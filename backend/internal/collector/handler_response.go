@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"ehome/backend/internal/models"
 	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
@@ -87,6 +88,24 @@ func (m *Manager) handlePong(deviceID string, payload []byte) {
 	rtt := time.Since(time.UnixMicro(int64(timestamp)))
 	logger.Infof("[%s] Pong verified, RTT=%v", deviceID, rtt)
 	metrics.PingRTT.Observe(float64(rtt.Milliseconds()))
+
+	// F7.6: Complete the pending ping record
+	if m.pingTracker != nil {
+		if rec, ok := m.pingTracker.Complete(deviceID); ok {
+			if rec.callback != nil {
+				rec.callback(rtt.Milliseconds(), true)
+			}
+		}
+	}
+
+	// F7.5: Store RTT in DB for historical analysis
+	now := time.Now()
+	m.db.Model(&models.Collector{}).
+		Where("device_id = ?", deviceID).
+		Updates(map[string]interface{}{
+			"ping_latency_ms": rtt.Milliseconds(),
+			"last_ping_at":    &now,
+		})
 
 	// WebSocket push
 	m.wsHub.BroadcastEvent("ping_result", map[string]interface{}{

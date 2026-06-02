@@ -17,6 +17,8 @@ type Collector struct {
 	ConfigStatus    string         `gorm:"size:20;default:pending" json:"config_status"` // pending/applied/failed
 	LastSeen        *time.Time     `json:"last_seen"`
 	UptimeSeconds   uint32         `json:"uptime_seconds"`
+	PingLatencyMs   int32          `json:"ping_latency_ms"`    // latest RTT in ms (F7.5)
+	LastPingAt      *time.Time     `json:"last_ping_at"`       // last successful ping time
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`

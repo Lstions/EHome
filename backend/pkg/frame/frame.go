@@ -163,6 +163,10 @@ func (d *Decoder) NextField() (*Field, error) {
 			return nil, err
 		}
 		d.pos = newPos
+		// Fuzz fix: guard against negative or overflow length
+		if length < 0 || length > uint64(len(d.buf)) {
+			return nil, fmt.Errorf("length-delimited field exceeds frame")
+		}
 		if d.pos+int(length) > len(d.buf) {
 			return nil, fmt.Errorf("length-delimited field exceeds frame")
 		}

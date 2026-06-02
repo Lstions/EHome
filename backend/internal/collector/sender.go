@@ -8,9 +8,11 @@ import (
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
+	"ehome/backend/pkg/logger"
 )
 
 // SendPing sends a Ping message to a device and records timestamp in Redis for verification
+// F7.6: Track the ping for retry on timeout
 func (m *Manager) SendPing(deviceID string) error {
 	ts := time.Now().UnixMicro()
 	enc := frame.NewEncoder(frame.MsgPing)
@@ -19,6 +21,22 @@ func (m *Manager) SendPing(deviceID string) error {
 	// Store ping timestamp in Redis for anti-forgery verification (TTL=30s)
 	if redis.Client != nil {
 		redis.Client.Set(context.Background(), fmt.Sprintf("ping:%s", deviceID), ts, 30*time.Second)
+	}
+
+	// F7.6: Register pending ping for retry/timeout
+	if m.pingTracker != nil {
+		m.pingTracker.Track(deviceID, ts, func(latencyMs int64, success bool) {
+			if !success {
+				logger.Warnf("[%s] Ping failed after %d retries (timeout)", deviceID, m.pingTracker.maxRetry)
+				m.wsHub.BroadcastEvent("ping_result", map[string]interface{}{
+					"device_id":  deviceID,
+					"latency_ms": -1,
+					"timestamp":  time.Now().Unix(),
+					"verified":   false,
+					"reason":     "timeout",
+				})
+			}
+		})
 	}
 
 	topic := mqtt.TopicForDevice(deviceID)

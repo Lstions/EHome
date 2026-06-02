@@ -37,6 +37,9 @@ type Manager struct {
 	stopCh          chan struct{}
 	wg              sync.WaitGroup  // for worker pool graceful shutdown
 	dataCh          chan dataReportJob // worker pool job channel
+
+	// F7.6: Ping tracking for retry/timeout
+	pingTracker *PingTracker
 }
 
 // NewManager creates a new collector manager
@@ -54,6 +57,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		stopCh:          make(chan struct{}),
 	}
 	mgr.otaMgr = ota.NewManager(db, mqttClient, wsHub)
+	mgr.pingTracker = NewPingTracker()
 	return mgr
 }
 

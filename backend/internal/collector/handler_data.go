@@ -1,6 +1,8 @@
 package collector
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"ehome/backend/internal/drivers"
@@ -103,6 +105,22 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 			Value:      sd.Value,
 			Unit:       sd.Unit,
 			Timestamp:  time.Now(),
+		})
+	}
+
+	// F4.1: Also store raw data in device_data table for historical record
+	if collectorID > 0 {
+		dataJSON, _ := json.Marshal(map[string]interface{}{
+			"raw_hex":    fmt.Sprintf("%x", rawData),
+			"sensors":    sensorData,
+			"channel_id": channelID,
+			"timestamp":  time.Now().UnixMilli(),
+		})
+		m.db.Create(&models.DeviceData{
+			DeviceID:    device.ID,
+			CollectorID: collectorID,
+			DataJSON:    string(dataJSON),
+			Timestamp:   time.Now(),
 		})
 	}
 

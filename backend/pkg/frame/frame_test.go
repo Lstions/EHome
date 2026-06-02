@@ -497,3 +497,86 @@ func BenchmarkDecodeConfigManifest(b *testing.B) {
 		}
 	}
 }
+
+// Fuzz test for frame decoder (N3.3)
+func FuzzDecoder(f *testing.F) {
+	// Seed corpus
+	f.Add([]byte{0x01, 0x0A, 0x05, 'h', 'e', 'l', 'l', 'o'}) // Hello with short string
+	f.Add([]byte{0x03, 0x08, 0x01})                          // DataReport with varint 1
+	f.Add([]byte{0xFF, 0x08, 0x7F})                          // Unknown type, varint 127
+	f.Add([]byte{})                                          // empty
+	f.Add([]byte{0x01, 0x80, 0x80, 0x80, 0x80})             // malformed varint
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Should never panic
+		dec, err := NewDecoder(data)
+		if err != nil {
+			return
+		}
+		// Consume all fields safely
+		for {
+			field, err := dec.NextField()
+			if err != nil {
+				break
+			}
+			// Try to read all value types - should not panic
+			_ = GetUint64(field)
+			_ = GetString(field)
+			_ = GetBool(field)
+		}
+	})
+}
+
+// Fuzz test for encoder round-trip
+func FuzzEncoderRoundTrip(f *testing.F) {
+	f.Add(uint8(0x01), uint64(42), "hello", true)
+	f.Add(uint8(0x03), uint64(1), "test", false)
+	f.Add(uint8(0x0B), uint64(100), "ota-task", true)
+
+	f.Fuzz(func(t *testing.T, msgType uint8, value uint64, str string, flag bool) {
+		// Encode
+		enc := NewEncoder(msgType)
+		enc.EncodeVarint(1, value)
+		enc.EncodeString(2, str)
+		enc.EncodeBool(3, flag)
+		wire := enc.Bytes()
+
+		// Decode and verify
+		dec, err := NewDecoder(wire)
+		if err != nil {
+			t.Fatalf("decode error: %v", err)
+		}
+		if dec.MsgType() != msgType {
+			t.Errorf("msg type: got 0x%02X, want 0x%02X", dec.MsgType(), msgType)
+		}
+
+		// Parse all fields
+		var gotVal uint64
+		var gotStr string
+		var gotFlag bool
+		for {
+			field, err := dec.NextField()
+			if err != nil {
+				break
+			}
+			switch field.FieldNum {
+			case 1:
+				gotVal = GetUint64(field)
+			case 2:
+				gotStr = GetString(field)
+			case 3:
+				gotFlag = GetBool(field)
+			}
+		}
+
+		if gotVal != value {
+			t.Errorf("value: got %d, want %d", gotVal, value)
+		}
+		if gotStr != str {
+			t.Errorf("str: got %q, want %q", gotStr, str)
+		}
+		if gotFlag != flag {
+			t.Errorf("flag: got %v, want %v", gotFlag, flag)
+		}
+	})
+}
