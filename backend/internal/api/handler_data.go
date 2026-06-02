@@ -1,0 +1,128 @@
+package api
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	"ehome/backend/internal/models"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+// registerDataRoutes sets up data query routes
+func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
+	// Get unified data for a device
+	// GET /api/v1/devices/:id/sensor-data?limit=100&since=2024-01-01T00:00:00Z
+	v1.GET("/devices/:id/sensor-data", func(c *gin.Context) {
+		deviceIDStr := c.Param("id")
+		deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device id"})
+			return
+		}
+
+		limitStr := c.DefaultQuery("limit", "100")
+		limit, _ := strconv.Atoi(limitStr)
+		if limit <= 0 || limit > 1000 {
+			limit = 100
+		}
+
+		sinceStr := c.Query("since")
+		sensorName := c.Query("sensor")
+
+		query := db.Where("device_id = ?", deviceID)
+		if sinceStr != "" {
+			if since, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+				query = query.Where("timestamp >= ?", since)
+			}
+		}
+		if sensorName != "" {
+			query = query.Where("sensor_name = ?", sensorName)
+		}
+
+		var data []models.UnifiedData
+		query.Order("timestamp DESC").Limit(limit).Find(&data)
+		c.JSON(http.StatusOK, data)
+	})
+
+	// Get latest sensor values for a collector (all devices)
+	// GET /api/v1/collectors/:device_id/latest
+	v1.GET("/collectors/:device_id/latest", func(c *gin.Context) {
+		deviceID := c.Param("device_id")
+		var col models.Collector
+		if err := db.Where("device_id = ?", deviceID).First(&col).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "collector not found"})
+			return
+		}
+
+		// Get all channels for this collector
+		var channels []models.Channel
+		db.Where("collector_id = ? AND enabled = ?", col.ID, true).Find(&channels)
+
+		type LatestValue struct {
+			ChannelID  uint    `json:"channel_id"`
+			SensorName string  `json:"sensor_name"`
+			Value      float64 `json:"value"`
+			Unit       string  `json:"unit"`
+			Timestamp  time.Time `json:"timestamp"`
+		}
+
+		var results []LatestValue
+		for _, ch := range channels {
+			var devices []models.Device
+			db.Where("channel_id = ?", ch.ID).Find(&devices)
+			for _, dev := range devices {
+				var ud models.UnifiedData
+				if err := db.Where("device_id = ?", dev.ID).
+					Order("timestamp DESC").First(&ud).Error; err == nil {
+					results = append(results, LatestValue{
+						ChannelID:  ch.ID,
+						SensorName: ud.SensorName,
+						Value:      ud.Value,
+						Unit:       ud.Unit,
+						Timestamp:  ud.Timestamp,
+					})
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"collector_id": col.ID,
+			"device_id":    deviceID,
+			"values":       results,
+		})
+	})
+
+	// Get time-series data for charting
+	// GET /api/v1/devices/:id/history?sensor=wind_direction&hours=24
+	v1.GET("/devices/:id/history", func(c *gin.Context) {
+		deviceIDStr := c.Param("id")
+		deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device id"})
+			return
+		}
+
+		sensorName := c.Query("sensor")
+		if sensorName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "sensor parameter required"})
+			return
+		}
+
+		hoursStr := c.DefaultQuery("hours", "24")
+		hours, _ := strconv.Atoi(hoursStr)
+		if hours <= 0 || hours > 720 {
+			hours = 24
+		}
+
+		since := time.Now().Add(-time.Duration(hours) * time.Hour)
+		var data []models.UnifiedData
+		db.Where("device_id = ? AND sensor_name = ? AND timestamp >= ?", deviceID, sensorName, since).
+			Order("timestamp ASC").
+			Find(&data)
+
+		c.JSON(http.StatusOK, data)
+	})
+}

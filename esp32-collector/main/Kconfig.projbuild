@@ -1,0 +1,127 @@
+menu "ESP32 Collector V3 Configuration"
+
+config COLLECTOR_FIRMWARE_VERSION
+    string "Firmware Version"
+    default "3.0.2"
+    help
+        Firmware version string reported in Hello
+
+config COLLECTOR_DEVICE_MODEL
+    string "Device Model"
+    default "ESP32C6" if IDF_TARGET_ESP32C6
+    default "ESP32S3" if IDF_TARGET_ESP32S3
+    default "ESP32"
+    help
+        Device model string reported in Hello (e.g. C6_MAN8, S3_MAN16)
+
+config COLLECTOR_PARTITION_TABLE
+    string "Partition table"
+    default "partitions_c6_8m.csv" if IDF_TARGET_ESP32C6
+    default "partitions_s3_8m.csv" if IDF_TARGET_ESP32S3
+    default "partitions_c6_8m.csv"
+    help
+        Partition table CSV file for your flash/chip combination.
+        Available options:
+          partitions_c6_8m.csv  - ESP32-C6, 8MB flash (nvs=24KB, ota=3MB each)
+          partitions_c6_16m.csv - ESP32-C6, 16MB flash (nvs=32KB, ota=6.5MB each)
+          partitions_s3_8m.csv  - ESP32-S3, 8MB flash (nvs=24KB, ota=3MB each)
+          partitions_s3_16m.csv - ESP32-S3, 16MB flash (nvs=32KB, ota=6.5MB each)
+
+config COLLECTOR_MQTT_BROKER_URL
+    string "MQTT Broker URL"
+    default "mqtt://192.168.20.80:1883"
+    help
+        MQTT broker URL
+
+config COLLECTOR_MQTT_PROTOCOL_V5
+    bool "Use MQTT 5.0 protocol"
+    default y
+    select MQTT_PROTOCOL_5
+    help
+        Enable MQTT 5.0 protocol (MQTT_PROTOCOL_V_5).
+        If disabled, falls back to MQTT 3.1.1.
+        MQTT 5.0 provides message expiry, content type, subscription
+        identifiers, and improved reason codes.
+        Requires EMQX 5.x or other MQTT 5.0 capable broker.
+
+config COLLECTOR_WIFI_SSID
+    string "WiFi SSID"
+    default "ABC"
+    help
+        WiFi SSID for network connection
+
+config COLLECTOR_WIFI_PASSWORD
+    string "WiFi Password"
+    default "sunwork123"
+    help
+        WiFi password
+
+config COLLECTOR_MAX_TEMPLATE_SLOTS
+    int "Maximum template slots"
+    default 64
+    help
+        Maximum number of command templates
+
+config COLLECTOR_MAX_HARDWARE
+    int "Maximum hardware instances"
+    default 16
+    help
+        Maximum number of hardware instances (UART/I2C/SPI/GPIO/ADC)
+
+config COLLECTOR_MAX_CHANNELS
+    int "Maximum channel instances"
+    default 32
+    help
+        Maximum number of channel instances
+
+config COLLECTOR_MAX_CHUNK_SIZE
+    int "Maximum chunk size for transfers"
+    default 1024
+    help
+        Maximum size of each chunk in chunked transfer
+
+config COLLECTOR_MAX_DIRECT_MESSAGE_BYTES
+    int "Maximum direct message size"
+    default 4096
+    help
+        Maximum size of non-chunked MQTT messages
+
+# ==================== OTA Security ====================
+
+menu "OTA Security"
+
+config COLLECTOR_OTA_VERIFY_HASH
+    bool "Verify firmware SHA256 hash after download"
+    default y
+    help
+        Enable SHA256 hash verification of downloaded firmware before applying.
+        The expected hash is provided in the OtaCommand message (md5_checksum field,
+        repurposed as SHA256). If the hash does not match, the OTA is aborted.
+        Disable only for debugging; this is a critical security feature.
+
+config COLLECTOR_OTA_ALLOW_HTTP
+    bool "Allow HTTP (non-HTTPS) OTA URLs"
+    default n
+    help
+        Allow firmware downloads over plain HTTP. This is INSECURE and should
+        only be enabled for development/testing. In production, all OTA URLs
+        must use HTTPS to prevent man-in-the-middle attacks.
+
+config COLLECTOR_OTA_SERVER_CERT_PEM
+    string "Path to server CA certificate (PEM) for OTA pinning"
+    default ""
+    help
+        Path to a PEM-encoded CA certificate file for HTTPS certificate pinning.
+        The certificate will be embedded in the firmware binary.
+        If empty, TLS certificate verification is skipped (development only).
+        For production, set this to the path of your OTA server's CA certificate.
+        Example: "certs/ota_server_ca.pem"
+
+config COLLECTOR_OTA_SERVER_CERT_PEM_EMPTY
+    bool
+    default y if COLLECTOR_OTA_SERVER_CERT_PEM = ""
+    default n if COLLECTOR_OTA_SERVER_CERT_PEM != ""
+
+endmenu
+
+endmenu

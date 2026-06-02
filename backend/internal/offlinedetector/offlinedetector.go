@@ -1,0 +1,137 @@
+package offlinedetector
+
+import (
+	"ehome/backend/pkg/logger"
+	"time"
+
+	"ehome/backend/internal/models"
+	"ehome/backend/internal/redis"
+	"ehome/backend/internal/websocket"
+
+	"gorm.io/gorm"
+)
+
+// Detector implements three-layer offline detection
+type Detector struct {
+	db     *gorm.DB
+	wsHub  *websocket.Hub
+	ticker *time.Ticker
+	quit   chan struct{}
+}
+
+// NewDetector creates a new offline detector
+func NewDetector(db *gorm.DB, wsHub *websocket.Hub) *Detector {
+	return &Detector{
+		db:    db,
+		wsHub: wsHub,
+		quit:  make(chan struct{}),
+	}
+}
+
+// Start begins the offline detection loop
+func (d *Detector) Start() {
+	d.ticker = time.NewTicker(5 * time.Second)
+	go d.loop()
+	logger.Infof("Offline detector started (3-layer)")
+}
+
+// Stop stops the offline detection loop
+func (d *Detector) Stop() {
+	close(d.quit)
+	d.ticker.Stop()
+}
+
+func (d *Detector) loop() {
+	for {
+		select {
+		case <-d.ticker.C:
+			d.checkOffline()
+		case <-d.quit:
+			return
+		}
+	}
+}
+
+// checkOffline performs three-layer offline detection
+func (d *Detector) checkOffline() {
+	// Layer 1: Check Redis heartbeats (fast, in-memory)
+	d.checkRedisHeartbeats()
+
+	// Layer 2: Check DB last_seen (SQL fallback)
+	d.checkDBLastSeen()
+}
+
+// checkRedisHeartbeats checks Redis TTL for all collectors
+func (d *Detector) checkRedisHeartbeats() {
+	if redis.Client == nil {
+		return // Redis not connected
+	}
+
+	ids, err := redis.GetAllCollectors()
+	if err != nil {
+		return
+	}
+
+	for _, deviceID := range ids {
+		if !redis.IsOnline(deviceID) {
+			// Heartbeat expired - mark offline
+			d.markOffline(deviceID, "redis_ttl_expired")
+		}
+	}
+}
+
+// checkDBLastSeen checks DB last_seen for collectors without Redis heartbeat
+func (d *Detector) checkDBLastSeen() {
+	var collectors []models.Collector
+	if err := d.db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
+		return
+	}
+
+	now := time.Now()
+	for _, col := range collectors {
+		// Skip if still has Redis heartbeat
+		if redis.IsOnline(col.DeviceID) {
+			continue
+		}
+
+		// Check if last_seen is older than 90s (L3: DB fallback)
+		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
+			d.markOffline(col.DeviceID, "db_last_seen_timeout")
+		}
+	}
+}
+
+// markOffline marks a collector as offline
+func (d *Detector) markOffline(deviceID, reason string) {
+	logger.Infof("[Offline] %s: %s", deviceID, reason)
+
+	// Update DB
+	d.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).Updates(map[string]interface{}{
+		"status": "offline",
+	})
+
+	// Record event
+	var collector models.Collector
+	if err := d.db.Where("device_id = ?", deviceID).First(&collector).Error; err == nil {
+		d.db.Create(&models.CollectorEvent{
+			CollectorID: collector.ID,
+			EventType:   "offline",
+			OldStatus:   "online",
+			NewStatus:   "offline",
+		})
+	}
+
+	// WebSocket push
+	d.wsHub.BroadcastEvent("collector_status", map[string]interface{}{
+		"device_id": deviceID,
+		"status":    "offline",
+		"reason":    reason,
+	})
+}
+
+// UpdateHeartbeat updates the heartbeat for a collector
+func (d *Detector) UpdateHeartbeat(deviceID string) {
+	if redis.Client != nil {
+		redis.SetHeartbeat(deviceID, 15*time.Second)
+	}
+}

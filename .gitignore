@@ -1,0 +1,31 @@
+# Go
+backend/bin/
+backend/server
+backend/ehome-server
+backend/vendor/
+*.exe
+*.dll
+*.so
+
+# ESP-IDF
+esp32-collector/build/
+esp32-collector/sdkconfig
+esp32-collector/sdkconfig.old
+esp32-collector/managed_components/
+esp32-collector/.cache/
+
+# Node/Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
