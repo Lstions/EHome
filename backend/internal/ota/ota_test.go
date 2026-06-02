@@ -247,3 +247,84 @@ func TestHandleHelloOTACompletionNoOp(t *testing.T) {
 func wireEncoderForTest() *frame.Encoder {
 	return frame.NewEncoder(0)
 }
+
+// Test CancelTask: in-flight → failed with reason "cancelled by user"
+func TestCancelTask(t *testing.T) {
+	db := setupOTATestDB(t)
+
+	// Create collector and firmware
+	col := models.Collector{
+		DeviceID:        "test-cancel-device",
+		Model:           "ESP32S3",
+		FirmwareVersion: "1.0.0",
+		Status:          "online",
+	}
+	db.Create(&col)
+
+	fw := models.Firmware{
+		Version:   "1.1.0",
+		URL:       "u1",
+		SizeBytes: 1024,
+		Checksum:  "abc",
+	}
+	db.Create(&fw)
+
+	mgr := NewManager(db, nil, nil)
+	task, err := mgr.CreateTask(col.ID, fw.ID)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if task.Status != StatusPending {
+		t.Errorf("expected pending, got %s", task.Status)
+	}
+
+	// Cancel the task
+	if err := mgr.CancelTask(task.ID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	// Verify it's now failed
+	var updated models.OTATask
+	db.First(&updated, task.ID)
+	if updated.Status != StatusFailed {
+		t.Errorf("expected failed, got %s", updated.Status)
+	}
+	if updated.ErrorMsg != "cancelled by user" {
+		t.Errorf("expected 'cancelled by user', got %s", updated.ErrorMsg)
+	}
+	if updated.CompletedAt == nil {
+		t.Error("expected CompletedAt to be set")
+	}
+}
+
+// Test CancelTask: terminal state task → error
+func TestCancelTask_AlreadyTerminal(t *testing.T) {
+	db := setupOTATestDB(t)
+	col := models.Collector{DeviceID: "x", Status: "online"}
+	db.Create(&col)
+	fw := models.Firmware{Version: "1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
+	db.Create(&fw)
+
+	mgr := NewManager(db, nil, nil)
+	task, _ := mgr.CreateTask(col.ID, fw.ID)
+
+	// Manually mark as success
+	task.Status = StatusSuccess
+	db.Save(&task)
+
+	// Try to cancel
+	err := mgr.CancelTask(task.ID)
+	if err == nil {
+		t.Error("expected error when cancelling terminal task")
+	}
+}
+
+// Test CancelTask: nonexistent task → error
+func TestCancelTask_NotFound(t *testing.T) {
+	db := setupOTATestDB(t)
+	mgr := NewManager(db, nil, nil)
+	err := mgr.CancelTask(99999)
+	if err == nil {
+		t.Error("expected error for nonexistent task")
+	}
+}

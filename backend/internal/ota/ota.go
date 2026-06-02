@@ -284,3 +284,32 @@ func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareV
 			deviceID, task.OtaID, task.StartedAt.Format(time.RFC3339), firmwareVersion)
 	}
 }
+
+// CancelTask marks an in-flight OTA task as cancelled (failed with reason)
+// F6.x: user-initiated cancel from UI
+func (m *Manager) CancelTask(taskID uint) error {
+	var task models.OTATask
+	if err := m.db.First(&task, taskID).Error; err != nil {
+		return fmt.Errorf("task not found: %w", err)
+	}
+	if _, ok := terminalStates[task.Status]; ok {
+		return fmt.Errorf("task %s is already in terminal state %s", task.OtaID, task.Status)
+	}
+	now := time.Now()
+	task.Status = StatusFailed
+	task.ErrorMsg = "cancelled by user"
+	task.CompletedAt = &now
+	if err := m.db.Save(&task).Error; err != nil {
+		return err
+	}
+	if m.wsHub != nil {
+		m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+			"ota_id":    task.OtaID,
+			"status":    task.Status,
+			"progress":  task.Progress,
+			"reason":    "cancelled",
+		})
+	}
+	logger.Infof("[OTA %s] cancelled by user", task.OtaID)
+	return nil
+}

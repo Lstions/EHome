@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/models"
@@ -64,6 +65,22 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 			return
 		}
 		c.JSON(http.StatusOK, task)
+	})
+
+	// Cancel OTA task
+	// - POST /api/v1/ota/tasks/:id/cancel
+	v1.POST("/ota/tasks/:id/cancel", func(c *gin.Context) {
+		id := c.Param("id")
+		taskID, err := strconv.ParseUint(id, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid task id"})
+			return
+		}
+		if err := otaMgr.CancelTask(uint(taskID)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "cancelled", "data": gin.H{"id": taskID}})
 	})
 
 	// List firmwares
@@ -133,6 +150,31 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 		}
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 		c.File(dst)
+	})
+
+	// Delete firmware by id
+	// - DELETE /api/v1/firmwares/:id
+	v1.DELETE("/firmwares/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var fw models.Firmware
+		if err := db.First(&fw, id).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "firmware not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		// Also remove the .bin file from disk
+		if fw.URL != "" {
+			binary := filepath.Base(fw.URL)
+			_ = os.Remove(filepath.Join("firmwares", binary))
+		}
+		if err := db.Delete(&fw).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"id": id, "version": fw.Version}})
 	})
 
 	// List notifications

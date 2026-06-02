@@ -54,14 +54,16 @@ func (m *Manager) dataWorker(id int) {
 // processDataReportJob handles the heavy DB/parse work off the MQTT callback
 func (m *Manager) processDataReportJob(job dataReportJob) {
 	// Record RX in terminal
-	m.termMgr.RecordRX(job.deviceID, uint(job.channelID), job.rawData)
+	if m.termMgr != nil {
+		m.termMgr.RecordRX(job.deviceID, uint(job.channelID), job.rawData)
+	}
 
 	// request_id routing
-	if job.requestID != 0 {
+	if job.requestID != 0 && m.pendingWrite != nil {
 		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)
 		var device models.Device
 		if err := m.db.Where("channel_id = ?", job.channelID).First(&device).Error; err == nil {
-			if m.deviceInit.HasActiveInit(device.Type) {
+			if m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
 				logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
 			}
 		}

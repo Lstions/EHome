@@ -199,4 +199,60 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		// implemented in the model. Return OK so the front-end call resolves.
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"id": c.Param("id"), "is_default": true}})
 	})
+
+	// Get a single channel
+	// - GET /api/v1/channels/:channel_id
+	v1.GET("/channels/:channel_id", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		var ch models.Channel
+		if err := db.First(&ch, id).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
+	})
+
+	// Update a channel
+	// - PUT /api/v1/channels/:channel_id
+	v1.PUT("/channels/:channel_id", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		var ch models.Channel
+		if err := db.First(&ch, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+			return
+		}
+		if err := c.ShouldBindJSON(&ch); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		ch.ID = parseUintID(id)
+		if err := db.Save(&ch).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
+	})
+
+	// Delete a channel
+	// - DELETE /api/v1/channels/:channel_id
+	v1.DELETE("/channels/:channel_id", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		if err := db.Delete(&models.Channel{}, id).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+	})
+}
+// parseUintID parses a uint from a string, returning 0 on error
+func parseUintID(s string) uint {
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return uint(id)
 }
