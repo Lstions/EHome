@@ -37,7 +37,7 @@ func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask
 	}
 
 	task := &models.OTATask{
-		OTaID:       fmt.Sprintf("ota-%d", time.Now().Unix()),
+		OtaID:       fmt.Sprintf("ota-%d", time.Now().Unix()),
 		CollectorID: collectorID,
 		FirmwareID:  firmwareID,
 		Status:      "pending",
@@ -65,7 +65,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	}
 
 	enc := frame.NewEncoder(frame.MsgOtaCmd)
-	enc.EncodeString(1, task.OTaID)
+	enc.EncodeString(1, task.OtaID)
 	enc.EncodeString(2, firmware.URL)
 	enc.EncodeString(3, firmware.Checksum)
 	enc.EncodeVarint(4, firmware.SizeBytes)

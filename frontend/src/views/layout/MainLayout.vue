@@ -137,7 +137,7 @@
               <el-dropdown-menu>
                 <el-dropdown-item disabled>
                   <el-icon><User /></el-icon>
-                  <span>{{ userStore.userInfo?.email || 'user@example.com' }}</span>
+                  <span>{{ userStore.userInfo?.username || 'user' }}</span>
                 </el-dropdown-item>
                 <el-dropdown-item divided command="profile">
                   <el-icon><UserFilled /></el-icon>
@@ -191,7 +191,8 @@ import {
   SuccessFilled,
   InfoFilled,
   Search,
-
+  Shop,
+  DataBoard,
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useUIStore } from '@/stores/ui'
@@ -221,7 +222,7 @@ const menuItems = [
   { path: '/firmware', title: '固件管理', icon: Files },
   { path: '/device-configs', title: '配置模板', icon: Setting },
   { path: '/vendors', title: '厂商管理', icon: Shop },
-  { path: '/data-sources', title: '数据源', icon: DataSource },
+  { path: '/data-sources', title: '数据源', icon: DataBoard },
   { path: '/notifications', title: '通知中心', icon: Bell },
   { path: '/monitor', title: '系统监控', icon: DataAnalysis },
 

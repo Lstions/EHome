@@ -12,8 +12,8 @@ export const useDeviceStore = defineStore('device', {
     async fetchDevices(params?: DeviceListParams) {
       this.loading = true
       try {
-        const response = await deviceApi.getList(params)
-        this.devices = response.items
+        const list = await deviceApi.getList(params)
+        this.devices = list
       } finally {
         this.loading = false
       }

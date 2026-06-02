@@ -9,7 +9,7 @@ const getStoredToken = (): string => {
 export const useUserStore = defineStore('user', {
   state: () => ({
     token: getStoredToken(),
-    userInfo: null as {id: number, username: string, email: string, role: string} | null,
+    userInfo: null as {id: number, username: string, role: string} | null,
     isLoggedIn: !!getStoredToken()
   }),
 

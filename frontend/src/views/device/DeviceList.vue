@@ -662,8 +662,8 @@ const fetchDevices = async () => {
     // Note: hardware_type is not directly supported by the API,
     // so we handle it client-side in filteredDevices
     const response = await deviceApi.getList(params)
-    devices.value = response.items || []
-    total.value = response.total || 0
+    devices.value = Array.isArray(response) ? response : []
+    total.value = devices.value.length
     updateStats()
   } catch (error: any) {
     ElMessage.error('获取设备列表失败')

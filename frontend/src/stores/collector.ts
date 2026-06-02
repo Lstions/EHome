@@ -12,9 +12,9 @@ export const useCollectorStore = defineStore('collector', {
     async fetchCollectors(params?: CollectorListParams) {
       this.loading = true
       try {
-        const response = await collectorApi.getList(params)
-        this.collectors = response.items
-        this.total = response.total
+        const list = await collectorApi.getList(params)
+        this.collectors = list
+        this.total = list.length
       } finally {
         this.loading = false
       }

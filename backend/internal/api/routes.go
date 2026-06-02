@@ -19,6 +19,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Auth routes (no JWT required)
+	registerAuthRoutes(r, db)
+
 	// API v1 with JWT auth
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())

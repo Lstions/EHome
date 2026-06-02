@@ -211,8 +211,9 @@ const fetchFirmwares = async () => {
       page: currentPage.value,
       page_size: pageSize.value
     })
-    firmwares.value = response.list || []
-    total.value = response.total || 0
+    // getList returns FirmwareDisplay[] (bare array)
+    firmwares.value = Array.isArray(response) ? response : []
+    total.value = firmwares.value.length
   } catch (error: any) {
     ElMessage.error('获取固件列表失败')
   } finally {
@@ -220,7 +221,7 @@ const fetchFirmwares = async () => {
   }
 }
 
-const handleDelete = async (row: Firmware) => {
+const handleDelete = async (row: any) => {
   try {
     await ElMessageBox.confirm(
       `确定要删除固件 "${row.name} (版本: ${formatVersion(row.version)})" 吗？`,
@@ -243,7 +244,7 @@ const handleDelete = async (row: Firmware) => {
 }
 
 // 编辑固件
-const handleEdit = (row: Firmware) => {
+const handleEdit = (row: any) => {
   editingFirmwareId.value = row.id
   // 去掉 v 前缀后填充表单
   editForm.name = row.name
@@ -271,8 +272,10 @@ const handleEditSubmit = async () => {
 }
 
 // 下载固件
-const handleDownload = (row: Firmware) => {
-  const url = firmwareApi.getDownloadUrl(row.id)
+const handleDownload = (row: any) => {
+  // Extract filename from url field
+  const filename = row.url ? row.url.split('/firmwares/')[1]?.split('/download')[0] : `${row.id}`
+  const url = firmwareApi.getDownloadUrl(filename || row.id)
   const link = document.createElement('a')
   link.href = url
   link.download = `${row.name}_${formatVersion(row.version)}.bin`

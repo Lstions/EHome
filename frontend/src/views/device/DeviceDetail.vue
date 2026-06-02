@@ -533,8 +533,10 @@ const fetchHistoryData = async () => {
         })
 
         chartSeries.value = []
-        if (response.items && response.items.length > 0) {
-          const firstItem = response.items[0]
+        // API returns bare array or wrapped response
+        const items = Array.isArray(response) ? response : (response as any).items || []
+        if (items.length > 0) {
+          const firstItem = items[0]
           const data = firstItem.data || {}
           const numericKeys = Object.keys(data).filter(key => key !== 'raw_data' && typeof data[key] === 'number')
 
@@ -542,7 +544,7 @@ const fetchHistoryData = async () => {
             chartSeries.value = numericKeys.map(key => ({
               name: key,
               unit: '',
-              data: response.items.map((item: any) => ({
+              data: items.map((item: any) => ({
                 time: item.created_at || item.collected_at,
                 value: item.data[key] ?? 0
               }))
@@ -551,7 +553,7 @@ const fetchHistoryData = async () => {
           } else {
             const valueKey = numericKeys[0] || Object.keys(data).find(key => typeof data[key] === 'number')
             if (valueKey) {
-              historyData.value = response.items.map((item: any) => ({
+              historyData.value = items.map((item: any) => ({
                 time: item.created_at || item.collected_at,
                 value: item.data[valueKey]
               }))

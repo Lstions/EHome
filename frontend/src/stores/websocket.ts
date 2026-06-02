@@ -80,7 +80,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
     manuallyClosed.value = false
 
     const wsUrl = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8080'
-    let statusUrl = `${wsUrl}/api/v1/ws/status`
+    let statusUrl = `${wsUrl}/api/v1/ws`
 
     const token = localStorage.getItem('token')
     if (token) {

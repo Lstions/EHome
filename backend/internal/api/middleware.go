@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -77,13 +78,15 @@ func JWTAuth() gin.HandlerFunc {
 }
 
 // GenerateToken creates a JWT token for a given user ID and role.
-// This is a helper for development/testing; production auth will be added later.
+// Token expires in 24 hours.
 func GenerateToken(userID uint, role string) (string, error) {
 	claims := Claims{
 		UserID: userID,
 		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer: "ehome",
+			Issuer:    "ehome",
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

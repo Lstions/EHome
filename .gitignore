@@ -33,4 +33,6 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
-*.pyo
+*.pyoehome-server-final
+ehome-server-new
+ehome-server.old

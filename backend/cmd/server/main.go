@@ -19,6 +19,7 @@ import (
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/redis"
 	"ehome/backend/internal/websocket"
+	"github.com/gin-contrib/cors"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +58,13 @@ func main() {
 	logger.Infof("Database connected and migrated")
 
 	db := database.GetDB()
+
+	// Seed admin user if not exists
+	if err := api.SeedAdminUser(db); err != nil {
+		logger.Warnf("Failed to seed admin user: %v", err)
+	} else {
+		logger.Infof("Admin user seeded (if not existed)")
+	}
 
 	// Initialize Redis
 	if err := redis.Connect(cfg.RedisAddr()); err != nil {
@@ -105,6 +113,15 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// CORS: allow frontend dev servers (Vite) + production origins
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://127.0.0.1:5175"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 	api.SetupRoutes(r, db, wsHub, collectorMgr, otaMgr)
 
 	// Health check

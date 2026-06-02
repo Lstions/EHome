@@ -109,7 +109,7 @@ type DataSource struct {
 // OTATask OTA升级任务
 type OTATask struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
-	OTaID       string     `gorm:"size:64;uniqueIndex;not null" json:"ota_id"`
+	OtaID       string     `gorm:"column:ota_id;size:64;uniqueIndex;not null" json:"ota_id"`
 	CollectorID uint       `gorm:"index;not null" json:"collector_id"`
 	FirmwareID  uint       `gorm:"index" json:"firmware_id"`
 	Status      string     `gorm:"size:20;default:pending" json:"status"` // pending/downloading/flashing/done/failed

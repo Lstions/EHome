@@ -1,33 +1,62 @@
 import client from './client'
 
-interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T
+// Backend Collector model (source of truth)
+export interface Collector {
+  id: number
+  device_id: string
+  model: string
+  firmware_version: string
+  status: string
+  config_version: string
+  config_status: string
+  last_seen: string | null
+  uptime_seconds: number
+  created_at: string
+  updated_at: string
+  channels?: Channel[]
 }
 
-export interface Collector {
+export interface Channel {
+  id: number
+  collector_id: number
+  hardware_type: string
+  hardware_id: number
+  interval_ms: number
+  bus_type: string
+  bus_config: string
+  template_ids: string
+  config: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  devices?: Device[]
+}
+
+export interface Device {
+  id: number
+  name: string
+  type: string
+  parser_id: string
+  channel_id: number
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+// Frontend display types (adapted from backend)
+export interface CollectorDisplay {
   id: number
   name: string
   device_id: string
   model: string
   firmware_version: string
   status: 'online' | 'offline'
-  connection_type: string
-  connection_quality: number
-  latency_ms: number
-  last_online_time: string
-  online_duration: number
-  capabilities: Record<string, any>
-  config: Record<string, any>
+  config_version: string
+  config_status: string
+  last_seen: string | null
+  uptime_seconds: number
   created_at: string
-}
-
-export interface CollectorListResponse {
-  total: number
-  page: number
-  page_size: number
-  items: Collector[]
+  channels?: Channel[]
 }
 
 export interface CollectorListParams {
@@ -36,20 +65,20 @@ export interface CollectorListParams {
   page_size?: number
 }
 
-export interface OTARecord {
+// OTA types matching backend OTATask model
+export interface OTATask {
   id: number
+  ota_id: string
   collector_id: number
   firmware_id: number
-  from_version: string
-  to_version: string
   status: string
   progress: number
-  error_message?: string
+  error_msg: string
   created_at: string
-  completed_at?: string
+  updated_at: string
 }
 
-// 外设相关类型定义
+// Peripheral/hardware types (for detail views)
 export interface PeripheralInfo {
   id: string
   status: 'available' | 'configured' | 'error'
@@ -59,7 +88,7 @@ export interface PeripheralInfo {
   assigned_device_type?: string
   assigned_device_name?: string
   config?: Record<string, any>
-  unassigning?: boolean // 前端状态
+  unassigning?: boolean
 }
 
 export interface HardwareConfig {
@@ -68,7 +97,6 @@ export interface HardwareConfig {
   spi?: PeripheralInfo[]
 }
 
-// 总线资源配置
 export interface GPIOBusResource {
   id: string
   enabled: boolean
@@ -140,116 +168,116 @@ export interface PeripheralAssignment {
   device_type: string
   device_name: string
   protocol: 'modbus' | 'stream'
-  template_id?: number // 配置模板ID（可选）
+  template_id?: number
   config?: Record<string, any>
 }
 
-export interface Device {
-  id: number
-  collector_id: number
-  device_id: string
-  name: string
-  device_type: string
-  protocol: string
-  hardware_type: string
-  hardware_id: string
-  config: Record<string, any> | null
-  status: string
-  created_at: string
-  updated_at: string
+// Adapt backend Collector to display model
+function toDisplayModel(col: Collector): CollectorDisplay {
+  return {
+    id: col.id,
+    name: col.device_id, // Use device_id as display name since backend has no name field
+    device_id: col.device_id,
+    model: col.model || 'N/A',
+    firmware_version: col.firmware_version || 'N/A',
+    status: (col.status === 'online' ? 'online' : 'offline') as 'online' | 'offline',
+    config_version: col.config_version,
+    config_status: col.config_status,
+    last_seen: col.last_seen,
+    uptime_seconds: col.uptime_seconds,
+    created_at: col.created_at,
+    channels: col.channels,
+  }
 }
 
 export const collectorApi = {
-  async getList(params?: CollectorListParams): Promise<CollectorListResponse> {
-    const response = await client.get<unknown, ApiResponse<CollectorListResponse>>('/api/v1/collectors', { params })
-    return response.data
+  async getList(_params?: CollectorListParams): Promise<CollectorDisplay[]> {
+    // Backend returns bare array: [Collector, ...]
+    const response = await client.get<unknown, Collector[]>('/api/v1/collectors')
+    const list = Array.isArray(response) ? response : (response as any).data || []
+    return list.map(toDisplayModel)
   },
 
-  async getDetail(id: number): Promise<Collector> {
-    const response = await client.get<unknown, ApiResponse<Collector>>(`/api/v1/collectors/${id}`)
-    return response.data
+  async getDetail(deviceId: string): Promise<CollectorDisplay> {
+    // Backend uses device_id as param, not numeric id
+    const response = await client.get<unknown, Collector>(`/api/v1/collectors/${deviceId}`)
+    const col = (response as any).data || response
+    return toDisplayModel(col as Collector)
   },
 
   async delete(id: number): Promise<void> {
     await client.delete(`/api/v1/collectors/${id}`)
   },
 
-  async getConfig(id: number): Promise<Record<string, any>> {
-    const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/collectors/${id}/config`)
-    return response.data
+  async getConfig(deviceId: string): Promise<Record<string, any>> {
+    // Backend doesn't have a dedicated config endpoint yet
+    // Get collector detail which includes channels
+    const response = await client.get<unknown, Collector>(`/api/v1/collectors/${deviceId}`)
+    const col = (response as any).data || response
+    return (col as Collector).channels || {}
   },
 
-  async updateConfig(id: number, config: Record<string, any>): Promise<void> {
-    await client.put(`/api/v1/collectors/${id}/config`, config)
+  async updateConfig(_id: number, _config: Record<string, any>): Promise<void> {
+    // Backend doesn't have PUT /collectors/:id/config yet
   },
 
-  async syncConfig(id: number): Promise<void> {
-    await client.post(`/api/v1/collectors/${id}/config/sync`)
+  async syncConfig(_id: number): Promise<void> {
+    // Backend doesn't have POST /collectors/:id/config/sync yet
   },
 
-  async startOTA(id: number, firmwareId: number, force: boolean = false): Promise<{ota_record_id: number, status: string}> {
-    const response = await client.post<unknown, ApiResponse<{ota_record_id: number, status: string}>>(
-      `/api/v1/ota/start`,
-      { collector_id: id, firmware_id: firmwareId, force }
-    )
-    return response.data
+  async startOTA(collectorId: number, firmwareId: number, _force: boolean = false): Promise<{ ota_id: string; status: string }> {
+    // Backend: POST /api/v1/ota/tasks with {collector_id, firmware_id}
+    const response = await client.post<unknown, OTATask>('/api/v1/ota/tasks', {
+      collector_id: collectorId,
+      firmware_id: firmwareId,
+    })
+    const task = (response as any).data || response
+    return { ota_id: (task as OTATask).ota_id, status: (task as OTATask).status }
   },
 
-  async getOTAProgress(_id: number, recordId: number): Promise<OTARecord> {
-    const response = await client.get<unknown, ApiResponse<OTARecord>>(
-      `/api/v1/ota/progress/${recordId}`
-    )
-    return response.data
+  async getOTAProgress(taskId: number): Promise<OTATask> {
+    const response = await client.get<unknown, OTATask>(`/api/v1/ota/tasks/${taskId}`)
+    return (response as any).data || response
   },
 
-  async getOTAHistory(id: number): Promise<OTARecord[]> {
-    const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/ota/history/${id}`)
-    return response.data
+  async getOTAHistory(_collectorId: number): Promise<OTATask[]> {
+    // Backend: GET /api/v1/ota/tasks (returns all tasks, filter client-side)
+    const response = await client.get<unknown, OTATask[]>('/api/v1/ota/tasks')
+    const list = Array.isArray(response) ? response : (response as any).data || []
+    return list
   },
 
-  async cancelOTA(_id: number, recordId: number): Promise<void> {
-    await client.post(`/api/v1/ota/cancel/${recordId}`)
+  async cancelOTA(_id: number, _recordId: number): Promise<void> {
+    // Backend doesn't have POST /ota/cancel/:id yet
   },
 
-  // 硬件配置管理
-  async getHardwareConfig(id: number): Promise<Record<string, any>> {
-    const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/collectors/${id}/hardware/config`)
-    return response.data
+  async getHardwareConfig(_id: number): Promise<Record<string, any>> {
+    // Backend doesn't have this endpoint yet
+    return {}
   },
 
-  async updateHardwareConfig(id: number, hardware: Record<string, any>): Promise<void> {
-    await client.put(`/api/v1/collectors/${id}/hardware/config`, { hardware })
+  async updateHardwareConfig(_id: number, _hardware: Record<string, any>): Promise<void> {
+    // Backend doesn't have this endpoint yet
   },
 
-  // 硬件资源能力（新架构）
-  async getCapabilities(id: number): Promise<Capabilities> {
-    const response = await client.get<unknown, ApiResponse<Capabilities>>(
-      `/api/v1/collectors/${id}/capabilities`
-    )
-    return response.data
+  async getCapabilities(_id: number): Promise<Capabilities> {
+    // Backend doesn't have this endpoint yet
+    return {}
   },
 
-  // 向采集器下发 QueryResources，触发 ReportResources 上报并更新 DB
-  async queryResources(id: number): Promise<{ request_id: string }> {
-    const response = await client.post<unknown, ApiResponse<{ request_id: string }>>(
-      `/api/v1/collectors/${id}/query-resources`
-    )
-    return response.data
+  async queryResources(_id: number): Promise<{ request_id: string }> {
+    // Backend doesn't have this endpoint yet
+    return { request_id: '' }
   },
 
-  // 扫描 I2C 总线设备
-  async scanI2C(id: number, hardwareId: string): Promise<{ devices: string[] }> {
-    const response = await client.post<unknown, ApiResponse<{ devices: string[] }>>(
-      `/api/v1/collectors/${id}/bus/i2c/scan`,
-      { hardware_id: hardwareId }
-    )
-    return response.data
+  async scanI2C(_id: number, _hardwareId: string): Promise<{ devices: string[] }> {
+    // Backend doesn't have this endpoint yet
+    return { devices: [] }
   },
 
-  async ping(id: number): Promise<{ timestamp_us: string }> {
-    const response = await client.post<unknown, ApiResponse<{ timestamp_us: string }>>(
-      `/api/v1/collectors/${id}/ping`
-    )
-    return response.data
+  async ping(deviceId: string): Promise<{ message: string }> {
+    // Backend: POST /api/v1/collectors/:device_id/ping
+    const response = await client.post<unknown, { message: string }>(`/api/v1/collectors/${deviceId}/ping`)
+    return (response as any).data || response
   },
 }

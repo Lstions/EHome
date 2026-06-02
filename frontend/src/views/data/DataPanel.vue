@@ -374,7 +374,7 @@ let unsubscribeData: (() => void) | null = null
 const fetchDevices = async () => {
   try {
     const response = await deviceApi.getList({ page_size: 500 })
-    deviceList.value = response.items
+    deviceList.value = Array.isArray(response) ? response : []
   } catch (error: any) {
     ElMessage.error('获取设备列表失败')
   }
@@ -413,8 +413,8 @@ const fetchData = async () => {
       page_size: pageSize.value
     })
 
-    historyData.value = response.items || []
-    total.value = response.total || 0
+    historyData.value = Array.isArray(response) ? response : []
+    total.value = historyData.value.length
 
     // 计算统计概览
     calculateStats()
