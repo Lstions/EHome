@@ -101,29 +101,45 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		deviceIDStr := c.Param("id")
 		deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device id"})
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid device id"})
 			return
 		}
 
 		sensorName := c.Query("sensor")
-		if sensorName == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "sensor parameter required"})
-			return
+
+		// Support start_time/end_time from frontend
+		startStr := c.Query("start_time")
+		endStr := c.Query("end_time")
+
+		var startTime, endTime time.Time
+		if startStr != "" && endStr != "" {
+			var err1, err2 error
+			startTime, err1 = time.Parse(time.RFC3339, startStr)
+			endTime, err2 = time.Parse(time.RFC3339, endStr)
+			if err1 != nil || err2 != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid time format (RFC3339 expected)"})
+				return
+			}
+		} else {
+			// Fallback to hours parameter
+			hoursStr := c.DefaultQuery("hours", "24")
+			hours, _ := strconv.Atoi(hoursStr)
+			if hours <= 0 || hours > 720 {
+				hours = 24
+			}
+			startTime = time.Now().Add(-time.Duration(hours) * time.Hour)
+			endTime = time.Now()
 		}
 
-		hoursStr := c.DefaultQuery("hours", "24")
-		hours, _ := strconv.Atoi(hoursStr)
-		if hours <= 0 || hours > 720 {
-			hours = 24
+		q := db.Where("device_id = ? AND timestamp >= ? AND timestamp <= ?", deviceID, startTime, endTime)
+		if sensorName != "" {
+			q = q.Where("sensor_name = ?", sensorName)
 		}
 
-		since := time.Now().Add(-time.Duration(hours) * time.Hour)
 		var data []models.UnifiedData
-		db.Where("device_id = ? AND sensor_name = ? AND timestamp >= ?", deviceID, sensorName, since).
-			Order("timestamp ASC").
-			Find(&data)
+		q.Order("timestamp ASC").Find(&data)
 
-		c.JSON(http.StatusOK, data)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
 	})
 
 	// Historical unified data for trend charts (Dashboard)

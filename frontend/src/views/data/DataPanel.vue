@@ -51,8 +51,8 @@
               <span class="stat-icon-text">🌡️</span>
             </div>
             <div class="stat-info">
-              <p class="stat-label">最新温度</p>
-              <p class="stat-value">{{ latestStats.temperature ?? '--' }}<span v-if="latestStats.temperature" class="stat-unit">°C</span></p>
+              <p class="stat-label">{{ latestStats.primaryLabel }}</p>
+              <p class="stat-value">{{ latestStats.primary?.toFixed(2) ?? '--' }}<span v-if="latestStats.primary" class="stat-unit">{{ latestStats.primaryUnit }}</span></p>
             </div>
           </div>
         </el-card>
@@ -64,8 +64,8 @@
               <span class="stat-icon-text">🌊</span>
             </div>
             <div class="stat-info">
-              <p class="stat-label">最新气压</p>
-              <p class="stat-value">{{ latestStats.pressure ?? '--' }}<span v-if="latestStats.pressure" class="stat-unit">hPa</span></p>
+              <p class="stat-label">{{ latestStats.secondaryLabel }}</p>
+              <p class="stat-value">{{ latestStats.secondary?.toFixed(2) ?? '--' }}<span v-if="latestStats.secondary" class="stat-unit">{{ latestStats.secondaryUnit }}</span></p>
             </div>
           </div>
         </el-card>
@@ -198,7 +198,7 @@
           </el-table-column>
           <el-table-column prop="data" label="数据">
             <template #default="{ row }">
-              <span>{{ formatData(row.parsed_data || row.data) }}</span>
+              <span>{{ formatData(row) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="原始数据" width="120" align="center">
@@ -266,8 +266,12 @@ const compareSeries = ref<any[]>([])
 
 // 统计概览数据
 const latestStats = reactive({
-  temperature: null as number | null,
-  pressure: null as number | null,
+  primary: null as number | null,
+  primaryLabel: '--',
+  primaryUnit: '',
+  secondary: null as number | null,
+  secondaryLabel: '--',
+  secondaryUnit: '',
   totalPoints: 0,
   duration: '--'
 })
@@ -275,88 +279,56 @@ const latestStats = reactive({
 const calculateStats = () => {
   const items = historyData.value
   if (!items || items.length === 0) {
-    latestStats.temperature = null
-    latestStats.pressure = null
+    latestStats.primary = null
+    latestStats.primaryLabel = '--'
+    latestStats.primaryUnit = ''
+    latestStats.secondary = null
+    latestStats.secondaryLabel = '--'
+    latestStats.secondaryUnit = ''
     latestStats.totalPoints = 0
     latestStats.duration = '--'
     return
   }
 
-  // 统计最新温度和气压（遍历所有数据提取）
-  let latestTemp: number | null = null
-  let latestPressure: number | null = null
-  let latestTempTime = ''
-  let latestPressureTime = ''
-
+  // Extract first two distinct sensor types from UnifiedData
+  const sensorMap = new Map<string, { value: number; unit: string; time: string }>()
   for (const item of items) {
-    const data = item.parsed_data || item.data
-    if (!data) continue
-    // Helper to extract numeric value
-    const extractNumeric = (val: any): number | null => {
-      if (typeof val === 'number') return val
-      if (typeof val === 'object' && val !== null && 'value' in val) {
-        return typeof val.value === 'number' ? val.value : null
-      }
-      return null
-    }
-
-    const itemTime = item.timestamp || item.created_at || item.collected_at || ''
-    // Temperature search: check common keys
-    const tempKeys = ['temperature', 'temp', 'Temperature', 'Temp']
-    for (const key of tempKeys) {
-      if (data[key] !== undefined) {
-        const val = extractNumeric(data[key])
-        if (val !== null && (!latestTemp || itemTime > latestTempTime)) {
-          latestTemp = val
-          latestTempTime = itemTime
-        }
-        break
-      }
-    }
-
-    // Pressure search
-    const pressKeys = ['pressure', 'Pressure', 'press', 'Press']
-    for (const key of pressKeys) {
-      if (data[key] !== undefined) {
-        const val = extractNumeric(data[key])
-        // Pressure in Pa -> convert to hPa
-        const adjusted = val !== null && val > 10000 ? val / 100 : val
-        if (val !== null && (!latestPressure || itemTime > latestPressureTime)) {
-          latestPressure = adjusted !== null ? Math.round(adjusted * 10) / 10 : null
-          latestPressureTime = itemTime
-        }
-        break
+    if (item.sensor_name && item.value !== undefined) {
+      const existing = sensorMap.get(item.sensor_name)
+      const itemTime = item.timestamp || item.created_at || ''
+      if (!existing || itemTime > existing.time) {
+        sensorMap.set(item.sensor_name, {
+          value: typeof item.value === 'number' ? item.value : parseFloat(item.value) || 0,
+          unit: item.unit || '',
+          time: itemTime
+        })
       }
     }
   }
 
-  latestStats.temperature = latestTemp
-  latestStats.pressure = latestPressure
-  latestStats.totalPoints = total.value
+  const sensors = Array.from(sensorMap.entries())
+  if (sensors.length >= 1) {
+    const [name, data] = sensors[0]
+    latestStats.primary = data.value
+    latestStats.primaryLabel = name
+    latestStats.primaryUnit = data.unit
+  }
+  if (sensors.length >= 2) {
+    const [name, data] = sensors[1]
+    latestStats.secondary = data.value
+    latestStats.secondaryLabel = name
+    latestStats.secondaryUnit = data.unit
+  }
 
-  // 计算采集时长
-  if (items.length >= 2) {
-    const times = items
-      .map(item => item.timestamp || item.created_at || item.collected_at)
-      .filter(Boolean)
-      .map(t => new Date(t).getTime())
-      .filter(t => !isNaN(t))
-      .sort((a, b) => a - b)
-    if (times.length >= 2) {
-      const diffMs = times[times.length - 1] - times[0]
-      const diffMin = Math.floor(diffMs / 60000)
-      if (diffMin < 60) {
-        latestStats.duration = `${diffMin}分钟`
-      } else if (diffMin < 1440) {
-        latestStats.duration = `${Math.floor(diffMin / 60)}小时${diffMin % 60}分钟`
-      } else {
-        latestStats.duration = `${Math.floor(diffMin / 1440)}天${Math.floor((diffMin % 1440) / 60)}小时`
-      }
-    } else {
-      latestStats.duration = '< 1分钟'
-    }
-  } else if (items.length === 1) {
-    latestStats.duration = '< 1分钟'
+  latestStats.totalPoints = items.length
+
+  // Calculate duration
+  const times = items.map(i => new Date(i.timestamp || i.created_at || 0).getTime()).filter(t => t > 0)
+  if (times.length >= 2) {
+    const durationMs = Math.max(...times) - Math.min(...times)
+    const hours = Math.floor(durationMs / 3600000)
+    const minutes = Math.floor((durationMs % 3600000) / 60000)
+    latestStats.duration = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`
   } else {
     latestStats.duration = '--'
   }
@@ -653,8 +625,20 @@ const formatTime = (time: string) => {
   return time ? new Date(time).toLocaleString('zh-CN') : '-'
 }
 
-const formatData = (data: Record<string, any>) => {
+const formatData = (row: Record<string, any>) => {
+  if (!row) return '-'
+
+  // UnifiedData format: sensor_name + value + unit
+  if (row.sensor_name && row.value !== undefined) {
+    const unit = row.unit || ''
+    const val = typeof row.value === 'number' ? row.value.toFixed(2) : row.value
+    return `${row.sensor_name}: ${val} ${unit}`.trim()
+  }
+
+  // Fallback: parsed_data or data object
+  const data = row.parsed_data || row.data
   if (!data) return '-'
+  if (typeof data === 'string') return data
 
   // Filter out raw_data from display (shown in separate column)
   const entries = Object.entries(data).filter(([key]) => key !== 'raw_data')

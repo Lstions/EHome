@@ -275,7 +275,7 @@ const collectorOfflinePercent = computed(() => {
 const fetchMetrics = async () => {
   try {
     const res = await getMetricsSummary()
-    if (res.code === 0 && res.data) {
+    if (res.code === 200 && res.data) {
       metrics.value = res.data
       lastUpdateTime.value = new Date().toLocaleString('zh-CN')
     }

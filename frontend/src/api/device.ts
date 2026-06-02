@@ -123,8 +123,12 @@ export const deviceApi = {
   async getHistoryData(id: number, params: {
     sensor?: string
     hours?: number
+    start_time?: string
+    end_time?: string
+    page?: number
+    page_size?: number
   }): Promise<any> {
-    // Backend: GET /api/v1/devices/:id/history?sensor=xxx&hours=24
+    // Backend: GET /api/v1/devices/:id/history
     const response = await client.get<unknown, any>(`/api/v1/devices/${id}/history`, { params })
     return (response as any).data || response
   },

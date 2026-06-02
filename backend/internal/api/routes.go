@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/ota"
@@ -11,6 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+func nowMillis() int64 {
+	return time.Now().UnixMilli()
+}
 
 // SetupRoutes configures all API routes by domain
 func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr *collector.Manager, otaMgr *ota.Manager) {
@@ -31,6 +36,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
 		registerTerminalRoutes(v1, collectorMgr)
+		registerMetricsRoutes(v1, db)
 
 		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)

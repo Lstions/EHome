@@ -33,6 +33,51 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusCreated, dev)
 	})
 
+	// Get single device by id
+	v1.GET("/devices/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var d models.Device
+		if err := db.First(&d, id).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
+	})
+
+	// Update device
+	v1.PUT("/devices/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var d models.Device
+		if err := db.First(&d, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device not found"})
+			return
+		}
+		if err := c.ShouldBindJSON(&d); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		d.ID = parseUintID(id)
+		if err := db.Save(&d).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
+	})
+
+	// Delete device
+	v1.DELETE("/devices/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		if err := db.Delete(&models.Device{}, id).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+	})
+
 	// List channels (optionally filter by collector_id)
 	// - GET /api/v1/channels                  → all channels
 	// - GET /api/v1/channels?collector_id=1   → channels belonging to that collector (numeric id)
