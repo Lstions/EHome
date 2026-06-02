@@ -121,6 +121,11 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		m.triggerDeviceInit(collector.ID, deviceID)
 	}
 
+	// HomeAssistant Discovery: publish on first registration or status change
+	if result.Error == gorm.ErrRecordNotFound || oldStatus == "offline" || oldStatus == "" {
+		m.publishHADiscovery(collector.ID, deviceID)
+	}
+
 	// Async ping
 	go m.SendPing(deviceID)
 }

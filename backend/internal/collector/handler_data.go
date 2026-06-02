@@ -66,9 +66,11 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 
 	select {
 	case m.dataCh <- job:
-		// submitted
+		// submitted to worker pool
 	default:
-		logger.Warnf("[%s] Worker pool full, dropping DataReport", deviceID)
+		// Worker pool full, fallback to sync processing to avoid data loss
+		logger.Warnf("[%s] Worker pool full, fallback to sync", deviceID)
+		m.processDataReportJob(job)
 	}
 }
 

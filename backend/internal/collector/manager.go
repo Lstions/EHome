@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"ehome/backend/internal/deviceinit"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
@@ -156,6 +157,34 @@ func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
 	for _, dev := range devices {
 		if m.deviceInit.InitIfNeeded(deviceID, uint32(dev.ChannelID), dev.Type) {
 			logger.Infof("[%s] Triggered device init: type=%s ch=%d", deviceID, dev.Type, dev.ChannelID)
+		}
+	}
+}
+
+// publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a collector
+func (m *Manager) publishHADiscovery(collectorID uint, deviceID string) {
+	if m.ha == nil {
+		return
+	}
+
+	var devices []models.Device
+	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
+		Where("channels.collector_id = ?", collectorID).
+		Find(&devices)
+
+	for _, dev := range devices {
+		driver, err := drivers.Get(dev.Type)
+		if err != nil {
+			continue
+		}
+		sensors := driver.GetSensorDefinitions()
+		if len(sensors) == 0 {
+			continue
+		}
+		if err := m.ha.PublishDiscovery(deviceID, dev.Name, dev.Type, sensors); err != nil {
+			logger.Infof("[%s] HA Discovery failed for device %s: %v", deviceID, dev.Name, err)
+		} else {
+			logger.Infof("[%s] HA Discovery published for device %s (%s)", deviceID, dev.Name, dev.Type)
 		}
 	}
 }

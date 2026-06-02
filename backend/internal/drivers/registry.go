@@ -20,6 +20,9 @@ type Driver interface {
 	DeviceType() string
 	// DeviceName returns human-readable name
 	DeviceName() string
+	// GetSensorDefinitions returns the sensor definitions for HA Discovery
+	// Default implementation returns empty; drivers can override
+	GetSensorDefinitions() []SensorData
 }
 
 // Registry holds all registered drivers

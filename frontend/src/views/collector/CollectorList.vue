@@ -474,7 +474,7 @@ onMounted(() => {
   fetchCollectors()
   
   // 订阅状态更新
-  unsubscribe = wsStore.subscribe('status', (message: WebSocketMessage) => {
+  unsubscribe = wsStore.subscribe('collector_status', (message: WebSocketMessage) => {
     if (message.payload?.collector_id) {
       fetchCollectors()
     }

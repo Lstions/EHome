@@ -465,7 +465,7 @@ onMounted(async () => {
   await fetchTrendData()
   await fetchStatusTimeline()
 
-  unsubscribeStatus = wsStore.subscribe('status', handleStatusUpdate)
+  unsubscribeStatus = wsStore.subscribe('collector_status', handleStatusUpdate)
   unsubscribeData = wsStore.subscribe('data', handleDataUpdate)
 })
 

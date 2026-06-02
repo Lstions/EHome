@@ -108,6 +108,7 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 	var requestID string
 	var hardwareID uint64
 	var success bool
+	var addresses []byte // field 4: found device addresses
 
 	for {
 		field, err := dec.NextField()
@@ -121,10 +122,23 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 			hardwareID = frame.GetUint64(field)
 		case 3:
 			success = frame.GetBool(field)
+		case 4:
+			addresses = frame.GetBytes(field)
 		}
 	}
 
-	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v", deviceID, requestID, hardwareID, success)
+	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v addrs=%x",
+		deviceID, requestID, hardwareID, success, addresses)
+
+	// Broadcast scan result via WebSocket
+	m.wsHub.BroadcastEvent("scan_result", map[string]interface{}{
+		"device_id":    deviceID,
+		"request_id":  requestID,
+		"hardware_id": hardwareID,
+		"success":     success,
+		"addresses":   fmt.Sprintf("%x", addresses),
+		"address_count": len(addresses),
+	})
 }
 
 // handleQueryResponse processes QueryRsp (type=0x0F)

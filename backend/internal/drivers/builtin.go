@@ -11,6 +11,12 @@ type BMP280Driver struct{}
 
 func (d *BMP280Driver) DeviceType() string { return "bmp280" }
 func (d *BMP280Driver) DeviceName() string { return "BMP280 Temperature/Pressure Sensor" }
+func (d *BMP280Driver) GetSensorDefinitions() []SensorData {
+	return []SensorData{
+		{Name: "temperature", Unit: "°C"},
+		{Name: "pressure", Unit: "hPa"},
+	}
+}
 
 func (d *BMP280Driver) ParseData(raw []byte) ([]SensorData, error) {
 	if len(raw) < 6 {
@@ -39,6 +45,12 @@ type LKTH01Driver struct{}
 
 func (d *LKTH01Driver) DeviceType() string { return "lk_th01" }
 func (d *LKTH01Driver) DeviceName() string { return "LK-TH01 Temperature/Humidity Sensor" }
+func (d *LKTH01Driver) GetSensorDefinitions() []SensorData {
+	return []SensorData{
+		{Name: "temperature", Unit: "°C"},
+		{Name: "humidity", Unit: "%RH"},
+	}
+}
 
 func (d *LKTH01Driver) ParseData(raw []byte) ([]SensorData, error) {
 	if len(raw) < 4 {
@@ -63,6 +75,12 @@ type SN3000Driver struct{}
 
 func (d *SN3000Driver) DeviceType() string { return "sn3000" }
 func (d *SN3000Driver) DeviceName() string { return "SN-3000 Wind Direction Sensor" }
+func (d *SN3000Driver) GetSensorDefinitions() []SensorData {
+	return []SensorData{
+		{Name: "wind_direction", Unit: "°"},
+		{Name: "wind_speed", Unit: "m/s"},
+	}
+}
 
 func (d *SN3000Driver) ParseData(raw []byte) ([]SensorData, error) {
 	if len(raw) < 5 {

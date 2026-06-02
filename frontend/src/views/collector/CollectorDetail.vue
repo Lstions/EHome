@@ -517,7 +517,7 @@ onMounted(() => {
   fetchOTAHistory()
 
   // 订阅状态更新
-  unsubscribe = wsStore.subscribe('status', (message: WebSocketMessage) => {
+  unsubscribe = wsStore.subscribe('collector_status', (message: WebSocketMessage) => {
     if (message.payload?.collector_id === collectorId.value) {
       if (message.payload?.latency_ms !== undefined) {
         collector.value = { ...collector.value, latency_ms: message.payload.latency_ms }

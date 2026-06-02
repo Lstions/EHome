@@ -43,7 +43,7 @@ func (h *Integration) PublishDiscovery(deviceID, deviceName, model string, senso
 			return fmt.Errorf("marshal discovery config: %w", err)
 		}
 
-		if err := h.mqttClient.Publish(configTopic, configJSON); err != nil {
+		if err := h.mqttClient.PublishRetained(configTopic, configJSON); err != nil {
 			logger.Infof("HA Discovery: failed to publish config: %v", err)
 		}
 	}

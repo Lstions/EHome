@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +14,12 @@ import (
 	wslib "github.com/gorilla/websocket"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// jwtSecret must match the one in api/middleware.go
+// TODO: move to shared config package
+const jwtSecret = "ehome-dev-secret-change-me"
 
 // HistoryFetcher retrieves terminal history for a channel (callback to avoid import cycle)
 type HistoryFetcher func(channelID uint) ([]Entry, error)
@@ -36,7 +42,8 @@ type WSHandler struct {
 type termClient struct {
 	conn *wslib.Conn
 	send chan []byte
-	h    *WSHandler
+	h   *WSHandler
+	role string // user role from JWT
 }
 
 // Incoming message types
@@ -160,9 +167,35 @@ func (h *WSHandler) dispatchEvent(event websocket.Event) {
 }
 
 // HandleTerminalWS handles the /ws/terminal WebSocket endpoint
-// JWT auth is expected to be handled by middleware before this handler
+// JWT auth: token from query param or Authorization header
 func (h *WSHandler) HandleTerminalWS(c *gin.Context) {
-	// Upgrade to WebSocket
+	// 1. Extract JWT token
+	tokenStr := c.Query("token")
+	if tokenStr == "" {
+		authHeader := c.GetHeader("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr = strings.TrimSpace(authHeader[7:])
+		}
+	}
+	if tokenStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing token"})
+		return
+	}
+
+	// 2. Parse JWT and extract role
+	role := "viewer" // default
+	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		return []byte(jwtSecret), nil
+	})
+	if err == nil && token.Valid {
+		if claims, ok := token.Claims.(*jwt.MapClaims); ok {
+			if r, ok := (*claims)["role"].(string); ok {
+				role = r
+			}
+		}
+	}
+
+	// 3. Upgrade to WebSocket
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Terminal WS upgrade failed: %v", err)
@@ -173,6 +206,7 @@ func (h *WSHandler) HandleTerminalWS(c *gin.Context) {
 		conn: conn,
 		send: make(chan []byte, 256),
 		h:    h,
+		role: role,
 	}
 
 	// Register client
@@ -314,6 +348,14 @@ func (c *termClient) readPump() {
 			c.h.unsubscribe(c, p.ChannelID)
 
 		case "send":
+			// Admin-only: only admin role can send commands to devices
+			if c.role != "admin" {
+				c.sendJSON(wsResponse{
+					Type:    "error",
+					Payload: map[string]string{"message": "forbidden: admin role required to send commands"},
+				})
+				continue
+			}
 			var p sendPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil || p.DeviceID == "" || p.DataHex == "" {
 				c.sendJSON(wsResponse{

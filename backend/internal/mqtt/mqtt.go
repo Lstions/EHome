@@ -63,6 +63,13 @@ func (c *Client) Publish(topic string, payload []byte) error {
 	return token.Error()
 }
 
+// PublishRetained sends a retained message to a topic
+func (c *Client) PublishRetained(topic string, payload []byte) error {
+	token := c.client.Publish(topic, 1, true, payload)
+	token.Wait()
+	return token.Error()
+}
+
 // Close disconnects from the broker
 func (c *Client) Close() {
 	c.client.Disconnect(250)

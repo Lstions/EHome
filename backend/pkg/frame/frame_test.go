@@ -397,3 +397,103 @@ func TestHelloAckWireFormat(t *testing.T) {
 	}
 	t.Logf("HelloAck encode/decode PASS: server_time=%d features=%d", gotServerTime, gotFeatures)
 }
+
+// === Benchmarks (P2.x from acceptance-criteria) ===
+
+// BenchmarkDecodeHello measures decode performance for typical Hello message
+func BenchmarkDecodeHello(b *testing.B) {
+	// Pre-encode a typical Hello message
+	enc := NewEncoder(MsgHello)
+	enc.EncodeString(1, "esp32c6_404CCA57B7BC")
+	enc.EncodeString(2, "2.0.0")
+	enc.EncodeString(3, "ESP32C6")
+	enc.EncodeVarint(4, 4)
+	wire := enc.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dec, _ := NewDecoder(wire)
+		for {
+			_, err := dec.NextField()
+			if err != nil {
+				break
+			}
+		}
+	}
+}
+
+// BenchmarkEncodeHello measures encode performance
+func BenchmarkEncodeHello(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		enc := NewEncoder(MsgHello)
+		enc.EncodeString(1, "esp32c6_404CCA57B7BC")
+		enc.EncodeString(2, "2.0.0")
+		enc.EncodeString(3, "ESP32C6")
+		enc.EncodeVarint(4, 4)
+		_ = enc.Bytes()
+	}
+}
+
+// BenchmarkDecodeDataReport measures decode performance for typical DataReport
+func BenchmarkDecodeDataReport(b *testing.B) {
+	// Pre-encode a typical DataReport (7 bytes raw data)
+	enc := NewEncoder(MsgDataRpt)
+	enc.EncodeVarint(1, 5)
+	enc.EncodeVarint(2, 1717200000000)
+	enc.EncodeVarint(3, 12345)
+	enc.EncodeBytes(4, []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07})
+	wire := enc.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dec, _ := NewDecoder(wire)
+		for {
+			_, err := dec.NextField()
+			if err != nil {
+				break
+			}
+		}
+	}
+}
+
+// BenchmarkEncodeDataReport measures encode performance
+func BenchmarkEncodeDataReport(b *testing.B) {
+	rawData := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		enc := NewEncoder(MsgDataRpt)
+		enc.EncodeVarint(1, 5)
+		enc.EncodeVarint(2, 1717200000000)
+		enc.EncodeVarint(3, 12345)
+		enc.EncodeBytes(4, rawData)
+		_ = enc.Bytes()
+	}
+}
+
+// BenchmarkDecodeConfigManifest measures decode for complex nested message
+func BenchmarkDecodeConfigManifest(b *testing.B) {
+	// Pre-encode a ConfigManifest with 4 templates
+	enc := NewEncoder(MsgConfigMfst)
+	enc.EncodeString(1, "cfg-001")
+	for i := 0; i < 4; i++ {
+		sub := SubEncoder()
+		sub.EncodeVarint(1, uint64(i+1))
+		sub.EncodeBytes(2, []byte{0xE0, 0xB6})
+		sub.EncodeVarint(3, 25)
+		sub.EncodeVarint(4, 10)
+		enc.EncodeSubFrame(2, sub.Bytes())
+	}
+	wire := enc.Bytes()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dec, _ := NewDecoder(wire)
+		for {
+			_, err := dec.NextField()
+			if err != nil {
+				break
+			}
+		}
+	}
+}
