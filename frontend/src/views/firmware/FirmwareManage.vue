@@ -12,33 +12,29 @@
       <el-skeleton v-if="loading" :rows="5" animated />
       <el-table v-else :data="firmwares" stripe>
         <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column prop="name" label="固件名称" />
-        <el-table-column prop="version" label="版本号">
+        <el-table-column prop="version" label="版本号" width="120">
           <template #default="{ row }">
             <span>{{ formatVersion(row.version) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="model" label="设备型号" />
         <el-table-column prop="file_size" label="文件大小" width="120">
           <template #default="{ row }">
             <span>{{ formatFileSize(row.file_size) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="file_md5" label="MD5" width="200" show-overflow-tooltip />
-        <el-table-column prop="changelog" label="更新日志" show-overflow-tooltip />
+        <el-table-column prop="file_md5" label="SHA256" width="200" show-overflow-tooltip />
+        <el-table-column prop="url" label="下载链接" show-overflow-tooltip>
+          <template #default="{ row }">
+            <a v-if="row.url" :href="row.url" target="_blank" class="download-link">下载</a>
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180">
           <template #default="{ row }">
             <span>{{ formatTime(row.created_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="row.status === 'active' ? 'success' : 'info'" size="small">
-              {{ row.status === 'active' ? '启用' : row.status || '未知' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
             <el-button
               type="primary"
@@ -348,5 +344,17 @@ onMounted(() => {
   font-size: 12px;
   color: #909399;
   line-height: 1.5;
+}
+
+.download-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+.download-link:hover {
+  text-decoration: underline;
+}
+
+.muted {
+  color: #c0c4cc;
 }
 </style>
