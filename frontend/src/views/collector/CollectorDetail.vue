@@ -352,16 +352,20 @@ const fetchCollectorDetail = async () => {
 }
 
 const fetchDevices = async () => {
-  const id = Number(route.params.id)
-  if (!id) return
+  // route.params.id is the device_id (string). Use it directly; the device list
+  // endpoint accepts the device_id via the api store which falls back to numeric.
+  // Also accept collector numeric id via collector.value.id once collector is loaded.
+  const idOrDeviceId = String(route.params.id) || collector.value?.device_id
+  if (!idOrDeviceId) return
 
   devicesLoading.value = true
   try {
     const [deviceRes, channelRes] = await Promise.all([
-      deviceApi.getList({ collector_id: id, page: 1, page_size: 100 }),
-      channelApi.getList(id)
+      deviceApi.getList({ collector_id: idOrDeviceId, page: 1, page_size: 100 }),
+      channelApi.getList(idOrDeviceId)
     ])
-    devices.value = deviceRes?.items || []
+    // deviceApi.getList always returns a Device[] (or empty array)
+    devices.value = Array.isArray(deviceRes) ? deviceRes : (deviceRes?.items || [])
     // 统一为数组
     channels.value = Array.isArray(channelRes)
       ? channelRes
@@ -383,12 +387,14 @@ const handleOTASuccess = () => {
 }
 
 const fetchOTAHistory = async () => {
-  const id = Number(route.params.id)
+  // route.params.id is the device_id (string). OTA tasks are looked up by
+  // collector numeric id on the server, so prefer collector.value.id once loaded.
+  const id = collector.value?.id ?? String(route.params.id)
   if (!id) return
 
   otaHistoryLoading.value = true
   try {
-    otaHistory.value = (await collectorApi.getOTAHistory(id)) || []
+    otaHistory.value = (await collectorApi.getOTAHistory(id as number | string)) || []
   } catch (error: any) {
     logger.error('获取OTA历史失败', { error: String(error) })
   } finally {

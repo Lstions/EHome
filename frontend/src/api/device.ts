@@ -73,8 +73,14 @@ function mapDeviceStatus(backendStatus: string): string {
 
 export const deviceApi = {
   async getList(_params?: DeviceListParams): Promise<Device[]> {
-    // Backend returns bare array: [Device, ...]
-    const response = await client.get<unknown, BackendDevice[]>('/api/v1/devices')
+    // Backend: GET /api/v1/devices
+    // Note: Device model has no direct collector_id link (devices link through
+    // channel → collector), so server-side filtering by collector_id is not
+    // yet implemented. We still pass the param so a future filter can pick it
+    // up without changing this signature.
+    const response = await client.get<unknown, BackendDevice[]>('/api/v1/devices', {
+      params: _params?.collector_id ? { collector_id: _params.collector_id } : {}
+    })
     const list = Array.isArray(response) ? response : (response as any).data || []
     return list.map(toDisplayModel)
   },
