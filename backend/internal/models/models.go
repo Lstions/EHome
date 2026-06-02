@@ -107,14 +107,19 @@ type DataSource struct {
 }
 
 // OTATask OTA升级任务
+// 状态机: pending → downloading → verifying → installing → success | failed
+// 状态字面量与 docs/v2.0/requirements.md §6.1 一致
 type OTATask struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	OtaID       string     `gorm:"column:ota_id;size:64;uniqueIndex;not null" json:"ota_id"`
 	CollectorID uint       `gorm:"index;not null" json:"collector_id"`
 	FirmwareID  uint       `gorm:"index" json:"firmware_id"`
-	Status      string     `gorm:"size:20;default:pending" json:"status"` // pending/downloading/flashing/done/failed
+	Status      string     `gorm:"size:20;default:pending" json:"status"` // pending/downloading/verifying/installing/success/failed
 	Progress    uint8      `gorm:"default:0" json:"progress"`
 	ErrorMsg    string     `gorm:"size:256" json:"error_msg"`
+	ToVersion   string     `gorm:"size:32" json:"to_version"`     // Target firmware version (used for Hello-based completion reconciliation, §6.4.3)
+	StartedAt   *time.Time `json:"started_at"`                    // When OTA first transitioned out of pending
+	CompletedAt *time.Time `json:"completed_at"`                  // When status reached success or failed (§6.4.2)
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }

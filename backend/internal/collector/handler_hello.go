@@ -91,6 +91,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		"firmware":  firmwareVersion,
 	})
 
+	// OTA state reconciliation per docs §6.4.3: if device Hello reports
+	// the target firmware version of an in-flight OTA task, mark it success.
+	if m.otaMgr != nil {
+		m.otaMgr.HandleHelloOTACompletion(collector.ID, deviceID, firmwareVersion)
+	}
+
 	// Config hash check + 30s dedup window
 	var templates []models.ConfigTemplate
 	m.db.Where("collector_id = ?", collector.ID).Find(&templates)

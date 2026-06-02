@@ -2,22 +2,55 @@ package ota
 
 import (
 	"fmt"
-	"ehome/backend/pkg/logger"
 	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/frame"
+	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
 )
 
+// OTA 状态机字面量 (与 docs/v2.0/requirements.md §6.1 一致)
+const (
+	StatusPending     = "pending"
+	StatusDownloading = "downloading"
+	StatusVerifying   = "verifying"
+	StatusInstalling  = "installing"
+	StatusSuccess     = "success"
+	StatusFailed      = "failed"
+)
+
+// OtaProgress 状态码 (ESP→SVR, type=0x0B) — 与 docs §6.3 / protocol-spec.md 一致
+const (
+	WireDownloading = 0
+	WireInstalling  = 1
+	WireSuccess     = 2
+	WireFailed      = 3
+)
+
+// 终态集合
+var terminalStates = map[string]bool{
+	StatusSuccess: true,
+	StatusFailed:  true,
+}
+
+// 抢占 (supersede) 旧 OTA 记录: 同一 collector 下所有非终态记录标记为 failed
+// 实现 docs §6.4.1
+var activeStates = []string{
+	StatusPending,
+	StatusDownloading,
+	StatusVerifying,
+	StatusInstalling,
+}
+
 // Manager handles OTA operations
 type Manager struct {
-	db     *gorm.DB
-	mqtt   *mqtt.Client
-	wsHub  *websocket.Hub
+	db    *gorm.DB
+	mqtt  *mqtt.Client
+	wsHub *websocket.Hub
 }
 
 // NewManager creates a new OTA manager
@@ -29,18 +62,37 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub) *Man
 	}
 }
 
-// CreateTask creates a new OTA task
+// CreateTask creates a new OTA task per docs §6.4.1:
+//  1. Mark all in-flight OTA records for the same collector as failed ("Superseded by new attempt")
+//  2. Create new record in pending state with the target firmware version
+//  3. (Caller is expected to publish the OtaCommand afterwards)
 func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask, error) {
 	var firmware models.Firmware
 	if err := m.db.First(&firmware, firmwareID).Error; err != nil {
 		return nil, fmt.Errorf("firmware not found: %w", err)
 	}
 
+	// §6.4.1: Supersede any prior in-flight OTA for this collector
+	now := time.Now()
+	res := m.db.Model(&models.OTATask{}).
+		Where("collector_id = ? AND status IN ?", collectorID, activeStates).
+		Updates(map[string]interface{}{
+			"status":       StatusFailed,
+			"error_msg":    "Superseded by new attempt",
+			"completed_at": &now,
+		})
+	if res.Error != nil {
+		logger.Warnf("[OTA] Failed to supersede prior tasks for collector %d: %v", collectorID, res.Error)
+	} else if res.RowsAffected > 0 {
+		logger.Infof("[OTA] Superseded %d in-flight OTA record(s) for collector %d", res.RowsAffected, collectorID)
+	}
+
 	task := &models.OTATask{
-		OtaID:       fmt.Sprintf("ota-%d", time.Now().Unix()),
+		OtaID:       fmt.Sprintf("ota-%d", now.UnixNano()),
 		CollectorID: collectorID,
 		FirmwareID:  firmwareID,
-		Status:      "pending",
+		ToVersion:   firmware.Version,
+		Status:      StatusPending,
 		Progress:    0,
 	}
 
@@ -75,7 +127,11 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
-// HandleOtaProgress processes OtaProgress messages from devices
+// HandleOtaProgress processes OtaProgress messages from devices per docs §6.4.2:
+//  - Map wire status code to state machine literal (0/1/2/3 → downloading/installing/success/failed)
+//  - When transitioning out of pending, set started_at
+//  - When reaching a terminal state (success or failed), set completed_at
+//  - Push ota_progress over WebSocket for live UI updates
 func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {
@@ -84,6 +140,7 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 
 	var taskID string
 	var status, progressPct uint64
+	var errorMsg string
 
 	for {
 		field, err := dec.NextField()
@@ -97,6 +154,8 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 			status = frame.GetUint64(field)
 		case 3:
 			progressPct = frame.GetUint64(field)
+		case 4:
+			errorMsg = frame.GetString(field)
 		}
 	}
 
@@ -107,26 +166,121 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 		return
 	}
 
-	task.Progress = uint8(progressPct)
-	switch status {
-	case 0:
-		task.Status = "downloading"
-	case 1:
-		task.Status = "completed"
-	case 2:
-		task.Status = "failed"
+	// Idempotency: terminal state records are immutable
+	if terminalStates[task.Status] {
+		logger.Infof("[%s] OTA task %s already in terminal state %s, ignoring progress update",
+			deviceID, taskID, task.Status)
+		return
 	}
-	m.db.Save(&task)
+
+	now := time.Now()
+	task.Progress = uint8(progressPct)
+
+	// Map wire code → state literal
+	wasActive := task.Status == StatusPending
+	switch status {
+	case WireDownloading:
+		task.Status = StatusDownloading
+	case WireInstalling:
+		// downloading → installing (could also be after verifying, but that's a server-only state)
+		task.Status = StatusInstalling
+	case WireSuccess:
+		task.Status = StatusSuccess
+		task.Progress = 100
+		task.CompletedAt = &now
+	case WireFailed:
+		task.Status = StatusFailed
+		if errorMsg != "" {
+			task.ErrorMsg = errorMsg
+		}
+		task.CompletedAt = &now
+	default:
+		logger.Warnf("[%s] Unknown OtaProgress status code %d, ignoring", deviceID, status)
+		return
+	}
+
+	if wasActive && task.Status == StatusDownloading {
+		task.StartedAt = &now
+	}
+
+	if err := m.db.Save(&task).Error; err != nil {
+		logger.Errorf("[%s] Failed to save OTA task %s: %v", deviceID, taskID, err)
+		return
+	}
 
 	// WebSocket push
 	if m.wsHub != nil {
 		m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
-			"ota_id":      taskID,
-			"status":      task.Status,
-			"progress":    progressPct,
-			"device_id":   deviceID,
+			"ota_id":    taskID,
+			"status":    task.Status,
+			"progress":  task.Progress,
+			"device_id": deviceID,
 		})
 	}
 
-	logger.Infof("[%s] OTA progress: %s = %d%%", deviceID, taskID, progressPct)
+	logger.Infof("[%s] OTA progress: %s -> %s (%d%%)", deviceID, taskID, task.Status, task.Progress)
+}
+
+// HandleHelloOTACompletion reconciles in-flight OTA tasks when a device Hello reports
+// a new firmware version, per docs §6.4.3.
+//
+// If the device is now running the target firmware (to_version), any in-flight task for
+// that collector is marked success. This covers the case where the ESP32 reboots into
+// the new firmware and the trailing success OtaProgress frame is lost.
+func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareVersion string) {
+	if collectorID == 0 {
+		return
+	}
+
+	// Find the latest non-terminal OTA record for this collector
+	var task models.OTATask
+	err := m.db.Where("collector_id = ? AND status IN ?", collectorID, activeStates).
+		Order("id DESC").
+		First(&task).Error
+	if err != nil {
+		return // No in-flight OTA or DB error — nothing to do
+	}
+
+	now := time.Now()
+	// Case A: device already reports the target version → mark success
+	if task.ToVersion != "" && task.ToVersion == firmwareVersion {
+		task.Status = StatusSuccess
+		task.Progress = 100
+		task.CompletedAt = &now
+		task.ErrorMsg = "Auto-completed via Hello (device reported target firmware)"
+		if task.StartedAt == nil {
+			task.StartedAt = &now
+		}
+		if err := m.db.Save(&task).Error; err == nil && m.wsHub != nil {
+			m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+				"ota_id":    task.OtaID,
+				"status":    task.Status,
+				"progress":  100,
+				"device_id": deviceID,
+				"reason":    "hello_completion",
+			})
+		}
+		logger.Infof("[%s] OTA %s auto-completed via Hello (firmware_version=%s)",
+			deviceID, task.OtaID, firmwareVersion)
+		return
+	}
+
+	// Case B: stuck in flight for >10 minutes with mismatched version → mark failed
+	if task.StartedAt != nil && now.Sub(*task.StartedAt) > 10*time.Minute {
+		task.Status = StatusFailed
+		task.ErrorMsg = fmt.Sprintf("Timeout: no progress for >10m, device reports %s (expected %s)",
+			firmwareVersion, task.ToVersion)
+		task.CompletedAt = &now
+		if err := m.db.Save(&task).Error; err == nil && m.wsHub != nil {
+			m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+				"ota_id":    task.OtaID,
+				"status":    task.Status,
+				"progress":  task.Progress,
+				"device_id": deviceID,
+				"reason":    "hello_timeout",
+			})
+		}
+		logger.Infof("[%s] OTA %s timed out (started_at=%s, current fw=%s)",
+			deviceID, task.OtaID, task.StartedAt.Format(time.RFC3339), firmwareVersion)
+	}
 }

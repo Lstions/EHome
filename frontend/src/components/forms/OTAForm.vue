@@ -229,10 +229,13 @@ const handleOTAProgress = (message: any) => {
   if (status === 'downloading') {
     statusText.value = '正在下载固件...'
     addLog(`下载进度 ${pct}%`)
-  } else if (status === 'flashing') {
-    statusText.value = '正在刷写固件...'
-    addLog(`刷写进度 ${pct}%`)
-  } else if (status === 'completed' || pct >= 100) {
+  } else if (status === 'verifying') {
+    statusText.value = '正在校验固件...'
+    addLog('SHA256 校验中...')
+  } else if (status === 'installing') {
+    statusText.value = '正在安装固件...'
+    addLog(`安装进度 ${pct}%`)
+  } else if (status === 'success' || pct >= 100) {
     upgradeStatus.value = 'completed'
     progress.value = 100
     statusText.value = '升级完成'
