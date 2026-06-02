@@ -88,14 +88,8 @@
       width="500px"
     >
       <el-form :model="uploadForm" :rules="uploadRules" label-width="100px">
-        <el-form-item label="固件名称" prop="name">
-          <el-input v-model="uploadForm.name" placeholder="请输入固件名称" />
-        </el-form-item>
-        <el-form-item label="版本号" prop="version">
-          <el-input v-model="uploadForm.version" placeholder="如: 1.0.0" />
-        </el-form-item>
-        <el-form-item label="设备型号" prop="model">
-          <el-input v-model="uploadForm.model" placeholder="如: ESP32-S3" />
+        <el-form-item label="固件版本" prop="version">
+          <el-input v-model="uploadForm.version" placeholder="如: 2.0.3" />
         </el-form-item>
         <el-form-item label="固件文件" prop="file">
           <el-upload
@@ -106,19 +100,12 @@
             :on-exceed="handleExceed"
             accept=".bin"
           >
-            <el-button>选择文件</el-button>
+            <el-button>选择 .bin 文件</el-button>
           </el-upload>
           <div v-if="uploadForm.file" class="file-info">
-            已选择: {{ uploadForm.file.name }}
+            已选择: {{ uploadForm.file.name }} ({{ formatFileSize(uploadForm.file.size) }})
           </div>
-        </el-form-item>
-        <el-form-item label="更新日志" prop="changelog">
-          <el-input
-            v-model="uploadForm.changelog"
-            type="textarea"
-            :rows="4"
-            placeholder="请输入更新日志"
-          />
+          <div class="form-hint">仅支持后端识别 .bin 固件文件</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -190,17 +177,12 @@ const editForm = reactive({
 })
 
 const uploadForm = reactive({
-  name: '',
   version: '',
-  model: '',
-  file: null as File | null,
-  changelog: ''
+  file: null as File | null
 })
 
 const uploadRules = {
-  name: [{ required: true, message: '请输入固件名称', trigger: 'blur' }],
   version: [{ required: true, message: '请输入版本号', trigger: 'blur' }],
-  model: [{ required: true, message: '请输入设备型号', trigger: 'blur' }],
   file: [{ required: true, message: '请选择固件文件', trigger: 'change' }]
 }
 
@@ -309,11 +291,8 @@ const handleUpload = async () => {
   uploading.value = true
   try {
     const formData = new FormData()
-    formData.append('name', uploadForm.name)
     formData.append('version', uploadForm.version)
-    formData.append('model', uploadForm.model)
     formData.append('file', uploadForm.file)
-    formData.append('changelog', uploadForm.changelog)
 
     await firmwareApi.upload(formData)
     ElMessage.success('上传成功')
@@ -328,11 +307,8 @@ const handleUpload = async () => {
 }
 
 const resetUploadForm = () => {
-  uploadForm.name = ''
   uploadForm.version = ''
-  uploadForm.model = ''
   uploadForm.file = null
-  uploadForm.changelog = ''
   uploadRef.value?.clearFiles()
 }
 
@@ -365,5 +341,12 @@ onMounted(() => {
   margin-top: 8px;
   font-size: 12px;
   color: #909399;
+}
+
+.form-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
 }
 </style>

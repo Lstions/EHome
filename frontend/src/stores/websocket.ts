@@ -79,10 +79,10 @@ export const useWebSocketStore = defineStore('websocket', () => {
 
     manuallyClosed.value = false
 
-    const wsUrl = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8080'
+    const wsUrl = import.meta.env.VITE_WS_BASE_URL || (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + window.location.host
     let statusUrl = `${wsUrl}/api/v1/ws`
 
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
     if (token) {
       statusUrl = `${statusUrl}?token=${encodeURIComponent(token)}`
     }

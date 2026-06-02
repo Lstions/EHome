@@ -51,10 +51,23 @@ function toDisplayModel(d: BackendDevice): Device {
     hardware_type: 'N/A',
     hardware_id: 'N/A',
     config: null,
-    status: d.status,
+    status: mapDeviceStatus(d.status),
     last_data: null,
     last_data_time: null,
     created_at: d.created_at,
+  }
+}
+
+// Map backend status ('active'/'inactive') to display status ('online'/'offline')
+function mapDeviceStatus(backendStatus: string): string {
+  switch (backendStatus) {
+    case 'active':
+      return 'online'
+    case 'inactive':
+    case 'disabled':
+      return 'offline'
+    default:
+      return backendStatus // Pass through unknown values
   }
 }
 
