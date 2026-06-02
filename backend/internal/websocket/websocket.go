@@ -23,6 +23,10 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+
+	// Subscription support for event-type listeners
+	subMu        sync.RWMutex
+	subscribers  map[chan Event]bool
 }
 
 // Client represents a WebSocket client
@@ -43,10 +47,11 @@ var upgrader = websocket.Upgrader{
 // NewHub creates a new WebSocket hub
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		clients:     make(map[*Client]bool),
+		broadcast:   make(chan []byte),
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		subscribers: make(map[chan Event]bool),
 	}
 }
 
@@ -80,6 +85,20 @@ func (h *Hub) Run() {
 				}
 			}
 			h.mu.RUnlock()
+
+			// Also forward to subscribers (parsed as Event)
+			var evt Event
+			if err := json.Unmarshal(message, &evt); err == nil {
+				h.subMu.RLock()
+				for ch := range h.subscribers {
+					select {
+					case ch <- evt:
+					default:
+						// subscriber channel full, drop
+					}
+				}
+				h.subMu.RUnlock()
+			}
 		}
 	}
 }
@@ -87,6 +106,24 @@ func (h *Hub) Run() {
 // Broadcast sends a message to all connected clients
 func (h *Hub) Broadcast(data []byte) {
 	h.broadcast <- data
+}
+
+// Subscribe returns a channel that receives all broadcast events
+// Callers can use this to listen for specific event types
+func (h *Hub) Subscribe() chan Event {
+	ch := make(chan Event, 64)
+	h.subMu.Lock()
+	h.subscribers[ch] = true
+	h.subMu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes a subscription channel
+func (h *Hub) Unsubscribe(ch chan Event) {
+	h.subMu.Lock()
+	delete(h.subscribers, ch)
+	h.subMu.Unlock()
+	close(ch)
 }
 
 // BroadcastEvent sends a structured event to all clients

@@ -5,6 +5,7 @@ import (
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/ota"
+	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 
 	"github.com/gin-gonic/gin"
@@ -13,13 +14,14 @@ import (
 
 // SetupRoutes configures all API routes by domain
 func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr *collector.Manager, otaMgr *ota.Manager) {
-	// Health check
+	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// API v1
+	// API v1 with JWT auth
 	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
 	{
 		registerCollectorRoutes(v1, db, collectorMgr)
 		registerDeviceRoutes(v1, db)
@@ -27,7 +29,20 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
 		registerTerminalRoutes(v1, collectorMgr)
 
-		// WebSocket endpoint
+		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)
 	}
+
+	// Terminal WebSocket endpoint (separate handler with callbacks)
+	// This endpoint also requires JWT auth via query param
+	termWSHandler := terminal.NewWSHandler(
+		wsHub,
+		func(channelID uint) ([]terminal.Entry, error) {
+			return collectorMgr.TerminalMgr().GetHistory(channelID, 256), nil
+		},
+		func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
+			return collectorMgr.SendWriteCommand(deviceID, channelID, data, readSize)
+		},
+	)
+	r.GET("/api/v1/ws/terminal", JWTAuth(), termWSHandler.HandleTerminalWS)
 }

@@ -5,80 +5,87 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWTSecret is the shared secret for token validation.
-// In production, load from config/env. For now, use a default.
-var JWTSecret = []byte(getJWTSecret())
+// jwtSecret is the HMAC secret for signing JWT tokens.
+// TODO: move to config when T09 is fully integrated.
+var jwtSecret = []byte("ehome-dev-secret-change-me")
 
-func getJWTSecret() string {
-	// Allow override via env
-	if v := getEnvDefault("EHOME_JWT_SECRET", ""); v != "" {
-		return v
-	}
-	// Default secret for development
-	return "ehome-dev-jwt-secret-2024"
+// Claims represents the JWT payload
+type Claims struct {
+	UserID uint   `json:"user_id"`
+	Role   string `json:"role,omitempty"`
+	jwt.RegisteredClaims
 }
 
-func getEnvDefault(key, fallback string) string {
-	if v := strings.TrimSpace(getEnvOrEmpty(key)); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func getEnvOrEmpty(key string) string {
-	if v, ok := getEnv2(key); ok {
-		return v
-	}
-	return ""
-}
-
-// Simple env lookup without importing os in this helper
-var envLookup = func(key string) (string, bool) {
-	return "", false
-}
-
-func getEnv2(key string) (string, bool) {
-	return envLookup(key)
-}
-
-// AuthMiddleware validates JWT tokens in the Authorization header or query param.
-// Supports: Authorization: Bearer <token>  OR  ?token=<token>
-func AuthMiddleware() gin.HandlerFunc {
+// JWTAuth returns a middleware that validates JWT tokens.
+// It checks:
+//   - Authorization: Bearer <token> header
+//   - ?token=<jwt> query parameter (for WebSocket connections)
+//
+// On success, sets "user_id" and "role" in gin context.
+// On failure, returns 401.
+func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := ""
+		tokenStr := ""
 
-		// 1. Check Authorization header
-		auth := c.GetHeader("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") {
-			token = strings.TrimPrefix(auth, "Bearer ")
+		// 1. Try Authorization header
+		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+				tokenStr = strings.TrimSpace(parts[1])
+			}
 		}
 
-		// 2. Check query parameter (useful for WebSocket connections)
-		if token == "" {
-			token = c.Query("token")
+		// 2. Fallback to query parameter (for WebSocket)
+		if tokenStr == "" {
+			tokenStr = c.Query("token")
 		}
 
-		if token == "" {
+		if tokenStr == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "missing authentication token",
 			})
 			return
 		}
 
-		// Validate JWT token
-		claims, err := ValidateJWT(token)
-		if err != nil {
+		// Parse and validate token
+		token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+			// Validate signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return jwtSecret, nil
+		})
+
+		if err != nil || !token.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid token: " + err.Error(),
+				"error": "invalid or expired token",
 			})
 			return
 		}
 
-		// Store user info in context
-		c.Set("user_id", claims.UserID)
-		c.Set("username", claims.Username)
+		if claims, ok := token.Claims.(*Claims); ok {
+			c.Set("user_id", claims.UserID)
+			c.Set("role", claims.Role)
+		}
+
 		c.Next()
 	}
+}
+
+// GenerateToken creates a JWT token for a given user ID and role.
+// This is a helper for development/testing; production auth will be added later.
+func GenerateToken(userID uint, role string) (string, error) {
+	claims := Claims{
+		UserID: userID,
+		Role:   role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer: "ehome",
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtSecret)
 }
