@@ -114,7 +114,7 @@
         class="collector-card"
         :class="{ offline: collector.status === 'offline' }"
         shadow="hover"
-        @click="goToDetail(collector.id)"
+        @click="goToDetail(collector.device_id || collector.id)"
       >
         <div class="card-header">
           <div class="collector-info">
@@ -183,7 +183,7 @@
         :data="filteredCollectors" 
         v-loading="loading"
         stripe
-        @row-click="(row) => goToDetail(row.id)"
+        @row-click="(row) => goToDetail(row.device_id || row.id)"
         row-class-name="collector-row"
       >
         <el-table-column label="采集器" min-width="200">
@@ -249,7 +249,7 @@
         
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click.stop="goToDetail(row.id)">详情</el-button>
+            <el-button size="small" @click.stop="goToDetail(row.device_id || row.id)">详情</el-button>
             <el-button size="small" type="danger" plain @click.stop="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -403,16 +403,18 @@ const handleStatClick = (status: string) => {
 }
 
 // 跳转详情
-const goToDetail = (id: number) => {
-  router.push(`/collectors/${id}`)
+const goToDetail = (idOrDeviceId: number | string) => {
+  // Pass device_id if available (backend route uses :device_id)
+  // We pass through the same value
+  router.push(`/collectors/${idOrDeviceId}`)
 }
 
 // 快捷操作
 const handleQuickAction = (action: string, collector: any) => {
   if (action === 'config') {
-    router.push(`/collectors/${collector.id}?tab=config`)
+    router.push(`/collectors/${collector.device_id || collector.id}?tab=config`)
   } else if (action === 'ota') {
-    router.push(`/firmware?collector=${collector.id}`)
+    router.push(`/firmware?collector=${collector.device_id || collector.id}`)
   }
 }
 

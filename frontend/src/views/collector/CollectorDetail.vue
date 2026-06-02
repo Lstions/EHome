@@ -264,7 +264,10 @@ const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 
 let unsubscribe: (() => void) | null = null
 
-const collectorId = computed(() => Number(route.params.id))
+// collectorId should be the backend DB id (numeric) for the OTA API.
+// route.params.id is either numeric id (legacy) or device_id string (new).
+// After fetching the collector, prefer its numeric id.
+const collectorId = computed(() => collector.value?.id ?? Number(route.params.id))
 
 const deviceTypeMap: Record<string, string> = {
   wind_speed: '风速传感器',
@@ -325,8 +328,8 @@ const handlePing = async () => {
 }
 
 const fetchCollectorDetail = async () => {
-  const id = Number(route.params.id)
-  if (!id) {
+  const idOrDeviceId = String(route.params.id)
+  if (!idOrDeviceId) {
     ElMessage.error('无效的采集器ID')
     goBack()
     return
@@ -334,7 +337,9 @@ const fetchCollectorDetail = async () => {
 
   loading.value = true
   try {
-    collector.value = await collectorApi.getDetail(id)
+    // Route param may be numeric id or device_id. Try device_id first, fallback to numeric.
+    // Backend GET /collectors/:device_id — pass as string (device_id) directly
+    collector.value = await collectorApi.getDetail(idOrDeviceId)
     // 自动测量延迟（如果在线且无延迟数据）
     if (collector.value?.status === 'online' && (!collector.value.latency_ms || collector.value.latency_ms <= 0)) {
       handlePing()
