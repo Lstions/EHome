@@ -77,9 +77,8 @@
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>24小时数据趋势</span>
               <el-select v-model="trendCategory" size="small" style="width: 140px;">
-                <el-option label="温度" value="temperature" />
-                <el-option label="气压" value="pressure" />
-                <el-option label="湿度" value="humidity" />
+                <el-option label="风向" value="wind_direction" />
+                <el-option label="风速" value="wind_speed" />
               </el-select>
             </div>
           </template>
@@ -232,13 +231,12 @@ const wsStore = useWebSocketStore()
 
 // 趋势图相关
 const trendLoading = ref(false)
-const trendCategory = ref('temperature')
+const trendCategory = ref('wind_direction')
 const trendSeries = ref<any[]>([])
 const trendCategoryName = computed(() => {
   const map: Record<string, string> = {
-    temperature: '温度',
-    pressure: '气压',
-    humidity: '湿度'
+    wind_direction: '风向',
+    wind_speed: '风速'
   }
   return map[trendCategory.value] || trendCategory.value
 })
@@ -257,14 +255,12 @@ const fetchTrendData = async () => {
     const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
 
     const unitMap: Record<string, string> = {
-      temperature: '°C',
-      pressure: 'hPa',
-      humidity: '%'
+      wind_direction: '°',
+      wind_speed: 'm/s'
     }
     const nameMap: Record<string, string> = {
-      temperature: '温度',
-      pressure: '气压',
-      humidity: '湿度'
+      wind_direction: '风向',
+      wind_speed: '风速'
     }
 
     // 从概览数据中获取设备列表，逐个查询
@@ -284,11 +280,15 @@ const fetchTrendData = async () => {
           start_time: startTime.toISOString(),
           end_time: endTime.toISOString()
         }
-      }).then(res => ({
-        deviceId,
-        deviceName: overview.value.latest_data?.find(d => d.device_id === deviceId)?.device_name || `设备${deviceId}`,
-        data: res.data || []
-      }))
+      }).then(res => {
+        // response interceptor unwraps response.data, so `res` is the raw array
+        const arr = Array.isArray(res) ? res : (res as any)?.data || []
+        return {
+          deviceId,
+          deviceName: overview.value.latest_data?.find(d => d.device_id === deviceId)?.device_name || `设备${deviceId}`,
+          data: arr
+        }
+      })
     )
 
     const results = await Promise.all(promises)

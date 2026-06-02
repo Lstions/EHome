@@ -125,4 +125,43 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		c.JSON(http.StatusOK, data)
 	})
+
+	// Historical unified data for trend charts (Dashboard)
+	// GET /api/v1/unified-data/historical?device_pk=1&category=wind_direction&start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z
+	v1.GET("/unified-data/historical", func(c *gin.Context) {
+		devicePKStr := c.Query("device_pk")
+		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			return
+		}
+
+		sensorName := c.Query("category")
+		if sensorName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "category parameter required"})
+			return
+		}
+
+		startStr := c.Query("start_time")
+		endStr := c.Query("end_time")
+		if startStr == "" || endStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time required"})
+			return
+		}
+
+		startTime, err1 := time.Parse(time.RFC3339, startStr)
+		endTime, err2 := time.Parse(time.RFC3339, endStr)
+		if err1 != nil || err2 != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid time format (RFC3339 expected)"})
+			return
+		}
+
+		var data []models.UnifiedData
+		db.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+			devicePK, sensorName, startTime, endTime).
+			Order("timestamp ASC").
+			Find(&data)
+
+		c.JSON(http.StatusOK, data)
+	})
 }

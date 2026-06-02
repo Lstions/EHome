@@ -47,14 +47,21 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 		deviceID, channelID, timestamp, sequence, requestID, errorCode, rawData)
 
 	// Dispatch to worker pool (non-blocking)
+	// Look up collector numeric ID (may be 0 if not found, but that's fine for fanout)
+	var collectorID uint
+	var collector models.Collector
+	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err == nil {
+		collectorID = collector.ID
+	}
 	job := dataReportJob{
-		deviceID:  deviceID,
-		channelID: channelID,
-		timestamp: timestamp,
-		sequence:  sequence,
-		rawData:   rawData,
-		errorCode: errorCode,
-		requestID: requestID,
+		deviceID:    deviceID,
+		collectorID: collectorID,
+		channelID:   channelID,
+		timestamp:   timestamp,
+		sequence:    sequence,
+		rawData:     rawData,
+		errorCode:   errorCode,
+		requestID:   requestID,
 	}
 
 	select {
@@ -100,6 +107,22 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 	// Publish to HomeAssistant
 	if m.ha != nil {
 		m.ha.PublishState(deviceID, sensorData)
+	}
+
+	// Broadcast parsed data via WebSocket for Dashboard real-time display
+	if m.wsHub != nil && len(sensorData) > 0 {
+		dataMap := make(map[string]interface{}, len(sensorData))
+		for _, sd := range sensorData {
+			dataMap[sd.Name] = sd.Value
+		}
+		m.wsHub.BroadcastEvent("data", map[string]interface{}{
+			"device_id":     device.ID,
+			"device_name":   device.Name,
+			"collector_id":  collectorID,
+			"channel_id":    channelID,
+			"data":          dataMap,
+			"collected_at":  time.Now().Format(time.RFC3339),
+		})
 	}
 
 	logger.Infof("[%s] Parsed %d sensors using driver %s", deviceID, len(sensorData), device.Type)

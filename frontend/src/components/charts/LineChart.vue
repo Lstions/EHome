@@ -124,9 +124,10 @@ const initChart = () => {
     : undefined
 
   const option: EChartsOption = {
-    title: { text: props.title, left: 'center' },
+    title: { text: props.title, left: 'center', textStyle: { fontFamily: "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif", fontSize: 14, fontWeight: 600 } },
     tooltip: {
       trigger: 'axis',
+      textStyle: { fontFamily: "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" },
       formatter: (params: any) => {
         if (!Array.isArray(params) || params.length === 0) return ''
         const time = params[0].name
@@ -137,12 +138,12 @@ const initChart = () => {
         return html
       }
     },
-    legend: multiSeries ? { top: 30 } : undefined,
+    legend: multiSeries ? { top: 30, textStyle: { fontFamily: "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" } } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
     xAxis: {
       type: 'category',
       data: getXAxisData(),
-      axisLabel: { rotate: 45, interval: 0 }
+      axisLabel: { rotate: 45, interval: 0, fontFamily: "'Noto Sans SC', sans-serif" }
     },
     yAxis: yAxisConfig || {
       type: 'value',
