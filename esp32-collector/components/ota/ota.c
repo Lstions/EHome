@@ -9,6 +9,9 @@
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
 #include "esp_partition.h"
+#if CONFIG_COLLECTOR_OTA_USE_HTTPS && CONFIG_COLLECTOR_OTA_VERIFY_CERT && CONFIG_COLLECTOR_OTA_CRT_BUNDLE
+#include "esp_crt_bundle.h"
+#endif
 #include <string.h>
 #include <ctype.h>
 
@@ -63,6 +66,49 @@ static bool validate_firmware(const char *expected_checksum, const uint8_t *comp
     return true;
 }
 
+/**
+ * @brief Build the esp_http_client_config_t based on Kconfig OTA security settings.
+ *
+ * - HTTPS + crt_bundle: uses Mozilla CA bundle (public Internet)
+ * - HTTPS + custom cert: embeds a CA PEM for private/self-signed servers
+ * - HTTPS + no verify: WARN log (not for production)
+ * - HTTP: WARN log (no encryption)
+ */
+static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg, const char *url)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->url = url;
+    cfg->timeout_ms = 10000;
+
+#if CONFIG_COLLECTOR_OTA_USE_HTTPS
+    #if CONFIG_COLLECTOR_OTA_VERIFY_CERT
+        #if CONFIG_COLLECTOR_OTA_CRT_BUNDLE
+            cfg->crt_bundle_attach = esp_crt_bundle_attach;
+            ESP_LOGI(TAG, "OTA HTTPS: verify with Mozilla CA bundle");
+        #elif CONFIG_COLLECTOR_OTA_CUSTOM_CERT
+            extern const uint8_t server_cert_pem_start[] asm("_binary_ca_pem_start");
+            extern const uint8_t server_cert_pem_end[]   asm("_binary_ca_pem_end");
+            cfg->cert_pem = (const char *)server_cert_pem_start;
+            ESP_LOGI(TAG, "OTA HTTPS: verify with custom CA cert (%d bytes)",
+                     (int)(server_cert_pem_end - server_cert_pem_start));
+        #endif
+        /*
+         * Set expected CN if configured (non-empty string).
+         * Kconfig default is "", so we check at runtime.
+         */
+        if (CONFIG_COLLECTOR_OTA_EXPECTED_CN[0] != '\0') {
+            cfg->common_name = CONFIG_COLLECTOR_OTA_EXPECTED_CN;
+            ESP_LOGI(TAG, "OTA HTTPS: expecting CN=%s", CONFIG_COLLECTOR_OTA_EXPECTED_CN);
+        }
+    #else
+        ESP_LOGW(TAG, "OTA HTTPS: certificate verification DISABLED - not for production");
+    #endif
+#else
+    ESP_LOGW(TAG, "OTA: using plain HTTP (no encryption)");
+#endif
+    return ESP_OK;
+}
+
 void ota_start(const char *ota_id, const char *url, const char *checksum, uint64_t size, const char *version)
 {
     (void)size;
@@ -76,12 +122,8 @@ void ota_start(const char *ota_id, const char *url, const char *checksum, uint64
     s_upgrading = true;
     ESP_LOGI(TAG, "Starting OTA: %s from %s", ota_id, url);
 
-    esp_http_client_config_t client_config = {
-        .url = url,
-        .cert_pem = NULL,
-        .timeout_ms = 10000,
-        .skip_cert_common_name_check = true,
-    };
+    esp_http_client_config_t client_config;
+    build_ota_http_config(&client_config, url);
 
     esp_https_ota_config_t ota_config = {
         .http_config = &client_config,

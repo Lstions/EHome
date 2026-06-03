@@ -107,9 +107,63 @@ config COLLECTOR_OTA_ALLOW_HTTP
         only be enabled for development/testing. In production, all OTA URLs
         must use HTTPS to prevent man-in-the-middle attacks.
 
+config COLLECTOR_OTA_USE_HTTPS
+    bool "Use HTTPS for OTA downloads"
+    default y
+    help
+        If enabled, OTA will use HTTPS protocol. Cert validation depends on
+        COLLECTOR_OTA_VERIFY_CERT and cert bundle settings.
+
+config COLLECTOR_OTA_VERIFY_CERT
+    bool "Verify server certificate"
+    default y
+    depends on COLLECTOR_OTA_USE_HTTPS
+    help
+        If enabled, validates server TLS certificate against the configured
+        trust anchors. Recommended for production.
+
+if COLLECTOR_OTA_VERIFY_CERT
+
+    choice COLLECTOR_OTA_TRUST_ANCHOR
+        prompt "TLS Trust Anchor Source"
+        default COLLECTOR_OTA_CRT_BUNDLE
+        help
+            Choose the trust anchor source for TLS validation.
+
+        config COLLECTOR_OTA_CRT_BUNDLE
+            bool "Use ESP-IDF x509 Certificate Bundle (Mozilla CA)"
+            help
+                Use ESP-IDF's built-in Mozilla CA bundle (suitable for
+                public Internet, requires CONFIG_ESP_CERTIFICATE_BUNDLE=y).
+
+        config COLLECTOR_OTA_CUSTOM_CERT
+            bool "Embed custom CA certificate (PEM)"
+            help
+                Use a custom CA certificate (for private CA / self-signed
+                in lab/private network).
+    endchoice
+
+    config COLLECTOR_OTA_CERT_PEM
+        string "Custom CA Certificate (PEM format)"
+        depends on COLLECTOR_OTA_CUSTOM_CERT
+        default ""
+        help
+            PEM-encoded CA certificate, including "-----BEGIN CERTIFICATE-----"
+            and "-----END CERTIFICATE-----".
+
+    config COLLECTOR_OTA_EXPECTED_CN
+        string "Expected Common Name (CN) for server cert"
+        default ""
+        help
+            If set, server certificate CN must match this string.
+            Leave empty to use the URL hostname as expected CN.
+
+endif
+
 config COLLECTOR_OTA_SERVER_CERT_PEM
-    string "Path to server CA certificate (PEM) for OTA pinning"
+    string "Path to server CA certificate (PEM) for OTA pinning (legacy)"
     default ""
+    depends on COLLECTOR_OTA_CUSTOM_CERT
     help
         Path to a PEM-encoded CA certificate file for HTTPS certificate pinning.
         The certificate will be embedded in the firmware binary.
@@ -122,6 +176,6 @@ config COLLECTOR_OTA_SERVER_CERT_PEM_EMPTY
     default y if COLLECTOR_OTA_SERVER_CERT_PEM = ""
     default n if COLLECTOR_OTA_SERVER_CERT_PEM != ""
 
-endmenu
+endmenu  # OTA Security
 
 endmenu
