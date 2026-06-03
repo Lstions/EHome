@@ -24,11 +24,17 @@ const (
 )
 
 // OtaProgress 状态码 (ESP→SVR, type=0x0B) — 与 docs §6.3 / protocol-spec.md 一致
+//
+// 当前 ESP32 实际只发 0/1/2/3 四个值, verifying 与 installing 阶段共用
+// status=1 (因为 ESP32 端 OTA_STAGE_VERIFYING/OTA_STAGE_APPLYING 都映射到
+// OTA_STATUS_INSTALLING)。WireVerifying=4 是 server 内部扩展, 允许未来
+// ESP32 升级时显式区分 verifying 和 installing 阶段。
 const (
 	WireDownloading = 0
 	WireInstalling  = 1
 	WireSuccess     = 2
 	WireFailed      = 3
+	WireVerifying   = 4 // server-side extension (future ESP32 升级使用)
 )
 
 // 终态集合
@@ -181,6 +187,10 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	switch status {
 	case WireDownloading:
 		task.Status = StatusDownloading
+	case WireVerifying:
+		// server-side extension: ESP32 未来可能显式发 verifying 状态
+		// (当前 OTA_STAGE_VERIFYING 在 ESP32 端映射为 OTA_STATUS_INSTALLING=1)
+		task.Status = StatusVerifying
 	case WireInstalling:
 		// downloading → installing (could also be after verifying, but that's a server-only state)
 		task.Status = StatusInstalling
@@ -195,8 +205,9 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 		}
 		task.CompletedAt = &now
 	default:
-		logger.Warnf("[%s] Unknown OtaProgress status code %d, ignoring", deviceID, status)
-		return
+		// Unknown wire code: log warning, keep current state (fail-open)
+		logger.Warnf("[%s] OtaProgress unknown wire code: %d (ota_id=%s)",
+			task.OtaID, status, taskID)
 	}
 
 	if wasActive && task.Status == StatusDownloading {
