@@ -7,6 +7,15 @@ const getStoredToken = (): string => {
   return localStorage.getItem('token') || sessionStorage.getItem('token') || ''
 }
 
+const getStoredUser = (): UserInfo | null => {
+  try {
+    const raw = localStorage.getItem('user') || sessionStorage.getItem('user')
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
 export type UserRole = 'admin' | 'operator' | 'viewer'
 
 export interface UserInfo {
@@ -24,11 +33,15 @@ const ROLE_LEVEL: Record<UserRole, number> = {
 }
 
 export const useUserStore = defineStore('user', {
-  state: () => ({
-    token: getStoredToken(),
-    userInfo: null as UserInfo | null,
-    isLoggedIn: !!getStoredToken(),
-  }),
+  state: () => {
+    const token = getStoredToken()
+    const user = getStoredUser()
+    return {
+      token,
+      userInfo: user,
+      isLoggedIn: !!token,
+    }
+  },
 
   getters: {
     role: (state): UserRole => state.userInfo?.role ?? 'viewer',
@@ -56,11 +69,13 @@ export const useUserStore = defineStore('user', {
       this.token = response.token
       this.userInfo = response.user as UserInfo
       this.isLoggedIn = true
-      if (rememberMe) {
-        localStorage.setItem('token', response.token)
-      } else {
-        sessionStorage.setItem('token', response.token)
-      }
+      const storage = rememberMe ? localStorage : sessionStorage
+      storage.setItem('token', response.token)
+      storage.setItem('user', JSON.stringify(response.user))
+      // 互斥另一份存储
+      const other = rememberMe ? sessionStorage : localStorage
+      other.removeItem('token')
+      other.removeItem('user')
       // 登录成功，清零失败计数
       clearAttempts()
     },
@@ -76,6 +91,8 @@ export const useUserStore = defineStore('user', {
       this.isLoggedIn = false
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
+      localStorage.removeItem('user')
+      sessionStorage.removeItem('user')
     },
   },
 })

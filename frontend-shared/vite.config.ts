@@ -35,6 +35,7 @@ export default defineConfig({
     strict: false,
     port: 5174,
     proxy: {
+      // baseURL 已含 /api/v1, 所以只代理根路径下的后端
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,

@@ -66,13 +66,26 @@ type Device struct {
 }
 
 // DeviceConfig 设备配置模板
+//
+// 与采集器级 ConfigTemplate (hex 读寄存器) 不同, DeviceConfig 是
+// 设备级元数据模板, 用于:
+//   - 创建设备时一键套用 (名称/描述/协议/硬件类型/参数/默认标志)
+//   - 团队共享"标准传感器配方" (如 10 个 BMP280 全部套同一模板)
+//
+// 前端字段对应: src/api/deviceConfig.ts
 type DeviceConfig struct {
-	ID              uint   `gorm:"primaryKey" json:"id"`
-	DeviceType      string `gorm:"size:32;not null;index" json:"device_type"`
-	ParserID        string `gorm:"size:32" json:"parser_id"`
-	ChannelTemplate string `gorm:"type:text" json:"channel_template"` // JSON
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	Name         string    `gorm:"size:128;not null;index" json:"name"`
+	Description  string    `gorm:"type:text" json:"description"`
+	DeviceType   string    `gorm:"size:64;not null;index" json:"device_type"`
+	Protocol     string    `gorm:"size:32" json:"protocol"`      // modbus / stream / custom
+	HardwareType string    `gorm:"size:32" json:"hardware_type"` // uart / i2c / spi / gpio / adc
+	ParserID     string    `gorm:"size:64" json:"parser_id"`
+	Config       string    `gorm:"type:text" json:"config"`     // JSON: 硬件参数 (baudrate/data_bits/...)
+	IsDefault    bool      `gorm:"default:false;index" json:"is_default"`
+	Status       string    `gorm:"size:20;default:active" json:"status"` // active / inactive
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // DeviceData 原始数据

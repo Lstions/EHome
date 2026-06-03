@@ -330,7 +330,42 @@
           <el-icon><InfoFilled /></el-icon>
           <span>选择此设备使用的<strong>解析器</strong>，解析器负责将原始字节转换为物理量</span>
         </div>
-        
+
+        <!-- 使用配置模板（可选） -->
+        <el-card shadow="never" class="template-quick-pick" v-if="availableTemplates.length > 0">
+          <div class="template-pick-row">
+            <div class="template-pick-label">
+              <el-icon><Document /></el-icon>
+              <span>使用配置模板（可选）</span>
+            </div>
+            <el-select
+              v-model="selectedTemplateId"
+              placeholder="选一个模板可自动套用设备类型与推荐解析器"
+              clearable
+              filterable
+              style="flex: 1;"
+              @change="onTemplateSelected"
+            >
+              <el-option
+                v-for="t in availableTemplates"
+                :key="t.id"
+                :label="`${t.name}  (${t.device_type} / ${t.hardware_type?.toUpperCase()})${t.is_default ? ' ⭐' : ''}`"
+                :value="t.id"
+              >
+                <div class="template-option-row">
+                  <span class="tpl-name">{{ t.name }}</span>
+                  <el-tag v-if="t.is_default" type="success" size="small">默认</el-tag>
+                  <el-tag size="small" type="info">{{ t.hardware_type?.toUpperCase() }}</el-tag>
+                </div>
+              </el-option>
+            </el-select>
+          </div>
+          <el-alert v-if="selectedTemplate" :closable="false" type="success" show-icon style="margin-top: 8px;">
+            已套用模板: <strong>{{ selectedTemplate.name }}</strong>
+            (设备类型 <code>{{ selectedTemplate.device_type }}</code> · 硬件 <code>{{ selectedTemplate.hardware_type?.toUpperCase() }}</code>)
+          </el-alert>
+        </el-card>
+
         <!-- 解析器选择卡片 -->
         <div class="parser-select-list">
           <div
@@ -511,7 +546,8 @@ import { useRouter } from 'vue-router'
 import { 
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid, 
   Plus, View, Edit, Delete, InfoFilled, Check, Warning,
-  Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download
+  Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download,
+  Document
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useCollectorStore } from '@/stores/collector'
@@ -519,6 +555,7 @@ import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
 import { deviceApi } from '@/api/device'
 import { channelApi } from '@/api/channel'
+import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import client from '@/api/client'
 import type { Channel } from '@/api/channel'
 import type { Parser } from '@/api/parser'
@@ -558,6 +595,45 @@ const createStep = ref(0)
 const selectedParser = ref<Parser | null>(null)
 const selectedChannel = ref<Channel | null>(null)
 const channelTab = ref('existing')
+
+// 模板选择 (Step 0 可选)
+const availableTemplates = ref<DeviceConfig[]>([])
+const selectedTemplateId = ref<number | null>(null)
+const selectedTemplate = computed(() =>
+  availableTemplates.value.find((t) => t.id === selectedTemplateId.value) || null,
+)
+
+// 加载配置模板 (Step 0)
+const loadTemplates = async () => {
+  try {
+    const res = await deviceConfigApi.getList({ page_size: 100 })
+    availableTemplates.value = res.list || []
+  } catch {
+    availableTemplates.value = []
+  }
+}
+
+// 选模板后: 预填表单 + 尝试自动选解析器
+const onTemplateSelected = async (templateId: number | undefined | null) => {
+  if (!templateId) {
+    return
+  }
+  const tpl = availableTemplates.value.find((t) => t.id === templateId)
+  if (!tpl) return
+  // 预填设备类型 / 硬件类型 / 协议
+  deviceForm.device_type = tpl.device_type
+  deviceForm.hardware_type = (tpl.hardware_type as any) || 'uart'
+  deviceForm.protocol = (tpl.protocol as any) || 'modbus'
+  // 尝试自动选解析器 (用 parser_id 匹配)
+  if (tpl.parser_id && availableParsers.value.length > 0) {
+    const matched = availableParsers.value.find(
+      (p: Parser) => p.id === tpl.parser_id || p.id?.endsWith(tpl.parser_id || ''),
+    )
+    if (matched) {
+      selectParser(matched)
+    }
+  }
+}
 
 // 编辑设备ID
 const editingDeviceId = ref<number | null>(null)
@@ -1083,6 +1159,7 @@ onMounted(() => {
   fetchCollectors()
   channelStore.fetchChannels()
   parserStore.fetchParsers()
+  loadTemplates()
 })
 </script>
 
@@ -1091,6 +1168,37 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.template-quick-pick {
+  margin-bottom: 16px;
+  border: 1px dashed #d9d9d9;
+  background: #fafbfc;
+}
+.template-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.template-pick-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: #606266;
+  white-space: nowrap;
+}
+.template-option-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.template-option-row .tpl-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 统计 */

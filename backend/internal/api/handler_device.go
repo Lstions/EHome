@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -17,6 +18,217 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var devices []models.Device
 		db.Find(&devices)
 		c.JSON(http.StatusOK, devices)
+	})
+
+	// ============================================================
+	// DeviceConfig 设备级配置模板 (前端 src/api/deviceConfig.ts)
+	// ============================================================
+	//
+	// 与采集器级 ConfigTemplate (hex 读寄存器) 不同, 本组端点管理
+	// 设备级元数据模板: 名称/描述/协议/硬件类型/参数/默认标志, 用于
+	// 创建设备时一键套用。
+	//
+	// 端点清单:
+	//   GET    /api/v1/device-configs                      → 列表 (分页 + 过滤)
+	//   GET    /api/v1/device-configs/:id                  → 详情
+	//   POST   /api/v1/device-configs                      → 创建
+	//   PUT    /api/v1/device-configs/:id                  → 更新
+	//   DELETE /api/v1/device-configs/:id                  → 删除
+	//   GET    /api/v1/device-configs/default/:device_type → 取该类型默认模板
+	//   POST   /api/v1/device-configs/:id/default          → 标记为默认
+
+	// List device-config templates (paginated + filterable)
+	v1.GET("/device-configs", func(c *gin.Context) {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
+		q := db.Model(&models.DeviceConfig{})
+		if dt := c.Query("device_type"); dt != "" {
+			q = q.Where("device_type = ?", dt)
+		}
+		if ht := c.Query("hardware_type"); ht != "" {
+			q = q.Where("hardware_type = ?", ht)
+		}
+		if st := c.Query("status"); st != "" {
+			q = q.Where("status = ?", st)
+		}
+		var total int64
+		q.Count(&total)
+		var items []models.DeviceConfig
+		if err := q.Order("is_default DESC, id DESC").
+			Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200, "message": "ok",
+			"data": gin.H{"list": items, "total": total, "page": page, "page_size": pageSize},
+		})
+	})
+
+	// Get device-config detail
+	v1.GET("/device-configs/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var tpl models.DeviceConfig
+		if err := db.First(&tpl, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+	})
+
+	// Create device-config template
+	v1.POST("/device-configs", func(c *gin.Context) {
+		var tpl models.DeviceConfig
+		if err := c.ShouldBindJSON(&tpl); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		// 服务端兜底: 必填字段
+		if tpl.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "name is required"})
+			return
+		}
+		if tpl.DeviceType == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "device_type is required"})
+			return
+		}
+		if tpl.HardwareType == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "hardware_type is required"})
+			return
+		}
+		if tpl.Status == "" {
+			tpl.Status = "active"
+		}
+		// 若标记为默认, 取消同 device_type 的其他默认
+		if tpl.IsDefault {
+			db.Model(&models.DeviceConfig{}).
+				Where("device_type = ? AND is_default = ?", tpl.DeviceType, true).
+				Update("is_default", false)
+		}
+		if err := db.Create(&tpl).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
+	})
+
+	// Update device-config template
+	v1.PUT("/device-configs/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		var tpl models.DeviceConfig
+		if err := db.First(&tpl, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		var update models.DeviceConfig
+		if err := c.ShouldBindJSON(&update); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		update.ID = tpl.ID
+		if update.Name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "name is required"})
+			return
+		}
+		if update.DeviceType == "" {
+			update.DeviceType = tpl.DeviceType
+		}
+		if update.HardwareType == "" {
+			update.HardwareType = tpl.HardwareType
+		}
+		// 若标记为默认, 取消同 device_type 的其他默认
+		if update.IsDefault {
+			db.Model(&models.DeviceConfig{}).
+				Where("device_type = ? AND id <> ? AND is_default = ?", update.DeviceType, tpl.ID, true).
+				Update("is_default", false)
+		}
+		if err := db.Save(&update).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
+	})
+
+	// Delete device-config template
+	v1.DELETE("/device-configs/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		if err := db.Delete(&models.DeviceConfig{}, id).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+	})
+
+	// Get default device-config for a device_type
+	// - 优先返回 is_default=true 的
+	// - 没有默认则返回最近创建的一条 active 模板
+	// - 都没有则 404 + data:null (前端兼容)
+	v1.GET("/device-configs/default/:device_type", func(c *gin.Context) {
+		dt := c.Param("device_type")
+		var tpl models.DeviceConfig
+		// 1. 找 is_default
+		err := db.Where("device_type = ? AND is_default = ? AND status = ?", dt, true, "active").
+			Order("id DESC").First(&tpl).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		// 2. 兜底: 任意 active
+		if tpl.ID == 0 {
+			err = db.Where("device_type = ? AND status = ?", dt, "active").
+				Order("id DESC").First(&tpl).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "no default config for device_type", "data": nil})
+				return
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+	})
+
+	// Mark a device-config as default (取消同 device_type 的其他默认)
+	v1.POST("/device-configs/:id/default", func(c *gin.Context) {
+		id := c.Param("id")
+		var tpl models.DeviceConfig
+		if err := db.First(&tpl, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		// 事务: 取消同 device_type 的其他默认, 设当前为默认
+		err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.DeviceConfig{}).
+				Where("device_type = ? AND id <> ? AND is_default = ?", tpl.DeviceType, tpl.ID, true).
+				Update("is_default", false).Error; err != nil {
+				return err
+			}
+			return tx.Model(&tpl).Update("is_default", true).Error
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
 	// Create device
@@ -125,128 +337,6 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusCreated, ch)
 	})
 
-	// List config templates (optionally filter by collector_id and paginate)
-	// - GET /api/v1/device-configs                                → all templates
-	// - GET /api/v1/device-configs?collector_id=1&page_size=100   → filtered
-	// Returns the envelope { code: 200, message: "", data: { items, total, page, page_size } }
-	// so the front-end axios response interceptor can unwrap it.
-	v1.GET("/device-configs", func(c *gin.Context) {
-		q := db.Model(&models.ConfigTemplate{})
-		if cid := c.Query("collector_id"); cid != "" {
-			q = q.Where("collector_id = ?", cid)
-		}
-		var total int64
-		q.Count(&total)
-		// Pagination (defaults: page=1, page_size=20)
-		page := 1
-		pageSize := 20
-		if v, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil && v > 0 {
-			page = v
-		}
-		if v, err := strconv.Atoi(c.DefaultQuery("page_size", "20")); err == nil && v > 0 {
-			pageSize = v
-		}
-		var items []models.ConfigTemplate
-		if err := q.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data": gin.H{
-				"items":     items,
-				"total":     total,
-				"page":      page,
-				"page_size": pageSize,
-			},
-		})
-	})
-
-	// Get config template detail
-	v1.GET("/device-configs/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var tpl models.ConfigTemplate
-		if err := db.First(&tpl, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "config template not found"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
-	})
-
-	// Create config template
-	v1.POST("/device-configs", func(c *gin.Context) {
-		var tpl models.ConfigTemplate
-		if err := c.ShouldBindJSON(&tpl); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-			return
-		}
-		if err := db.Create(&tpl).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
-	})
-
-	// Update config template
-	v1.PUT("/device-configs/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var tpl models.ConfigTemplate
-		if err := db.First(&tpl, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "config template not found"})
-			return
-		}
-		var update models.ConfigTemplate
-		if err := c.ShouldBindJSON(&update); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-			return
-		}
-		update.ID = tpl.ID
-		if err := db.Save(&update).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
-	})
-
-	// Delete config template
-	v1.DELETE("/device-configs/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		if err := db.Delete(&models.ConfigTemplate{}, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
-	})
-
-	// Get default config template for a device type
-	// - GET /api/v1/device-configs/default/:device_type
-	v1.GET("/device-configs/default/:device_type", func(c *gin.Context) {
-		dt := c.Param("device_type")
-		var tpl models.ConfigTemplate
-		// Return most recently created template; in a real system this would
-		// be marked is_default. For now we return any matching template or empty.
-		err := db.Where("write_data LIKE ?", "%"+dt+"%").Order("id DESC").First(&tpl).Error
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "no default config for device_type"})
-			return
-		}
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
-	})
-
-	// Mark a config template as default (alias used by front-end forms)
-	v1.POST("/device-configs/:id/default", func(c *gin.Context) {
-		// For now this is a no-op alias; the mark-as-default logic is not yet
-		// implemented in the model. Return OK so the front-end call resolves.
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"id": c.Param("id"), "is_default": true}})
-	})
-
-	// Get a single channel
-	// - GET /api/v1/channels/:channel_id
 	v1.GET("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var ch models.Channel
