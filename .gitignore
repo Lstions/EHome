@@ -37,3 +37,6 @@ __pycache__/
 ehome-server-new
 ehome-server.old
 ehome-server-final
+
+# Legacy v1.x frontend (deleted 2026-06-03, archived in git history)
+frontend/
