@@ -1,7 +1,7 @@
 <template>
   <el-container class="main-layout">
-    <!-- 侧边栏 -->
-    <el-aside :width="sidebarWidth" class="sidebar">
+    <!-- 侧边栏 (桌面端) -->
+    <el-aside v-if="!isMobile" :width="sidebarWidth" class="sidebar">
       <!-- Logo 区域 -->
       <div class="logo-area" @click="router.push('/dashboard')">
         <div class="logo-icon">
@@ -34,13 +34,52 @@
       </div>
     </el-aside>
 
+    <!-- 侧边栏 (移动端抽层) -->
+    <el-drawer
+      v-if="isMobile"
+      v-model="mobileDrawerVisible"
+      direction="ltr"
+      :with-header="false"
+      size="240px"
+      class="mobile-sidebar-drawer"
+    >
+      <div class="logo-area" @click="router.push('/dashboard')">
+        <div class="logo-icon">
+          <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
+        </div>
+        <span class="logo-text">EHomeSystem</span>
+      </div>
+      <el-menu
+        :default-active="activeMenu"
+        router
+        class="sidebar-menu"
+        @select="mobileDrawerVisible = false"
+      >
+        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+          <el-icon><component :is="item.icon" /></el-icon>
+          <template #title>{{ item.title }}</template>
+        </el-menu-item>
+      </el-menu>
+    </el-drawer>
+
     <!-- 右侧容器 -->
     <el-container class="main-container">
       <!-- 顶部 Header -->
       <el-header class="main-header">
         <!-- 左侧：折叠按钮 + 面包屑 -->
         <div class="header-left">
+          <!-- 移动端用汉堡按钮 + 抽屉 -->
           <el-button
+            v-if="isMobile"
+            :icon="Menu"
+            circle
+            size="default"
+            class="collapse-btn"
+            @click="mobileDrawerVisible = true"
+          />
+          <!-- 桌面端用折叠按钮 -->
+          <el-button
+            v-else
             :icon="Fold"
             circle
             size="default"
@@ -171,6 +210,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { useRouter, useRoute } from 'vue-router'
 import {
   Odometer,
@@ -191,7 +231,7 @@ import {
   SuccessFilled,
   InfoFilled,
   Search,
-
+  Menu,
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useUIStore } from '@/stores/ui'
@@ -212,6 +252,10 @@ const searchQuery = ref('')
 
 // 平台检测
 const isMac = computed(() => /Mac/i.test(navigator.platform))
+
+// 响应式
+const { isMobile } = useResponsive()
+const mobileDrawerVisible = ref(false)
 
 // 菜单项（全部，含角色要求）
 const allMenuItems = [

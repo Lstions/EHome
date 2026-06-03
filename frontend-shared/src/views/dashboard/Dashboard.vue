@@ -69,18 +69,69 @@
       </el-row>
     </template>
 
+    <!-- 告警 / 异常摘要 -->
+    <el-row v-if="overview && (offlineDevices > 0 || offlineCollectors > 0 || dataErrorCount > 0)" :gutter="20" style="margin-top: 20px;">
+      <el-col :span="24">
+        <el-card shadow="hover" class="alert-summary">
+          <template #header>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <el-icon color="#e6a23c" :size="20"><WarningFilled /></el-icon>
+              <span>异常摘要</span>
+              <el-tag size="small" type="warning">需关注</el-tag>
+            </div>
+          </template>
+          <el-row :gutter="16">
+            <el-col v-if="offlineCollectors > 0" :span="8">
+              <div class="alert-item" @click="router.push('/collectors?status=offline')">
+                <el-icon color="#f56c6c" :size="28"><Connection /></el-icon>
+                <div>
+                  <div class="alert-value">{{ offlineCollectors }}</div>
+                  <div class="alert-label">离线采集器</div>
+                </div>
+              </div>
+            </el-col>
+            <el-col v-if="offlineDevices > 0" :span="8">
+              <div class="alert-item" @click="router.push('/devices?status=offline')">
+                <el-icon color="#f56c6c" :size="28"><Cpu /></el-icon>
+                <div>
+                  <div class="alert-value">{{ offlineDevices }}</div>
+                  <div class="alert-label">离线设备</div>
+                </div>
+              </div>
+            </el-col>
+            <el-col v-if="dataErrorCount > 0" :span="8">
+              <div class="alert-item" @click="router.push('/data')">
+                <el-icon color="#e6a23c" :size="28"><WarningFilled /></el-icon>
+                <div>
+                  <div class="alert-value">{{ dataErrorCount }}</div>
+                  <div class="alert-label">采集错误（近 1h）</div>
+                </div>
+              </div>
+            </el-col>
+          </el-row>
+        </el-card>
+      </el-col>
+    </el-row>
+
     <!-- 24h 趋势图表 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
         <el-card>
           <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>24小时数据趋势</span>
-              <el-select v-model="trendCategory" size="small" style="width: 140px;">
-                <el-option label="温度" value="temperature" />
-                <el-option label="气压" value="pressure" />
-                <el-option label="湿度" value="humidity" />
-              </el-select>
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+              <span>{{ trendRangeLabel }}趋势</span>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <el-radio-group v-model="trendRange" size="small" @change="fetchTrendData">
+                  <el-radio-button value="1h">1小时</el-radio-button>
+                  <el-radio-button value="24h">24小时</el-radio-button>
+                  <el-radio-button value="7d">7天</el-radio-button>
+                </el-radio-group>
+                <el-select v-model="trendCategory" size="small" style="width: 140px;">
+                  <el-option label="温度" value="temperature" />
+                  <el-option label="气压" value="pressure" />
+                  <el-option label="湿度" value="humidity" />
+                </el-select>
+              </div>
             </div>
           </template>
           <el-skeleton v-if="trendLoading" :rows="4" animated />
@@ -207,7 +258,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Cpu, CircleCheck, Refresh, Connection, TrendCharts } from '@element-plus/icons-vue'
+import { Cpu, CircleCheck, Refresh, Connection, TrendCharts, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -234,6 +285,11 @@ const wsStore = useWebSocketStore()
 const trendLoading = ref(false)
 const trendCategory = ref('temperature')
 const trendSeries = ref<any[]>([])
+const trendRange = ref<'1h' | '24h' | '7d'>('24h')
+const trendRangeLabel = computed(() => {
+  const map: Record<string, string> = { '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天' }
+  return map[trendRange.value] || ''
+})
 const trendCategoryName = computed(() => {
   const map: Record<string, string> = {
     temperature: '温度',
@@ -246,15 +302,27 @@ const trendCategoryName = computed(() => {
 // 状态时间线
 const statusTimeline = ref<any[]>([])
 
+// 告警摘要计算属性
+const offlineCollectors = computed(() => Math.max(0, (overview.value.collectors?.total || 0) - (overview.value.collectors?.online || 0)))
+const offlineDevices = computed(() => Math.max(0, (overview.value.devices?.total || 0) - (overview.value.devices?.online || 0)))
+const dataErrorCount = computed(() => {
+  return (overview.value.latest_data || []).filter(d => (d.error_code && d.error_code > 0)).length
+})
+
 let unsubscribeStatus: (() => void) | null = null
 let unsubscribeData: (() => void) | null = null
 
-// 获取 24h 趋势数据
+// 获取趋势数据
 const fetchTrendData = async () => {
   trendLoading.value = true
   try {
     const endTime = new Date()
-    const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000)
+    const rangeMs: Record<string, number> = {
+      '1h': 60 * 60 * 1000,
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+    }
+    const startTime = new Date(endTime.getTime() - (rangeMs[trendRange.value] || rangeMs['24h']))
 
     const unitMap: Record<string, string> = {
       temperature: '°C',
@@ -536,5 +604,40 @@ onUnmounted(() => {
   font-size: 12px;
   color: #909399;
   font-family: monospace;
+}
+
+.alert-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-color-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.alert-item:hover {
+  background: #fef0f0;
+  transform: translateX(2px);
+}
+.alert-value {
+  font-size: 22px;
+  font-weight: 600;
+  color: #f56c6c;
+  line-height: 1.2;
+}
+.alert-label {
+  font-size: 12px;
+  color: var(--text-color-secondary);
+  margin-top: 2px;
+}
+
+@media (max-width: 768px) {
+  :deep(.stat-card) {
+    margin-bottom: 8px;
+  }
+  :deep(.alert-item) {
+    margin-bottom: 8px;
+  }
 }
 </style>

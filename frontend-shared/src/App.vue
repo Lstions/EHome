@@ -1,7 +1,9 @@
 <template>
   <el-config-provider :locale="locale" :theme="theme">
-    <NetworkBanner />
-    <router-view />
+    <ErrorBoundary>
+      <NetworkBanner />
+      <router-view />
+    </ErrorBoundary>
   </el-config-provider>
 </template>
 
@@ -9,6 +11,7 @@
 import { computed, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
 import NetworkBanner from '@/components/common/NetworkBanner.vue'
 
 const themeStore = useThemeStore()

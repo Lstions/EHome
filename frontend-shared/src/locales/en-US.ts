@@ -1,0 +1,112 @@
+/**
+ * 国际化文案 - English (US)
+ *
+ * 镜像 src/locales/zh-CN.ts 的所有 key
+ * 暂时不完整，但已具备基础翻译能力
+ */
+
+export default {
+  common: {
+    appName: 'EHomeSystem',
+    confirm: 'Confirm',
+    cancel: 'Cancel',
+    save: 'Save',
+    delete: 'Delete',
+    edit: 'Edit',
+    create: 'Create',
+    search: 'Search',
+    reset: 'Reset',
+    refresh: 'Refresh',
+    export: 'Export',
+    import: 'Import',
+    loading: 'Loading...',
+    noData: 'No data',
+    success: 'Success',
+    failed: 'Failed',
+    deleteConfirm: 'Confirm delete? This action cannot be undone.',
+    yes: 'Yes',
+    no: 'No',
+    on: 'On',
+    off: 'Off',
+    enabled: 'Enabled',
+    disabled: 'Disabled',
+  },
+  menu: {
+    dashboard: 'Dashboard',
+    collectors: 'Collectors',
+    devices: 'Devices',
+    data: 'Data Panel',
+    firmware: 'Firmware',
+    deviceConfigs: 'Config Templates',
+    monitor: 'Monitor',
+  },
+  role: {
+    admin: 'Admin',
+    operator: 'Operator',
+    viewer: 'Viewer',
+  },
+  device: {
+    status: {
+      online: 'Online',
+      offline: 'Offline',
+      unknown: 'Unknown',
+    },
+    type: {
+      wind_speed: 'Wind Speed',
+      wind_direction: 'Wind Direction',
+      rain: 'Rain Gauge',
+      light: 'Light Sensor',
+      temp_humidity: 'Temp & Humidity',
+      battery: 'Battery BMS',
+      inverter: 'PV Inverter',
+      bmp280: 'BMP280',
+      sht40: 'SHT40',
+    },
+    protocol: {
+      modbus: 'MODBUS',
+      stream: 'Stream',
+      custom: 'Custom',
+    },
+    hardware: {
+      uart: 'UART',
+      i2c: 'I2C',
+      spi: 'SPI',
+      gpio: 'GPIO',
+      adc: 'ADC',
+    },
+  },
+  error: {
+    notFound: 'Page Not Found',
+    notFoundDesc: 'The page you visited has been removed, renamed, or is temporarily unavailable.',
+    forbidden: 'Access Denied',
+    forbiddenDesc: 'Your account does not have permission to access this page.',
+    forbiddenHint: 'Please contact the administrator to adjust your role.',
+    backHome: 'Back to Home',
+    backPrev: 'Go Back',
+    relogin: 'Switch Account',
+  },
+  login: {
+    title: 'Sign in',
+    rememberMe: 'Remember me',
+    forgotPassword: 'Forgot password?',
+    submit: 'Sign in',
+    submitting: 'Signing in...',
+    lockout: 'Login locked. Try again in {seconds} seconds.',
+    failRemaining: 'Wrong credentials. {n} attempts remaining.',
+    locked: '{n} consecutive failures. Locked for {minutes} minutes.',
+  },
+  network: {
+    offline: 'Network disconnected',
+    reconnecting: 'Server connection lost. Reconnecting...',
+    retry: 'Retry',
+  },
+  feedback: {
+    createSuccess: 'Created',
+    updateSuccess: 'Updated',
+    deleteSuccess: 'Deleted',
+    saveSuccess: 'Saved',
+    exportSuccess: 'Exported',
+    importSuccess: 'Imported',
+    copySuccess: 'Copied',
+  },
+}

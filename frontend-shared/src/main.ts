@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import router from './router'
+import i18n from './locales'
 import App from './App.vue'
 import permissionDirective from '@/directives/permission'
 import { logger } from '@/utils/logger'
@@ -47,6 +48,7 @@ app.directive('permission', permissionDirective)
 
 app.use(createPinia())
 app.use(router)
+app.use(i18n)
 
 logger.info('应用挂载', { element: '#app' })
 app.mount('#app')
