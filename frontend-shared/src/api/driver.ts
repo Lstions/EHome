@@ -27,28 +27,55 @@ export interface DriverTreeNode {
 }
 
 // 后端返回格式: { code: 200, data: { tree: [...] }, message: "success" }
-interface ApiResponse<T> {
+interface ApiEnvelope<T> {
   code: number
   data: T
   message: string
 }
 
+interface DriverTreeEnvelope extends ApiEnvelope<{ tree: DriverTreeNode[] }> {}
+
+/** 统一拆信封，兼容后端两种返回形态 */
+function unwrap<T>(response: unknown, fallback: T): T {
+  if (response && typeof response === 'object') {
+    const r = response as { data?: unknown }
+    if (r.data !== undefined) {
+      // 形如 { code, data, message }
+      const inner = r.data as { data?: unknown }
+      if (inner && typeof inner === 'object' && 'data' in inner) {
+        return (inner.data as T) ?? fallback
+      }
+      return (r.data as T) ?? fallback
+    }
+  }
+  return fallback
+}
+
 // 获取驱动层级树
-export const getDriverTree = async (): Promise<DriverTreeNode[]> => {
-  const response = await client.get<any, ApiResponse<{ tree: DriverTreeNode[] }>>('/api/v1/drivers/tree')
-  return (response as any).data?.tree || []
+export async function getDriverTree(): Promise<DriverTreeNode[]> {
+  const response = await client.get<DriverTreeEnvelope>('/api/v1/drivers/tree')
+  return unwrap<DriverTreeNode[]>(response, [])
 }
 
 // 获取驱动列表（扁平）
-export const getDriverList = async (): Promise<DriverMeta[]> => {
-  const response = await client.get<any, ApiResponse<DriverMeta[]>>('/api/v1/drivers')
-  return (response as any).data
+export async function getDriverList(): Promise<DriverMeta[]> {
+  const response = await client.get<ApiEnvelope<DriverMeta[]>>('/api/v1/drivers')
+  return unwrap<DriverMeta[]>(response, [])
 }
 
 // 获取驱动详情
-export const getDriverDetail = async (type: string) => {
-  const response = await client.get<any, ApiResponse<any>>(`/api/v1/drivers/${encodeURIComponent(type)}`)
-  return (response as any).data
+export async function getDriverDetail(type: string): Promise<DriverMeta> {
+  const response = await client.get<ApiEnvelope<DriverMeta>>(`/api/v1/drivers/${encodeURIComponent(type)}`)
+  return unwrap<DriverMeta>(response, {} as DriverMeta)
+}
+
+// Cascader 选项类型
+export interface CascaderOption {
+  value: string
+  label: string
+  children?: CascaderOption[]
+  hardware_types?: string[]
+  description?: string
 }
 
 // 转换为 Cascader 格式
@@ -60,7 +87,7 @@ export const transformToCascaderOptions = (tree: DriverTreeNode[]): CascaderOpti
     const oemOption: CascaderOption = {
       value: oem.id,
       label: oem.name,
-      children: []
+      children: [],
     }
 
     if (oem.children) {
@@ -68,22 +95,23 @@ export const transformToCascaderOptions = (tree: DriverTreeNode[]): CascaderOpti
         const catOption: CascaderOption = {
           value: category.id,
           label: category.name,
-          children: []
+          children: [],
         }
 
         if (category.drivers) {
           for (const driver of category.drivers) {
-            catOption.children!.push({
+            const child: CascaderOption = {
               value: driver.type,
               label: driver.display_name,
               hardware_types: driver.hardware_types,
-              description: driver.description
-            } as any)
+              description: driver.description,
+            }
+            catOption.children?.push(child)
           }
         }
 
         if (catOption.children && catOption.children.length > 0) {
-          oemOption.children!.push(catOption)
+          oemOption.children?.push(catOption)
         }
       }
     }
@@ -115,19 +143,10 @@ export const flattenDrivers = (tree: DriverTreeNode[]): DriverLeaf[] => {
   return drivers
 }
 
-// Cascader 选项类型
-export interface CascaderOption {
-  value: string
-  label: string
-  children?: CascaderOption[]
-  hardware_types?: string[]
-  description?: string
-}
-
 export default {
   getDriverTree,
   getDriverList,
   getDriverDetail,
   transformToCascaderOptions,
-  flattenDrivers
+  flattenDrivers,
 }

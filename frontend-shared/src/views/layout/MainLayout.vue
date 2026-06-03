@@ -143,9 +143,9 @@
                   <el-icon><UserFilled /></el-icon>
                   <span>个人设置</span>
                 </el-dropdown-item>
-                <el-dropdown-item command="settings">
-                  <el-icon><Setting /></el-icon>
-                  <span>系统设置</span>
+                <el-dropdown-item v-if="userStore.isAdmin" command="users">
+                  <el-icon><UserFilled /></el-icon>
+                  <span>用户管理</span>
                 </el-dropdown-item>
                 <el-dropdown-item divided command="logout">
                   <el-icon><SwitchButton /></el-icon>
@@ -197,8 +197,9 @@ import { useUserStore } from '@/stores/user'
 import { useUIStore } from '@/stores/ui'
 import { useWebSocketStore } from '@/stores/websocket'
 import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notification as ApiNotification } from '@/api/notification'
-import { ElMessageBox, ElMessage } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
+import feedback from '@/utils/feedback'
 
 const router = useRouter()
 const route = useRoute()
@@ -334,9 +335,9 @@ const clearNotifications = async () => {
   try {
     await markAllAsRead()
     await fetchNotifications()
-    ElMessage.success('已全部标记为已读')
+    feedback.success('已全部标记为已读')
   } catch (error) {
-    ElMessage.error('标记已读失败')
+    feedback.handleError(error, '标记已读失败')
   }
 }
 
@@ -357,16 +358,19 @@ const handleNotificationClick = async (item: ApiNotification) => {
 // 用户菜单操作
 const handleCommand = async (command: string) => {
   if (command === 'logout') {
-    await ElMessageBox.confirm('确定要退出登录吗？', '提示', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning'
+    const ok = await feedback.confirmDanger('确定要退出登录吗？', {
+      title: '退出登录',
+      confirmText: '退出',
     })
+    if (!ok) return
     wsStore.disconnect()
-    userStore.logout()
+    await userStore.logout()
+    feedback.success('已退出登录')
     router.push('/login')
-  } else if (command === 'profile' || command === 'settings') {
-    ElMessage.info('功能开发中')
+  } else if (command === 'profile') {
+    router.push('/profile')
+  } else if (command === 'users') {
+    router.push('/admin/users')
   }
 }
 

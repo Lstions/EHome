@@ -36,7 +36,7 @@ export interface DeviceModel {
   protocol: string
   description: string
   parser_plugin: string
-  config_schema: Record<string, any>
+  config_schema: Record<string, unknown>
   enabled: boolean
   created_at: string
   updated_at: string

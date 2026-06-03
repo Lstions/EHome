@@ -40,9 +40,13 @@ export const useUserStore = defineStore('user', {
     /**
      * 判断当前用户是否拥有指定角色（含更高级角色）
      * 例: hasRole('operator') → admin 和 operator 都返回 true
+     * 未登录时一律返回 false
      */
     hasRole(): (role: UserRole) => boolean {
-      return (role: UserRole) => this.roleLevel <= ROLE_LEVEL[role]
+      return (role: UserRole) => {
+        if (!this.userInfo) return false
+        return this.roleLevel <= ROLE_LEVEL[role]
+      }
     },
   },
 

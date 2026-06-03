@@ -2,6 +2,17 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import type { UserRole } from '@/stores/user'
 
+declare module 'vue-router' {
+  interface RouteMeta {
+    requiresAuth?: boolean
+    title?: string
+    icon?: string
+    roles?: UserRole[]
+    hiddenInMenu?: boolean
+    hidden?: boolean
+  }
+}
+
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -71,6 +82,18 @@ const routes: RouteRecordRaw[] = [
         name: 'Monitor',
         component: () => import('@/views/monitor/Monitor.vue'),
         meta: { title: '系统监控', icon: 'DataAnalysis', roles: ['admin'] },
+      },
+      {
+        path: 'admin/users',
+        name: 'UserList',
+        component: () => import('@/views/admin/UserList.vue'),
+        meta: { title: '用户管理', icon: 'UserFilled', roles: ['admin'], hiddenInMenu: true },
+      },
+      {
+        path: 'profile',
+        name: 'Profile',
+        component: () => import('@/views/profile/Profile.vue'),
+        meta: { title: '个人设置', icon: 'Setting', hiddenInMenu: true },
       },
     ],
   },

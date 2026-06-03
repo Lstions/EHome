@@ -1,9 +1,9 @@
 import client from './client'
 
-// 数据源状态类型
+/** 数据源状态 */
 export type DataSourceStatus = 'active' | 'standby' | 'error' | 'disabled'
 
-// 数据源类型
+/** 数据源 */
 export interface DataSource {
   id: number
   device_id: number
@@ -17,10 +17,10 @@ export interface DataSource {
   max_fail_count: number
   last_success?: string
   last_failure?: string
-  config?: Record<string, any>
+  config?: Record<string, unknown>
   created_at: string
   updated_at: string
-  device?: any
+  device?: { id: number; name: string }
 }
 
 export interface CreateDataSourceRequest {
@@ -31,7 +31,7 @@ export interface CreateDataSourceRequest {
   priority?: number
   is_primary?: boolean
   max_fail_count?: number
-  config?: Record<string, any>
+  config?: Record<string, unknown>
 }
 
 export interface UpdateDataSourceRequest {
@@ -41,10 +41,10 @@ export interface UpdateDataSourceRequest {
   is_primary?: boolean
   max_fail_count?: number
   status?: DataSourceStatus
-  config?: Record<string, any>
+  config?: Record<string, unknown>
 }
 
-// 数据源健康记录
+/** 数据源健康记录 */
 export interface DataSourceHealth {
   id: number
   source_id: number
@@ -54,7 +54,7 @@ export interface DataSourceHealth {
   created_at: string
 }
 
-// 故障切换日志
+/** 故障切换日志 */
 export interface FailoverLog {
   id: number
   device_id: number
@@ -67,64 +67,46 @@ export interface FailoverLog {
   to_source?: DataSource
 }
 
-// 数据源API
+interface ListParams {
+  page?: number
+  page_size?: number
+  device_id?: number
+  category?: string
+  status?: DataSourceStatus
+}
+
 export const dataSourceApi = {
-  // 获取数据源列表
-  list(params?: {
-    page?: number
-    page_size?: number
-    device_id?: number
-    category?: string
-    status?: DataSourceStatus
-  }) {
-    return client.get<{ data: DataSource[]; total: number }>('/data-sources', { params })
+  list(params?: ListParams) {
+    return client.get<{ data: DataSource[]; total: number }>('/api/v1/data-sources', { params })
   },
-
-  // 获取数据源详情
   get(id: number) {
-    return client.get<{ data: DataSource }>(`/data-sources/${id}`)
+    return client.get<{ data: DataSource }>(`/api/v1/data-sources/${id}`)
   },
-
-  // 创建数据源
   create(data: CreateDataSourceRequest) {
-    return client.post<{ data: DataSource }>('/data-sources', data)
+    return client.post<{ data: DataSource }>('/api/v1/data-sources', data)
   },
-
-  // 更新数据源
   update(id: number, data: UpdateDataSourceRequest) {
-    return client.put<{ data: DataSource }>(`/data-sources/${id}`, data)
+    return client.put<{ data: DataSource }>(`/api/v1/data-sources/${id}`, data)
   },
-
-  // 删除数据源
   delete(id: number) {
-    return client.delete(`/data-sources/${id}`)
+    return client.delete(`/api/v1/data-sources/${id}`)
   },
-
-  // 激活数据源
   activate(id: number) {
-    return client.post(`/data-sources/${id}/activate`)
+    return client.post(`/api/v1/data-sources/${id}/activate`)
   },
-
-  // 停用数据源
   deactivate(id: number) {
-    return client.post(`/data-sources/${id}/deactivate`)
+    return client.post(`/api/v1/data-sources/${id}/deactivate`)
   },
-
-  // 重置数据源
   reset(id: number) {
-    return client.post(`/data-sources/${id}/reset`)
+    return client.post(`/api/v1/data-sources/${id}/reset`)
   },
-
-  // 获取数据源健康记录
   getHealth(id: number, limit?: number) {
-    return client.get<{ data: DataSourceHealth[] }>(`/data-sources/${id}/health`, {
+    return client.get<{ data: DataSourceHealth[] }>(`/api/v1/data-sources/${id}/health`, {
       params: { limit },
     })
   },
-
-  // 获取故障切换日志
   getFailoverLogs(deviceId: number, limit?: number) {
-    return client.get<{ data: FailoverLog[] }>(`/devices/${deviceId}/failover-logs`, {
+    return client.get<{ data: FailoverLog[] }>(`/api/v1/devices/${deviceId}/failover-logs`, {
       params: { limit },
     })
   },
