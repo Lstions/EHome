@@ -5,10 +5,10 @@
       <!-- Logo 区域 -->
       <div class="logo-area" @click="router.push('/dashboard')">
         <div class="logo-icon">
-          <el-icon :size="24"><HomeFilled /></el-icon>
+          <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
         </div>
         <transition name="fade">
-          <span v-if="!uiStore.sidebarCollapsed" class="logo-text">HomeStation</span>
+          <span v-if="!uiStore.sidebarCollapsed" class="logo-text">EHomeSystem</span>
         </transition>
       </div>
 
@@ -29,7 +29,7 @@
       <!-- 侧边栏底部 -->
       <div class="sidebar-footer">
         <div class="version-info" v-if="!uiStore.sidebarCollapsed">
-          <span>v1.1.0</span>
+          <span>v{{ appVersion }}</span>
         </div>
       </div>
     </el-aside>
@@ -212,17 +212,27 @@ const searchQuery = ref('')
 // 平台检测
 const isMac = computed(() => /Mac/i.test(navigator.platform))
 
-// 菜单项
-const menuItems = [
-  { path: '/dashboard', title: '仪表盘', icon: Odometer },
-  { path: '/collectors', title: '采集器', icon: Connection },
-  { path: '/devices', title: '设备', icon: Cpu },
-  { path: '/data', title: '数据面板', icon: DataLine },
-  { path: '/firmware', title: '固件管理', icon: Files },
-  { path: '/device-configs', title: '配置模板', icon: Setting },
-  { path: '/monitor', title: '系统监控', icon: DataAnalysis },
-
+// 菜单项（全部，含角色要求）
+const allMenuItems = [
+  { path: '/dashboard', title: '仪表盘', icon: Odometer, roles: undefined },
+  { path: '/collectors', title: '采集器', icon: Connection, roles: undefined },
+  { path: '/devices', title: '设备', icon: Cpu, roles: undefined },
+  { path: '/data', title: '数据面板', icon: DataLine, roles: undefined },
+  { path: '/firmware', title: '固件管理', icon: Files, roles: ['admin', 'operator'] as string[] },
+  { path: '/device-configs', title: '配置模板', icon: Setting, roles: ['admin', 'operator'] as string[] },
+  { path: '/monitor', title: '系统监控', icon: DataAnalysis, roles: ['admin'] as string[] },
 ]
+
+// 根据角色过滤菜单
+const menuItems = computed(() => {
+  const role = userStore.role
+  return allMenuItems.filter((item) => {
+    if (!item.roles) return true
+    return item.roles.includes(role)
+  })
+})
+
+const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.0.0')
 
 // 通知 - 从 API 获取
 const notifications = ref<ApiNotification[]>([])

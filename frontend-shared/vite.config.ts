@@ -1,14 +1,34 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // Element Plus 按需自动引入
+    AutoImport({
+      imports: ['vue', 'vue-router', 'pinia'],
+      resolvers: [ElementPlusResolver()],
+      dts: 'src/auto-imports.d.ts',
+    }),
+    Components({
+      resolvers: [
+        // 自动按需引入 Element Plus 组件和样式
+        ElementPlusResolver({ importStyle: 'css', dts: 'src/components.d.ts' }),
+      ],
+      // 自定义组件位置（项目内）
+      dirs: ['src/components'],
+      dts: 'src/components.d.ts',
+    }),
+  ],
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
   },
   server: {
     host: '0.0.0.0',
@@ -17,12 +37,26 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8080',
-        changeOrigin: true
+        changeOrigin: true,
       },
       '/ws': {
         target: 'ws://localhost:8080',
-        ws: true
-      }
-    }
-  }
+        ws: true,
+      },
+    },
+  },
+  build: {
+    // 提升主 chunk 体积阈值到 1.5MB（ECharts 部分按需引入后会远低于此）
+    chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      output: {
+        // ECharts / xterm / 业务通用 chunk 拆分
+        manualChunks(id) {
+          if (id.includes('node_modules/echarts/')) return 'echarts'
+          if (id.includes('node_modules/element-plus/')) return 'element'
+          if (id.includes('node_modules/vue/') || id.includes('node_modules/vue-router/') || id.includes('node_modules/pinia/')) return 'vue'
+        },
+      },
+    },
+  },
 })

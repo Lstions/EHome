@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#409eff"/>
+      <stop offset="100%" stop-color="#67c23a"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <!-- 房屋外轮廓 -->
+  <path d="M16 30 L32 16 L48 30 L48 48 L16 48 Z" fill="#ffffff" fill-opacity="0.95"/>
+  <!-- 门 -->
+  <rect x="28" y="36" width="8" height="12" fill="#409eff"/>
+  <!-- 数据波形 (IoT 感) -->
+  <path d="M20 26 L24 26 L26 22 L30 30 L34 24 L38 26 L44 26" stroke="#67c23a" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

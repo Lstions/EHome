@@ -5,7 +5,13 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { GaugeChart as GaugeChartSeries } from 'echarts/charts'
+import { TitleComponent, TooltipComponent } from 'echarts/components'
 import type { EChartsOption } from 'echarts/core'
+
+// Register required ECharts components for tree-shaking mode
+echarts.use([CanvasRenderer, GaugeChartSeries, TitleComponent, TooltipComponent])
 
 const props = withDefaults(defineProps<{
   value: number

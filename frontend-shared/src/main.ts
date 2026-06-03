@@ -1,47 +1,52 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import router from './router'
 import App from './App.vue'
-import '@/styles/theme.css'
+import permissionDirective from '@/directives/permission'
 import { logger } from '@/utils/logger'
+import { initLoginLockout } from '@/utils/loginLockout'
 
 // 初始化日志系统
 logger.info('应用启动', {
-  version: import.meta.env.VITE_APP_VERSION || '1.1.0',
-  mode: import.meta.env.MODE
+  version: import.meta.env.VITE_APP_VERSION || '2.0.0',
+  mode: import.meta.env.MODE,
+  name: import.meta.env.VITE_APP_NAME || 'EHomeSystem',
 })
 
-// 全局错误处理
+// 初始化登录锁定（清掉过期的锁定记录）
+initLoginLockout()
+
+// Element Plus 按需引入由 unplugin-vue-components/unplugin-auto-import 自动处理
+// 主题样式也由 autoImportCSS 注入
+// 这里只需要保留 dark 主题
+
 const app = createApp(App)
 
+// 全局错误处理
 app.config.errorHandler = (err, instance, info) => {
   logger.error('Vue错误', {
-    error: String(err),
+    error: err instanceof Error ? `${err.message}\n${err.stack}` : String(err),
     component: instance?.$options?.name || 'Unknown',
-    info
+    info,
   })
 }
 
 app.config.warnHandler = (msg, instance, trace) => {
+  // 抑制 Element Plus 已知警告（如重复组件名）
+  if (msg.includes('Duplicate' as any)) return
   logger.warn('Vue警告', {
     message: msg,
     component: instance?.$options?.name || 'Unknown',
-    trace
+    trace,
   })
 }
 
-// 注册所有 Element Plus 图标
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
-}
+// 注册自定义指令
+app.directive('permission', permissionDirective)
 
 app.use(createPinia())
 app.use(router)
-app.use(ElementPlus)
 
 logger.info('应用挂载', { element: '#app' })
 app.mount('#app')
