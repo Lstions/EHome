@@ -45,7 +45,7 @@ func (m *Manager) SendPing(deviceID string) error {
 		})
 	}
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -62,7 +62,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 		enc.EncodeVarint(4, uint64(readSize))
 	}
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -72,7 +72,7 @@ func (m *Manager) SendScanRequest(deviceID string, hardwareID uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("scan-%d", time.Now().Unix()))
 	enc.EncodeVarint(2, uint64(hardwareID))
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -82,7 +82,7 @@ func (m *Manager) SendQueryRequest(deviceID string, queryType uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("query-%d", time.Now().UnixMilli()))
 	enc.EncodeVarint(2, uint64(queryType))
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -92,7 +92,7 @@ func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint
 	enc.EncodeVarint(1, serverTime)
 	enc.EncodeVarint(2, uint64(features))
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -101,7 +101,7 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 	enc := frame.NewEncoder(frame.MsgConfigQuery)
 	enc.EncodeString(1, fmt.Sprintf("cfgq-%d", time.Now().UnixMilli()))
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -210,7 +210,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	enc.EncodeString(5, decision.SyncID)
 	enc.EncodeString(6, string(decision.Reason))
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 	} else {

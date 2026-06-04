@@ -137,7 +137,7 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 			dataMap[sd.Name] = sd.Value
 		}
 		payload := map[string]interface{}{
-			"device_id":      device.ID, // v2.1 字段名
+			"device_id":      device.ID, // v2.1 字段名 (保留兼容前端)
 			"edge_device_id": device.ID, // v2.2 新增 (同一值)
 			"device_name":    device.Name,
 			"collector_id":   collectorID, // v2.1 字段名

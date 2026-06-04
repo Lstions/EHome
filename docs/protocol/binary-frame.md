@@ -1,5 +1,17 @@
 # 二进制帧协议规范
 
+## v2.2 层级说明
+
+v2.2 引入三层模型:
+
+| 层级 | 概念 | 说明 |
+|------|------|------|
+| Node | 节点 | 物理边缘设备 (ESP32-C6/S3), MQTT 通信主体 |
+| EdgeDevice | 边缘设备 | Node + Channel + DeviceConfig 的实例化 |
+| DeviceConfig | 设备配置 | 设备型号的协议无关定义 |
+
+MQTT topic 使用 `nodes/{id}/up|down`, 不再使用 v2.1 的 `devices/{id}/up|down`。
+
 ## 帧格式
 
 ```

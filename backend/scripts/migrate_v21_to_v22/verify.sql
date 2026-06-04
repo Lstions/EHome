@@ -205,7 +205,7 @@ SELECT
   node_id,
   name,
   status,
-  mqtt_topic_format,
+  -- mqtt_topic_format removed
   created_at
 FROM nodes
 ORDER BY id

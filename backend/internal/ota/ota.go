@@ -130,7 +130,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	enc.EncodeVarint(4, firmware.SizeBytes)
 	enc.EncodeString(5, firmware.Version)
 
-	topic := mqtt.TopicForDevice(collector.NodeID)
+	topic := mqtt.TopicForNode(collector.NodeID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 

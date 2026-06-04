@@ -71,7 +71,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	m.mu.Unlock()
 
 	// Send the command
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
 		m.removeEntry(requestID)
 		return nil, fmt.Errorf("failed to publish: %w", err)

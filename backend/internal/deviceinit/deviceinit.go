@@ -97,7 +97,7 @@ func (o *Orchestrator) sendAndWait(deviceID string, channelID uint32, requestID 
 		enc.EncodeVarint(4, uint64(readSize))
 	}
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	if err := o.mqtt.Publish(topic, enc.Bytes()); err != nil {
 		return nil, fmt.Errorf("send failed: %w", err)
 	}

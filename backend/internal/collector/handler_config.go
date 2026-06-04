@@ -204,7 +204,7 @@ func (m *Manager) sendConfigManifest(deviceID string) {
 		enc.EncodeSubFrame(3, subEnc.Bytes())
 	}
 
-	topic := mqtt.TopicForDevice(deviceID)
+	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 	} else {

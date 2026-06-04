@@ -35,8 +35,8 @@ func Initialize(broker, user, password string) (*Client, error) {
 
 	c := &Client{client: client}
 
-	// Subscribe to all device topics
-	token := client.Subscribe("devices/+/up", 1, c.onMessage)
+	// Subscribe to all node upstream topics
+	token := client.Subscribe("nodes/+/up", 1, c.onMessage)
 	token.Wait()
 	if token.Error() != nil {
 		return nil, fmt.Errorf("subscribe: %w", token.Error())
@@ -75,7 +75,7 @@ func (c *Client) Close() {
 	c.client.Disconnect(250)
 }
 
-// TopicForDevice returns the down topic for a device
-func TopicForDevice(deviceID string) string {
-	return fmt.Sprintf("devices/%s/down", deviceID)
+// TopicForNode returns the down topic for a node
+func TopicForNode(nodeID string) string {
+	return fmt.Sprintf("nodes/%s/down", nodeID)
 }

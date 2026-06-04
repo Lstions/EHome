@@ -46,8 +46,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   config_sync_state     VARCHAR(20) DEFAULT 'unknown',
   last_sync_at          TIMESTAMPTZ,
   last_sync_id          VARCHAR(64),
-  -- v2.2 新增字段
-  mqtt_topic_format     VARCHAR(16) DEFAULT 'v2',  -- 'v1' (devices/{id}) 或 'v2' (nodes/{id})
+  -- v2.2 新增字段 (mqtt_topic_format removed: 产品未发布, 无需兼容)
   created_at            TIMESTAMPTZ DEFAULT NOW(),
   updated_at            TIMESTAMPTZ DEFAULT NOW(),
   deleted_at            TIMESTAMPTZ
@@ -98,7 +97,7 @@ BEGIN
       ping_latency_ms, mqtt_topic_up, mqtt_topic_down,
       wifi_ssid, wifi_rssi, free_heap_bytes, capabilities, hardware_info,
       config_epoch, last_manifest_id, config_sync_state, last_sync_at, last_sync_id,
-      mqtt_topic_format, created_at, updated_at, deleted_at
+      created_at, updated_at, deleted_at
     )
     SELECT
       id, 
@@ -125,7 +124,6 @@ BEGIN
       config_sync_state, 
       last_sync_at, 
       last_sync_id,
-      'v1',  -- v2.2 新增: 标记老节点用 v1 topic
       created_at, 
       updated_at,
       deleted_at
