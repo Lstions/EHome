@@ -279,7 +279,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
 
 /* === Send outgoing messages === */
 
-void msg_handler_send_hello(const char *device_id, const char *fw_version,
+void msg_handler_send_hello(const char *node_id, const char *fw_version,
                             const char *model, uint8_t channel_count)
 {
     uint8_t buf[384];
@@ -288,7 +288,8 @@ void msg_handler_send_hello(const char *device_id, const char *fw_version,
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_HELLO);
     
     /* v2.0 fields (1-4) */
-    frame_encode_string(&enc, 1, device_id);
+    /* field 1: node_id (was device_id in v2.1, value unchanged) */
+    frame_encode_string(&enc, 1, node_id);
     frame_encode_string(&enc, 2, fw_version);
     frame_encode_string(&enc, 3, model);
     frame_encode_varint(&enc, 4, channel_count);
@@ -303,7 +304,7 @@ void msg_handler_send_hello(const char *device_id, const char *fw_version,
     frame_encode_string(&enc, 8, "2.1");  /* protocol version */
     
     ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, proto=2.1",
-             device_id, fw_version, model, channel_count,
+             node_id, fw_version, model, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
              config_mgr_has_manifest());
     mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));

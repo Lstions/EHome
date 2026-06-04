@@ -45,8 +45,8 @@ bool mqtt_client_is_connected_impl(void);
 void mqtt_client_register_msg_cb(mqtt_msg_cb_t cb, void *ctx);
 void mqtt_client_register_state_cb(mqtt_state_cb_t cb, void *ctx);
 
-/* === Set device_id (for topic construction) === */
-void mqtt_client_set_device_id(const char *device_id);
+/* === Set node_id (for topic construction) === */
+void mqtt_client_set_node_id(const char *node_id);
 
 #ifdef __cplusplus
 }

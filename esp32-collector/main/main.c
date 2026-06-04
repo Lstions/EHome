@@ -27,7 +27,7 @@
 #define FIRMWARE_VERSION "2.1.0"
 
 /* Device ID from MAC address */
-static char s_device_id[32] = {0};
+static char s_node_id[32] = {0};
 static uint32_t s_uptime_sec = 0;
 static bool s_config_received = false;
 
@@ -41,7 +41,7 @@ const char *get_firmware_version(void)
 static void on_wifi_state(wifi_mgr_state_t state, void *ctx);
 static void on_mqtt_state(mqtt_client_state_t state, void *ctx);
 static void on_mqtt_msg(const char *topic, const uint8_t *data, size_t len, void *ctx);
-static void generate_device_id(void);
+static void generate_node_id(void);
 static void status_task(void *pvParameters);
 static void on_sync_send_hello(void);
 
@@ -59,7 +59,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     /* Generate device ID */
-    generate_device_id();
+    generate_node_id();
 
     /* Init components */
     config_mgr_init();
@@ -74,7 +74,7 @@ void app_main(void)
     wifi_mgr_register_state_cb(on_wifi_state, NULL);
     mqtt_client_register_state_cb(on_mqtt_state, NULL);
     mqtt_client_register_msg_cb(on_mqtt_msg, NULL);
-    mqtt_client_set_device_id(s_device_id);
+    mqtt_client_set_node_id(s_node_id);
 
     /* Initialize and start RGB LED */
     rgb_led_init(8);  /* GPIO8 = ESP32-C6 built-in RGB LED */
@@ -93,7 +93,7 @@ void app_main(void)
     /* v2.1: Periodic sync task */
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
 
-    ESP_LOGI(TAG, "Collector initialized, device_id=%s", s_device_id);
+    ESP_LOGI(TAG, "Collector initialized, node_id=%s", s_node_id);
 }
 
 /* === Callbacks === */
@@ -128,7 +128,7 @@ static void on_mqtt_state(mqtt_client_state_t state, void *ctx)
         
         for (int retry = 0; retry < HELLO_MAX_RETRIES && !hello_confirmed; retry++) {
             ESP_LOGI(TAG, "Sending Hello (attempt %d/%d)...", retry + 1, HELLO_MAX_RETRIES);
-            msg_handler_send_hello(s_device_id, FIRMWARE_VERSION, CONFIG_IDF_TARGET,
+            msg_handler_send_hello(s_node_id, FIRMWARE_VERSION, CONFIG_IDF_TARGET,
                                    config_mgr_get_active_channel_count());
             
             /* Wait for HelloAck */
@@ -184,11 +184,11 @@ static void on_mqtt_msg(const char *topic, const uint8_t *data, size_t len, void
 }
 
 /* === Helpers === */
-static void generate_device_id(void)
+static void generate_node_id(void)
 {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(s_device_id, sizeof(s_device_id), CONFIG_IDF_TARGET "_%02X%02X%02X%02X%02X%02X",
+    snprintf(s_node_id, sizeof(s_node_id), CONFIG_IDF_TARGET "_%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
@@ -208,6 +208,6 @@ static void status_task(void *pvParameters)
 /* v2.1: Callback for sync_manager to trigger Hello send */
 static void on_sync_send_hello(void)
 {
-    msg_handler_send_hello(s_device_id, FIRMWARE_VERSION, CONFIG_IDF_TARGET,
+    msg_handler_send_hello(s_node_id, FIRMWARE_VERSION, CONFIG_IDF_TARGET,
                            config_mgr_get_active_channel_count());
 }

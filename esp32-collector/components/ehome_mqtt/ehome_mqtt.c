@@ -17,7 +17,7 @@ static mqtt_msg_cb_t s_msg_cb = NULL;
 static void *s_msg_cb_ctx = NULL;
 static mqtt_state_cb_t s_state_cb = NULL;
 static void *s_state_cb_ctx = NULL;
-static char s_device_id[32] = {0};
+static char s_node_id[32] = {0};
 static char s_up_topic[64] = {0};
 static char s_down_topic[64] = {0};
 
@@ -40,7 +40,7 @@ void mqtt_client_start(void)
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = "mqtt://192.168.20.3:1883",
-        .credentials.client_id = s_device_id,
+        .credentials.client_id = s_node_id,
         .session.keepalive = 30,
     };
 
@@ -127,23 +127,23 @@ void mqtt_client_register_state_cb(mqtt_state_cb_t cb, void *ctx)
     s_state_cb_ctx = ctx;
 }
 
-void mqtt_client_set_device_id(const char *device_id)
+void mqtt_client_set_node_id(const char *node_id)
 {
-    strlcpy(s_device_id, device_id, sizeof(s_device_id));
+    strlcpy(s_node_id, node_id, sizeof(s_node_id));
     build_topics();
-    ESP_LOGI(TAG, "Device ID set: %s", s_device_id);
+    ESP_LOGI(TAG, "Node ID set: %s", s_node_id);
 }
 
 /* === Internal === */
 
 static void build_topics(void)
 {
-    if (s_device_id[0] != '\0') {
-        snprintf(s_up_topic, sizeof(s_up_topic), "devices/%s/up", s_device_id);
-        snprintf(s_down_topic, sizeof(s_down_topic), "devices/%s/down", s_device_id);
+    if (s_node_id[0] != '\0') {
+        snprintf(s_up_topic, sizeof(s_up_topic), "nodes/%s/up", s_node_id);
+        snprintf(s_down_topic, sizeof(s_down_topic), "nodes/%s/down", s_node_id);
     } else {
-        strlcpy(s_up_topic, "devices/unknown/up", sizeof(s_up_topic));
-        strlcpy(s_down_topic, "devices/unknown/down", sizeof(s_down_topic));
+        strlcpy(s_up_topic, "nodes/unknown/up", sizeof(s_up_topic));
+        strlcpy(s_down_topic, "nodes/unknown/down", sizeof(s_down_topic));
     }
 }
 
