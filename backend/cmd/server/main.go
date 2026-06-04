@@ -103,6 +103,22 @@ func main() {
 	collectorMgr := collector.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector)
 	go collectorMgr.Start()
 
+	// v2.1: Server startup push — push config to all online collectors (fixes G2)
+	go func() {
+		time.Sleep(5 * time.Second) // Wait for MQTT/Redis/DB to be ready
+		decisions := collectorMgr.SyncGate().OnServerStartup()
+		for _, d := range decisions {
+			if d.Action != collector.SyncActionNone {
+				collectorMgr.SendConfigManifestWithDecision(d)
+				logger.Infof("[sync_id=%s] Server-startup push: device=%s reason=%s",
+					d.SyncID, d.DeviceID, d.Reason)
+			}
+		}
+		if len(decisions) > 0 {
+			logger.Infof("Server-startup push complete: %d collectors notified", len(decisions))
+		}
+	}()
+
 	// Start offline detection loop (after collector manager is ready)
 	offlineDetector.Start()
 

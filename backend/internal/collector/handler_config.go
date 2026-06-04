@@ -14,6 +14,7 @@ import (
 )
 
 // handleConfigResult processes ConfigResult (type=0x05)
+// v2.1: also updates config_sync_state
 func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {
@@ -23,6 +24,10 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 
 	var manifestID string
 	var success bool
+
+	// v2.1 optional fields
+	var configEpoch uint64
+	var syncID string
 
 	for {
 		field, err := dec.NextField()
@@ -34,18 +39,26 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 			manifestID = frame.GetString(field)
 		case 2:
 			success = frame.GetBool(field)
+		case 3: // v2.1: config_epoch
+			configEpoch = frame.GetUint64(field)
+		case 4: // v2.1: sync_id
+			syncID = frame.GetString(field)
 		}
 	}
 
-	logger.Infof("[%s] ConfigResult: manifest=%s success=%v", deviceID, manifestID, success)
+	logger.Infof("[%s] ConfigResult: manifest=%s success=%v epoch=%d sync_id=%s",
+		deviceID, manifestID, success, configEpoch, syncID)
 
 	// Update collector config version
 	if success {
-		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
-			Updates(map[string]interface{}{
-				"config_version": manifestID,
-				"config_status":  "applied",
-			})
+		updates := map[string]interface{}{
+			"config_version": manifestID,
+			"config_status":  "applied",
+		}
+		if configEpoch > 0 {
+			updates["config_epoch"] = configEpoch
+		}
+		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).Updates(updates)
 	} else {
 		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
 			Update("config_status", "failed")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
@@ -40,6 +41,10 @@ type Manager struct {
 
 	// F7.6: Ping tracking for retry/timeout
 	pingTracker *PingTracker
+
+	// v2.1: Sync mechanism
+	eventBus *ConfigEventBus
+	syncGate *SyncGate
 }
 
 // NewManager creates a new collector manager
@@ -58,11 +63,24 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	mgr.otaMgr = ota.NewManager(db, mqttClient, wsHub)
 	mgr.pingTracker = NewPingTracker()
+
+	// v2.1: Initialize sync mechanism
+	epochGen := NewEpochGenerator(db)
+	if err := epochGen.Restore(); err != nil {
+		logger.Warnf("EpochGenerator restore failed: %v (will use time-based seed)", err)
+	}
+	mgr.eventBus = NewConfigEventBus(1024, epochGen)
+	mgr.syncGate = NewSyncGate(mgr, mgr.eventBus)
+
 	return mgr
 }
 
 func (m *Manager) Start() {
 	m.startWorkerPool()
+
+	// v2.1: Start SyncGate event consumer
+	m.syncGate.Start()
+
 	logger.Infof("Collector manager started")
 	<-m.stopCh
 	// Drain workers: close channel then wait
@@ -132,6 +150,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleQueryResponse(deviceID, payload)
 	case frame.MsgConfigReport:
 		m.handleConfigReport(deviceID, payload)
+	case frame.MsgConfigSyncReq:
+		m.handleConfigSyncRequest(deviceID, payload)
 	default:
 		logger.Infof("[%s] Unknown msg type: 0x%02X", deviceID, msgType)
 	}
@@ -163,6 +183,69 @@ func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
 			logger.Infof("[%s] Triggered device init: type=%s ch=%d", deviceID, dev.Type, dev.ChannelID)
 		}
 	}
+}
+
+// EventBus returns the ConfigEventBus for external access (e.g. API handlers)
+func (m *Manager) EventBus() *ConfigEventBus {
+	return m.eventBus
+}
+
+// SyncGate returns the SyncGate for external access (e.g. main.go startup)
+func (m *Manager) SyncGate() *SyncGate {
+	return m.syncGate
+}
+
+// BuildManifestID generates a new manifest ID for config sync.
+func (m *Manager) BuildManifestID() string {
+	return fmt.Sprintf("v2-%d", time.Now().UnixMilli())
+}
+
+// ConfigHashResult holds the result of a config hash calculation.
+type ConfigHashResult struct {
+	Hash       string
+	ManifestID string
+}
+
+// CalcConfigHashForDevice calculates the config hash and manifest ID for a device.
+func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
+	var collector models.Collector
+	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+		return ConfigHashResult{}
+	}
+
+	var templates []models.ConfigTemplate
+	m.db.Where("collector_id = ?", collector.ID).Find(&templates)
+	var channels []models.Channel
+	m.db.Where("collector_id = ?", collector.ID).Find(&channels)
+
+	hashData := m.buildHashData(templates, channels)
+	hash := m.hashMgr.CalcConfigHash(hashData, nil)
+	manifestID := collector.ConfigVersion
+	if manifestID == "" {
+		manifestID = "none"
+	}
+
+	return ConfigHashResult{Hash: hash, ManifestID: manifestID}
+}
+
+// GetDeviceIDByCollectorID resolves a collector ID to its device_id string.
+func (m *Manager) GetDeviceIDByCollectorID(collectorID uint) string {
+	var collector models.Collector
+	if err := m.db.First(&collector, collectorID).Error; err != nil {
+		return ""
+	}
+	return collector.DeviceID
+}
+
+// GetOnlineDeviceIDs returns device IDs of all online collectors.
+func (m *Manager) GetOnlineDeviceIDs() []string {
+	var collectors []models.Collector
+	m.db.Where("status = ?", "online").Find(&collectors)
+	ids := make([]string, 0, len(collectors))
+	for _, c := range collectors {
+		ids = append(ids, c.DeviceID)
+	}
+	return ids
 }
 
 // publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a collector

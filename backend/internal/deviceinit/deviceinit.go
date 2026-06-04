@@ -27,6 +27,10 @@ type Orchestrator struct {
 	mqtt   *mqtt.Client
 	mu     sync.RWMutex
 	cache  map[string]*InitState // device_type -> init state
+
+	// v2.1: response tracking for sendAndWait
+	pendingMu   sync.Mutex
+	pendingResp map[uint32]chan []byte // request_id -> response channel
 }
 
 // InitState tracks initialization progress for a device
@@ -41,9 +45,10 @@ type InitState struct {
 // NewOrchestrator creates a new device init orchestrator
 func NewOrchestrator(db *gorm.DB, mqttClient *mqtt.Client) *Orchestrator {
 	return &Orchestrator{
-		db:    db,
-		mqtt:  mqttClient,
-		cache: make(map[string]*InitState),
+		db:          db,
+		mqtt:        mqttClient,
+		cache:       make(map[string]*InitState),
+		pendingResp: make(map[uint32]chan []byte),
 	}
 }
 
@@ -68,6 +73,59 @@ func (o *Orchestrator) GetInitSequence(deviceType string) []Step {
 	}
 }
 
+// sendAndWait sends a WriteCommand and waits for the response with timeout.
+// v2.1: replaces time.Sleep with proper async wait (fixes G6).
+func (o *Orchestrator) sendAndWait(deviceID string, channelID uint32, requestID uint32, data []byte, readSize uint32, timeout time.Duration) ([]byte, error) {
+	// Register pending response channel
+	respCh := make(chan []byte, 1)
+	o.pendingMu.Lock()
+	o.pendingResp[requestID] = respCh
+	o.pendingMu.Unlock()
+
+	defer func() {
+		o.pendingMu.Lock()
+		delete(o.pendingResp, requestID)
+		o.pendingMu.Unlock()
+	}()
+
+	// Send WriteCommand
+	enc := frame.NewEncoder(frame.MsgWriteCmd)
+	enc.EncodeVarint(1, uint64(requestID))
+	enc.EncodeVarint(2, uint64(channelID))
+	enc.EncodeBytes(3, data)
+	if readSize > 0 {
+		enc.EncodeVarint(4, uint64(readSize))
+	}
+
+	topic := mqtt.TopicForDevice(deviceID)
+	if err := o.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		return nil, fmt.Errorf("send failed: %w", err)
+	}
+
+	// Wait for response or timeout
+	select {
+	case resp := <-respCh:
+		return resp, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout after %v", timeout)
+	}
+}
+
+// HandleWriteResponse routes a WriteResponse to the waiting sender.
+// Called by collector manager when a WriteResponse (0x07) is received.
+func (o *Orchestrator) HandleWriteResponse(requestID uint32, rawData []byte) {
+	o.pendingMu.Lock()
+	ch, ok := o.pendingResp[requestID]
+	o.pendingMu.Unlock()
+
+	if ok {
+		select {
+		case ch <- rawData:
+		default: // channel full, response already received or timed out
+		}
+	}
+}
+
 // InitDevice performs initialization for a device
 func (o *Orchestrator) InitDevice(deviceID string, channelID uint32, deviceType string) error {
 	steps := o.GetInitSequence(deviceType)
@@ -85,27 +143,26 @@ func (o *Orchestrator) InitDevice(deviceID string, channelID uint32, deviceType 
 	o.cache[deviceType] = state
 	o.mu.Unlock()
 
-	// Execute each step
+	// Execute each step using sendAndWait (v2.1: no more time.Sleep)
 	for i, step := range steps {
 		state.CurrentIdx = i
 		logger.Infof("[Init] %s: executing step %d/%d: %s", deviceID, i+1, len(steps), step.Name)
 
-		// Send WriteCommand
-		enc := frame.NewEncoder(frame.MsgWriteCmd)
-		enc.EncodeVarint(1, uint64(i+1)) // request_id
-		enc.EncodeVarint(2, uint64(channelID))
-		enc.EncodeBytes(3, step.Data)
-		if step.ReadSize > 0 {
-			enc.EncodeVarint(4, uint64(step.ReadSize))
+		requestID := uint32(i + 1)
+		rawData, err := o.sendAndWait(deviceID, channelID, requestID, step.Data, step.ReadSize, step.Timeout)
+		if err != nil {
+			logger.Warnf("[Init] %s: step %s failed: %v", deviceID, step.Name, err)
+			// Continue with next step on failure (best-effort init)
+			continue
 		}
 
-		topic := mqtt.TopicForDevice(deviceID)
-		if err := o.mqtt.Publish(topic, enc.Bytes()); err != nil {
-			return fmt.Errorf("init step %s failed: %w", step.Name, err)
+		// Store calibration data if applicable
+		if step.Name == "read_calib" && len(rawData) > 0 {
+			state.CalibData = rawData
+			o.saveCalibData(deviceID, deviceType, rawData)
 		}
 
-		// Wait for response (simplified - in real impl, would wait for WriteResponse)
-		time.Sleep(step.Timeout)
+		logger.Infof("[Init] %s: step %s completed, data=%x", deviceID, step.Name, rawData)
 	}
 
 	state.Completed = true

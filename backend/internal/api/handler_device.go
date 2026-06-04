@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"ehome/backend/internal/collector"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -12,7 +13,10 @@ import (
 )
 
 // registerDeviceRoutes sets up device + channel CRUD routes
-func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
+func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
+	// Get the EventBus for emitting config change events (v2.1)
+	eventBus := collectorMgr.EventBus()
+
 	// List devices
 	v1.GET("/devices", func(c *gin.Context) {
 		var devices []models.Device
@@ -277,30 +281,40 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1: Emit config change for the channel's collector
+		var ch models.Channel
+		if db.First(&ch, d.ChannelID).Error == nil {
+			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionUpdate, ch.CollectorID, d.ID)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
 	})
 
 	// Delete device
 	v1.DELETE("/devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		var d models.Device
+		if err := db.First(&d, id).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		// Find collector before deletion for event emission
+		var ch models.Channel
+		hasCollector := db.First(&ch, d.ChannelID).Error == nil
 		if err := db.Delete(&models.Device{}, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
+		}
+		// v2.1: Emit config change
+		if hasCollector {
+			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionDelete, ch.CollectorID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
 	// List channels (optionally filter by collector_id)
-	// - GET /api/v1/channels                  → all channels
-	// - GET /api/v1/channels?collector_id=1   → channels belonging to that collector (numeric id)
-	// Returns the envelope { code: 200, message: "", data: [...] } so the
-	// front-end axios response interceptor can unwrap it.
 	v1.GET("/channels", func(c *gin.Context) {
 		q := db.Model(&models.Channel{})
 		if cid := c.Query("collector_id"); cid != "" {
-			// collector_id may be either a numeric id or a device_id string.
-			// Match against Channel.CollectorID (numeric) when parseable, otherwise
-			// resolve through the collectors table.
 			if _, err := strconv.ParseUint(cid, 10, 64); err == nil {
 				q = q.Where("collector_id = ?", cid)
 			} else {
@@ -308,8 +322,6 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 				if err := db.Where("device_id = ?", cid).First(&col).Error; err == nil {
 					q = q.Where("collector_id = ?", col.ID)
 				} else {
-					// Unknown collector → return empty result rather than 404 so
-					// front-end skeletons resolve to "no data" instead of erroring.
 					c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []models.Channel{}})
 					return
 				}
@@ -334,6 +346,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		// v2.1: Emit config change for the collector
+		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.CollectorID, ch.ID)
 		c.JSON(http.StatusCreated, ch)
 	})
 
@@ -352,7 +366,6 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	})
 
 	// Update a channel
-	// - PUT /api/v1/channels/:channel_id
 	v1.PUT("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var ch models.Channel
@@ -369,20 +382,30 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1: Emit config change for the collector
+		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.CollectorID, ch.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
 	// Delete a channel
-	// - DELETE /api/v1/channels/:channel_id
 	v1.DELETE("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
+		var ch models.Channel
+		hasCollector := db.First(&ch, id).Error == nil
+		collectorID := ch.CollectorID
+		channelID := ch.ID
 		if err := db.Delete(&models.Channel{}, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1: Emit config change
+		if hasCollector {
+			collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, collectorID, channelID)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 }
+
 // parseUintID parses a uint from a string, returning 0 on error
 func parseUintID(s string) uint {
 	id, err := strconv.ParseUint(s, 10, 64)

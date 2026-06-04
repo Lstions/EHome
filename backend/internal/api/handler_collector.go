@@ -13,6 +13,9 @@ import (
 
 // registerCollectorRoutes sets up collector CRUD + data + ping routes
 func registerCollectorRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
+	// Get the EventBus for emitting config change events (v2.1)
+	eventBus := collectorMgr.EventBus()
+
 	// List collectors
 	v1.GET("/collectors", func(c *gin.Context) {
 		var collectors []models.Collector
@@ -45,6 +48,8 @@ func registerCollectorRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *col
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		// v2.1: Emit config change
+		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionCreate, col.ID, col.ID)
 		c.JSON(http.StatusCreated, col)
 	})
 
@@ -61,16 +66,21 @@ func registerCollectorRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *col
 			return
 		}
 		db.Save(&col)
+		// v2.1: Emit config change
+		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionUpdate, col.ID, col.ID)
 		c.JSON(http.StatusOK, col)
 	})
 
 	// Delete collector
 	v1.DELETE("/collectors/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		collectorID := parseUintID(id)
 		if err := db.Delete(&models.Collector{}, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		// v2.1: Emit config change
+		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionDelete, collectorID, collectorID)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 

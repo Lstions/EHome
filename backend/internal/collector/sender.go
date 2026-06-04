@@ -2,9 +2,13 @@ package collector
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
@@ -97,4 +101,123 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 
 	topic := mqtt.TopicForDevice(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
+}
+
+// SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.
+// The decision carries sync_id, epoch, manifest_id, and reason from SyncGate.
+func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
+	deviceID := decision.DeviceID
+
+	var collector models.Collector
+	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+		logger.Infof("[%s] Collector not found for config", deviceID)
+		return
+	}
+
+	var templates []models.ConfigTemplate
+	m.db.Where("collector_id = ?", collector.ID).Find(&templates)
+
+	var channels []models.Channel
+	m.db.Where("collector_id = ?", collector.ID).Find(&channels)
+
+	manifestID := decision.ManifestID
+	if manifestID == "" {
+		manifestID = fmt.Sprintf("v2-%d", time.Now().UnixMilli())
+	}
+
+	enc := frame.NewEncoder(frame.MsgConfigMfst)
+	enc.EncodeString(1, manifestID)
+
+	// v2.1: field 2 = config_epoch
+	enc.EncodeVarint(2, decision.Epoch)
+
+	// Encode templates (field 3, repeated sub-structure)
+	for _, tmpl := range templates {
+		subEnc := frame.SubEncoder()
+		subEnc.EncodeVarint(1, uint64(tmpl.ID))
+		if tmpl.WriteData != "" {
+			writeHex := tmpl.WriteData
+			if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
+				writeHex = writeHex[2:]
+			}
+			if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
+				subEnc.EncodeBytes(2, writeBytes)
+			}
+		}
+		if tmpl.ReadLength > 0 {
+			subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
+		}
+		if tmpl.DelayMs > 0 {
+			subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
+		}
+		enc.EncodeSubFrame(3, subEnc.Bytes())
+	}
+
+	// Encode channels (field 4, repeated sub-structure)
+	for _, ch := range channels {
+		subEnc := frame.SubEncoder()
+		subEnc.EncodeVarint(1, uint64(ch.ID))
+		subEnc.EncodeVarint(2, uint64(ch.HardwareID))
+
+		// Packed repeated template_ids (field 3)
+		if ch.TemplateIDs != "" {
+			for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
+				if id, err := strconv.ParseUint(strings.TrimSpace(idStr), 10, 32); err == nil {
+					subEnc.EncodeVarint(3, id)
+				}
+			}
+		}
+
+		subEnc.EncodeVarint(4, uint64(ch.IntervalMs))
+		subEnc.EncodeBool(5, ch.Enabled)
+
+		// Bus type
+		busTypeMap := map[string]uint8{
+			"UART": 1, "1": 1,
+			"I2C":  2, "2": 2,
+			"SPI":  3, "3": 3,
+			"GPIO": 4, "4": 4,
+			"ADC":  5, "5": 5,
+		}
+		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {
+			subEnc.EncodeVarint(6, uint64(bt))
+		}
+
+		// Bus config
+		busConfigData := ch.BusConfig
+		if busConfigData == "" {
+			busConfigData = ch.Config
+		}
+		if busConfigData != "" {
+			if strings.HasPrefix(busConfigData, "\\x") {
+				hexStr := busConfigData[2:]
+				if decoded, err := hex.DecodeString(hexStr); err == nil {
+					subEnc.EncodeBytes(7, decoded)
+				} else {
+					subEnc.EncodeString(7, busConfigData)
+				}
+			} else {
+				subEnc.EncodeString(7, busConfigData)
+			}
+		}
+
+		enc.EncodeSubFrame(4, subEnc.Bytes())
+	}
+
+	// v2.1: field 5 = sync_id, field 6 = sync_reason
+	enc.EncodeString(5, decision.SyncID)
+	enc.EncodeString(6, string(decision.Reason))
+
+	topic := mqtt.TopicForDevice(deviceID)
+	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
+	} else {
+		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s epoch=%d reason=%s %d templates, %d channels",
+			decision.SyncID, deviceID, manifestID, decision.Epoch, decision.Reason, len(templates), len(channels))
+
+		// Update DB with new manifest ID and mark as sent
+		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
+			Update("config_version", manifestID)
+		m.hashMgr.UpdateLastSent(deviceID)
+	}
 }

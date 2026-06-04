@@ -60,6 +60,7 @@ func AutoMigrate() error {
 		&models.DeviceModel{},
 		&models.CollectorEvent{},
 		&models.CalibrationCache{},
+		&models.ConfigMeta{}, // v2.1: epoch persistence
 	)
 }
 

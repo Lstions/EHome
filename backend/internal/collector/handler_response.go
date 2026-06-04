@@ -189,3 +189,50 @@ func (m *Manager) handleQueryResponse(deviceID string, payload []byte) {
 
 	logger.Infof("[%s] QueryRsp: request=%s success=%v err=%s", deviceID, requestID, success, errorMsg)
 }
+
+// handleConfigSyncRequest processes ConfigSyncRequest (type=0x13)
+// v2.1: device actively requests config sync.
+func (m *Manager) handleConfigSyncRequest(deviceID string, payload []byte) {
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		logger.Infof("[%s] Failed to decode ConfigSyncRequest: %v", deviceID, err)
+		return
+	}
+
+	var reason string
+	var currentEpoch uint64
+	var currentManifestID string
+
+	for {
+		field, err := dec.NextField()
+		if err != nil {
+			break
+		}
+		switch field.FieldNum {
+		case 1:
+			reason = frame.GetString(field)
+		case 2:
+			currentEpoch = frame.GetUint64(field)
+		case 3:
+			currentManifestID = frame.GetString(field)
+		}
+	}
+
+	logger.Infof("[%s] ConfigSyncRequest: reason=%s epoch=%d manifest=%s",
+		deviceID, reason, currentEpoch, currentManifestID)
+
+	q := &ConfigQueryMsg{
+		Reason:           reason,
+		CurrentEpoch:     currentEpoch,
+		CurrentManifestID: currentManifestID,
+	}
+
+	decision := m.syncGate.OnConfigQuery(deviceID, q)
+	if decision.Action == SyncActionFull {
+		logger.Infof("[sync_id=%s] ConfigSyncRequest push: device=%s reason=%s",
+			decision.SyncID, deviceID, decision.Reason)
+		m.SendConfigManifestWithDecision(decision)
+	} else {
+		logger.Infof("[sync_id=%s] ConfigSyncRequest skip: device=%s in_sync", decision.SyncID, deviceID)
+	}
+}

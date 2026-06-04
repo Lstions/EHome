@@ -37,6 +37,7 @@ const (
 	MsgConfigQuery  = 0x10
 	MsgConfigReport = 0x11
 	MsgHelloAck     = 0x12
+	MsgConfigSyncReq = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
 )
 
 // Field represents a decoded field
@@ -283,6 +284,7 @@ func MsgTypeName(msgType uint8) string {
 		MsgConfigQuery: "config_query",
 		MsgConfigReport: "config_report",
 		MsgHelloAck:    "hello_ack",
+		MsgConfigSyncReq: "config_sync_request",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

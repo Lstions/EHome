@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 )
 
 // handleHello processes Hello messages (type=0x01)
+// v2.1: parses 8 fields (4 new: config_epoch, nvs_has_config, last_manifest, protocol_version)
+// and routes through SyncGate for unified sync decision.
 func (m *Manager) handleHello(deviceID string, payload []byte) {
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {
@@ -20,6 +23,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 
 	var firmwareVersion, model string
 	var channelCount uint64
+
+	// v2.1 new fields (defaults for v2.0 compatibility)
+	var configEpoch uint64
+	var nvsHasConfig = true // default true for v2.0 firmware (they have config if they're sending Hello)
+	var lastManifest string
+	var protocolVersion = "2.0"
 
 	for {
 		field, err := dec.NextField()
@@ -33,10 +42,19 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 			model = frame.GetString(field)
 		case 4:
 			channelCount = frame.GetUint64(field)
+		case 5: // v2.1: config_epoch
+			configEpoch = frame.GetUint64(field)
+		case 6: // v2.1: nvs_has_config
+			nvsHasConfig = frame.GetBool(field)
+		case 7: // v2.1: last_manifest
+			lastManifest = frame.GetString(field)
+		case 8: // v2.1: protocol_version
+			protocolVersion = frame.GetString(field)
 		}
 	}
 
-	logger.Infof("[%s] Hello: fw=%s model=%s channels=%d", deviceID, firmwareVersion, model, channelCount)
+	logger.Infof("[%s] Hello: fw=%s model=%s channels=%d epoch=%d nvs=%v manifest=%s proto=%s",
+		deviceID, firmwareVersion, model, channelCount, configEpoch, nvsHasConfig, lastManifest, protocolVersion)
 
 	// Immediately send HelloAck (0x12) to confirm handshake
 	serverTime := uint64(time.Now().UnixMilli())
@@ -84,7 +102,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	}
 
 	// WebSocket push
-	m.wsHub.BroadcastEvent("collector_status", map[string]interface{}{
+	m.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
 		"device_id": deviceID,
 		"status":    "online",
 		"model":     model,
@@ -97,23 +115,24 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		m.otaMgr.HandleHelloOTACompletion(collector.ID, deviceID, firmwareVersion)
 	}
 
-	// Config hash check + 30s dedup window
-	var templates []models.ConfigTemplate
-	m.db.Where("collector_id = ?", collector.ID).Find(&templates)
-	var channels []models.Channel
-	m.db.Where("collector_id = ?", collector.ID).Find(&channels)
+	// === v2.1: SyncGate decision (replaces ad-hoc hash check) ===
+	helloMsg := &HelloMsg{
+		DeviceID:        deviceID,
+		FirmwareVersion: firmwareVersion,
+		Model:           model,
+		ChannelCount:    channelCount,
+		ConfigEpoch:     configEpoch,
+		NvsHasConfig:    nvsHasConfig,
+		LastManifest:    lastManifest,
+		ProtocolVersion: protocolVersion,
+	}
 
-	// Calculate hash from templates + channels data
-	hashData := m.buildHashData(templates, channels)
-	newHash := m.hashMgr.CalcConfigHash(hashData, nil)
-
-	// Check if config should be sent (hash changed or first time)
-	if m.hashMgr.ShouldSendConfig(deviceID, newHash) {
-		logger.Infof("[%s] Config hash changed or first time, sending ConfigManifest (hash=%s)", deviceID, newHash)
-		m.sendConfigManifest(deviceID)
-		m.hashMgr.UpdateLastSent(deviceID)
+	decision := m.syncGate.OnHello(deviceID, helloMsg)
+	if decision.Action == SyncActionFull {
+		logger.Infof("[sync_id=%s] Hello push: device=%s reason=%s", decision.SyncID, deviceID, decision.Reason)
+		m.SendConfigManifestWithDecision(decision)
 	} else {
-		logger.Infof("[%s] Config unchanged (hash=%s), skip ConfigManifest", deviceID, newHash)
+		logger.Infof("[sync_id=%s] Hello skip: device=%s reason=%s", decision.SyncID, deviceID, decision.Reason)
 	}
 
 	// offline→online detection: trigger device initialization

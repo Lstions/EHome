@@ -32,7 +32,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 	v1.Use(JWTAuth())
 	{
 		registerCollectorRoutes(v1, db, collectorMgr)
-		registerDeviceRoutes(v1, db)
+		registerDeviceRoutes(v1, db, collectorMgr)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
 		registerTerminalRoutes(v1, collectorMgr)
