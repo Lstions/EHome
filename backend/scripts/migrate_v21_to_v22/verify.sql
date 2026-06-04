@@ -4,10 +4,10 @@
 --   psql -h localhost -U postgres -d ehome -f verify.sql
 --
 -- 预期结果:
---   - collectors count = nodes count (数据完整迁移)
---   - devices count = edge_devices count
+--   - nodes count = collectors count (数据完整迁移, 如果老表存在)
+--   - edge_devices count = devices count (如果老表存在)
 --   - channels with node_id IS NULL = 0 (FK 完整)
---   - edge_devices with device_config_id = 0 应该接近 0 (Type 字段成功猜到 device_config)
+--   - edge_devices with device_config_id = 0 应该接近 0
 --
 -- 版本: v2.2 (2026-06-04)
 -- 作者: Phase 2A-2 DB Migration
@@ -25,26 +25,10 @@
 \echo '-------------------'
 
 SELECT 
-  'collectors (v2.1)' AS table_name,
-  COUNT(*) AS total_rows,
-  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
-FROM collectors
-
-UNION ALL
-
-SELECT 
   'nodes (v2.2)' AS table_name,
   COUNT(*) AS total_rows,
   COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
 FROM nodes
-
-UNION ALL
-
-SELECT 
-  'devices (v2.1)' AS table_name,
-  COUNT(*) AS total_rows,
-  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
-FROM devices
 
 UNION ALL
 
@@ -65,29 +49,38 @@ ORDER BY table_name;
 \echo '2. Data Integrity Checks'
 \echo '------------------------'
 
-SELECT 
-  'collectors vs nodes' AS check_name,
-  CASE 
-    WHEN (SELECT COUNT(*) FROM collectors WHERE deleted_at IS NULL) = 
-         (SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL)
-    THEN '✅ PASS'
-    ELSE '❌ FAIL'
-  END AS status,
-  (SELECT COUNT(*) FROM collectors WHERE deleted_at IS NULL) AS collectors_count,
-  (SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL) AS nodes_count
+-- Check if old tables exist and compare counts
+DO $$
+DECLARE
+  collectors_count INTEGER;
+  nodes_count INTEGER;
+  devices_count INTEGER;
+  edge_devices_count INTEGER;
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'collectors') THEN
+    SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) INTO collectors_count FROM collectors;
+    SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) INTO nodes_count FROM nodes;
+    IF collectors_count = nodes_count THEN
+      RAISE NOTICE 'collectors vs nodes: PASS (% = %)', collectors_count, nodes_count;
+    ELSE
+      RAISE WARNING 'collectors vs nodes: FAIL (collectors=%, nodes=%)', collectors_count, nodes_count;
+    END IF;
+  ELSE
+    RAISE NOTICE 'collectors table does not exist, skip comparison';
+  END IF;
 
-UNION ALL
-
-SELECT 
-  'devices vs edge_devices' AS check_name,
-  CASE 
-    WHEN (SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL) = 
-         (SELECT COUNT(*) FROM edge_devices WHERE deleted_at IS NULL)
-    THEN '✅ PASS'
-    ELSE '❌ FAIL'
-  END AS status,
-  (SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL) AS devices_count,
-  (SELECT COUNT(*) FROM edge_devices WHERE deleted_at IS NULL) AS edge_devices_count;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'devices') THEN
+    SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) INTO devices_count FROM devices;
+    SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) INTO edge_devices_count FROM edge_devices;
+    IF devices_count = edge_devices_count THEN
+      RAISE NOTICE 'devices vs edge_devices: PASS (% = %)', devices_count, edge_devices_count;
+    ELSE
+      RAISE WARNING 'devices vs edge_devices: FAIL (devices=%, edge_devices=%)', devices_count, edge_devices_count;
+    END IF;
+  ELSE
+    RAISE NOTICE 'devices table does not exist, skip comparison';
+  END IF;
+END $$;
 
 \echo ''
 
@@ -158,49 +151,10 @@ WHERE device_config_id = 0;
 \echo ''
 
 -- ============================================
--- 5. 视图检查
+-- 5. 索引检查
 -- ============================================
 
-\echo '5. View Checks'
-\echo '--------------'
-
--- collectors 视图可查询
-SELECT 
-  'collectors view' AS check_name,
-  CASE 
-    WHEN COUNT(*) >= 0 THEN '✅ PASS'
-    ELSE '❌ FAIL'
-  END AS status,
-  COUNT(*) AS count
-FROM collectors;
-
--- devices 视图可查询
-SELECT 
-  'devices view' AS check_name,
-  CASE 
-    WHEN COUNT(*) >= 0 THEN '✅ PASS'
-    ELSE '❌ FAIL'
-  END AS status,
-  COUNT(*) AS count
-FROM devices;
-
--- device_templates 视图可查询
-SELECT 
-  'device_templates view' AS check_name,
-  CASE 
-    WHEN COUNT(*) >= 0 THEN '✅ PASS'
-    ELSE '❌ FAIL'
-  END AS status,
-  COUNT(*) AS count
-FROM device_templates;
-
-\echo ''
-
--- ============================================
--- 6. 索引检查
--- ============================================
-
-\echo '6. Index Checks'
+\echo '5. Index Checks'
 \echo '---------------'
 
 SELECT 
@@ -214,10 +168,10 @@ ORDER BY tablename, indexname;
 \echo ''
 
 -- ============================================
--- 7. FK 约束检查
+-- 6. FK 约束检查
 -- ============================================
 
-\echo '7. FK Constraint Checks'
+\echo '6. FK Constraint Checks'
 \echo '----------------------'
 
 SELECT 
@@ -240,10 +194,10 @@ ORDER BY tc.table_name, tc.constraint_name;
 \echo ''
 
 -- ============================================
--- 8. 数据样本检查
+-- 7. 数据样本检查
 -- ============================================
 
-\echo '8. Data Sample (first 3 nodes)'
+\echo '7. Data Sample (first 3 nodes)'
 \echo '-----------------------------'
 
 SELECT 
@@ -259,7 +213,7 @@ LIMIT 3;
 
 \echo ''
 
-\echo '9. Data Sample (first 3 edge_devices)'
+\echo '8. Data Sample (first 3 edge_devices)'
 \echo '------------------------------------'
 
 SELECT 
@@ -285,12 +239,11 @@ LIMIT 3;
 \echo '========================================'
 \echo ''
 \echo 'Expected results:'
-\echo '  ✅ collectors count = nodes count'
-\echo '  ✅ devices count = edge_devices count'
+\echo '  ✅ nodes count = collectors count (if old table exists)'
+\echo '  ✅ edge_devices count = devices count (if old table exists)'
 \echo '  ✅ channels with node_id IS NULL = 0'
 \echo '  ✅ edge_devices with invalid FK = 0'
 \echo '  ⚠️  edge_devices with device_config_id = 0 should be minimal'
-\echo '  ✅ All views queryable'
 \echo '  ✅ All indexes created'
 \echo '  ✅ All FK constraints added'
 \echo ''

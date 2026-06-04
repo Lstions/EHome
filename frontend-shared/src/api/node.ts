@@ -12,7 +12,7 @@ interface ApiResponse<T> {
 
 export interface Node {
   id: number
-  node_id: string          // v2.2 字段名 (原 device_id)
+  node_id: string
   name: string
   model: string
   firmware_version: string
@@ -32,12 +32,6 @@ export interface Node {
   last_manifest_id?: string
   last_sync_at?: string
   last_sync_id?: string
-
-  // v2.1 兼容字段 (6 个月后删除, v2.3)
-  /** @deprecated Use node_id instead */
-  device_id?: string
-  /** @deprecated Use node_id instead */
-  collector_id?: string
 }
 
 export interface NodeListResponse {
@@ -55,7 +49,7 @@ export interface NodeListParams {
 
 export interface OTARecord {
   id: number
-  node_id: number          // v2.2 字段名 (原 collector_id)
+  node_id: number
   firmware_id: number
   from_version: string
   to_version: string
@@ -64,21 +58,7 @@ export interface OTARecord {
   error_message?: string
   created_at: string
   completed_at?: string
-
-  /** @deprecated Use node_id instead */
-  collector_id?: number
 }
-
-// ============================================================
-// v2.1 兼容别名 (6 个月后删除, v2.3)
-// ============================================================
-
-/** @deprecated Use Node instead */
-export type Collector = Node
-/** @deprecated Use NodeListResponse instead */
-export type CollectorListResponse = NodeListResponse
-/** @deprecated Use NodeListParams instead */
-export type CollectorListParams = NodeListParams
 
 // ============================================================
 // 外设相关类型定义
@@ -179,7 +159,7 @@ export interface PeripheralAssignment {
 }
 
 // ============================================================
-// v2.2 API (nodeApi) — 推荐
+// API (nodeApi)
 // ============================================================
 
 export const nodeApi = {
@@ -272,104 +252,6 @@ export const nodeApi = {
   async ping(id: number): Promise<{ timestamp_us: string }> {
     const response = await client.post<unknown, ApiResponse<{ timestamp_us: string }>>(
       `/api/v1/nodes/${id}/ping`
-    )
-    return response.data
-  },
-}
-
-// ============================================================
-// v2.1 兼容 API (collectorApi) — 6 个月后删除, v2.3
-// 调用 v2.2 node 接口, 路径映射由后端双注册保证
-// ============================================================
-
-/** @deprecated Use nodeApi instead */
-export const collectorApi = {
-  async getList(params?: CollectorListParams): Promise<CollectorListResponse> {
-    // v2.1 兼容: 调用 /api/v1/collectors (后端双注册, 重定向到 /api/v1/nodes)
-    const response = await client.get<unknown, ApiResponse<CollectorListResponse>>('/api/v1/collectors', { params })
-    return response.data
-  },
-
-  async getDetail(id: number): Promise<Collector> {
-    const response = await client.get<unknown, ApiResponse<Collector>>(`/api/v1/collectors/${id}`)
-    return response.data
-  },
-
-  async delete(id: number): Promise<void> {
-    await client.delete(`/api/v1/collectors/${id}`)
-  },
-
-  async getConfig(id: number): Promise<Record<string, any>> {
-    const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/collectors/${id}/config`)
-    return response.data
-  },
-
-  async updateConfig(id: number, config: Record<string, any>): Promise<void> {
-    await client.put(`/api/v1/collectors/${id}/config`, config)
-  },
-
-  async syncConfig(id: number): Promise<void> {
-    await client.post(`/api/v1/collectors/${id}/config/sync`)
-  },
-
-  async startOTA(id: number, firmwareId: number, force: boolean = false): Promise<{ota_record_id: number, status: string}> {
-    const response = await client.post<unknown, ApiResponse<{ota_record_id: number, status: string}>>(
-      `/api/v1/ota/start`,
-      { collector_id: id, firmware_id: firmwareId, force }
-    )
-    return response.data
-  },
-
-  async getOTAProgress(_id: number, recordId: number): Promise<OTARecord> {
-    const response = await client.get<unknown, ApiResponse<OTARecord>>(
-      `/api/v1/ota/progress/${recordId}`
-    )
-    return response.data
-  },
-
-  async getOTAHistory(id: number): Promise<OTARecord[]> {
-    const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/ota/history/${id}`)
-    return response.data
-  },
-
-  async cancelOTA(_id: number, recordId: number): Promise<void> {
-    await client.post(`/api/v1/ota/cancel/${recordId}`)
-  },
-
-  async getHardwareConfig(id: number): Promise<Record<string, any>> {
-    const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/collectors/${id}/hardware/config`)
-    return response.data
-  },
-
-  async updateHardwareConfig(id: number, hardware: Record<string, any>): Promise<void> {
-    await client.put(`/api/v1/collectors/${id}/hardware/config`, { hardware })
-  },
-
-  async getCapabilities(id: number): Promise<Capabilities> {
-    const response = await client.get<unknown, ApiResponse<Capabilities>>(
-      `/api/v1/collectors/${id}/capabilities`
-    )
-    return response.data
-  },
-
-  async queryResources(id: number): Promise<{ request_id: string }> {
-    const response = await client.post<unknown, ApiResponse<{ request_id: string }>>(
-      `/api/v1/collectors/${id}/query-resources`
-    )
-    return response.data
-  },
-
-  async scanI2C(id: number, hardwareId: string): Promise<{ devices: string[] }> {
-    const response = await client.post<unknown, ApiResponse<{ devices: string[] }>>(
-      `/api/v1/collectors/${id}/bus/i2c/scan`,
-      { hardware_id: hardwareId }
-    )
-    return response.data
-  },
-
-  async ping(id: number): Promise<{ timestamp_us: string }> {
-    const response = await client.post<unknown, ApiResponse<{ timestamp_us: string }>>(
-      `/api/v1/collectors/${id}/ping`
     )
     return response.data
   },

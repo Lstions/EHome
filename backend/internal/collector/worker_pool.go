@@ -62,7 +62,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	// request_id routing
 	if job.requestID != 0 && m.pendingWrite != nil {
 		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)
-		var device models.Device
+		var device models.EdgeDevice
 		if err := m.db.Where("channel_id = ?", job.channelID).First(&device).Error; err == nil {
 			if m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
 				logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
@@ -71,8 +71,8 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	}
 
 	// Get collector
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", job.deviceID).First(&collector).Error; err != nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", job.deviceID).First(&collector).Error; err != nil {
 		logger.Infof("[%s] Collector not found", job.deviceID)
 		return
 	}
@@ -110,7 +110,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		"request_id": job.requestID,
 	}
 	// Try to look up sensor device for richer payload
-	var sensorDevice models.Device
+	var sensorDevice models.EdgeDevice
 	if err := m.db.Where("channel_id = ?", job.channelID).First(&sensorDevice).Error; err == nil {
 		channelDataEvent["sensor_device_id"] = sensorDevice.ID
 		channelDataEvent["sensor_device_name"] = sensorDevice.Name

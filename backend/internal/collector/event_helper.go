@@ -11,23 +11,23 @@ import (
 //
 // Usage in API handlers:
 //
-//	defer EmitConfigChange(bus, CfgChangeChannel, CfgActionUpdate, collectorID, channelID)
+//	defer EmitConfigChange(bus, CfgChangeNode, CfgActionUpdate, nodeID, channelID)
 //
 // The actor field is derived from context when available, otherwise defaults to "api:unknown".
-func EmitConfigChange(bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, collectorID, entityID uint) {
+func EmitConfigChange(bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, nodeID, entityID uint) {
 	if bus == nil {
-		logger.Warnf("EmitConfigChange: bus is nil, skipping event (type=%s action=%s collector=%d entity=%d)",
-			t, a, collectorID, entityID)
+		logger.Warnf("EmitConfigChange: bus is nil, skipping event (type=%s action=%s node=%d entity=%d)",
+			t, a, nodeID, entityID)
 		return
 	}
 
 	evt := ConfigChangeEvent{
-		EventID:     uuid.New().String(),
-		Type:        t,
-		Action:      a,
-		CollectorID: collectorID,
-		EntityID:    entityID,
-		Actor:       "api:admin", // TODO: extract from gin.Context when auth context is available
+		EventID:  uuid.New().String(),
+		Type:     t,
+		Action:   a,
+		NodeID:   nodeID,
+		EntityID: entityID,
+		Actor:    "api:admin", // TODO: extract from gin.Context when auth context is available
 	}
 
 	if err := bus.Publish(evt); err != nil {

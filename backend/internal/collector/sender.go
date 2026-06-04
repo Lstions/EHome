@@ -110,8 +110,8 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	deviceID := decision.DeviceID
 
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
 		logger.Infof("[%s] Collector not found for config", deviceID)
 		return
 	}
@@ -218,7 +218,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			decision.SyncID, deviceID, manifestID, decision.Epoch, decision.Reason, len(templates), len(channels))
 
 		// Update DB with new manifest ID and mark as sent
-		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
+		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).
 			Update("config_version", manifestID)
 		m.hashMgr.UpdateLastSent(deviceID)
 	}

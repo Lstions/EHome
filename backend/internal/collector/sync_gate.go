@@ -46,7 +46,7 @@ type SyncDecision struct {
 
 // HelloMsg carries the parsed v2.1 Hello fields for SyncGate decision.
 type HelloMsg struct {
-	DeviceID        string
+	NodeID          string
 	FirmwareVersion string
 	Model           string
 	ChannelCount    uint64
@@ -188,12 +188,12 @@ func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
 
 	// Find the device_id for the affected collector
 	var deviceID string
-	if evt.CollectorID > 0 {
-		deviceID = g.mgr.GetDeviceIDByCollectorID(evt.CollectorID)
+	if evt.NodeID > 0 {
+		deviceID = g.mgr.GetDeviceIDByNodeID(evt.NodeID)
 	}
 	if deviceID == "" {
 		logger.Infof("[sync_id=%s] OnConfigChange: collector %d has no device, skip",
-			syncID, evt.CollectorID)
+			syncID, evt.NodeID)
 		return nil
 	}
 

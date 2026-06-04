@@ -104,7 +104,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { collectorApi } from '@/api/collector'
+import { nodeApi } from '@/api/node'
 import { firmwareApi, type Firmware } from '@/api/firmware'
 import { formatFileSize } from '@/utils/format'
 
@@ -214,7 +214,7 @@ const handleStart = async () => {
     statusText.value = '正在上传固件...'
     addLog('开始 OTA 升级')
 
-    const otaRecord = await collectorApi.startOTA(props.collectorId, form.firmware_id)
+    const otaRecord = await nodeApi.startOTA(props.collectorId, form.firmware_id)
 
     upgradeStatus.value = 'upgrading'
     statusText.value = '正在升级中...'

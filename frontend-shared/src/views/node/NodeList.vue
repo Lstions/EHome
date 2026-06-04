@@ -472,9 +472,9 @@ let unsubscribe: (() => void) | null = null
 onMounted(() => {
   fetchNodes()
   
-  // 订阅状态更新 (v2.2)
+  // 订阅状态更新
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.node_id or message.payload?.node_id || message.payload?.collector_id) {
+    if (message.payload?.node_id) {
       fetchNodes()
     }
   })

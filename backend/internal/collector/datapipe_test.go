@@ -28,12 +28,12 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	db.AutoMigrate(&models.Collector{}, &models.Channel{}, &models.Device{},
+	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
 	// Set up a channel + device
-	col := models.Collector{
-		DeviceID:        "test-pipeline",
+	col := models.Node{
+		NodeID:        "test-pipeline",
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -41,14 +41,14 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	db.Create(&col)
 
 	ch := models.Channel{
-		CollectorID: col.ID,
+		NodeID: col.ID,
 		HardwareID:  1,
 		IntervalMs:  5000,
 		Enabled:     true,
 	}
 	db.Create(&ch)
 
-	dev := models.Device{
+	dev := models.EdgeDevice{
 		Name:      "BMP280-Test",
 		ChannelID: ch.ID,
 		Type:      "bmp280",
@@ -62,7 +62,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	// Build a minimal manager
 	mgr := &Manager{db: db}
 
-	mgr.parseAndStoreData(col.ID, col.DeviceID, uint64(ch.ID), rawData)
+	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), rawData)
 
 	// Verify unified_data was written
 	var unified []models.UnifiedData
@@ -87,12 +87,12 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 // should silently skip without crashing.
 func TestDataPipeline_UnknownDevice(t *testing.T) {
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	db.AutoMigrate(&models.Collector{}, &models.Channel{}, &models.Device{},
+	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Collector{DeviceID: "x", Status: "online"}
+	col := models.Node{NodeID: "x", Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{CollectorID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	// No device created
 
@@ -109,14 +109,14 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 // TestDataPipeline_EmptyRaw: empty raw data should be skipped gracefully
 func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	db.AutoMigrate(&models.Collector{}, &models.Channel{}, &models.Device{},
+	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Collector{DeviceID: "x", Status: "online"}
+	col := models.Node{NodeID: "x", Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{CollectorID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
-	dev := models.Device{Name: "sn3000", ChannelID: ch.ID, Type: "sn3000"}
+	dev := models.EdgeDevice{Name: "sn3000", ChannelID: ch.ID, Type: "sn3000"}
 	db.Create(&dev)
 
 	mgr := &Manager{db: db}

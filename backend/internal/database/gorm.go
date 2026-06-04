@@ -44,10 +44,10 @@ func Connect(cfg Config) error {
 func AutoMigrate() error {
 	return DB.AutoMigrate(
 		// v2.1 表 (保留, GORM 会自动加新字段)
-		&models.Collector{},
+		&models.Node{},
 		&models.Channel{},
 		&models.ConfigTemplate{},
-		&models.Device{},
+		&models.EdgeDevice{},
 		&models.DeviceConfig{},
 		&models.DeviceData{},
 		&models.UnifiedData{},

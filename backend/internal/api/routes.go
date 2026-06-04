@@ -31,17 +31,13 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	{
-		registerCollectorRoutes(v1, db, collectorMgr)
 		registerDeviceRoutes(v1, db, collectorMgr)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
 		registerTerminalRoutes(v1, collectorMgr)
 		registerMetricsRoutes(v1, db)
 
-		// ============================================================
-		// v2.2 双路径注册 (6 个月兼容期, 之后删除 v2.1 路径)
-		// 同一 handler, 两套路径, 返回相同数据
-		// ============================================================
+		// v2.2 routes
 		registerNodeRoutes(v1, db, collectorMgr)
 		registerEdgeDeviceRoutes(v1, db, collectorMgr)
 

@@ -212,7 +212,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { channelApi, type Channel } from '@/api/channel'
-import { collectorApi } from '@/api/collector'
+import { nodeApi } from '@/api/node'
 
 interface Props {
   collectorId: number
@@ -361,7 +361,7 @@ const scanI2C = async () => {
   if (!form.hardware_id) return
   scanning.value = true
   try {
-    const result = await collectorApi.scanI2C(props.collectorId, form.hardware_id)
+    const result = await nodeApi.scanI2C(props.collectorId, form.hardware_id)
     if (result?.devices?.length) {
       ElMessage.success(`发现 ${result.devices.length} 个设备: ${result.devices.join(', ')}`)
       // 自动填入第一个地址
@@ -408,7 +408,7 @@ const handleSubmit = async () => {
       await channelApi.update(editingChannel.value.id, data)
       // 自动同步配置到采集器
       try {
-        await collectorApi.syncConfig(props.collectorId)
+        await nodeApi.syncConfig(props.collectorId)
         ElMessage.success('更新成功，配置已同步到采集器')
       } catch (syncError: any) {
         ElMessage.warning('更新成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))
@@ -417,7 +417,7 @@ const handleSubmit = async () => {
       await channelApi.create(data as any)
       // 自动同步配置到采集器
       try {
-        await collectorApi.syncConfig(props.collectorId)
+        await nodeApi.syncConfig(props.collectorId)
         ElMessage.success('创建成功，配置已同步到采集器')
       } catch (syncError: any) {
         ElMessage.warning('创建成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))

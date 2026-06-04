@@ -12,17 +12,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// registerDeviceRoutes sets up device + channel CRUD routes
+// registerDeviceRoutes sets up channel + device-config CRUD routes
 func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
-	// Get the EventBus for emitting config change events (v2.1)
+	// Get the EventBus for emitting config change events
 	eventBus := collectorMgr.EventBus()
-
-	// List devices
-	v1.GET("/devices", func(c *gin.Context) {
-		var devices []models.Device
-		db.Find(&devices)
-		c.JSON(http.StatusOK, devices)
-	})
 
 	// ============================================================
 	// DeviceConfig 设备级配置模板 (前端 src/api/deviceConfig.ts)
@@ -123,7 +116,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1 G1 fix: Emit config change (device_config affects all nodes using this config)
+		// Emit config change (device_config affects all nodes using this config)
 		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionCreate, 0, tpl.ID)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
@@ -166,7 +159,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1 G1 fix: Emit config change (device_config affects all nodes using this config)
+		// Emit config change (device_config affects all nodes using this config)
 		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, update.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
@@ -179,7 +172,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1 G1 fix: Emit config change
+		// Emit config change
 		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionDelete, 0, tplID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
@@ -239,102 +232,25 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1 G1 fix: Emit config change (default flag change affects nodes using this config)
+		// Emit config change (default flag change affects nodes using this config)
 		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, tpl.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
-	// Create device
-	v1.POST("/devices", func(c *gin.Context) {
-		var dev models.Device
-		if err := c.ShouldBindJSON(&dev); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		if err := db.Create(&dev).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		// v2.1 G1 fix: Emit config change for the channel's collector
-		var ch models.Channel
-		if db.First(&ch, dev.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionCreate, ch.CollectorID, dev.ID)
-		}
-		c.JSON(http.StatusCreated, dev)
-	})
+	// ============================================================
+	// Channel 通道 CRUD
+	// ============================================================
 
-	// Get single device by id
-	v1.GET("/devices/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var d models.Device
-		if err := db.First(&d, id).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device not found"})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
-	})
-
-	// Update device
-	v1.PUT("/devices/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var d models.Device
-		if err := db.First(&d, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device not found"})
-			return
-		}
-		if err := c.ShouldBindJSON(&d); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-			return
-		}
-		d.ID = parseUintID(id)
-		if err := db.Save(&d).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		// v2.1: Emit config change for the channel's collector
-		var ch models.Channel
-		if db.First(&ch, d.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionUpdate, ch.CollectorID, d.ID)
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
-	})
-
-	// Delete device
-	v1.DELETE("/devices/:id", func(c *gin.Context) {
-		id := c.Param("id")
-		var d models.Device
-		if err := db.First(&d, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		// Find collector before deletion for event emission
-		var ch models.Channel
-		hasCollector := db.First(&ch, d.ChannelID).Error == nil
-		if err := db.Delete(&models.Device{}, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		// v2.1: Emit config change
-		if hasCollector {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionDelete, ch.CollectorID, d.ID)
-		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
-	})
-
-	// List channels (optionally filter by collector_id)
+	// List channels (optionally filter by node_id)
 	v1.GET("/channels", func(c *gin.Context) {
 		q := db.Model(&models.Channel{})
-		if cid := c.Query("collector_id"); cid != "" {
-			if _, err := strconv.ParseUint(cid, 10, 64); err == nil {
-				q = q.Where("collector_id = ?", cid)
+		if nid := c.Query("node_id"); nid != "" {
+			if _, err := strconv.ParseUint(nid, 10, 64); err == nil {
+				q = q.Where("node_id = ?", nid)
 			} else {
-				var col models.Collector
-				if err := db.Where("device_id = ?", cid).First(&col).Error; err == nil {
-					q = q.Where("collector_id = ?", col.ID)
+				var node models.Node
+				if err := db.Where("node_id = ?", nid).First(&node).Error; err == nil {
+					q = q.Where("node_id = ?", node.ID)
 				} else {
 					c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []models.Channel{}})
 					return
@@ -360,8 +276,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		// v2.1: Emit config change for the collector
-		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.CollectorID, ch.ID)
+		// Emit config change for the node
+		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusCreated, ch)
 	})
 
@@ -396,8 +312,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1: Emit config change for the collector
-		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.CollectorID, ch.ID)
+		// Emit config change for the node
+		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
@@ -405,16 +321,16 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 	v1.DELETE("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var ch models.Channel
-		hasCollector := db.First(&ch, id).Error == nil
-		collectorID := ch.CollectorID
+		hasNode := db.First(&ch, id).Error == nil
+		nodeID := ch.NodeID
 		channelID := ch.ID
 		if err := db.Delete(&models.Channel{}, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
-		// v2.1: Emit config change
-		if hasCollector {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, collectorID, channelID)
+		// Emit config change
+		if hasNode {
+			collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, nodeID, channelID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})

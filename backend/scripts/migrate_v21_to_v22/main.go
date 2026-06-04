@@ -232,17 +232,6 @@ ALTER TABLE edge_devices
   FOREIGN KEY (device_config_id) REFERENCES device_configs(id) ON DELETE RESTRICT NOT VALID;
 `)
 
-	fmt.Println()
-	fmt.Println("-- ============================================")
-	fmt.Println("-- Step 5: 创建兼容视图")
-	fmt.Println("-- ============================================")
-	fmt.Println(`
-CREATE OR REPLACE VIEW collectors AS
-  SELECT id, node_id AS device_id, ... FROM nodes;
-
-CREATE OR REPLACE VIEW devices AS
-  SELECT id, name, ... FROM edge_devices;
-`)
 }
 
 func runMigration(db *gorm.DB) error {
@@ -271,13 +260,7 @@ func runMigration(db *gorm.DB) error {
 	}
 
 	log.Println()
-	log.Println("Step 5: 创建兼容视图...")
-	if err := createCompatViews(db); err != nil {
-		return fmt.Errorf("create views: %w", err)
-	}
-
-	log.Println()
-	log.Println("Step 6: 数据完整性检查...")
+	log.Println("Step 5: 数据完整性检查...")
 	if err := verifyMigration(db); err != nil {
 		log.Printf("⚠️  Warning: %v", err)
 	}
@@ -646,105 +629,20 @@ ALTER TABLE channels
 	return nil
 }
 
-func createCompatViews(db *gorm.DB) error {
-	// collectors 视图
-	log.Printf("  → Creating collectors view...")
-	result := db.Exec(`
-CREATE OR REPLACE VIEW collectors AS
-  SELECT 
-    id, 
-    node_id AS device_id,
-    name,
-    model, 
-    firmware_version, 
-    protocol_version,
-    platform, 
-    status, 
-    last_seen, 
-    last_ping_at, 
-    uptime_seconds,
-    ping_latency_ms, 
-    mqtt_topic_up, 
-    mqtt_topic_down,
-    wifi_ssid, 
-    wifi_rssi, 
-    free_heap_bytes, 
-    capabilities, 
-    hardware_info,
-    config_epoch, 
-    last_manifest_id, 
-    config_sync_state, 
-    last_sync_at, 
-    last_sync_id,
-    created_at, 
-    updated_at,
-    deleted_at
-  FROM nodes
-	`)
-	if result.Error != nil {
-		return result.Error
-	}
-	log.Printf("  ✓ Created collectors view")
-
-	// devices 视图
-	log.Printf("  → Creating devices view...")
-	result = db.Exec(`
-CREATE OR REPLACE VIEW devices AS
-  SELECT
-    id, 
-    name, 
-    channel_id, 
-    interval_ms, 
-    enabled, 
-    status,
-    created_at, 
-    updated_at, 
-    deleted_at,
-    ''::varchar AS type,
-    ''::varchar AS parser_id
-  FROM edge_devices
-	`)
-	if result.Error != nil {
-		return result.Error
-	}
-	log.Printf("  ✓ Created devices view")
-
-	// device_templates 视图
-	log.Printf("  → Creating device_templates view...")
-	result = db.Exec("CREATE OR REPLACE VIEW device_templates AS SELECT * FROM device_configs")
-	if result.Error != nil {
-		log.Printf("  ⚠️  Warning: failed to create device_templates view: %v", result.Error)
-	} else {
-		log.Printf("  ✓ Created device_templates view")
-	}
-
-	return nil
-}
-
 func verifyMigration(db *gorm.DB) error {
 	// 检查数据完整性
-	var collectorsCount, nodesCount int64
-	var devicesCount, edgeDevicesCount int64
+	var nodesCount int64
+	var edgeDevicesCount int64
 	var missingConfigCount int64
 
-	db.Raw("SELECT COUNT(*) FROM collectors WHERE deleted_at IS NULL").Scan(&collectorsCount)
 	db.Raw("SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL").Scan(&nodesCount)
-	db.Raw("SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL").Scan(&devicesCount)
 	db.Raw("SELECT COUNT(*) FROM edge_devices WHERE deleted_at IS NULL").Scan(&edgeDevicesCount)
 	db.Raw("SELECT COUNT(*) FROM edge_devices WHERE device_config_id = 0 OR device_config_id IS NULL").Scan(&missingConfigCount)
 
 	log.Printf("  📊 Migration stats:")
-	log.Printf("     collectors: %d → nodes: %d", collectorsCount, nodesCount)
-	log.Printf("     devices: %d → edge_devices: %d", devicesCount, edgeDevicesCount)
+	log.Printf("     nodes: %d", nodesCount)
+	log.Printf("     edge_devices: %d", edgeDevicesCount)
 	log.Printf("     edge_devices with device_config_id=0: %d", missingConfigCount)
-
-	if collectorsCount > 0 && nodesCount < collectorsCount {
-		return fmt.Errorf("data migration incomplete: collectors=%d, nodes=%d", collectorsCount, nodesCount)
-	}
-
-	if devicesCount > 0 && edgeDevicesCount < devicesCount {
-		return fmt.Errorf("data migration incomplete: devices=%d, edge_devices=%d", devicesCount, edgeDevicesCount)
-	}
 
 	if missingConfigCount > 0 {
 		log.Printf("  ⚠️  Warning: %d edge_devices have device_config_id=0 (need manual fix)", missingConfigCount)

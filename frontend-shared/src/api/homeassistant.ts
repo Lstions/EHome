@@ -9,10 +9,10 @@ export const haApi = {
   },
 
   /**
-   * 同步采集器下所有设备到HomeAssistant
+   * 同步节点下所有边缘设备到HomeAssistant
    */
-  async syncCollector(collectorId: number): Promise<void> {
-    await client.post(`/api/v1/ha/sync/collector/${collectorId}`)
+  async syncNode(nodeId: number): Promise<void> {
+    await client.post(`/api/v1/ha/sync/node/${nodeId}`)
   },
 
   /**

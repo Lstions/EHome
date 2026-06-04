@@ -52,8 +52,8 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	// Dispatch to worker pool (non-blocking)
 	// Look up collector numeric ID (may be 0 if not found, but that's fine for fanout)
 	var collectorID uint
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err == nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
 		collectorID = collector.ID
 	}
 	job := dataReportJob{
@@ -80,7 +80,7 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 // parseAndStoreData parses raw data using device drivers and stores in unified_data
 func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, rawData []byte) {
 	// Get device type from database
-	var device models.Device
+	var device models.EdgeDevice
 	if err := m.db.Where("channel_id = ?", channelID).First(&device).Error; err != nil {
 		return
 	}

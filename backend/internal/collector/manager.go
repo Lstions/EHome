@@ -173,7 +173,7 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 
 // triggerDeviceInit finds devices for a collector and triggers initialization
 func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
-	var devices []models.Device
+	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
 		Where("channels.collector_id = ?", collectorID).
 		Find(&devices)
@@ -208,8 +208,8 @@ type ConfigHashResult struct {
 
 // CalcConfigHashForDevice calculates the config hash and manifest ID for a device.
 func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
 		return ConfigHashResult{}
 	}
 
@@ -228,22 +228,22 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	return ConfigHashResult{Hash: hash, ManifestID: manifestID}
 }
 
-// GetDeviceIDByCollectorID resolves a collector ID to its device_id string.
-func (m *Manager) GetDeviceIDByCollectorID(collectorID uint) string {
-	var collector models.Collector
-	if err := m.db.First(&collector, collectorID).Error; err != nil {
+// GetDeviceIDByNodeID resolves a node DB ID to its node_id string.
+func (m *Manager) GetDeviceIDByNodeID(nodeDBID uint) string {
+	var node models.Node
+	if err := m.db.First(&node, nodeDBID).Error; err != nil {
 		return ""
 	}
-	return collector.NodeID
+	return node.NodeID
 }
 
 // GetOnlineDeviceIDs returns device IDs of all online collectors.
 func (m *Manager) GetOnlineDeviceIDs() []string {
-	var collectors []models.Collector
+	var collectors []models.Node
 	m.db.Where("status = ?", "online").Find(&collectors)
 	ids := make([]string, 0, len(collectors))
 	for _, c := range collectors {
-		ids = append(ids, c.DeviceID)
+		ids = append(ids, c.NodeID)
 	}
 	return ids
 }
@@ -254,7 +254,7 @@ func (m *Manager) publishHADiscovery(collectorID uint, deviceID string) {
 		return
 	}
 
-	var devices []models.Device
+	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
 		Where("channels.collector_id = ?", collectorID).
 		Find(&devices)

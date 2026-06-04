@@ -83,7 +83,7 @@ func (d *Detector) checkRedisHeartbeats() {
 
 // checkDBLastSeen checks DB last_seen for collectors without Redis heartbeat
 func (d *Detector) checkDBLastSeen() {
-	var collectors []models.Collector
+	var collectors []models.Node
 	if err := d.db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
 		return
 	}
@@ -107,12 +107,12 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	logger.Infof("[Offline] %s: %s", deviceID, reason)
 
 	// Update DB
-	d.db.Model(&models.Collector{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
+	d.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
 		"status": "offline",
 	})
 
 	// Record event
-	var collector models.Collector
+	var collector models.Node
 	if err := d.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
 		d.db.Create(&models.CollectorEvent{
 			CollectorID: collector.ID,
@@ -122,18 +122,11 @@ func (d *Detector) markOffline(deviceID, reason string) {
 		})
 	}
 
-	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
-	d.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
-		"device_id": deviceID,
-		"node_id":   deviceID, // v2.2 新增
-		"status":    "offline",
-		"reason":    reason,
-	})
+	// WebSocket push
 	d.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
-		"device_id": deviceID, // v2.1 兼容
-		"node_id":   deviceID,
-		"status":    "offline",
-		"reason":    reason,
+		"node_id": deviceID,
+		"status":  "offline",
+		"reason":  reason,
 	})
 }
 

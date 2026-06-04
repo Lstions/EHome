@@ -22,7 +22,7 @@ func setupOTATestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Collector{})
+	db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Node{})
 	return db
 }
 
@@ -253,8 +253,8 @@ func TestCancelTask(t *testing.T) {
 	db := setupOTATestDB(t)
 
 	// Create collector and firmware
-	col := models.Collector{
-		DeviceID:        "test-cancel-device",
+	col := models.Node{
+		NodeID:        "test-cancel-device",
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -300,7 +300,7 @@ func TestCancelTask(t *testing.T) {
 // Test CancelTask: terminal state task → error
 func TestCancelTask_AlreadyTerminal(t *testing.T) {
 	db := setupOTATestDB(t)
-	col := models.Collector{DeviceID: "x", Status: "online"}
+	col := models.Node{NodeID: "x", Status: "online"}
 	db.Create(&col)
 	fw := models.Firmware{Version: "1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)

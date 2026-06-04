@@ -31,7 +31,7 @@ func TestConfigEventBus_Publish_IncrementsEpoch(t *testing.T) {
 	bus.Publish(ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		CollectorID: 1,
+		NodeID: 1,
 		EntityID:    100,
 	})
 	after := bus.CurrentEpoch()
@@ -52,7 +52,7 @@ func TestConfigEventBus_Subscribe_ReceiveEvent(t *testing.T) {
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionCreate,
-		CollectorID: 5,
+		NodeID: 5,
 		EntityID:    42,
 	}
 	bus.Publish(evt)
@@ -62,8 +62,8 @@ func TestConfigEventBus_Subscribe_ReceiveEvent(t *testing.T) {
 		if received.Type != evt.Type {
 			t.Fatalf("wrong type: got %s want %s", received.Type, evt.Type)
 		}
-		if received.CollectorID != evt.CollectorID {
-			t.Fatalf("wrong collector: got %d want %d", received.CollectorID, evt.CollectorID)
+		if received.NodeID != evt.NodeID {
+			t.Fatalf("wrong collector: got %d want %d", received.NodeID, evt.NodeID)
 		}
 		if received.Epoch == 0 {
 			t.Fatal("epoch should be set")
@@ -85,7 +85,7 @@ func TestConfigEventBus_Publish_NonBlocking(t *testing.T) {
 		bus.Publish(ConfigChangeEvent{
 			Type:        CfgChangeChannel,
 			Action:      CfgActionUpdate,
-			CollectorID: uint(i),
+			NodeID: uint(i),
 			EntityID:    uint(i),
 		})
 	}
@@ -104,7 +104,7 @@ func TestConfigEventBus_Publish_SetsDefaults(t *testing.T) {
 	bus.Publish(ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionDelete,
-		CollectorID: 1,
+		NodeID: 1,
 		EntityID:    1,
 	})
 
@@ -136,7 +136,7 @@ func TestConfigEventBus_ConcurrentPublish(t *testing.T) {
 			bus.Publish(ConfigChangeEvent{
 				Type:        CfgChangeChannel,
 				Action:      CfgActionUpdate,
-				CollectorID: uint(idx),
+				NodeID: uint(idx),
 				EntityID:    uint(idx),
 			})
 		}(i)

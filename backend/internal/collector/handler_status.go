@@ -47,8 +47,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	}
 
 	// Update collector
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
 		logger.Infof("[%s] Collector not found for status update", deviceID)
 		return
 	}
@@ -96,16 +96,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		m.triggerDeviceInit(collector.ID, deviceID)
 	}
 
-	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
-	m.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
-		"device_id":      deviceID,
-		"node_id":        deviceID, // v2.2 新增 (同一值)
-		"status":         status,
-		"uptime_seconds": uptimeSec,
-		"channel_count":  channelCount,
-	})
+	// WebSocket push
 	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
-		"device_id":      deviceID, // v2.1 兼容
 		"node_id":        deviceID,
 		"status":         status,
 		"uptime_seconds": uptimeSec,

@@ -11,8 +11,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
-    BusConfigPanel: typeof import('./components/collector/BusConfigPanel.vue')['default']
     ChannelManager: typeof import('./components/channel/ChannelManager.vue')['default']
+    ChannelPanel: typeof import('./components/node/ChannelPanel.vue')['default']
     ChannelTerminal: typeof import('./components/channel/ChannelTerminal.vue')['default']
     ConfirmDialog: typeof import('./components/common/ConfirmDialog.vue')['default']
     CountUp: typeof import('./components/common/CountUp.vue')['default']

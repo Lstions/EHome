@@ -240,7 +240,7 @@ import { ElMessage } from 'element-plus'
 import { Download, Connection } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import LineChart from '@/components/charts/LineChart.vue'
-import { deviceApi, type Device } from '@/api/device'
+import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { getErrorInfo } from '@/utils/errorCode'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -376,7 +376,7 @@ let unsubscribeData: (() => void) | null = null
 
 const fetchDevices = async () => {
   try {
-    const response = await deviceApi.getList({ page_size: 500 })
+    const response = await edgeDeviceApi.getList({ page_size: 500 })
     deviceList.value = response.items
   } catch (error: any) {
     ElMessage.error('获取设备列表失败')
@@ -409,7 +409,7 @@ const fetchData = async () => {
         break
     }
 
-    const response = await deviceApi.getHistoryData(queryForm.deviceId, {
+    const response = await edgeDeviceApi.getHistoryData(queryForm.deviceId, {
       start_time: startTime.toISOString(),
       end_time: endTime.toISOString(),
       page: currentPage.value,

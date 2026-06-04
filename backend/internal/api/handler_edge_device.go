@@ -11,8 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// registerEdgeDeviceRoutes sets up v2.2 edge-device CRUD routes (/edge-devices = /devices alias)
-// Same handlers, same logic, different path. 6-month compat, then delete v2.1 paths.
+// registerEdgeDeviceRoutes sets up edge-device CRUD routes
 func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
 	eventBus := collectorMgr.EventBus()
 
@@ -52,7 +51,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, dev.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionCreate, ch.NodeID, dev.ID)
+			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionCreate, ch.NodeID, dev.ID)
 		}
 		c.JSON(http.StatusCreated, dev)
 	})
@@ -77,7 +76,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
+			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
 	})
@@ -99,7 +98,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		}
 		// EmitConfigChange
 		if hasNode {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionDelete, ch.NodeID, d.ID)
+			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionDelete, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})

@@ -4,36 +4,6 @@ import (
 	"testing"
 )
 
-// TestV21CompatAliases 验证 v2.1 老代码风格可继续用 (Phase 2A-1)
-func TestV21CompatAliases(t *testing.T) {
-	// Collector = Node (v2.1 别名)
-	var c1 Collector
-	c1 = Node{} // 同类型, 可赋值
-	c1.NodeID = "esp32c6_test"
-	if c1.NodeID != "esp32c6_test" {
-		t.Error("Collector alias should equal Node")
-	}
-	_ = c1
-
-	// Device = EdgeDevice (v2.1 别名)
-	var d1 Device
-	d1 = EdgeDevice{}
-	d1.Name = "test_edge_device"
-	if d1.Name != "test_edge_device" {
-		t.Error("Device alias should equal EdgeDevice")
-	}
-	_ = d1
-
-	// DeviceTemplate = DeviceConfig (v2.1 别名)
-	var dt1 DeviceTemplate
-	dt1 = DeviceConfig{}
-	dt1.DeviceType = "bmp280"
-	if dt1.DeviceType != "bmp280" {
-		t.Error("DeviceTemplate alias should equal DeviceConfig")
-	}
-	_ = dt1
-}
-
 // TestV22NewFields 验证 v2.2 新字段可用
 func TestV22NewFields(t *testing.T) {
 	ed := EdgeDevice{
@@ -57,30 +27,6 @@ func TestV22NewFields(t *testing.T) {
 	}
 	if ed.InitState != "pending" {
 		t.Error("init_state not set")
-	}
-}
-
-// TestChannelCompatFields 验证 Channel 字段 alias
-func TestChannelCompatFields(t *testing.T) {
-	c := Channel{
-		NodeID: 42, // v2.2 新名
-	}
-	// 老代码访问 CollectorID 仍可用 (gorm:"-" 不存 DB, 但 Go 字段存在)
-	c.CollectorID = 42
-	if c.NodeID != c.CollectorID {
-		t.Error("Channel.NodeID should equal Channel.CollectorID alias")
-	}
-}
-
-// TestNodeCompatFields 验证 Node.DeviceID alias
-func TestNodeCompatFields(t *testing.T) {
-	n := Node{
-		NodeID: "esp32c6_xxx",
-	}
-	// 老代码访问 .DeviceID 仍可用 (gorm:"-" 不存 DB)
-	n.DeviceID = "esp32c6_xxx"
-	if n.NodeID != n.DeviceID {
-		t.Error("Node.NodeID should equal Node.DeviceID alias")
 	}
 }
 

@@ -262,8 +262,8 @@ const handleSubmit = async () => {
       if (isEdit.value) {
         // 编辑模式 - 调用更新 API
         try {
-          const { deviceApi } = await import('@/api/device')
-          await deviceApi.update(props.deviceId!, {
+          const { edgeDeviceApi } = await import('@/api/device')
+          await edgeDeviceApi.update(props.deviceId!, {
             name: form.name,
             device_type: form.device_type,
             protocol: form.protocol,
@@ -297,8 +297,8 @@ watch(() => props.visible, (newVal) => {
 watch(() => props.deviceId, async (newVal) => {
   if (newVal && props.visible) {
     try {
-      const { deviceApi } = await import('@/api/device')
-      const device = await deviceApi.getDetail(newVal)
+      const { edgeDeviceApi } = await import('@/api/device')
+      const device = await edgeDeviceApi.getDetail(newVal)
       form.collector_id = device.collector_id
       form.name = device.name
       form.device_type = device.device_type

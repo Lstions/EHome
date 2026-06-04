@@ -300,65 +300,7 @@ BEGIN
 END $$;
 
 -- ============================================
--- Step 5: 创建 v2.1 兼容视图 (6 个月后删除)
--- ============================================
-
--- 5.1 collectors 视图 (老代码读)
-CREATE OR REPLACE VIEW collectors AS
-  SELECT 
-    id, 
-    node_id AS device_id,  -- 兼容: node_id 映射回 device_id
-    name,
-    model, 
-    firmware_version, 
-    protocol_version,
-    platform, 
-    status, 
-    last_seen, 
-    last_ping_at, 
-    uptime_seconds,
-    ping_latency_ms, 
-    mqtt_topic_up, 
-    mqtt_topic_down,
-    wifi_ssid, 
-    wifi_rssi, 
-    free_heap_bytes, 
-    capabilities, 
-    hardware_info,
-    config_epoch, 
-    last_manifest_id, 
-    config_sync_state, 
-    last_sync_at, 
-    last_sync_id,
-    created_at, 
-    updated_at,
-    deleted_at
-  FROM nodes;
-
--- 5.2 devices 视图 (老代码读)
-CREATE OR REPLACE VIEW devices AS
-  SELECT
-    id, 
-    name, 
-    channel_id, 
-    interval_ms, 
-    enabled, 
-    status,
-    created_at, 
-    updated_at, 
-    deleted_at,
-    -- 兼容性: 推导 Type 和 ParserID (从 device_config)
-    -- 注意: 这些字段在 v2.2 已移到 device_configs 表
-    ''::varchar AS type,
-    ''::varchar AS parser_id
-  FROM edge_devices;
-
--- 5.3 device_templates 视图 (如果需要)
-CREATE OR REPLACE VIEW device_templates AS
-  SELECT * FROM device_configs;
-
--- ============================================
--- Step 6: 更新序列 (确保新插入不冲突)
+-- Step 5: 更新序列 (确保新插入不冲突)
 -- ============================================
 
 -- 确保 nodes.id 序列正确
@@ -370,7 +312,7 @@ SELECT setval(pg_get_serial_sequence('edge_devices', 'id'),
               COALESCE((SELECT MAX(id) FROM edge_devices), 0) + 1, false);
 
 -- ============================================
--- Step 7: 数据完整性检查 (警告, 不阻止提交)
+-- Step 6: 数据完整性检查 (警告, 不阻止提交)
 -- ============================================
 
 DO $$
@@ -433,11 +375,6 @@ COMMIT;
 -- 
 -- 4. 监控日志:
 --    journalctl -u ehome-server -f
--- 
--- 5. 6 个月后删除兼容视图:
---    DROP VIEW collectors;
---    DROP VIEW devices;
---    DROP VIEW device_templates;
 -- 
 -- 回滚 (如果需要):
 --    psql -f v22_rollback_to_v21.sql

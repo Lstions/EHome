@@ -101,8 +101,8 @@ func (m *Manager) handlePong(deviceID string, payload []byte) {
 
 	// F7.5: Store RTT in DB for historical analysis
 	now := time.Now()
-	m.db.Model(&models.Collector{}).
-		Where("device_id = ?", deviceID).
+	m.db.Model(&models.Node{}).
+		Where("node_id = ?", deviceID).
 		Updates(map[string]interface{}{
 			"ping_latency_ms": rtt.Milliseconds(),
 			"last_ping_at":    &now,

@@ -195,15 +195,15 @@ func (o *Orchestrator) HandleDataReportAck(deviceID string, requestID uint32, ra
 
 // saveCalibData saves calibration data to database
 func (o *Orchestrator) saveCalibData(deviceID, deviceType string, data []byte) {
-	var collector models.Collector
-	if err := o.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
-		logger.Infof("[Init] Collector not found: %s", deviceID)
+	var node models.Node
+	if err := o.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
+		logger.Infof("[Init] Node not found: %s", deviceID)
 		return
 	}
 
 	// Save to calibration cache
 	o.db.Create(&models.CalibrationCache{
-		CollectorID: collector.ID,
+		CollectorID: node.ID,
 		DeviceType:  deviceType,
 		Data:        fmt.Sprintf("%x", data),
 	})

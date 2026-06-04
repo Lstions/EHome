@@ -563,9 +563,9 @@ onMounted(() => {
   fetchDevices()
   fetchOTAHistory()
 
-  // 订阅状态更新 (v2.2)
+  // 订阅状态更新
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.node_id === collectorId.value || message.payload?.collector_id === collectorId.value) {
+    if (message.payload?.node_id === collectorId.value) {
       if (message.payload?.latency_ms !== undefined) {
         collector.value = { ...collector.value, latency_ms: message.payload.latency_ms }
         pinging.value = false
@@ -577,12 +577,6 @@ onMounted(() => {
       } else {
         fetchCollectorDetail()
       }
-    }
-  })
-  // v2.1 兼容订阅 (6 个月后删除, v2.3)
-  wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.collector_id === collectorId.value) {
-      fetchCollectorDetail()
     }
   })
 })

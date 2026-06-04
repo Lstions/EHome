@@ -47,19 +47,19 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, data)
 	})
 
-	// Get latest sensor values for a collector (all devices)
-	// GET /api/v1/collectors/:device_id/latest
-	v1.GET("/collectors/:device_id/latest", func(c *gin.Context) {
-		deviceID := c.Param("device_id")
-		var col models.Collector
-		if err := db.Where("device_id = ?", deviceID).First(&col).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "collector not found"})
+	// Get latest sensor values for a node (all edge devices)
+	// GET /api/v1/nodes/:node_id/latest
+	v1.GET("/nodes/:node_id/latest", func(c *gin.Context) {
+		nodeID := c.Param("node_id")
+		var node models.Node
+		if err := db.Where("node_id = ?", nodeID).First(&node).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
 
-		// Get all channels for this collector
+		// Get all channels for this node
 		var channels []models.Channel
-		db.Where("collector_id = ? AND enabled = ?", col.ID, true).Find(&channels)
+		db.Where("node_id = ? AND enabled = ?", node.ID, true).Find(&channels)
 
 		type LatestValue struct {
 			ChannelID  uint      `json:"channel_id"`
@@ -71,7 +71,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		var results []LatestValue
 		for _, ch := range channels {
-			var devices []models.Device
+			var devices []models.EdgeDevice
 			db.Where("channel_id = ?", ch.ID).Find(&devices)
 			for _, dev := range devices {
 				var ud models.UnifiedData
@@ -89,9 +89,8 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"collector_id": col.ID,
-			"device_id":    deviceID,
-			"values":       results,
+			"node_id": node.ID,
+			"values":  results,
 		})
 	})
 

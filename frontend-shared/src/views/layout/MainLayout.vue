@@ -260,8 +260,8 @@ const mobileDrawerVisible = ref(false)
 // 菜单项（全部，含角色要求）
 const allMenuItems = [
   { path: '/dashboard', title: '仪表盘', icon: Odometer, roles: undefined },
-  { path: '/collectors', title: '采集器', icon: Connection, roles: undefined },
-  { path: '/devices', title: '设备', icon: Cpu, roles: undefined },
+  { path: '/node', title: '节点', icon: Connection, roles: undefined },
+  { path: '/edge-device', title: '边缘设备', icon: Cpu, roles: undefined },
   { path: '/data', title: '数据面板', icon: DataLine, roles: undefined },
   { path: '/firmware', title: '固件管理', icon: Files, roles: ['admin', 'operator'] as string[] },
   { path: '/device-configs', title: '配置模板', icon: Setting, roles: ['admin', 'operator'] as string[] },
@@ -315,15 +315,15 @@ const activeMenu = computed(() => {
 const breadcrumbs = computed(() => {
   const pathNames: Record<string, string> = {
     '/dashboard': '仪表盘',
-    '/collectors': '采集器管理',
-    '/devices': '设备管理',
+    '/node': '节点管理',
+    '/edge-device': '边缘设备管理',
     '/data': '数据面板',
     '/firmware': '固件管理',
     '/device-configs': '配置模板',
     '/monitor': '系统监控',
 
-    '/collectors/:id': '采集器详情',
-    '/devices/:id': '设备详情',
+    '/node/:id': '节点详情',
+    '/edge-device/:id': '边缘设备详情',
   }
 
   const crumbs: string[] = []
@@ -344,12 +344,12 @@ const breadcrumbs = computed(() => {
 const searchPlaceholder = computed(() => {
   const path = route.path
   if (path.startsWith('/device')) return '搜索设备名称、类型...'
-  if (path.startsWith('/collector')) return '搜索采集器名称、型号...'
+  if (path.startsWith('/node')) return '搜索节点名称、型号...'
   if (path.startsWith('/firmware')) return '搜索固件名称、版本...'
   if (path.startsWith('/device-configs')) return '搜索模板名称...'
   if (path.startsWith('/data')) return '搜索设备数据...'
   if (path.startsWith('/monitor')) return '搜索监控指标...'
-  return '搜索设备、采集器...'
+  return '搜索设备、节点...'
 })
 
 // 搜索处理
@@ -359,17 +359,17 @@ const handleSearch = () => {
 
   // 根据搜索内容智能跳转
   const lowerQuery = query.toLowerCase()
-  if (lowerQuery.includes('采集器') || lowerQuery.includes('collector')) {
-    router.push({ path: '/collectors', query: { search: query } })
+  if (lowerQuery.includes('节点') || lowerQuery.includes('node')) {
+    router.push({ path: '/node', query: { search: query } })
   } else if (lowerQuery.includes('设备') || lowerQuery.includes('device')) {
-    router.push({ path: '/devices', query: { search: query } })
+    router.push({ path: '/edge-device', query: { search: query } })
   } else if (lowerQuery.includes('固件') || lowerQuery.includes('firmware')) {
     router.push({ path: '/firmware', query: { search: query } })
   } else if (lowerQuery.includes('配置') || lowerQuery.includes('config')) {
     router.push({ path: '/device-configs', query: { search: query } })
   } else {
     // 默认跳转到设备列表搜索
-    router.push({ path: '/devices', query: { search: query } })
+    router.push({ path: '/edge-device', query: { search: query } })
   }
   searchQuery.value = ''
 }
@@ -395,7 +395,7 @@ const handleNotificationClick = async (item: ApiNotification) => {
   }
   // 根据通知类型跳转
   if (item.title.includes('离线')) {
-    router.push('/devices')
+    router.push('/edge-device')
   }
 }
 

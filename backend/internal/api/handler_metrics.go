@@ -63,14 +63,14 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 
 		// DB counts
 		var devOnline, devOffline int64
-		db.Model(&models.Device{}).Where("status = ?", "active").Count(&devOnline)
-		db.Model(&models.Device{}).Where("status <> ?", "active").Count(&devOffline)
+		db.Model(&models.EdgeDevice{}).Where("status = ?", "active").Count(&devOnline)
+		db.Model(&models.EdgeDevice{}).Where("status <> ?", "active").Count(&devOffline)
 		resp.Device.Online = devOnline
 		resp.Device.Offline = devOffline
 
 		var colOnline, colOffline int64
-		db.Model(&models.Collector{}).Where("status = ?", "online").Count(&colOnline)
-		db.Model(&models.Collector{}).Where("status = ?", "offline").Count(&colOffline)
+		db.Model(&models.Node{}).Where("status = ?", "online").Count(&colOnline)
+		db.Model(&models.Node{}).Where("status = ?", "offline").Count(&colOffline)
 		resp.Collector.Online = colOnline
 		resp.Collector.Offline = colOffline
 

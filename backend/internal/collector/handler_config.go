@@ -58,9 +58,9 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 		if configEpoch > 0 {
 			updates["config_epoch"] = configEpoch
 		}
-		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).Updates(updates)
+		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(updates)
 	} else {
-		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
+		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).
 			Update("config_status", "failed")
 	}
 }
@@ -99,8 +99,8 @@ func (m *Manager) handleConfigReport(deviceID string, payload []byte) {
 		deviceID, requestID, manifestID, templateCount, channelCount, uptimeSec)
 
 	// Verify config sync: compare reported manifest with DB
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err == nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
 		if collector.ConfigVersion != manifestID {
 			logger.Infof("[%s] Config mismatch! DB=%s device=%s", deviceID, collector.ConfigVersion, manifestID)
 		}
@@ -109,8 +109,8 @@ func (m *Manager) handleConfigReport(deviceID string, payload []byte) {
 
 // sendConfigManifest sends configuration to a device with full nested sub-structures
 func (m *Manager) sendConfigManifest(deviceID string) {
-	var collector models.Collector
-	if err := m.db.Where("device_id = ?", deviceID).First(&collector).Error; err != nil {
+	var collector models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
 		logger.Infof("[%s] Collector not found for config", deviceID)
 		return
 	}
@@ -210,7 +210,7 @@ func (m *Manager) sendConfigManifest(deviceID string) {
 	} else {
 		logger.Infof("[%s] ConfigManifest sent: id=%s %d templates, %d channels",
 			deviceID, manifestID, len(templates), len(channels))
-		m.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).
+		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).
 			Update("config_version", manifestID)
 	}
 }

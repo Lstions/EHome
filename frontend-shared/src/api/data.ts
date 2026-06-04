@@ -7,12 +7,12 @@ interface ApiResponse<T> {
 }
 
 export interface Overview {
-  collectors: {
+  nodes: {
     total: number
     online: number
     offline: number
   }
-  devices: {
+  edge_devices: {
     total: number
     online: number
     offline: number
@@ -20,7 +20,7 @@ export interface Overview {
   latest_data: Array<{
     device_id: number
     device_name: string
-    collector_name: string
+    node_name: string
     data: Record<string, any>
     collected_at: string
     raw_data?: string
@@ -33,11 +33,11 @@ export const dataApi = {
     return response.data
   },
 
-  async getCollectorDevicesData(collectorId: number, params: {
+  async getNodeDevicesData(nodeId: number, params: {
     start_time: string
     end_time: string
   }): Promise<any> {
-    const response = await client.get<unknown, ApiResponse<any>>(`/api/v1/collectors/${collectorId}/devices-data`, { params })
+    const response = await client.get<unknown, ApiResponse<any>>(`/api/v1/nodes/${nodeId}/latest`, { params })
     return response.data
   }
 }

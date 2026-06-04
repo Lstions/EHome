@@ -161,7 +161,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { collectorApi, type PeripheralAssignment } from '@/api/collector'
+import { nodeApi, type PeripheralAssignment } from '@/api/node'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 
 const props = withDefaults(defineProps<{
@@ -399,7 +399,7 @@ const handleSubmit = async () => {
       config: configData
     }
 
-    await collectorApi.assignPeripheral(props.collectorId, assignment)
+    await nodeApi.assignPeripheral(props.collectorId, assignment)
     ElMessage.success('外设分配成功')
     emit('success')
     dialogVisible.value = false

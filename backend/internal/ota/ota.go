@@ -118,7 +118,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	}
 
 	// Get device_id
-	var collector models.Collector
+	var collector models.Node
 	if err := m.db.First(&collector, task.CollectorID).Error; err != nil {
 		return err
 	}

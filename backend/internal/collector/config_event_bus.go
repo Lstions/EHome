@@ -14,8 +14,8 @@ type ConfigChangeType string
 const (
 	CfgChangeTemplate     ConfigChangeType = "template"
 	CfgChangeChannel      ConfigChangeType = "channel"
-	CfgChangeDevice       ConfigChangeType = "device"
-	CfgChangeCollector    ConfigChangeType = "collector"
+	CfgChangeEdgeDevice   ConfigChangeType = "edge_device"
+	CfgChangeNode         ConfigChangeType = "node"
 	CfgChangeDeviceConfig ConfigChangeType = "device_config"
 )
 
@@ -30,14 +30,14 @@ const (
 
 // ConfigChangeEvent represents a single configuration change event on the bus.
 type ConfigChangeEvent struct {
-	EventID     string           // UUID v4
-	Type        ConfigChangeType // template / channel / device / collector / device_config
-	Action      ConfigChangeAction
-	CollectorID uint   // affected collector (0 = all / unknown)
-	EntityID    uint   // changed entity ID
-	Epoch       uint64 // global epoch after increment
-	Timestamp   time.Time
-	Actor       string // "api:admin", "init:factory_reset", "system:startup"
+	EventID   string           // UUID v4
+	Type      ConfigChangeType // template / channel / device / device_config
+	Action    ConfigChangeAction
+	NodeID    uint   // affected node (0 = all / unknown)
+	EntityID  uint   // changed entity ID
+	Epoch     uint64 // global epoch after increment
+	Timestamp time.Time
+	Actor     string // "api:admin", "init:factory_reset", "system:startup"
 }
 
 // ConfigEventBus is a simple channel-based event bus for configuration changes.
@@ -72,8 +72,8 @@ func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
 	case b.ch <- evt:
 		return nil
 	default:
-		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s collector=%d entity=%d",
-			evt.Type, evt.Action, evt.CollectorID, evt.EntityID)
+		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%d entity=%d",
+			evt.Type, evt.Action, evt.NodeID, evt.EntityID)
 		return nil // drop silently per design — alarm via metrics in production
 	}
 }

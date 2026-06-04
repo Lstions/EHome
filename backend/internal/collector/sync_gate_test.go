@@ -17,7 +17,7 @@ func newTestManagerAndGate(t *testing.T) (*Manager, *SyncGate, *ConfigEventBus) 
 	if err != nil {
 		t.Fatalf("sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.ConfigMeta{}, &models.Collector{}, &models.Channel{}, &models.ConfigTemplate{})
+	db.AutoMigrate(&models.ConfigMeta{}, &models.Node{}, &models.Channel{}, &models.ConfigTemplate{})
 
 	epochGen := NewEpochGenerator(db)
 	epochGen.Restore()
@@ -38,7 +38,7 @@ func TestOnHello_NvsEmpty_ForceSync(t *testing.T) {
 	_, gate, _ := newTestManagerAndGate(t)
 
 	hello := &HelloMsg{
-		DeviceID:     "dev1",
+		NodeID:     "dev1",
 		NvsHasConfig: false, // NVS empty — should force full sync
 	}
 	d := gate.OnHello("dev1", hello)
@@ -57,11 +57,11 @@ func TestOnHello_EpochLag_ForceSync(t *testing.T) {
 	_, gate, bus := newTestManagerAndGate(t)
 
 	// Increment server epoch to be ahead of device
-	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, CollectorID: 1, EntityID: 1})
+	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, NodeID: 1, EntityID: 1})
 	time.Sleep(10 * time.Millisecond) // let async persist
 
 	hello := &HelloMsg{
-		DeviceID:     "dev1",
+		NodeID:     "dev1",
 		NvsHasConfig: true,
 		ConfigEpoch:  0, // device epoch = 0, server epoch > 0
 	}
@@ -77,7 +77,7 @@ func TestOnHello_ManifestMismatch_ForceSync(t *testing.T) {
 
 	// Make server epoch == device epoch (0 == 0 or match)
 	hello := &HelloMsg{
-		DeviceID:     "dev1",
+		NodeID:     "dev1",
 		NvsHasConfig: true,
 		ConfigEpoch:  bus.CurrentEpoch(),
 		LastManifest: "old-manifest-id",
@@ -93,14 +93,14 @@ func TestOnHello_InSync_NoAction(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
 	// Create a collector with known config
-	collector := models.Collector{NodeID: "dev1", Status: "online"}
+	collector := models.Node{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	// Compute the hash the device would report
 	serverHash := mgr.CalcConfigHashForDevice("dev1")
 
 	hello := &HelloMsg{
-		DeviceID:     "dev1",
+		NodeID:     "dev1",
 		NvsHasConfig: true,
 		ConfigEpoch:  bus.CurrentEpoch(),
 		LastManifest: serverHash.ManifestID,
@@ -121,7 +121,7 @@ func TestOnHello_V2Firmware_LegacyPath(t *testing.T) {
 
 	// v2.0 firmware: no epoch/nvs_has fields → defaults (epoch=0, nvs_has=true)
 	hello := &HelloMsg{
-		DeviceID:        "dev1",
+		NodeID:        "dev1",
 		NvsHasConfig:    true, // default for v2.0
 		ConfigEpoch:     0,    // default for v2.0
 		ProtocolVersion: "2.0",
@@ -139,7 +139,7 @@ func TestOnStatusReport_EpochLag_Push(t *testing.T) {
 	_, gate, bus := newTestManagerAndGate(t)
 
 	// Increment server epoch
-	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, CollectorID: 1, EntityID: 1})
+	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, NodeID: 1, EntityID: 1})
 	time.Sleep(10 * time.Millisecond)
 
 	rpt := &StatusReportMsg{
@@ -185,13 +185,13 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create a collector
-	collector := models.Collector{NodeID: "dev1", Status: "online"}
+	collector := models.Node{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		CollectorID: collector.ID,
+		NodeID: collector.ID,
 		EntityID:    100,
 	}
 	decisions := gate.OnConfigChange(evt)
@@ -212,7 +212,7 @@ func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		CollectorID: 9999, // non-existent
+		NodeID: 9999, // non-existent
 		EntityID:    100,
 	}
 	decisions := gate.OnConfigChange(evt)
@@ -224,7 +224,7 @@ func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
 func TestOnConfigChange_EpochIncremented(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	collector := models.Collector{NodeID: "dev1", Status: "online"}
+	collector := models.Node{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	_ = bus.CurrentEpoch() // use bus
@@ -232,7 +232,7 @@ func TestOnConfigChange_EpochIncremented(t *testing.T) {
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		CollectorID: collector.ID,
+		NodeID: collector.ID,
 		EntityID:    100,
 	}
 	// Publish increments epoch
@@ -251,9 +251,9 @@ func TestOnServerStartup_PushAllOnline(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create online collectors
-	mgr.db.Create(&models.Collector{NodeID: "dev1", Status: "online"})
-	mgr.db.Create(&models.Collector{NodeID: "dev2", Status: "online"})
-	mgr.db.Create(&models.Collector{NodeID: "dev3", Status: "offline"})
+	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: "dev2", Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: "dev3", Status: "offline"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 2 {
@@ -298,7 +298,7 @@ func TestOnConfigQuery_InSync(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
 	// Create collector
-	mgr.db.Create(&models.Collector{NodeID: "dev1", Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
 
 	serverHash := mgr.CalcConfigHashForDevice("dev1")
 

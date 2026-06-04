@@ -65,13 +65,13 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	}
 
 	// Upsert collector
-	var collector models.Collector
-	result := m.db.Where("device_id = ?", deviceID).First(&collector)
+	var collector models.Node
+	result := m.db.Where("node_id = ?", deviceID).First(&collector)
 	now := time.Now()
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
-		collector = models.Collector{
-			DeviceID:        deviceID,
+		collector = models.Node{
+			NodeID:        deviceID,
 			Model:           model,
 			FirmwareVersion: firmwareVersion,
 			Status:          "online",
@@ -101,20 +101,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		}
 	}
 
-	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
-	m.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
-		"device_id": deviceID,
-		"node_id":   deviceID, // v2.2 新增 (同一值)
-		"status":    "online",
-		"model":     model,
-		"firmware":  firmwareVersion,
-	})
+	// WebSocket push
 	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
-		"device_id": deviceID, // v2.1 兼容
-		"node_id":   deviceID,
-		"status":    "online",
-		"model":     model,
-		"firmware":  firmwareVersion,
+		"node_id":  deviceID,
+		"status":   "online",
+		"model":    model,
+		"firmware": firmwareVersion,
 	})
 
 	// OTA state reconciliation per docs §6.4.3: if device Hello reports
@@ -125,7 +117,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 
 	// === v2.1: SyncGate decision (replaces ad-hoc hash check) ===
 	helloMsg := &HelloMsg{
-		DeviceID:        deviceID,
+		NodeID:        deviceID,
 		FirmwareVersion: firmwareVersion,
 		Model:           model,
 		ChannelCount:    channelCount,

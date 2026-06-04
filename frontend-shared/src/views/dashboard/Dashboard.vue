@@ -535,8 +535,6 @@ onMounted(async () => {
   await fetchStatusTimeline()
 
   unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
-  // v2.1 兼容订阅 (6 个月后删除, v2.3)
-  wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, handleStatusUpdate)
   unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
 })
 

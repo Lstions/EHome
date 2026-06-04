@@ -11,8 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// registerNodeRoutes sets up v2.2 node CRUD routes (/nodes = /collectors alias)
-// Same handlers, same logic, different path. 6-month compat, then delete v2.1 paths.
+// registerNodeRoutes sets up node CRUD routes
 func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
 	eventBus := collectorMgr.EventBus()
 
@@ -48,7 +47,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionCreate, node.ID, node.ID)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionCreate, node.ID, node.ID)
 		c.JSON(http.StatusCreated, node)
 	})
 
@@ -65,7 +64,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			return
 		}
 		db.Save(&node)
-		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionUpdate, node.ID, node.ID)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionUpdate, node.ID, node.ID)
 		c.JSON(http.StatusOK, node)
 	})
 
@@ -77,7 +76,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(eventBus, collector.CfgChangeCollector, collector.CfgActionDelete, nodeID, nodeID)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionDelete, nodeID, nodeID)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 

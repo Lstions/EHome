@@ -16,7 +16,6 @@ import (
 // 一个 Node = 一个物理边缘设备 (ESP32-C6/S3) 的中心端抽象
 // 字段含义见 docs/设计/节点/详细设计.md
 type Node struct {
-	DeviceID        string     `gorm:"-" json:"device_id,omitempty"` // v2.1 兼容 (alias of NodeID, 不存 DB)
 	ID              uint       `gorm:"primaryKey" json:"id"`
 	NodeID          string     `gorm:"uniqueIndex;size:32;not null" json:"node_id"` // 物理 ID (e.g. esp32c6_404CCA57B7BC)
 	Name            string     `gorm:"size:64;not null" json:"name"`
@@ -57,15 +56,6 @@ type Node struct {
 func (Node) TableName() string { return "nodes" }
 
 // =====================================================================
-// v2.1 兼容别名 (6 个月内保留, 之后 v2.3 删除)
-// =====================================================================
-
-// Collector v2.1 别名 → Node (v2.2)
-//
-// Deprecated: Use Node instead. Will be removed in v2.3.
-type Collector = Node
-
-// =====================================================================
 
 // EdgeDevice 边缘设备 (v2.2 新名 + 增强字段, 替代 v2.1 Device)
 //
@@ -104,22 +94,13 @@ func (EdgeDevice) TableName() string { return "edge_devices" }
 
 // =====================================================================
 
-// Device v2.1 别名 → EdgeDevice (v2.2)
-//
-// Deprecated: Use EdgeDevice instead. Will be removed in v2.3.
-type Device = EdgeDevice
-
-// =====================================================================
-
 // Channel 通道 (v2.2: 物理端点, 不再含 device_type 等业务字段)
 //
 // 一个 Channel = 一个物理总线实例 (UART/I2C/SPI/GPIO/ADC)
 // v2.2 字段含义见 docs/设计/通道/详细设计.md
 type Channel struct {
-	ID     uint `gorm:"primaryKey" json:"id"`
-	NodeID uint `gorm:"index;not null;column:node_id" json:"node_id"` // v2.2 改名 (was CollectorID), column 重命名后保留旧名兼容
-	// 兼容 v2.1 字段名 (gorm:"-" 不存 DB, 仅作 JSON 输出/Go 访问 alias)
-	CollectorID  uint           `gorm:"-" json:"collector_id,omitempty"` // alias of NodeID (6 个月内保留)
+	ID           uint           `gorm:"primaryKey" json:"id"`
+	NodeID       uint           `gorm:"index;not null;column:node_id" json:"node_id"`
 	HardwareType string         `gorm:"size:20" json:"hardware_type"`    // SPI/I2C/UART/GPIO/ADC
 	HardwareID   uint           `gorm:"default:0" json:"hardware_id"`    // 总线上的硬件地址 (e.g. I2C 0x76)
 	IntervalMs   int            `gorm:"default:5000" json:"interval_ms"`
@@ -131,16 +112,9 @@ type Channel struct {
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
-	// 关联 (v2.2 改用 EdgeDevice)
+	// 关联
 	EdgeDevices []EdgeDevice `gorm:"foreignKey:ChannelID" json:"edge_devices,omitempty"`
-	// 兼容 v2.1 字段名 (gorm:"-" 不存 DB)
-	Devices []EdgeDevice `gorm:"-" json:"devices,omitempty"` // alias of EdgeDevices (6 个月内保留)
 }
-
-// 兼容: v2.1 老代码访问 channel.CollectorID 仍可用
-// (因为 DB 列是 node_id, Go 字段是 NodeID, JSON 字段是 node_id)
-// 老代码需改: channel.CollectorID → channel.NodeID
-// 6 个月内通过 grep 工具辅助迁移
 
 // =====================================================================
 
@@ -189,11 +163,6 @@ type DeviceConfig struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
-
-// DeviceTemplate v2.1 别名 → DeviceConfig (v2.2)
-//
-// Deprecated: Use DeviceConfig instead. Will be removed in v2.3.
-type DeviceTemplate = DeviceConfig
 
 // =====================================================================
 
