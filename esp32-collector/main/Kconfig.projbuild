@@ -178,4 +178,22 @@ config COLLECTOR_OTA_SERVER_CERT_PEM_EMPTY
 
 endmenu  # OTA Security
 
+# ==================== Sync v2.1 ====================
+
+config COLLECTOR_SYNC_PERIODIC_SEC
+    int "Periodic config sync interval (seconds)"
+    default 600
+    range 60 3600
+    help
+        Interval for collector to actively query server config.
+        Lower = more responsive, higher = less network traffic.
+
+config COLLECTOR_SYNC_DEDUP_SEC
+    int "Sync dedup window (seconds)"
+    default 30
+    range 10 600
+    help
+        Don't re-request sync within this window unless forced.
+        Applies to SYNC_REASON_DOUBT and other dedup-eligible reasons.
+
 endmenu

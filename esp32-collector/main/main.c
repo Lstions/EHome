@@ -21,14 +21,21 @@
 #include "ota.h"
 #include "rgb_led.h"
 #include "factory_reset.h"
+#include "sync_manager.h"
 
 #define TAG "EHOME"
-#define FIRMWARE_VERSION "2.0.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 /* Device ID from MAC address */
 static char s_device_id[32] = {0};
 static uint32_t s_uptime_sec = 0;
 static bool s_config_received = false;
+
+/* Firmware version accessor for sync_manager */
+const char *get_firmware_version(void)
+{
+    return FIRMWARE_VERSION;
+}
 
 /* Forward declarations */
 static void on_wifi_state(wifi_mgr_state_t state, void *ctx);
@@ -36,6 +43,7 @@ static void on_mqtt_state(mqtt_client_state_t state, void *ctx);
 static void on_mqtt_msg(const char *topic, const uint8_t *data, size_t len, void *ctx);
 static void generate_device_id(void);
 static void status_task(void *pvParameters);
+static void on_sync_send_hello(void);
 
 /* === Main === */
 void app_main(void)
@@ -55,6 +63,8 @@ void app_main(void)
 
     /* Init components */
     config_mgr_init();
+    sync_manager_init();  /* v2.1: sync manager */
+    sync_manager_register_send_hello_cb(on_sync_send_hello);  /* v2.1: register callback */
     msg_handler_init();
     ota_init();
     scheduler_init();
@@ -79,6 +89,9 @@ void app_main(void)
 
     /* Status report task */
     xTaskCreate(status_task, "status", 2048, NULL, 3, NULL);
+
+    /* v2.1: Periodic sync task */
+    xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
 
     ESP_LOGI(TAG, "Collector initialized, device_id=%s", s_device_id);
 }
@@ -190,4 +203,11 @@ static void status_task(void *pvParameters)
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
+}
+
+/* v2.1: Callback for sync_manager to trigger Hello send */
+static void on_sync_send_hello(void)
+{
+    msg_handler_send_hello(s_device_id, FIRMWARE_VERSION, CONFIG_IDF_TARGET,
+                           config_mgr_get_active_channel_count());
 }

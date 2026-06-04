@@ -14,6 +14,10 @@
 #define NVS_NAMESPACE "config"
 #define KEY_MANIFEST  "manifest"
 #define KEY_HASH      "hash"
+/* v2.1 sync keys */
+#define NVS_KEY_CONFIG_EPOCH   "cfg_epoch"     /* uint64 */
+#define NVS_KEY_MANIFEST_ID    "manifest_id"   /* string */
+#define NVS_KEY_LAST_SYNC_TIME "last_sync"     /* uint32 */
 
 /* State */
 static config_manifest_t s_manifest = {0};
@@ -420,4 +424,129 @@ static uint32_t compute_crc32(const uint8_t *data, size_t len)
         crc = crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFF;
+}
+
+/* === v2.1 Sync: Epoch / Manifest ID persistence === */
+
+uint64_t config_mgr_get_epoch(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return 0;
+    }
+
+    uint64_t epoch = 0;
+    err = nvs_get_u64(handle, NVS_KEY_CONFIG_EPOCH, &epoch);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        return 0;  /* Not found or error */
+    }
+
+    return epoch;
+}
+
+bool config_mgr_has_manifest(void)
+{
+    /* Check if manifest_id exists and is non-empty */
+    const char *mid = config_mgr_get_manifest_id();
+    return (mid != NULL && mid[0] != '\0');
+}
+
+const char *config_mgr_get_manifest_id(void)
+{
+    /* First check in-memory manifest */
+    if (s_manifest.manifest_id[0] != '\0') {
+        return s_manifest.manifest_id;
+    }
+
+    /* Try to load from NVS */
+    static char cached_manifest_id[64] = {0};
+    if (cached_manifest_id[0] != '\0') {
+        return cached_manifest_id;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return NULL;
+    }
+
+    size_t len = sizeof(cached_manifest_id);
+    err = nvs_get_str(handle, NVS_KEY_MANIFEST_ID, cached_manifest_id, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK || cached_manifest_id[0] == '\0') {
+        return NULL;
+    }
+
+    return cached_manifest_id;
+}
+
+void config_mgr_set_epoch(uint64_t epoch)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for epoch: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_u64(handle, NVS_KEY_CONFIG_EPOCH, epoch);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save epoch: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Epoch saved: %llu", (unsigned long long)epoch);
+    }
+
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void config_mgr_set_manifest_id(const char *id)
+{
+    if (id == NULL || id[0] == '\0') {
+        return;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for manifest_id: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_str(handle, NVS_KEY_MANIFEST_ID, id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save manifest_id: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Manifest ID saved: %s", id);
+    }
+
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void config_mgr_clear_epoch(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS for clear: %s", esp_err_to_name(err));
+        return;
+    }
+
+    /* Erase epoch and manifest_id keys */
+    nvs_erase_key(handle, NVS_KEY_CONFIG_EPOCH);
+    nvs_erase_key(handle, NVS_KEY_MANIFEST_ID);
+    nvs_erase_key(handle, NVS_KEY_LAST_SYNC_TIME);
+
+    nvs_commit(handle);
+    nvs_close(handle);
+
+    /* Clear in-memory state */
+    memset(s_manifest.manifest_id, 0, sizeof(s_manifest.manifest_id));
+
+    ESP_LOGI(TAG, "Epoch and manifest_id cleared from NVS");
 }

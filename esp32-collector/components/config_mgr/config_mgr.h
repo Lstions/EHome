@@ -76,6 +76,14 @@ uint32_t config_mgr_get_hash(void);
 bool config_mgr_save_to_nvs(void);
 bool config_mgr_load_from_nvs(void);
 
+/* === v2.1 Sync: Epoch / Manifest ID persistence === */
+uint64_t config_mgr_get_epoch(void);
+bool config_mgr_has_manifest(void);
+const char *config_mgr_get_manifest_id(void);
+void config_mgr_set_epoch(uint64_t epoch);
+void config_mgr_set_manifest_id(const char *id);
+void config_mgr_clear_epoch(void);  /* factory_reset use */
+
 #ifdef __cplusplus
 }
 #endif

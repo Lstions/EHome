@@ -244,6 +244,7 @@ import { deviceApi, type Device } from '@/api/device'
 import client from '@/api/client'
 import { getErrorInfo } from '@/utils/errorCode'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import { exportCSV, exportJSON } from '@/utils/exportData'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
@@ -565,7 +566,7 @@ const handleDataUpdate = (message: WebSocketMessage) => {
 const toggleRealtime = (enabled: boolean) => {
   if (enabled) {
     // 订阅实时数据
-    unsubscribeData = wsStore.subscribe('data', handleDataUpdate)
+    unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
     realtimeCount.value = 0
     realtimeData.value = []
     ElMessage.success('已开启实时数据接收')

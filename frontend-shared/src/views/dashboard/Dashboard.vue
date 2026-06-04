@@ -267,6 +267,7 @@ import LineChart from '@/components/charts/LineChart.vue'
 import { dataApi, type Overview } from '@/api/data'
 import client from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 const router = useRouter()
@@ -533,8 +534,8 @@ onMounted(async () => {
   await fetchTrendData()
   await fetchStatusTimeline()
 
-  unsubscribeStatus = wsStore.subscribe('status', handleStatusUpdate)
-  unsubscribeData = wsStore.subscribe('data', handleDataUpdate)
+  unsubscribeStatus = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, handleStatusUpdate)
+  unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
 })
 
 onUnmounted(() => {

@@ -52,6 +52,9 @@ typedef enum {
 #define MSG_CONFIG_QUERY  0x10
 #define MSG_CONFIG_REPORT 0x11
 #define MSG_HELLO_ACK     0x12
+/* v2.1 sync messages */
+#define MSG_CONFIG_SYNC_REQ  0x13
+#define MSG_CONFIG_SYNC_RSP  0x14
 
 /* === Encoder === */
 typedef struct {
@@ -64,6 +67,10 @@ void frame_encoder_init(frame_encoder_t *enc, uint8_t *buf, size_t cap, uint8_t 
 frame_err_t frame_encode_varint(frame_encoder_t *enc, uint8_t field_num, uint64_t value);
 frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const char *str);
 frame_err_t frame_encode_bytes(frame_encoder_t *enc, uint8_t field_num, const uint8_t *data, size_t len);
+/* Bool is encoded as varint (0 or 1), protobuf-compatible */
+static inline frame_err_t frame_encode_bool(frame_encoder_t *enc, uint8_t field_num, bool value) {
+    return frame_encode_varint(enc, field_num, value ? 1 : 0);
+}
 static inline size_t frame_encoder_size(const frame_encoder_t *enc) { return enc->pos; }
 static inline uint8_t *frame_encoder_data(frame_encoder_t *enc) { return enc->buf; }
 

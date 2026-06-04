@@ -33,6 +33,8 @@ typedef enum {
     LED_STATE_OTA,              // 紫色呼吸 - OTA升级中
     LED_STATE_COLLECT_ERROR,    // 黄色单闪 - 采集错误
     LED_STATE_FACTORY_RESET,    // 红色快闪 - 恢复出厂中
+    LED_STATE_SYNCING,          // 黄色快闪 - v2.1 同步中
+    LED_STATE_CONFIG_LAG,       // 橙色慢闪 - v2.1 配置落后
     LED_STATE_MAX
 } led_state_t;
 

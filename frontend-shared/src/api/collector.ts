@@ -21,6 +21,13 @@ export interface Collector {
   capabilities: Record<string, any>
   config: Record<string, any>
   created_at: string
+  // v2.1 同步机制字段
+  protocol_version?: string
+  config_sync_state?: 'in_sync' | 'syncing' | 'lag' | 'error' | 'unknown'
+  config_epoch?: number
+  last_manifest_id?: string
+  last_sync_at?: string
+  last_sync_id?: string
 }
 
 export interface CollectorListResponse {

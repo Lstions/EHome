@@ -148,6 +148,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { channelApi, type Channel } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 interface Props {
@@ -429,7 +430,7 @@ const setupWebSocket = () => {
     wsStore.connect()
   }
 
-  unsubscribeChannelData = wsStore.subscribe('channel_data', (message: WebSocketMessage) => {
+  unsubscribeChannelData = wsStore.subscribe(WS_EVENT.CHANNEL_DATA, (message: WebSocketMessage) => {
     const payload = message.payload as any
     if (!payload) return
 

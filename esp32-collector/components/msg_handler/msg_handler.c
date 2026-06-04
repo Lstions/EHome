@@ -9,6 +9,7 @@
 #include "config_mgr.h"
 #include "ota.h"
 #include "factory_reset.h"
+#include "sync_manager.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -81,6 +82,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
     switch (msg_type) {
     case MSG_CONFIG_MFST: {
         char manifest_id[64] = {0};
+        uint64_t server_epoch = 0;
         frame_field_t field;
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
@@ -89,10 +91,21 @@ void msg_handler_process(const uint8_t *data, size_t len)
                 memcpy(manifest_id, field.value.bytes.ptr, copy_len);
                 manifest_id[copy_len] = '\0';
             }
+            /* v2.1: field 2 = config_epoch */
+            if (field.field_num == 2 && field.wire_type == WIRE_VARINT) {
+                server_epoch = field.value.varint;
+            }
         }
-        ESP_LOGI(TAG, "ConfigManifest: manifest_id=%s", manifest_id);
+        ESP_LOGI(TAG, "ConfigManifest: manifest_id=%s, epoch=%llu", 
+                 manifest_id, (unsigned long long)server_epoch);
         config_mgr_apply_manifest(data, len);
         msg_handler_send_config_result(manifest_id, true);
+        
+        /* v2.1: notify sync_manager of applied config */
+        sync_manager_on_config_applied(server_epoch, manifest_id);
+        
+        /* v2.1: notify downlink received */
+        sync_manager_on_downlink_received(MSG_CONFIG_MFST);
         break;
     }
 
@@ -252,6 +265,9 @@ void msg_handler_process(const uint8_t *data, size_t len)
         s_server_time_ms = server_time;
         ESP_LOGI(TAG, "HelloAck: server_time=%llu features=%u",
                  (unsigned long long)server_time, (unsigned)features);
+        
+        /* v2.1: notify sync_manager */
+        sync_manager_on_downlink_received(MSG_HELLO_ACK);
         break;
     }
 
@@ -266,16 +282,30 @@ void msg_handler_process(const uint8_t *data, size_t len)
 void msg_handler_send_hello(const char *device_id, const char *fw_version,
                             const char *model, uint8_t channel_count)
 {
-    uint8_t buf[256];
+    uint8_t buf[384];
     frame_encoder_t enc;
     
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_HELLO);
+    
+    /* v2.0 fields (1-4) */
     frame_encode_string(&enc, 1, device_id);
     frame_encode_string(&enc, 2, fw_version);
     frame_encode_string(&enc, 3, model);
     frame_encode_varint(&enc, 4, channel_count);
     
-    ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch", device_id, fw_version, model, channel_count);
+    /* v2.1 new fields (5-8) */
+    frame_encode_varint(&enc, 5, config_mgr_get_epoch());
+    frame_encode_varint(&enc, 6, config_mgr_has_manifest() ? 1 : 0);  /* bool as varint */
+    const char *mid = config_mgr_get_manifest_id();
+    if (mid && mid[0] != '\0') {
+        frame_encode_string(&enc, 7, mid);
+    }
+    frame_encode_string(&enc, 8, "2.1");  /* protocol version */
+    
+    ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, proto=2.1",
+             device_id, fw_version, model, channel_count,
+             (unsigned long long)config_mgr_get_epoch(),
+             config_mgr_has_manifest());
     mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
@@ -285,11 +315,20 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t ch
     frame_encoder_t enc;
     
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_STATUS_RPT);
+    
+    /* v2.0 fields (1-3) */
     frame_encode_varint(&enc, 1, uptime_sec);
     frame_encode_string(&enc, 2, status);
     frame_encode_varint(&enc, 3, channel_count);
     
-    ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch", (unsigned long)uptime_sec, status, channel_count);
+    /* v2.1 new fields (4-5) */
+    frame_encode_varint(&enc, 4, config_mgr_get_epoch());
+    frame_encode_varint(&enc, 5, (uint64_t)sync_manager_get_state_enum());  /* idle/syncing/error */
+    
+    ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d",
+             (unsigned long)uptime_sec, status, channel_count,
+             (unsigned long long)config_mgr_get_epoch(),
+             sync_manager_get_state_enum());
     mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 

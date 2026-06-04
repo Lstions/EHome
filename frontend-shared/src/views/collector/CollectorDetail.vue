@@ -81,6 +81,35 @@
       </el-descriptions>
     </el-card>
 
+    <!-- 配置同步状态 -->
+    <el-card v-if="collector" class="config-sync-state" style="margin-top: 20px;">
+      <template #header>
+        <span>配置同步状态 <el-tag :type="syncStateTagType" size="small">{{ syncStateLabel }}</el-tag></span>
+      </template>
+      <el-descriptions :column="2" border>
+        <el-descriptions-item label="协议版本">
+          {{ collector.protocol_version || '2.0' }}
+        </el-descriptions-item>
+        <el-descriptions-item label="Config Epoch">
+          <span :class="{ 'epoch-lag': isEpochLagging }">
+            {{ collector.config_epoch ?? 0 }}
+          </span>
+          <span v-if="isEpochLagging" class="lag-indicator">
+            <el-icon><Warning /></el-icon> 落后
+          </span>
+        </el-descriptions-item>
+        <el-descriptions-item label="Last Manifest">
+          <code>{{ collector.last_manifest_id || '—' }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item label="Last Sync">
+          {{ formatTime(collector.last_sync_at) }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="collector.last_sync_id" label="Last Sync ID" :span="2">
+          <code>{{ collector.last_sync_id }}</code>
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-card>
+
     <el-card v-if="loading && !collector" style="margin-top: 20px;">
       <template #header>
         <span>总线配置</span>
@@ -233,7 +262,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Refresh, RefreshRight, Link, Connection } from '@element-plus/icons-vue'
+import { Upload, Refresh, RefreshRight, Link, Connection, Warning } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
@@ -242,6 +271,7 @@ import { collectorApi, type OTARecord } from '@/api/collector'
 import { deviceApi } from '@/api/device'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 const router = useRouter()
@@ -265,6 +295,34 @@ const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 let unsubscribe: (() => void) | null = null
 
 const collectorId = computed(() => Number(route.params.id))
+
+// v2.1 配置同步状态
+const syncStateLabel = computed(() => {
+  const s = collector.value?.config_sync_state
+  return {
+    in_sync: '已同步',
+    syncing: '同步中',
+    lag: '落后',
+    error: '错误',
+    unknown: '未知',
+  }[s as string] || '未知'
+})
+
+const syncStateTagType = computed(() => {
+  return {
+    in_sync: 'success',
+    syncing: 'warning',
+    lag: 'danger',
+    error: 'danger',
+    unknown: 'info',
+  }[collector.value?.config_sync_state as string] || 'info'
+})
+
+const isEpochLagging = computed(() => {
+  // 服务端 epoch 暂未下发，预留接口
+  const serverEpoch = 0 // TODO: 从全局 store 获取
+  return (collector.value?.config_epoch ?? 0) < serverEpoch
+})
 
 const deviceTypeMap: Record<string, string> = {
   wind_speed: '风速传感器',
@@ -506,7 +564,7 @@ onMounted(() => {
   fetchOTAHistory()
 
   // 订阅状态更新
-  unsubscribe = wsStore.subscribe('status', (message: WebSocketMessage) => {
+  unsubscribe = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
     if (message.payload?.collector_id === collectorId.value) {
       if (message.payload?.latency_ms !== undefined) {
         collector.value = { ...collector.value, latency_ms: message.payload.latency_ms }
@@ -661,5 +719,30 @@ onUnmounted(() => {
 
 .device-no-channel {
   font-size: 12px;
+}
+
+/* 配置同步状态卡 */
+.config-sync-state {
+  .epoch-lag {
+    color: #f56c6c;
+    font-weight: 600;
+  }
+
+  .lag-indicator {
+    color: #f56c6c;
+    font-size: 13px;
+    margin-left: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  code {
+    background: #f5f7fa;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: 'Courier New', Courier, monospace;
+  }
 }
 </style>

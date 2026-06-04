@@ -294,6 +294,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useCollectorStore } from '@/stores/collector'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
@@ -472,7 +473,7 @@ onMounted(() => {
   fetchCollectors()
   
   // 订阅状态更新
-  unsubscribe = wsStore.subscribe('status', (message: WebSocketMessage) => {
+  unsubscribe = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
     if (message.payload?.collector_id) {
       fetchCollectors()
     }
