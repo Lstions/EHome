@@ -101,12 +101,12 @@ func TestSafeASCII(t *testing.T) {
 		input    []byte
 		expected string
 	}{
-		{[]byte{0x41, 0x42, 0x43}, "ABC"},           // printable
-		{[]byte{0x01, 0x02, 0x03}, "..."},            // non-printable
-		{[]byte{0x48, 0x00, 0x65}, "H.e"},            // mixed
-		{[]byte{}, ""},                                // empty
-		{[]byte{0x7F}, "."},                           // DEL
-		{[]byte{0x20, 0x7E}, " ~"},                    // boundary
+		{[]byte{0x41, 0x42, 0x43}, "ABC"}, // printable
+		{[]byte{0x01, 0x02, 0x03}, "..."}, // non-printable
+		{[]byte{0x48, 0x00, 0x65}, "H.e"}, // mixed
+		{[]byte{}, ""},                    // empty
+		{[]byte{0x7F}, "."},               // DEL
+		{[]byte{0x20, 0x7E}, " ~"},        // boundary
 	}
 
 	for _, tt := range tests {

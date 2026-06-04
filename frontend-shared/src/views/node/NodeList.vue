@@ -17,7 +17,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">采集器总数</span>
+            <span class="stat-label">节点总数</span>
           </div>
           <div class="stat-action">
             <el-icon><Plus /></el-icon>
@@ -64,7 +64,7 @@
       <div class="toolbar-left">
         <el-input
           v-model="searchKeyword"
-          placeholder="搜索采集器名称、型号..."
+          placeholder="搜索节点名称、型号..."
           prefix-icon="Search"
           clearable
           class="search-input"
@@ -95,9 +95,9 @@
           </el-button>
         </el-button-group>
         
-        <el-button type="primary" @click="router.push('/collectors?action=add')">
+        <el-button type="primary" @click="router.push('/nodes?action=add')">
           <el-icon><Plus /></el-icon>
-          添加采集器
+          添加节点
         </el-button>
         <el-button type="primary" @click="refreshData">
           <el-icon><Refresh /></el-icon>
@@ -186,7 +186,7 @@
         @row-click="(row) => goToDetail(row.id)"
         row-class-name="collector-row"
       >
-        <el-table-column label="采集器" min-width="200">
+        <el-table-column label="节点" min-width="200">
           <template #default="{ row }">
             <div class="table-collector-info">
               <div class="collector-icon" :class="row.status">
@@ -262,8 +262,8 @@
           :total="total"
           :page-sizes="[10, 20, 50]"
           layout="total, sizes, prev, pager, next, jumper"
-          @current-change="fetchCollectors"
-          @size-change="fetchCollectors"
+          @current-change="fetchNodes"
+          @size-change="fetchNodes"
         />
       </div>
     </el-card>
@@ -272,10 +272,10 @@
     <EmptyState
       v-if="!loading && filteredCollectors.length === 0"
       icon="Connection"
-      title="暂无采集器"
-      description="开始添加第一个采集器来监控您的设备"
+      title="暂无节点"
+      description="开始添加第一个节点来监控您的设备"
       :quick-actions="[
-        { label: '添加采集器', icon: Plus, type: 'primary', handler: () => ElMessage.info('跳转添加页面') }
+        { label: '添加节点', icon: Plus, type: 'primary', handler: () => ElMessage.info('跳转添加页面') }
       ]"
     />
 
@@ -292,7 +292,7 @@ import {
   Plus
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useCollectorStore } from '@/stores/collector'
+import { useNodeStore } from '@/stores/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -300,7 +300,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
 
 const router = useRouter()
-const collectorStore = useCollectorStore()
+const nodeStore = useNodeStore()
 const wsStore = useWebSocketStore()
 
 // 状态
@@ -325,13 +325,13 @@ const stats = reactive({
 
 // 型号选项
 const modelOptions = computed(() => {
-  const models = new Set(collectors.value.map(c => c.model).filter(Boolean))
+  const models = new Set(nodes.value.map(c => c.model).filter(Boolean))
   return Array.from(models)
 })
 
 // 过滤后的采集器
 const filteredCollectors = computed(() => {
-  let result = collectors.value
+  let result = nodes.value
   
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
@@ -354,7 +354,7 @@ const filteredCollectors = computed(() => {
 
 // 更新统计
 const updateStats = () => {
-  const list = collectors.value
+  const list = nodes.value
   stats.total = list.length
   stats.online = list.filter(c => c.status === 'online').length
   stats.offline = list.filter(c => c.status === 'offline').length
@@ -362,19 +362,19 @@ const updateStats = () => {
   stats.onlineRate = stats.total > 0 ? Math.round((stats.online / stats.total) * 100) : 0
 }
 
-// 获取采集器列表
-const fetchCollectors = async () => {
+// 获取节点列表
+const fetchNodes = async () => {
   loading.value = true
   try {
-    await collectorStore.fetchCollectors({
+    await nodeStore.fetchNodes({
       page: currentPage.value,
       page_size: pageSize.value
     })
-    collectors.value = collectorStore.collectors
-    total.value = collectorStore.total
+    nodes.value = nodeStore.collectors
+    total.value = nodeStore.total
     updateStats()
   } catch (error: any) {
-    ElMessage.error('获取采集器列表失败')
+    ElMessage.error('获取节点列表失败')
   } finally {
     loading.value = false
   }
@@ -382,7 +382,7 @@ const fetchCollectors = async () => {
 
 // 刷新数据
 const refreshData = () => {
-  fetchCollectors()
+  fetchNodes()
   ElMessage.success('数据已刷新')
 }
 
@@ -405,13 +405,13 @@ const handleStatClick = (status: string) => {
 
 // 跳转详情
 const goToDetail = (id: number) => {
-  router.push(`/collectors/${id}`)
+  router.push(`/nodes/${id}`)
 }
 
 // 快捷操作
 const handleQuickAction = (action: string, collector: any) => {
   if (action === 'config') {
-    router.push(`/collectors/${collector.id}?tab=config`)
+    router.push(`/nodes/${collector.id}?tab=config`)
   } else if (action === 'ota') {
     router.push(`/firmware?collector=${collector.id}`)
   }
@@ -421,14 +421,14 @@ const handleQuickAction = (action: string, collector: any) => {
 const handleDelete = async (row: any) => {
   try {
     await ElMessageBox.confirm(
-      `确定要删除采集器 "${row.name}" 吗？此操作不可恢复。`,
+      `确定要删除节点 "${row.name}" 吗？此操作不可恢复。`,
       '警告',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
     
-    await collectorStore.deleteCollector(row.id)
+    await nodeStore.deleteCollector(row.id)
     ElMessage.success('删除成功')
-    await fetchCollectors()
+    await fetchNodes()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
@@ -470,12 +470,12 @@ const formatRelativeTime = (time: string) => {
 let unsubscribe: (() => void) | null = null
 
 onMounted(() => {
-  fetchCollectors()
+  fetchNodes()
   
-  // 订阅状态更新
-  unsubscribe = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.collector_id) {
-      fetchCollectors()
+  // 订阅状态更新 (v2.2)
+  unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
+    if (message.payload?.node_id or message.payload?.node_id || message.payload?.collector_id) {
+      fetchNodes()
     }
   })
 })

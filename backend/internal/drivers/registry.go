@@ -1,8 +1,8 @@
 package drivers
 
 import (
-	"fmt"
 	"ehome/backend/pkg/logger"
+	"fmt"
 )
 
 // SensorData represents parsed sensor data

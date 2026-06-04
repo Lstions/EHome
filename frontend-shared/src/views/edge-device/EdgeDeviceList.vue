@@ -17,7 +17,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">设备总数</span>
+            <span class="stat-label">边缘设备总数</span>
           </div>
           <div class="stat-action">
             <el-icon><Plus /></el-icon>
@@ -60,7 +60,7 @@
       <div class="toolbar-left">
         <el-input
           v-model="searchKeyword"
-          placeholder="搜索设备名称、类型..."
+          placeholder="搜索边缘设备名称、类型..."
           prefix-icon="Search"
           clearable
           class="search-input"
@@ -106,7 +106,7 @@
         </el-button-group>
         <el-button type="primary" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
-          创建设备
+          创建边缘设备
         </el-button>
       </div>
     </div>
@@ -142,7 +142,7 @@
             <el-tag size="small">{{ getDeviceTypeLabel(row.device_type) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="采集器" width="150" show-overflow-tooltip>
+        <el-table-column label="节点" width="150" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.collector?.name || ('#' + row.collector_id) }}
           </template>
@@ -216,7 +216,7 @@
           <div class="card-section-info">
             <div class="info-row">
               <span class="info-icon">📡</span>
-              <span class="info-label">所属采集器</span>
+              <span class="info-label">所属节点</span>
               <span class="info-value">{{ device.collector?.name || ('#' + device.collector_id) }}</span>
             </div>
             <div class="info-row">
@@ -289,10 +289,10 @@
     <EmptyState
       v-if="!loading && filteredDevices.length === 0"
       icon="Cpu"
-      title="暂无设备"
-      description='进入采集器详情页，点击“创建设备”按钮开始添加'
+      title="暂无边缘设备"
+      description='进入节点详情页，点击“创建边缘设备”按钮开始添加'
       :quick-actions="[
-        { label: '查看采集器', icon: View, type: 'primary', handler: () => router.push('/collectors') }
+        { label: '查看节点', icon: View, type: 'primary', handler: () => router.push('/nodes') }
       ]"
     />
 
@@ -309,10 +309,10 @@
       />
     </div>
 
-    <!-- 创建设备对话框 -->
+    <!-- 创建边缘设备对话框 -->
     <el-dialog
       v-model="showCreateDialog"
-      :title="editingDeviceId ? '编辑设备' : '创建设备'"
+      :title="editingDeviceId ? '编辑边缘设备' : '创建边缘设备'"
       width="680px"
       :close-on-click-modal="false"
       class="create-device-dialog"
@@ -320,7 +320,7 @@
       <!-- 步骤指示器 -->
       <el-steps :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
         <el-step title="选择解析器" />
-        <el-step title="选择采集器 & 通道" />
+        <el-step title="选择节点 & 通道" />
         <el-step title="基本信息" />
       </el-steps>
       
@@ -407,9 +407,9 @@
           <el-tag size="small" style="margin-left: 8px;">{{ selectedParser.id }}</el-tag>
         </div>
         
-        <!-- 采集器选择（Step 2） -->
-        <el-form-item label="所属采集器" prop="collector_id" style="margin-bottom: 16px;">
-          <el-select v-model="deviceForm.collector_id" placeholder="选择采集器" style="width: 100%;" @change="selectedChannel = null">
+        <!-- 节点选择（Step 2） -->
+        <el-form-item label="所属节点" prop="collector_id" style="margin-bottom: 16px;">
+          <el-select v-model="deviceForm.collector_id" placeholder="选择节点" style="width: 100%;" @change="selectedChannel = null">
             <el-option 
               v-for="c in onlineCollectors" 
               :key="c.id" 
@@ -486,8 +486,8 @@
         </div>
         
         <el-form ref="deviceFormRef" :model="deviceForm" :rules="deviceRules" label-position="top">
-          <el-form-item label="设备名称" prop="name">
-            <el-input v-model="deviceForm.name" placeholder="请输入设备名称" />
+          <el-form-item label="边缘设备名称" prop="name">
+            <el-input v-model="deviceForm.name" placeholder="请输入边缘设备名称" />
           </el-form-item>
           
           <el-form-item label="采集间隔 (ms)" prop="interval_ms">
@@ -531,7 +531,7 @@
           下一步
         </el-button>
         <el-button v-if="createStep === 2" type="primary" :loading="submitting" @click="handleCreate">
-          创建设备
+          创建边缘设备
         </el-button>
       </template>
     </el-dialog>
@@ -550,10 +550,10 @@ import {
   Document
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useCollectorStore } from '@/stores/collector'
+import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
-import { deviceApi } from '@/api/device'
+import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import client from '@/api/client'
@@ -564,7 +564,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
 
 const router = useRouter()
-const collectorStore = useCollectorStore()
+const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
 
@@ -635,7 +635,7 @@ const onTemplateSelected = async (templateId: number | undefined | null) => {
   }
 }
 
-// 编辑设备ID
+// 编辑边缘设备ID
 const editingDeviceId = ref<number | null>(null)
 
 // 设备表单
@@ -650,8 +650,8 @@ const deviceForm = reactive({
 })
 
 const deviceRules = {
-  name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }],
-  collector_id: [{ required: true, message: '请选择采集器', trigger: 'change' }]
+  name: [{ required: true, message: '请输入边缘设备名称', trigger: 'blur' }],
+  collector_id: [{ required: true, message: '请选择节点', trigger: 'change' }]
 }
 
 // 新通道表单
@@ -685,7 +685,7 @@ const fetchTodayDataCount = async () => {
   }
 }
 
-// 只显示在线采集器
+// 只显示在线节点
 const onlineCollectors = computed(() => collectors.value.filter((c: any) => c.status === 'online'))
 
 // 设备类型定义
@@ -725,7 +725,7 @@ const filteredDevices = computed(() => {
   return result
 })
 
-// 获取设备列表
+// 获取边缘设备列表
 const fetchDevices = async () => {
   loading.value = true
   try {
@@ -737,24 +737,24 @@ const fetchDevices = async () => {
     if (statusFilter.value) params.status = statusFilter.value
     // Note: hardware_type is not directly supported by the API,
     // so we handle it client-side in filteredDevices
-    const response = await deviceApi.getList(params)
+    const response = await edgeDeviceApi.getList(params)
     devices.value = response.items || []
     total.value = response.total || 0
     updateStats()
   } catch (error: any) {
-    ElMessage.error('获取设备列表失败')
+    ElMessage.error('获取边缘设备列表失败')
   } finally {
     loading.value = false
   }
 }
 
-// 获取采集器列表
-const fetchCollectors = async () => {
+// 获取节点列表
+const fetchNodes = async () => {
   try {
-    await collectorStore.fetchCollectors({ page: 1, page_size: 100 })
-    collectors.value = collectorStore.collectors
+    await nodeStore.fetchNodes({ page: 1, page_size: 100 })
+    collectors.value = nodeStore.nodes
   } catch (error) {
-    console.error('获取采集器失败', error)
+    console.error('获取节点失败', error)
   }
 }
 
@@ -770,7 +770,7 @@ const updateStats = () => {
   fetchTodayDataCount()
 }
 
-// 获取可用总线（从该采集器的已有通道中提取，fallback 到默认选项）
+// 获取可用总线（从该节点的已有通道中提取，fallback 到默认选项）
 const availableBusesForType = (hardwareType: string): string[] => {
   if (!deviceForm.collector_id) return []
   const collectorChannels = channelStore.channels.filter(
@@ -778,7 +778,7 @@ const availableBusesForType = (hardwareType: string): string[] => {
   )
   // 提取已有的 hardware_id（如 I2C0, UART1），去重
   const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))]
-  // 如果已有总线为空（该采集器还没有任何此类通道），提供默认选项
+  // 如果已有总线为空（该节点还没有任何此类通道），提供默认选项
   if (buses.length === 0) {
     switch (hardwareType) {
       case 'uart': return ['UART1', 'UART2']
@@ -810,7 +810,7 @@ const selectedParserBusTypes = computed(() => {
   return selectedParser.value?.hardware_types || ['i2c', 'spi', 'uart']
 })
 
-// 已有通道列表（按采集器和解析器总线类型过滤）
+// 已有通道列表（按节点和解析器总线类型过滤）
 const existingChannels = computed(() => {
   if (!selectedParser.value) return []
   return channelStore.channels.filter(ch => 
@@ -894,7 +894,7 @@ const handleStatClick = (status: string) => {
 }
 
 const goToDetail = (id: number) => {
-  router.push(`/devices/${id}`)
+  router.push(`/edge-devices/${id}`)
 }
 
 const handleEdit = (device: any) => {
@@ -914,12 +914,12 @@ const handleEdit = (device: any) => {
 const handleDelete = async (device: any) => {
   try {
     await ElMessageBox.confirm(
-      `确定要删除设备 "${device.name}" 吗？`,
+      `确定要删除边缘设备 "${device.name}" 吗？`,
       '警告',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
     
-    await deviceApi.delete(device.id)
+    await edgeDeviceApi.delete(device.id)
     ElMessage.success('删除成功')
     await fetchDevices()
   } catch (error: any) {
@@ -945,7 +945,7 @@ const handleBatchDelete = async () => {
     )
 
     const ids = selectedDevices.value.map(d => d.id)
-    const promises = ids.map(id => deviceApi.delete(id))
+    const promises = ids.map(id => edgeDeviceApi.delete(id))
     await Promise.all(promises)
     ElMessage.success(`成功删除 ${ids.length} 个设备`)
     selectedDevices.value = []
@@ -961,7 +961,7 @@ const handleBatchDelete = async () => {
 const handleBatchExport = () => {
   if (selectedDevices.value.length === 0) return
 
-  const rows = [['ID', '名称', '类型', '采集器', '总线', '状态', '最新数据', '最后采集时间']]
+  const rows = [['ID', '名称', '类型', '节点', '总线', '状态', '最新数据', '最后采集时间']]
   for (const device of selectedDevices.value) {
     rows.push([
       String(device.id),
@@ -997,7 +997,7 @@ const handleCreate = async () => {
 
     // 编辑模式
     if (editingDeviceId.value) {
-      await deviceApi.update(editingDeviceId.value, {
+      await edgeDeviceApi.update(editingDeviceId.value, {
         name: deviceForm.name,
         collector_id: deviceForm.collector_id!,
         device_type: deviceForm.device_type,
@@ -1056,8 +1056,8 @@ const handleCreate = async () => {
       throw new Error('请先选择或创建通道')
     }
     
-    // 创建设备
-    await deviceApi.create({
+    // 创建边缘设备
+    await edgeDeviceApi.create({
       name: deviceForm.name,
       collector_id: deviceForm.collector_id!,
       channel_id: channelId,
@@ -1156,7 +1156,7 @@ watch(showCreateDialog, (val) => {
 
 onMounted(() => {
   fetchDevices()
-  fetchCollectors()
+  fetchNodes()
   channelStore.fetchChannels()
   parserStore.fetchParsers()
   loadTemplates()

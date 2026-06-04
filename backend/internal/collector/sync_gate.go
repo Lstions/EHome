@@ -29,9 +29,9 @@ type SyncAction int
 
 const (
 	SyncActionNone  SyncAction = iota // No action needed — device is in sync
-	SyncActionFull                     // Send full ConfigManifest
-	SyncActionPatch                    // Send incremental patch (future, v2.2)
-	SyncActionDefer                    // Defer — within dedup window
+	SyncActionFull                    // Send full ConfigManifest
+	SyncActionPatch                   // Send incremental patch (future, v2.2)
+	SyncActionDefer                   // Defer — within dedup window
 )
 
 // SyncDecision is the output of a SyncGate decision for a single device.
@@ -67,8 +67,8 @@ type StatusReportMsg struct {
 
 // ConfigQueryMsg carries the parsed ConfigSyncRequest fields.
 type ConfigQueryMsg struct {
-	Reason           string
-	CurrentEpoch     uint64
+	Reason            string
+	CurrentEpoch      uint64
 	CurrentManifestID string
 }
 

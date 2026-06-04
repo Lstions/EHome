@@ -1,9 +1,9 @@
 package database
 
 import (
-	"fmt"
-	"ehome/backend/pkg/logger"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
+	"fmt"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

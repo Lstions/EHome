@@ -10,7 +10,7 @@ import (
 // ConfigHashManager manages config hash calculation and deduplication
 type ConfigHashManager struct {
 	mu          sync.RWMutex
-	hashes      map[string]string   // device_id -> hash
+	hashes      map[string]string    // device_id -> hash
 	lastSent    map[string]time.Time // device_id -> last sent time
 	dedupWindow time.Duration
 }

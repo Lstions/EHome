@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
@@ -135,14 +136,17 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		for _, sd := range sensorData {
 			dataMap[sd.Name] = sd.Value
 		}
-		m.wsHub.BroadcastEvent("data", map[string]interface{}{
-			"device_id":     device.ID,
-			"device_name":   device.Name,
-			"collector_id":  collectorID,
-			"channel_id":    channelID,
-			"data":          dataMap,
-			"collected_at":  time.Now().Format(time.RFC3339),
-		})
+		payload := map[string]interface{}{
+			"device_id":      device.ID, // v2.1 字段名
+			"edge_device_id": device.ID, // v2.2 新增 (同一值)
+			"device_name":    device.Name,
+			"collector_id":   collectorID, // v2.1 字段名
+			"node_id":        collectorID, // v2.2 新增 (同一值)
+			"channel_id":     channelID,
+			"data":           dataMap,
+			"collected_at":   time.Now().Format(time.RFC3339),
+		}
+		m.wsHub.BroadcastEvent(events.DataUpdate, payload)
 	}
 
 	logger.Infof("[%s] Parsed %d sensors using driver %s", deviceID, len(sensorData), device.Type)

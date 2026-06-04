@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
@@ -107,12 +108,13 @@ func (m *Manager) handlePong(deviceID string, payload []byte) {
 			"last_ping_at":    &now,
 		})
 
-	// WebSocket push
-	m.wsHub.BroadcastEvent("ping_result", map[string]interface{}{
-		"device_id":   deviceID,
-		"latency_ms":  rtt.Milliseconds(),
-		"timestamp":   time.Now().Unix(),
-		"verified":    true,
+	// WebSocket push (v2.2: ping_result 事件名不变)
+	m.wsHub.BroadcastEvent(events.PingResult, map[string]interface{}{
+		"device_id":  deviceID,
+		"node_id":    deviceID, // v2.2 新增 (同一值)
+		"latency_ms": rtt.Milliseconds(),
+		"timestamp":  time.Now().Unix(),
+		"verified":   true,
 	})
 }
 
@@ -149,13 +151,14 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v addrs=%x",
 		deviceID, requestID, hardwareID, success, addresses)
 
-	// Broadcast scan result via WebSocket
-	m.wsHub.BroadcastEvent("scan_result", map[string]interface{}{
-		"device_id":    deviceID,
-		"request_id":  requestID,
-		"hardware_id": hardwareID,
-		"success":     success,
-		"addresses":   fmt.Sprintf("%x", addresses),
+	// Broadcast scan result via WebSocket (v2.2: scan_result 事件名不变)
+	m.wsHub.BroadcastEvent(events.ScanResult, map[string]interface{}{
+		"device_id":     deviceID,
+		"node_id":       deviceID, // v2.2 新增 (同一值)
+		"request_id":    requestID,
+		"hardware_id":   hardwareID,
+		"success":       success,
+		"addresses":     fmt.Sprintf("%x", addresses),
 		"address_count": len(addresses),
 	})
 }
@@ -222,8 +225,8 @@ func (m *Manager) handleConfigSyncRequest(deviceID string, payload []byte) {
 		deviceID, reason, currentEpoch, currentManifestID)
 
 	q := &ConfigQueryMsg{
-		Reason:           reason,
-		CurrentEpoch:     currentEpoch,
+		Reason:            reason,
+		CurrentEpoch:      currentEpoch,
 		CurrentManifestID: currentManifestID,
 	}
 

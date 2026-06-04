@@ -122,8 +122,8 @@ func TestOnHello_V2Firmware_LegacyPath(t *testing.T) {
 	// v2.0 firmware: no epoch/nvs_has fields → defaults (epoch=0, nvs_has=true)
 	hello := &HelloMsg{
 		DeviceID:        "dev1",
-		NvsHasConfig:    true,  // default for v2.0
-		ConfigEpoch:     0,     // default for v2.0
+		NvsHasConfig:    true, // default for v2.0
+		ConfigEpoch:     0,    // default for v2.0
 		ProtocolVersion: "2.0",
 	}
 	d := gate.OnHello("dev1", hello)
@@ -284,8 +284,8 @@ func TestOnConfigQuery_Mismatch(t *testing.T) {
 	_, gate, _ := newTestManagerAndGate(t)
 
 	q := &ConfigQueryMsg{
-		Reason:           "periodic",
-		CurrentEpoch:     0,
+		Reason:            "periodic",
+		CurrentEpoch:      0,
 		CurrentManifestID: "old-manifest",
 	}
 	d := gate.OnConfigQuery("dev1", q)

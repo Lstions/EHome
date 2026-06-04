@@ -5,16 +5,38 @@
  * CI: scripts/check_ws_event_names.sh 验证 union match
  *
  * 命名规范: <noun>_<verb> (全小写, 下划线分隔)
+ *
+ * v2.2 兼容策略: 保留 v2.1 事件名 + 新增 v2.2 事件名, 6 个月后删除 v2.1
  */
 
 export const WS_EVENT = {
-  // 采集器
+  // ============================================================
+  // v2.1 事件名 (保留 6 个月, 之后删除)
+  // ============================================================
+
+  // 采集器 (v2.1)
   COLLECTOR_STATUS: 'collector_status',
   COLLECTOR_CONFIG_SYNCED: 'collector_config_synced',
   COLLECTOR_CONFIG_CHANGED: 'collector_config_changed',
 
-  // 设备
+  // 设备 (v2.1)
   DEVICE_STATUS: 'device_status',
+
+  // ============================================================
+  // v2.2 事件名 (新增, 推荐)
+  // ============================================================
+
+  // 节点 (v2.2 替代 collector)
+  NODE_STATUS: 'node_status',
+  NODE_CONFIG_SYNCED: 'node_config_synced',
+  NODE_CONFIG_CHANGED: 'node_config_changed',
+
+  // 边缘设备 (v2.2 替代 device)
+  EDGE_DEVICE_STATUS: 'edge_device_status',
+
+  // ============================================================
+  // 通用事件 (v2.1 + v2.2 共用, 不改名)
+  // ============================================================
 
   // 数据
   DATA_UPDATE: 'data_update',

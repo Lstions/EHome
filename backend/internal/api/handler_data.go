@@ -62,10 +62,10 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		db.Where("collector_id = ? AND enabled = ?", col.ID, true).Find(&channels)
 
 		type LatestValue struct {
-			ChannelID  uint    `json:"channel_id"`
-			SensorName string  `json:"sensor_name"`
-			Value      float64 `json:"value"`
-			Unit       string  `json:"unit"`
+			ChannelID  uint      `json:"channel_id"`
+			SensorName string    `json:"sensor_name"`
+			Value      float64   `json:"value"`
+			Unit       string    `json:"unit"`
 			Timestamp  time.Time `json:"timestamp"`
 		}
 

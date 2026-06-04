@@ -1,9 +1,9 @@
 package collector
 
 import (
+	"ehome/backend/pkg/logger"
 	"encoding/hex"
 	"fmt"
-	"ehome/backend/pkg/logger"
 	"strconv"
 	"strings"
 	"time"
@@ -170,10 +170,10 @@ func (m *Manager) sendConfigManifest(deviceID string) {
 		// Bus type: map string or numeric to uint8
 		busTypeMap := map[string]uint8{
 			"UART": 1, "1": 1,
-			"I2C":  2, "2": 2,
-			"SPI":  3, "3": 3,
+			"I2C": 2, "2": 2,
+			"SPI": 3, "3": 3,
 			"GPIO": 4, "4": 4,
-			"ADC":  5, "5": 5,
+			"ADC": 5, "5": 5,
 		}
 		logger.Infof("config: channel %d BusType=%q BusConfig=%q", ch.ID, ch.BusType, ch.BusConfig)
 		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {

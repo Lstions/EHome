@@ -55,7 +55,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 
 	col := models.Collector{
 		NodeID: "test_device",
-		Status:   "online",
+		Status: "online",
 	}
 	db.Create(&col)
 
@@ -76,7 +76,7 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 
 	oldTime := time.Now().Add(-120 * time.Second)
 	col := models.Collector{
-		NodeID: "old_device",
+		NodeID:   "old_device",
 		Status:   "online",
 		LastSeen: &oldTime,
 	}
@@ -107,7 +107,7 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 
 	recentTime := time.Now().Add(-10 * time.Second)
 	col := models.Collector{
-		NodeID: "recent_device",
+		NodeID:   "recent_device",
 		Status:   "online",
 		LastSeen: &recentTime,
 	}

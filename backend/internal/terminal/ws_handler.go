@@ -42,7 +42,7 @@ type WSHandler struct {
 type termClient struct {
 	conn *wslib.Conn
 	send chan []byte
-	h   *WSHandler
+	h    *WSHandler
 	role string // user role from JWT
 }
 

@@ -96,9 +96,17 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		m.triggerDeviceInit(collector.ID, deviceID)
 	}
 
-	// WebSocket push
+	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
 	m.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
 		"device_id":      deviceID,
+		"node_id":        deviceID, // v2.2 新增 (同一值)
+		"status":         status,
+		"uptime_seconds": uptimeSec,
+		"channel_count":  channelCount,
+	})
+	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
+		"device_id":      deviceID, // v2.1 兼容
+		"node_id":        deviceID,
 		"status":         status,
 		"uptime_seconds": uptimeSec,
 		"channel_count":  channelCount,

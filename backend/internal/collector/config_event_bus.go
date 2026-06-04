@@ -30,14 +30,14 @@ const (
 
 // ConfigChangeEvent represents a single configuration change event on the bus.
 type ConfigChangeEvent struct {
-	EventID     string            // UUID v4
-	Type        ConfigChangeType  // template / channel / device / collector / device_config
+	EventID     string           // UUID v4
+	Type        ConfigChangeType // template / channel / device / collector / device_config
 	Action      ConfigChangeAction
-	CollectorID uint              // affected collector (0 = all / unknown)
-	EntityID    uint              // changed entity ID
-	Epoch       uint64            // global epoch after increment
+	CollectorID uint   // affected collector (0 = all / unknown)
+	EntityID    uint   // changed entity ID
+	Epoch       uint64 // global epoch after increment
 	Timestamp   time.Time
-	Actor       string            // "api:admin", "init:factory_reset", "system:startup"
+	Actor       string // "api:admin", "init:factory_reset", "system:startup"
 }
 
 // ConfigEventBus is a simple channel-based event bus for configuration changes.

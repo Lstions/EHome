@@ -150,5 +150,5 @@ func (c *Config) DatabaseURL() string {
 		c.Database.User, c.Database.Password, c.Database.Host,
 		c.Database.Port, c.Database.DBName, c.Database.SSLMode)
 }
-func (c *Config) LogLevel() string { return c.Log.Level }
+func (c *Config) LogLevel() string         { return c.Log.Level }
 func (c *Config) DBConfig() DatabaseConfig { return c.Database }

@@ -1,6 +1,7 @@
 package offlinedetector
 
 import (
+	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
 	"time"
 
@@ -121,9 +122,16 @@ func (d *Detector) markOffline(deviceID, reason string) {
 		})
 	}
 
-	// WebSocket push
-	d.wsHub.BroadcastEvent("collector_status", map[string]interface{}{
+	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
+	d.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
 		"device_id": deviceID,
+		"node_id":   deviceID, // v2.2 新增
+		"status":    "offline",
+		"reason":    reason,
+	})
+	d.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
+		"device_id": deviceID, // v2.1 兼容
+		"node_id":   deviceID,
 		"status":    "offline",
 		"reason":    reason,
 	})

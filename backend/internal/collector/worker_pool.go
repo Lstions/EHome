@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -101,6 +102,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	// WebSocket push: include sensor device_id (numeric) if found in DB
 	channelDataEvent := map[string]interface{}{
 		"device_id":  job.deviceID, // collector device_id (string, for terminal correlation)
+		"node_id":    job.deviceID, // v2.2 新增 (同一值)
 		"channel_id": job.channelID,
 		"raw_hex":    fmt.Sprintf("%x", job.rawData),
 		"timestamp":  time.Now().Unix(),
@@ -114,5 +116,5 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		channelDataEvent["sensor_device_name"] = sensorDevice.Name
 		channelDataEvent["sensor_type"] = sensorDevice.Type
 	}
-	m.wsHub.BroadcastEvent("channel_data", channelDataEvent)
+	m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
 }

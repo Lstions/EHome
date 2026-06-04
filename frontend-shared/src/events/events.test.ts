@@ -4,13 +4,21 @@ import { WS_EVENT, isValidEventName, isStrictEventName, type WsEventName } from 
 describe('events.ts', () => {
   describe('WS_EVENT constants', () => {
     it('should have all required event names', () => {
-      // 采集器
+      // v2.1 采集器
       expect(WS_EVENT.COLLECTOR_STATUS).toBe('collector_status')
       expect(WS_EVENT.COLLECTOR_CONFIG_SYNCED).toBe('collector_config_synced')
       expect(WS_EVENT.COLLECTOR_CONFIG_CHANGED).toBe('collector_config_changed')
 
-      // 设备
+      // v2.1 设备
       expect(WS_EVENT.DEVICE_STATUS).toBe('device_status')
+
+      // v2.2 节点
+      expect(WS_EVENT.NODE_STATUS).toBe('node_status')
+      expect(WS_EVENT.NODE_CONFIG_SYNCED).toBe('node_config_synced')
+      expect(WS_EVENT.NODE_CONFIG_CHANGED).toBe('node_config_changed')
+
+      // v2.2 边缘设备
+      expect(WS_EVENT.EDGE_DEVICE_STATUS).toBe('edge_device_status')
 
       // 数据
       expect(WS_EVENT.DATA_UPDATE).toBe('data_update')
@@ -108,6 +116,10 @@ describe('events.ts', () => {
         WS_EVENT.COLLECTOR_CONFIG_SYNCED,
         WS_EVENT.COLLECTOR_CONFIG_CHANGED,
         WS_EVENT.DEVICE_STATUS,
+        WS_EVENT.NODE_STATUS,
+        WS_EVENT.NODE_CONFIG_SYNCED,
+        WS_EVENT.NODE_CONFIG_CHANGED,
+        WS_EVENT.EDGE_DEVICE_STATUS,
         WS_EVENT.DATA_UPDATE,
         WS_EVENT.OTA_PROGRESS,
         WS_EVENT.OTA_COMPLETED,
@@ -117,7 +129,7 @@ describe('events.ts', () => {
         WS_EVENT.TERMINAL_ACK,
         WS_EVENT.SCAN_RESULT,
       ]
-      expect(validNames.length).toBe(12)
+      expect(validNames.length).toBe(16)
     })
   })
 })

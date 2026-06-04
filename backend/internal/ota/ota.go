@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/websocket"
@@ -134,10 +135,10 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 }
 
 // HandleOtaProgress processes OtaProgress messages from devices per docs §6.4.2:
-//  - Map wire status code to state machine literal (0/1/2/3 → downloading/installing/success/failed)
-//  - When transitioning out of pending, set started_at
-//  - When reaching a terminal state (success or failed), set completed_at
-//  - Push ota_progress over WebSocket for live UI updates
+//   - Map wire status code to state machine literal (0/1/2/3 → downloading/installing/success/failed)
+//   - When transitioning out of pending, set started_at
+//   - When reaching a terminal state (success or failed), set completed_at
+//   - Push ota_progress over WebSocket for live UI updates
 func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {
@@ -221,7 +222,7 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 
 	// WebSocket push
 	if m.wsHub != nil {
-		m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+		m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
 			"ota_id":    taskID,
 			"status":    task.Status,
 			"progress":  task.Progress,
@@ -263,7 +264,7 @@ func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareV
 			task.StartedAt = &now
 		}
 		if err := m.db.Save(&task).Error; err == nil && m.wsHub != nil {
-			m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+			m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
 				"ota_id":    task.OtaID,
 				"status":    task.Status,
 				"progress":  100,
@@ -283,7 +284,7 @@ func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareV
 			firmwareVersion, task.ToVersion)
 		task.CompletedAt = &now
 		if err := m.db.Save(&task).Error; err == nil && m.wsHub != nil {
-			m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
+			m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
 				"ota_id":    task.OtaID,
 				"status":    task.Status,
 				"progress":  task.Progress,
@@ -314,11 +315,11 @@ func (m *Manager) CancelTask(taskID uint) error {
 		return err
 	}
 	if m.wsHub != nil {
-		m.wsHub.BroadcastEvent("ota_progress", map[string]interface{}{
-			"ota_id":    task.OtaID,
-			"status":    task.Status,
-			"progress":  task.Progress,
-			"reason":    "cancelled",
+		m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
+			"ota_id":   task.OtaID,
+			"status":   task.Status,
+			"progress": task.Progress,
+			"reason":   "cancelled",
 		})
 	}
 	logger.Infof("[OTA %s] cancelled by user", task.OtaID)

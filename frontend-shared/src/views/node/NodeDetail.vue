@@ -1,6 +1,6 @@
 <template>
   <div class="collector-detail">
-    <PageHeader title="采集器详情" :show-back="true" @back="goBack">
+    <PageHeader title="节点详情" :show-back="true" @back="goBack">
       <template #extra>
         <el-button
           :icon="RefreshRight"
@@ -39,7 +39,7 @@
       </template>
 
       <el-descriptions :column="2" border>
-        <el-descriptions-item label="采集器名称">
+        <el-descriptions-item label="节点名称">
           {{ collector.name }}
         </el-descriptions-item>
         <el-descriptions-item label="设备ID">
@@ -124,7 +124,7 @@
       </template>
 
       <!-- 总线配置面板 -->
-      <BusConfigPanel ref="busConfigPanelRef" :collector-id="collectorId" :collector-status="collector?.status" />
+      <ChannelPanel ref="busConfigPanelRef" :collector-id="collectorId" :collector-status="collector?.status" />
     </el-card>
 
     <el-card style="margin-top: 20px;">
@@ -266,9 +266,9 @@ import { Upload, Refresh, RefreshRight, Link, Connection, Warning } from '@eleme
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
-import BusConfigPanel from '@/components/collector/BusConfigPanel.vue'
-import { collectorApi, type OTARecord } from '@/api/collector'
-import { deviceApi } from '@/api/device'
+import ChannelPanel from '@/components/node/ChannelPanel.vue'
+import { nodeApi, type OTARecord } from '@/api/node'
+import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
@@ -345,10 +345,10 @@ const getChannelForDevice = (device: any) => {
   )
 }
 
-// 点击通道标签 → 通过 BusConfigPanel 打开通道编辑对话框
+// 点击通道标签 → 通过 ChannelPanel 打开通道编辑对话框
 const handleEditChannel = (channel: any) => {
   if (collector.value?.status !== 'online') {
-    ElMessage.warning('采集器离线，无法编辑通道')
+    ElMessage.warning('节点离线，无法编辑通道')
     return
   }
   busConfigPanelRef.value?.handleOpenChannelManager(channel)
@@ -370,7 +370,7 @@ const handlePing = async () => {
   if (!collector.value) return
   pinging.value = true
   try {
-    await collectorApi.ping(collector.value.id)
+    await nodeApi.ping(collector.value.id)
     const timeout = setTimeout(() => {
       pinging.value = false
       ElMessage.warning('延迟测量超时，采集器可能离线')
@@ -392,13 +392,13 @@ const fetchCollectorDetail = async () => {
 
   loading.value = true
   try {
-    collector.value = await collectorApi.getDetail(id)
+    collector.value = await nodeApi.getDetail(id)
     // 自动测量延迟（如果在线且无延迟数据）
     if (collector.value?.status === 'online' && (!collector.value.latency_ms || collector.value.latency_ms <= 0)) {
       handlePing()
     }
   } catch (error: any) {
-    ElMessage.error('获取采集器详情失败')
+    ElMessage.error('获取节点详情失败')
   } finally {
     loading.value = false
   }
@@ -411,7 +411,7 @@ const fetchDevices = async () => {
   devicesLoading.value = true
   try {
     const [deviceRes, channelRes] = await Promise.all([
-      deviceApi.getList({ collector_id: id, page: 1, page_size: 100 }),
+      edgeDeviceApi.getList({ collector_id: id, page: 1, page_size: 100 }),
       channelApi.getList(id)
     ])
     devices.value = deviceRes?.items || []
@@ -430,7 +430,7 @@ const fetchDevices = async () => {
 const handleOTASuccess = () => {
   ElMessage.success('OTA 升级已完成')
   showOTADialog.value = false
-  // 刷新采集器详情以更新固件版本
+  // 刷新节点详情以更新固件版本
   fetchCollectorDetail()
   fetchOTAHistory()
 }
@@ -441,7 +441,7 @@ const fetchOTAHistory = async () => {
 
   otaHistoryLoading.value = true
   try {
-    otaHistory.value = (await collectorApi.getOTAHistory(id)) || []
+    otaHistory.value = (await nodeApi.getOTAHistory(id)) || []
   } catch (error: any) {
     logger.error('获取OTA历史失败', { error: String(error) })
   } finally {
@@ -455,7 +455,7 @@ const handleSyncConfig = async () => {
 
   syncingConfig.value = true
   try {
-    await collectorApi.syncConfig(id)
+    await nodeApi.syncConfig(id)
     ElMessage.success('配置同步成功')
   } catch (error: any) {
     ElMessage.error('配置同步失败: ' + (error.message || '未知错误'))
@@ -472,7 +472,7 @@ const handleCancelOTA = async (record: OTARecord) => {
       type: 'warning'
     })
 
-    await collectorApi.cancelOTA(collectorId.value, record.id)
+    await nodeApi.cancelOTA(collectorId.value, record.id)
     ElMessage.success('已取消OTA升级')
     fetchOTAHistory()
   } catch (error: any) {
@@ -507,7 +507,7 @@ const getOTAStatusText = (status: string) => {
 }
 
 const handleViewDevice = (device: any) => {
-  router.push(`/devices/${device.id}`)
+  router.push(`/edge-devices/${device.id}`)
 }
 
 const handleDeviceClick = (row: any) => {
@@ -563,9 +563,9 @@ onMounted(() => {
   fetchDevices()
   fetchOTAHistory()
 
-  // 订阅状态更新
-  unsubscribe = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.collector_id === collectorId.value) {
+  // 订阅状态更新 (v2.2)
+  unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
+    if (message.payload?.node_id === collectorId.value || message.payload?.collector_id === collectorId.value) {
       if (message.payload?.latency_ms !== undefined) {
         collector.value = { ...collector.value, latency_ms: message.payload.latency_ms }
         pinging.value = false
@@ -577,6 +577,12 @@ onMounted(() => {
       } else {
         fetchCollectorDetail()
       }
+    }
+  })
+  // v2.1 兼容订阅 (6 个月后删除, v2.3)
+  wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, (message: WebSocketMessage) => {
+    if (message.payload?.collector_id === collectorId.value) {
+      fetchCollectorDetail()
     }
   })
 })

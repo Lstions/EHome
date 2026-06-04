@@ -25,8 +25,8 @@ type Hub struct {
 	mu         sync.RWMutex
 
 	// Subscription support for event-type listeners
-	subMu        sync.RWMutex
-	subscribers  map[chan Event]bool
+	subMu       sync.RWMutex
+	subscribers map[chan Event]bool
 }
 
 // Client represents a WebSocket client

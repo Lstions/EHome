@@ -96,9 +96,9 @@ func (t *ChannelTerminal) Count() int {
 
 // Manager manages terminals for all channels
 type Manager struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	terminals map[uint]*ChannelTerminal // key: channel_id
-	wsCh     chan TerminalEvent         // WebSocket broadcast channel
+	wsCh      chan TerminalEvent        // WebSocket broadcast channel
 }
 
 // TerminalEvent is sent via WebSocket on new TX/RX

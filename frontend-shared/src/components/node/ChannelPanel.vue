@@ -173,7 +173,7 @@
 import { ref, reactive, onMounted, computed, defineComponent, h } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Loading, Plus } from '@element-plus/icons-vue'
-import { collectorApi } from '@/api/collector'
+import { nodeApi } from '@/api/node'
 import { deviceConfigApi } from '@/api/deviceConfig'
 import { channelApi } from '@/api/channel'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
@@ -323,7 +323,7 @@ const refreshBuses = async () => {
   try {
     // Step 0: 向采集器下发 QueryResources，等待 ReportResources 回填 DB
     try {
-      await collectorApi.queryResources(props.collectorId)
+      await nodeApi.queryResources(props.collectorId)
       // 等采集器上报 ReportResources（通常 1-2 秒内）
       await new Promise(resolve => setTimeout(resolve, 2000))
     } catch (err) {
@@ -331,11 +331,11 @@ const refreshBuses = async () => {
     }
 
     // Step 1: 获取设备能力（纯 Hardware，不含用户配置）
-    const capData = await collectorApi.getCapabilities(props.collectorId)
+    const capData = await nodeApi.getCapabilities(props.collectorId)
     capabilities.value = capData  // 保存到 ref，供 ChannelManager 使用
 
     // Step 2: 获取用户配置（HardwareConfig）
-    const userConfig = await collectorApi.getHardwareConfig(props.collectorId)
+    const userConfig = await nodeApi.getHardwareConfig(props.collectorId)
 
     // Step 3: 先在临时变量中构建合并结果，避免中间状态导致 UI 闪烁
     const mergedHardware: Record<string, any[]> = {}
@@ -394,7 +394,7 @@ const refreshBuses = async () => {
 const saveBusConfig = async () => {
   saving.value = true
   try {
-    await collectorApi.updateHardwareConfig(props.collectorId, hardware.value)
+    await nodeApi.updateHardwareConfig(props.collectorId, hardware.value)
     ElMessage.success('总线配置已保存')
   } catch (error: any) {
     ElMessage.error('保存失败: ' + (error.message || '未知错误'))

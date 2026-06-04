@@ -12,7 +12,7 @@
     <template v-else>
       <el-row :gutter="20">
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/collectors')">
+          <el-card class="stat-card" @click="router.push('/nodes')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #409eff;">
                 <el-icon :size="32"><Connection /></el-icon>
@@ -26,7 +26,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/collectors?status=online')">
+          <el-card class="stat-card" @click="router.push('/nodes?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #67c23a;">
                 <el-icon :size="32"><CircleCheck /></el-icon>
@@ -40,7 +40,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/devices')">
+          <el-card class="stat-card" @click="router.push('/edge-devices')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #e6a23c;">
                 <el-icon :size="32"><Cpu /></el-icon>
@@ -54,7 +54,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/devices?status=online')">
+          <el-card class="stat-card" @click="router.push('/edge-devices?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #67c23a;">
                 <el-icon :size="32"><CircleCheck /></el-icon>
@@ -82,7 +82,7 @@
           </template>
           <el-row :gutter="16">
             <el-col v-if="offlineCollectors > 0" :span="8">
-              <div class="alert-item" @click="router.push('/collectors?status=offline')">
+              <div class="alert-item" @click="router.push('/nodes?status=offline')">
                 <el-icon color="#f56c6c" :size="28"><Connection /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineCollectors }}</div>
@@ -91,7 +91,7 @@
               </div>
             </el-col>
             <el-col v-if="offlineDevices > 0" :span="8">
-              <div class="alert-item" @click="router.push('/devices?status=offline')">
+              <div class="alert-item" @click="router.push('/edge-devices?status=offline')">
                 <el-icon color="#f56c6c" :size="28"><Cpu /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineDevices }}</div>
@@ -148,7 +148,7 @@
               title="暂无趋势数据"
               description="需要设备数据才能显示趋势图表"
               :quick-actions="[
-                { label: '查看设备', icon: Cpu, type: 'primary', handler: () => router.push('/devices') }
+                { label: '查看设备', icon: Cpu, type: 'primary', handler: () => router.push('/edge-devices') }
               ]"
             />
           </div>
@@ -210,7 +210,7 @@
           <el-table v-else-if="(overview.latest_data || []).length > 0" :data="overview.latest_data" stripe>
             <el-table-column prop="device_name" label="设备名称" width="150">
               <template #default="{ row }">
-                <router-link :to="`/devices/${row.device_id}`" class="device-link">
+                <router-link :to="`/edge-devices/${row.device_id}`" class="device-link">
                   {{ row.device_name }}
                 </router-link>
               </template>
@@ -245,8 +245,8 @@
             title="暂无数据"
             description="添加采集器和设备后，数据将在此处显示"
             :quick-actions="[
-              { label: '查看采集器', icon: Connection, type: 'primary', handler: () => router.push('/collectors') },
-              { label: '查看设备', icon: Cpu, handler: () => router.push('/devices') }
+              { label: '查看采集器', icon: Connection, type: 'primary', handler: () => router.push('/nodes') },
+              { label: '查看设备', icon: Cpu, handler: () => router.push('/edge-devices') }
             ]"
           />
         </el-card>
@@ -534,7 +534,9 @@ onMounted(async () => {
   await fetchTrendData()
   await fetchStatusTimeline()
 
-  unsubscribeStatus = wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, handleStatusUpdate)
+  unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
+  // v2.1 兼容订阅 (6 个月后删除, v2.3)
+  wsStore.subscribe(WS_EVENT.COLLECTOR_STATUS, handleStatusUpdate)
   unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
 })
 

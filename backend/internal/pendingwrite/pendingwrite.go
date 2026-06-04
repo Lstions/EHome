@@ -46,7 +46,7 @@ func NewManager(mqttClient *mqtt.Client) *Manager {
 // SendWriteCommand sends a WriteCommand and waits for response
 func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byte, readSize uint32, timeout time.Duration) (*Response, error) {
 	requestID := uint32(time.Now().UnixNano())
-	
+
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
 	enc.EncodeVarint(1, uint64(requestID))
 	enc.EncodeVarint(2, uint64(channelID))

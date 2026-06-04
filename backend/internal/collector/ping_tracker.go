@@ -16,19 +16,19 @@ type PingTracker struct {
 }
 
 type pingRecord struct {
-	deviceID   string
-	timestamp  int64
-	attempt    int
-	createdAt  time.Time
-	callback   func(latencyMs int64, success bool)
+	deviceID  string
+	timestamp int64
+	attempt   int
+	createdAt time.Time
+	callback  func(latencyMs int64, success bool)
 }
 
 // NewPingTracker creates a new ping tracker
 func NewPingTracker() *PingTracker {
 	return &PingTracker{
 		pending:  make(map[string]*pingRecord),
-		maxRetry: 3,                 // retry up to 3 times
-		timeout:  10 * time.Second,   // 10s timeout per attempt
+		maxRetry: 3,                // retry up to 3 times
+		timeout:  10 * time.Second, // 10s timeout per attempt
 		stop:     make(chan struct{}),
 	}
 }

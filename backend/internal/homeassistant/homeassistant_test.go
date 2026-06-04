@@ -14,7 +14,7 @@ func (m *mockMQTT) Publish(topic string, payload []byte) error { return nil }
 func TestPublishDiscovery(t *testing.T) {
 	var client *mqtt.Client
 	_ = client // 避免未使用变量
-	
+
 	integration := NewIntegration(nil)
 	_ = integration
 

@@ -38,6 +38,13 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerTerminalRoutes(v1, collectorMgr)
 		registerMetricsRoutes(v1, db)
 
+		// ============================================================
+		// v2.2 双路径注册 (6 个月兼容期, 之后删除 v2.1 路径)
+		// 同一 handler, 两套路径, 返回相同数据
+		// ============================================================
+		registerNodeRoutes(v1, db, collectorMgr)
+		registerEdgeDeviceRoutes(v1, db, collectorMgr)
+
 		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)
 	}

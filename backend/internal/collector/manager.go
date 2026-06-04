@@ -36,7 +36,7 @@ type Manager struct {
 	termMgr         *terminal.Manager
 	offlineDetector *offlinedetector.Detector
 	stopCh          chan struct{}
-	wg              sync.WaitGroup  // for worker pool graceful shutdown
+	wg              sync.WaitGroup     // for worker pool graceful shutdown
 	dataCh          chan dataReportJob // worker pool job channel
 
 	// F7.6: Ping tracking for retry/timeout

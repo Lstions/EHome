@@ -399,9 +399,9 @@ func TestParseHex(t *testing.T) {
 		{"AABBCC", []byte{0xAA, 0xBB, 0xCC}, false},
 		{"aabbcc", []byte{0xAA, 0xBB, 0xCC}, false},
 		{"", []byte{}, false},
-		{"0", nil, true},       // odd length
-		{"GG", nil, true},      // invalid hex
-		{"0x0102", nil, true},  // 0x prefix not supported
+		{"0", nil, true},      // odd length
+		{"GG", nil, true},     // invalid hex
+		{"0x0102", nil, true}, // 0x prefix not supported
 	}
 
 	for _, tt := range tests {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -13,7 +12,7 @@ import (
 )
 
 // Migration v2.1 → v2.2
-// 
+//
 // 功能:
 //   - 创建 nodes / edge_devices 表 (GORM AutoMigrate)
 //   - 迁移 collectors → nodes (数据复制)
@@ -61,21 +60,21 @@ func main() {
 
 	// Load config
 	cfg := loadConfig()
-	
+
 	// Connect database
 	db := connectDB(cfg)
-	
+
 	if *dryRun {
 		log.Println("📋 DRY-RUN MODE: Printing SQL without executing")
 		printMigrationSQL()
 		return
 	}
-	
+
 	// Execute migration
 	if err := runMigration(db); err != nil {
 		log.Fatalf("❌ Migration failed: %v", err)
 	}
-	
+
 	log.Println("✅ v2.1 → v2.2 migration complete")
 }
 
@@ -89,13 +88,13 @@ func loadConfig() DatabaseConfig {
 		DBName:   getEnv("EHOME_DB_NAME", "ehome"),
 		SSLMode:  getEnv("EHOME_DB_SSLMODE", "disable"),
 	}
-	
+
 	// Try loading from config.yaml
 	configFile := *configPath
 	if configFile == "" {
 		configFile = "../../config.yaml"
 	}
-	
+
 	// Check if config file exists
 	if _, err := os.Stat(configFile); err == nil {
 		log.Printf("   config: %s", configFile)
@@ -104,7 +103,7 @@ func loadConfig() DatabaseConfig {
 	} else {
 		log.Printf("   config: using defaults (file not found: %s)", configFile)
 	}
-	
+
 	return cfg
 }
 
@@ -378,10 +377,10 @@ func migrateData(db *gorm.DB) error {
 		// 检查 nodes 是否已有数据
 		var nodesCount int64
 		db.Raw("SELECT COUNT(*) FROM nodes").Scan(&nodesCount)
-		
+
 		if nodesCount == 0 {
 			log.Printf("  → Migrating collectors → nodes...")
-			
+
 			// 迁移 collectors → nodes
 			result := db.Exec(`
 INSERT INTO nodes (
@@ -446,10 +445,10 @@ ON CONFLICT (node_id) DO NOTHING
 		// 检查 edge_devices 是否已有数据
 		var edgeDevicesCount int64
 		db.Raw("SELECT COUNT(*) FROM edge_devices").Scan(&edgeDevicesCount)
-		
+
 		if edgeDevicesCount == 0 {
 			log.Printf("  → Migrating devices → edge_devices...")
-			
+
 			// 迁移 devices → edge_devices
 			result := db.Exec(`
 INSERT INTO edge_devices (
@@ -616,7 +615,7 @@ ALTER TABLE edge_devices
 	// channels.node_id → nodes.id
 	var channelsExist bool
 	db.Raw("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'channels')").Scan(&channelsExist)
-	
+
 	if channelsExist {
 		var fkChannelsNodeExists bool
 		db.Raw(`

@@ -123,6 +123,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1 G1 fix: Emit config change (device_config affects all nodes using this config)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionCreate, 0, tpl.ID)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
 
@@ -164,16 +166,21 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1 G1 fix: Emit config change (device_config affects all nodes using this config)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, update.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
 
 	// Delete device-config template
 	v1.DELETE("/device-configs/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		tplID := parseUintID(id)
 		if err := db.Delete(&models.DeviceConfig{}, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1 G1 fix: Emit config change
+		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionDelete, 0, tplID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
@@ -232,6 +239,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+		// v2.1 G1 fix: Emit config change (default flag change affects nodes using this config)
+		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, tpl.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
@@ -245,6 +254,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 		if err := db.Create(&dev).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		// v2.1 G1 fix: Emit config change for the channel's collector
+		var ch models.Channel
+		if db.First(&ch, dev.ChannelID).Error == nil {
+			collector.EmitConfigChange(eventBus, collector.CfgChangeDevice, collector.CfgActionCreate, ch.CollectorID, dev.ID)
 		}
 		c.JSON(http.StatusCreated, dev)
 	})

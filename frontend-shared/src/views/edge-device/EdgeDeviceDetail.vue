@@ -1,6 +1,6 @@
 <template>
   <div class="device-detail">
-    <PageHeader title="设备详情" :show-back="true" @back="goBack">
+    <PageHeader title="边缘设备详情" :show-back="true" @back="goBack">
       <template #extra>
         <el-tag v-if="wsConnected" type="success" size="small" style="margin-right: 8px;">
           <el-icon><Connection /></el-icon>
@@ -41,7 +41,7 @@
     </PageHeader>
 
     <!-- 编辑对话框 -->
-    <el-dialog v-model="editDialogVisible" title="编辑设备" width="500px">
+    <el-dialog v-model="editDialogVisible" title="编辑边缘设备" width="500px">
       <el-form :model="editForm" label-width="80px">
         <el-form-item label="设备名称">
           <el-input v-model="editForm.name" />
@@ -66,9 +66,9 @@
     </el-dialog>
 
     <!-- 删除确认对话框 -->
-    <el-dialog v-model="deleteDialogVisible" title="删除设备" width="400px">
+    <el-dialog v-model="deleteDialogVisible" title="删除边缘设备" width="400px">
       <p style="margin: 0;">
-        确定要删除设备 <strong>{{ device?.name }}</strong> 吗？此操作不可恢复。
+        确定要删除边缘设备 <strong>{{ device?.name }}</strong> 吗？此操作不可恢复。
       </p>
       <template #footer>
         <el-button @click="deleteDialogVisible = false">取消</el-button>
@@ -236,7 +236,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import RealtimeDataList, { type DataItem } from '@/components/data/RealtimeDataList.vue'
-import { deviceApi, type Device } from '@/api/device'
+import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { getErrorInfo } from '@/utils/errorCode'
 import { haApi } from '@/api/homeassistant'
 import client from '@/api/client'
@@ -257,7 +257,7 @@ interface SeriesData {
 const router = useRouter()
 const route = useRoute()
 
-const device = ref<Device | null>(null)
+const device = ref<EdgeDevice | null>(null)
 const historyData = ref<HistoryDataPoint[]>([])
 const chartSeries = ref<SeriesData[]>([])
 const loading = ref(true)
@@ -413,9 +413,9 @@ const fetchDeviceDetail = async () => {
 
   loading.value = true
   try {
-    device.value = await deviceApi.getDetail(id)
+    device.value = await edgeDeviceApi.getDetail(id)
   } catch (error: any) {
-    ElMessage.error('获取设备详情失败')
+    ElMessage.error('获取边缘设备详情失败')
   } finally {
     loading.value = false
   }
@@ -426,7 +426,7 @@ const fetchLatestData = async () => {
   if (!id) return
 
   try {
-    const response = await deviceApi.getLatestData(id)
+    const response = await edgeDeviceApi.getLatestData(id)
     if (response && realtimeListRef.value) {
       const dataItem: DataItem = {
         id: `latest-${Date.now()}`,
@@ -525,7 +525,7 @@ const fetchHistoryData = async () => {
         logger.debug('图表数据加载成功', { seriesCount: series.length })
       } else {
         // Fallback: 从 device_data 表获取
-        const response = await deviceApi.getHistoryData(id, {
+        const response = await edgeDeviceApi.getHistoryData(id, {
           start_time: startTime.toISOString(),
           end_time: endTime.toISOString(),
           page: 1,
@@ -590,7 +590,7 @@ const handleTimeRangeChange = () => {
   }
 }
 
-// 编辑设备
+// 编辑边缘设备
 const handleEdit = () => {
   if (!device.value) return
   editForm.value = {
@@ -608,7 +608,7 @@ const submitEdit = async () => {
 
   editLoading.value = true
   try {
-    await deviceApi.update(device.value.id, { name: editForm.value.name })
+    await edgeDeviceApi.update(device.value.id, { name: editForm.value.name })
     ElMessage.success('设备信息已保存')
     editDialogVisible.value = false
     await fetchDeviceDetail()
@@ -619,7 +619,7 @@ const submitEdit = async () => {
   }
 }
 
-// 删除设备
+// 删除边缘设备
 const handleDelete = () => {
   deleteDialogVisible.value = true
 }
@@ -629,10 +629,10 @@ const submitDelete = async () => {
 
   deleteLoading.value = true
   try {
-    await deviceApi.delete(device.value.id)
+    await edgeDeviceApi.delete(device.value.id)
     ElMessage.success('设备已删除')
     deleteDialogVisible.value = false
-    router.replace('/devices')
+    router.replace('/edge-devices')
   } catch (error: any) {
     ElMessage.error(error.message || '删除失败')
   } finally {
@@ -713,7 +713,7 @@ const handleOperation = async (operation: string, label: string) => {
     )
 
     const id = Number(route.params.id)
-    await deviceApi.executeOperation(id, operation)
+    await edgeDeviceApi.executeOperation(id, operation)
     ElMessage.success(`${label}命令已发送`)
     await fetchDeviceDetail()
   } catch (error: any) {
@@ -731,7 +731,7 @@ const currentPwmOperation = ref('')
 const executePwmOperation = async () => {
   try {
     const id = Number(route.params.id)
-    await deviceApi.executeOperation(id, currentPwmOperation.value, {
+    await edgeDeviceApi.executeOperation(id, currentPwmOperation.value, {
       duty: pwmForm.value.duty,
       frequency: pwmForm.value.frequency,
     })

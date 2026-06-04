@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
@@ -32,8 +33,9 @@ func (m *Manager) SendPing(deviceID string) error {
 		m.pingTracker.Track(deviceID, ts, func(latencyMs int64, success bool) {
 			if !success {
 				logger.Warnf("[%s] Ping failed after %d retries (timeout)", deviceID, m.pingTracker.maxRetry)
-				m.wsHub.BroadcastEvent("ping_result", map[string]interface{}{
+				m.wsHub.BroadcastEvent(events.PingResult, map[string]interface{}{
 					"device_id":  deviceID,
+					"node_id":    deviceID, // v2.2 新增
 					"latency_ms": -1,
 					"timestamp":  time.Now().Unix(),
 					"verified":   false,
@@ -174,10 +176,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		// Bus type
 		busTypeMap := map[string]uint8{
 			"UART": 1, "1": 1,
-			"I2C":  2, "2": 2,
-			"SPI":  3, "3": 3,
+			"I2C": 2, "2": 2,
+			"SPI": 3, "3": 3,
 			"GPIO": 4, "4": 4,
-			"ADC":  5, "5": 5,
+			"ADC": 5, "5": 5,
 		}
 		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {
 			subEnc.EncodeVarint(6, uint64(bt))

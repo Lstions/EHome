@@ -18,8 +18,8 @@ type MetricsResponse struct {
 		RequestsInFlight int64 `json:"requests_in_flight"`
 	} `json:"http"`
 	MQTT struct {
-		MessagesReceived  int64 `json:"messages_received"`
-		MessagesSent      int64 `json:"messages_sent"`
+		MessagesReceived int64 `json:"messages_received"`
+		MessagesSent     int64 `json:"messages_sent"`
 		ConnectionErrors int64 `json:"connection_errors"`
 	} `json:"mqtt"`
 	Device struct {

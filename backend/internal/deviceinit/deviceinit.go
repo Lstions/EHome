@@ -1,8 +1,8 @@
 package deviceinit
 
 import (
-	"fmt"
 	"ehome/backend/pkg/logger"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,10 +23,10 @@ type Step struct {
 
 // Orchestrator manages device initialization sequences
 type Orchestrator struct {
-	db     *gorm.DB
-	mqtt   *mqtt.Client
-	mu     sync.RWMutex
-	cache  map[string]*InitState // device_type -> init state
+	db    *gorm.DB
+	mqtt  *mqtt.Client
+	mu    sync.RWMutex
+	cache map[string]*InitState // device_type -> init state
 
 	// v2.1: response tracking for sendAndWait
 	pendingMu   sync.Mutex

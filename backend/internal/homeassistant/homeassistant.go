@@ -1,9 +1,9 @@
 package homeassistant
 
 import (
+	"ehome/backend/pkg/logger"
 	"encoding/json"
 	"fmt"
-	"ehome/backend/pkg/logger"
 
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/mqtt"

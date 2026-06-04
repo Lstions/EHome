@@ -101,9 +101,17 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		}
 	}
 
-	// WebSocket push
+	// WebSocket push (v2.2 dual-emit: collector_status + node_status)
 	m.wsHub.BroadcastEvent(events.CollectorStatus, map[string]interface{}{
 		"device_id": deviceID,
+		"node_id":   deviceID, // v2.2 新增 (同一值)
+		"status":    "online",
+		"model":     model,
+		"firmware":  firmwareVersion,
+	})
+	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
+		"device_id": deviceID, // v2.1 兼容
+		"node_id":   deviceID,
 		"status":    "online",
 		"model":     model,
 		"firmware":  firmwareVersion,
