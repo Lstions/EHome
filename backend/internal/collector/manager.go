@@ -234,7 +234,7 @@ func (m *Manager) GetDeviceIDByCollectorID(collectorID uint) string {
 	if err := m.db.First(&collector, collectorID).Error; err != nil {
 		return ""
 	}
-	return collector.DeviceID
+	return collector.NodeID
 }
 
 // GetOnlineDeviceIDs returns device IDs of all online collectors.

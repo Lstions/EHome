@@ -90,13 +90,13 @@ func (d *Detector) checkDBLastSeen() {
 	now := time.Now()
 	for _, col := range collectors {
 		// Skip if still has Redis heartbeat
-		if redis.IsOnline(col.DeviceID) {
+		if redis.IsOnline(col.NodeID) {
 			continue
 		}
 
 		// Check if last_seen is older than 90s (L3: DB fallback)
 		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
-			d.markOffline(col.DeviceID, "db_last_seen_timeout")
+			d.markOffline(col.NodeID, "db_last_seen_timeout")
 		}
 	}
 }
@@ -106,13 +106,13 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	logger.Infof("[Offline] %s: %s", deviceID, reason)
 
 	// Update DB
-	d.db.Model(&models.Collector{}).Where("device_id = ?", deviceID).Updates(map[string]interface{}{
+	d.db.Model(&models.Collector{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
 		"status": "offline",
 	})
 
 	// Record event
 	var collector models.Collector
-	if err := d.db.Where("device_id = ?", deviceID).First(&collector).Error; err == nil {
+	if err := d.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
 		d.db.Create(&models.CollectorEvent{
 			CollectorID: collector.ID,
 			EventType:   "offline",

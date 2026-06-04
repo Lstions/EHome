@@ -54,7 +54,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 	d := NewDetector(db, wsHub)
 
 	col := models.Collector{
-		DeviceID: "test_device",
+		NodeID: "test_device",
 		Status:   "online",
 	}
 	db.Create(&col)
@@ -62,7 +62,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 	d.markOffline("test_device", "redis_ttl_expired")
 
 	var updated models.Collector
-	db.Where("device_id = ?", "test_device").First(&updated)
+	db.Where("node_id = ?", "test_device").First(&updated)
 	if updated.Status != "offline" {
 		t.Errorf("expected offline, got %s", updated.Status)
 	}
@@ -76,7 +76,7 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 
 	oldTime := time.Now().Add(-120 * time.Second)
 	col := models.Collector{
-		DeviceID: "old_device",
+		NodeID: "old_device",
 		Status:   "online",
 		LastSeen: &oldTime,
 	}
@@ -88,12 +88,12 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(c.DeviceID, "db_last_seen_timeout")
+			d.markOffline(c.NodeID, "db_last_seen_timeout")
 		}
 	}
 
 	var updated models.Collector
-	db.Where("device_id = ?", "old_device").First(&updated)
+	db.Where("node_id = ?", "old_device").First(&updated)
 	if updated.Status != "offline" {
 		t.Errorf("expected offline, got %s", updated.Status)
 	}
@@ -107,7 +107,7 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 
 	recentTime := time.Now().Add(-10 * time.Second)
 	col := models.Collector{
-		DeviceID: "recent_device",
+		NodeID: "recent_device",
 		Status:   "online",
 		LastSeen: &recentTime,
 	}
@@ -118,12 +118,12 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(c.DeviceID, "db_last_seen_timeout")
+			d.markOffline(c.NodeID, "db_last_seen_timeout")
 		}
 	}
 
 	var updated models.Collector
-	db.Where("device_id = ?", "recent_device").First(&updated)
+	db.Where("node_id = ?", "recent_device").First(&updated)
 	if updated.Status != "online" {
 		t.Errorf("expected online, got %s", updated.Status)
 	}

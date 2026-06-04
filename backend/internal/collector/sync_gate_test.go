@@ -93,7 +93,7 @@ func TestOnHello_InSync_NoAction(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
 	// Create a collector with known config
-	collector := models.Collector{DeviceID: "dev1", Status: "online"}
+	collector := models.Collector{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	// Compute the hash the device would report
@@ -185,7 +185,7 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create a collector
-	collector := models.Collector{DeviceID: "dev1", Status: "online"}
+	collector := models.Collector{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	evt := ConfigChangeEvent{
@@ -224,7 +224,7 @@ func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
 func TestOnConfigChange_EpochIncremented(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	collector := models.Collector{DeviceID: "dev1", Status: "online"}
+	collector := models.Collector{NodeID: "dev1", Status: "online"}
 	mgr.db.Create(&collector)
 
 	_ = bus.CurrentEpoch() // use bus
@@ -251,9 +251,9 @@ func TestOnServerStartup_PushAllOnline(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create online collectors
-	mgr.db.Create(&models.Collector{DeviceID: "dev1", Status: "online"})
-	mgr.db.Create(&models.Collector{DeviceID: "dev2", Status: "online"})
-	mgr.db.Create(&models.Collector{DeviceID: "dev3", Status: "offline"})
+	mgr.db.Create(&models.Collector{NodeID: "dev1", Status: "online"})
+	mgr.db.Create(&models.Collector{NodeID: "dev2", Status: "online"})
+	mgr.db.Create(&models.Collector{NodeID: "dev3", Status: "offline"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 2 {
@@ -298,7 +298,7 @@ func TestOnConfigQuery_InSync(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
 	// Create collector
-	mgr.db.Create(&models.Collector{DeviceID: "dev1", Status: "online"})
+	mgr.db.Create(&models.Collector{NodeID: "dev1", Status: "online"})
 
 	serverHash := mgr.CalcConfigHashForDevice("dev1")
 
