@@ -43,6 +43,7 @@ func Connect(cfg Config) error {
 
 func AutoMigrate() error {
 	return DB.AutoMigrate(
+		// v2.1 表 (保留, GORM 会自动加新字段)
 		&models.Collector{},
 		&models.Channel{},
 		&models.ConfigTemplate{},
@@ -61,6 +62,12 @@ func AutoMigrate() error {
 		&models.CollectorEvent{},
 		&models.CalibrationCache{},
 		&models.ConfigMeta{}, // v2.1: epoch persistence
+
+		// v2.2 新表 (Phase 2A-2: DB 迁移)
+		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
+		// 如果 struct 尚未定义, 注释掉这两行, 等 struct 改名完成后再启用
+		// &models.Node{},
+		// &models.EdgeDevice{},
 	)
 }
 

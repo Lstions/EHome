@@ -1,0 +1,298 @@
+-- v2.1 → v2.2 迁移验证脚本
+-- 
+-- 使用方法:
+--   psql -h localhost -U postgres -d ehome -f verify.sql
+--
+-- 预期结果:
+--   - collectors count = nodes count (数据完整迁移)
+--   - devices count = edge_devices count
+--   - channels with node_id IS NULL = 0 (FK 完整)
+--   - edge_devices with device_config_id = 0 应该接近 0 (Type 字段成功猜到 device_config)
+--
+-- 版本: v2.2 (2026-06-04)
+-- 作者: Phase 2A-2 DB Migration
+
+\echo '========================================'
+\echo 'v2.1 → v2.2 Migration Verification'
+\echo '========================================'
+\echo ''
+
+-- ============================================
+-- 1. 表行数对比
+-- ============================================
+
+\echo '1. Table Row Counts'
+\echo '-------------------'
+
+SELECT 
+  'collectors (v2.1)' AS table_name,
+  COUNT(*) AS total_rows,
+  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
+FROM collectors
+
+UNION ALL
+
+SELECT 
+  'nodes (v2.2)' AS table_name,
+  COUNT(*) AS total_rows,
+  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
+FROM nodes
+
+UNION ALL
+
+SELECT 
+  'devices (v2.1)' AS table_name,
+  COUNT(*) AS total_rows,
+  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
+FROM devices
+
+UNION ALL
+
+SELECT 
+  'edge_devices (v2.2)' AS table_name,
+  COUNT(*) AS total_rows,
+  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS active_rows
+FROM edge_devices
+
+ORDER BY table_name;
+
+\echo ''
+
+-- ============================================
+-- 2. 数据完整性检查
+-- ============================================
+
+\echo '2. Data Integrity Checks'
+\echo '------------------------'
+
+SELECT 
+  'collectors vs nodes' AS check_name,
+  CASE 
+    WHEN (SELECT COUNT(*) FROM collectors WHERE deleted_at IS NULL) = 
+         (SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL)
+    THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  (SELECT COUNT(*) FROM collectors WHERE deleted_at IS NULL) AS collectors_count,
+  (SELECT COUNT(*) FROM nodes WHERE deleted_at IS NULL) AS nodes_count
+
+UNION ALL
+
+SELECT 
+  'devices vs edge_devices' AS check_name,
+  CASE 
+    WHEN (SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL) = 
+         (SELECT COUNT(*) FROM edge_devices WHERE deleted_at IS NULL)
+    THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  (SELECT COUNT(*) FROM devices WHERE deleted_at IS NULL) AS devices_count,
+  (SELECT COUNT(*) FROM edge_devices WHERE deleted_at IS NULL) AS edge_devices_count;
+
+\echo ''
+
+-- ============================================
+-- 3. FK 完整性检查
+-- ============================================
+
+\echo '3. Foreign Key Integrity'
+\echo '------------------------'
+
+-- channels.node_id IS NULL 检查
+SELECT 
+  'channels with node_id IS NULL' AS check_name,
+  CASE 
+    WHEN COUNT(*) = 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM channels 
+WHERE node_id IS NULL;
+
+-- edge_devices.node_id FK 违反检查
+SELECT 
+  'edge_devices with invalid node_id' AS check_name,
+  CASE 
+    WHEN COUNT(*) = 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM edge_devices ed
+LEFT JOIN nodes n ON n.id = ed.node_id
+WHERE n.id IS NULL;
+
+-- edge_devices.device_config_id FK 违反检查 (允许 0)
+SELECT 
+  'edge_devices with invalid device_config_id (excluding 0)' AS check_name,
+  CASE 
+    WHEN COUNT(*) = 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM edge_devices ed
+LEFT JOIN device_configs dc ON dc.id = ed.device_config_id
+WHERE dc.id IS NULL
+AND ed.device_config_id != 0;
+
+\echo ''
+
+-- ============================================
+-- 4. device_config_id 占位符检查
+-- ============================================
+
+\echo '4. device_config_id Placeholder Check'
+\echo '-------------------------------------'
+
+SELECT 
+  'edge_devices with device_config_id = 0' AS check_name,
+  CASE 
+    WHEN COUNT(*) = 0 THEN '✅ PASS (all configured)'
+    WHEN COUNT(*) < 10 THEN '⚠️  WARNING (minor)'
+    ELSE '❌ FAIL (needs manual fix)'
+  END AS status,
+  COUNT(*) AS count,
+  ROUND(100.0 * COUNT(*) / NULLIF((SELECT COUNT(*) FROM edge_devices), 0), 2) AS percentage
+FROM edge_devices 
+WHERE device_config_id = 0;
+
+\echo ''
+
+-- ============================================
+-- 5. 视图检查
+-- ============================================
+
+\echo '5. View Checks'
+\echo '--------------'
+
+-- collectors 视图可查询
+SELECT 
+  'collectors view' AS check_name,
+  CASE 
+    WHEN COUNT(*) >= 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM collectors;
+
+-- devices 视图可查询
+SELECT 
+  'devices view' AS check_name,
+  CASE 
+    WHEN COUNT(*) >= 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM devices;
+
+-- device_templates 视图可查询
+SELECT 
+  'device_templates view' AS check_name,
+  CASE 
+    WHEN COUNT(*) >= 0 THEN '✅ PASS'
+    ELSE '❌ FAIL'
+  END AS status,
+  COUNT(*) AS count
+FROM device_templates;
+
+\echo ''
+
+-- ============================================
+-- 6. 索引检查
+-- ============================================
+
+\echo '6. Index Checks'
+\echo '---------------'
+
+SELECT 
+  indexname,
+  tablename
+FROM pg_indexes
+WHERE tablename IN ('nodes', 'edge_devices', 'channels')
+AND indexname LIKE 'idx_%'
+ORDER BY tablename, indexname;
+
+\echo ''
+
+-- ============================================
+-- 7. FK 约束检查
+-- ============================================
+
+\echo '7. FK Constraint Checks'
+\echo '----------------------'
+
+SELECT 
+  tc.constraint_name,
+  tc.table_name,
+  kcu.column_name,
+  ccu.table_name AS foreign_table_name,
+  ccu.column_name AS foreign_column_name
+FROM information_schema.table_constraints AS tc
+JOIN information_schema.key_column_usage AS kcu
+  ON tc.constraint_name = kcu.constraint_name
+  AND tc.table_schema = kcu.table_schema
+JOIN information_schema.constraint_column_usage AS ccu
+  ON ccu.constraint_name = tc.constraint_name
+  AND ccu.table_schema = tc.table_schema
+WHERE tc.constraint_type = 'FOREIGN KEY'
+  AND tc.table_name IN ('edge_devices', 'channels')
+ORDER BY tc.table_name, tc.constraint_name;
+
+\echo ''
+
+-- ============================================
+-- 8. 数据样本检查
+-- ============================================
+
+\echo '8. Data Sample (first 3 nodes)'
+\echo '-----------------------------'
+
+SELECT 
+  id,
+  node_id,
+  name,
+  status,
+  mqtt_topic_format,
+  created_at
+FROM nodes
+ORDER BY id
+LIMIT 3;
+
+\echo ''
+
+\echo '9. Data Sample (first 3 edge_devices)'
+\echo '------------------------------------'
+
+SELECT 
+  id,
+  name,
+  node_id,
+  channel_id,
+  device_config_id,
+  status,
+  created_at
+FROM edge_devices
+ORDER BY id
+LIMIT 3;
+
+\echo ''
+
+-- ============================================
+-- 总结
+-- ============================================
+
+\echo '========================================'
+\echo 'Verification Complete'
+\echo '========================================'
+\echo ''
+\echo 'Expected results:'
+\echo '  ✅ collectors count = nodes count'
+\echo '  ✅ devices count = edge_devices count'
+\echo '  ✅ channels with node_id IS NULL = 0'
+\echo '  ✅ edge_devices with invalid FK = 0'
+\echo '  ⚠️  edge_devices with device_config_id = 0 should be minimal'
+\echo '  ✅ All views queryable'
+\echo '  ✅ All indexes created'
+\echo '  ✅ All FK constraints added'
+\echo ''
+\echo 'If any checks fail, review the migration logs and fix manually.'
+\echo ''
