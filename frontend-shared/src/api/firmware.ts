@@ -1,20 +1,11 @@
 import client from './client'
 
-interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T
-}
-
 export interface Firmware {
   id: number
-  name: string
   version: string
-  model: string
-  file_size: number
-  file_md5: string
-  changelog: string
-  status: string
+  checksum: string
+  size_bytes: number
+  url: string
   created_at: string
 }
 
@@ -27,18 +18,33 @@ export interface FirmwareListParams {
 
 export const firmwareApi = {
   async getList(params?: FirmwareListParams): Promise<{total: number, list: Firmware[]}> {
-    const response = await client.get<unknown, ApiResponse<{total: number, list: Firmware[]}>>('/api/v1/firmwares', { params })
-    return response.data
+    const response = await client.get<unknown, any>('/api/v1/firmwares', { params })
+    // Backend returns bare array [{...}], not {code, data, message} envelope
+    // Interceptor returns response.data (parsed JSON body), so response IS the array
+    if (Array.isArray(response)) {
+      return { total: response.length, list: response as Firmware[] }
+    }
+    // Handle envelope format if backend changes
+    if (response?.data?.list) {
+      return { total: response.data.total ?? response.data.list.length, list: response.data.list }
+    }
+    if (response?.data && Array.isArray(response.data)) {
+      return { total: response.data.length, list: response.data }
+    }
+    return { total: 0, list: [] }
   },
 
   async upload(formData: FormData): Promise<Firmware> {
-    const response = await client.post<unknown, ApiResponse<Firmware>>('/api/v1/firmwares/upload', formData, {
+    const response = await client.post<unknown, any>('/api/v1/firmwares/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
-    return response.data
+    // POST returns bare object (the created firmware)
+    if (response?.id !== undefined) return response as Firmware
+    if (response?.data) return response.data as Firmware
+    return response as unknown as Firmware
   },
 
-  async update(id: number, data: { name?: string; changelog?: string }): Promise<void> {
+  async update(id: number, data: { version?: string; changelog?: string }): Promise<void> {
     await client.put(`/api/v1/firmwares/${id}`, data)
   },
 

@@ -144,7 +144,7 @@
         </el-table-column>
         <el-table-column label="节点" width="150" show-overflow-tooltip>
           <template #default="{ row }">
-            {{ row.collector?.name || ('#' + row.collector_id) }}
+            {{ row.node?.name || ('#' + row.node_id) }}
           </template>
         </el-table-column>
         <el-table-column label="总线" width="120">
@@ -217,7 +217,7 @@
             <div class="info-row">
               <span class="info-icon">📡</span>
               <span class="info-label">所属节点</span>
-              <span class="info-value">{{ device.collector?.name || ('#' + device.collector_id) }}</span>
+              <span class="info-value">{{ device.node?.name || ('#' + device.node_id) }}</span>
             </div>
             <div class="info-row">
               <span class="info-icon">🔌</span>
@@ -292,7 +292,7 @@
       title="暂无边缘设备"
       description='进入节点详情页，点击“创建边缘设备”按钮开始添加'
       :quick-actions="[
-        { label: '查看节点', icon: View, type: 'primary', handler: () => router.push('/nodes') }
+        { label: '查看节点', icon: View, type: 'primary', handler: () => router.push('/node') }
       ]"
     />
 
@@ -408,8 +408,8 @@
         </div>
         
         <!-- 节点选择（Step 2） -->
-        <el-form-item label="所属节点" prop="collector_id" style="margin-bottom: 16px;">
-          <el-select v-model="deviceForm.collector_id" placeholder="选择节点" style="width: 100%;" @change="selectedChannel = null">
+        <el-form-item label="所属节点" prop="node_id" style="margin-bottom: 16px;">
+          <el-select v-model="deviceForm.node_id" placeholder="选择节点" style="width: 100%;" @change="selectedChannel = null">
             <el-option 
               v-for="c in onlineCollectors" 
               :key="c.id" 
@@ -640,7 +640,7 @@ const editingDeviceId = ref<number | null>(null)
 
 // 设备表单
 const deviceForm = reactive({
-  collector_id: null as number | null,
+  node_id: null as number | null,
   name: '',
   device_type: '',
   protocol: 'modbus',
@@ -651,7 +651,7 @@ const deviceForm = reactive({
 
 const deviceRules = {
   name: [{ required: true, message: '请输入边缘设备名称', trigger: 'blur' }],
-  collector_id: [{ required: true, message: '请选择节点', trigger: 'change' }]
+  node_id: [{ required: true, message: '请选择节点', trigger: 'change' }]
 }
 
 // 新通道表单
@@ -772,9 +772,9 @@ const updateStats = () => {
 
 // 获取可用总线（从该节点的已有通道中提取，fallback 到默认选项）
 const availableBusesForType = (hardwareType: string): string[] => {
-  if (!deviceForm.collector_id) return []
+  if (!deviceForm.node_id) return []
   const collectorChannels = channelStore.channels.filter(
-    ch => ch.collector_id === deviceForm.collector_id && ch.hardware_type === hardwareType
+    ch => ch.node_id === deviceForm.node_id && ch.hardware_type === hardwareType
   )
   // 提取已有的 hardware_id（如 I2C0, UART1），去重
   const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))]
@@ -814,7 +814,7 @@ const selectedParserBusTypes = computed(() => {
 const existingChannels = computed(() => {
   if (!selectedParser.value) return []
   return channelStore.channels.filter(ch => 
-    ch.collector_id === deviceForm.collector_id &&
+    ch.node_id === deviceForm.node_id &&
     selectedParser.value!.hardware_types.includes(ch.hardware_type)
   )
 })
@@ -834,7 +834,7 @@ const generatedChannelName = computed(() => {
 const canGoNext = computed(() => {
   if (createStep.value === 0) return !!selectedParser.value
   if (createStep.value === 1) {
-    if (!deviceForm.collector_id) return false
+    if (!deviceForm.node_id) return false
     if (channelTab.value === 'existing') return !!selectedChannel.value
     if (channelTab.value === 'create') return !!newChannel.hardware_id
   }
@@ -894,7 +894,7 @@ const handleStatClick = (status: string) => {
 }
 
 const goToDetail = (id: number) => {
-  router.push(`/edge-devices/${id}`)
+  router.push(`/edge-device/${id}`)
 }
 
 const handleEdit = (device: any) => {
@@ -902,7 +902,7 @@ const handleEdit = (device: any) => {
   editingDeviceId.value = device.id
   // 填充表单数据
   deviceForm.name = device.name
-  deviceForm.collector_id = device.collector_id
+  deviceForm.node_id = device.node_id
   deviceForm.device_type = device.device_type
   deviceForm.protocol = device.protocol || 'modbus'
   deviceForm.hardware_type = device.hardware_type || 'uart'
@@ -967,7 +967,7 @@ const handleBatchExport = () => {
       String(device.id),
       device.name,
       getDeviceTypeLabel(device.device_type),
-      device.collector?.name || ('#' + device.collector_id),
+      device.node?.name || ('#' + device.node_id),
       `${device.hardware_type?.toUpperCase()} ${device.hardware_id}`,
       device.status === 'online' ? '在线' : '离线',
       device.last_data ? formatDeviceData(device.last_data) : '暂无数据',
@@ -999,7 +999,7 @@ const handleCreate = async () => {
     if (editingDeviceId.value) {
       await edgeDeviceApi.update(editingDeviceId.value, {
         name: deviceForm.name,
-        collector_id: deviceForm.collector_id!,
+        node_id: deviceForm.node_id!,
         device_type: deviceForm.device_type,
         protocol: deviceForm.protocol,
         hardware_type: deviceForm.hardware_type,
@@ -1027,7 +1027,7 @@ const handleCreate = async () => {
         : newChannel.address
       
       const ch = await channelStore.createChannel({
-        collector_id: deviceForm.collector_id!,
+        node_id: deviceForm.node_id!,
         hardware_type: newChannel.hardware_type as any,
         hardware_id: newChannel.hardware_id,
         address: address || undefined,
@@ -1059,7 +1059,7 @@ const handleCreate = async () => {
     // 创建边缘设备
     await edgeDeviceApi.create({
       name: deviceForm.name,
-      collector_id: deviceForm.collector_id!,
+      node_id: deviceForm.node_id!,
       channel_id: channelId,
       device_type: selectedParser.value!.id,
       protocol,
@@ -1085,7 +1085,7 @@ const resetCreateDialog = () => {
   selectedChannel.value = null
   channelTab.value = 'existing'
   deviceForm.name = ''
-  deviceForm.collector_id = null
+  deviceForm.node_id = null
   deviceForm.interval_ms = 1000
   newChannel.hardware_type = 'i2c'
   newChannel.hardware_id = ''
@@ -1141,7 +1141,7 @@ watch(showCreateDialog, (val) => {
     editingDeviceId.value = null
     // 重置表单
     deviceForm.name = ''
-    deviceForm.collector_id = null
+    deviceForm.node_id = null
     deviceForm.device_type = ''
     deviceForm.protocol = 'modbus'
     deviceForm.hardware_type = 'uart'

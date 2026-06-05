@@ -79,8 +79,18 @@ export const useWebSocketStore = defineStore('websocket', () => {
 
     manuallyClosed.value = false
 
-    const wsUrl = import.meta.env.VITE_WS_BASE_URL || 'ws://localhost:8080'
-    let statusUrl = `${wsUrl}/api/v1/ws/status`
+    const wsUrl = import.meta.env.VITE_WS_URL || '/api/v1/ws'
+    let statusUrl: string
+
+    // If wsUrl is already a full URL (ws:// or wss://), use it directly;
+    // otherwise construct from current location for same-origin proxy
+    if (wsUrl.startsWith('ws://') || wsUrl.startsWith('wss://')) {
+      statusUrl = `${wsUrl}/api/v1/ws`
+    } else {
+      // Relative path — construct from current page origin
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      statusUrl = `${protocol}//${window.location.host}${wsUrl}`
+    }
 
     const token = localStorage.getItem('token')
     if (token) {

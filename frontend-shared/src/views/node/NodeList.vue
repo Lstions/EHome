@@ -95,7 +95,7 @@
           </el-button>
         </el-button-group>
         
-        <el-button type="primary" @click="router.push('/nodes?action=add')">
+        <el-button type="primary" @click="router.push('/node?action=add')">
           <el-icon><Plus /></el-icon>
           添加节点
         </el-button>
@@ -325,13 +325,13 @@ const stats = reactive({
 
 // 型号选项
 const modelOptions = computed(() => {
-  const models = new Set(nodes.value.map(c => c.model).filter(Boolean))
+  const models = new Set(collectors.value.map(c => c.model).filter(Boolean))
   return Array.from(models)
 })
 
 // 过滤后的采集器
 const filteredCollectors = computed(() => {
-  let result = nodes.value
+  let result = collectors.value
   
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
@@ -354,7 +354,7 @@ const filteredCollectors = computed(() => {
 
 // 更新统计
 const updateStats = () => {
-  const list = nodes.value
+  const list = collectors.value
   stats.total = list.length
   stats.online = list.filter(c => c.status === 'online').length
   stats.offline = list.filter(c => c.status === 'offline').length
@@ -370,7 +370,7 @@ const fetchNodes = async () => {
       page: currentPage.value,
       page_size: pageSize.value
     })
-    nodes.value = nodeStore.collectors
+    collectors.value = nodeStore.nodes
     total.value = nodeStore.total
     updateStats()
   } catch (error: any) {
@@ -405,13 +405,13 @@ const handleStatClick = (status: string) => {
 
 // 跳转详情
 const goToDetail = (id: number) => {
-  router.push(`/nodes/${id}`)
+  router.push(`/node/${id}`)
 }
 
 // 快捷操作
 const handleQuickAction = (action: string, collector: any) => {
   if (action === 'config') {
-    router.push(`/nodes/${collector.id}?tab=config`)
+    router.push(`/node/${collector.id}?tab=config`)
   } else if (action === 'ota') {
     router.push(`/firmware?collector=${collector.id}`)
   }
@@ -426,7 +426,7 @@ const handleDelete = async (row: any) => {
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
     
-    await nodeStore.deleteCollector(row.id)
+    await nodeStore.deleteNode(row.id)
     ElMessage.success('删除成功')
     await fetchNodes()
   } catch (error: any) {

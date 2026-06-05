@@ -9,8 +9,8 @@ export const useChannelStore = defineStore('channel', {
   }),
 
   getters: {
-    getByCollectorId: (state) => (collectorId: number) => {
-      return state.channels.filter(ch => ch.collector_id === collectorId)
+    getByNodeId: (state) => (nodeId: number) => {
+      return state.channels.filter(ch => ch.node_id === nodeId)
     },
 
     getById: (state) => (id: number) => {
@@ -19,10 +19,10 @@ export const useChannelStore = defineStore('channel', {
   },
 
   actions: {
-    async fetchChannels(collectorId?: number) {
+    async fetchChannels(nodeId?: number) {
       this.loading = true
       try {
-        const res = await channelApi.getList(collectorId)
+        const res = await channelApi.getList(nodeId)
         // API returns paginated response: { items: Channel[], total, page, page_size }
         // or when filtered by collector_id: { items: Channel[] } or Channel[]
         if (Array.isArray(res)) {

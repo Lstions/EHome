@@ -3,7 +3,7 @@ import client from './client'
 
 export interface Channel {
   id?: number
-  collector_id: number
+  node_id: number
   name?: string              // 通道名称（后端自动生成，如 "I2C0_0x77"）
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc' | 'pwm'
   hardware_id: string            // "I2C0"
@@ -25,8 +25,8 @@ export const channelApi = {
   // 获取通道列表
   // Server returns: { code: 200, data: { items: Channel[], total, page, page_size } }
   // or with collector_id filter: { items: Channel[] }
-  async getList(collectorId?: number): Promise<Channel[] | { items: Channel[]; total?: number }> {
-    const params = collectorId ? { collector_id: collectorId } : {}
+  async getList(nodeId?: number): Promise<Channel[] | { items: Channel[]; total?: number }> {
+    const params = nodeId ? { node_id: nodeId } : {}
     const response = await client.get('/api/v1/channels', { params })
     // response is the full body: { code: 200, data: { items, total, ... } }
     const body = response as { code?: number; data?: unknown }

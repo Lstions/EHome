@@ -1,11 +1,5 @@
 import client from './client'
 
-interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T
-}
-
 export interface Overview {
   nodes: {
     total: number
@@ -29,15 +23,16 @@ export interface Overview {
 
 export const dataApi = {
   async getOverview(): Promise<Overview> {
-    const response = await client.get<unknown, ApiResponse<Overview>>('/api/v1/overview')
-    return response.data
+    const response = await client.get<unknown, any>('/api/v1/overview')
+    // /overview 直接返回 {nodes, edge_devices, ...}，没有 {code, data, message} 包装
+    return response.data !== undefined ? response.data : response
   },
 
   async getNodeDevicesData(nodeId: number, params: {
     start_time: string
     end_time: string
   }): Promise<any> {
-    const response = await client.get<unknown, ApiResponse<any>>(`/api/v1/nodes/${nodeId}/latest`, { params })
-    return response.data
+    const response = await client.get<unknown, any>(`/api/v1/nodes/${nodeId}/latest`, { params })
+    return response?.data !== undefined ? response.data : response
   }
 }

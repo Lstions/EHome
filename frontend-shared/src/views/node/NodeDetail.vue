@@ -507,7 +507,7 @@ const getOTAStatusText = (status: string) => {
 }
 
 const handleViewDevice = (device: any) => {
-  router.push(`/edge-devices/${device.id}`)
+  router.push(`/edge-device/${device.id}`)
 }
 
 const handleDeviceClick = (row: any) => {

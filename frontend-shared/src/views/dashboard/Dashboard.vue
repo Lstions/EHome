@@ -12,56 +12,56 @@
     <template v-else>
       <el-row :gutter="20">
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/nodes')">
+          <el-card class="stat-card" @click="router.push('/node')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #409eff;">
                 <el-icon :size="32"><Connection /></el-icon>
               </div>
               <div class="stat-info">
                 <p class="stat-label">采集器总数</p>
-                <p class="stat-value">{{ overview.collectors?.total || 0 }}</p>
+                <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
               </div>
             </div>
           </el-card>
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/nodes?status=online')">
+          <el-card class="stat-card" @click="router.push('/node?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #67c23a;">
                 <el-icon :size="32"><CircleCheck /></el-icon>
               </div>
               <div class="stat-info">
                 <p class="stat-label">在线采集器</p>
-                <p class="stat-value">{{ overview.collectors?.online || 0 }}</p>
+                <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
               </div>
             </div>
           </el-card>
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/edge-devices')">
+          <el-card class="stat-card" @click="router.push('/edge-device')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #e6a23c;">
                 <el-icon :size="32"><Cpu /></el-icon>
               </div>
               <div class="stat-info">
                 <p class="stat-label">设备总数</p>
-                <p class="stat-value">{{ overview.devices?.total || 0 }}</p>
+                <p class="stat-value">{{ overview.edge_devices?.total || 0 }}</p>
               </div>
             </div>
           </el-card>
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/edge-devices?status=online')">
+          <el-card class="stat-card" @click="router.push('/edge-device?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: #67c23a;">
                 <el-icon :size="32"><CircleCheck /></el-icon>
               </div>
               <div class="stat-info">
                 <p class="stat-label">在线设备</p>
-                <p class="stat-value">{{ overview.devices?.online || 0 }}</p>
+                <p class="stat-value">{{ overview.edge_devices?.online || 0 }}</p>
               </div>
             </div>
           </el-card>
@@ -82,7 +82,7 @@
           </template>
           <el-row :gutter="16">
             <el-col v-if="offlineCollectors > 0" :span="8">
-              <div class="alert-item" @click="router.push('/nodes?status=offline')">
+              <div class="alert-item" @click="router.push('/node?status=offline')">
                 <el-icon color="#f56c6c" :size="28"><Connection /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineCollectors }}</div>
@@ -91,7 +91,7 @@
               </div>
             </el-col>
             <el-col v-if="offlineDevices > 0" :span="8">
-              <div class="alert-item" @click="router.push('/edge-devices?status=offline')">
+              <div class="alert-item" @click="router.push('/edge-device?status=offline')">
                 <el-icon color="#f56c6c" :size="28"><Cpu /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineDevices }}</div>
@@ -148,7 +148,7 @@
               title="暂无趋势数据"
               description="需要设备数据才能显示趋势图表"
               :quick-actions="[
-                { label: '查看设备', icon: Cpu, type: 'primary', handler: () => router.push('/edge-devices') }
+                { label: '查看设备', icon: Cpu, type: 'primary', handler: () => router.push('/edge-device') }
               ]"
             />
           </div>
@@ -210,7 +210,7 @@
           <el-table v-else-if="(overview.latest_data || []).length > 0" :data="overview.latest_data" stripe>
             <el-table-column prop="device_name" label="设备名称" width="150">
               <template #default="{ row }">
-                <router-link :to="`/edge-devices/${row.device_id}`" class="device-link">
+                <router-link :to="`/edge-device/${row.device_id}`" class="device-link">
                   {{ row.device_name }}
                 </router-link>
               </template>
@@ -245,8 +245,8 @@
             title="暂无数据"
             description="添加采集器和设备后，数据将在此处显示"
             :quick-actions="[
-              { label: '查看采集器', icon: Connection, type: 'primary', handler: () => router.push('/nodes') },
-              { label: '查看设备', icon: Cpu, handler: () => router.push('/edge-devices') }
+              { label: '查看采集器', icon: Connection, type: 'primary', handler: () => router.push('/node') },
+              { label: '查看设备', icon: Cpu, handler: () => router.push('/edge-device') }
             ]"
           />
         </el-card>
@@ -273,8 +273,8 @@ import { logger } from '@/utils/logger'
 const router = useRouter()
 
 const overview = ref<Overview>({
-  collectors: { total: 0, online: 0, offline: 0 },
-  devices: { total: 0, online: 0, offline: 0 },
+  nodes: { total: 0, online: 0, offline: 0 },
+  edge_devices: { total: 0, online: 0, offline: 0 },
   latest_data: []
 })
 
@@ -304,8 +304,8 @@ const trendCategoryName = computed(() => {
 const statusTimeline = ref<any[]>([])
 
 // 告警摘要计算属性
-const offlineCollectors = computed(() => Math.max(0, (overview.value.collectors?.total || 0) - (overview.value.collectors?.online || 0)))
-const offlineDevices = computed(() => Math.max(0, (overview.value.devices?.total || 0) - (overview.value.devices?.online || 0)))
+const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
+const offlineDevices = computed(() => Math.max(0, (overview.value.edge_devices?.total || 0) - (overview.value.edge_devices?.online || 0)))
 const dataErrorCount = computed(() => {
   return (overview.value.latest_data || []).filter(d => (d.error_code && d.error_code > 0)).length
 })

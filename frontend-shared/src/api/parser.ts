@@ -19,14 +19,16 @@ export const parserApi = {
    * 获取所有解析器列表
    */
   async getList(): Promise<Parser[]> {
-    const response = await client.get('/api/v1/drivers')
-    const drivers = response.data.data || []
+    const response = await client.get('/api/v1/device-configs')
+    // Backend returns {code, data: {list: [...], total, ...}, message}
+    const envelope = response as any
+    const drivers = envelope.data?.list || envelope.data || []
     return drivers.map((d: any) => ({
-      id: d.type,
-      name: d.display_name,
+      id: d.type || d.device_type,
+      name: d.display_name || d.name,
       vendor: d.oem,
       category: d.category,
-      hardware_types: d.bus_types || [],
+      hardware_types: d.bus_types || d.hardware_types || [],
       measure_types: d.measure_type ? [d.measure_type] : [],
       description: d.description
     }))
@@ -36,16 +38,18 @@ export const parserApi = {
    * 获取单个解析器详情
    */
   async getById(id: string): Promise<Parser> {
-    const response = await client.get(`/api/v1/drivers/${id}`)
-    const d = response.data.data
+    const response = await client.get(`/api/v1/device-configs/${id}`)
+    // Backend returns {code, data: DeviceConfig, message}
+    const envelope = response as any
+    const d = envelope.data
     return {
-      id: d.meta.type,
-      name: d.meta.display_name,
-      vendor: d.meta.oem,
-      category: d.meta.category,
-      hardware_types: d.meta.bus_types || [],
-      measure_types: d.meta.measure_type ? [d.meta.measure_type] : [],
-      description: d.meta.description
+      id: d.type || d.device_type,
+      name: d.display_name || d.name,
+      vendor: d.oem,
+      category: d.category,
+      hardware_types: d.bus_types || d.hardware_types || [],
+      measure_types: d.measure_type ? [d.measure_type] : [],
+      description: d.description
     }
   }
 }

@@ -12,30 +12,21 @@
       <el-skeleton v-if="loading" :rows="5" animated />
       <el-table v-else :data="firmwares" stripe>
         <el-table-column prop="id" label="ID" width="60" />
-        <el-table-column prop="name" label="固件名称" />
         <el-table-column prop="version" label="版本号">
           <template #default="{ row }">
             <span>{{ formatVersion(row.version) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="model" label="设备型号" />
-        <el-table-column prop="file_size" label="文件大小" width="120">
+        <el-table-column prop="checksum" label="校验和(SHA256)" width="200" show-overflow-tooltip />
+        <el-table-column prop="size_bytes" label="文件大小" width="120">
           <template #default="{ row }">
-            <span>{{ formatFileSize(row.file_size) }}</span>
+            <span>{{ formatFileSize(row.size_bytes) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="file_md5" label="MD5" width="200" show-overflow-tooltip />
-        <el-table-column prop="changelog" label="更新日志" show-overflow-tooltip />
+        <el-table-column prop="url" label="下载地址" show-overflow-tooltip />
         <el-table-column prop="created_at" label="创建时间" width="180">
           <template #default="{ row }">
             <span>{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="row.status === 'active' ? 'success' : 'info'" size="small">
-              {{ row.status === 'active' ? '启用' : row.status || '未知' }}
-            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="200" fixed="right">
@@ -88,14 +79,8 @@
       width="500px"
     >
       <el-form :model="uploadForm" :rules="uploadRules" label-width="100px">
-        <el-form-item label="固件名称" prop="name">
-          <el-input v-model="uploadForm.name" placeholder="请输入固件名称" />
-        </el-form-item>
         <el-form-item label="版本号" prop="version">
           <el-input v-model="uploadForm.version" placeholder="如: 1.0.0" />
-        </el-form-item>
-        <el-form-item label="设备型号" prop="model">
-          <el-input v-model="uploadForm.model" placeholder="如: ESP32-S3" />
         </el-form-item>
         <el-form-item label="固件文件" prop="file">
           <el-upload
@@ -111,14 +96,6 @@
           <div v-if="uploadForm.file" class="file-info">
             已选择: {{ uploadForm.file.name }}
           </div>
-        </el-form-item>
-        <el-form-item label="更新日志" prop="changelog">
-          <el-input
-            v-model="uploadForm.changelog"
-            type="textarea"
-            :rows="4"
-            placeholder="请输入更新日志"
-          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -137,19 +114,8 @@
       :close-on-click-modal="false"
     >
       <el-form :model="editForm" label-width="100px">
-        <el-form-item label="固件名称">
-          <el-input v-model="editForm.name" placeholder="请输入固件名称" />
-        </el-form-item>
         <el-form-item label="版本号">
           <el-input v-model="editForm.version" placeholder="如: 1.0.0" />
-        </el-form-item>
-        <el-form-item label="更新日志">
-          <el-input
-            v-model="editForm.changelog"
-            type="textarea"
-            :rows="4"
-            placeholder="请输入更新日志"
-          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -184,23 +150,16 @@ const editing = ref(false)
 const editingFirmwareId = ref<number | null>(null)
 
 const editForm = reactive({
-  name: '',
-  version: '',
-  changelog: ''
+  version: ''
 })
 
 const uploadForm = reactive({
-  name: '',
   version: '',
-  model: '',
-  file: null as File | null,
-  changelog: ''
+  file: null as File | null
 })
 
 const uploadRules = {
-  name: [{ required: true, message: '请输入固件名称', trigger: 'blur' }],
   version: [{ required: true, message: '请输入版本号', trigger: 'blur' }],
-  model: [{ required: true, message: '请输入设备型号', trigger: 'blur' }],
   file: [{ required: true, message: '请选择固件文件', trigger: 'change' }]
 }
 
@@ -223,7 +182,7 @@ const fetchFirmwares = async () => {
 const handleDelete = async (row: Firmware) => {
   try {
     await ElMessageBox.confirm(
-      `确定要删除固件 "${row.name} (版本: ${formatVersion(row.version)})" 吗？`,
+      `确定要删除固件版本 "${formatVersion(row.version)}" 吗？`,
       '提示',
       {
         confirmButtonText: '确定',
@@ -245,10 +204,7 @@ const handleDelete = async (row: Firmware) => {
 // 编辑固件
 const handleEdit = (row: Firmware) => {
   editingFirmwareId.value = row.id
-  // 去掉 v 前缀后填充表单
-  editForm.name = row.name
   editForm.version = row.version.replace(/^v/i, '')
-  editForm.changelog = row.changelog || ''
   showEditDialog.value = true
 }
 
@@ -257,8 +213,7 @@ const handleEditSubmit = async () => {
   editing.value = true
   try {
     await firmwareApi.update(editingFirmwareId.value, {
-      name: editForm.name,
-      changelog: editForm.changelog
+      version: editForm.version
     })
     ElMessage.success('更新成功')
     showEditDialog.value = false
@@ -275,7 +230,7 @@ const handleDownload = (row: Firmware) => {
   const url = firmwareApi.getDownloadUrl(row.id)
   const link = document.createElement('a')
   link.href = url
-  link.download = `${row.name}_${formatVersion(row.version)}.bin`
+  link.download = `firmware_${formatVersion(row.version)}.bin`
   link.click()
   ElMessage.success('开始下载')
 }
@@ -306,11 +261,8 @@ const handleUpload = async () => {
   uploading.value = true
   try {
     const formData = new FormData()
-    formData.append('name', uploadForm.name)
     formData.append('version', uploadForm.version)
-    formData.append('model', uploadForm.model)
     formData.append('file', uploadForm.file)
-    formData.append('changelog', uploadForm.changelog)
 
     await firmwareApi.upload(formData)
     ElMessage.success('上传成功')
@@ -325,15 +277,13 @@ const handleUpload = async () => {
 }
 
 const resetUploadForm = () => {
-  uploadForm.name = ''
   uploadForm.version = ''
-  uploadForm.model = ''
   uploadForm.file = null
-  uploadForm.changelog = ''
   uploadRef.value?.clearFiles()
 }
 
-const formatFileSize = (bytes: number) => {
+const formatFileSize = (bytes: number | undefined | null) => {
+  if (!bytes && bytes !== 0) return '-'
   if (bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB']

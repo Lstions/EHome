@@ -632,7 +632,7 @@ const submitDelete = async () => {
     await edgeDeviceApi.delete(device.value.id)
     ElMessage.success('设备已删除')
     deleteDialogVisible.value = false
-    router.replace('/edge-devices')
+    router.replace('/edge-device')
   } catch (error: any) {
     ElMessage.error(error.message || '删除失败')
   } finally {

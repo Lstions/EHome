@@ -164,13 +164,47 @@ export interface PeripheralAssignment {
 
 export const nodeApi = {
   async getList(params?: NodeListParams): Promise<NodeListResponse> {
-    const response = await client.get<unknown, ApiResponse<NodeListResponse>>('/api/v1/nodes', { params })
-    return response.data
+    const response = await client.get('/api/v1/nodes', { params })
+    // Client interceptor returns response.data (parsed JSON body)
+    // Backend v2.2 returns bare array [{...}], not an envelope
+    const raw = response as any
+    if (Array.isArray(raw)) {
+      // Backend returns bare array [{...}], wrap it
+      return {
+        total: raw.length,
+        page: params?.page || 1,
+        page_size: params?.page_size || raw.length,
+        items: raw as unknown as Node[]
+      }
+    }
+    // If backend returns proper envelope format {code, data: {items, total, ...}, message}
+    if (raw?.data) {
+      const inner = raw.data
+      if (inner.items) {
+        return inner as NodeListResponse
+      }
+      // data is the list directly
+      if (Array.isArray(inner)) {
+        return {
+          total: inner.length,
+          page: params?.page || 1,
+          page_size: params?.page_size || inner.length,
+          items: inner as unknown as Node[]
+        }
+      }
+    }
+    // Fallback
+    return { total: 0, page: 1, page_size: 20, items: [] }
   },
 
   async getDetail(id: number): Promise<Node> {
-    const response = await client.get<unknown, ApiResponse<Node>>(`/api/v1/nodes/${id}`)
-    return response.data
+    const response = await client.get(`/api/v1/nodes/${id}`)
+    // Backend may return bare object or envelope
+    const raw = response as any
+    if (raw?.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
+      return raw.data as Node
+    }
+    return raw as unknown as Node
   },
 
   async delete(id: number): Promise<void> {
