@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// jwtSecret must match the one in api/middleware.go
-// TODO: move to shared config package
-const jwtSecret = "ehome-dev-secret-change-me"
+// v2.2: jwtSecret reads from EHOME_JWT_SECRET env var, matching api/middleware.go
+var jwtSecret = func() string {
+	if s := os.Getenv("EHOME_JWT_SECRET"); s != "" {
+		return s
+	}
+	return "ehome-dev-secret-change-me"
+}()
 
 // HistoryFetcher retrieves terminal history for a channel (callback to avoid import cycle)
 type HistoryFetcher func(channelID uint) ([]Entry, error)

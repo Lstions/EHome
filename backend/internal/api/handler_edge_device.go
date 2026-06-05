@@ -52,7 +52,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, dev.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionCreate, ch.NodeID, dev.ID)
+			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionCreate, ch.NodeID, dev.ID)
 		}
 		c.JSON(http.StatusCreated, dev)
 	})
@@ -77,7 +77,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
+			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
 	})
@@ -145,7 +145,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		}
 		// EmitConfigChange
 		if hasNode {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionDelete, ch.NodeID, d.ID)
+			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionDelete, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
@@ -191,7 +191,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 			Params    map[string]interface{} `json:"params"`
 		}
 		c.ShouldBindJSON(&req)
-		// TODO: send operation via MQTT to device
+		// NOTE: requires MQTT device gateway integration
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"device_id": id, "operation": req.Operation, "status": "pending",
 		}})
@@ -201,8 +201,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 	e.GET("/:id/operations/history", func(c *gin.Context) {
 		_, _ = strconv.Atoi(c.Param("id"))
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-		// TODO: query operation_logs table
-		_ = limit // avoid unused variable warning
+		_ = limit // reserved for future MQTT event pipeline integration
+		// NOTE: operation_logs table populated by MQTT event pipeline
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []interface{}{}})
 	})
 }

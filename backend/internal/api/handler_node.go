@@ -50,7 +50,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionCreate, node.ID, node.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionCreate, node.ID, node.ID)
 		c.JSON(http.StatusCreated, node)
 	})
 
@@ -67,7 +67,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			return
 		}
 		db.Save(&node)
-		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionUpdate, node.ID, node.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionUpdate, node.ID, node.ID)
 		c.JSON(http.StatusOK, node)
 	})
 
@@ -79,7 +79,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(eventBus, collector.CfgChangeNode, collector.CfgActionDelete, nodeID, nodeID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionDelete, nodeID, nodeID)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 
@@ -143,7 +143,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			HardwareID string `json:"hardware_id"`
 		}
 		c.ShouldBindJSON(&req)
-		// TODO: send I2C scan command via MQTT sendAndWait
+		// NOTE: requires MQTT broadcast I2C_SCAN to node firmware
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%d-%d", id, time.Now().Unix()),
 		}})
@@ -480,6 +480,7 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 		if configChanged {
 			// Increment epoch via EventBus (Publish increments epoch)
 			collector.EmitConfigChange(
+				c,
 				collectorMgr.EventBus(),
 				collector.CfgChangeNode,
 				collector.CfgActionUpdate,

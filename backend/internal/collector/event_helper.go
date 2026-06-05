@@ -1,8 +1,11 @@
 package collector
 
 import (
+	"fmt"
+
 	"ehome/backend/pkg/logger"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -11,14 +14,21 @@ import (
 //
 // Usage in API handlers:
 //
-//	defer EmitConfigChange(bus, CfgChangeNode, CfgActionUpdate, nodeID, channelID)
+//	defer EmitConfigChange(ctx, bus, CfgChangeNode, CfgActionUpdate, nodeID, channelID)
 //
-// The actor field is derived from context when available, otherwise defaults to "api:unknown".
-func EmitConfigChange(bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, nodeID, entityID uint) {
+// The actor field is derived from gin.Context when available, otherwise defaults to "system".
+func EmitConfigChange(ctx *gin.Context, bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, nodeID, entityID uint) {
 	if bus == nil {
 		logger.Warnf("EmitConfigChange: bus is nil, skipping event (type=%s action=%s node=%d entity=%d)",
 			t, a, nodeID, entityID)
 		return
+	}
+
+	actor := "system"
+	if ctx != nil {
+		if uid, exists := ctx.Get("user_id"); exists {
+			actor = fmt.Sprintf("api:%v", uid)
+		}
 	}
 
 	evt := ConfigChangeEvent{
@@ -27,7 +37,7 @@ func EmitConfigChange(bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAct
 		Action:   a,
 		NodeID:   nodeID,
 		EntityID: entityID,
-		Actor:    "api:admin", // TODO: extract from gin.Context when auth context is available
+		Actor:    actor,
 	}
 
 	if err := bus.Publish(evt); err != nil {
