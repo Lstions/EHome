@@ -17,10 +17,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onErrorCaptured } from 'vue'
+import { ref, onErrorCaptured, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { logger } from '@/utils/logger'
 
 const error = ref<Error | null>(null)
+const route = useRoute()
+
+// 路由变化时自动清除错误状态
+watch(() => route.path, () => {
+  error.value = null
+})
 
 onErrorCaptured((err: unknown) => {
   const e = err instanceof Error ? err : new Error(String(err))
