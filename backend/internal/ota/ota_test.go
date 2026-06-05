@@ -62,8 +62,8 @@ func TestCreateTaskWithFirmware(t *testing.T) {
 	if task == nil {
 		t.Fatal("expected non-nil task")
 	}
-	if task.CollectorID != 1 {
-		t.Errorf("expected collector_id=1, got %d", task.CollectorID)
+	if task.NodeID != 1 {
+		t.Errorf("expected node_id=1, got %d", task.NodeID)
 	}
 	if task.FirmwareID != fw.ID {
 		t.Errorf("expected firmware_id=%d, got %d", fw.ID, task.FirmwareID)

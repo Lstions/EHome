@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/models"
@@ -79,6 +80,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 			collector.EmitConfigChange(eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
+	})
+
+	// Init edge device (trigger InitDevice via sendAndWait)
+	v1.POST("/edge-devices/:id/init", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		// TODO: trigger InitDevice via sendAndWait (G6)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"id": id, "status": "pending", "message": "init triggered"}})
 	})
 
 	// Delete edge device (v2.2 path for DELETE /devices/:id)

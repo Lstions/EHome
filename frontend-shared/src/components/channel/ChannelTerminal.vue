@@ -336,7 +336,7 @@ const sendData = async () => {
     lastOptimisticTx.value = { data: hexData, time: Date.now() }
 
     wsStore.send({
-      type: 'channel_write',
+      type: WS_EVENT.CHANNEL_WRITE,
       payload: {
         channel_id: selectedChannelId.value,
         data: hexData,
@@ -503,7 +503,7 @@ const setupWebSocket = () => {
   })
 
   // 订阅 channel_write_error（WS 消息路由错误，如 channel 不存在）
-  const unsubWriteError = wsStore.subscribe('channel_write_error', (message: WebSocketMessage) => {
+  const unsubWriteError = wsStore.subscribe(WS_EVENT.CHANNEL_WRITE_ERROR, (message: WebSocketMessage) => {
     const payload = message.payload as any
     if (!payload) return
     if (!selectedChannelId.value || payload.channel_id !== selectedChannelId.value) return

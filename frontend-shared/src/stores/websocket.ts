@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { logger } from '@/utils/logger'
+import { WS_EVENT } from '@/events/events'
 
 export interface WebSocketMessage {
   type: string
@@ -115,7 +116,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
     ws.value.onmessage = (event: MessageEvent) => {
       try {
         const message: WebSocketMessage = JSON.parse(event.data)
-        if (message.type === 'channel_data') {
+        if (message.type === WS_EVENT.CHANNEL_DATA) {
           console.log('[WS] Received:', message.type, JSON.stringify(message.payload))
         }
         handleMessage(message)

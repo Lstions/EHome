@@ -73,6 +73,11 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.eventBus = NewConfigEventBus(1024, epochGen)
 	mgr.syncGate = NewSyncGate(mgr, mgr.eventBus)
 
+	// G10: Record initial node online count
+	var onlineCount int64
+	mgr.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineCount)
+	metrics.NodeOnlineCount.Set(float64(onlineCount))
+
 	return mgr
 }
 
@@ -155,8 +160,21 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleConfigReport(deviceID, payload)
 	case frame.MsgConfigSyncReq:
 		m.handleConfigSyncRequest(deviceID, payload)
+
+	// Unimplemented message types — log warning, no panic
+	case frame.MsgConfigMfst:
+		logger.Warnf("[%s] Unimplemented msg type: ConfigManifest (0x%02X) — no handler", deviceID, msgType)
+	case frame.MsgOtaCmd:
+		logger.Warnf("[%s] Unimplemented msg type: OtaCommand (0x%02X) — no handler", deviceID, msgType)
+	case frame.MsgScanReq:
+		logger.Warnf("[%s] Unimplemented msg type: ScanRequest (0x%02X) — no handler", deviceID, msgType)
+	case frame.MsgConfigQuery:
+		logger.Warnf("[%s] Unimplemented msg type: ConfigQuery (0x%02X) — no handler", deviceID, msgType)
+	case frame.MsgConfigSyncRsp:
+		logger.Warnf("[%s] Unimplemented msg type: ConfigSyncResponse (0x%02X) — no handler", deviceID, msgType)
+
 	default:
-		logger.Infof("[%s] Unknown msg type: 0x%02X", deviceID, msgType)
+		logger.Warnf("[%s] Unknown msg type: 0x%02X", deviceID, msgType)
 	}
 }
 

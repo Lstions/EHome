@@ -208,11 +208,11 @@ type DataSource struct {
 
 // =====================================================================
 
-// OTATask OTA升级任务 (保留 CollectorID, 待 v2.3 改名 NodeID)
+// OTATask OTA升级任务 (v2.3: CollectorID → NodeID, DB 列名 collector_id 不变)
 type OTATask struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	OtaID       string     `gorm:"column:ota_id;size:64;uniqueIndex;not null" json:"ota_id"`
-	CollectorID uint       `gorm:"index;not null" json:"collector_id"` // 待 v2.3 改为 NodeID
+	NodeID      uint       `gorm:"column:collector_id;index;not null" json:"node_id"`
 	FirmwareID  uint       `gorm:"index" json:"firmware_id"`
 	Status      string     `gorm:"size:20;default:pending" json:"status"`
 	Progress    uint8      `gorm:"default:0" json:"progress"`
@@ -228,12 +228,16 @@ type OTATask struct {
 
 // Firmware 固件版本 (保留)
 type Firmware struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Version   string    `gorm:"size:32;not null" json:"version"`
-	Checksum  string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
-	SizeBytes uint64    `json:"size_bytes"`
-	URL       string    `gorm:"size:256;not null" json:"url"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Version     string    `gorm:"size:32;not null" json:"version"`
+	Checksum    string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
+	SizeBytes   uint64    `json:"size_bytes"`
+	URL         string    `gorm:"size:256;not null" json:"url"`
+	Filename    string    `gorm:"size:256" json:"filename,omitempty"`
+	StoragePath string    `gorm:"size:512" json:"storage_path,omitempty"`
+	Changelog   string    `gorm:"type:text" json:"changelog,omitempty"`
+	TargetModel string    `gorm:"size:64" json:"target_model,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // =====================================================================

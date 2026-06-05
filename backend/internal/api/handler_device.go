@@ -264,6 +264,36 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
+	// Get init-flow for a device-config
+	v1.GET("/device-configs/:id/init-flow", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var cfg models.DeviceConfig
+		if err := db.First(&cfg, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cfg.InitFlow})
+	})
+
+	// Test parser for a device-config
+	v1.POST("/device-configs/:id/test-parser", func(c *gin.Context) {
+		var req struct {
+			RawData string `json:"raw_data"`
+		}
+		c.ShouldBindJSON(&req)
+		id, _ := strconv.Atoi(c.Param("id"))
+		var cfg models.DeviceConfig
+		if err := db.First(&cfg, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		// TODO: call parser registry with raw_data
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
+			"raw_data": req.RawData, "parsed": gin.H{},
+		}})
+	})
+
 	// ============================================================
 	// Channel 通道 CRUD
 	// ============================================================

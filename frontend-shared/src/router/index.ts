@@ -48,6 +48,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '节点详情', hidden: true },
       },
       {
+        path: 'channel',
+        name: 'ChannelList',
+        component: () => import('@/views/channel/ChannelList.vue'),
+        meta: { title: '通道管理', icon: 'Connection' },
+      },
+      {
         path: 'edge-device',
         name: 'EdgeDeviceList',
         component: () => import('@/views/edge-device/EdgeDeviceList.vue'),

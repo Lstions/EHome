@@ -79,4 +79,49 @@ var (
 		Help:    "HTTP request duration in seconds",
 		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
 	}, []string{"method", "path"})
+
+	// --- G10: Additional design metrics ---
+
+	// NodeOnlineCount tracks online node count
+	NodeOnlineCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ehome_node_online_count",
+		Help: "Online node count",
+	})
+
+	// EdgeDeviceTotal tracks edge device count by status
+	EdgeDeviceTotal = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ehome_edge_device_total",
+		Help: "Edge device count by status",
+	}, []string{"status"})
+
+	// DataReceivedTotal counts data reports received by node and status
+	DataReceivedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_data_received_total",
+		Help: "Data reports received",
+	}, []string{"node_id", "status"})
+
+	// MqttPublishFailures counts MQTT publish failures by topic
+	MqttPublishFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_mqtt_publish_failures_total",
+		Help: "MQTT publish failures",
+	}, []string{"topic"})
+
+	// HttpRequestDuration records HTTP request duration with status code label
+	HttpRequestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ehome_http_request_duration_seconds",
+		Help:    "HTTP request duration",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"method", "route", "status"})
+
+	// SyncDecisionsTotal counts sync gate decisions by reason and action
+	SyncDecisionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_sync_decisions_total",
+		Help: "Sync decisions total",
+	}, []string{"reason", "action"})
+
+	// EventBusDroppedTotal counts ConfigEventBus drops
+	EventBusDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_event_bus_dropped_total",
+		Help: "ConfigEventBus drops",
+	})
 )

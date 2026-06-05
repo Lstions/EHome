@@ -8,7 +8,11 @@ import (
 )
 
 // Wire types (protobuf compatible)
+
+// Note: 设计文档 v2.0 最初提议 0xEB，实际实现选用 0x0B 保持兼容性
 const (
+	FrameMagic = 0x0B
+
 	WireVarint          = 0
 	WireFixed64         = 1
 	WireLengthDelimited = 2
@@ -37,8 +41,9 @@ const (
 	MsgConfigQuery  = 0x10
 	MsgConfigReport = 0x11
 	MsgHelloAck     = 0x12
-	MsgConfigSyncReq = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
-	MsgPongAck      = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
+	MsgConfigSyncReq  = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
+	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
+	MsgPongAck        = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
 )
 
 // Field represents a decoded field
@@ -286,7 +291,8 @@ func MsgTypeName(msgType uint8) string {
 		MsgConfigReport: "config_report",
 		MsgHelloAck:    "hello_ack",
 		MsgConfigSyncReq:  "config_sync_request",
-		MsgPongAck:       "pong_ack",
+		MsgConfigSyncRsp:  "config_sync_response",
+		MsgPongAck:        "pong_ack",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

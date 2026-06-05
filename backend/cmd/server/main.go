@@ -24,7 +24,6 @@ import (
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -157,11 +156,6 @@ func main() {
 			"version": "2.0.0",
 			"drivers": driverRegistry.List(),
 		})
-	})
-
-	// Prometheus metrics endpoint
-	r.GET("/metrics", func(c *gin.Context) {
-		promhttp.Handler().ServeHTTP(c.Writer, c.Request)
 	})
 
 	// Start HTTP server with graceful shutdown support

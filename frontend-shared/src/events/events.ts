@@ -35,6 +35,15 @@ export const WS_EVENT = {
 
   // 扫描
   SCAN_RESULT: 'scan_result',
+
+  // 通道写入 (v2.2)
+  CHANNEL_WRITE: 'channel_write',
+  CHANNEL_WRITE_ERROR: 'channel_write_error',
+
+  // ─── v2.1 兼容 (6个月后删除, remove after 2026-12) ───
+  COLLECTOR_STATUS: 'collector_status',
+  COLLECTOR_CONFIG_SYNCED: 'collector_config_synced',
+  DEVICE_STATUS: 'device_status',
 } as const
 
 /** 所有合法 WS 事件名的联合类型 */
@@ -57,4 +66,47 @@ export function isValidEventName(name: string): boolean {
  */
 export function isStrictEventName(name: string): boolean {
   return /^[a-z]+(_[a-z]+)+$/.test(name)
+}
+
+/**
+ * v2.1 → v2.2 事件名映射 (兼容层)
+ * 用于双订阅，确保前端同时处理新旧事件名
+ * TODO: 2026-12 后删除
+ */
+export const WS_EVENT_COMPAT: Record<string, WsEventName> = {
+  // v2.1 → v2.2
+  [WS_EVENT.COLLECTOR_STATUS]: WS_EVENT.NODE_STATUS,
+  [WS_EVENT.COLLECTOR_CONFIG_SYNCED]: WS_EVENT.NODE_CONFIG_SYNCED,
+  [WS_EVENT.DEVICE_STATUS]: WS_EVENT.EDGE_DEVICE_STATUS,
+}
+
+/**
+ * 创建兼容订阅函数
+ * 同时订阅新事件名和旧事件名，返回统一的取消订阅函数
+ *
+ * @example
+ * // v2.1 compat: 同时订阅 collector_status 和 node_status
+ * const unsubscribe = subscribeCompat(wsStore, WS_EVENT.NODE_STATUS, handler)
+ */
+export function createCompatSubscribe(
+  subscribe: (type: string, handler: (msg: any) => void) => () => void
+) {
+  return (eventName: WsEventName, handler: (msg: any) => void): (() => void) => {
+    const unsubscribers: Array<() => void> = []
+
+    // 订阅新事件名
+    unsubscribers.push(subscribe(eventName, handler))
+
+    // 检查是否有对应的旧事件名需要兼容订阅
+    const oldEventName = Object.entries(WS_EVENT_COMPAT).find(([, newName]) => newName === eventName)?.[0]
+    if (oldEventName) {
+      // v2.1 compat: 同时订阅旧事件名
+      unsubscribers.push(subscribe(oldEventName, handler))
+    }
+
+    // 返回统一的取消订阅函数
+    return () => {
+      unsubscribers.forEach(unsub => unsub())
+    }
+  }
 }

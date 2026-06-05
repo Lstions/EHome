@@ -10,6 +10,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 )
 
 // handleDataReport processes DataReport (type=0x03)
@@ -48,6 +49,13 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 
 	logger.Infof("[%s] DataReport: ch=%d ts=%d seq=%d req=%d err=%d raw=%x",
 		deviceID, channelID, timestamp, sequence, requestID, errorCode, rawData)
+
+	// G10: Record data received metric
+	status := "ok"
+	if errorCode != 0 {
+		status = "error"
+	}
+	metrics.DataReceivedTotal.WithLabelValues(deviceID, status).Inc()
 
 	// Dispatch to worker pool (non-blocking)
 	// Look up collector numeric ID (may be 0 if not found, but that's fine for fanout)

@@ -267,7 +267,7 @@ import LineChart from '@/components/charts/LineChart.vue'
 import { dataApi, type Overview } from '@/api/data'
 import client from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
-import { WS_EVENT } from '@/events/events'
+import { WS_EVENT, createCompatSubscribe } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 const router = useRouter()
@@ -534,7 +534,9 @@ onMounted(async () => {
   await fetchTrendData()
   await fetchStatusTimeline()
 
-  unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
+  // v2.1 compat: 同时订阅 collector_status 和 node_status
+  const subscribeCompat = createCompatSubscribe(wsStore.subscribe.bind(wsStore))
+  unsubscribeStatus = subscribeCompat(WS_EVENT.NODE_STATUS, handleStatusUpdate)
   unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
 })
 

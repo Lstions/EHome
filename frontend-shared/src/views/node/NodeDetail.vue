@@ -271,7 +271,7 @@ import { nodeApi, type OTARecord } from '@/api/node'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
-import { WS_EVENT } from '@/events/events'
+import { WS_EVENT, createCompatSubscribe } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 const router = useRouter()
@@ -564,7 +564,9 @@ onMounted(() => {
   fetchOTAHistory()
 
   // 订阅状态更新
-  unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
+  // v2.1 compat: 同时订阅 collector_status 和 node_status
+  const subscribeCompat = createCompatSubscribe(wsStore.subscribe.bind(wsStore))
+  unsubscribe = subscribeCompat(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
     if (message.payload?.node_id === collectorId.value) {
       if (message.payload?.latency_ms !== undefined) {
         collector.value = { ...collector.value, latency_ms: message.payload.latency_ms }

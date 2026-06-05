@@ -97,7 +97,7 @@ func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask
 
 	task := &models.OTATask{
 		OtaID:       fmt.Sprintf("ota-%d", now.UnixNano()),
-		CollectorID: collectorID,
+		NodeID:      collectorID,
 		FirmwareID:  firmwareID,
 		ToVersion:   firmware.Version,
 		Status:      StatusPending,
@@ -120,7 +120,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 
 	// Get device_id
 	var collector models.Node
-	if err := m.db.First(&collector, task.CollectorID).Error; err != nil {
+	if err := m.db.First(&collector, task.NodeID).Error; err != nil {
 		return err
 	}
 

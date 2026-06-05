@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"github.com/google/uuid"
 )
@@ -74,6 +75,7 @@ func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
 	default:
 		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%d entity=%d",
 			evt.Type, evt.Action, evt.NodeID, evt.EntityID)
+		metrics.EventBusDroppedTotal.Inc()
 		return nil // drop silently per design — alarm via metrics in production
 	}
 }
