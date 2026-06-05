@@ -21,7 +21,7 @@ type Node struct {
 	NodeID          int64      `gorm:"column:node_id;uniqueIndex;not null" json:"node_id"` // 物理 ID (bigint)
 	Name            string     `gorm:"size:64;not null" json:"name"`
 	Model           string     `gorm:"size:20" json:"model"`
-	FirmwareVersion string     `gorm:"size:20" json:"firmware_version"`
+	FirmwareVersion string     `gorm:"size:32" json:"firmware_version"`
 	ProtocolVersion string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
 	Platform        string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
 	Status          string     `gorm:"size:20;default:offline" json:"status"`
@@ -38,6 +38,10 @@ type Node struct {
 	FreeHeapBytes   int        `json:"free_heap_bytes"`
 	Capabilities    string     `gorm:"type:jsonb" json:"capabilities"`
 	HardwareInfo    string     `gorm:"type:jsonb" json:"hardware_info"`
+	// v2.2 连接元数据
+	ConnectionType  string     `gorm:"size:32" json:"connection_type"`
+	LatencyMs       int        `gorm:"default:0" json:"latency_ms"`
+	LastOnlineTime  *time.Time `json:"last_online_time"`
 	// v2.1 同步机制字段
 	ConfigEpoch     uint64     `gorm:"default:0" json:"config_epoch"`
 	LastManifestID  string     `gorm:"size:64" json:"last_manifest_id"`
@@ -244,11 +248,15 @@ type Firmware struct {
 
 // Notification 通知 (保留)
 type Notification struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Type      string    `gorm:"size:20;not null" json:"type"`
-	Message   string    `gorm:"type:text;not null" json:"message"`
-	Read      bool      `gorm:"default:false" json:"read"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Type        string    `gorm:"size:20;not null" json:"type"`
+	Message     string    `gorm:"type:text;not null" json:"message"`
+	Title       string    `gorm:"size:256" json:"title"`
+	Description string    `gorm:"type:text" json:"description"`
+	Source      string    `gorm:"size:64" json:"source"`
+	SourceID    string    `gorm:"size:64" json:"source_id"`
+	Read        bool      `gorm:"default:false" json:"read"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // =====================================================================

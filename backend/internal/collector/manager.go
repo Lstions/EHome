@@ -76,7 +76,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	// G10: Record initial node online count
 	var onlineCount int64
 	mgr.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineCount)
-	metrics.NodeOnlineCount.Set(float64(onlineCount))
+	metrics.NodesOnline.Set(float64(onlineCount))
 
 	return mgr
 }

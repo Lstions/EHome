@@ -88,6 +88,6 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 			"message": "ok",
 			"data":    resp,
 		})
-		_ = metrics.CollectorsOnline // suppress unused
+		_ = metrics.NodesOnline // suppress unused
 	}
 }

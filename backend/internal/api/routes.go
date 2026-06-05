@@ -39,6 +39,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerDeviceRoutes(v1, db, collectorMgr, driverRegistry)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
+		registerOTARoutesCompat(v1, db, otaMgr, collectorMgr)
+		registerHARoutes(v1)
 		registerTerminalRoutes(v1, collectorMgr)
 		registerMetricsRoutes(v1, db)
 

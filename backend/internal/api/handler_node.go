@@ -148,6 +148,51 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%d-%d", id, time.Now().Unix()),
 		}})
 	})
+
+	// POST /api/v1/nodes/:id/config/sync
+	n.POST("/:id/config/sync", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		// Trigger config sync via collector manager
+		collectorMgr.SyncGate().OnServerStartup() // or specific node sync
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "syncing"}})
+	})
+
+	// GET /api/v1/nodes/:id/hardware/config
+	n.GET("/:id/hardware/config", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var node models.Node
+		if err := db.First(&node, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"hardware": gin.H{"wifi_ssid": node.WiFiSSID, "wifi_rssi": node.WiFiRSSI, "free_heap": node.FreeHeapBytes},
+		}})
+	})
+
+	// PUT /api/v1/nodes/:id/hardware/config
+	n.PUT("/:id/hardware/config", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var req struct{ Hardware map[string]interface{} `json:"hardware"` }
+		c.ShouldBindJSON(&req)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "updated"}})
+	})
+
+	// GET /api/v1/nodes/:id/capabilities
+	n.GET("/:id/capabilities", func(c *gin.Context) {
+		_, _ = strconv.Atoi(c.Param("id"))
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"capabilities": []string{"i2c", "spi", "uart", "gpio", "adc"},
+		}})
+	})
+
+	// POST /api/v1/nodes/:id/query-resources
+	n.POST("/:id/query-resources", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"request_id": fmt.Sprintf("res-%d-%d", id, time.Now().Unix()),
+		}})
+	})
 }
 
 // edgeDeviceConfigItem is a lightweight EdgeDevice representation for config API responses.

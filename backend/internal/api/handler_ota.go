@@ -176,11 +176,56 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"id": id, "version": fw.Version}})
 	})
+}
 
-	// List notifications
-	v1.GET("/notifications", func(c *gin.Context) {
-		var notifications []models.Notification
-		db.Order("created_at DESC").Find(&notifications)
-		c.JSON(http.StatusOK, notifications)
+// registerOTARoutesCompat adds frontend-compatible OTA alias paths
+// These mirror the core OTA routes but use shorter, REST-friendly paths
+// that the frontend expects (e.g. /ota/start instead of /ota/tasks).
+func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, collectorMgr *collector.Manager) {
+	// POST /api/v1/ota/start
+	v1.POST("/ota/start", func(c *gin.Context) {
+		var req struct {
+			NodeID     uint `json:"node_id" binding:"required"`
+			FirmwareID uint `json:"firmware_id" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		task, err := otaMgr.CreateTask(req.NodeID, req.FirmwareID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": task})
+	})
+
+	// GET /api/v1/ota/progress/:id
+	v1.GET("/ota/progress/:id", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var task models.OTATask
+		if err := db.First(&task, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": task})
+	})
+
+	// GET /api/v1/ota/history/:nodeId
+	v1.GET("/ota/history/:nodeId", func(c *gin.Context) {
+		nodeID, _ := strconv.Atoi(c.Param("nodeId"))
+		var tasks []models.OTATask
+		db.Where("collector_id = ?", nodeID).Order("created_at DESC").Find(&tasks)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tasks})
+	})
+
+	// POST /api/v1/ota/cancel/:id
+	v1.POST("/ota/cancel/:id", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		if err := otaMgr.CancelTask(uint(id)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200})
 	})
 }

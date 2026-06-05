@@ -6,9 +6,9 @@ import (
 )
 
 var (
-	// CollectorsOnline tracks number of online collectors
-	CollectorsOnline = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "ehome_collectors_online",
+	// NodesOnline tracks number of online nodes
+	NodesOnline = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ehome_nodes_online",
 		Help: "Number of online collectors",
 	})
 
@@ -82,8 +82,8 @@ var (
 
 	// --- G10: Additional design metrics ---
 
-	// NodeOnlineCount tracks online node count
-	NodeOnlineCount = promauto.NewGauge(prometheus.GaugeOpts{
+	// NodeOnlineCount tracks online node count (deprecated, use NodesOnline)
+	_ = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "ehome_node_online_count",
 		Help: "Online node count",
 	})
