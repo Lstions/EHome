@@ -9,37 +9,55 @@ import (
 
 // Client wraps the MQTT client
 type Client struct {
-	client  mqtt.Client
-	handler func(topic string, payload []byte)
+	client    mqtt.Client
+	handler   func(topic string, payload []byte)
+	topics    map[string]byte // subscribed topics with QoS for resubscription
 }
 
 // Initialize connects to the MQTT broker
 func Initialize(broker, user, password string) (*Client, error) {
+	c := &Client{
+		topics: make(map[string]byte),
+	}
+
 	opts := mqtt.NewClientOptions().
 		AddBroker(broker).
 		SetClientID("ehome-server-v2").
+		SetCleanSession(false). // persistent session: broker keeps subscriptions & queued messages
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
 		SetKeepAlive(30 * time.Second).
-		SetPingTimeout(10 * time.Second)
+		SetPingTimeout(10 * time.Second).
+		SetOrderMatters(false). // allow parallel message processing
+		SetOnConnectHandler(func(_ mqtt.Client) {
+			// On (re)connect: resubscribe all topics so we never miss messages
+			// after a reconnect. Even with persistent session, the broker
+			// only restores subscriptions that were made with clean=false;
+			// resubscribing is idempotent and guarantees coverage.
+			for topic, qos := range c.topics {
+				if token := c.client.Subscribe(topic, qos, c.onMessage); token.Wait() && token.Error() != nil {
+					fmt.Printf("[MQTT] resubscribe %s failed: %v\n", topic, token.Error())
+				} else {
+					fmt.Printf("[MQTT] resubscribed %s (QoS %d)\n", topic, qos)
+				}
+			}
+		})
 
 	if user != "" {
 		opts = opts.SetUsername(user).SetPassword(password)
 	}
 
 	client := mqtt.NewClient(opts)
+	c.client = client
+
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("connect to MQTT: %w", token.Error())
 	}
 
-	c := &Client{client: client}
-
 	// Subscribe to all node upstream topics
-	token := client.Subscribe("nodes/+/up", 1, c.onMessage)
-	token.Wait()
-	if token.Error() != nil {
-		return nil, fmt.Errorf("subscribe: %w", token.Error())
+	if err := c.Subscribe("nodes/+/up", 1); err != nil {
+		return nil, fmt.Errorf("subscribe: %w", err)
 	}
 
 	return c, nil
@@ -66,6 +84,14 @@ func (c *Client) Publish(topic string, payload []byte) error {
 // PublishRetained sends a retained message to a topic
 func (c *Client) PublishRetained(topic string, payload []byte) error {
 	token := c.client.Publish(topic, 1, true, payload)
+	token.Wait()
+	return token.Error()
+}
+
+// Subscribe adds a topic subscription (also tracked for auto-resubscribe on reconnect)
+func (c *Client) Subscribe(topic string, qos byte) error {
+	c.topics[topic] = qos
+	token := c.client.Subscribe(topic, qos, c.onMessage)
 	token.Wait()
 	return token.Error()
 }
