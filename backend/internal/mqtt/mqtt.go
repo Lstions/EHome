@@ -2,16 +2,20 @@ package mqtt
 
 import (
 	"fmt"
+	"sync"
 	"time"
+
+	"ehome/backend/pkg/logger"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // Client wraps the MQTT client
 type Client struct {
-	client    mqtt.Client
-	handler   func(topic string, payload []byte)
-	topics    map[string]byte // subscribed topics with QoS for resubscription
+	client  mqtt.Client
+	handler func(topic string, payload []byte)
+	mu      sync.RWMutex
+	topics  map[string]byte // subscribed topics with QoS for resubscription
 }
 
 // Initialize connects to the MQTT broker
@@ -29,19 +33,20 @@ func Initialize(broker, user, password string) (*Client, error) {
 		SetConnectRetryInterval(5 * time.Second).
 		SetKeepAlive(30 * time.Second).
 		SetPingTimeout(10 * time.Second).
-		SetOrderMatters(false). // allow parallel message processing
 		SetOnConnectHandler(func(_ mqtt.Client) {
 			// On (re)connect: resubscribe all topics so we never miss messages
 			// after a reconnect. Even with persistent session, the broker
 			// only restores subscriptions that were made with clean=false;
 			// resubscribing is idempotent and guarantees coverage.
+			c.mu.RLock()
 			for topic, qos := range c.topics {
 				if token := c.client.Subscribe(topic, qos, c.onMessage); token.Wait() && token.Error() != nil {
-					fmt.Printf("[MQTT] resubscribe %s failed: %v\n", topic, token.Error())
+					logger.Warnf("[MQTT] resubscribe %s failed: %v", topic, token.Error())
 				} else {
-					fmt.Printf("[MQTT] resubscribed %s (QoS %d)\n", topic, qos)
+					logger.Infof("[MQTT] resubscribed %s (QoS %d)", topic, qos)
 				}
 			}
+			c.mu.RUnlock()
 		})
 
 	if user != "" {
@@ -90,7 +95,9 @@ func (c *Client) PublishRetained(topic string, payload []byte) error {
 
 // Subscribe adds a topic subscription (also tracked for auto-resubscribe on reconnect)
 func (c *Client) Subscribe(topic string, qos byte) error {
+	c.mu.Lock()
 	c.topics[topic] = qos
+	c.mu.Unlock()
 	token := c.client.Subscribe(topic, qos, c.onMessage)
 	token.Wait()
 	return token.Error()

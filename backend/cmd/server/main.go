@@ -60,11 +60,13 @@ func main() {
 
 	db := database.GetDB()
 
-	// Seed test data if core tables are empty
-	if err := seed.SeedTestData(db); err != nil {
-		logger.Warnf("Failed to seed test data: %v", err)
-	} else {
-		logger.Infof("Test data seeded (if not existed)")
+	// Seed test data only when explicitly requested via environment variable
+	if os.Getenv("SEED_TEST_DATA") == "true" {
+		if err := seed.SeedTestData(db); err != nil {
+			logger.Warnf("Failed to seed test data: %v", err)
+		} else {
+			logger.Infof("Test data seeded")
+		}
 	}
 
 	// Seed admin user if not exists

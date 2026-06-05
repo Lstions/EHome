@@ -27,8 +27,8 @@ func Connect(cfg Config) error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger:                                   gormlogger.Default.LogMode(gormlogger.Info), // Debug: show all SQL
-		DisableForeignKeyConstraintWhenMigrating: true,
+		Logger:                                   gormlogger.Default.LogMode(gormlogger.Warn),
+		DisableForeignKeyConstraintWhenMigrating: true, // GORM AutoMigrate creates wrong-direction FKs; real FKs managed via SQL migration
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect database: %w", err)

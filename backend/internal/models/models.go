@@ -18,7 +18,7 @@ import (
 // 字段含义见 docs/设计/节点/详细设计.md
 type Node struct {
 	ID              uint       `gorm:"primaryKey" json:"id"`
-	NodeID          int64      `gorm:"column:node_id;not null" json:"node_id"` // 物理 ID (bigint)
+	NodeID          int64      `gorm:"column:node_id;uniqueIndex;not null" json:"node_id"` // 物理 ID (bigint)
 	Name            string     `gorm:"size:64;not null" json:"name"`
 	Model           string     `gorm:"size:20" json:"model"`
 	FirmwareVersion string     `gorm:"size:20" json:"firmware_version"`
@@ -50,7 +50,7 @@ type Node struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 	// 关联
-	// Channels []Channel `gorm:"foreignKey:NodeID;references:ID" json:"channels,omitempty"`
+	Channels []Channel `gorm:"foreignKey:NodeID;references:ID" json:"channels,omitempty"`
 }
 
 // TableName GORM 表名 (Phase 2A-2 DB 迁移后, 用 nodes 表)

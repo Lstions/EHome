@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,6 +8,7 @@ import (
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -306,10 +306,6 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 			return
 		}
 
-		// --- BUG-04: Snapshot current state for idempotency check ---
-		snapshotChannelsBefore := snapshotChannels(db, node.ID)
-		snapshotEdgeDevicesBefore := snapshotEdgeDevices(db, node.ID)
-
 		var updatedFields []string
 
 		// Update channels if provided
@@ -367,7 +363,10 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 				}
 
 				if len(updates) > 0 {
-					db.Model(&models.Channel{}).Where("id = ?", ch.ID).Updates(updates)
+					result := db.Model(&models.Channel{}).Where("id = ?", ch.ID).Updates(updates)
+					if result.Error != nil {
+						logger.Warnf("Failed to update channel id=%d: %v", ch.ID, result.Error)
+					}
 				}
 			}
 		}
@@ -412,20 +411,18 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 				}
 
 				if len(updates) > 0 {
-					db.Model(&models.EdgeDevice{}).Where("id = ?", ed.ID).Updates(updates)
+					result := db.Model(&models.EdgeDevice{}).Where("id = ?", ed.ID).Updates(updates)
+					if result.Error != nil {
+						logger.Warnf("Failed to update edge_device id=%d: %v", ed.ID, result.Error)
+					}
 				}
 			}
 		}
 
-		// --- BUG-04: Idempotency check ---
-		// Compare post-update snapshots with pre-update snapshots.
-		// If nothing actually changed, skip epoch increment and MQTT push.
-		snapshotChannelsAfter := snapshotChannels(db, node.ID)
-		snapshotEdgeDevicesAfter := snapshotEdgeDevices(db, node.ID)
-
-		configChanged := len(updatedFields) > 0 ||
-			!jsonEqual(snapshotChannelsBefore, snapshotChannelsAfter) ||
-			!jsonEqual(snapshotEdgeDevicesBefore, snapshotEdgeDevicesAfter)
+		// --- BUG-04: Idempotency check (M7: simplified) ---
+		// Only check if updatedFields is non-empty; skip DB snapshot comparison
+		// to avoid race conditions. Worst case: extra config push, which is safe.
+		configChanged := len(updatedFields) > 0
 
 		if configChanged {
 			// Increment epoch via EventBus (Publish increments epoch)
@@ -478,37 +475,4 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 			"data":  tasks,
 		})
 	}
-}
-
-// snapshotChannels captures the current channel state as JSON for comparison.
-func snapshotChannels(db *gorm.DB, nodeID uint) []byte {
-	var channels []models.Channel
-	db.Where("node_id = ?", nodeID).Order("id").Find(&channels)
-	b, _ := json.Marshal(channels)
-	return b
-}
-
-// snapshotEdgeDevices captures the current edge device state as JSON for comparison.
-func snapshotEdgeDevices(db *gorm.DB, nodeID uint) []byte {
-	var devices []models.EdgeDevice
-	db.Where("node_id = ?", nodeID).Order("id").Find(&devices)
-	b, _ := json.Marshal(devices)
-	return b
-}
-
-// jsonEqual compares two JSON byte slices for semantic equality.
-// Handles nil/empty as equal.
-func jsonEqual(a, b []byte) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	if len(a) == 0 || len(b) == 0 {
-		return false
-	}
-	// Normalize and compare
-	var va, vb interface{}
-	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
-		return false
-	}
-	return fmt.Sprintf("%v", va) == fmt.Sprintf("%v", vb)
 }

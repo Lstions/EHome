@@ -243,6 +243,10 @@ func (m *Manager) handleConfigSyncRequest(deviceID string, payload []byte) {
 
 // handlePing processes MsgPing (0x08) from device.
 // BUG-12: Device can ping the server; server responds with PongAck (0x18).
+//
+// Note: The caller (Manager.HandleMessage via dispatch in manager.go) already
+// strips the frame header (0x0B/type/version), so payload here is the bare
+// frame body. NewDecoder(payload) is therefore correct — NOT a double decode.
 func (m *Manager) handlePing(deviceID string, payload []byte) {
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {

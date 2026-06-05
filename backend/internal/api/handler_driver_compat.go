@@ -93,8 +93,9 @@ func registerDriverCompatRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		groupMap := make(map[string]*TreeNode)
 		var tree []TreeNode
+		// Use device_type as tree key (more meaningful than HardwareType which is just uart/i2c/spi)
 		for i := range configs {
-			key := configs[i].HardwareType
+			key := configs[i].DeviceType
 			if key == "" {
 				key = "other"
 			}

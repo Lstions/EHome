@@ -2,15 +2,23 @@ package collector
 
 import (
 	"ehome/backend/internal/events"
+	"ehome/backend/internal/models"
+	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"strconv"
 	"time"
 
-	"ehome/backend/internal/models"
-	"ehome/backend/pkg/frame"
-
 	"gorm.io/gorm"
 )
+
+// parseDeviceID parses a deviceID string to int64 with logging on failure.
+func parseDeviceID(s string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		logger.Warnf("[%s] Device Hello with non-numeric deviceID, parse failed: %v", s, err)
+	}
+	return n, err
+}
 
 // handleHello processes Hello messages (type=0x01)
 // v2.1: parses 8 fields (4 new: config_epoch, nvs_has_config, last_manifest, protocol_version)
@@ -65,6 +73,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		logger.Infof("[%s] HelloAck sent: server_time=%d features=0", deviceID, serverTime)
 	}
 
+	nodeID, err := parseDeviceID(deviceID)
+	if err != nil {
+		logger.Warnf("[%s] Ignoring Hello: invalid deviceID", deviceID)
+		return
+	}
+
 	// Upsert collector
 	var collector models.Node
 	result := m.db.Where("node_id = ?", deviceID).First(&collector)
@@ -72,7 +86,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
 		collector = models.Node{
-			NodeID:          func() int64 { n, _ := strconv.ParseInt(deviceID, 10, 64); return n }(),
+			NodeID:          nodeID,
 			Model:           model,
 			FirmwareVersion: firmwareVersion,
 			Status:          "online",
