@@ -109,67 +109,67 @@
     <!-- 卡片视图 -->
     <div v-if="viewMode === 'grid'" class="collector-grid">
       <el-card 
-        v-for="collector in filteredCollectors" 
-        :key="collector.id" 
+        v-for="node in filteredNodes" 
+        :key="node.id" 
         class="collector-card"
-        :class="{ offline: collector.status === 'offline' }"
+        :class="{ offline: node.status === 'offline' }"
         shadow="hover"
-        @click="goToDetail(collector.id)"
+        @click="goToDetail(node.id)"
       >
         <div class="card-header">
           <div class="collector-info">
-            <div class="collector-icon" :class="collector.status">
+            <div class="collector-icon" :class="node.status">
               <el-icon :size="24"><Cpu /></el-icon>
             </div>
             <div class="collector-meta">
-              <h3>{{ collector.name }}</h3>
-              <span class="model">{{ collector.model || '未知型号' }}</span>
+              <h3>{{ node.name }}</h3>
+              <span class="model">{{ node.model || '未知型号' }}</span>
             </div>
           </div>
-          <div class="status-tag" :class="collector.status">
+          <div class="status-tag" :class="node.status">
             <span class="status-dot"></span>
-            {{ collector.status === 'online' ? '在线' : '离线' }}
+            {{ node.status === 'online' ? '在线' : '离线' }}
           </div>
         </div>
         
         <div class="card-body">
           <div class="info-row">
             <span class="label">设备ID</span>
-            <span class="value">{{ collector.device_id }}</span>
+            <span class="value">{{ node.device_id }}</span>
           </div>
           <div class="info-row">
             <span class="label">固件版本</span>
-            <el-tag size="small">{{ collector.firmware_version || '未知' }}</el-tag>
+            <el-tag size="small">{{ node.firmware_version || '未知' }}</el-tag>
           </div>
           <div class="info-row">
             <span class="label">连接质量</span>
-            <div class="quality-bar" v-if="collector.status === 'online'">
+            <div class="quality-bar" v-if="node.status === 'online'">
               <el-progress 
-                :percentage="collector.connection_quality || 0" 
+                :percentage="node.connection_quality || 0" 
                 :stroke-width="6"
-                :color="getQualityColor(collector.connection_quality)"
+                :color="getQualityColor(node.connection_quality)"
                 :show-text="false"
               />
-              <span class="quality-value">{{ collector.connection_quality || 0 }}%</span>
+              <span class="quality-value">{{ node.connection_quality || 0 }}%</span>
             </div>
             <span v-else class="value">-</span>
           </div>
           <div class="info-row">
             <span class="label">最后在线</span>
-            <span class="value time">{{ formatRelativeTime(collector.last_online_time) }}</span>
+            <span class="value time">{{ formatRelativeTime(node.last_online_time) }}</span>
           </div>
         </div>
         
         <div class="card-footer">
-          <el-button size="small" text @click.stop="handleQuickAction('config', collector)">
+          <el-button size="small" text @click.stop="handleQuickAction('config', node)">
             <el-icon><Setting /></el-icon>
             配置
           </el-button>
-          <el-button size="small" text @click.stop="handleQuickAction('ota', collector)">
+          <el-button size="small" text @click.stop="handleQuickAction('ota', node)">
             <el-icon><Upload /></el-icon>
             升级
           </el-button>
-          <el-button size="small" text type="danger" @click.stop="handleDelete(collector)">
+          <el-button size="small" text type="danger" @click.stop="handleDelete(node)">
             <el-icon><Delete /></el-icon>
             删除
           </el-button>
@@ -180,7 +180,7 @@
     <!-- 列表视图 -->
     <el-card v-else class="collector-table-card">
       <el-table 
-        :data="filteredCollectors" 
+        :data="filteredNodes" 
         v-loading="loading"
         stripe
         @row-click="(row) => goToDetail(row.id)"
@@ -270,7 +270,7 @@
 
     <!-- 空状态 -->
     <EmptyState
-      v-if="!loading && filteredCollectors.length === 0"
+      v-if="!loading && filteredNodes.length === 0"
       icon="Connection"
       title="暂无节点"
       description="开始添加第一个节点来监控您的设备"
@@ -305,7 +305,7 @@ const wsStore = useWebSocketStore()
 
 // 状态
 const loading = ref(false)
-const collectors = ref<any[]>([])
+const nodes = ref<any[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -325,13 +325,13 @@ const stats = reactive({
 
 // 型号选项
 const modelOptions = computed(() => {
-  const models = new Set(collectors.value.map(c => c.model).filter(Boolean))
+  const models = new Set(nodes.value.map(c => c.model).filter(Boolean))
   return Array.from(models)
 })
 
 // 过滤后的采集器
-const filteredCollectors = computed(() => {
-  let result = collectors.value
+const filteredNodes = computed(() => {
+  let result = nodes.value
   
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
@@ -354,7 +354,7 @@ const filteredCollectors = computed(() => {
 
 // 更新统计
 const updateStats = () => {
-  const list = collectors.value
+  const list = nodes.value
   stats.total = list.length
   stats.online = list.filter(c => c.status === 'online').length
   stats.offline = list.filter(c => c.status === 'offline').length
@@ -370,7 +370,7 @@ const fetchNodes = async () => {
       page: currentPage.value,
       page_size: pageSize.value
     })
-    collectors.value = nodeStore.nodes
+    nodes.value = nodeStore.nodes
     total.value = nodeStore.total
     updateStats()
   } catch (error: any) {
@@ -409,11 +409,11 @@ const goToDetail = (id: number) => {
 }
 
 // 快捷操作
-const handleQuickAction = (action: string, collector: any) => {
+const handleQuickAction = (action: string, node: any) => {
   if (action === 'config') {
-    router.push(`/node/${collector.id}?tab=config`)
+    router.push(`/node/${node.id}?tab=config`)
   } else if (action === 'ota') {
-    router.push(`/firmware?collector=${collector.id}`)
+    router.push(`/firmware?node=${node.id}`)
   }
 }
 

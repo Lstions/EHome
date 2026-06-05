@@ -204,7 +204,7 @@ const handleDelete = async (row: Firmware) => {
 // 编辑固件
 const handleEdit = (row: Firmware) => {
   editingFirmwareId.value = row.id
-  editForm.version = row.version.replace(/^v/i, '')
+  editForm.version = row.version?.replace(/^v/i, '') || ''
   showEditDialog.value = true
 }
 

@@ -18,20 +18,30 @@
 
 <script setup lang="ts">
 import { ref, onErrorCaptured, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import { logger } from '@/utils/logger'
 
 const error = ref<Error | null>(null)
 const route = useRoute()
 
-// 路由变化时自动清除错误状态
-watch(() => route.path, () => {
-  error.value = null
+// Track the route path where the error occurred
+let errorRoutePath: string | null = null
+
+// Only clear error when navigating AWAY from the route that caused the error
+// to a different valid route. Don't clear on every route change.
+watch(() => route.path, (newPath, oldPath) => {
+  // Only clear if we had an error AND we're navigating to a different route
+  // (not just a param change on the same route pattern)
+  if (error.value && errorRoutePath !== null && newPath !== errorRoutePath) {
+    error.value = null
+    errorRoutePath = null
+  }
 })
 
 onErrorCaptured((err: unknown) => {
   const e = err instanceof Error ? err : new Error(String(err))
   error.value = e
+  errorRoutePath = route.path
   logger.error('ErrorBoundary 捕获组件错误', {
     name: e.name,
     message: e.message,
@@ -43,6 +53,7 @@ onErrorCaptured((err: unknown) => {
 
 const handleReset = () => {
   error.value = null
+  errorRoutePath = null
 }
 
 const handleReload = () => {
