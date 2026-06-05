@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -112,6 +113,19 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 				Where("device_type = ? AND is_default = ?", tpl.DeviceType, true).
 				Update("is_default", false)
 		}
+		// Normalize v2.2 JSONB fields: 空值 -> 合法 JSON (GORM 不会自动转)
+		if len(tpl.Config) == 0 {
+			tpl.Config = json.RawMessage([]byte("{}"))
+		}
+		if len(tpl.Connection) == 0 {
+			tpl.Connection = json.RawMessage([]byte("{}"))
+		}
+		if len(tpl.Parser) == 0 {
+			tpl.Parser = json.RawMessage([]byte("{}"))
+		}
+		if len(tpl.InitFlow) == 0 {
+			tpl.InitFlow = json.RawMessage([]byte("[]"))
+		}
 		if err := db.Create(&tpl).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
@@ -154,6 +168,19 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			db.Model(&models.DeviceConfig{}).
 				Where("device_type = ? AND id <> ? AND is_default = ?", update.DeviceType, tpl.ID, true).
 				Update("is_default", false)
+		}
+		// Normalize v2.2 JSONB fields: 空值 -> 合法 JSON (GORM 不会自动转)
+		if len(update.Config) == 0 {
+			update.Config = json.RawMessage([]byte("{}"))
+		}
+		if len(update.Connection) == 0 {
+			update.Connection = json.RawMessage([]byte("{}"))
+		}
+		if len(update.Parser) == 0 {
+			update.Parser = json.RawMessage([]byte("{}"))
+		}
+		if len(update.InitFlow) == 0 {
+			update.InitFlow = json.RawMessage([]byte("[]"))
 		}
 		if err := db.Save(&update).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})

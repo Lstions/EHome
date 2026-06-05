@@ -48,11 +48,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	})
 
 	// Get latest sensor values for a node (all edge devices)
-	// GET /api/v1/nodes/:node_id/latest
-	v1.GET("/nodes/:node_id/latest", func(c *gin.Context) {
-		nodeID := c.Param("node_id")
+	// GET /api/v1/nodes/:id/latest
+	v1.GET("/nodes/:id/latest", func(c *gin.Context) {
+		id := c.Param("id")
 		var node models.Node
-		if err := db.Where("node_id = ?", nodeID).First(&node).Error; err != nil {
+		if err := db.First(&node, id).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}

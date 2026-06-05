@@ -41,8 +41,20 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerNodeRoutes(v1, db, collectorMgr)
 		registerEdgeDeviceRoutes(v1, db, collectorMgr)
 
+		// Overview + Notification routes
+		registerOverviewRoutes(v1, db)
+		registerNotificationRoutes(v1, db)
+
+		// Data reports (placeholder)
+		registerDataReportRoutes(v1, db)
+
+		// Driver compatibility routes (reuse device-configs)
+		registerDriverCompatRoutes(v1, db)
+
 		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)
+		// WebSocket status endpoint (alias)
+		v1.GET("/ws/status", wsHub.HandleWebSocket)
 	}
 
 	// Terminal WebSocket endpoint (separate handler with callbacks)
