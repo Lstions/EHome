@@ -147,7 +147,7 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
-	api.SetupRoutes(r, db, wsHub, collectorMgr, otaMgr)
+	api.SetupRoutes(r, db, wsHub, collectorMgr, otaMgr, driverRegistry)
 
 	// Health check
 	r.GET("/ping", func(c *gin.Context) {

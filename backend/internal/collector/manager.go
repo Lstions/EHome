@@ -187,7 +187,7 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 		buf = append(buf, []byte(fmt.Sprintf("t:%d:%s:%d:%d:", t.ID, t.WriteData, t.ReadLength, t.DelayMs))...)
 	}
 	for _, c := range channels {
-		buf = append(buf, []byte(fmt.Sprintf("c:%d:%d:%s:%d:%v:%s:", c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
+		buf = append(buf, []byte(fmt.Sprintf("c:%d:%s:%s:%d:%v:%s:", c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
 	}
 	return buf
 }
@@ -204,6 +204,11 @@ func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
 			logger.Infof("[%s] Triggered device init: type=%s ch=%d", deviceID, dev.Type, dev.ChannelID)
 		}
 	}
+}
+
+// DeviceInit returns the device init orchestrator for external access (e.g. API handlers)
+func (m *Manager) DeviceInit() *deviceinit.Orchestrator {
+	return m.deviceInit
 }
 
 // EventBus returns the ConfigEventBus for external access (e.g. API handlers)

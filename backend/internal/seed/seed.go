@@ -74,7 +74,7 @@ func SeedTestData(db *gorm.DB) error {
 	channel := models.Channel{
 		NodeID:       node.ID,
 		HardwareType: "I2C",
-		HardwareID:   104,
+		HardwareID:   "0x68",
 		BusType:      "I2C",
 		BusConfig:    `{"sda_pin":21,"scl_pin":22,"clock_hz":400000}`,
 		IntervalMs:   1000,
@@ -92,7 +92,7 @@ func SeedTestData(db *gorm.DB) error {
 		NodeID:         node.ID,
 		ChannelID:      channel.ID,
 		DeviceConfigID: deviceConfig.ID,
-		HardwareID:     104,
+		HardwareID:     "0x68",
 		IntervalMs:     1000,
 		Enabled:        true,
 		Status:         "active",

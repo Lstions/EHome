@@ -153,7 +153,7 @@ func (m *Manager) sendConfigManifest(deviceID string) {
 	for _, ch := range channels {
 		subEnc := frame.SubEncoder()
 		subEnc.EncodeVarint(1, uint64(ch.ID))
-		subEnc.EncodeVarint(2, uint64(ch.HardwareID))
+		subEnc.EncodeString(2, ch.HardwareID)
 
 		// Packed repeated template_ids (field 3)
 		if ch.TemplateIDs != "" {

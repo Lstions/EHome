@@ -134,6 +134,20 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 
 	// BUG-08 fix: OTA history for a specific node
 	v1.GET("/nodes/:id/ota/history", getNodeOTAHistory(db))
+
+	// POST /api/v1/nodes/:id/bus/i2c/scan
+	n := v1.Group("/nodes")
+	n.POST("/:id/bus/i2c/scan", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var req struct {
+			HardwareID string `json:"hardware_id"`
+		}
+		c.ShouldBindJSON(&req)
+		// TODO: send I2C scan command via MQTT sendAndWait
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%d-%d", id, time.Now().Unix()),
+		}})
+	})
 }
 
 // edgeDeviceConfigItem is a lightweight EdgeDevice representation for config API responses.
@@ -146,7 +160,7 @@ type edgeDeviceConfigItem struct {
 	NodeID         uint       `json:"node_id"`
 	ChannelID      uint       `json:"channel_id"`
 	DeviceConfigID uint       `json:"device_config_id"`
-	HardwareID     uint       `json:"hardware_id"`
+	HardwareID     string     `json:"hardware_id"`
 	IntervalMs     int        `json:"interval_ms"`
 	Enabled        bool       `json:"enabled"`
 	Status         string     `json:"status"`
@@ -266,15 +280,15 @@ type nodeConfigUpdateRequest struct {
 }
 
 type channelUpdateItem struct {
-	ID         uint   `json:"id"`
-	Address    string `json:"address,omitempty"`    // maps to HardwareID hex string
-	HardwareID *uint  `json:"hardware_id,omitempty"`
-	IntervalMs *int   `json:"interval_ms,omitempty"`
-	BusType    string `json:"bus_type,omitempty"`
-	BusConfig  string `json:"bus_config,omitempty"`
-	Config     string `json:"config,omitempty"`
+	ID          uint   `json:"id"`
+	Address     string `json:"address,omitempty"`    // maps to HardwareID hex string
+	HardwareID  string `json:"hardware_id,omitempty"`
+	IntervalMs  *int   `json:"interval_ms,omitempty"`
+	BusType     string `json:"bus_type,omitempty"`
+	BusConfig   string `json:"bus_config,omitempty"`
+	Config      string `json:"config,omitempty"`
 	TemplateIDs string `json:"template_ids,omitempty"`
-	Enabled    *bool  `json:"enabled,omitempty"`
+	Enabled     *bool  `json:"enabled,omitempty"`
 }
 
 type edgeDeviceUpdateItem struct {
@@ -282,7 +296,7 @@ type edgeDeviceUpdateItem struct {
 	Name           string `json:"name,omitempty"`
 	ChannelID      *uint  `json:"channel_id,omitempty"`
 	DeviceConfigID *uint  `json:"device_config_id,omitempty"`
-	HardwareID     *uint  `json:"hardware_id,omitempty"`
+	HardwareID     string `json:"hardware_id,omitempty"`
 	IntervalMs     *int   `json:"interval_ms,omitempty"`
 	Enabled        *bool  `json:"enabled,omitempty"`
 }
@@ -322,19 +336,13 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 
 				updates := map[string]interface{}{}
 
-				// Handle "address" field (hex string like "0x77" → HardwareID uint)
+				// Handle "address" field (hex string like "0x77" → HardwareID string)
 				if ch.Address != "" {
-					hexStr := ch.Address
-					if len(hexStr) >= 2 && (hexStr[:2] == "0x" || hexStr[:2] == "0X") {
-						hexStr = hexStr[2:]
-					}
-					if hwID, err := strconv.ParseUint(hexStr, 16, 32); err == nil {
-						updates["hardware_id"] = uint(hwID)
-						updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.address", i))
-					}
+					updates["hardware_id"] = ch.Address
+					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.address", i))
 				}
-				if ch.HardwareID != nil {
-					updates["hardware_id"] = *ch.HardwareID
+				if ch.HardwareID != "" {
+					updates["hardware_id"] = ch.HardwareID
 					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.hardware_id", i))
 				}
 				if ch.IntervalMs != nil {
@@ -397,8 +405,8 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 					updates["device_config_id"] = *ed.DeviceConfigID
 					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.device_config_id", i))
 				}
-				if ed.HardwareID != nil {
-					updates["hardware_id"] = *ed.HardwareID
+				if ed.HardwareID != "" {
+					updates["hardware_id"] = ed.HardwareID
 					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.hardware_id", i))
 				}
 				if ed.IntervalMs != nil {

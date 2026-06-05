@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/collector"
-
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
@@ -20,7 +20,7 @@ func nowMillis() int64 {
 }
 
 // SetupRoutes configures all API routes by domain
-func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr *collector.Manager, otaMgr *ota.Manager) {
+func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr *collector.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry) {
 	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -36,7 +36,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	{
-		registerDeviceRoutes(v1, db, collectorMgr)
+		registerDeviceRoutes(v1, db, collectorMgr, driverRegistry)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, collectorMgr)
 		registerTerminalRoutes(v1, collectorMgr)
@@ -55,6 +55,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 
 		// Driver compatibility routes (reuse device-configs)
 		registerDriverCompatRoutes(v1, db)
+
+		// Data source CRUD routes
+		registerDataSourceRoutes(v1.Group("/data-sources"), db)
 
 		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)

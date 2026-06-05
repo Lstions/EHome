@@ -70,7 +70,7 @@ type EdgeDevice struct {
 	NodeID         uint           `gorm:"index;not null" json:"node_id"`          // v2.2 显式 FK (was implicit via Channel)
 	ChannelID      uint           `gorm:"index;not null" json:"channel_id"`       // 保留
 	DeviceConfigID uint           `gorm:"index;not null" json:"device_config_id"` // v2.2 关键新增 FK
-	HardwareID     uint           `gorm:"default:0" json:"hardware_id"`           // v2.2 新增 (从 Channel 移过来)
+	HardwareID     string         `gorm:"size:16;default:''" json:"hardware_id"`           // v2.2 新增 (从 Channel 移过来)
 	IntervalMs     int            `gorm:"default:5000" json:"interval_ms"`
 	Enabled        bool           `gorm:"default:true" json:"enabled"`
 	Status         string         `gorm:"size:20;default:active" json:"status"`
@@ -103,7 +103,7 @@ type Channel struct {
 	ID           uint           `gorm:"primaryKey" json:"id"`
 	NodeID       uint           `gorm:"index;not null;column:node_id" json:"node_id"`
 	HardwareType string         `gorm:"size:20" json:"hardware_type"`    // SPI/I2C/UART/GPIO/ADC
-	HardwareID   uint           `gorm:"default:0" json:"hardware_id"`    // 总线上的硬件地址 (e.g. I2C 0x76)
+	HardwareID   string         `gorm:"size:16;default:''" json:"hardware_id"`    // 总线上的硬件地址 (e.g. I2C 0x76)
 	IntervalMs   int            `gorm:"default:5000" json:"interval_ms"`
 	BusType      string         `gorm:"size:20;default:I2C" json:"bus_type"` // I2C/SPI/UART/GPIO/ADC
 	BusConfig    string         `gorm:"type:text" json:"bus_config"`         // JSON bus配置 (引脚/速率等)

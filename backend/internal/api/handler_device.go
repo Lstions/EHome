@@ -1,12 +1,16 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ehome/backend/internal/collector"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +18,7 @@ import (
 )
 
 // registerDeviceRoutes sets up channel + device-config CRUD routes
-func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
+func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager, driverRegistry *drivers.Registry) {
 	// Get the EventBus for emitting config change events
 	eventBus := collectorMgr.EventBus()
 
@@ -287,10 +291,42 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			c.JSON(http.StatusNotFound, gin.H{"code": 404})
 			return
 		}
-		// TODO: call parser registry with raw_data
+
+		// Try the drivers.Registry first
+		if driverRegistry != nil {
+			if driver, err := driverRegistry.Get(cfg.DeviceType); err == nil {
+				rawBytes := []byte(req.RawData)
+				// If raw_data looks like hex, decode it first
+				if decoded, hexErr := decodeHexString(req.RawData); hexErr == nil && len(decoded) > 0 {
+					rawBytes = decoded
+				}
+				sensorData, parseErr := driver.ParseData(rawBytes)
+				if parseErr != nil {
+					c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+						"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
+						"raw_data": req.RawData, "parsed": gin.H{}, "error": parseErr.Error(),
+					}})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+					"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
+					"raw_data": req.RawData, "parsed": sensorData,
+				}})
+				return
+			}
+		}
+
+		// Fallback: basic JSON parse if raw_data is valid JSON
+		parsed := gin.H{}
+		if req.RawData != "" {
+			var jsonObj interface{}
+			if json.Unmarshal([]byte(req.RawData), &jsonObj) == nil {
+				parsed = gin.H{"json": jsonObj}
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
-			"raw_data": req.RawData, "parsed": gin.H{},
+			"raw_data": req.RawData, "parsed": parsed,
 		}})
 	})
 
@@ -394,6 +430,18 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 }
 
 // parseUintID parses a uint from a string, returning 0 on error
+// decodeHexString attempts to decode a hex string (with or without 0x prefix)
+func decodeHexString(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s = s[2:]
+	}
+	if len(s)%2 != 0 {
+		return nil, fmt.Errorf("odd length hex string")
+	}
+	return hex.DecodeString(s)
+}
+
 func parseUintID(s string) uint {
 	id, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
