@@ -18,6 +18,7 @@ import (
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/redis"
+	"ehome/backend/internal/seed"
 	"ehome/backend/internal/websocket"
 	"github.com/gin-contrib/cors"
 	"ehome/backend/pkg/logger"
@@ -58,6 +59,13 @@ func main() {
 	logger.Infof("Database connected and migrated")
 
 	db := database.GetDB()
+
+	// Seed test data if core tables are empty
+	if err := seed.SeedTestData(db); err != nil {
+		logger.Warnf("Failed to seed test data: %v", err)
+	} else {
+		logger.Infof("Test data seeded (if not existed)")
+	}
 
 	// Seed admin user if not exists
 	if err := api.SeedAdminUser(db); err != nil {
