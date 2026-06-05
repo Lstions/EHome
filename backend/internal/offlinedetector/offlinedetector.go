@@ -119,8 +119,8 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	// Record event
 	var collector models.Node
 	if err := d.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
-		d.db.Create(&models.CollectorEvent{
-			CollectorID: collector.ID,
+		d.db.Create(&models.NodeEvent{
+			NodeID: collector.ID,
 			EventType:   "offline",
 			OldStatus:   "online",
 			NewStatus:   "offline",

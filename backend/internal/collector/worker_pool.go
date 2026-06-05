@@ -86,7 +86,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		"request_id": job.requestID,
 	})
 	m.db.Create(&models.DeviceData{
-		CollectorID: collector.ID,
+		NodeID: collector.ID,
 		DataJSON:    string(dataJSON),
 		Timestamp:   time.Now(),
 	})

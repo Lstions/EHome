@@ -171,7 +171,7 @@ type DeviceConfig struct {
 type DeviceData struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	DeviceID     uint      `gorm:"index;not null" json:"device_id"`    // v2.2: 改为 EdgeDeviceID
-	CollectorID  uint      `gorm:"index;not null" json:"collector_id"` // v2.2: 改为 NodeID
+	NodeID       uint      `gorm:"index;not null;column:node_id" json:"node_id"` // v2.3: renamed from CollectorID
 	DataJSON     string    `gorm:"type:text" json:"data_json"`
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -296,14 +296,14 @@ type DeviceModel struct {
 
 // =====================================================================
 
-// CollectorEvent 节点状态变更事件 (保留 v2.1 名, 待 v2.3 改名 NodeEvent)
-type CollectorEvent struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	CollectorID uint      `gorm:"index;not null" json:"collector_id"` // 待 v2.3 改名 NodeID
-	EventType   string    `gorm:"size:20;not null" json:"event_type"`
-	OldStatus   string    `gorm:"size:20" json:"old_status"`
-	NewStatus   string    `gorm:"size:20" json:"new_status"`
-	CreatedAt   time.Time `json:"created_at"`
+// NodeEvent 节点状态变更事件 (v2.3: renamed from NodeEvent)
+type NodeEvent struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	NodeID    uint      `gorm:"index;not null;column:node_id" json:"node_id"`
+	EventType string    `gorm:"size:20;not null" json:"event_type"`
+	OldStatus string    `gorm:"size:20" json:"old_status"`
+	NewStatus string    `gorm:"size:20" json:"new_status"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // =====================================================================
@@ -311,7 +311,7 @@ type CollectorEvent struct {
 // CalibrationCache 校准数据缓存 (保留)
 type CalibrationCache struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
-	CollectorID uint      `gorm:"index;not null" json:"collector_id"` // 待 v2.3 改名 NodeID
+	NodeID    uint      `gorm:"index;not null;column:node_id" json:"node_id"` // v2.3: renamed from CollectorID
 	DeviceType  string    `gorm:"size:32;not null" json:"device_type"`
 	Data        string    `gorm:"type:text;not null" json:"data"`
 	CreatedAt   time.Time `json:"created_at"`

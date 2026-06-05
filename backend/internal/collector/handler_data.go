@@ -127,7 +127,7 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		})
 		m.db.Create(&models.DeviceData{
 			DeviceID:    device.ID,
-			CollectorID: collectorID,
+			NodeID: collectorID,
 			DataJSON:    string(dataJSON),
 			Timestamp:   time.Now(),
 		})

@@ -94,8 +94,8 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 			UptimeSeconds:   0,
 		}
 		m.db.Create(&collector)
-		m.db.Create(&models.CollectorEvent{
-			CollectorID: collector.ID,
+		m.db.Create(&models.NodeEvent{
+			NodeID: collector.ID,
 			EventType:   "online",
 			NewStatus:   "online",
 		})
@@ -107,8 +107,8 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		collector.LastSeen = &now
 		m.db.Save(&collector)
 		if oldStatus != "online" {
-			m.db.Create(&models.CollectorEvent{
-				CollectorID: collector.ID,
+			m.db.Create(&models.NodeEvent{
+				NodeID: collector.ID,
 				EventType:   "online",
 				OldStatus:   oldStatus,
 				NewStatus:   "online",

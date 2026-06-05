@@ -28,7 +28,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 	// Create OTA task + send OtaCmd to device
 	v1.POST("/ota/tasks", func(c *gin.Context) {
 		var req struct {
-			CollectorID uint `json:"collector_id" binding:"required"`
+			NodeID uint `json:"node_id" binding:"required"`
 			FirmwareID  uint `json:"firmware_id" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -36,7 +36,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 			return
 		}
 
-		task, err := otaMgr.CreateTask(req.CollectorID, req.FirmwareID)
+		task, err := otaMgr.CreateTask(req.NodeID, req.FirmwareID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

@@ -36,10 +36,7 @@ describe('events.ts', () => {
       expect(WS_EVENT.CHANNEL_WRITE).toBe('channel_write')
       expect(WS_EVENT.CHANNEL_WRITE_ERROR).toBe('channel_write_error')
 
-      // v2.1 兼容
-      expect(WS_EVENT.COLLECTOR_STATUS).toBe('collector_status')
-      expect(WS_EVENT.COLLECTOR_CONFIG_SYNCED).toBe('collector_config_synced')
-      expect(WS_EVENT.DEVICE_STATUS).toBe('device_status')
+
     })
 
     it('all event names should be valid (lowercase, underscore-separated)', () => {
@@ -127,11 +124,9 @@ describe('events.ts', () => {
         WS_EVENT.SCAN_RESULT,
         WS_EVENT.CHANNEL_WRITE,
         WS_EVENT.CHANNEL_WRITE_ERROR,
-        WS_EVENT.COLLECTOR_STATUS,
-        WS_EVENT.COLLECTOR_CONFIG_SYNCED,
-        WS_EVENT.DEVICE_STATUS,
+
       ]
-      expect(validNames.length).toBe(17)
+      expect(validNames.length).toBe(14)
     })
   })
 })

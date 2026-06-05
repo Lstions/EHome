@@ -68,8 +68,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 
 	// Record event on status change
 	if oldStatus != status {
-		m.db.Create(&models.CollectorEvent{
-			CollectorID: collector.ID,
+		m.db.Create(&models.NodeEvent{
+			NodeID: collector.ID,
 			EventType:   "status_change",
 			OldStatus:   oldStatus,
 			NewStatus:   status,
