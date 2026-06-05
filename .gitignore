@@ -42,3 +42,8 @@ ehome-server-final
 frontend/
 .verify_certs/
 backend/migrate_v21_to_v22
+
+# Playwright E2E
+frontend-shared/e2e/
+frontend-shared/playwright.config.ts
+frontend-shared/test-results/

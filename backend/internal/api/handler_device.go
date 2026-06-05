@@ -136,7 +136,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionCreate, 0, tpl.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionCreate, 0, tpl.ID)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
 
@@ -192,7 +192,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, update.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, update.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
 
@@ -205,7 +205,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change
-		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionDelete, 0, tplID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionDelete, 0, tplID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
@@ -265,7 +265,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (default flag change affects nodes using this config)
-		collector.EmitConfigChange(eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, tpl.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, tpl.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
@@ -371,7 +371,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change for the node
-		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.NodeID, ch.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusCreated, ch)
 	})
 
@@ -407,7 +407,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change for the node
-		collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.NodeID, ch.ID)
+		collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
@@ -424,7 +424,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 		}
 		// Emit config change
 		if hasNode {
-			collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, nodeID, channelID)
+			collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, nodeID, channelID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
