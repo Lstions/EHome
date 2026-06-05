@@ -39,9 +39,12 @@ type Node struct {
 	Capabilities    string     `gorm:"type:jsonb" json:"capabilities"`
 	HardwareInfo    string     `gorm:"type:jsonb" json:"hardware_info"`
 	// v2.2 连接元数据
-	ConnectionType  string     `gorm:"size:32" json:"connection_type"`
-	LatencyMs       int        `gorm:"default:0" json:"latency_ms"`
-	LastOnlineTime  *time.Time `json:"last_online_time"`
+	ConnectionType    string     `gorm:"size:32" json:"connection_type"`
+	ConnectionQuality int        `gorm:"default:100" json:"connection_quality"`
+	LatencyMs         int        `gorm:"default:0" json:"latency_ms"`
+	OnlineDuration    uint64     `gorm:"default:0" json:"online_duration"`
+	LastOnlineTime    *time.Time `json:"last_online_time"`
+	Config            string     `gorm:"type:jsonb;default:'{}'" json:"config"`
 	// v2.1 同步机制字段
 	ConfigEpoch     uint64     `gorm:"default:0" json:"config_epoch"`
 	LastManifestID  string     `gorm:"size:64" json:"last_manifest_id"`
@@ -150,6 +153,7 @@ type DeviceConfig struct {
 	Name         string `gorm:"size:128;not null;index" json:"name"`
 	Description  string `gorm:"type:text" json:"description"`
 	DeviceType   string `gorm:"size:64;not null;index" json:"device_type"`
+	DeviceModel string `gorm:"size:64" json:"device_model"`
 	Protocol     string `gorm:"size:32" json:"protocol"`      // modbus / stream / custom (legacy)
 	HardwareType string `gorm:"size:32" json:"hardware_type"` // uart / i2c / spi / gpio / adc (legacy)
 	ParserID     string `gorm:"size:64" json:"parser_id"`     // legacy, v2.2 用 parser JSONB
@@ -266,7 +270,9 @@ type User struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	Username     string    `gorm:"size:32;uniqueIndex;not null" json:"username"`
 	PasswordHash string    `gorm:"size:128;not null" json:"-"`
+	Email        string    `gorm:"size:128" json:"email"`
 	Role         string    `gorm:"size:20;default:user" json:"role"`
+	Enabled      bool      `gorm:"default:true" json:"enabled"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

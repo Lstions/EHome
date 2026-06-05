@@ -68,6 +68,9 @@ func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
 
 			c.JSON(http.StatusOK, resp)
 		})
+		auth.POST("/logout", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "logged out"})
+		})
 	}
 }
 

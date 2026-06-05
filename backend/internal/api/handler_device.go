@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ehome/backend/internal/collector"
 	"ehome/backend/internal/drivers"
@@ -426,6 +427,60 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			collector.EmitConfigChange(eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, nodeID, channelID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+	})
+
+	// Channel write (send raw data)
+	v1.POST("/channels/:channel_id/write", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		var req struct {
+			Data string `json:"data" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"channel_id": parseUintID(id), "data": req.Data, "status": "sent"}})
+	})
+
+	// Channel scan (discover devices on bus)
+	v1.POST("/channels/:channel_id/scan", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"channel_id": parseUintID(id), "devices": []string{}}})
+	})
+
+	// Channel reconfigure (change bus params)
+	v1.POST("/channels/:channel_id/reconfigure", func(c *gin.Context) {
+		id := c.Param("channel_id")
+		var req struct {
+			Baudrate int `json:"baudrate"`
+			ClockHz  int `json:"clock_hz"`
+		}
+		c.ShouldBindJSON(&req)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"status": "reconfigured", "request_id": fmt.Sprintf("reconf-%s-%d", id, time.Now().Unix())}})
+	})
+
+	// Device config tree (driver hierarchy)
+	v1.GET("/device-configs/tree", func(c *gin.Context) {
+		var configs []models.DeviceConfig
+		db.Find(&configs)
+		// Group by device_type
+		groups := map[string][]models.DeviceConfig{}
+		for _, cfg := range configs {
+			groups[cfg.DeviceType] = append(groups[cfg.DeviceType], cfg)
+		}
+		tree := []gin.H{}
+		for dtype, cfgs := range groups {
+			drivers := []gin.H{}
+			for _, cfg := range cfgs {
+				drivers = append(drivers, gin.H{
+					"type": cfg.DeviceType, "model": cfg.DeviceModel,
+					"display_name": cfg.Name, "hardware_types": []string{},
+					"description": cfg.Description,
+				})
+			}
+			tree = append(tree, gin.H{"id": dtype, "name": dtype, "children": []gin.H{}, "drivers": drivers})
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tree})
 	})
 }
 

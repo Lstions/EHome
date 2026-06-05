@@ -52,6 +52,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)
 
+		// User CRUD routes
+		registerUserRoutes(v1, db)
+
 		// Data reports (placeholder)
 		registerDataReportRoutes(v1, db)
 

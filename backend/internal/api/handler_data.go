@@ -179,4 +179,10 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		c.JSON(http.StatusOK, data)
 	})
+
+	// GET /api/v1/devices/:id/failover-logs
+	v1.GET("/devices/:id/failover-logs", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []gin.H{}, "total": 0, "limit": limit})
+	})
 }

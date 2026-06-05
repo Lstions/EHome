@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"ehome/backend/internal/models"
 
@@ -10,6 +11,14 @@ import (
 )
 
 func registerNotificationRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
+	// GET /notifications
+	v1.GET("/notifications", func(c *gin.Context) {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+		var notifs []models.Notification
+		db.Order("created_at DESC").Limit(limit).Find(&notifs)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": notifs})
+	})
+
 	// GET /notifications/unread-count
 	v1.GET("/notifications/unread-count", func(c *gin.Context) {
 		var count int64
