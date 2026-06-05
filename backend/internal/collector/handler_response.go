@@ -7,6 +7,7 @@ import (
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
@@ -238,4 +239,42 @@ func (m *Manager) handleConfigSyncRequest(deviceID string, payload []byte) {
 	} else {
 		logger.Infof("[sync_id=%s] ConfigSyncRequest skip: device=%s in_sync", decision.SyncID, deviceID)
 	}
+}
+
+// handlePing processes MsgPing (0x08) from device.
+// BUG-12: Device can ping the server; server responds with PongAck (0x18).
+func (m *Manager) handlePing(deviceID string, payload []byte) {
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		logger.Infof("[%s] Failed to decode Ping: %v", deviceID, err)
+		return
+	}
+
+	var timestamp uint64
+	for {
+		field, err := dec.NextField()
+		if err != nil {
+			break
+		}
+		if field.FieldNum == 1 {
+			timestamp = frame.GetUint64(field)
+		}
+	}
+
+	logger.Infof("[%s] Received MsgPing (0x08): timestamp=%d", deviceID, timestamp)
+
+	// Respond with PongAck (0x18)
+	if err := m.SendPongAck(deviceID, timestamp); err != nil {
+		logger.Warnf("[%s] Failed to send PongAck: %v", deviceID, err)
+	}
+}
+
+// SendPongAck sends a PongAck (0x18) message to a device in response to MsgPing.
+func (m *Manager) SendPongAck(deviceID string, pingTimestamp uint64) error {
+	enc := frame.NewEncoder(frame.MsgPongAck)
+	enc.EncodeVarint(1, pingTimestamp) // echo back the ping timestamp
+	enc.EncodeVarint(2, uint64(time.Now().UnixMilli())) // server timestamp
+
+	topic := mqtt.TopicForNode(deviceID)
+	return m.mqtt.Publish(topic, enc.Bytes())
 }

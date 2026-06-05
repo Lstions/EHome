@@ -38,6 +38,7 @@ const (
 	MsgConfigReport = 0x11
 	MsgHelloAck     = 0x12
 	MsgConfigSyncReq = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
+	MsgPongAck      = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
 )
 
 // Field represents a decoded field
@@ -284,7 +285,8 @@ func MsgTypeName(msgType uint8) string {
 		MsgConfigQuery: "config_query",
 		MsgConfigReport: "config_report",
 		MsgHelloAck:    "hello_ack",
-		MsgConfigSyncReq: "config_sync_request",
+		MsgConfigSyncReq:  "config_sync_request",
+		MsgPongAck:       "pong_ack",
 	}
 	if name, ok := names[msgType]; ok {
 		return name
