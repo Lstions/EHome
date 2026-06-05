@@ -9,7 +9,7 @@ var (
 	// NodesOnline tracks number of online nodes
 	NodesOnline = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "ehome_nodes_online",
-		Help: "Number of online collectors",
+		Help: "Number of online nodes",
 	})
 
 	// MessagesReceived counts total MQTT messages received by type

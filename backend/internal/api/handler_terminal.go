@@ -5,18 +5,18 @@ import (
 	"net/http"
 	"strconv"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 
 	"github.com/gin-gonic/gin"
 )
 
 // registerTerminalRoutes sets up channel terminal history + write routes
-func registerTerminalRoutes(v1 *gin.RouterGroup, collectorMgr *collector.Manager) {
+func registerTerminalRoutes(v1 *gin.RouterGroup, nodeMgr *nodemgr.Manager) {
 	// Get terminal history
 	v1.GET("/channels/:channel_id/terminal", func(c *gin.Context) {
 		channelID, _ := strconv.Atoi(c.Param("channel_id"))
 		count, _ := strconv.Atoi(c.DefaultQuery("count", "50"))
-		entries := collectorMgr.TerminalMgr().GetHistory(uint(channelID), count)
+		entries := nodeMgr.TerminalMgr().GetHistory(uint(channelID), count)
 		c.JSON(http.StatusOK, gin.H{
 			"channel_id": channelID,
 			"count":      len(entries),
@@ -45,7 +45,7 @@ func registerTerminalRoutes(v1 *gin.RouterGroup, collectorMgr *collector.Manager
 		if req.ReadSize > 0 {
 			readSize = uint32(req.ReadSize)
 		}
-		if err := collectorMgr.SendWriteCommand(req.DeviceID, uint32(channelID), data, readSize); err != nil {
+		if err := nodeMgr.SendWriteCommand(req.DeviceID, uint32(channelID), data, readSize); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

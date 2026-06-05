@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"ehome/backend/internal/events"
@@ -46,30 +46,30 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		}
 	}
 
-	// Update collector
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
+	// Update node
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found for status update", deviceID)
 		return
 	}
 
-	oldStatus := collector.Status
+	oldStatus := node.Status
 	now := time.Now()
-	collector.Status = status
-	collector.LastSeen = &now
-	collector.UptimeSeconds = uint32(uptimeSec)
+	node.Status = status
+	node.LastSeen = &now
+	node.UptimeSeconds = uint32(uptimeSec)
 
 	// v2.1: update config_sync_state if provided
 	if syncState != "" {
-		collector.ConfigStatus = syncState
+		node.ConfigStatus = syncState
 	}
 
-	m.db.Save(&collector)
+	m.db.Save(&node)
 
 	// Record event on status change
 	if oldStatus != status {
 		m.db.Create(&models.NodeEvent{
-			NodeID: collector.ID,
+			NodeID: node.ID,
 			EventType:   "status_change",
 			OldStatus:   oldStatus,
 			NewStatus:   status,
@@ -93,7 +93,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 
 	// offline→online detection
 	if oldStatus == "offline" && status == "online" {
-		m.triggerDeviceInit(collector.ID, deviceID)
+		m.triggerDeviceInit(node.ID, deviceID)
 	}
 
 	// WebSocket push

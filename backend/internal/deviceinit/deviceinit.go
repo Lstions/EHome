@@ -112,7 +112,7 @@ func (o *Orchestrator) sendAndWait(deviceID string, channelID uint32, requestID 
 }
 
 // HandleWriteResponse routes a WriteResponse to the waiting sender.
-// Called by collector manager when a WriteResponse (0x07) is received.
+// Called by node manager when a WriteResponse (0x07) is received.
 func (o *Orchestrator) HandleWriteResponse(requestID uint32, rawData []byte) {
 	o.pendingMu.Lock()
 	ch, ok := o.pendingResp[requestID]
@@ -226,8 +226,8 @@ func (o *Orchestrator) ClearCache(deviceType string) {
 }
 
 // InitIfNeeded checks if a device needs initialization and triggers it.
-// This is called when a collector transitions from offline to online.
-// deviceID: collector device_id
+// This is called when a node transitions from offline to online.
+// deviceID: node device_id
 // channelID: the channel where the device is connected
 // deviceType: the type of device (e.g., "bmp280")
 // Returns true if init was triggered, false if already initialized or no init sequence.

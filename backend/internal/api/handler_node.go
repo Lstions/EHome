@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 
@@ -15,10 +15,10 @@ import (
 )
 
 // registerNodeRoutes sets up node CRUD routes
-func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
-	eventBus := collectorMgr.EventBus()
+func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+	eventBus := nodeMgr.EventBus()
 
-	// List nodes (v2.2 path for /collectors)
+	// List nodes (v2.2 compat path)
 	v1.GET("/nodes", func(c *gin.Context) {
 		var nodes []models.Node
 		if err := db.Find(&nodes).Error; err != nil {
@@ -39,7 +39,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 		c.JSON(http.StatusOK, node)
 	})
 
-	// Create node (v2.2 path for POST /collectors)
+	// Create node (v2.2 compat path)
 	v1.POST("/nodes", func(c *gin.Context) {
 		var node models.Node
 		if err := c.ShouldBindJSON(&node); err != nil {
@@ -50,7 +50,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionCreate, node.ID, node.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.ID, node.ID)
 		c.JSON(http.StatusCreated, node)
 	})
 
@@ -67,7 +67,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			return
 		}
 		db.Save(&node)
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionUpdate, node.ID, node.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.ID, node.ID)
 		c.JSON(http.StatusOK, node)
 	})
 
@@ -79,7 +79,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeNode, collector.CfgActionDelete, nodeID, nodeID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, nodeID, nodeID)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 
@@ -119,7 +119,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		if err := collectorMgr.SendPing(strconv.FormatInt(node.NodeID, 10)); err != nil {
+		if err := nodeMgr.SendPing(strconv.FormatInt(node.NodeID, 10)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -127,10 +127,10 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 	})
 
 	// Get node config (v2.2 ConfigManifest)
-	v1.GET("/nodes/:id/config", getNodeConfig(db, collectorMgr))
+	v1.GET("/nodes/:id/config", getNodeConfig(db, nodeMgr))
 
 	// Update node config (v2.2 incremental update)
-	v1.PUT("/nodes/:id/config", updateNodeConfig(db, collectorMgr))
+	v1.PUT("/nodes/:id/config", updateNodeConfig(db, nodeMgr))
 
 	// BUG-08 fix: OTA history for a specific node
 	v1.GET("/nodes/:id/ota/history", getNodeOTAHistory(db))
@@ -152,8 +152,8 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collecto
 	// POST /api/v1/nodes/:id/config/sync
 	n.POST("/:id/config/sync", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
-		// Trigger config sync via collector manager
-		collectorMgr.SyncGate().OnServerStartup() // or specific node sync
+		// Trigger config sync via node manager
+		nodeMgr.SyncGate().OnServerStartup() // or specific node sync
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "syncing"}})
 	})
 
@@ -256,7 +256,7 @@ type nodeConfigResponse struct {
 }
 
 // getNodeConfig returns the full configuration manifest for a node.
-func getNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerFunc {
+func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
@@ -295,7 +295,7 @@ func getNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerFunc
 		}
 
 		// Get current epoch
-		epoch := collectorMgr.EventBus().CurrentEpoch()
+		epoch := nodeMgr.EventBus().CurrentEpoch()
 
 		protocolVersion := node.ProtocolVersion
 		if protocolVersion == "" {
@@ -349,7 +349,7 @@ type edgeDeviceUpdateItem struct {
 // updateNodeConfig handles incremental (partial) config updates for a node.
 // BUG-04 fix: idempotent — if the effective config content is unchanged,
 // skip epoch increment and MQTT push, return 200 immediately.
-func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerFunc {
+func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
@@ -479,18 +479,18 @@ func updateNodeConfig(db *gorm.DB, collectorMgr *collector.Manager) gin.HandlerF
 
 		if configChanged {
 			// Increment epoch via EventBus (Publish increments epoch)
-			collector.EmitConfigChange(
+			nodemgr.EmitConfigChange(
 				c,
-				collectorMgr.EventBus(),
-				collector.CfgChangeNode,
-				collector.CfgActionUpdate,
+				nodeMgr.EventBus(),
+				nodemgr.CfgChangeNode,
+				nodemgr.CfgActionUpdate,
 				node.ID,
 				node.ID,
 			)
 		}
 
 		// Get the new epoch after increment (or current if unchanged)
-		newEpoch := collectorMgr.EventBus().CurrentEpoch()
+		newEpoch := nodeMgr.EventBus().CurrentEpoch()
 
 		// If node is online, SyncGate will automatically push config
 		// (EmitConfigChange publishes to the bus, SyncGate consumes and pushes)

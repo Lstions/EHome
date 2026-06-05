@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"encoding/json"
@@ -70,9 +70,9 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		}
 	}
 
-	// Get collector
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", job.deviceID).First(&collector).Error; err != nil {
+	// Get node
+	var node models.Node
+	if err := m.db.Where("node_id = ?", job.deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found", job.deviceID)
 		return
 	}
@@ -86,7 +86,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		"request_id": job.requestID,
 	})
 	m.db.Create(&models.DeviceData{
-		NodeID: collector.ID,
+		NodeID: node.ID,
 		DataJSON:    string(dataJSON),
 		Timestamp:   time.Now(),
 	})
@@ -101,7 +101,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// WebSocket push: include sensor device_id (numeric) if found in DB
 	channelDataEvent := map[string]interface{}{
-		"device_id":  job.deviceID, // collector device_id (string, for terminal correlation)
+		"device_id":  job.deviceID, // node device_id (string, for terminal correlation)
 		"node_id":    job.deviceID, // v2.2 新增 (同一值)
 		"channel_id": job.channelID,
 		"raw_hex":    fmt.Sprintf("%x", job.rawData),

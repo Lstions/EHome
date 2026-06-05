@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"testing"
@@ -92,9 +92,9 @@ func TestOnHello_ManifestMismatch_ForceSync(t *testing.T) {
 func TestOnHello_InSync_NoAction(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	// Create a collector with known config (NodeID must match the deviceID used in OnHello)
-	collector := models.Node{NodeID: 4001, Status: "online"}
-	mgr.db.Create(&collector)
+	// Create a node with known config (NodeID must match the deviceID used in OnHello)
+	nodeRecord := models.Node{NodeID: 4001, Status: "online"}
+	mgr.db.Create(&nodeRecord)
 
 	// Compute the hash the device would report (use same ID as OnHello)
 	deviceID := "4001"
@@ -185,14 +185,14 @@ func TestOnStatusReport_OnlineWithEpochZero(t *testing.T) {
 func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Create a collector
-	collector := models.Node{NodeID: 4002, Status: "online"}
-	mgr.db.Create(&collector)
+	// Create a node
+	nodeRecord := models.Node{NodeID: 4002, Status: "online"}
+	mgr.db.Create(&nodeRecord)
 
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		NodeID: collector.ID,
+		NodeID: nodeRecord.ID,
 		EntityID:    100,
 	}
 	decisions := gate.OnConfigChange(evt)
@@ -218,20 +218,20 @@ func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
 	}
 	decisions := gate.OnConfigChange(evt)
 	if len(decisions) != 0 {
-		t.Fatalf("expected 0 decisions for missing collector, got %d", len(decisions))
+		t.Fatalf("expected 0 decisions for missing node, got %d", len(decisions))
 	}
 }
 
 func TestOnConfigChange_EpochIncremented(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	collector := models.Node{NodeID: 4003, Status: "online"}
-	mgr.db.Create(&collector)
+	nodeRecord := models.Node{NodeID: 4003, Status: "online"}
+	mgr.db.Create(&nodeRecord)
 	before := bus.CurrentEpoch()
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
 		Action:      CfgActionUpdate,
-		NodeID: collector.ID,
+		NodeID: nodeRecord.ID,
 		EntityID:    100,
 	}
 	// Publish increments epoch
@@ -249,14 +249,14 @@ func TestOnConfigChange_EpochIncremented(t *testing.T) {
 func TestOnServerStartup_PushAllOnline(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Create online collectors
+	// Create online nodes
 	mgr.db.Create(&models.Node{NodeID: 5001, Status: "online"})
 	mgr.db.Create(&models.Node{NodeID: 5002, Status: "online"})
 	mgr.db.Create(&models.Node{NodeID: 5003, Status: "offline"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 2 {
-		t.Fatalf("expected 2 decisions for online collectors, got %d", len(decisions))
+		t.Fatalf("expected 2 decisions for online nodes, got %d", len(decisions))
 	}
 	for _, d := range decisions {
 		if d.Action != SyncActionFull {
@@ -273,7 +273,7 @@ func TestOnServerStartup_NoOnline(t *testing.T) {
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 0 {
-		t.Fatalf("expected 0 decisions with no online collectors, got %d", len(decisions))
+		t.Fatalf("expected 0 decisions with no online nodes, got %d", len(decisions))
 	}
 }
 

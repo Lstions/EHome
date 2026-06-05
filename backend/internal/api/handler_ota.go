@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/ota"
 
@@ -17,7 +17,7 @@ import (
 )
 
 // registerOTARoutes sets up OTA task + firmware routes
-func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, collectorMgr *collector.Manager) {
+func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, nodeMgr *nodemgr.Manager) {
 	// List OTA tasks
 	v1.GET("/ota/tasks", func(c *gin.Context) {
 		var tasks []models.OTATask
@@ -202,7 +202,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 // registerOTARoutesCompat adds frontend-compatible OTA alias paths
 // These mirror the core OTA routes but use shorter, REST-friendly paths
 // that the frontend expects (e.g. /ota/start instead of /ota/tasks).
-func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, collectorMgr *collector.Manager) {
+func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, nodeMgr *nodemgr.Manager) {
 	// POST /api/v1/ota/start
 	v1.POST("/ota/start", func(c *gin.Context) {
 		var req struct {

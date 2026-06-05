@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -13,8 +13,8 @@ import (
 )
 
 // registerEdgeDeviceRoutes sets up edge-device CRUD routes
-func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager) {
-	eventBus := collectorMgr.EventBus()
+func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+	eventBus := nodeMgr.EventBus()
 
 	// List edge devices (v2.2 path for /devices)
 	v1.GET("/edge-devices", func(c *gin.Context) {
@@ -52,7 +52,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, dev.ChannelID).Error == nil {
-			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionCreate, ch.NodeID, dev.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionCreate, ch.NodeID, dev.ID)
 		}
 		c.JSON(http.StatusCreated, dev)
 	})
@@ -77,7 +77,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
-			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionUpdate, ch.NodeID, d.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
 	})
@@ -106,7 +106,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		deviceID := strconv.FormatInt(node.NodeID, 10)
 
 		// Use the deviceinit Orchestrator to trigger init
-		orchestrator := collectorMgr.DeviceInit()
+		orchestrator := nodeMgr.DeviceInit()
 		if orchestrator == nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "device init orchestrator not available"})
 			return
@@ -145,7 +145,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *co
 		}
 		// EmitConfigChange
 		if hasNode {
-			collector.EmitConfigChange(c, eventBus, collector.CfgChangeEdgeDevice, collector.CfgActionDelete, ch.NodeID, d.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, d.ID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})

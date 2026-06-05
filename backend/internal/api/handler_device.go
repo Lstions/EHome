@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 
@@ -19,9 +19,9 @@ import (
 )
 
 // registerDeviceRoutes sets up channel + device-config CRUD routes
-func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collector.Manager, driverRegistry *drivers.Registry) {
+func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry) {
 	// Get the EventBus for emitting config change events
-	eventBus := collectorMgr.EventBus()
+	eventBus := nodeMgr.EventBus()
 
 	// ============================================================
 	// DeviceConfig 设备级配置模板 (前端 src/api/deviceConfig.ts)
@@ -136,7 +136,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionCreate, 0, tpl.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionCreate, 0, tpl.ID)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
 
@@ -192,7 +192,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, update.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, 0, update.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
 
@@ -205,7 +205,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionDelete, 0, tplID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionDelete, 0, tplID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
@@ -265,7 +265,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change (default flag change affects nodes using this config)
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeDeviceConfig, collector.CfgActionUpdate, 0, tpl.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, 0, tpl.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
@@ -371,7 +371,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change for the node
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionCreate, ch.NodeID, ch.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionCreate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusCreated, ch)
 	})
 
@@ -407,7 +407,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 			return
 		}
 		// Emit config change for the node
-		collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionUpdate, ch.NodeID, ch.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, ch.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
@@ -424,7 +424,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, collectorMgr *collec
 		}
 		// Emit config change
 		if hasNode {
-			collector.EmitConfigChange(c, eventBus, collector.CfgChangeChannel, collector.CfgActionDelete, nodeID, channelID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, nodeID, channelID)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})

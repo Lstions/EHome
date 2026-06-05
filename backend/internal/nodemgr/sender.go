@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"context"
@@ -110,17 +110,17 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	deviceID := decision.DeviceID
 
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found for config", deviceID)
 		return
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", collector.ID).Find(&templates)
+	m.db.Where("node_id = ?", node.ID).Find(&templates)
 
 	var channels []models.Channel
-	m.db.Where("node_id = ?", collector.ID).Find(&channels)
+	m.db.Where("node_id = ?", node.ID).Find(&channels)
 
 	manifestID := decision.ManifestID
 	if manifestID == "" {

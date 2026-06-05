@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"encoding/json"
@@ -58,11 +58,11 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	metrics.DataReceivedTotal.WithLabelValues(deviceID, status).Inc()
 
 	// Dispatch to worker pool (non-blocking)
-	// Look up collector numeric ID (may be 0 if not found, but that's fine for fanout)
+	// Look up node numeric ID (may be 0 if not found, but that's fine for fanout)
 	var collectorID uint
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
-		collectorID = collector.ID
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err == nil {
+		collectorID = node.ID
 	}
 	job := dataReportJob{
 		deviceID:    deviceID,

@@ -45,7 +45,7 @@ var terminalStates = map[string]bool{
 	StatusFailed:  true,
 }
 
-// 抢占 (supersede) 旧 OTA 记录: 同一 collector 下所有非终态记录标记为 failed
+// 抢占 (supersede) 旧 OTA 记录: 同 node 下所有非终态记录标记为 failed
 // 实现 docs §6.4.1
 var activeStates = []string{
 	StatusPending,
@@ -71,7 +71,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub) *Man
 }
 
 // CreateTask creates a new OTA task per docs §6.4.1:
-//  1. Mark all in-flight OTA records for the same collector as failed ("Superseded by new attempt")
+//  1. Mark all in-flight OTA records for the same node as failed ("Superseded by new attempt")
 //  2. Create new record in pending state with the target firmware version
 //  3. (Caller is expected to publish the OtaCommand afterwards)
 func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask, error) {
@@ -80,7 +80,7 @@ func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask
 		return nil, fmt.Errorf("firmware not found: %w", err)
 	}
 
-	// §6.4.1: Supersede any prior in-flight OTA for this collector
+	// §6.4.1: Supersede any prior in-flight OTA for this node
 	now := time.Now()
 	res := m.db.Model(&models.OTATask{}).
 		Where("collector_id = ? AND status IN ?", collectorID, activeStates).
@@ -119,8 +119,8 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	}
 
 	// Get device_id
-	var collector models.Node
-	if err := m.db.First(&collector, task.NodeID).Error; err != nil {
+	var nodeRecord models.Node
+	if err := m.db.First(&nodeRecord, task.NodeID).Error; err != nil {
 		return err
 	}
 
@@ -131,7 +131,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	enc.EncodeVarint(4, firmware.SizeBytes)
 	enc.EncodeString(5, firmware.Version)
 
-	topic := mqtt.TopicForNode(strconv.FormatInt(collector.NodeID, 10))
+	topic := mqtt.TopicForNode(strconv.FormatInt(nodeRecord.NodeID, 10))
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
@@ -238,14 +238,14 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 // a new firmware version, per docs §6.4.3.
 //
 // If the device is now running the target firmware (to_version), any in-flight task for
-// that collector is marked success. This covers the case where the ESP32 reboots into
+// that node is marked success. This covers the case where the ESP32 reboots into
 // the new firmware and the trailing success OtaProgress frame is lost.
 func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareVersion string) {
 	if collectorID == 0 {
 		return
 	}
 
-	// Find the latest non-terminal OTA record for this collector
+	// Find the latest non-terminal OTA record for this node
 	var task models.OTATask
 	err := m.db.Where("collector_id = ? AND status IN ?", collectorID, activeStates).
 		Order("id DESC").

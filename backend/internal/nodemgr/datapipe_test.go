@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"strconv"
@@ -43,7 +43,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 
 	ch := models.Channel{
 		NodeID: col.ID,
-		HardwareID:  1,
+		HardwareID:  "1",
 		IntervalMs:  5000,
 		Enabled:     true,
 	}
@@ -93,7 +93,7 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 
 	col := models.Node{NodeID: 3002, Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: col.ID, HardwareID: "1", IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	// No device created
 
@@ -115,7 +115,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 
 	col := models.Node{NodeID: 3003, Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: col.ID, HardwareID: "1", IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	dev := models.EdgeDevice{Name: "sn3000", ChannelID: ch.ID, Type: "sn3000"}
 	db.Create(&dev)

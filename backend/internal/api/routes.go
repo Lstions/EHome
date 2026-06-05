@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/terminal"
@@ -20,7 +20,7 @@ func nowMillis() int64 {
 }
 
 // SetupRoutes configures all API routes by domain
-func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr *collector.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry) {
+func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry) {
 	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -36,17 +36,17 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	{
-		registerDeviceRoutes(v1, db, collectorMgr, driverRegistry)
+		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry)
 		registerDataRoutes(v1, db)
-		registerOTARoutes(v1, db, otaMgr, collectorMgr)
-		registerOTARoutesCompat(v1, db, otaMgr, collectorMgr)
+		registerOTARoutes(v1, db, otaMgr, nodeMgr)
+		registerOTARoutesCompat(v1, db, otaMgr, nodeMgr)
 		registerHARoutes(v1)
-		registerTerminalRoutes(v1, collectorMgr)
+		registerTerminalRoutes(v1, nodeMgr)
 		registerMetricsRoutes(v1, db)
 
 		// v2.2 routes
-		registerNodeRoutes(v1, db, collectorMgr)
-		registerEdgeDeviceRoutes(v1, db, collectorMgr)
+		registerNodeRoutes(v1, db, nodeMgr)
+		registerEdgeDeviceRoutes(v1, db, nodeMgr)
 
 		// Overview + Notification routes
 		registerOverviewRoutes(v1, db)
@@ -79,10 +79,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 	termWSHandler := terminal.NewWSHandler(
 		wsHub,
 		func(channelID uint) ([]terminal.Entry, error) {
-			return collectorMgr.TerminalMgr().GetHistory(channelID, 256), nil
+			return nodeMgr.TerminalMgr().GetHistory(channelID, 256), nil
 		},
 		func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
-			return collectorMgr.SendWriteCommand(deviceID, channelID, data, readSize)
+			return nodeMgr.SendWriteCommand(deviceID, channelID, data, readSize)
 		},
 	)
 	r.GET("/api/v1/ws/terminal", JWTAuth(), termWSHandler.HandleTerminalWS)

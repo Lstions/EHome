@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/api"
-	"ehome/backend/internal/collector"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/drivers"
@@ -108,31 +108,31 @@ func main() {
 	// Initialize offline detector
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
 
-	// Initialize collector manager
-	collectorMgr := collector.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector)
-	go collectorMgr.Start()
+	// Initialize node manager
+	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector)
+	go nodeMgr.Start()
 
-	// v2.1: Server startup push — push config to all online collectors (fixes G2)
+	// v2.1: Server startup push — push config to all online nodes (fixes G2)
 	go func() {
 		time.Sleep(5 * time.Second) // Wait for MQTT/Redis/DB to be ready
-		decisions := collectorMgr.SyncGate().OnServerStartup()
+		decisions := nodeMgr.SyncGate().OnServerStartup()
 		for _, d := range decisions {
-			if d.Action != collector.SyncActionNone {
-				collectorMgr.SendConfigManifestWithDecision(d)
+			if d.Action != nodemgr.SyncActionNone {
+				nodeMgr.SendConfigManifestWithDecision(d)
 				logger.Infof("[sync_id=%s] Server-startup push: device=%s reason=%s",
 					d.SyncID, d.DeviceID, d.Reason)
 			}
 		}
 		if len(decisions) > 0 {
-			logger.Infof("Server-startup push complete: %d collectors notified", len(decisions))
+			logger.Infof("Server-startup push complete: %d nodes notified", len(decisions))
 		}
 	}()
 
-	// Start offline detection loop (after collector manager is ready)
+	// Start offline detection loop (after node manager is ready)
 	offlineDetector.Start()
 
 	// Setup MQTT message handlers
-	mqttClient.SetHandler(collectorMgr.HandleMessage)
+	mqttClient.SetHandler(nodeMgr.HandleMessage)
 
 	// Setup HTTP API
 	gin.SetMode(gin.ReleaseMode)
@@ -147,7 +147,7 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
-	api.SetupRoutes(r, db, wsHub, collectorMgr, otaMgr, driverRegistry)
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry)
 
 	// Health check
 	r.GET("/ping", func(c *gin.Context) {
@@ -182,8 +182,8 @@ func main() {
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")
 
-	// 2. Stop collector manager (drains in-flight message processing)
-	collectorMgr.Stop()
+	// 2. Stop node manager (drains in-flight message processing)
+	nodeMgr.Stop()
 	logger.Infof("Collector manager stopped")
 
 	// 3. Shutdown HTTP server with 10s timeout

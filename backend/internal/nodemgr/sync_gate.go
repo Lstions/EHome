@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"fmt"
@@ -210,18 +210,18 @@ func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDec
 }
 
 // OnConfigChange handles a ConfigChangeEvent from the bus.
-// Returns one SyncDecision per affected collector device.
+// Returns one SyncDecision per affected node device.
 func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
 	syncID := uuid.New().String()
 	serverEpoch := g.eventBus.CurrentEpoch()
 
-	// Find the device_id for the affected collector
+	// Find the device_id for the affected node
 	var deviceID string
 	if evt.NodeID > 0 {
 		deviceID = g.mgr.GetDeviceIDByNodeID(evt.NodeID)
 	}
 	if deviceID == "" {
-		logger.Infof("[sync_id=%s] OnConfigChange: collector %d has no device, skip",
+		logger.Infof("[sync_id=%s] OnConfigChange: node %d has no device, skip",
 			syncID, evt.NodeID)
 		return nil
 	}
@@ -239,7 +239,7 @@ func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
 	return []SyncDecision{d}
 }
 
-// OnServerStartup returns decisions for all online collectors.
+// OnServerStartup returns decisions for all online nodes.
 // Fixes G2: server restart no longer loses sync state.
 func (g *SyncGate) OnServerStartup() []SyncDecision {
 	syncID := uuid.New().String()
@@ -259,7 +259,7 @@ func (g *SyncGate) OnServerStartup() []SyncDecision {
 		recordDecision(d)
 		decisions = append(decisions, d)
 	}
-	logger.Infof("[sync_id=%s] OnServerStartup: %d online collectors to push", syncID, len(decisions))
+	logger.Infof("[sync_id=%s] OnServerStartup: %d online nodes to push", syncID, len(decisions))
 	return decisions
 }
 

@@ -63,7 +63,7 @@ func (d *Detector) checkOffline() {
 	d.checkDBLastSeen()
 }
 
-// checkRedisHeartbeats checks Redis TTL for all collectors
+// checkRedisHeartbeats checks Redis TTL for all nodes
 // BUG-05 fix: Instead of scanning Redis keys (which won't find expired ones),
 // query DB for online nodes and verify their heartbeat key still exists.
 func (d *Detector) checkRedisHeartbeats() {
@@ -107,7 +107,7 @@ func (d *Detector) checkDBLastSeen() {
 	}
 }
 
-// markOffline marks a collector as offline
+// markOffline marks a node as offline
 func (d *Detector) markOffline(deviceID, reason string) {
 	logger.Infof("[Offline] %s: %s", deviceID, reason)
 
@@ -117,10 +117,10 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	})
 
 	// Record event
-	var collector models.Node
-	if err := d.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
+	var nodeRecord models.Node
+	if err := d.db.Where("node_id = ?", deviceID).First(&nodeRecord).Error; err == nil {
 		d.db.Create(&models.NodeEvent{
-			NodeID: collector.ID,
+			NodeID: nodeRecord.ID,
 			EventType:   "offline",
 			OldStatus:   "online",
 			NewStatus:   "offline",
@@ -135,7 +135,7 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	})
 }
 
-// UpdateHeartbeat updates the heartbeat for a collector
+// UpdateHeartbeat updates the heartbeat for a node
 func (d *Detector) UpdateHeartbeat(deviceID string) {
 	if redis.Client != nil {
 		redis.SetHeartbeat(deviceID, 15*time.Second)

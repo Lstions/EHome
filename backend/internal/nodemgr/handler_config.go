@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"ehome/backend/pkg/logger"
@@ -49,7 +49,7 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 	logger.Infof("[%s] ConfigResult: manifest=%s success=%v epoch=%d sync_id=%s",
 		deviceID, manifestID, success, configEpoch, syncID)
 
-	// Update collector config version
+	// Update node config version
 	if success {
 		updates := map[string]interface{}{
 			"config_version": manifestID,
@@ -99,27 +99,27 @@ func (m *Manager) handleConfigReport(deviceID string, payload []byte) {
 		deviceID, requestID, manifestID, templateCount, channelCount, uptimeSec)
 
 	// Verify config sync: compare reported manifest with DB
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err == nil {
-		if collector.ConfigVersion != manifestID {
-			logger.Infof("[%s] Config mismatch! DB=%s device=%s", deviceID, collector.ConfigVersion, manifestID)
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err == nil {
+		if node.ConfigVersion != manifestID {
+			logger.Infof("[%s] Config mismatch! DB=%s device=%s", deviceID, node.ConfigVersion, manifestID)
 		}
 	}
 }
 
 // sendConfigManifest sends configuration to a device with full nested sub-structures
 func (m *Manager) sendConfigManifest(deviceID string) {
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found for config", deviceID)
 		return
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", collector.ID).Find(&templates)
+	m.db.Where("node_id = ?", node.ID).Find(&templates)
 
 	var channels []models.Channel
-	m.db.Where("node_id = ?", collector.ID).Find(&channels)
+	m.db.Where("node_id = ?", node.ID).Find(&channels)
 
 	// Build manifest with manifest_id
 	manifestID := fmt.Sprintf("v2-%d", time.Now().UnixMilli())

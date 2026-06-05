@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"fmt"
@@ -24,7 +24,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Manager handles collector lifecycle and message processing
+// Manager handles node lifecycle and message processing
 type Manager struct {
 	db              *gorm.DB
 	mqtt            *mqtt.Client
@@ -48,7 +48,7 @@ type Manager struct {
 	syncGate *SyncGate
 }
 
-// NewManager creates a new collector manager
+// NewManager creates a new node manager
 func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector) *Manager {
 	mgr := &Manager{
 		db:              db,
@@ -192,7 +192,7 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 	return buf
 }
 
-// triggerDeviceInit finds devices for a collector and triggers initialization
+// triggerDeviceInit finds devices for a node and triggers initialization
 func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
 	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
@@ -234,19 +234,19 @@ type ConfigHashResult struct {
 
 // CalcConfigHashForDevice calculates the config hash and manifest ID for a device.
 func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
-	var collector models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&collector).Error; err != nil {
+	var node models.Node
+	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		return ConfigHashResult{}
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", collector.ID).Find(&templates)
+	m.db.Where("node_id = ?", node.ID).Find(&templates)
 	var channels []models.Channel
-	m.db.Where("node_id = ?", collector.ID).Find(&channels)
+	m.db.Where("node_id = ?", node.ID).Find(&channels)
 
 	hashData := m.buildHashData(templates, channels)
 	hash := m.hashMgr.CalcConfigHash(hashData, nil)
-	manifestID := collector.ConfigVersion
+	manifestID := node.ConfigVersion
 	if manifestID == "" {
 		manifestID = "none"
 	}
@@ -263,7 +263,7 @@ func (m *Manager) GetDeviceIDByNodeID(nodeDBID uint) string {
 	return strconv.FormatInt(node.NodeID, 10)
 }
 
-// GetOnlineDeviceIDs returns device IDs of all online collectors.
+// GetOnlineDeviceIDs returns device IDs of all online nodes.
 func (m *Manager) GetOnlineDeviceIDs() []string {
 	var collectors []models.Node
 	m.db.Where("status = ?", "online").Find(&collectors)
@@ -274,7 +274,7 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 	return ids
 }
 
-// publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a collector
+// publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a node
 func (m *Manager) publishHADiscovery(collectorID uint, deviceID string) {
 	if m.ha == nil {
 		return

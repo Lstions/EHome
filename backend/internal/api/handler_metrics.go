@@ -29,7 +29,7 @@ type MetricsResponse struct {
 	Collector struct {
 		Online  int64 `json:"online"`
 		Offline int64 `json:"offline"`
-	} `json:"collector"`
+	} `json:"node"`
 	Data struct {
 		PointsCollected int64 `json:"points_collected"`
 		PointsStored    int64 `json:"points_stored"`

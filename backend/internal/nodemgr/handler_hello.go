@@ -1,4 +1,4 @@
-package collector
+package nodemgr
 
 import (
 	"ehome/backend/internal/events"
@@ -79,13 +79,13 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		return
 	}
 
-	// Upsert collector
-	var collector models.Node
-	result := m.db.Where("node_id = ?", deviceID).First(&collector)
+	// Upsert node
+	var node models.Node
+	result := m.db.Where("node_id = ?", deviceID).First(&node)
 	now := time.Now()
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
-		collector = models.Node{
+		node = models.Node{
 			NodeID:          nodeID,
 			Model:           model,
 			FirmwareVersion: firmwareVersion,
@@ -93,22 +93,22 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 			LastSeen:        &now,
 			UptimeSeconds:   0,
 		}
-		m.db.Create(&collector)
+		m.db.Create(&node)
 		m.db.Create(&models.NodeEvent{
-			NodeID: collector.ID,
+			NodeID: node.ID,
 			EventType:   "online",
 			NewStatus:   "online",
 		})
 	} else {
-		oldStatus = collector.Status
-		collector.FirmwareVersion = firmwareVersion
-		collector.Model = model
-		collector.Status = "online"
-		collector.LastSeen = &now
-		m.db.Save(&collector)
+		oldStatus = node.Status
+		node.FirmwareVersion = firmwareVersion
+		node.Model = model
+		node.Status = "online"
+		node.LastSeen = &now
+		m.db.Save(&node)
 		if oldStatus != "online" {
 			m.db.Create(&models.NodeEvent{
-				NodeID: collector.ID,
+				NodeID: node.ID,
 				EventType:   "online",
 				OldStatus:   oldStatus,
 				NewStatus:   "online",
@@ -127,7 +127,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	// OTA state reconciliation per docs §6.4.3: if device Hello reports
 	// the target firmware version of an in-flight OTA task, mark it success.
 	if m.otaMgr != nil {
-		m.otaMgr.HandleHelloOTACompletion(collector.ID, deviceID, firmwareVersion)
+		m.otaMgr.HandleHelloOTACompletion(node.ID, deviceID, firmwareVersion)
 	}
 
 	// === v2.1: SyncGate decision (replaces ad-hoc hash check) ===
@@ -152,12 +152,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 
 	// offline→online detection: trigger device initialization
 	if oldStatus == "offline" || oldStatus == "" {
-		m.triggerDeviceInit(collector.ID, deviceID)
+		m.triggerDeviceInit(node.ID, deviceID)
 	}
 
 	// HomeAssistant Discovery: publish on first registration or status change
 	if result.Error == gorm.ErrRecordNotFound || oldStatus == "offline" || oldStatus == "" {
-		m.publishHADiscovery(collector.ID, deviceID)
+		m.publishHADiscovery(node.ID, deviceID)
 	}
 
 	// Async ping
