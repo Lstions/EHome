@@ -3,6 +3,7 @@ package collector
 import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
+	"strconv"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -71,7 +72,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
 		collector = models.Node{
-			NodeID:        deviceID,
+			NodeID:          func() int64 { n, _ := strconv.ParseInt(deviceID, 10, 64); return n }(),
 			Model:           model,
 			FirmwareVersion: firmwareVersion,
 			Status:          "online",

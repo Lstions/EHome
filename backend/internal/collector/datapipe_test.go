@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"strconv"
 	_ "ehome/backend/pkg/logger"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 
 	// Set up a channel + device
 	col := models.Node{
-		NodeID:        "test-pipeline",
+		NodeID:          3001,
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -62,7 +63,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	// Build a minimal manager
 	mgr := &Manager{db: db}
 
-	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), rawData)
+	mgr.parseAndStoreData(col.ID, strconv.FormatInt(col.NodeID, 10), uint64(ch.ID), rawData)
 
 	// Verify unified_data was written
 	var unified []models.UnifiedData
@@ -90,14 +91,14 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Node{NodeID: "x", Status: "online"}
+	col := models.Node{NodeID: 3002, Status: "online"}
 	db.Create(&col)
 	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	// No device created
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "x", uint64(ch.ID), []byte{1, 2, 3, 4, 5, 6})
+	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), []byte{1, 2, 3, 4, 5, 6})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)
@@ -112,7 +113,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Node{NodeID: "x", Status: "online"}
+	col := models.Node{NodeID: 3003, Status: "online"}
 	db.Create(&col)
 	ch := models.Channel{NodeID: col.ID, HardwareID: 1, IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
@@ -120,7 +121,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db.Create(&dev)
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "x", uint64(ch.ID), []byte{})
+	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), []byte{})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)

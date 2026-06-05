@@ -1,15 +1,15 @@
 database:
-  dbname: ehome
   host: localhost
-  password: homestation123
   port: 9432
-  sslmode: disable
   user: homestation
-log:
-  level: info
+  password: homestation123
+  dbname: ehome
+  sslmode: disable
 mqtt:
   broker: tcp://localhost:1883
 redis:
   addr: localhost:6379
 server:
-  addr: :8080
+  addr: ":8080"
+log:
+  level: info

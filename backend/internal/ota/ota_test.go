@@ -254,7 +254,7 @@ func TestCancelTask(t *testing.T) {
 
 	// Create collector and firmware
 	col := models.Node{
-		NodeID:        "test-cancel-device",
+		NodeID:          2001,
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -300,7 +300,7 @@ func TestCancelTask(t *testing.T) {
 // Test CancelTask: terminal state task → error
 func TestCancelTask_AlreadyTerminal(t *testing.T) {
 	db := setupOTATestDB(t)
-	col := models.Node{NodeID: "x", Status: "online"}
+	col := models.Node{NodeID: 2002, Status: "online"}
 	db.Create(&col)
 	fw := models.Firmware{Version: "1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)

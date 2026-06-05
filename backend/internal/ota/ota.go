@@ -2,6 +2,7 @@ package ota
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"ehome/backend/internal/events"
@@ -130,7 +131,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	enc.EncodeVarint(4, firmware.SizeBytes)
 	enc.EncodeString(5, firmware.Version)
 
-	topic := mqtt.TopicForNode(collector.NodeID)
+	topic := mqtt.TopicForNode(strconv.FormatInt(collector.NodeID, 10))
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 

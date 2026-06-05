@@ -2,6 +2,7 @@ package collector
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -142,6 +143,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleWriteResponse(deviceID, payload)
 	case frame.MsgPong:
 		m.handlePong(deviceID, payload)
+	case frame.MsgPing:
+		m.handlePing(deviceID, payload) // BUG-12: handle device→server Ping
 	case frame.MsgOtaProg:
 		m.otaMgr.HandleOtaProgress(deviceID, payload)
 	case frame.MsgScanRpt:
@@ -175,7 +178,7 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
 	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
-		Where("channels.collector_id = ?", collectorID).
+		Where("channels.node_id = ?", collectorID).
 		Find(&devices)
 
 	for _, dev := range devices {
@@ -214,9 +217,9 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("collector_id = ?", collector.ID).Find(&templates)
+	m.db.Where("node_id = ?", collector.ID).Find(&templates)
 	var channels []models.Channel
-	m.db.Where("collector_id = ?", collector.ID).Find(&channels)
+	m.db.Where("node_id = ?", collector.ID).Find(&channels)
 
 	hashData := m.buildHashData(templates, channels)
 	hash := m.hashMgr.CalcConfigHash(hashData, nil)
@@ -234,7 +237,7 @@ func (m *Manager) GetDeviceIDByNodeID(nodeDBID uint) string {
 	if err := m.db.First(&node, nodeDBID).Error; err != nil {
 		return ""
 	}
-	return node.NodeID
+	return strconv.FormatInt(node.NodeID, 10)
 }
 
 // GetOnlineDeviceIDs returns device IDs of all online collectors.
@@ -243,7 +246,7 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 	m.db.Where("status = ?", "online").Find(&collectors)
 	ids := make([]string, 0, len(collectors))
 	for _, c := range collectors {
-		ids = append(ids, c.NodeID)
+		ids = append(ids, strconv.FormatInt(c.NodeID, 10))
 	}
 	return ids
 }
@@ -256,7 +259,7 @@ func (m *Manager) publishHADiscovery(collectorID uint, deviceID string) {
 
 	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
-		Where("channels.collector_id = ?", collectorID).
+		Where("channels.node_id = ?", collectorID).
 		Find(&devices)
 
 	for _, dev := range devices {

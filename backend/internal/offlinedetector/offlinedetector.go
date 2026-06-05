@@ -3,6 +3,7 @@ package offlinedetector
 import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
+	"strconv"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -63,19 +64,23 @@ func (d *Detector) checkOffline() {
 }
 
 // checkRedisHeartbeats checks Redis TTL for all collectors
+// BUG-05 fix: Instead of scanning Redis keys (which won't find expired ones),
+// query DB for online nodes and verify their heartbeat key still exists.
 func (d *Detector) checkRedisHeartbeats() {
 	if redis.Client == nil {
 		return // Redis not connected
 	}
 
-	ids, err := redis.GetAllCollectors()
-	if err != nil {
+	// Get all nodes currently marked as online in DB
+	var onlineNodes []models.Node
+	if err := d.db.Where("status = ?", "online").Find(&onlineNodes).Error; err != nil {
 		return
 	}
 
-	for _, deviceID := range ids {
+	for _, col := range onlineNodes {
+		deviceID := strconv.FormatInt(col.NodeID, 10)
 		if !redis.IsOnline(deviceID) {
-			// Heartbeat expired - mark offline
+			// Heartbeat key missing/expired — mark offline
 			d.markOffline(deviceID, "redis_ttl_expired")
 		}
 	}
@@ -91,13 +96,13 @@ func (d *Detector) checkDBLastSeen() {
 	now := time.Now()
 	for _, col := range collectors {
 		// Skip if still has Redis heartbeat
-		if redis.IsOnline(col.NodeID) {
+		if redis.IsOnline(strconv.FormatInt(col.NodeID, 10)) {
 			continue
 		}
 
 		// Check if last_seen is older than 90s (L3: DB fallback)
 		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
-			d.markOffline(col.NodeID, "db_last_seen_timeout")
+			d.markOffline(strconv.FormatInt(col.NodeID, 10), "db_last_seen_timeout")
 		}
 	}
 }

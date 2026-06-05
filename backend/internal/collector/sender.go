@@ -117,10 +117,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("collector_id = ?", collector.ID).Find(&templates)
+	m.db.Where("node_id = ?", collector.ID).Find(&templates)
 
 	var channels []models.Channel
-	m.db.Where("collector_id = ?", collector.ID).Find(&channels)
+	m.db.Where("node_id = ?", collector.ID).Find(&channels)
 
 	manifestID := decision.ManifestID
 	if manifestID == "" {

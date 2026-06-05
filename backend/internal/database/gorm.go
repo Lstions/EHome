@@ -27,7 +27,8 @@ func Connect(cfg Config) error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
+		Logger:                                   gormlogger.Default.LogMode(gormlogger.Info), // Debug: show all SQL
+		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect database: %w", err)
@@ -44,7 +45,7 @@ func Connect(cfg Config) error {
 func AutoMigrate() error {
 	return DB.AutoMigrate(
 		// v2.1 表 (保留, GORM 会自动加新字段)
-		&models.Node{},
+	&models.Node{},
 		&models.Channel{},
 		&models.ConfigTemplate{},
 		&models.EdgeDevice{},

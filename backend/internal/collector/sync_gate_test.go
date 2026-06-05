@@ -92,25 +92,26 @@ func TestOnHello_ManifestMismatch_ForceSync(t *testing.T) {
 func TestOnHello_InSync_NoAction(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	// Create a collector with known config
-	collector := models.Node{NodeID: "dev1", Status: "online"}
+	// Create a collector with known config (NodeID must match the deviceID used in OnHello)
+	collector := models.Node{NodeID: 4001, Status: "online"}
 	mgr.db.Create(&collector)
 
-	// Compute the hash the device would report
-	serverHash := mgr.CalcConfigHashForDevice("dev1")
+	// Compute the hash the device would report (use same ID as OnHello)
+	deviceID := "4001"
+	serverHash := mgr.CalcConfigHashForDevice(deviceID)
 
 	hello := &HelloMsg{
-		NodeID:     "dev1",
+		NodeID:     deviceID,
 		NvsHasConfig: true,
 		ConfigEpoch:  bus.CurrentEpoch(),
 		LastManifest: serverHash.ManifestID,
 	}
 
 	// Pre-populate hashMgr so dedup skips
-	mgr.hashMgr.ShouldSendConfig("dev1", serverHash.Hash)
-	mgr.hashMgr.UpdateLastSent("dev1")
+	mgr.hashMgr.ShouldSendConfig(deviceID, serverHash.Hash)
+	mgr.hashMgr.UpdateLastSent(deviceID)
 
-	d := gate.OnHello("dev1", hello)
+	d := gate.OnHello(deviceID, hello)
 	if d.Action != SyncActionNone {
 		t.Fatalf("expected SyncActionNone for in-sync device, got %d (reason=%s)", d.Action, d.Reason)
 	}
@@ -185,7 +186,7 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create a collector
-	collector := models.Node{NodeID: "dev1", Status: "online"}
+	collector := models.Node{NodeID: 4002, Status: "online"}
 	mgr.db.Create(&collector)
 
 	evt := ConfigChangeEvent{
@@ -201,8 +202,8 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	if decisions[0].Action != SyncActionFull {
 		t.Fatalf("expected SyncActionFull, got %d", decisions[0].Action)
 	}
-	if decisions[0].DeviceID != "dev1" {
-		t.Fatalf("expected deviceID=dev1, got %s", decisions[0].DeviceID)
+	if decisions[0].DeviceID != "4002" {
+		t.Fatalf("expected deviceID=4002, got %s", decisions[0].DeviceID)
 	}
 }
 
@@ -224,10 +225,8 @@ func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
 func TestOnConfigChange_EpochIncremented(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	collector := models.Node{NodeID: "dev1", Status: "online"}
+	collector := models.Node{NodeID: 4003, Status: "online"}
 	mgr.db.Create(&collector)
-
-	_ = bus.CurrentEpoch() // use bus
 	before := bus.CurrentEpoch()
 	evt := ConfigChangeEvent{
 		Type:        CfgChangeChannel,
@@ -251,9 +250,9 @@ func TestOnServerStartup_PushAllOnline(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create online collectors
-	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
-	mgr.db.Create(&models.Node{NodeID: "dev2", Status: "online"})
-	mgr.db.Create(&models.Node{NodeID: "dev3", Status: "offline"})
+	mgr.db.Create(&models.Node{NodeID: 5001, Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: 5002, Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: 5003, Status: "offline"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 2 {
@@ -297,17 +296,18 @@ func TestOnConfigQuery_Mismatch(t *testing.T) {
 func TestOnConfigQuery_InSync(t *testing.T) {
 	mgr, gate, bus := newTestManagerAndGate(t)
 
-	// Create collector
-	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
+	// Create collector (NodeID must match the deviceID used in OnConfigQuery)
+	deviceID := "6001"
+	mgr.db.Create(&models.Node{NodeID: 6001, Status: "online"})
 
-	serverHash := mgr.CalcConfigHashForDevice("dev1")
+	serverHash := mgr.CalcConfigHashForDevice(deviceID)
 
 	q := &ConfigQueryMsg{
 		Reason:            "periodic",
 		CurrentEpoch:      bus.CurrentEpoch(),
 		CurrentManifestID: serverHash.ManifestID,
 	}
-	d := gate.OnConfigQuery("dev1", q)
+	d := gate.OnConfigQuery(deviceID, q)
 	if d.Action != SyncActionNone {
 		t.Fatalf("expected SyncActionNone for in-sync query, got %d (reason=%s)", d.Action, d.Reason)
 	}
