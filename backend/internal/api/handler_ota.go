@@ -153,6 +153,27 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, co
 	})
 
 	// Delete firmware by id
+	// - PUT /api/v1/firmwares/:id
+	v1.PUT("/firmwares/:id", func(c *gin.Context) {
+		var firmware models.Firmware
+		if err := db.First(&firmware, c.Param("id")).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		var req struct {
+			Version   *string `json:"version"`
+			Changelog *string `json:"changelog"`
+			NodeModel *string `json:"node_model"`
+		}
+		c.ShouldBindJSON(&req)
+		updates := map[string]interface{}{}
+		if req.Version != nil { updates["version"] = *req.Version }
+		if req.Changelog != nil { updates["changelog"] = *req.Changelog }
+		if req.NodeModel != nil { updates["node_model"] = *req.NodeModel }
+		db.Model(&firmware).Updates(updates)
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": firmware})
+	})
+
 	// - DELETE /api/v1/firmwares/:id
 	v1.DELETE("/firmwares/:id", func(c *gin.Context) {
 		id := c.Param("id")

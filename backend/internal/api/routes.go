@@ -64,6 +64,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, collectorMgr 
 		// Data source CRUD routes
 		registerDataSourceRoutes(v1.Group("/data-sources"), db)
 
+		// Vendor + DeviceModel + DeviceCategory CRUD
+		registerVendorRoutes(v1, db)
+
 		// WebSocket endpoint (general)
 		v1.GET("/ws", wsHub.HandleWebSocket)
 		// WebSocket status endpoint (alias)
