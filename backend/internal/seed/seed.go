@@ -31,6 +31,11 @@ func SeedTestData(db *gorm.DB) error {
 		ProtocolVersion: "2.2",
 		Platform:        "ESP32C6",
 		Status:          "offline",
+		Capabilities:    `{}`,
+		HardwareInfo:    `{}`,
+		Config:          `{}`,
+		ConnectionType:  "mqtt",
+		ConnectionQuality: 100,
 	}
 	if err := db.Create(&node).Error; err != nil {
 		return err

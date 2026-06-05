@@ -27,12 +27,11 @@ export interface DriverTreeNode {
 }
 
 // 获取驱动层级树
-// Note: Backend v2.2 does not have /device-configs/tree endpoint
-// This function returns empty array until backend adds tree support
+// v2.2: backend now supports /api/v1/device-configs/tree endpoint
 export async function getDriverTree(): Promise<DriverTreeNode[]> {
-  // TODO: Backend needs to add /api/v1/device-configs/tree endpoint
-  // For now, return empty tree and use getDriverList() instead
-  return []
+  const response = await client.get('/api/v1/device-configs/tree')
+  const envelope = response as any
+  return envelope.data || []
 }
 
 // 获取驱动列表（扁平）

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -10,8 +11,13 @@ import (
 )
 
 // jwtSecret is the HMAC secret for signing JWT tokens.
-// TODO: move to config when T09 is fully integrated.
-var jwtSecret = []byte("ehome-dev-secret-change-me")
+// v2.2: configurable via EHOME_JWT_SECRET env var.
+var jwtSecret = []byte(func() string {
+	if s := os.Getenv("EHOME_JWT_SECRET"); s != "" {
+		return s
+	}
+	return "ehome-dev-secret-change-me"
+}())
 
 // Claims represents the JWT payload
 type Claims struct {
