@@ -18,6 +18,38 @@ import (
 
 // registerOTARoutes sets up OTA task + firmware routes
 func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, nodeMgr *nodemgr.Manager) {
+	// ── New OTA status / rollback endpoints ──
+
+	// GET /api/v1/ota/status/:nodeId — query node OTA status
+	v1.GET("/ota/status/:nodeId", func(c *gin.Context) {
+		nodeID, err := strconv.ParseUint(c.Param("nodeId"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid node id"})
+			return
+		}
+		status, err := otaMgr.GetNodeOTAStatus(uint(nodeID))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": status})
+	})
+
+	// POST /api/v1/ota/rollback/:nodeId — manual rollback to last stable version
+	v1.POST("/ota/rollback/:nodeId", func(c *gin.Context) {
+		nodeID, err := strconv.ParseUint(c.Param("nodeId"), 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid node id"})
+			return
+		}
+		if err := otaMgr.AutoRollback(uint(nodeID)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "rollback initiated", "data": gin.H{"node_id": nodeID}})
+	})
+
+	// ── Existing OTA task + firmware routes ──
 	// List OTA tasks
 	v1.GET("/ota/tasks", func(c *gin.Context) {
 		var tasks []models.OTATask
@@ -140,19 +172,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		c.JSON(http.StatusCreated, fw)
 	})
 
-	// Download firmware .bin file (ESP32 fetches from here)
-	v1.GET("/firmwares/:filename/download", func(c *gin.Context) {
-		filename := filepath.Base(c.Param("filename")) // prevent path traversal
-		dst := filepath.Join("firmwares", filename)
-		if _, err := os.Stat(dst); os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "firmware not found"})
-			return
-		}
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
-		c.File(dst)
-	})
-
-	// Delete firmware by id
+	// Update firmware metadata
 	// - PUT /api/v1/firmwares/:id
 	v1.PUT("/firmwares/:id", func(c *gin.Context) {
 		var firmware models.Firmware
@@ -161,16 +181,32 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			return
 		}
 		var req struct {
-			Version   *string `json:"version"`
-			Changelog *string `json:"changelog"`
-			NodeModel *string `json:"node_model"`
+			Version        *string `json:"version"`
+			Changelog      *string `json:"changelog"`
+			NodeModel      *string `json:"node_model"`
+			MinFromVersion *string `json:"min_from_version"`
+			Stable         *bool   `json:"stable"`
 		}
 		c.ShouldBindJSON(&req)
 		updates := map[string]interface{}{}
-		if req.Version != nil { updates["version"] = *req.Version }
-		if req.Changelog != nil { updates["changelog"] = *req.Changelog }
-		if req.NodeModel != nil { updates["node_model"] = *req.NodeModel }
+		if req.Version != nil {
+			updates["version"] = *req.Version
+		}
+		if req.Changelog != nil {
+			updates["changelog"] = *req.Changelog
+		}
+		if req.NodeModel != nil {
+			updates["target_model"] = *req.NodeModel
+		}
+		if req.MinFromVersion != nil {
+			updates["min_from_version"] = *req.MinFromVersion
+		}
+		if req.Stable != nil {
+			updates["stable"] = *req.Stable
+		}
 		db.Model(&firmware).Updates(updates)
+		// Reload to return updated data
+		db.First(&firmware, firmware.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": firmware})
 	})
 
@@ -248,5 +284,20 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200})
+	})
+}
+
+// RegisterFirmwareDownload registers the firmware download endpoint WITHOUT auth.
+// ESP32 devices fetch firmware without JWT tokens.
+func RegisterFirmwareDownload(r *gin.Engine) {
+	r.GET("/api/v1/firmwares/:filename/download", func(c *gin.Context) {
+		filename := filepath.Base(c.Param("filename")) // prevent path traversal
+		dst := filepath.Join("firmwares", filename)
+		if _, err := os.Stat(dst); os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "firmware not found"})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+		c.File(dst)
 	})
 }

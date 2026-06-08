@@ -236,16 +236,18 @@ type OTATask struct {
 
 // Firmware 固件版本 (保留)
 type Firmware struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	Version     string    `gorm:"size:32;not null" json:"version"`
-	Checksum    string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
-	SizeBytes   uint64    `json:"size_bytes"`
-	URL         string    `gorm:"size:256;not null" json:"url"`
-	Filename    string    `gorm:"size:256" json:"filename,omitempty"`
-	StoragePath string    `gorm:"size:512" json:"storage_path,omitempty"`
-	Changelog   string    `gorm:"type:text" json:"changelog,omitempty"`
-	TargetModel string    `gorm:"size:64" json:"target_model,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	Version       string    `gorm:"size:32;not null" json:"version"`
+	Checksum      string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
+	SizeBytes     uint64    `json:"size_bytes"`
+	URL           string    `gorm:"size:256;not null" json:"url"`
+	Filename      string    `gorm:"size:256" json:"filename,omitempty"`
+	StoragePath   string    `gorm:"size:512" json:"storage_path,omitempty"`
+	Changelog     string    `gorm:"type:text" json:"changelog,omitempty"`
+	TargetModel   string    `gorm:"size:64" json:"target_model,omitempty"`
+	MinFromVersion string  `gorm:"size:32" json:"min_from_version,omitempty"` // 最低可升级版本(跳级检测)
+	Stable        bool      `gorm:"default:false" json:"stable"`               // 是否标记为稳定版本
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // =====================================================================

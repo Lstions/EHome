@@ -6,8 +6,9 @@
 - `backend/internal/ota/ota.go` (P3 修: WireVerifying=4, fail-open default)
 - `backend/internal/ota/ota_test.go` (单元测试)
 - `backend/internal/api/handler_ota.go` (firmwares 4 + ota/tasks 3 端点)
+- `backend/internal/api/routes.go` (`RegisterFirmwareDownload` 独立注册, 无 JWT)
 - `backend/internal/models/models.go` (`Firmware` + `OTATask` struct)
-- `backend/internal/collector/handler_hello.go` (`HandleHelloOTACompletion` §6.4.3)
+- `backend/internal/nodemgr/handler_hello.go` (`HandleHelloOTACompletion` §6.4.3)
 - `backend/internal/database/gorm.go` (AutoMigrate)
 
 ### 前端
@@ -61,6 +62,7 @@
 | `COLLECTOR_OTA_CUSTOM_CERT` | n | 嵌入自定义 CA PEM (私有 CA) |
 | `COLLECTOR_OTA_CERT_PEM` | "" | 自定义 CA 证书内容 (PEM 格式) |
 | `COLLECTOR_OTA_EXPECTED_CN` | "" | 期望的服务器证书 CN |
+| `ESP_HTTPS_OTA_ALLOW_HTTP` | n | 允许 HTTP URL (仅开发环境) |
 
 ### 三种配置组合
 
@@ -77,6 +79,11 @@
 3. **HTTP 或 HTTPS 无验证** (仅开发)
    - `CONFIG_COLLECTOR_OTA_USE_HTTPS=n` → 纯 HTTP (WARN)
    - `CONFIG_COLLECTOR_OTA_VERIFY_CERT=n` → HTTPS 但不验证 (WARN)
+
+4. **HTTP (ESP_HTTPS_OTA_ALLOW_HTTP)** (开发/内网)
+   - `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y` → HTTPS 库也接受 http:// URL
+   - 用于 ESP32 无法访问 HTTPS 固件服务器的内网开发环境
+   - 生产环境禁用
 
 ### 安全改进
 

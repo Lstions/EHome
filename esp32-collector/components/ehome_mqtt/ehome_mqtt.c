@@ -42,6 +42,7 @@ void mqtt_client_start(void)
         .broker.address.uri = "mqtt://192.168.20.3:1883",
         .credentials.client_id = s_node_id,
         .session.keepalive = 30,
+        .session.disable_clean_session = false,  // TODO: true causes session conflict after EMQX restart
     };
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);

@@ -56,6 +56,15 @@ config COLLECTOR_WIFI_PASSWORD
     help
         WiFi password
 
+config COLLECTOR_NODE_ID
+    string "Node ID"
+    default ""
+    help
+        Node ID used for MQTT topic and Hello frame.
+        Must match the node_id in the server database.
+        If empty, falls back to MAC-based ID (e.g. esp32c6_AABBCCDDEEFF).
+        Example: "1001"
+
 config COLLECTOR_MAX_TEMPLATE_SLOTS
     int "Maximum template slots"
     default 64

@@ -32,6 +32,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// Auth routes (no JWT required)
 	registerAuthRoutes(r, db)
 
+	// Firmware download — no auth (ESP32 fetches without JWT)
+	RegisterFirmwareDownload(r)
+
 	// API v1 with JWT auth
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())

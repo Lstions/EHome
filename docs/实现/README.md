@@ -15,14 +15,14 @@
 
 ## 📦 模块索引
 
-| # | 模块 | 实现文档 | 后端 | 前端 | 采集器端 |
+| # | 模块 | 实现文档 | 后端 | 前端 | 节点端 |
 |---|------|---------|------|------|----------|
 | 1 | **认证授权** | [认证授权.md](认证授权.md) | `internal/api/handler_auth.go` + `handler_user.go` | `views/auth/` + `views/admin/UserList.vue` + `views/profile/` | - |
-| 2 | **采集器** | [采集器.md](采集器.md) | `internal/collector/*.go` | `views/collector/` + `components/collector/BusConfigPanel.vue` | `components/wifi_mgr/`, `msg_handler/`, `ehome_mqtt/` |
+| 2 | **节点** | [节点.md](节点.md) | `internal/nodemgr/*.go` | `views/collector/` + `components/collector/BusConfigPanel.vue` | `components/wifi_mgr/`, `msg_handler/`, `ehome_mqtt/` |
 | 3 | **设备** | [设备.md](设备.md) | `internal/api/handler_device.go` | `views/device/` | `components/proto_engine/`, `msg_handler/` |
 | 4 | **通道** | [通道.md](通道.md) | `internal/api/handler_device.go` (channel 段) | `components/channel/` | `components/bus/`, `config_mgr/` |
 | 5 | **设备模板** | [设备模板.md](设备模板.md) | `internal/api/handler_device.go` (device-configs 段) | `views/config/DeviceConfigList.vue` | - |
-| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/collector/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus/`, `drivers/` |
+| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus/`, `drivers/` |
 | 7 | **固件OTA** | [固件OTA.md](固件OTA.md) | `internal/ota/ota.go` (P3 修) | `views/firmware/FirmwareManage.vue` | `components/ota_updater/`, `proto_engine/` |
 | 8 | **通知中心** | [通知中心.md](通知中心.md) | `internal/api/handler_notification.go` | `views/notification/` | - |
 | 9 | **系统监控** | [系统监控.md](系统监控.md) | `internal/api/handler_metrics.go` (P2) | `views/monitor/Monitor.vue` (P2) | - |
@@ -32,7 +32,7 @@
 | 模块 | 后端代码 | 前端代码 | 端点数 | 测试覆盖 |
 |------|---------|---------|--------|---------|
 | 认证授权 | ✅ 完整 | ✅ 完整 | 10 | 🟢 23 测试 |
-| 采集器 | ✅ 完整 | ✅ 完整 | 8+ | 🟡 2 测试 |
+| 节点 | ✅ 完整 | ✅ 完整 | 8+ | 🟡 2 测试 |
 | 设备 | ✅ 完整 | ✅ 完整 | 8 | 🟡 待补 |
 | 通道 | ✅ 完整 | ✅ 完整 | 6 | 🟡 待补 |
 | 设备模板 | ✅ 完整 (P3) | ✅ 完整 (P3) | 7 | 🟢 E2E 10 |
@@ -68,7 +68,7 @@
 - 风格: scoped + BEM-like
 - HTTP: axios + interceptors
 
-### 采集器
+### 节点
 - RTOS: FreeRTOS (ESP-IDF v5.x)
 - 协议: 手写二进制帧 (跟后端共用头文件概念)
 - 持久化: NVS (加密分区)
@@ -93,7 +93,7 @@ pnpm dev  # http://localhost:5174
 # 前端 build
 pnpm build  # → dist/
 
-# 采集器
+# 节点
 cd esp32-collector
 idf.py build
 idf.py -p /dev/ttyACM0 flash

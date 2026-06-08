@@ -79,17 +79,22 @@ func (c *Client) onMessage(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
-// Publish sends a message to a topic
+// Publish sends a message to a topic with a 5-second timeout.
+// Returns error if the broker does not acknowledge within the deadline.
 func (c *Client) Publish(topic string, payload []byte) error {
 	token := c.client.Publish(topic, 1, false, payload)
-	token.Wait()
+	if !token.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("mqtt publish timeout")
+	}
 	return token.Error()
 }
 
-// PublishRetained sends a retained message to a topic
+// PublishRetained sends a retained message to a topic with a 5-second timeout.
 func (c *Client) PublishRetained(topic string, payload []byte) error {
 	token := c.client.Publish(topic, 1, true, payload)
-	token.Wait()
+	if !token.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("mqtt publish timeout")
+	}
 	return token.Error()
 }
 

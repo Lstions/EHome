@@ -21,6 +21,16 @@ const (
 	WireFixed32         = 5
 )
 
+// OtaCmd field numbers (MsgOtaCmd = 0x0A)
+//
+//  Field 1: ota_id     (string)
+//  Field 2: url        (string)
+//  Field 3: checksum   (string)
+//  Field 4: size       (varint)
+//  Field 5: version    (string)
+//  Field 6: sequence   (varint, uint32) — monotonic counter for dedup & log tracing
+const OtaCmdFieldSequence uint8 = 6
+
 // Message types
 const (
 	MsgHello      = 0x01

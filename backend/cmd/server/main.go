@@ -182,11 +182,15 @@ func main() {
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")
 
-	// 2. Stop node manager (drains in-flight message processing)
+	// 2. Stop OTA manager (drains timeout scanner goroutine)
+	otaMgr.Close()
+	logger.Infof("OTA manager stopped")
+
+	// 3. Stop node manager (drains in-flight message processing)
 	nodeMgr.Stop()
 	logger.Infof("Collector manager stopped")
 
-	// 3. Shutdown HTTP server with 10s timeout
+	// 4. Shutdown HTTP server with 10s timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -195,10 +199,10 @@ func main() {
 		logger.Infof("HTTP server stopped")
 	}
 
-	// 4. Close MQTT connection
+	// 5. Close MQTT connection
 	mqttClient.Close()
 	logger.Infof("MQTT disconnected")
 
-	// 5. Flush logger
+	// 6. Flush logger
 	logger.Infof("EHomeSystem Server stopped")
 }

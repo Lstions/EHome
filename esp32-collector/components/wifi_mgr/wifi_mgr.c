@@ -151,9 +151,19 @@ void wifi_mgr_start(void)
     char password[64] = {0};
 
     if (!wifi_mgr_load_credentials(ssid, sizeof(ssid), password, sizeof(password))) {
-        ESP_LOGW(TAG, "No WiFi credentials, starting provisioning...");
-        wifi_mgr_start_provisioning();
-        return;
+        // Fallback to sdkconfig defaults (CONFIG_COLLECTOR_WIFI_SSID / CONFIG_COLLECTOR_WIFI_PASSWORD)
+        const char *def_ssid = CONFIG_COLLECTOR_WIFI_SSID;
+        const char *def_pwd = CONFIG_COLLECTOR_WIFI_PASSWORD;
+        if (def_ssid[0] != '\0') {
+            ESP_LOGI(TAG, "Using sdkconfig defaults: SSID=%s", def_ssid);
+            strlcpy(ssid, def_ssid, sizeof(ssid));
+            strlcpy(password, def_pwd, sizeof(password));
+            wifi_mgr_save_credentials(ssid, password);
+        } else {
+            ESP_LOGW(TAG, "No WiFi credentials, starting provisioning...");
+            wifi_mgr_start_provisioning();
+            return;
+        }
     }
 
     ESP_LOGI(TAG, "Connecting to SSID: %s", ssid);

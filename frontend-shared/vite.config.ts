@@ -6,7 +6,14 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // 支持环境变量覆盖 proxy target (docker compose 开发环境用 backend:8080)
+  const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8080'
+  const wsTarget = process.env.VITE_API_TARGET
+    ? process.env.VITE_API_TARGET.replace('http://', 'ws://')
+    : 'ws://localhost:8080'
+
+  return {
   plugins: [
     vue(),
     // Element Plus 按需自动引入
@@ -37,11 +44,11 @@ export default defineConfig({
     proxy: {
       // baseURL 已含 /api/v1, 所以只代理根路径下的后端
       '/api': {
-        target: 'http://localhost:8080',
+        target: apiTarget,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8080',
+        target: wsTarget,
         ws: true,
       },
     },
@@ -60,4 +67,5 @@ export default defineConfig({
       },
     },
   },
+  }
 })

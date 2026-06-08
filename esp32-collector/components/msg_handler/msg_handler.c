@@ -154,10 +154,15 @@ void msg_handler_process(const uint8_t *data, size_t len)
     }
 
     case MSG_OTA_CMD: {
-        char ota_id[64] = {0};
-        char firmware_url[256] = {0};
-        char checksum[128] = {0};
-        char version[32] = {0};
+        // static to avoid stack overflow in mqtt_task (stack ~6KB, this saves ~480B)
+        static char ota_id[64];
+        static char firmware_url[256];
+        static char checksum[128];
+        static char version[32];
+        memset(ota_id, 0, sizeof(ota_id));
+        memset(firmware_url, 0, sizeof(firmware_url));
+        memset(checksum, 0, sizeof(checksum));
+        memset(version, 0, sizeof(version));
         uint64_t size_bytes = 0;
         frame_field_t field;
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
@@ -183,6 +188,10 @@ void msg_handler_process(const uint8_t *data, size_t len)
             }
         }
         ESP_LOGI(TAG, "OtaCmd: id=%s, url=%s, size=%llu", ota_id, firmware_url, (unsigned long long)size_bytes);
+        if (ota_is_duplicate(ota_id)) {
+            ESP_LOGW(TAG, "OTA duplicate ignored: %s", ota_id);
+            break;
+        }
         ota_start(ota_id, firmware_url, checksum, size_bytes, version);
         break;
     }

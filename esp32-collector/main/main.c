@@ -9,7 +9,9 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_mac.h"
 
 #include "frame_codec.h"
@@ -24,12 +26,13 @@
 #include "sync_manager.h"
 
 #define TAG "EHOME"
-#define FIRMWARE_VERSION "2.2.0"
+#define FIRMWARE_VERSION "2.2.5"
 
 /* Device ID from MAC address */
 static char s_node_id[32] = {0};
 static uint32_t s_uptime_sec = 0;
 static bool s_config_received = false;
+static bool s_ota_need_confirm = false;
 
 /* Firmware version accessor for sync_manager */
 const char *get_firmware_version(void)
@@ -57,6 +60,27 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    /* === OTA power-loss recovery check ===
+     * If the device rebooted with ota_state != none, the previous OTA was
+     * interrupted.  Since rollback is enabled, the bootloader boots the new
+     * partition in "pending validation" state.  If the new app itself detects
+     * stale NVS state from a *different* OTA attempt, it means the new app
+     * booted but never confirmed — we should still confirm it (the fact it
+     * booted and got this far is proof it works).  However, if we just
+     * flashed and the state is still downloading/verifying, the old app
+     * would have been running — that case is caught by the bootloader's
+     * own rollback timeout.
+     *
+     * Strategy: read NVS state; if non-zero, log it, then clear it.
+     * We will confirm validity once WiFi connects.
+     */
+    uint8_t ota_boot_state = ota_get_nvs_state();
+    if (ota_boot_state != 0) {
+        ESP_LOGW(TAG, "OTA state non-zero at boot (%d) — previous OTA interrupted, will validate after WiFi connect",
+                 ota_boot_state);
+        s_ota_need_confirm = true;
+    }
 
     /* Generate device ID */
     generate_node_id();
@@ -103,6 +127,15 @@ static void on_wifi_state(wifi_mgr_state_t state, void *ctx)
     ESP_LOGI(TAG, "WiFi state: %d", state);
     if (state == WIFI_MGR_CONNECTED) {
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
+
+        /* Confirm OTA: WiFi connected → new firmware is functional.
+         * Only call if we detected a pending OTA at boot (ota_boot_state != 0).
+         * Avoids unnecessary NVS writes on every WiFi reconnection. */
+        if (s_ota_need_confirm) {
+            ota_confirm_valid();
+            s_ota_need_confirm = false;
+        }
+
         mqtt_client_start();
     } else if (state == WIFI_MGR_CONNECTING) {
         rgb_led_set_state(LED_STATE_WIFI_CONNECTING);
@@ -186,10 +219,15 @@ static void on_mqtt_msg(const char *topic, const uint8_t *data, size_t len, void
 /* === Helpers === */
 static void generate_node_id(void)
 {
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(s_node_id, sizeof(s_node_id), CONFIG_IDF_TARGET "_%02X%02X%02X%02X%02X%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    const char *cfg_node_id = CONFIG_COLLECTOR_NODE_ID;
+    if (cfg_node_id[0] != '\0') {
+        strlcpy(s_node_id, cfg_node_id, sizeof(s_node_id));
+    } else {
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        snprintf(s_node_id, sizeof(s_node_id), CONFIG_IDF_TARGET "_%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
 }
 
 static void status_task(void *pvParameters)
