@@ -16,15 +16,17 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
 
-# Runtime stage
-FROM nginx:1.27-alpine
+# Runtime stage: serve with node static server (avoids nginx pull from Docker Hub)
+FROM node:22-alpine
 
-# Copy nginx config
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Copy built files
-COPY --from=builder /app/dist /usr/share/nginx/html
+# Install serve globally
+RUN npm install -g serve
+
+COPY --from=builder /app/dist /app/dist
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["serve", "-s", "dist", "-l", "80"]
