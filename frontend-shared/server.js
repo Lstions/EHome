@@ -17,9 +17,11 @@ const server = http.createServer((req, res) => {
   // API 请求代理到后端
   if (req.url.startsWith('/api/') || req.url.startsWith('/ping')) {
     const url = new URL(req.url, BACKEND);
+    // 确保 Authorization header 不被丢弃
+    const proxyHeaders = { ...req.headers, host: url.host };
     const proxyReq = http.request(url, {
       method: req.method,
-      headers: { ...req.headers, host: url.host },
+      headers: proxyHeaders,
     }, (proxyRes) => {
       // WebSocket upgrade 支持
       res.writeHead(proxyRes.statusCode, proxyRes.headers);
@@ -52,12 +54,19 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// WebSocket 代理
+// WebSocket 代理 — 使用 http.request 转发 ws:// 会导致 ERR_INVALID_PROTOCOL
+// 直接在 upgrade 事件中转发到后端
 server.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url, BACKEND.replace('http', 'ws'));
-  const proxyReq = http.request(url, {
+  // Forward the raw upgrade request to the backend
+  const wsUrl = `ws://${new URL(BACKEND).host}${req.url}`;
+  const options = new URL(wsUrl);
+  const proxyReq = http.request({
+    hostname: options.hostname,
+    port: options.port,
+    path: options.pathname + options.search,
     method: 'GET',
     headers: req.headers,
+    protocol: 'http:',
   });
   proxyReq.on('upgrade', (proxyRes, proxySocket) => {
     socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
@@ -65,7 +74,10 @@ server.on('upgrade', (req, socket, head) => {
     proxySocket.pipe(socket);
     socket.pipe(proxySocket);
   });
-  proxyReq.on('error', () => socket.destroy());
+  proxyReq.on('error', (err) => {
+    console.error('WS proxy error:', err.message);
+    socket.destroy();
+  });
   proxyReq.end();
 });
 

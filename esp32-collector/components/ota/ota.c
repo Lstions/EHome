@@ -434,18 +434,35 @@ static void ota_task_func(void *pvParameters)
         return;
     }
 
-    /* Checksum OK — mark app valid and cancel rollback. */
-    err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "mark_app_valid failed: %s (proceeding with reboot)", esp_err_to_name(err));
+    /* Checksum OK — set boot partition and reboot */
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL) {
+        ESP_LOGE(TAG, "Cannot get update partition after OTA write");
+        ota_nvs_set_state(OTA_STATE_NONE);
+        msg_handler_send_ota_prog(args->ota_id, 3, 0, "Boot partition switch failed");
+        free(args);
+        s_upgrading = false;
+        vTaskDelete(NULL);
+        return;
     }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "set_boot_partition failed: %s", esp_err_to_name(err));
+        ota_nvs_set_state(OTA_STATE_NONE);
+        msg_handler_send_ota_prog(args->ota_id, 3, 0, "Boot partition switch failed");
+        free(args);
+        s_upgrading = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Boot partition set to '%s' (0x%" PRIx32 "), restarting...",
+             update_partition->label, update_partition->address);
 
     /* Clear NVS state */
     ota_nvs_set_state(OTA_STATE_NONE);
 
-    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
-    ESP_LOGI(TAG, "Checksum OK, will boot from '%s' on next restart",
-             update_partition ? update_partition->label : "?");
     msg_handler_send_ota_prog(args->ota_id, 1, 100, NULL);
 
     free(args);

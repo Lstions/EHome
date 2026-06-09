@@ -26,7 +26,7 @@
 #include "sync_manager.h"
 
 #define TAG "EHOME"
-#define FIRMWARE_VERSION "2.2.6"
+#define FIRMWARE_VERSION "2.2.8"
 
 /* Device ID from MAC address */
 static char s_node_id[32] = {0};
