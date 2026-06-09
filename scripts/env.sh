@@ -47,9 +47,9 @@ PROD_PORTS=(
     "EMQX_DASHBOARD_PORT=18083"
     "FRONTEND_PORT=80"
     "BACKEND_PORT=8080"
-    "POSTGRES_USER=homestation"
-    "POSTGRES_PASSWORD=homestation123"
-    "POSTGRES_DB=homestation"
+    "POSTGRES_USER=ehome"
+    "POSTGRES_PASSWORD=ehome123"
+    "POSTGRES_DB=ehome"
 )
 
 usage() {
@@ -97,7 +97,7 @@ _detect_running() {
     pg_port=$(docker inspect ehome-postgres --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' 2>/dev/null || echo "")
     if [[ "$pg_port" == "5433" ]]; then
         echo "dev"
-    elif [[ "$pg_port" == "5432" ]]; then
+    elif [[ "$pg_port" == "5434" ]]; then
         echo "prod"
     else
         echo "none"
@@ -111,7 +111,6 @@ _compose() {
     if [[ "$env" == "dev" ]]; then
         env "${DEV_PORTS[@]}" docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_DEV" "$@"
     else
-        docker network create homestation_homestation-net 2>/dev/null || true
         env "${PROD_PORTS[@]}" docker compose -f "$COMPOSE_BASE" "$@"
     fi
 }
@@ -192,15 +191,12 @@ cmd_status() {
         case "$name" in
             *-dev) tag="${YELLOW}[dev]${NC}" ;;
             ehome-postgres|ehome-redis|ehome-emqx)
-                # 这些是共享的，根据端口判断
-                if docker inspect "$name" --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' 2>/dev/null | grep -q "5433" 2>/dev/null; then
+                if docker inspect "$name" --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' 2>/dev/null | grep -q "5433"; then
                     tag="${YELLOW}[dev]${NC}"
-                elif docker inspect "$name" --format '{{json .NetworkSettings.Ports}}' 2>/dev/null | grep -q "5433"; then
-                    tag="${YELLOW}[dev]${NC}"
-                elif docker inspect "$name" --format '{{json .NetworkSettings.Ports}}' 2>/dev/null | grep -q "6380\|1884\|8084\|18084"; then
-                    tag="${YELLOW}[dev]${NC}"
-                else
+                elif docker inspect "$name" --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' 2>/dev/null | grep -q "5434"; then
                     tag="${GREEN}[prod]${NC}"
+                else
+                    tag="${YELLOW}[dev]${NC}"
                 fi
                 ;;
             *) tag="${GREEN}[prod]${NC}" ;;

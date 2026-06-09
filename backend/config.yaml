@@ -1,8 +1,8 @@
 database:
   host: localhost
   port: 9432
-  user: homestation
-  password: homestation123
+  user: ehome
+  password: ehome123
   dbname: ehome
   sslmode: disable
 mqtt:

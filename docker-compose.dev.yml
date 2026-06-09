@@ -69,9 +69,6 @@ services:
       EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:-192.168.20.3:8080}
       SEED_TEST_DATA: "true"
       LOG_LEVEL: debug
-    networks:
-      default: null
-      homestation-net: null
     working_dir: /app
     command: ["air", "-c", ".air.toml"]
     depends_on:

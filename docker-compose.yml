@@ -53,7 +53,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # EHomeSystem frontend (nginx + Vue3 SPA)
+  # EHomeSystem frontend (Vue3 SPA)
   frontend:
     build:
       context: ./frontend-shared
@@ -75,23 +75,16 @@ services:
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     environment:
-      EHOME_DB_HOST: homestation-postgres
-      EHOME_DB_PORT: 5432
-      EHOME_DB_USER: homestation
-      EHOME_DB_PASSWORD: homestation123
-      EHOME_DB_NAME: homestation
-      EHOME_REDIS_ADDR: homestation-redis:6379
-      EHOME_MQTT_BROKER: tcp://homestation-emqx:1883
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER:-ehome}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD:-ehome123}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      EHOME_REDIS_ADDR: redis:6379
+      EHOME_MQTT_BROKER: tcp://emqx:1883
       EHOME_MQTT_CLIENT_ID: ehome-backend
-    networks:
-      - homestation-net
     volumes:
       - ./backend/firmwares:/app/firmwares
-
-networks:
-  homestation-net:
-    external: true
-    name: homestation_homestation-net
 
 volumes:
   ehome-pgdata:

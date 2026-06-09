@@ -9,14 +9,14 @@
 
 ```bash
 # 1. Copy ACL rules to EMQX
-docker cp emqx/acl.conf homestation-emqx:/opt/emqx/etc/acl.conf
+docker cp emqx/acl.conf ehome-emqx:/opt/emqx/etc/acl.conf
 
 # 2. Set no_match = deny (deny by default, only allow listed rules)
-docker cp emqx/no-match-deny.conf homestation-emqx:/opt/emqx/etc/
-docker exec homestation-emqx emqx ctl conf load --replace /opt/emqx/etc/no-match-deny.conf
+docker cp emqx/no-match-deny.conf ehome-emqx:/opt/emqx/etc/
+docker exec ehome-emqx emqx ctl conf load --replace /opt/emqx/etc/no-match-deny.conf
 
 # 3. Reload config
-docker exec homestation-emqx emqx ctl conf reload
+docker exec ehome-emqx emqx ctl conf reload
 ```
 
 ## Rules Summary
@@ -42,7 +42,7 @@ docker exec homestation-emqx emqx ctl conf reload
 
 ```bash
 # Check current ACL state
-docker exec homestation-emqx emqx ctl conf show authorization
+docker exec ehome-emqx emqx ctl conf show authorization
 
 # Test ACL: this should be DENIED (wrong clientid)
 python3 -c "
@@ -57,7 +57,7 @@ c.loop_stop(); c.disconnect()
 "
 
 # Check EMQX log for deny events (enable debug first)
-docker exec homestation-emqx emqx ctl log primary-level debug
+docker exec ehome-emqx emqx ctl log primary-level debug
 ```
 
 ## N3.1 Compliance
