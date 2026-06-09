@@ -1,0 +1,86 @@
+# ============================================================
+# EHomeSystem Development Override
+# 用法:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# ============================================================
+
+services:
+  # 开发环境: 基础设施端口偏移 (通过环境变量 ${EMQX_MQTT_PORT:-1883} 等控制)
+  # 启动时设置: EMQX_MQTT_PORT=1884 REDIS_PORT=6380 POSTGRES_PORT=5433 docker compose ... up -d
+  postgres:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ehome}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  emqx:
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # 开发环境: 前端 Vite HMR 热更新
+  frontend:
+    build:
+      context: ./frontend-shared
+      dockerfile: dev.Dockerfile
+    container_name: ehome-frontend-dev
+    ports:
+      - "${FRONTEND_DEV_PORT:-5174}:5174"
+    volumes:
+      - ./frontend-shared/src:/app/src:rw
+      - ./frontend-shared/public:/app/public:ro
+      - ./frontend-shared/index.html:/app/index.html:ro
+      - ./frontend-shared/vite.config.ts:/app/vite.config.ts:ro
+      - ./frontend-shared/tsconfig.json:/app/tsconfig.json:ro
+    environment:
+      VITE_API_TARGET: http://backend:8080
+    depends_on:
+      - backend
+
+  # 开发环境: 后端 Go + air 热重载
+  backend:
+    build:
+      context: ./backend
+      dockerfile: dev.Dockerfile
+    container_name: ehome-backend-dev
+    volumes:
+      - ./backend:/app:rw
+      - ehome-dev-cache:/root/.cache/go-build
+    environment:
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER:-ehome}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD:-ehome123}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      MQTT_BROKER: tcp://emqx:1883
+      REDIS_ADDR: redis:6379
+      EHOME_REDIS_ADDR: redis:6379
+      EHOME_MQTT_BROKER: tcp://emqx:1883
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:-192.168.20.3:8080}
+      SEED_TEST_DATA: "true"
+      LOG_LEVEL: debug
+    networks:
+      default: null
+      homestation-net: null
+    working_dir: /app
+    command: ["air", "-c", ".air.toml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  ehome-dev-cache:

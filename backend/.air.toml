@@ -1,0 +1,45 @@
+# EHomeSystem Backend - air hot-reload config
+# https://github.com/air-verse/air
+
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  # Binary name
+  bin = "./tmp/ehome-server"
+  # Build command
+  cmd = "go build -o ./tmp/ehome-server ./cmd/server/"
+  # Delay before first build (ms)
+  delay = 500
+  # Watch file extensions
+  include_ext = ["go", "yaml", "yml", "json"]
+  # Exclude directories
+  exclude_dir = ["tmp", "vendor", "testdata", "bin", "firmwares"]
+  # Exclude unchanged files
+  exclude_unchanged = false
+  # Follow symlinks
+  follow_symlink = false
+  # Full rebuild on first run
+  full_bin = ""
+  # Watch additional files
+  include_dir = ["cmd", "internal", "pkg"]
+  # Exclude files matching regex
+  exclude_regex = ["_test.go"]
+  # Stop on error
+  stop_on_error = true
+
+[log]
+  # Show log time
+  time = true
+
+[color]
+  # Custom colors
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  # Clean tmp on exit
+  clean_on_exit = true
