@@ -80,9 +80,10 @@ services:
       EHOME_DB_USER: ${POSTGRES_USER:-ehome}
       EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD:-ehome123}
       EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
-      EHOME_REDIS_ADDR: redis:6379
-      EHOME_MQTT_BROKER: tcp://emqx:1883
+      REDIS_ADDR: redis:6379
+      MQTT_BROKER: tcp://emqx:1883
       EHOME_MQTT_CLIENT_ID: ehome-backend
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:-192.168.20.3:8080}
     volumes:
       - ./backend/firmwares:/app/firmwares
 

@@ -16,17 +16,16 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
 
-# Runtime stage: serve with node static server (avoids nginx pull from Docker Hub)
+# Runtime stage: Node proxy server with static file serving
 FROM node:22-alpine
 
 WORKDIR /app
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-# Install serve globally
-RUN npm install -g serve
 
 COPY --from=builder /app/dist /app/dist
+COPY server.js /app/server.js
 
 EXPOSE 80
 
-CMD ["serve", "-s", "dist", "-l", "80"]
+ENV BACKEND_URL=http://backend:8080
+
+CMD ["node", "server.js"]
