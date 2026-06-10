@@ -34,27 +34,27 @@ func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
 		auth.POST("/login", func(c *gin.Context) {
 			var req LoginRequest
 			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "username and password required"})
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "username and password required"})
 				return
 			}
 
 			// Find user
 			var user models.User
 			if err := db.Where("username = ?", req.Username).First(&user).Error; err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "用户名或密码错误"})
 				return
 			}
 
 			// Verify password
 			if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "用户名或密码错误"})
 				return
 			}
 
 			// Generate JWT token
 			token, err := GenerateToken(user.ID, user.Role)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to generate token"})
 				return
 			}
 
@@ -66,7 +66,7 @@ func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
 			resp.User.Username = user.Username
 			resp.User.Role = user.Role
 
-			c.JSON(http.StatusOK, resp)
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": resp})
 		})
 		auth.POST("/logout", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "logged out"})
