@@ -32,7 +32,8 @@ const severity = computed<'error' | 'warning'>(() => (offlineByBrowser.value ? '
 
 const title = computed(() => {
   if (offlineByBrowser.value) return '网络已断开'
-  if (!wsStore.connected) return '与服务器的连接已断开'
+  // Only show WS disconnected if user is authenticated
+  if (wsStore.isAuthenticated && !wsStore.connected) return '与服务器的连接已断开'
   return ''
 })
 
@@ -50,6 +51,9 @@ const hide = () => {
 const onRetry = () => {
   if (offlineByBrowser.value) {
     window.location.reload()
+  } else if (!wsStore.isAuthenticated) {
+    // 未登录时跳转到登录页
+    window.location.href = '/login'
   } else {
     wsStore.connect()
     hide()
@@ -79,7 +83,8 @@ onMounted(() => {
   stopWatch = wsStore.onConnected(() => hide())
   // 简单定时检查 ws 状态
   timer = setInterval(() => {
-    if (!wsStore.connected && !visible.value && !offlineByBrowser.value) {
+    // Only show WS reconnect banner if user is authenticated
+    if (wsStore.isAuthenticated && !wsStore.connected && !visible.value && !offlineByBrowser.value) {
       show('正在尝试重新连接...', true)
     }
   }, 10000)

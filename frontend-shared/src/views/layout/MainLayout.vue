@@ -240,6 +240,7 @@ import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notif
 import { ElMessage } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
 import feedback from '@/utils/feedback'
+import { logger } from '@/utils/logger'
 
 const router = useRouter()
 const route = useRoute()
@@ -427,7 +428,12 @@ const handleKeydown = (e: KeyboardEvent) => {
 }
 
 onMounted(() => {
-  wsStore.connect()
+  if (wsStore.isAuthenticated) {
+    logger.debug('[MainLayout] 已登录，连接 WebSocket')
+    wsStore.connect()
+  } else {
+    logger.debug('[MainLayout] 未登录，跳过 WebSocket')
+  }
   document.addEventListener('keydown', handleKeydown)
 })
 

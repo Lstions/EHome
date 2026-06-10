@@ -33,6 +33,24 @@ export const useWebSocketStore = defineStore('websocket', () => {
 
   const isConnected = computed(() => connected.value)
 
+  // 统一的认证状态检查
+  const isAuthenticated = computed(() => {
+    try {
+      return !!(localStorage.getItem('token') || sessionStorage.getItem('token'))
+    } catch {
+      return false
+    }
+  })
+
+  // 获取 token
+  const getToken = () => {
+    try {
+      return localStorage.getItem('token') || sessionStorage.getItem('token')
+    } catch {
+      return null
+    }
+  }
+
   // 订阅消息
   const subscribe = (type: string, handler: MessageHandler) => {
     if (!messageHandlers.value.has(type)) {
@@ -78,6 +96,13 @@ export const useWebSocketStore = defineStore('websocket', () => {
       return
     }
 
+    // Skip if not authenticated
+    const token = getToken()
+    if (!token) {
+      logger.debug('WebSocket skipped: no token')
+      return
+    }
+
     manuallyClosed.value = false
 
     const wsUrl = import.meta.env.VITE_WS_URL || '/api/v1/ws'
@@ -93,10 +118,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
       statusUrl = `${protocol}//${window.location.host}${wsUrl}`
     }
 
-    const token = localStorage.getItem('token')
-    if (token) {
-      statusUrl = `${statusUrl}?token=${encodeURIComponent(token)}`
-    }
+    statusUrl = `${statusUrl}?token=${encodeURIComponent(token)}`
 
     logger.debug('WebSocket 连接中', { url: statusUrl.replace(/token=[^&]+/, 'token=***') })
     ws.value = new WebSocket(statusUrl)
@@ -201,6 +223,8 @@ export const useWebSocketStore = defineStore('websocket', () => {
   return {
     connected,
     isConnected,
+    isAuthenticated,
+    getToken,
     subscribe,
     onConnected,
     connect,
