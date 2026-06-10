@@ -26,7 +26,7 @@
 #include "sync_manager.h"
 
 #define TAG "EHOME"
-#define FIRMWARE_VERSION "2.2.8"
+#define FIRMWARE_VERSION "2.2.9"
 
 /* Device ID from MAC address */
 static char s_node_id[32] = {0};
@@ -81,6 +81,14 @@ void app_main(void)
                  ota_boot_state);
         s_ota_need_confirm = true;
     }
+
+    /* Confirm current firmware as valid so OTA rollback doesn't block future updates.
+     * Must be called before any OTA attempt, otherwise esp_ota_begin fails with
+     * ESP_ERR_OTA_ROLLBACK_INVALID_STATE.  Calling this early (before WiFi) is safe
+     * because the bootloader would have rolled back on its own if the app never booted.
+     */
+    ota_confirm_valid();
+    s_ota_need_confirm = false;  /* already done */
 
     /* Generate device ID */
     generate_node_id();

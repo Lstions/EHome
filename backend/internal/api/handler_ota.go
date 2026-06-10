@@ -254,6 +254,16 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+
+		// Send OtaCmd to device via MQTT (fire-and-forget with ack retry)
+		if err := otaMgr.SendOtaCommand(task); err != nil {
+			task.Status = "failed"
+			task.ErrorMsg = fmt.Sprintf("send failed: %v", err)
+			db.Save(task)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": task.ErrorMsg})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": task})
 	})
 

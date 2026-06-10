@@ -23,8 +23,9 @@ interface ApiResponse<T> {
 
 export const authApi = {
   async login(data: LoginRequest): Promise<LoginResponse> {
-    const response = await client.post<unknown, ApiResponse<LoginResponse>>('/api/v1/auth/login', data)
-    return response.data
+    // Interceptor already unwraps response.data → bare JSON body {token, user}
+    const response = await client.post<unknown, LoginResponse>('/api/v1/auth/login', data)
+    return response as unknown as LoginResponse
   },
 
   async logout(): Promise<void> {
