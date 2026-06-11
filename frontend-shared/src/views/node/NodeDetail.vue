@@ -43,7 +43,7 @@
           {{ collector.name }}
         </el-descriptions-item>
         <el-descriptions-item label="设备ID">
-          {{ collector.device_id }}
+          {{ collector.node_id }}
         </el-descriptions-item>
         <el-descriptions-item label="型号">
           {{ collector.model }}
@@ -66,9 +66,9 @@
           <span v-else>-</span>
         </el-descriptions-item>
         <el-descriptions-item label="延迟">
-          <span v-if="collector.status === 'online' && collector.latency_ms !== undefined && collector.latency_ms > 0"
-                :style="{ color: getLatencyColor(collector.latency_ms) }">
-            {{ collector.latency_ms }} ms
+          <span v-if="collector.status === 'online' && collector.ping_latency_ms !== undefined && collector.ping_latency_ms > 0"
+                :style="{ color: getLatencyColor(collector.ping_latency_ms) }">
+            {{ collector.ping_latency_ms }} ms
           </span>
           <span v-else>-</span>
         </el-descriptions-item>
@@ -394,7 +394,7 @@ const fetchCollectorDetail = async () => {
   try {
     collector.value = await nodeApi.getDetail(id)
     // 自动测量延迟（如果在线且无延迟数据）
-    if (collector.value?.status === 'online' && (!collector.value.latency_ms || collector.value.latency_ms <= 0)) {
+    if (collector.value?.status === 'online' && (!collector.value.ping_latency_ms || collector.value.ping_latency_ms <= 0)) {
       handlePing()
     }
   } catch (error: any) {

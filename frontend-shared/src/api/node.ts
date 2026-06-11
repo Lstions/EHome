@@ -20,6 +20,7 @@ export interface Node {
   connection_type: string
   connection_quality: number
   latency_ms: number
+  ping_latency_ms: number
   last_online_time: string
   online_duration: number
   capabilities: Record<string, any>
