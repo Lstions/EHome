@@ -23,9 +23,11 @@ interface ApiResponse<T> {
 
 export const authApi = {
   async login(data: LoginRequest): Promise<LoginResponse> {
-    // Interceptor already unwraps response.data → bare JSON body {token, user}
-    const response = await client.post<unknown, LoginResponse>('/api/v1/auth/login', data)
-    return response as unknown as LoginResponse
+    // Backend returns envelope: {code, data: {token, user}, message}
+    // Interceptor returns response.data = the full envelope,
+    // so we must unwrap response.data to get {token, user}
+    const response = await client.post<unknown, any>('/api/v1/auth/login', data)
+    return (response as any).data as LoginResponse
   },
 
   async logout(): Promise<void> {
