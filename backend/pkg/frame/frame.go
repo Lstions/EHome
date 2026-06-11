@@ -53,7 +53,8 @@ const (
 	MsgHelloAck     = 0x12
 	MsgConfigSyncReq  = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
 	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
-	MsgPongAck        = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
+	MsgPongAck          = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
+	MsgResourceReport   = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
 )
 
 // Field represents a decoded field
@@ -303,6 +304,7 @@ func MsgTypeName(msgType uint8) string {
 		MsgConfigSyncReq:  "config_sync_request",
 		MsgConfigSyncRsp:  "config_sync_response",
 		MsgPongAck:        "pong_ack",
+		MsgResourceReport: "resource_report",
 	}
 	if name, ok := names[msgType]; ok {
 		return name
