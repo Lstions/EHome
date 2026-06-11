@@ -160,6 +160,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleConfigReport(deviceID, payload)
 	case frame.MsgConfigSyncReq:
 		m.handleConfigSyncRequest(deviceID, payload)
+	case frame.MsgResourceReport:
+		m.handleResourceReport(deviceID, payload)
 
 	// Unimplemented message types — log warning, no panic
 	case frame.MsgConfigMfst:
