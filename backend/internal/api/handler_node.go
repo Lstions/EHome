@@ -1,8 +1,10 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -13,6 +15,70 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// findNodeByID resolves a node by DB primary key (if numeric) or node_id string.
+func findNodeByID(db *gorm.DB, id string) (*models.Node, error) {
+	var node models.Node
+	if intID, err := strconv.Atoi(id); err == nil {
+		if db.First(&node, intID).Error == nil {
+			return &node, nil
+		}
+	}
+	if err := db.Where("node_id = ?", id).First(&node).Error; err != nil {
+		return nil, err
+	}
+	return &node, nil
+}
+
+// getDefaultESP32C6Buses returns the default hardware resources for ESP32-C6.
+// Used as fallback when DB capabilities field is empty.
+func getDefaultESP32C6Buses() map[string]interface{} {
+	return map[string]interface{}{
+		"uart": []interface{}{
+			map[string]interface{}{"id": "UART0", "port": 0, "default_tx": 16, "default_rx": 17, "max_baud": 5000000,
+				"pins": []interface{}{
+					map[string]interface{}{"pin": 16, "role": 1},
+					map[string]interface{}{"pin": 17, "role": 2},
+				}},
+			map[string]interface{}{"id": "UART1", "port": 1, "default_tx": 21, "default_rx": 20, "max_baud": 5000000,
+				"pins": []interface{}{
+					map[string]interface{}{"pin": 21, "role": 1},
+					map[string]interface{}{"pin": 20, "role": 2},
+				}},
+		},
+		"i2c": []interface{}{
+			map[string]interface{}{"id": "I2C0", "port": 0, "default_sda": 21, "default_scl": 22, "max_freq_hz": 1000000,
+				"pins": []interface{}{
+					map[string]interface{}{"pin": 21, "role": 3},
+					map[string]interface{}{"pin": 22, "role": 4},
+				}},
+		},
+		"spi": []interface{}{
+			map[string]interface{}{"id": "SPI2", "port": 2, "default_mosi": 23, "default_miso": 19, "default_sclk": 18, "default_cs": 5, "max_freq_hz": 40000000,
+				"pins": []interface{}{
+					map[string]interface{}{"pin": 23, "role": 5},
+					map[string]interface{}{"pin": 19, "role": 6},
+					map[string]interface{}{"pin": 18, "role": 7},
+					map[string]interface{}{"pin": 5, "role": 8},
+				}},
+		},
+		"gpio": []interface{}{
+			map[string]interface{}{"id": "GPIO0", "pin": 0, "pins": []interface{}{map[string]interface{}{"pin": 0, "role": 9}}},
+			map[string]interface{}{"id": "GPIO1", "pin": 1, "pins": []interface{}{map[string]interface{}{"pin": 1, "role": 9}}},
+			map[string]interface{}{"id": "GPIO2", "pin": 2, "pins": []interface{}{map[string]interface{}{"pin": 2, "role": 9}}},
+			map[string]interface{}{"id": "GPIO3", "pin": 3, "pins": []interface{}{map[string]interface{}{"pin": 3, "role": 9}}},
+			map[string]interface{}{"id": "GPIO4", "pin": 4, "pins": []interface{}{map[string]interface{}{"pin": 4, "role": 9}}},
+			map[string]interface{}{"id": "GPIO5", "pin": 5, "pins": []interface{}{map[string]interface{}{"pin": 5, "role": 9}}},
+			map[string]interface{}{"id": "GPIO6", "pin": 6, "pins": []interface{}{map[string]interface{}{"pin": 6, "role": 9}}},
+			map[string]interface{}{"id": "GPIO7", "pin": 7, "pins": []interface{}{map[string]interface{}{"pin": 7, "role": 9}}},
+		},
+		"adc": []interface{}{
+			map[string]interface{}{"id": "ADC1_CH0", "unit": 1, "channel": 0, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 0, "role": 10}}},
+			map[string]interface{}{"id": "ADC1_CH1", "unit": 1, "channel": 1, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 1, "role": 10}}},
+			map[string]interface{}{"id": "ADC1_CH2", "unit": 1, "channel": 2, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 2, "role": 10}}},
+		},
+	}
+}
 
 // registerNodeRoutes sets up node CRUD routes
 func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
@@ -28,11 +94,19 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		c.JSON(http.StatusOK, nodes)
 	})
 
-	// Get node by DB id (v2.2 path for /collectors/:id)
+	// Get node by DB id or node_id (v2.2 path)
 	v1.GET("/nodes/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		// Try by primary key first (if numeric)
+		if intID, err := strconv.Atoi(id); err == nil {
+			if db.First(&node, intID).Error == nil {
+				c.JSON(http.StatusOK, node)
+				return
+			}
+		}
+		// Fallback: lookup by node_id string
+		if err := db.Where("node_id = ?", id).First(&node).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
@@ -83,11 +157,11 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 
-	// Get channels for node (v2.2 path for /collectors/:id/channels)
+	// Get channels for node
 	v1.GET("/nodes/:id/channels", func(c *gin.Context) {
 		id := c.Param("id")
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
@@ -96,13 +170,13 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		c.JSON(http.StatusOK, channels)
 	})
 
-	// Get node data (v2.2 path for /collectors/:id/data)
+	// Get node data
 	v1.GET("/nodes/:id/data", func(c *gin.Context) {
 		id := c.Param("id")
 		limitStr := c.DefaultQuery("limit", "100")
 		limit, _ := strconv.Atoi(limitStr)
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
@@ -111,11 +185,11 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		c.JSON(http.StatusOK, data)
 	})
 
-	// Ping node (v2.2 path for /collectors/:id/ping)
+	// Ping node
 	v1.POST("/nodes/:id/ping", func(c *gin.Context) {
 		id := c.Param("id")
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
@@ -157,32 +231,87 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "syncing"}})
 	})
 
-	// GET /api/v1/nodes/:id/hardware/config
-	n.GET("/:id/hardware/config", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+	// GET /api/v1/nodes/:id/capabilities
+	n.GET("/:id/capabilities", func(c *gin.Context) {
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
+		buses := getDefaultESP32C6Buses()
+		var capList []string
+		if node.Capabilities != "" && node.Capabilities != "{}" {
+			var parsed map[string]interface{}
+			if json.Unmarshal([]byte(node.Capabilities), &parsed) == nil {
+				if b, ok := parsed["buses"]; ok {
+					buses = b.(map[string]interface{})
+				}
+			}
+		}
+		for k := range buses {
+			capList = append(capList, k)
+		}
+		sort.Strings(capList)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"hardware": gin.H{"wifi_ssid": node.WiFiSSID, "wifi_rssi": node.WiFiRSSI, "free_heap": node.FreeHeapBytes},
+			"capabilities": capList,
+			"buses":        buses,
+		}})
+	})
+
+	// GET /api/v1/nodes/:id/hardware/config
+	n.GET("/:id/hardware/config", func(c *gin.Context) {
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+		hardware := gin.H{
+			"wifi_ssid":  node.WiFiSSID,
+			"wifi_rssi":  node.WiFiRSSI,
+			"free_heap":  node.FreeHeapBytes,
+		}
+		if node.HardwareInfo != "" && node.HardwareInfo != "{}" {
+			var parsed map[string]interface{}
+			if json.Unmarshal([]byte(node.HardwareInfo), &parsed) == nil {
+				if b, ok := parsed["buses"]; ok {
+					hardware["buses"] = b
+				}
+			}
+		}
+		if hardware["buses"] == nil {
+			hardware["buses"] = gin.H{}
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"hardware": hardware,
 		}})
 	})
 
 	// PUT /api/v1/nodes/:id/hardware/config
 	n.PUT("/:id/hardware/config", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		var req struct{ Hardware map[string]interface{} `json:"hardware"` }
-		c.ShouldBindJSON(&req)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "updated"}})
-	})
-
-	// GET /api/v1/nodes/:id/capabilities
-	n.GET("/:id/capabilities", func(c *gin.Context) {
-		_, _ = strconv.Atoi(c.Param("id"))
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+		var req struct {
+			Hardware map[string]interface{} `json:"hardware"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid request body"})
+			return
+		}
+		// Store buses from request into hardware_info
+		if buses, ok := req.Hardware["buses"]; ok {
+			hwJSON, _ := json.Marshal(map[string]interface{}{"buses": buses})
+			node.HardwareInfo = string(hwJSON)
+			db.Model(node).Update("hardware_info", node.HardwareInfo)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"capabilities": []string{"i2c", "spi", "uart", "gpio", "adc"},
+			"node_id": node.ID,
+			"status":  "updated",
 		}})
 	})
 
