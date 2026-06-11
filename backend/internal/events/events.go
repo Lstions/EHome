@@ -5,9 +5,10 @@ package events
 // WebSocket event names — noun_verb format, lowercase, underscore-separated
 const (
 	// Node events
-	NodeStatus        = "node_status"
-	NodeConfigSynced  = "node_config_synced"
-	NodeConfigChanged = "node_config_changed"
+	NodeStatus            = "node_status"
+	NodeConfigSynced      = "node_config_synced"
+	NodeConfigChanged     = "node_config_changed"
+	NodeResourcesUpdated  = "node_resources_updated"
 
 	// EdgeDevice events
 	EdgeDeviceStatus = "edge_device_status"
