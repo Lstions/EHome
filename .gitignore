@@ -47,3 +47,7 @@ backend/migrate_v21_to_v22
 frontend-shared/e2e/
 frontend-shared/playwright.config.ts
 frontend-shared/test-results/
+
+# Firmware binaries
+*.bin
+backend/firmwares/
