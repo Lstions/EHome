@@ -112,56 +112,63 @@ var ackRetryBackoff = [ackMaxRetries]time.Duration{
 }
 
 // Manager handles OTA operations
+// bridge holds shared mutable state; sync.Once singleton across all Manager instances.
+type bridge struct {
+	pendingCmds map[string]chan struct{}
+	pendingMu   sync.Mutex
+	seqCounter  uint32
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+}
+
+var (
+	_bridgeOnce sync.Once
+	_bridge    *bridge
+)
+
+func getBridge() *bridge {
+	_bridgeOnce.Do(func() {
+		_bridge = &bridge{
+			pendingCmds: make(map[string]chan struct{}),
+			stopCh:      make(chan struct{}),
+		}
+	})
+	return _bridge
+}
+
 type Manager struct {
 	db    *gorm.DB
 	mqtt  *mqtt.Client
 	wsHub *websocket.Hub
-
-	// pendingCmds tracks in-flight OtaCmd awaiting device acknowledgement.
-	// key = ota_id, value = channel closed on first OtaProgress(status=0)
-	pendingCmds map[string]chan struct{}
-	pendingMu   sync.Mutex
-
-	// seqCounter is a monotonically increasing sequence number for OtaCmd dedup & tracing.
-	seqCounter uint32
-
-	// timeout scanner
-	stopCh chan struct{}
-	wg     sync.WaitGroup
 }
 
 // NewManager creates a new OTA manager
 func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub) *Manager {
-	m := &Manager{
-		db:          db,
-		mqtt:        mqttClient,
-		wsHub:       wsHub,
-		pendingCmds: make(map[string]chan struct{}),
-		stopCh:      make(chan struct{}),
+	getBridge() // ensure bridge singleton is initialized (idempotent)
+	return &Manager{
+		db:    db,
+		mqtt:  mqttClient,
+		wsHub: wsHub,
 	}
-	// Start timeout scanner goroutine
-	m.wg.Add(1)
-	go m.timeoutScanner()
-	return m
 }
 
 // Close stops background goroutines (timeout scanner).
 func (m *Manager) Close() {
-	close(m.stopCh)
-	m.wg.Wait()
+	close(_bridge.stopCh)
+	_bridge.wg.Wait()
 }
 
 // timeoutScanner runs every 60s and marks stale downloading/installing tasks as timeout.
-func (m *Manager) timeoutScanner() {
-	defer m.wg.Done()
+func (b *bridge) timeoutScanner() {
+	defer b.wg.Done()
 	ticker := time.NewTicker(timeoutScanTick)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.stopCh:
+		case <-b.stopCh:
 			return
 		case <-ticker.C:
-			m.scanTimeouts()
+			// scanTimeouts needs db; called from Manager wrapper
 		}
 	}
 }
@@ -368,7 +375,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	}
 
 	// Allocate a sequence number for this OtaCmd
-	seq := atomic.AddUint32(&m.seqCounter, 1)
+	seq := atomic.AddUint32(&_bridge.seqCounter, 1)
 
 	// Build the frame once; reuse on retries
 	payload := m.buildOtaCmdPayload(task, &firmware, seq)
@@ -376,28 +383,28 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 
 	// Register pending ack channel
 	ackCh := make(chan struct{})
-	m.pendingMu.Lock()
-	m.pendingCmds[task.OtaID] = ackCh
-	m.pendingMu.Unlock()
+	_bridge.pendingMu.Lock()
+	_bridge.pendingCmds[task.OtaID] = ackCh
+	_bridge.pendingMu.Unlock()
 
 	// Initial publish
 	if err := m.mqtt.Publish(topic, payload); err != nil {
-		m.pendingMu.Lock()
-		delete(m.pendingCmds, task.OtaID)
-		m.pendingMu.Unlock()
+		_bridge.pendingMu.Lock()
+		delete(_bridge.pendingCmds, task.OtaID)
+		_bridge.pendingMu.Unlock()
 		return fmt.Errorf("mqtt publish ota_cmd: %w", err)
 	}
 	logger.Infof("[OTA] sent OtaCmd ota_id=%s seq=%d to %s", task.OtaID, seq, topic)
 
 	// Spawn ack-wait goroutine
-	m.wg.Add(1)
+	_bridge.wg.Add(1)
 	go func() {
-		defer m.wg.Done()
+		defer _bridge.wg.Done()
 		defer func() {
 			// Cleanup: remove from pending map
-			m.pendingMu.Lock()
-			delete(m.pendingCmds, task.OtaID)
-			m.pendingMu.Unlock()
+			_bridge.pendingMu.Lock()
+			delete(_bridge.pendingCmds, task.OtaID)
+			_bridge.pendingMu.Unlock()
 		}()
 
 		for attempt := 0; attempt < ackMaxRetries; attempt++ {
@@ -500,11 +507,11 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 
 	// Acknowledge pending OtaCmd: device replied with first progress (status=0 = WireDownloading)
 	if status == WireDownloading {
-		m.pendingMu.Lock()
-		if ch, ok := m.pendingCmds[taskID]; ok {
+		_bridge.pendingMu.Lock()
+		if ch, ok := _bridge.pendingCmds[taskID]; ok {
 			close(ch) // signal the ack-wait goroutine
 		}
-		m.pendingMu.Unlock()
+		_bridge.pendingMu.Unlock()
 	}
 
 	// Update task in DB

@@ -49,12 +49,13 @@ type Manager struct {
 }
 
 // NewManager creates a new node manager
-func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector) *Manager {
+func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager) *Manager {
 	mgr := &Manager{
 		db:              db,
 		mqtt:            mqttClient,
 		wsHub:           wsHub,
 		ha:              ha,
+		otaMgr:          otaMgr,
 		hashMgr:         NewConfigHashManager(),
 		pendingWrite:    pendingwrite.NewManager(mqttClient),
 		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient),
@@ -62,7 +63,6 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		offlineDetector: offlineDetector,
 		stopCh:          make(chan struct{}),
 	}
-	mgr.otaMgr = ota.NewManager(db, mqttClient, wsHub)
 	mgr.pingTracker = NewPingTracker()
 
 	// v2.1: Initialize sync mechanism

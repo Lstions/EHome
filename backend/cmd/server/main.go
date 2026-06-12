@@ -109,7 +109,7 @@ func main() {
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
 
 	// Initialize node manager
-	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector)
+	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr)
 	go nodeMgr.Start()
 
 	// v2.1: Server startup push — push config to all online nodes (fixes G2)
