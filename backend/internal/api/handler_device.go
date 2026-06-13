@@ -459,26 +459,91 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"status": "reconfigured", "request_id": fmt.Sprintf("reconf-%s-%d", id, time.Now().Unix())}})
 	})
 
-	// Device config tree (driver hierarchy)
+	// Device config tree (driver hierarchy: OEM → Category → Driver)
 	v1.GET("/device-configs/tree", func(c *gin.Context) {
-		var configs []models.DeviceConfig
-		db.Find(&configs)
-		// Group by device_type
-		groups := map[string][]models.DeviceConfig{}
-		for _, cfg := range configs {
-			groups[cfg.DeviceType] = append(groups[cfg.DeviceType], cfg)
+		type DriverLeaf struct {
+			Type          string   `json:"type"`
+			Model         string   `json:"model"`
+			DisplayName   string   `json:"display_name"`
+			HardwareTypes []string `json:"hardware_types"`
+			Description   string   `json:"description"`
 		}
-		tree := []gin.H{}
-		for dtype, cfgs := range groups {
-			drivers := []gin.H{}
-			for _, cfg := range cfgs {
-				drivers = append(drivers, gin.H{
-					"type": cfg.DeviceType, "model": cfg.DeviceModel,
-					"display_name": cfg.Name, "hardware_types": []string{},
-					"description": cfg.Description,
+		type TreeNode struct {
+			ID       string       `json:"id"`
+			Name     string       `json:"name"`
+			Children []TreeNode   `json:"children,omitempty"`
+			Drivers  []DriverLeaf `json:"drivers,omitempty"`
+		}
+
+		// Build tree from registered drivers + DB device-configs
+		// Structure: OEM → Category → Driver
+		type catKey struct{ oem, cat string }
+		driverMap := map[catKey][]DriverLeaf{}
+
+		// 1. Registered drivers (priority)
+		if driverRegistry != nil {
+			for _, dt := range driverRegistry.List() {
+				d, _ := driverRegistry.Get(dt)
+				hwt := d.HardwareTypes()
+				if hwt == nil {
+					hwt = []string{}
+				}
+				key := catKey{d.OEM(), d.Category()}
+				driverMap[key] = append(driverMap[key], DriverLeaf{
+					Type: dt, Model: dt, DisplayName: d.DeviceName(),
+					HardwareTypes: hwt, Description: "",
 				})
 			}
-			tree = append(tree, gin.H{"id": dtype, "name": dtype, "children": []gin.H{}, "drivers": drivers})
+		}
+
+		// 2. DB device-configs (supplement, dedup by type)
+		var configs []models.DeviceConfig
+		db.Find(&configs)
+		for _, cfg := range configs {
+			oem := "通用"
+			if cfg.VendorID != nil {
+				var vendor models.Vendor
+				if db.First(&vendor, *cfg.VendorID).Error == nil {
+					oem = vendor.Name
+				}
+			}
+			key := catKey{oem, cfg.DeviceType}
+			// Dedup: skip if type already exists
+			dup := false
+			for _, d := range driverMap[key] {
+				if d.Type == cfg.DeviceType {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				driverMap[key] = append(driverMap[key], DriverLeaf{
+					Type: cfg.DeviceType, Model: cfg.DeviceModel,
+					DisplayName: cfg.Name,
+					HardwareTypes: []string{cfg.HardwareType},
+					Description: cfg.Description,
+				})
+			}
+		}
+
+		// Group by OEM
+		oemMap := map[string]map[string][]DriverLeaf{}
+		for k, drivers := range driverMap {
+			if oemMap[k.oem] == nil {
+				oemMap[k.oem] = map[string][]DriverLeaf{}
+			}
+			oemMap[k.oem][k.cat] = drivers
+		}
+
+		tree := []TreeNode{}
+		for oemName, cats := range oemMap {
+			oemNode := TreeNode{ID: oemName, Name: oemName, Children: []TreeNode{}}
+			for catName, drivers := range cats {
+				oemNode.Children = append(oemNode.Children, TreeNode{
+					ID: catName, Name: catName, Drivers: drivers,
+				})
+			}
+			tree = append(tree, oemNode)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tree})
 	})

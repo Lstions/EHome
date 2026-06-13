@@ -1,8 +1,6 @@
 package api
 
 import (
-	"net/http"
-
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -19,7 +17,7 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		db.Model(&models.Node{}).Where("status = ?", "online").Count(&nodeOnline)
 		db.Model(&models.EdgeDevice{}).Count(&edgeDeviceTotal)
 		db.Model(&models.EdgeDevice{}).Where("status = ?", "online").Count(&edgeDeviceOnline)
-		c.JSON(http.StatusOK, gin.H{
+		Success(c, gin.H{
 			"nodes":        gin.H{"total": nodeTotal, "online": nodeOnline, "offline": nodeTotal - nodeOnline},
 			"edge_devices": gin.H{"total": edgeDeviceTotal, "online": edgeDeviceOnline, "offline": edgeDeviceTotal - edgeDeviceOnline},
 		})

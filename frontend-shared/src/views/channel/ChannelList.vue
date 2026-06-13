@@ -117,12 +117,11 @@
       </el-table-column>
       <el-table-column label="启用状态" width="100" align="center">
         <template #default="{ row }">
-          <el-tag
-            :type="row.status === 'active' ? 'success' : row.status === 'error' ? 'danger' : 'info'"
+          <el-switch
+            :model-value="row.enabled"
             size="small"
-          >
-            {{ getStatusLabel(row.status) }}
-          </el-tag>
+            disabled
+          />
         </template>
       </el-table-column>
       <el-table-column label="操作" width="100" align="center">

@@ -20,7 +20,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	v1.GET("/edge-devices", func(c *gin.Context) {
 		var devices []models.EdgeDevice
 		db.Find(&devices)
-		c.JSON(http.StatusOK, devices)
+		Success(c, devices)
 	})
 
 	// Get single edge device by id (v2.2 path for /devices/:id)

@@ -135,7 +135,7 @@
         <div class="card-body">
           <div class="info-row">
             <span class="label">设备ID</span>
-            <span class="value">{{ node.device_id }}</span>
+            <span class="value">{{ node.node_id }}</span>
           </div>
           <div class="info-row">
             <span class="label">固件版本</span>
@@ -200,7 +200,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="device_id" label="设备ID" width="100" />
+        <el-table-column prop="node_id" label="设备ID" width="100" />
         
         <el-table-column prop="firmware_version" label="固件" width="100">
           <template #default="{ row }">

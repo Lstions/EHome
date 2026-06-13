@@ -20,8 +20,13 @@ type Driver interface {
 	DeviceType() string
 	// DeviceName returns human-readable name
 	DeviceName() string
+	// OEM returns the manufacturer name (e.g. "Bosch", "LK")
+	OEM() string
+	// Category returns the sensor category (e.g. "温度气压传感器")
+	Category() string
+	// HardwareTypes returns supported bus types
+	HardwareTypes() []string
 	// GetSensorDefinitions returns the sensor definitions for HA Discovery
-	// Default implementation returns empty; drivers can override
 	GetSensorDefinitions() []SensorData
 }
 

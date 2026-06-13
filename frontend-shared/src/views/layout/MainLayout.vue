@@ -278,7 +278,7 @@ const menuItems = computed(() => {
   })
 })
 
-const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.0.0')
+const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
 
 // 通知 - 从 API 获取
 const notifications = ref<ApiNotification[]>([])

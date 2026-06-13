@@ -9,8 +9,11 @@ import (
 // BMP280: [7 bytes] → {"temperature": 25.3, "pressure": 1013.2}
 type BMP280Driver struct{}
 
-func (d *BMP280Driver) DeviceType() string { return "bmp280" }
-func (d *BMP280Driver) DeviceName() string { return "BMP280 Temperature/Pressure Sensor" }
+func (d *BMP280Driver) DeviceType() string     { return "bmp280" }
+func (d *BMP280Driver) DeviceName() string     { return "BMP280 温度气压传感器" }
+func (d *BMP280Driver) OEM() string            { return "博世" }
+func (d *BMP280Driver) Category() string       { return "温度气压传感器" }
+func (d *BMP280Driver) HardwareTypes() []string { return []string{"i2c", "spi"} }
 func (d *BMP280Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
 		{Name: "temperature", Unit: "°C"},
@@ -43,8 +46,11 @@ func (d *BMP280Driver) ParseData(raw []byte) ([]SensorData, error) {
 // LK-TH01: [8 bytes] → {"temperature": 25.1, "humidity": 65.0}
 type LKTH01Driver struct{}
 
-func (d *LKTH01Driver) DeviceType() string { return "lk_th01" }
-func (d *LKTH01Driver) DeviceName() string { return "LK-TH01 Temperature/Humidity Sensor" }
+func (d *LKTH01Driver) DeviceType() string     { return "lk_th01" }
+func (d *LKTH01Driver) DeviceName() string     { return "LK-TH01 温湿度传感器" }
+func (d *LKTH01Driver) OEM() string            { return "路科" }
+func (d *LKTH01Driver) Category() string       { return "温湿度传感器" }
+func (d *LKTH01Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *LKTH01Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
 		{Name: "temperature", Unit: "°C"},
@@ -73,8 +79,11 @@ func (d *LKTH01Driver) ParseData(raw []byte) ([]SensorData, error) {
 // Wind speed = (spd_hi<<8 | spd_lo) / 10.0, unit: m/s
 type SN3000Driver struct{}
 
-func (d *SN3000Driver) DeviceType() string { return "sn3000" }
-func (d *SN3000Driver) DeviceName() string { return "SN-3000 Wind Direction Sensor" }
+func (d *SN3000Driver) DeviceType() string     { return "sn3000" }
+func (d *SN3000Driver) DeviceName() string     { return "SN-3000 风向风速传感器" }
+func (d *SN3000Driver) OEM() string            { return "赛能" }
+func (d *SN3000Driver) Category() string       { return "风向风速传感器" }
+func (d *SN3000Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *SN3000Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
 		{Name: "wind_direction", Unit: "°"},

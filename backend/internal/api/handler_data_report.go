@@ -1,7 +1,6 @@
 package api
 
 import (
-	"net/http"
 	"strconv"
 
 	"ehome/backend/internal/models"
@@ -21,6 +20,6 @@ func registerDataReportRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		var data []models.UnifiedData
 		db.Order("created_at DESC").Limit(limit).Find(&data)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": data})
+		Success(c, data)
 	})
 }

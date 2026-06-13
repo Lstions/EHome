@@ -8,6 +8,8 @@ import (
 	"ehome/backend/pkg/metrics"
 
 	"github.com/gin-gonic/gin"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 )
 
@@ -29,7 +31,7 @@ type MetricsResponse struct {
 	Collector struct {
 		Online  int64 `json:"online"`
 		Offline int64 `json:"offline"`
-	} `json:"node"`
+	} `json:"collector"`
 	Data struct {
 		PointsCollected int64 `json:"points_collected"`
 		PointsStored    int64 `json:"points_stored"`
@@ -61,6 +63,15 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		resp := MetricsResponse{}
 
+		// --- HTTP: read from prometheus counter ---
+		resp.HTTP.RequestsTotal = readCounterTotal(metrics.HTTPRequests)
+		resp.HTTP.RequestsInFlight = 0 // not tracked yet
+
+		// --- MQTT: read from prometheus counters ---
+		resp.MQTT.MessagesReceived = readCounterTotal(metrics.MessagesReceived)
+		resp.MQTT.MessagesSent = readCounterTotal(metrics.MessagesSent)
+		resp.MQTT.ConnectionErrors = 0 // not tracked yet
+
 		// DB counts
 		var devOnline, devOffline int64
 		db.Model(&models.EdgeDevice{}).Where("status = ?", "active").Count(&devOnline)
@@ -77,6 +88,7 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		var points int64
 		db.Model(&models.UnifiedData{}).Count(&points)
 		resp.Data.PointsStored = points
+		resp.Data.PointsCollected = readCounterTotal(metrics.DataReportsProcessed)
 
 		var otaTotal int64
 		db.Model(&models.OTATask{}).Count(&otaTotal)
@@ -90,4 +102,27 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		})
 		_ = metrics.NodesOnline // suppress unused
 	}
+}
+
+// readCounterTotal reads the total value from a prometheus Counter or CounterVec (sum over all labels).
+// Uses a goroutine to read while Collect sends, avoiding deadlock when label cardinality > buffer size.
+func readCounterTotal(c prometheus.Collector) int64 {
+	ch := make(chan prometheus.Metric, 10)
+	done := make(chan struct{})
+	var total float64
+	go func() {
+		var m dto.Metric
+		for metric := range ch {
+			if err := metric.Write(&m); err == nil {
+				if m.Counter != nil {
+					total += m.Counter.GetValue()
+				}
+			}
+		}
+		close(done)
+	}()
+	c.Collect(ch)
+	close(ch)
+	<-done
+	return int64(total)
 }

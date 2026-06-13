@@ -9,6 +9,7 @@ import (
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
+	"ehome/backend/pkg/metrics"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -21,6 +22,16 @@ func nowMillis() int64 {
 
 // SetupRoutes configures all API routes by domain
 func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry) {
+	// Global HTTP metrics middleware
+	r.Use(func(c *gin.Context) {
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
+		metrics.HTTPRequests.WithLabelValues(c.Request.Method, path).Inc()
+		c.Next()
+	})
+
 	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

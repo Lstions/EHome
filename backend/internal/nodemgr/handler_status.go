@@ -25,7 +25,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 
 	// v2.1 new fields
 	var configEpoch uint64
-	var syncState string
+	var syncStateVarint uint64
 
 	for {
 		field, err := dec.NextField()
@@ -41,9 +41,21 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 			channelCount = frame.GetUint64(field)
 		case 4: // v2.1: config_epoch
 			configEpoch = frame.GetUint64(field)
-		case 5: // v2.1: sync_state
-			syncState = frame.GetString(field)
+		case 5: // v2.1: sync_state (varint enum from ESP32: 0=idle,1=syncing,2=error)
+			syncStateVarint = frame.GetUint64(field)
 		}
+	}
+
+	// Map ESP32 sync_state varint to config_sync_state string
+	// Only update on explicit syncing/error states; idle (0) does not overwrite.
+	var syncState string
+	switch syncStateVarint {
+	case 1:
+		syncState = "syncing"
+	case 2:
+		syncState = "error"
+	default:
+		// varint 0 = idle — leave current state unchanged
 	}
 
 	// Update node
@@ -58,10 +70,16 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	node.Status = status
 	node.LastSeen = &now
 	node.UptimeSeconds = uint32(uptimeSec)
+	node.OnlineDuration = uint64(uptimeSec)
+
+	// Set last_online_time on every status report while online
+	if status == "online" {
+		node.LastOnlineTime = &now
+	}
 
 	// v2.1: update config_sync_state if provided
 	if syncState != "" {
-		node.ConfigStatus = syncState
+		node.ConfigSyncState = syncState
 	}
 
 	m.db.Save(&node)

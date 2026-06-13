@@ -217,9 +217,14 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s epoch=%d reason=%s %d templates, %d channels",
 			decision.SyncID, deviceID, manifestID, decision.Epoch, decision.Reason, len(templates), len(channels))
 
-		// Update DB with new manifest ID and mark as sent
-		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).
-			Update("config_version", manifestID)
+		// Update DB with new manifest ID and mark as syncing
+		now := time.Now()
+		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
+			"config_version":    manifestID,
+			"config_sync_state": "syncing",
+			"last_sync_at":      now,
+			"last_sync_id":      decision.SyncID,
+		})
 		m.hashMgr.UpdateLastSent(deviceID)
 	}
 }

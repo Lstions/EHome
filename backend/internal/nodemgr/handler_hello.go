@@ -86,12 +86,16 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
 		node = models.Node{
-			NodeID:          nodeID,
-			Model:           model,
-			FirmwareVersion: firmwareVersion,
-			Status:          "online",
-			LastSeen:        &now,
-			UptimeSeconds:   0,
+			NodeID:           nodeID,
+			Model:            model,
+			FirmwareVersion:  firmwareVersion,
+			ProtocolVersion:  protocolVersion,
+			Status:           "online",
+			LastSeen:         &now,
+			LastOnlineTime:   &now,
+			UptimeSeconds:    0,
+			ConfigEpoch:      configEpoch,
+			LastManifestID:   lastManifest,
 		}
 		m.db.Create(&node)
 		m.db.Create(&models.NodeEvent{
@@ -103,8 +107,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		oldStatus = node.Status
 		node.FirmwareVersion = firmwareVersion
 		node.Model = model
+		node.ProtocolVersion = protocolVersion
 		node.Status = "online"
 		node.LastSeen = &now
+		node.LastOnlineTime = &now
+		node.ConfigEpoch = configEpoch
+		node.LastManifestID = lastManifest
 		m.db.Save(&node)
 		if oldStatus != "online" {
 			m.db.Create(&models.NodeEvent{

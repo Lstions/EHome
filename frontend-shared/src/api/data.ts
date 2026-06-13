@@ -1,5 +1,4 @@
 import client from './client'
-import { unpackResponse } from './unpack'
 
 export interface Overview {
   nodes: {
@@ -25,8 +24,8 @@ export interface Overview {
 export const dataApi = {
   async getOverview(): Promise<Overview> {
     const response = await client.get<unknown, any>('/api/v1/overview')
-    // /overview 直接返回 {nodes, edge_devices, ...}，没有 {code, data, message} 包装
-    return unpackResponse(response)
+    // Interceptor returns {code, data, message} → response.data = the overview
+    return (response as any).data
   },
 
   async getNodeDevicesData(nodeId: number, params: {
@@ -34,6 +33,6 @@ export const dataApi = {
     end_time: string
   }): Promise<any> {
     const response = await client.get<unknown, any>(`/api/v1/nodes/${nodeId}/latest`, { params })
-    return unpackResponse(response)
+    return (response as any).data
   }
 }

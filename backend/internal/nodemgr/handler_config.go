@@ -51,12 +51,18 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 
 	// Update node config version
 	if success {
+		now := time.Now()
 		updates := map[string]interface{}{
-			"config_version": manifestID,
-			"config_status":  "applied",
+			"config_version":    manifestID,
+			"config_status":     "applied",
+			"config_sync_state": "in_sync",
+			"last_sync_at":      now,
 		}
 		if configEpoch > 0 {
 			updates["config_epoch"] = configEpoch
+		}
+		if syncID != "" {
+			updates["last_sync_id"] = syncID
 		}
 		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(updates)
 	} else {

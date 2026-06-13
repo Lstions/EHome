@@ -54,7 +54,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	v1.GET("/ota/tasks", func(c *gin.Context) {
 		var tasks []models.OTATask
 		db.Find(&tasks)
-		c.JSON(http.StatusOK, tasks)
+		Success(c, tasks)
 	})
 
 	// Create OTA task + send OtaCmd to device
@@ -96,7 +96,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 			return
 		}
-		c.JSON(http.StatusOK, task)
+		Success(c, task)
 	})
 
 	// Cancel OTA task
@@ -119,7 +119,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	v1.GET("/firmwares", func(c *gin.Context) {
 		var firmwares []models.Firmware
 		db.Find(&firmwares)
-		c.JSON(http.StatusOK, firmwares)
+		Success(c, firmwares)
 	})
 
 	// Upload firmware .bin file

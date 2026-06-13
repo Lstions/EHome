@@ -18,30 +18,17 @@ export interface FirmwareListParams {
 
 export const firmwareApi = {
   async getList(params?: FirmwareListParams): Promise<{total: number, list: Firmware[]}> {
-    const response = await client.get<unknown, any>('/api/v1/firmwares', { params })
-    // Backend returns bare array [{...}], not {code, data, message} envelope
-    // Interceptor returns response.data (parsed JSON body), so response IS the array
-    if (Array.isArray(response)) {
-      return { total: response.length, list: response as Firmware[] }
-    }
-    // Handle envelope format if backend changes
-    if (response?.data?.list) {
-      return { total: response.data.total ?? response.data.list.length, list: response.data.list }
-    }
-    if (response?.data && Array.isArray(response.data)) {
-      return { total: response.data.length, list: response.data }
-    }
-    return { total: 0, list: [] }
+    const response = await client.get('/api/v1/firmwares', { params })
+    // Interceptor returns {code, data, message} → response.data = the array
+    const list = (response as any).data as Firmware[] ?? []
+    return { total: list.length, list }
   },
 
   async upload(formData: FormData): Promise<Firmware> {
-    const response = await client.post<unknown, any>('/api/v1/firmwares/upload', formData, {
+    const response = await client.post('/api/v1/firmwares/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
-    // POST returns bare object (the created firmware)
-    if (response?.id !== undefined) return response as Firmware
-    if (response?.data) return response.data as Firmware
-    return response as unknown as Firmware
+    return (response as any).data
   },
 
   async update(id: number, data: { version?: string; changelog?: string }): Promise<void> {

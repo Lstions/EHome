@@ -385,15 +385,13 @@ const handleSubmit = async () => {
   }
 }
 
-// 查找驱动路径
+// 查找驱动路径 (3层: OEM → 种类 → 驱动)
 const findDriverPath = (deviceType: string): string[] => {
   for (const oem of driverOptions.value) {
     for (const category of oem.children || []) {
-      for (const subCategory of category.children || []) {
-        for (const driver of subCategory.children || []) {
-          if (driver.value === deviceType) {
-            return [oem.value, category.value, subCategory.value, driver.value]
-          }
+      for (const driver of category.children || []) {
+        if (driver.value === deviceType) {
+          return [oem.value, category.value, driver.value]
         }
       }
     }

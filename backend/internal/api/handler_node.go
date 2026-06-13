@@ -91,7 +91,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, nodes)
+		Success(c, nodes)
 	})
 
 	// Get node by DB id or node_id (v2.2 path)
@@ -101,7 +101,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		// Try by primary key first (if numeric)
 		if intID, err := strconv.Atoi(id); err == nil {
 			if db.First(&node, intID).Error == nil {
-				c.JSON(http.StatusOK, node)
+				Success(c, node)
 				return
 			}
 		}
@@ -110,7 +110,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		c.JSON(http.StatusOK, node)
+		Success(c, node)
 	})
 
 	// Create node (v2.2 compat path)
@@ -142,7 +142,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		db.Save(&node)
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.ID, node.ID)
-		c.JSON(http.StatusOK, node)
+		Success(c, node)
 	})
 
 	// Delete node (v2.2 path for DELETE /collectors/:id)
@@ -167,7 +167,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		var channels []models.Channel
 		db.Where("node_id = ?", node.ID).Find(&channels)
-		c.JSON(http.StatusOK, channels)
+		Success(c, channels)
 	})
 
 	// Get node data
@@ -182,7 +182,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		var data []models.DeviceData
 		db.Where("collector_id = ?", node.ID).Order("timestamp DESC").Limit(limit).Find(&data)
-		c.JSON(http.StatusOK, data)
+		Success(c, data)
 	})
 
 	// Ping node
