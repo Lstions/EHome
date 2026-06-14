@@ -1,5 +1,4 @@
 import client from './client'
-import { unpackResponse } from './unpack'
 
 export interface EdgeDevice {
   id: number
@@ -82,7 +81,7 @@ export const edgeDeviceApi = {
 
   async getLatestData(id: number): Promise<any> {
     const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/latest-data`)
-    return unpackResponse(response)
+    return response.data || response
   },
 
   async getHistoryData(id: number, params: {
@@ -92,7 +91,7 @@ export const edgeDeviceApi = {
     page_size?: number
   }): Promise<any> {
     const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/data`, { params })
-    return unpackResponse(response)
+    return response.data || response
   },
 
   async executeOperation(id: number, operation: string, params?: Record<string, any>): Promise<any> {
@@ -100,7 +99,7 @@ export const edgeDeviceApi = {
       operation,
       params
     })
-    return unpackResponse(response)
+    return response.data || response
   },
 
   async getOperationHistory(id: number, limit: number = 50): Promise<any[]> {
