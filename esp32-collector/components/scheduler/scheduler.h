@@ -41,6 +41,14 @@ sched_err_t scheduler_remove_channel(uint32_t channel_id);
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
 
+/**
+ * Execute a bus transaction for a given channel (used by WriteCommand).
+ * Returns BUS_OK on success, or error code.
+ * rx_buf receives response data, rx_len set to bytes read.
+ */
+int scheduler_execute_write(uint32_t channel_id, const uint8_t *tx_data, size_t tx_len,
+                           uint32_t read_size, uint8_t *rx_buf, size_t *rx_len);
+
 #ifdef __cplusplus
 }
 #endif

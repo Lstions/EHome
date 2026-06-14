@@ -1,12 +1,16 @@
 /**
  * @file bus.c
  * @brief Bus Abstraction Layer - I2C/SPI/UART implementation for ESP32
+ *
+ * Thread safety: each bus handle has its own mutex (I2C/SPI only).
+ * UART driver is internally thread-safe.
  */
 
 #include "bus.h"
 #include "esp_log.h"
 #include "driver/i2c.h"
 #include "driver/uart.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -49,6 +53,8 @@ typedef struct bus_handle_impl {
     uint8_t  tx_buf[64];
     size_t   tx_len;
     uint32_t read_length;
+    /* I2C mutex — protects bus_transact from concurrent access */
+    SemaphoreHandle_t mutex;
 } bus_handle_impl_t;
 
 static bool s_i2c_initialized[I2C_NUM_MAX] = {false};
@@ -60,6 +66,10 @@ bus_handle_t bus_open(uint8_t bus_type, const uint8_t *config_data, size_t confi
     if (!h) return NULL;
 
     h->bus_type = bus_type;
+    /* Create mutex for I2C/SPI (UART doesn't need one) */
+    if (bus_type == BUS_TYPE_I2C || bus_type == BUS_TYPE_SPI) {
+        h->mutex = xSemaphoreCreateMutex();
+    }
 
     switch (bus_type) {
     case BUS_TYPE_I2C: {
@@ -138,9 +148,9 @@ bus_handle_t bus_open(uint8_t bus_type, const uint8_t *config_data, size_t confi
         };
         uart_param_config(h->config.uart.port, &uart_conf);
 
-        /* Set UART pins from config_data[0..1] or default GPIO20/21 for RS485 */
-        int tx_pin = 21;  /* default: GPIO21 = UART1 TX (RS485 DI) */
-        int rx_pin = 20;  /* default: GPIO20 = UART1 RX (RS485 RO) */
+        /* Set UART pins from config_data[0..1] or default GPIO20/21 */
+        int tx_pin = 21;
+        int rx_pin = 20;
         if (config_data && config_len >= 2) {
             tx_pin = config_data[0];
             rx_pin = config_data[1];
@@ -168,6 +178,9 @@ void bus_close(bus_handle_t handle)
     switch (h->bus_type) {
     case BUS_TYPE_UART:
         uart_driver_delete(h->config.uart.port);
+        break;
+    case BUS_TYPE_SPI:
+        /* SPI cleanup not implemented — needs driver/spi_master.h + esp_driver_spi */
         break;
     default:
         break;
@@ -197,6 +210,13 @@ bus_error_t bus_transact(bus_handle_t handle, uint8_t *rx_buf, size_t rx_buf_siz
     bus_handle_impl_t *h = (bus_handle_impl_t *)handle;
     *rx_len = 0;
 
+    /* Lock I2C/SPI mutex */
+    if (h->mutex) {
+        xSemaphoreTake(h->mutex, pdMS_TO_TICKS(500));
+    }
+
+    bus_error_t result = BUS_OK;
+
     switch (h->bus_type) {
     case BUS_TYPE_I2C: {
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -211,7 +231,8 @@ bus_error_t bus_transact(bus_handle_t handle, uint8_t *rx_buf, size_t rx_buf_siz
 
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "I2C write failed: %s", esp_err_to_name(err));
-            return BUS_ERR_TRANSACT;
+            result = BUS_ERR_TRANSACT;
+            break;
         }
 
         if (h->read_length > 0 && rx_buf_size > 0) {
@@ -233,7 +254,7 @@ bus_error_t bus_transact(bus_handle_t handle, uint8_t *rx_buf, size_t rx_buf_siz
                 *rx_len = to_read;
             } else {
                 ESP_LOGW(TAG, "I2C read failed: %s", esp_err_to_name(err));
-                return BUS_ERR_TRANSACT;
+                result = BUS_ERR_TRANSACT;
             }
         }
         break;
@@ -282,8 +303,13 @@ bus_error_t bus_transact(bus_handle_t handle, uint8_t *rx_buf, size_t rx_buf_siz
     }
 
     default:
-        return BUS_ERR_INVALID;
+        result = BUS_ERR_INVALID;
+        break;
     }
 
-    return BUS_OK;
+    if (h->mutex) {
+        xSemaphoreGive(h->mutex);
+    }
+
+    return result;
 }

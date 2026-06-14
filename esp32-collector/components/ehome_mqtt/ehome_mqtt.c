@@ -39,7 +39,7 @@ void mqtt_client_start(void)
     }
 
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://192.168.20.3:1883",
+        .broker.address.uri = CONFIG_COLLECTOR_MQTT_BROKER_URL,
         .credentials.client_id = s_node_id,
         .session.keepalive = 30,
         .session.disable_clean_session = false,  // TODO: true causes session conflict after EMQX restart

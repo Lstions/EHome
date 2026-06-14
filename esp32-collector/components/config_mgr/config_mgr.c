@@ -206,6 +206,7 @@ bool config_mgr_load_from_nvs(void)
     }
 
     ESP_LOGI(TAG, "Config loaded from NVS: %s", s_manifest.manifest_id);
+    s_manifest.applied = true;  /* loaded from NVS means it was previously applied */
     return true;
 }
 
@@ -248,8 +249,8 @@ static bool parse_manifest(const uint8_t *data, size_t len)
             memcpy(s_manifest.manifest_id, field.value.bytes.ptr, copy_len);
             s_manifest.manifest_id[copy_len] = '\0';
         }
-        /* Field 2: templates (nested message) */
-        else if (field.field_num == 2 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+        /* Field 3: templates (nested message) */
+        else if (field.field_num == 3 && field.wire_type == WIRE_LENGTH_DELIMITED) {
             if (s_manifest.template_count < MAX_TEMPLATES) {
                 config_template_t *cur_template = &s_manifest.templates[s_manifest.template_count++];
                 /* Parse nested template fields */
@@ -280,8 +281,8 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                 }
             }
         }
-        /* Field 3: channels (nested message) */
-        else if (field.field_num == 3 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+        /* Field 4: channels (nested message) */
+        else if (field.field_num == 4 && field.wire_type == WIRE_LENGTH_DELIMITED) {
             ESP_LOGI(TAG, "Found channel field: len=%d", (int)field.value.bytes.len);
             if (s_manifest.channel_count < MAX_CHANNELS) {
                 config_channel_t *cur_channel = &s_manifest.channels[s_manifest.channel_count++];
@@ -299,9 +300,24 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                         case 1: /* id */
                             cur_channel->id = (uint32_t)cf.value.varint;
                             break;
-                        case 2: /* hardware_id */
-                            cur_channel->hardware_id = (uint32_t)cf.value.varint;
-                            break;
+                        case 2: /* hardware_id — server sends string like "UART1" or "0x68" */
+                        	if (cf.wire_type == WIRE_LENGTH_DELIMITED) {
+                        		/* Read first 4 bytes as varint backward-compat, or parse as string */
+                        		if (cf.value.bytes.len >= 1 && cf.value.bytes.len <= 4) {
+                        			/* Treat as raw bytes → uint32 (little-endian like varint) */
+                        			uint32_t val = 0;
+                        			for (size_t b = 0; b < cf.value.bytes.len; b++) {
+                        				val |= ((uint32_t)cf.value.bytes.ptr[b]) << (b * 8);
+                        			}
+                        			cur_channel->hardware_id = val;
+                        		} else {
+                        			/* Longer string — use a simple hash/first-chars as ID */
+                        			cur_channel->hardware_id = (uint32_t)cf.value.bytes.ptr[0];
+                        		}
+                        	} else if (cf.wire_type == WIRE_VARINT) {
+                        		cur_channel->hardware_id = (uint32_t)cf.value.varint;
+                        	}
+                        	break;
                         case 3: /* template_ids (repeated varint) */
                             if (cf.wire_type == WIRE_VARINT && cur_channel->template_count < MAX_TEMPLATE_IDS) {
                                 cur_channel->template_ids[cur_channel->template_count++] = (uint32_t)cf.value.varint;

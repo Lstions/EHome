@@ -191,9 +191,12 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			busConfigData = ch.Config
 		}
 		if busConfigData != "" {
-			if strings.HasPrefix(busConfigData, "\\x") {
+			/* Try hex decode first — PostgreSQL bytea may already be binary in-memory */
+			if decoded, err := hex.DecodeString(busConfigData); err == nil && len(decoded) > 0 {
+				subEnc.EncodeBytes(7, decoded)
+			} else if strings.HasPrefix(busConfigData, "\\x") {
 				hexStr := busConfigData[2:]
-				if decoded, err := hex.DecodeString(hexStr); err == nil {
+				if decoded, err := hex.DecodeString(hexStr); err == nil && len(decoded) > 0 {
 					subEnc.EncodeBytes(7, decoded)
 				} else {
 					subEnc.EncodeString(7, busConfigData)
