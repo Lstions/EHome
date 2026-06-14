@@ -19,7 +19,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// List edge devices (v2.2 path for /devices)
 	v1.GET("/edge-devices", func(c *gin.Context) {
 		var devices []models.EdgeDevice
-		db.Find(&devices)
+		db.Preload("Channel").Preload("Node").Find(&devices)
 		Success(c, devices)
 	})
 
