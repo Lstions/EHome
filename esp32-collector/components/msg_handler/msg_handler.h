@@ -43,6 +43,9 @@ void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
 void msg_handler_send_query_rsp(const char *request_id, bool success, const char *error_msg);
 void msg_handler_send_config_report(const char *request_id);
 
+/* === v2.4 Resource reporting === */
+void msg_handler_send_resource_report(void);
+
 /* === Factory reset - implemented in main.c === */
 void factory_reset(void);
 

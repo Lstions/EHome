@@ -84,6 +84,14 @@ void config_mgr_set_epoch(uint64_t epoch);
 void config_mgr_set_manifest_id(const char *id);
 void config_mgr_clear_epoch(void);  /* factory_reset use */
 
+/* === v2.4 bus_config flags helpers === */
+
+/**
+ * Extract dma_enabled from a channel's bus_config flags byte.
+ * Returns true if DMA is enabled, true by default if flags byte is absent.
+ */
+bool bus_config_get_dma_enabled(const config_channel_t *ch);
+
 #ifdef __cplusplus
 }
 #endif

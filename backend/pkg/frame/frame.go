@@ -55,6 +55,7 @@ const (
 	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
 	MsgPongAck          = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
 	MsgResourceReport   = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
+	MsgQueryResources   = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
 )
 
 // Field represents a decoded field
@@ -142,6 +143,15 @@ func NewDecoder(buf []byte) (*Decoder, error) {
 		return nil, fmt.Errorf("empty frame")
 	}
 	return &Decoder{buf: buf, pos: 1}, nil
+}
+
+// NewSubDecoder creates a decoder for sub-messages (no message type byte).
+// Unlike NewDecoder, it starts reading fields from position 0.
+func NewSubDecoder(buf []byte) (*Decoder, error) {
+	if len(buf) < 1 {
+		return nil, fmt.Errorf("empty sub-frame")
+	}
+	return &Decoder{buf: buf, pos: 0}, nil
 }
 
 // MsgType returns the message type byte
@@ -305,6 +315,7 @@ func MsgTypeName(msgType uint8) string {
 		MsgConfigSyncRsp:  "config_sync_response",
 		MsgPongAck:        "pong_ack",
 		MsgResourceReport: "resource_report",
+		MsgQueryResources: "query_resources",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

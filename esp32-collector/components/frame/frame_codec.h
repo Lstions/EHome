@@ -55,6 +55,9 @@ typedef enum {
 /* v2.1 sync messages */
 #define MSG_CONFIG_SYNC_REQ  0x13
 #define MSG_CONFIG_SYNC_RSP  0x14
+/* v2.4 resource reporting */
+#define MSG_RESOURCE_REPORT  0x19
+#define MSG_QUERY_RESOURCES  0x1A
 
 /* === Encoder === */
 typedef struct {

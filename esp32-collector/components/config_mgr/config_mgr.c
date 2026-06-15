@@ -566,3 +566,23 @@ void config_mgr_clear_epoch(void)
 
     ESP_LOGI(TAG, "Epoch and manifest_id cleared from NVS");
 }
+
+/* === v2.4 bus_config flags helpers === */
+
+bool bus_config_get_dma_enabled(const config_channel_t *ch)
+{
+    if (!ch) return true;
+
+    size_t flags_offset;
+    switch (ch->bus_type) {
+    case 1: flags_offset = 6; break; /* UART: [tx, rx, baud×4, flags] */
+    case 2: flags_offset = 7; break; /* I2C:   [sda, scl, addr, freq×4, flags] */
+    case 3: flags_offset = 6; break; /* SPI:   [cs, mode, freq×4, flags] */
+    default: return true;
+    }
+
+    if (ch->bus_config_len > flags_offset) {
+        return (ch->bus_config[flags_offset] & 0x01) != 0;
+    }
+    return true;  /* default: DMA enabled for backward compatibility */
+}

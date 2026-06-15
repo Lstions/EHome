@@ -1,6 +1,9 @@
 /**
  * @file scheduler.h
- * @brief Channel Scheduler - periodic data acquisition via bus layer
+ * @brief Channel Scheduler - periodic sampling via unified command queue
+ *
+ * The scheduler is a pure timer.  All bus transactions (UART/SPI/I2C) are
+ * dispatched through the shared command queue consumed by the bus worker.
  */
 
 #ifndef SCHEDULER_H
@@ -40,14 +43,6 @@ sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
-
-/**
- * Execute a bus transaction for a given channel (used by WriteCommand).
- * Returns BUS_OK on success, or error code.
- * rx_buf receives response data, rx_len set to bytes read.
- */
-int scheduler_execute_write(uint32_t channel_id, const uint8_t *tx_data, size_t tx_len,
-                           uint32_t read_size, uint8_t *rx_buf, size_t *rx_len);
 
 #ifdef __cplusplus
 }

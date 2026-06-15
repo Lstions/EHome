@@ -317,9 +317,22 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 
 	// POST /api/v1/nodes/:id/query-resources
 	n.POST("/:id/query-resources", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+		deviceID := strconv.FormatInt(node.NodeID, 10)
+		requestID, err := nodeMgr.SendQueryResources(deviceID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"request_id": fmt.Sprintf("res-%d-%d", id, time.Now().Unix()),
+			"node_id":    id,
+			"request_id": requestID,
+			"status":     "sent",
 		}})
 	})
 }

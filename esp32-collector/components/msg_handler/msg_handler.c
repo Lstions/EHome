@@ -10,8 +10,11 @@
 #include "ota.h"
 #include "factory_reset.h"
 #include "sync_manager.h"
+#include "hw_profile.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define TAG "MSG"
 
@@ -34,6 +37,11 @@ __attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t
 {
     (void)request_id;
     (void)hardware_id;
+}
+
+__attribute__((weak)) void on_query_resources_received(const char *request_id)
+{
+    (void)request_id;
 }
 
 /* === Init === */
@@ -264,6 +272,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
         uint64_t server_time = 0;
         uint32_t features = 0;
         frame_field_t field;
+        ESP_LOGI(TAG, "HelloAck received! len=%zu", len);
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             switch (field.field_num) {
             case 1: server_time = field.value.varint; break;
@@ -277,6 +286,23 @@ void msg_handler_process(const uint8_t *data, size_t len)
         
         /* v2.1: notify sync_manager */
         sync_manager_on_downlink_received(MSG_HELLO_ACK);
+        break;
+    }
+
+    case MSG_QUERY_RESOURCES: {
+        char request_id[64] = {0};
+        frame_field_t field;
+        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
+            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+                size_t copy_len = field.value.bytes.len < sizeof(request_id) - 1
+                                ? field.value.bytes.len : sizeof(request_id) - 1;
+                memcpy(request_id, field.value.bytes.ptr, copy_len);
+            }
+        }
+        ESP_LOGI(TAG, "QueryResources: req=%s", request_id);
+        on_query_resources_received(request_id);
+        /* Send full ResourceReport in response */
+        msg_handler_send_resource_report();
         break;
     }
 
@@ -493,4 +519,26 @@ void msg_handler_send_config_report(const char *request_id)
              cfg ? cfg->template_count : 0, 
              cfg ? cfg->channel_count : 0);
     mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+}
+
+/* === v2.4 Resource Report === */
+void msg_handler_send_resource_report(void)
+{
+    /* Use heap for large buffers to avoid stack overflow in hello task */
+    uint8_t *buf = heap_caps_malloc(1024, MALLOC_CAP_DEFAULT);
+    if (!buf) {
+        ESP_LOGE(TAG, "Failed to allocate ResourceReport buffer");
+        return;
+    }
+    size_t len = 0;
+
+    if (!hw_profile_build_report(buf, 1024, &len)) {
+        ESP_LOGE(TAG, "Failed to build ResourceReport");
+        free(buf);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sending ResourceReport: %zu bytes", len);
+    mqtt_client_publish_impl(buf, len);
+    free(buf);
 }

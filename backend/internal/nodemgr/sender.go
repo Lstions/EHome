@@ -105,6 +105,23 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
+// SendQueryResources sends a QueryResources (0x1A) to a device, requesting it to send a ResourceReport.
+// Returns the request_id for correlation.
+func (m *Manager) SendQueryResources(deviceID string) (string, error) {
+	requestID := fmt.Sprintf("res-%d", time.Now().UnixMilli())
+
+	enc := frame.NewEncoder(frame.MsgQueryResources)
+	enc.EncodeString(1, requestID)
+
+	topic := mqtt.TopicForNode(deviceID)
+	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		return "", fmt.Errorf("failed to publish QueryResources: %w", err)
+	}
+
+	logger.Infof("[%s] QueryResources sent: request_id=%s", deviceID, requestID)
+	return requestID, nil
+}
+
 // SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.
 // The decision carries sync_id, epoch, manifest_id, and reason from SyncGate.
 func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
