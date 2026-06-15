@@ -1,208 +1,24 @@
-menu "ESP32 Collector V3 Configuration"
+menu "EHome Collector Configuration"
 
-config COLLECTOR_FIRMWARE_VERSION
-    string "Firmware Version"
-    default "3.0.2"
-    help
-        Firmware version string reported in Hello
+endmenu
 
-config COLLECTOR_DEVICE_MODEL
-    string "Device Model"
-    default "ESP32C6" if IDF_TARGET_ESP32C6
-    default "ESP32S3" if IDF_TARGET_ESP32S3
-    default "ESP32"
-    help
-        Device model string reported in Hello (e.g. C6_MAN8, S3_MAN16)
+menu "Debug Configuration"
 
-config COLLECTOR_PARTITION_TABLE
-    string "Partition table"
-    default "partitions_c6_8m.csv" if IDF_TARGET_ESP32C6
-    default "partitions_s3_8m.csv" if IDF_TARGET_ESP32S3
-    default "partitions_c6_8m.csv"
-    help
-        Partition table CSV file for your flash/chip combination.
-        Available options:
-          partitions_c6_8m.csv  - ESP32-C6, 8MB flash (nvs=24KB, ota=3MB each)
-          partitions_c6_16m.csv - ESP32-C6, 16MB flash (nvs=32KB, ota=6.5MB each)
-          partitions_s3_8m.csv  - ESP32-S3, 8MB flash (nvs=24KB, ota=3MB each)
-          partitions_s3_16m.csv - ESP32-S3, 16MB flash (nvs=32KB, ota=6.5MB each)
-
-config COLLECTOR_MQTT_BROKER_URL
-    string "MQTT Broker URL"
-    default "mqtt://192.168.20.80:1883"
-    help
-        MQTT broker URL
-
-config COLLECTOR_MQTT_PROTOCOL_V5
-    bool "Use MQTT 5.0 protocol"
-    default y
-    select MQTT_PROTOCOL_5
-    help
-        Enable MQTT 5.0 protocol (MQTT_PROTOCOL_V_5).
-        If disabled, falls back to MQTT 3.1.1.
-        MQTT 5.0 provides message expiry, content type, subscription
-        identifiers, and improved reason codes.
-        Requires EMQX 5.x or other MQTT 5.0 capable broker.
-
-config COLLECTOR_WIFI_SSID
-    string "WiFi SSID"
-    default "ABC"
-    help
-        WiFi SSID for network connection
-
-config COLLECTOR_WIFI_PASSWORD
-    string "WiFi Password"
-    default "sunwork123"
-    help
-        WiFi password
-
-config COLLECTOR_NODE_ID
-    string "Node ID"
-    default ""
-    help
-        Node ID used for MQTT topic and Hello frame.
-        Must match the node_id in the server database.
-        If empty, falls back to MAC-based ID (e.g. esp32c6_AABBCCDDEEFF).
-        Example: "1001"
-
-config COLLECTOR_MAX_TEMPLATE_SLOTS
-    int "Maximum template slots"
-    default 64
-    help
-        Maximum number of command templates
-
-config COLLECTOR_MAX_HARDWARE
-    int "Maximum hardware instances"
-    default 16
-    help
-        Maximum number of hardware instances (UART/I2C/SPI/GPIO/ADC)
-
-config COLLECTOR_MAX_CHANNELS
-    int "Maximum channel instances"
-    default 32
-    help
-        Maximum number of channel instances
-
-config COLLECTOR_MAX_CHUNK_SIZE
-    int "Maximum chunk size for transfers"
-    default 1024
-    help
-        Maximum size of each chunk in chunked transfer
-
-config COLLECTOR_MAX_DIRECT_MESSAGE_BYTES
-    int "Maximum direct message size"
-    default 4096
-    help
-        Maximum size of non-chunked MQTT messages
-
-# ==================== OTA Security ====================
-
-menu "OTA Security"
-
-config COLLECTOR_OTA_VERIFY_HASH
-    bool "Verify firmware SHA256 hash after download"
-    default y
-    help
-        Enable SHA256 hash verification of downloaded firmware before applying.
-        The expected hash is provided in the OtaCommand message (md5_checksum field,
-        repurposed as SHA256). If the hash does not match, the OTA is aborted.
-        Disable only for debugging; this is a critical security feature.
-
-config COLLECTOR_OTA_ALLOW_HTTP
-    bool "Allow HTTP (non-HTTPS) OTA URLs"
-    default n
-    help
-        Allow firmware downloads over plain HTTP. This is INSECURE and should
-        only be enabled for development/testing. In production, all OTA URLs
-        must use HTTPS to prevent man-in-the-middle attacks.
-
-config COLLECTOR_OTA_USE_HTTPS
-    bool "Use HTTPS for OTA downloads"
-    default y
-    help
-        If enabled, OTA will use HTTPS protocol. Cert validation depends on
-        COLLECTOR_OTA_VERIFY_CERT and cert bundle settings.
-
-config COLLECTOR_OTA_VERIFY_CERT
-    bool "Verify server certificate"
-    default y
-    depends on COLLECTOR_OTA_USE_HTTPS
-    help
-        If enabled, validates server TLS certificate against the configured
-        trust anchors. Recommended for production.
-
-if COLLECTOR_OTA_VERIFY_CERT
-
-    choice COLLECTOR_OTA_TRUST_ANCHOR
-        prompt "TLS Trust Anchor Source"
-        default COLLECTOR_OTA_CRT_BUNDLE
+    config DEBUG_TCP_ENABLED
+        bool "Enable TCP Transport for debugging"
+        default n
         help
-            Choose the trust anchor source for TLS validation.
+            Enable TCP transport layer that runs in parallel with MQTT.
+            This allows testing and debugging via direct TCP connection.
+            Disable for production use to save resources.
 
-        config COLLECTOR_OTA_CRT_BUNDLE
-            bool "Use ESP-IDF x509 Certificate Bundle (Mozilla CA)"
-            help
-                Use ESP-IDF's built-in Mozilla CA bundle (suitable for
-                public Internet, requires CONFIG_ESP_CERTIFICATE_BUNDLE=y).
-
-        config COLLECTOR_OTA_CUSTOM_CERT
-            bool "Embed custom CA certificate (PEM)"
-            help
-                Use a custom CA certificate (for private CA / self-signed
-                in lab/private network).
-    endchoice
-
-    config COLLECTOR_OTA_CERT_PEM
-        string "Custom CA Certificate (PEM format)"
-        depends on COLLECTOR_OTA_CUSTOM_CERT
-        default ""
+    config DEBUG_TCP_PORT
+        int "TCP Transport port number"
+        depends on DEBUG_TCP_ENABLED
+        default 8088
+        range 1024 65535
         help
-            PEM-encoded CA certificate, including "-----BEGIN CERTIFICATE-----"
-            and "-----END CERTIFICATE-----".
-
-    config COLLECTOR_OTA_EXPECTED_CN
-        string "Expected Common Name (CN) for server cert"
-        default ""
-        help
-            If set, server certificate CN must match this string.
-            Leave empty to use the URL hostname as expected CN.
-
-endif
-
-config COLLECTOR_OTA_SERVER_CERT_PEM
-    string "Path to server CA certificate (PEM) for OTA pinning (legacy)"
-    default ""
-    depends on COLLECTOR_OTA_CUSTOM_CERT
-    help
-        Path to a PEM-encoded CA certificate file for HTTPS certificate pinning.
-        The certificate will be embedded in the firmware binary.
-        If empty, TLS certificate verification is skipped (development only).
-        For production, set this to the path of your OTA server's CA certificate.
-        Example: "certs/ota_server_ca.pem"
-
-config COLLECTOR_OTA_SERVER_CERT_PEM_EMPTY
-    bool
-    default y if COLLECTOR_OTA_SERVER_CERT_PEM = ""
-    default n if COLLECTOR_OTA_SERVER_CERT_PEM != ""
-
-endmenu  # OTA Security
-
-# ==================== Sync v2.1 ====================
-
-config COLLECTOR_SYNC_PERIODIC_SEC
-    int "Periodic config sync interval (seconds)"
-    default 600
-    range 60 3600
-    help
-        Interval for collector to actively query server config.
-        Lower = more responsive, higher = less network traffic.
-
-config COLLECTOR_SYNC_DEDUP_SEC
-    int "Sync dedup window (seconds)"
-    default 30
-    range 10 600
-    help
-        Don't re-request sync within this window unless forced.
-        Applies to SYNC_REASON_DOUBT and other dedup-eligible reasons.
+            Port number for TCP transport server.
+            Default is 8088.
 
 endmenu

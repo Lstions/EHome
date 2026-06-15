@@ -10,19 +10,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Forward declaration */
+typedef struct transport transport_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* === Init === */
 void msg_handler_init(void);
+void msg_handler_deinit(void);
 
 /* === HelloAck state === */
 bool msg_handler_is_hello_ack_received(void);
 uint64_t msg_handler_get_server_time(void);
 void msg_handler_reset_hello_ack(void);
 
-/* === Process incoming frame === */
+/* === Message processing === */
+void msg_handler_process_with_transport(const uint8_t *data, size_t len, transport_t *transport);
 void msg_handler_process(const uint8_t *data, size_t len);
 
 /* === Send outgoing messages === */
@@ -42,12 +47,13 @@ void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
                                bool success, const uint32_t *addresses, uint8_t addr_count);
 void msg_handler_send_query_rsp(const char *request_id, bool success, const char *error_msg);
 void msg_handler_send_config_report(const char *request_id);
-
-/* === v2.4 Resource reporting === */
 void msg_handler_send_resource_report(void);
 
 /* === Factory reset - implemented in main.c === */
 void factory_reset(void);
+
+/* === Weak callbacks - implemented in main.c === */
+void on_query_resources_received(const char *request_id);
 
 #ifdef __cplusplus
 }

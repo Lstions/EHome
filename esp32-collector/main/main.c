@@ -18,7 +18,11 @@
 
 #include "frame_codec.h"
 #include "wifi_mgr.h"
+#include "transport.h"
 #include "ehome_mqtt.h"
+#ifdef CONFIG_DEBUG_TCP_ENABLED
+#include "ehome_tcp.h"
+#endif
 #include "msg_handler.h"
 #include "config_mgr.h"
 #include "scheduler.h"
@@ -50,11 +54,15 @@ const char *get_firmware_version(void) { return FIRMWARE_VERSION; }
 static void on_wifi_state(wifi_mgr_state_t s, void *c);
 static void on_mqtt_state(mqtt_client_state_t s, void *c);
 static void on_mqtt_msg(const char *t, const uint8_t *d, size_t l, void *c);
+static void on_transport_msg(const uint8_t *data, size_t len, void *ctx);
+static void on_transport_state(transport_state_t state, void *ctx);
 static void generate_node_id(void);
 static void status_task(void *p);
 static void on_sync_send_hello(void);
 static void hello_handshake_task(void *p);
 static void bus_worker_task(void *p);
+
+static transport_t *s_tcp_transport = NULL;
 
 /* Provided by msg_handler — sends hw_profile ResourceReport (MSG 0x19) */
 extern void msg_handler_send_resource_report(void);
@@ -176,7 +184,13 @@ void app_main(void)
     ota_init();
     scheduler_init();
     mqtt_client_init();
-
+    
+    // Initialize transport manager
+    transport_manager_init();
+    
+    // Register MQTT transport
+    mqtt_transport_register();
+    
     g_cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
 
     wifi_mgr_register_state_cb(on_wifi_state, NULL);
@@ -195,11 +209,40 @@ void app_main(void)
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
     xTaskCreate(bus_worker_task, "bus_worker", 4096, NULL, 8, NULL);
 
+#ifdef CONFIG_DEBUG_TCP_ENABLED
+    // Initialize TCP transport (runs in parallel with MQTT)
+    ESP_LOGI(TAG, "Starting TCP transport on port %d", CONFIG_DEBUG_TCP_PORT);
+    tcp_transport_config_t tcp_config = {
+        .port = CONFIG_DEBUG_TCP_PORT,
+        .max_clients = 4,
+    };
+    s_tcp_transport = tcp_transport_create(&tcp_config);
+    if (s_tcp_transport) {
+        // Register message and state callbacks
+        s_tcp_transport->msg_cb = on_transport_msg;
+        s_tcp_transport->msg_cb_ctx = s_tcp_transport;  /* Pass transport as context */
+        s_tcp_transport->state_cb = on_transport_state;
+        s_tcp_transport->state_cb_ctx = NULL;
+        
+        s_tcp_transport->ops->init(s_tcp_transport, NULL);
+        transport_register(s_tcp_transport);
+        ESP_LOGI(TAG, "TCP transport registered");
+        
+        // Check if WiFi is already connected and start TCP transport
+        if (wifi_mgr_get_state() == WIFI_MGR_CONNECTED) {
+            if (s_tcp_transport->state != TRANSPORT_CONNECTED && s_tcp_transport->ops->start) {
+                ESP_LOGI(TAG, "WiFi already connected, starting TCP transport");
+                s_tcp_transport->ops->start(s_tcp_transport);
+            }
+        }
+    }
+#endif
+
     ESP_LOGI(TAG, "Init done, node=%s", s_node_id);
 }
 
 /* ================================================================== */
-/*  WiFi / MQTT callbacks                                             */
+/*  WiFi / Transport callbacks                                        */
 /* ================================================================== */
 
 static void on_wifi_state(wifi_mgr_state_t s, void *c)
@@ -209,6 +252,14 @@ static void on_wifi_state(wifi_mgr_state_t s, void *c)
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
         if (s_ota_need_confirm) { ota_confirm_valid(); s_ota_need_confirm = false; }
         mqtt_client_start();
+        
+#ifdef CONFIG_DEBUG_TCP_ENABLED
+        // Start TCP transport when WiFi is connected
+        if (s_tcp_transport && s_tcp_transport->state != TRANSPORT_CONNECTED && s_tcp_transport->ops->start) {
+            ESP_LOGI(TAG, "Starting TCP transport");
+            s_tcp_transport->ops->start(s_tcp_transport);
+        }
+#endif
     } else if (s == WIFI_MGR_CONNECTING) {
         rgb_led_set_state(LED_STATE_WIFI_CONNECTING);
     } else if (s == WIFI_MGR_FAILED) {
@@ -217,6 +268,30 @@ static void on_wifi_state(wifi_mgr_state_t s, void *c)
 }
 
 static bool s_hello_task_running = false;
+
+/* Transport message and state callbacks */
+static void on_transport_msg(const uint8_t *data, size_t len, void *ctx)
+{
+    transport_t *transport = (transport_t *)ctx;
+    ESP_LOGI(TAG, "Received message from transport: %d bytes", (int)len);
+    
+    // Process the message through msg_handler with transport context
+    if (len > 0 && data) {
+        msg_handler_process_with_transport(data, len, transport);
+    }
+}
+
+static void on_transport_state(transport_state_t state, void *ctx)
+{
+    (void)ctx;
+    ESP_LOGI(TAG, "Transport state changed: %d", state);
+    
+    if (state == TRANSPORT_CONNECTED) {
+        rgb_led_set_state(LED_STATE_RUNNING);
+    } else if (state == TRANSPORT_DISCONNECTED || state == TRANSPORT_FAILED) {
+        rgb_led_set_state(LED_STATE_MQTT_FAILED);
+    }
+}
 
 static void on_mqtt_state(mqtt_client_state_t s, void *c)
 {

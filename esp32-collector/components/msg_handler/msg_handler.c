@@ -11,12 +11,56 @@
 #include "factory_reset.h"
 #include "sync_manager.h"
 #include "hw_profile.h"
+#include "transport.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 
 #define TAG "MSG"
+
+/* Mutex for thread-safe transport access */
+static SemaphoreHandle_t s_publish_mutex = NULL;
+
+/* Current transport context for sending responses */
+static transport_t *s_current_transport = NULL;
+
+/* === Internal publish function with transport routing === */
+static void msg_handler_publish(const uint8_t *data, size_t len)
+{
+    transport_t *transport_to_use = NULL;
+    
+    /* Get current transport under mutex protection */
+    if (s_publish_mutex != NULL) {
+        xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
+        transport_to_use = s_current_transport;
+        xSemaphoreGive(s_publish_mutex);
+    }
+    
+    /* If we have a current transport context (message came from TCP/MQTT), 
+       send response back through that transport */
+    if (transport_to_use && transport_to_use->ops && transport_to_use->ops->send) {
+        esp_err_t ret = transport_to_use->ops->send(transport_to_use, data, len);
+        if (ret == ESP_OK) {
+            ESP_LOGD(TAG, "Sent response via current transport (%d bytes)", (int)len);
+            return;
+        }
+        ESP_LOGW(TAG, "Failed to send via current transport, falling back to broadcast");
+    }
+    
+    /* No current transport or send failed: broadcast to all connected transports */
+    esp_err_t ret = transport_broadcast(data, len);
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Broadcast to all transports (%d bytes)", (int)len);
+        return;
+    }
+    
+    /* Last resort: send via MQTT directly */
+    ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
+    mqtt_client_publish_impl(data, len);
+}
 
 /* HelloAck state */
 static volatile bool s_hello_ack_received = false;
@@ -49,7 +93,28 @@ void msg_handler_init(void)
 {
     s_hello_ack_received = false;
     s_server_time_ms = 0;
+    
+    /* Create mutex for thread-safe transport access */
+    if (s_publish_mutex == NULL) {
+        s_publish_mutex = xSemaphoreCreateMutex();
+        if (s_publish_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create publish mutex");
+        }
+    }
+    
     ESP_LOGI(TAG, "Message handler initialized");
+}
+
+void msg_handler_deinit(void)
+{
+    /* Clean up mutex */
+    if (s_publish_mutex != NULL) {
+        vSemaphoreDelete(s_publish_mutex);
+        s_publish_mutex = NULL;
+    }
+    
+    s_current_transport = NULL;
+    ESP_LOGI(TAG, "Message handler deinitialized");
 }
 
 /* === HelloAck state === */
@@ -70,6 +135,31 @@ void msg_handler_reset_hello_ack(void)
 }
 
 /* === Process incoming frame === */
+/* === Message processing === */
+void msg_handler_process_with_transport(const uint8_t *data, size_t len, transport_t *transport)
+{
+    /* Set current transport context for sending responses */
+    if (s_publish_mutex != NULL) {
+        xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
+        s_current_transport = transport;
+        xSemaphoreGive(s_publish_mutex);
+    } else {
+        s_current_transport = transport;
+    }
+    
+    /* Process the message */
+    msg_handler_process(data, len);
+    
+    /* Clear transport context */
+    if (s_publish_mutex != NULL) {
+        xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
+        s_current_transport = NULL;
+        xSemaphoreGive(s_publish_mutex);
+    } else {
+        s_current_transport = NULL;
+    }
+}
+
 void msg_handler_process(const uint8_t *data, size_t len)
 {
     if (len < 1) {
@@ -341,7 +431,7 @@ void msg_handler_send_hello(const char *node_id, const char *fw_version,
              node_id, fw_version, model, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
              config_mgr_has_manifest());
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t channel_count)
@@ -364,7 +454,7 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t ch
              (unsigned long)uptime_sec, status, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
              sync_manager_get_state_enum());
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
@@ -390,7 +480,7 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
     
     ESP_LOGD(TAG, "Sending DataReport: ch=%lu, seq=%lu, len=%zu", 
              (unsigned long)channel_id, (unsigned long)sequence, raw_len);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_config_result(const char *manifest_id, bool success)
@@ -403,7 +493,7 @@ void msg_handler_send_config_result(const char *manifest_id, bool success)
     frame_encode_varint(&enc, 2, success ? 1 : 0);
     
     ESP_LOGI(TAG, "Sending ConfigResult: %s, success=%d", manifest_id, success);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
@@ -423,7 +513,7 @@ void msg_handler_send_write_rsp(uint32_t request_id, bool success,
     }
     
     ESP_LOGI(TAG, "Sending WriteRsp: req=%lu, success=%d", (unsigned long)request_id, success);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_pong(uint64_t timestamp_us)
@@ -435,7 +525,7 @@ void msg_handler_send_pong(uint64_t timestamp_us)
     frame_encode_varint(&enc, 1, timestamp_us);
     
     ESP_LOGI(TAG, "Sending Pong: ts=%llu", (unsigned long long)timestamp_us);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_ota_prog(const char *ota_id, uint8_t status,
@@ -453,7 +543,7 @@ void msg_handler_send_ota_prog(const char *ota_id, uint8_t status,
     }
     
     ESP_LOGI(TAG, "Sending OtaProg: %s, status=%d, progress=%d%%", ota_id, status, progress_pct);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
@@ -475,7 +565,7 @@ void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
     
     ESP_LOGI(TAG, "Sending ScanRpt: req=%s, hw=%lu, success=%d, addrs=%d",
              request_id, (unsigned long)hardware_id, success, addr_count);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_query_rsp(const char *request_id, bool success, const char *error_msg)
@@ -491,7 +581,7 @@ void msg_handler_send_query_rsp(const char *request_id, bool success, const char
     }
     
     ESP_LOGI(TAG, "Sending QueryRsp: req=%s, success=%d", request_id, success);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 void msg_handler_send_config_report(const char *request_id)
@@ -517,7 +607,7 @@ void msg_handler_send_config_report(const char *request_id)
              request_id, cfg ? cfg->manifest_id : "none", 
              cfg ? cfg->template_count : 0, 
              cfg ? cfg->channel_count : 0);
-    mqtt_client_publish_impl(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 /* === v2.4 Resource Report === */
@@ -538,6 +628,6 @@ void msg_handler_send_resource_report(void)
     }
 
     ESP_LOGI(TAG, "Sending ResourceReport: %zu bytes", len);
-    mqtt_client_publish_impl(buf, len);
+    msg_handler_publish(buf, len);
     free(buf);
 }

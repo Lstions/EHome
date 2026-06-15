@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,6 +48,11 @@ void mqtt_client_register_state_cb(mqtt_state_cb_t cb, void *ctx);
 
 /* === Set node_id (for topic construction) === */
 void mqtt_client_set_node_id(const char *node_id);
+
+/**
+ * @brief 注册 MQTT transport
+ */
+esp_err_t mqtt_transport_register(void);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,16 @@
+menu "EHome MQTT Configuration"
+
+    config COLLECTOR_MQTT_BROKER_URL
+        string "MQTT Broker URL"
+        default "mqtt://10.42.0.1:1884"
+        help
+            MQTT broker URL for communication.
+            Format: mqtt://host:port or mqtts://host:port
+
+    config COLLECTOR_NODE_ID
+        string "Node ID"
+        default "1001"
+        help
+            Unique identifier for this collector node.
+
+endmenu

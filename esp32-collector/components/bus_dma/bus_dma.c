@@ -285,8 +285,62 @@ static void uart_deinit(bus_dma_ctx_t *ctx)
 }
 
 /* ------------------------------------------------------------------ */
-/*  SPI init / transact / deinit                                      */
+/*  SPI init / transact / deinit (with bus sharing)                   */
 /* ------------------------------------------------------------------ */
+
+/* Shared SPI bus registry */
+#define MAX_SPI_BUSES 4
+
+typedef struct {
+    spi_host_device_t host;
+    int mosi_pin;
+    int miso_pin;
+    int sclk_pin;
+    bool dma_enabled;
+    uint32_t ref_count;  /* Number of devices using this bus */
+} spi_bus_entry_t;
+
+static spi_bus_entry_t s_spi_buses[MAX_SPI_BUSES];
+static bool s_spi_registry_initialized = false;
+
+static void spi_registry_init(void)
+{
+    if (!s_spi_registry_initialized) {
+        memset(s_spi_buses, 0, sizeof(s_spi_buses));
+        for (int i = 0; i < MAX_SPI_BUSES; i++) {
+            s_spi_buses[i].host = SPI_HOST_MAX;  /* Invalid marker */
+        }
+        s_spi_registry_initialized = true;
+    }
+}
+
+/* Find existing SPI bus with matching config */
+static spi_bus_entry_t *spi_find_bus(int mosi, int miso, int sclk, bool dma)
+{
+    spi_registry_init();
+    for (int i = 0; i < MAX_SPI_BUSES; i++) {
+        if (s_spi_buses[i].host != SPI_HOST_MAX &&
+            s_spi_buses[i].mosi_pin == mosi &&
+            s_spi_buses[i].miso_pin == miso &&
+            s_spi_buses[i].sclk_pin == sclk &&
+            s_spi_buses[i].dma_enabled == dma) {
+            return &s_spi_buses[i];
+        }
+    }
+    return NULL;
+}
+
+/* Allocate new SPI bus entry */
+static spi_bus_entry_t *spi_alloc_bus(void)
+{
+    spi_registry_init();
+    for (int i = 0; i < MAX_SPI_BUSES; i++) {
+        if (s_spi_buses[i].host == SPI_HOST_MAX) {
+            return &s_spi_buses[i];
+        }
+    }
+    return NULL;
+}
 
 static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 {
@@ -296,31 +350,86 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uint8_t mode   = cfg[1];
     uint32_t freq  = read_be32(&cfg[2]);
 
-    ctx->cfg.spi.host   = SPI2_HOST;
+    /* SPI bus pins - parse from config if provided, otherwise use defaults */
+    int mosi_pin = -1;  /* Default: use board default */
+    int miso_pin = -1;
+    int sclk_pin = -1;
+
+    /* Parse MOSI/MISO/SCLK from config if len >= 9 */
+    if (len >= 9) {
+        mosi_pin = cfg[6];
+        miso_pin = cfg[7];
+        sclk_pin = cfg[8];
+    }
+
+    ctx->cfg.spi.host   = SPI2_HOST;  /* Use SPI2_HOST by default */
     ctx->cfg.spi.cs_pin = cs_pin;
     ctx->cfg.spi.freq   = freq;
     ctx->cfg.spi.mode   = mode;
+    ctx->cfg.spi.mosi_pin = mosi_pin;
+    ctx->cfg.spi.miso_pin = miso_pin;
+    ctx->cfg.spi.sclk_pin = sclk_pin;
 
-    /* Default bus pins — caller may override via SPI pin config */
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num   = -1,
-        .miso_io_num   = -1,
-        .sclk_io_num   = -1,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 256,
-    };
+    /* Check if bus with same config already exists */
+    spi_bus_entry_t *bus_entry = spi_find_bus(mosi_pin, miso_pin, sclk_pin, ctx->dma_enabled);
 
-    /*
-     * NOTE: In real usage the bus may already be initialized by another
-     * channel. spi_bus_initialize will return ESP_ERR_INVALID_STATE if so.
-     * We ignore that and just add the device.
-     */
-    esp_err_t r = spi_bus_initialize(SPI2_HOST, &bus_cfg,
-                                     ctx->dma_enabled ? SPI_DMA_CH_AUTO
-                                                      : SPI_DMA_DISABLED);
-    if (r != ESP_OK && r != ESP_ERR_INVALID_STATE) return r;
+    if (bus_entry == NULL) {
+        /* Find available SPI host */
+        spi_host_device_t host = SPI2_HOST;
+        for (int i = 0; i < MAX_SPI_BUSES; i++) {
+            if (s_spi_buses[i].host == SPI_HOST_MAX) {
+                host = (spi_host_device_t)(SPI2_HOST + i);
+                break;
+            }
+        }
 
+        /* Default bus pins — caller may override via SPI pin config */
+        spi_bus_config_t bus_cfg = {
+            .mosi_io_num   = mosi_pin,
+            .miso_io_num   = miso_pin,
+            .sclk_io_num   = sclk_pin,
+            .quadwp_io_num = -1,
+            .quadhd_io_num = -1,
+            .max_transfer_sz = 256,
+        };
+
+        esp_err_t r = spi_bus_initialize(host, &bus_cfg,
+                                         ctx->dma_enabled ? SPI_DMA_CH_AUTO
+                                                          : SPI_DMA_DISABLED);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(r));
+            return r;
+        }
+
+        /* Register in shared bus table */
+        bus_entry = spi_alloc_bus();
+        if (bus_entry == NULL) {
+            ESP_LOGE(TAG, "SPI bus registry full");
+            spi_bus_free(host);
+            return ESP_ERR_NO_MEM;
+        }
+
+        bus_entry->host = host;
+        bus_entry->mosi_pin = mosi_pin;
+        bus_entry->miso_pin = miso_pin;
+        bus_entry->sclk_pin = sclk_pin;
+        bus_entry->dma_enabled = ctx->dma_enabled;
+        bus_entry->ref_count = 0;
+
+        ctx->cfg.spi.host = host;
+
+        ESP_LOGI(TAG, "SPI%d %s bus init (MOSI=%d MISO=%d SCLK=%d)",
+                 host, ctx->dma_enabled ? "DMA" : "polled",
+                 mosi_pin, miso_pin, sclk_pin);
+    } else {
+        /* Reuse existing bus */
+        ctx->cfg.spi.host = bus_entry->host;
+        ESP_LOGI(TAG, "SPI%d %s bus reused (MOSI=%d MISO=%d SCLK=%d)",
+                 bus_entry->host, ctx->dma_enabled ? "DMA" : "polled",
+                 mosi_pin, miso_pin, sclk_pin);
+    }
+
+    /* Add device to bus */
     spi_device_interface_config_t dev_cfg = {
         .clock_speed_hz = (int)freq,
         .mode           = mode,
@@ -328,12 +437,21 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         .queue_size     = 1,
     };
 
-    r = spi_bus_add_device(SPI2_HOST, &dev_cfg, &ctx->cfg.spi.dev);
-    if (r != ESP_OK) return r;
+    esp_err_t r = spi_bus_add_device(ctx->cfg.spi.host, &dev_cfg, &ctx->cfg.spi.dev);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(r));
+        /* Only free bus if we just created it (ref_count == 0) */
+        if (bus_entry->ref_count == 0) {
+            spi_bus_free(ctx->cfg.spi.host);
+            bus_entry->host = SPI_HOST_MAX;
+        }
+        return r;
+    }
 
-    ESP_LOGI(TAG, "SPI %s init (CS=%d mode=%d freq=%lu)",
+    bus_entry->ref_count++;
+    ESP_LOGI(TAG, "SPI %s device init (CS=%d mode=%d freq=%lu) ref_count=%lu",
              ctx->dma_enabled ? "DMA" : "polled",
-             cs_pin, mode, (unsigned long)freq);
+             cs_pin, mode, (unsigned long)freq, (unsigned long)bus_entry->ref_count);
     return ESP_OK;
 }
 
@@ -375,6 +493,23 @@ static void spi_deinit(bus_dma_ctx_t *ctx)
     if (ctx->cfg.spi.dev) {
         spi_bus_remove_device(ctx->cfg.spi.dev);
         ctx->cfg.spi.dev = NULL;
+
+        /* Find the bus entry and decrement ref count */
+        spi_bus_entry_t *bus_entry = spi_find_bus(ctx->cfg.spi.mosi_pin,
+                                                   ctx->cfg.spi.miso_pin,
+                                                   ctx->cfg.spi.sclk_pin,
+                                                   ctx->dma_enabled);
+        if (bus_entry && bus_entry->ref_count > 0) {
+            bus_entry->ref_count--;
+            ESP_LOGI(TAG, "SPI bus ref_count=%lu", (unsigned long)bus_entry->ref_count);
+
+            /* Only free bus if last device */
+            if (bus_entry->ref_count == 0) {
+                spi_bus_free(ctx->cfg.spi.host);
+                bus_entry->host = SPI_HOST_MAX;
+                ESP_LOGI(TAG, "SPI bus freed");
+            }
+        }
     }
 }
 

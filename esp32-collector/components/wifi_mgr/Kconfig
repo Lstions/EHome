@@ -1,0 +1,15 @@
+menu "WiFi Manager Configuration"
+
+    config COLLECTOR_WIFI_SSID
+        string "WiFi SSID"
+        default "ABC"
+        help
+            SSID (network name) to connect to.
+
+    config COLLECTOR_WIFI_PASSWORD
+        string "WiFi Password"
+        default "sunwork123"
+        help
+            WiFi password (WPA/WPA2).
+
+endmenu
