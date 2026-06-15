@@ -272,7 +272,6 @@ void msg_handler_process(const uint8_t *data, size_t len)
         uint64_t server_time = 0;
         uint32_t features = 0;
         frame_field_t field;
-        ESP_LOGI(TAG, "HelloAck received! len=%zu", len);
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             switch (field.field_num) {
             case 1: server_time = field.value.varint; break;
