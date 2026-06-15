@@ -33,8 +33,60 @@ static inline uint32_t read_be32(const uint8_t *p)
 }
 
 /* ------------------------------------------------------------------ */
-/*  UART init / transact / deinit                                     */
+/*  UART init / transact / deinit (with port sharing)                 */
 /* ------------------------------------------------------------------ */
+
+/* Shared UART port registry */
+#define MAX_UART_PORTS 3
+
+typedef struct {
+    uart_port_t port;
+    int tx_pin;
+    int rx_pin;
+    uint32_t baud;
+    uint32_t ref_count;  /* Number of channels using this port */
+} uart_port_entry_t;
+
+static uart_port_entry_t s_uart_ports[MAX_UART_PORTS];
+static bool s_uart_registry_initialized = false;
+
+static void uart_registry_init(void)
+{
+    if (!s_uart_registry_initialized) {
+        memset(s_uart_ports, 0, sizeof(s_uart_ports));
+        for (int i = 0; i < MAX_UART_PORTS; i++) {
+            s_uart_ports[i].port = UART_NUM_MAX;  /* Invalid marker */
+        }
+        s_uart_registry_initialized = true;
+    }
+}
+
+/* Find existing UART port with matching config */
+static uart_port_entry_t *uart_find_port(int tx_pin, int rx_pin, uint32_t baud)
+{
+    uart_registry_init();
+    for (int i = 0; i < MAX_UART_PORTS; i++) {
+        if (s_uart_ports[i].port != UART_NUM_MAX &&
+            s_uart_ports[i].tx_pin == tx_pin &&
+            s_uart_ports[i].rx_pin == rx_pin &&
+            s_uart_ports[i].baud == baud) {
+            return &s_uart_ports[i];
+        }
+    }
+    return NULL;
+}
+
+/* Allocate new UART port entry */
+static uart_port_entry_t *uart_alloc_port(void)
+{
+    uart_registry_init();
+    for (int i = 0; i < MAX_UART_PORTS; i++) {
+        if (s_uart_ports[i].port == UART_NUM_MAX) {
+            return &s_uart_ports[i];
+        }
+    }
+    return NULL;
+}
 
 static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 {
@@ -44,42 +96,99 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     int rx_pin  = cfg[1];
     uint32_t baud = read_be32(&cfg[2]);
 
-    ctx->cfg.uart.port   = UART_NUM_1;
-    ctx->cfg.uart.baud   = baud;
-    ctx->cfg.uart.tx_pin = tx_pin;
-    ctx->cfg.uart.rx_pin = rx_pin;
-
-    uart_config_t uart_cfg = {
-        .baud_rate  = (int)baud,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-
-    esp_err_t r;
-    r = uart_param_config(ctx->cfg.uart.port, &uart_cfg);
-    if (r != ESP_OK) return r;
-
-    r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
-    if (r != ESP_OK) return r;
-
-    if (ctx->dma_enabled) {
-        /* DMA-backed ring buffers: RX 1024B, TX 256B */
-        r = uart_driver_install(ctx->cfg.uart.port, 1024, 256, 0, NULL, 0);
-        if (r != ESP_OK) return r;
-        uart_set_rx_timeout(ctx->cfg.uart.port, 4);
-    } else {
-        /* Polled: small RX buffer, no TX buffer */
-        r = uart_driver_install(ctx->cfg.uart.port, 256, 0, 0, NULL, 0);
-        if (r != ESP_OK) return r;
+    /* Validate pins */
+    if (tx_pin < 0 || tx_pin > 30 || rx_pin < 0 || rx_pin > 30) {
+        ESP_LOGE(TAG, "UART invalid pins: TX=%d RX=%d (must be 0-30)", tx_pin, rx_pin);
+        return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "UART%d %s init (TX=%d RX=%d baud=%lu)",
-             ctx->cfg.uart.port,
-             ctx->dma_enabled ? "DMA" : "polled",
-             tx_pin, rx_pin, (unsigned long)baud);
+    /* Check if port with same config already exists */
+    uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
+    
+    if (port_entry == NULL) {
+        /* Find available UART port number */
+        uart_port_t port_num = UART_NUM_1;  /* Use UART1 by default */
+        for (int i = 0; i < MAX_UART_PORTS; i++) {
+            if (s_uart_ports[i].port == UART_NUM_MAX) {
+                port_num = (uart_port_t)(UART_NUM_0 + i);
+                break;
+            }
+        }
+        
+        ctx->cfg.uart.port   = port_num;
+        ctx->cfg.uart.baud   = baud;
+        ctx->cfg.uart.tx_pin = tx_pin;
+        ctx->cfg.uart.rx_pin = rx_pin;
+
+        uart_config_t uart_cfg = {
+            .baud_rate  = (int)baud,
+            .data_bits  = UART_DATA_8_BITS,
+            .parity     = UART_PARITY_DISABLE,
+            .stop_bits  = UART_STOP_BITS_1,
+            .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+        };
+
+        esp_err_t r;
+        r = uart_param_config(ctx->cfg.uart.port, &uart_cfg);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(r));
+            return r;
+        }
+
+        r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
+            return r;
+        }
+
+        if (ctx->dma_enabled) {
+            r = uart_driver_install(ctx->cfg.uart.port, 1024, 256, 0, NULL, 0);
+            if (r != ESP_OK) {
+                ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
+                return r;
+            }
+            uart_set_rx_timeout(ctx->cfg.uart.port, 4);
+        } else {
+            r = uart_driver_install(ctx->cfg.uart.port, 256, 0, 0, NULL, 0);
+            if (r != ESP_OK) {
+                ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
+                return r;
+            }
+        }
+
+        /* Register in shared port table */
+        port_entry = uart_alloc_port();
+        if (port_entry == NULL) {
+            ESP_LOGE(TAG, "UART port registry full");
+            uart_driver_delete(ctx->cfg.uart.port);
+            return ESP_ERR_NO_MEM;
+        }
+        
+        port_entry->port = ctx->cfg.uart.port;
+        port_entry->tx_pin = tx_pin;
+        port_entry->rx_pin = rx_pin;
+        port_entry->baud = baud;
+        port_entry->ref_count = 0;
+        
+        ESP_LOGI(TAG, "UART%d %s init (TX=%d RX=%d baud=%lu)",
+                 ctx->cfg.uart.port,
+                 ctx->dma_enabled ? "DMA" : "polled",
+                 tx_pin, rx_pin, (unsigned long)baud);
+    } else {
+        /* Reuse existing port */
+        ctx->cfg.uart.port   = port_entry->port;
+        ctx->cfg.uart.baud   = baud;
+        ctx->cfg.uart.tx_pin = tx_pin;
+        ctx->cfg.uart.rx_pin = rx_pin;
+        ESP_LOGI(TAG, "UART%d %s reused (TX=%d RX=%d baud=%lu)",
+                 ctx->cfg.uart.port,
+                 ctx->dma_enabled ? "DMA" : "polled",
+                 tx_pin, rx_pin, (unsigned long)baud);
+    }
+
+    port_entry->ref_count++;
+    ESP_LOGI(TAG, "UART port ref_count=%lu", (unsigned long)port_entry->ref_count);
     return ESP_OK;
 }
 
@@ -91,29 +200,42 @@ static esp_err_t uart_transact(bus_dma_ctx_t *ctx,
     uart_port_t port = ctx->cfg.uart.port;
     *rx_len = 0;
 
+    /* Adaptive timeout based on baud rate */
+    uint32_t first_byte_timeout = 100;  /* Base 100ms */
+    uint32_t gap_timeout = 20;          /* Base 20ms gap */
+    
+    /* Adjust for slower baud rates */
+    if (ctx->cfg.uart.baud < 19200) {
+        first_byte_timeout = 300;
+        gap_timeout = 50;
+    } else if (ctx->cfg.uart.baud > 460800) {
+        first_byte_timeout = 50;
+        gap_timeout = 10;
+    }
+
     if (ctx->dma_enabled) {
         /*
          * DMA path: NO flush_input — the DMA ring captures everything.
-         * 1. TX
-         * 2. Wait for TX complete
-         * 3. Read first chunk with generous timeout (500ms)
-         * 4. Loop reading with short gap timeout (50ms) until idle
+         * Optimized with adaptive timeouts based on baud rate.
          */
         if (tx && tx_len > 0) {
             int w = uart_write_bytes(port, (const char *)tx, tx_len);
-            if (w < 0) return ESP_FAIL;
+            if (w < 0) {
+                ESP_LOGW(TAG, "UART write failed");
+                return ESP_FAIL;
+            }
             uart_wait_tx_done(port, pdMS_TO_TICKS(100));
         }
 
-        /* First read: allow up to 500ms for the first byte */
+        /* First read: adaptive timeout based on baud rate */
         size_t total = 0;
-        int n = uart_read_bytes(port, rx, rx_size, pdMS_TO_TICKS(500));
+        int n = uart_read_bytes(port, rx, rx_size, pdMS_TO_TICKS(first_byte_timeout));
         if (n > 0) {
             total = (size_t)n;
-            /* Continue reading while data arrives within 50ms gap */
+            /* Continue reading while data arrives within adaptive gap timeout */
             while (total < rx_size) {
                 n = uart_read_bytes(port, rx + total, rx_size - total,
-                                    pdMS_TO_TICKS(50));
+                                    pdMS_TO_TICKS(gap_timeout));
                 if (n <= 0) break;
                 total += (size_t)n;
             }
@@ -145,7 +267,21 @@ static esp_err_t uart_transact(bus_dma_ctx_t *ctx,
 
 static void uart_deinit(bus_dma_ctx_t *ctx)
 {
-    uart_driver_delete(ctx->cfg.uart.port);
+    /* Find the port entry and decrement ref count */
+    uart_port_entry_t *port_entry = uart_find_port(ctx->cfg.uart.tx_pin, 
+                                                    ctx->cfg.uart.rx_pin, 
+                                                    ctx->cfg.uart.baud);
+    if (port_entry && port_entry->ref_count > 0) {
+        port_entry->ref_count--;
+        ESP_LOGI(TAG, "UART port ref_count=%lu", (unsigned long)port_entry->ref_count);
+        
+        if (port_entry->ref_count == 0) {
+            /* Last channel on this port - delete the driver */
+            uart_driver_delete(ctx->cfg.uart.port);
+            port_entry->port = UART_NUM_MAX;  /* Mark as available */
+            ESP_LOGI(TAG, "UART%d driver deleted", ctx->cfg.uart.port);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -243,8 +379,55 @@ static void spi_deinit(bus_dma_ctx_t *ctx)
 }
 
 /* ------------------------------------------------------------------ */
-/*  I2C init / transact / deinit                                      */
+/*  I2C init / transact / deinit (with bus sharing)                   */
 /* ------------------------------------------------------------------ */
+
+/* Shared I2C bus registry */
+#define MAX_I2C_BUSES 4
+
+typedef struct {
+    i2c_master_bus_handle_t bus_handle;
+    int sda_pin;
+    int scl_pin;
+    uint32_t ref_count;  /* Number of devices using this bus */
+} i2c_bus_entry_t;
+
+static i2c_bus_entry_t s_i2c_buses[MAX_I2C_BUSES];
+static bool s_i2c_registry_initialized = false;
+
+static void i2c_registry_init(void)
+{
+    if (!s_i2c_registry_initialized) {
+        memset(s_i2c_buses, 0, sizeof(s_i2c_buses));
+        s_i2c_registry_initialized = true;
+    }
+}
+
+/* Find existing I2C bus with matching pins */
+static i2c_bus_entry_t *i2c_find_bus(int sda, int scl)
+{
+    i2c_registry_init();
+    for (int i = 0; i < MAX_I2C_BUSES; i++) {
+        if (s_i2c_buses[i].bus_handle != NULL &&
+            s_i2c_buses[i].sda_pin == sda &&
+            s_i2c_buses[i].scl_pin == scl) {
+            return &s_i2c_buses[i];
+        }
+    }
+    return NULL;
+}
+
+/* Allocate new I2C bus entry */
+static i2c_bus_entry_t *i2c_alloc_bus(void)
+{
+    i2c_registry_init();
+    for (int i = 0; i < MAX_I2C_BUSES; i++) {
+        if (s_i2c_buses[i].bus_handle == NULL) {
+            return &s_i2c_buses[i];
+        }
+    }
+    return NULL;
+}
 
 static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 {
@@ -255,47 +438,93 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uint8_t addr  = cfg[2];
     uint32_t freq = read_be32(&cfg[3]);
 
+    /* Validate pins - ESP32-C6 has GPIO 0-30 */
+    if (sda < 0 || sda > 30 || scl < 0 || scl > 30) {
+        ESP_LOGE(TAG, "I2C invalid pins: SDA=%d SCL=%d (must be 0-30)", sda, scl);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (sda == scl) {
+        ESP_LOGE(TAG, "I2C SDA and SCL cannot be the same pin: %d", sda);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Validate I2C address (7-bit: 0x08-0x77) */
+    if (addr < 0x08 || addr > 0x77) {
+        ESP_LOGW(TAG, "I2C address 0x%02X may be reserved", addr);
+    }
+
     ctx->cfg.i2c.addr    = addr;
     ctx->cfg.i2c.freq    = freq;
     ctx->cfg.i2c.sda_pin = sda;
     ctx->cfg.i2c.scl_pin = scl;
 
-    /*
-     * ESP-IDF v6: Only new i2c_master API available.
-     * dma_enabled controls combined (transmit_receive) vs split operations.
-     */
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port        = I2C_NUM_0,
-        .sda_io_num      = sda,
-        .scl_io_num      = scl,
-        .clk_source      = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
+    /* Check if bus with same pins already exists */
+    i2c_bus_entry_t *bus_entry = i2c_find_bus(sda, scl);
+    
+    if (bus_entry == NULL) {
+        /* Create new I2C bus */
+        i2c_master_bus_config_t bus_cfg = {
+            .i2c_port        = I2C_NUM_0,
+            .sda_io_num      = sda,
+            .scl_io_num      = scl,
+            .clk_source      = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
 
-    esp_err_t r = i2c_new_master_bus(&bus_cfg, &ctx->cfg.i2c.bus_handle);
-    if (r != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(r));
-        return r;
+        esp_err_t r = i2c_new_master_bus(&bus_cfg, &ctx->cfg.i2c.bus_handle);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "i2c_new_master_bus failed (SDA=%d SCL=%d): %s", 
+                     sda, scl, esp_err_to_name(r));
+            return r;
+        }
+
+        /* Register in shared bus table */
+        bus_entry = i2c_alloc_bus();
+        if (bus_entry == NULL) {
+            ESP_LOGE(TAG, "I2C bus registry full");
+            i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
+            return ESP_ERR_NO_MEM;
+        }
+        
+        bus_entry->bus_handle = ctx->cfg.i2c.bus_handle;
+        bus_entry->sda_pin = sda;
+        bus_entry->scl_pin = scl;
+        bus_entry->ref_count = 0;
+        
+        ESP_LOGI(TAG, "I2C bus created (SDA=%d SCL=%d)", sda, scl);
+    } else {
+        /* Reuse existing bus */
+        ctx->cfg.i2c.bus_handle = bus_entry->bus_handle;
+        ESP_LOGI(TAG, "I2C bus reused (SDA=%d SCL=%d)", sda, scl);
     }
 
+    /* Add device to bus */
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = addr,
         .scl_speed_hz    = freq,
     };
 
-    r = i2c_master_bus_add_device(ctx->cfg.i2c.bus_handle, &dev_cfg, &ctx->cfg.i2c.dev_handle);
+    esp_err_t r = i2c_master_bus_add_device(ctx->cfg.i2c.bus_handle, &dev_cfg, &ctx->cfg.i2c.dev_handle);
     if (r != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_master_bus_add_device failed: %s", esp_err_to_name(r));
-        i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
+        ESP_LOGE(TAG, "i2c_master_bus_add_device failed (addr=0x%02X): %s", 
+                 addr, esp_err_to_name(r));
+        /* Only delete bus if we just created it (ref_count == 0) */
+        if (bus_entry->ref_count == 0) {
+            i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
+            bus_entry->bus_handle = NULL;
+        }
         ctx->cfg.i2c.bus_handle = NULL;
         return r;
     }
 
-    ESP_LOGI(TAG, "I2C %s init (SDA=%d SCL=%d addr=0x%02X freq=%lu)",
+    bus_entry->ref_count++;
+    
+    ESP_LOGI(TAG, "I2C %s init (SDA=%d SCL=%d addr=0x%02X freq=%lu) ref_count=%lu",
              ctx->dma_enabled ? "DMA" : "std",
-             sda, scl, addr, (unsigned long)freq);
+             sda, scl, addr, (unsigned long)freq, (unsigned long)bus_entry->ref_count);
     return ESP_OK;
 }
 
@@ -337,10 +566,24 @@ static void i2c_deinit(bus_dma_ctx_t *ctx)
     if (ctx->cfg.i2c.dev_handle) {
         i2c_master_bus_rm_device(ctx->cfg.i2c.dev_handle);
         ctx->cfg.i2c.dev_handle = NULL;
-    }
-    if (ctx->cfg.i2c.bus_handle) {
-        i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
-        ctx->cfg.i2c.bus_handle = NULL;
+        
+        /* Decrement ref count and delete bus if last device */
+        i2c_bus_entry_t *bus_entry = i2c_find_bus(ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
+        if (bus_entry && bus_entry->ref_count > 0) {
+            bus_entry->ref_count--;
+            ESP_LOGI(TAG, "I2C device removed, ref_count=%lu", (unsigned long)bus_entry->ref_count);
+            
+            if (bus_entry->ref_count == 0) {
+                /* Last device on this bus - delete the bus */
+                if (ctx->cfg.i2c.bus_handle) {
+                    i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
+                    ctx->cfg.i2c.bus_handle = NULL;
+                    bus_entry->bus_handle = NULL;
+                    ESP_LOGI(TAG, "I2C bus deleted (SDA=%d SCL=%d)", 
+                             ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
+                }
+            }
+        }
     }
 }
 

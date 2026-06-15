@@ -44,6 +44,10 @@ sched_err_t scheduler_remove_channel(uint32_t channel_id);
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
 
+/* === Performance tracking === */
+void scheduler_notify_channel_error(uint32_t channel_id);
+void scheduler_notify_channel_success(uint32_t channel_id);
+
 #ifdef __cplusplus
 }
 #endif

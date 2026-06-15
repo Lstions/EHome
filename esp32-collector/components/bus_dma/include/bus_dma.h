@@ -4,6 +4,7 @@
  *
  * Replaces the uart_dma component with a multi-bus abstraction.
  * Each bus_dma_ctx_t instance manages one physical bus channel.
+ * I2C buses are shared across multiple devices automatically.
  */
 
 #ifndef BUS_DMA_H
@@ -61,6 +62,9 @@ typedef struct {
 /**
  * @brief Initialize a bus DMA context.
  *
+ * For I2C: If a bus with the same (sda, scl) pins already exists,
+ *          it will be shared automatically.
+ *
  * @param ctx         Context to initialize (caller-allocated)
  * @param bus_type    BUS_TYPE_UART / BUS_TYPE_I2C / BUS_TYPE_SPI
  * @param dma_enabled true = use DMA-backed APIs, false = polled/legacy
@@ -97,6 +101,9 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
 
 /**
  * @brief Deinitialize and release bus resources.
+ *
+ * For I2C: Removes the device. The bus is only released when the
+ *          last device on that bus is removed.
  */
 void bus_dma_deinit(bus_dma_ctx_t *ctx);
 

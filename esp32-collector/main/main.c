@@ -335,13 +335,23 @@ static void bus_worker_task(void *p)
 
     ESP_LOGI(TAG, "Bus worker (prio=%d)", uxTaskPriorityGet(NULL));
 
+    /* Performance metrics */
+    uint32_t total_transactions = 0;
+    uint32_t total_errors = 0;
+    uint32_t no_ctx_count = 0;
+    TickType_t last_stats_time = xTaskGetTickCount();
+
     while (1) {
         if (!xQueueReceive(g_cmd_queue, &cmd, portMAX_DELAY)) continue;
 
         bus_dma_ctx_t *ctx = find_ctx(cmd.channel_id);
         if (!ctx) {
+            no_ctx_count++;
             if (cmd.type == CMD_WRITE)
                 msg_handler_send_write_rsp(cmd.request_id, false, 4, "no ctx");
+            
+            /* Notify scheduler of error for backoff */
+            scheduler_notify_channel_error(cmd.channel_id);
             continue;
         }
 
@@ -349,6 +359,14 @@ static void bus_worker_task(void *p)
         esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
                                         cmd.timeout_ms ? cmd.timeout_ms : 50,
                                         rx, sizeof(rx), &rl);
+
+        total_transactions++;
+        if (e != ESP_OK) {
+            total_errors++;
+            scheduler_notify_channel_error(cmd.channel_id);
+        } else {
+            scheduler_notify_channel_success(cmd.channel_id);
+        }
 
         if (cmd.type == CMD_WRITE) {
             bool ok = (e == ESP_OK);
@@ -363,6 +381,22 @@ static void bus_worker_task(void *p)
         if (cmd.type == CMD_SAMPLE && rl > 0) {
             uint64_t ts = esp_timer_get_time();
             msg_handler_send_data_report(cmd.channel_id, ts, 0, rx, rl, 0, 0);
+        }
+
+        /* Periodic performance logging (every 10 seconds) */
+        TickType_t now = xTaskGetTickCount();
+        if (now - last_stats_time > pdMS_TO_TICKS(10000)) {
+            if (total_transactions > 0 || total_errors > 0 || no_ctx_count > 0) {
+                uint32_t success_rate = total_transactions > 0 ? 
+                    ((total_transactions - total_errors) * 100 / total_transactions) : 0;
+                ESP_LOGI(TAG, "Worker stats: txn=%" PRIu32 " err=%" PRIu32 
+                         " (%" PRIu32 "%%) no_ctx=%" PRIu32,
+                         total_transactions, total_errors, success_rate, no_ctx_count);
+            }
+            total_transactions = 0;
+            total_errors = 0;
+            no_ctx_count = 0;
+            last_stats_time = now;
         }
     }
 }

@@ -27,6 +27,8 @@ typedef struct {
     uint32_t         last_sequence;
     TickType_t       last_sample_time;
     bool             active;
+    uint32_t         error_count;      /* Track errors for backoff */
+    uint32_t         skip_count;       /* Count skipped samples */
 } sched_channel_t;
 
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
@@ -122,16 +124,52 @@ uint8_t scheduler_get_channel_count(void)
     return c;
 }
 
+/* ── performance tracking ─────────────────────────────────────────── */
+
+void scheduler_notify_channel_error(uint32_t channel_id)
+{
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s_channels[i].active && s_channels[i].config.id == channel_id) {
+            s_channels[i].error_count++;
+            /* Cap error count to prevent overflow */
+            if (s_channels[i].error_count > 100) {
+                s_channels[i].error_count = 100;
+            }
+            break;
+        }
+    }
+}
+
+void scheduler_notify_channel_success(uint32_t channel_id)
+{
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s_channels[i].active && s_channels[i].config.id == channel_id) {
+            /* Gradually reduce error count on success */
+            if (s_channels[i].error_count > 0) {
+                s_channels[i].error_count--;
+            }
+            s_channels[i].skip_count = 0;  /* Reset skip counter */
+            break;
+        }
+    }
+}
+
 /* ── scheduler task (10 ms tick) ─────────────────────────────────── */
 
 static void scheduler_task(void *p)
 {
     (void)p;
     TickType_t wake = xTaskGetTickCount();
+    uint32_t queue_full_count = 0;
+    uint32_t total_samples = 0;
 
     while (s_running) {
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(10));
         TickType_t now = xTaskGetTickCount();
+
+        /* Check queue depth for backpressure */
+        UBaseType_t queue_spaces = uxQueueSpacesAvailable(g_cmd_queue);
+        bool queue_pressure = (queue_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
             if (!s_channels[i].active || !s_channels[i].config.enabled)
@@ -140,7 +178,25 @@ static void scheduler_task(void *p)
                 pdMS_TO_TICKS(s_channels[i].config.interval_ms))
                 continue;
 
+            /* Adaptive backoff: if channel has errors, skip some samples */
+            if (s_channels[i].error_count > 3) {
+                s_channels[i].skip_count++;
+                /* Exponential backoff: skip 2^min(error_count, 5) samples */
+                uint32_t skip_threshold = (s_channels[i].error_count > 5) ? 32 : 
+                                          (1 << (s_channels[i].error_count - 3));
+                if (s_channels[i].skip_count < skip_threshold) {
+                    continue;
+                }
+                s_channels[i].skip_count = 0;
+            }
+
             s_channels[i].last_sample_time = now;
+
+            /* Backpressure: skip if queue is nearly full */
+            if (queue_pressure) {
+                queue_full_count++;
+                continue;
+            }
 
             /* Build a unified bus command for any bus type. */
             bus_cmd_t cmd = {
@@ -165,8 +221,22 @@ static void scheduler_task(void *p)
             }
 
             if (xQueueSend(g_cmd_queue, &cmd, 0) != pdTRUE) {
-                ESP_LOGW(TAG, "cmd queue full, ch %" PRIu32, cmd.channel_id);
+                queue_full_count++;
+            } else {
+                total_samples++;
             }
+        }
+
+        /* Periodic performance logging (every 10 seconds) */
+        static uint32_t last_log = 0;
+        if (now - last_log > pdMS_TO_TICKS(10000)) {
+            if (total_samples > 0 || queue_full_count > 0) {
+                ESP_LOGI(TAG, "Stats: samples=%" PRIu32 " full=%" PRIu32 " q_free=%d",
+                         total_samples, queue_full_count, (int)queue_spaces);
+            }
+            last_log = now;
+            total_samples = 0;
+            queue_full_count = 0;
         }
     }
 
