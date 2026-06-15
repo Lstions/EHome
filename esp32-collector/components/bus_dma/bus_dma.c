@@ -76,11 +76,11 @@ static uart_port_entry_t *uart_find_port(int tx_pin, int rx_pin, uint32_t baud)
     return NULL;
 }
 
-/* Allocate new UART port entry */
+/* Allocate new UART port entry — skip slot 0 (reserved for UART0/console) */
 static uart_port_entry_t *uart_alloc_port(void)
 {
     uart_registry_init();
-    for (int i = 0; i < MAX_UART_PORTS; i++) {
+    for (int i = 1; i < MAX_UART_PORTS; i++) {
         if (s_uart_ports[i].port == UART_NUM_MAX) {
             return &s_uart_ports[i];
         }
@@ -106,9 +106,9 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
     
     if (port_entry == NULL) {
-        /* Find available UART port number */
-        uart_port_t port_num = UART_NUM_1;  /* Use UART1 by default */
-        for (int i = 0; i < MAX_UART_PORTS; i++) {
+        /* Find available UART port number — skip UART0 (console) */
+        uart_port_t port_num = UART_NUM_1;  /* ESP32C6: UART0=console, so start from UART1 */
+        for (int i = 1; i < MAX_UART_PORTS; i++) {
             if (s_uart_ports[i].port == UART_NUM_MAX) {
                 port_num = (uart_port_t)(UART_NUM_0 + i);
                 break;

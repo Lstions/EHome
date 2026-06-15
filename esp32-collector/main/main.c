@@ -269,15 +269,32 @@ static void on_wifi_state(wifi_mgr_state_t s, void *c)
 
 static bool s_hello_task_running = false;
 
+/* === ConfigManifest applied — restart scheduler with new channels === */
+static void handle_config_applied(void)
+{
+    if (scheduler_is_running()) scheduler_stop();
+    cleanup_bus_channels();
+    setup_bus_channels();
+    scheduler_start();
+    ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
+}
+
 /* Transport message and state callbacks */
 static void on_transport_msg(const uint8_t *data, size_t len, void *ctx)
 {
     transport_t *transport = (transport_t *)ctx;
     ESP_LOGI(TAG, "Received message from transport: %d bytes", (int)len);
     
+    bool is_cfg = (len > 0 && data[0] == MSG_CONFIG_MFST);
+    if (is_cfg) s_config_received = true;
+    
     // Process the message through msg_handler with transport context
     if (len > 0 && data) {
         msg_handler_process_with_transport(data, len, transport);
+    }
+    
+    if (is_cfg) {
+        handle_config_applied();
     }
 }
 
@@ -311,15 +328,11 @@ static void on_mqtt_state(mqtt_client_state_t s, void *c)
 static void on_mqtt_msg(const char *t, const uint8_t *d, size_t l, void *c)
 {
     (void)t; (void)c;
-    bool is_cfg = (l > 0 && d[0] == 0x04);
+    bool is_cfg = (l > 0 && d[0] == MSG_CONFIG_MFST);
     if (is_cfg) s_config_received = true;
     msg_handler_process(d, l);
     if (is_cfg) {
-        if (scheduler_is_running()) scheduler_stop();
-        cleanup_bus_channels();
-        setup_bus_channels();
-        scheduler_start();
-        ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
+        handle_config_applied();
     }
 }
 
