@@ -85,19 +85,51 @@ main/
 - SPI mode (0 vs 3) 和频率匹配
 - 或使用逻辑分析仪抓取 SPI 信号
 
-### ✅ MQTT 全栈集成
-- ESP32 连接 EMQX broker (192.168.1.10:1884)
-- ConfigManifest 通过 MQTT 下发成功（2 个 UART 通道）
-- 后端 Docker 环境运行正常（PostgreSQL、Redis、EMQX、前后端）
-- REST API 可用（7 个通道已创建）
+### ✅ SPI BMP280 验证（完成）
+**日期**: 2026-06-16  
+**提交**: 待提交
+
+**结果**: BMP280 SPI 通信完全成功，芯片 ID 读取正确 (0x58)
+
+**修复的 3 个关键 Bug**:
+1. `scripts/tcp_debug.py` - WriteCommand protobuf 字段映射错误（缺少 channel_id）
+2. `main/bus_worker.c` - SPI 传输长度计算错误（rx_size 过大导致 ESP-IDF 拒绝）
+3. `sdkconfig.defaults` - TCP 调试端口配置 + UART 控制台输出配置
+
+**验证日志**:
+```
+SPI 初始化: CS=13, mode=0, freq=1000000, MOSI=10, MISO=11, SCLK=12
+DataReport: 22 02 0058 → BMP280 芯片 ID = 0x58 ✅
+WriteRsp: req=1, success=1 ✅
+性能: txn=12 err=0 (100%) no_ctx=0 ✅
+```
+
+### ✅ 代码清理：删除废弃的 bus 组件
+**日期**: 2026-06-16  
+**提交**: 待提交
+
+**问题**: 代码库中存在两个 bus 组件：
+- `components/bus/` (316行) - 旧版实现
+- `components/bus_dma/` (815行) - 新版实现
+
+**分析**:
+- `bus` 组件使用旧的 I2C 驱动 API，SPI 实现不完整
+- `bus_dma` 组件使用新的驱动 API，支持 DMA，实现完整
+- 代码搜索确认 `bus` 组件**未被任何代码引用**
+- `bus_dma` 组件被 3 个模块使用：`bus_manager.c`, `app_state.h`, `bus_worker.c`
+
+**操作**: 删除 `components/bus/` 目录，减少技术债务
 
 ### 📈 代码统计
-- 今日累积变更: 8 (早晨) + 10 (重构) = 18 files
-- +7203/-1994 lines (早晨) + 新模块 (重构)
+- 今日累积变更: 8 (早晨) + 10 (重构) + 6 (SPI验证) = 24 files
+- +7203/-1994 lines (早晨) + 新模块 (重构) + SPI 验证 + 代码清理
 - main.c: 512 → 151 lines
 - 固件大小: 1.2MB (不变)
+- 删除: components/bus/ (316行死代码)
 
 ### 🔍 下一步
-1. SPI BMP280 硬件调试（确认引脚连接 + 供电）
-2. 修复后固件 SPI 端到端验证
+1. ✅ SPI BMP280 验证（已完成）
+2. ✅ 代码清理（已完成）
 3. 提交并推送 master 分支
+4. E2E + CDP 自动化测试
+5. 性能优化（如有需要）

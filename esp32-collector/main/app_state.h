@@ -40,7 +40,7 @@ typedef struct {
     bool        hello_task_running;
 
     /* ---- Config-manifest application lock ---- */
-    portMUX_TYPE config_lock;
+    SemaphoreHandle_t config_mutex;
 
     /* ---- Transports ---- */
     transport_t *tcp_transport;

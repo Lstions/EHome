@@ -53,6 +53,9 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
                             uint8_t bus_type,
                             const uint8_t *config, size_t config_len)
 {
+    ESP_LOGI(TAG, "reg_bus_channel: ch=%" PRIu32 " type=%u cfg_len=%zu", 
+             ch_id, bus_type, config_len);
+    
     /* Already registered? */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++)
         if (s->bus_ch[i] == ch_id && s->bus_ctx[i].initialized) return;
@@ -62,10 +65,13 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
         if (s->bus_ch[i] == 0) {
             s->bus_ch[i] = ch_id;
             bool dma = get_dma_enabled(bus_type, config, config_len);
+            ESP_LOGI(TAG, "Calling bus_dma_init: ch=%" PRIu32 " type=%u dma=%d idx=%d",
+                     ch_id, bus_type, dma, i);
+            /* 注意：不要在自旋锁保护区域内调用日志函数 */
             esp_err_t err = bus_dma_init(&s->bus_ctx[i], bus_type, dma,
                                          config, config_len);
             if (err == ESP_OK) {
-                ESP_LOGI(TAG, "ch=%" PRIu32 " type=%u dma=%d idx=%d",
+                ESP_LOGI(TAG, "ch=%" PRIu32 " type=%u dma=%d idx=%d SUCCESS",
                          ch_id, bus_type, dma, i);
             } else {
                 ESP_LOGE(TAG, "ch=%" PRIu32 " init failed: %s",

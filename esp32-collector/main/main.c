@@ -94,6 +94,27 @@ void app_main(void)
 
     /* ---- Subsystem init ---- */
     config_mgr_init();
+    
+    /* Load config from NVS if available */
+    if (config_mgr_load_from_nvs()) {
+        ESP_LOGI(TAG, "Config loaded from NVS");
+        const config_manifest_t *manifest = config_mgr_get_manifest();
+        if (manifest) {
+            ESP_LOGI(TAG, "Manifest: id=%s, templates=%d, channels=%d, applied=%d",
+                     manifest->manifest_id, manifest->template_count, 
+                     manifest->channel_count, manifest->applied);
+            if (manifest->channel_count > 0) {
+                ESP_LOGI(TAG, "Setting up buses from NVS config (%d channels)", manifest->channel_count);
+                bus_manager_setup_from_manifest(s);
+                scheduler_start();
+            } else {
+                ESP_LOGW(TAG, "Manifest has no channels, skipping bus setup");
+            }
+        } else {
+            ESP_LOGW(TAG, "No manifest available after NVS load");
+        }
+    }
+    
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
     msg_handler_init();

@@ -45,9 +45,17 @@ static void worker_task(void *pv)
         }
 
         size_t rl = 0;
-        esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
+        /* Use cmd.read_size for rx, capped at buffer size.
+         * Total transaction length = max(tx_len, read_size) for full-duplex SPI. */
+        size_t actual_rx_size = cmd.read_size;
+        if (actual_rx_size > sizeof(rx)) actual_rx_size = sizeof(rx);
+        /* For SPI: transaction length must cover both TX and RX */
+        size_t total_len = (cmd.tx_len > actual_rx_size) ? cmd.tx_len : actual_rx_size;
+        if (total_len == 0) total_len = 1;  /* at least 1 byte */
+
+        esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, total_len,
                                        cmd.timeout_ms ? cmd.timeout_ms : 50,
-                                       rx, sizeof(rx), &rl);
+                                       rx, actual_rx_size, &rl);
 
         txn++;
         if (e != ESP_OK) {

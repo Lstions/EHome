@@ -51,8 +51,13 @@ app_state_t *app_state_init(void)
     /* Unique node_id from hardware MAC */
     generate_node_id(s_app.node_id, sizeof(s_app.node_id));
 
-    /* Spinlock for config-manifest application.
-     * Zeroed by memset above — portMUX_TYPE initializes to unlocked. */
+    /* Mutex for config-manifest application.
+     * Using mutex instead of spinlock because we call blocking functions
+     * (scheduler_stop with vTaskDelay, scheduler_start with xTaskCreate) */
+    s_app.config_mutex = xSemaphoreCreateMutex();
+    if (s_app.config_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create config mutex!");
+    }
 
     /* Command queue */
     s_app.cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
@@ -94,12 +99,16 @@ uint32_t app_state_get_uptime_sec(void)
 
 void app_state_lock_config(void)
 {
-    portENTER_CRITICAL(&s_app.config_lock);
+    if (s_app.config_mutex != NULL) {
+        xSemaphoreTake(s_app.config_mutex, portMAX_DELAY);
+    }
 }
 
 void app_state_unlock_config(void)
 {
-    portEXIT_CRITICAL(&s_app.config_lock);
+    if (s_app.config_mutex != NULL) {
+        xSemaphoreGive(s_app.config_mutex);
+    }
 }
 
 /* ---- Version ---- */

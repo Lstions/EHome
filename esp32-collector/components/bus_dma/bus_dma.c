@@ -362,6 +362,9 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         sclk_pin = cfg[8];
     }
 
+    ESP_LOGI(TAG, "SPI config: CS=%d, mode=%d, freq=%lu, MOSI=%d, MISO=%d, SCLK=%d, dma=%d",
+             cs_pin, mode, (unsigned long)freq, mosi_pin, miso_pin, sclk_pin, ctx->dma_enabled);
+
     ctx->cfg.spi.host   = SPI2_HOST;  /* Use SPI2_HOST by default */
     ctx->cfg.spi.cs_pin = cs_pin;
     ctx->cfg.spi.freq   = freq;
