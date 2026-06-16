@@ -34,8 +34,8 @@ type ConfigChangeEvent struct {
 	EventID   string           // UUID v4
 	Type      ConfigChangeType // template / channel / device / device_config
 	Action    ConfigChangeAction
-	NodeID    uint   // affected node (0 = all / unknown)
-	EntityID  uint   // changed entity ID
+	NodeID    string // affected node (0 = all / unknown)
+	EntityID  string // changed entity ID
 	Epoch     uint64 // global epoch after increment
 	Timestamp time.Time
 	Actor     string // "api:admin", "init:factory_reset", "system:startup"

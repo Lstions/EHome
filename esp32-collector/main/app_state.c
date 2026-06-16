@@ -30,14 +30,13 @@ static void generate_node_id(char *buf, size_t buflen)
     uint8_t mac[6];
     esp_err_t err = esp_efuse_mac_get_default(mac);
     if (err == ESP_OK) {
-        /* Format: "EHEM-" + last 6 hex digits of MAC = unique 11-char ID */
-        snprintf(buf, buflen, "EHEM-%02X%02X%02X",
-                 mac[3], mac[4], mac[5]);
+        /* Pure hex: 12 chars from 6-byte MAC */
+        snprintf(buf, buflen, "%02X%02X%02X%02X%02X%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         ESP_LOGI(TAG, "node_id from MAC: %s", buf);
         return;
     }
-
-    /* Fallback: Kconfig default */
+    /* Fallback to Kconfig */
     strlcpy(buf, CONFIG_COLLECTOR_NODE_ID, buflen);
     ESP_LOGW(TAG, "MAC read failed, using Kconfig node_id: %s", buf);
 }

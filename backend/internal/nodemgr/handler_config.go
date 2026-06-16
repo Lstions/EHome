@@ -122,10 +122,10 @@ func (m *Manager) sendConfigManifest(deviceID string) {
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", node.ID).Find(&templates)
+	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
 
 	var channels []models.Channel
-	m.db.Where("node_id = ?", node.ID).Find(&channels)
+	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
 
 	// Build manifest with manifest_id
 	manifestID := fmt.Sprintf("v2-%d", time.Now().UnixMilli())

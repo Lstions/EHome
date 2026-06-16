@@ -17,7 +17,7 @@ import (
 //	defer EmitConfigChange(ctx, bus, CfgChangeNode, CfgActionUpdate, nodeID, channelID)
 //
 // The actor field is derived from gin.Context when available, otherwise defaults to "system".
-func EmitConfigChange(ctx *gin.Context, bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, nodeID, entityID uint) {
+func EmitConfigChange(ctx *gin.Context, bus *ConfigEventBus, t ConfigChangeType, a ConfigChangeAction, nodeID string, entityID string) {
 	if bus == nil {
 		logger.Warnf("EmitConfigChange: bus is nil, skipping event (type=%s action=%s node=%d entity=%d)",
 			t, a, nodeID, entityID)
@@ -35,8 +35,8 @@ func EmitConfigChange(ctx *gin.Context, bus *ConfigEventBus, t ConfigChangeType,
 		EventID:  uuid.New().String(),
 		Type:     t,
 		Action:   a,
-		NodeID:   nodeID,
-		EntityID: entityID,
+		NodeID:   fmt.Sprint(nodeID),
+		EntityID: fmt.Sprint(entityID),
 		Actor:    actor,
 	}
 

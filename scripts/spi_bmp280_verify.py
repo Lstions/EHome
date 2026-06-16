@@ -8,7 +8,7 @@ import socket
 import time
 import sys
 
-HOST = '10.42.0.173'
+HOST = '192.168.1.54'
 PORT = 8088
 TIMEOUT = 10
 

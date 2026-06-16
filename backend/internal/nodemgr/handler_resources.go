@@ -427,7 +427,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		}
 
 		channel := models.Channel{
-			NodeID:       node.ID,
+			NodeID:       node.NodeID,
 			HardwareType: busTypeStr,
 			HardwareID:   hwIDStr,
 			BusType:      busTypeStr,
@@ -439,7 +439,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 
 		// Upsert: find by node_id + hardware_id, update or create
 		var existing models.Channel
-		if err := m.db.Where("node_id = ? AND hardware_id = ? AND deleted_at IS NULL", node.ID, hwIDStr).First(&existing).Error; err == nil {
+		if err := m.db.Where("node_id = ? AND hardware_id = ? AND deleted_at IS NULL", node.NodeID, hwIDStr).First(&existing).Error; err == nil {
 			// Update existing
 			m.db.Model(&existing).Updates(map[string]interface{}{
 				"hardware_type": busTypeStr,
@@ -451,7 +451,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 			})
 		} else {
 			// Create new
-			channel.NodeID = node.ID
+			channel.NodeID = node.NodeID
 			m.db.Create(&channel)
 		}
 		logger.Infof("[%s] Upserted channel: hw_id=%s type=%s enabled=%v", deviceID, hwIDStr, busTypeStr, ch.Enabled)

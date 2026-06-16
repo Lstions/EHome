@@ -2,7 +2,6 @@ package nodemgr
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -195,10 +194,10 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 }
 
 // triggerDeviceInit finds devices for a node and triggers initialization
-func (m *Manager) triggerDeviceInit(collectorID uint, deviceID string) {
+func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 	var devices []models.EdgeDevice
 	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
-		Where("channels.node_id = ?", collectorID).
+		Where("channels.node_id = ?", nodeID).
 		Find(&devices)
 
 	for _, dev := range devices {
@@ -242,9 +241,9 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	}
 
 	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", node.ID).Find(&templates)
+	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
 	var channels []models.Channel
-	m.db.Where("node_id = ?", node.ID).Find(&channels)
+	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
 
 	hashData := m.buildHashData(templates, channels)
 	hash := m.hashMgr.CalcConfigHash(hashData, nil)
@@ -262,7 +261,7 @@ func (m *Manager) GetDeviceIDByNodeID(nodeDBID uint) string {
 	if err := m.db.First(&node, nodeDBID).Error; err != nil {
 		return ""
 	}
-	return strconv.FormatInt(node.NodeID, 10)
+	return node.NodeID
 }
 
 // GetOnlineDeviceIDs returns device IDs of all online nodes.
@@ -271,13 +270,13 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 	m.db.Where("status = ?", "online").Find(&collectors)
 	ids := make([]string, 0, len(collectors))
 	for _, c := range collectors {
-		ids = append(ids, strconv.FormatInt(c.NodeID, 10))
+		ids = append(ids, c.NodeID)
 	}
 	return ids
 }
 
 // publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a node
-func (m *Manager) publishHADiscovery(collectorID uint, deviceID string) {
+func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
 	if m.ha == nil {
 		return
 	}

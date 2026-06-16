@@ -22,12 +22,8 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 	// GET /api/v1/ota/status/:nodeId — query node OTA status
 	v1.GET("/ota/status/:nodeId", func(c *gin.Context) {
-		nodeID, err := strconv.ParseUint(c.Param("nodeId"), 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid node id"})
-			return
-		}
-		status, err := otaMgr.GetNodeOTAStatus(uint(nodeID))
+		nodeID := c.Param("nodeId")
+		status, err := otaMgr.GetNodeOTAStatus(nodeID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": err.Error()})
 			return
@@ -37,12 +33,8 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 	// POST /api/v1/ota/rollback/:nodeId — manual rollback to last stable version
 	v1.POST("/ota/rollback/:nodeId", func(c *gin.Context) {
-		nodeID, err := strconv.ParseUint(c.Param("nodeId"), 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid node id"})
-			return
-		}
-		if err := otaMgr.AutoRollback(uint(nodeID)); err != nil {
+		nodeID := c.Param("nodeId")
+		if err := otaMgr.AutoRollback(nodeID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
@@ -60,8 +52,8 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	// Create OTA task + send OtaCmd to device
 	v1.POST("/ota/tasks", func(c *gin.Context) {
 		var req struct {
-			NodeID uint `json:"node_id" binding:"required"`
-			FirmwareID  uint `json:"firmware_id" binding:"required"`
+			NodeID     string `json:"node_id" binding:"required"`
+			FirmwareID uint   `json:"firmware_id" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -242,8 +234,8 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 	// POST /api/v1/ota/start
 	v1.POST("/ota/start", func(c *gin.Context) {
 		var req struct {
-			NodeID     uint `json:"node_id" binding:"required"`
-			FirmwareID uint `json:"firmware_id" binding:"required"`
+			NodeID     string `json:"node_id" binding:"required"`
+			FirmwareID uint   `json:"firmware_id" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

@@ -24,7 +24,7 @@ func SeedTestData(db *gorm.DB) error {
 
 	// --- Node ---
 	node := models.Node{
-		NodeID:          1001,
+		NodeID:          "F0F5BD02F35C",
 		Name:            "E2E测试节点",
 		Model:           "esp32c6",
 		FirmwareVersion: "2.2.0",
@@ -40,7 +40,7 @@ func SeedTestData(db *gorm.DB) error {
 	if err := db.Create(&node).Error; err != nil {
 		return err
 	}
-	logger.Infof("[seed] Created node: id=%d, node_id=%d", node.ID, node.NodeID)
+	logger.Infof("[seed] Created node: id=%s.*node_id=%s", node.ID, node.NodeID)
 
 	// --- DeviceConfig ---
 	connJSON, _ := json.Marshal(map[string]interface{}{
@@ -77,7 +77,7 @@ func SeedTestData(db *gorm.DB) error {
 
 	// --- Channel (I2C) ---
 	channel := models.Channel{
-		NodeID:       node.ID,
+		NodeID:       node.NodeID,
 		HardwareType: "I2C",
 		HardwareID:   "0x68",
 		BusType:      "I2C",
@@ -94,7 +94,7 @@ func SeedTestData(db *gorm.DB) error {
 	edgeDevice := models.EdgeDevice{
 		Name:           "BMP280 现场 A",
 		Type:           "sensor",
-		NodeID:         node.ID,
+		NodeID:         node.NodeID,
 		ChannelID:      channel.ID,
 		DeviceConfigID: deviceConfig.ID,
 		HardwareID:     "0x68",

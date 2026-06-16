@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"errors"
 	"net/http"
 	"strconv"
@@ -52,7 +53,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, dev.ChannelID).Error == nil {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionCreate, ch.NodeID, dev.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionCreate, ch.NodeID, fmt.Sprint(dev.ID))
 		}
 		c.JSON(http.StatusCreated, dev)
 	})
@@ -77,7 +78,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, d.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(d.ID))
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
 	})
@@ -103,7 +104,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "associated node not found"})
 			return
 		}
-		deviceID := strconv.FormatInt(node.NodeID, 10)
+		deviceID := node.NodeID
 
 		// Use the deviceinit Orchestrator to trigger init
 		orchestrator := nodeMgr.DeviceInit()
@@ -145,7 +146,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		// EmitConfigChange
 		if hasNode {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, d.ID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(d.ID))
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})

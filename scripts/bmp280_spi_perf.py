@@ -19,7 +19,7 @@ import time
 import sys
 import struct
 
-HOST = '10.42.0.173'
+HOST = '192.168.1.54'
 PORT = 8088
 
 # === Protobuf 编码 ===

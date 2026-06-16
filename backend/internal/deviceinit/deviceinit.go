@@ -203,7 +203,7 @@ func (o *Orchestrator) saveCalibData(deviceID, deviceType string, data []byte) {
 
 	// Save to calibration cache
 	o.db.Create(&models.CalibrationCache{
-		NodeID: node.ID,
+		NodeID: node.NodeID,
 		DeviceType:  deviceType,
 		Data:        fmt.Sprintf("%x", data),
 	})

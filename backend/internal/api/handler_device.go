@@ -136,7 +136,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionCreate, 0, tpl.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionCreate, "0", fmt.Sprint(tpl.ID))
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
 
@@ -192,7 +192,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change (device_config affects all nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, 0, update.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, "0", fmt.Sprint(update.ID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
 
@@ -205,7 +205,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionDelete, 0, tplID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionDelete, "0", fmt.Sprint(tplID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
@@ -265,7 +265,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change (default flag change affects nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, 0, tpl.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, "0", fmt.Sprint(tpl.ID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
@@ -344,7 +344,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			} else {
 				var node models.Node
 				if err := db.Where("node_id = ?", nid).First(&node).Error; err == nil {
-					q = q.Where("node_id = ?", node.ID)
+					q = q.Where("node_id = ?", node.NodeID)
 				} else {
 					c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []models.Channel{}})
 					return
@@ -371,7 +371,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change for the node
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionCreate, ch.NodeID, ch.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionCreate, ch.NodeID, fmt.Sprint(ch.ID))
 		c.JSON(http.StatusCreated, ch)
 	})
 
@@ -407,7 +407,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		// Emit config change for the node
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, ch.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(ch.ID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
@@ -424,7 +424,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		// Emit config change
 		if hasNode {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, nodeID, channelID)
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, nodeID, fmt.Sprint(channelID))
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
@@ -432,14 +432,49 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	// Channel write (send raw data)
 	v1.POST("/channels/:channel_id/write", func(c *gin.Context) {
 		id := c.Param("channel_id")
+		channelID := parseUintID(id)
 		var req struct {
-			Data string `json:"data" binding:"required"`
+			Data    string `json:"data" binding:"required"`
+			HexMode bool   `json:"hex_mode"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"channel_id": parseUintID(id), "data": req.Data, "status": "sent"}})
+		// Decode data (hex or raw)
+		var data []byte
+		if req.HexMode {
+			var err error
+			data, err = hex.DecodeString(req.Data)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid hex data"})
+				return
+			}
+		} else {
+			data = []byte(req.Data)
+		}
+		// Look up channel to get node_id
+		var ch models.Channel
+		if err := db.First(&ch, channelID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+			return
+		}
+		// Send WriteCommand via pending write (with 10s timeout)
+		deviceID := ch.NodeID
+		resp, err := nodeMgr.PendingWrite().SendWriteCommand(deviceID, uint32(channelID), data, 0, 10*time.Second)
+		if err != nil {
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": 504, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"data": gin.H{
+				"channel_id": channelID,
+				"success":    resp.Success,
+				"error_code": resp.ErrorCode,
+				"error_msg":  resp.ErrorMsg,
+			},
+		})
 	})
 
 	// Channel scan (discover devices on bus)

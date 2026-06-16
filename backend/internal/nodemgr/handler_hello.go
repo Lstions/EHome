@@ -5,20 +5,10 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
-	"strconv"
 	"time"
 
 	"gorm.io/gorm"
 )
-
-// parseDeviceID parses a deviceID string to int64 with logging on failure.
-func parseDeviceID(s string) (int64, error) {
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		logger.Warnf("[%s] Device Hello with non-numeric deviceID, parse failed: %v", s, err)
-	}
-	return n, err
-}
 
 // handleHello processes Hello messages (type=0x01)
 // v2.1: parses 8 fields (4 new: config_epoch, nvs_has_config, last_manifest, protocol_version)
@@ -73,11 +63,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		logger.Infof("[%s] HelloAck sent: server_time=%d features=0", deviceID, serverTime)
 	}
 
-	nodeID, err := parseDeviceID(deviceID)
-	if err != nil {
-		logger.Warnf("[%s] Ignoring Hello: invalid deviceID", deviceID)
-		return
-	}
+	// deviceID is already the string node_id (e.g. "F0F5BD02F35C")
 
 	// Upsert node
 	var node models.Node
@@ -86,7 +72,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	oldStatus := ""
 	if result.Error == gorm.ErrRecordNotFound {
 		node = models.Node{
-			NodeID:           nodeID,
+			NodeID:           deviceID,
 			Model:            model,
 			FirmwareVersion:  firmwareVersion,
 			ProtocolVersion:  protocolVersion,
@@ -99,7 +85,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		}
 		m.db.Create(&node)
 		m.db.Create(&models.NodeEvent{
-			NodeID: node.ID,
+			NodeID: deviceID,
 			EventType:   "online",
 			NewStatus:   "online",
 		})
@@ -116,7 +102,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		m.db.Save(&node)
 		if oldStatus != "online" {
 			m.db.Create(&models.NodeEvent{
-				NodeID: node.ID,
+				NodeID: deviceID,
 				EventType:   "online",
 				OldStatus:   oldStatus,
 				NewStatus:   "online",
@@ -134,8 +120,9 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 
 	// OTA state reconciliation per docs §6.4.3: if device Hello reports
 	// the target firmware version of an in-flight OTA task, mark it success.
+	// HandleHelloOTACompletion takes deviceID (MQTT topic-derived node_id string) as first arg
 	if m.otaMgr != nil {
-		m.otaMgr.HandleHelloOTACompletion(node.ID, deviceID, firmwareVersion)
+		m.otaMgr.HandleHelloOTACompletion(deviceID, deviceID, firmwareVersion)
 	}
 
 	// === v2.1: SyncGate decision (replaces ad-hoc hash check) ===
@@ -160,12 +147,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 
 	// offline→online detection: trigger device initialization
 	if oldStatus == "offline" || oldStatus == "" {
-		m.triggerDeviceInit(node.ID, deviceID)
+		m.triggerDeviceInit(deviceID, deviceID)
 	}
 
 	// HomeAssistant Discovery: publish on first registration or status change
 	if result.Error == gorm.ErrRecordNotFound || oldStatus == "offline" || oldStatus == "" {
-		m.publishHADiscovery(node.ID, deviceID)
+		m.publishHADiscovery(deviceID, deviceID)
 	}
 
 	// Async ping

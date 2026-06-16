@@ -217,11 +217,11 @@ func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
 
 	// Find the device_id for the affected node
 	var deviceID string
-	if evt.NodeID > 0 {
-		deviceID = g.mgr.GetDeviceIDByNodeID(evt.NodeID)
+	if evt.NodeID != "" {
+		deviceID = evt.NodeID
 	}
 	if deviceID == "" {
-		logger.Infof("[sync_id=%s] OnConfigChange: node %d has no device, skip",
+		logger.Infof("[sync_id=%s] OnConfigChange: node %s has no device, skip",
 			syncID, evt.NodeID)
 		return nil
 	}

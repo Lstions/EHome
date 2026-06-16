@@ -3,7 +3,6 @@ package offlinedetector
 import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
-	"strconv"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -78,7 +77,7 @@ func (d *Detector) checkRedisHeartbeats() {
 	}
 
 	for _, col := range onlineNodes {
-		deviceID := strconv.FormatInt(col.NodeID, 10)
+		deviceID := col.NodeID
 		if !redis.IsOnline(deviceID) {
 			// Heartbeat key missing/expired — mark offline
 			d.markOffline(deviceID, "redis_ttl_expired")
@@ -96,13 +95,13 @@ func (d *Detector) checkDBLastSeen() {
 	now := time.Now()
 	for _, col := range collectors {
 		// Skip if still has Redis heartbeat
-		if redis.IsOnline(strconv.FormatInt(col.NodeID, 10)) {
+		if redis.IsOnline(col.NodeID) {
 			continue
 		}
 
 		// Check if last_seen is older than 90s (L3: DB fallback)
 		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
-			d.markOffline(strconv.FormatInt(col.NodeID, 10), "db_last_seen_timeout")
+			d.markOffline(col.NodeID, "db_last_seen_timeout")
 		}
 	}
 }
@@ -120,7 +119,7 @@ func (d *Detector) markOffline(deviceID, reason string) {
 	var nodeRecord models.Node
 	if err := d.db.Where("node_id = ?", deviceID).First(&nodeRecord).Error; err == nil {
 		d.db.Create(&models.NodeEvent{
-			NodeID: nodeRecord.ID,
+			NodeID: nodeRecord.NodeID,
 			EventType:   "offline",
 			OldStatus:   "online",
 			NewStatus:   "offline",

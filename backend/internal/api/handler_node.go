@@ -124,7 +124,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.ID, node.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.NodeID, fmt.Sprint(node.ID))
 		c.JSON(http.StatusCreated, node)
 	})
 
@@ -141,7 +141,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		db.Save(&node)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.ID, node.ID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, fmt.Sprint(node.ID))
 		Success(c, node)
 	})
 
@@ -153,7 +153,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, nodeID, nodeID)
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, fmt.Sprint(nodeID), fmt.Sprint(nodeID))
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 
@@ -166,7 +166,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		var channels []models.Channel
-		db.Where("node_id = ?", node.ID).Find(&channels)
+		db.Where("node_id = ?", node.NodeID).Find(&channels)
 		Success(c, channels)
 	})
 
@@ -181,7 +181,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		var data []models.DeviceData
-		db.Where("collector_id = ?", node.ID).Order("timestamp DESC").Limit(limit).Find(&data)
+		db.Where("collector_id = ?", node.NodeID).Order("timestamp DESC").Limit(limit).Find(&data)
 		Success(c, data)
 	})
 
@@ -193,7 +193,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		if err := nodeMgr.SendPing(strconv.FormatInt(node.NodeID, 10)); err != nil {
+		if err := nodeMgr.SendPing(node.NodeID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -310,7 +310,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			db.Model(node).Update("hardware_info", node.HardwareInfo)
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"node_id": node.ID,
+			"node_id": node.NodeID,
 			"status":  "updated",
 		}})
 	})
@@ -323,7 +323,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
-		deviceID := strconv.FormatInt(node.NodeID, 10)
+		deviceID := node.NodeID
 		requestID, err := nodeMgr.SendQueryResources(deviceID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
@@ -344,7 +344,7 @@ type edgeDeviceConfigItem struct {
 	ParserID       string     `json:"parser_id"`
 	ID             uint       `json:"id"`
 	Name           string     `json:"name"`
-	NodeID         uint       `json:"node_id"`
+	NodeID         string     `json:"node_id"`
 	ChannelID      uint       `json:"channel_id"`
 	DeviceConfigID uint       `json:"device_config_id"`
 	HardwareID     string     `json:"hardware_id"`
@@ -410,11 +410,11 @@ func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 
 		// Load channels for this node
 		var channels []models.Channel
-		db.Where("node_id = ?", node.ID).Find(&channels)
+		db.Where("node_id = ?", node.NodeID).Find(&channels)
 
 		// Load edge devices for this node
 		var edgeDevices []models.EdgeDevice
-		db.Where("node_id = ?", node.ID).Find(&edgeDevices)
+		db.Where("node_id = ?", node.NodeID).Find(&edgeDevices)
 
 		// Collect device_config IDs from edge devices
 		deviceConfigIDs := make([]uint, 0, len(edgeDevices))
@@ -517,7 +517,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				}
 				// Verify channel belongs to this node
 				var existing models.Channel
-				if err := db.Where("id = ? AND node_id = ?", ch.ID, node.ID).First(&existing).Error; err != nil {
+				if err := db.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&existing).Error; err != nil {
 					continue // skip channels not belonging to this node
 				}
 
@@ -574,7 +574,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				}
 				// Verify edge device belongs to this node
 				var existing models.EdgeDevice
-				if err := db.Where("id = ? AND node_id = ?", ed.ID, node.ID).First(&existing).Error; err != nil {
+				if err := db.Where("id = ? AND node_id = ?", ed.ID, node.NodeID).First(&existing).Error; err != nil {
 					continue
 				}
 
@@ -626,8 +626,8 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				nodeMgr.EventBus(),
 				nodemgr.CfgChangeNode,
 				nodemgr.CfgActionUpdate,
-				node.ID,
-				node.ID,
+				node.NodeID,
+				node.NodeID,
 			)
 		}
 
@@ -664,7 +664,7 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		var tasks []models.OTATask
-		db.Where("collector_id = ?", node.ID).Order("created_at DESC").Find(&tasks)
+		db.Where("collector_id = ?", node.NodeID).Order("created_at DESC").Find(&tasks)
 
 		c.JSON(http.StatusOK, gin.H{
 			"code": 200,

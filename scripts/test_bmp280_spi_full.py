@@ -25,7 +25,7 @@ import struct
 import time
 import sys
 
-ESP32_HOST = '10.42.0.173'
+ESP32_HOST = '192.168.1.54'
 ESP32_PORT = 8088
 
 # 消息类型

@@ -16,7 +16,7 @@ import sys
 import struct
 import statistics
 
-HOST = '10.42.0.173'
+HOST = '192.168.1.54'
 PORT = 8088
 
 # === 帧编码 (项目自定义 frame_codec 格式) ===

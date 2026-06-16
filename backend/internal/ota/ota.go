@@ -212,7 +212,7 @@ func (m *Manager) scanTimeouts() {
 
 // maybeAutoRollback checks if the same node has had >=3 OTA failures in 24h,
 // and if so, automatically rolls back to the last known stable firmware.
-func (m *Manager) maybeAutoRollback(nodeID uint) {
+func (m *Manager) maybeAutoRollback(nodeID string) {
 	since := time.Now().Add(-rollbackWindow)
 	var failCount int64
 	m.db.Model(&models.OTATask{}).
@@ -228,18 +228,18 @@ func (m *Manager) maybeAutoRollback(nodeID uint) {
 	}
 
 	// Trigger auto-rollback
-	logger.Infof("[OTA] node %d has %d failures in 24h, triggering auto-rollback", nodeID, failCount)
+	logger.Infof("[OTA] node %s has %d failures in 24h, triggering auto-rollback", nodeID, failCount)
 	if err := m.AutoRollback(nodeID); err != nil {
-		logger.Errorf("[OTA] auto-rollback failed for node %d: %v", nodeID, err)
+		logger.Errorf("[OTA] auto-rollback failed for node %s: %v", nodeID, err)
 	}
 }
 
 // AutoRollback finds the last known stable firmware for a node and creates a rollback OTA task.
 // Same node with 3+ OTA failures in 24h triggers this automatically.
-func (m *Manager) AutoRollback(nodeID uint) error {
+func (m *Manager) AutoRollback(nodeID string) error {
 	// Find the node's current firmware version
 	var node models.Node
-	if err := m.db.First(&node, nodeID).Error; err != nil {
+	if err := m.db.Where("node_id = ?", nodeID).First(&node).Error; err != nil {
 		return fmt.Errorf("node not found: %w", err)
 	}
 
@@ -249,7 +249,7 @@ func (m *Manager) AutoRollback(nodeID uint) error {
 		Order("completed_at DESC").
 		First(&lastSuccess).Error
 	if err != nil {
-		return fmt.Errorf("no successful OTA found for node %d, cannot determine stable version: %w", nodeID, err)
+		return fmt.Errorf("no successful OTA found for node %s, cannot determine stable version: %w", nodeID, err)
 	}
 
 	// Find the firmware record for that version
@@ -260,7 +260,7 @@ func (m *Manager) AutoRollback(nodeID uint) error {
 
 	// If the current version already matches the stable version, skip
 	if node.FirmwareVersion == stableFW.Version {
-		return fmt.Errorf("node %d already on stable version %s, no rollback needed", nodeID, stableFW.Version)
+		return fmt.Errorf("node %s already on stable version %s, no rollback needed", nodeID, stableFW.Version)
 	}
 
 	// Create rollback task
@@ -274,14 +274,14 @@ func (m *Manager) AutoRollback(nodeID uint) error {
 		return fmt.Errorf("failed to send rollback OTA command: %w", err)
 	}
 
-	logger.Infof("[OTA] auto-rollback: node %d → firmware %s (task %s)", nodeID, stableFW.Version, task.OtaID)
+	logger.Infof("[OTA] auto-rollback: node %s → firmware %s (task %s)", nodeID, stableFW.Version, task.OtaID)
 	return nil
 }
 
 // GetNodeOTAStatus returns the OTA status for a node.
-func (m *Manager) GetNodeOTAStatus(nodeID uint) (map[string]interface{}, error) {
+func (m *Manager) GetNodeOTAStatus(nodeID string) (map[string]interface{}, error) {
 	var node models.Node
-	if err := m.db.First(&node, nodeID).Error; err != nil {
+	if err := m.db.Where("node_id = ?", nodeID).First(&node).Error; err != nil {
 		return nil, fmt.Errorf("node not found: %w", err)
 	}
 
@@ -320,7 +320,7 @@ func (m *Manager) GetNodeOTAStatus(nodeID uint) (map[string]interface{}, error) 
 //  1. Mark all in-flight OTA records for the same node as failed ("Superseded by new attempt")
 //  2. Create new record in pending state with the target firmware version
 //  3. (Caller is expected to publish the OtaCommand afterwards)
-func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask, error) {
+func (m *Manager) CreateTask(collectorID string, firmwareID uint) (*models.OTATask, error) {
 	var firmware models.Firmware
 	if err := m.db.First(&firmware, firmwareID).Error; err != nil {
 		return nil, fmt.Errorf("firmware not found: %w", err)
@@ -336,9 +336,9 @@ func (m *Manager) CreateTask(collectorID uint, firmwareID uint) (*models.OTATask
 			"completed_at": &now,
 		})
 	if res.Error != nil {
-		logger.Warnf("[OTA] Failed to supersede prior tasks for collector %d: %v", collectorID, res.Error)
+		logger.Warnf("[OTA] Failed to supersede prior tasks for collector %s: %v", collectorID, res.Error)
 	} else if res.RowsAffected > 0 {
-		logger.Infof("[OTA] Superseded %d in-flight OTA record(s) for collector %d", res.RowsAffected, collectorID)
+		logger.Infof("[OTA] Superseded %d in-flight OTA record(s) for collector %s", res.RowsAffected, collectorID)
 	}
 
 	task := &models.OTATask{
@@ -379,7 +379,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 
 	// Build the frame once; reuse on retries
 	payload := m.buildOtaCmdPayload(task, &firmware, seq)
-	topic := mqtt.TopicForNode(strconv.FormatInt(nodeRecord.NodeID, 10))
+	topic := mqtt.TopicForNode(nodeRecord.NodeID)
 
 	// Register pending ack channel
 	ackCh := make(chan struct{})
@@ -594,8 +594,8 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 // the new firmware and the trailing success OtaProgress frame is lost.
 //
 // Enhanced: version mismatch detection with needs_retry status.
-func (m *Manager) HandleHelloOTACompletion(collectorID uint, deviceID, firmwareVersion string) {
-	if collectorID == 0 {
+func (m *Manager) HandleHelloOTACompletion(collectorID string, deviceID, firmwareVersion string) {
+	if collectorID == "" {
 		return
 	}
 

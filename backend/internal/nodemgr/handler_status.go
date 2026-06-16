@@ -87,7 +87,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	// Record event on status change
 	if oldStatus != status {
 		m.db.Create(&models.NodeEvent{
-			NodeID: node.ID,
+			NodeID: node.NodeID,
 			EventType:   "status_change",
 			OldStatus:   oldStatus,
 			NewStatus:   status,
@@ -111,7 +111,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 
 	// offline→online detection
 	if oldStatus == "offline" && status == "online" {
-		m.triggerDeviceInit(node.ID, deviceID)
+		m.triggerDeviceInit(node.NodeID, deviceID)
 	}
 
 	// WebSocket push

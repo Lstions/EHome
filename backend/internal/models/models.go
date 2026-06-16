@@ -18,7 +18,7 @@ import (
 // 字段含义见 docs/设计/节点/详细设计.md
 type Node struct {
 	ID              uint       `gorm:"primaryKey" json:"id"`
-	NodeID          int64      `gorm:"column:node_id;uniqueIndex;not null" json:"node_id"` // 物理 ID (bigint)
+	NodeID          string     `gorm:"column:node_id;type:varchar(32);uniqueIndex;not null" json:"node_id"` // 物理 ID (hex string, e.g. "F0F5BD02F35C")
 	Name            string     `gorm:"size:64;not null" json:"name"`
 	Model           string     `gorm:"size:20" json:"model"`
 	FirmwareVersion string     `gorm:"size:32" json:"firmware_version"`
@@ -57,7 +57,7 @@ type Node struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 	// 关联
-	Channels []Channel `gorm:"foreignKey:NodeID;references:ID" json:"channels,omitempty"`
+	Channels []Channel `gorm:"foreignKey:NodeID;references:NodeID" json:"channels,omitempty"`
 }
 
 // TableName GORM 表名 (Phase 2A-2 DB 迁移后, 用 nodes 表)
@@ -74,7 +74,7 @@ type EdgeDevice struct {
 	ParserID       string         `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"`                      // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
 	ID             uint           `gorm:"primaryKey" json:"id"`
 	Name           string         `gorm:"size:64;not null" json:"name"`
-	NodeID         uint           `gorm:"index;not null" json:"node_id"`          // v2.2 显式 FK (was implicit via Channel)
+	NodeID         string         `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`          // v2.2 显式 FK (was implicit via Channel)
 	ChannelID      uint           `gorm:"index;not null" json:"channel_id"`       // 保留
 	DeviceConfigID uint           `gorm:"index;not null" json:"device_config_id"` // v2.2 关键新增 FK
 	HardwareID     string         `gorm:"size:16;default:''" json:"hardware_id"`           // v2.2 新增 (从 Channel 移过来)
@@ -92,7 +92,7 @@ type EdgeDevice struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 	// 关联
-	Node         Node         `gorm:"foreignKey:NodeID;references:ID" json:"node,omitempty"`
+	Node         Node         `gorm:"foreignKey:NodeID;references:NodeID" json:"node,omitempty"`
 	Channel      Channel      `gorm:"foreignKey:ChannelID" json:"channel,omitempty"`
 	DeviceConfig DeviceConfig `gorm:"foreignKey:DeviceConfigID" json:"device_config,omitempty"`
 }
@@ -108,7 +108,7 @@ func (EdgeDevice) TableName() string { return "edge_devices" }
 // v2.2 字段含义见 docs/设计/通道/详细设计.md
 type Channel struct {
 	ID           uint           `gorm:"primaryKey" json:"id"`
-	NodeID       uint           `gorm:"index;not null;column:node_id" json:"node_id"`
+	NodeID       string         `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
 	HardwareType string         `gorm:"size:20" json:"hardware_type"`    // SPI/I2C/UART/GPIO/ADC
 	HardwareID   string         `gorm:"size:16;default:''" json:"hardware_id"`    // 总线上的硬件地址 (e.g. I2C 0x76)
 	IntervalMs   int            `gorm:"default:5000" json:"interval_ms"`
@@ -131,7 +131,7 @@ type Channel struct {
 // 定义读取设备的寄存器序列 (hex write_data + read_length + delay_ms)
 type ConfigTemplate struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	NodeID    uint      `gorm:"index;not null;column:node_id" json:"node_id"` // v2.2: renamed from CollectorID
+	NodeID    string     `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
 	WriteData string    `gorm:"type:text;not null" json:"write_data"`
 	ReadLength uint32   `gorm:"default:0" json:"read_length"`
 	DelayMs   uint32    `gorm:"default:0" json:"delay_ms"`
@@ -179,7 +179,7 @@ type DeviceConfig struct {
 type DeviceData struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	DeviceID     uint      `gorm:"index;not null" json:"device_id"`    // v2.2: 改为 EdgeDeviceID
-	NodeID       uint      `gorm:"index;not null;column:node_id" json:"node_id"` // v2.3: renamed from CollectorID
+	NodeID       string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
 	DataJSON     string    `gorm:"type:text" json:"data_json"`
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -220,7 +220,7 @@ type DataSource struct {
 type OTATask struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	OtaID       string     `gorm:"column:ota_id;size:64;uniqueIndex;not null" json:"ota_id"`
-	NodeID      uint       `gorm:"column:collector_id;index;not null" json:"node_id"`
+	NodeID      string     `gorm:"column:collector_id;type:varchar(32);index;not null" json:"node_id"`
 	FirmwareID  uint       `gorm:"index" json:"firmware_id"`
 	Status      string     `gorm:"size:20;default:pending" json:"status"`
 	Progress    uint8      `gorm:"default:0" json:"progress"`
@@ -315,7 +315,7 @@ type DeviceModel struct {
 // NodeEvent 节点状态变更事件 (v2.3: renamed from NodeEvent)
 type NodeEvent struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	NodeID    uint      `gorm:"index;not null;column:node_id" json:"node_id"`
+	NodeID    string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
 	EventType string    `gorm:"size:20;not null" json:"event_type"`
 	OldStatus string    `gorm:"size:20" json:"old_status"`
 	NewStatus string    `gorm:"size:20" json:"new_status"`
@@ -327,7 +327,7 @@ type NodeEvent struct {
 // CalibrationCache 校准数据缓存 (保留)
 type CalibrationCache struct {
 	ID          uint      `gorm:"primaryKey" json:"id"`
-	NodeID    uint      `gorm:"index;not null;column:node_id" json:"node_id"` // v2.3: renamed from CollectorID
+	NodeID    string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
 	DeviceType  string    `gorm:"size:32;not null" json:"device_type"`
 	Data        string    `gorm:"type:text;not null" json:"data"`
 	CreatedAt   time.Time `json:"created_at"`

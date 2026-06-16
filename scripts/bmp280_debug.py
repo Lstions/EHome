@@ -2,7 +2,7 @@
 """BMP280 SPI 调试版 - 带详细日志"""
 import socket, time, sys, struct
 
-HOST = '10.42.0.173'
+HOST = '192.168.1.54'
 PORT = 8088
 
 def ev(v):
