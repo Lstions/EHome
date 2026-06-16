@@ -1,0 +1,115 @@
+/**
+ * @file app_state.c
+ * @brief Application state singleton — replaces main.c globals.
+ *
+ * node_id is auto-generated from the WiFi MAC address for true uniqueness
+ * across devices.  Falls back to Kconfig CONFIG_COLLECTOR_NODE_ID if MAC
+ * read fails.
+ */
+
+#include "app_state.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include <string.h>
+#include <inttypes.h>
+
+#define TAG "APP_STATE"
+#define FIRMWARE_VERSION "2.4.0"
+#define MODEL_NAME       CONFIG_IDF_TARGET
+
+/* ==== Bridge for scheduler.c (still uses global) ==== */
+QueueHandle_t g_cmd_queue;
+
+/* ==== Singleton ==== */
+static app_state_t s_app;
+
+/* ---- node_id from MAC ---- */
+
+static void generate_node_id(char *buf, size_t buflen)
+{
+    uint8_t mac[6];
+    esp_err_t err = esp_efuse_mac_get_default(mac);
+    if (err == ESP_OK) {
+        /* Format: "EHEM-" + last 6 hex digits of MAC = unique 11-char ID */
+        snprintf(buf, buflen, "EHEM-%02X%02X%02X",
+                 mac[3], mac[4], mac[5]);
+        ESP_LOGI(TAG, "node_id from MAC: %s", buf);
+        return;
+    }
+
+    /* Fallback: Kconfig default */
+    strlcpy(buf, CONFIG_COLLECTOR_NODE_ID, buflen);
+    ESP_LOGW(TAG, "MAC read failed, using Kconfig node_id: %s", buf);
+}
+
+/* ---- Lifecycle ---- */
+
+app_state_t *app_state_init(void)
+{
+    memset(&s_app, 0, sizeof(s_app));
+
+    /* Unique node_id from hardware MAC */
+    generate_node_id(s_app.node_id, sizeof(s_app.node_id));
+
+    /* Spinlock for config-manifest application.
+     * Zeroed by memset above — portMUX_TYPE initializes to unlocked. */
+
+    /* Command queue */
+    s_app.cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
+    g_cmd_queue = s_app.cmd_queue; /* bridge for scheduler.c (still uses global) */
+
+    /* Zero the pool markers */
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        s_app.bus_ch[i] = 0;
+    }
+
+    ESP_LOGI(TAG, "State initialized: node_id=%s fw=%s model=%s",
+             s_app.node_id, FIRMWARE_VERSION, MODEL_NAME);
+    return &s_app;
+}
+
+/* ---- Getters ---- */
+
+app_state_t *app_state_get(void)
+{
+    return &s_app;
+}
+
+bool app_state_is_config_received(void)
+{
+    return s_app.config_received;
+}
+
+void app_state_set_config_received(bool v)
+{
+    s_app.config_received = v;
+}
+
+uint32_t app_state_get_uptime_sec(void)
+{
+    return s_app.uptime_sec;
+}
+
+/* ---- Config lock ---- */
+
+void app_state_lock_config(void)
+{
+    portENTER_CRITICAL(&s_app.config_lock);
+}
+
+void app_state_unlock_config(void)
+{
+    portEXIT_CRITICAL(&s_app.config_lock);
+}
+
+/* ---- Version ---- */
+
+const char *get_firmware_version(void)
+{
+    return FIRMWARE_VERSION;
+}
+
+const char *get_model_name(void)
+{
+    return MODEL_NAME;
+}

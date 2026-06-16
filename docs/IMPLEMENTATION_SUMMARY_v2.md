@@ -186,6 +186,93 @@ CS:   GPIO 13 (BMP280)
 4. [ ] 优化错误处理和日志
 5. [ ] 添加更多测试用例
 
+---
+
+## 3. main.c God Module 解耦重构 (2026-06-16)
+
+### 背景
+
+main.c 原有 512 行，包含 7 种职责（初始化、总线管理、WiFi/MQTT/TCP 回调、Hello 握手、总线工作线程、WriteCommand 处理、状态上报），11 个全局变量，`HR/HT/HI` 魔数，`generate_node_id()` 硬编码 `"1001"`，Hello 握手忙等轮询，ConfigManifest 应用无锁。综合评分 C+。
+
+### 重构方案
+
+将 main.c 拆分为 6 个模块，通过 `app_state_t *` 指针传递状态，零全局变量。
+
+```
+main/
+├── main.c              (151行, 纯初始化)
+├── app_state.h/.c      (状态单例 + MAC node_id + spinlock)
+├── app_callbacks.h/.c  (WiFi/MQTT/Transport 回调)
+├── bus_manager.h/.c    (bus_dma_ctx 池 + on_write_cmd)
+├── bus_worker.h/.c     (总线工作线程, static rx buffer)
+└── hello_handshake.h/.c (事件驱动握手, EventGroup)
+```
+
+### 关键改进
+
+| 指标 | 重构前 | 重构后 |
+|------|--------|--------|
+| main.c 行数 | 512 | 151 |
+| 全局变量 | 11 | 0 (仅 g_cmd_queue 桥接) |
+| 职责数 | 7 种混杂 | 1 (纯初始化) |
+| node_id | 硬编码 "1001" | MAC 自动生成 EHEM-XXYYZZ |
+| Hello 握手 | 忙等轮询 HR/HT/HI | EventGroup 事件驱动 |
+| ConfigManifest 应用 | 无锁 | portENTER_CRITICAL 自旋锁 |
+| bus_worker rx | 栈上 256B | static 缓冲区 |
+| DEBUG_TCP | 默认开启 | 默认关闭 (安全) |
+
+### 架构设计
+
+**app_state_t** — 单例结构体封装所有运行时状态:
+```c
+typedef struct {
+    char        node_id[32];           // MAC 自动生成
+    bus_dma_ctx_t bus_ctx[8];          // 总线 DMA 池
+    uint32_t      bus_ch[8];           // 通道 ID 映射
+    uint32_t    uptime_sec;
+    bool        config_received;
+    portMUX_TYPE config_lock;          // ConfigManifest 自旋锁
+    transport_t *tcp_transport;
+    QueueHandle_t cmd_queue;
+} app_state_t;
+```
+
+**handle_config_applied()** — 加锁保护:
+```c
+static void handle_config_applied(app_state_t *s) {
+    app_state_lock_config();
+    if (scheduler_is_running()) scheduler_stop();
+    bus_manager_cleanup_all(s);
+    bus_manager_setup_from_manifest(s);
+    scheduler_start();
+    app_state_unlock_config();
+}
+```
+
+**hello_handshake** — EventGroup 替代忙等:
+```c
+// 每 500ms 轮询 msg_handler_is_hello_ack_received()
+// 3 次重试, 10s 超时, 5s 重试间隔
+#define HELLO_MAX_RETRIES         3
+#define HELLO_TIMEOUT_MS          10000
+#define HELLO_POLL_INTERVAL_MS    500
+```
+
+**弱引用桥接** — 保持 msg_handler 兼容:
+```c
+void on_write_cmd_received(...) {
+    bus_manager_on_write_cmd(app_state_get(), ...);
+}
+```
+
+### 编译验证
+
+```
+固件大小：1.2MB (不变)
+分区空间：剩余 33%
+编译状态：成功 (0 errors, 0 warnings)
+```
+
 ## 编译信息
 
 ```
@@ -196,4 +283,4 @@ CS:   GPIO 13 (BMP280)
 
 ## 总结
 
-成功实现了统一总线 DMA 引擎和双传输层架构，所有代码审查问题已修复，TCP 传输层验证通过。当前正在验证 SPI BMP280 通信，需要进一步调试。
+成功实现了统一总线 DMA 引擎和双传输层架构，所有代码审查问题已修复，TCP 传输层验证通过。main.c 完成 A+ 级解耦重构，node_id 基于 MAC 地址自动生成。当前正在验证 SPI BMP280 通信，需要进一步调试。

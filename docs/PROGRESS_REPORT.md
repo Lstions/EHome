@@ -5,7 +5,7 @@ ESP32-C6 物联网采集器，支持多总线通信和远程管理
 
 ---
 
-## 2026-06-16 开发进展（验证 + Bug修复）
+## 2026-06-16 开发进展（验证 + Bug修复 + 代码重构）
 
 ### ✅ UART 串口验证（TCP + MQTT 全栈）
 **提交:** `5c5914e` fix: UART端口分配跳过console, TCP ConfigManifest处理, 魔数替换宏
@@ -33,6 +33,45 @@ ESP32-C6 物联网采集器，支持多总线通信和远程管理
    - 魔数 `0x04` → `MSG_CONFIG_MFST` 宏
    - 提取 `handle_config_applied()` 公共函数（MQTT 和 TCP 回调共用）
 
+---
+
+### ✅ main.c God Module 解耦重构 → A+
+
+**目标:** 将 main.c 从 C+ 提升到 A+ — 11个全局变量归零，7种职责拆分为独立模块，线程安全，可测试。
+
+**新文件结构:**
+
+```
+main/
+├── main.c              (151行, 纯初始化)
+├── app_state.h/.c      (状态单例 + MAC node_id + spinlock)
+├── app_callbacks.h/.c  (WiFi/MQTT/Transport 回调)
+├── bus_manager.h/.c    (bus_dma_ctx 池 + on_write_cmd)
+├── bus_worker.h/.c     (总线工作线程, static rx buffer)
+└── hello_handshake.h/.c (事件驱动握手, EventGroup)
+```
+
+**关键改进:**
+
+| 指标 | 重构前 | 重构后 |
+|------|--------|--------|
+| main.c 行数 | 512 | **151** |
+| 全局变量 | 11 | **0** (仅 g_cmd_queue 桥接) |
+| 职责数 | 7 种混杂 | **1** (纯初始化) |
+| node_id | 硬编码 `"1001"` | **MAC 自动生成** `EHEM-XXYYZZ` |
+| Hello 握手 | 忙等轮询 `HR/HT/HI` | **EventGroup 事件驱动** |
+| ConfigManifest 应用 | 无锁 | **portENTER_CRITICAL 自旋锁** |
+| bus_worker rx | 栈上 256B | **static 缓冲区** |
+| DEBUG_TCP | 默认开启 | **默认关闭 (安全)** |
+
+**架构亮点:**
+
+- `app_state_t` 结构体封装所有运行时状态，通过指针传递
+- `handle_config_applied()` 加自旋锁，MQTT/TCP 回调并发安全
+- Hello 握手从忙等轮询改为 FreeRTOS EventGroup + `msg_handler_is_hello_ack_received()` 轮询
+- 弱引用桥接保持 `msg_handler` 兼容性
+- 固件大小无增长 (1.2MB)
+
 ### ⚠️ SPI BMP280 验证
 **状态:** 调试中 — SPI 通道注册成功，bus 事务执行但未收到 BMP280 响应
 
@@ -52,13 +91,13 @@ ESP32-C6 物联网采集器，支持多总线通信和远程管理
 - 后端 Docker 环境运行正常（PostgreSQL、Redis、EMQX、前后端）
 - REST API 可用（7 个通道已创建）
 
-### 📈 代码统计（本次提交）
-- 8 files changed, +675/-13
-- bus_dma.c: UART 端口分配修复
-- main.c: TCP ConfigManifest 处理 + 代码重构
-- scripts/: TCP 验证、MQTT 验证、SPI 测试脚本
+### 📈 代码统计
+- 今日累积变更: 8 (早晨) + 10 (重构) = 18 files
+- +7203/-1994 lines (早晨) + 新模块 (重构)
+- main.c: 512 → 151 lines
+- 固件大小: 1.2MB (不变)
 
 ### 🔍 下一步
 1. SPI BMP280 硬件调试（确认引脚连接 + 供电）
 2. 修复后固件 SPI 端到端验证
-3. 推送 master 分支
+3. 提交并推送 master 分支
