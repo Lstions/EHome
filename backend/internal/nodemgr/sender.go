@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -223,12 +224,42 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			}
 		}
 
+		// Field 8: dma_enabled
+		subEnc.EncodeBool(8, ch.DmaEnabled)
+
 		enc.EncodeSubFrame(4, subEnc.Bytes())
 	}
 
-	// v2.1: field 5 = sync_id, field 6 = sync_reason
-	enc.EncodeString(5, decision.SyncID)
-	enc.EncodeString(6, string(decision.Reason))
+	// Field 5: dma_channel_configs (repeated DmaChannelConfig sub-messages)
+	// These are loaded from node.DmaChannels if present, or from DB config
+	var dmaConfigs []models.DmaChannelConfig
+	if node.Config != "" {
+		var cfg map[string]interface{}
+		if json.Unmarshal([]byte(node.Config), &cfg) == nil {
+			if dc, ok := cfg["dma_configs"]; ok {
+				if dcJSON, err := json.Marshal(dc); err == nil {
+					json.Unmarshal(dcJSON, &dmaConfigs)
+				}
+			}
+		}
+	}
+	for _, dc := range dmaConfigs {
+		subEnc := frame.SubEncoder()
+		subEnc.EncodeVarint(1, uint64(dc.DmaID))
+		enabled := uint64(0)
+		if dc.Enabled {
+			enabled = 1
+		}
+		subEnc.EncodeVarint(2, enabled)
+		if dc.BindTo != "" {
+			subEnc.EncodeString(3, dc.BindTo)
+		}
+		enc.EncodeSubFrame(5, subEnc.Bytes())
+	}
+
+	// v2.1: field 8 = sync_id, field 9 = sync_reason
+	enc.EncodeString(8, decision.SyncID)
+	enc.EncodeString(9, string(decision.Reason))
 
 	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
