@@ -353,7 +353,9 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         cli_cfg.timeout_ms = 30000;
         esp_https_ota_config_t ota_cfg = { .http_config = &cli_cfg };
         err = esp_https_ota(&ota_cfg);
-        total_bytes = (int)size;
+        // HTTPS path: use partition size for accurate SHA256 verification
+        const esp_partition_t *p = esp_ota_get_next_update_partition(NULL);
+        total_bytes = (p && p->size > 0) ? (int)p->size : (int)size;
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "HTTPS OTA fail: %s (0x%x)", esp_err_to_name(err), err);
             return err;
@@ -382,6 +384,7 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
     static uint8_t buf[4096];
     uint64_t remaining = total_bytes > 0 ? (uint64_t)total_bytes : size;
     uint32_t offset = 0;
+    int chunk_count = 0;
     while (remaining > 0) {
         size_t tr = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
         err = esp_partition_read(update_partition, offset, buf, tr);
@@ -392,7 +395,14 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         }
         mbedtls_sha256_update(&sha256_ctx, buf, tr);
         offset += tr; remaining -= tr;
-        vTaskDelay(pdMS_TO_TICKS(1));  // yield to prevent watchdog
+        chunk_count++;
+        if (chunk_count % 16 == 0) {  // 64KB = 16 * 4KB
+            ESP_LOGI(TAG, "SHA256 progress: %lu/%llu bytes (%d%%)",
+                     (unsigned long)offset, (unsigned long long)total_bytes,
+                     total_bytes > 0 ? (int)(offset * 100 / total_bytes) : 0);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms yield to prevent watchdog
+        taskYIELD();
     }
     mbedtls_sha256_finish(&sha256_ctx, sha256_result);
     mbedtls_sha256_free(&sha256_ctx);
