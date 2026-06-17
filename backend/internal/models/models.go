@@ -38,6 +38,7 @@ type Node struct {
 	FreeHeapBytes   int        `json:"free_heap_bytes"`
 	Capabilities    string     `gorm:"type:jsonb" json:"capabilities"`
 	HardwareInfo    string     `gorm:"type:jsonb" json:"hardware_info"`
+	DmaChannels     string     `gorm:"type:jsonb;default:'[]'" json:"dma_channels"`
 	// v2.2 连接元数据
 	ConnectionType    string     `gorm:"size:32" json:"connection_type"`
 	ConnectionQuality int        `gorm:"default:100" json:"connection_quality"`
@@ -117,6 +118,7 @@ type Channel struct {
 	TemplateIDs  string         `gorm:"type:text" json:"template_ids"`       // 逗号分隔的template ID列表
 	Config       string         `gorm:"type:text" json:"config"`             // JSON bus_config (兼容旧字段)
 	Enabled      bool           `gorm:"default:true" json:"enabled"`
+	DmaEnabled   bool           `gorm:"default:false" json:"dma_enabled"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
@@ -332,6 +334,27 @@ type CalibrationCache struct {
 	Data        string    `gorm:"type:text;not null" json:"data"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// =====================================================================
+
+// DmaChannelInfo represents a single DMA channel reported by the device
+type DmaChannelInfo struct {
+	DmaID         uint32 `json:"dma_id"`
+	Name          string `json:"name"`
+	DmaType       uint8  `json:"dma_type"`
+	Capabilities  uint8  `json:"capabilities"`
+	MaxBurst      uint32 `json:"max_burst"`
+	State         uint8  `json:"state"` // 0=free, 1=allocated, 2=disabled
+	BoundTo       string `json:"bound_to"`
+	CompatibleBus uint8  `json:"compatible_bus"`
+}
+
+// DmaChannelConfig represents DMA channel configuration to send to device
+type DmaChannelConfig struct {
+	DmaID   uint32 `json:"dma_id"`
+	Enabled bool   `json:"enabled"`
+	BindTo  string `json:"bind_to"`
 }
 
 // =====================================================================
