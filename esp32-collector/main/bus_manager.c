@@ -163,7 +163,7 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
         .bus_type   = find_bus_type(m, ch),
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
         .read_size  = rs,
-        .timeout_ms = 50,
+        .timeout_ms = 500,  /* 500ms for loopback/remote device response */
         .type       = CMD_WRITE,
     };
     if (l > 0 && d) memcpy(cmd.tx_data, d, cmd.tx_len);
