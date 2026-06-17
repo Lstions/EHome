@@ -335,6 +335,60 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			"status":     "sent",
 		}})
 	})
+
+	// GET /api/v1/nodes/:id/dma-channels — get DMA channel info for a node
+	n.GET("/:id/dma-channels", func(c *gin.Context) {
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+
+		var channels []models.DmaChannelInfo
+		if node.DmaChannels != "" && node.DmaChannels != "[]" {
+			json.Unmarshal([]byte(node.DmaChannels), &channels)
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"dma_channels": channels,
+		}})
+	})
+
+	// PUT /api/v1/nodes/:id/dma-config — update DMA configuration for a node
+	n.PUT("/:id/dma-config", func(c *gin.Context) {
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+
+		var configs []models.DmaChannelConfig
+		if err := c.ShouldBindJSON(&configs); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+
+		// Store DMA configs in node.Config JSON under "dma_configs" key
+		var cfg map[string]interface{}
+		if node.Config != "" && node.Config != "{}" {
+			json.Unmarshal([]byte(node.Config), &cfg)
+		}
+		if cfg == nil {
+			cfg = map[string]interface{}{}
+		}
+		cfg["dma_configs"] = configs
+		cfgJSON, _ := json.Marshal(cfg)
+		db.Model(&models.Node{}).Where("node_id = ?", node.NodeID).Update("config", string(cfgJSON))
+
+		// Trigger config sync to push updated manifest to device
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, node.NodeID)
+
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"node_id": node.NodeID,
+			"status":  "sent",
+		}})
+	})
 }
 
 // edgeDeviceConfigItem is a lightweight EdgeDevice representation for config API responses.
