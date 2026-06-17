@@ -16,7 +16,7 @@
 - `frontend-shared/src/api/firmware.ts` + `api/ota.ts`
 - `frontend-shared/src/stores/firmware.ts`
 
-### 采集器
+### 节点
 - `esp32-collector/components/ota/ota.c` (OTA 下载 + TLS 证书验证)
 - `esp32-collector/components/ota/ota.h` (OTA 接口)
 - `esp32-collector/components/ota_updater/ota_updater.c` (9 步流程)

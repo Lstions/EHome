@@ -2,7 +2,7 @@
 
 **版本**: v1.0  
 **日期**: 2026-06-16  
-**状态**: 待评审
+**状态**: 设计中（feat/dma-resource-protocol 分支，未实现）
 
 ---
 
@@ -28,7 +28,7 @@
 
 1. **协议层定义意愿，节点层决定现实** — 协议表达用户期望，节点根据硬件约束做最终决策
 2. **DMA 通道是一等公民** — 作为独立资源上报和管理，与总线是多对多映射
-3. **设备默认开启 DMA** — DMA 优先分配，不可用时自动降级 polled
+3. **节点默认开启 DMA** — DMA 优先分配，不可用时自动降级 polled
 4. **能力上报先行** — 节点上报 DMA 能力，前端据此展示和控制
 
 ---
@@ -121,7 +121,7 @@ flags 回归简单语义，只表达**当前实际运行状态**（只读回传�
 #define FLAG_DMA_ACTIVE   0x01   // bit 0: 当前使用 DMA (只读回传)
 // bit 1-7: 保留
 
-// 设备默认行为: DMA 优先 (自动分配)
+// 节点默认行为: DMA 优先 (自动分配)
 // 用户通过 DmaChannelConfig 控制哪些 DMA 通道可用
 // 不需要在 bus_config 中表达 dma_mode
 ```
@@ -510,6 +510,6 @@ function checkConflict(targetDmaId, targetHwId) {
 
 1. **DMA 通道作为独立资源上报** — 前端完全数据驱动，无需硬编码平台能力
 2. **compatible_bus bitmask** — 是否足够描述 DMA 通道与硬件的映射？
-3. **默认 DMA 优先** — 设备默认开启 DMA，自动分配，不可用时降级
+3. **默认 DMA 优先** — 节点默认开启 DMA，自动分配，不可用时降级
 4. **前端互斥计算** — 冲突检测在前端 vs 节点端，哪种更合适？
 5. **flags 简化** — bus_config.flags 只保留 DMA_ACTIVE 回传，控制通过 DmaChannelConfig

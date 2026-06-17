@@ -3,7 +3,7 @@
 **版本**: v2.5  
 **日期**: 2026-06-17  
 **分支**: feat/dma-resource-protocol  
-**状态**: 已实现
+**状态**: 设计中（feat/dma-resource-protocol 分支，未实现）
 
 ---
 

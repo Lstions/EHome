@@ -211,11 +211,11 @@ static void scheduler_task(void *p)
                 .bus_type   = s_channels[i].config.bus_type,
                 .tx_len     = 0,
                 .read_size  = 0,
-                .timeout_ms = 30,
+                .timeout_ms = 50,  /* default */
                 .type       = CMD_SAMPLE,
             };
 
-            /* If the channel references a template, copy its TX payload. */
+            /* If the channel references a template, copy its TX payload and timeout. */
             if (s_channels[i].config.template_count > 0) {
                 const config_template_t *t =
                     config_mgr_get_template(s_channels[i].config.template_ids[0]);
@@ -224,6 +224,9 @@ static void scheduler_task(void *p)
                                      ? t->write_data_len : CMD_TX_MAX;
                     memcpy(cmd.tx_data, t->write_data, cmd.tx_len);
                     cmd.read_size = t->read_length;
+                    if (t->delay_ms > 0) {
+                        cmd.timeout_ms = t->delay_ms;
+                    }
                 }
             }
 

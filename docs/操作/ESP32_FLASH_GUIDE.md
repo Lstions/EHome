@@ -10,7 +10,7 @@
 ## 构建步骤
 
 ```bash
-cd /home/sun/workspace/EHomeSystem/esp32-collector
+cd /home/bcat/workspace/ehome-system/esp32-collector
 
 # 设置ESP-IDF环境
 . $HOME/esp/esp-idf/export.sh

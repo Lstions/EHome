@@ -5,9 +5,9 @@
 ### 1. 共享总线管理 (Shared Bus Management)
 
 #### I2C 总线共享
-- **问题**: 多个 I2C 设备尝试独立初始化同一总线，导致 "I2C bus id already acquired" 错误
-- **解决方案**: 实现 I2C 总线注册表，相同 (SDA, SCL) 引脚配置的设备共享总线句柄
-- **效果**: ref_count 跟踪，只有最后一个设备移除时才删除总线
+- **问题**: 多个 I2C 边缘设备尝试独立初始化同一总线，导致 "I2C bus id already acquired" 错误
+- **解决方案**: 实现 I2C 总线注册表，相同 (SDA, SCL) 引脚配置的边缘设备共享总线句柄
+- **效果**: ref_count 跟踪，只有最后一个边缘设备移除时才删除总线
 - **代码位置**: `components/bus_dma/bus_dma.c` - `i2c_init()`, `i2c_deinit()`
 
 #### UART 端口共享
@@ -110,7 +110,7 @@ Scheduler: samples=55 full=0 q_free=15
 ```
 - ✅ **no_ctx=0** - 无上下文错误
 - ✅ 所有事务被处理
-- ℹ️ err=55 是因为没有实际的 I2C 设备或 UART 回环服务器
+- ℹ️ err=55 是因为没有实际的 I2C 边缘设备或 UART 回环服务器
 
 ## 代码变更统计
 
@@ -131,7 +131,7 @@ esp32-collector/stress_test.py                     | +150 lines (new)
 ### Before
 ```
 每个通道独立初始化总线
-→ 多个 I2C 设备尝试获取同一总线 → 失败
+→ 多个 I2C 边缘设备尝试获取同一总线 → 失败
 → 多个 UART 通道尝试安装同一驱动 → 失败
 → 大量 "no ctx" 错误
 ```

@@ -18,10 +18,10 @@
 | # | 模块 | 实现文档 | 后端 | 前端 | 节点端 |
 |---|------|---------|------|------|----------|
 | 1 | **认证授权** | [认证授权.md](认证授权.md) | `internal/api/handler_auth.go` + `handler_user.go` | `views/auth/` + `views/admin/UserList.vue` + `views/profile/` | - |
-| 2 | **节点** | [节点.md](节点.md) | `internal/nodemgr/*.go` | `views/collector/` + `components/collector/BusConfigPanel.vue` | `components/wifi_mgr/`, `msg_handler/`, `ehome_mqtt/` |
-| 3 | **设备** | [设备.md](设备.md) | `internal/api/handler_device.go` | `views/device/` | `components/proto_engine/`, `msg_handler/` |
+| 2 | **节点** | [节点.md](节点.md) | `internal/nodemgr/*.go` | `views/node/` + `components/node/BusConfigPanel.vue` | `components/wifi_mgr/`, `msg_handler/`, `ehome_mqtt/` |
+| 3 | **边缘设备** | [边缘设备.md](边缘设备.md) | `handler_edge_device.go` | `views/edge-device/` | `components/proto_engine/`, `msg_handler/` |
 | 4 | **通道** | [通道.md](通道.md) | `internal/api/handler_device.go` (channel 段) | `components/channel/` | `components/bus/`, `config_mgr/` |
-| 5 | **设备模板** | [设备模板.md](设备模板.md) | `internal/api/handler_device.go` (device-configs 段) | `views/config/DeviceConfigList.vue` | - |
+| 5 | **设备配置** | [设备配置.md](设备配置.md) | `handler_device_config.go` | `views/config/DeviceConfigList.vue` | - |
 | 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus/`, `drivers/` |
 | 7 | **固件OTA** | [固件OTA.md](固件OTA.md) | `internal/ota/ota.go` (P3 修) | `views/firmware/FirmwareManage.vue` | `components/ota_updater/`, `proto_engine/` |
 | 8 | **通知中心** | [通知中心.md](通知中心.md) | `internal/api/handler_notification.go` | `views/notification/` | - |
@@ -33,9 +33,9 @@
 |------|---------|---------|--------|---------|
 | 认证授权 | ✅ 完整 | ✅ 完整 | 10 | 🟢 23 测试 |
 | 节点 | ✅ 完整 | ✅ 完整 | 8+ | 🟡 2 测试 |
-| 设备 | ✅ 完整 | ✅ 完整 | 8 | 🟡 待补 |
+| 边缘设备 | ✅ 完整 | ✅ 完整 | 8 | 🟡 待补 |
 | 通道 | ✅ 完整 | ✅ 完整 | 6 | 🟡 待补 |
-| 设备模板 | ✅ 完整 (P3) | ✅ 完整 (P3) | 7 | 🟢 E2E 10 |
+| 设备配置 | ✅ 完整 (P3) | ✅ 完整 (P3) | 7 | 🟢 E2E 10 |
 | 数据采集 | ✅ 完整 | ✅ 完整 | 4 | 🟡 待补 |
 | 固件OTA | ✅ 完整 (P3) | ✅ 完整 | 7 | 🟢 单元 + E2E 10 |
 | 通知中心 | ✅ 基础 | ✅ 基础 | 5 | 🔴 待补 |
