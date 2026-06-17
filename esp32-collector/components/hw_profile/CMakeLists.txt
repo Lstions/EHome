@@ -1,3 +1,3 @@
-idf_component_register(SRCS "hw_profile.c"
+idf_component_register(SRCS "hw_profile.c" "hw_tables.c"
                        INCLUDE_DIRS "include"
                        REQUIRES frame config_mgr dma_pool bus_dma)
