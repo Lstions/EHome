@@ -20,6 +20,9 @@ extern "C" {
 #define MAX_TEMPLATE_IDS  8
 #define MAX_DMA_CONFIGS   8
 
+/* === NVS version === */
+#define CONFIG_NVS_VERSION  1  /* Increment when config_manifest_t layout changes */
+
 /* === Template === */
 typedef struct {
     uint32_t id;

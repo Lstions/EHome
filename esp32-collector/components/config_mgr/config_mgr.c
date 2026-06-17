@@ -170,8 +170,14 @@ bool config_mgr_save_to_nvs(void)
         return false;
     }
 
-    /* Save manifest as blob */
-    err = nvs_set_blob(handle, KEY_MANIFEST, &s_manifest, sizeof(s_manifest));
+    /* Prepend version header */
+    uint8_t blob[sizeof(uint32_t) + sizeof(s_manifest)];
+    uint32_t version = CONFIG_NVS_VERSION;
+    memcpy(blob, &version, sizeof(version));
+    memcpy(blob + sizeof(version), &s_manifest, sizeof(s_manifest));
+
+    /* Save manifest blob (with version header) */
+    err = nvs_set_blob(handle, KEY_MANIFEST, blob, sizeof(blob));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save manifest: %s", esp_err_to_name(err));
         nvs_close(handle);
@@ -202,13 +208,31 @@ bool config_mgr_load_from_nvs(void)
         return false;
     }
 
-    /* Load manifest blob */
-    size_t len = sizeof(s_manifest);
-    err = nvs_get_blob(handle, KEY_MANIFEST, &s_manifest, &len);
-    if (err != ESP_OK || len != sizeof(s_manifest)) {
+    /* Load manifest blob (with version header) */
+    size_t required_size = sizeof(uint32_t) + sizeof(s_manifest);
+    size_t len = required_size;
+    uint8_t blob[required_size];
+    err = nvs_get_blob(handle, KEY_MANIFEST, blob, &len);
+
+    if (err != ESP_OK || len < sizeof(uint32_t)) {
         nvs_close(handle);
         return false;
     }
+
+    /* Check version */
+    uint32_t version;
+    memcpy(&version, blob, sizeof(version));
+    if (version != CONFIG_NVS_VERSION) {
+        ESP_LOGW(TAG, "NVS config version mismatch (got %lu, expected %d), clearing old data",
+                 (unsigned long)version, CONFIG_NVS_VERSION);
+        nvs_erase_key(handle, KEY_MANIFEST);
+        nvs_commit(handle);
+        nvs_close(handle);
+        return false;
+    }
+
+    /* Version matches, restore manifest */
+    memcpy(&s_manifest, blob + sizeof(uint32_t), sizeof(s_manifest));
 
     /* Verify hash */
     uint32_t saved_hash;
