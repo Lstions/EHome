@@ -19,9 +19,6 @@
 #define FIRMWARE_VERSION "2.4.0"
 #define MODEL_NAME       CONFIG_IDF_TARGET
 
-/* ==== Bridge for scheduler.c (still uses global) ==== */
-QueueHandle_t g_cmd_queue;
-
 /* ==== Singleton ==== */
 static app_state_t s_app;
 static dma_pool_t s_dma_pool;  /* Lives in app_state, not a global */
@@ -63,7 +60,6 @@ app_state_t *app_state_init(void)
 
     /* Command queue */
     s_app.cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
-    g_cmd_queue = s_app.cmd_queue; /* bridge for scheduler.c (still uses global) */
 
     /* Zero the pool markers */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {

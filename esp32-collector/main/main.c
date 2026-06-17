@@ -128,7 +128,7 @@ void app_main(void)
             if (manifest->channel_count > 0) {
                 ESP_LOGI(TAG, "Setting up buses from NVS config (%d channels)", manifest->channel_count);
                 bus_manager_setup_from_manifest(s);
-                scheduler_start();
+                scheduler_start(s->cmd_queue);
             } else {
                 ESP_LOGW(TAG, "Manifest has no channels, skipping bus setup");
             }

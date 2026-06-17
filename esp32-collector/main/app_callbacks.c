@@ -48,7 +48,7 @@ static void handle_config_applied(app_state_t *s)
     bus_manager_setup_from_manifest(s);
     
     ESP_LOGI(TAG, "Starting scheduler...");
-    scheduler_start();  /* 内部有xTaskCreate，不能在自旋锁内 */
+    scheduler_start(s->cmd_queue);  /* 内部有xTaskCreate，不能在自旋锁内 */
     
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
     

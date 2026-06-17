@@ -3,7 +3,7 @@
  * @brief Channel Scheduler v3.0 — pure timer, all buses via unified command queue
  *
  * Every channel (UART / I2C / SPI) is sampled by posting a CMD_SAMPLE
- * descriptor to g_cmd_queue.  A single bus-worker task drains the queue
+ * descriptor to the injected command queue.  A single bus-worker task drains the queue
  * and performs the actual bus transactions, eliminating per-bus special
  * cases and the race-prone vTaskDelete in scheduler_stop.
  */
@@ -34,6 +34,7 @@ typedef struct {
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
 static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
+static QueueHandle_t   s_cmd_queue = NULL;
 
 static void scheduler_task(void *p);
 
@@ -46,9 +47,15 @@ void scheduler_init(void)
     s_task_handle = NULL;
 }
 
-void scheduler_start(void)
+void scheduler_start(QueueHandle_t cmd_queue)
 {
     if (s_task_handle) return;
+
+    s_cmd_queue = cmd_queue;
+    if (s_cmd_queue == NULL) {
+        ESP_LOGE(TAG, "cmd_queue is NULL, cannot start");
+        return;
+    }
 
     const config_manifest_t *cfg = config_mgr_get_manifest();
     if (cfg && cfg->applied) {
@@ -168,7 +175,7 @@ static void scheduler_task(void *p)
         TickType_t now = xTaskGetTickCount();
 
         /* Check queue depth for backpressure */
-        UBaseType_t queue_spaces = uxQueueSpacesAvailable(g_cmd_queue);
+        UBaseType_t queue_spaces = uxQueueSpacesAvailable(s_cmd_queue);
         bool queue_pressure = (queue_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
@@ -220,7 +227,7 @@ static void scheduler_task(void *p)
                 }
             }
 
-            if (xQueueSend(g_cmd_queue, &cmd, 0) != pdTRUE) {
+            if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
                 queue_full_count++;
             } else {
                 total_samples++;

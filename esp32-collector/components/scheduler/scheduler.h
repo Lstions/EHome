@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "config_mgr.h"
 
 #ifdef __cplusplus
@@ -37,7 +39,7 @@ typedef enum {
 
 /* === Public API === */
 void scheduler_init(void);
-void scheduler_start(void);
+void scheduler_start(QueueHandle_t cmd_queue);
 void scheduler_stop(void);
 sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);

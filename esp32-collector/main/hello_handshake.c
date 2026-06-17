@@ -97,7 +97,7 @@ static void hello_task(void *pv)
         if (!scheduler_is_running() && config_mgr_has_manifest()) {
             config_mgr_load_from_nvs();
             bus_manager_setup_from_manifest(s);
-            scheduler_start();
+            scheduler_start(s->cmd_queue);
         }
     }
 

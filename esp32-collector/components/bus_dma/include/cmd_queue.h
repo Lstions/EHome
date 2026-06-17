@@ -40,9 +40,6 @@ typedef struct {
     cmd_type_t type;
 } bus_cmd_t;
 
-/** Global command queue handle — created in main.c, used by scheduler + worker */
-extern QueueHandle_t g_cmd_queue;
-
 #ifdef __cplusplus
 }
 #endif
