@@ -289,6 +289,40 @@ func decodeChannelEntry(data []byte) channelEntry {
 	return ch
 }
 
+// decodeDmaChannel decodes a single DMA channel sub-message (ResourceReport field 8)
+func decodeDmaChannel(data []byte) models.DmaChannelInfo {
+	var ch models.DmaChannelInfo
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return ch
+	}
+	for {
+		field, err := dec.NextField()
+		if err != nil {
+			break
+		}
+		switch field.FieldNum {
+		case 1: // dma_id
+			ch.DmaID = uint32(frame.GetUint64(field))
+		case 2: // name
+			ch.Name = frame.GetString(field)
+		case 3: // dma_type
+			ch.DmaType = uint8(frame.GetUint64(field))
+		case 4: // capabilities
+			ch.Capabilities = uint8(frame.GetUint64(field))
+		case 5: // max_burst
+			ch.MaxBurst = uint32(frame.GetUint64(field))
+		case 6: // state
+			ch.State = uint8(frame.GetUint64(field))
+		case 7: // bound_to
+			ch.BoundTo = frame.GetString(field)
+		case 8: // compatible_bus
+			ch.CompatibleBus = uint8(frame.GetUint64(field))
+		}
+	}
+	return ch
+}
+
 func decodeChannelsBlob(data []byte) []channelEntry {
 	var channels []channelEntry
 	dec, err := frame.NewSubDecoder(data)
@@ -343,6 +377,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	var resourceCount uint64
 	var busesBlob []byte
 	var channelsBlob []byte
+	var dmaChannels []models.DmaChannelInfo
 
 	for {
 		field, err := dec.NextField()
@@ -358,6 +393,8 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 			busesBlob = frame.GetBytes(field)
 		case 4:
 			channelsBlob = frame.GetBytes(field)
+		case 8: // dma_channels (repeated DmaChannel sub-messages)
+			dmaChannels = append(dmaChannels, decodeDmaChannel(frame.GetBytes(field)))
 		}
 	}
 
@@ -388,8 +425,8 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	}
 	hwInfoJSON, _ := json.Marshal(hardwareInfo)
 
-	logger.Infof("[%s] ResourceReport decoded: %d uart, %d i2c, %d spi, %d gpio, %d adc, %d channels",
-		deviceID, len(buses.UART), len(buses.I2C), len(buses.SPI), len(buses.GPIO), len(buses.ADC), len(channels))
+	logger.Infof("[%s] ResourceReport decoded: %d uart, %d i2c, %d spi, %d gpio, %d adc, %d channels, %d dma",
+		deviceID, len(buses.UART), len(buses.I2C), len(buses.SPI), len(buses.GPIO), len(buses.ADC), len(channels), len(dmaChannels))
 
 	// Find node
 	var node models.Node
@@ -398,11 +435,16 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		return
 	}
 
-	// Update node: capabilities (buses JSON), hardware_info (full JSON), platform
+	// Update node: capabilities (buses JSON), hardware_info (full JSON), platform, dma_channels
 	updates := map[string]interface{}{
 		"capabilities":  string(busesJSON),
 		"hardware_info": string(hwInfoJSON),
 		"platform":      platform,
+	}
+	// Store DMA channels
+	if len(dmaChannels) > 0 {
+		dmaJSON, _ := json.Marshal(dmaChannels)
+		updates["dma_channels"] = string(dmaJSON)
 	}
 	m.db.Model(&node).Updates(updates)
 
@@ -435,6 +477,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 			IntervalMs:   int(ch.IntervalMs),
 			TemplateIDs:  templateIDsStr,
 			Enabled:      ch.Enabled,
+			DmaEnabled:   ch.DmaEnabled,
 		}
 
 		// Upsert: find by node_id + hardware_id, update or create
@@ -448,6 +491,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 				"interval_ms":   int(ch.IntervalMs),
 				"template_ids":  templateIDsStr,
 				"enabled":       ch.Enabled,
+				"dma_enabled":   ch.DmaEnabled,
 			})
 		} else {
 			// Create new
@@ -462,11 +506,15 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	json.Unmarshal(busesJSON, &busesMap)
 
 	// WebSocket push: node_resources_updated
-	m.wsHub.BroadcastEvent(events.NodeResourcesUpdated, map[string]interface{}{
+	wsData := map[string]interface{}{
 		"node_id":        deviceID,
 		"resource_count": resourceCount,
 		"platform":       platform,
 		"buses":          busesMap,
 		"channel_count":  len(channels),
-	})
+	}
+	if len(dmaChannels) > 0 {
+		wsData["dma_channels"] = dmaChannels
+	}
+	m.wsHub.BroadcastEvent(events.NodeResourcesUpdated, wsData)
 }
