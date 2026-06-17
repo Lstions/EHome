@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "frame_codec.h"
+#include "dma_pool.h"
 #include <string.h>
 
 #define TAG "CONFIG"
@@ -22,6 +23,7 @@
 /* State */
 static config_manifest_t s_manifest = {0};
 static bool s_initialized = false;
+static dma_pool_t *s_dma_pool = NULL;  /* Injected via setter (DIP) */
 
 /* Forward declarations */
 static void clear_manifest(void);
@@ -29,6 +31,28 @@ static bool parse_manifest(const uint8_t *data, size_t len);
 static uint32_t compute_crc32(const uint8_t *data, size_t len);
 
 /* === Public API === */
+
+void config_mgr_set_dma_pool(dma_pool_t *pool)
+{
+    s_dma_pool = pool;
+}
+
+void config_mgr_replay_dma_configs(void)
+{
+    if (!s_dma_pool) {
+        ESP_LOGW(TAG, "replay_dma: pool not set, skipping");
+        return;
+    }
+    for (int i = 0; i < s_manifest.dma_config_count; i++) {
+        const config_dma_channel_t *dc = &s_manifest.dma_configs[i];
+        ESP_LOGI(TAG, "Replaying DMA config: id=%lu enabled=%d bind_to='%s'",
+                 (unsigned long)dc->dma_id, dc->enabled, dc->bind_to);
+        dma_pool_apply_config(s_dma_pool, dc->dma_id, dc->enabled, dc->bind_to);
+    }
+    if (s_manifest.dma_config_count > 0) {
+        ESP_LOGI(TAG, "Replayed %d DMA configs from NVS", s_manifest.dma_config_count);
+    }
+}
 
 void config_mgr_init(void)
 {
@@ -39,13 +63,7 @@ void config_mgr_init(void)
     ESP_LOGI(TAG, "Initializing config manager...");
     clear_manifest();
     s_initialized = true;
-
-    /* Try to load from NVS */
-    if (config_mgr_load_from_nvs()) {
-        ESP_LOGI(TAG, "Loaded config from NVS: %s", s_manifest.manifest_id);
-    } else {
-        ESP_LOGI(TAG, "No saved config, starting fresh");
-    }
+    /* NVS load is done explicitly in main.c after pool injection */
 }
 
 bool config_mgr_apply_manifest(const uint8_t *data, size_t len)
@@ -243,7 +261,7 @@ static bool parse_manifest(const uint8_t *data, size_t len)
 
     while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
         /* Field 1: manifest_id (string) */
-        if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+        if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
             size_t copy_len = field.value.bytes.len < sizeof(s_manifest.manifest_id) - 1
                             ? field.value.bytes.len : sizeof(s_manifest.manifest_id) - 1;
             memcpy(s_manifest.manifest_id, field.value.bytes.ptr, copy_len);
@@ -263,7 +281,7 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                             cur_template->id = (uint32_t)tf.value.varint;
                             break;
                         case 2: /* write_data */
-                            if (tf.wire_type == WIRE_LENGTH_DELIMITED) {
+                            if (tf.wire_type == WIRE_LENGTH_DELIMITED && tf.value.bytes.ptr) {
                                 size_t cpy = tf.value.bytes.len < sizeof(cur_template->write_data)
                                             ? tf.value.bytes.len : sizeof(cur_template->write_data);
                                 memcpy(cur_template->write_data, tf.value.bytes.ptr, cpy);
@@ -282,7 +300,7 @@ static bool parse_manifest(const uint8_t *data, size_t len)
             }
         }
         /* Field 4: channels (nested message) */
-        else if (field.field_num == 4 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+        else if (field.field_num == 4 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
             ESP_LOGI(TAG, "Found channel field: len=%d", (int)field.value.bytes.len);
             if (s_manifest.channel_count < MAX_CHANNELS) {
                 config_channel_t *cur_channel = &s_manifest.channels[s_manifest.channel_count++];
@@ -301,7 +319,7 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                             cur_channel->id = (uint32_t)cf.value.varint;
                             break;
                         case 2: /* hardware_id — server sends string like "UART1" or "0x68" */
-                        	if (cf.wire_type == WIRE_LENGTH_DELIMITED) {
+                        	if (cf.wire_type == WIRE_LENGTH_DELIMITED && cf.value.bytes.ptr) {
                         		/* Read first 4 bytes as varint backward-compat, or parse as string */
                         		if (cf.value.bytes.len >= 1 && cf.value.bytes.len <= 4) {
                         			/* Treat as raw bytes → uint32 (little-endian like varint) */
@@ -333,7 +351,7 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                             cur_channel->bus_type = (uint8_t)cf.value.varint;
                             break;
                         case 7: /* bus_config */
-                            if (cf.wire_type == WIRE_LENGTH_DELIMITED) {
+                            if (cf.wire_type == WIRE_LENGTH_DELIMITED && cf.value.bytes.ptr) {
                                 size_t cpy = cf.value.bytes.len < sizeof(cur_channel->bus_config)
                                             ? cf.value.bytes.len : sizeof(cur_channel->bus_config);
                                 memcpy(cur_channel->bus_config, cf.value.bytes.ptr, cpy);
@@ -343,6 +361,49 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                         }
                     }
                 }
+            }
+        }
+        /* Field 5: DmaChannelConfig (repeated nested message) */
+        else if (field.field_num == 5 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
+            uint32_t dma_id = 0;
+            bool enabled = true;
+            char bind_to[DMA_BOUND_MAX] = {0};
+
+            frame_decoder_t ddec;
+            if (frame_decoder_init_sub(&ddec, field.value.bytes.ptr,
+                                        field.value.bytes.len) == FRAME_OK) {
+                frame_field_t df;
+                while (frame_decoder_next(&ddec, &df) == FRAME_OK) {
+                    switch (df.field_num) {
+                    case 1: dma_id = (uint32_t)df.value.varint; break;
+                    case 2: enabled = df.value.varint != 0; break;
+                    case 3:
+                        if (df.wire_type == WIRE_LENGTH_DELIMITED && df.value.bytes.ptr) {
+                            size_t cpy = df.value.bytes.len < sizeof(bind_to) - 1
+                                        ? df.value.bytes.len : sizeof(bind_to) - 1;
+                            memcpy(bind_to, df.value.bytes.ptr, cpy);
+                            bind_to[cpy] = '\0';
+                        }
+                        break;
+                    }
+                }
+            }
+
+            ESP_LOGI(TAG, "DmaChannelConfig: id=%lu enabled=%d bind_to='%s'",
+                     (unsigned long)dma_id, enabled, bind_to);
+            /* Store in manifest for NVS persistence + replay */
+            if (s_manifest.dma_config_count < MAX_DMA_CONFIGS) {
+                config_dma_channel_t *dc = &s_manifest.dma_configs[s_manifest.dma_config_count++];
+                dc->dma_id = dma_id;
+                dc->enabled = enabled;
+                strncpy(dc->bind_to, bind_to, sizeof(dc->bind_to) - 1);
+                dc->bind_to[sizeof(dc->bind_to) - 1] = '\0';
+            }
+            /* Apply to pool if available */
+            if (s_dma_pool) {
+                dma_pool_apply_config(s_dma_pool, dma_id, enabled, bind_to);
+            } else {
+                ESP_LOGD(TAG, "DmaChannelConfig stored (pool not yet injected)");
             }
         }
     }

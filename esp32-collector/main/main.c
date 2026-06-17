@@ -18,6 +18,7 @@
 #include "ota.h"
 #include "rgb_led.h"
 #include "factory_reset.h"
+#include "uart0_boot.h"
 #include "wifi_mgr.h"
 #include "ehome_mqtt.h"
 #include "transport.h"
@@ -26,6 +27,15 @@
 #endif
 #include "nvs_flash.h"
 #include "esp_log.h"
+
+/* RGB LED pin differs by board: S3=GPIO48, C6=GPIO8 */
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+  #define BOARD_LED_GPIO  48
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+  #define BOARD_LED_GPIO  8
+#else
+  #define BOARD_LED_GPIO  8
+#endif
 
 #define TAG "EHOME"
 
@@ -65,8 +75,6 @@ void on_query_resources_received(const char *request_id)
     (void)request_id;
 }
 
-void factory_reset(void) { /* implemented in factory_reset component */ }
-
 /* ================================================================== */
 /*  app_main                                                          */
 /* ================================================================== */
@@ -92,12 +100,26 @@ void app_main(void)
     /* ---- App state (singleton — node_id from MAC, cmd_queue, spinlock) ---- */
     app_state_t *s = app_state_init();
 
-    /* ---- Subsystem init ---- */
+    /* ---- UART0 boot mode check (MUST be before any UART0 driver install) ---- */
+    /* If BOOT held at startup, UART0 reserved for download — task blocks here */
+    if (!uart0_boot_init()) {
+        ESP_LOGW(TAG, "UART0 in download mode, normal init skipped");
+        /* uart0_boot spawns a wait task; we just spin */
+        while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
+
+    /* ---- Subsystem init (dma_pool already initialized in app_state_init) ---- */
     config_mgr_init();
     
+    /* DIP: inject dma_pool into components that need it */
+    config_mgr_set_dma_pool(s->dma_pool);
+    msg_handler_set_dma_pool(s->dma_pool);
+
     /* Load config from NVS if available */
     if (config_mgr_load_from_nvs()) {
         ESP_LOGI(TAG, "Config loaded from NVS");
+        /* Replay DMA configs (pool now injected) */
+        config_mgr_replay_dma_configs();
         const config_manifest_t *manifest = config_mgr_get_manifest();
         if (manifest) {
             ESP_LOGI(TAG, "Manifest: id=%s, templates=%d, channels=%d, applied=%d",
@@ -132,7 +154,7 @@ void app_main(void)
     mqtt_client_register_msg_cb(on_mqtt_msg_cb, s);
     mqtt_client_set_node_id(s->node_id);
 
-    rgb_led_init(8);
+    rgb_led_init(BOARD_LED_GPIO);
     rgb_led_start();
     factory_reset_init();
 

@@ -1,0 +1,13 @@
+# EHomeSystem ESP32-C6 specific configuration
+# Target
+CONFIG_IDF_TARGET="esp32c6"
+
+# Flash
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# USB Serial/JTAG (C6 native USB: GPIO12=D-, GPIO13=D+)
+CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
+
+# C6 has 2 HP UARTs (DMA-capable) + 1 LP UART (no DMA)
+# UART0 (TX16/RX17): user data serial + ROM download fallback
+# UART1 (TX21/RX20): general purpose

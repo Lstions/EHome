@@ -8,6 +8,8 @@
  */
 
 #include "app_state.h"
+#include "dma_pool.h"
+#include "hw_profile.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include <string.h>
@@ -22,6 +24,7 @@ QueueHandle_t g_cmd_queue;
 
 /* ==== Singleton ==== */
 static app_state_t s_app;
+static dma_pool_t s_dma_pool;  /* Lives in app_state, not a global */
 
 /* ---- node_id from MAC ---- */
 
@@ -66,6 +69,10 @@ app_state_t *app_state_init(void)
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_app.bus_ch[i] = 0;
     }
+
+    /* DMA pool init (from chip-specific hw_profile table) */
+    dma_pool_init(&s_dma_pool, hw_dmas, HW_DMA_COUNT);
+    s_app.dma_pool = &s_dma_pool;
 
     ESP_LOGI(TAG, "State initialized: node_id=%s fw=%s model=%s",
              s_app.node_id, FIRMWARE_VERSION, MODEL_NAME);

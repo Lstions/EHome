@@ -1,28 +1,113 @@
 /**
  * @file hw_profile.c
- * @brief ESP32-C6 Hardware Profile - static resource tables and report encoder
+ * @brief Hardware Profile - static resource tables and report encoder
+ *
+ * Supports ESP32-S3 and ESP32-C6 via CONFIG_IDF_TARGET_* conditionals.
+ * S3: 3 UART (all DMA), 2 I2C, 2 SPI, 12 GPIO, 5 ADC
+ * C6: 2 UART (DMA),    1 I2C, 1 SPI, 8 GPIO,  3 ADC
  */
 
 #include "hw_profile.h"
 #include "frame_codec.h"
 #include "config_mgr.h"
+#include "bus_dma.h"
 #include <string.h>
 #include <stdlib.h>
 
 /* ================================================================
- *  ESP32-C6 Static Hardware Profile
+ *  Static Hardware Profile — per-target pin tables
+ *
+ *  RESERVED PINS (do NOT assign to user peripherals):
+ *    S3: GPIO19=USB_D-, GPIO20=USB_D+, GPIO48=RGB LED
+ *    C6: GPIO12=USB_D-, GPIO13=USB_D+, GPIO8=RGB LED
+ *
+ *  S3 UART0: TX=43 RX=44 (ROM bootloader download port)
+ *  S3 UART1: TX=4  RX=5  (general purpose, avoids USB 19/20)
+ *  S3 UART2: TX=1  RX=2  (general purpose)
+ *  C6 UART0: TX=16 RX=17 (ROM bootloader download port)
+ *  C6 UART1: TX=21 RX=20 (general purpose, avoids USB 12/13)
+ *
+ *  All HP UARTs on both chips support DMA (flags = 0x01).
  * ================================================================ */
 
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+
+/* S3 USB pins: GPIO19=USB_D-, GPIO20=USB_D+ (RESERVED for USB Serial/JTAG) */
+const hw_uart_t hw_uarts[HW_UART_COUNT] = {
+    { .id = "UART0", .port = 0, .default_tx_pin = 43, .default_rx_pin = 44,
+      .max_baud = 5000000, .flags = 0x01 },  /* DMA, ROM download port */
+    { .id = "UART1", .port = 1, .default_tx_pin = 4,  .default_rx_pin = 5,
+      .max_baud = 5000000, .flags = 0x01 },  /* DMA, avoids USB pins 19/20 */
+    { .id = "UART2", .port = 2, .default_tx_pin = 1,  .default_rx_pin = 2,
+      .max_baud = 5000000, .flags = 0x01 },  /* DMA, general purpose */
+};
+
+const hw_i2c_t hw_i2cs[HW_I2C_COUNT] = {
+    { .id = "I2C0", .port = 0, .default_sda = 8,  .default_scl = 9,
+      .max_freq_hz = 1000000, .flags = 0x01 },
+    { .id = "I2C1", .port = 1, .default_sda = 47, .default_scl = 48,
+      .max_freq_hz = 1000000, .flags = 0x01 },
+};
+
+const hw_spi_t hw_spis[HW_SPI_COUNT] = {
+    { .id = "SPI2", .port = 2, .default_mosi = 11, .default_miso = 13,
+      .default_sclk = 12, .default_cs = 10, .max_freq_hz = 80000000,
+      .flags = 0x01 },
+    { .id = "SPI3", .port = 3, .default_mosi = 35, .default_miso = 37,
+      .default_sclk = 36, .default_cs = 34, .max_freq_hz = 80000000,
+      .flags = 0x01 },
+};
+
+const hw_gpio_t hw_gpios[HW_GPIO_COUNT] = {
+    { .id = "GPIO0",  .pin = 0  },
+    { .id = "GPIO1",  .pin = 1  },
+    { .id = "GPIO2",  .pin = 2  },
+    { .id = "GPIO3",  .pin = 3  },
+    { .id = "GPIO4",  .pin = 4  },
+    { .id = "GPIO5",  .pin = 5  },
+    { .id = "GPIO6",  .pin = 6  },
+    { .id = "GPIO7",  .pin = 7  },
+    { .id = "GPIO8",  .pin = 8  },
+    { .id = "GPIO15", .pin = 15 },
+    { .id = "GPIO16", .pin = 16 },
+    { .id = "GPIO17", .pin = 17 },
+};
+
+const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
+    { .id = "ADC1_CH0", .unit = 1, .channel = 0, .pin = 1,  .max_bits = 12 },
+    { .id = "ADC1_CH1", .unit = 1, .channel = 1, .pin = 2,  .max_bits = 12 },
+    { .id = "ADC1_CH2", .unit = 1, .channel = 2, .pin = 3,  .max_bits = 12 },
+    { .id = "ADC1_CH3", .unit = 1, .channel = 3, .pin = 4,  .max_bits = 12 },
+    { .id = "ADC1_CH4", .unit = 1, .channel = 4, .pin = 5,  .max_bits = 12 },
+};
+
+/* S3: 5 GDMA channels (CH0-4), all general purpose TX+RX, UART+I2C+SPI compatible */
+const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
+    { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },  /* UART|I2C|SPI */
+    { .dma_id = 1, .name = "GDMA_CH1", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+    { .dma_id = 2, .name = "GDMA_CH2", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+    { .dma_id = 3, .name = "GDMA_CH3", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+    { .dma_id = 4, .name = "GDMA_CH4", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+};
+
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+
+/* C6 USB pins: GPIO12=USB_D-, GPIO13=USB_D+ (RESERVED for USB Serial/JTAG) */
 const hw_uart_t hw_uarts[HW_UART_COUNT] = {
     { .id = "UART0", .port = 0, .default_tx_pin = 16, .default_rx_pin = 17,
-      .max_baud = 5000000, .flags = 0x01 },
+      .max_baud = 5000000, .flags = 0x01 },  /* DMA, ROM download port */
     { .id = "UART1", .port = 1, .default_tx_pin = 21, .default_rx_pin = 20,
-      .max_baud = 5000000, .flags = 0x01 },
+      .max_baud = 5000000, .flags = 0x01 },  /* DMA, avoids USB pins 12/13 */
 };
 
 const hw_i2c_t hw_i2cs[HW_I2C_COUNT] = {
     { .id = "I2C0", .port = 0, .default_sda = 21, .default_scl = 22,
-      .max_freq_hz = 1000000, .flags = 0x01 },
+      .max_freq_hz = 1000000, .flags = 0x00 },  /* C6 I2C: no DMA support */
 };
 
 const hw_spi_t hw_spis[HW_SPI_COUNT] = {
@@ -47,6 +132,20 @@ const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
     { .id = "ADC1_CH1", .unit = 1, .channel = 1, .pin = 1, .max_bits = 12 },
     { .id = "ADC1_CH2", .unit = 1, .channel = 2, .pin = 2, .max_bits = 12 },
 };
+
+/* C6: 3 GDMA channels — all general purpose TX+RX, UART+SPI compatible */
+const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
+    { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
+    { .dma_id = 1, .name = "GDMA_CH1", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
+    { .dma_id = 2, .name = "GDMA_CH2", .dma_type = 0,
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
+};
+
+#else
+  #error "Unsupported IDF target"
+#endif
 
 /* ================================================================
  *  Sub-message encoding helpers
@@ -159,40 +258,6 @@ static bool encode_adc_entry(uint8_t *out, size_t cap, size_t *out_len,
     return true;
 }
 
-/* ================================================================
- *  Extract dma_enabled flag from bus_config raw bytes
- * ================================================================ */
-static uint8_t extract_dma_enabled(uint8_t bus_type,
-                                   const uint8_t *bus_config,
-                                   size_t bus_config_len)
-{
-    size_t flags_offset = 0;
-    size_t min_len = 0;
-
-    switch (bus_type) {
-    case 1: /* UART: [tx, rx, baud×4] = 6 bytes, +flags = 7 */
-        flags_offset = 6;
-        min_len = 7;
-        break;
-    case 2: /* I2C: [sda, scl, addr, freq×4] = 7 bytes, +flags = 8 */
-        flags_offset = 7;
-        min_len = 8;
-        break;
-    case 3: /* SPI: [cs, mode, freq×4] = 6 bytes, +flags = 7 */
-        flags_offset = 6;
-        min_len = 7;
-        break;
-    default:
-        return 0;
-    }
-
-    if (bus_config_len >= min_len) {
-        return (bus_config[flags_offset] & 0x01) ? 1 : 0;
-    }
-    /* Default: dma enabled */
-    return 1;
-}
-
 /* ----------------------------------------------------------------
  *  Encode a single channel_entry sub-message
  * ---------------------------------------------------------------- */
@@ -222,9 +287,9 @@ static bool encode_channel_entry(uint8_t *out, size_t cap, size_t *out_len,
     }
 
     /* field8: dma_enabled extracted from bus_config flags */
-    uint8_t dma = extract_dma_enabled(ch->bus_type, ch->bus_config,
-                                      ch->bus_config_len);
-    if (frame_encode_varint(&enc, 8, dma) != FRAME_OK) return false;
+    bool dma = bus_config_get_dma_enabled(ch->bus_type, ch->bus_config,
+                                          ch->bus_config_len);
+    if (frame_encode_varint(&enc, 8, dma ? 1 : 0) != FRAME_OK) return false;
 
     *out_len = frame_encoder_size(&enc);
     return true;
@@ -333,7 +398,8 @@ static bool build_channels_blob(uint8_t *blob, size_t cap, size_t *out_len)
 /* ================================================================
  *  Public API: Build the full ResourceReport frame
  * ================================================================ */
-bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len)
+bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
+                              dma_pool_t *dma_pool)
 {
     if (!buf || !out_len || sz == 0) return false;
 
@@ -366,27 +432,35 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len)
 
     /* field1: platform string */
     if (frame_encode_string(&enc, 1, HW_PLATFORM_STRING) != FRAME_OK)
-        return false;
+        goto cleanup_fail;
 
     /* field2: resource_count varint */
     if (frame_encode_varint(&enc, 2, resource_count) != FRAME_OK)
-        return false;
+        goto cleanup_fail;
 
     /* field3: buses_blob bytes (sub-message, skip type byte) */
     if (buses_len > 1) {
         if (frame_encode_bytes(&enc, 3, buses_buf + 1,
-                               buses_len - 1) != FRAME_OK) {
-            free(buses_buf); free(channels_buf);
-            return false;
-        }
+                               buses_len - 1) != FRAME_OK)
+            goto cleanup_fail;
     }
 
     /* field4: channels_blob bytes (sub-message, skip type byte) */
     if (channels_len > 1) {
         if (frame_encode_bytes(&enc, 4, channels_buf + 1,
-                               channels_len - 1) != FRAME_OK) {
-            free(buses_buf); free(channels_buf);
-            return false;
+                               channels_len - 1) != FRAME_OK)
+            goto cleanup_fail;
+    }
+
+    /* field8: dma_channels (repeated DmaChannel sub-messages) */
+    if (dma_pool) {
+        uint8_t *dma_buf = calloc(1, 512);
+        if (dma_buf) {
+            size_t dma_len = dma_pool_serialize(dma_pool, dma_buf, 512);
+            if (dma_len > 0) {
+                frame_encoder_append_raw(&enc, dma_buf, dma_len);
+            }
+            free(dma_buf);
         }
     }
 
@@ -394,4 +468,9 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len)
     free(channels_buf);
     *out_len = frame_encoder_size(&enc);
     return true;
+
+cleanup_fail:
+    free(buses_buf);
+    free(channels_buf);
+    return false;
 }

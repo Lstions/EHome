@@ -1,5 +1,50 @@
 menu "EHome Collector Configuration"
 
+    menu "OTA Configuration"
+
+        config COLLECTOR_OTA_USE_HTTPS
+            bool "Use HTTPS for OTA updates"
+            default y
+            help
+                Enable HTTPS for OTA firmware downloads.
+
+        config COLLECTOR_OTA_VERIFY_CERT
+            bool "Verify server certificate (HTTPS)"
+            default y
+            depends on COLLECTOR_OTA_USE_HTTPS
+            help
+                Verify the OTA server's TLS certificate.
+
+        config COLLECTOR_OTA_CRT_BUNDLE
+            bool "Use Mozilla CA certificate bundle"
+            default y
+            depends on COLLECTOR_OTA_VERIFY_CERT
+            help
+                Use the built-in Mozilla CA bundle for verification.
+
+        config COLLECTOR_OTA_CUSTOM_CERT
+            bool "Use custom CA certificate"
+            default n
+            depends on COLLECTOR_OTA_VERIFY_CERT && !COLLECTOR_OTA_CRT_BUNDLE
+            help
+                Embed a custom CA PEM for private/self-signed servers.
+
+        config COLLECTOR_OTA_EXPECTED_CN
+            string "Expected certificate Common Name"
+            default ""
+            depends on COLLECTOR_OTA_VERIFY_CERT
+            help
+                If non-empty, verify the server cert CN matches this value.
+
+        config COLLECTOR_OTA_ALLOW_HTTP
+            bool "Allow plain HTTP OTA (development only)"
+            default n
+            help
+                Allow downloading firmware over plain HTTP.
+                WARNING: No encryption, no authentication. Dev use only.
+
+    endmenu
+
 endmenu
 
 menu "Debug Configuration"

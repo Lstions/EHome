@@ -1,0 +1,18 @@
+# EHomeSystem ESP32-S3 specific configuration
+# Target
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash (S3 dev boards typically 8MB or 16MB, but 4MB works)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# USB Serial/JTAG (S3 native USB: GPIO19=D-, GPIO20=D+)
+CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
+
+# S3 has 3 UARTs, all DMA-capable
+# UART0 (TX43/RX44): user data serial + ROM download fallback
+# UART1 (TX20/RX21): CH340 dev board
+# UART2 (TX1/RX2):   general purpose
+
+# PSRAM (S3 dev boards often have 8MB PSRAM)
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_OCT=y

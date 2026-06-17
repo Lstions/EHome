@@ -83,6 +83,15 @@ frame_err_t frame_encode_bytes(frame_encoder_t *enc, uint8_t field_num, const ui
     return FRAME_OK;
 }
 
+frame_err_t frame_encoder_append_raw(frame_encoder_t *enc, const uint8_t *data, size_t len)
+{
+    frame_err_t err = encoder_ensure_space(enc, len);
+    if (err != FRAME_OK) return err;
+    memcpy(&enc->buf[enc->pos], data, len);
+    enc->pos += len;
+    return FRAME_OK;
+}
+
 /* === Decoder === */
 
 frame_err_t frame_decoder_init(frame_decoder_t *dec, const uint8_t *buf, size_t len)

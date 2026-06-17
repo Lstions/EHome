@@ -49,6 +49,10 @@ void msg_handler_send_query_rsp(const char *request_id, bool success, const char
 void msg_handler_send_config_report(const char *request_id);
 void msg_handler_send_resource_report(void);
 
+/* DIP: inject dma_pool for ResourceReport encoding */
+struct dma_pool_t;
+void msg_handler_set_dma_pool(struct dma_pool_t *pool);
+
 /* === Factory reset - implemented in main.c === */
 void factory_reset(void);
 

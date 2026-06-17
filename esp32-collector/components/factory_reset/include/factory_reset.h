@@ -4,7 +4,8 @@
 
 /**
  * Initialize factory reset button monitor.
- * If BOOT button (GPIO9) is held for >5 seconds, erases NVS and reboots.
+ * If BOOT button is held for >5 seconds, erases NVS and reboots.
+ * BOOT GPIO: S3=GPIO0, C6=GPIO9 (per-chip conditional in .c).
  */
 void factory_reset_init(void);
 

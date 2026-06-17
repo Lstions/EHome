@@ -1,10 +1,12 @@
 /**
  * @file hw_profile.h
- * @brief ESP32-C6 Hardware Profile - compile-time resource definitions
+ * @brief Hardware Profile - compile-time resource definitions for S3/C6
  *
  * Defines static hardware capabilities (UART, I2C, SPI, GPIO, ADC) and
  * provides hw_profile_build_report() to encode a binary ResourceReport
  * (MSG_RESOURCE_REPORT = 0x19) via frame_codec.
+ *
+ * Supports ESP32-S3 and ESP32-C6 via CONFIG_IDF_TARGET_* conditionals.
  */
 
 #ifndef HW_PROFILE_H
@@ -13,6 +15,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "dma_pool.h"  /* for hw_dma_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,19 +65,49 @@ typedef struct {
     uint8_t     max_bits;
 } hw_adc_t;
 
-/* === Platform constants === */
-#define HW_PLATFORM_STRING  "ESP32C6"
+/* hw_dma_t is defined in dma_pool.h (included above) */
 
-/* === Hardware resource counts === */
-#define HW_UART_COUNT   2
-#define HW_I2C_COUNT    1
-#define HW_SPI_COUNT    1
-#define HW_GPIO_COUNT   8
-#define HW_ADC_COUNT    3
+/* === Platform-specific constants === */
+
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+
+  #define HW_PLATFORM_STRING  "ESP32S3"
+  /* S3: 3 UARTs (all DMA-capable), 2 I2C, 2 SPI */
+  #define HW_UART_COUNT   3
+  #define HW_I2C_COUNT    2
+  #define HW_SPI_COUNT    2
+  #define HW_GPIO_COUNT   12
+  #define HW_ADC_COUNT    5
+  #define HW_DMA_COUNT    5  /* S3: 5 GDMA channels (CH0-4) */
+
+  /* Reserved pins — must NOT be used for user peripherals */
+  #define HW_RESERVED_USB_DN   19  /* USB_D- */
+  #define HW_RESERVED_USB_DP   20  /* USB_D+ */
+  #define HW_RESERVED_LED      48  /* RGB LED (WS2812) */
+
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+
+  #define HW_PLATFORM_STRING  "ESP32C6"
+  /* C6: 2 HP UARTs (DMA-capable), 1 I2C, 1 SPI */
+  #define HW_UART_COUNT   2
+  #define HW_I2C_COUNT    1
+  #define HW_SPI_COUNT    1
+  #define HW_GPIO_COUNT   8
+  #define HW_ADC_COUNT    3
+  #define HW_DMA_COUNT    3
+
+  /* Reserved pins — must NOT be used for user peripherals */
+  #define HW_RESERVED_USB_DN   12  /* USB_D- */
+  #define HW_RESERVED_USB_DP   13  /* USB_D+ */
+  #define HW_RESERVED_LED       8  /* RGB LED (WS2812) */
+
+#else
+  #error "Unsupported IDF target — add profile for this chip"
+#endif
 
 /* Total hardware bus/pin resources (excludes config channels) */
 #define HW_RESOURCE_COUNT  (HW_UART_COUNT + HW_I2C_COUNT + HW_SPI_COUNT + \
-                            HW_GPIO_COUNT + HW_ADC_COUNT)
+                            HW_GPIO_COUNT + HW_ADC_COUNT + HW_DMA_COUNT)
 
 /* === Extern const arrays (defined in hw_profile.c) === */
 extern const hw_uart_t hw_uarts[HW_UART_COUNT];
@@ -82,6 +115,7 @@ extern const hw_i2c_t  hw_i2cs[HW_I2C_COUNT];
 extern const hw_spi_t  hw_spis[HW_SPI_COUNT];
 extern const hw_gpio_t hw_gpios[HW_GPIO_COUNT];
 extern const hw_adc_t  hw_adcs[HW_ADC_COUNT];
+extern const hw_dma_t  hw_dmas[HW_DMA_COUNT];
 
 /* === Report builder === */
 
@@ -96,7 +130,9 @@ extern const hw_adc_t  hw_adcs[HW_ADC_COUNT];
  * @param out_len  On success, set to the encoded frame length.
  * @return true on success, false on buffer overflow or encoding error.
  */
-bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len);
+struct dma_pool_t;
+bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
+                              struct dma_pool_t *dma_pool);
 
 #ifdef __cplusplus
 }

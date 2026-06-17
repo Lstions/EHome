@@ -10,6 +10,7 @@
 #include "bus_dma.h"
 #include "config_mgr.h"
 #include "msg_handler.h"
+#include "dma_pool.h"
 #include "esp_log.h"
 #include <string.h>
 #include <inttypes.h>
@@ -20,21 +21,17 @@
 extern void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                        uint32_t error_code, const char *error_msg);
 
-/* ==== Bus type → DMA flags byte offset ==== */
+/* ==== hw_id derivation (LoD: name reflects actual resource) ==== */
 
-static bool get_dma_enabled(uint8_t bus_type, const uint8_t *cfg, size_t cfglen)
+static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type, uint32_t ch_id)
 {
-    static const uint8_t k_flags_offset[] = {
-        [BUS_TYPE_UART - 1] = 6,
-        [BUS_TYPE_I2C  - 1] = 7,
-        [BUS_TYPE_SPI  - 1] = 6,
-    };
-    if (bus_type < 1 || bus_type > 3) return true;
-
-    uint8_t off = k_flags_offset[bus_type - 1];
-    if (cfg && cfglen > off)
-        return (cfg[off] & 0x01) != 0;
-    return true; /* default: DMA enabled */
+    const char *bus_name = "UNKNOWN";
+    switch (bus_type) {
+        case BUS_TYPE_UART: bus_name = "UART"; break;
+        case BUS_TYPE_SPI:  bus_name = "SPI";  break;
+        case BUS_TYPE_I2C:  bus_name = "I2C";  break;
+    }
+    snprintf(buf, buflen, "%s_CH%" PRIu32, bus_name, ch_id);
 }
 
 /* ==== Look up bus_type from config manifest ==== */
@@ -64,19 +61,48 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s->bus_ch[i] == 0) {
             s->bus_ch[i] = ch_id;
-            bool dma = get_dma_enabled(bus_type, config, config_len);
-            ESP_LOGI(TAG, "Calling bus_dma_init: ch=%" PRIu32 " type=%u dma=%d idx=%d",
+            
+            /* DMA allocation: check user preference first, then try pool */
+            bool dma = false;
+            char hw_id[16];
+            derive_hw_id(hw_id, sizeof(hw_id), bus_type, ch_id);
+            
+            /* Respect user DMA preference from bus_config flags */
+            bool user_wants_dma = bus_config_get_dma_enabled(bus_type, config, config_len);
+            if (user_wants_dma && s->dma_pool) {
+                uint32_t dma_id = 0;
+                esp_err_t dma_err = dma_pool_allocate(s->dma_pool, bus_type,
+                                                        hw_id, &dma_id);
+                if (dma_err == ESP_OK) {
+                    dma = true;
+                    ESP_LOGI(TAG, "ch=%" PRIu32 " DMA allocated (id=%" PRIu32 ")",
+                             ch_id, dma_id);
+                } else {
+                    ESP_LOGW(TAG, "ch=%" PRIu32 " DMA requested but unavailable, polled",
+                             ch_id);
+                }
+            } else if (!user_wants_dma) {
+                ESP_LOGI(TAG, "ch=%" PRIu32 " DMA disabled by user config", ch_id);
+            }
+            
+            ESP_LOGI(TAG, "bus_dma_init: ch=%" PRIu32 " type=%u dma=%d idx=%d",
                      ch_id, bus_type, dma, i);
-            /* 注意：不要在自旋锁保护区域内调用日志函数 */
             esp_err_t err = bus_dma_init(&s->bus_ctx[i], bus_type, dma,
                                          config, config_len);
             if (err == ESP_OK) {
+                /* Save hw_id for cleanup (avoid manifest dependency) */
+                strncpy(s->bus_hw_id[i], hw_id, sizeof(s->bus_hw_id[i]) - 1);
+                s->bus_hw_id[i][sizeof(s->bus_hw_id[i]) - 1] = '\0';
                 ESP_LOGI(TAG, "ch=%" PRIu32 " type=%u dma=%d idx=%d SUCCESS",
                          ch_id, bus_type, dma, i);
             } else {
                 ESP_LOGE(TAG, "ch=%" PRIu32 " init failed: %s",
                          ch_id, esp_err_to_name(err));
                 s->bus_ch[i] = 0;
+                /* Release DMA if init failed */
+                if (dma) {
+                    dma_pool_release_by_hw(s->dma_pool, hw_id);
+                }
             }
             return;
         }
@@ -95,8 +121,13 @@ void bus_manager_cleanup_all(app_state_t *s)
 {
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s->bus_ctx[i].initialized) {
+            /* Release DMA using saved hw_id (no manifest dependency) */
+            if (s->dma_pool && s->bus_hw_id[i][0] != '\0') {
+                dma_pool_release_by_hw(s->dma_pool, s->bus_hw_id[i]);
+            }
             bus_dma_deinit(&s->bus_ctx[i]);
             s->bus_ch[i] = 0;
+            s->bus_hw_id[i][0] = '\0';
         }
     }
 }

@@ -18,6 +18,7 @@ extern "C" {
 #define MAX_TEMPLATES     16
 #define MAX_CHANNELS      8
 #define MAX_TEMPLATE_IDS  8
+#define MAX_DMA_CONFIGS   8
 
 /* === Template === */
 typedef struct {
@@ -41,6 +42,13 @@ typedef struct {
     size_t   bus_config_len;
 } config_channel_t;
 
+/* === DMA Channel Config (persisted with manifest) === */
+typedef struct {
+    uint32_t dma_id;
+    bool     enabled;
+    char     bind_to[16];
+} config_dma_channel_t;
+
 /* === Config state === */
 typedef struct {
     char              manifest_id[64];
@@ -48,6 +56,8 @@ typedef struct {
     uint8_t           template_count;
     config_channel_t  channels[MAX_CHANNELS];
     uint8_t           channel_count;
+    config_dma_channel_t dma_configs[MAX_DMA_CONFIGS];
+    uint8_t           dma_config_count;
     bool              applied;
 } config_manifest_t;
 
@@ -85,12 +95,17 @@ void config_mgr_set_manifest_id(const char *id);
 void config_mgr_clear_epoch(void);  /* factory_reset use */
 
 /* === v2.4 bus_config flags helpers === */
+/* Note: bus_config_get_dma_enabled() is defined in bus_dma.h */
 
-/**
- * Extract dma_enabled from a channel's bus_config flags byte.
- * Returns true if DMA is enabled, true by default if flags byte is absent.
- */
-bool bus_config_get_dma_enabled(const config_channel_t *ch);
+/* === DIP: DMA pool injection ===
+ * config_mgr receives dma_pool_t* via setter (not a global).
+ * Must be called before config_mgr_apply_manifest if DmaChannelConfig
+ * fields need to be applied. */
+struct dma_pool_t;
+void config_mgr_set_dma_pool(struct dma_pool_t *pool);
+
+/** Replay stored DMA configs into dma_pool (called after NVS load + pool inject) */
+void config_mgr_replay_dma_configs(void);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 #include "frame_codec.h"
 #include "ehome_mqtt.h"
 #include "config_mgr.h"
+#include "dma_pool.h"
 #include "ota.h"
 #include "factory_reset.h"
 #include "sync_manager.h"
@@ -20,6 +21,13 @@
 #include <stdlib.h>
 
 #define TAG "MSG"
+
+static dma_pool_t *s_dma_pool = NULL;  /* Injected via setter (DIP) */
+
+void msg_handler_set_dma_pool(dma_pool_t *pool)
+{
+    s_dma_pool = pool;
+}
 
 /* Mutex for thread-safe transport access */
 static SemaphoreHandle_t s_publish_mutex = NULL;
@@ -184,10 +192,12 @@ void msg_handler_process(const uint8_t *data, size_t len)
         frame_field_t field;
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
-                size_t copy_len = field.value.bytes.len < sizeof(manifest_id) - 1 
-                                ? field.value.bytes.len : sizeof(manifest_id) - 1;
-                memcpy(manifest_id, field.value.bytes.ptr, copy_len);
-                manifest_id[copy_len] = '\0';
+                if (field.value.bytes.ptr) {
+                    size_t copy_len = field.value.bytes.len < sizeof(manifest_id) - 1 
+                                    ? field.value.bytes.len : sizeof(manifest_id) - 1;
+                    memcpy(manifest_id, field.value.bytes.ptr, copy_len);
+                    manifest_id[copy_len] = '\0';
+                }
             }
             /* v2.1: field 2 = config_epoch */
             if (field.field_num == 2 && field.wire_type == WIRE_VARINT) {
@@ -227,7 +237,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
                  (unsigned long)request_id, (unsigned long)channel_id, cmd_len);
         
         /* Check for factory reset command: channel_id=0, data=[0xFC, 0x00] */
-        if (channel_id == 0 && cmd_len == 2 && cmd_data[0] == 0xFC && cmd_data[1] == 0x00) {
+        if (channel_id == 0 && cmd_len == 2 && cmd_data && cmd_data[0] == 0xFC && cmd_data[1] == 0x00) {
             ESP_LOGI(TAG, "Factory reset command received");
             msg_handler_send_write_rsp(request_id, true, 0, NULL);
             /* Perform factory reset - defined in main.c */
@@ -267,21 +277,29 @@ void msg_handler_process(const uint8_t *data, size_t len)
             if (field.wire_type != WIRE_LENGTH_DELIMITED && field.wire_type != WIRE_VARINT) continue;
             switch (field.field_num) {
             case 1:
-                memcpy(ota_id, field.value.bytes.ptr, 
-                       field.value.bytes.len < sizeof(ota_id)-1 ? field.value.bytes.len : sizeof(ota_id)-1);
+                if (field.value.bytes.ptr) {
+                    memcpy(ota_id, field.value.bytes.ptr, 
+                           field.value.bytes.len < sizeof(ota_id)-1 ? field.value.bytes.len : sizeof(ota_id)-1);
+                }
                 break;
             case 2:
-                memcpy(firmware_url, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(firmware_url)-1 ? field.value.bytes.len : sizeof(firmware_url)-1);
+                if (field.value.bytes.ptr) {
+                    memcpy(firmware_url, field.value.bytes.ptr,
+                           field.value.bytes.len < sizeof(firmware_url)-1 ? field.value.bytes.len : sizeof(firmware_url)-1);
+                }
                 break;
             case 3:
-                memcpy(checksum, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(checksum)-1 ? field.value.bytes.len : sizeof(checksum)-1);
+                if (field.value.bytes.ptr) {
+                    memcpy(checksum, field.value.bytes.ptr,
+                           field.value.bytes.len < sizeof(checksum)-1 ? field.value.bytes.len : sizeof(checksum)-1);
+                }
                 break;
             case 4: size_bytes = field.value.varint; break;
             case 5:
-                memcpy(version, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(version)-1 ? field.value.bytes.len : sizeof(version)-1);
+                if (field.value.bytes.ptr) {
+                    memcpy(version, field.value.bytes.ptr,
+                           field.value.bytes.len < sizeof(version)-1 ? field.value.bytes.len : sizeof(version)-1);
+                }
                 break;
             }
         }
@@ -301,7 +319,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             switch (field.field_num) {
             case 1:
-                if (field.wire_type == WIRE_LENGTH_DELIMITED) {
+                if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
                     memcpy(request_id, field.value.bytes.ptr,
                            field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
                 }
@@ -325,7 +343,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
             switch (field.field_num) {
             case 1:
-                if (field.wire_type == WIRE_LENGTH_DELIMITED) {
+                if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
                     memcpy(request_id, field.value.bytes.ptr,
                            field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
                 }
@@ -347,7 +365,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
         char request_id[64] = {0};
         frame_field_t field;
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
                 memcpy(request_id, field.value.bytes.ptr,
                        field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
             }
@@ -382,7 +400,7 @@ void msg_handler_process(const uint8_t *data, size_t len)
         char request_id[64] = {0};
         frame_field_t field;
         while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
+            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
                 size_t copy_len = field.value.bytes.len < sizeof(request_id) - 1
                                 ? field.value.bytes.len : sizeof(request_id) - 1;
                 memcpy(request_id, field.value.bytes.ptr, copy_len);
@@ -621,7 +639,10 @@ void msg_handler_send_resource_report(void)
     }
     size_t len = 0;
 
-    if (!hw_profile_build_report(buf, 1024, &len)) {
+    if (!s_dma_pool) {
+        ESP_LOGW(TAG, "dma_pool not set, sending report without DMA info");
+    }
+    if (!hw_profile_build_report(buf, 1024, &len, s_dma_pool)) {
         ESP_LOGE(TAG, "Failed to build ResourceReport");
         free(buf);
         return;

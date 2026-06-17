@@ -7,10 +7,20 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "FACTORY_RESET";
+#define TAG "FACTORY_RESET"
 static bool s_in_progress = false;
 
-#define BOOT_BUTTON_GPIO  9
+/* BOOT button GPIO differs by chip:
+ *   S3: GPIO0 (standard BOOT pin, also used for ROM download mode)
+ *   C6: GPIO9 (on most C6 dev boards, e.g. ESP32-C6-DevKitC-1) */
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+  #define BOOT_BUTTON_GPIO  0
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+  #define BOOT_BUTTON_GPIO  9
+#else
+  #define BOOT_BUTTON_GPIO  0
+#endif
+
 #define HOLD_TIME_MS      5000
 #define POLL_INTERVAL_MS  100
 

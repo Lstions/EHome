@@ -23,6 +23,40 @@
 #define TAG "BUS_DMA"
 
 /* ------------------------------------------------------------------ */
+/*  UART0 availability: depends on console output target               */
+/*  If console is on USB Serial/JTAG, UART0 is free for data use.     */
+/*  If console is on UART0, we must skip it.                          */
+/* ------------------------------------------------------------------ */
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP_CONSOLE_USB_CDC)
+  #define UART0_START_INDEX  0   /* Console on USB — UART0 available */
+#else
+  #define UART0_START_INDEX  1   /* Console on UART0 — skip slot 0  */
+#endif
+
+/* GPIO pin max varies by chip: S3=48, C6=30 */
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+  #define GPIO_PIN_MAX  48
+  /* Reserved pins — USB Serial/JTAG and RGB LED */
+  #define RESERVED_PIN_USB_DN  19
+  #define RESERVED_PIN_USB_DP  20
+  #define RESERVED_PIN_LED     48
+#else
+  #define GPIO_PIN_MAX  30
+  /* Reserved pins — USB Serial/JTAG and RGB LED */
+  #define RESERVED_PIN_USB_DN  12
+  #define RESERVED_PIN_USB_DP  13
+  #define RESERVED_PIN_LED      8
+#endif
+
+/* Check if a pin is reserved (USB or LED) */
+static inline bool is_pin_reserved(int pin)
+{
+    return pin == RESERVED_PIN_USB_DN ||
+           pin == RESERVED_PIN_USB_DP ||
+           pin == RESERVED_PIN_LED;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -76,11 +110,11 @@ static uart_port_entry_t *uart_find_port(int tx_pin, int rx_pin, uint32_t baud)
     return NULL;
 }
 
-/* Allocate new UART port entry — skip slot 0 (reserved for UART0/console) */
+/* Allocate new UART port entry — skip UART0 if console is on UART0 */
 static uart_port_entry_t *uart_alloc_port(void)
 {
     uart_registry_init();
-    for (int i = 1; i < MAX_UART_PORTS; i++) {
+    for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
         if (s_uart_ports[i].port == UART_NUM_MAX) {
             return &s_uart_ports[i];
         }
@@ -96,9 +130,15 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     int rx_pin  = cfg[1];
     uint32_t baud = read_be32(&cfg[2]);
 
-    /* Validate pins */
-    if (tx_pin < 0 || tx_pin > 30 || rx_pin < 0 || rx_pin > 30) {
-        ESP_LOGE(TAG, "UART invalid pins: TX=%d RX=%d (must be 0-30)", tx_pin, rx_pin);
+    /* Validate pins (S3: 0-48, C6: 0-30) */
+    if (tx_pin < 0 || tx_pin > GPIO_PIN_MAX || rx_pin < 0 || rx_pin > GPIO_PIN_MAX) {
+        ESP_LOGE(TAG, "UART invalid pins: TX=%d RX=%d (must be 0-%d)", tx_pin, rx_pin, GPIO_PIN_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Reject reserved pins (USB/LED) to prevent hardware conflicts */
+    if (is_pin_reserved(tx_pin) || is_pin_reserved(rx_pin)) {
+        ESP_LOGE(TAG, "UART pin conflict: TX=%d RX=%d (reserved: USB_D-=%d USB_D+=%d LED=%d)",
+                 tx_pin, rx_pin, RESERVED_PIN_USB_DN, RESERVED_PIN_USB_DP, RESERVED_PIN_LED);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -106,13 +146,19 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
     
     if (port_entry == NULL) {
-        /* Find available UART port number — skip UART0 (console) */
-        uart_port_t port_num = UART_NUM_1;  /* ESP32C6: UART0=console, so start from UART1 */
-        for (int i = 1; i < MAX_UART_PORTS; i++) {
+        /* Find available UART port number — skip UART0 if console is on UART0 */
+        uart_port_t port_num = UART_NUM_MAX;  /* Invalid until found */
+        for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
             if (s_uart_ports[i].port == UART_NUM_MAX) {
-                port_num = (uart_port_t)(UART_NUM_0 + i);
+                uart_port_t candidate = (uart_port_t)(UART_NUM_0 + i);
+                if (candidate >= UART_NUM_MAX) break;  /* Exceeds chip UART count */
+                port_num = candidate;
                 break;
             }
+        }
+        if (port_num >= UART_NUM_MAX) {
+            ESP_LOGE(TAG, "No available UART port (all %d in use or exceeds chip limit)", MAX_UART_PORTS);
+            return ESP_ERR_NO_MEM;
         }
         
         ctx->cfg.uart.port   = port_num;
@@ -365,6 +411,24 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     ESP_LOGI(TAG, "SPI config: CS=%d, mode=%d, freq=%lu, MOSI=%d, MISO=%d, SCLK=%d, dma=%d",
              cs_pin, mode, (unsigned long)freq, mosi_pin, miso_pin, sclk_pin, ctx->dma_enabled);
 
+    /* Reject reserved pins (USB/LED) to prevent hardware conflicts */
+    if (cs_pin >= 0 && is_pin_reserved(cs_pin)) {
+        ESP_LOGE(TAG, "SPI pin conflict: CS=%d (reserved: USB/LED)", cs_pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (mosi_pin >= 0 && is_pin_reserved(mosi_pin)) {
+        ESP_LOGE(TAG, "SPI pin conflict: MOSI=%d (reserved: USB/LED)", mosi_pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (miso_pin >= 0 && is_pin_reserved(miso_pin)) {
+        ESP_LOGE(TAG, "SPI pin conflict: MISO=%d (reserved: USB/LED)", miso_pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (sclk_pin >= 0 && is_pin_reserved(sclk_pin)) {
+        ESP_LOGE(TAG, "SPI pin conflict: SCLK=%d (reserved: USB/LED)", sclk_pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     ctx->cfg.spi.host   = SPI2_HOST;  /* Use SPI2_HOST by default */
     ctx->cfg.spi.cs_pin = cs_pin;
     ctx->cfg.spi.freq   = freq;
@@ -576,9 +640,15 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uint8_t addr  = cfg[2];
     uint32_t freq = read_be32(&cfg[3]);
 
-    /* Validate pins - ESP32-C6 has GPIO 0-30 */
-    if (sda < 0 || sda > 30 || scl < 0 || scl > 30) {
-        ESP_LOGE(TAG, "I2C invalid pins: SDA=%d SCL=%d (must be 0-30)", sda, scl);
+    /* Validate pins (S3: 0-48, C6: 0-30) */
+    if (sda < 0 || sda > GPIO_PIN_MAX || scl < 0 || scl > GPIO_PIN_MAX) {
+        ESP_LOGE(TAG, "I2C invalid pins: SDA=%d SCL=%d (must be 0-%d)", sda, scl, GPIO_PIN_MAX);
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* Reject reserved pins (USB/LED) to prevent hardware conflicts */
+    if (is_pin_reserved(sda) || is_pin_reserved(scl)) {
+        ESP_LOGE(TAG, "I2C pin conflict: SDA=%d SCL=%d (reserved: USB_D-=%d USB_D+=%d LED=%d)",
+                 sda, scl, RESERVED_PIN_USB_DN, RESERVED_PIN_USB_DP, RESERVED_PIN_LED);
         return ESP_ERR_INVALID_ARG;
     }
 

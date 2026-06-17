@@ -1,7 +1,13 @@
-# EHomeSystem ESP32 Collector - Configuration
-# Default target: ESP32-C6 4MB Flash
+# EHomeSystem ESP32 Collector - Shared Configuration
+# Console/logs on USB Serial/JTAG (both S3 and C6 support it)
+# UART0 is free for user data serial port
 
-# Flash size
+# Console output via USB Serial/JTAG (firmware flash + logs)
+# UART0 is free for user data but retains ROM bootloader download capability
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Flash
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
@@ -37,9 +43,6 @@ CONFIG_FREERTOS_HZ=1000
 
 # Main task stack
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
-
-# Console output via UART0 (for debugging via CP210x)
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # Partition Table - custom with OTA dual partition
 CONFIG_PARTITION_TABLE_CUSTOM=y

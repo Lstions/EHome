@@ -19,6 +19,10 @@
 #include "transport.h"
 #include "cmd_queue.h"
 
+/* Forward declaration — dma_pool_t is owned by dma_pool component.
+ * Full definition in dma_pool.h; app_state only needs the pointer. */
+struct dma_pool_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,6 +36,7 @@ typedef struct {
     /* ---- Bus DMA pool ---- */
     bus_dma_ctx_t bus_ctx[SCHED_MAX_CHANNELS];
     uint32_t      bus_ch[SCHED_MAX_CHANNELS];
+    char          bus_hw_id[SCHED_MAX_CHANNELS][16]; /* hw_id per slot (for cleanup) */
 
     /* ---- Runtime state ---- */
     uint32_t    uptime_sec;
@@ -47,6 +52,9 @@ typedef struct {
 
     /* ---- Command queue ---- */
     QueueHandle_t cmd_queue;
+
+    /* ---- DMA resource pool (DIP: injected, not global) ---- */
+    struct dma_pool_t *dma_pool;
 
 } app_state_t;
 

@@ -242,139 +242,123 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
     esp_err_t err;
     int total_bytes = 0;  // actual downloaded bytes, used for SHA256
 
+    /* Runtime URL detection: http:// or https:// */
+    bool is_https = (strncmp(url, "https://", 8) == 0);
+    bool is_http  = (strncmp(url, "http://", 7) == 0);
+
+    if (!is_http && !is_https) {
+        ESP_LOGE(TAG, "Invalid URL scheme (must be http:// or https://)");
+        return ESP_ERR_INVALID_ARG;
+    }
+
 #if CONFIG_COLLECTOR_OTA_ALLOW_HTTP
-    ESP_LOGI(TAG, "[DIAG] Using HTTP mode (CONFIG_COLLECTOR_OTA_ALLOW_HTTP=y)");
+    if (is_http && !is_https) {
+        ESP_LOGW(TAG, "Using plain HTTP (development mode)");
+#else
+    if (is_http && !is_https) {
+        ESP_LOGE(TAG, "HTTP not allowed (CONFIG_COLLECTOR_OTA_ALLOW_HTTP=n)");
+        return ESP_ERR_NOT_SUPPORTED;
+#endif
+        /* HTTP: direct esp_http_client */
+        esp_http_client_config_t cli_cfg = {0};
+        cli_cfg.url = url;
+        cli_cfg.timeout_ms = 30000;
+        cli_cfg.buffer_size = 8192;
+        cli_cfg.buffer_size_tx = 1024;
 
-    /* HTTP: direct esp_http_client (esp_https_ota unreliable for plain HTTP) */
-    esp_http_client_config_t cli_cfg;
-    ESP_LOGI(TAG, "[DIAG] Building HTTP config...");
-    err = build_ota_http_config(&cli_cfg, url);
-    ESP_LOGI(TAG, "[DIAG] build_ota_http_config returned: %s", esp_err_to_name(err));
-    ESP_LOGI(TAG, "[DIAG] HTTP config: url='%s', timeout_ms=%d, transport_type=%d",
-             cli_cfg.url ? cli_cfg.url : "(null)", cli_cfg.timeout_ms, cli_cfg.transport_type);
+        esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
+        if (client == NULL) {
+            ESP_LOGE(TAG, "HTTP client init FAILED");
+            return ESP_FAIL;
+        }
 
-    cli_cfg.timeout_ms = 30000;
-    cli_cfg.buffer_size = 8192;
-    cli_cfg.buffer_size_tx = 1024;
-    ESP_LOGI(TAG, "[DIAG] Updated config: timeout_ms=%d, buffer_size=%d, buffer_size_tx=%d",
-             cli_cfg.timeout_ms, cli_cfg.buffer_size, cli_cfg.buffer_size_tx);
-
-    ESP_LOGI(TAG, "[DIAG] Calling esp_http_client_init...");
-    esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
-    ESP_LOGI(TAG, "[DIAG] esp_http_client_init returned: %p", client);
-    if (client == NULL) {
-        ESP_LOGE(TAG, "[DIAG] HTTP client init FAILED - returning ESP_FAIL");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "[DIAG] Calling esp_http_client_open(client, 0)...");
-    err = esp_http_client_open(client, 0);
-    ESP_LOGI(TAG, "[DIAG] esp_http_client_open returned: %s (0x%x)",
-             esp_err_to_name(err), err);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[DIAG] HTTP open FAILED");
-        esp_http_client_cleanup(client);
-        return err;
-    }
-
-    ESP_LOGI(TAG, "[DIAG] Calling esp_http_client_fetch_headers...");
-    int cl = esp_http_client_fetch_headers(client);
-    ESP_LOGI(TAG, "[DIAG] fetch_headers returned content-length: %d", cl);
-
-    int sc = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "[DIAG] HTTP status code: %d", sc);
-
-    if (sc != 200) {
-        ESP_LOGE(TAG, "[DIAG] HTTP status not 200, aborting");
-        esp_http_client_close(client); esp_http_client_cleanup(client);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "[DIAG] HTTP 200 OK, content-length=%d bytes", cl);
-
-    ESP_LOGI(TAG, "[DIAG] Calling esp_ota_get_next_update_partition(NULL)...");
-    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-    ESP_LOGI(TAG, "[DIAG] Update partition: %p", part);
-    if (part == NULL) {
-        ESP_LOGE(TAG, "[DIAG] No OTA partition found!");
-        esp_http_client_close(client); esp_http_client_cleanup(client);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "[DIAG] Partition: label='%s', address=0x%" PRIx32 ", size=%" PRIu32,
-             part->label, part->address, part->size);
-
-    esp_ota_handle_t handle = 0;
-    ESP_LOGI(TAG, "[DIAG] Calling esp_ota_begin...");
-    err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
-    ESP_LOGI(TAG, "[DIAG] esp_ota_begin returned: %s, handle=%" PRIu32,
-             esp_err_to_name(err), handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[DIAG] esp_ota_begin FAILED");
-        esp_http_client_close(client); esp_http_client_cleanup(client);
-        return err;
-    }
-
-    int total = 0, last_pct = -1;
-    static uint8_t rx[4096];
-    int n;
-    int read_count = 0;
-    ESP_LOGI(TAG, "[DIAG] Starting download loop, buffer size=%zu", sizeof(rx));
-    while ((n = esp_http_client_read(client, (char *)rx, sizeof(rx))) > 0) {
-        read_count++;
-        err = esp_ota_write(handle, rx, n);
+        err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "[DIAG] ota_write FAILED at %d bytes: %s", total, esp_err_to_name(err));
-            esp_ota_end(handle);
-            esp_http_client_close(client); esp_http_client_cleanup(client);
+            ESP_LOGE(TAG, "HTTP open FAILED: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
             return err;
         }
-        total += n;
-        int pct = cl > 0 ? (total * 100 / cl) : 0;
-        if (pct != last_pct) {
-            ESP_LOGI(TAG, "[DIAG] Downloaded %d/%d bytes (%d%%)", total, cl, pct);
-            last_pct = pct;
-            msg_handler_send_ota_prog(ota_id, 0, (uint8_t)pct, NULL);
+
+        int cl = esp_http_client_fetch_headers(client);
+        int sc = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "HTTP %d, content-length=%d", sc, cl);
+
+        if (sc != 200) {
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ESP_FAIL;
         }
-        if (read_count % 50 == 0) {
-            ESP_LOGI(TAG, "[DIAG] Read loop iteration %d, total=%d bytes", read_count, total);
+
+        const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+        if (part == NULL) {
+            ESP_LOGE(TAG, "No OTA partition found");
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ESP_FAIL;
+        }
+
+        esp_ota_handle_t handle = 0;
+        err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_begin FAILED: %s", esp_err_to_name(err));
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return err;
+        }
+
+        int total = 0, last_pct = -1;
+        static uint8_t rx[4096];
+        int n;
+        while ((n = esp_http_client_read(client, (char *)rx, sizeof(rx))) > 0) {
+            err = esp_ota_write(handle, rx, n);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "ota_write FAILED at %d bytes", total);
+                esp_ota_end(handle);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return err;
+            }
+            total += n;
+            int pct = cl > 0 ? (total * 100 / cl) : 0;
+            if (pct != last_pct && pct % 10 == 0) {
+                ESP_LOGI(TAG, "Downloaded %d%%", pct);
+                last_pct = pct;
+                msg_handler_send_ota_prog(ota_id, 0, (uint8_t)pct, NULL);
+            }
+        }
+
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+
+        if (total == 0) {
+            ESP_LOGE(TAG, "Zero bytes downloaded");
+            esp_ota_end(handle);
+            return ESP_FAIL;
+        }
+
+        err = esp_ota_end(handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_end FAILED: %s", esp_err_to_name(err));
+            return err;
+        }
+
+        ESP_LOGI(TAG, "HTTP OTA written %d bytes", total);
+        total_bytes = total;
+    }
+    else {
+        /* HTTPS: use esp_https_ota high-level API */
+        ESP_LOGI(TAG, "Using HTTPS with certificate verification");
+        esp_http_client_config_t cli_cfg;
+        build_ota_http_config(&cli_cfg, url);
+        cli_cfg.timeout_ms = 30000;
+        esp_https_ota_config_t ota_cfg = { .http_config = &cli_cfg };
+        err = esp_https_ota(&ota_cfg);
+        total_bytes = (int)size;
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "HTTPS OTA fail: %s (0x%x)", esp_err_to_name(err), err);
+            return err;
         }
     }
-    ESP_LOGI(TAG, "[DIAG] Download loop finished. Last read returned: %d", n);
-    ESP_LOGI(TAG, "[DIAG] Total read iterations: %d, total bytes: %d", read_count, total);
-
-    ESP_LOGI(TAG, "[DIAG] Closing HTTP client...");
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    ESP_LOGI(TAG, "[DIAG] HTTP client closed");
-
-    if (total == 0) {
-        ESP_LOGE(TAG, "[DIAG] Zero bytes downloaded!");
-        esp_ota_end(handle);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "[DIAG] Calling esp_ota_end...");
-    err = esp_ota_end(handle);
-    ESP_LOGI(TAG, "[DIAG] esp_ota_end returned: %s", esp_err_to_name(err));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "[DIAG] esp_ota_end FAILED");
-        return err;
-    }
-    ESP_LOGI(TAG, "[DIAG] OTA written %d bytes to partition", total);
-    total_bytes = total;
-#else
-    /* HTTPS: use esp_https_ota high-level API */
-    esp_http_client_config_t cli_cfg;
-    build_ota_http_config(&cli_cfg, url);
-    cli_cfg.timeout_ms = 30000;
-    esp_https_ota_config_t ota_cfg = { .http_config = &cli_cfg };
-    err = esp_https_ota(&ota_cfg);
-    total_bytes = (int)size;
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA fail: %s (0x%x)", esp_err_to_name(err), err);
-        return err;
-    }
-#endif
 
     /* Write NVS: verifying */
     ota_nvs_set_state(OTA_STATE_VERIFYING);

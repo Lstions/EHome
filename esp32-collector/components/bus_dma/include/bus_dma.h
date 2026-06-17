@@ -31,6 +31,52 @@ extern "C" {
 #define BUS_TYPE_I2C   2
 #define BUS_TYPE_SPI   3
 
+/* === Bus config helper === */
+
+/**
+ * @brief Extract DMA enabled flag from bus_config raw bytes.
+ *
+ * Bus config byte layouts:
+ *   UART: [tx_pin, rx_pin, baud×4(BE)] + optional flags byte at offset 6
+ *   SPI:  [cs_pin, mode, freq×4(BE)]   + optional flags byte at offset 6
+ *   I2C:  [sda, scl, addr, freq×4(BE)] + optional flags byte at offset 7
+ *
+ * @param bus_type      BUS_TYPE_UART / BUS_TYPE_I2C / BUS_TYPE_SPI
+ * @param bus_config    Bus-specific configuration bytes
+ * @param bus_config_len Length of config buffer
+ * @return true if DMA is enabled, true if flags byte is missing (default)
+ */
+static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
+                                               const uint8_t *bus_config,
+                                               size_t bus_config_len)
+{
+    size_t flags_offset = 0;
+    size_t min_len = 0;
+
+    switch (bus_type) {
+    case BUS_TYPE_UART:
+        flags_offset = 6;
+        min_len = 7;
+        break;
+    case BUS_TYPE_I2C:
+        flags_offset = 7;
+        min_len = 8;
+        break;
+    case BUS_TYPE_SPI:
+        flags_offset = 6;
+        min_len = 7;
+        break;
+    default:
+        return true; /* Unknown bus type, default to DMA enabled */
+    }
+
+    if (bus_config && bus_config_len >= min_len) {
+        return (bus_config[flags_offset] & 0x01) != 0;
+    }
+    /* Flags byte missing, default to DMA enabled */
+    return true;
+}
+
 /* === Bus DMA context === */
 typedef struct {
     uint8_t  bus_type;

@@ -70,6 +70,13 @@ void frame_encoder_init(frame_encoder_t *enc, uint8_t *buf, size_t cap, uint8_t 
 frame_err_t frame_encode_varint(frame_encoder_t *enc, uint8_t field_num, uint64_t value);
 frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const char *str);
 frame_err_t frame_encode_bytes(frame_encoder_t *enc, uint8_t field_num, const uint8_t *data, size_t len);
+/**
+ * @brief Append raw bytes directly to encoder (no field tag/length prefix).
+ *
+ * Use for pre-encoded sub-message payloads that already contain their own
+ * field tags. Avoids direct enc->pos manipulation by callers.
+ */
+frame_err_t frame_encoder_append_raw(frame_encoder_t *enc, const uint8_t *data, size_t len);
 /* Bool is encoded as varint (0 or 1), protobuf-compatible */
 static inline frame_err_t frame_encode_bool(frame_encoder_t *enc, uint8_t field_num, bool value) {
     return frame_encode_varint(enc, field_num, value ? 1 : 0);
