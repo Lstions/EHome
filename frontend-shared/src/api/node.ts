@@ -149,6 +149,27 @@ export interface Capabilities {
   }
 }
 
+// ============================================================
+// DMA 相关类型定义
+// ============================================================
+
+export interface DmaChannelInfo {
+  dma_id: number
+  name: string
+  dma_type: number
+  capabilities: number
+  max_burst: number
+  state: number       // 0=free, 1=allocated, 2=disabled
+  bound_to: string
+  compatible_bus: number
+}
+
+export interface DmaChannelConfig {
+  dma_id: number
+  enabled: boolean
+  bind_to: string
+}
+
 export interface PeripheralAssignment {
   peripheral_type: 'uart' | 'i2c' | 'spi'
   peripheral_id: string
@@ -289,5 +310,17 @@ export const nodeApi = {
       `/api/v1/nodes/${id}/ping`
     )
     return response.data
+  },
+
+  // DMA 通道管理
+  async getDmaChannels(id: number): Promise<DmaChannelInfo[]> {
+    const response = await client.get<unknown, ApiResponse<{ dma_channels: DmaChannelInfo[] }>>(
+      `/api/v1/nodes/${id}/dma-channels`
+    )
+    return response.data?.dma_channels || []
+  },
+
+  async updateDmaConfig(id: number, configs: DmaChannelConfig[]): Promise<void> {
+    await client.put(`/api/v1/nodes/${id}/dma-config`, configs)
   },
 }

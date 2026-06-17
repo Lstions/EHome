@@ -127,6 +127,70 @@
       <ChannelPanel ref="busConfigPanelRef" :collector-id="collectorId" :collector-status="collector?.status" />
     </el-card>
 
+    <!-- DMA 通道 -->
+    <el-card v-if="collector" style="margin-top: 20px;">
+      <template #header>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span>DMA 通道</span>
+          <el-button size="small" @click="loadDmaChannels" :loading="dmaLoading">
+            <el-icon><Refresh /></el-icon>
+            刷新
+          </el-button>
+        </div>
+      </template>
+
+      <el-skeleton v-if="dmaLoading && dmaChannels.length === 0" :rows="3" animated />
+      <el-empty v-else-if="dmaChannels.length === 0" description="暂无 DMA 数据" />
+      <div v-else class="dma-grid">
+        <div
+          v-for="dma in dmaChannels"
+          :key="dma.dma_id"
+          class="dma-card"
+          :class="dmaStateClass(dma.state)"
+        >
+          <div class="dma-header">
+            <span class="dma-name">{{ dma.name }}</span>
+            <el-tag :type="dmaStateTagType(dma.state)" size="small">
+              {{ dmaStateText(dma.state) }}
+            </el-tag>
+          </div>
+          <div class="dma-details">
+            <div class="dma-detail-row">
+              <span class="dma-label">类型</span>
+              <span>{{ dmaTypeText(dma.dma_type) }}</span>
+            </div>
+            <div class="dma-detail-row">
+              <span class="dma-label">能力</span>
+              <span>{{ capText(dma.capabilities) }}</span>
+            </div>
+            <div class="dma-detail-row">
+              <span class="dma-label">最大突发</span>
+              <span>{{ dma.max_burst }} 字节</span>
+            </div>
+            <div v-if="dma.bound_to" class="dma-detail-row">
+              <span class="dma-label">绑定</span>
+              <span class="dma-bound">{{ dma.bound_to }}</span>
+            </div>
+            <div class="dma-detail-row">
+              <span class="dma-label">兼容总线</span>
+              <span>{{ busText(dma.compatible_bus) }}</span>
+            </div>
+          </div>
+          <div class="dma-controls">
+            <label class="dma-toggle">
+              <el-switch
+                :model-value="dma.state !== 2"
+                :disabled="dma.state === 1"
+                @change="toggleDma(dma, $event)"
+                active-text="启用"
+                inactive-text="禁用"
+              />
+            </label>
+          </div>
+        </div>
+      </div>
+    </el-card>
+
     <el-card style="margin-top: 20px;">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -267,7 +331,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
-import { nodeApi, type OTARecord } from '@/api/node'
+import { nodeApi, type OTARecord, type DmaChannelInfo } from '@/api/node'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -291,6 +355,10 @@ const showOTADialog = ref(false)
 const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
 const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
+
+// DMA 通道
+const dmaChannels = ref<DmaChannelInfo[]>([])
+const dmaLoading = ref(false)
 
 let unsubscribe: (() => void) | null = null
 
@@ -549,6 +617,84 @@ const hasPeripherals = computed(() => {
          (hardware.spi?.length || 0) > 0
 })
 
+// ============================================================
+// DMA 辅助函数
+// ============================================================
+
+const dmaStateText = (state: number): string => {
+  switch (state) {
+    case 0: return '空闲'
+    case 1: return '已分配'
+    case 2: return '已禁用'
+    default: return '未知'
+  }
+}
+
+const dmaStateClass = (state: number): string => {
+  switch (state) {
+    case 0: return 'dma-state-free'
+    case 1: return 'dma-state-allocated'
+    case 2: return 'dma-state-disabled'
+    default: return ''
+  }
+}
+
+const dmaStateTagType = (state: number): string => {
+  switch (state) {
+    case 0: return 'info'
+    case 1: return 'success'
+    case 2: return 'danger'
+    default: return 'info'
+  }
+}
+
+const dmaTypeText = (type: number): string => {
+  return type === 0 ? 'GDMA' : `类型${type}`
+}
+
+const capText = (cap: number): string => {
+  const parts: string[] = []
+  if (cap & 1) parts.push('TX')
+  if (cap & 2) parts.push('RX')
+  if (cap & 4) parts.push('Burst')
+  return parts.join(', ') || '无'
+}
+
+const busText = (bus: number): string => {
+  const parts: string[] = []
+  if (bus & 1) parts.push('UART')
+  if (bus & 2) parts.push('I2C')
+  if (bus & 4) parts.push('SPI')
+  return parts.join(', ') || '无'
+}
+
+const loadDmaChannels = async () => {
+  const id = collectorId.value
+  if (!id) return
+  dmaLoading.value = true
+  try {
+    dmaChannels.value = await nodeApi.getDmaChannels(id)
+  } catch (error: any) {
+    logger.error('获取 DMA 通道失败', { error: String(error) })
+  } finally {
+    dmaLoading.value = false
+  }
+}
+
+const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
+  try {
+    await nodeApi.updateDmaConfig(collectorId.value, [{
+      dma_id: dma.dma_id,
+      enabled: enabled,
+      bind_to: dma.bound_to
+    }])
+    await loadDmaChannels()
+    ElMessage.success(enabled ? `已启用 ${dma.name}` : `已禁用 ${dma.name}`)
+  } catch (error: any) {
+    ElMessage.error('操作失败: ' + (error.message || '未知错误'))
+  }
+}
+
 // 采集器上线时刷新通道列表
 watch(() => collector.value?.status, (newStatus, oldStatus) => {
   if (oldStatus === 'offline' && newStatus === 'online') {
@@ -562,6 +708,7 @@ onMounted(() => {
   fetchCollectorDetail()
   fetchDevices()
   fetchOTAHistory()
+  loadDmaChannels()
 
   // 订阅状态更新
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
@@ -744,5 +891,89 @@ onUnmounted(() => {
     font-size: 12px;
     font-family: 'Courier New', Courier, monospace;
   }
+}
+
+/* DMA 通道卡片 */
+.dma-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.dma-card {
+  padding: 16px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  border: 1px solid #e4e7ed;
+  transition: border-color 0.2s;
+}
+
+.dma-card:hover {
+  border-color: #409eff;
+}
+
+.dma-card.dma-state-allocated {
+  background: #f0f9eb;
+  border-color: #c2e7b0;
+}
+
+.dma-card.dma-state-disabled {
+  background: #fef0f0;
+  border-color: #fbc4c4;
+}
+
+.dma-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.dma-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: #303133;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.dma-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.dma-detail-row {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: #606266;
+}
+
+.dma-label {
+  width: 70px;
+  flex-shrink: 0;
+  color: #909399;
+  font-size: 12px;
+}
+
+.dma-bound {
+  color: #67c23a;
+  font-weight: 500;
+}
+
+.dma-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid #ebeef5;
+}
+
+.dma-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
 }
 </style>
