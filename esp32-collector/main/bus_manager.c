@@ -13,7 +13,6 @@
 #include "bus_manager.h"
 #include "bus_dma.h"
 #include "config_mgr.h"
-#include "msg_handler.h"
 #include "dma_pool.h"
 #include "esp_log.h"
 #include <string.h>
@@ -21,9 +20,13 @@
 
 #define TAG "BUS_MGR"
 
-/* ---- Forward declare for msg_handler callback ---- */
-extern void msg_handler_send_write_rsp(uint32_t request_id, bool success,
-                                       uint32_t error_code, const char *error_msg);
+/* ---- Callback for write response (injected by main.c) ---- */
+static write_rsp_cb_t s_write_rsp_cb = NULL;
+
+void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb)
+{
+    s_write_rsp_cb = cb;
+}
 
 /* ==== hw_id derivation (LoD: name reflects actual resource) ==== */
 
@@ -180,5 +183,5 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
     if (l > 0 && d) memcpy(cmd.tx_data, d, cmd.tx_len);
 
     if (!xQueueSend(s->cmd_queue, &cmd, 0))
-        msg_handler_send_write_rsp(rid, false, 0xFFFF, "queue full");
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
 }

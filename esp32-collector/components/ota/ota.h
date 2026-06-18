@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,22 @@ uint8_t ota_get_nvs_state(void);
  * Call after boot validation (e.g. WiFi connected successfully).
  */
 void ota_confirm_valid(void);
+
+/**
+ * @brief OTA progress callback type for decoupling from msg_handler.
+ * @param ota_id Unique OTA session identifier
+ * @param status 0=downloading, 1=completed, 2=verifying, 3=failed
+ * @param progress_pct Progress percentage (0-100)
+ * @param error_msg Error message (NULL if no error)
+ */
+typedef void (*ota_progress_cb_t)(const char *ota_id, uint8_t status,
+                                   uint8_t progress_pct, const char *error_msg);
+
+/**
+ * @brief Inject OTA progress callback to decouple from msg_handler.
+ * Must be called before ota_start().
+ */
+void ota_set_progress_callback(ota_progress_cb_t cb);
 
 #ifdef __cplusplus
 }

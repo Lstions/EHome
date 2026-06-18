@@ -1,54 +1,67 @@
 /**
  * @file msg_handler.c
- * @brief Message Dispatcher Implementation
+ * @brief Message Dispatcher Core — routes incoming frames to handler modules
+ *
+ * This is the routing layer only. Actual message processing lives in:
+ *   handler_hello.c    — Hello/HelloAck/Ping/Pong
+ *   handler_config.c   — ConfigManifest/ConfigQuery/QueryResources
+ *   handler_writecmd.c — WriteCmd/ScanReq/QueryReq
+ *   handler_data.c     — DataReport/StatusReport/OtaProg/OtaCmd
  */
 
 #include "msg_handler.h"
+#include "msg_handler_internal.h"
 #include "frame_codec.h"
+#include "transport.h"
 #include "ehome_mqtt.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
-#include "ota.h"
-#include "factory_reset.h"
-#include "sync_manager.h"
-#include "hw_profile.h"
-#include "transport.h"
 #include "esp_log.h"
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include <string.h>
-#include <stdlib.h>
 
 #define TAG "MSG"
 
-static dma_pool_t *s_dma_pool = NULL;  /* Injected via setter (DIP) */
+/* === State === */
+static dma_pool_t *s_dma_pool = NULL;
+static SemaphoreHandle_t s_publish_mutex = NULL;
+static transport_t *s_current_transport = NULL;
+
+/* === Forward declarations for handler functions === */
+extern void handler_hello_process_ack(frame_decoder_t *dec);
+extern void handler_hello_process_ping(frame_decoder_t *dec);
+extern void handler_config_process_manifest(frame_decoder_t *dec);
+extern void handler_config_process_query(frame_decoder_t *dec);
+extern void handler_config_process_query_resources(frame_decoder_t *dec);
+extern void handler_writecmd_process(frame_decoder_t *dec);
+extern void handler_writecmd_process_scan(frame_decoder_t *dec);
+extern void handler_writecmd_process_query(frame_decoder_t *dec);
+extern void handler_data_process_ota(frame_decoder_t *dec);
+
+/* === DMA pool injection === */
 
 void msg_handler_set_dma_pool(dma_pool_t *pool)
 {
     s_dma_pool = pool;
 }
 
-/* Mutex for thread-safe transport access */
-static SemaphoreHandle_t s_publish_mutex = NULL;
+dma_pool_t *msg_handler_get_dma_pool(void)
+{
+    return s_dma_pool;
+}
 
-/* Current transport context for sending responses */
-static transport_t *s_current_transport = NULL;
+/* === Publish === */
 
-/* === Internal publish function with transport routing === */
-static void msg_handler_publish(const uint8_t *data, size_t len)
+void msg_handler_publish(const uint8_t *data, size_t len)
 {
     transport_t *transport_to_use = NULL;
-    
-    /* Get current transport under mutex protection */
+
     if (s_publish_mutex != NULL) {
         xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
         transport_to_use = s_current_transport;
         xSemaphoreGive(s_publish_mutex);
     }
-    
-    /* If we have a current transport context (message came from TCP/MQTT), 
-       send response back through that transport */
+
     if (transport_to_use && transport_to_use->ops && transport_to_use->ops->send) {
         esp_err_t ret = transport_to_use->ops->send(transport_to_use, data, len);
         if (ret == ESP_OK) {
@@ -57,96 +70,44 @@ static void msg_handler_publish(const uint8_t *data, size_t len)
         }
         ESP_LOGW(TAG, "Failed to send via current transport, falling back to broadcast");
     }
-    
-    /* No current transport or send failed: broadcast to all connected transports */
+
     esp_err_t ret = transport_broadcast(data, len);
     if (ret == ESP_OK) {
         ESP_LOGD(TAG, "Broadcast to all transports (%d bytes)", (int)len);
         return;
     }
-    
-    /* Last resort: send via MQTT directly */
+
     ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
     mqtt_client_publish_impl(data, len);
 }
 
-/* HelloAck state */
-static volatile bool s_hello_ack_received = false;
-static volatile uint64_t s_server_time_ms = 0;
+/* === Init / Deinit === */
 
-/* Weak callbacks - can be overridden by main.c */
-__attribute__((weak)) void on_write_cmd_received(uint32_t request_id, uint32_t channel_id,
-                                                   const uint8_t *data, size_t len, uint32_t read_size)
-{
-    (void)request_id;
-    (void)channel_id;
-    (void)data;
-    (void)len;
-    (void)read_size;
-}
-
-__attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t hardware_id)
-{
-    (void)request_id;
-    (void)hardware_id;
-}
-
-__attribute__((weak)) void on_query_resources_received(const char *request_id)
-{
-    (void)request_id;
-}
-
-/* === Init === */
 void msg_handler_init(void)
 {
-    s_hello_ack_received = false;
-    s_server_time_ms = 0;
-    
-    /* Create mutex for thread-safe transport access */
     if (s_publish_mutex == NULL) {
         s_publish_mutex = xSemaphoreCreateMutex();
         if (s_publish_mutex == NULL) {
             ESP_LOGE(TAG, "Failed to create publish mutex");
         }
     }
-    
     ESP_LOGI(TAG, "Message handler initialized");
 }
 
 void msg_handler_deinit(void)
 {
-    /* Clean up mutex */
     if (s_publish_mutex != NULL) {
         vSemaphoreDelete(s_publish_mutex);
         s_publish_mutex = NULL;
     }
-    
     s_current_transport = NULL;
     ESP_LOGI(TAG, "Message handler deinitialized");
 }
 
-/* === HelloAck state === */
-bool msg_handler_is_hello_ack_received(void)
-{
-    return s_hello_ack_received;
-}
+/* === Transport-aware processing === */
 
-uint64_t msg_handler_get_server_time(void)
-{
-    return s_server_time_ms;
-}
-
-void msg_handler_reset_hello_ack(void)
-{
-    s_hello_ack_received = false;
-    s_server_time_ms = 0;
-}
-
-/* === Process incoming frame === */
-/* === Message processing === */
 void msg_handler_process_with_transport(const uint8_t *data, size_t len, transport_t *transport)
 {
-    /* Set current transport context for sending responses */
     if (s_publish_mutex != NULL) {
         xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
         s_current_transport = transport;
@@ -154,11 +115,9 @@ void msg_handler_process_with_transport(const uint8_t *data, size_t len, transpo
     } else {
         s_current_transport = transport;
     }
-    
-    /* Process the message */
+
     msg_handler_process(data, len);
-    
-    /* Clear transport context */
+
     if (s_publish_mutex != NULL) {
         xSemaphoreTake(s_publish_mutex, portMAX_DELAY);
         s_current_transport = NULL;
@@ -167,6 +126,8 @@ void msg_handler_process_with_transport(const uint8_t *data, size_t len, transpo
         s_current_transport = NULL;
     }
 }
+
+/* === Message dispatch === */
 
 void msg_handler_process(const uint8_t *data, size_t len)
 {
@@ -186,469 +147,48 @@ void msg_handler_process(const uint8_t *data, size_t len)
     ESP_LOGI(TAG, "Received message type=0x%02X, len=%zu", msg_type, len);
 
     switch (msg_type) {
-    case MSG_CONFIG_MFST: {
-        char manifest_id[64] = {0};
-        uint64_t server_epoch = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
-                if (field.value.bytes.ptr) {
-                    size_t copy_len = field.value.bytes.len < sizeof(manifest_id) - 1 
-                                    ? field.value.bytes.len : sizeof(manifest_id) - 1;
-                    memcpy(manifest_id, field.value.bytes.ptr, copy_len);
-                    manifest_id[copy_len] = '\0';
-                }
-            }
-            /* v2.1: field 2 = config_epoch */
-            if (field.field_num == 2 && field.wire_type == WIRE_VARINT) {
-                server_epoch = field.value.varint;
-            }
-        }
-        ESP_LOGI(TAG, "ConfigManifest: manifest_id=%s, epoch=%llu", 
-                 manifest_id, (unsigned long long)server_epoch);
+    case MSG_CONFIG_MFST:
+        /* ConfigManifest needs raw data for config_mgr_apply_manifest */
         config_mgr_apply_manifest(data, len);
-        msg_handler_send_config_result(manifest_id, true);
-        
-        /* v2.1: notify sync_manager of applied config */
-        sync_manager_on_config_applied(server_epoch, manifest_id);
-        
-        /* v2.1: notify downlink received */
-        sync_manager_on_downlink_received(MSG_CONFIG_MFST);
+        /* Re-init decoder since apply_manifest consumed the frame */
+        frame_decoder_init(&dec, data, len);
+        handler_config_process_manifest(&dec);
         break;
-    }
 
-    case MSG_WRITE_CMD: {
-        uint32_t request_id = 0, channel_id = 0, read_size = 0;
-        const uint8_t *cmd_data = NULL;
-        size_t cmd_len = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            switch (field.field_num) {
-            case 1: request_id = (uint32_t)field.value.varint; break;
-            case 2: channel_id = (uint32_t)field.value.varint; break;
-            case 3:
-                cmd_data = field.value.bytes.ptr;
-                cmd_len = field.value.bytes.len;
-                break;
-            case 4: read_size = (uint32_t)field.value.varint; break;
-            }
-        }
-        ESP_LOGI(TAG, "WriteCmd: req=%lu, ch=%lu, len=%zu", 
-                 (unsigned long)request_id, (unsigned long)channel_id, cmd_len);
-        
-        /* Check for factory reset command: channel_id=0, data=[0xFC, 0x00] */
-        if (channel_id == 0 && cmd_len == 2 && cmd_data && cmd_data[0] == 0xFC && cmd_data[1] == 0x00) {
-            ESP_LOGI(TAG, "Factory reset command received");
-            msg_handler_send_write_rsp(request_id, true, 0, NULL);
-            /* Perform factory reset - defined in main.c */
-            factory_reset_trigger();
-        } else {
-            on_write_cmd_received(request_id, channel_id, cmd_data, cmd_len, read_size);
-        }
+    case MSG_WRITE_CMD:
+        handler_writecmd_process(&dec);
         break;
-    }
 
-    case MSG_PING: {
-        uint64_t timestamp_us = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1) {
-                timestamp_us = field.value.varint;
-            }
-        }
-        ESP_LOGI(TAG, "Ping: ts=%llu", (unsigned long long)timestamp_us);
-        msg_handler_send_pong(timestamp_us);
+    case MSG_PING:
+        handler_hello_process_ping(&dec);
         break;
-    }
 
-    case MSG_OTA_CMD: {
-        // static to avoid stack overflow in mqtt_task (stack ~6KB, this saves ~480B)
-        static char ota_id[64];
-        static char firmware_url[256];
-        static char checksum[128];
-        static char version[32];
-        memset(ota_id, 0, sizeof(ota_id));
-        memset(firmware_url, 0, sizeof(firmware_url));
-        memset(checksum, 0, sizeof(checksum));
-        memset(version, 0, sizeof(version));
-        uint64_t size_bytes = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.wire_type != WIRE_LENGTH_DELIMITED && field.wire_type != WIRE_VARINT) continue;
-            switch (field.field_num) {
-            case 1:
-                if (field.value.bytes.ptr) {
-                    memcpy(ota_id, field.value.bytes.ptr, 
-                           field.value.bytes.len < sizeof(ota_id)-1 ? field.value.bytes.len : sizeof(ota_id)-1);
-                }
-                break;
-            case 2:
-                if (field.value.bytes.ptr) {
-                    memcpy(firmware_url, field.value.bytes.ptr,
-                           field.value.bytes.len < sizeof(firmware_url)-1 ? field.value.bytes.len : sizeof(firmware_url)-1);
-                }
-                break;
-            case 3:
-                if (field.value.bytes.ptr) {
-                    memcpy(checksum, field.value.bytes.ptr,
-                           field.value.bytes.len < sizeof(checksum)-1 ? field.value.bytes.len : sizeof(checksum)-1);
-                }
-                break;
-            case 4: size_bytes = field.value.varint; break;
-            case 5:
-                if (field.value.bytes.ptr) {
-                    memcpy(version, field.value.bytes.ptr,
-                           field.value.bytes.len < sizeof(version)-1 ? field.value.bytes.len : sizeof(version)-1);
-                }
-                break;
-            }
-        }
-        ESP_LOGI(TAG, "OtaCmd: id=%s, url=%s, size=%llu", ota_id, firmware_url, (unsigned long long)size_bytes);
-        if (ota_is_duplicate(ota_id)) {
-            ESP_LOGW(TAG, "OTA duplicate ignored: %s", ota_id);
-            break;
-        }
-        ota_start(ota_id, firmware_url, checksum, size_bytes, version);
+    case MSG_OTA_CMD:
+        handler_data_process_ota(&dec);
         break;
-    }
 
-    case MSG_SCAN_REQ: {
-        char request_id[64] = {0};
-        uint32_t hardware_id = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            switch (field.field_num) {
-            case 1:
-                if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                    memcpy(request_id, field.value.bytes.ptr,
-                           field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-                }
-                break;
-            case 2:
-                if (field.wire_type == WIRE_VARINT) {
-                    hardware_id = (uint32_t)field.value.varint;
-                }
-                break;
-            }
-        }
-        ESP_LOGI(TAG, "ScanReq: req=%s, hw=%lu", request_id, (unsigned long)hardware_id);
-        on_scan_req_received(request_id, hardware_id);
+    case MSG_SCAN_REQ:
+        handler_writecmd_process_scan(&dec);
         break;
-    }
 
-    case MSG_QUERY_REQ: {
-        char request_id[64] = {0};
-        uint32_t query_type = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            switch (field.field_num) {
-            case 1:
-                if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                    memcpy(request_id, field.value.bytes.ptr,
-                           field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-                }
-                break;
-            case 2:
-                if (field.wire_type == WIRE_VARINT) {
-                    query_type = (uint32_t)field.value.varint;
-                }
-                break;
-            }
-        }
-        ESP_LOGI(TAG, "QueryReq: req=%s, type=%lu", request_id, (unsigned long)query_type);
-        /* Respond with basic hardware info */
-        msg_handler_send_query_rsp(request_id, true, NULL);
+    case MSG_QUERY_REQ:
+        handler_writecmd_process_query(&dec);
         break;
-    }
 
-    case MSG_CONFIG_QUERY: {
-        char request_id[64] = {0};
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                memcpy(request_id, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-            }
-        }
-        ESP_LOGI(TAG, "ConfigQuery: req=%s", request_id);
-        /* Respond with current config state */
-        msg_handler_send_config_report(request_id);
+    case MSG_CONFIG_QUERY:
+        handler_config_process_query(&dec);
         break;
-    }
 
-    case MSG_HELLO_ACK: {
-        uint64_t server_time = 0;
-        uint32_t features = 0;
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            switch (field.field_num) {
-            case 1: server_time = field.value.varint; break;
-            case 2: features = (uint32_t)field.value.varint; break;
-            }
-        }
-        s_hello_ack_received = true;
-        s_server_time_ms = server_time;
-        ESP_LOGI(TAG, "HelloAck: server_time=%llu features=%u",
-                 (unsigned long long)server_time, (unsigned)features);
-        
-        /* v2.1: notify sync_manager */
-        sync_manager_on_downlink_received(MSG_HELLO_ACK);
+    case MSG_HELLO_ACK:
+        handler_hello_process_ack(&dec);
         break;
-    }
 
-    case MSG_QUERY_RESOURCES: {
-        char request_id[64] = {0};
-        frame_field_t field;
-        while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
-            if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                size_t copy_len = field.value.bytes.len < sizeof(request_id) - 1
-                                ? field.value.bytes.len : sizeof(request_id) - 1;
-                memcpy(request_id, field.value.bytes.ptr, copy_len);
-            }
-        }
-        ESP_LOGI(TAG, "QueryResources: req=%s", request_id);
-        on_query_resources_received(request_id);
-        /* Send full ResourceReport in response */
-        msg_handler_send_resource_report();
+    case MSG_QUERY_RESOURCES:
+        handler_config_process_query_resources(&dec);
         break;
-    }
 
     default:
         ESP_LOGW(TAG, "Unknown message type: 0x%02X", msg_type);
         break;
     }
-}
-
-/* === Send outgoing messages === */
-
-void msg_handler_send_hello(const char *node_id, const char *fw_version,
-                            const char *model, uint8_t channel_count)
-{
-    uint8_t buf[384];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_HELLO);
-    
-    /* v2.0 fields (1-4) */
-    /* field 1: node_id (was device_id in v2.1, value unchanged) */
-    frame_encode_string(&enc, 1, node_id);
-    frame_encode_string(&enc, 2, fw_version);
-    frame_encode_string(&enc, 3, model);
-    frame_encode_varint(&enc, 4, channel_count);
-    
-    /* v2.1 new fields (5-8) */
-    frame_encode_varint(&enc, 5, config_mgr_get_epoch());
-    frame_encode_varint(&enc, 6, config_mgr_has_manifest() ? 1 : 0);  /* bool as varint */
-    const char *mid = config_mgr_get_manifest_id();
-    if (mid && mid[0] != '\0') {
-        frame_encode_string(&enc, 7, mid);
-    }
-    frame_encode_string(&enc, 8, "2.1");  /* protocol version */
-    
-    ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, proto=2.1",
-             node_id, fw_version, model, channel_count,
-             (unsigned long long)config_mgr_get_epoch(),
-             config_mgr_has_manifest());
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t channel_count)
-{
-    uint8_t buf[128];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_STATUS_RPT);
-    
-    /* v2.0 fields (1-3) */
-    frame_encode_varint(&enc, 1, uptime_sec);
-    frame_encode_string(&enc, 2, status);
-    frame_encode_varint(&enc, 3, channel_count);
-    
-    /* v2.1 new fields (4-5) */
-    frame_encode_varint(&enc, 4, config_mgr_get_epoch());
-    frame_encode_varint(&enc, 5, (uint64_t)sync_manager_get_state_enum());  /* idle/syncing/error */
-    
-    ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d",
-             (unsigned long)uptime_sec, status, channel_count,
-             (unsigned long long)config_mgr_get_epoch(),
-             sync_manager_get_state_enum());
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
-                                  uint32_t sequence, const uint8_t *raw_data, size_t raw_len,
-                                  uint32_t error_code, uint32_t request_id)
-{
-    uint8_t buf[512];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_DATA_RPT);
-    frame_encode_varint(&enc, 1, channel_id);
-    frame_encode_varint(&enc, 2, timestamp_us);
-    frame_encode_varint(&enc, 3, sequence);
-    if (raw_data && raw_len > 0) {
-        frame_encode_bytes(&enc, 4, raw_data, raw_len);
-    }
-    if (error_code != 0) {
-        frame_encode_varint(&enc, 5, error_code);
-    }
-    if (request_id != 0) {
-        frame_encode_varint(&enc, 6, request_id);
-    }
-    
-    ESP_LOGD(TAG, "Sending DataReport: ch=%lu, seq=%lu, len=%zu", 
-             (unsigned long)channel_id, (unsigned long)sequence, raw_len);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_config_result(const char *manifest_id, bool success)
-{
-    uint8_t buf[128];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_CONFIG_RSLT);
-    frame_encode_string(&enc, 1, manifest_id);
-    frame_encode_varint(&enc, 2, success ? 1 : 0);
-    
-    ESP_LOGI(TAG, "Sending ConfigResult: %s, success=%d", manifest_id, success);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_write_rsp(uint32_t request_id, bool success,
-                                uint32_t error_code, const char *error_msg)
-{
-    uint8_t buf[256];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_WRITE_RSP);
-    frame_encode_varint(&enc, 1, request_id);
-    frame_encode_varint(&enc, 2, success ? 1 : 0);
-    if (error_code != 0) {
-        frame_encode_varint(&enc, 3, error_code);
-    }
-    if (error_msg && error_msg[0] != '\0') {
-        frame_encode_string(&enc, 4, error_msg);
-    }
-    
-    ESP_LOGI(TAG, "Sending WriteRsp: req=%lu, success=%d", (unsigned long)request_id, success);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_pong(uint64_t timestamp_us)
-{
-    uint8_t buf[32];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_PONG);
-    frame_encode_varint(&enc, 1, timestamp_us);
-    
-    ESP_LOGI(TAG, "Sending Pong: ts=%llu", (unsigned long long)timestamp_us);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_ota_prog(const char *ota_id, uint8_t status,
-                               uint8_t progress_pct, const char *error_msg)
-{
-    uint8_t buf[256];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_OTA_PROG);
-    frame_encode_string(&enc, 1, ota_id);
-    frame_encode_varint(&enc, 2, status);
-    frame_encode_varint(&enc, 3, progress_pct);
-    if (error_msg && error_msg[0] != '\0') {
-        frame_encode_string(&enc, 4, error_msg);
-    }
-    
-    ESP_LOGI(TAG, "Sending OtaProg: %s, status=%d, progress=%d%%", ota_id, status, progress_pct);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_scan_rpt(const char *request_id, uint32_t hardware_id,
-                               bool success, const uint32_t *addresses, uint8_t addr_count)
-{
-    uint8_t buf[256];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_SCAN_RPT);
-    frame_encode_string(&enc, 1, request_id);
-    frame_encode_varint(&enc, 2, hardware_id);
-    frame_encode_varint(&enc, 3, success ? 1 : 0);
-    
-    if (addresses && addr_count > 0) {
-        for (uint8_t i = 0; i < addr_count; i++) {
-            frame_encode_varint(&enc, 4, addresses[i]);
-        }
-    }
-    
-    ESP_LOGI(TAG, "Sending ScanRpt: req=%s, hw=%lu, success=%d, addrs=%d",
-             request_id, (unsigned long)hardware_id, success, addr_count);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_query_rsp(const char *request_id, bool success, const char *error_msg)
-{
-    uint8_t buf[256];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_QUERY_RSP);
-    frame_encode_string(&enc, 1, request_id);
-    frame_encode_varint(&enc, 2, success ? 1 : 0);
-    if (error_msg && error_msg[0] != '\0') {
-        frame_encode_string(&enc, 3, error_msg);
-    }
-    
-    ESP_LOGI(TAG, "Sending QueryRsp: req=%s, success=%d", request_id, success);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-void msg_handler_send_config_report(const char *request_id)
-{
-    uint8_t buf[256];
-    frame_encoder_t enc;
-    
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_CONFIG_REPORT);
-    frame_encode_string(&enc, 1, request_id);
-    
-    /* Get current config from config_mgr */
-    const config_manifest_t *cfg = config_mgr_get_manifest();
-    if (cfg && cfg->manifest_id[0] != '\0') {
-        frame_encode_string(&enc, 2, cfg->manifest_id);
-        frame_encode_varint(&enc, 3, cfg->template_count);
-        frame_encode_varint(&enc, 4, cfg->channel_count);
-    } else {
-        frame_encode_varint(&enc, 3, 0);
-        frame_encode_varint(&enc, 4, 0);
-    }
-    
-    ESP_LOGI(TAG, "Sending ConfigReport: req=%s, manifest=%s, tmpl=%d, ch=%d",
-             request_id, cfg ? cfg->manifest_id : "none", 
-             cfg ? cfg->template_count : 0, 
-             cfg ? cfg->channel_count : 0);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
-}
-
-/* === v2.4 Resource Report === */
-void msg_handler_send_resource_report(void)
-{
-    /* Use heap for large buffers to avoid stack overflow in hello task */
-    uint8_t *buf = heap_caps_malloc(1024, MALLOC_CAP_DEFAULT);
-    if (!buf) {
-        ESP_LOGE(TAG, "Failed to allocate ResourceReport buffer");
-        return;
-    }
-    size_t len = 0;
-
-    if (!s_dma_pool) {
-        ESP_LOGW(TAG, "dma_pool not set, sending report without DMA info");
-    }
-    if (!hw_profile_build_report(buf, 1024, &len, s_dma_pool)) {
-        ESP_LOGE(TAG, "Failed to build ResourceReport");
-        free(buf);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Sending ResourceReport: %zu bytes", len);
-    msg_handler_publish(buf, len);
-    free(buf);
 }

@@ -35,6 +35,7 @@ typedef enum {
     LED_STATE_FACTORY_RESET,    // 红色快闪 - 恢复出厂中
     LED_STATE_SYNCING,          // 黄色快闪 - v2.1 同步中
     LED_STATE_CONFIG_LAG,       // 橙色慢闪 - v2.1 配置落后
+    LED_STATE_WAITING_CONFIG,   // 青色慢闪 - HelloAck已收到，等待服务端下发ConfigManifest
     LED_STATE_MAX
 } led_state_t;
 
@@ -65,13 +66,6 @@ void rgb_led_set_state(led_state_t state);
  * @return 当前状态
  */
 led_state_t rgb_led_get_state(void);
-
-/**
- * @brief 设置 LED 状态
- * @param state LED 状态
- * @note 无优先级阻断，由调用方控制流程顺序
- */
-void rgb_led_set_state(led_state_t state);
 
 /**
  * @brief 强制设置 LED 状态 (等同于 set_state，保留兼容)

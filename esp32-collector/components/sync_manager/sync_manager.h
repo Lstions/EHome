@@ -21,7 +21,7 @@ typedef enum {
     SYNC_REASON_NONE,              // No sync needed
     SYNC_REASON_PERIODIC,          // Periodic (default 10min)
     SYNC_REASON_EPOCH_LAG,         // Response indicates epoch lag
-    SYNC_REASON_NVS_EMPTY,         // NVS empty (factory reset)
+    SYNC_REASON_NO_CONFIG,          // No active config (boot/factory reset)
     SYNC_REASON_FORCED,            // force_sync flag received
     SYNC_REASON_USER_ACTION,       // User-triggered action
     SYNC_REASON_DOUBT,             // Suspected state inconsistency
@@ -32,7 +32,7 @@ typedef enum {
 typedef struct {
     uint64_t epoch;               // Current local epoch
     char     manifest_id[64];     // Current local manifest_id
-    bool     nvs_has_config;      // NVS has manifest data
+    bool     has_active_config;    // Device has active config in memory
     uint32_t last_sync_time_sec;  // Last sync time (seconds since boot)
     uint32_t last_sync_id_hash;   // Last sync_id hash (dedup)
 } sync_state_t;
@@ -68,6 +68,10 @@ void sync_manager_periodic_task(void *pvParameters);
 
 /* === Update state after successful ConfigManifest apply === */
 void sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id);
+
+/* === Config receive timeout (esp_timer one-shot) === */
+void sync_manager_start_config_timeout(void);
+void sync_manager_cancel_config_timeout(void);
 
 #ifdef __cplusplus
 }

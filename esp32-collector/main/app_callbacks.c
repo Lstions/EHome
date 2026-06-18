@@ -53,6 +53,7 @@ static void handle_config_applied(app_state_t *s)
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
     
     app_state_unlock_config();
+    rgb_led_set_state(LED_STATE_RUNNING);  /* Config applied — device operational */
     ESP_LOGI(TAG, "handle_config_applied: DONE");
 }
 
@@ -125,7 +126,7 @@ void on_transport_state_cb(transport_state_t state, void *ctx)
     ESP_LOGI(TAG, "Transport state: %d", state);
 
     if (state == TRANSPORT_CONNECTED) {
-        rgb_led_set_state(LED_STATE_RUNNING);
+        /* Don't set RUNNING — server config state determines LED, not transport */
     } else if (state == TRANSPORT_DISCONNECTED || state == TRANSPORT_FAILED) {
         rgb_led_set_state(LED_STATE_MQTT_FAILED);
     }
@@ -139,7 +140,7 @@ void on_mqtt_state_cb(mqtt_client_state_t state, void *ctx)
     if (!s) return;
 
     if (state == MQTT_CLIENT_CONNECTED) {
-        rgb_led_set_state(LED_STATE_RUNNING);
+        rgb_led_set_state(LED_STATE_MQTT_CONNECTING);  /* Not RUNNING yet — Hello not complete */
         if (!s->hello_task_running) {
             msg_handler_reset_hello_ack();
             hello_handshake_start(s);

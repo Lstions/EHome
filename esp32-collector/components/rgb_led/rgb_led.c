@@ -43,6 +43,9 @@ static const led_color_t s_state_colors[LED_STATE_MAX] = {
     [LED_STATE_OTA]              = {0, 255, 255},    // Purple
     [LED_STATE_COLLECT_ERROR]    = {255, 255, 0},    // Yellow
     [LED_STATE_FACTORY_RESET]    = {0, 255, 0},      // Red
+    [LED_STATE_WAITING_CONFIG]   = {0, 255, 255},    // Cyan
+    [LED_STATE_SYNCING]          = {255, 255, 0},    // Yellow
+    [LED_STATE_CONFIG_LAG]       = {165, 255, 0},    // Orange
 };
 
 // LED state modes
@@ -74,6 +77,9 @@ static const led_mode_t s_state_modes[LED_STATE_MAX] = {
     [LED_STATE_OTA]              = MODE_BREATHING,
     [LED_STATE_COLLECT_ERROR]    = MODE_FAST_BLINK,
     [LED_STATE_FACTORY_RESET]    = MODE_FAST_BLINK,
+    [LED_STATE_WAITING_CONFIG]   = MODE_SLOW_BLINK,
+    [LED_STATE_SYNCING]          = MODE_FAST_BLINK,
+    [LED_STATE_CONFIG_LAG]       = MODE_SLOW_BLINK,
 };
 
 /**

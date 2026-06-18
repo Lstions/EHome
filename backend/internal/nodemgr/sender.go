@@ -235,10 +235,12 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	var dmaConfigs []models.DmaChannelConfig
 	if node.Config != "" {
 		var cfg map[string]interface{}
-		if json.Unmarshal([]byte(node.Config), &cfg) == nil {
-			if dc, ok := cfg["dma_configs"]; ok {
-				if dcJSON, err := json.Marshal(dc); err == nil {
-					json.Unmarshal(dcJSON, &dmaConfigs)
+		if err := json.Unmarshal([]byte(node.Config), &cfg); err != nil {
+			logger.Warnf("[%s] Failed to parse node.Config JSON in sender: %v", deviceID, err)
+		} else if dc, ok := cfg["dma_configs"]; ok {
+			if dcJSON, err := json.Marshal(dc); err == nil {
+				if err := json.Unmarshal(dcJSON, &dmaConfigs); err != nil {
+					logger.Warnf("[%s] Failed to parse dma_configs for sender: %v", deviceID, err)
 				}
 			}
 		}

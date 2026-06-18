@@ -11,6 +11,7 @@
 #define HW_PROFILE_H
 
 #include "hw_tables.h"
+#include "config_mgr.h"  /* for config_channel_t type only */
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,7 +32,8 @@ extern "C" {
  */
 struct dma_pool_t;
 bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
-                              struct dma_pool_t *dma_pool);
+                              struct dma_pool_t *dma_pool,
+                              const config_channel_t *channels, uint8_t channel_count);
 
 #ifdef __cplusplus
 }

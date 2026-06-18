@@ -53,11 +53,7 @@ void msg_handler_send_resource_report(void);
 struct dma_pool_t;
 void msg_handler_set_dma_pool(struct dma_pool_t *pool);
 
-/* === Factory reset - implemented in main.c === */
-void factory_reset(void);
-
-/* === Weak callbacks - implemented in main.c === */
-void on_query_resources_received(const char *request_id);
+/* === Weak callbacks - implemented in main.c, declared in handler modules === */
 
 #ifdef __cplusplus
 }

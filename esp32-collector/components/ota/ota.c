@@ -4,7 +4,6 @@
  */
 
 #include "ota.h"
-#include "msg_handler.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
@@ -45,6 +44,22 @@ typedef enum {
 
 static bool s_upgrading = false;
 static char s_last_ota_id[64] = {0};
+
+/* --- Progress callback injection (decouples from msg_handler) --- */
+static ota_progress_cb_t s_progress_cb = NULL;
+
+void ota_set_progress_callback(ota_progress_cb_t cb)
+{
+    s_progress_cb = cb;
+}
+
+static void ota_report_progress(const char *ota_id, uint8_t status,
+                                 uint8_t progress_pct, const char *error_msg)
+{
+    if (s_progress_cb) {
+        s_progress_cb(ota_id, status, progress_pct, error_msg);
+    }
+}
 
 /* --- NVS helpers --- */
 
@@ -237,10 +252,10 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
     ota_nvs_set_state(OTA_STATE_DOWNLOADING);
     ota_nvs_set_meta(version, checksum);
 
-    msg_handler_send_ota_prog(ota_id, 0, 0, NULL);
+    ota_report_progress(ota_id, 0, 0, NULL);
 
     esp_err_t err;
-    int total_bytes = 0;  // actual downloaded bytes, used for SHA256
+    uint32_t total_bytes = 0;  /* actual downloaded bytes, used for SHA256 */
 
     /* Runtime URL detection: http:// or https:// */
     bool is_https = (strncmp(url, "https://", 8) == 0);
@@ -323,7 +338,7 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
             if (pct != last_pct && pct % 10 == 0) {
                 ESP_LOGI(TAG, "Downloaded %d%%", pct);
                 last_pct = pct;
-                msg_handler_send_ota_prog(ota_id, 0, (uint8_t)pct, NULL);
+                ota_report_progress(ota_id, 0, (uint8_t)pct, NULL);
             }
         }
 
@@ -343,7 +358,7 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         }
 
         ESP_LOGI(TAG, "HTTP OTA written %d bytes", total);
-        total_bytes = total;
+        total_bytes = (uint32_t)total;
     }
     else {
         /* HTTPS: use esp_https_ota high-level API */
@@ -355,7 +370,7 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         err = esp_https_ota(&ota_cfg);
         // HTTPS path: use partition size for accurate SHA256 verification
         const esp_partition_t *p = esp_ota_get_next_update_partition(NULL);
-        total_bytes = (p && p->size > 0) ? (int)p->size : (int)size;
+        total_bytes = (p && p->size > 0) ? (uint32_t)p->size : (uint32_t)size;
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "HTTPS OTA fail: %s (0x%x)", esp_err_to_name(err), err);
             return err;
@@ -499,7 +514,7 @@ static void ota_task_func(void *pvParameters)
     if (err != ESP_OK) {
         /* All retries exhausted */
         ota_nvs_set_state(OTA_STATE_NONE);
-        msg_handler_send_ota_prog(args->ota_id, 3, 0, "Download failed after retries");
+        ota_report_progress(args->ota_id, 3, 0, "Download failed after retries");
         free(args);
         s_upgrading = false;
         vTaskDelete(NULL);
@@ -511,7 +526,7 @@ static void ota_task_func(void *pvParameters)
     if (update_partition == NULL) {
         ESP_LOGE(TAG, "Cannot get update partition after OTA write");
         ota_nvs_set_state(OTA_STATE_NONE);
-        msg_handler_send_ota_prog(args->ota_id, 3, 0, "Boot partition switch failed");
+        ota_report_progress(args->ota_id, 3, 0, "Boot partition switch failed");
         free(args);
         s_upgrading = false;
         vTaskDelete(NULL);
@@ -522,7 +537,7 @@ static void ota_task_func(void *pvParameters)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "set_boot_partition failed: %s", esp_err_to_name(err));
         ota_nvs_set_state(OTA_STATE_NONE);
-        msg_handler_send_ota_prog(args->ota_id, 3, 0, "Boot partition switch failed");
+        ota_report_progress(args->ota_id, 3, 0, "Boot partition switch failed");
         free(args);
         s_upgrading = false;
         vTaskDelete(NULL);
@@ -535,7 +550,7 @@ static void ota_task_func(void *pvParameters)
     /* Clear NVS state */
     ota_nvs_set_state(OTA_STATE_NONE);
 
-    msg_handler_send_ota_prog(args->ota_id, 1, 100, NULL);
+    ota_report_progress(args->ota_id, 1, 100, NULL);
 
     free(args);
     ESP_LOGI(TAG, "OTA success, restarting in 1s...");

@@ -6,7 +6,7 @@
  *   1. MQTT connected → hello_handshake_start()
  *   2. Task sends Hello, waits on EventGroup with short poll interval
  *   3. Each poll tick checks msg_handler_is_hello_ack_received()
- *   4. On success: send ResourceReport, apply persisted config, start scheduler
+ *   4. On success: send ResourceReport, wait for server ConfigManifest
  *
  * No modification to msg_handler.c required — polls the existing flag.
  */
@@ -14,6 +14,7 @@
 #include "hello_handshake.h"
 #include "msg_handler.h"
 #include "config_mgr.h"
+#include "sync_manager.h"
 #include "scheduler.h"
 #include "bus_manager.h"
 #include "rgb_led.h"
@@ -85,26 +86,21 @@ static void hello_task(void *pv)
     }
 
     if (!ok) {
-        ESP_LOGE(TAG, "Hello failed after %d retries", HELLO_MAX_RETRIES);
-        rgb_led_set_state(LED_STATE_MQTT_FAILED);
+        ESP_LOGE(TAG, "Hello failed after %d retries — server offline, will retry via periodic sync", HELLO_MAX_RETRIES);
+        rgb_led_set_state(LED_STATE_SERVER_OFFLINE);
     } else {
-        rgb_led_set_state(LED_STATE_RUNNING);
+        rgb_led_set_state(LED_STATE_WAITING_CONFIG);  /* ConfigManifest not yet received */
 
         /* v2.4: Send ResourceReport after successful handshake */
         msg_handler_send_resource_report();
-
-        /* Apply persisted config if needed */
-        if (!scheduler_is_running() && config_mgr_has_manifest()) {
-            config_mgr_load_from_nvs();
-            bus_manager_setup_from_manifest(s);
-            scheduler_start(s->cmd_queue);
-        }
+        /* Start config receive timeout — server should send ConfigManifest soon */
+        sync_manager_start_config_timeout();
     }
 
-    s->hello_task_running = false;
     vEventGroupDelete(s_hello_evt);
     s_hello_evt = NULL;
     s_state_ref = NULL;
+    s->hello_task_running = false;
     vTaskDelete(NULL);
 }
 

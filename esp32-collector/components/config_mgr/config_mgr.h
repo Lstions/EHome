@@ -20,8 +20,6 @@ extern "C" {
 #define MAX_TEMPLATE_IDS  8
 #define MAX_DMA_CONFIGS   8
 
-/* === NVS version === */
-#define CONFIG_NVS_VERSION  1  /* Increment when config_manifest_t layout changes */
 
 /* === Template === */
 typedef struct {
@@ -82,33 +80,24 @@ const config_channel_t *config_mgr_get_channel(uint8_t index);
 /* === Get active channel count === */
 uint8_t config_mgr_get_active_channel_count(void);
 
-/* === Get config hash (CRC32) === */
-uint32_t config_mgr_get_hash(void);
-
-/* === NVS persistence === */
-bool config_mgr_save_to_nvs(void);
-bool config_mgr_load_from_nvs(void);
-
-/* === v2.1 Sync: Epoch / Manifest ID persistence === */
+/* === Sync metadata (NVS) === */
 uint64_t config_mgr_get_epoch(void);
-bool config_mgr_has_manifest(void);
-const char *config_mgr_get_manifest_id(void);
 void config_mgr_set_epoch(uint64_t epoch);
-void config_mgr_set_manifest_id(const char *id);
 void config_mgr_clear_epoch(void);  /* factory_reset use */
 
-/* === v2.4 bus_config flags helpers === */
-/* Note: bus_config_get_dma_enabled() is defined in bus_dma.h */
+/* === In-memory manifest state (server = truth) === */
+bool config_mgr_has_manifest(void);           /* checks in-memory only */
+const char *config_mgr_get_manifest_id(void); /* in-memory only */
+
+/* === Last-known manifest from NVS (for Hello v2.1 protocol fields) === */
+const char *config_mgr_get_last_known_manifest_id(void);
+bool config_mgr_has_last_known_manifest(void);
 
 /* === DIP: DMA pool injection ===
- * config_mgr receives dma_pool_t* via setter (not a global).
- * Must be called before config_mgr_apply_manifest if DmaChannelConfig
- * fields need to be applied. */
+ * config_mgr receives dma_pool_t* via setter (not a global). */
 struct dma_pool_t;
 void config_mgr_set_dma_pool(struct dma_pool_t *pool);
-
-/** Replay stored DMA configs into dma_pool (called after NVS load + pool inject) */
-void config_mgr_replay_dma_configs(void);
+void config_mgr_set_manifest_id(const char *id);
 
 #ifdef __cplusplus
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // findNodeByID resolves a node by DB primary key (if numeric) or node_id string.
@@ -347,7 +348,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 
 		var channels []models.DmaChannelInfo
 		if node.DmaChannels != "" && node.DmaChannels != "[]" {
-			json.Unmarshal([]byte(node.DmaChannels), &channels)
+			if err := json.Unmarshal([]byte(node.DmaChannels), &channels); err != nil {
+				logger.Warnf("[%s] Failed to parse dma_channels JSONB: %v", node.NodeID, err)
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"dma_channels": channels,
@@ -355,13 +358,10 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	})
 
 	// PUT /api/v1/nodes/:id/dma-config — update DMA configuration for a node
+	// Merges new configs by dma_id (does not overwrite unrelated channels).
+	// Uses SELECT FOR UPDATE to prevent read-modify-write race conditions.
 	n.PUT("/:id/dma-config", func(c *gin.Context) {
 		id := c.Param("id")
-		node, err := findNodeByID(db, id)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
-			return
-		}
 
 		var configs []models.DmaChannelConfig
 		if err := c.ShouldBindJSON(&configs); err != nil {
@@ -369,17 +369,77 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 
-		// Store DMA configs in node.Config JSON under "dma_configs" key
+		// Input validation: dma_id, duplicate check, bind_to length
+		seen := make(map[uint32]bool)
+		for i, cfg := range configs {
+			if cfg.DmaID == 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("configs[%d].dma_id must not be 0", i)})
+				return
+			}
+			if seen[cfg.DmaID] {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("duplicate dma_id %d", cfg.DmaID)})
+				return
+			}
+			seen[cfg.DmaID] = true
+			if len(cfg.BindTo) > 16 {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("configs[%d].bind_to exceeds 16 characters", i)})
+				return
+			}
+		}
+
+		// Use transaction with SELECT FOR UPDATE to prevent concurrent modification
+		tx := db.Begin()
+		var node models.Node
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", id).First(&node).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
+
+		// Parse existing node.Config JSON
 		var cfg map[string]interface{}
 		if node.Config != "" && node.Config != "{}" {
-			json.Unmarshal([]byte(node.Config), &cfg)
+			if err := json.Unmarshal([]byte(node.Config), &cfg); err != nil {
+				logger.Warnf("[%s] Failed to parse node.Config JSON: %v", node.NodeID, err)
+			}
 		}
 		if cfg == nil {
 			cfg = map[string]interface{}{}
 		}
-		cfg["dma_configs"] = configs
+
+		// Load existing DMA configs for merge
+		var existingConfigs []models.DmaChannelConfig
+		if dc, ok := cfg["dma_configs"]; ok {
+			if dcJSON, err := json.Marshal(dc); err == nil {
+				if err := json.Unmarshal(dcJSON, &existingConfigs); err != nil {
+					logger.Warnf("[%s] Failed to parse existing dma_configs: %v", node.NodeID, err)
+				}
+			}
+		}
+
+		// Merge by dma_id: existing configs as base, overlay new ones
+		configMap := make(map[uint32]models.DmaChannelConfig)
+		for _, ec := range existingConfigs {
+			configMap[ec.DmaID] = ec
+		}
+		for _, nc := range configs {
+			configMap[nc.DmaID] = nc
+		}
+		merged := make([]models.DmaChannelConfig, 0, len(configMap))
+		for _, v := range configMap {
+			merged = append(merged, v)
+		}
+		// Sort by dma_id for deterministic output (avoids spurious config sync)
+		sort.Slice(merged, func(i, j int) bool { return merged[i].DmaID < merged[j].DmaID })
+
+		cfg["dma_configs"] = merged
 		cfgJSON, _ := json.Marshal(cfg)
-		db.Model(&models.Node{}).Where("node_id = ?", node.NodeID).Update("config", string(cfgJSON))
+		if err := tx.Model(&node).Update("config", string(cfgJSON)).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		tx.Commit()
 
 		// Trigger config sync to push updated manifest to device
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, node.NodeID)

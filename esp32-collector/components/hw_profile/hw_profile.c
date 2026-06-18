@@ -8,8 +8,6 @@
 
 #include "hw_profile.h"
 #include "frame_codec.h"
-#include "config_mgr.h"
-#include "bus_dma.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -23,6 +21,25 @@
  * ================================================================ */
 
 /* Temporary buffer sizes for sub-message encoding */
+/* Local copy of bus_config_get_dma_enabled (from bus_dma.h, avoids dependency) */
+static inline bool local_bus_config_get_dma_enabled(uint8_t bus_type,
+                                                      const uint8_t *bus_config,
+                                                      size_t bus_config_len)
+{
+    size_t flags_offset = 0;
+    size_t min_len = 0;
+    switch (bus_type) {
+    case 1: flags_offset = 6; min_len = 7; break;  /* UART */
+    case 2: flags_offset = 7; min_len = 8; break;  /* I2C */
+    case 3: flags_offset = 6; min_len = 7; break;  /* SPI */
+    default: return false;
+    }
+    if (bus_config && bus_config_len >= min_len) {
+        return (bus_config[flags_offset] & 0x01) != 0;
+    }
+    return false;
+}
+
 #define SUB_ENTRY_BUF   128
 #define BUSES_BLOB_BUF  512
 #define CHAN_BLOB_BUF   2048
@@ -153,7 +170,7 @@ static bool encode_channel_entry(uint8_t *out, size_t cap, size_t *out_len,
     }
 
     /* field8: dma_enabled extracted from bus_config flags */
-    bool dma = bus_config_get_dma_enabled(ch->bus_type, ch->bus_config,
+    bool dma = local_bus_config_get_dma_enabled(ch->bus_type, ch->bus_config,
                                           ch->bus_config_len);
     if (frame_encode_varint(&enc, 8, dma ? 1 : 0) != FRAME_OK) return false;
 
@@ -230,14 +247,14 @@ static bool build_buses_blob(uint8_t *blob, size_t cap, size_t *out_len)
 /* ================================================================
  *  Build the channels_blob sub-message
  * ================================================================ */
-static bool build_channels_blob(uint8_t *blob, size_t cap, size_t *out_len)
+static bool build_channels_blob(uint8_t *blob, size_t cap, size_t *out_len,
+                                  const config_channel_t *channels, uint8_t channel_count)
 {
     frame_encoder_t enc;
     frame_encoder_init(&enc, blob, cap, 0);
 
-    const config_manifest_t *mfst = config_mgr_get_manifest();
-    if (!mfst) {
-        /* No manifest yet — empty channels blob (just the type byte) */
+    if (!channels || channel_count == 0) {
+        /* No channels configured — empty blob */
         *out_len = frame_encoder_size(&enc);
         return true;
     }
@@ -246,8 +263,8 @@ static bool build_channels_blob(uint8_t *blob, size_t cap, size_t *out_len)
     size_t  entry_len;
 
     /* field1: channel_entry (repeated) — only enabled channels */
-    for (uint8_t i = 0; i < mfst->channel_count; i++) {
-        const config_channel_t *ch = &mfst->channels[i];
+    for (uint8_t i = 0; i < channel_count; i++) {
+        const config_channel_t *ch = &channels[i];
         if (!ch->enabled) continue;
 
         if (!encode_channel_entry(entry_buf, sizeof(entry_buf), &entry_len, ch))
@@ -265,16 +282,16 @@ static bool build_channels_blob(uint8_t *blob, size_t cap, size_t *out_len)
  *  Public API: Build the full ResourceReport frame
  * ================================================================ */
 bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
-                              dma_pool_t *dma_pool)
+                              dma_pool_t *dma_pool,
+                              const config_channel_t *channels, uint8_t channel_count)
 {
     if (!buf || !out_len || sz == 0) return false;
 
     /* Count enabled channels for resource_count */
-    const config_manifest_t *mfst = config_mgr_get_manifest();
     uint8_t enabled_channels = 0;
-    if (mfst) {
-        for (uint8_t i = 0; i < mfst->channel_count; i++) {
-            if (mfst->channels[i].enabled) enabled_channels++;
+    if (channels) {
+        for (uint8_t i = 0; i < channel_count; i++) {
+            if (channels[i].enabled) enabled_channels++;
         }
     }
     uint32_t resource_count = HW_RESOURCE_COUNT + enabled_channels;
@@ -289,7 +306,8 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
     uint8_t *channels_buf = calloc(1, CHAN_BLOB_BUF);
     if (!channels_buf) { free(buses_buf); return false; }
     size_t  channels_len = 0;
-    ok = build_channels_blob(channels_buf, CHAN_BLOB_BUF, &channels_len);
+    ok = build_channels_blob(channels_buf, CHAN_BLOB_BUF, &channels_len,
+                           channels, channel_count);
     if (!ok) { free(buses_buf); free(channels_buf); return false; }
 
     /* Encode top-level ResourceReport frame */

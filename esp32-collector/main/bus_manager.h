@@ -18,6 +18,8 @@
 extern "C" {
 #endif
 
+void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb);
+
 void bus_manager_init(app_state_t *state);
 void bus_manager_cleanup_all(app_state_t *state);
 void bus_manager_setup_from_manifest(app_state_t *state);

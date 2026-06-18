@@ -10,7 +10,6 @@
 
 #include "scheduler.h"
 #include "config_mgr.h"
-#include "msg_handler.h"
 #include "cmd_queue.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"

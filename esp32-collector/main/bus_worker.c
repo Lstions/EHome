@@ -19,7 +19,6 @@
 #include "bus_manager.h"
 #include "bus_dma.h"
 #include "cmd_queue.h"
-#include "msg_handler.h"
 #include "scheduler.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -31,6 +30,16 @@
 #define RX_PRIO      8
 #define WORKER_STACK 4096
 #define RX_POLL_MS   5     /* rx_task poll interval */
+
+/* Injected callbacks (set before bus_worker_start) */
+static write_rsp_cb_t s_write_rsp_cb = NULL;
+static data_rpt_cb_t  s_data_rpt_cb  = NULL;
+
+void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
+{
+    s_write_rsp_cb = wr_cb;
+    s_data_rpt_cb  = dr_cb;
+}
 
 /* ==================================================================
  *  cmd_task — TX path (WriteCommand + CMD_SAMPLE)
@@ -53,7 +62,7 @@ static void cmd_task(void *pv)
         if (!ctx) {
             no_ctx++;
             if (cmd.type == CMD_WRITE)
-                msg_handler_send_write_rsp(cmd.request_id, false, 4, "no ctx");
+                if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, 4, "no ctx");
             scheduler_notify_channel_error(cmd.channel_id);
             continue;
         }
@@ -77,11 +86,11 @@ static void cmd_task(void *pv)
                             break;
                         }
                     }
-                    msg_handler_send_write_rsp(cmd.request_id, true, 0, NULL);
+                    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
                     scheduler_notify_channel_success(cmd.channel_id);
                 } else {
                     errs++;
-                    msg_handler_send_write_rsp(cmd.request_id, false,
+                    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false,
                                                (uint32_t)e, "bus err");
                     scheduler_notify_channel_error(cmd.channel_id);
                 }
@@ -92,16 +101,16 @@ static void cmd_task(void *pv)
                 esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
                                                rx, sizeof(rx), &rl);
                 if (e == ESP_OK) {
-                    msg_handler_send_write_rsp(cmd.request_id, true, 0, NULL);
+                    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
                     scheduler_notify_channel_success(cmd.channel_id);
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
-                        msg_handler_send_data_report(cmd.channel_id, ts, 0,
+                        if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
                                                      rx, rl, 0, cmd.request_id);
                     }
                 } else {
                     errs++;
-                    msg_handler_send_write_rsp(cmd.request_id, false,
+                    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false,
                                                (uint32_t)e, "bus err");
                     scheduler_notify_channel_error(cmd.channel_id);
                 }
@@ -136,7 +145,7 @@ static void cmd_task(void *pv)
                     scheduler_notify_channel_success(cmd.channel_id);
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
-                        msg_handler_send_data_report(cmd.channel_id, ts, 0,
+                        if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
                                                      rx, rl, 0, 0);
                     }
                 } else {
@@ -195,7 +204,7 @@ static void rx_task(void *pv)
                 }
 
                 uint64_t ts = esp_timer_get_time();
-                msg_handler_send_data_report(ch, ts, 0, rx, n, 0, rid);
+                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid);
             }
         }
 

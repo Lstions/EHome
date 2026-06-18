@@ -115,27 +115,8 @@ void app_main(void)
     config_mgr_set_dma_pool(s->dma_pool);
     msg_handler_set_dma_pool(s->dma_pool);
 
-    /* Load config from NVS if available */
-    if (config_mgr_load_from_nvs()) {
-        ESP_LOGI(TAG, "Config loaded from NVS");
-        /* Replay DMA configs (pool now injected) */
-        config_mgr_replay_dma_configs();
-        const config_manifest_t *manifest = config_mgr_get_manifest();
-        if (manifest) {
-            ESP_LOGI(TAG, "Manifest: id=%s, templates=%d, channels=%d, applied=%d",
-                     manifest->manifest_id, manifest->template_count, 
-                     manifest->channel_count, manifest->applied);
-            if (manifest->channel_count > 0) {
-                ESP_LOGI(TAG, "Setting up buses from NVS config (%d channels)", manifest->channel_count);
-                bus_manager_setup_from_manifest(s);
-                scheduler_start(s->cmd_queue);
-            } else {
-                ESP_LOGW(TAG, "Manifest has no channels, skipping bus setup");
-            }
-        } else {
-            ESP_LOGW(TAG, "No manifest available after NVS load");
-        }
-    }
+    /* Server is single source of truth — no NVS config load at boot.
+     * Config will arrive via ConfigManifest after Hello handshake. */
     
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
@@ -164,6 +145,13 @@ void app_main(void)
     /* ---- Background tasks ---- */
     xTaskCreate(status_task, "status", 2048, (void *)s, 3, NULL);
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
+    /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */
+    bus_worker_set_callbacks(msg_handler_send_write_rsp, msg_handler_send_data_report);
+    bus_manager_set_write_rsp_cb(msg_handler_send_write_rsp);
+
+    /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
+    ota_set_progress_callback(msg_handler_send_ota_prog);
+
     bus_worker_start(s);
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
