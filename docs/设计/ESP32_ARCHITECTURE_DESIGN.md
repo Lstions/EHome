@@ -3,7 +3,8 @@
 **版本**: v2.5  
 **日期**: 2026-06-17  
 **分支**: feat/dma-resource-protocol  
-**状态**: 设计中（feat/dma-resource-protocol 分支，未实现）
+**状态**: 大部分已实现。dma_pool、uart0_boot、hw_tables 组件已编码，DIP 模式已落地，msg_handler 已拆分。前端 DMA 面板已对接。剩余: DMA 冲突检测增强、Linux 平台适配。
+**最近更新**: 2026-06-18 — 同步代码实现状态。关联 commit: ac3bed1..84b931c
 
 ---
 

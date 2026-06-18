@@ -2,7 +2,8 @@
 
 **版本**: v1.0  
 **日期**: 2026-06-16  
-**状态**: 设计中（feat/dma-resource-protocol 分支，未实现）
+**状态**: 部分已实现。协议字段 (ResourceReport field 8, ConfigManifest field 5) 已完成编解码，dma_pool 组件已落地 (三级分配策略)，前端 DMA 面板已对接 (展示+开关)，后端 API 已实现 (GET /nodes/:id/dma-channels, PUT /nodes/:id/dma-config)。剩余: DMA 冲突自动降级、Linux 平台适配。
+**最近更新**: 2026-06-18 — 同步代码实现状态。关联 commit: 3974ce7, 92121b5, 952cc81, f5d9f36, 8a9bddc
 
 ---
 

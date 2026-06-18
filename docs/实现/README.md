@@ -18,14 +18,16 @@
 | # | 模块 | 实现文档 | 后端 | 前端 | 节点端 |
 |---|------|---------|------|------|----------|
 | 1 | **认证授权** | [认证授权.md](认证授权.md) | `internal/api/handler_auth.go` + `handler_user.go` | `views/auth/` + `views/admin/UserList.vue` + `views/profile/` | - |
-| 2 | **节点** | [节点.md](节点.md) | `internal/nodemgr/*.go` | `views/node/` + `components/node/BusConfigPanel.vue` | `components/wifi_mgr/`, `msg_handler/`, `ehome_mqtt/` |
+| 2 | **节点** | [节点.md](节点.md) | `internal/nodemgr/*.go`<br/>`internal/api/handler_node.go` (含 DMA API) | `views/node/` + `views/node/NodeDetail.vue` (DMA 面板) | `main/` (app_state + bus_manager)<br/>`msg_handler/` (含 handler_config/hello/data/writecmd)<br/>`hw_profile/` (含 hw_tables)<br/>`dma_pool/` |
 | 3 | **边缘设备** | [边缘设备.md](边缘设备.md) | `handler_edge_device.go` | `views/edge-device/` | `components/proto_engine/`, `msg_handler/` |
-| 4 | **通道** | [通道.md](通道.md) | `internal/api/handler_device.go` (channel 段) | `components/channel/` | `components/bus/`, `config_mgr/` |
+| 4 | **通道** | [通道.md](通道.md) | `internal/api/handler_node.go` (通道 DMA 配置)<br/>`internal/api/handler_device.go` (channel 段) | `components/channel/` | `components/bus_dma/`, `config_mgr/`, `bus_manager.c` |
 | 5 | **设备配置** | [设备配置.md](设备配置.md) | `handler_device_config.go` | `views/config/DeviceConfigList.vue` | - |
-| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus/`, `drivers/` |
-| 7 | **固件OTA** | [固件OTA.md](固件OTA.md) | `internal/ota/ota.go` (P3 修) | `views/firmware/FirmwareManage.vue` | `components/ota_updater/`, `proto_engine/` |
+| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus_worker.c` (TX/RX 分离) |
+| 7 | **固件OTA** | [固件OTA.md](固件OTA.md) | `internal/ota/ota.go` | `views/firmware/FirmwareManage.vue` | `components/ota/` |
 | 8 | **通知中心** | [通知中心.md](通知中心.md) | `internal/api/handler_notification.go` | `views/notification/` | - |
 | 9 | **系统监控** | [系统监控.md](系统监控.md) | `internal/api/handler_metrics.go` (P2) | `views/monitor/Monitor.vue` (P2) | - |
+| 10 | **DMA 资源管理** | — | `internal/api/handler_node.go` (dma-channels/dma-config)<br/>`internal/nodemgr/handler_resources.go` | `views/node/NodeDetail.vue` (DMA 面板) | `components/dma_pool/`<br/>`components/hw_profile/` (ResourceReport field8) |
+| 11 | **UART DMA 优化** | [UART_DMA_OPTIMIZATION.md](UART_DMA_OPTIMIZATION.md) | — | — | `components/bus_dma/`, `components/uart0_boot/` |
 
 ## 📊 实现完整度总览
 

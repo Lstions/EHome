@@ -20,7 +20,7 @@ MQTT topic 使用 `nodes/{id}/up|down`, 不再使用 v2.1 的 `devices/{id}/up|d
 │  (1 B)   │  (key-value pairs, proto-style)     │
 └──────────┴─────────────────────────────────────┘
 
-type:    1 字节消息类型 (0x01-0x0D)
+type:    1 字节消息类型 (0x01-0x1A)
 fields:  每个 field = [tag_byte] [value]
 
 tag = (field_number << 3) | wire_type
@@ -30,18 +30,296 @@ tag = (field_number << 3) | wire_type
 
 ## 消息类型
 
-| Type        | Hex  | 方向      | 用途           |
-|-------------|------|-----------|----------------|
-| Hello       | 0x01 | ESP→SVR   | 启动握手       |
-| StatusRpt   | 0x02 | ESP→SVR   | 心跳/状态      |
-| DataRpt     | 0x03 | ESP→SVR   | 传感器数据上报 |
-| ConfigMfst  | 0x04 | SVR→ESP   | 全量配置下发   |
-| ConfigRslt  | 0x05 | ESP→SVR   | 配置应用确认   |
-| WriteCmd    | 0x06 | SVR→ESP   | 交互命令       |
-| WriteRsp    | 0x07 | ESP→SVR   | 命令确认       |
-| Ping        | 0x08 | SVR→ESP   | 延迟测量       |
-| Pong        | 0x09 | ESP→SVR   | 延迟响应       |
-| OtaCmd      | 0x0A | SVR→ESP   | 固件升级命令   |
-| OtaProg     | 0x0B | ESP→SVR   | OTA 进度       |
-| ScanRpt     | 0x0C | ESP→SVR   | I2C 扫描结果   |
-| ScanReq     | 0x0D | SVR→ESP   | I2C 扫描请求   |
+| Type            | Hex  | 方向      | 用途               |
+|-----------------|------|-----------|--------------------|
+| Hello           | 0x01 | ESP→SVR   | 启动握手           |
+| StatusRpt       | 0x02 | ESP→SVR   | 心跳/状态          |
+| DataRpt         | 0x03 | ESP→SVR   | 传感器数据上报     |
+| ConfigMfst      | 0x04 | SVR→ESP   | 全量配置下发       |
+| ConfigRslt      | 0x05 | ESP→SVR   | 配置应用确认       |
+| WriteCmd        | 0x06 | SVR→ESP   | 交互命令           |
+| WriteRsp        | 0x07 | ESP→SVR   | 命令确认           |
+| Ping            | 0x08 | SVR→ESP   | 延迟测量           |
+| Pong            | 0x09 | ESP→SVR   | 延迟响应           |
+| OtaCmd          | 0x0A | SVR→ESP   | 固件升级命令       |
+| OtaProg         | 0x0B | ESP→SVR   | OTA 进度           |
+| ScanRpt         | 0x0C | ESP→SVR   | I2C 扫描结果       |
+| ScanReq         | 0x0D | SVR→ESP   | I2C 扫描请求       |
+| QueryReq        | 0x0E | SVR→ESP   | 通用查询请求       |
+| QueryRsp        | 0x0F | ESP→SVR   | 通用查询响应       |
+| ConfigQuery     | 0x10 | SVR→ESP   | 配置查询请求       |
+| ConfigReport    | 0x11 | ESP→SVR   | 保存的配置上报     |
+| HelloAck        | 0x12 | SVR→ESP   | Hello 确认 (含 node_id) |
+| ConfigSyncReq   | 0x13 | SVR→ESP   | v2.1 配置同步请求  |
+| ConfigSyncRsp   | 0x14 | ESP→SVR   | v2.1 配置同步响应  |
+| ResourceReport  | 0x19 | ESP→SVR   | 硬件资源上报       |
+| QueryResources  | 0x1A | SVR→ESP   | 查询硬件资源       |
+
+## 各消息详细定义
+
+### Hello (0x01) — ESP→SVR
+
+启动握手，节点上线后首条消息。
+
+```
+field 1 (string): node_id      — 设备唯一标识 (MAC 派生)
+field 2 (varint): fw_version   — 固件版本号
+field 3 (varint): hw_revision  — 硬件版本号
+field 4 (string): platform     — 平台标识 (如 "ESP32-S3", "ESP32-C6")
+```
+
+### StatusRpt (0x02) — ESP→SVR
+
+周期性心跳/状态上报。
+
+```
+field 1 (varint): uptime_sec   — 运行时长 (秒)
+field 2 (varint): free_heap    — 剩余堆内存 (字节)
+field 3 (varint): rssi         — WiFi 信号强度 (负值)
+field 4 (varint): conn_status  — 连接状态: 0=正常, 1=重连中, 2=降级
+```
+
+### DataRpt (0x03) — ESP→SVR
+
+传感器数据上报，包含一个或多个通道的采集数据。
+
+```
+field 1 (varint): channel_id   — 通道 ID
+field 2 (bytes):  raw_data     — 原始采集数据 (二进制)
+field 3 (varint): timestamp_ms — 采集时间戳 (ms, 启动后)
+field 4 (varint): seq          — 序列号 (自增)
+(field 1-4 可重复, 每条通道一组)
+```
+
+### ConfigMfst (0x04) — SVR→ESP
+
+全量配置下发。节点收到后必须回复 ConfigRslt (0x05)。
+
+```
+field 1 (string): manifest_id  — 配置清单 ID (版本号)
+field 2 (bytes):  templates    — 设备模板列表 (嵌套子消息, repeated)
+field 3 (bytes):  channels     — 通道配置列表 (嵌套子消息, repeated)
+field 5 (bytes):  dma_channel_configs — DMA 通道配置 (嵌套子消息, repeated, v2.4+)
+
+Template 子消息:
+  field 1 (varint): template_id
+  field 2 (string): name
+  field 3 (string): parser         — 解析器 ID (如 "bosch.bmp280")
+  field 4 (varint): interval_ms    — 采集间隔
+  field 5 (bytes):  init_commands  — 初始化命令列表 (repeated)
+
+ChannelConfig 子消息:
+  field 1 (varint): channel_id
+  field 2 (varint): bus_type       — 1=UART, 2=I2C, 3=SPI, 4=GPIO, 5=ADC
+  field 3 (varint): hardware_id    — 硬件资源索引 (hw_tables 中的索引)
+  field 4 (varint): interval_ms    — 采集间隔
+  field 5 (varint): enabled        — 1=启用, 0=禁用
+  field 6 (bytes):  bus_config     — 总线特定配置 (如波特率/I2C地址)
+  field 7 (varint): template_ids   — 关联模板 ID (repeated)
+  field 8 (varint): dma_enabled    — 是否启用 DMA (v2.4+)
+
+DmaChannelConfig 子消息 (v2.4+):
+  field 1 (varint): dma_id         — DMA 通道 ID
+  field 2 (varint): enabled        — 1=启用, 0=禁用
+  field 3 (bytes):  bind_to        — 绑定到硬件资源 (如 "UART1")
+```
+
+### ConfigRslt (0x05) — ESP→SVR
+
+配置应用确认。
+
+```
+field 1 (varint): success       — 1=成功, 0=失败
+field 2 (varint): error_code    — 错误码 (失败时)
+field 3 (string): error_msg     — 错误描述 (失败时)
+```
+
+### WriteCmd (0x06) — SVR→ESP
+
+交互命令：对指定通道执行的读写操作。可带超时参数。
+
+```
+field 1 (varint): channel_id    — 目标通道 ID
+field 2 (bytes):  command       — 命令载荷 (二进制)
+field 3 (varint): timeout_ms    — 读超时 (ms, 0=仅写)
+field 4 (varint): delay_ms      — 写后延迟 (ms, 等待设备处理)
+field 5 (varint): seq           — 序列号
+field 6 (varint): flags         — 标志位: bit0=需要回复, bit1=循环
+```
+
+### WriteRsp (0x07) — ESP→SVR
+
+命令确认及回复数据。
+
+```
+field 1 (varint): channel_id    — 通道 ID
+field 2 (bytes):  response      — 回复数据 (二进制, 可能为空)
+field 3 (varint): seq           — 对应 WriteCmd 的序列号
+field 4 (varint): error_code    — 错误码: 0=成功
+```
+
+### ResourceReport (0x19) — ESP→SVR  (v2.4+)
+
+硬件资源上报。Hello 后或收到 QueryResources (0x1A) 时发送。
+
+协议层定义意愿，节点层决定现实：节点根据硬件约束上报实际资源。
+
+```
+field 1 (string): platform          — 平台标识 ("ESP32-S3", "ESP32-C6", "Linux-RK3576")
+field 2 (varint): resource_count    — 资源总数
+field 3 (bytes):  buses_blob        — 总线列表 (嵌套子消息)
+field 4 (bytes):  channels_blob     — 通道列表 (嵌套子消息)
+field 8 (bytes):  dma_channels      — DMA 通道列表 (嵌套子消息, repeated, v2.5+)
+
+Buses 子消息 (field 3):
+  field 1 (bytes): uart_entry (repeated)
+  field 2 (bytes): i2c_entry (repeated)
+  field 3 (bytes): spi_entry (repeated)
+  field 4 (bytes): gpio_entry (repeated)
+  field 5 (bytes): adc_entry (repeated)
+
+  每个 bus_entry 包含:
+    field 1 (string): id            — 硬件标识 ("UART0", "I2C0")
+    field 2 (varint): unit          — 单元号
+    field 3 (varint): ...           — 总线特定字段 (引脚/频段等)
+
+Channels 子消息 (field 4):
+  field 1 (bytes): channel_entry (repeated)
+
+  channel_entry:
+    field 1 (varint): id            — 通道 ID
+    field 2 (varint): bus_type      — 1=UART, 2=I2C, 3=SPI, 4=GPIO, 5=ADC
+    field 3 (varint): hardware_id   — 硬件索引
+    field 4 (varint): interval_ms   — 采集间隔
+    field 5 (varint): enabled       — 1=启用, 0=禁用
+    field 6 (bytes):  bus_config    — 总线配置
+    field 7 (varint): template_ids  — 关联模板 (repeated)
+    field 8 (varint): dma_enabled   — DMA 是否启用 (v2.5+)
+
+DmaChannel 子消息 (field 8, repeated):
+  field 1 (varint): dma_id          — DMA 通道 ID (平台唯一)
+  field 2 (string): name            — 名称 ("GDMA_CH0")
+  field 3 (varint): dma_type        — 0=GDMA, 1=EDMA, 2=DMA2D
+  field 4 (varint): capabilities    — bit mask: bit0=TX, bit1=RX, bit2=burst
+  field 5 (varint): max_burst       — 最大突发传输长度 (bytes)
+  field 6 (varint): state           — 0=free, 1=allocated, 2=disabled
+  field 7 (string): bound_to        — 当前绑定的硬件 ("UART1" / "" = 未绑定)
+  field 8 (varint): compatible_bus  — 兼容总线: bit0=UART, bit1=I2C, bit2=SPI
+```
+
+### OtaCmd (0x0A) — SVR→ESP
+
+```
+field 1 (string): url           — 固件下载 URL (HTTPS)
+field 2 (varint): size          — 固件大小 (bytes)
+field 3 (string): sha256        — SHA256 校验和 (hex string)
+field 4 (varint): version       — 固件版本号
+```
+
+### OtaProg (0x0B) — ESP→SVR
+
+```
+field 1 (varint): progress      — 下载进度 (0-100)
+field 2 (varint): state         — 0=下载中, 1=校验中, 2=刷写中, 3=完成, 4=失败
+field 3 (varint): error_code    — 错误码 (失败时)
+```
+
+### ScanReq (0x0D) / ScanRpt (0x0C)
+
+```
+ScanReq: field 1 (varint): bus_type — 1=I2C (仅 I2C 实现)
+ScanRpt: field 1 (bytes): devices   — 扫描结果 (I2C 地址列表, repeated varint)
+```
+
+### HelloAck (0x12) — SVR→ESP  (v2.1+)
+
+Hello 的确认包，携带分配的 node_id。用于 NVS 为空时的重新绑定场景。
+
+```
+field 1 (string): node_id       — 分配的节点 ID
+field 2 (varint): config_present — 1=服务端有该节点配置
+```
+
+### ConfigSyncReq (0x13) / ConfigSyncRsp (0x14)  (v2.1)
+
+配置同步机制。用于确保服务端离线恢复后能重推配置。
+
+```
+ConfigSyncReq:  (空消息, 无字段)
+ConfigSyncRsp:
+  field 1 (varint): has_config   — 1=需要配置下发
+```
+
+### QueryReq (0x0E) / QueryRsp (0x0F)  (v2.1+)
+
+通用查询/响应，用于扩展查询。
+
+```
+QueryReq:
+  field 1 (varint): query_type  — 查询类型
+  field 2 (bytes):  payload     — 查询参数
+
+QueryRsp:
+  field 1 (varint): query_type  — 对应查询类型
+  field 2 (bytes):  payload     — 查询结果
+```
+
+### ConfigQuery (0x10) / ConfigReport (0x11)  (v2.1+)
+
+用于服务端查询节点当前持有的配置版本。
+
+```
+ConfigQuery:
+  field 1 (string): manifest_id — 期望的配置 ID
+
+ConfigReport:
+  field 1 (string): manifest_id — 节点当前配置 ID
+```
+
+### QueryResources (0x1A) — SVR→ESP  (v2.4+)
+
+请求节点上报硬件资源。
+
+```
+(空消息, 无字段)
+```
+
+## 编码 API (frame_codec)
+
+C 头文件: `esp32-collector/components/frame/frame_codec.h`
+
+```
+/* 编码器 */
+frame_encoder_init(enc, buf, cap, msg_type)  — 初始化编码器
+frame_encode_varint(enc, field_num, value)   — 编码 varint 字段
+frame_encode_string(enc, field_num, str)     — 编码 string 字段
+frame_encode_bytes(enc, field_num, data, len)— 编码 bytes 字段
+frame_encode_bool(enc, field_num, value)     — 编码 bool (varint 0/1)
+frame_encoder_append_raw(enc, data, len)     — 追加预编码数据 (用于嵌套子消息)
+frame_encoder_size(enc)                      — 获取编码后长度
+frame_encoder_data(enc)                      — 获取编码后缓冲区
+
+/* 解码器 */
+frame_decoder_init(dec, buf, len)            — 初始化解码器
+frame_decoder_init_sub(dec, buf, len)        — 初始化子消息解码器
+frame_decoder_next(dec, &field)              — 读取下一个字段
+
+/* 辅助函数 */
+frame_varint_size(value)                     — 计算 varint 编码后字节数
+frame_encode_varint_to_buf(buf, value)       — 编码 varint 到指定缓冲区
+```
+
+## 协议版本
+
+| 版本  | 变更 |
+|-------|------|
+| v2.0  | 初始二进制帧协议 (0x01-0x0D) |
+| v2.1  | 新增 0x0E-0x14 (QueryReq/QueryRsp, ConfigQuery/Report, HelloAck, ConfigSyncReq/Rsp); MQTT topic 改为 nodes/{id}/up|
+| v2.2  | 三层模型(节点/边缘设备/设备配置); 命名迁移 |
+| v2.4  | 新增 0x19-0x1A (ResourceReport/QueryResources); ConfigMfst field 5 (DmaChannelConfig); channel_entry field 8 (dma_enabled) |
+| v2.5  | ResourceReport field 8 (DmaChannel); frame_encoder_append_raw; dma_pool 组件 |
+
+---
+
+> **最近更新**: 2026-06-18 — 添加缺失的消息类型 (0x0E-0x14, 0x19-0x1A) 及完整字段定义
+> **关联 commit**: 84b931c, 0e95bc3, 3974ce7, 92121b5, 952cc81, 8a9bddc
