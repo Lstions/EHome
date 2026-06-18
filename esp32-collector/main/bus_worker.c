@@ -1,10 +1,18 @@
 /**
  * @file bus_worker.c
- * @brief Unified bus transaction worker — consumes cmd_queue, drives bus_dma_transact.
+ * @brief Two independent tasks: cmd_task (TX) and rx_task (RX).
  *
- * Single high-priority task (prio=8) that processes bus commands from the
- * shared command queue.  Injects write responses and data reports back to
- * msg_handler.  Periodic performance logging every 10 seconds.
+ * Design:
+ *   UART is full-duplex at the hardware level.  cmd_task handles TX
+ *   (fire-and-forget for WriteCommand, write+delay for CMD_SAMPLE).
+ *   rx_task polls all UART channels non-blocking and emits DataReport.
+ *
+ *   SPI and I2C are transactional — cmd_task does atomic write+read
+ *   via bus_dma_transact().  rx_task skips non-UART channels.
+ *
+ *   Timeout is NOT handled here.  The backend decides when a
+ *   WriteCommand has timed out (no DataReport with matching request_id
+ *   within the expected window).
  */
 
 #include "bus_worker.h"
@@ -17,17 +25,23 @@
 #include "esp_timer.h"
 #include <inttypes.h>
 
-#define TAG          "BUS_WORKER"
-#define WORKER_PRIO  8
+#define TAG_CMD      "CMD_TASK"
+#define TAG_RX       "RX_TASK"
+#define CMD_PRIO     7
+#define RX_PRIO      8
 #define WORKER_STACK 4096
+#define RX_POLL_MS   5     /* rx_task poll interval */
 
-static void worker_task(void *pv)
+/* ==================================================================
+ *  cmd_task — TX path (WriteCommand + CMD_SAMPLE)
+ * ================================================================== */
+
+static void cmd_task(void *pv)
 {
     app_state_t *s = (app_state_t *)pv;
     bus_cmd_t cmd;
-    static uint8_t rx[256]; /* static to reduce stack pressure */
 
-    ESP_LOGI(TAG, "Started (prio=%d)", uxTaskPriorityGet(NULL));
+    ESP_LOGI(TAG_CMD, "Started (prio=%d)", uxTaskPriorityGet(NULL));
 
     uint32_t txn = 0, errs = 0, no_ctx = 0;
     TickType_t last_stats = xTaskGetTickCount();
@@ -44,41 +58,92 @@ static void worker_task(void *pv)
             continue;
         }
 
-        size_t rl = 0;
-        /* Use cmd.read_size for rx, capped at buffer size.
-         * Total transaction length = max(tx_len, read_size) for full-duplex SPI. */
-        size_t actual_rx_size = cmd.read_size;
-        if (actual_rx_size > sizeof(rx)) actual_rx_size = sizeof(rx);
-        /* For SPI: transaction length must cover both TX and RX */
-        size_t total_len = (cmd.tx_len > actual_rx_size) ? cmd.tx_len : actual_rx_size;
-        if (total_len == 0) total_len = 1;  /* at least 1 byte */
-
-        esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, total_len,
-                                       cmd.timeout_ms ? cmd.timeout_ms : 50,
-                                       rx, actual_rx_size, &rl);
-
         txn++;
-        if (e != ESP_OK) {
-            errs++;
-            scheduler_notify_channel_error(cmd.channel_id);
-        } else {
-            scheduler_notify_channel_success(cmd.channel_id);
-        }
 
         if (cmd.type == CMD_WRITE) {
-            bool ok = (e == ESP_OK);
-            msg_handler_send_write_rsp(cmd.request_id, ok,
-                                       ok ? 0 : (uint32_t)e,
-                                       ok ? NULL : "bus err");
-            if (rl > 0) {
-                uint64_t ts = esp_timer_get_time();
-                msg_handler_send_data_report(cmd.channel_id, ts, 0, rx, rl, 0, cmd.request_id);
+            /*
+             * WriteCommand: TX only for UART, transact for SPI/I2C.
+             * WriteResponse is sent immediately after TX completes.
+             * For UART, record pending request_id so rx_task can
+             * attach it to the DataReport when data arrives.
+             */
+            if (ctx->bus_type == BUS_TYPE_UART) {
+                esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
+                if (e == ESP_OK) {
+                    /* Record pending request_id for rx_task correlation */
+                    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+                        if (s->bus_ch[i] == cmd.channel_id) {
+                            s->pending_requests[i] = cmd.request_id;
+                            break;
+                        }
+                    }
+                    msg_handler_send_write_rsp(cmd.request_id, true, 0, NULL);
+                    scheduler_notify_channel_success(cmd.channel_id);
+                } else {
+                    errs++;
+                    msg_handler_send_write_rsp(cmd.request_id, false,
+                                               (uint32_t)e, "bus err");
+                    scheduler_notify_channel_error(cmd.channel_id);
+                }
+            } else {
+                /* SPI / I2C: atomic transact */
+                uint8_t rx[256];
+                size_t rl = 0;
+                esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
+                                               rx, sizeof(rx), &rl);
+                if (e == ESP_OK) {
+                    msg_handler_send_write_rsp(cmd.request_id, true, 0, NULL);
+                    scheduler_notify_channel_success(cmd.channel_id);
+                    if (rl > 0) {
+                        uint64_t ts = esp_timer_get_time();
+                        msg_handler_send_data_report(cmd.channel_id, ts, 0,
+                                                     rx, rl, 0, cmd.request_id);
+                    }
+                } else {
+                    errs++;
+                    msg_handler_send_write_rsp(cmd.request_id, false,
+                                               (uint32_t)e, "bus err");
+                    scheduler_notify_channel_error(cmd.channel_id);
+                }
             }
         }
 
-        if (cmd.type == CMD_SAMPLE && rl > 0) {
-            uint64_t ts = esp_timer_get_time();
-            msg_handler_send_data_report(cmd.channel_id, ts, 0, rx, rl, 0, 0);
+        if (cmd.type == CMD_SAMPLE) {
+            /*
+             * CMD_SAMPLE: periodic sampling from scheduler.
+             * UART: TX + delay, rx_task picks up response.
+             * SPI/I2C: atomic transact.
+             */
+            if (ctx->bus_type == BUS_TYPE_UART) {
+                esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
+                if (e != ESP_OK) {
+                    errs++;
+                    scheduler_notify_channel_error(cmd.channel_id);
+                } else {
+                    scheduler_notify_channel_success(cmd.channel_id);
+                }
+                /* Let device process, then rx_task picks up the response */
+                if (cmd.delay_ms > 0) {
+                    vTaskDelay(pdMS_TO_TICKS(cmd.delay_ms));
+                }
+            } else {
+                /* SPI / I2C */
+                uint8_t rx[256];
+                size_t rl = 0;
+                esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
+                                               rx, sizeof(rx), &rl);
+                if (e == ESP_OK) {
+                    scheduler_notify_channel_success(cmd.channel_id);
+                    if (rl > 0) {
+                        uint64_t ts = esp_timer_get_time();
+                        msg_handler_send_data_report(cmd.channel_id, ts, 0,
+                                                     rx, rl, 0, 0);
+                    }
+                } else {
+                    errs++;
+                    scheduler_notify_channel_error(cmd.channel_id);
+                }
+            }
         }
 
         /* Periodic stats (every 10s) */
@@ -86,7 +151,7 @@ static void worker_task(void *pv)
         if (now - last_stats > pdMS_TO_TICKS(10000)) {
             if (txn > 0 || errs > 0 || no_ctx > 0) {
                 uint32_t rate = txn > 0 ? ((txn - errs) * 100 / txn) : 0;
-                ESP_LOGI(TAG, "Stats: txn=%" PRIu32 " err=%" PRIu32
+                ESP_LOGI(TAG_CMD, "Stats: txn=%" PRIu32 " err=%" PRIu32
                          " (%" PRIu32 "%%) no_ctx=%" PRIu32,
                          txn, errs, rate, no_ctx);
             }
@@ -96,8 +161,71 @@ static void worker_task(void *pv)
     }
 }
 
+/* ==================================================================
+ *  rx_task — RX path (UART only, non-blocking poll)
+ * ================================================================== */
+
+static void rx_task(void *pv)
+{
+    app_state_t *s = (app_state_t *)pv;
+    uint8_t rx[256];
+
+    ESP_LOGI(TAG_RX, "Started (prio=%d, poll=%dms)",
+             uxTaskPriorityGet(NULL), RX_POLL_MS);
+
+    uint32_t reads = 0, hits = 0;
+    TickType_t last_stats = xTaskGetTickCount();
+
+    while (1) {
+        for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+            if (!s->bus_ctx[i].initialized) continue;
+            if (s->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+
+            reads++;
+            size_t n = bus_dma_read(&s->bus_ctx[i], rx, sizeof(rx));
+            if (n > 0) {
+                hits++;
+                uint32_t ch = s->bus_ch[i];
+                uint32_t rid = 0;
+
+                /* Consume pending request_id if one exists */
+                if (s->pending_requests[i] != 0) {
+                    rid = s->pending_requests[i];
+                    s->pending_requests[i] = 0;
+                }
+
+                uint64_t ts = esp_timer_get_time();
+                msg_handler_send_data_report(ch, ts, 0, rx, n, 0, rid);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(RX_POLL_MS));
+
+        /* Periodic stats (every 10s) */
+        TickType_t now = xTaskGetTickCount();
+        if (now - last_stats > pdMS_TO_TICKS(10000)) {
+            if (reads > 0) {
+                ESP_LOGI(TAG_RX, "Stats: reads=%" PRIu32 " hits=%" PRIu32
+                         " (%.1f%%)", reads, hits,
+                         (float)hits * 100.0f / (float)reads);
+            }
+            reads = 0; hits = 0;
+            last_stats = now;
+        }
+    }
+}
+
+/* ==================================================================
+ *  Public API
+ * ================================================================== */
+
 void bus_worker_start(app_state_t *state)
 {
-    xTaskCreate(worker_task, "bus_worker", WORKER_STACK,
-                (void *)state, WORKER_PRIO, NULL);
+    /* rx_task: highest priority — must not miss DMA data */
+    xTaskCreate(rx_task, "rx_task", WORKER_STACK,
+                (void *)state, RX_PRIO, NULL);
+
+    /* cmd_task: second priority — TX path */
+    xTaskCreate(cmd_task, "cmd_task", WORKER_STACK,
+                (void *)state, CMD_PRIO, NULL);
 }

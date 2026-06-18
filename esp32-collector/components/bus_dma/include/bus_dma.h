@@ -1,14 +1,15 @@
 /**
  * @file bus_dma.h
- * @brief Unified Bus DMA Engine — supports UART, SPI, I2C with dynamic DMA on/off
+ * @brief Unified Bus DMA Engine — UART TX/RX separated, SPI/I2C transactional
  *
- * Replaces the uart_dma component with a multi-bus abstraction.
- * Each bus_dma_ctx_t instance manages one physical bus channel.
- * 
+ * Design principle:
+ *   UART is full-duplex at the hardware level — TX and RX are independent.
+ *   cmd_task does TX (fire-and-forget), rx_task does RX (non-blocking poll).
+ *   SPI and I2C are transactional — cmd_task does atomic write+read.
+ *
  * Bus sharing:
- * - I2C: Buses are shared across multiple devices automatically based on (sda, scl) pins
- * - SPI: Buses are shared across multiple devices automatically based on (mosi, miso, sclk) pins
- * - UART: Each channel uses its own port
+ *   I2C: shared by (sda, scl) pins.  SPI: shared by (mosi, miso, sclk) pins.
+ *   UART: each channel owns its port (no sharing needed).
  */
 
 #ifndef BUS_DMA_H
@@ -38,12 +39,9 @@ extern "C" {
  *
  * Bus config byte layouts:
  *   UART: [tx_pin, rx_pin, baud×4(BE)] + optional flags byte at offset 6
- *   SPI:  [cs_pin, mode, freq×4(BE)]   + optional flags byte at offset 6
+ *   SPI:  [cs, mode, freq×4(BE), MOSI, MISO, SCLK] + optional flags byte
  *   I2C:  [sda, scl, addr, freq×4(BE)] + optional flags byte at offset 7
  *
- * @param bus_type      BUS_TYPE_UART / BUS_TYPE_I2C / BUS_TYPE_SPI
- * @param bus_config    Bus-specific configuration bytes
- * @param bus_config_len Length of config buffer
  * @return true if DMA is enabled, true if flags byte is missing (default)
  */
 static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
@@ -54,27 +52,15 @@ static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
     size_t min_len = 0;
 
     switch (bus_type) {
-    case BUS_TYPE_UART:
-        flags_offset = 6;
-        min_len = 7;
-        break;
-    case BUS_TYPE_I2C:
-        flags_offset = 7;
-        min_len = 8;
-        break;
-    case BUS_TYPE_SPI:
-        flags_offset = 6;
-        min_len = 7;
-        break;
-    default:
-        return true; /* Unknown bus type, default to DMA enabled */
+    case BUS_TYPE_UART: flags_offset = 6; min_len = 7;  break;
+    case BUS_TYPE_I2C:  flags_offset = 7; min_len = 8;  break;
+    case BUS_TYPE_SPI:  flags_offset = 6; min_len = 7;  break;
+    default: return true;
     }
 
-    if (bus_config && bus_config_len >= min_len) {
+    if (bus_config && bus_config_len >= min_len)
         return (bus_config[flags_offset] & 0x01) != 0;
-    }
-    /* Flags byte missing, default to DMA enabled */
-    return true;
+    return true;  /* Flags byte missing, default to DMA enabled */
 }
 
 /* === Bus DMA context === */
@@ -112,55 +98,54 @@ typedef struct {
     } cfg;
 } bus_dma_ctx_t;
 
+/* ==================================================================
+ *  Lifecycle
+ * ================================================================== */
+
+esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
+                       const uint8_t *config, size_t config_len);
+void bus_dma_deinit(bus_dma_ctx_t *ctx);
+
+/* ==================================================================
+ *  UART: independent TX / RX (full-duplex hardware)
+ * ================================================================== */
+
 /**
- * @brief Initialize a bus DMA context.
+ * @brief Write data to UART TX line.  Fire-and-forget — does not wait for
+ *        any response.  Returns after TX FIFO is drained.
  *
- * For I2C: If a bus with the same (sda, scl) pins already exists,
- *          it will be shared automatically.
- * For SPI: If a bus with the same (mosi, miso, sclk) pins already exists,
- *          it will be shared automatically.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if ctx is not UART
+ */
+esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len);
+
+/**
+ * @brief Read any available data from UART RX (DMA ring buffer or FIFO).
+ *        Non-blocking — returns 0 immediately if no data is waiting.
  *
- * @param ctx         Context to initialize (caller-allocated)
- * @param bus_type    BUS_TYPE_UART / BUS_TYPE_I2C / BUS_TYPE_SPI
- * @param dma_enabled true = use DMA-backed APIs, false = polled/legacy
- * @param config      Bus-specific configuration bytes
- * @param config_len  Length of config buffer
+ * @return number of bytes read into buf (0 = nothing available)
+ */
+size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size);
+
+/* ==================================================================
+ *  SPI / I2C: transactional (write then read, atomic)
+ * ================================================================== */
+
+/**
+ * @brief Execute an atomic write-then-read transaction on SPI or I2C.
+ *        Not valid for UART (use bus_dma_write + bus_dma_read instead).
  *
- * Config byte layouts:
- *   UART: [tx_pin, rx_pin, baud×4(BE)] + optional flags byte at offset 6
- *   SPI:  [cs_pin, mode, freq×4(BE)]   + optional flags byte at offset 6
- *   I2C:  [sda, scl, addr, freq×4(BE)] + optional flags byte at offset 7
+ * @param ctx       Initialized SPI or I2C context
+ * @param tx        Transmit data (NULL for read-only)
+ * @param tx_len    Transmit length in bytes
+ * @param rx        Receive buffer
+ * @param rx_size   Receive buffer capacity
+ * @param rx_len    [out] Actual bytes received
  *
  * @return ESP_OK on success
  */
-esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
-                       const uint8_t *config, size_t config_len);
-
-/**
- * @brief Execute a bus transaction (write then read).
- *
- * @param ctx         Initialized context
- * @param tx          Transmit data (NULL for read-only)
- * @param tx_len      Transmit length
- * @param timeout_ms  RX timeout in milliseconds
- * @param rx          Receive buffer
- * @param rx_size     Receive buffer capacity
- * @param rx_len      [out] Actual bytes received
- *
- * @return ESP_OK on success, ESP_ERR_TIMEOUT if no response
- */
 esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
                            const uint8_t *tx, size_t tx_len,
-                           uint32_t timeout_ms,
                            uint8_t *rx, size_t rx_size, size_t *rx_len);
-
-/**
- * @brief Deinitialize and release bus resources.
- *
- * For I2C/SPI: Removes the device. The bus is only released when the
- *              last device on that bus is removed.
- */
-void bus_dma_deinit(bus_dma_ctx_t *ctx);
 
 #ifdef __cplusplus
 }

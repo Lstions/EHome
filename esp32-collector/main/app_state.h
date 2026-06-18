@@ -53,6 +53,9 @@ typedef struct {
     /* ---- Command queue ---- */
     QueueHandle_t cmd_queue;
 
+    /* ---- Pending WriteCommand request_ids (per channel) ---- */
+    uint32_t    pending_requests[SCHED_MAX_CHANNELS];
+
     /* ---- DMA resource pool (DIP: injected, not global) ---- */
     struct dma_pool_t *dma_pool;
 

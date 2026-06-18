@@ -4,6 +4,10 @@
  *
  * Owns the shared pool of bus_dma_ctx_t instances in app_state.
  * All bus channel lifecycle operations go through this module.
+ *
+ * WriteCommand handling: constructs a bus_cmd_t and posts it to the
+ * command queue.  No timeout derivation — the ESP32 does not understand
+ * timeouts; that is the backend's responsibility.
  */
 
 #include "bus_manager.h"
@@ -151,35 +155,26 @@ bus_dma_ctx_t *bus_manager_find_ctx(app_state_t *s, uint32_t channel_id)
     return NULL;
 }
 
-/* ==== WriteCommand handler ==== */
+/* ==== WriteCommand handler ====
+ *
+ * Constructs a bus_cmd_t and posts it to the command queue.
+ * No timeout derivation — the ESP32 does TX only for UART WriteCommands.
+ * The backend handles timeout by watching for DataReport with matching
+ * request_id.
+ */
 
 void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
                                const uint8_t *d, size_t l, uint32_t rs)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
-    
-    /* Derive timeout from channel's template delay_ms */
-    uint32_t timeout = 50;  /* default: 50ms */
-    if (m) {
-        for (int i = 0; i < m->channel_count; i++) {
-            if (m->channels[i].id == ch && m->channels[i].template_count > 0) {
-                const config_template_t *t =
-                    config_mgr_get_template(m->channels[i].template_ids[0]);
-                if (t && t->delay_ms > 0) {
-                    timeout = t->delay_ms;
-                }
-                break;
-            }
-        }
-    }
-    
+    (void)rs;  /* read_size no longer used — backend handles RX expectation */
+
     bus_cmd_t cmd = {
         .request_id = rid,
         .channel_id = ch,
         .bus_type   = find_bus_type(m, ch),
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
-        .read_size  = rs,
-        .timeout_ms = timeout,
+        .delay_ms   = 0,    /* WriteCommand: TX only, no delay */
         .type       = CMD_WRITE,
     };
     if (l > 0 && d) memcpy(cmd.tx_data, d, cmd.tx_len);

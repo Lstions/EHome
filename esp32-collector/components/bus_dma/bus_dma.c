@@ -238,77 +238,48 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     return ESP_OK;
 }
 
-static esp_err_t uart_transact(bus_dma_ctx_t *ctx,
-                               const uint8_t *tx, size_t tx_len,
-                               uint32_t timeout_ms,
-                               uint8_t *rx, size_t rx_size, size_t *rx_len)
+/* ==== UART: independent TX (fire-and-forget) ==== */
+
+static esp_err_t uart_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
 {
     uart_port_t port = ctx->cfg.uart.port;
-    *rx_len = 0;
 
-    /* Adaptive timeout based on baud rate */
-    uint32_t first_byte_timeout = 100;  /* Base 100ms */
-    uint32_t gap_timeout = 20;          /* Base 20ms gap */
-    
-    /* Adjust for slower baud rates */
-    if (ctx->cfg.uart.baud < 19200) {
-        first_byte_timeout = 300;
-        gap_timeout = 50;
-    } else if (ctx->cfg.uart.baud > 460800) {
-        first_byte_timeout = 50;
-        gap_timeout = 10;
+    if (data && len > 0) {
+        int w = uart_write_bytes(port, (const char *)data, len);
+        if (w < 0) {
+            ESP_LOGW(TAG, "UART write failed");
+            return ESP_FAIL;
+        }
+        uart_wait_tx_done(port, pdMS_TO_TICKS(100));
     }
+    return ESP_OK;
+}
 
-    if (ctx->dma_enabled) {
-        /*
-         * DMA path: NO flush_input — the DMA ring captures everything.
-         * Optimized with adaptive timeouts based on baud rate.
-         */
-        if (tx && tx_len > 0) {
-            int w = uart_write_bytes(port, (const char *)tx, tx_len);
-            if (w < 0) {
-                ESP_LOGW(TAG, "UART write failed");
-                return ESP_FAIL;
-            }
-            uart_wait_tx_done(port, pdMS_TO_TICKS(100));
+/* ==== UART: independent RX (non-blocking poll) ==== */
+
+static size_t uart_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
+{
+    uart_port_t port = ctx->cfg.uart.port;
+
+    /*
+     * DMA path: the DMA ring buffer captures data autonomously.
+     * Non-blocking read picks up whatever has accumulated.
+     *
+     * Polled path: uart_read_bytes with timeout=0 returns FIFO content
+     * immediately.  No flush — flush would discard useful data.
+     */
+    size_t total = 0;
+    int n = uart_read_bytes(port, buf, buf_size, 0);  /* timeout=0: non-blocking */
+    if (n > 0) {
+        total = (size_t)n;
+        /* Drain remaining bytes if DMA ring has more (quick gap detection) */
+        while (total < buf_size) {
+            n = uart_read_bytes(port, buf + total, buf_size - total, pdMS_TO_TICKS(2));
+            if (n <= 0) break;
+            total += (size_t)n;
         }
-
-        /* First read: adaptive timeout based on baud rate */
-        size_t total = 0;
-        int n = uart_read_bytes(port, rx, rx_size, pdMS_TO_TICKS(first_byte_timeout));
-        if (n > 0) {
-            total = (size_t)n;
-            /* Continue reading while data arrives within adaptive gap timeout */
-            while (total < rx_size) {
-                n = uart_read_bytes(port, rx + total, rx_size - total,
-                                    pdMS_TO_TICKS(gap_timeout));
-                if (n <= 0) break;
-                total += (size_t)n;
-            }
-        }
-
-        *rx_len = total;
-        return (total > 0) ? ESP_OK : ESP_ERR_TIMEOUT;
-    } else {
-        /*
-         * Polled path: flush stale RX, TX, wait, single read with timeout.
-         */
-        uart_flush_input(port);
-
-        if (tx && tx_len > 0) {
-            int w = uart_write_bytes(port, (const char *)tx, tx_len);
-            if (w < 0) return ESP_FAIL;
-            uart_wait_tx_done(port, pdMS_TO_TICKS(100));
-        }
-
-        uint32_t tmo = (timeout_ms > 0) ? timeout_ms : 50;
-        int n = uart_read_bytes(port, rx, rx_size, pdMS_TO_TICKS(tmo));
-        if (n > 0) {
-            *rx_len = (size_t)n;
-            return ESP_OK;
-        }
-        return ESP_ERR_TIMEOUT;
     }
+    return total;
 }
 
 static void uart_deinit(bus_dma_ctx_t *ctx)
@@ -524,10 +495,8 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
 static esp_err_t spi_transact(bus_dma_ctx_t *ctx,
                                const uint8_t *tx, size_t tx_len,
-                               uint32_t timeout_ms,
                                uint8_t *rx, size_t rx_size, size_t *rx_len)
 {
-    (void)timeout_ms;
     *rx_len = 0;
 
     spi_transaction_t t = {
@@ -738,11 +707,10 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
 static esp_err_t i2c_transact(bus_dma_ctx_t *ctx,
                                const uint8_t *tx, size_t tx_len,
-                               uint32_t timeout_ms,
                                uint8_t *rx, size_t rx_size, size_t *rx_len)
 {
     *rx_len = 0;
-    int tmo = (timeout_ms > 0) ? (int)timeout_ms : 100;
+    int tmo = 100;  /* I2C needs a timeout for ACK — 100ms is reasonable */
 
     i2c_master_dev_handle_t dev = ctx->cfg.i2c.dev_handle;
     if (dev == NULL) return ESP_ERR_INVALID_STATE;
@@ -832,9 +800,41 @@ esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
     return ESP_OK;
 }
 
+/* ==================================================================
+ *  Public API
+ * ================================================================== */
+
+/* ---- UART: independent TX ---- */
+esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    if (ctx == NULL || !ctx->initialized) return ESP_ERR_INVALID_ARG;
+    if (ctx->bus_type != BUS_TYPE_UART) return ESP_ERR_NOT_SUPPORTED;
+
+    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+
+    esp_err_t r = uart_write(ctx, data, len);
+    xSemaphoreGive(ctx->mutex);
+    return r;
+}
+
+/* ---- UART: independent RX (non-blocking) ---- */
+size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
+{
+    if (ctx == NULL || !ctx->initialized) return 0;
+    if (ctx->bus_type != BUS_TYPE_UART) return 0;
+
+    if (xSemaphoreTake(ctx->mutex, 0) != pdTRUE)  /* don't wait */
+        return 0;
+
+    size_t n = uart_read(ctx, buf, buf_size);
+    xSemaphoreGive(ctx->mutex);
+    return n;
+}
+
+/* ---- SPI / I2C: transactional ---- */
 esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
                            const uint8_t *tx, size_t tx_len,
-                           uint32_t timeout_ms,
                            uint8_t *rx, size_t rx_size, size_t *rx_len)
 {
     if (ctx == NULL || !ctx->initialized || rx_len == NULL)
@@ -847,14 +847,11 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
 
     esp_err_t r;
     switch (ctx->bus_type) {
-        case BUS_TYPE_UART:
-            r = uart_transact(ctx, tx, tx_len, timeout_ms, rx, rx_size, rx_len);
-            break;
         case BUS_TYPE_SPI:
-            r = spi_transact(ctx, tx, tx_len, timeout_ms, rx, rx_size, rx_len);
+            r = spi_transact(ctx, tx, tx_len, rx, rx_size, rx_len);
             break;
         case BUS_TYPE_I2C:
-            r = i2c_transact(ctx, tx, tx_len, timeout_ms, rx, rx_size, rx_len);
+            r = i2c_transact(ctx, tx, tx_len, rx, rx_size, rx_len);
             break;
         default:
             r = ESP_ERR_NOT_SUPPORTED;
