@@ -196,7 +196,7 @@ func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []mo
 // triggerDeviceInit finds devices for a node and triggers initialization
 func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 	var devices []models.EdgeDevice
-	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
+	m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
 		Where("channels.node_id = ?", nodeID).
 		Find(&devices)
 
@@ -282,7 +282,7 @@ func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
 	}
 
 	var devices []models.EdgeDevice
-	m.db.Joins("JOIN channels ON channels.id = devices.channel_id").
+	m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
 		Where("channels.node_id = ?", collectorID).
 		Find(&devices)
 

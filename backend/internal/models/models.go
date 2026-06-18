@@ -36,8 +36,8 @@ type Node struct {
 	WiFiSSID        string     `gorm:"size:64" json:"wifi_ssid"`
 	WiFiRSSI        int        `json:"wifi_rssi"`
 	FreeHeapBytes   int        `json:"free_heap_bytes"`
-	Capabilities    string     `gorm:"type:jsonb" json:"capabilities"`
-	HardwareInfo    string     `gorm:"type:jsonb" json:"hardware_info"`
+	Capabilities    string     `gorm:"type:jsonb;default:'{}'" json:"capabilities"`
+	HardwareInfo    string     `gorm:"type:jsonb;default:'{}'" json:"hardware_info"`
 	DmaChannels     string     `gorm:"type:jsonb;default:'[]'" json:"dma_channels"`
 	// v2.2 连接元数据
 	ConnectionType    string     `gorm:"size:32" json:"connection_type"`
