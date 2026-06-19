@@ -14,6 +14,7 @@
 #include "bus_dma.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
+#include "hw_tables.h"
 #include "esp_log.h"
 #include <string.h>
 #include <inttypes.h>
@@ -28,17 +29,69 @@ void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb)
     s_write_rsp_cb = cb;
 }
 
-/* ==== hw_id derivation (LoD: name reflects actual resource) ==== */
+/* ==== hw_id derivation: produces canonical name matching dma_pool config ====
+ * Crawls the matching hw resource table by bus_type and bus_config pins
+ * to get "UART0", "SPI2", etc. — the same identifier used in the "bind_to"
+ * field by dma_pool_apply_config (e.g. "uart/UART0").
+ *
+ * Falls back to a unique "bus/UNKNOWN_XX_YY" form when lookup fails,
+ * encoding bus_type and first two config bytes to avoid collision
+ * in dma_pool_release_by_hw(). */
 
-static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type, uint32_t ch_id)
+static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
+                          const uint8_t *bus_config, size_t bus_config_len)
 {
-    const char *bus_name = "UNKNOWN";
+    const char *id = NULL;
+    const char *bus_name = "unknown";
+
     switch (bus_type) {
-        case BUS_TYPE_UART: bus_name = "UART"; break;
-        case BUS_TYPE_SPI:  bus_name = "SPI";  break;
-        case BUS_TYPE_I2C:  bus_name = "I2C";  break;
+    case BUS_TYPE_UART:
+        bus_name = "uart";
+        if (bus_config && bus_config_len >= 2)
+            for (int i = 0; i < HW_UART_COUNT; i++)
+                if (hw_uarts[i].default_tx_pin == bus_config[0] &&
+                    hw_uarts[i].default_rx_pin == bus_config[1]) {
+                    id = hw_uarts[i].id; break;
+                }
+        break;
+    case BUS_TYPE_SPI:
+        bus_name = "spi";
+        /* SPI bus is identified by MOSI/MISO/SCLK (bus-level), not CS
+         * (device-level).  Match on all three when available (len >= 9),
+         * otherwise fall back to MOSI/MISO/SCLK defaults from hw table. */
+        if (bus_config && bus_config_len >= 6) {
+            int mosi = (bus_config_len >= 9) ? bus_config[6] : -1;
+            int miso = (bus_config_len >= 9) ? bus_config[7] : -1;
+            int sclk = (bus_config_len >= 9) ? bus_config[8] : -1;
+            for (int i = 0; i < HW_SPI_COUNT; i++) {
+                bool mosi_ok = (mosi < 0) || (hw_spis[i].default_mosi == mosi);
+                bool miso_ok = (miso < 0) || (hw_spis[i].default_miso == miso);
+                bool sclk_ok = (sclk < 0) || (hw_spis[i].default_sclk == sclk);
+                if (mosi_ok && miso_ok && sclk_ok) {
+                    id = hw_spis[i].id; break;
+                }
+            }
+        }
+        break;
+    case BUS_TYPE_I2C:
+        bus_name = "i2c";
+        if (bus_config && bus_config_len >= 2)
+            for (int i = 0; i < HW_I2C_COUNT; i++)
+                if (hw_i2cs[i].default_sda == bus_config[0] &&
+                    hw_i2cs[i].default_scl == bus_config[1]) {
+                    id = hw_i2cs[i].id; break;
+                }
+        break;
     }
-    snprintf(buf, buflen, "%s_CH%" PRIu32, bus_name, ch_id);
+
+    if (id) {
+        snprintf(buf, buflen, "%s/%s", bus_name, id);
+    } else {
+        /* Unique fallback: encode bus_type + first 2 config bytes */
+        uint8_t b0 = (bus_config && bus_config_len >= 1) ? bus_config[0] : 0;
+        uint8_t b1 = (bus_config && bus_config_len >= 2) ? bus_config[1] : 0;
+        snprintf(buf, buflen, "%s/UNKNOWN_%02X_%02X", bus_name, b0, b1);
+    }
 }
 
 /* ==== Look up bus_type from config manifest ==== */
@@ -72,7 +125,7 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
             /* DMA allocation: check user preference first, then try pool */
             bool dma = false;
             char hw_id[16];
-            derive_hw_id(hw_id, sizeof(hw_id), bus_type, ch_id);
+            derive_hw_id(hw_id, sizeof(hw_id), bus_type, config, config_len);
             
             /* Respect user DMA preference from bus_config flags */
             bool user_wants_dma = bus_config_get_dma_enabled(bus_type, config, config_len);

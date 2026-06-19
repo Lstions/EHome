@@ -153,6 +153,23 @@ func (g *SyncGate) OnHello(deviceID string, hello *HelloMsg) SyncDecision {
 		return d
 	}
 
+	// Axis 3.5: ForceSend — device has NVS config but reports 0 channels (stale/broken config)
+	// This catches the case where NVS has wrong channel assignments (e.g., TX=21/RX=20)
+	// that produce the same hash as the correct config (TX=20/RX=21).
+	// Without this, the device is stuck because hash matches but channels are wrong.
+	if hello.NvsHasConfig && hello.ChannelCount == 0 && serverHash.ChannelCount > 0 {
+		d := SyncDecision{
+			Action:     SyncActionFull,
+			Reason:     fmt.Sprintf("force_send:nvs_has_config_but_zero_channels:server_channels=%d", serverHash.ChannelCount),
+			SyncID:     syncID,
+			Epoch:      serverEpoch,
+			ManifestID: g.mgr.BuildManifestID(),
+			DeviceID:   deviceID,
+		}
+		recordDecision(d)
+		return d
+	}
+
 	// Dedup: if hash changed or first time within TTL, still send
 	if g.mgr.hashMgr.ShouldSendConfig(deviceID, serverHash.Hash) {
 		d := SyncDecision{

@@ -82,6 +82,42 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
         }
     }
 
+    /* 1b. Pre-allocated by apply_config with different naming?
+     * bind_to format "busType/hwId" (e.g. "uart/UART1") vs hw_id format
+     * "BUS_CHxx" (e.g. "UART_CH42").  If a compatible ALLOCATED channel's
+     * bound_to starts with our bus type prefix, reuse it — on shared-HCI
+     * targets (like C6), a UART DMA channel serves any UART on that bus. */
+    for (int i = 0; i < pool->count; i++) {
+        if (pool->channels[i].state == DMA_STATE_ALLOCATED &&
+            (pool->channels[i].compatible_bus & bus_mask) &&
+            pool->channels[i].bound_to[0] != '\0') {
+            const char *slash = strchr(pool->channels[i].bound_to, '/');
+            if (slash) {
+                /* bind_to = "busType/hwId" — check bus type matches */
+                size_t bus_len = slash - pool->channels[i].bound_to;
+                const char *bus_names[] = {"uart", "i2c", "spi"};
+                for (int b = 0; b < 3; b++) {
+                    if (bus_type == b + 1 &&
+                        bus_len == strlen(bus_names[b]) &&
+                        strncasecmp(pool->channels[i].bound_to, bus_names[b], bus_len) == 0) {
+                        *out_dma_id = pool->channels[i].dma_id;
+                        /* Save old bound_to for logging before overwriting */
+                        char old_bound[DMA_BOUND_MAX];
+                        strncpy(old_bound, pool->channels[i].bound_to, DMA_BOUND_MAX - 1);
+                        old_bound[DMA_BOUND_MAX - 1] = '\0';
+                        /* Update bound_to to the canonical hw_id */
+                        strncpy(pool->channels[i].bound_to, hw_id, DMA_BOUND_MAX - 1);
+                        pool->channels[i].bound_to[DMA_BOUND_MAX - 1] = '\0';
+                        xSemaphoreGive(pool->mutex);
+                        ESP_LOGI(TAG, "Alloc %s: reuse %s (was bound %s)",
+                                 hw_id, pool->channels[i].name, old_bound);
+                        return ESP_OK;
+                    }
+                }
+            }
+        }
+    }
+
     /* 2. Free channel: compatible + TX+RX */
     for (int i = 0; i < pool->count; i++) {
         if (pool->channels[i].state == DMA_STATE_FREE &&

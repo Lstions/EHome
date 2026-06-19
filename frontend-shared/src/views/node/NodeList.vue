@@ -114,7 +114,7 @@
         class="collector-card"
         :class="{ offline: node.status === 'offline' }"
         shadow="hover"
-        @click="goToDetail(node.id)"
+        @click="goToDetail(node.node_id)"
       >
         <div class="card-header">
           <div class="collector-info">
@@ -183,7 +183,7 @@
         :data="filteredNodes" 
         v-loading="loading"
         stripe
-        @row-click="(row) => goToDetail(row.id)"
+        @row-click="(row) => goToDetail(row.node_id)"
         row-class-name="collector-row"
       >
         <el-table-column label="节点" min-width="200">
@@ -249,7 +249,7 @@
         
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click.stop="goToDetail(row.id)">详情</el-button>
+            <el-button size="small" @click.stop="goToDetail(row.node_id)">详情</el-button>
             <el-button size="small" type="danger" plain @click.stop="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -404,16 +404,16 @@ const handleStatClick = (status: string) => {
 }
 
 // 跳转详情
-const goToDetail = (id: number) => {
-  router.push(`/node/${id}`)
+const goToDetail = (nodeId: string) => {
+  router.push(`/node/${nodeId}`)
 }
 
 // 快捷操作
 const handleQuickAction = (action: string, node: any) => {
   if (action === 'config') {
-    router.push(`/node/${node.id}?tab=config`)
+    router.push(`/node/${node.node_id}?tab=config`)
   } else if (action === 'ota') {
-    router.push(`/firmware?node=${node.id}`)
+    router.push(`/firmware?node=${node.node_id}`)
   }
 }
 

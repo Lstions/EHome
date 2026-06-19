@@ -16,7 +16,7 @@
 #include <inttypes.h>
 
 #define TAG "APP_STATE"
-#define FIRMWARE_VERSION "2.5.0"
+#define FIRMWARE_VERSION "2.5.1"
 #define MODEL_NAME       CONFIG_IDF_TARGET
 
 /* ==== Singleton ==== */

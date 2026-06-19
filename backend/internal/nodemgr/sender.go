@@ -55,6 +55,8 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	// Record TX in terminal
 	m.termMgr.RecordTX(deviceID, uint(channelID), data)
 
+	logger.Infof("[sender] SendWriteCommand: device=%s ch=%d data_hex=%x readSize=%d", deviceID, channelID, data, readSize)
+
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
 	enc.EncodeVarint(1, uint64(time.Now().UnixNano())) // request_id
 	enc.EncodeVarint(2, uint64(channelID))
@@ -241,8 +243,16 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			if dcJSON, err := json.Marshal(dc); err == nil {
 				if err := json.Unmarshal(dcJSON, &dmaConfigs); err != nil {
 					logger.Warnf("[%s] Failed to parse dma_configs for sender: %v", deviceID, err)
+				} else {
+					logger.Infof("[%s] Loaded %d dma_configs from node.Config", deviceID, len(dmaConfigs))
 				}
 			}
+		} else {
+			logger.Infof("[%s] No dma_configs key in node.Config (keys: %v)", deviceID, func() []string {
+				keys := make([]string, 0, len(cfg))
+				for k := range cfg { keys = append(keys, k) }
+				return keys
+			}())
 		}
 	}
 	for _, dc := range dmaConfigs {

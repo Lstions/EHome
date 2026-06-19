@@ -39,15 +39,47 @@ func mockWriteSender(deviceID string, channelID uint32, data []byte, readSize ui
 }
 
 // generateTestToken creates a JWT token for testing
+// Uses the same secret as api/middleware.go (ehome-dev-secret-change-me when no env override)
 func generateTestToken(role string) string {
 	claims := jwt.MapClaims{
-		"sub":  "test-user",
-		"role": role,
-		"exp":  time.Now().Add(1 * time.Hour).Unix(),
+		"user_id": 1,
+		"role":    role,
+		"exp":     time.Now().Add(1 * time.Hour).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenStr, _ := token.SignedString([]byte(jwtSecret))
+	tokenStr, _ := token.SignedString([]byte("ehome-dev-secret-change-me"))
 	return tokenStr
+}
+
+// testJWTAuth is a lightweight middleware that mimics api.JWTAuth() for testing.
+// It parses the ?token= query param and sets "user_id" and "role" in context.
+func testJWTAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokenStr := c.Query("token")
+		if tokenStr == "" {
+			c.AbortWithStatusJSON(401, gin.H{"error": "missing token"})
+			return
+		}
+		token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+			return []byte("ehome-dev-secret-change-me"), nil
+		})
+		if err != nil || !token.Valid {
+			c.AbortWithStatusJSON(401, gin.H{"error": "invalid token"})
+			return
+		}
+		if claims, ok := token.Claims.(*jwt.MapClaims); ok {
+			if uid, ok := (*claims)["user_id"]; ok {
+				switch v := uid.(type) {
+				case float64:
+					c.Set("user_id", uint(v))
+				}
+			}
+			if r, ok := (*claims)["role"].(string); ok {
+				c.Set("role", r)
+			}
+		}
+		c.Next()
+	}
 }
 
 func TestNewWSHandler(t *testing.T) {
@@ -75,7 +107,7 @@ func TestWSHandler_SubscribeAndHistory(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -140,7 +172,7 @@ func TestWSHandler_SendCommand(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -227,7 +259,7 @@ func TestWSHandler_PingPong(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -267,7 +299,7 @@ func TestWSHandler_InvalidJSON(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -304,7 +336,7 @@ func TestWSHandler_UnknownMessageType(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -344,7 +376,7 @@ func TestWSHandler_Unsubscribe(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -431,7 +463,7 @@ func TestWSHandler_DataBroadcast(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -492,7 +524,7 @@ func TestWSHandler_DataBroadcastFilteredByChannel(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()
@@ -556,7 +588,7 @@ func TestWSHandler_SendCommand_ForbiddenForViewer(t *testing.T) {
 	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
 
 	r := gin.New()
-	r.GET("/ws/terminal", h.HandleTerminalWS)
+	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
 
 	server := httptest.NewServer(r)
 	defer server.Close()

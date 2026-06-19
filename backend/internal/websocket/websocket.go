@@ -16,6 +16,9 @@ type Event struct {
 	Payload interface{} `json:"payload"`
 }
 
+// MessageHandler is called when a client sends a message via WebSocket
+type MessageHandler func(client *Client, evt Event)
+
 // Hub manages WebSocket connections
 type Hub struct {
 	clients    map[*Client]bool
@@ -27,6 +30,9 @@ type Hub struct {
 	// Subscription support for event-type listeners
 	subMu       sync.RWMutex
 	subscribers map[chan Event]bool
+
+	// OnMessage is called when a client sends a message (e.g., terminal send)
+	onMessage MessageHandler
 }
 
 // Client represents a WebSocket client
@@ -34,6 +40,8 @@ type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
+	// UserID from JWT auth (set during upgrade)
+	UserID string
 }
 
 var upgrader = websocket.Upgrader{
@@ -53,6 +61,11 @@ func NewHub() *Hub {
 		unregister:  make(chan *Client),
 		subscribers: make(map[chan Event]bool),
 	}
+}
+
+// SetOnMessage sets the callback for client-sent messages
+func (h *Hub) SetOnMessage(handler MessageHandler) {
+	h.onMessage = handler
 }
 
 // Run starts the hub event loop
@@ -148,7 +161,13 @@ func (h *Hub) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
+	// Extract user_id from JWT auth context (set by middleware)
+	userID, _ := c.Get("user_id")
+
 	client := &Client{hub: h, conn: conn, send: make(chan []byte, 256)}
+	if uid, ok := userID.(string); ok {
+		client.UserID = uid
+	}
 	h.register <- client
 
 	go client.writePump()
@@ -162,12 +181,20 @@ func (c *Client) readPump() {
 	}()
 
 	for {
-		_, _, err := c.conn.ReadMessage()
+		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("WebSocket error: %v", err)
 			}
 			break
+		}
+
+		// Parse and dispatch client-sent messages
+		if c.hub.onMessage != nil {
+			var evt Event
+			if err := json.Unmarshal(message, &evt); err == nil {
+				c.hub.onMessage(c, evt)
+			}
 		}
 	}
 }

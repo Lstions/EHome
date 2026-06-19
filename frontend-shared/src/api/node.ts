@@ -219,7 +219,7 @@ export const nodeApi = {
     return { total: 0, page: 1, page_size: 20, items: [] }
   },
 
-  async getDetail(id: number): Promise<Node> {
+  async getDetail(id: number | string): Promise<Node> {
     const response = await client.get(`/api/v1/nodes/${id}`)
     // Backend may return bare object or envelope
     const raw = response as any
@@ -229,24 +229,24 @@ export const nodeApi = {
     return raw as unknown as Node
   },
 
-  async delete(id: number): Promise<void> {
+  async delete(id: number | string): Promise<void> {
     await client.delete(`/api/v1/nodes/${id}`)
   },
 
-  async getConfig(id: number): Promise<Record<string, any>> {
+  async getConfig(id: number | string): Promise<Record<string, any>> {
     const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/nodes/${id}/config`)
     return response.data
   },
 
-  async updateConfig(id: number, config: Record<string, any>): Promise<void> {
+  async updateConfig(id: number | string, config: Record<string, any>): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/config`, config)
   },
 
-  async syncConfig(id: number): Promise<void> {
+  async syncConfig(id: number | string): Promise<void> {
     await client.post(`/api/v1/nodes/${id}/config/sync`)
   },
 
-  async startOTA(id: number, firmwareId: number, force: boolean = false): Promise<{ota_record_id: number, status: string}> {
+  async startOTA(id: number | string, firmwareId: number, force: boolean = false): Promise<{ota_record_id: number, status: string}> {
     const response = await client.post<unknown, ApiResponse<{ota_record_id: number, status: string}>>(
       `/api/v1/ota/start`,
       { node_id: id, firmware_id: firmwareId, force }
@@ -254,34 +254,34 @@ export const nodeApi = {
     return response.data
   },
 
-  async getOTAProgress(_id: number, recordId: number): Promise<OTARecord> {
+  async getOTAProgress(_id: number | string, recordId: number): Promise<OTARecord> {
     const response = await client.get<unknown, ApiResponse<OTARecord>>(
       `/api/v1/ota/progress/${recordId}`
     )
     return response.data
   },
 
-  async getOTAHistory(id: number): Promise<OTARecord[]> {
+  async getOTAHistory(id: number | string): Promise<OTARecord[]> {
     const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/ota/history/${id}`)
     return response.data
   },
 
-  async cancelOTA(_id: number, recordId: number): Promise<void> {
+  async cancelOTA(_id: number | string, recordId: number): Promise<void> {
     await client.post(`/api/v1/ota/cancel/${recordId}`)
   },
 
   // 硬件配置管理
-  async getHardwareConfig(id: number): Promise<Record<string, any>> {
+  async getHardwareConfig(id: number | string): Promise<Record<string, any>> {
     const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/nodes/${id}/hardware/config`)
     return response.data
   },
 
-  async updateHardwareConfig(id: number, hardware: Record<string, any>): Promise<void> {
+  async updateHardwareConfig(id: number | string, hardware: Record<string, any>): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/hardware/config`, { hardware })
   },
 
   // 硬件资源能力（新架构）
-  async getCapabilities(id: number): Promise<Capabilities> {
+  async getCapabilities(id: number | string): Promise<Capabilities> {
     const response = await client.get<unknown, ApiResponse<Capabilities>>(
       `/api/v1/nodes/${id}/capabilities`
     )
@@ -289,7 +289,7 @@ export const nodeApi = {
   },
 
   // 向节点下发 QueryResources，触发 ReportResources 上报并更新 DB
-  async queryResources(id: number): Promise<{ request_id: string }> {
+  async queryResources(id: number | string): Promise<{ request_id: string }> {
     const response = await client.post<unknown, ApiResponse<{ request_id: string }>>(
       `/api/v1/nodes/${id}/query-resources`
     )
@@ -297,7 +297,7 @@ export const nodeApi = {
   },
 
   // 扫描 I2C 总线设备
-  async scanI2C(id: number, hardwareId: string): Promise<{ devices: string[] }> {
+  async scanI2C(id: number | string, hardwareId: string): Promise<{ devices: string[] }> {
     const response = await client.post<unknown, ApiResponse<{ devices: string[] }>>(
       `/api/v1/nodes/${id}/bus/i2c/scan`,
       { hardware_id: hardwareId }
@@ -305,7 +305,7 @@ export const nodeApi = {
     return response.data
   },
 
-  async ping(id: number): Promise<{ timestamp_us: string }> {
+  async ping(id: number | string): Promise<{ timestamp_us: string }> {
     const response = await client.post<unknown, ApiResponse<{ timestamp_us: string }>>(
       `/api/v1/nodes/${id}/ping`
     )
@@ -313,14 +313,14 @@ export const nodeApi = {
   },
 
   // DMA 通道管理
-  async getDmaChannels(id: number): Promise<DmaChannelInfo[]> {
+  async getDmaChannels(id: number | string): Promise<DmaChannelInfo[]> {
     const response = await client.get<unknown, ApiResponse<{ dma_channels: DmaChannelInfo[] }>>(
       `/api/v1/nodes/${id}/dma-channels`
     )
     return response.data?.dma_channels || []
   },
 
-  async updateDmaConfig(id: number, configs: DmaChannelConfig[]): Promise<void> {
+  async updateDmaConfig(id: number | string, configs: DmaChannelConfig[]): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/dma-config`, configs)
   },
 }

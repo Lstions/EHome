@@ -56,7 +56,7 @@
                       class="hardware-channel-item"
                       :class="{ 'has-channel': getChannelsForHardware(busType, hw.id).length > 0 }"
                     >
-                      <!-- 第一行：硬件名称 + 类型标签 + 参数信息 -->
+                      <!-- 第一行：硬件名称 + 类型标签 + 参数信息 + DMA开关 -->
                       <div class="hardware-card-header">
                         <div class="hardware-main">
                           <span class="hardware-id">{{ hw.name || hw.id }}</span>
@@ -64,7 +64,25 @@
                           <PinBadges :pins="hw.pins" />
                           <span class="hardware-info">{{ getHardwareInfo(hw) }}</span>
                         </div>
-                        <el-checkbox v-model="hw.enabled" disabled size="small" class="hw-enabled-checkbox" />
+                        <div class="hardware-actions" @click.stop>
+                          <!-- DMA 开关（仅对有 DMA 支持的总线类型显示） -->
+                          <!-- model-value: 该DMA是否绑定到当前硬件 -->
+                          <!-- disabled: 该DMA已分配给其他硬件，或节点离线 -->
+                          <template v-if="supportsDma(busType)">
+                            <el-switch
+                              v-for="dma in getDmaForHardware(busType, hw)"
+                              :key="dma.dma_id"
+                              :model-value="isDmaBoundTo(dma, busType, hw)"
+                              :disabled="!canToggleDma(dma, busType, hw)"
+                              :loading="dmaToggling[dma.dma_id] || false"
+                              @change="(val: boolean) => toggleDmaForHardware(busType, hw, dma, val)"
+                              size="small"
+                              :active-text="dma.name"
+                              class="dma-switch"
+                            />
+                          </template>
+                          <el-checkbox v-model="hw.enabled" disabled size="small" class="hw-enabled-checkbox" />
+                        </div>
                       </div>
 
                       <!-- 第二行：通道标签 -->
@@ -118,6 +136,7 @@
         <div class="config-section">
           <ChannelTerminal
             :collector-id="collectorId"
+            :node-device-id="nodeDeviceId"
             :channels="allChannels"
           />
         </div>
@@ -179,10 +198,13 @@ import { channelApi } from '@/api/channel'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
 import { logger } from '@/utils/logger'
+import type { DmaChannelInfo } from '@/api/node'
 
 interface Props {
-  collectorId: number
+  collectorId: number | string
+  nodeDeviceId?: string   // Device UUID like "404CCAFFFE57"
   collectorStatus?: string
+  dmaChannels?: DmaChannelInfo[]
 }
 
 const props = defineProps<Props>()
@@ -342,11 +364,43 @@ const refreshBuses = async () => {
     const capHardware = capData?.buses || {}
     for (const type of ['gpio', 'adc', 'i2c', 'spi', 'uart']) {
       if (capHardware[type] && Array.isArray(capHardware[type])) {
-        mergedHardware[type] = capHardware[type].map((r: any) => ({
-          ...r,
-          enabled: false,  // 默认禁用
-          config_id: null
-        }))
+        mergedHardware[type] = capHardware[type].map((r: any) => {
+          // 从实际 DMA 状态初始化 _dmaEnabled/_dmaId（而非硬编码 false）
+          let dmaEnabled = false
+          let dmaId: number | null = null
+          if (props.dmaChannels) {
+            for (const dma of props.dmaChannels) {
+              if (dma.bound_to && dma.state === 1) {  // state=1 = allocated
+                // bound_to format: "UART_CH39" or "busType/hwId"
+                const boundStr = typeof dma.bound_to === 'string' ? dma.bound_to : ''
+                const hwId = String(r.id)
+                // 1) "UART_CH39" pattern: extract hw_type from bound_to ("UART") and match by channel
+                if (boundStr.includes('_CH')) {
+                  // boundStr = "UART_CH39" -> find channel 39, check its hardware_id
+                  const chIdMatch = boundStr.match(/_CH(\d+)$/)
+                  if (chIdMatch) {
+                    const chId = parseInt(chIdMatch[1])
+                    const ch = allChannels.value.find(c => c.id === chId)
+                    if (ch && (ch.hardware_id === hwId || String(ch.hardware_id) === hwId)) {
+                      dmaEnabled = true; dmaId = dma.dma_id; break
+                    }
+                  }
+                }
+                // 2) "busType/hwId" pattern: e.g. "uart/UART1"
+                if (boundStr.includes('/' + hwId) || boundStr.endsWith(hwId)) {
+                  dmaEnabled = true; dmaId = dma.dma_id; break
+                }
+              }
+            }
+          }
+          return {
+            ...r,
+            enabled: false,  // 默认禁用
+            config_id: null,
+            _dmaEnabled: dmaEnabled,
+            _dmaId: dmaId
+          }
+        })
       } else {
         mergedHardware[type] = []
       }
@@ -406,7 +460,7 @@ const saveBusConfig = async () => {
 const refreshChannels = async () => {
   channelsLoading.value = true
   try {
-    const result = await channelApi.getList(props.collectorId)
+    const result = await channelApi.getList(props.nodeDeviceId || props.collectorId)
     // Handle both array and {items: []} response
     allChannels.value = Array.isArray(result) ? result : (result.items || [])
     if (initialLoadingDone.value) {
@@ -592,6 +646,76 @@ const getHardwareInfo = (hw: any) => {
   if (hw.direction) parts.push(hw.direction === 'input' ? '输入' : '输出')
   if (hw.mode) parts.push(hw.mode === 'master' ? '主机' : '从机')
   return parts.length > 0 ? `(${parts.join(', ')})` : ''
+}
+
+// ============================================================
+// DMA 开关逻辑
+// ============================================================
+
+const supportsDma = (busType: string): boolean => {
+  if (!props.dmaChannels || props.dmaChannels.length === 0) return false
+  return ['uart', 'spi', 'i2c'].includes(busType)
+}
+
+const busTypeToMask = (busType: string): number => {
+  switch (busType) {
+    case 'uart': return 1
+    case 'i2c': return 2
+    case 'spi': return 4
+    default: return 0
+  }
+}
+
+const getDmaForHardware = (busType: string, hw: any): DmaChannelInfo[] => {
+  if (!props.dmaChannels) return []
+  const busMask = busTypeToMask(busType)
+  return props.dmaChannels.filter(dma => (dma.compatible_bus & busMask) !== 0)
+}
+
+/** Check if a DMA channel is bound to this specific hardware resource */
+const isDmaBoundTo = (dma: DmaChannelInfo, busType: string, hw: any): boolean => {
+  if (dma.state === 2) return false  // disabled = OFF
+  if (dma.state !== 1 || !dma.bound_to) return false  // not allocated = OFF
+  return isBoundToHardware(dma.bound_to, busType, hw.id)
+}
+
+/** Match bound_to string against hardware — canonical format: "busType/hwId" */
+const isBoundToHardware = (boundTo: string, busType: string, hwId: string): boolean => {
+  return boundTo.toLowerCase() === `${busType}/${hwId.toLowerCase()}`
+}
+
+const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean => {
+  if (!props.collectorStatus || props.collectorStatus !== 'online') return false
+  // Already bound to this hardware — can toggle OFF
+  if (isDmaBoundTo(dma, busType, hw)) return true
+  // Free channel — can toggle ON
+  if (dma.state === 0) return true
+  // Allocated to another hardware — cannot toggle
+  return false
+}
+
+// DMA 开关 loading 状态（按 dma_id 跟踪）
+const dmaToggling = ref<Record<number, boolean>>({})
+
+const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInfo, enabled: boolean) => {
+  dmaToggling.value[dma.dma_id] = true
+  try {
+    // Standardize bind_to format: bus_type/hw_id (e.g. "uart/UART1", "spi/SPI2")
+    const bindTo = enabled ? `${busType.toLowerCase()}/${hw.id}` : ''
+    await nodeApi.updateDmaConfig(props.collectorId, [{
+      dma_id: dma.dma_id,
+      enabled: enabled,
+      bind_to: bindTo
+    }])
+    // API成功后刷新 DMA 通道状态（与 DMA 详情页一致，以 dma.state 为准）
+    // 刷新总线配置以同步硬件绑定状态
+    await refreshBuses()
+    ElMessage.success(enabled ? `DMA ${dma.name} 已启用` : `DMA ${dma.name} 已禁用`)
+  } catch (error: any) {
+    ElMessage.error('DMA配置保存失败: ' + (error.message || '未知错误'))
+  } finally {
+    dmaToggling.value[dma.dma_id] = false
+  }
 }
 
 // 删除通道
@@ -997,6 +1121,29 @@ defineExpose({
 .hw-enabled-checkbox :deep(.el-checkbox__input.is-disabled .el-checkbox__inner) {
   background-color: #ebeeef;
   border-color: #dcdfe6;
+}
+
+/* DMA 开关样式 */
+.hardware-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.dma-switch {
+  --el-switch-on-color: #409eff;
+  --el-switch-off-color: #dcdfe6;
+}
+
+.dma-switch :deep(.el-switch__label) {
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  color: #606266;
+}
+
+.dma-switch :deep(.el-switch__label.is-active) {
+  color: #409eff;
 }
 
 /* 第二行：引脚 */

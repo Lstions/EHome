@@ -89,7 +89,14 @@ static void hello_task(void *pv)
         ESP_LOGE(TAG, "Hello failed after %d retries — server offline, will retry via periodic sync", HELLO_MAX_RETRIES);
         rgb_led_set_state(LED_STATE_SERVER_OFFLINE);
     } else {
-        rgb_led_set_state(LED_STATE_WAITING_CONFIG);  /* ConfigManifest not yet received */
+        /* ConfigManifest may have arrived during handshake (MQTT callback
+         * processes it immediately while hello_task polls for HelloAck).
+         * If already applied, go straight to RUNNING instead of WAITING_CONFIG. */
+        if (config_mgr_has_manifest()) {
+            rgb_led_set_state(LED_STATE_RUNNING);
+        } else {
+            rgb_led_set_state(LED_STATE_WAITING_CONFIG);  /* ConfigManifest not yet received */
+        }
 
         /* v2.4: Send ResourceReport after successful handshake */
         msg_handler_send_resource_report();

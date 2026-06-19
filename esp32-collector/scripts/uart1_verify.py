@@ -37,7 +37,7 @@ template.extend(encode_field(4, 0, 100))                  # delay_ms
 payload.extend(encode_field(3, 2, bytes(template)))       # field 3: templates
 
 # Channel: id=1, hardware_id=1, template_ids=[1], interval=5000, enabled=1, bus_type=1(UART)
-# bus_config: TX=21(0x15), RX=20(0x14), baud=9600(0x00002580 BE)
+# bus_config: TX=21(0x15), RX=20(0x14), baud=115200(0x0001C200 BE)
 channel = bytearray()
 channel.extend(encode_field(1, 0, 1))                     # id
 channel.extend(encode_field(2, 0, 1))                     # hardware_id (varint)
@@ -46,8 +46,8 @@ channel.extend(encode_field(3, 2, tids))                  # template_ids
 channel.extend(encode_field(4, 0, 5000))                  # interval_ms
 channel.extend(encode_field(5, 0, 1))                     # enabled
 channel.extend(encode_field(6, 0, 1))                     # bus_type=UART
-# C6 UART1: TX=21(0x15), RX=20(0x14), baud=9600(0x00002580)
-bus_cfg = bytes([0x15, 0x14, 0x00, 0x00, 0x25, 0x80])
+# C6 UART1: TX=21(0x15), RX=20(0x14), baud=115200(0x0001C200)
+bus_cfg = bytes([0x15, 0x14, 0x00, 0x01, 0xC2, 0x00])
 channel.extend(encode_field(7, 2, bus_cfg))               # bus_config
 payload.extend(encode_field(4, 2, bytes(channel)))        # field 4: channels
 

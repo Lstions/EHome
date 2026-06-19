@@ -43,7 +43,7 @@ services:
       REDIS_ADDR: ehome-redis:6379
       EHOME_REDIS_ADDR: ehome-redis:6379
       EHOME_MQTT_BROKER: tcp://ehome-emqx:1883
-      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:-192.168.20.3:8080}
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:-192.168.20.3:8081}
       SEED_TEST_DATA: "true"
       LOG_LEVEL: debug
     working_dir: /app

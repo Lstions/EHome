@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
 
 	"github.com/gin-gonic/gin"
@@ -153,6 +153,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 		fw := models.Firmware{
 			Version:   version,
+			Filename:  filename,
 			Checksum:  checksum,
 			SizeBytes: uint64(len(data)),
 			URL:       url,
@@ -272,7 +273,11 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 
 	// GET /api/v1/ota/history/:nodeId
 	v1.GET("/ota/history/:nodeId", func(c *gin.Context) {
-		nodeID, _ := strconv.Atoi(c.Param("nodeId"))
+		nodeID := c.Param("nodeId")
+		if nodeID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "missing nodeId"})
+			return
+		}
 		var tasks []models.OTATask
 		db.Where("collector_id = ?", nodeID).Order("created_at DESC").Find(&tasks)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tasks})

@@ -65,6 +65,16 @@ export const channelApi = {
   async write(id: number, data: string): Promise<ChannelWriteResponse> {
     const response = await client.post<unknown, { data: ChannelWriteResponse }>(`/api/v1/channels/${id}/write`, {
       data,        // hex 字符串，如 "F4"
+      hex_mode: true,  // 告知后端 data 是 hex 编码
+    })
+    return response.data
+  },
+
+  // 终端写入（需要 device_id）
+  async terminalWrite(id: number, deviceId: string, dataHex: string): Promise<ChannelWriteResponse> {
+    const response = await client.post<unknown, { data: ChannelWriteResponse }>(`/api/v1/channels/${id}/terminal/write`, {
+      device_id: deviceId,
+      data_hex: dataHex,
     })
     return response.data
   },

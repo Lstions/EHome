@@ -370,7 +370,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 
 	// Get device_id
 	var nodeRecord models.Node
-	if err := m.db.First(&nodeRecord, task.NodeID).Error; err != nil {
+	if err := m.db.Where("node_id = ?", task.NodeID).First(&nodeRecord).Error; err != nil {
 		return err
 	}
 

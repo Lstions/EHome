@@ -132,16 +132,16 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	// Update node (v2.2 path for PUT /collectors/:id)
 	v1.PUT("/nodes/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		if err := c.ShouldBindJSON(&node); err != nil {
+		if err := c.ShouldBindJSON(node); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		db.Save(&node)
+		db.Save(node)
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, fmt.Sprint(node.ID))
 		Success(c, node)
 	})
@@ -149,12 +149,17 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	// Delete node (v2.2 path for DELETE /collectors/:id)
 	v1.DELETE("/nodes/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		nodeID := parseUintID(id)
-		if err := db.Delete(&models.Node{}, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		nodeIDStr := node.NodeID
+		if err := db.Delete(node).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, fmt.Sprint(nodeID), fmt.Sprint(nodeID))
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, nodeIDStr, nodeIDStr)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
 
@@ -213,23 +218,33 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	// POST /api/v1/nodes/:id/bus/i2c/scan
 	n := v1.Group("/nodes")
 	n.POST("/:id/bus/i2c/scan", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
 		var req struct {
 			HardwareID string `json:"hardware_id"`
 		}
 		c.ShouldBindJSON(&req)
 		// NOTE: requires MQTT broadcast I2C_SCAN to node firmware
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%d-%d", id, time.Now().Unix()),
+			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%s-%d", node.NodeID, time.Now().Unix()),
 		}})
 	})
 
 	// POST /api/v1/nodes/:id/config/sync
 	n.POST("/:id/config/sync", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
+		id := c.Param("id")
+		node, err := findNodeByID(db, id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			return
+		}
 		// Trigger config sync via node manager
 		nodeMgr.SyncGate().OnServerStartup() // or specific node sync
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": id, "status": "syncing"}})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": node.NodeID, "status": "syncing"}})
 	})
 
 	// GET /api/v1/nodes/:id/capabilities

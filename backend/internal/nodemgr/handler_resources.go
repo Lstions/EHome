@@ -3,7 +3,6 @@ package nodemgr
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
@@ -448,58 +447,61 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	}
 	m.db.Model(&node).Updates(updates)
 
-	// Upsert channels
-	for _, ch := range channels {
-		busTypeStr := busTypeToString(ch.BusType)
-		hwIDStr := strconv.FormatUint(ch.HardwareID, 16)
-
-		// Build bus_config JSON from raw bytes
-		busConfigStr := ""
-		if len(ch.BusConfig) > 0 {
-			busConfigStr = fmt.Sprintf("%x", ch.BusConfig)
-		}
-
-		// Build template_ids comma-separated string
-		templateIDsStr := ""
-		for i, tid := range ch.TemplateIDs {
-			if i > 0 {
-				templateIDsStr += ","
-			}
-			templateIDsStr += strconv.FormatUint(tid, 10)
-		}
-
-		channel := models.Channel{
-			NodeID:       node.NodeID,
-			HardwareType: busTypeStr,
-			HardwareID:   hwIDStr,
-			BusType:      busTypeStr,
-			BusConfig:    busConfigStr,
-			IntervalMs:   int(ch.IntervalMs),
-			TemplateIDs:  templateIDsStr,
-			Enabled:      ch.Enabled,
-			DmaEnabled:   ch.DmaEnabled,
-		}
-
-		// Upsert: find by node_id + hardware_id, update or create
-		var existing models.Channel
-		if err := m.db.Where("node_id = ? AND hardware_id = ? AND deleted_at IS NULL", node.NodeID, hwIDStr).First(&existing).Error; err == nil {
-			// Update existing
-			m.db.Model(&existing).Updates(map[string]interface{}{
-				"hardware_type": busTypeStr,
-				"bus_type":      busTypeStr,
-				"bus_config":    busConfigStr,
-				"interval_ms":   int(ch.IntervalMs),
-				"template_ids":  templateIDsStr,
-				"enabled":       ch.Enabled,
-				"dma_enabled":   ch.DmaEnabled,
-			})
-		} else {
-			// Create new
-			channel.NodeID = node.NodeID
-			m.db.Create(&channel)
-		}
-		logger.Infof("[%s] Upserted channel: hw_id=%s type=%s enabled=%v", deviceID, hwIDStr, busTypeStr, ch.Enabled)
-	}
+	// DISABLED: Auto-upsert channels from ResourceReport — channels should only be
+	// created/managed via explicit API or ConfigManifest, not from C6's self-reported state.
+	// The C6 reports HardwareID as decimal (e.g. 55) which gets hex-encoded to "37" instead
+	// of the correct "UART1" string, polluting the channels table with wrong entries.
+	// for _, ch := range channels {
+	// 	busTypeStr := busTypeToString(ch.BusType)
+	// 	hwIDStr := strconv.FormatUint(ch.HardwareID, 16)
+	//
+	// 	// Build bus_config JSON from raw bytes
+	// 	busConfigStr := ""
+	// 	if len(ch.BusConfig) > 0 {
+	// 		busConfigStr = fmt.Sprintf("%x", ch.BusConfig)
+	// 	}
+	//
+	// 	// Build template_ids comma-separated string
+	// 	templateIDsStr := ""
+	// 	for i, tid := range ch.TemplateIDs {
+	// 		if i > 0 {
+	// 			templateIDsStr += ","
+	// 		}
+	// 		templateIDsStr += strconv.FormatUint(tid, 10)
+	// 	}
+	//
+	// 	channel := models.Channel{
+	// 		NodeID:       node.NodeID,
+	// 		HardwareType: busTypeStr,
+	// 		HardwareID:   hwIDStr,
+	// 		BusType:      busTypeStr,
+	// 		BusConfig:    busConfigStr,
+	// 		IntervalMs:   int(ch.IntervalMs),
+	// 		TemplateIDs:  templateIDsStr,
+	// 		Enabled:      ch.Enabled,
+	// 		DmaEnabled:   ch.DmaEnabled,
+	// 	}
+	//
+	// 	// Upsert: find by node_id + hardware_id, update or create
+	// 	var existing models.Channel
+	// 	if err := m.db.Where("node_id = ? AND hardware_id = ? AND deleted_at IS NULL", node.NodeID, hwIDStr).First(&existing).Error; err == nil {
+	// 		// Update existing
+	// 		m.db.Model(&existing).Updates(map[string]interface{}{
+	// 			"hardware_type": busTypeStr,
+	// 			"bus_type":      busTypeStr,
+	// 			"bus_config":    busConfigStr,
+	// 			"interval_ms":   int(ch.IntervalMs),
+	// 			"template_ids":  templateIDsStr,
+	// 			"enabled":       ch.Enabled,
+	// 			"dma_enabled":   ch.DmaEnabled,
+	// 		})
+	// 	} else {
+	// 		// Create new
+	// 		channel.NodeID = node.NodeID
+	// 		m.db.Create(&channel)
+	// 	}
+	// 	logger.Infof("[%s] Upserted channel: hw_id=%s type=%s enabled=%v", deviceID, hwIDStr, busTypeStr, ch.Enabled)
+	// }
 
 	// Build buses map for WebSocket event
 	var busesMap map[string]interface{}

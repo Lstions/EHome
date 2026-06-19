@@ -6,6 +6,7 @@
       :title="readonly ? '查看通道' : (editingChannel ? '编辑通道' : '创建通道')"
       width="600px"
       :close-on-click-modal="false"
+      class="channel-manager-dialog"
       @closed="resetForm"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" :disabled="readonly">
@@ -268,19 +269,61 @@ const currentCaps = computed(() => {
   if (!hwList) return null
   const hw = hwList.find((h: any) => String(h.id) === form.hardware_id)
   if (!hw) return null
-  // Go protobuf JSON 序列化用 PascalCase: Capabilities.UartCaps / I2CCaps / SpiCaps / GpioCaps / AdcCaps
+
+  // 1) 尝试嵌套结构: hw.Capabilities.UartCaps (Go protobuf JSON)
   const capsWrapper = hw.Capabilities || hw.capabilities
-  if (!capsWrapper) return null
-  // 能力在 oneof 字段中，key 首字母大写
-  const capsKeyMap: Record<string, string> = {
-    uart: 'UartCaps',
-    i2c: 'I2CCaps',
-    spi: 'SpiCaps',
-    gpio: 'GpioCaps',
-    adc: 'AdcCaps'
+  if (capsWrapper) {
+    const capsKeyMap: Record<string, string> = {
+      uart: 'UartCaps',
+      i2c: 'I2CCaps',
+      spi: 'SpiCaps',
+      gpio: 'GpioCaps',
+      adc: 'AdcCaps'
+    }
+    const capsKey = capsKeyMap[form.hardware_type]
+    const nested = capsWrapper[capsKey] || capsWrapper[capsKey?.toLowerCase()]
+    if (nested) return nested
   }
-  const capsKey = capsKeyMap[form.hardware_type]
-  return capsWrapper[capsKey] || capsWrapper[capsKey?.toLowerCase()] || null
+
+  // 2) 无嵌套包装时，直接从 hw 本身提取参数
+  switch (form.hardware_type) {
+    case 'uart':
+      return {
+        baud_rate_max: hw.max_baud || 921600,
+        baud_rate_min: hw.min_baud || 1200,
+        data_bits_options: hw.data_bits_options || [5, 6, 7, 8],
+        stop_bits_options: hw.stop_bits_options || [1, 1.5, 2],
+        parity_options: hw.parity_options || ['none', 'odd', 'even'],
+        flow_control_options: hw.flow_control_options || ['none', 'rts_cts', 'xon_xoff']
+      }
+    case 'i2c':
+      return {
+        freq_hz_max: hw.max_freq_hz || 1000000,
+        freq_hz_min: hw.min_freq_hz || 10000,
+        address_min: hw.address_min ?? 8,
+        address_max: hw.address_max ?? 119,
+        supports_scan: hw.supports_scan ?? true,
+        supports_10bit: hw.supports_10bit || false
+      }
+    case 'spi':
+      return {
+        freq_hz_max: hw.max_freq_hz || 40000000,
+        freq_hz_min: hw.min_freq_hz || 100000,
+        mode_options: hw.mode_options || [0, 1, 2, 3],
+        cs_pins: hw.cs_pins || (hw.default_cs_pin != null ? [hw.default_cs_pin] : [])
+      }
+    case 'gpio':
+      return {
+        direction_options: hw.direction_options || ['INPUT', 'OUTPUT', 'INPUT_PULLUP', 'INPUT_PULLDOWN']
+      }
+    case 'adc':
+      return {
+        attenuation_options: hw.attenuation_options || [0, 1, 2, 3],
+        bit_width_options: hw.bit_width_options || [9, 10, 11, 12]
+      }
+    default:
+      return null
+  }
 })
 
 // 获取指定类型的硬件列表（完整对象）
@@ -337,7 +380,7 @@ const initConfigDefaults = () => {
   if (!caps) return
 
   if (form.hardware_type === 'uart') {
-    form.config.baud_rate = caps.baud_rate_max || 115200
+    form.config.baud_rate = 115200
     form.config.data_bits = caps.data_bits_options?.includes(8) ? 8 : (caps.data_bits_options?.[0] || 8)
     form.config.stop_bits = caps.stop_bits_options?.includes(1) ? 1 : (caps.stop_bits_options?.[0] || 1)
     form.config.parity = caps.parity_options?.includes('none') ? 'none' : (caps.parity_options?.[0] || 'none')
@@ -394,14 +437,58 @@ const handleSubmit = async () => {
     // 组装 config
     const config: Record<string, any> = { ...form.config }
 
+    // 组装 bus_config (硬件总线配置的hex字节数组)
+    let busConfig = ''
+    const hw = availableHardwareList.value.find(h => String(h.id) === form.hardware_id)
+    if (form.hardware_type === 'uart' && hw) {
+      const tx_pin = form.config.tx_pin || hw.default_tx_pin
+      const rx_pin = form.config.rx_pin || hw.default_rx_pin
+      const baud = form.config.baud_rate || 115200
+      // bus_config: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)]
+      const buf = new Uint8Array(6)
+      buf[0] = tx_pin
+      buf[1] = rx_pin
+      buf[2] = (baud >> 24) & 0xFF
+      buf[3] = (baud >> 16) & 0xFF
+      buf[4] = (baud >> 8) & 0xFF
+      buf[5] = baud & 0xFF
+      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
+    } else if (form.hardware_type === 'i2c' && hw) {
+      const sda = form.config.sda_pin || hw.default_sda_pin
+      const scl = form.config.scl_pin || hw.default_scl_pin
+      const addr = parseInt(form.address, 16) || 0
+      const freq = form.config.freq_hz || hw.max_freq_hz || 400000
+      const buf = new Uint8Array(7)
+      buf[0] = sda; buf[1] = scl; buf[2] = addr & 0xFF
+      buf[3] = (freq >> 24) & 0xFF; buf[4] = (freq >> 16) & 0xFF
+      buf[5] = (freq >> 8) & 0xFF; buf[6] = freq & 0xFF
+      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
+    } else if (form.hardware_type === 'spi' && hw) {
+      const cs = form.config.cs_pin || hw.default_cs_pin || 5
+      const mode = form.config.spi_mode || 0
+      const freq = form.config.freq_hz || hw.max_freq_hz || 1000000
+      const mosi = form.config.mosi_pin || hw.default_mosi || -1
+      const miso = form.config.miso_pin || hw.default_miso || -1
+      const sclk = form.config.sclk_pin || hw.default_sclk || -1
+      // bus_config: [cs(1B)][mode(1B)][freq(4B BE)][mosi(1B)][miso(1B)][sclk(1B)]
+      const buf = new Uint8Array(9)
+      buf[0] = cs; buf[1] = mode
+      buf[2] = (freq >> 24) & 0xFF; buf[3] = (freq >> 16) & 0xFF
+      buf[4] = (freq >> 8) & 0xFF; buf[5] = freq & 0xFF
+      buf[6] = mosi; buf[7] = miso; buf[8] = sclk
+      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
+    }
+
     const data: Partial<Channel> = {
-      collector_id: props.collectorId,
+      node_id: String(props.collectorId),
       hardware_type: form.hardware_type,
       hardware_id: form.hardware_id,
+      bus_type: form.hardware_type.toUpperCase(),
       address: address || undefined,
       name: form.name || undefined,
-      status: form.enabled ? 'active' : 'inactive',
-      config
+      enabled: form.enabled,
+      bus_config: busConfig || undefined,
+      config: JSON.stringify(config)
     }
 
     if (editingChannel.value?.id) {
@@ -500,5 +587,26 @@ watch(showDialog, (open) => {
 :deep(.el-select.is-disabled .el-input__inner) {
   color: #303133;
   -webkit-text-fill-color: #303133;
+}
+</style>
+
+<!-- Global styles for the el-dialog custom-class (scoped CSS cannot reach dialog overlay) -->
+<style>
+.channel-manager-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.channel-manager-dialog .el-dialog__body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.channel-manager-dialog .el-dialog__footer {
+  flex-shrink: 0;
+  border-top: 1px solid #ebeef5;
+  padding: 12px 20px;
 }
 </style>

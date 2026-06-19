@@ -124,7 +124,7 @@
       </template>
 
       <!-- 总线配置面板 -->
-      <ChannelPanel ref="busConfigPanelRef" :collector-id="collectorId" :collector-status="collector?.status" />
+      <ChannelPanel ref="busConfigPanelRef" :collector-id="collectorId" :node-device-id="collector?.node_id" :collector-status="collector?.status" :dma-channels="dmaChannels" />
     </el-card>
 
     <!-- DMA 通道 -->
@@ -176,11 +176,12 @@
               <span>{{ busText(dma.compatible_bus) }}</span>
             </div>
           </div>
-          <div class="dma-controls">
+          <div class="dma-controls" @click.stop>
             <label class="dma-toggle">
               <el-switch
                 :model-value="dma.state !== 2"
                 :disabled="dma.state === 1"
+                :loading="dmaTogglingMap[dma.dma_id] || false"
                 @change="toggleDma(dma, $event)"
                 active-text="启用"
                 inactive-text="禁用"
@@ -362,7 +363,7 @@ const dmaLoading = ref(false)
 
 let unsubscribe: (() => void) | null = null
 
-const collectorId = computed(() => Number(route.params.id))
+const collectorId = computed(() => route.params.id as string)
 
 // 配置同步状态
 const syncStateLabel = computed(() => {
@@ -438,7 +439,7 @@ const handlePing = async () => {
   if (!collector.value) return
   pinging.value = true
   try {
-    await nodeApi.ping(collector.value.id)
+    await nodeApi.ping(collector.value.node_id)
     const timeout = setTimeout(() => {
       pinging.value = false
       ElMessage.warning('延迟测量超时，采集器可能离线')
@@ -451,9 +452,9 @@ const handlePing = async () => {
 }
 
 const fetchCollectorDetail = async () => {
-  const id = Number(route.params.id)
+  const id = route.params.id as string
   if (!id) {
-    ElMessage.error('无效的采集器ID')
+    ElMessage.error('无效的节点ID')
     goBack()
     return
   }
@@ -473,7 +474,7 @@ const fetchCollectorDetail = async () => {
 }
 
 const fetchDevices = async () => {
-  const id = Number(route.params.id)
+  const id = route.params.id as string
   if (!id) return
 
   devicesLoading.value = true
@@ -504,7 +505,7 @@ const handleOTASuccess = () => {
 }
 
 const fetchOTAHistory = async () => {
-  const id = Number(route.params.id)
+  const id = route.params.id as string
   if (!id) return
 
   otaHistoryLoading.value = true
@@ -518,7 +519,7 @@ const fetchOTAHistory = async () => {
 }
 
 const handleSyncConfig = async () => {
-  const id = Number(route.params.id)
+  const id = route.params.id as string
   if (!id) return
 
   syncingConfig.value = true
@@ -681,7 +682,11 @@ const loadDmaChannels = async () => {
   }
 }
 
+// DMA 开关 loading 状态（按 dma_id 跟踪）
+const dmaTogglingMap = ref<Record<number, boolean>>({})
+
 const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
+  dmaTogglingMap.value[dma.dma_id] = true
   try {
     await nodeApi.updateDmaConfig(collectorId.value, [{
       dma_id: dma.dma_id,
@@ -692,6 +697,8 @@ const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
     ElMessage.success(enabled ? `已启用 ${dma.name}` : `已禁用 ${dma.name}`)
   } catch (error: any) {
     ElMessage.error('操作失败: ' + (error.message || '未知错误'))
+  } finally {
+    dmaTogglingMap.value[dma.dma_id] = false
   }
 }
 

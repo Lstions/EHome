@@ -54,6 +54,9 @@ static void config_timeout_callback(void *arg)
         if (s_initialized) {
             sync_manager_request_sync(SYNC_REASON_DOUBT);
         }
+    } else {
+        /* Config arrived during timeout window — ensure LED is correct */
+        rgb_led_set_state(LED_STATE_RUNNING);
     }
 }
 

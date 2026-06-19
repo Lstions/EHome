@@ -22,7 +22,7 @@
  *  S3 UART1: TX=4  RX=5  (general purpose, avoids USB 19/20)
  *  S3 UART2: TX=1  RX=2  (general purpose)
  *  C6 UART0: TX=16 RX=17 (ROM bootloader download port)
- *  C6 UART1: TX=21 RX=20 (general purpose, avoids USB 12/13)
+ *  C6 UART1: TX=20 RX=21 (general purpose, avoids USB 12/13)
  *
  *  All HP UARTs on both chips support DMA (flags = 0x01).
  * ================================================================ */
@@ -98,7 +98,7 @@ const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
 const hw_uart_t hw_uarts[HW_UART_COUNT] = {
     { .id = "UART0", .port = 0, .default_tx_pin = 16, .default_rx_pin = 17,
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, ROM download port */
-    { .id = "UART1", .port = 1, .default_tx_pin = 21, .default_rx_pin = 20,
+    { .id = "UART1", .port = 1, .default_tx_pin = 20, .default_rx_pin = 21,
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, avoids USB pins 12/13 */
 };
 
@@ -130,14 +130,16 @@ const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
     { .id = "ADC1_CH2", .unit = 1, .channel = 2, .pin = 2, .max_bits = 12 },
 };
 
-/* C6: 3 GDMA channels — all general purpose TX+RX, UART+SPI compatible */
+/* C6: 3 GDMA channel pairs (TX+RX).  Only CH1 is UART-capable because
+ * UART0/UART1 share a single UHCI interface — at most one UART can use
+ * DMA at any time.  CH0 and CH2 are reserved for SPI / other peripherals. */
 const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
     { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
     { .dma_id = 1, .name = "GDMA_CH1", .dma_type = 0,
       .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
     { .dma_id = 2, .name = "GDMA_CH2", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
 };
 
 #else

@@ -26,11 +26,18 @@
 /*  UART0 availability: depends on console output target               */
 /*  If console is on USB Serial/JTAG, UART0 is free for data use.     */
 /*  If console is on UART0, we must skip it.                          */
+/*                                                                    */
+/*  IMPORTANT: Even when UART0 is "free" (console on USB-JTAG), we    */
+/*  reserve UART0 for boot/download use and start data channels from   */
+/*  UART1.  This avoids conflicts with the ROM bootloader which uses   */
+/*  UART0 for download mode, and matches the physical pin layout where */
+/*  UART0 = boot pins (C6: GPIO16/17, S3: GPIO43/44) and              */
+/*  UART1 = data pins (C6: GPIO21/20, S3: user-configurable).         */
 /* ------------------------------------------------------------------ */
 #if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP_CONSOLE_USB_CDC)
-  #define UART0_START_INDEX  0   /* Console on USB — UART0 available */
+  #define UART0_START_INDEX  1   /* Console on USB — skip UART0, start from UART1 */
 #else
-  #define UART0_START_INDEX  1   /* Console on UART0 — skip slot 0  */
+  #define UART0_START_INDEX  1   /* Console on UART0 — skip UART0 (reserved)      */
 #endif
 
 /* GPIO pin max varies by chip: S3=48, C6=30 */
@@ -189,14 +196,16 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         }
 
         if (ctx->dma_enabled) {
-            r = uart_driver_install(ctx->cfg.uart.port, 1024, 256, 0, NULL, 0);
+            // DMA mode: TX buffer 1024 avoids blocking, RX ring buffer 256
+            r = uart_driver_install(ctx->cfg.uart.port, 1024, 256, 1024, NULL, 0);
             if (r != ESP_OK) {
                 ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
                 return r;
             }
             uart_set_rx_timeout(ctx->cfg.uart.port, 4);
         } else {
-            r = uart_driver_install(ctx->cfg.uart.port, 256, 0, 0, NULL, 0);
+            // Polled mode: TX buffer 256 (non-blocking), no RX ring buffer
+            r = uart_driver_install(ctx->cfg.uart.port, 256, 0, 256, NULL, 0);
             if (r != ESP_OK) {
                 ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
                 return r;

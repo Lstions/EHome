@@ -35,6 +35,10 @@
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static data_rpt_cb_t  s_data_rpt_cb  = NULL;
 
+/* Task handles for suspend/resume during config re-apply */
+static TaskHandle_t s_rx_task_h = NULL;
+static TaskHandle_t s_cmd_task_h = NULL;
+
 void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
 {
     s_write_rsp_cb = wr_cb;
@@ -232,9 +236,21 @@ void bus_worker_start(app_state_t *state)
 {
     /* rx_task: highest priority — must not miss DMA data */
     xTaskCreate(rx_task, "rx_task", WORKER_STACK,
-                (void *)state, RX_PRIO, NULL);
+                (void *)state, RX_PRIO, &s_rx_task_h);
 
     /* cmd_task: second priority — TX path */
     xTaskCreate(cmd_task, "cmd_task", WORKER_STACK,
-                (void *)state, CMD_PRIO, NULL);
+                (void *)state, CMD_PRIO, &s_cmd_task_h);
+}
+
+void bus_worker_suspend(void)
+{
+    if (s_rx_task_h) vTaskSuspend(s_rx_task_h);
+    if (s_cmd_task_h) vTaskSuspend(s_cmd_task_h);
+}
+
+void bus_worker_resume(void)
+{
+    if (s_rx_task_h) vTaskResume(s_rx_task_h);
+    if (s_cmd_task_h) vTaskResume(s_cmd_task_h);
 }

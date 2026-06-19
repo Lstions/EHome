@@ -16,12 +16,12 @@
           <el-option
             v-for="fw in firmwares"
             :key="fw.id"
-            :label="`${fw.version} - ${fw.name}`"
+            :label="`${fw.version} - ${fw.filename}`"
             :value="fw.id"
           >
             <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>{{ fw.version }} - {{ fw.name }}</span>
-              <span style="color: #909399; font-size: 12px;">{{ getModelName(fw.model) }}</span>
+              <span>{{ fw.version }} - {{ fw.filename }}</span>
+              <span style="color: #909399; font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
             </div>
           </el-option>
         </el-select>
@@ -34,13 +34,13 @@
       <el-form-item label="固件信息" v-if="selectedFirmware">
         <el-descriptions :column="2" border size="small">
           <el-descriptions-item label="文件名">
-            {{ selectedFirmware.name }}
+            {{ selectedFirmware.filename }}
           </el-descriptions-item>
           <el-descriptions-item label="文件大小">
-            {{ formatFileSize(selectedFirmware.file_size) }}
+            {{ formatFileSize(selectedFirmware.size_bytes) }}
           </el-descriptions-item>
           <el-descriptions-item label="MD5">
-            {{ selectedFirmware.file_md5 }}
+            {{ selectedFirmware.checksum }}
           </el-descriptions-item>
           <el-descriptions-item label="更新日志">
             <div style="max-height: 100px; overflow-y: auto;">

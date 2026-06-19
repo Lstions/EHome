@@ -20,6 +20,8 @@ import (
 	"ehome/backend/internal/redis"
 	"ehome/backend/internal/seed"
 	"ehome/backend/internal/websocket"
+	"encoding/hex"
+	"encoding/json"
 	"github.com/gin-contrib/cors"
 	"ehome/backend/pkg/logger"
 
@@ -111,6 +113,31 @@ func main() {
 	// Initialize node manager
 	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr)
 	go nodeMgr.Start()
+
+	// Set WebSocket OnMessage handler for terminal send commands
+	wsHub.SetOnMessage(func(client *websocket.Client, evt websocket.Event) {
+		if evt.Type == "send" {
+			payload, _ := json.Marshal(evt.Payload)
+			var p struct {
+				DeviceID  string `json:"device_id"`
+				ChannelID uint32 `json:"channel_id"`
+				DataHex   string `json:"data_hex"`
+				ReadSize  uint32 `json:"read_size"`
+			}
+			if err := json.Unmarshal(payload, &p); err == nil && p.DeviceID != "" && p.DataHex != "" {
+				data, err := hex.DecodeString(p.DataHex)
+				if err != nil {
+					logger.Warnf("[WS] Invalid hex in terminal send: %v", err)
+					return
+				}
+				if err := nodeMgr.SendWriteCommand(p.DeviceID, p.ChannelID, data, p.ReadSize); err != nil {
+					logger.Warnf("[WS] SendWriteCommand failed: %v", err)
+				} else {
+					logger.Infof("[WS] Terminal send via WS: device=%s ch=%d data=%s read=%d", p.DeviceID, p.ChannelID, p.DataHex, p.ReadSize)
+				}
+			}
+		}
+	})
 
 	// v2.1: Server startup push — push config to all online nodes (fixes G2)
 	go func() {

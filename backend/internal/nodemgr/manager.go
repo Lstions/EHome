@@ -229,8 +229,9 @@ func (m *Manager) BuildManifestID() string {
 
 // ConfigHashResult holds the result of a config hash calculation.
 type ConfigHashResult struct {
-	Hash       string
-	ManifestID string
+	Hash         string
+	ManifestID   string
+	ChannelCount int // number of server-side channels for the device
 }
 
 // CalcConfigHashForDevice calculates the config hash and manifest ID for a device.
@@ -252,7 +253,7 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 		manifestID = "none"
 	}
 
-	return ConfigHashResult{Hash: hash, ManifestID: manifestID}
+	return ConfigHashResult{Hash: hash, ManifestID: manifestID, ChannelCount: len(channels)}
 }
 
 // GetDeviceIDByNodeID resolves a node DB ID to its node_id string.

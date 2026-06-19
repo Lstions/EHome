@@ -12,6 +12,7 @@
 #include "hello_handshake.h"
 #include "msg_handler.h"
 #include "scheduler.h"
+#include "bus_worker.h"
 #include "config_mgr.h"
 #include "rgb_led.h"
 #include "wifi_mgr.h"
@@ -33,6 +34,12 @@ static void handle_config_applied(app_state_t *s)
 {
     ESP_LOGI(TAG, "handle_config_applied: START");
     
+    /* Suspend rx_task/cmd_task before cleanup to prevent race:
+     * rx_task polls bus_dma_read() in a tight loop; if it accesses
+     * a UART driver that bus_manager_cleanup_all is about to delete,
+     * uart_read_bytes() hits a NULL queue → assert crash. */
+    bus_worker_suspend();
+    
     /* 使用互斥锁而不是自旋锁，因为需要调用可能阻塞的函数 */
     app_state_lock_config();
     
@@ -53,6 +60,10 @@ static void handle_config_applied(app_state_t *s)
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
     
     app_state_unlock_config();
+    
+    /* Resume rx_task/cmd_task — buses are now re-initialized */
+    bus_worker_resume();
+    
     rgb_led_set_state(LED_STATE_RUNNING);  /* Config applied — device operational */
     ESP_LOGI(TAG, "handle_config_applied: DONE");
 }

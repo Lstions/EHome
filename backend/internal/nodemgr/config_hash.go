@@ -53,8 +53,10 @@ func (m *ConfigHashManager) ShouldSendConfig(deviceID string, newHash string) bo
 
 	// Hash unchanged but dedup expired, or first time
 	if hasOld && oldHash == newHash {
-		// Same hash, dedup expired — still skip (no point resending identical config)
-		return false
+		// Same hash, dedup expired — allow resend (backend restart clears memory,
+		// so the first Hello after restart should trigger a push even with same hash)
+		m.lastSent[deviceID] = time.Now()
+		return true
 	}
 
 	// First time: update state and send

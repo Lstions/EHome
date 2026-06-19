@@ -3,9 +3,12 @@ import client from './client'
 export interface Firmware {
   id: number
   version: string
+  filename: string
   checksum: string
   size_bytes: number
   url: string
+  changelog?: string
+  target_model?: string
   created_at: string
 }
 

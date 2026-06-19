@@ -97,7 +97,14 @@
     <!-- 发送区域 -->
     <el-card class="terminal-send-card" shadow="never">
       <div class="terminal-input">
+        <!-- 输入模式切换 -->
+        <el-radio-group v-model="inputMode" size="small" class="input-mode-toggle">
+          <el-radio-button value="hex">HEX</el-radio-button>
+          <el-radio-button value="ascii">ASCII</el-radio-button>
+        </el-radio-group>
+
         <el-input
+          v-if="inputMode === 'hex'"
           v-model="inputData"
           placeholder="输入 hex 数据（如 01 03 00 00 00 02 C4 0B）"
           size="small"
@@ -113,12 +120,29 @@
           </template>
         </el-input>
 
+        <el-input
+          v-else
+          v-model="inputDataAscii"
+          placeholder="输入 ASCII 明文（如 AT+RST）"
+          size="small"
+          @keyup.enter="sendData"
+          @keydown="handleKeydown"
+          :disabled="!selectedChannelId || sending"
+          clearable
+          style="flex: 1;"
+          class="ascii-input"
+        >
+          <template #prefix>
+            <span class="tx-prefix">TX&gt;</span>
+          </template>
+        </el-input>
+
         <el-button
           type="primary"
           size="small"
           @click="sendData"
           :loading="sending"
-          :disabled="!selectedChannelId || !inputData.trim()"
+          :disabled="!selectedChannelId || (!inputData.trim() && !inputDataAscii.trim())"
         >
           发送
         </el-button>
@@ -152,7 +176,8 @@ import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 interface Props {
-  collectorId: number
+  collectorId: number | string
+  nodeDeviceId?: string
   channels?: Channel[]
 }
 
@@ -161,6 +186,8 @@ const props = defineProps<Props>()
 // State
 const selectedChannelId = ref<number | undefined>()
 const inputData = ref('')
+const inputDataAscii = ref('')
+const inputMode = ref<'hex' | 'ascii'>('hex')
 const displayMode = ref<'hex' | 'ascii'>('hex')
 const sending = ref(false)
 const txLogContainer = ref<HTMLDivElement>()
@@ -291,6 +318,15 @@ const isValidHex = (str: string): boolean => {
   return /^[0-9A-Fa-f]*$/.test(str) && str.length % 2 === 0
 }
 
+// Convert ASCII string to hex string
+const asciiToHex = (ascii: string): string => {
+  let hex = ''
+  for (let i = 0; i < ascii.length; i++) {
+    hex += ascii.charCodeAt(i).toString(16).padStart(2, '0').toUpperCase()
+  }
+  return hex
+}
+
 const hexToAscii = (hex: string): string => {
   let result = ''
   for (let i = 0; i < hex.length; i += 2) {
@@ -309,16 +345,33 @@ const formatData = (data: string): string => {
 }
 
 const sendData = async () => {
-  if (!selectedChannelId.value || !inputData.value.trim()) return
+  if (!selectedChannelId.value) return
 
-  const hexData = formatHexInput(inputData.value)
-  if (!isValidHex(hexData)) {
-    ElMessage.warning('无效的 HEX 数据（需偶数长度，如 F4 或 F4 2E）')
-    return
+  // Determine hex data based on input mode
+  let hexData: string
+  if (inputMode.value === 'ascii') {
+    if (!inputDataAscii.value.trim()) return
+    hexData = asciiToHex(inputDataAscii.value)
+  } else {
+    if (!inputData.value.trim()) return
+    hexData = formatHexInput(inputData.value)
+    if (!isValidHex(hexData)) {
+      ElMessage.warning('无效的 HEX 数据（需偶数长度，如 F4 或 F4 2E）')
+      return
+    }
   }
 
+  // Get device_id (node_id) from selected channel
+  const channel = selectedChannel.value
+  if (!channel || !channel.node_id) {
+    ElMessage.error('无法获取通道的节点 ID，请重新选择通道')
+    return
+  }
+  const deviceId = String(channel.node_id)
+
   // Save to command history
-  commandHistory.value.push(inputData.value)
+  const historyEntry = inputMode.value === 'ascii' ? `[ASCII] ${inputDataAscii.value}` : inputData.value
+  commandHistory.value.push(historyEntry)
   if (commandHistory.value.length > 50) commandHistory.value.shift()
   historyIndex.value = -1
 
@@ -335,27 +388,29 @@ const sendData = async () => {
   if (wsStore.connected) {
     lastOptimisticTx.value = { data: hexData, time: Date.now() }
 
+    // Send via terminal WS protocol: type=send, payload={device_id, channel_id, data_hex}
     wsStore.send({
-      type: WS_EVENT.CHANNEL_WRITE,
+      type: 'send',
       payload: {
+        device_id: deviceId,
         channel_id: selectedChannelId.value,
-        data: hexData,
+        data_hex: hexData,
       }
     })
-    inputData.value = ''
+    ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
+    if (inputMode.value === 'ascii') {
+      inputDataAscii.value = ''
+    } else {
+      inputData.value = ''
+    }
   } else {
     sending.value = true
     try {
-      const result = await channelApi.write(selectedChannelId.value!, hexData)
+      const result = await channelApi.terminalWrite(selectedChannelId.value!, deviceId, hexData)
       if (result.success) {
-        addLog({
-          type: 'info',
-          direction: 'TX',
-          time: now(),
-          data: '✓ 已发送',
-          source: 'manual',
-        })
+        ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
       } else {
+        ElMessage.error('发送失败')
         addLog({
           type: 'error',
           direction: 'TX',
@@ -366,6 +421,7 @@ const sendData = async () => {
       }
     } catch (error: any) {
       const errMsg = error?.response?.data?.message || error?.message || '未知错误'
+      ElMessage.error(`发送失败: ${errMsg}`)
       addLog({
         type: 'error',
         direction: 'TX',
@@ -380,6 +436,7 @@ const sendData = async () => {
 }
 
 const sendQuickCommand = async (cmd: { write: string }) => {
+  inputMode.value = 'hex'
   inputData.value = cmd.write
   await sendData()
 }
@@ -406,13 +463,15 @@ const handleKeydown = (e: KeyboardEvent) => {
 const onChannelChange = () => {
   logEntries.value = []
   inputData.value = ''
+  inputDataAscii.value = ''
 }
 
 const loadChannels = async () => {
   if (props.channels?.length) return
   channelsLoading.value = true
   try {
-    const result = await channelApi.getList(props.collectorId)
+    const queryId = props.nodeDeviceId || props.collectorId
+    const result = await channelApi.getList(queryId as any)
     localChannels.value = Array.isArray(result) ? result : (result.items || [])
   } catch (error: any) {
     logger.error('加载通道列表失败', { error: String(error) })
@@ -437,68 +496,34 @@ const setupWebSocket = () => {
     // 只处理当前选中通道的数据
     if (!selectedChannelId.value || payload.channel_id !== selectedChannelId.value) return
 
-    switch (payload.direction) {
-      case 'recv': {
-        // DataReport 上行数据 — 有 request_id 表示交互命令响应，无则周期采集
-        const source: 'interactive' | 'scheduled' = payload.request_id ? 'interactive' : 'scheduled'
-        // Show data if present, or show ack if request_id exists (even with empty data)
-        if (payload.data) {
-          addLog({
-            type: 'recv',
-            direction: 'RX',
-            time: now(),
-            data: payload.data,
-            source: source,
-            channelId: payload.channel_id,
-            errorCode: payload.error_code,
-          })
-        } else if (payload.request_id) {
-          // WriteCommand ack with no data (e.g. timeout/error)
-          const errInfo = payload.error_code ? ` [ERR:${payload.error_code}]` : ''
-          addLog({
-            type: payload.error_code ? 'error' : 'recv',
-            direction: 'RX',
-            time: now(),
-            data: payload.error_code ? `无响应${errInfo}` : '✓ 确认',
-            source: 'interactive',
-            channelId: payload.channel_id,
-            errorCode: payload.error_code,
-          })
-        }
-        break
-      }
+    // channel_data 事件始终是上行数据 (DataReport from device)
+    // 后端 payload 字段: device_id, channel_id, raw_hex, timestamp, error_code, request_id
+    // 注意: 后端不发送 direction 字段，channel_data = RX
+    const data = payload.data || payload.raw_hex
+    const source: 'interactive' | 'scheduled' = payload.request_id ? 'interactive' : 'scheduled'
 
-      case 'send': {
-        // 下行 WriteCommand 回显 — 去重乐观更新
-        if (payload.data && lastOptimisticTx.value &&
-            payload.data === lastOptimisticTx.value.data &&
-            Date.now() - lastOptimisticTx.value.time < 2000) {
-          lastOptimisticTx.value = null
-          break
-        }
-        if (payload.data) {
-          addLog({
-            type: 'send',
-            direction: 'TX',
-            time: now(),
-            data: payload.data,
-            source: 'manual',
-            meta: '(remote)',
-          })
-        }
-        break
-      }
-
-      case 'send_error': {
-        addLog({
-          type: 'error',
-          direction: 'TX',
-          time: now(),
-          data: payload.error || '写入失败',
-          source: 'manual',
-        })
-        break
-      }
+    if (data) {
+      addLog({
+        type: 'recv',
+        direction: 'RX',
+        time: now(),
+        data: data,
+        source: source,
+        channelId: payload.channel_id,
+        errorCode: payload.error_code,
+      })
+    } else if (payload.request_id) {
+      // WriteCommand ack with no data (e.g. timeout/error)
+      const errInfo = payload.error_code ? ` [ERR:${payload.error_code}]` : ''
+      addLog({
+        type: payload.error_code ? 'error' : 'recv',
+        direction: 'RX',
+        time: now(),
+        data: payload.error_code ? `无响应${errInfo}` : '✓ 确认',
+        source: 'interactive',
+        channelId: payload.channel_id,
+        errorCode: payload.error_code,
+      })
     }
   })
 
@@ -686,7 +711,12 @@ watch(() => props.channels, () => {
   align-items: center;
 }
 
-.hex-input :deep(.el-input__inner) {
+.input-mode-toggle {
+  flex-shrink: 0;
+}
+
+.hex-input :deep(.el-input__inner),
+.ascii-input :deep(.el-input__inner) {
   font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
   letter-spacing: 0.5px;
 }
