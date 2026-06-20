@@ -82,11 +82,22 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
         }
     }
 
-    /* 1b. Pre-allocated by apply_config with different naming?
-     * bind_to format "busType/hwId" (e.g. "uart/UART1") vs hw_id format
-     * "BUS_CHxx" (e.g. "UART_CH42").  If a compatible ALLOCATED channel's
-     * bound_to starts with our bus type prefix, reuse it — on shared-HCI
-     * targets (like C6), a UART DMA channel serves any UART on that bus. */
+    /* 1b. Pre-allocated by apply_config with different hw_id?
+     *
+     * At C6 boot: dma_pool_apply_config binds CH1 to "uart/UART1"
+     * (from user DMA toggle).  Later bus_manager_setup_from_manifest()
+     * calls dma_pool_allocate("uart/UART1") — the exact match in step 1
+     * succeeds, no need for step 1b.
+     *
+     * Step 1b handles the case where a different UART requests DMA
+     * after the first one already took it (C6 UHCI sharing).  Since
+     * only CH1 is UART-compatible (hw_tables.c), step 1b reuses the
+     * already-allocated CH1 for the new requester.  This naturally
+     * enforces the hardware constraint documented in
+     * ESP32-C6 TRM v1.2 Ch.4 pp.122-123: UART0/UART1 share one
+     * UHCI slot on the GDMA peri-select matrix.
+     *
+     * bound_to format: "bus/hw_id" (e.g. "uart/UART1"). */
     for (int i = 0; i < pool->count; i++) {
         if (pool->channels[i].state == DMA_STATE_ALLOCATED &&
             (pool->channels[i].compatible_bus & bus_mask) &&

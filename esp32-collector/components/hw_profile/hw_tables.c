@@ -131,8 +131,20 @@ const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
 };
 
 /* C6: 3 GDMA channel pairs (TX+RX).  Only CH1 is UART-capable because
- * UART0/UART1 share a single UHCI interface — at most one UART can use
- * DMA at any time.  CH0 and CH2 are reserved for SPI / other peripherals. */
+ * UART0/UART1 share a single UHCI interface on the GDMA peri-select matrix.
+ *
+ * Hardware reference: ESP32-C6 TRM v1.2, Chapter 4, pp. 122-123
+ * - GDMA has 6 independent channels (3 TX + 3 RX)
+ * - Peripherals: SPI2, UHCI(UART0/UART1), I2S, AES, SHA, ADC, PARLIO
+ * - UHCI occupies ONE peri-select slot — at most one TX and one RX channel
+ *   can connect to UHCI at any time
+ * - Each TX/RX channel independently selects a peripheral via Peri Select
+ *
+ * We model the 6 physical channels as 3 pairs (TXn+RXn).  Only pair 1
+ * (CH1) is marked UART-compatible so the dma_pool naturally enforces
+ * the hardware constraint: two UARTs cannot both get DMA.
+ *
+ * CH0 and CH2 are reserved for SPI and other peripherals. */
 const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
     { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
       .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
