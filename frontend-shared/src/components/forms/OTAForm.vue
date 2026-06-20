@@ -136,6 +136,7 @@ const dialogVisible = computed({
       progress.value = 0
       upgradeStatus.value = 'idle'
       upgradeLogs.value = []
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
     }
   }
 })
@@ -211,17 +212,18 @@ const handleStart = async () => {
 
   try {
     upgradeStatus.value = 'uploading'
-    statusText.value = '正在上传固件...'
+    statusText.value = '正在创建OTA任务...'
     addLog('开始 OTA 升级')
 
     const otaRecord = await nodeApi.startOTA(props.collectorId, form.firmware_id)
 
     upgradeStatus.value = 'upgrading'
     statusText.value = '正在升级中...'
-    addLog(`OTA 任务已创建，ID: ${otaRecord.ota_record_id}`)
+    addLog(`OTA 任务已创建，ID: ${otaRecord.ota_record_id || otaRecord.id}`)
 
-    // 模拟进度更新（实际应该通过 WebSocket 获取）
-    simulateProgress()
+    // 轮询真实进度
+    const recordId = otaRecord.ota_record_id || otaRecord.id
+    pollProgress(recordId)
 
   } catch (error: any) {
     ElMessage.error(error.message || '启动升级失败')
@@ -231,36 +233,52 @@ const handleStart = async () => {
   }
 }
 
-// 模拟进度（实际应该通过 WebSocket 接收）
-const simulateProgress = () => {
-  let percent = 0
-  const interval = setInterval(() => {
-    percent += 10
-    progress.value = percent
+// 轮询真实OTA进度
+let progressTimer: ReturnType<typeof setInterval> | null = null
 
-    if (percent >= 50 && percent < 60) {
-      addLog('正在下载固件...')
-    } else if (percent >= 60 && percent < 90) {
-      addLog('正在刷写固件...')
-    } else if (percent >= 90) {
-      addLog('正在重启设备...')
+const pollProgress = (recordId: number) => {
+  if (progressTimer) clearInterval(progressTimer)
+
+  progressTimer = setInterval(async () => {
+    try {
+      const record = await nodeApi.getOTAProgress(props.collectorId, recordId)
+      progress.value = record.progress || 0
+
+      const statusMap: Record<string, string> = {
+        'pending': '等待中...',
+        'downloading': '正在下载固件...',
+        'flashing': '正在刷写固件...',
+        'completed': '升级完成',
+        'failed': '升级失败',
+      }
+      statusText.value = statusMap[record.status] || record.status
+
+      // 状态变化时添加日志
+      const lastLog = upgradeLogs.value[0]
+      if (!lastLog || lastLog.message !== statusText.value) {
+        addLog(statusText.value)
+      }
+
+      if (record.status === 'completed') {
+        clearInterval(progressTimer!)
+        progressTimer = null
+        upgradeStatus.value = 'completed'
+        progress.value = 100
+        addLog('升级完成！请等待设备重启...')
+        emit('success')
+        setTimeout(() => { dialogVisible.value = false }, 3000)
+      } else if (record.status === 'failed') {
+        clearInterval(progressTimer!)
+        progressTimer = null
+        upgradeStatus.value = 'failed'
+        statusText.value = '升级失败'
+        addLog(`失败: ${record.error_msg || '未知错误'}`)
+      }
+    } catch (error: any) {
+      // 轮询失败不中断，继续尝试
+      console.warn('OTA progress poll failed:', error)
     }
-
-    if (percent >= 100) {
-      clearInterval(interval)
-      upgradeStatus.value = 'completed'
-      statusText.value = '升级完成'
-      addLog('升级完成！请等待设备重启...')
-      progress.value = 100
-
-      emit('success')
-
-      // 3秒后关闭对话框
-      setTimeout(() => {
-        dialogVisible.value = false
-      }, 3000)
-    }
-  }, 500)
+  }, 2000)
 }
 
 // 添加日志
