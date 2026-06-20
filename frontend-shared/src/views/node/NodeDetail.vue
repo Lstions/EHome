@@ -179,8 +179,8 @@
           <div class="dma-controls" @click.stop>
             <label class="dma-toggle">
               <el-switch
-                :model-value="dma.state !== 2"
-                :disabled="dma.state === 1"
+                :model-value="getDmaSwitchState(dma)"
+                :disabled="collector?.status !== 'online'"
                 :loading="dmaTogglingMap[dma.dma_id] || false"
                 @change="toggleDma(dma, $event)"
                 active-text="启用"
@@ -360,6 +360,7 @@ const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 // DMA 通道
 const dmaChannels = ref<DmaChannelInfo[]>([])
 const dmaLoading = ref(false)
+const dmaOverrideStateMap = ref<Record<number, number>>({})
 
 let unsubscribe: (() => void) | null = null
 
@@ -669,12 +670,21 @@ const busText = (bus: number): string => {
   return parts.join(', ') || '无'
 }
 
+const getDmaSwitchState = (dma: DmaChannelInfo): boolean => {
+  const override = dmaOverrideStateMap.value[dma.dma_id]
+  if (override !== undefined) {
+    return override !== 2
+  }
+  return dma.state !== 2
+}
+
 const loadDmaChannels = async () => {
   const id = collectorId.value
   if (!id) return
   dmaLoading.value = true
   try {
     dmaChannels.value = await nodeApi.getDmaChannels(id)
+    dmaOverrideStateMap.value = {}
   } catch (error: any) {
     logger.error('获取 DMA 通道失败', { error: String(error) })
   } finally {
@@ -686,16 +696,22 @@ const loadDmaChannels = async () => {
 const dmaTogglingMap = ref<Record<number, boolean>>({})
 
 const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
+  // 乐观更新：先设置 override 状态
+  const targetState = enabled ? 0 : 2
+  dmaOverrideStateMap.value[dma.dma_id] = targetState
+
   dmaTogglingMap.value[dma.dma_id] = true
   try {
     await nodeApi.updateDmaConfig(collectorId.value, [{
       dma_id: dma.dma_id,
       enabled: enabled,
-      bind_to: dma.bound_to
+      bind_to: enabled ? dma.bound_to : ''
     }])
     await loadDmaChannels()
     ElMessage.success(enabled ? `已启用 ${dma.name}` : `已禁用 ${dma.name}`)
   } catch (error: any) {
+    // 失败回滚 override
+    delete dmaOverrideStateMap.value[dma.dma_id]
     ElMessage.error('操作失败: ' + (error.message || '未知错误'))
   } finally {
     dmaTogglingMap.value[dma.dma_id] = false

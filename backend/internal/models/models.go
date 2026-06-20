@@ -92,6 +92,8 @@ type EdgeDevice struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
+	// 非数据库字段 — 仅用于 API 响应中携带最新传感器数据
+	LastData       map[string]float64 `gorm:"-" json:"last_data,omitempty"`
 	// 关联
 	Node         Node         `gorm:"foreignKey:NodeID;references:NodeID" json:"node,omitempty"`
 	Channel      Channel      `gorm:"foreignKey:ChannelID" json:"channel,omitempty"`

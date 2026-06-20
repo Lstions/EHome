@@ -1,10 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -16,6 +19,7 @@ var jwtSecret = []byte(func() string {
 	if s := os.Getenv("EHOME_JWT_SECRET"); s != "" {
 		return s
 	}
+	logger.Warnf("⚠️  EHOME_JWT_SECRET not set — using insecure default secret. DO NOT use in production!")
 	return "ehome-dev-secret-change-me"
 }())
 
@@ -79,6 +83,22 @@ func JWTAuth() gin.HandlerFunc {
 			c.Set("role", claims.Role)
 		}
 
+		c.Next()
+	}
+}
+
+// RequireRole returns a middleware that checks the authenticated user's role.
+// It reads "role" from gin context (set by JWTAuth) and returns 403 if it doesn't match.
+func RequireRole(role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		r, exists := c.Get("role")
+		if !exists || r != role {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": fmt.Sprintf("%s role required", role),
+			})
+			return
+		}
 		c.Next()
 	}
 }

@@ -11,25 +11,25 @@
     <el-card>
       <el-skeleton v-if="loading" :rows="5" animated />
       <el-table v-else :data="firmwares" stripe>
-        <el-table-column prop="id" label="ID" width="60" />
+        <el-table-column prop="id" label="ID" width="50" />
         <el-table-column prop="version" label="版本号">
           <template #default="{ row }">
             <span>{{ formatVersion(row.version) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="checksum" label="校验和(SHA256)" width="200" show-overflow-tooltip />
-        <el-table-column prop="size_bytes" label="文件大小" width="120">
+        <el-table-column prop="checksum" label="校验和(SHA256)" width="240" show-overflow-tooltip />
+        <el-table-column prop="size_bytes" label="文件大小" width="100">
           <template #default="{ row }">
             <span>{{ formatFileSize(row.size_bytes) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="url" label="下载地址" show-overflow-tooltip />
-        <el-table-column prop="created_at" label="创建时间" width="180">
+        <el-table-column prop="url" label="下载地址" width="250" show-overflow-tooltip />
+        <el-table-column prop="created_at" label="创建时间" width="170">
           <template #default="{ row }">
             <span>{{ formatTime(row.created_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <el-button
               type="primary"
@@ -52,6 +52,7 @@
               @click="handleDelete(row)"
             >
               <el-icon><Delete /></el-icon>
+              删除
             </el-button>
           </template>
         </el-table-column>
@@ -76,6 +77,7 @@
     <el-dialog
       v-model="showUploadDialog"
       title="上传固件"
+      align-center
       width="500px"
     >
       <el-form :model="uploadForm" :rules="uploadRules" label-width="100px">
@@ -93,6 +95,7 @@
           >
             <el-button>选择文件</el-button>
           </el-upload>
+          <div class="upload-tip">支持 .bin 格式文件</div>
           <div v-if="uploadForm.file" class="file-info">
             已选择: {{ uploadForm.file.name }}
           </div>
@@ -110,6 +113,7 @@
     <el-dialog
       v-model="showEditDialog"
       title="编辑固件"
+      align-center
       width="500px"
       :close-on-click-modal="false"
     >
@@ -227,7 +231,7 @@ const handleEditSubmit = async () => {
 
 // 下载固件
 const handleDownload = (row: Firmware) => {
-  const url = firmwareApi.getDownloadUrl(row.id)
+  const url = firmwareApi.getDownloadUrl(row.filename)
   const link = document.createElement('a')
   link.href = url
   link.download = `firmware_${formatVersion(row.version)}.bin`
@@ -310,6 +314,12 @@ onMounted(() => {
 
 .file-info {
   margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.upload-tip {
+  margin-top: 4px;
   font-size: 12px;
   color: #909399;
 }

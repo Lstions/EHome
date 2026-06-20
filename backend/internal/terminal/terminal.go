@@ -115,7 +115,7 @@ type TerminalEvent struct {
 func NewManager() *Manager {
 	return &Manager{
 		terminals: make(map[uint]*ChannelTerminal),
-		wsCh:      make(chan TerminalEvent, 64),
+		wsCh:      make(chan TerminalEvent, 256),
 	}
 }
 

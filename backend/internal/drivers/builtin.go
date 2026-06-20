@@ -80,40 +80,33 @@ func (d *LKTH01Driver) ParseData(raw []byte) ([]SensorData, error) {
 type SN3000Driver struct{}
 
 func (d *SN3000Driver) DeviceType() string     { return "sn3000" }
-func (d *SN3000Driver) DeviceName() string     { return "SN-3000 风向风速传感器" }
-func (d *SN3000Driver) OEM() string            { return "赛能" }
-func (d *SN3000Driver) Category() string       { return "风向风速传感器" }
+func (d *SN3000Driver) DeviceName() string     { return "SN-3000 风向传感器" }
+func (d *SN3000Driver) OEM() string            { return "普锐森社" }
+func (d *SN3000Driver) Category() string       { return "风向传感器" }
 func (d *SN3000Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *SN3000Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
 		{Name: "wind_direction", Unit: "°"},
-		{Name: "wind_speed", Unit: "m/s"},
 	}
 }
 
 func (d *SN3000Driver) ParseData(raw []byte) ([]SensorData, error) {
+	// SN-3000-FXJT-N01-360 is a wind DIRECTION sensor only (no wind speed).
+	// Modbus response format: [addr][func][byte_count][reg0_hi][reg0_lo][reg1_hi][reg1_lo][crc_lo][crc_hi]
+	// Register 0x0000: wind direction × 10 (0-3599) → 0.0° ~ 359.9°
+	// Register 0x0001: integer wind direction (0-359) — redundant, skip
 	if len(raw) < 5 {
 		return nil, fmt.Errorf("sn3000: need at least 5 bytes (addr+func+count+2data), got %d", len(raw))
 	}
 
-	// Verify function code
 	if raw[1] != 0x03 {
 		return nil, fmt.Errorf("sn3000: unexpected function code 0x%02X, expected 0x03", raw[1])
 	}
 
-	// Wind direction: data[3:4], high byte first, divide by 10
 	direction := float64(binary.BigEndian.Uint16(raw[3:5])) / 10.0
-	result := []SensorData{
+	return []SensorData{
 		{Name: "wind_direction", Value: direction, Unit: "°"},
-	}
-
-	// Wind speed: data[5:6], if available
-	if len(raw) >= 7 {
-		speed := float64(binary.BigEndian.Uint16(raw[5:7])) / 10.0
-		result = append(result, SensorData{Name: "wind_speed", Value: speed, Unit: "m/s"})
-	}
-
-	return result, nil
+	}, nil
 }
 
 // RegisterBuiltInDrivers registers all built-in drivers

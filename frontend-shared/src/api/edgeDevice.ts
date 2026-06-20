@@ -1,23 +1,27 @@
 import client from './client'
 
+// M10 fix: Export DeviceStatus type for use across components
+export type DeviceStatus = 'online' | 'offline' | 'error' | 'active' | 'pending' | 'initializing' | 'unknown'
+
 export interface EdgeDevice {
   id: number
-  node_id: number
-  node?: { id: number; name: string }
+  node_id: number | string
+  node?: { id: number | string; name: string }
   name: string
   device_type: string
   protocol: string
   hardware_type: string
   hardware_id: string
   config: Record<string, any>
-  status: string
+  status: DeviceStatus
   last_data: Record<string, number> | null
   last_data_time: string | null
+  last_error_code?: number
   created_at: string
 }
 
 export interface EdgeDeviceListParams {
-  node_id?: number
+  node_id?: number | string
   device_type?: string
   status?: string
   page?: number
@@ -29,6 +33,67 @@ export interface CreateEdgeDeviceParams extends Partial<EdgeDevice> {
 }
 
 // ============================================================
+// Normalize backend fields → frontend EdgeDevice interface
+// ============================================================
+
+// RawEdgeDevice represents the raw API response from the backend
+// (M8 fix: replaces `any` with proper interface for type safety)
+interface RawEdgeDevice {
+  id: number
+  node_id?: number | string
+  node?: { id?: number | string; name?: string }
+  name?: string
+  type?: string
+  device_type?: string
+  protocol?: string
+  device_config?: { protocol?: string }
+  hardware_type?: string
+  channel?: { hardware_type?: string; hardware_id?: string }
+  hardware_id?: string
+  config?: Record<string, any>
+  status?: string
+  last_data?: Record<string, number> | null
+  last_data_at?: string | null
+  last_data_time?: string | null
+  error_code?: number
+  last_error_code?: number
+  created_at?: string
+}
+
+// M9 fix: Explicit status mapping from backend values to frontend display values
+const STATUS_MAP: Record<string, DeviceStatus> = {
+  active: 'online',
+  online: 'online',
+  offline: 'offline',
+  error: 'error',
+  pending: 'pending',
+  initializing: 'initializing',
+  unknown: 'unknown',
+}
+
+function mapStatus(rawStatus?: string): DeviceStatus {
+  if (!rawStatus) return 'offline'
+  return STATUS_MAP[rawStatus] ?? 'unknown' // unmapped statuses become 'unknown' instead of unsafe cast
+}
+
+const normalize = (d: RawEdgeDevice): EdgeDevice => ({
+  id: d.id,
+  node_id: d.node_id ?? 0,
+  node: d.node && d.node.name ? { id: d.node.id ?? d.node_id, name: d.node.name } : undefined,
+  name: d.name || '',
+  device_type: d.type || d.device_type || '',
+  protocol: d.protocol || d.device_config?.protocol || '',
+  hardware_type: d.hardware_type || d.channel?.hardware_type || '',
+  hardware_id: d.hardware_id || d.channel?.hardware_id || '',
+  config: d.config || {},
+  status: mapStatus(d.status),
+  last_data: d.last_data || null,
+  last_data_time: d.last_data_at || d.last_data_time || null,
+  last_error_code: d.error_code ?? d.last_error_code ?? undefined,
+  created_at: d.created_at || ''
+})
+
+// ============================================================
 // API (edgeDeviceApi)
 // ============================================================
 
@@ -38,14 +103,14 @@ export const edgeDeviceApi = {
     // Backend returns bare array [{...}], not {code, data, message} envelope
     // Interceptor returns response.data (parsed JSON body), so response IS the array
     if (Array.isArray(response)) {
-      return { total: response.length, items: response as EdgeDevice[] }
+      return { total: response.length, items: response.map(normalize) }
     }
     // Handle envelope format if backend changes
     if (response?.data?.items) {
-      return { total: response.data.total ?? response.data.items.length, items: response.data.items }
+      return { total: response.data.total ?? response.data.items.length, items: response.data.items.map(normalize) }
     }
     if (response?.data && Array.isArray(response.data)) {
-      return { total: response.data.length, items: response.data }
+      return { total: response.data.length, items: response.data.map(normalize) }
     }
     return { total: 0, items: [] }
   },
@@ -54,9 +119,9 @@ export const edgeDeviceApi = {
     const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}`)
     // GET /edge-devices/:id returns envelope {code, data, message}
     if (response?.data && typeof response.data === 'object') {
-      return response.data as EdgeDevice
+      return normalize(response.data)
     }
-    return response as unknown as EdgeDevice
+    return normalize(response)
   },
 
   async create(data: CreateEdgeDeviceParams): Promise<{id: number}> {

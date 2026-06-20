@@ -51,15 +51,15 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	// GET /api/v1/nodes/:id/latest
 	v1.GET("/nodes/:id/latest", func(c *gin.Context) {
 		id := c.Param("id")
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
 
 		// Get all channels for this node
 		var channels []models.Channel
-		db.Where("node_id = ? AND enabled = ?", node.ID, true).Find(&channels)
+		db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Find(&channels)
 
 		type LatestValue struct {
 			ChannelID  uint      `json:"channel_id"`
@@ -89,7 +89,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"node_id": node.ID,
+			"node_id": node.NodeID,
 			"values":  results,
 		})
 	})

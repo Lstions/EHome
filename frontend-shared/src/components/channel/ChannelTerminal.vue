@@ -336,8 +336,9 @@ const hexToAscii = (hex: string): string => {
   return result
 }
 
-const formatData = (data: string): string => {
+const formatData = (data: string | any): string => {
   if (!data) return ''
+  if (typeof data !== 'string') return String(data)
   if (displayMode.value === 'ascii') {
     return hexToAscii(data)
   }
@@ -497,9 +498,10 @@ const setupWebSocket = () => {
     if (!selectedChannelId.value || payload.channel_id !== selectedChannelId.value) return
 
     // channel_data 事件始终是上行数据 (DataReport from device)
-    // 后端 payload 字段: device_id, channel_id, raw_hex, timestamp, error_code, request_id
+    // 后端 payload 字段: device_id, channel_id, raw_hex, timestamp, error_code, request_id, data (parsed sensors)
     // 注意: 后端不发送 direction 字段，channel_data = RX
-    const data = payload.data || payload.raw_hex
+    // 终端显示 raw hex，data 是解析后的传感器数据（对象），不能用于终端显示
+    const data = payload.raw_hex
     const source: 'interactive' | 'scheduled' = payload.request_id ? 'interactive' : 'scheduled'
 
     if (data) {

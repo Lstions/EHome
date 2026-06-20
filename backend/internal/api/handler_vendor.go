@@ -29,27 +29,38 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": vendor})
 	})
-	v1.POST("/vendors", func(c *gin.Context) {
-		var vendor models.Vendor
-		if err := c.ShouldBindJSON(&vendor); err != nil {
+	v1.POST("/vendors", RequireRole("admin"), func(c *gin.Context) {
+		var dto struct {
+			Name string `json:"name" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
+		vendor := models.Vendor{Name: dto.Name}
 		db.Create(&vendor)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": vendor})
 	})
-	v1.PUT("/vendors/:id", func(c *gin.Context) {
+	v1.PUT("/vendors/:id", RequireRole("admin"), func(c *gin.Context) {
 		var vendor models.Vendor
 		if err := db.First(&vendor, c.Param("id")).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404})
 			return
 		}
-		var req map[string]interface{}
-		c.ShouldBindJSON(&req)
-		db.Model(&vendor).Updates(req)
+		var dto struct {
+			Name *string `json:"name"`
+		}
+		c.ShouldBindJSON(&dto)
+		updates := map[string]interface{}{}
+		if dto.Name != nil {
+			updates["name"] = *dto.Name
+		}
+		if len(updates) > 0 {
+			db.Model(&vendor).Updates(updates)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": vendor})
 	})
-	v1.DELETE("/vendors/:id", func(c *gin.Context) {
+	v1.DELETE("/vendors/:id", RequireRole("admin"), func(c *gin.Context) {
 		db.Delete(&models.Vendor{}, c.Param("id"))
 		c.JSON(http.StatusOK, gin.H{"code": 200})
 	})
@@ -77,27 +88,53 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm})
 	})
-	v1.POST("/device-models", func(c *gin.Context) {
-		var dm models.DeviceModel
-		if err := c.ShouldBindJSON(&dm); err != nil {
+	v1.POST("/device-models", RequireRole("admin"), func(c *gin.Context) {
+		var dto struct {
+			Name     string `json:"name" binding:"required"`
+			Type     string `json:"type" binding:"required"`
+			VendorID uint   `json:"vendor_id" binding:"required"`
+			Fields   string `json:"fields"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
+		dm := models.DeviceModel{Name: dto.Name, Type: dto.Type, VendorID: dto.VendorID, Fields: dto.Fields}
 		db.Create(&dm)
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": dm})
 	})
-	v1.PUT("/device-models/:id", func(c *gin.Context) {
+	v1.PUT("/device-models/:id", RequireRole("admin"), func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404})
 			return
 		}
-		var req map[string]interface{}
-		c.ShouldBindJSON(&req)
-		db.Model(&dm).Updates(req)
+		var dto struct {
+			Name     *string `json:"name"`
+			Type     *string `json:"type"`
+			VendorID *uint   `json:"vendor_id"`
+			Fields   *string `json:"fields"`
+		}
+		c.ShouldBindJSON(&dto)
+		updates := map[string]interface{}{}
+		if dto.Name != nil {
+			updates["name"] = *dto.Name
+		}
+		if dto.Type != nil {
+			updates["type"] = *dto.Type
+		}
+		if dto.VendorID != nil {
+			updates["vendor_id"] = *dto.VendorID
+		}
+		if dto.Fields != nil {
+			updates["fields"] = *dto.Fields
+		}
+		if len(updates) > 0 {
+			db.Model(&dm).Updates(updates)
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm})
 	})
-	v1.DELETE("/device-models/:id", func(c *gin.Context) {
+	v1.DELETE("/device-models/:id", RequireRole("admin"), func(c *gin.Context) {
 		db.Delete(&models.DeviceModel{}, c.Param("id"))
 		c.JSON(http.StatusOK, gin.H{"code": 200})
 	})
@@ -111,7 +148,7 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm.Fields})
 	})
-	v1.PUT("/device-models/:id/fields", func(c *gin.Context) {
+	v1.PUT("/device-models/:id/fields", RequireRole("admin"), func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404})

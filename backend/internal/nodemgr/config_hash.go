@@ -31,12 +31,13 @@ func (m *ConfigHashManager) CalcConfigHash(templates, channels []byte) string {
 	return fmt.Sprintf("%08x", h)
 }
 
-// ShouldSendConfig checks if config should be sent (hash changed or dedup window expired)
+// ShouldSendConfig checks if config should be sent (hash changed or first time)
+// M6 fix: do NOT resend when hash is same and dedup expired — only send when hash changes
 func (m *ConfigHashManager) ShouldSendConfig(deviceID string, newHash string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check hash first: if hash changed, always send regardless of dedup
+	// Check hash: if hash changed, always send
 	oldHash, hasOld := m.hashes[deviceID]
 	if hasOld && oldHash != newHash {
 		m.hashes[deviceID] = newHash
@@ -44,25 +45,16 @@ func (m *ConfigHashManager) ShouldSendConfig(deviceID string, newHash string) bo
 		return true
 	}
 
-	// Same hash or first time: check dedup window
-	if lastTime, ok := m.lastSent[deviceID]; ok {
-		if time.Since(lastTime) < m.dedupWindow {
-			return false // Within 30s window, skip
-		}
-	}
-
-	// Hash unchanged but dedup expired, or first time
-	if hasOld && oldHash == newHash {
-		// Same hash, dedup expired — allow resend (backend restart clears memory,
-		// so the first Hello after restart should trigger a push even with same hash)
+	// First time (no previous hash): send and record
+	if !hasOld {
+		m.hashes[deviceID] = newHash
 		m.lastSent[deviceID] = time.Now()
 		return true
 	}
 
-	// First time: update state and send
-	m.hashes[deviceID] = newHash
-	m.lastSent[deviceID] = time.Now()
-	return true
+	// Same hash: do NOT resend (M6 fix: previous logic incorrectly resent every 30s)
+	// Only update lastSent if we actually sent, otherwise just skip
+	return false
 }
 
 // Reset clears hash for a device (e.g., on config change)

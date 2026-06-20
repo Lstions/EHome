@@ -38,7 +38,7 @@ func registerUserRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": user})
 	})
 	// POST /users
-	u.POST("", func(c *gin.Context) {
+	u.POST("", RequireRole("admin"), func(c *gin.Context) {
 		var req struct {
 			Username string `json:"username" binding:"required"`
 			Password string `json:"password" binding:"required"`
@@ -58,7 +58,7 @@ func registerUserRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": user})
 	})
 	// PUT /users/:id
-	u.PUT("/:id", func(c *gin.Context) {
+	u.PUT("/:id", RequireRole("admin"), func(c *gin.Context) {
 		var user models.User
 		if err := db.First(&user, c.Param("id")).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404})
@@ -91,7 +91,7 @@ func registerUserRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": user})
 	})
 	// DELETE /users/:id
-	u.DELETE("/:id", func(c *gin.Context) {
+	u.DELETE("/:id", RequireRole("admin"), func(c *gin.Context) {
 		db.Delete(&models.User{}, c.Param("id"))
 		c.JSON(http.StatusOK, gin.H{"code": 200})
 	})
@@ -120,7 +120,7 @@ func registerUserRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 200})
 	})
 	// POST /users/:id/reset-password
-	u.POST("/:id/reset-password", func(c *gin.Context) {
+	u.POST("/:id/reset-password", RequireRole("admin"), func(c *gin.Context) {
 		var req struct {
 			NewPassword string `json:"new_password" binding:"required"`
 		}

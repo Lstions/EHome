@@ -14,6 +14,27 @@ export interface Parser {
   description?: string    // 描述
 }
 
+// S8 fix: Extract 4-level hardware_types fallback chain into a helper function
+// (was duplicated in getList() and getById())
+function resolveHardwareTypes(d: any): string[] {
+  return d.bus_types || d.hardware_types ||
+    (d.hardware_type ? [d.hardware_type.toLowerCase()] :
+     d.connection?.bus_type ? [d.connection.bus_type.toLowerCase()] :
+     d.protocol ? [d.protocol.toLowerCase()] : [])
+}
+
+function normalizeParser(d: any): Parser {
+  return {
+    id: d.type || d.device_type,
+    name: d.display_name || d.name,
+    vendor: d.oem || d.vendor || '',
+    category: d.category || '',
+    hardware_types: resolveHardwareTypes(d),
+    measure_types: d.measure_type ? [d.measure_type] : [],
+    description: d.description
+  }
+}
+
 export const parserApi = {
   /**
    * 获取所有解析器列表
@@ -23,15 +44,7 @@ export const parserApi = {
     // Backend returns {code, data: {list: [...], total, ...}, message}
     const envelope = response as any
     const drivers = envelope.data?.list || envelope.data || []
-    return drivers.map((d: any) => ({
-      id: d.type || d.device_type,
-      name: d.display_name || d.name,
-      vendor: d.oem,
-      category: d.category,
-      hardware_types: d.bus_types || d.hardware_types || [],
-      measure_types: d.measure_type ? [d.measure_type] : [],
-      description: d.description
-    }))
+    return drivers.map(normalizeParser)
   },
 
   /**
@@ -41,16 +54,7 @@ export const parserApi = {
     const response = await client.get(`/api/v1/device-configs/${id}`)
     // Backend returns {code, data: DeviceConfig, message}
     const envelope = response as any
-    const d = envelope.data
-    return {
-      id: d.type || d.device_type,
-      name: d.display_name || d.name,
-      vendor: d.oem,
-      category: d.category,
-      hardware_types: d.bus_types || d.hardware_types || [],
-      measure_types: d.measure_type ? [d.measure_type] : [],
-      description: d.description
-    }
+    return normalizeParser(envelope.data)
   }
 }
 

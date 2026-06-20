@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +33,8 @@ type Hub struct {
 	subscribers map[chan Event]bool
 
 	// OnMessage is called when a client sends a message (e.g., terminal send)
+	// C4 fix: protected by onMsgMu for concurrent read/write
+	onMsgMu  sync.RWMutex
 	onMessage MessageHandler
 }
 
@@ -42,6 +45,8 @@ type Client struct {
 	send chan []byte
 	// UserID from JWT auth (set during upgrade)
 	UserID string
+	// Role from JWT auth (M3 fix: needed for command authorization)
+	Role string
 }
 
 var upgrader = websocket.Upgrader{
@@ -64,8 +69,11 @@ func NewHub() *Hub {
 }
 
 // SetOnMessage sets the callback for client-sent messages
+// C4 fix: protected by onMsgMu
 func (h *Hub) SetOnMessage(handler MessageHandler) {
+	h.onMsgMu.Lock()
 	h.onMessage = handler
+	h.onMsgMu.Unlock()
 }
 
 // Run starts the hub event loop
@@ -124,7 +132,7 @@ func (h *Hub) Broadcast(data []byte) {
 // Subscribe returns a channel that receives all broadcast events
 // Callers can use this to listen for specific event types
 func (h *Hub) Subscribe() chan Event {
-	ch := make(chan Event, 64)
+	ch := make(chan Event, 256)
 	h.subMu.Lock()
 	h.subscribers[ch] = true
 	h.subMu.Unlock()
@@ -162,11 +170,23 @@ func (h *Hub) HandleWebSocket(c *gin.Context) {
 	}
 
 	// Extract user_id from JWT auth context (set by middleware)
-	userID, _ := c.Get("user_id")
-
+	// S4 fix: JWT middleware sets user_id as uint (Claims.UserID), handle both types
 	client := &Client{hub: h, conn: conn, send: make(chan []byte, 256)}
-	if uid, ok := userID.(string); ok {
-		client.UserID = uid
+	if userID, exists := c.Get("user_id"); exists {
+		switch v := userID.(type) {
+		case string:
+			client.UserID = v
+		case uint:
+			client.UserID = strconv.FormatUint(uint64(v), 10)
+		case float64:
+			client.UserID = strconv.FormatUint(uint64(v), 10)
+		}
+	}
+	// M3 fix: also extract role for command authorization
+	if role, exists := c.Get("role"); exists {
+		if r, ok := role.(string); ok {
+			client.Role = r
+		}
 	}
 	h.register <- client
 
@@ -190,10 +210,14 @@ func (c *Client) readPump() {
 		}
 
 		// Parse and dispatch client-sent messages
-		if c.hub.onMessage != nil {
+		// C4 fix: read onMessage under RLock
+		c.hub.onMsgMu.RLock()
+		handler := c.hub.onMessage
+		c.hub.onMsgMu.RUnlock()
+		if handler != nil {
 			var evt Event
 			if err := json.Unmarshal(message, &evt); err == nil {
-				c.hub.onMessage(c, evt)
+				handler(c, evt)
 			}
 		}
 	}

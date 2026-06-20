@@ -20,7 +20,43 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// List edge devices (v2.2 path for /devices)
 	v1.GET("/edge-devices", func(c *gin.Context) {
 		var devices []models.EdgeDevice
-		db.Preload("Channel").Preload("Node").Find(&devices)
+		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").Find(&devices)
+
+		// Enrich each device with latest sensor data from unified_data (C1 fix: batch query)
+		type lastDataEntry struct {
+			DeviceID   uint    `json:"device_id"`
+			SensorName string  `json:"sensor_name"`
+			Value      float64 `json:"value"`
+			Unit       string  `json:"unit"`
+		}
+		// Collect all device IDs
+		deviceIDs := make([]uint, len(devices))
+		for i, d := range devices {
+			deviceIDs[i] = d.ID
+		}
+		// Single query: get latest 10 rows per device using DISTINCT ON (PostgreSQL)
+		var allEntries []lastDataEntry
+		if len(deviceIDs) > 0 {
+			db.Table("unified_data").
+				Select("ud.device_id, ud.sensor_name, ud.value, ud.unit").
+				Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON unified_data.device_id = latest.device_id AND unified_data.created_at = latest.created_at", deviceIDs).
+				Where("unified_data.device_id IN ?", deviceIDs).
+				Find(&allEntries)
+		}
+		// Group by device ID
+		dataByDevice := make(map[uint]map[string]float64, len(devices))
+		for _, e := range allEntries {
+			if dataByDevice[e.DeviceID] == nil {
+				dataByDevice[e.DeviceID] = make(map[string]float64)
+			}
+			dataByDevice[e.DeviceID][e.SensorName] = e.Value
+		}
+		for i := range devices {
+			if dm, ok := dataByDevice[devices[i].ID]; ok && len(dm) > 0 {
+				devices[i].LastData = dm
+			}
+		}
+
 		Success(c, devices)
 	})
 
@@ -28,7 +64,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	v1.GET("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var d models.EdgeDevice
-		if err := db.First(&d, id).Error; err != nil {
+		if err := db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
 				return
@@ -40,11 +76,38 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Create edge device (v2.2 path for POST /devices)
-	v1.POST("/edge-devices", func(c *gin.Context) {
-		var dev models.EdgeDevice
-		if err := c.ShouldBindJSON(&dev); err != nil {
+	v1.POST("/edge-devices", RequireRole("admin"), func(c *gin.Context) {
+		// B1 fix: bind to a separate DTO, then construct from allowed fields only
+		var dto struct {
+			Name          *string `json:"name"`
+			Type          *string `json:"type"`
+			NodeID        *string `json:"node_id"`
+			ChannelID     *uint   `json:"channel_id"`
+			Enabled       *bool   `json:"enabled"`
+			IntervalMs    *int    `json:"interval_ms"`
+			HardwareID    *string `json:"hardware_id"`
+			DeviceConfigID *uint  `json:"device_config_id"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		if dto.Name == nil || dto.Type == nil || dto.NodeID == nil || dto.ChannelID == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name, type, node_id, and channel_id are required"})
+			return
+		}
+		dev := models.EdgeDevice{Name: *dto.Name, Type: *dto.Type, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
+		if dto.Enabled != nil {
+			dev.Enabled = *dto.Enabled
+		}
+		if dto.IntervalMs != nil {
+			dev.IntervalMs = *dto.IntervalMs
+		}
+		if dto.HardwareID != nil {
+			dev.HardwareID = *dto.HardwareID
+		}
+		if dto.DeviceConfigID != nil {
+			dev.DeviceConfigID = *dto.DeviceConfigID
 		}
 		if err := db.Create(&dev).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -59,22 +122,62 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Update edge device (v2.2 path for PUT /devices/:id)
-	v1.PUT("/edge-devices/:id", func(c *gin.Context) {
+	v1.PUT("/edge-devices/:id", RequireRole("admin"), func(c *gin.Context) {
 		id := c.Param("id")
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
 			return
 		}
-		if err := c.ShouldBindJSON(&d); err != nil {
+		// B1 fix: bind to a separate DTO, then apply only allowed fields via Updates
+		var dto struct {
+			Name           *string `json:"name"`
+			Type           *string `json:"type"`
+			Enabled        *bool   `json:"enabled"`
+			IntervalMs     *int    `json:"interval_ms"`
+			HardwareID     *string `json:"hardware_id"`
+			DeviceConfigID *uint   `json:"device_config_id"`
+			ChannelID      *uint   `json:"channel_id"`
+			NodeID         *string `json:"node_id"`
+			Status         *string `json:"status"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
-		d.ID = parseUintID(id)
-		if err := db.Save(&d).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
+		updates := map[string]interface{}{}
+		if dto.Name != nil {
+			updates["name"] = *dto.Name
 		}
+		if dto.Type != nil {
+			updates["type"] = *dto.Type
+		}
+		if dto.Enabled != nil {
+			updates["enabled"] = *dto.Enabled
+		}
+		if dto.IntervalMs != nil {
+			updates["interval_ms"] = *dto.IntervalMs
+		}
+		if dto.HardwareID != nil {
+			updates["hardware_id"] = *dto.HardwareID
+		}
+		if dto.DeviceConfigID != nil {
+			updates["device_config_id"] = *dto.DeviceConfigID
+		}
+		if dto.ChannelID != nil {
+			updates["channel_id"] = *dto.ChannelID
+		}
+		if dto.NodeID != nil {
+			updates["node_id"] = *dto.NodeID
+		}
+		if dto.Status != nil {
+			updates["status"] = *dto.Status
+		}
+		if len(updates) > 0 {
+			db.Model(&d).Updates(updates)
+		}
+		// Reload to get updated fields
+		db.First(&d, id)
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
@@ -84,7 +187,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Init edge device (trigger InitDevice via deviceinit.Orchestrator)
-	v1.POST("/edge-devices/:id/init", func(c *gin.Context) {
+	v1.POST("/edge-devices/:id/init", RequireRole("admin"), func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 
 		// Load the edge device to get device type, channel, and node info
@@ -99,8 +202,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 
 		// Resolve the MQTT device ID from the associated Node
-		var node models.Node
-		if err := db.First(&node, dev.NodeID).Error; err != nil {
+		node, err := findNodeByID(db, dev.NodeID)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "associated node not found"})
 			return
 		}

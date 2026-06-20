@@ -95,16 +95,55 @@ const buildSeries = () => {
 }
 
 const getXAxisData = () => {
-  if (props.series && props.series.length > 0 && props.series[0].data.length > 0) {
-    return props.series[0].data.map(item => {
-      const date = new Date(item.time)
-      return `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`
-    })
-  }
-  return props.data.map(item => {
-    const date = new Date(item.time)
-    return `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`
+  const source = (props.series && props.series.length > 0 && props.series[0].data.length > 0)
+    ? props.series[0].data
+    : props.data
+  if (source.length === 0) return []
+
+  const trendRange = props.series?.[0]?.data?.length
+    ? (() => {
+        const first = new Date(source[0].time)
+        const last = new Date(source[source.length - 1].time)
+        return (last.getTime() - first.getTime()) / 86400000
+      })()
+    : 0
+
+  return source.map(item => {
+    const d = new Date(item.time)
+    if (trendRange > 2) {
+      // 7d: MM/DD HH:mm
+      return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+    } else {
+      // 24h and 1h: HH:mm (seconds not useful on chart axis)
+      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+    }
   })
+}
+
+const getXAxisConfig = () => {
+  const source = (props.series && props.series.length > 0 && props.series[0].data.length > 0)
+    ? props.series[0].data
+    : props.data
+  const count = source.length
+  const labels = getXAxisData()
+
+  // Auto-calculate interval to show ~8-12 labels max
+  const maxLabels = 10
+  const interval = count > maxLabels ? Math.floor(count / maxLabels) : 0
+
+  // Determine rotation based on data density
+  const rotate = count > 50 ? 30 : count > 20 ? 15 : 0
+
+  return {
+    type: 'category' as const,
+    data: labels,
+    axisLabel: {
+      rotate,
+      interval,
+      fontSize: 11
+    },
+    axisTick: { alignWithLabel: true }
+  }
 }
 
 const initChart = () => {
@@ -139,11 +178,7 @@ const initChart = () => {
     },
     legend: multiSeries ? { top: 30 } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
-    xAxis: {
-      type: 'category',
-      data: getXAxisData(),
-      axisLabel: { rotate: 45, interval: 0 }
-    },
+    xAxis: getXAxisConfig(),
     yAxis: yAxisConfig || {
       type: 'value',
       axisLabel: { formatter: (value: number) => value.toFixed(2) }
@@ -178,7 +213,7 @@ watch(() => [props.data, props.series], () => {
   chartInstance.setOption({
     legend: multiSeries ? { top: 30 } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
-    xAxis: { type: 'category', data: getXAxisData(), axisLabel: { rotate: 45, interval: 0 } },
+    xAxis: getXAxisConfig(),
     yAxis: yAxisConfig,
     series: buildSeries()
   })

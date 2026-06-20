@@ -127,9 +127,12 @@
                   <el-radio-button value="7d">7天</el-radio-button>
                 </el-radio-group>
                 <el-select v-model="trendCategory" size="small" style="width: 140px;">
-                  <el-option label="温度" value="temperature" />
-                  <el-option label="气压" value="pressure" />
-                  <el-option label="湿度" value="humidity" />
+                  <el-option
+                    v-for="cat in availableTrendCategories"
+                    :key="cat.value"
+                    :label="cat.label"
+                    :value="cat.value"
+                  />
                 </el-select>
               </div>
             </div>
@@ -269,6 +272,7 @@ import client from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
+import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
 
 const router = useRouter()
 
@@ -292,12 +296,39 @@ const trendRangeLabel = computed(() => {
   return map[trendRange.value] || ''
 })
 const trendCategoryName = computed(() => {
-  const map: Record<string, string> = {
-    temperature: '温度',
-    pressure: '气压',
-    humidity: '湿度'
+  return sensorNameMap[trendCategory.value] || trendCategory.value
+})
+
+// 传感器映射已提取到 utils/sensor.ts (S6 fix)
+
+// 从 overview.latest_data 动态提取可用的传感器类型
+const availableTrendCategories = computed(() => {
+  const dataKeys = new Set<string>()
+  for (const item of (overview.value.latest_data || [])) {
+    if (item.data && typeof item.data === 'object') {
+      for (const key of Object.keys(item.data)) {
+        const val = item.data[key]
+        // 只收集数值型字段（排除字符串、null 等）
+        if (typeof val === 'number' || (typeof val === 'object' && val !== null && 'value' in val)) {
+          dataKeys.add(key)
+        }
+      }
+    }
   }
-  return map[trendCategory.value] || trendCategory.value
+  // 按预定义顺序排列，未知的排在后面
+  const knownOrder = SENSOR_ORDER
+  const sorted = [...dataKeys].sort((a, b) => {
+    const ia = knownOrder.indexOf(a)
+    const ib = knownOrder.indexOf(b)
+    if (ia !== -1 && ib !== -1) return ia - ib
+    if (ia !== -1) return -1
+    if (ib !== -1) return 1
+    return a.localeCompare(b)
+  })
+  return sorted.map(key => ({
+    value: key,
+    label: sensorNameMap[key] || key
+  }))
 })
 
 // 状态时间线
@@ -325,16 +356,8 @@ const fetchTrendData = async () => {
     }
     const startTime = new Date(endTime.getTime() - (rangeMs[trendRange.value] || rangeMs['24h']))
 
-    const unitMap: Record<string, string> = {
-      temperature: '°C',
-      pressure: 'hPa',
-      humidity: '%'
-    }
-    const nameMap: Record<string, string> = {
-      temperature: '温度',
-      pressure: '气压',
-      humidity: '湿度'
-    }
+    const unitMap = sensorUnitMap
+    const nameMap = sensorNameMap
 
     // 从概览数据中获取设备列表，逐个查询
     const deviceIds = overview.value.latest_data?.map(d => d.device_id).filter(Boolean) || []
@@ -356,7 +379,7 @@ const fetchTrendData = async () => {
       }).then(res => ({
         deviceId,
         deviceName: overview.value.latest_data?.find(d => d.device_id === deviceId)?.device_name || `设备${deviceId}`,
-        data: res.data || []
+        data: Array.isArray(res) ? res : (res.data || [])
       }))
     )
 
@@ -527,6 +550,22 @@ const formatTime = (time: string | null | undefined) => {
 
 watch(trendCategory, () => {
   fetchTrendData()
+})
+
+// M11 fix: Extract category keys as a flat string for stable watch comparison.
+// The original availableTrendCategories computed returns new object references on every
+// evaluation, causing the watch to fire on every overview update even when values are identical.
+const availableCategoryKeys = computed(() => {
+  return availableTrendCategories.value.map(c => c.value).join(',')
+})
+
+watch(availableCategoryKeys, (newKeys, oldKeys) => {
+  const cats = availableTrendCategories.value
+  if (cats.length > 0 && !cats.some(c => c.value === trendCategory.value)) {
+    trendCategory.value = cats[0].value
+  } else if (cats.length === 0) {
+    trendSeries.value = []
+  }
 })
 
 onMounted(async () => {

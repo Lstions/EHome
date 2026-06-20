@@ -130,6 +130,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	})
 
 	// Update node (v2.2 path for PUT /collectors/:id)
+	// M1 fix: use separate DTO to prevent field injection (ID, CreatedAt, etc.)
 	v1.PUT("/nodes/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
@@ -137,12 +138,76 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
 			return
 		}
-		if err := c.ShouldBindJSON(node); err != nil {
+		// M1 fix: bind to a separate DTO, then copy allowed fields only
+		var dto struct {
+			Name            *string `json:"name"`
+			Model           *string `json:"model"`
+			FirmwareVersion *string `json:"firmware_version"`
+			ProtocolVersion *string `json:"protocol_version"`
+			Platform        *string `json:"platform"`
+			Status          *string `json:"status"`
+			ConfigVersion   *string `json:"config_version"`
+			ConfigStatus    *string `json:"config_status"`
+			WiFiSSID        *string `json:"wifi_ssid"`
+			WiFiRSSI        *int    `json:"wifi_rssi"`
+			FreeHeapBytes   *int    `json:"free_heap_bytes"`
+			Capabilities    *string `json:"capabilities"`
+			HardwareInfo    *string `json:"hardware_info"`
+			Config          *string `json:"config"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		db.Save(node)
+		updates := map[string]interface{}{}
+		if dto.Name != nil {
+			updates["name"] = *dto.Name
+		}
+		if dto.Model != nil {
+			updates["model"] = *dto.Model
+		}
+		if dto.FirmwareVersion != nil {
+			updates["firmware_version"] = *dto.FirmwareVersion
+		}
+		if dto.ProtocolVersion != nil {
+			updates["protocol_version"] = *dto.ProtocolVersion
+		}
+		if dto.Platform != nil {
+			updates["platform"] = *dto.Platform
+		}
+		if dto.Status != nil {
+			updates["status"] = *dto.Status
+		}
+		if dto.ConfigVersion != nil {
+			updates["config_version"] = *dto.ConfigVersion
+		}
+		if dto.ConfigStatus != nil {
+			updates["config_status"] = *dto.ConfigStatus
+		}
+		if dto.WiFiSSID != nil {
+			updates["wifi_ssid"] = *dto.WiFiSSID
+		}
+		if dto.WiFiRSSI != nil {
+			updates["wifi_rssi"] = *dto.WiFiRSSI
+		}
+		if dto.FreeHeapBytes != nil {
+			updates["free_heap_bytes"] = *dto.FreeHeapBytes
+		}
+		if dto.Capabilities != nil {
+			updates["capabilities"] = *dto.Capabilities
+		}
+		if dto.HardwareInfo != nil {
+			updates["hardware_info"] = *dto.HardwareInfo
+		}
+		if dto.Config != nil {
+			updates["config"] = *dto.Config
+		}
+		if len(updates) > 0 {
+			db.Model(node).Updates(updates)
+		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, fmt.Sprint(node.ID))
+		// Reload node to get updated fields
+		db.First(node, node.ID)
 		Success(c, node)
 	})
 
@@ -187,7 +252,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		var data []models.DeviceData
-		db.Where("collector_id = ?", node.NodeID).Order("timestamp DESC").Limit(limit).Find(&data)
+		db.Where("node_id = ?", node.NodeID).Order("timestamp DESC").Limit(limit).Find(&data)
 		Success(c, data)
 	})
 
@@ -387,10 +452,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		// Input validation: dma_id, duplicate check, bind_to length
 		seen := make(map[uint32]bool)
 		for i, cfg := range configs {
-			if cfg.DmaID == 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("configs[%d].dma_id must not be 0", i)})
-				return
-			}
+
 			if seen[cfg.DmaID] {
 				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("duplicate dma_id %d", cfg.DmaID)})
 				return

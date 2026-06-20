@@ -95,6 +95,10 @@ func main() {
 	// Register built-in device drivers
 	driverRegistry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(driverRegistry)
+	// Also register to global registry (handler_data.go uses drivers.Get())
+	drivers.Register(&drivers.BMP280Driver{})
+	drivers.Register(&drivers.LKTH01Driver{})
+	drivers.Register(&drivers.SN3000Driver{})
 	logger.Infof("Registered %d device drivers", len(driverRegistry.List()))
 
 	// Initialize WebSocket hub
@@ -115,9 +119,23 @@ func main() {
 	go nodeMgr.Start()
 
 	// Set WebSocket OnMessage handler for terminal send commands
+	// M3 fix: add admin role check before processing write commands
 	wsHub.SetOnMessage(func(client *websocket.Client, evt websocket.Event) {
 		if evt.Type == "send" {
-			payload, _ := json.Marshal(evt.Payload)
+			// M3 fix: check admin role — only admins can send write commands
+			if client.UserID == "" {
+				logger.Warnf("[WS] Rejecting send command: unauthenticated client")
+				return
+			}
+			if client.Role != "admin" {
+				logger.Warnf("[WS] Rejecting send command: user %s role=%s (admin required)", client.UserID, client.Role)
+				return
+			}
+			payload, err := json.Marshal(evt.Payload)
+			if err != nil {
+				logger.Warnf("[WS] Failed to marshal send payload: %v", err)
+				return
+			}
 			var p struct {
 				DeviceID  string `json:"device_id"`
 				ChannelID uint32 `json:"channel_id"`

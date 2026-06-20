@@ -72,7 +72,7 @@
                             <el-switch
                               v-for="dma in getDmaForHardware(busType, hw)"
                               :key="dma.dma_id"
-                              :model-value="isDmaBoundTo(dma, busType, hw)"
+                              :model-value="getDmaSwitchModel(busType, hw, dma)"
                               :disabled="!canToggleDma(dma, busType, hw)"
                               :loading="dmaToggling[dma.dma_id] || false"
                               @change="(val: boolean) => toggleDmaForHardware(busType, hw, dma, val)"
@@ -433,6 +433,8 @@ const refreshBuses = async () => {
     if (initialLoadingDone.value) {
       ElMessage.success('配置已刷新')
     }
+    // refreshBuses 完成后清除所有 DMA override，让 UI 回归真实状态
+    dmaOverrideMap.value = {}
   } catch (error: any) {
     logger.error('获取配置失败', { error: String(error) })
     if (initialLoadingDone.value) {
@@ -697,7 +699,21 @@ const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean =>
 // DMA 开关 loading 状态（按 dma_id 跟踪）
 const dmaToggling = ref<Record<number, boolean>>({})
 
+// DMA 开关乐观更新覆盖层（key格式: `${busType}/${hw.id}/${dma.dma_id}`）
+const dmaOverrideMap = ref<Record<string, boolean>>({})
+
+const getDmaSwitchModel = (busType: string, hw: any, dma: DmaChannelInfo): boolean => {
+  const key = `${busType}/${hw.id}/${dma.dma_id}`
+  if (key in dmaOverrideMap.value) {
+    return dmaOverrideMap.value[key]
+  }
+  return isDmaBoundTo(dma, busType, hw)
+}
+
 const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInfo, enabled: boolean) => {
+  const overrideKey = `${busType}/${hw.id}/${dma.dma_id}`
+  // 乐观更新：立即设置 override 为目标值
+  dmaOverrideMap.value[overrideKey] = enabled
   dmaToggling.value[dma.dma_id] = true
   try {
     // Standardize bind_to format: bus_type/hw_id (e.g. "uart/UART1", "spi/SPI2")
@@ -707,11 +723,13 @@ const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInf
       enabled: enabled,
       bind_to: bindTo
     }])
-    // API成功后刷新 DMA 通道状态（与 DMA 详情页一致，以 dma.state 为准）
-    // 刷新总线配置以同步硬件绑定状态
+    // API成功后刷新总线配置以同步硬件绑定状态
     await refreshBuses()
+    // refreshBuses 完成后会清除所有 override
     ElMessage.success(enabled ? `DMA ${dma.name} 已启用` : `DMA ${dma.name} 已禁用`)
   } catch (error: any) {
+    // API 失败则回滚：删除 override，恢复为 isDmaBoundTo 的真实值
+    delete dmaOverrideMap.value[overrideKey]
     ElMessage.error('DMA配置保存失败: ' + (error.message || '未知错误'))
   } finally {
     dmaToggling.value[dma.dma_id] = false

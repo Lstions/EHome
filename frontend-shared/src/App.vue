@@ -50,4 +50,11 @@ html, body {
   width: 100%;
   height: 100%;
 }
+
+/* overlay可见时启用flex居中；隐藏时Element Plus内联display:none优先级更高，不受影响 */
+.el-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 </style>

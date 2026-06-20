@@ -42,9 +42,9 @@ export const firmwareApi = {
     await client.delete(`/api/v1/firmwares/${id}`)
   },
 
-  getDownloadUrl(id: number): string {
+  getDownloadUrl(filename: string): string {
     const baseURL = client.defaults.baseURL || ''
     const token = localStorage.getItem('token') || sessionStorage.getItem('token')
-    return `${baseURL}/api/v1/firmwares/${id}/download?token=${token}`
+    return `${baseURL}/api/v1/firmwares/${encodeURIComponent(filename)}/download?token=${token}`
   }
 }

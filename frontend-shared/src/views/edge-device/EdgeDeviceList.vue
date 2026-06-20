@@ -396,6 +396,7 @@
       
       <!-- Step 2: 选择/创建通道 -->
       <div v-show="createStep === 1">
+        <el-form :model="deviceForm" :rules="deviceRules">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
           <span>选择数据传输的<strong>通道</strong>，或为此设备创建新通道</span>
@@ -414,7 +415,7 @@
               v-for="c in onlineCollectors" 
               :key="c.id" 
               :label="`${c.name} (${c.model || '未知型号'})`" 
-              :value="c.id"
+              :value="c.node_id"
             />
           </el-select>
         </el-form-item>
@@ -476,6 +477,7 @@
             </el-form>
           </el-tab-pane>
         </el-tabs>
+        </el-form>
       </div>
       
       <!-- Step 3: 基本信息 -->
@@ -651,7 +653,8 @@ const deviceForm = reactive({
 
 const deviceRules = {
   name: [{ required: true, message: '请输入边缘设备名称', trigger: 'blur' }],
-  node_id: [{ required: true, message: '请选择节点', trigger: 'change' }]
+  // S10 fix: Add node_id required rule so the red asterisk shows on the form item
+  node_id: [{ required: true, message: '请选择所属节点', trigger: 'change' }],
 }
 
 // 新通道表单
@@ -993,6 +996,10 @@ const handleCreate = async () => {
   
   try {
     await deviceFormRef.value.validate()
+    if (!deviceForm.node_id) {
+      ElMessage.warning('请选择所属节点')
+      return
+    }
     submitting.value = true
 
     // 编辑模式

@@ -91,15 +91,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		Timestamp:   time.Now(),
 	})
 
-	// Parse and store unified data (includes HA state push)
-	if job.errorCode == 0 && job.rawData != nil {
-		m.parseAndStoreData(job.collectorID, job.deviceID, job.channelID, job.rawData)
-		metrics.DataReportsProcessed.Inc()
-	} else {
-		metrics.DataReportErrors.Inc()
-	}
-
-	// WebSocket push: include sensor device_id (numeric) if found in DB
+	// WebSocket push: build channel_data event first
 	channelDataEvent := map[string]interface{}{
 		"device_id":  job.deviceID, // node device_id (string, for terminal correlation)
 		"node_id":    job.deviceID, // v2.2 新增 (同一值)
@@ -109,6 +101,20 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		"error_code": job.errorCode,
 		"request_id": job.requestID,
 	}
+
+	// Parse and store unified data (includes HA state push)
+	if job.errorCode == 0 && job.rawData != nil {
+		parsedData := m.parseAndStoreData(job.collectorID, job.deviceID, job.channelID, job.rawData)
+		metrics.DataReportsProcessed.Inc()
+
+		// Add parsed sensor data to channel_data event
+		if parsedData != nil {
+			channelDataEvent["data"] = parsedData
+		}
+	} else {
+		metrics.DataReportErrors.Inc()
+	}
+
 	// Try to look up sensor device for richer payload
 	var sensorDevice models.EdgeDevice
 	if err := m.db.Where("channel_id = ?", job.channelID).First(&sensorDevice).Error; err == nil {

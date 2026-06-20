@@ -15,12 +15,6 @@ export interface LoginResponse {
   }
 }
 
-interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T
-}
-
 export const authApi = {
   async login(data: LoginRequest): Promise<LoginResponse> {
     // Backend returns envelope: {code, data: {token, user}, message}

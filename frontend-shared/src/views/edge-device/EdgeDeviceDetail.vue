@@ -242,6 +242,7 @@ import { haApi } from '@/api/homeassistant'
 import client from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { logger } from '@/utils/logger'
+import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
 
 interface HistoryDataPoint {
   time: string
@@ -284,7 +285,7 @@ const deleteDialogVisible = ref(false)
 const deleteLoading = ref(false)
 
 // WebSocket 连接
-const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/ws`
+const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v1/ws`
 const { connected: wsConnected, connect: wsConnect, disconnect: wsDisconnect, send: wsSend } = useWebSocket(wsUrl, {
   onMessage: handleWebSocketMessage,
   onConnected: handleWebSocketConnected,
@@ -339,24 +340,37 @@ const hasOperations = computed(() => {
 
 // WebSocket 消息处理
 function handleWebSocketMessage(message: any) {
-  if (message.type === 'data' && message.payload) {
-    const payload = message.payload
-    const deviceId = Number(route.params.id)
+  // Backend sends: {type: "channel_data", payload: {data: {wind_direction: 312.9}, ...}}
+  // Also handle flat format: {type: "channel_data", data: {...}, sensor_device_id: 4, ...}
+  const isDataEvent = message.type === 'data' || message.type === 'channel_data'
+  if (!isDataEvent) return
 
-    if (payload.device_id === deviceId) {
-      const data = payload.data
-      if (data && realtimeListRef.value) {
-        const dataItem: DataItem = {
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          timestamp: data.created_at || new Date().toISOString(),
-          data: data.data || data,
-          rawData: data.raw_data,
-          isRealtime: true
-        }
-        realtimeListRef.value.addData(dataItem)
-        logger.debug('收到实时数据', { deviceId, data: data.data })
-      }
+  // C6 fix: route.params.id is string, WS payload device_id may be string or number.
+  // Explicit Number() coercion ensures type-safe === comparison.
+  const deviceId: number = Number(route.params.id)
+  // Payload may be nested under message.payload or flat on message
+  const p = message.payload || message
+  const msgDeviceId: number = Number(p.sensor_device_id || p.edge_device_id || p.device_id)
+  if (isNaN(msgDeviceId) || msgDeviceId !== deviceId) return
+
+  // Get parsed sensor data
+  const sensorData = p.data || p.sensors
+
+  if (sensorData && realtimeListRef.value) {
+    const dataItem: DataItem = {
+      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: p.collected_at || (p.timestamp ? new Date(p.timestamp * 1000).toISOString() : new Date().toISOString()),
+      data: sensorData,
+      rawData: p.raw_hex || p.raw_data,
+      isRealtime: true
     }
+    realtimeListRef.value.addData(dataItem)
+    logger.debug('收到实时数据', { deviceId, sensorData })
+  }
+
+  // Update device last_data_time (matches the API field name)
+  if (device.value) {
+    device.value.last_data_time = new Date().toISOString()
   }
 }
 
@@ -428,10 +442,24 @@ const fetchLatestData = async () => {
   try {
     const response = await edgeDeviceApi.getLatestData(id)
     if (response && realtimeListRef.value) {
+      // latest-data API returns DeviceData with data_json (string) containing sensors
+      let parsedData = response.data || {}
+      if (response.data_json) {
+        try {
+          const dj = JSON.parse(response.data_json)
+          // data_json.sensors is [{Name, Value, Unit}], convert to {name: value}
+          if (dj.sensors && Array.isArray(dj.sensors)) {
+            parsedData = {}
+            for (const s of dj.sensors) {
+              parsedData[s.Name] = s.Value
+            }
+          }
+        } catch (e) { /* ignore parse error */ }
+      }
       const dataItem: DataItem = {
         id: `latest-${Date.now()}`,
         timestamp: response.created_at || new Date().toISOString(),
-        data: response.data || {},
+        data: parsedData,
         rawData: response.raw_data,
         isRealtime: false
       }
@@ -465,16 +493,11 @@ const fetchHistoryData = async () => {
         )
       )
 
-      const unitMap: Record<string, string> = {
-        temperature: '°C',
-        pressure: 'hPa',
-        humidity: '%'
-      }
-
+      // S6 fix: use shared sensorUnitMap instead of local duplicate
       chartSeries.value = categories
         .map((cat, i) => ({
-          name: cat === 'temperature' ? '温度' : cat === 'pressure' ? '气压' : '湿度',
-          unit: unitMap[cat] || '',
+          name: sensorNameMap[cat] || cat,
+          unit: sensorUnitMap[cat] || '',
           data: (seriesResults[i] as any[]).map((item: any) => ({
             time: item.created_at || item.timestamp,
             value: item.value
@@ -484,20 +507,8 @@ const fetchHistoryData = async () => {
 
       historyData.value = []
     } else {
-      // 其他设备：先尝试从 unified_data 获取
-      const knownCategories = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction', 'illuminance', 'uv_index', 'rain_intensity', 'rain_accum', 'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency']
-      const unitMap: Record<string, string> = {
-        temperature: '°C', pressure: 'hPa', humidity: '%',
-        wind_speed: 'm/s', wind_direction: '°', illuminance: 'lux',
-        voltage: 'V', current: 'A', power: 'W', energy: 'kWh',
-        soc: '%', soh: '%', frequency: 'Hz'
-      }
-      const nameMap: Record<string, string> = {
-        temperature: '温度', pressure: '气压', humidity: '湿度',
-        wind_speed: '风速', wind_direction: '风向', illuminance: '光照',
-        voltage: '电压', current: '电流', power: '功率', energy: '电量',
-        soc: 'SOC', soh: 'SOH', frequency: '频率'
-      }
+      // S6 fix: use shared sensorNameMap/sensorUnitMap instead of local duplicates
+      const knownCategories = [...SENSOR_ORDER, 'illuminance', 'uv_index', 'rain_intensity', 'rain_accum', 'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency']
 
       const seriesResults = await Promise.all(
         knownCategories.map(cat =>
@@ -511,8 +522,8 @@ const fetchHistoryData = async () => {
       const series = seriesResults
         .filter(r => r.data && r.data.length > 0)
         .map(r => ({
-          name: nameMap[r.cat] || r.cat,
-          unit: unitMap[r.cat] || '',
+          name: sensorNameMap[r.cat] || r.cat,
+          unit: sensorUnitMap[r.cat] || '',
           data: r.data.map((item: any) => ({
             time: item.created_at || item.timestamp,
             value: item.value
