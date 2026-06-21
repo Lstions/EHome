@@ -130,7 +130,7 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 	var requestID string
 	var hardwareID uint64
 	var success bool
-	var addresses []byte // field 4: found device addresses
+	var addressesRaw []byte // field 4: found device addresses (raw bytes)
 
 	for {
 		field, err := dec.NextField()
@@ -145,11 +145,18 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 		case 3:
 			success = frame.GetBool(field)
 		case 4:
-			addresses = frame.GetBytes(field)
+			addressesRaw = frame.GetBytes(field)
 		}
 	}
 
-	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v addrs=%x",
+	// Parse raw address bytes into integer list
+	// Each address is a single byte (Modbus slave address 1-247)
+	var addresses []uint64
+	for _, b := range addressesRaw {
+		addresses = append(addresses, uint64(b))
+	}
+
+	logger.Infof("[%s] ScanReport: request=%s hw=%d success=%v addrs=%v",
 		deviceID, requestID, hardwareID, success, addresses)
 
 	// Broadcast scan result via WebSocket (v2.2: scan_result 事件名不变)
@@ -159,7 +166,7 @@ func (m *Manager) handleScanReport(deviceID string, payload []byte) {
 		"request_id":    requestID,
 		"hardware_id":   hardwareID,
 		"success":       success,
-		"addresses":     fmt.Sprintf("%x", addresses),
+		"addresses":     addresses,
 		"address_count": len(addresses),
 	})
 }

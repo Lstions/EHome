@@ -27,6 +27,12 @@ __attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t
     (void)request_id; (void)hardware_id;
 }
 
+__attribute__((weak)) void on_modbus_scan_req_received(const char *request_id,
+    uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)
+{
+    (void)request_id; (void)start_addr; (void)end_addr; (void)timeout_ms;
+}
+
 /* === Receive: WriteCmd (0x06) === */
 
 void handler_writecmd_process(frame_decoder_t *dec)
@@ -66,6 +72,10 @@ void handler_writecmd_process_scan(frame_decoder_t *dec)
 {
     char request_id[64] = {0};
     uint32_t hardware_id = 0;
+    uint32_t scan_type = 1;     /* 1=I2C(default), 2=MODBUS */
+    uint32_t start_addr = 0;
+    uint32_t end_addr = 0;
+    uint32_t timeout_ms = 200;  /* default 200ms */
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
@@ -81,10 +91,39 @@ void handler_writecmd_process_scan(frame_decoder_t *dec)
                 hardware_id = (uint32_t)field.value.varint;
             }
             break;
+        case 3: /* scan_type */
+            if (field.wire_type == WIRE_VARINT) {
+                scan_type = (uint32_t)field.value.varint;
+            }
+            break;
+        case 4: /* start_addr */
+            if (field.wire_type == WIRE_VARINT) {
+                start_addr = (uint32_t)field.value.varint;
+            }
+            break;
+        case 5: /* end_addr */
+            if (field.wire_type == WIRE_VARINT) {
+                end_addr = (uint32_t)field.value.varint;
+            }
+            break;
+        case 6: /* timeout_ms */
+            if (field.wire_type == WIRE_VARINT) {
+                timeout_ms = (uint32_t)field.value.varint;
+            }
+            break;
         }
     }
-    ESP_LOGI(TAG, "ScanReq: req=%s, hw=%lu", request_id, (unsigned long)hardware_id);
-    on_scan_req_received(request_id, hardware_id);
+
+    if (scan_type == 2) {
+        /* Modbus scan */
+        ESP_LOGI(TAG, "ScanReq MODBUS: req=%s start=%lu end=%lu timeout=%lu",
+                 request_id, (unsigned long)start_addr, (unsigned long)end_addr, (unsigned long)timeout_ms);
+        on_modbus_scan_req_received(request_id, start_addr, end_addr, timeout_ms);
+    } else {
+        /* I2C scan (original logic) */
+        ESP_LOGI(TAG, "ScanReq I2C: req=%s hw=%lu", request_id, (unsigned long)hardware_id);
+        on_scan_req_received(request_id, hardware_id);
+    }
 }
 
 /* === Receive: QueryReq (0x0E) === */

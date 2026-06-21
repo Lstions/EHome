@@ -22,6 +22,7 @@
 #include "wifi_mgr.h"
 #include "ehome_mqtt.h"
 #include "transport.h"
+#include "bus_dma.h"
 #ifdef CONFIG_DEBUG_TCP_ENABLED
 #include "ehome_tcp.h"
 #endif
@@ -74,6 +75,97 @@ void on_write_cmd_received(uint32_t rid, uint32_t ch,
 void on_query_resources_received(const char *request_id)
 {
     (void)request_id;
+}
+
+/* ---- Modbus CRC16 helper ---- */
+
+static uint16_t modbus_crc16(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+/* ---- Modbus scan callback (overrides weak in handler_writecmd.c) ---- */
+
+void on_modbus_scan_req_received(const char *request_id,
+    uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)
+{
+    ESP_LOGI("MODBUS_SCAN", "Scanning addresses %lu-%lu, timeout=%lums",
+             (unsigned long)start_addr, (unsigned long)end_addr, (unsigned long)timeout_ms);
+
+    app_state_t *s = app_state_get();
+
+    /* Find first UART channel */
+    bus_dma_ctx_t *uart_ctx = NULL;
+    uint32_t channel_id = 0;
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s->bus_ctx[i].initialized && s->bus_ctx[i].bus_type == BUS_TYPE_UART) {
+            uart_ctx = &s->bus_ctx[i];
+            channel_id = s->bus_ch[i];
+            break;
+        }
+    }
+
+    if (!uart_ctx) {
+        ESP_LOGE("MODBUS_SCAN", "No UART channel found");
+        msg_handler_send_scan_rpt(request_id, 0, false, NULL, 0);
+        return;
+    }
+
+    /* Scan each address */
+    uint32_t found[256];
+    uint8_t found_count = 0;
+
+    for (uint32_t addr = start_addr; addr <= end_addr && addr <= 247; addr++) {
+        /* Build Modbus 03 command: read holding register
+         * [addr] [03] [00] [00] [00] [01] [CRC_L] [CRC_H] */
+        uint8_t cmd[8];
+        cmd[0] = (uint8_t)addr;
+        cmd[1] = 0x03;
+        cmd[2] = 0x00;
+        cmd[3] = 0x00;
+        cmd[4] = 0x00;
+        cmd[5] = 0x01;
+        uint16_t crc = modbus_crc16(cmd, 6);
+        cmd[6] = crc & 0xFF;
+        cmd[7] = (crc >> 8) & 0xFF;
+
+        /* Send */
+        esp_err_t err = bus_dma_write(uart_ctx, cmd, sizeof(cmd));
+        if (err != ESP_OK) {
+            continue;
+        }
+
+        /* Wait for response */
+        uint8_t rx[256];
+        size_t rx_len = 0;
+        TickType_t start_tick = xTaskGetTickCount();
+        while ((xTaskGetTickCount() - start_tick) < pdMS_TO_TICKS(timeout_ms)) {
+            rx_len = bus_dma_read(uart_ctx, rx, sizeof(rx));
+            if (rx_len >= 5) { /* Modbus response minimum 5 bytes */
+                if (rx[0] == addr && rx[1] == 0x03) {
+                    found[found_count++] = addr;
+                    ESP_LOGI("MODBUS_SCAN", "Found device at addr %lu", (unsigned long)addr);
+                }
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    /* Send result */
+    msg_handler_send_scan_rpt(request_id, channel_id, true, found, found_count);
+    ESP_LOGI("MODBUS_SCAN", "Scan complete: %d devices found", found_count);
 }
 
 /* ================================================================== */

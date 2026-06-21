@@ -69,7 +69,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
-// SendScanRequest sends a ScanRequest to a device
+// SendScanRequest sends a ScanRequest to a device (I2C mode)
 func (m *Manager) SendScanRequest(deviceID string, hardwareID uint32) error {
 	enc := frame.NewEncoder(frame.MsgScanReq)
 	enc.EncodeString(1, fmt.Sprintf("scan-%d", time.Now().Unix()))
@@ -77,6 +77,42 @@ func (m *Manager) SendScanRequest(deviceID string, hardwareID uint32) error {
 
 	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
+}
+
+// SendModbusScanRequest sends a ScanRequest to a device (Modbus mode)
+// field 1: request_id (string)
+// field 3: scan_type = 2 (MODBUS)
+// field 4: start_addr
+// field 5: end_addr
+// field 6: timeout_ms (per-address timeout)
+func (m *Manager) SendModbusScanRequest(deviceID string, startAddr, endAddr, timeoutMs int) (string, error) {
+	requestID := fmt.Sprintf("scan-%d", time.Now().UnixMilli())
+
+	enc := frame.NewEncoder(frame.MsgScanReq)
+	enc.EncodeString(1, requestID)
+	enc.EncodeVarint(3, 2) // scan_type = MODBUS
+
+	if startAddr > 0 {
+		enc.EncodeVarint(4, uint64(startAddr))
+	} else {
+		enc.EncodeVarint(4, 1) // default start from 1
+	}
+	if endAddr > 0 {
+		enc.EncodeVarint(5, uint64(endAddr))
+	} else {
+		enc.EncodeVarint(5, 247) // default end at 247
+	}
+	if timeoutMs > 0 {
+		enc.EncodeVarint(6, uint64(timeoutMs))
+	} else {
+		enc.EncodeVarint(6, 200) // default 200ms
+	}
+
+	topic := mqtt.TopicForNode(deviceID)
+	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		return "", err
+	}
+	return requestID, nil
 }
 
 // SendQueryRequest sends a QueryReq (type=0x0E) to a device

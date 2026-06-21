@@ -1,10 +1,12 @@
 package api
 
 import (
-	"fmt"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
@@ -12,6 +14,27 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// parseHardwareIDUint converts a hardware ID string to uint64.
+// "0x76" → 118, "5" → 5, "" → 0
+// (mirror of nodemgr.parseHardwareID for use in API layer)
+func parseHardwareIDUint(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if strings.HasPrefix(strings.ToLower(s), "0x") {
+		v, err := strconv.ParseUint(s[2:], 16, 64)
+		if err == nil {
+			return v
+		}
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err == nil {
+		return v
+	}
+	return 0
+}
 
 // registerEdgeDeviceRoutes sets up edge-device CRUD routes
 func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
@@ -308,5 +331,97 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		_ = limit // reserved for future MQTT event pipeline integration
 		// NOTE: operation_logs table populated by MQTT event pipeline
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []interface{}{}})
+	})
+
+	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
+	e.POST("/:id/change-address", RequireRole("admin"), func(c *gin.Context) {
+		id := c.Param("id")
+
+		var req struct {
+			NewAddress int    `json:"new_address" binding:"required"`
+			Command    string `json:"command,omitempty"` // optional custom Modbus command (hex)
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "new_address is required")
+			return
+		}
+		if req.NewAddress < 1 || req.NewAddress > 247 {
+			Error(c, http.StatusBadRequest, "new_address must be between 1 and 247")
+			return
+		}
+
+		// Look up edge device
+		var edge models.EdgeDevice
+		if err := db.First(&edge, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				Error(c, http.StatusNotFound, "edge device not found")
+				return
+			}
+			Error(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// Look up channel and node for MQTT routing
+		var ch models.Channel
+		if err := db.First(&ch, edge.ChannelID).Error; err != nil {
+			Error(c, http.StatusNotFound, "associated channel not found")
+			return
+		}
+		var node models.Node
+		if err := db.Where("node_id = ?", edge.NodeID).First(&node).Error; err != nil {
+			Error(c, http.StatusNotFound, "associated node not found")
+			return
+		}
+
+		// Build WriteCommand data
+		var writeData []byte
+		if req.Command != "" {
+			// User-provided custom command (hex)
+			var err error
+			writeData, err = hex.DecodeString(req.Command)
+			if err != nil {
+				Error(c, http.StatusBadRequest, "invalid hex command")
+				return
+			}
+		} else {
+			// Default Modbus FC06 (write single register) to change address
+			// Uses the current hardware_id as the slave address
+			oldAddr := uint8(0)
+			if v := parseHardwareIDUint(edge.HardwareID); v > 0 && v <= 247 {
+				oldAddr = uint8(v)
+			}
+			newAddr := uint8(req.NewAddress)
+			writeData = []byte{
+				oldAddr,                         // slave address (current)
+				0x06,                            // function code: write single register
+				0x00, 0x00,                      // register address (device-specific)
+				0x00, newAddr,                   // new address value
+				0x00, 0x00,                      // CRC placeholder (firmware will calculate)
+			}
+		}
+
+		// Send WriteCommand via node manager
+		deviceID := node.NodeID
+		if err := nodeMgr.SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, 0); err != nil {
+			Error(c, http.StatusInternalServerError, "failed to send address change command: "+err.Error())
+			return
+		}
+
+		// Update DB immediately (simplified: don't wait for ACK)
+		edge.HardwareID = strconv.Itoa(req.NewAddress)
+		db.Model(&edge).Update("hardware_id", edge.HardwareID)
+
+		// Trigger config sync so device gets the updated address
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(edge.ID))
+
+		c.JSON(http.StatusOK, gin.H{
+			"code":    200,
+			"message": "ok",
+			"data": gin.H{
+				"id":          edge.ID,
+				"new_address": req.NewAddress,
+				"message":     "地址修改命令已发送",
+			},
+		})
 	})
 }

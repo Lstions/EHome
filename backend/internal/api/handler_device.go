@@ -478,9 +478,72 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	})
 
 	// Channel scan (discover devices on bus)
+	// Supports both I2C and Modbus scan types
 	v1.POST("/channels/:channel_id/scan", func(c *gin.Context) {
 		id := c.Param("channel_id")
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"channel_id": parseUintID(id), "devices": []string{}}})
+		channelID := parseUintID(id)
+
+		var req struct {
+			ScanType  string `json:"scan_type"`            // "i2c" or "modbus"
+			StartAddr int    `json:"start_addr,omitempty"` // Modbus start address
+			EndAddr   int    `json:"end_addr,omitempty"`   // Modbus end address
+			TimeoutMs int    `json:"timeout_ms,omitempty"` // per-address timeout
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			req.ScanType = "i2c" // default to I2C
+		}
+
+		// Look up channel
+		var ch models.Channel
+		if err := db.First(&ch, channelID).Error; err != nil {
+			Error(c, http.StatusNotFound, "channel not found")
+			return
+		}
+
+		// Look up node to get device ID for MQTT
+		var node models.Node
+		if err := db.Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil {
+			Error(c, http.StatusNotFound, "node not found")
+			return
+		}
+
+		deviceID := node.NodeID
+
+		if req.ScanType == "modbus" {
+			// Modbus scan: send ScanRequest with Modbus parameters
+			requestID, err := nodeMgr.SendModbusScanRequest(deviceID, req.StartAddr, req.EndAddr, req.TimeoutMs)
+			if err != nil {
+				Error(c, http.StatusInternalServerError, "failed to trigger Modbus scan: "+err.Error())
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"code":    200,
+				"message": "ok",
+				"data": gin.H{
+					"channel_id": channelID,
+					"scan_type":  "modbus",
+					"request_id": requestID,
+					"message":    "Modbus 扫描已触发，等待结果",
+				},
+			})
+		} else {
+			// I2C scan: use existing SendScanRequest
+			hwID := uint32(ch.ID) // use channel ID as hardware_id for I2C
+			if err := nodeMgr.SendScanRequest(deviceID, hwID); err != nil {
+				Error(c, http.StatusInternalServerError, "failed to trigger I2C scan: "+err.Error())
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"code":    200,
+				"message": "ok",
+				"data": gin.H{
+					"channel_id": channelID,
+					"scan_type":  "i2c",
+					"request_id": fmt.Sprintf("scan-%d", time.Now().Unix()),
+					"message":    "I2C 扫描已触发，等待结果",
+				},
+			})
+		}
 	})
 
 	// Channel reconfigure (change bus params)

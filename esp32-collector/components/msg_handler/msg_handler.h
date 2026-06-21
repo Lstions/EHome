@@ -57,6 +57,8 @@ struct dma_pool_t;
 void msg_handler_set_dma_pool(struct dma_pool_t *pool);
 
 /* === Weak callbacks - implemented in main.c, declared in handler modules === */
+void on_modbus_scan_req_received(const char *request_id,
+    uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
