@@ -418,6 +418,8 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	})
 
 	// GET /api/v1/nodes/:id/dma-channels — get DMA channel info for a node
+	// Merges device-reported state with config intent (node.Config.dma_configs).
+	// If config says enabled but device reports disabled, use config intent state.
 	n.GET("/:id/dma-channels", func(c *gin.Context) {
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
@@ -432,6 +434,36 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 				logger.Warnf("[%s] Failed to parse dma_channels JSONB: %v", node.NodeID, err)
 			}
 		}
+
+		// Merge config intent: if dma_configs says enabled=true but device state=2(disabled),
+		// override state to 0(free) — config has been pushed but device hasn't reported back yet.
+		var configDmas []models.DmaChannelConfig
+		if node.Config != "" {
+			var cfg map[string]interface{}
+			if err := json.Unmarshal([]byte(node.Config), &cfg); err == nil {
+				if dc, ok := cfg["dma_configs"]; ok {
+					if dcJSON, err := json.Marshal(dc); err == nil {
+						json.Unmarshal(dcJSON, &configDmas)
+					}
+				}
+			}
+		}
+		if len(configDmas) > 0 {
+			configMap := make(map[uint32]bool)
+			for _, cd := range configDmas {
+				configMap[cd.DmaID] = cd.Enabled
+			}
+			for i := range channels {
+				if enabled, ok := configMap[channels[i].DmaID]; ok {
+					if enabled && channels[i].State == 2 {
+						channels[i].State = 0 // config says enabled, device hasn't caught up
+					} else if !enabled && channels[i].State != 2 {
+						channels[i].State = 2 // config says disabled
+					}
+				}
+			}
+		}
+
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"dma_channels": channels,
 		}})
