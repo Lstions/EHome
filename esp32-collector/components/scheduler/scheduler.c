@@ -156,6 +156,14 @@ uint8_t scheduler_get_channel_count(void)
     return c;
 }
 
+const scheduler_state_t *scheduler_get_state(void)
+{
+    static scheduler_state_t state;
+    state.channels = s_channels;
+    state.channel_count = SCHED_MAX_CHANNELS;
+    return &state;
+}
+
 /* ── performance tracking ─────────────────────────────────────────── */
 
 void scheduler_notify_channel_error(uint32_t channel_id)
@@ -250,8 +258,11 @@ static void scheduler_task(void *p)
 
                         if (xQueueSend(s_cmd_queue, &bcmd, 0) != pdTRUE) {
                             queue_full_count++;
+                            scmd->error_count++;
+                            if (scmd->error_count > 100) scmd->error_count = 100;
                         } else {
                             total_samples++;
+                            scmd->error_count = 0;  /* simplified: queue success → healthy */
                         }
                     }
                 }

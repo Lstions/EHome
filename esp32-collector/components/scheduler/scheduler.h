@@ -48,6 +48,7 @@ typedef struct {
     uint32_t interval_ms;
     bool     enabled;
     TickType_t last_run_ms;     /* independent timing per command */
+    uint32_t error_count;       /* consecutive errors for health reporting */
 } sched_command_t;
 
 /* === v2.3: per-edge-device scheduler state === */
@@ -79,6 +80,19 @@ sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
+
+/* === v2.3: scheduler state snapshot for StatusReport === */
+typedef struct {
+    const sched_channel_t *channels;
+    uint8_t                channel_count;
+} scheduler_state_t;
+
+/**
+ * @brief Get a snapshot of the scheduler state (read-only).
+ * The returned pointer is to a static struct — do NOT free.
+ * Valid only while scheduler is running or stopped (channels array persists).
+ */
+const scheduler_state_t *scheduler_get_state(void);
 
 /* === Performance tracking === */
 void scheduler_notify_channel_error(uint32_t channel_id);

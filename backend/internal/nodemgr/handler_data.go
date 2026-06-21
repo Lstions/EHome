@@ -25,6 +25,7 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	var channelID, timestamp, sequence uint64
 	var rawData []byte
 	var errorCode, requestID uint64
+	var edgeDeviceID, commandIndex uint64
 
 	for {
 		field, err := dec.NextField()
@@ -44,6 +45,10 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 			errorCode = frame.GetUint64(field)
 		case 6:
 			requestID = frame.GetUint64(field)
+		case 7:
+			edgeDeviceID = frame.GetUint64(field)
+		case 8:
+			commandIndex = frame.GetUint64(field)
 		}
 	}
 
@@ -65,14 +70,16 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 		collectorID = node.ID
 	}
 	job := dataReportJob{
-		deviceID:    deviceID,
-		collectorID: collectorID,
-		channelID:   channelID,
-		timestamp:   timestamp,
-		sequence:    sequence,
-		rawData:     rawData,
-		errorCode:   errorCode,
-		requestID:   requestID,
+		deviceID:     deviceID,
+		collectorID:  collectorID,
+		channelID:    channelID,
+		timestamp:    timestamp,
+		sequence:     sequence,
+		rawData:      rawData,
+		errorCode:    errorCode,
+		requestID:    requestID,
+		edgeDeviceID: edgeDeviceID,
+		commandIndex: commandIndex,
 	}
 
 	select {

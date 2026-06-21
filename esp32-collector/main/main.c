@@ -48,7 +48,8 @@ static void status_task(void *pv)
         s->uptime_sec++;
         if (mqtt_client_is_connected_impl())
             msg_handler_send_status(s->uptime_sec, "online",
-                                    config_mgr_get_active_channel_count());
+                                    config_mgr_get_active_channel_count(),
+                                    scheduler_get_state());
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

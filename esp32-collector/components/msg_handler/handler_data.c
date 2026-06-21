@@ -11,6 +11,7 @@
 #include "frame_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
+#include "scheduler.h"
 #include "ota.h"
 #include "esp_log.h"
 #include <string.h>
@@ -72,9 +73,10 @@ void handler_data_process_ota(frame_decoder_t *dec)
 
 /* === Send: StatusReport (0x02) === */
 
-void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t channel_count)
+void msg_handler_send_status(uint32_t uptime_sec, const char *status,
+                             uint8_t channel_count, const scheduler_state_t *sched)
 {
-    uint8_t buf[128];
+    uint8_t buf[512];
     frame_encoder_t enc;
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_STATUS_RPT);
     frame_encode_varint(&enc, 1, uptime_sec);
@@ -89,6 +91,52 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t ch
         frame_encode_string(&enc, 6, config_hash);
     }
 
+    // v2.3: field 7 — channel_health (repeated nested) → edge_device_health
+    if (sched != NULL) {
+        for (int ci = 0; ci < sched->channel_count; ci++) {
+            const sched_channel_t *ch = &sched->channels[ci];
+            if (!ch->active || ch->edge_device_count == 0) continue;
+
+            // Build ChannelHealth sub-frame
+            uint8_t ch_buf[512];
+            frame_encoder_t ch_enc;
+            frame_encoder_init(&ch_enc, ch_buf, sizeof(ch_buf), 0);
+            frame_encode_varint(&ch_enc, 1, ch->config.id); // channel_id
+
+            for (int ed = 0; ed < ch->edge_device_count; ed++) {
+                const sched_edge_device_t *dev = &ch->edge_devices[ed];
+                for (int ci2 = 0; ci2 < dev->command_count; ci2++) {
+                    const sched_command_t *cmd = &dev->commands[ci2];
+                    if (cmd->error_count == 0 && cmd->enabled) continue; // healthy → skip to save bandwidth
+
+                    // Build EdgeDeviceHealth sub-frame
+                    uint8_t ed_buf[64];
+                    frame_encoder_t ed_enc;
+                    frame_encoder_init(&ed_enc, ed_buf, sizeof(ed_buf), 0);
+                    frame_encode_varint(&ed_enc, 1, dev->edge_device_id);
+                    frame_encode_varint(&ed_enc, 2, ci2);            // command_index
+                    frame_encode_varint(&ed_enc, 3, cmd->error_count);
+                    // comm_status: 0=OK, 1=TIMEOUT, 2=CRC_ERROR, 3=FAULT
+                    uint64_t comm_st = cmd->error_count >= 3 ? 3 :
+                                       (cmd->error_count > 0  ? 1 : 0);
+                    frame_encode_varint(&ed_enc, 4, comm_st);
+
+                    frame_encode_bytes(&ch_enc, 2,
+                                       frame_encoder_data(&ed_enc),
+                                       frame_encoder_size(&ed_enc));
+                }
+            }
+
+            // Only emit ChannelHealth if it has content beyond channel_id
+            size_t ch_content = frame_encoder_size(&ch_enc);
+            if (ch_content > 0) {
+                frame_encode_bytes(&enc, 7,
+                                   frame_encoder_data(&ch_enc),
+                                   frame_encoder_size(&ch_enc));
+            }
+        }
+    }
+
     ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d, hash=%s",
              (unsigned long)uptime_sec, status, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
@@ -101,7 +149,8 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t ch
 
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t sequence, const uint8_t *raw_data, size_t raw_len,
-                                  uint32_t error_code, uint32_t request_id)
+                                  uint32_t error_code, uint32_t request_id,
+                                  uint32_t edge_device_id, uint8_t command_index)
 {
     uint8_t buf[512];
     frame_encoder_t enc;
@@ -118,8 +167,17 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
     if (request_id != 0) {
         frame_encode_varint(&enc, 6, request_id);
     }
-    ESP_LOGD(TAG, "Sending DataReport: ch=%lu, seq=%lu, len=%zu",
-             (unsigned long)channel_id, (unsigned long)sequence, raw_len);
+    /* v2.3: edge_device_id + command_index for multi-command routing */
+    if (edge_device_id != 0) {
+        frame_encode_varint(&enc, 7, edge_device_id);
+    }
+    if (command_index > 0 || edge_device_id != 0) {
+        /* command_index 为 0 时也编码（只要有 edge_device_id） */
+        frame_encode_varint(&enc, 8, command_index);
+    }
+    ESP_LOGD(TAG, "Sending DataReport: ch=%lu, seq=%lu, len=%zu, edge=%lu, cmd_idx=%u",
+             (unsigned long)channel_id, (unsigned long)sequence, raw_len,
+             (unsigned long)edge_device_id, command_index);
     msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 

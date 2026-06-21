@@ -13,14 +13,16 @@ import (
 
 // dataReportJob represents a parsed DataReport ready for async processing
 type dataReportJob struct {
-	deviceID    string
-	collectorID uint
-	channelID   uint64
-	timestamp   uint64
-	sequence    uint64
-	rawData     []byte
-	errorCode   uint64
-	requestID   uint64
+	deviceID     string
+	collectorID  uint
+	channelID    uint64
+	timestamp    uint64
+	sequence     uint64
+	rawData      []byte
+	errorCode    uint64
+	requestID    uint64
+	edgeDeviceID uint64
+	commandIndex uint64
 }
 
 const (
@@ -63,10 +65,13 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	if job.requestID != 0 && m.pendingWrite != nil {
 		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)
 		var device models.EdgeDevice
-		if err := m.db.Where("channel_id = ?", job.channelID).First(&device).Error; err == nil {
-			if m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
-				logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
-			}
+		if job.edgeDeviceID > 0 {
+			m.db.Where("id = ?", job.edgeDeviceID).First(&device)
+		} else {
+			m.db.Where("channel_id = ?", job.channelID).First(&device)
+		}
+		if m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
+			logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
 		}
 	}
 
@@ -79,11 +84,13 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// Store raw data
 	dataJSON, _ := json.Marshal(map[string]interface{}{
-		"raw":        fmt.Sprintf("%x", job.rawData),
-		"channel":    job.channelID,
-		"sequence":   job.sequence,
-		"error_code": job.errorCode,
-		"request_id": job.requestID,
+		"raw":            fmt.Sprintf("%x", job.rawData),
+		"channel":        job.channelID,
+		"sequence":       job.sequence,
+		"error_code":     job.errorCode,
+		"request_id":     job.requestID,
+		"edge_device_id": job.edgeDeviceID,
+		"command_index":  job.commandIndex,
 	})
 	m.db.Create(&models.DeviceData{
 		NodeID: node.NodeID,
@@ -93,13 +100,15 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// WebSocket push: build channel_data event first
 	channelDataEvent := map[string]interface{}{
-		"device_id":  job.deviceID, // node device_id (string, for terminal correlation)
-		"node_id":    job.deviceID, // v2.2 新增 (同一值)
-		"channel_id": job.channelID,
-		"raw_hex":    fmt.Sprintf("%x", job.rawData),
-		"timestamp":  time.Now().Unix(),
-		"error_code": job.errorCode,
-		"request_id": job.requestID,
+		"device_id":      job.deviceID, // node device_id (string, for terminal correlation)
+		"node_id":        job.deviceID, // v2.2 新增 (同一值)
+		"channel_id":     job.channelID,
+		"raw_hex":        fmt.Sprintf("%x", job.rawData),
+		"timestamp":      time.Now().Unix(),
+		"error_code":     job.errorCode,
+		"request_id":     job.requestID,
+		"edge_device_id": job.edgeDeviceID,
+		"command_index":  job.commandIndex,
 	}
 
 	// Parse and store unified data (includes HA state push)
@@ -117,10 +126,20 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// Try to look up sensor device for richer payload
 	var sensorDevice models.EdgeDevice
-	if err := m.db.Where("channel_id = ?", job.channelID).First(&sensorDevice).Error; err == nil {
-		channelDataEvent["sensor_device_id"] = sensorDevice.ID
-		channelDataEvent["sensor_device_name"] = sensorDevice.Name
-		channelDataEvent["sensor_type"] = sensorDevice.Type
+	if job.edgeDeviceID > 0 {
+		// v2.3: new firmware provides edge_device_id directly
+		if err := m.db.Where("id = ?", job.edgeDeviceID).First(&sensorDevice).Error; err == nil {
+			channelDataEvent["sensor_device_id"] = sensorDevice.ID
+			channelDataEvent["sensor_device_name"] = sensorDevice.Name
+			channelDataEvent["sensor_type"] = sensorDevice.Type
+		}
+	} else {
+		// Legacy: fall back to channel_id lookup (v2.2 compat)
+		if err := m.db.Where("channel_id = ?", job.channelID).First(&sensorDevice).Error; err == nil {
+			channelDataEvent["sensor_device_id"] = sensorDevice.ID
+			channelDataEvent["sensor_device_name"] = sensorDevice.Name
+			channelDataEvent["sensor_type"] = sensorDevice.Type
+		}
 	}
 	m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
 }

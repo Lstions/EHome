@@ -32,7 +32,8 @@ extern "C" {
 /* ---- Callback types for msg_handler decoupling ---- */
 typedef void (*write_rsp_cb_t)(uint32_t rid, bool ok, uint32_t code, const char *msg);
 typedef void (*data_rpt_cb_t)(uint32_t ch, uint64_t ts, uint32_t seq,
-                               const uint8_t *data, size_t len, uint32_t code, uint32_t rid);
+                               const uint8_t *data, size_t len, uint32_t code, uint32_t rid,
+                               uint32_t edge_device_id, uint8_t command_index);
 
 typedef struct {
     /* ---- Identity (auto-generated from MAC) ---- */

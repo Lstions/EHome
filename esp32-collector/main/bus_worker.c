@@ -110,7 +110,7 @@ static void cmd_task(void *pv)
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
                         if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
-                                                     rx, rl, 0, cmd.request_id);
+                                                     rx, rl, 0, cmd.request_id, 0, 0);
                     }
                 } else {
                     errs++;
@@ -150,7 +150,7 @@ static void cmd_task(void *pv)
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
                         if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
-                                                     rx, rl, 0, 0);
+                                                     rx, rl, 0, 0, 0, 0);
                     }
                 } else {
                     errs++;
@@ -208,7 +208,7 @@ static void rx_task(void *pv)
                 }
 
                 uint64_t ts = esp_timer_get_time();
-                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid);
+                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, 0, 0);
             }
         }
 
