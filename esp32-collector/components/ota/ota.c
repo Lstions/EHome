@@ -248,6 +248,23 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
     ESP_LOGI(TAG, "  Checksum: '%s'", checksum ? checksum : "(none)");
     ESP_LOGI(TAG, "  Version: '%s'", version ? version : "(none)");
 
+    /* Partition safety check: ensure update partition is not the running partition.
+     * When otadata has no valid entry, esp_ota_get_next_update_partition(NULL) may
+     * return the currently running partition, which would cause self-overwrite. */
+    const esp_partition_t *running_part = esp_ota_get_running_partition();
+    const esp_partition_t *update_part_check = esp_ota_get_next_update_partition(NULL);
+    if (update_part_check == NULL) {
+        ESP_LOGE(TAG, "No OTA update partition found");
+        return ESP_FAIL;
+    }
+    if (update_part_check->address == running_part->address) {
+        ESP_LOGE(TAG, "OTA target partition '%s' (0x%" PRIx32 ") is the running partition! Aborting to prevent self-overwrite.",
+                 update_part_check->label, update_part_check->address);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "OTA partition check OK: running=0x%" PRIx32 " update=0x%" PRIx32,
+             running_part->address, update_part_check->address);
+
     /* Write NVS: downloading */
     ota_nvs_set_state(OTA_STATE_DOWNLOADING);
     ota_nvs_set_meta(version, checksum);

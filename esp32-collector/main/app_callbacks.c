@@ -39,8 +39,8 @@ static void handle_config_applied(app_state_t *s)
     const config_manifest_t *cfg = config_mgr_get_manifest();
     const char *new_id = cfg ? cfg->manifest_id : NULL;
     const char *last_id = config_mgr_get_last_known_manifest_id();
-    if (new_id && last_id && strcmp(new_id, last_id) == 0) {
-        ESP_LOGI(TAG, "handle_config_applied: SKIP (same manifest %s)", new_id);
+    if (new_id && last_id && strcmp(new_id, last_id) == 0 && config_mgr_has_manifest()) {
+        ESP_LOGI(TAG, "handle_config_applied: SKIP (same manifest %s, config active)", new_id);
         return;
     }
 

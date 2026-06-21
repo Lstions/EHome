@@ -34,7 +34,7 @@ if(_pt_file)
     endif()
 endif()
 
-set(PROJECT_VER "2.5.3" CACHE STRING "Project version")
+set(PROJECT_VER "2.5.5" CACHE STRING "Project version")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(ehome_collector)
