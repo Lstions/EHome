@@ -540,8 +540,24 @@ watch(showDialog, (open) => {
     form.hardware_id = editingChannel.value.hardware_id || ''
     form.address = editingChannel.value.address || ''
     form.name = editingChannel.value.name || ''
-    form.enabled = editingChannel.value.status === 'active'
-    form.config = { ...(editingChannel.value.config || {}) }
+    form.enabled = editingChannel.value.enabled !== false  // enabled is bool, not status string
+    // config may be JSON string (from API) or object — normalize to object
+    let rawConfig = editingChannel.value.config || {}
+    if (typeof rawConfig === 'string') {
+      try { rawConfig = JSON.parse(rawConfig) } catch { rawConfig = {} }
+    }
+    form.config = { ...rawConfig }
+    // Also parse bus_config if it's a JSON string (may be raw hex for UART)
+    if (editingChannel.value.bus_config) {
+      let busCfg = editingChannel.value.bus_config
+      if (typeof busCfg === 'string' && busCfg.startsWith('{')) {
+        try { busCfg = JSON.parse(busCfg) } catch { /* keep as string */ }
+      }
+      // Merge bus_config fields into form.config for display
+      if (typeof busCfg === 'object' && busCfg !== null) {
+        form.config = { ...form.config, ...busCfg }
+      }
+    }
     if (form.hardware_type === 'spi' && editingChannel.value.address) {
       form.config.cs_pin = parseInt(editingChannel.value.address)
     }

@@ -1,0 +1,744 @@
+# EHomeSystem 配置变更架构审查报告
+
+**审查角色**: 嵌入式系统架构师  
+**日期**: 2026-06-21  
+**目标平台**: ESP32-C6 + FreeRTOS + 340KB RAM  
+**收敛标准**: 单信号替代多信号、零状态替代有状态、纯函数替代带锁结构  
+
+---
+
+## 〇、审查范围
+
+审查对象为 ESP32 固件侧配置变更全链路：
+
+```
+MQTT/TCP → msg_handler → config_mgr_apply_manifest() → handle_config_applied()
+                                                                    ↓
+                                              bus_worker_suspend()
+                                              scheduler_stop()
+                                              bus_manager_cleanup_all()
+                                              bus_manager_setup_from_manifest()
+                                              scheduler_start()
+                                              bus_worker_resume()
+```
+
+涉及组件：`config_mgr`, `bus_manager`, `bus_worker`, `scheduler`, `dma_pool`, `sync_manager`, `app_callbacks`
+
+---
+
+## 一、问题 1：配置解析与副作用执行未分离
+
+### 1.1 现状
+
+`config_mgr_apply_manifest()` 在解析 ConfigManifest 的过程中，**直接调用** `dma_pool_apply_config()`：
+
+```c
+// config_mgr.c:331-335
+if (s_dma_pool) {
+    dma_pool_apply_config(s_dma_pool, dma_id, enabled, bind_to);
+} else {
+    ESP_LOGD(TAG, "DmaChannelConfig stored (pool not yet injected)");
+}
+```
+
+这违反了**解析与执行分离**原则。后果：
+
+| 问题 | 影响 |
+|------|------|
+| 解析失败时 DMA pool 状态已被部分修改 | 原子性丧失：manifest 解析失败 → `clear_manifest()` 清空配置 → 但 DMA pool 已被修改，无法回滚 |
+| 解析逻辑与硬件状态耦合 | 单元测试必须 mock 整个 dma_pool，无法独立测试解析正确性 |
+| 时序依赖 | `s_dma_pool` 必须在 `apply_manifest` 之前注入，否则 DMA 配置只存不执行，产生隐式状态 |
+| 重复推送时双重副作用 | 服务端推送相同配置 → `clear_manifest()` → `parse_manifest()` → 再次 `dma_pool_apply_config()` → 即使配置未变，DMA pool 也被重置 |
+
+### 1.2 根本方案：两阶段提交
+
+将 `config_mgr_apply_manifest()` 拆分为**纯解析**和**副作用执行**两个阶段：
+
+```c
+/* Phase 1: 纯解析 — 零副作用，可回滚 */
+typedef struct {
+    config_manifest_t manifest;
+    config_diff_t     diff;        // 与当前配置的差异
+    bool              parse_ok;
+} config_parse_result_t;
+
+config_parse_result_t config_mgr_parse(const uint8_t *data, size_t len);
+
+/* Phase 2: 原子提交 — 全有或全无 */
+bool config_mgr_commit(const config_parse_result_t *result, dma_pool_t *pool);
+```
+
+**关键设计**：
+
+1. `config_mgr_parse()` 是纯函数：只填充 `config_parse_result_t`，不修改任何全局状态
+2. `config_mgr_commit()` 是原子操作：先验证 diff，再一次性替换 `s_manifest` + 执行 DMA pool 变更
+3. 如果 commit 失败，`s_manifest` 保持不变（旧配置继续运行）
+
+**内存开销**：`config_parse_result_t` ≈ `config_manifest_t` (约 2KB) + `config_diff_t` (约 100B)。在 340KB RAM 环境下可接受，因为它是栈上临时变量，commit 后立即释放。
+
+### 1.3 对现有代码的影响
+
+| 文件 | 变更 |
+|------|------|
+| `config_mgr.h` | 新增 `config_parse_result_t`, `config_mgr_parse()`, `config_mgr_commit()` |
+| `config_mgr.c` | 拆分 `apply_manifest` 为 parse + commit；删除 parse 内的 `dma_pool_apply_config` 调用 |
+| `app_callbacks.c` | `handle_config_applied` 改为调用 parse → commit 两步 |
+| `handler_config.c` | 无变更（dispatch 层不变） |
+
+---
+
+## 二、问题 2：声明式配置 vs 命令式配置
+
+### 2.1 现状
+
+ConfigManifest 协议是**声明式**的——描述"设备应该处于什么状态"：
+
+```
+ConfigManifest {
+    manifest_id: "v2-a1b2c3d4"
+    templates: [...]      // 期望的模板集合
+    channels: [...]       // 期望的通道集合
+    dma_configs: [...]    // 期望的 DMA 配置
+}
+```
+
+但固件侧的应用逻辑是**命令式**的——执行"先清空一切，再重建一切"：
+
+```c
+// app_callbacks.c:33-69
+static void handle_config_applied(app_state_t *s) {
+    bus_worker_suspend();
+    app_state_lock_config();
+    scheduler_stop();
+    bus_manager_cleanup_all(s);          // ← 命令式：销毁一切
+    bus_manager_setup_from_manifest(s);   // ← 命令式：重建一切
+    scheduler_start(s->cmd_queue);
+    app_state_unlock_config();
+    bus_worker_resume();
+}
+```
+
+**声明式协议 + 命令式执行 = 全量重建**。这是所有问题的根源。
+
+### 2.2 根本方案：声明式协议 + 声明式执行
+
+声明式执行的核心：**比较期望状态与当前状态，只执行差异部分**。
+
+这正是 `docs/review/config-incremental-update.md` 已经设计但未实现的方案。我审查后认为该设计方向正确，但需要从架构层面补充以下关键约束：
+
+#### 2.2.1 diff 必须在 parse 阶段完成
+
+```c
+config_parse_result_t config_mgr_parse(const uint8_t *data, size_t len) {
+    config_parse_result_t result = {0};
+    
+    // 1. 纯解析：填充 result.manifest
+    if (!parse_manifest_data(data, len, &result.manifest)) {
+        result.parse_ok = false;
+        return result;
+    }
+    
+    // 2. 纯计算：与当前 s_manifest 做 diff
+    compute_config_diff(&s_manifest, &result.manifest, &result.diff);
+    
+    result.parse_ok = true;
+    return result;
+}
+```
+
+**为什么 diff 在 parse 阶段而不是 commit 阶段**：diff 是纯计算，无副作用，属于解析的一部分。commit 阶段只负责执行 diff。
+
+#### 2.2.2 diff 的粒度必须覆盖 DMA pool
+
+当前 `config-incremental-update.md` 的 `config_diff_t` 缺少 DMA 配置变更的细粒度描述：
+
+```c
+typedef struct {
+    /* 通道级变更 */
+    uint32_t changed_channel_ids[MAX_CHANNELS];
+    uint8_t  changed_channel_count;
+    uint32_t removed_channel_ids[MAX_CHANNELS];
+    uint8_t  removed_channel_count;
+    uint32_t added_channel_ids[MAX_CHANNELS];
+    uint8_t  added_channel_count;
+    
+    /* DMA 级变更 — 新增 */
+    struct {
+        uint32_t dma_id;
+        bool     was_enabled;
+        bool     now_enabled;
+        char     was_bind_to[DMA_BOUND_MAX];
+        char     now_bind_to[DMA_BOUND_MAX];
+    } dma_diffs[MAX_DMA_CONFIGS];
+    uint8_t  dma_diff_count;
+    
+    /* 综合判断 */
+    bool     bus_rebuild_needed;   // 任何通道变更
+    bool     dma_reconfig_needed;  // DMA 配置变更（可能不影响通道）
+    bool     scheduler_update_needed; // 仅调度参数变更
+    bool     no_op;                // 无需任何操作
+} config_diff_t;
+```
+
+#### 2.2.3 声明式执行的状态机
+
+将 `handle_config_applied` 从命令式序列改为状态机驱动：
+
+```
+                    ┌──────────┐
+                    │  PARSED  │
+                    └────┬─────┘
+                         │ diff.no_op?
+                    ┌────┴────┐
+                    │         │
+                 yes│         │no
+                    ▼         ▼
+              ┌─────────┐  ┌──────────────┐
+              │  DONE   │  │  DIFF_READY  │
+              └─────────┘  └──────┬───────┘
+                                  │
+                     ┌────────────┼────────────┐
+                     │            │            │
+              dma_only│     bus_change│  sched_only│
+                     ▼            ▼            ▼
+              ┌──────────┐ ┌───────────┐ ┌──────────┐
+              │DMA_RECFG │ │BUS_REBUILD│ │SCHED_UPD │
+              └────┬─────┘ └─────┬─────┘ └────┬─────┘
+                   │             │             │
+                   ▼             ▼             ▼
+              ┌─────────────────────────────────────┐
+              │            COMMIT_DONE              │
+              └─────────────────────────────────────┘
+```
+
+每个状态只执行必要的操作，避免全量重建。
+
+---
+
+## 三、问题 3：资源生命周期管理——增量式 vs 全量式
+
+### 3.1 现状：全量式
+
+当前生命周期管理是全量销毁+重建：
+
+```
+cleanup_all() → 释放所有 DMA → deinit 所有 bus_ctx → 清零所有 bus_ch
+setup_from_manifest() → 为每个 channel 重新分配 DMA → 重新 init bus_ctx
+```
+
+**代价**：
+- 每次 ConfigManifest 推送，即使只改了一个 DMA 开关，所有 UART 驱动被删除重建
+- ~10ms 总线中断窗口，Modbus 采集丢失数据
+- DMA pool 的 allocate/release 在无变更时产生无意义的状态翻转
+
+### 3.2 根本方案：增量式生命周期
+
+增量式的核心原则：**只销毁需要销毁的，只创建需要创建的**。
+
+#### 3.2.1 通道级增量操作
+
+```c
+/* bus_manager.h — 新增 API */
+
+/* 销毁单个通道 */
+void bus_manager_teardown_channel(app_state_t *s, uint32_t channel_id);
+
+/* 创建单个通道 */
+esp_err_t bus_manager_setup_channel(app_state_t *s, uint32_t channel_id);
+
+/* 更新通道调度参数（不重建总线） */
+void bus_manager_update_channel_timing(app_state_t *s, uint32_t channel_id,
+                                        uint32_t interval_ms);
+```
+
+#### 3.2.2 通道重建的判断条件
+
+一个通道需要重建（teardown + setup），当且仅当以下任一条件成立：
+
+| 条件 | 原因 |
+|------|------|
+| `bus_type` 变更 | 硬件外设类型不同，驱动完全不同 |
+| `bus_config` 任一字节变更 | 引脚/波特率/频率等硬件参数变化 |
+| `enabled` 从 true→false | 通道被禁用，需释放资源 |
+| `enabled` 从 false→true | 通道被启用，需分配资源 |
+| DMA 绑定变更且影响此通道 | DMA on→off 或 off→on 影响驱动初始化模式 |
+
+**不需要重建**的条件：
+
+| 条件 | 处理方式 |
+|------|---------|
+| `interval_ms` 变更 | 仅更新 scheduler 参数 |
+| `edge_devices` 结构变更 | 仅更新 scheduler 参数 |
+| `template_ids` 变更 | scheduler 下次采样自动使用新模板 |
+| DMA 通道开关（未绑定到此通道） | 无影响 |
+
+#### 3.2.3 DMA pool 的增量更新
+
+DMA pool 的 `apply_config` 已经是增量式的（只修改指定 dma_id 的通道）。问题在于它被**在解析阶段调用**，而不是在 commit 阶段。
+
+修正后的流程：
+
+```
+parse阶段:  计算 dma_diffs[]
+commit阶段: 
+  for each dma_diff:
+    if (was_enabled && !now_enabled)  → dma_pool_apply_config(id, false, "")
+    if (!was_enabled && now_enabled)  → dma_pool_apply_config(id, true, bind_to)
+    if (bind_to changed)              → dma_pool_apply_config(id, true, new_bind_to)
+```
+
+### 3.3 全量式的唯一合理场景
+
+**首次配置**（`prev_manifest.applied == false`）时，必须全量创建。这是增量式的退化情况，等价于所有通道都是 "added"。
+
+---
+
+## 四、问题 4：FreeRTOS 环境下的线程安全增量更新
+
+### 4.1 现状：vTaskSuspend + Mutex
+
+```c
+// app_callbacks.c
+bus_worker_suspend();        // vTaskSuspend(rx_task + cmd_task)
+app_state_lock_config();     // xSemaphoreTake(config_mutex)
+scheduler_stop();            // 等待 scheduler task 退出
+bus_manager_cleanup_all(s);
+bus_manager_setup_from_manifest(s);
+scheduler_start(s->cmd_queue);
+app_state_unlock_config();
+bus_worker_resume();         // vTaskResume(rx_task + cmd_task)
+```
+
+**问题**：
+
+| 问题 | 严重性 | 说明 |
+|------|--------|------|
+| `vTaskSuspend` 是不安全的同步原语 | **高** | 如果被挂起的 task 持有 mutex（如 bus_dma_ctx_t.mutex），其他 task 请求同一 mutex 会死锁 |
+| 全局挂起影响所有通道 | **高** | 即使只改一个通道，所有通道的 RX/TX 都被暂停 |
+| `scheduler_stop()` 等待 task 退出 | **中** | 最多 1s 延迟（100×10ms 轮询），期间系统无采样 |
+| config_mutex 保护范围过大 | **中** | 从 scheduler_stop 到 scheduler_start 整个过程持锁，阻塞其他想访问配置的 task |
+
+### 4.2 根本方案：通道级挂起 + 无锁读取
+
+#### 4.2.1 通道级挂起替代全局挂起
+
+```c
+/* bus_dma.h — 新增 */
+
+/* 挂起单个通道的 RX/TX 操作 */
+void bus_dma_suspend(bus_dma_ctx_t *ctx);
+
+/* 恢复单个通道的 RX/TX 操作 */
+void bus_dma_resume(bus_dma_ctx_t *ctx);
+```
+
+实现方式：在每个 `bus_dma_ctx_t` 中增加 `volatile bool suspended` 标志：
+
+```c
+typedef struct {
+    uint8_t  bus_type;
+    bool     dma_enabled;
+    bool     initialized;
+    bool     suspended;          // ← 新增
+    SemaphoreHandle_t mutex;
+    // ...
+} bus_dma_ctx_t;
+```
+
+bus_worker 的 rx_task 和 cmd_task 在操作前检查 `suspended`：
+
+```c
+// rx_task
+if (s->bus_ctx[i].suspended) continue;  // 跳过被挂起的通道
+
+// cmd_task
+if (ctx->suspended) {
+    // 将命令放回队列或丢弃
+    scheduler_notify_channel_error(cmd.channel_id);
+    continue;
+}
+```
+
+**优势**：
+- 不需要 `vTaskSuspend`，避免死锁风险
+- 只影响正在变更的通道，其他通道继续运行
+- `suspended` 是 `volatile bool`，单字节对齐，在 ESP32-C6 (32-bit) 上是原子读写
+
+#### 4.2.2 配置数据的无锁读取
+
+当前 `config_mgr_get_manifest()` 返回指向静态 `s_manifest` 的指针。如果在读取过程中 `apply_manifest` 修改了 `s_manifest`，读取方会看到不一致的数据。
+
+**方案 A：双缓冲（推荐）**
+
+```c
+static config_manifest_t s_manifests[2];  // 双缓冲
+static volatile uint8_t  s_active_idx;    // 当前活跃缓冲区索引
+
+const config_manifest_t *config_mgr_get_manifest(void) {
+    return &s_manifests[s_active_idx];  // 无锁读取
+}
+
+// commit 阶段：
+uint8_t new_idx = 1 - s_active_idx;
+s_manifests[new_idx] = parsed_manifest;
+s_active_idx = new_idx;  // 原子切换（单字节赋值）
+```
+
+**内存开销**：`config_manifest_t` ≈ 2KB，双缓冲 = 4KB。在 340KB RAM 中占 1.2%。
+
+**方案 B：RCU 风格（过度设计）**
+
+对于 ESP32 单核环境，双缓冲已经足够。RCU 需要更复杂的内存管理，不值得。
+
+#### 4.2.3 scheduler 的增量更新
+
+当前 `scheduler_stop()` + `scheduler_start()` 是全量操作。增量更新方案：
+
+```c
+/* scheduler.h — 新增 */
+
+/* 增量更新：移除/添加/修改通道，不停止 scheduler task */
+void scheduler_apply_diff(const config_diff_t *diff, const config_manifest_t *manifest);
+```
+
+实现：
+
+```c
+void scheduler_apply_diff(const config_diff_t *diff, const config_manifest_t *manifest) {
+    // 1. 移除被删除的通道
+    for (int i = 0; i < diff->removed_channel_count; i++)
+        scheduler_remove_channel(diff->removed_channel_ids[i]);
+    
+    // 2. 移除被修改的通道（稍后重新添加）
+    for (int i = 0; i < diff->changed_channel_count; i++)
+        scheduler_remove_channel(diff->changed_channel_ids[i]);
+    
+    // 3. 添加新通道和重新添加修改的通道
+    for (int i = 0; i < diff->added_channel_count; i++) {
+        const config_channel_t *ch = find_channel(manifest, diff->added_channel_ids[i]);
+        if (ch) scheduler_add_channel(ch);
+    }
+    for (int i = 0; i < diff->changed_channel_count; i++) {
+        const config_channel_t *ch = find_channel(manifest, diff->changed_channel_ids[i]);
+        if (ch) scheduler_add_channel(ch);
+    }
+    
+    // 4. 更新仅调度参数变更的通道
+    for (int i = 0; i < diff->timing_only_count; i++) {
+        // 直接修改 s_channels[slot].config.interval_ms 等
+        // scheduler task 下次 tick 自动使用新参数
+    }
+}
+```
+
+**线程安全分析**：
+- `scheduler_add_channel` / `scheduler_remove_channel` 修改 `s_channels[i].active` 标志
+- `scheduler_task` 在每次 tick 开始时检查 `s_channels[i].active`
+- `active` 是 `bool` 类型，在 ESP32-C6 上是原子读写
+- **不需要停止 scheduler task**——它会在下一个 10ms tick 自动感知变更
+
+**关键约束**：scheduler task 的 10ms tick 意味着配置变更的生效延迟最多 10ms，远优于当前的 ~1s (scheduler_stop 等待)。
+
+#### 4.2.4 完整的增量更新流程
+
+```c
+static void handle_config_applied(app_state_t *s) {
+    // Phase 1: 纯解析（无锁、无副作用）
+    config_parse_result_t result = config_mgr_parse(data, len);
+    if (!result.parse_ok) {
+        ESP_LOGE(TAG, "Parse failed, keeping current config");
+        return;
+    }
+    
+    // Phase 2: 快速路径 — 无变更
+    if (result.diff.no_op) {
+        ESP_LOGI(TAG, "Config unchanged, skip");
+        return;
+    }
+    
+    // Phase 3: 挂起受影响的通道（通道级，非全局）
+    for (int i = 0; i < result.diff.changed_channel_count; i++)
+        bus_dma_suspend(find_ctx_by_channel_id(s, result.diff.changed_channel_ids[i]));
+    for (int i = 0; i < result.diff.removed_channel_count; i++)
+        bus_dma_suspend(find_ctx_by_channel_id(s, result.diff.removed_channel_ids[i]));
+    
+    // Phase 4: 原子提交配置（双缓冲切换）
+    config_mgr_commit(&result, s->dma_pool);
+    
+    // Phase 5: 增量重建受影响的通道
+    for (int i = 0; i < result.diff.removed_channel_count; i++)
+        bus_manager_teardown_channel(s, result.diff.removed_channel_ids[i]);
+    for (int i = 0; i < result.diff.changed_channel_count; i++) {
+        bus_manager_teardown_channel(s, result.diff.changed_channel_ids[i]);
+        bus_manager_setup_channel(s, result.diff.changed_channel_ids[i]);
+    }
+    for (int i = 0; i < result.diff.added_channel_count; i++)
+        bus_manager_setup_channel(s, result.diff.added_channel_ids[i]);
+    
+    // Phase 6: 增量更新 scheduler（不停止 task）
+    scheduler_apply_diff(&result.diff, config_mgr_get_manifest());
+    
+    // Phase 7: 恢复受影响的通道
+    for (int i = 0; i < result.diff.changed_channel_count; i++)
+        bus_dma_resume(find_ctx_by_channel_id(s, result.diff.changed_channel_ids[i]));
+    // 新增的通道不需要 resume（刚创建，默认 suspended=false）
+    
+    rgb_led_set_state(LED_STATE_RUNNING);
+}
+```
+
+**与现状的对比**：
+
+| 维度 | 现状（全量） | 方案（增量） |
+|------|-------------|-------------|
+| 总线中断时间 | ~10ms（所有通道） | ~2ms（仅变更通道） |
+| 未变更通道影响 | 全部暂停 | 零影响 |
+| scheduler 停止 | 是（~1s） | 否（10ms 内生效） |
+| vTaskSuspend | 是（死锁风险） | 否 |
+| config_mutex 持有时间 | 整个重建过程 | 仅双缓冲切换（<1μs） |
+| DMA pool 操作 | 每次 apply 全量重置 | 仅变更的通道 |
+
+---
+
+## 五、问题 5：DMA Pool 管理应该归入谁的生命周期
+
+### 5.1 现状：DMA Pool 被三个模块直接操作
+
+```
+config_mgr  →  dma_pool_apply_config()     // 解析时修改 DMA 状态
+bus_manager →  dma_pool_allocate/release()  // 通道创建/销毁时分配/释放
+msg_handler →  dma_pool_serialize()         // 上报时读取 DMA 状态
+```
+
+**问题**：
+
+1. **config_mgr 在解析阶段修改 DMA pool**：违反"解析与执行分离"
+2. **bus_manager 和 config_mgr 都能修改 DMA pool**：两个修改者之间没有协调机制
+3. **DMA pool 的状态与 bus_ctx 的状态可能不一致**：config_mgr 禁用了某个 DMA 通道，但 bus_manager 不知道，继续使用
+
+### 5.2 根本方案：DMA Pool 归入 bus_manager 的生命周期
+
+**原则**：DMA pool 是总线通道的附属资源，其分配/释放应与通道的生命周期绑定。
+
+#### 5.2.1 所有权划分
+
+| 模块 | 对 DMA pool 的权限 | 理由 |
+|------|-------------------|------|
+| **bus_manager** | **唯一修改者**（allocate/release/apply_config） | 通道创建时分配，通道销毁时释放，配置变更时重配置 |
+| config_mgr | 只读（存储 DmaChannelConfig 到 manifest） | 解析阶段只记录意图，不执行 |
+| msg_handler | 只读（serialize） | 上报时读取状态 |
+| scheduler | 无访问 | 不需要知道 DMA |
+
+#### 5.2.2 DMA 配置变更的执行路径
+
+```
+ConfigManifest 到达
+  → config_mgr_parse(): 存储 dma_configs 到 manifest，不调用 dma_pool
+  → config_mgr_commit(): 切换 manifest 双缓冲
+  → handle_config_applied():
+      → bus_manager_apply_dma_diff(&diff): 
+          for each dma_diff:
+            if disabled:  dma_pool_apply_config(id, false, "")
+            if enabled:   dma_pool_apply_config(id, true, bind_to)
+            if bind_to changed: 
+              dma_pool_release_by_hw(old_bind_to)
+              dma_pool_apply_config(id, true, new_bind_to)
+      → 如果 DMA 变更影响了活跃通道:
+          teardown + setup 该通道
+```
+
+#### 5.2.3 config_mgr 不再持有 dma_pool 引用
+
+```c
+// 删除
+void config_mgr_set_dma_pool(dma_pool_t *pool);  // ← 删除此 setter
+static dma_pool_t *s_dma_pool = NULL;             // ← 删除此静态变量
+
+// config_mgr_apply_manifest 中删除:
+if (s_dma_pool) {
+    dma_pool_apply_config(s_dma_pool, dma_id, enabled, bind_to);
+}
+```
+
+DMA pool 只通过 `app_state_t->dma_pool` 访问，由 `bus_manager` 独占操作。
+
+#### 5.2.4 DMA pool 与通道的绑定关系
+
+当前 `dma_pool_allocate()` 的三级策略已经正确处理了绑定关系。增量更新需要补充的是：
+
+**当 DMA 配置变更导致某个通道的 DMA 模式切换时**：
+
+```c
+// bus_manager 内部
+static void reconfigure_channel_dma(app_state_t *s, uint32_t channel_id,
+                                      bool new_dma_enabled) {
+    bus_dma_ctx_t *ctx = bus_manager_find_ctx(s, channel_id);
+    if (!ctx) return;
+    
+    // 1. 释放旧 DMA
+    if (ctx->dma_enabled) {
+        dma_pool_release_by_hw(s->dma_pool, hw_id);
+    }
+    
+    // 2. 重新初始化总线（DMA on → off 或 off → on 需要重新 init）
+    bus_dma_deinit(ctx);
+    bool dma = new_dma_enabled;
+    if (dma && s->dma_pool) {
+        uint32_t dma_id;
+        if (dma_pool_allocate(s->dma_pool, bus_type, hw_id, &dma_id) != ESP_OK)
+            dma = false;
+    }
+    bus_dma_init(ctx, bus_type, dma, config, config_len);
+}
+```
+
+---
+
+## 六、综合架构方案
+
+### 6.1 新的组件职责划分
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    app_callbacks.c                          │
+│  handle_config_applied(): 编排增量更新流程                    │
+│  parse → diff → suspend-affected → commit → rebuild → resume│
+└──────────┬──────────────────────────────────────────────────┘
+           │
+    ┌──────┴──────┬──────────────┬──────────────┐
+    ▼             ▼              ▼              ▼
+┌─────────┐ ┌──────────┐ ┌───────────┐ ┌──────────────┐
+│config_mgr│ │bus_manager│ │ scheduler │ │  dma_pool    │
+│纯解析    │ │唯一DMA修改者│ │增量更新   │ │资源池(被动)  │
+│双缓冲    │ │通道级操作  │ │不停止task │ │              │
+│零副作用  │ │           │ │           │ │              │
+└─────────┘ └─────┬─────┘ └───────────┘ └──────────────┘
+                  │
+                  ▼
+            ┌──────────┐
+            │ bus_dma  │
+            │通道级挂起 │
+            │suspended │
+            └──────────┘
+```
+
+### 6.2 新的数据流
+
+```
+ConfigManifest 到达
+  │
+  ├─ 1. config_mgr_parse(data, len)
+  │     → 纯解析，填充 parse_result
+  │     → 计算 diff（与当前 manifest 比较）
+  │     → 零副作用
+  │
+  ├─ 2. diff.no_op? → YES → return（零开销）
+  │
+  ├─ 3. bus_dma_suspend(受影响通道)
+  │     → 仅设置 suspended=true
+  │     → rx_task/cmd_task 自动跳过
+  │
+  ├─ 4. config_mgr_commit(&parse_result)
+  │     → 双缓冲切换（原子）
+  │     → 不操作 DMA pool
+  │
+  ├─ 5. bus_manager_apply_diff(s, &diff)
+  │     → teardown removed/changed 通道
+  │     → setup added/changed 通道
+  │     → apply DMA config changes
+  │
+  ├─ 6. scheduler_apply_diff(&diff, manifest)
+  │     → 增量添加/移除/修改通道
+  │     → 不停止 scheduler task
+  │
+  └─ 7. bus_dma_resume(受影响通道)
+        → 设置 suspended=false
+```
+
+### 6.3 关键 API 变更清单
+
+| 组件 | 新增 API | 删除 API | 修改 API |
+|------|---------|---------|---------|
+| **config_mgr** | `config_mgr_parse()`, `config_mgr_commit()` | `config_mgr_set_dma_pool()`, `config_mgr_apply_manifest()` | `config_mgr_get_manifest()` 改为双缓冲 |
+| **bus_manager** | `bus_manager_teardown_channel()`, `bus_manager_setup_channel()`, `bus_manager_apply_dma_diff()` | — | `bus_manager_cleanup_all()` 保留但仅用于 factory reset |
+| **bus_dma** | `bus_dma_suspend()`, `bus_dma_resume()` | — | `bus_dma_ctx_t` 增加 `suspended` 字段 |
+| **scheduler** | `scheduler_apply_diff()` | — | `scheduler_start()` 不再重新添加所有通道 |
+| **bus_worker** | — | `bus_worker_suspend()`, `bus_worker_resume()` | rx_task/cmd_task 检查 `suspended` 标志 |
+| **app_state** | — | — | 删除 `config_mutex`（双缓冲替代） |
+
+### 6.4 内存预算
+
+| 项目 | 现状 | 方案 | 增量 |
+|------|------|------|------|
+| config_manifest 双缓冲 | 2KB (单) | 4KB (双) | +2KB |
+| config_diff_t | 0 | ~200B (栈上临时) | 0 (临时) |
+| bus_dma_ctx_t.suspended | 0 | 8×1B = 8B | +8B |
+| config_mutex | ~80B | 0 (删除) | -80B |
+| **净增量** | | | **+1.9KB** |
+
+在 340KB RAM 中占 0.56%，可接受。
+
+---
+
+## 七、与现有设计文档的关系
+
+### 7.1 `config-incremental-update.md`
+
+该文档已正确识别了全量重建的问题，并设计了 `config_diff_t` 和增量更新流程。本审查报告在此基础上补充：
+
+1. **解析与执行分离**：原方案未涉及，是架构层面的根本改进
+2. **DMA pool 生命周期归属**：原方案未明确 DMA pool 应归谁管理
+3. **线程安全机制**：原方案仍使用 `bus_worker_suspend()` + `app_state_lock_config()`，本方案改为通道级挂起 + 双缓冲
+4. **scheduler 增量更新**：原方案设计了 `scheduler_apply_diff()`，但未分析为什么不需要停止 scheduler task
+
+### 7.2 `config-push-loop-fix-v2.md`
+
+该文档解决了服务端的配置推送自激循环问题（manifest_id 改为 CRC32 内容哈希）。这是**服务端**的修复，与本文的**固件侧**架构改进是正交的、互补的。
+
+### 7.3 `DMA_RESOURCE_PROTOCOL_DESIGN.md`
+
+该文档定义了 DMA 资源协议。本文不改变协议，只改变固件侧的执行方式。
+
+---
+
+## 八、实施路线图
+
+| Phase | 内容 | 依赖 | 风险 |
+|-------|------|------|------|
+| **P1** | config_mgr 拆分：parse + commit，删除 dma_pool setter | 无 | 低 — 纯重构 |
+| **P2** | bus_dma 通道级挂起：增加 suspended 字段，修改 bus_worker | P1 | 低 — 新增字段 |
+| **P3** | config_mgr 双缓冲：s_manifests[2] + s_active_idx | P1 | 中 — 需验证所有读取方 |
+| **P4** | bus_manager 增量操作：teardown/setup 单通道 | P2 | 中 — 需仔细处理 DMA 释放 |
+| **P5** | scheduler 增量更新：apply_diff | P4 | 低 — 已有 remove/add API |
+| **P6** | handle_config_applied 重写：编排增量流程 | P1-P5 | 高 — 集成测试 |
+| **P7** | 删除 bus_worker_suspend/resume、config_mutex | P6 | 中 — 需确认无遗漏调用 |
+
+**建议**：P1-P3 可并行开发，P4-P5 依赖 P1-P3，P6 是集成点，P7 是清理。
+
+---
+
+## 九、结论
+
+EHomeSystem 配置变更架构的根本问题是**声明式协议与命令式执行的不匹配**。这导致了：
+
+1. 全量重建（即使只改一个 DMA 开关）
+2. 解析与副作用耦合（config_mgr 直接修改 DMA pool）
+3. 粗粒度同步（vTaskSuspend 全局挂起）
+4. DMA pool 多修改者（config_mgr + bus_manager）
+
+根本解决方案的四个支柱：
+
+| 支柱 | 原则 | 实现 |
+|------|------|------|
+| **解析与执行分离** | 纯函数 + 原子提交 | config_mgr_parse + config_mgr_commit |
+| **声明式执行** | diff 驱动，只变更差异 | config_diff_t + 通道级操作 |
+| **通道级同步** | 最小影响范围 | bus_dma_suspend/resume + 双缓冲 |
+| **DMA 单一修改者** | 所有权明确 | bus_manager 独占 DMA pool 操作 |
+
+收敛标准达成情况：
+
+| 标准 | 达成方式 |
+|------|---------|
+| **单信号替代多信号** | config_diff_t 替代 no_op/bus_rebuild/dma_binding_changed 多个布尔 |
+| **零状态替代有状态** | config_mgr_parse 纯函数（零状态）；双缓冲替代 mutex（零锁） |
+| **纯函数替代带锁结构** | parse 阶段纯函数；commit 阶段仅双缓冲切换（<1μs，无需锁） |
