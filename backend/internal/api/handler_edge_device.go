@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -375,8 +377,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		// Build WriteCommand data
 		var writeData []byte
+		newAddr := uint8(req.NewAddress)
+
 		if req.Command != "" {
-			// User-provided custom command (hex)
+			// User-provided custom command (hex) — escape hatch for one-off cases
 			var err error
 			writeData, err = hex.DecodeString(req.Command)
 			if err != nil {
@@ -384,19 +388,59 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				return
 			}
 		} else {
-			// Default Modbus FC06 (write single register) to change address
-			// Uses the current hardware_id as the slave address
-			oldAddr := uint8(0)
-			if v := parseHardwareIDUint(edge.HardwareID); v > 0 && v <= 247 {
-				oldAddr = uint8(v)
+			// Look up DeviceConfig for change_address_command template
+			var dc models.DeviceConfig
+			if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
+				Error(c, http.StatusNotFound, "device config not found")
+				return
 			}
-			newAddr := uint8(req.NewAddress)
-			writeData = []byte{
-				oldAddr,                         // slave address (current)
-				0x06,                            // function code: write single register
-				0x00, 0x00,                      // register address (device-specific)
-				0x00, newAddr,                   // new address value
-				0x00, 0x00,                      // CRC placeholder (firmware will calculate)
+
+			// Parse init_flow or a dedicated field for change_address_command
+			// v2.3: change_address_command is stored in DeviceConfig.Config JSON
+			// or a dedicated JSONB field. For now, check Config for the template.
+			type AddrCmdCfg struct {
+				ChangeAddressCommand *struct {
+					TemplateHex string `json:"template_hex"`
+				} `json:"change_address_command"`
+			}
+			var acfg AddrCmdCfg
+			if dc.Config != nil {
+				if err := json.Unmarshal(dc.Config, &acfg); err == nil && acfg.ChangeAddressCommand != nil && acfg.ChangeAddressCommand.TemplateHex != "" {
+					// Use DeviceConfig template with placeholder replacement
+					tmpl := acfg.ChangeAddressCommand.TemplateHex
+					oldAddr := uint8(0)
+					if v := parseHardwareIDUint(edge.HardwareID); v > 0 && v <= 247 {
+						oldAddr = uint8(v)
+					}
+					// Replace placeholders
+					replacer := strings.NewReplacer(
+						"{addr}", fmt.Sprintf("%02X", newAddr),
+						"{addr_hi}", fmt.Sprintf("%02X", newAddr>>8),
+						"{addr_lo}", fmt.Sprintf("%02X", newAddr&0xFF),
+						"{old_addr}", fmt.Sprintf("%02X", oldAddr),
+					)
+					tmpl = replacer.Replace(tmpl)
+					// Remove spaces and parse hex
+					hexStr := strings.ReplaceAll(tmpl, " ", "")
+					var err error
+					writeData, err = hex.DecodeString(hexStr)
+					if err != nil {
+						Error(c, http.StatusBadRequest, "invalid change_address_command template: "+err.Error())
+						return
+					}
+					// Prepend old slave address if not already in template
+					if oldAddr > 0 && (len(writeData) == 0 || writeData[0] == 0 || writeData[0] == newAddr) {
+						writeData = append([]byte{oldAddr}, writeData...)
+					}
+					logger.Infof("[change-address] Using DeviceConfig template for edge=%d, old=%d→new=%d, hex=%x",
+						edge.ID, oldAddr, newAddr, writeData)
+				} else {
+					Error(c, http.StatusBadRequest, "该设备型号不支持地址修改（DeviceConfig 未定义 change_address_command 模板）")
+					return
+				}
+			} else {
+				Error(c, http.StatusBadRequest, "该设备型号不支持地址修改（DeviceConfig 未定义 change_address_command 模板）")
+				return
 			}
 		}
 
