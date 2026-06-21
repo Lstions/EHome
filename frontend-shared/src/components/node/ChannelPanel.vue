@@ -249,10 +249,14 @@ const scanningHwId = ref<string | null>(null)
 function isScannable(busType: string, hw: any): boolean {
   if (busType === 'i2c') return true
   if (busType === 'uart') {
+    // bus_config may be raw hex or JSON with mode field
     try {
       const cfg = typeof hw.bus_config === 'string' ? JSON.parse(hw.bus_config) : hw.bus_config
-      return cfg?.mode === 'rs485'
-    } catch { return false }
+      if (cfg?.mode === 'rs485') return true
+    } catch {
+      // raw hex — treat as scannable (most UART deployments are RS485)
+    }
+    return !!hw.bus_config
   }
   return false
 }

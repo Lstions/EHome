@@ -184,10 +184,18 @@ const scanningId = ref<number | null>(null)
 function isScannable(row: any): boolean {
   if (row.hardware_type === 'i2c') return true
   if (row.hardware_type === 'uart') {
+    // bus_config may be raw hex (e.g. "1415000012C0") or JSON with mode field
+    // For raw hex, treat all UART channels as potentially scannable
+    // (RS485 mode cannot be determined from hex alone)
     try {
       const cfg = typeof row.bus_config === 'string' ? JSON.parse(row.bus_config) : row.bus_config
-      return cfg?.mode === 'rs485'
-    } catch { return false }
+      if (cfg?.mode === 'rs485') return true
+      // If JSON parse succeeded but no rs485 mode, fall through to check raw hex
+    } catch {
+      // bus_config is raw hex — treat as scannable (most UART deployments are RS485)
+    }
+    // Any UART channel with bus_config present is potentially RS485
+    return !!row.bus_config
   }
   return false
 }
