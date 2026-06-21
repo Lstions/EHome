@@ -90,13 +90,14 @@ void msg_handler_send_hello(const char *node_id, const char *fw_version,
     frame_encode_varint(&enc, 4, channel_count);
     frame_encode_varint(&enc, 5, config_mgr_get_epoch());
     frame_encode_varint(&enc, 6, config_mgr_has_last_known_manifest() ? 1 : 0);
+    frame_encode_varint(&enc, 7, 2);  /* protocol_version: 2 = multi-command collection */
     const char *mid = config_mgr_get_last_known_manifest_id();
     if (mid && mid[0] != '\0') {
-        frame_encode_string(&enc, 7, mid);
+        frame_encode_string(&enc, 8, mid);
     }
-    frame_encode_string(&enc, 8, "2.1");
+    frame_encode_string(&enc, 9, "2.1");
 
-    ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, proto=2.1",
+    ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, proto_ver=2, proto=2.1",
              node_id, fw_version, model, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
              config_mgr_has_last_known_manifest());
