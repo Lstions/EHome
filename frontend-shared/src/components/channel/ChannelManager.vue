@@ -444,15 +444,31 @@ const handleSubmit = async () => {
       const tx_pin = form.config.tx_pin || hw.default_tx_pin
       const rx_pin = form.config.rx_pin || hw.default_rx_pin
       const baud = form.config.baud_rate || 115200
-      // bus_config: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)]
-      const buf = new Uint8Array(6)
+      const data_bits = form.config.data_bits || 8
+      const stop_bits = form.config.stop_bits || 1
+      const parity_map: Record<string, number> = { none: 0, even: 1, odd: 2, mark: 3, space: 4 }
+      const parity = parity_map[form.config.parity] ?? 0
+      const flow_map: Record<string, number> = { none: 0, rts: 1, cts: 2, 'rts/cts': 3 }
+      const flow = flow_map[form.config.flow_control] ?? 0
+      // bus_config: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)][data_bits(1B)][stop_bits(1B)][parity(1B)][flow(1B)]
+      const buf = new Uint8Array(10)
       buf[0] = tx_pin
       buf[1] = rx_pin
       buf[2] = (baud >> 24) & 0xFF
       buf[3] = (baud >> 16) & 0xFF
       buf[4] = (baud >> 8) & 0xFF
       buf[5] = baud & 0xFF
+      buf[6] = data_bits
+      buf[7] = stop_bits
+      buf[8] = parity
+      buf[9] = flow
       busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
+      // Also store in config JSON for readability
+      config.baud_rate = baud
+      config.data_bits = data_bits
+      config.stop_bits = stop_bits
+      config.parity = form.config.parity || 'none'
+      config.flow_control = form.config.flow_control || 'none'
     } else if (form.hardware_type === 'i2c' && hw) {
       const sda = form.config.sda_pin || hw.default_sda_pin
       const scl = form.config.scl_pin || hw.default_scl_pin
@@ -547,16 +563,27 @@ watch(showDialog, (open) => {
       try { rawConfig = JSON.parse(rawConfig) } catch { rawConfig = {} }
     }
     form.config = { ...rawConfig }
-    // Also parse bus_config if it's a JSON string (may be raw hex for UART)
-    if (editingChannel.value.bus_config) {
-      let busCfg = editingChannel.value.bus_config
-      if (typeof busCfg === 'string' && busCfg.startsWith('{')) {
-        try { busCfg = JSON.parse(busCfg) } catch { /* keep as string */ }
+    // Also parse bus_config hex for UART to extract params not in config JSON
+    if (form.hardware_type === 'uart' && editingChannel.value.bus_config && typeof editingChannel.value.bus_config === 'string') {
+      const hex = editingChannel.value.bus_config
+      if (!hex.startsWith('{') && hex.length >= 6) {
+        // bus_config hex: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)]
+        try {
+          const tx = parseInt(hex.substring(0, 2), 16)
+          const rx = parseInt(hex.substring(2, 4), 16)
+          const baud = parseInt(hex.substring(4, 12), 16)
+          if (!form.config.tx_pin) form.config.tx_pin = tx
+          if (!form.config.rx_pin) form.config.rx_pin = rx
+          if (!form.config.baud_rate) form.config.baud_rate = baud
+        } catch { /* ignore decode errors */ }
       }
-      // Merge bus_config fields into form.config for display
-      if (typeof busCfg === 'object' && busCfg !== null) {
-        form.config = { ...form.config, ...busCfg }
-      }
+    }
+    // Fill defaults for missing fields so form doesn't appear empty
+    if (form.hardware_type === 'uart') {
+      if (!form.config.data_bits) form.config.data_bits = 8
+      if (!form.config.stop_bits) form.config.stop_bits = 1
+      if (!form.config.parity) form.config.parity = 'none'
+      if (!form.config.flow_control) form.config.flow_control = 'none'
     }
     if (form.hardware_type === 'spi' && editingChannel.value.address) {
       form.config.cs_pin = parseInt(editingChannel.value.address)
