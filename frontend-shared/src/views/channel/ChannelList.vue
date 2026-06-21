@@ -124,8 +124,18 @@
           />
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="100" align="center">
+      <el-table-column label="操作" width="180" align="center">
         <template #default="{ row }">
+          <el-button
+            v-if="isScannable(row)"
+            type="warning"
+            link
+            size="small"
+            :loading="scanningId === row.id"
+            @click.stop="handleScan(row)"
+          >
+            地址扫描
+          </el-button>
           <el-button
             type="primary"
             link
@@ -155,6 +165,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { Refresh, Filter, Cpu } from '@element-plus/icons-vue'
 import { channelApi, type Channel } from '@/api/channel'
 import { useNodeStore } from '@/stores/node'
@@ -168,6 +179,31 @@ const nodeStore = useNodeStore()
 // 数据
 const channels = ref<Channel[]>([])
 const loading = ref(false)
+const scanningId = ref<number | null>(null)
+
+function isScannable(row: any): boolean {
+  if (row.hardware_type === 'i2c') return true
+  if (row.hardware_type === 'uart') {
+    try {
+      const cfg = typeof row.bus_config === 'string' ? JSON.parse(row.bus_config) : row.bus_config
+      return cfg?.mode === 'rs485'
+    } catch { return false }
+  }
+  return false
+}
+
+async function handleScan(row: any) {
+  scanningId.value = row.id
+  try {
+    const scanType = row.hardware_type === 'i2c' ? 'i2c' : 'modbus'
+    const result = await channelApi.scan(row.id, { scan_type: scanType })
+    ElMessage.success(`扫描完成: 发现 ${result.devices?.length || 0} 个设备`)
+  } catch (e: any) {
+    ElMessage.error('扫描失败: ' + (e.message || '未知错误'))
+  } finally {
+    scanningId.value = null
+  }
+}
 
 // 筛选
 const searchKeyword = ref('')

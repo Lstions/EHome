@@ -1,5 +1,5 @@
 <template>
-  <el-tag :type="tagType" size="small">
+  <el-tag :type="tagType" size="small" :effect="effect">
     {{ statusText }}
   </el-tag>
 </template>
@@ -8,9 +8,12 @@
 import { computed } from 'vue'
 import type { DeviceStatus } from '@/api/edgeDevice'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   status: DeviceStatus
-}>()
+  effect?: 'dark' | 'light' | 'plain'
+}>(), {
+  effect: 'light'
+})
 
 const tagType = computed(() => {
   switch (props.status) {
@@ -18,7 +21,10 @@ const tagType = computed(() => {
     case 'active':
       return 'success'
     case 'offline':
+    case 'disabled':
       return 'info'
+    case 'warning':
+      return 'warning'
     case 'error':
       return 'danger'
     case 'pending':
@@ -34,12 +40,17 @@ const tagType = computed(() => {
 const statusText = computed(() => {
   switch (props.status) {
     case 'online':
+      return '在线'
     case 'active':
       return '在线'
     case 'offline':
       return '离线'
+    case 'warning':
+      return '警告'
     case 'error':
-      return '错误'
+      return '故障'
+    case 'disabled':
+      return '已禁用'
     case 'pending':
       return '等待中'
     case 'initializing':

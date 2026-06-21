@@ -24,12 +24,29 @@
           :icon="Connection"
           @click="handleSyncToHA"
           :loading="syncingHA"
-          :disabled="!device || device.status !== 'online'"
+          :disabled="!device || (device.status !== 'online' && device.status !== 'active')"
         >
           同步到HA
         </el-button>
         <el-button
-          v-if="device?.status === 'online'"
+          v-if="canChangeAddress"
+          type="warning"
+          size="small"
+          @click="showAddressDialog = true"
+        >
+          修改地址
+        </el-button>
+        <el-tooltip
+          v-else-if="device"
+          content="该设备型号不支持地址修改"
+          placement="top"
+        >
+          <el-button type="warning" size="small" disabled>
+            修改地址
+          </el-button>
+        </el-tooltip>
+        <el-button
+          v-if="device?.status === 'online' || device?.status === 'active'"
           type="primary"
           :icon="Refresh"
           :loading="refreshing"
@@ -76,6 +93,24 @@
       </template>
     </el-dialog>
 
+    <!-- 修改地址对话框 -->
+    <el-dialog v-model="showAddressDialog" title="修改设备地址" width="400px" align-center>
+      <el-form label-width="80px">
+        <el-form-item label="当前地址">
+          <el-tag>{{ device?.hardware_id || 'N/A' }}</el-tag>
+        </el-form-item>
+        <el-form-item label="新地址" required>
+          <el-input-number v-model="newAddress" :min="1" :max="247" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showAddressDialog = false">取消</el-button>
+        <el-button type="primary" :loading="changingAddress" @click="handleChangeAddress">
+          确认修改
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-card v-if="loading && !device">
       <el-skeleton :rows="4" animated />
     </el-card>
@@ -100,11 +135,16 @@
         <el-descriptions-item label="硬件ID">
           {{ device.hardware_id }}
         </el-descriptions-item>
-        <el-descriptions-item label="状态">
-          <StatusBadge :status="device.status" />
+        <el-descriptions-item label="健康状态">
+          <StatusBadge :status="device.status" effect="dark" />
         </el-descriptions-item>
         <el-descriptions-item label="最后数据时间">
           {{ formatTime(device.last_data_time) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="错误码" v-if="device.last_error_code && device.last_error_code > 0">
+          <el-tag type="danger" size="small">
+            {{ device.last_error_code }} - {{ getErrorInfo(device.last_error_code).label }}
+          </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="采集状态" v-if="device.last_error_code">
           <el-tag :type="getErrorInfo(device.last_error_code).type" size="small">
@@ -118,7 +158,7 @@
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>实时数据</span>
-          <el-tag v-if="device?.status === 'online'" type="success" size="small">
+          <el-tag v-if="device?.status === 'online' || device?.status === 'active'" type="success" size="small">
             实时
           </el-tag>
         </div>
@@ -141,7 +181,7 @@
           :key="op.key"
           :type="op.type"
           :icon="op.icon"
-          :disabled="device?.status !== 'online'"
+          :disabled="device?.status !== 'online' && device?.status !== 'active'"
           @click="handleOperation(op.key, op.label)"
         >
           {{ op.label }}
@@ -283,6 +323,36 @@ const editForm = ref({
 // 删除相关
 const deleteDialogVisible = ref(false)
 const deleteLoading = ref(false)
+
+// 修改地址相关
+const showAddressDialog = ref(false)
+const newAddress = ref(1)
+const changingAddress = ref(false)
+
+// 判断是否支持地址修改
+const canChangeAddress = computed(() => {
+  const dc = device.value?.device_config
+  if (!dc?.config) return false
+  try {
+    const cfg = typeof dc.config === 'string' ? JSON.parse(dc.config) : dc.config
+    return !!cfg?.change_address_command
+  } catch { return false }
+})
+
+async function handleChangeAddress() {
+  if (!device.value) return
+  changingAddress.value = true
+  try {
+    await edgeDeviceApi.changeAddress(device.value.id, newAddress.value)
+    ElMessage.success(`地址已修改为 ${newAddress.value}`)
+    showAddressDialog.value = false
+    await fetchDeviceDetail()
+  } catch (e: any) {
+    ElMessage.error('修改失败: ' + (e.message || '未知错误'))
+  } finally {
+    changingAddress.value = false
+  }
+}
 
 // WebSocket 连接
 const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v1/ws`

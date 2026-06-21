@@ -1,7 +1,8 @@
 import client from './client'
 
 // M10 fix: Export DeviceStatus type for use across components
-export type DeviceStatus = 'online' | 'offline' | 'error' | 'active' | 'pending' | 'initializing' | 'unknown'
+// Extended to support health status: active, warning, error, disabled
+export type DeviceStatus = 'active' | 'online' | 'offline' | 'warning' | 'error' | 'disabled' | 'pending' | 'initializing' | 'unknown'
 
 export interface EdgeDevice {
   id: number
@@ -18,6 +19,7 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
+  device_config?: { protocol?: string; config?: Record<string, any> | string }
 }
 
 export interface EdgeDeviceListParams {
@@ -46,7 +48,7 @@ interface RawEdgeDevice {
   type?: string
   device_type?: string
   protocol?: string
-  device_config?: { protocol?: string }
+  device_config?: { protocol?: string; config?: Record<string, any> | string }
   hardware_type?: string
   channel?: { hardware_type?: string; hardware_id?: string }
   hardware_id?: string
@@ -61,11 +63,14 @@ interface RawEdgeDevice {
 }
 
 // M9 fix: Explicit status mapping from backend values to frontend display values
+// Preserves health status values (active, warning, error, disabled) instead of collapsing to online/offline
 const STATUS_MAP: Record<string, DeviceStatus> = {
-  active: 'online',
+  active: 'active',
   online: 'online',
   offline: 'offline',
+  warning: 'warning',
   error: 'error',
+  disabled: 'disabled',
   pending: 'pending',
   initializing: 'initializing',
   unknown: 'unknown',
@@ -90,7 +95,8 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   last_data: d.last_data || null,
   last_data_time: d.last_data_at || d.last_data_time || null,
   last_error_code: d.error_code ?? d.last_error_code ?? undefined,
-  created_at: d.created_at || ''
+  created_at: d.created_at || '',
+  device_config: d.device_config
 })
 
 // ============================================================
@@ -175,5 +181,12 @@ export const edgeDeviceApi = {
     if (Array.isArray(response)) return response
     if (response?.data) return response.data as any[]
     return []
+  },
+
+  async changeAddress(id: number, newAddress: number): Promise<any> {
+    const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/change-address`, {
+      new_address: newAddress
+    })
+    return response.data || response
   }
 }

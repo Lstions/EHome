@@ -102,6 +102,16 @@
                             <span class="channel-tag-name">{{ ch.name || '未命名' }}</span>
                             <span class="channel-tag-id">#{{ ch.id }}</span>
                           </el-tag>
+                          <el-button
+                            v-if="isScannable(busType, hw)"
+                            size="small"
+                            type="warning"
+                            :loading="scanningHwId === hw.id"
+                            @click="handleScan(busType, hw)"
+                            class="scan-btn"
+                          >
+                            地址扫描
+                          </el-button>
                         </template>
                         <template v-else>
                           <div class="no-channel-hint">
@@ -232,6 +242,40 @@ const reconfigureForm = reactive({
   baudrate: 115200
 })
 const uartChannels = computed(() => allChannels.value.filter((ch: any) => ch.hardware_type === 'uart'))
+
+// 地址扫描
+const scanningHwId = ref<string | null>(null)
+
+function isScannable(busType: string, hw: any): boolean {
+  if (busType === 'i2c') return true
+  if (busType === 'uart') {
+    try {
+      const cfg = typeof hw.bus_config === 'string' ? JSON.parse(hw.bus_config) : hw.bus_config
+      return cfg?.mode === 'rs485'
+    } catch { return false }
+  }
+  return false
+}
+
+async function handleScan(busType: string, hw: any) {
+  // 找到该硬件资源下的第一个通道作为扫描入口
+  const channels = getChannelsForHardware(busType, hw.id)
+  if (channels.length === 0) {
+    ElMessage.warning('该硬件资源下没有通道，无法扫描')
+    return
+  }
+  const ch = channels[0]
+  scanningHwId.value = hw.id
+  try {
+    const scanType = busType === 'i2c' ? 'i2c' : 'modbus'
+    const result = await channelApi.scan(ch.id, { scan_type: scanType })
+    ElMessage.success(`扫描完成: 发现 ${result.devices?.length || 0} 个设备`)
+  } catch (e: any) {
+    ElMessage.error('扫描失败: ' + (e.message || '未知错误'))
+  } finally {
+    scanningHwId.value = null
+  }
+}
 
 // 配置模板列表
 const configTemplates = ref<any[]>([])
@@ -1243,6 +1287,12 @@ defineExpose({
 
 .add-channel-btn:hover {
   color: #66b1ff;
+}
+
+.scan-btn {
+  margin-left: 4px;
+  border-radius: 8px;
+  font-weight: 500;
 }
 
 

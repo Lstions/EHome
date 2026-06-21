@@ -82,8 +82,11 @@
         </el-select>
         
         <el-select v-model="statusFilter" placeholder="状态" clearable style="min-width: 90px;">
-          <el-option label="在线" value="online" />
+          <el-option label="在线" value="active" />
           <el-option label="离线" value="offline" />
+          <el-option label="警告" value="warning" />
+          <el-option label="故障" value="error" />
+          <el-option label="已禁用" value="disabled" />
         </el-select>
         
         <el-select v-model="hardwareFilter" placeholder="硬件类型" clearable style="min-width: 120px;">
@@ -154,8 +157,11 @@
         </el-table-column>
         <el-table-column prop="status" label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'online' ? 'success' : 'info'" size="small">
-              {{ row.status === 'online' ? '在线' : '离线' }}
+            <el-tag 
+              :type="statusTagType(row.status)" 
+              size="small"
+              effect="dark">
+              {{ statusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -192,7 +198,7 @@
         v-for="device in filteredDevices" 
         :key="device.id" 
         class="device-card"
-        :class="{ offline: device.status === 'offline' }"
+        :class="{ offline: device.status === 'offline' || device.status === 'disabled' }"
         shadow="hover"
       >
         <div class="card-header">
@@ -207,7 +213,7 @@
           </div>
           <div class="status-indicator" :class="device.status">
             <span class="dot"></span>
-            {{ device.status === 'online' ? '在线' : '离线' }}
+            {{ statusLabel(device.status) }}
           </div>
         </div>
         
@@ -768,8 +774,8 @@ const updateStats = () => {
   // since those represent the filtered subset
   stats.total = total.value
   const allVisible = devices.value
-  stats.online = allVisible.filter(d => d.status === 'online').length
-  stats.offline = allVisible.filter(d => d.status === 'offline').length
+  stats.online = allVisible.filter(d => d.status === 'active' || d.status === 'online').length
+  stats.offline = allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length
   fetchTodayDataCount()
 }
 
@@ -885,6 +891,32 @@ const getDeviceTypeLabel = (type: string) => {
   return deviceTypes.find(t => t.value === type)?.label || type
 }
 
+// Health status tag type mapping (Element Plus tag types)
+function statusTagType(status: string): string {
+  switch (status) {
+    case 'active': return 'success'
+    case 'online': return 'success'
+    case 'warning': return 'warning'
+    case 'error': return 'danger'
+    case 'disabled': return 'info'
+    case 'offline': return 'info'
+    default: return 'info'
+  }
+}
+
+// Health status label mapping
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'active': return '在线'
+    case 'online': return '在线'
+    case 'warning': return '警告'
+    case 'error': return '故障'
+    case 'disabled': return '已禁用'
+    case 'offline': return '离线'
+    default: return status || '未知'
+  }
+}
+
 // 操作
 const handleStatClick = (status: string) => {
   if (status === 'all') {
@@ -972,7 +1004,7 @@ const handleBatchExport = () => {
       getDeviceTypeLabel(device.device_type),
       device.node?.name || ('#' + device.node_id),
       `${device.hardware_type?.toUpperCase()} ${device.hardware_id}`,
-      device.status === 'online' ? '在线' : '离线',
+      statusLabel(device.status),
       device.last_data ? formatDeviceData(device.last_data) : '暂无数据',
       formatRelativeTime(device.last_data_time)
     ])
@@ -1361,7 +1393,11 @@ onMounted(() => {
 }
 
 .status-indicator.online { background: #f0f9eb; color: #67c23a; }
+.status-indicator.active { background: #f0f9eb; color: #67c23a; }
 .status-indicator.offline { background: #f4f4f5; color: #909399; }
+.status-indicator.warning { background: #fdf6ec; color: #e6a23c; }
+.status-indicator.error { background: #fef0f0; color: #f56c6c; }
+.status-indicator.disabled { background: #f4f4f5; color: #909399; }
 
 .status-indicator .dot {
   width: 6px;
@@ -1371,6 +1407,7 @@ onMounted(() => {
 }
 
 .status-indicator.online .dot { animation: pulse 2s infinite; }
+.status-indicator.active .dot { animation: pulse 2s infinite; }
 
 .card-body {
   display: flex;
@@ -1475,7 +1512,7 @@ onMounted(() => {
   font-size: 13px;
 }
 
-/* 离线卡片强化 */
+/* 离线/故障卡片强化 */
 .device-card.offline .card-section-data {
   background: #f5f5f5;
 }
