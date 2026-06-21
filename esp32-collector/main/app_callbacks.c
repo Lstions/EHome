@@ -32,6 +32,18 @@ static bool is_config_manifest(const uint8_t *data, size_t len)
 
 static void handle_config_applied(app_state_t *s)
 {
+    /* Idempotency guard: skip if same manifest_id already applied.
+     * Backend may re-push the same config due to timing (e.g. StatusReport
+     * triggering a sync decision), but re-applying causes scheduler restart
+     * which resets channel_count to 0, creating a feedback loop. */
+    const config_manifest_t *cfg = config_mgr_get_manifest();
+    const char *new_id = cfg ? cfg->manifest_id : NULL;
+    const char *last_id = config_mgr_get_last_known_manifest_id();
+    if (new_id && last_id && strcmp(new_id, last_id) == 0) {
+        ESP_LOGI(TAG, "handle_config_applied: SKIP (same manifest %s)", new_id);
+        return;
+    }
+
     ESP_LOGI(TAG, "handle_config_applied: START");
     
     /* Suspend rx_task/cmd_task before cleanup to prevent race:

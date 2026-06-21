@@ -121,17 +121,9 @@ func (g *SyncGate) decide(deviceID string, deviceHash string, nvsEmpty bool,
 	}
 
 	if deviceHash == serverHash.ManifestID {
-		if deviceChannelCount == 0 && serverHash.ChannelCount > 0 {
-			d := SyncDecision{
-				Action:     SyncActionFull,
-				Reason:     "zero_channels_stale_config",
-				SyncID:     syncID,
-				ManifestID: serverHash.ManifestID,
-				DeviceID:   deviceID,
-			}
-			recordDecision(d)
-			return d
-		}
+		// hash 匹配 = 设备已持有正确配置。
+		// channel_count 差异是设备内部时序问题（scheduler 启动窗口期），
+		// 设备自行消化，后端不干预。
 		d := SyncDecision{
 			Action:   SyncActionNone,
 			Reason:   "hash_match",
