@@ -125,8 +125,53 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 	return requestID, nil
 }
 
+// parseProtocolVersion parses a version string like "2.2" or "2.3" into a float64.
+// Returns 0 for empty or unparseable strings.
+func parseProtocolVersion(v string) float64 {
+	parts := strings.Split(v, ".")
+	if len(parts) >= 2 {
+		major, _ := strconv.ParseFloat(parts[0]+"."+parts[1], 64)
+		return major
+	}
+	return 0
+}
+
+// parseHardwareID converts a hardware ID string to uint64.
+// "0x76" → 118, "5" → 5, "" → 0
+func parseHardwareID(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	if strings.HasPrefix(strings.ToLower(s), "0x") {
+		v, err := strconv.ParseUint(s[2:], 16, 64)
+		if err == nil {
+			return v
+		}
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err == nil {
+		return v
+	}
+	return 0
+}
+
+// findTemplateID returns a template ID for the given channel and edge device.
+// Uses the first template_id from Channel.TemplateIDs; falls back to 1.
+func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
+	if ch.TemplateIDs != "" {
+		for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
+			if id, err := strconv.ParseUint(strings.TrimSpace(idStr), 10, 32); err == nil {
+				return id
+			}
+		}
+	}
+	return 1
+}
+
 // SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.
 // The decision carries sync_id, epoch, manifest_id, and reason from SyncGate.
+// ProtocolVersion >= 2.3 uses field 9 (edge_device_groups); older versions use field 3+4.
 func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	deviceID := decision.DeviceID
 
@@ -152,44 +197,54 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 
 	// v2.2: field 2 epoch removed, field 9 sync_reason removed
 
-	// Encode templates (field 3, repeated sub-structure)
-	for _, tmpl := range templates {
-		subEnc := frame.SubEncoder()
-		subEnc.EncodeVarint(1, uint64(tmpl.ID))
-		if tmpl.WriteData != "" {
-			writeHex := tmpl.WriteData
-			if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
-				writeHex = writeHex[2:]
+	// Determine encoding path based on protocol version
+	useV2 := parseProtocolVersion(node.ProtocolVersion) >= 2.3
+
+	// Encode templates (field 3, repeated sub-structure) — only for old path
+	if !useV2 {
+		for _, tmpl := range templates {
+			subEnc := frame.SubEncoder()
+			subEnc.EncodeVarint(1, uint64(tmpl.ID))
+			if tmpl.WriteData != "" {
+				writeHex := tmpl.WriteData
+				if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
+					writeHex = writeHex[2:]
+				}
+				if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
+					subEnc.EncodeBytes(2, writeBytes)
+				}
 			}
-			if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
-				subEnc.EncodeBytes(2, writeBytes)
+			if tmpl.ReadLength > 0 {
+				subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
 			}
+			if tmpl.DelayMs > 0 {
+				subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
+			}
+			enc.EncodeSubFrame(3, subEnc.Bytes())
 		}
-		if tmpl.ReadLength > 0 {
-			subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
-		}
-		if tmpl.DelayMs > 0 {
-			subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
-		}
-		enc.EncodeSubFrame(3, subEnc.Bytes())
 	}
 
 	// Encode channels (field 4, repeated sub-structure)
 	for _, ch := range channels {
 		subEnc := frame.SubEncoder()
 		subEnc.EncodeVarint(1, uint64(ch.ID))
-		subEnc.EncodeString(2, ch.HardwareID)
 
-		// Packed repeated template_ids (field 3)
-		if ch.TemplateIDs != "" {
-			for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
-				if id, err := strconv.ParseUint(strings.TrimSpace(idStr), 10, 32); err == nil {
-					subEnc.EncodeVarint(3, id)
+		if !useV2 {
+			// Old path: field 2 hardware_id, field 3 template_ids, field 4 interval_ms
+			subEnc.EncodeString(2, ch.HardwareID)
+
+			// Packed repeated template_ids (field 3)
+			if ch.TemplateIDs != "" {
+				for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
+					if id, err := strconv.ParseUint(strings.TrimSpace(idStr), 10, 32); err == nil {
+						subEnc.EncodeVarint(3, id)
+					}
 				}
 			}
+
+			subEnc.EncodeVarint(4, uint64(ch.IntervalMs))
 		}
 
-		subEnc.EncodeVarint(4, uint64(ch.IntervalMs))
 		subEnc.EncodeBool(5, ch.Enabled)
 
 		// Bus type
@@ -227,6 +282,27 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 
 		// Field 8: dma_enabled
 		subEnc.EncodeBool(8, ch.DmaEnabled)
+
+		if useV2 {
+			// New path: field 9 edge_device_groups (repeated sub-messages)
+			var edges []models.EdgeDevice
+			m.db.Where("channel_id = ? AND node_id = ? AND enabled = true", ch.ID, node.NodeID).Find(&edges)
+
+			for _, edge := range edges {
+				grpEnc := frame.SubEncoder()
+				grpEnc.EncodeVarint(1, uint64(edge.ID))
+				grpEnc.EncodeVarint(2, parseHardwareID(edge.HardwareID))
+
+				// Each edge device has one command entry
+				cmdEnc := frame.SubEncoder()
+				cmdEnc.EncodeVarint(1, findTemplateID(ch, edge)) // template_id
+				cmdEnc.EncodeVarint(2, uint64(edge.IntervalMs))  // interval_ms
+				cmdEnc.EncodeBool(3, edge.Enabled)
+				grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+
+				subEnc.EncodeSubFrame(9, grpEnc.Bytes())
+			}
+		}
 
 		enc.EncodeSubFrame(4, subEnc.Bytes())
 	}

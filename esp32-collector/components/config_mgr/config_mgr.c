@@ -234,6 +234,58 @@ static bool parse_manifest(const uint8_t *data, size_t len)
                                 cur_channel->bus_config_len = cpy;
                             }
                             break;
+                        case 9: /* edge_device_groups (repeated nested) */
+                            if (cf.wire_type == WIRE_LENGTH_DELIMITED && cf.value.bytes.ptr
+                                && cur_channel->edge_device_count < MAX_EDGE_DEVICES_PER_CH) {
+
+                                config_edge_device_t *cur_ed =
+                                    &cur_channel->edge_devices[cur_channel->edge_device_count++];
+
+                                frame_decoder_t edec;
+                                if (frame_decoder_init_sub(&edec, cf.value.bytes.ptr,
+                                                            cf.value.bytes.len) == FRAME_OK) {
+                                    frame_field_t ef;
+                                    while (frame_decoder_next(&edec, &ef) == FRAME_OK) {
+                                        switch (ef.field_num) {
+                                        case 1: /* edge_device_id */
+                                            cur_ed->edge_device_id = (uint32_t)ef.value.varint;
+                                            break;
+                                        case 2: /* hardware_id */
+                                            cur_ed->hardware_id = (uint32_t)ef.value.varint;
+                                            break;
+                                        case 3: /* commands (repeated nested) */
+                                            if (ef.wire_type == WIRE_LENGTH_DELIMITED
+                                                && ef.value.bytes.ptr
+                                                && cur_ed->command_count < MAX_COMMANDS_PER_DEVICE) {
+
+                                                config_command_t *cur_cmd =
+                                                    &cur_ed->commands[cur_ed->command_count++];
+
+                                                frame_decoder_t cdec2;
+                                                if (frame_decoder_init_sub(&cdec2, ef.value.bytes.ptr,
+                                                                            ef.value.bytes.len) == FRAME_OK) {
+                                                    frame_field_t cf2;
+                                                    while (frame_decoder_next(&cdec2, &cf2) == FRAME_OK) {
+                                                        switch (cf2.field_num) {
+                                                        case 1: /* template_id */
+                                                            cur_cmd->template_id = (uint32_t)cf2.value.varint;
+                                                            break;
+                                                        case 2: /* interval_ms */
+                                                            cur_cmd->interval_ms = (uint32_t)cf2.value.varint;
+                                                            break;
+                                                        case 3: /* enabled */
+                                                            cur_cmd->enabled = cf2.value.varint != 0;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
                         }
                     }
                 }

@@ -19,6 +19,8 @@ extern "C" {
 #define MAX_CHANNELS      8
 #define MAX_TEMPLATE_IDS  8
 #define MAX_DMA_CONFIGS   8
+#define MAX_EDGE_DEVICES_PER_CH 5
+#define MAX_COMMANDS_PER_DEVICE 3
 
 
 /* === Template === */
@@ -29,6 +31,21 @@ typedef struct {
     uint32_t read_length;
     uint32_t delay_ms;
 } config_template_t;
+
+/* === Edge Device Command === */
+typedef struct {
+    uint32_t template_id;
+    uint32_t interval_ms;
+    bool     enabled;
+} config_command_t;
+
+/* === Edge Device === */
+typedef struct {
+    uint32_t edge_device_id;
+    uint32_t hardware_id;
+    config_command_t commands[MAX_COMMANDS_PER_DEVICE];
+    uint8_t  command_count;
+} config_edge_device_t;
 
 /* === Channel === */
 typedef struct {
@@ -41,6 +58,9 @@ typedef struct {
     uint8_t  bus_type;    // 1=UART, 2=I2C, 3=SPI, 4=GPIO, 5=ADC
     uint8_t  bus_config[128];
     size_t   bus_config_len;
+    /* v2.3: edge device groups */
+    config_edge_device_t edge_devices[MAX_EDGE_DEVICES_PER_CH];
+    uint8_t  edge_device_count;
 } config_channel_t;
 
 /* === DMA Channel Config (persisted with manifest) === */
