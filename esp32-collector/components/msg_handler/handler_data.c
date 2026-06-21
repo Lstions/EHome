@@ -83,10 +83,17 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status, uint8_t ch
     frame_encode_varint(&enc, 4, config_mgr_get_epoch());
     frame_encode_varint(&enc, 5, (uint64_t)sync_manager_get_state_enum());
 
-    ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d",
+    // v2.2: send config_hash so server can decide without waiting for Hello
+    const char *config_hash = config_mgr_get_last_known_manifest_id();
+    if (config_hash != NULL) {
+        frame_encode_string(&enc, 6, config_hash);
+    }
+
+    ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d, hash=%s",
              (unsigned long)uptime_sec, status, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
-             sync_manager_get_state_enum());
+             sync_manager_get_state_enum(),
+             config_hash ? config_hash : "(none)");
     msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 

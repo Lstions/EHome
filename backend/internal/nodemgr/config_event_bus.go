@@ -36,7 +36,7 @@ type ConfigChangeEvent struct {
 	Action    ConfigChangeAction
 	NodeID    string // affected node (0 = all / unknown)
 	EntityID  string // changed entity ID
-	Epoch     uint64 // global epoch after increment
+	Epoch     uint64 // global epoch after increment (retained for struct compat, no longer used)
 	Timestamp time.Time
 	Actor     string // "api:admin", "init:factory_reset", "system:startup"
 }
@@ -44,24 +44,19 @@ type ConfigChangeEvent struct {
 // ConfigEventBus is a simple channel-based event bus for configuration changes.
 // Single subscriber model: only SyncGate subscribes.
 type ConfigEventBus struct {
-	ch       chan ConfigChangeEvent
-	epochGen *EpochGenerator
+	ch chan ConfigChangeEvent
 }
 
 // NewConfigEventBus creates a new bus with the given buffer size.
-func NewConfigEventBus(bufferSize int, epochGen *EpochGenerator) *ConfigEventBus {
+func NewConfigEventBus(bufferSize int) *ConfigEventBus {
 	return &ConfigEventBus{
-		ch:       make(chan ConfigChangeEvent, bufferSize),
-		epochGen: epochGen,
+		ch: make(chan ConfigChangeEvent, bufferSize),
 	}
 }
 
-// Publish increments the epoch and sends the event to the bus channel.
+// Publish sends the event to the bus channel.
 // If the channel is full, the event is dropped with a warning (non-blocking).
 func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
-	// Increment epoch on every publish
-	evt.Epoch = b.epochGen.Next()
-
 	if evt.EventID == "" {
 		evt.EventID = uuid.New().String()
 	}
@@ -73,7 +68,7 @@ func (b *ConfigEventBus) Publish(evt ConfigChangeEvent) error {
 	case b.ch <- evt:
 		return nil
 	default:
-		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%d entity=%d",
+		logger.Warnf("ConfigEventBus buffer full, dropping event: type=%s action=%s node=%s entity=%s",
 			evt.Type, evt.Action, evt.NodeID, evt.EntityID)
 		metrics.EventBusDroppedTotal.Inc()
 		return nil // drop silently per design — alarm via metrics in production
@@ -87,6 +82,7 @@ func (b *ConfigEventBus) Subscribe() <-chan ConfigChangeEvent {
 }
 
 // CurrentEpoch returns the current global epoch value.
+// Retained for backward compatibility (API handlers); always returns 0 in v2.
 func (b *ConfigEventBus) CurrentEpoch() uint64 {
-	return b.epochGen.Current()
+	return 0
 }

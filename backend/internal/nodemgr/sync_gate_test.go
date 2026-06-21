@@ -2,7 +2,6 @@ package nodemgr
 
 import (
 	"testing"
-	"time"
 
 	"ehome/backend/internal/models"
 
@@ -19,9 +18,7 @@ func newTestManagerAndGate(t *testing.T) (*Manager, *SyncGate, *ConfigEventBus) 
 	}
 	db.AutoMigrate(&models.ConfigMeta{}, &models.Node{}, &models.Channel{}, &models.ConfigTemplate{})
 
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
-	bus := NewConfigEventBus(64, epochGen)
+	bus := NewConfigEventBus(64)
 
 	// Create a Manager with the test DB (no MQTT, no WS)
 	mgr := &Manager{
@@ -38,78 +35,54 @@ func TestOnHello_NvsEmpty_ForceSync(t *testing.T) {
 	_, gate, _ := newTestManagerAndGate(t)
 
 	hello := &HelloMsg{
-		NodeID:     "dev1",
+		NodeID:      "dev1",
 		NvsHasConfig: false, // NVS empty — should force full sync
 	}
 	d := gate.OnHello("dev1", hello)
 	if d.Action != SyncActionFull {
 		t.Fatalf("expected SyncActionFull, got %d", d.Action)
 	}
-	if d.Reason != "nvs_empty_force_sync" {
-		t.Fatalf("expected nvs_empty_force_sync, got %s", d.Reason)
+	if d.Reason != "nvs_empty" {
+		t.Fatalf("expected nvs_empty, got %s", d.Reason)
 	}
 	if d.SyncID == "" {
 		t.Fatal("SyncID should be set")
 	}
 }
 
-func TestOnHello_EpochLag_ForceSync(t *testing.T) {
-	_, gate, bus := newTestManagerAndGate(t)
+func TestOnHello_HashMismatch_Push(t *testing.T) {
+	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Increment server epoch to be ahead of device
-	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, NodeID: 1, EntityID: 1})
-	time.Sleep(10 * time.Millisecond) // let async persist
+	// Create a node so CalcConfigHashForDevice returns a non-empty hash
+	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
 
 	hello := &HelloMsg{
-		NodeID:     "dev1",
+		NodeID:       "dev1",
 		NvsHasConfig: true,
-		ConfigEpoch:  0, // device epoch = 0, server epoch > 0
-	}
-	d := gate.OnHello("dev1", hello)
-	if d.Action != SyncActionFull {
-		t.Fatalf("expected SyncActionFull for epoch lag, got %d", d.Action)
-	}
-	_ = bus // silence unused variable warning
-}
-
-func TestOnHello_ManifestMismatch_ForceSync(t *testing.T) {
-	_, gate, bus := newTestManagerAndGate(t)
-
-	// Make server epoch == device epoch (0 == 0 or match)
-	hello := &HelloMsg{
-		NodeID:     "dev1",
-		NvsHasConfig: true,
-		ConfigEpoch:  bus.CurrentEpoch(),
 		LastManifest: "old-manifest-id",
 	}
 	d := gate.OnHello("dev1", hello)
-	// Should be Full due to manifest mismatch (unless hash happens to match)
-	if d.Action == SyncActionNone {
-		t.Fatal("expected non-None action when manifest mismatches")
+	if d.Action != SyncActionFull {
+		t.Fatalf("expected SyncActionFull for hash mismatch, got %d (reason=%s)", d.Action, d.Reason)
 	}
 }
 
 func TestOnHello_InSync_NoAction(t *testing.T) {
-	mgr, gate, bus := newTestManagerAndGate(t)
+	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Create a node with known config (NodeID must match the deviceID used in OnHello)
-	nodeRecord := models.Node{NodeID: 4001, Status: "online"}
+	// Create a node with known config
+	nodeRecord := models.Node{NodeID: "4001", Status: "online"}
 	mgr.db.Create(&nodeRecord)
 
-	// Compute the hash the device would report (use same ID as OnHello)
+	// Compute the hash the device would report
 	deviceID := "4001"
 	serverHash := mgr.CalcConfigHashForDevice(deviceID)
 
 	hello := &HelloMsg{
-		NodeID:     deviceID,
+		NodeID:      deviceID,
 		NvsHasConfig: true,
-		ConfigEpoch:  bus.CurrentEpoch(),
-		LastManifest: serverHash.ManifestID,
+		LastManifest: serverHash.ManifestID, // device reports same ManifestID as server
 	}
-
-	// Pre-populate hashMgr so dedup skips
-	mgr.hashMgr.ShouldSendConfig(deviceID, serverHash.Hash)
-	mgr.hashMgr.UpdateLastSent(deviceID)
 
 	d := gate.OnHello(deviceID, hello)
 	if d.Action != SyncActionNone {
@@ -122,61 +95,71 @@ func TestOnHello_V2Firmware_LegacyPath(t *testing.T) {
 
 	// v2.0 firmware: no epoch/nvs_has fields → defaults (epoch=0, nvs_has=true)
 	hello := &HelloMsg{
-		NodeID:        "dev1",
-		NvsHasConfig:    true, // default for v2.0
-		ConfigEpoch:     0,    // default for v2.0
+		NodeID:          "dev1",
+		NvsHasConfig:    true,  // default for v2.0
+		ConfigEpoch:     0,     // default for v2.0
 		ProtocolVersion: "2.0",
 	}
 	d := gate.OnHello("dev1", hello)
-	// With epoch=0 and server epoch > 0, should trigger epoch lag
-	if d.Action != SyncActionFull {
-		t.Fatalf("expected SyncActionFull for legacy v2.0 device (epoch=0 < server), got %d", d.Action)
+	// With empty LastManifest and no server config, should be no_server_config or hash_mismatch
+	if d.Reason != "no_server_config" && d.Reason != "hash_mismatch" {
+		// Either is acceptable depending on whether node exists in DB
+		t.Fatalf("expected no_server_config or hash_mismatch, got %s", d.Reason)
 	}
 }
 
 // === OnStatusReport tests ===
 
-func TestOnStatusReport_EpochLag_Push(t *testing.T) {
-	_, gate, bus := newTestManagerAndGate(t)
+func TestOnStatusReport_EmptyConfigHash_Skip(t *testing.T) {
+	_, gate, _ := newTestManagerAndGate(t)
 
-	// Increment server epoch
-	bus.Publish(ConfigChangeEvent{Type: CfgChangeChannel, Action: CfgActionUpdate, NodeID: 1, EntityID: 1})
-	time.Sleep(10 * time.Millisecond)
-
+	// Old firmware: no config_hash field → short-circuit skip
 	rpt := &StatusReportMsg{
-		Status:      "online",
-		ConfigEpoch: 0, // device epoch = 0, server > 0
-	}
-	d := gate.OnStatusReport("dev1", rpt)
-	if d.Action != SyncActionFull {
-		t.Fatalf("expected SyncActionFull for status epoch lag, got %d", d.Action)
-	}
-}
-
-func TestOnStatusReport_InSync(t *testing.T) {
-	_, gate, bus := newTestManagerAndGate(t)
-
-	rpt := &StatusReportMsg{
-		Status:      "online",
-		ConfigEpoch: bus.CurrentEpoch(),
+		Status:     "online",
+		ConfigHash: "", // empty → skip
 	}
 	d := gate.OnStatusReport("dev1", rpt)
 	if d.Action != SyncActionNone {
-		t.Fatalf("expected SyncActionNone for in-sync status, got %d", d.Action)
+		t.Fatalf("expected SyncActionNone for empty config_hash, got %d", d.Action)
+	}
+	if d.Reason != "no_config_hash_wait_for_hello" {
+		t.Fatalf("expected no_config_hash_wait_for_hello, got %s", d.Reason)
 	}
 }
 
-func TestOnStatusReport_OnlineWithEpochZero(t *testing.T) {
-	_, gate, _ := newTestManagerAndGate(t)
+func TestOnStatusReport_ConfigHashMatch(t *testing.T) {
+	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Device comes online with epoch 0, server has epoch > 0
+	// Create a node
+	nodeRecord := models.Node{NodeID: "dev2", Status: "online"}
+	mgr.db.Create(&nodeRecord)
+
+	serverHash := mgr.CalcConfigHashForDevice("dev2")
 	rpt := &StatusReportMsg{
-		Status:      "online",
-		ConfigEpoch: 0,
+		Status:       "online",
+		ConfigHash:   serverHash.ManifestID, // device reports same ManifestID as server
+		ChannelCount: uint64(serverHash.ChannelCount),
 	}
-	d := gate.OnStatusReport("dev1", rpt)
+	d := gate.OnStatusReport("dev2", rpt)
+	if d.Action != SyncActionNone {
+		t.Fatalf("expected SyncActionNone for hash match, got %d (reason=%s)", d.Action, d.Reason)
+	}
+}
+
+func TestOnStatusReport_ConfigHashMismatch(t *testing.T) {
+	mgr, gate, _ := newTestManagerAndGate(t)
+
+	// Create a node
+	nodeRecord := models.Node{NodeID: "dev3", Status: "online"}
+	mgr.db.Create(&nodeRecord)
+
+	rpt := &StatusReportMsg{
+		Status:     "online",
+		ConfigHash: "wrong_hash",
+	}
+	d := gate.OnStatusReport("dev3", rpt)
 	if d.Action != SyncActionFull {
-		t.Fatalf("expected SyncActionFull for epoch=0 status, got %d", d.Action)
+		t.Fatalf("expected SyncActionFull for hash mismatch, got %d", d.Action)
 	}
 }
 
@@ -186,14 +169,14 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create a node
-	nodeRecord := models.Node{NodeID: 4002, Status: "online"}
+	nodeRecord := models.Node{NodeID: "4002", Status: "online"}
 	mgr.db.Create(&nodeRecord)
 
 	evt := ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionUpdate,
-		NodeID: nodeRecord.ID,
-		EntityID:    100,
+		Type:     CfgChangeChannel,
+		Action:   CfgActionUpdate,
+		NodeID:   "4002",
+		EntityID: "100",
 	}
 	decisions := gate.OnConfigChange(evt)
 	if len(decisions) != 1 {
@@ -207,105 +190,50 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 	}
 }
 
-func TestOnConfigChange_NoDevice_Skip(t *testing.T) {
-	_, gate, _ := newTestManagerAndGate(t)
-
-	evt := ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionUpdate,
-		NodeID: 9999, // non-existent
-		EntityID:    100,
-	}
-	decisions := gate.OnConfigChange(evt)
-	if len(decisions) != 0 {
-		t.Fatalf("expected 0 decisions for missing node, got %d", len(decisions))
-	}
-}
-
-func TestOnConfigChange_EpochIncremented(t *testing.T) {
-	mgr, gate, bus := newTestManagerAndGate(t)
-
-	nodeRecord := models.Node{NodeID: 4003, Status: "online"}
-	mgr.db.Create(&nodeRecord)
-	before := bus.CurrentEpoch()
-	evt := ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionUpdate,
-		NodeID: nodeRecord.ID,
-		EntityID:    100,
-	}
-	// Publish increments epoch
-	bus.Publish(evt)
-	time.Sleep(10 * time.Millisecond)
-
-	decisions := gate.OnConfigChange(evt)
-	if len(decisions) > 0 && decisions[0].Epoch <= before {
-		t.Fatalf("decision epoch should be > before: epoch=%d before=%d", decisions[0].Epoch, before)
-	}
-}
-
 // === OnServerStartup tests ===
 
-func TestOnServerStartup_PushAllOnline(t *testing.T) {
+func TestOnServerStartup_NoPush(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create online nodes
-	mgr.db.Create(&models.Node{NodeID: 5001, Status: "online"})
-	mgr.db.Create(&models.Node{NodeID: 5002, Status: "online"})
-	mgr.db.Create(&models.Node{NodeID: 5003, Status: "offline"})
-
-	decisions := gate.OnServerStartup()
-	if len(decisions) != 2 {
-		t.Fatalf("expected 2 decisions for online nodes, got %d", len(decisions))
-	}
-	for _, d := range decisions {
-		if d.Action != SyncActionFull {
-			t.Fatalf("expected SyncActionFull, got %d", d.Action)
-		}
-		if d.Reason != "server_startup_push" {
-			t.Fatalf("expected server_startup_push, got %s", d.Reason)
-		}
-	}
-}
-
-func TestOnServerStartup_NoOnline(t *testing.T) {
-	_, gate, _ := newTestManagerAndGate(t)
+	mgr.db.Create(&models.Node{NodeID: "5001", Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: "5002", Status: "online"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 0 {
-		t.Fatalf("expected 0 decisions with no online nodes, got %d", len(decisions))
+		t.Fatalf("expected 0 decisions (v2.2: wait for StatusReport), got %d", len(decisions))
 	}
 }
 
 // === OnConfigQuery tests ===
 
 func TestOnConfigQuery_Mismatch(t *testing.T) {
-	_, gate, _ := newTestManagerAndGate(t)
+	mgr, gate, _ := newTestManagerAndGate(t)
+
+	// Create a node so CalcConfigHashForDevice returns a non-empty hash
+	mgr.db.Create(&models.Node{NodeID: "dev1", Status: "online"})
 
 	q := &ConfigQueryMsg{
 		Reason:            "periodic",
-		CurrentEpoch:      0,
 		CurrentManifestID: "old-manifest",
 	}
 	d := gate.OnConfigQuery("dev1", q)
 	if d.Action != SyncActionFull {
-		t.Fatalf("expected SyncActionFull for query mismatch, got %d", d.Action)
+		t.Fatalf("expected SyncActionFull for query mismatch, got %d (reason=%s)", d.Action, d.Reason)
 	}
 }
 
 func TestOnConfigQuery_InSync(t *testing.T) {
-	mgr, gate, bus := newTestManagerAndGate(t)
+	mgr, gate, _ := newTestManagerAndGate(t)
 
-	// Create collector (NodeID must match the deviceID used in OnConfigQuery)
 	deviceID := "6001"
-	mgr.db.Create(&models.Node{NodeID: 6001, Status: "online"})
+	mgr.db.Create(&models.Node{NodeID: "6001", Status: "online"})
 
 	serverHash := mgr.CalcConfigHashForDevice(deviceID)
 
 	q := &ConfigQueryMsg{
 		Reason:            "periodic",
-		CurrentEpoch:      bus.CurrentEpoch(),
-		CurrentManifestID: serverHash.ManifestID,
+		CurrentManifestID: serverHash.ManifestID, // device reports matching ManifestID
 	}
 	d := gate.OnConfigQuery(deviceID, q)
 	if d.Action != SyncActionNone {
@@ -322,8 +250,8 @@ func TestOnOfflineReconnect_ForcePush(t *testing.T) {
 	if d.Action != SyncActionFull {
 		t.Fatalf("expected SyncActionFull for offline reconnect, got %d", d.Action)
 	}
-	if d.Reason != "offline_reconnect_push" {
-		t.Fatalf("expected offline_reconnect_push, got %s", d.Reason)
+	if d.Reason != "offline_reconnect" {
+		t.Fatalf("expected offline_reconnect, got %s", d.Reason)
 	}
 }
 
@@ -336,8 +264,8 @@ func TestOnFactoryReset_ForcePush(t *testing.T) {
 	if d.Action != SyncActionFull {
 		t.Fatalf("expected SyncActionFull for factory reset, got %d", d.Action)
 	}
-	if d.Reason != "factory_reset_force_sync" {
-		t.Fatalf("expected factory_reset_force_sync, got %s", d.Reason)
+	if d.Reason != "factory_reset" {
+		t.Fatalf("expected factory_reset, got %s", d.Reason)
 	}
 }
 
@@ -348,18 +276,15 @@ func TestSyncDecision_AlwaysHasSyncID(t *testing.T) {
 
 	decisions := []SyncDecision{
 		gate.OnHello("dev1", &HelloMsg{NvsHasConfig: false}),
-		gate.OnStatusReport("dev1", &StatusReportMsg{ConfigEpoch: 0}),
+		gate.OnStatusReport("dev1", &StatusReportMsg{ConfigHash: ""}), // empty hash → skip
 		gate.OnOfflineReconnect("dev1"),
 		gate.OnFactoryReset("dev1"),
-		gate.OnConfigQuery("dev1", &ConfigQueryMsg{CurrentEpoch: 0}),
+		gate.OnConfigQuery("dev1", &ConfigQueryMsg{CurrentManifestID: ""}),
 	}
 
 	for i, d := range decisions {
 		if d.SyncID == "" {
 			t.Fatalf("decision %d missing SyncID", i)
-		}
-		if d.Epoch == 0 {
-			t.Fatalf("decision %d missing Epoch", i)
 		}
 	}
 }

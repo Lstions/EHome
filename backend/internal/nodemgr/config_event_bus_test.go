@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"sync"
 	"testing"
 	"time"
 
@@ -21,39 +20,17 @@ func setupEventBusTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func TestConfigEventBus_Publish_IncrementsEpoch(t *testing.T) {
-	db := setupEventBusTestDB(t)
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
-	bus := NewConfigEventBus(10, epochGen)
-
-	before := bus.CurrentEpoch()
-	bus.Publish(ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionUpdate,
-		NodeID: 1,
-		EntityID:    100,
-	})
-	after := bus.CurrentEpoch()
-
-	if after <= before {
-		t.Fatalf("epoch should increment: before=%d after=%d", before, after)
-	}
-}
-
-func TestConfigEventBus_Subscribe_ReceiveEvent(t *testing.T) {
-	db := setupEventBusTestDB(t)
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
-	bus := NewConfigEventBus(10, epochGen)
+func TestConfigEventBus_Publish_ReceiveEvent(t *testing.T) {
+	_ = setupEventBusTestDB(t)
+	bus := NewConfigEventBus(10)
 
 	ch := bus.Subscribe()
 
 	evt := ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionCreate,
-		NodeID: 5,
-		EntityID:    42,
+		Type:     CfgChangeChannel,
+		Action:   CfgActionUpdate,
+		NodeID:   "node-5",
+		EntityID: "42",
 	}
 	bus.Publish(evt)
 
@@ -63,10 +40,7 @@ func TestConfigEventBus_Subscribe_ReceiveEvent(t *testing.T) {
 			t.Fatalf("wrong type: got %s want %s", received.Type, evt.Type)
 		}
 		if received.NodeID != evt.NodeID {
-			t.Fatalf("wrong collector: got %d want %d", received.NodeID, evt.NodeID)
-		}
-		if received.Epoch == 0 {
-			t.Fatal("epoch should be set")
+			t.Fatalf("wrong node: got %s want %s", received.NodeID, evt.NodeID)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for event")
@@ -74,38 +48,34 @@ func TestConfigEventBus_Subscribe_ReceiveEvent(t *testing.T) {
 }
 
 func TestConfigEventBus_Publish_NonBlocking(t *testing.T) {
-	db := setupEventBusTestDB(t)
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
+	_ = setupEventBusTestDB(t)
 	// Buffer size 1 — will fill quickly
-	bus := NewConfigEventBus(1, epochGen)
+	bus := NewConfigEventBus(1)
 
 	// Publish more events than buffer can hold
 	for i := 0; i < 10; i++ {
 		bus.Publish(ConfigChangeEvent{
-			Type:        CfgChangeChannel,
-			Action:      CfgActionUpdate,
-			NodeID: uint(i),
-			EntityID:    uint(i),
+			Type:     CfgChangeChannel,
+			Action:   CfgActionUpdate,
+			NodeID:   "node",
+			EntityID: "item",
 		})
 	}
 	// Should not block or panic
 }
 
 func TestConfigEventBus_Publish_SetsDefaults(t *testing.T) {
-	db := setupEventBusTestDB(t)
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
-	bus := NewConfigEventBus(10, epochGen)
+	_ = setupEventBusTestDB(t)
+	bus := NewConfigEventBus(10)
 
 	ch := bus.Subscribe()
 
 	// Publish without EventID or Timestamp
 	bus.Publish(ConfigChangeEvent{
-		Type:        CfgChangeChannel,
-		Action:      CfgActionDelete,
-		NodeID: 1,
-		EntityID:    1,
+		Type:     CfgChangeChannel,
+		Action:   CfgActionDelete,
+		NodeID:   "1",
+		EntityID: "1",
 	})
 
 	select {
@@ -121,40 +91,21 @@ func TestConfigEventBus_Publish_SetsDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigEventBus_ConcurrentPublish(t *testing.T) {
-	db := setupEventBusTestDB(t)
-	epochGen := NewEpochGenerator(db)
-	epochGen.Restore()
-	bus := NewConfigEventBus(100, epochGen)
+func TestConfigEventBus_CurrentEpoch_ReturnsZero(t *testing.T) {
+	_ = setupEventBusTestDB(t)
+	bus := NewConfigEventBus(10)
 
-	const n = 50
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			bus.Publish(ConfigChangeEvent{
-				Type:        CfgChangeChannel,
-				Action:      CfgActionUpdate,
-				NodeID: uint(idx),
-				EntityID:    uint(idx),
-			})
-		}(i)
+	if bus.CurrentEpoch() != 0 {
+		t.Fatalf("CurrentEpoch should always return 0 in v2, got %d", bus.CurrentEpoch())
 	}
-	wg.Wait()
 
-	// All events should have unique epochs (monotonic increment)
-	epochs := make(map[uint64]bool)
-	ch := bus.Subscribe()
-	for i := 0; i < n; i++ {
-		select {
-		case evt := <-ch:
-			if epochs[evt.Epoch] {
-				t.Fatalf("duplicate epoch: %d", evt.Epoch)
-			}
-			epochs[evt.Epoch] = true
-		case <-time.After(time.Second):
-			t.Fatalf("timeout at event %d", i)
-		}
+	bus.Publish(ConfigChangeEvent{
+		Type:   CfgChangeChannel,
+		Action: CfgActionUpdate,
+		NodeID: "1",
+	})
+
+	if bus.CurrentEpoch() != 0 {
+		t.Fatalf("CurrentEpoch should still return 0 after publish, got %d", bus.CurrentEpoch())
 	}
 }

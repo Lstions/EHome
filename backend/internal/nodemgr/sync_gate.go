@@ -2,27 +2,11 @@ package nodemgr
 
 import (
 	"fmt"
-	"time"
 
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
 	"github.com/google/uuid"
-)
-
-// SyncReason identifies why a sync was triggered.
-type SyncReason string
-
-const (
-	SyncReasonHello            SyncReason = "hello"
-	SyncReasonStatusReport     SyncReason = "status_report"
-	SyncReasonConfigChange     SyncReason = "config_change"
-	SyncReasonServerStartup    SyncReason = "server_startup"
-	SyncReasonConfigQuery      SyncReason = "config_query"
-	SyncReasonOfflineReconnect SyncReason = "offline_reconnect"
-	SyncReasonFactoryReset     SyncReason = "factory_reset"
-	SyncReasonPeriodic         SyncReason = "periodic"
-	SyncReasonEpochLag         SyncReason = "epoch_lag"
 )
 
 // SyncAction represents the decision outcome for a sync event.
@@ -40,9 +24,8 @@ type SyncDecision struct {
 	Action     SyncAction
 	Reason     string // Human-readable reason for logging
 	SyncID     string // UUID for observability
-	Epoch      uint64 // Server's current epoch at decision time
 	ManifestID string // Manifest ID to send (if action is Full)
-	DeviceID   string // Target device (set by caller after decision)
+	DeviceID   string // Target device
 }
 
 // HelloMsg carries the parsed v2.1 Hello fields for SyncGate decision.
@@ -57,13 +40,14 @@ type HelloMsg struct {
 	ProtocolVersion string
 }
 
-// StatusReportMsg carries the parsed v2.1 StatusReport fields for SyncGate decision.
+// StatusReportMsg carries the parsed v2.2 StatusReport fields for SyncGate decision.
 type StatusReportMsg struct {
 	UptimeSec    uint64
 	Status       string
 	ChannelCount uint64
 	ConfigEpoch  uint64
 	SyncState    string
+	ConfigHash   string // v2.2: config_hash from device
 }
 
 // ConfigQueryMsg carries the parsed ConfigSyncRequest fields.
@@ -78,7 +62,6 @@ type ConfigQueryMsg struct {
 type SyncGate struct {
 	mgr      *Manager
 	eventBus *ConfigEventBus
-	dedupTTL time.Duration
 }
 
 // NewSyncGate creates a new SyncGate.
@@ -86,7 +69,6 @@ func NewSyncGate(mgr *Manager, eventBus *ConfigEventBus) *SyncGate {
 	return &SyncGate{
 		mgr:      mgr,
 		eventBus: eventBus,
-		dedupTTL: 30 * time.Second,
 	}
 }
 
@@ -104,196 +86,56 @@ func recordDecision(d SyncDecision) {
 	metrics.SyncDecisionsTotal.WithLabelValues(d.Reason, actionStr).Inc()
 }
 
-// OnHello makes a sync decision when a device sends Hello.
-// Three-axis decision: NVS state > Epoch > Hash (strictest to most lenient).
-func (g *SyncGate) OnHello(deviceID string, hello *HelloMsg) SyncDecision {
+// decide is the single decision point for all sync logic.
+// deviceHash: the hash reported by the device (from Hello last_manifest or StatusReport config_hash)
+// nvsEmpty: true if device reports NVS has no config
+// deviceChannelCount: number of channels the device reports
+func (g *SyncGate) decide(deviceID string, deviceHash string, nvsEmpty bool,
+	deviceChannelCount uint64) SyncDecision {
+
 	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
 
-	// Axis 1: NVS state (fixes G3 — factory reset stuck)
-	if !hello.NvsHasConfig {
+	if nvsEmpty {
+		serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
 		d := SyncDecision{
 			Action:     SyncActionFull,
-			Reason:     "nvs_empty_force_sync",
+			Reason:     "nvs_empty",
 			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
+			ManifestID: serverHash.ManifestID,
 			DeviceID:   deviceID,
 		}
 		recordDecision(d)
 		return d
 	}
-
-	// Axis 2: Epoch comparison (fixes G1, G2)
-	if hello.ConfigEpoch < serverEpoch {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     fmt.Sprintf("epoch_lag: device=%d server=%d", hello.ConfigEpoch, serverEpoch),
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		return d
-	}
-
-	// Axis 3: Hash comparison (fallback)
-	serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
-	if hello.LastManifest != serverHash.ManifestID {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     "manifest_id_mismatch",
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		return d
-	}
-
-	// Axis 3.5: ForceSend — device has NVS config but reports 0 channels (stale/broken config)
-	// This catches the case where NVS has wrong channel assignments (e.g., TX=21/RX=20)
-	// that produce the same hash as the correct config (TX=20/RX=21).
-	// Without this, the device is stuck because hash matches but channels are wrong.
-	if hello.NvsHasConfig && hello.ChannelCount == 0 && serverHash.ChannelCount > 0 {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     fmt.Sprintf("force_send:nvs_has_config_but_zero_channels:server_channels=%d", serverHash.ChannelCount),
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		return d
-	}
-
-	// Dedup: if hash changed or first time within TTL, still send
-	if g.mgr.hashMgr.ShouldSendConfig(deviceID, serverHash.Hash) {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     "dedup_expired_or_first_time",
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		return d
-	}
-
-	d := SyncDecision{
-		Action:   SyncActionNone,
-		Reason:   "in_sync",
-		SyncID:   syncID,
-		Epoch:    serverEpoch,
-		DeviceID: deviceID,
-	}
-	recordDecision(d)
-	return d
-}
-
-// OnStatusReport makes a sync decision when a device sends StatusReport.
-// Fixes G5: offline→online path now triggers config re-sync if epoch is behind.
-func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDecision {
-	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
-
-	// Epoch check: if device is behind, push config
-	if rpt.ConfigEpoch < serverEpoch {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     fmt.Sprintf("status_epoch_lag: device=%d server=%d", rpt.ConfigEpoch, serverEpoch),
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		return d
-	}
-
-	d := SyncDecision{
-		Action:   SyncActionNone,
-		Reason:   "status_in_sync",
-		SyncID:   syncID,
-		Epoch:    serverEpoch,
-		DeviceID: deviceID,
-	}
-	recordDecision(d)
-	return d
-}
-
-// OnConfigChange handles a ConfigChangeEvent from the bus.
-// Returns one SyncDecision per affected node device.
-func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
-	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
-
-	// Find the device_id for the affected node
-	var deviceID string
-	if evt.NodeID != "" {
-		deviceID = evt.NodeID
-	}
-	if deviceID == "" {
-		logger.Infof("[sync_id=%s] OnConfigChange: node %s has no device, skip",
-			syncID, evt.NodeID)
-		return nil
-	}
-
-	// For config change events, always push (epoch already incremented by Publish)
-	d := SyncDecision{
-		Action:     SyncActionFull,
-		Reason:     fmt.Sprintf("config_change: type=%s action=%s entity=%d", evt.Type, evt.Action, evt.EntityID),
-		SyncID:     syncID,
-		Epoch:      serverEpoch,
-		ManifestID: g.mgr.BuildManifestID(),
-		DeviceID:   deviceID,
-	}
-	recordDecision(d)
-	return []SyncDecision{d}
-}
-
-// OnServerStartup returns decisions for all online nodes.
-// Fixes G2: server restart no longer loses sync state.
-func (g *SyncGate) OnServerStartup() []SyncDecision {
-	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
-
-	var decisions []SyncDecision
-	onlineDevices := g.mgr.GetOnlineDeviceIDs()
-	for _, deviceID := range onlineDevices {
-		d := SyncDecision{
-			Action:     SyncActionFull,
-			Reason:     "server_startup_push",
-			SyncID:     syncID,
-			Epoch:      serverEpoch,
-			ManifestID: g.mgr.BuildManifestID(),
-			DeviceID:   deviceID,
-		}
-		recordDecision(d)
-		decisions = append(decisions, d)
-	}
-	logger.Infof("[sync_id=%s] OnServerStartup: %d online nodes to push", syncID, len(decisions))
-	return decisions
-}
-
-// OnConfigQuery handles an explicit config query from a device (0x13).
-func (g *SyncGate) OnConfigQuery(deviceID string, q *ConfigQueryMsg) SyncDecision {
-	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
 
 	serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
-
-	// If manifest matches and epoch matches, device is in sync
-	if q.CurrentEpoch >= serverEpoch && q.CurrentManifestID == serverHash.ManifestID {
+	if serverHash.Hash == "" {
 		d := SyncDecision{
 			Action:   SyncActionNone,
-			Reason:   "config_query_in_sync",
+			Reason:   "no_server_config",
 			SyncID:   syncID,
-			Epoch:    serverEpoch,
+			DeviceID: deviceID,
+		}
+		recordDecision(d)
+		return d
+	}
+
+	if deviceHash == serverHash.ManifestID {
+		if deviceChannelCount == 0 && serverHash.ChannelCount > 0 {
+			d := SyncDecision{
+				Action:     SyncActionFull,
+				Reason:     "zero_channels_stale_config",
+				SyncID:     syncID,
+				ManifestID: serverHash.ManifestID,
+				DeviceID:   deviceID,
+			}
+			recordDecision(d)
+			return d
+		}
+		d := SyncDecision{
+			Action:   SyncActionNone,
+			Reason:   "hash_match",
+			SyncID:   syncID,
 			DeviceID: deviceID,
 		}
 		recordDecision(d)
@@ -302,44 +144,88 @@ func (g *SyncGate) OnConfigQuery(deviceID string, q *ConfigQueryMsg) SyncDecisio
 
 	d := SyncDecision{
 		Action:     SyncActionFull,
-		Reason:     fmt.Sprintf("config_query_mismatch: device_epoch=%d server_epoch=%d", q.CurrentEpoch, serverEpoch),
+		Reason:     "hash_mismatch",
 		SyncID:     syncID,
-		Epoch:      serverEpoch,
-		ManifestID: g.mgr.BuildManifestID(),
+		ManifestID: serverHash.ManifestID,
 		DeviceID:   deviceID,
 	}
 	recordDecision(d)
 	return d
 }
 
-	// OnOfflineReconnect handles an offline→online transition for a device.
+// OnHello makes a sync decision when a device sends Hello.
+func (g *SyncGate) OnHello(deviceID string, hello *HelloMsg) SyncDecision {
+	return g.decide(deviceID, hello.LastManifest, !hello.NvsHasConfig, hello.ChannelCount)
+}
+
+// OnStatusReport makes a sync decision when a device sends StatusReport.
+// CRITICAL: old firmware does not send config_hash — must short-circuit to avoid
+// pushing config every 5 seconds (empty string != serverHash is always true).
+func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDecision {
+	if rpt.ConfigHash == "" {
+		d := SyncDecision{
+			Action:   SyncActionNone,
+			Reason:   "no_config_hash_wait_for_hello",
+			SyncID:   uuid.New().String(),
+			DeviceID: deviceID,
+		}
+		recordDecision(d)
+		return d
+	}
+	return g.decide(deviceID, rpt.ConfigHash, false, rpt.ChannelCount)
+}
+
+// OnConfigChange handles a ConfigChangeEvent from the bus.
+// Returns one SyncDecision per affected node device.
+func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
+	syncID := uuid.New().String()
+	serverHash := g.mgr.CalcConfigHashForDevice(evt.NodeID)
+	d := SyncDecision{
+		Action:     SyncActionFull,
+		Reason:     fmt.Sprintf("config_changed: type=%s action=%s", evt.Type, evt.Action),
+		SyncID:     syncID,
+		ManifestID: serverHash.ManifestID,
+		DeviceID:   evt.NodeID,
+	}
+	recordDecision(d)
+	return []SyncDecision{d}
+}
+
+// OnServerStartup returns decisions for all online nodes.
+// v2.2: returns nil — wait for devices to send StatusReport, then decide() auto-judges.
+func (g *SyncGate) OnServerStartup() []SyncDecision {
+	return nil
+}
+
+// OnConfigQuery handles an explicit config query from a device (0x13).
+func (g *SyncGate) OnConfigQuery(deviceID string, q *ConfigQueryMsg) SyncDecision {
+	return g.decide(deviceID, q.CurrentManifestID, false, 0)
+}
+
+// OnOfflineReconnect handles an offline→online transition for a device.
 func (g *SyncGate) OnOfflineReconnect(deviceID string) SyncDecision {
 	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
-
+	serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
 	d := SyncDecision{
 		Action:     SyncActionFull,
-		Reason:     "offline_reconnect_push",
+		Reason:     "offline_reconnect",
 		SyncID:     syncID,
-		Epoch:      serverEpoch,
-		ManifestID: g.mgr.BuildManifestID(),
+		ManifestID: serverHash.ManifestID,
 		DeviceID:   deviceID,
 	}
 	recordDecision(d)
 	return d
 }
 
-	// OnFactoryReset handles a factory reset event for a device.
+// OnFactoryReset handles a factory reset event for a device.
 func (g *SyncGate) OnFactoryReset(deviceID string) SyncDecision {
 	syncID := uuid.New().String()
-	serverEpoch := g.eventBus.CurrentEpoch()
-
+	serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
 	d := SyncDecision{
 		Action:     SyncActionFull,
-		Reason:     "factory_reset_force_sync",
+		Reason:     "factory_reset",
 		SyncID:     syncID,
-		Epoch:      serverEpoch,
-		ManifestID: g.mgr.BuildManifestID(),
+		ManifestID: serverHash.ManifestID,
 		DeviceID:   deviceID,
 	}
 	recordDecision(d)

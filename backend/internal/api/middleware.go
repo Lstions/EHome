@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"ehome/backend/pkg/logger"
-
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -19,7 +17,6 @@ var jwtSecret = []byte(func() string {
 	if s := os.Getenv("EHOME_JWT_SECRET"); s != "" {
 		return s
 	}
-	logger.Warnf("⚠️  EHOME_JWT_SECRET not set — using insecure default secret. DO NOT use in production!")
 	return "ehome-dev-secret-change-me"
 }())
 

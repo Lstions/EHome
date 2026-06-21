@@ -26,6 +26,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	// v2.1 new fields
 	var configEpoch uint64
 	var syncStateVarint uint64
+	var configHash string // v2.2: config_hash from device
 
 	for {
 		field, err := dec.NextField()
@@ -43,6 +44,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 			configEpoch = frame.GetUint64(field)
 		case 5: // v2.1: sync_state (varint enum from ESP32: 0=idle,1=syncing,2=error)
 			syncStateVarint = frame.GetUint64(field)
+		case 6: // v2.2: config_hash
+			configHash = frame.GetString(field)
 		}
 	}
 
@@ -101,6 +104,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		ChannelCount: channelCount,
 		ConfigEpoch:  configEpoch,
 		SyncState:    syncState,
+		ConfigHash:   configHash,
 	}
 
 	decision := m.syncGate.OnStatusReport(deviceID, rpt)

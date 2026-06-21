@@ -150,8 +150,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	enc := frame.NewEncoder(frame.MsgConfigMfst)
 	enc.EncodeString(1, manifestID)
 
-	// v2.1: field 2 = config_epoch
-	enc.EncodeVarint(2, decision.Epoch)
+	// v2.2: field 2 epoch removed, field 9 sync_reason removed
 
 	// Encode templates (field 3, repeated sub-structure)
 	for _, tmpl := range templates {
@@ -269,16 +268,15 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		enc.EncodeSubFrame(5, subEnc.Bytes())
 	}
 
-	// v2.1: field 8 = sync_id, field 9 = sync_reason
+	// v2.2: field 8 = sync_id (field 9 sync_reason removed)
 	enc.EncodeString(8, decision.SyncID)
-	enc.EncodeString(9, string(decision.Reason))
 
 	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 	} else {
-		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s epoch=%d reason=%s %d templates, %d channels",
-			decision.SyncID, deviceID, manifestID, decision.Epoch, decision.Reason, len(templates), len(channels))
+		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s reason=%s %d templates, %d channels",
+			decision.SyncID, deviceID, manifestID, decision.Reason, len(templates), len(channels))
 
 		// Update DB with new manifest ID and mark as syncing
 		now := time.Now()
@@ -288,6 +286,5 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			"last_sync_at":      now,
 			"last_sync_id":      decision.SyncID,
 		})
-		m.hashMgr.UpdateLastSent(deviceID)
 	}
 }

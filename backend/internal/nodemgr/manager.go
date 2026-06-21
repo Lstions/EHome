@@ -1,10 +1,10 @@
 package nodemgr
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
@@ -64,12 +64,8 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	mgr.pingTracker = NewPingTracker()
 
-	// v2.1: Initialize sync mechanism
-	epochGen := NewEpochGenerator(db)
-	if err := epochGen.Restore(); err != nil {
-		logger.Warnf("EpochGenerator restore failed: %v (will use time-based seed)", err)
-	}
-	mgr.eventBus = NewConfigEventBus(1024, epochGen)
+	// v2.2: Initialize sync mechanism (no epoch generator)
+	mgr.eventBus = NewConfigEventBus(1024)
 	mgr.syncGate = NewSyncGate(mgr, mgr.eventBus)
 
 	// G10: Record initial node online count
@@ -181,14 +177,24 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 
 // === Helpers ===
 
-// buildHashData serializes templates + channels into bytes for hash calculation
-func (m *Manager) buildHashData(templates []models.ConfigTemplate, channels []models.Channel) []byte {
+// buildHashData serializes templates + channels + dmaConfigs into bytes for hash calculation
+func (m *Manager) buildHashData(
+	templates []models.ConfigTemplate,
+	channels []models.Channel,
+	dmaConfigs []models.DmaChannelConfig,
+) []byte {
 	var buf []byte
 	for _, t := range templates {
-		buf = append(buf, []byte(fmt.Sprintf("t:%d:%s:%d:%d:", t.ID, t.WriteData, t.ReadLength, t.DelayMs))...)
+		buf = append(buf, []byte(fmt.Sprintf("t:%d:%s:%d:%d:",
+			t.ID, t.WriteData, t.ReadLength, t.DelayMs))...)
 	}
 	for _, c := range channels {
-		buf = append(buf, []byte(fmt.Sprintf("c:%d:%s:%s:%d:%v:%s:", c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
+		buf = append(buf, []byte(fmt.Sprintf("c:%d:%s:%s:%d:%v:%s:",
+			c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
+	}
+	for _, d := range dmaConfigs {
+		buf = append(buf, []byte(fmt.Sprintf("d:%d:%v:%s:",
+			d.DmaID, d.Enabled, d.BindTo))...)
 	}
 	return buf
 }
@@ -222,11 +228,6 @@ func (m *Manager) SyncGate() *SyncGate {
 	return m.syncGate
 }
 
-// BuildManifestID generates a new manifest ID for config sync.
-func (m *Manager) BuildManifestID() string {
-	return fmt.Sprintf("v2-%d", time.Now().UnixMilli())
-}
-
 // ConfigHashResult holds the result of a config hash calculation.
 type ConfigHashResult struct {
 	Hash         string
@@ -246,14 +247,28 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	var channels []models.Channel
 	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
 
-	hashData := m.buildHashData(templates, channels)
-	hash := m.hashMgr.CalcConfigHash(hashData, nil)
-	manifestID := node.ConfigVersion
-	if manifestID == "" {
-		manifestID = "none"
+	// 从 node.Config JSON 解析 DMA configs
+	var dmaConfigs []models.DmaChannelConfig
+	if node.Config != "" {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal([]byte(node.Config), &cfg); err == nil {
+			if dc, ok := cfg["dma_configs"]; ok {
+				if dcJSON, err := json.Marshal(dc); err == nil {
+					json.Unmarshal(dcJSON, &dmaConfigs)
+				}
+			}
+		}
 	}
 
-	return ConfigHashResult{Hash: hash, ManifestID: manifestID, ChannelCount: len(channels)}
+	hashData := m.buildHashData(templates, channels, dmaConfigs)
+	hash := m.hashMgr.CalcConfigHash(hashData)
+	manifestID := fmt.Sprintf("v2-%s", hash)
+
+	return ConfigHashResult{
+		Hash:         hash,
+		ManifestID:   manifestID,
+		ChannelCount: len(channels),
+	}
 }
 
 // GetDeviceIDByNodeID resolves a node DB ID to its node_id string.
