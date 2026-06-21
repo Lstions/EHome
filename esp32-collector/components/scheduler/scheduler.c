@@ -1,11 +1,15 @@
 /**
  * @file scheduler.c
- * @brief Channel Scheduler v3.0 — pure timer, all buses via unified command queue
+ * @brief Channel Scheduler v3.1 — pure timer, all buses via unified command queue
  *
  * Every channel (UART / I2C / SPI) is sampled by posting a CMD_SAMPLE
  * descriptor to the injected command queue.  A single bus-worker task drains the queue
  * and performs the actual bus transactions, eliminating per-bus special
  * cases and the race-prone vTaskDelete in scheduler_stop.
+ *
+ * v2.3: channels with edge_devices use a three-level loop
+ *       (channel → edge_device → command) with independent per-command timing.
+ *       Channels without edge_devices fall back to the legacy template_ids[0] path.
  */
 
 #include "scheduler.h"
@@ -20,16 +24,7 @@
 
 #define TAG "SCHEDULER"
 
-/* ── per-channel state ───────────────────────────────────────────── */
-typedef struct {
-    config_channel_t config;
-    uint32_t         last_sequence;
-    TickType_t       last_sample_time;
-    bool             active;
-    uint32_t         error_count;      /* Track errors for backoff */
-    uint32_t         skip_count;       /* Count skipped samples */
-} sched_channel_t;
-
+/* ── per-channel state (struct definition now in scheduler.h) ──── */
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
 static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
@@ -105,6 +100,37 @@ sched_err_t scheduler_add_channel(const config_channel_t *ch)
     s_channels[slot].last_sequence    = 0;
     s_channels[slot].last_sample_time = 0;
     s_channels[slot].active           = true;
+    s_channels[slot].error_count      = 0;
+    s_channels[slot].skip_count       = 0;
+
+    /* v2.3: initialise edge_device + command scheduler state */
+    s_channels[slot].edge_device_count = 0;
+    if (ch->edge_device_count > 0) {
+        uint8_t count = ch->edge_device_count;
+        if (count > MAX_EDGE_DEVICES_PER_CH)
+            count = MAX_EDGE_DEVICES_PER_CH;
+        s_channels[slot].edge_device_count = count;
+
+        for (int ed = 0; ed < count; ed++) {
+            const config_edge_device_t *src = &ch->edge_devices[ed];
+            sched_edge_device_t *dst = &s_channels[slot].edge_devices[ed];
+            dst->edge_device_id = src->edge_device_id;
+            dst->hardware_id    = src->hardware_id;
+            dst->command_count  = 0;
+
+            uint8_t cmd_count = src->command_count;
+            if (cmd_count > MAX_COMMANDS_PER_DEVICE)
+                cmd_count = MAX_COMMANDS_PER_DEVICE;
+            dst->command_count = cmd_count;
+
+            for (int ci = 0; ci < cmd_count; ci++) {
+                dst->commands[ci].template_id  = src->commands[ci].template_id;
+                dst->commands[ci].interval_ms  = src->commands[ci].interval_ms;
+                dst->commands[ci].enabled      = src->commands[ci].enabled;
+                dst->commands[ci].last_run_ms  = 0;
+            }
+        }
+    }
 
     return SCHED_OK;
 }
@@ -180,64 +206,117 @@ static void scheduler_task(void *p)
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
             if (!s_channels[i].active || !s_channels[i].config.enabled)
                 continue;
-            if (now - s_channels[i].last_sample_time <
-                pdMS_TO_TICKS(s_channels[i].config.interval_ms))
-                continue;
 
-            /* Adaptive backoff: if channel has errors, skip some samples */
-            if (s_channels[i].error_count > 3) {
-                s_channels[i].skip_count++;
-                /* Exponential backoff: skip 2^min(error_count, 5) samples */
-                uint32_t skip_threshold = (s_channels[i].error_count > 5) ? 32 : 
-                                          (1 << (s_channels[i].error_count - 3));
-                if (s_channels[i].skip_count < skip_threshold) {
-                    continue;
-                }
-                s_channels[i].skip_count = 0;
-            }
+            sched_channel_t *ch = &s_channels[i];
 
-            s_channels[i].last_sample_time = now;
+            /* Decide v2 (edge_device) vs v1 (legacy template) path */
+            bool use_v2 = (ch->edge_device_count > 0);
 
-            /* Backpressure: skip if queue is nearly full */
-            if (queue_pressure) {
-                queue_full_count++;
-                continue;
-            }
+            if (use_v2) {
+                /* ── v2.3: three-level loop, independent per-command timing ── */
+                for (int ed = 0; ed < ch->edge_device_count; ed++) {
+                    sched_edge_device_t *dev = &ch->edge_devices[ed];
+                    for (int ci = 0; ci < dev->command_count; ci++) {
+                        sched_command_t *scmd = &dev->commands[ci];
+                        if (!scmd->enabled) continue;
 
-            /* Build a unified bus command for any bus type.
-             * Only channels with templates need active TX (e.g. Modbus polling).
-             * Channels without templates (e.g. GPS NMEA) are passive —
-             * rx_task handles them. */
-            bus_cmd_t cmd = {
-                .channel_id = s_channels[i].config.id,
-                .bus_type   = s_channels[i].config.bus_type,
-                .tx_len     = 0,
-                .delay_ms   = 0,
-                .type       = CMD_SAMPLE,
-            };
+                        /* Independent timing check */
+                        if (now - scmd->last_run_ms < pdMS_TO_TICKS(scmd->interval_ms))
+                            continue;
 
-            /* If the channel references a template, copy its TX payload and delay. */
-            if (s_channels[i].config.template_count > 0) {
-                const config_template_t *t =
-                    config_mgr_get_template(s_channels[i].config.template_ids[0]);
-                if (t && t->write_data_len > 0) {
-                    cmd.tx_len = t->write_data_len < CMD_TX_MAX
-                                     ? t->write_data_len : CMD_TX_MAX;
-                    memcpy(cmd.tx_data, t->write_data, cmd.tx_len);
-                    if (t->delay_ms > 0) {
-                        cmd.delay_ms = t->delay_ms;
+                        scmd->last_run_ms = now;
+
+                        /* Backpressure: skip if queue is nearly full */
+                        if (queue_pressure) {
+                            queue_full_count++;
+                            continue;
+                        }
+
+                        /* Look up template for this command */
+                        const config_template_t *t =
+                            config_mgr_get_template(scmd->template_id);
+                        if (!t || t->write_data_len == 0) continue;
+
+                        /* Build bus_cmd_t */
+                        bus_cmd_t bcmd = {
+                            .channel_id = ch->config.id,
+                            .bus_type   = ch->config.bus_type,
+                            .tx_len     = t->write_data_len < CMD_TX_MAX
+                                              ? t->write_data_len : CMD_TX_MAX,
+                            .delay_ms   = t->delay_ms > 0 ? t->delay_ms : 0,
+                            .type       = CMD_SAMPLE,
+                        };
+                        memcpy(bcmd.tx_data, t->write_data, bcmd.tx_len);
+
+                        if (xQueueSend(s_cmd_queue, &bcmd, 0) != pdTRUE) {
+                            queue_full_count++;
+                        } else {
+                            total_samples++;
+                        }
                     }
                 }
             } else {
-                /* No template — skip this channel.  rx_task handles passive
-                 * UART RX; SPI/I2C without a template have nothing to do. */
-                continue;
-            }
+                /* ── v1: legacy template_ids[0] path (unchanged) ── */
 
-            if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
-                queue_full_count++;
-            } else {
-                total_samples++;
+                if (now - ch->last_sample_time <
+                    pdMS_TO_TICKS(ch->config.interval_ms))
+                    continue;
+
+                /* Adaptive backoff: if channel has errors, skip some samples */
+                if (ch->error_count > 3) {
+                    ch->skip_count++;
+                    /* Exponential backoff: skip 2^min(error_count, 5) samples */
+                    uint32_t skip_threshold = (ch->error_count > 5) ? 32 :
+                                              (1 << (ch->error_count - 3));
+                    if (ch->skip_count < skip_threshold) {
+                        continue;
+                    }
+                    ch->skip_count = 0;
+                }
+
+                ch->last_sample_time = now;
+
+                /* Backpressure: skip if queue is nearly full */
+                if (queue_pressure) {
+                    queue_full_count++;
+                    continue;
+                }
+
+                /* Build a unified bus command for any bus type.
+                 * Only channels with templates need active TX (e.g. Modbus polling).
+                 * Channels without templates (e.g. GPS NMEA) are passive —
+                 * rx_task handles them. */
+                bus_cmd_t cmd = {
+                    .channel_id = ch->config.id,
+                    .bus_type   = ch->config.bus_type,
+                    .tx_len     = 0,
+                    .delay_ms   = 0,
+                    .type       = CMD_SAMPLE,
+                };
+
+                /* If the channel references a template, copy its TX payload and delay. */
+                if (ch->config.template_count > 0) {
+                    const config_template_t *t =
+                        config_mgr_get_template(ch->config.template_ids[0]);
+                    if (t && t->write_data_len > 0) {
+                        cmd.tx_len = t->write_data_len < CMD_TX_MAX
+                                         ? t->write_data_len : CMD_TX_MAX;
+                        memcpy(cmd.tx_data, t->write_data, cmd.tx_len);
+                        if (t->delay_ms > 0) {
+                            cmd.delay_ms = t->delay_ms;
+                        }
+                    }
+                } else {
+                    /* No template — skip this channel.  rx_task handles passive
+                     * UART RX; SPI/I2C without a template have nothing to do. */
+                    continue;
+                }
+
+                if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+                    queue_full_count++;
+                } else {
+                    total_samples++;
+                }
             }
         }
 
