@@ -84,7 +84,7 @@ function mapStatus(rawStatus?: string): DeviceStatus {
 const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   id: d.id,
   node_id: d.node_id ?? 0,
-  node: d.node && d.node.name ? { id: d.node.id ?? d.node_id, name: d.node.name } : undefined,
+  node: d.node && d.node.name ? { id: (d.node.id ?? d.node_id ?? 0) as string | number, name: d.node.name } : undefined,
   name: d.name || '',
   device_type: d.type || d.device_type || '',
   protocol: d.protocol || d.device_config?.protocol || '',
