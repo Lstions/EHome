@@ -198,9 +198,34 @@ void bus_manager_setup_from_manifest(app_state_t *s)
     if (!m || !m->applied) return;
     for (int i = 0; i < m->channel_count; i++) {
         if (!m->channels[i].enabled) continue;
-        reg_bus_channel(s, m->channels[i].id, m->channels[i].bus_type,
-                        m->channels[i].bus_config, m->channels[i].bus_config_len);
+        bus_manager_reg_channel(s, &m->channels[i]);
     }
+}
+
+/* v2.4: Incremental single-channel register */
+void bus_manager_reg_channel(app_state_t *s, const config_channel_t *ch)
+{
+    reg_bus_channel(s, ch->id, ch->bus_type,
+                    ch->bus_config, ch->bus_config_len);
+}
+
+/* v2.4: Incremental single-channel unregister */
+void bus_manager_unreg_channel(app_state_t *s, uint32_t channel_id)
+{
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s->bus_ch[i] == channel_id && s->bus_ctx[i].initialized) {
+            /* Release DMA using saved hw_id */
+            if (s->dma_pool && s->bus_hw_id[i][0] != '\0') {
+                dma_pool_release_by_hw(s->dma_pool, s->bus_hw_id[i]);
+            }
+            bus_dma_deinit(&s->bus_ctx[i]);
+            s->bus_ch[i] = 0;
+            s->bus_hw_id[i][0] = '\0';
+            ESP_LOGI(TAG, "Unregistered ch=%lu", (unsigned long)channel_id);
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "Unregister ch=%lu: not found", (unsigned long)channel_id);
 }
 
 bus_dma_ctx_t *bus_manager_find_ctx(app_state_t *s, uint32_t channel_id)

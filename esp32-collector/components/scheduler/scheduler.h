@@ -78,6 +78,9 @@ void scheduler_start(QueueHandle_t cmd_queue);
 void scheduler_stop(void);
 sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);
+sched_err_t scheduler_update_channel(const config_channel_t *channel);  /* v2.4: in-place update */
+void scheduler_pause(void);   /* v2.4: pause task loop, preserve channel state */
+void scheduler_resume(QueueHandle_t cmd_queue);  /* v2.4: resume after pause */
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
 

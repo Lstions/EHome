@@ -542,12 +542,60 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		sort.Slice(merged, func(i, j int) bool { return merged[i].DmaID < merged[j].DmaID })
 
 		cfg["dma_configs"] = merged
-		cfgJSON, _ := json.Marshal(cfg)
+		cfgJSON, err := json.Marshal(cfg)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to marshal config"})
+			return
+		}
 		if err := tx.Model(&node).Update("config", string(cfgJSON)).Error; err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
+
+		// v2.5: Immediately update DmaChannels JSONB so GET /dma-channels
+		// returns the correct state without waiting for next ResourceReport.
+		var devChannels []models.DmaChannelInfo
+		if node.DmaChannels != "" && node.DmaChannels != "[]" {
+			json.Unmarshal([]byte(node.DmaChannels), &devChannels)
+		}
+		for _, nc := range configs {
+			found := false
+			for j := range devChannels {
+				if devChannels[j].DmaID == nc.DmaID {
+					devChannels[j].BoundTo = nc.BindTo
+					if nc.Enabled {
+						devChannels[j].State = 1 // allocated
+					} else {
+						devChannels[j].State = 2 // disabled
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				state := uint8(2)
+				if nc.Enabled { state = 1 }
+				devChannels = append(devChannels, models.DmaChannelInfo{
+					DmaID:   nc.DmaID,
+					State:   state,
+					BoundTo: nc.BindTo,
+				})
+			}
+		}
+		dmaJSON, err := json.Marshal(devChannels)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to marshal dma_channels"})
+			return
+		}
+		if err := tx.Model(&node).Update("dma_channels", string(dmaJSON)).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+
 		tx.Commit()
 
 		// Trigger config sync to push updated manifest to device

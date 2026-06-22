@@ -177,10 +177,13 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 
 // === Helpers ===
 
-// buildHashData serializes templates + channels + dmaConfigs into bytes for hash calculation
+// buildHashData serializes templates + channels + edge_devices + dmaConfigs into bytes for hash calculation.
+// v2.4: added edge_devices — previously missing, causing hash to not change when edge_device
+// config (hardware_id, interval_ms, enabled) was modified. Device would receive stale config after reboot.
 func (m *Manager) buildHashData(
 	templates []models.ConfigTemplate,
 	channels []models.Channel,
+	edgeDevices []models.EdgeDevice,
 	dmaConfigs []models.DmaChannelConfig,
 ) []byte {
 	var buf []byte
@@ -191,6 +194,10 @@ func (m *Manager) buildHashData(
 	for _, c := range channels {
 		buf = append(buf, []byte(fmt.Sprintf("c:%d:%s:%s:%d:%v:%s:",
 			c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
+	}
+	for _, ed := range edgeDevices {
+		buf = append(buf, []byte(fmt.Sprintf("e:%d:%s:%d:%v:",
+			ed.ID, ed.HardwareID, ed.IntervalMs, ed.Enabled))...)
 	}
 	for _, d := range dmaConfigs {
 		buf = append(buf, []byte(fmt.Sprintf("d:%d:%v:%s:",
@@ -260,7 +267,11 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 		}
 	}
 
-	hashData := m.buildHashData(templates, channels, dmaConfigs)
+	// v2.4: query edge_devices for hash calculation
+	var edgeDevices []models.EdgeDevice
+	m.db.Where("node_id = ? AND enabled = true", node.NodeID).Find(&edgeDevices)
+
+	hashData := m.buildHashData(templates, channels, edgeDevices, dmaConfigs)
 	hash := m.hashMgr.CalcConfigHash(hashData)
 	manifestID := fmt.Sprintf("v2-%s", hash)
 

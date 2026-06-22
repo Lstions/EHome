@@ -122,8 +122,20 @@ func (g *SyncGate) decide(deviceID string, deviceHash string, nvsEmpty bool,
 
 	if deviceHash == serverHash.ManifestID {
 		// hash 匹配 = 设备已持有正确配置。
-		// channel_count 差异是设备内部时序问题（scheduler 启动窗口期），
-		// 设备自行消化，后端不干预。
+		// 但 channel_count=0 且 nvs_has=1 表示设备 in-memory 配置为空
+		// （重启后 NVS 有旧 manifest_id 但 config_mgr 未加载），
+		// 必须强制推送让设备重建配置。
+		if deviceChannelCount == 0 && !nvsEmpty && serverHash.ChannelCount > 0 {
+			d := SyncDecision{
+				Action:     SyncActionFull,
+				Reason:     "force_push:hash_match_but_zero_channels",
+				SyncID:     syncID,
+				ManifestID: serverHash.ManifestID,
+				DeviceID:   deviceID,
+			}
+			recordDecision(d)
+			return d
+		}
 		d := SyncDecision{
 			Action:   SyncActionNone,
 			Reason:   "hash_match",

@@ -148,10 +148,9 @@ void msg_handler_process(const uint8_t *data, size_t len)
 
     switch (msg_type) {
     case MSG_CONFIG_MFST:
-        /* ConfigManifest needs raw data for config_mgr_apply_manifest */
-        config_mgr_apply_manifest(data, len);
-        /* Re-init decoder since apply_manifest consumed the frame */
-        frame_decoder_init(&dec, data, len);
+        /* v2.4: config_mgr_apply_manifest moved to handle_config_applied
+         * inside app_state_lock_config() — prevents TOCTOU race between
+         * manifest parse (clear+rebuild) and concurrent StatusReport reads. */
         handler_config_process_manifest(&dec);
         break;
 

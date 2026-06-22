@@ -72,9 +72,9 @@
                             <el-switch
                               v-for="dma in getDmaForHardware(busType, hw)"
                               :key="dma.dma_id"
-                              :model-value="getDmaSwitchModel(busType, hw, dma)"
+                              :model-value="dmaStore.isSwitchOn(dma) && isDmaBoundTo(dma, busType, hw)"
                               :disabled="!canToggleDma(dma, busType, hw)"
-                              :loading="dmaToggling[dma.dma_id] || false"
+                              :loading="dmaStore.toggling[dma.dma_id] || false"
                               @change="(val: boolean) => toggleDmaForHardware(busType, hw, dma, val)"
                               size="small"
                               :active-text="dma.name"
@@ -208,6 +208,7 @@ import { channelApi } from '@/api/channel'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
 import { logger } from '@/utils/logger'
+import { useDmaStore } from '@/stores/dma'
 import type { DmaChannelInfo } from '@/api/node'
 
 interface Props {
@@ -218,6 +219,7 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+const dmaStore = useDmaStore()
 
 const activeTab = ref('channels')
 const initialLoadingDone = ref(false)
@@ -416,8 +418,9 @@ const refreshBuses = async () => {
           // 从实际 DMA 状态初始化 _dmaEnabled/_dmaId（而非硬编码 false）
           let dmaEnabled = false
           let dmaId: number | null = null
-          if (props.dmaChannels) {
-            for (const dma of props.dmaChannels) {
+          const dmaList = dmaStore.mergedChannels
+          if (dmaList && dmaList.length > 0) {
+            for (const dma of dmaList) {
               if (dma.bound_to && dma.state === 1) {  // state=1 = allocated
                 // bound_to format: "UART_CH39" or "busType/hwId"
                 const boundStr = typeof dma.bound_to === 'string' ? dma.bound_to : ''
@@ -481,8 +484,8 @@ const refreshBuses = async () => {
     if (initialLoadingDone.value) {
       ElMessage.success('配置已刷新')
     }
-    // refreshBuses 完成后清除所有 DMA override，让 UI 回归真实状态
-    dmaOverrideMap.value = {}
+    // refreshBuses 完成后刷新 DMA store 数据，让 UI 回归真实状态
+    dmaStore.fetch(props.collectorId)
   } catch (error: any) {
     logger.error('获取配置失败', { error: String(error) })
     if (initialLoadingDone.value) {
@@ -699,11 +702,11 @@ const getHardwareInfo = (hw: any) => {
 }
 
 // ============================================================
-// DMA 开关逻辑
+// DMA 开关逻辑 — 统一由 dmaStore 管理
 // ============================================================
 
 const supportsDma = (busType: string): boolean => {
-  if (!props.dmaChannels || props.dmaChannels.length === 0) return false
+  if (dmaStore.mergedChannels.length === 0) return false
   return ['uart', 'spi', 'i2c'].includes(busType)
 }
 
@@ -716,16 +719,19 @@ const busTypeToMask = (busType: string): number => {
   }
 }
 
-const getDmaForHardware = (busType: string, hw: any): DmaChannelInfo[] => {
-  if (!props.dmaChannels) return []
+const getDmaForHardware = (busType: string, _hw: any): DmaChannelInfo[] => {
+  const src = dmaStore.mergedChannels
+  if (!src || src.length === 0) return []
   const busMask = busTypeToMask(busType)
-  return props.dmaChannels.filter(dma => (dma.compatible_bus & busMask) !== 0)
+  return src.filter(dma => (dma.compatible_bus & busMask) !== 0)
 }
 
-/** Check if a DMA channel is bound to this specific hardware resource */
+/** Check if a DMA channel is bound to this specific hardware resource.
+ * v2.5: bind state determined by bound_to string, NOT by dma.state.
+ * bound_to is the canonical binding reference — if it names this hardware,
+ * the toggle should reflect ON regardless of state. */
 const isDmaBoundTo = (dma: DmaChannelInfo, busType: string, hw: any): boolean => {
-  if (dma.state === 2) return false  // disabled = OFF
-  if (dma.state !== 1 || !dma.bound_to) return false  // not allocated = OFF
+  if (!dma.bound_to) return false
   return isBoundToHardware(dma.bound_to, busType, hw.id)
 }
 
@@ -738,49 +744,32 @@ const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean =>
   if (!props.collectorStatus || props.collectorStatus !== 'online') return false
   // Already bound to this hardware — can toggle OFF
   if (isDmaBoundTo(dma, busType, hw)) return true
-  // Free channel — can toggle ON
-  if (dma.state === 0) return true
+  // Free channel OR disabled channel — can toggle ON
+  if (dma.state === 0 || dma.state === 2) {
+    // v2.5: mutual exclusion — only one DMA per hardware.
+    // If another DMA is already bound to this same hw, block.
+    const hwKey = `${busType.toLowerCase()}/${hw.id}`
+    const allDmas = dmaStore.mergedChannels
+    for (const other of allDmas) {
+      if (other.dma_id === dma.dma_id) continue
+      if (other.bound_to && other.bound_to.toLowerCase() === hwKey) {
+        return false  // another DMA already owns this hardware
+      }
+    }
+    return true
+  }
   // Allocated to another hardware — cannot toggle
   return false
 }
 
-// DMA 开关 loading 状态（按 dma_id 跟踪）
-const dmaToggling = ref<Record<number, boolean>>({})
-
-// DMA 开关乐观更新覆盖层（key格式: `${busType}/${hw.id}/${dma.dma_id}`）
-const dmaOverrideMap = ref<Record<string, boolean>>({})
-
-const getDmaSwitchModel = (busType: string, hw: any, dma: DmaChannelInfo): boolean => {
-  const key = `${busType}/${hw.id}/${dma.dma_id}`
-  if (key in dmaOverrideMap.value) {
-    return dmaOverrideMap.value[key]
-  }
-  return isDmaBoundTo(dma, busType, hw)
-}
-
 const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInfo, enabled: boolean) => {
-  const overrideKey = `${busType}/${hw.id}/${dma.dma_id}`
-  // 乐观更新：立即设置 override 为目标值
-  dmaOverrideMap.value[overrideKey] = enabled
-  dmaToggling.value[dma.dma_id] = true
+  // Standardize bind_to format: bus_type/hw_id (e.g. "uart/UART1", "spi/SPI2")
+  const bindTo = enabled ? `${busType.toLowerCase()}/${hw.id}` : ''
   try {
-    // Standardize bind_to format: bus_type/hw_id (e.g. "uart/UART1", "spi/SPI2")
-    const bindTo = enabled ? `${busType.toLowerCase()}/${hw.id}` : ''
-    await nodeApi.updateDmaConfig(props.collectorId, [{
-      dma_id: dma.dma_id,
-      enabled: enabled,
-      bind_to: bindTo
-    }])
-    // API成功后刷新总线配置以同步硬件绑定状态
-    await refreshBuses()
-    // refreshBuses 完成后会清除所有 override
+    await dmaStore.toggle(props.collectorId, dma, enabled, bindTo)
     ElMessage.success(enabled ? `DMA ${dma.name} 已启用` : `DMA ${dma.name} 已禁用`)
   } catch (error: any) {
-    // API 失败则回滚：删除 override，恢复为 isDmaBoundTo 的真实值
-    delete dmaOverrideMap.value[overrideKey]
     ElMessage.error('DMA配置保存失败: ' + (error.message || '未知错误'))
-  } finally {
-    dmaToggling.value[dma.dma_id] = false
   }
 }
 

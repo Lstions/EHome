@@ -27,38 +27,12 @@ extern dma_pool_t *msg_handler_get_dma_pool(void);
 
 void handler_config_process_manifest(frame_decoder_t *dec)
 {
-    char manifest_id[64] = {0};
-    uint64_t server_epoch = 0;
-    frame_err_t err;
-    frame_field_t field;
-    while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
-        if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED) {
-            if (field.value.bytes.ptr) {
-                size_t copy_len = field.value.bytes.len < sizeof(manifest_id) - 1
-                                ? field.value.bytes.len : sizeof(manifest_id) - 1;
-                memcpy(manifest_id, field.value.bytes.ptr, copy_len);
-                manifest_id[copy_len] = '\0';
-            }
-        }
-        if (field.field_num == 2 && field.wire_type == WIRE_VARINT) {
-            server_epoch = field.value.varint;
-        }
-    }
-    ESP_LOGI(TAG, "ConfigManifest: manifest_id=%s, epoch=%llu",
-             manifest_id, (unsigned long long)server_epoch);
-
-    /* We need the raw frame data for config_mgr_apply_manifest.
-     * The decoder was initialized from it, so we reconstruct from decoder state. */
-    /* Actually, config_mgr_apply_manifest needs the original data+len.
-     * We'll pass it through the dispatch layer instead. */
-    /* NOTE: The dispatch in msg_handler_process passes raw data for this case. */
-
-    /* This function is called AFTER config_mgr_apply_manifest in the dispatcher.
-     * Here we just handle the protocol-level response and sync notifications. */
-    msg_handler_send_config_result(manifest_id, true);
-    sync_manager_on_config_applied(server_epoch, manifest_id);
-    sync_manager_cancel_config_timeout();
-    sync_manager_on_downlink_received(MSG_CONFIG_MFST);
+    /* v2.4: ConfigManifest application moved to handle_config_applied
+     * (app_callbacks.c) inside app_state_lock_config().
+     * This function is now a no-op — msg_handler_process still dispatches
+     * MSG_CONFIG_MFST here for protocol routing, but the actual manifest
+     * parse, ConfigResult, and bus rebuild all happen in handle_config_applied. */
+    (void)dec;
 }
 
 /* === Receive: ConfigQuery (0x10) === */

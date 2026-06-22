@@ -336,12 +336,14 @@ import { nodeApi, type OTARecord, type DmaChannelInfo } from '@/api/node'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { useDmaStore } from '@/stores/dma'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 
 const router = useRouter()
 const route = useRoute()
 const wsStore = useWebSocketStore()
+const dmaStore = useDmaStore()
 
 const collector = ref<any>(null)
 const devices = ref<any[]>([])
@@ -357,10 +359,10 @@ const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
 const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 
-// DMA 通道
-const dmaChannels = ref<DmaChannelInfo[]>([])
-const dmaLoading = ref(false)
-const dmaOverrideStateMap = ref<Record<number, number>>({})
+// DMA 通道 — v2.5: 统一由 dmaStore 管理
+const dmaChannels = computed(() => dmaStore.mergedChannels)
+const dmaLoading = computed(() => dmaStore.loading)
+const dmaTogglingMap = computed(() => dmaStore.toggling)
 
 let unsubscribe: (() => void) | null = null
 
@@ -671,50 +673,19 @@ const busText = (bus: number): string => {
 }
 
 const getDmaSwitchState = (dma: DmaChannelInfo): boolean => {
-  const override = dmaOverrideStateMap.value[dma.dma_id]
-  if (override !== undefined) {
-    return override !== 2
-  }
-  return dma.state !== 2
+  return dmaStore.isSwitchOn(dma)
 }
 
 const loadDmaChannels = async () => {
-  const id = collectorId.value
-  if (!id) return
-  dmaLoading.value = true
-  try {
-    dmaChannels.value = await nodeApi.getDmaChannels(id)
-    dmaOverrideStateMap.value = {}
-  } catch (error: any) {
-    logger.error('获取 DMA 通道失败', { error: String(error) })
-  } finally {
-    dmaLoading.value = false
-  }
+  await dmaStore.fetch(collectorId.value)
 }
 
-// DMA 开关 loading 状态（按 dma_id 跟踪）
-const dmaTogglingMap = ref<Record<number, boolean>>({})
-
 const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
-  // 乐观更新：先设置 override 状态
-  const targetState = enabled ? 0 : 2
-  dmaOverrideStateMap.value[dma.dma_id] = targetState
-
-  dmaTogglingMap.value[dma.dma_id] = true
   try {
-    await nodeApi.updateDmaConfig(collectorId.value, [{
-      dma_id: dma.dma_id,
-      enabled: enabled,
-      bind_to: enabled ? dma.bound_to : ''
-    }])
-    await loadDmaChannels()
+    await dmaStore.toggle(collectorId.value, dma, enabled)
     ElMessage.success(enabled ? `已启用 ${dma.name}` : `已禁用 ${dma.name}`)
   } catch (error: any) {
-    // 失败回滚 override
-    delete dmaOverrideStateMap.value[dma.dma_id]
     ElMessage.error('操作失败: ' + (error.message || '未知错误'))
-  } finally {
-    dmaTogglingMap.value[dma.dma_id] = false
   }
 }
 

@@ -83,6 +83,37 @@ void scheduler_stop(void)
     }
 }
 
+/* v2.4: Lightweight pause — stops the task loop but preserves channel state.
+ * Unlike scheduler_stop(), this does NOT clear s_channels[].active.
+ * Caller must call scheduler_resume() to restart the task. */
+void scheduler_pause(void)
+{
+    s_running = false;
+    if (s_task_handle) {
+        for (int i = 0; i < 100 && eTaskGetState(s_task_handle) != eDeleted; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        s_task_handle = NULL;
+    }
+    /* Channel state preserved — s_channels[].active untouched */
+}
+
+/* v2.4: Resume after pause — recreates the task without reloading channels. */
+void scheduler_resume(QueueHandle_t cmd_queue)
+{
+    if (s_task_handle) return;
+    s_cmd_queue = cmd_queue;
+    if (s_cmd_queue == NULL) {
+        ESP_LOGE(TAG, "cmd_queue is NULL, cannot resume");
+        return;
+    }
+    s_running = true;
+    xTaskCreatePinnedToCore(scheduler_task, "scheduler",
+                            SCHED_TASK_STACK, NULL,
+                            SCHED_TASK_PRIORITY, &s_task_handle,
+                            SCHED_TASK_CORE);
+}
+
 sched_err_t scheduler_add_channel(const config_channel_t *ch)
 {
     if (!ch) return SCHED_ERR_INVALID;
@@ -140,6 +171,56 @@ sched_err_t scheduler_remove_channel(uint32_t id)
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s_channels[i].active && s_channels[i].config.id == id) {
             s_channels[i].active = false;
+            return SCHED_OK;
+        }
+    }
+    return SCHED_ERR_NOT_FOUND;
+}
+
+/* v2.4: In-place update — only copies the config (interval_ms, template_ids, etc.)
+ * without changing the active flag or runtime counters.  Used when bus-level
+ * config hasn't changed and we don't want to lose the last_sample_time. */
+sched_err_t scheduler_update_channel(const config_channel_t *ch)
+{
+    if (!ch) return SCHED_ERR_INVALID;
+
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s_channels[i].active && s_channels[i].config.id == ch->id) {
+            /* Preserve runtime state, overwrite config */
+            TickType_t saved_last = s_channels[i].last_sample_time;
+            uint32_t saved_seq = s_channels[i].last_sequence;
+            uint32_t saved_err = s_channels[i].error_count;
+            uint32_t saved_skip = s_channels[i].skip_count;
+
+            memcpy(&s_channels[i].config, ch, sizeof(config_channel_t));
+            s_channels[i].last_sample_time = saved_last;
+            s_channels[i].last_sequence = saved_seq;
+            s_channels[i].error_count = saved_err;
+            s_channels[i].skip_count = saved_skip;
+
+            /* Re-init edge_device state from new config */
+            s_channels[i].edge_device_count = 0;
+            if (ch->edge_device_count > 0) {
+                uint8_t count = ch->edge_device_count;
+                if (count > MAX_EDGE_DEVICES_PER_CH) count = MAX_EDGE_DEVICES_PER_CH;
+                s_channels[i].edge_device_count = count;
+                for (int ed = 0; ed < count; ed++) {
+                    const config_edge_device_t *src = &ch->edge_devices[ed];
+                    sched_edge_device_t *dst = &s_channels[i].edge_devices[ed];
+                    dst->edge_device_id = src->edge_device_id;
+                    dst->hardware_id    = src->hardware_id;
+                    dst->command_count  = 0;
+                    uint8_t cmd_count = src->command_count;
+                    if (cmd_count > MAX_COMMANDS_PER_DEVICE) cmd_count = MAX_COMMANDS_PER_DEVICE;
+                    dst->command_count = cmd_count;
+                    for (int ci = 0; ci < cmd_count; ci++) {
+                        dst->commands[ci].template_id  = src->commands[ci].template_id;
+                        dst->commands[ci].interval_ms  = src->commands[ci].interval_ms;
+                        dst->commands[ci].enabled      = src->commands[ci].enabled;
+                        /* preserve last_run_ms for independent timing */
+                    }
+                }
+            }
             return SCHED_OK;
         }
     }

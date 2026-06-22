@@ -24,6 +24,10 @@ void bus_manager_init(app_state_t *state);
 void bus_manager_cleanup_all(app_state_t *state);
 void bus_manager_setup_from_manifest(app_state_t *state);
 
+/* v2.4: Incremental config apply — single-channel register/unregister */
+void bus_manager_reg_channel(app_state_t *s, const config_channel_t *ch);
+void bus_manager_unreg_channel(app_state_t *s, uint32_t channel_id);
+
 /**
  * @brief Find a bus_dma_ctx_t by channel id.
  * @return Pointer to context, or NULL if not found.

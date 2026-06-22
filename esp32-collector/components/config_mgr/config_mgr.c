@@ -319,19 +319,17 @@ static bool parse_manifest(const uint8_t *data, size_t len)
 
             ESP_LOGI(TAG, "DmaChannelConfig: id=%lu enabled=%d bind_to='%s'",
                      (unsigned long)dma_id, enabled, bind_to);
-            /* Store in manifest for in-memory access */
+            /* Store in manifest for in-memory access.
+             * v2.4: DMA application deferred to handle_config_applied
+             * (bus_manager_setup_from_manifest).  Applying here and then
+             * releasing in bus_manager_cleanup_all is a redundant
+             * ALLOCATED→FREE→ALLOCATED cycle visible to other threads. */
             if (s_manifest.dma_config_count < MAX_DMA_CONFIGS) {
                 config_dma_channel_t *dc = &s_manifest.dma_configs[s_manifest.dma_config_count++];
                 dc->dma_id = dma_id;
                 dc->enabled = enabled;
                 strncpy(dc->bind_to, bind_to, sizeof(dc->bind_to) - 1);
                 dc->bind_to[sizeof(dc->bind_to) - 1] = '\0';
-            }
-            /* Apply to pool if available */
-            if (s_dma_pool) {
-                dma_pool_apply_config(s_dma_pool, dma_id, enabled, bind_to);
-            } else {
-                ESP_LOGD(TAG, "DmaChannelConfig stored (pool not yet injected)");
             }
         }
     }
