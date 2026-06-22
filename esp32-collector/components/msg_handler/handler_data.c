@@ -15,6 +15,7 @@
 #include "ota.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define TAG "DATA_H"
 
@@ -22,53 +23,44 @@
 
 void handler_data_process_ota(frame_decoder_t *dec)
 {
-    static char ota_id[64];
-    static char firmware_url[256];
-    static char checksum[128];
-    static char version[32];
-    memset(ota_id, 0, sizeof(ota_id));
-    memset(firmware_url, 0, sizeof(firmware_url));
-    memset(checksum, 0, sizeof(checksum));
-    memset(version, 0, sizeof(version));
-    uint64_t size_bytes = 0;
+    /* Heap-allocate to avoid static buffer concurrency issues */
+    ota_cmd_t *cmd = calloc(1, sizeof(ota_cmd_t));
+    if (!cmd) {
+        ESP_LOGE(TAG, "Failed to allocate ota_cmd_t");
+        return;
+    }
+    
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
-        if (field.wire_type != WIRE_LENGTH_DELIMITED && field.wire_type != WIRE_VARINT) continue;
         switch (field.field_num) {
-        case 1:
-            if (field.value.bytes.ptr) {
-                memcpy(ota_id, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(ota_id)-1 ? field.value.bytes.len : sizeof(ota_id)-1);
-            }
+        case OTA_CMD_F_OTA_ID:
+            frame_field_get_string(&field, cmd->ota_id, sizeof(cmd->ota_id));
             break;
-        case 2:
-            if (field.value.bytes.ptr) {
-                memcpy(firmware_url, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(firmware_url)-1 ? field.value.bytes.len : sizeof(firmware_url)-1);
-            }
+        case OTA_CMD_F_URL:
+            frame_field_get_string(&field, cmd->firmware_url, sizeof(cmd->firmware_url));
             break;
-        case 3:
-            if (field.value.bytes.ptr) {
-                memcpy(checksum, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(checksum)-1 ? field.value.bytes.len : sizeof(checksum)-1);
-            }
+        case OTA_CMD_F_CHECKSUM:
+            frame_field_get_string(&field, cmd->checksum, sizeof(cmd->checksum));
             break;
-        case 4: size_bytes = field.value.varint; break;
-        case 5:
-            if (field.value.bytes.ptr) {
-                memcpy(version, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(version)-1 ? field.value.bytes.len : sizeof(version)-1);
-            }
+        case OTA_CMD_F_SIZE:
+            frame_field_get_varint(&field, &cmd->size_bytes);
+            break;
+        case OTA_CMD_F_VERSION:
+            frame_field_get_string(&field, cmd->version, sizeof(cmd->version));
             break;
         }
     }
-    ESP_LOGI(TAG, "OtaCmd: id=%s, url=%s, size=%llu", ota_id, firmware_url, (unsigned long long)size_bytes);
-    if (ota_is_duplicate(ota_id)) {
-        ESP_LOGW(TAG, "OTA duplicate ignored: %s", ota_id);
+    
+    ESP_LOGI(TAG, "OtaCmd: id=%s, url=%s, size=%llu", 
+             cmd->ota_id, cmd->firmware_url, (unsigned long long)cmd->size_bytes);
+    
+    if (ota_is_duplicate(cmd->ota_id)) {
+        ESP_LOGW(TAG, "OTA duplicate ignored: %s", cmd->ota_id);
+        free(cmd);
         return;
     }
-    ota_start(ota_id, firmware_url, checksum, size_bytes, version);
+    ota_start(cmd);  /* ota_start takes ownership of cmd */
 }
 
 /* === Send: StatusReport (0x02) === */

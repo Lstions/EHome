@@ -4,128 +4,178 @@
  */
 
 #include "ehome_mqtt.h"
-#include "mqtt_client.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include <string.h>
 
 #define TAG "MQTT"
 
-static esp_mqtt_client_handle_t s_client = NULL;
-static mqtt_client_state_t s_state = MQTT_CLIENT_DISCONNECTED;
-static mqtt_msg_cb_t s_msg_cb = NULL;
-static void *s_msg_cb_ctx = NULL;
-static mqtt_state_cb_t s_state_cb = NULL;
-static void *s_state_cb_ctx = NULL;
+/* === Static context instance === */
+static mqtt_client_ctx_t s_ctx = {
+    .client = NULL,
+    .state = MQTT_CLIENT_DISCONNECTED,
+    .msg_cb = NULL,
+    .msg_cb_ctx = NULL,
+    .state_cb = NULL,
+    .state_cb_ctx = NULL,
+    .mutex = NULL,
+};
+
+/* === Configuration strings (set once at init, read-only thereafter) === */
 static char s_node_id[32] = {0};
 static char s_up_topic[64] = {0};
 static char s_down_topic[64] = {0};
 
-static void set_state(mqtt_client_state_t state);
+/* === Internal function declarations === */
+static void set_state(mqtt_client_ctx_t *ctx, mqtt_client_state_t state);
 static void build_topics(void);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+
+/* === Helper macros for mutex locking === */
+#define LOCK_CTX()   do { if (s_ctx.mutex) xSemaphoreTake(s_ctx.mutex, portMAX_DELAY); } while(0)
+#define UNLOCK_CTX() do { if (s_ctx.mutex) xSemaphoreGive(s_ctx.mutex); } while(0)
 
 void mqtt_client_init(void)
 {
     ESP_LOGI(TAG, "Initializing MQTT client...");
+    
+    /* Create mutex for context protection */
+    if (s_ctx.mutex == NULL) {
+        s_ctx.mutex = xSemaphoreCreateMutex();
+        if (s_ctx.mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create mutex");
+        }
+    }
+    
     build_topics();
 }
 
 void mqtt_client_start(void)
 {
-    if (s_client != NULL) {
+    ESP_LOGI(TAG, "mqtt_client_start() called");
+    LOCK_CTX();
+    
+    if (s_ctx.client != NULL) {
         ESP_LOGW(TAG, "MQTT client already started");
+        UNLOCK_CTX();
         return;
     }
-
-    esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = CONFIG_COLLECTOR_MQTT_BROKER_URL,
-        .credentials.client_id = s_node_id,
-        .session.keepalive = 30,
-        .session.disable_clean_session = false,  // TODO: true causes session conflict after EMQX restart
-    };
-
-    s_client = esp_mqtt_client_init(&mqtt_cfg);
-    if (s_client == NULL) {
+    
+    static esp_mqtt_client_config_t mqtt_cfg;
+    memset(&mqtt_cfg, 0, sizeof(mqtt_cfg));
+    mqtt_cfg.broker.address.uri = CONFIG_COLLECTOR_MQTT_BROKER_URL;
+    mqtt_cfg.credentials.client_id = s_node_id;
+    mqtt_cfg.session.keepalive = 30;
+    mqtt_cfg.session.disable_clean_session = false;
+    
+    s_ctx.client = esp_mqtt_client_init(&mqtt_cfg);
+    if (s_ctx.client == NULL) {
         ESP_LOGE(TAG, "Failed to create MQTT client");
-        set_state(MQTT_CLIENT_FAILED);
+        set_state(&s_ctx, MQTT_CLIENT_FAILED);
+        UNLOCK_CTX();
         return;
     }
-
-    esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_err_t err = esp_mqtt_client_start(s_client);
+    
+    esp_mqtt_client_register_event(s_ctx.client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_err_t err = esp_mqtt_client_start(s_ctx.client);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
-        set_state(MQTT_CLIENT_FAILED);
+        set_state(&s_ctx, MQTT_CLIENT_FAILED);
+        UNLOCK_CTX();
         return;
     }
-
-    set_state(MQTT_CLIENT_CONNECTING);
+    
+    set_state(&s_ctx, MQTT_CLIENT_CONNECTING);
+    UNLOCK_CTX();
 }
 
 void mqtt_client_stop(void)
 {
-    if (s_client != NULL) {
-        esp_mqtt_client_stop(s_client);
-        esp_mqtt_client_destroy(s_client);
-        s_client = NULL;
+    LOCK_CTX();
+    
+    if (s_ctx.client != NULL) {
+        esp_mqtt_client_stop(s_ctx.client);
+        esp_mqtt_client_destroy(s_ctx.client);
+        s_ctx.client = NULL;
     }
-    set_state(MQTT_CLIENT_DISCONNECTED);
+    set_state(&s_ctx, MQTT_CLIENT_DISCONNECTED);
+    
+    UNLOCK_CTX();
 }
 
 bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
 {
-    if (s_client == NULL || s_state != MQTT_CLIENT_CONNECTED) {
+    LOCK_CTX();
+    
+    if (s_ctx.client == NULL || s_ctx.state != MQTT_CLIENT_CONNECTED) {
         ESP_LOGW(TAG, "Cannot publish: not connected");
+        UNLOCK_CTX();
         return false;
     }
 
-    int msg_id = esp_mqtt_client_publish(s_client, s_up_topic, (const char *)data, len, 1, 0);
+    int msg_id = esp_mqtt_client_publish(s_ctx.client, s_up_topic, (const char *)data, len, 1, 0);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Publish failed");
+        UNLOCK_CTX();
         return false;
     }
 
     ESP_LOGD(TAG, "Published %zu bytes to %s (msg_id=%d)", len, s_up_topic, msg_id);
+    UNLOCK_CTX();
     return true;
 }
 
 bool mqtt_client_subscribe_impl(const char *topic)
 {
-    if (s_client == NULL) {
+    LOCK_CTX();
+    
+    if (s_ctx.client == NULL) {
+        UNLOCK_CTX();
         return false;
     }
 
-    int msg_id = esp_mqtt_client_subscribe(s_client, topic, 1);
+    int msg_id = esp_mqtt_client_subscribe(s_ctx.client, topic, 1);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Subscribe failed for %s", topic);
+        UNLOCK_CTX();
         return false;
     }
 
     ESP_LOGI(TAG, "Subscribed to %s", topic);
+    UNLOCK_CTX();
     return true;
 }
 
 mqtt_client_state_t mqtt_client_get_state(void)
 {
-    return s_state;
+    LOCK_CTX();
+    mqtt_client_state_t state = s_ctx.state;
+    UNLOCK_CTX();
+    return state;
 }
 
 bool mqtt_client_is_connected_impl(void)
 {
-    return s_state == MQTT_CLIENT_CONNECTED;
+    LOCK_CTX();
+    bool connected = (s_ctx.state == MQTT_CLIENT_CONNECTED);
+    UNLOCK_CTX();
+    return connected;
 }
 
 void mqtt_client_register_msg_cb(mqtt_msg_cb_t cb, void *ctx)
 {
-    s_msg_cb = cb;
-    s_msg_cb_ctx = ctx;
+    LOCK_CTX();
+    s_ctx.msg_cb = cb;
+    s_ctx.msg_cb_ctx = ctx;
+    UNLOCK_CTX();
 }
 
 void mqtt_client_register_state_cb(mqtt_state_cb_t cb, void *ctx)
 {
-    s_state_cb = cb;
-    s_state_cb_ctx = ctx;
+    LOCK_CTX();
+    s_ctx.state_cb = cb;
+    s_ctx.state_cb_ctx = ctx;
+    UNLOCK_CTX();
 }
 
 void mqtt_client_set_node_id(const char *node_id)
@@ -148,12 +198,13 @@ static void build_topics(void)
     }
 }
 
-static void set_state(mqtt_client_state_t state)
+static void set_state(mqtt_client_ctx_t *ctx, mqtt_client_state_t state)
 {
-    if (s_state != state) {
-        s_state = state;
-        if (s_state_cb) {
-            s_state_cb(state, s_state_cb_ctx);
+    /* Note: caller must already hold the mutex */
+    if (ctx->state != state) {
+        ctx->state = state;
+        if (ctx->state_cb) {
+            ctx->state_cb(state, ctx->state_cb_ctx);
         }
     }
 }
@@ -164,26 +215,30 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     (void)base;
     esp_mqtt_event_handle_t event = event_data;
 
+    ESP_LOGI(TAG, "MQTT event: %d", event->event_id);
+    
+    /* Don't hold mutex during event processing - MQTT events run in the MQTT task
+     * and blocking here can deadlock with esp_mqtt_client API calls */
     switch (event->event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT connected to broker");
         /* Subscribe BEFORE notifying app, so down-topic is ready for ConfigManifest */
         if (s_down_topic[0] != '\0') {
-            esp_mqtt_client_subscribe(s_client, s_down_topic, 1);
+            esp_mqtt_client_subscribe(s_ctx.client, s_down_topic, 1);
             ESP_LOGI(TAG, "Subscribed to %s", s_down_topic);
         }
-        set_state(MQTT_CLIENT_CONNECTED);
+        set_state(&s_ctx, MQTT_CLIENT_CONNECTED);
         break;
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
-        set_state(MQTT_CLIENT_DISCONNECTED);
+        set_state(&s_ctx, MQTT_CLIENT_DISCONNECTED);
         break;
 
     case MQTT_EVENT_DATA: {
         ESP_LOGD(TAG, "MQTT data received");
-        if (s_msg_cb) {
-            s_msg_cb(event->topic, (const uint8_t *)event->data, event->data_len, s_msg_cb_ctx);
+        if (s_ctx.msg_cb) {
+            s_ctx.msg_cb(event->topic, (const uint8_t *)event->data, event->data_len, s_ctx.msg_cb_ctx);
         }
         break;
     }

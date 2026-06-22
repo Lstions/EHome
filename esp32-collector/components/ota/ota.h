@@ -14,8 +14,24 @@
 extern "C" {
 #endif
 
+/**
+ * @brief OTA command structure (heap-allocated, eliminates static buffer concurrency issues)
+ */
+typedef struct {
+    char ota_id[64];
+    char firmware_url[256];
+    char checksum[128];
+    char version[32];
+    uint64_t size_bytes;
+} ota_cmd_t;
+
 void ota_init(void);
-void ota_start(const char *ota_id, const char *url, const char *checksum, uint64_t size, const char *version);
+
+/**
+ * @brief Start OTA upgrade with command structure
+ * @param cmd Heap-allocated command (ota_start takes ownership and will free it)
+ */
+void ota_start(const ota_cmd_t *cmd);
 bool ota_is_upgrading(void);
 
 /**
@@ -52,6 +68,24 @@ typedef void (*ota_progress_cb_t)(const char *ota_id, uint8_t status,
  * Must be called before ota_start().
  */
 void ota_set_progress_callback(ota_progress_cb_t cb);
+
+/**
+ * @brief Rollback trigger reasons for ota_mark_invalid_rollback().
+ */
+typedef enum {
+    OTA_ROLLBACK_ON_BOOT_FAIL = 0,  ///< Rollback because boot validation failed (WiFi, etc.)
+    OTA_ROLLBACK_MANUAL,             ///< Manual rollback triggered by user/server command
+} ota_rollback_trigger_t;
+
+/**
+ * @brief Mark the running app as invalid and reboot to the previous partition.
+ *
+ * Internally calls esp_ota_mark_app_invalid_rollback_and_reboot().
+ * Clears NVS state and logs the trigger reason.
+ *
+ * @param trigger Reason for the rollback (for logging/auditing)
+ */
+void ota_mark_invalid_rollback(ota_rollback_trigger_t trigger);
 
 #ifdef __cplusplus
 }

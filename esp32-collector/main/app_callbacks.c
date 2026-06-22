@@ -261,6 +261,16 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
 /* ==== WiFi callback ==== */
 
+/* === Deferred MQTT start (avoid stack overflow in WiFi event loop) === */
+
+static void mqtt_start_task(void *pv)
+{
+    ESP_LOGI(TAG, "mqtt_start_task: starting MQTT client...");
+    mqtt_client_start();
+    ESP_LOGI(TAG, "mqtt_start_task: done, deleting task");
+    vTaskDelete(NULL);
+}
+
 void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 {
     app_state_t *s = (app_state_t *)ctx;
@@ -274,7 +284,11 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
             ota_confirm_valid();
             s->ota_need_confirm = false;
         }
-        mqtt_client_start();
+        /* Defer mqtt_client_start() to a separate task to avoid stack overflow
+         * in the WiFi event loop task (which has limited stack). */
+        ESP_LOGI(TAG, "WiFi connected, spawning MQTT start task");
+        xTaskCreate(mqtt_start_task, "mqtt_start", 8192, NULL, 5, NULL);
+        break;
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
         if (s->tcp_transport && s->tcp_transport->state != TRANSPORT_CONNECTED

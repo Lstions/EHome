@@ -79,38 +79,14 @@ void handler_writecmd_process_scan(frame_decoder_t *dec)
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
+        uint64_t v;
         switch (field.field_num) {
-        case 1:
-            if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                memcpy(request_id, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-            }
-            break;
-        case 2:
-            if (field.wire_type == WIRE_VARINT) {
-                hardware_id = (uint32_t)field.value.varint;
-            }
-            break;
-        case 3: /* scan_type */
-            if (field.wire_type == WIRE_VARINT) {
-                scan_type = (uint32_t)field.value.varint;
-            }
-            break;
-        case 4: /* start_addr */
-            if (field.wire_type == WIRE_VARINT) {
-                start_addr = (uint32_t)field.value.varint;
-            }
-            break;
-        case 5: /* end_addr */
-            if (field.wire_type == WIRE_VARINT) {
-                end_addr = (uint32_t)field.value.varint;
-            }
-            break;
-        case 6: /* timeout_ms */
-            if (field.wire_type == WIRE_VARINT) {
-                timeout_ms = (uint32_t)field.value.varint;
-            }
-            break;
+        case 1: frame_field_get_string(&field, request_id, sizeof(request_id)); break;
+        case 2: if (frame_field_get_varint(&field, &v) == FRAME_OK) hardware_id = (uint32_t)v; break;
+        case 3: if (frame_field_get_varint(&field, &v) == FRAME_OK) scan_type = (uint32_t)v; break;
+        case 4: if (frame_field_get_varint(&field, &v) == FRAME_OK) start_addr = (uint32_t)v; break;
+        case 5: if (frame_field_get_varint(&field, &v) == FRAME_OK) end_addr = (uint32_t)v; break;
+        case 6: if (frame_field_get_varint(&field, &v) == FRAME_OK) timeout_ms = (uint32_t)v; break;
         }
     }
 
@@ -135,18 +111,10 @@ void handler_writecmd_process_query(frame_decoder_t *dec)
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
+        uint64_t v;
         switch (field.field_num) {
-        case 1:
-            if (field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-                memcpy(request_id, field.value.bytes.ptr,
-                       field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-            }
-            break;
-        case 2:
-            if (field.wire_type == WIRE_VARINT) {
-                query_type = (uint32_t)field.value.varint;
-            }
-            break;
+        case 1: frame_field_get_string(&field, request_id, sizeof(request_id)); break;
+        case 2: if (frame_field_get_varint(&field, &v) == FRAME_OK) query_type = (uint32_t)v; break;
         }
     }
     ESP_LOGI(TAG, "QueryReq: req=%s, type=%lu", request_id, (unsigned long)query_type);

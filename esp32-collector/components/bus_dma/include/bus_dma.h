@@ -147,6 +147,36 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
                            const uint8_t *tx, size_t tx_len,
                            uint8_t *rx, size_t rx_size, size_t *rx_len);
 
+/**
+ * @brief Initialize UART0 boot mode manager.
+ *
+ * MUST be called BEFORE any UART0 driver installation.
+ * Checks BOOT button (GPIO0) state:
+ *   - If held: UART0 reserved for download, enters wait loop (LED fast blink)
+ *   - If released: UART0 available for data use
+ *
+ * @return true  if UART0 is available for data use
+ * @return false if UART0 is reserved for firmware download mode
+ */
+bool bus_dma_uart0_boot_init(void);
+
+/**
+ * @brief Enter UART0 firmware download mode.
+ *
+ * Pulls GPIO0 low, enables RTC GPIO hold so it persists across reset,
+ * then calls esp_restart(). ROM bootloader detects GPIO0 low and enters
+ * UART0 serial download mode automatically.
+ *
+ * This function does not return.
+ */
+void bus_dma_uart0_enter_download(void) __attribute__((noreturn));
+
+/**
+ * @brief Check if UART0 is available for data use.
+ * @return true if UART0 can be used as data serial port
+ */
+bool bus_dma_uart0_is_available(void);
+
 #ifdef __cplusplus
 }
 #endif

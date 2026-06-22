@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -119,6 +120,34 @@ static inline size_t frame_encode_varint_to_buf(uint8_t *buf, uint64_t value) {
     }
     buf[i++] = value & 0x7F;
     return i;
+}
+
+/* === Field accessors (safe extraction from decoded fields) === */
+
+static inline frame_err_t frame_field_get_string(const frame_field_t *f, char *buf, size_t sz) {
+    if (!f || !buf || sz == 0) return FRAME_ERR_INVALID_TAG;
+    if (f->wire_type != WIRE_LENGTH_DELIMITED) return FRAME_ERR_INVALID_TAG;
+    if (!f->value.bytes.ptr) { buf[0] = '\0'; return FRAME_OK; }
+    size_t n = f->value.bytes.len < sz - 1 ? f->value.bytes.len : sz - 1;
+    memcpy(buf, f->value.bytes.ptr, n);
+    buf[n] = '\0';
+    return FRAME_OK;
+}
+
+static inline frame_err_t frame_field_get_varint(const frame_field_t *f, uint64_t *v) {
+    if (!f || !v) return FRAME_ERR_INVALID_TAG;
+    if (f->wire_type != WIRE_VARINT) return FRAME_ERR_INVALID_TAG;
+    *v = f->value.varint;
+    return FRAME_OK;
+}
+
+static inline frame_err_t frame_field_get_bytes(const frame_field_t *f,
+                                                  const uint8_t **data, size_t *len) {
+    if (!f || !data || !len) return FRAME_ERR_INVALID_TAG;
+    if (f->wire_type != WIRE_LENGTH_DELIMITED) return FRAME_ERR_INVALID_TAG;
+    *data = f->value.bytes.ptr;
+    *len = f->value.bytes.len;
+    return FRAME_OK;
 }
 
 #ifdef __cplusplus

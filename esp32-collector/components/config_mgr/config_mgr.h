@@ -119,6 +119,10 @@ struct dma_pool_t;
 void config_mgr_set_dma_pool(struct dma_pool_t *pool);
 void config_mgr_set_manifest_id(const char *id);
 
+/* === Double-buffer lock API (for app_callbacks long-lock interval) === */
+void config_mgr_lock(void);
+void config_mgr_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -8,4 +8,4 @@ idf_component_register(SRCS "main.c"
                        REQUIRES freertos nvs_flash
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
                        config_mgr scheduler ota rgb_led factory_reset
-                       sync_manager bus_dma hw_profile dma_pool uart0_boot)
+                       sync_manager bus_dma hw_profile dma_pool)

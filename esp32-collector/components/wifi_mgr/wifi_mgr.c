@@ -1,103 +1,29 @@
 /**
  * @file wifi_mgr.c
- * @brief WiFi Manager Implementation
+ * @brief WiFi Manager - STA mode with auto-reconnect and NVS persistence.
+ *
+ * Provisioning (SoftAP + HTTP captive portal) lives in wifi_provisioning.c.
  */
 
 #include "wifi_mgr.h"
+#include "wifi_provisioning.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "esp_http_server.h"
 #include <string.h>
 
 #define TAG "WIFI_MGR"
-
-static httpd_handle_t s_http_server = NULL;
-
-/* HTTP server handlers */
-static esp_err_t prov_root_handler(httpd_req_t *req)
-{
-    const char *html = "<!DOCTYPE html><html><head><title>EHome Setup</title>"
-                       "<style>body{font-family:Arial,sans-serif;max-width:400px;margin:50px auto;padding:20px}"
-                       "h1{color:#333}input{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}"
-                       "button{width:100%;padding:12px;background:#4CAF50;color:#fff;border:none;cursor:pointer}"
-                       "</style></head><body>"
-                       "<h1>EHome WiFi Setup</h1>"
-                       "<form method=\"POST\" action=\"/connect\">"
-                       "<input name=\"ssid\" placeholder=\"WiFi SSID\" required>"
-                       "<input name=\"password\" type=\"password\" placeholder=\"Password\">"
-                       "<button type=\"submit\">Connect</button></form></body></html>";
-    httpd_resp_send(req, html, strlen(html));
-    return ESP_OK;
-}
-
-static esp_err_t prov_connect_handler(httpd_req_t *req)
-{
-    char buf[128] = {0};
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret <= 0) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-    
-    /* Simple form parsing: ssid=xxx&password=yyy */
-    char ssid[32] = {0}, password[64] = {0};
-    sscanf(buf, "ssid=%[^&]&password=%s", ssid, password);
-    
-    ESP_LOGI(TAG, "Provisioning: SSID=%s", ssid);
-    
-    /* Save credentials */
-    wifi_mgr_save_credentials(ssid, password);
-    
-    const char *resp = "<html><body><h1>Connecting...</h1>"
-                       "<p>Device will restart and connect to your WiFi.</p></body></html>";
-    httpd_resp_send(req, resp, strlen(resp));
-    
-    /* Delay and restart */
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_restart();
-    return ESP_OK;
-}
-
-void wifi_mgr_start_http_server(void)
-{
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 80;
-    
-    if (httpd_start(&s_http_server, &config) == ESP_OK) {
-        httpd_uri_t root_uri = {
-            .uri = "/",
-            .method = HTTP_GET,
-            .handler = prov_root_handler,
-        };
-        httpd_uri_t connect_uri = {
-            .uri = "/connect",
-            .method = HTTP_POST,
-            .handler = prov_connect_handler,
-        };
-        httpd_register_uri_handler(s_http_server, &root_uri);
-        httpd_register_uri_handler(s_http_server, &connect_uri);
-        ESP_LOGI(TAG, "HTTP server started on port 80");
-    }
-}
-
-void wifi_mgr_stop_http_server(void)
-{
-    if (s_http_server) {
-        httpd_stop(s_http_server);
-        s_http_server = NULL;
-    }
-}
 
 #define NVS_NAMESPACE "wifi_cfg"
 #define KEY_SSID      "ssid"
 #define KEY_PASSWORD  "password"
 
-#define WIFI_CONNECT_TIMEOUT_MS 30000
-#define WIFI_RECONNECT_DELAY_MS 5000
+#define WIFI_CONNECT_TIMEOUT_MS  30000
+#define WIFI_RECONNECT_DELAY_MS  5000
 
 /* Event bits */
 #define WIFI_CONNECTED_BIT    BIT0
@@ -111,7 +37,6 @@ static void *s_state_cb_ctx = NULL;
 static int s_retry_count = 0;
 static int s_max_retry = 10;
 static bool s_auto_reconnect = true;
-static bool s_provisioning_active = false;
 
 /* Forward declarations */
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -124,19 +49,15 @@ void wifi_mgr_init(void)
 {
     ESP_LOGI(TAG, "Initializing WiFi manager...");
 
-    // Create event group
     s_wifi_event_group = xEventGroupCreate();
 
-    // Initialize TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
-    // Initialize WiFi with default config
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -151,9 +72,9 @@ void wifi_mgr_start(void)
     char password[64] = {0};
 
     if (!wifi_mgr_load_credentials(ssid, sizeof(ssid), password, sizeof(password))) {
-        // Fallback to sdkconfig defaults (CONFIG_COLLECTOR_WIFI_SSID / CONFIG_COLLECTOR_WIFI_PASSWORD)
+        /* Fallback to sdkconfig defaults. */
         const char *def_ssid = CONFIG_COLLECTOR_WIFI_SSID;
-        const char *def_pwd = CONFIG_COLLECTOR_WIFI_PASSWORD;
+        const char *def_pwd  = CONFIG_COLLECTOR_WIFI_PASSWORD;
         if (def_ssid[0] != '\0') {
             ESP_LOGI(TAG, "Using sdkconfig defaults: SSID=%s", def_ssid);
             strlcpy(ssid, def_ssid, sizeof(ssid));
@@ -179,7 +100,6 @@ void wifi_mgr_start(void)
 
     set_state(WIFI_MGR_CONNECTING);
 
-    // Wait for connection
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
@@ -213,6 +133,12 @@ bool wifi_mgr_is_connected(void)
 
 bool wifi_mgr_save_credentials(const char *ssid, const char *password)
 {
+    if (!ssid) return false;
+
+    /* Reject oversize inputs before touching NVS. */
+    if (strlen(ssid) > WIFI_PROVISION_SSID_MAX) return false;
+    if (password && strlen(password) > WIFI_PROVISION_PASSWORD_MAX) return false;
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
@@ -226,7 +152,7 @@ bool wifi_mgr_save_credentials(const char *ssid, const char *password)
         return false;
     }
 
-    err = nvs_set_str(handle, KEY_PASSWORD, password);
+    err = nvs_set_str(handle, KEY_PASSWORD, password ? password : "");
     if (err != ESP_OK) {
         nvs_close(handle);
         return false;
@@ -241,6 +167,8 @@ bool wifi_mgr_save_credentials(const char *ssid, const char *password)
 
 bool wifi_mgr_load_credentials(char *ssid, size_t ssid_len, char *password, size_t pwd_len)
 {
+    if (!ssid || !password || ssid_len == 0 || pwd_len == 0) return false;
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
@@ -285,21 +213,23 @@ void wifi_mgr_register_state_cb(wifi_mgr_state_cb_t cb, void *ctx)
     s_state_cb_ctx = ctx;
 }
 
+/* === Provisioning wrappers (implementation in wifi_provisioning.c) === */
+
 void wifi_mgr_start_provisioning(void)
 {
-    if (s_provisioning_active) return;
-    s_provisioning_active = true;
-    
+    if (wifi_provisioning_is_active()) return;
+
     ESP_LOGI(TAG, "=== Provisioning Mode ===");
-    ESP_LOGI(TAG, "Connect to AP: EHome-Setup-XXXX");
+    ESP_LOGI(TAG, "Connect to AP: EHome-Setup");
     ESP_LOGI(TAG, "Visit: http://192.168.4.1");
-    ESP_LOGI(TAG, "Or use serial: AT+WIFI=ssid,password");
+    ESP_LOGI(TAG, "Portal auto-closes after %d minutes",
+             WIFI_PROVISION_TIMEOUT_MS / (60 * 1000));
     ESP_LOGI(TAG, "==========================");
-    
-    // Start SoftAP for provisioning
+
+    /* Start SoftAP for provisioning. */
     esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
     (void)ap_netif;
-    
+
     wifi_config_t ap_config = {
         .ap = {
             .ssid = "EHome-Setup",
@@ -310,20 +240,23 @@ void wifi_mgr_start_provisioning(void)
             .authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    
-    /* Start HTTP server for provisioning */
-    wifi_mgr_start_http_server();
-    
+
+    wifi_provisioning_set_active(true);
+
+    /* Start HTTP server + 30-minute timeout timer. */
+    wifi_provisioning_start_http_server();
+
     set_state(WIFI_MGR_DISCONNECTED);
 }
 
 void wifi_mgr_stop_provisioning(void)
 {
-    s_provisioning_active = false;
+    wifi_provisioning_stop_http_server();
+    wifi_provisioning_set_active(false);
     ESP_LOGI(TAG, "Provisioning stopped");
 }
 
@@ -331,8 +264,10 @@ void wifi_mgr_stop_provisioning(void)
 
 static void set_state(wifi_mgr_state_t state)
 {
-    if (s_state != state) {
+    wifi_mgr_state_t old_state = s_state;
+    if (old_state != state) {
         s_state = state;
+        ESP_LOGD(TAG, "State change: %d -> %d", old_state, state);
         if (s_state_cb) {
             s_state_cb(state, s_state_cb_ctx);
         }
@@ -350,14 +285,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             break;
 
         case WIFI_EVENT_STA_DISCONNECTED: {
-            wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+            wifi_event_sta_disconnected_t *event =
+                (wifi_event_sta_disconnected_t *)event_data;
             ESP_LOGW(TAG, "Disconnected from AP, reason=%d", event->reason);
-            
+
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-            
+
             if (s_auto_reconnect && s_retry_count < s_max_retry) {
                 s_retry_count++;
-                ESP_LOGI(TAG, "Reconnecting... attempt %d/%d", s_retry_count, s_max_retry);
+                ESP_LOGI(TAG, "Reconnecting... attempt %d/%d",
+                         s_retry_count, s_max_retry);
                 set_state(WIFI_MGR_CONNECTING);
                 vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
                 esp_wifi_connect();

@@ -43,10 +43,7 @@ void handler_config_process_query(frame_decoder_t *dec)
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
-        if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-            memcpy(request_id, field.value.bytes.ptr,
-                   field.value.bytes.len < sizeof(request_id)-1 ? field.value.bytes.len : sizeof(request_id)-1);
-        }
+        if (field.field_num == 1) frame_field_get_string(&field, request_id, sizeof(request_id));
     }
     ESP_LOGI(TAG, "ConfigQuery: req=%s", request_id);
     msg_handler_send_config_report(request_id);
@@ -66,11 +63,7 @@ void handler_config_process_query_resources(frame_decoder_t *dec)
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
-        if (field.field_num == 1 && field.wire_type == WIRE_LENGTH_DELIMITED && field.value.bytes.ptr) {
-            size_t copy_len = field.value.bytes.len < sizeof(request_id) - 1
-                            ? field.value.bytes.len : sizeof(request_id) - 1;
-            memcpy(request_id, field.value.bytes.ptr, copy_len);
-        }
+        if (field.field_num == 1) frame_field_get_string(&field, request_id, sizeof(request_id));
     }
     ESP_LOGI(TAG, "QueryResources: req=%s", request_id);
     on_query_resources_received(request_id);

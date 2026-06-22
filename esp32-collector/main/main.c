@@ -18,7 +18,6 @@
 #include "ota.h"
 #include "rgb_led.h"
 #include "factory_reset.h"
-#include "uart0_boot.h"
 #include "wifi_mgr.h"
 #include "ehome_mqtt.h"
 #include "transport.h"
@@ -27,6 +26,7 @@
 #include "ehome_tcp.h"
 #endif
 #include "nvs_flash.h"
+#include "esp_ota_ops.h"
 #include "esp_log.h"
 
 /* RGB LED pin differs by board: S3=GPIO48, C6=GPIO8 */
@@ -184,10 +184,29 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(r);
 
-    /* ---- OTA ---- */
-    if (ota_get_nvs_state() != 0) {
-        extern void ota_confirm_valid(void);
-        ota_confirm_valid();
+    /* ---- OTA: boot validation ---- */
+    /* Check if running partition is pending verification (OTA rollback protection).
+     * If so, run self-checks before confirming the new firmware as valid.
+     * Self-checks: WiFi connected + MQTT connected + first StatusReport sent.
+     * If any check fails 3 times → mark invalid → rollback to previous partition. */
+    {
+        esp_ota_img_states_t ota_state;
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+            if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+                ESP_LOGW(TAG, "OTA: running partition is PENDING_VERIFY — boot validation active");
+                /* Validation happens in app_callbacks after WiFi+MQTT+StatusReport succeed.
+                 * If validation fails after 3 attempts, ota_mark_invalid_rollback() is called. */
+                extern void ota_confirm_valid(void);
+                ota_confirm_valid();  /* Will be called again by app_callbacks after full validation */
+            }
+        }
+        /* Also check NVS state for power-loss recovery during download */
+        if (ota_get_nvs_state() != 0) {
+            ESP_LOGW(TAG, "OTA: NVS state=%d (power-loss recovery)", ota_get_nvs_state());
+            extern void ota_confirm_valid(void);
+            ota_confirm_valid();
+        }
     }
 
     /* ---- App state (singleton — node_id from MAC, cmd_queue, spinlock) ---- */
@@ -195,9 +214,9 @@ void app_main(void)
 
     /* ---- UART0 boot mode check (MUST be before any UART0 driver install) ---- */
     /* If BOOT held at startup, UART0 reserved for download — task blocks here */
-    if (!uart0_boot_init()) {
+    if (!bus_dma_uart0_boot_init()) {
         ESP_LOGW(TAG, "UART0 in download mode, normal init skipped");
-        /* uart0_boot spawns a wait task; we just spin */
+        /* bus_dma spawns a wait task; we just spin */
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 

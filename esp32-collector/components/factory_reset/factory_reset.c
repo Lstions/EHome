@@ -1,6 +1,7 @@
 #include "factory_reset.h"
 #include "rgb_led.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
@@ -9,6 +10,14 @@
 
 #define TAG "FACTORY_RESET"
 static bool s_in_progress = false;
+
+/* Namespace whitelist - only erase these during factory reset */
+static const char *NVS_NAMESPACES[] = {
+    "wifi_cfg",
+    "config",
+    "ota",
+};
+#define NVS_NAMESPACE_COUNT (sizeof(NVS_NAMESPACES) / sizeof(NVS_NAMESPACES[0]))
 
 /* BOOT button GPIO differs by chip:
  *   S3: GPIO0 (standard BOOT pin, also used for ROM download mode)
@@ -57,15 +66,29 @@ static void factory_reset_task(void *arg)
 
             if (held_ms >= HOLD_TIME_MS) {
                 s_in_progress = true;
-                ESP_LOGW(TAG, "FACTORY RESET triggered! Erasing NVS...");
+                ESP_LOGW(TAG, "FACTORY RESET triggered! Erasing NVS namespaces...");
 
                 rgb_led_set_state(LED_STATE_FACTORY_RESET);
 
-                /* Erase NVS partition */
-                nvs_flash_erase();
-                nvs_flash_init();
+                /* Erase only whitelisted NVS namespaces */
+                for (size_t i = 0; i < NVS_NAMESPACE_COUNT; i++) {
+                    nvs_handle_t handle;
+                    esp_err_t err = nvs_open(NVS_NAMESPACES[i], NVS_READWRITE, &handle);
+                    if (err == ESP_OK) {
+                        err = nvs_erase_all(handle);
+                        nvs_commit(handle);
+                        nvs_close(handle);
+                        if (err == ESP_OK) {
+                            ESP_LOGI(TAG, "Erased namespace: %s", NVS_NAMESPACES[i]);
+                        } else {
+                            ESP_LOGW(TAG, "Failed to erase %s: %s", NVS_NAMESPACES[i], esp_err_to_name(err));
+                        }
+                    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+                        ESP_LOGW(TAG, "Failed to open %s: %s", NVS_NAMESPACES[i], esp_err_to_name(err));
+                    }
+                }
 
-                ESP_LOGW(TAG, "NVS erased. Rebooting in 2s...");
+                ESP_LOGW(TAG, "NVS namespaces erased. Rebooting in 2s...");
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 esp_restart();
             }
@@ -88,11 +111,28 @@ bool factory_reset_in_progress(void)
 void factory_reset_trigger(void)
 {
     s_in_progress = true;
-    ESP_LOGW(TAG, "FACTORY RESET via command! Erasing NVS...");
+    ESP_LOGW(TAG, "FACTORY RESET via command! Erasing NVS namespaces...");
     rgb_led_set_state(LED_STATE_FACTORY_RESET);
-    nvs_flash_erase();
-    nvs_flash_init();
-    ESP_LOGW(TAG, "NVS erased. Rebooting in 2s...");
+    
+    /* Erase only whitelisted NVS namespaces */
+    for (size_t i = 0; i < NVS_NAMESPACE_COUNT; i++) {
+        nvs_handle_t handle;
+        esp_err_t err = nvs_open(NVS_NAMESPACES[i], NVS_READWRITE, &handle);
+        if (err == ESP_OK) {
+            err = nvs_erase_all(handle);
+            nvs_commit(handle);
+            nvs_close(handle);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Erased namespace: %s", NVS_NAMESPACES[i]);
+            } else {
+                ESP_LOGW(TAG, "Failed to erase %s: %s", NVS_NAMESPACES[i], esp_err_to_name(err));
+            }
+        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "Failed to open %s: %s", NVS_NAMESPACES[i], esp_err_to_name(err));
+        }
+    }
+    
+    ESP_LOGW(TAG, "NVS namespaces erased. Rebooting in 2s...");
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
 }

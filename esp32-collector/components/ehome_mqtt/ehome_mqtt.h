@@ -10,6 +10,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "mqtt_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +29,17 @@ typedef enum {
 /* === Message callback === */
 typedef void (*mqtt_msg_cb_t)(const char *topic, const uint8_t *data, size_t len, void *ctx);
 typedef void (*mqtt_state_cb_t)(mqtt_client_state_t state, void *ctx);
+
+/* === MQTT client context (encapsulates all mutable state) === */
+typedef struct {
+    esp_mqtt_client_handle_t client;
+    mqtt_client_state_t      state;
+    mqtt_msg_cb_t            msg_cb;
+    void                    *msg_cb_ctx;
+    mqtt_state_cb_t          state_cb;
+    void                    *state_cb_ctx;
+    SemaphoreHandle_t        mutex;
+} mqtt_client_ctx_t;
 
 /* === Init / Start / Stop === */
 void mqtt_client_init(void);

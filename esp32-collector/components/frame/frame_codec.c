@@ -47,6 +47,7 @@ frame_err_t frame_encode_varint(frame_encoder_t *enc, uint8_t field_num, uint64_
 
 frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const char *str)
 {
+    if (str == NULL) str = "";  /* NULL guard: encode as empty string */
     size_t len = strlen(str);
     frame_err_t err = encoder_ensure_space(enc, 1 + 5 + len); /* tag + varint(len) + data */
     if (err != FRAME_OK) return err;

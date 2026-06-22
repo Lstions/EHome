@@ -6,7 +6,6 @@
 #include "ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
-#include "esp_https_ota.h"
 #include "esp_http_client.h"
 #include "esp_partition.h"
 #include "nvs_flash.h"
@@ -141,6 +140,23 @@ void ota_confirm_valid(void)
     ota_nvs_set_state(OTA_STATE_NONE);
 }
 
+void ota_mark_invalid_rollback(ota_rollback_trigger_t trigger)
+{
+    const char *reason = (trigger == OTA_ROLLBACK_ON_BOOT_FAIL) 
+        ? "boot validation failed" 
+        : "manual rollback";
+    
+    ESP_LOGW(TAG, "Marking app invalid and triggering rollback + reboot (reason: %s)", reason);
+    
+    /* Clear NVS state before rollback */
+    ota_nvs_set_state(OTA_STATE_NONE);
+    
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mark_app_invalid_rollback_and_reboot failed: %s", esp_err_to_name(err));
+    }
+}
+
 /**
  * @brief Convert binary SHA256 hash to hex string
  */
@@ -182,28 +198,43 @@ static bool validate_firmware(const char *expected_checksum, const uint8_t *comp
     return true;
 }
 
+/* Forward declarations for refactored OTA functions */
+static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes);
+static esp_err_t ota_verify(const char *expected_checksum,
+                            uint32_t total_bytes, uint64_t expected_size);
+
 /**
- * @brief Build the esp_http_client_config_t based on Kconfig OTA security settings.
+ * @brief Build the esp_http_client_config_t based on URL scheme and Kconfig settings.
  *
+ * Unified for both HTTP and HTTPS:
  * - HTTPS + crt_bundle: uses Mozilla CA bundle (public Internet)
  * - HTTPS + custom cert: embeds a CA PEM for private/self-signed servers
  * - HTTPS + no verify: WARN log (not for production)
- * - HTTP: WARN log (no encryption)
+ * - HTTP: allowed only when CONFIG_COLLECTOR_OTA_ALLOW_HTTP is set
+ *
+ * @param cfg      Output client config (caller owns the struct)
+ * @param url      Firmware download URL
+ * @param is_https true if URL scheme is https://, false for http://
  */
-static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg, const char *url)
+static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg,
+                                       const char *url, bool is_https)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->url = url;
     cfg->timeout_ms = 10000;
 
+    if (!is_https) {
+        /* Plain HTTP path */
 #if CONFIG_COLLECTOR_OTA_ALLOW_HTTP
-    /* Development mode: allow plain HTTP (insecure) */
-    cfg->transport_type = HTTP_TRANSPORT_OVER_TCP;
-    ESP_LOGW(TAG, "OTA: HTTP allowed (development mode - INSECURE)");
-    (void)url;  /* suppress unused warning */
-    return ESP_OK;
+        ESP_LOGW(TAG, "OTA: using plain HTTP (development mode - INSECURE)");
+        return ESP_OK;
 #else
-    /* Production: HTTPS with certificate verification */
+        ESP_LOGE(TAG, "HTTP not allowed (CONFIG_COLLECTOR_OTA_ALLOW_HTTP=n)");
+        return ESP_ERR_NOT_SUPPORTED;
+#endif
+    }
+
+    /* HTTPS path: configure certificate verification */
 #if CONFIG_COLLECTOR_OTA_USE_HTTPS
     #if CONFIG_COLLECTOR_OTA_VERIFY_CERT
         #if CONFIG_COLLECTOR_OTA_CRT_BUNDLE
@@ -228,29 +259,22 @@ static esp_err_t build_ota_http_config(esp_http_client_config_t *cfg, const char
         ESP_LOGW(TAG, "OTA HTTPS: certificate verification DISABLED - not for production");
     #endif
 #else
-    ESP_LOGW(TAG, "OTA: using plain HTTP (no encryption)");
+    ESP_LOGW(TAG, "OTA: HTTPS URL but CONFIG_COLLECTOR_OTA_USE_HTTPS not set");
 #endif
     return ESP_OK;
-#endif  /* CONFIG_COLLECTOR_OTA_ALLOW_HTTP */
 }
 
 /**
- * @brief Single OTA download+verify attempt. Returns ESP_OK on success.
- *        On failure caller may retry after resetting NVS state.
+ * @brief Download firmware image via HTTP or HTTPS.
+ * @return ESP_OK on success, ESP_FAIL/esp_err_t on failure.
+ *         On success, *out_total_bytes is set to the number of bytes written.
  */
-static esp_err_t ota_try_download(const char *ota_id, const char *url,
-                                  const char *checksum, uint64_t size,
-                                  const char *version)
+static esp_err_t ota_download(const char *url, uint64_t expected_size,
+                              uint32_t *out_total_bytes)
 {
-    ESP_LOGI(TAG, "=== ota_try_download START ===");
-    ESP_LOGI(TAG, "  URL: '%s'", url);
-    ESP_LOGI(TAG, "  Expected size: %llu bytes", (unsigned long long)size);
-    ESP_LOGI(TAG, "  Checksum: '%s'", checksum ? checksum : "(none)");
-    ESP_LOGI(TAG, "  Version: '%s'", version ? version : "(none)");
+    esp_err_t err;
 
-    /* Partition safety check: ensure update partition is not the running partition.
-     * When otadata has no valid entry, esp_ota_get_next_update_partition(NULL) may
-     * return the currently running partition, which would cause self-overwrite. */
+    /* Partition safety check: ensure update partition is not the running partition. */
     const esp_partition_t *running_part = esp_ota_get_running_partition();
     const esp_partition_t *update_part_check = esp_ota_get_next_update_partition(NULL);
     if (update_part_check == NULL) {
@@ -258,23 +282,13 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         return ESP_FAIL;
     }
     if (update_part_check->address == running_part->address) {
-        ESP_LOGE(TAG, "OTA target partition '%s' (0x%" PRIx32 ") is the running partition! Aborting to prevent self-overwrite.",
+        ESP_LOGE(TAG, "OTA target partition '%s' (0x%" PRIx32 ") is the running partition! Aborting.",
                  update_part_check->label, update_part_check->address);
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "OTA partition check OK: running=0x%" PRIx32 " update=0x%" PRIx32,
              running_part->address, update_part_check->address);
 
-    /* Write NVS: downloading */
-    ota_nvs_set_state(OTA_STATE_DOWNLOADING);
-    ota_nvs_set_meta(version, checksum);
-
-    ota_report_progress(ota_id, 0, 0, NULL);
-
-    esp_err_t err;
-    uint32_t total_bytes = 0;  /* actual downloaded bytes, used for SHA256 */
-
-    /* Runtime URL detection: http:// or https:// */
     bool is_https = (strncmp(url, "https://", 8) == 0);
     bool is_http  = (strncmp(url, "http://", 7) == 0);
 
@@ -283,69 +297,79 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         return ESP_ERR_INVALID_ARG;
     }
 
-#if CONFIG_COLLECTOR_OTA_ALLOW_HTTP
     if (is_http && !is_https) {
-        ESP_LOGW(TAG, "Using plain HTTP (development mode)");
-#else
-    if (is_http && !is_https) {
+#if !CONFIG_COLLECTOR_OTA_ALLOW_HTTP
         ESP_LOGE(TAG, "HTTP not allowed (CONFIG_COLLECTOR_OTA_ALLOW_HTTP=n)");
         return ESP_ERR_NOT_SUPPORTED;
+#else
+        ESP_LOGW(TAG, "Using plain HTTP (development mode)");
+        err = ota_download_http(url, out_total_bytes);
 #endif
-        /* HTTP: direct esp_http_client */
-        esp_http_client_config_t cli_cfg = {0};
-        cli_cfg.url = url;
+    } else {
+        /* HTTPS path: use esp_http_client with certificate verification */
+        ESP_LOGI(TAG, "Using HTTPS with certificate verification");
+        esp_http_client_config_t cli_cfg;
+        build_ota_http_config(&cli_cfg, url, true);
         cli_cfg.timeout_ms = 30000;
-        cli_cfg.buffer_size = 8192;
-        cli_cfg.buffer_size_tx = 1024;
 
         esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
         if (client == NULL) {
-            ESP_LOGE(TAG, "HTTP client init FAILED");
+            ESP_LOGE(TAG, "HTTPS client init FAILED");
             return ESP_FAIL;
         }
 
         err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "HTTP open FAILED: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "HTTPS open FAILED: %s", esp_err_to_name(err));
             esp_http_client_cleanup(client);
             return err;
         }
 
         int cl = esp_http_client_fetch_headers(client);
         int sc = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "HTTP %d, content-length=%d", sc, cl);
+        ESP_LOGI(TAG, "HTTPS %d, content-length=%d", sc, cl);
 
         if (sc != 200) {
+            ESP_LOGE(TAG, "HTTPS server returned error %d", sc);
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return ESP_FAIL;
         }
 
-        const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-        if (part == NULL) {
+        const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+        if (update_partition == NULL) {
             ESP_LOGE(TAG, "No OTA partition found");
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return ESP_FAIL;
         }
 
-        esp_ota_handle_t handle = 0;
-        err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+        esp_ota_handle_t ota_handle;
+        err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_ota_begin FAILED: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return err;
         }
 
         int total = 0, last_pct = -1;
-        static uint8_t rx[4096];
+        uint8_t *rx_buf = malloc(4096);
+        if (!rx_buf) {
+            ESP_LOGE(TAG, "Failed to allocate receive buffer");
+            esp_ota_end(ota_handle);
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return ESP_ERR_NO_MEM;
+        }
+
         int n;
-        while ((n = esp_http_client_read(client, (char *)rx, sizeof(rx))) > 0) {
-            err = esp_ota_write(handle, rx, n);
+        while ((n = esp_http_client_read(client, (char *)rx_buf, 4096)) > 0) {
+            err = esp_ota_write(ota_handle, rx_buf, n);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "ota_write FAILED at %d bytes", total);
-                esp_ota_end(handle);
+                ESP_LOGE(TAG, "esp_ota_write failed at %d bytes: %s", total, esp_err_to_name(err));
+                free(rx_buf);
+                esp_ota_end(ota_handle);
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);
                 return err;
@@ -355,68 +379,154 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
             if (pct != last_pct && pct % 10 == 0) {
                 ESP_LOGI(TAG, "Downloaded %d%%", pct);
                 last_pct = pct;
-                ota_report_progress(ota_id, 0, (uint8_t)pct, NULL);
             }
         }
 
+        free(rx_buf);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
 
-        if (total == 0) {
-            ESP_LOGE(TAG, "Zero bytes downloaded");
+        err = esp_ota_end(ota_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+            return err;
+        }
+
+        *out_total_bytes = (uint32_t)total;
+        ESP_LOGI(TAG, "HTTPS OTA written %d bytes", total);
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA download failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+/**
+ * @brief HTTP download path (development mode).
+ */
+static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
+{
+    esp_http_client_config_t cli_cfg = {0};
+    cli_cfg.url = url;
+    cli_cfg.timeout_ms = 30000;
+    cli_cfg.buffer_size = 8192;
+    cli_cfg.buffer_size_tx = 1024;
+
+    esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "HTTP client init FAILED");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP open FAILED: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    int cl = esp_http_client_fetch_headers(client);
+    int sc = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "HTTP %d, content-length=%d", sc, cl);
+
+    if (sc != 200) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (part == NULL) {
+        ESP_LOGE(TAG, "No OTA partition found");
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t handle = 0;
+    err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin FAILED: %s", esp_err_to_name(err));
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    int total = 0, last_pct = -1;
+    static uint8_t rx[4096];
+    int n;
+    while ((n = esp_http_client_read(client, (char *)rx, sizeof(rx))) > 0) {
+        err = esp_ota_write(handle, rx, n);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ota_write FAILED at %d bytes", total);
             esp_ota_end(handle);
-            return ESP_FAIL;
-        }
-
-        err = esp_ota_end(handle);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_ota_end FAILED: %s", esp_err_to_name(err));
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
             return err;
         }
-
-        ESP_LOGI(TAG, "HTTP OTA written %d bytes", total);
-        total_bytes = (uint32_t)total;
-    }
-    else {
-        /* HTTPS: use esp_https_ota high-level API */
-        ESP_LOGI(TAG, "Using HTTPS with certificate verification");
-        esp_http_client_config_t cli_cfg;
-        build_ota_http_config(&cli_cfg, url);
-        cli_cfg.timeout_ms = 30000;
-        esp_https_ota_config_t ota_cfg = { .http_config = &cli_cfg };
-        err = esp_https_ota(&ota_cfg);
-        // HTTPS path: use partition size for accurate SHA256 verification
-        const esp_partition_t *p = esp_ota_get_next_update_partition(NULL);
-        total_bytes = (p && p->size > 0) ? (uint32_t)p->size : (uint32_t)size;
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "HTTPS OTA fail: %s (0x%x)", esp_err_to_name(err), err);
-            return err;
+        total += n;
+        int pct = cl > 0 ? (total * 100 / cl) : 0;
+        if (pct != last_pct && pct % 10 == 0) {
+            ESP_LOGI(TAG, "Downloaded %d%%", pct);
+            last_pct = pct;
         }
     }
 
-    /* Write NVS: verifying */
-    ota_nvs_set_state(OTA_STATE_VERIFYING);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total == 0) {
+        ESP_LOGE(TAG, "Zero bytes downloaded");
+        esp_ota_end(handle);
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end FAILED: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "HTTP OTA written %d bytes", total);
+    *out_total_bytes = (uint32_t)total;
+    return ESP_OK;
+}
+
+/**
+ * @brief Verify firmware SHA256 checksum against expected value.
+ * @param expected_checksum Hex-encoded SHA256 string from server.
+ * @param total_bytes       Number of bytes written to the update partition.
+ * @param expected_size     Expected firmware size from server command.
+ * @return ESP_OK if checksum matches or no checksum provided.
+ */
+static esp_err_t ota_verify(const char *expected_checksum,
+                            uint32_t total_bytes, uint64_t expected_size)
+{
     ESP_LOGI(TAG, "OTA image written, validating checksum...");
 
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL) {
-        ESP_LOGE(TAG, "No update partition found");
+        ESP_LOGE(TAG, "No update partition found for verification");
         return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "Computing SHA256 of '%s' (offset 0x%" PRIx32 ", %llu bytes)",
-             update_partition->label, update_partition->address, (unsigned long long)total_bytes);
+             update_partition->label, update_partition->address,
+             (unsigned long long)total_bytes);
 
     uint8_t sha256_result[32] = {0};
     mbedtls_sha256_context sha256_ctx;
     mbedtls_sha256_init(&sha256_ctx);
-    mbedtls_sha256_starts(&sha256_ctx, 0); /* 0 = SHA-256 */
+    mbedtls_sha256_starts(&sha256_ctx, 0);
 
     const int CHUNK = 4096;
     static uint8_t buf[4096];
-    uint64_t remaining = total_bytes > 0 ? (uint64_t)total_bytes : size;
+    uint64_t remaining = total_bytes > 0 ? (uint64_t)total_bytes : expected_size;
     uint32_t offset = 0;
     int chunk_count = 0;
+    esp_err_t err;
+
     while (remaining > 0) {
         size_t tr = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
         err = esp_partition_read(update_partition, offset, buf, tr);
@@ -428,69 +538,81 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
         mbedtls_sha256_update(&sha256_ctx, buf, tr);
         offset += tr; remaining -= tr;
         chunk_count++;
-        if (chunk_count % 16 == 0) {  // 64KB = 16 * 4KB
+        if (chunk_count % 16 == 0) {
             ESP_LOGI(TAG, "SHA256 progress: %lu/%llu bytes (%d%%)",
                      (unsigned long)offset, (unsigned long long)total_bytes,
                      total_bytes > 0 ? (int)(offset * 100 / total_bytes) : 0);
         }
-        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms yield to prevent watchdog
+        vTaskDelay(pdMS_TO_TICKS(10));
         taskYIELD();
     }
     mbedtls_sha256_finish(&sha256_ctx, sha256_result);
     mbedtls_sha256_free(&sha256_ctx);
 
-    if (!validate_firmware(checksum, sha256_result)) return ESP_FAIL;
+    if (!validate_firmware(expected_checksum, sha256_result)) {
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
-/* Forward declaration */
+/**
+ * @brief Single OTA download+verify attempt. Returns ESP_OK on success.
+ */
+static esp_err_t ota_try_download(const char *ota_id, const char *url,
+                                  const char *checksum, uint64_t size,
+                                  const char *version)
+{
+    ESP_LOGI(TAG, "=== ota_try_download START ===");
+    ESP_LOGI(TAG, "  URL: '%s'", url);
+    ESP_LOGI(TAG, "  Expected size: %llu bytes", (unsigned long long)size);
+    ESP_LOGI(TAG, "  Checksum: '%s'", checksum ? checksum : "(none)");
+    ESP_LOGI(TAG, "  Version: '%s'", version ? version : "(none)");
+
+    /* Write NVS: downloading */
+    ota_nvs_set_state(OTA_STATE_DOWNLOADING);
+    ota_nvs_set_meta(version, checksum);
+    ota_report_progress(ota_id, 0, 0, NULL);
+
+    uint32_t total_bytes = 0;
+    esp_err_t err = ota_download(url, size, &total_bytes);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Write NVS: verifying */
+    ota_nvs_set_state(OTA_STATE_VERIFYING);
+
+    return ota_verify(checksum, total_bytes, size);
+}
+
+/* Forward declarations */
 static void ota_task_func(void *pvParameters);
 
-typedef struct {
-    char ota_id[64];
-    char url[256];
-    char checksum[128];
-    char version[32];
-    uint64_t size;
-} ota_task_args_t;
-
-void ota_start(const char *ota_id, const char *url, const char *checksum, uint64_t size, const char *version)
+/* OTA start function */
+void ota_start(const ota_cmd_t *cmd)
 {
-    ESP_LOGI(TAG, "=== ota_start called ===");
-    ESP_LOGI(TAG, "  ota_id:    '%s'", ota_id ? ota_id : "(null)");
-    ESP_LOGI(TAG, "  url:       '%s'", url ? url : "(null)");
-    ESP_LOGI(TAG, "  checksum:  '%s'", checksum ? checksum : "(null)");
-    ESP_LOGI(TAG, "  size:      %llu bytes", (unsigned long long)size);
-    ESP_LOGI(TAG, "  version:   '%s'", version ? version : "(null)");
+    if (!cmd) {
+        ESP_LOGE(TAG, "ota_start: NULL command");
+        return;
+    }
 
     if (s_upgrading) {
         ESP_LOGW(TAG, "OTA already in progress");
+        free((void *)cmd);
         return;
     }
 
     s_upgrading = true;
-    ESP_LOGI(TAG, "Starting OTA: %s from %s (expect %llu bytes)", ota_id, url, (unsigned long long)size);
+    ESP_LOGI(TAG, "Starting OTA: %s from %s (expect %llu bytes)",
+             cmd->ota_id, cmd->firmware_url, (unsigned long long)cmd->size_bytes);
 
-    // Copy args to heap for the task
-    ota_task_args_t *args = malloc(sizeof(ota_task_args_t));
-    if (!args) {
-        ESP_LOGE(TAG, "malloc failed for OTA args");
-        s_upgrading = false;
-        return;
-    }
-    strncpy(args->ota_id, ota_id, sizeof(args->ota_id)-1);
-    strncpy(args->url, url, sizeof(args->url)-1);
-    strncpy(args->checksum, checksum, sizeof(args->checksum)-1);
-    strncpy(args->version, version, sizeof(args->version)-1);
-    args->size = size;
-
-    // Run OTA in a dedicated task so mqtt_task can keep running
-    // Increased stack from 8192 to 16384 for HTTP client buffer requirements
+    /* Run OTA in a dedicated task so mqtt_task can keep running.
+     * cmd is passed directly — ota_task_func takes ownership and will free it. */
     ESP_LOGI(TAG, "Creating ota_task with 16KB stack...");
-    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", 16384, args, 5, NULL);
+    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", 16384, (void *)cmd, 5, NULL);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create ota_task");
-        free(args);
+        free((void *)cmd);
         s_upgrading = false;
     }
 }
@@ -498,14 +620,14 @@ void ota_start(const char *ota_id, const char *url, const char *checksum, uint64
 /* OTA task entry point */
 static void ota_task_func(void *pvParameters)
 {
-    ota_task_args_t *args = (ota_task_args_t *)pvParameters;
+    ota_cmd_t *cmd = (ota_cmd_t *)pvParameters;
 
     ESP_LOGI(TAG, "=== ota_task_func START ===");
-    ESP_LOGI(TAG, "  args->ota_id:   '%s'", args->ota_id);
-    ESP_LOGI(TAG, "  args->url:      '%s'", args->url);
-    ESP_LOGI(TAG, "  args->checksum: '%s'", args->checksum);
-    ESP_LOGI(TAG, "  args->version:  '%s'", args->version);
-    ESP_LOGI(TAG, "  args->size:     %llu bytes", (unsigned long long)args->size);
+    ESP_LOGI(TAG, "  cmd->ota_id:      '%s'", cmd->ota_id);
+    ESP_LOGI(TAG, "  cmd->firmware_url:'%s'", cmd->firmware_url);
+    ESP_LOGI(TAG, "  cmd->checksum:    '%s'", cmd->checksum);
+    ESP_LOGI(TAG, "  cmd->version:     '%s'", cmd->version);
+    ESP_LOGI(TAG, "  cmd->size_bytes:  %llu bytes", (unsigned long long)cmd->size_bytes);
     ESP_LOGI(TAG, "  Free heap: %u bytes", (unsigned int)esp_get_free_heap_size());
 
     #define OTA_MAX_RETRIES 3
@@ -520,7 +642,7 @@ static void ota_task_func(void *pvParameters)
             ota_nvs_set_state(OTA_STATE_NONE);
         }
 
-        err = ota_try_download(args->ota_id, args->url, args->checksum, args->size, args->version);
+        err = ota_try_download(cmd->ota_id, cmd->firmware_url, cmd->checksum, cmd->size_bytes, cmd->version);
         if (err == ESP_OK) {
             break;  /* success */
         }
@@ -531,8 +653,8 @@ static void ota_task_func(void *pvParameters)
     if (err != ESP_OK) {
         /* All retries exhausted */
         ota_nvs_set_state(OTA_STATE_NONE);
-        ota_report_progress(args->ota_id, 3, 0, "Download failed after retries");
-        free(args);
+        ota_report_progress(cmd->ota_id, 3, 0, "Download failed after retries");
+        free(cmd);
         s_upgrading = false;
         vTaskDelete(NULL);
         return;
@@ -543,8 +665,8 @@ static void ota_task_func(void *pvParameters)
     if (update_partition == NULL) {
         ESP_LOGE(TAG, "Cannot get update partition after OTA write");
         ota_nvs_set_state(OTA_STATE_NONE);
-        ota_report_progress(args->ota_id, 3, 0, "Boot partition switch failed");
-        free(args);
+        ota_report_progress(cmd->ota_id, 3, 0, "Boot partition switch failed");
+        free(cmd);
         s_upgrading = false;
         vTaskDelete(NULL);
         return;
@@ -552,28 +674,25 @@ static void ota_task_func(void *pvParameters)
 
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "set_boot_partition failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
         ota_nvs_set_state(OTA_STATE_NONE);
-        ota_report_progress(args->ota_id, 3, 0, "Boot partition switch failed");
-        free(args);
+        ota_report_progress(cmd->ota_id, 3, 0, "Boot partition switch failed");
+        free(cmd);
         s_upgrading = false;
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Boot partition set to '%s' (0x%" PRIx32 "), restarting...",
-             update_partition->label, update_partition->address);
+    ESP_LOGI(TAG, "Boot partition set to next partition");
+    ota_nvs_set_state(OTA_STATE_VERIFYING);
+    ota_report_progress(cmd->ota_id, 1, 100, NULL);
 
-    /* Clear NVS state */
-    ota_nvs_set_state(OTA_STATE_NONE);
-
-    ota_report_progress(args->ota_id, 1, 100, NULL);
-
-    free(args);
-    ESP_LOGI(TAG, "OTA success, restarting in 1s...");
+    free(cmd);
+    ESP_LOGI(TAG, "Rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 }
+
 bool ota_is_upgrading(void)
 {
     return s_upgrading;
