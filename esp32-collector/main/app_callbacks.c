@@ -242,7 +242,12 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         }
 
         /* v2.4: Resume scheduler after pause — incremental modifications done */
-        scheduler_resume(s->cmd_queue);
+        scheduler_resume(&(scheduler_queues_t){
+            .uart0_cmd_queue = s->uart0_cmd_queue,
+            .uart1_cmd_queue = s->uart1_cmd_queue,
+            .spi_cmd_queue  = s->spi_cmd_queue,
+            .i2c_cmd_queue  = s->i2c_cmd_queue,
+        });
     } else {
         /* First-time apply or scheduler not running — full setup */
         ESP_LOGI(TAG, "Full setup (first apply or scheduler not running)");
@@ -251,7 +256,12 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         }
         bus_manager_cleanup_all(s);
         bus_manager_setup_from_manifest(s);
-        scheduler_start(s->cmd_queue);
+        scheduler_start(&(scheduler_queues_t){
+            .uart0_cmd_queue = s->uart0_cmd_queue,
+            .uart1_cmd_queue = s->uart1_cmd_queue,
+            .spi_cmd_queue  = s->spi_cmd_queue,
+            .i2c_cmd_queue  = s->i2c_cmd_queue,
+        });
     }
 
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());

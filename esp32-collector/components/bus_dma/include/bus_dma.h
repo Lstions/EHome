@@ -68,7 +68,7 @@ typedef struct {
     uint8_t  bus_type;
     bool     dma_enabled;
     bool     initialized;
-    SemaphoreHandle_t mutex;
+    SemaphoreHandle_t tx_mutex;  // Protects TX path (write + transact). RX needs no mutex (uart_read_bytes is thread-safe, rx_task is sole consumer)
 
     union {
         struct {

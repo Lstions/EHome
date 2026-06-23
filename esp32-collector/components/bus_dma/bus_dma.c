@@ -13,6 +13,7 @@
 
 #include "bus_dma.h"
 #include "rgb_led.h"
+#include "hw_tables.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "driver/uart.h"
@@ -401,8 +402,8 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
             }
             uart_set_rx_timeout(ctx->cfg.uart.port, 4);
         } else {
-            // Polled mode: TX buffer 256 (non-blocking), no RX ring buffer
-            r = uart_driver_install(ctx->cfg.uart.port, 256, 0, 256, NULL, 0);
+            // Polled mode: TX buffer 256 (non-blocking), RX ring buffer 256 for gap detection
+            r = uart_driver_install(ctx->cfg.uart.port, 256, 256, 0, NULL, 0);
             if (r != ESP_OK) {
                 ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
                 return r;
@@ -815,6 +816,20 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uint8_t addr  = cfg[2];
     uint32_t freq = read_be32(&cfg[3]);
 
+    /* Validate I2C bus count — reject if all HW I2C buses are already active */
+    i2c_registry_init();
+    int active_count = 0;
+    for (int i = 0; i < MAX_I2C_BUSES; i++) {
+        if (s_i2c_buses[i].bus_handle != NULL) {
+            active_count++;
+        }
+    }
+    if (active_count >= HW_I2C_COUNT) {
+        ESP_LOGE(TAG, "I2C bus limit reached: %d active, HW_I2C_COUNT=%d",
+                 active_count, HW_I2C_COUNT);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     /* Validate pins (S3: 0-48, C6: 0-30) */
     if (sda < 0 || sda > GPIO_PIN_MAX || scl < 0 || scl > GPIO_PIN_MAX) {
         ESP_LOGE(TAG, "I2C invalid pins: SDA=%d SCL=%d (must be 0-%d)", sda, scl, GPIO_PIN_MAX);
@@ -916,7 +931,7 @@ static esp_err_t i2c_transact(bus_dma_ctx_t *ctx,
                                uint8_t *rx, size_t rx_size, size_t *rx_len)
 {
     *rx_len = 0;
-    int tmo = 100;  /* I2C needs a timeout for ACK — 100ms is reasonable */
+    int tmo = 50;  /* I2C needs a timeout for ACK — 50ms is sufficient */
 
     i2c_master_dev_handle_t dev = ctx->cfg.i2c.dev_handle;
     if (dev == NULL) return ESP_ERR_INVALID_STATE;
@@ -982,8 +997,8 @@ esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
     ctx->bus_type    = bus_type;
     ctx->dma_enabled = dma_enabled;
 
-    ctx->mutex = xSemaphoreCreateMutex();
-    if (ctx->mutex == NULL) return ESP_ERR_NO_MEM;
+    ctx->tx_mutex = xSemaphoreCreateMutex();
+    if (ctx->tx_mutex == NULL) return ESP_ERR_NO_MEM;
 
     esp_err_t r;
     switch (bus_type) {
@@ -997,8 +1012,8 @@ esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
     }
 
     if (r != ESP_OK) {
-        vSemaphoreDelete(ctx->mutex);
-        ctx->mutex = NULL;
+        vSemaphoreDelete(ctx->tx_mutex);
+        ctx->tx_mutex = NULL;
         return r;
     }
 
@@ -1016,11 +1031,11 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
     if (ctx == NULL || !ctx->initialized) return ESP_ERR_INVALID_ARG;
     if (ctx->bus_type != BUS_TYPE_UART) return ESP_ERR_NOT_SUPPORTED;
 
-    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    if (xSemaphoreTake(ctx->tx_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
 
     esp_err_t r = uart_write(ctx, data, len);
-    xSemaphoreGive(ctx->mutex);
+    xSemaphoreGive(ctx->tx_mutex);
     return r;
 }
 
@@ -1030,12 +1045,9 @@ size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
     if (ctx == NULL || !ctx->initialized) return 0;
     if (ctx->bus_type != BUS_TYPE_UART) return 0;
 
-    if (xSemaphoreTake(ctx->mutex, 0) != pdTRUE)  /* don't wait */
-        return 0;
-
-    size_t n = uart_read(ctx, buf, buf_size);
-    xSemaphoreGive(ctx->mutex);
-    return n;
+    /* No mutex needed for RX: uart_read_bytes is thread-safe (ESP-IDF
+     * internal per-port spinlock), and rx_task is the sole consumer. */
+    return uart_read(ctx, buf, buf_size);
 }
 
 /* ---- SPI / I2C: transactional ---- */
@@ -1048,7 +1060,7 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
 
     *rx_len = 0;
 
-    if (xSemaphoreTake(ctx->mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    if (xSemaphoreTake(ctx->tx_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
 
     esp_err_t r;
@@ -1064,7 +1076,7 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
             break;
     }
 
-    xSemaphoreGive(ctx->mutex);
+    xSemaphoreGive(ctx->tx_mutex);
     return r;
 }
 
@@ -1078,9 +1090,9 @@ void bus_dma_deinit(bus_dma_ctx_t *ctx)
         case BUS_TYPE_I2C:  i2c_deinit(ctx);  break;
     }
 
-    if (ctx->mutex) {
-        vSemaphoreDelete(ctx->mutex);
-        ctx->mutex = NULL;
+    if (ctx->tx_mutex) {
+        vSemaphoreDelete(ctx->tx_mutex);
+        ctx->tx_mutex = NULL;
     }
 
     ctx->initialized = false;

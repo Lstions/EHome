@@ -60,17 +60,24 @@ app_state_t *app_state_init(void)
         ESP_LOGE(TAG, "Failed to create config mutex!");
     }
 
-    /* Command queue */
+    /* Command queue (WriteCommand compat, transition period) */
     s_app.cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
+
+    /* Per-bus command queues (for cmd_task split) */
+    s_app.uart0_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
+    s_app.uart1_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
+    s_app.spi_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.i2c_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
 
     /* Zero the pool markers */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_app.bus_ch[i] = 0;
     }
 
-    /* Per-channel pending queues (depth=4, replaces race-prone single-slot arrays) */
+    /* Per-channel pending queues (depth=10, replaces race-prone single-slot arrays) */
+#define PENDING_QUEUE_DEPTH 10
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-        s_app.pending_queues[i] = xQueueCreate(4, sizeof(pending_cmd_t));
+        s_app.pending_queues[i] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
         if (s_app.pending_queues[i] == NULL) {
             ESP_LOGE(TAG, "Failed to create pending queue for slot %d!", i);
         }

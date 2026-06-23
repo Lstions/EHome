@@ -64,7 +64,13 @@ typedef struct {
     transport_t *tcp_transport;
 
     /* ---- Command queue ---- */
-    QueueHandle_t cmd_queue;
+    QueueHandle_t cmd_queue;                    /* WriteCommand compat (transition) */
+
+    /* ---- Per-bus command queues (for cmd_task split) ---- */
+    QueueHandle_t uart0_cmd_queue;              /* UART0 CMD_SAMPLE + CMD_WRITE */
+    QueueHandle_t uart1_cmd_queue;              /* UART1 CMD_SAMPLE + CMD_WRITE */
+    QueueHandle_t spi_cmd_queue;                /* SPI   CMD_SAMPLE + CMD_WRITE */
+    QueueHandle_t i2c_cmd_queue;                /* I2C   CMD_SAMPLE + CMD_WRITE */
 
     /* ---- Pending command state (per channel, FreeRTOS Queue) ---- */
     /* Each UART channel has a queue of pending_cmd_t entries so that

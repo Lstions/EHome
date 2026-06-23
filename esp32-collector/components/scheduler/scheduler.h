@@ -72,15 +72,23 @@ typedef struct {
     uint8_t             edge_device_count;
 } sched_channel_t;
 
+/* === Per-bus queue set (injected by caller, avoids app_state_t coupling) === */
+typedef struct {
+    QueueHandle_t uart0_cmd_queue;
+    QueueHandle_t uart1_cmd_queue;
+    QueueHandle_t spi_cmd_queue;
+    QueueHandle_t i2c_cmd_queue;
+} scheduler_queues_t;
+
 /* === Public API === */
 void scheduler_init(void);
-void scheduler_start(QueueHandle_t cmd_queue);
+void scheduler_start(const scheduler_queues_t *queues);
 void scheduler_stop(void);
 sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);
 sched_err_t scheduler_update_channel(const config_channel_t *channel);  /* v2.4: in-place update */
 void scheduler_pause(void);   /* v2.4: pause task loop, preserve channel state */
-void scheduler_resume(QueueHandle_t cmd_queue);  /* v2.4: resume after pause */
+void scheduler_resume(const scheduler_queues_t *queues);  /* v2.4: resume after pause */
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
 

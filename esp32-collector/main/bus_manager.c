@@ -16,6 +16,7 @@
 #include "dma_pool.h"
 #include "hw_tables.h"
 #include "esp_log.h"
+#include "driver/uart.h"
 #include <string.h>
 #include <inttypes.h>
 
@@ -102,6 +103,26 @@ static uint8_t find_bus_type(const config_manifest_t *m, uint32_t ch)
     for (int i = 0; i < m->channel_count; i++)
         if (m->channels[i].id == ch) return m->channels[i].bus_type;
     return 0;
+}
+
+/* ==== Derive uart_port from channel bus_config via hw_tables ==== */
+
+static uart_port_t derive_uart_port_for_channel(const config_manifest_t *m, uint32_t ch)
+{
+    if (!m) return UART_NUM_0;
+    for (int i = 0; i < m->channel_count; i++) {
+        if (m->channels[i].id == ch && m->channels[i].bus_type == BUS_TYPE_UART) {
+            const uint8_t *bc = m->channels[i].bus_config;
+            size_t bclen = m->channels[i].bus_config_len;
+            if (bc && bclen >= 2) {
+                for (int j = 0; j < HW_UART_COUNT; j++)
+                    if (hw_uarts[j].default_tx_pin == bc[0] &&
+                        hw_uarts[j].default_rx_pin == bc[1])
+                        return (uart_port_t)hw_uarts[j].port;
+            }
+        }
+    }
+    return UART_NUM_0;  /* default */
 }
 
 /* ==== Register one channel ==== */
@@ -265,9 +286,20 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
         .delay_ms   = 0,    /* WriteCommand: TX only, no delay */
         .type       = CMD_WRITE,
+        .uart_port  = derive_uart_port_for_channel(m, ch),
     };
     if (l > 0 && d) memcpy(cmd.tx_data, d, cmd.tx_len);
 
-    if (!xQueueSend(s->cmd_queue, &cmd, 0))
+    /* Dispatch to per-bus queue */
+    QueueHandle_t target_q;
+    switch (cmd.bus_type) {
+    case BUS_TYPE_UART:
+        target_q = (cmd.uart_port == UART_NUM_0) ? s->uart0_cmd_queue : s->uart1_cmd_queue;
+        break;
+    case BUS_TYPE_SPI:  target_q = s->spi_cmd_queue;  break;
+    case BUS_TYPE_I2C:  target_q = s->i2c_cmd_queue;  break;
+    default:            target_q = s->uart0_cmd_queue; break;
+    }
+    if (!xQueueSend(target_q, &cmd, 0))
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
 }

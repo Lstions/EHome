@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "driver/uart.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +46,7 @@ typedef struct {
     uint32_t   delay_ms;                      /* TX→RX delay (sample only) */
     uint32_t   edge_device_id;                /* v2.3: edge_device for DataReport routing */
     uint8_t    command_index;                 /* v2.3: command index within edge_device */
+    uart_port_t uart_port;                    /* UART port (UART_NUM_0/1), per-port dispatch */
     cmd_type_t type;
 } bus_cmd_t;
 

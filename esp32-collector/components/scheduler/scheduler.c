@@ -15,10 +15,13 @@
 #include "scheduler.h"
 #include "config_mgr.h"
 #include "cmd_queue.h"
+#include "bus_dma.h"
+#include "hw_tables.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "driver/uart.h"
 #include <string.h>
 #include <inttypes.h>
 
@@ -28,9 +31,42 @@
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
 static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
-static QueueHandle_t   s_cmd_queue = NULL;
+static scheduler_queues_t s_queues;
 
 static void scheduler_task(void *p);
+
+/* ── queue dispatch: pick the right per-bus queue from bus_cmd_t ── */
+
+static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t *bcmd)
+{
+    switch (bcmd->bus_type) {
+    case BUS_TYPE_UART:
+        return (bcmd->uart_port == UART_NUM_0) ? q->uart0_cmd_queue : q->uart1_cmd_queue;
+    case BUS_TYPE_SPI:  return q->spi_cmd_queue;
+    case BUS_TYPE_I2C:  return q->i2c_cmd_queue;
+    default:            return q->uart0_cmd_queue;
+    }
+}
+
+/* ── derive uart_port_t from bus_config bytes via hw_tables ── */
+
+static uart_port_t derive_uart_port(const config_channel_t *ch)
+{
+    if (ch->bus_type != BUS_TYPE_UART || ch->bus_config_len < 2)
+        return UART_NUM_0;  /* safe default */
+
+    uint8_t tx_pin = ch->bus_config[0];
+    uint8_t rx_pin = ch->bus_config[1];
+
+    for (int i = 0; i < HW_UART_COUNT; i++) {
+        if (hw_uarts[i].default_tx_pin == tx_pin &&
+            hw_uarts[i].default_rx_pin == rx_pin) {
+            return (uart_port_t)hw_uarts[i].port;
+        }
+    }
+    /* Fallback: if tx_pin matches UART0 default, assume UART0; else UART1 */
+    return UART_NUM_1;
+}
 
 /* ── public API ──────────────────────────────────────────────────── */
 
@@ -41,13 +77,16 @@ void scheduler_init(void)
     s_task_handle = NULL;
 }
 
-void scheduler_start(QueueHandle_t cmd_queue)
+void scheduler_start(const scheduler_queues_t *queues)
 {
     if (s_task_handle) return;
 
-    s_cmd_queue = cmd_queue;
-    if (s_cmd_queue == NULL) {
-        ESP_LOGE(TAG, "cmd_queue is NULL, cannot start");
+    if (queues) {
+        s_queues = *queues;
+    }
+    if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
+        s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
+        ESP_LOGE(TAG, "all queues are NULL, cannot start");
         return;
     }
 
@@ -99,12 +138,15 @@ void scheduler_pause(void)
 }
 
 /* v2.4: Resume after pause — recreates the task without reloading channels. */
-void scheduler_resume(QueueHandle_t cmd_queue)
+void scheduler_resume(const scheduler_queues_t *queues)
 {
     if (s_task_handle) return;
-    s_cmd_queue = cmd_queue;
-    if (s_cmd_queue == NULL) {
-        ESP_LOGE(TAG, "cmd_queue is NULL, cannot resume");
+    if (queues) {
+        s_queues = *queues;
+    }
+    if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
+        s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
+        ESP_LOGE(TAG, "all queues are NULL, cannot resume");
         return;
     }
     s_running = true;
@@ -330,7 +372,9 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
             };
             memcpy(bcmd.tx_data, t->write_data, bcmd.tx_len);
 
-            if (xQueueSend(s_cmd_queue, &bcmd, 0) != pdTRUE) {
+            bcmd.uart_port = derive_uart_port(&ch->config);
+            QueueHandle_t target_q = dispatch_queue(&s_queues, &bcmd);
+            if (xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
                 (*queue_full_count)++;
                 scmd->error_count++;
                 if (scmd->error_count > 100) scmd->error_count = 100;
@@ -408,7 +452,9 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
         return;
     }
 
-    if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+    cmd.uart_port = derive_uart_port(&ch->config);
+    QueueHandle_t target_q = dispatch_queue(&s_queues, &cmd);
+    if (xQueueSend(target_q, &cmd, 0) != pdTRUE) {
         (*queue_full_count)++;
     } else {
         (*total_samples)++;
@@ -428,9 +474,13 @@ static void scheduler_task(void *p)
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(10));
         TickType_t now = xTaskGetTickCount();
 
-        /* Check queue depth for backpressure */
-        UBaseType_t queue_spaces = uxQueueSpacesAvailable(s_cmd_queue);
-        bool queue_pressure = (queue_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
+        /* Check queue depth for backpressure — use the busiest queue */
+        UBaseType_t min_spaces = CMD_QUEUE_DEPTH;
+        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.uart0_cmd_queue));
+        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.uart1_cmd_queue));
+        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.spi_cmd_queue));
+        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.i2c_cmd_queue));
+        bool queue_pressure = (min_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         /* Iterate through all active channels */
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
@@ -460,8 +510,8 @@ static void scheduler_task(void *p)
         static uint32_t last_log = 0;
         if (now - last_log > pdMS_TO_TICKS(10000)) {
             if (total_samples > 0 || queue_full_count > 0) {
-                ESP_LOGI(TAG, "Stats: samples=%" PRIu32 " full=%" PRIu32 " q_free=%d",
-                         total_samples, queue_full_count, (int)queue_spaces);
+                ESP_LOGI(TAG, "Stats: samples=%" PRIu32 " full=%" PRIu32 " min_free=%d",
+                         total_samples, queue_full_count, (int)min_spaces);
             }
             last_log = now;
             total_samples = 0;
