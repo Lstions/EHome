@@ -171,38 +171,79 @@
       />
     </el-card>
 
-    <el-card style="margin-top: 20px;" v-if="hasOperations">
+    <el-card style="margin-top: 20px;" v-if="hasConfigOperations">
       <template #header>
-        <span>设备操作</span>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span>设备操作</span>
+          <el-tag v-if="isDeviceOffline" type="info" size="small">设备离线，操作已禁用</el-tag>
+        </div>
       </template>
       <div class="operation-buttons">
-        <el-button
-          v-for="op in availableOperations"
-          :key="op.key"
-          :type="op.type"
-          :icon="op.icon"
-          :disabled="device?.status !== 'online' && device?.status !== 'active'"
-          @click="handleOperation(op.key, op.label)"
-        >
-          {{ op.label }}
-        </el-button>
+        <template v-for="(op, opKey) in configOperations" :key="opKey">
+          <!-- 无参数操作：直接按钮 -->
+          <el-button
+            v-if="!op.params || op.params.length === 0"
+            :type="op.type === 'read' ? 'primary' : 'warning'"
+            :loading="operationLoading[opKey]"
+            :disabled="isDeviceOffline"
+            @click="executeConfigOperation(opKey, op)"
+          >
+            {{ op.label }}
+          </el-button>
+          <!-- 有参数操作：按钮弹出参数对话框 -->
+          <el-button
+            v-else
+            :type="op.type === 'read' ? 'primary' : 'warning'"
+            :loading="operationLoading[opKey]"
+            :disabled="isDeviceOffline"
+            @click="openOperationDialog(opKey, op)"
+          >
+            {{ op.label }}
+          </el-button>
+        </template>
       </div>
     </el-card>
 
-    <el-dialog v-model="pwmDialogVisible" title="PWM 参数设置" width="400px">
-      <el-form label-width="80px">
-        <el-form-item label="占空比">
-          <el-input-number v-model="pwmForm.duty" :min="0" :max="100" :step="1" />
-          <span style="margin-left: 8px">%</span>
-        </el-form-item>
-        <el-form-item label="频率">
-          <el-input-number v-model="pwmForm.frequency" :min="1" :step="100" />
-          <span style="margin-left: 8px">Hz</span>
+    <!-- 设备操作参数对话框 -->
+    <el-dialog v-model="opDialogVisible" :title="opDialogTitle" width="420px" align-center>
+      <el-form label-width="100px">
+        <el-form-item
+          v-for="param in opDialogParams"
+          :key="param.name"
+          :label="param.label || param.name"
+          required
+        >
+          <el-input-number
+            v-if="param.type === 'uint8' || param.type === 'uint16' || param.type === 'int8' || param.type === 'int16'"
+            v-model="opParamValues[param.name]"
+            :min="param.min ?? 0"
+            :max="param.max ?? 255"
+            :step="1"
+            style="width: 100%;"
+          />
+          <el-select
+            v-else-if="param.type === 'enum'"
+            v-model="opParamValues[param.name]"
+            placeholder="请选择"
+            style="width: 100%;"
+          >
+            <el-option
+              v-for="opt in param.options"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+          <el-input
+            v-else
+            v-model="opParamValues[param.name]"
+            :placeholder="`请输入${param.label || param.name}`"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="pwmDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="executePwmOperation">确定</el-button>
+        <el-button @click="opDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="opDialogLoading" @click="submitOperationDialog">确定</el-button>
       </template>
     </el-dialog>
 
@@ -271,7 +312,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Connection, Top, Bottom, SetUp, Edit, Delete, Download } from '@element-plus/icons-vue'
+import { Refresh, Connection, Edit, Delete, Download } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import LineChart from '@/components/charts/LineChart.vue'
@@ -381,32 +422,136 @@ const deviceTypeText = computed(() => {
   return device.value ? deviceTypeMap[device.value.device_type] || device.value.device_type : ''
 })
 
-// 设备操作定义
-const operations: Record<string, Array<{key: string, label: string, type: string, icon: any}>> = {
-  rain: [
-    { key: 'reset_rain', label: '重置雨量', type: 'warning', icon: Refresh }
-  ],
-  battery: [
-    { key: 'restart_battery', label: '重启保护板', type: 'danger', icon: Refresh }
-  ],
-  'gpio.digital': [
-    { key: 'gpio_set_high', label: '输出高电平', type: 'success', icon: Top },
-    { key: 'gpio_set_low', label: '输出低电平', type: 'danger', icon: Bottom },
-    { key: 'gpio_toggle', label: '翻转', type: 'warning', icon: Refresh },
-  ],
-  'gpio.pwm': [
-    { key: 'pwm_set', label: '设置PWM', type: 'primary', icon: SetUp },
-  ]
+// 设备操作定义（从 DeviceConfig.operations 动态获取）
+interface OperationParam {
+  name: string
+  type: string  // 'uint8' | 'uint16' | 'int8' | 'int16' | 'enum' | string
+  label?: string
+  min?: number
+  max?: number
+  options?: Array<{ value: number | string; label: string }>
 }
 
-const availableOperations = computed(() => {
-  if (!device.value) return []
-  return operations[device.value.device_type] || []
+interface OperationDef {
+  label: string
+  type: 'read' | 'write'
+  params: OperationParam[]
+}
+
+const configOperations = computed<Record<string, OperationDef>>(() => {
+  const dc = device.value?.device_config
+  if (!dc) return {}
+  // operations may be nested under dc.config or directly on dc
+  let ops = dc.operations
+  if (!ops && dc.config) {
+    const cfg = typeof dc.config === 'string' ? JSON.parse(dc.config) : dc.config
+    ops = cfg?.operations
+  }
+  if (!ops || typeof ops !== 'object') return {}
+  return ops as Record<string, OperationDef>
 })
 
-const hasOperations = computed(() => {
-  return availableOperations.value.length > 0
+const hasConfigOperations = computed(() => {
+  return Object.keys(configOperations.value).length > 0
 })
+
+const isDeviceOffline = computed(() => {
+  if (!device.value) return true
+  return device.value.status !== 'online' && device.value.status !== 'active'
+})
+
+// 操作 loading 状态
+const operationLoading = ref<Record<string, boolean>>({})
+
+// 操作参数对话框
+const opDialogVisible = ref(false)
+const opDialogTitle = ref('')
+const opDialogParams = ref<OperationParam[]>([])
+const opParamValues = ref<Record<string, any>>({})
+const opDialogLoading = ref(false)
+const currentOpKey = ref('')
+
+function openOperationDialog(opKey: string, op: OperationDef) {
+  currentOpKey.value = opKey
+  opDialogTitle.value = op.label
+  opDialogParams.value = op.params || []
+  // 初始化参数默认值
+  const defaults: Record<string, any> = {}
+  for (const p of op.params) {
+    if (p.type === 'enum' && p.options && p.options.length > 0) {
+      defaults[p.name] = p.options[0].value
+    } else if (p.type === 'uint8' || p.type === 'uint16' || p.type === 'int8' || p.type === 'int16') {
+      defaults[p.name] = p.min ?? 0
+    } else {
+      defaults[p.name] = ''
+    }
+  }
+  opParamValues.value = defaults
+  opDialogVisible.value = true
+}
+
+async function submitOperationDialog() {
+  const opKey = currentOpKey.value
+  const op = configOperations.value[opKey]
+  if (!op || !device.value) return
+
+  opDialogLoading.value = true
+  operationLoading.value = { ...operationLoading.value, [opKey]: true }
+  try {
+    const id = Number(route.params.id)
+    const result = await edgeDeviceApi.executeOperation(id, opKey, opParamValues.value)
+    handleOperationResult(op, result)
+    opDialogVisible.value = false
+  } catch (error: any) {
+    ElMessage.error(error.message || '操作执行失败')
+  } finally {
+    opDialogLoading.value = false
+    operationLoading.value = { ...operationLoading.value, [opKey]: false }
+  }
+}
+
+async function executeConfigOperation(opKey: string, op: OperationDef) {
+  if (!device.value) return
+
+  // write 类型需要确认
+  if (op.type === 'write') {
+    try {
+      await ElMessageBox.confirm(
+        `确定要执行"${op.label}"操作吗？`,
+        '确认操作',
+        { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return // 用户取消
+    }
+  }
+
+  operationLoading.value = { ...operationLoading.value, [opKey]: true }
+  try {
+    const id = Number(route.params.id)
+    const result = await edgeDeviceApi.executeOperation(id, opKey)
+    handleOperationResult(op, result)
+  } catch (error: any) {
+    ElMessage.error(error.message || '操作执行失败')
+  } finally {
+    operationLoading.value = { ...operationLoading.value, [opKey]: false }
+  }
+}
+
+function handleOperationResult(op: OperationDef, result: any) {
+  if (op.type === 'write') {
+    ElMessage.success('命令已发送')
+  } else {
+    // read 类型：显示返回值
+    const value = result?.value ?? result?.data?.value
+    const unit = result?.unit ?? result?.data?.unit ?? ''
+    if (value !== undefined && value !== null) {
+      ElMessage.success(`查询结果: ${value}${unit ? ' ' + unit : ''}`)
+    } else {
+      ElMessage.success('查询成功')
+    }
+  }
+}
 
 // WebSocket 消息处理
 function handleWebSocketMessage(message: any) {
@@ -772,56 +917,6 @@ const handleExportCSV = () => {
   URL.revokeObjectURL(url)
 
   ElMessage.success('导出成功')
-}
-
-const handleOperation = async (operation: string, label: string) => {
-  if (operation === 'pwm_set') {
-    pwmDialogVisible.value = true
-    pwmForm.value = { duty: 50, frequency: 1000 }
-    currentPwmOperation.value = operation
-    return
-  }
-
-  try {
-    await ElMessageBox.confirm(
-      `确定要执行"${label}"操作吗？`,
-      '确认操作',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }
-    )
-
-    const id = Number(route.params.id)
-    await edgeDeviceApi.executeOperation(id, operation)
-    ElMessage.success(`${label}命令已发送`)
-    await fetchDeviceDetail()
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error(error.message || '操作执行失败')
-    }
-  }
-}
-
-// PWM 参数
-const pwmDialogVisible = ref(false)
-const pwmForm = ref({ duty: 50, frequency: 1000 })
-const currentPwmOperation = ref('')
-
-const executePwmOperation = async () => {
-  try {
-    const id = Number(route.params.id)
-    await edgeDeviceApi.executeOperation(id, currentPwmOperation.value, {
-      duty: pwmForm.value.duty,
-      frequency: pwmForm.value.frequency,
-    })
-    ElMessage.success('PWM 设置命令已发送')
-    pwmDialogVisible.value = false
-    await fetchDeviceDetail()
-  } catch (error: any) {
-    ElMessage.error(error.message || '操作失败')
-  }
 }
 
 const handleSyncToHA = async () => {

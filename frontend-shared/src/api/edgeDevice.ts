@@ -19,7 +19,7 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
-  device_config?: { protocol?: string; config?: Record<string, any> | string }
+  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, any> }
 }
 
 export interface EdgeDeviceListParams {
@@ -48,7 +48,7 @@ interface RawEdgeDevice {
   type?: string
   device_type?: string
   protocol?: string
-  device_config?: { protocol?: string; config?: Record<string, any> | string }
+  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, any> }
   hardware_type?: string
   channel?: { hardware_type?: string; hardware_id?: string }
   hardware_id?: string
@@ -166,9 +166,9 @@ export const edgeDeviceApi = {
   },
 
   async executeOperation(id: number, operation: string, params?: Record<string, any>): Promise<any> {
-    const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/operations`, {
+    const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/execute`, {
       operation,
-      params
+      params: params || {}
     })
     return response.data || response
   },
