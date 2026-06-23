@@ -177,16 +177,39 @@
             </div>
           </div>
           <div class="dma-controls" @click.stop>
-            <label class="dma-toggle">
-              <el-switch
-                :model-value="getDmaSwitchState(dma)"
-                :disabled="collector?.status !== 'online'"
-                :loading="dmaTogglingMap[dma.dma_id] || false"
-                @change="toggleDma(dma, $event)"
-                active-text="启用"
-                inactive-text="禁用"
-              />
-            </label>
+            <!-- DMA 绑定只能通过 ChannelPanel 的硬件开关操作，此处仅展示状态 -->
+            <el-tag
+              v-if="dma.bound_to"
+              type="success"
+              size="small"
+              effect="plain"
+            >
+              绑定: {{ dma.bound_to }}
+            </el-tag>
+            <el-tag
+              v-else-if="dma.state === DmaState.ALLOCATED"
+              type="warning"
+              size="small"
+              effect="plain"
+            >
+              未绑定
+            </el-tag>
+            <el-tag
+              v-else-if="dma.state === DmaState.FREE"
+              type="info"
+              size="small"
+              effect="plain"
+            >
+              未使用
+            </el-tag>
+            <el-tag
+              v-else-if="dma.state === DmaState.DISABLED"
+              type="danger"
+              size="small"
+              effect="plain"
+            >
+              已禁用
+            </el-tag>
           </div>
         </div>
       </div>
@@ -332,13 +355,14 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
-import { nodeApi, type OTARecord, type DmaChannelInfo } from '@/api/node'
+import { nodeApi, type OTARecord } from '@/api/node'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
+import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
 
 const router = useRouter()
 const route = useRoute()
@@ -359,10 +383,9 @@ const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
 const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 
-// DMA 通道 — v2.5: 统一由 dmaStore 管理
+// DMA 通道 — v2.5: 统一由 dmaStore 管理（只读展示，绑定操作在 ChannelPanel 中）
 const dmaChannels = computed(() => dmaStore.mergedChannels)
 const dmaLoading = computed(() => dmaStore.loading)
-const dmaTogglingMap = computed(() => dmaStore.toggling)
 
 let unsubscribe: (() => void) | null = null
 
@@ -622,35 +645,10 @@ const hasPeripherals = computed(() => {
 })
 
 // ============================================================
-// DMA 辅助函数
+// DMA 辅助函数 — 使用共享枚举 (dmaState.ts)
 // ============================================================
 
-const dmaStateText = (state: number): string => {
-  switch (state) {
-    case 0: return '空闲'
-    case 1: return '已分配'
-    case 2: return '已禁用'
-    default: return '未知'
-  }
-}
-
-const dmaStateClass = (state: number): string => {
-  switch (state) {
-    case 0: return 'dma-state-free'
-    case 1: return 'dma-state-allocated'
-    case 2: return 'dma-state-disabled'
-    default: return ''
-  }
-}
-
-const dmaStateTagType = (state: number): string => {
-  switch (state) {
-    case 0: return 'info'
-    case 1: return 'success'
-    case 2: return 'danger'
-    default: return 'info'
-  }
-}
+// dmaStateText, dmaStateClass, dmaStateTagType 已从 @/utils/dmaState 导入
 
 const dmaTypeText = (type: number): string => {
   return type === 0 ? 'GDMA' : `类型${type}`
@@ -672,21 +670,8 @@ const busText = (bus: number): string => {
   return parts.join(', ') || '无'
 }
 
-const getDmaSwitchState = (dma: DmaChannelInfo): boolean => {
-  return dmaStore.isSwitchOn(dma)
-}
-
 const loadDmaChannels = async () => {
   await dmaStore.fetch(collectorId.value)
-}
-
-const toggleDma = async (dma: DmaChannelInfo, enabled: boolean) => {
-  try {
-    await dmaStore.toggle(collectorId.value, dma, enabled)
-    ElMessage.success(enabled ? `已启用 ${dma.name}` : `已禁用 ${dma.name}`)
-  } catch (error: any) {
-    ElMessage.error('操作失败: ' + (error.message || '未知错误'))
-  }
 }
 
 // 采集器上线时刷新通道列表
@@ -962,12 +947,5 @@ onUnmounted(() => {
   justify-content: flex-end;
   padding-top: 8px;
   border-top: 1px solid #ebeef5;
-}
-
-.dma-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
 }
 </style>

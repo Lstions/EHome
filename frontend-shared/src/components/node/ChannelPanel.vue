@@ -209,6 +209,7 @@ import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
 import { logger } from '@/utils/logger'
 import { useDmaStore } from '@/stores/dma'
+import { DmaState, isDmaRebindable } from '@/utils/dmaState'
 import type { DmaChannelInfo } from '@/api/node'
 
 interface Props {
@@ -421,7 +422,7 @@ const refreshBuses = async () => {
           const dmaList = dmaStore.mergedChannels
           if (dmaList && dmaList.length > 0) {
             for (const dma of dmaList) {
-              if (dma.bound_to && dma.state === 1) {  // state=1 = allocated
+              if (dma.bound_to && dma.state === DmaState.ALLOCATED) {  // state=1 = allocated
                 // bound_to format: "UART_CH39" or "busType/hwId"
                 const boundStr = typeof dma.bound_to === 'string' ? dma.bound_to : ''
                 const hwId = String(r.id)
@@ -744,8 +745,9 @@ const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean =>
   if (!props.collectorStatus || props.collectorStatus !== 'online') return false
   // Already bound to this hardware — can toggle OFF
   if (isDmaBoundTo(dma, busType, hw)) return true
-  // Free channel OR disabled channel — can toggle ON
-  if (dma.state === 0 || dma.state === 2) {
+  // Free, disabled, or allocated-but-unbound (orphan) — can toggle ON
+  // bound_to may be undefined (field missing) or "" (empty string) — !boundTo handles both
+  if (isDmaRebindable(dma.state, dma.bound_to)) {
     // v2.5: mutual exclusion — only one DMA per hardware.
     // If another DMA is already bound to this same hw, block.
     const hwKey = `${busType.toLowerCase()}/${hw.id}`
@@ -758,7 +760,7 @@ const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean =>
     }
     return true
   }
-  // Allocated to another hardware — cannot toggle
+  // Allocated and bound to another hardware — cannot toggle
   return false
 }
 

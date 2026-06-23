@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { nodeApi, type DmaChannelInfo, type DmaChannelConfig } from '@/api/node'
+import { DmaState, isDmaRebindable } from '@/utils/dmaState'
 
 /**
  * DMA 通道统一状态管理 (v2.5)
@@ -50,6 +51,7 @@ export const useDmaStore = defineStore('dma', () => {
       const list = await nodeApi.getDmaChannels(collectorId)
       channels.value = list
       overrideState.value = {}
+      bindToCache.value = {}
     } finally {
       loading.value = false
     }
@@ -58,8 +60,16 @@ export const useDmaStore = defineStore('dma', () => {
   async function toggle(collectorId: string | number, dma: DmaChannelInfo, enabled: boolean, bindTo?: string) {
     const dmaId = dma.dma_id
 
+    // 并发守卫：防止快速点击触发重复请求
+    if (toggling.value[dmaId]) return
+
+    // 防御检查：启用 DMA 必须指定绑定目标，否则会产生孤儿状态
+    if (enabled && !bindTo && !bindToCache.value[dmaId] && !dma.bound_to) {
+      throw new Error('启用 DMA 必须指定绑定目标（bindTo）')
+    }
+
     // 乐观更新
-    overrideState.value[dmaId] = enabled ? 1 : 2   // 1=allocated, 2=disabled
+    overrideState.value[dmaId] = enabled ? DmaState.ALLOCATED : DmaState.DISABLED
     if (enabled && bindTo) {
       bindToCache.value[dmaId] = bindTo
     } else if (!enabled && dma.bound_to) {
@@ -68,30 +78,37 @@ export const useDmaStore = defineStore('dma', () => {
     toggling.value[dmaId] = true
 
     try {
-      // v2.5: 发送所有 DMA 通道的完整配置，确保互斥。
-      // 如果启用此 DMA 并绑定到某硬件，先解绑其他已绑定同一硬件的 DMA。
-      const allConfigs: DmaChannelConfig[] = []
-      const hwKey = (enabled && bindTo) ? bindTo.toLowerCase() : ''
-      for (const ch of channels.value) {
-        if (ch.dma_id === dmaId) {
-          allConfigs.push({
-            dma_id: dmaId,
-            enabled,
-            bind_to: enabled ? (bindTo || bindToCache.value[dmaId] || ch.bound_to || '') : ''
-          })
-        } else if (hwKey && ch.bound_to && ch.bound_to.toLowerCase() === hwKey) {
-          // 解绑已占用同一硬件的其他 DMA
-          allConfigs.push({ dma_id: ch.dma_id, enabled: false, bind_to: '' })
-        } else {
-          allConfigs.push({ dma_id: ch.dma_id, enabled: ch.state !== 2, bind_to: ch.bound_to })
+      // v2.5: 只发送需要更新的通道，后端会合并保留其他通道的原状态
+      const configs: DmaChannelConfig[] = []
+      
+      // 当前操作的通道
+      configs.push({
+        dma_id: dmaId,
+        enabled,
+        bind_to: enabled ? (bindTo || bindToCache.value[dmaId] || dma.bound_to || '') : ''
+      })
+      
+      // 如果启用此通道并绑定到某硬件，解绑其他已绑定同一硬件的通道（互斥）
+      // 使用 mergedChannels 确保乐观更新期间的绑定状态也被检测到
+      if (enabled && bindTo) {
+        const hwKey = bindTo.toLowerCase()
+        for (const ch of mergedChannels.value) {
+          if (ch.dma_id === dmaId) continue
+          if (ch.bound_to && ch.bound_to.toLowerCase() === hwKey) {
+            configs.push({ dma_id: ch.dma_id, enabled: false, bind_to: '' })
+          }
         }
       }
-      await nodeApi.updateDmaConfig(collectorId, allConfigs)
+      
+      await nodeApi.updateDmaConfig(collectorId, configs)
 
       // 刷新真实数据
       await fetch(collectorId)
     } catch (e: any) {
+      // 回滚乐观更新
       delete overrideState.value[dmaId]
+      // 清理残留的 bindToCache，防止脏数据
+      delete bindToCache.value[dmaId]
       throw e
     } finally {
       toggling.value[dmaId] = false
