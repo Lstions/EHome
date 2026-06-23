@@ -123,6 +123,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                                 .edge_device_id = cmd.edge_device_id,
                                 .command_index  = cmd.command_index,
                                 .request_id     = cmd.request_id,
+                                .read_size      = cmd.read_size,
                             };
                             if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
                                 ESP_LOGW(tag, "pending queue full for slot %d (write+read), dropping pending", i);
@@ -159,6 +160,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                             .edge_device_id = cmd.edge_device_id,
                             .command_index  = cmd.command_index,
                             .request_id     = 0,
+                            .read_size      = 0,
                         };
                         if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
                             ESP_LOGW(tag, "pending queue full for slot %d (sample), dropping pending", i);
@@ -355,17 +357,49 @@ static void rx_task(void *pv)
                 uint32_t eid = 0;
                 uint8_t  cidx = 0;
 
-                /* Dequeue one pending entry per RX read (FIFO match).
-                 * Each TX command enqueues one pending_cmd_t; each RX
-                 * read consumes one, preserving TX/RX ordering. */
+                /* Smart pending queue match: prefer CMD_WRITE+readSize entries
+                 * whose read_size matches the RX length. This prevents CMD_SAMPLE
+                 * entries (read_size=0, matches any) from stealing the slot when
+                 * a CMD_WRITE+readSize response is expected.
+                 *
+                 * Algorithm: drain the queue, find the best match, push back
+                 * non-matching entries in original order. */
+                pending_cmd_t best_match;
+                bool found = false;
+                pending_cmd_t drained[4];  /* queue depth = 4 */
+                int drained_count = 0;
                 pending_cmd_t pcmd;
-                if (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
-                    rid  = pcmd.request_id;
-                    eid  = pcmd.edge_device_id;
-                    cidx = pcmd.command_index;
+
+                /* Drain the entire queue */
+                while (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
+                    if (!found && pcmd.read_size > 0 && pcmd.read_size == n) {
+                        /* Exact length match for CMD_WRITE+readSize — use this */
+                        best_match = pcmd;
+                        found = true;
+                    } else if (!found && pcmd.read_size == 0) {
+                        /* CMD_SAMPLE entry (matches any length) — keep as fallback */
+                        drained[drained_count++] = pcmd;
+                    } else {
+                        /* Non-matching entry — push back later */
+                        drained[drained_count++] = pcmd;
+                    }
                 }
-                /* If no pending entry, rid/eid/cidx stay 0 — data
-                 * arrives without command context (e.g. unsolicited). */
+
+                if (found) {
+                    rid  = best_match.request_id;
+                    eid  = best_match.edge_device_id;
+                    cidx = best_match.command_index;
+                } else if (drained_count > 0) {
+                    /* No exact match — use first fallback (CMD_SAMPLE) */
+                    rid  = drained[0].request_id;
+                    eid  = drained[0].edge_device_id;
+                    cidx = drained[0].command_index;
+                    /* Push back remaining entries */
+                    for (int j = 1; j < drained_count; j++) {
+                        xQueueSendToBack(s->pending_queues[i], &drained[j], 0);
+                    }
+                }
+                /* If no pending entry at all, rid/eid/cidx stay 0 — unsolicited. */
 
                 uint64_t ts = esp_timer_get_time();
                 if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, eid, cidx);

@@ -40,6 +40,7 @@ typedef struct {
     uint32_t edge_device_id;
     uint8_t  command_index;
     uint32_t request_id;       /* 0 for CMD_SAMPLE (no WriteResponse) */
+    uint32_t read_size;        /* Expected RX length for CMD_WRITE+readSize; 0 = any length ok */
 } pending_cmd_t;
 
 typedef struct {

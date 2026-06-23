@@ -89,7 +89,10 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	}
 }
 
-// HandleResponse processes a WriteResponse from a device
+// HandleResponse processes a WriteResponse from a device.
+// For read operations (ReadSize > 0), WriteRsp only confirms the command was received
+// by the firmware — the actual data will arrive via DataReportAck.
+// We must NOT resolve the pending entry on WriteRsp for reads, otherwise we lose the RawData.
 func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint32, errorMsg string) {
 	m.mu.Lock()
 	entry, ok := m.pending[requestID]
@@ -99,6 +102,22 @@ func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint3
 		return
 	}
 
+	// If this is a read operation (readSize > 0), WriteRsp is just an ACK.
+	// The real response comes via HandleDataReportAck with the raw data.
+	// Only fail early if the firmware reported an error.
+	if entry.ReadSize > 0 {
+		if !success {
+			entry.Response <- &Response{
+				Success:   false,
+				ErrorCode: errorCode,
+				ErrorMsg:  errorMsg,
+			}
+		}
+		// success: don't resolve, wait for DataReportAck
+		return
+	}
+
+	// For write-only operations (readSize == 0), WriteRsp is the final response.
 	entry.Response <- &Response{
 		Success:   success,
 		ErrorCode: errorCode,

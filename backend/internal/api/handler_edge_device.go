@@ -556,6 +556,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			}
 		}
 
+		// Default to Modbus slave address 1 if not resolved from hardware_id or connection
+		if addr == 0 {
+			addr = 1
+		}
+
 		// 4. Render command template
 		vars := TemplateVars{
 			Addr:   addr,
@@ -602,7 +607,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		case "read":
 			// Read operation: use pendingwrite to wait for response
-			timeout := time.Duration(3000) * time.Millisecond
+			timeout := time.Duration(10000) * time.Millisecond
 			if opConfig.TimeoutMs > 0 {
 				timeout = time.Duration(opConfig.TimeoutMs) * time.Millisecond
 			}
@@ -610,6 +615,9 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if readSize == 0 {
 				readSize = 9 // default Modbus response size
 			}
+
+			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v dataHex=%x",
+				req.Operation, deviceID, edge.ChannelID, readSize, timeout, writeData)
 
 			resp, err := nodeMgr.PendingWrite().SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, readSize, timeout)
 			if err != nil {
