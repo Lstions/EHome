@@ -131,6 +131,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		if len(tpl.InitFlow) == 0 {
 			tpl.InitFlow = json.RawMessage([]byte("[]"))
 		}
+		if len(tpl.Operations) == 0 {
+			tpl.Operations = json.RawMessage([]byte("{}"))
+		}
 		if err := db.Create(&tpl).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
@@ -186,6 +189,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		if len(update.InitFlow) == 0 {
 			update.InitFlow = json.RawMessage([]byte("[]"))
+		}
+		if len(update.Operations) == 0 {
+			update.Operations = json.RawMessage([]byte("{}"))
 		}
 		if err := db.Save(&update).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})

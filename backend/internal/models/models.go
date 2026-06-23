@@ -165,7 +165,8 @@ type DeviceConfig struct {
 	// v2.2 新增三大部分 JSONB 字段 (推荐使用)
 	Connection json.RawMessage `gorm:"type:jsonb;not null;default:'{}';serializer:json" json:"connection"` // 设备连接参数 {protocol, default_params, ...}
 	Parser     json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"parser"`                    // 数据解析器 {id, options}
-	InitFlow   json.RawMessage `gorm:"type:jsonb;default:'[]';serializer:json" json:"init_flow"`               // 业务配置流程 {steps: [...]}
+	InitFlow    json.RawMessage `gorm:"type:jsonb;default:'[]';serializer:json" json:"init_flow"`               // 业务配置流程 {steps: [...]}
+	Operations  json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"operations"`             // 设备支持的操作 {op_id: {name, params, ...}}
 	// 关联 (可选)
 	VendorID      *uint `gorm:"index" json:"vendor_id,omitempty"`
 	DeviceModelID *uint `gorm:"index" json:"device_model_id,omitempty"`
