@@ -71,9 +71,6 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		// Command response — skip DB storage and WS push
 		return
 	}
-		// The data has been delivered to the pendingwrite caller already.
-		return
-	}
 
 	// Get node
 	var node models.Node
