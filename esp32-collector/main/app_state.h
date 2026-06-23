@@ -35,6 +35,13 @@ typedef void (*data_rpt_cb_t)(uint32_t ch, uint64_t ts, uint32_t seq,
                                const uint8_t *data, size_t len, uint32_t code, uint32_t rid,
                                uint32_t edge_device_id, uint8_t command_index);
 
+/* ---- Pending command descriptor for per-channel FreeRTOS Queue ---- */
+typedef struct {
+    uint32_t edge_device_id;
+    uint8_t  command_index;
+    uint32_t request_id;       /* 0 for CMD_SAMPLE (no WriteResponse) */
+} pending_cmd_t;
+
 typedef struct {
     /* ---- Identity (auto-generated from MAC) ---- */
     char        node_id[NODE_ID_MAX_LEN];
@@ -59,12 +66,14 @@ typedef struct {
     /* ---- Command queue ---- */
     QueueHandle_t cmd_queue;
 
-    /* ---- Pending WriteCommand request_ids (per channel) ---- */
-    uint32_t    pending_requests[SCHED_MAX_CHANNELS];
+    /* ---- Pending command state (per channel, FreeRTOS Queue) ---- */
+    /* Each UART channel has a queue of pending_cmd_t entries so that
+     * cmd_task (TX) and rx_task (RX) never race on a single shared slot.
+     * Queue depth=4 is based on MAX_EDGE_DEVICES_PER_CH=5 with margin. */
+    QueueHandle_t pending_queues[SCHED_MAX_CHANNELS];
 
     /* ---- DMA resource pool (DIP: injected, not global) ---- */
     struct dma_pool_t *dma_pool;
-
 } app_state_t;
 
 /* ---- Lifecycle ---- */

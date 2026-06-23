@@ -92,12 +92,65 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	}
 }
 
-// parseAndStoreData parses raw data using device drivers and stores in unified_data
-// Returns the parsed sensor data map (for WS broadcast) or nil on failure
-func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, rawData []byte) map[string]interface{} {
-	// Get device type from database
+// findEdgeDeviceByChannelID resolves an edge_device from the channel_id in a DataReport.
+//
+// C6 firmware encodes channel_id as the config_mgr internal index (0-based), NOT the
+// channels.id DB primary key.  When the direct lookup `WHERE channel_id = ?` succeeds
+// (new firmware that sends the real DB id), we use that.  Otherwise we fall back to
+// finding the channel by its position among the node's channels (ordered by id) and
+// then looking up the edge_device on that channel.
+//
+// If edgeDeviceID > 0 (new firmware provides it directly), we look up by primary key
+// first — this is the preferred fast path.
+func (m *Manager) findEdgeDeviceByChannelID(deviceID string, channelID uint64, edgeDeviceID uint64) (models.EdgeDevice, bool) {
 	var device models.EdgeDevice
-	if err := m.db.Preload("Node").Where("channel_id = ?", channelID).First(&device).Error; err != nil {
+
+	// Fast path: new firmware provides edge_device_id directly
+	if edgeDeviceID > 0 {
+		if err := m.db.Preload("Node").Where("id = ?", edgeDeviceID).First(&device).Error; err == nil {
+			return device, true
+		}
+		// Fall through to channel-based lookup if edge_device_id lookup fails
+	}
+
+	// Try direct channel_id lookup (works when C6 sends channels.id as channel_id)
+	if err := m.db.Preload("Node").Where("channel_id = ?", channelID).First(&device).Error; err == nil {
+		return device, true
+	}
+
+	// Fallback: C6 sends channel_id as 0-based index into its config_mgr channel list.
+	// Find the node's channels ordered by id, pick the one at index channelID,
+	// then find the edge_device on that channel.
+	var channels []models.Channel
+	if err := m.db.Where("node_id = ?", deviceID).Order("id ASC").Find(&channels).Error; err != nil {
+		return device, false
+	}
+
+	idx := int(channelID)
+	if idx < 0 || idx >= len(channels) {
+		logger.Infof("[%s] Channel index %d out of range (node has %d channels)", deviceID, channelID, len(channels))
+		return device, false
+	}
+
+	realChannelID := channels[idx].ID
+	if err := m.db.Preload("Node").Where("channel_id = ?", realChannelID).First(&device).Error; err != nil {
+		// Last resort: if multiple edge_devices on this channel, try node_id + channel_id
+		if err2 := m.db.Preload("Node").Where("channel_id = ? AND node_id = ?", realChannelID, deviceID).First(&device).Error; err2 != nil {
+			return device, false
+		}
+	}
+
+	logger.Infof("[%s] Resolved channel_id %d (C6 index) -> channels.id %d -> edge_device.id %d",
+		deviceID, channelID, realChannelID, device.ID)
+	return device, true
+}
+
+// parseAndStoreData parses raw data using device drivers and stores in unified_data
+// Returns the parsed sensor (for WS broadcast) or nil on failure
+func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, edgeDeviceID uint64, rawData []byte) map[string]interface{} {
+	// Get device type from database
+	device, found := m.findEdgeDeviceByChannelID(deviceID, channelID, edgeDeviceID)
+	if !found {
 		return nil
 	}
 

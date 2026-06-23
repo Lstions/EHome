@@ -16,7 +16,9 @@
 #include <inttypes.h>
 
 #define TAG "APP_STATE"
-#define FIRMWARE_VERSION "2.5.6"
+/* Single source of truth: version comes from CMakeLists.txt PROJECT_VER,
+ * injected via target_compile_definitions as EHOME_PROJECT_VER. */
+#define FIRMWARE_VERSION EHOME_PROJECT_VER
 #define MODEL_NAME       CONFIG_IDF_TARGET
 
 /* ==== Singleton ==== */
@@ -64,6 +66,14 @@ app_state_t *app_state_init(void)
     /* Zero the pool markers */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_app.bus_ch[i] = 0;
+    }
+
+    /* Per-channel pending queues (depth=4, replaces race-prone single-slot arrays) */
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        s_app.pending_queues[i] = xQueueCreate(4, sizeof(pending_cmd_t));
+        if (s_app.pending_queues[i] == NULL) {
+            ESP_LOGE(TAG, "Failed to create pending queue for slot %d!", i);
+        }
     }
 
     /* DMA pool init (from chip-specific hw_profile table) */

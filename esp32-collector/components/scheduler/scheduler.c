@@ -141,6 +141,9 @@ sched_err_t scheduler_add_channel(const config_channel_t *ch)
         if (count > MAX_EDGE_DEVICES_PER_CH)
             count = MAX_EDGE_DEVICES_PER_CH;
         s_channels[slot].edge_device_count = count;
+        ESP_LOGI(TAG, "scheduler_add_channel: ch_id=%lu, edge_device_count=%d, ed[0].id=%lu",
+                 (unsigned long)ch->id, ch->edge_device_count,
+                 ch->edge_device_count > 0 ? (unsigned long)ch->edge_devices[0].edge_device_id : 0);
 
         for (int ed = 0; ed < count; ed++) {
             const config_edge_device_t *src = &ch->edge_devices[ed];
@@ -317,11 +320,13 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
 
             /* Build bus_cmd_t */
             bus_cmd_t bcmd = {
-                .channel_id = ch->config.id,
-                .bus_type   = ch->config.bus_type,
-                .tx_len     = t->write_data_len < CMD_TX_MAX ? t->write_data_len : CMD_TX_MAX,
-                .delay_ms   = t->delay_ms > 0 ? t->delay_ms : 0,
-                .type       = CMD_SAMPLE,
+                .channel_id     = ch->config.id,
+                .bus_type       = ch->config.bus_type,
+                .tx_len         = t->write_data_len < CMD_TX_MAX ? t->write_data_len : CMD_TX_MAX,
+                .delay_ms       = t->delay_ms > 0 ? t->delay_ms : 0,
+                .edge_device_id = dev->edge_device_id,
+                .command_index  = (uint8_t)ci,
+                .type           = CMD_SAMPLE,
             };
             memcpy(bcmd.tx_data, t->write_data, bcmd.tx_len);
 
@@ -431,10 +436,19 @@ static void scheduler_task(void *p)
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
             if (!s_channels[i].active || !s_channels[i].config.enabled)
                 continue;
-
             sched_channel_t *ch = &s_channels[i];
 
             /* Dispatch to appropriate scheduling strategy */
+            {
+                static TickType_t s_path_log_time[SCHED_MAX_CHANNELS] = {0};
+                TickType_t now2 = xTaskGetTickCount();
+                if (s_path_log_time[i] == 0 || now2 - s_path_log_time[i] > pdMS_TO_TICKS(60000)) {
+                    ESP_LOGI(TAG, "sched: ch=%lu edge_device_count=%d, choosing %s path",
+                             (unsigned long)ch->config.id, ch->edge_device_count,
+                             ch->edge_device_count > 0 ? "v2" : "v1");
+                    s_path_log_time[i] = now2;
+                }
+            }
             if (ch->edge_device_count > 0) {
                 schedule_v2_channel(ch, now, queue_pressure, &total_samples, &queue_full_count);
             } else {

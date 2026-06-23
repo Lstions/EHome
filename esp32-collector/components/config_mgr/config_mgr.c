@@ -251,6 +251,8 @@ static void parse_channel_fields(config_channel_t *cur_channel, const uint8_t *d
             case 9: /* edge_device_groups */
                 if (cf.wire_type == WIRE_LENGTH_DELIMITED && cf.value.bytes.ptr
                     && cur_channel->edge_device_count < MAX_EDGE_DEVICES_PER_CH) {
+                    ESP_LOGI(TAG, "Parsed edge_device: ch_id=%lu, ed_count=%d, bytes_len=%d",
+                             (unsigned long)cur_channel->id, cur_channel->edge_device_count, (int)cf.value.bytes.len);
                     parse_edge_device(cur_channel, cf.value.bytes.ptr, cf.value.bytes.len);
                 }
                 break;
@@ -304,6 +306,7 @@ static void parse_edge_device_fields(config_edge_device_t *cur_ed, const uint8_t
             switch (ef.field_num) {
             case 1: /* edge_device_id */
                 cur_ed->edge_device_id = (uint32_t)ef.value.varint;
+                ESP_LOGI(TAG, "  ed.f1: edge_device_id=%lu", (unsigned long)cur_ed->edge_device_id);
                 break;
             case 2: /* hardware_id */
                 cur_ed->hardware_id = (uint32_t)ef.value.varint;
@@ -381,6 +384,7 @@ static void log_parsed_manifest(const config_manifest_t *target)
                  i, (unsigned long)ch->id, (unsigned long)ch->hardware_id,
                  (unsigned long)ch->interval_ms, ch->enabled, ch->bus_type,
                  (unsigned)ch->bus_config_len, (unsigned)ch->template_count);
+        ESP_LOGI(TAG, "  channel[%d]: edge_device_count=%d", i, ch->edge_device_count);
         for (int t = 0; t < ch->template_count; t++) {
             ESP_LOGD(TAG, "    template_id[%d]=%lu", t, (unsigned long)ch->template_ids[t]);
         }

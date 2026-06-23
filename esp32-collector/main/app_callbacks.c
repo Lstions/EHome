@@ -139,6 +139,12 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
     /* === Phase 0: Parse new manifest (inside mutex) === */
     config_mgr_apply_manifest(data, len);
+    {
+        const config_manifest_t *tmp_cfg = config_mgr_get_manifest();
+        ESP_LOGI(TAG, "After apply_manifest: channels=%d, ch[0].edge_device_count=%d",
+                 tmp_cfg ? tmp_cfg->channel_count : 0,
+                 (tmp_cfg && tmp_cfg->channel_count > 0) ? tmp_cfg->channels[0].edge_device_count : -1);
+    }
 
     /* v2.4: Apply DmaChannelConfig to dma_pool.
      * Previously done in parse_manifest() but removed (redundant ALLOCATED→FREE→ALLOCATED).

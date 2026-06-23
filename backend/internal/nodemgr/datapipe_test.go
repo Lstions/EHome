@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"strconv"
 	_ "ehome/backend/pkg/logger"
 	"testing"
 	"time"
@@ -63,7 +62,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	// Build a minimal manager
 	mgr := &Manager{db: db}
 
-	mgr.parseAndStoreData(col.ID, strconv.FormatInt(col.NodeID, 10), uint64(ch.ID), rawData)
+	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), 0, rawData)
 
 	// Verify unified_data was written
 	var unified []models.UnifiedData
@@ -98,7 +97,7 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 	// No device created
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), []byte{1, 2, 3, 4, 5, 6})
+	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), 0, []byte{1, 2, 3, 4, 5, 6})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)
@@ -121,7 +120,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db.Create(&dev)
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), []byte{})
+	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), 0, []byte{})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)
@@ -212,4 +211,106 @@ func TestDriverRegistry_Global(t *testing.T) {
 	// The init() in this file registers them
 	types := drivers.List()
 	t.Logf("registered: %v", types)
+}
+
+// TestFindEdgeDeviceByChannelID_C6IndexFallback: when C6 sends channel_id=0 (its
+// internal config_mgr index) instead of the DB channels.id, the fallback path
+// should resolve the correct edge_device by looking up the node's channels
+// ordered by id and treating the C6 channel_id as a 0-based index.
+func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{})
+
+	// Create a node
+	node := models.Node{
+		NodeID:          "AABBCCDDEE01",
+		Model:           "ESP32C6",
+		FirmwareVersion: "1.0.0",
+		Status:          "online",
+	}
+	db.Create(&node)
+
+	// Create two channels (DB will assign IDs like 1,2 — but they might not start at 0)
+	ch1 := models.Channel{
+		NodeID:       node.NodeID,
+		HardwareID:   "1",
+		BusType:      "I2C",
+		IntervalMs:   5000,
+		Enabled:      true,
+	}
+	db.Create(&ch1)
+
+	ch2 := models.Channel{
+		NodeID:       node.NodeID,
+		HardwareID:   "0x76",
+		BusType:      "I2C",
+		IntervalMs:   1000,
+		Enabled:      true,
+	}
+	db.Create(&ch2)
+
+	// Create edge devices on both channels
+	ed1 := models.EdgeDevice{
+		Name:      "BMP280-Ch1",
+		NodeID:    node.NodeID,
+		ChannelID: ch1.ID,
+		Type:      "bmp280",
+	}
+	db.Create(&ed1)
+
+	ed2 := models.EdgeDevice{
+		Name:      "LK_TH01-Ch2",
+		NodeID:    node.NodeID,
+		ChannelID: ch2.ID,
+		Type:      "lk_th01",
+	}
+	db.Create(&ed2)
+
+	mgr := &Manager{db: db}
+
+	// Test 1: Direct lookup by channels.id should work (new firmware path)
+	device, found := mgr.findEdgeDeviceByChannelID(node.NodeID, uint64(ch1.ID), 0)
+	if !found {
+		t.Error("expected to find edge_device by direct channel_id lookup")
+	}
+	if device.ID != ed1.ID {
+		t.Errorf("expected device ID %d, got %d", ed1.ID, device.ID)
+	}
+
+	// Test 2: C6 index 0 should resolve to the first channel (ch1)
+	// This simulates C6 sending channel_id=0 when ch1.ID is actually a larger number
+	device, found = mgr.findEdgeDeviceByChannelID(node.NodeID, 0, 0)
+	if !found {
+		t.Error("expected to find edge_device by C6 index 0 fallback")
+	}
+	if device.ID != ed1.ID {
+		t.Errorf("expected device ID %d (ch1), got %d", ed1.ID, device.ID)
+	}
+
+	// Test 3: C6 index 1 should resolve to the second channel (ch2)
+	device, found = mgr.findEdgeDeviceByChannelID(node.NodeID, 1, 0)
+	if !found {
+		t.Error("expected to find edge_device by C6 index 1 fallback")
+	}
+	if device.ID != ed2.ID {
+		t.Errorf("expected device ID %d (ch2), got %d", ed2.ID, device.ID)
+	}
+
+	// Test 4: edge_device_id > 0 should use direct primary key lookup
+	device, found = mgr.findEdgeDeviceByChannelID(node.NodeID, 0, uint64(ed2.ID))
+	if !found {
+		t.Error("expected to find edge_device by edge_device_id")
+	}
+	if device.ID != ed2.ID {
+		t.Errorf("expected device ID %d, got %d", ed2.ID, device.ID)
+	}
+
+	// Test 5: Out-of-range index should return false
+	_, found = mgr.findEdgeDeviceByChannelID(node.NodeID, 99, 0)
+	if found {
+		t.Error("expected NOT to find edge_device for out-of-range index 99")
+	}
 }

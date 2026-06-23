@@ -64,13 +64,8 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	// request_id routing
 	if job.requestID != 0 && m.pendingWrite != nil {
 		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)
-		var device models.EdgeDevice
-		if job.edgeDeviceID > 0 {
-			m.db.Where("id = ?", job.edgeDeviceID).First(&device)
-		} else {
-			m.db.Where("channel_id = ?", job.channelID).First(&device)
-		}
-		if m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
+		device, found := m.findEdgeDeviceByChannelID(job.deviceID, job.channelID, job.edgeDeviceID)
+		if found && m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
 			logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
 		}
 	}
@@ -113,7 +108,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// Parse and store unified data (includes HA state push)
 	if job.errorCode == 0 && job.rawData != nil {
-		parsedData := m.parseAndStoreData(job.collectorID, job.deviceID, job.channelID, job.rawData)
+		parsedData := m.parseAndStoreData(job.collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.rawData)
 		metrics.DataReportsProcessed.Inc()
 
 		// Add parsed sensor data to channel_data event
@@ -134,11 +129,11 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 			channelDataEvent["sensor_type"] = sensorDevice.Type
 		}
 	} else {
-		// Legacy: fall back to channel_id lookup (v2.2 compat)
-		if err := m.db.Where("channel_id = ?", job.channelID).First(&sensorDevice).Error; err == nil {
-			channelDataEvent["sensor_device_id"] = sensorDevice.ID
-			channelDataEvent["sensor_device_name"] = sensorDevice.Name
-			channelDataEvent["sensor_type"] = sensorDevice.Type
+		// Legacy: fall back to channel_id lookup with C6 index resolution
+		if sd, found := m.findEdgeDeviceByChannelID(job.deviceID, job.channelID, 0); found {
+			channelDataEvent["sensor_device_id"] = sd.ID
+			channelDataEvent["sensor_device_name"] = sd.Name
+			channelDataEvent["sensor_type"] = sd.Type
 		}
 	}
 	m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)

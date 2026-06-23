@@ -10,6 +10,22 @@ import (
 	"gorm.io/gorm"
 )
 
+// negotiatedProtocolVersion returns the protocol version to use for a node,
+// taking the minimum of the device-reported version and the server's max
+// supported version. This ensures we never exceed the server's capability
+// while respecting the device's limitation.
+func negotiatedProtocolVersion(deviceReported string) string {
+	dev := parseProtocolVersion(deviceReported)
+	srv := parseProtocolVersion(ServerMaxProtocolVersion)
+	if dev <= 0 || srv <= 0 {
+		return deviceReported
+	}
+	if dev <= srv {
+		return deviceReported
+	}
+	return ServerMaxProtocolVersion
+}
+
 // handleHello processes Hello messages (type=0x01)
 // v2.1: parses 8 fields (4 new: config_epoch, nvs_has_config, last_manifest, protocol_version)
 // and routes through SyncGate for unified sync decision.
@@ -75,7 +91,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 			NodeID:           deviceID,
 			Model:            model,
 			FirmwareVersion:  firmwareVersion,
-			ProtocolVersion:  protocolVersion,
+			ProtocolVersion:  negotiatedProtocolVersion(protocolVersion),
 			Status:           "online",
 			LastSeen:         &now,
 			LastOnlineTime:   &now,
@@ -93,7 +109,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		oldStatus = node.Status
 		node.FirmwareVersion = firmwareVersion
 		node.Model = model
-		node.ProtocolVersion = protocolVersion
+		node.ProtocolVersion = negotiatedProtocolVersion(protocolVersion)
 		node.Status = "online"
 		node.LastSeen = &now
 		node.LastOnlineTime = &now

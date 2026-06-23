@@ -189,6 +189,10 @@ void bus_manager_cleanup_all(app_state_t *s)
             s->bus_ch[i] = 0;
             s->bus_hw_id[i][0] = '\0';
         }
+        /* Drain any stale pending entries from the queue */
+        if (s->pending_queues[i]) {
+            xQueueReset(s->pending_queues[i]);
+        }
     }
 }
 
@@ -221,6 +225,10 @@ void bus_manager_unreg_channel(app_state_t *s, uint32_t channel_id)
             bus_dma_deinit(&s->bus_ctx[i]);
             s->bus_ch[i] = 0;
             s->bus_hw_id[i][0] = '\0';
+            /* Drain stale pending entries */
+            if (s->pending_queues[i]) {
+                xQueueReset(s->pending_queues[i]);
+            }
             ESP_LOGI(TAG, "Unregistered ch=%lu", (unsigned long)channel_id);
             return;
         }

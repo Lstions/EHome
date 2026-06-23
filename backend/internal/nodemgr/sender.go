@@ -161,6 +161,10 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 	return requestID, nil
 }
 
+// ServerMaxProtocolVersion is the highest protocol version this server supports.
+// Negotiated version = min(device-reported, ServerMaxProtocolVersion).
+const ServerMaxProtocolVersion = "2.3"
+
 // parseProtocolVersion parses a version string like "2.2" or "2.3" into a float64.
 // Returns 0 for empty or unparseable strings.
 func parseProtocolVersion(v string) float64 {
@@ -236,9 +240,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	// Determine encoding path based on protocol version
 	useV2 := parseProtocolVersion(node.ProtocolVersion) >= 2.3
 
-	// Encode templates (field 3, repeated sub-structure) — only for old path
-	if !useV2 {
-		for _, tmpl := range templates {
+	// Encode templates (field 3, repeated sub-structure)
+	// v2 path still needs templates — C6's schedule_v2_channel uses
+	// config_mgr_get_template(template_id) to look up write_data/read_length/delay_ms.
+	for _, tmpl := range templates {
 			subEnc := frame.SubEncoder()
 			subEnc.EncodeVarint(1, uint64(tmpl.ID))
 			if tmpl.WriteData != "" {
@@ -257,7 +262,6 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 				subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
 			}
 			enc.EncodeSubFrame(3, subEnc.Bytes())
-		}
 	}
 
 	// Encode channels (field 4, repeated sub-structure)
@@ -323,6 +327,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			// New path: field 9 edge_device_groups (repeated sub-messages)
 			var edges []models.EdgeDevice
 			m.db.Where("channel_id = ? AND node_id = ? AND enabled = true", ch.ID, node.NodeID).Find(&edges)
+			logger.Infof("[%s] ConfigManifest ch=%d: useV2=true, found %d edge_devices (query: channel_id=%d node_id=%s)", deviceID, ch.ID, len(edges), ch.ID, node.NodeID)
 
 			for _, edge := range edges {
 				grpEnc := frame.SubEncoder()
@@ -384,7 +389,14 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	enc.EncodeString(8, decision.SyncID)
 
 	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	payload := enc.Bytes()
+	
+	// DEBUG: Log first 120 bytes of ConfigManifest hex
+	hexLen := len(payload)
+	if hexLen > 120 { hexLen = 120 }
+	logger.Infof("[%s] ConfigManifest hex (%d bytes): %s", deviceID, len(payload), hex.EncodeToString(payload[:hexLen]))
+	
+	if err := m.mqtt.Publish(topic, payload); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 	} else {
 		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s reason=%s %d templates, %d channels",

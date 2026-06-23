@@ -17,6 +17,106 @@ import (
 	"gorm.io/gorm"
 )
 
+// getDefaultTemplateParams returns default ConfigTemplate parameters (write_data, read_length, delay_ms)
+// for a given device type. The hardwareID is used to build Modbus slave address in the command.
+// Returns ("", 0, 0) if no defaults are known for the device type.
+func getDefaultTemplateParams(deviceType string, hardwareID string) (string, uint32, uint32) {
+	// Normalize device type for matching
+	dt := strings.ToLower(strings.TrimSpace(deviceType))
+
+	// Resolve Modbus slave address from hardware_id (default 1 if not set)
+	slaveAddr := uint8(1)
+	if v := parseHardwareIDUint(hardwareID); v > 0 && v <= 247 {
+		slaveAddr = uint8(v)
+	}
+
+	switch dt {
+	// Modbus RTU devices — SN-3000 wind direction sensor
+	case "sn3000", "wind_direction", "wind":
+		// Modbus Read Holding Registers: addr=slaveAddr, func=0x03, start=0x0000, count=0x0002
+		// Command: [slaveAddr][03][00][00][00][02][CRC16]
+		writeData := fmt.Sprintf("%02X0300000002", slaveAddr)
+		// Response: [addr][func][byte_count=4][reg0_hi][reg0_lo][reg1_hi][reg1_lo][crc_lo][crc_hi] = 9 bytes
+		return writeData, 9, 100
+
+	// Modbus RTU devices — LK-TH01 temperature/humidity sensor
+	case "lk_th01", "lk-th01", "temperature_humidity", "temp_humidity":
+		// Modbus Read Holding Registers: addr=slaveAddr, func=0x03, start=0x0000, count=0x0002
+		writeData := fmt.Sprintf("%02X0300000002", slaveAddr)
+		// Response: [addr][func][byte_count=4][temp_hi][temp_lo][hum_hi][hum_lo][crc_lo][crc_hi] = 9 bytes
+		return writeData, 9, 100
+
+	// I2C devices — BMP280 temperature/pressure sensor
+	case "bmp280", "bme280":
+		// I2C read: write register address 0xF7 (pressure_msb), read 6 bytes of data
+		// For I2C, write_data is just the register address byte(s)
+		return "F7", 6, 100
+
+	default:
+		// For unknown device types, try to generate a generic Modbus read command
+		// if the hardware_id looks like a Modbus address
+		if slaveAddr > 1 || hardwareID != "" {
+			// Generic Modbus Read Holding Registers: start=0x0000, count=0x0001
+			writeData := fmt.Sprintf("%02X0300000001", slaveAddr)
+			return writeData, 7, 100
+		}
+		return "", 0, 0
+	}
+}
+
+// getTemplateParamsFromDeviceConfig attempts to derive ConfigTemplate parameters
+// from a DeviceConfig's Connection JSONB field. Returns ("", 0, 0) if no params can be derived.
+func getTemplateParamsFromDeviceConfig(dc models.DeviceConfig, hardwareID string) (string, uint32, uint32) {
+	if dc.Connection == nil {
+		return "", 0, 0
+	}
+
+	var conn map[string]interface{}
+	if err := json.Unmarshal(dc.Connection, &conn); err != nil {
+		return "", 0, 0
+	}
+
+	protocol, _ := conn["protocol"].(string)
+	switch strings.ToLower(protocol) {
+	case "modbus", "modbus-rtu", "uart":
+		// Modbus RTU: build read holding registers command
+		slaveAddr := uint8(1)
+		if v := parseHardwareIDUint(hardwareID); v > 0 && v <= 247 {
+			slaveAddr = uint8(v)
+		}
+		// Check for custom params in connection.default_params
+		startReg := uint16(0)
+		regCount := uint16(2)
+		if dp, ok := conn["default_params"].(map[string]interface{}); ok {
+			if sr, ok := dp["start_register"].(float64); ok {
+				startReg = uint16(sr)
+			}
+			if rc, ok := dp["register_count"].(float64); ok {
+				regCount = uint16(rc)
+			}
+		}
+		writeData := fmt.Sprintf("%02X03%04X%04X", slaveAddr, startReg, regCount)
+		readLength := uint32(3 + regCount*2 + 2) // addr + func + byte_count + data + CRC
+		return writeData, readLength, 100
+
+	case "i2c":
+		// I2C: use register address from connection.default_params
+		if dp, ok := conn["default_params"].(map[string]interface{}); ok {
+			if addr, ok := dp["read_register"].(string); ok {
+				return addr, 6, 100
+			}
+			// Default I2C read for common sensors
+			if strings.Contains(strings.ToLower(dc.DeviceType), "bmp") {
+				return "F7", 6, 100
+			}
+		}
+		return "", 0, 0
+
+	default:
+		return "", 0, 0
+	}
+}
+
 // parseHardwareIDUint converts a hardware ID string to uint64.
 // "0x76" → 118, "5" → 5, "" → 0
 // (mirror of nodemgr.parseHardwareID for use in API layer)
@@ -62,10 +162,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Single query: get latest 10 rows per device using DISTINCT ON (PostgreSQL)
 		var allEntries []lastDataEntry
 		if len(deviceIDs) > 0 {
-			db.Table("unified_data").
+			db.Table("unified_data ud").
 				Select("ud.device_id, ud.sensor_name, ud.value, ud.unit").
-				Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON unified_data.device_id = latest.device_id AND unified_data.created_at = latest.created_at", deviceIDs).
-				Where("unified_data.device_id IN ?", deviceIDs).
+				Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON ud.device_id = latest.device_id AND ud.created_at = latest.created_at", deviceIDs).
+				Where("ud.device_id IN ?", deviceIDs).
 				Find(&allEntries)
 		}
 		// Group by device ID
@@ -134,15 +234,67 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if dto.DeviceConfigID != nil {
 			dev.DeviceConfigID = *dto.DeviceConfigID
 		}
-		if err := db.Create(&dev).Error; err != nil {
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			// Step 1: Create EdgeDevice (inside transaction)
+			if err := tx.Create(&dev).Error; err != nil {
+				return err
+			}
+
+			// Step 2: Cascade — create ConfigTemplate and link to channel's template_ids
+			var ch models.Channel
+			if err := tx.First(&ch, dev.ChannelID).Error; err == nil {
+				// Determine default Modbus/I2C command parameters based on device type
+				writeData, readLength, delayMs := getDefaultTemplateParams(dev.Type, dev.HardwareID)
+
+				// If DeviceConfigID is set, try to derive params from DeviceConfig.Connection
+				if writeData == "" && dev.DeviceConfigID > 0 {
+					var dc models.DeviceConfig
+					if err := tx.First(&dc, dev.DeviceConfigID).Error; err == nil {
+						writeData, readLength, delayMs = getTemplateParamsFromDeviceConfig(dc, dev.HardwareID)
+					}
+				}
+
+				// Only create ConfigTemplate if we have a valid write_data
+				if writeData != "" {
+					tmpl := models.ConfigTemplate{
+						NodeID:     ch.NodeID,
+						WriteData:  writeData,
+						ReadLength: readLength,
+						DelayMs:    delayMs,
+					}
+					if err := tx.Create(&tmpl).Error; err != nil {
+						logger.Warnf("[edge-device-create] Failed to create ConfigTemplate for edge_device id=%d: %v", dev.ID, err)
+						return err // rollback entire transaction
+					}
+					// Step 3: Append new template ID to channel's template_ids atomically (SQL-level)
+					newTmplID := strconv.FormatUint(uint64(tmpl.ID), 10)
+					if err := tx.Model(&ch).Update("template_ids",
+						gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newTmplID, newTmplID),
+					).Error; err != nil {
+						logger.Warnf("[edge-device-create] Failed to update channel template_ids for edge_device id=%d: %v", dev.ID, err)
+						return err // rollback entire transaction
+					}
+					logger.Infof("[edge-device-create] Created ConfigTemplate id=%d for edge_device id=%d type=%s, channel %d (appended template_id=%s)",
+						tmpl.ID, dev.ID, dev.Type, ch.ID, newTmplID)
+				} else {
+					logger.Infof("[edge-device-create] No default template params for type=%s, skipping ConfigTemplate creation", dev.Type)
+				}
+			}
+
+			return nil // commit transaction
+		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		// EmitConfigChange: find the node via channel
-		var ch models.Channel
-		if db.First(&ch, dev.ChannelID).Error == nil {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionCreate, ch.NodeID, fmt.Sprint(dev.ID))
+
+		// EmitConfigChange (outside transaction — event emission should not block rollback)
+		var chForEvent models.Channel
+		if db.First(&chForEvent, dev.ChannelID).Error == nil {
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionCreate, chForEvent.NodeID, fmt.Sprint(dev.ID))
 		}
+
+		// Reload with associations for response
+		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&dev, dev.ID)
 		c.JSON(http.StatusCreated, dev)
 	})
 
@@ -201,8 +353,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if len(updates) > 0 {
 			db.Model(&d).Updates(updates)
 		}
-		// Reload to get updated fields
-		db.First(&d, id)
+		// Reload to get updated fields (P1 fix: Preload associations so PUT response includes Channel/Node/DeviceConfig)
+		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, id)
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {

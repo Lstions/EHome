@@ -43,6 +43,8 @@ typedef struct {
     uint8_t    tx_data[CMD_TX_MAX];
     size_t     tx_len;
     uint32_t   delay_ms;                      /* TX→RX delay (sample only) */
+    uint32_t   edge_device_id;                /* v2.3: edge_device for DataReport routing */
+    uint8_t    command_index;                 /* v2.3: command index within edge_device */
     cmd_type_t type;
 } bus_cmd_t;
 

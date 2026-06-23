@@ -13,6 +13,12 @@
  *   Timeout is NOT handled here.  The backend decides when a
  *   WriteCommand has timed out (no DataReport with matching request_id
  *   within the expected window).
+ *
+ *   Pending command tracking: Each UART channel has a FreeRTOS Queue
+ *   (pending_queues[i], depth=4) of pending_cmd_t entries.  cmd_task
+ *   enqueues before/after TX; rx_task dequeues one entry per RX read.
+ *   This replaces the old per-channel single-slot arrays that caused
+ *   data misattribution when multiple edge_devices share a channel.
  */
 
 #include "bus_worker.h"
@@ -77,16 +83,23 @@ static void cmd_task(void *pv)
             /*
              * WriteCommand: TX only for UART, transact for SPI/I2C.
              * WriteResponse is sent immediately after TX completes.
-             * For UART, record pending request_id so rx_task can
-             * attach it to the DataReport when data arrives.
+             * For UART, enqueue pending_cmd_t so rx_task can
+             * attach request_id/edge_device_id to the DataReport.
              */
             if (ctx->bus_type == BUS_TYPE_UART) {
                 esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
                 if (e == ESP_OK) {
-                    /* Record pending request_id for rx_task correlation */
+                    /* Enqueue pending command for rx_task correlation */
                     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
                         if (s->bus_ch[i] == cmd.channel_id) {
-                            s->pending_requests[i] = cmd.request_id;
+                            pending_cmd_t pcmd = {
+                                .edge_device_id = cmd.edge_device_id,
+                                .command_index  = cmd.command_index,
+                                .request_id     = cmd.request_id,
+                            };
+                            if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
+                                ESP_LOGW(TAG_CMD, "pending queue full for slot %d (write), dropping pending", i);
+                            }
                             break;
                         }
                     }
@@ -110,7 +123,8 @@ static void cmd_task(void *pv)
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
                         if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
-                                                     rx, rl, 0, cmd.request_id, 0, 0);
+                                                     rx, rl, 0, cmd.request_id,
+                                                     cmd.edge_device_id, cmd.command_index);
                     }
                 } else {
                     errs++;
@@ -134,6 +148,21 @@ static void cmd_task(void *pv)
                     scheduler_notify_channel_error(cmd.channel_id);
                 } else {
                     scheduler_notify_channel_success(cmd.channel_id);
+                    /* Enqueue edge_device_id/command_index for rx_task correlation.
+                     * request_id=0 signals CMD_SAMPLE (no WriteResponse expected). */
+                    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+                        if (s->bus_ch[i] == cmd.channel_id) {
+                            pending_cmd_t pcmd = {
+                                .edge_device_id = cmd.edge_device_id,
+                                .command_index  = cmd.command_index,
+                                .request_id     = 0,
+                            };
+                            if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
+                                ESP_LOGW(TAG_CMD, "pending queue full for slot %d (sample), dropping pending", i);
+                            }
+                            break;
+                        }
+                    }
                 }
                 /* Let device process, then rx_task picks up the response */
                 if (cmd.delay_ms > 0) {
@@ -150,7 +179,8 @@ static void cmd_task(void *pv)
                     if (rl > 0) {
                         uint64_t ts = esp_timer_get_time();
                         if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
-                                                     rx, rl, 0, 0, 0, 0);
+                                                     rx, rl, 0, 0,
+                                                     cmd.edge_device_id, cmd.command_index);
                     }
                 } else {
                     errs++;
@@ -200,15 +230,23 @@ static void rx_task(void *pv)
                 hits++;
                 uint32_t ch = s->bus_ch[i];
                 uint32_t rid = 0;
+                uint32_t eid = 0;
+                uint8_t  cidx = 0;
 
-                /* Consume pending request_id if one exists */
-                if (s->pending_requests[i] != 0) {
-                    rid = s->pending_requests[i];
-                    s->pending_requests[i] = 0;
+                /* Dequeue one pending entry per RX read (FIFO match).
+                 * Each TX command enqueues one pending_cmd_t; each RX
+                 * read consumes one, preserving TX/RX ordering. */
+                pending_cmd_t pcmd;
+                if (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
+                    rid  = pcmd.request_id;
+                    eid  = pcmd.edge_device_id;
+                    cidx = pcmd.command_index;
                 }
+                /* If no pending entry, rid/eid/cidx stay 0 — data
+                 * arrives without command context (e.g. unsolicited). */
 
                 uint64_t ts = esp_timer_get_time();
-                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, 0, 0);
+                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, eid, cidx);
             }
         }
 
