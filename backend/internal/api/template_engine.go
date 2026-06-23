@@ -48,7 +48,9 @@ type OperationConfig struct {
 	TimeoutMs      int    `json:"timeout_ms"`       // timeout in ms (for read ops, default 3000)
 	ResponseParser string `json:"response_parser"`  // "modbus_uint16", "modbus_uint16_div10", etc.
 	Unit           string `json:"unit"`             // unit string for the response value
+	ResponseUnit   string `json:"response_unit"`    // alias: some configs use response_unit instead of unit
 	PostAction     string `json:"post_action"`      // "update_connection_address", "update_connection_baud", etc.
+	Label          string `json:"label"`            // human-readable operation label
 }
 
 // TemplateVars holds the variables available for template substitution.

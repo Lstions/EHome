@@ -68,6 +68,11 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		if found && m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
 			logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
 		}
+		// Command response — skip DB storage and WS push
+		return
+	}
+		// The data has been delivered to the pendingwrite caller already.
+		return
 	}
 
 	// Get node

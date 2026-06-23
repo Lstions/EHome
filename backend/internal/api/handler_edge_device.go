@@ -643,11 +643,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 					result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
 					result["parse_error"] = err.Error()
 				} else {
-					result["value"] = value
-					if opConfig.Unit != "" {
-						result["unit"] = opConfig.Unit
+						result["value"] = value
+						// Use ResponseUnit if Unit is empty (DB configs use "response_unit" key)
+						unit := opConfig.Unit
+						if unit == "" {
+							unit = opConfig.ResponseUnit
+						}
+						if unit != "" {
+							result["unit"] = unit
+						}
 					}
-				}
 			} else if len(resp.RawData) > 0 {
 				result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
 			}
@@ -664,6 +669,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 	})
 
+	// DEPRECATED: Use POST /:id/execute with operation "change_address" instead.
+	// This endpoint is kept for backward compatibility and will be removed in a future version.
 	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
 	e.POST("/:id/change-address", RequireRole("admin"), func(c *gin.Context) {
 		id := c.Param("id")

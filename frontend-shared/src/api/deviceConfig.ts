@@ -14,6 +14,7 @@ export interface DeviceConfig {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
+  operations?: Record<string, any>
   is_default: boolean
   status: string
   created_at: string
@@ -42,6 +43,7 @@ export interface CreateDeviceConfigParams {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
+  operations?: Record<string, any>
   is_default?: boolean
 }
 
@@ -52,6 +54,7 @@ export interface UpdateDeviceConfigParams {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
+  operations?: Record<string, any>
   is_default?: boolean
   status?: string
 }
