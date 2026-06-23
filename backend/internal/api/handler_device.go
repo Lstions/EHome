@@ -286,6 +286,17 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cfg.InitFlow})
 	})
 
+	// Get operations for a device-config
+	v1.GET("/device-configs/:id/operations", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		var cfg models.DeviceConfig
+		if err := db.First(&cfg, id).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cfg.Operations})
+	})
+
 	// Test parser for a device-config
 	v1.POST("/device-configs/:id/test-parser", func(c *gin.Context) {
 		var req struct {

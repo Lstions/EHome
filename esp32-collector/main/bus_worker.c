@@ -97,24 +97,38 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
 
         if (cmd.type == CMD_WRITE) {
             /*
-             * WriteCommand on UART: TX only, fire-and-forget.
-             * Enqueue pending_cmd_t so rx_task can attach
-             * request_id/edge_device_id to the DataReport.
+             * WriteCommand on UART:
+             *   read_size == 0: TX only, fire-and-forget, WriteRsp(success).
+             *   read_size > 0: TX + turnaround + enqueue pending_cmd_t so
+             *                   rx_task can correlate the response DataReport.
+             *                   WriteRsp still sent immediately (TX confirmed).
              */
             esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
             if (e == ESP_OK) {
-                /* Enqueue pending command for rx_task correlation */
-                for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-                    if (s->bus_ch[i] == cmd.channel_id) {
-                        pending_cmd_t pcmd = {
-                            .edge_device_id = cmd.edge_device_id,
-                            .command_index  = cmd.command_index,
-                            .request_id     = cmd.request_id,
-                        };
-                        if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
-                            ESP_LOGW(tag, "pending queue full for slot %d (write), dropping pending", i);
+                if (cmd.read_size > 0) {
+                    /* Turnaround delay (same as CMD_SAMPLE) before RX window */
+                    uint32_t baud = ctx->cfg.uart.baud;
+                    if (baud > 0) {
+                        uint32_t turnaround_us = 38500000UL / baud;
+                        if (turnaround_us > 10000) {
+                            vTaskDelay(pdMS_TO_TICKS((turnaround_us + 999) / 1000));
+                        } else if (turnaround_us > 1000) {
+                            ets_delay_us(turnaround_us);
                         }
-                        break;
+                    }
+                    /* Enqueue pending command for rx_task correlation */
+                    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+                        if (s->bus_ch[i] == cmd.channel_id) {
+                            pending_cmd_t pcmd = {
+                                .edge_device_id = cmd.edge_device_id,
+                                .command_index  = cmd.command_index,
+                                .request_id     = cmd.request_id,
+                            };
+                            if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
+                                ESP_LOGW(tag, "pending queue full for slot %d (write+read), dropping pending", i);
+                            }
+                            break;
+                        }
                     }
                 }
                 if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
@@ -216,15 +230,26 @@ static void spi_i2c_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *ta
         txn++;
 
         if (cmd.type == CMD_WRITE) {
-            /* SPI / I2C: atomic transact */
+            /* SPI / I2C WriteCommand:
+             *   read_size == 0: TX only, WriteRsp(success), no DataReport.
+             *   read_size > 0: atomic transact(TX+RX), WriteRsp(success),
+             *                   plus DataReport with read-back data.
+             */
             uint8_t rx[256];
             size_t rl = 0;
-            esp_err_t e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
-                                           rx, sizeof(rx), &rl);
+            esp_err_t e;
+            if (cmd.read_size > 0) {
+                size_t read_cap = cmd.read_size < sizeof(rx) ? cmd.read_size : sizeof(rx);
+                e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
+                                     rx, read_cap, &rl);
+            } else {
+                e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len,
+                                     rx, sizeof(rx), &rl);
+            }
             if (e == ESP_OK) {
                 if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
                 scheduler_notify_channel_success(cmd.channel_id);
-                if (rl > 0) {
+                if (cmd.read_size > 0 && rl > 0) {
                     uint64_t ts = esp_timer_get_time();
                     if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0,
                                                  rx, rl, 0, cmd.request_id,

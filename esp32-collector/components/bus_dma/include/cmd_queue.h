@@ -24,18 +24,28 @@ extern "C" {
 
 /* === Command types === */
 typedef enum {
-    CMD_WRITE = 0,    /* WriteCommand from backend (TX only, no RX wait) */
+    CMD_WRITE = 0,    /* WriteCommand from backend (TX only if read_size==0, TX+RX if read_size>0) */
     CMD_SAMPLE = 1,   /* Periodic sample from scheduler (TX + optional delay) */
 } cmd_type_t;
 
 /* === Bus command descriptor ===
  *
- * UART channels:  cmd_task does TX only; rx_task handles RX independently.
+ * UART channels:  cmd_task does TX; rx_task handles RX independently.
+ *   CMD_WRITE + read_size==0: TX only, WriteRsp immediate.
+ *   CMD_WRITE + read_size>0: TX + turnaround delay + enqueue pending_cmd_t
+ *     for rx_task correlation → DataReport with request_id.
+ *   CMD_SAMPLE: TX + turnaround + enqueue pending_cmd_t (request_id=0).
+ *
  * SPI/I2C channels: cmd_task does full transact (TX+RX atomic).
+ *   CMD_WRITE + read_size==0: transact, WriteRsp only (no DataReport).
+ *   CMD_WRITE + read_size>0: transact with read_cap=read_size,
+ *     WriteRsp + DataReport with request_id.
+ *   CMD_SAMPLE: transact, DataReport (request_id=0).
  *
  * delay_ms: for CMD_SAMPLE, milliseconds to wait between TX and letting
  *           rx_task pick up the response.  0 = no delay.
- *           Not used for CMD_WRITE (WriteCommand returns immediately).
+ *           Not used for CMD_WRITE (turnaround auto-calculated from baud).
+ * read_size: for CMD_WRITE, expected RX byte count.  0 = TX only.
  */
 typedef struct {
     uint32_t   request_id;                    /* Correlates WriteResponse/DataReport */
@@ -44,6 +54,7 @@ typedef struct {
     uint8_t    tx_data[CMD_TX_MAX];
     size_t     tx_len;
     uint32_t   delay_ms;                      /* TX→RX delay (sample only) */
+    uint32_t   read_size;                     /* v2.5: expected RX bytes for CMD_WRITE (0=TX only) */
     uint32_t   edge_device_id;                /* v2.3: edge_device for DataReport routing */
     uint8_t    command_index;                 /* v2.3: command index within edge_device */
     uart_port_t uart_port;                    /* UART port (UART_NUM_0/1), per-port dispatch */

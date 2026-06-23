@@ -277,14 +277,14 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
                                const uint8_t *d, size_t l, uint32_t rs)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
-    (void)rs;  /* read_size no longer used — backend handles RX expectation */
 
     bus_cmd_t cmd = {
         .request_id = rid,
         .channel_id = ch,
         .bus_type   = find_bus_type(m, ch),
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
-        .delay_ms   = 0,    /* WriteCommand: TX only, no delay */
+        .delay_ms   = 0,    /* WriteCommand: no fixed delay */
+        .read_size  = rs,   /* v2.5: expected RX bytes (0 = TX only) */
         .type       = CMD_WRITE,
         .uart_port  = derive_uart_port_for_channel(m, ch),
     };

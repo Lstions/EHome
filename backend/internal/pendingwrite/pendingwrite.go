@@ -26,6 +26,7 @@ type Response struct {
 	Success   bool
 	ErrorCode uint32
 	ErrorMsg  string
+	RawData   []byte // Response data from DataReportAck (for read operations)
 }
 
 // Manager handles pending write operations with timeout and retry
@@ -122,6 +123,7 @@ func (m *Manager) HandleDataReportAck(requestID uint32, rawData []byte) {
 		Success:   true,
 		ErrorCode: 0,
 		ErrorMsg:  "",
+		RawData:   rawData,
 	}
 }
 

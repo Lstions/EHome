@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
@@ -487,6 +488,174 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []interface{}{}})
 	})
 
+	// POST /api/v1/edge-devices/:id/execute — execute a device operation
+	// Uses DeviceConfig.Operations JSONB for operation definitions with template engine + CRC
+	e.POST("/:id/execute", RequireRole("admin"), func(c *gin.Context) {
+		id := c.Param("id")
+
+		var req struct {
+			Operation string                 `json:"operation" binding:"required"`
+			Params    map[string]interface{} `json:"params"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "operation is required")
+			return
+		}
+
+		// 1. Look up EdgeDevice
+		var edge models.EdgeDevice
+		if err := db.Preload("DeviceConfig").First(&edge, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				Error(c, http.StatusNotFound, "edge device not found")
+				return
+			}
+			Error(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		// 2. Look up DeviceConfig.Operations
+		if edge.DeviceConfig.ID == 0 {
+			Error(c, http.StatusBadRequest, "device config not found for this edge device")
+			return
+		}
+
+		var operations map[string]OperationConfig
+		if edge.DeviceConfig.Operations != nil {
+			if err := json.Unmarshal(edge.DeviceConfig.Operations, &operations); err != nil {
+				Error(c, http.StatusInternalServerError, "failed to parse device config operations")
+				return
+			}
+		}
+
+		opConfig, ok := operations[req.Operation]
+		if !ok {
+			Error(c, http.StatusBadRequest, fmt.Sprintf("operation %q not found in device config", req.Operation))
+			return
+		}
+
+		// Validate operation type
+		if opConfig.Type != "read" && opConfig.Type != "write" {
+			Error(c, http.StatusBadRequest, fmt.Sprintf("invalid operation type %q, must be 'read' or 'write'", opConfig.Type))
+			return
+		}
+
+		// 3. Resolve current address from EdgeDevice
+		addr := parseHardwareIDUint(edge.HardwareID)
+
+		// Also try to get address from DeviceConfig.Connection
+		if addr == 0 && edge.DeviceConfig.Connection != nil {
+			var conn map[string]interface{}
+			if err := json.Unmarshal(edge.DeviceConfig.Connection, &conn); err == nil {
+				if dp, ok := conn["default_params"].(map[string]interface{}); ok {
+					if a, ok := dp["address"]; ok {
+						if v, err := toUint64(a); err == nil {
+							addr = v
+						}
+					}
+				}
+			}
+		}
+
+		// 4. Render command template
+		vars := TemplateVars{
+			Addr:   addr,
+			Params: req.Params,
+		}
+		writeData, err := RenderCommandTemplate(opConfig.CommandTemplate, vars)
+		if err != nil {
+			Error(c, http.StatusBadRequest, "failed to render command template: "+err.Error())
+			return
+		}
+
+		// Resolve node for MQTT routing
+		var node models.Node
+		if err := db.Where("node_id = ?", edge.NodeID).First(&node).Error; err != nil {
+			Error(c, http.StatusNotFound, "associated node not found")
+			return
+		}
+		deviceID := node.NodeID
+
+		logger.Infof("[execute] edge=%d op=%s type=%s addr=%d data_hex=%x", edge.ID, req.Operation, opConfig.Type, addr, writeData)
+
+		// 5. Execute based on type
+		switch opConfig.Type {
+		case "write":
+			// Fire-and-forget: send via nodeMgr
+			if err := nodeMgr.SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, 0); err != nil {
+				Error(c, http.StatusInternalServerError, "failed to send command: "+err.Error())
+				return
+			}
+
+			// Execute post_action
+			if err := executePostAction(db, edge, opConfig.PostAction, req.Params); err != nil {
+				logger.Warnf("[execute] post_action failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
+			}
+
+			// Trigger config sync
+			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, edge.NodeID, fmt.Sprint(edge.ID))
+
+			Success(c, gin.H{
+				"status":    "sent",
+				"operation": req.Operation,
+				"data_hex":  fmt.Sprintf("%x", writeData),
+			})
+
+		case "read":
+			// Read operation: use pendingwrite to wait for response
+			timeout := time.Duration(3000) * time.Millisecond
+			if opConfig.TimeoutMs > 0 {
+				timeout = time.Duration(opConfig.TimeoutMs) * time.Millisecond
+			}
+			readSize := opConfig.ReadSize
+			if readSize == 0 {
+				readSize = 9 // default Modbus response size
+			}
+
+			resp, err := nodeMgr.PendingWrite().SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, readSize, timeout)
+			if err != nil {
+				Error(c, http.StatusInternalServerError, "command failed: "+err.Error())
+				return
+			}
+			if !resp.Success {
+				Error(c, http.StatusInternalServerError, fmt.Sprintf("device returned error: code=%d msg=%s", resp.ErrorCode, resp.ErrorMsg))
+				return
+			}
+
+			// Parse response if parser is defined
+			result := gin.H{
+				"status":    "ok",
+				"operation": req.Operation,
+				"data_hex":  fmt.Sprintf("%x", writeData),
+			}
+
+			if opConfig.ResponseParser != "" && len(resp.RawData) > 0 {
+				value, err := ParseModbusResponse(resp.RawData, opConfig.ResponseParser)
+				if err != nil {
+					logger.Warnf("[execute] response parse failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
+					result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
+					result["parse_error"] = err.Error()
+				} else {
+					result["value"] = value
+					if opConfig.Unit != "" {
+						result["unit"] = opConfig.Unit
+					}
+				}
+			} else if len(resp.RawData) > 0 {
+				result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
+			}
+
+			// Execute post_action
+			if err := executePostAction(db, edge, opConfig.PostAction, req.Params); err != nil {
+				logger.Warnf("[execute] post_action failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
+			}
+
+			Success(c, result)
+
+		default:
+			Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported operation type: %s", opConfig.Type))
+		}
+	})
+
 	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
 	e.POST("/:id/change-address", RequireRole("admin"), func(c *gin.Context) {
 		id := c.Param("id")
@@ -620,4 +789,89 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			},
 		})
 	})
+}
+
+// executePostAction handles post-operation side effects like updating device address or baud rate.
+func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, params map[string]interface{}) error {
+	switch postAction {
+	case "update_connection_address":
+		// Update EdgeDevice.HardwareID and DeviceConfig.Connection.address
+		newAddr, ok := params["new_addr"]
+		if !ok {
+			return fmt.Errorf("new_addr param required for update_connection_address")
+		}
+		newAddrStr := fmt.Sprintf("%v", newAddr)
+
+		// Update EdgeDevice.HardwareID
+		if err := db.Model(&edge).Update("hardware_id", newAddrStr).Error; err != nil {
+			return fmt.Errorf("failed to update hardware_id: %w", err)
+		}
+
+		// Update DeviceConfig.Connection.address
+		var dc models.DeviceConfig
+		if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
+			return fmt.Errorf("failed to load device config: %w", err)
+		}
+		var conn map[string]interface{}
+		if dc.Connection != nil {
+			if err := json.Unmarshal(dc.Connection, &conn); err != nil {
+				return fmt.Errorf("failed to parse connection JSON: %w", err)
+			}
+		} else {
+			conn = make(map[string]interface{})
+		}
+		// Update address in default_params
+		dp, ok := conn["default_params"].(map[string]interface{})
+		if !ok {
+			dp = make(map[string]interface{})
+		}
+		dp["address"] = newAddr
+		conn["default_params"] = dp
+		connJSON, _ := json.Marshal(conn)
+		if err := db.Model(&dc).Update("connection", connJSON).Error; err != nil {
+			return fmt.Errorf("failed to update connection: %w", err)
+		}
+
+		logger.Infof("[execute] post_action update_connection_address: edge=%d new_addr=%v", edge.ID, newAddr)
+
+	case "update_connection_baud":
+		// Update DeviceConfig.Connection.baud_rate
+		newBaud, ok := params["new_baud"]
+		if !ok {
+			return fmt.Errorf("new_baud param required for update_connection_baud")
+		}
+
+		var dc models.DeviceConfig
+		if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
+			return fmt.Errorf("failed to load device config: %w", err)
+		}
+		var conn map[string]interface{}
+		if dc.Connection != nil {
+			if err := json.Unmarshal(dc.Connection, &conn); err != nil {
+				return fmt.Errorf("failed to parse connection JSON: %w", err)
+			}
+		} else {
+			conn = make(map[string]interface{})
+		}
+		dp, ok := conn["default_params"].(map[string]interface{})
+		if !ok {
+			dp = make(map[string]interface{})
+		}
+		dp["baud_rate"] = newBaud
+		conn["default_params"] = dp
+		connJSON, _ := json.Marshal(conn)
+		if err := db.Model(&dc).Update("connection", connJSON).Error; err != nil {
+			return fmt.Errorf("failed to update connection: %w", err)
+		}
+
+		logger.Infof("[execute] post_action update_connection_baud: edge=%d new_baud=%v", edge.ID, newBaud)
+
+	case "":
+		// No post action
+
+	default:
+		logger.Warnf("[execute] unknown post_action: %s", postAction)
+	}
+
+	return nil
 }
