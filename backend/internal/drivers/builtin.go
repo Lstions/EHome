@@ -109,9 +109,90 @@ func (d *SN3000Driver) ParseData(raw []byte) ([]SensorData, error) {
 	}, nil
 }
 
+// PRS3001Driver parses PRS-3001 optical rainfall & illuminance sensor data (Modbus RTU)
+// Brand: 普锐森社, Model: 2628100523 (shell 3001, optical rainfall+illuminance 01, 485 output)
+// Default baud: 4800, address: 0x01, 8N1
+//
+// Registers:
+//   0x0000: rainfall × 10 (0.1mm resolution) — func 03/06
+//   0x0002-0x0003: illuminance (uint32, 0-200000 Lux) — func 03
+//
+// Two collection modes:
+//  1. Rainfall only: query reg 0x0000 (1 reg), response 2 data bytes → value/10.0 mm
+//  2. Rainfall + Illuminance: query reg 0x0000-0x0003 (4 regs), response 8 data bytes
+//     bytes[0:2] = rainfall × 10, bytes[4:8] = illuminance uint32 Lux
+//
+// Modbus RTU response (func=0x03):
+//
+//	[addr][0x03][byte_count][data...][crc_lo][crc_hi]
+type PRS3001Driver struct{}
+
+func (d *PRS3001Driver) DeviceType() string     { return "prs3001" }
+func (d *PRS3001Driver) DeviceName() string     { return "PRS-3001 光学雨量光照变送器" }
+func (d *PRS3001Driver) OEM() string            { return "普锐森社" }
+func (d *PRS3001Driver) Category() string       { return "雨量光照传感器" }
+func (d *PRS3001Driver) HardwareTypes() []string { return []string{"uart"} }
+func (d *PRS3001Driver) GetSensorDefinitions() []SensorData {
+	return []SensorData{
+		{Name: "rainfall", Unit: "mm"},
+		{Name: "illuminance", Unit: "Lux"},
+	}
+}
+
+func (d *PRS3001Driver) ParseData(raw []byte) ([]SensorData, error) {
+	// Minimum Modbus RTU frame: [addr][func][byte_count][2 data bytes][crc_lo][crc_hi] = 7 bytes
+	if len(raw) < 5 {
+		return nil, fmt.Errorf("prs3001: need at least 5 bytes (addr+func+count+2data), got %d", len(raw))
+	}
+
+	if raw[1] != 0x03 {
+		return nil, fmt.Errorf("prs3001: unexpected function code 0x%02X, expected 0x03", raw[1])
+	}
+
+	byteCount := int(raw[2])
+	if len(raw) < 3+byteCount+2 {
+		return nil, fmt.Errorf("prs3001: frame too short, expected %d data bytes, got %d", byteCount, len(raw)-5)
+	}
+
+	data := raw[3 : 3+byteCount]
+
+	switch byteCount {
+	case 2:
+		// Rainfall only: 1 register (0x0000)
+		rainfall := float64(binary.BigEndian.Uint16(data[0:2])) / 10.0
+		return []SensorData{
+			{Name: "rainfall", Value: rainfall, Unit: "mm"},
+		}, nil
+
+	case 6:
+		// 3 registers (0x0000-0x0002): rainfall + illuminance
+		// reg0 = rainfall × 10, reg1 = unused, reg2 = illuminance (0-200000 Lux, fits in uint16)
+		rainfall := float64(binary.BigEndian.Uint16(data[0:2])) / 10.0
+		illuminance := float64(binary.BigEndian.Uint16(data[4:6]))
+		return []SensorData{
+			{Name: "rainfall", Value: rainfall, Unit: "mm"},
+			{Name: "illuminance", Value: illuminance, Unit: "Lux"},
+		}, nil
+
+	case 8:
+		// 4 registers (0x0000-0x0003): rainfall + full illuminance
+		rainfall := float64(binary.BigEndian.Uint16(data[0:2])) / 10.0
+		// Registers 0x0002-0x0003 form a 32-bit unsigned illuminance value
+		illuminance := float64(binary.BigEndian.Uint32(data[4:8]))
+		return []SensorData{
+			{Name: "rainfall", Value: rainfall, Unit: "mm"},
+			{Name: "illuminance", Value: illuminance, Unit: "Lux"},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("prs3001: unexpected byte count %d, expected 2/6/8", byteCount)
+	}
+}
+
 // RegisterBuiltInDrivers registers all built-in drivers
 func RegisterBuiltInDrivers(registry *Registry) {
 	registry.Register(&BMP280Driver{})
 	registry.Register(&LKTH01Driver{})
 	registry.Register(&SN3000Driver{})
+	registry.Register(&PRS3001Driver{})
 }

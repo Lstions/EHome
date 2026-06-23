@@ -99,6 +99,7 @@ func main() {
 	drivers.Register(&drivers.BMP280Driver{})
 	drivers.Register(&drivers.LKTH01Driver{})
 	drivers.Register(&drivers.SN3000Driver{})
+	drivers.Register(&drivers.PRS3001Driver{})
 	logger.Infof("Registered %d device drivers", len(driverRegistry.List()))
 
 	// Initialize WebSocket hub
