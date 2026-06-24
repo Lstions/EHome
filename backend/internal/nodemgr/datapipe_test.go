@@ -2,6 +2,7 @@ package nodemgr
 
 import (
 	_ "ehome/backend/pkg/logger"
+	"fmt"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 
 	// Set up a channel + device
 	col := models.Node{
-		NodeID:          3001,
+		NodeID:          "3001",
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -41,7 +42,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	db.Create(&col)
 
 	ch := models.Channel{
-		NodeID: col.ID,
+		NodeID: fmt.Sprintf("%d", col.ID),
 		HardwareID:  "1",
 		IntervalMs:  5000,
 		Enabled:     true,
@@ -90,9 +91,9 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Node{NodeID: 3002, Status: "online"}
+	col := models.Node{NodeID: "3002", Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{NodeID: col.ID, HardwareID: "1", IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: fmt.Sprintf("%d", col.ID), HardwareID: "1", IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	// No device created
 
@@ -112,9 +113,9 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.UnifiedData{}, &models.DeviceData{})
 
-	col := models.Node{NodeID: 3003, Status: "online"}
+	col := models.Node{NodeID: "3003", Status: "online"}
 	db.Create(&col)
-	ch := models.Channel{NodeID: col.ID, HardwareID: "1", IntervalMs: 5000, Enabled: true}
+	ch := models.Channel{NodeID: fmt.Sprintf("%d", col.ID), HardwareID: "1", IntervalMs: 5000, Enabled: true}
 	db.Create(&ch)
 	dev := models.EdgeDevice{Name: "sn3000", ChannelID: ch.ID, Type: "sn3000"}
 	db.Create(&dev)
