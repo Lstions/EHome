@@ -79,12 +79,26 @@ func (c *Client) onMessage(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
-// Publish sends a message to a topic with a 5-second timeout.
+// Publish sends a message to a topic with QoS 1 and a 5-second timeout.
 // Returns error if the broker does not acknowledge within the deadline.
 func (c *Client) Publish(topic string, payload []byte) error {
 	token := c.client.Publish(topic, 1, false, payload)
 	if !token.WaitTimeout(5 * time.Second) {
 		return fmt.Errorf("mqtt publish timeout")
+	}
+	return token.Error()
+}
+
+// P3-5: PublishQoS2 sends a message with QoS 2 (exactly-once delivery) for critical operations.
+// QoS 2 uses a 4-step handshake which adds latency — only use for write commands
+// where delivery guarantee matters more than speed.
+func (c *Client) PublishQoS2(topic string, payload []byte) error {
+	if c.client == nil {
+		return fmt.Errorf("MQTT client not connected")
+	}
+	token := c.client.Publish(topic, 2, false, payload)
+	if !token.WaitTimeout(10 * time.Second) {
+		return fmt.Errorf("QoS 2 publish timeout")
 	}
 	return token.Error()
 }

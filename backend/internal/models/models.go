@@ -341,6 +341,25 @@ type CalibrationCache struct {
 
 // =====================================================================
 
+// PendingWriteRecord P3-4: PendingWrite persistence table (SQLite WAL)
+// Stores in-flight write commands so they survive backend restarts.
+type PendingWriteRecord struct {
+	RequestID   uint32    `gorm:"primaryKey;column:request_id"`
+	DeviceID    string    `gorm:"column:device_id;index"`
+	ChannelID   uint32    `gorm:"column:channel_id"`
+	Data        []byte    `gorm:"column:data;type:blob"`
+	ReadSize    uint32    `gorm:"column:read_size"`
+	SentAt      time.Time `gorm:"column:sent_at;index"`
+	TimeoutAt   time.Time `gorm:"column:timeout_at;index"`
+	OperationID string    `gorm:"column:operation_id"`
+}
+
+func (PendingWriteRecord) TableName() string {
+	return "pending_writes"
+}
+
+// =====================================================================
+
 // DmaChannelInfo represents a single DMA channel reported by the device
 type DmaChannelInfo struct {
 	DmaID         uint32 `json:"dma_id"`

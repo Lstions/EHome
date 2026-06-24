@@ -107,7 +107,8 @@ static uint8_t find_bus_type(const config_manifest_t *m, uint32_t ch)
     return 0;
 }
 
-/* ==== Derive uart_port from channel bus_config via hw_tables ==== */
+/* ==== Derive uart_port from channel bus_config via hw_tables ====
+ * P3-7: Replaced static derive_uart_port_for_channel with shared hw_derive_uart_port */
 
 static uart_port_t derive_uart_port_for_channel(const config_manifest_t *m, uint32_t ch)
 {
@@ -117,10 +118,7 @@ static uart_port_t derive_uart_port_for_channel(const config_manifest_t *m, uint
             const uint8_t *bc = m->channels[i].bus_config;
             size_t bclen = m->channels[i].bus_config_len;
             if (bc && bclen >= 2) {
-                for (int j = 0; j < HW_UART_COUNT; j++)
-                    if (hw_uarts[j].default_tx_pin == bc[0] &&
-                        hw_uarts[j].default_rx_pin == bc[1])
-                        return (uart_port_t)hw_uarts[j].port;
+                return hw_derive_uart_port(bc[0], bc[1], UART_NUM_0);
             }
         }
     }

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -346,6 +347,113 @@ func init() {
 	RegisterParser("modbus_float32", &modbusFloat32Parser{})
 }
 
+// P3-3: JSON-driven response parsing rule
+type ParserRule struct {
+	Type       string  `json:"type"`         // "modbus_register", "raw_bytes", "ascii"
+	ByteOffset int     `json:"byte_offset"`  // 数据起始偏移 (0-based)
+	ByteLength int     `json:"byte_length"`  // 数据长度 (bytes)
+	DataType   string  `json:"data_type"`    // "uint16", "int16", "uint32", "int32", "float32", "ascii"
+	Endian     string  `json:"endian"`       // "big" (default), "little"
+	Scale      float64 `json:"scale"`        // 缩放因子 (1.0 = no scaling)
+	Offset     float64 `json:"offset"`       // 偏移量 (0.0 = no offset)
+	Unit       string  `json:"unit"`         // 单位
+}
+
+// P3-3: Parse response using a JSON-defined rule
+func ParseResponseByRule(ruleJSON string, rawData []byte) (float64, string, error) {
+	var rule ParserRule
+	if err := json.Unmarshal([]byte(ruleJSON), &rule); err != nil {
+		return 0, "", fmt.Errorf("invalid parser rule: %w", err)
+	}
+
+	// Default endian
+	if rule.Endian == "" {
+		rule.Endian = "big"
+	}
+
+	// Default scale (0 would zero out the value, so default to 1.0)
+	if rule.Scale == 0 {
+		rule.Scale = 1.0
+	}
+
+	// Boundary check
+	if rule.ByteOffset < 0 || rule.ByteLength <= 0 {
+		return 0, "", fmt.Errorf("invalid byte_offset=%d or byte_length=%d", rule.ByteOffset, rule.ByteLength)
+	}
+	if rule.ByteOffset+rule.ByteLength > len(rawData) {
+		return 0, "", fmt.Errorf("data too short: need offset %d + length %d = %d bytes, got %d",
+			rule.ByteOffset, rule.ByteLength, rule.ByteOffset+rule.ByteLength, len(rawData))
+	}
+
+	// Extract bytes
+	data := rawData[rule.ByteOffset : rule.ByteOffset+rule.ByteLength]
+
+	// Parse by data type
+	var value float64
+	switch rule.DataType {
+	case "uint16":
+		if len(data) < 2 {
+			return 0, "", fmt.Errorf("uint16 needs 2 bytes, got %d", len(data))
+		}
+		if rule.Endian == "little" {
+			value = float64(uint16(data[1])<<8 | uint16(data[0]))
+		} else {
+			value = float64(uint16(data[0])<<8 | uint16(data[1]))
+		}
+	case "int16":
+		if len(data) < 2 {
+			return 0, "", fmt.Errorf("int16 needs 2 bytes, got %d", len(data))
+		}
+		var v int16
+		if rule.Endian == "little" {
+			v = int16(uint16(data[1])<<8 | uint16(data[0]))
+		} else {
+			v = int16(uint16(data[0])<<8 | uint16(data[1]))
+		}
+		value = float64(v)
+	case "uint32":
+		if len(data) < 4 {
+			return 0, "", fmt.Errorf("uint32 needs 4 bytes, got %d", len(data))
+		}
+		if rule.Endian == "little" {
+			value = float64(uint32(data[3])<<24 | uint32(data[2])<<16 | uint32(data[1])<<8 | uint32(data[0]))
+		} else {
+			value = float64(uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3]))
+		}
+	case "int32":
+		if len(data) < 4 {
+			return 0, "", fmt.Errorf("int32 needs 4 bytes, got %d", len(data))
+		}
+		var v int32
+		if rule.Endian == "little" {
+			v = int32(uint32(data[3])<<24 | uint32(data[2])<<16 | uint32(data[1])<<8 | uint32(data[0]))
+		} else {
+			v = int32(uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3]))
+		}
+		value = float64(v)
+	case "float32":
+		if len(data) < 4 {
+			return 0, "", fmt.Errorf("float32 needs 4 bytes, got %d", len(data))
+		}
+		var bits uint32
+		if rule.Endian == "little" {
+			bits = binary.LittleEndian.Uint32(data)
+		} else {
+			bits = binary.BigEndian.Uint32(data)
+		}
+		value = float64(math.Float32frombits(bits))
+	case "ascii":
+		return 0, string(data), nil
+	default:
+		return 0, "", fmt.Errorf("unsupported data_type: %s", rule.DataType)
+	}
+
+	// Apply scale and offset
+	value = value*rule.Scale + rule.Offset
+
+	return value, rule.Unit, nil
+}
+
 // ParseModbusResponse parses a Modbus response according to the response_parser strategy.
 // rawData is the full response bytes from the device.
 //
@@ -355,8 +463,18 @@ func init() {
 //   - "modbus_int16": Modbus FC03 response, extracts int16 from data[3:5]
 //   - "modbus_uint32": Modbus FC03 response, extracts uint32 from data[3:7]
 //   - "modbus_float32": Modbus FC03 response, extracts IEEE 754 float32 from data[3:7]
+//   - JSON rule: If parser starts with '{', parsed as a ParserRule JSON definition (P3-3)
 func ParseModbusResponse(rawData []byte, parser string) (float64, error) {
-	// Try registry first
+	// P3-3: Try JSON rule parsing first if parser looks like JSON
+	if strings.HasPrefix(strings.TrimSpace(parser), "{") {
+		value, _, err := ParseResponseByRule(parser, rawData)
+		if err != nil {
+			return 0, err
+		}
+		return value, nil
+	}
+
+	// Try registry for named parsers
 	if p, ok := parserRegistry[parser]; ok {
 		val, _, err := p.Parse(rawData)
 		return val, err

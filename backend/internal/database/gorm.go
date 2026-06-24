@@ -63,6 +63,7 @@ func AutoMigrate() error {
 		&models.NodeEvent{},
 		&models.CalibrationCache{},
 		&models.ConfigMeta{}, // v2.1: epoch persistence
+		&models.PendingWriteRecord{}, // P3-4: pending write persistence
 
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加

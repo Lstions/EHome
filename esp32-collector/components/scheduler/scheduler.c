@@ -49,23 +49,14 @@ static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t
 }
 
 /* ── derive uart_port_t from bus_config bytes via hw_tables ── */
+/* P3-7: Replaced static derive_uart_port with shared hw_derive_uart_port from hw_tables */
 
 static uart_port_t derive_uart_port(const config_channel_t *ch)
 {
     if (ch->bus_type != BUS_TYPE_UART || ch->bus_config_len < 2)
         return UART_NUM_0;  /* safe default */
 
-    uint8_t tx_pin = ch->bus_config[0];
-    uint8_t rx_pin = ch->bus_config[1];
-
-    for (int i = 0; i < HW_UART_COUNT; i++) {
-        if (hw_uarts[i].default_tx_pin == tx_pin &&
-            hw_uarts[i].default_rx_pin == rx_pin) {
-            return (uart_port_t)hw_uarts[i].port;
-        }
-    }
-    /* Fallback: if tx_pin matches UART0 default, assume UART0; else UART1 */
-    return UART_NUM_1;
+    return hw_derive_uart_port(ch->bus_config[0], ch->bus_config[1], UART_NUM_1);
 }
 
 /* ── public API ──────────────────────────────────────────────────── */

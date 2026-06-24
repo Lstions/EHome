@@ -11,6 +11,19 @@
 
 #include "hw_tables.h"
 
+/* === P3-7: Common UART port derivation === */
+
+uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port)
+{
+    for (int i = 0; i < HW_UART_COUNT; i++) {
+        if (hw_uarts[i].default_tx_pin == tx_pin &&
+            hw_uarts[i].default_rx_pin == rx_pin) {
+            return (uart_port_t)hw_uarts[i].port;
+        }
+    }
+    return default_port;
+}
+
 /* ================================================================
  *  Static Hardware Profile — per-target pin tables
  *

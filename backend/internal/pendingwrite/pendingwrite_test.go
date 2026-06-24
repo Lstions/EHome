@@ -13,7 +13,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestNewManager(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
 	}
@@ -23,19 +23,19 @@ func TestNewManager(t *testing.T) {
 }
 
 func TestHandleResponseNoEntry(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 	// Should not panic on unknown request_id
 	mgr.HandleResponse(99999, true, 0, "")
 }
 
 func TestHandleDataReportAckNoEntry(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 	// Should not panic on unknown request_id
 	mgr.HandleDataReportAck(99999, []byte{0x01, 0x02})
 }
 
 func TestHandleResponseWithEntry(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	// Manually insert a pending entry
 	entry := &Entry{
@@ -64,7 +64,7 @@ func TestHandleResponseWithEntry(t *testing.T) {
 }
 
 func TestHandleDataReportAckWithEntry(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry := &Entry{
 		RequestID: 54321,
@@ -90,7 +90,7 @@ func TestHandleDataReportAckWithEntry(t *testing.T) {
 }
 
 func TestHandleResponseFailure(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry := &Entry{
 		RequestID: 11111,
@@ -116,7 +116,7 @@ func TestHandleResponseFailure(t *testing.T) {
 }
 
 func TestRemoveEntry(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry := &Entry{
 		RequestID: 22222,
@@ -134,7 +134,7 @@ func TestRemoveEntry(t *testing.T) {
 }
 
 func TestRetryFailedExpired(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry := &Entry{
 		RequestID:  33333,
@@ -154,7 +154,7 @@ func TestRetryFailedExpired(t *testing.T) {
 }
 
 func TestRetryFailedMaxRetries(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry := &Entry{
 		RequestID:  44444,
@@ -205,7 +205,7 @@ func TestResolveExactlyOnce(t *testing.T) {
 }
 
 func TestShutdown(t *testing.T) {
-	mgr := NewManager(nil)
+	mgr := NewManager(nil, nil)
 
 	entry1 := &Entry{
 		RequestID: 66666,

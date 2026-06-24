@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "dma_pool.h"  /* for hw_dma_t */
+#include "driver/uart.h"  /* P3-7: for uart_port_t in hw_derive_uart_port */
 
 #ifdef __cplusplus
 extern "C" {
@@ -113,6 +114,21 @@ extern const hw_spi_t  hw_spis[HW_SPI_COUNT];
 extern const hw_gpio_t hw_gpios[HW_GPIO_COUNT];
 extern const hw_adc_t  hw_adcs[HW_ADC_COUNT];
 extern const hw_dma_t  hw_dmas[HW_DMA_COUNT];
+
+/* === P3-7: Common UART port derivation === */
+
+/**
+ * @brief Derive uart_port_t from TX/RX pin numbers via hw_uarts lookup table.
+ *
+ * Iterates hw_uarts[] to find a matching (tx_pin, rx_pin) pair and returns
+ * the corresponding port number.  This eliminates the duplicate derive_uart_port
+ * functions that were in both scheduler.c and bus_manager.c.
+ *
+ * @param tx_pin  TX pin number (bus_config[0] for UART channels)
+ * @param rx_pin  RX pin number (bus_config[1] for UART channels)
+ * @return        Matching uart_port_t, or default_port if no match found
+ */
+uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port);
 
 #ifdef __cplusplus
 }

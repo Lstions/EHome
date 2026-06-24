@@ -51,6 +51,7 @@ func (m *Manager) SendPing(deviceID string) error {
 }
 
 // SendWriteCommand sends a WriteCommand to a device
+// P3-5: Uses QoS 2 (exactly-once) for critical write operations
 func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byte, readSize uint32) error {
 	// Record TX in terminal
 	m.termMgr.RecordTX(deviceID, uint(channelID), data)
@@ -66,7 +67,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	}
 
 	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.mqtt.PublishQoS2(topic, enc.Bytes())
 }
 
 // SendScanRequest sends a ScanRequest to a device (I2C mode)
