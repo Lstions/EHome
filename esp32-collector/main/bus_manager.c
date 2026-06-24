@@ -95,7 +95,9 @@ static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
     }
 }
 
-/* ==== Look up bus_type from config manifest ==== */
+/* ==== Look up bus_type from config manifest ====
+ * P2-9: This is now a fallback — prefer reading bus_type from bus_dma_ctx_t
+ * which is set during bus_dma_init(). Used only when ctx is not yet available. */
 
 static uint8_t find_bus_type(const config_manifest_t *m, uint32_t ch)
 {
@@ -284,10 +286,13 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
         return;
     }
 
+    /* P2-9: Prefer bus_type from ctx (set during bus_dma_init) over manifest lookup */
+    bus_dma_ctx_t *bctx = bus_manager_find_ctx(s, ch);
+
     bus_cmd_t cmd = {
         .request_id = rid,
         .channel_id = ch,
-        .bus_type   = find_bus_type(m, ch),
+        .bus_type   = bctx ? bctx->bus_type : find_bus_type(m, ch),
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
         .delay_ms   = 0,    /* WriteCommand: no fixed delay */
         .read_size  = rs,   /* v2.5: expected RX bytes (0 = TX only) */
