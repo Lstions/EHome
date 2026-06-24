@@ -299,10 +299,15 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
 
     ESP_LOGI(tag, "Started (prio=%d)", uxTaskPriorityGet(NULL));
 
+    /* 8.3: Subscribe this task to the watchdog */
+    esp_task_wdt_add(NULL);
+
     uint32_t txn = 0, errs = 0, no_ctx = 0;
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* 8.3: Feed watchdog to prevent hardware hang causing task death */
+        esp_task_wdt_reset();
         /* P0-3: Suspend check — if config apply is in progress, wait */
         if (s_suspend_sem != NULL) {
             if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
