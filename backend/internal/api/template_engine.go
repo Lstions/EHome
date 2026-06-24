@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -228,35 +229,137 @@ func formatValue(val uint64, spec string) (string, error) {
 	return fmt.Sprintf("%"+spec, val), nil
 }
 
+// ResponseParser is the interface for parsing device response data
+type ResponseParser interface {
+	Parse(rawData []byte) (value float64, unit string, err error)
+}
+
+// parserRegistry maps parser names to implementations
+var parserRegistry = map[string]ResponseParser{}
+
+// RegisterParser adds a parser to the global registry
+func RegisterParser(name string, p ResponseParser) {
+	parserRegistry[name] = p
+}
+
+// --- Built-in parsers ---
+
+type modbusUint16Parser struct{}
+
+func (p *modbusUint16Parser) Parse(rawData []byte) (float64, string, error) {
+	if len(rawData) < 5 {
+		return 0, "", fmt.Errorf("response too short for modbus_uint16: got %d bytes, need at least 5", len(rawData))
+	}
+	if rawData[1]&0x80 != 0 {
+		return 0, "", fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X (%s)", rawData[1], rawData[2], modbusExceptionMessage(rawData[2]))
+	}
+	val := binary.BigEndian.Uint16(rawData[3:5])
+	return float64(val), "", nil
+}
+
+type modbusUint16Div10Parser struct{}
+
+func (p *modbusUint16Div10Parser) Parse(rawData []byte) (float64, string, error) {
+	if len(rawData) < 5 {
+		return 0, "", fmt.Errorf("response too short for modbus_uint16_div10: got %d bytes, need at least 5", len(rawData))
+	}
+	if rawData[1]&0x80 != 0 {
+		return 0, "", fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X (%s)", rawData[1], rawData[2], modbusExceptionMessage(rawData[2]))
+	}
+	val := binary.BigEndian.Uint16(rawData[3:5])
+	return float64(val) / 10.0, "", nil
+}
+
+type modbusInt16Parser struct{}
+
+func (p *modbusInt16Parser) Parse(rawData []byte) (float64, string, error) {
+	if len(rawData) < 5 {
+		return 0, "", fmt.Errorf("response too short for modbus_int16: got %d bytes, need at least 5", len(rawData))
+	}
+	if rawData[1]&0x80 != 0 {
+		return 0, "", fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X (%s)", rawData[1], rawData[2], modbusExceptionMessage(rawData[2]))
+	}
+	val := int16(binary.BigEndian.Uint16(rawData[3:5]))
+	return float64(val), "", nil
+}
+
+type modbusUint32Parser struct{}
+
+func (p *modbusUint32Parser) Parse(rawData []byte) (float64, string, error) {
+	if len(rawData) < 7 {
+		return 0, "", fmt.Errorf("response too short for modbus_uint32: got %d bytes, need at least 7", len(rawData))
+	}
+	if rawData[1]&0x80 != 0 {
+		return 0, "", fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X (%s)", rawData[1], rawData[2], modbusExceptionMessage(rawData[2]))
+	}
+	val := binary.BigEndian.Uint32(rawData[3:7])
+	return float64(val), "", nil
+}
+
+type modbusFloat32Parser struct{}
+
+func (p *modbusFloat32Parser) Parse(rawData []byte) (float64, string, error) {
+	if len(rawData) < 7 {
+		return 0, "", fmt.Errorf("response too short for modbus_float32: got %d bytes, need at least 7", len(rawData))
+	}
+	if rawData[1]&0x80 != 0 {
+		return 0, "", fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X (%s)", rawData[1], rawData[2], modbusExceptionMessage(rawData[2]))
+	}
+	bits := binary.BigEndian.Uint32(rawData[3:7])
+	return float64(math.Float32frombits(bits)), "", nil
+}
+
+// modbusExceptionMessage returns a human-readable description for Modbus exception codes
+func modbusExceptionMessage(code byte) string {
+	switch code {
+	case 0x01:
+		return "illegal function"
+	case 0x02:
+		return "illegal data address"
+	case 0x03:
+		return "illegal data value"
+	case 0x04:
+		return "slave device failure"
+	case 0x05:
+		return "acknowledge"
+	case 0x06:
+		return "slave device busy"
+	case 0x07:
+		return "negative acknowledge"
+	case 0x08:
+		return "memory parity error"
+	case 0x0A:
+		return "gateway path unavailable"
+	case 0x0B:
+		return "gateway target device failed to respond"
+	default:
+		return fmt.Sprintf("unknown exception code 0x%02X", code)
+	}
+}
+
+func init() {
+	RegisterParser("modbus_uint16", &modbusUint16Parser{})
+	RegisterParser("modbus_uint16_div10", &modbusUint16Div10Parser{})
+	RegisterParser("modbus_int16", &modbusInt16Parser{})
+	RegisterParser("modbus_uint32", &modbusUint32Parser{})
+	RegisterParser("modbus_float32", &modbusFloat32Parser{})
+}
+
 // ParseModbusResponse parses a Modbus response according to the response_parser strategy.
 // rawData is the full response bytes from the device.
 //
-// Supported parsers:
+// Supported parsers (via registry):
 //   - "modbus_uint16": Modbus FC03 response, extracts uint16 from data[3:5]
 //   - "modbus_uint16_div10": Same as above, then divides by 10.0
+//   - "modbus_int16": Modbus FC03 response, extracts int16 from data[3:5]
+//   - "modbus_uint32": Modbus FC03 response, extracts uint32 from data[3:7]
+//   - "modbus_float32": Modbus FC03 response, extracts IEEE 754 float32 from data[3:7]
 func ParseModbusResponse(rawData []byte, parser string) (float64, error) {
-	switch parser {
-	case "modbus_uint16":
-		if len(rawData) < 5 {
-			return 0, fmt.Errorf("response too short for modbus_uint16: got %d bytes, need at least 5", len(rawData))
-		}
-		if rawData[1]&0x80 != 0 {
-			return 0, fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X", rawData[1], rawData[2])
-		}
-		val := binary.BigEndian.Uint16(rawData[3:5])
-		return float64(val), nil
-
-	case "modbus_uint16_div10":
-		if len(rawData) < 5 {
-			return 0, fmt.Errorf("response too short for modbus_uint16_div10: got %d bytes, need at least 5", len(rawData))
-		}
-		if rawData[1]&0x80 != 0 {
-			return 0, fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X", rawData[1], rawData[2])
-		}
-		val := binary.BigEndian.Uint16(rawData[3:5])
-		return float64(val) / 10.0, nil
-
-	default:
-		return 0, fmt.Errorf("unknown response_parser: %s", parser)
+	// Try registry first
+	if p, ok := parserRegistry[parser]; ok {
+		val, _, err := p.Parse(rawData)
+		return val, err
 	}
+	// Fallback for unknown parsers
+	return 0, fmt.Errorf("unknown response_parser: %s", parser)
 }

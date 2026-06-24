@@ -71,7 +71,7 @@ func (Node) TableName() string { return "nodes" }
 // 一个 EdgeDevice = Node + Channel + DeviceConfig 三元组的实例化
 // 字段含义见 docs/设计/边缘设备/详细设计.md
 type EdgeDevice struct {
-	Type           string         `gorm:"column:type;size:32;not null;default:'';index" json:"type"` // v2.1 字段保留 (从 DeviceConfig.DeviceType 同步, 由 v2.2 init 维护)
+	Type           string         `gorm:"column:type;size:32;not null;default:'';index" json:"type"` // deprecated: use DeviceConfig.DeviceType via JOIN. Kept for backward compat.
 	ParserID       string         `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"`                      // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
 	ID             uint           `gorm:"primaryKey" json:"id"`
 	Name           string         `gorm:"size:64;not null" json:"name"`

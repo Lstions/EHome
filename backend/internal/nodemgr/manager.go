@@ -243,43 +243,63 @@ type ConfigHashResult struct {
 }
 
 // CalcConfigHashForDevice calculates the config hash and manifest ID for a device.
+// P2-1: Uses a transaction with REPEATABLE READ isolation so all four queries see a
+// consistent snapshot (no partial view of a concurrent write).
+// P2-6: All Find queries use ORDER BY id ASC so the hash is deterministic regardless
+// of database row-ordering differences.
 func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
-	var node models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
-		return ConfigHashResult{}
-	}
+	var result ConfigHashResult
 
-	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
-	var channels []models.Channel
-	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
+	err := m.db.Transaction(func(tx *gorm.DB) error {
+		// P2-1: REPEATABLE READ for consistent snapshot across queries.
+		// Silently ignored by SQLite — the transaction itself still provides consistency.
+		tx.Exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 
-	// 从 node.Config JSON 解析 DMA configs
-	var dmaConfigs []models.DmaChannelConfig
-	if node.Config != "" {
-		var cfg map[string]interface{}
-		if err := json.Unmarshal([]byte(node.Config), &cfg); err == nil {
-			if dc, ok := cfg["dma_configs"]; ok {
-				if dcJSON, err := json.Marshal(dc); err == nil {
-					json.Unmarshal(dcJSON, &dmaConfigs)
+		var node models.Node
+		if err := tx.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
+			return err
+		}
+
+		// P2-6: ORDER BY id ASC for deterministic hash
+		var templates []models.ConfigTemplate
+		tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&templates)
+		var channels []models.Channel
+		tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&channels)
+
+		// 从 node.Config JSON 解析 DMA configs
+		var dmaConfigs []models.DmaChannelConfig
+		if node.Config != "" {
+			var cfg map[string]interface{}
+			if err := json.Unmarshal([]byte(node.Config), &cfg); err == nil {
+				if dc, ok := cfg["dma_configs"]; ok {
+					if dcJSON, err := json.Marshal(dc); err == nil {
+						json.Unmarshal(dcJSON, &dmaConfigs)
+					}
 				}
 			}
 		}
+
+		// v2.4: query edge_devices for hash calculation
+		// P2-6: ORDER BY id ASC for deterministic hash
+		var edgeDevices []models.EdgeDevice
+		tx.Order("id ASC").Where("node_id = ? AND enabled = true", node.NodeID).Find(&edgeDevices)
+
+		hashData := m.buildHashData(templates, channels, edgeDevices, dmaConfigs)
+		hash := m.hashMgr.CalcConfigHash(hashData)
+		manifestID := fmt.Sprintf("v2-%s", hash)
+
+		result = ConfigHashResult{
+			Hash:         hash,
+			ManifestID:   manifestID,
+			ChannelCount: len(channels),
+		}
+		return nil
+	})
+
+	if err != nil {
+		return ConfigHashResult{}
 	}
-
-	// v2.4: query edge_devices for hash calculation
-	var edgeDevices []models.EdgeDevice
-	m.db.Where("node_id = ? AND enabled = true", node.NodeID).Find(&edgeDevices)
-
-	hashData := m.buildHashData(templates, channels, edgeDevices, dmaConfigs)
-	hash := m.hashMgr.CalcConfigHash(hashData)
-	manifestID := fmt.Sprintf("v2-%s", hash)
-
-	return ConfigHashResult{
-		Hash:         hash,
-		ManifestID:   manifestID,
-		ChannelCount: len(channels),
-	}
+	return result
 }
 
 // GetDeviceIDByNodeID resolves a node DB ID to its node_id string.

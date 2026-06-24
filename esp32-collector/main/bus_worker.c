@@ -36,6 +36,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "rom/ets_sys.h"   /* ets_delay_us — busy-wait without disabling interrupts */
+#include "freertos/semphr.h"
 #include <inttypes.h>
 
 #define TAG_U0       "CMD_U0"
@@ -54,6 +55,19 @@
 /* Injected callbacks (set before bus_worker_start) */
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static data_rpt_cb_t  s_data_rpt_cb  = NULL;
+
+/* P0-3: Counting semaphore for suspend/resume — replaces vTaskSuspend/Resume
+ * maxCount=1, initialCount=1 (available = not suspended)
+ * suspend: Take semaphore → blocks cmd_tasks
+ * resume: Give semaphore → unblocks cmd_tasks
+ * cmd_task: probe with Take(0)+Give() — if Take fails, we're suspended */
+static SemaphoreHandle_t s_suspend_sem = NULL;
+
+static void ensure_suspend_sem(void) {
+    if (s_suspend_sem == NULL) {
+        s_suspend_sem = xSemaphoreCreateCounting(1, 1);
+    }
+}
 
 /* Task handles for suspend/resume/stop */
 static TaskHandle_t s_rx_task_h   = NULL;
@@ -82,6 +96,18 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* P0-3: Suspend check — if config apply is in progress, wait */
+        if (s_suspend_sem != NULL) {
+            if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
+                /* Semaphore available = not suspended, give it back */
+                xSemaphoreGive(s_suspend_sem);
+            } else {
+                /* Semaphore taken = suspended, wait and retry */
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+
         if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
 
         bus_dma_ctx_t *ctx = bus_manager_find_ctx(s, cmd.channel_id);
@@ -218,6 +244,18 @@ static void spi_i2c_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *ta
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* P0-3: Suspend check — if config apply is in progress, wait */
+        if (s_suspend_sem != NULL) {
+            if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
+                /* Semaphore available = not suspended, give it back */
+                xSemaphoreGive(s_suspend_sem);
+            } else {
+                /* Semaphore taken = suspended, wait and retry */
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+
         if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
 
         bus_dma_ctx_t *ctx = bus_manager_find_ctx(s, cmd.channel_id);
@@ -344,6 +382,16 @@ static void rx_task(void *pv)
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* P0-3: Suspend check for rx_task too */
+        if (s_suspend_sem != NULL) {
+            if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
+                xSemaphoreGive(s_suspend_sem);
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        }
+
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
             if (!s->bus_ctx[i].initialized) continue;
             if (s->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
@@ -450,20 +498,17 @@ void bus_worker_start(app_state_t *state)
 
 void bus_worker_suspend(void)
 {
-    if (s_rx_task_h)  vTaskSuspend(s_rx_task_h);
-    if (s_cmd_u0_h)   vTaskSuspend(s_cmd_u0_h);
-    if (s_cmd_u1_h)   vTaskSuspend(s_cmd_u1_h);
-    if (s_cmd_spi_h)  vTaskSuspend(s_cmd_spi_h);
-    if (s_cmd_i2c_h)  vTaskSuspend(s_cmd_i2c_h);
+    ensure_suspend_sem();
+    ESP_LOGI("BUS_WORKER", "Suspending bus tasks (config apply)");
+    xSemaphoreTake(s_suspend_sem, portMAX_DELAY);  // Take = suspend
 }
 
 void bus_worker_resume(void)
 {
-    if (s_rx_task_h)  vTaskResume(s_rx_task_h);
-    if (s_cmd_u0_h)   vTaskResume(s_cmd_u0_h);
-    if (s_cmd_u1_h)   vTaskResume(s_cmd_u1_h);
-    if (s_cmd_spi_h)  vTaskResume(s_cmd_spi_h);
-    if (s_cmd_i2c_h)  vTaskResume(s_cmd_i2c_h);
+    if (s_suspend_sem != NULL) {
+        xSemaphoreGive(s_suspend_sem);  // Give = resume
+        ESP_LOGI("BUS_WORKER", "Resumed bus tasks");
+    }
 }
 
 void bus_worker_stop(void)

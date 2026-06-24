@@ -3,7 +3,14 @@ package pendingwrite
 import (
 	"testing"
 	"time"
+
+	"ehome/backend/pkg/logger"
 )
+
+func TestMain(m *testing.M) {
+	logger.Init("info")
+	m.Run()
+}
 
 func TestNewManager(t *testing.T) {
 	mgr := NewManager(nil)
@@ -163,5 +170,77 @@ func TestRetryFailedMaxRetries(t *testing.T) {
 	// Entry should be removed (retry count >= max)
 	if _, ok := mgr.pending[44444]; ok {
 		t.Error("entry should be removed after max retries")
+	}
+}
+
+func TestResolveExactlyOnce(t *testing.T) {
+	entry := &Entry{
+		RequestID: 55555,
+		DeviceID:  "test_device",
+		Response:  make(chan *Response, 1),
+		SentAt:    time.Now(),
+	}
+
+	// Multiple resolve calls — only the first should succeed
+	entry.resolve(&Response{Success: true, ErrorMsg: "first"})
+	entry.resolve(&Response{Success: false, ErrorMsg: "second"})
+	entry.resolve(&Response{Success: false, ErrorMsg: "third"})
+
+	// Should get exactly one response — the first one
+	resp := <-entry.Response
+	if !resp.Success {
+		t.Error("expected success=true from first resolve")
+	}
+	if resp.ErrorMsg != "first" {
+		t.Errorf("expected error_msg=first, got %s", resp.ErrorMsg)
+	}
+
+	// Channel should now be empty (only one write despite three resolve calls)
+	select {
+	case <-entry.Response:
+		t.Error("should not have a second response on channel")
+	default:
+		// correct: channel is empty
+	}
+}
+
+func TestShutdown(t *testing.T) {
+	mgr := NewManager(nil)
+
+	entry1 := &Entry{
+		RequestID: 66666,
+		DeviceID:  "test_device_1",
+		Response:  make(chan *Response, 1),
+		SentAt:    time.Now(),
+	}
+	entry2 := &Entry{
+		RequestID: 77777,
+		DeviceID:  "test_device_2",
+		Response:  make(chan *Response, 1),
+		SentAt:    time.Now(),
+	}
+	mgr.pending[66666] = entry1
+	mgr.pending[77777] = entry2
+
+	mgr.Shutdown(5 * time.Second)
+
+	// All entries should be resolved with shutdown error
+	for _, entry := range []*Entry{entry1, entry2} {
+		select {
+		case resp := <-entry.Response:
+			if resp.Success {
+				t.Error("expected success=false for shutdown response")
+			}
+			if resp.ErrorMsg != "server shutting down" {
+				t.Errorf("expected error_msg='server shutting down', got %s", resp.ErrorMsg)
+			}
+		default:
+			t.Fatal("expected response on channel after shutdown")
+		}
+	}
+
+	// Pending map should be empty
+	if len(mgr.pending) != 0 {
+		t.Errorf("expected 0 pending entries after shutdown, got %d", len(mgr.pending))
 	}
 }

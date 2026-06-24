@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,9 @@ import (
 
 // operationNameRe validates operation names to prevent injection or malformed input.
 var operationNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// executeLimiter limits concurrent /execute read operations to prevent resource exhaustion.
+var executeLimiter = make(chan struct{}, 20)
 
 // getDefaultTemplateParams returns default ConfigTemplate parameters (write_data, read_length, delay_ms)
 // for a given device type. The hardwareID is used to build Modbus slave address in the command.
@@ -616,10 +620,28 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			})
 
 		case "read":
+			// Concurrency limit for read operations
+			select {
+			case executeLimiter <- struct{}{}:
+				defer func() { <-executeLimiter }()
+			default:
+				Error(c, http.StatusServiceUnavailable, "too many concurrent operations")
+				return
+			}
+
+			// P1-3: Device-level mutex to prevent concurrent /execute on same device+channel
+			deviceKey := fmt.Sprintf("%s:%d", deviceID, edge.ChannelID)
+			deviceLocks.lock(deviceKey)
+			defer deviceLocks.unlock(deviceKey)
+
 			// Read operation: use pendingwrite to wait for response
+			// Timeout with 30s upper bound to prevent runaway waits
 			timeout := 10 * time.Second
 			if opConfig.TimeoutMs > 0 {
-				timeout = time.Duration(opConfig.TimeoutMs) * time.Millisecond
+				configured := time.Duration(opConfig.TimeoutMs) * time.Millisecond
+				if configured <= 30*time.Second {
+					timeout = configured
+				}
 			}
 			readSize := opConfig.ReadSize
 			if readSize == 0 {
@@ -629,9 +651,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v dataHex=%x",
 				req.Operation, deviceID, edge.ChannelID, readSize, timeout, writeData)
 
-			resp, err := nodeMgr.PendingWrite().SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, readSize, timeout)
+			ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+			defer cancel()
+			resp, err := nodeMgr.PendingWrite().SendWriteCommand(ctx, deviceID, uint32(edge.ChannelID), writeData, readSize, timeout)
 			if err != nil {
-				Error(c, http.StatusInternalServerError, "command failed: "+err.Error())
+				if errors.Is(err, context.DeadlineExceeded) {
+					Error(c, http.StatusGatewayTimeout, "device did not respond")
+				} else if errors.Is(err, context.Canceled) {
+					Error(c, 499, "client disconnected")
+				} else {
+					Error(c, http.StatusInternalServerError, "command failed: "+err.Error())
+				}
 				return
 			}
 			if !resp.Success {
@@ -731,6 +761,70 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			writeData, err = hex.DecodeString(req.Command)
 			if err != nil {
 				Error(c, http.StatusBadRequest, "invalid hex command")
+				return
+			}
+
+			// P1-2: Modbus command security validation
+
+			// 1. Length check
+			if len(writeData) < 4 || len(writeData) > 64 {
+				Error(c, http.StatusBadRequest, "command must be 4-64 bytes")
+				return
+			}
+
+			// 2. Slave address check — prevent broadcast attack
+			slaveAddr := writeData[0]
+			if slaveAddr == 0x00 {
+				Error(c, http.StatusBadRequest, "broadcast address 0x00 not allowed")
+				return
+			}
+			if slaveAddr > 247 {
+				Error(c, http.StatusBadRequest, "Modbus address must be 1-247")
+				return
+			}
+
+			// 3. Target address must match current device (prevent attacking other devices)
+			oldAddr := uint8(0)
+			if v := parseHardwareIDUint(edge.HardwareID); v > 0 && v <= 247 {
+				oldAddr = uint8(v)
+			}
+			if oldAddr > 0 && slaveAddr != oldAddr {
+				Error(c, http.StatusBadRequest,
+					fmt.Sprintf("command must target device address 0x%02X", oldAddr))
+				return
+			}
+
+			// 4. CRC check
+			if len(writeData) >= 4 {
+				expectedCRC := ModbusCRC16(writeData[:len(writeData)-2])
+				actualCRC := uint16(writeData[len(writeData)-2]) | uint16(writeData[len(writeData)-1])<<8
+				if expectedCRC != actualCRC {
+					Error(c, http.StatusBadRequest, "invalid Modbus CRC")
+					return
+				}
+			}
+
+			// 5. Function code whitelist (replace funcCode >= 0x05 ban)
+			// Allow: FC01-04 (read) + FC05/06 (write single register/coil, needed for change-address)
+			// Deny: FC0F/10 (write multiple) + FC2x/3x/4x/5x/6x/7x (diagnostics/file/etc)
+			funcCode := writeData[1] & 0x7F
+			switch funcCode {
+			case 0x01, 0x02, 0x03, 0x04:
+				// Read operations — allowed
+			case 0x05, 0x06:
+				// Write single register/coil — allowed (change-address uses FC06)
+				// Additional check: write target register should be in allowed range
+				if len(writeData) >= 6 {
+					regAddr := uint16(writeData[2])<<8 | uint16(writeData[3])
+					if regAddr > 0xFF {
+						Error(c, http.StatusForbidden,
+							fmt.Sprintf("write to register 0x%04X not allowed (max 0x00FF)", regAddr))
+						return
+					}
+				}
+			default:
+				Error(c, http.StatusForbidden,
+					fmt.Sprintf("function code 0x%02X not allowed (allowed: 01-06)", funcCode))
 				return
 			}
 		} else {

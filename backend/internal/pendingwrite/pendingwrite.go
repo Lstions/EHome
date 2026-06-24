@@ -1,6 +1,7 @@
 package pendingwrite
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -8,6 +9,7 @@ import (
 
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
+	"ehome/backend/pkg/logger"
 )
 
 // Entry represents a pending write operation
@@ -20,6 +22,7 @@ type Entry struct {
 	SentAt     time.Time
 	RetryCount int
 	Response   chan *Response
+	once       sync.Once // guarantees exactly-once delivery to Response channel
 }
 
 // Response represents a write response
@@ -53,8 +56,17 @@ func NewManager(mqttClient *mqtt.Client) *Manager {
 	}
 }
 
-// SendWriteCommand sends a WriteCommand and waits for response
-func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byte, readSize uint32, timeout time.Duration) (*Response, error) {
+// resolve delivers a response to the entry's channel exactly once.
+// The channel is buffered(1), so this never blocks.
+func (e *Entry) resolve(resp *Response) {
+	e.once.Do(func() {
+		e.Response <- resp
+	})
+}
+
+// SendWriteCommand sends a WriteCommand and waits for response.
+// The ctx parameter allows cancellation (e.g. from HTTP request context).
+func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channelID uint32, data []byte, readSize uint32, timeout time.Duration) (*Response, error) {
 	requestID := atomic.AddUint32(&nextRequestID, 1)
 
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
@@ -80,21 +92,28 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 	m.pending[requestID] = entry
 	m.mu.Unlock()
 
+	defer m.removeEntry(requestID)
+
 	// Send the command
 	topic := mqtt.TopicForNode(deviceID)
 	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
-		m.removeEntry(requestID)
+		entry.resolve(&Response{Success: false, ErrorMsg: fmt.Sprintf("failed to publish: %v", err)})
 		return nil, fmt.Errorf("failed to publish: %w", err)
 	}
 
-	// Wait for response with timeout
+	// Wait for response with timeout or context cancellation
 	select {
 	case resp := <-entry.Response:
-		m.removeEntry(requestID)
+		if !resp.Success {
+			return resp, fmt.Errorf("device error: code=%d msg=%s", resp.ErrorCode, resp.ErrorMsg)
+		}
 		return resp, nil
 	case <-time.After(timeout):
-		m.removeEntry(requestID)
+		entry.resolve(&Response{Success: false, ErrorMsg: "timeout"})
 		return nil, fmt.Errorf("write command timeout after %v", timeout)
+	case <-ctx.Done():
+		entry.resolve(&Response{Success: false, ErrorMsg: "cancelled"})
+		return nil, fmt.Errorf("write command cancelled: %w", ctx.Err())
 	}
 }
 
@@ -108,6 +127,7 @@ func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint3
 	m.mu.Unlock()
 
 	if !ok {
+		logger.Infof("[pendingwrite] late WriteResponse for requestID=%d (entry already removed)", requestID)
 		return
 	}
 
@@ -116,22 +136,22 @@ func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint3
 	// Only fail early if the firmware reported an error.
 	if entry.ReadSize > 0 {
 		if !success {
-			entry.Response <- &Response{
+			entry.resolve(&Response{
 				Success:   false,
 				ErrorCode: errorCode,
 				ErrorMsg:  errorMsg,
-			}
+			})
 		}
 		// success: don't resolve, wait for DataReportAck
 		return
 	}
 
 	// For write-only operations (readSize == 0), WriteRsp is the final response.
-	entry.Response <- &Response{
+	entry.resolve(&Response{
 		Success:   success,
 		ErrorCode: errorCode,
 		ErrorMsg:  errorMsg,
-	}
+	})
 }
 
 // HandleDataReportAck processes a DataReport that carries a non-zero request_id,
@@ -143,16 +163,17 @@ func (m *Manager) HandleDataReportAck(requestID uint32, rawData []byte) {
 	m.mu.Unlock()
 
 	if !ok {
+		logger.Infof("[pendingwrite] late DataReportAck for requestID=%d (entry already removed, likely timed out)", requestID)
 		return
 	}
 
 	// DataReport ack implies success (device responded with data)
-	entry.Response <- &Response{
+	entry.resolve(&Response{
 		Success:   true,
 		ErrorCode: 0,
 		ErrorMsg:  "",
 		RawData:   rawData,
-	}
+	})
 }
 
 func (m *Manager) removeEntry(requestID uint32) {
@@ -179,4 +200,15 @@ func (m *Manager) RetryFailed(maxRetries int) {
 			// Re-send would go here
 		}
 	}
+}
+
+// Shutdown resolves all pending entries with a shutdown error and clears the map.
+// This is called during graceful server shutdown to unblock any waiting goroutines.
+func (m *Manager) Shutdown(timeout time.Duration) {
+	m.mu.Lock()
+	for reqID, entry := range m.pending {
+		entry.resolve(&Response{Success: false, ErrorMsg: "server shutting down"})
+		delete(m.pending, reqID)
+	}
+	m.mu.Unlock()
 }

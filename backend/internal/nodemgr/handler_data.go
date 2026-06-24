@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/drivers"
@@ -12,6 +13,10 @@ import (
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 )
+
+// P1-4: Backpressure — overflow goroutine limit for when worker pool is full
+var overflowGoroutines int64
+const maxOverflowGoroutines = 50
 
 // handleDataReport processes DataReport (type=0x03)
 // Fast path: decode frame fields, then dispatch to worker pool
@@ -63,15 +68,9 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	metrics.DataReceivedTotal.WithLabelValues(deviceID, status).Inc()
 
 	// Dispatch to worker pool (non-blocking)
-	// Look up node numeric ID (may be 0 if not found, but that's fine for fanout)
-	var collectorID uint
-	var node models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err == nil {
-		collectorID = node.ID
-	}
+	// P1-4: collectorID resolved in worker, not in MQTT callback
 	job := dataReportJob{
 		deviceID:     deviceID,
-		collectorID:  collectorID,
 		channelID:    channelID,
 		timestamp:    timestamp,
 		sequence:     sequence,
@@ -86,9 +85,19 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	case m.dataCh <- job:
 		// submitted to worker pool
 	default:
-		// Worker pool full, fallback to sync processing to avoid data loss
-		logger.Warnf("[%s] Worker pool full, fallback to sync", deviceID)
-		m.processDataReportJob(job)
+		// P1-4: Backpressure — limit overflow goroutines
+		current := atomic.LoadInt64(&overflowGoroutines)
+		if current >= maxOverflowGoroutines {
+			// Critical overload — block MQTT callback (better than data loss)
+			logger.Warnf("[%s] CRITICAL: overflow limit reached (%d), blocking MQTT callback", deviceID, current)
+			m.processDataReportJob(job)
+		} else {
+			atomic.AddInt64(&overflowGoroutines, 1)
+			go func() {
+				defer atomic.AddInt64(&overflowGoroutines, -1)
+				m.processDataReportJob(job)
+			}()
+		}
 	}
 }
 

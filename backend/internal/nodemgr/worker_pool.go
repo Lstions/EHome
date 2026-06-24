@@ -14,7 +14,6 @@ import (
 // dataReportJob represents a parsed DataReport ready for async processing
 type dataReportJob struct {
 	deviceID     string
-	collectorID  uint
 	channelID    uint64
 	timestamp    uint64
 	sequence     uint64
@@ -26,8 +25,8 @@ type dataReportJob struct {
 }
 
 const (
-	defaultWorkerCount = 4
-	defaultJobBuffer   = 128
+	defaultWorkerCount = 8    // P1-5: from 4 → 8
+	defaultJobBuffer   = 1024 // P1-5: from 128 → 1024
 )
 
 // startWorkerPool launches background goroutines to process DataReport jobs
@@ -72,11 +71,11 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		return
 	}
 
-	// Get node
+	// P1-4: Resolve collectorID in worker (not MQTT callback)
 	var node models.Node
-	if err := m.db.Where("node_id = ?", job.deviceID).First(&node).Error; err != nil {
-		logger.Infof("[%s] Collector not found", job.deviceID)
-		return
+	var collectorID uint
+	if err := m.db.Where("node_id = ?", job.deviceID).First(&node).Error; err == nil {
+		collectorID = node.ID
 	}
 
 	// Store raw data
@@ -110,7 +109,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// Parse and store unified data (includes HA state push)
 	if job.errorCode == 0 && job.rawData != nil {
-		parsedData := m.parseAndStoreData(job.collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.rawData)
+		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.rawData)
 		metrics.DataReportsProcessed.Inc()
 
 		// Add parsed sensor data to channel_data event

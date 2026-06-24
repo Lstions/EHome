@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -478,7 +479,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		// Send WriteCommand via pending write (with 10s timeout)
 		deviceID := ch.NodeID
-		resp, err := nodeMgr.PendingWrite().SendWriteCommand(deviceID, uint32(channelID), data, 0, 10*time.Second)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+		defer cancel()
+		resp, err := nodeMgr.PendingWrite().SendWriteCommand(ctx, deviceID, uint32(channelID), data, 0, 10*time.Second)
 		if err != nil {
 			c.JSON(http.StatusGatewayTimeout, gin.H{"code": 504, "message": err.Error()})
 			return
