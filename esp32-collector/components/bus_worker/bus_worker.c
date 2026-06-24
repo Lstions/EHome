@@ -45,6 +45,7 @@
 #include "scheduler.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_task_wdt.h"   /* 8.3: Task watchdog — feed in cmd_task loops */
 #include "rom/ets_sys.h"   /* ets_delay_us — busy-wait without disabling interrupts */
 #include "freertos/semphr.h"
 #include <inttypes.h>
@@ -86,6 +87,10 @@ static TaskHandle_t s_cmd_u0_h    = NULL;
 static TaskHandle_t s_cmd_u1_h    = NULL;
 static TaskHandle_t s_cmd_spi_h   = NULL;
 static TaskHandle_t s_cmd_i2c_h   = NULL;
+
+/* 8.1: Runtime counters for observability */
+static uint32_t s_rx_timeout_count[SCHED_MAX_CHANNELS];   /* P1-6: RX timeout count per channel */
+static uint32_t s_rx_match_count[SCHED_MAX_CHANNELS];     /* Frame match count per channel */
 
 void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
 {
@@ -154,10 +159,15 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
 
     ESP_LOGI(tag, "Started (prio=%d)", uxTaskPriorityGet(NULL));
 
+    /* 8.3: Subscribe this task to the watchdog */
+    esp_task_wdt_add(NULL);
+
     uint32_t txn = 0, errs = 0, no_ctx = 0;
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* 8.3: Feed watchdog to prevent hardware hang causing task death */
+        esp_task_wdt_reset();
         /* P0-3: Suspend check — if config apply is in progress, wait */
         if (s_suspend_sem != NULL) {
             if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
@@ -527,10 +537,15 @@ static void rx_task(void *pv)
     ESP_LOGI(TAG_RX, "Started (prio=%d, poll=%dms)",
              uxTaskPriorityGet(NULL), RX_POLL_MS);
 
+    /* 8.3: Subscribe this task to the watchdog */
+    esp_task_wdt_add(NULL);
+
     uint32_t reads = 0, hits = 0;
     TickType_t last_stats = xTaskGetTickCount();
 
     while (1) {
+        /* 8.3: Feed watchdog to prevent hardware hang causing task death */
+        esp_task_wdt_reset();
         /* P0-3: Suspend check for rx_task too */
         if (s_suspend_sem != NULL) {
             if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
@@ -574,6 +589,7 @@ static void rx_task(void *pv)
             stream_rx_t *stream = &s_streams[i];
             if (stream->len > 0 && is_frame_complete(stream)) {
                 hits++;
+                s_rx_match_count[i]++;   /* 8.1: Runtime counter — frame match per channel */
                 uint32_t ch = rt->bus_ch[i];
                 uint32_t rid = 0;
                 uint32_t eid = 0;
@@ -684,6 +700,7 @@ static void rx_task(void *pv)
 
                     if (elapsed_ms > (int64_t)pcmd.rx_timeout_ms) {
                         /* RX timeout — send DataReport with error_code=0x01 */
+                        s_rx_timeout_count[i]++;   /* 8.1: Runtime counter — RX timeout per channel */
                         ESP_LOGW(TAG_RX, "P1-6: RX timeout for reqID=%lu (waited %lldms, limit=%lums)",
                                  (unsigned long)pcmd.request_id,
                                  (long long)elapsed_ms, (unsigned long)pcmd.rx_timeout_ms);
@@ -768,4 +785,17 @@ void bus_worker_stop(void)
     if (s_cmd_u1_h)   { vTaskDelete(s_cmd_u1_h);   s_cmd_u1_h   = NULL; }
     if (s_cmd_spi_h)  { vTaskDelete(s_cmd_spi_h);  s_cmd_spi_h  = NULL; }
     if (s_cmd_i2c_h)  { vTaskDelete(s_cmd_i2c_h);  s_cmd_i2c_h  = NULL; }
+}
+
+/* 8.1: Get runtime counters (for debug/status queries) */
+uint32_t bus_worker_get_rx_timeout_count(int channel)
+{
+    if (channel < 0 || channel >= SCHED_MAX_CHANNELS) return 0;
+    return s_rx_timeout_count[channel];
+}
+
+uint32_t bus_worker_get_rx_match_count(int channel)
+{
+    if (channel < 0 || channel >= SCHED_MAX_CHANNELS) return 0;
+    return s_rx_match_count[channel];
 }

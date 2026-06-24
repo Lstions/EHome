@@ -166,6 +166,10 @@ void bus_worker_resume(void);
 /** Delete all worker tasks — full teardown */
 void bus_worker_stop(void);
 
+/* 8.1: Get runtime counters (for debug/status queries) */
+uint32_t bus_worker_get_rx_timeout_count(int channel);
+uint32_t bus_worker_get_rx_match_count(int channel);
+
 #ifdef __cplusplus
 }
 #endif

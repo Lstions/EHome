@@ -55,6 +55,8 @@ func (m *Manager) dataWorker(id int) {
 
 // processDataReportJob handles the heavy DB/parse work off the MQTT callback
 func (m *Manager) processDataReportJob(job dataReportJob) {
+	start := time.Now()
+
 	// Record RX in terminal
 	if m.termMgr != nil {
 		m.termMgr.RecordRX(job.deviceID, uint(job.channelID), job.rawData)
@@ -146,4 +148,6 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	if m.wsHub != nil {
 		m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
 	}
+
+	metrics.WorkerPoolProcessDuration.Observe(time.Since(start).Seconds())
 }

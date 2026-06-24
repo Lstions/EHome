@@ -15,6 +15,7 @@ import (
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -558,6 +559,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 
+		opType := opConfig.Type
+
+		// 8.1: Track concurrent executions
+		metrics.ExecuteConcurrentActive.Inc()
+		metrics.ExecuteRequestTotal.WithLabelValues(opType, "started").Inc()
+		defer metrics.ExecuteConcurrentActive.Dec()
+
 		// 3. Resolve current address from EdgeDevice
 		addr := parseHardwareIDUint(edge.HardwareID)
 
@@ -606,6 +614,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		case "write":
 			// Fire-and-forget: send via nodeMgr
 			if err := nodeMgr.SendWriteCommand(deviceID, uint32(edge.ChannelID), writeData, 0); err != nil {
+				metrics.ExecuteRequestTotal.WithLabelValues(opType, "error").Inc()
 				Error(c, http.StatusInternalServerError, "failed to send command: "+err.Error())
 				return
 			}
@@ -674,6 +683,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				result["verify_value"] = verifyResult
 				result["verify_operation"] = opConfig.VerifyOperation
 			}
+			metrics.ExecuteRequestTotal.WithLabelValues(opType, "success").Inc()
 			Success(c, result)
 
 		case "read":
@@ -682,6 +692,9 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			case executeLimiter <- struct{}{}:
 				defer func() { <-executeLimiter }()
 			default:
+				// 8.1: Track rate limit rejections
+				metrics.ExecuteRateLimitRejected.Inc()
+				metrics.ExecuteRequestTotal.WithLabelValues(opType, "error").Inc()
 				Error(c, http.StatusServiceUnavailable, "too many concurrent operations")
 				return
 			}
@@ -708,10 +721,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v dataHex=%x",
 				req.Operation, deviceID, edge.ChannelID, readSize, timeout, writeData)
 
+			// 8.1: Track read operation latency
+			readStart := time.Now()
+
 			ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 			defer cancel()
 			resp, err := nodeMgr.PendingWrite().SendWriteCommand(ctx, deviceID, uint32(edge.ChannelID), writeData, readSize, timeout)
 			if err != nil {
+				metrics.ExecuteRequestTotal.WithLabelValues(opType, "error").Inc()
 				if errors.Is(err, context.DeadlineExceeded) {
 					Error(c, http.StatusGatewayTimeout, "device did not respond")
 				} else if errors.Is(err, context.Canceled) {
@@ -722,9 +739,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				return
 			}
 			if !resp.Success {
+				metrics.ExecuteRequestTotal.WithLabelValues(opType, "error").Inc()
 				Error(c, http.StatusInternalServerError, fmt.Sprintf("device returned error: code=%d msg=%s", resp.ErrorCode, resp.ErrorMsg))
 				return
 			}
+
+			// 8.1: Observe read duration
+			metrics.ExecuteReadDuration.Observe(time.Since(readStart).Seconds())
 
 			// Parse response if parser is defined
 			result := gin.H{
@@ -759,9 +780,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				logger.Warnf("[execute] post_action failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
 			}
 
+			metrics.ExecuteRequestTotal.WithLabelValues(opType, "success").Inc()
 			Success(c, result)
 
 		default:
+			metrics.ExecuteRequestTotal.WithLabelValues(opType, "error").Inc()
 			Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported operation type: %s", opConfig.Type))
 		}
 	})

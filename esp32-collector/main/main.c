@@ -28,6 +28,7 @@
 #include "nvs_flash.h"
 #include "esp_ota_ops.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"   /* 8.3: Task watchdog initialization */
 
 /* RGB LED pin differs by board: S3=GPIO48, C6=GPIO8 */
 #ifdef CONFIG_IDF_TARGET_ESP32S3
@@ -263,6 +264,14 @@ void app_main(void)
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
     ota_set_progress_callback(msg_handler_send_ota_prog);
+
+    /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout */
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 10000,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    ESP_ERROR_CHECK(esp_task_wdt_init(&wdt_config));
 
     bus_worker_start(&s->bus_runtime);
 

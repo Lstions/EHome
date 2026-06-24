@@ -119,6 +119,81 @@ var (
 		Help: "Sync decisions total",
 	}, []string{"reason", "action"})
 
+	// --- 8.1: PendingWrite observability metrics ---
+
+	// PendingWriteActiveEntries tracks current pending write entries
+	PendingWriteActiveEntries = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ehome_pendingwrite_active_entries",
+		Help: "Current pending write entries",
+	})
+
+	// PendingWriteTimeoutTotal counts timeout events in cleanup
+	PendingWriteTimeoutTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_pendingwrite_timeout_total",
+		Help: "Total timeout count",
+	})
+
+	// PendingWriteLateResponseTotal counts late responses (entry already removed)
+	PendingWriteLateResponseTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_pendingwrite_late_response_total",
+		Help: "Total late response count",
+	})
+
+	// PendingWriteDuration records response latency distribution
+	PendingWriteDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_pendingwrite_duration_seconds",
+		Help:    "Response latency distribution",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10},
+	})
+
+	// --- 8.1: /execute observability metrics ---
+
+	// ExecuteRequestTotal counts execute requests by type and status
+	ExecuteRequestTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_execute_request_total",
+		Help: "Request count",
+	}, []string{"type", "status"})
+
+	// ExecuteReadDuration records read operation latency
+	ExecuteReadDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_execute_read_duration_seconds",
+		Help:    "Read operation latency",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10},
+	})
+
+	// ExecuteConcurrentActive tracks current concurrent executions
+	ExecuteConcurrentActive = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ehome_execute_concurrent_active",
+		Help: "Current concurrent executions",
+	})
+
+	// ExecuteRateLimitRejected counts rate limit rejections
+	ExecuteRateLimitRejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_execute_rate_limit_rejected_total",
+		Help: "Rate limit rejection count",
+	})
+
+	// --- 8.1: Worker pool observability metrics ---
+
+	// WorkerPoolOverflowTotal counts queue overflow events
+	WorkerPoolOverflowTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_worker_pool_overflow_total",
+		Help: "Overflow count",
+	})
+
+	// WorkerPoolBackpressureBlockTotal counts backpressure block events
+	WorkerPoolBackpressureBlockTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_worker_pool_backpressure_block_total",
+		Help: "Backpressure block count",
+	})
+
+	// WorkerPoolProcessDuration records processing latency
+	WorkerPoolProcessDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_worker_pool_process_duration_seconds",
+		Help:    "Processing latency",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1},
+	})
+
 	// EventBusDroppedTotal counts ConfigEventBus drops
 	EventBusDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ehome_event_bus_dropped_total",

@@ -11,6 +11,7 @@ import (
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -109,10 +110,17 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 	m.pending[requestID] = entry
 	m.mu.Unlock()
 
+	// 8.1: Track active entries
+	metrics.PendingWriteActiveEntries.Inc()
+
 	// P3-4: Persist entry to SQLite
 	m.persistEntry(entry, requestID, timeout)
 
-	defer m.removeEntry(requestID)
+	defer func() {
+		m.removeEntry(requestID)
+		// 8.1: Decrement active entries on exit
+		metrics.PendingWriteActiveEntries.Dec()
+	}()
 
 	// Send the command (P3-5: QoS 2 for critical write operations)
 	topic := mqtt.TopicForNode(deviceID)
@@ -148,7 +156,14 @@ func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint3
 
 	if !ok {
 		logger.Infof("[pendingwrite] late WriteResponse for requestID=%d (entry already removed)", requestID)
+		// 8.1: Track late responses
+		metrics.PendingWriteLateResponseTotal.Inc()
 		return
+	}
+
+	// 8.1: Observe response latency
+	if !entry.SentAt.IsZero() {
+		metrics.PendingWriteDuration.Observe(time.Since(entry.SentAt).Seconds())
 	}
 
 	// If this is a read operation (readSize > 0), WriteRsp is just an ACK.
@@ -188,7 +203,14 @@ func (m *Manager) HandleDataReportAck(requestID uint32, rawData []byte) {
 
 	if !ok {
 		logger.Infof("[pendingwrite] late DataReportAck for requestID=%d (entry already removed, likely timed out)", requestID)
+		// 8.1: Track late responses
+		metrics.PendingWriteLateResponseTotal.Inc()
 		return
+	}
+
+	// 8.1: Observe response latency
+	if !entry.SentAt.IsZero() {
+		metrics.PendingWriteDuration.Observe(time.Since(entry.SentAt).Seconds())
 	}
 
 	// DataReport ack implies success (device responded with data)
@@ -343,6 +365,8 @@ func (m *Manager) cleanupLoop() {
 			if now.Sub(entry.SentAt) > 5*time.Minute {
 				entry.resolve(&Response{Success: false, ErrorMsg: "cleanup: stale entry"})
 				delete(m.pending, id)
+				// 8.1: Track timeout events
+				metrics.PendingWriteTimeoutTotal.Inc()
 			}
 		}
 		m.mu.Unlock()
