@@ -42,16 +42,17 @@ func ModbusCRC16(data []byte) uint16 {
 //	  "post_action": ""
 //	}
 type OperationConfig struct {
-	Name           string `json:"name"`
-	Type           string `json:"type"`             // "read" or "write"
-	CommandTemplate string `json:"command_template"` // hex template with placeholders
-	ReadSize       uint32 `json:"read_size"`        // expected response bytes (for read ops)
-	TimeoutMs      int    `json:"timeout_ms"`       // timeout in ms (for read ops, default 3000)
-	ResponseParser string `json:"response_parser"`  // "modbus_uint16", "modbus_uint16_div10", etc.
-	Unit           string `json:"unit"`             // unit string for the response value
-	ResponseUnit   string `json:"response_unit"`    // alias: some configs use response_unit instead of unit
-	PostAction     string `json:"post_action"`      // "update_connection_address", "update_connection_baud", etc.
-	Label          string `json:"label"`            // human-readable operation label
+	Name            string `json:"name"`
+	Type            string `json:"type"`              // "read" or "write"
+	CommandTemplate string `json:"command_template"`  // hex template with placeholders
+	ReadSize        uint32 `json:"read_size"`         // expected response bytes (for read ops)
+	TimeoutMs       int    `json:"timeout_ms"`        // timeout in ms (for read ops, default 3000)
+	ResponseParser  string `json:"response_parser"`   // "modbus_uint16", "modbus_uint16_div10", etc.
+	Unit            string `json:"unit"`              // unit string for the response value
+	ResponseUnit    string `json:"response_unit"`     // alias: some configs use response_unit instead of unit
+	PostAction      string `json:"post_action"`       // "update_connection_address", "update_connection_baud", etc.
+	Label           string `json:"label"`             // human-readable operation label
+	VerifyOperation string `json:"verify_operation"`  // P2-4: Name of a read operation to verify write success
 }
 
 // TemplateVars holds the variables available for template substitution.

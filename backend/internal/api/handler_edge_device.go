@@ -618,11 +618,63 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			// Trigger config sync
 			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, edge.NodeID, fmt.Sprint(edge.ID))
 
-			Success(c, gin.H{
+			// P2-4: Verify write by executing a read operation
+			var verifyResult interface{}
+			if opConfig.VerifyOperation != "" {
+				verifyOpConfig, ok := operations[opConfig.VerifyOperation]
+				if !ok {
+					logger.Warnf("[execute] verify_operation %q not found in device config", opConfig.VerifyOperation)
+				} else if verifyOpConfig.Type != "read" {
+					logger.Warnf("[execute] verify_operation %q is not a read operation", opConfig.VerifyOperation)
+				} else {
+					// Render verify command
+					verifyVars := TemplateVars{Addr: addr, Params: req.Params}
+					verifyData, err := RenderCommandTemplate(verifyOpConfig.CommandTemplate, verifyVars)
+					if err != nil {
+						logger.Warnf("[execute] verify command render failed: %v", err)
+					} else {
+						verifyReadSize := verifyOpConfig.ReadSize
+						if verifyReadSize == 0 {
+							verifyReadSize = 9
+						}
+						verifyTimeout := 10 * time.Second
+						if verifyOpConfig.TimeoutMs > 0 {
+							configured := time.Duration(verifyOpConfig.TimeoutMs) * time.Millisecond
+							if configured <= 30*time.Second {
+								verifyTimeout = configured
+							}
+						}
+
+						ctx2, cancel2 := context.WithTimeout(c.Request.Context(), verifyTimeout)
+						defer cancel2()
+
+						resp2, err := nodeMgr.PendingWrite().SendWriteCommand(ctx2, deviceID, uint32(edge.ChannelID), verifyData, verifyReadSize, verifyTimeout)
+						if err != nil {
+							logger.Warnf("[execute] verify operation failed: %v", err)
+						} else if !resp2.Success {
+							logger.Warnf("[execute] verify operation returned error: code=%d msg=%s", resp2.ErrorCode, resp2.ErrorMsg)
+						} else if verifyOpConfig.ResponseParser != "" && len(resp2.RawData) > 0 {
+							value, err := ParseModbusResponse(resp2.RawData, verifyOpConfig.ResponseParser)
+							if err != nil {
+								logger.Warnf("[execute] verify parse failed: %v", err)
+							} else {
+								verifyResult = value
+							}
+						}
+					}
+				}
+			}
+
+			result := gin.H{
 				"status":    "sent",
 				"operation": req.Operation,
 				"data_hex":  fmt.Sprintf("%x", writeData),
-			})
+			}
+			if verifyResult != nil {
+				result["verify_value"] = verifyResult
+				result["verify_operation"] = opConfig.VerifyOperation
+			}
+			Success(c, result)
 
 		case "read":
 			// Concurrency limit for read operations
