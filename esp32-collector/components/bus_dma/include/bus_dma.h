@@ -76,6 +76,7 @@ typedef struct {
             uint32_t    baud;
             int         tx_pin;
             int         rx_pin;
+            int32_t     turnaround_us;  /* P2-2: Turnaround delay in us. 0=auto (Modbus 3.5 char), -1=none (full duplex), >0=manual. Default: 0 */
         } uart;
         struct {
             spi_host_device_t  host;

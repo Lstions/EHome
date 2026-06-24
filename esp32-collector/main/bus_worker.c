@@ -16,9 +16,10 @@
  *   rx_task: polls all UART channels non-blocking, dequeues pending_cmd_t
  *   for DataReport attribution. Priority 7 (above cmd_tasks at 6).
  *
- *   Timeout is NOT handled here.  The backend decides when a
- *   WriteCommand has timed out (no DataReport with matching request_id
- *   within the expected window).
+ *   P1-6: RX timeout — if a pending command has rx_timeout_ms > 0 and
+ *   no response arrives within that window, rx_task emits a DataReport
+ *   with error_code=0x01 (sensor RX timeout).  This replaces the old
+ *   backend-only timeout for UART read operations.
  *
  *   Pending command tracking: Each UART channel has a FreeRTOS Queue
  *   (pending_queues[i], depth=PENDING_QUEUE_DEPTH) of pending_cmd_t entries.  UART
@@ -38,6 +39,7 @@
 #include "rom/ets_sys.h"   /* ets_delay_us — busy-wait without disabling interrupts */
 #include "freertos/semphr.h"
 #include <inttypes.h>
+#include <string.h>
 
 #define TAG_U0       "CMD_U0"
 #define TAG_U1       "CMD_U1"
@@ -80,6 +82,57 @@ void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
 {
     s_write_rsp_cb = wr_cb;
     s_data_rpt_cb  = dr_cb;
+}
+
+/* ==================================================================
+ *  P2-2: Configurable turnaround delay helpers
+ * ================================================================== */
+
+/* P2-2: Compute turnaround delay from configuration
+ * turnaround_us: 0 = auto (Modbus RTU 3.5 character interval)
+ *               -1 = none (full duplex, no delay)
+ *               >0 = manual value in microseconds
+ * Returns the delay in us, or 0 if no delay needed.
+ */
+static uint32_t compute_turnaround_us(const bus_dma_ctx_t *ctx) {
+    int32_t cfg_turnaround = ctx->cfg.uart.turnaround_us;
+
+    if (cfg_turnaround == -1) {
+        /* Full duplex — no turnaround */
+        return 0;
+    }
+
+    uint32_t turnaround_us;
+    if (cfg_turnaround == 0) {
+        /* Auto: Modbus RTU 3.5 character interval = 38.5 bits */
+        uint32_t baud = ctx->cfg.uart.baud;
+        if (baud == 0) return 0;
+        turnaround_us = 38500000UL / baud;
+    } else {
+        turnaround_us = (uint32_t)cfg_turnaround;
+    }
+
+    /* Bounds check: cap at 100ms */
+    if (turnaround_us > 100000) {
+        ESP_LOGW("BUS_WORKER", "turnaround_us=%lu > 100ms, capping", (unsigned long)turnaround_us);
+        turnaround_us = 100000;
+    }
+
+    return turnaround_us;
+}
+
+/* P2-2: Apply turnaround delay */
+static void apply_turnaround_delay(uint32_t turnaround_us) {
+    if (turnaround_us == 0) return;
+
+    if (turnaround_us > 10000) {
+        /* >10ms: use vTaskDelay (yields CPU) */
+        vTaskDelay(pdMS_TO_TICKS((turnaround_us + 999) / 1000));
+    } else if (turnaround_us > 1000) {
+        /* 1-10ms: use ets_delay_us (busy-wait, does NOT disable interrupts) */
+        ets_delay_us(turnaround_us);
+    }
+    /* <1ms (@115200+): no extra wait needed */
 }
 
 /* ==================================================================
@@ -132,16 +185,9 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
             esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
             if (e == ESP_OK) {
                 if (cmd.read_size > 0) {
-                    /* Turnaround delay (same as CMD_SAMPLE) before RX window */
-                    uint32_t baud = ctx->cfg.uart.baud;
-                    if (baud > 0) {
-                        uint32_t turnaround_us = 38500000UL / baud;
-                        if (turnaround_us > 10000) {
-                            vTaskDelay(pdMS_TO_TICKS((turnaround_us + 999) / 1000));
-                        } else if (turnaround_us > 1000) {
-                            ets_delay_us(turnaround_us);
-                        }
-                    }
+                    /* P2-2: Configurable turnaround delay before RX window */
+                    uint32_t turnaround_us = compute_turnaround_us(ctx);
+                    apply_turnaround_delay(turnaround_us);
                     /* Enqueue pending command for rx_task correlation */
                     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
                         if (s->bus_ch[i] == cmd.channel_id) {
@@ -150,7 +196,14 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                                 .command_index  = cmd.command_index,
                                 .request_id     = cmd.request_id,
                                 .read_size      = cmd.read_size,
+                                .tx_timestamp   = esp_timer_get_time(),  /* P1-6: Record TX time */
+                                .rx_timeout_ms  = 1000,                  /* P1-6: Default 1000ms timeout */
                             };
+                            /* P1-1: Copy command bytes for Modbus exception matching */
+                            pcmd.cmd_data_len = cmd.tx_len < PENDING_CMD_DATA_MAX ? cmd.tx_len : PENDING_CMD_DATA_MAX;
+                            if (pcmd.cmd_data_len > 0) {
+                                memcpy(pcmd.cmd_data, cmd.tx_data, pcmd.cmd_data_len);
+                            }
                             if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
                                 ESP_LOGW(tag, "pending queue full for slot %d (write+read), dropping pending", i);
                             }
@@ -195,23 +248,10 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                     }
                 }
             }
-            /* Modbus RTU turn-around: replace delay_ms with precise 3.5-char wait.
-             * 3.5 char = 38.5 bits → turnaround_us = 38500000 / baud
-             * New firmware auto-calculates from baud rate; ConfigTemplate.delay_ms
-             * field is kept for backward compat but ignored. */
+            /* P2-2: Configurable turnaround delay */
             {
-                uint32_t baud = ctx->cfg.uart.baud;
-                if (baud > 0) {
-                    uint32_t turnaround_us = 38500000UL / baud;
-                    if (turnaround_us > 10000) {
-                        /* >10ms: use vTaskDelay (yields CPU) */
-                        vTaskDelay(pdMS_TO_TICKS((turnaround_us + 999) / 1000));
-                    } else if (turnaround_us > 1000) {
-                        /* 1-10ms: use ets_delay_us (busy-wait, does NOT disable interrupts) */
-                        ets_delay_us(turnaround_us);
-                    }
-                    /* <1ms (@115200+): no extra wait needed */
-                }
+                uint32_t turnaround_us = compute_turnaround_us(ctx);
+                apply_turnaround_delay(turnaround_us);
             }
         }
 
@@ -440,6 +480,54 @@ static void rx_task(void *pv)
                             ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
                         }
                     }
+                } else if (!found && n >= 5 && (rx[1] & 0x80)) {
+                    /* P1-1: Modbus exception response detection
+                     * Modbus exception format: [addr][func|0x80][exception_code][CRC_lo][CRC_hi] = 5 bytes
+                     * Match by slave addr + func code for precise attribution when multiple pending */
+                    uint8_t resp_addr = rx[0];
+                    uint8_t resp_func = rx[1] & 0x7F;  /* Strip exception bit */
+
+                    int best_idx = -1;
+                    /* First pass: exact match by slave addr + func code */
+                    for (int j = 0; j < drained_count; j++) {
+                        if (drained[j].read_size > 0 &&
+                            drained[j].cmd_data_len >= 2 &&
+                            drained[j].cmd_data[0] == resp_addr &&
+                            drained[j].cmd_data[1] == resp_func) {
+                            best_idx = j;
+                            break;  /* Exact match, stop searching */
+                        }
+                    }
+                    /* Fallback: if no exact match, use first read_size > 0 entry */
+                    if (best_idx < 0) {
+                        for (int j = 0; j < drained_count; j++) {
+                            if (drained[j].read_size > 0) {
+                                best_idx = j;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (best_idx >= 0) {
+                        rid  = drained[best_idx].request_id;
+                        eid  = drained[best_idx].edge_device_id;
+                        cidx = drained[best_idx].command_index;
+                        /* Remove matched entry from drained array */
+                        for (int k = best_idx; k < drained_count - 1; k++) {
+                            drained[k] = drained[k + 1];
+                        }
+                        drained_count--;
+                        found = true;
+                        ESP_LOGI(TAG_RX, "P1-1: matched Modbus exception (addr=0x%02X func=0x%02X) to reqID=%lu",
+                                 resp_addr, resp_func, (unsigned long)rid);
+                    }
+
+                    /* Push back remaining unmatched entries */
+                    for (int j = 0; j < drained_count; j++) {
+                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                        }
+                    }
                 } else if (drained_count > 0) {
                     /* No exact match — use first fallback (CMD_SAMPLE, read_size=0) */
                     rid  = drained[0].request_id;
@@ -456,6 +544,49 @@ static void rx_task(void *pv)
 
                 uint64_t ts = esp_timer_get_time();
                 if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, eid, cidx);
+            }
+        }
+
+        /* P1-6: Check for RX timeouts on pending commands */
+        for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+            if (!s->pending_queues[i]) continue;
+            if (!s->bus_ctx[i].initialized) continue;
+            if (s->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+
+            /* Drain and check timeouts */
+            pending_cmd_t drained_tmo[PENDING_QUEUE_DEPTH];
+            int tmo_count = 0;
+            pending_cmd_t pcmd;
+
+            while (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
+                if (pcmd.rx_timeout_ms > 0 && pcmd.tx_timestamp > 0) {
+                    int64_t now_us = esp_timer_get_time();
+                    int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
+
+                    if (elapsed_ms > (int64_t)pcmd.rx_timeout_ms) {
+                        /* RX timeout — send DataReport with error_code=0x01 */
+                        ESP_LOGW(TAG_RX, "P1-6: RX timeout for reqID=%lu (waited %lldms, limit=%lums)",
+                                 (unsigned long)pcmd.request_id,
+                                 (long long)elapsed_ms, (unsigned long)pcmd.rx_timeout_ms);
+
+                        if (s_data_rpt_cb) {
+                            uint32_t ch = s->bus_ch[i];
+                            uint64_t ts = (uint64_t)esp_timer_get_time();
+                            /* error_code = 0x01 means RX timeout (sensor no response) */
+                            s_data_rpt_cb(ch, ts, 0, NULL, 0, 0x01, pcmd.request_id,
+                                         pcmd.edge_device_id, pcmd.command_index);
+                        }
+                        /* Don't re-enqueue — timed out */
+                        continue;
+                    }
+                }
+                /* Not timed out — re-enqueue */
+                drained_tmo[tmo_count++] = pcmd;
+            }
+
+            /* Re-enqueue non-expired entries */
+            for (int j = 0; j < tmo_count; j++) {
+                xQueueSendToBack(s->pending_queues[i], &drained_tmo[j], 0);
             }
         }
 

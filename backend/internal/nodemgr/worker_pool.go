@@ -60,6 +60,12 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		m.termMgr.RecordRX(job.deviceID, uint(job.channelID), job.rawData)
 	}
 
+	// P1-6: RX timeout from ESP32 — notify pendingWrite with error
+	if job.errorCode == 0x01 && job.requestID != 0 && m.pendingWrite != nil {
+		m.pendingWrite.HandleResponse(uint32(job.requestID), false, 0x01, "sensor RX timeout")
+		return
+	}
+
 	// request_id routing
 	if job.requestID != 0 && m.pendingWrite != nil {
 		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)

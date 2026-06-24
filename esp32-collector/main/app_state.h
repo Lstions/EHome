@@ -29,6 +29,7 @@ extern "C" {
 
 #define NODE_ID_MAX_LEN  32
 #define PENDING_QUEUE_DEPTH 10  /* per-channel pending queue depth (must match app_state.c) */
+#define PENDING_CMD_DATA_MAX 8  /* Store first 8 bytes of command for Modbus exception matching */
 
 /* ---- Callback types for msg_handler decoupling ---- */
 typedef void (*write_rsp_cb_t)(uint32_t rid, bool ok, uint32_t code, const char *msg);
@@ -42,6 +43,13 @@ typedef struct {
     uint8_t  command_index;
     uint32_t request_id;       /* 0 for CMD_SAMPLE (no WriteResponse) */
     uint32_t read_size;        /* Expected RX length for CMD_WRITE+readSize; 0 = CMD_SAMPLE (matches any length) */
+    /* P1-1: Store original command bytes for Modbus exception matching
+     * cmd_data[0] = slave address, cmd_data[1] = function code */
+    uint8_t  cmd_data[PENDING_CMD_DATA_MAX];
+    uint8_t  cmd_data_len;     /* Number of valid bytes in cmd_data */
+    /* P1-6: RX timeout tracking */
+    int64_t  tx_timestamp;     /* Time when TX completed (esp_timer_get_time()), 0 = no tracking */
+    uint32_t rx_timeout_ms;    /* RX timeout in ms (0 = no timeout tracking), default 1000 */
 } pending_cmd_t;
 
 typedef struct {
