@@ -259,7 +259,14 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
                             .command_index  = cmd.command_index,
                             .request_id     = 0,
                             .read_size      = 0,
+                            .tx_timestamp   = esp_timer_get_time(),  /* P1-6: Record TX time for CMD_SAMPLE too */
+                            .rx_timeout_ms  = 1000,                  /* P1-6: Default 1000ms timeout */
                         };
+                        /* P1-1: Copy command bytes for Modbus exception matching */
+                        pcmd.cmd_data_len = cmd.tx_len < PENDING_CMD_DATA_MAX ? cmd.tx_len : PENDING_CMD_DATA_MAX;
+                        if (pcmd.cmd_data_len > 0) {
+                            memcpy(pcmd.cmd_data, cmd.tx_data, pcmd.cmd_data_len);
+                        }
                         if (!xQueueSend(rt->pending_queues[i], &pcmd, 0)) {
                             ESP_LOGW(tag, "pending queue full for slot %d (sample), dropping pending", i);
                         }
