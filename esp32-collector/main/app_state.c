@@ -5,9 +5,13 @@
  * node_id is auto-generated from the WiFi MAC address for true uniqueness
  * across devices.  Falls back to Kconfig CONFIG_COLLECTOR_NODE_ID if MAC
  * read fails.
+ *
+ * P2-8: bus_runtime_t initialization bridges app_state_t fields to the
+ * decoupled bus_worker/bus_manager components.
  */
 
 #include "app_state.h"
+#include "bus_manager.h"  /* P2-8: bus_manager_find_ctx for find_ctx callback */
 #include "dma_pool.h"
 #include "hw_profile.h"
 #include "esp_log.h"
@@ -41,6 +45,22 @@ static void generate_node_id(char *buf, size_t buflen)
     /* Fallback to Kconfig */
     strlcpy(buf, CONFIG_COLLECTOR_NODE_ID, buflen);
     ESP_LOGW(TAG, "MAC read failed, using Kconfig node_id: %s", buf);
+}
+
+/* ---- P2-8: Bus runtime initialization ---- */
+
+void app_state_init_bus_runtime(app_state_t *s, bus_runtime_t *rt)
+{
+    rt->bus_ctx         = s->bus_ctx;
+    rt->bus_ch          = s->bus_ch;
+    rt->bus_hw_id       = (char *)s->bus_hw_id;  /* flat 2D array cast */
+    rt->dma_pool        = s->dma_pool;
+    rt->pending_queues  = s->pending_queues;
+    rt->uart0_cmd_queue = s->uart0_cmd_queue;
+    rt->uart1_cmd_queue = s->uart1_cmd_queue;
+    rt->spi_cmd_queue   = s->spi_cmd_queue;
+    rt->i2c_cmd_queue   = s->i2c_cmd_queue;
+    rt->find_ctx        = bus_manager_find_ctx;  /* P2-8: breaks circular dependency */
 }
 
 /* ---- Lifecycle ---- */
@@ -85,6 +105,9 @@ app_state_t *app_state_init(void)
     /* DMA pool init (from chip-specific hw_profile table) */
     dma_pool_init(&s_dma_pool, hw_dmas, HW_DMA_COUNT);
     s_app.dma_pool = &s_dma_pool;
+
+    /* P2-8: Initialize bus_runtime_t from app_state fields */
+    app_state_init_bus_runtime(&s_app, &s_app.bus_runtime);
 
     ESP_LOGI(TAG, "State initialized: node_id=%s fw=%s model=%s",
              s_app.node_id, FIRMWARE_VERSION, MODEL_NAME);

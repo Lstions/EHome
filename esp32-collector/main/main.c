@@ -69,7 +69,7 @@ static void on_sync_send_hello(void)
 void on_write_cmd_received(uint32_t rid, uint32_t ch,
                            const uint8_t *d, size_t l, uint32_t rs)
 {
-    bus_manager_on_write_cmd(app_state_get(), rid, ch, d, l, rs);
+    bus_manager_on_write_cmd(&app_state_get()->bus_runtime, rid, ch, d, l, rs);
 }
 
 void on_query_resources_received(const char *request_id)
@@ -264,7 +264,7 @@ void app_main(void)
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
     ota_set_progress_callback(msg_handler_send_ota_prog);
 
-    bus_worker_start(s);
+    bus_worker_start(&s->bus_runtime);
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
     /* TCP transport (parallel with MQTT, debug only) */

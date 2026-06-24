@@ -34,10 +34,12 @@
  *   RX read.  This replaces the old per-channel single-slot arrays
  *   that caused data misattribution when multiple edge_devices share
  *   a channel.
+ *
+ *   P2-8: Decoupled from app_state_t — uses bus_runtime_t for dependency
+ *   injection.  All s->field accesses replaced with rt->field.
  */
 
 #include "bus_worker.h"
-#include "bus_manager.h"
 #include "bus_dma.h"
 #include "cmd_queue.h"
 #include "scheduler.h"
@@ -146,7 +148,7 @@ static void apply_turnaround_delay(uint32_t turnaround_us) {
  *  UART cmd worker — shared logic for UART0 and UART1 tasks
  * ================================================================== */
 
-static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
+static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag)
 {
     bus_cmd_t cmd;
 
@@ -170,7 +172,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
 
         if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
 
-        bus_dma_ctx_t *ctx = bus_manager_find_ctx(s, cmd.channel_id);
+        bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
         if (!ctx) {
             no_ctx++;
             if (cmd.type == CMD_WRITE)
@@ -197,7 +199,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                     apply_turnaround_delay(turnaround_us);
                     /* Enqueue pending command for rx_task correlation */
                     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-                        if (s->bus_ch[i] == cmd.channel_id) {
+                        if (rt->bus_ch[i] == cmd.channel_id) {
                             pending_cmd_t pcmd = {
                                 .edge_device_id = cmd.edge_device_id,
                                 .command_index  = cmd.command_index,
@@ -211,7 +213,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
                             if (pcmd.cmd_data_len > 0) {
                                 memcpy(pcmd.cmd_data, cmd.tx_data, pcmd.cmd_data_len);
                             }
-                            if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
+                            if (!xQueueSend(rt->pending_queues[i], &pcmd, 0)) {
                                 ESP_LOGW(tag, "pending queue full for slot %d (write+read), dropping pending", i);
                             }
                             break;
@@ -241,14 +243,14 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
             } else {
                 scheduler_notify_channel_success(cmd.channel_id);
                 for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-                    if (s->bus_ch[i] == cmd.channel_id) {
+                    if (rt->bus_ch[i] == cmd.channel_id) {
                         pending_cmd_t pcmd = {
                             .edge_device_id = cmd.edge_device_id,
                             .command_index  = cmd.command_index,
                             .request_id     = 0,
                             .read_size      = 0,
                         };
-                        if (!xQueueSend(s->pending_queues[i], &pcmd, 0)) {
+                        if (!xQueueSend(rt->pending_queues[i], &pcmd, 0)) {
                             ESP_LOGW(tag, "pending queue full for slot %d (sample), dropping pending", i);
                         }
                         break;
@@ -281,7 +283,7 @@ static void uart_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
  *  SPI/I2C cmd worker — shared logic for SPI and I2C tasks
  * ================================================================== */
 
-static void spi_i2c_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *tag)
+static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag)
 {
     bus_cmd_t cmd;
 
@@ -305,7 +307,7 @@ static void spi_i2c_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *ta
 
         if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
 
-        bus_dma_ctx_t *ctx = bus_manager_find_ctx(s, cmd.channel_id);
+        bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
         if (!ctx) {
             no_ctx++;
             if (cmd.type == CMD_WRITE)
@@ -391,26 +393,26 @@ static void spi_i2c_cmd_loop(app_state_t *s, QueueHandle_t queue, const char *ta
 
 static void cmd_task_uart0(void *pv)
 {
-    app_state_t *s = (app_state_t *)pv;
-    uart_cmd_loop(s, s->uart0_cmd_queue, TAG_U0);
+    bus_runtime_t *rt = (bus_runtime_t *)pv;
+    uart_cmd_loop(rt, rt->uart0_cmd_queue, TAG_U0);
 }
 
 static void cmd_task_uart1(void *pv)
 {
-    app_state_t *s = (app_state_t *)pv;
-    uart_cmd_loop(s, s->uart1_cmd_queue, TAG_U1);
+    bus_runtime_t *rt = (bus_runtime_t *)pv;
+    uart_cmd_loop(rt, rt->uart1_cmd_queue, TAG_U1);
 }
 
 static void cmd_task_spi(void *pv)
 {
-    app_state_t *s = (app_state_t *)pv;
-    spi_i2c_cmd_loop(s, s->spi_cmd_queue, TAG_SPI);
+    bus_runtime_t *rt = (bus_runtime_t *)pv;
+    spi_i2c_cmd_loop(rt, rt->spi_cmd_queue, TAG_SPI);
 }
 
 static void cmd_task_i2c(void *pv)
 {
-    app_state_t *s = (app_state_t *)pv;
-    spi_i2c_cmd_loop(s, s->i2c_cmd_queue, TAG_I2C);
+    bus_runtime_t *rt = (bus_runtime_t *)pv;
+    spi_i2c_cmd_loop(rt, rt->i2c_cmd_queue, TAG_I2C);
 }
 
 /* ==================================================================
@@ -519,7 +521,7 @@ static void init_default_delim_config(stream_rx_t *stream, uint32_t baud) {
 
 static void rx_task(void *pv)
 {
-    app_state_t *s = (app_state_t *)pv;
+    bus_runtime_t *rt = (bus_runtime_t *)pv;
     uint8_t rx[256];
 
     ESP_LOGI(TAG_RX, "Started (prio=%d, poll=%dms)",
@@ -540,18 +542,18 @@ static void rx_task(void *pv)
         }
 
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-            if (!s->bus_ctx[i].initialized) continue;
-            if (s->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+            if (!rt->bus_ctx[i].initialized) continue;
+            if (rt->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
 
             reads++;
-            size_t n = bus_dma_read(&s->bus_ctx[i], rx, sizeof(rx));
+            size_t n = bus_dma_read(&rt->bus_ctx[i], rx, sizeof(rx));
             if (n > 0) {
                 stream_rx_t *stream = &s_streams[i];
 
                 /* P1-7: Initialize stream on first RX if not yet configured */
                 if (stream->delim_cfg.type == FRAME_DELIM_TIMEOUT &&
                     stream->delim_cfg.timeout.timeout_us == 0) {
-                    init_default_delim_config(stream, s->bus_ctx[i].cfg.uart.baud);
+                    init_default_delim_config(stream, rt->bus_ctx[i].cfg.uart.baud);
                 }
 
                 /* Append to stream buffer */
@@ -572,7 +574,7 @@ static void rx_task(void *pv)
             stream_rx_t *stream = &s_streams[i];
             if (stream->len > 0 && is_frame_complete(stream)) {
                 hits++;
-                uint32_t ch = s->bus_ch[i];
+                uint32_t ch = rt->bus_ch[i];
                 uint32_t rid = 0;
                 uint32_t eid = 0;
                 uint8_t  cidx = 0;
@@ -586,7 +588,7 @@ static void rx_task(void *pv)
                 size_t frame_len = stream->len;
 
                 /* Drain the entire queue */
-                while (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
+                while (xQueueReceive(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
                     if (!found && pcmd.read_size > 0 && pcmd.read_size == frame_len) {
                         best_match = pcmd;
                         found = true;
@@ -600,7 +602,7 @@ static void rx_task(void *pv)
                     eid  = best_match.edge_device_id;
                     cidx = best_match.command_index;
                     for (int j = 0; j < drained_count; j++) {
-                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                        if (!xQueueSendToBack(rt->pending_queues[i], &drained[j], 0)) {
                             ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
@@ -640,7 +642,7 @@ static void rx_task(void *pv)
                                  resp_addr, resp_func, (unsigned long)rid);
                     }
                     for (int j = 0; j < drained_count; j++) {
-                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                        if (!xQueueSendToBack(rt->pending_queues[i], &drained[j], 0)) {
                             ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
@@ -649,7 +651,7 @@ static void rx_task(void *pv)
                     eid  = drained[0].edge_device_id;
                     cidx = drained[0].command_index;
                     for (int j = 1; j < drained_count; j++) {
-                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                        if (!xQueueSendToBack(rt->pending_queues[i], &drained[j], 0)) {
                             ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
@@ -666,16 +668,16 @@ static void rx_task(void *pv)
 
         /* P1-6: Check for RX timeouts on pending commands */
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-            if (!s->pending_queues[i]) continue;
-            if (!s->bus_ctx[i].initialized) continue;
-            if (s->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+            if (!rt->pending_queues[i]) continue;
+            if (!rt->bus_ctx[i].initialized) continue;
+            if (rt->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
 
             /* Drain and check timeouts */
             pending_cmd_t drained_tmo[PENDING_QUEUE_DEPTH];
             int tmo_count = 0;
             pending_cmd_t pcmd;
 
-            while (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
+            while (xQueueReceive(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
                 if (pcmd.rx_timeout_ms > 0 && pcmd.tx_timestamp > 0) {
                     int64_t now_us = esp_timer_get_time();
                     int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
@@ -687,7 +689,7 @@ static void rx_task(void *pv)
                                  (long long)elapsed_ms, (unsigned long)pcmd.rx_timeout_ms);
 
                         if (s_data_rpt_cb) {
-                            uint32_t ch = s->bus_ch[i];
+                            uint32_t ch = rt->bus_ch[i];
                             uint64_t ts = (uint64_t)esp_timer_get_time();
                             /* error_code = 0x01 means RX timeout (sensor no response) */
                             s_data_rpt_cb(ch, ts, 0, NULL, 0, 0x01, pcmd.request_id,
@@ -703,7 +705,7 @@ static void rx_task(void *pv)
 
             /* Re-enqueue non-expired entries */
             for (int j = 0; j < tmo_count; j++) {
-                xQueueSendToBack(s->pending_queues[i], &drained_tmo[j], 0);
+                xQueueSendToBack(rt->pending_queues[i], &drained_tmo[j], 0);
             }
         }
 
@@ -727,21 +729,21 @@ static void rx_task(void *pv)
  *  Public API
  * ================================================================== */
 
-void bus_worker_start(app_state_t *state)
+void bus_worker_start(bus_runtime_t *rt)
 {
     /* rx_task: highest priority — must not miss DMA data */
     xTaskCreate(rx_task, "rx_task", RX_STACK,
-                (void *)state, RX_PRIO, &s_rx_task_h);
+                (void *)rt, RX_PRIO, &s_rx_task_h);
 
     /* Per-bus cmd_tasks: same priority (6), fair scheduling */
     xTaskCreate(cmd_task_uart0, "cmd_u0", UART_STACK,
-                (void *)state, CMD_PRIO, &s_cmd_u0_h);
+                (void *)rt, CMD_PRIO, &s_cmd_u0_h);
     xTaskCreate(cmd_task_uart1, "cmd_u1", UART_STACK,
-                (void *)state, CMD_PRIO, &s_cmd_u1_h);
+                (void *)rt, CMD_PRIO, &s_cmd_u1_h);
     xTaskCreate(cmd_task_spi,   "cmd_spi", SPI_I2C_STACK,
-                (void *)state, CMD_PRIO, &s_cmd_spi_h);
+                (void *)rt, CMD_PRIO, &s_cmd_spi_h);
     xTaskCreate(cmd_task_i2c,   "cmd_i2c", SPI_I2C_STACK,
-                (void *)state, CMD_PRIO, &s_cmd_i2c_h);
+                (void *)rt, CMD_PRIO, &s_cmd_i2c_h);
 }
 
 void bus_worker_suspend(void)

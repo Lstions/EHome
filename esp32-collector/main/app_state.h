@@ -4,6 +4,9 @@
  *
  * Single struct passed by pointer to all modules.  Zero global variables
  * outside of the singleton in app_state.c.
+ *
+ * P2-8: Callback types and pending_cmd_t moved to bus_worker.h for
+ * decoupling.  This header includes bus_worker.h for those types.
  */
 
 #ifndef APP_STATE_H
@@ -14,43 +17,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "bus_dma.h"
+#include "bus_worker.h"    /* P2-8: bus_runtime_t, write_rsp_cb_t, data_rpt_cb_t, pending_cmd_t */
 #include "config_mgr.h"
 #include "scheduler.h"
 #include "transport.h"
 #include "cmd_queue.h"
-
-/* Forward declaration — dma_pool_t is owned by dma_pool component.
- * Full definition in dma_pool.h; app_state only needs the pointer. */
-struct dma_pool_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define NODE_ID_MAX_LEN  32
-#define PENDING_QUEUE_DEPTH 10  /* per-channel pending queue depth (must match app_state.c) */
-#define PENDING_CMD_DATA_MAX 8  /* Store first 8 bytes of command for Modbus exception matching */
-
-/* ---- Callback types for msg_handler decoupling ---- */
-typedef void (*write_rsp_cb_t)(uint32_t rid, bool ok, uint32_t code, const char *msg);
-typedef void (*data_rpt_cb_t)(uint32_t ch, uint64_t ts, uint32_t seq,
-                               const uint8_t *data, size_t len, uint32_t code, uint32_t rid,
-                               uint32_t edge_device_id, uint8_t command_index);
-
-/* ---- Pending command descriptor for per-channel FreeRTOS Queue ---- */
-typedef struct {
-    uint32_t edge_device_id;
-    uint8_t  command_index;
-    uint32_t request_id;       /* 0 for CMD_SAMPLE (no WriteResponse) */
-    uint32_t read_size;        /* Expected RX length for CMD_WRITE+readSize; 0 = CMD_SAMPLE (matches any length) */
-    /* P1-1: Store original command bytes for Modbus exception matching
-     * cmd_data[0] = slave address, cmd_data[1] = function code */
-    uint8_t  cmd_data[PENDING_CMD_DATA_MAX];
-    uint8_t  cmd_data_len;     /* Number of valid bytes in cmd_data */
-    /* P1-6: RX timeout tracking */
-    int64_t  tx_timestamp;     /* Time when TX completed (esp_timer_get_time()), 0 = no tracking */
-    uint32_t rx_timeout_ms;    /* RX timeout in ms (0 = no timeout tracking), default 1000 */
-} pending_cmd_t;
 
 typedef struct {
     /* ---- Identity (auto-generated from MAC) ---- */
@@ -90,6 +67,9 @@ typedef struct {
 
     /* ---- DMA resource pool (DIP: injected, not global) ---- */
     struct dma_pool_t *dma_pool;
+
+    /* ---- P2-8: Bus runtime for dependency injection ---- */
+    bus_runtime_t bus_runtime;
 } app_state_t;
 
 /* ---- Lifecycle ---- */
@@ -104,6 +84,9 @@ uint32_t app_state_get_uptime_sec(void);
 /* ---- Config-manifest lock helpers ---- */
 void app_state_lock_config(void);
 void app_state_unlock_config(void);
+
+/* ---- P2-8: Bus runtime initialization ---- */
+void app_state_init_bus_runtime(app_state_t *s, bus_runtime_t *rt);
 
 /* ---- Version ---- */
 const char *get_firmware_version(void);

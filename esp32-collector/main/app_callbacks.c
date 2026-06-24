@@ -198,7 +198,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
             }
             if (!found) {
                 ESP_LOGI(TAG, "Incremental: remove ch=%lu", (unsigned long)old_channels[i].id);
-                bus_manager_unreg_channel(s, old_channels[i].id);
+                bus_manager_unreg_channel(&s->bus_runtime, old_channels[i].id);
                 scheduler_remove_channel(old_channels[i].id);
             }
         }
@@ -220,7 +220,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
             if (old_idx < 0) {
                 /* New channel — full register */
                 ESP_LOGI(TAG, "Incremental: add new ch=%lu", (unsigned long)new_ch->id);
-                bus_manager_reg_channel(s, new_ch);
+                bus_manager_reg_channel(&s->bus_runtime, new_ch);
                 scheduler_add_channel(new_ch);
             } else if (old_channels[old_idx].bus_type != new_ch->bus_type ||
                        old_channels[old_idx].bus_config_len != new_ch->bus_config_len ||
@@ -229,8 +229,8 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
                 /* Bus-level config changed — rebuild */
                 ESP_LOGI(TAG, "Incremental: rebuild ch=%lu (bus config changed)",
                          (unsigned long)new_ch->id);
-                bus_manager_unreg_channel(s, old_channels[old_idx].id);
-                bus_manager_reg_channel(s, new_ch);
+                bus_manager_unreg_channel(&s->bus_runtime, old_channels[old_idx].id);
+                bus_manager_reg_channel(&s->bus_runtime, new_ch);
                 scheduler_remove_channel(old_channels[old_idx].id);
                 scheduler_add_channel(new_ch);
             } else {
@@ -254,8 +254,8 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         if (scheduler_is_running()) {
             scheduler_stop();
         }
-        bus_manager_cleanup_all(s);
-        bus_manager_setup_from_manifest(s);
+        bus_manager_cleanup_all(&s->bus_runtime);
+        bus_manager_setup_from_manifest(&s->bus_runtime);
         scheduler_start(&(scheduler_queues_t){
             .uart0_cmd_queue = s->uart0_cmd_queue,
             .uart1_cmd_queue = s->uart1_cmd_queue,

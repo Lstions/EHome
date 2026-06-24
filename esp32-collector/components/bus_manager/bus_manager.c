@@ -2,12 +2,15 @@
  * @file bus_manager.c
  * @brief Bus DMA context pool — register, find, cleanup channels.
  *
- * Owns the shared pool of bus_dma_ctx_t instances in app_state.
+ * Owns the shared pool of bus_dma_ctx_t instances in bus_runtime_t.
  * All bus channel lifecycle operations go through this module.
  *
  * WriteCommand handling: constructs a bus_cmd_t and posts it to the
  * command queue.  No timeout derivation — the ESP32 does not understand
  * timeouts; that is the backend's responsibility.
+ *
+ * P2-8: Decoupled from app_state_t — uses bus_runtime_t for dependency
+ * injection.  All s->field accesses replaced with rt->field.
  */
 
 #include "bus_manager.h"
@@ -125,9 +128,15 @@ static uart_port_t derive_uart_port_for_channel(const config_manifest_t *m, uint
     return UART_NUM_0;  /* default */
 }
 
+/* ==== Helper: get bus_hw_id[i] from flat array ==== */
+static char *get_bus_hw_id(bus_runtime_t *rt, int idx)
+{
+    return rt->bus_hw_id + idx * 16;
+}
+
 /* ==== Register one channel ==== */
 
-static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
+static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                             uint8_t bus_type,
                             const uint8_t *config, size_t config_len)
 {
@@ -136,12 +145,12 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
     
     /* Already registered? */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++)
-        if (s->bus_ch[i] == ch_id && s->bus_ctx[i].initialized) return;
+        if (rt->bus_ch[i] == ch_id && rt->bus_ctx[i].initialized) return;
 
     /* Find free slot */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-        if (s->bus_ch[i] == 0) {
-            s->bus_ch[i] = ch_id;
+        if (rt->bus_ch[i] == 0) {
+            rt->bus_ch[i] = ch_id;
             
             /* DMA allocation: check user preference first, then try pool */
             bool dma = false;
@@ -150,9 +159,9 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
             
             /* Respect user DMA preference from bus_config flags */
             bool user_wants_dma = bus_config_get_dma_enabled(bus_type, config, config_len);
-            if (user_wants_dma && s->dma_pool) {
+            if (user_wants_dma && rt->dma_pool) {
                 uint32_t dma_id = 0;
-                esp_err_t dma_err = dma_pool_allocate(s->dma_pool, bus_type,
+                esp_err_t dma_err = dma_pool_allocate(rt->dma_pool, bus_type,
                                                         hw_id, &dma_id);
                 if (dma_err == ESP_OK) {
                     dma = true;
@@ -168,21 +177,22 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
             
             ESP_LOGI(TAG, "bus_dma_init: ch=%" PRIu32 " type=%u dma=%d idx=%d",
                      ch_id, bus_type, dma, i);
-            esp_err_t err = bus_dma_init(&s->bus_ctx[i], bus_type, dma,
+            esp_err_t err = bus_dma_init(&rt->bus_ctx[i], bus_type, dma,
                                          config, config_len);
             if (err == ESP_OK) {
                 /* Save hw_id for cleanup (avoid manifest dependency) */
-                strncpy(s->bus_hw_id[i], hw_id, sizeof(s->bus_hw_id[i]) - 1);
-                s->bus_hw_id[i][sizeof(s->bus_hw_id[i]) - 1] = '\0';
+                char *hw_id_slot = get_bus_hw_id(rt, i);
+                strncpy(hw_id_slot, hw_id, 15);
+                hw_id_slot[15] = '\0';
                 ESP_LOGI(TAG, "ch=%" PRIu32 " type=%u dma=%d idx=%d SUCCESS",
                          ch_id, bus_type, dma, i);
             } else {
                 ESP_LOGE(TAG, "ch=%" PRIu32 " init failed: %s",
                          ch_id, esp_err_to_name(err));
-                s->bus_ch[i] = 0;
+                rt->bus_ch[i] = 0;
                 /* Release DMA if init failed */
                 if (dma) {
-                    dma_pool_release_by_hw(s->dma_pool, hw_id);
+                    dma_pool_release_by_hw(rt->dma_pool, hw_id);
                 }
             }
             return;
@@ -193,62 +203,64 @@ static void reg_bus_channel(app_state_t *s, uint32_t ch_id,
 
 /* ==== Public API ==== */
 
-void bus_manager_init(app_state_t *state)
+void bus_manager_init(bus_runtime_t *rt)
 {
-    (void)state; /* pool already zeroed by app_state_init */
+    (void)rt; /* pool already zeroed by app_state_init */
 }
 
-void bus_manager_cleanup_all(app_state_t *s)
+void bus_manager_cleanup_all(bus_runtime_t *rt)
 {
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-        if (s->bus_ctx[i].initialized) {
+        if (rt->bus_ctx[i].initialized) {
             /* Release DMA using saved hw_id (no manifest dependency) */
-            if (s->dma_pool && s->bus_hw_id[i][0] != '\0') {
-                dma_pool_release_by_hw(s->dma_pool, s->bus_hw_id[i]);
+            char *hw_id_slot = get_bus_hw_id(rt, i);
+            if (rt->dma_pool && hw_id_slot[0] != '\0') {
+                dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
             }
-            bus_dma_deinit(&s->bus_ctx[i]);
-            s->bus_ch[i] = 0;
-            s->bus_hw_id[i][0] = '\0';
+            bus_dma_deinit(&rt->bus_ctx[i]);
+            rt->bus_ch[i] = 0;
+            hw_id_slot[0] = '\0';
         }
         /* Drain any stale pending entries from the queue */
-        if (s->pending_queues[i]) {
-            xQueueReset(s->pending_queues[i]);
+        if (rt->pending_queues[i]) {
+            xQueueReset(rt->pending_queues[i]);
         }
     }
 }
 
-void bus_manager_setup_from_manifest(app_state_t *s)
+void bus_manager_setup_from_manifest(bus_runtime_t *rt)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
     if (!m || !m->applied) return;
     for (int i = 0; i < m->channel_count; i++) {
         if (!m->channels[i].enabled) continue;
-        bus_manager_reg_channel(s, &m->channels[i]);
+        bus_manager_reg_channel(rt, &m->channels[i]);
     }
 }
 
 /* v2.4: Incremental single-channel register */
-void bus_manager_reg_channel(app_state_t *s, const config_channel_t *ch)
+void bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch)
 {
-    reg_bus_channel(s, ch->id, ch->bus_type,
+    reg_bus_channel(rt, ch->id, ch->bus_type,
                     ch->bus_config, ch->bus_config_len);
 }
 
 /* v2.4: Incremental single-channel unregister */
-void bus_manager_unreg_channel(app_state_t *s, uint32_t channel_id)
+void bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
 {
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-        if (s->bus_ch[i] == channel_id && s->bus_ctx[i].initialized) {
+        if (rt->bus_ch[i] == channel_id && rt->bus_ctx[i].initialized) {
             /* Release DMA using saved hw_id */
-            if (s->dma_pool && s->bus_hw_id[i][0] != '\0') {
-                dma_pool_release_by_hw(s->dma_pool, s->bus_hw_id[i]);
+            char *hw_id_slot = get_bus_hw_id(rt, i);
+            if (rt->dma_pool && hw_id_slot[0] != '\0') {
+                dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
             }
-            bus_dma_deinit(&s->bus_ctx[i]);
-            s->bus_ch[i] = 0;
-            s->bus_hw_id[i][0] = '\0';
+            bus_dma_deinit(&rt->bus_ctx[i]);
+            rt->bus_ch[i] = 0;
+            hw_id_slot[0] = '\0';
             /* Drain stale pending entries */
-            if (s->pending_queues[i]) {
-                xQueueReset(s->pending_queues[i]);
+            if (rt->pending_queues[i]) {
+                xQueueReset(rt->pending_queues[i]);
             }
             ESP_LOGI(TAG, "Unregistered ch=%lu", (unsigned long)channel_id);
             return;
@@ -257,11 +269,11 @@ void bus_manager_unreg_channel(app_state_t *s, uint32_t channel_id)
     ESP_LOGW(TAG, "Unregister ch=%lu: not found", (unsigned long)channel_id);
 }
 
-bus_dma_ctx_t *bus_manager_find_ctx(app_state_t *s, uint32_t channel_id)
+bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id)
 {
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++)
-        if (s->bus_ch[i] == channel_id && s->bus_ctx[i].initialized)
-            return &s->bus_ctx[i];
+        if (rt->bus_ch[i] == channel_id && rt->bus_ctx[i].initialized)
+            return &rt->bus_ctx[i];
     return NULL;
 }
 
@@ -273,7 +285,7 @@ bus_dma_ctx_t *bus_manager_find_ctx(app_state_t *s, uint32_t channel_id)
  * request_id.
  */
 
-void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
+void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
                                const uint8_t *d, size_t l, uint32_t rs)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
@@ -285,7 +297,7 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
     }
 
     /* P2-9: Prefer bus_type from ctx (set during bus_dma_init) over manifest lookup */
-    bus_dma_ctx_t *bctx = bus_manager_find_ctx(s, ch);
+    bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
 
     bus_cmd_t cmd = {
         .request_id = rid,
@@ -303,11 +315,11 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
     QueueHandle_t target_q;
     switch (cmd.bus_type) {
     case BUS_TYPE_UART:
-        target_q = (cmd.uart_port == UART_NUM_0) ? s->uart0_cmd_queue : s->uart1_cmd_queue;
+        target_q = (cmd.uart_port == UART_NUM_0) ? rt->uart0_cmd_queue : rt->uart1_cmd_queue;
         break;
-    case BUS_TYPE_SPI:  target_q = s->spi_cmd_queue;  break;
-    case BUS_TYPE_I2C:  target_q = s->i2c_cmd_queue;  break;
-    default:            target_q = s->uart0_cmd_queue; break;
+    case BUS_TYPE_SPI:  target_q = rt->spi_cmd_queue;  break;
+    case BUS_TYPE_I2C:  target_q = rt->i2c_cmd_queue;  break;
+    default:            target_q = rt->uart0_cmd_queue; break;
     }
     if (!xQueueSend(target_q, &cmd, 0))
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
