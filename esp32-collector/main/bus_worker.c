@@ -21,7 +21,7 @@
  *   within the expected window).
  *
  *   Pending command tracking: Each UART channel has a FreeRTOS Queue
- *   (pending_queues[i], depth=4) of pending_cmd_t entries.  UART
+ *   (pending_queues[i], depth=PENDING_QUEUE_DEPTH) of pending_cmd_t entries.  UART
  *   cmd_tasks enqueue before/after TX; rx_task dequeues one entry per
  *   RX read.  This replaces the old per-channel single-slot arrays
  *   that caused data misattribution when multiple edge_devices share
@@ -366,7 +366,7 @@ static void rx_task(void *pv)
                  * non-matching entries in original order. */
                 pending_cmd_t best_match;
                 bool found = false;
-                pending_cmd_t drained[4];  /* queue depth = 4 */
+                pending_cmd_t drained[PENDING_QUEUE_DEPTH];
                 int drained_count = 0;
                 pending_cmd_t pcmd;
 
@@ -376,11 +376,8 @@ static void rx_task(void *pv)
                         /* Exact length match for CMD_WRITE+readSize — use this */
                         best_match = pcmd;
                         found = true;
-                    } else if (!found && pcmd.read_size == 0) {
-                        /* CMD_SAMPLE entry (matches any length) — keep as fallback */
-                        drained[drained_count++] = pcmd;
                     } else {
-                        /* Non-matching entry — push back later */
+                        /* Non-matching or fallback entry — keep for requeue */
                         drained[drained_count++] = pcmd;
                     }
                 }
@@ -389,14 +386,22 @@ static void rx_task(void *pv)
                     rid  = best_match.request_id;
                     eid  = best_match.edge_device_id;
                     cidx = best_match.command_index;
+                    /* Push back ALL unmatched entries in original order */
+                    for (int j = 0; j < drained_count; j++) {
+                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                        }
+                    }
                 } else if (drained_count > 0) {
-                    /* No exact match — use first fallback (CMD_SAMPLE) */
+                    /* No exact match — use first fallback (CMD_SAMPLE, read_size=0) */
                     rid  = drained[0].request_id;
                     eid  = drained[0].edge_device_id;
                     cidx = drained[0].command_index;
-                    /* Push back remaining entries */
+                    /* Push back remaining entries (skip consumed fallback) */
                     for (int j = 1; j < drained_count; j++) {
-                        xQueueSendToBack(s->pending_queues[i], &drained[j], 0);
+                        if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                        }
                     }
                 }
                 /* If no pending entry at all, rid/eid/cidx stay 0 — unsolicited. */

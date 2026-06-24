@@ -1,8 +1,21 @@
 import client from './client'
+import type { OperationDef } from './deviceConfig'
 
 // M10 fix: Export DeviceStatus type for use across components
 // Extended to support health status: active, warning, error, disabled
 export type DeviceStatus = 'active' | 'online' | 'offline' | 'warning' | 'error' | 'disabled' | 'pending' | 'initializing' | 'unknown'
+
+export interface ExecuteOperationResponse {
+  code: number
+  data: {
+    status: string
+    operation: string
+    value?: number
+    unit?: string
+    data_hex?: string
+  }
+  message: string
+}
 
 export interface EdgeDevice {
   id: number
@@ -19,7 +32,7 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
-  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, any> }
+  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
 }
 
 export interface EdgeDeviceListParams {
@@ -48,7 +61,7 @@ interface RawEdgeDevice {
   type?: string
   device_type?: string
   protocol?: string
-  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, any> }
+  device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
   hardware_type?: string
   channel?: { hardware_type?: string; hardware_id?: string }
   hardware_id?: string
@@ -165,7 +178,7 @@ export const edgeDeviceApi = {
     return response.data || response
   },
 
-  async executeOperation(id: number, operation: string, params?: Record<string, any>): Promise<any> {
+  async executeOperation(id: number, operation: string, params?: Record<string, any>): Promise<ExecuteOperationResponse> {
     const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/execute`, {
       operation,
       params: params || {}

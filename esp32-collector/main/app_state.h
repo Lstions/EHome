@@ -28,6 +28,7 @@ extern "C" {
 #endif
 
 #define NODE_ID_MAX_LEN  32
+#define PENDING_QUEUE_DEPTH 10  /* per-channel pending queue depth (must match app_state.c) */
 
 /* ---- Callback types for msg_handler decoupling ---- */
 typedef void (*write_rsp_cb_t)(uint32_t rid, bool ok, uint32_t code, const char *msg);
@@ -40,7 +41,7 @@ typedef struct {
     uint32_t edge_device_id;
     uint8_t  command_index;
     uint32_t request_id;       /* 0 for CMD_SAMPLE (no WriteResponse) */
-    uint32_t read_size;        /* Expected RX length for CMD_WRITE+readSize; 0 = any length ok */
+    uint32_t read_size;        /* Expected RX length for CMD_WRITE+readSize; 0 = CMD_SAMPLE (matches any length) */
 } pending_cmd_t;
 
 typedef struct {
@@ -76,7 +77,7 @@ typedef struct {
     /* ---- Pending command state (per channel, FreeRTOS Queue) ---- */
     /* Each UART channel has a queue of pending_cmd_t entries so that
      * cmd_task (TX) and rx_task (RX) never race on a single shared slot.
-     * Queue depth=4 is based on MAX_EDGE_DEVICES_PER_CH=5 with margin. */
+     * Queue depth=PENDING_QUEUE_DEPTH (10), see app_state.c. */
     QueueHandle_t pending_queues[SCHED_MAX_CHANNELS];
 
     /* ---- DMA resource pool (DIP: injected, not global) ---- */

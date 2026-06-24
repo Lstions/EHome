@@ -206,7 +206,7 @@
 
     <!-- 设备操作参数对话框 -->
     <el-dialog v-model="opDialogVisible" :title="opDialogTitle" width="420px" align-center>
-      <el-form label-width="100px">
+      <el-form ref="opFormRef" :model="opParamValues" label-width="100px">
         <el-form-item
           v-for="param in opDialogParams"
           :key="param.name"
@@ -214,11 +214,11 @@
           required
         >
           <el-input-number
-            v-if="param.type === 'uint8' || param.type === 'uint16' || param.type === 'int8' || param.type === 'int16'"
+            v-if="param.type === 'uint8' || param.type === 'uint16' || param.type === 'int8' || param.type === 'int16' || param.type === 'int32' || param.type === 'uint32' || param.type === 'float'"
             v-model="opParamValues[param.name]"
             :min="param.min ?? 0"
-            :max="param.max ?? 255"
-            :step="1"
+            :max="param.max ?? getDefaultMax(param.type)"
+            :step="param.step ?? 1"
             style="width: 100%;"
           />
           <el-select
@@ -309,15 +309,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance } from 'element-plus'
 import { Refresh, Connection, Edit, Delete, Download } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import RealtimeDataList, { type DataItem } from '@/components/data/RealtimeDataList.vue'
-import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { edgeDeviceApi, type EdgeDevice, type ExecuteOperationResponse } from '@/api/edgeDevice'
+import { type OperationDef, type OperationParam } from '@/api/deviceConfig'
 import { getErrorInfo } from '@/utils/errorCode'
 import { haApi } from '@/api/homeassistant'
 import client from '@/api/client'
@@ -423,29 +425,19 @@ const deviceTypeText = computed(() => {
 })
 
 // 设备操作定义（从 DeviceConfig.operations 动态获取）
-interface OperationParam {
-  name: string
-  type: string  // 'uint8' | 'uint16' | 'int8' | 'int16' | 'enum' | string
-  label?: string
-  min?: number
-  max?: number
-  options?: Array<{ value: number | string; label: string }>
-}
-
-interface OperationDef {
-  label: string
-  type: 'read' | 'write'
-  params: OperationParam[]
-}
-
 const configOperations = computed<Record<string, OperationDef>>(() => {
   const dc = device.value?.device_config
   if (!dc) return {}
   // operations may be nested under dc.config or directly on dc
   let ops = dc.operations
   if (!ops && dc.config) {
-    const cfg = typeof dc.config === 'string' ? JSON.parse(dc.config) : dc.config
-    ops = cfg?.operations
+    try {
+      const cfg = typeof dc.config === 'string' ? JSON.parse(dc.config) : dc.config
+      ops = cfg?.operations
+    } catch {
+      console.warn('device_config.config JSON parse failed')
+      return {}
+    }
   }
   if (!ops || typeof ops !== 'object') return {}
   return ops as Record<string, OperationDef>
@@ -461,27 +453,37 @@ const isDeviceOffline = computed(() => {
 })
 
 // 操作 loading 状态
-const operationLoading = ref<Record<string, boolean>>({})
+const operationLoading = reactive<Record<string, boolean>>({})
 
 // 操作参数对话框
 const opDialogVisible = ref(false)
 const opDialogTitle = ref('')
 const opDialogParams = ref<OperationParam[]>([])
-const opParamValues = ref<Record<string, any>>({})
+const opParamValues = ref<Record<string, number | string>>({})
 const opDialogLoading = ref(false)
 const currentOpKey = ref('')
+const opFormRef = ref<FormInstance>()
+
+function getDefaultMax(type: string): number {
+  const map: Record<string, number> = {
+    uint8: 255, uint16: 65535, int8: 127, int16: 32767, int32: 2147483647, uint32: 4294967295
+  }
+  return map[type] ?? 255
+}
 
 function openOperationDialog(opKey: string, op: OperationDef) {
   currentOpKey.value = opKey
   opDialogTitle.value = op.label
   opDialogParams.value = op.params || []
   // 初始化参数默认值
-  const defaults: Record<string, any> = {}
-  for (const p of op.params) {
+  const defaults: Record<string, number | string> = {}
+  for (const p of op.params || []) {
     if (p.type === 'enum' && p.options && p.options.length > 0) {
       defaults[p.name] = p.options[0].value
-    } else if (p.type === 'uint8' || p.type === 'uint16' || p.type === 'int8' || p.type === 'int16') {
-      defaults[p.name] = p.min ?? 0
+    } else if (p.type === 'uint8' || p.type === 'uint16' || p.type === 'int8' || p.type === 'int16' || p.type === 'int32' || p.type === 'uint32' || p.type === 'float') {
+      defaults[p.name] = p.min ?? (p.default !== undefined ? p.default : 0)
+    } else if (p.default !== undefined) {
+      defaults[p.name] = p.default
     } else {
       defaults[p.name] = ''
     }
@@ -495,18 +497,27 @@ async function submitOperationDialog() {
   const op = configOperations.value[opKey]
   if (!op || !device.value) return
 
+  // M4: 表单验证
+  if (opFormRef.value) {
+    try {
+      await opFormRef.value.validate()
+    } catch {
+      return // validation failed
+    }
+  }
+
   opDialogLoading.value = true
-  operationLoading.value = { ...operationLoading.value, [opKey]: true }
+  operationLoading[opKey] = true
   try {
     const id = Number(route.params.id)
     const result = await edgeDeviceApi.executeOperation(id, opKey, opParamValues.value)
-    handleOperationResult(op, result)
+    await handleOperationResult(opKey, op, result)
     opDialogVisible.value = false
   } catch (error: any) {
     ElMessage.error(error.message || '操作执行失败')
   } finally {
     opDialogLoading.value = false
-    operationLoading.value = { ...operationLoading.value, [opKey]: false }
+    operationLoading[opKey] = false
   }
 }
 
@@ -526,21 +537,23 @@ async function executeConfigOperation(opKey: string, op: OperationDef) {
     }
   }
 
-  operationLoading.value = { ...operationLoading.value, [opKey]: true }
+  operationLoading[opKey] = true
   try {
     const id = Number(route.params.id)
     const result = await edgeDeviceApi.executeOperation(id, opKey)
-    handleOperationResult(op, result)
+    await handleOperationResult(opKey, op, result)
   } catch (error: any) {
     ElMessage.error(error.message || '操作执行失败')
   } finally {
-    operationLoading.value = { ...operationLoading.value, [opKey]: false }
+    operationLoading[opKey] = false
   }
 }
 
-function handleOperationResult(op: OperationDef, result: any) {
+async function handleOperationResult(opKey: string, op: OperationDef, result: ExecuteOperationResponse) {
   if (op.type === 'write') {
     ElMessage.success('命令已发送')
+    // M6: 操作成功后刷新设备数据
+    await fetchDeviceDetail()
   } else {
     // read 类型：显示返回值
     const value = result?.value ?? result?.data?.value

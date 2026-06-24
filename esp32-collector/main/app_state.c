@@ -74,8 +74,7 @@ app_state_t *app_state_init(void)
         s_app.bus_ch[i] = 0;
     }
 
-    /* Per-channel pending queues (depth=10, replaces race-prone single-slot arrays) */
-#define PENDING_QUEUE_DEPTH 10
+    /* Per-channel pending queues (depth=PENDING_QUEUE_DEPTH, replaces race-prone single-slot arrays) */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_app.pending_queues[i] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
         if (s_app.pending_queues[i] == NULL) {

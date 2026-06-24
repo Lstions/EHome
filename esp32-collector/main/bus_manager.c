@@ -278,6 +278,12 @@ void bus_manager_on_write_cmd(app_state_t *s, uint32_t rid, uint32_t ch,
 {
     const config_manifest_t *m = config_mgr_get_manifest();
 
+    /* Validate read_size upper bound */
+    if (rs > 256) {
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "read_size too large");
+        return;
+    }
+
     bus_cmd_t cmd = {
         .request_id = rid,
         .channel_id = ch,

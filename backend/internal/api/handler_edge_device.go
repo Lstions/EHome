@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// operationNameRe validates operation names to prevent injection or malformed input.
+var operationNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // getDefaultTemplateParams returns default ConfigTemplate parameters (write_data, read_length, delay_ms)
 // for a given device type. The hardwareID is used to build Modbus slave address in the command.
@@ -502,6 +506,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 
+		// Validate operation name format
+		if !operationNameRe.MatchString(req.Operation) {
+			Error(c, http.StatusBadRequest, "invalid operation name format")
+			return
+		}
+
 		// 1. Look up EdgeDevice
 		var edge models.EdgeDevice
 		if err := db.Preload("DeviceConfig").First(&edge, id).Error; err != nil {
@@ -607,7 +617,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		case "read":
 			// Read operation: use pendingwrite to wait for response
-			timeout := time.Duration(10000) * time.Millisecond
+			timeout := 10 * time.Second
 			if opConfig.TimeoutMs > 0 {
 				timeout = time.Duration(opConfig.TimeoutMs) * time.Millisecond
 			}
@@ -810,41 +820,47 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, params map[string]interface{}) error {
 	switch postAction {
 	case "update_connection_address":
-		// Update EdgeDevice.HardwareID and DeviceConfig.Connection.address
+		// Update EdgeDevice.HardwareID and DeviceConfig.Connection.address atomically
 		newAddr, ok := params["new_addr"]
 		if !ok {
 			return fmt.Errorf("new_addr param required for update_connection_address")
 		}
 		newAddrStr := fmt.Sprintf("%v", newAddr)
 
-		// Update EdgeDevice.HardwareID
-		if err := db.Model(&edge).Update("hardware_id", newAddrStr).Error; err != nil {
-			return fmt.Errorf("failed to update hardware_id: %w", err)
-		}
-
-		// Update DeviceConfig.Connection.address
-		var dc models.DeviceConfig
-		if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
-			return fmt.Errorf("failed to load device config: %w", err)
-		}
-		var conn map[string]interface{}
-		if dc.Connection != nil {
-			if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-				return fmt.Errorf("failed to parse connection JSON: %w", err)
+		err := db.Transaction(func(tx *gorm.DB) error {
+			// Update EdgeDevice.HardwareID
+			if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", edge.ID).Update("hardware_id", newAddrStr).Error; err != nil {
+				return fmt.Errorf("failed to update hardware_id: %w", err)
 			}
-		} else {
-			conn = make(map[string]interface{})
-		}
-		// Update address in default_params
-		dp, ok := conn["default_params"].(map[string]interface{})
-		if !ok {
-			dp = make(map[string]interface{})
-		}
-		dp["address"] = newAddr
-		conn["default_params"] = dp
-		connJSON, _ := json.Marshal(conn)
-		if err := db.Model(&dc).Update("connection", connJSON).Error; err != nil {
-			return fmt.Errorf("failed to update connection: %w", err)
+
+			// Update DeviceConfig.Connection.address
+			var dc models.DeviceConfig
+			if err := tx.First(&dc, edge.DeviceConfigID).Error; err != nil {
+				return fmt.Errorf("failed to load device config: %w", err)
+			}
+			var conn map[string]interface{}
+			if dc.Connection != nil {
+				if err := json.Unmarshal(dc.Connection, &conn); err != nil {
+					return fmt.Errorf("failed to parse connection JSON: %w", err)
+				}
+			} else {
+				conn = make(map[string]interface{})
+			}
+			// Update address in default_params
+			dp, ok := conn["default_params"].(map[string]interface{})
+			if !ok {
+				dp = make(map[string]interface{})
+			}
+			dp["address"] = newAddr
+			conn["default_params"] = dp
+			connJSON, _ := json.Marshal(conn)
+			if err := tx.Model(&models.DeviceConfig{}).Where("id = ?", dc.ID).Update("connection", connJSON).Error; err != nil {
+				return fmt.Errorf("failed to update connection: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 
 		logger.Infof("[execute] post_action update_connection_address: edge=%d new_addr=%v", edge.ID, newAddr)

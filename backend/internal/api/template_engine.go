@@ -82,28 +82,55 @@ func RenderCommandTemplate(template string, vars TemplateVars) ([]byte, error) {
 	hasCRC := strings.Contains(tmpl, "{crc}")
 
 	// First pass: replace all placeholders except {crc}
-	result := placeholderRe.ReplaceAllStringFunc(tmpl, func(match string) string {
-		parts := placeholderRe.FindStringSubmatch(match)
-		varName := parts[1]
-		fmtSpec := parts[2]
+	// We can't use ReplaceAllStringFunc because it doesn't support error propagation,
+	// so we do a manual replacement loop, skipping {crc} placeholders.
+	result := tmpl
+	searchOffset := 0
+	for searchOffset < len(result) {
+		match := placeholderRe.FindStringSubmatchIndex(result[searchOffset:])
+		if match == nil {
+			break
+		}
+		// Adjust match indices to be relative to full string
+		for i := range match {
+			if match[i] >= 0 {
+				match[i] += searchOffset
+			}
+		}
+		varName := result[match[2]:match[3]]
 
 		if varName == "crc" {
-			return match // leave {crc} for second pass
+			// Skip {crc} — advance searchOffset past this match
+			searchOffset = match[1]
+			continue
+		}
+
+		fmtSpec := ""
+		if match[4] >= 0 {
+			fmtSpec = result[match[4]:match[5]]
 		}
 
 		// Resolve the variable value
 		val, err := resolveVar(varName, vars)
 		if err != nil {
-			return match // leave unresolved
+			return nil, fmt.Errorf("unresolved template variable: %s: %w", varName, err)
 		}
 
 		// Format the value
+		var replacement string
 		if fmtSpec != "" {
-			return formatValue(val, fmtSpec)
+			replacement, err = formatValue(val, fmtSpec)
+			if err != nil {
+				return nil, fmt.Errorf("invalid format for variable %s: %w", varName, err)
+			}
+		} else {
+			replacement = fmt.Sprintf("%d", val)
 		}
-		// Default: format as decimal
-		return fmt.Sprintf("%d", val)
-	})
+
+		result = result[:match[0]] + replacement + result[match[1]:]
+		// Advance searchOffset past the replacement (avoids re-matching within replacement text)
+		searchOffset = match[0] + len(replacement)
+	}
 
 	// If no CRC, just decode the hex string
 	if !hasCRC {
@@ -187,12 +214,18 @@ func toUint64(v interface{}) (uint64, error) {
 	}
 }
 
+// fmtSpecRe validates format specifiers for formatValue to prevent format injection.
+// Only allows numeric width/precision with integer format verbs (d, X, x, o, b).
+var fmtSpecRe = regexp.MustCompile(`^[0-9]*[dXxob]$`)
+
 // formatValue formats a uint64 value using a printf-style format spec.
 // Supports common Go fmt verbs: d, x, X, o, b, and width/precision like 02X, 04X.
-func formatValue(val uint64, spec string) string {
-	// Handle common format specs like "02X", "04X", "d", "02d", etc.
-	// We use fmt.Sprintf with the % prefix
-	return fmt.Sprintf("%"+spec, val)
+// Returns an error if the format spec is not in the allowed whitelist.
+func formatValue(val uint64, spec string) (string, error) {
+	if !fmtSpecRe.MatchString(spec) {
+		return "", fmt.Errorf("invalid format spec: %q", spec)
+	}
+	return fmt.Sprintf("%"+spec, val), nil
 }
 
 // ParseModbusResponse parses a Modbus response according to the response_parser strategy.
@@ -207,12 +240,18 @@ func ParseModbusResponse(rawData []byte, parser string) (float64, error) {
 		if len(rawData) < 5 {
 			return 0, fmt.Errorf("response too short for modbus_uint16: got %d bytes, need at least 5", len(rawData))
 		}
+		if rawData[1]&0x80 != 0 {
+			return 0, fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X", rawData[1], rawData[2])
+		}
 		val := binary.BigEndian.Uint16(rawData[3:5])
 		return float64(val), nil
 
 	case "modbus_uint16_div10":
 		if len(rawData) < 5 {
 			return 0, fmt.Errorf("response too short for modbus_uint16_div10: got %d bytes, need at least 5", len(rawData))
+		}
+		if rawData[1]&0x80 != 0 {
+			return 0, fmt.Errorf("modbus exception response: func=0x%02X, code=0x%02X", rawData[1], rawData[2])
 		}
 		val := binary.BigEndian.Uint16(rawData[3:5])
 		return float64(val) / 10.0, nil

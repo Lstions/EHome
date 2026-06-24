@@ -6,6 +6,25 @@ interface ApiResponse<T> {
   data: T
 }
 
+export interface OperationParam {
+  name: string
+  type: 'uint8' | 'uint16' | 'int8' | 'int16' | 'int32' | 'uint32' | 'float' | 'enum' | 'string' | 'bool'
+  label?: string
+  min?: number
+  max?: number
+  step?: number
+  default?: number | string
+  options?: Array<{ value: number | string; label: string }>
+}
+
+export interface OperationDef {
+  label: string
+  type: 'read' | 'write'
+  params?: OperationParam[]
+  description?: string
+  confirm?: boolean
+}
+
 export interface DeviceConfig {
   id: number
   name: string
@@ -14,7 +33,7 @@ export interface DeviceConfig {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
-  operations?: Record<string, any>
+  operations?: Record<string, OperationDef>
   is_default: boolean
   status: string
   created_at: string
@@ -43,7 +62,7 @@ export interface CreateDeviceConfigParams {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
-  operations?: Record<string, any>
+  operations?: Record<string, OperationDef>
   is_default?: boolean
 }
 
@@ -54,7 +73,7 @@ export interface UpdateDeviceConfigParams {
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc'
   config: Record<string, any>
-  operations?: Record<string, any>
+  operations?: Record<string, OperationDef>
   is_default?: boolean
   status?: string
 }

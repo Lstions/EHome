@@ -3,6 +3,7 @@ package pendingwrite
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/mqtt"
@@ -36,6 +37,14 @@ type Manager struct {
 	mqtt    *mqtt.Client
 }
 
+// nextRequestID is an atomic counter for generating unique request IDs,
+// initialized from the current nanosecond timestamp to avoid collisions.
+var nextRequestID uint32
+
+func init() {
+	nextRequestID = uint32(time.Now().UnixNano())
+}
+
 // NewManager creates a new pending write manager
 func NewManager(mqttClient *mqtt.Client) *Manager {
 	return &Manager{
@@ -46,7 +55,7 @@ func NewManager(mqttClient *mqtt.Client) *Manager {
 
 // SendWriteCommand sends a WriteCommand and waits for response
 func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byte, readSize uint32, timeout time.Duration) (*Response, error) {
-	requestID := uint32(time.Now().UnixNano())
+	requestID := atomic.AddUint32(&nextRequestID, 1)
 
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
 	enc.EncodeVarint(1, uint64(requestID))
