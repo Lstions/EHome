@@ -21,6 +21,13 @@
  *   with error_code=0x01 (sensor RX timeout).  This replaces the old
  *   backend-only timeout for UART read operations.
  *
+ *   P1-7: Protocol-agnostic frame delimiter — rx_task accumulates UART
+ *   bytes into per-channel stream_rx_t buffers and uses frame_delim_config_t
+ *   to detect complete frames.  Four modes: timeout (Modbus RTU),
+ *   delimiter (GB3024 ASCII), start_stop (嘉佰达 BMS), fixed length.
+ *   Default is FRAME_DELIM_TIMEOUT with auto-calculated interval from
+ *   baud rate — fully backward-compatible with existing Modbus RTU.
+ *
  *   Pending command tracking: Each UART channel has a FreeRTOS Queue
  *   (pending_queues[i], depth=PENDING_QUEUE_DEPTH) of pending_cmd_t entries.  UART
  *   cmd_tasks enqueue before/after TX; rx_task dequeues one entry per
@@ -408,7 +415,107 @@ static void cmd_task_i2c(void *pv)
 
 /* ==================================================================
  *  rx_task — RX path (UART only, non-blocking poll)
+ *
+ *  P1-7: Protocol-agnostic frame delimiter — stream RX processing.
+ *  Bytes from bus_dma_read are accumulated into per-channel stream
+ *  buffers.  Frame completeness is determined by the channel's
+ *  frame_delim_config_t (timeout / delimiter / start_stop / fixed).
+ *  Only complete frames are dispatched to the pending-queue match
+ *  and DataReport callback.
  * ================================================================== */
+
+/* P1-7: Per-channel stream state */
+static stream_rx_t s_streams[SCHED_MAX_CHANNELS];
+
+/* 检查 buffer 末尾是否匹配分隔符 */
+static bool ends_with_delimiter(const uint8_t *buf, size_t len,
+                                 const uint8_t *delim, uint8_t delim_len) {
+    if (len < delim_len) return false;
+    return memcmp(buf + len - delim_len, delim, delim_len) == 0;
+}
+
+/* 从 start_stop 帧中读取长度字段 */
+static int32_t read_length_field(const uint8_t *buf, size_t buf_len,
+                                  const frame_delim_config_t *cfg) {
+    int offset = cfg->start_stop.length_field_offset;
+    int size   = cfg->start_stop.length_field_size;
+    if ((int)buf_len < offset + size) return -1;
+    if (size == 1) return buf[offset];
+    if (size == 2) return (buf[offset] << 8) | buf[offset + 1];
+    return -1;
+}
+
+/* P1-7: Check if a complete frame has been received */
+static bool is_frame_complete(stream_rx_t *stream) {
+    switch (stream->delim_cfg.type) {
+
+    case FRAME_DELIM_TIMEOUT: {
+        /* Modbus RTU: 帧间静默超过阈值 */
+        if (stream->len == 0) return false;
+        uint64_t now = esp_timer_get_time();
+        return (now - stream->last_rx_time) > stream->delim_cfg.timeout.timeout_us;
+    }
+
+    case FRAME_DELIM_DELIMITER: {
+        /* GB3024 ASCII: 检查末尾是否为分隔符 */
+        return ends_with_delimiter(stream->buffer, stream->len,
+                                   stream->delim_cfg.delimiter.bytes,
+                                   stream->delim_cfg.delimiter.len);
+    }
+
+    case FRAME_DELIM_START_STOP: {
+        /* 嘉佰达 BMS: start + len + data + stop */
+        if (stream->len < 1) return false;
+        if (!stream->frame_started) {
+            if (stream->buffer[0] == stream->delim_cfg.start_stop.start_byte) {
+                stream->frame_started = true;
+            } else {
+                stream->len = 0;  /* 丢弃非帧头字节 */
+                return false;
+            }
+        }
+        int32_t payload_len = read_length_field(stream->buffer, stream->len, &stream->delim_cfg);
+        if (payload_len < 0) return false;
+        int header = stream->delim_cfg.start_stop.header_size;
+        int expected = header + payload_len + 2 + 1;  /* data + checksum(2) + stop(1) */
+        if (stream->delim_cfg.start_stop.length_includes_header) {
+            expected = payload_len + 2 + 1;
+        }
+        if (stream->len >= (size_t)expected) {
+            if (stream->buffer[expected - 1] == stream->delim_cfg.start_stop.stop_byte) {
+                return true;
+            }
+            ESP_LOGW(TAG_RX, "stop byte mismatch: expected 0x%02X, got 0x%02X",
+                     stream->delim_cfg.start_stop.stop_byte,
+                     stream->buffer[expected - 1]);
+            stream->len = 0;
+            stream->frame_started = false;
+            return false;
+        }
+        return false;
+    }
+
+    case FRAME_DELIM_FIXED: {
+        return stream->len >= stream->delim_cfg.fixed_len.length;
+    }
+
+    default:
+        return false;
+    }
+}
+
+/* P1-7: Initialize default frame delimiter config for a channel
+ * Modbus RTU is the default — timeout based on baud rate */
+static void init_default_delim_config(stream_rx_t *stream, uint32_t baud) {
+    stream->delim_cfg.type = FRAME_DELIM_TIMEOUT;
+    if (baud > 0) {
+        stream->delim_cfg.timeout.timeout_us = 38500000UL / baud;
+    } else {
+        stream->delim_cfg.timeout.timeout_us = 4000;  /* 默认 4ms @9600 */
+    }
+    stream->len = 0;
+    stream->frame_started = false;
+}
 
 static void rx_task(void *pv)
 {
@@ -439,33 +546,51 @@ static void rx_task(void *pv)
             reads++;
             size_t n = bus_dma_read(&s->bus_ctx[i], rx, sizeof(rx));
             if (n > 0) {
+                stream_rx_t *stream = &s_streams[i];
+
+                /* P1-7: Initialize stream on first RX if not yet configured */
+                if (stream->delim_cfg.type == FRAME_DELIM_TIMEOUT &&
+                    stream->delim_cfg.timeout.timeout_us == 0) {
+                    init_default_delim_config(stream, s->bus_ctx[i].cfg.uart.baud);
+                }
+
+                /* Append to stream buffer */
+                if (stream->len + n <= sizeof(stream->buffer)) {
+                    memcpy(stream->buffer + stream->len, rx, n);
+                    stream->len += n;
+                } else {
+                    ESP_LOGW(TAG_RX, "ch%d buffer overflow (%d+%d > %d), resetting",
+                             i, (int)stream->len, (int)n, (int)sizeof(stream->buffer));
+                    stream->len = 0;
+                    stream->frame_started = false;
+                    continue;
+                }
+                stream->last_rx_time = esp_timer_get_time();
+            }
+
+            /* P1-7: Check if a complete frame has been received */
+            stream_rx_t *stream = &s_streams[i];
+            if (stream->len > 0 && is_frame_complete(stream)) {
                 hits++;
                 uint32_t ch = s->bus_ch[i];
                 uint32_t rid = 0;
                 uint32_t eid = 0;
                 uint8_t  cidx = 0;
 
-                /* Smart pending queue match: prefer CMD_WRITE+readSize entries
-                 * whose read_size matches the RX length. This prevents CMD_SAMPLE
-                 * entries (read_size=0, matches any) from stealing the slot when
-                 * a CMD_WRITE+readSize response is expected.
-                 *
-                 * Algorithm: drain the queue, find the best match, push back
-                 * non-matching entries in original order. */
+                /* Smart pending queue match (existing logic, but using stream->buffer instead of rx) */
                 pending_cmd_t best_match;
                 bool found = false;
                 pending_cmd_t drained[PENDING_QUEUE_DEPTH];
                 int drained_count = 0;
                 pending_cmd_t pcmd;
+                size_t frame_len = stream->len;
 
                 /* Drain the entire queue */
                 while (xQueueReceive(s->pending_queues[i], &pcmd, 0) == pdTRUE) {
-                    if (!found && pcmd.read_size > 0 && pcmd.read_size == n) {
-                        /* Exact length match for CMD_WRITE+readSize — use this */
+                    if (!found && pcmd.read_size > 0 && pcmd.read_size == frame_len) {
                         best_match = pcmd;
                         found = true;
                     } else {
-                        /* Non-matching or fallback entry — keep for requeue */
                         drained[drained_count++] = pcmd;
                     }
                 }
@@ -474,31 +599,26 @@ static void rx_task(void *pv)
                     rid  = best_match.request_id;
                     eid  = best_match.edge_device_id;
                     cidx = best_match.command_index;
-                    /* Push back ALL unmatched entries in original order */
                     for (int j = 0; j < drained_count; j++) {
                         if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
-                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
-                } else if (!found && n >= 5 && (rx[1] & 0x80)) {
-                    /* P1-1: Modbus exception response detection
-                     * Modbus exception format: [addr][func|0x80][exception_code][CRC_lo][CRC_hi] = 5 bytes
-                     * Match by slave addr + func code for precise attribution when multiple pending */
-                    uint8_t resp_addr = rx[0];
-                    uint8_t resp_func = rx[1] & 0x7F;  /* Strip exception bit */
+                } else if (!found && frame_len >= 5 && (stream->buffer[1] & 0x80)) {
+                    /* P1-1: Modbus exception response detection */
+                    uint8_t resp_addr = stream->buffer[0];
+                    uint8_t resp_func = stream->buffer[1] & 0x7F;
 
                     int best_idx = -1;
-                    /* First pass: exact match by slave addr + func code */
                     for (int j = 0; j < drained_count; j++) {
                         if (drained[j].read_size > 0 &&
                             drained[j].cmd_data_len >= 2 &&
                             drained[j].cmd_data[0] == resp_addr &&
                             drained[j].cmd_data[1] == resp_func) {
                             best_idx = j;
-                            break;  /* Exact match, stop searching */
+                            break;
                         }
                     }
-                    /* Fallback: if no exact match, use first read_size > 0 entry */
                     if (best_idx < 0) {
                         for (int j = 0; j < drained_count; j++) {
                             if (drained[j].read_size > 0) {
@@ -507,12 +627,10 @@ static void rx_task(void *pv)
                             }
                         }
                     }
-
                     if (best_idx >= 0) {
                         rid  = drained[best_idx].request_id;
                         eid  = drained[best_idx].edge_device_id;
                         cidx = drained[best_idx].command_index;
-                        /* Remove matched entry from drained array */
                         for (int k = best_idx; k < drained_count - 1; k++) {
                             drained[k] = drained[k + 1];
                         }
@@ -521,29 +639,28 @@ static void rx_task(void *pv)
                         ESP_LOGI(TAG_RX, "P1-1: matched Modbus exception (addr=0x%02X func=0x%02X) to reqID=%lu",
                                  resp_addr, resp_func, (unsigned long)rid);
                     }
-
-                    /* Push back remaining unmatched entries */
                     for (int j = 0; j < drained_count; j++) {
                         if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
-                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
                 } else if (drained_count > 0) {
-                    /* No exact match — use first fallback (CMD_SAMPLE, read_size=0) */
                     rid  = drained[0].request_id;
                     eid  = drained[0].edge_device_id;
                     cidx = drained[0].command_index;
-                    /* Push back remaining entries (skip consumed fallback) */
                     for (int j = 1; j < drained_count; j++) {
                         if (!xQueueSendToBack(s->pending_queues[i], &drained[j], 0)) {
-                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry, request_id=%lu", (unsigned long)drained[j].request_id);
+                            ESP_LOGW(TAG_RX, "failed to re-enqueue pending entry");
                         }
                     }
                 }
-                /* If no pending entry at all, rid/eid/cidx stay 0 — unsolicited. */
 
                 uint64_t ts = esp_timer_get_time();
-                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, rx, n, 0, rid, eid, cidx);
+                if (s_data_rpt_cb) s_data_rpt_cb(ch, ts, 0, stream->buffer, stream->len, 0, rid, eid, cidx);
+
+                /* Reset stream state */
+                stream->len = 0;
+                stream->frame_started = false;
             }
         }
 
