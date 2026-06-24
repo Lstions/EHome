@@ -143,5 +143,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 			channelDataEvent["sensor_type"] = sd.Type
 		}
 	}
-	m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
+	if m.wsHub != nil {
+		m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
+	}
 }
