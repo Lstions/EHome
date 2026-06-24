@@ -137,6 +137,21 @@
           </template>
         </el-input>
 
+        <!-- SPI/I2C read_size 控件 -->
+        <template v-if="showReadSize">
+          <el-input-number
+            v-model="readSize"
+            :min="0" :max="256"
+            :step="1"
+            size="small"
+            style="width: 120px;"
+            controls-position="right"
+            placeholder="RX 字节数"
+          />
+          <span class="read-size-hint" v-if="readSize === 0">仅写</span>
+          <span class="read-size-hint" v-else>读 {{ readSize }}B</span>
+        </template>
+
         <el-button
           type="primary"
           size="small"
@@ -192,6 +207,13 @@ const displayMode = ref<'hex' | 'ascii'>('hex')
 const sending = ref(false)
 const txLogContainer = ref<HTMLDivElement>()
 const rxLogContainer = ref<HTMLDivElement>()
+
+// SPI/I2C 读取字节数
+const readSize = ref<number>(0)
+const showReadSize = computed(() => {
+  const type = selectedChannel.value?.hardware_type
+  return type === 'spi' || type === 'i2c'
+})
 
 // Pure data flow: log entry is simple — just direction + data + source
 interface LogEntry {
@@ -274,6 +296,7 @@ const quickCommands = computed(() => {
     .map((c: any) => ({
       label: c.key || c.write,
       write: c.write,
+      read_size: c.read_size,  // 支持 read_size 字段
     }))
 })
 
@@ -389,13 +412,14 @@ const sendData = async () => {
   if (wsStore.connected) {
     lastOptimisticTx.value = { data: hexData, time: Date.now() }
 
-    // Send via terminal WS protocol: type=send, payload={device_id, channel_id, data_hex}
+    // Send via terminal WS protocol: type=send, payload={device_id, channel_id, data_hex, read_size}
     wsStore.send({
       type: 'send',
       payload: {
         device_id: deviceId,
         channel_id: selectedChannelId.value,
         data_hex: hexData,
+        ...(showReadSize.value && readSize.value > 0 && { read_size: readSize.value }),
       }
     })
     ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
@@ -407,7 +431,10 @@ const sendData = async () => {
   } else {
     sending.value = true
     try {
-      const result = await channelApi.terminalWrite(selectedChannelId.value!, deviceId, hexData)
+      const result = await channelApi.terminalWrite(
+        selectedChannelId.value!, deviceId, hexData,
+        showReadSize.value ? readSize.value : undefined
+      )
       if (result.success) {
         ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
       } else {
@@ -436,9 +463,13 @@ const sendData = async () => {
   }
 }
 
-const sendQuickCommand = async (cmd: { write: string }) => {
+const sendQuickCommand = async (cmd: { write: string; read_size?: number }) => {
   inputMode.value = 'hex'
   inputData.value = cmd.write
+  // SPI/I2C 快捷命令如果配置了 read_size，自动填入
+  if (showReadSize.value && cmd.read_size !== undefined) {
+    readSize.value = cmd.read_size
+  }
   await sendData()
 }
 
@@ -465,6 +496,7 @@ const onChannelChange = () => {
   logEntries.value = []
   inputData.value = ''
   inputDataAscii.value = ''
+  readSize.value = 0
 }
 
 const loadChannels = async () => {
@@ -675,6 +707,12 @@ watch(() => props.channels, () => {
 
 .dot-interactive {
   background: var(--el-color-warning);
+}
+
+.read-size-hint {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
 }
 
 .entry-time {

@@ -30,7 +30,8 @@ export const channelApi = {
     const response = await client.get('/api/v1/channels', { params })
     // response is the full body: { code: 200, data: { items, total, ... } }
     const body = response as { code?: number; data?: unknown }
-    if (body.code && body.code !== 200) {
+    // 2xx 为成功，4xx/5xx 为业务错误（与 client.ts 拦截器逻辑一致）
+    if (body.code && body.code >= 400) {
       throw new Error('获取通道列表失败')
     }
     // Unwrap: { data: { items: [...] } } -> { items: [...] }
@@ -70,12 +71,16 @@ export const channelApi = {
     return response.data
   },
 
-  // 终端写入（需要 device_id）
-  async terminalWrite(id: number, deviceId: string, dataHex: string): Promise<ChannelWriteResponse> {
-    const response = await client.post<unknown, { data: ChannelWriteResponse }>(`/api/v1/channels/${id}/terminal/write`, {
+  // 终端写入（需要 device_id，SPI/I2C 可传 read_size 指定预期读取字节数）
+  async terminalWrite(id: number, deviceId: string, dataHex: string, readSize?: number): Promise<ChannelWriteResponse> {
+    const body: Record<string, unknown> = {
       device_id: deviceId,
       data_hex: dataHex,
-    })
+    }
+    if (readSize !== undefined && readSize > 0) {
+      body.read_size = readSize
+    }
+    const response = await client.post<unknown, { data: ChannelWriteResponse }>(`/api/v1/channels/${id}/terminal/write`, body)
     return response.data
   },
 

@@ -1034,16 +1034,14 @@ const handleCreate = async () => {
     }
     submitting.value = true
 
-    // 编辑模式
+    // 编辑模式 — 字段对齐后端 UpdateDTO: name/type/enabled/interval_ms/hardware_id/node_id/channel_id
     if (editingDeviceId.value) {
       await edgeDeviceApi.update(editingDeviceId.value, {
         name: deviceForm.name,
-        node_id: deviceForm.node_id!,
-        device_type: deviceForm.device_type,
-        protocol: deviceForm.protocol,
-        hardware_type: deviceForm.hardware_type,
+        node_id: String(deviceForm.node_id!),
+        type: deviceForm.device_type,
         hardware_id: deviceForm.hardware_id,
-        config: { interval_ms: deviceForm.interval_ms }
+        interval_ms: deviceForm.interval_ms,
       })
       ElMessage.success('设备更新成功')
       showCreateDialog.value = false
@@ -1085,26 +1083,23 @@ const handleCreate = async () => {
       // 已有通道场景：如果 channel.config 没有 device_type，补上
       if (!targetChannel.config?.device_type && targetChannel.id) {
         await channelApi.update(targetChannel.id, {
-          config: { 
-            ...targetChannel.config, 
-            device_type: selectedParser.value!.id 
-          }
+          config: JSON.stringify({
+            ...targetChannel.config,
+            device_type: selectedParser.value!.id
+          })
         })
       }
     } else {
       throw new Error('请先选择或创建通道')
     }
     
-    // 创建边缘设备
+    // 创建边缘设备 (后端 DTO 字段: type, node_id(string), channel_id, hardware_id)
     await edgeDeviceApi.create({
-      name: deviceForm.name,
-      node_id: deviceForm.node_id!,
-      channel_id: channelId,
-      device_type: selectedParser.value!.id,
-      protocol,
-      hardware_type: targetChannel.hardware_type,
+      name: String(deviceForm.name),
+      node_id: String(deviceForm.node_id!),
+      channel_id: channelId!,
+      type: selectedParser.value!.id,
       hardware_id: targetChannel.hardware_id,
-      config: { interval_ms: deviceForm.interval_ms }
     })
     
     ElMessage.success('创建成功')

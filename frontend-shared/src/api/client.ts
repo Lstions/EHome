@@ -27,8 +27,8 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => {
     const data = response.data as { code?: number; message?: string; data?: unknown }
-    // 检查业务状态码
-    if (data.code && data.code !== 200) {
+    // 检查业务状态码：2xx 放行，4xx/5xx 拦截为业务错误
+    if (data.code && data.code >= 400) {
       return Promise.reject(new Error(data.message || '请求失败'))
     }
     return response.data

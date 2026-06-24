@@ -43,8 +43,17 @@ export interface EdgeDeviceListParams {
   page_size?: number
 }
 
-export interface CreateEdgeDeviceParams extends Partial<EdgeDevice> {
+// 创建参数 — 精确对齐后端 CreateDTO，不继承 Partial<EdgeDevice>
+// 后端 DTO: name(*string), type(*string), node_id(*string), channel_id(*uint), hardware_id(*string)
+export interface CreateEdgeDeviceParams {
+  name?: string
+  type?: string
+  node_id?: string
   channel_id?: number
+  hardware_id?: string
+  enabled?: boolean
+  interval_ms?: number
+  device_config_id?: number
 }
 
 // ============================================================
@@ -155,7 +164,8 @@ export const edgeDeviceApi = {
     return response as unknown as {id: number}
   },
 
-  async update(id: number, data: Partial<EdgeDevice>): Promise<void> {
+  // 更新参数 — 对齐后端 UpdateDTO
+  async update(id: number, data: CreateEdgeDeviceParams): Promise<void> {
     await client.put(`/api/v1/edge-devices/${id}`, data)
   },
 
