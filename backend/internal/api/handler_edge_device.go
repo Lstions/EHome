@@ -349,6 +349,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		if dto.DeviceConfigID != nil {
 			updates["device_config_id"] = *dto.DeviceConfigID
+			// P2-7: Sync Type from DeviceConfig when DeviceConfigID changes
+			var dc models.DeviceConfig
+			if err := db.First(&dc, *dto.DeviceConfigID).Error; err == nil && dc.DeviceType != "" {
+				updates["type"] = dc.DeviceType
+			}
 		}
 		if dto.ChannelID != nil {
 			updates["channel_id"] = *dto.ChannelID
