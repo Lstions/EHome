@@ -461,7 +461,7 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
     }
 }
 
-/* ── scheduler task (10 ms tick) ─────────────────────────────────── */
+/* ── scheduler task (P3-1: dynamic tick — 1ms when fast channels active, 10ms otherwise) ─ */
 
 static void scheduler_task(void *p)
 {
@@ -471,7 +471,30 @@ static void scheduler_task(void *p)
     uint32_t total_samples = 0;
 
     while (s_running) {
-        vTaskDelayUntil(&wake, pdMS_TO_TICKS(10));
+        /* P3-1: Dynamic tick — use 1ms when any channel needs <100ms interval,
+         * otherwise use 10ms to save CPU.  Checked every iteration because
+         * channel configuration may change at runtime. */
+        bool has_fast_channel = false;
+        for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+            if (!s_channels[i].active) continue;
+            if (s_channels[i].config.interval_ms < 100) {
+                has_fast_channel = true;
+                break;
+            }
+            /* Also check per-command intervals in v2 edge_device channels */
+            for (int ed = 0; ed < s_channels[i].edge_device_count; ed++) {
+                for (int ci = 0; ci < s_channels[i].edge_devices[ed].command_count; ci++) {
+                    if (s_channels[i].edge_devices[ed].commands[ci].interval_ms < 100) {
+                        has_fast_channel = true;
+                        break;
+                    }
+                }
+                if (has_fast_channel) break;
+            }
+            if (has_fast_channel) break;
+        }
+        TickType_t tick_ms = has_fast_channel ? 1 : 10;
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(tick_ms));
         TickType_t now = xTaskGetTickCount();
 
         /* Check queue depth for backpressure — use the busiest queue */
