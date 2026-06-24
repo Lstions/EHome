@@ -180,7 +180,9 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
             }
         }
 
-        if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
+        /* 8.3: Use finite timeout (5s) so we can feed the watchdog even when
+         * the queue is empty (no commands arriving on this bus). */
+        if (!xQueueReceive(queue, &cmd, pdMS_TO_TICKS(5000))) continue;
 
         bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
         if (!ctx) {
@@ -327,7 +329,9 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
             }
         }
 
-        if (!xQueueReceive(queue, &cmd, portMAX_DELAY)) continue;
+        /* 8.3: Use finite timeout (5s) so we can feed the watchdog even when
+         * the queue is empty (no commands arriving on this bus). */
+        if (!xQueueReceive(queue, &cmd, pdMS_TO_TICKS(5000))) continue;
 
         bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
         if (!ctx) {

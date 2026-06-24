@@ -265,7 +265,10 @@ void app_main(void)
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
     ota_set_progress_callback(msg_handler_send_ota_prog);
 
-    /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout */
+    /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
+     * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)
+     * before app_main. We must deinit first, then reinit with our config. */
+    esp_task_wdt_deinit();
     esp_task_wdt_config_t wdt_config = {
         .timeout_ms = 10000,
         .idle_core_mask = 0,
