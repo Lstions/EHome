@@ -375,10 +375,16 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
 #if SOC_UART_LP_NUM >= 1
         /* LP_UART does not support DMA — force polled mode */
-        if (ctx->cfg.uart.port >= SOC_UART_HP_NUM && ctx->dma_enabled) {
-            ESP_LOGW(TAG, "LP_UART port %d does not support DMA, forcing polled mode",
-                     ctx->cfg.uart.port);
-            ctx->dma_enabled = false;
+        {
+            const hw_uart_t *hw = NULL;
+            for (int i = 0; i < HW_UART_COUNT; i++) {
+                if (hw_uarts[i].port == port_num) { hw = &hw_uarts[i]; break; }
+            }
+            if (hw && hw_uart_is_lp(hw) && ctx->dma_enabled) {
+                ESP_LOGW(TAG, "LP_UART port %d does not support DMA, forcing polled mode",
+                         port_num);
+                ctx->dma_enabled = false;
+            }
         }
 #endif
 
@@ -406,14 +412,21 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
         /* LP_UART has fixed IOs — skip uart_set_pin to avoid ESP_FAIL.
          * For HP UART, set pins normally. */
-        if (ctx->cfg.uart.port < SOC_UART_HP_NUM) {
-            r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
-            if (r != ESP_OK) {
-                ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
-                return r;
+        {
+            const hw_uart_t *hw = NULL;
+            for (int i = 0; i < HW_UART_COUNT; i++) {
+                if (hw_uarts[i].port == ctx->cfg.uart.port) { hw = &hw_uarts[i]; break; }
             }
-        } else {
-            ESP_LOGI(TAG, "LP_UART port %d: using fixed pins (skip uart_set_pin)", ctx->cfg.uart.port);
+            if (hw && hw_uart_is_lp(hw)) {
+                ESP_LOGI(TAG, "LP_UART port %d: using fixed pins (skip uart_set_pin)",
+                         ctx->cfg.uart.port);
+            } else {
+                r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
+                if (r != ESP_OK) {
+                    ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
+                    return r;
+                }
+            }
         }
 
         if (ctx->dma_enabled) {

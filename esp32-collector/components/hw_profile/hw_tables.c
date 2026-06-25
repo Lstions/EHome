@@ -6,7 +6,7 @@
  * Supports ESP32-S3 and ESP32-C6 via CONFIG_IDF_TARGET_* conditionals.
  *
  * S3: 3 UART (all DMA), 2 I2C, 2 SPI, 12 GPIO, 5 ADC, 5 GDMA
- * C6: 2 UART (DMA),    1 I2C, 1 SPI, 8 GPIO,  3 ADC, 3 GDMA
+ * C6: 2 HP UART (DMA) + 1 LP UART (no DMA), 1 I2C, 1 SPI, 8 GPIO, 3 ADC, 3 GDMA
  */
 
 #include "hw_tables.h"
@@ -36,8 +36,10 @@ uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port
  *  S3 UART2: TX=1  RX=2  (general purpose)
  *  C6 UART0: TX=16 RX=17 (ROM bootloader download port)
  *  C6 UART1: TX=20 RX=21 (general purpose, avoids USB 12/13)
+ *  C6 LP_UART0: TX=LP_GPIO5 RX=LP_GPIO4 (low-power, fixed pins, no DMA, 16B FIFO)
  *
  *  All HP UARTs on both chips support DMA (flags = 0x01).
+ *  LP_UART has flags = 0x02 (bit1 = is_lp_uart, no DMA).
  * ================================================================ */
 
 #ifdef CONFIG_IDF_TARGET_ESP32S3
@@ -113,6 +115,8 @@ const hw_uart_t hw_uarts[HW_UART_COUNT] = {
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, ROM download port */
     { .id = "UART1", .port = 1, .default_tx_pin = 20, .default_rx_pin = 21,
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, avoids USB pins 12/13 */
+    { .id = "LP_UART0", .port = 2, .default_tx_pin = 5,  .default_rx_pin = 4,
+      .max_baud = 1000000, .flags = 0x02 },  /* LP_UART: no DMA, fixed pins, 16B FIFO */
 };
 
 const hw_i2c_t hw_i2cs[HW_I2C_COUNT] = {

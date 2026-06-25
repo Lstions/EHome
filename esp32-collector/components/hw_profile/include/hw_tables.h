@@ -30,6 +30,12 @@ typedef struct {
     uint8_t     flags;           /* bit0 = dma_supported */
 } hw_uart_t;
 
+/* UART flags */
+#define HW_UART_FLAG_DMA       0x01   /* DMA supported */
+#define HW_UART_FLAG_LP_UART   0x02   /* Low-power UART (fixed pins, no DMA, small FIFO) */
+
+#define hw_uart_is_lp(u)  ((u)->flags & HW_UART_FLAG_LP_UART)
+
 typedef struct {
     const char *id;
     uint8_t     port;
@@ -86,8 +92,8 @@ typedef struct {
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
 
   #define HW_PLATFORM_STRING  "ESP32C6"
-  /* C6: 2 HP UARTs (DMA-capable), 1 I2C, 1 SPI */
-  #define HW_UART_COUNT   2
+  /* C6: 2 HP UARTs (DMA-capable) + 1 LP UART (no DMA, fixed pins, 16B FIFO), 1 I2C, 1 SPI */
+  #define HW_UART_COUNT   3
   #define HW_I2C_COUNT    1
   #define HW_SPI_COUNT    1
   #define HW_GPIO_COUNT   8
