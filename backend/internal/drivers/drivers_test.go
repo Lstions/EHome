@@ -61,8 +61,8 @@ func TestRegistry(t *testing.T) {
 
 	// Test list
 	types := reg.List()
-	if len(types) != 3 {
-		t.Fatalf("expected 3 drivers, got %d", len(types))
+	if len(types) != 4 {
+		t.Fatalf("expected 4 drivers, got %d", len(types))
 	}
 
 	// Test get

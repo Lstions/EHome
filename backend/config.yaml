@@ -1,6 +1,6 @@
 database:
   host: localhost
-  port: 9432
+  port: 5434
   user: ehome
   password: ehome123
   dbname: ehome

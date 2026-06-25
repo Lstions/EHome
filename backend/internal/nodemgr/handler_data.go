@@ -12,6 +12,7 @@ import (
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
+	"ehome/backend/pkg/parser"
 )
 
 // P1-4: Backpressure — overflow goroutine limit for when worker pool is full
@@ -156,26 +157,57 @@ func (m *Manager) findEdgeDeviceByChannelID(deviceID string, channelID uint64, e
 	return device, true
 }
 
-// parseAndStoreData parses raw data using device drivers and stores in unified_data
-// Returns the parsed sensor (for WS broadcast) or nil on failure
+// parseAndStoreData parses raw data using DeviceConfig.Parser JSONB (primary)
+// with Driver fallback, and stores in unified_data.
+// Returns the parsed sensor (for WS broadcast) or nil on failure.
 func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, edgeDeviceID uint64, rawData []byte) map[string]interface{} {
-	// Get device type from database
+	// Get device type from database — Preload DeviceConfig for Parser JSONB access
 	device, found := m.findEdgeDeviceByChannelID(deviceID, channelID, edgeDeviceID)
 	if !found {
 		return nil
 	}
 
-	// Get driver and parse
-	driver, err := drivers.Get(device.Type)
-	if err != nil {
-		logger.Infof("[%s] No driver for type %s: %v", deviceID, device.Type, err)
-		return nil
+
+	// Primary path: try DeviceConfig.Parser JSONB (unified ConfigParser)
+	var sensorData []parser.Field
+	var parseMethod string
+
+	if device.DeviceConfigID > 0 {
+		var dc models.DeviceConfig
+		if err := m.db.First(&dc, device.DeviceConfigID).Error; err == nil {
+			if len(dc.Parser) > 0 && string(dc.Parser) != "{}" && string(dc.Parser) != "null" {
+				cp, err := parser.NewConfigParser(dc.Parser)
+				if err == nil {
+					fields, err := cp.Parse(rawData)
+					if err == nil && len(fields) > 0 {
+						sensorData = fields
+						parseMethod = fmt.Sprintf("ConfigParser(%s)", dc.Name)
+					} else if err != nil {
+						logger.Debugf("[%s] ConfigParser failed, falling back to driver: %v", deviceID, err)
+					}
+				}
+			}
+		}
 	}
 
-	sensorData, err := driver.ParseData(rawData)
-	if err != nil {
-		logger.Infof("[%s] Failed to parse data: %v", deviceID, err)
-		return nil
+	// Fallback: try Driver registry (legacy, for HA Discovery compatibility)
+	if sensorData == nil {
+		driver, err := drivers.Get(device.Type)
+		if err != nil {
+			logger.Infof("[%s] No ConfigParser and no driver for type %s", deviceID, device.Type)
+			return nil
+		}
+		drvData, err := driver.ParseData(rawData)
+		if err != nil {
+			logger.Infof("[%s] Failed to parse data: %v", deviceID, err)
+			return nil
+		}
+		// Convert drivers.SensorData to parser.Field
+		sensorData = make([]parser.Field, len(drvData))
+		for i, sd := range drvData {
+			sensorData[i] = parser.Field{Name: sd.Name, Value: sd.Value, Unit: sd.Unit}
+		}
+		parseMethod = fmt.Sprintf("Driver(%s)", device.Type)
 	}
 
 	// Store parsed data (C3 fix: batch INSERT instead of per-sensor db.Create)
@@ -243,9 +275,13 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		})
 	}
 
-	// Publish to HomeAssistant
+	// Publish to HomeAssistant — convert parser.Field back to drivers.SensorData
 	if m.ha != nil {
-		m.ha.PublishState(deviceID, sensorData)
+		haData := make([]drivers.SensorData, len(sensorData))
+		for i, f := range sensorData {
+			haData[i] = drivers.SensorData{Name: f.Name, Value: f.Value, Unit: f.Unit}
+		}
+		m.ha.PublishState(deviceID, haData)
 	}
 
 	// Broadcast parsed data via WebSocket for Dashboard real-time display
@@ -271,7 +307,7 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		logger.Warnf("[%s] wsHub is nil, skipping data_update broadcast", deviceID)
 	}
 
-	logger.Infof("[%s] Parsed %d sensors using driver %s", deviceID, len(sensorData), device.Type)
+	logger.Infof("[%s] Parsed %d sensors using %s", deviceID, len(sensorData), parseMethod)
 
 	// Return parsed data map for caller to include in channel_data event
 	dataMap := make(map[string]interface{}, len(sensorData))
