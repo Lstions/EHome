@@ -347,7 +347,7 @@ type PendingWriteRecord struct {
 	RequestID   uint32    `gorm:"primaryKey;column:request_id"`
 	DeviceID    string    `gorm:"column:device_id;index"`
 	ChannelID   uint32    `gorm:"column:channel_id"`
-	Data        []byte    `gorm:"column:data;type:blob"`
+	Data        []byte    `gorm:"column:data;type:bytea"`
 	ReadSize    uint32    `gorm:"column:read_size"`
 	SentAt      time.Time `gorm:"column:sent_at;index"`
 	TimeoutAt   time.Time `gorm:"column:timeout_at;index"`

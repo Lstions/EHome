@@ -225,17 +225,19 @@ bool bus_dma_uart0_is_available(void)
 /*  If console is on USB Serial/JTAG, UART0 is free for data use.     */
 /*  If console is on UART0, we must skip it.                          */
 /*                                                                    */
-/*  IMPORTANT: Even when UART0 is "free" (console on USB-JTAG), we    */
-/*  reserve UART0 for boot/download use and start data channels from   */
-/*  UART1.  This avoids conflicts with the ROM bootloader which uses   */
-/*  UART0 for download mode, and matches the physical pin layout where */
-/*  UART0 = boot pins (C6: GPIO16/17, S3: GPIO43/44) and              */
-/*  UART1 = data pins (C6: GPIO21/20, S3: user-configurable).         */
+/*  When UART0 is available (console on USB-JTAG), we allow it to be  */
+/*  used as a data channel.  The first UART channel gets UART_NUM_0,  */
+/*  the second gets UART_NUM_1, etc.  This lets users connect an     */
+/*  external USB-serial adapter to the UART0 boot pins (C6: GPIO16/17)*/
+/*  and use it for sensor communication.                              */
+/*                                                                    */
+/*  When UART0 is NOT available (console on UART0), we skip it and    */
+/*  start from UART1.                                                 */
 /* ------------------------------------------------------------------ */
 #if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP_CONSOLE_USB_CDC)
-  #define UART0_START_INDEX  1   /* Console on USB — skip UART0, start from UART1 */
+  #define UART0_START_INDEX  0   /* Console on USB — UART0 available for data */
 #else
-  #define UART0_START_INDEX  1   /* Console on UART0 — skip UART0 (reserved)      */
+  #define UART0_START_INDEX  1   /* Console on UART0 — skip UART0 (reserved)  */
 #endif
 
 /* GPIO pin max varies by chip: S3=48, C6=30 */
@@ -371,13 +373,28 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         ctx->cfg.uart.tx_pin = tx_pin;
         ctx->cfg.uart.rx_pin = rx_pin;
 
+#if SOC_UART_LP_NUM >= 1
+        /* LP_UART does not support DMA — force polled mode */
+        if (ctx->cfg.uart.port >= SOC_UART_HP_NUM && ctx->dma_enabled) {
+            ESP_LOGW(TAG, "LP_UART port %d does not support DMA, forcing polled mode",
+                     ctx->cfg.uart.port);
+            ctx->dma_enabled = false;
+        }
+#endif
+
         uart_config_t uart_cfg = {
             .baud_rate  = (int)baud,
             .data_bits  = UART_DATA_8_BITS,
             .parity     = UART_PARITY_DISABLE,
             .stop_bits  = UART_STOP_BITS_1,
             .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+#if SOC_UART_LP_NUM >= 1
+            .lp_source_clk = (ctx->cfg.uart.port >= SOC_UART_HP_NUM)
+                             ? LP_UART_SCLK_DEFAULT
+                             : (lp_uart_sclk_t)UART_SCLK_DEFAULT,
+#else
             .source_clk = UART_SCLK_DEFAULT,
+#endif
         };
 
         esp_err_t r;
@@ -387,10 +404,16 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
             return r;
         }
 
-        r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
-        if (r != ESP_OK) {
-            ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
-            return r;
+        /* LP_UART has fixed IOs — skip uart_set_pin to avoid ESP_FAIL.
+         * For HP UART, set pins normally. */
+        if (ctx->cfg.uart.port < SOC_UART_HP_NUM) {
+            r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
+            if (r != ESP_OK) {
+                ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
+                return r;
+            }
+        } else {
+            ESP_LOGI(TAG, "LP_UART port %d: using fixed pins (skip uart_set_pin)", ctx->cfg.uart.port);
         }
 
         if (ctx->dma_enabled) {
