@@ -184,6 +184,7 @@ func (m *Manager) buildHashData(
 	templates []models.ConfigTemplate,
 	channels []models.Channel,
 	edgeDevices []models.EdgeDevice,
+	deviceConfigs []models.DeviceConfig,
 	dmaConfigs []models.DmaChannelConfig,
 ) []byte {
 	var buf []byte
@@ -196,8 +197,12 @@ func (m *Manager) buildHashData(
 			c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
 	}
 	for _, ed := range edgeDevices {
-		buf = append(buf, []byte(fmt.Sprintf("e:%d:%s:%d:%v:",
-			ed.ID, ed.HardwareID, ed.IntervalMs, ed.Enabled))...)
+		buf = append(buf, []byte(fmt.Sprintf("e:%d:%d:%s:%d:%v:",
+			ed.ID, ed.DeviceConfigID, ed.HardwareID, ed.IntervalMs, ed.Enabled))...)
+	}
+	for _, dc := range deviceConfigs {
+		buf = append(buf, []byte(fmt.Sprintf("dc:%d:%s:%s:%s:%s:%s:%s:%s:",
+			dc.ID, dc.DeviceType, dc.DeviceModel, string(dc.Connection), string(dc.Parser), string(dc.InitFlow), string(dc.Operations), dc.Status))...)
 	}
 	for _, d := range dmaConfigs {
 		buf = append(buf, []byte(fmt.Sprintf("d:%d:%v:%s:",
@@ -253,7 +258,8 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	err := m.db.Transaction(func(tx *gorm.DB) error {
 		// P2-1: REPEATABLE READ for consistent snapshot across queries.
 		// Silently ignored by SQLite — the transaction itself still provides consistency.
-		tx.Exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+		// Use helper instead of raw SQL so SQLite tests don't hit syntax errors.
+		SetTransactionIsolation(tx)
 
 		var node models.Node
 		if err := tx.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
@@ -284,7 +290,22 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 		var edgeDevices []models.EdgeDevice
 		tx.Order("id ASC").Where("node_id = ? AND enabled = true", node.NodeID).Find(&edgeDevices)
 
-		hashData := m.buildHashData(templates, channels, edgeDevices, dmaConfigs)
+		deviceConfigIDs := make([]uint, 0, len(edgeDevices))
+		seenDeviceConfigIDs := make(map[uint]struct{}, len(edgeDevices))
+		for _, ed := range edgeDevices {
+			if ed.DeviceConfigID > 0 {
+				if _, ok := seenDeviceConfigIDs[ed.DeviceConfigID]; !ok {
+					seenDeviceConfigIDs[ed.DeviceConfigID] = struct{}{}
+					deviceConfigIDs = append(deviceConfigIDs, ed.DeviceConfigID)
+				}
+			}
+		}
+		var deviceConfigs []models.DeviceConfig
+		if len(deviceConfigIDs) > 0 {
+			tx.Order("id ASC").Where("id IN ?", deviceConfigIDs).Find(&deviceConfigs)
+		}
+
+		hashData := m.buildHashData(templates, channels, edgeDevices, deviceConfigs, dmaConfigs)
 		hash := m.hashMgr.CalcConfigHash(hashData)
 		manifestID := fmt.Sprintf("v2-%s", hash)
 
@@ -347,5 +368,16 @@ func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
 		} else {
 			logger.Infof("[%s] HA Discovery published for device %s (%s)", deviceID, dev.Name, dev.Type)
 		}
+	}
+}
+
+// SetTransactionIsolation sets the transaction isolation level to REPEATABLE READ
+// on PostgreSQL. On SQLite it is a no-op because SQLite transactions are
+// SERIALIZABLE by default (strictly stronger than REPEATABLE READ), and the
+// SET TRANSACTION syntax is not supported.
+func SetTransactionIsolation(tx *gorm.DB) {
+	dialect := tx.Dialector.Name()
+	if dialect == "postgres" {
+		tx.Exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 	}
 }
