@@ -28,9 +28,7 @@ export const firmwareApi = {
   },
 
   async upload(formData: FormData): Promise<Firmware> {
-    const response = await client.post('/api/v1/firmwares/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
+    const response = await client.post('/api/v1/firmwares/upload', formData)
     return (response as any).data
   },
 

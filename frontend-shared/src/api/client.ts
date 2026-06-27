@@ -4,9 +4,8 @@ import axios, { type AxiosInstance, type AxiosError } from 'axios'
 const apiClient: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json'
-  }
+  // 不设置默认 Content-Type，让 axios 根据请求体自动处理
+  // (FormData 需要浏览器自动生成 multipart/form-data + boundary)
 })
 
 // 请求拦截器 - 添加JWT Token
