@@ -11,9 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/nodemgr"
+	"ehome/backend/pkg/parser"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -311,25 +312,40 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 
-		// Try the drivers.Registry first
+		rawBytes := []byte(req.RawData)
+		// If raw_data looks like hex, decode it first
+		if decoded, hexErr := decodeHexString(req.RawData); hexErr == nil && len(decoded) > 0 {
+			rawBytes = decoded
+		}
+
+		// Primary path: DeviceConfig.Parser JSONB. This mirrors runtime parsing in nodemgr.
+		if len(cfg.Parser) > 0 && string(cfg.Parser) != "{}" && string(cfg.Parser) != "null" {
+			if cp, err := parser.NewConfigParser(cfg.Parser); err == nil {
+				fields, parseErr := cp.Parse(rawBytes)
+				if parseErr == nil {
+					c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+						"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
+						"raw_data": req.RawData, "parsed": fields, "parser": "device_config",
+					}})
+					return
+				}
+			}
+		}
+
+		// Fallback: legacy driver parser.
 		if driverRegistry != nil {
 			if driver, err := driverRegistry.Get(cfg.DeviceType); err == nil {
-				rawBytes := []byte(req.RawData)
-				// If raw_data looks like hex, decode it first
-				if decoded, hexErr := decodeHexString(req.RawData); hexErr == nil && len(decoded) > 0 {
-					rawBytes = decoded
-				}
 				sensorData, parseErr := driver.ParseData(rawBytes)
 				if parseErr != nil {
 					c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 						"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
-						"raw_data": req.RawData, "parsed": gin.H{}, "error": parseErr.Error(),
+						"raw_data": req.RawData, "parsed": gin.H{}, "error": parseErr.Error(), "parser": "driver",
 					}})
 					return
 				}
 				c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 					"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
-					"raw_data": req.RawData, "parsed": sensorData,
+					"raw_data": req.RawData, "parsed": sensorData, "parser": "driver",
 				}})
 				return
 			}
@@ -637,9 +653,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if !dup {
 				driverMap[key] = append(driverMap[key], DriverLeaf{
 					Type: cfg.DeviceType, Model: cfg.DeviceModel,
-					DisplayName: cfg.Name,
+					DisplayName:   cfg.Name,
 					HardwareTypes: []string{cfg.HardwareType},
-					Description: cfg.Description,
+					Description:   cfg.Description,
 				})
 			}
 		}

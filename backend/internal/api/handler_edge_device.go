@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
@@ -214,14 +214,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	v1.POST("/edge-devices", RequireRole("admin"), func(c *gin.Context) {
 		// B1 fix: bind to a separate DTO, then construct from allowed fields only
 		var dto struct {
-			Name          *string `json:"name"`
-			Type          *string `json:"type"`
-			NodeID        *string `json:"node_id"`
-			ChannelID     *uint   `json:"channel_id"`
-			Enabled       *bool   `json:"enabled"`
-			IntervalMs    *int    `json:"interval_ms"`
-			HardwareID    *string `json:"hardware_id"`
-			DeviceConfigID *uint  `json:"device_config_id"`
+			Name           *string `json:"name"`
+			Type           *string `json:"type"`
+			NodeID         *string `json:"node_id"`
+			ChannelID      *uint   `json:"channel_id"`
+			Enabled        *bool   `json:"enabled"`
+			IntervalMs     *int    `json:"interval_ms"`
+			HardwareID     *string `json:"hardware_id"`
+			DeviceConfigID *uint   `json:"device_config_id"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -243,6 +243,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		if dto.DeviceConfigID != nil {
 			dev.DeviceConfigID = *dto.DeviceConfigID
+			var dc models.DeviceConfig
+			if err := db.First(&dc, *dto.DeviceConfigID).Error; err == nil && dc.DeviceType != "" {
+				dev.Type = dc.DeviceType
+			}
 		}
 		if err := db.Transaction(func(tx *gorm.DB) error {
 			// Step 1: Create EdgeDevice (inside transaction)
@@ -761,16 +765,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 					result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
 					result["parse_error"] = err.Error()
 				} else {
-						result["value"] = value
-						// Use ResponseUnit if Unit is empty (DB configs use "response_unit" key)
-						unit := opConfig.Unit
-						if unit == "" {
-							unit = opConfig.ResponseUnit
-						}
-						if unit != "" {
-							result["unit"] = unit
-						}
+					result["value"] = value
+					// Use ResponseUnit if Unit is empty (DB configs use "response_unit" key)
+					unit := opConfig.Unit
+					if unit == "" {
+						unit = opConfig.ResponseUnit
 					}
+					if unit != "" {
+						result["unit"] = unit
+					}
+				}
 			} else if len(resp.RawData) > 0 {
 				result["raw_hex"] = fmt.Sprintf("%x", resp.RawData)
 			}
