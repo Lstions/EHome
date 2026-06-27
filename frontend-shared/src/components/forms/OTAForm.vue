@@ -155,6 +155,13 @@ const upgradeStatus = ref<'idle' | 'uploading' | 'upgrading' | 'completed' | 'fa
 const statusText = ref('')
 const upgradeLogs = ref<Array<{time: string, message: string}>>([])
 
+// progress bar status
+const progressStatus = computed(() => {
+  if (upgradeStatus.value === 'failed') return 'exception'
+  if (upgradeStatus.value === 'completed') return 'success'
+  return ''
+})
+
 // 设备型号映射
 const MODEL_NAMES: Record<string, string> = {
   'ESP32-S3': 'ESP32-S3',
@@ -248,6 +255,8 @@ const pollProgress = (recordId: number) => {
         'pending': '等待中...',
         'downloading': '正在下载固件...',
         'flashing': '正在刷写固件...',
+        'installing': '正在安装固件...',
+        'success': '升级完成',
         'completed': '升级完成',
         'failed': '升级失败',
       }
@@ -259,7 +268,7 @@ const pollProgress = (recordId: number) => {
         addLog(statusText.value)
       }
 
-      if (record.status === 'completed') {
+      if (record.status === 'completed' || record.status === 'success') {
         clearInterval(progressTimer!)
         progressTimer = null
         upgradeStatus.value = 'completed'

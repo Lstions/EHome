@@ -87,10 +87,10 @@ export const channelApi = {
   // 扫描通道所在总线
   async scan(id: number, options?: { scan_type?: string; start_addr?: number; end_addr?: number; timeout_ms?: number }): Promise<{ channel_id: number; devices: string[] }> {
     const response = await client.post<unknown, { data: { channel_id: number; devices: string[] } }>(`/api/v1/channels/${id}/scan`, {
-      scan_type: options?.scan_type || 'i2c',
-      start_addr: options?.start_addr || 1,
-      end_addr: options?.end_addr || 247,
-      timeout_ms: options?.timeout_ms || 200,
+      scan_type: options?.scan_type ?? 'i2c',
+      start_addr: options?.start_addr ?? 1,
+      end_addr: options?.end_addr ?? 247,
+      timeout_ms: options?.timeout_ms ?? 200,
     })
     return response.data
   },

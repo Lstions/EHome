@@ -288,7 +288,7 @@ function getHardwareTagType(type: string): '' | 'success' | 'warning' | 'info' |
     adc: 'danger',
     pwm: 'info',
   }
-  return map[type] || 'info'
+  return map[type] ?? 'info'
 }
 
 function getBusTypeLabel(type: string): string {
