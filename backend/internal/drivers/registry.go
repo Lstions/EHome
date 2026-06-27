@@ -70,6 +70,11 @@ func (r *Registry) List() []string {
 // Global registry instance
 var globalRegistry = NewRegistry()
 
+// GlobalRegistry returns the process-wide driver registry.
+func GlobalRegistry() *Registry {
+	return globalRegistry
+}
+
 // Register registers a driver globally
 func Register(driver Driver) {
 	globalRegistry.Register(driver)

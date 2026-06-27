@@ -9,23 +9,25 @@ import (
 	"time"
 
 	"ehome/backend/internal/api"
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/homeassistant"
+	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/redis"
 	"ehome/backend/internal/seed"
 	"ehome/backend/internal/websocket"
+	"ehome/backend/pkg/logger"
 	"encoding/hex"
 	"encoding/json"
 	"github.com/gin-contrib/cors"
-	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -92,15 +94,13 @@ func main() {
 	defer mqttClient.Close()
 	logger.Infof("MQTT connected")
 
-	// Register built-in device drivers
+	// Register built-in device drivers with DeviceConfig.Parser JSONB overrides.
+	// This keeps the API registry and the global fallback registry aligned with DB-backed parsers.
+	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
-	drivers.RegisterBuiltInDrivers(driverRegistry)
-	// Also register to global registry (handler_data.go uses drivers.Get())
-	drivers.Register(&drivers.BMP280Driver{})
-	drivers.Register(&drivers.LKTH01Driver{})
-	drivers.Register(&drivers.SN3000Driver{})
-	drivers.Register(&drivers.PRS3001Driver{})
-	logger.Infof("Registered %d device drivers", len(driverRegistry.List()))
+	drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
+	drivers.RegisterBuiltInDriversWithParsers(drivers.GlobalRegistry(), parserConfigs)
+	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub()
@@ -251,4 +251,25 @@ func main() {
 
 	// 6. Flush logger
 	logger.Infof("EHomeSystem Server stopped")
+}
+
+// loadDeviceConfigParsers loads active DeviceConfig.Parser JSONB definitions keyed by device_type.
+// Built-in drivers use these as their primary parsing path before legacy hardcoded fallback.
+func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {
+	configs := make(map[string]json.RawMessage)
+	var deviceConfigs []models.DeviceConfig
+	if err := db.Where("status = ?", "active").Order("is_default DESC, id DESC").Find(&deviceConfigs).Error; err != nil {
+		logger.Warnf("Failed to load DeviceConfig parsers: %v", err)
+		return configs
+	}
+	for _, cfg := range deviceConfigs {
+		if cfg.DeviceType == "" || len(cfg.Parser) == 0 || string(cfg.Parser) == "{}" || string(cfg.Parser) == "null" {
+			continue
+		}
+		// Preserve the first entry because ordering places defaults/newest first.
+		if _, exists := configs[cfg.DeviceType]; !exists {
+			configs[cfg.DeviceType] = cfg.Parser
+		}
+	}
+	return configs
 }
