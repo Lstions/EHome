@@ -139,7 +139,7 @@ func printMigrationSQL() {
 	fmt.Println("-- ============================================")
 	fmt.Println("-- Step 1: 创建新表")
 	fmt.Println("-- ============================================")
-	fmt.Println(`
+	fmt.Print(`
 CREATE TABLE IF NOT EXISTS nodes (
   id                    SERIAL PRIMARY KEY,
   node_id               VARCHAR(32) UNIQUE NOT NULL,
@@ -198,7 +198,7 @@ CREATE TABLE IF NOT EXISTS edge_devices (
 	fmt.Println("-- ============================================")
 	fmt.Println("-- Step 2: 数据迁移")
 	fmt.Println("-- ============================================")
-	fmt.Println(`
+	fmt.Print(`
 -- collectors → nodes
 INSERT INTO nodes (...)
 SELECT ... FROM collectors WHERE deleted_at IS NULL
@@ -214,7 +214,7 @@ ON CONFLICT (id) DO NOTHING;
 	fmt.Println("-- ============================================")
 	fmt.Println("-- Step 3: 列重命名")
 	fmt.Println("-- ============================================")
-	fmt.Println(`
+	fmt.Print(`
 ALTER TABLE channels RENAME COLUMN collector_id TO node_id;
 `)
 
@@ -222,7 +222,7 @@ ALTER TABLE channels RENAME COLUMN collector_id TO node_id;
 	fmt.Println("-- ============================================")
 	fmt.Println("-- Step 4: 加 FK 约束")
 	fmt.Println("-- ============================================")
-	fmt.Println(`
+	fmt.Print(`
 ALTER TABLE edge_devices
   ADD CONSTRAINT fk_edge_devices_node
   FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE RESTRICT;

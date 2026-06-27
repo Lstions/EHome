@@ -7,11 +7,33 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     globals: true,
-    include: ['src/**/*.{test,spec}.{js,ts}']
+    include: ['src/**/*.{test,spec}.{js,ts}'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{js,ts,vue}'],
+      exclude: [
+        'src/**/*.d.ts',
+        'src/**/*.spec.ts',
+        'src/**/*.test.ts',
+        'src/auto-imports.d.ts',
+        'src/components.d.ts',
+        'src/main.ts',
+        'src/router/index.ts',
+        'node_modules/**',
+      ],
+      thresholds: {
+        lines: 15,
+        functions: 15,
+        branches: 12,
+        statements: 15,
+      },
+    },
   },
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
-  }
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
 })
