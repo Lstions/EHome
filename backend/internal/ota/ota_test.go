@@ -37,7 +37,7 @@ func TestCreateTaskNoFirmware(t *testing.T) {
 	db := setupOTATestDB(t)
 	mgr := NewManager(db, nil, nil)
 
-	_, err := mgr.CreateTask(1, 999)
+	_, err := mgr.CreateTask("1", 999)
 	if err == nil {
 		t.Error("expected error for non-existent firmware")
 	}
@@ -55,15 +55,15 @@ func TestCreateTaskWithFirmware(t *testing.T) {
 	}
 	db.Create(&fw)
 
-	task, err := mgr.CreateTask(1, fw.ID)
+	task, err := mgr.CreateTask("1", fw.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if task == nil {
 		t.Fatal("expected non-nil task")
 	}
-	if task.NodeID != 1 {
-		t.Errorf("expected node_id=1, got %d", task.NodeID)
+	if task.NodeID != "1" {
+		t.Errorf("expected node_id=1, got %s", task.NodeID)
 	}
 	if task.FirmwareID != fw.ID {
 		t.Errorf("expected firmware_id=%d, got %d", fw.ID, task.FirmwareID)
@@ -86,7 +86,7 @@ func TestCreateTaskSupersedesPrior(t *testing.T) {
 	db.Create(&fw2)
 
 	// First task should be in pending
-	t1, err := mgr.CreateTask(1, fw1.ID)
+	t1, err := mgr.CreateTask("1", fw1.ID)
 	if err != nil {
 		t.Fatalf("first task: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestCreateTaskSupersedesPrior(t *testing.T) {
 	db.Save(t1)
 
 	// Second task should supersede the first
-	t2, err := mgr.CreateTask(1, fw2.ID)
+	t2, err := mgr.CreateTask("1", fw2.ID)
 	if err != nil {
 		t.Fatalf("second task: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestHandleOtaProgressStateMapping(t *testing.T) {
 
 	fw := models.Firmware{Version: "1.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)
-	task, _ := mgr.CreateTask(1, fw.ID)
+	task, _ := mgr.CreateTask("1", fw.ID)
 	if task == nil {
 		t.Fatal("task is nil")
 	}
@@ -165,7 +165,7 @@ func TestHandleOtaProgressStateMapping(t *testing.T) {
 	for _, c := range cases {
 		// Reset task to a fresh state for each case
 		db.Exec("DELETE FROM ota_tasks")
-		task, _ := mgr.CreateTask(1, fw.ID)
+		task, _ := mgr.CreateTask("1", fw.ID)
 		otaID = task.OtaID
 
 		payload := encodeProgress(otaID, c.wireStatus, 50)
@@ -190,7 +190,7 @@ func TestHandleHelloOTACompletionSuccess(t *testing.T) {
 
 	fw := models.Firmware{Version: "2.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)
-	task, _ := mgr.CreateTask(1, fw.ID)
+	task, _ := mgr.CreateTask("1", fw.ID)
 	// Push to mid-flight
 	now := time.Now()
 	task.Status = StatusInstalling
@@ -198,7 +198,7 @@ func TestHandleHelloOTACompletionSuccess(t *testing.T) {
 	db.Save(task)
 
 	// Hello reports target version → should mark success
-	mgr.HandleHelloOTACompletion(1, "dev1", "2.0.0")
+	mgr.HandleHelloOTACompletion("1", "dev1", "2.0.0")
 
 	var got models.OTATask
 	db.Where("ota_id = ?", task.OtaID).First(&got)
@@ -216,20 +216,23 @@ func TestHandleHelloOTACompletionTimeout(t *testing.T) {
 
 	fw := models.Firmware{Version: "2.0.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)
-	task, _ := mgr.CreateTask(1, fw.ID)
+	task, _ := mgr.CreateTask("1", fw.ID)
 	// Started 20 min ago, still in flight
 	oldStart := time.Now().Add(-20 * time.Minute)
 	task.Status = StatusDownloading
 	task.StartedAt = &oldStart
 	db.Save(task)
 
-	// Hello reports old firmware (mismatch) → should mark failed
-	mgr.HandleHelloOTACompletion(1, "dev1", "1.0.0")
+	// Hello reports old firmware (mismatch) — HandleHelloOTACompletion only
+	// marks success when versions match; it does NOT mark failed on mismatch.
+	// Timeout/failure detection is handled by timeoutScanner and ack retries.
+	// So the task should remain in downloading status.
+	mgr.HandleHelloOTACompletion("1", "dev1", "1.0.0")
 
 	var got models.OTATask
 	db.Where("ota_id = ?", task.OtaID).First(&got)
-	if got.Status != StatusFailed {
-		t.Errorf("expected failed (timeout), got %s", got.Status)
+	if got.Status != StatusDownloading {
+		t.Errorf("expected downloading (Hello mismatch is no-op), got %s", got.Status)
 	}
 }
 
@@ -238,7 +241,7 @@ func TestHandleHelloOTACompletionNoOp(t *testing.T) {
 	mgr := NewManager(db, nil, nil)
 
 	// No in-flight task — should be no-op
-	mgr.HandleHelloOTACompletion(99, "dev1", "1.0.0")
+	mgr.HandleHelloOTACompletion("99", "dev1", "1.0.0")
 	// No assertions, just shouldn't panic
 }
 
@@ -254,7 +257,7 @@ func TestCancelTask(t *testing.T) {
 
 	// Create collector and firmware
 	col := models.Node{
-		NodeID:          2001,
+		NodeID:          "2001",
 		Model:           "ESP32S3",
 		FirmwareVersion: "1.0.0",
 		Status:          "online",
@@ -270,7 +273,7 @@ func TestCancelTask(t *testing.T) {
 	db.Create(&fw)
 
 	mgr := NewManager(db, nil, nil)
-	task, err := mgr.CreateTask(col.ID, fw.ID)
+	task, err := mgr.CreateTask(col.NodeID, fw.ID)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -300,13 +303,13 @@ func TestCancelTask(t *testing.T) {
 // Test CancelTask: terminal state task → error
 func TestCancelTask_AlreadyTerminal(t *testing.T) {
 	db := setupOTATestDB(t)
-	col := models.Node{NodeID: 2002, Status: "online"}
+	col := models.Node{NodeID: "2002", Status: "online"}
 	db.Create(&col)
 	fw := models.Firmware{Version: "1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
 	db.Create(&fw)
 
 	mgr := NewManager(db, nil, nil)
-	task, _ := mgr.CreateTask(col.ID, fw.ID)
+	task, _ := mgr.CreateTask(col.NodeID, fw.ID)
 
 	// Manually mark as success
 	task.Status = StatusSuccess

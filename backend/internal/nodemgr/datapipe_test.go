@@ -234,8 +234,10 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 	}
 	db.Create(&node)
 
-	// Create two channels (DB will assign IDs like 1,2 — but they might not start at 0)
+	// Create two channels with explicit DB IDs far from 0/1 so C6 legacy
+	// 0-based indexes cannot collide with real channels.id values.
 	ch1 := models.Channel{
+		ID:           100,
 		NodeID:       node.NodeID,
 		HardwareID:   "1",
 		BusType:      "I2C",
@@ -245,6 +247,7 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 	db.Create(&ch1)
 
 	ch2 := models.Channel{
+		ID:           101,
 		NodeID:       node.NodeID,
 		HardwareID:   "0x76",
 		BusType:      "I2C",

@@ -1,7 +1,6 @@
 package offlinedetector
 
 import (
-	"strconv"
 	"testing"
 	"time"
 
@@ -35,7 +34,9 @@ func TestNewDetector(t *testing.T) {
 }
 
 func TestDetectorStartStop(t *testing.T) {
-	d := NewDetector(nil, nil)
+	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	db.AutoMigrate(&models.Node{}, &models.NodeEvent{})
+	d := NewDetector(db, nil)
 	d.Start()
 	time.Sleep(100 * time.Millisecond)
 	d.Stop()
@@ -55,7 +56,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 	d := NewDetector(db, wsHub)
 
 	col := models.Node{
-		NodeID: 1001,
+		NodeID: "1001",
 		Status: "online",
 	}
 	db.Create(&col)
@@ -63,7 +64,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 	d.markOffline("1001", "redis_ttl_expired")
 
 	var updated models.Node
-	db.Where("node_id = ?", 1001).First(&updated)
+	db.Where("node_id = ?", "1001").First(&updated)
 	if updated.Status != "offline" {
 		t.Errorf("expected offline, got %s", updated.Status)
 	}
@@ -77,7 +78,7 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 
 	oldTime := time.Now().Add(-120 * time.Second)
 	col := models.Node{
-		NodeID:   1002,
+		NodeID:   "1002",
 		Status:   "online",
 		LastSeen: &oldTime,
 	}
@@ -89,12 +90,12 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(strconv.FormatInt(c.NodeID, 10), "db_last_seen_timeout")
+			d.markOffline(c.NodeID, "db_last_seen_timeout")
 		}
 	}
 
 	var updated models.Node
-	db.Where("node_id = ?", 1002).First(&updated)
+	db.Where("node_id = ?", "1002").First(&updated)
 	if updated.Status != "offline" {
 		t.Errorf("expected offline, got %s", updated.Status)
 	}
@@ -108,7 +109,7 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 
 	recentTime := time.Now().Add(-10 * time.Second)
 	col := models.Node{
-		NodeID:   1003,
+		NodeID:   "1003",
 		Status:   "online",
 		LastSeen: &recentTime,
 	}
@@ -119,12 +120,12 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(strconv.FormatInt(c.NodeID, 10), "db_last_seen_timeout")
+			d.markOffline(c.NodeID, "db_last_seen_timeout")
 		}
 	}
 
 	var updated models.Node
-	db.Where("node_id = ?", 1003).First(&updated)
+	db.Where("node_id = ?", "1003").First(&updated)
 	if updated.Status != "online" {
 		t.Errorf("expected online, got %s", updated.Status)
 	}

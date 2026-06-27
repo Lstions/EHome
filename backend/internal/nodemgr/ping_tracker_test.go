@@ -68,15 +68,15 @@ func TestPingTracker_ShouldRetry(t *testing.T) {
 func TestPingTracker_Timeout(t *testing.T) {
 	pt := NewPingTracker()
 	pt.timeout = 50 * time.Millisecond // short timeout for test
-	pt.maxRetry = 1                    // only 1 retry for fast test
+	pt.maxRetry = 1 // only 1 retry for fast test
 	pt.StartWithInterval(50 * time.Millisecond)
 	defer pt.Stop()
 
 	var callbackCalled int32
-	var resultSuccess bool
+	var resultSuccess atomic.Bool
 	pt.Track("device-1", 12345, func(latencyMs int64, success bool) {
 		atomic.StoreInt32(&callbackCalled, 1)
-		resultSuccess = success
+		resultSuccess.Store(success)
 	})
 
 	// Wait for at least 2 timeout cycles
@@ -85,7 +85,7 @@ func TestPingTracker_Timeout(t *testing.T) {
 	if atomic.LoadInt32(&callbackCalled) == 0 {
 		t.Error("expected callback to be called on timeout")
 	}
-	if resultSuccess {
+	if resultSuccess.Load() {
 		t.Error("expected success=false on timeout")
 	}
 }

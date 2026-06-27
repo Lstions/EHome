@@ -8,10 +8,10 @@ import (
 func TestV22NewFields(t *testing.T) {
 	ed := EdgeDevice{
 		Name:           "BMP280 现场 A",
-		NodeID:         1,
+		NodeID:         "1",
 		ChannelID:      2,
 		DeviceConfigID: 5, // v2.2 关键新增
-		HardwareID:     0x76,
+		HardwareID:     "0x76",
 		IntervalMs:     1000,
 		Enabled:        true,
 		Status:         "active",
@@ -22,7 +22,7 @@ func TestV22NewFields(t *testing.T) {
 	if ed.DeviceConfigID != 5 {
 		t.Error("device_config_id not set")
 	}
-	if ed.HardwareID != 0x76 {
+	if ed.HardwareID != "0x76" {
 		t.Error("hardware_id not set")
 	}
 	if ed.InitState != "pending" {
