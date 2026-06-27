@@ -54,3 +54,7 @@ backend/firmwares/
 
 # Local dev runtime
 .logs/
+
+# Test coverage artifacts
+backend/coverage.out
+frontend-shared/coverage/
