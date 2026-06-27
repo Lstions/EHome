@@ -78,8 +78,10 @@ describe('v-permission 指令', () => {
     const wrapper = mount(Comp, { global: { directives: { permission } } })
     expect((wrapper.find('[data-testid="el"]').element as HTMLElement).style.display).toBe('none')
 
-    // 模拟角色提升
+    // 模拟角色提升。指令 updated 钩子只在宿主组件更新时运行；
+    // 用户状态变化本身不是此组件 render 依赖，所以测试中显式触发一次重渲染。
     store.userInfo.role = 'admin'
+    wrapper.vm.$forceUpdate()
     await wrapper.vm.$nextTick()
     expect((wrapper.find('[data-testid="el"]').element as HTMLElement).style.display).not.toBe('none')
   })
