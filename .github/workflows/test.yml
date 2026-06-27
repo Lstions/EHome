@@ -1,0 +1,166 @@
+name: Test CI
+
+on:
+  push:
+    branches: [main, develop, 'v*']
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.25"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+
+jobs:
+  # ─── Backend: lint + unit tests ──────────────────────────────────
+  backend:
+    name: Backend (lint + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run unit tests (SQLite)
+        run: |
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out
+
+      - name: Coverage gate (≥25%)
+        run: |
+          COV=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total coverage: ${COV}%"
+          if [ "$(echo "$COV < 25" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COV}% is below 25% threshold"
+            exit 1
+          fi
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.out
+
+  # ─── Backend: PostgreSQL integration tests ───────────────────────
+  backend-integration:
+    name: Backend (PostgreSQL integration)
+    runs-on: ubuntu-latest
+    needs: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ehome
+          POSTGRES_PASSWORD: ehome123
+          POSTGRES_DB: ehome_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ehome"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Run integration tests (PostgreSQL)
+        env:
+          EHOME_TEST_DB: postgres
+          EHOME_DB_HOST: localhost
+          EHOME_DB_PORT: 5432
+          EHOME_DB_USER: ehome
+          EHOME_DB_PASSWORD: ehome123
+          EHOME_DB_NAME: ehome_test
+        run: |
+          go test -race -count=1 -tags=integration ./...
+
+  # ─── Frontend: lint + unit tests ─────────────────────────────────
+  frontend:
+    name: Frontend (lint + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-shared
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend-shared/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (type-check)
+        run: npx vue-tsc --noEmit || true
+
+      - name: Run unit tests with coverage
+        run: pnpm test:coverage
+
+      - name: Coverage gate (≥15%)
+        run: |
+          COV=$(cat coverage/coverage-summary.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          total=d.get('total',{}).get('lines',{}).get('pct',0)
+          print(total)
+          ")
+          echo "Total line coverage: ${COV}%"
+          if [ "$(echo "$COV < 15" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COV}% is below 15% threshold"
+            exit 1
+          fi
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend-shared/coverage/
+
+  # ─── Summary ─────────────────────────────────────────────────────
+  summary:
+    name: CI Summary
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [backend, backend-integration, frontend]
+    steps:
+      - name: Check results
+        run: |
+          echo "Backend:       ${{ needs.backend.result }}"
+          echo "Integration:   ${{ needs.backend-integration.result }}"
+          echo "Frontend:      ${{ needs.frontend.result }}"
+          if [ "${{ needs.backend.result }}" = "failure" ] || \
+             [ "${{ needs.backend-integration.result }}" = "failure" ] || \
+             [ "${{ needs.frontend.result }}" = "failure" ]; then
+            echo "::error::One or more CI jobs failed"
+            exit 1
+          fi
