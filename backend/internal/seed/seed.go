@@ -24,17 +24,17 @@ func SeedTestData(db *gorm.DB) error {
 
 	// --- Node ---
 	node := models.Node{
-		NodeID:          "F0F5BD02F35C",
-		Name:            "E2E测试节点",
-		Model:           "esp32c6",
-		FirmwareVersion: "2.2.0",
-		ProtocolVersion: "2.2",
-		Platform:        "ESP32C6",
-		Status:          "offline",
-		Capabilities:    `{}`,
-		HardwareInfo:    `{}`,
-		Config:          `{}`,
-		ConnectionType:  "mqtt",
+		NodeID:            "F0F5BD02F35C",
+		Name:              "E2E测试节点",
+		Model:             "esp32c6",
+		FirmwareVersion:   "2.2.0",
+		ProtocolVersion:   "2.2",
+		Platform:          "ESP32C6",
+		Status:            "offline",
+		Capabilities:      `{}`,
+		HardwareInfo:      `{}`,
+		Config:            `{}`,
+		ConnectionType:    "mqtt",
 		ConnectionQuality: 100,
 	}
 	if err := db.Create(&node).Error; err != nil {
@@ -44,8 +44,11 @@ func SeedTestData(db *gorm.DB) error {
 
 	// --- DeviceConfig ---
 	connJSON, _ := json.Marshal(map[string]interface{}{
-		"bus_type": "I2C",
-		"address":  "0x76",
+		"protocol": "i2c",
+		"default_params": map[string]interface{}{
+			"address":       "0x76",
+			"read_register": "F7",
+		},
 	})
 	parserJSON, _ := json.Marshal(map[string]interface{}{
 		"data_format": "binary",
