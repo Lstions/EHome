@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
+import { nextTick } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 
 // Mock localStorage
@@ -85,11 +86,13 @@ describe('Theme Store', () => {
     expect(localStorageMock.setItem).toHaveBeenCalledWith('theme', 'dark')
   })
 
-  it('should set theme to light', () => {
+  it('should set theme to light', async () => {
     const store = useThemeStore()
     store.setTheme('dark') // Start with dark
+    await nextTick()
     
     store.setTheme('light')
+    await nextTick()
     
     expect(store.mode).toBe('light')
     expect(localStorageMock.setItem).toHaveBeenCalledWith('theme', 'light')
@@ -104,11 +107,13 @@ describe('Theme Store', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(true)
   })
 
-  it('should remove dark class when switching to light theme', () => {
+  it('should remove dark class when switching to light theme', async () => {
     const store = useThemeStore()
     store.setTheme('dark')
+    await nextTick()
     
     store.setTheme('light')
+    await nextTick()
     
     expect(document.documentElement.getAttribute('data-theme')).toBe('light')
     expect(document.documentElement.classList.contains('dark')).toBe(false)

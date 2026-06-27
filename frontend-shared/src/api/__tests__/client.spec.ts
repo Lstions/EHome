@@ -70,9 +70,9 @@ describe('apiClient 拦截器', () => {
     expect(result.headers.Authorization).toBeUndefined()
   })
 
-  it('业务 code 非 200 时 reject with message', () => {
+  it('业务 code 非 200 时 reject with message', async () => {
     const handler = mockResponseFulfilled.getMockImplementation() as any
-    expect(() => handler({ data: { code: 400, message: '参数错误' } })).rejects.toThrow('参数错误')
+    await expect(handler({ data: { code: 400, message: '参数错误' } })).rejects.toThrow('参数错误')
   })
 
   it('业务 code 200 时 resolve data', () => {
@@ -87,7 +87,7 @@ describe('apiClient 拦截器', () => {
     expect(handler({ data })).toEqual(data)
   })
 
-  it('HTTP 401 时清除 token 并跳 /login', () => {
+  it('HTTP 401 时清除 token 并跳 /login', async () => {
     localStorage.setItem('token', 'expired')
     sessionStorage.setItem('token', 'expired-session')
 
@@ -97,7 +97,7 @@ describe('apiClient 拦截器', () => {
     ;(window as any).location = { ...originalLocation, href: '' }
 
     const handler = mockResponseRejected.getMockImplementation() as any
-    expect(handler({ response: { status: 401 } })).rejects.toBeDefined()
+    await expect(handler({ response: { status: 401 } })).rejects.toBeDefined()
 
     expect(localStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('token')).toBeNull()
@@ -107,14 +107,14 @@ describe('apiClient 拦截器', () => {
     ;(window as any).location = originalLocation
   })
 
-  it('非 401 HTTP 错误不跳 /login', () => {
+  it('非 401 HTTP 错误不跳 /login', async () => {
     const originalLocation = window.location
     delete (window as any).location
     ;(window as any).location = { ...originalLocation, href: '' }
 
     localStorage.setItem('token', 'still-valid')
     const handler = mockResponseRejected.getMockImplementation() as any
-    handler({ response: { status: 500, data: { message: 'Server Error' } } })
+    await expect(handler({ response: { status: 500, data: { message: 'Server Error' } } })).rejects.toThrow('Server Error')
     expect(localStorage.getItem('token')).toBe('still-valid')
     expect(window.location.href).toBe('')
     ;(window as any).location = originalLocation
