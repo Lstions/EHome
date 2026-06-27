@@ -4,16 +4,25 @@
 # 本地开发：前后端跑在本机，基础设施（PG/Redis/EMQX）复用生产 compose
 #
 # Usage:
-#   make up          - 启动基础设施 (PG/Redis/EMQX) + 本地前后端
-#   make down        - 停止基础设施 + 本地前后端
-#   make restart     - 重启本地前后端（基础设施不动）
-#   make infra       - 仅启动基础设施
-#   make infra-down  - 仅停止基础设施
-#   make backend     - 仅启动本地后端
-#   make frontend    - 仅启动本地前端
-#   make status      - 查看服务状态
-#   make logs        - 查看后端日志 (LOGS=frontend 查看前端)
-#   make clean       - 删除所有容器和数据卷
+#   make up              - 启动基础设施 (PG/Redis/EMQX) + 本地前后端
+#   make down            - 停止基础设施 + 本地前后端
+#   make restart         - 重启本地前后端（基础设施不动）
+#   make infra           - 仅启动基础设施
+#   make infra-down      - 仅停止基础设施
+#   make backend         - 仅启动本地后端
+#   make frontend        - 仅启动本地前端
+#   make e2e             - 运行 Playwright E2E 测试
+#   make test            - 运行全部测试 (backend + frontend)
+#   make test-backend    - 运行 Go 后端单元测试 (SQLite)
+#   make test-frontend   - 运行前端 vitest 单元测试
+#   make test-integration- 运行 Go 后端集成测试 (PostgreSQL)
+#   make test-coverage   - 运行全部测试并生成覆盖率报告
+#   make lint-backend    - Go vet 静态检查
+#   make lint-frontend   - 前端 TypeScript 类型检查
+#   make lint            - 运行全部 lint
+#   make status          - 查看服务状态
+#   make logs            - 查看后端日志 (LOGS=frontend 查看前端)
+#   make clean           - 删除所有容器和数据卷
 #
 # 生产环境直接用 docker compose:
 #   docker compose up -d          # 启动全部生产服务
@@ -39,7 +48,15 @@ define kill_port
 	lsof -ti :$(1) 2>/dev/null | xargs -r kill -9 2>/dev/null
 endef
 
-.PHONY: up down restart infra infra-down backend frontend status logs clean help
+# ---- 覆盖率阈值 (当前基线，逐步提高) ----
+BACKEND_COVERAGE_THRESHOLD  ?= 25
+FRONTEND_COVERAGE_THRESHOLD ?= 15
+
+.PHONY: up down restart infra infra-down backend frontend e2e \
+        test test-backend test-frontend test-integration test-coverage \
+        lint lint-backend lint-frontend \
+        test-infra test-infra-down \
+        status logs clean help
 
 # ---- 一键启动开发环境 ----
 up: infra ## 启动基础设施 + 本地前后端
@@ -122,7 +139,7 @@ restart: ## 重启本地前后端
 # ---- 基础设施 ----
 infra: ## 仅启动基础设施 (PG/Redis/EMQX)
 	@echo "==> Starting infrastructure..."
-	POSTGRES_PORT=$(POSTGRES_PORT) EMQX_MQTT_PORT=$(EMQX_PORT) REDIS_PORT=$(REDIS_PORT) \
+	@POSTGRES_PORT=$(POSTGRES_PORT) EMQX_MQTT_PORT=$(EMQX_PORT) REDIS_PORT=$(REDIS_PORT) \
 		docker compose up -d postgres redis emqx
 	@echo "==> Infrastructure ready (PG:$(POSTGRES_PORT) Redis:$(REDIS_PORT) EMQX:$(EMQX_PORT))"
 
@@ -167,6 +184,84 @@ frontend: ## 仅启动本地前端
 		echo "==> Frontend started (http://localhost:$(FRONTEND_PORT)) ✓"; \
 	else echo "==> Frontend FAILED — check $(LOG_DIR)/frontend.log"; fi
 
+# ---- 测试 ----
+test: test-backend test-frontend ## 运行全部测试 (backend + frontend)
+
+test-backend: ## 运行 Go 后端单元测试 (SQLite, 带覆盖率)
+	@echo "==> Running Go unit tests (SQLite)..."
+	@cd $(BACKEND) && go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+	@cd $(BACKEND) && go tool cover -func=coverage.out | tail -1
+	@COV=$$(cd $(BACKEND) && go tool cover -func=coverage.out | grep total | awk '{print $$3}' | sed 's/%//') && \
+		echo "    Coverage: $${COV}% (threshold: $(BACKEND_COVERAGE_THRESHOLD)%)" && \
+		if [ "$$(echo "$$COV < $(BACKEND_COVERAGE_THRESHOLD)" | bc -l)" -eq 1 ]; then \
+			echo "❌ Coverage $${COV}% below $(BACKEND_COVERAGE_THRESHOLD)% threshold!"; exit 1; \
+		else echo "✅ Coverage gate passed"; fi
+
+test-frontend: ## 运行前端 vitest 单元测试 (带覆盖率)
+	@echo "==> Running frontend unit tests..."
+	@cd $(FRONTEND) && pnpm test:coverage
+	@echo "    Coverage report: $(FRONTEND)/coverage/index.html"
+
+test-integration: test-infra ## 运行 Go 后端集成测试 (PostgreSQL, 需要 docker)
+	@echo "==> Running Go integration tests (PostgreSQL)..."
+	@cd $(BACKEND) && EHOME_TEST_DB=postgres \
+		EHOME_DB_HOST=localhost \
+		EHOME_DB_PORT=5435 \
+		EHOME_DB_USER=ehome \
+		EHOME_DB_PASSWORD=ehome123 \
+		EHOME_DB_NAME=ehome_test \
+		go test -race -count=1 -tags=integration ./...
+	@echo "✅ Integration tests passed"
+
+test-coverage: ## 运行全部测试并生成覆盖率报告
+	@echo "==> Running all tests with coverage..."
+	@$(MAKE) test-backend
+	@$(MAKE) test-frontend
+	@echo ""
+	@echo "==> Coverage reports:"
+	@echo "    Backend:  $(BACKEND)/coverage.out (go tool cover -html=coverage.out)"
+	@echo "    Frontend: $(FRONTEND)/coverage/index.html"
+
+# ---- 测试基础设施 (docker-compose.test.yml) ----
+test-infra: ## 启动测试用基础设施 (PG/Redis/EMQX, 端口偏移避免冲突)
+	@echo "==> Starting test infrastructure..."
+	@docker compose -f docker-compose.test.yml up -d
+	@echo "==> Waiting for services to be healthy..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		healthy=$$(docker inspect --format='{{range .State.Health.Status}}{{.}}{{end}}' ehome-test-postgres 2>/dev/null); \
+		[ "$$healthy" = "healthy" ] && break; \
+		sleep 2; \
+	done
+	@echo "    PostgreSQL: localhost:5435"
+	@echo "    Redis:      localhost:6380"
+	@echo "    EMQX:       localhost:1884"
+
+test-infra-down: ## 停止测试用基础设施
+	@echo "==> Stopping test infrastructure..."
+	@docker compose -f docker-compose.test.yml down --remove-orphans
+
+# ---- Lint ----
+lint: lint-backend lint-frontend ## 运行全部 lint
+
+lint-backend: ## Go vet 静态检查
+	@echo "==> Running go vet..."
+	@cd $(BACKEND) && go vet ./...
+	@echo "✅ go vet passed"
+
+lint-frontend: ## 前端 TypeScript 类型检查
+	@echo "==> Running vue-tsc type check..."
+	@cd $(FRONTEND) && npx vue-tsc --noEmit
+	@echo "✅ vue-tsc passed"
+
+# ---- E2E 测试 ----
+e2e: ## Run Playwright E2E tests (run make up first)
+	@if ! lsof -ti :$(FRONTEND_PORT) >/dev/null 2>&1; then \
+		echo "❌ Frontend is not running on port $(FRONTEND_PORT). Run 'make up' first."; \
+		exit 1; \
+	fi
+	@echo "==> Running Playwright E2E tests against http://localhost:$(FRONTEND_PORT)..."
+	@cd $(FRONTEND) && npx playwright test
+
 # ---- 状态 ----
 status: ## 查看服务状态
 	@echo "==> Infrastructure:"
@@ -196,5 +291,5 @@ clean: ## 删除所有容器、数据卷和本地进程
 
 # ---- Help ----
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
