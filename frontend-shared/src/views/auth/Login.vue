@@ -98,7 +98,7 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
 
   // 前端锁定检查
   if (lockSeconds.value > 0) {
-    loginFormRef.value?.setLoading(false)
+    loginFormRef.value?.setLoading?.(false)
     return
   }
 
@@ -121,7 +121,7 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
         : error.message || '登录失败'
     }
   } finally {
-    loginFormRef.value?.setLoading(false)
+    loginFormRef.value?.setLoading?.(false)
   }
 }
 

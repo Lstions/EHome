@@ -1,4 +1,5 @@
 import type { Directive, DirectiveBinding } from 'vue'
+import { watch } from 'vue'
 import { useUserStore } from '@/stores/user'
 
 /**
@@ -14,6 +15,7 @@ import { useUserStore } from '@/stores/user'
  */
 interface PermissionElement extends HTMLElement {
   __permission_original_display__?: string
+  __permission_watch_stop__?: () => void
 }
 
 function checkPermission(value: any, modifier: string): boolean {
@@ -28,15 +30,6 @@ function checkPermission(value: any, modifier: string): boolean {
   }
   // 默认 any 修饰符
   return allowed.includes(role)
-}
-
-const permission: Directive<PermissionElement, any> = {
-  mounted(el, binding: DirectiveBinding) {
-    applyPermission(el, binding)
-  },
-  updated(el, binding: DirectiveBinding) {
-    applyPermission(el, binding)
-  },
 }
 
 function applyPermission(el: PermissionElement, binding: DirectiveBinding) {
@@ -55,6 +48,25 @@ function applyPermission(el: PermissionElement, binding: DirectiveBinding) {
     }
     el.style.display = 'none'
   }
+}
+
+const permission: Directive<PermissionElement, any> = {
+  mounted(el, binding: DirectiveBinding) {
+    applyPermission(el, binding)
+    // 监听用户角色变化，自动重新评估权限
+    const userStore = useUserStore()
+    el.__permission_watch_stop__ = watch(
+      () => userStore.userInfo?.role,
+      () => applyPermission(el, binding)
+    )
+  },
+  updated(el, binding: DirectiveBinding) {
+    applyPermission(el, binding)
+  },
+  unmounted(el) {
+    // 清理 watcher
+    el.__permission_watch_stop__?.()
+  },
 }
 
 export default permission

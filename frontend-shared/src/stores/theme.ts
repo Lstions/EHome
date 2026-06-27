@@ -33,11 +33,12 @@ export const useThemeStore = defineStore('theme', () => {
     mode.value = theme
   }
 
-  // 监听主题变化
+  // 监听主题变化。flush: 'sync' 让 mode/localStorage/DOM 三者保持同步不变量，
+  // 避免调用 setTheme 后 DOM 仍停留在旧主题直到 nextTick。
   watch(mode, (newMode) => {
     localStorage.setItem('theme', newMode)
     applyTheme(newMode)
-  }, { immediate: true })
+  }, { immediate: true, flush: 'sync' })
 
   // 监听系统主题变化
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
