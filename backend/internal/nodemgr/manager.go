@@ -201,8 +201,8 @@ func (m *Manager) buildHashData(
 			c.ID, c.HardwareID, c.TemplateIDs, c.IntervalMs, c.Enabled, c.BusConfig))...)
 	}
 	for _, ed := range edgeDevices {
-		buf = append(buf, []byte(fmt.Sprintf("e:%d:%d:%s:%d:%v:",
-			ed.ID, ed.DeviceConfigID, ed.HardwareID, ed.IntervalMs, ed.Enabled))...)
+		buf = append(buf, []byte(fmt.Sprintf("e:%d:%d:%s:%d:%v:%s:",
+			ed.ID, ed.DeviceConfigID, ed.HardwareID, ed.IntervalMs, ed.Enabled, string(ed.CommandIntervals)))...)
 	}
 	for _, dc := range deviceConfigs {
 		buf = append(buf, []byte(fmt.Sprintf("dc:%d:%s:%s:%s:%s:%s:%s:%s:",
