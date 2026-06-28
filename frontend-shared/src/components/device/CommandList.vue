@@ -8,7 +8,7 @@
         <div v-for="cmd in schedulableCommands" :key="cmd.id" class="command-item" :class="{ disabled: localIntervals[cmd.id] === 0 }">
           <div class="cmd-info">
             <span class="cmd-name">{{ cmd.name }}</span>
-            <el-tag size="small" :type="cmd.type === 'read' ? '' : 'warning'">
+            <el-tag size="small" :type="cmd.type === 'read' ? 'info' : 'warning'">
               {{ cmd.type === 'read' ? '读' : '写' }}
             </el-tag>
             <span class="cmd-hex">0x{{ cmd.cmd_byte.toString(16).padStart(2, '0').toUpperCase() }}</span>
