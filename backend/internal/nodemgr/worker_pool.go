@@ -117,8 +117,18 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 
 	// Parse and store unified data (includes HA state push)
 	if job.errorCode == 0 && job.rawData != nil {
-		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.rawData)
+		// S3: Accumulate by requestID for frame reassembly (P1-8 safety net).
+		// ESP32 rx_task uses UART idle detection to report complete responses,
+		// but slow baud or multi-frame protocols may still produce partial reports.
+		merged := m.reassembler.append(uint32(job.requestID), job.rawData)
+		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, merged)
 		metrics.DataReportsProcessed.Inc()
+
+		if parsedData != nil {
+			// Parse succeeded — consume the reassembly buffer
+			m.reassembler.consume(uint32(job.requestID))
+		}
+		// Parse failed — buffer retained for next DataReport with same requestID
 
 		// Add parsed sensor data to channel_data event
 		if parsedData != nil {

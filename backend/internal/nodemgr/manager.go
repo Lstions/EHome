@@ -39,6 +39,9 @@ type Manager struct {
 	wg              sync.WaitGroup     // for worker pool graceful shutdown
 	dataCh          chan dataReportJob // worker pool job channel
 
+	// S3: requestID-level frame reassembly (P1-8 safety net)
+	reassembler *streamReassembler
+
 	// F7.6: Ping tracking for retry/timeout
 	pingTracker *PingTracker
 
@@ -61,6 +64,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
 		stopCh:          make(chan struct{}),
+		reassembler:     newStreamReassembler(),
 	}
 	mgr.pingTracker = NewPingTracker()
 
