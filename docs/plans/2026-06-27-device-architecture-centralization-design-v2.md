@@ -1,0 +1,780 @@
+# EHomeSystem Device Architecture Centralization — Design v2
+
+> **Design only — no implementation.**
+> Goal: Centralize device architecture so adding a new device type touches one
+> declarative definition, not 6+ scattered files.
+
+---
+
+## 1. Current Architecture — Problems
+
+### 1.1 N-File Scatter
+
+Adding `jiabaida_bms` required touching **9+ files**:
+
+| Layer | File | What was added |
+|-------|------|----------------|
+| Backend Driver | `drivers/jiabaida.go` (578 lines) | Full protocol parser |
+| Backend Registry | `drivers/builtin.go` | `registry.Register()` × 2 functions |
+| Backend Tests | `drivers/drivers_test.go` | Driver count 4→5 in 5 places |
+| Backend Seed | `drivers/jiabaida_seed.sql` | DeviceConfig + ConfigTemplates |
+| Frontend List | `EdgeDeviceList.vue` | `{ value: 'jiabaida_bms', label: 'BMS', icon: Lightning }` |
+| Frontend Detail | `EdgeDeviceDetail.vue` | `deviceTypeMap: { jiabaida_bms: 'BMS 电池管理系统' }` |
+| Frontend Node | `NodeDetail.vue` | Same map duplicated |
+| Frontend Form | `PeripheralAssignForm.vue` | `deviceTypeOptions` + `deviceTypeNames` — two arrays |
+| Frontend Config | `DeviceConfigList.vue` | `deviceTypeOptions` — another copy |
+
+### 1.2 Dual Parsing Paths
+
+```
+DataReport → handler_data.go → parseAndStoreData()
+                                ├── Primary:   DeviceConfig.Parser JSONB → parser.ConfigParser
+                                └── Fallback:  drivers.Get(device.Type)  → Driver.ParseData()
+```
+
+- **ConfigParser** (`pkg/parser/parser.go`): JSON-driven, fixed-offset only.
+  Works for simple Modbus RTU sensors (PRS-3001, SN3000).
+- **Driver** (`internal/drivers/`): Go code, handles complex protocols (BMS 7-command
+  parser, variable-length fields, custom checksum).
+
+**Problem**: ConfigParser can't express variable-length data (BMS 0x0F: NTC count →
+N×2B temps → cell count → M×2B voltages). BMS falls back to Driver. Split-brain:
+some fields DB-configurable, others Go-only.
+
+### 1.3 Dual Driver Registry — Local + Global
+
+```go
+// main.go — must register in BOTH
+driverRegistry := drivers.NewRegistry()
+drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)    // local
+drivers.RegisterBuiltInDriversWithParsers(drivers.GlobalRegistry(), parserConfigs) // global
+```
+
+Footgun: if you forget global, `handler_data.go` can't find the driver.
+
+### 1.4 Frontend Hardcoded Type Maps — 5+ Copies
+
+```
+EdgeDeviceList.vue    → deviceTypes[] with icons (10 entries)
+EdgeDeviceDetail.vue  → deviceTypeMap{} (10 entries, different subset)
+NodeDetail.vue        → deviceTypeMap{} (9 entries, same as Detail minus bmp280/sht40)
+PeripheralAssignForm  → deviceTypeOptions[] + deviceTypeNames{} (8+8 entries)
+DeviceConfigList.vue  → deviceTypeOptions[] (7 entries — missing jiabaida_bms!)
+```
+
+Inconsistencies: `bmp280`/`sht40` appear only in EdgeDeviceDetail.
+`gpio.digital`/`gpio.pwm` appear only in EdgeDeviceList.
+`DeviceConfigList` is missing `jiabaida_bms` entirely.
+
+### 1.5 Frontend Sensor Metadata Hardcoded
+
+`utils/sensor.ts` has three static maps:
+- `sensorNameMap`: Chinese labels for ~20 sensor categories
+- `sensorUnitMap`: Units for ~20 sensor categories
+- `SENSOR_ORDER`: Display ordering
+
+Plus `EdgeDeviceDetail.vue` has type-specific chart logic:
+```js
+if (['bmp280', 'sht40', 'temp_humidity'].includes(deviceType)) {
+  // multi-series chart with hardcoded category lists
+}
+```
+
+This means every new device type also needs chart category logic.
+
+### 1.6 Checksum Incompatibility
+
+Template engine (`pkg/parser/template.go`) only computes Modbus CRC16.
+Jiabaida BMS uses `^sum + 1`. So BMS ConfigTemplates use pre-computed hex
+strings instead of templates — breaking the template abstraction.
+
+### 1.7 Store Underuse
+
+`useEdgeDeviceStore` exists but is minimal — all views call API directly,
+bypassing the store entirely. No shared device type state.
+
+---
+
+## 2. Proposed Design: Device Descriptor Registry (DDR)
+
+### 2.1 Core Concept
+
+Replace scattered per-device-type code with a single **Device Descriptor** — a
+declarative definition covering all three concerns (configuration, parsing, UI)
+in one place. The descriptor is the single source of truth; everything else reads from it.
+
+```
+┌───────────────────────────────────────────────────────────┐
+│              Device Descriptor (DDR)                       │
+│  One Go struct + DB seed per device type                   │
+│                                                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Metadata    │  │ Parser Spec  │  │   UI Spec      │  │
+│  │  type/name   │  │ protocol     │  │ icon/color     │  │
+│  │  OEM/category│  │ commands[]   │  │ card_type      │  │
+│  │  hardware    │  │ fields[]     │  │ groups[]       │  │
+│  │  description │  │ checksum     │  │ sensor_meta[]  │  │
+│  └──────────────┘  └──────────────┘  └────────────────┘  │
+└───────────────────────────────────────────────────────────┘
+         │                   │                  │
+         ▼                   ▼                  ▼
+  /api/device-types    Parser Engine      DeviceCard.vue
+  (frontend catalog)   (unified)         (dynamic render)
+```
+
+### 2.2 Device Descriptor Structure
+
+```go
+// backend/internal/devicespec/spec.go
+
+// DeviceSpec is the single declarative definition for a device type.
+type DeviceSpec struct {
+    // ── Metadata ──
+    DeviceType    string   `json:"device_type"`     // "jiabaida_bms"
+    DeviceName    string   `json:"device_name"`     // "嘉佰达 BMS 电池管理系统"
+    OEM           string   `json:"oem"`             // "嘉佰达"
+    Category      string   `json:"category"`        // "BMS"
+    HardwareTypes []string `json:"hardware_types"`  // ["uart"]
+    Protocol      string   `json:"protocol"`        // "jiabaida_binary"
+    Description   string   `json:"description"`
+
+    // ── Connection ──
+    Connection ConnectionSpec `json:"connection"`
+
+    // ── Parsing ──
+    // Commands define what to send and how to parse the response.
+    // Each command maps to a parser function by name.
+    Commands []CommandSpec `json:"commands"`
+
+    // ── UI ──
+    // How the frontend renders this device's data card.
+    UI UISpec `json:"ui"`
+}
+
+type ConnectionSpec struct {
+    Protocol  string `json:"protocol"`       // "jiabaida_binary" | "modbus_rtu" | "i2c_raw"
+    BaudRate  int    `json:"baud_rate"`
+    DataBits  int    `json:"data_bits"`
+    StopBits  int    `json:"stop_bits"`
+    Parity    string `json:"parity"`
+    FrameMode string `json:"frame_mode"`     // "start_stop" | "modbus_rtu" | "fixed_length"
+    WakeupSeq []byte `json:"wakeup_seq,omitempty"` // BMS: 00000000 + 100ms
+}
+
+// CommandSpec defines one protocol command (read or write).
+type CommandSpec struct {
+    ID           string  `json:"id"`            // "read_basic_info"
+    Name         string  `json:"name"`          // "读取基本信息"
+    Type         string  `json:"type"`          // "read" | "write"
+    CmdByte      byte    `json:"cmd_byte"`      // 0x03
+    WriteData    []byte  `json:"write_data"`    // pre-computed frame (phase 1)
+    ReadSize     int     `json:"read_size"`     // expected response length
+    DelayMs      int     `json:"delay_ms"`
+    ChecksumAlgo string  `json:"checksum_algo"` // "jiabaida" | "modbus_crc16" | "none"
+    Enabled      bool    `json:"enabled"`       // phase gating
+
+    // Parser: named function or inline field rules
+    Parser ParserSpec `json:"parser"`
+}
+
+// ParserSpec supports both fixed-offset and variable-length parsing.
+type ParserSpec struct {
+    // "field_rules" = inline FieldRule[] (simple, JSON-declarable)
+    // "named" = registered Go function (complex, variable-length)
+    Type   string      `json:"type"`   // "field_rules" | "named"
+    Name   string      `json:"name"`   // if type="named": "jiabaida_0x03"
+    Fields []FieldRule `json:"fields"` // if type="field_rules"
+}
+
+// FieldRule extends the existing parser.FieldRule with variable-length support.
+type FieldRule struct {
+    Name      string  `json:"name"`
+    Type      string  `json:"type"`              // uint8/uint16/int16/uint32/float32/ascii
+    Unit      string  `json:"unit"`
+    Scale     float64 `json:"scale"`
+    Offset    int     `json:"offset"`            // byte offset in payload
+    Length    int     `json:"length"`
+    Endian    string  `json:"endian"`            // "big" | "little"
+    // ── NEW: variable-length support ──
+    CountFrom string  `json:"count_from,omitempty"` // field name whose value = repeat count
+    NameFmt   string  `json:"name_fmt,omitempty"`   // e.g. "temperature_%d"
+    Transform string  `json:"transform,omitempty"`  // "kelvin_to_celsius" | "none"
+}
+
+// UISpec defines how the frontend renders this device.
+type UISpec struct {
+    Icon       string     `json:"icon"`        // "Lightning" | "Cloudy" | "Sunny"
+    Color      string     `json:"color"`       // CSS gradient or color name
+    CardType   string     `json:"card_type"`   // "sensor" | "bms" | "inverter" | "gpio"
+    Groups     []UIGroup  `json:"groups"`      // data grouping for display
+    SensorMeta []SensorMeta `json:"sensor_meta"` // replaces utils/sensor.ts maps
+}
+
+// UIGroup groups sensor fields into visual sections.
+type UIGroup struct {
+    Title  string   `json:"title"`   // "电池基本信息"
+    Fields []string `json:"fields"`  // ["total_voltage", "current", "rsoc", ...]
+    Layout string   `json:"layout"`  // "grid" | "gauge" | "table" | "chart"
+}
+
+// SensorMeta provides display metadata for individual sensor fields.
+// Replaces the frontend's hardcoded sensorNameMap/sensorUnitMap/SENSOR_ORDER.
+type SensorMeta struct {
+    Name        string  `json:"name"`         // "total_voltage" (matches parser field name)
+    DisplayName string  `json:"display_name"` // "总电压"
+    Unit        string  `json:"unit"`         // "V"
+    Order       int     `json:"order"`        // display ordering within groups
+    ChartColor  string  `json:"chart_color,omitempty"` // "#67c23a"
+}
+```
+
+### 2.3 Example: Jiabaida BMS Descriptor
+
+```go
+// backend/internal/devicespec/builtin/jiabaida_bms.go
+
+var JiabaidaBMS = DeviceSpec{
+    DeviceType:    "jiabaida_bms",
+    DeviceName:    "嘉佰达 BMS 电池管理系统",
+    OEM:           "嘉佰达",
+    Category:      "BMS",
+    HardwareTypes: []string{"uart"},
+    Protocol:      "jiabaida_binary",
+    Description:   "嘉佰达软件板通用协议 V19，RS485/UART 9600bps",
+
+    Connection: ConnectionSpec{
+        Protocol:  "jiabaida_binary",
+        BaudRate:  9600,
+        DataBits:  8,
+        StopBits:  1,
+        Parity:    "none",
+        FrameMode: "start_stop",
+        WakeupSeq: []byte{0x00, 0x00, 0x00, 0x00},
+    },
+
+    Commands: []CommandSpec{
+        {
+            ID: "read_basic_info", Name: "读取基本信息", Type: "read",
+            CmdByte: 0x03, WriteData: []byte{0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77},
+            ReadSize: 60, DelayMs: 100, ChecksumAlgo: "jiabaida", Enabled: true,
+            Parser: ParserSpec{Type: "named", Name: "jiabaida_0x03"},
+        },
+        {
+            ID: "read_cell_voltage", Name: "读取单体电压", Type: "read",
+            CmdByte: 0x04, WriteData: []byte{0xDD, 0xA5, 0x04, 0x00, 0xFF, 0xFC, 0x77},
+            ReadSize: 50, DelayMs: 100, ChecksumAlgo: "jiabaida", Enabled: false,
+            Parser: ParserSpec{Type: "named", Name: "jiabaida_0x04"},
+        },
+        // ... 0x0F, 0xAA, 0x05, 0xF2, 0xF3, 0xF6, 0xA2, 0xE1
+    },
+
+    UI: UISpec{
+        Icon:     "Lightning",
+        Color:    "linear-gradient(135deg, #67c23a 0%, #85ce61 100%)",
+        CardType: "bms",
+        Groups: []UIGroup{
+            {Title: "电池基本信息", Layout: "grid",
+                Fields: []string{"total_voltage", "current", "rsoc", "remaining_capacity", "nominal_capacity", "cycle_count"}},
+            {Title: "温度", Layout: "grid",
+                Fields: []string{"temperature_1", "temperature_2", "temperature_3"}},
+            {Title: "保护与状态", Layout: "table",
+                Fields: []string{"protection_status", "fet_status", "cell_count", "software_version"}},
+            {Title: "单体电压", Layout: "table",
+                Fields: []string{"cell_voltage_max", "cell_voltage_min", "cell_voltage_avg"}},
+        },
+        SensorMeta: []SensorMeta{
+            {Name: "total_voltage", DisplayName: "总电压", Unit: "V", Order: 1, ChartColor: "#67c23a"},
+            {Name: "current", DisplayName: "电流", Unit: "A", Order: 2, ChartColor: "#409eff"},
+            {Name: "rsoc", DisplayName: "剩余容量", Unit: "%", Order: 3, ChartColor: "#e6a23c"},
+            // ... all BMS sensor fields
+        },
+    },
+}
+```
+
+### 2.4 Example: PRS-3001 (Simple Modbus Sensor)
+
+Simple sensors use `field_rules` — no Go parser code needed:
+
+```go
+var PRS3001 = DeviceSpec{
+    DeviceType:    "prs3001",
+    DeviceName:    "PRS-3001 风速传感器",
+    OEM:           "普瑞森",
+    Category:      "wind_speed",
+    HardwareTypes: []string{"uart"},
+    Protocol:      "modbus_rtu",
+
+    Connection: ConnectionSpec{
+        Protocol: "modbus_rtu", BaudRate: 4800, DataBits: 8,
+        StopBits: 1, Parity: "none", FrameMode: "modbus_rtu",
+    },
+
+    Commands: []CommandSpec{
+        {
+            ID: "read_wind_speed", Name: "查询风速", Type: "read",
+            CmdByte: 0x03, ReadSize: 7, ChecksumAlgo: "modbus_crc16", Enabled: true,
+            Parser: ParserSpec{
+                Type: "field_rules",
+                Fields: []FieldRule{
+                    {Name: "wind_speed", Type: "uint16", Offset: 0, Length: 2,
+                        Scale: 0.01, Unit: "m/s", Endian: "big"},
+                },
+            },
+        },
+    },
+
+    UI: UISpec{
+        Icon: "Lightning", Color: "#409eff", CardType: "sensor",
+        Groups: []UIGroup{
+            {Title: "风速", Layout: "gauge", Fields: []string{"wind_speed"}},
+        },
+        SensorMeta: []SensorMeta{
+            {Name: "wind_speed", DisplayName: "风速", Unit: "m/s", Order: 1, ChartColor: "#409eff"},
+        },
+    },
+}
+```
+
+---
+
+## 3. Key Design Decisions
+
+### D1: Named parsers vs pure-declarative
+
+**Decision**: Support both. Simple protocols use `field_rules` (pure JSON, no code).
+Complex protocols (BMS 0x0F with nested variable arrays) use `named` parsers (Go
+code registered by name). The spec declares which to use.
+
+**Rationale**: Making BMS 0x0F purely declarative would require a Turing-complete
+field rule language. Named parsers keep complex logic in readable Go while making
+simple cases zero-code.
+
+### D2: Spec in code vs spec in DB
+
+**Decision**: Built-in specs live in Go code (compiled, version-controlled).
+DeviceConfig DB table remains for user overrides (interval, baud rate, enabled commands).
+
+**Rationale**: Protocol parsing logic belongs in code (type-safe, testable, version-
+controlled). User-tunable parameters belong in DB (runtime configurable, no recompile).
+The spec is the base layer; DeviceConfig is the override layer.
+
+### D3: UISpec in backend vs frontend
+
+**Decision**: UISpec lives in the DeviceSpec (backend), exposed via API.
+Frontend renders dynamically.
+
+**Rationale**: The device type definition should be complete — metadata, protocol,
+and UI hints in one place. Keeping UI hints in the frontend recreates the scatter
+problem. The backend doesn't render HTML; it just declares "this device has groups:
+basic info, temperatures, cell voltages" and the frontend picks the layout component.
+
+### D4: SensorMeta in backend vs frontend
+
+**Decision**: SensorMeta (display name, unit, order, chart color) lives in DeviceSpec.
+Replaces `sensorNameMap`, `sensorUnitMap`, and `SENSOR_ORDER` in `utils/sensor.ts`.
+
+**Rationale**: These maps are currently hardcoded per-sensor-name in the frontend.
+A new device's sensor fields have nowhere to get display metadata from. Putting it
+in the spec means the frontend can render any new device without code changes.
+
+### D5: Keep ConfigParser as sub-component or replace?
+
+**Decision**: Phase 2 absorbs ConfigParser's `FieldRule` into `devicespec.FieldRule`
+(with extensions). The standalone `pkg/parser/` package is removed in Phase 3.
+
+**Rationale**: Two field-rule types with the same name is confusing. Unify into one
+with optional variable-length support.
+
+### D6: DeviceSpec.Commands vs DeviceConfig.Operations
+
+**Decision**: DeviceSpec.Commands = protocol-level (what to send, how to parse).
+DeviceConfig.Operations = user-level (what to expose in the UI, with labels/params).
+Operations reference commands by ID.
+
+**Rationale**: Commands are intrinsic to the protocol. Operations are a presentation
+layer — which commands to expose, what labels to give them, what params to accept.
+A user may disable a command's operation while the command still exists in the spec.
+
+---
+
+## 4. Unified Parse Flow
+
+Replaces current dual-path with spec-driven dispatch:
+
+```
+DataReport → handler_data.go → parseAndStoreData()
+                                └── DeviceSpec lookup by device_type
+                                     └── For each enabled Command whose CmdByte matches:
+                                          ├── if Parser.Type == "field_rules":
+                                          │     Enhanced ConfigParser with FieldRules
+                                          └── if Parser.Type == "named":
+                                                NamedParser registry lookup
+```
+
+No more "ConfigParser first, Driver fallback." The spec declares which parser to use.
+
+### Named Parser Registry
+
+```go
+// backend/internal/devicespec/namedparser.go
+
+type NamedParser interface {
+    Parse(raw []byte) ([]parser.Field, error)
+}
+
+var namedParsers = map[string]NamedParser{}
+
+func RegisterNamedParser(name string, p NamedParser) { namedParsers[name] = p }
+func GetNamedParser(name string) (NamedParser, bool) { p, ok := namedParsers[name]; return p, ok }
+```
+
+Complex parsers (BMS 0x03 with variable NTC count, 0x0F with nested arrays) register
+as named parsers. The `JiabaidaBMSDriver` code moves here unchanged — it just registers
+under names like `"jiabaida_0x03"` instead of living in the Driver interface.
+
+### Enhanced FieldRule for Variable-Length
+
+```json
+{
+  "name": "temperatures",
+  "type": "uint16",
+  "count_from": "ntc_count",
+  "offset": 23,
+  "length": 2,
+  "name_fmt": "temperature_%d",
+  "transform": "kelvin_to_celsius",
+  "unit": "°C"
+}
+```
+
+This eliminates the need for Go code for protocols that are variable-length but
+structurally simple.
+
+### Checksum Abstraction
+
+```go
+type ChecksumAlgo interface {
+    Compute(data []byte) []byte
+    Verify(frame []byte) bool
+}
+
+var checksumAlgos = map[string]ChecksumAlgo{
+    "modbus_crc16": &ModbusCRC16{},
+    "jiabaida":     &JiabaidaChecksum{},  // ^sum + 1
+    "none":         &NoChecksum{},
+}
+```
+
+Phase 2: Makes `CommandSpec.WriteData` generatable from templates instead of
+pre-computed hex strings. The `{crc}` placeholder resolves to the correct algorithm
+per device type.
+
+---
+
+## 5. Single Registry — Eliminate Dual Registration
+
+```go
+// backend/internal/devicespec/registry.go
+
+var registry = map[string]*DeviceSpec{}
+
+func Register(spec *DeviceSpec) {
+    registry[spec.DeviceType] = spec
+}
+func Get(deviceType string) (*DeviceSpec, bool) { ... }
+func All() []*DeviceSpec { ... }
+
+func RegisterBuiltins() {
+    Register(&BMP280)
+    Register(&LKTH01)
+    Register(&SN3000)
+    Register(&PRS3001)
+    Register(&JiabaidaBMS)
+}
+```
+
+Called once in `main.go`: `devicespec.RegisterBuiltins()`
+No local/global duplication. One registry, one call site.
+
+---
+
+## 6. API: `/api/v1/device-types` — Frontend Catalog
+
+New endpoint replaces all hardcoded frontend type maps:
+
+```
+GET /api/v1/device-types
+Response:
+[
+  {
+    "device_type": "jiabaida_bms",
+    "device_name": "嘉佰达 BMS 电池管理系统",
+    "oem": "嘉佰达",
+    "category": "BMS",
+    "hardware_types": ["uart"],
+    "ui": {
+      "icon": "Lightning",
+      "color": "linear-gradient(135deg, #67c23a 0%, #85ce61 100%)",
+      "card_type": "bms",
+      "groups": [...],
+      "sensor_meta": [...]
+    },
+    "commands": [
+      {"id": "read_basic_info", "name": "读取基本信息", "type": "read", "enabled": true}
+    ]
+  },
+  ...
+]
+```
+
+Also:
+```
+GET /api/v1/device-types/:type        → single spec
+GET /api/v1/device-types/:type/ui     → UISpec only (for card rendering)
+GET /api/v1/device-types/:type/sensors → SensorMeta[] only
+```
+
+---
+
+## 7. Frontend: Dynamic Device Architecture
+
+### 7.1 DeviceTypeStore (replaces all hardcoded maps)
+
+```typescript
+// frontend-shared/src/stores/deviceType.ts
+
+export const useDeviceTypeStore = defineStore('deviceType', () => {
+  const types = ref<DeviceTypeSpec[]>([])
+  const loaded = ref(false)
+
+  async function fetchTypes() { ... }  // GET /api/v1/device-types
+  function getByType(t: string) { return types.value.find(d => d.device_type === t) }
+  function getDisplayName(t: string) { return getByType(t)?.device_name || t }
+  function getIcon(t: string) { return getByType(t)?.ui.icon || 'Cpu' }
+  function getUISpec(t: string) { return getByType(t)?.ui }
+  function getSensorMeta(t: string, sensorName: string) { ... }
+
+  return { types, loaded, fetchTypes, getByType, getDisplayName, getIcon, getUISpec, getSensorMeta }
+})
+```
+
+### 7.2 Replaced Code Map
+
+| Current (hardcoded) | After (store-driven) |
+|---------------------|----------------------|
+| `EdgeDeviceList.vue` → `deviceTypes[]` (10 entries) | `deviceTypeStore.types` |
+| `EdgeDeviceDetail.vue` → `deviceTypeMap{}` (10 entries) | `deviceTypeStore.getDisplayName(type)` |
+| `NodeDetail.vue` → `deviceTypeMap{}` (9 entries) | `deviceTypeStore.getDisplayName(type)` |
+| `PeripheralAssignForm.vue` → `deviceTypeOptions[]` (8) | `deviceTypeStore.types` for dropdown |
+| `DeviceConfigList.vue` → `deviceTypeOptions[]` (7) | `deviceTypeStore.types` for filter |
+| `utils/sensor.ts` → `sensorNameMap` | `spec.ui.sensor_meta[].display_name` |
+| `utils/sensor.ts` → `sensorUnitMap` | `spec.ui.sensor_meta[].unit` |
+| `utils/sensor.ts` → `SENSOR_ORDER` | `spec.ui.sensor_meta[].order` |
+| `EdgeDeviceDetail.vue` → `if (['bmp280'...])` chart logic | `spec.ui.groups` with `layout="chart"` |
+
+### 7.3 DeviceCard.vue — Dynamic Card Component
+
+```vue
+<!-- frontend-shared/src/components/device/DeviceCard.vue -->
+<template>
+  <div class="device-card" :style="cardStyle">
+    <div v-for="group in uiSpec.groups" :key="group.title" class="data-group">
+      <h4>{{ group.title }}</h4>
+      <component :is="layoutComponent(group.layout)"
+                 :fields="group.fields"
+                 :data="latestData"
+                 :sensor-meta="sensorMetaMap" />
+    </div>
+  </div>
+</template>
+```
+
+Layout components:
+- `SensorGrid.vue` ← `layout="grid"` (key-value pairs in grid)
+- `SensorGauge.vue` ← `layout="gauge"` (SOC gauge, voltage gauge)
+- `SensorTable.vue` ← `layout="table"` (cell voltages, protection counts)
+- `SensorChart.vue` ← `layout="chart"` (historical trends, multi-series)
+
+### 7.4 SensorMeta Replaces Hardcoded Chart Logic
+
+Current problem — type-specific chart category logic in EdgeDeviceDetail:
+```js
+// BEFORE: hardcoded per-type
+if (['bmp280', 'sht40', 'temp_humidity'].includes(deviceType)) {
+  const categories = deviceType === 'bmp280'
+    ? ['temperature', 'pressure']
+    : ['temperature', 'humidity']
+  // ...
+}
+```
+
+After — driven by UISpec:
+```js
+// AFTER: dynamic from spec
+const chartGroups = uiSpec.groups.filter(g => g.layout === 'chart')
+// Each group's Fields[] defines which sensor categories to chart
+// SensorMeta provides display_name, unit, chart_color
+```
+
+---
+
+## 8. Migration Strategy
+
+### Phase 1: Add DDR alongside existing (no breaking changes)
+
+1. Create `internal/devicespec/` package with `DeviceSpec` struct + registry
+2. Register all 5 existing device types as specs
+3. Add `/api/v1/device-types` endpoint reading from the registry
+4. Frontend: create `deviceTypeStore.ts`, replace hardcoded maps in 5 Vue files
+   with store lookups
+5. Delete `utils/sensor.ts` maps (sensorNameMap/sensorUnitMap/SENSOR_ORDER) —
+   replaced by SensorMeta from store
+
+**Result**: Frontend type maps eliminated. Backend still uses dual
+ConfigParser/Driver path.
+
+### Phase 2: Unify parsing under DDR
+
+1. Add `NamedParser` registry, move BMS command parsers into it
+2. Enhance `FieldRule` with `CountFrom`/`NameFmt`/`Transform`
+3. Modify `parseAndStoreData()` to use `DeviceSpec.Commands[].Parser`
+   instead of ConfigParser-then-Driver
+4. Add `ChecksumAlgo` strategy, make BMS commands templateable
+5. Add `DeviceSpec.Commands` → `DeviceConfig.Operations` reference mapping
+
+**Result**: `drivers/registry.go` and `Driver` interface deprecated for parsing.
+ConfigParser becomes a sub-component of the spec.
+
+### Phase 3: Remove legacy code
+
+1. Delete `internal/drivers/` package (Driver interface, registry, builtin.go)
+2. Delete `pkg/parser/` ConfigParser (absorbed into devicespec)
+3. Remove dual registry registration in `main.go`
+4. Remove `drivers_test.go` count assertions
+5. Delete deprecated `DeviceForm.vue`
+
+**Result**: One registry, one parse path, one source of truth.
+
+---
+
+## 9. Impact Assessment
+
+### Per New Device Type
+
+| Step | Before (current) | After (proposed) |
+|------|------------------|------------------|
+| Define protocol | Write Go driver (200-600 lines) | Write DeviceSpec (50-100 lines) + optional NamedParser |
+| Register driver | Edit `builtin.go` × 2 + test counts | Add to `RegisterBuiltins()` (1 line) |
+| DB config | Write seed SQL | DeviceSpec includes connection + commands (DB row for user overrides only) |
+| Frontend type map | Edit 5 Vue files | Nothing — auto-appears via `/api/v1/device-types` |
+| Frontend device card | Inherits generic RealtimeDataList | Auto-renders via UISpec groups |
+| Frontend form | Edit `deviceTypeOptions` array | Nothing — auto-appears in dropdown |
+| Frontend sensor names | Edit `sensorNameMap`/`sensorUnitMap` | Nothing — SensorMeta in spec |
+| Frontend chart logic | Add `if (type === '...')` branch | Nothing — `layout="chart"` groups |
+
+### Complexity Reduction
+
+- **9 files → 1 file**: New device type = one `DeviceSpec` definition
+- **2 parse paths → 1**: Spec declares parser, no ConfigParser/Driver split
+- **2 registries → 1**: Single `devicespec` registry
+- **5 type maps → 0**: Frontend fetches from API
+- **3 sensor maps → 0**: SensorMeta in spec
+- **Pre-computed hex → templated commands**: Checksum strategy per protocol
+
+### What Stays the Same
+
+- ESP32 firmware: zero changes (firmware is immutable constraint)
+- MQTT/WS data flow: DataReport → handler_data.go → parse → store → broadcast
+- Database schema: DeviceConfig table stays (becomes user-override layer)
+- HomeAssistant discovery: reads sensor definitions from spec instead of Driver
+- EdgeDevice CRUD API: unchanged
+- WebSocket realtime flow: unchanged
+
+---
+
+## 10. File Structure (Proposed)
+
+```
+backend/internal/devicespec/
+├── spec.go              # DeviceSpec, CommandSpec, ParserSpec, UISpec, SensorMeta structs
+├── registry.go          # Single registry (no local/global split)
+├── parser.go            # Unified parse entry: spec → field_rules or named
+├── fieldrule.go         # Enhanced FieldRule with CountFrom/NameFmt/Transform
+├── checksum.go          # ChecksumAlgo strategy (modbus_crc16, jiabaida, none)
+├── namedparser.go       # NamedParser interface + registry
+├── api.go               # /api/v1/device-types handler
+└── builtin/
+    ├── bmp280.go        # DeviceSpec definition
+    ├── lkth01.go
+    ├── sn3000.go
+    ├── prs3001.go
+    └── jiabaida_bms.go  # DeviceSpec + named parser registrations
+
+frontend-shared/src/
+├── stores/
+│   └── deviceType.ts    # Pinia store: fetch + cache /api/v1/device-types
+├── components/
+│   └── device/
+│       ├── DeviceCard.vue      # Dynamic card from UISpec
+│       ├── SensorGrid.vue      # layout="grid"
+│       ├── SensorGauge.vue     # layout="gauge"
+│       ├── SensorTable.vue     # layout="table"
+│       └── SensorChart.vue     # layout="chart"
+└── views/
+    └── edge-device/
+        └── EdgeDeviceDetail.vue  # Uses DeviceCard instead of hardcoded maps
+```
+
+### Files Deleted in Phase 3
+
+```
+backend/internal/drivers/registry.go      # Dual registry
+backend/internal/drivers/builtin.go       # Dual registration
+backend/internal/drivers/driver.go        # Driver interface (optional)
+backend/pkg/parser/parser.go              # ConfigParser (absorbed)
+backend/pkg/parser/builtin.go             # Named parsers (absorbed)
+backend/pkg/parser/rule.go                # ParserRule (absorbed)
+frontend-shared/src/utils/sensor.ts       # Replaced by SensorMeta
+frontend-shared/src/components/forms/DeviceForm.vue  # Already deprecated
+```
+
+---
+
+## 11. Open Questions
+
+1. **Should SensorMeta support i18n?** Currently all display names are Chinese.
+   If multi-language support is needed, SensorMeta could have a `display_names`
+   map instead of a single `display_name`. Recommend deferring to later.
+
+2. **How to handle GPIO/PWM device types?** These are not sensors — they have
+   no data parsing, only control operations. The spec's Commands section covers
+   write operations, but `gpio.digital` and `gpio.pwm` need a different card
+   type (toggle/switch instead of data display). Add `CardType: "gpio"` with
+   `Layout: "switch"` support in UIGroup.
+
+3. **Should the `/api/v1/device-types` response include full ParserSpec?**
+   The frontend doesn't need parsing details. Recommend returning only metadata
+   + UI spec in the list endpoint, with optional `?include=parser` for admin
+   tools that need the full spec.
+
+4. **DeviceSpec versioning?** When a spec changes (e.g., new field added to
+   BMS 0x03), how do we handle existing data? Recommend semantic versioning
+   in DeviceSpec with a `Version` field, and migration notes in the spec.
+
+---
+
+## 12. Summary
+
+The DDR design eliminates the "N-file scatter" by making the **DeviceSpec** the
+single source of truth for every device type. Configuration (connection, commands),
+parsing (field rules or named parsers), and UI (icon, groups, sensor metadata) are
+all declared in one struct. The frontend becomes fully dynamic — no hardcoded type
+maps, no hardcoded sensor name/unit maps, no type-specific chart logic. The backend
+has one registry, one parse path, and one checksum abstraction. Adding a new device
+type goes from touching 9 files to writing 1 spec definition (+ optional named
+parser for complex protocols).
+
+The migration is incremental — Phase 1 adds DDR alongside existing code with no
+breakage, Phase 2 unifies parsing, Phase 3 removes legacy code. Each phase is
+independently deployable and testable.
