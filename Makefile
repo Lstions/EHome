@@ -36,6 +36,17 @@ FRONTEND_PORT   ?= 5174
 EMQX_PORT       ?= 1883
 REDIS_PORT      ?= 6379
 
+# ---- OTA external host (ESP32 reaches backend here, not localhost) ----
+# Auto-detect the IP that external devices can reach; override with EHOME_EXTERNAL_HOST=ip:port
+_WSL_IP := $(shell ip route get 1 2>/dev/null | awk '{print $$7; exit}')
+ifeq ($(EHOME_EXTERNAL_HOST),)
+  ifneq ($(_WSL_IP),)
+    EHOME_EXTERNAL_HOST := $(_WSL_IP):$(BACKEND_PORT)
+  else
+    EHOME_EXTERNAL_HOST := localhost:$(BACKEND_PORT)
+  endif
+endif
+
 # ---- 路径 ----
 ROOT     := $(shell pwd)
 BACKEND  := $(ROOT)/backend
@@ -71,7 +82,7 @@ up: infra ## 启动基础设施 + 本地前后端
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
 		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
-		EHOME_EXTERNAL_HOST=localhost:$(BACKEND_PORT) \
+		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend (port $(FRONTEND_PORT))..."
@@ -120,7 +131,7 @@ restart: ## 重启本地前后端
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
 		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
-		EHOME_EXTERNAL_HOST=localhost:$(BACKEND_PORT) \
+		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend..."
@@ -160,7 +171,7 @@ backend: ## 仅启动本地后端
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
 		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
-		EHOME_EXTERNAL_HOST=localhost:$(BACKEND_PORT) \
+		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
