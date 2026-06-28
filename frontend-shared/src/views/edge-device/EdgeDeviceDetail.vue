@@ -171,6 +171,14 @@
       />
     </el-card>
 
+    <!-- 指令频率管理 -->
+    <el-card style="margin-top: 20px;" v-if="device?.device_type">
+      <template #header>
+        <span>指令频率</span>
+      </template>
+      <CommandList :device-id="deviceId" :device-type="device.device_type" />
+    </el-card>
+
     <el-card style="margin-top: 20px;" v-if="hasConfigOperations">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -318,6 +326,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import RealtimeDataList, { type DataItem } from '@/components/data/RealtimeDataList.vue'
+import CommandList from '@/components/device/CommandList.vue'
 import { edgeDeviceApi, type EdgeDevice, type ExecuteOperationResponse } from '@/api/edgeDevice'
 import { type OperationDef, type OperationParam } from '@/api/deviceConfig'
 import { getErrorInfo } from '@/utils/errorCode'
@@ -340,6 +349,8 @@ interface SeriesData {
 
 const router = useRouter()
 const route = useRoute()
+
+const deviceId = Number(route.params.id)
 
 const device = ref<EdgeDevice | null>(null)
 const historyData = ref<HistoryDataPoint[]>([])
@@ -417,7 +428,8 @@ const deviceTypeMap: Record<string, string> = {
   battery: '电池保护板',
   inverter: '光伏逆变器',
   bmp280: 'BMP280温压传感器',
-  sht40: 'SHT40温湿度传感器'
+  sht40: 'SHT40温湿度传感器',
+  jiabaida_bms: 'BMS 电池管理系统'
 }
 
 const deviceTypeText = computed(() => {
@@ -596,8 +608,8 @@ function handleWebSocketMessage(message: any) {
     logger.debug('收到实时数据', { deviceId, sensorData })
   }
 
-  // Update device last_data_time (matches the API field name)
-  if (device.value) {
+  // Update device last_data_time only when actual sensor data is received
+  if (device.value && sensorData && Object.keys(sensorData).length > 0) {
     device.value.last_data_time = new Date().toISOString()
   }
 }

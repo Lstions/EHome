@@ -426,18 +426,17 @@ const deviceTypeMap: Record<string, string> = {
   light: '光照传感器',
   temp_humidity: '温湿度传感器',
   battery: '电池保护板',
-  inverter: '光伏逆变器'
+  inverter: '光伏逆变器',
+  jiabaida_bms: 'BMS 电池管理系统'
 }
 
 const getDeviceTypeText = (type: string) => {
   return deviceTypeMap[type] || type
 }
 
-// 根据设备的 hardware_type + hardware_id 查找对应的 Channel
+// 根据设备的 channel_id 查找对应的 Channel
 const getChannelForDevice = (device: any) => {
-  return channels.value.find(
-    ch => ch.hardware_type === device.hardware_type && ch.hardware_id === device.hardware_id
-  )
+  return channels.value.find(ch => ch.id === device.channel_id)
 }
 
 // 点击通道标签 → 通过 ChannelPanel 打开通道编辑对话框

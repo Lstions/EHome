@@ -20,6 +20,7 @@ export interface ExecuteOperationResponse {
 export interface EdgeDevice {
   id: number
   node_id: number | string
+  channel_id: number
   node?: { id: number | string; name: string }
   name: string
   device_type: string
@@ -65,6 +66,7 @@ export interface CreateEdgeDeviceParams {
 interface RawEdgeDevice {
   id: number
   node_id?: number | string
+  channel_id?: number
   node?: { id?: number | string; name?: string }
   name?: string
   type?: string
@@ -106,6 +108,7 @@ function mapStatus(rawStatus?: string): DeviceStatus {
 const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   id: d.id,
   node_id: d.node_id ?? 0,
+  channel_id: d.channel_id ?? 0,
   node: d.node && d.node.name ? { id: (d.node.id ?? d.node_id ?? 0) as string | number, name: d.node.name } : undefined,
   name: d.name || '',
   device_type: d.type || d.device_type || '',
@@ -211,5 +214,42 @@ export const edgeDeviceApi = {
       new_address: newAddress
     })
     return response.data || response
-  }
+  },
+
+  // Driver command templates
+  async getDriverCommands(deviceType: string): Promise<CommandTemplate[]> {
+    const response = await client.get<unknown, any>(`/api/v1/drivers/${deviceType}/commands`)
+    if (Array.isArray(response?.data)) return response.data
+    if (Array.isArray(response)) return response
+    return []
+  },
+
+  // Edge device command intervals
+  async getCommandIntervals(edgeDeviceId: number): Promise<CommandTemplateWithInterval[]> {
+    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${edgeDeviceId}/commands`)
+    if (Array.isArray(response?.data)) return response.data
+    if (Array.isArray(response)) return response
+    return []
+  },
+
+  async updateCommandIntervals(edgeDeviceId: number, intervals: Record<string, number>): Promise<void> {
+    await client.put(`/api/v1/edge-devices/${edgeDeviceId}/commands`, { intervals })
+  },
+}
+
+export interface CommandTemplate {
+  id: string
+  name: string
+  type: string
+  cmd_byte: number
+  write_data: string
+  read_length: number
+  delay_ms: number
+  interval_ms: number
+  schedulable: boolean
+  description: string
+}
+
+export interface CommandTemplateWithInterval extends CommandTemplate {
+  current_interval_ms: number
 }

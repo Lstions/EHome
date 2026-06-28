@@ -705,6 +705,7 @@ const deviceTypes = [
   { value: 'rain', label: '雨量', icon: Cloudy },
   { value: 'light', label: '光照', icon: Sunny },
   { value: 'battery', label: '电池', icon: Lightning },
+  { value: 'jiabaida_bms', label: 'BMS', icon: Lightning },
   { value: 'inverter', label: '逆变器', icon: DataAnalysis },
   { value: 'gpio.digital', label: 'GPIO 控制', icon: Open },
   { value: 'gpio.pwm', label: 'PWM 输出', icon: SetUp },

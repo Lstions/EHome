@@ -14,6 +14,7 @@ declare module 'vue' {
     ChannelManager: typeof import('./components/channel/ChannelManager.vue')['default']
     ChannelPanel: typeof import('./components/node/ChannelPanel.vue')['default']
     ChannelTerminal: typeof import('./components/channel/ChannelTerminal.vue')['default']
+    CommandList: typeof import('./components/device/CommandList.vue')['default']
     ConfirmDialog: typeof import('./components/common/ConfirmDialog.vue')['default']
     CountUp: typeof import('./components/common/CountUp.vue')['default']
     DeviceConfigForm: typeof import('./components/forms/DeviceConfigForm.vue')['default']
