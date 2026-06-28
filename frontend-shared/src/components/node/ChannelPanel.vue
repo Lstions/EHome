@@ -820,7 +820,8 @@ onMounted(() => {
 
 defineExpose({
   refreshChannels,
-  refreshBuses
+  refreshBuses,
+  handleOpenChannelManager
 })
 </script>
 

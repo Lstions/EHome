@@ -588,14 +588,10 @@ watch(showDialog, (open) => {
         if (!form.config.parity) form.config.parity = 'none'
         if (!form.config.flow_control) form.config.flow_control = 'none'
       }
-    form.name = ''
-    form.address = ''
-    form.enabled = true
-    form.config = {}
-    // 延迟初始化默认值（等 currentCaps 计算完成）
-    setTimeout(() => initConfigDefaults(), 50)
   } else {
     resetForm()
+    // 延迟初始化默认值（等 currentCaps 计算完成）
+    setTimeout(() => initConfigDefaults(), 50)
   }
 })
 </script>
