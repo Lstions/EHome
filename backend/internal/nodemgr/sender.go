@@ -16,6 +16,8 @@ import (
 	"ehome/backend/internal/drivers"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+
+	"gorm.io/gorm"
 )
 
 // SendPing sends a Ping message to a device and records timestamp in Redis for verification
@@ -225,6 +227,16 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 
 	var templates []models.ConfigTemplate
 	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
+
+	// Self-healing: reconcile driver CommandTemplates with DB ConfigTemplates.
+	// When a driver's command has no matching ConfigTemplate (e.g. device created
+	// before createTemplatesFromDriver was deployed), auto-create the missing
+	// template. This eliminates the fragile write_data hex-string matching gap.
+	reconciled := reconcileDriverTemplates(m.db, node.NodeID, templates)
+	if reconciled {
+		// Reload templates after reconciliation
+		m.db.Where("node_id = ?", node.NodeID).Find(&templates)
+	}
 
 	var channels []models.Channel
 	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
@@ -452,6 +464,77 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			"last_sync_id":      decision.SyncID,
 		})
 	}
+}
+
+// reconcileDriverTemplates ensures every driver CommandTemplate has a matching
+// ConfigTemplate in DB. Auto-creates missing templates for self-healing.
+// Returns true if any templates were created.
+func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []models.ConfigTemplate) bool {
+	// Collect all edge devices for this node and their driver commands
+	type cmdNeed struct {
+		chID    uint
+		writeData string
+		readLength uint32
+		delayMs   uint32
+	}
+	needed := make(map[string]cmdNeed) // key = normalized write_data
+
+	var edges []models.EdgeDevice
+	db.Where("node_id = ? AND enabled = true", nodeID).Find(&edges)
+	for _, edge := range edges {
+		drv, err := drivers.Get(edge.Type)
+		if err != nil {
+			continue
+		}
+		provider, ok := drv.(drivers.CommandTemplateProvider)
+		if !ok {
+			continue
+		}
+		for _, cmd := range provider.GetCommandTemplates() {
+			if !cmd.Schedulable || cmd.WriteData == "" {
+				continue
+			}
+			key := strings.ToUpper(strings.TrimSpace(cmd.WriteData))
+			needed[key] = cmdNeed{
+				chID:       edge.ChannelID,
+				writeData:  cmd.WriteData,
+				readLength: cmd.ReadLength,
+				delayMs:    cmd.DelayMs,
+			}
+		}
+	}
+
+	// Check which needed templates already exist
+	existingKeys := make(map[string]bool)
+	for _, t := range existingTemplates {
+		existingKeys[strings.ToUpper(strings.TrimSpace(t.WriteData))] = true
+	}
+
+	// Create missing templates
+	created := false
+	for key, need := range needed {
+		if existingKeys[key] {
+			continue
+		}
+		tmpl := models.ConfigTemplate{
+			NodeID:     nodeID,
+			WriteData:  need.writeData,
+			ReadLength: need.readLength,
+			DelayMs:    need.delayMs,
+		}
+		if err := db.Create(&tmpl).Error; err != nil {
+			logger.Warnf("[reconcile] Failed to auto-create template for write_data=%s: %v", need.writeData, err)
+			continue
+		}
+		// Append template ID to channel's template_ids
+		newID := strconv.FormatUint(uint64(tmpl.ID), 10)
+		db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
+			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID))
+		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d write_data=%s for channel=%d",
+			tmpl.ID, need.writeData, need.chID)
+		created = true
+	}
+	return created
 }
 
 // getCommandTemplatesFromDriver returns command templates from a driver, or nil.
