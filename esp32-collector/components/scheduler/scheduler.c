@@ -357,6 +357,7 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
                 .bus_type       = ch->config.bus_type,
                 .tx_len         = t->write_data_len < CMD_TX_MAX ? t->write_data_len : CMD_TX_MAX,
                 .delay_ms       = t->delay_ms > 0 ? t->delay_ms : 0,
+                .read_size      = t->read_length,  /* P1-8: pass read_length for rx_task metadata */
                 .edge_device_id = dev->edge_device_id,
                 .command_index  = (uint8_t)ci,
                 .type           = CMD_SAMPLE,
@@ -433,6 +434,7 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
         if (t && t->write_data_len > 0) {
             cmd.tx_len = t->write_data_len < CMD_TX_MAX ? t->write_data_len : CMD_TX_MAX;
             memcpy(cmd.tx_data, t->write_data, cmd.tx_len);
+            cmd.read_size = t->read_length;  /* P1-8: pass read_length for rx_task metadata */
             if (t->delay_ms > 0) {
                 cmd.delay_ms = t->delay_ms;
             }

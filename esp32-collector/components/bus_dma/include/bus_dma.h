@@ -65,10 +65,10 @@ static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
 
 /* === Bus DMA context === */
 typedef struct {
-    uint8_t  bus_type;
-    bool     dma_enabled;
-    bool     initialized;
-    SemaphoreHandle_t tx_mutex;  // Protects TX path (write + transact). RX needs no mutex (uart_read_bytes is thread-safe, rx_task is sole consumer)
+    uint8_t bus_type;
+    bool dma_enabled;
+    bool initialized;
+    SemaphoreHandle_t tx_mutex;
 
     union {
         struct {
