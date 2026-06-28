@@ -61,6 +61,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// v2.2 routes
 		registerNodeRoutes(v1, db, nodeMgr)
 		registerEdgeDeviceRoutes(v1, db, nodeMgr)
+		registerDriverCommandRoutes(v1, db, nodeMgr)
 
 		// Overview + Notification routes
 		registerOverviewRoutes(v1, db)

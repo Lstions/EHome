@@ -45,6 +45,17 @@ func (d *BMP280Driver) ParseData(raw []byte) ([]SensorData, error) {
 	}, nil
 }
 
+func (d *BMP280Driver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{
+		{
+			ID: "read_temp_pressure", Name: "读取温度气压", Type: "read",
+			CmdByte: 0x00, WriteData: "",
+			ReadLength: 6, DelayMs: 50, IntervalMs: 5000, Schedulable: true,
+			Description: "BMP280 温度 (°C) 和气压 (hPa)",
+		},
+	}
+}
+
 // LKTH01Driver parses LK-TH01 sensor data
 // LK-TH01: [8 bytes] → {"temperature": 25.1, "humidity": 65.0}
 type LKTH01Driver struct{}
@@ -74,6 +85,17 @@ func (d *LKTH01Driver) ParseData(raw []byte) ([]SensorData, error) {
 		{Name: "temperature", Value: temp, Unit: "°C"},
 		{Name: "humidity", Value: humidity, Unit: "%RH"},
 	}, nil
+}
+
+func (d *LKTH01Driver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{
+		{
+			ID: "read_temp_humidity", Name: "读取温湿度", Type: "read",
+			CmdByte: 0x00, WriteData: "",
+			ReadLength: 4, DelayMs: 50, IntervalMs: 5000, Schedulable: true,
+			Description: "LK-TH01 温度 (°C) 和湿度 (%RH)",
+		},
+	}
 }
 
 // SN3000Driver parses SN-3000 wind direction sensor data (Modbus RTU)
@@ -192,9 +214,31 @@ func (d *PRS3001Driver) parseLegacy(raw []byte) ([]SensorData, error) {
 func fieldsToSensorData(fields []parser.Field) []SensorData {
 	result := make([]SensorData, len(fields))
 	for i, f := range fields {
-		result[i] = SensorData{Name: f.Name, Value: f.Value, Unit: f.Unit}
+		result[i] = SensorData{Name: f.Name, Value: f.Value, Unit: f.Unit, StringValue: f.StringValue}
 	}
 	return result
+}
+
+func (d *SN3000Driver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{
+		{
+			ID: "read_wind_direction", Name: "读取风向", Type: "read",
+			CmdByte: 0x03, WriteData: "0103000000018458",
+			ReadLength: 7, DelayMs: 50, IntervalMs: 5000, Schedulable: true,
+			Description: "SN-3000 风向角度 (°)，Modbus RTU FC03",
+		},
+	}
+}
+
+func (d *PRS3001Driver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{
+		{
+			ID: "read_rainfall", Name: "读取雨量", Type: "read",
+			CmdByte: 0x03, WriteData: "010300000002C40B",
+			ReadLength: 9, DelayMs: 100, IntervalMs: 5000, Schedulable: true,
+			Description: "PRS-3001 雨量 (mm) 和光照度 (Lux)，Modbus RTU FC03",
+		},
+	}
 }
 
 // RegisterBuiltInDrivers registers all built-in drivers.
@@ -205,6 +249,7 @@ func RegisterBuiltInDrivers(registry *Registry) {
 	registry.Register(&LKTH01Driver{})
 	registry.Register(&SN3000Driver{})
 	registry.Register(&PRS3001Driver{})
+	// JiabaidaBMSDriver registered in RegisterBuiltInDriversWithParsers
 }
 
 // RegisterBuiltInDriversWithParsers registers built-in drivers with ConfigParser overrides.
@@ -231,4 +276,7 @@ func RegisterBuiltInDriversWithParsers(registry *Registry, parserConfigs map[str
 		}
 	}
 	registry.Register(prs3001)
+
+	// Jiabaida BMS — no ConfigParser (binary protocol, handled in ParseData)
+	registry.Register(&JiabaidaBMSDriver{})
 }

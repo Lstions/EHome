@@ -192,16 +192,43 @@ func TestOnConfigChange_PushToAffectedCollector(t *testing.T) {
 
 // === OnServerStartup tests ===
 
-func TestOnServerStartup_NoPush(t *testing.T) {
+func TestOnServerStartup_PushesToOnlineNodes(t *testing.T) {
 	mgr, gate, _ := newTestManagerAndGate(t)
 
 	// Create online nodes
 	mgr.db.Create(&models.Node{NodeID: "5001", Status: "online"})
 	mgr.db.Create(&models.Node{NodeID: "5002", Status: "online"})
+	// Also create an offline node — should NOT get a decision
+	mgr.db.Create(&models.Node{NodeID: "5003", Status: "offline"})
+
+	decisions := gate.OnServerStartup()
+	if len(decisions) != 2 {
+		t.Fatalf("expected 2 decisions for 2 online nodes, got %d", len(decisions))
+	}
+	deviceIDs := make(map[string]bool)
+	for _, d := range decisions {
+		if d.Action != SyncActionFull {
+			t.Fatalf("expected SyncActionFull for %s, got %d", d.DeviceID, d.Action)
+		}
+		if d.Reason != "server_startup" {
+			t.Fatalf("expected server_startup reason for %s, got %s", d.DeviceID, d.Reason)
+		}
+		deviceIDs[d.DeviceID] = true
+	}
+	if !deviceIDs["5001"] || !deviceIDs["5002"] {
+		t.Fatalf("missing expected device in decisions, got: %v", deviceIDs)
+	}
+}
+
+func TestOnServerStartup_NoOnlineNodes(t *testing.T) {
+	mgr, gate, _ := newTestManagerAndGate(t)
+
+	// Only offline nodes
+	mgr.db.Create(&models.Node{NodeID: "5003", Status: "offline"})
 
 	decisions := gate.OnServerStartup()
 	if len(decisions) != 0 {
-		t.Fatalf("expected 0 decisions (v2.2: wait for StatusReport), got %d", len(decisions))
+		t.Fatalf("expected 0 decisions for 0 online nodes, got %d", len(decisions))
 	}
 }
 

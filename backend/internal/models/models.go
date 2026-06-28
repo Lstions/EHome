@@ -89,6 +89,7 @@ type EdgeDevice struct {
 	InitState      string         `gorm:"size:20;default:pending" json:"init_state"` // v2.2 新增 (G6 准备)
 	InitLastStep   int            `gorm:"default:0" json:"init_last_step"`           // v2.2 新增
 	InitTotalSteps int            `gorm:"default:0" json:"init_total_steps"`         // v2.2 新增
+	CommandIntervals json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"command_intervals"` // per-command polling intervals
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`

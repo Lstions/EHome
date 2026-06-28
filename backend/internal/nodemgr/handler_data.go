@@ -205,7 +205,7 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		// Convert drivers.SensorData to parser.Field
 		sensorData = make([]parser.Field, len(drvData))
 		for i, sd := range drvData {
-			sensorData[i] = parser.Field{Name: sd.Name, Value: sd.Value, Unit: sd.Unit}
+			sensorData[i] = parser.Field{Name: sd.Name, Value: sd.Value, Unit: sd.Unit, StringValue: sd.StringValue}
 		}
 		parseMethod = fmt.Sprintf("Driver(%s)", device.Type)
 	}

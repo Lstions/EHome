@@ -7,9 +7,10 @@ import (
 
 // SensorData represents parsed sensor data
 type SensorData struct {
-	Name  string
-	Value float64
-	Unit  string
+	Name        string
+	Value       float64
+	Unit        string
+	StringValue string // optional string data (hardware version, serial number, etc.)
 }
 
 // Driver is the interface for device drivers

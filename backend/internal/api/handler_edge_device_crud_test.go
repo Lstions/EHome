@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -40,6 +41,8 @@ func setupEdgeDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
+	// Register drivers so createTemplatesFromDriver works in tests
+	drivers.RegisterBuiltInDrivers(drivers.GlobalRegistry())
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
 	registerEdgeDeviceRoutes(v1, db, mgr)
 	return r, db

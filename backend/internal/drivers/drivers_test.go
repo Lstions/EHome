@@ -434,7 +434,7 @@ func TestRegistry_RegisterOverwrite(t *testing.T) {
 // === Global registry ===
 
 func TestGlobalRegistry(t *testing.T) {
-	// Register built-in drivers
+	// Register built-in drivers (generic path: BMP280, LKTH01, SN3000, PRS3001)
 	RegisterBuiltInDrivers(GlobalRegistry())
 
 	types := List()
@@ -457,8 +457,8 @@ func TestRegisterBuiltInDriversWithParsers(t *testing.T) {
 	// With nil/empty parser configs
 	RegisterBuiltInDriversWithParsers(reg, nil)
 	types := reg.List()
-	if len(types) != 4 {
-		t.Errorf("expected 4 drivers, got %d", len(types))
+	if len(types) != 5 {
+		t.Errorf("expected 5 drivers, got %d", len(types))
 	}
 }
 
@@ -472,8 +472,8 @@ func TestRegisterBuiltInDriversWithParsers_ValidParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 4 {
-		t.Errorf("expected 4 drivers, got %d", len(types))
+	if len(types) != 5 {
+		t.Errorf("expected 5 drivers, got %d", len(types))
 	}
 }
 
@@ -487,8 +487,8 @@ func TestRegisterBuiltInDriversWithParsers_InvalidParser(t *testing.T) {
 
 	// Should still register the driver (just without ConfigParser)
 	types := reg.List()
-	if len(types) != 4 {
-		t.Errorf("expected 4 drivers even with invalid parser, got %d", len(types))
+	if len(types) != 5 {
+		t.Errorf("expected 5 drivers even with invalid parser, got %d", len(types))
 	}
 }
 
@@ -501,8 +501,8 @@ func TestRegisterBuiltInDriversWithParsers_EmptyParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 4 {
-		t.Errorf("expected 4 drivers, got %d", len(types))
+	if len(types) != 5 {
+		t.Errorf("expected 5 drivers, got %d", len(types))
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
+	"ehome/backend/internal/drivers"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 )
@@ -335,12 +336,51 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 				grpEnc.EncodeVarint(1, uint64(edge.ID))
 				grpEnc.EncodeVarint(2, parseHardwareID(edge.HardwareID))
 
-				// Each edge device has one command entry
-				cmdEnc := frame.SubEncoder()
-				cmdEnc.EncodeVarint(1, findTemplateID(ch, edge)) // template_id
-				cmdEnc.EncodeVarint(2, uint64(edge.IntervalMs))  // interval_ms
-				cmdEnc.EncodeBool(3, edge.Enabled)
-				grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+				// Per-command intervals: check driver CommandTemplates for multi-command support
+				cmdIntervals := make(map[string]int)
+				if len(edge.CommandIntervals) > 0 {
+					json.Unmarshal(edge.CommandIntervals, &cmdIntervals)
+				}
+				drv, _ := drivers.Get(edge.Type)
+				driverCmds := getCommandTemplatesFromDriver(drv)
+
+				if len(driverCmds) > 0 {
+					// Multiple commands: encode only Schedulable commands
+					for _, t := range driverCmds {
+						if !t.Schedulable {
+							continue // one-shot trigger, not for ConfigManifest
+						}
+						interval := t.IntervalMs
+						if v, ok := cmdIntervals[t.ID]; ok {
+							interval = v
+						}
+						if interval <= 0 {
+							continue // disabled
+						}
+						tmplID := findTemplateIDForCommand(templates, t.WriteData)
+						if tmplID == 0 {
+							logger.Warnf("[%s] No ConfigTemplate found for command %s (write_data=%s), skipping",
+								deviceID, t.ID, t.WriteData)
+							continue
+						}
+						cmdEnc := frame.SubEncoder()
+						cmdEnc.EncodeVarint(1, tmplID)
+						cmdEnc.EncodeVarint(2, uint64(interval))
+						cmdEnc.EncodeBool(3, true)
+						grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+					}
+				} else {
+					// Single command: use edge default interval
+					interval := edge.IntervalMs
+					if v, ok := cmdIntervals["default"]; ok {
+						interval = v
+					}
+					cmdEnc := frame.SubEncoder()
+					cmdEnc.EncodeVarint(1, findTemplateID(ch, edge))
+					cmdEnc.EncodeVarint(2, uint64(interval))
+					cmdEnc.EncodeBool(3, edge.Enabled)
+					grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+				}
 
 				subEnc.EncodeSubFrame(9, grpEnc.Bytes())
 			}
@@ -412,4 +452,31 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			"last_sync_id":      decision.SyncID,
 		})
 	}
+}
+
+// getCommandTemplatesFromDriver returns command templates from a driver, or nil.
+func getCommandTemplatesFromDriver(drv drivers.Driver) []drivers.CommandTemplate {
+	if drv == nil {
+		return nil
+	}
+	if provider, ok := drv.(drivers.CommandTemplateProvider); ok {
+		return provider.GetCommandTemplates()
+	}
+	return nil
+}
+
+// findTemplateIDForCommand finds a ConfigTemplate ID that matches the given write_data hex.
+// Returns 0 if no matching template is found — the caller should skip that command.
+func findTemplateIDForCommand(templates []models.ConfigTemplate, writeData string) uint64 {
+	normalized := strings.ToUpper(strings.TrimSpace(writeData))
+	if normalized == "" {
+		return 0
+	}
+	for _, t := range templates {
+		tWrite := strings.ToUpper(strings.TrimSpace(t.WriteData))
+		if tWrite == normalized {
+			return uint64(t.ID)
+		}
+	}
+	return 0 // no match — caller must skip this command
 }

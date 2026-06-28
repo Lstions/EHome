@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -27,51 +28,65 @@ var operationNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // executeLimiter limits concurrent /execute read operations to prevent resource exhaustion.
 var executeLimiter = make(chan struct{}, 20)
 
-// getDefaultTemplateParams returns default ConfigTemplate parameters (write_data, read_length, delay_ms)
-// for a given device type. The hardwareID is used to build Modbus slave address in the command.
-// Returns ("", 0, 0) if no defaults are known for the device type.
-func getDefaultTemplateParams(deviceType string, hardwareID string) (string, uint32, uint32) {
-	// Normalize device type for matching
-	dt := strings.ToLower(strings.TrimSpace(deviceType))
-
-	// Resolve Modbus slave address from hardware_id (default 1 if not set)
-	slaveAddr := uint8(1)
-	if v := parseHardwareIDUint(hardwareID); v > 0 && v <= 247 {
-		slaveAddr = uint8(v)
-	}
-
-	switch dt {
-	// Modbus RTU devices — SN-3000 wind direction sensor
-	case "sn3000", "wind_direction", "wind":
-		// Modbus Read Holding Registers: addr=slaveAddr, func=0x03, start=0x0000, count=0x0002
-		// Command: [slaveAddr][03][00][00][00][02][CRC16]
-		writeData := fmt.Sprintf("%02X0300000002", slaveAddr)
-		// Response: [addr][func][byte_count=4][reg0_hi][reg0_lo][reg1_hi][reg1_lo][crc_lo][crc_hi] = 9 bytes
-		return writeData, 9, 100
-
-	// Modbus RTU devices — LK-TH01 temperature/humidity sensor
-	case "lk_th01", "lk-th01", "temperature_humidity", "temp_humidity":
-		// Modbus Read Holding Registers: addr=slaveAddr, func=0x03, start=0x0000, count=0x0002
-		writeData := fmt.Sprintf("%02X0300000002", slaveAddr)
-		// Response: [addr][func][byte_count=4][temp_hi][temp_lo][hum_hi][hum_lo][crc_lo][crc_hi] = 9 bytes
-		return writeData, 9, 100
-
-	// I2C devices — BMP280 temperature/pressure sensor
-	case "bmp280", "bme280":
-		// I2C read: write register address 0xF7 (pressure_msb), read 6 bytes of data
-		// For I2C, write_data is just the register address byte(s)
-		return "F7", 6, 100
-
-	default:
-		// For unknown device types, try to generate a generic Modbus read command
-		// if the hardware_id looks like a Modbus address
-		if slaveAddr > 1 || hardwareID != "" {
-			// Generic Modbus Read Holding Registers: start=0x0000, count=0x0001
-			writeData := fmt.Sprintf("%02X0300000001", slaveAddr)
-			return writeData, 7, 100
+// driver creates ConfigTemplates from the device driver's CommandTemplates (single source of truth).
+// Falls back to getTemplateParamsFromDeviceConfig for legacy devices without a driver.
+func createTemplatesFromDriver(tx *gorm.DB, ch *models.Channel, dev *models.EdgeDevice) error {
+	drv, err := drivers.Get(dev.Type)
+	if err != nil {
+		// No driver registered — try legacy DeviceConfig-based fallback
+		if dev.DeviceConfigID > 0 {
+			var dc models.DeviceConfig
+			if err2 := tx.First(&dc, dev.DeviceConfigID).Error; err2 == nil {
+				writeData, readLength, delayMs := getTemplateParamsFromDeviceConfig(dc, dev.HardwareID)
+				if writeData != "" {
+					return createSingleTemplate(tx, ch, writeData, readLength, delayMs)
+				}
+			}
 		}
-		return "", 0, 0
+		return nil // no templates to create — that's OK for unregistered device types
 	}
+
+	provider, ok := drv.(drivers.CommandTemplateProvider)
+	if !ok {
+		return nil // driver exists but doesn't provide templates
+	}
+
+	created := 0
+	for _, cmd := range provider.GetCommandTemplates() {
+		if !cmd.Schedulable {
+			continue // one-shot triggers don't need ConfigTemplates
+		}
+		if err := createSingleTemplate(tx, ch, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
+			return fmt.Errorf("failed to create template for command %s: %w", cmd.ID, err)
+		}
+		created++
+	}
+	logger.Infof("[edge-device-create] Created %d ConfigTemplates for type=%s via driver", created, dev.Type)
+	return nil
+}
+
+// createSingleTemplate inserts one ConfigTemplate and appends its ID to the channel's template_ids.
+func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, readLength uint32, delayMs uint32) error {
+	if writeData == "" {
+		return nil
+	}
+	tmpl := models.ConfigTemplate{
+		NodeID:     ch.NodeID,
+		WriteData:  writeData,
+		ReadLength: readLength,
+		DelayMs:    delayMs,
+	}
+	if err := tx.Create(&tmpl).Error; err != nil {
+		return err
+	}
+	newTmplID := strconv.FormatUint(uint64(tmpl.ID), 10)
+	if err := tx.Model(ch).Update("template_ids",
+		gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newTmplID, newTmplID),
+	).Error; err != nil {
+		return err
+	}
+	logger.Infof("[edge-device-create] ConfigTemplate id=%d write_data=%s channel=%d", tmpl.ID, writeData, ch.ID)
+	return nil
 }
 
 // getTemplateParamsFromDeviceConfig attempts to derive ConfigTemplate parameters
@@ -155,7 +170,26 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// List edge devices (v2.2 path for /devices)
 	v1.GET("/edge-devices", func(c *gin.Context) {
 		var devices []models.EdgeDevice
-		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").Find(&devices)
+		query := db.Preload("Channel").Preload("Node").Preload("DeviceConfig")
+
+		// Apply optional node_id filter (frontend sends as collector_id)
+		nodeID := c.Query("node_id")
+		if nodeID == "" {
+			nodeID = c.Query("collector_id")
+		}
+		if nodeID != "" {
+			query = query.Where("node_id = ?", nodeID)
+		}
+
+		// Apply optional device_type & status filters
+		if dt := c.Query("device_type"); dt != "" {
+			query = query.Where("type = ?", dt)
+		}
+		if st := c.Query("status"); st != "" {
+			query = query.Where("status = ?", st)
+		}
+
+		query.Find(&devices)
 
 		// Enrich each device with latest sensor data from unified_data (C1 fix: batch query)
 		type lastDataEntry struct {
@@ -254,44 +288,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				return err
 			}
 
-			// Step 2: Cascade — create ConfigTemplate and link to channel's template_ids
+			// Step 2: Create ConfigTemplates from driver's CommandTemplates (single source of truth)
 			var ch models.Channel
 			if err := tx.First(&ch, dev.ChannelID).Error; err == nil {
-				// Determine default Modbus/I2C command parameters based on device type
-				writeData, readLength, delayMs := getDefaultTemplateParams(dev.Type, dev.HardwareID)
-
-				// If DeviceConfigID is set, try to derive params from DeviceConfig.Connection
-				if writeData == "" && dev.DeviceConfigID > 0 {
-					var dc models.DeviceConfig
-					if err := tx.First(&dc, dev.DeviceConfigID).Error; err == nil {
-						writeData, readLength, delayMs = getTemplateParamsFromDeviceConfig(dc, dev.HardwareID)
-					}
-				}
-
-				// Only create ConfigTemplate if we have a valid write_data
-				if writeData != "" {
-					tmpl := models.ConfigTemplate{
-						NodeID:     ch.NodeID,
-						WriteData:  writeData,
-						ReadLength: readLength,
-						DelayMs:    delayMs,
-					}
-					if err := tx.Create(&tmpl).Error; err != nil {
-						logger.Warnf("[edge-device-create] Failed to create ConfigTemplate for edge_device id=%d: %v", dev.ID, err)
-						return err // rollback entire transaction
-					}
-					// Step 3: Append new template ID to channel's template_ids atomically (SQL-level)
-					newTmplID := strconv.FormatUint(uint64(tmpl.ID), 10)
-					if err := tx.Model(&ch).Update("template_ids",
-						gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newTmplID, newTmplID),
-					).Error; err != nil {
-						logger.Warnf("[edge-device-create] Failed to update channel template_ids for edge_device id=%d: %v", dev.ID, err)
-						return err // rollback entire transaction
-					}
-					logger.Infof("[edge-device-create] Created ConfigTemplate id=%d for edge_device id=%d type=%s, channel %d (appended template_id=%s)",
-						tmpl.ID, dev.ID, dev.Type, ch.ID, newTmplID)
-				} else {
-					logger.Infof("[edge-device-create] No default template params for type=%s, skipping ConfigTemplate creation", dev.Type)
+				if err := createTemplatesFromDriver(tx, &ch, &dev); err != nil {
+					logger.Warnf("[edge-device-create] Failed to create ConfigTemplates: %v", err)
+					return err
 				}
 			}
 
@@ -939,7 +941,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 					// Replace placeholders
 					replacer := strings.NewReplacer(
 						"{addr}", fmt.Sprintf("%02X", newAddr),
-						"{addr_hi}", fmt.Sprintf("%02X", newAddr>>8),
+						"{addr_hi}", fmt.Sprintf("%02X", uint16(newAddr)>>8),
 						"{addr_lo}", fmt.Sprintf("%02X", newAddr&0xFF),
 						"{old_addr}", fmt.Sprintf("%02X", oldAddr),
 					)

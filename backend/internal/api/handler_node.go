@@ -307,8 +307,14 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
-		// Trigger config sync via node manager
-		nodeMgr.SyncGate().OnServerStartup() // or specific node sync
+		// Force a full config push to this node (bypass hash match)
+		decisions := nodeMgr.SyncGate().OnServerStartup()
+		for _, d := range decisions {
+			if d.DeviceID == node.NodeID {
+				nodeMgr.SendConfigManifestWithDecision(d)
+				break
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": node.NodeID, "status": "syncing"}})
 	})
 

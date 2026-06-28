@@ -9,9 +9,10 @@ import (
 
 // Field represents a single parsed sensor field.
 type Field struct {
-	Name  string
-	Value float64
-	Unit  string
+	Name        string
+	Value       float64
+	Unit        string
+	StringValue string // optional string data (hardware version, serial number, etc.)
 }
 
 // Parser is the unified interface for all data parsing.

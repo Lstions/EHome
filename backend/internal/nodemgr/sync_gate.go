@@ -196,9 +196,25 @@ func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
 }
 
 // OnServerStartup returns decisions for all online nodes.
-// v2.2: returns nil — wait for devices to send StatusReport, then decide() auto-judges.
+// Pushes full config to every online device — ensures devices get
+// any config changes that happened while the server was down.
 func (g *SyncGate) OnServerStartup() []SyncDecision {
-	return nil
+	deviceIDs := g.mgr.GetOnlineDeviceIDs()
+	decisions := make([]SyncDecision, 0, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		syncID := uuid.New().String()
+		serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
+		d := SyncDecision{
+			Action:     SyncActionFull,
+			Reason:     "server_startup",
+			SyncID:     syncID,
+			ManifestID: serverHash.ManifestID,
+			DeviceID:   deviceID,
+		}
+		recordDecision(d)
+		decisions = append(decisions, d)
+	}
+	return decisions
 }
 
 // OnConfigQuery handles an explicit config query from a device (0x13).

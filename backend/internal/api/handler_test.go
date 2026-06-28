@@ -1054,34 +1054,38 @@ func TestParseHardwareIDUint(t *testing.T) {
 	}
 }
 
-// ==================== getDefaultTemplateParams Tests ====================
+// ==================== createSingleTemplate Tests ====================
 
-func TestGetDefaultTemplateParams(t *testing.T) {
-	tests := []struct {
-		deviceType  string
-		hardwareID  string
-		wantNonZero bool // expect writeData != ""
-	}{
-		{"sn3000", "1", true},
-		{"bmp280", "", true},
-		{"lk_th01", "1", true},
-		{"unknown", "5", true},         // generic modbus with hardwareID
-		{"unknown", "", false},          // no defaults for unknown
-		{"wind_direction", "1", true},
-	}
-	for _, tt := range tests {
-		writeData, readLength, delayMs := getDefaultTemplateParams(tt.deviceType, tt.hardwareID)
-		if tt.wantNonZero && writeData == "" {
-			t.Errorf("getDefaultTemplateParams(%q, %q): expected non-empty writeData", tt.deviceType, tt.hardwareID)
+func TestCreateSingleTemplate(t *testing.T) {
+	db := setupTestDB(t)
+	node := models.Node{NodeID: "test-node-1", Name: "Test Node", Status: "online"}
+	db.Create(&node)
+	ch := models.Channel{NodeID: node.NodeID, HardwareType: "uart", HardwareID: "UART0"}
+	db.Create(&ch)
+
+	t.Run("valid template", func(t *testing.T) {
+		err := db.Transaction(func(tx *gorm.DB) error {
+			return createSingleTemplate(tx, &ch, "DDA50300FFFD77", 60, 100)
+		})
+		if err != nil {
+			t.Fatalf("createSingleTemplate failed: %v", err)
 		}
-		if !tt.wantNonZero && writeData != "" {
-			t.Errorf("getDefaultTemplateParams(%q, %q): expected empty writeData, got %q", tt.deviceType, tt.hardwareID, writeData)
+		// Verify template was created
+		var tmpl models.ConfigTemplate
+		if err := db.Where("write_data = ?", "DDA50300FFFD77").First(&tmpl).Error; err != nil {
+			t.Fatalf("template not found: %v", err)
 		}
-		if writeData != "" && readLength == 0 {
-			t.Errorf("getDefaultTemplateParams(%q, %q): expected non-zero readLength", tt.deviceType, tt.hardwareID)
+		if tmpl.ReadLength != 60 || tmpl.DelayMs != 100 {
+			t.Errorf("unexpected template params: read_length=%d delay_ms=%d", tmpl.ReadLength, tmpl.DelayMs)
 		}
-		if writeData != "" && delayMs == 0 {
-			t.Errorf("getDefaultTemplateParams(%q, %q): expected non-zero delayMs", tt.deviceType, tt.hardwareID)
+	})
+
+	t.Run("empty write_data", func(t *testing.T) {
+		err := db.Transaction(func(tx *gorm.DB) error {
+			return createSingleTemplate(tx, &ch, "", 10, 100)
+		})
+		if err != nil {
+			t.Fatalf("createSingleTemplate with empty write_data should not error: %v", err)
 		}
-	}
+	})
 }
