@@ -216,7 +216,7 @@ import { channelApi, type Channel } from '@/api/channel'
 import { nodeApi } from '@/api/node'
 
 interface Props {
-  collectorId: number
+  collectorId: string
   modelValue: boolean
   capabilities?: any
   initialData?: any | null
@@ -450,8 +450,9 @@ const handleSubmit = async () => {
       const parity = parity_map[form.config.parity] ?? 0
       const flow_map: Record<string, number> = { none: 0, rts: 1, cts: 2, 'rts/cts': 3 }
       const flow = flow_map[form.config.flow_control] ?? 0
-      // bus_config: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)][data_bits(1B)][stop_bits(1B)][parity(1B)][flow(1B)]
-      const buf = new Uint8Array(10)
+      // bus_config layout (10 bytes):
+       // [0]=tx_pin [1]=rx_pin [2-5]=baud(BE) [6]=data_bits [7]=stop_bits [8]=parity [9]=flow
+       const buf = new Uint8Array(10)
       buf[0] = tx_pin
       buf[1] = rx_pin
       buf[2] = (baud >> 24) & 0xFF
@@ -462,14 +463,14 @@ const handleSubmit = async () => {
       buf[7] = stop_bits
       buf[8] = parity
       buf[9] = flow
-      busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
-      // Also store in config JSON for readability
-      config.baud_rate = baud
-      config.data_bits = data_bits
-      config.stop_bits = stop_bits
-      config.parity = form.config.parity || 'none'
-      config.flow_control = form.config.flow_control || 'none'
-    } else if (form.hardware_type === 'i2c' && hw) {
+       busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
+       // Also store in config JSON for readability
+       config.baud_rate = baud
+       config.data_bits = data_bits
+       config.stop_bits = stop_bits
+       config.parity = form.config.parity || 'none'
+       config.flow_control = form.config.flow_control || 'none'
+       } else if (form.hardware_type === 'i2c' && hw) {
       const sda = form.config.sda_pin || hw.default_sda_pin
       const scl = form.config.scl_pin || hw.default_scl_pin
       const addr = parseInt(form.address, 16) || 0
@@ -564,34 +565,29 @@ watch(showDialog, (open) => {
     }
     form.config = { ...rawConfig }
     // Also parse bus_config hex for UART to extract params not in config JSON
-    if (form.hardware_type === 'uart' && editingChannel.value.bus_config && typeof editingChannel.value.bus_config === 'string') {
-      const hex = editingChannel.value.bus_config
-      if (!hex.startsWith('{') && hex.length >= 6) {
-        // bus_config hex: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)]
-        try {
-          const tx = parseInt(hex.substring(0, 2), 16)
-          const rx = parseInt(hex.substring(2, 4), 16)
-          const baud = parseInt(hex.substring(4, 12), 16)
-          if (!form.config.tx_pin) form.config.tx_pin = tx
-          if (!form.config.rx_pin) form.config.rx_pin = rx
-          if (!form.config.baud_rate) form.config.baud_rate = baud
-        } catch { /* ignore decode errors */ }
+      if (form.hardware_type === 'uart' && editingChannel.value.bus_config && typeof editingChannel.value.bus_config === 'string') {
+        const hex = editingChannel.value.bus_config
+        if (!hex.startsWith('{') && hex.length >= 6) {
+          // bus_config hex: [tx_pin(1B)][rx_pin(1B)][baud(4B BE)][...optional extended fields]
+          try {
+            const tx = parseInt(hex.substring(0, 2), 16)
+            const rx = parseInt(hex.substring(2, 4), 16)
+            if (!form.config.tx_pin) form.config.tx_pin = tx
+            if (!form.config.rx_pin) form.config.rx_pin = rx
+            if (hex.length >= 12) {
+              const baud = parseInt(hex.substring(4, 12), 16)
+              if (!form.config.baud_rate) form.config.baud_rate = baud
+            }
+          } catch { /* ignore decode errors */ }
+        }
       }
-    }
-    // Fill defaults for missing fields so form doesn't appear empty
-    if (form.hardware_type === 'uart') {
-      if (!form.config.data_bits) form.config.data_bits = 8
-      if (!form.config.stop_bits) form.config.stop_bits = 1
-      if (!form.config.parity) form.config.parity = 'none'
-      if (!form.config.flow_control) form.config.flow_control = 'none'
-    }
-    if (form.hardware_type === 'spi' && editingChannel.value.address) {
-      form.config.cs_pin = parseInt(editingChannel.value.address)
-    }
-  } else if (props.presetHardwareType) {
-    // 预选模式：从硬件卡片传入
-    form.hardware_type = props.presetHardwareType
-    form.hardware_id = props.presetHardwareId || ''
+      // Fill defaults for UART fields not covered by bus_config
+      if (form.hardware_type === 'uart') {
+        if (!form.config.data_bits) form.config.data_bits = 8
+        if (!form.config.stop_bits) form.config.stop_bits = 1
+        if (!form.config.parity) form.config.parity = 'none'
+        if (!form.config.flow_control) form.config.flow_control = 'none'
+      }
     form.name = ''
     form.address = ''
     form.enabled = true

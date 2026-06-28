@@ -110,12 +110,12 @@ import { formatFileSize } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
   visible: boolean
-  collectorId: number
+  collectorId: string
   collectorModel?: string
   currentFirmwareVersion?: string
 }>(), {
   visible: false,
-  collectorId: 0,
+  collectorId: '',
   collectorModel: 'ESP32-S3',
   currentFirmwareVersion: ''
 })

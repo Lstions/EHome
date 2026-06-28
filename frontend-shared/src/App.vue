@@ -1,5 +1,5 @@
 <template>
-  <el-config-provider :locale="locale" :theme="theme">
+  <el-config-provider :locale="locale">
     <ErrorBoundary>
       <NetworkBanner />
       <router-view />
@@ -8,7 +8,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
@@ -17,10 +17,6 @@ import NetworkBanner from '@/components/common/NetworkBanner.vue'
 const themeStore = useThemeStore()
 
 const locale = zhCn
-
-const theme = computed(() => {
-  return themeStore.mode === 'dark' ? 'dark' : 'light'
-})
 
 // 监听主题变化，更新 document 类名
 watch(() => themeStore.mode, (mode) => {

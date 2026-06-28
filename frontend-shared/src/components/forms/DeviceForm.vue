@@ -140,7 +140,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 const props = withDefaults(defineProps<{
   visible: boolean
   deviceId?: number | null
-  collectorId?: number | null
+  collectorId?: string | null
 }>(), {
   visible: false,
   deviceId: null,
