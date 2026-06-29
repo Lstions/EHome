@@ -40,7 +40,20 @@
 
       <el-descriptions :column="2" border>
         <el-descriptions-item label="节点名称">
-          {{ collector.name }}
+          <div class="editable-name">
+            <span v-if="!editingName">{{ collector.name || '(未命名)' }}</span>
+            <el-input
+              v-else
+              v-model="editNameValue"
+              size="small"
+              style="width: 180px;"
+              @keyup.enter="saveName"
+              @keyup.escape="cancelEditName"
+            />
+            <el-icon v-if="!editingName" class="edit-icon" @click="startEditName"><Edit /></el-icon>
+            <el-button v-else type="primary" size="small" link @click="saveName">保存</el-button>
+            <el-button v-if="editingName" size="small" link @click="cancelEditName">取消</el-button>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="设备ID">
           {{ collector.node_id }}
@@ -222,35 +235,46 @@
       <template v-else>
         <el-empty v-if="devices.length === 0" description="暂无设备" />
         <el-table v-else :data="devices" stripe @row-click="handleDeviceClick" style="cursor: pointer;">
-          <el-table-column prop="name" label="设备名称" min-width="160" />
-          <el-table-column label="设备类型" width="150">
+          <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip />
+          <el-table-column label="类型" width="130">
             <template #default="{ row }">
               {{ getDeviceTypeText(row.device_type) }}
             </template>
           </el-table-column>
-          <el-table-column label="通信通道" width="160">
+          <el-table-column label="地址" width="70">
             <template #default="{ row }">
-              <div v-if="getChannelForDevice(row)" class="device-channel-cell" @click="handleEditChannel(getChannelForDevice(row))">
-                <el-tag size="default" type="primary" effect="light" class="device-channel-tag">
-                  <div class="device-channel-name">{{ getChannelForDevice(row)?.name || '未命名' }}</div>
-                  <div class="device-channel-bus">
-                    {{ getChannelForDevice(row)?.hardware_type?.toUpperCase() }} {{ getChannelForDevice(row)?.hardware_id }}
-                  </div>
-                </el-tag>
-              </div>
-              <span v-else class="device-no-channel">
-                <el-tag size="small" type="info" effect="plain">
-                  无通道
-                </el-tag>
-              </span>
+              <code>{{ row.hardware_id || '-' }}</code>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
+          <el-table-column label="通道" width="140">
+            <template #default="{ row }">
+              <div v-if="getChannelForDevice(row)" class="device-channel-cell" @click="handleEditChannel(getChannelForDevice(row))">
+                <el-tag size="small" type="primary" effect="light">
+                  {{ getChannelForDevice(row)?.hardware_type?.toUpperCase() }} {{ getChannelForDevice(row)?.hardware_id }}
+                </el-tag>
+              </div>
+              <span v-else class="text-muted">无</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="最新数据" min-width="160">
+            <template #default="{ row }">
+              <span v-if="row.last_data && Object.keys(row.last_data).length > 0">
+                {{ formatLastData(row.last_data) }}
+              </span>
+              <span v-else class="text-muted">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="80">
             <template #default="{ row }">
               <StatusBadge :status="row.status" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="100">
+          <el-table-column label="最后数据时间" width="160">
+            <template #default="{ row }">
+              <span class="text-muted">{{ formatTime(row.last_data_at) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="80" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click.stop="handleViewDevice(row)">
                 查看
@@ -342,7 +366,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Refresh, RefreshRight, Link, Connection, Warning } from '@element-plus/icons-vue'
+import { Upload, Refresh, RefreshRight, Link, Connection, Warning, Edit } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
@@ -355,6 +379,7 @@ import { useDmaStore } from '@/stores/dma'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
+import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
 
 const router = useRouter()
@@ -374,6 +399,36 @@ const syncingConfig = ref(false)
 const showOTADialog = ref(false)
 const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
+
+// 节点名称编辑
+const editingName = ref(false)
+const editNameValue = ref('')
+const savingName = ref(false)
+
+const startEditName = () => {
+  editNameValue.value = collector.value?.name || ''
+  editingName.value = true
+}
+
+const cancelEditName = () => {
+  editingName.value = false
+  editNameValue.value = ''
+}
+
+const saveName = async () => {
+  if (!collector.value) return
+  savingName.value = true
+  try {
+    await nodeApi.update(collector.value.id, { name: editNameValue.value })
+    collector.value.name = editNameValue.value
+    editingName.value = false
+    ElMessage.success('节点名称已更新')
+  } catch (error: any) {
+    ElMessage.error('保存失败: ' + (error.message || '未知错误'))
+  } finally {
+    savingName.value = false
+  }
+}
 const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
 
 // DMA 通道 — v2.5: 统一由 dmaStore 管理（只读展示，绑定操作在 ChannelPanel 中）
@@ -614,6 +669,18 @@ const formatTime = (time: string | null | undefined) => {
   return date.toLocaleString('zh-CN')
 }
 
+const formatLastData = (data: Record<string, any>): string => {
+  if (!data) return '-'
+  const entries = Object.entries(data).filter(([k]) => k !== 'error_code' && k !== 'raw_data')
+  if (entries.length === 0) return '-'
+  // Show up to 3 key=value pairs
+  return entries.slice(0, 3).map(([k, v]) => {
+    const unit = sensorUnitMap[k] || ''
+    const name = sensorNameMap[k] || k
+    return `${name}: ${typeof v === 'number' ? v.toFixed(v < 10 ? 2 : 0) : v}${unit ? unit : ''}`
+  }).join('  ')
+}
+
 const formatOnlineDuration = (seconds: number) => {
   if (!seconds) return '-'
 
@@ -724,6 +791,27 @@ onUnmounted(() => {
 <style scoped>
 .collector-detail {
   padding: 0;
+}
+
+.editable-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.edit-icon {
+  cursor: pointer;
+  color: var(--el-text-color-secondary);
+  transition: color 0.2s;
+}
+
+.edit-icon:hover {
+  color: var(--el-color-primary);
+}
+
+.text-muted {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
 }
 
 .peripheral-section {

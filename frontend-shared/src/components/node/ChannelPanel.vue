@@ -21,9 +21,6 @@
                 <el-icon><Plus /></el-icon>
                 新建通道
               </el-button>
-              <el-button type="warning" size="small" @click="reconfigureDialogVisible = true" :disabled="collectorStatus !== 'online' || uartChannels.length === 0">
-                改波特率
-              </el-button>
             </div>
           </div>
 
@@ -102,6 +99,15 @@
                             <span class="channel-tag-name">{{ ch.name || '未命名' }}</span>
                             <span class="channel-tag-id">#{{ ch.id }}</span>
                           </el-tag>
+                          <el-button
+                            v-if="busType === 'uart' && getChannelsForHardware(busType, hw.id).length > 0 && collectorStatus === 'online'"
+                            size="small"
+                            link
+                            type="warning"
+                            @click="openReconfigure(getChannelsForHardware(busType, hw.id)[0])"
+                          >
+                            改波特率
+                          </el-button>
                           <el-button
                             v-if="isScannable(busType, hw)"
                             size="small"
@@ -245,6 +251,18 @@ const reconfigureForm = reactive({
   baudrate: 115200
 })
 const uartChannels = computed(() => allChannels.value.filter((ch: any) => ch.hardware_type === 'uart'))
+
+const openReconfigure = (channel: any) => {
+  reconfigureForm.channelId = channel.id
+  // Pre-fill current baud rate from channel config
+  try {
+    const cfg = typeof channel.config === 'string' ? JSON.parse(channel.config) : channel.config
+    if (cfg?.baud_rate) {
+      reconfigureForm.baudrate = cfg.baud_rate
+    }
+  } catch { /* ignore */ }
+  reconfigureDialogVisible.value = true
+}
 
 // 地址扫描
 const scanningHwId = ref<string | null>(null)
