@@ -127,17 +127,17 @@
                 <el-progress 
                   :percentage="deviceOnlinePercent" 
                   :stroke-width="20"
-                  :color="'var(--el-color-success)'"
+                  :color="'#67c23a'"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
                 </el-progress>
               </div>
               <div class="status-item">
                 <span class="status-label">离线</span>
-                <el-progress 
-                  :percentage="deviceOfflinePercent" 
+                <el-progress
+                  :percentage="deviceOfflinePercent"
                   :stroke-width="20"
-                  :color="'var(--el-color-danger)'"
+                  :color="'#f56c6c'"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
                 </el-progress>
@@ -160,17 +160,17 @@
                 <el-progress 
                   :percentage="collectorOnlinePercent" 
                   :stroke-width="20"
-                  :color="'var(--el-color-success)'"
+                  :color="'#67c23a'"
                 >
                   <span>{{ metrics?.collector?.online || 0 }}</span>
                 </el-progress>
               </div>
               <div class="status-item">
                 <span class="status-label">离线</span>
-                <el-progress 
-                  :percentage="collectorOfflinePercent" 
+                <el-progress
+                  :percentage="collectorOfflinePercent"
                   :stroke-width="20"
-                  :color="'var(--el-color-danger)'"
+                  :color="'#f56c6c'"
                 >
                   <span>{{ metrics?.collector?.offline || 0 }}</span>
                 </el-progress>

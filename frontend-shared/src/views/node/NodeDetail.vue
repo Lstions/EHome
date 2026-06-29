@@ -425,15 +425,15 @@ const handleEditChannel = (channel: any) => {
 }
 
 const getQualityColor = (quality: number) => {
-  if (quality >= 80) return 'var(--el-color-success)'
-  if (quality >= 60) return 'var(--el-color-warning)'
-  return 'var(--el-color-danger)'
+  if (quality >= 80) return '#67c23a'
+  if (quality >= 60) return '#e6a23c'
+  return '#f56c6c'
 }
 
 const getLatencyColor = (ms: number) => {
-  if (ms < 50) return 'var(--el-color-success)'
-  if (ms < 200) return 'var(--el-color-warning)'
-  return 'var(--el-color-danger)'
+  if (ms < 50) return '#67c23a'
+  if (ms < 200) return '#e6a23c'
+  return '#f56c6c'
 }
 
 const handlePing = async () => {

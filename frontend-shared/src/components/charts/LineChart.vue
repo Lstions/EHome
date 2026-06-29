@@ -54,7 +54,7 @@ const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
 
 // Default color palette
-const SERIES_COLORS = ['var(--el-color-primary)', 'var(--el-color-danger)', 'var(--el-color-warning)', 'var(--el-color-success)', 'var(--el-text-color-secondary)']
+const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399']
 
 const buildSeries = () => {
   // Multi-series mode: use props.series
