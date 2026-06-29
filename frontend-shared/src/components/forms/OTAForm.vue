@@ -106,6 +106,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import { firmwareApi, type Firmware } from '@/api/firmware'
+import { useFirmwareStore } from '@/stores/firmware'
 import { formatFileSize } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
@@ -179,14 +180,12 @@ const getModelName = (model: string): string => {
 }
 
 // 获取固件列表
+const firmwareStore = useFirmwareStore()
 const fetchFirmwares = async () => {
   firmwaresLoading.value = true
   try {
-    // 获取所有活跃固件，不按 model 过滤
-    const response = await firmwareApi.getList({
-      status: 'active'
-    })
-    firmwares.value = response.list || []
+    await firmwareStore.fetchList({ status: 'active' })
+    firmwares.value = firmwareStore.list
     
     if (firmwares.value.length === 0) {
       ElMessage.warning('暂无可用固件，请先上传固件')

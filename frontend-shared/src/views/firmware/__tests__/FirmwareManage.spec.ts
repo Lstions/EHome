@@ -6,13 +6,16 @@ import FirmwareManage from '../FirmwareManage.vue'
 vi.mock('@/api/firmware', () => ({
   firmwareApi: {
     getList: vi.fn(() => Promise.resolve({
-      data: { list: [
+      list: [
         { id: 1, version: '1.0.0', checksum: 'abc123', size_bytes: 1024, url: 'http://test/fw1.bin', created_at: '2024-01-01T00:00:00Z' },
         { id: 2, version: '1.1.0', checksum: 'def456', size_bytes: 2048, url: 'http://test/fw2.bin', created_at: '2024-01-02T00:00:00Z' },
-      ], total: 2 },
+      ],
+      total: 2,
     })),
     delete: vi.fn(() => Promise.resolve()),
     update: vi.fn(() => Promise.resolve()),
+    upload: vi.fn(() => Promise.resolve()),
+    getDownloadUrl: vi.fn(() => 'http://test/fw.bin'),
   },
 }))
 
@@ -74,7 +77,7 @@ describe('FirmwareManage.vue', () => {
 
   it('shows empty state when no firmware', async () => {
     const { firmwareApi } = await import('@/api/firmware')
-    vi.mocked(firmwareApi.getList).mockResolvedValueOnce({ data: { list: [], total: 0 } } as any)
+    vi.mocked(firmwareApi.getList).mockResolvedValueOnce({ list: [], total: 0 } as any)
     const wrapper = mount(FirmwareManage, { global: { stubs } })
     await flushPromises()
     expect(wrapper.find('.el-empty').exists() || wrapper.text()).toBeTruthy()

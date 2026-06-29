@@ -561,6 +561,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
@@ -576,6 +577,7 @@ const router = useRouter()
 const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 // 视图模式：card | table
 const viewMode = ref<'card' | 'table'>('card')
@@ -735,13 +737,11 @@ const fetchDevices = async () => {
     }
     if (typeFilter.value) params.device_type = typeFilter.value
     if (statusFilter.value) params.status = statusFilter.value
-    // Note: hardware_type is not directly supported by the API,
-    // so we handle it client-side in filteredDevices
-    const response = await edgeDeviceApi.getList(params)
-    devices.value = response.items || []
-    total.value = response.total || 0
+    await edgeDeviceStore.fetchList(params, true) // force=true for user-triggered refresh
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
     updateStats()
-  } catch (error: any) {
+  } catch {
     ElMessage.error('获取边缘设备列表失败')
   } finally {
     loading.value = false
@@ -936,9 +936,11 @@ const handleDelete = async (device: any) => {
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
     
-    await edgeDeviceApi.delete(device.id)
+    await edgeDeviceStore.deleteDevice(device.id)
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
+    updateStats()
     ElMessage.success('删除成功')
-    await fetchDevices()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
@@ -962,11 +964,12 @@ const handleBatchDelete = async () => {
     )
 
     const ids = selectedDevices.value.map(d => d.id)
-    const promises = ids.map(id => edgeDeviceApi.delete(id))
-    await Promise.all(promises)
-    ElMessage.success(`成功删除 ${ids.length} 个设备`)
+    await Promise.all(ids.map(id => edgeDeviceStore.deleteDevice(id)))
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
+    updateStats()
     selectedDevices.value = []
-    await fetchDevices()
+    ElMessage.success(`成功删除 ${ids.length} 个设备`)
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('批量删除失败')

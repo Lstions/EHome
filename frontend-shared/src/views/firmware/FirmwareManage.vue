@@ -152,7 +152,9 @@ import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled } from 
 import { ElMessage, ElMessageBox, type UploadInstance, type UploadProps } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
+import { useFirmwareStore } from '@/stores/firmware'
 
+const firmwareStore = useFirmwareStore()
 const firmwares = ref<Firmware[]>([])
 const loading = ref(false)
 const currentPage = ref(1)
@@ -192,12 +194,12 @@ const uploadRules = {
 const fetchFirmwares = async () => {
   loading.value = true
   try {
-    const response = await firmwareApi.getList({
+    await firmwareStore.fetchList({
       page: currentPage.value,
       page_size: pageSize.value
-    })
-    firmwares.value = response.list || []
-    total.value = response.total || 0
+    }, true)
+    firmwares.value = firmwareStore.list
+    total.value = firmwareStore.total
   } catch {
     ElMessage.error('获取固件列表失败')
   } finally {
@@ -221,10 +223,11 @@ const handleBatchDelete = async () => {
 
     batchDeleting.value = true
     const ids = selectedFirmwares.value.map(f => f.id)
-    await Promise.all(ids.map(id => firmwareApi.delete(id)))
+    await Promise.all(ids.map(id => firmwareStore.deleteFirmware(id)))
+    firmwares.value = firmwareStore.list
+    total.value = firmwareStore.total
     ElMessage.success(`已删除 ${count} 个固件`)
     selectedFirmwares.value = []
-    await fetchFirmwares()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('批量删除失败: ' + (error.message || '未知错误'))
@@ -243,9 +246,10 @@ const handleDelete = async (row: Firmware) => {
       { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
     )
 
-    await firmwareApi.delete(row.id)
+    await firmwareStore.deleteFirmware(row.id)
+    firmwares.value = firmwareStore.list
+    total.value = firmwareStore.total
     ElMessage.success('删除成功')
-    await fetchFirmwares()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
@@ -267,15 +271,15 @@ const handleEditSubmit = async () => {
   if (!editingFirmwareId.value) return
   editing.value = true
   try {
-    await firmwareApi.update(editingFirmwareId.value, {
+    await firmwareStore.update(editingFirmwareId.value, {
       version: editForm.version,
       target_model: editForm.target_model,
       changelog: editForm.changelog,
       stable: editForm.stable
     })
+    firmwares.value = firmwareStore.list
     ElMessage.success('更新成功')
     showEditDialog.value = false
-    await fetchFirmwares()
   } catch (error: any) {
     ElMessage.error(error.message || '更新失败')
   } finally {
@@ -349,7 +353,7 @@ const handleUpload = async () => {
     }
     formData.append('file', uploadForm.file)
 
-    await firmwareApi.upload(formData)
+    await firmwareStore.upload(formData)
     ElMessage.success('上传成功')
     showUploadDialog.value = false
     resetUploadForm()

@@ -372,7 +372,7 @@ import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
 import { nodeApi, type OTARecord } from '@/api/node'
-import { edgeDeviceApi } from '@/api/edgeDevice'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
@@ -386,6 +386,7 @@ const router = useRouter()
 const route = useRoute()
 const wsStore = useWebSocketStore()
 const dmaStore = useDmaStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 const collector = ref<any>(null)
 const devices = ref<any[]>([])
@@ -558,11 +559,11 @@ const fetchDevices = async () => {
 
   devicesLoading.value = true
   try {
-    const [deviceRes, channelRes] = await Promise.all([
-      edgeDeviceApi.getList({ collector_id: id, page: 1, page_size: 100 }),
+    const [channelRes] = await Promise.all([
+      edgeDeviceStore.fetchList({ node_id: id, page: 1, page_size: 100 }, true),
       channelApi.getList(id)
     ])
-    devices.value = deviceRes?.items || []
+    devices.value = edgeDeviceStore.list
     // 统一为数组
     channels.value = Array.isArray(channelRes)
       ? channelRes

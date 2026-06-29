@@ -241,6 +241,7 @@ import { Download, Connection } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import client from '@/api/client'
 import { getErrorInfo } from '@/utils/errorCode'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -372,13 +373,14 @@ const queryForm = reactive({
 })
 
 const wsStore = useWebSocketStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 let unsubscribeData: (() => void) | null = null
 
 const fetchDevices = async () => {
   try {
-    const response = await edgeDeviceApi.getList({ page_size: 500 })
-    deviceList.value = response.items
-  } catch (error: any) {
+    await edgeDeviceStore.fetchList({ page_size: 500 })
+    deviceList.value = edgeDeviceStore.list
+  } catch {
     ElMessage.error('获取设备列表失败')
   }
 }
