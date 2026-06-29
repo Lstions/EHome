@@ -21,9 +21,6 @@
                 <el-icon><Plus /></el-icon>
                 新建通道
               </el-button>
-              <el-button type="warning" size="small" @click="reconfigureDialogVisible = true" :disabled="collectorStatus !== 'online' || uartChannels.length === 0">
-                改波特率
-              </el-button>
             </div>
           </div>
 
@@ -102,6 +99,15 @@
                             <span class="channel-tag-name">{{ ch.name || '未命名' }}</span>
                             <span class="channel-tag-id">#{{ ch.id }}</span>
                           </el-tag>
+                          <el-button
+                            v-if="busType === 'uart' && getChannelsForHardware(busType, hw.id).length > 0 && collectorStatus === 'online'"
+                            size="small"
+                            link
+                            type="warning"
+                            @click="openReconfigure(getChannelsForHardware(busType, hw.id)[0])"
+                          >
+                            改波特率
+                          </el-button>
                           <el-button
                             v-if="isScannable(busType, hw)"
                             size="small"
@@ -245,6 +251,18 @@ const reconfigureForm = reactive({
   baudrate: 115200
 })
 const uartChannels = computed(() => allChannels.value.filter((ch: any) => ch.hardware_type === 'uart'))
+
+const openReconfigure = (channel: any) => {
+  reconfigureForm.channelId = channel.id
+  // Pre-fill current baud rate from channel config
+  try {
+    const cfg = typeof channel.config === 'string' ? JSON.parse(channel.config) : channel.config
+    if (cfg?.baud_rate) {
+      reconfigureForm.baudrate = cfg.baud_rate
+    }
+  } catch { /* ignore */ }
+  reconfigureDialogVisible.value = true
+}
 
 // 地址扫描
 const scanningHwId = ref<string | null>(null)
@@ -866,7 +884,7 @@ defineExpose({
 .bus-type-section {
   margin-bottom: 24px;
   padding: 16px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 8px;
 }
 
@@ -888,7 +906,7 @@ defineExpose({
 }
 
 .bus-count-badge {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   background: #f4f4f5;
   padding: 1px 8px;
@@ -963,7 +981,7 @@ defineExpose({
 }
 
 .param-hint {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   margin-left: 4px;
 }
@@ -973,12 +991,12 @@ defineExpose({
   padding: 12px;
   background: #f0f9eb;
   border-radius: 6px;
-  border-left: 4px solid #67c23a;
+  border-left: 4px solid var(--el-color-success);
 }
 
 .tip-box p {
   margin: 0;
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 
@@ -990,7 +1008,7 @@ defineExpose({
 
 .data-item {
   padding: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 6px;
 }
 
@@ -1002,7 +1020,7 @@ defineExpose({
 }
 
 .data-time {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
@@ -1013,7 +1031,7 @@ defineExpose({
 }
 
 .data-label {
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 
@@ -1026,7 +1044,7 @@ defineExpose({
 }
 
 .assoc-hint {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   margin-left: 8px;
 }
@@ -1062,11 +1080,11 @@ defineExpose({
   padding: 12px 16px 8px 16px;
 }
 .channel-bus-group :deep(.el-collapse-item__arrow) {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   transition: transform 0.3s;
 }
 .channel-bus-group :deep(.el-collapse-item.is-disabled .el-collapse-item__header) {
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   cursor: not-allowed;
 }
 
@@ -1113,7 +1131,7 @@ defineExpose({
   border-color: #c5deb4;
 }
 .hardware-channel-item.has-channel::before {
-  background: #67c23a;
+  background: var(--el-color-success);
 }
 
 /* 无通道：左侧灰色 + 虚线边框 */
@@ -1123,7 +1141,7 @@ defineExpose({
   border-color: #d5dce3;
 }
 .hardware-channel-item:not(.has-channel)::before {
-  background: #c0c4cc;
+  background: var(--el-text-color-placeholder);
 }
 
 /* 有通道：浅绿色背景 + 实线边框 */
@@ -1164,14 +1182,14 @@ defineExpose({
 }
 
 .hardware-info {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
 /* 启用 checkbox 美化 */
 .hw-enabled-checkbox :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner) {
-  background-color: #67c23a;
-  border-color: #67c23a;
+  background-color: var(--el-color-success);
+  border-color: var(--el-color-success);
 }
 .hw-enabled-checkbox :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
   border-color: #fff;
@@ -1190,18 +1208,18 @@ defineExpose({
 }
 
 .dma-switch {
-  --el-switch-on-color: #409eff;
+  --el-switch-on-color: var(--el-color-primary);
   --el-switch-off-color: #dcdfe6;
 }
 
 .dma-switch :deep(.el-switch__label) {
   font-size: 11px;
   font-family: 'Courier New', monospace;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .dma-switch :deep(.el-switch__label.is-active) {
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 /* 第二行：引脚 */
@@ -1222,7 +1240,7 @@ defineExpose({
   font-weight: 600;
   transition: all 0.2s;
   padding: 4px 10px;
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   background: #ecf5ff;
   color: #1d60d6;
 }
@@ -1264,7 +1282,7 @@ defineExpose({
 }
 
 .no-channel-dashed:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   background: rgba(64, 158, 255, 0.04);
 }
 
@@ -1277,7 +1295,7 @@ defineExpose({
   font-size: 12px;
   padding: 0;
   height: auto;
-  color: #409eff;
+  color: var(--el-color-primary);
   font-weight: 500;
 }
 
@@ -1300,7 +1318,7 @@ defineExpose({
   flex-wrap: wrap;
   gap: 8px;
   padding: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 6px;
 }
 

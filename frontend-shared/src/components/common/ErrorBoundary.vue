@@ -75,14 +75,14 @@ const handleReload = () => {
 }
 .error-details {
   margin-top: 16px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   padding: 12px 16px;
   border-radius: 4px;
   font-size: 12px;
 }
 .error-details summary {
   cursor: pointer;
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-weight: 500;
   user-select: none;
 }
@@ -90,7 +90,7 @@ const handleReload = () => {
   margin: 8px 0 0;
   white-space: pre-wrap;
   word-break: break-all;
-  color: #f56c6c;
+  color: var(--el-color-danger);
   max-height: 240px;
   overflow-y: auto;
 }

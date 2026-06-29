@@ -99,7 +99,7 @@
           >
             {{ bus.toUpperCase() }}
           </el-tag>
-          <span style="margin: 0 8px; color: #909399;">|</span>
+          <span style="margin: 0 8px; color: var(--el-text-color-secondary);">|</span>
           <el-tag
             v-for="measure in selectedParser.measure_types"
             :key="measure"
@@ -282,12 +282,12 @@ watch(() => props.modelValue, (val) => {
 }
 
 .parser-card:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   background: #f0f9eb;
 }
 
 .parser-card.selected {
-  border-color: #67c23a;
+  border-color: var(--el-color-success);
   background: #f0f9eb;
 }
 
@@ -295,7 +295,7 @@ watch(() => props.modelValue, (val) => {
   width: 44px;
   height: 44px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #409eff 0%, #67c23a 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -317,7 +317,7 @@ watch(() => props.modelValue, (val) => {
 .parser-id {
   margin: 0 0 8px;
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-family: monospace;
 }
 
@@ -334,7 +334,7 @@ watch(() => props.modelValue, (val) => {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #67c23a;
+  background: var(--el-color-success);
   color: #fff;
   display: flex;
   align-items: center;
@@ -348,7 +348,7 @@ watch(() => props.modelValue, (val) => {
 .parser-id-label {
   font-family: monospace;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-left: 8px;
 }
 </style>

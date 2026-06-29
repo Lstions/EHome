@@ -43,7 +43,7 @@
               :value="String(hw.id)"
             >
               <span>{{ hw.name || hw.id }}</span>
-              <span v-if="hw.pins?.length" style="color: #909399; font-size: 12px; margin-left: 8px;">
+              <span v-if="hw.pins?.length" style="color: var(--el-text-color-secondary); font-size: 12px; margin-left: 8px;">
                 ({{ formatPinsBrief(hw.pins) }})
               </span>
             </el-option>
@@ -603,19 +603,19 @@ watch(showDialog, (open) => {
 
 .form-tip {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-top: 4px;
 }
 
 .cap-hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-top: 4px;
   line-height: 1.5;
 }
 
 .cap-hint span {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 /* 预选硬件时只读字段的视觉提示 */

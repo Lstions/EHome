@@ -73,6 +73,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi, type PeripheralAssignment } from '@/api/node'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
+import { deviceTypeOptions } from '@/utils/deviceType'
 
 const props = defineProps<{
   visible: boolean
@@ -118,16 +119,7 @@ const form = reactive({
   } as Record<string, any>
 })
 
-const deviceTypeOptions = [
-  {value:'wind_speed', label:'风速传感器'},
-  {value:'wind_direction', label:'风向传感器'},
-  {value:'rain', label:'雨量传感器'},
-  {value:'light', label:'光照传感器'},
-  {value:'temp_humidity', label:'温湿度传感器'},
-  {value:'battery', label:'电池保护板'},
-  {value:'jiabaida_bms', label:'BMS 电池管理系统'},
-  {value:'inverter', label:'光伏逆变器'}
-]
+// deviceTypeOptions imported from @/utils/deviceType
 
 const rules = {
   device_type: [{required: true, message: '请选择设备类型', trigger: 'change'}],

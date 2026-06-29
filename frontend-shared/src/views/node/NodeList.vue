@@ -12,7 +12,7 @@
       <!-- 顶部统计卡片 -->
       <div class="stats-row">
         <div class="stat-card" @click="handleStatClick('all')">
-          <div class="stat-icon" style="color: #409eff;">
+          <div class="stat-icon" style="color: var(--el-color-primary);">
             <el-icon><Connection /></el-icon>
           </div>
           <div class="stat-content">
@@ -25,7 +25,7 @@
         </div>
         
         <div class="stat-card online" @click="handleStatClick('online')">
-          <div class="stat-icon" style="color: #67c23a;">
+          <div class="stat-icon" style="color: var(--el-color-success);">
             <el-icon><CircleCheck /></el-icon>
           </div>
           <div class="stat-content">
@@ -39,7 +39,7 @@
         </div>
         
         <div class="stat-card offline" @click="handleStatClick('offline')">
-          <div class="stat-icon" style="color: #f56c6c;">
+          <div class="stat-icon" style="color: var(--el-color-danger);">
             <el-icon><CircleClose /></el-icon>
           </div>
           <div class="stat-content">
@@ -49,7 +49,7 @@
         </div>
         
         <div class="stat-card warning">
-          <div class="stat-icon" style="color: #e6a23c;">
+          <div class="stat-icon" style="color: var(--el-color-warning);">
             <el-icon><Warning /></el-icon>
           </div>
           <div class="stat-content">
@@ -155,7 +155,7 @@
             <span v-else class="value">-</span>
           </div>
           <div class="info-row">
-            <span class="label">最后在线</span>
+            <span class="label">上线时间</span>
             <span class="value time">{{ formatRelativeTime(node.last_online_time) }}</span>
           </div>
         </div>
@@ -241,7 +241,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="最后在线" width="160">
+        <el-table-column label="上线时间" width="160">
           <template #default="{ row }">
             <span class="time">{{ formatRelativeTime(row.last_online_time) }}</span>
           </template>
@@ -554,10 +554,10 @@ onUnmounted(() => {
   color: var(--el-text-color-secondary);
 }
 
-.stat-card.total .stat-icon { color: #409eff; }
-.stat-card.online .stat-icon { color: #67c23a; }
-.stat-card.offline .stat-icon { color: #f56c6c; }
-.stat-card.warning .stat-icon { color: #e6a23c; }
+.stat-card.total .stat-icon { color: var(--el-color-primary); }
+.stat-card.online .stat-icon { color: var(--el-color-success); }
+.stat-card.offline .stat-icon { color: var(--el-color-danger); }
+.stat-card.warning .stat-icon { color: var(--el-color-warning); }
 
 .stat-content {
   align-items: center;
@@ -580,7 +580,7 @@ onUnmounted(() => {
 
 .stat-label {
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .stat-trend {
@@ -594,7 +594,7 @@ onUnmounted(() => {
 
 .stat-trend.up {
   background: #f0f9eb;
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 /* 工具栏 */
@@ -667,8 +667,8 @@ onUnmounted(() => {
   color: #fff;
 }
 
-.collector-icon.online { background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%); }
-.collector-icon.offline { background: linear-gradient(135deg, #909399 0%, #b1b3b8 100%); }
+.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
+.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, #b1b3b8 100%); }
 
 .collector-meta h3 {
   margin: 0;
@@ -678,7 +678,7 @@ onUnmounted(() => {
 
 .collector-meta .model {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .status-tag {
@@ -692,12 +692,12 @@ onUnmounted(() => {
 
 .status-tag.online {
   background: #f0f9eb;
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 .status-tag.offline {
   background: #f4f4f5;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .status-tag .status-dot {
@@ -716,8 +716,8 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   padding: 16px 0;
-  border-top: 1px solid #f5f7fa;
-  border-bottom: 1px solid #f5f7fa;
+  border-top: 1px solid var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-fill-color-light);
 }
 
 .info-row {
@@ -728,16 +728,16 @@ onUnmounted(() => {
 
 .info-row .label {
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .info-row .value {
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .info-row .value.time {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
@@ -755,7 +755,7 @@ onUnmounted(() => {
 
 .quality-value {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   min-width: 32px;
 }
 
@@ -788,7 +788,7 @@ onUnmounted(() => {
 
 .table-collector-info .model {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .status-cell {
@@ -803,8 +803,8 @@ onUnmounted(() => {
   border-radius: 50%;
 }
 
-.status-cell.online .status-dot { background: #67c23a; }
-.status-cell.offline .status-dot { background: #909399; }
+.status-cell.online .status-dot { background: var(--el-color-success); }
+.status-cell.offline .status-dot { background: var(--el-text-color-secondary); }
 
 .pagination-wrapper {
   margin-top: 16px;
@@ -822,7 +822,7 @@ onUnmounted(() => {
 .stat-card .stat-action {
   opacity: 0;
   transition: opacity 0.2s;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .stat-card:hover .stat-action {

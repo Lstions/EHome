@@ -9,13 +9,33 @@ export interface WebSocketMessage {
   payload?: {
     collector_id?: number
     device_id?: number
+    edge_device_id?: number
+    sensor_device_id?: number
+    node_id?: number | string
     status?: string
     devices?: any[]
     data?: any
+    sensors?: any
+    collected_at?: string
+    raw_hex?: string
+    raw_data?: any
     progress?: number
     record_id?: number
     latency_ms?: number
+    device_name?: string
+    collector_name?: string
+    channel_id?: number
+    uptime_seconds?: number
+    channel_count?: number
+    model?: string
+    firmware?: string
+    reason?: string
   }
+  // Flat-format fields (legacy compatibility)
+  data?: any
+  device_id?: number
+  sensor_device_id?: number
+  edge_device_id?: number
   timestamp?: number
 }
 

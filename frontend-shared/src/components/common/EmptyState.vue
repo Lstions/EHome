@@ -89,9 +89,9 @@ const iconSize = computed(() => {
   width: 100px;
   height: 100px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #f5f7fa 0%, #e8eaec 100%);
+  background: linear-gradient(135deg, var(--el-fill-color-light) 0%, #e8eaec 100%);
   margin-bottom: 20px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 .empty-state.small .empty-illustration {
@@ -118,7 +118,7 @@ const iconSize = computed(() => {
 .empty-description {
   margin: 0 0 16px;
   font-size: 14px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   line-height: 1.6;
 }
 
@@ -136,21 +136,21 @@ const iconSize = computed(() => {
 /* 不同场景的插图颜色 */
 .empty-state.data .empty-illustration {
   background: linear-gradient(135deg, #ecf5ff 0%, #d9ecff 100%);
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .empty-state.device .empty-illustration {
   background: linear-gradient(135deg, #f0f9eb 0%, #e1f3d8 100%);
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 .empty-state.warning .empty-illustration {
   background: linear-gradient(135deg, #fef0f0 0%, #fde2e2 100%);
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 
 .empty-state.network .empty-illustration {
   background: linear-gradient(135deg, #fef9f0 0%, #f5e6d3 100%);
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 </style>

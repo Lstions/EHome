@@ -182,7 +182,7 @@
                 </el-dropdown-item>
                 <el-dropdown-item command="export">导出配置</el-dropdown-item>
                 <el-dropdown-item command="delete" divided>
-                  <span style="color: #f56c6c;">删除</span>
+                  <span style="color: var(--el-color-danger);">删除</span>
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -253,6 +253,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
+import { deviceTypeOptions } from '@/utils/deviceType'
 
 // 状态
 const loading = ref(false)
@@ -279,16 +280,7 @@ const stats = reactive({
   deviceTypes: 0
 })
 
-// 设备类型选项
-const deviceTypeOptions = [
-  { value: 'temp_humidity', label: '温湿度传感器' },
-  { value: 'wind_speed', label: '风速传感器' },
-  { value: 'wind_direction', label: '风向传感器' },
-  { value: 'rain', label: '雨量计' },
-  { value: 'light', label: '光照传感器' },
-  { value: 'battery', label: '电池保护板' },
-  { value: 'inverter', label: '光伏逆变器' }
-]
+// 设备类型选项 — 从 deviceType.ts 统一导入
 
 // 过滤后的配置
 const filteredConfigs = computed(() => {
@@ -598,16 +590,16 @@ onMounted(() => {
   justify-content: center;
   color: #fff;
   font-size: 20px;
-  background: linear-gradient(135deg, #409eff 0%, #67c23a 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
 }
 
-.stat-icon.active { background: #67c23a; }
-.stat-icon.bus { background: #e6a23c; }
-.stat-icon.device { background: #909399; }
+.stat-icon.active { background: var(--el-color-success); }
+.stat-icon.bus { background: var(--el-color-warning); }
+.stat-icon.device { background: var(--el-text-color-secondary); }
 
 .stat-content { flex: 1; }
 .stat-value { display: block; font-size: 24px; font-weight: 600; color: #303133; }
-.stat-label { font-size: 13px; color: #909399; }
+.stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
 /* 工具栏 */
 .toolbar-card :deep(.el-card__body) {
@@ -675,10 +667,10 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.config-icon.uart { background: linear-gradient(135deg, #409eff 0%, #67c23a 100%); }
-.config-icon.i2c { background: linear-gradient(135deg, #e6a23c 0%, #f56c6c 100%); }
-.config-icon.spi { background: linear-gradient(135deg, #909399 0%, #c0c4cc 100%); }
-.config-icon.gpio { background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%); }
+.config-icon.uart { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
+.config-icon.i2c { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
+.config-icon.spi { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
+.config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
 .config-icon.adc { background: linear-gradient(135deg, #9c27b0 0%, #ba68c8 100%); }
 
 .config-info {
@@ -698,7 +690,7 @@ onMounted(() => {
 .config-info .desc {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -712,8 +704,8 @@ onMounted(() => {
 
 .card-body {
   padding: 16px 0;
-  border-top: 1px solid #f5f7fa;
-  border-bottom: 1px solid #f5f7fa;
+  border-top: 1px solid var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-fill-color-light);
 }
 
 .spec-list {
@@ -730,7 +722,7 @@ onMounted(() => {
 
 .spec-item .label {
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .params-preview {
@@ -763,13 +755,13 @@ onMounted(() => {
 .config-json h4 {
   margin: 0 0 10px;
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .config-json pre {
   margin: 0;
   padding: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 6px;
   font-size: 12px;
   font-family: monospace;

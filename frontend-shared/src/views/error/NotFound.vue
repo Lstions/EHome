@@ -45,7 +45,7 @@ const goBack = () => {
   font-size: 120px;
   font-weight: 700;
   line-height: 1;
-  background: linear-gradient(135deg, #409eff, #67c23a);
+  background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-success));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

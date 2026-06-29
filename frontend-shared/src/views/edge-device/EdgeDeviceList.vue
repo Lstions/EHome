@@ -561,6 +561,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
@@ -570,11 +571,13 @@ import type { Parser } from '@/api/parser'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
+import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 
 const router = useRouter()
 const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 // 视图模式：card | table
 const viewMode = ref<'card' | 'table'>('card')
@@ -697,19 +700,8 @@ const fetchTodayDataCount = async () => {
 // 只显示在线节点
 const onlineCollectors = computed(() => collectors.value.filter((c: any) => c.status === 'online'))
 
-// 设备类型定义
-const deviceTypes = [
-  { value: 'temp_humidity', label: '温湿度', icon: Odometer },
-  { value: 'wind_speed', label: '风速', icon: Lightning },
-  { value: 'wind_direction', label: '风向', icon: Cloudy },
-  { value: 'rain', label: '雨量', icon: Cloudy },
-  { value: 'light', label: '光照', icon: Sunny },
-  { value: 'battery', label: '电池', icon: Lightning },
-  { value: 'jiabaida_bms', label: 'BMS', icon: Lightning },
-  { value: 'inverter', label: '逆变器', icon: DataAnalysis },
-  { value: 'gpio.digital', label: 'GPIO 控制', icon: Open },
-  { value: 'gpio.pwm', label: 'PWM 输出', icon: SetUp },
-]
+// 设备类型定义 — 从 deviceType.ts 统一导入
+const deviceTypes = deviceTypeOptions
 
 // 过滤后的设备
 const filteredDevices = computed(() => {
@@ -745,13 +737,11 @@ const fetchDevices = async () => {
     }
     if (typeFilter.value) params.device_type = typeFilter.value
     if (statusFilter.value) params.status = statusFilter.value
-    // Note: hardware_type is not directly supported by the API,
-    // so we handle it client-side in filteredDevices
-    const response = await edgeDeviceApi.getList(params)
-    devices.value = response.items || []
-    total.value = response.total || 0
+    await edgeDeviceStore.fetchList(params, true) // force=true for user-triggered refresh
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
     updateStats()
-  } catch (error: any) {
+  } catch {
     ElMessage.error('获取边缘设备列表失败')
   } finally {
     loading.value = false
@@ -863,16 +853,7 @@ const selectChannel = (ch: Channel) => {
 
 // 设备类型相关
 const getDeviceIcon = (type: string) => {
-  const iconMap: Record<string, any> = {
-    temp_humidity: Odometer,
-    wind_speed: Lightning,
-    wind_direction: Cloudy,
-    rain: Cloudy,
-    light: Sunny,
-    battery: Lightning,
-    inverter: DataAnalysis
-  }
-  return iconMap[type] || Cpu
+  return getDeviceTypeIcon(type)
 }
 
 const getDeviceClass = (type: string) => {
@@ -889,7 +870,7 @@ const getDeviceClass = (type: string) => {
 }
 
 const getDeviceTypeLabel = (type: string) => {
-  return deviceTypes.find(t => t.value === type)?.label || type
+  return getGlobalDeviceTypeLabel(type)
 }
 
 // Health status tag type mapping (Element Plus tag types)
@@ -955,9 +936,11 @@ const handleDelete = async (device: any) => {
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
     
-    await edgeDeviceApi.delete(device.id)
+    await edgeDeviceStore.deleteDevice(device.id)
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
+    updateStats()
     ElMessage.success('删除成功')
-    await fetchDevices()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('删除失败')
@@ -981,11 +964,12 @@ const handleBatchDelete = async () => {
     )
 
     const ids = selectedDevices.value.map(d => d.id)
-    const promises = ids.map(id => edgeDeviceApi.delete(id))
-    await Promise.all(promises)
-    ElMessage.success(`成功删除 ${ids.length} 个设备`)
+    await Promise.all(ids.map(id => edgeDeviceStore.deleteDevice(id)))
+    devices.value = edgeDeviceStore.list
+    total.value = edgeDeviceStore.listTotal
+    updateStats()
     selectedDevices.value = []
-    await fetchDevices()
+    ElMessage.success(`成功删除 ${ids.length} 个设备`)
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('批量删除失败')
@@ -1220,7 +1204,7 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   white-space: nowrap;
 }
 .template-option-row {
@@ -1271,19 +1255,19 @@ onMounted(() => {
   font-size: 20px;
 }
 
-.stat-icon.total { background: linear-gradient(135deg, #409eff 0%, #67c23a 100%); }
-.stat-icon.online { background: #67c23a; }
-.stat-icon.offline { background: #909399; }
-.stat-icon.today { background: #e6a23c; }
+.stat-icon.total { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
+.stat-icon.online { background: var(--el-color-success); }
+.stat-icon.offline { background: var(--el-text-color-secondary); }
+.stat-icon.today { background: var(--el-color-warning); }
 
 .stat-content { flex: 1; }
 .stat-value { display: block; font-size: 28px; font-weight: 600; color: #303133; }
-.stat-label { font-size: 13px; color: #909399; }
+.stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
 .stat-card .stat-action {
   opacity: 0;
   transition: opacity 0.2s;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .stat-card:hover .stat-action {
@@ -1368,12 +1352,12 @@ onMounted(() => {
   color: #fff;
 }
 
-.device-icon.temp { background: linear-gradient(135deg, #409eff 0%, #67c23a 100%); }
-.device-icon.wind { background: linear-gradient(135deg, #909399 0%, #c0c4cc 100%); }
-.device-icon.rain { background: linear-gradient(135deg, #e6a23c 0%, #f56c6c 100%); }
+.device-icon.temp { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
+.device-icon.wind { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
+.device-icon.rain { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
 .device-icon.light { background: linear-gradient(135deg, #ffc100 0%, #ff7800 100%); }
-.device-icon.battery { background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%); }
-.device-icon.solar { background: linear-gradient(135deg, #409eff 0%, #9c27b0 100%); }
+.device-icon.battery { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
+.device-icon.solar { background: linear-gradient(135deg, var(--el-color-primary) 0%, #9c27b0 100%); }
 
 .device-info { flex: 1; }
 .device-info h3 { margin: 0; font-size: 16px; color: #303133; }
@@ -1388,12 +1372,12 @@ onMounted(() => {
   border-radius: 20px;
 }
 
-.status-indicator.online { background: #f0f9eb; color: #67c23a; }
-.status-indicator.active { background: #f0f9eb; color: #67c23a; }
-.status-indicator.offline { background: #f4f4f5; color: #909399; }
-.status-indicator.warning { background: #fdf6ec; color: #e6a23c; }
-.status-indicator.error { background: #fef0f0; color: #f56c6c; }
-.status-indicator.disabled { background: #f4f4f5; color: #909399; }
+.status-indicator.online { background: #f0f9eb; color: var(--el-color-success); }
+.status-indicator.active { background: #f0f9eb; color: var(--el-color-success); }
+.status-indicator.offline { background: #f4f4f5; color: var(--el-text-color-secondary); }
+.status-indicator.warning { background: #fdf6ec; color: var(--el-color-warning); }
+.status-indicator.error { background: #fef0f0; color: var(--el-color-danger); }
+.status-indicator.disabled { background: #f4f4f5; color: var(--el-text-color-secondary); }
 
 .status-indicator .dot {
   width: 6px;
@@ -1436,7 +1420,7 @@ onMounted(() => {
 }
 
 .info-label {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   min-width: 70px;
 }
 
@@ -1447,11 +1431,11 @@ onMounted(() => {
 }
 
 .info-value code {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 /* 数据预览区块 */
@@ -1477,7 +1461,7 @@ onMounted(() => {
 
 .data-label {
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -1496,7 +1480,7 @@ onMounted(() => {
 
 .data-time {
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   white-space: nowrap;
 }
 
@@ -1504,7 +1488,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
@@ -1515,7 +1499,7 @@ onMounted(() => {
 
 .device-card.offline .data-item,
 .device-card.offline .info-value {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .card-actions {
@@ -1545,7 +1529,7 @@ onMounted(() => {
   padding: 12px 16px;
   background: #f0f9eb;
   border-radius: 6px;
-  color: #67c23a;
+  color: var(--el-color-success);
   font-size: 14px;
   margin-bottom: 20px;
 }
@@ -1570,11 +1554,11 @@ onMounted(() => {
 }
 
 .parser-select-card:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
 }
 
 .parser-select-card.selected {
-  border-color: #67c23a;
+  border-color: var(--el-color-success);
   background: #f0f9eb;
 }
 
@@ -1582,7 +1566,7 @@ onMounted(() => {
   width: 44px;
   height: 44px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #409eff 0%, #67c23a 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1602,7 +1586,7 @@ onMounted(() => {
 .parser-vendor {
   margin: 0 0 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .parser-tags {
@@ -1615,7 +1599,7 @@ onMounted(() => {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: #67c23a;
+  background: var(--el-color-success);
   color: #fff;
   display: flex;
   align-items: center;
@@ -1651,11 +1635,11 @@ onMounted(() => {
 }
 
 .channel-select-card:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
 }
 
 .channel-select-card.selected {
-  border-color: #67c23a;
+  border-color: var(--el-color-success);
   background: #f0f9eb;
 }
 
@@ -1666,27 +1650,27 @@ onMounted(() => {
 
 .channel-bus-id {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-left: auto;
 }
 
 .parser-id {
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-left: 6px;
 }
 
 .confirm-card {
   margin-top: 20px;
   padding: 16px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 8px;
 }
 
 .confirm-card h4 {
   margin: 0 0 12px;
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .confirm-items {
@@ -1703,7 +1687,7 @@ onMounted(() => {
 }
 
 .confirm-item .label {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .confirm-item .value {
@@ -1730,7 +1714,7 @@ onMounted(() => {
 }
 
 .batch-info strong {
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .batch-actions {
@@ -1741,12 +1725,12 @@ onMounted(() => {
 /* 表格数据样式 */
 .table-data-text {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .table-data-empty {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 @keyframes pulse {

@@ -152,11 +152,12 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		url := fmt.Sprintf("http://%s/api/v1/firmwares/%s/download", extHost, filename)
 
 		fw := models.Firmware{
-			Version:   version,
-			Filename:  filename,
-			Checksum:  checksum,
-			SizeBytes: uint64(len(data)),
-			URL:       url,
+			Version:     version,
+			Filename:    filename,
+			Checksum:    checksum,
+			SizeBytes:   uint64(len(data)),
+			URL:         url,
+			TargetModel: c.PostForm("target_model"),
 		}
 		if err := db.Create(&fw).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

@@ -114,10 +114,10 @@ onUnmounted(() => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 .network-banner.error {
-  background: linear-gradient(90deg, #f56c6c, #ff7875);
+  background: linear-gradient(90deg, var(--el-color-danger), #ff7875);
 }
 .network-banner.warning {
-  background: linear-gradient(90deg, #e6a23c, #f0b955);
+  background: linear-gradient(90deg, var(--el-color-warning), #f0b955);
   color: #fff;
 }
 .banner-icon {

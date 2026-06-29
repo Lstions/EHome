@@ -476,7 +476,7 @@ onUnmounted(() => {
 .logo-icon {
   width: 36px;
   height: 36px;
-  background: linear-gradient(135deg, #409eff 0%, #67c23a 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
   border-radius: 10px;
   display: flex;
   align-items: center;
@@ -514,7 +514,7 @@ onUnmounted(() => {
 
 :deep(.el-menu-item.is-active) {
   background: linear-gradient(90deg, rgba(64, 158, 255, 0.2) 0%, rgba(64, 158, 255, 0.1) 100%);
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 :deep(.el-menu-item.is-active)::before {
@@ -525,7 +525,7 @@ onUnmounted(() => {
   transform: translateY(-50%);
   width: 3px;
   height: 20px;
-  background: #409eff;
+  background: var(--el-color-primary);
   border-radius: 0 3px 3px 0;
 }
 
@@ -542,7 +542,7 @@ onUnmounted(() => {
 
 /* ========== 右侧容器 ========== */
 .main-container {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   overflow: hidden;
 }
 
@@ -566,7 +566,7 @@ onUnmounted(() => {
 }
 
 .collapse-btn {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border: none;
   transition: all 0.3s;
 }
@@ -597,7 +597,7 @@ onUnmounted(() => {
 
 :deep(.global-search .el-input__wrapper) {
   border-radius: 20px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   box-shadow: none;
   border: 1px solid transparent;
   transition: all 0.3s;
@@ -605,7 +605,7 @@ onUnmounted(() => {
 
 :deep(.global-search .el-input__wrapper:hover),
 :deep(.global-search .el-input__wrapper.is-focus) {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   background: #fff;
   box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.1);
 }
@@ -618,7 +618,7 @@ onUnmounted(() => {
   background: #fff;
   border: 1px solid #dcdfe6;
   border-radius: 4px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .header-right {
@@ -635,13 +635,13 @@ onUnmounted(() => {
   background: #fef0f0;
   border-radius: 20px;
   font-size: 12px;
-  color: #f56c6c;
+  color: var(--el-color-danger);
   transition: all 0.3s;
 }
 
 .ws-status.connected {
   background: #f0f9eb;
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 .status-dot {
@@ -658,7 +658,7 @@ onUnmounted(() => {
 }
 
 .notification-badge :deep(.el-badge__content) {
-  background: #f56c6c;
+  background: var(--el-color-danger);
 }
 
 .notification-panel {
@@ -677,7 +677,7 @@ onUnmounted(() => {
 .notification-empty {
   padding: 40px 20px;
   text-align: center;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .notification-empty p {
@@ -693,7 +693,7 @@ onUnmounted(() => {
 }
 
 .notification-item:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 
 .notification-item.unread {
@@ -712,17 +712,17 @@ onUnmounted(() => {
 
 .notification-icon.info {
   background: #ecf5ff;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .notification-icon.warning {
   background: #fef0f0;
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 
 .notification-icon.success {
   background: #f0f9eb;
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 .notification-content {
@@ -740,7 +740,7 @@ onUnmounted(() => {
 .notification-desc {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -748,7 +748,7 @@ onUnmounted(() => {
 
 .notification-time {
   font-size: 11px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 .user-menu {
@@ -762,11 +762,11 @@ onUnmounted(() => {
 }
 
 .user-menu:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #409eff 0%, #67c23a 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
   color: #fff;
   font-weight: 500;
 }
@@ -781,7 +781,7 @@ onUnmounted(() => {
   padding: 20px;
   overflow-y: auto;
   height: calc(100vh - 60px);
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 
 /* ========== 过渡动画 ========== */

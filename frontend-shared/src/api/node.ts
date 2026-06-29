@@ -229,6 +229,10 @@ export const nodeApi = {
     return raw as unknown as Node
   },
 
+  async update(id: number | string, data: { name?: string }): Promise<void> {
+    await client.put(`/api/v1/nodes/${id}`, data)
+  },
+
   async delete(id: number | string): Promise<void> {
     await client.delete(`/api/v1/nodes/${id}`)
   },

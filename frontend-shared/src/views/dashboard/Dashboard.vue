@@ -14,7 +14,7 @@
         <el-col :span="6">
           <el-card class="stat-card" @click="router.push('/node')">
             <div class="stat-content">
-              <div class="stat-icon" style="color: #409eff;">
+              <div class="stat-icon" style="color: var(--el-color-primary);">
                 <el-icon :size="32"><Connection /></el-icon>
               </div>
               <div class="stat-info">
@@ -28,7 +28,7 @@
         <el-col :span="6">
           <el-card class="stat-card" @click="router.push('/node?status=online')">
             <div class="stat-content">
-              <div class="stat-icon" style="color: #67c23a;">
+              <div class="stat-icon" style="color: var(--el-color-success);">
                 <el-icon :size="32"><CircleCheck /></el-icon>
               </div>
               <div class="stat-info">
@@ -42,7 +42,7 @@
         <el-col :span="6">
           <el-card class="stat-card" @click="router.push('/edge-device')">
             <div class="stat-content">
-              <div class="stat-icon" style="color: #e6a23c;">
+              <div class="stat-icon" style="color: var(--el-color-warning);">
                 <el-icon :size="32"><Cpu /></el-icon>
               </div>
               <div class="stat-info">
@@ -56,7 +56,7 @@
         <el-col :span="6">
           <el-card class="stat-card" @click="router.push('/edge-device?status=online')">
             <div class="stat-content">
-              <div class="stat-icon" style="color: #67c23a;">
+              <div class="stat-icon" style="color: var(--el-color-success);">
                 <el-icon :size="32"><CircleCheck /></el-icon>
               </div>
               <div class="stat-info">
@@ -75,7 +75,7 @@
         <el-card shadow="hover" class="alert-summary">
           <template #header>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <el-icon color="#e6a23c" :size="20"><WarningFilled /></el-icon>
+              <el-icon color="var(--el-color-warning)" :size="20"><WarningFilled /></el-icon>
               <span>异常摘要</span>
               <el-tag size="small" type="warning">需关注</el-tag>
             </div>
@@ -83,7 +83,7 @@
           <el-row :gutter="16">
             <el-col v-if="offlineCollectors > 0" :span="8">
               <div class="alert-item" @click="router.push('/node?status=offline')">
-                <el-icon color="#f56c6c" :size="28"><Connection /></el-icon>
+                <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineCollectors }}</div>
                   <div class="alert-label">离线采集器</div>
@@ -92,7 +92,7 @@
             </el-col>
             <el-col v-if="offlineDevices > 0" :span="8">
               <div class="alert-item" @click="router.push('/edge-device?status=offline')">
-                <el-icon color="#f56c6c" :size="28"><Cpu /></el-icon>
+                <el-icon color="var(--el-color-danger)" :size="28"><Cpu /></el-icon>
                 <div>
                   <div class="alert-value">{{ offlineDevices }}</div>
                   <div class="alert-label">离线设备</div>
@@ -101,7 +101,7 @@
             </el-col>
             <el-col v-if="dataErrorCount > 0" :span="8">
               <div class="alert-item" @click="router.push('/data')">
-                <el-icon color="#e6a23c" :size="28"><WarningFilled /></el-icon>
+                <el-icon color="var(--el-color-warning)" :size="28"><WarningFilled /></el-icon>
                 <div>
                   <div class="alert-value">{{ dataErrorCount }}</div>
                   <div class="alert-label">采集错误（近 1h）</div>
@@ -186,7 +186,7 @@
                   {{ item.status === 'online' ? '在线' : '离线' }}
                 </el-tag>
               </p>
-              <p v-if="item.type" style="margin: 4px 0 0; font-size: 12px; color: #909399;">
+              <p v-if="item.type" style="margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary);">
                 {{ item.collectorName ? `采集器: ${item.collectorName}` : '' }}
               </p>
             </el-timeline-item>
@@ -621,7 +621,7 @@ onUnmounted(() => {
 .stat-label {
   margin: 0 0 8px;
   font-size: 14px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .stat-value {
@@ -632,7 +632,7 @@ onUnmounted(() => {
 }
 
 .device-link {
-  color: #409eff;
+  color: var(--el-color-primary);
   text-decoration: none;
 }
 
@@ -642,7 +642,7 @@ onUnmounted(() => {
 
 .raw-data {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-family: monospace;
 }
 
@@ -663,7 +663,7 @@ onUnmounted(() => {
 .alert-value {
   font-size: 22px;
   font-weight: 600;
-  color: #f56c6c;
+  color: var(--el-color-danger);
   line-height: 1.2;
 }
 .alert-label {

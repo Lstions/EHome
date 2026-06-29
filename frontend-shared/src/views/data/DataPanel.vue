@@ -47,7 +47,7 @@
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, #f56c6c, #e6a23c);">
+            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-danger), var(--el-color-warning));">
               <span class="stat-icon-text">🌡️</span>
             </div>
             <div class="stat-info">
@@ -60,7 +60,7 @@
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, #409eff, #67c23a);">
+            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-success));">
               <span class="stat-icon-text">🌊</span>
             </div>
             <div class="stat-info">
@@ -73,7 +73,7 @@
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, #e6a23c, #ffc100);">
+            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-warning), #ffc100);">
               <span class="stat-icon-text">📊</span>
             </div>
             <div class="stat-info">
@@ -86,7 +86,7 @@
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, #67c23a, #85ce61);">
+            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-success), #85ce61);">
               <span class="stat-icon-text">⏱️</span>
             </div>
             <div class="stat-info">
@@ -155,7 +155,7 @@
         />
       </el-checkbox-group>
       <div v-if="compareDevices.length >= 2" style="margin-top: 12px; display: flex; align-items: center; gap: 12px;">
-        <span style="font-size: 14px; color: #606266;">对比类别：</span>
+        <span style="font-size: 14px; color: var(--el-text-color-regular);">对比类别：</span>
         <el-select v-model="queryForm.compareCategory" size="small" style="width: 140px;">
           <el-option label="温度" value="temperature" />
           <el-option label="气压" value="pressure" />
@@ -203,8 +203,8 @@
           </el-table-column>
           <el-table-column label="原始数据" width="120" align="center">
             <template #default="{ row }">
-              <span v-if="row.raw_data" style="font-size: 12px; color: #909399;">{{ formatRawData(row.raw_data) }}</span>
-              <span v-else style="color: #c0c4cc;">-</span>
+              <span v-if="row.raw_data" style="font-size: 12px; color: var(--el-text-color-secondary);">{{ formatRawData(row.raw_data) }}</span>
+              <span v-else style="color: var(--el-text-color-placeholder);">-</span>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="100" align="center">
@@ -214,7 +214,7 @@
                       size="small">
                 {{ getErrorInfo(row.error_code).label }}
               </el-tag>
-              <span v-else style="color: #67c23a;">正常</span>
+              <span v-else style="color: var(--el-color-success);">正常</span>
             </template>
           </el-table-column>
         </el-table>
@@ -241,6 +241,7 @@ import { Download, Connection } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import client from '@/api/client'
 import { getErrorInfo } from '@/utils/errorCode'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -372,13 +373,14 @@ const queryForm = reactive({
 })
 
 const wsStore = useWebSocketStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 let unsubscribeData: (() => void) | null = null
 
 const fetchDevices = async () => {
   try {
-    const response = await edgeDeviceApi.getList({ page_size: 500 })
-    deviceList.value = response.items
-  } catch (error: any) {
+    await edgeDeviceStore.fetchList({ page_size: 500 })
+    deviceList.value = edgeDeviceStore.list
+  } catch {
     ElMessage.error('获取设备列表失败')
   }
 }
@@ -738,7 +740,7 @@ onUnmounted(() => {
 
 .realtime-count {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .stat-card {
@@ -779,7 +781,7 @@ onUnmounted(() => {
 .stat-label {
   margin: 0 0 4px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .stat-value {
@@ -792,7 +794,7 @@ onUnmounted(() => {
 .stat-unit {
   font-size: 13px;
   font-weight: 400;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-left: 2px;
 }
 </style>

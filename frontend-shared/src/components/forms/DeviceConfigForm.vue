@@ -479,7 +479,7 @@ onMounted(() => {
 
 :deep(.el-divider__text) {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 @media (max-width: 768px) {

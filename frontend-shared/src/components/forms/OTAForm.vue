@@ -21,7 +21,7 @@
           >
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>{{ fw.version }} - {{ fw.filename }}</span>
-              <span style="color: #909399; font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
+              <span style="color: var(--el-text-color-secondary); font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
             </div>
           </el-option>
         </el-select>
@@ -106,6 +106,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import { firmwareApi, type Firmware } from '@/api/firmware'
+import { useFirmwareStore } from '@/stores/firmware'
 import { formatFileSize } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
@@ -179,14 +180,12 @@ const getModelName = (model: string): string => {
 }
 
 // 获取固件列表
+const firmwareStore = useFirmwareStore()
 const fetchFirmwares = async () => {
   firmwaresLoading.value = true
   try {
-    // 获取所有活跃固件，不按 model 过滤
-    const response = await firmwareApi.getList({
-      status: 'active'
-    })
-    firmwares.value = response.list || []
+    await firmwareStore.fetchList({ status: 'active' })
+    firmwares.value = firmwareStore.list
     
     if (firmwares.value.length === 0) {
       ElMessage.warning('暂无可用固件，请先上传固件')
@@ -307,17 +306,17 @@ watch(() => props.visible, (newVal) => {
 .upgrade-progress {
   margin-top: 20px;
   padding: 20px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 4px;
 }
 
 .status-text {
   text-align: center;
   margin-top: 10px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 :deep(.el-timeline-item__timestamp) {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

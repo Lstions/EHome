@@ -9,6 +9,8 @@ export interface Firmware {
   url: string
   changelog?: string
   target_model?: string
+  min_from_version?: string
+  stable?: boolean
   created_at: string
 }
 
