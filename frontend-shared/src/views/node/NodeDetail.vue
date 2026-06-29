@@ -76,7 +76,7 @@
           {{ formatTime(collector.last_online_time) }}
         </el-descriptions-item>
         <el-descriptions-item label="在线时长">
-          {{ formatOnlineDuration(collector.online_duration) }}
+          {{ sessionDuration }}
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -382,6 +382,29 @@ const dmaLoading = computed(() => dmaStore.loading)
 
 let unsubscribe: (() => void) | null = null
 
+// 会话在线时长：从 last_online_time 到现在的差值，每秒刷新
+const nowTick = ref(Date.now())
+let sessionTimer: ReturnType<typeof setInterval> | null = null
+
+const sessionDuration = computed(() => {
+  const t = collector.value?.last_online_time
+  if (!t || collector.value?.status !== 'online') return '-'
+  const start = new Date(t).getTime()
+  if (isNaN(start)) return '-'
+  const diff = Math.floor((nowTick.value - start) / 1000)
+  if (diff < 0) return '-'
+  const days = Math.floor(diff / 86400)
+  const hours = Math.floor((diff % 86400) / 3600)
+  const minutes = Math.floor((diff % 3600) / 60)
+  const seconds = Math.floor(diff % 60)
+  const parts: string[] = []
+  if (days > 0) parts.push(`${days}天`)
+  if (hours > 0) parts.push(`${hours}小时`)
+  if (minutes > 0) parts.push(`${minutes}分钟`)
+  if (seconds > 0 && parts.length === 0) parts.push(`${seconds}秒`)
+  return parts.join(' ') || '-'
+})
+
 const collectorId = computed(() => route.params.id as string)
 
 // 配置同步状态
@@ -664,6 +687,9 @@ onMounted(() => {
   fetchOTAHistory()
   loadDmaChannels()
 
+  // 会话时长每秒刷新
+  sessionTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+
   // 订阅状态更新
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
     if (message.payload?.node_id === collectorId.value) {
@@ -688,6 +714,9 @@ onUnmounted(() => {
   }
   if (pendingPingTimeout.value) {
     clearTimeout(pendingPingTimeout.value)
+  }
+  if (sessionTimer) {
+    clearInterval(sessionTimer)
   }
 })
 </script>
