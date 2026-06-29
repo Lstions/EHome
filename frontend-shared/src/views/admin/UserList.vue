@@ -361,10 +361,10 @@ onMounted(() => {
 }
 .role-desc {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .text-muted {
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   font-size: 12px;
 }
 </style>

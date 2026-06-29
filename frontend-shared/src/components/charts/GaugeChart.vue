@@ -87,7 +87,7 @@ const initChart = () => {
                 roundCap: 'round',
                 width: 10,
                 itemStyle: {
-                  color: percent > 80 ? '#f56c6c' : percent > 60 ? '#e6a23c' : '#409eff',
+                  color: percent > 80 ? 'var(--el-color-danger)' : percent > 60 ? 'var(--el-color-warning)' : 'var(--el-color-primary)',
                   shadowColor: 'rgba(0, 0, 0, 0.1)',
                   shadowBlur: 10,
                   shadowOffsetX: 2,
@@ -96,7 +96,7 @@ const initChart = () => {
               },
               pointer: {
                 itemStyle: {
-                  color: percent > 80 ? '#f56c6c' : percent > 60 ? '#e6a23c' : '#409eff'
+                  color: percent > 80 ? 'var(--el-color-danger)' : percent > 60 ? 'var(--el-color-warning)' : 'var(--el-color-primary)'
                 }
               }
             }

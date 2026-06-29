@@ -354,6 +354,7 @@ import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
+import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
 
 const router = useRouter()
@@ -405,19 +406,8 @@ const syncStateTagType = computed(() => {
   }[collector.value?.config_sync_state as string] || 'info'
 })
 
-const deviceTypeMap: Record<string, string> = {
-  wind_speed: '风速传感器',
-  wind_direction: '风向传感器',
-  rain: '雨量传感器',
-  light: '光照传感器',
-  temp_humidity: '温湿度传感器',
-  battery: '电池保护板',
-  inverter: '光伏逆变器',
-  jiabaida_bms: 'BMS 电池管理系统'
-}
-
 const getDeviceTypeText = (type: string) => {
-  return deviceTypeMap[type] || type
+  return getDeviceTypeLabel(type)
 }
 
 // 根据设备的 channel_id 查找对应的 Channel
@@ -435,15 +425,15 @@ const handleEditChannel = (channel: any) => {
 }
 
 const getQualityColor = (quality: number) => {
-  if (quality >= 80) return '#67c23a'
-  if (quality >= 60) return '#e6a23c'
-  return '#f56c6c'
+  if (quality >= 80) return 'var(--el-color-success)'
+  if (quality >= 60) return 'var(--el-color-warning)'
+  return 'var(--el-color-danger)'
 }
 
 const getLatencyColor = (ms: number) => {
-  if (ms < 50) return '#67c23a'
-  if (ms < 200) return '#e6a23c'
-  return '#f56c6c'
+  if (ms < 50) return 'var(--el-color-success)'
+  if (ms < 200) return 'var(--el-color-warning)'
+  return 'var(--el-color-danger)'
 }
 
 const handlePing = async () => {
@@ -722,7 +712,7 @@ onUnmounted(() => {
   margin-bottom: 12px;
   font-size: 14px;
   font-weight: 500;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .peripheral-list {
@@ -736,14 +726,14 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 6px;
   border: 1px solid #e4e7ed;
   transition: all 0.2s;
 }
 
 .peripheral-item:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
 }
 
 .peripheral-item.assigned {
@@ -772,7 +762,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #67c23a;
+  color: var(--el-color-success);
   font-size: 13px;
 }
 
@@ -798,7 +788,7 @@ onUnmounted(() => {
 
 .device-channel-tag {
   border-radius: 8px;
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   background: #ecf5ff;
   color: #1d60d6;
   padding: 5px 10px;
@@ -835,7 +825,7 @@ onUnmounted(() => {
 /* 配置同步状态卡 */
 .config-sync-state {
   code {
-    background: #f5f7fa;
+    background: var(--el-fill-color-light);
     padding: 2px 6px;
     border-radius: 3px;
     font-size: 12px;
@@ -852,14 +842,14 @@ onUnmounted(() => {
 
 .dma-card {
   padding: 16px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 8px;
   border: 1px solid #e4e7ed;
   transition: border-color 0.2s;
 }
 
 .dma-card:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
 }
 
 .dma-card.dma-state-allocated {
@@ -897,18 +887,18 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .dma-label {
   width: 70px;
   flex-shrink: 0;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
 .dma-bound {
-  color: #67c23a;
+  color: var(--el-color-success);
   font-weight: 500;
 }
 

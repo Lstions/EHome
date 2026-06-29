@@ -55,10 +55,10 @@
 
     <!-- 忘记密码提示 -->
     <el-dialog v-model="showForgotTip" title="忘记密码" width="400px" append-to-body>
-      <div style="line-height: 1.8; color: #606266;">
+      <div style="line-height: 1.8; color: var(--el-text-color-regular);">
         <p>请联系系统管理员重置密码。</p>
         <p>管理员可通过后端命令行工具执行：</p>
-        <pre style="background: #f5f7fa; padding: 12px 16px; border-radius: 4px; font-family: monospace; font-size: 13px; color: #303133; margin: 12px 0 0;">
+        <pre style="background: var(--el-fill-color-light); padding: 12px 16px; border-radius: 4px; font-family: monospace; font-size: 13px; color: var(--el-text-color-primary); margin: 12px 0 0;">
           ehome-cli user reset-password --username &lt;用户名&gt;</pre>
       </div>
     </el-dialog>

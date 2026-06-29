@@ -66,7 +66,7 @@ const relogin = async () => {
   font-size: 120px;
   font-weight: 700;
   line-height: 1;
-  background: linear-gradient(135deg, #f56c6c, #e6a23c);
+  background: linear-gradient(135deg, var(--el-color-danger), var(--el-color-warning));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;

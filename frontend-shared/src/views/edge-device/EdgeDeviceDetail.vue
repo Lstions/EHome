@@ -332,9 +332,11 @@ import { type OperationDef, type OperationParam } from '@/api/deviceConfig'
 import { getErrorInfo } from '@/utils/errorCode'
 import { haApi } from '@/api/homeassistant'
 import client from '@/api/client'
-import { useWebSocket } from '@/composables/useWebSocket'
+import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
+import { getDeviceTypeLabel } from '@/utils/deviceType'
 
 interface HistoryDataPoint {
   time: string
@@ -408,32 +410,12 @@ async function handleChangeAddress() {
   }
 }
 
-// WebSocket 连接
-const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v1/ws`
-const { connected: wsConnected, connect: wsConnect, disconnect: wsDisconnect, send: wsSend } = useWebSocket(wsUrl, {
-  onMessage: handleWebSocketMessage,
-  onConnected: handleWebSocketConnected,
-  onDisconnected: handleWebSocketDisconnected,
-  onError: () => {
-    logger.error('WebSocket 连接错误')
-  }
-})
-
-const deviceTypeMap: Record<string, string> = {
-  wind_speed: '风速传感器',
-  wind_direction: '风向传感器',
-  rain: '雨量传感器',
-  light: '光照传感器',
-  temp_humidity: '温湿度传感器',
-  battery: '电池保护板',
-  inverter: '光伏逆变器',
-  bmp280: 'BMP280温压传感器',
-  sht40: 'SHT40温湿度传感器',
-  jiabaida_bms: 'BMS 电池管理系统'
-}
+// WebSocket — use global store connection (MainLayout manages lifecycle)
+const wsStore = useWebSocketStore()
+const wsConnected = computed(() => wsStore.connected)
 
 const deviceTypeText = computed(() => {
-  return device.value ? deviceTypeMap[device.value.device_type] || device.value.device_type : ''
+  return device.value ? getDeviceTypeLabel(device.value.device_type) : ''
 })
 
 // 设备操作定义（从 DeviceConfig.operations 动态获取）
@@ -579,14 +561,11 @@ async function handleOperationResult(opKey: string, op: OperationDef, result: Ex
 }
 
 // WebSocket 消息处理
-function handleWebSocketMessage(message: any) {
-  // Backend sends: {type: "channel_data", payload: {data: {wind_direction: 312.9}, ...}}
-  // Also handle flat format: {type: "channel_data", data: {...}, sensor_device_id: 4, ...}
-  const isDataEvent = message.type === 'data' || message.type === 'channel_data'
+function handleWebSocketMessage(message: WebSocketMessage) {
+  const isDataEvent = message.type === WS_EVENT.DATA_UPDATE || message.type === 'channel_data'
   if (!isDataEvent) return
 
   // C6 fix: route.params.id is string, WS payload device_id may be string or number.
-  // Explicit Number() coercion ensures type-safe === comparison.
   const deviceId: number = Number(route.params.id)
   // Payload may be nested under message.payload or flat on message
   const p = message.payload || message
@@ -612,21 +591,6 @@ function handleWebSocketMessage(message: any) {
   if (device.value && sensorData && Object.keys(sensorData).length > 0) {
     device.value.last_data_time = new Date().toISOString()
   }
-}
-
-function handleWebSocketConnected() {
-  logger.info('WebSocket 已连接')
-  const deviceId = Number(route.params.id)
-  wsSend({
-    action: 'subscribe',
-    room: 'data',
-    device_ids: [deviceId]
-  })
-  logger.debug('已订阅设备数据', { deviceId })
-}
-
-function handleWebSocketDisconnected() {
-  logger.info('WebSocket 已断开')
 }
 
 // 获取时间范围
@@ -970,16 +934,19 @@ const goBack = () => {
   router.back()
 }
 
+let unsubscribe: (() => void) | null = null
+
 onMounted(() => {
   fetchDeviceDetail()
   fetchLatestData()
   fetchHistoryData()
 
-  wsConnect()
+  // Subscribe to WS data_update events via global store
+  unsubscribe = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleWebSocketMessage)
 })
 
 onUnmounted(() => {
-  wsDisconnect()
+  if (unsubscribe) unsubscribe()
 })
 </script>
 

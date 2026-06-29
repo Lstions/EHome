@@ -156,19 +156,19 @@ const handleError = (error: any) => {
 }
 .c1 {
   width: 400px; height: 400px;
-  background: #409eff;
+  background: var(--el-color-primary);
   top: -100px; right: -80px;
   animation: float1 12s ease-in-out infinite;
 }
 .c2 {
   width: 300px; height: 300px;
-  background: #67c23a;
+  background: var(--el-color-success);
   bottom: -60px; left: -40px;
   animation: float2 15s ease-in-out infinite;
 }
 .c3 {
   width: 200px; height: 200px;
-  background: #e6a23c;
+  background: var(--el-color-warning);
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   animation: float3 10s ease-in-out infinite;
@@ -220,7 +220,7 @@ const handleError = (error: any) => {
 .brand-desc {
   margin: 4px 0 0;
   font-size: 13px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   letter-spacing: 0.5px;
 }
 
@@ -230,6 +230,6 @@ const handleError = (error: any) => {
 }
 .version {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 </style>

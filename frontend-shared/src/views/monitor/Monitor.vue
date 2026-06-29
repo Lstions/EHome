@@ -127,7 +127,7 @@
                 <el-progress 
                   :percentage="deviceOnlinePercent" 
                   :stroke-width="20"
-                  :color="'#67c23a'"
+                  :color="'var(--el-color-success)'"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
                 </el-progress>
@@ -137,7 +137,7 @@
                 <el-progress 
                   :percentage="deviceOfflinePercent" 
                   :stroke-width="20"
-                  :color="'#f56c6c'"
+                  :color="'var(--el-color-danger)'"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
                 </el-progress>
@@ -160,7 +160,7 @@
                 <el-progress 
                   :percentage="collectorOnlinePercent" 
                   :stroke-width="20"
-                  :color="'#67c23a'"
+                  :color="'var(--el-color-success)'"
                 >
                   <span>{{ metrics?.collector?.online || 0 }}</span>
                 </el-progress>
@@ -170,7 +170,7 @@
                 <el-progress 
                   :percentage="collectorOfflinePercent" 
                   :stroke-width="20"
-                  :color="'#f56c6c'"
+                  :color="'var(--el-color-danger)'"
                 >
                   <span>{{ metrics?.collector?.offline || 0 }}</span>
                 </el-progress>
@@ -365,10 +365,10 @@ onUnmounted(() => {
   opacity: 0.3;
 }
 
-.stat-card.http .stat-icon { color: #409eff; }
-.stat-card.device .stat-icon { color: #67c23a; }
-.stat-card.collector .stat-icon { color: #e6a23c; }
-.stat-card.data .stat-icon { color: #909399; }
+.stat-card.http .stat-icon { color: var(--el-color-primary); }
+.stat-card.device .stat-icon { color: var(--el-color-success); }
+.stat-card.collector .stat-icon { color: var(--el-color-warning); }
+.stat-card.data .stat-icon { color: var(--el-text-color-secondary); }
 
 .stat-card :deep(.el-card__body) {
   display: flex;
@@ -387,17 +387,17 @@ onUnmounted(() => {
 }
 
 .stat-value .online {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 
 .stat-value .separator {
   margin: 0 4px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .stat-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-top: 4px;
 }
 
@@ -423,7 +423,7 @@ onUnmounted(() => {
 .status-label {
   width: 40px;
   font-size: 14px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .status-item .el-progress {
@@ -431,14 +431,14 @@ onUnmounted(() => {
 }
 
 .error-text {
-  color: #f56c6c;
+  color: var(--el-color-danger);
   font-weight: bold;
 }
 
 .footer-info {
   margin-top: 20px;
   text-align: center;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 14px;
 }
 </style>

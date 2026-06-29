@@ -259,18 +259,18 @@ describe('NodeDetail.vue', () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()
     const vm = wrapper.vm as any
-    expect(vm.getQualityColor(95)).toBe('#67c23a')
-    expect(vm.getQualityColor(70)).toBe('#e6a23c')
-    expect(vm.getQualityColor(30)).toBe('#f56c6c')
+    expect(vm.getQualityColor(95)).toBe('var(--el-color-success)')
+    expect(vm.getQualityColor(70)).toBe('var(--el-color-warning)')
+    expect(vm.getQualityColor(30)).toBe('var(--el-color-danger)')
   })
 
   it('getLatencyColor returns correct colors', async () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()
     const vm = wrapper.vm as any
-    expect(vm.getLatencyColor(10)).toBe('#67c23a')
-    expect(vm.getLatencyColor(100)).toBe('#e6a23c')
-    expect(vm.getLatencyColor(300)).toBe('#f56c6c')
+    expect(vm.getLatencyColor(10)).toBe('var(--el-color-success)')
+    expect(vm.getLatencyColor(100)).toBe('var(--el-color-warning)')
+    expect(vm.getLatencyColor(300)).toBe('var(--el-color-danger)')
   })
 
   it('dmaTypeText returns correct type names', async () => {

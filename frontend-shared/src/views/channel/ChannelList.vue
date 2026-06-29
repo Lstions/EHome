@@ -89,7 +89,7 @@
       <el-table-column label="节点名称" min-width="140">
         <template #default="{ row }">
           <div class="node-name-cell">
-            <el-icon :size="16" :color="getNodeStatus(row.node_id) === 'online' ? '#67c23a' : '#909399'">
+            <el-icon :size="16" :color="getNodeStatus(row.node_id) === 'online' ? 'var(--el-color-success)' : 'var(--el-text-color-secondary)'">
               <Cpu />
             </el-icon>
             <span>{{ getNodeName(row.node_id) }}</span>
@@ -405,7 +405,7 @@ onMounted(() => {
 }
 
 .text-muted {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .pagination-wrapper {

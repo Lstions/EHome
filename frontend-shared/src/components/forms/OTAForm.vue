@@ -21,7 +21,7 @@
           >
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>{{ fw.version }} - {{ fw.filename }}</span>
-              <span style="color: #909399; font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
+              <span style="color: var(--el-text-color-secondary); font-size: 12px;">{{ getModelName(fw.target_model) }}</span>
             </div>
           </el-option>
         </el-select>
@@ -307,17 +307,17 @@ watch(() => props.visible, (newVal) => {
 .upgrade-progress {
   margin-top: 20px;
   padding: 20px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   border-radius: 4px;
 }
 
 .status-text {
   text-align: center;
   margin-top: 10px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 :deep(.el-timeline-item__timestamp) {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

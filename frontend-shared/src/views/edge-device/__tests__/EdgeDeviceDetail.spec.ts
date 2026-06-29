@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { ref } from 'vue'
 import EdgeDeviceDetail from '../EdgeDeviceDetail.vue'
 
 // Mock vue-router
@@ -24,9 +23,7 @@ const {
   mockExecuteOperation,
   mockSyncDevice,
   mockClientGet,
-  mockWsConnect,
-  mockWsDisconnect,
-  mockWsSend,
+  mockWsSubscribe,
 } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() =>
     Promise.resolve({
@@ -53,9 +50,7 @@ const {
   mockExecuteOperation: vi.fn(() => Promise.resolve({ code: 0, data: { status: 'ok' }, message: '' })),
   mockSyncDevice: vi.fn(() => Promise.resolve()),
   mockClientGet: vi.fn(() => Promise.resolve({ data: [] })),
-  mockWsConnect: vi.fn(),
-  mockWsDisconnect: vi.fn(),
-  mockWsSend: vi.fn(),
+  mockWsSubscribe: vi.fn(() => vi.fn()),
 }))
 
 vi.mock('@/api/edgeDevice', () => ({
@@ -80,13 +75,15 @@ vi.mock('@/api/client', () => ({
   default: { get: mockClientGet },
 }))
 
-vi.mock('@/composables/useWebSocket', () => ({
-  useWebSocket: () => ({
-    connected: ref(false),
-    connect: mockWsConnect,
-    disconnect: mockWsDisconnect,
-    send: mockWsSend,
+vi.mock('@/stores/websocket', () => ({
+  useWebSocketStore: () => ({
+    connected: false,
+    subscribe: mockWsSubscribe,
   }),
+}))
+
+vi.mock('@/events/events', () => ({
+  WS_EVENT: { DATA_UPDATE: 'data_update', NODE_STATUS: 'node_status' },
 }))
 
 vi.mock('@/utils/logger', () => ({
@@ -225,10 +222,10 @@ describe('EdgeDeviceDetail.vue', () => {
     expect(vm.canChangeAddress).toBe(false)
   })
 
-  it('calls wsConnect on mount', async () => {
+  it('subscribes to WS data_update on mount', async () => {
     mount(EdgeDeviceDetail, { global: { stubs } })
     await flushPromises()
-    expect(mockWsConnect).toHaveBeenCalled()
+    expect(mockWsSubscribe).toHaveBeenCalledWith('data_update', expect.any(Function))
   })
 
   it('calls goBack on back navigation', async () => {
