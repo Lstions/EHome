@@ -112,7 +112,10 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		node.ProtocolVersion = negotiatedProtocolVersion(protocolVersion)
 		node.Status = "online"
 		node.LastSeen = &now
-		node.LastOnlineTime = &now
+		// last_online_time 只在 offline→online 转换时设置，在线期间不覆盖
+		if oldStatus != "online" {
+			node.LastOnlineTime = &now
+		}
 		node.ConfigEpoch = configEpoch
 		node.LastManifestID = lastManifest
 		m.db.Save(&node)

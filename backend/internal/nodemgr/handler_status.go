@@ -76,8 +76,9 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	node.UptimeSeconds = uint32(uptimeSec)
 	node.OnlineDuration = uint64(uptimeSec)
 
-	// Set last_online_time on every status report while online
-	if status == "online" {
+	// last_online_time = 本次上线的起始时刻，只在 offline→online 转换时设置。
+	// 在线期间不覆盖，这样用户看到的是"什么时候上线的"而非"几秒前"。
+	if status == "online" && oldStatus != "online" {
 		node.LastOnlineTime = &now
 	}
 

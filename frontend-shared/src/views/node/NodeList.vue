@@ -155,7 +155,7 @@
             <span v-else class="value">-</span>
           </div>
           <div class="info-row">
-            <span class="label">最后在线</span>
+            <span class="label">上线时间</span>
             <span class="value time">{{ formatRelativeTime(node.last_online_time) }}</span>
           </div>
         </div>
@@ -241,7 +241,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="最后在线" width="160">
+        <el-table-column label="上线时间" width="160">
           <template #default="{ row }">
             <span class="time">{{ formatRelativeTime(row.last_online_time) }}</span>
           </template>

@@ -72,7 +72,7 @@
           </span>
           <span v-else>-</span>
         </el-descriptions-item>
-        <el-descriptions-item label="最后在线时间">
+        <el-descriptions-item label="上线时间">
           {{ formatTime(collector.last_online_time) }}
         </el-descriptions-item>
         <el-descriptions-item label="在线时长">
