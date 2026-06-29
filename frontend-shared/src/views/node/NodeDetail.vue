@@ -90,14 +90,6 @@
         <el-descriptions-item label="协议版本">
           {{ collector.protocol_version || '2.0' }}
         </el-descriptions-item>
-        <el-descriptions-item label="Config Epoch">
-          <span :class="{ 'epoch-lag': isEpochLagging }">
-            {{ collector.config_epoch ?? 0 }}
-          </span>
-          <span v-if="isEpochLagging" class="lag-indicator">
-            <el-icon><Warning /></el-icon> 落后
-          </span>
-        </el-descriptions-item>
         <el-descriptions-item label="Last Manifest">
           <code>{{ collector.last_manifest_id || '—' }}</code>
         </el-descriptions-item>
@@ -411,12 +403,6 @@ const syncStateTagType = computed(() => {
     error: 'danger',
     unknown: 'info',
   }[collector.value?.config_sync_state as string] || 'info'
-})
-
-const isEpochLagging = computed(() => {
-  // 服务端 epoch 暂未下发，预留接口
-  const serverEpoch = 0 // TODO: 从全局 store 获取
-  return (collector.value?.config_epoch ?? 0) < serverEpoch
 })
 
 const deviceTypeMap: Record<string, string> = {
@@ -848,20 +834,6 @@ onUnmounted(() => {
 
 /* 配置同步状态卡 */
 .config-sync-state {
-  .epoch-lag {
-    color: #f56c6c;
-    font-weight: 600;
-  }
-
-  .lag-indicator {
-    color: #f56c6c;
-    font-size: 13px;
-    margin-left: 6px;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-  }
-
   code {
     background: #f5f7fa;
     padding: 2px 6px;

@@ -49,16 +49,17 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		}
 	}
 
-	// Map ESP32 sync_state varint to config_sync_state string
-	// Only update on explicit syncing/error states; idle (0) does not overwrite.
+	// Map ESP32 sync_state varint to config_sync_state string.
+	// idle (0) = device finished applying config → mark in_sync (self-healing).
+	// This is the primary recovery path when ConfigResult (0x05) is lost.
 	var syncState string
 	switch syncStateVarint {
+	case 0:
+		syncState = "in_sync"
 	case 1:
 		syncState = "syncing"
 	case 2:
 		syncState = "error"
-	default:
-		// varint 0 = idle — leave current state unchanged
 	}
 
 	// Update node
@@ -80,10 +81,14 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		node.LastOnlineTime = &now
 	}
 
-	// v2.1: update config_sync_state if provided
+	// v2.1: update config_sync_state and config_epoch from device report
 	if syncState != "" {
 		node.ConfigSyncState = syncState
 	}
+	node.ConfigEpoch = configEpoch
+
+	logger.Infof("[%s] StatusReport: status=%s uptime=%d ch=%d epoch=%d sync_state=%d(%s) hash=%s",
+		deviceID, status, uptimeSec, channelCount, configEpoch, syncStateVarint, syncState, configHash)
 
 	m.db.Save(&node)
 

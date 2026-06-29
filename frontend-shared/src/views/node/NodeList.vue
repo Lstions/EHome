@@ -262,8 +262,8 @@
           :total="total"
           :page-sizes="[10, 20, 50]"
           layout="total, sizes, prev, pager, next, jumper"
-          @current-change="fetchNodes"
-          @size-change="fetchNodes"
+          @current-change="() => fetchNodes()"
+          @size-change="() => fetchNodes()"
         />
       </div>
     </el-card>
@@ -363,8 +363,9 @@ const updateStats = () => {
 }
 
 // 获取节点列表
-const fetchNodes = async () => {
-  loading.value = true
+// silent=true: 不显示骨架屏（用于 WS 推送的静默刷新）
+const fetchNodes = async (silent = false) => {
+  if (!silent) loading.value = true
   try {
     await nodeStore.fetchNodes({
       page: currentPage.value,
@@ -376,8 +377,18 @@ const fetchNodes = async () => {
   } catch (error: any) {
     ElMessage.error('获取节点列表失败')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
+}
+
+// WS 推送防抖：短时间内多条事件只触发一次静默刷新
+let wsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+const debouncedSilentRefresh = () => {
+  if (wsRefreshTimer) clearTimeout(wsRefreshTimer)
+  wsRefreshTimer = setTimeout(() => {
+    wsRefreshTimer = null
+    fetchNodes(true)
+  }, 500)
 }
 
 // 刷新数据
@@ -472,16 +483,32 @@ let unsubscribe: (() => void) | null = null
 onMounted(() => {
   fetchNodes()
   
-  // 订阅状态更新
+  // 订阅状态更新：就地更新节点状态，避免全量重拉导致屏闪
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
-    if (message.payload?.node_id) {
-      fetchNodes()
+    const payload = message.payload
+    if (!payload?.node_id) return
+
+    // 就地更新：在已有 nodes 数组中找到对应节点并更新状态字段
+    const node = nodes.value.find(n => n.node_id === payload.node_id)
+    if (node) {
+      // 状态未变则不做任何操作
+      if (payload.status && node.status !== payload.status) {
+        node.status = payload.status
+        if (payload.status === 'offline') {
+          node.connection_quality = 0
+        }
+        updateStats()
+      }
+    } else {
+      // 新节点（列表中不存在）：防抖静默拉取
+      debouncedSilentRefresh()
     }
   })
 })
 
 onUnmounted(() => {
   if (unsubscribe) unsubscribe()
+  if (wsRefreshTimer) clearTimeout(wsRefreshTimer)
 })
 </script>
 

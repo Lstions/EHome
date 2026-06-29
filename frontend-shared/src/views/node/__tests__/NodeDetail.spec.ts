@@ -34,7 +34,6 @@ const {
       last_online_time: new Date().toISOString(),
       online_duration: 86400,
       config_sync_state: 'in_sync',
-      config_epoch: 1,
       protocol_version: '2.0',
     })
   ),
