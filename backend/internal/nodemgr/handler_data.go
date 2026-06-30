@@ -86,20 +86,25 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	case m.dataCh <- job:
 		// submitted to worker pool
 	default:
-		// P1-4: Backpressure — limit overflow goroutines
+		// P1-4: Backpressure — limit overflow goroutines via atomic CAS loop
 		metrics.WorkerPoolOverflowTotal.Inc()
-		current := atomic.LoadInt64(&overflowGoroutines)
-		if current >= maxOverflowGoroutines {
-			// Critical overload — block MQTT callback (better than data loss)
-			metrics.WorkerPoolBackpressureBlockTotal.Inc()
-			logger.Warnf("[%s] CRITICAL: overflow limit reached (%d), blocking MQTT callback", deviceID, current)
-			m.processDataReportJob(job)
-		} else {
-			atomic.AddInt64(&overflowGoroutines, 1)
-			go func() {
-				defer atomic.AddInt64(&overflowGoroutines, -1)
+		for {
+			current := atomic.LoadInt64(&overflowGoroutines)
+			if current >= maxOverflowGoroutines {
+				// Critical overload — block MQTT callback (better than data loss)
+				metrics.WorkerPoolBackpressureBlockTotal.Inc()
+				logger.Warnf("[%s] CRITICAL: overflow limit reached (%d), blocking MQTT callback", deviceID, current)
 				m.processDataReportJob(job)
-			}()
+				break
+			}
+			if atomic.CompareAndSwapInt64(&overflowGoroutines, current, current+1) {
+				go func() {
+					defer atomic.AddInt64(&overflowGoroutines, -1)
+					m.processDataReportJob(job)
+				}()
+				break
+			}
+			// CAS failed — another goroutine modified the counter, retry
 		}
 	}
 }

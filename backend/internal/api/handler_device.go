@@ -14,6 +14,7 @@ import (
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
+	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/parser"
 
 	"github.com/gin-gonic/gin"
@@ -423,7 +424,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
 	})
 
-	// Update a channel
+	// Update a channel (DTO pattern to prevent mass assignment)
 	v1.PUT("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var ch models.Channel
@@ -431,14 +432,60 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
 			return
 		}
-		if err := c.ShouldBindJSON(&ch); err != nil {
+		var dto struct {
+			HardwareType *string `json:"hardware_type"`
+			HardwareID   *string `json:"hardware_id"`
+			IntervalMs   *int    `json:"interval_ms"`
+			BusType      *string `json:"bus_type"`
+			BusConfig    *string `json:"bus_config"`
+			TemplateIDs  *string `json:"template_ids"`
+			Config       *string `json:"config"`
+			Enabled      *bool   `json:"enabled"`
+			DmaEnabled   *bool   `json:"dma_enabled"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
-		ch.ID = parseUintID(id)
-		if err := db.Save(&ch).Error; err != nil {
+		updates := map[string]interface{}{}
+		if dto.HardwareType != nil {
+			updates["hardware_type"] = *dto.HardwareType
+		}
+		if dto.HardwareID != nil {
+			updates["hardware_id"] = *dto.HardwareID
+		}
+		if dto.IntervalMs != nil {
+			updates["interval_ms"] = *dto.IntervalMs
+		}
+		if dto.BusType != nil {
+			updates["bus_type"] = *dto.BusType
+		}
+		if dto.BusConfig != nil {
+			updates["bus_config"] = *dto.BusConfig
+		}
+		if dto.TemplateIDs != nil {
+			updates["template_ids"] = *dto.TemplateIDs
+		}
+		if dto.Config != nil {
+			updates["config"] = *dto.Config
+		}
+		if dto.Enabled != nil {
+			updates["enabled"] = *dto.Enabled
+		}
+		if dto.DmaEnabled != nil {
+			updates["dma_enabled"] = *dto.DmaEnabled
+		}
+		if len(updates) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "no fields to update"})
+			return
+		}
+		if err := db.Model(&ch).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
+		}
+		// Reload to get updated record with new timestamps
+		if err := db.First(&ch, id).Error; err != nil {
+			logger.Warnf("Failed to reload channel after update: %v", err)
 		}
 		// Emit config change for the node
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(ch.ID))

@@ -392,7 +392,7 @@ describe('driver API', () => {
       id: 'bosch', name: 'Bosch',
       children: [{
         id: 'temp', name: 'Temperature',
-        drivers: [{ type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c'], description: 'Temp sensor' }]
+        drivers: [{ type: 'bmp280', model: 'BMP280', display_name: 'BMP280', hardware_types: ['i2c'], description: 'Temp sensor' }]
       }]
     }]
     const options = transformToCascaderOptions(tree)

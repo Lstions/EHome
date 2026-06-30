@@ -27,6 +27,17 @@ export const sensorNameMap: Record<string, string> = {
   soc: 'SOC',
   soh: 'SOH',
   frequency: '频率',
+  // BMS sensors
+  total_voltage: '总电压',
+  rsoc: 'SOC',
+  remaining_capacity: '剩余容量',
+  protection_status: '保护状态',
+  fet_status: 'MOS状态',
+  temperature_1: '温度1',
+  temperature_2: '温度2',
+  temperature_3: '温度3',
+  cell_voltage_max: '最高单体电压',
+  cell_voltage_min: '最低单体电压',
 }
 
 /** 传感器单位映射 */
@@ -53,6 +64,17 @@ export const sensorUnitMap: Record<string, string> = {
   soc: '%',
   soh: '%',
   frequency: 'Hz',
+  // BMS sensors
+  total_voltage: 'V',
+  rsoc: '%',
+  remaining_capacity: 'Ah',
+  protection_status: '',
+  fet_status: '',
+  temperature_1: '°C',
+  temperature_2: '°C',
+  temperature_3: '°C',
+  cell_voltage_max: 'V',
+  cell_voltage_min: 'V',
 }
 
 /** 预定义传感器类型排序（已知类型按此顺序排列，未知类型排后面） */

@@ -1,5 +1,7 @@
 // HAL error code mapping for channel data
-export const HAL_ERROR_CODES: Record<number, { label: string; type: string }> = {
+export type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger'
+
+export const HAL_ERROR_CODES: Record<number, { label: string; type: TagType }> = {
   0: { label: '成功', type: 'success' },
   1: { label: '超时', type: 'warning' },
   2: { label: '忙碌', type: 'info' },
@@ -11,7 +13,7 @@ export const HAL_ERROR_CODES: Record<number, { label: string; type: string }> = 
   8: { label: '配置已变更', type: 'info' },
 }
 
-export function getErrorInfo(code: number | undefined | null): { label: string; type: string } {
+export function getErrorInfo(code: number | undefined | null): { label: string; type: TagType } {
   if (code === undefined || code === null || code === 0) {
     return { label: '成功', type: 'success' }
   }

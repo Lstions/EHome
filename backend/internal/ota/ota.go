@@ -55,7 +55,6 @@ var terminalStates = map[string]bool{
 // 实现 docs §6.4.1
 var activeStates = []string{
 	StatusPending,
-	StatusPending,
 	StatusDownloading,
 	StatusVerifying,
 	StatusInstalling,

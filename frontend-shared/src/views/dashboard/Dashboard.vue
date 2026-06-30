@@ -12,7 +12,7 @@
     <template v-else>
       <el-row :gutter="20">
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/node')">
+          <el-card shadow="hover" class="stat-card" @click="router.push('/node')">
             <div class="stat-content">
               <div class="stat-icon" style="color: var(--el-color-primary);">
                 <el-icon :size="32"><Connection /></el-icon>
@@ -26,7 +26,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/node?status=online')">
+          <el-card shadow="hover" class="stat-card" @click="router.push('/node?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: var(--el-color-success);">
                 <el-icon :size="32"><CircleCheck /></el-icon>
@@ -40,7 +40,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/edge-device')">
+          <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device')">
             <div class="stat-content">
               <div class="stat-icon" style="color: var(--el-color-warning);">
                 <el-icon :size="32"><Cpu /></el-icon>
@@ -54,7 +54,7 @@
         </el-col>
 
         <el-col :span="6">
-          <el-card class="stat-card" @click="router.push('/edge-device?status=online')">
+          <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device?status=online')">
             <div class="stat-content">
               <div class="stat-icon" style="color: var(--el-color-success);">
                 <el-icon :size="32"><CircleCheck /></el-icon>
@@ -116,7 +116,7 @@
     <!-- 24h 趋势图表 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
               <span>{{ trendRangeLabel }}趋势</span>
@@ -162,7 +162,7 @@
     <!-- 设备状态时间线 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>采集器/设备状态变化</span>
@@ -199,7 +199,7 @@
     <!-- 最新数据表格（同时显示原始设备数据和解析后数据） -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
-        <el-card>
+        <el-card shadow="hover">
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>最新数据</span>
@@ -301,31 +301,34 @@ const trendCategoryName = computed(() => {
 
 // 传感器映射已提取到 utils/sensor.ts (S6 fix)
 
-// 从 overview.latest_data 动态提取可用的传感器类型
-const availableTrendCategories = computed(() => {
-  const dataKeys = new Set<string>()
-  for (const item of (overview.value.latest_data || [])) {
+// 缓存已见过的传感器类型集合，只增不减，避免 WS 数据更新导致选项忽多忽少
+const seenCategoryKeys = ref<Set<string>>(new Set())
+
+// 监听 latest_data 变化，累积已见过的传感器类型
+watch(() => overview.value.latest_data, (newData) => {
+  for (const item of (newData || [])) {
     if (item.data && typeof item.data === 'object') {
       for (const key of Object.keys(item.data)) {
         const val = item.data[key]
-        // 只收集数值型字段（排除字符串、null 等）
         if (typeof val === 'number' || (typeof val === 'object' && val !== null && 'value' in val)) {
-          dataKeys.add(key)
+          seenCategoryKeys.value.add(key)
         }
       }
     }
   }
-  // 按预定义顺序排列，未知的排在后面
+}, { deep: true, immediate: true })
+
+// 从缓存集合生成可用传感器类型列表
+const availableTrendCategories = computed(() => {
   const knownOrder = SENSOR_ORDER
-  const sorted = [...dataKeys].sort((a, b) => {
+  return [...seenCategoryKeys.value].sort((a, b) => {
     const ia = knownOrder.indexOf(a)
     const ib = knownOrder.indexOf(b)
     if (ia !== -1 && ib !== -1) return ia - ib
     if (ia !== -1) return -1
     if (ib !== -1) return 1
     return a.localeCompare(b)
-  })
-  return sorted.map(key => ({
+  }).map(key => ({
     value: key,
     label: sensorNameMap[key] || key
   }))
@@ -437,55 +440,43 @@ const fetchStatusTimeline = async () => {
   }
 }
 
-// 处理状态更新
+// 处理状态更新 — 防抖：多个状态变更在1秒内只触发一次fetchOverview
+let overviewDirty = false
+let overviewDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const scheduleOverviewRefresh = () => {
+  overviewDirty = true
+  if (overviewDebounceTimer) clearTimeout(overviewDebounceTimer)
+  overviewDebounceTimer = setTimeout(() => {
+    if (overviewDirty) {
+      overviewDirty = false
+      fetchOverview(true)
+    }
+  }, 1000)
+}
+
 const handleStatusUpdate = (message: WebSocketMessage) => {
   logger.debug('状态更新', { payload: message.payload })
 
   if (message.payload?.collector_id || message.payload?.device_id) {
-    fetchOverview()
+    scheduleOverviewRefresh()
   }
 }
 
-// 处理数据更新
+// 处理数据更新 — 不直接修改 latest_data，触发防抖刷新避免表格跳动
 const handleDataUpdate = (message: WebSocketMessage) => {
   logger.debug('数据更新', { payload: message.payload })
-
-  const data = message.payload
-  if (data && overview.value.latest_data) {
-    const newDataItem = {
-      device_id: data.device_id || 0,
-      device_name: data.device_name || '未知设备',
-      collector_name: data.collector_name || '未知采集器',
-      data: data.data || {},
-      raw_data: data.raw_data,
-      collected_at: data.collected_at || new Date().toISOString()
-    }
-
-    const existingIndex = overview.value.latest_data.findIndex(
-      item => item.device_name === newDataItem.device_name
-    )
-
-    if (existingIndex >= 0) {
-      overview.value.latest_data.splice(existingIndex, 1, newDataItem)
-    } else {
-      overview.value.latest_data.unshift(newDataItem)
-    }
-
-    if (overview.value.latest_data.length > 20) {
-      overview.value.latest_data = overview.value.latest_data.slice(0, 20)
-    }
-  }
+  scheduleOverviewRefresh()
 }
 
-const fetchOverview = async () => {
-  loading.value = true
+const fetchOverview = async (silent = false) => {
+  if (!silent) loading.value = true
   try {
     const data = await dataApi.getOverview()
     overview.value = data
   } catch (error: any) {
-    ElMessage.error('获取概览数据失败')
+    if (!silent) ElMessage.error('获取概览数据失败')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -580,6 +571,10 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unsubscribeStatus) unsubscribeStatus()
   if (unsubscribeData) unsubscribeData()
+  if (overviewDebounceTimer) {
+    clearTimeout(overviewDebounceTimer)
+    overviewDebounceTimer = null
+  }
 })
 </script>
 
@@ -628,7 +623,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 28px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .device-link {
@@ -657,7 +652,7 @@ onUnmounted(() => {
   transition: all 0.2s;
 }
 .alert-item:hover {
-  background: #fef0f0;
+  background: var(--el-color-danger-light-9);
   transform: translateX(2px);
 }
 .alert-value {

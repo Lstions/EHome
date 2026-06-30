@@ -249,6 +249,7 @@ import { WS_EVENT } from '@/events/events'
 import { exportCSV, exportJSON } from '@/utils/exportData'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
+import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 
 const deviceList = ref<Device[]>([])
 const historyData = ref<any[]>([])
@@ -458,24 +459,26 @@ const buildChartSeries = async () => {
         break
     }
 
-    const categories = ['temperature', 'pressure', 'humidity', 'wind_speed', 'illuminance']
-    const unitMap: Record<string, string> = {
-      temperature: '°C',
-      pressure: 'hPa',
-      humidity: '%',
-      wind_speed: 'm/s',
-      illuminance: 'lux'
-    }
-    const nameMap: Record<string, string> = {
-      temperature: '温度',
-      pressure: '气压',
-      humidity: '湿度',
-      wind_speed: '风速',
-      illuminance: '光照'
+    // Fetch categories dynamically from the API instead of hardcoding
+    let categoryNames: string[] = []
+    try {
+      const catResponse = await client.get<unknown, any>('/api/v1/unified-data/categories')
+      const cats = catResponse?.data || catResponse || []
+      if (Array.isArray(cats)) {
+        categoryNames = cats.map((c: any) => c.code || c.name || c)
+      }
+    } catch { /* ignore */ }
+
+    // Fallback to known categories if API returns nothing
+    if (categoryNames.length === 0) {
+      categoryNames = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction',
+        'illuminance', 'uv_index', 'rain_intensity', 'rain_accum',
+        'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency',
+        'cell_voltage', 'cell_temp', 'mos_status']
     }
 
     const series: any[] = []
-    const promises = categories.map(cat =>
+    const promises = categoryNames.map(cat =>
       client.get<unknown, any>('/api/v1/unified-data/historical', {
         params: {
           device_pk: queryForm.deviceId,
@@ -484,6 +487,7 @@ const buildChartSeries = async () => {
           end_time: endTime.toISOString()
         }
       }).then(res => ({ cat, data: res.data || [] }))
+        .catch(() => ({ cat, data: [] as any[] }))
     )
 
     const results = await Promise.all(promises)
@@ -495,9 +499,12 @@ const buildChartSeries = async () => {
             return t && !t.startsWith('0001-01-01')
           })
         if (filteredData.length > 0) {
+          // Use category from API response or fall back to sensor maps
+          const catName = sensorNameMap[r.cat] || r.cat
+          const catUnit = sensorUnitMap[r.cat] || ''
           series.push({
-            name: nameMap[r.cat] || r.cat,
-            unit: unitMap[r.cat] || '',
+            name: catName,
+            unit: catUnit,
             data: filteredData.map((item: any) => ({
               time: item.timestamp || item.created_at,
               value: item.value
@@ -536,6 +543,28 @@ const buildChartSeries = async () => {
 }
 
 // 实时数据处理
+// 性能优化：防抖 calculateStats 和 buildChartSeries，避免每条WS消息都触发重计算
+let statsDirty = false
+let chartDirty = false
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
+const DEBOUNCE_MS = 2000  // 2秒内多条消息只触发一次重算
+
+const flushDebounced = () => {
+  if (statsDirty) {
+    statsDirty = false
+    calculateStats()
+  }
+  if (chartDirty) {
+    chartDirty = false
+    buildChartSeries()
+  }
+}
+
+const scheduleDebounced = () => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(flushDebounced, DEBOUNCE_MS)
+}
+
 const handleDataUpdate = (message: WebSocketMessage) => {
   const payload = message.payload
   if (!payload || payload.device_id !== queryForm.deviceId) return
@@ -560,9 +589,10 @@ const handleDataUpdate = (message: WebSocketMessage) => {
   }
   total.value++
 
-  // 更新统计和图表
-  calculateStats()
-  buildChartSeries()
+  // 标记为脏，延迟批量重算（避免高频WS消息每条都触发20+个HTTP请求）
+  statsDirty = true
+  chartDirty = true
+  scheduleDebounced()
 }
 
 const toggleRealtime = (enabled: boolean) => {
@@ -718,6 +748,10 @@ onMounted(() => {
 onUnmounted(() => {
   if (unsubscribeData) {
     unsubscribeData()
+  }
+  if (debounceTimer) {
+    clearTimeout(debounceTimer)
+    debounceTimer = null
   }
 })
 </script>

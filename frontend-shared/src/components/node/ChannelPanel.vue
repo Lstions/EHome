@@ -102,7 +102,7 @@
                           <el-button
                             v-if="busType === 'uart' && getChannelsForHardware(busType, hw.id).length > 0 && collectorStatus === 'online'"
                             size="small"
-                            link
+                            text
                             type="warning"
                             @click="openReconfigure(getChannelsForHardware(busType, hw.id)[0])"
                           >
@@ -125,7 +125,7 @@
                               <span class="no-channel-text">无通道</span>
                               <el-button
                                 type="primary"
-                                link
+                                text
                                 size="small"
                                 class="add-channel-btn"
                                 @click="collectorStatus === 'online' && handleOpenChannelManager(undefined, busType, hw.id)"

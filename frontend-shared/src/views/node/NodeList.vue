@@ -178,7 +178,7 @@
     </div>
 
     <!-- 列表视图 -->
-    <el-card v-else class="collector-table-card">
+    <el-card v-else class="collector-table-card" shadow="hover">
       <el-table 
         :data="filteredNodes" 
         v-loading="loading"
@@ -250,7 +250,7 @@
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click.stop="goToDetail(row.node_id)">详情</el-button>
-            <el-button size="small" type="danger" plain @click.stop="handleDelete(row)">删除</el-button>
+            <el-button size="small" type="danger" text @click.stop="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -298,6 +298,7 @@ import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
+import { getQualityColor, getLatencyColor } from '@/utils/theme'
 
 const router = useRouter()
 const nodeStore = useNodeStore()
@@ -448,18 +449,6 @@ const handleDelete = async (row: any) => {
 }
 
 // 工具函数
-const getQualityColor = (quality: number) => {
-  if (quality >= 80) return '#67c23a'
-  if (quality >= 50) return '#e6a23c'
-  return '#f56c6c'
-}
-
-const getLatencyColor = (ms: number) => {
-  if (ms < 50) return '#67c23a'
-  if (ms < 200) return '#e6a23c'
-  return '#f56c6c'
-}
-
 const formatRelativeTime = (time: string) => {
   if (!time) return '-'
   const now = new Date()
@@ -535,7 +524,7 @@ onUnmounted(() => {
   gap: 16px;
   cursor: pointer;
   transition: all 0.3s;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .stat-card:hover {
@@ -574,7 +563,7 @@ onUnmounted(() => {
   display: block;
   font-size: 28px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   line-height: 1.2;
 }
 
@@ -593,7 +582,7 @@ onUnmounted(() => {
 }
 
 .stat-trend.up {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
@@ -602,10 +591,10 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #fff;
+  background: var(--el-bg-color);
   padding: 16px 20px;
   border-radius: 12px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .toolbar-left {
@@ -633,7 +622,7 @@ onUnmounted(() => {
 .collector-card {
   cursor: pointer;
   transition: all 0.3s;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .collector-card:hover {
@@ -667,13 +656,13 @@ onUnmounted(() => {
   color: #fff;
 }
 
-.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
+.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
 .collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, #b1b3b8 100%); }
 
 .collector-meta h3 {
   margin: 0;
   font-size: 16px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .collector-meta .model {
@@ -691,12 +680,12 @@ onUnmounted(() => {
 }
 
 .status-tag.online {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
 .status-tag.offline {
-  background: #f4f4f5;
+  background: var(--el-fill-color-light);
   color: var(--el-text-color-secondary);
 }
 
@@ -783,7 +772,7 @@ onUnmounted(() => {
 
 .table-collector-info .name {
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .table-collector-info .model {
@@ -807,7 +796,7 @@ onUnmounted(() => {
 .status-cell.offline .status-dot { background: var(--el-text-color-secondary); }
 
 .pagination-wrapper {
-  margin-top: 16px;
+  margin-top: 20px;
   display: flex;
   justify-content: flex-end;
 }

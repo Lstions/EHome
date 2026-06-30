@@ -4,13 +4,16 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -116,6 +119,9 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 	// Upload firmware .bin file
 	v1.POST("/firmwares/upload", func(c *gin.Context) {
+		// Limit request body to 4MB to prevent abuse
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<20)
+
 		version := c.PostForm("version")
 		if version == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "version required"})
@@ -128,10 +134,29 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			return
 		}
 
+		// Validate file extension
+		filename := filepath.Base(file.Filename)
+		if !strings.HasSuffix(strings.ToLower(filename), ".bin") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "only .bin firmware files are allowed"})
+			return
+		}
+
+		// Validate Content-Type (common types for binary uploads)
+		contentType := file.Header.Get("Content-Type")
+		allowedTypes := map[string]bool{
+			"application/octet-stream": true,
+			"application/x-binary":     true,
+			"binary/octet-stream":      true,
+			"":                         true, // Some clients omit Content-Type for multipart files
+		}
+		if !allowedTypes[contentType] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported content type: %s", contentType)})
+			return
+		}
+
 		// Save to firmware dir
 		fwDir := "firmwares"
 		os.MkdirAll(fwDir, 0755)
-		filename := filepath.Base(file.Filename)
 		dst := filepath.Join(fwDir, filename)
 		if err := c.SaveUploadedFile(file, dst); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -144,12 +169,18 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		checksum := fmt.Sprintf("%x", hash)
 
 		// Build download URL (ESP32 will fetch from this URL)
-		// Use configurable external address, fallback to request host
+		// Use configurable external address, fallback to request host with warning
 		extHost := os.Getenv("EHOME_EXTERNAL_HOST")
 		if extHost == "" {
-			extHost = c.Request.Host
+			if isDevelopmentMode() {
+				logger.Warnf("EHOME_EXTERNAL_HOST not set, falling back to request Host header for firmware URL (potential Host Header Injection)")
+				extHost = c.Request.Host
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "EHOME_EXTERNAL_HOST not configured; cannot generate firmware download URL"})
+				return
+			}
 		}
-		url := fmt.Sprintf("http://%s/api/v1/firmwares/%s/download", extHost, filename)
+		url := fmt.Sprintf("http://%s/api/v1/firmwares/%s/download", extHost, url.PathEscape(filename))
 
 		fw := models.Firmware{
 			Version:     version,

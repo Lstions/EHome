@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { nodeApi, type DmaChannelInfo, type DmaChannelConfig } from '@/api/node'
-import { DmaState, isDmaRebindable } from '@/utils/dmaState'
+import { DmaState } from '@/utils/dmaState'
 
 /**
  * DMA 通道统一状态管理 (v2.5)

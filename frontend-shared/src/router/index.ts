@@ -62,7 +62,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'edge-device/:id',
         name: 'EdgeDeviceDetail',
-        component: () => import('@/views/edge-device/EdgeDeviceDetail.vue'),
+        component: () => import('@/views/edge-device/EdgeDeviceDetailRouter.vue'),
         meta: { title: '边缘设备详情', hidden: true },
       },
       {

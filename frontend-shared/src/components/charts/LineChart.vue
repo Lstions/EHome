@@ -54,18 +54,48 @@ const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
 
 // Default color palette
-const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399']
+const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399', '#8b5cf6', '#06b6d4', '#f97316']
 
-const buildSeries = () => {
+/**
+ * Build yAxis list for multi-series mode.
+ * Series with the same unit share one Y-axis (left side).
+ * Series with different units get their own Y-axis (offset right).
+ */
+const buildYAxisList = () => {
+  if (!props.series || props.series.length <= 1) return undefined
+  const unitGroups: string[] = []
+  const seriesToYAxis: number[] = []
+  props.series.forEach(s => {
+    const unit = s.unit || ''
+    const existingIdx = unitGroups.indexOf(unit)
+    if (existingIdx >= 0) {
+      seriesToYAxis.push(existingIdx)
+    } else {
+      seriesToYAxis.push(unitGroups.length)
+      unitGroups.push(unit)
+    }
+  })
+  return {
+    yAxisList: unitGroups.map((unit, i) => ({
+      type: 'value' as const,
+      name: unit ? `(${unit})` : '数值',
+      position: i === 0 ? 'left' as 'left' : 'right' as 'right',
+      offset: i > 1 ? (i - 1) * 60 : 0,
+      axisLabel: { formatter: (v: number) => v.toFixed(1) }
+    })),
+    seriesToYAxis
+  }
+}
+
+const buildSeries = (seriesToYAxis?: number[]) => {
   // Multi-series mode: use props.series
   if (props.series && props.series.length > 0) {
-    const firstSeries = props.series[0]
     return props.series.map((s, i) => ({
       name: s.name + (s.unit ? ` (${s.unit})` : ''),
       type: 'line' as const,
       data: s.data.map(item => item.value),
       smooth: props.smooth,
-      yAxisIndex: i,
+      yAxisIndex: seriesToYAxis ? seriesToYAxis[i] : i,
       lineStyle: { width: 2, color: SERIES_COLORS[i % SERIES_COLORS.length] },
       itemStyle: { color: SERIES_COLORS[i % SERIES_COLORS.length] },
       areaStyle: {
@@ -152,15 +182,8 @@ const initChart = () => {
   chartInstance = echarts.init(chartRef.value)
 
   const multiSeries = props.series && props.series.length > 1
-  const yAxisConfig = multiSeries
-    ? props.series!.map((s, i) => ({
-        type: 'value' as const,
-        name: s.name + (s.unit ? ` (${s.unit})` : ''),
-        position: i === 0 ? 'left' : 'right' as 'right',
-        offset: i > 1 ? (i - 1) * 60 : 0,
-        axisLabel: { formatter: (v: number) => v.toFixed(1) }
-      }))
-    : undefined
+  const yAxisInfo = buildYAxisList()
+  const yAxisConfig = yAxisInfo?.yAxisList
 
   const option: EChartsOption = {
     title: { text: props.title, left: 'center' },
@@ -183,7 +206,7 @@ const initChart = () => {
       type: 'value',
       axisLabel: { formatter: (value: number) => value.toFixed(2) }
     },
-    series: buildSeries()
+    series: buildSeries(yAxisInfo?.seriesToYAxis)
   }
 
   chartInstance.setOption(option)
@@ -197,25 +220,18 @@ watch(() => [props.data, props.series], () => {
   if (!chartInstance) return
 
   const multiSeries = props.series && props.series.length > 1
-  const yAxisConfig = multiSeries
-    ? props.series!.map((s, i) => ({
-        type: 'value' as const,
-        name: s.name + (s.unit ? ` (${s.unit})` : ''),
-        position: i === 0 ? 'left' : 'right' as 'right',
-        offset: i > 1 ? (i - 1) * 60 : 0,
-        axisLabel: { formatter: (v: number) => v.toFixed(1) }
-      }))
-    : {
-        type: 'value' as const,
-        axisLabel: { formatter: (value: number) => value.toFixed(2) }
-      }
+  const yAxisInfo = buildYAxisList()
+  const yAxisConfig = yAxisInfo?.yAxisList || {
+    type: 'value' as const,
+    axisLabel: { formatter: (value: number) => value.toFixed(2) }
+  }
 
   chartInstance.setOption({
     legend: multiSeries ? { top: 30 } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(),
     yAxis: yAxisConfig,
-    series: buildSeries()
+    series: buildSeries(yAxisInfo?.seriesToYAxis)
   })
 }, { deep: true })
 

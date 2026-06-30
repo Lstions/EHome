@@ -53,9 +53,9 @@
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right" v-permission="'admin'">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEditDialog(row)">编辑</el-button>
-            <el-button link type="primary" size="small" @click="openResetPasswordDialog(row)">重置密码</el-button>
-            <el-button link type="danger" size="small" :disabled="row.id === currentUserId" @click="handleDelete(row)">删除</el-button>
+            <el-button text type="primary" size="small" @click="openEditDialog(row)">编辑</el-button>
+            <el-button text type="primary" size="small" @click="openResetPasswordDialog(row)">重置密码</el-button>
+            <el-button text type="danger" size="small" :disabled="row.id === currentUserId" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>

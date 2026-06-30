@@ -98,7 +98,7 @@ describe('Profile.vue', () => {
   })
 
   it('computes roleTagType correctly for operator', async () => {
-    const role = 'operator' as const
+    const role = 'operator' as string
     const result = role === 'admin' ? 'danger' : role === 'operator' ? 'warning' : 'info'
     expect(result).toBe('warning')
   })

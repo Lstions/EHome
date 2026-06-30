@@ -112,7 +112,7 @@
         </el-col>
       </el-row>
 
-      <el-row :gutter="16" style="margin-top: 16px;">
+      <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 设备状态 -->
         <el-col :span="12">
           <el-card shadow="hover">
@@ -127,7 +127,7 @@
                 <el-progress 
                   :percentage="deviceOnlinePercent" 
                   :stroke-width="20"
-                  :color="'#67c23a'"
+                  :color="THEME_COLORS.success"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
                 </el-progress>
@@ -137,7 +137,7 @@
                 <el-progress
                   :percentage="deviceOfflinePercent"
                   :stroke-width="20"
-                  :color="'#f56c6c'"
+                  :color="THEME_COLORS.danger"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
                 </el-progress>
@@ -160,7 +160,7 @@
                 <el-progress 
                   :percentage="collectorOnlinePercent" 
                   :stroke-width="20"
-                  :color="'#67c23a'"
+                  :color="THEME_COLORS.success"
                 >
                   <span>{{ metrics?.collector?.online || 0 }}</span>
                 </el-progress>
@@ -170,7 +170,7 @@
                 <el-progress
                   :percentage="collectorOfflinePercent"
                   :stroke-width="20"
-                  :color="'#f56c6c'"
+                  :color="THEME_COLORS.danger"
                 >
                   <span>{{ metrics?.collector?.offline || 0 }}</span>
                 </el-progress>
@@ -180,7 +180,7 @@
         </el-col>
       </el-row>
 
-      <el-row :gutter="16" style="margin-top: 16px;">
+      <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 数据采集 -->
         <el-col :span="12">
           <el-card shadow="hover">
@@ -235,6 +235,7 @@ import {
   Connection, Monitor, Cpu, DataLine, Promotion, Refresh 
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
+import { THEME_COLORS } from '@/utils/theme'
 
 // 状态
 const metrics = ref<MetricsSummary | null>(null)
@@ -383,7 +384,7 @@ onUnmounted(() => {
 .stat-value {
   font-size: 28px;
   font-weight: bold;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .stat-value .online {

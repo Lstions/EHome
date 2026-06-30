@@ -7,9 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/pkg/logger"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+const defaultJWTSecret = "ehome-dev-secret-change-me"
 
 // jwtSecret is the HMAC secret for signing JWT tokens.
 // v2.2: configurable via EHOME_JWT_SECRET env var.
@@ -17,8 +21,27 @@ var jwtSecret = []byte(func() string {
 	if s := os.Getenv("EHOME_JWT_SECRET"); s != "" {
 		return s
 	}
-	return "ehome-dev-secret-change-me"
+	return defaultJWTSecret
 }())
+
+// isDevelopmentMode returns true if the server is running in development mode.
+// Development mode is enabled when GIN_MODE is unset (Gin defaults to debug),
+// GIN_MODE=debug, or EHOME_ENV=development.
+func isDevelopmentMode() bool {
+	ginMode := os.Getenv("GIN_MODE")
+	return ginMode == "" || ginMode == "debug" || os.Getenv("EHOME_ENV") == "development"
+}
+
+// ValidateJWTSecret checks that the JWT secret is not the default value in production.
+// Must be called from main.go at startup.
+func ValidateJWTSecret() {
+	if string(jwtSecret) == defaultJWTSecret && !isDevelopmentMode() {
+		logger.Fatalf("JWT secret is set to default value. Set EHOME_JWT_SECRET env var or run in development mode (GIN_MODE=debug or EHOME_ENV=development)")
+	}
+	if string(jwtSecret) == defaultJWTSecret {
+		logger.Warnf("WARNING: using default JWT secret in development mode. Set EHOME_JWT_SECRET for production.")
+	}
+}
 
 // Claims represents the JWT payload
 type Claims struct {

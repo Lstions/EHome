@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { logger } from '@/utils/logger'
-import { WS_EVENT } from '@/events/events'
 
 export interface WebSocketMessage {
   type: string
@@ -50,6 +49,10 @@ export const useWebSocketStore = defineStore('websocket', () => {
   const manuallyClosed = ref(false)
   const messageHandlers = ref<Map<string, Set<MessageHandler>>>(new Map())
   const connectionHandlers = ref<Set<ConnectionHandler>>(new Set())
+  // 指数退避重连：5s → 10s → 20s → 40s → 60s（上限60s）
+  const reconnectAttempts = ref(0)
+  const MAX_RECONNECT_DELAY = 60000
+  const BASE_RECONNECT_DELAY = 5000
 
   const isConnected = computed(() => connected.value)
 
@@ -143,9 +146,16 @@ export const useWebSocketStore = defineStore('websocket', () => {
     logger.debug('WebSocket 连接中', { url: statusUrl.replace(/token=[^&]+/, 'token=***') })
     ws.value = new WebSocket(statusUrl)
 
-    ws.value.onopen = () => {
+    // Capture the current WebSocket instance in a local variable.
+    // This prevents closures (onclose/onerror/etc.) from accessing a different
+    // instance if connect() is called again (e.g. reconnect) before the old
+    // socket's events fire.
+    const sock = ws.value
+
+    sock.onopen = () => {
       connected.value = true
-      logger.info('WebSocket 已连接', { url: statusUrl.replace(/token=[^&]+/, 'token=***') })
+      reconnectAttempts.value = 0  // 连接成功后重置退避计数
+      logger.info('WebSocket 已连接')
       if (reconnectTimer.value) {
         clearTimeout(reconnectTimer.value)
         reconnectTimer.value = null
@@ -155,12 +165,9 @@ export const useWebSocketStore = defineStore('websocket', () => {
       connectionHandlers.value.forEach(handler => handler())
     }
 
-    ws.value.onmessage = (event: MessageEvent) => {
+    sock.onmessage = (event: MessageEvent) => {
       try {
         const message: WebSocketMessage = JSON.parse(event.data)
-        if (message.type === WS_EVENT.CHANNEL_DATA) {
-          console.log('[WS] Received:', message.type, JSON.stringify(message.payload))
-        }
         handleMessage(message)
         resetHeartbeat()
       } catch (error) {
@@ -168,12 +175,12 @@ export const useWebSocketStore = defineStore('websocket', () => {
       }
     }
 
-    ws.value.onerror = (event) => {
+    sock.onerror = (event) => {
       logger.error('WebSocket 错误', { event: String(event) })
       connected.value = false
     }
 
-    ws.value.onclose = () => {
+    sock.onclose = () => {
       connected.value = false
       logger.warn('WebSocket 已断开')
 
@@ -181,14 +188,20 @@ export const useWebSocketStore = defineStore('websocket', () => {
         return
       }
 
-      // 自动重连
+      // 指数退避重连
       if (reconnectTimer.value === null) {
+        const delay = Math.min(
+          BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts.value),
+          MAX_RECONNECT_DELAY
+        )
+        reconnectAttempts.value++
+        logger.info(`WebSocket 将在 ${delay / 1000}s 后重连（第 ${reconnectAttempts.value} 次）`)
         reconnectTimer.value = setTimeout(() => {
           reconnectTimer.value = null
           if (!manuallyClosed.value) {
             connect()
           }
-        }, 5000)
+        }, delay)
       }
 
       stopHeartbeat()
@@ -205,6 +218,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
       clearTimeout(reconnectTimer.value)
       reconnectTimer.value = null
     }
+    reconnectAttempts.value = 0
     stopHeartbeat()
   }
 
@@ -216,7 +230,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
   }
 
-  // 心跳
+  // 心跳 — 45s间隔，收到任何消息也重置（服务端活跃时不需要额外ping）
   const startHeartbeat = () => {
     if (heartbeatTimer.value) {
       clearInterval(heartbeatTimer.value)
@@ -225,7 +239,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
       if (ws.value && ws.value.readyState === WebSocket.OPEN) {
         ws.value.send(JSON.stringify({ type: 'ping' }))
       }
-    }, 30000)
+    }, 45000)
   }
 
   const stopHeartbeat = () => {

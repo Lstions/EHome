@@ -174,6 +174,13 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		m.publishHADiscovery(deviceID, deviceID)
 	}
 
-	// Async ping
-	go m.SendPing(deviceID)
+	// Async ping (with timeout and WaitGroup tracking)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		// TODO: add context-aware timeout when SendPing supports context
+		if err := m.SendPing(deviceID); err != nil {
+			logger.Warnf("[%s] Ping failed: %v", deviceID, err)
+		}
+	}()
 }

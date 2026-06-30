@@ -10,13 +10,13 @@
       </div>
       <div class="list-stats">
         <el-tag size="small" type="info">
-          共 {{ dataItems.length }} 条数据
+          共 {{ items.length }} 条数据
         </el-tag>
         <el-button
           size="small"
           :icon="Delete"
           @click="handleClear"
-          :disabled="dataItems.length === 0"
+          :disabled="items.length === 0"
         >
           清空
         </el-button>
@@ -25,9 +25,9 @@
 
     <div class="list-container" ref="listContainer">
       <RecycleScroller
-        v-if="dataItems.length > 0"
+        v-if="items.length > 0"
         class="scroller"
-        :items="dataItems"
+        :items="items"
         :item-size="80"
         key-field="id"
         :buffer="200"
@@ -35,16 +35,16 @@
         <template #default="{ item }">
           <div class="data-item">
             <div class="item-header">
-              <span class="timestamp">{{ formatTime(item.timestamp) }}</span>
-              <el-tag v-if="item.data?.error_code && item.data.error_code > 0" :type="getErrorInfo(item.data.error_code).type" size="small">
-                {{ getErrorInfo(item.data.error_code).label }}
+              <span class="timestamp">{{ formatTime((item as DataItem).timestamp) }}</span>
+              <el-tag v-if="(item as DataItem).data?.error_code && (item as DataItem).data.error_code > 0" :type="getErrorInfo((item as DataItem).data.error_code).type" size="small">
+                {{ getErrorInfo((item as DataItem).data.error_code).label }}
               </el-tag>
-              <el-tag size="small" :type="item.isRealtime ? 'success' : 'info'">
-                {{ item.isRealtime ? '实时' : '历史' }}
+              <el-tag size="small" :type="(item as DataItem).isRealtime ? 'success' : 'info'">
+                {{ (item as DataItem).isRealtime ? '实时' : '历史' }}
               </el-tag>
             </div>
             <div class="item-content" :class="{ 'hex-mode': displayMode === 'hex' }">
-              {{ formatItemData(item) }}
+              {{ formatItemData(item as DataItem) }}
             </div>
           </div>
         </template>
@@ -56,30 +56,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, nextTick, watch } from 'vue'
 import { RecycleScroller } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { Delete } from '@element-plus/icons-vue'
 import { formatTime, formatDataPlainText, dataToHexString } from '@/utils/format'
 import { getErrorInfo } from '@/utils/errorCode'
 
-export interface DataItem {
-  id: string
-  timestamp: string
-  data: any
-  rawData?: number[]
-  isRealtime: boolean
-}
+import type { DataItem } from '@/types/realtime'
 
 interface Props {
-  initialData?: DataItem[]
+  items: DataItem[]
   maxItems?: number
   autoScroll?: boolean
-  deviceType?: string  // 设备类型，用于智能格式化（如 'bmp280'）
+  deviceType?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  initialData: () => [],
+  items: () => [],
   maxItems: 500,
   autoScroll: true,
   deviceType: ''
@@ -89,20 +83,17 @@ const emit = defineEmits<{
   (e: 'clear'): void
 }>()
 
+// UI-only state: display mode toggle (plaintext / hex)
 const displayMode = ref<'text' | 'hex'>('text')
-const dataItems = ref<DataItem[]>([...props.initialData])
 const listContainer = ref<HTMLElement | null>(null)
 
-// 添加新数据
-const addData = (item: DataItem) => {
-  dataItems.value.unshift(item)
+// Clear: emit to parent so it can manage the source data
+const handleClear = () => {
+  emit('clear')
+}
 
-  // 限制最大条数
-  if (dataItems.value.length > props.maxItems) {
-    dataItems.value = dataItems.value.slice(0, props.maxItems)
-  }
-
-  // 自动滚动到顶部
+// Auto-scroll to top when new items arrive
+watch(() => props.items.length, () => {
   if (props.autoScroll) {
     nextTick(() => {
       if (listContainer.value) {
@@ -113,23 +104,11 @@ const addData = (item: DataItem) => {
       }
     })
   }
-}
-
-// 批量添加数据
-const addDataBatch = (items: DataItem[]) => {
-  dataItems.value = [...items, ...dataItems.value].slice(0, props.maxItems)
-}
-
-// 清空数据
-const handleClear = () => {
-  dataItems.value = []
-  emit('clear')
-}
+})
 
 // 格式化数据项
 const formatItemData = (item: DataItem): string => {
   if (displayMode.value === 'hex') {
-    // 优先使用原始字节数据
     if (item.rawData && item.rawData.length > 0) {
       return bytesToHexLocal(item.rawData)
     }
@@ -138,25 +117,12 @@ const formatItemData = (item: DataItem): string => {
   return formatDataPlainText(item.data, props.deviceType)
 }
 
-// 本地16进制格式化（避免导入问题）
+// 本地16进制格式化
 const bytesToHexLocal = (bytes: number[]): string => {
   return bytes
     .map(byte => byte.toString(16).toUpperCase().padStart(2, '0'))
     .join(' ')
 }
-
-// 格式化时间戳
-const formatTimeLocal = (timestamp: string): string => {
-  return formatTime(timestamp)
-}
-
-// 暴露方法供父组件调用
-defineExpose({
-  addData,
-  addDataBatch,
-  clear: handleClear,
-  getDataItems: () => dataItems.value
-})
 </script>
 
 <style scoped>

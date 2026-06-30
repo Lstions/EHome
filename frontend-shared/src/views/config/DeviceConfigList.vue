@@ -44,7 +44,7 @@
     </div>
 
     <!-- 工具栏 -->
-    <el-card class="toolbar-card">
+    <el-card class="toolbar-card" shadow="hover">
       <div class="filter-bar">
         <div class="filter-left">
           <el-input
@@ -578,7 +578,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 16px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .stat-icon {
@@ -598,7 +598,7 @@ onMounted(() => {
 .stat-icon.device { background: var(--el-text-color-secondary); }
 
 .stat-content { flex: 1; }
-.stat-value { display: block; font-size: 24px; font-weight: 600; color: #303133; }
+.stat-value { display: block; font-size: 24px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
 /* 工具栏 */
@@ -638,7 +638,7 @@ onMounted(() => {
 
 .config-card {
   transition: all 0.3s;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .config-card:hover {
@@ -670,7 +670,7 @@ onMounted(() => {
 .config-icon.uart { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
 .config-icon.i2c { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
 .config-icon.spi { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
-.config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
+.config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
 .config-icon.adc { background: linear-gradient(135deg, #9c27b0 0%, #ba68c8 100%); }
 
 .config-info {
@@ -681,7 +681,7 @@ onMounted(() => {
 .config-info h3 {
   margin: 0;
   font-size: 16px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

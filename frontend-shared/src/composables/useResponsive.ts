@@ -1,4 +1,4 @@
-import { ref, onMounted, onUnmounted, readonly } from 'vue'
+import { ref, onMounted, onUnmounted, readonly, computed } from 'vue'
 
 /** 响应式断点（与 src/styles/theme.css 保持一致） */
 export const BREAKPOINTS = {
@@ -28,11 +28,11 @@ export function useResponsive() {
     window.removeEventListener('resize', updateWidth)
   })
 
-  const isMobile = readonly(ref(windowWidth.value < BREAKPOINTS.md))
-  const isTablet = readonly(ref(
-    windowWidth.value >= BREAKPOINTS.md && windowWidth.value < BREAKPOINTS.lg,
+  const isMobile = readonly(computed(() => windowWidth.value < BREAKPOINTS.md))
+  const isTablet = readonly(computed(
+    () => windowWidth.value >= BREAKPOINTS.md && windowWidth.value < BREAKPOINTS.lg,
   ))
-  const isDesktop = readonly(ref(windowWidth.value >= BREAKPOINTS.lg))
+  const isDesktop = readonly(computed(() => windowWidth.value >= BREAKPOINTS.lg))
 
   return {
     width: windowWidth,

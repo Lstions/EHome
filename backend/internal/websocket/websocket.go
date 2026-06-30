@@ -2,10 +2,14 @@ package websocket
 
 import (
 	"encoding/json"
-	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"sync"
+
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -53,8 +57,72 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins in development
+		return checkOrigin(r)
 	},
+}
+
+// isDevMode returns true if running in development mode.
+func isDevMode() bool {
+	return os.Getenv("GIN_MODE") == "debug" || os.Getenv("EHOME_ENV") == "development"
+}
+
+// checkOrigin validates the WebSocket Origin header against a whitelist.
+// In development mode: allows localhost and 127.0.0.1 origins.
+// In production: allows only the configured EHOME_EXTERNAL_HOST origin.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser clients (e.g., curl) don't send Origin
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil {
+		logger.Errorf("WebSocket origin parse error: %v", err)
+		return false
+	}
+
+	host := u.Hostname()
+
+	// Development mode: allow localhost
+	if isDevMode() {
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return true
+		}
+		// Also allow EHOME_EXTERNAL_HOST in dev mode if set
+		if extHost := os.Getenv("EHOME_EXTERNAL_HOST"); extHost != "" {
+			if hostMatchesExtHost(host, extHost) {
+				return true
+			}
+		}
+		logger.Warnf("WebSocket origin rejected (dev mode): %s", origin)
+		return false
+	}
+
+	// Production mode: only allow configured EHOME_EXTERNAL_HOST
+	extHost := os.Getenv("EHOME_EXTERNAL_HOST")
+	if extHost == "" {
+		logger.Warnf("WebSocket origin rejected: EHOME_EXTERNAL_HOST not set, origin=%s", origin)
+		return false
+	}
+
+	if hostMatchesExtHost(host, extHost) {
+		return true
+	}
+
+	logger.Warnf("WebSocket origin rejected (production): %s, expected host from EHOME_EXTERNAL_HOST=%s", origin, extHost)
+	return false
+}
+
+// hostMatchesExtHost checks if the origin hostname matches the configured external host.
+// extHost may include a port (e.g., "example.com:8080").
+func hostMatchesExtHost(host, extHost string) bool {
+	extHostHost, _, err := net.SplitHostPort(extHost)
+	if err != nil {
+		// No port in extHost, compare directly
+		return host == extHost
+	}
+	return host == extHostHost
 }
 
 // NewHub creates a new WebSocket hub
@@ -84,7 +152,7 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
-			log.Println("WebSocket client registered")
+			logger.Infof("WebSocket client registered")
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -93,7 +161,7 @@ func (h *Hub) Run() {
 				close(client.send)
 			}
 			h.mu.Unlock()
-			log.Println("WebSocket client unregistered")
+			logger.Infof("WebSocket client unregistered")
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
@@ -155,7 +223,7 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 	}
 	data, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("Failed to marshal event: %v", err)
+		logger.Errorf("Failed to marshal event: %v", err)
 		return
 	}
 	h.Broadcast(data)
@@ -165,7 +233,7 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 func (h *Hub) HandleWebSocket(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
+		logger.Errorf("WebSocket upgrade failed: %v", err)
 		return
 	}
 
@@ -204,7 +272,7 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+				logger.Errorf("WebSocket error: %v", err)
 			}
 			break
 		}

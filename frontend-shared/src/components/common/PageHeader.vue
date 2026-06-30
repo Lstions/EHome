@@ -33,8 +33,8 @@ const goBack = () => {
   justify-content: space-between;
   align-items: center;
   padding: 16px 24px;
-  background: #fff;
-  border-bottom: 1px solid #e8eaec;
+  background: var(--el-bg-color);
+  border-bottom: 1px solid var(--el-border-color);
   margin-bottom: 16px;
 }
 
@@ -48,12 +48,12 @@ const goBack = () => {
   margin: 0;
   font-size: 20px;
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .page-header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 </style>

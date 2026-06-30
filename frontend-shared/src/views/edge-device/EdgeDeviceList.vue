@@ -130,7 +130,7 @@
     </div>
 
     <!-- 设备表格列表 -->
-    <el-card v-if="viewMode === 'table'">
+    <el-card v-if="viewMode === 'table'" shadow="hover">
       <el-table
         :data="filteredDevices"
         stripe
@@ -427,7 +427,7 @@
         </el-form-item>
         
         <!-- 通道 Tabs: 选择已有 / 创建新 -->
-        <el-tabs v-model="channelTab" style="margin-top: 16px;">
+        <el-tabs v-model="channelTab" style="margin-top: 20px;">
           <el-tab-pane label="选择已有通道" name="existing">
             <div v-if="existingChannels.length > 0" class="channel-list">
               <div
@@ -1236,7 +1236,7 @@ onMounted(() => {
   gap: 16px;
   cursor: pointer;
   transition: all 0.3s;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .stat-card:hover {
@@ -1261,7 +1261,7 @@ onMounted(() => {
 .stat-icon.today { background: var(--el-color-warning); }
 
 .stat-content { flex: 1; }
-.stat-value { display: block; font-size: 28px; font-weight: 600; color: #303133; }
+.stat-value { display: block; font-size: 28px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
 .stat-card .stat-action {
@@ -1279,10 +1279,10 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #fff;
+  background: var(--el-bg-color);
   padding: 16px 20px;
   border-radius: 12px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .toolbar-left {
@@ -1301,7 +1301,7 @@ onMounted(() => {
 
 .device-card {
   transition: all 0.3s;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
 }
 
 .device-card:hover {
@@ -1331,7 +1331,7 @@ onMounted(() => {
 .device-info h3 {
   margin: 0;
   font-size: 15px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1356,11 +1356,11 @@ onMounted(() => {
 .device-icon.wind { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
 .device-icon.rain { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
 .device-icon.light { background: linear-gradient(135deg, #ffc100 0%, #ff7800 100%); }
-.device-icon.battery { background: linear-gradient(135deg, var(--el-color-success) 0%, #85ce61 100%); }
+.device-icon.battery { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
 .device-icon.solar { background: linear-gradient(135deg, var(--el-color-primary) 0%, #9c27b0 100%); }
 
 .device-info { flex: 1; }
-.device-info h3 { margin: 0; font-size: 16px; color: #303133; }
+.device-info h3 { margin: 0; font-size: 16px; color: var(--el-text-color-primary); }
 .device-meta { margin-top: 4px; }
 
 .status-indicator {
@@ -1372,12 +1372,12 @@ onMounted(() => {
   border-radius: 20px;
 }
 
-.status-indicator.online { background: #f0f9eb; color: var(--el-color-success); }
-.status-indicator.active { background: #f0f9eb; color: var(--el-color-success); }
-.status-indicator.offline { background: #f4f4f5; color: var(--el-text-color-secondary); }
-.status-indicator.warning { background: #fdf6ec; color: var(--el-color-warning); }
-.status-indicator.error { background: #fef0f0; color: var(--el-color-danger); }
-.status-indicator.disabled { background: #f4f4f5; color: var(--el-text-color-secondary); }
+.status-indicator.online { background: var(--el-color-success-light-9); color: var(--el-color-success); }
+.status-indicator.active { background: var(--el-color-success-light-9); color: var(--el-color-success); }
+.status-indicator.offline { background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
+.status-indicator.warning { background: var(--el-color-warning-light-9); color: var(--el-color-warning); }
+.status-indicator.error { background: var(--el-color-danger-light-9); color: var(--el-color-danger); }
+.status-indicator.disabled { background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
 
 .status-indicator .dot {
   width: 6px;
@@ -1425,7 +1425,7 @@ onMounted(() => {
 }
 
 .info-value {
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin-left: auto;
   word-break: break-all;
 }
@@ -1474,7 +1474,7 @@ onMounted(() => {
 
 .data-item {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   font-weight: 500;
 }
 
@@ -1527,7 +1527,7 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   border-radius: 6px;
   color: var(--el-color-success);
   font-size: 14px;
@@ -1547,7 +1547,7 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s;
@@ -1559,7 +1559,7 @@ onMounted(() => {
 
 .parser-select-card.selected {
   border-color: var(--el-color-success);
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
 }
 
 .parser-select-icon {
@@ -1580,7 +1580,7 @@ onMounted(() => {
 .parser-select-info h4 {
   margin: 0 0 4px;
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .parser-vendor {
@@ -1608,10 +1608,10 @@ onMounted(() => {
 
 .selected-parser-badge {
   padding: 8px 12px;
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   border-radius: 6px;
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .channel-list {
@@ -1627,7 +1627,7 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
   padding: 10px 14px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--el-border-color);
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s;
@@ -1640,12 +1640,12 @@ onMounted(() => {
 
 .channel-select-card.selected {
   border-color: var(--el-color-success);
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
 }
 
 .channel-select-card code {
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .channel-bus-id {
@@ -1694,7 +1694,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 /* 批量操作栏 */
@@ -1710,7 +1710,7 @@ onMounted(() => {
 
 .batch-info {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .batch-info strong {

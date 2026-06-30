@@ -41,6 +41,9 @@ func main() {
 	defer logger.Sync()
 
 	logger.Infof("EHomeSystem Server v2.0 starting...")
+
+	// Validate JWT secret is not default in production
+	api.ValidateJWTSecret()
 	logger.Infof("Config: MQTT=%s, DB=%s:%d/%s, API=%s",
 		cfg.MQTTBroker(), cfg.DBConfig().Host, cfg.DBConfig().Port, cfg.DBConfig().DBName, cfg.APIAddr())
 

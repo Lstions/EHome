@@ -126,14 +126,14 @@ async function save() {
 .section-title { margin: 0 0 4px; font-size: 14px; }
 .section-desc { margin: 0 0 12px; font-size: 12px; color: var(--el-text-color-secondary); }
 .command-list { display: flex; flex-direction: column; gap: 8px; }
-.command-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; background: var(--el-bg-color); border-radius: 4px; }
+.command-item { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; padding: 8px; background: var(--el-bg-color); border-radius: 4px; overflow: hidden; }
 .command-item.disabled { opacity: 0.5; }
 .command-item.trigger { border-left: 2px solid var(--el-color-danger); }
-.cmd-info { display: flex; align-items: center; gap: 6px; min-width: 180px; }
+.cmd-info { display: flex; align-items: center; gap: 6px; width: 180px; flex-shrink: 0; }
 .cmd-name { font-weight: 500; font-size: 13px; }
 .cmd-hex { font-family: monospace; font-size: 11px; color: var(--el-text-color-secondary); }
-.cmd-desc { flex: 1; font-size: 11px; color: var(--el-text-color-secondary); min-width: 150px; }
-.cmd-controls { display: flex; align-items: center; gap: 4px; }
+.cmd-desc { flex: 1; font-size: 11px; color: var(--el-text-color-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-controls { display: flex; align-items: center; gap: 4px; width: 200px; flex-shrink: 0; justify-content: flex-end; }
 .interval-unit { font-size: 11px; color: var(--el-text-color-secondary); }
 .trigger-hint { font-size: 11px; color: var(--el-text-color-secondary); font-style: italic; }
 .command-actions { margin-top: 12px; display: flex; align-items: center; gap: 8px; }

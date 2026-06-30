@@ -84,6 +84,7 @@ up: infra ## 启动基础设施 + 本地前后端
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
+		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend (port $(FRONTEND_PORT))..."
 	@cd $(FRONTEND) && \
@@ -133,6 +134,7 @@ restart: ## 重启本地前后端
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
+		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend..."
 	@cd $(FRONTEND) && \
@@ -173,6 +175,7 @@ backend: ## 仅启动本地后端
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
+		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		lsof -ti :$(BACKEND_PORT) >/dev/null 2>&1 && break; \

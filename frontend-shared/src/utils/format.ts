@@ -185,3 +185,12 @@ export function formatDataDisplay(data: any, mode: 'text' | 'hex' = 'text', devi
   }
   return formatDataPlainText(data, deviceType)
 }
+
+/**
+ * Format power value: convert to kW if >= 1000W
+ */
+export function formatPower(w: number): string {
+  if (!w || w === 0) return '0W'
+  if (Math.abs(w) >= 1000) return `${(w / 1000).toFixed(2)}kW`
+  return `${w.toFixed(0)}W`
+}

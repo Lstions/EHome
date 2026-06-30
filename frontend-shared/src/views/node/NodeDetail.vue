@@ -30,10 +30,10 @@
       </template>
     </PageHeader>
 
-    <el-card v-if="loading && !collector">
+    <el-card v-if="loading && !collector" shadow="hover">
       <el-skeleton :rows="5" animated />
     </el-card>
-    <el-card v-else-if="collector">
+    <el-card v-else-if="collector" shadow="hover">
       <template #header>
         <span>基本信息</span>
       </template>
@@ -51,8 +51,8 @@
               @keyup.escape="cancelEditName"
             />
             <el-icon v-if="!editingName" class="edit-icon" @click="startEditName"><Edit /></el-icon>
-            <el-button v-else type="primary" size="small" link @click="saveName">保存</el-button>
-            <el-button v-if="editingName" size="small" link @click="cancelEditName">取消</el-button>
+            <el-button v-else type="primary" size="small" text @click="saveName">保存</el-button>
+            <el-button v-if="editingName" size="small" text @click="cancelEditName">取消</el-button>
           </div>
         </el-descriptions-item>
         <el-descriptions-item label="设备ID">
@@ -62,7 +62,7 @@
           {{ collector.model }}
         </el-descriptions-item>
         <el-descriptions-item label="固件版本">
-          <el-tag type="info">{{ collector.firmware_version || '-' }}</el-tag>
+          <el-tag type="info" size="small">{{ collector.firmware_version || '-' }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="状态">
           <StatusBadge :status="collector.status" />
@@ -73,7 +73,7 @@
             v-else-if="collector.connection_quality !== undefined"
             :percentage="collector.connection_quality"
             :color="getQualityColor(collector.connection_quality)"
-            :stroke-width="8"
+            :stroke-width="6"
             style="width: 120px;"
           />
           <span v-else>-</span>
@@ -95,7 +95,7 @@
     </el-card>
 
     <!-- 配置同步状态 -->
-    <el-card v-if="collector" class="config-sync-state" style="margin-top: 20px;">
+    <el-card v-if="collector" class="config-sync-state" shadow="hover" style="margin-top: 20px;">
       <template #header>
         <span>配置同步状态 <el-tag :type="syncStateTagType" size="small">{{ syncStateLabel }}</el-tag></span>
       </template>
@@ -115,17 +115,15 @@
       </el-descriptions>
     </el-card>
 
-    <el-card v-if="loading && !collector" style="margin-top: 20px;">
+    <el-card v-if="loading && !collector" shadow="hover" style="margin-top: 20px;">
       <template #header>
         <span>总线配置</span>
       </template>
       <el-skeleton :rows="6" animated />
     </el-card>
-    <el-card v-else style="margin-top: 20px;">
+    <el-card v-else shadow="hover" style="margin-top: 20px;">
       <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span>总线配置</span>
-        </div>
+        <span>总线配置</span>
       </template>
 
       <!-- 总线配置面板 -->
@@ -133,7 +131,7 @@
     </el-card>
 
     <!-- DMA 通道 -->
-    <el-card v-if="collector" style="margin-top: 20px;">
+    <el-card v-if="collector" shadow="hover" style="margin-top: 20px;">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>DMA 通道</span>
@@ -220,7 +218,7 @@
       </div>
     </el-card>
 
-    <el-card style="margin-top: 20px;">
+    <el-card shadow="hover" style="margin-top: 20px;">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>关联设备</span>
@@ -276,7 +274,7 @@
           </el-table-column>
           <el-table-column label="操作" width="80" fixed="right">
             <template #default="{ row }">
-              <el-button type="primary" link size="small" @click.stop="handleViewDevice(row)">
+              <el-button type="primary" text size="small" @click.stop="handleViewDevice(row)">
                 查看
               </el-button>
             </template>
@@ -286,7 +284,7 @@
     </el-card>
 
     <!-- OTA 历史记录 -->
-    <el-card style="margin-top: 20px;">
+    <el-card shadow="hover" style="margin-top: 20px;">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>OTA 升级历史</span>
@@ -308,7 +306,7 @@
           </el-table-column>
           <el-table-column label="状态" width="120">
             <template #default="{ row }">
-              <el-tag :type="getOTAStatusType(row.status)">
+              <el-tag :type="getOTAStatusType(row.status)" size="small">
                 {{ getOTAStatusText(row.status) }}
               </el-tag>
             </template>
@@ -337,7 +335,7 @@
               <el-button
                 v-if="row.status === 'pending' || row.status === 'downloading'"
                 type="danger"
-                link
+                text
                 size="small"
                 @click="handleCancelOTA(row)"
               >
@@ -379,6 +377,7 @@ import { useDmaStore } from '@/stores/dma'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
+import { getQualityColor, getLatencyColor } from '@/utils/theme'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
 
@@ -501,18 +500,6 @@ const handleEditChannel = (channel: any) => {
     return
   }
   busConfigPanelRef.value?.handleOpenChannelManager(channel)
-}
-
-const getQualityColor = (quality: number) => {
-  if (quality >= 80) return '#67c23a'
-  if (quality >= 60) return '#e6a23c'
-  return '#f56c6c'
-}
-
-const getLatencyColor = (ms: number) => {
-  if (ms < 50) return '#67c23a'
-  if (ms < 200) return '#e6a23c'
-  return '#f56c6c'
 }
 
 const handlePing = async () => {
@@ -846,7 +833,7 @@ onUnmounted(() => {
   padding: 12px 16px;
   background: var(--el-fill-color-light);
   border-radius: 6px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color);
   transition: all 0.2s;
 }
 
@@ -855,8 +842,8 @@ onUnmounted(() => {
 }
 
 .peripheral-item.assigned {
-  background: #f0f9eb;
-  border-color: #c2e7b0;
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5);
 }
 
 .peripheral-info {
@@ -867,7 +854,7 @@ onUnmounted(() => {
 
 .peripheral-id {
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .peripheral-status {
@@ -891,7 +878,7 @@ onUnmounted(() => {
 }
 
 .capability-item:not(:last-child) {
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--el-border-color-light);
 }
 
 :deep(.el-collapse-item__header) {
@@ -907,8 +894,8 @@ onUnmounted(() => {
 .device-channel-tag {
   border-radius: 8px;
   border-color: var(--el-color-primary);
-  background: #ecf5ff;
-  color: #1d60d6;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
   padding: 5px 10px;
   cursor: pointer;
   transition: background 0.2s;
@@ -917,7 +904,7 @@ onUnmounted(() => {
 }
 
 .device-channel-tag:hover {
-  background: #d9ecff;
+  background: var(--el-color-primary-light-8);
 }
 
 .device-channel-name {
@@ -962,7 +949,7 @@ onUnmounted(() => {
   padding: 16px;
   background: var(--el-fill-color-light);
   border-radius: 8px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color);
   transition: border-color 0.2s;
 }
 
@@ -971,13 +958,13 @@ onUnmounted(() => {
 }
 
 .dma-card.dma-state-allocated {
-  background: #f0f9eb;
-  border-color: #c2e7b0;
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5);
 }
 
 .dma-card.dma-state-disabled {
-  background: #fef0f0;
-  border-color: #fbc4c4;
+  background: var(--el-color-danger-light-9);
+  border-color: var(--el-color-danger-light-5);
 }
 
 .dma-header {
@@ -990,7 +977,7 @@ onUnmounted(() => {
 .dma-name {
   font-weight: 600;
   font-size: 15px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   font-family: 'Courier New', Courier, monospace;
 }
 
@@ -1025,6 +1012,6 @@ onUnmounted(() => {
   align-items: center;
   justify-content: flex-end;
   padding-top: 8px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--el-border-color-light);
 }
 </style>

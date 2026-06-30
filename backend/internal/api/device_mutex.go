@@ -38,9 +38,9 @@ func (dm *deviceMutexMap) lock(deviceKey string) {
 	}
 	entry := dm.locks[deviceKey]
 	atomic.AddInt64(&entry.count, 1)
+	entry.mu.Lock()
 	dm.mu.Unlock()
 
-	entry.mu.Lock()
 	entry.last = time.Now()
 }
 
