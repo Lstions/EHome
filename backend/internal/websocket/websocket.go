@@ -84,19 +84,9 @@ func checkOrigin(r *http.Request) bool {
 
 	host := u.Hostname()
 
-	// Development mode: allow localhost
+	// Development mode: allow all origins (Tailscale, LAN, etc.)
 	if isDevMode() {
-		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-			return true
-		}
-		// Also allow EHOME_EXTERNAL_HOST in dev mode if set
-		if extHost := os.Getenv("EHOME_EXTERNAL_HOST"); extHost != "" {
-			if hostMatchesExtHost(host, extHost) {
-				return true
-			}
-		}
-		logger.Warnf("WebSocket origin rejected (dev mode): %s", origin)
-		return false
+		return true
 	}
 
 	// Production mode: only allow configured EHOME_EXTERNAL_HOST
