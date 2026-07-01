@@ -250,6 +250,7 @@ import { exportCSV, exportJSON } from '@/utils/exportData'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
+import { downsampleData } from '@/utils/downsample'
 
 const deviceList = ref<Device[]>([])
 const historyData = ref<any[]>([])
@@ -505,10 +506,12 @@ const buildChartSeries = async () => {
           series.push({
             name: catName,
             unit: catUnit,
-            data: filteredData.map((item: any) => ({
-              time: item.timestamp || item.created_at,
-              value: item.value
-            }))
+            data: downsampleData(
+              filteredData.map((item: any) => ({
+                time: item.timestamp || item.created_at,
+                value: item.value
+              }))
+            )
           })
         }
       }
@@ -526,15 +529,14 @@ const buildChartSeries = async () => {
       chartSeries.value = numericKeys.map(key => ({
         name: key,
         unit: '',
-        data: historyData.value
-          .filter((item: any) => {
-            const t = item.timestamp || item.collected_at || item.created_at
-            return t && !t.startsWith('0001-01-01')
-          })
-          .map(item => ({
-            time: item.timestamp || item.collected_at || item.created_at,
-            value: item.data?.[key] ?? 0
-          }))
+        data: downsampleData(
+          historyData.value
+            .filter((item: any) => {
+              const t = item.timestamp || item.collected_at || item.created_at
+              return t && !t.startsWith('0001-01-01')
+            })
+            .map(item => ({ time: item.timestamp || item.collected_at || item.created_at, value: item.data?.[key] ?? 0 }))
+        )
       }))
     } else {
       chartSeries.value = []

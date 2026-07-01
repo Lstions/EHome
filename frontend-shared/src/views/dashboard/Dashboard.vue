@@ -273,6 +273,7 @@ import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
+import { downsampleData } from '@/utils/downsample'
 
 const router = useRouter()
 
@@ -392,16 +393,18 @@ const fetchTrendData = async () => {
         series.push({
           name: r.deviceName,
           unit: unitMap[trendCategory.value] || '',
-          data: r.data
-            .filter((item: any) => {
-              const t = item.timestamp || item.created_at
-              return t && !t.startsWith('0001-01-01')
-            })
-            .map((item: any) => ({
-              time: item.timestamp || item.created_at,
-              value: item.value
-            }))
-            .sort((a: any, b: any) => a.time.localeCompare(b.time))
+          data: downsampleData(
+            r.data
+              .filter((item: any) => {
+                const t = item.timestamp || item.created_at
+                return t && !t.startsWith('0001-01-01')
+              })
+              .map((item: any) => ({
+                time: item.timestamp || item.created_at,
+                value: item.value
+              }))
+              .sort((a: any, b: any) => a.time.localeCompare(b.time))
+          )
         })
       }
     }

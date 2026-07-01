@@ -71,6 +71,7 @@ import LineChart from '@/components/charts/LineChart.vue'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
+import { downsampleData } from '@/utils/downsample'
 import { logger } from '@/utils/logger'
 
 const props = defineProps<{
@@ -190,7 +191,9 @@ const fetchHistoryData = async () => {
           name: sensorNameMap[cat] || cat,
           unit: sensorUnitMap[cat] || '',
           category: cat,
-          data: (results[i] as any[]).map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+          data: downsampleData(
+            (results[i] as any[]).map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+          )
         }))
         .filter(s => s.data.length > 0)
       historyData.value = []
@@ -218,7 +221,9 @@ const fetchHistoryData = async () => {
           name: sensorNameMap[r.cat] || r.cat,
           unit: sensorUnitMap[r.cat] || '',
           category: r.cat,
-          data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+          data: downsampleData(
+            r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+          )
         }))
       if (series.length > 0) {
         chartSeries.value = series
@@ -239,13 +244,17 @@ const fetchHistoryData = async () => {
           if (numericKeys.length > 1) {
             chartSeries.value = numericKeys.map(key => ({
               name: sensorNameMap[key] || key, unit: sensorUnitMap[key] || '', category: key,
-              data: response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
+              data: downsampleData(
+                response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
+              )
             }))
             historyData.value = []
           } else {
             const valueKey = numericKeys[0] || Object.keys(data).find(key => typeof data[key] === 'number' && !statusCategories.includes(key))
             historyData.value = valueKey
-              ? response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
+              ? downsampleData(
+                  response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
+                )
               : []
           }
         } else {

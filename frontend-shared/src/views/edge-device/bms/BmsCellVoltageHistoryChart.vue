@@ -53,6 +53,8 @@
       <LineChart
         v-if="filteredSeries.length > 0"
         :series="filteredSeries"
+        :y-axis-min="yAxisRange.min"
+        :y-axis-max="yAxisRange.max"
         height="320px"
       />
 
@@ -71,6 +73,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import LineChart from '@/components/charts/LineChart.vue'
 import client from '@/api/client'
+import { downsampleMultiSeries } from '@/utils/downsample'
 
 const props = withDefaults(defineProps<{
   deviceId: number
@@ -115,6 +118,42 @@ const filteredSeries = computed<SeriesData[]>(() => {
   return allSeries.value.filter(s => selectedCells.value.includes(s.cellNumber))
 })
 
+/**
+ * Compute adaptive Y-axis range from actual cell voltage history data.
+ * Uses data min/max with padding so small voltage differences are visible.
+ * Clamps to safe bounds so the chart never looks absurd with bad data.
+ */
+const yAxisRange = computed<{ min: number; max: number }>(() => {
+  const allValues = filteredSeries.value.flatMap(s => s.data.map(d => d.value)).filter(v => typeof v === 'number' && v > 0)
+  if (allValues.length === 0) return { min: 2.5, max: 4.0 }
+
+  const dataMin = allValues.reduce((a, b) => a < b ? a : b, Infinity)
+  const dataMax = allValues.reduce((a, b) => a > b ? a : b, -Infinity)
+  const span = dataMax - dataMin
+
+  // If all values are identical, create a small window around the value
+  const padding = span < 0.05 ? 0.05 : span * 0.3
+  let min = dataMin - padding
+  let max = dataMax + padding
+
+  // Clamp to safe bounds
+  if (min < 2.0) min = 2.0
+  if (max > 4.5) max = 4.5
+
+  // Ensure minimum visible range
+  if (max - min < 0.1) {
+    const center = (min + max) / 2
+    min = center - 0.05
+    max = center + 0.05
+  }
+
+  // Round to nice values
+  min = Math.floor(min * 100) / 100
+  max = Math.ceil(max * 100) / 100
+
+  return { min, max }
+})
+
 const fetchCellVoltageHistory = async () => {
   if (!props.deviceId) return
   const [startTime, endTime] = getTimeRange()
@@ -132,16 +171,41 @@ const fetchCellVoltageHistory = async () => {
         }).then(res => res || []).catch(() => [])
       )
     )
+
+    // Map raw API results to {time, value} arrays
+    const rawSeries = cellCategories.map((cat, i) =>
+      (results[i] as any[]).map(item => ({
+        time: item.created_at || item.timestamp,
+        value: item.value
+      }))
+    )
+
+    // Downsample all series together so they share the same timestamps.
+    // This ensures the tooltip at any time point shows all cells, not just
+    // the ones that happened to retain a point at that timestamp.
+    // Series with different lengths fall back to independent downsampling.
+    const hasData = rawSeries.filter(s => s.length > 0)
+    const downsampled = hasData.length > 0
+      ? downsampleMultiSeries(hasData)
+      : []
+
+    // Rebuild allSeries preserving original cell numbers
+    const downsampledMap = new Map<number, typeof rawSeries[number]>()
+    let dsIdx = 0
+    for (let i = 0; i < cellCategories.length; i++) {
+      if (rawSeries[i].length > 0) {
+        downsampledMap.set(i + 1, downsampled[dsIdx] || [])
+        dsIdx++
+      }
+    }
+
     allSeries.value = cellCategories
       .map((cat, i) => ({
         name: `#${i + 1}`,
         unit: 'V',
         category: cat,
         cellNumber: i + 1,
-        data: (results[i] as any[]).map(item => ({
-          time: item.created_at || item.timestamp,
-          value: item.value
-        }))
+        data: downsampledMap.get(i + 1) || []
       }))
       .filter(s => s.data.length > 0)
     selectedCells.value = allSeries.value.map(s => s.cellNumber)

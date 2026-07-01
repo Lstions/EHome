@@ -42,6 +42,8 @@ const props = withDefaults(defineProps<{
   height?: string
   smooth?: boolean
   series?: SeriesConfig[]
+  yAxisMin?: number
+  yAxisMax?: number
 }>(), {
   data: () => [],
   title: '',
@@ -75,29 +77,34 @@ const buildYAxisList = () => {
       unitGroups.push(unit)
     }
   })
+  const hasCustomRange = props.yAxisMin !== undefined && props.yAxisMax !== undefined
   return {
     yAxisList: unitGroups.map((unit, i) => ({
       type: 'value' as const,
       name: unit ? `(${unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
       offset: i > 1 ? (i - 1) * 60 : 0,
-      axisLabel: { formatter: (v: number) => v.toFixed(1) }
+      min: props.yAxisMin,
+      max: props.yAxisMax,
+      axisLabel: { formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) }
     })),
     seriesToYAxis
   }
 }
 
 const buildSeries = (seriesToYAxis?: number[]) => {
-  // Multi-series mode: use props.series
+  // Multi-series mode: use props.series — data as [timestamp, value] pairs
   if (props.series && props.series.length > 0) {
     return props.series.map((s, i) => ({
       name: s.name + (s.unit ? ` (${s.unit})` : ''),
       type: 'line' as const,
-      data: s.data.map(item => item.value),
+      data: s.data.map(item => [new Date(item.time).getTime(), item.value]),
       smooth: props.smooth,
+      sampling: 'lttb' as const,
       yAxisIndex: seriesToYAxis ? seriesToYAxis[i] : i,
       lineStyle: { width: 2, color: SERIES_COLORS[i % SERIES_COLORS.length] },
       itemStyle: { color: SERIES_COLORS[i % SERIES_COLORS.length] },
+      showSymbol: s.data.length > 50 ? false : true,
       areaStyle: {
         color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
           { offset: 0, color: SERIES_COLORS[i % SERIES_COLORS.length] + '33' },
@@ -111,7 +118,7 @@ const buildSeries = (seriesToYAxis?: number[]) => {
   return [{
     name: '数值',
     type: 'line' as const,
-    data: props.data.map(item => item.value),
+    data: props.data.map(item => [new Date(item.time).getTime(), item.value]),
     smooth: props.smooth,
     lineStyle: { width: 2, color: SERIES_COLORS[0] },
     itemStyle: { color: SERIES_COLORS[0] },
@@ -124,55 +131,28 @@ const buildSeries = (seriesToYAxis?: number[]) => {
   }]
 }
 
-const getXAxisData = () => {
-  const source = (props.series && props.series.length > 0 && props.series[0].data.length > 0)
-    ? props.series[0].data
-    : props.data
-  if (source.length === 0) return []
-
-  const trendRange = props.series?.[0]?.data?.length
-    ? (() => {
-        const first = new Date(source[0].time)
-        const last = new Date(source[source.length - 1].time)
-        return (last.getTime() - first.getTime()) / 86400000
-      })()
-    : 0
-
-  return source.map(item => {
-    const d = new Date(item.time)
-    if (trendRange > 2) {
-      // 7d: MM/DD HH:mm
-      return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
-    } else {
-      // 24h and 1h: HH:mm (seconds not useful on chart axis)
-      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
-    }
-  })
-}
-
+/**
+ * Time-based xAxis config.
+ * Uses type: 'time' so series with different timestamps align correctly.
+ */
 const getXAxisConfig = () => {
-  const source = (props.series && props.series.length > 0 && props.series[0].data.length > 0)
-    ? props.series[0].data
-    : props.data
-  const count = source.length
-  const labels = getXAxisData()
-
-  // Auto-calculate interval to show ~8-12 labels max
-  const maxLabels = 10
-  const interval = count > maxLabels ? Math.floor(count / maxLabels) : 0
-
-  // Determine rotation based on data density
-  const rotate = count > 50 ? 30 : count > 20 ? 15 : 0
-
   return {
-    type: 'category' as const,
-    data: labels,
+    type: 'time' as const,
     axisLabel: {
-      rotate,
-      interval,
-      fontSize: 11
-    },
-    axisTick: { alignWithLabel: true }
+      fontSize: 11,
+      formatter: (value: number) => {
+        const d = new Date(value)
+        const now = new Date()
+        const diffDays = Math.abs(now.getTime() - value) / 86400000
+        if (diffDays > 2) {
+          // 7d range: MM/DD HH:mm
+          return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+        } else {
+          // 24h and 1h: HH:mm
+          return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+        }
+      }
+    }
   }
 }
 
@@ -191,19 +171,24 @@ const initChart = () => {
       trigger: 'axis',
       formatter: (params: any) => {
         if (!Array.isArray(params) || params.length === 0) return ''
-        const time = params[0].name
-        let html = `${time}<br/>`
+        const ts = params[0].axisValueLabel || params[0].name
+        const d = new Date(ts)
+        const timeStr = `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
+        let html = `${timeStr}<br/>`
         params.forEach((p: any) => {
-          html += `${p.marker} ${p.seriesName}: <b>${typeof p.value === 'number' ? p.value.toFixed(2) : p.value}</b><br/>`
+          const val = Array.isArray(p.value) ? p.value[1] : p.value
+          html += `${p.marker} ${p.seriesName}: <b>${typeof val === 'number' ? val.toFixed(3) : val}</b><br/>`
         })
         return html
       }
     },
-    legend: multiSeries ? { top: 30 } : undefined,
+    legend: multiSeries ? { top: 30, type: 'scroll' as const } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(),
     yAxis: yAxisConfig || {
       type: 'value',
+      min: props.yAxisMin,
+      max: props.yAxisMax,
       axisLabel: { formatter: (value: number) => value.toFixed(2) }
     },
     series: buildSeries(yAxisInfo?.seriesToYAxis)
@@ -223,16 +208,18 @@ watch(() => [props.data, props.series], () => {
   const yAxisInfo = buildYAxisList()
   const yAxisConfig = yAxisInfo?.yAxisList || {
     type: 'value' as const,
+    min: props.yAxisMin,
+    max: props.yAxisMax,
     axisLabel: { formatter: (value: number) => value.toFixed(2) }
   }
 
   chartInstance.setOption({
-    legend: multiSeries ? { top: 30 } : undefined,
+    legend: multiSeries ? { top: 30, type: 'scroll' as const } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(),
     yAxis: yAxisConfig,
     series: buildSeries(yAxisInfo?.seriesToYAxis)
-  })
+  }, { replaceMerge: ['series'] })
 }, { deep: true })
 
 onUnmounted(() => {
