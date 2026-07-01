@@ -32,6 +32,7 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
 
 const initChart = () => {
   if (!chartRef.value) return
@@ -112,6 +113,7 @@ const initChart = () => {
 watch(() => props.value, () => {
   if (chartInstance) {
     chartInstance.setOption({
+      animation: false,
       series: [
         {
           data: [
@@ -126,6 +128,8 @@ watch(() => props.value, () => {
 })
 
 onUnmounted(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   if (chartInstance) {
     chartInstance.dispose()
     chartInstance = null
@@ -134,6 +138,10 @@ onUnmounted(() => {
 
 onMounted(() => {
   initChart()
+  if (chartRef.value) {
+    resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+    resizeObserver.observe(chartRef.value)
+  }
 })
 </script>
 

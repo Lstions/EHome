@@ -347,6 +347,7 @@ const dataErrorCount = computed(() => {
 
 let unsubscribeStatus: (() => void) | null = null
 let unsubscribeData: (() => void) | null = null
+let trendRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 // 获取趋势数据
 const fetchTrendData = async () => {
@@ -469,6 +470,22 @@ const handleStatusUpdate = (message: WebSocketMessage) => {
 const handleDataUpdate = (message: WebSocketMessage) => {
   logger.debug('数据更新', { payload: message.payload })
   scheduleOverviewRefresh()
+  // 有数据更新时也刷新趋势图(复用防抖)
+  scheduleTrendRefresh()
+}
+
+// 趋势图防抖刷新 — WS数据到达时触发，2s防抖避免频繁刷新
+let trendDirty = false
+let trendDebounceTimer: ReturnType<typeof setTimeout> | null = null
+const scheduleTrendRefresh = () => {
+  trendDirty = true
+  if (trendDebounceTimer) clearTimeout(trendDebounceTimer)
+  trendDebounceTimer = setTimeout(() => {
+    if (trendDirty) {
+      trendDirty = false
+      fetchTrendData()
+    }
+  }, 2000)
 }
 
 const fetchOverview = async (silent = false) => {
@@ -569,6 +586,13 @@ onMounted(async () => {
 
   unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
   unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
+
+  // 30秒自动刷新趋势图
+  trendRefreshTimer = setInterval(() => {
+    if (trendSeries.value.length > 0) {
+      fetchTrendData()
+    }
+  }, 30000)
 })
 
 onUnmounted(() => {
@@ -577,6 +601,14 @@ onUnmounted(() => {
   if (overviewDebounceTimer) {
     clearTimeout(overviewDebounceTimer)
     overviewDebounceTimer = null
+  }
+  if (trendDebounceTimer) {
+    clearTimeout(trendDebounceTimer)
+    trendDebounceTimer = null
+  }
+  if (trendRefreshTimer) {
+    clearInterval(trendRefreshTimer)
+    trendRefreshTimer = null
   }
 })
 </script>

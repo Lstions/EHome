@@ -130,6 +130,7 @@
         <LineChart
           v-if="chartSeries.length > 0"
           :series="chartSeries"
+          :realtime="realtimeEnabled"
           title="历史数据趋势"
           height="350px"
         />
@@ -506,6 +507,7 @@ const buildChartSeries = async () => {
           series.push({
             name: catName,
             unit: catUnit,
+            category: r.cat,
             data: downsampleData(
               filteredData.map((item: any) => ({
                 time: item.timestamp || item.created_at,
@@ -529,6 +531,7 @@ const buildChartSeries = async () => {
       chartSeries.value = numericKeys.map(key => ({
         name: key,
         unit: '',
+        category: key,
         data: downsampleData(
           historyData.value
             .filter((item: any) => {
@@ -545,9 +548,8 @@ const buildChartSeries = async () => {
 }
 
 // 实时数据处理
-// 性能优化：防抖 calculateStats 和 buildChartSeries，避免每条WS消息都触发重计算
+// 性能优化：防抖 calculateStats，避免每条WS消息都触发重计算
 let statsDirty = false
-let chartDirty = false
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 const DEBOUNCE_MS = 2000  // 2秒内多条消息只触发一次重算
 
@@ -555,10 +557,6 @@ const flushDebounced = () => {
   if (statsDirty) {
     statsDirty = false
     calculateStats()
-  }
-  if (chartDirty) {
-    chartDirty = false
-    buildChartSeries()
   }
 }
 
@@ -591,10 +589,37 @@ const handleDataUpdate = (message: WebSocketMessage) => {
   }
   total.value++
 
-  // 标记为脏，延迟批量重算（避免高频WS消息每条都触发20+个HTTP请求）
+  // 标记stats为脏（统计计算），但不标记chartDirty
   statsDirty = true
-  chartDirty = true
   scheduleDebounced()
+
+  // 增量更新图表 — 直接append到现有series
+  appendRealtimeData(payload)
+}
+
+// 新增函数: 增量更新图表series
+const appendRealtimeData = (payload: any) => {
+  if (chartSeries.value.length === 0) return
+  const data = payload.data || payload.sensors
+  if (!data || typeof data !== 'object') return
+  const time = payload.collected_at || new Date().toISOString()
+
+  let updated = false
+  for (const series of chartSeries.value) {
+    const key = series.category
+    if (key && data[key] !== undefined && typeof data[key] === 'number') {
+      series.data.push({ time, value: data[key] })
+      // 限制长度
+      if (series.data.length > 500) {
+        series.data = series.data.slice(-500)
+      }
+      updated = true
+    }
+  }
+  // 触发响应式更新 — 重新赋值引用
+  if (updated) {
+    chartSeries.value = [...chartSeries.value]
+  }
 }
 
 const toggleRealtime = (enabled: boolean) => {

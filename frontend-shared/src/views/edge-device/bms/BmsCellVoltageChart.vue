@@ -24,6 +24,7 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
 
 function getBarColors(values: number[]): string[] {
   return values.map(v => {
@@ -45,6 +46,7 @@ function buildChartOption() {
     : computeAdaptiveYAxisRange(validValues, { minBound: 2.0, maxBound: 4.5 })
 
   return {
+    animation: false,
     tooltip: {
       trigger: 'axis' as const,
       formatter: (params: any) => {
@@ -95,22 +97,42 @@ function initChart() {
   chartInstance.setOption(buildChartOption())
 }
 
-function handleResize() {
-  chartInstance?.resize()
+function updateChart() {
+  if (!chartInstance) return
+  const values = props.voltages.length > 0
+    ? props.voltages.slice(0, props.cellCount)
+    : new Array(props.cellCount).fill(0)
+
+  const validValues = values.filter(v => typeof v === 'number' && v > 0)
+  const { min, max } = validValues.length === 0
+    ? { min: 2.5, max: 4.0 }
+    : computeAdaptiveYAxisRange(validValues, { minBound: 2.0, maxBound: 4.5 })
+
+  chartInstance.setOption({
+    animation: false,
+    yAxis: { min, max },
+    series: [{
+      data: values.map(v => ({
+        value: v,
+        itemStyle: { color: v === 0 ? THEME_COLORS.info : getBarColors([v])[0] }
+      }))
+    }]
+  })
 }
 
-watch(() => props.voltages, () => {
-  if (!chartInstance) return
-  chartInstance.setOption(buildChartOption())
-}, { deep: true })
+watch(() => props.voltages, () => updateChart(), { deep: true })
 
 onMounted(() => {
   initChart()
-  window.addEventListener('resize', handleResize)
+  if (chartRef.value) {
+    resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+    resizeObserver.observe(chartRef.value)
+  }
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   chartInstance?.dispose()
   chartInstance = null
 })

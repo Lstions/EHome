@@ -45,13 +45,15 @@ const props = withDefaults(defineProps<{
   yAxisMin?: number
   yAxisMax?: number
   showArea?: boolean
+  realtime?: boolean
 }>(), {
   data: () => [],
   title: '',
   height: '400px',
   smooth: true,
   series: () => [],
-  showArea: true
+  showArea: true,
+  realtime: false
 })
 
 const chartRef = ref<HTMLElement>()
@@ -172,6 +174,7 @@ const initChart = () => {
   const yAxisConfig = yAxisInfo?.yAxisList
 
   const option: EChartsOption = {
+    animation: props.realtime ? false : undefined,
     title: { text: props.title, left: 'center' },
     tooltip: {
       trigger: 'axis',
@@ -220,13 +223,14 @@ watch(() => [props.data, props.series], () => {
   }
 
   chartInstance.setOption({
+    animation: props.realtime ? false : undefined,
     legend: multiSeries ? { top: 30, type: 'scroll' as const } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(),
     yAxis: yAxisConfig,
     series: buildSeries(yAxisInfo?.seriesToYAxis)
   }, { replaceMerge: ['series'] })
-}, { deep: true })
+}, { deep: !props.realtime })
 
 onUnmounted(() => {
   chartInstance?.dispose()
