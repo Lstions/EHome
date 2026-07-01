@@ -60,7 +60,7 @@ import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
-import { downsampleData, downsampleMultiSeries } from '@/utils/downsample'
+import { downsampleData, downsampleMultiSeriesAligned } from '@/utils/downsample'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import { useTimeRange } from '@/composables/useTimeRange'
 import type { HistoryDataPoint, SeriesData } from '@/types/chart'
@@ -230,12 +230,12 @@ async function fetchHistoryData() {
           data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
         }))
 
-      // 多series同步降采样：series数量>1且所有series长度相同
-      if (series.length > 1 && series.every(s => s.data.length === series[0].data.length)) {
-        const downsampled = downsampleMultiSeries(series.map(s => s.data))
+      // 多series同步降采样：时间戳对齐后同步降采样，确保tooltip显示所有series
+      if (series.length > 1) {
+        const downsampled = downsampleMultiSeriesAligned(series.map(s => s.data))
         series.forEach((s, i) => { s.data = downsampled[i] })
-      } else {
-        series.forEach(s => { s.data = downsampleData(s.data) })
+      } else if (series.length === 1) {
+        series[0].data = downsampleData(series[0].data)
       }
 
       if (series.length > 0) {
