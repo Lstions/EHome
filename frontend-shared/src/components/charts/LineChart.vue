@@ -44,12 +44,14 @@ const props = withDefaults(defineProps<{
   series?: SeriesConfig[]
   yAxisMin?: number
   yAxisMax?: number
+  showArea?: boolean
 }>(), {
   data: () => [],
   title: '',
   height: '400px',
   smooth: true,
-  series: () => []
+  series: () => [],
+  showArea: true
 })
 
 const chartRef = ref<HTMLElement>()
@@ -105,12 +107,14 @@ const buildSeries = (seriesToYAxis?: number[]) => {
       lineStyle: { width: 2, color: SERIES_COLORS[i % SERIES_COLORS.length] },
       itemStyle: { color: SERIES_COLORS[i % SERIES_COLORS.length] },
       showSymbol: s.data.length > 50 ? false : true,
-      areaStyle: {
-        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: SERIES_COLORS[i % SERIES_COLORS.length] + '33' },
-          { offset: 1, color: SERIES_COLORS[i % SERIES_COLORS.length] + '0a' }
-        ])
-      }
+      ...(props.showArea ? {
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: SERIES_COLORS[i % SERIES_COLORS.length] + '33' },
+            { offset: 1, color: SERIES_COLORS[i % SERIES_COLORS.length] + '0a' }
+          ])
+        }
+      } : {})
     }))
   }
 
@@ -122,12 +126,14 @@ const buildSeries = (seriesToYAxis?: number[]) => {
     smooth: props.smooth,
     lineStyle: { width: 2, color: SERIES_COLORS[0] },
     itemStyle: { color: SERIES_COLORS[0] },
-    areaStyle: {
-      color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-        { offset: 0, color: SERIES_COLORS[0] + '33' },
-        { offset: 1, color: SERIES_COLORS[0] + '0a' }
-      ])
-    }
+    ...(props.showArea ? {
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: SERIES_COLORS[0] + '33' },
+          { offset: 1, color: SERIES_COLORS[0] + '0a' }
+        ])
+      }
+    } : {})
   }]
 }
 

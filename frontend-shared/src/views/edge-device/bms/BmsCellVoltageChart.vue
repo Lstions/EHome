@@ -9,6 +9,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart as BarChartSeries } from 'echarts/charts'
 import { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } from 'echarts/components'
 import { THEME_COLORS } from '@/utils/theme'
+import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 
 echarts.use([CanvasRenderer, BarChartSeries, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent])
 
@@ -32,50 +33,16 @@ function getBarColors(values: number[]): string[] {
   })
 }
 
-/**
- * Compute adaptive Y-axis range from actual cell voltage data.
- * - Uses data min/max with padding so small voltage differences are visible.
- * - Clamps to safe bounds so the chart never looks absurd with bad data.
- * - Falls back to a sensible default range when no data.
- */
-function computeYAxisRange(values: number[]): { min: number; max: number } {
-  const valid = values.filter(v => typeof v === 'number' && v > 0)
-  if (valid.length === 0) return { min: 2.5, max: 4.0 }
-
-  const dataMin = Math.min(...valid)
-  const dataMax = Math.max(...valid)
-  const span = dataMax - dataMin
-
-  // If all cells are identical, create a small window around the value
-  const padding = span < 0.05 ? 0.05 : span * 0.3
-  let min = dataMin - padding
-  let max = dataMax + padding
-
-  // Clamp to safe bounds
-  if (min < 2.0) min = 2.0
-  if (max > 4.5) max = 4.5
-
-  // Ensure minimum visible range
-  if (max - min < 0.1) {
-    const center = (min + max) / 2
-    min = center - 0.05
-    max = center + 0.05
-  }
-
-  // Round to nice values
-  min = Math.floor(min * 100) / 100
-  max = Math.ceil(max * 100) / 100
-
-  return { min, max }
-}
-
 function buildChartOption() {
   const labels = Array.from({ length: props.cellCount }, (_, i) => `#${i + 1}`)
   const values = props.voltages.length > 0
     ? props.voltages.slice(0, props.cellCount)
     : new Array(props.cellCount).fill(0)
 
-  const { min, max } = computeYAxisRange(values)
+  const validValues = values.filter(v => typeof v === 'number' && v > 0)
+  const { min, max } = validValues.length === 0
+    ? { min: 2.5, max: 4.0 }
+    : computeAdaptiveYAxisRange(validValues, { minBound: 2.0, maxBound: 4.5 })
 
   return {
     tooltip: {

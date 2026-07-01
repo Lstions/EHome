@@ -95,6 +95,7 @@ declare module 'vue' {
     SkeletonCard: typeof import('./components/common/SkeletonCard.vue')['default']
     StatusBadge: typeof import('./components/common/StatusBadge.vue')['default']
     ThemeSwitch: typeof import('./components/common/ThemeSwitch.vue')['default']
+    TimeRangeSelector: typeof import('./components/charts/TimeRangeSelector.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

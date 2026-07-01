@@ -3,25 +3,11 @@
     <template #header>
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span>历史数据</span>
-        <div class="time-range-selector">
-          <el-radio-group v-model="timeRange" size="small" @change="handleTimeRangeChange">
-            <el-radio-button value="1h">1小时</el-radio-button>
-            <el-radio-button value="24h">24小时</el-radio-button>
-            <el-radio-button value="7d">7天</el-radio-button>
-            <el-radio-button value="custom">自定义</el-radio-button>
-          </el-radio-group>
-          <el-date-picker
-            v-if="timeRange === 'custom'"
-            v-model="customTimeRange"
-            type="datetimerange"
-            size="small"
-            range-separator="至"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            style="margin-left: 10px; width: 380px;"
-            @change="fetchHistoryData"
+        <div class="header-controls">
+          <TimeRangeSelector
+            v-model="timeRange"
+            v-model:custom-range="customTimeRange"
+            @change="onTimeRangeChange"
           />
           <el-button
             type="primary"
@@ -49,6 +35,8 @@
             :series="group.series"
             :title="''"
             height="260px"
+            :yAxisMin="group.yAxisMin"
+            :yAxisMax="group.yAxisMax"
           />
         </div>
       </div>
@@ -68,10 +56,14 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import LineChart from '@/components/charts/LineChart.vue'
+import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
-import { downsampleData } from '@/utils/downsample'
+import { downsampleData, downsampleMultiSeries } from '@/utils/downsample'
+import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
+import { useTimeRange } from '@/composables/useTimeRange'
+import type { HistoryDataPoint, SeriesData } from '@/types/chart'
 import { logger } from '@/utils/logger'
 
 const props = defineProps<{
@@ -80,14 +72,23 @@ const props = defineProps<{
   deviceTypeText: string
 }>()
 
-interface HistoryDataPoint { time: string; value: number }
-interface SeriesData { name: string; data: HistoryDataPoint[]; unit?: string; category?: string }
-
 const historyData = ref<HistoryDataPoint[]>([])
 const chartSeries = ref<SeriesData[]>([])
 const chartLoading = ref(true)
-const timeRange = ref('24h')
-const customTimeRange = ref<[string, string] | null>(null)
+
+const { timeRange, customTimeRange, getTimeRange, handleTimeRangeChange } = useTimeRange(fetchHistoryData)
+
+/**
+ * Unified handler for TimeRangeSelector @change events.
+ * The selector emits 'change' for both radio-group (preset) and date-picker (custom) changes.
+ * handleTimeRangeChange (from composable) only fires for preset ranges;
+ * for 'custom' we trigger fetchHistoryData directly when the date picker changes.
+ */
+const onTimeRangeChange = () => {
+  handleTimeRangeChange()
+  // handleTimeRangeChange skips 'custom'; trigger fetch for custom date changes
+  if (timeRange.value === 'custom') fetchHistoryData()
+}
 
 /** BMS设备使用的unified-data category名称 */
 const bmsCategories = [
@@ -122,16 +123,27 @@ const isBmsDevice = (deviceType: string): boolean => {
   return bmsTypes.includes(deviceType.toLowerCase())
 }
 
+interface ChartSubGroupResult {
+  title: string
+  series: SeriesData[]
+  yAxisMin?: number
+  yAxisMax?: number
+}
+
 /**
  * 将chartSeries按量纲分组为子图表。
  * BMS设备使用预定义分组；非BMS设备按unit自动分组。
+ * 仅在单组时计算自适应Y轴范围并传入LineChart；
+ * 多组时不传（让echarts auto），因为LineChart的yAxisMin/yAxisMax是全局共享的。
  */
-const chartSubGroups = computed<{ title: string; series: SeriesData[] }[]>(() => {
+const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
   if (chartSeries.value.length === 0) return []
+
+  let groups: { title: string; series: SeriesData[] }[]
 
   if (isBmsDevice(props.deviceType)) {
     // BMS: 按预定义量纲分组
-    return bmsChartGroups
+    groups = bmsChartGroups
       .map(group => {
         const series = chartSeries.value.filter(s =>
           s.category && group.categories.includes(s.category)
@@ -139,37 +151,31 @@ const chartSubGroups = computed<{ title: string; series: SeriesData[] }[]>(() =>
         return { title: group.title, series }
       })
       .filter(g => g.series.length > 0)
+  } else {
+    // 非BMS: 按unit自动分组
+    const unitGroups = new Map<string, SeriesData[]>()
+    for (const s of chartSeries.value) {
+      const unit = s.unit || ''
+      if (!unitGroups.has(unit)) unitGroups.set(unit, [])
+      unitGroups.get(unit)!.push(s)
+    }
+    groups = Array.from(unitGroups.entries()).map(([unit, series]) => ({
+      title: unit ? `(${unit})` : '数据趋势',
+      series,
+    }))
   }
 
-  // 非BMS: 按unit自动分组
-  const unitGroups = new Map<string, SeriesData[]>()
-  for (const s of chartSeries.value) {
-    const unit = s.unit || ''
-    if (!unitGroups.has(unit)) unitGroups.set(unit, [])
-    unitGroups.get(unit)!.push(s)
+  // 只在单组时计算自适应Y轴范围
+  if (groups.length === 1 && groups[0].series.length > 0) {
+    const allValues = groups[0].series.flatMap(s => s.data.map(d => d.value))
+    const { min, max } = computeAdaptiveYAxisRange(allValues)
+    return [{ ...groups[0], yAxisMin: min, yAxisMax: max }]
   }
-  return Array.from(unitGroups.entries()).map(([unit, series]) => ({
-    title: unit ? `(${unit})` : '数据趋势',
-    series,
-  }))
+
+  return groups.map(g => ({ ...g }))
 })
 
-const getTimeRange = (): [Date, Date] => {
-  const now = new Date()
-  let startTime: Date
-  switch (timeRange.value) {
-    case '1h': startTime = new Date(now.getTime() - 3600000); break
-    case '24h': startTime = new Date(now.getTime() - 86400000); break
-    case '7d': startTime = new Date(now.getTime() - 7 * 86400000); break
-    case 'custom':
-      if (customTimeRange.value) return [new Date(customTimeRange.value[0]), new Date(customTimeRange.value[1])]
-      startTime = new Date(now.getTime() - 86400000); break
-    default: startTime = new Date(now.getTime() - 86400000)
-  }
-  return [startTime, now]
-}
-
-const fetchHistoryData = async () => {
+async function fetchHistoryData() {
   if (!props.deviceId) return
   const [startTime, endTime] = getTimeRange()
   const deviceType = props.deviceType
@@ -221,10 +227,17 @@ const fetchHistoryData = async () => {
           name: sensorNameMap[r.cat] || r.cat,
           unit: sensorUnitMap[r.cat] || '',
           category: r.cat,
-          data: downsampleData(
-            r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
-          )
+          data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
         }))
+
+      // 多series同步降采样：series数量>1且所有series长度相同
+      if (series.length > 1 && series.every(s => s.data.length === series[0].data.length)) {
+        const downsampled = downsampleMultiSeries(series.map(s => s.data))
+        series.forEach((s, i) => { s.data = downsampled[i] })
+      } else {
+        series.forEach(s => { s.data = downsampleData(s.data) })
+      }
+
       if (series.length > 0) {
         chartSeries.value = series
         historyData.value = []
@@ -268,10 +281,6 @@ const fetchHistoryData = async () => {
   } finally {
     chartLoading.value = false
   }
-}
-
-const handleTimeRangeChange = () => {
-  if (timeRange.value !== 'custom') fetchHistoryData()
 }
 
 function handleExportCSV() {
@@ -319,7 +328,7 @@ onMounted(() => fetchHistoryData())
 </script>
 
 <style scoped>
-.time-range-selector { display: flex; align-items: center; }
+.header-controls { display: flex; align-items: center; }
 .chart-grid { display: flex; flex-direction: column; gap: 16px; }
 .chart-sub-section {
   border: 1px solid var(--el-border-color-lighter);

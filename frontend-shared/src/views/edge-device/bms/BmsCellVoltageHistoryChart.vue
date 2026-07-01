@@ -3,27 +3,11 @@
     <template #header>
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span>电芯电压历史趋势</span>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <el-radio-group v-model="timeRange" size="small" @change="handleTimeRangeChange">
-            <el-radio-button value="1h">1小时</el-radio-button>
-            <el-radio-button value="24h">24小时</el-radio-button>
-            <el-radio-button value="7d">7天</el-radio-button>
-            <el-radio-button value="custom">自定义</el-radio-button>
-          </el-radio-group>
-          <el-date-picker
-            v-if="timeRange === 'custom'"
-            v-model="customTimeRange"
-            type="datetimerange"
-            size="small"
-            range-separator="至"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            style="width: 340px;"
-            @change="fetchCellVoltageHistory"
-          />
-        </div>
+        <TimeRangeSelector
+          v-model="timeRange"
+          v-model:custom-range="customTimeRange"
+          @change="onTimeRangeChange"
+        />
       </div>
     </template>
 
@@ -55,6 +39,7 @@
         :series="filteredSeries"
         :y-axis-min="yAxisRange.min"
         :y-axis-max="yAxisRange.max"
+        :show-area="false"
         height="320px"
       />
 
@@ -72,8 +57,12 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import LineChart from '@/components/charts/LineChart.vue'
+import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import client from '@/api/client'
 import { downsampleMultiSeries } from '@/utils/downsample'
+import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
+import { useTimeRange } from '@/composables/useTimeRange'
+import type { HistoryDataPoint, SeriesData } from '@/types/chart'
 
 const props = withDefaults(defineProps<{
   deviceId: number
@@ -82,79 +71,45 @@ const props = withDefaults(defineProps<{
   cellCount: 16
 })
 
-interface HistoryDataPoint { time: string; value: number }
-interface SeriesData { name: string; data: HistoryDataPoint[]; unit?: string; category?: string; cellNumber: number }
-
 const loading = ref(true)
 const allSeries = ref<SeriesData[]>([])
 const selectedCells = ref<number[]>([])
-const timeRange = ref('24h')
-const customTimeRange = ref<[string, string] | null>(null)
+
+// useTimeRange provides reactive timeRange/customTimeRange state, getTimeRange(),
+// and handleTimeRangeChange (fires onChange only for preset ranges, not 'custom').
+// fetchCellVoltageHistory is a hoisted function declaration so it can be referenced
+// here before its definition appears in source order.
+const { timeRange, customTimeRange, getTimeRange, handleTimeRangeChange } = useTimeRange(fetchCellVoltageHistory)
 
 const cellCategories = Array.from(
   { length: props.cellCount },
   (_, i) => `cell_voltage_${i + 1}`
 )
 
-const getTimeRange = (): [Date, Date] => {
-  const now = new Date()
-  let startTime: Date
-  switch (timeRange.value) {
-    case '1h': startTime = new Date(now.getTime() - 3600000); break
-    case '24h': startTime = new Date(now.getTime() - 86400000); break
-    case '7d': startTime = new Date(now.getTime() - 7 * 86400000); break
-    case 'custom':
-      if (customTimeRange.value) {
-        return [new Date(customTimeRange.value[0]), new Date(customTimeRange.value[1])]
-      }
-      startTime = new Date(now.getTime() - 86400000); break
-    default: startTime = new Date(now.getTime() - 86400000)
-  }
-  return [startTime, now]
-}
-
 const filteredSeries = computed<SeriesData[]>(() => {
   if (selectedCells.value.length === 0) return []
   return allSeries.value.filter(s => selectedCells.value.includes(s.cellNumber))
 })
 
-/**
- * Compute adaptive Y-axis range from actual cell voltage history data.
- * Uses data min/max with padding so small voltage differences are visible.
- * Clamps to safe bounds so the chart never looks absurd with bad data.
- */
 const yAxisRange = computed<{ min: number; max: number }>(() => {
   const allValues = filteredSeries.value.flatMap(s => s.data.map(d => d.value)).filter(v => typeof v === 'number' && v > 0)
   if (allValues.length === 0) return { min: 2.5, max: 4.0 }
-
-  const dataMin = allValues.reduce((a, b) => a < b ? a : b, Infinity)
-  const dataMax = allValues.reduce((a, b) => a > b ? a : b, -Infinity)
-  const span = dataMax - dataMin
-
-  // If all values are identical, create a small window around the value
-  const padding = span < 0.05 ? 0.05 : span * 0.3
-  let min = dataMin - padding
-  let max = dataMax + padding
-
-  // Clamp to safe bounds
-  if (min < 2.0) min = 2.0
-  if (max > 4.5) max = 4.5
-
-  // Ensure minimum visible range
-  if (max - min < 0.1) {
-    const center = (min + max) / 2
-    min = center - 0.05
-    max = center + 0.05
-  }
-
-  // Round to nice values
-  min = Math.floor(min * 100) / 100
-  max = Math.ceil(max * 100) / 100
-
-  return { min, max }
+  return computeAdaptiveYAxisRange(allValues, { minBound: 2.0, maxBound: 4.5 })
 })
 
-const fetchCellVoltageHistory = async () => {
+/**
+ * Wrapper for TimeRangeSelector @change event.
+ * Uses the composable's handleTimeRangeChange for preset ranges,
+ * and also fetches when custom dates are selected via the date picker.
+ */
+const onTimeRangeChange = () => {
+  handleTimeRangeChange()
+  if (timeRange.value === 'custom' && customTimeRange.value) {
+    fetchCellVoltageHistory()
+  }
+}
+
+async function fetchCellVoltageHistory() {
   if (!props.deviceId) return
   const [startTime, endTime] = getTimeRange()
   loading.value = true
@@ -173,7 +128,7 @@ const fetchCellVoltageHistory = async () => {
     )
 
     // Map raw API results to {time, value} arrays
-    const rawSeries = cellCategories.map((cat, i) =>
+    const rawSeries: HistoryDataPoint[][] = cellCategories.map((cat, i) =>
       (results[i] as any[]).map(item => ({
         time: item.created_at || item.timestamp,
         value: item.value
@@ -213,12 +168,6 @@ const fetchCellVoltageHistory = async () => {
     ElMessage.error('获取电芯电压历史数据失败')
   } finally {
     loading.value = false
-  }
-}
-
-const handleTimeRangeChange = () => {
-  if (timeRange.value !== 'custom') {
-    fetchCellVoltageHistory()
   }
 }
 
