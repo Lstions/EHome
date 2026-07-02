@@ -58,6 +58,7 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
 
 // Default color palette
 const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399', '#8b5cf6', '#06b6d4', '#f97316']
@@ -205,11 +206,13 @@ const initChart = () => {
 
   chartInstance.setOption(option)
 
-  const resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+  resizeObserver = new ResizeObserver(() => chartInstance?.resize())
   resizeObserver.observe(chartRef.value)
 }
 
 // Watch for data changes
+// realtime mode: shallow watch (reference change only) — appendRealtimeData does chartSeries.value = [...]
+// normal mode: deep watch to detect nested data array mutations
 watch(() => [props.data, props.series], () => {
   if (!chartInstance) return
 
@@ -230,9 +233,11 @@ watch(() => [props.data, props.series], () => {
     yAxis: yAxisConfig,
     series: buildSeries(yAxisInfo?.seriesToYAxis)
   }, { replaceMerge: ['series'] })
-}, { deep: !props.realtime })
+}, { deep: true })
 
 onUnmounted(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   chartInstance?.dispose()
   chartInstance = null
 })

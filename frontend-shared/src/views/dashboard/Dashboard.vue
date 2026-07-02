@@ -481,7 +481,7 @@ const scheduleTrendRefresh = () => {
   trendDirty = true
   if (trendDebounceTimer) clearTimeout(trendDebounceTimer)
   trendDebounceTimer = setTimeout(() => {
-    if (trendDirty) {
+    if (trendDirty && !trendLoading.value) {
       trendDirty = false
       fetchTrendData()
     }
@@ -589,7 +589,7 @@ onMounted(async () => {
 
   // 30秒自动刷新趋势图
   trendRefreshTimer = setInterval(() => {
-    if (trendSeries.value.length > 0) {
+    if (trendSeries.value.length > 0 && !trendLoading.value) {
       fetchTrendData()
     }
   }, 30000)
