@@ -59,7 +59,6 @@ import { ElMessage } from 'element-plus'
 import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import client from '@/api/client'
-import { downsampleMultiSeries } from '@/utils/downsample'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import { useTimeRange } from '@/composables/useTimeRange'
 import type { HistoryDataPoint, SeriesData } from '@/types/chart'
@@ -114,53 +113,62 @@ async function fetchCellVoltageHistory() {
   const [startTime, endTime] = getTimeRange()
   loading.value = true
   try {
-    const results = await Promise.all(
-      cellCategories.map(cat =>
-        client.get<unknown, any>('/api/v1/unified-data/historical', {
-          params: {
-            device_pk: props.deviceId,
-            category: cat,
-            start_time: startTime.toISOString(),
-            end_time: endTime.toISOString()
-          }
-        }).then(res => res || []).catch(() => [])
+    // 批量请求：1 个请求替代 16 个并行请求，服务端降采样 max_points=500
+    const rawSeries: HistoryDataPoint[][] = new Array(cellCategories.length).fill(null).map(() => [])
+    try {
+      const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
+        params: {
+          device_pk: props.deviceId,
+          categories: cellCategories.join(','),
+          start_time: startTime.toISOString(),
+          end_time: endTime.toISOString(),
+          max_points: 500
+        }
+      })
+      const batchData = batchRes?.data || batchRes || []
+      if (Array.isArray(batchData)) {
+        for (const result of batchData) {
+          const cat = result.category
+          if (!cat) continue
+          const idx = cellCategories.indexOf(cat)
+          if (idx === -1) continue
+          rawSeries[idx] = (result.data || []).map((item: any) => ({
+            time: item.created_at || item.timestamp,
+            value: item.value
+          }))
+        }
+      }
+    } catch {
+      // Fallback: 逐个请求 + max_points=500
+      const fallbackResults = await Promise.all(
+        cellCategories.map(cat =>
+          client.get<unknown, any>('/api/v1/unified-data/historical', {
+            params: {
+              device_pk: props.deviceId,
+              category: cat,
+              start_time: startTime.toISOString(),
+              end_time: endTime.toISOString(),
+              max_points: 500
+            }
+          }).then(res => ({ cat, data: (res.data || res || []) as any[] })).catch(() => ({ cat, data: [] as any[] }))
+        )
       )
-    )
-
-    // Map raw API results to {time, value} arrays
-    const rawSeries: HistoryDataPoint[][] = cellCategories.map((cat, i) =>
-      (results[i] as any[]).map(item => ({
-        time: item.created_at || item.timestamp,
-        value: item.value
-      }))
-    )
-
-    // Downsample all series together so they share the same timestamps.
-    // This ensures the tooltip at any time point shows all cells, not just
-    // the ones that happened to retain a point at that timestamp.
-    // Series with different lengths fall back to independent downsampling.
-    const hasData = rawSeries.filter(s => s.length > 0)
-    const downsampled = hasData.length > 0
-      ? downsampleMultiSeries(hasData)
-      : []
-
-    // Rebuild allSeries preserving original cell numbers
-    const downsampledMap = new Map<number, typeof rawSeries[number]>()
-    let dsIdx = 0
-    for (let i = 0; i < cellCategories.length; i++) {
-      if (rawSeries[i].length > 0) {
-        downsampledMap.set(i + 1, downsampled[dsIdx] || [])
-        dsIdx++
+      for (const r of fallbackResults) {
+        const idx = cellCategories.indexOf(r.cat)
+        if (idx !== -1) {
+          rawSeries[idx] = r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+        }
       }
     }
 
+    // 服务端已降采样，直接使用原始数据
     allSeries.value = cellCategories
       .map((cat, i) => ({
         name: `#${i + 1}`,
         unit: 'V',
         category: cat,
         cellNumber: i + 1,
-        data: downsampledMap.get(i + 1) || []
+        data: rawSeries[i] || []
       }))
       .filter(s => s.data.length > 0)
     selectedCells.value = allSeries.value.map(s => s.cellNumber)

@@ -10,6 +10,14 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+// Publisher is the interface for MQTT publishing operations.
+// *Client implements this interface. Tests can provide mock implementations.
+type Publisher interface {
+	Publish(topic string, payload []byte) error
+	PublishQoS2(topic string, payload []byte) error
+	PublishRetained(topic string, payload []byte) error
+}
+
 // Client wraps the MQTT client
 type Client struct {
 	client  mqtt.Client

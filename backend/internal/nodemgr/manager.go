@@ -26,7 +26,7 @@ import (
 // Manager handles node lifecycle and message processing
 type Manager struct {
 	db              *gorm.DB
-	mqtt            *mqtt.Client
+	mqtt            mqtt.Publisher
 	wsHub           *websocket.Hub
 	ha              *homeassistant.Integration
 	otaMgr          *ota.Manager

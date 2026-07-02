@@ -60,7 +60,6 @@ import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import client from '@/api/client'
 import { sensorNameMap, sensorUnitMap, SENSOR_ORDER } from '@/utils/sensor'
-import { downsampleData, downsampleMultiSeriesAligned } from '@/utils/downsample'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import { useTimeRange } from '@/composables/useTimeRange'
 import type { HistoryDataPoint, SeriesData } from '@/types/chart'
@@ -182,60 +181,116 @@ async function fetchHistoryData() {
 
   chartLoading.value = true
   try {
-    // Unified data devices: query specific categories
+    // Unified data devices: query specific categories via batch API
     if (['bmp280', 'sht40', 'temp_humidity'].includes(deviceType)) {
       const categories = deviceType === 'bmp280' ? ['temperature', 'pressure'] : ['temperature', 'humidity']
-      const results = await Promise.all(
-        categories.map(cat =>
-          client.get<unknown, any>('/api/v1/unified-data/historical', {
-            params: { device_pk: props.deviceId, category: cat, start_time: startTime.toISOString(), end_time: endTime.toISOString() }
-          }).then(res => res || [])
-        )
-      )
-      chartSeries.value = categories
-        .map((cat, i) => ({
-          name: sensorNameMap[cat] || cat,
-          unit: sensorUnitMap[cat] || '',
-          category: cat,
-          data: downsampleData(
-            (results[i] as any[]).map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+      const series: SeriesData[] = []
+      try {
+        const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
+          params: {
+            device_pk: props.deviceId,
+            categories: categories.join(','),
+            start_time: startTime.toISOString(),
+            end_time: endTime.toISOString(),
+            max_points: 500
+          }
+        })
+        const batchData = batchRes?.data || batchRes || []
+        if (Array.isArray(batchData)) {
+          for (const result of batchData) {
+            const cat = result.category
+            if (!cat) continue
+            const items = (result.data || []).map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+            if (items.length > 0) {
+              series.push({
+                name: sensorNameMap[cat] || cat,
+                unit: sensorUnitMap[cat] || '',
+                category: cat,
+                data: items
+              })
+            }
+          }
+        }
+      } catch {
+        // Fallback: 逐个请求 + max_points=500
+        const fallbackResults = await Promise.all(
+          categories.map(cat =>
+            client.get<unknown, any>('/api/v1/unified-data/historical', {
+              params: { device_pk: props.deviceId, category: cat, start_time: startTime.toISOString(), end_time: endTime.toISOString(), max_points: 500 }
+            }).then(res => ({ cat, data: (res.data || res || []) as any[] })).catch(() => ({ cat, data: [] as any[] }))
           )
-        }))
-        .filter(s => s.data.length > 0)
+        )
+        for (const r of fallbackResults) {
+          if (r.data && r.data.length > 0) {
+            series.push({
+              name: sensorNameMap[r.cat] || r.cat,
+              unit: sensorUnitMap[r.cat] || '',
+              category: r.cat,
+              data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+            })
+          }
+        }
+      }
+      chartSeries.value = series.filter(s => s.data.length > 0)
       historyData.value = []
     } else {
-      // Generic: try all known categories via unified-data
+      // Generic: try all known categories via unified-data batch API
       // BMS设备使用专用category名称
       const knownCategories = isBmsDevice(deviceType)
         ? bmsCategories
         : [...SENSOR_ORDER, 'illuminance', 'uv_index', 'rain_intensity', 'rain_accum',
             'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency',
             'cell_voltage', 'cell_temp', 'mos_status', 'protection_status']
-      const results = await Promise.all(
-        knownCategories.map(cat =>
-          client.get<unknown, any>('/api/v1/unified-data/historical', {
-            params: { device_pk: props.deviceId, category: cat, start_time: startTime.toISOString(), end_time: endTime.toISOString() }
-          }).then(res => ({ cat, data: res || [] }))
-            .catch(() => ({ cat, data: [] as any[] }))
-        )
-      )
-      // 过滤掉状态量(不适合折线图)和空数据
-      const series = results
-        .filter(r => r.data && r.data.length > 0)
-        .filter(r => !statusCategories.includes(r.cat))
-        .map(r => ({
-          name: sensorNameMap[r.cat] || r.cat,
-          unit: sensorUnitMap[r.cat] || '',
-          category: r.cat,
-          data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
-        }))
 
-      // 多series同步降采样：时间戳对齐后同步降采样，确保tooltip显示所有series
-      if (series.length > 1) {
-        const downsampled = downsampleMultiSeriesAligned(series.map(s => s.data))
-        series.forEach((s, i) => { s.data = downsampled[i] })
-      } else if (series.length === 1) {
-        series[0].data = downsampleData(series[0].data)
+      const series: SeriesData[] = []
+      try {
+        const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
+          params: {
+            device_pk: props.deviceId,
+            categories: knownCategories.join(','),
+            start_time: startTime.toISOString(),
+            end_time: endTime.toISOString(),
+            max_points: 500
+          }
+        })
+        const batchData = batchRes?.data || batchRes || []
+        if (Array.isArray(batchData)) {
+          for (const result of batchData) {
+            const cat = result.category
+            if (!cat) continue
+            // 过滤掉状态量(不适合折线图)和空数据
+            if (statusCategories.includes(cat)) continue
+            const items = (result.data || []).map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+            if (items.length > 0) {
+              series.push({
+                name: sensorNameMap[cat] || cat,
+                unit: sensorUnitMap[cat] || '',
+                category: cat,
+                data: items
+              })
+            }
+          }
+        }
+      } catch {
+        // Fallback: 逐个请求 + max_points=500
+        const fallbackResults = await Promise.all(
+          knownCategories.map(cat =>
+            client.get<unknown, any>('/api/v1/unified-data/historical', {
+              params: { device_pk: props.deviceId, category: cat, start_time: startTime.toISOString(), end_time: endTime.toISOString(), max_points: 500 }
+            }).then(res => ({ cat, data: (res.data || res || []) as any[] }))
+              .catch(() => ({ cat, data: [] as any[] }))
+          )
+        )
+        for (const r of fallbackResults) {
+          if (r.data && r.data.length > 0 && !statusCategories.includes(r.cat)) {
+            series.push({
+              name: sensorNameMap[r.cat] || r.cat,
+              unit: sensorUnitMap[r.cat] || '',
+              category: r.cat,
+              data: r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
+            })
+          }
+        }
       }
 
       if (series.length > 0) {
@@ -255,19 +310,17 @@ async function fetchHistoryData() {
             .filter(key => key !== 'raw_data' && typeof data[key] === 'number')
             .filter(key => !statusCategories.includes(key))
           if (numericKeys.length > 1) {
+            // Fallback: device_data table — 无服务端降采样，保留原始数据
             chartSeries.value = numericKeys.map(key => ({
               name: sensorNameMap[key] || key, unit: sensorUnitMap[key] || '', category: key,
-              data: downsampleData(
-                response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
-              )
+              data: response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[key] ?? 0 }))
             }))
             historyData.value = []
           } else {
             const valueKey = numericKeys[0] || Object.keys(data).find(key => typeof data[key] === 'number' && !statusCategories.includes(key))
+            // Fallback: device_data table — 无服务端降采样，保留原始数据
             historyData.value = valueKey
-              ? downsampleData(
-                  response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
-                )
+              ? response.items.map((item: any) => ({ time: item.created_at || item.collected_at, value: item.data[valueKey] }))
               : []
           }
         } else {

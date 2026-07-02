@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/gin-contrib/cors"
+	"github.com/gin-contrib/gzip"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -187,6 +188,8 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// Gzip compression for API responses (20MB JSON → ~3MB)
+	r.Use(gzip.Gzip(gzip.DefaultCompression))
 	// CORS: allow all origins — services listen on 0.0.0.0, LAN/external devices need access
 	r.Use(cors.New(cors.Config{
 		AllowOriginFunc: func(origin string) bool {

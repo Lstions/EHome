@@ -60,8 +60,8 @@ define kill_port
 endef
 
 # ---- 覆盖率阈值 (当前基线，逐步提高) ----
-BACKEND_COVERAGE_THRESHOLD  ?= 25
-FRONTEND_COVERAGE_THRESHOLD ?= 15
+BACKEND_COVERAGE_THRESHOLD  ?= 35
+FRONTEND_COVERAGE_THRESHOLD ?= 25
 
 .PHONY: up down restart infra infra-down backend frontend e2e \
         test test-backend test-frontend test-integration test-coverage \

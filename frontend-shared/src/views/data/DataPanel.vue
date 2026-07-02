@@ -251,7 +251,6 @@ import { exportCSV, exportJSON } from '@/utils/exportData'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
-import { downsampleData } from '@/utils/downsample'
 
 const deviceList = ref<Device[]>([])
 const historyData = ref<any[]>([])
@@ -480,41 +479,86 @@ const buildChartSeries = async () => {
     }
 
     const series: any[] = []
-    const promises = categoryNames.map(cat =>
-      client.get<unknown, any>('/api/v1/unified-data/historical', {
-        params: {
-          device_pk: queryForm.deviceId,
-          category: cat,
-          start_time: startTime.toISOString(),
-          end_time: endTime.toISOString()
-        }
-      }).then(res => ({ cat, data: res.data || [] }))
-        .catch(() => ({ cat, data: [] as any[] }))
-    )
 
-    const results = await Promise.all(promises)
-    for (const r of results) {
-      if (r.data && r.data.length > 0) {
-        const filteredData = r.data
-          .filter((item: any) => {
+    // 批量请求：1 个请求替代 19 个并行请求，服务端降采样 max_points=500
+    const batchParams = {
+      device_pk: queryForm.deviceId,
+      categories: categoryNames.join(','),
+      start_time: startTime.toISOString(),
+      end_time: endTime.toISOString(),
+      max_points: 500
+    }
+
+    try {
+      const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
+        params: batchParams
+      })
+      const batchData = batchRes?.data || batchRes || []
+      // 批量 API 返回格式: [{category: "temperature", data: [{...}]}, ...]
+      if (Array.isArray(batchData)) {
+        for (const result of batchData) {
+          const cat = result.category
+          if (!cat) continue
+          const items = (result.data || []).filter((item: any) => {
             const t = item.timestamp || item.created_at
             return t && !t.startsWith('0001-01-01')
           })
-        if (filteredData.length > 0) {
-          // Use category from API response or fall back to sensor maps
-          const catName = sensorNameMap[r.cat] || r.cat
-          const catUnit = sensorUnitMap[r.cat] || ''
-          series.push({
-            name: catName,
-            unit: catUnit,
-            category: r.cat,
-            data: downsampleData(
-              filteredData.map((item: any) => ({
+          if (items.length > 0) {
+            const catName = sensorNameMap[cat] || cat
+            const catUnit = sensorUnitMap[cat] || ''
+            series.push({
+              name: catName,
+              unit: catUnit,
+              category: cat,
+              data: items.map((item: any) => ({
                 time: item.timestamp || item.created_at,
                 value: item.value
               }))
-            )
-          })
+            })
+          }
+        }
+      }
+
+      // 如果批量 API 未返回任何数据，尝试 fallback 逐个请求
+      if (series.length === 0) {
+        throw new Error('batch API returned no data, falling back')
+      }
+    } catch {
+      // Fallback: 批量 API 失败时逐个请求 + max_points=500
+      const fallbackPromises = categoryNames.map(cat =>
+        client.get<unknown, any>('/api/v1/unified-data/historical', {
+          params: {
+            device_pk: queryForm.deviceId,
+            category: cat,
+            start_time: startTime.toISOString(),
+            end_time: endTime.toISOString(),
+            max_points: 500
+          }
+        }).then(res => ({ cat, data: (res.data || res || []) as any[] }))
+          .catch(() => ({ cat, data: [] as any[] }))
+      )
+
+      const fallbackResults = await Promise.all(fallbackPromises)
+      for (const r of fallbackResults) {
+        if (r.data && r.data.length > 0) {
+          const filteredData = r.data
+            .filter((item: any) => {
+              const t = item.timestamp || item.created_at
+              return t && !t.startsWith('0001-01-01')
+            })
+          if (filteredData.length > 0) {
+            const catName = sensorNameMap[r.cat] || r.cat
+            const catUnit = sensorUnitMap[r.cat] || ''
+            series.push({
+              name: catName,
+              unit: catUnit,
+              category: r.cat,
+              data: filteredData.map((item: any) => ({
+                time: item.timestamp || item.created_at,
+                value: item.value
+              }))
+            })
+          }
         }
       }
     }
@@ -532,14 +576,12 @@ const buildChartSeries = async () => {
         name: key,
         unit: '',
         category: key,
-        data: downsampleData(
-          historyData.value
-            .filter((item: any) => {
-              const t = item.timestamp || item.collected_at || item.created_at
-              return t && !t.startsWith('0001-01-01')
-            })
-            .map(item => ({ time: item.timestamp || item.collected_at || item.created_at, value: item.data?.[key] ?? 0 }))
-        )
+        data: historyData.value
+          .filter((item: any) => {
+            const t = item.timestamp || item.collected_at || item.created_at
+            return t && !t.startsWith('0001-01-01')
+          })
+          .map(item => ({ time: item.timestamp || item.collected_at || item.created_at, value: item.data?.[key] ?? 0 }))
       }))
     } else {
       chartSeries.value = []
@@ -681,7 +723,8 @@ const fetchCompareData = async () => {
           device_pk: deviceId,
           category: queryForm.compareCategory,
           start_time: startTime.toISOString(),
-          end_time: endTime.toISOString()
+          end_time: endTime.toISOString(),
+          max_points: 500
         }
       })
       return {

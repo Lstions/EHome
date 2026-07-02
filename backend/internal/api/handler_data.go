@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -10,6 +12,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// downsampleUnifiedData uniformly samples data to at most maxPoints rows.
+// If maxPoints <= 0 or data already fits, returns data unchanged.
+// Always keeps the first and last points.
+func downsampleUnifiedData(data []models.UnifiedData, maxPoints int) []models.UnifiedData {
+	if maxPoints <= 0 || len(data) <= maxPoints {
+		return data
+	}
+	step := len(data) / maxPoints
+	if step < 2 {
+		step = 2
+	}
+	result := make([]models.UnifiedData, 0, maxPoints+2)
+	result = append(result, data[0]) // always keep first
+	for i := step; i < len(data)-1; i += step {
+		result = append(result, data[i])
+	}
+	result = append(result, data[len(data)-1]) // always keep last
+	return result
+}
 
 // registerDataRoutes sets up data query routes
 func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
@@ -138,6 +160,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var data []models.UnifiedData
 		q.Order("timestamp ASC").Find(&data)
 
+		// Server-side downsampling: if max_points specified and data exceeds it,
+		// uniformly sample to cap response size.
+		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
+		data = downsampleUnifiedData(data, maxPoints)
+
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
 	})
 
@@ -177,6 +204,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			Order("timestamp ASC").
 			Find(&data)
 
+		// Server-side downsampling: if max_points specified and data exceeds it,
+		// uniformly sample to cap response size.
+		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
+		data = downsampleUnifiedData(data, maxPoints)
+
 		c.JSON(http.StatusOK, data)
 	})
 
@@ -184,5 +216,64 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	v1.GET("/devices/:id/failover-logs", func(c *gin.Context) {
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []gin.H{}, "total": 0, "limit": limit})
+	})
+
+	// Batch historical query — eliminates N+1 request pattern
+	// GET /api/v1/unified-data/historical-batch?device_pk=8&categories=rsoc,temperature_1,cell_voltage_1&start_time=...&end_time=...&max_points=500
+	v1.GET("/unified-data/historical-batch", func(c *gin.Context) {
+		devicePKStr := c.Query("device_pk")
+		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			return
+		}
+
+		categoriesStr := c.Query("categories")
+		if categoriesStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "categories parameter required (comma-separated)"})
+			return
+		}
+		categories := strings.Split(categoriesStr, ",")
+
+		startStr := c.Query("start_time")
+		endStr := c.Query("end_time")
+		if startStr == "" || endStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time required"})
+			return
+		}
+
+		startTime, err1 := time.Parse(time.RFC3339, startStr)
+		endTime, err2 := time.Parse(time.RFC3339, endStr)
+		if err1 != nil || err2 != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid time format (RFC3339 expected)"})
+			return
+		}
+
+		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
+
+		// Query all categories in parallel
+		type catResult struct {
+			Category string                 `json:"category"`
+			Data     []models.UnifiedData   `json:"data"`
+		}
+		results := make([]catResult, len(categories))
+
+		var wg sync.WaitGroup
+		for i, cat := range categories {
+			wg.Add(1)
+			go func(idx int, category string) {
+				defer wg.Done()
+				var data []models.UnifiedData
+				db.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+					devicePK, category, startTime, endTime).
+					Order("timestamp ASC").
+					Find(&data)
+				data = downsampleUnifiedData(data, maxPoints)
+				results[idx] = catResult{Category: category, Data: data}
+			}(i, cat)
+		}
+		wg.Wait()
+
+		c.JSON(http.StatusOK, results)
 	})
 }
