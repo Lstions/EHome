@@ -203,6 +203,16 @@ func main() {
 	}))
 	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry)
 
+	// Serve frontend static files (production unified deployment)
+	staticDir := os.Getenv("EHOME_STATIC_DIR")
+	if staticDir != "" {
+		r.Static("/assets", staticDir+"/assets")
+		r.StaticFile("/favicon.svg", staticDir+"/favicon.svg")
+		r.NoRoute(func(c *gin.Context) {
+			c.File(staticDir + "/index.html")
+		})
+	}
+
 	// Health check
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{

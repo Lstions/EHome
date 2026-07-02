@@ -31,7 +31,6 @@ type Driver interface {
 	GetSensorDefinitions() []SensorData
 }
 
-// Registry holds all registered drivers
 type Registry struct {
 	drivers map[string]Driver
 }
@@ -90,3 +89,20 @@ func Get(deviceType string) (Driver, error) {
 func List() []string {
 	return globalRegistry.List()
 }
+
+// CommandAwareDriver is an optional interface for drivers that need command
+// context to disambiguate responses with identical formats (e.g. HPV vs HPVB
+// on the Techfine GB3024, which both return "(AAA.A BB.B CCCCC").
+//
+// commandWriteData is the hex-encoded WriteData of the ConfigTemplate that
+// was sent to the device (same format as CommandTemplate.WriteData /
+// ConfigTemplate.WriteData — hex-encoded ASCII).  Drivers that implement this
+// interface should decode it the same way the sender does.
+type CommandAwareDriver interface {
+	Driver
+	// ParseDataWithCommand parses raw data with command context.
+	// commandWriteData is the hex-encoded write data of the template that
+	// was sent (e.g. "4850560d" for "HPV\r").
+	ParseDataWithCommand(raw []byte, commandWriteData string) ([]SensorData, error)
+}
+

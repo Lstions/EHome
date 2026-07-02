@@ -90,25 +90,33 @@
         />
       </el-card>
 
+      <!-- Status & alarms -->
+      <el-card style="margin-top: 20px;" shadow="hover">
+        <template #header>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>状态与告警</span>
+            <el-tag v-if="hasAlarms" type="danger" size="small">{{ alarmCount }}条告警</el-tag>
+          </div>
+        </template>
+        <InverterStatusGrid :latest-data="latestData" />
+      </el-card>
+
       <!-- MPPT details -->
       <el-card style="margin-top: 20px;" shadow="hover">
         <template #header><span>MPPT通道</span></template>
         <InverterMpptCard :data="latestData" />
       </el-card>
 
-      <!-- Alarm status -->
-      <el-card style="margin-top: 20px;" shadow="hover" v-if="hasAlarms">
-        <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span>告警状态</span>
-            <el-tag type="danger" size="small">{{ alarmCount }}条告警</el-tag>
-          </div>
-        </template>
-        <div class="alarm-list">
-          <el-tag v-for="alarm in alarmItems" :key="alarm" type="danger" size="small" style="margin: 4px;">
-            {{ alarm }}
-          </el-tag>
-        </div>
+      <!-- Temperature & fan -->
+      <el-card style="margin-top: 20px;" shadow="hover">
+        <template #header><span>温度与风扇</span></template>
+        <InverterTempCard :latest-data="latestData" />
+      </el-card>
+
+      <!-- Energy generation -->
+      <el-card style="margin-top: 20px;" shadow="hover">
+        <template #header><span>发电量统计</span></template>
+        <InverterEnergyCard :latest-data="latestData" />
       </el-card>
 
       <!-- Realtime data stream -->
@@ -128,12 +136,6 @@
         />
       </el-card>
 
-      <!-- Command frequency -->
-      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
-
-      <!-- Operations -->
-      <OperationButtons :device="device" :device-id="deviceId" @operation-executed="fetchDeviceDetail" />
-
       <!-- History chart -->
       <HistoryChartSection
         ref="historyChartRef"
@@ -141,6 +143,12 @@
         :device-type="device.device_type"
         :device-type-text="deviceTypeText"
       />
+
+      <!-- Command frequency -->
+      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
+
+      <!-- Operations -->
+      <OperationButtons :device="device" :device-id="deviceId" @operation-executed="fetchDeviceDetail" />
     </template>
   </div>
 </template>
@@ -156,6 +164,9 @@ import CommandFrequencySection from '../shared/CommandFrequencySection.vue'
 import OperationButtons from '../shared/OperationButtons.vue'
 import InverterPowerFlow from './InverterPowerFlow.vue'
 import InverterMpptCard from './InverterMpptCard.vue'
+import InverterStatusGrid from './InverterStatusGrid.vue'
+import InverterTempCard from './InverterTempCard.vue'
+import InverterEnergyCard from './InverterEnergyCard.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
@@ -192,24 +203,23 @@ const totalPvPower = computed(() => {
   return total
 })
 
-// Alarm detection
-const alarmItems = computed<string[]>(() => {
-  if (!latestData.value) return []
-  const alarms: string[] = []
+// Alarm detection — count only, detailed display is in InverterStatusGrid
+const alarmCount = computed(() => {
+  if (!latestData.value) return 0
+  let count = 0
   for (const [key, val] of Object.entries(latestData.value)) {
     if (key.startsWith('alarm_') && (val === 1 || val > 0)) {
-      alarms.push(key.replace('alarm_', '').replace(/_/g, ' '))
+      count++
     }
   }
   const faultCode = latestData.value.fault_code ?? latestData.value.error_code
   if (faultCode && faultCode > 0) {
-    alarms.push(`故障码: ${faultCode}`)
+    count++
   }
-  return alarms
+  return count
 })
 
-const hasAlarms = computed(() => alarmItems.value.length > 0)
-const alarmCount = computed(() => alarmItems.value.length)
+const hasAlarms = computed(() => alarmCount.value > 0)
 
 function formatNum(v: number | undefined | null, digits: number = 1): string {
   if (v === undefined || v === null || isNaN(v)) return '--'

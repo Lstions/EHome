@@ -181,7 +181,7 @@ export function downsampleMultiSeriesAligned<T extends TimeSeriesPoint>(
 
   // Step 2: Build aligned series via nearest-neighbor interpolation
   // For each series, pre-sort by timestamp and use binary search
-  const aligned: T[][] = series.map(s => {
+  const aligned = series.map(s => {
     const sorted = [...s].sort((a, b) =>
       new Date(a.time).getTime() - new Date(b.time).getTime()
     )
@@ -200,9 +200,9 @@ export function downsampleMultiSeriesAligned<T extends TimeSeriesPoint>(
         const d2 = Math.abs(new Date(sorted[lo - 1].time).getTime() - ts)
         if (d2 < d1) lo--
       }
-      return { time: new Date(ts).toISOString(), value: sorted[lo].value }
+      return { time: new Date(ts).toISOString(), value: sorted[lo].value } as T
     })
-  })
+  }) as T[][]
 
   // Step 3: Multi-series dedup — keep indices where any series changes value
   const totalLen = allTs.length

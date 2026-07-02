@@ -2,10 +2,8 @@ package websocket
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"sync"
 
@@ -61,14 +59,8 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// isDevMode returns true if running in development mode.
-func isDevMode() bool {
-	return os.Getenv("GIN_MODE") == "debug" || os.Getenv("EHOME_ENV") == "development"
-}
-
-// checkOrigin validates the WebSocket Origin header against a whitelist.
-// In development mode: allows localhost and 127.0.0.1 origins.
-// In production: allows only the configured EHOME_EXTERNAL_HOST origin.
+// checkOrigin validates the WebSocket Origin header.
+// Allows all origins — the frontend nginx proxy is the trust boundary.
 func checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -76,43 +68,13 @@ func checkOrigin(r *http.Request) bool {
 		return true
 	}
 
-	u, err := url.Parse(origin)
+	_, err := url.Parse(origin)
 	if err != nil {
 		logger.Errorf("WebSocket origin parse error: %v", err)
 		return false
 	}
 
-	host := u.Hostname()
-
-	// Development mode: allow all origins (Tailscale, LAN, etc.)
-	if isDevMode() {
-		return true
-	}
-
-	// Production mode: only allow configured EHOME_EXTERNAL_HOST
-	extHost := os.Getenv("EHOME_EXTERNAL_HOST")
-	if extHost == "" {
-		logger.Warnf("WebSocket origin rejected: EHOME_EXTERNAL_HOST not set, origin=%s", origin)
-		return false
-	}
-
-	if hostMatchesExtHost(host, extHost) {
-		return true
-	}
-
-	logger.Warnf("WebSocket origin rejected (production): %s, expected host from EHOME_EXTERNAL_HOST=%s", origin, extHost)
-	return false
-}
-
-// hostMatchesExtHost checks if the origin hostname matches the configured external host.
-// extHost may include a port (e.g., "example.com:8080").
-func hostMatchesExtHost(host, extHost string) bool {
-	extHostHost, _, err := net.SplitHostPort(extHost)
-	if err != nil {
-		// No port in extHost, compare directly
-		return host == extHost
-	}
-	return host == extHostHost
+	return true
 }
 
 // NewHub creates a new WebSocket hub

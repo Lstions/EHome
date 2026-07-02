@@ -97,6 +97,30 @@ const bmsCategories = [
   'cell_voltage_max', 'cell_voltage_min',
 ]
 
+/** 逆变器设备使用的unified-data category名称 */
+const inverterCategories = [
+  // PV
+  'pv1_voltage', 'pv1_current', 'pv1_power',
+  'pv2_voltage', 'pv2_current', 'pv2_power',
+  // Grid
+  'grid_voltage', 'grid_frequency',
+  // Output
+  'output_voltage', 'output_frequency',
+  'output_apparent_power', 'output_active_power', 'output_load_percent',
+  // Battery
+  'battery_voltage', 'battery_capacity',
+  'battery_charge_current', 'battery_discharge_current', 'bus_voltage',
+  // Temperature
+  'pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp',
+  'max_temp', 'pv2_temp', 'dc_rectifier_temp',
+  // Energy
+  'daily_energy', 'monthly_energy', 'yearly_energy', 'total_energy',
+  // BMS
+  'bms_soc', 'bms_charge_current', 'bms_discharge_current',
+  'bms_charge_voltage_limit', 'bms_discharge_voltage_limit',
+  'bms_charge_current_limit', 'bms_temp',
+]
+
 /** 状态量category — 不适合折线图，从图表中移除 */
 const statusCategories = ['protection_status', 'fet_status']
 
@@ -116,10 +140,28 @@ const bmsChartGroups: ChartSubGroup[] = [
   { title: '温度 (°C)', categories: ['temperature_1', 'temperature_2', 'temperature_3'] },
 ]
 
+/**
+ * 逆变器按量纲分组的子图表定义。
+ */
+const inverterChartGroups: ChartSubGroup[] = [
+  { title: 'PV输入', categories: ['pv1_voltage', 'pv1_current', 'pv1_power', 'pv2_voltage', 'pv2_current', 'pv2_power'] },
+  { title: '电网', categories: ['grid_voltage', 'grid_frequency'] },
+  { title: '输出', categories: ['output_voltage', 'output_frequency', 'output_apparent_power', 'output_active_power', 'output_load_percent'] },
+  { title: '电池', categories: ['battery_voltage', 'battery_capacity', 'battery_charge_current', 'battery_discharge_current', 'bus_voltage'] },
+  { title: '温度 (°C)', categories: ['pv_temp', 'inverter_temp', 'boost_temp', 'transformer_temp', 'max_temp', 'pv2_temp', 'dc_rectifier_temp'] },
+  { title: '发电量 (kWh)', categories: ['daily_energy', 'monthly_energy', 'yearly_energy', 'total_energy'] },
+  { title: 'BMS', categories: ['bms_soc', 'bms_charge_current', 'bms_discharge_current', 'bms_charge_voltage_limit', 'bms_discharge_voltage_limit', 'bms_charge_current_limit', 'bms_temp'] },
+]
+
 /** 判断是否为BMS设备类型 */
 const isBmsDevice = (deviceType: string): boolean => {
   const bmsTypes = ['jiabaida_bms', 'bms', 'battery']
   return bmsTypes.includes(deviceType.toLowerCase())
+}
+
+/** 判断是否为逆变器设备类型 */
+const isInverterDevice = (deviceType: string): boolean => {
+  return deviceType.toLowerCase() === 'inverter'
 }
 
 interface ChartSubGroupResult {
@@ -143,6 +185,16 @@ const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
   if (isBmsDevice(props.deviceType)) {
     // BMS: 按预定义量纲分组
     groups = bmsChartGroups
+      .map(group => {
+        const series = chartSeries.value.filter(s =>
+          s.category && group.categories.includes(s.category)
+        )
+        return { title: group.title, series }
+      })
+      .filter(g => g.series.length > 0)
+  } else if (isInverterDevice(props.deviceType)) {
+    // Inverter: 按预定义量纲分组
+    groups = inverterChartGroups
       .map(group => {
         const series = chartSeries.value.filter(s =>
           s.category && group.categories.includes(s.category)
@@ -238,7 +290,9 @@ async function fetchHistoryData() {
       // BMS设备使用专用category名称
       const knownCategories = isBmsDevice(deviceType)
         ? bmsCategories
-        : [...SENSOR_ORDER, 'illuminance', 'uv_index', 'rain_intensity', 'rain_accum',
+        : isInverterDevice(deviceType)
+          ? inverterCategories
+          : [...SENSOR_ORDER, 'illuminance', 'uv_index', 'rain_intensity', 'rain_accum',
             'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency',
             'cell_voltage', 'cell_temp', 'mos_status', 'protection_status']
 

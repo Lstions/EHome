@@ -63,7 +63,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	// Build a minimal manager
 	mgr := &Manager{db: db}
 
-	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), 0, rawData)
+	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), 0, 0, rawData)
 
 	// Verify unified_data was written
 	var unified []models.UnifiedData
@@ -98,7 +98,7 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 	// No device created
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), 0, []byte{1, 2, 3, 4, 5, 6})
+	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), 0, 0, []byte{1, 2, 3, 4, 5, 6})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)
@@ -121,7 +121,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	db.Create(&dev)
 
 	mgr := &Manager{db: db}
-	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), 0, []byte{})
+	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), 0, 0, []byte{})
 
 	var count int64
 	db.Model(&models.UnifiedData{}).Count(&count)

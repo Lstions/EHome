@@ -121,7 +121,7 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		// ESP32 rx_task uses UART idle detection to report complete responses,
 		// but slow baud or multi-frame protocols may still produce partial reports.
 		merged := m.reassembler.append(uint32(job.requestID), job.rawData)
-		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, merged)
+		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.commandIndex, merged)
 		metrics.DataReportsProcessed.Inc()
 
 		if parsedData != nil {

@@ -279,4 +279,7 @@ func RegisterBuiltInDriversWithParsers(registry *Registry, parserConfigs map[str
 
 	// Jiabaida BMS — no ConfigParser (binary protocol, handled in ParseData)
 	registry.Register(&JiabaidaBMSDriver{})
+
+	// Techfine GB3024 inverter — ASCII protocol, no ConfigParser
+	registry.Register(&TechfineInverterDriver{})
 }

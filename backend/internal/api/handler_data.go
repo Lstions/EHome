@@ -263,8 +263,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			wg.Add(1)
 			go func(idx int, category string) {
 				defer wg.Done()
+				// Use a new Session to avoid Statement sharing between concurrent goroutines.
+				// GORM v2's *gorm.DB shares Statement state across chained calls; without
+				// Session{}, concurrent db.Where() calls race and corrupt each other's conditions,
+				// causing some queries to return 0 rows.
+				session := db.Session(&gorm.Session{})
 				var data []models.UnifiedData
-				db.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+				session.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
 					devicePK, category, startTime, endTime).
 					Order("timestamp ASC").
 					Find(&data)

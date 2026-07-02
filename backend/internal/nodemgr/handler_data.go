@@ -164,8 +164,9 @@ func (m *Manager) findEdgeDeviceByChannelID(deviceID string, channelID uint64, e
 
 // parseAndStoreData parses raw data using DeviceConfig.Parser JSONB (primary)
 // with Driver fallback, and stores in unified_data.
+// commandIndex is the ConfigTemplate ID that was sent (0 if unknown).
 // Returns the parsed sensor (for WS broadcast) or nil on failure.
-func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, edgeDeviceID uint64, rawData []byte) map[string]interface{} {
+func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID uint64, edgeDeviceID uint64, commandIndex uint64, rawData []byte) map[string]interface{} {
 	// Get device type from database — Preload DeviceConfig for Parser JSONB access
 	device, found := m.findEdgeDeviceByChannelID(deviceID, channelID, edgeDeviceID)
 	if !found {
@@ -202,10 +203,34 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 			logger.Infof("[%s] No ConfigParser and no driver for type %s", deviceID, device.Type)
 			return nil
 		}
-		drvData, err := driver.ParseData(rawData)
-		if err != nil {
-			logger.Infof("[%s] Failed to parse data: %v", deviceID, err)
-			return nil
+
+		var drvData []drivers.SensorData
+		// If the driver implements CommandAwareDriver and we have commandIndex,
+		// resolve the ConfigTemplate.WriteData and use ParseDataWithCommand.
+		if commandIndex > 0 {
+			if caDriver, ok := driver.(drivers.CommandAwareDriver); ok {
+				var tmpl models.ConfigTemplate
+				if findErr := m.db.First(&tmpl, commandIndex).Error; findErr == nil && tmpl.WriteData != "" {
+					caErr := func() error {
+						data, innerErr := caDriver.ParseDataWithCommand(rawData, tmpl.WriteData)
+						if innerErr == nil {
+							drvData = data
+						}
+						return innerErr
+					}()
+					if caErr != nil {
+						logger.Infof("[%s] ParseDataWithCommand failed, falling back to ParseData: %v", deviceID, caErr)
+					}
+				}
+			}
+		}
+		// Fall back to plain ParseData if CommandAwareDriver didn't handle it
+		if drvData == nil {
+			drvData, err = driver.ParseData(rawData)
+			if err != nil {
+				logger.Infof("[%s] Failed to parse data: %v", deviceID, err)
+				return nil
+			}
 		}
 		// Convert drivers.SensorData to parser.Field
 		sensorData = make([]parser.Field, len(drvData))
