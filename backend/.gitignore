@@ -1,2 +1,23 @@
+# Firmware binaries
 *.bin
+
+# Build output
+bin/
+server
+ehome-server
+ehome-server-final
+migrate_v21_to_v22
+
+# Coverage
+*.out
+
+# Temp
 tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

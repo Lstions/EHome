@@ -33,7 +33,6 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
-*.pyoehome-server-final
 ehome-server-new
 ehome-server.old
 ehome-server-final
@@ -54,6 +53,7 @@ backend/firmwares/
 
 # Local dev runtime
 .logs/
+.pids/
 
 # Test coverage artifacts
 backend/coverage.out

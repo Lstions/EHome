@@ -1,0 +1,6 @@
+FROM scratch
+WORKDIR /app
+COPY ehome-server .
+COPY firmwares/ firmwares/
+EXPOSE 8080
+CMD ["./ehome-server"]
