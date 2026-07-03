@@ -33,19 +33,10 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
-ehome-server-new
-ehome-server.old
-ehome-server-final
 
-# Legacy v1.x frontend (deleted 2026-06-03, archived in git history)
-frontend/
-.verify_certs/
-backend/migrate_v21_to_v22
-
-# Playwright E2E
-frontend-shared/e2e/
-frontend-shared/playwright.config.ts
+# Playwright E2E (test code is tracked; output only)
 frontend-shared/test-results/
+frontend-shared/playwright-report/
 
 # Firmware binaries
 *.bin

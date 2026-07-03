@@ -33,7 +33,7 @@
 POSTGRES_PORT   ?= 5434
 BACKEND_PORT    ?= 8080
 FRONTEND_PORT   ?= 5174
-EMQX_PORT       ?= 1883
+EMQX_PORT       ?= 1884
 REDIS_PORT      ?= 6379
 
 # ---- OTA external host (ESP32 reaches backend here, not localhost) ----
