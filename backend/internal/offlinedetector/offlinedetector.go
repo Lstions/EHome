@@ -21,9 +21,9 @@ type Detector struct {
 	quit   chan struct{}
 
 	// M5 fix: Cache active edge device IDs to avoid full table scan every 5s
-	mu             sync.RWMutex
-	activeDevices  map[uint]time.Time // device PK → last_data_at (only active devices)
-	cacheReady     bool
+	mu            sync.RWMutex
+	activeDevices map[uint]time.Time // device PK → last_data_at (only active devices)
+	cacheReady    bool
 }
 
 // NewDetector creates a new offline detector
@@ -63,30 +63,42 @@ func (d *Detector) loop() {
 	}
 }
 
-// checkOffline performs three-layer offline detection
+// checkOffline performs three-layer offline detection (parallel).
+// Each layer uses a session-isolated DB handle (db.Session) to avoid
+// Statement races between concurrent GORM calls.
 func (d *Detector) checkOffline() {
-	// Layer 1: Check Redis heartbeats (fast, in-memory)
-	d.checkRedisHeartbeats()
+	var wg sync.WaitGroup
+	wg.Add(3)
 
-	// Layer 2: Check DB last_seen (SQL fallback)
-	d.checkDBLastSeen()
+	go func() {
+		defer wg.Done()
+		d.checkRedisHeartbeats(d.db.Session(&gorm.Session{}))
+	}()
 
-	// Layer 3: Check edge devices with stale data (no data for 60s → offline)
-	// M5 fix: Use cached device list instead of full DB scan
-	d.checkEdgeDevicesOffline()
+	go func() {
+		defer wg.Done()
+		d.checkDBLastSeen(d.db.Session(&gorm.Session{}))
+	}()
+
+	go func() {
+		defer wg.Done()
+		d.checkEdgeDevicesOffline(d.db.Session(&gorm.Session{}))
+	}()
+
+	wg.Wait()
 }
 
-// checkRedisHeartbeats checks Redis TTL for all nodes
+// checkRedisHeartbeats checks Redis TTL for all nodes.
 // BUG-05 fix: Instead of scanning Redis keys (which won't find expired ones),
 // query DB for online nodes and verify their heartbeat key still exists.
-func (d *Detector) checkRedisHeartbeats() {
+func (d *Detector) checkRedisHeartbeats(db *gorm.DB) {
 	if redis.Client == nil {
 		return // Redis not connected
 	}
 
 	// Get all nodes currently marked as online in DB
 	var onlineNodes []models.Node
-	if err := d.db.Where("status = ?", "online").Find(&onlineNodes).Error; err != nil {
+	if err := db.Where("status = ?", "online").Find(&onlineNodes).Error; err != nil {
 		return
 	}
 
@@ -94,15 +106,15 @@ func (d *Detector) checkRedisHeartbeats() {
 		deviceID := col.NodeID
 		if !redis.IsOnline(deviceID) {
 			// Heartbeat key missing/expired — mark offline
-			d.markOffline(deviceID, "redis_ttl_expired")
+			d.markOffline(db, deviceID, "redis_ttl_expired")
 		}
 	}
 }
 
 // checkDBLastSeen checks DB last_seen for collectors without Redis heartbeat
-func (d *Detector) checkDBLastSeen() {
+func (d *Detector) checkDBLastSeen(db *gorm.DB) {
 	var collectors []models.Node
-	if err := d.db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
+	if err := db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
 		return
 	}
 
@@ -115,28 +127,28 @@ func (d *Detector) checkDBLastSeen() {
 
 		// Check if last_seen is older than 90s (L3: DB fallback)
 		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
-			d.markOffline(col.NodeID, "db_last_seen_timeout")
+			d.markOffline(db, col.NodeID, "db_last_seen_timeout")
 		}
 	}
 }
 
-// markOffline marks a node as offline
-func (d *Detector) markOffline(deviceID, reason string) {
+// markOffline marks a node as offline using the provided session.
+func (d *Detector) markOffline(db *gorm.DB, deviceID, reason string) {
 	logger.Infof("[Offline] %s: %s", deviceID, reason)
 
 	// Update DB
-	d.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
+	db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
 		"status": "offline",
 	})
 
 	// Record event
 	var nodeRecord models.Node
-	if err := d.db.Where("node_id = ?", deviceID).First(&nodeRecord).Error; err == nil {
-		d.db.Create(&models.NodeEvent{
-			NodeID: nodeRecord.NodeID,
-			EventType:   "offline",
-			OldStatus:   "online",
-			NewStatus:   "offline",
+	if err := db.Where("node_id = ?", deviceID).First(&nodeRecord).Error; err == nil {
+		db.Create(&models.NodeEvent{
+			NodeID:    nodeRecord.NodeID,
+			EventType: "offline",
+			OldStatus: "online",
+			NewStatus: "offline",
 		})
 	}
 
@@ -197,7 +209,7 @@ func (d *Detector) OnEdgeDeviceCreated(deviceID uint) {
 // checkEdgeDevicesOffline finds edge devices still marked "active" whose
 // last_data_at is older than 60 seconds and marks them "offline".
 // M5 fix: Uses in-memory cache of active device IDs instead of full DB scan.
-func (d *Detector) checkEdgeDevicesOffline() {
+func (d *Detector) checkEdgeDevicesOffline(db *gorm.DB) {
 	threshold := time.Now().Add(-60 * time.Second)
 
 	// Collect stale device IDs from cache (fast, no DB query)
@@ -216,20 +228,20 @@ func (d *Detector) checkEdgeDevicesOffline() {
 
 	// Fetch only stale devices from DB (targeted query, not full scan)
 	var staleDevices []models.EdgeDevice
-	if err := d.db.Where("id IN ? AND status = ?", staleIDs, "active").Find(&staleDevices).Error; err != nil {
+	if err := db.Where("id IN ? AND status = ?", staleIDs, "active").Find(&staleDevices).Error; err != nil {
 		return
 	}
 
 	for _, dev := range staleDevices {
-		d.markEdgeDeviceOffline(dev)
+		d.markEdgeDeviceOffline(db, dev)
 	}
 }
 
 // markEdgeDeviceOffline marks an edge device as offline and broadcasts the change.
-func (d *Detector) markEdgeDeviceOffline(dev models.EdgeDevice) {
+func (d *Detector) markEdgeDeviceOffline(db *gorm.DB, dev models.EdgeDevice) {
 	logger.Infof("[EdgeDevice Offline] id=%d name=%s node_id=%s — no data for >60s", dev.ID, dev.Name, dev.NodeID)
 
-	d.db.Model(&dev).Updates(map[string]interface{}{
+	db.Model(&dev).Updates(map[string]interface{}{
 		"status": "offline",
 	})
 

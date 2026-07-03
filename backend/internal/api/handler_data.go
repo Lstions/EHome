@@ -69,7 +69,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, data)
 	})
 
-	// Get latest sensor values for a node (all edge devices)
+	// Get latest sensor values for a node (all edge devices) — single query via correlated subquery
 	// GET /api/v1/nodes/:id/latest
 	v1.GET("/nodes/:id/latest", func(c *gin.Context) {
 		id := c.Param("id")
@@ -79,10 +79,21 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
-		// Get all channels for this node
-		var channels []models.Channel
-		db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Find(&channels)
+		// Get all enabled channel IDs for this node
+		var channelIDs []uint
+		db.Model(&models.Channel{}).Where("node_id = ? AND enabled = ?", node.NodeID, true).Pluck("id", &channelIDs)
 
+		if len(channelIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"node_id": node.NodeID,
+				"values":  []map[string]interface{}{},
+			})
+			return
+		}
+
+		// Single query: correlated subquery to get latest UnifiedData per device
+		// Compatible with both PostgreSQL and SQLite (no DISTINCT ON).
+		// Replaces the previous N+1 query (channels × devices × data).
 		type LatestValue struct {
 			ChannelID  uint      `json:"channel_id"`
 			SensorName string    `json:"sensor_name"`
@@ -92,22 +103,25 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		var results []LatestValue
-		for _, ch := range channels {
-			var devices []models.EdgeDevice
-			db.Where("channel_id = ?", ch.ID).Find(&devices)
-			for _, dev := range devices {
-				var ud models.UnifiedData
-				if err := db.Where("device_id = ?", dev.ID).
-					Order("timestamp DESC").First(&ud).Error; err == nil {
-					results = append(results, LatestValue{
-						ChannelID:  ch.ID,
-						SensorName: ud.SensorName,
-						Value:      ud.Value,
-						Unit:       ud.Unit,
-						Timestamp:  ud.Timestamp,
-					})
-				}
-			}
+		err = db.Raw(`
+			SELECT ed.channel_id AS channel_id,
+				ud.sensor_name,
+				ud.value,
+				ud.unit,
+				ud.timestamp
+			FROM unified_data ud
+			JOIN edge_devices ed ON ed.id = ud.device_id
+			JOIN (
+				SELECT device_id, MAX(timestamp) as max_ts
+				FROM unified_data
+				WHERE device_id IN (SELECT id FROM edge_devices WHERE channel_id IN ?)
+				GROUP BY device_id
+			) latest ON latest.device_id = ud.device_id AND latest.max_ts = ud.timestamp
+		`, channelIDs).Scan(&results).Error
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
 		}
 
 		c.JSON(http.StatusOK, gin.H{
@@ -253,8 +267,8 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		// Query all categories in parallel
 		type catResult struct {
-			Category string                 `json:"category"`
-			Data     []models.UnifiedData   `json:"data"`
+			Category string               `json:"category"`
+			Data     []models.UnifiedData `json:"data"`
 		}
 		results := make([]catResult, len(categories))
 

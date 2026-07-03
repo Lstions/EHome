@@ -9,13 +9,15 @@ RUN go mod download
 COPY backend/ .
 RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
 
-# Frontend build — we use the prebuilt dist from the host to avoid pnpm CI issues
+# Frontend build — must be built before running docker build:
+# cd frontend-shared && pnpm build
 FROM alpine:3.21
 
 RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 COPY --from=backend-builder /app/ehome-server .
+
 COPY frontend-shared/dist ./static/dist
 RUN mkdir -p /app/firmwares
 RUN ls -la /app/static/dist/

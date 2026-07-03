@@ -3,12 +3,15 @@ package nodemgr
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
+
+	"gorm.io/gorm"
 )
 
 // dataReportJob represents a parsed DataReport ready for async processing
@@ -28,6 +31,31 @@ const (
 	defaultWorkerCount = 8    // P1-5: from 4 → 8
 	defaultJobBuffer   = 1024 // P1-5: from 128 → 1024
 )
+
+// nodeIDCache caches node_id (string) → node.ID (uint) mapping.
+// Updated by handleHello/handleStatusReport, read by worker pool
+// instead of repeating db.Where("node_id = ?", job.deviceID).First() per DataReport.
+var nodeIDCache sync.Map
+
+// InvalidateNodeIDCache removes a device_id from the node ID cache.
+// Must be called when a node is deleted so stale lookups don't return the old primary key.
+func InvalidateNodeIDCache(deviceID string) {
+	nodeIDCache.Delete(deviceID)
+}
+
+// lookupCollectorID returns the collector (node) ID for a device_id.
+// Cache-first: if miss, query DB with session isolation and populate cache.
+func lookupCollectorID(db *gorm.DB, deviceID string) (uint, bool) {
+	if v, ok := nodeIDCache.Load(deviceID); ok {
+		return v.(uint), true
+	}
+	var node models.Node
+	if err := db.Session(&gorm.Session{}).Where("node_id = ?", deviceID).First(&node).Error; err != nil {
+		return 0, false
+	}
+	nodeIDCache.Store(deviceID, node.ID)
+	return node.ID, true
+}
 
 // startWorkerPool launches background goroutines to process DataReport jobs
 func (m *Manager) startWorkerPool() {
@@ -79,11 +107,11 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		return
 	}
 
-	// P1-4: Resolve collectorID in worker (not MQTT callback)
-	var node models.Node
-	var collectorID uint
-	if err := m.db.Where("node_id = ?", job.deviceID).First(&node).Error; err == nil {
-		collectorID = node.ID
+	// P1-4: Resolve collectorID via cache (fallback to DB lookup with session isolation)
+	collectorID, found := lookupCollectorID(m.db, job.deviceID)
+	if !found {
+		logger.Infof("[%s] Node not found for DataReport (deviceID=%s)", job.deviceID, job.deviceID)
+		return
 	}
 
 	// Store raw data
@@ -96,10 +124,10 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 		"edge_device_id": job.edgeDeviceID,
 		"command_index":  job.commandIndex,
 	})
-	m.db.Create(&models.DeviceData{
-		NodeID: node.NodeID,
-		DataJSON:    string(dataJSON),
-		Timestamp:   time.Now(),
+	m.db.Session(&gorm.Session{}).Create(&models.DeviceData{
+		NodeID:    job.deviceID,
+		DataJSON:  string(dataJSON),
+		Timestamp: time.Now(),
 	})
 
 	// WebSocket push: build channel_data event first

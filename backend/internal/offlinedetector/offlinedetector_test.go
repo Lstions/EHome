@@ -61,7 +61,7 @@ func TestMarkOfflineWithDB(t *testing.T) {
 	}
 	db.Create(&col)
 
-	d.markOffline("1001", "redis_ttl_expired")
+	d.markOffline(db, "1001", "redis_ttl_expired")
 
 	var updated models.Node
 	db.Where("node_id = ?", "1001").First(&updated)
@@ -90,7 +90,7 @@ func TestCheckDBLastSeenTimeout(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(c.NodeID, "db_last_seen_timeout")
+			d.markOffline(db, c.NodeID, "db_last_seen_timeout")
 		}
 	}
 
@@ -120,7 +120,7 @@ func TestCheckDBLastSeenRecent(t *testing.T) {
 	db.Where("status = ?", "online").Find(&collectors)
 	for _, c := range collectors {
 		if c.LastSeen != nil && time.Since(*c.LastSeen) > 90*time.Second {
-			d.markOffline(c.NodeID, "db_last_seen_timeout")
+			d.markOffline(db, c.NodeID, "db_last_seen_timeout")
 		}
 	}
 

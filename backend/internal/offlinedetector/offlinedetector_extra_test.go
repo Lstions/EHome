@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	ehomeRedis "ehome/backend/internal/redis"
 	ehomeModels "ehome/backend/internal/models"
+	ehomeRedis "ehome/backend/internal/redis"
 	"ehome/backend/internal/websocket"
 
 	"github.com/redis/go-redis/v9"
@@ -64,7 +64,7 @@ func TestCheckDBLastSeen_NoNodes(t *testing.T) {
 
 	d, db := setupExtraDetector(t)
 	// No nodes in DB — should be a no-op
-	d.checkDBLastSeen()
+	d.checkDBLastSeen(db.Session(&gorm.Session{}))
 
 	var count int64
 	db.Model(&ehomeModels.Node{}).Count(&count)
@@ -91,7 +91,7 @@ func TestCheckDBLastSeen_OfflineNode(t *testing.T) {
 	db.Create(&node)
 
 	// Call checkDBLastSeen — should mark node offline
-	d.checkDBLastSeen()
+	d.checkDBLastSeen(db.Session(&gorm.Session{}))
 
 	var updated ehomeModels.Node
 	db.Where("node_id = ?", "offline-test-001").First(&updated)
@@ -110,10 +110,10 @@ func TestCheckDBLastSeen_OfflineNode(t *testing.T) {
 // TestCheckEdgeDevicesOffline_NoDevices verifies that checkEdgeDevicesOffline
 // does not error when there are no active edge devices.
 func TestCheckEdgeDevicesOffline_NoDevices(t *testing.T) {
-	d, _ := setupExtraDetector(t)
+	d, db := setupExtraDetector(t)
 
 	// No devices in cache — should be a no-op
-	d.checkEdgeDevicesOffline()
+	d.checkEdgeDevicesOffline(db.Session(&gorm.Session{}))
 
 	if d.pending_deviceCount() != 0 {
 		t.Error("expected 0 active devices in cache")
@@ -238,7 +238,7 @@ func TestCheckEdgeDevicesOffline_StaleDevice(t *testing.T) {
 	d.mu.Unlock()
 
 	// Run checkEdgeDevicesOffline
-	d.checkEdgeDevicesOffline()
+	d.checkEdgeDevicesOffline(db.Session(&gorm.Session{}))
 
 	// Verify device is now offline in DB
 	var updated ehomeModels.EdgeDevice
@@ -275,7 +275,7 @@ func TestCheckEdgeDevicesOffline_RecentDevice(t *testing.T) {
 	d.cacheReady = true
 	d.mu.Unlock()
 
-	d.checkEdgeDevicesOffline()
+	d.checkEdgeDevicesOffline(db.Session(&gorm.Session{}))
 
 	var updated ehomeModels.EdgeDevice
 	db.First(&updated, dev.ID)

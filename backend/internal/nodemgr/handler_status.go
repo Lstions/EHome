@@ -62,12 +62,15 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		syncState = "error"
 	}
 
-	// Update node
+	// Update node status
 	var node models.Node
 	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found for status update", deviceID)
 		return
 	}
+
+	// Populate node_id → node.ID cache for worker pool lookups
+	nodeIDCache.Store(deviceID, node.ID)
 
 	oldStatus := node.Status
 	now := time.Now()

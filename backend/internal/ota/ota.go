@@ -99,7 +99,7 @@ func compareVersion(a, b string) int {
 
 // ack retry parameters
 const (
-	ackTimeout   = 30 * time.Second // wait for device to acknowledge OtaCmd
+	ackTimeout    = 30 * time.Second // wait for device to acknowledge OtaCmd
 	ackMaxRetries = 3
 )
 
@@ -122,7 +122,7 @@ type bridge struct {
 
 var (
 	_bridgeOnce sync.Once
-	_bridge    *bridge
+	_bridge     *bridge
 )
 
 func getBridge() *bridge {
@@ -136,38 +136,53 @@ func getBridge() *bridge {
 }
 
 type Manager struct {
-	db    *gorm.DB
-	mqtt  *mqtt.Client
-	wsHub *websocket.Hub
+	db        *gorm.DB
+	mqtt      *mqtt.Client
+	wsHub     *websocket.Hub
+	wg        sync.WaitGroup // for timeoutScanner graceful shutdown
+	started   sync.Once      // ensures Start() is re-entrant safe
+	closeOnce sync.Once      // ensures Close() does not double-close stopCh
 }
 
 // NewManager creates a new OTA manager
 func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub) *Manager {
 	getBridge() // ensure bridge singleton is initialized (idempotent)
-	return &Manager{
+	mgr := &Manager{
 		db:    db,
 		mqtt:  mqttClient,
 		wsHub: wsHub,
 	}
+	return mgr
 }
 
-// Close stops background goroutines (timeout scanner).
+// Close stops background goroutines (timeout scanner + ack waiters).
 func (m *Manager) Close() {
-	close(_bridge.stopCh)
+	m.closeOnce.Do(func() {
+		close(_bridge.stopCh)
+	})
 	_bridge.wg.Wait()
+	m.wg.Wait()
+}
+
+// Start launches background goroutines (timeout scanner must run for the manager lifetime).
+func (m *Manager) Start() {
+	m.started.Do(func() {
+		m.wg.Add(1)
+		go m.timeoutScanner()
+	})
 }
 
 // timeoutScanner runs every 60s and marks stale downloading/installing tasks as timeout.
-func (b *bridge) timeoutScanner() {
-	defer b.wg.Done()
+func (m *Manager) timeoutScanner() {
+	defer m.wg.Done()
 	ticker := time.NewTicker(timeoutScanTick)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-b.stopCh:
+		case <-_bridge.stopCh:
 			return
 		case <-ticker.C:
-			// scanTimeouts needs db; called from Manager wrapper
+			m.scanTimeouts()
 		}
 	}
 }
@@ -306,10 +321,10 @@ func (m *Manager) GetNodeOTAStatus(nodeID string) (map[string]interface{}, error
 		Count(&failCount)
 
 	result := map[string]interface{}{
-		"node_id":              nodeID,
-		"current_version":      node.FirmwareVersion,
-		"last_upgrade_time":    lastUpgradeTime,
-		"fail_count_24h":       failCount,
+		"node_id":           nodeID,
+		"current_version":   node.FirmwareVersion,
+		"last_upgrade_time": lastUpgradeTime,
+		"fail_count_24h":    failCount,
 	}
 
 	return result, nil

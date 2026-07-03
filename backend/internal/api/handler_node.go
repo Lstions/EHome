@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -224,6 +224,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		nodemgr.InvalidateNodeIDCache(nodeIDStr)
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, nodeIDStr, nodeIDStr)
 		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 	})
@@ -355,9 +356,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		hardware := gin.H{
-			"wifi_ssid":  node.WiFiSSID,
-			"wifi_rssi":  node.WiFiRSSI,
-			"free_heap":  node.FreeHeapBytes,
+			"wifi_ssid": node.WiFiSSID,
+			"wifi_rssi": node.WiFiRSSI,
+			"free_heap": node.FreeHeapBytes,
 		}
 		if node.HardwareInfo != "" && node.HardwareInfo != "{}" {
 			var parsed map[string]interface{}
@@ -582,7 +583,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			}
 			if !found {
 				state := uint8(2)
-				if nc.Enabled { state = 1 }
+				if nc.Enabled {
+					state = 1
+				}
 				devChannels = append(devChannels, models.DmaChannelInfo{
 					DmaID:   nc.DmaID,
 					State:   state,
@@ -666,12 +669,12 @@ func edgeDeviceToConfigItem(ed models.EdgeDevice) edgeDeviceConfigItem {
 
 // nodeConfigResponse is the response structure for GET /nodes/:id/config
 type nodeConfigResponse struct {
-	Node            models.Node              `json:"node"`
-	Channels        []models.Channel         `json:"channels"`
-	EdgeDevices     []edgeDeviceConfigItem   `json:"edge_devices"`
-	DeviceConfigs   []models.DeviceConfig    `json:"device_configs"`
-	Epoch           uint64                   `json:"epoch"`
-	ProtocolVersion string                   `json:"protocol_version"`
+	Node            models.Node            `json:"node"`
+	Channels        []models.Channel       `json:"channels"`
+	EdgeDevices     []edgeDeviceConfigItem `json:"edge_devices"`
+	DeviceConfigs   []models.DeviceConfig  `json:"device_configs"`
+	Epoch           uint64                 `json:"epoch"`
+	ProtocolVersion string                 `json:"protocol_version"`
 }
 
 // getNodeConfig returns the full configuration manifest for a node.
@@ -745,7 +748,7 @@ type nodeConfigUpdateRequest struct {
 
 type channelUpdateItem struct {
 	ID          uint   `json:"id"`
-	Address     string `json:"address,omitempty"`    // maps to HardwareID hex string
+	Address     string `json:"address,omitempty"` // maps to HardwareID hex string
 	HardwareID  string `json:"hardware_id,omitempty"`
 	IntervalMs  *int   `json:"interval_ms,omitempty"`
 	BusType     string `json:"bus_type,omitempty"`
@@ -945,7 +948,7 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 
 		c.JSON(http.StatusOK, gin.H{
 			"code": 200,
-			"data":  tasks,
+			"data": tasks,
 		})
 	}
 }
