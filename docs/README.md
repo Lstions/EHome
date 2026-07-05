@@ -1,6 +1,7 @@
 # EHomeSystem 文档中心
 
-> **版本**: v2.2 | **术语基准**: [设计/00-术语表.md](设计/00-术语表.md)
+> **版本**: v2.5 | **术语基准**: [设计/00-术语表.md](设计/00-术语表.md)
+> **更新**: 2026-07-03
 
 ---
 
@@ -14,8 +15,24 @@
 | [验证/](验证/) | 验证报告 | 历史 |
 | [发布/](发布/) | 版本发布报告 | 历史 |
 | [操作/](操作/) | 操作指南（刷机、部署等） | 操作 |
-| [protocol/](protocol/) | 二进制帧协议规范 | ★ 权威 |
+| [协议/](协议/) | 二进制帧协议规范 | ★ 权威 |
+| [重构/](重构/) | 重构方案与实施记录 | 历史 |
+| [评审/](评审/) | 架构/性能/RTOS 评审报告 | 历史 |
 | [archive/](archive/) | v2.0 时期历史归档 | 已过时 |
+
+## v2.5 主要变更（自 v2.2 以来）
+
+- **BMS 驱动**: 佳百利 BMS 协议驱动 + CommandTemplate 系统 + 逐指令 ConfigManifest
+- **逆变器驱动**: Techfine 光伏逆变器驱动 (RS485/Modbus)
+- **ESP32 双目标**: ESP32-S3 + ESP32-C6 双目标构建，独立 sdkconfig/partitions
+- **UART 透明管道**: P1-8 透明 UART 字节管道，替代帧分隔系统（UART 空闲检测）
+- **DMA 多总线**: 统一总线 DMA 架构，多总线并行优化
+- **通道终端**: WebSocket 通道终端（前后端），支持实时收发原始数据
+- **服务端降采样**: /historical-batch API + 服务端 max_points 降采样 + gzip 压缩
+- **图表性能**: ECharts 时间轴重构 + 降采样 + 公共图表组件抽取
+- **前端架构清理**: Pinia store 优化、EdgeDeviceDetail 组件化、UI 一致性
+- **生产部署**: 前后端合并为单一 Docker 服务 (ehome-web)
+- **安全加固**: 并发修复 (GORM Statement 竞争)、OTA 死代码清理、离线检测修复
 
 ## 术语速查
 
@@ -25,6 +42,8 @@
 | 物理传感器/执行器实例 | **边缘设备 (EdgeDevice)** | Device、设备 |
 | 设备型号定义 | **设备配置 (DeviceConfig)** | 设备模板、DeviceTemplate |
 | 总线通信端口 | **通道 (Channel)** | — |
+| 配置下发清单 | **配置清单 (ConfigManifest)** | — |
+| 写操作响应 | **WriteRsp** | — |
 
 > 完整术语表: [设计/00-术语表.md](设计/00-术语表.md)
 
@@ -34,23 +53,35 @@
 1. [设计/00-概念模型.md](设计/00-概念模型.md) — 理解核心概念
 2. [设计/00-术语表.md](设计/00-术语表.md) — 掌握术语
 3. [设计/总体设计.md](设计/总体设计.md) — 系统全貌
-4. [protocol/binary-frame.md](protocol/binary-frame.md) — 通信协议
+4. [协议/二进制帧协议.md](协议/二进制帧协议.md) — 通信协议
 
 ### 后端开发
 1. 设计/ 下各模块详细设计 → 实现/ 下对应实现记录
 2. [设计/命名迁移设计.md](设计/命名迁移设计.md) — v2.1 → v2.2 迁移
+3. `backend/internal/drivers/` — 驱动注册表 + ConfigParser 架构
+4. `backend/pkg/parser/` — 统一解析器架构 (替代旧的 3 套解析系统)
 
 ### ESP32 嵌入式开发
-1. [操作/ESP32_FLASH_GUIDE.md](操作/ESP32_FLASH_GUIDE.md) — 刷机指南
-2. [设计/ESP32_ARCHITECTURE_DESIGN.md](设计/ESP32_ARCHITECTURE_DESIGN.md) — ESP32 架构
+1. [操作/ESP32刷机指南.md](操作/ESP32刷机指南.md) — 刷机指南
+2. [设计/ESP32架构设计.md](设计/ESP32架构设计.md) — ESP32 架构
 3. [设计/固件OTA/](设计/固件OTA/) — OTA 设计与可靠性
+4. [设计/设备架构集中化设计.md](设计/设备架构集中化设计.md) — 设备架构集中化设计
+5. `esp32-collector/sdkconfig.defaults.*` — S3/C6 双目标配置
+6. `esp32-collector/partitions_*.csv` — 分区表 (S3/C6 × 4M/8M/16M)
 
 ### 前端开发
 1. [实现/README.md](实现/README.md) — 模块索引与前端路径
-2. 各模块实现文档中的前端路径说明
+2. `frontend-shared/src/stores/` — Pinia stores (10 个)
+3. `frontend-shared/src/api/` — API 模块 (17 个)
+4. `frontend-shared/src/views/` — 页面模块 (13 个)
+
+### 部署运维
+1. 项目根 `README.md` — 快速开始 + 端口配置
+2. 项目根 `Dockerfile` + `docker-compose.yml` — 生产部署
+3. `Makefile` — 本地开发工具
 
 ## 归档说明
 
 `archive/v2.0/` 下的文档为项目早期阶段产出，术语可能使用 v2.0/v2.1 旧名（采集器、设备模板等），仅供参考，**不应作为当前开发依据**。
 
-当前开发以 `设计/` 和 `protocol/` 下的文档为权威来源。
+当前开发以 `设计/` 和 `协议/` 下的文档为权威来源。
