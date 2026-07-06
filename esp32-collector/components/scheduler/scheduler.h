@@ -78,6 +78,7 @@ typedef struct {
     QueueHandle_t uart1_cmd_queue;
     QueueHandle_t spi_cmd_queue;
     QueueHandle_t i2c_cmd_queue;
+    QueueHandle_t gpio_cmd_queue;
 } scheduler_queues_t;
 
 /* === Public API === */

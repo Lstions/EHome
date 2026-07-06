@@ -58,6 +58,7 @@ typedef struct {
     QueueHandle_t uart1_cmd_queue;              /* UART1 CMD_SAMPLE + CMD_WRITE */
     QueueHandle_t spi_cmd_queue;                /* SPI   CMD_SAMPLE + CMD_WRITE */
     QueueHandle_t i2c_cmd_queue;                /* I2C   CMD_SAMPLE + CMD_WRITE */
+    QueueHandle_t gpio_cmd_queue;               /* GPIO  CMD_SAMPLE + CMD_WRITE */
 
     /* ---- Pending command state (per channel, FreeRTOS Queue) ---- */
     /* Each UART channel has a queue of pending_cmd_t entries so that
