@@ -11,6 +11,7 @@
  */
 
 #include "log_stream.h"
+#include "log_stream_codec.h"
 #include "frame_codec.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -64,7 +65,6 @@ static log_stream_publish_fn_t s_publish = NULL;
 /* TX buffers are static to avoid task-stack overflow. */
 static log_entry_t s_tx_batch[LOG_BATCH_MAX];
 static uint8_t s_tx_buf[LOG_TX_BUF_SIZE];
-static uint8_t s_tx_subbuf[LOG_LINE_MAX + 128];
 
 /* === Ring buffer operations (mutex-protected) === */
 
@@ -131,43 +131,20 @@ static void log_tx_task(void *pv)
 
         int n = ring_drain(batch, LOG_BATCH_MAX);
         if (n > 0) {
-            /* Encode MsgLogStream frame */
-            frame_encoder_t enc;
-            frame_encoder_init(&enc, s_tx_buf, sizeof(s_tx_buf), MSG_LOG_STREAM);
-
-            /* Field 1: count (varint) */
-            frame_encode_varint(&enc, 1, (uint64_t)n);
-
-            /* Field 2: seq (varint) */
-            frame_encode_varint(&enc, 2, (uint64_t)s_seq++);
-
-            /* Encode each log entry as a sub-frame in field 3 (repeated) */
-            for (int i = 0; i < n; i++) {
-                /* Nested entries are raw field sequences, not top-level frames:
-                 * do not prepend a message-type byte. */
-                frame_encoder_t sub = {
-                    .buf = s_tx_subbuf,
-                    .pos = 0,
-                    .capacity = sizeof(s_tx_subbuf),
+            log_stream_entry_t entries[LOG_BATCH_MAX];
+            for (int i = 0; i < n; ++i) {
+                entries[i] = (log_stream_entry_t){
+                    .level = batch[i].level,
+                    .timestamp_us = batch[i].ts_us,
+                    .tag = batch[i].tag,
+                    .message = batch[i].msg,
                 };
-
-                /* Sub-field 1: level */
-                frame_encode_varint(&sub, 1, batch[i].level);
-                /* Sub-field 2: ts (fixed64) */
-                /* Encode ts as varint for simplicity (protobuf compatible) */
-                frame_encode_varint(&sub, 2, batch[i].ts_us);
-                /* Sub-field 3: tag (string) */
-                frame_encode_string(&sub, 3, batch[i].tag);
-                /* Sub-field 4: message (string) */
-                frame_encode_string(&sub, 4, batch[i].msg);
-
-                /* Wrap entry as repeated length-delimited field 3. */
-                frame_encode_bytes(&enc, 3, s_tx_subbuf, sub.pos);
             }
-
-            /* Publish through injected transport callback. */
-            if (s_publish != NULL) {
-                s_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+            size_t encoded_len = 0;
+            if (log_stream_encode(s_tx_buf, sizeof(s_tx_buf), &encoded_len,
+                                  s_seq++, entries, (size_t)n) == FRAME_OK &&
+                s_publish != NULL) {
+                s_publish(s_tx_buf, encoded_len);
             }
         }
 

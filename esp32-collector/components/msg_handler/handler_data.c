@@ -9,6 +9,7 @@
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
+#include "data_report_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
@@ -146,36 +147,20 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint8_t command_index)
 {
     uint8_t buf[512];
-    frame_encoder_t enc;
-    frame_encoder_init(&enc, buf, sizeof(buf), MSG_DATA_RPT);
-    frame_encode_varint(&enc, 1, channel_id);
-    frame_encode_varint(&enc, 2, timestamp_us);
-    frame_encode_varint(&enc, 3, sequence);
-    if (raw_data && raw_len > 0) {
-        frame_encode_bytes(&enc, 4, raw_data, raw_len);
-    }
-    if (error_code != 0) {
-        frame_encode_varint(&enc, 5, error_code);
-    }
-    if (request_id != 0) {
-        frame_encode_varint(&enc, 6, request_id);
-    }
-    /* v2.3: edge_device_id + command_index for multi-command routing */
-    if (edge_device_id != 0) {
-        frame_encode_varint(&enc, 7, edge_device_id);
-    }
-    if (command_template_id != 0) {
-        /* Field 9: actual ConfigTemplate.ID, distinct from per-device index. */
-        frame_encode_varint(&enc, 9, command_template_id);
-    }
-    if (command_index > 0 || edge_device_id != 0) {
-        /* command_index 为 0 时也编码（只要有 edge_device_id） */
-        frame_encode_varint(&enc, 8, command_index);
+    size_t len = 0;
+    frame_err_t err = data_report_encode(buf, sizeof(buf), &len,
+                                         channel_id, timestamp_us, sequence,
+                                         raw_data, raw_len, error_code, request_id,
+                                         edge_device_id, command_template_id,
+                                         command_index);
+    if (err != FRAME_OK) {
+        ESP_LOGE(TAG, "DataReport encode failed: %d", err);
+        return;
     }
     ESP_LOGD(TAG, "Sending DataReport: ch=%lu, seq=%lu, len=%zu, edge=%lu, cmd_idx=%u",
              (unsigned long)channel_id, (unsigned long)sequence, raw_len,
              (unsigned long)edge_device_id, command_index);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    msg_handler_publish(buf, len);
 }
 
 /* === Send: OtaProg (0x0D) === */

@@ -83,13 +83,16 @@ func TestHandleDataReport(t *testing.T) {
 	enc.EncodeVarint(2, 12345678) // timestamp_us
 	enc.EncodeVarint(3, 42)       // sequence
 	enc.EncodeBytes(4, raw)       // raw_data
+	enc.EncodeVarint(7, 77)       // edge_device_id
+	enc.EncodeVarint(8, 0)        // command_index: first command in edge device
+	enc.EncodeVarint(9, 456)      // command_template_id: DB primary key
 
 	dec, err := frame.NewDecoder(enc.Bytes())
 	if err != nil {
 		t.Fatalf("decoder init: %v", err)
 	}
 
-	var channelID, timestamp, sequence uint64
+	var channelID, timestamp, sequence, edgeDeviceID, commandIndex, commandTemplateID uint64
 	var rawData []byte
 
 	for {
@@ -106,6 +109,12 @@ func TestHandleDataReport(t *testing.T) {
 			sequence = frame.GetUint64(field)
 		case 4:
 			rawData = frame.GetBytes(field)
+		case 7:
+			edgeDeviceID = frame.GetUint64(field)
+		case 8:
+			commandIndex = frame.GetUint64(field)
+		case 9:
+			commandTemplateID = frame.GetUint64(field)
 		}
 	}
 
@@ -120,6 +129,9 @@ func TestHandleDataReport(t *testing.T) {
 	}
 	if string(rawData) != string(raw) {
 		t.Errorf("raw_data mismatch")
+	}
+	if edgeDeviceID != 77 || commandIndex != 0 || commandTemplateID != 456 {
+		t.Errorf("routing context got edge=%d index=%d template=%d, want 77/0/456", edgeDeviceID, commandIndex, commandTemplateID)
 	}
 }
 

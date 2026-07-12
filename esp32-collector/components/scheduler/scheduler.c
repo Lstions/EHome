@@ -49,6 +49,14 @@ static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t
     }
 }
 
+/* A board may intentionally expose only a subset of bus workers.  Treat a
+ * missing queue as fully available for global backpressure accounting; the
+ * per-channel dispatch path below rejects a command whose own queue is absent. */
+static UBaseType_t queue_spaces_or_depth(QueueHandle_t queue)
+{
+    return queue != NULL ? uxQueueSpacesAvailable(queue) : CMD_QUEUE_DEPTH;
+}
+
 /* ── derive uart_port_t from bus_config bytes via hw_tables ── */
 /* P3-7: Replaced static derive_uart_port with shared hw_derive_uart_port from hw_tables */
 
@@ -370,7 +378,7 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
 
             bcmd.uart_port = derive_uart_port(&ch->config);
             QueueHandle_t target_q = dispatch_queue(&s_queues, &bcmd);
-            if (xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
+            if (target_q == NULL || xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
                 (*queue_full_count)++;
                 scmd->error_count++;
                 if (scmd->error_count > 100) scmd->error_count = 100;
@@ -451,7 +459,7 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
 
     cmd.uart_port = derive_uart_port(&ch->config);
     QueueHandle_t target_q = dispatch_queue(&s_queues, &cmd);
-    if (xQueueSend(target_q, &cmd, 0) != pdTRUE) {
+    if (target_q == NULL || xQueueSend(target_q, &cmd, 0) != pdTRUE) {
         (*queue_full_count)++;
     } else {
         (*total_samples)++;
@@ -496,10 +504,10 @@ static void scheduler_task(void *p)
 
         /* Check queue depth for backpressure — use the busiest queue */
         UBaseType_t min_spaces = CMD_QUEUE_DEPTH;
-        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.uart0_cmd_queue));
-        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.uart1_cmd_queue));
-        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.spi_cmd_queue));
-        min_spaces = MIN(min_spaces, uxQueueSpacesAvailable(s_queues.i2c_cmd_queue));
+        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.uart0_cmd_queue));
+        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.uart1_cmd_queue));
+        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.spi_cmd_queue));
+        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.i2c_cmd_queue));
         bool queue_pressure = (min_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         /* Iterate through all active channels */

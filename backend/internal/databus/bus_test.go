@@ -260,6 +260,21 @@ func TestDataEventBus_BoundsConsumerConcurrency(t *testing.T) {
 		t.Fatalf("started %d handlers concurrently; per-consumer bound is 1", got)
 	}
 
+	// A separate lightweight consumer must run even while the parser-style
+	// consumer is blocked; this protects the terminal/WS fast path.
+	fast := &mockDataConsumer{name: "fast", shouldH: true}
+	bus.Register(fast)
+	bus.Publish(DataEvent{Sequence: 99})
+	deadline := time.Now().Add(time.Second)
+	for len(fast.getEvents()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(fast.getEvents()) != 1 {
+		close(release)
+		bus.Stop()
+		t.Fatal("slow consumer blocked independent fast consumer")
+	}
+
 	close(release)
 	bus.Stop()
 }

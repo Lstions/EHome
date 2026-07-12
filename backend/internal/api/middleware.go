@@ -50,6 +50,13 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// devAuthBypassEnabled permits no-token local development only when explicitly
+// enabled. It is intentionally impossible in production mode, even if the env
+// variable is accidentally inherited.
+func devAuthBypassEnabled() bool {
+	return isDevelopmentMode() && strings.EqualFold(os.Getenv("EHOME_DEV_BYPASS_AUTH"), "true")
+}
+
 // JWTAuth returns a middleware that validates JWT tokens.
 // It checks:
 //   - Authorization: Bearer <token> header
@@ -59,6 +66,15 @@ type Claims struct {
 // On failure, returns 401.
 func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if devAuthBypassEnabled() {
+			// Explicit local-only bypass. Keep role=admin so development E2E can
+			// exercise routes protected by RequireRole without minting a JWT.
+			c.Set("user_id", uint(0))
+			c.Set("role", "admin")
+			c.Next()
+			return
+		}
+
 		tokenStr := ""
 
 		// 1. Try Authorization header
@@ -111,6 +127,10 @@ func JWTAuth() gin.HandlerFunc {
 // It reads "role" from gin context (set by JWTAuth) and returns 403 if it doesn't match.
 func RequireRole(role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if devAuthBypassEnabled() {
+			c.Next()
+			return
+		}
 		r, exists := c.Get("role")
 		if !exists || r != role {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
