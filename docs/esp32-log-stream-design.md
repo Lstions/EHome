@@ -135,24 +135,7 @@ ESP32 是纯粹的生产者，只负责：
 
 独立于 bus_worker/scheduler，仅依赖 ESP-IDF log 系统 + MQTT client。
 
-### 3.3 核心机制
-
-ESP-IDF 关键 API：
-- `esp_log_set_vprintf(func)` — 替换全局日志输出函数
-- `esp_log_level_set(tag, level)` — 按标签设置日志级别
-
-**关闭状态 (enabled=false)**：
-- 不调用 `esp_log_set_vprintf`，保持默认 UART 输出
-- 无 task、无 buffer、无内存分配
-
-**开启状态 (enabled=true)**：
-- 安装 vprintf hook：
-  1. 调用原始 vprintf（保持 UART 本地输出）
-  2. 将日志行写入 ring buffer
-- 创建 `log_tx_task`（优先级 5，低于 rx_task=7 和 cmd_task=6）
-- `esp_log_level_set("*", level)` 控制全局级别
-
-### 3.4 Structured diagnostic capture (no global hook)
+### 3.3 Structured diagnostic capture (no global hook)
 
 `esp_log_set_vprintf` is **not used**: on the ESP32-C6/IDF v6 collector it can
 re-enter the logging path and destabilize runtime tasks. Instead critical modules
@@ -165,38 +148,37 @@ manifest parsing and sync timeout, scheduler queue failures, bus-worker pending
 queue/RX overflow/RX timeout, channel transaction failures, and OTA start,
 partition safety, NVS, and download failures.
 
-### 3.5 log_tx_task 逻辑
+### 3.4 log_tx_task 逻辑
 
 ```
 log_tx_task:
   loop:
-    delay 100ms
+    delay 200ms
     lock ring buffer
     取出可用行 (最多 LOG_BATCH_MAX 行)
     unlock
     if 行数 > 0:
       打包为 MsgLogStream 协议帧
-      通过 s_mqtt_publish() 发布
+      调用注入的 MQTT publish callback 发布
 ```
 
-### 3.6 启停控制
+### 3.5 启停控制
 
 ```c
 void log_stream_start(uint8_t level);
-  → 分配 ring buffer + 互斥锁
-  → 保存原始 vprintf，安装 hook
-  → esp_log_level_set("*", level)
-  → 创建 log_tx_task
+  → 分配小型 ring buffer + 互斥锁
+  → 设置远程日志阈值（不修改全局 ESP_LOG 级别）
+  → 创建低优先级 log_tx_task
 
 void log_stream_stop(void);
-  → 恢复原始 vprintf
-  → esp_log_level_set("*", 默认级别)
   → 通知 log_tx_task 退出，等待删除
   → 释放 ring buffer + 互斥锁
 
 void log_stream_set_level(uint8_t level);
-  → esp_log_level_set("*", level)
+  → 更新远程结构化日志阈值
 ```
+
+内存预算：ring 约 608B、静态编码缓冲约 1.5KB、task stack 1.5KB；启用额外内存保持在 5KB 内。
 
 ### 3.7 Config Manifest 字段
 
