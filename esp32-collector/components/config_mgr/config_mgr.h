@@ -80,6 +80,9 @@ typedef struct {
     config_dma_channel_t dma_configs[MAX_DMA_CONFIGS];
     uint8_t           dma_config_count;
     bool              applied;
+    /* v2.5: log stream config */
+    bool              log_stream_enabled;
+    uint8_t           log_stream_level;
 } config_manifest_t;
 
 /* === Init === */
@@ -122,6 +125,10 @@ void config_mgr_set_manifest_id(const char *id);
 /* === Double-buffer lock API (for app_callbacks long-lock interval) === */
 void config_mgr_lock(void);
 void config_mgr_unlock(void);
+
+/* === v2.5: Log stream config === */
+bool    config_mgr_get_log_stream_enabled(void);
+uint8_t config_mgr_get_log_stream_level(void);
 
 #ifdef __cplusplus
 }

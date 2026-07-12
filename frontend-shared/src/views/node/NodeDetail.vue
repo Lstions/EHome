@@ -357,6 +357,14 @@
       @success="handleOTASuccess"
       @update:visible="showOTADialog = $event"
     />
+
+    <!-- 系统日志 -->
+    <el-card v-if="collector" shadow="hover" style="margin-top: 20px;">
+      <template #header>
+        <span>系统日志</span>
+      </template>
+      <LogPanel :collector-id="collectorId" :node-device-id="collector?.node_id" />
+    </el-card>
   </div>
 </template>
 
@@ -369,6 +377,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
+import LogPanel from '@/components/node/LogPanel.vue'
 import { nodeApi, type OTARecord } from '@/api/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { channelApi } from '@/api/channel'

@@ -25,6 +25,7 @@
 #include "wifi_mgr.h"
 #include "ehome_mqtt.h"
 #include "transport.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "frame_codec.h"
 #include <string.h>
@@ -270,6 +271,22 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
     /* Resume rx_task/cmd_task */
     bus_worker_resume();
+
+    /* v2.5: Apply log_stream config from manifest */
+    {
+        bool log_en = config_mgr_get_log_stream_enabled();
+        uint8_t log_lvl = config_mgr_get_log_stream_level();
+        if (log_en && !log_stream_is_active()) {
+            ESP_LOGI(TAG, "LogStream: starting (level=%d)", log_lvl);
+            log_stream_start(log_lvl);
+        } else if (!log_en && log_stream_is_active()) {
+            ESP_LOGI(TAG, "LogStream: stopping");
+            log_stream_stop();
+        } else if (log_en && log_stream_is_active()) {
+            ESP_LOGI(TAG, "LogStream: updating level=%d", log_lvl);
+            log_stream_set_level(log_lvl);
+        }
+    }
 
     rgb_led_set_state(LED_STATE_RUNNING);
     ESP_LOGI(TAG, "handle_config_applied: DONE");

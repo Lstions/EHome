@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/homeassistant"
+	"ehome/backend/internal/logstream"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/offlinedetector"
@@ -48,6 +50,11 @@ type Manager struct {
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
 	syncGate *SyncGate
+
+	// v2.5: Log stream event bus + consumer manager
+	logBus        *logstream.LogEventBus
+	logDBConsumer *logstream.DBConsumer
+	logCleanup    *logstream.LogCleanup
 }
 
 // NewManager creates a new node manager
@@ -71,6 +78,21 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	// v2.2: Initialize sync mechanism (no epoch generator)
 	mgr.eventBus = NewConfigEventBus(1024)
 	mgr.syncGate = NewSyncGate(mgr, mgr.eventBus)
+
+	// v2.5: Initialize log stream event bus + consumers
+	mgr.logBus = logstream.NewLogEventBus()
+	mgr.logDBConsumer = logstream.NewDBConsumer(db)
+	mgr.logBus.Register(mgr.logDBConsumer)
+	mgr.logBus.Register(logstream.NewWSConsumer(wsHub))
+
+	// Auto-migrate node_logs table
+	if err := db.AutoMigrate(&models.NodeLog{}); err != nil {
+		logger.Warnf("Failed to auto-migrate node_logs: %v", err)
+	}
+
+	// Start log cleanup (72h max age, 1h interval)
+	mgr.logCleanup = logstream.NewLogCleanup(db, 72*time.Hour, time.Hour)
+	mgr.logCleanup.Start()
 
 	// G10: Record initial node online count
 	var onlineCount int64
@@ -161,6 +183,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleConfigSyncRequest(deviceID, payload)
 	case frame.MsgResourceReport:
 		m.handleResourceReport(deviceID, payload)
+	case frame.MsgLogStream:
+		m.handleLogStream(deviceID, payload)
 
 	// Unimplemented message types — log warning, no panic
 	case frame.MsgConfigMfst:

@@ -52,6 +52,9 @@ void msg_handler_send_query_rsp(const char *request_id, bool success, const char
 void msg_handler_send_config_report(const char *request_id);
 void msg_handler_send_resource_report(void);
 
+/* === Publish raw frame via current transport (MQTT/TCP) === */
+void msg_handler_publish(const uint8_t *data, size_t len);
+
 /* DIP: inject dma_pool for ResourceReport encoding */
 struct dma_pool_t;
 void msg_handler_set_dma_pool(struct dma_pool_t *pool);

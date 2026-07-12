@@ -327,4 +327,31 @@ export const nodeApi = {
   async updateDmaConfig(id: number | string, configs: DmaChannelConfig[]): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/dma-config`, configs)
   },
+
+  // v2.5: Log stream API
+  async getLogConfig(id: number | string): Promise<{ stream_enabled: boolean; level: number; persist_enabled: boolean }> {
+    const response = await client.get(`/api/v1/nodes/${id}/log-config`)
+    return (response as any).data || response
+  },
+
+  async updateLogConfig(id: number | string, data: { stream_enabled?: boolean; level?: number }): Promise<void> {
+    await client.put(`/api/v1/nodes/${id}/log-config`, data)
+  },
+
+  async updateLogPersist(id: number | string, enabled: boolean): Promise<void> {
+    await client.put(`/api/v1/nodes/${id}/log-persist`, { enabled })
+  },
+
+  async getNodeLogs(id: number | string, params: {
+    from?: number; to?: number; level?: number; tag?: string; q?: string; page?: number; size?: number
+  }): Promise<{ total: number; page: number; size: number; logs: any[] }> {
+    const response = await client.get(`/api/v1/nodes/${id}/logs`, { params })
+    return (response as any).data || response
+  },
+
+  async deleteNodeLogs(id: number | string, before?: number): Promise<{ deleted: number }> {
+    const params = before ? { before } : {}
+    const response = await client.delete(`/api/v1/nodes/${id}/logs`, { params })
+    return (response as any).data || response
+  },
 }

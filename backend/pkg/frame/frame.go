@@ -56,6 +56,7 @@ const (
 	MsgPongAck          = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
 	MsgResourceReport   = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
 	MsgQueryResources   = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
+	MsgLogStream        = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
 )
 
 // Field represents a decoded field
@@ -316,6 +317,7 @@ func MsgTypeName(msgType uint8) string {
 		MsgPongAck:        "pong_ack",
 		MsgResourceReport: "resource_report",
 		MsgQueryResources: "query_resources",
+		MsgLogStream:      "log_stream",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

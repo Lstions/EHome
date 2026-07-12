@@ -52,6 +52,11 @@ type Node struct {
 	ConfigSyncState string     `gorm:"size:20;default:unknown" json:"config_sync_state"`
 	LastSyncAt      *time.Time `json:"last_sync_at"`
 	LastSyncID      string     `gorm:"size:64" json:"last_sync_id"`
+	// v2.5: log stream config (sent to ESP32 via ConfigManifest field 10)
+	LogStreamEnabled bool   `gorm:"default:false" json:"log_stream_enabled"`
+	LogStreamLevel   int    `gorm:"default:2" json:"log_stream_level"` // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE
+	// v2.5: log persistence config (pure backend, NOT sent to ESP32)
+	LogPersistEnabled bool  `gorm:"default:false" json:"log_persist_enabled"`
 	// v2.2 新增: 标记用 v1 (devices/{id}) 还是 v2 (nodes/{id}) topic — REMOVED: 产品未发布, 无需兼容
 	// MQTTTopicFormat string         `gorm:"size:16;default:v2" json:"mqtt_topic_format"`
 	CreatedAt       time.Time      `json:"created_at"`

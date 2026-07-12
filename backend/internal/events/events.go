@@ -28,4 +28,7 @@ const (
 	ScanResult  = "scan_result"
 	ChannelData = "channel_data"
 	TerminalAck = "terminal_ack"
+
+	// v2.5: System log stream
+	NodeLog = "node_log"
 )

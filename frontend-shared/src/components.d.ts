@@ -84,6 +84,7 @@ declare module 'vue' {
     GaugeChart: typeof import('./components/charts/GaugeChart.vue')['default']
     LineChart: typeof import('./components/charts/LineChart.vue')['default']
     LoginForm: typeof import('./components/forms/LoginForm.vue')['default']
+    LogPanel: typeof import('./components/node/LogPanel.vue')['default']
     NetworkBanner: typeof import('./components/common/NetworkBanner.vue')['default']
     OTAForm: typeof import('./components/forms/OTAForm.vue')['default']
     PageHeader: typeof import('./components/common/PageHeader.vue')['default']

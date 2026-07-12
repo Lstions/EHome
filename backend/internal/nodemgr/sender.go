@@ -438,6 +438,15 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		enc.EncodeSubFrame(5, subEnc.Bytes())
 	}
 
+	// v2.5: field 10 = log_stream config (sub-frame: 1=enabled, 2=level)
+	// Read from node DB fields (LogStreamEnabled, LogStreamLevel)
+	{
+		lsEnc := frame.SubEncoder()
+		lsEnc.EncodeBool(1, node.LogStreamEnabled)
+		lsEnc.EncodeVarint(2, uint64(node.LogStreamLevel))
+		enc.EncodeSubFrame(10, lsEnc.Bytes())
+	}
+
 	// v2.2: field 8 = sync_id (field 9 sync_reason removed)
 	enc.EncodeString(8, decision.SyncID)
 

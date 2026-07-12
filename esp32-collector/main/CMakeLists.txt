@@ -7,7 +7,7 @@ idf_component_register(SRCS "main.c"
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool
-                       bus_worker bus_manager)
+                       bus_worker bus_manager log_stream)
 
 # Inject version from top-level CMakeLists.txt PROJECT_VER as a compile definition.
 # This is the single source of truth — app_state.c reads EHOME_PROJECT_VER instead

@@ -59,6 +59,8 @@ typedef enum {
 /* v2.4 resource reporting */
 #define MSG_RESOURCE_REPORT  0x19
 #define MSG_QUERY_RESOURCES  0x1A
+/* v2.5 log streaming */
+#define MSG_LOG_STREAM       0x1D
 
 /* === Encoder === */
 typedef struct {

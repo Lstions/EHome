@@ -615,6 +615,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			"status":  "sent",
 		}})
 	})
+
+	// v2.5: Log stream routes
+	registerLogStreamRoutes(n, db, nodeMgr)
 }
 
 // edgeDeviceConfigItem is a lightweight EdgeDevice representation for config API responses.

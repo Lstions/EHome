@@ -35,6 +35,7 @@ static void parse_field_manifest_id(config_manifest_t *target, const frame_field
 static void parse_field_template(config_manifest_t *target, const frame_field_t *field);
 static void parse_field_channel(config_manifest_t *target, const frame_field_t *field);
 static void parse_field_dma_channel(config_manifest_t *target, const frame_field_t *field);
+static void parse_field_log_stream(config_manifest_t *target, const frame_field_t *field);
 static void parse_edge_device(config_channel_t *cur_channel, const uint8_t *data, size_t len);
 static void parse_command(config_edge_device_t *cur_ed, const uint8_t *data, size_t len);
 /* === Public API === */
@@ -373,6 +374,28 @@ static void parse_field_dma_channel(config_manifest_t *target, const frame_field
     }
 }
 
+/* === v2.5: Log stream config (field 10) === */
+static void parse_field_log_stream(config_manifest_t *target, const frame_field_t *field)
+{
+    if (field->field_num == 10 && field->wire_type == WIRE_LENGTH_DELIMITED && field->value.bytes.ptr) {
+        frame_decoder_t sub;
+        if (frame_decoder_init_sub(&sub, field->value.bytes.ptr, field->value.bytes.len) != FRAME_OK) return;
+        frame_field_t sf;
+        while (frame_decoder_next(&sub, &sf) == FRAME_OK) {
+            switch (sf.field_num) {
+            case 1: /* enabled */
+                target->log_stream_enabled = sf.value.varint != 0;
+                break;
+            case 2: /* level */
+                target->log_stream_level = (uint8_t)sf.value.varint;
+                break;
+            }
+        }
+        ESP_LOGI(TAG, "LogStream config: enabled=%d level=%d",
+                 target->log_stream_enabled, target->log_stream_level);
+    }
+}
+
 static void log_parsed_manifest(const config_manifest_t *target)
 {
     ESP_LOGD(TAG, "Parsed: manifest_id=%s, templates=%d, channels=%d",
@@ -418,6 +441,7 @@ static bool parse_manifest(config_manifest_t *target, const uint8_t *data, size_
         parse_field_template(target, &field);
         parse_field_channel(target, &field);
         parse_field_dma_channel(target, &field);
+        parse_field_log_stream(target, &field);
     }
 
     log_parsed_manifest(target);
@@ -506,6 +530,19 @@ void config_mgr_set_epoch(uint64_t epoch)
 
     nvs_commit(handle);
     nvs_close(handle);
+}
+
+/* === v2.5: Log stream config getters === */
+bool config_mgr_get_log_stream_enabled(void)
+{
+    if (!s_initialized) return false;
+    return active_manifest()->log_stream_enabled;
+}
+
+uint8_t config_mgr_get_log_stream_level(void)
+{
+    if (!s_initialized) return 2; /* INFO default */
+    return active_manifest()->log_stream_level;
 }
 
 void config_mgr_set_manifest_id(const char *id)

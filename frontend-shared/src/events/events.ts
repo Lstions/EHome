@@ -39,6 +39,9 @@ export const WS_EVENT = {
   // 通道写入 (v2.2)
   CHANNEL_WRITE: 'channel_write',
   CHANNEL_WRITE_ERROR: 'channel_write_error',
+
+  // 系统日志流 (v2.5)
+  NODE_LOG: 'node_log',
 } as const
 
 /** 所有合法 WS 事件名的联合类型 */
