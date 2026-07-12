@@ -37,6 +37,18 @@ func newStreamReassembler() *streamReassembler {
 // append adds raw bytes to the buffer for the given requestID and returns
 // the accumulated bytes. If requestID is 0 (CMD_SAMPLE, no correlation),
 // returns data unchanged (no buffering).
+// Append adds raw bytes to the buffer for the given requestID and returns
+// the accumulated bytes. If requestID is 0 (CMD_SAMPLE, no correlation),
+// returns data unchanged (no buffering).
+func (sr *streamReassembler) Append(requestID uint32, data []byte) []byte {
+	return sr.append(requestID, data)
+}
+
+// Consume discards the buffer for the given requestID after successful parse.
+func (sr *streamReassembler) Consume(requestID uint32) {
+	sr.consume(requestID)
+}
+
 func (sr *streamReassembler) append(requestID uint32, data []byte) []byte {
 	if requestID == 0 || len(data) == 0 {
 		return data

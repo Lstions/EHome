@@ -1,12 +1,10 @@
 package nodemgr
 
 import (
-	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
-	"ehome/backend/internal/events"
+	"ehome/backend/internal/databus"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -81,111 +79,31 @@ func (m *Manager) dataWorker(id int) {
 	logger.Infof("Worker %d exiting", id)
 }
 
-// processDataReportJob handles the heavy DB/parse work off the MQTT callback
+// processDataReportJob handles the heavy DB/parse work off the MQTT callback.
+// v2.5: Refactored to parse frame and publish to DataEventBus.
+// All downstream processing (terminal record, WS push, DB persist, sensor parse)
+// is handled by independent consumers on the bus.
 func (m *Manager) processDataReportJob(job dataReportJob) {
-	start := time.Now()
-
-	// Record RX in terminal
-	if m.termMgr != nil {
-		m.termMgr.RecordRX(job.deviceID, uint(job.channelID), job.rawData)
-	}
-
-	// P1-6: RX timeout from ESP32 — notify pendingWrite with error
-	if job.errorCode == 0x01 && job.requestID != 0 && m.pendingWrite != nil {
-		m.pendingWrite.HandleResponse(uint32(job.requestID), false, 0x01, "sensor RX timeout")
+	if m.dataBus == nil {
+		// Fallback for tests where dataBus is not initialized
 		return
 	}
 
-	// request_id routing
-	if job.requestID != 0 && m.pendingWrite != nil {
-		m.pendingWrite.HandleDataReportAck(uint32(job.requestID), job.rawData)
-		device, found := m.findEdgeDeviceByChannelID(job.deviceID, job.channelID, job.edgeDeviceID)
-		if found && m.deviceInit != nil && m.deviceInit.HasActiveInit(device.Type) {
-			logger.Infof("[%s] DataReport ack for device init, type=%s", job.deviceID, device.Type)
-		}
-		// Command response — skip DB storage and WS push
-		return
+	evt := databus.DataEvent{
+		DeviceID:     job.deviceID,
+		ChannelID:    job.channelID,
+		Timestamp:    job.timestamp,
+		Sequence:     job.sequence,
+		RawData:      job.rawData,
+		ErrorCode:    job.errorCode,
+		RequestID:    job.requestID,
+		EdgeDeviceID: job.edgeDeviceID,
+		CommandIndex: job.commandIndex,
+		ReceivedAt:   time.Now(),
 	}
 
-	// P1-4: Resolve collectorID via cache (fallback to DB lookup with session isolation)
-	collectorID, found := lookupCollectorID(m.db, job.deviceID)
-	if !found {
-		logger.Infof("[%s] Node not found for DataReport (deviceID=%s)", job.deviceID, job.deviceID)
-		return
-	}
+	// Publish to event bus — consumers handle everything
+	m.dataBus.Publish(evt)
 
-	// Store raw data
-	dataJSON, _ := json.Marshal(map[string]interface{}{
-		"raw":            fmt.Sprintf("%x", job.rawData),
-		"channel":        job.channelID,
-		"sequence":       job.sequence,
-		"error_code":     job.errorCode,
-		"request_id":     job.requestID,
-		"edge_device_id": job.edgeDeviceID,
-		"command_index":  job.commandIndex,
-	})
-	m.db.Session(&gorm.Session{}).Create(&models.DeviceData{
-		NodeID:    job.deviceID,
-		DataJSON:  string(dataJSON),
-		Timestamp: time.Now(),
-	})
-
-	// WebSocket push: build channel_data event first
-	channelDataEvent := map[string]interface{}{
-		"device_id":      job.deviceID, // node device_id (string, for terminal correlation)
-		"node_id":        job.deviceID, // v2.2 新增 (同一值)
-		"channel_id":     job.channelID,
-		"raw_hex":        fmt.Sprintf("%x", job.rawData),
-		"timestamp":      time.Now().Unix(),
-		"error_code":     job.errorCode,
-		"request_id":     job.requestID,
-		"edge_device_id": job.edgeDeviceID,
-		"command_index":  job.commandIndex,
-	}
-
-	// Parse and store unified data (includes HA state push)
-	if job.errorCode == 0 && job.rawData != nil {
-		// S3: Accumulate by requestID for frame reassembly (P1-8 safety net).
-		// ESP32 rx_task uses UART idle detection to report complete responses,
-		// but slow baud or multi-frame protocols may still produce partial reports.
-		merged := m.reassembler.append(uint32(job.requestID), job.rawData)
-		parsedData := m.parseAndStoreData(collectorID, job.deviceID, job.channelID, job.edgeDeviceID, job.commandIndex, merged)
-		metrics.DataReportsProcessed.Inc()
-
-		if parsedData != nil {
-			// Parse succeeded — consume the reassembly buffer
-			m.reassembler.consume(uint32(job.requestID))
-		}
-		// Parse failed — buffer retained for next DataReport with same requestID
-
-		// Add parsed sensor data to channel_data event
-		if parsedData != nil {
-			channelDataEvent["data"] = parsedData
-		}
-	} else {
-		metrics.DataReportErrors.Inc()
-	}
-
-	// Try to look up sensor device for richer payload
-	var sensorDevice models.EdgeDevice
-	if job.edgeDeviceID > 0 {
-		// v2.3: new firmware provides edge_device_id directly
-		if err := m.db.Where("id = ?", job.edgeDeviceID).First(&sensorDevice).Error; err == nil {
-			channelDataEvent["sensor_device_id"] = sensorDevice.ID
-			channelDataEvent["sensor_device_name"] = sensorDevice.Name
-			channelDataEvent["sensor_type"] = sensorDevice.Type
-		}
-	} else {
-		// Legacy: fall back to channel_id lookup with C6 index resolution
-		if sd, found := m.findEdgeDeviceByChannelID(job.deviceID, job.channelID, 0); found {
-			channelDataEvent["sensor_device_id"] = sd.ID
-			channelDataEvent["sensor_device_name"] = sd.Name
-			channelDataEvent["sensor_type"] = sd.Type
-		}
-	}
-	if m.wsHub != nil {
-		m.wsHub.BroadcastEvent(events.ChannelData, channelDataEvent)
-	}
-
-	metrics.WorkerPoolProcessDuration.Observe(time.Since(start).Seconds())
+	metrics.WorkerPoolProcessDuration.Observe(time.Since(evt.ReceivedAt).Seconds())
 }

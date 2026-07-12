@@ -9,6 +9,7 @@ import (
 
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/databus"
 	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/logstream"
 	"ehome/backend/internal/models"
@@ -55,6 +56,9 @@ type Manager struct {
 	logBus        *logstream.LogEventBus
 	logDBConsumer *logstream.DBConsumer
 	logCleanup    *logstream.LogCleanup
+
+	// v2.5: Data event bus (replaces inline processDataReportJob heavy logic)
+	dataBus *databus.DataEventBus
 }
 
 // NewManager creates a new node manager
@@ -93,6 +97,14 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	// Start log cleanup (72h max age, 1h interval)
 	mgr.logCleanup = logstream.NewLogCleanup(db, 72*time.Hour, time.Hour)
 	mgr.logCleanup.Start()
+
+	// v2.5: Initialize data event bus + consumers
+	mgr.dataBus = databus.NewDataEventBus()
+	mgr.dataBus.Register(databus.NewTerminalConsumer(mgr.termMgr))
+	mgr.dataBus.Register(databus.NewWSPushConsumer(wsHub))
+	mgr.dataBus.Register(databus.NewPendingWriteConsumer(mgr.pendingWrite, mgr.deviceInit, db))
+	mgr.dataBus.Register(databus.NewDBPersistConsumer(db))
+	mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler))
 
 	// G10: Record initial node online count
 	var onlineCount int64
@@ -334,6 +346,8 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 		}
 
 		hashData := m.buildHashData(templates, channels, edgeDevices, deviceConfigs, dmaConfigs)
+		// v2.5: include log_stream config in hash so changes trigger manifest push
+		hashData = append(hashData, []byte(fmt.Sprintf("ls:%v:%d:", node.LogStreamEnabled, node.LogStreamLevel))...)
 		hash := m.hashMgr.CalcConfigHash(hashData)
 		manifestID := fmt.Sprintf("v2-%s", hash)
 
