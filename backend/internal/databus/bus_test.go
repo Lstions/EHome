@@ -4,16 +4,22 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/models"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 type mockDataConsumer struct {
-	name     string
-	shouldH  bool
-	events   []DataEvent
-	mu       sync.Mutex
+	name    string
+	shouldH bool
+	events  []DataEvent
+	mu      sync.Mutex
 }
 
-func (m *mockDataConsumer) Name() string { return m.name }
+func (m *mockDataConsumer) Name() string                    { return m.name }
 func (m *mockDataConsumer) ShouldHandle(evt DataEvent) bool { return m.shouldH }
 func (m *mockDataConsumer) Handle(evt DataEvent) {
 	m.mu.Lock()
@@ -32,6 +38,59 @@ type panicDataConsumer struct{ name string }
 func (p *panicDataConsumer) Name() string                    { return p.name }
 func (p *panicDataConsumer) ShouldHandle(evt DataEvent) bool { return true }
 func (p *panicDataConsumer) Handle(evt DataEvent)            { panic("test panic") }
+
+type blockingDataConsumer struct {
+	name    string
+	started chan struct{}
+	release <-chan struct{}
+}
+
+type commandAwareTestDriver struct {
+	calledWith chan string
+}
+
+func (d *commandAwareTestDriver) DeviceType() string { return "command_aware_test" }
+func (d *commandAwareTestDriver) DeviceName() string { return "command aware test" }
+func (d *commandAwareTestDriver) OEM() string        { return "test" }
+func (d *commandAwareTestDriver) Category() string   { return "test" }
+func (d *commandAwareTestDriver) HardwareTypes() []string {
+	return []string{"UART"}
+}
+func (d *commandAwareTestDriver) ParseData(raw []byte) ([]drivers.SensorData, error) {
+	return []drivers.SensorData{{Name: "fallback_value", Value: 1}}, nil
+}
+func (d *commandAwareTestDriver) GetSensorDefinitions() []drivers.SensorData { return nil }
+func (d *commandAwareTestDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return nil
+}
+func (d *commandAwareTestDriver) ParseDataWithCommand(raw []byte, writeData string) ([]drivers.SensorData, error) {
+	d.calledWith <- writeData
+	return []drivers.SensorData{{Name: "command_value", Value: 1}}, nil
+}
+
+type passthroughReassembler struct{}
+
+func (passthroughReassembler) Append(requestID uint32, data []byte) []byte { return data }
+func (passthroughReassembler) Consume(requestID uint32)                    {}
+
+func newConsumerTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{}, &models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
+
+func (c *blockingDataConsumer) Name() string                    { return c.name }
+func (c *blockingDataConsumer) ShouldHandle(evt DataEvent) bool { return true }
+func (c *blockingDataConsumer) Handle(evt DataEvent) {
+	c.started <- struct{}{}
+	<-c.release
+}
 
 func TestDataEventBus_Publish_DeliversToActiveConsumers(t *testing.T) {
 	bus := NewDataEventBus()
@@ -159,5 +218,157 @@ func TestDataEvent_IsPassive(t *testing.T) {
 	command := DataEvent{RequestID: 100}
 	if command.IsPassive() {
 		t.Error("RequestID≠0 should not be passive")
+	}
+}
+
+func TestDataEventBus_ScheduledSampleIsNotPassive(t *testing.T) {
+	// ESP32 CMD_SAMPLE reports have no request ID, but do include the target
+	// edge_device_id. They must take the parse/store path rather than the
+	// passive terminal-only path.
+	scheduled := DataEvent{RequestID: 0, EdgeDeviceID: 42, RawData: []byte{0x01}}
+	if scheduled.IsPassive() {
+		t.Fatal("scheduled sample with edge_device_id must not be passive")
+	}
+	if !NewDBPersistConsumer(nil).ShouldHandle(scheduled) {
+		t.Fatal("scheduled sample must be persisted")
+	}
+	if !NewSensorParserConsumer(nil, nil, nil, nil).ShouldHandle(scheduled) {
+		t.Fatal("scheduled sample must be parsed")
+	}
+}
+
+func TestDataEventBus_BoundsConsumerConcurrency(t *testing.T) {
+	bus := NewDataEventBus()
+	release := make(chan struct{})
+	consumer := &blockingDataConsumer{
+		name:    "blocking",
+		started: make(chan struct{}, 32),
+		release: release,
+	}
+	bus.Register(consumer)
+
+	for i := 0; i < 16; i++ {
+		bus.Publish(DataEvent{Sequence: uint64(i)})
+	}
+
+	// A bus must not start an unbounded goroutine per event. Give the scheduler
+	// enough time to fill its fixed worker pool, then verify it cannot start all
+	// 16 blocked handlers concurrently.
+	time.Sleep(100 * time.Millisecond)
+	if got := len(consumer.started); got > dataConsumerWorkerCount {
+		close(release)
+		bus.Stop()
+		t.Fatalf("started %d handlers concurrently; worker bound is %d", got, dataConsumerWorkerCount)
+	}
+
+	close(release)
+	bus.Stop()
+}
+
+func TestDataEventBus_StopIsIdempotentAndPublishSafe(t *testing.T) {
+	bus := NewDataEventBus()
+	bus.Stop()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Stop/Publish after Stop must not panic: %v", r)
+		}
+	}()
+	bus.Publish(DataEvent{})
+	bus.Stop()
+}
+
+func TestDataEventBus_IsPassiveAndRoutesWebPush(t *testing.T) {
+	passive := DataEvent{RequestID: 0, EdgeDeviceID: 0}
+	scheduled := DataEvent{RequestID: 0, EdgeDeviceID: 42}
+	command := DataEvent{RequestID: 7}
+
+	wsPush := NewWSPushConsumer(nil)
+	for _, evt := range []DataEvent{passive} {
+		if !wsPush.ShouldHandle(evt) {
+			t.Fatalf("passive event %+v must reach ws push", evt)
+		}
+	}
+	for _, evt := range []DataEvent{scheduled, command} {
+		if wsPush.ShouldHandle(evt) {
+			t.Fatalf("non-passive event %+v must not duplicate ws push", evt)
+		}
+	}
+}
+
+func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-command"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	device := models.EdgeDevice{Name: "command-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	template := models.ConfigTemplate{NodeID: node.NodeID, WriteData: "485056420d"}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+
+	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
+	drivers.Register(driver)
+	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer.Handle(DataEvent{
+		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 9,
+		CommandIndex: uint64(template.ID), RawData: []byte("response"),
+	})
+
+	select {
+	case got := <-driver.calledWith:
+		if got != template.WriteData {
+			t.Fatalf("command context = %q, want %q", got, template.WriteData)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CommandAwareDriver was not called")
+	}
+
+	var count int64
+	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count unified data: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("unified data count = %d, want 1", count)
+	}
+}
+
+func TestSensorParserConsumer_ResolvesExplicitEdgeDeviceID(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-explicit"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	device := models.EdgeDevice{Name: "explicit-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
+	drivers.Register(driver)
+	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer.Handle(DataEvent{
+		DeviceID: node.NodeID, ChannelID: 999, EdgeDeviceID: uint64(device.ID),
+		RequestID: 11, RawData: []byte("response"),
+	})
+
+	var count int64
+	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count unified data: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("explicit edge device id did not route data; count = %d", count)
 	}
 }

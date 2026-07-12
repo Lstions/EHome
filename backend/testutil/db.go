@@ -50,6 +50,7 @@ var allModels = []interface{}{
 	&models.CalibrationCache{},
 	&models.ConfigMeta{},
 	&models.PendingWriteRecord{},
+	&models.NodeLog{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

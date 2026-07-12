@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"ehome/backend/internal/databus"
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
-	"ehome/backend/internal/databus"
 	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/logstream"
 	"ehome/backend/internal/models"
@@ -39,6 +39,7 @@ type Manager struct {
 	termMgr         *terminal.Manager
 	offlineDetector *offlinedetector.Detector
 	stopCh          chan struct{}
+	stopOnce        sync.Once
 	wg              sync.WaitGroup     // for worker pool graceful shutdown
 	dataCh          chan dataReportJob // worker pool job channel
 
@@ -89,12 +90,8 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.logBus.Register(mgr.logDBConsumer)
 	mgr.logBus.Register(logstream.NewWSConsumer(wsHub))
 
-	// Auto-migrate node_logs table
-	if err := db.AutoMigrate(&models.NodeLog{}); err != nil {
-		logger.Warnf("Failed to auto-migrate node_logs: %v", err)
-	}
-
-	// Start log cleanup (72h max age, 1h interval)
+	// NodeLog is migrated at application startup with the rest of the schema;
+	// do not make manager construction perform DDL in request/unit-test paths.
 	mgr.logCleanup = logstream.NewLogCleanup(db, 72*time.Hour, time.Hour)
 	mgr.logCleanup.Start()
 
@@ -102,9 +99,14 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.dataBus = databus.NewDataEventBus()
 	mgr.dataBus.Register(databus.NewTerminalConsumer(mgr.termMgr))
 	mgr.dataBus.Register(databus.NewWSPushConsumer(wsHub))
+	mgr.dataBus.Register(databus.NewDataMetricsConsumer())
 	mgr.dataBus.Register(databus.NewPendingWriteConsumer(mgr.pendingWrite, mgr.deviceInit, db))
 	mgr.dataBus.Register(databus.NewDBPersistConsumer(db))
-	mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler))
+	if offlineDetector != nil {
+		mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler, offlineDetector.OnEdgeDeviceData))
+	} else {
+		mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler))
+	}
 
 	// G10: Record initial node online count
 	var onlineCount int64
@@ -125,11 +127,23 @@ func (m *Manager) Start() {
 	// Drain workers: close channel then wait
 	close(m.dataCh)
 	m.wg.Wait()
+	if m.dataBus != nil {
+		m.dataBus.Stop()
+	}
+	if m.logBus != nil {
+		m.logBus.Stop()
+	}
+	if m.logCleanup != nil {
+		m.logCleanup.Stop()
+	}
 	logger.Infof("All workers drained")
 }
 
+// Stop begins graceful shutdown. It is safe to call more than once.
 func (m *Manager) Stop() {
-	close(m.stopCh)
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
 }
 
 // PendingWrite returns the pending write manager for external access (e.g. API)

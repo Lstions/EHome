@@ -17,6 +17,7 @@
 #include "cmd_queue.h"
 #include "bus_dma.h"
 #include "hw_tables.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -78,6 +79,7 @@ void scheduler_start(const scheduler_queues_t *queues)
     if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
         s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
         ESP_LOGE(TAG, "all queues are NULL, cannot start");
+        LOG_STREAM_E(TAG, "start failed queues=none");
         return;
     }
 
@@ -138,6 +140,7 @@ void scheduler_resume(const scheduler_queues_t *queues)
     if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
         s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
         ESP_LOGE(TAG, "all queues are NULL, cannot resume");
+        LOG_STREAM_E(TAG, "resume failed queues=none");
         return;
     }
     s_running = true;

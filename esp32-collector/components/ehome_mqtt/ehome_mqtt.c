@@ -4,6 +4,7 @@
  */
 
 #include "ehome_mqtt.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include <string.h>
@@ -80,6 +81,7 @@ void mqtt_client_start(void)
     esp_err_t err = esp_mqtt_client_start(s_ctx.client);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
+        LOG_STREAM_E(TAG, "start failed err=%s", esp_err_to_name(err));
         set_state(&s_ctx, MQTT_CLIENT_FAILED);
         UNLOCK_CTX();
         return;
@@ -221,7 +223,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
      * and blocking here can deadlock with esp_mqtt_client API calls */
     switch (event->event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "MQTT connected to broker");
+    ESP_LOGI(TAG, "MQTT connected to broker");
+        LOG_STREAM_I(TAG, "connected broker=%s", CONFIG_COLLECTOR_MQTT_BROKER_URL);
         /* Subscribe BEFORE notifying app, so down-topic is ready for ConfigManifest */
         if (s_down_topic[0] != '\0') {
             esp_mqtt_client_subscribe(s_ctx.client, s_down_topic, 1);
@@ -232,6 +235,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
+        LOG_STREAM_W(TAG, "disconnected");
         set_state(&s_ctx, MQTT_CLIENT_DISCONNECTED);
         break;
 

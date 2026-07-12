@@ -2,6 +2,7 @@ package logstream
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -11,10 +12,13 @@ import (
 // LogCleanup runs a background goroutine that periodically deletes old node_logs
 // entries. This prevents unbounded table growth from log persistence.
 type LogCleanup struct {
-	db          *gorm.DB
-	maxAge      time.Duration
-	interval    time.Duration
-	stopCh      chan struct{}
+	db        *gorm.DB
+	maxAge    time.Duration
+	interval  time.Duration
+	startOnce sync.Once
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 }
 
 // NewLogCleanup creates a new cleanup worker.
@@ -35,14 +39,22 @@ func NewLogCleanup(db *gorm.DB, maxAge time.Duration, interval time.Duration) *L
 	}
 }
 
-// Start launches the cleanup goroutine.
+// Start launches the cleanup goroutine once.
 func (lc *LogCleanup) Start() {
-	go lc.run()
+	lc.startOnce.Do(func() {
+		lc.wg.Add(1)
+		go func() {
+			defer lc.wg.Done()
+			lc.run()
+		}()
+	})
 }
 
-// Stop signals the cleanup goroutine to exit.
+// Stop signals the cleanup goroutine to exit and waits for it. It is safe to
+// call repeatedly from normal shutdown and test teardown paths.
 func (lc *LogCleanup) Stop() {
-	close(lc.stopCh)
+	lc.stopOnce.Do(func() { close(lc.stopCh) })
+	lc.wg.Wait()
 }
 
 func (lc *LogCleanup) run() {

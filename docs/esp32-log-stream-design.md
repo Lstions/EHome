@@ -152,18 +152,18 @@ ESP-IDF 关键 API：
 - 创建 `log_tx_task`（优先级 5，低于 rx_task=7 和 cmd_task=6）
 - `esp_log_level_set("*", level)` 控制全局级别
 
-### 3.4 Ring Buffer 设计
+### 3.4 Structured diagnostic capture (no global hook)
 
-```c
-#define LOG_RING_BUF_SIZE   4096    // 4KB
-#define LOG_LINE_MAX        256     // 单行最大长度
-#define LOG_BATCH_MAX       16      // 单次最多打包行数
-#define LOG_TX_INTERVAL_MS  100     // 发送间隔
-```
+`esp_log_set_vprintf` is **not used**: on the ESP32-C6/IDF v6 collector it can
+re-enter the logging path and destabilize runtime tasks. Instead critical modules
+emit selected structured events through `LOG_STREAM_E/W/I/D/V` wrappers. UART
+`ESP_LOGx` output remains unchanged. The remote level is a stream threshold only
+and does not call `esp_log_level_set("*", ...)`.
 
-- 互斥锁保护（vprintf hook 从任意 task 调用）
-- 溢出策略：丢弃最旧行，保证最新日志优先
-- 单行超过 LOG_LINE_MAX 时截断
+Covered diagnostic boundaries include MQTT lifecycle/publish errors, config
+manifest parsing and sync timeout, scheduler queue failures, bus-worker pending
+queue/RX overflow/RX timeout, channel transaction failures, and OTA start,
+partition safety, NVS, and download failures.
 
 ### 3.5 log_tx_task 逻辑
 
@@ -588,12 +588,16 @@ DELETE /api/nodes/:id/logs
 
 ### ESP32 (enabled=true)
 
-| 资源 | 开销 |
-|------|------|
-| Task | 1 个 (~2KB stack) |
-| 内存 | ring buffer 4KB |
-| CPU | vprintf hook ~10μs/行，tx_task 每 100ms |
-| MQTT | 每 100ms 最多 1 条 (≤4KB) |
+| 资源 | 真实预算 |
+|------|---------|
+| Task stack | 1536 B |
+| Ring heap | 608 B (`4 × sizeof(log_entry_t)`) |
+| Static TX buffers | 1248 B (`4 × 152` batch + `768` frame buffer + `224` sub-frame) |
+| Mutex/control state | <256 B |
+| **总计** | **<3.7 KB** (under the 5 KB design limit) |
+
+The bounded ring drops oldest entries; the low-priority task publishes at most four
+structured entries every 200 ms.
 
 ### 后端
 

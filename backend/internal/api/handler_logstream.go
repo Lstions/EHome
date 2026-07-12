@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -15,21 +16,14 @@ import (
 
 // registerLogStreamRoutes registers log stream API routes under /nodes/:id/
 func registerLogStreamRoutes(n *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
-	// GET /api/v1/nodes/:id/log-config — get current log stream config
-	n.GET("/:id/log-config", getLogConfig(db))
-
-	// PUT /api/v1/nodes/:id/log-config — update log stream config (stream_enabled, level)
-	// Triggers config sync to ESP32
-	n.PUT("/:id/log-config", updateLogConfig(db, nodeMgr))
-
-	// PUT /api/v1/nodes/:id/log-persist — enable/disable DB persistence (pure backend)
-	n.PUT("/:id/log-persist", updateLogPersist(db, nodeMgr))
-
-	// GET /api/v1/nodes/:id/logs — query persisted logs with filters
-	n.GET("/:id/logs", getNodeLogs(db))
-
-	// DELETE /api/v1/nodes/:id/logs — delete logs (all or before timestamp)
-	n.DELETE("/:id/logs", deleteNodeLogs(db))
+	// Every operational log endpoint is an administrator action: logs can expose
+	// topology, configuration, and error detail, and configuration/deletion mutate state.
+	admin := n.Group("", RequireRole("admin"))
+	admin.GET("/:id/log-config", getLogConfig(db))
+	admin.PUT("/:id/log-config", updateLogConfig(db, nodeMgr))
+	admin.PUT("/:id/log-persist", updateLogPersist(db, nodeMgr))
+	admin.GET("/:id/logs", getNodeLogs(db))
+	admin.DELETE("/:id/logs", deleteNodeLogs(db))
 }
 
 func getLogConfig(db *gorm.DB) gin.HandlerFunc {
@@ -40,9 +34,9 @@ func getLogConfig(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"stream_enabled":   node.LogStreamEnabled,
-			"level":            node.LogStreamLevel,
-			"persist_enabled":  node.LogPersistEnabled,
+			"stream_enabled":  node.LogStreamEnabled,
+			"level":           node.LogStreamLevel,
+			"persist_enabled": node.LogPersistEnabled,
 		})
 	}
 }
@@ -92,9 +86,9 @@ func updateLogConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"message":         "log config updated, config sync triggered",
-			"stream_enabled":  updates["log_stream_enabled"],
-			"level":           updates["log_stream_level"],
+			"message":        "log config updated, config sync triggered",
+			"stream_enabled": updates["log_stream_enabled"],
+			"level":          updates["log_stream_level"],
 		})
 	}
 }
@@ -129,7 +123,7 @@ func updateLogPersist(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 		nodeMgr.SetLogPersist(node.NodeID, *req.Enabled)
 
 		c.JSON(http.StatusOK, gin.H{
-			"message": fmt.Sprintf("log persistence %s", map[bool]string{true: "enabled", false: "disabled"}[*req.Enabled]),
+			"message":         fmt.Sprintf("log persistence %s", map[bool]string{true: "enabled", false: "disabled"}[*req.Enabled]),
 			"persist_enabled": *req.Enabled,
 		})
 	}
@@ -146,20 +140,31 @@ func getNodeLogs(db *gorm.DB) gin.HandlerFunc {
 		// Parse query params
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("size", "100"))
-		if page < 1 { page = 1 }
-		if size < 1 || size > 1000 { size = 100 }
+		if page < 1 {
+			page = 1
+		}
+		if size < 1 || size > 1000 {
+			size = 100
+		}
 
 		query := db.Model(&models.NodeLog{}).Where("node_id = ?", node.NodeID)
 
-		// Time range filter
+		// created_at is server receipt time. ESP Ts is monotonic uptime, not wall
+		// time, so it cannot be used to filter or order historical records.
 		if fromStr := c.Query("from"); fromStr != "" {
-			if from, err := strconv.ParseInt(fromStr, 10, 64); err == nil {
-				query = query.Where("ts >= ?", from)
+			if from, err := parseLogTimeMillis(fromStr); err == nil {
+				query = query.Where("created_at >= ?", from)
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "from must be Unix milliseconds or RFC3339"})
+				return
 			}
 		}
 		if toStr := c.Query("to"); toStr != "" {
-			if to, err := strconv.ParseInt(toStr, 10, 64); err == nil {
-				query = query.Where("ts <= ?", to)
+			if to, err := parseLogTimeMillis(toStr); err == nil {
+				query = query.Where("created_at <= ?", to)
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "to must be Unix milliseconds or RFC3339"})
+				return
 			}
 		}
 
@@ -182,11 +187,17 @@ func getNodeLogs(db *gorm.DB) gin.HandlerFunc {
 
 		// Count total
 		var total int64
-		query.Count(&total)
+		if err := query.Count(&total).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count logs"})
+			return
+		}
 
-		// Paginate (ORDER BY ts DESC)
+		// Paginate by server receipt time. Ts is retained only as ESP uptime metadata.
 		var logs []models.NodeLog
-		query.Order("ts DESC").Offset((page - 1) * size).Limit(size).Find(&logs)
+		if err := query.Order("created_at DESC").Order("id DESC").Offset((page - 1) * size).Limit(size).Find(&logs).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query logs"})
+			return
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"total": total,
@@ -195,6 +206,13 @@ func getNodeLogs(db *gorm.DB) gin.HandlerFunc {
 			"logs":  logs,
 		})
 	}
+}
+
+func parseLogTimeMillis(value string) (time.Time, error) {
+	if millis, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.UnixMilli(millis).UTC(), nil
+	}
+	return time.Parse(time.RFC3339, value)
 }
 
 func deleteNodeLogs(db *gorm.DB) gin.HandlerFunc {
@@ -207,11 +225,14 @@ func deleteNodeLogs(db *gorm.DB) gin.HandlerFunc {
 
 		query := db.Where("node_id = ?", node.NodeID)
 
-		// Optional: delete before timestamp
+		// Optional: delete entries received before a server wall-clock timestamp.
 		if beforeStr := c.Query("before"); beforeStr != "" {
-			if before, err := strconv.ParseInt(beforeStr, 10, 64); err == nil {
-				query = query.Where("ts < ?", before)
+			before, err := parseLogTimeMillis(beforeStr)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "before must be Unix milliseconds or RFC3339"})
+				return
 			}
+			query = query.Where("created_at < ?", before)
 		}
 
 		result := query.Delete(&models.NodeLog{})

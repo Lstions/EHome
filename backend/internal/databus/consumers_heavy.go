@@ -51,7 +51,7 @@ func (c *PendingWriteConsumer) Handle(evt DataEvent) {
 		c.pendingWrite.HandleDataReportAck(uint32(evt.RequestID), evt.RawData)
 	}
 	// Device init notification
-	if c.deviceInit != nil && evt.EdgeDeviceID > 0 {
+	if c.deviceInit != nil && c.db != nil && evt.EdgeDeviceID > 0 {
 		var device models.EdgeDevice
 		if err := c.db.Where("id = ?", evt.EdgeDeviceID).First(&device).Error; err == nil {
 			if c.deviceInit.HasActiveInit(device.Type) {
@@ -62,7 +62,8 @@ func (c *PendingWriteConsumer) Handle(evt DataEvent) {
 }
 
 // DBPersistConsumer writes raw data to device_data table for audit/history.
-// Only handles command responses (passive data is not persisted).
+// It persists command responses and scheduler samples; uncorrelated terminal
+// RX data remains memory/WS-only.
 type DBPersistConsumer struct {
 	db *gorm.DB
 }
@@ -73,9 +74,12 @@ func NewDBPersistConsumer(db *gorm.DB) *DBPersistConsumer {
 
 func (c *DBPersistConsumer) Name() string { return "db_persist" }
 func (c *DBPersistConsumer) ShouldHandle(evt DataEvent) bool {
-	return evt.RequestID != 0
+	return evt.ShouldPersist()
 }
 func (c *DBPersistConsumer) Handle(evt DataEvent) {
+	if c.db == nil {
+		return
+	}
 	dataJSON, _ := json.Marshal(map[string]interface{}{
 		"raw":            fmt.Sprintf("%x", evt.RawData),
 		"channel":        evt.ChannelID,
@@ -97,38 +101,54 @@ func (c *DBPersistConsumer) Handle(evt DataEvent) {
 // data_update WebSocket events. This is the heaviest consumer.
 // Only handles command responses with valid data (not passive, not error).
 type SensorParserConsumer struct {
-	db          *gorm.DB
-	wsHub       *websocket.Hub
-	ha          *homeassistant.Integration
-	reassembler Reassembler
+	db             *gorm.DB
+	wsHub          *websocket.Hub
+	ha             *homeassistant.Integration
+	reassembler    Reassembler
+	deviceActivity func(uint)
 }
 
-func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler) *SensorParserConsumer {
-	return &SensorParserConsumer{db: db, wsHub: wsHub, ha: ha, reassembler: reassembler}
+func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
+	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, ha: ha, reassembler: reassembler}
+	if len(deviceActivity) > 0 {
+		consumer.deviceActivity = deviceActivity[0]
+	}
+	return consumer
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
 func (c *SensorParserConsumer) ShouldHandle(evt DataEvent) bool {
-	return evt.RequestID != 0 && evt.ErrorCode == 0 && len(evt.RawData) > 0
+	return evt.ShouldParse()
 }
 func (c *SensorParserConsumer) Handle(evt DataEvent) {
+	if c.db == nil || c.reassembler == nil {
+		return
+	}
+
 	// Frame reassembly for multi-frame protocols
 	merged := c.reassembler.Append(uint32(evt.RequestID), evt.RawData)
 
-	// Find edge device
-	var channels []models.Channel
-	if err := c.db.Where("node_id = ?", evt.DeviceID).Order("id ASC").Find(&channels).Error; err != nil {
-		return
-	}
-	idx := int(evt.ChannelID)
-	if idx < 0 || idx >= len(channels) {
-		return
-	}
-	realChannelID := channels[idx].ID
-
+	// Find edge device. Preserve both firmware encodings: explicit edge_device_id,
+	// real channels.id, and legacy 0-based channel-list index.
 	var device models.EdgeDevice
-	if err := c.db.Preload("Node").Where("channel_id = ?", realChannelID).First(&device).Error; err != nil {
-		return
+	if evt.EdgeDeviceID > 0 {
+		if err := c.db.Preload("Node").Where("id = ?", evt.EdgeDeviceID).First(&device).Error; err != nil {
+			return
+		}
+	} else {
+		if err := c.db.Preload("Node").Where("channel_id = ? AND node_id = ?", evt.ChannelID, evt.DeviceID).First(&device).Error; err != nil {
+			var channels []models.Channel
+			if err := c.db.Where("node_id = ?", evt.DeviceID).Order("id ASC").Find(&channels).Error; err != nil {
+				return
+			}
+			idx := int(evt.ChannelID)
+			if idx < 0 || idx >= len(channels) {
+				return
+			}
+			if err := c.db.Preload("Node").Where("channel_id = ? AND node_id = ?", channels[idx].ID, evt.DeviceID).First(&device).Error; err != nil {
+				return
+			}
+		}
 	}
 
 	// Parse sensor data
@@ -152,14 +172,32 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 	}
 
-	// Fallback: Driver registry
+	// Fallback: Driver registry. CommandAwareDriver receives the originating
+	// ConfigTemplate.WriteData so protocols with identical response layouts can
+	// select the correct parser branch.
 	if sensorData == nil {
 		drv, err := drivers.Get(device.Type)
 		if err != nil {
 			c.reassembler.Consume(uint32(evt.RequestID))
 			return
 		}
-		drvData, err := drv.ParseData(merged)
+
+		var drvData []drivers.SensorData
+		if evt.CommandIndex > 0 {
+			if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
+				var template models.ConfigTemplate
+				if err := c.db.First(&template, evt.CommandIndex).Error; err == nil && template.WriteData != "" {
+					drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
+					if err != nil {
+						logger.Infof("[%s] ParseDataWithCommand failed, falling back to ParseData: %v", evt.DeviceID, err)
+						drvData = nil
+					}
+				}
+			}
+		}
+		if drvData == nil {
+			drvData, err = drv.ParseData(merged)
+		}
 		if err != nil {
 			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, err)
 			return
@@ -190,11 +228,19 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		c.db.Create(&records)
 	}
 
-	// Update edge device status
+	// Update edge device status. Keep last_data_at fresh for every successful
+	// sample, and notify the offline detector even when no status transition
+	// occurs so its active-device cache cannot age out a healthy device.
 	result := c.db.Model(&device).Where("status = ?", "offline").Updates(map[string]interface{}{
 		"last_data_at": now,
 		"status":       "active",
 	})
+	if result.RowsAffected == 0 {
+		c.db.Model(&device).Updates(map[string]interface{}{"last_data_at": now})
+	}
+	if c.deviceActivity != nil {
+		c.deviceActivity(device.ID)
+	}
 	if result.RowsAffected > 0 && c.wsHub != nil {
 		c.wsHub.BroadcastEvent(events.EdgeDeviceStatus, map[string]interface{}{
 			"edge_device_id": device.ID,
@@ -230,18 +276,41 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		c.ha.PublishState(evt.DeviceID, haData)
 	}
 
-	// Broadcast data_update event
-	if c.wsHub != nil && len(sensorData) > 0 {
-		dataMap := make(map[string]interface{}, len(sensorData))
-		for _, sd := range sensorData {
-			dataMap[sd.Name] = sd.Value
+	// Broadcast the legacy-compatible parsed channel_data payload. Terminal clients
+	// still receive raw uncorrelated RX reports through WSPushConsumer.
+	dataMap := make(map[string]interface{}, len(sensorData))
+	for _, sd := range sensorData {
+		dataMap[sd.Name] = sd.Value
+	}
+	if c.wsHub != nil {
+		channelEvent := map[string]interface{}{
+			"device_id":          evt.DeviceID,
+			"node_id":            evt.DeviceID,
+			"channel_id":         evt.ChannelID,
+			"raw_hex":            fmt.Sprintf("%x", evt.RawData),
+			"timestamp":          now.Unix(),
+			"error_code":         evt.ErrorCode,
+			"request_id":         evt.RequestID,
+			"edge_device_id":     evt.EdgeDeviceID,
+			"command_index":      evt.CommandIndex,
+			"data":               dataMap,
+			"sensor_device_id":   device.ID,
+			"sensor_device_name": device.Name,
+			"sensor_type":        device.Type,
 		}
+		c.wsHub.BroadcastEvent(events.ChannelData, channelEvent)
+	}
+
+	// Broadcast data_update event, retaining the legacy numeric collector/node
+	// identifiers expected by existing dashboard clients.
+	if c.wsHub != nil && len(sensorData) > 0 {
 		c.wsHub.BroadcastEvent(events.DataUpdate, map[string]interface{}{
 			"device_id":      device.ID,
 			"edge_device_id": device.ID,
 			"device_name":    device.Name,
-			"collector_id":   device.NodeID,
-			"node_id":        device.NodeID,
+			"collector_id":   device.Node.ID,
+			"collector_name": device.Node.Name,
+			"node_id":        device.Node.ID,
 			"channel_id":     evt.ChannelID,
 			"data":           dataMap,
 			"collected_at":   now.Format(time.RFC3339),

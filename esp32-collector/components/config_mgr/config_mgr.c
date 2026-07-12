@@ -4,6 +4,7 @@
  */
 
 #include "config_mgr.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "frame_codec.h"
@@ -67,6 +68,7 @@ bool config_mgr_apply_manifest(const uint8_t *data, size_t len)
 {
     if (data == NULL || len < 1) {
         ESP_LOGE(TAG, "Invalid manifest data");
+        LOG_STREAM_E(TAG, "manifest rejected reason=invalid_input len=%u", (unsigned)len);
         return false;
     }
 
@@ -76,6 +78,7 @@ bool config_mgr_apply_manifest(const uint8_t *data, size_t len)
 
     if (!parse_manifest(target, data, len)) {
         ESP_LOGE(TAG, "Failed to parse manifest");
+        LOG_STREAM_E(TAG, "manifest rejected reason=parse_failed len=%u", (unsigned)len);
         memset(target, 0, sizeof(*target));  /* clean up failed parse */
         return false;
     }
@@ -89,6 +92,7 @@ bool config_mgr_apply_manifest(const uint8_t *data, size_t len)
 
     ESP_LOGD(TAG, "Applied manifest: %s, templates=%d, channels=%d",
              target->manifest_id, target->template_count, target->channel_count);
+    LOG_STREAM_I(TAG, "manifest applied id=%s channels=%u templates=%u", target->manifest_id, (unsigned)target->channel_count, (unsigned)target->template_count);
     return true;
 }
 

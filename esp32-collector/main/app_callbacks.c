@@ -266,6 +266,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     }
 
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
+    LOG_STREAM_I(TAG, "config applied scheduler_channels=%d", scheduler_get_channel_count());
 
     app_state_unlock_config();
 
@@ -321,6 +322,7 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
         /* Defer mqtt_client_start() to a separate task to avoid stack overflow
          * in the WiFi event loop task (which has limited stack). */
         ESP_LOGI(TAG, "WiFi connected, spawning MQTT start task");
+        LOG_STREAM_I(TAG, "wifi connected mqtt_start=scheduled");
         xTaskCreate(mqtt_start_task, "mqtt_start", 8192, NULL, 5, NULL);
         break;
 

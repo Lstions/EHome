@@ -28,6 +28,7 @@
 #include "bus_dma.h"
 #include "cmd_queue.h"
 #include "scheduler.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
@@ -128,7 +129,8 @@ static void enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
   memcpy(pcmd.cmd_data, cmd->tx_data, pcmd.cmd_data_len);
  }
  if (!xQueueSend(rt->pending_queues[ch_idx], &pcmd, 0)) {
-  ESP_LOGW(TAG_U0, "pending queue full ch%d, dropping", ch_idx);
+        ESP_LOGW(TAG_U0, "pending queue full ch%d, dropping", ch_idx);
+  LOG_STREAM_W(TAG_U0, "pending overflow ch=%d request=%lu", ch_idx, (unsigned long)cmd->request_id);
  }
 }
 
@@ -395,6 +397,7 @@ static void rx_task(void *pv)
     if (s->len + n > STREAM_RX_BUF_SIZE) {
      ESP_LOGW(TAG_RX, "ch%d rx overflow (len=%d+%d > %d), resetting",
       i, (int)s->len, (int)n, (int)STREAM_RX_BUF_SIZE);
+     LOG_STREAM_W(TAG_RX, "overflow channel=%lu buffered=%u incoming=%u", (unsigned long)rt->bus_ch[i], (unsigned)s->len, (unsigned)n);
      s->len = 0;
     }
     memcpy(s->buffer + s->len, rx, n);
@@ -455,6 +458,7 @@ static void rx_task(void *pv)
       s_rx_timeout_count[i]++;
       ESP_LOGW(TAG_RX, "P1-6: RX timeout reqID=%lu (%lldms)",
        (unsigned long)pcmd.request_id, (long long)elapsed_ms);
+      LOG_STREAM_W(TAG_RX, "timeout channel=%lu request=%lu elapsed_ms=%lld", (unsigned long)rt->bus_ch[i], (unsigned long)pcmd.request_id, (long long)elapsed_ms);
       if (s_data_rpt_cb) {
        uint64_t ts = (uint64_t)esp_timer_get_time();
        s_data_rpt_cb(rt->bus_ch[i], ts, 0, NULL, 0,

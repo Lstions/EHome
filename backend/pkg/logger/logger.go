@@ -5,6 +5,13 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+func sugared() *zap.SugaredLogger {
+	if L != nil {
+		return L
+	}
+	return zap.NewNop().Sugar()
+}
+
 // L is the global logger instance
 var L *zap.SugaredLogger
 
@@ -54,42 +61,42 @@ func Sync() {
 
 // Convenience functions using structured logging (msg + key/value pairs)
 func Info(msg string, keysAndValues ...interface{}) {
-	L.Infow(msg, keysAndValues...)
+	sugared().Infow(msg, keysAndValues...)
 }
 
 func Error(msg string, keysAndValues ...interface{}) {
-	L.Errorw(msg, keysAndValues...)
+	sugared().Errorw(msg, keysAndValues...)
 }
 
 func Warn(msg string, keysAndValues ...interface{}) {
-	L.Warnw(msg, keysAndValues...)
+	sugared().Warnw(msg, keysAndValues...)
 }
 
 func Debug(msg string, keysAndValues ...interface{}) {
-	L.Debugw(msg, keysAndValues...)
+	sugared().Debugw(msg, keysAndValues...)
 }
 
 func Fatal(msg string, keysAndValues ...interface{}) {
-	L.Fatalw(msg, keysAndValues...)
+	sugared().Fatalw(msg, keysAndValues...)
 }
 
 // Printf-style convenience functions
 func Infof(template string, args ...interface{}) {
-	L.Infof(template, args...)
+	sugared().Infof(template, args...)
 }
 
 func Errorf(template string, args ...interface{}) {
-	L.Errorf(template, args...)
+	sugared().Errorf(template, args...)
 }
 
 func Warnf(template string, args ...interface{}) {
-	L.Warnf(template, args...)
+	sugared().Warnf(template, args...)
 }
 
 func Debugf(template string, args ...interface{}) {
-	L.Debugf(template, args...)
+	sugared().Debugf(template, args...)
 }
 
 func Fatalf(template string, args ...interface{}) {
-	L.Fatalf(template, args...)
+	sugared().Fatalf(template, args...)
 }

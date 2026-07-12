@@ -6,153 +6,207 @@ import (
 	"sync/atomic"
 )
 
-// LogEntry represents a single system log line from an ESP32 collector.
+// LogEntry represents a single structured system log line from an ESP32 collector.
+// Ts is ESP monotonic uptime in microseconds, not a wall-clock timestamp.
 type LogEntry struct {
 	NodeID  string
 	Level   int    // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE
-	Ts      int64  // ESP32 microsecond timestamp
-	Tag     string // log tag (e.g. "MQTT", "RX_TASK")
-	Message string // log message (no trailing newline)
+	Ts      int64  // ESP32 microsecond uptime
+	Tag     string // component tag (for example MQTT or RX_TASK)
+	Message string // message without a trailing newline
 }
 
-// LogBatch represents a batch of log entries from one MsgLogStream frame.
+// LogBatch represents entries received in one MsgLogStream frame.
 type LogBatch struct {
 	NodeID string
 	Seq    int
 	Logs   []LogEntry
 }
 
-// LogConsumer is the interface that all log consumers must implement.
-// Consumers are registered with the LogEventBus and receive log batches.
-// Each consumer runs in its own goroutine with panic recovery.
+// LogConsumer receives batches serially through its own bounded mailbox.
+// Consume must return promptly; a blocked consumer never blocks the dispatcher
+// or other consumers, but can have its own oldest batches dropped.
 type LogConsumer interface {
-	Name() string       // unique identifier for management
-	IsActive() bool     // whether this consumer should receive batches
-	Consume(batch LogBatch) // process a batch of logs
-}
-
-// LogEventBus is the middleware between the MQTT handler (producer) and
-// downstream consumers (WS push, DB persist, future webhook/API, etc.).
-//
-// The bus decouples producers from consumers:
-//   - Producers call Publish() without knowing how many consumers exist
-//   - Consumers register/unregister dynamically
-//   - Each consumer gets its own goroutine per batch (isolated, panic-safe)
-//   - Backpressure: bounded channel, drops oldest when full
-type LogEventBus struct {
-	mu        sync.RWMutex
-	consumers []LogConsumer
-	logChan   chan LogBatch
-	wg        sync.WaitGroup
-	dropped   atomic.Uint64
-	stopCh    chan struct{}
+	Name() string
+	IsActive() bool
+	Consume(batch LogBatch)
 }
 
 const (
-	logChanBufferSize = 64
+	logChanBufferSize   = 64
+	consumerMailboxSize = 16
 )
 
-// NewLogEventBus creates and starts a new event bus.
+type consumerWorker struct {
+	consumer LogConsumer
+	mailbox  chan LogBatch
+}
+
+// LogEventBus owns one bounded ingress queue and one bounded serial worker per
+// registered consumer. This bounds goroutine and queued-batch growth even when a
+// downstream DB/websocket consumer is slow. Publish is safe during and after Stop.
+type LogEventBus struct {
+	mu        sync.RWMutex
+	consumers map[string]*consumerWorker
+	logChan   chan LogBatch
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
+	dropped   atomic.Uint64
+	stopped   atomic.Bool
+}
+
 func NewLogEventBus() *LogEventBus {
 	bus := &LogEventBus{
-		logChan: make(chan LogBatch, logChanBufferSize),
-		stopCh:  make(chan struct{}),
+		consumers: make(map[string]*consumerWorker),
+		logChan:   make(chan LogBatch, logChanBufferSize),
+		stopCh:    make(chan struct{}),
 	}
+	bus.wg.Add(1)
 	go bus.dispatch()
 	return bus
 }
 
-// Publish sends a log batch to all active consumers.
-// Non-blocking: if the channel is full, the oldest batch is dropped.
+// Publish drops the oldest ingress batch under pressure. It is intentionally
+// non-blocking because it runs on the MQTT receive path.
 func (bus *LogEventBus) Publish(batch LogBatch) {
+	if bus.stopped.Load() {
+		return
+	}
+	select {
+	case <-bus.stopCh:
+		return
+	default:
+	}
+
 	select {
 	case bus.logChan <- batch:
+		return
+	case <-bus.stopCh:
+		return
 	default:
-		// Channel full — drop oldest, then push
-		select {
-		case <-bus.logChan:
-		default:
-		}
+	}
+
+	select {
+	case <-bus.logChan:
 		bus.dropped.Add(1)
-		bus.logChan <- batch
+	default:
+	}
+	select {
+	case bus.logChan <- batch:
+	case <-bus.stopCh:
+	default:
+		// A racing dispatcher filled the channel again; preserve non-blocking behavior.
+		bus.dropped.Add(1)
 	}
 }
 
-// Register adds a consumer to the bus.
-func (bus *LogEventBus) Register(c LogConsumer) {
+// Register adds a consumer and starts exactly one bounded mailbox worker.
+func (bus *LogEventBus) Register(consumer LogConsumer) {
+	if consumer == nil || bus.stopped.Load() {
+		return
+	}
+
+	worker := &consumerWorker{
+		consumer: consumer,
+		mailbox:  make(chan LogBatch, consumerMailboxSize),
+	}
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-	// Check for duplicate by name
-	for _, existing := range bus.consumers {
-		if existing.Name() == c.Name() {
-			return
-		}
+	if _, exists := bus.consumers[consumer.Name()]; exists || bus.stopped.Load() {
+		bus.mu.Unlock()
+		return
 	}
-	bus.consumers = append(bus.consumers, c)
-	slog.Info("logstream: consumer registered", "name", c.Name())
+	bus.consumers[consumer.Name()] = worker
+	bus.wg.Add(1)
+	bus.mu.Unlock()
+
+	go bus.runConsumer(worker)
+	slog.Info("logstream: consumer registered", "name", consumer.Name())
 }
 
-// Unregister removes a consumer by name.
+// Unregister detaches the consumer. Its worker exits on bus shutdown; this
+// avoids a close/send race while allowing an in-flight Consume to finish.
 func (bus *LogEventBus) Unregister(name string) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-	for i, c := range bus.consumers {
-		if c.Name() == name {
-			bus.consumers = append(bus.consumers[:i], bus.consumers[i+1:]...)
-			slog.Info("logstream: consumer unregistered", "name", name)
-			return
-		}
+	if _, exists := bus.consumers[name]; exists {
+		delete(bus.consumers, name)
+		slog.Info("logstream: consumer unregistered", "name", name)
 	}
+	bus.mu.Unlock()
 }
 
-// DroppedCount returns the number of batches dropped due to backpressure.
-func (bus *LogEventBus) DroppedCount() uint64 {
-	return bus.dropped.Load()
-}
+func (bus *LogEventBus) DroppedCount() uint64 { return bus.dropped.Load() }
 
-// Stop shuts down the dispatch goroutine and waits for in-flight consumers.
+// Stop is idempotent and waits for the dispatcher plus every consumer worker.
+// It does not close ingress/mailbox channels, eliminating concurrent send/close
+// panics from MQTT delivery or a dispatcher fan-out race.
 func (bus *LogEventBus) Stop() {
-	close(bus.stopCh)
-	close(bus.logChan)
+	bus.stopOnce.Do(func() {
+		bus.stopped.Store(true)
+		close(bus.stopCh)
+	})
 	bus.wg.Wait()
 }
 
-// dispatch is the core loop that fans out batches to consumers.
 func (bus *LogEventBus) dispatch() {
+	defer bus.wg.Done()
 	for {
 		select {
-		case batch, ok := <-bus.logChan:
-			if !ok {
-				return
-			}
-			bus.fanout(batch)
 		case <-bus.stopCh:
 			return
+		case batch := <-bus.logChan:
+			bus.fanout(batch)
 		}
 	}
 }
 
-// fanout sends a batch to all active consumers in isolated goroutines.
 func (bus *LogEventBus) fanout(batch LogBatch) {
 	bus.mu.RLock()
-	consumers := make([]LogConsumer, len(bus.consumers))
-	copy(consumers, bus.consumers)
+	workers := make([]*consumerWorker, 0, len(bus.consumers))
+	for _, worker := range bus.consumers {
+		workers = append(workers, worker)
+	}
 	bus.mu.RUnlock()
 
-	for _, c := range consumers {
-		if !c.IsActive() {
+	for _, worker := range workers {
+		if !worker.consumer.IsActive() {
 			continue
 		}
-		bus.wg.Add(1)
-		go func(consumer LogConsumer, b LogBatch) {
-			defer bus.wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("logstream: consumer panic",
-						"consumer", consumer.Name(), "panic", r)
-				}
+		select {
+		case worker.mailbox <- batch:
+			continue
+		default:
+		}
+		select {
+		case <-worker.mailbox:
+			bus.dropped.Add(1)
+		default:
+		}
+		select {
+		case worker.mailbox <- batch:
+		case <-bus.stopCh:
+			return
+		default:
+			bus.dropped.Add(1)
+		}
+	}
+}
+
+func (bus *LogEventBus) runConsumer(worker *consumerWorker) {
+	defer bus.wg.Done()
+	for {
+		select {
+		case <-bus.stopCh:
+			return
+		case batch := <-worker.mailbox:
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						slog.Error("logstream: consumer panic", "consumer", worker.consumer.Name(), "panic", recovered)
+					}
+				}()
+				worker.consumer.Consume(batch)
 			}()
-			consumer.Consume(b)
-		}(c, batch)
+		}
 	}
 }

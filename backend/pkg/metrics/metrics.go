@@ -199,4 +199,11 @@ var (
 		Name: "ehome_event_bus_dropped_total",
 		Help: "ConfigEventBus drops",
 	})
+
+	// DataEventBusDroppedTotal counts data reports dropped by the bounded
+	// DataEventBus input queue under backpressure.
+	DataEventBusDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_data_event_bus_dropped_total",
+		Help: "DataEventBus data reports dropped under backpressure",
+	})
 )

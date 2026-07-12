@@ -12,7 +12,6 @@
 
 #include "log_stream.h"
 #include "frame_codec.h"
-#include "msg_handler.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
@@ -28,12 +27,12 @@
 
 /* === Configuration === */
 #define LOG_RING_BUF_SIZE   4096
-#define LOG_LINE_MAX        128     // single line max length
-#define LOG_BATCH_MAX       8       // max lines per batch
+#define LOG_LINE_MAX        96      // bounded structured message payload
+#define LOG_BATCH_MAX       4       // bounded batch limits peak RAM and MQTT work
 #define LOG_TX_INTERVAL_MS  200     // send interval (less frequent = less MQTT load)
-#define LOG_TX_STACK        3072    // task stack; buffers are static, not task-local
+#define LOG_TX_STACK        1536    // static buffers keep task stack small
 #define LOG_TX_PRIO         5       /* below rx_task(7) and cmd_task(6) */
-#define LOG_TX_BUF_SIZE     1536    // enough for 8 compact log entries
+#define LOG_TX_BUF_SIZE     768     // 4 compact entries fit within this bound
 
 /* === Message type === */
 #define MSG_LOG_STREAM      0x1D
@@ -54,12 +53,13 @@ static log_entry_t *s_ring = NULL;       /* array of LOG_BATCH_MAX*... entries *
 static int s_ring_head = 0;              /* write index */
 static int s_ring_tail = 0;              /* read index */
 static int s_ring_count = 0;             /* entries in buffer */
-#define RING_CAPACITY 8                  /* max queued entries (8*~320B = ~2.5KB) */
+#define RING_CAPACITY 4                  /* 4 * 152B = 608B heap */
 
 static TaskHandle_t s_task = NULL;
 static bool s_active = false;
 static uint8_t s_level = LOG_LEVEL_INFO;
 static uint16_t s_seq = 0;
+static log_stream_publish_fn_t s_publish = NULL;
 
 /* TX buffers are static to avoid task-stack overflow. */
 static log_entry_t s_tx_batch[LOG_BATCH_MAX];
@@ -165,8 +165,10 @@ static void log_tx_task(void *pv)
                 frame_encode_bytes(&enc, 3, s_tx_subbuf, sub.pos);
             }
 
-            /* Publish via msg_handler (MQTT) */
-            msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+            /* Publish through injected transport callback. */
+            if (s_publish != NULL) {
+                s_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(LOG_TX_INTERVAL_MS));
@@ -179,6 +181,11 @@ static void log_tx_task(void *pv)
 }
 
 /* === Public API === */
+
+void log_stream_set_publish_callback(log_stream_publish_fn_t publish)
+{
+    s_publish = publish;
+}
 
 void log_stream_start(uint8_t level)
 {
@@ -206,11 +213,15 @@ void log_stream_start(uint8_t level)
     s_ring_head = 0;
     s_ring_tail = 0;
     s_ring_count = 0;
+    if (level > LOG_LEVEL_VERBOSE) {
+        level = LOG_LEVEL_VERBOSE;
+    }
     s_level = level;
     s_seq = 0;
 
-    /* ESP-IDF v6.0 global esp_log_set_vprintf replacement is unsafe for
-     * the collector runtime. System modules call log_stream_emit() explicitly. */
+    /* Global esp_log_set_vprintf is deliberately never installed: IDF v6's
+     * process-wide callback is unsafe here. Module wrappers provide explicit,
+     * bounded remote diagnostics without changing UART log behavior. */
     s_active = true;
     /* Create tx task */
     BaseType_t ret = xTaskCreate(log_tx_task, "log_tx", LOG_TX_STACK,
@@ -235,10 +246,16 @@ void log_stream_stop(void)
 
     s_active = false;
 
-    /* Wait for task to exit */
+    /* Wait for task to exit. Force-delete only after the bounded wait so the
+     * ring/mutex cannot be freed while log_tx_task still references them. */
     if (s_task) {
         for (int i = 0; i < 100 && s_task; i++) {
             vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (s_task) {
+            ESP_LOGW(TAG, "log_tx_task did not exit; deleting it before cleanup");
+            vTaskDelete(s_task);
+            s_task = NULL;
         }
     }
 
@@ -262,9 +279,9 @@ void log_stream_stop(void)
 void log_stream_set_level(uint8_t level)
 {
     if (!s_active) return;
-    s_level = level;
-    esp_log_level_set("*", (esp_log_level_t)level);
-    ESP_LOGI(TAG, "Level set to %d", level);
+    s_level = level > LOG_LEVEL_VERBOSE ? LOG_LEVEL_VERBOSE : level;
+    /* Remote filtering only: never change global ESP-IDF log filtering. */
+    log_stream_emit(LOG_LEVEL_INFO, TAG, "remote level set=%u", s_level);
 }
 
 bool log_stream_is_active(void)

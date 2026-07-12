@@ -4,6 +4,7 @@
  */
 
 #include "ota.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_http_client.h"
@@ -68,6 +69,7 @@ static esp_err_t ota_nvs_set_state(ota_nvs_state_t state)
     esp_err_t err = nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS open failed: %s", esp_err_to_name(err));
+        LOG_STREAM_E(TAG, "nvs open failed err=%s", esp_err_to_name(err));
         return err;
     }
     err = nvs_set_u8(handle, OTA_NVS_KEY_STATE, (uint8_t)state);
@@ -284,6 +286,7 @@ static esp_err_t ota_download(const char *url, uint64_t expected_size,
     if (update_part_check->address == running_part->address) {
         ESP_LOGE(TAG, "OTA target partition '%s' (0x%" PRIx32 ") is the running partition! Aborting.",
                  update_part_check->label, update_part_check->address);
+        LOG_STREAM_E(TAG, "target rejected running_partition=%s", update_part_check->label);
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "OTA partition check OK: running=0x%" PRIx32 " update=0x%" PRIx32,
@@ -398,6 +401,7 @@ static esp_err_t ota_download(const char *url, uint64_t expected_size,
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA download failed: %s", esp_err_to_name(err));
+        LOG_STREAM_E(TAG, "download failed transport=https err=%s", esp_err_to_name(err));
     }
     return err;
 }
@@ -605,6 +609,7 @@ void ota_start(const ota_cmd_t *cmd)
     s_upgrading = true;
     ESP_LOGI(TAG, "Starting OTA: %s from %s (expect %llu bytes)",
              cmd->ota_id, cmd->firmware_url, (unsigned long long)cmd->size_bytes);
+    LOG_STREAM_I(TAG, "start ota_id=%s version=%s bytes=%llu", cmd->ota_id, cmd->version, (unsigned long long)cmd->size_bytes);
 
     /* Run OTA in a dedicated task so mqtt_task can keep running.
      * cmd is passed directly — ota_task_func takes ownership and will free it. */

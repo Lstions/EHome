@@ -9,6 +9,7 @@
 #include "sync_manager.h"
 #include "config_mgr.h"
 #include "ehome_mqtt.h"
+#include "log_stream.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "rgb_led.h"
@@ -49,6 +50,7 @@ static void config_timeout_callback(void *arg)
     (void)arg;
     if (!config_mgr_has_manifest()) {
         ESP_LOGW(TAG, "ConfigManifest not received within %ds — server offline", CONFIG_RECEIVE_TIMEOUT_SEC);
+        LOG_STREAM_W(TAG, "config timeout seconds=%d", CONFIG_RECEIVE_TIMEOUT_SEC);
         rgb_led_set_state(LED_STATE_SERVER_OFFLINE);
         /* Trigger sync retry */
         if (s_initialized) {
@@ -141,6 +143,7 @@ void sync_manager_request_sync(sync_reason_t reason)
     /* Check MQTT connectivity */
     if (!mqtt_client_is_connected_impl()) {
         ESP_LOGW(TAG, "MQTT not connected, deferring sync request");
+        LOG_STREAM_W(TAG, "sync deferred reason=%d mqtt=disconnected", reason);
         s_sync_enum = SYNC_STATE_ERROR;
         return;
     }

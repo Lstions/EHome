@@ -132,6 +132,54 @@ func (p *panicConsumer) Consume(batch LogBatch) {
 	panic("intentional test panic")
 }
 
+func TestLogEventBus_StopIsIdempotentAndPublishIsSafeAfterStop(t *testing.T) {
+	bus := NewLogEventBus()
+	bus.Stop()
+	bus.Stop()
+	bus.Publish(LogBatch{NodeID: "after-stop"})
+}
+
+func TestLogEventBus_BoundedConsumerWorker(t *testing.T) {
+	bus := NewLogEventBus()
+	defer bus.Stop()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	defer close(release)
+	blocked := &blockingConsumer{name: "blocked", started: started, release: release}
+	bus.Register(blocked)
+
+	bus.Publish(LogBatch{NodeID: "first"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not start")
+	}
+	for i := 0; i < consumerMailboxSize+4; i++ {
+		bus.fanout(LogBatch{NodeID: "queued"})
+	}
+	if got := bus.DroppedCount(); got == 0 {
+		t.Fatal("expected a bounded mailbox overflow to increment dropped count")
+	}
+	// release is deferred so a failed assertion cannot deadlock bus.Stop().
+}
+
+type blockingConsumer struct {
+	name    string
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (c *blockingConsumer) Name() string   { return c.name }
+func (c *blockingConsumer) IsActive() bool { return true }
+func (c *blockingConsumer) Consume(LogBatch) {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	<-c.release
+}
+
 func TestDBConsumer_AlwaysRegistered(t *testing.T) {
 	consumer := &DBConsumer{}
 	if !consumer.IsActive() {
@@ -140,38 +188,38 @@ func TestDBConsumer_AlwaysRegistered(t *testing.T) {
 }
 
 func TestWSConsumer_BroadcastEvent(t *testing.T) {
- mockHub := &mockWSHub{}
- consumer := NewWSConsumer(mockHub)
+	mockHub := &mockWSHub{}
+	consumer := NewWSConsumer(mockHub)
 
- batch := LogBatch{
-  NodeID: "test-node",
-  Logs: []LogEntry{
-   {Level: 0, Ts: 1000, Tag: "ERR", Message: "error msg"},
-   {Level: 2, Ts: 2000, Tag: "INFO", Message: "info msg"},
-  },
- }
+	batch := LogBatch{
+		NodeID: "test-node",
+		Logs: []LogEntry{
+			{Level: 0, Ts: 1000, Tag: "ERR", Message: "error msg"},
+			{Level: 2, Ts: 2000, Tag: "INFO", Message: "info msg"},
+		},
+	}
 
- consumer.Consume(batch)
+	consumer.Consume(batch)
 
- if len(mockHub.events) != 1 {
-  t.Fatalf("expected 1 broadcast event, got %d", len(mockHub.events))
- }
+	if len(mockHub.events) != 1 {
+		t.Fatalf("expected 1 broadcast event, got %d", len(mockHub.events))
+	}
 
- if mockHub.events[0].eventType != "node_log" {
-  t.Errorf("event type = %s, want node_log", mockHub.events[0].eventType)
- }
+	if mockHub.events[0].eventType != "node_log" {
+		t.Errorf("event type = %s, want node_log", mockHub.events[0].eventType)
+	}
 }
 
 type mockWSHub struct {
- events []struct {
-  eventType string
-  payload   interface{}
- }
+	events []struct {
+		eventType string
+		payload   interface{}
+	}
 }
 
 func (m *mockWSHub) BroadcastEvent(eventType string, payload interface{}) {
- m.events = append(m.events, struct {
-  eventType string
-  payload   interface{}
- }{eventType, payload})
+	m.events = append(m.events, struct {
+		eventType string
+		payload   interface{}
+	}{eventType, payload})
 }

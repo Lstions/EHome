@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"ehome/backend/pkg/metrics"
 )
 
 // DataEvent represents a single data report from an ESP32 collector.
@@ -22,14 +24,32 @@ type DataEvent struct {
 	ReceivedAt   time.Time // backend receive time
 }
 
-// IsPassive returns true for passive/terminal data (no pending command).
+// IsPassive returns true only for uncorrelated terminal/RX data. Scheduler
+// samples use request_id=0 too, but carry edge_device_id and must be parsed.
 func (e *DataEvent) IsPassive() bool {
 	return e.RequestID == 0 && e.EdgeDeviceID == 0
 }
 
-// IsCommandResponse returns true for scheduled command responses.
+// IsCommandResponse returns true for pending write/read command responses.
 func (e *DataEvent) IsCommandResponse() bool {
 	return e.RequestID != 0
+}
+
+// IsScheduledSample returns true for scheduler reports addressed to a known
+// edge device. ESP32 emits these with request_id=0.
+func (e *DataEvent) IsScheduledSample() bool {
+	return e.RequestID == 0 && e.EdgeDeviceID != 0
+}
+
+// ShouldPersist returns true for reports that belong in device history.
+func (e *DataEvent) ShouldPersist() bool {
+	return !e.IsPassive()
+}
+
+// ShouldParse returns true for successful reports associated with an edge
+// device or a correlated command response.
+func (e *DataEvent) ShouldParse() bool {
+	return e.ShouldPersist() && e.ErrorCode == 0 && len(e.RawData) > 0
 }
 
 // IsError returns true for error reports (e.g. RX timeout).
@@ -38,7 +58,7 @@ func (e *DataEvent) IsError() bool {
 }
 
 // DataConsumer is the interface for all data event consumers.
-// Each consumer runs in its own goroutine per event (isolated, panic-safe).
+// Consumers execute in a fixed, panic-isolated worker pool.
 type DataConsumer interface {
 	Name() string
 	ShouldHandle(evt DataEvent) bool
@@ -46,43 +66,77 @@ type DataConsumer interface {
 }
 
 // DataEventBus decouples the MQTT handler (producer) from data consumers.
-// Same architecture as LogEventBus: bounded channel + dispatch goroutine +
-// per-consumer goroutine fanout with panic recovery.
+// It uses bounded ingress and worker queues, a fixed worker pool, and panic
+// recovery so slow consumers cannot create unbounded goroutines.
 type DataEventBus struct {
-	mu        sync.RWMutex
-	consumers []DataConsumer
-	dataChan  chan DataEvent
-	wg        sync.WaitGroup
-	dropped   atomic.Uint64
-	stopCh    chan struct{}
+	mu         sync.RWMutex
+	consumers  []DataConsumer
+	dataChan   chan DataEvent
+	workChan   chan consumerWork
+	wg         sync.WaitGroup
+	dispatchWG sync.WaitGroup
+	dropped    atomic.Uint64
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+}
+
+type consumerWork struct {
+	consumer DataConsumer
+	event    DataEvent
 }
 
 const (
-	dataChanBufferSize = 256
+	dataChanBufferSize      = 256
+	dataConsumerWorkerCount = 8
+	dataConsumerQueueSize   = 256
 )
 
 // NewDataEventBus creates and starts a new data event bus.
 func NewDataEventBus() *DataEventBus {
 	bus := &DataEventBus{
 		dataChan: make(chan DataEvent, dataChanBufferSize),
+		workChan: make(chan consumerWork, dataConsumerQueueSize),
 		stopCh:   make(chan struct{}),
 	}
+	bus.dispatchWG.Add(1)
 	go bus.dispatch()
+	for i := 0; i < dataConsumerWorkerCount; i++ {
+		bus.wg.Add(1)
+		go bus.consume()
+	}
 	return bus
 }
 
 // Publish sends a data event to all active consumers.
-// Non-blocking: if the channel is full, the oldest event is dropped.
+// It is non-blocking. During overload, the oldest queued event is dropped; after
+// shutdown it is a no-op so MQTT callbacks cannot panic during teardown.
 func (bus *DataEventBus) Publish(evt DataEvent) {
+	select {
+	case <-bus.stopCh:
+		return
+	default:
+	}
+
+	select {
+	case bus.dataChan <- evt:
+		return
+	default:
+	}
+
+	// Drop the oldest event while retaining the newest report. A concurrent
+	// dispatcher may empty the channel between these selects, so retry the send
+	// non-blockingly instead of risking a blocked MQTT callback.
+	select {
+	case <-bus.dataChan:
+		bus.dropped.Add(1)
+		metrics.DataEventBusDroppedTotal.Inc()
+	default:
+	}
 	select {
 	case bus.dataChan <- evt:
 	default:
-		select {
-		case <-bus.dataChan:
-		default:
-		}
 		bus.dropped.Add(1)
-		bus.dataChan <- evt
+		metrics.DataEventBusDroppedTotal.Inc()
 	}
 }
 
@@ -117,30 +171,41 @@ func (bus *DataEventBus) DroppedCount() uint64 {
 	return bus.dropped.Load()
 }
 
-// Stop shuts down the dispatch goroutine and waits for in-flight consumers.
+// Stop shuts down dispatch and consumer workers after draining queued work.
+// It is safe to call repeatedly.
 func (bus *DataEventBus) Stop() {
-	close(bus.stopCh)
-	close(bus.dataChan)
-	bus.wg.Wait()
+	bus.stopOnce.Do(func() {
+		close(bus.stopCh)
+		bus.dispatchWG.Wait()
+		bus.wg.Wait()
+	})
 }
 
-// dispatch is the core loop that fans out events to consumers.
+// dispatch fans out events to matching consumers via a bounded work queue.
 func (bus *DataEventBus) dispatch() {
+	defer bus.dispatchWG.Done()
+	defer close(bus.workChan)
+
 	for {
 		select {
-		case evt, ok := <-bus.dataChan:
-			if !ok {
-				return
-			}
+		case evt := <-bus.dataChan:
 			bus.fanout(evt)
 		case <-bus.stopCh:
-			return
+			for {
+				select {
+				case evt := <-bus.dataChan:
+					bus.fanout(evt)
+				default:
+					return
+				}
+			}
 		}
 	}
 }
 
-// fanout sends an event to all consumers whose ShouldHandle returns true.
-// Each consumer runs in its own goroutine with panic recovery.
+// fanout submits matching consumers to a bounded worker queue. If the queue is
+// full, dispatcher backpressure preserves ordering and prevents unbounded
+// goroutine creation.
 func (bus *DataEventBus) fanout(evt DataEvent) {
 	bus.mu.RLock()
 	consumers := make([]DataConsumer, len(bus.consumers))
@@ -151,16 +216,20 @@ func (bus *DataEventBus) fanout(evt DataEvent) {
 		if !c.ShouldHandle(evt) {
 			continue
 		}
-		bus.wg.Add(1)
-		go func(consumer DataConsumer, e DataEvent) {
-			defer bus.wg.Done()
+		bus.workChan <- consumerWork{consumer: c, event: evt}
+	}
+}
+
+func (bus *DataEventBus) consume() {
+	defer bus.wg.Done()
+	for work := range bus.workChan {
+		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("databus: consumer panic",
-						"consumer", consumer.Name(), "panic", r)
+					slog.Error("databus: consumer panic", "consumer", work.consumer.Name(), "panic", r)
 				}
 			}()
-			consumer.Handle(e)
-		}(c, evt)
+			work.consumer.Handle(work.event)
+		}()
 	}
 }

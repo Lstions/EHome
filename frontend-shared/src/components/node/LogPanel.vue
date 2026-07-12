@@ -48,7 +48,7 @@
           class="log-line"
           :class="levelClass(line.level)"
         >
-          <span class="log-time">{{ formatTime(line.ts) }}</span>
+		<span class="log-time">{{ formatRealtimeUptime(line.ts) }}</span>
           <span class="log-level">{{ levelText(line.level) }}</span>
           <span class="log-tag">{{ line.tag }}</span>
           <span class="log-msg">{{ line.msg }}</span>
@@ -77,7 +77,7 @@
       </div>
       <el-table v-if="historyLogs.length > 0" :data="historyLogs" stripe size="small" style="margin-top: 8px;">
         <el-table-column label="时间" width="160">
-          <template #default="{ row }">{{ formatTime(row.ts) }}</template>
+          <template #default="{ row }">{{ formatHistoryTime(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="级别" width="80">
           <template #default="{ row }">
@@ -268,11 +268,20 @@ function levelTagType(level: number): string {
   return ['danger', 'warning', '', 'info', 'info'][level] || ''
 }
 
-function formatTime(ts: number): string {
-  // ESP32 ts is in microseconds
-  const ms = Math.floor(ts / 1000)
-  const d = new Date(ms)
-  return d.toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0')
+function formatRealtimeUptime(tsUs: number): string {
+  const totalMs = Math.max(0, Math.floor(Number(tsUs || 0) / 1000))
+  const hours = Math.floor(totalMs / 3_600_000)
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
+  const seconds = Math.floor((totalMs % 60_000) / 1000)
+  const millis = totalMs % 1000
+  return `运行 ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
+}
+
+function formatHistoryTime(createdAt?: string): string {
+  if (!createdAt) return '-'
+  const date = new Date(createdAt)
+  if (Number.isNaN(date.getTime())) return '-'
+  return date.toLocaleString('zh-CN', { hour12: false })
 }
 
 onMounted(() => {

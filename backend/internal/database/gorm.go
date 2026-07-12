@@ -45,7 +45,7 @@ func Connect(cfg Config) error {
 func AutoMigrate() error {
 	return DB.AutoMigrate(
 		// v2.1 表 (保留, GORM 会自动加新字段)
-	&models.Node{},
+		&models.Node{},
 		&models.Channel{},
 		&models.ConfigTemplate{},
 		&models.EdgeDevice{},
@@ -62,8 +62,9 @@ func AutoMigrate() error {
 		&models.DeviceModel{},
 		&models.NodeEvent{},
 		&models.CalibrationCache{},
-		&models.ConfigMeta{}, // v2.1: epoch persistence
+		&models.ConfigMeta{},         // v2.1: epoch persistence
 		&models.PendingWriteRecord{}, // P3-4: pending write persistence
+		&models.NodeLog{},            // v2.5: remote ESP32 system-log history
 
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
