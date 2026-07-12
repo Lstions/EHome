@@ -590,6 +590,13 @@ watch(showDialog, (open) => {
       }
   } else {
     resetForm()
+    // 应用预选硬件类型和ID（从硬件卡片点击"创建通道"时传入）
+    if (props.presetHardwareType) {
+      form.hardware_type = props.presetHardwareType
+    }
+    if (props.presetHardwareId) {
+      form.hardware_id = props.presetHardwareId
+    }
     // 延迟初始化默认值（等 currentCaps 计算完成）
     setTimeout(() => initConfigDefaults(), 50)
   }

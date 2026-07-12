@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { WS_EVENT, isValidEventName, isStrictEventName, type WsEventName } from './events'
+import { WS_EVENT, isValidEventName, isStrictEventName, type WsEventName } from '../events'
 
 describe('events.ts', () => {
   describe('WS_EVENT constants', () => {
@@ -40,14 +40,14 @@ describe('events.ts', () => {
     })
 
     it('all event names should be valid (lowercase, underscore-separated)', () => {
-      const eventNames = Object.values(WS_EVENT)
+      const eventNames: string[] = Object.values(WS_EVENT)
       for (const name of eventNames) {
         expect(isValidEventName(name), `Event name "${name}" should be valid`).toBe(true)
       }
     })
 
     it('most event names should follow strict <noun>_<verb> format', () => {
-      const eventNames = Object.values(WS_EVENT)
+      const eventNames: string[] = Object.values(WS_EVENT)
       const nonStrict: string[] = []
       for (const name of eventNames) {
         if (!isStrictEventName(name)) {

@@ -404,19 +404,32 @@ static void rx_task(void *pv)
 
    /* UART idle detection: if no data this poll AND buffer non-empty
     * AND idle threshold exceeded → response is complete → report */
-   if (s->len > 0 && n == 0 && has_pending_cmd(rt, i)) {
+   if (s->len > 0 && n == 0) {
     int64_t now_us = esp_timer_get_time();
     if (now_us - s_last_rx_us[i] > UART_IDLE_THRESHOLD_US) {
-     pending_cmd_t pcmd;
-     if (xQueuePeek(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
+     if (has_pending_cmd(rt, i)) {
+      /* Request-response mode: report with pending cmd metadata */
+      pending_cmd_t pcmd;
+      if (xQueuePeek(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
+       uint64_t ts = (uint64_t)now_us;
+       if (s_data_rpt_cb) {
+        s_data_rpt_cb(rt->bus_ch[i], ts, 0,
+         s->buffer, s->len, 0,
+         pcmd.request_id, pcmd.edge_device_id, pcmd.command_index);
+       }
+       /* Pop the pending cmd — response is complete */
+       xQueueReceive(rt->pending_queues[i], &pcmd, 0);
+       hits++;
+      }
+     } else {
+      /* Passive/terminal mode: no pending cmd — report as spontaneous data
+       * (request_id=0, edge_device_id=0) so terminal sees RX bytes */
       uint64_t ts = (uint64_t)now_us;
       if (s_data_rpt_cb) {
        s_data_rpt_cb(rt->bus_ch[i], ts, 0,
         s->buffer, s->len, 0,
-        pcmd.request_id, pcmd.edge_device_id, pcmd.command_index);
+        0, 0, 0);
       }
-      /* Pop the pending cmd — response is complete */
-      xQueueReceive(rt->pending_queues[i], &pcmd, 0);
       hits++;
      }
      s->len = 0;
