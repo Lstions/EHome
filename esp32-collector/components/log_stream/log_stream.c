@@ -29,10 +29,10 @@
 
 /* === Configuration === */
 #define LOG_RING_BUF_SIZE   4096
-#define LOG_LINE_MAX        256
-#define LOG_BATCH_MAX       16
-#define LOG_TX_INTERVAL_MS  100
-#define LOG_TX_STACK        4096
+#define LOG_LINE_MAX        128     // single line max length
+#define LOG_BATCH_MAX       8       // max lines per batch
+#define LOG_TX_INTERVAL_MS  200     // send interval (less frequent = less MQTT load)
+#define LOG_TX_STACK        3072    // task stack
 #define LOG_TX_PRIO         5       /* below rx_task(7) and cmd_task(6) */
 
 /* === Message type === */
@@ -54,12 +54,17 @@ static log_entry_t *s_ring = NULL;       /* array of LOG_BATCH_MAX*... entries *
 static int s_ring_head = 0;              /* write index */
 static int s_ring_tail = 0;              /* read index */
 static int s_ring_count = 0;             /* entries in buffer */
-#define RING_CAPACITY 32                 /* max queued entries */
+#define RING_CAPACITY 8                  /* max queued entries (8*~320B = ~2.5KB) */
 
 static TaskHandle_t s_task = NULL;
 static bool s_active = false;
 static uint8_t s_level = LOG_LEVEL_INFO;
 static uint16_t s_seq = 0;
+
+/* Reentrancy guard: prevents log feedback loop.
+ * When log_tx_task publishes via MQTT, ESP_LOGI calls inside that path
+ * would trigger the hook again, creating a recursive loop. */
+static volatile bool s_in_hook = false;
 
 /* Original vprintf function pointer */
 static vprintf_like_t s_orig_vprintf = NULL;
@@ -116,88 +121,37 @@ static int ring_drain(log_entry_t *out, int max)
  */
 static int log_stream_vprintf(const char *fmt, va_list args)
 {
-    /* Always call original vprintf first (keep UART output) */
+    /* Reentrancy guard */
+    if (s_in_hook) {
+        if (s_orig_vprintf) {
+            va_list args_copy;
+            va_copy(args_copy, args);
+            s_orig_vprintf(fmt, args_copy);
+            va_end(args_copy);
+        }
+        return 0;
+    }
+    s_in_hook = true;
+
+    /* Call original vprintf first (keep UART output) */
     if (s_orig_vprintf) {
         va_list args_copy;
         va_copy(args_copy, args);
-        s_orig_vprintf(fmt, args_copy);
+        int ret = s_orig_vprintf(fmt, args_copy);
         va_end(args_copy);
+        s_in_hook = false;
+        return ret;
     }
 
-    /* Format the message into a local buffer */
-    char buf[LOG_LINE_MAX + 64];
-    int len = vsnprintf(buf, sizeof(buf), fmt, args);
-    if (len <= 0) return len;
-
-    /* Strip trailing newline */
-    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) {
-        buf[--len] = '\0';
-    }
-    if (len == 0) return 0;
-
-    /* Parse level from format string prefix.
-     * ESP-IDF format: "\r\nI (12345) tag: message"
-     * Or with color: "\033[0;32mI (12345) tag: message\033[0m"
-     * The first non-color character is the level letter. */
-    const char *p = fmt;
-    /* Skip color codes if present */
-    while (*p == '\033') {
-        while (*p && *p != 'm') p++;
-        if (*p == 'm') p++;
-    }
-    /* Skip \r\n prefix */
-    while (*p == '\r' || *p == '\n') p++;
-
-    uint8_t level = LOG_LEVEL_INFO;
-    switch (*p) {
-        case 'E': level = LOG_LEVEL_ERROR;   break;
-        case 'W': level = LOG_LEVEL_WARN;    break;
-        case 'I': level = LOG_LEVEL_INFO;    break;
-        case 'D': level = LOG_LEVEL_DEBUG;   break;
-        case 'V': level = LOG_LEVEL_VERBOSE; break;
-    }
-
-    /* Extract tag from formatted output: "I (12345) TAG: message" */
-    const char *tag_start = NULL;
-    const char *msg_start = buf;
-
-    /* Find ") " in formatted output */
-    const char *paren = strchr(buf, ')');
-    if (paren && paren[1] == ' ') {
-        tag_start = paren + 2;
-        const char *colon = strchr(tag_start, ':');
-        if (colon && colon[1] == ' ') {
-            msg_start = colon + 2;
-            /* Extract tag */
-            char tag[32];
-            int tag_len = (int)(colon - tag_start);
-            if (tag_len > 31) tag_len = 31;
-            memcpy(tag, tag_start, tag_len);
-            tag[tag_len] = '\0';
-
-            /* Filter by level */
-            if (level <= s_level) {
-                uint64_t ts = esp_timer_get_time();
-                ring_push(level, ts, tag, msg_start, strlen(msg_start));
-            }
-            return len;
-        }
-    }
-
-    /* Fallback: can't parse tag, use "UNKNOWN" */
-    if (level <= s_level) {
-        uint64_t ts = esp_timer_get_time();
-        ring_push(level, ts, "UNKNOWN", buf, len);
-    }
-
-    return len;
+    s_in_hook = false;
+    return 0;
 }
 
 /* === log_tx_task: batch publish === */
 
 static void log_tx_task(void *pv)
 {
-    ESP_LOGI(TAG, "log_tx_task started (prio=%d, interval=%dms)", LOG_TX_PRIO, LOG_TX_INTERVAL_MS);
+    /* Don't use ESP_LOGI here — it would trigger the vprintf hook */
     esp_task_wdt_add(NULL);
 
     log_entry_t batch[LOG_BATCH_MAX];
