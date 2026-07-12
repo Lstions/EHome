@@ -132,24 +132,11 @@ func (p *panicConsumer) Consume(batch LogBatch) {
 	panic("intentional test panic")
 }
 
-func TestDBConsumer_SetActive(t *testing.T) {
-	// Test without real DB — just verify active flag behavior
- consumer := &DBConsumer{}
- consumer.active.Store(false)
-
- if consumer.IsActive() {
-  t.Error("new DBConsumer should be inactive")
- }
-
- consumer.SetActive(true)
- if !consumer.IsActive() {
-  t.Error("DBConsumer should be active after SetActive(true)")
- }
-
- consumer.SetActive(false)
- if consumer.IsActive() {
-  t.Error("DBConsumer should be inactive after SetActive(false)")
- }
+func TestDBConsumer_AlwaysRegistered(t *testing.T) {
+	consumer := &DBConsumer{}
+	if !consumer.IsActive() {
+		t.Error("DBConsumer must stay registered; it evaluates persistence per node in Consume")
+	}
 }
 
 func TestWSConsumer_BroadcastEvent(t *testing.T) {

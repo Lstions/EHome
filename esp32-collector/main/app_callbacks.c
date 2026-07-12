@@ -279,6 +279,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         if (log_en && !log_stream_is_active()) {
             ESP_LOGI(TAG, "LogStream: starting (level=%d)", log_lvl);
             log_stream_start(log_lvl);
+            log_stream_emit(LOG_LEVEL_INFO, "CALLBACK", "remote log stream enabled, level=%u", log_lvl);
         } else if (!log_en && log_stream_is_active()) {
             ESP_LOGI(TAG, "LogStream: stopping");
             log_stream_stop();

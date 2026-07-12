@@ -35,6 +35,7 @@ func (m *Manager) handleLogStream(deviceID string, payload []byte) {
 			if data, ok := field.Value.([]byte); ok {
 				entry := parseLogEntry(data)
 				if entry != nil {
+					entry.NodeID = deviceID
 					batch.Logs = append(batch.Logs, *entry)
 				}
 			}
@@ -42,9 +43,11 @@ func (m *Manager) handleLogStream(deviceID string, payload []byte) {
 	}
 
 	if len(batch.Logs) == 0 {
+		logger.Warnf("[%s] LogStream: parsed zero entries from %d-byte payload", deviceID, len(payload))
 		return
 	}
 
+	logger.Infof("[%s] LogStream: parsed %d entries seq=%d", deviceID, len(batch.Logs), batch.Seq)
 	// Publish to event bus — consumers handle the rest
 	m.logBus.Publish(batch)
 }

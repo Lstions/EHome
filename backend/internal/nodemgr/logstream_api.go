@@ -15,18 +15,17 @@ func (m *Manager) TriggerConfigSync(nodeID string) error {
 	})
 }
 
-// SetLogPersist enables or disables the DB log consumer for a specific node.
-// This is a pure backend operation — ESP32 is NOT notified.
+// SetLogPersist is retained as an API compatibility boundary. Persistence is
+// now evaluated per node by DBConsumer from nodes.log_persist_enabled, which
+// has already been written transactionally by the API handler. ESP32 is not
+// notified because storage policy is a backend-only concern.
 func (m *Manager) SetLogPersist(nodeID string, enabled bool) {
-	if m.logDBConsumer != nil {
-		m.logDBConsumer.SetActive(enabled)
-	}
+	_ = nodeID
+	_ = enabled
 }
 
-// GetLogPersist returns the current DB persistence state.
+// GetLogPersist is no longer meaningful globally because persistence is
+// per-node. Callers should read Node.LogPersistEnabled instead.
 func (m *Manager) GetLogPersist() bool {
-	if m.logDBConsumer == nil {
-		return false
-	}
-	return m.logDBConsumer.IsActive()
+	return false
 }

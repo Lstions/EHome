@@ -57,6 +57,15 @@ void log_stream_set_level(uint8_t level);
  */
 bool log_stream_is_active(void);
 
+/**
+ * @brief Emit a structured system log entry to the remote stream.
+ * Safe to call from normal task context; non-blocking and drops on contention.
+ * @param level  LOG_LEVEL_ERROR..LOG_LEVEL_VERBOSE
+ * @param tag    short component tag
+ * @param fmt    printf-style message format
+ */
+void log_stream_emit(uint8_t level, const char *tag, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
 #ifdef __cplusplus
 }
 #endif

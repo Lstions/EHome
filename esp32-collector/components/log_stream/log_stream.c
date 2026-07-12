@@ -5,10 +5,9 @@
  * Architecture:
  *   vprintf hook → ring buffer → log_tx_task → MQTT MsgLogStream (0x1D)
  *
- * The hook intercepts ALL ESP_LOGx output. It calls the original vprintf
- * (to keep UART output for local debugging) and also copies the formatted
- * line into a ring buffer. log_tx_task wakes every 100ms, drains the ring
- * buffer, and publishes batched MsgLogStream frames via msg_handler_publish.
+ * ESP-IDF v6.0 does not safely support replacing the global vprintf handler
+ * in this collector runtime, so system modules emit structured entries via
+ * log_stream_emit(). The stream keeps UART logging untouched.
  */
 
 #include "log_stream.h"
@@ -32,8 +31,9 @@
 #define LOG_LINE_MAX        128     // single line max length
 #define LOG_BATCH_MAX       8       // max lines per batch
 #define LOG_TX_INTERVAL_MS  200     // send interval (less frequent = less MQTT load)
-#define LOG_TX_STACK        3072    // task stack
+#define LOG_TX_STACK        3072    // task stack; buffers are static, not task-local
 #define LOG_TX_PRIO         5       /* below rx_task(7) and cmd_task(6) */
+#define LOG_TX_BUF_SIZE     1536    // enough for 8 compact log entries
 
 /* === Message type === */
 #define MSG_LOG_STREAM      0x1D
@@ -61,19 +61,23 @@ static bool s_active = false;
 static uint8_t s_level = LOG_LEVEL_INFO;
 static uint16_t s_seq = 0;
 
-/* Reentrancy guard: prevents log feedback loop.
- * When log_tx_task publishes via MQTT, ESP_LOGI calls inside that path
- * would trigger the hook again, creating a recursive loop. */
-static volatile bool s_in_hook = false;
-
-/* Original vprintf function pointer */
-static vprintf_like_t s_orig_vprintf = NULL;
+/* TX buffers are static to avoid task-stack overflow. */
+static log_entry_t s_tx_batch[LOG_BATCH_MAX];
+static uint8_t s_tx_buf[LOG_TX_BUF_SIZE];
+static uint8_t s_tx_subbuf[LOG_LINE_MAX + 128];
 
 /* === Ring buffer operations (mutex-protected) === */
 
 static void ring_push(uint8_t level, uint64_t ts, const char *tag, const char *msg, size_t msg_len)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    /* vprintf hook can run inside arbitrary IDF task/critical contexts.
+     * It must never block: drop a log line if the drain task owns the mutex. */
+    if (s_mutex == NULL || xPortInIsrContext()) {
+        return;
+    }
+    if (xSemaphoreTake(s_mutex, 0) != pdTRUE) {
+        return;
+    }
 
     if (s_ring_count >= RING_CAPACITY) {
         /* Overflow: drop oldest by advancing tail */
@@ -112,41 +116,6 @@ static int ring_drain(log_entry_t *out, int max)
     return n;
 }
 
-/* === vprintf hook === */
-
-/**
- * The hook receives the same args as the standard vprintf.
- * ESP-IDF log format: "[LEVEL] tag: message\n"
- * We parse the level and tag from the format string, then forward.
- */
-static int log_stream_vprintf(const char *fmt, va_list args)
-{
-    /* Reentrancy guard */
-    if (s_in_hook) {
-        if (s_orig_vprintf) {
-            va_list args_copy;
-            va_copy(args_copy, args);
-            s_orig_vprintf(fmt, args_copy);
-            va_end(args_copy);
-        }
-        return 0;
-    }
-    s_in_hook = true;
-
-    /* Call original vprintf first (keep UART output) */
-    if (s_orig_vprintf) {
-        va_list args_copy;
-        va_copy(args_copy, args);
-        int ret = s_orig_vprintf(fmt, args_copy);
-        va_end(args_copy);
-        s_in_hook = false;
-        return ret;
-    }
-
-    s_in_hook = false;
-    return 0;
-}
-
 /* === log_tx_task: batch publish === */
 
 static void log_tx_task(void *pv)
@@ -154,7 +123,8 @@ static void log_tx_task(void *pv)
     /* Don't use ESP_LOGI here — it would trigger the vprintf hook */
     esp_task_wdt_add(NULL);
 
-    log_entry_t batch[LOG_BATCH_MAX];
+    /* Static buffers: never put multi-KB payloads on this task's stack. */
+    log_entry_t *batch = s_tx_batch;
 
     while (s_active) {
         esp_task_wdt_reset();
@@ -162,9 +132,8 @@ static void log_tx_task(void *pv)
         int n = ring_drain(batch, LOG_BATCH_MAX);
         if (n > 0) {
             /* Encode MsgLogStream frame */
-            uint8_t buf[4096];
             frame_encoder_t enc;
-            frame_encoder_init(&enc, buf, sizeof(buf), MSG_LOG_STREAM);
+            frame_encoder_init(&enc, s_tx_buf, sizeof(s_tx_buf), MSG_LOG_STREAM);
 
             /* Field 1: count (varint) */
             frame_encode_varint(&enc, 1, (uint64_t)n);
@@ -174,9 +143,13 @@ static void log_tx_task(void *pv)
 
             /* Encode each log entry as a sub-frame in field 3 (repeated) */
             for (int i = 0; i < n; i++) {
-                frame_encoder_t sub;
-                uint8_t subbuf[LOG_LINE_MAX + 128];
-                frame_encoder_init(&sub, subbuf, sizeof(subbuf), 0);
+                /* Nested entries are raw field sequences, not top-level frames:
+                 * do not prepend a message-type byte. */
+                frame_encoder_t sub = {
+                    .buf = s_tx_subbuf,
+                    .pos = 0,
+                    .capacity = sizeof(s_tx_subbuf),
+                };
 
                 /* Sub-field 1: level */
                 frame_encode_varint(&sub, 1, batch[i].level);
@@ -188,8 +161,8 @@ static void log_tx_task(void *pv)
                 /* Sub-field 4: message (string) */
                 frame_encode_string(&sub, 4, batch[i].msg);
 
-                /* Append as length-delimited field 3 in main frame */
-                frame_encoder_append_raw(&enc, subbuf, sub.pos);
+                /* Wrap entry as repeated length-delimited field 3. */
+                frame_encode_bytes(&enc, 3, s_tx_subbuf, sub.pos);
             }
 
             /* Publish via msg_handler (MQTT) */
@@ -236,21 +209,14 @@ void log_stream_start(uint8_t level)
     s_level = level;
     s_seq = 0;
 
-    /* Install vprintf hook */
-    s_orig_vprintf = esp_log_set_vprintf(log_stream_vprintf);
-
-    /* Set global log level */
-    esp_log_level_set("*", (esp_log_level_t)level);
-
+    /* ESP-IDF v6.0 global esp_log_set_vprintf replacement is unsafe for
+     * the collector runtime. System modules call log_stream_emit() explicitly. */
     s_active = true;
-
     /* Create tx task */
     BaseType_t ret = xTaskCreate(log_tx_task, "log_tx", LOG_TX_STACK,
                                  NULL, LOG_TX_PRIO, &s_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create log_tx_task");
-        esp_log_set_vprintf(s_orig_vprintf);
-        s_orig_vprintf = NULL;
         vSemaphoreDelete(s_mutex);
         s_mutex = NULL;
         free(s_ring);
@@ -259,6 +225,7 @@ void log_stream_start(uint8_t level)
         return;
     }
 
+    log_stream_emit(LOG_LEVEL_INFO, TAG, "remote stream started level=%u", level);
     ESP_LOGI(TAG, "Started (level=%d, ring=%d entries)", level, RING_CAPACITY);
 }
 
@@ -274,15 +241,6 @@ void log_stream_stop(void)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
-
-    /* Restore original vprintf */
-    if (s_orig_vprintf) {
-        esp_log_set_vprintf(s_orig_vprintf);
-        s_orig_vprintf = NULL;
-    }
-
-    /* Restore default log level */
-    esp_log_level_set("*", ESP_LOG_INFO);
 
     /* Free resources */
     if (s_mutex) {
@@ -312,4 +270,25 @@ void log_stream_set_level(uint8_t level)
 bool log_stream_is_active(void)
 {
     return s_active;
+}
+
+void log_stream_emit(uint8_t level, const char *tag, const char *fmt, ...)
+{
+    if (!s_active || level > s_level || tag == NULL || fmt == NULL) {
+        return;
+    }
+
+    char msg[LOG_LINE_MAX];
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    if (len <= 0) {
+        return;
+    }
+    size_t msg_len = (size_t)len;
+    if (msg_len >= sizeof(msg)) {
+        msg_len = sizeof(msg) - 1;
+    }
+    ring_push(level, esp_timer_get_time(), tag, msg, msg_len);
 }

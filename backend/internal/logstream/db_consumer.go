@@ -1,38 +1,42 @@
 package logstream
 
 import (
-	"sync/atomic"
+	"log/slog"
 	"time"
 
 	"ehome/backend/internal/models"
 	"gorm.io/gorm"
 )
 
-// DBConsumer persists log batches to the node_logs table.
-// It can be dynamically enabled/disabled via SetActive() — the persist_enabled
-// flag is a pure backend concern, NOT communicated to ESP32.
+// DBConsumer persists log batches to node_logs. Persistence is evaluated per
+// node from nodes.log_persist_enabled, so a server restart never loses the
+// configured policy and one node's switch never changes another node's logs.
 type DBConsumer struct {
-	db     *gorm.DB
-	active atomic.Bool
+	db *gorm.DB
 }
 
-// NewDBConsumer creates a new database log consumer.
-// Starts in inactive state — must be explicitly activated via SetActive(true).
 func NewDBConsumer(db *gorm.DB) *DBConsumer {
 	return &DBConsumer{db: db}
 }
 
 func (c *DBConsumer) Name() string { return "database" }
 
-func (c *DBConsumer) IsActive() bool { return c.active.Load() }
-
-// SetActive enables or disables DB persistence.
-func (c *DBConsumer) SetActive(active bool) {
-	c.active.Store(active)
-}
+// Always active as a bus consumer; Consume performs the per-node policy check.
+func (c *DBConsumer) IsActive() bool { return true }
 
 func (c *DBConsumer) Consume(batch LogBatch) {
 	if len(batch.Logs) == 0 {
+		return
+	}
+
+	var node models.Node
+	if err := c.db.Select("log_persist_enabled").Where("node_id = ?", batch.NodeID).First(&node).Error; err != nil {
+		if err != gorm.ErrRecordNotFound {
+			slog.Warn("logstream: failed to read persistence policy", "node_id", batch.NodeID, "error", err)
+		}
+		return
+	}
+	if !node.LogPersistEnabled {
 		return
 	}
 
@@ -50,9 +54,7 @@ func (c *DBConsumer) Consume(batch LogBatch) {
 		}
 	}
 
-	// Batch insert — single transaction for all rows
 	if err := c.db.CreateInBatches(rows, len(rows)).Error; err != nil {
-		// Log error but don't panic — bus will recover anyway
-		_ = err
+		slog.Warn("logstream: batch persistence failed", "node_id", batch.NodeID, "error", err)
 	}
 }
