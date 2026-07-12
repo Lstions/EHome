@@ -183,10 +183,10 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 
 		var drvData []drivers.SensorData
-		if evt.CommandIndex > 0 {
+		if evt.CommandTemplateID > 0 {
 			if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
 				var template models.ConfigTemplate
-				if err := c.db.First(&template, evt.CommandIndex).Error; err == nil && template.WriteData != "" {
+				if err := c.db.Where("id = ? AND node_id = ?", evt.CommandTemplateID, evt.DeviceID).First(&template).Error; err == nil && template.WriteData != "" {
 					drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
 					if err != nil {
 						logger.Infof("[%s] ParseDataWithCommand failed, falling back to ParseData: %v", evt.DeviceID, err)

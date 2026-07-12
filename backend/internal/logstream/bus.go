@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+
+	"ehome/backend/pkg/metrics"
 )
 
 // LogEntry represents a single structured system log line from an ESP32 collector.
@@ -40,6 +42,8 @@ const (
 type consumerWorker struct {
 	consumer LogConsumer
 	mailbox  chan LogBatch
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // LogEventBus owns one bounded ingress queue and one bounded serial worker per
@@ -89,7 +93,7 @@ func (bus *LogEventBus) Publish(batch LogBatch) {
 
 	select {
 	case <-bus.logChan:
-		bus.dropped.Add(1)
+		bus.recordDrop("ingress", "")
 	default:
 	}
 	select {
@@ -97,7 +101,7 @@ func (bus *LogEventBus) Publish(batch LogBatch) {
 	case <-bus.stopCh:
 	default:
 		// A racing dispatcher filled the channel again; preserve non-blocking behavior.
-		bus.dropped.Add(1)
+		bus.recordDrop("ingress", "")
 	}
 }
 
@@ -110,6 +114,7 @@ func (bus *LogEventBus) Register(consumer LogConsumer) {
 	worker := &consumerWorker{
 		consumer: consumer,
 		mailbox:  make(chan LogBatch, consumerMailboxSize),
+		done:     make(chan struct{}),
 	}
 	bus.mu.Lock()
 	if _, exists := bus.consumers[consumer.Name()]; exists || bus.stopped.Load() {
@@ -124,18 +129,27 @@ func (bus *LogEventBus) Register(consumer LogConsumer) {
 	slog.Info("logstream: consumer registered", "name", consumer.Name())
 }
 
-// Unregister detaches the consumer. Its worker exits on bus shutdown; this
-// avoids a close/send race while allowing an in-flight Consume to finish.
+// Unregister detaches and terminates a consumer worker. The mailbox is not
+// closed because fanout may hold a snapshot; done is safe to select on.
 func (bus *LogEventBus) Unregister(name string) {
 	bus.mu.Lock()
-	if _, exists := bus.consumers[name]; exists {
+	worker, exists := bus.consumers[name]
+	if exists {
 		delete(bus.consumers, name)
-		slog.Info("logstream: consumer unregistered", "name", name)
 	}
 	bus.mu.Unlock()
+	if exists {
+		worker.doneOnce.Do(func() { close(worker.done) })
+		slog.Info("logstream: consumer unregistered", "name", name)
+	}
 }
 
 func (bus *LogEventBus) DroppedCount() uint64 { return bus.dropped.Load() }
+
+func (bus *LogEventBus) recordDrop(stage, consumer string) {
+	bus.dropped.Add(1)
+	metrics.LogEventBusDroppedTotal.WithLabelValues(stage, consumer).Inc()
+}
 
 // Stop is idempotent and waits for the dispatcher plus every consumer worker.
 // It does not close ingress/mailbox channels, eliminating concurrent send/close
@@ -144,6 +158,15 @@ func (bus *LogEventBus) Stop() {
 	bus.stopOnce.Do(func() {
 		bus.stopped.Store(true)
 		close(bus.stopCh)
+		bus.mu.RLock()
+		workers := make([]*consumerWorker, 0, len(bus.consumers))
+		for _, worker := range bus.consumers {
+			workers = append(workers, worker)
+		}
+		bus.mu.RUnlock()
+		for _, worker := range workers {
+			worker.doneOnce.Do(func() { close(worker.done) })
+		}
 	})
 	bus.wg.Wait()
 }
@@ -175,19 +198,23 @@ func (bus *LogEventBus) fanout(batch LogBatch) {
 		select {
 		case worker.mailbox <- batch:
 			continue
+		case <-worker.done:
+			continue
 		default:
 		}
 		select {
 		case <-worker.mailbox:
-			bus.dropped.Add(1)
+			bus.recordDrop("consumer", worker.consumer.Name())
 		default:
 		}
 		select {
 		case worker.mailbox <- batch:
+		case <-worker.done:
+			return
 		case <-bus.stopCh:
 			return
 		default:
-			bus.dropped.Add(1)
+			bus.recordDrop("consumer", worker.consumer.Name())
 		}
 	}
 }
@@ -196,7 +223,7 @@ func (bus *LogEventBus) runConsumer(worker *consumerWorker) {
 	defer bus.wg.Done()
 	for {
 		select {
-		case <-bus.stopCh:
+		case <-worker.done:
 			return
 		case batch := <-worker.mailbox:
 			func() {

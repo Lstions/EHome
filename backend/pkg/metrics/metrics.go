@@ -206,4 +206,10 @@ var (
 		Name: "ehome_data_event_bus_dropped_total",
 		Help: "DataEventBus data reports dropped under backpressure",
 	})
+
+	// LogEventBusDroppedTotal counts log batches dropped by stage and consumer.
+	LogEventBusDroppedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_log_event_bus_dropped_total",
+		Help: "LogEventBus batches dropped under backpressure",
+	}, []string{"stage", "consumer"})
 )

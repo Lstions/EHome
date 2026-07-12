@@ -10,226 +10,207 @@ import (
 )
 
 // DataEvent represents a single data report from an ESP32 collector.
-// Created by the MQTT handler after parsing a DataReport (0x03) frame.
 type DataEvent struct {
-	DeviceID     string    // collector node_id
-	ChannelID    uint64    // channel ID
-	Timestamp    uint64    // ESP32 microsecond timestamp
-	Sequence     uint64    // sequence number
-	RawData      []byte    // raw data bytes
-	ErrorCode    uint64    // 0=ok, 0x01=RX timeout
-	RequestID    uint64    // 0=passive/terminal data, ≠0=command response
-	EdgeDeviceID uint64    // 0=unknown
-	CommandIndex uint64    // command template index
-	ReceivedAt   time.Time // backend receive time
+	DeviceID          string
+	ChannelID         uint64
+	Timestamp         uint64
+	Sequence          uint64
+	RawData           []byte
+	ErrorCode         uint64
+	RequestID         uint64
+	EdgeDeviceID      uint64
+	CommandIndex      uint64 // per-edge-device command array index
+	CommandTemplateID uint64 // ConfigTemplate.ID carried by firmware field 9
+	ReceivedAt        time.Time
 }
 
-// IsPassive returns true only for uncorrelated terminal/RX data. Scheduler
-// samples use request_id=0 too, but carry edge_device_id and must be parsed.
-func (e *DataEvent) IsPassive() bool {
-	return e.RequestID == 0 && e.EdgeDeviceID == 0
-}
-
-// IsCommandResponse returns true for pending write/read command responses.
-func (e *DataEvent) IsCommandResponse() bool {
-	return e.RequestID != 0
-}
-
-// IsScheduledSample returns true for scheduler reports addressed to a known
-// edge device. ESP32 emits these with request_id=0.
-func (e *DataEvent) IsScheduledSample() bool {
-	return e.RequestID == 0 && e.EdgeDeviceID != 0
-}
-
-// ShouldPersist returns true for reports that belong in device history.
-func (e *DataEvent) ShouldPersist() bool {
-	return !e.IsPassive()
-}
-
-// ShouldParse returns true for successful reports associated with an edge
-// device or a correlated command response.
+// IsPassive identifies uncorrelated terminal data. Scheduler samples use
+// request_id=0 too, but carry edge_device_id and must be parsed/stored.
+func (e *DataEvent) IsPassive() bool         { return e.RequestID == 0 && e.EdgeDeviceID == 0 }
+func (e *DataEvent) IsCommandResponse() bool { return e.RequestID != 0 }
+func (e *DataEvent) IsScheduledSample() bool { return e.RequestID == 0 && e.EdgeDeviceID != 0 }
+func (e *DataEvent) ShouldPersist() bool     { return !e.IsPassive() }
 func (e *DataEvent) ShouldParse() bool {
 	return e.ShouldPersist() && e.ErrorCode == 0 && len(e.RawData) > 0
 }
+func (e *DataEvent) IsError() bool { return e.ErrorCode != 0 }
 
-// IsError returns true for error reports (e.g. RX timeout).
-func (e *DataEvent) IsError() bool {
-	return e.ErrorCode != 0
-}
-
-// DataConsumer is the interface for all data event consumers.
-// Consumers execute in a fixed, panic-isolated worker pool.
+// DataConsumer handles one data-event category.
 type DataConsumer interface {
 	Name() string
 	ShouldHandle(evt DataEvent) bool
 	Handle(evt DataEvent)
 }
 
-// DataEventBus decouples the MQTT handler (producer) from data consumers.
-// It uses bounded ingress and worker queues, a fixed worker pool, and panic
-// recovery so slow consumers cannot create unbounded goroutines.
+const (
+	dataChanBufferSize  = 256
+	consumerMailboxSize = 64
+)
+
+type consumerWorker struct {
+	consumer DataConsumer
+	mailbox  chan DataEvent
+}
+
+// DataEventBus has bounded ingress and a dedicated bounded mailbox per
+// consumer. Slow parser/DB consumers can therefore never delay terminal/WS
+// delivery or create unbounded goroutines.
 type DataEventBus struct {
 	mu         sync.RWMutex
-	consumers  []DataConsumer
+	consumers  map[string]*consumerWorker
 	dataChan   chan DataEvent
-	workChan   chan consumerWork
-	wg         sync.WaitGroup
 	dispatchWG sync.WaitGroup
+	workerWG   sync.WaitGroup
 	dropped    atomic.Uint64
+	stopped    atomic.Bool
 	stopCh     chan struct{}
 	stopOnce   sync.Once
 }
 
-type consumerWork struct {
-	consumer DataConsumer
-	event    DataEvent
-}
-
-const (
-	dataChanBufferSize      = 256
-	dataConsumerWorkerCount = 8
-	dataConsumerQueueSize   = 256
-)
-
-// NewDataEventBus creates and starts a new data event bus.
 func NewDataEventBus() *DataEventBus {
 	bus := &DataEventBus{
-		dataChan: make(chan DataEvent, dataChanBufferSize),
-		workChan: make(chan consumerWork, dataConsumerQueueSize),
-		stopCh:   make(chan struct{}),
+		consumers: make(map[string]*consumerWorker),
+		dataChan:  make(chan DataEvent, dataChanBufferSize),
+		stopCh:    make(chan struct{}),
 	}
 	bus.dispatchWG.Add(1)
 	go bus.dispatch()
-	for i := 0; i < dataConsumerWorkerCount; i++ {
-		bus.wg.Add(1)
-		go bus.consume()
-	}
 	return bus
 }
 
-// Publish sends a data event to all active consumers.
-// It is non-blocking. During overload, the oldest queued event is dropped; after
-// shutdown it is a no-op so MQTT callbacks cannot panic during teardown.
+// Publish is non-blocking and safe after Stop. Under ingress pressure it drops
+// an oldest event to retain the latest state.
 func (bus *DataEventBus) Publish(evt DataEvent) {
+	if bus.stopped.Load() {
+		return
+	}
 	select {
 	case <-bus.stopCh:
 		return
 	default:
 	}
-
 	select {
 	case bus.dataChan <- evt:
 		return
 	default:
 	}
-
-	// Drop the oldest event while retaining the newest report. A concurrent
-	// dispatcher may empty the channel between these selects, so retry the send
-	// non-blockingly instead of risking a blocked MQTT callback.
 	select {
 	case <-bus.dataChan:
-		bus.dropped.Add(1)
-		metrics.DataEventBusDroppedTotal.Inc()
+		bus.recordDrop()
 	default:
 	}
 	select {
 	case bus.dataChan <- evt:
+	case <-bus.stopCh:
 	default:
-		bus.dropped.Add(1)
-		metrics.DataEventBusDroppedTotal.Inc()
+		bus.recordDrop()
 	}
 }
 
-// Register adds a consumer to the bus.
+func (bus *DataEventBus) recordDrop() {
+	bus.dropped.Add(1)
+	metrics.DataEventBusDroppedTotal.Inc()
+}
+
 func (bus *DataEventBus) Register(c DataConsumer) {
-	bus.mu.Lock()
-	defer bus.mu.Unlock()
-	for _, existing := range bus.consumers {
-		if existing.Name() == c.Name() {
-			return
-		}
+	if c == nil || bus.stopped.Load() {
+		return
 	}
-	bus.consumers = append(bus.consumers, c)
+	worker := &consumerWorker{consumer: c, mailbox: make(chan DataEvent, consumerMailboxSize)}
+	bus.mu.Lock()
+	if _, exists := bus.consumers[c.Name()]; exists || bus.stopped.Load() {
+		bus.mu.Unlock()
+		return
+	}
+	bus.consumers[c.Name()] = worker
+	bus.workerWG.Add(1)
+	bus.mu.Unlock()
+	go bus.runConsumer(worker)
 	slog.Info("databus: consumer registered", "name", c.Name())
 }
 
-// Unregister removes a consumer by name.
+// Unregister detaches a consumer. Its worker exits on bus shutdown; mailbox is
+// intentionally not closed because fanout can hold a read-only snapshot.
 func (bus *DataEventBus) Unregister(name string) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-	for i, c := range bus.consumers {
-		if c.Name() == name {
-			bus.consumers = append(bus.consumers[:i], bus.consumers[i+1:]...)
-			slog.Info("databus: consumer unregistered", "name", name)
-			return
-		}
+	if _, ok := bus.consumers[name]; ok {
+		delete(bus.consumers, name)
+		slog.Info("databus: consumer unregistered", "name", name)
 	}
+	bus.mu.Unlock()
 }
 
-// DroppedCount returns the number of events dropped due to backpressure.
-func (bus *DataEventBus) DroppedCount() uint64 {
-	return bus.dropped.Load()
-}
+func (bus *DataEventBus) DroppedCount() uint64 { return bus.dropped.Load() }
 
-// Stop shuts down dispatch and consumer workers after draining queued work.
-// It is safe to call repeatedly.
+// Stop is idempotent. MQTT producers observe stopped and cannot send to a
+// closed channel; workers terminate without close/send races.
 func (bus *DataEventBus) Stop() {
 	bus.stopOnce.Do(func() {
+		bus.stopped.Store(true)
 		close(bus.stopCh)
-		bus.dispatchWG.Wait()
-		bus.wg.Wait()
 	})
+	bus.dispatchWG.Wait()
+	bus.workerWG.Wait()
 }
 
-// dispatch fans out events to matching consumers via a bounded work queue.
 func (bus *DataEventBus) dispatch() {
 	defer bus.dispatchWG.Done()
-	defer close(bus.workChan)
-
 	for {
 		select {
+		case <-bus.stopCh:
+			return
 		case evt := <-bus.dataChan:
 			bus.fanout(evt)
-		case <-bus.stopCh:
-			for {
-				select {
-				case evt := <-bus.dataChan:
-					bus.fanout(evt)
-				default:
-					return
-				}
-			}
 		}
 	}
 }
 
-// fanout submits matching consumers to a bounded worker queue. If the queue is
-// full, dispatcher backpressure preserves ordering and prevents unbounded
-// goroutine creation.
 func (bus *DataEventBus) fanout(evt DataEvent) {
 	bus.mu.RLock()
-	consumers := make([]DataConsumer, len(bus.consumers))
-	copy(consumers, bus.consumers)
+	workers := make([]*consumerWorker, 0, len(bus.consumers))
+	for _, worker := range bus.consumers {
+		workers = append(workers, worker)
+	}
 	bus.mu.RUnlock()
-
-	for _, c := range consumers {
-		if !c.ShouldHandle(evt) {
+	for _, worker := range workers {
+		if !worker.consumer.ShouldHandle(evt) {
 			continue
 		}
-		bus.workChan <- consumerWork{consumer: c, event: evt}
+		select {
+		case worker.mailbox <- evt:
+			continue
+		default:
+		}
+		select {
+		case <-worker.mailbox:
+			bus.recordDrop()
+		default:
+		}
+		select {
+		case worker.mailbox <- evt:
+		case <-bus.stopCh:
+			return
+		default:
+			bus.recordDrop()
+		}
 	}
 }
 
-func (bus *DataEventBus) consume() {
-	defer bus.wg.Done()
-	for work := range bus.workChan {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					slog.Error("databus: consumer panic", "consumer", work.consumer.Name(), "panic", r)
-				}
+func (bus *DataEventBus) runConsumer(worker *consumerWorker) {
+	defer bus.workerWG.Done()
+	for {
+		select {
+		case <-bus.stopCh:
+			return
+		case evt := <-worker.mailbox:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("databus: consumer panic", "consumer", worker.consumer.Name(), "panic", r)
+					}
+				}()
+				worker.consumer.Handle(evt)
 			}()
-			work.consumer.Handle(work.event)
-		}()
+		}
 	}
 }

@@ -14,15 +14,16 @@ import (
 
 // dataReportJob represents a parsed DataReport ready for async processing
 type dataReportJob struct {
-	deviceID     string
-	channelID    uint64
-	timestamp    uint64
-	sequence     uint64
-	rawData      []byte
-	errorCode    uint64
-	requestID    uint64
-	edgeDeviceID uint64
-	commandIndex uint64
+	deviceID          string
+	channelID         uint64
+	timestamp         uint64
+	sequence          uint64
+	rawData           []byte
+	errorCode         uint64
+	requestID         uint64
+	edgeDeviceID      uint64
+	commandIndex      uint64
+	commandTemplateID uint64
 }
 
 const (
@@ -90,16 +91,17 @@ func (m *Manager) processDataReportJob(job dataReportJob) {
 	}
 
 	evt := databus.DataEvent{
-		DeviceID:     job.deviceID,
-		ChannelID:    job.channelID,
-		Timestamp:    job.timestamp,
-		Sequence:     job.sequence,
-		RawData:      job.rawData,
-		ErrorCode:    job.errorCode,
-		RequestID:    job.requestID,
-		EdgeDeviceID: job.edgeDeviceID,
-		CommandIndex: job.commandIndex,
-		ReceivedAt:   time.Now(),
+		DeviceID:          job.deviceID,
+		ChannelID:         job.channelID,
+		Timestamp:         job.timestamp,
+		Sequence:          job.sequence,
+		RawData:           job.rawData,
+		ErrorCode:         job.errorCode,
+		RequestID:         job.requestID,
+		EdgeDeviceID:      job.edgeDeviceID,
+		CommandIndex:      job.commandIndex,
+		CommandTemplateID: job.commandTemplateID,
+		ReceivedAt:        time.Now(),
 	}
 
 	// Publish to event bus — consumers handle everything

@@ -142,7 +142,8 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status,
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t sequence, const uint8_t *raw_data, size_t raw_len,
                                   uint32_t error_code, uint32_t request_id,
-                                  uint32_t edge_device_id, uint8_t command_index)
+                                  uint32_t edge_device_id, uint32_t command_template_id,
+                                  uint8_t command_index)
 {
     uint8_t buf[512];
     frame_encoder_t enc;
@@ -162,6 +163,10 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
     /* v2.3: edge_device_id + command_index for multi-command routing */
     if (edge_device_id != 0) {
         frame_encode_varint(&enc, 7, edge_device_id);
+    }
+    if (command_template_id != 0) {
+        /* Field 9: actual ConfigTemplate.ID, distinct from per-device index. */
+        frame_encode_varint(&enc, 9, command_template_id);
     }
     if (command_index > 0 || edge_device_id != 0) {
         /* command_index 为 0 时也编码（只要有 edge_device_id） */

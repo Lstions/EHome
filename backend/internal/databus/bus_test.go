@@ -251,14 +251,13 @@ func TestDataEventBus_BoundsConsumerConcurrency(t *testing.T) {
 		bus.Publish(DataEvent{Sequence: uint64(i)})
 	}
 
-	// A bus must not start an unbounded goroutine per event. Give the scheduler
-	// enough time to fill its fixed worker pool, then verify it cannot start all
-	// 16 blocked handlers concurrently.
+	// Each consumer has one serial worker, so no more than one blocked handler
+	// can run for this consumer regardless of event volume.
 	time.Sleep(100 * time.Millisecond)
-	if got := len(consumer.started); got > dataConsumerWorkerCount {
+	if got := len(consumer.started); got > 1 {
 		close(release)
 		bus.Stop()
-		t.Fatalf("started %d handlers concurrently; worker bound is %d", got, dataConsumerWorkerCount)
+		t.Fatalf("started %d handlers concurrently; per-consumer bound is 1", got)
 	}
 
 	close(release)
@@ -320,7 +319,9 @@ func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 9,
-		CommandIndex: uint64(template.ID), RawData: []byte("response"),
+		CommandIndex:      uint64(template.ID % 256),
+		CommandTemplateID: uint64(template.ID),
+		RawData:           []byte("response"),
 	})
 
 	select {

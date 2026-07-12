@@ -362,6 +362,7 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
                 .delay_ms       = t->delay_ms > 0 ? t->delay_ms : 0,
                 .read_size      = t->read_length,  /* P1-8: pass read_length for rx_task metadata */
                 .edge_device_id = dev->edge_device_id,
+                .command_template_id = scmd->template_id,
                 .command_index  = (uint8_t)ci,
                 .type           = CMD_SAMPLE,
             };

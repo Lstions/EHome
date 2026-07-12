@@ -17,6 +17,7 @@ import (
 
 // P1-4: Backpressure — overflow goroutine limit for when worker pool is full
 var overflowGoroutines int64
+
 const maxOverflowGoroutines = 50
 
 // handleDataReport processes DataReport (type=0x03)
@@ -31,7 +32,7 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	var channelID, timestamp, sequence uint64
 	var rawData []byte
 	var errorCode, requestID uint64
-	var edgeDeviceID, commandIndex uint64
+	var edgeDeviceID, commandIndex, commandTemplateID uint64
 
 	for {
 		field, err := dec.NextField()
@@ -55,6 +56,8 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 			edgeDeviceID = frame.GetUint64(field)
 		case 8:
 			commandIndex = frame.GetUint64(field)
+		case 9:
+			commandTemplateID = frame.GetUint64(field)
 		}
 	}
 
@@ -71,15 +74,16 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 	// Dispatch to worker pool (non-blocking)
 	// P1-4: collectorID resolved in worker, not in MQTT callback
 	job := dataReportJob{
-		deviceID:     deviceID,
-		channelID:    channelID,
-		timestamp:    timestamp,
-		sequence:     sequence,
-		rawData:      rawData,
-		errorCode:    errorCode,
-		requestID:    requestID,
-		edgeDeviceID: edgeDeviceID,
-		commandIndex: commandIndex,
+		deviceID:          deviceID,
+		channelID:         channelID,
+		timestamp:         timestamp,
+		sequence:          sequence,
+		rawData:           rawData,
+		errorCode:         errorCode,
+		requestID:         requestID,
+		edgeDeviceID:      edgeDeviceID,
+		commandIndex:      commandIndex,
+		commandTemplateID: commandTemplateID,
 	}
 
 	select {
@@ -172,7 +176,6 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 	if !found {
 		return nil
 	}
-
 
 	// Primary path: try DeviceConfig.Parser JSONB (unified ConfigParser)
 	var sensorData []parser.Field
@@ -298,10 +301,10 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 			"timestamp":  time.Now().UnixMilli(),
 		})
 		m.db.Create(&models.DeviceData{
-			DeviceID:    device.ID,
-			NodeID: deviceID,
-			DataJSON:    string(dataJSON),
-			Timestamp:   time.Now(),
+			DeviceID:  device.ID,
+			NodeID:    deviceID,
+			DataJSON:  string(dataJSON),
+			Timestamp: time.Now(),
 		})
 	}
 
@@ -324,9 +327,9 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 			"device_id":      device.ID, // v2.1 字段名 (保留兼容前端)
 			"edge_device_id": device.ID, // v2.2 新增 (同一值)
 			"device_name":    device.Name,
-			"collector_id":   collectorID, // v2.1 字段名
+			"collector_id":   collectorID,      // v2.1 字段名
 			"collector_name": device.Node.Name, // v2.2 新增
-			"node_id":        collectorID, // v2.2 新增 (同一值)
+			"node_id":        collectorID,      // v2.2 新增 (同一值)
 			"channel_id":     channelID,
 			"data":           dataMap,
 			"collected_at":   time.Now().Format(time.RFC3339),

@@ -39,7 +39,8 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status,
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t sequence, const uint8_t *raw_data, size_t raw_len,
                                   uint32_t error_code, uint32_t request_id,
-                                  uint32_t edge_device_id, uint8_t command_index);
+                                  uint32_t edge_device_id, uint32_t command_template_id,
+                                  uint8_t command_index);
 void msg_handler_send_config_result(const char *manifest_id, bool success);
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                 uint32_t error_code, const char *error_msg);

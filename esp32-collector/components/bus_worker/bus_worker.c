@@ -117,6 +117,7 @@ static void enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
 {
  pending_cmd_t pcmd = {
   .edge_device_id  = cmd->edge_device_id,
+  .command_template_id = cmd->command_template_id,
   .command_index   = cmd->command_index,
   .request_id      = (cmd->type == CMD_SAMPLE) ? 0 : cmd->request_id,
   .read_size       = cmd->read_size,
@@ -274,7 +275,7 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
     if (cmd.read_size > 0 && rl > 0) {
      uint64_t ts = esp_timer_get_time();
      if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0, rx, rl, 0,
-      cmd.request_id, cmd.edge_device_id, cmd.command_index);
+      cmd.request_id, cmd.edge_device_id, cmd.command_template_id, cmd.command_index);
     }
    } else {
     errs++;
@@ -291,7 +292,7 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
     if (rl > 0) {
      uint64_t ts = esp_timer_get_time();
      if (s_data_rpt_cb) s_data_rpt_cb(cmd.channel_id, ts, 0, rx, rl, 0,
-      0, cmd.edge_device_id, cmd.command_index);
+      0, cmd.edge_device_id, cmd.command_template_id, cmd.command_index);
    }
   } else {
     errs++;
@@ -418,7 +419,7 @@ static void rx_task(void *pv)
        if (s_data_rpt_cb) {
         s_data_rpt_cb(rt->bus_ch[i], ts, 0,
          s->buffer, s->len, 0,
-         pcmd.request_id, pcmd.edge_device_id, pcmd.command_index);
+         pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
        }
        /* Pop the pending cmd — response is complete */
        xQueueReceive(rt->pending_queues[i], &pcmd, 0);
@@ -431,7 +432,7 @@ static void rx_task(void *pv)
       if (s_data_rpt_cb) {
        s_data_rpt_cb(rt->bus_ch[i], ts, 0,
         s->buffer, s->len, 0,
-        0, 0, 0);
+        0, 0, 0, 0);
       }
       hits++;
      }
@@ -462,7 +463,7 @@ static void rx_task(void *pv)
       if (s_data_rpt_cb) {
        uint64_t ts = (uint64_t)esp_timer_get_time();
        s_data_rpt_cb(rt->bus_ch[i], ts, 0, NULL, 0,
-        0x01, pcmd.request_id, pcmd.edge_device_id, pcmd.command_index);
+        0x01, pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
       }
       continue; /* drop — timed out */
      }
