@@ -5,6 +5,7 @@
 #include "frame_codec.h"
 #include "data_report_codec.h"
 #include "log_stream_codec.h"
+#include "scheduler_queue_guard.h"
 
 static int s_failures;
 
@@ -131,12 +132,19 @@ static void test_log_stream_rejects_invalid_inputs_and_capacity(void)
           "undersized buffer must report overflow");
 }
 
+static void test_scheduler_queue_guard(void)
+{
+    CHECK(!scheduler_queue_is_present(NULL), "NULL queue must be rejected before FreeRTOS API calls");
+    CHECK(scheduler_queue_is_present((const void *)0x1), "non-NULL queue must be accepted");
+}
+
 int main(void)
 {
     test_data_report_encodes_template_id_as_field_9();
     test_data_report_omits_optional_routing_fields_when_zero();
     test_log_stream_entry_is_a_raw_subframe();
     test_log_stream_rejects_invalid_inputs_and_capacity();
+    test_scheduler_queue_guard();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", s_failures);

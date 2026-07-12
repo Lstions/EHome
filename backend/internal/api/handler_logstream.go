@@ -80,9 +80,12 @@ func updateLogConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			return
 		}
 
-		// Trigger config sync to push new manifest (with log_stream field) to ESP32
-		if err := nodeMgr.TriggerConfigSync(node.NodeID); err != nil {
-			logger.Warnf("Failed to trigger config sync for %s: %v", node.NodeID, err)
+		// Trigger config sync to push new manifest (with log_stream field) to ESP32.
+		// A nil manager is valid in API-only tests and offline maintenance tools.
+		if nodeMgr != nil {
+			if err := nodeMgr.TriggerConfigSync(node.NodeID); err != nil {
+				logger.Warnf("Failed to trigger config sync for %s: %v", node.NodeID, err)
+			}
 		}
 
 		c.JSON(http.StatusOK, gin.H{
@@ -182,7 +185,9 @@ func getNodeLogs(db *gorm.DB) gin.HandlerFunc {
 
 		// Keyword search
 		if q := c.Query("q"); q != "" {
-			query = query.Where("message ILIKE ?", "%"+q+"%")
+			// LOWER + LIKE works on PostgreSQL and SQLite test databases; ILIKE is
+			// PostgreSQL-only and made this query path untestable in SQLite.
+			query = query.Where("LOWER(message) LIKE LOWER(?)", "%"+q+"%")
 		}
 
 		// Count total

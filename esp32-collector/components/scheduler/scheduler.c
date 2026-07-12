@@ -13,6 +13,7 @@
  */
 
 #include "scheduler.h"
+#include "scheduler_queue_guard.h"
 #include "config_mgr.h"
 #include "cmd_queue.h"
 #include "bus_dma.h"
@@ -54,7 +55,7 @@ static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t
  * per-channel dispatch path below rejects a command whose own queue is absent. */
 static UBaseType_t queue_spaces_or_depth(QueueHandle_t queue)
 {
-    return queue != NULL ? uxQueueSpacesAvailable(queue) : CMD_QUEUE_DEPTH;
+    return scheduler_queue_is_present(queue) ? uxQueueSpacesAvailable(queue) : CMD_QUEUE_DEPTH;
 }
 
 /* ── derive uart_port_t from bus_config bytes via hw_tables ── */
@@ -378,7 +379,7 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
 
             bcmd.uart_port = derive_uart_port(&ch->config);
             QueueHandle_t target_q = dispatch_queue(&s_queues, &bcmd);
-            if (target_q == NULL || xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
+            if (!scheduler_queue_is_present(target_q) || xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
                 (*queue_full_count)++;
                 scmd->error_count++;
                 if (scmd->error_count > 100) scmd->error_count = 100;
@@ -459,7 +460,7 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
 
     cmd.uart_port = derive_uart_port(&ch->config);
     QueueHandle_t target_q = dispatch_queue(&s_queues, &cmd);
-    if (target_q == NULL || xQueueSend(target_q, &cmd, 0) != pdTRUE) {
+    if (!scheduler_queue_is_present(target_q) || xQueueSend(target_q, &cmd, 0) != pdTRUE) {
         (*queue_full_count)++;
     } else {
         (*total_samples)++;

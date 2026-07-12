@@ -88,7 +88,10 @@ func newConsumerTestDB(t *testing.T) *gorm.DB {
 func (c *blockingDataConsumer) Name() string                    { return c.name }
 func (c *blockingDataConsumer) ShouldHandle(evt DataEvent) bool { return true }
 func (c *blockingDataConsumer) Handle(evt DataEvent) {
-	c.started <- struct{}{}
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
 	<-c.release
 }
 
@@ -275,6 +278,35 @@ func TestDataEventBus_BoundsConsumerConcurrency(t *testing.T) {
 		t.Fatal("slow consumer blocked independent fast consumer")
 	}
 
+	close(release)
+	bus.Stop()
+}
+
+func TestDataEventBus_DropsWhenConsumerMailboxIsFull(t *testing.T) {
+	bus := NewDataEventBus()
+	release := make(chan struct{})
+	consumer := &blockingDataConsumer{name: "blocked-drop", started: make(chan struct{}, 1), release: release}
+	bus.Register(consumer)
+	bus.Publish(DataEvent{Sequence: 0})
+	select {
+	case <-consumer.started:
+	case <-time.After(time.Second):
+		close(release)
+		bus.Stop()
+		t.Fatal("blocking consumer did not start")
+	}
+	for i := 1; i < consumerMailboxSize+8; i++ {
+		bus.Publish(DataEvent{Sequence: uint64(i)})
+	}
+	deadline := time.Now().Add(time.Second)
+	for bus.DroppedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if bus.DroppedCount() == 0 {
+		close(release)
+		bus.Stop()
+		t.Fatal("full consumer mailbox must increment dropped count")
+	}
 	close(release)
 	bus.Stop()
 }

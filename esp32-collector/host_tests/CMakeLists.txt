@@ -15,6 +15,7 @@ target_include_directories(protocol_log_tests PRIVATE
     ../components/frame
     ../components/msg_handler
     ../components/log_stream
-    ../components/log_stream/include)
+    ../components/log_stream/include
+    ../components/scheduler)
 target_compile_options(protocol_log_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME protocol_log_tests COMMAND protocol_log_tests)

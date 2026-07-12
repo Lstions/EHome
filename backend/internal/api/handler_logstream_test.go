@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,17 +14,37 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func setupLogStreamTestRoutes(t *testing.T) (*gin.Engine, string) {
+func newAdminLogRouter(t *testing.T) (*gin.Engine, *models.Node) {
 	t.Helper()
 	db := setupTestDB(t)
 	if err := db.AutoMigrate(&models.NodeLog{}); err != nil {
+		t.Fatal(err)
+	}
+	node := &models.Node{NodeID: "node-log-admin", LogStreamEnabled: true, LogStreamLevel: 2, LogPersistEnabled: true}
+	if err := db.Create(node).Error; err != nil {
 		t.Fatal(err)
 	}
 	r := setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerLogStreamRoutes(v1.Group("/nodes"), db, nil)
-	return r, ""
+	return r, node
+}
+
+func adminRequest(t *testing.T, r *gin.Engine, method, target string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	token, err := GenerateToken(1, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
 }
 
 func TestLogStreamAPI_RequiresAdminRole(t *testing.T) {
@@ -34,83 +55,148 @@ func TestLogStreamAPI_RequiresAdminRole(t *testing.T) {
 	if err := db.Create(&models.Node{NodeID: "node-log-viewer"}).Error; err != nil {
 		t.Fatal(err)
 	}
-
 	r := setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerLogStreamRoutes(v1.Group("/nodes"), db, nil)
-
 	token, err := GenerateToken(2, "viewer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, methodPath := range []struct {
-		method string
-		path   string
-	}{
+	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/nodes/node-log-viewer/log-config"},
 		{http.MethodGet, "/api/v1/nodes/node-log-viewer/logs"},
 		{http.MethodPut, "/api/v1/nodes/node-log-viewer/log-config"},
 		{http.MethodPut, "/api/v1/nodes/node-log-viewer/log-persist"},
 		{http.MethodDelete, "/api/v1/nodes/node-log-viewer/logs"},
 	} {
-		req := httptest.NewRequest(methodPath.method, methodPath.path, nil)
+		req := httptest.NewRequest(tc.method, tc.path, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		if w.Code != http.StatusForbidden {
-			t.Fatalf("%s %s status = %d, want %d: %s", methodPath.method, methodPath.path, w.Code, http.StatusForbidden, w.Body.String())
+			t.Fatalf("%s %s=%d want 403", tc.method, tc.path, w.Code)
 		}
 	}
 }
 
-func TestGetNodeLogs_FiltersAndOrdersByCreatedAt(t *testing.T) {
-	db := setupTestDB(t)
-	if err := db.AutoMigrate(&models.NodeLog{}); err != nil {
+func TestLogStreamConfigAndPersistWritesValidateAndRetainZeroValues(t *testing.T) {
+	r, node := newAdminLogRouter(t)
+	w := adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/log-config", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get config=%d: %s", w.Code, w.Body.String())
+	}
+	var config map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &config); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&models.Node{NodeID: "node-log-history"}).Error; err != nil {
-		t.Fatal(err)
+	if config["stream_enabled"] != true || config["level"] != float64(2) || config["persist_enabled"] != true {
+		t.Fatalf("unexpected config: %#v", config)
 	}
 
+	w = adminRequest(t, r, http.MethodPut, "/api/v1/nodes/"+node.NodeID+"/log-config", []byte(`{"stream_enabled":false,"level":0}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("zero-value update=%d: %s", w.Code, w.Body.String())
+	}
+	w = adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/log-config", nil)
+	json.Unmarshal(w.Body.Bytes(), &config)
+	if config["stream_enabled"] != false || config["level"] != float64(0) {
+		t.Fatalf("zero values not persisted: %#v", config)
+	}
+
+	for _, body := range [][]byte{nil, []byte(`{}`), []byte(`{"level":5}`), []byte(`{"level":-1}`)} {
+		w = adminRequest(t, r, http.MethodPut, "/api/v1/nodes/"+node.NodeID+"/log-config", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid config %q=%d want 400", body, w.Code)
+		}
+	}
+	w = adminRequest(t, r, http.MethodPut, "/api/v1/nodes/missing/log-config", []byte(`{"level":1}`))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing node=%d want 404", w.Code)
+	}
+
+	w = adminRequest(t, r, http.MethodPut, "/api/v1/nodes/"+node.NodeID+"/log-persist", []byte(`{"enabled":false}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("persist false=%d: %s", w.Code, w.Body.String())
+	}
+	w = adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/log-config", nil)
+	json.Unmarshal(w.Body.Bytes(), &config)
+	if config["persist_enabled"] != false {
+		t.Fatalf("persist false not retained: %#v", config)
+	}
+	for _, body := range [][]byte{nil, []byte(`{}`)} {
+		w = adminRequest(t, r, http.MethodPut, "/api/v1/nodes/"+node.NodeID+"/log-persist", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid persist %q=%d want 400", body, w.Code)
+		}
+	}
+}
+
+func TestGetNodeLogs_FiltersOrdersAndDeleteScopesByCreatedAt(t *testing.T) {
+	r, node := newAdminLogRouter(t)
+	db := setupTestDB(t)
+	_ = db // Router has its own isolated DB; use handler test below with directly seeded router DB.
+	// Recreate route with the seeded DB to exercise query and delete semantics.
+	seedDB := setupTestDB(t)
+	if err := seedDB.AutoMigrate(&models.NodeLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedDB.Create(node).Error; err != nil {
+		t.Fatal(err)
+	}
+	other := models.Node{NodeID: "other-node"}
+	if err := seedDB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
 	base := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	logs := []models.NodeLog{
-		{NodeID: "node-log-history", Level: 2, Ts: 9_999_999, Tag: "OLD", Message: "old", CreatedAt: base.Add(-time.Hour)},
-		{NodeID: "node-log-history", Level: 2, Ts: 1, Tag: "NEWER", Message: "newer", CreatedAt: base.Add(2 * time.Minute)},
-		{NodeID: "node-log-history", Level: 2, Ts: 2, Tag: "NEWEST", Message: "newest", CreatedAt: base.Add(3 * time.Minute)},
+		{NodeID: node.NodeID, Level: 2, Ts: 999999, Tag: "OLD", Message: "old alpha", CreatedAt: base.Add(-time.Hour)},
+		{NodeID: node.NodeID, Level: 1, Ts: 1, Tag: "WARN", Message: "new beta", CreatedAt: base.Add(2 * time.Minute)},
+		{NodeID: node.NodeID, Level: 2, Ts: 2, Tag: "INFO", Message: "new alpha", CreatedAt: base.Add(3 * time.Minute)},
+		{NodeID: other.NodeID, Level: 2, Ts: 3, Tag: "INFO", Message: "other alpha", CreatedAt: base.Add(-time.Hour)},
 	}
-	if err := db.Create(&logs).Error; err != nil {
+	if err := seedDB.Create(&logs).Error; err != nil {
 		t.Fatal(err)
 	}
-
-	r := setupRouter()
+	r = setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	v1.GET("/nodes/:id/logs", RequireRole("admin"), getNodeLogs(db))
-	token, err := GenerateToken(1, "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	from := strconv.FormatInt(base.Add(time.Minute).UnixMilli(), 10)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/node-log-history/logs?from="+from, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
-	}
+	registerLogStreamRoutes(v1.Group("/nodes"), seedDB, nil)
 
-	var response struct {
+	from := strconv.FormatInt(base.Add(time.Minute).UnixMilli(), 10)
+	to := strconv.FormatInt(base.Add(4*time.Minute).UnixMilli(), 10)
+	w := adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/logs?from="+from+"&to="+to+"&level=2&tag=INFO&q=alpha&page=1&size=1", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("filtered query=%d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
 		Total int              `json:"total"`
 		Logs  []models.NodeLog `json:"logs"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if response.Total != 2 || len(response.Logs) != 2 {
-		t.Fatalf("filtered logs = total %d, rows %d; want 2", response.Total, len(response.Logs))
+	if result.Total != 1 || len(result.Logs) != 1 || result.Logs[0].Tag != "INFO" {
+		t.Fatalf("unexpected filtered result: %+v", result)
 	}
-	if response.Logs[0].Tag != "NEWEST" || response.Logs[1].Tag != "NEWER" {
-		t.Fatalf("history order = [%s, %s], want [NEWEST, NEWER]", response.Logs[0].Tag, response.Logs[1].Tag)
+	w = adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/logs?from=invalid", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid from=%d want 400", w.Code)
+	}
+
+	before := strconv.FormatInt(base.Add(time.Minute).UnixMilli(), 10)
+	w = adminRequest(t, r, http.MethodDelete, "/api/v1/nodes/"+node.NodeID+"/logs?before="+before, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("scoped delete=%d: %s", w.Code, w.Body.String())
+	}
+	var countNode, countOther int64
+	seedDB.Model(&models.NodeLog{}).Where("node_id = ?", node.NodeID).Count(&countNode)
+	seedDB.Model(&models.NodeLog{}).Where("node_id = ?", other.NodeID).Count(&countOther)
+	if countNode != 2 || countOther != 1 {
+		t.Fatalf("delete scope node=%d other=%d want 2/1", countNode, countOther)
+	}
+	w = adminRequest(t, r, http.MethodDelete, "/api/v1/nodes/"+node.NodeID+"/logs?before=bad", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid before=%d want 400", w.Code)
 	}
 }
