@@ -120,7 +120,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Lint (type-check)
-        run: npx vue-tsc --noEmit || true
+        run: pnpm typecheck
 
       - name: Run unit tests with coverage
         run: pnpm test:coverage
