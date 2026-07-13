@@ -1,288 +1,291 @@
 /**
  * @file log_stream.c
- * @brief ESP32 System Log Stream implementation
+ * @brief ESP32 native log capture and remote stream implementation.
  *
- * Architecture:
- *   vprintf hook → ring buffer → log_tx_task → MQTT MsgLogStream (0x1D)
- *
- * ESP-IDF v6.0 does not safely support replacing the global vprintf handler
- * in this collector runtime, so system modules emit structured entries via
- * log_stream_emit(). The stream keeps UART logging untouched.
+ * Architecture: IDF v6 esp_log link wrapper -> one bounded log_capture ring ->
+ * log_tx_task -> MQTT MsgLogStream (0x1D). Explicit log_stream_emit() calls use
+ * the same capture ring as native ESP_LOG calls.
  */
 
 #include "log_stream.h"
 #include "log_stream_codec.h"
+#include "log_capture.h"
+#include "log_capture_esp.h"
 #include "frame_codec.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include <string.h>
 #include <stdarg.h>
-#include <stdio.h>
+#include <stdatomic.h>
 
 #define TAG "LOG_STREAM"
 
-/* === Configuration === */
-#define LOG_RING_BUF_SIZE   4096
-#define LOG_LINE_MAX        96      // bounded structured message payload
-#define LOG_BATCH_MAX       4       // bounded batch limits peak RAM and MQTT work
-#define LOG_TX_INTERVAL_MS  200     // send interval (less frequent = less MQTT load)
-#define LOG_TX_STACK        1536    // static buffers keep task stack small
-#define LOG_TX_PRIO         5       /* below rx_task(7) and cmd_task(6) */
-#define LOG_TX_BUF_SIZE     768     // 4 compact entries fit within this bound
+#define LOG_BATCH_MAX       4
+#define LOG_TX_INTERVAL_MS  200
+#define LOG_TX_STACK        1536
+#define LOG_TX_PRIO         5
+#define LOG_TX_BUF_SIZE     768
+#define RING_CAPACITY       4
+#define LOG_TASK_EXITED_BIT BIT0
+#define LOG_TASK_STOP_TIMEOUT_MS 1000
+#define LOG_CAPTURE_USER_TIMEOUT_MS 100
 
-/* === Message type === */
-#define MSG_LOG_STREAM      0x1D
+typedef enum {
+    LOG_STREAM_STOPPED = 0,
+    LOG_STREAM_STARTING,
+    LOG_STREAM_RUNNING,
+    LOG_STREAM_STOPPING,
+} log_stream_state_t;
 
-/* === Ring buffer entry === */
-typedef struct {
-    uint8_t  level;
-    uint64_t ts_us;
-    uint8_t  tag_len;
-    char     tag[32];
-    uint16_t msg_len;
-    char     msg[LOG_LINE_MAX];
-} log_entry_t;
-
-/* === State === */
-static SemaphoreHandle_t s_mutex = NULL;
-static log_entry_t *s_ring = NULL;       /* array of LOG_BATCH_MAX*... entries */
-static int s_ring_head = 0;              /* write index */
-static int s_ring_tail = 0;              /* read index */
-static int s_ring_count = 0;             /* entries in buffer */
-#define RING_CAPACITY 4                  /* 4 * 152B = 608B heap */
-
-static TaskHandle_t s_task = NULL;
-static bool s_active = false;
-static uint8_t s_level = LOG_LEVEL_INFO;
-static uint16_t s_seq = 0;
-static log_stream_publish_fn_t s_publish = NULL;
-
-/* TX buffers are static to avoid task-stack overflow. */
-static log_entry_t s_tx_batch[LOG_BATCH_MAX];
+/* Capture storage is static so a wrapper that was already in flight at detach
+ * can never observe freed memory. log_capture_esp_detach() also waits for such
+ * readers before stop returns or a subsequent start reinitializes the ring. */
+static log_capture_t s_capture;
+static log_capture_entry_t s_ring[RING_CAPACITY];
+static log_capture_entry_t s_tx_batch[LOG_BATCH_MAX];
 static uint8_t s_tx_buf[LOG_TX_BUF_SIZE];
 
-/* === Ring buffer operations (mutex-protected) === */
+static _Atomic(TaskHandle_t) s_task;
+static atomic_uint s_state;
+static atomic_uint s_capture_users;
+static uint16_t s_seq;
+static _Atomic(log_stream_publish_fn_t) s_publish;
+static StaticEventGroup_t s_task_events_storage;
+static EventGroupHandle_t s_task_events;
 
-static void ring_push(uint8_t level, uint64_t ts, const char *tag, const char *msg, size_t msg_len)
+/* Compile-time gate for firmware-owned known storage plus configured task stack.
+ * Static ring/TX/control storage is resident even while disabled. This is only a
+ * lower-bound accounting gate: dynamically allocated TCB, allocator metadata,
+ * per-task TLS, and target runtime overhead require C6/S3 hardware measurement. */
+#define LOG_STREAM_OWNED_RAM_BUDGET_BYTES 4096U
+#define LOG_STREAM_OWNED_RAM_BYTES ( \
+    sizeof(s_capture) + sizeof(s_ring) + sizeof(s_tx_batch) + sizeof(s_tx_buf) + \
+    LOG_TX_STACK + sizeof(s_task) + sizeof(s_state) + sizeof(s_capture_users) + \
+    sizeof(s_seq) + sizeof(s_publish) + sizeof(s_task_events_storage) + \
+    sizeof(s_task_events))
+_Static_assert(LOG_STREAM_OWNED_RAM_BYTES <= LOG_STREAM_OWNED_RAM_BUDGET_BYTES,
+               "log_stream firmware-owned static/stack/control RAM exceeds budget");
+
+static uint8_t bounded_level(uint8_t level)
 {
-    /* vprintf hook can run inside arbitrary IDF task/critical contexts.
-     * It must never block: drop a log line if the drain task owns the mutex. */
-    if (s_mutex == NULL || xPortInIsrContext()) {
-        return;
-    }
-    if (xSemaphoreTake(s_mutex, 0) != pdTRUE) {
-        return;
-    }
-
-    if (s_ring_count >= RING_CAPACITY) {
-        /* Overflow: drop oldest by advancing tail */
-        s_ring_tail = (s_ring_tail + 1) % RING_CAPACITY;
-        s_ring_count--;
-    }
-
-    log_entry_t *e = &s_ring[s_ring_head];
-    e->level = level;
-    e->ts_us = ts;
-    e->tag_len = (uint8_t)(strlen(tag) < sizeof(e->tag) ? strlen(tag) : sizeof(e->tag) - 1);
-    memcpy(e->tag, tag, e->tag_len);
-    e->tag[e->tag_len] = '\0';
-    if (msg_len > LOG_LINE_MAX - 1) msg_len = LOG_LINE_MAX - 1;
-    e->msg_len = (uint16_t)msg_len;
-    memcpy(e->msg, msg, msg_len);
-    e->msg[msg_len] = '\0';
-
-    s_ring_head = (s_ring_head + 1) % RING_CAPACITY;
-    s_ring_count++;
-
-    xSemaphoreGive(s_mutex);
+    return level > LOG_LEVEL_VERBOSE ? LOG_LEVEL_VERBOSE : level;
 }
 
-static int ring_drain(log_entry_t *out, int max)
+static void maybe_finish_stop(void)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    int n = 0;
-    while (s_ring_count > 0 && n < max) {
-        out[n] = s_ring[s_ring_tail];
-        s_ring_tail = (s_ring_tail + 1) % RING_CAPACITY;
-        s_ring_count--;
-        n++;
+    if (atomic_load_explicit(&s_task, memory_order_seq_cst) == NULL &&
+        atomic_load_explicit(&s_capture_users, memory_order_seq_cst) == 0) {
+        unsigned expected = LOG_STREAM_STOPPING;
+        (void)atomic_compare_exchange_strong_explicit(
+            &s_state, &expected, LOG_STREAM_STOPPED,
+            memory_order_seq_cst, memory_order_seq_cst);
     }
-    xSemaphoreGive(s_mutex);
-    return n;
 }
 
-/* === log_tx_task: batch publish === */
+static bool capture_user_enter(void)
+{
+    atomic_fetch_add_explicit(&s_capture_users, 1, memory_order_seq_cst);
+    if (atomic_load_explicit(&s_state, memory_order_seq_cst) != LOG_STREAM_RUNNING) {
+        atomic_fetch_sub_explicit(&s_capture_users, 1, memory_order_seq_cst);
+        maybe_finish_stop();
+        return false;
+    }
+    return true;
+}
+
+static void capture_user_leave(void)
+{
+    atomic_fetch_sub_explicit(&s_capture_users, 1, memory_order_seq_cst);
+    maybe_finish_stop();
+}
 
 static void log_tx_task(void *pv)
 {
-    /* Don't use ESP_LOGI here — it would trigger the vprintf hook */
+    (void)pv;
+    /* Creation can schedule this task on the other S3 core before start has
+     * published its handle/state. The creator releases this one-shot gate only
+     * after both are visible. */
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     esp_task_wdt_add(NULL);
 
-    /* Static buffers: never put multi-KB payloads on this task's stack. */
-    log_entry_t *batch = s_tx_batch;
-
-    while (s_active) {
+    while (atomic_load_explicit(&s_state, memory_order_acquire) == LOG_STREAM_RUNNING) {
         esp_task_wdt_reset();
 
-        int n = ring_drain(batch, LOG_BATCH_MAX);
-        if (n > 0) {
+        size_t count = log_capture_drain(&s_capture, s_tx_batch, LOG_BATCH_MAX);
+        if (count > 0) {
             log_stream_entry_t entries[LOG_BATCH_MAX];
-            for (int i = 0; i < n; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 entries[i] = (log_stream_entry_t){
-                    .level = batch[i].level,
-                    .timestamp_us = batch[i].ts_us,
-                    .tag = batch[i].tag,
-                    .message = batch[i].msg,
+                    .level = s_tx_batch[i].level,
+                    .timestamp_us = s_tx_batch[i].timestamp_us,
+                    .tag = s_tx_batch[i].tag,
+                    .message = s_tx_batch[i].message,
                 };
             }
+
             size_t encoded_len = 0;
+            log_stream_publish_fn_t publish =
+                atomic_load_explicit(&s_publish, memory_order_acquire);
             if (log_stream_encode(s_tx_buf, sizeof(s_tx_buf), &encoded_len,
-                                  s_seq++, entries, (size_t)n) == FRAME_OK &&
-                s_publish != NULL) {
-                s_publish(s_tx_buf, encoded_len);
+                                  s_seq++, entries, count) == FRAME_OK &&
+                publish != NULL) {
+                /* MQTT publish paths log internally. Keep those diagnostics out
+                 * of this same ring to prevent a publish -> log -> publish loop. */
+                log_capture_suppress(&s_capture);
+                publish(s_tx_buf, encoded_len);
+                log_capture_resume(&s_capture);
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(LOG_TX_INTERVAL_MS));
+        /* Stop wakes this wait immediately instead of waiting for the full TX
+         * interval. Notifications are private to this worker task. */
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOG_TX_INTERVAL_MS));
     }
 
     esp_task_wdt_delete(NULL);
-    ESP_LOGI(TAG, "log_tx_task exiting");
-    s_task = NULL;
+    atomic_store_explicit(&s_task, NULL, memory_order_seq_cst);
+    xEventGroupSetBits(s_task_events, LOG_TASK_EXITED_BIT);
+    maybe_finish_stop();
     vTaskDelete(NULL);
 }
 
-/* === Public API === */
-
 void log_stream_set_publish_callback(log_stream_publish_fn_t publish)
 {
-    s_publish = publish;
+    atomic_store_explicit(&s_publish, publish, memory_order_release);
 }
 
 void log_stream_start(uint8_t level)
 {
-    if (s_active) {
-        /* Already running — just update level */
-        log_stream_set_level(level);
+    level = bounded_level(level);
+    unsigned expected = LOG_STREAM_STOPPED;
+    if (!atomic_compare_exchange_strong_explicit(
+            &s_state, &expected, LOG_STREAM_STARTING,
+            memory_order_acq_rel, memory_order_acquire)) {
+        if (expected == LOG_STREAM_RUNNING) {
+            log_stream_set_level(level);
+        }
+        /* STARTING/STOPPING are short, owned lifecycle transitions. A second
+         * caller must not race initialization or resurrect a stopping task. */
         return;
     }
 
-    /* Allocate ring buffer array */
-    s_ring = heap_caps_calloc(RING_CAPACITY, sizeof(log_entry_t), MALLOC_CAP_DEFAULT);
-    if (!s_ring) {
-        ESP_LOGE(TAG, "Failed to allocate ring buffer (%d bytes)", (int)(RING_CAPACITY * sizeof(log_entry_t)));
+    if (s_task_events == NULL) {
+        s_task_events = xEventGroupCreateStatic(&s_task_events_storage);
+    }
+    if (s_task_events == NULL ||
+        atomic_load_explicit(&s_task, memory_order_acquire) != NULL) {
+        atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
         return;
     }
 
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) {
-        free(s_ring);
-        s_ring = NULL;
-        ESP_LOGE(TAG, "Failed to create mutex");
+    /* Complete a previous bounded detach before reinitializing static storage. */
+    if (!log_capture_esp_detach()) {
+        atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
         return;
     }
 
-    s_ring_head = 0;
-    s_ring_tail = 0;
-    s_ring_count = 0;
-    if (level > LOG_LEVEL_VERBOSE) {
-        level = LOG_LEVEL_VERBOSE;
-    }
-    s_level = level;
+    xEventGroupClearBits(s_task_events, LOG_TASK_EXITED_BIT);
+    log_capture_init(&s_capture, s_ring, RING_CAPACITY, level);
     s_seq = 0;
+    log_capture_esp_attach(&s_capture);
 
-    /* Global esp_log_set_vprintf is deliberately never installed: IDF v6's
-     * process-wide callback is unsafe here. Module wrappers provide explicit,
-     * bounded remote diagnostics without changing UART log behavior. */
-    s_active = true;
-    /* Create tx task */
+    TaskHandle_t task = NULL;
     BaseType_t ret = xTaskCreate(log_tx_task, "log_tx", LOG_TX_STACK,
-                                 NULL, LOG_TX_PRIO, &s_task);
+                                 NULL, LOG_TX_PRIO, &task);
     if (ret != pdPASS) {
+        (void)log_capture_esp_detach();
+        atomic_store_explicit(&s_task, NULL, memory_order_release);
+        atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
         ESP_LOGE(TAG, "Failed to create log_tx_task");
-        vSemaphoreDelete(s_mutex);
-        s_mutex = NULL;
-        free(s_ring);
-        s_ring = NULL;
-        s_active = false;
         return;
     }
+    atomic_store_explicit(&s_task, task, memory_order_release);
+    atomic_store_explicit(&s_state, LOG_STREAM_RUNNING, memory_order_release);
+    xTaskNotifyGive(task);
 
-    log_stream_emit(LOG_LEVEL_INFO, TAG, "remote stream started level=%u", level);
-    ESP_LOGI(TAG, "Started (level=%d, ring=%d entries)", level, RING_CAPACITY);
+    ESP_LOGI(TAG, "Started (level=%u, ring=%u entries)", level, RING_CAPACITY);
 }
 
 void log_stream_stop(void)
 {
-    if (!s_active) return;
+    unsigned expected = LOG_STREAM_RUNNING;
+    if (!atomic_compare_exchange_strong_explicit(
+            &s_state, &expected, LOG_STREAM_STOPPING,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
 
-    s_active = false;
+    if (!log_capture_esp_detach()) {
+        /* Pointer is already detached. Static storage remains untouched and a
+         * later start retries reader quiescence before reinitializing it. */
+        ESP_LOGW(TAG, "native log readers did not quiesce before timeout");
+    }
 
-    /* Wait for task to exit. Force-delete only after the bounded wait so the
-     * ring/mutex cannot be freed while log_tx_task still references them. */
-    if (s_task) {
-        for (int i = 0; i < 100 && s_task; i++) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+    const TickType_t capture_start = xTaskGetTickCount();
+    TickType_t capture_timeout = pdMS_TO_TICKS(LOG_CAPTURE_USER_TIMEOUT_MS);
+    if (capture_timeout == 0) {
+        capture_timeout = 1;
+    }
+    while (atomic_load_explicit(&s_capture_users, memory_order_seq_cst) != 0) {
+        if ((TickType_t)(xTaskGetTickCount() - capture_start) >= capture_timeout) {
+            ESP_LOGW(TAG, "explicit log producers did not quiesce before timeout");
+            break;
         }
-        if (s_task) {
-            ESP_LOGW(TAG, "log_tx_task did not exit; deleting it before cleanup");
-            vTaskDelete(s_task);
-            s_task = NULL;
+        taskYIELD();
+        vTaskDelay(1);
+    }
+
+    TaskHandle_t task = atomic_load_explicit(&s_task, memory_order_acquire);
+    if (task != NULL) {
+        xTaskNotifyGive(task);
+        EventBits_t bits = xEventGroupWaitBits(
+            s_task_events, LOG_TASK_EXITED_BIT, pdFALSE, pdTRUE,
+            pdMS_TO_TICKS(LOG_TASK_STOP_TIMEOUT_MS));
+        if ((bits & LOG_TASK_EXITED_BIT) == 0) {
+            /* Never force-delete: the worker may be inside publish. It owns its
+             * exit and will move STOPPING -> STOPPED after publish returns. */
+            ESP_LOGW(TAG, "log_tx_task stop timed out; awaiting cooperative exit");
+            return;
         }
+        /* The exit bit is set after s_task becomes NULL. Complete the state
+         * transition here as well so stop never returns while still STOPPING. */
+        maybe_finish_stop();
+    } else {
+        maybe_finish_stop();
     }
-
-    /* Free resources */
-    if (s_mutex) {
-        vSemaphoreDelete(s_mutex);
-        s_mutex = NULL;
-    }
-    if (s_ring) {
-        free(s_ring);
-        s_ring = NULL;
-    }
-
-    s_ring_head = 0;
-    s_ring_tail = 0;
-    s_ring_count = 0;
 
     ESP_LOGI(TAG, "Stopped");
 }
 
 void log_stream_set_level(uint8_t level)
 {
-    if (!s_active) return;
-    s_level = level > LOG_LEVEL_VERBOSE ? LOG_LEVEL_VERBOSE : level;
-    /* Remote filtering only: never change global ESP-IDF log filtering. */
-    log_stream_emit(LOG_LEVEL_INFO, TAG, "remote level set=%u", s_level);
+    if (!capture_user_enter()) {
+        return;
+    }
+    level = bounded_level(level);
+    log_capture_set_level(&s_capture, level);
+    capture_user_leave();
+    log_stream_emit(LOG_LEVEL_INFO, TAG, "remote level set=%u", level);
 }
 
 bool log_stream_is_active(void)
 {
-    return s_active;
+    return atomic_load_explicit(&s_state, memory_order_acquire) == LOG_STREAM_RUNNING;
 }
 
 void log_stream_emit(uint8_t level, const char *tag, const char *fmt, ...)
 {
-    if (!s_active || level > s_level || tag == NULL || fmt == NULL) {
+    if (tag == NULL || fmt == NULL || !capture_user_enter()) {
         return;
     }
 
-    char msg[LOG_LINE_MAX];
     va_list args;
     va_start(args, fmt);
-    int len = vsnprintf(msg, sizeof(msg), fmt, args);
+    (void)log_capture_pushv(&s_capture, level, (uint64_t)esp_timer_get_time(),
+                            tag, fmt, args);
     va_end(args);
-    if (len <= 0) {
-        return;
-    }
-    size_t msg_len = (size_t)len;
-    if (msg_len >= sizeof(msg)) {
-        msg_len = sizeof(msg) - 1;
-    }
-    ring_push(level, esp_timer_get_time(), tag, msg, msg_len);
+    capture_user_leave();
 }

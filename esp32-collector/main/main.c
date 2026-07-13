@@ -120,7 +120,6 @@ void on_modbus_scan_req_received(const char *request_id,
 
     if (!uart_ctx) {
         ESP_LOGE("MODBUS_SCAN", "No UART channel found");
-        LOG_STREAM_E("MODBUS_SCAN", "scan rejected reason=no_uart");
         msg_handler_send_scan_rpt(request_id, 0, false, NULL, 0);
         return;
     }
@@ -169,7 +168,6 @@ void on_modbus_scan_req_received(const char *request_id,
     /* Send result */
     msg_handler_send_scan_rpt(request_id, channel_id, true, found, found_count);
     ESP_LOGI("MODBUS_SCAN", "Scan complete: %d devices found", found_count);
-    LOG_STREAM_I("MODBUS_SCAN", "complete channel=%lu found=%u", (unsigned long)channel_id, (unsigned)found_count);
 }
 
 /* ================================================================== */

@@ -2,10 +2,11 @@
  * @file log_stream.h
  * @brief Safe structured ESP32 diagnostic log stream.
  *
- * The stream deliberately does not hook esp_log_set_vprintf(): replacing ESP-IDF's
- * global formatter is unsafe on the ESP32-C6 runtime. Critical modules emit
- * structured diagnostics through LOG_STREAM_* wrappers while normal UART logging
- * remains untouched. Disabled mode allocates no task or heap.
+ * Native ESP-IDF v6 esp_log calls are captured before UART formatting through a
+ * link wrapper, while preserving the original ESP-IDF backend. Explicit
+ * log_stream_emit() diagnostics and native logs share one bounded, non-blocking
+ * capture ring. Disabled mode runs no TX task, emits no stream traffic, and
+ * captures no entries; fixed ring/TX/control storage remains statically resident.
  */
 #ifndef LOG_STREAM_H
 #define LOG_STREAM_H

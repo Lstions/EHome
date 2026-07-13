@@ -45,6 +45,13 @@ CONFIG_FREERTOS_HZ=1000
 # Main task stack
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
+# ESP-IDF v6 Log V2 is required by log_stream's esp_log link wrapper. Keep the
+# production console at INFO while compiling every level through VERBOSE so the
+# remote stream can raise individual tags at runtime.
+CONFIG_LOG_VERSION_2=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+
 # Partition Table - custom with OTA dual partition
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.168.20.3:1883"

@@ -1,0 +1,4 @@
+#ifndef HOST_LIFECYCLE_FRAME_CODEC_H
+#define HOST_LIFECYCLE_FRAME_CODEC_H
+#define FRAME_OK 0
+#endif

@@ -1,0 +1,3 @@
+#ifndef HOST_TEST_ESP_EVENT_H
+#define HOST_TEST_ESP_EVENT_H
+#endif

@@ -53,3 +53,6 @@ backend/cover.out
 backend/coverage_raw.out
 coverage.out
 frontend-shared/coverage/
+
+# Local ESP32 host-test build trees
+esp32-collector/host_tests/build*/

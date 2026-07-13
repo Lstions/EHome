@@ -162,7 +162,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
     const config_manifest_t *new_cfg = config_mgr_get_manifest();
     const char *new_id = new_cfg ? new_cfg->manifest_id : NULL;
-    const char *last_id = config_mgr_get_last_known_manifest_id();
 
     /* Idempotency guard — already checked at function entry with raw frame peek.
      * If we reach here, either manifest is new or scheduler is not running. */
@@ -266,7 +265,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     }
 
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
-    LOG_STREAM_I(TAG, "config applied scheduler_channels=%d", scheduler_get_channel_count());
 
     app_state_unlock_config();
 
@@ -280,7 +278,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         if (log_en && !log_stream_is_active()) {
             ESP_LOGI(TAG, "LogStream: starting (level=%d)", log_lvl);
             log_stream_start(log_lvl);
-            log_stream_emit(LOG_LEVEL_INFO, "CALLBACK", "remote log stream enabled, level=%u", log_lvl);
         } else if (!log_en && log_stream_is_active()) {
             ESP_LOGI(TAG, "LogStream: stopping");
             log_stream_stop();
@@ -322,7 +319,6 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
         /* Defer mqtt_client_start() to a separate task to avoid stack overflow
          * in the WiFi event loop task (which has limited stack). */
         ESP_LOGI(TAG, "WiFi connected, spawning MQTT start task");
-        LOG_STREAM_I(TAG, "wifi connected mqtt_start=scheduled");
         xTaskCreate(mqtt_start_task, "mqtt_start", 8192, NULL, 5, NULL);
         break;
 

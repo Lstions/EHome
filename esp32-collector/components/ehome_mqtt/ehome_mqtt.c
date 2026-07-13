@@ -4,12 +4,26 @@
  */
 
 #include "ehome_mqtt.h"
-#include "log_stream.h"
 #include "esp_log.h"
 #include "esp_event.h"
 #include <string.h>
 
 #define TAG "MQTT"
+
+enum {
+    MQTT_PUBLISH_QOS_NO_ACK = 0,
+    MQTT_PUBLISH_QOS_RELIABLE = 1,
+    /* MsgLogStream is the frame protocol message type 0x1D. Keep this local to
+     * avoid adding a frame component dependency solely for QoS selection. */
+    MQTT_FRAME_TYPE_LOG_STREAM = 0x1D,
+};
+
+static int mqtt_publish_qos_for_frame(const uint8_t *data, size_t len)
+{
+    return data != NULL && len > 0 && data[0] == MQTT_FRAME_TYPE_LOG_STREAM
+               ? MQTT_PUBLISH_QOS_NO_ACK
+               : MQTT_PUBLISH_QOS_RELIABLE;
+}
 
 /* === Static context instance === */
 static mqtt_client_ctx_t s_ctx = {
@@ -81,7 +95,6 @@ void mqtt_client_start(void)
     esp_err_t err = esp_mqtt_client_start(s_ctx.client);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
-        LOG_STREAM_E(TAG, "start failed err=%s", esp_err_to_name(err));
         set_state(&s_ctx, MQTT_CLIENT_FAILED);
         UNLOCK_CTX();
         return;
@@ -115,7 +128,8 @@ bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
         return false;
     }
 
-    int msg_id = esp_mqtt_client_publish(s_ctx.client, s_up_topic, (const char *)data, len, 1, 0);
+    const int qos = mqtt_publish_qos_for_frame(data, len);
+    int msg_id = esp_mqtt_client_publish(s_ctx.client, s_up_topic, (const char *)data, len, qos, 0);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Publish failed");
         UNLOCK_CTX();
@@ -217,14 +231,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     (void)base;
     esp_mqtt_event_handle_t event = event_data;
 
-    ESP_LOGI(TAG, "MQTT event: %d", event->event_id);
-    
     /* Don't hold mutex during event processing - MQTT events run in the MQTT task
      * and blocking here can deadlock with esp_mqtt_client API calls */
     switch (event->event_id) {
     case MQTT_EVENT_CONNECTED:
     ESP_LOGI(TAG, "MQTT connected to broker");
-        LOG_STREAM_I(TAG, "connected broker=%s", CONFIG_COLLECTOR_MQTT_BROKER_URL);
         /* Subscribe BEFORE notifying app, so down-topic is ready for ConfigManifest */
         if (s_down_topic[0] != '\0') {
             esp_mqtt_client_subscribe(s_ctx.client, s_down_topic, 1);
@@ -235,7 +246,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
-        LOG_STREAM_W(TAG, "disconnected");
         set_state(&s_ctx, MQTT_CLIENT_DISCONNECTED);
         break;
 
@@ -246,6 +256,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         }
         break;
     }
+
+    case MQTT_EVENT_ERROR:
+        ESP_LOGE(TAG, "MQTT transport error");
+        break;
+
+    case MQTT_EVENT_PUBLISHED:
+        /* esp-mqtt can report this after publish() returns, including QoS 0.
+         * Logging it would occur after log-stream suppression is restored and
+         * turn every log frame into an asynchronous capture feedback loop. */
+        break;
 
     default:
         break;

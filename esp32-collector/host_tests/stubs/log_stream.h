@@ -1,0 +1,3 @@
+#ifndef HOST_TEST_LOG_STREAM_H
+#define HOST_TEST_LOG_STREAM_H
+#endif
