@@ -1,10 +1,11 @@
 # ============================================================
 # EHomeSystem Development Makefile
 # ============================================================
-# 本地开发：前后端跑在本机，基础设施（PG/Redis/EMQX）复用生产 compose
+# 本地开发：前后端跑在本机，基础设施使用独立的 docker-compose.dev.yml
 #
 # Usage:
-#   make up              - 启动基础设施 (PG/Redis/EMQX) + 本地前后端
+#   make dev             - 启动独立开发环境（默认目标）
+#   make up              - make dev 的别名
 #   make down            - 停止基础设施 + 本地前后端
 #   make restart         - 重启本地前后端（基础设施不动）
 #   make infra           - 仅启动基础设施
@@ -24,17 +25,28 @@
 #   make logs            - 查看后端日志 (LOGS=frontend 查看前端)
 #   make clean           - 删除所有容器和数据卷
 #
-# 生产环境直接用 docker compose:
+# 生产环境只能直接使用 docker compose，不受本 Makefile 管理:
 #   docker compose up -d          # 启动全部生产服务
 #   docker compose down           # 停止
 # ============================================================
 
+.DEFAULT_GOAL := dev
+
+# Make 与 Compose 共用同一份开发配置，命令行变量仍可覆盖。
+-include .env.dev
+
 # ---- 端口配置 (可覆盖) ----
-POSTGRES_PORT   ?= 5434
-BACKEND_PORT    ?= 8080
+POSTGRES_USER   ?= ehome
+POSTGRES_PASSWORD ?= ehome123
+POSTGRES_DB     ?= ehome
+POSTGRES_PORT   ?= 5435
+BACKEND_PORT    ?= 8082
 FRONTEND_PORT   ?= 5174
-EMQX_PORT       ?= 1884
-REDIS_PORT      ?= 6379
+EMQX_MQTT_PORT  ?= 1884
+EMQX_WS_PORT    ?= 8084
+EMQX_DASHBOARD_PORT ?= 18084
+REDIS_PORT      ?= 6380
+DEV_PROJECT     ?= ehome-dev
 
 # ---- OTA external host (ESP32 reaches backend here, not localhost) ----
 # Auto-detect the IP that external devices can reach; override with EHOME_EXTERNAL_HOST=ip:port
@@ -52,6 +64,7 @@ ROOT     := $(shell pwd)
 BACKEND  := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend-shared
 LOG_DIR  := $(ROOT)/.logs
+DEV_COMPOSE := docker compose --project-name $(DEV_PROJECT) --env-file $(ROOT)/.env.dev -f $(ROOT)/docker-compose.dev.yml
 
 # 按端口杀进程（可靠，不依赖 PID 文件）
 define kill_port
@@ -63,24 +76,27 @@ endef
 BACKEND_COVERAGE_THRESHOLD  ?= 35
 FRONTEND_COVERAGE_THRESHOLD ?= 25
 
-.PHONY: up down restart infra infra-down backend frontend e2e \
+.PHONY: dev up down restart infra infra-down backend frontend e2e \
         test test-backend test-frontend test-integration test-coverage \
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
         status logs clean help
 
 # ---- 一键启动开发环境 ----
+dev: up ## 启动独立开发环境（默认）
+
 up: infra ## 启动基础设施 + 本地前后端
 	@mkdir -p $(LOG_DIR)
 	@echo "==> Starting local backend (port $(BACKEND_PORT))..."
 	@cd $(BACKEND) && \
+		EHOME_SERVER_ADDR=:$(BACKEND_PORT) \
 		EHOME_DB_HOST=localhost \
 		EHOME_DB_PORT=$(POSTGRES_PORT) \
-		EHOME_DB_USER=ehome \
-		EHOME_DB_PASSWORD=ehome123 \
-		EHOME_DB_NAME=ehome \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		EHOME_DB_NAME=$(POSTGRES_DB) \
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
-		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
+		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
@@ -88,7 +104,8 @@ up: infra ## 启动基础设施 + 本地前后端
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend (port $(FRONTEND_PORT))..."
 	@cd $(FRONTEND) && \
-		nohup pnpm dev > $(LOG_DIR)/frontend.log 2>&1 &
+		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@echo "==> Waiting for services..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		b=0; f=0; \
@@ -104,7 +121,7 @@ up: infra ## 启动基础设施 + 本地前后端
 		echo "    Frontend: http://localhost:$(FRONTEND_PORT) ✓"; \
 	else echo "    Frontend: FAILED — check $(LOG_DIR)/frontend.log"; fi
 	@echo "    Postgres: localhost:$(POSTGRES_PORT)"
-	@echo "    EMQX:     localhost:$(EMQX_PORT) (dashboard: 18083)"
+	@echo "    EMQX:     localhost:$(EMQX_MQTT_PORT) (dashboard: $(EMQX_DASHBOARD_PORT))"
 	@echo "    Redis:    localhost:$(REDIS_PORT)"
 
 # ---- 停止全部 ----
@@ -124,13 +141,14 @@ restart: ## 重启本地前后端
 	@mkdir -p $(LOG_DIR)
 	@echo "==> Starting local backend..."
 	@cd $(BACKEND) && \
+		EHOME_SERVER_ADDR=:$(BACKEND_PORT) \
 		EHOME_DB_HOST=localhost \
 		EHOME_DB_PORT=$(POSTGRES_PORT) \
-		EHOME_DB_USER=ehome \
-		EHOME_DB_PASSWORD=ehome123 \
-		EHOME_DB_NAME=ehome \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		EHOME_DB_NAME=$(POSTGRES_DB) \
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
-		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
+		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
@@ -138,7 +156,8 @@ restart: ## 重启本地前后端
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend..."
 	@cd $(FRONTEND) && \
-		nohup pnpm dev > $(LOG_DIR)/frontend.log 2>&1 &
+		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@echo "==> Waiting for services..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		b=0; f=0; \
@@ -152,26 +171,32 @@ restart: ## 重启本地前后端
 # ---- 基础设施 ----
 infra: ## 仅启动基础设施 (PG/Redis/EMQX)
 	@echo "==> Starting infrastructure..."
-	@POSTGRES_PORT=$(POSTGRES_PORT) EMQX_MQTT_PORT=$(EMQX_PORT) REDIS_PORT=$(REDIS_PORT) \
-		docker compose up -d postgres redis emqx
-	@echo "==> Infrastructure ready (PG:$(POSTGRES_PORT) Redis:$(REDIS_PORT) EMQX:$(EMQX_PORT))"
+	@POSTGRES_PORT=$(POSTGRES_PORT) REDIS_PORT=$(REDIS_PORT) \
+		EMQX_MQTT_PORT=$(EMQX_MQTT_PORT) EMQX_WS_PORT=$(EMQX_WS_PORT) \
+		EMQX_DASHBOARD_PORT=$(EMQX_DASHBOARD_PORT) \
+		$(DEV_COMPOSE) up -d --wait postgres redis emqx
+	@$(DEV_COMPOSE) exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc \
+		"SELECT 1 FROM pg_database WHERE datname = 'ehome_test'" | grep -q 1 || \
+		$(DEV_COMPOSE) exec -T postgres createdb -U $(POSTGRES_USER) ehome_test
+	@echo "==> Infrastructure ready (PG:$(POSTGRES_PORT) Redis:$(REDIS_PORT) EMQX:$(EMQX_MQTT_PORT))"
 
 infra-down: ## 仅停止基础设施
 	@echo "==> Stopping infrastructure..."
-	docker compose down --remove-orphans
+	$(DEV_COMPOSE) down --remove-orphans
 
 # ---- 单独启动 ----
 backend: ## 仅启动本地后端
 	@mkdir -p $(LOG_DIR)
 	$(call kill_port,$(BACKEND_PORT))
 	@cd $(BACKEND) && \
+		EHOME_SERVER_ADDR=:$(BACKEND_PORT) \
 		EHOME_DB_HOST=localhost \
 		EHOME_DB_PORT=$(POSTGRES_PORT) \
-		EHOME_DB_USER=ehome \
-		EHOME_DB_PASSWORD=ehome123 \
-		EHOME_DB_NAME=ehome \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		EHOME_DB_NAME=$(POSTGRES_DB) \
 		REDIS_ADDR=localhost:$(REDIS_PORT) \
-		MQTT_BROKER=tcp://localhost:$(EMQX_PORT) \
+		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		LOG_LEVEL=debug \
@@ -189,7 +214,8 @@ frontend: ## 仅启动本地前端
 	@mkdir -p $(LOG_DIR)
 	$(call kill_port,$(FRONTEND_PORT))
 	@cd $(FRONTEND) && \
-		nohup pnpm dev > $(LOG_DIR)/frontend.log 2>&1 &
+		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		lsof -ti :$(FRONTEND_PORT) >/dev/null 2>&1 && break; \
 		sleep 2; \
@@ -216,13 +242,13 @@ test-frontend: ## 运行前端 vitest 单元测试 (带覆盖率)
 	@cd $(FRONTEND) && pnpm test:coverage
 	@echo "    Coverage report: $(FRONTEND)/coverage/index.html"
 
-test-integration: test-infra ## 运行 Go 后端集成测试 (PostgreSQL, 需要 docker)
+test-integration: infra ## 使用开发环境的 ehome_test 数据库运行集成测试
 	@echo "==> Running Go integration tests (PostgreSQL)..."
 	@cd $(BACKEND) && EHOME_TEST_DB=postgres \
 		EHOME_DB_HOST=localhost \
-		EHOME_DB_PORT=5435 \
-		EHOME_DB_USER=ehome \
-		EHOME_DB_PASSWORD=ehome123 \
+		EHOME_DB_PORT=$(POSTGRES_PORT) \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=ehome_test \
 		go test -race -count=1 -tags=integration ./...
 	@echo "✅ Integration tests passed"
@@ -236,23 +262,10 @@ test-coverage: ## 运行全部测试并生成覆盖率报告
 	@echo "    Backend:  $(BACKEND)/coverage.out (go tool cover -html=coverage.out)"
 	@echo "    Frontend: $(FRONTEND)/coverage/index.html"
 
-# ---- 测试基础设施 (docker-compose.test.yml) ----
-test-infra: ## 启动测试用基础设施 (PG/Redis/EMQX, 端口偏移避免冲突)
-	@echo "==> Starting test infrastructure..."
-	@docker compose -f docker-compose.test.yml up -d
-	@echo "==> Waiting for services to be healthy..."
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		healthy=$$(docker inspect --format='{{range .State.Health.Status}}{{.}}{{end}}' ehome-test-postgres 2>/dev/null); \
-		[ "$$healthy" = "healthy" ] && break; \
-		sleep 2; \
-	done
-	@echo "    PostgreSQL: localhost:5435"
-	@echo "    Redis:      localhost:6380"
-	@echo "    EMQX:       localhost:1884"
+# 测试与开发共用同一套基础设施；保留旧目标名作为兼容别名。
+test-infra: infra ## 确保开发/测试共用基础设施已启动
 
-test-infra-down: ## 停止测试用基础设施
-	@echo "==> Stopping test infrastructure..."
-	@docker compose -f docker-compose.test.yml down --remove-orphans
+test-infra-down: infra-down ## 停止开发/测试共用基础设施
 
 # ---- Lint ----
 lint: lint-backend lint-frontend ## 运行全部 lint
@@ -263,9 +276,9 @@ lint-backend: ## Go vet 静态检查
 	@echo "✅ go vet passed"
 
 lint-frontend: ## 前端 TypeScript 类型检查
-	@echo "==> Running vue-tsc type check..."
-	@cd $(FRONTEND) && npx vue-tsc --noEmit
-	@echo "✅ vue-tsc passed"
+	@echo "==> Running TypeScript type check..."
+	@cd $(FRONTEND) && pnpm typecheck
+	@echo "✅ TypeScript passed"
 
 # ---- E2E 测试 ----
 e2e: ## Run Playwright E2E tests (run make up first)
@@ -278,8 +291,8 @@ e2e: ## Run Playwright E2E tests (run make up first)
 
 # ---- 状态 ----
 status: ## 查看服务状态
-	@echo "==> Infrastructure:"
-	@docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep ehome || echo "  (none running)"
+	@echo "==> Development infrastructure ($(DEV_PROJECT)):"
+	@$(DEV_COMPOSE) ps
 	@echo ""
 	@echo "==> Local services:"
 	@if lsof -ti :$(BACKEND_PORT) >/dev/null 2>&1; then \
@@ -294,12 +307,12 @@ logs: ## 查看后端日志 (LOGS=frontend 查看前端)
 	@tail -f $(LOG_DIR)/$(or $(LOGS),backend).log
 
 # ---- 清理 ----
-clean: ## 删除所有容器、数据卷和本地进程
-	@echo "==> WARNING: This will delete all data (database, redis, emqx)!"
+clean: ## 删除开发环境容器、数据卷和本地进程（不影响生产）
+	@echo "==> WARNING: This will delete DEVELOPMENT data only (database, redis, emqx)!"
 	@read -p "    Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
 	$(call kill_port,$(BACKEND_PORT))
 	$(call kill_port,$(FRONTEND_PORT))
-	docker compose down -v --remove-orphans
+	$(DEV_COMPOSE) down -v --remove-orphans
 	rm -rf $(ROOT)/.logs
 	@echo "==> Cleaned up."
 

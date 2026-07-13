@@ -42,7 +42,7 @@ type Manager struct {
 	mu      sync.RWMutex
 	pending map[uint32]*Entry
 	mqtt    *mqtt.Client
-	db      *gorm.DB // P3-4: SQLite persistence
+	db      *gorm.DB // P3-4: database persistence
 }
 
 // nextRequestID is an atomic counter for generating unique request IDs,
@@ -61,10 +61,12 @@ func NewManager(mqttClient *mqtt.Client, db *gorm.DB) *Manager {
 		db:      db,
 	}
 
-	// P3-4: Auto-migrate persistence table and ensure WAL mode
+	// P3-4: Auto-migrate the persistence table. WAL is a SQLite-only setting.
 	if db != nil {
 		db.AutoMigrate(&models.PendingWriteRecord{})
-		db.Exec("PRAGMA journal_mode=WAL")
+		if db.Dialector.Name() == "sqlite" {
+			db.Exec("PRAGMA journal_mode=WAL")
+		}
 	}
 
 	// P3-4: Recover pending entries from previous session
@@ -113,7 +115,7 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 	// 8.1: Track active entries
 	metrics.PendingWriteActiveEntries.Inc()
 
-	// P3-4: Persist entry to SQLite
+	// P3-4: Persist entry to the database
 	m.persistEntry(entry, requestID, timeout)
 
 	defer func() {

@@ -7,11 +7,11 @@ import { fileURLToPath, URL } from 'node:url'
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
-  // 支持环境变量覆盖 proxy target (docker compose 开发环境用 backend:8080)
-  const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8080'
+  // 支持环境变量覆盖 proxy target；默认使用与生产端口隔离的本地后端。
+  const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8082'
   const wsTarget = process.env.VITE_API_TARGET
     ? process.env.VITE_API_TARGET.replace('http://', 'ws://')
-    : 'ws://localhost:8080'
+    : 'ws://localhost:8082'
 
   return {
   plugins: [
