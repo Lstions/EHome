@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeDetail from '../NodeDetail.vue'
+import { useUserStore, type UserRole } from '@/stores/user'
 
 // Mock vue-router
 const mockPush = vi.fn()
@@ -20,6 +21,10 @@ const {
   mockCancelOTA,
   mockGetList,
   mockGetChannelList,
+  mockLogPanelMounted,
+  mockGetLogConfig,
+  mockGetNodeLogs,
+  mockSubscribe,
 } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() =>
     Promise.resolve({
@@ -43,6 +48,10 @@ const {
   mockCancelOTA: vi.fn(() => Promise.resolve()),
   mockGetList: vi.fn(() => Promise.resolve({ total: 0, items: [] })),
   mockGetChannelList: vi.fn(() => Promise.resolve([])),
+  mockLogPanelMounted: vi.fn(),
+  mockGetLogConfig: vi.fn(() => Promise.resolve()),
+  mockGetNodeLogs: vi.fn(() => Promise.resolve()),
+  mockSubscribe: vi.fn((_event?: string, _handler?: (message: unknown) => void) => vi.fn()),
 }))
 
 vi.mock('@/api/node', () => ({
@@ -69,7 +78,7 @@ vi.mock('@/api/channel', () => ({
 
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({
-    subscribe: vi.fn(() => vi.fn()),
+    subscribe: mockSubscribe,
     connected: false,
   }),
 }))
@@ -94,7 +103,7 @@ vi.mock('@/utils/dmaState', () => ({
 }))
 
 vi.mock('@/events/events', () => ({
-  WS_EVENT: { NODE_STATUS: 'node_status' },
+  WS_EVENT: { NODE_STATUS: 'node_status', NODE_LOG: 'node_log' },
 }))
 
 // Stub child components
@@ -103,6 +112,15 @@ const stubs = {
   StatusBadge: { template: '<span data-testid="status-badge" />' },
   OTAForm: { template: '<div data-testid="ota-form" />' },
   ChannelPanel: { template: '<div data-testid="channel-panel" />' },
+  LogPanel: {
+    setup() {
+      mockLogPanelMounted()
+      mockGetLogConfig()
+      mockGetNodeLogs()
+      mockSubscribe('node_log', vi.fn())
+    },
+    template: '<div data-testid="log-panel">管理员日志工具</div>',
+  },
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-skeleton': { template: '<div class="el-skeleton" />' },
   'el-descriptions': { template: '<div class="el-descriptions"><slot /></div>' },
@@ -111,6 +129,7 @@ const stubs = {
   'el-tag': { template: '<span class="el-tag"><slot /></span>' },
   'el-icon': { template: '<i class="el-icon"><slot /></i>' },
   'el-progress': { template: '<div class="el-progress" />' },
+  'el-input': { template: '<input />' },
   'el-empty': { template: '<div class="el-empty" />' },
   'el-table': { template: '<div class="el-table"><slot /></div>' },
   'el-table-column': { template: '<div />' },
@@ -134,6 +153,26 @@ describe('NodeDetail.vue', () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()
     expect(wrapper.find('[data-testid="page-header"]').exists()).toBe(true)
+  })
+
+  it.each([
+    ['admin', true],
+    ['operator', false],
+    ['viewer', false],
+  ] as Array<[UserRole, boolean]>)('shows and mounts system logs only for %s users', async (role, canSeeLogs) => {
+    const userStore = useUserStore()
+    userStore.userInfo = { id: 1, username: role, email: `${role}@example.com`, role }
+
+    const wrapper = mount(NodeDetail, { global: { stubs } })
+    await flushPromises()
+
+    expect(wrapper.text().includes('系统日志')).toBe(canSeeLogs)
+    expect(wrapper.find('[data-testid="log-panel"]').exists()).toBe(canSeeLogs)
+    expect(mockLogPanelMounted).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
+    expect(mockGetLogConfig).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
+    expect(mockGetNodeLogs).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
+    expect(mockSubscribe.mock.calls.filter(call => call[0] === 'node_log')).toHaveLength(canSeeLogs ? 1 : 0)
+    wrapper.unmount()
   })
 
   it('calls fetchCollectorDetail on mount', async () => {

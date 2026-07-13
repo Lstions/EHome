@@ -9,7 +9,11 @@
 /** 转义 CSV 单元格 */
 function escapeCSV(value: unknown): string {
   if (value === null || value === undefined) return ''
-  const s = typeof value === 'string' ? value : String(value)
+  const raw = typeof value === 'string' ? value : String(value)
+  // Spreadsheet applications can ignore leading whitespace/control characters
+  // when deciding whether a cell is a formula. Preserve the original value, but
+  // neutralize it when its first non-whitespace/control character is dangerous.
+  const s = /^[\s\u0000-\u0020\u007f]*[=+\-@]/.test(raw) ? `'${raw}` : raw
   // 含逗号/双引号/换行 → 加双引号并转义内部双引号
   if (/[",\n\r]/.test(s)) {
     return '"' + s.replace(/"/g, '""') + '"'
@@ -49,6 +53,11 @@ export function exportCSV(
 export function exportJSON(filename: string, data: unknown): void {
   const json = JSON.stringify(data, null, 2)
   triggerDownload(json, `${filename}.json`, 'application/json;charset=utf-8;')
+}
+
+/** Download plain text while keeping the object URL alive long enough for browsers to consume it. */
+export function downloadText(content: string, filename: string): void {
+  triggerDownload(content, filename, 'text/plain;charset=utf-8;')
 }
 
 /**

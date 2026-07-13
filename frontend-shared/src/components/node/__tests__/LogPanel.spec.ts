@@ -1,6 +1,14 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
-import { defineComponent } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { defineComponent, type PropType } from 'vue'
+
+interface RealtimeLogLine {
+  id: number
+  ts: number
+  level: number
+  tag: string
+  msg: string
+}
 
 const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(),
@@ -8,8 +16,12 @@ const mocks = vi.hoisted(() => ({
   getLogConfig: vi.fn(),
   updateLogConfig: vi.fn(),
   updateLogPersist: vi.fn(),
-  getNodeLogs: vi.fn(),
-  deleteNodeLogs: vi.fn(),
+  success: vi.fn(),
+  error: vi.fn(),
+  exportCSV: vi.fn(),
+  downloadText: vi.fn(),
+  createObjectURL: vi.fn((_blob: Blob) => 'blob:realtime-log'),
+  revokeObjectURL: vi.fn(),
 }))
 
 vi.mock('@/api/node', () => ({
@@ -17,120 +29,351 @@ vi.mock('@/api/node', () => ({
     getLogConfig: mocks.getLogConfig,
     updateLogConfig: mocks.updateLogConfig,
     updateLogPersist: mocks.updateLogPersist,
-    getNodeLogs: mocks.getNodeLogs,
-    deleteNodeLogs: mocks.deleteNodeLogs,
   },
 }))
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ subscribe: mocks.subscribe }),
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: vi.fn(), error: vi.fn() },
-  ElMessageBox: { confirm: vi.fn() },
+  ElMessage: { success: mocks.success, error: mocks.error },
+}))
+vi.mock('@/utils/exportData', () => ({
+  exportCSV: mocks.exportCSV,
+  downloadText: mocks.downloadText,
 }))
 
 import LogPanel from '@/components/node/LogPanel.vue'
 
-const stubs = {
-  'el-switch': defineComponent({ emits: ['change'], template: '<button @click="$emit(\'change\', true)"><slot /></button>' }),
-  'el-select': defineComponent({ template: '<div><slot /></div>' }),
-  'el-option': true,
-  'el-alert': true,
-  'el-empty': true,
-  'el-button': defineComponent({ emits: ['click'], template: '<button @click="$emit(\'click\')"><slot /></button>' }),
-  'el-icon': true,
-  'el-input': true,
-  'el-table': true,
-  'el-table-column': true,
-  'el-tag': true,
-  'el-pagination': true,
-  VideoPause: true,
-  VideoPlay: true,
+const SwitchStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: Boolean },
+  emits: ['update:modelValue', 'change'],
+  template: `<button v-bind="$attrs" @click="$emit('update:modelValue', !modelValue); $emit('change', !modelValue)"><slot /></button>`,
+})
+
+const SelectStub = defineComponent({
+  inheritAttrs: false,
+  props: ['modelValue'],
+  emits: ['update:modelValue', 'change'],
+  template: `<select v-bind="$attrs" :value="modelValue" @change="$emit('update:modelValue', Number($event.target.value)); $emit('change', Number($event.target.value))"><slot /></select>`,
+})
+
+const OptionStub = defineComponent({
+  props: ['label', 'value'],
+  template: '<option :value="value">{{ label }}</option>',
+})
+
+const InputStub = defineComponent({
+  inheritAttrs: false,
+  props: ['modelValue'],
+  emits: ['update:modelValue'],
+  template: `<input v-bind="$attrs" :value="modelValue ?? ''" @input="$emit('update:modelValue', $event.target.value)" />`,
+})
+
+interface RealtimeSearchCountState {
+  epoch: number
+  baselineId: number
+  baselineMatchIds: number[]
+  matchedAfterBaseline: number
 }
 
-function mountPanel() {
+const RealtimeViewerStub = defineComponent({
+  name: 'LogRealtimeViewer',
+  props: {
+    logs: { type: Array as PropType<RealtimeLogLine[]>, default: () => [] },
+    receivedCount: { type: Number, default: 0 },
+    generation: { type: Number, default: 0 },
+    paused: Boolean,
+    searchKeyword: { type: String, default: '' },
+    searchCountState: {
+      type: Object as PropType<RealtimeSearchCountState>,
+      default: () => ({ epoch: 0, baselineId: 0, baselineMatchIds: [], matchedAfterBaseline: 0 }),
+    },
+  },
+  emits: ['update:paused', 'clear', 'export'],
+  template: `<section aria-label="实时日志组件">
+    <span data-testid="realtime-state">{{ logs.length }}|{{ receivedCount }}|{{ generation }}|{{ paused }}|{{ searchKeyword }}</span>
+    <span data-testid="search-count-state">{{ searchCountState.epoch }}|{{ searchCountState.baselineId }}|{{ searchCountState.baselineMatchIds.length }}|{{ searchCountState.matchedAfterBaseline }}</span>
+    <span v-for="line in logs" :key="line.id" class="received-log" :data-log-id="line.id">{{ line.msg }}</span>
+    <button aria-label="切换暂停" @click="$emit('update:paused', !paused)">切换暂停</button>
+    <button aria-label="清空实时日志" @click="$emit('clear')">清空</button>
+    <button aria-label="导出实时文本" @click="$emit('export', 'text')">文本</button>
+    <button aria-label="导出实时 CSV" @click="$emit('export', 'csv')">CSV</button>
+  </section>`,
+})
+
+const HistoryPanelStub = defineComponent({
+  name: 'LogHistoryPanel',
+  props: ['collectorId'],
+  template: '<section aria-label="历史日志组件">历史 {{ collectorId }}</section>',
+})
+
+const stubs = {
+  'el-switch': SwitchStub,
+  'el-select': SelectStub,
+  'el-option': OptionStub,
+  'el-alert': defineComponent({ template: '<div><slot /></div>' }),
+  'el-input': InputStub,
+  LogRealtimeViewer: RealtimeViewerStub,
+  LogHistoryPanel: HistoryPanelStub,
+}
+
+function mountPanel(): VueWrapper {
   return mount(LogPanel, {
     props: { collectorId: 'node-1', nodeDeviceId: 'NODE-1' },
     global: { stubs },
   })
 }
 
-describe('LogPanel', () => {
-  let wsHandler: ((message: any) => void) | undefined
+function sendLogEnvelope(nodeId: string, lines: Array<Omit<RealtimeLogLine, 'id'>>): void {
+  wsHandler?.({
+    type: 'node_log',
+    payload: { node_id: nodeId, lines },
+  })
+}
+
+let wsHandler: ((message: unknown) => void) | undefined
+
+async function settlePanel(): Promise<VueWrapper> {
+  const wrapper = mountPanel()
+  await flushPromises()
+  return wrapper
+}
+
+describe('LogPanel orchestration', () => {
+  const wrappers: VueWrapper[] = []
 
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.getLogConfig.mockResolvedValue({ stream_enabled: true, persist_enabled: true, level: 2 })
-    mocks.getNodeLogs.mockResolvedValue({ logs: [], total: 0 })
-    mocks.subscribe.mockImplementation((_event: string, handler: (message: any) => void) => {
+    mocks.getLogConfig.mockResolvedValue({ stream_enabled: true, persist_enabled: false, level: 2 })
+    mocks.updateLogConfig.mockResolvedValue(undefined)
+    mocks.updateLogPersist.mockResolvedValue(undefined)
+    mocks.subscribe.mockImplementation((_event: string, handler: (message: unknown) => void) => {
       wsHandler = handler
       return mocks.unsubscribe
     })
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: mocks.createObjectURL,
+      revokeObjectURL: mocks.revokeObjectURL,
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
   })
 
-  afterEach(() => { wsHandler = undefined })
+  afterEach(() => {
+    wrappers.splice(0).forEach(wrapper => wrapper.unmount())
+    wsHandler = undefined
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
 
-  it('loads config and subscribes to NODE_LOG with cleanup', async () => {
-    const wrapper = mountPanel()
-    await flushPromises()
+  const track = (wrapper: VueWrapper) => {
+    wrappers.push(wrapper)
+    return wrapper
+  }
+
+  it('loads configuration, subscribes with cleanup, and always exposes saved history', async () => {
+    const wrapper = track(await settlePanel())
+
     expect(mocks.getLogConfig).toHaveBeenCalledWith('node-1')
     expect(mocks.subscribe).toHaveBeenCalledWith('node_log', expect.any(Function))
-    expect(wrapper.text()).toContain('实时日志')
+    expect(wrapper.find('[aria-label="实时日志组件"]').exists()).toBe(true)
+    expect(wrapper.get('[aria-label="历史日志组件"]').text()).toContain('node-1')
+
     wrapper.unmount()
+    wrappers.splice(wrappers.indexOf(wrapper), 1)
     expect(mocks.unsubscribe).toHaveBeenCalledOnce()
   })
 
-  it('accepts only matching node logs and renders uptime instead of epoch time', async () => {
-    const wrapper = mountPanel()
+  it('routes production envelopes only for the selected node and assigns stable increasing ids', async () => {
+    const wrapper = track(await settlePanel())
+
+    sendLogEnvelope('OTHER', [{ level: 2, ts: 1_000_000, tag: 'DROP', msg: 'ignored' }])
+    sendLogEnvelope('NODE-1', [
+      { level: 2, ts: 2_000_000, tag: 'MQTT', msg: 'connected' },
+      { level: 1, ts: 3_000_000, tag: 'RX', msg: 'timeout' },
+    ])
     await flushPromises()
-    wsHandler?.({ data: { node_id: 'OTHER', lines: [{ level: 2, ts: 1_000_000, tag: 'DROP', msg: 'ignored' }] } })
-    wsHandler?.({ data: { node_id: 'NODE-1', lines: [{ level: 2, ts: 3_661_002_003, tag: 'MQTT', msg: 'connected' }] } })
-    await flushPromises()
-    expect(wrapper.text()).not.toContain('ignored')
-    expect(wrapper.text()).toContain('connected')
-    expect(wrapper.text()).toContain('运行 01:01:01.002')
-    expect(wrapper.text()).not.toContain('1970')
+
+    const logs = wrapper.findAll('.received-log')
+    expect(logs.map(log => log.text())).toEqual(['connected', 'timeout'])
+    expect(logs.map(log => log.attributes('data-log-id'))).toEqual(['1', '2'])
   })
 
-  it('accepts the production WebSocket envelope payload for matching node logs', async () => {
-    const wrapper = mountPanel()
+  it('keeps a 5000-line bounded realtime buffer and preserves monotonic ids after trimming', async () => {
+    const wrapper = track(await settlePanel())
+    const lines = Array.from({ length: 5002 }, (_, index) => ({
+      level: index % 5,
+      ts: index * 1_000_000,
+      tag: 'LOAD',
+      msg: `line-${index}`,
+    }))
+
+    sendLogEnvelope('NODE-1', lines)
     await flushPromises()
 
-    wsHandler?.({
-      type: 'node_log',
-      payload: {
-        node_id: 'NODE-1',
-        lines: [{ level: 1, ts: 2_000_000, tag: 'RX_TASK', msg: 'timeout from server envelope' }],
-      },
-    })
-    await flushPromises()
+    const logs = wrapper.findAll('.received-log')
+    expect(logs).toHaveLength(5000)
+    expect(logs[0].text()).toBe('line-2')
+    expect(logs[0].attributes('data-log-id')).toBe('3')
+    expect(logs[logs.length - 1].attributes('data-log-id')).toBe('5002')
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('5000|5002|0|false|')
 
-    expect(wrapper.text()).toContain('timeout from server envelope')
+    sendLogEnvelope('NODE-1', Array.from({ length: 7 }, (_, index) => ({
+      level: 2,
+      ts: index,
+      tag: 'AFTER_CAP',
+      msg: `after-cap-${index}`,
+    })))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('5000|5009|0|false|')
   })
 
-  it('labels realtime log controls for assistive technology', async () => {
-    const wrapper = mountPanel()
+  it('continues buffering while paused and passes search state to the viewer', async () => {
+    const wrapper = track(await settlePanel())
+
+    await wrapper.get('[aria-label="切换暂停"]').trigger('click')
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('timeout')
+    sendLogEnvelope('NODE-1', [{ level: 1, ts: 4_000_000, tag: 'RX', msg: 'timeout while paused' }])
     await flushPromises()
 
-    expect(wrapper.find('[aria-label="暂停实时日志"]').exists()).toBe(true)
-    expect(wrapper.find('[aria-label="清空实时日志"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('1|1|0|true|timeout')
+    expect(wrapper.text()).toContain('timeout while paused')
   })
 
-  it('updates stream, level, persistence and queries history through node API', async () => {
-    mocks.updateLogConfig.mockResolvedValue({})
-    mocks.updateLogPersist.mockResolvedValue({})
-    mocks.getNodeLogs.mockResolvedValue({ logs: [{ tag: 'RX', message: 'sample', created_at: '2026-07-12T12:00:00Z', level: 2 }], total: 1 })
-    const wrapper = mountPanel()
+  it('clears through the child event without reusing ids for later logs', async () => {
+    const wrapper = track(await settlePanel())
+
+    sendLogEnvelope('NODE-1', [{ level: 2, ts: 1, tag: 'A', msg: 'before clear' }])
+    await flushPromises()
+    await wrapper.get('[aria-label="清空实时日志"]').trigger('click')
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('0|1|1|false|')
+    sendLogEnvelope('NODE-1', [{ level: 2, ts: 2, tag: 'B', msg: 'after clear' }])
     await flushPromises()
 
-    await (wrapper.vm as any).onStreamToggle(false)
-    await (wrapper.vm as any).onLevelChange(3)
-    await (wrapper.vm as any).onPersistToggle(true)
-    await (wrapper.vm as any).queryLogs()
+    const logs = wrapper.findAll('.received-log')
+    expect(logs).toHaveLength(1)
+    expect(logs[0].text()).toBe('after clear')
+    expect(logs[0].attributes('data-log-id')).toBe('2')
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('1|2|1|false|')
+  })
+
+  it('publishes a clear generation with logs arriving in the same Vue batch', async () => {
+    const wrapper = track(await settlePanel())
+    sendLogEnvelope('NODE-1', [{ level: 2, ts: 1, tag: 'A', msg: 'before clear' }])
+    await flushPromises()
+
+    const clearPromise = wrapper.get('[aria-label="清空实时日志"]').trigger('click')
+    sendLogEnvelope('NODE-1', [
+      { level: 2, ts: 2, tag: 'B', msg: 'same tick one' },
+      { level: 2, ts: 3, tag: 'B', msg: 'same tick two' },
+    ])
+    await clearPromise
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('2|3|1|false|')
+    expect(wrapper.findAll('.received-log').map(log => log.attributes('data-log-id'))).toEqual(['2', '3'])
+  })
+
+  it('performs filtered CSV and text downloads for child export events', async () => {
+    const wrapper = track(await settlePanel())
+
+    sendLogEnvelope('NODE-1', [
+      { level: 2, ts: 1_000_000, tag: 'KEEP', msg: 'kept message' },
+      { level: 0, ts: 2_000_000, tag: 'DROP', msg: 'other message' },
+    ])
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('keep')
+    await flushPromises()
+
+    await wrapper.get('[aria-label="导出实时 CSV"]').trigger('click')
+    expect(mocks.exportCSV).toHaveBeenCalledWith(
+      'realtime-logs-node-1',
+      ['运行时间', '级别', 'Tag', '消息'],
+      [{ 运行时间: '00:00:01.000', 级别: 'INFO', Tag: 'KEEP', 消息: 'kept message' }],
+    )
+
+    await wrapper.get('[aria-label="导出实时文本"]').trigger('click')
+    expect(mocks.downloadText).toHaveBeenCalledWith(
+      '00:00:01.000 INFO KEEP kept message',
+      'realtime-logs-node-1.txt',
+    )
+  })
+
+  it('keeps receivedCount as a full monotonic arrival sequence independent of search', async () => {
+    const wrapper = track(await settlePanel())
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('keep')
+
+    sendLogEnvelope('NODE-1', [
+      { level: 2, ts: 1, tag: 'DROP', msg: 'hidden' },
+      { level: 2, ts: 2, tag: 'KEEP', msg: 'visible' },
+    ])
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('2|2|0|false|keep')
+  })
+
+  it('publishes bounded search metadata that counts matches across trimming', async () => {
+    const wrapper = track(await settlePanel())
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('match')
+
+    const lines = Array.from({ length: 6000 }, (_, index) => ({
+      level: 2,
+      ts: index,
+      tag: index % 2 === 0 ? 'MATCH' : 'OTHER',
+      msg: `line-${index}`,
+    }))
+    sendLogEnvelope('NODE-1', lines)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('5000|6000|0|false|match')
+    expect(wrapper.get('[data-testid="search-count-state"]').text()).toBe('1|0|0|3000')
+  })
+
+  it('rebases a changed search from only the retained window', async () => {
+    const wrapper = track(await settlePanel())
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('first')
+
+    sendLogEnvelope('NODE-1', Array.from({ length: 6000 }, (_, index) => ({
+      level: 2,
+      ts: index,
+      tag: index % 2 === 0 ? 'FIRST' : index % 4 === 1 ? 'SECOND' : 'OTHER',
+      msg: `line-${index}`,
+    })))
+    await flushPromises()
+
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('second')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="search-count-state"]').text()).toBe('2|6000|1250|0')
+  })
+
+  it('rebases active search metadata on clear before same-batch arrivals', async () => {
+    const wrapper = track(await settlePanel())
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('match')
+    sendLogEnvelope('NODE-1', [{ level: 2, ts: 1, tag: 'MATCH', msg: 'before clear' }])
+    await flushPromises()
+
+    const clearPromise = wrapper.get('[aria-label="清空实时日志"]').trigger('click')
+    sendLogEnvelope('NODE-1', [
+      { level: 2, ts: 2, tag: 'MATCH', msg: 'same batch match' },
+      { level: 2, ts: 3, tag: 'OTHER', msg: 'same batch miss' },
+    ])
+    await clearPromise
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="search-count-state"]').text()).toBe('2|1|0|1')
+  })
+
+  it('updates stream, level, and persistence configuration through DOM controls', async () => {
+    const wrapper = track(await settlePanel())
+
+    await wrapper.get('[aria-label="日志级别"]').setValue('3')
+    await wrapper.get('[aria-label="日志流开关"]').trigger('click')
+    await wrapper.get('[aria-label="日志持久化开关"]').trigger('click')
+    await flushPromises()
 
     expect(mocks.updateLogConfig).toHaveBeenCalledWith('node-1', { stream_enabled: false })
     expect(mocks.updateLogConfig).toHaveBeenCalledWith('node-1', { level: 3 })
     expect(mocks.updateLogPersist).toHaveBeenCalledWith('node-1', true)
-    expect(mocks.getNodeLogs).toHaveBeenCalledWith('node-1', expect.objectContaining({ page: 1, size: 100 }))
   })
 })

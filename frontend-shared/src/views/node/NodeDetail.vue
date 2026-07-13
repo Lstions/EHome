@@ -359,7 +359,7 @@
     />
 
     <!-- 系统日志 -->
-    <el-card v-if="collector" shadow="hover" style="margin-top: 20px;">
+    <el-card v-if="collector && userStore.isAdmin" shadow="hover" style="margin-top: 20px;">
       <template #header>
         <span>系统日志</span>
       </template>
@@ -383,6 +383,7 @@ import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
+import { useUserStore } from '@/stores/user'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
@@ -395,6 +396,7 @@ const route = useRoute()
 const wsStore = useWebSocketStore()
 const dmaStore = useDmaStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+const userStore = useUserStore()
 
 const collector = ref<any>(null)
 const devices = ref<any[]>([])

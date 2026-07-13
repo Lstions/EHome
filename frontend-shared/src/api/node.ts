@@ -61,6 +61,40 @@ export interface OTARecord {
   completed_at?: string
 }
 
+/** Persisted ESP32 log record returned by the node history API. */
+export interface NodeLogEntry {
+  id: number
+  node_id: string
+  level: number
+  /** ESP uptime in microseconds; not a wall-clock timestamp. */
+  ts: number
+  tag: string
+  message: string
+  /** Server receipt time in RFC3339 format. */
+  created_at: string
+}
+
+/**
+ * Node log API query. The current backend accepts one numeric level only.
+ * Wall-clock values may be Unix milliseconds or RFC3339 strings.
+ */
+export interface NodeLogQuery {
+  from?: number | string
+  to?: number | string
+  level?: number
+  tag?: string
+  q?: string
+  page?: number
+  size?: number
+}
+
+export interface NodeLogPage {
+  total: number
+  page: number
+  size: number
+  logs: NodeLogEntry[]
+}
+
 // ============================================================
 // 外设相关类型定义
 // ============================================================
@@ -342,15 +376,13 @@ export const nodeApi = {
     await client.put(`/api/v1/nodes/${id}/log-persist`, { enabled })
   },
 
-  async getNodeLogs(id: number | string, params: {
-    from?: number; to?: number; level?: number; tag?: string; q?: string; page?: number; size?: number
-  }): Promise<{ total: number; page: number; size: number; logs: any[] }> {
+  async getNodeLogs(id: number | string, params: NodeLogQuery = {}): Promise<NodeLogPage> {
     const response = await client.get(`/api/v1/nodes/${id}/logs`, { params })
     return (response as any).data || response
   },
 
-  async deleteNodeLogs(id: number | string, before?: number): Promise<{ deleted: number }> {
-    const params = before ? { before } : {}
+  async deleteNodeLogs(id: number | string, before?: number | string): Promise<{ deleted: number }> {
+    const params = before !== undefined ? { before } : {}
     const response = await client.delete(`/api/v1/nodes/${id}/logs`, { params })
     return (response as any).data || response
   },
