@@ -34,11 +34,11 @@
     <div v-if="streamEnabled" class="log-realtime">
       <div class="log-toolbar">
         <span class="toolbar-title">实时日志</span>
-        <el-button size="small" @click="paused = !paused">
+        <el-button size="small" :aria-label="paused ? '继续实时日志' : '暂停实时日志'" @click="paused = !paused">
           <el-icon><VideoPause v-if="!paused" /><VideoPlay v-else /></el-icon>
           {{ paused ? '继续' : '暂停' }}
         </el-button>
-        <el-button size="small" @click="realtimeLogs = []">清屏</el-button>
+        <el-button size="small" aria-label="清空实时日志" @click="realtimeLogs = []">清屏</el-button>
         <el-input v-model="searchKeyword" size="small" placeholder="搜索..." style="width: 180px;" clearable />
       </div>
       <div class="log-terminal" ref="terminalRef">
@@ -58,7 +58,7 @@
     </div>
 
     <!-- 历史查询区 -->
-    <div v-if="persistEnabled" class="log-history" style="margin-top: 16px;">
+    <div v-if="persistEnabled" class="log-history">
       <div class="log-toolbar">
         <span class="toolbar-title">历史日志</span>
         <el-button size="small" @click="queryLogs" :loading="queryLoading">查询</el-button>
@@ -154,7 +154,9 @@ const filteredRealtimeLogs = computed(() => {
 let unsubWs: (() => void) | null = null
 
 function onWsMessage(msg: WebSocketMessage) {
-  const data = (msg as any).data || msg
+  // Hub broadcasts { type, payload }; retain flat/data compatibility for
+  // legacy emitters used by existing clients and tests.
+  const data = (msg as any).payload || (msg as any).data || msg
   if (data.node_id !== props.nodeDeviceId) return
   if (paused.value) return
 
@@ -335,57 +337,57 @@ onUnmounted(() => {
 }
 
 .log-terminal {
-  background: #1e1e1e;
-  border-radius: 8px;
+  background: var(--terminal-bg);
+  border-radius: var(--radius-md);
   padding: 12px;
   max-height: 400px;
   overflow-y: auto;
   font-family: 'JetBrains Mono', 'Cascadia Code', 'Courier New', Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
+  color: var(--terminal-text);
 }
 
 .log-line {
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content 60px minmax(80px, max-content) minmax(0, 1fr);
   gap: 8px;
-  white-space: nowrap;
+  align-items: start;
 }
 
 .log-time {
-  color: #888;
-  flex-shrink: 0;
+  color: var(--terminal-muted);
+  min-width: 0;
 }
 
 .log-level {
   font-weight: 600;
-  flex-shrink: 0;
-  width: 60px;
+  min-width: 0;
 }
 
 .log-tag {
-  color: #569cd6;
-  flex-shrink: 0;
-  min-width: 80px;
+  color: var(--terminal-accent);
+  min-width: 0;
 }
 
 .log-msg {
-  color: #d4d4d4;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--terminal-text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.log-error .log-level { color: #f48771; }
-.log-error .log-msg { color: #f48771; }
-.log-warn .log-level { color: #cca700; }
-.log-warn .log-msg { color: #cca700; }
-.log-info .log-level { color: #4ec9b0; }
-.log-debug .log-level { color: #888; }
-.log-debug .log-msg { color: #aaa; }
-.log-verbose .log-level { color: #666; }
-.log-verbose .log-msg { color: #888; }
+.log-error .log-level,
+.log-error .log-msg { color: var(--terminal-danger); }
+.log-warn .log-level,
+.log-warn .log-msg { color: var(--terminal-warning); }
+.log-info .log-level { color: var(--terminal-success); }
+.log-debug .log-level,
+.log-debug .log-msg { color: var(--terminal-muted); }
+.log-verbose .log-level,
+.log-verbose .log-msg { color: var(--terminal-subtle); }
 
 .log-empty {
-  color: #666;
+  color: var(--terminal-subtle);
   text-align: center;
   padding: 20px;
 }
@@ -399,5 +401,49 @@ onUnmounted(() => {
 .log-history {
   border-top: 1px solid var(--el-border-color-light);
   padding-top: 12px;
+  margin-top: 16px;
+}
+
+@media (max-width: 768px) {
+  .log-controls,
+  .log-toolbar,
+  .query-filters {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .log-controls {
+    gap: 12px;
+  }
+
+  .control-group {
+    flex: 1 1 140px;
+    justify-content: space-between;
+  }
+
+  .log-toolbar .toolbar-title {
+    flex-basis: 100%;
+    margin-right: 0;
+  }
+
+  .log-toolbar :deep(.el-input),
+  .query-filters :deep(.el-input),
+  .query-filters :deep(.el-select) {
+    flex: 1 1 100%;
+    width: 100% !important;
+  }
+
+  .log-line {
+    grid-template-columns: max-content 56px minmax(0, 1fr);
+    gap: 4px 8px;
+  }
+
+  .log-tag {
+    grid-column: 1 / -1;
+  }
+
+  .log-msg {
+    grid-column: 1 / -1;
+  }
 }
 </style>

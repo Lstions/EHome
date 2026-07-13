@@ -17,7 +17,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">边缘设备总数</span>
+            <span class="stat-label">本页边缘设备</span>
           </div>
           <div class="stat-action">
             <el-icon><Plus /></el-icon>
@@ -30,7 +30,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.online" class="stat-value" />
-            <span class="stat-label">在线</span>
+            <span class="stat-label">本页在线</span>
           </div>
         </div>
         
@@ -40,7 +40,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.offline" class="stat-value" />
-            <span class="stat-label">离线</span>
+            <span class="stat-label">本页离线/异常</span>
           </div>
         </div>
 
@@ -100,10 +100,10 @@
       
       <div class="toolbar-right">
         <el-button-group style="margin-right: 12px;">
-          <el-button :type="viewMode === 'card' ? 'primary' : ''" @click="viewMode = 'card'">
+          <el-button :type="viewMode === 'card' ? 'primary' : ''" aria-label="卡片视图" @click="viewMode = 'card'">
             <el-icon><Grid /></el-icon>
           </el-button>
-          <el-button :type="viewMode === 'table' ? 'primary' : ''" @click="viewMode = 'table'">
+          <el-button :type="viewMode === 'table' ? 'primary' : ''" aria-label="表格视图" @click="viewMode = 'table'">
             <el-icon><List /></el-icon>
           </el-button>
         </el-button-group>
@@ -112,6 +112,15 @@
           创建边缘设备
         </el-button>
       </div>
+    </div>
+
+    <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
+      <span class="active-filters-label">当前筛选：</span>
+      <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''">关键词：{{ searchKeyword }}</el-tag>
+      <el-tag v-if="typeFilter" closable @close="typeFilter = ''">类型：{{ getDeviceTypeLabel(typeFilter) }}</el-tag>
+      <el-tag v-if="statusFilter" closable @close="statusFilter = ''">状态：{{ statusLabel(statusFilter) }}</el-tag>
+      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''">总线：{{ hardwareFilter.toUpperCase() }}</el-tag>
+      <el-button text type="primary" @click="clearFilters">清除全部</el-button>
     </div>
 
     <!-- 批量操作栏 -->
@@ -203,12 +212,13 @@
       >
         <div class="card-header">
           <div class="device-icon" :class="getDeviceClass(device.device_type)">
-            <el-icon :size="28"><component :is="getDeviceIcon(device.device_type)" /></el-icon>
+            <el-icon :size="20"><component :is="getDeviceIcon(device.device_type)" /></el-icon>
           </div>
           <div class="device-info">
             <h3 :title="device.name">{{ device.name }}</h3>
             <div class="device-meta">
               <el-tag size="small" :title="getDeviceTypeLabel(device.device_type)">{{ getDeviceTypeLabel(device.device_type) }}</el-tag>
+              <el-tag v-if="device.protocol" size="small" type="info">{{ device.protocol.toUpperCase() }}</el-tag>
             </div>
           </div>
           <div class="status-indicator" :class="device.status">
@@ -216,77 +226,40 @@
             {{ statusLabel(device.status) }}
           </div>
         </div>
-        
-        <div class="card-body">
-          <!-- 设备信息区块 -->
-          <div class="card-section-info">
-            <div class="info-row">
-              <span class="info-icon">📡</span>
-              <span class="info-label">所属节点</span>
-              <span class="info-value">{{ device.node?.name || ('#' + device.node_id) }}</span>
-            </div>
-            <div class="info-row">
-              <span class="info-icon">🔌</span>
-              <span class="info-label">总线通道</span>
-              <span class="info-value"><code>{{ device.hardware_type?.toUpperCase() }} {{ device.hardware_id }}</code></span>
-            </div>
-            <div class="info-row" v-if="device.protocol">
-              <span class="info-icon">📻</span>
-              <span class="info-label">通信协议</span>
-              <el-tag size="small" :type="device.protocol === 'modbus' ? 'primary' : 'info'">
-                {{ device.protocol?.toUpperCase() }}
-              </el-tag>
+
+        <div class="card-facts">
+          <div class="fact-item">
+            <el-icon :size="16"><Connection /></el-icon>
+            <div class="fact-content">
+              <span class="fact-label">所属节点</span>
+              <span class="fact-value" :title="device.node?.name || ('#' + device.node_id)">{{ device.node?.name || ('#' + device.node_id) }}</span>
             </div>
           </div>
-
-          <!-- 数据预览区块 -->
-          <div class="card-section-data" :class="{ 'no-data': !device.last_data }">
-            <template v-if="device.last_data">
-              <div class="data-preview">
-                <span class="data-label">最新读数</span>
-                <div class="data-values">
-                  <span class="data-item" v-if="device.last_data.temperature !== undefined">
-                    🌡️ {{ device.last_data.temperature.toFixed(1) }}°C
-                  </span>
-                  <span class="data-item" v-if="device.last_data.humidity !== undefined">
-                    💧 {{ device.last_data.humidity.toFixed(1) }}%
-                  </span>
-                  <span class="data-item" v-if="device.last_data.pressure !== undefined">
-                    🌊 {{ device.last_data.pressure.toFixed(1) }}hPa
-                  </span>
-                  <span class="data-item" v-if="device.last_data.wind_speed !== undefined">
-                    🌬️ {{ device.last_data.wind_speed.toFixed(1) }}m/s
-                  </span>
-                  <span class="data-item" v-if="!hasSpecificData(device)">
-                    {{ formatDeviceData(device.last_data) }}
-                  </span>
-                </div>
-              </div>
-              <div class="data-time">
-                {{ formatRelativeTime(device.last_data_time) }}
-              </div>
-            </template>
-            <template v-else>
-              <div class="no-data-placeholder">
-                <el-icon><Warning /></el-icon>
-                暂无数据
-              </div>
-            </template>
+          <div class="fact-item">
+            <el-icon :size="16"><DataLine /></el-icon>
+            <div class="fact-content">
+              <span class="fact-label">总线通道</span>
+              <code class="fact-value">{{ device.hardware_type?.toUpperCase() }} {{ device.hardware_id }}</code>
+            </div>
           </div>
         </div>
-        
+
+        <div class="card-reading" :class="{ 'no-data': !device.last_data }">
+          <template v-if="device.last_data">
+            <span class="reading-label">最新读数</span>
+            <strong class="reading-value" :title="formatDeviceData(device.last_data)">{{ formatDeviceData(device.last_data) }}</strong>
+            <span class="reading-time">{{ formatRelativeTime(device.last_data_time) }}</span>
+          </template>
+          <template v-else>
+            <el-icon :size="16"><Warning /></el-icon>
+            <span>等待首条采集数据</span>
+          </template>
+        </div>
+
         <div class="card-actions">
-          <el-button size="small" @click="goToDetail(device.id)">
-            <el-icon><View /></el-icon>
-            详情
-          </el-button>
-          <el-button size="small" @click="handleEdit(device)">
-            <el-icon><Edit /></el-icon>
-            编辑
-          </el-button>
-          <el-button size="small" type="danger" text @click="handleDelete(device)">
-            <el-icon><Delete /></el-icon>
-          </el-button>
+          <el-button size="small" type="primary" text :icon="View" @click="goToDetail(device.id)">详情</el-button>
+          <el-button size="small" text :icon="Edit" @click="handleEdit(device)">编辑</el-button>
+          <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${device.name}`" @click="handleDelete(device)" />
         </div>
       </el-card>
     </div>
@@ -550,10 +523,10 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { 
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid, 
-  Plus, View, Edit, Delete, InfoFilled, Check, Warning,
+  Plus, View, Edit, Delete, InfoFilled, Check, Warning, Connection, DataLine,
   Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download,
   Document
 } from '@element-plus/icons-vue'
@@ -574,6 +547,7 @@ import CountUp from '@/components/common/CountUp.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 
 const router = useRouter()
+const route = useRoute()
 const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
@@ -600,6 +574,15 @@ const statusFilter = ref('')
 const hardwareFilter = ref('')
 const showCreateDialog = ref(false)
 const submitting = ref(false)
+
+const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''
+const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
+if (routeSearch) searchKeyword.value = routeSearch
+if (['active', 'online', 'offline', 'warning', 'error', 'disabled'].includes(routeStatus)) {
+  statusFilter.value = routeStatus
+}
+
+const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
 
 // 向导状态
 const createStep = ref(0)
@@ -760,10 +743,7 @@ const fetchNodes = async () => {
 
 // 更新统计
 const updateStats = () => {
-  // total comes from the server response (accurate total across pages)
-  // For online/offline counts on the stats bar, we use the current visible devices
-  // since those represent the filtered subset
-  stats.total = total.value
+  stats.total = devices.value.length
   const allVisible = devices.value
   stats.online = allVisible.filter(d => d.status === 'active' || d.status === 'online').length
   stats.offline = allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length
@@ -900,6 +880,14 @@ function statusLabel(status: string): string {
 }
 
 // 操作
+const clearFilters = () => {
+  searchKeyword.value = ''
+  typeFilter.value = ''
+  statusFilter.value = ''
+  hardwareFilter.value = ''
+  currentPage.value = 1
+}
+
 const handleStatClick = (status: string) => {
   if (status === 'all') {
     statusFilter.value = ''
@@ -1295,21 +1283,23 @@ onMounted(() => {
 /* 设备网格 */
 .device-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 20px;
 }
 
 .device-card {
-  transition: all 0.3s;
+  overflow: hidden;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
   border: 1px solid var(--el-border-color);
 }
 
 .device-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  transform: translateY(-2px);
+  border-color: var(--el-color-primary-light-5);
+  box-shadow: var(--shadow-md);
 }
 
-.device-card.offline { opacity: 0.85; }
+.device-card.offline { opacity: 0.78; }
 
 .device-card .el-card__body {
   padding: 0;
@@ -1317,9 +1307,9 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
-  padding: 16px 16px 0;
+  padding: 16px;
   margin-bottom: 0;
 }
 
@@ -1330,46 +1320,42 @@ onMounted(() => {
 
 .device-info h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
+  font-weight: 600;
   color: var(--el-text-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.status-indicator {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
 .device-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  flex-shrink: 0;
 }
 
-.device-icon.temp { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
-.device-icon.wind { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
-.device-icon.rain { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
-.device-icon.light { background: linear-gradient(135deg, #ffc100 0%, #ff7800 100%); }
-.device-icon.battery { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
-.device-icon.solar { background: linear-gradient(135deg, var(--el-color-primary) 0%, #9c27b0 100%); }
+.device-icon.wind { color: var(--el-text-color-regular); background: var(--el-fill-color-light); }
+.device-icon.rain { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.device-icon.light { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.device-icon.battery { color: var(--el-color-success); background: var(--el-color-success-light-9); }
+.device-icon.solar { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 
-.device-info { flex: 1; }
-.device-info h3 { margin: 0; font-size: 16px; color: var(--el-text-color-primary); }
-.device-meta { margin-top: 4px; }
+.device-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 
 .status-indicator {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 20px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
 }
 
 .status-indicator.online { background: var(--el-color-success-light-9); color: var(--el-color-success); }
@@ -1389,124 +1375,96 @@ onMounted(() => {
 .status-indicator.online .dot { animation: pulse 2s infinite; }
 .status-indicator.active .dot { animation: pulse 2s infinite; }
 
-.card-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 0;
-  border-top: none;
-  border-bottom: none;
+.card-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 16px 16px;
 }
 
-/* 信息区块 */
-.card-section-info {
+.fact-item {
   display: flex;
-  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
-  padding: 14px 16px;
-  border-bottom: 1px solid #f0f2f5;
+  min-width: 0;
+  color: var(--el-text-color-secondary);
 }
 
-.info-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.info-icon {
-  font-size: 14px;
+.fact-item > .el-icon {
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
   flex-shrink: 0;
 }
 
-.info-label {
-  color: var(--el-text-color-secondary);
-  min-width: 70px;
-}
-
-.info-value {
-  color: var(--el-text-color-primary);
-  margin-left: auto;
-  word-break: break-all;
-}
-
-.info-value code {
-  background: var(--el-fill-color-light);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--el-color-primary);
-}
-
-/* 数据预览区块 */
-.card-section-data {
-  padding: 14px 16px;
-  background: #f9fafb;
-  border-radius: 0 0 8px 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 52px;
-}
-
-.card-section-data.no-data {
-  justify-content: center;
-}
-
-.data-preview {
+.fact-content {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  min-width: 0;
 }
 
-.data-label {
-  font-size: 11px;
+.fact-label,
+.reading-label {
   color: var(--el-text-color-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 12px;
 }
 
-.data-values {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.data-item {
-  font-size: 14px;
+.fact-value {
   color: var(--el-text-color-primary);
+  font-size: 13px;
   font-weight: 500;
-}
-
-.data-time {
-  font-size: 11px;
-  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.no-data-placeholder {
-  display: flex;
+code.fact-value {
+  color: var(--el-color-primary);
+  font-family: var(--el-font-family);
+}
+
+.card-reading {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  min-height: 52px;
+  padding: 12px 16px;
+  background: var(--el-fill-color-lighter);
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.card-reading.no-data {
+  display: flex;
+  justify-content: center;
   color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
-/* 离线/故障卡片强化 */
-.device-card.offline .card-section-data {
-  background: #f5f5f5;
+.reading-value {
+  min-width: 0;
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.device-card.offline .data-item,
-.device-card.offline .info-value {
+.reading-time {
   color: var(--el-text-color-secondary);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
   padding: 10px 16px;
-  border-top: 1px solid #f0f2f5;
-  background: #fff;
-  border-radius: 0 0 8px 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
 }
 
 /* 分页 */

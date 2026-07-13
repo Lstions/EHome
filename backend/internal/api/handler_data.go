@@ -182,6 +182,35 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
 	})
 
+	// Get available measurement categories for one edge device.
+	// GET /api/v1/unified-data/categories?device_pk=1
+	v1.GET("/unified-data/categories", func(c *gin.Context) {
+		devicePK, err := strconv.ParseUint(c.Query("device_pk"), 10, 32)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			return
+		}
+
+		type category struct {
+			Code string `json:"code"`
+			Unit string `json:"unit"`
+		}
+		var categories []category
+		if err := db.Model(&models.UnifiedData{}).
+			Select("sensor_name AS code, MAX(unit) AS unit").
+			Where("device_id = ?", devicePK).
+			Group("sensor_name").
+			Order("sensor_name ASC").
+			Scan(&categories).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query categories failed"})
+			return
+		}
+		if categories == nil {
+			categories = []category{}
+		}
+		c.JSON(http.StatusOK, categories)
+	})
+
 	// Historical unified data for trend charts (Dashboard)
 	// GET /api/v1/unified-data/historical?device_pk=1&category=wind_direction&start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z
 	v1.GET("/unified-data/historical", func(c *gin.Context) {

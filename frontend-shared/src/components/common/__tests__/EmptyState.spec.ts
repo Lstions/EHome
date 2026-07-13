@@ -33,6 +33,11 @@ describe('EmptyState.vue', () => {
     expect(large.find('.empty-state.large').exists()).toBe(true)
   })
 
+  it('applies the scenario kind class for contextual empty states', () => {
+    const wrapper = mount(EmptyState, { props: { kind: 'filtered' }, global: { stubs } })
+    expect(wrapper.find('.empty-state.filtered').exists()).toBe(true)
+  })
+
   it('renders quick action buttons when provided', () => {
     const actions = [
       { label: '刷新', handler: () => {} },

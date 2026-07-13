@@ -75,6 +75,7 @@
             circle
             size="default"
             class="collapse-btn"
+            aria-label="打开导航菜单"
             @click="mobileDrawerVisible = true"
           />
           <!-- 桌面端用折叠按钮 -->
@@ -84,6 +85,7 @@
             circle
             size="default"
             class="collapse-btn"
+            aria-label="折叠侧边导航"
             @click="uiStore.toggleSidebar"
           />
           
@@ -102,6 +104,7 @@
           <el-input
             v-model="searchQuery"
             :placeholder="searchPlaceholder"
+            aria-label="快速跳转"
             prefix-icon="Search"
             clearable
             class="global-search"
@@ -125,7 +128,7 @@
           <el-popover placement="bottom-end" :width="320" trigger="click">
             <template #reference>
               <el-badge :value="notificationCount" :hidden="notificationCount === 0" class="notification-badge">
-                <el-button :icon="Bell" circle size="default" />
+                <el-button :icon="Bell" circle size="default" aria-label="打开通知中心" />
               </el-badge>
             </template>
             <div class="notification-panel">
@@ -263,6 +266,7 @@ const allMenuItems = [
   { path: '/dashboard', title: '仪表盘', icon: Odometer, roles: undefined },
   { path: '/node', title: '节点', icon: Connection, roles: undefined },
   { path: '/edge-device', title: '边缘设备', icon: Cpu, roles: undefined },
+  { path: '/channel', title: '通道管理', icon: Connection, roles: undefined },
   { path: '/data', title: '数据面板', icon: DataLine, roles: undefined },
   { path: '/firmware', title: '固件管理', icon: Files, roles: ['admin', 'operator'] as string[] },
   { path: '/device-configs', title: '配置模板', icon: Setting, roles: ['admin', 'operator'] as string[] },
@@ -318,6 +322,7 @@ const breadcrumbs = computed(() => {
     '/dashboard': '仪表盘',
     '/node': '节点管理',
     '/edge-device': '边缘设备管理',
+    '/channel': '通道管理',
     '/data': '数据面板',
     '/firmware': '固件管理',
     '/device-configs': '配置模板',
@@ -341,37 +346,29 @@ const breadcrumbs = computed(() => {
   return crumbs
 })
 
-// 搜索框动态提示
-const searchPlaceholder = computed(() => {
-  const path = route.path
-  if (path.startsWith('/device')) return '搜索设备名称、类型...'
-  if (path.startsWith('/node')) return '搜索节点名称、型号...'
-  if (path.startsWith('/firmware')) return '搜索固件名称、版本...'
-  if (path.startsWith('/device-configs')) return '搜索模板名称...'
-  if (path.startsWith('/data')) return '搜索设备数据...'
-  if (path.startsWith('/monitor')) return '搜索监控指标...'
-  return '搜索设备、节点...'
-})
+// 快速跳转提示
+const searchPlaceholder = computed(() => '快速跳转：仪表盘、节点、设备、通道…')
 
 // 搜索处理
 const handleSearch = () => {
   const query = searchQuery.value.trim()
   if (!query) return
 
-  // 根据搜索内容智能跳转
+  // 顶栏仅承担页面快速跳转，资源检索由对应列表页完成。
   const lowerQuery = query.toLowerCase()
-  if (lowerQuery.includes('节点') || lowerQuery.includes('node')) {
-    router.push({ path: '/node', query: { search: query } })
-  } else if (lowerQuery.includes('设备') || lowerQuery.includes('device')) {
-    router.push({ path: '/edge-device', query: { search: query } })
-  } else if (lowerQuery.includes('固件') || lowerQuery.includes('firmware')) {
-    router.push({ path: '/firmware', query: { search: query } })
-  } else if (lowerQuery.includes('配置') || lowerQuery.includes('config')) {
-    router.push({ path: '/device-configs', query: { search: query } })
-  } else {
-    // 默认跳转到设备列表搜索
-    router.push({ path: '/edge-device', query: { search: query } })
-  }
+  const destinations = [
+    { keywords: ['仪表盘', 'dashboard'], path: '/dashboard' },
+    { keywords: ['节点', 'node'], path: '/node' },
+    { keywords: ['边缘设备', '设备', 'device'], path: '/edge-device' },
+    { keywords: ['通道', 'channel'], path: '/channel' },
+    { keywords: ['数据', 'data'], path: '/data' },
+    { keywords: ['固件', 'firmware'], path: '/firmware' },
+    { keywords: ['配置', 'config'], path: '/device-configs' },
+    { keywords: ['监控', 'monitor'], path: '/monitor' },
+  ]
+  const destination = destinations.find(({ keywords }) => keywords.some(keyword => lowerQuery.includes(keyword)))
+  if (destination) router.push(destination.path)
+  else ElMessage.info('未找到匹配页面，请输入仪表盘、节点、设备、通道、数据、固件、配置或监控')
   searchQuery.value = ''
 }
 

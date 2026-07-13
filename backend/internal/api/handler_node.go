@@ -95,6 +95,32 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		Success(c, nodes)
 	})
 
+	// Global status transition history for the dashboard's operational timeline.
+	// Must be registered before /nodes/:id so "status-history" is not treated as an ID.
+	// GET /api/v1/nodes/status-history?limit=50
+	v1.GET("/nodes/status-history", func(c *gin.Context) {
+		limit, err := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		if err != nil || limit < 1 || limit > 200 {
+			limit = 50
+		}
+
+		type statusEvent struct {
+			models.NodeEvent
+			NodeName string `json:"node_name"`
+		}
+		var events []statusEvent
+		if err := db.Table("node_events AS event").
+			Select("event.*, nodes.name AS node_name").
+			Joins("LEFT JOIN nodes ON nodes.node_id = event.node_id").
+			Order("event.created_at DESC").
+			Limit(limit).
+			Scan(&events).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query node status history failed"})
+			return
+		}
+		Success(c, events)
+	})
+
 	// Get node by DB id or node_id (v2.2 path)
 	v1.GET("/nodes/:id", func(c *gin.Context) {
 		id := c.Param("id")
@@ -112,6 +138,31 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		Success(c, node)
+	})
+
+	// Status transition history for operational timelines.
+	// GET /api/v1/nodes/:id/status-history?limit=50
+	v1.GET("/nodes/:id/status-history", func(c *gin.Context) {
+		node, err := findNodeByID(db, c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+
+		limit, err := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		if err != nil || limit < 1 || limit > 200 {
+			limit = 50
+		}
+
+		var events []models.NodeEvent
+		if err := db.Where("node_id = ?", node.NodeID).
+			Order("created_at DESC").
+			Limit(limit).
+			Find(&events).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query node status history failed"})
+			return
+		}
+		Success(c, events)
 	})
 
 	// Create node (v2.2 compat path)

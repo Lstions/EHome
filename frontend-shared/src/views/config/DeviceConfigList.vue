@@ -8,7 +8,7 @@
         </div>
         <div class="stat-content">
           <span class="stat-value">{{ stats.total }}</span>
-          <span class="stat-label">配置模板</span>
+          <span class="stat-label">本页模板</span>
         </div>
       </div>
       
@@ -18,7 +18,7 @@
         </div>
         <div class="stat-content">
           <span class="stat-value">{{ stats.active }}</span>
-          <span class="stat-label">启用中</span>
+          <span class="stat-label">本页启用</span>
         </div>
       </div>
       
@@ -94,6 +94,15 @@
         </div>
       </div>
     </el-card>
+
+    <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
+      <span class="active-filters-label">当前筛选：</span>
+      <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''; handleFiltersChanged()">关键词：{{ searchKeyword }}</el-tag>
+      <el-tag v-if="typeFilter" closable @close="typeFilter = ''; handleFiltersChanged()">类型：{{ getDeviceTypeLabel(typeFilter) }}</el-tag>
+      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''; handleFiltersChanged()">总线：{{ hardwareFilter.toUpperCase() }}</el-tag>
+      <el-tag v-if="statusFilter" closable @close="statusFilter = ''; handleFiltersChanged()">状态：{{ statusFilter === 'active' ? '启用' : '禁用' }}</el-tag>
+      <el-button text type="primary" @click="clearFilters">清除全部</el-button>
+    </div>
 
     <!-- 配置模板卡片 -->
     <div class="config-grid">
@@ -192,12 +201,16 @@
     </div>
 
     <!-- 空状态 -->
-    <el-empty 
-      v-if="!loading && filteredConfigs.length === 0" 
-      description="暂无配置模板，请创建新的模板"
-    >
-      <el-button type="primary" @click="showFormDialog = true">新建模板</el-button>
-    </el-empty>
+    <EmptyState
+      v-if="!loading && filteredConfigs.length === 0"
+      :kind="hasActiveFilters ? 'filtered' : 'initial'"
+      icon="Document"
+      :title="hasActiveFilters ? '没有匹配的配置模板' : '暂无配置模板'"
+      :description="hasActiveFilters ? '请调整筛选条件，或清除全部筛选后重试。' : '创建模板后，可为边缘设备复用连接、解析与初始化配置。'"
+      :quick-actions="hasActiveFilters
+        ? [{ label: '清除全部筛选', type: 'primary', handler: clearFilters }]
+        : [{ label: '新建模板', type: 'primary', handler: () => { showFormDialog = true } }]"
+    />
 
     <!-- 分页 -->
     <div v-if="total > 0" class="pagination-wrapper">
@@ -244,7 +257,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { 
   Document, CircleCheck, Connection, Cpu, Search, Grid, 
   Upload, Download, Plus, View, Edit, CopyDocument, MoreFilled,
@@ -252,6 +265,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
 
@@ -265,6 +279,7 @@ const searchKeyword = ref('')
 const typeFilter = ref('')
 const hardwareFilter = ref('')
 const statusFilter = ref('')
+const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || hardwareFilter.value || statusFilter.value))
 
 // 对话框
 const showFormDialog = ref(false)
@@ -341,8 +356,24 @@ const updateStats = () => {
 
 // 搜索
 const handleSearch = () => {
-  // 防抖搜索
+  handleFiltersChanged()
 }
+
+const handleFiltersChanged = () => {
+  currentPage.value = 1
+  fetchConfigs()
+}
+
+const clearFilters = () => {
+  searchKeyword.value = ''
+  typeFilter.value = ''
+  hardwareFilter.value = ''
+  statusFilter.value = ''
+  currentPage.value = 1
+  fetchConfigs()
+}
+
+watch([typeFilter, hardwareFilter, statusFilter], handleFiltersChanged)
 
 // 总线图标
 const getBusIcon = (busType: string) => {
@@ -745,6 +776,18 @@ onMounted(() => {
   display: flex;
   justify-content: center;
   padding: 20px 0;
+}
+
+.active-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.active-filters-label {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 
 /* 预览对话框 */

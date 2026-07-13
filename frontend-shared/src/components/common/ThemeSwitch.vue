@@ -1,6 +1,6 @@
 <template>
   <el-dropdown trigger="click" @command="handleCommand">
-    <el-button :icon="currentIcon" circle />
+    <el-button :icon="currentIcon" circle aria-label="切换主题" />
     <template #dropdown>
       <el-dropdown-menu>
         <el-dropdown-item command="light" :disabled="themeStore.mode === 'light'">

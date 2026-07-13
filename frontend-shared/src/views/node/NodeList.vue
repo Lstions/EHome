@@ -17,7 +17,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">节点总数</span>
+            <span class="stat-label">本页节点</span>
           </div>
           <div class="stat-action">
             <el-icon><Plus /></el-icon>
@@ -30,7 +30,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.online" class="stat-value" />
-            <span class="stat-label">在线</span>
+            <span class="stat-label">本页在线</span>
           </div>
           <div class="stat-trend up">
             <el-icon><TrendCharts /></el-icon>
@@ -44,7 +44,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.offline" class="stat-value" />
-            <span class="stat-label">离线</span>
+            <span class="stat-label">本页离线</span>
           </div>
         </div>
         
@@ -54,7 +54,7 @@
           </div>
           <div class="stat-content">
             <CountUp :value="stats.warning" class="stat-value" />
-            <span class="stat-label">告警</span>
+            <span class="stat-label">本页告警</span>
           </div>
         </div>
       </div>
@@ -87,10 +87,10 @@
       
       <div class="toolbar-right">
         <el-button-group>
-          <el-button :type="viewMode === 'grid' ? 'primary' : 'default'" @click="viewMode = 'grid'">
+          <el-button :type="viewMode === 'grid' ? 'primary' : 'default'" aria-label="卡片视图" @click="viewMode = 'grid'">
             <el-icon><Grid /></el-icon>
           </el-button>
-          <el-button :type="viewMode === 'list' ? 'primary' : 'default'" @click="viewMode = 'list'">
+          <el-button :type="viewMode === 'list' ? 'primary' : 'default'" aria-label="表格视图" @click="viewMode = 'list'">
             <el-icon><List /></el-icon>
           </el-button>
         </el-button-group>
@@ -104,6 +104,14 @@
           刷新
         </el-button>
       </div>
+    </div>
+
+    <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
+      <span class="active-filters-label">当前筛选：</span>
+      <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''; handleFilter()">关键词：{{ searchKeyword }}</el-tag>
+      <el-tag v-if="statusFilter" closable @close="statusFilter = ''; handleFilter()">状态：{{ statusFilter === 'online' ? '在线' : '离线' }}</el-tag>
+      <el-tag v-if="modelFilter" closable @close="modelFilter = ''; handleFilter()">型号：{{ modelFilter }}</el-tag>
+      <el-button text type="primary" @click="clearFilters">清除全部</el-button>
     </div>
 
     <!-- 卡片视图 -->
@@ -285,7 +293,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { 
   Connection, CircleCheck, CircleClose, Warning, Cpu, Search, 
   Filter, Grid, List, Refresh, Setting, Upload, Delete, TrendCharts,
@@ -301,6 +309,7 @@ import CountUp from '@/components/common/CountUp.vue'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 
 const router = useRouter()
+const route = useRoute()
 const nodeStore = useNodeStore()
 const wsStore = useWebSocketStore()
 
@@ -314,6 +323,13 @@ const viewMode = ref<'grid' | 'list'>('grid')
 const searchKeyword = ref('')
 const statusFilter = ref('')
 const modelFilter = ref('')
+
+const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''
+const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
+if (routeSearch) searchKeyword.value = routeSearch
+if (routeStatus === 'online' || routeStatus === 'offline') statusFilter.value = routeStatus
+
+const hasActiveFilters = computed(() => Boolean(searchKeyword.value || statusFilter.value || modelFilter.value))
 
 // 统计数据
 const stats = reactive({
@@ -404,6 +420,13 @@ const handleSearch = () => {
 }
 
 const handleFilter = () => {
+  currentPage.value = 1
+}
+
+const clearFilters = () => {
+  searchKeyword.value = ''
+  statusFilter.value = ''
+  modelFilter.value = ''
   currentPage.value = 1
 }
 
@@ -610,6 +633,18 @@ onUnmounted(() => {
 .toolbar-right {
   display: flex;
   gap: 12px;
+}
+
+.active-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.active-filters-label {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 
 /* 卡片网格 */

@@ -43,15 +43,15 @@
         <el-radio-button value="ascii">ASCII</el-radio-button>
       </el-radio-group>
 
-      <el-button size="small" @click="togglePause" :type="isPaused ? 'warning' : 'default'">
+      <el-button size="small" :aria-label="isPaused ? '继续终端日志' : '暂停终端日志'" @click="togglePause" :type="isPaused ? 'warning' : 'default'">
         {{ isPaused ? '▶ 继续' : '⏸ 暂停' }}
       </el-button>
 
-      <el-button size="small" @click="exportLog" :disabled="logEntries.length === 0" title="导出日志">
+      <el-button size="small" aria-label="导出终端日志" @click="exportLog" :disabled="logEntries.length === 0" title="导出日志">
         ↓ 导出
       </el-button>
 
-      <el-button size="small" @click="clearLog" :disabled="logEntries.length === 0">
+      <el-button size="small" aria-label="清空终端日志" @click="clearLog" :disabled="logEntries.length === 0">
         清空
       </el-button>
     </div>
@@ -533,17 +533,17 @@ watch(() => props.channels, () => { /* no auto-select */ })
 .channel-terminal { display: flex; flex-direction: column; gap: 12px; }
 .terminal-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .terminal-dual-panel { display: flex; gap: 8px; height: 400px; }
-.terminal-panel { flex: 1; display: flex; flex-direction: column; border: 1px solid var(--el-border-color-lighter); border-radius: 4px; overflow: hidden; }
+.terminal-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--el-border-color-lighter); border-radius: var(--radius-sm); overflow: hidden; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--el-border-color-lighter); font-size: 12px; font-weight: 500; }
-.tx-panel .panel-header { background: var(--el-color-primary-light-9, #ecf5ff); color: var(--el-color-primary); }
-.rx-panel .panel-header { background: var(--el-color-success-light-9, #f0f9eb); color: var(--el-color-success); }
+.tx-panel .panel-header { background: var(--el-color-primary-light-9); color: var(--el-color-primary); }
+.rx-panel .panel-header { background: var(--el-color-success-light-9); color: var(--el-color-success); }
 .panel-paused .panel-header { animation: pause-blink 1.5s ease-in-out infinite; }
 @keyframes pause-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 .panel-label { color: inherit; }
 .panel-count { font-size: 11px; opacity: 0.7; }
-.panel-log { flex: 1; overflow-y: auto; padding: 4px 0; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; line-height: 1.6; }
+.panel-log { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; line-height: 1.6; }
 .panel-empty { color: var(--el-text-color-placeholder); text-align: center; padding: 20px; font-size: 12px; }
-.panel-entry { display: flex; align-items: baseline; padding: 1px 8px; gap: 6px; min-height: 22px; }
+.panel-entry { display: flex; align-items: baseline; padding: 1px 8px; gap: 6px; min-height: 22px; min-width: 0; }
 .panel-entry:hover { background: var(--el-fill-color-lighter); }
 .panel-entry.error { color: var(--el-color-danger); }
 .panel-entry.info { color: var(--el-color-success); }
@@ -554,7 +554,7 @@ watch(() => props.channels, () => { /* no auto-select */ })
 .dot-interactive { background: var(--el-color-warning); }
 .entry-time { color: var(--el-text-color-secondary); font-size: 11px; flex-shrink: 0; }
 .entry-length { color: var(--el-text-color-secondary); font-size: 10px; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; flex-shrink: 0; opacity: 0.7; }
-.entry-data { white-space: pre-wrap; word-break: break-all; }
+.entry-data { min-width: 0; white-space: pre-wrap; word-break: break-all; }
 .entry-ellipsis { color: var(--el-color-primary); font-size: 10px; cursor: pointer; flex-shrink: 0; }
 .entry-meta { font-size: 10px; opacity: 0.8; flex-shrink: 0; }
 .entry-meta.interactive { color: var(--el-color-warning); }
@@ -564,4 +564,40 @@ watch(() => props.channels, () => { /* no auto-select */ })
 .input-mode-toggle { flex-shrink: 0; }
 .tx-prefix { color: var(--el-color-primary); font-weight: 600; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; margin-right: 4px; }
 .read-size-hint { font-size: 11px; color: var(--el-text-color-secondary); white-space: nowrap; }
+
+@media (max-width: 768px) {
+  .terminal-controls > :first-child {
+    width: 100% !important;
+  }
+
+  .terminal-controls > div[style*="flex"] {
+    display: none;
+  }
+
+  .terminal-dual-panel {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .terminal-panel {
+    height: 260px;
+    flex: none;
+  }
+
+  .terminal-input {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .input-mode-toggle,
+  .terminal-input :deep(.el-input),
+  .terminal-input :deep(.el-input-number) {
+    flex: 1 1 100%;
+    width: 100% !important;
+  }
+
+  .terminal-input :deep(.el-button) {
+    flex: 1 1 auto;
+  }
+}
 </style>

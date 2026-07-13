@@ -4,9 +4,13 @@ import { createPinia, setActivePinia } from 'pinia'
 import NodeList from '@/views/node/NodeList.vue'
 
 // Mock vue-router
-const mockPush = vi.fn()
+const { mockPush, mockRoute } = vi.hoisted(() => ({
+  mockPush: vi.fn(),
+  mockRoute: { query: {} as Record<string, string> },
+}))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mockPush }),
+  useRoute: () => mockRoute,
 }))
 
 // Mock node store
@@ -109,6 +113,34 @@ describe('NodeList.vue', () => {
     vm.statusFilter = 'online'
     await wrapper.vm.$nextTick()
     expect(vm.filteredNodes.length).toBe(2)
+  })
+
+  it('initializes search and status filters from route query', async () => {
+    mockRoute.query = { search: 'Collector-A', status: 'online' }
+    const wrapper = mount(NodeList, { global: { stubs } })
+    await flushPromises()
+
+    const vm = wrapper.vm as any
+    expect(vm.searchKeyword).toBe('Collector-A')
+    expect(vm.statusFilter).toBe('online')
+    expect(vm.filteredNodes).toHaveLength(1)
+  })
+
+  it('clears all filters and restores the first page', async () => {
+    const wrapper = mount(NodeList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.searchKeyword = 'ESP'
+    vm.statusFilter = 'online'
+    vm.modelFilter = 'ESP32'
+    vm.currentPage = 3
+
+    vm.clearFilters()
+
+    expect(vm.searchKeyword).toBe('')
+    expect(vm.statusFilter).toBe('')
+    expect(vm.modelFilter).toBe('')
+    expect(vm.currentPage).toBe(1)
   })
 
   it('navigates to node detail on goToDetail', async () => {

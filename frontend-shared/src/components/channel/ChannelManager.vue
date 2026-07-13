@@ -262,16 +262,16 @@ const rules = {
 
 // ====== 能力数据 ======
 
-// 获取当前选中硬件的能力数据
+// 获取当前选中硬件的能力数据。能力上报尚未到达时提供安全兜底，
+// 以确保既有通道在编辑时仍可修改其已保存的参数。
 const currentCaps = computed(() => {
-  if (!props.capabilities?.buses || !form.hardware_type || !form.hardware_id) return null
-  const hwList = props.capabilities.buses[form.hardware_type]
-  if (!hwList) return null
+  const hardwareType = form.hardware_type.toLowerCase()
+  if (!hardwareType) return null
+  const hwList = props.capabilities?.buses?.[hardwareType] || []
   const hw = hwList.find((h: any) => String(h.id) === form.hardware_id)
-  if (!hw) return null
 
   // 1) 尝试嵌套结构: hw.Capabilities.UartCaps (Go protobuf JSON)
-  const capsWrapper = hw.Capabilities || hw.capabilities
+  const capsWrapper = hw?.Capabilities || hw?.capabilities
   if (capsWrapper) {
     const capsKeyMap: Record<string, string> = {
       uart: 'UartCaps',
@@ -280,46 +280,44 @@ const currentCaps = computed(() => {
       gpio: 'GpioCaps',
       adc: 'AdcCaps'
     }
-    const capsKey = capsKeyMap[form.hardware_type]
+    const capsKey = capsKeyMap[hardwareType]
     const nested = capsWrapper[capsKey] || capsWrapper[capsKey?.toLowerCase()]
     if (nested) return nested
   }
 
-  // 2) 无嵌套包装时，直接从 hw 本身提取参数
-  switch (form.hardware_type) {
+  // 2) 能力尚不可用时使用通用安全范围；保存的通道配置仍可编辑。
+  switch (hardwareType) {
     case 'uart':
       return {
-        baud_rate_max: hw.max_baud || 921600,
-        baud_rate_min: hw.min_baud || 1200,
-        data_bits_options: hw.data_bits_options || [5, 6, 7, 8],
-        stop_bits_options: hw.stop_bits_options || [1, 1.5, 2],
-        parity_options: hw.parity_options || ['none', 'odd', 'even'],
-        flow_control_options: hw.flow_control_options || ['none', 'rts_cts', 'xon_xoff']
+        baud_rate_max: hw?.max_baud || 921600,
+        baud_rate_min: hw?.min_baud || 1200,
+        data_bits_options: hw?.data_bits_options || [5, 6, 7, 8],
+        stop_bits_options: hw?.stop_bits_options || [1, 1.5, 2],
+        parity_options: hw?.parity_options || ['none', 'odd', 'even'],
+        flow_control_options: hw?.flow_control_options || ['none', 'rts_cts', 'xon_xoff']
       }
     case 'i2c':
       return {
-        freq_hz_max: hw.max_freq_hz || 1000000,
-        freq_hz_min: hw.min_freq_hz || 10000,
-        address_min: hw.address_min ?? 8,
-        address_max: hw.address_max ?? 119,
-        supports_scan: hw.supports_scan ?? true,
-        supports_10bit: hw.supports_10bit || false
+        freq_hz_max: hw?.max_freq_hz || 1000000,
+        freq_hz_min: hw?.min_freq_hz || 10000,
+        address_min: hw?.address_min ?? 8,
+        address_max: hw?.address_max ?? 119,
+        supports_scan: hw?.supports_scan ?? false,
+        supports_10bit: hw?.supports_10bit || false
       }
     case 'spi':
       return {
-        freq_hz_max: hw.max_freq_hz || 40000000,
-        freq_hz_min: hw.min_freq_hz || 100000,
-        mode_options: hw.mode_options || [0, 1, 2, 3],
-        cs_pins: hw.cs_pins || (hw.default_cs_pin != null ? [hw.default_cs_pin] : [])
+        freq_hz_max: hw?.max_freq_hz || 40000000,
+        freq_hz_min: hw?.min_freq_hz || 100000,
+        mode_options: hw?.mode_options || [0, 1, 2, 3],
+        cs_pins: hw?.cs_pins || (hw?.default_cs_pin != null ? [hw.default_cs_pin] : [])
       }
     case 'gpio':
-      return {
-        direction_options: hw.direction_options || ['INPUT', 'OUTPUT', 'INPUT_PULLUP', 'INPUT_PULLDOWN']
-      }
+      return { direction_options: hw?.direction_options || ['INPUT', 'OUTPUT', 'INPUT_PULLUP', 'INPUT_PULLDOWN'] }
     case 'adc':
       return {
-        attenuation_options: hw.attenuation_options || [0, 1, 2, 3],
-        bit_width_options: hw.bit_width_options || [9, 10, 11, 12]
+        attenuation_options: hw?.attenuation_options || [0, 1, 2, 3],
+        bit_width_options: hw?.bit_width_options || [9, 10, 11, 12]
       }
     default:
       return null
@@ -553,7 +551,7 @@ watch(showDialog, (open) => {
 
   if (editingChannel.value) {
     // 编辑模式：从通道数据填充
-    form.hardware_type = editingChannel.value.hardware_type || 'i2c'
+    form.hardware_type = String(editingChannel.value.hardware_type || 'i2c').toLowerCase()
     form.hardware_id = editingChannel.value.hardware_id || ''
     form.address = editingChannel.value.address || ''
     form.name = editingChannel.value.name || ''

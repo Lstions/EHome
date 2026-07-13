@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -164,6 +165,93 @@ func TestNodeDetail_Existing(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNodeStatusHistory_ReturnsChronologicalStatusEvents(t *testing.T) {
+	r, db := setupTestRouter(t)
+	if err := db.AutoMigrate(&models.NodeEvent{}); err != nil {
+		t.Fatalf("migrate node events: %v", err)
+	}
+	now := time.Now().UTC()
+	db.Create(&models.Node{NodeID: "history-node", Name: "History Node", Status: "online"})
+	db.Create(&models.NodeEvent{NodeID: "history-node", EventType: "offline", OldStatus: "online", NewStatus: "offline", CreatedAt: now.Add(-time.Hour)})
+	db.Create(&models.NodeEvent{NodeID: "history-node", EventType: "online", OldStatus: "offline", NewStatus: "online", CreatedAt: now})
+
+	req := httptest.NewRequest("GET", "/api/v1/nodes/history-node/status-history?limit=10", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Data []models.NodeEvent `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Data) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(body.Data))
+	}
+	if body.Data[0].NewStatus != "online" || body.Data[1].NewStatus != "offline" {
+		t.Fatalf("expected newest-first status events, got %#v", body.Data)
+	}
+}
+
+func TestGlobalNodeStatusHistory_IncludesNodeNames(t *testing.T) {
+	r, db := setupTestRouter(t)
+	if err := db.AutoMigrate(&models.NodeEvent{}); err != nil {
+		t.Fatalf("migrate node events: %v", err)
+	}
+	db.Create(&models.Node{NodeID: "status-node", Name: "现场节点", Status: "online"})
+	db.Create(&models.NodeEvent{NodeID: "status-node", EventType: "online", OldStatus: "offline", NewStatus: "online"})
+
+	req := httptest.NewRequest("GET", "/api/v1/nodes/status-history?limit=10", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Data []struct {
+			NodeID    string `json:"node_id"`
+			NodeName  string `json:"node_name"`
+			NewStatus string `json:"new_status"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Data) != 1 || body.Data[0].NodeID != "status-node" || body.Data[0].NodeName != "现场节点" || body.Data[0].NewStatus != "online" {
+		t.Fatalf("unexpected status history: %#v", body.Data)
+	}
+}
+
+func TestUnifiedDataCategories_ReturnsOnlyCategoriesForSelectedDevice(t *testing.T) {
+	r, db := setupTestRouter(t)
+	now := time.Now().UTC()
+	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "temperature", Value: 20, Unit: "°C", Timestamp: now})
+	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "humidity", Value: 50, Unit: "%", Timestamp: now})
+	db.Create(&models.UnifiedData{DeviceID: 2, SensorName: "voltage", Value: 48, Unit: "V", Timestamp: now})
+
+	req := httptest.NewRequest("GET", "/api/v1/unified-data/categories?device_pk=1", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body []struct {
+		Code string `json:"code"`
+		Unit string `json:"unit"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body) != 2 || body[0].Code != "humidity" || body[1].Code != "temperature" {
+		t.Fatalf("unexpected categories: %#v", body)
 	}
 }
 

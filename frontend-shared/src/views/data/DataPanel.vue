@@ -43,60 +43,37 @@
     </el-card>
 
     <!-- 统计概览卡片 -->
-    <el-row :gutter="16" style="margin-top: 20px;" v-if="queryForm.deviceId && historyData.length > 0">
-      <el-col :span="6">
-        <el-card class="stat-card" shadow="hover">
-          <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-danger), var(--el-color-warning));">
-              <span class="stat-icon-text">🌡️</span>
-            </div>
-            <div class="stat-info">
-              <p class="stat-label">最新温度</p>
-              <p class="stat-value">{{ latestStats.temperature ?? '--' }}<span v-if="latestStats.temperature" class="stat-unit">°C</span></p>
-            </div>
+    <div v-if="queryForm.deviceId && historyData.length > 0" class="data-stats">
+      <el-card v-for="stat in dynamicStats" :key="stat.code" class="stat-card" shadow="hover">
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon><DataAnalysis /></el-icon>
           </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card class="stat-card" shadow="hover">
-          <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-success));">
-              <span class="stat-icon-text">🌊</span>
-            </div>
-            <div class="stat-info">
-              <p class="stat-label">最新气压</p>
-              <p class="stat-value">{{ latestStats.pressure ?? '--' }}<span v-if="latestStats.pressure" class="stat-unit">hPa</span></p>
-            </div>
+          <div class="stat-info">
+            <p class="stat-label">{{ stat.label }}</p>
+            <p class="stat-value">{{ stat.value }}<span v-if="stat.unit" class="stat-unit">{{ stat.unit }}</span></p>
           </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card class="stat-card" shadow="hover">
-          <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-warning), #ffc100);">
-              <span class="stat-icon-text">📊</span>
-            </div>
-            <div class="stat-info">
-              <p class="stat-label">数据点总数</p>
-              <p class="stat-value">{{ latestStats.totalPoints }}</p>
-            </div>
+        </div>
+      </el-card>
+      <el-card class="stat-card" shadow="hover">
+        <div class="stat-content">
+          <div class="stat-icon"><el-icon><DocumentChecked /></el-icon></div>
+          <div class="stat-info">
+            <p class="stat-label">本次数据点</p>
+            <p class="stat-value">{{ total }}</p>
           </div>
-        </el-card>
-      </el-col>
-      <el-col :span="6">
-        <el-card class="stat-card" shadow="hover">
-          <div class="stat-content">
-            <div class="stat-icon" style="background: linear-gradient(135deg, var(--el-color-success), #85ce61);">
-              <span class="stat-icon-text">⏱️</span>
-            </div>
-            <div class="stat-info">
-              <p class="stat-label">采集时长</p>
-              <p class="stat-value">{{ latestStats.duration }}</p>
-            </div>
+        </div>
+      </el-card>
+      <el-card class="stat-card" shadow="hover">
+        <div class="stat-content">
+          <div class="stat-icon"><el-icon><Timer /></el-icon></div>
+          <div class="stat-info">
+            <p class="stat-label">采集覆盖时长</p>
+            <p class="stat-value">{{ latestStats.duration }}</p>
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+        </div>
+      </el-card>
+    </div>
 
     <!-- 实时数据开关 -->
     <el-card style="margin-top: 20px;" v-if="queryForm.deviceId">
@@ -157,11 +134,15 @@
       </el-checkbox-group>
       <div v-if="compareDevices.length >= 2" style="margin-top: 12px; display: flex; align-items: center; gap: 12px;">
         <span style="font-size: 14px; color: var(--el-text-color-regular);">对比类别：</span>
-        <el-select v-model="queryForm.compareCategory" size="small" style="width: 140px;">
-          <el-option label="温度" value="temperature" />
-          <el-option label="气压" value="pressure" />
-          <el-option label="湿度" value="humidity" />
+        <el-select v-model="queryForm.compareCategory" size="small" style="width: 180px;" :disabled="compareCategories.length === 0">
+          <el-option
+            v-for="category in compareCategories"
+            :key="category.code"
+            :label="`${sensorNameMap[category.code] || category.code}${category.unit ? ` (${category.unit})` : ''}`"
+            :value="category.code"
+          />
         </el-select>
+        <span v-if="compareCategories.length === 0" class="compare-category-hint">所选设备没有可安全比较的同单位指标</span>
       </div>
       <div v-if="compareDevices.length >= 2" style="margin-top: 20px; min-height: 300px;">
         <LineChart
@@ -173,6 +154,17 @@
       </div>
       <el-empty v-else description="请选择至少2个设备进行对比" />
     </el-card>
+
+    <EmptyState
+      v-if="!queryForm.deviceId"
+      kind="initial"
+      icon="Cpu"
+      title="选择设备后查看数据"
+      description="选择边缘设备和时间范围后，可查看历史趋势、最新指标与实时数据。"
+      :quick-actions="[
+        { label: '管理边缘设备', icon: Cpu, type: 'primary', handler: () => router.push('/edge-device') }
+      ]"
+    />
 
     <!-- 历史数据表格 -->
     <el-card style="margin-top: 20px;">
@@ -190,7 +182,13 @@
       </template>
       <el-skeleton v-if="loading" :rows="5" animated />
       <template v-else>
-        <el-empty v-if="!historyData || historyData.length === 0" description="暂无数据" />
+        <EmptyState
+          v-if="!historyData || historyData.length === 0"
+          :kind="queryForm.deviceId ? 'empty' : 'initial'"
+          icon="DataAnalysis"
+          :title="queryForm.deviceId ? '该时间范围内暂无数据' : '请选择设备'"
+          :description="queryForm.deviceId ? '可调整时间范围，或确认设备已完成采集与同步。' : '选择设备后即可查询历史数据。'"
+        />
         <el-table v-else :data="historyData" stripe>
           <el-table-column prop="created_at" label="采集时间" width="180">
             <template #default="{ row }">
@@ -236,10 +234,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Download, Connection } from '@element-plus/icons-vue'
+import { Download, Connection, DataAnalysis, DocumentChecked, Timer, Cpu } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import LineChart from '@/components/charts/LineChart.vue'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -252,6 +252,7 @@ import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 
+const router = useRouter()
 const deviceList = ref<Device[]>([])
 const historyData = ref<any[]>([])
 const chartSeries = ref<any[]>([])
@@ -269,102 +270,73 @@ const realtimeData = ref<any[]>([])
 const compareMode = ref(false)
 const compareDevices = ref<number[]>([])
 const compareSeries = ref<any[]>([])
+interface MeasurementCategory {
+  code: string
+  unit: string
+}
+const availableCategories = ref<MeasurementCategory[]>([])
+const compareCategories = ref<MeasurementCategory[]>([])
 
 // 统计概览数据
 const latestStats = reactive({
-  temperature: null as number | null,
-  pressure: null as number | null,
   totalPoints: 0,
   duration: '--'
 })
 
+const extractNumericValue = (value: unknown): number | null => {
+  if (typeof value === 'number') return value
+  if (typeof value === 'object' && value !== null && 'value' in value) {
+    const numeric = (value as { value?: unknown }).value
+    return typeof numeric === 'number' ? numeric : null
+  }
+  return null
+}
+
+const dynamicStats = computed(() => {
+  const latest = [...historyData.value]
+    .sort((a, b) => String(b.timestamp || b.created_at || b.collected_at || '').localeCompare(String(a.timestamp || a.created_at || a.collected_at || '')))[0]
+  const source = latest?.parsed_data || latest?.data || {}
+  return availableCategories.value
+    .map((category) => {
+      const value = extractNumericValue(source[category.code])
+      if (value === null) return null
+      return {
+        code: category.code,
+        label: `最新${sensorNameMap[category.code] || category.code}`,
+        unit: category.unit || sensorUnitMap[category.code] || '',
+        value: Number.isInteger(value) ? value : Number(value.toFixed(2)),
+      }
+    })
+    .filter((stat): stat is { code: string; label: string; unit: string; value: number } => stat !== null)
+    .slice(0, 3)
+})
+
 const calculateStats = () => {
   const items = historyData.value
+  latestStats.totalPoints = total.value
   if (!items || items.length === 0) {
-    latestStats.temperature = null
-    latestStats.pressure = null
-    latestStats.totalPoints = 0
     latestStats.duration = '--'
     return
   }
 
-  // 统计最新温度和气压（遍历所有数据提取）
-  let latestTemp: number | null = null
-  let latestPressure: number | null = null
-  let latestTempTime = ''
-  let latestPressureTime = ''
-
-  for (const item of items) {
-    const data = item.parsed_data || item.data
-    if (!data) continue
-    // Helper to extract numeric value
-    const extractNumeric = (val: any): number | null => {
-      if (typeof val === 'number') return val
-      if (typeof val === 'object' && val !== null && 'value' in val) {
-        return typeof val.value === 'number' ? val.value : null
-      }
-      return null
-    }
-
-    const itemTime = item.timestamp || item.created_at || item.collected_at || ''
-    // Temperature search: check common keys
-    const tempKeys = ['temperature', 'temp', 'Temperature', 'Temp']
-    for (const key of tempKeys) {
-      if (data[key] !== undefined) {
-        const val = extractNumeric(data[key])
-        if (val !== null && (!latestTemp || itemTime > latestTempTime)) {
-          latestTemp = val
-          latestTempTime = itemTime
-        }
-        break
-      }
-    }
-
-    // Pressure search
-    const pressKeys = ['pressure', 'Pressure', 'press', 'Press']
-    for (const key of pressKeys) {
-      if (data[key] !== undefined) {
-        const val = extractNumeric(data[key])
-        // Pressure in Pa -> convert to hPa
-        const adjusted = val !== null && val > 10000 ? val / 100 : val
-        if (val !== null && (!latestPressure || itemTime > latestPressureTime)) {
-          latestPressure = adjusted !== null ? Math.round(adjusted * 10) / 10 : null
-          latestPressureTime = itemTime
-        }
-        break
-      }
-    }
+  const times = items
+    .map(item => item.timestamp || item.created_at || item.collected_at)
+    .filter(Boolean)
+    .map(t => new Date(t).getTime())
+    .filter(t => !Number.isNaN(t))
+    .sort((a, b) => a - b)
+  if (times.length < 2) {
+    latestStats.duration = '< 1分钟'
+    return
   }
 
-  latestStats.temperature = latestTemp
-  latestStats.pressure = latestPressure
-  latestStats.totalPoints = total.value
-
-  // 计算采集时长
-  if (items.length >= 2) {
-    const times = items
-      .map(item => item.timestamp || item.created_at || item.collected_at)
-      .filter(Boolean)
-      .map(t => new Date(t).getTime())
-      .filter(t => !isNaN(t))
-      .sort((a, b) => a - b)
-    if (times.length >= 2) {
-      const diffMs = times[times.length - 1] - times[0]
-      const diffMin = Math.floor(diffMs / 60000)
-      if (diffMin < 60) {
-        latestStats.duration = `${diffMin}分钟`
-      } else if (diffMin < 1440) {
-        latestStats.duration = `${Math.floor(diffMin / 60)}小时${diffMin % 60}分钟`
-      } else {
-        latestStats.duration = `${Math.floor(diffMin / 1440)}天${Math.floor((diffMin % 1440) / 60)}小时`
-      }
-    } else {
-      latestStats.duration = '< 1分钟'
-    }
-  } else if (items.length === 1) {
-    latestStats.duration = '< 1分钟'
+  const diffMin = Math.floor((times[times.length - 1] - times[0]) / 60000)
+  if (diffMin < 60) {
+    latestStats.duration = `${diffMin}分钟`
+  } else if (diffMin < 1440) {
+    latestStats.duration = `${Math.floor(diffMin / 60)}小时${diffMin % 60}分钟`
   } else {
-    latestStats.duration = '--'
+    latestStats.duration = `${Math.floor(diffMin / 1440)}天${Math.floor((diffMin % 1440) / 60)}小时`
   }
 }
 
@@ -377,6 +349,52 @@ const queryForm = reactive({
 const wsStore = useWebSocketStore()
 const edgeDeviceStore = useEdgeDeviceStore()
 let unsubscribeData: (() => void) | null = null
+
+const loadDeviceCategories = async () => {
+  if (!queryForm.deviceId) {
+    availableCategories.value = []
+    return
+  }
+  try {
+    const response = await client.get<unknown, any>('/api/v1/unified-data/categories', {
+      params: { device_pk: queryForm.deviceId },
+    })
+    const rawCategories = response?.data || response || []
+    availableCategories.value = Array.isArray(rawCategories)
+      ? rawCategories
+        .filter((item: any) => item?.code)
+        .map((item: any) => ({ code: item.code, unit: item.unit || sensorUnitMap[item.code] || '' }))
+      : []
+  } catch (error) {
+    logger.warn('获取设备指标类别失败', { error: String(error) })
+    availableCategories.value = []
+  }
+}
+
+const loadCompareCategories = async () => {
+  if (compareDevices.value.length < 2) {
+    compareCategories.value = []
+    return
+  }
+  try {
+    const categoryLists = await Promise.all(compareDevices.value.map(async (deviceId) => {
+      const response = await client.get<unknown, any>('/api/v1/unified-data/categories', { params: { device_pk: deviceId } })
+      const items = response?.data || response || []
+      return Array.isArray(items) ? items : []
+    }))
+    const [first, ...rest] = categoryLists
+    compareCategories.value = (first || []).filter((candidate: MeasurementCategory) =>
+      rest.every(list => list.some((item: MeasurementCategory) => item.code === candidate.code && item.unit === candidate.unit)),
+    )
+    if (!compareCategories.value.some(category => category.code === queryForm.compareCategory)) {
+      queryForm.compareCategory = compareCategories.value[0]?.code || ''
+    }
+  } catch (error) {
+    logger.warn('获取可比较指标失败', { error: String(error) })
+    compareCategories.value = []
+    queryForm.compareCategory = ''
+  }
+}
 
 const fetchDevices = async () => {
   try {
@@ -423,7 +441,7 @@ const fetchData = async () => {
     historyData.value = response.items || []
     total.value = response.total || 0
 
-    // 计算统计概览
+    await loadDeviceCategories()
     calculateStats()
 
     // 构建图表数据：从 unified_data API 获取解析后的数值数据
@@ -460,22 +478,10 @@ const buildChartSeries = async () => {
         break
     }
 
-    // Fetch categories dynamically from the API instead of hardcoding
-    let categoryNames: string[] = []
-    try {
-      const catResponse = await client.get<unknown, any>('/api/v1/unified-data/categories')
-      const cats = catResponse?.data || catResponse || []
-      if (Array.isArray(cats)) {
-        categoryNames = cats.map((c: any) => c.code || c.name || c)
-      }
-    } catch { /* ignore */ }
-
-    // Fallback to known categories if API returns nothing
+    const categoryNames = availableCategories.value.map(category => category.code)
     if (categoryNames.length === 0) {
-      categoryNames = ['temperature', 'pressure', 'humidity', 'wind_speed', 'wind_direction',
-        'illuminance', 'uv_index', 'rain_intensity', 'rain_accum',
-        'voltage', 'current', 'power', 'energy', 'soc', 'soh', 'frequency',
-        'cell_voltage', 'cell_temp', 'mos_status']
+      chartSeries.value = []
+      return
     }
 
     const series: any[] = []
@@ -799,9 +805,10 @@ const formatRawData = (rawData: string | Record<string, any>) => {
   return JSON.stringify(rawData)
 }
 
-watch(compareDevices, () => {
+watch(compareDevices, async () => {
   if (compareMode.value && compareDevices.value.length >= 2) {
-    fetchCompareData()
+    await loadCompareCategories()
+    if (queryForm.compareCategory) await fetchCompareData()
   }
 })
 
@@ -829,6 +836,13 @@ onUnmounted(() => {
 <style scoped>
 .data-panel {
   padding: 0;
+}
+
+.data-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
 }
 
 :deep(.el-pagination) {
@@ -871,10 +885,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-}
-
-.stat-icon-text {
-  font-size: 20px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 
 .stat-info {
@@ -892,7 +904,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 22px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .stat-unit {
@@ -900,5 +912,35 @@ onUnmounted(() => {
   font-weight: 400;
   color: var(--el-text-color-secondary);
   margin-left: 2px;
+}
+
+.compare-category-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .data-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  :deep(.el-form--inline) {
+    display: flex;
+    flex-direction: column;
+  }
+
+  :deep(.el-form--inline .el-form-item) {
+    margin-right: 0;
+  }
+
+  :deep(.el-form--inline .el-form-item__content),
+  :deep(.el-form--inline .el-select) {
+    width: 100%;
+  }
+
+  .realtime-indicator {
+    flex-wrap: wrap;
+  }
 }
 </style>

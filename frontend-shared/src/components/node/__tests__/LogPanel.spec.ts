@@ -92,6 +92,30 @@ describe('LogPanel', () => {
     expect(wrapper.text()).not.toContain('1970')
   })
 
+  it('accepts the production WebSocket envelope payload for matching node logs', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    wsHandler?.({
+      type: 'node_log',
+      payload: {
+        node_id: 'NODE-1',
+        lines: [{ level: 1, ts: 2_000_000, tag: 'RX_TASK', msg: 'timeout from server envelope' }],
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('timeout from server envelope')
+  })
+
+  it('labels realtime log controls for assistive technology', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="暂停实时日志"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="清空实时日志"]').exists()).toBe(true)
+  })
+
   it('updates stream, level, persistence and queries history through node API', async () => {
     mocks.updateLogConfig.mockResolvedValue({})
     mocks.updateLogPersist.mockResolvedValue({})

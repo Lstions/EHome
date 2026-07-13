@@ -100,6 +100,25 @@ describe('Dashboard.vue', () => {
     expect(statCards.length).toBe(4)
   })
 
+  it('uses the responsive KPI grid instead of fixed 24-column spans', async () => {
+    const wrapper = mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    expect(wrapper.find('.dashboard-stats').exists()).toBe(true)
+  })
+
+  it('does not render a simulated status timeline as operational data', async () => {
+    const wrapper = mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('模拟数据')
+  })
+
+  it('loads real status history from the API', async () => {
+    const client = (await import('@/api/client')).default
+    mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    expect(client.get).toHaveBeenCalledWith('/api/v1/nodes/status-history', { params: { limit: 20 } })
+  })
+
   it('computes offline collectors correctly', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()

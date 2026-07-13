@@ -46,10 +46,13 @@ vi.mock('@/stores/websocket', () => ({
   }),
 }))
 
-// ── Mock API client (default export with get/post/put/delete) ──
+const { mockClientGet } = vi.hoisted(() => ({
+  mockClientGet: vi.fn(() => Promise.resolve({ data: [] })),
+}))
+
 vi.mock('@/api/client', () => ({
   default: {
-    get: vi.fn(() => Promise.resolve({ data: [] })),
+    get: mockClientGet,
     post: vi.fn(() => Promise.resolve({ data: {} })),
     put: vi.fn(() => Promise.resolve()),
     delete: vi.fn(() => Promise.resolve()),
@@ -191,5 +194,21 @@ describe('DataPanel', () => {
     expect(wrapper.find('.data-panel').exists()).toBe(true)
     // No stat cards when empty
     expect(wrapper.find('.stat-card').exists()).toBe(false)
+  })
+
+  it('uses the selected device categories instead of a global hardcoded list', async () => {
+    const wrapper = getMounted()
+    const vm = wrapper.vm as any
+    vm.queryForm.deviceId = 42
+    ;(mockClientGet as any).mockImplementation(((url: string) => {
+      if (url === '/api/v1/unified-data/categories') {
+        return Promise.resolve([{ code: 'battery_voltage', unit: 'V' }])
+      }
+      return Promise.resolve([])
+    }) as any)
+
+    await vm.loadDeviceCategories()
+
+    expect(vm.availableCategories).toEqual([{ code: 'battery_voltage', unit: 'V' }])
   })
 })

@@ -2,9 +2,6 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
-# Flash (S3 dev boards typically 8MB or 16MB, but 4MB works)
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-
 # USB Serial/JTAG (S3 native USB: GPIO19=D-, GPIO20=D+)
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 

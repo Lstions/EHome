@@ -32,7 +32,7 @@ const stubs = {
   'el-row': { template: '<div class="el-row"><slot /></div>' },
   'el-col': { template: '<div class="el-col"><slot /></div>' },
   'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-select': { template: '<select class="el-select"><slot /></select>' },
+  'el-select': { template: '<select class="el-select" @change="$emit(\'change\')"><slot /></select>' },
   'el-option': { template: '<option />' },
   'el-icon': { template: '<i class="el-icon"><slot /></i>' },
   'el-descriptions': { template: '<div class="el-descriptions"><slot /></div>' },
@@ -56,6 +56,11 @@ describe('Monitor.vue', () => {
     const wrapper = mount(Monitor, { global: { stubs } })
     expect(wrapper.find('.toolbar').exists()).toBe(true)
     expect(wrapper.text()).toContain('系统监控')
+  })
+
+  it('uses text and an icon rather than an emoji-only heading', () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    expect(wrapper.find('.toolbar h2').text()).toBe('系统监控')
   })
 
   it('renders refresh button', () => {
@@ -131,5 +136,16 @@ describe('Monitor.vue', () => {
     await flushPromises()
     // 5000 points → "5.00K"
     expect(wrapper.text()).toContain('K')
+  })
+
+  it('restarts polling when the refresh interval changes', async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+    const wrapper = mount(Monitor, { global: { stubs } })
+    const callsAfterMount = setIntervalSpy.mock.calls.length
+
+    await wrapper.find('.el-select').trigger('change')
+
+    expect(setIntervalSpy.mock.calls.length).toBeGreaterThan(callsAfterMount)
+    setIntervalSpy.mockRestore()
   })
 })

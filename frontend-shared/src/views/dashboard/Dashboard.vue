@@ -3,70 +3,60 @@
     <PageHeader title="仪表盘" />
 
     <template v-if="loading">
-      <el-row :gutter="20">
-        <el-col :span="6" v-for="i in 4" :key="i">
-          <SkeletonCard variant="stat" :icon-size="48" animated />
-        </el-col>
-      </el-row>
+      <div class="dashboard-stats">
+        <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
+      </div>
     </template>
     <template v-else>
-      <el-row :gutter="20">
-        <el-col :span="6">
-          <el-card shadow="hover" class="stat-card" @click="router.push('/node')">
-            <div class="stat-content">
-              <div class="stat-icon" style="color: var(--el-color-primary);">
-                <el-icon :size="32"><Connection /></el-icon>
-              </div>
-              <div class="stat-info">
-                <p class="stat-label">采集器总数</p>
-                <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
-              </div>
+      <div class="dashboard-stats">
+        <el-card shadow="hover" class="stat-card" @click="router.push('/node')">
+          <div class="stat-content">
+            <div class="stat-icon" style="color: var(--el-color-primary);">
+              <el-icon :size="32"><Connection /></el-icon>
             </div>
-          </el-card>
-        </el-col>
+            <div class="stat-info">
+              <p class="stat-label">采集器总数</p>
+              <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
+            </div>
+          </div>
+        </el-card>
 
-        <el-col :span="6">
-          <el-card shadow="hover" class="stat-card" @click="router.push('/node?status=online')">
-            <div class="stat-content">
-              <div class="stat-icon" style="color: var(--el-color-success);">
-                <el-icon :size="32"><CircleCheck /></el-icon>
-              </div>
-              <div class="stat-info">
-                <p class="stat-label">在线采集器</p>
-                <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
-              </div>
+        <el-card shadow="hover" class="stat-card" @click="router.push('/node?status=online')">
+          <div class="stat-content">
+            <div class="stat-icon" style="color: var(--el-color-success);">
+              <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
-          </el-card>
-        </el-col>
+            <div class="stat-info">
+              <p class="stat-label">在线采集器</p>
+              <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
+            </div>
+          </div>
+        </el-card>
 
-        <el-col :span="6">
-          <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device')">
-            <div class="stat-content">
-              <div class="stat-icon" style="color: var(--el-color-warning);">
-                <el-icon :size="32"><Cpu /></el-icon>
-              </div>
-              <div class="stat-info">
-                <p class="stat-label">设备总数</p>
-                <p class="stat-value">{{ overview.edge_devices?.total || 0 }}</p>
-              </div>
+        <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device')">
+          <div class="stat-content">
+            <div class="stat-icon" style="color: var(--el-color-warning);">
+              <el-icon :size="32"><Cpu /></el-icon>
             </div>
-          </el-card>
-        </el-col>
+            <div class="stat-info">
+              <p class="stat-label">设备总数</p>
+              <p class="stat-value">{{ overview.edge_devices?.total || 0 }}</p>
+            </div>
+          </div>
+        </el-card>
 
-        <el-col :span="6">
-          <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device?status=online')">
-            <div class="stat-content">
-              <div class="stat-icon" style="color: var(--el-color-success);">
-                <el-icon :size="32"><CircleCheck /></el-icon>
-              </div>
-              <div class="stat-info">
-                <p class="stat-label">在线设备</p>
-                <p class="stat-value">{{ overview.edge_devices?.online || 0 }}</p>
-              </div>
+        <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device?status=online')">
+          <div class="stat-content">
+            <div class="stat-icon" style="color: var(--el-color-success);">
+              <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
-          </el-card>
-        </el-col>
-      </el-row>
+            <div class="stat-info">
+              <p class="stat-label">在线设备</p>
+              <p class="stat-value">{{ overview.edge_devices?.online || 0 }}</p>
+            </div>
+          </div>
+        </el-card>
+      </div>
     </template>
 
     <!-- 告警 / 异常摘要 -->
@@ -159,39 +149,36 @@
       </el-col>
     </el-row>
 
-    <!-- 设备状态时间线 -->
+    <!-- 真实节点状态变化 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
         <el-card shadow="hover">
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span>采集器/设备状态变化</span>
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <el-tag size="small" type="warning">模拟数据</el-tag>
-                <el-tag size="small" type="info">最近 24 小时</el-tag>
-              </div>
+              <span>节点状态变化</span>
+              <span class="status-history-hint">最近 {{ statusHistory.length }} 条真实状态事件</span>
             </div>
           </template>
-          <el-timeline v-if="statusTimeline.length > 0">
+          <el-timeline v-if="statusHistory.length > 0">
             <el-timeline-item
-              v-for="item in statusTimeline"
-              :key="item.id"
-              :timestamp="formatTime(item.time)"
-              :type="item.type"
-              :hollow="item.type === 'warning'"
+              v-for="event in statusHistory"
+              :key="event.id"
+              :timestamp="formatTime(event.created_at)"
+              :type="event.new_status === 'online' ? 'success' : 'warning'"
             >
-              <p style="margin: 0; font-size: 14px;">
-                <strong>{{ item.name }}</strong>
-                <el-tag size="small" :type="item.status === 'online' ? 'success' : 'info'" style="margin-left: 8px;">
-                  {{ item.status === 'online' ? '在线' : '离线' }}
-                </el-tag>
-              </p>
-              <p v-if="item.type" style="margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary);">
-                {{ item.collectorName ? `采集器: ${item.collectorName}` : '' }}
-              </p>
+              <strong>{{ event.node_name || event.node_id }}</strong>
+              <el-tag size="small" :type="event.new_status === 'online' ? 'success' : 'info'" style="margin-left: 8px;">
+                {{ event.new_status === 'online' ? '在线' : '离线' }}
+              </el-tag>
             </el-timeline-item>
           </el-timeline>
-          <el-empty v-else description="暂无状态变化记录" />
+          <EmptyState
+            v-else
+            icon="Connection"
+            size="small"
+            title="暂无状态变化记录"
+            description="节点首次上线、恢复或离线后，状态变化会显示在这里。"
+          />
         </el-card>
       </el-col>
     </el-row>
@@ -290,6 +277,7 @@ const wsStore = useWebSocketStore()
 const trendLoading = ref(false)
 const trendCategory = ref('temperature')
 const trendSeries = ref<any[]>([])
+const statusHistory = ref<Array<{ id: number; node_id: string; node_name?: string; new_status: string; created_at: string }>>([])
 const trendRange = ref<'1h' | '24h' | '7d'>('24h')
 const trendRangeLabel = computed(() => {
   const map: Record<string, string> = { '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天' }
@@ -334,8 +322,6 @@ const availableTrendCategories = computed(() => {
   }))
 })
 
-// 状态时间线
-const statusTimeline = ref<any[]>([])
 
 // 告警摘要计算属性
 const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
@@ -417,28 +403,15 @@ const fetchTrendData = async () => {
   }
 }
 
-// 获取状态变化时间线
-const fetchStatusTimeline = async () => {
-  try {
-    // 从 unified_data 的设备列表获取基本信息构建简单时间线
-    // 实际应该从日志表获取，这里用概览数据模拟
-    const devices = overview.value.latest_data || []
-    const timeline: any[] = []
-    const now = Date.now()
 
-    for (const item of devices.slice(0, 10)) {
-      timeline.push({
-        id: item.device_id,
-        name: item.device_name,
-        collectorName: item.collector_name,
-        status: 'online',
-        time: item.collected_at || new Date(now).toISOString(),
-        type: 'success'
-      })
-    }
-    statusTimeline.value = timeline
+const fetchStatusHistory = async () => {
+  try {
+    const response = await client.get<unknown, any>('/api/v1/nodes/status-history', { params: { limit: 20 } })
+    const events = response?.data || response || []
+    statusHistory.value = Array.isArray(events) ? events : []
   } catch (error) {
-    statusTimeline.value = []
+    logger.warn('获取节点状态历史失败', { error: String(error) })
+    statusHistory.value = []
   }
 }
 
@@ -459,8 +432,9 @@ const scheduleOverviewRefresh = () => {
 const handleStatusUpdate = (message: WebSocketMessage) => {
   logger.debug('状态更新', { payload: message.payload })
 
-  if (message.payload?.collector_id || message.payload?.device_id) {
+  if (message.payload?.collector_id || message.payload?.device_id || message.payload?.node_id) {
     scheduleOverviewRefresh()
+    fetchStatusHistory()
   }
 }
 
@@ -501,8 +475,10 @@ const fetchOverview = async (silent = false) => {
 const handleRefresh = async () => {
   refreshing.value = true
   try {
+    // Trend queries derive their device list from overview.latest_data, so refresh
+    // the overview first to avoid issuing a trend request with stale devices.
     await fetchOverview()
-    await fetchTrendData()
+    await Promise.all([fetchTrendData(), fetchStatusHistory()])
     ElMessage.success('数据已刷新')
   } catch (error) {
     ElMessage.error('刷新失败')
@@ -579,8 +555,7 @@ watch(availableCategoryKeys, (newKeys, oldKeys) => {
 
 onMounted(async () => {
   await fetchOverview()
-  await fetchTrendData()
-  await fetchStatusTimeline()
+  await Promise.all([fetchTrendData(), fetchStatusHistory()])
 
   unsubscribeStatus = wsStore.subscribe(WS_EVENT.NODE_STATUS, handleStatusUpdate)
   unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
@@ -614,6 +589,12 @@ onUnmounted(() => {
 <style scoped>
 .dashboard {
   padding: 0;
+}
+
+.dashboard-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
 }
 
 .stat-card {
@@ -659,6 +640,11 @@ onUnmounted(() => {
   color: var(--el-text-color-primary);
 }
 
+.status-history-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
 .device-link {
   color: var(--el-color-primary);
   text-decoration: none;
@@ -701,6 +687,30 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
+  .dashboard-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .stat-content {
+    gap: 10px;
+  }
+
+  .stat-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .stat-label {
+    line-height: 1.35;
+    margin-bottom: 4px;
+  }
+
+  .stat-value {
+    font-size: 24px;
+    white-space: nowrap;
+  }
+
   :deep(.stat-card) {
     margin-bottom: 8px;
   }

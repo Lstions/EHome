@@ -1,8 +1,11 @@
 <template>
   <div class="page-header">
     <div class="page-header-left">
-      <el-button v-if="showBack" :icon="ArrowLeft" circle @click="goBack" />
-      <h2>{{ title }}</h2>
+      <el-button v-if="showBack" :icon="ArrowLeft" circle aria-label="返回上一页" @click="goBack" />
+      <div>
+        <h2>{{ title }}</h2>
+        <p v-if="subtitle" class="page-header-subtitle">{{ subtitle }}</p>
+      </div>
     </div>
     <div class="page-header-right">
       <slot name="extra"></slot>
@@ -15,6 +18,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   title: string
+  subtitle?: string
   showBack?: boolean
 }>()
 
@@ -51,9 +55,32 @@ const goBack = () => {
   color: var(--el-text-color-primary);
 }
 
+.page-header-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
 .page-header-right {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+  }
+
+  .page-header-left h2 {
+    font-size: 18px;
+  }
+
+  .page-header-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }
 </style>

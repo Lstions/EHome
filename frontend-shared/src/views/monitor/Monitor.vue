@@ -2,9 +2,9 @@
   <div class="monitor-container">
     <!-- 顶部操作栏 -->
     <div class="toolbar">
-      <h2>📊 系统监控</h2>
+      <h2><el-icon aria-hidden="true"><DataAnalysis /></el-icon> 系统监控</h2>
       <div class="toolbar-actions">
-        <el-select v-model="refreshInterval" placeholder="刷新间隔" size="default">
+        <el-select v-model="refreshInterval" placeholder="刷新间隔" size="default" @change="handleIntervalChange">
           <el-option label="5秒" :value="5000" />
           <el-option label="10秒" :value="10000" />
           <el-option label="30秒" :value="30000" />
@@ -232,7 +232,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
-  Connection, Monitor, Cpu, DataLine, Promotion, Refresh 
+  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { THEME_COLORS } from '@/utils/theme'
@@ -339,6 +339,9 @@ onUnmounted(() => {
 }
 
 .toolbar h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 24px;
 }

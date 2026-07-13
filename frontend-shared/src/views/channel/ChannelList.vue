@@ -1,7 +1,7 @@
 <template>
   <div class="channel-page">
     <PageHeader title="通道管理" subtitle="查看和管理所有节点的通道配置">
-      <template #actions>
+      <template #extra>
         <el-button @click="refreshData" :loading="loading">
           <el-icon><Refresh /></el-icon>
           刷新
@@ -54,9 +54,7 @@
           <el-option label="UART" value="uart" />
           <el-option label="I2C" value="i2c" />
           <el-option label="SPI" value="spi" />
-          <el-option label="GPIO" value="gpio" />
-          <el-option label="ADC" value="adc" />
-          <el-option label="PWM" value="pwm" />
+
         </el-select>
       </div>
     </div>

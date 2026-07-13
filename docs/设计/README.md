@@ -75,6 +75,7 @@ EHomeSystem 整体遵循 5 大设计原则 (按重要性排序)：
 | **15** | **通道终端 (v2.5)** | `backend/internal/terminal/` + `frontend-shared/src/views/channel/` | — | — |
 | **16** | **逐指令 ConfigManifest (v2.5.16+)** | 见 ehome-system skill reference `multi-command-configmanifest.md` | — | — |
 | **17** | **设备架构集中化 (Design Only)** | [设备架构集中化设计.md](设备架构集中化设计.md) | — | — |
+| **18** | **前端 UI/UX 改进** | **[前端UIUX改进设计.md](前端UIUX改进设计.md)** | 浏览器矩阵见文档 | — |
 
 > ★ = v2.2 命名。详见 [00-术语表.md](00-术语表.md) + [命名迁移设计.md](命名迁移设计.md)
 
@@ -87,6 +88,7 @@ docs/设计/
 ├── 00-概念模型.md                  # ★ v2.2 三层关系图
 ├── 命名迁移设计.md                 # ★ v2.1 → v2.2 迁移路径
 ├── 总体设计.md                     # 架构 + 数据流 + 状态机总览 + 接口契约 (v2.2)
+├── 前端UIUX改进设计.md              # 前端审查、分阶段改进与实施追踪
 ├── 认证授权/
 │   ├── 详细设计.md                 # 功能架构 / 流程图 / 状态机 / 数据结构
 │   └── 验收标准.md                 # 前端/后端/节点 三段验收 checklist

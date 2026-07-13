@@ -58,6 +58,11 @@ static UBaseType_t queue_spaces_or_depth(QueueHandle_t queue)
     return scheduler_queue_is_present(queue) ? uxQueueSpacesAvailable(queue) : CMD_QUEUE_DEPTH;
 }
 
+static UBaseType_t min_queue_spaces(UBaseType_t left, UBaseType_t right)
+{
+    return left < right ? left : right;
+}
+
 /* ── derive uart_port_t from bus_config bytes via hw_tables ── */
 /* P3-7: Replaced static derive_uart_port with shared hw_derive_uart_port from hw_tables */
 
@@ -505,10 +510,10 @@ static void scheduler_task(void *p)
 
         /* Check queue depth for backpressure — use the busiest queue */
         UBaseType_t min_spaces = CMD_QUEUE_DEPTH;
-        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.uart0_cmd_queue));
-        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.uart1_cmd_queue));
-        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.spi_cmd_queue));
-        min_spaces = MIN(min_spaces, queue_spaces_or_depth(s_queues.i2c_cmd_queue));
+        min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart0_cmd_queue));
+        min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart1_cmd_queue));
+        min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.spi_cmd_queue));
+        min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.i2c_cmd_queue));
         bool queue_pressure = (min_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         /* Iterate through all active channels */

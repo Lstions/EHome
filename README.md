@@ -88,15 +88,17 @@ make frontend    # 仅启动前端 (:5174)
 ```bash
 cd esp32-collector
 
-# ESP32-S3
-idf.py set-target esp32s3
-idf.py build
-idf.py flash
+# 独立构建目录，避免芯片和 Flash 容量配置互相污染
+./build_firmware.sh c6-n8
+./build_firmware.sh c6-n16
+./build_firmware.sh s3-n8
+./build_firmware.sh s3-n16
 
-# ESP32-C6
-idf.py set-target esp32c6
-idf.py build
-idf.py flash
+# 构建全部支持的固件
+./build_firmware.sh all
+
+# 示例：烧录 C6-N8
+idf.py -B build/c6-n8 -p /dev/ttyACM0 flash monitor
 ```
 
 ### 4. 生产部署

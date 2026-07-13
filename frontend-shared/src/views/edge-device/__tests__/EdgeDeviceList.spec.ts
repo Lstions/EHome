@@ -4,9 +4,13 @@ import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 
 // Mock vue-router
-const mockPush = vi.fn()
+const { mockPush, mockRoute } = vi.hoisted(() => ({
+  mockPush: vi.fn(),
+  mockRoute: { query: {} as Record<string, string> },
+}))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mockPush }),
+  useRoute: () => mockRoute,
 }))
 
 // Mock node store
@@ -166,5 +170,58 @@ describe('EdgeDeviceList.vue', () => {
     vm.statusFilter = 'active'
     vm.handleStatClick('all')
     expect(vm.statusFilter).toBe('')
+  })
+
+  it('clears all filters and restores the first page', async () => {
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.searchKeyword = 'Device'
+    vm.typeFilter = 'temp_humidity'
+    vm.statusFilter = 'offline'
+    vm.hardwareFilter = 'i2c'
+    vm.currentPage = 3
+
+    vm.clearFilters()
+
+    expect(vm.searchKeyword).toBe('')
+    expect(vm.typeFilter).toBe('')
+    expect(vm.statusFilter).toBe('')
+    expect(vm.hardwareFilter).toBe('')
+    expect(vm.currentPage).toBe(1)
+  })
+
+  it('uses a compact facts grid and reading area in card view', async () => {
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.devices = [{
+      id: 1,
+      name: '雨量计',
+      status: 'active',
+      device_type: 'prs3001',
+      node_id: 'node-1',
+      hardware_type: 'uart',
+      hardware_id: 'UART1',
+      protocol: 'modbus',
+      last_data: { rainfall: 12.5 },
+      last_data_time: '2026-07-13T09:00:00Z',
+    }]
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.card-facts').exists()).toBe(true)
+    expect(wrapper.find('.card-reading').exists()).toBe(true)
+    expect(wrapper.find('.device-card').text()).not.toContain('📡')
+    expect(wrapper.find('.device-card').text()).not.toContain('🔌')
+  })
+
+  it('initializes search and status filters from route query', async () => {
+    mockRoute.query = { search: 'Device A', status: 'offline' }
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+
+    const vm = wrapper.vm as any
+    expect(vm.searchKeyword).toBe('Device A')
+    expect(vm.statusFilter).toBe('offline')
   })
 })

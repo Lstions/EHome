@@ -71,9 +71,10 @@
 
 ### 前端开发
 1. [实现/README.md](实现/README.md) — 模块索引与前端路径
-2. `frontend-shared/src/stores/` — Pinia stores (10 个)
-3. `frontend-shared/src/api/` — API 模块 (17 个)
-4. `frontend-shared/src/views/` — 页面模块 (13 个)
+2. [设计/前端UIUX改进设计.md](设计/前端UIUX改进设计.md) — 前端 UI/UX 改进设计与实施追踪
+3. `frontend-shared/src/stores/` — Pinia stores (10 个)
+4. `frontend-shared/src/api/` — API 模块 (17 个)
+5. `frontend-shared/src/views/` — 页面模块 (13 个)
 
 ### 部署运维
 1. 项目根 `README.md` — 快速开始 + 端口配置

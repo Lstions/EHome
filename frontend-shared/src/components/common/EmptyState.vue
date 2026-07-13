@@ -1,5 +1,5 @@
 <template>
-  <div class="empty-state" :class="[size]">
+  <div class="empty-state" :class="[size, kind]">
     <div class="empty-illustration">
       <slot name="illustration">
         <el-icon :size="iconSize"><component :is="icon" /></el-icon>
@@ -47,12 +47,14 @@ const props = withDefaults(defineProps<{
   title?: string
   description?: string
   size?: 'default' | 'small' | 'large'
+  kind?: 'empty' | 'initial' | 'filtered' | 'error' | 'permission'
   quickActions?: QuickAction[]
 }>(), {
   icon: FolderOpened,
   title: '暂无数据',
   description: '',
-  size: 'default'
+  size: 'default',
+  kind: 'empty'
 })
 
 const iconSize = computed(() => {
@@ -89,7 +91,7 @@ const iconSize = computed(() => {
   width: 100px;
   height: 100px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--el-fill-color-light) 0%, #e8eaec 100%);
+  background: linear-gradient(135deg, var(--el-fill-color-light) 0%, var(--el-fill-color) 100%);
   margin-bottom: 20px;
   color: var(--el-text-color-placeholder);
 }
@@ -112,7 +114,7 @@ const iconSize = computed(() => {
   margin: 0 0 8px;
   font-size: 16px;
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .empty-description {
@@ -134,23 +136,38 @@ const iconSize = computed(() => {
 }
 
 /* 不同场景的插图颜色 */
-.empty-state.data .empty-illustration {
-  background: linear-gradient(135deg, #ecf5ff 0%, #d9ecff 100%);
+.empty-state.initial .empty-illustration {
+  background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
 }
 
+.empty-state.filtered .empty-illustration {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+}
+
+.empty-state.permission .empty-illustration {
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+}
+
+.empty-state.error .empty-illustration {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+
 .empty-state.device .empty-illustration {
-  background: linear-gradient(135deg, #f0f9eb 0%, #e1f3d8 100%);
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
 .empty-state.warning .empty-illustration {
-  background: linear-gradient(135deg, #fef0f0 0%, #fde2e2 100%);
+  background: var(--el-color-danger-light-9);
   color: var(--el-color-danger);
 }
 
 .empty-state.network .empty-illustration {
-  background: linear-gradient(135deg, #fef9f0 0%, #f5e6d3 100%);
+  background: var(--el-color-warning-light-9);
   color: var(--el-color-warning);
 }
 </style>
