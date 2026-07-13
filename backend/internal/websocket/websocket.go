@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 
 	"ehome/backend/pkg/logger"
@@ -19,13 +20,19 @@ type Event struct {
 	Payload interface{} `json:"payload"`
 }
 
+type broadcastMessage struct {
+	data         []byte
+	broadcastAll bool
+	targetRole   string
+}
+
 // MessageHandler is called when a client sends a message via WebSocket
 type MessageHandler func(client *Client, evt Event)
 
 // Hub manages WebSocket connections
 type Hub struct {
 	clients    map[*Client]bool
-	broadcast  chan []byte
+	broadcast  chan broadcastMessage
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
@@ -36,7 +43,7 @@ type Hub struct {
 
 	// OnMessage is called when a client sends a message (e.g., terminal send)
 	// C4 fix: protected by onMsgMu for concurrent read/write
-	onMsgMu  sync.RWMutex
+	onMsgMu   sync.RWMutex
 	onMessage MessageHandler
 }
 
@@ -81,7 +88,7 @@ func checkOrigin(r *http.Request) bool {
 func NewHub() *Hub {
 	return &Hub{
 		clients:     make(map[*Client]bool),
-		broadcast:   make(chan []byte),
+		broadcast:   make(chan broadcastMessage),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		subscribers: make(map[chan Event]bool),
@@ -116,20 +123,23 @@ func (h *Hub) Run() {
 			logger.Infof("WebSocket client unregistered")
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
+				if !message.broadcastAll && (message.targetRole == "" || client.Role != message.targetRole) {
+					continue
+				}
 				select {
-				case client.send <- message:
+				case client.send <- message.data:
 				default:
 					close(client.send)
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 
 			// Also forward to subscribers (parsed as Event)
 			var evt Event
-			if err := json.Unmarshal(message, &evt); err == nil {
+			if err := json.Unmarshal(message.data, &evt); err == nil {
 				h.subMu.RLock()
 				for ch := range h.subscribers {
 					select {
@@ -146,7 +156,7 @@ func (h *Hub) Run() {
 
 // Broadcast sends a message to all connected clients
 func (h *Hub) Broadcast(data []byte) {
-	h.broadcast <- data
+	h.broadcast <- broadcastMessage{data: data, broadcastAll: true}
 }
 
 // Subscribe returns a channel that receives all broadcast events
@@ -167,8 +177,20 @@ func (h *Hub) Unsubscribe(ch chan Event) {
 	close(ch)
 }
 
-// BroadcastEvent sends a structured event to all clients
+// BroadcastEvent sends a structured event to all clients.
 func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
+	h.broadcastEvent(eventType, payload, true, "")
+}
+
+// BroadcastEventToRole sends a structured event only to external clients with
+// the requested role. The target is trimmed before matching and a blank target
+// fails closed for external clients. Internal subscribers still receive the
+// event because they are trusted backend consumers.
+func (h *Hub) BroadcastEventToRole(eventType string, payload interface{}, role string) {
+	h.broadcastEvent(eventType, payload, false, strings.TrimSpace(role))
+}
+
+func (h *Hub) broadcastEvent(eventType string, payload interface{}, broadcastAll bool, targetRole string) {
 	event := Event{
 		Type:    eventType,
 		Payload: payload,
@@ -178,7 +200,11 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 		logger.Errorf("Failed to marshal event: %v", err)
 		return
 	}
-	h.Broadcast(data)
+	h.broadcast <- broadcastMessage{
+		data:         data,
+		broadcastAll: broadcastAll,
+		targetRole:   targetRole,
+	}
 }
 
 // HandleWebSocket handles WebSocket upgrade requests
