@@ -41,7 +41,7 @@
 
 | 层 | 技术 |
 |----|------|
-| 边缘节点 | ESP32-S3 / ESP32-C6, FreeRTOS, WiFi STA, IDF v5.x |
+| 边缘节点 | ESP32-S3 / ESP32-C6, FreeRTOS, WiFi STA, ESP-IDF 6.0.1 |
 | 消息中间件 | EMQX 5.7 (MQTT 5.0, QoS 1) |
 | 服务端 | Go 1.25, Gin, GORM, PostgreSQL 16, Redis |
 | 前端 | Vue 3.5, Vite 8, Element Plus 2.13, ECharts 6, Pinia 3, Tailwind CSS |
@@ -54,7 +54,7 @@
 - Go 1.25+
 - Node.js 22+ / pnpm
 - Docker + Docker Compose
-- ESP-IDF v5.x (固件编译)
+- ESP-IDF 6.0.1 (固件编译)
 
 ### 1. 克隆并进入项目
 
@@ -65,40 +65,65 @@ cd /home/sun/workspace/EHomeSystem
 ### 2. 启动开发环境
 
 ```bash
-# 一键启动：基础设施 (PG/Redis/EMQX) + 本地前后端
-make up
+# 一键启动：独立开发基础设施 + 本地前后端（make 不带参数效果相同）
+make dev
 
 # 或分步启动
 make infra       # 仅启动基础设施
-make backend     # 仅启动后端 (:8080)
+make backend     # 仅启动后端 (:8082)
 make frontend    # 仅启动前端 (:5174)
 ```
 
-本地开发端口（避免与生产冲突）：
+开发与测试共用 `ehome-dev` Compose 项目；其中 PostgreSQL 同时包含 `ehome` 和 `ehome_test` 两个数据库。开发栈使用独立容器、网络、持久卷和主机端口，所有 `make down/clean` 操作均不会管理生产 Compose 项目。
 
-| 服务 | 开发端口 | 生产端口 |
-|------|---------|---------|
-| PostgreSQL | 5434 | 5432 (容器内) |
+本地开发端口：
+
+| 服务 | 开发/测试端口 | 生产端口 |
+|------|---------------|---------|
+| PostgreSQL | 5435 | 5432（容器内） |
+| Redis | 6380 | 6379（容器内） |
 | EMQX MQTT | 1884 | 1883 |
-| 后端 API | 8080 | 8080 (容器内) |
-| 前端 | 5174 | 80 (nginx/容器) |
+| EMQX WebSocket | 8084 | 8083 |
+| EMQX Dashboard | 18084 | 18083 |
+| 后端 API | 8082 | 8080 |
+| 前端 | 5174 | 80 |
 
 ### 3. 构建 ESP32 固件
 
+先安装 ESP-IDF 6.0.1，并在当前终端加载其环境：
+
 ```bash
 cd esp32-collector
+. "$IDF_PATH/export.sh"
+```
 
-# 独立构建目录，避免芯片和 Flash 容量配置互相污染
+固件按“芯片 + Flash 容量”选择 profile。每个 profile 使用独立的 `sdkconfig`、依赖锁和构建目录，切换目标时不需要执行 `idf.py set-target` 或 `fullclean`。
+
+| Profile | 芯片 | Flash | 分区布局 | 构建目录 |
+|---------|------|------:|----------|----------|
+| `c6-n8` | ESP32-C6 | 8MB | 双 OTA，3.5MB × 2 | `build/c6-n8/` |
+| `c6-n16` | ESP32-C6 | 16MB | 双 OTA，6.5MB × 2 | `build/c6-n16/` |
+| `s3-n8` | ESP32-S3 | 8MB | 双 OTA，3.5MB × 2 | `build/s3-n8/` |
+| `s3-n16` | ESP32-S3 | 16MB | 双 OTA，6.5MB × 2 | `build/s3-n16/` |
+
+`N8`、`N16` 只表示模块的 Flash 容量；S3 模块的 PSRAM 类型和容量需要通过额外板型配置单独启用。
+
+```bash
+# 构建指定 profile
 ./build_firmware.sh c6-n8
-./build_firmware.sh c6-n16
-./build_firmware.sh s3-n8
-./build_firmware.sh s3-n16
 
-# 构建全部支持的固件
+# 构建全部四种 profile
 ./build_firmware.sh all
+```
 
-# 示例：烧录 C6-N8
+主固件生成在 `build/<profile>/ehome_collector.bin`。烧录时必须使用对应 profile 的构建目录：
+
+```bash
+# 烧录并监控 C6-N8
 idf.py -B build/c6-n8 -p /dev/ttyACM0 flash monitor
+
+# 烧录并监控 S3-N16
+idf.py -B build/s3-n16 -p /dev/ttyUSB0 flash monitor
 ```
 
 ### 4. 生产部署
@@ -225,9 +250,13 @@ EHomeSystem/
 │   │   ├── sync_manager/  # 配置同步
 │   │   ├── transport/     # 传输层
 │   │   └── ...            # wifi/mqtt/nvs/rgb_led 等
+│   ├── build_firmware.sh  # C6/S3、N8/N16 profile 构建入口
+│   ├── config/flash/      # N8/N16 Flash 容量配置
+│   ├── partitions/        # 按容量共享的双 OTA 分区表
+│   ├── sdkconfig.defaults # 芯片间共享配置
 │   ├── sdkconfig.defaults.esp32s3  # S3 配置
 │   ├── sdkconfig.defaults.esp32c6  # C6 配置
-│   └── partitions_*.csv   # 分区表 (S3/C6, 4M/8M/16M)
+│   └── dependencies.lock  # Component Manager 离线构建种子
 ├── frontend-shared/       # Vue3 前端
 │   └── src/
 │       ├── api/           # 17 个 API 模块

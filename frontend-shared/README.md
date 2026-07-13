@@ -60,8 +60,8 @@ pnpm test
 
 `.env.development`:
 ```
-VITE_API_BASE_URL=http://localhost:8080
-VITE_WS_BASE_URL=ws://localhost:8080
+VITE_API_BASE_URL=http://localhost:8082
+VITE_WS_BASE_URL=ws://localhost:8082
 ```
 
 ## 功能模块
