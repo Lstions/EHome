@@ -136,106 +136,36 @@
             </template>
           </div>
 
-          <!-- GPIO 外设控制 — 硬件资源列表 -->
-          <div v-if="hardware.gpio?.length > 0" class="channel-bus-group">
+          <!-- GPIO / PWM 引脚资源 — 行式控制面板 -->
+          <div v-if="hardware.gpio?.length > 0 || gpioConfigs.length > 0 || pwmConfigs.length > 0" class="channel-bus-group">
             <el-collapse>
               <el-collapse-item>
                 <template #title>
                   <div class="bus-type-header">
-                    <el-tag :type="getBusTagType('gpio')" size="small">GPIO</el-tag>
-                    <span class="bus-type-name">通用输入输出</span>
-                    <span class="bus-count-badge">{{ hardware.gpio.length }} 个引脚</span>
+                    <el-tag :type="getBusTagType('gpio')" size="small">GPIO/PWM</el-tag>
+                    <span class="bus-type-name">GPIO / PWM 引脚</span>
+                    <span class="bus-count-badge">共 {{ hardware.gpio?.length || 0 }} · 已配置 {{ gpioConfigs.length + pwmConfigs.length }} · 可用 {{ availablePinCount }}</span>
                   </div>
                 </template>
-                <div class="periph-card-grid">
-                  <div
-                    v-for="hw in hardware.gpio"
-                    :key="hw.id"
-                    class="gpio-resource-card"
-                    :class="{ 'is-configured': getGpioConfig(hw.pin) }"
-                  >
-                    <!-- 已配置：显示控制卡片 -->
-                    <GPIOPinCard
-                      v-if="getGpioConfig(hw.pin)"
-                      :config="getGpioConfig(hw.pin)!"
-                      :node-id="nodeDeviceId || ''"
-                      :offline="collectorStatus !== 'online'"
-                      @remove="handleRemoveGpio"
-                    />
-                    <!-- 未配置：显示引脚信息 + 配置按钮 -->
-                    <div v-else class="gpio-unconfigured-card">
-                      <div class="gpio-unconfigured-header">
-                        <span class="gpio-pin-name">{{ hw.id }}</span>
-                        <el-tag size="small" type="info" effect="plain">未配置</el-tag>
-                      </div>
-                      <el-button
-                        size="small"
-                        type="primary"
-                        plain
-                        @click="openGpioDialog(hw.pin, hw.id)"
-                        :disabled="collectorStatus !== 'online'"
-                      >
-                        配置引脚
-                      </el-button>
-                    </div>
-                  </div>
-                </div>
-              </el-collapse-item>
-            </el-collapse>
-          </div>
-
-          <!-- PWM 外设控制 — 复用 GPIO 引脚列表，LEDC 可路由到任意 GPIO -->
-          <div v-if="hardware.gpio?.length > 0" class="channel-bus-group">
-            <el-collapse>
-              <el-collapse-item>
-                <template #title>
-                  <div class="bus-type-header">
-                    <el-tag :type="getBusTagType('pwm')" size="small">PWM</el-tag>
-                    <span class="bus-type-name">PWM 输出 (LEDC)</span>
-                    <span class="bus-count-badge">{{ pwmConfigs.length }} 个通道</span>
-                  </div>
-                </template>
-                <div class="periph-card-grid">
-                  <div
-                    v-for="hw in hardware.gpio"
-                    :key="`pwm-hw-${hw.id}`"
-                    class="gpio-resource-card"
-                    :class="{ 'is-configured': getPwmConfig(hw.pin) }"
-                  >
-                    <!-- 已配置为 PWM：显示控制卡片 -->
-                    <PWMChannelCard
-                      v-if="getPwmConfig(hw.pin)"
-                      :config="getPwmConfig(hw.pin)!"
-                      :node-id="nodeDeviceId || ''"
-                      :offline="collectorStatus !== 'online'"
-                      @remove="handleRemovePwm"
-                    />
-                    <!-- 已被 GPIO 占用：显示禁用提示 -->
-                    <div v-else-if="getGpioConfig(hw.pin)" class="gpio-unconfigured-card">
-                      <div class="gpio-unconfigured-header">
-                        <span class="gpio-pin-name">{{ hw.id }}</span>
-                        <el-tag size="small" type="warning" effect="plain">GPIO 占用</el-tag>
-                      </div>
-                      <span class="pwm-occupied-hint">已配置为 GPIO</span>
-                    </div>
-                    <!-- 未配置：显示启用 PWM 按钮 -->
-                    <div v-else class="gpio-unconfigured-card">
-                      <div class="gpio-unconfigured-header">
-                        <span class="gpio-pin-name">{{ hw.id }}</span>
-                        <el-tag size="small" type="info" effect="plain">可用</el-tag>
-                      </div>
-                      <el-button
-                        size="small"
-                        type="primary"
-                        plain
-                        @click="openPwmDialog(hw.pin, hw.id)"
-                        :disabled="collectorStatus !== 'online'"
-                      >
-                        启用 PWM
-                      </el-button>
-                    </div>
-                  </div>
-                </div>
+                <PinResourceList
+                  :hardware-gpio="hardware.gpio || []"
+                  :gpio-configs="gpioConfigs"
+                  :pwm-configs="pwmConfigs"
+                  :node-id="nodeDeviceId || ''"
+                  :offline="collectorStatus !== 'online'"
+                  :initial-loading="periphLoading && gpioConfigs.length === 0 && pwmConfigs.length === 0"
+                  :refreshing="periphLoading"
+                  :occupied-pins="occupiedPinMap"
+                  @configure-gpio="openGpioDialogFromRow"
+                  @configure-pwm="openPwmDialogFromRow"
+                  @edit-gpio="openEditGpioDialog"
+                  @edit-pwm="openEditPwmDialog"
+                  @remove-gpio="handleRemoveGpio"
+                  @remove-pwm="handleRemovePwm"
+                  @refresh="refreshPeriph"
+                  @retry="refreshPeriph"
+                  @row-updated="refreshPeriph"
+                />
               </el-collapse-item>
             </el-collapse>
           </div>
@@ -364,15 +294,14 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, defineComponent, h } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, Loading, Plus } from '@element-plus/icons-vue'
+import { Refresh, Plus } from '@element-plus/icons-vue'
 import { nodeApi } from '@/api/node'
 import { deviceConfigApi } from '@/api/deviceConfig'
 import { channelApi } from '@/api/channel'
 import { gpioApi, pwmApi, type GPIOConfig, type PWMConfig } from '@/api/periph'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
-import GPIOPinCard from '@/components/periph/GPIOPinCard.vue'
-import PWMChannelCard from '@/components/periph/PWMChannelCard.vue'
+import PinResourceList from '@/components/periph/PinResourceList.vue'
 import { logger } from '@/utils/logger'
 import { useDmaStore } from '@/stores/dma'
 import { DmaState, isDmaRebindable } from '@/utils/dmaState'
@@ -1033,6 +962,74 @@ const gpioForm = reactive({
 // 根据 pin 查找已有的 GPIOConfig
 const getGpioConfig = (pin: number): GPIOConfig | undefined => {
   return gpioConfigs.value.find(g => g.pin === pin)
+}
+
+// 可用引脚数 = 硬件 GPIO 总数 - 已配置 GPIO - 已配置 PWM
+const availablePinCount = computed(() => {
+  const total = hardware.value.gpio?.length || 0
+  const configured = new Set<number>()
+  for (const g of gpioConfigs.value) configured.add(g.pin)
+  for (const p of pwmConfigs.value) configured.add(p.pin)
+  // 占用映射中的引脚也算非可用
+  for (const pin of occupiedPinMap.value.keys()) configured.add(pin)
+  return Math.max(0, total - configured.size)
+})
+
+// 已占用引脚映射: 从通道列表中推导总线占用
+// API 降级: 当前无法精确识别所有 occupied 来源，仅从通道 hardware_type/pins 推导
+const occupiedPinMap = computed(() => {
+  const map = new Map<number, string>()
+  // 遍历通道，从 hardware pins 中提取占用信息
+  for (const ch of allChannels.value) {
+    if (ch.hardware_type && ch.pins) {
+      const pins = Array.isArray(ch.pins) ? ch.pins : []
+      for (const p of pins) {
+        const pinNum = typeof p === 'object' ? p.pin : (typeof p === 'string' ? parseInt(p.replace(/\D/g, '')) : null)
+        if (pinNum != null && !isNaN(pinNum)) {
+          const role = typeof p === 'object' ? p.role : 0
+          const roleLabels: Record<number, string> = { 1: 'TX', 2: 'RX', 3: 'SDA', 4: 'SCL', 5: 'MOSI', 6: 'MISO', 7: 'SCLK', 8: 'CS' }
+          const label = roleLabels[role] ? `${ch.hardware_type?.toUpperCase()} ${roleLabels[role]}` : `${ch.hardware_type?.toUpperCase()} 占用`
+          if (!map.has(pinNum)) map.set(pinNum, label)
+        }
+      }
+    }
+  }
+  return map
+})
+
+// PinResourceList 事件处理
+const openGpioDialogFromRow = (pin: number) => {
+  const hw = hardware.value.gpio?.find(h => h.pin === pin)
+  openGpioDialog(pin, hw?.id || `GPIO${pin}`)
+}
+
+const openPwmDialogFromRow = (pin: number) => {
+  const hw = hardware.value.gpio?.find(h => h.pin === pin)
+  openPwmDialog(pin, hw?.id || `GPIO${pin}`)
+}
+
+const openEditGpioDialog = (pin: number) => {
+  const cfg = getGpioConfig(pin)
+  if (cfg) {
+    gpioForm.pin = pin
+    gpioForm.direction = cfg.direction
+    gpioForm.initial_level = cfg.initial_level
+    gpioForm.label = cfg.label || ''
+    gpioDialogVisible.value = true
+  }
+}
+
+const openEditPwmDialog = (pin: number) => {
+  const cfg = getPwmConfig(pin)
+  if (cfg) {
+    pwmForm.pin = pin
+    pwmForm.frequency = cfg.frequency
+    pwmForm.duty = cfg.duty
+    pwmForm.resolution = cfg.resolution
+    pwmForm.auto_start = cfg.auto_start
+    pwmForm.label = cfg.label || ''
+    pwmDialogVisible.value = true
+  }
 }
 
 const openGpioDialog = (pin: number, hwId: string) => {
@@ -1708,90 +1705,9 @@ defineExpose({
   font-size: 12px;
 }
 
-/* ---- Peripheral Card Grid (GPIO/PWM) ---- */
-.periph-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
-  padding: 4px 0;
-}
-
-/* 窄容器：单列保证可用 */
-@media (max-width: 480px) {
-  .periph-card-grid {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-}
-
-/* 宽容器：最多 4 列 */
-@media (min-width: 900px) {
-  .periph-card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  }
-}
-
-.periph-section-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 4px 0;
-}
-
-.periph-empty-hint {
-  color: var(--el-text-color-placeholder);
-  font-size: 13px;
-  padding: 8px 0;
-}
-
 .pwm-duty-hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
-}
-
-/* GPIO 未配置卡片 */
-.gpio-resource-card {
-  display: flex;
-  min-width: 0;
-}
-
-.gpio-resource-card.is-configured {
-  /* GPIOPinCard 自带样式 */
-}
-
-.gpio-unconfigured-card {
-  border: 1px dashed var(--el-border-color);
-  border-radius: 8px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  background: var(--el-fill-color-lighter);
-}
-
-.gpio-unconfigured-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  min-width: 0;
-}
-
-.gpio-pin-name {
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pwm-occupied-hint {
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
 }
 </style>

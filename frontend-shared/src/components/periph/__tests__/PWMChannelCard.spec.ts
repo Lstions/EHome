@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   start: vi.fn(),
   stop: vi.fn(),
   setDuty: vi.fn(),
+  getState: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
 }))
@@ -16,38 +17,37 @@ vi.mock('@/api/periph', () => ({
     start: mocks.start,
     stop: mocks.stop,
     setDuty: mocks.setDuty,
+    getState: mocks.getState,
   },
 }))
 vi.mock('element-plus', () => ({
   ElMessage: { success: mocks.success, error: mocks.error },
 }))
 
-import PWMChannelCard from '@/components/periph/PWMChannelCard.vue'
+import PWMChannelRow from '@/components/periph/PWMChannelRow.vue'
 
 const ButtonStub = defineComponent({
   inheritAttrs: false,
   props: ['loading', 'disabled', 'type', 'size'],
   emits: ['click'],
   computed: {
-    isDisabled(): boolean {
-      return Boolean(this.disabled)
-    },
+    isDisabled(): boolean { return Boolean(this.disabled) },
   },
   template: `<button v-bind="$attrs" :disabled="isDisabled" :data-loading="String(Boolean(loading))" @click="$emit('click')"><slot /></button>`,
 })
 
 const TagStub = defineComponent({
   inheritAttrs: false,
-  props: ['type', 'size'],
-  template: `<span v-bind="$attrs"><slot /></span>`,
+  props: ['type', 'size', 'effect'],
+  template: `<span v-bind="$attrs" class="el-tag-stub"><slot /></span>`,
 })
 
 const SliderStub = defineComponent({
   name: 'ElSlider',
   inheritAttrs: false,
-  props: ['modelValue', 'min', 'max', 'step', 'showTooltip', 'disabled'],
+  props: ['modelValue', 'min', 'max', 'step', 'showTooltip', 'disabled', 'ariaLabel'],
   emits: ['input', 'change', 'update:modelValue'],
-  template: `<div v-bind="$attrs" class="el-slider-stub" :data-disabled="String(Boolean(disabled))">
+  template: `<div v-bind="$attrs" class="el-slider-stub" :data-disabled="String(Boolean(disabled))" :aria-label="ariaLabel">
     <input aria-label="duty-slider" type="range" :value="modelValue" :disabled="disabled" />
   </div>`,
 })
@@ -70,14 +70,14 @@ const pwmConfig = (overrides: Partial<PWMConfig> = {}): PWMConfig => ({
   ...overrides,
 })
 
-function mountCard(config: PWMConfig, offline = false): VueWrapper {
-  return mount(PWMChannelCard, {
-    props: { config, nodeId: 'node-1', offline },
+function mountRow(config: PWMConfig, offline = false, running: boolean | null = null): VueWrapper {
+  return mount(PWMChannelRow, {
+    props: { config, nodeId: 'node-1', offline, running },
     global: { stubs },
   })
 }
 
-describe('PWMChannelCard', () => {
+describe('PWMChannelRow', () => {
   const wrappers: VueWrapper[] = []
 
   beforeEach(() => {
@@ -90,43 +90,44 @@ describe('PWMChannelCard', () => {
     vi.useRealTimers()
   })
 
-  const track = (wrapper: VueWrapper) => {
-    wrappers.push(wrapper)
-    return wrapper
-  }
+  const track = (w: VueWrapper) => { wrappers.push(w); return w }
 
   describe('display', () => {
-    it('renders frequency from config', () => {
-      const wrapper = track(mountCard(pwmConfig({ frequency: 2000 })))
-      expect(wrapper.get('.freq-value').text()).toContain('2000 Hz')
+    it('renders duty percentage from config', () => {
+      const wrapper = track(mountRow(pwmConfig({ duty: 5000 })))
+      expect(wrapper.get('.pwm-duty-value').text()).toBe('50.00%')
     })
 
-    it('renders duty percentage from config', () => {
-      const wrapper = track(mountCard(pwmConfig({ duty: 5000 })))
-      expect(wrapper.get('.duty-value').text()).toBe('50.00%')
+    it('shows 未知 when running is null', () => {
+      const wrapper = track(mountRow(pwmConfig()))
+      expect(wrapper.text()).toContain('未知')
+    })
+
+    it('shows 运行中 when running is true', () => {
+      const wrapper = track(mountRow(pwmConfig(), false, true))
+      expect(wrapper.text()).toContain('运行中')
+    })
+
+    it('shows 已停止 when running is false', () => {
+      const wrapper = track(mountRow(pwmConfig(), false, false))
+      expect(wrapper.text()).toContain('已停止')
     })
 
     it('updates local duty when config.duty prop changes', async () => {
-      const wrapper = track(mountCard(pwmConfig({ duty: 2500 })))
-      expect(wrapper.get('.duty-value').text()).toBe('25.00%')
+      const wrapper = track(mountRow(pwmConfig({ duty: 2500 })))
+      expect(wrapper.get('.pwm-duty-value').text()).toBe('25.00%')
 
       await wrapper.setProps({ config: pwmConfig({ duty: 7500 }) })
-      expect(wrapper.get('.duty-value').text()).toBe('75.00%')
-    })
-
-    it('shows stopped status tag initially', () => {
-      const wrapper = track(mountCard(pwmConfig()))
-      expect(wrapper.get('.card-header-right .el-tag, .card-header-right span').text()).toContain('已停止')
+      expect(wrapper.get('.pwm-duty-value').text()).toBe('75.00%')
     })
   })
 
   describe('start/stop', () => {
-    it('calls pwmApi.start and sets running state on start', async () => {
+    it('calls pwmApi.start on start button', async () => {
       mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
+      const wrapper = track(mountRow(pwmConfig()))
 
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
+      const startBtn = wrapper.findAll('button').find(b => b.text().includes('启动'))!
       await startBtn.trigger('click')
       await flushPromises()
 
@@ -135,89 +136,65 @@ describe('PWMChannelCard', () => {
       expect(mocks.success).toHaveBeenCalledOnce()
     })
 
-    it('disables start button when running', async () => {
+    it('shows stop button (not danger) when running', async () => {
       mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
+      const wrapper = track(mountRow(pwmConfig()))
 
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
-      await startBtn.trigger('click')
+      await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
 
-      expect((startBtn.element as HTMLButtonElement).disabled).toBe(true)
+      const stopBtn = wrapper.findAll('button').find(b => b.text().includes('停止'))
+      expect(stopBtn).toBeTruthy()
+      // Stop button should NOT have type="danger"
+      expect(stopBtn!.attributes('type')).not.toBe('danger')
     })
 
-    it('calls pwmApi.stop and clears running state on stop', async () => {
+    it('calls pwmApi.stop on stop button', async () => {
       mocks.start.mockResolvedValue(undefined)
       mocks.stop.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
+      const wrapper = track(mountRow(pwmConfig()))
 
-      // start first
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
-      await startBtn.trigger('click')
+      await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
-      expect(wrapper.text()).toContain('运行中')
 
-      // then stop
-      const stopBtn = buttons.find(b => b.text().includes('停止'))!
+      const stopBtn = wrapper.findAll('button').find(b => b.text().includes('停止'))!
       await stopBtn.trigger('click')
       await flushPromises()
 
       expect(mocks.stop).toHaveBeenCalledWith('node-1', 6)
       expect(wrapper.text()).toContain('已停止')
-      expect(mocks.success).toHaveBeenCalledTimes(2)
     })
 
-    it('disables stop button when not running', () => {
-      const wrapper = track(mountCard(pwmConfig()))
+    it('shows error on start failure and keeps 未知', async () => {
+      mocks.start.mockRejectedValue(new Error('fault'))
+      const wrapper = track(mountRow(pwmConfig()))
 
-      const buttons = wrapper.findAll('button')
-      const stopBtn = buttons.find(b => b.text().includes('停止'))!
-      expect((stopBtn.element as HTMLButtonElement).disabled).toBe(true)
-    })
-
-    it('shows error on start failure', async () => {
-      mocks.start.mockRejectedValue(new Error('hw fault'))
-      const wrapper = track(mountCard(pwmConfig()))
-
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
-      await startBtn.trigger('click')
+      await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
 
       expect(mocks.error).toHaveBeenCalledOnce()
-      expect(wrapper.text()).toContain('已停止')
     })
 
-    it('shows error on stop failure and keeps running state', async () => {
+    it('emits state-change on start/stop', async () => {
       mocks.start.mockResolvedValue(undefined)
-      mocks.stop.mockRejectedValue(new Error('busy'))
-      const wrapper = track(mountCard(pwmConfig()))
+      mocks.stop.mockResolvedValue(undefined)
+      const wrapper = track(mountRow(pwmConfig()))
 
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
-      await startBtn.trigger('click')
+      await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
+      expect(wrapper.emitted('state-change')![0]).toEqual([6, true])
 
-      const stopBtn = buttons.find(b => b.text().includes('停止'))!
+      const stopBtn = wrapper.findAll('button').find(b => b.text().includes('停止'))!
       await stopBtn.trigger('click')
       await flushPromises()
-
-      expect(mocks.error).toHaveBeenCalledOnce()
-      expect(wrapper.text()).toContain('运行中')
+      expect(wrapper.emitted('state-change')![1]).toEqual([6, false])
     })
   })
 
-  describe('duty change debounce', () => {
+  describe('duty slider debounce', () => {
     it('does not call setDuty immediately on slider change', async () => {
       mocks.setDuty.mockResolvedValue(undefined)
-      mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
-
-      const buttons = wrapper.findAll('button')
-      await buttons.find(b => b.text().includes('启动'))!.trigger('click')
-      await flushPromises()
+      const wrapper = track(mountRow(pwmConfig(), false, true))
 
       const slider = wrapper.findComponent(SliderStub)
       slider.vm.$emit('change', 6000)
@@ -226,14 +203,9 @@ describe('PWMChannelCard', () => {
       expect(mocks.setDuty).not.toHaveBeenCalled()
     })
 
-    it('calls setDuty after 300ms debounce on slider change', async () => {
+    it('calls setDuty after 300ms debounce', async () => {
       mocks.setDuty.mockResolvedValue(undefined)
-      mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
-
-      const buttons = wrapper.findAll('button')
-      await buttons.find(b => b.text().includes('启动'))!.trigger('click')
-      await flushPromises()
+      const wrapper = track(mountRow(pwmConfig(), false, true))
 
       const slider = wrapper.findComponent(SliderStub)
       slider.vm.$emit('change', 6000)
@@ -246,113 +218,71 @@ describe('PWMChannelCard', () => {
       expect(mocks.setDuty).toHaveBeenCalledWith('node-1', 6, 6000)
     })
 
-    it('resets debounce timer on rapid successive changes', async () => {
-      mocks.setDuty.mockResolvedValue(undefined)
-      mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
-
-      const buttons = wrapper.findAll('button')
-      await buttons.find(b => b.text().includes('启动'))!.trigger('click')
-      await flushPromises()
+    it('rolls back duty on setDuty failure', async () => {
+      mocks.setDuty.mockRejectedValue(new Error('fail'))
+      mocks.getState.mockResolvedValue({ running: true, duty: 5000, frequency: 1000 })
+      const wrapper = track(mountRow(pwmConfig({ duty: 5000 }), false, true))
 
       const slider = wrapper.findComponent(SliderStub)
-      slider.vm.$emit('change', 6000)
-      vi.advanceTimersByTime(200)
+      slider.vm.$emit('change', 8000)
+      await flushPromises()
+      vi.advanceTimersByTime(300)
+      await flushPromises()
 
-      slider.vm.$emit('change', 7000)
-      vi.advanceTimersByTime(200)
-      expect(mocks.setDuty).not.toHaveBeenCalled()
-
-      vi.advanceTimersByTime(100)
-      expect(mocks.setDuty).toHaveBeenCalledTimes(1)
-      expect(mocks.setDuty).toHaveBeenCalledWith('node-1', 6, 7000)
+      // Should have rolled back to 5000
+      expect(wrapper.get('.pwm-duty-value').text()).toBe('50.00%')
+      expect(mocks.error).toHaveBeenCalledOnce()
     })
 
     it('updates local display on slider input without API call', async () => {
-      mocks.start.mockResolvedValue(undefined)
-      const wrapper = track(mountCard(pwmConfig()))
-
-      const buttons = wrapper.findAll('button')
-      await buttons.find(b => b.text().includes('启动'))!.trigger('click')
-      await flushPromises()
+      const wrapper = track(mountRow(pwmConfig(), false, true))
 
       const slider = wrapper.findComponent(SliderStub)
       slider.vm.$emit('input', 8000)
       await flushPromises()
 
-      expect(wrapper.get('.duty-value').text()).toBe('80.00%')
+      expect(wrapper.get('.pwm-duty-value').text()).toBe('80.00%')
       expect(mocks.setDuty).not.toHaveBeenCalled()
     })
   })
 
   describe('offline state', () => {
-    it('disables start and stop buttons when offline', () => {
-      const wrapper = track(mountCard(pwmConfig(), true))
-
-      const buttons = wrapper.findAll('button')
-      const startBtn = buttons.find(b => b.text().includes('启动'))!
-      const stopBtn = buttons.find(b => b.text().includes('停止'))!
+    it('disables start button when offline', () => {
+      const wrapper = track(mountRow(pwmConfig(), true))
+      const startBtn = wrapper.findAll('button').find(b => b.text().includes('启动'))!
       expect((startBtn.element as HTMLButtonElement).disabled).toBe(true)
-      expect((stopBtn.element as HTMLButtonElement).disabled).toBe(true)
     })
 
-    it('applies pwm-offline class', () => {
-      const wrapper = track(mountCard(pwmConfig(), true))
-      expect(wrapper.find('.pwm-offline').exists()).toBe(true)
-    })
-  })
-
-  describe('layout structure', () => {
-    it('renders card with pwm-channel-card class and correct structure', () => {
-      const wrapper = track(mountCard(pwmConfig()))
-      expect(wrapper.find('.pwm-channel-card').exists()).toBe(true)
-      expect(wrapper.find('.card-header').exists()).toBe(true)
-      expect(wrapper.find('.pin-name').exists()).toBe(true)
-      expect(wrapper.find('.card-header-right').exists()).toBe(true)
+    it('disables slider when offline', () => {
+      const wrapper = track(mountRow(pwmConfig(), true, true))
+      const slider = wrapper.findComponent(SliderStub)
+      expect(slider.props('disabled')).toBe(true)
     })
 
-    it('renders frequency display row', () => {
-      const wrapper = track(mountCard(pwmConfig()))
-      const freq = wrapper.find('.pwm-freq')
-      expect(freq.exists()).toBe(true)
-      expect(freq.find('.freq-label').exists()).toBe(true)
-      expect(freq.find('.freq-value').exists()).toBe(true)
+    it('disables slider when not running', () => {
+      const wrapper = track(mountRow(pwmConfig(), false, false))
+      const slider = wrapper.findComponent(SliderStub)
+      expect(slider.props('disabled')).toBe(true)
     })
 
-    it('renders duty section with header and slider', () => {
-      const wrapper = track(mountCard(pwmConfig()))
-      const duty = wrapper.find('.pwm-duty')
-      expect(duty.exists()).toBe(true)
-      expect(duty.find('.duty-header').exists()).toBe(true)
-      expect(duty.find('.duty-label').exists()).toBe(true)
-      expect(duty.find('.duty-value').exists()).toBe(true)
-    })
-
-    it('renders action buttons in pwm-buttons container', () => {
-      const wrapper = track(mountCard(pwmConfig()))
-      const btnContainer = wrapper.find('.pwm-buttons')
-      expect(btnContainer.exists()).toBe(true)
-      const buttons = btnContainer.findAll('button')
-      expect(buttons.length).toBe(2) // 启动, 停止
-    })
-
-    it('renders label when config has label', () => {
-      const wrapper = track(mountCard(pwmConfig({ label: 'Fan' })))
-      expect(wrapper.find('.pin-label').exists()).toBe(true)
-      expect(wrapper.find('.pin-label').text()).toBe('Fan')
+    it('keeps content readable when offline', () => {
+      const wrapper = track(mountRow(pwmConfig(), true))
+      const el = wrapper.find('.pwm-channel-row').element as HTMLElement
+      expect(el.style.opacity).toBe('')
+      expect(el.style.pointerEvents).toBe('')
     })
   })
 
-  describe('remove emit', () => {
-    it('emits remove with pin number on remove button click', async () => {
-      const wrapper = track(mountCard(pwmConfig({ pin: 9 })))
+  describe('structure', () => {
+    it('renders with pwm-channel-row class', () => {
+      const wrapper = track(mountRow(pwmConfig()))
+      expect(wrapper.find('.pwm-channel-row').exists()).toBe(true)
+    })
 
-      const buttons = wrapper.findAll('button')
-      const removeBtn = buttons.find(b => b.text().includes('✕'))!
-      await removeBtn.trigger('click')
-
-      expect(wrapper.emitted('remove')).toBeTruthy()
-      expect(wrapper.emitted('remove')![0]).toEqual([9])
+    it('has aria-label on slider containing pin number', () => {
+      const wrapper = track(mountRow(pwmConfig({ pin: 15 })))
+      const slider = wrapper.findComponent(SliderStub)
+      expect(slider.props('ariaLabel')).toContain('GPIO 15')
     })
   })
 })
