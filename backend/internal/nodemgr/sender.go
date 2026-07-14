@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/events"
@@ -19,6 +20,35 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// SendPeriphCmd sends a peripheral control command (GPIO/PWM) to a device.
+// Uses QoS 2 (exactly-once), consistent with SendWriteCommand.
+// periphType: 1=GPIO, 2=PWM; action/value/config per the protocol spec.
+func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, pin uint8,
+	action uint8, value uint32, config []byte) error {
+	requestID := atomic.AddUint32(&nextPeriphRequestID, 1)
+
+	enc := frame.NewEncoder(frame.MsgPeriphCmd)
+	enc.EncodeVarint(1, uint64(requestID))   // field 1: request_id
+	enc.EncodeVarint(2, uint64(periphType))  // field 2: periph_type
+	enc.EncodeVarint(3, uint64(pin))         // field 3: pin
+	enc.EncodeVarint(4, uint64(action))      // field 4: action
+	if value > 0 {
+		enc.EncodeVarint(5, uint64(value)) // field 5: value (optional)
+	}
+	if len(config) > 0 {
+		enc.EncodeBytes(6, config)         // field 6: config (optional)
+	}
+
+	logger.Infof("[%s] SendPeriphCmd: type=%d pin=%d action=%d value=%d config_len=%d reqID=%d",
+		deviceID, periphType, pin, action, value, len(config), requestID)
+
+	topic := mqtt.TopicForNode(deviceID)
+	return m.mqtt.PublishQoS2(topic, enc.Bytes())
+}
+
+// nextPeriphRequestID is the atomic counter for PeriphCmd request IDs.
+var nextPeriphRequestID uint32
 
 // SendPing sends a Ping message to a device and records timestamp in Redis for verification
 // F7.6: Track the ping for retry on timeout
@@ -445,6 +475,33 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		lsEnc.EncodeBool(1, node.LogStreamEnabled)
 		lsEnc.EncodeVarint(2, uint64(node.LogStreamLevel))
 		enc.EncodeSubFrame(10, lsEnc.Bytes())
+	}
+
+	// Field 11: gpio_configs (repeated sub-messages, v3.0)
+	// Only encode for protocol_version >= 2.4 (older firmware ignores unknown fields)
+	if parseProtocolVersion(node.ProtocolVersion) >= 2.4 {
+		var gpioConfigs []models.GPIOConfig
+		m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&gpioConfigs)
+		for _, gc := range gpioConfigs {
+			subEnc := frame.SubEncoder()
+			subEnc.EncodeVarint(1, uint64(gc.Pin))           // sub-field 1: pin
+			subEnc.EncodeVarint(2, uint64(gc.Direction))     // sub-field 2: direction
+			subEnc.EncodeVarint(3, uint64(gc.InitialLevel))  // sub-field 3: initial_level
+			enc.EncodeSubFrame(11, subEnc.Bytes())
+		}
+
+		// Field 12: pwm_configs (repeated sub-messages, v3.0)
+		var pwmConfigs []models.PWMConfig
+		m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&pwmConfigs)
+		for _, pc := range pwmConfigs {
+			subEnc := frame.SubEncoder()
+			subEnc.EncodeVarint(1, uint64(pc.Pin))        // sub-field 1: pin
+			subEnc.EncodeVarint(2, uint64(pc.Frequency))  // sub-field 2: frequency
+			subEnc.EncodeVarint(3, uint64(pc.Duty))       // sub-field 3: duty
+			subEnc.EncodeVarint(4, uint64(pc.Resolution)) // sub-field 4: resolution
+			subEnc.EncodeBool(5, pc.AutoStart)            // sub-field 5: auto_start
+			enc.EncodeSubFrame(12, subEnc.Bytes())
+		}
 	}
 
 	// v2.2: field 8 = sync_id (field 9 sync_reason removed)

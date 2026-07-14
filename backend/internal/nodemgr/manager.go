@@ -209,6 +209,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleConfigSyncRequest(deviceID, payload)
 	case frame.MsgResourceReport:
 		m.handleResourceReport(deviceID, payload)
+	case frame.MsgPeriphRsp:
+		m.handlePeriphResponse(deviceID, payload)
 	case frame.MsgLogStream:
 		m.handleLogStream(deviceID, payload)
 
@@ -240,6 +242,8 @@ func (m *Manager) buildHashData(
 	edgeDevices []models.EdgeDevice,
 	deviceConfigs []models.DeviceConfig,
 	dmaConfigs []models.DmaChannelConfig,
+	gpioConfigs []models.GPIOConfig,
+	pwmConfigs []models.PWMConfig,
 ) []byte {
 	var buf []byte
 	for _, t := range templates {
@@ -259,8 +263,13 @@ func (m *Manager) buildHashData(
 			dc.ID, dc.DeviceType, dc.DeviceModel, string(dc.Connection), string(dc.Parser), string(dc.InitFlow), string(dc.Operations), dc.Status))...)
 	}
 	for _, d := range dmaConfigs {
-		buf = append(buf, []byte(fmt.Sprintf("d:%d:%v:%s:",
-			d.DmaID, d.Enabled, d.BindTo))...)
+		buf = append(buf, []byte(fmt.Sprintf("d:%d:%v:%s:", d.DmaID, d.Enabled, d.BindTo))...)
+	}
+	for _, g := range gpioConfigs {
+		buf = append(buf, []byte(fmt.Sprintf("g:%d:%d:%d:%v:", g.Pin, g.Direction, g.InitialLevel, g.Enabled))...)
+	}
+	for _, p := range pwmConfigs {
+		buf = append(buf, []byte(fmt.Sprintf("p:%d:%d:%d:%d:%v:", p.Pin, p.Frequency, p.Duty, p.Resolution, p.Enabled))...)
 	}
 	return buf
 }
@@ -359,7 +368,13 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 			tx.Order("id ASC").Where("id IN ?", deviceConfigIDs).Find(&deviceConfigs)
 		}
 
-		hashData := m.buildHashData(templates, channels, edgeDevices, deviceConfigs, dmaConfigs)
+		// v3.0: query GPIO/PWM configs for hash calculation
+		var gpioConfigs []models.GPIOConfig
+		tx.Order("pin ASC").Where("node_id = ?", node.NodeID).Find(&gpioConfigs)
+		var pwmConfigs []models.PWMConfig
+		tx.Order("pin ASC").Where("node_id = ?", node.NodeID).Find(&pwmConfigs)
+
+		hashData := m.buildHashData(templates, channels, edgeDevices, deviceConfigs, dmaConfigs, gpioConfigs, pwmConfigs)
 		// v2.5: include log_stream config in hash so changes trigger manifest push
 		hashData = append(hashData, []byte(fmt.Sprintf("ls:%v:%d:", node.LogStreamEnabled, node.LogStreamLevel))...)
 		hash := m.hashMgr.CalcConfigHash(hashData)

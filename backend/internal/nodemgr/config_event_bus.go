@@ -18,6 +18,8 @@ const (
 	CfgChangeEdgeDevice   ConfigChangeType = "edge_device"
 	CfgChangeNode         ConfigChangeType = "node"
 	CfgChangeDeviceConfig ConfigChangeType = "device_config"
+	CfgChangeGPIO         ConfigChangeType = "gpio"
+	CfgChangePWM          ConfigChangeType = "pwm"
 )
 
 // ConfigChangeAction identifies the CRUD action performed.

@@ -63,6 +63,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerEdgeDeviceRoutes(v1, db, nodeMgr)
 		registerDriverCommandRoutes(v1, db, nodeMgr)
 
+		// v3.0: GPIO/PWM peripheral control routes
+		registerPeriphRoutes(v1, db, nodeMgr)
+
 		// Overview + Notification routes
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)

@@ -31,4 +31,8 @@ const (
 
 	// v2.5: System log stream
 	NodeLog = "node_log"
+
+	// Peripheral events (v3.0: GPIO/PWM control)
+	PeriphResult = "periph_result" // GPIO/PWM 操作结果
+	PeriphState  = "periph_state"  // GPIO/PWM 状态变更
 )

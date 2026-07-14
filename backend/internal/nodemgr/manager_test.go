@@ -66,8 +66,8 @@ func TestBuildHashData_Deterministic(t *testing.T) {
 	dc := []models.DeviceConfig{{ID: 5, DeviceType: "tA", DeviceModel: "mA", Connection: []byte("uart"), Parser: []byte("bin"), InitFlow: []byte(""), Operations: []byte("[]"), Status: "active"}}
 	dma := []models.DmaChannelConfig{{DmaID: 1, Enabled: true, BindTo: "ch1"}}
 
-	r1 := mgr.buildHashData(tpl, ch, ed, dc, dma)
-	r2 := mgr.buildHashData(tpl, ch, ed, dc, dma)
+	r1 := mgr.buildHashData(tpl, ch, ed, dc, dma, nil, nil)
+	r2 := mgr.buildHashData(tpl, ch, ed, dc, dma, nil, nil)
 	if len(r1) == 0 {
 		t.Fatal("empty hash data")
 	}
@@ -80,7 +80,7 @@ func TestBuildHashData_Deterministic(t *testing.T) {
 func TestBuildHashData_EmptyInput(t *testing.T) {
 	db := setupTestDB(t)
 	mgr := NewManager(db, nil, nil, nil, nil, nil)
-	r := mgr.buildHashData(nil, nil, nil, nil, nil)
+	r := mgr.buildHashData(nil, nil, nil, nil, nil, nil, nil)
 	// nil input returns nil (var buf []byte with no appends = nil)
 	// This is expected behavior — just verify no panic
 	_ = r
@@ -93,11 +93,11 @@ func TestBuildHashData_SectionChange(t *testing.T) {
 	tpl := []models.ConfigTemplate{{ID: 1, WriteData: "0x01", ReadLength: 1, DelayMs: 100}}
 	ch := []models.Channel{{ID: 10, HardwareID: "hw1", TemplateIDs: "1", IntervalMs: 1000, Enabled: true, BusConfig: "{}"}}
 
-	base := mgr.buildHashData(tpl, ch, nil, nil, nil)
+	base := mgr.buildHashData(tpl, ch, nil, nil, nil, nil, nil)
 
 	ed := []models.EdgeDevice{{ID: 1, DeviceConfigID: 5, HardwareID: "x", IntervalMs: 100, Enabled: true, ChannelID: 1, Type: "tA", Name: "a"}}
 	dc := []models.DeviceConfig{{ID: 5, DeviceType: "tA", DeviceModel: "mA", Connection: []byte("uart"), Parser: []byte("bin"), InitFlow: []byte(""), Operations: []byte("[]"), Status: "active"}}
-	changed := mgr.buildHashData(tpl, ch, ed, dc, nil)
+	changed := mgr.buildHashData(tpl, ch, ed, dc, nil, nil, nil)
 
 	if string(base) == string(changed) {
 		t.Error("Adding edgeDevices+deviceConfigs must change hash output")
@@ -121,8 +121,8 @@ func TestBuildHashData_DedupDeviceConfigID(t *testing.T) {
 		{ID: 3, DeviceConfigID: 5, HardwareID: "z", IntervalMs: 300, Enabled: true, ChannelID: 1, Type: "tA", Name: "c"},
 	}
 
-	r1 := mgr.buildHashData(tpl, ch, ed1, dc, nil)
-	r2 := mgr.buildHashData(tpl, ch, ed2, dc, nil)
+	r1 := mgr.buildHashData(tpl, ch, ed1, dc, nil, nil, nil)
+	r2 := mgr.buildHashData(tpl, ch, ed2, dc, nil, nil, nil)
 	// Different edge device content → different hash data (expected behavior)
 	if string(r1) == string(r2) {
 		t.Error("Different edge device entries should produce different hash data")

@@ -366,6 +366,49 @@ func (PendingWriteRecord) TableName() string {
 
 // =====================================================================
 
+// GPIOConfig GPIO 引脚配置 (v3.0: 从通道系统中剥离, 独立外设控制)
+//
+// 一个 GPIOConfig = 一个 GPIO 引脚的配置 (direction + initial_level + label)
+// (node_id, pin) 复合唯一索引确保同一节点同一引脚只能有一个配置
+type GPIOConfig struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	NodeID       string    `gorm:"column:node_id;type:varchar(32);index:idx_gpio_node_pin,unique;not null" json:"node_id"`
+	Pin          int       `gorm:"index:idx_gpio_node_pin,unique;not null" json:"pin"`
+	Direction    uint8     `gorm:"not null" json:"direction"` // 0=INPUT, 1=OUTPUT, 2=INPUT_PULLUP, 3=INPUT_PULLDOWN
+	InitialLevel uint8     `gorm:"default:0" json:"initial_level"`
+	Label        string    `gorm:"size:64" json:"label"`
+	Enabled      bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (GPIOConfig) TableName() string { return "gpio_configs" }
+
+// =====================================================================
+
+// PWMConfig PWM 通道配置 (v3.0: 全新, 从通道系统中剥离)
+//
+// 一个 PWMConfig = 一个 PWM 输出引脚的配置 (frequency + duty + resolution + auto_start)
+// (node_id, pin) 复合唯一索引确保同一节点同一引脚只能有一个配置
+// AutoStart 替代 Running — 运行时状态不持久化
+type PWMConfig struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	NodeID     string    `gorm:"column:node_id;type:varchar(32);index:idx_pwm_node_pin,unique;not null" json:"node_id"`
+	Pin        int       `gorm:"index:idx_pwm_node_pin,unique;not null" json:"pin"`
+	Frequency  uint32    `gorm:"not null" json:"frequency"`
+	Duty       uint16    `gorm:"default:0" json:"duty"`       // 0-10000 = 0.00%-100.00%
+	Resolution uint8     `gorm:"default:14" json:"resolution"` // 分辨率位数 (4-20, 默认 14)
+	AutoStart  bool      `gorm:"default:false" json:"auto_start"`
+	Label      string    `gorm:"size:64" json:"label"`
+	Enabled    bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (PWMConfig) TableName() string { return "pwm_configs" }
+
+// =====================================================================
+
 // DmaChannelInfo represents a single DMA channel reported by the device
 type DmaChannelInfo struct {
 	DmaID         uint32 `json:"dma_id"`

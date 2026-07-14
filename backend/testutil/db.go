@@ -51,6 +51,9 @@ var allModels = []interface{}{
 	&models.ConfigMeta{},
 	&models.PendingWriteRecord{},
 	&models.NodeLog{},
+	// v3.0: GPIO/PWM peripheral control models
+	&models.GPIOConfig{},
+	&models.PWMConfig{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

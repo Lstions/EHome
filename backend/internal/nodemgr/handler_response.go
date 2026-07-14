@@ -289,3 +289,55 @@ func (m *Manager) SendPongAck(deviceID string, pingTimestamp uint64) error {
 	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
+
+// handlePeriphResponse processes PeriphRsp (type=0x1C) — GPIO/PWM operation result.
+// Decodes the response and pushes it via WebSocket as a PeriphResult event.
+func (m *Manager) handlePeriphResponse(deviceID string, payload []byte) {
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		logger.Infof("[%s] Failed to decode PeriphRsp: %v", deviceID, err)
+		return
+	}
+
+	var requestID uint64
+	var success bool
+	var value uint64
+	var errorCode uint64
+	var periphType uint64
+	var pin uint64
+
+	for {
+		field, err := dec.NextField()
+		if err != nil {
+			break
+		}
+		switch field.FieldNum {
+		case 1:
+			requestID = frame.GetUint64(field)
+		case 2:
+			success = frame.GetBool(field)
+		case 3:
+			value = frame.GetUint64(field)
+		case 4:
+			errorCode = frame.GetUint64(field)
+		case 5:
+			periphType = frame.GetUint64(field) // optional, for async events
+		case 6:
+			pin = frame.GetUint64(field) // optional, for async events
+		}
+	}
+
+	logger.Infof("[%s] PeriphRsp: request_id=%d success=%v value=%d error_code=%d periph_type=%d pin=%d",
+		deviceID, requestID, success, value, errorCode, periphType, pin)
+
+	// WebSocket push — PeriphResult event
+	m.wsHub.BroadcastEvent(events.PeriphResult, map[string]interface{}{
+		"node_id":     deviceID,
+		"request_id":  requestID,
+		"success":     success,
+		"value":       value,
+		"error_code":  errorCode,
+		"periph_type": periphType,
+		"pin":         pin,
+	})
+}
