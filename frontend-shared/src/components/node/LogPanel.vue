@@ -48,16 +48,6 @@
     </el-alert>
 
     <div class="realtime-section">
-      <div class="realtime-search">
-        <strong>实时日志</strong>
-        <el-input
-          v-model="searchKeyword"
-          aria-label="搜索实时日志"
-          size="small"
-          placeholder="搜索 Tag、消息或级别..."
-          clearable
-        />
-      </div>
       <LogRealtimeViewer
         :logs="realtimeLogs"
         :received-count="realtimeReceivedCount"
@@ -66,6 +56,7 @@
         :search-keyword="searchKeyword"
         :search-count-state="realtimeSearchCountState"
         @update:paused="paused = $event"
+        @update:search-keyword="searchKeyword = $event"
         @clear="clearRealtimeLogs"
         @export="exportRealtimeLogs"
       />
@@ -326,8 +317,7 @@ onUnmounted(() => {
 }
 
 .log-controls,
-.control-group,
-.realtime-search {
+.control-group {
   display: flex;
   align-items: center;
 }
@@ -341,8 +331,7 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.control-label,
-.realtime-search strong {
+.control-label {
   font-size: 14px;
   font-weight: 600;
   color: var(--el-text-color-primary);
@@ -361,24 +350,13 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.realtime-search {
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.realtime-search :deep(.el-input) {
-  width: min(320px, 100%);
-}
-
 .history-section {
   padding-top: 16px;
   border-top: 1px solid var(--el-border-color-light);
 }
 
 @media (max-width: 768px) {
-  .log-controls,
-  .realtime-search {
+  .log-controls {
     align-items: stretch;
   }
 
@@ -389,14 +367,6 @@ onUnmounted(() => {
   .control-group {
     flex: 1 1 140px;
     justify-content: space-between;
-  }
-
-  .realtime-search {
-    flex-direction: column;
-  }
-
-  .realtime-search :deep(.el-input) {
-    width: 100%;
   }
 }
 </style>

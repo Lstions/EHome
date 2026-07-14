@@ -90,10 +90,11 @@ const RealtimeViewerStub = defineComponent({
       default: () => ({ epoch: 0, baselineId: 0, baselineMatchIds: [], matchedAfterBaseline: 0 }),
     },
   },
-  emits: ['update:paused', 'clear', 'export'],
+  emits: ['update:paused', 'update:searchKeyword', 'clear', 'export'],
   template: `<section aria-label="实时日志组件">
     <span data-testid="realtime-state">{{ logs.length }}|{{ receivedCount }}|{{ generation }}|{{ paused }}|{{ searchKeyword }}</span>
     <span data-testid="search-count-state">{{ searchCountState.epoch }}|{{ searchCountState.baselineId }}|{{ searchCountState.baselineMatchIds.length }}|{{ searchCountState.matchedAfterBaseline }}</span>
+    <input aria-label="搜索实时日志" :value="searchKeyword" @input="$emit('update:searchKeyword', $event.target.value)" />
     <span v-for="line in logs" :key="line.id" class="received-log" :data-log-id="line.id">{{ line.msg }}</span>
     <button aria-label="切换暂停" @click="$emit('update:paused', !paused)">切换暂停</button>
     <button aria-label="清空实时日志" @click="$emit('clear')">清空</button>
@@ -239,6 +240,17 @@ describe('LogPanel orchestration', () => {
 
     expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('1|1|0|true|timeout')
     expect(wrapper.text()).toContain('timeout while paused')
+  })
+
+  it('lets the realtime viewer render search and owns the updated search state', async () => {
+    const wrapper = track(await settlePanel())
+
+    expect(wrapper.find('.realtime-search').exists()).toBe(false)
+    await wrapper.get('[aria-label="搜索实时日志"]').setValue('sensor')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="realtime-state"]').text()).toBe('0|0|0|false|sensor')
+    expect(wrapper.get('[data-testid="search-count-state"]').text()).toBe('1|0|0|0')
   })
 
   it('clears through the child event without reusing ids for later logs', async () => {

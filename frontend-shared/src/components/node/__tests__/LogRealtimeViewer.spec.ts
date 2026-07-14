@@ -1,6 +1,7 @@
 import { nextTick } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Delete, Download, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import LogRealtimeViewer from '@/components/node/LogRealtimeViewer.vue'
 import LogRealtimeViewerSource from '@/components/node/LogRealtimeViewer.vue?raw'
 
@@ -678,6 +679,102 @@ describe('LogRealtimeViewer', () => {
     await wrapper.get('.unread-button').trigger('click')
 
     expect(wrapper.find('.unread-button').exists()).toBe(false)
+  })
+
+  it('renders toolbar actions as small Element Plus buttons with semantic state and icons', async () => {
+    const wrapper = track(mountViewer({ logs: makeLogs(3) }))
+    await nextTick()
+
+    const pauseButton = wrapper.get('.pause-button')
+    const clearButton = wrapper.get('.clear-button')
+    const exportTextButton = wrapper.get('.export-text-button')
+    const exportCsvButton = wrapper.get('.export-csv-button')
+    const toolbarButtons = [pauseButton, clearButton, exportTextButton, exportCsvButton]
+
+    toolbarButtons.forEach((button) => {
+      expect(button.element.tagName).toBe('BUTTON')
+      expect(button.classes()).toContain('el-button')
+      expect(button.classes()).toContain('el-button--small')
+    })
+    expect(pauseButton.classes()).not.toContain('el-button--warning')
+    expect(pauseButton.findComponent(VideoPause).exists()).toBe(true)
+    expect(clearButton.classes()).not.toContain('el-button--danger')
+    expect(clearButton.findComponent(Delete).exists()).toBe(true)
+    expect(exportTextButton.findComponent(Download).exists()).toBe(true)
+    expect(exportCsvButton.findComponent(Download).exists()).toBe(true)
+
+    await wrapper.setProps({ paused: true })
+
+    expect(pauseButton.classes()).toContain('el-button--warning')
+    expect(pauseButton.findComponent(VideoPlay).exists()).toBe(true)
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-toolbar-actions[\s\S]*?gap: 8px;[\s\S]*?margin-left: auto;/,
+    )
+    expect(LogRealtimeViewerSource).toContain('width: 280px;')
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-action-group :deep\(\.el-button \+ \.el-button\)[\s\S]*?margin-left: 0;/,
+    )
+  })
+
+  it('keeps the title, count, search, and actions in one toolbar and emits search updates', async () => {
+    const wrapper = track(mountViewer({ logs: makeLogs(3), searchKeyword: 'message' }))
+    await nextTick()
+
+    const toolbar = wrapper.get('.log-toolbar')
+    expect(toolbar.get('.log-title').text()).toBe('实时日志')
+    expect(toolbar.get('.log-summary').text()).toBe('3 / 3')
+    expect((toolbar.get('[aria-label="搜索实时日志"]').element as HTMLInputElement).value).toBe('message')
+    expect(toolbar.findAll('.pause-button')).toHaveLength(1)
+    expect(toolbar.findAll('.clear-button')).toHaveLength(1)
+    expect(toolbar.findAll('.export-text-button')).toHaveLength(1)
+    expect(toolbar.findAll('.export-csv-button')).toHaveLength(1)
+
+    await toolbar.get('[aria-label="搜索实时日志"]').setValue('error')
+
+    expect(wrapper.emitted('update:searchKeyword')).toEqual([['error']])
+  })
+
+  it('groups related actions so responsive wrapping never splits individual button pairs', async () => {
+    const wrapper = track(mountViewer({ logs: makeLogs(3) }))
+    await nextTick()
+
+    const actions = wrapper.get('.log-toolbar-actions')
+    const directChildren = Array.from(actions.element.children)
+
+    expect(directChildren).toHaveLength(3)
+    expect(directChildren[0]?.classList.contains('log-search')).toBe(true)
+    expect(directChildren[1]?.classList.contains('log-action-group')).toBe(true)
+    expect(directChildren[1]?.classList.contains('log-control-group')).toBe(true)
+    expect(directChildren[2]?.classList.contains('log-action-group')).toBe(true)
+    expect(directChildren[2]?.classList.contains('log-export-group')).toBe(true)
+    expect(actions.get('.log-control-group').findAll('.el-button')).toHaveLength(2)
+    expect(actions.get('.log-control-group').find('.pause-button').exists()).toBe(true)
+    expect(actions.get('.log-control-group').find('.clear-button').exists()).toBe(true)
+    expect(actions.get('.log-export-group').findAll('.el-button')).toHaveLength(2)
+    expect(actions.get('.log-export-group').find('.export-text-button').exists()).toBe(true)
+    expect(actions.get('.log-export-group').find('.export-csv-button').exists()).toBe(true)
+  })
+
+  it('uses container width to keep the desktop toolbar single-line and wrap by planned groups', () => {
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-realtime-viewer\s*{[\s\S]*?container-type:\s*inline-size;/,
+    )
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-toolbar\s*{[\s\S]*?flex-wrap:\s*nowrap;/,
+    )
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-toolbar-actions\s*{[\s\S]*?flex:\s*0 0 auto;[\s\S]*?flex-wrap:\s*nowrap;/,
+    )
+    expect(LogRealtimeViewerSource).toMatch(/\.log-search\s*{[\s\S]*?width:\s*280px;/)
+    expect(LogRealtimeViewerSource).toMatch(
+      /\.log-action-group\s*{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?white-space:\s*nowrap;/,
+    )
+    expect(LogRealtimeViewerSource).toMatch(
+      /@container\s*\(max-width:\s*900px\)[\s\S]*?\.log-toolbar\s*{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?\.log-toolbar-actions\s*{[\s\S]*?width:\s*100%;/,
+    )
+    expect(LogRealtimeViewerSource).toMatch(
+      /@container\s*\(max-width:\s*600px\)[\s\S]*?\.log-toolbar-actions\s*{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?\.log-search\s*{[\s\S]*?flex:\s*1 1 100%;[\s\S]*?width:\s*100%;/,
+    )
   })
 
   it('emits clear and both export actions from the toolbar', async () => {

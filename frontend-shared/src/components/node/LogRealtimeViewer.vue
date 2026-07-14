@@ -1,19 +1,65 @@
 <template>
   <section class="log-realtime-viewer">
     <header class="log-toolbar">
-      <span class="log-summary">实时日志 {{ filteredLogs.length }} / {{ logs.length }}</span>
-      <button type="button" class="pause-button" @click="emit('update:paused', !paused)">
-        {{ paused ? '继续' : '暂停' }}
-      </button>
-      <button type="button" class="clear-button" :disabled="logs.length === 0" @click="emit('clear')">
-        清屏
-      </button>
-      <button type="button" class="export-text-button" :disabled="filteredLogs.length === 0" @click="emit('export', 'text')">
-        导出文本
-      </button>
-      <button type="button" class="export-csv-button" :disabled="filteredLogs.length === 0" @click="emit('export', 'csv')">
-        导出 CSV
-      </button>
+      <div class="log-toolbar-summary">
+        <strong class="log-title">实时日志</strong>
+        <span class="log-summary">{{ filteredLogs.length }} / {{ logs.length }}</span>
+      </div>
+      <div class="log-toolbar-actions">
+        <el-input
+          class="log-search"
+          :model-value="searchKeyword"
+          aria-label="搜索实时日志"
+          size="small"
+          placeholder="搜索 Tag、消息或级别..."
+          clearable
+          @update:model-value="emit('update:searchKeyword', $event)"
+        />
+        <div class="log-action-group log-control-group">
+          <el-button
+            class="pause-button"
+            size="small"
+            :type="paused ? 'warning' : 'default'"
+            :icon="paused ? VideoPlay : VideoPause"
+            :aria-label="paused ? '继续实时日志' : '暂停实时日志'"
+            @click="emit('update:paused', !paused)"
+          >
+            {{ paused ? '继续' : '暂停' }}
+          </el-button>
+          <el-button
+            class="clear-button"
+            size="small"
+            :icon="Delete"
+            aria-label="清空实时日志"
+            :disabled="logs.length === 0"
+            @click="emit('clear')"
+          >
+            清屏
+          </el-button>
+        </div>
+        <div class="log-action-group log-export-group">
+          <el-button
+            class="export-text-button"
+            size="small"
+            :icon="Download"
+            aria-label="导出实时日志文本"
+            :disabled="filteredLogs.length === 0"
+            @click="emit('export', 'text')"
+          >
+            导出文本
+          </el-button>
+          <el-button
+            class="export-csv-button"
+            size="small"
+            :icon="Download"
+            aria-label="导出实时日志 CSV"
+            :disabled="filteredLogs.length === 0"
+            @click="emit('export', 'csv')"
+          >
+            导出 CSV
+          </el-button>
+        </div>
+      </div>
     </header>
 
     <button
@@ -54,6 +100,8 @@
 </template>
 
 <script setup lang="ts">
+import { Delete, Download, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { ElButton, ElInput } from 'element-plus'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RecycleScroller } from 'vue-virtual-scroller'
 import type { RecycleScrollerExposed } from 'vue-virtual-scroller'
@@ -97,6 +145,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   (event: 'update:paused', value: boolean): void
+  (event: 'update:searchKeyword', value: string): void
   (event: 'clear'): void
   (event: 'export', format: 'text' | 'csv'): void
 }>()
@@ -277,20 +326,60 @@ watch(
 <style scoped>
 .log-realtime-viewer {
   min-width: 0;
+  container-type: inline-size;
 }
 
 .log-toolbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 8px 16px;
   margin-bottom: 8px;
 }
 
+.log-toolbar-summary,
+.log-toolbar-actions,
+.log-action-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-toolbar-summary {
+  flex: 0 0 auto;
+}
+
+.log-title {
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .log-summary {
-  margin-right: auto;
   color: var(--el-text-color-regular);
   font-size: 13px;
+  white-space: nowrap;
+}
+
+.log-toolbar-actions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  margin-left: auto;
+}
+
+.log-action-group {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.log-action-group :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.log-search {
+  flex: 0 0 280px;
+  width: 280px;
 }
 
 .terminal-shell {
@@ -349,6 +438,29 @@ watch(
   place-items: center;
   height: 100%;
   color: var(--terminal-subtle);
+}
+
+@container (max-width: 900px) {
+  .log-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .log-toolbar-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+@container (max-width: 600px) {
+  .log-toolbar-actions {
+    flex-wrap: wrap;
+  }
+
+  .log-search {
+    flex: 1 1 100%;
+    width: 100%;
+  }
 }
 
 @media (max-width: 768px) {
