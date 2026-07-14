@@ -4,6 +4,23 @@ import { createPinia, setActivePinia } from 'pinia'
 import MainLayout from '@/views/layout/MainLayout.vue'
 import layoutSource from '../MainLayout.vue?raw'
 
+// ── 辅助：读取 theme.css 原始内容 ──────────────────────
+// Vitest 环境下 ?raw 后缀对 .css 文件返回空串（CSS 插件拦截），
+// 用 Node.js createRequire + fs 同步读取文件内容。
+// tsc 配置不含 node 类型，用 @ts-expect-error 抑制类型错误。
+async function loadThemeCssRaw(): Promise<string> {
+  // @ts-expect-error — Node.js 内置模块，Vitest 运行时可用
+  const { createRequire } = await import('module')
+  const req = createRequire(import.meta.url)
+  const path = req('path')
+  const fs = req('fs')
+  const cssPath = path.resolve(
+    path.dirname(import.meta.url.replace('file://', '')),
+    '../../../styles/theme.css',
+  )
+  return fs.readFileSync(cssPath, 'utf-8')
+}
+
 // ── Mocks ──────────────────────────────────────────────
 
 const { mockPush, mockRoute } = vi.hoisted(() => ({
@@ -261,5 +278,81 @@ describe('MainLayout.vue', () => {
     const versionText = footer.find('.mobile-version-info')
     expect(versionText.exists()).toBe(true)
     expect(versionText.text()).toContain('v')
+  })
+
+  // ── 主题 token / 深色模式精确覆盖 ──────────────────────
+
+  it('移动端抽屉 body 背景使用 var(--el-bg-color) 而非硬编码白底', () => {
+    // 抽屉 body 背景
+    expect(layoutSource).toMatch(/\.mobile-sidebar-drawer \.el-drawer__body[^}]*background:\s*var\(--el-bg-color\)/)
+    // 不应出现硬编码 #fff / #ffffff / white 作为背景
+    expect(layoutSource).not.toMatch(/\.mobile-sidebar-drawer[^}]*background:\s*#fff\b/)
+    expect(layoutSource).not.toMatch(/\.mobile-sidebar-drawer[^}]*background:\s*#ffffff\b/)
+    expect(layoutSource).not.toMatch(/\.mobile-sidebar-drawer[^}]*background:\s*white\b/)
+  })
+
+  it('移动端抽屉菜单背景使用 var(--el-bg-color) 而非硬编码白底', () => {
+    expect(layoutSource).toMatch(/\.mobile-sidebar-drawer \.mobile-sidebar-menu[^}]*background:\s*var\(--el-bg-color\)/)
+    expect(layoutSource).not.toMatch(/\.mobile-sidebar-drawer \.mobile-sidebar-menu[^}]*background:\s*#fff\b/)
+  })
+
+  it('移动端抽屉所有颜色均使用 Element Plus CSS 变量 token', () => {
+    // logo 文字 → var(--el-text-color-primary)
+    expect(layoutSource).toMatch(/\.mobile-logo-text[^}]*color:\s*var\(--el-text-color-primary\)/)
+    // 普通菜单项 → var(--el-text-color-regular)
+    expect(layoutSource).toMatch(/\.mobile-sidebar-drawer \.el-menu-item[^}]*color:\s*var\(--el-text-color-regular\)/)
+    // hover → var(--el-fill-color-light)
+    expect(layoutSource).toMatch(/\.el-menu-item:hover[^}]*background:\s*var\(--el-fill-color-light\)/)
+    // hover 文字 → var(--el-text-color-primary)
+    expect(layoutSource).toMatch(/\.el-menu-item:hover[^}]*color:\s*var\(--el-text-color-primary\)/)
+    // active → var(--el-color-primary) + var(--el-color-primary-light-9)
+    expect(layoutSource).toMatch(/\.el-menu-item\.is-active[^}]*color:\s*var\(--el-color-primary\)/)
+    expect(layoutSource).toMatch(/\.el-menu-item\.is-active[^}]*background:\s*var\(--el-color-primary-light-9\)/)
+    // footer border → var(--el-border-color-lighter)
+    expect(layoutSource).toMatch(/\.mobile-sidebar-footer[^}]*border-top:.*var\(--el-border-color-lighter\)/)
+    // logo area border → var(--el-border-color-lighter)
+    expect(layoutSource).toMatch(/\.mobile-logo-area[^}]*border-bottom:.*var\(--el-border-color-lighter\)/)
+    // version info → var(--el-text-color-placeholder)
+    expect(layoutSource).toMatch(/\.mobile-version-info[^}]*color:\s*var\(--el-text-color-placeholder\)/)
+  })
+
+  it('桌面端深色侧栏样式全部限定在 .sidebar 选择器内', () => {
+    // logo-text 白色仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.logo-text[^}]*color:\s*#fff/)
+    expect(layoutSource).not.toMatch(/^\s*\.logo-text\s*\{[^}]*color:\s*#fff/m)
+    // el-menu-item 深色仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar :deep\(\.el-menu-item\)/)
+    expect(layoutSource).not.toMatch(/^\s*:deep\(\.el-menu-item\)\s*\{/m)
+    // sidebar-menu 仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.sidebar-menu/)
+    expect(layoutSource).not.toMatch(/^\s*\.sidebar-menu\s*\{/m)
+    // sidebar-footer 仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.sidebar-footer/)
+    expect(layoutSource).not.toMatch(/^\s*\.sidebar-footer\s*\{/m)
+    // version-info 仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.version-info/)
+    expect(layoutSource).not.toMatch(/^\s*\.version-info\s*\{/m)
+    // logo-area 仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.logo-area/)
+    expect(layoutSource).not.toMatch(/^\s*\.logo-area\s*\{/m)
+    // logo-icon 仅 .sidebar 内
+    expect(layoutSource).toMatch(/\.sidebar \.logo-icon/)
+    expect(layoutSource).not.toMatch(/^\s*\.logo-icon\s*\{/m)
+  })
+
+  it('theme.css 中 html.dark 覆盖 --el-bg-color 以确保 Teleport 继承深色', async () => {
+    // theme.css 中的 html.dark 覆盖确保 Teleport 到 body 的抽屉能继承深色变量。
+    // Vitest 环境下 ?raw 对 CSS 返回空串，用动态 require 读取文件内容。
+    const themeCssSource = await loadThemeCssRaw()
+    expect(themeCssSource).toBeTruthy()
+    expect(themeCssSource.length).toBeGreaterThan(100)
+    // html.dark 必须覆盖 --el-bg-color
+    expect(themeCssSource).toMatch(/html\.dark[^{]*\{[^}]*--el-bg-color:\s*var\(--bg-color\)/)
+    // 暗色主题 --bg-color 必须为深色值
+    expect(themeCssSource).toMatch(/\[data-theme="dark"\][^{]*\{[^}]*--bg-color:\s*#[0-9a-fA-F]{6}/)
+    // html.dark 也设置 --el-menu-bg-color
+    expect(themeCssSource).toMatch(/html\.dark[^{]*\{[^}]*--el-menu-bg-color/)
+    // html.dark 设置 --el-fill-color-light
+    expect(themeCssSource).toMatch(/html\.dark[^{]*\{[^}]*--el-fill-color-light/)
   })
 })
