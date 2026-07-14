@@ -20,7 +20,6 @@
         <el-option label="UART" value="uart" />
         <el-option label="I2C" value="i2c" />
         <el-option label="SPI" value="spi" />
-        <el-option label="GPIO" value="gpio" />
         <el-option label="ADC" value="adc" />
       </el-select>
     </div>
@@ -193,9 +192,7 @@ const getBusTagType = (bus: string): string => {
     uart: '',
     i2c: 'warning',
     spi: 'danger',
-    gpio: 'success',
     adc: 'primary',
-    pwm: 'info'
   }
   return types[bus] || 'info'
 }

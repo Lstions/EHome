@@ -67,9 +67,7 @@
             <el-option label="UART" value="uart" />
             <el-option label="I2C" value="i2c" />
             <el-option label="SPI" value="spi" />
-            <el-option label="GPIO" value="gpio" />
             <el-option label="ADC" value="adc" />
-            <el-option label="PWM" value="pwm" />
           </el-select>
           
           <el-select v-model="statusFilter" placeholder="状态" clearable>
@@ -381,9 +379,7 @@ const getBusIcon = (busType: string) => {
     uart: DataBoard,
     i2c: DataAnalysis,
     spi: Files,
-    gpio: CpuIcon,
     adc: Files,
-    pwm: DataBoard
   }
   return iconMap[busType] || Files
 }

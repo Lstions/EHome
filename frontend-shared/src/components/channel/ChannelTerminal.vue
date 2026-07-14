@@ -213,6 +213,8 @@ const showReadSize = computed(() => {
   return type === 'spi' || type === 'i2c'
 })
 
+// GPIO 方向相关代码已移至 PeripheralControl 组件
+
 interface LogEntry {
   type: 'send' | 'recv' | 'error' | 'info'
   direction: 'TX' | 'RX'
@@ -262,7 +264,7 @@ interface ChannelGroup { type: string; label: string; channels: Channel[] }
 const channelGroups = computed<ChannelGroup[]>(() => {
   const groups: Map<string, Channel[]> = new Map()
   const typeLabels: Record<string, string> = {
-    uart: '串口 (UART)', i2c: 'I2C', spi: 'SPI', gpio: 'GPIO', adc: 'ADC', pwm: 'PWM'
+    uart: '串口 (UART)', i2c: 'I2C', spi: 'SPI', adc: 'ADC'
   }
   for (const ch of allChannels.value) {
     const type = ch.hardware_type || 'other'
@@ -277,7 +279,7 @@ const rxEntries = computed(() => logEntries.value.filter(e => e.direction === 'R
 
 // --- Helpers ---
 const getTagType = (type: string) => {
-  const types: Record<string, string> = { gpio: 'info', adc: 'success', i2c: 'warning', spi: 'danger', uart: '', pwm: 'primary' }
+  const types: Record<string, string> = { adc: 'success', i2c: 'warning', spi: 'danger', uart: '' }
   return types[type] || ''
 }
 
@@ -422,6 +424,8 @@ const sendData = async () => {
     }
   }
 }
+
+// GPIO 快捷操作已移至 PeripheralControl 组件
 
 const handleKeydown = (e: KeyboardEvent) => {
   if (e.key === 'ArrowUp') {

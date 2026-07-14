@@ -166,28 +166,6 @@
         </div>
       </template>
 
-      <!-- GPIO 参数 -->
-      <template v-if="form.hardware_type === 'gpio'">
-        <div class="params-grid">
-          <el-form-item label="引脚号">
-            <el-input-number v-model="form.config.pin" :min="0" :max="48" style="width: 100%;" />
-          </el-form-item>
-          <el-form-item label="方向">
-            <el-select v-model="form.config.direction" style="width: 100%;">
-              <el-option value="input" label="输入" />
-              <el-option value="output" label="输出" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="上下拉">
-            <el-select v-model="form.config.pull" style="width: 100%;">
-              <el-option value="none" label="无" />
-              <el-option value="pullup" label="上拉" />
-              <el-option value="pulldown" label="下拉" />
-            </el-select>
-          </el-form-item>
-        </div>
-      </template>
-
       <!-- ADC 参数 -->
       <template v-if="form.hardware_type === 'adc'">
         <div class="params-grid">
@@ -251,7 +229,6 @@ const busOptions = [
   { value: 'uart', label: 'UART' },
   { value: 'i2c', label: 'I2C' },
   { value: 'spi', label: 'SPI' },
-  { value: 'gpio', label: 'GPIO' },
   { value: 'adc', label: 'ADC' },
 ]
 

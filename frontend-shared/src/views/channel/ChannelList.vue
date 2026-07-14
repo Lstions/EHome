@@ -55,6 +55,7 @@
           <el-option label="I2C" value="i2c" />
           <el-option label="SPI" value="spi" />
 
+          <el-option label="ADC" value="adc" />
         </el-select>
       </div>
     </div>

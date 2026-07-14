@@ -22,7 +22,6 @@
             <el-option label="UART" value="uart" />
             <el-option label="I2C" value="i2c" />
             <el-option label="SPI" value="spi" />
-            <el-option label="GPIO" value="gpio" />
             <el-option label="ADC" value="adc" />
           </el-select>
         </el-form-item>
@@ -158,15 +157,6 @@
           </el-form-item>
         </template>
 
-        <!-- GPIO 参数 -->
-        <template v-if="form.hardware_type === 'gpio' && currentCaps">
-          <el-form-item label="方向" v-if="currentCaps.direction_options?.length">
-            <el-select v-model="form.config.direction" style="width: 100%;">
-              <el-option v-for="d in currentCaps.direction_options" :key="d" :label="directionLabel(d)" :value="d" />
-            </el-select>
-          </el-form-item>
-        </template>
-
         <!-- ADC 参数 -->
         <template v-if="form.hardware_type === 'adc' && currentCaps">
           <el-form-item label="衰减" v-if="currentCaps.attenuation_options?.length">
@@ -277,7 +267,6 @@ const currentCaps = computed(() => {
       uart: 'UartCaps',
       i2c: 'I2CCaps',
       spi: 'SpiCaps',
-      gpio: 'GpioCaps',
       adc: 'AdcCaps'
     }
     const capsKey = capsKeyMap[hardwareType]
@@ -389,8 +378,6 @@ const initConfigDefaults = () => {
     form.config.freq_hz = caps.freq_hz_max || 1000000
     form.config.cs_pin = caps.cs_pins?.[0] ?? 0
     form.config.spi_mode = caps.mode_options?.includes(0) ? 0 : (caps.mode_options?.[0] ?? 0)
-  } else if (form.hardware_type === 'gpio') {
-    form.config.direction = caps.direction_options?.includes('INPUT') ? 'INPUT' : (caps.direction_options?.[0] || 'INPUT')
   } else if (form.hardware_type === 'adc') {
     form.config.attenuation = caps.attenuation_options?.includes(3) ? 3 : (caps.attenuation_options?.[0] ?? 3)
     form.config.bit_width = caps.bit_width_options?.includes(12) ? 12 : (caps.bit_width_options?.[0] ?? 12)

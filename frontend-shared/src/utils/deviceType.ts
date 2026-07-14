@@ -8,7 +8,7 @@
 
 import type { Component } from 'vue'
 import {
-  Odometer, Lightning, Cloudy, Sunny, DataAnalysis, Open, SetUp,
+  Odometer, Lightning, Cloudy, Sunny, DataAnalysis,
 } from '@element-plus/icons-vue'
 
 export interface DeviceTypeOption {
@@ -29,8 +29,7 @@ export const deviceTypeOptions: DeviceTypeOption[] = [
   { value: 'inverter', label: '光伏逆变器', icon: DataAnalysis },
   { value: 'bmp280', label: 'BMP280温压传感器', icon: Odometer },
   { value: 'sht40', label: 'SHT40温湿度传感器', icon: Odometer },
-  { value: 'gpio.digital', label: 'GPIO 控制', icon: Open },
-  { value: 'gpio.pwm', label: 'PWM 输出', icon: SetUp },
+  // GPIO/PWM 已移至独立外设控制组件，保留 fallback 标签用于已存在的记录
 ]
 
 /** Quick lookup: device_type → Chinese label */
@@ -45,7 +44,12 @@ const iconMap = new Map<string, Component>(
 
 /** Get Chinese label for a device type, falls back to raw type */
 export function getDeviceTypeLabel(type: string): string {
-  return labelMap.get(type) || type
+  // Fallback labels for legacy GPIO/PWM device types (moved to PeripheralControl)
+  const fallbackLabels: Record<string, string> = {
+    'gpio.digital': 'GPIO 控制',
+    'gpio.pwm': 'PWM 输出',
+  }
+  return labelMap.get(type) || fallbackLabels[type] || type
 }
 
 /** Get icon component for a device type, falls back to DataAnalysis */

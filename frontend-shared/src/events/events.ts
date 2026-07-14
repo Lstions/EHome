@@ -42,6 +42,10 @@ export const WS_EVENT = {
 
   // 系统日志流 (v2.5)
   NODE_LOG: 'node_log',
+
+  // 外设控制 (v2.4: GPIO/PWM)
+  PERIPH_RESULT: 'periph_result',
+  PERIPH_STATE: 'periph_state',
 } as const
 
 /** 所有合法 WS 事件名的联合类型 */

@@ -5,7 +5,7 @@ export interface Channel {
   id?: number
   node_id: number
   name?: string              // 通道名称（后端自动生成，如 "I2C0_0x77"）
-  hardware_type: 'uart' | 'i2c' | 'spi' | 'gpio' | 'adc' | 'pwm'
+  hardware_type: 'uart' | 'i2c' | 'spi' | 'adc'
   hardware_id: string            // "I2C0"
   address?: string          // "0x77" 或 "10"
   config: {
