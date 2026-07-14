@@ -272,7 +272,7 @@ describe('PeripheralControl', () => {
   })
 
   it('does not subscribe when websocket is not connected', async () => {
-    const wrapper = track(mountControl())
+    track(mountControl())
     await flushPromises()
 
     expect(mocks.subscribe).not.toHaveBeenCalled()
@@ -310,7 +310,7 @@ describe('PeripheralControl', () => {
 
   it('does not refresh when receiving PERIPH_RESULT for a different node', async () => {
     wsState.connected = true
-    const wrapper = track(mountControl())
+    track(mountControl())
     await flushPromises()
 
     mocks.gpioList.mockClear()
