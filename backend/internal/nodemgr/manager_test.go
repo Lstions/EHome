@@ -152,3 +152,138 @@ func TestCalcConfigHashForDevice_NotFound(t *testing.T) {
 		t.Error("Expected empty result for nonexistent node")
 	}
 }
+
+// =====================================================================
+// GPIO/PWM config hash 测试 (v3.0)
+// =====================================================================
+
+// setupTestDBWithPeriph 创建包含 GPIO/PWM 模型的测试 DB
+func setupTestDBWithPeriph(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.AutoMigrate(
+		&models.Node{}, &models.NodeEvent{}, &models.ConfigMeta{},
+		&models.Channel{}, &models.ConfigTemplate{}, &models.EdgeDevice{},
+		&models.DeviceConfig{}, &models.GPIOConfig{}, &models.PWMConfig{},
+	)
+	return db
+}
+
+// TestBuildHashData_GPIOConfigs 验证 GPIO 配置参与 hash 计算
+func TestBuildHashData_GPIOConfigs(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+
+	gpio1 := []models.GPIOConfig{{Pin: 2, Direction: 1, InitialLevel: 0, Enabled: true}}
+	gpio2 := []models.GPIOConfig{{Pin: 2, Direction: 1, InitialLevel: 1, Enabled: true}} // initial_level 不同
+
+	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio1, nil)
+	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio2, nil)
+
+	if string(r1) == string(r2) {
+		t.Error("不同 GPIO initial_level 应产生不同 hash data")
+	}
+}
+
+// TestBuildHashData_PWMConfigs 验证 PWM 配置参与 hash 计算
+func TestBuildHashData_PWMConfigs(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+
+	pwm1 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+	pwm2 := []models.PWMConfig{{Pin: 6, Frequency: 2000, Duty: 500, Resolution: 14, Enabled: true}} // frequency 不同
+
+	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm1)
+	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm2)
+
+	if string(r1) == string(r2) {
+		t.Error("不同 PWM frequency 应产生不同 hash data")
+	}
+}
+
+// TestBuildHashData_GPIOAndPWM 验证 GPIO 和 PWM 都参与 hash
+func TestBuildHashData_GPIOAndPWM(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+
+	gpio := []models.GPIOConfig{{Pin: 2, Direction: 1, InitialLevel: 0, Enabled: true}}
+	pwm := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+
+	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio, nil)
+	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio, pwm)
+
+	if string(r1) == string(r2) {
+		t.Error("添加 PWM 配置应改变 hash data")
+	}
+}
+
+// TestBuildHashData_GPIOEnabledFlag 验证 GPIO enabled 状态影响 hash
+func TestBuildHashData_GPIOEnabledFlag(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+
+	gpioEnabled := []models.GPIOConfig{{Pin: 2, Direction: 1, Enabled: true}}
+	gpioDisabled := []models.GPIOConfig{{Pin: 2, Direction: 1, Enabled: false}}
+
+	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, gpioEnabled, nil)
+	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, gpioDisabled, nil)
+
+	if string(r1) == string(r2) {
+		t.Error("GPIO enabled 状态不同应产生不同 hash data")
+	}
+}
+
+// TestBuildHashData_PWMResolution 验证 PWM resolution 影响 hash
+func TestBuildHashData_PWMResolution(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+
+	pwm14 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+	pwm12 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 12, Enabled: true}}
+
+	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm14)
+	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm12)
+
+	if string(r1) == string(r2) {
+		t.Error("不同 PWM resolution 应产生不同 hash data")
+	}
+}
+
+// TestCalcConfigHashForDevice_WithGPIO 验证 CalcConfigHashForDevice 包含 GPIO 配置
+func TestCalcConfigHashForDevice_WithGPIO(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+	db.Create(&models.Node{NodeID: "dev1", Status: "online"})
+
+	// 先计算无 GPIO 的 hash
+	r1 := mgr.CalcConfigHashForDevice("dev1")
+
+	// 添加 GPIO 配置
+	db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 1, Enabled: true})
+
+	r2 := mgr.CalcConfigHashForDevice("dev1")
+
+	if r1.Hash == r2.Hash {
+		t.Error("添加 GPIO 配置应改变 config hash")
+	}
+}
+
+// TestCalcConfigHashForDevice_WithPWM 验证 CalcConfigHashForDevice 包含 PWM 配置
+func TestCalcConfigHashForDevice_WithPWM(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+	db.Create(&models.Node{NodeID: "dev1", Status: "online"})
+
+	r1 := mgr.CalcConfigHashForDevice("dev1")
+
+	db.Create(&models.PWMConfig{NodeID: "dev1", Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
+
+	r2 := mgr.CalcConfigHashForDevice("dev1")
+
+	if r1.Hash == r2.Hash {
+		t.Error("添加 PWM 配置应改变 config hash")
+	}
+}
