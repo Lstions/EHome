@@ -236,6 +236,7 @@ void app_main(void)
     sync_manager_register_send_hello_cb(on_sync_send_hello);
     msg_handler_init();
     log_stream_set_publish_callback(msg_handler_publish);
+    handler_periph_init();   /* v3.0: GPIO/PWM peripheral control queues + tasks */
     ota_init();
     scheduler_init();
 

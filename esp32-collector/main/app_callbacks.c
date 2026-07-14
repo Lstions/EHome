@@ -16,6 +16,7 @@
 #include "bus_manager.h"
 #include "hello_handshake.h"
 #include "msg_handler.h"
+#include "msg_handler_internal.h"
 #include "scheduler.h"
 #include "bus_worker.h"
 #include "config_mgr.h"
@@ -26,6 +27,8 @@
 #include "ehome_mqtt.h"
 #include "transport.h"
 #include "log_stream.h"
+#include "gpio_ctrl.h"
+#include "pwm_ctrl.h"
 #include "esp_log.h"
 #include "frame_codec.h"
 #include <string.h>
@@ -145,6 +148,14 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         ESP_LOGI(TAG, "After apply_manifest: channels=%d, ch[0].edge_device_count=%d",
                  tmp_cfg ? tmp_cfg->channel_count : 0,
                  (tmp_cfg && tmp_cfg->channel_count > 0) ? tmp_cfg->channels[0].edge_device_count : -1);
+    }
+
+    /* v3.0: Apply GPIO/PWM peripheral configs from manifest (field 11/12) */
+    {
+        const config_manifest_t *cfg = config_mgr_get_manifest();
+        if (cfg) {
+            handler_periph_apply_configs(cfg);
+        }
     }
 
     /* v2.4: Apply DmaChannelConfig to dma_pool.

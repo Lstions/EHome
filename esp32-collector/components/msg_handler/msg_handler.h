@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "scheduler.h"
+#include "frame_codec.h"
+#include "config_mgr.h"
 
 /* Forward declaration */
 typedef struct transport transport_t;
@@ -59,6 +61,11 @@ void msg_handler_publish(const uint8_t *data, size_t len);
 /* DIP: inject dma_pool for ResourceReport encoding */
 struct dma_pool_t;
 void msg_handler_set_dma_pool(struct dma_pool_t *pool);
+
+/* === v3.0: Peripheral control (GPIO/PWM) === */
+void handler_periph_init(void);
+void handler_periph_process(frame_decoder_t *dec);
+void handler_periph_apply_configs(const config_manifest_t *cfg);
 
 /* === Weak callbacks - implemented in main.c, declared in handler modules === */
 void on_modbus_scan_req_received(const char *request_id,

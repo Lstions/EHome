@@ -36,6 +36,8 @@ static void parse_field_template(config_manifest_t *target, const frame_field_t 
 static void parse_field_channel(config_manifest_t *target, const frame_field_t *field);
 static void parse_field_dma_channel(config_manifest_t *target, const frame_field_t *field);
 static void parse_field_log_stream(config_manifest_t *target, const frame_field_t *field);
+static void parse_field_gpio_config(config_manifest_t *target, const frame_field_t *field);
+static void parse_field_pwm_config(config_manifest_t *target, const frame_field_t *field);
 static void parse_edge_device(config_channel_t *cur_channel, const uint8_t *data, size_t len);
 static void parse_command(config_edge_device_t *cur_ed, const uint8_t *data, size_t len);
 /* === Public API === */
@@ -396,6 +398,71 @@ static void parse_field_log_stream(config_manifest_t *target, const frame_field_
     }
 }
 
+/* === v3.0: GPIO config (field 11) === */
+
+static void parse_gpio_config_fields(config_gpio_t *cur, const uint8_t *data, size_t len)
+{
+    frame_decoder_t gdec;
+    if (frame_decoder_init_sub(&gdec, data, len) == FRAME_OK) {
+        frame_field_t gf;
+        while (frame_decoder_next(&gdec, &gf) == FRAME_OK) {
+            switch (gf.field_num) {
+            case 1: cur->pin = (uint8_t)gf.value.varint; break;
+            case 2: cur->direction = (uint8_t)gf.value.varint; break;
+            case 3: cur->initial_level = (uint8_t)gf.value.varint; break;
+            }
+        }
+    }
+}
+
+static void parse_field_gpio_config(config_manifest_t *target, const frame_field_t *field)
+{
+    if (field->field_num == 11 && field->wire_type == WIRE_LENGTH_DELIMITED && field->value.bytes.ptr) {
+        if (target->gpio_config_count < MAX_GPIO_CONFIGS) {
+            config_gpio_t *cur = &target->gpio_configs[target->gpio_config_count++];
+            memset(cur, 0, sizeof(*cur));
+            parse_gpio_config_fields(cur, field->value.bytes.ptr, field->value.bytes.len);
+            ESP_LOGI(TAG, "GPIO config: pin=%d dir=%d init=%d", cur->pin, cur->direction, cur->initial_level);
+        } else {
+            ESP_LOGW(TAG, "GPIO config count overflow (max=%d)", MAX_GPIO_CONFIGS);
+        }
+    }
+}
+
+/* === v3.0: PWM config (field 12) === */
+
+static void parse_pwm_config_fields(config_pwm_t *cur, const uint8_t *data, size_t len)
+{
+    frame_decoder_t pdec;
+    if (frame_decoder_init_sub(&pdec, data, len) == FRAME_OK) {
+        frame_field_t pf;
+        while (frame_decoder_next(&pdec, &pf) == FRAME_OK) {
+            switch (pf.field_num) {
+            case 1: cur->pin = (uint8_t)pf.value.varint; break;
+            case 2: cur->frequency = (uint32_t)pf.value.varint; break;
+            case 3: cur->duty = (uint16_t)pf.value.varint; break;
+            case 4: cur->resolution = (uint8_t)pf.value.varint; break;
+            case 5: cur->auto_start = pf.value.varint != 0; break;
+            }
+        }
+    }
+}
+
+static void parse_field_pwm_config(config_manifest_t *target, const frame_field_t *field)
+{
+    if (field->field_num == 12 && field->wire_type == WIRE_LENGTH_DELIMITED && field->value.bytes.ptr) {
+        if (target->pwm_config_count < MAX_PWM_CONFIGS) {
+            config_pwm_t *cur = &target->pwm_configs[target->pwm_config_count++];
+            memset(cur, 0, sizeof(*cur));
+            parse_pwm_config_fields(cur, field->value.bytes.ptr, field->value.bytes.len);
+            ESP_LOGI(TAG, "PWM config: pin=%d freq=%lu duty=%u res=%d auto=%d",
+                     cur->pin, (unsigned long)cur->frequency, cur->duty, cur->resolution, cur->auto_start);
+        } else {
+            ESP_LOGW(TAG, "PWM config count overflow (max=%d)", MAX_PWM_CONFIGS);
+        }
+    }
+}
+
 static void log_parsed_manifest(const config_manifest_t *target)
 {
     ESP_LOGD(TAG, "Parsed: manifest_id=%s, templates=%d, channels=%d",
@@ -442,6 +509,8 @@ static bool parse_manifest(config_manifest_t *target, const uint8_t *data, size_
         parse_field_channel(target, &field);
         parse_field_dma_channel(target, &field);
         parse_field_log_stream(target, &field);
+        parse_field_gpio_config(target, &field);
+        parse_field_pwm_config(target, &field);
     }
 
     log_parsed_manifest(target);

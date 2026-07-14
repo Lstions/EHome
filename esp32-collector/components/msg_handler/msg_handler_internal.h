@@ -211,6 +211,60 @@ typedef enum {
     QUERY_RSP_F_ERROR_MSG  = 3,
 } query_rsp_field_t;
 
+/* PeriphCmd (0x1B) — center → node */
+typedef enum {
+    PERIPH_CMD_F_REQUEST_ID  = 1,
+    PERIPH_CMD_F_PERIPH_TYPE = 2,
+    PERIPH_CMD_F_PIN         = 3,
+    PERIPH_CMD_F_ACTION      = 4,
+    PERIPH_CMD_F_VALUE       = 5,
+    PERIPH_CMD_F_CONFIG      = 6,
+} periph_cmd_field_t;
+
+/* PeriphRsp (0x1C) — node → center */
+typedef enum {
+    PERIPH_RSP_F_REQUEST_ID  = 1,
+    PERIPH_RSP_F_SUCCESS     = 2,
+    PERIPH_RSP_F_VALUE       = 3,
+    PERIPH_RSP_F_ERROR_CODE  = 4,
+    PERIPH_RSP_F_PERIPH_TYPE = 5,
+    PERIPH_RSP_F_PIN         = 6,
+} periph_rsp_field_t;
+
+/* Periph type values */
+typedef enum {
+    PERIPH_TYPE_GPIO = 1,
+    PERIPH_TYPE_PWM  = 2,
+} periph_type_t;
+
+/* Periph error codes */
+typedef enum {
+    PERIPH_ERR_OK                = 0,
+    PERIPH_ERR_INVALID_PIN       = 1,
+    PERIPH_ERR_INVALID_ACTION    = 2,
+    PERIPH_ERR_INVALID_PARAM     = 3,
+    PERIPH_ERR_RESOURCE_EXHAUSTED = 4,
+    PERIPH_ERR_NOT_CONFIGURED    = 5,
+    PERIPH_ERR_HW_ERROR          = 6,
+    PERIPH_ERR_PIN_CONFLICT      = 7,
+} periph_error_t;
+
+/* ConfigManifest GPIO sub-fields (field 11) */
+typedef enum {
+    GPIO_CFG_F_PIN           = 1,
+    GPIO_CFG_F_DIRECTION     = 2,
+    GPIO_CFG_F_INITIAL_LEVEL = 3,
+} gpio_config_field_t;
+
+/* ConfigManifest PWM sub-fields (field 12) */
+typedef enum {
+    PWM_CFG_F_PIN        = 1,
+    PWM_CFG_F_FREQUENCY  = 2,
+    PWM_CFG_F_DUTY       = 3,
+    PWM_CFG_F_RESOLUTION = 4,
+    PWM_CFG_F_AUTO_START = 5,
+} pwm_config_field_t;
+
 #ifdef __cplusplus
 }
 #endif

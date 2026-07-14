@@ -186,6 +186,10 @@ void msg_handler_process(const uint8_t *data, size_t len)
         handler_config_process_query_resources(&dec);
         break;
 
+    case MSG_PERIPH_CMD:
+        handler_periph_process(&dec);
+        break;
+
     default:
         ESP_LOGW(TAG, "Unknown message type: 0x%02X", msg_type);
         break;

@@ -60,7 +60,6 @@ struct bus_runtime_s {
  QueueHandle_t uart1_cmd_queue;
  QueueHandle_t spi_cmd_queue;
  QueueHandle_t i2c_cmd_queue;
- QueueHandle_t gpio_cmd_queue;
 
  /* P2-8: Context lookup callback — breaks circular dependency with bus_manager.
   * Set by app_state_init_bus_runtime() to point to bus_manager_find_ctx(). */

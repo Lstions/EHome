@@ -59,6 +59,9 @@ typedef enum {
 /* v2.4 resource reporting */
 #define MSG_RESOURCE_REPORT  0x19
 #define MSG_QUERY_RESOURCES  0x1A
+/* v3.0 peripheral control (GPIO + PWM) */
+#define MSG_PERIPH_CMD       0x1B
+#define MSG_PERIPH_RSP       0x1C
 /* v2.5 log streaming */
 #define MSG_LOG_STREAM       0x1D
 

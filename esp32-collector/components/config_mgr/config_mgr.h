@@ -70,6 +70,24 @@ typedef struct {
     char     bind_to[16];
 } config_dma_channel_t;
 
+/* === v3.0: GPIO/PWM peripheral configs (field 11/12) === */
+#define MAX_GPIO_CONFIGS  12
+#define MAX_PWM_CONFIGS   6
+
+typedef struct {
+    uint8_t pin;
+    uint8_t direction;     /* 0=INPUT, 1=OUTPUT, 2=INPUT_PULLUP, 3=INPUT_PULLDOWN */
+    uint8_t initial_level; /* OUTPUT 时的初始电平 */
+} config_gpio_t;
+
+typedef struct {
+    uint8_t  pin;
+    uint32_t frequency;    /* Hz */
+    uint16_t duty;         /* 0-10000 = 0.00%-100.00% */
+    uint8_t  resolution;   /* bits (4-20, default 14) */
+    bool     auto_start;   /* ConfigManifest 应用后自动启动 */
+} config_pwm_t;
+
 /* === Config state === */
 typedef struct {
     char              manifest_id[64];
@@ -79,6 +97,10 @@ typedef struct {
     uint8_t           channel_count;
     config_dma_channel_t dma_configs[MAX_DMA_CONFIGS];
     uint8_t           dma_config_count;
+    config_gpio_t     gpio_configs[MAX_GPIO_CONFIGS];  /* v3.0 field 11 */
+    uint8_t           gpio_config_count;
+    config_pwm_t      pwm_configs[MAX_PWM_CONFIGS];     /* v3.0 field 12 */
+    uint8_t           pwm_config_count;
     bool              applied;
     /* v2.5: log stream config */
     bool              log_stream_enabled;
