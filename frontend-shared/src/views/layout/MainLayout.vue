@@ -833,7 +833,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   padding: 0;
-  background: #fff;
+  background: var(--el-bg-color);
 }
 
 :global(.mobile-sidebar-drawer .mobile-drawer-body) {
@@ -879,7 +879,7 @@ onUnmounted(() => {
 :global(.mobile-sidebar-drawer .mobile-sidebar-menu) {
   flex: 1;
   border-right: none;
-  background: #fff;
+  background: var(--el-bg-color);
   padding: 8px;
   overflow-y: auto;
 }
