@@ -36,6 +36,23 @@ static bool find_varint_field(const uint8_t *buf, size_t len, uint8_t number,
     return true;
 }
 
+static bool routing_fields_are_in_protocol_order(const uint8_t *buf, size_t len)
+{
+    frame_decoder_t dec;
+    frame_field_t field;
+    bool saw_command_index = false;
+    if (frame_decoder_init(&dec, buf, len) != FRAME_OK) return false;
+
+    while (frame_decoder_next(&dec, &field) == FRAME_OK) {
+        if (field.field_num == 8) {
+            saw_command_index = true;
+        } else if (field.field_num == 9) {
+            return saw_command_index;
+        }
+    }
+    return false;
+}
+
 static void test_data_report_encodes_template_id_as_field_9(void)
 {
     uint8_t buf[256];
@@ -56,6 +73,8 @@ static void test_data_report_encodes_template_id_as_field_9(void)
 
     CHECK(find_varint_field(buf, len, 8, &value, &count), "field 8 decode failed");
     CHECK(count == 1 && value == 0, "field 8 must preserve command index zero with edge device");
+    CHECK(routing_fields_are_in_protocol_order(buf, len),
+          "field 8 command index must be encoded before field 9 command template ID");
 }
 
 static void test_data_report_omits_optional_routing_fields_when_zero(void)

@@ -32,12 +32,12 @@ frame_err_t data_report_encode(uint8_t *buf, size_t capacity, size_t *out_len,
     if (edge_device_id != 0 && (err = frame_encode_varint(&enc, 7, edge_device_id)) != FRAME_OK) {
         return err;
     }
-    if (command_template_id != 0 &&
-        (err = frame_encode_varint(&enc, 9, command_template_id)) != FRAME_OK) {
-        return err;
-    }
     if ((command_index > 0 || edge_device_id != 0) &&
         (err = frame_encode_varint(&enc, 8, command_index)) != FRAME_OK) {
+        return err;
+    }
+    if (command_template_id != 0 &&
+        (err = frame_encode_varint(&enc, 9, command_template_id)) != FRAME_OK) {
         return err;
     }
 

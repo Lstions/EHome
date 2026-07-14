@@ -51,6 +51,11 @@ static uint8_t s_tx_buf[LOG_TX_BUF_SIZE];
 static _Atomic(TaskHandle_t) s_task;
 static atomic_uint s_state;
 static atomic_uint s_capture_users;
+/* s_seq is NOT atomic: it is only accessed by the single log_tx_task FreeRTOS
+ * task during RUNNING. The STOPPED→STARTING→RUNNING state machine barrier ensures
+ * s_seq is quiescent (no concurrent reader/writer) when it is reset to 0 in
+ * log_stream_start_impl(), because stop waits for the TX task to fully exit
+ * before start can proceed. This is a lifecycle barrier, not atomic access. */
 static uint16_t s_seq;
 static _Atomic(log_stream_publish_fn_t) s_publish;
 static StaticEventGroup_t s_task_events_storage;
