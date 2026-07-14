@@ -1,14 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, type PropType } from 'vue'
-
-interface RealtimeLogLine {
-  id: number
-  ts: number
-  level: number
-  tag: string
-  msg: string
-}
+import type { RealtimeLogLine, RealtimeSearchCountState } from '@/components/node/logTypes'
 
 const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(),
@@ -18,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   updateLogPersist: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
+  warning: vi.fn(),
+  loggerWarn: vi.fn(),
   exportCSV: vi.fn(),
   downloadText: vi.fn(),
   createObjectURL: vi.fn((_blob: Blob) => 'blob:realtime-log'),
@@ -35,7 +30,10 @@ vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ subscribe: mocks.subscribe }),
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: mocks.success, error: mocks.error },
+  ElMessage: { success: mocks.success, error: mocks.error, warning: mocks.warning },
+}))
+vi.mock('@/utils/logger', () => ({
+  logger: { warn: mocks.loggerWarn },
 }))
 vi.mock('@/utils/exportData', () => ({
   exportCSV: mocks.exportCSV,
@@ -69,13 +67,6 @@ const InputStub = defineComponent({
   emits: ['update:modelValue'],
   template: `<input v-bind="$attrs" :value="modelValue ?? ''" @input="$emit('update:modelValue', $event.target.value)" />`,
 })
-
-interface RealtimeSearchCountState {
-  epoch: number
-  baselineId: number
-  baselineMatchIds: number[]
-  matchedAfterBaseline: number
-}
 
 const RealtimeViewerStub = defineComponent({
   name: 'LogRealtimeViewer',
@@ -184,6 +175,20 @@ describe('LogPanel orchestration', () => {
     wrapper.unmount()
     wrappers.splice(wrappers.indexOf(wrapper), 1)
     expect(mocks.unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('warns without blocking viewers when configuration loading fails', async () => {
+    mocks.getLogConfig.mockRejectedValueOnce(new Error('network unavailable'))
+
+    const wrapper = track(await settlePanel())
+
+    expect(mocks.loggerWarn).toHaveBeenCalledWith('加载节点日志配置失败', {
+      collectorId: 'node-1',
+      error: 'network unavailable',
+    })
+    expect(mocks.warning).toHaveBeenCalledWith('日志配置加载失败，仍可查看实时与历史日志')
+    expect(wrapper.find('[aria-label="实时日志组件"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="历史日志组件"]').exists()).toBe(true)
   })
 
   it('routes production envelopes only for the selected node and assigns stable increasing ids', async () => {

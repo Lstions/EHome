@@ -36,7 +36,7 @@ const page: NodeLogPage = {
 describe('nodeApi log history', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('forwards the complete single-level query and unwraps an API envelope', async () => {
+  it('returns the typed bare page supplied by the response interceptor', async () => {
     const query: NodeLogQuery = {
       from: 1_700_000_000_000,
       to: '2026-07-13T09:00:00Z',
@@ -46,7 +46,7 @@ describe('nodeApi log history', () => {
       page: 2,
       size: 25,
     }
-    mockClient.get.mockResolvedValue({ code: 200, message: 'ok', data: page })
+    mockClient.get.mockResolvedValue(page)
 
     const result = await nodeApi.getNodeLogs('collector-1', query)
 
@@ -60,14 +60,8 @@ describe('nodeApi log history', () => {
     expectTypeOf<NodeLogQuery>().not.toHaveProperty('before')
   })
 
-  it('accepts the backend bare page response', async () => {
-    mockClient.get.mockResolvedValue(page)
-
-    await expect(nodeApi.getNodeLogs(9, { page: 2, size: 25 })).resolves.toEqual(page)
-  })
-
   it('preserves a zero before timestamp when deleting', async () => {
-    mockClient.delete.mockResolvedValue({ data: { deleted: 3 } })
+    mockClient.delete.mockResolvedValue({ deleted: 3 })
 
     await expect(nodeApi.deleteNodeLogs('collector-1', 0)).resolves.toEqual({ deleted: 3 })
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/nodes/collector-1/logs', {

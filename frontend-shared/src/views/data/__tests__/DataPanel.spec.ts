@@ -47,7 +47,7 @@ vi.mock('@/stores/websocket', () => ({
 }))
 
 const { mockClientGet } = vi.hoisted(() => ({
-  mockClientGet: vi.fn(() => Promise.resolve({ data: [] })),
+  mockClientGet: vi.fn<(url: string, config?: unknown) => Promise<unknown>>(() => Promise.resolve([])),
 }))
 
 vi.mock('@/api/client', () => ({
@@ -194,6 +194,21 @@ describe('DataPanel', () => {
     expect(wrapper.find('.data-panel').exists()).toBe(true)
     // No stat cards when empty
     expect(wrapper.find('.stat-card').exists()).toBe(false)
+  })
+
+  it('filters invalid category API rows before rendering selected-device metrics', async () => {
+    mockClientGet.mockResolvedValueOnce([
+      { code: 'temperature', unit: '°C' },
+      { code: '', unit: 'ignored' },
+    ])
+
+    const wrapper = getMounted()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.queryForm.deviceId = 1
+    await vm.loadDeviceCategories()
+
+    expect(vm.availableCategories).toEqual([{ code: 'temperature', unit: '°C' }])
   })
 
   it('uses the selected device categories instead of a global hardcoded list', async () => {

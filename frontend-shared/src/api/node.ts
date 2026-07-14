@@ -364,8 +364,7 @@ export const nodeApi = {
 
   // v2.5: Log stream API
   async getLogConfig(id: number | string): Promise<{ stream_enabled: boolean; level: number; persist_enabled: boolean }> {
-    const response = await client.get(`/api/v1/nodes/${id}/log-config`)
-    return (response as any).data || response
+    return client.get<unknown, { stream_enabled: boolean; level: number; persist_enabled: boolean }>(`/api/v1/nodes/${id}/log-config`)
   },
 
   async updateLogConfig(id: number | string, data: { stream_enabled?: boolean; level?: number }): Promise<void> {
@@ -377,13 +376,11 @@ export const nodeApi = {
   },
 
   async getNodeLogs(id: number | string, params: NodeLogQuery = {}): Promise<NodeLogPage> {
-    const response = await client.get(`/api/v1/nodes/${id}/logs`, { params })
-    return (response as any).data || response
+    return client.get<unknown, NodeLogPage>(`/api/v1/nodes/${id}/logs`, { params })
   },
 
   async deleteNodeLogs(id: number | string, before?: number | string): Promise<{ deleted: number }> {
     const params = before !== undefined ? { before } : {}
-    const response = await client.delete(`/api/v1/nodes/${id}/logs`, { params })
-    return (response as any).data || response
+    return client.delete<unknown, { deleted: number }>(`/api/v1/nodes/${id}/logs`, { params })
   },
 }

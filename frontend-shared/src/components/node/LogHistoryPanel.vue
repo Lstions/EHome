@@ -121,6 +121,7 @@ import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
+import { levelText, levelTagType } from '@/components/node/logTypes'
 
 interface Props {
   collectorId: string | number
@@ -251,14 +252,6 @@ function exportCurrentPage() {
       消息: entry.message,
     })),
   )
-}
-
-function levelText(level: number): string {
-  return ['ERROR', 'WARN', 'INFO', 'DEBUG', 'VERBOSE'][level] ?? 'UNKNOWN'
-}
-
-function levelTagType(level: number): 'danger' | 'warning' | 'info' | '' {
-  return ['danger', 'warning', '', 'info', 'info'][level] as 'danger' | 'warning' | 'info' | '' ?? ''
 }
 
 function formatHistoryTime(value: string | number): string {

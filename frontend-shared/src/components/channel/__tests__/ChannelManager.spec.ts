@@ -1,27 +1,100 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { defineComponent } from 'vue'
 import ChannelManager from '../ChannelManager.vue'
 
-vi.mock('@/api/channel', () => ({
-  channelApi: { create: vi.fn(), update: vi.fn() },
-}))
-vi.mock('@/api/node', () => ({
-  nodeApi: { scanI2C: vi.fn(), syncConfig: vi.fn() },
-}))
+vi.mock('@/api/channel', () => ({ channelApi: { create: vi.fn(), update: vi.fn() } }))
+vi.mock('@/api/node', () => ({ nodeApi: { scanI2C: vi.fn(), syncConfig: vi.fn() } }))
+
+const DialogStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: Boolean, title: String, width: String },
+  emits: ['update:modelValue', 'closed'],
+  template: '<div class="el-dialog" v-if="modelValue"><slot /><slot name="footer" /></div>',
+})
+
+const FormStub = defineComponent({
+  props: { model: Object, rules: Object, labelPosition: String, disabled: Boolean },
+  setup(_, { expose }) {
+    const validate = () => Promise.resolve(true)
+    expose({ validate })
+  },
+  template: '<form><slot /></form>',
+})
+
+const FormItemStub = defineComponent({
+  props: { label: String, prop: String },
+  template: '<section><slot /></section>',
+})
+
+const SelectStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: [String, Number], disabled: Boolean, placeholder: String },
+  emits: ['update:modelValue', 'change'],
+  template: '<div class="el-select" v-bind="$attrs"><slot /></div>',
+})
+
+const OptionStub = defineComponent({
+  props: { label: [String, Number], value: [String, Number, Boolean] },
+  template: '<option :value="value" />',
+})
+
+const InputStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: String },
+  emits: ['update:modelValue'],
+  template: '<input v-bind="$attrs" />',
+})
+
+const InputNumberStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: Number, min: Number, max: Number, step: Number },
+  emits: ['update:modelValue'],
+  template: '<input type="number" v-bind="$attrs" />',
+})
+
+const RadioGroupStub = defineComponent({
+  inheritAttrs: false,
+  props: { modelValue: [String, Number, Boolean] },
+  emits: ['update:modelValue'],
+  template: '<div v-bind="$attrs"><slot /></div>',
+})
+
+const RadioButtonStub = defineComponent({
+  props: { value: [String, Number, Boolean] },
+  template: '<button><slot /></button>',
+})
+
+const SwitchStub = defineComponent({
+  props: { modelValue: Boolean },
+  emits: ['update:modelValue'],
+  template: '<input type="checkbox" :checked="modelValue" />',
+})
+
+const ButtonStub = defineComponent({
+  inheritAttrs: false,
+  props: { type: String, loading: Boolean, disabled: Boolean },
+  emits: ['click'],
+  template: '<button v-bind="$attrs" @click="$emit(\'click\')"><slot /></button>',
+})
+
+const IconStub = defineComponent({
+  template: '<i><slot /></i>',
+})
 
 const stubs = {
-  'el-dialog': { template: '<div class="el-dialog"><slot /><slot name="footer" /></div>' },
-  'el-form': { template: '<form><slot /></form>' },
-  'el-form-item': { template: '<section><slot /></section>' },
-  'el-select': { template: '<div class="el-select"><slot /></div>' },
-  'el-option': { template: '<option />' },
-  'el-input': { template: '<input />' },
-  'el-input-number': { template: '<input type="number" />' },
-  'el-radio-group': { template: '<div><slot /></div>' },
-  'el-radio-button': { template: '<button><slot /></button>' },
-  'el-switch': { template: '<input type="checkbox" />' },
-  'el-button': { template: '<button><slot /></button>' },
-  'el-icon': { template: '<i><slot /></i>' },
+  'el-dialog': DialogStub,
+  'el-form': FormStub,
+  'el-form-item': FormItemStub,
+  'el-select': SelectStub,
+  'el-option': OptionStub,
+  'el-input': InputStub,
+  'el-input-number': InputNumberStub,
+  'el-radio-group': RadioGroupStub,
+  'el-radio-button': RadioButtonStub,
+  'el-switch': SwitchStub,
+  'el-button': ButtonStub,
+  'el-icon': IconStub,
 }
 
 describe('ChannelManager', () => {

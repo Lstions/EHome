@@ -106,21 +106,12 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RecycleScroller } from 'vue-virtual-scroller'
 import type { RecycleScrollerExposed } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
-
-interface RealtimeLogLine {
-  id: number
-  ts: number
-  level: number
-  tag: string
-  msg: string
-}
-
-interface RealtimeSearchCountState {
-  epoch: number
-  baselineId: number
-  baselineMatchIds: number[]
-  matchedAfterBaseline: number
-}
+import {
+  levelText,
+  formatUptime,
+  type RealtimeLogLine,
+  type RealtimeSearchCountState,
+} from '@/components/node/logTypes'
 
 const props = withDefaults(defineProps<{
   logs: RealtimeLogLine[]
@@ -191,21 +182,8 @@ const unreadCount = computed(() => {
   return unreadBaseline + unreadAfterBaseline
 })
 
-function levelText(level: number): string {
-  return ['ERROR', 'WARN', 'INFO', 'DEBUG', 'VERBOSE'][level] ?? 'UNKNOWN'
-}
-
 function levelClass(level: number): string {
   return ['log-error', 'log-warn', 'log-info', 'log-debug', 'log-verbose'][level] ?? 'log-info'
-}
-
-function formatUptime(tsUs: number): string {
-  const totalMs = Math.max(0, Math.floor(Number(tsUs || 0) / 1000))
-  const hours = Math.floor(totalMs / 3_600_000)
-  const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
-  const seconds = Math.floor((totalMs % 60_000) / 1000)
-  const millis = totalMs % 1000
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
 }
 
 function scrollToBottom(): void {

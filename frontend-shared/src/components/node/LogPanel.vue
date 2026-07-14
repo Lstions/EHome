@@ -77,28 +77,18 @@ import LogRealtimeViewer from '@/components/node/LogRealtimeViewer.vue'
 import { WS_EVENT } from '@/events/events'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { downloadText, exportCSV } from '@/utils/exportData'
+import { logger } from '@/utils/logger'
+import {
+  levelText,
+  formatUptime,
+  type IncomingRealtimeLogLine,
+  type RealtimeLogLine,
+  type RealtimeSearchCountState,
+} from '@/components/node/logTypes'
 
 interface Props {
   collectorId: string | number
   nodeDeviceId?: string
-}
-
-interface IncomingRealtimeLogLine {
-  ts: number
-  level: number
-  tag: string
-  msg: string
-}
-
-interface RealtimeLogLine extends IncomingRealtimeLogLine {
-  id: number
-}
-
-interface RealtimeSearchCountState {
-  epoch: number
-  baselineId: number
-  baselineMatchIds: number[]
-  matchedAfterBaseline: number
 }
 
 const props = defineProps<Props>()
@@ -183,8 +173,12 @@ async function loadConfig(): Promise<void> {
     streamEnabled.value = config.stream_enabled
     persistEnabled.value = config.persist_enabled
     logLevel.value = config.level
-  } catch {
-    // The log viewers remain available when configuration cannot be loaded.
+  } catch (error: unknown) {
+    logger.warn('加载节点日志配置失败', {
+      collectorId: String(props.collectorId),
+      error: errorMessage(error),
+    })
+    ElMessage.warning('日志配置加载失败，仍可查看实时与历史日志')
   }
 }
 
@@ -262,19 +256,6 @@ function exportRealtimeLogs(format: 'text' | 'csv'): void {
     .map(line => `${formatUptime(line.ts)} ${levelText(line.level)} ${line.tag} ${line.msg}`)
     .join('\n')
   downloadText(content, `${filename}.txt`)
-}
-
-function levelText(level: number): string {
-  return ['ERROR', 'WARN', 'INFO', 'DEBUG', 'VERBOSE'][level] ?? 'UNKNOWN'
-}
-
-function formatUptime(tsUs: number): string {
-  const totalMs = Math.max(0, Math.floor(Number(tsUs || 0) / 1000))
-  const hours = Math.floor(totalMs / 3_600_000)
-  const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
-  const seconds = Math.floor((totalMs % 60_000) / 1000)
-  const millis = totalMs % 1000
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
 }
 
 function errorMessage(error: unknown): string {

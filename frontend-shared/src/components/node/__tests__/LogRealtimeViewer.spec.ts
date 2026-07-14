@@ -4,21 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Delete, Download, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import LogRealtimeViewer from '@/components/node/LogRealtimeViewer.vue'
 import LogRealtimeViewerSource from '@/components/node/LogRealtimeViewer.vue?raw'
-
-type LogLine = {
-  id: number
-  ts: number
-  level: number
-  tag: string
-  msg: string
-}
-
-type SearchCountState = {
-  epoch: number
-  baselineId: number
-  baselineMatchIds: number[]
-  matchedAfterBaseline: number
-}
+import type { RealtimeLogLine as LogLine, RealtimeSearchCountState as SearchCountState } from '@/components/node/logTypes'
 
 function makeLogs(count: number, start = 0): LogLine[] {
   return Array.from({ length: count }, (_, index) => ({

@@ -274,6 +274,21 @@ interface MeasurementCategory {
   code: string
   unit: string
 }
+interface MeasurementPoint {
+  timestamp?: string
+  created_at?: string
+  value: number
+}
+interface MeasurementBatch {
+  category: string
+  data: MeasurementPoint[]
+}
+interface RealtimeDataPayload {
+  device_id?: number
+  collected_at?: string
+  data?: Record<string, unknown>
+  sensors?: Record<string, unknown>
+}
 const availableCategories = ref<MeasurementCategory[]>([])
 const compareCategories = ref<MeasurementCategory[]>([])
 
@@ -356,14 +371,13 @@ const loadDeviceCategories = async () => {
     return
   }
   try {
-    const response = await client.get<unknown, any>('/api/v1/unified-data/categories', {
+    const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', {
       params: { device_pk: queryForm.deviceId },
     })
-    const rawCategories = response?.data || response || []
-    availableCategories.value = Array.isArray(rawCategories)
-      ? rawCategories
-        .filter((item: any) => item?.code)
-        .map((item: any) => ({ code: item.code, unit: item.unit || sensorUnitMap[item.code] || '' }))
+    availableCategories.value = Array.isArray(response)
+      ? response
+        .filter((item): item is MeasurementCategory => typeof item?.code === 'string' && item.code.length > 0)
+        .map(item => ({ code: item.code, unit: item.unit || sensorUnitMap[item.code] || '' }))
       : []
   } catch (error) {
     logger.warn('获取设备指标类别失败', { error: String(error) })
@@ -378,9 +392,8 @@ const loadCompareCategories = async () => {
   }
   try {
     const categoryLists = await Promise.all(compareDevices.value.map(async (deviceId) => {
-      const response = await client.get<unknown, any>('/api/v1/unified-data/categories', { params: { device_pk: deviceId } })
-      const items = response?.data || response || []
-      return Array.isArray(items) ? items : []
+      const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', { params: { device_pk: deviceId } })
+      return Array.isArray(response) ? response : []
     }))
     const [first, ...rest] = categoryLists
     compareCategories.value = (first || []).filter((candidate: MeasurementCategory) =>
@@ -446,7 +459,7 @@ const fetchData = async () => {
 
     // 构建图表数据：从 unified_data API 获取解析后的数值数据
     buildChartSeries()
-  } catch (error: any) {
+  } catch {
     ElMessage.error('获取历史数据失败')
   } finally {
     loading.value = false
@@ -496,16 +509,15 @@ const buildChartSeries = async () => {
     }
 
     try {
-      const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
+      const batchRes = await client.get<unknown, MeasurementBatch[]>('/api/v1/unified-data/historical-batch', {
         params: batchParams
       })
-      const batchData = batchRes?.data || batchRes || []
       // 批量 API 返回格式: [{category: "temperature", data: [{...}]}, ...]
-      if (Array.isArray(batchData)) {
-        for (const result of batchData) {
+      if (Array.isArray(batchRes)) {
+        for (const result of batchRes) {
           const cat = result.category
           if (!cat) continue
-          const items = (result.data || []).filter((item: any) => {
+          const items = (result.data || []).filter((item) => {
             const t = item.timestamp || item.created_at
             return t && !t.startsWith('0001-01-01')
           })
@@ -516,7 +528,7 @@ const buildChartSeries = async () => {
               name: catName,
               unit: catUnit,
               category: cat,
-              data: items.map((item: any) => ({
+              data: items.map((item) => ({
                 time: item.timestamp || item.created_at,
                 value: item.value
               }))
@@ -532,7 +544,7 @@ const buildChartSeries = async () => {
     } catch {
       // Fallback: 批量 API 失败时逐个请求 + max_points=500
       const fallbackPromises = categoryNames.map(cat =>
-        client.get<unknown, any>('/api/v1/unified-data/historical', {
+        client.get<unknown, MeasurementPoint[]>('/api/v1/unified-data/historical', {
           params: {
             device_pk: queryForm.deviceId,
             category: cat,
@@ -540,15 +552,15 @@ const buildChartSeries = async () => {
             end_time: endTime.toISOString(),
             max_points: 500
           }
-        }).then(res => ({ cat, data: (res.data || res || []) as any[] }))
-          .catch(() => ({ cat, data: [] as any[] }))
+        }).then(res => ({ cat, data: Array.isArray(res) ? res : [] }))
+          .catch(() => ({ cat, data: [] as MeasurementPoint[] }))
       )
 
       const fallbackResults = await Promise.all(fallbackPromises)
       for (const r of fallbackResults) {
         if (r.data && r.data.length > 0) {
           const filteredData = r.data
-            .filter((item: any) => {
+            .filter((item) => {
               const t = item.timestamp || item.created_at
               return t && !t.startsWith('0001-01-01')
             })
@@ -559,7 +571,7 @@ const buildChartSeries = async () => {
               name: catName,
               unit: catUnit,
               category: r.cat,
-              data: filteredData.map((item: any) => ({
+              data: filteredData.map((item) => ({
                 time: item.timestamp || item.created_at,
                 value: item.value
               }))
@@ -583,7 +595,7 @@ const buildChartSeries = async () => {
         unit: '',
         category: key,
         data: historyData.value
-          .filter((item: any) => {
+          .filter((item) => {
             const t = item.timestamp || item.collected_at || item.created_at
             return t && !t.startsWith('0001-01-01')
           })
@@ -614,13 +626,13 @@ const scheduleDebounced = () => {
 }
 
 const handleDataUpdate = (message: WebSocketMessage) => {
-  const payload = message.payload
+  const payload = message.payload as RealtimeDataPayload | undefined
   if (!payload || payload.device_id !== queryForm.deviceId) return
 
   realtimeCount.value++
   const newItem = {
-    collected_at: (payload as any).collected_at || new Date().toISOString(),
-    data: (payload as any).data || {},
+    collected_at: payload.collected_at || new Date().toISOString(),
+    data: payload.data || {},
     error_code: 0
   }
 
@@ -646,7 +658,7 @@ const handleDataUpdate = (message: WebSocketMessage) => {
 }
 
 // 新增函数: 增量更新图表series
-const appendRealtimeData = (payload: any) => {
+const appendRealtimeData = (payload: RealtimeDataPayload) => {
   if (chartSeries.value.length === 0) return
   const data = payload.data || payload.sensors
   if (!data || typeof data !== 'object') return
@@ -724,7 +736,7 @@ const fetchCompareData = async () => {
 
   try {
     const promises = compareDevices.value.map(async (deviceId) => {
-      const response = await client.get<unknown, any>(`/api/v1/unified-data/historical`, {
+      const response = await client.get<unknown, MeasurementPoint[]>(`/api/v1/unified-data/historical`, {
         params: {
           device_pk: deviceId,
           category: queryForm.compareCategory,
@@ -736,7 +748,7 @@ const fetchCompareData = async () => {
       return {
         deviceId,
         deviceName: deviceList.value.find(d => d.id === deviceId)?.name || String(deviceId),
-        data: response.data || []
+        data: Array.isArray(response) ? response : []
       }
     })
 
@@ -746,11 +758,11 @@ const fetchCompareData = async () => {
       name: r.deviceName,
       unit: '',
       data: r.data
-        .filter((item: any) => {
+        .filter((item) => {
           const t = item.timestamp || item.created_at
           return t && !t.startsWith('0001-01-01')
         })
-        .map((item: any) => ({
+        .map((item) => ({
           time: item.timestamp || item.created_at,
           value: item.value
         }))
@@ -764,7 +776,7 @@ const formatTime = (time: string) => {
   return time ? new Date(time).toLocaleString('zh-CN') : '-'
 }
 
-const formatData = (data: Record<string, any>) => {
+const formatData = (data: Record<string, unknown>) => {
   if (!data) return '-'
 
   // Filter out raw_data from display (shown in separate column)
