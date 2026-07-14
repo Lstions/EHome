@@ -64,6 +64,17 @@ func main() {
 	}
 	logger.Infof("Database connected and migrated")
 
+	// v3.0: One-time idempotent migration of old GPIO channels → gpio_configs
+	if migrateResult, err := database.MigrateGPIOChannels(database.GetDB()); err != nil {
+		logger.Warnf("GPIO channel migration failed (non-fatal): %v", err)
+	} else if migrateResult.Migrated > 0 {
+		logger.Infof("GPIO channel migration: %d migrated, %d skipped, %d errors",
+			migrateResult.Migrated, migrateResult.Skipped, migrateResult.Errors)
+		for _, w := range migrateResult.Warnings {
+			logger.Warnf("GPIO migration: %s", w)
+		}
+	}
+
 	db := database.GetDB()
 
 	if os.Getenv("SEED_TEST_DATA") == "true" {
