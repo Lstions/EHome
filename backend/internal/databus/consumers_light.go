@@ -49,7 +49,9 @@ func (c *DataMetricsConsumer) ShouldHandle(evt DataEvent) bool {
 func (c *DataMetricsConsumer) Handle(evt DataEvent) {
 	if evt.IsError() || len(evt.RawData) == 0 {
 		metrics.DataReportErrors.Inc()
+		return
 	}
+	metrics.DataReportsProcessed.Inc()
 }
 
 func NewWSPushConsumer(wsHub *websocket.Hub) *WSPushConsumer {

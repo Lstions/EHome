@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,9 @@ import (
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/callbacks"
 )
 
 func newAdminLogRouter(t *testing.T) (*gin.Engine, *models.Node) {
@@ -132,10 +136,38 @@ func TestLogStreamConfigAndPersistWritesValidateAndRetainZeroValues(t *testing.T
 	}
 }
 
+func TestDeleteNodeLogsReturnsServerErrorWhenDeleteFails(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.Node{}, &models.NodeLog{}); err != nil {
+		t.Fatal(err)
+	}
+	node := models.Node{NodeID: "node-delete-failure"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	db.Callback().Delete().Replace("gorm:delete", func(tx *gorm.DB) {
+		if tx.Statement.Table == "node_logs" {
+			tx.AddError(fmt.Errorf("forced delete failure"))
+			return
+		}
+		callbacks.Delete(&callbacks.Config{})(tx)
+	})
+	r := setupRouter()
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	registerLogStreamRoutes(v1.Group("/nodes"), db, nil)
+
+	w := adminRequest(t, r, http.MethodDelete, "/api/v1/nodes/"+node.NodeID+"/logs", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("delete failure status=%d body=%s, want 500", w.Code, w.Body.String())
+	}
+}
+
 func TestGetNodeLogs_FiltersOrdersAndDeleteScopesByCreatedAt(t *testing.T) {
-	r, node := newAdminLogRouter(t)
-	db := setupTestDB(t)
-	_ = db // Router has its own isolated DB; use handler test below with directly seeded router DB.
+	_, node := newAdminLogRouter(t)
 	// Recreate route with the seeded DB to exercise query and delete semantics.
 	seedDB := setupTestDB(t)
 	if err := seedDB.AutoMigrate(&models.NodeLog{}); err != nil {
@@ -158,7 +190,7 @@ func TestGetNodeLogs_FiltersOrdersAndDeleteScopesByCreatedAt(t *testing.T) {
 	if err := seedDB.Create(&logs).Error; err != nil {
 		t.Fatal(err)
 	}
-	r = setupRouter()
+	r := setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerLogStreamRoutes(v1.Group("/nodes"), seedDB, nil)

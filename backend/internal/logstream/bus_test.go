@@ -6,6 +6,24 @@ import (
 	"time"
 )
 
+func logBusEventually(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatal(message)
+		}
+	}
+}
+
 // mockConsumer is a test consumer that records all batches it receives
 type mockConsumer struct {
 	name    string
@@ -48,8 +66,7 @@ func TestLogEventBus_Publish_DeliversToActiveConsumers(t *testing.T) {
 
 	bus.Publish(batch)
 
-	// Wait for async dispatch
-	time.Sleep(100 * time.Millisecond)
+	logBusEventually(t, func() bool { return len(active.getBatches()) == 1 }, "active consumer did not receive batch")
 
 	activeBatches := active.getBatches()
 	if len(activeBatches) != 1 {
@@ -76,7 +93,7 @@ func TestLogEventBus_Register_DuplicateName(t *testing.T) {
 	bus.Register(c2) // should be ignored
 
 	bus.Publish(LogBatch{NodeID: "n1"})
-	time.Sleep(50 * time.Millisecond)
+	logBusEventually(t, func() bool { return len(c1.getBatches()) == 1 }, "first duplicate-named consumer did not receive batch")
 
 	// Only c1 should receive (c2 was rejected as duplicate)
 	if len(c1.getBatches()) != 1 {
@@ -89,19 +106,36 @@ func TestLogEventBus_Unregister(t *testing.T) {
 	defer bus.Stop()
 
 	c := &mockConsumer{name: "removable", active: true}
+	observer := &mockConsumer{name: "observer", active: true}
 	bus.Register(c)
+	bus.Register(observer)
 
 	bus.Publish(LogBatch{NodeID: "n1"})
-	time.Sleep(50 * time.Millisecond)
+	logBusEventually(t, func() bool { return len(c.getBatches()) == 1 }, "consumer did not receive batch before unregister")
 
 	bus.Unregister("removable")
 
 	bus.Publish(LogBatch{NodeID: "n2"})
-	time.Sleep(50 * time.Millisecond)
+	logBusEventually(t, func() bool { return len(observer.getBatches()) == 2 }, "post-unregister batch was not dispatched")
 
 	batches := c.getBatches()
 	if len(batches) != 1 {
 		t.Errorf("consumer should only have 1 batch after unregister, got %d", len(batches))
+	}
+}
+
+func TestLogEventBus_StoppedSnapshotWorkerDoesNotAbortFanout(t *testing.T) {
+	bus := NewLogEventBus()
+	defer bus.Stop()
+	worker := &consumerWorker{
+		consumer: &mockConsumer{name: "stopped", active: true},
+		mailbox:  make(chan LogBatch, consumerMailboxSize),
+		done:     make(chan struct{}),
+	}
+	worker.doneOnce.Do(func() { close(worker.done) })
+
+	if keepGoing := bus.fanoutWorker(worker, LogBatch{NodeID: "snapshot"}); !keepGoing {
+		t.Fatal("a stopped snapshot worker must be skipped without aborting fanout")
 	}
 }
 
@@ -116,7 +150,7 @@ func TestLogEventBus_ConsumerPanic_Isolated(t *testing.T) {
 	bus.Register(goodConsumer)
 
 	bus.Publish(LogBatch{NodeID: "n1"})
-	time.Sleep(100 * time.Millisecond)
+	logBusEventually(t, func() bool { return len(goodConsumer.getBatches()) == 1 }, "good consumer did not receive batch after peer panic")
 
 	// good consumer should still receive despite panicker crashing
 	if len(goodConsumer.getBatches()) != 1 {

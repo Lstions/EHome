@@ -34,9 +34,6 @@ func newStreamReassembler() *streamReassembler {
 	}
 }
 
-// append adds raw bytes to the buffer for the given requestID and returns
-// the accumulated bytes. If requestID is 0 (CMD_SAMPLE, no correlation),
-// returns data unchanged (no buffering).
 // Append adds raw bytes to the buffer for the given requestID and returns
 // the accumulated bytes. If requestID is 0 (CMD_SAMPLE, no correlation),
 // returns data unchanged (no buffering).

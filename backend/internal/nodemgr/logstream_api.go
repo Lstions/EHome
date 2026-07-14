@@ -20,12 +20,8 @@ func (m *Manager) TriggerConfigSync(nodeID string) error {
 // has already been written transactionally by the API handler. ESP32 is not
 // notified because storage policy is a backend-only concern.
 func (m *Manager) SetLogPersist(nodeID string, enabled bool) {
-	_ = nodeID
-	_ = enabled
-}
-
-// GetLogPersist is no longer meaningful globally because persistence is
-// per-node. Callers should read Node.LogPersistEnabled instead.
-func (m *Manager) GetLogPersist() bool {
-	return false
+	if m == nil || m.logDBConsumer == nil {
+		return
+	}
+	m.logDBConsumer.SetPersist(nodeID, enabled)
 }

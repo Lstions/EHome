@@ -1,16 +1,50 @@
 package databus
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/metrics"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func counterValue(t *testing.T, collector prometheus.Collector) float64 {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 1)
+	collector.Collect(ch)
+	metric := <-ch
+	var out dto.Metric
+	if err := metric.Write(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out.GetCounter().GetValue()
+}
+
+func eventually(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatal(message)
+		}
+	}
+}
 
 type mockDataConsumer struct {
 	name    string
@@ -107,7 +141,7 @@ func TestDataEventBus_Publish_DeliversToActiveConsumers(t *testing.T) {
 
 	evt := DataEvent{DeviceID: "test", ChannelID: 1, RequestID: 100, RawData: []byte{0x01, 0x02}}
 	bus.Publish(evt)
-	time.Sleep(100 * time.Millisecond)
+	eventually(t, func() bool { return len(active.getEvents()) == 1 }, "active consumer did not receive event")
 
 	if len(active.getEvents()) != 1 {
 		t.Fatalf("active consumer should receive 1 event, got %d", len(active.getEvents()))
@@ -137,7 +171,9 @@ func TestDataEventBus_PassiveDataOnlyGoesToLightConsumers(t *testing.T) {
 	// Passive data: request_id=0
 	evt := DataEvent{DeviceID: "test", ChannelID: 1, RequestID: 0, RawData: []byte{0xDD, 0xA5}}
 	bus.Publish(evt)
-	time.Sleep(100 * time.Millisecond)
+	eventually(t, func() bool {
+		return len(terminal.getEvents()) == 1 && len(wsPush.getEvents()) == 1
+	}, "light consumers did not receive passive event")
 
 	if len(terminal.getEvents()) != 1 {
 		t.Errorf("terminal consumer should receive passive data, got %d", len(terminal.getEvents()))
@@ -167,7 +203,7 @@ func TestDataEventBus_ConsumerPanic_Isolated(t *testing.T) {
 	bus.Register(goodC)
 
 	bus.Publish(DataEvent{DeviceID: "test"})
-	time.Sleep(100 * time.Millisecond)
+	eventually(t, func() bool { return len(goodC.getEvents()) == 1 }, "good consumer did not receive event after peer panic")
 
 	if len(goodC.getEvents()) != 1 {
 		t.Errorf("good consumer should receive event even if another panics")
@@ -185,7 +221,7 @@ func TestDataEventBus_RegisterDuplicate(t *testing.T) {
 	bus.Register(c2) // should be ignored
 
 	bus.Publish(DataEvent{DeviceID: "n1"})
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool { return len(c1.getEvents()) == 1 }, "first duplicate-named consumer did not receive event")
 
 	if len(c1.getEvents()) != 1 {
 		t.Errorf("first consumer should receive event")
@@ -197,18 +233,59 @@ func TestDataEventBus_Unregister(t *testing.T) {
 	defer bus.Stop()
 
 	c := &mockDataConsumer{name: "removable", shouldH: true}
+	observer := &mockDataConsumer{name: "unregister-observer", shouldH: true}
 	bus.Register(c)
+	bus.Register(observer)
 
 	bus.Publish(DataEvent{DeviceID: "n1"})
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool { return len(c.getEvents()) == 1 }, "consumer did not receive event before unregister")
 
 	bus.Unregister("removable")
 
 	bus.Publish(DataEvent{DeviceID: "n2"})
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, func() bool { return len(observer.getEvents()) == 2 }, "post-unregister event was not dispatched")
+	if got := len(c.getEvents()); got != 1 {
+		t.Fatalf("consumer received %d events, want 1 after unregister", got)
+	}
+}
 
-	if len(c.getEvents()) != 1 {
-		t.Errorf("consumer should only have 1 event after unregister, got %d", len(c.getEvents()))
+func TestDataEventBus_StoppedSnapshotWorkerDoesNotSkipRemainingConsumers(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		bus := NewDataEventBus()
+		live := &mockDataConsumer{name: "live", shouldH: true}
+		bus.Register(live)
+		dead := &consumerWorker{
+			consumer: &mockDataConsumer{name: "dead", shouldH: true},
+			mailbox:  make(chan DataEvent, consumerMailboxSize),
+			done:     make(chan struct{}),
+		}
+		dead.doneOnce.Do(func() { close(dead.done) })
+		bus.mu.Lock()
+		bus.consumers[dead.consumer.Name()] = dead
+		bus.mu.Unlock()
+
+		bus.fanout(DataEvent{Sequence: uint64(i)})
+		eventually(t, func() bool { return len(live.getEvents()) == 1 }, "stopped snapshot worker skipped a remaining consumer")
+		bus.Stop()
+	}
+}
+
+func TestDataEventBus_UnregisterTerminatesWorker(t *testing.T) {
+	bus := NewDataEventBus()
+	defer bus.Stop()
+	consumer := &mockDataConsumer{name: "worker-exit", shouldH: true}
+	bus.Register(consumer)
+
+	bus.Unregister(consumer.Name())
+	exited := make(chan struct{})
+	go func() {
+		bus.workerWG.Wait()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("consumer worker did not exit after Unregister")
 	}
 }
 
@@ -256,22 +333,36 @@ func TestDataEventBus_BoundsConsumerConcurrency(t *testing.T) {
 
 	// Each consumer has one serial worker, so no more than one blocked handler
 	// can run for this consumer regardless of event volume.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-consumer.started:
+	case <-time.After(time.Second):
+		close(release)
+		bus.Stop()
+		t.Fatal("blocking consumer did not start")
+	}
 	if got := len(consumer.started); got > 1 {
 		close(release)
 		bus.Stop()
 		t.Fatalf("started %d handlers concurrently; per-consumer bound is 1", got)
 	}
 
+	// Wait until the dispatcher has moved every pre-registration event into the
+	// blocking consumer's mailbox. Otherwise a newly registered fast consumer
+	// could legitimately receive some of those earlier ingress events too.
+	bus.mu.RLock()
+	blockingWorker := bus.consumers[consumer.Name()]
+	bus.mu.RUnlock()
+	eventually(t, func() bool { return len(blockingWorker.mailbox) == 15 }, "dispatcher did not drain the initial ingress events")
+
 	// A separate lightweight consumer must run even while the parser-style
 	// consumer is blocked; this protects the terminal/WS fast path.
 	fast := &mockDataConsumer{name: "fast", shouldH: true}
 	bus.Register(fast)
 	bus.Publish(DataEvent{Sequence: 99})
-	deadline := time.Now().Add(time.Second)
-	for len(fast.getEvents()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	eventually(t, func() bool {
+		events := fast.getEvents()
+		return len(events) == 1 && events[0].Sequence == 99
+	}, "slow consumer blocked independent fast consumer")
 	if len(fast.getEvents()) != 1 {
 		close(release)
 		bus.Stop()
@@ -298,10 +389,7 @@ func TestDataEventBus_DropsWhenConsumerMailboxIsFull(t *testing.T) {
 	for i := 1; i < consumerMailboxSize+8; i++ {
 		bus.Publish(DataEvent{Sequence: uint64(i)})
 	}
-	deadline := time.Now().Add(time.Second)
-	for bus.DroppedCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	eventually(t, func() bool { return bus.DroppedCount() > 0 }, "full consumer mailbox did not increment dropped count")
 	if bus.DroppedCount() == 0 {
 		close(release)
 		bus.Stop()
@@ -339,6 +427,107 @@ func TestDataEventBus_IsPassiveAndRoutesWebPush(t *testing.T) {
 		if wsPush.ShouldHandle(evt) {
 			t.Fatalf("non-passive event %+v must not duplicate ws push", evt)
 		}
+	}
+}
+
+func TestDataMetricsConsumerCountsSuccessfulAndFailedReports(t *testing.T) {
+	processedBefore := counterValue(t, metrics.DataReportsProcessed)
+	errorsBefore := counterValue(t, metrics.DataReportErrors)
+	consumer := NewDataMetricsConsumer()
+
+	consumer.Handle(DataEvent{RawData: []byte{0x01}})
+	consumer.Handle(DataEvent{ErrorCode: 1})
+
+	if got := counterValue(t, metrics.DataReportsProcessed) - processedBefore; got != 1 {
+		t.Fatalf("processed metric delta = %v, want 1", got)
+	}
+	if got := counterValue(t, metrics.DataReportErrors) - errorsBefore; got != 1 {
+		t.Fatalf("error metric delta = %v, want 1", got)
+	}
+}
+
+func TestDBPersistConsumerCountsWriteFailure(t *testing.T) {
+	db := newConsumerTestDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data")
+	before := counterValue(t, counter)
+
+	NewDBPersistConsumer(db).Handle(DataEvent{DeviceID: "node", ReceivedAt: time.Now()})
+
+	if got := counterValue(t, counter) - before; got != 1 {
+		t.Fatalf("DB write failure metric delta = %v, want 1", got)
+	}
+}
+
+func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-write-fail"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	device := models.EdgeDevice{Name: "write-fail-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatal(err)
+	}
+	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
+	drivers.Register(driver)
+	db.Callback().Create().Before("gorm:create").Register("test:fail-unified-data", func(tx *gorm.DB) {
+		if tx.Statement.Table == "unified_data" {
+			tx.AddError(errors.New("forced unified_data write failure"))
+		}
+	})
+	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data")
+	before := counterValue(t, counter)
+
+	NewSensorParserConsumer(db, nil, nil, passthroughReassembler{}).Handle(DataEvent{
+		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
+	})
+
+	if got := counterValue(t, counter) - before; got != 1 {
+		t.Fatalf("unified_data write failure metric delta = %v, want 1", got)
+	}
+}
+
+func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-device-data-fail"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	device := models.EdgeDevice{Name: "device-data-fail", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatal(err)
+	}
+	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
+	drivers.Register(driver)
+	db.Callback().Create().Before("gorm:create").Register("test:fail-device-data", func(tx *gorm.DB) {
+		if tx.Statement.Table == "device_data" {
+			tx.AddError(errors.New("forced device_data write failure"))
+		}
+	})
+	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "device_data")
+	before := counterValue(t, counter)
+
+	NewSensorParserConsumer(db, nil, nil, passthroughReassembler{}).Handle(DataEvent{
+		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
+	})
+
+	if got := counterValue(t, counter) - before; got != 1 {
+		t.Fatalf("device_data write failure metric delta = %v, want 1", got)
 	}
 }
 

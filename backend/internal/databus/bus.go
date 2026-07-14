@@ -50,6 +50,8 @@ const (
 type consumerWorker struct {
 	consumer DataConsumer
 	mailbox  chan DataEvent
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // DataEventBus has bounded ingress and a dedicated bounded mailbox per
@@ -116,7 +118,11 @@ func (bus *DataEventBus) Register(c DataConsumer) {
 	if c == nil || bus.stopped.Load() {
 		return
 	}
-	worker := &consumerWorker{consumer: c, mailbox: make(chan DataEvent, consumerMailboxSize)}
+	worker := &consumerWorker{
+		consumer: c,
+		mailbox:  make(chan DataEvent, consumerMailboxSize),
+		done:     make(chan struct{}),
+	}
 	bus.mu.Lock()
 	if _, exists := bus.consumers[c.Name()]; exists || bus.stopped.Load() {
 		bus.mu.Unlock()
@@ -129,15 +135,19 @@ func (bus *DataEventBus) Register(c DataConsumer) {
 	slog.Info("databus: consumer registered", "name", c.Name())
 }
 
-// Unregister detaches a consumer. Its worker exits on bus shutdown; mailbox is
-// intentionally not closed because fanout can hold a read-only snapshot.
+// Unregister detaches and terminates a consumer worker. The mailbox is not
+// closed because fanout may hold a snapshot; done is safe to select on.
 func (bus *DataEventBus) Unregister(name string) {
 	bus.mu.Lock()
-	if _, ok := bus.consumers[name]; ok {
+	worker, exists := bus.consumers[name]
+	if exists {
 		delete(bus.consumers, name)
-		slog.Info("databus: consumer unregistered", "name", name)
 	}
 	bus.mu.Unlock()
+	if exists {
+		worker.doneOnce.Do(func() { close(worker.done) })
+		slog.Info("databus: consumer unregistered", "name", name)
+	}
 }
 
 func (bus *DataEventBus) DroppedCount() uint64 { return bus.dropped.Load() }
@@ -148,6 +158,15 @@ func (bus *DataEventBus) Stop() {
 	bus.stopOnce.Do(func() {
 		bus.stopped.Store(true)
 		close(bus.stopCh)
+		bus.mu.RLock()
+		workers := make([]*consumerWorker, 0, len(bus.consumers))
+		for _, worker := range bus.consumers {
+			workers = append(workers, worker)
+		}
+		bus.mu.RUnlock()
+		for _, worker := range workers {
+			worker.doneOnce.Do(func() { close(worker.done) })
+		}
 	})
 	bus.dispatchWG.Wait()
 	bus.workerWG.Wait()
@@ -179,15 +198,21 @@ func (bus *DataEventBus) fanout(evt DataEvent) {
 		select {
 		case worker.mailbox <- evt:
 			continue
+		case <-worker.done:
+			continue
 		default:
 		}
 		select {
 		case <-worker.mailbox:
 			bus.recordDrop()
+		case <-worker.done:
+			continue
 		default:
 		}
 		select {
 		case worker.mailbox <- evt:
+		case <-worker.done:
+			continue
 		case <-bus.stopCh:
 			return
 		default:
@@ -200,7 +225,7 @@ func (bus *DataEventBus) runConsumer(worker *consumerWorker) {
 	defer bus.workerWG.Done()
 	for {
 		select {
-		case <-bus.stopCh:
+		case <-worker.done:
 			return
 		case evt := <-worker.mailbox:
 			func() {

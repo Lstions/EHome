@@ -192,30 +192,42 @@ func (bus *LogEventBus) fanout(batch LogBatch) {
 	bus.mu.RUnlock()
 
 	for _, worker := range workers {
-		if !worker.consumer.IsActive() {
-			continue
-		}
-		select {
-		case worker.mailbox <- batch:
-			continue
-		case <-worker.done:
-			continue
-		default:
-		}
-		select {
-		case <-worker.mailbox:
-			bus.recordDrop("consumer", worker.consumer.Name())
-		default:
-		}
-		select {
-		case worker.mailbox <- batch:
-		case <-worker.done:
+		if !bus.fanoutWorker(worker, batch) {
 			return
-		case <-bus.stopCh:
-			return
-		default:
-			bus.recordDrop("consumer", worker.consumer.Name())
 		}
+	}
+}
+
+// fanoutWorker reports whether fanout should continue. A worker detached after
+// the snapshot is skipped; only stopping the whole bus aborts the traversal.
+func (bus *LogEventBus) fanoutWorker(worker *consumerWorker, batch LogBatch) bool {
+	if !worker.consumer.IsActive() {
+		return true
+	}
+	select {
+	case worker.mailbox <- batch:
+		return true
+	case <-worker.done:
+		return true
+	default:
+	}
+	select {
+	case <-worker.mailbox:
+		bus.recordDrop("consumer", worker.consumer.Name())
+	case <-worker.done:
+		return true
+	default:
+	}
+	select {
+	case worker.mailbox <- batch:
+		return true
+	case <-worker.done:
+		return true
+	case <-bus.stopCh:
+		return false
+	default:
+		bus.recordDrop("consumer", worker.consumer.Name())
+		return true
 	}
 }
 

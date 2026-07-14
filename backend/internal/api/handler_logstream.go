@@ -122,8 +122,10 @@ func updateLogPersist(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			return
 		}
 
-		// Toggle DB consumer via node manager
-		nodeMgr.SetLogPersist(node.NodeID, *req.Enabled)
+		// Write through the DB consumer cache only after the database update succeeds.
+		if nodeMgr != nil {
+			nodeMgr.SetLogPersist(node.NodeID, *req.Enabled)
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"message":         fmt.Sprintf("log persistence %s", map[bool]string{true: "enabled", false: "disabled"}[*req.Enabled]),
@@ -241,6 +243,11 @@ func deleteNodeLogs(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		result := query.Delete(&models.NodeLog{})
+		if result.Error != nil {
+			logger.Warn("failed to delete node logs", "node_id", node.NodeID, "error", result.Error)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete logs"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"deleted": result.RowsAffected,
 		})

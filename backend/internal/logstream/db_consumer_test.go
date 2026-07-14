@@ -1,15 +1,17 @@
 package logstream
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"ehome/backend/internal/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-func TestDBConsumer_PersistsOnlyEnabledNode(t *testing.T) {
+func newDBConsumerTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -29,6 +31,11 @@ func TestDBConsumer_PersistsOnlyEnabledNode(t *testing.T) {
 	)`).Error; err != nil {
 		t.Fatal(err)
 	}
+	return db
+}
+
+func TestDBConsumer_PersistsOnlyEnabledNode(t *testing.T) {
+	db := newDBConsumerTestDB(t)
 	if err := db.Create(&models.Node{NodeID: "enabled", LogPersistEnabled: true}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +47,6 @@ func TestDBConsumer_PersistsOnlyEnabledNode(t *testing.T) {
 	consumer.Consume(LogBatch{NodeID: "enabled", Seq: 7, Logs: []LogEntry{{NodeID: "enabled", Level: 2, Ts: 101, Tag: "TEST", Message: "saved"}}})
 	consumer.Consume(LogBatch{NodeID: "disabled", Seq: 8, Logs: []LogEntry{{NodeID: "disabled", Level: 2, Ts: 102, Tag: "TEST", Message: "discarded"}}})
 
-	// Consume writes synchronously; tiny delay only protects SQLite scheduling on CI.
-	time.Sleep(time.Millisecond)
 	var logs []models.NodeLog
 	if err := db.Order("id").Find(&logs).Error; err != nil {
 		t.Fatal(err)
@@ -51,5 +56,83 @@ func TestDBConsumer_PersistsOnlyEnabledNode(t *testing.T) {
 	}
 	if logs[0].NodeID != "enabled" || logs[0].Message != "saved" || logs[0].Seq != 7 {
 		t.Fatalf("unexpected persisted log: %+v", logs[0])
+	}
+}
+
+func TestDBConsumer_CachesPersistencePolicyPerNode(t *testing.T) {
+	db := newDBConsumerTestDB(t)
+	if err := db.Create(&models.Node{NodeID: "cached", LogPersistEnabled: false}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var policyQueries atomic.Int32
+	if err := db.Callback().Query().Before("gorm:query").Register("test:count-policy-query", func(tx *gorm.DB) {
+		if tx.Statement.Table == "nodes" {
+			policyQueries.Add(1)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	consumer := NewDBConsumer(db)
+	batch := LogBatch{NodeID: "cached", Logs: []LogEntry{{NodeID: "cached", Message: "discarded"}}}
+	consumer.Consume(batch)
+	consumer.Consume(batch)
+
+	if got := policyQueries.Load(); got != 1 {
+		t.Fatalf("persistence policy queries = %d, want 1", got)
+	}
+}
+
+func TestDBConsumer_SetPersistTakesEffectImmediately(t *testing.T) {
+	db := newDBConsumerTestDB(t)
+	if err := db.Create(&models.Node{NodeID: "toggle", LogPersistEnabled: false}).Error; err != nil {
+		t.Fatal(err)
+	}
+	consumer := NewDBConsumer(db)
+	batch := LogBatch{NodeID: "toggle", Logs: []LogEntry{{NodeID: "toggle", Message: "entry"}}}
+
+	consumer.Consume(batch)
+	consumer.SetPersist("toggle", true)
+	consumer.Consume(batch)
+	consumer.SetPersist("toggle", false)
+	consumer.Consume(batch)
+
+	var count int64
+	if err := db.Model(&models.NodeLog{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted logs = %d, want exactly 1 after immediate on/off changes", count)
+	}
+}
+
+func TestDBConsumer_ConcurrentCacheMissQueriesPolicyOnce(t *testing.T) {
+	db := newDBConsumerTestDB(t)
+	if err := db.Create(&models.Node{NodeID: "concurrent", LogPersistEnabled: false}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var policyQueries atomic.Int32
+	if err := db.Callback().Query().Before("gorm:query").Register("test:count-concurrent-policy-query", func(tx *gorm.DB) {
+		if tx.Statement.Table == "nodes" {
+			policyQueries.Add(1)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	consumer := NewDBConsumer(db)
+	batch := LogBatch{NodeID: "concurrent", Logs: []LogEntry{{NodeID: "concurrent", Message: "discarded"}}}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			consumer.Consume(batch)
+		}()
+	}
+	wg.Wait()
+
+	if got := policyQueries.Load(); got != 1 {
+		t.Fatalf("concurrent persistence policy queries = %d, want 1", got)
 	}
 }

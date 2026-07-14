@@ -200,6 +200,12 @@ var (
 		Help: "ConfigEventBus drops",
 	})
 
+	// DataConsumerDBWriteFailures counts persistence failures by consumer and table.
+	DataConsumerDBWriteFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_data_consumer_db_write_failures_total",
+		Help: "DataEventBus consumer database write failures",
+	}, []string{"consumer", "table"})
+
 	// DataEventBusDroppedTotal counts data reports dropped by the bounded
 	// DataEventBus input queue under backpressure.
 	DataEventBusDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{

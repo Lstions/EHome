@@ -13,6 +13,7 @@ import (
 	"ehome/backend/internal/pendingwrite"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
@@ -80,7 +81,7 @@ func (c *DBPersistConsumer) Handle(evt DataEvent) {
 	if c.db == nil {
 		return
 	}
-	dataJSON, _ := json.Marshal(map[string]interface{}{
+	dataJSON, err := json.Marshal(map[string]interface{}{
 		"raw":            fmt.Sprintf("%x", evt.RawData),
 		"channel":        evt.ChannelID,
 		"sequence":       evt.Sequence,
@@ -89,11 +90,18 @@ func (c *DBPersistConsumer) Handle(evt DataEvent) {
 		"edge_device_id": evt.EdgeDeviceID,
 		"command_index":  evt.CommandIndex,
 	})
-	c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
+	if err != nil {
+		logger.Warn("databus: failed to marshal raw device data", "consumer", c.Name(), "node_id", evt.DeviceID, "error", err)
+		return
+	}
+	if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
 		NodeID:    evt.DeviceID,
 		DataJSON:  string(dataJSON),
 		Timestamp: evt.ReceivedAt,
-	})
+	}).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
+		logger.Warn("databus: failed to persist raw device data", "consumer", c.Name(), "node_id", evt.DeviceID, "error", err)
+	}
 }
 
 // SensorParserConsumer parses sensor data, stores to unified_data,
@@ -225,7 +233,10 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		})
 	}
 	if len(records) > 0 {
-		c.db.Create(&records)
+		if err := c.db.Session(&gorm.Session{}).Create(&records).Error; err != nil {
+			metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
+			logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+		}
 	}
 
 	// Update edge device status. Keep last_data_at fresh for every successful
@@ -254,18 +265,23 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	}
 
 	// Store raw data for this edge device
-	dataJSON, _ := json.Marshal(map[string]interface{}{
+	dataJSON, err := json.Marshal(map[string]interface{}{
 		"raw_hex":    fmt.Sprintf("%x", merged),
 		"sensors":    sensorData,
 		"channel_id": evt.ChannelID,
 		"timestamp":  now.UnixMilli(),
 	})
-	c.db.Create(&models.DeviceData{
+	if err != nil {
+		logger.Warn("databus: failed to marshal parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+	} else if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
 		DeviceID:  device.ID,
 		NodeID:    evt.DeviceID,
 		DataJSON:  string(dataJSON),
 		Timestamp: now,
-	})
+	}).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
+		logger.Warn("databus: failed to persist parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+	}
 
 	// HomeAssistant publish
 	if c.ha != nil {
