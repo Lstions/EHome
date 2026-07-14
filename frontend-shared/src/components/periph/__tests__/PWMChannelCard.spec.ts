@@ -302,6 +302,47 @@ describe('PWMChannelCard', () => {
     })
   })
 
+  describe('layout structure', () => {
+    it('renders card with pwm-channel-card class and correct structure', () => {
+      const wrapper = track(mountCard(pwmConfig()))
+      expect(wrapper.find('.pwm-channel-card').exists()).toBe(true)
+      expect(wrapper.find('.card-header').exists()).toBe(true)
+      expect(wrapper.find('.pin-name').exists()).toBe(true)
+      expect(wrapper.find('.card-header-right').exists()).toBe(true)
+    })
+
+    it('renders frequency display row', () => {
+      const wrapper = track(mountCard(pwmConfig()))
+      const freq = wrapper.find('.pwm-freq')
+      expect(freq.exists()).toBe(true)
+      expect(freq.find('.freq-label').exists()).toBe(true)
+      expect(freq.find('.freq-value').exists()).toBe(true)
+    })
+
+    it('renders duty section with header and slider', () => {
+      const wrapper = track(mountCard(pwmConfig()))
+      const duty = wrapper.find('.pwm-duty')
+      expect(duty.exists()).toBe(true)
+      expect(duty.find('.duty-header').exists()).toBe(true)
+      expect(duty.find('.duty-label').exists()).toBe(true)
+      expect(duty.find('.duty-value').exists()).toBe(true)
+    })
+
+    it('renders action buttons in pwm-buttons container', () => {
+      const wrapper = track(mountCard(pwmConfig()))
+      const btnContainer = wrapper.find('.pwm-buttons')
+      expect(btnContainer.exists()).toBe(true)
+      const buttons = btnContainer.findAll('button')
+      expect(buttons.length).toBe(2) // 启动, 停止
+    })
+
+    it('renders label when config has label', () => {
+      const wrapper = track(mountCard(pwmConfig({ label: 'Fan' })))
+      expect(wrapper.find('.pin-label').exists()).toBe(true)
+      expect(wrapper.find('.pin-label').text()).toBe('Fan')
+    })
+  })
+
   describe('remove emit', () => {
     it('emits remove with pin number on remove button click', async () => {
       const wrapper = track(mountCard(pwmConfig({ pin: 9 })))

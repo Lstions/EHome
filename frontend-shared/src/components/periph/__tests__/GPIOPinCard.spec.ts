@@ -258,6 +258,43 @@ describe('GPIOPinCard', () => {
     })
   })
 
+  describe('layout structure', () => {
+    it('renders card with gpio-pin-card class and correct structure', () => {
+      const wrapper = track(mountCard(outputConfig()))
+      expect(wrapper.find('.gpio-pin-card').exists()).toBe(true)
+      expect(wrapper.find('.card-header').exists()).toBe(true)
+      expect(wrapper.find('.pin-name').exists()).toBe(true)
+      expect(wrapper.find('.card-header-right').exists()).toBe(true)
+    })
+
+    it('renders action buttons in gpio-buttons container', () => {
+      const wrapper = track(mountCard(outputConfig()))
+      const btnContainer = wrapper.find('.gpio-buttons')
+      expect(btnContainer.exists()).toBe(true)
+      const buttons = btnContainer.findAll('button')
+      expect(buttons.length).toBe(3) // ON, OFF, TOGGLE
+    })
+
+    it('renders level indicator with dot and text', () => {
+      const wrapper = track(mountCard(outputConfig({ initial_level: 1 })))
+      const indicator = wrapper.find('.gpio-level-indicator')
+      expect(indicator.exists()).toBe(true)
+      expect(indicator.find('.level-dot').exists()).toBe(true)
+      expect(indicator.find('.level-text').exists()).toBe(true)
+    })
+
+    it('renders label when config has label', () => {
+      const wrapper = track(mountCard(outputConfig({ label: 'LED Light' })))
+      expect(wrapper.find('.pin-label').exists()).toBe(true)
+      expect(wrapper.find('.pin-label').text()).toBe('LED Light')
+    })
+
+    it('does not render label when config has no label', () => {
+      const wrapper = track(mountCard(outputConfig({ label: '' })))
+      expect(wrapper.find('.pin-label').exists()).toBe(false)
+    })
+  })
+
   describe('remove emit', () => {
     it('emits remove with pin number on remove button click', async () => {
       const wrapper = track(mountCard(outputConfig({ pin: 7 })))

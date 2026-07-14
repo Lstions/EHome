@@ -308,6 +308,37 @@ describe('PeripheralControl', () => {
     expect(wrapper.findAll('.pwm-channel-card-stub')).toHaveLength(1)
   })
 
+  describe('layout structure', () => {
+    it('renders card-grid with responsive grid class', async () => {
+      mocks.gpioList.mockResolvedValue([gpioConfig(5)])
+      const wrapper = track(mountControl())
+      await flushPromises()
+
+      const grid = wrapper.find('.card-grid')
+      expect(grid.exists()).toBe(true)
+    })
+
+    it('renders GPIO section with section-title', async () => {
+      mocks.gpioList.mockResolvedValue([gpioConfig(5)])
+      const wrapper = track(mountControl())
+      await flushPromises()
+
+      const section = wrapper.find('.periph-section')
+      expect(section.exists()).toBe(true)
+      expect(section.find('.section-title').text()).toBe('GPIO')
+    })
+
+    it('renders PWM section with section-title', async () => {
+      mocks.pwmList.mockResolvedValue([pwmConfig(6)])
+      const wrapper = track(mountControl())
+      await flushPromises()
+
+      const section = wrapper.find('.periph-section')
+      expect(section.exists()).toBe(true)
+      expect(section.find('.section-title').text()).toBe('PWM')
+    })
+  })
+
   it('does not refresh when receiving PERIPH_RESULT for a different node', async () => {
     wsState.connected = true
     track(mountControl())

@@ -1710,10 +1710,25 @@ defineExpose({
 
 /* ---- Peripheral Card Grid (GPIO/PWM) ---- */
 .periph-card-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
   padding: 4px 0;
+}
+
+/* 窄容器：单列保证可用 */
+@media (max-width: 480px) {
+  .periph-card-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+}
+
+/* 宽容器：最多 4 列 */
+@media (min-width: 900px) {
+  .periph-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
 }
 
 .periph-section-body {
@@ -1738,6 +1753,7 @@ defineExpose({
 /* GPIO 未配置卡片 */
 .gpio-resource-card {
   display: flex;
+  min-width: 0;
 }
 
 .gpio-resource-card.is-configured {
@@ -1747,12 +1763,13 @@ defineExpose({
 .gpio-unconfigured-card {
   border: 1px dashed var(--el-border-color);
   border-radius: 8px;
-  padding: 12px;
+  padding: 8px 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 140px;
-  max-width: 200px;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   background: var(--el-fill-color-lighter);
 }
 
@@ -1760,13 +1777,17 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
+  min-width: 0;
 }
 
 .gpio-pin-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pwm-occupied-hint {

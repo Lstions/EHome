@@ -132,12 +132,13 @@ const toggleLevel = async () => {
 .gpio-pin-card {
   border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 140px;
-  max-width: 200px;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 .gpio-pin-card.gpio-offline {
   opacity: 0.5;
@@ -147,7 +148,8 @@ const toggleLevel = async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
+  min-width: 0;
 }
 .card-header-right {
   display: flex;
@@ -162,15 +164,26 @@ const toggleLevel = async () => {
 }
 .pin-name {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .pin-label {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .gpio-buttons {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.gpio-buttons .el-button {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .gpio-level-indicator {
   display: flex;
