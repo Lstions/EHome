@@ -197,7 +197,7 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 
 // ServerMaxProtocolVersion is the highest protocol version this server supports.
 // Negotiated version = min(device-reported, ServerMaxProtocolVersion).
-const ServerMaxProtocolVersion = "2.3"
+const ServerMaxProtocolVersion = "2.5"
 
 // parseProtocolVersion parses a version string like "2.2" or "2.3" into a float64.
 // Returns 0 for empty or unparseable strings.

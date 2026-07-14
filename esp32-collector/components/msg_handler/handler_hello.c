@@ -97,7 +97,7 @@ void msg_handler_send_hello(const char *node_id, const char *fw_version,
     if (mid && mid[0] != '\0') {
         frame_encode_string(&enc, 7, mid);   /* field 7: last_manifest (string) */
     }
-    frame_encode_string(&enc, 8, "2.3");     /* field 8: protocol_version (string) */
+    frame_encode_string(&enc, 8, "2.5");     /* field 8: protocol_version (string) */
 
     /* v2.4: log the SAME value that field 6 encodes (in-memory, not NVS) */
     ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, last_manifest=%s, proto_ver=2.3",
