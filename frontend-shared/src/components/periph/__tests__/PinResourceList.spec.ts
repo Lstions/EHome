@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, nextTick } from 'vue'
@@ -750,6 +751,57 @@ describe('PinResourceList', () => {
       expect(row.find('.pin-configuration').exists()).toBe(true)
       expect(row.find('.pin-runtime').exists()).toBe(true)
       expect(row.find('.pin-actions').exists()).toBe(true)
+    })
+  })
+
+  // === CSS 容器查询响应式 ===
+  describe('container query responsive layout', () => {
+    const fs = require('fs')
+    const path = require('path')
+    const sfcSource = fs.readFileSync(path.resolve(__dirname, '../PinResourceList.vue'), 'utf-8')
+    const pwmRowSource = fs.readFileSync(path.resolve(__dirname, '../PWMChannelRow.vue'), 'utf-8')
+    const gpioRowSource = fs.readFileSync(path.resolve(__dirname, '../GPIOPinRow.vue'), 'utf-8')
+
+    it('pin-resource-panel establishes container context', () => {
+      expect(sfcSource).toContain('container-type: inline-size')
+      expect(sfcSource).toContain('container-name: pin-panel')
+    })
+
+    it('uses @container pin-panel as primary responsive trigger (not solely @media)', () => {
+      expect(sfcSource).toContain('@container pin-panel (max-width: 600px)')
+    })
+
+    it('row grid columns use minmax(0,...) to prevent min-content overflow', () => {
+      expect(sfcSource).toContain('minmax(0, 1.1fr)')
+      expect(sfcSource).toContain('minmax(0, 1.2fr)')
+      expect(sfcSource).toContain('minmax(0, 2fr)')
+      expect(sfcSource).not.toContain('minmax(150px,')
+      expect(sfcSource).not.toContain('minmax(180px,')
+      expect(sfcSource).not.toContain('minmax(280px,')
+    })
+
+    it('key elements have min-width:0 to prevent flex/grid overflow', () => {
+      // panel, filter, list, row, identity, configuration, runtime, actions
+      const minWidthCount = (sfcSource.match(/min-width:\s*0/g) || []).length
+      expect(minWidthCount).toBeGreaterThanOrEqual(7)
+    })
+
+    it('duty slider uses width clamp (not fixed px width)', () => {
+      expect(sfcSource).toContain('min-width: 80px')
+      expect(sfcSource).toContain('max-width: 180px')
+      expect(sfcSource).toContain('width: 100%')
+    })
+
+    it('PWMChannelRow uses container query (not viewport @media)', () => {
+      expect(pwmRowSource).toContain('container-type: inline-size')
+      expect(pwmRowSource).toContain('container-name: pwm-row')
+      expect(pwmRowSource).toContain('@container pwm-row')
+      expect(pwmRowSource).not.toContain('@media (max-width: 768px)')
+    })
+
+    it('GPIOPinRow has min-width:0 and max-width:100% to prevent overflow', () => {
+      expect(gpioRowSource).toContain('min-width: 0')
+      expect(gpioRowSource).toContain('max-width: 100%')
     })
   })
 })

@@ -174,6 +174,10 @@ defineExpose({ running, localDuty, startPwm, stopPwm })
   gap: 12px;
   flex-wrap: wrap;
   min-width: 0;
+  max-width: 100%;
+  /* 自身容器查询上下文，用于独立使用场景 */
+  container-type: inline-size;
+  container-name: pwm-row;
 }
 
 .pwm-duty-value {
@@ -185,13 +189,16 @@ defineExpose({ running, localDuty, startPwm, stopPwm })
 }
 
 .pwm-duty-slider {
-  width: 180px;
+  width: 100%;
+  min-width: 80px;
+  max-width: 180px;
   flex-shrink: 1;
 }
 
-@media (max-width: 768px) {
+/* 容器查询响应式: 当自身宽度 ≤600px 时 slider 占满 */
+@container pwm-row (max-width: 600px) {
   .pwm-duty-slider {
-    width: 100%;
+    max-width: 100%;
   }
 }
 </style>

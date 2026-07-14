@@ -705,9 +705,15 @@ defineExpose({
 
 <style scoped>
 .pin-resource-panel {
+  /* container query context: allows descendants to respond to *actual*
+   * available width, not viewport width which is wrong when a sidebar
+   * consumes space. */
+  container-type: inline-size;
+  container-name: pin-panel;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
 }
 
 .pin-offline-alert,
@@ -730,11 +736,13 @@ defineExpose({
 
 .pin-filter {
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .pin-search {
   width: 220px;
-  flex-shrink: 0;
+  max-width: 100%;
+  flex-shrink: 1;
 }
 
 .pin-refresh-btn {
@@ -747,15 +755,17 @@ defineExpose({
   list-style: none;
   margin: 0;
   padding: 0;
+  min-width: 0;
 }
 
 .pin-resource-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.1fr) minmax(180px, 1.2fr) minmax(280px, 2fr) auto;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr) minmax(0, 2fr) auto;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
   min-height: 64px;
+  min-width: 0;
   border-bottom: 1px solid var(--el-border-color-lighter);
   transition: background-color 0.2s;
   position: relative;
@@ -851,7 +861,8 @@ defineExpose({
   gap: 8px;
   justify-content: flex-end;
   flex-shrink: 0;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* ---- 电平指示器 ---- */
@@ -897,7 +908,9 @@ defineExpose({
 }
 
 .pin-duty-slider {
-  width: 180px;
+  width: 100%;
+  min-width: 80px;
+  max-width: 180px;
   flex-shrink: 1;
 }
 
@@ -921,8 +934,10 @@ defineExpose({
   color: var(--el-color-danger);
 }
 
-/* ---- 响应式: ~430px ---- */
-@media (max-width: 768px) {
+/* ---- 容器查询响应式: 当组件可用宽度 ≤600px 时采用双层重排 ----
+ * 不再依赖 viewport @media 作为唯一触发条件，因为侧边栏后的实际容器
+ * 宽度可能远小于 viewport 宽度。 */
+@container pin-panel (max-width: 600px) {
   .pin-resource-row {
     grid-template-columns: 1fr auto;
     gap: 8px;
@@ -948,6 +963,7 @@ defineExpose({
   }
 
   .pin-duty-slider {
+    max-width: 100%;
     width: 100%;
   }
 
@@ -961,8 +977,29 @@ defineExpose({
   }
 
   .pin-search {
-    width: 1fr;
-    flex: 1;
+    width: 100%;
+    flex: 1 1 120px;
+  }
+
+  .pin-refresh-btn {
+    margin-left: 0;
+  }
+}
+
+/* ---- 保留 viewport @media 作为渐进增强 (辅助，非唯一触发) ---- */
+@media (max-width: 768px) {
+  .pin-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .pin-filter {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .pin-search {
+    width: 100%;
+    flex: 1 1 120px;
   }
 
   .pin-refresh-btn {

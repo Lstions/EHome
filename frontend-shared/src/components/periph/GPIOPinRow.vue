@@ -140,6 +140,7 @@ defineExpose({ currentLevel, setLevel, readLevel })
   display: flex;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
 }
 
 .gpio-runtime {
@@ -148,6 +149,7 @@ defineExpose({ currentLevel, setLevel, readLevel })
   gap: 12px;
   flex-wrap: wrap;
   min-width: 0;
+  max-width: 100%;
 }
 
 .pin-level-indicator {
