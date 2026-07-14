@@ -446,7 +446,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* ========== 侧边栏 ========== */
+/* ========== 侧边栏 (桌面端) ========== */
 .sidebar {
   background: linear-gradient(180deg, #1a1f2e 0%, #1e2538 100%);
   display: flex;
@@ -455,7 +455,8 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.logo-area {
+/* logo-area / logo-text / logo-icon 白字规则限定到 .sidebar */
+.sidebar .logo-area {
   height: 60px;
   display: flex;
   align-items: center;
@@ -466,7 +467,7 @@ onUnmounted(() => {
   transition: all 0.3s;
 }
 
-.logo-area:hover {
+.sidebar .logo-area:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
@@ -482,7 +483,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.logo-text {
+.sidebar .logo-text {
   font-size: 18px;
   font-weight: 600;
   color: #fff;
@@ -496,7 +497,8 @@ onUnmounted(() => {
   padding: 8px;
 }
 
-:deep(.el-menu-item) {
+/* 菜单项白字规则限定到 .sidebar */
+.sidebar :deep(.el-menu-item) {
   height: 44px;
   margin: 2px 0;
   border-radius: 8px;
@@ -504,17 +506,17 @@ onUnmounted(() => {
   transition: all 0.3s;
 }
 
-:deep(.el-menu-item:hover) {
+.sidebar :deep(.el-menu-item:hover) {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
 }
 
-:deep(.el-menu-item.is-active) {
+.sidebar :deep(.el-menu-item.is-active) {
   background: linear-gradient(90deg, rgba(64, 158, 255, 0.2) 0%, rgba(64, 158, 255, 0.1) 100%);
   color: var(--el-color-primary);
 }
 
-:deep(.el-menu-item.is-active)::before {
+.sidebar :deep(.el-menu-item.is-active)::before {
   content: '';
   position: absolute;
   left: 0;
@@ -531,7 +533,7 @@ onUnmounted(() => {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.version-info {
+.sidebar .version-info {
   text-align: center;
   font-size: 12px;
   color: rgba(255, 255, 255, 0.3);
@@ -546,8 +548,8 @@ onUnmounted(() => {
 /* ========== Header ========== */
 .main-header {
   height: 60px;
-  background: #fff;
-  border-bottom: 1px solid #e8eaec;
+  background: var(--el-bg-color);
+  border-bottom: 1px solid var(--el-border-color-light);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -569,7 +571,7 @@ onUnmounted(() => {
 }
 
 .collapse-btn:hover {
-  background: #e8eaec;
+  background: var(--el-fill-color);
   transform: scale(1.05);
 }
 
@@ -603,7 +605,7 @@ onUnmounted(() => {
 :deep(.global-search .el-input__wrapper:hover),
 :deep(.global-search .el-input__wrapper.is-focus) {
   border-color: var(--el-color-primary);
-  background: #fff;
+  background: var(--el-bg-color);
   box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.1);
 }
 
@@ -612,8 +614,8 @@ onUnmounted(() => {
   padding: 2px 6px;
   font-size: 11px;
   font-family: inherit;
-  background: #fff;
-  border: 1px solid #dcdfe6;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color);
   border-radius: 4px;
   color: var(--el-text-color-secondary);
 }
@@ -629,7 +631,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  background: #fef0f0;
+  background: var(--el-color-danger-light-9);
   border-radius: 20px;
   font-size: 12px;
   color: var(--el-color-danger);
@@ -637,7 +639,7 @@ onUnmounted(() => {
 }
 
 .ws-status.connected {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
@@ -667,7 +669,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid #e8eaec;
+  border-bottom: 1px solid var(--el-border-color-light);
   font-weight: 500;
 }
 
@@ -694,7 +696,7 @@ onUnmounted(() => {
 }
 
 .notification-item.unread {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
 }
 
 .notification-icon {
@@ -708,17 +710,17 @@ onUnmounted(() => {
 }
 
 .notification-icon.info {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
 }
 
 .notification-icon.warning {
-  background: #fef0f0;
+  background: var(--el-color-danger-light-9);
   color: var(--el-color-warning);
 }
 
 .notification-icon.success {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
@@ -731,7 +733,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 13px;
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .notification-desc {
@@ -770,7 +772,7 @@ onUnmounted(() => {
 
 .user-name {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 /* ========== 主内容区 ========== */
@@ -828,7 +830,7 @@ onUnmounted(() => {
 
 /* 平板 */
 @media (min-width: 769px) and (max-width: 1024px) {
-  .logo-text {
+  .sidebar .logo-text {
     display: none;
   }
   
@@ -842,5 +844,85 @@ onUnmounted(() => {
   .main-content {
     padding: 24px 32px;
   }
+}
+</style>
+
+<!-- ========== 移动端抽屉 :global 样式 (Teleport 到 body，scoped 无法覆盖) ========== -->
+<style>
+.mobile-sidebar-drawer {
+  /* 抽屉容器背景使用 Element Plus token */
+  --el-drawer-bg-color: var(--el-bg-color);
+}
+
+.mobile-sidebar-drawer .el-drawer__body {
+  background: var(--el-bg-color);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+/* 抽屉内 logo 区域 */
+.mobile-sidebar-drawer .logo-area {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--el-border-color-light);
+  transition: all 0.3s;
+  flex-shrink: 0;
+}
+
+.mobile-sidebar-drawer .logo-area:hover {
+  background: var(--el-fill-color-light);
+}
+
+.mobile-sidebar-drawer .logo-text {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  white-space: nowrap;
+}
+
+/* 抽屉内菜单 */
+.mobile-sidebar-drawer .sidebar-menu {
+  flex: 1;
+  border-right: none;
+  background: transparent;
+  padding: 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-sidebar-drawer .el-menu-item {
+  height: 44px;
+  margin: 2px 0;
+  border-radius: 8px;
+  color: var(--el-text-color-regular);
+  transition: all 0.3s;
+}
+
+.mobile-sidebar-drawer .el-menu-item:hover {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+
+.mobile-sidebar-drawer .el-menu-item.is-active {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+.mobile-sidebar-drawer .el-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--el-color-primary);
+  border-radius: 0 3px 3px 0;
 }
 </style>
