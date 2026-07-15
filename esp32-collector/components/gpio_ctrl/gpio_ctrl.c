@@ -43,6 +43,7 @@ typedef struct {
 } gpio_pin_state_t;
 
 static gpio_pin_state_t s_pin_state[GPIO_CTRL_MAX_PINS];
+static uint8_t s_output_level[GPIO_CTRL_MAX_PINS];
 static SemaphoreHandle_t s_config_mutex = NULL;
 static volatile bool s_reconfiguring = false;
 
@@ -145,6 +146,7 @@ static esp_err_t apply_config(int pin, int direction, int initial_level)
             ESP_LOGE(TAG, "gpio_set_level(pin=%d, init) failed: %s", pin, esp_err_to_name(ret));
             return ret;
         }
+        s_output_level[pin] = initial_level ? 1 : 0;
     }
 
     s_pin_state[pin].configured = true;
@@ -210,6 +212,7 @@ esp_err_t gpio_ctrl_set(int pin, int level)
     if (s_pin_state[pin].direction != GPIO_DIR_OUTPUT) return ESP_ERR_INVALID_STATE;
 
     esp_err_t ret = gpio_set_level(pin, level ? 1 : 0);
+    if (ret == ESP_OK) s_output_level[pin] = level ? 1 : 0;
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "set: pin=%d failed: %s", pin, esp_err_to_name(ret));
     }
@@ -222,6 +225,7 @@ int gpio_ctrl_read(int pin)
     if (!is_valid_pin(pin)) return -1;
     if (!s_pin_state[pin].configured) return -1;
 
+    if (s_pin_state[pin].direction == GPIO_DIR_OUTPUT) return s_output_level[pin];
     return gpio_get_level(pin);
 }
 
@@ -290,8 +294,9 @@ esp_err_t gpio_ctrl_toggle(int pin)
     if (s_pin_state[pin].direction != GPIO_DIR_OUTPUT) return ESP_ERR_INVALID_STATE;
 
     /* Atomic toggle: read then set inverse */
-    int level = gpio_get_level(pin);
+    int level = s_output_level[pin];
     esp_err_t ret = gpio_set_level(pin, level ? 0 : 1);
+    if (ret == ESP_OK) s_output_level[pin] = level ? 0 : 1;
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "toggle: pin=%d failed: %s", pin, esp_err_to_name(ret));
     }
