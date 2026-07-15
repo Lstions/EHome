@@ -51,39 +51,6 @@ func adminRequest(t *testing.T, r *gin.Engine, method, target string, body []byt
 	return w
 }
 
-func TestLogStreamAPI_RequiresAdminRole(t *testing.T) {
-	db := setupTestDB(t)
-	if err := db.AutoMigrate(&models.NodeLog{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Create(&models.Node{NodeID: "node-log-viewer"}).Error; err != nil {
-		t.Fatal(err)
-	}
-	r := setupRouter()
-	v1 := r.Group("/api/v1")
-	v1.Use(JWTAuth())
-	registerLogStreamRoutes(v1.Group("/nodes"), db, nil)
-	token, err := GenerateToken(2, "viewer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/api/v1/nodes/node-log-viewer/log-config"},
-		{http.MethodGet, "/api/v1/nodes/node-log-viewer/logs"},
-		{http.MethodPut, "/api/v1/nodes/node-log-viewer/log-config"},
-		{http.MethodPut, "/api/v1/nodes/node-log-viewer/log-persist"},
-		{http.MethodDelete, "/api/v1/nodes/node-log-viewer/logs"},
-	} {
-		req := httptest.NewRequest(tc.method, tc.path, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("%s %s=%d want 403", tc.method, tc.path, w.Code)
-		}
-	}
-}
-
 func TestLogStreamConfigAndPersistWritesValidateAndRetainZeroValues(t *testing.T) {
 	r, node := newAdminLogRouter(t)
 	w := adminRequest(t, r, http.MethodGet, "/api/v1/nodes/"+node.NodeID+"/log-config", nil)

@@ -3,15 +3,15 @@
     <el-button :icon="currentIcon" circle aria-label="切换主题" />
     <template #dropdown>
       <el-dropdown-menu>
-        <el-dropdown-item command="light" :disabled="themeStore.mode === 'light'">
+        <el-dropdown-item command="light" :disabled="!themeStore.followsSystem && themeStore.mode === 'light'">
           <el-icon><Sunny /></el-icon>
           <span style="margin-left: 8px">亮色模式</span>
         </el-dropdown-item>
-        <el-dropdown-item command="dark" :disabled="themeStore.mode === 'dark'">
+        <el-dropdown-item command="dark" :disabled="!themeStore.followsSystem && themeStore.mode === 'dark'">
           <el-icon><Moon /></el-icon>
           <span style="margin-left: 8px">暗色模式</span>
         </el-dropdown-item>
-        <el-dropdown-item divided command="system">
+        <el-dropdown-item divided command="system" :disabled="themeStore.followsSystem">
           <el-icon><Monitor /></el-icon>
           <span style="margin-left: 8px">跟随系统</span>
         </el-dropdown-item>
@@ -33,10 +33,7 @@ const currentIcon = computed(() => {
 
 const handleCommand = (command: string) => {
   if (command === 'system') {
-    // 清除本地存储，跟随系统
-    localStorage.removeItem('theme')
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    themeStore.setTheme(isDark ? 'dark' : 'light')
+    themeStore.followSystem()
   } else {
     themeStore.setTheme(command as ThemeMode)
   }

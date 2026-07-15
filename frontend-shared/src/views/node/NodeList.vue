@@ -99,7 +99,7 @@
           <el-icon><Plus /></el-icon>
           添加节点
         </el-button>
-        <el-button type="primary" @click="refreshData">
+        <el-button type="primary" @click="refreshData" :loading="refreshing">
           <el-icon><Refresh /></el-icon>
           刷新
         </el-button>
@@ -314,8 +314,6 @@ const nodeStore = useNodeStore()
 const wsStore = useWebSocketStore()
 
 // 状态
-const loading = ref(false)
-const nodes = ref<any[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -328,6 +326,13 @@ const routeSearch = typeof route.query.search === 'string' ? route.query.search 
 const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
 if (routeSearch) searchKeyword.value = routeSearch
 if (routeStatus === 'online' || routeStatus === 'offline') statusFilter.value = routeStatus
+
+const getListParams = () => ({ page: currentPage.value, page_size: pageSize.value })
+const initialCache = nodeStore.getCachedList(getListParams())
+const hasInitialCache = !!initialCache
+const loading = ref(!hasInitialCache)
+const refreshing = ref(false)
+const nodes = ref<any[]>(initialCache?.items || [])
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || statusFilter.value || modelFilter.value))
 
@@ -381,20 +386,24 @@ const updateStats = () => {
 
 // 获取节点列表
 // silent=true: 不显示骨架屏（用于 WS 推送的静默刷新）
-const fetchNodes = async (silent = false) => {
-  if (!silent) loading.value = true
+let listRequestSequence = 0
+const fetchNodes = async (silent = false, force = false, throwOnError = false) => {
+  const sequence = ++listRequestSequence
+  const params = getListParams()
+  const showInitialSkeleton = !silent && !nodeStore.hasCachedList(params)
+  if (showInitialSkeleton) loading.value = true
   try {
-    await nodeStore.fetchNodes({
-      page: currentPage.value,
-      page_size: pageSize.value
-    })
-    nodes.value = nodeStore.nodes
-    total.value = nodeStore.total
+    await nodeStore.fetchNodes(params, force)
+    if (sequence !== listRequestSequence) return
+    const cached = nodeStore.getCachedList(params)
+    nodes.value = cached?.items || []
+    total.value = cached?.total || 0
     updateStats()
   } catch (error: any) {
-    ElMessage.error('获取节点列表失败')
+    if (sequence === listRequestSequence) ElMessage.error('获取节点列表失败')
+    if (throwOnError) throw error
   } finally {
-    if (!silent) loading.value = false
+    if (showInitialSkeleton && sequence === listRequestSequence) loading.value = false
   }
 }
 
@@ -409,9 +418,16 @@ const debouncedSilentRefresh = () => {
 }
 
 // 刷新数据
-const refreshData = () => {
-  fetchNodes()
-  ElMessage.success('数据已刷新')
+const refreshData = async () => {
+  refreshing.value = true
+  try {
+    await fetchNodes(false, true, true)
+    ElMessage.success('数据已刷新')
+  } catch {
+    // fetchNodes already displayed the request error.
+  } finally {
+    refreshing.value = false
+  }
 }
 
 // 搜索和筛选
@@ -454,6 +470,7 @@ const handleQuickAction = (action: string, node: any) => {
 
 // 删除
 const handleDelete = async (row: any) => {
+  let deleted = false
   try {
     await ElMessageBox.confirm(
       `确定要删除节点 "${row.name}" 吗？此操作不可恢复。`,
@@ -462,10 +479,18 @@ const handleDelete = async (row: any) => {
     )
     
     await nodeStore.deleteNode(row.id)
+    deleted = true
+    nodes.value = nodes.value.filter(node => node.id !== row.id && node.node_id !== String(row.id))
+    total.value = Math.max(0, total.value - 1)
+    updateStats()
     ElMessage.success('删除成功')
-    await fetchNodes()
+    try {
+      await fetchNodes(false, true, true)
+    } catch {
+      ElMessage.warning('节点已删除，但列表刷新失败，请稍后刷新')
+    }
   } catch (error: any) {
-    if (error !== 'cancel') {
+    if (error !== 'cancel' && !deleted) {
       ElMessage.error('删除失败')
     }
   }
@@ -539,7 +564,7 @@ onUnmounted(() => {
 }
 
 .stat-card {
-  background: #fff;
+  background: var(--card-bg);
   border-radius: 12px;
   padding: 20px;
   display: flex;
@@ -552,7 +577,7 @@ onUnmounted(() => {
 
 .stat-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-md);
 }
 
 .stat-icon {
@@ -662,7 +687,7 @@ onUnmounted(() => {
 
 .collector-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-lg);
 }
 
 .collector-card.offline {
@@ -692,7 +717,7 @@ onUnmounted(() => {
 }
 
 .collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
-.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, #b1b3b8 100%); }
+.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
 
 .collector-meta h3 {
   margin: 0;

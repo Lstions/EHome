@@ -22,6 +22,37 @@ export const THEME_COLORS = {
   info: '#909399',
 } as const
 
+export type ThemeColors = { [K in keyof typeof THEME_COLORS]: string }
+
+/** Resolve current CSS theme tokens for Canvas/JS contexts. */
+export function getThemeColors(): ThemeColors {
+  if (typeof document === 'undefined') return THEME_COLORS
+  const styles = getComputedStyle(document.documentElement)
+  const resolve = (token: string, fallback: string) => styles.getPropertyValue(token).trim() || fallback
+  return {
+    primary: resolve('--color-primary', THEME_COLORS.primary),
+    success: resolve('--color-success', THEME_COLORS.success),
+    warning: resolve('--color-warning', THEME_COLORS.warning),
+    danger: resolve('--color-danger', THEME_COLORS.danger),
+    info: resolve('--color-info', THEME_COLORS.info),
+  }
+}
+
+export function getThemeSurfaceColors() {
+  if (typeof document === 'undefined') {
+    return { text: '#303133', regular: '#606266', border: '#e8eaec', split: '#ebeef5', overlay: '#ffffff' }
+  }
+  const styles = getComputedStyle(document.documentElement)
+  const resolve = (token: string, fallback: string) => styles.getPropertyValue(token).trim() || fallback
+  return {
+    text: resolve('--text-color-primary', '#303133'),
+    regular: resolve('--text-color-regular', '#606266'),
+    border: resolve('--border-color', '#e8eaec'),
+    split: resolve('--border-color-light', '#ebeef5'),
+    overlay: resolve('--bg-color-overlay', '#ffffff'),
+  }
+}
+
 // Light variants for gradients (mirror var(--el-color-*-light-3))
 export const THEME_COLORS_LIGHT = {
   primary: '#79bbff',
@@ -39,9 +70,10 @@ export const THEME_COLORS_LIGHT = {
  * - quality < 60: danger (red)
  */
 export function getQualityColor(quality: number): string {
-  if (quality >= 80) return THEME_COLORS.success
-  if (quality >= 60) return THEME_COLORS.warning
-  return THEME_COLORS.danger
+  const colors = getThemeColors()
+  if (quality >= 80) return colors.success
+  if (quality >= 60) return colors.warning
+  return colors.danger
 }
 
 /**
@@ -51,7 +83,8 @@ export function getQualityColor(quality: number): string {
  * - ms >= 200: danger (red)
  */
 export function getLatencyColor(ms: number): string {
-  if (ms < 50) return THEME_COLORS.success
-  if (ms < 200) return THEME_COLORS.warning
-  return THEME_COLORS.danger
+  const colors = getThemeColors()
+  if (ms < 50) return colors.success
+  if (ms < 200) return colors.warning
+  return colors.danger
 }

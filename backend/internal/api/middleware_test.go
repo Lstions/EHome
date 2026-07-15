@@ -124,19 +124,19 @@ func TestGenerateToken(t *testing.T) {
 	}
 }
 
-func TestJWTAuth_ExplicitDevelopmentBypass(t *testing.T) {
+func TestJWTAuth_DevelopmentBypassIsRetired(t *testing.T) {
 	t.Setenv("GIN_MODE", "debug")
 	t.Setenv("EHOME_ENV", "development")
 	t.Setenv("EHOME_DEV_BYPASS_AUTH", "true")
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(JWTAuth(), RequireRole("admin"))
+	r.Use(JWTAuth())
 	r.GET("/test", func(c *gin.Context) { role, _ := c.Get("role"); c.JSON(http.StatusOK, gin.H{"role": role}) })
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/test", nil)
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("development bypass expected 200, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("retired development bypass must return 401, got %d", w.Code)
 	}
 }
 

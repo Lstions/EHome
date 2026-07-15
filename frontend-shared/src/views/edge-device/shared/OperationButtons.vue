@@ -27,8 +27,16 @@
   </el-card>
 
   <!-- Operation params dialog -->
-  <el-dialog v-model="opDialogVisible" :title="opDialogTitle" width="420px" align-center>
-    <el-form ref="opFormRef" :model="opParamValues" label-width="100px">
+  <el-dialog
+    v-model="opDialogVisible"
+    :title="opDialogTitle"
+    width="420px"
+    align-center
+    :close-on-press-escape="!opDialogLoading"
+    :show-close="!opDialogLoading"
+    :before-close="handleDialogClose"
+  >
+    <el-form ref="opFormRef" :model="opParamValues" label-width="100px" :disabled="opDialogLoading">
       <el-form-item
         v-for="param in opDialogParams"
         :key="param.name"
@@ -64,14 +72,14 @@
       </el-form-item>
     </el-form>
     <template #footer>
-      <el-button @click="opDialogVisible = false">取消</el-button>
+      <el-button :disabled="opDialogLoading" @click="opDialogVisible = false">取消</el-button>
       <el-button type="primary" :loading="opDialogLoading" @click="submitOperationDialog">确定</el-button>
     </template>
   </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance } from 'element-plus'
 import { edgeDeviceApi, type EdgeDevice, type ExecuteOperationResponse } from '@/api/edgeDevice'
@@ -115,6 +123,11 @@ const opParamValues = ref<Record<string, number | string>>({})
 const opDialogLoading = ref(false)
 const currentOpKey = ref('')
 const opFormRef = ref<FormInstance>()
+let operationGeneration = 0
+const handleDialogClose = (done: () => void) => {
+  if (opDialogLoading.value) return
+  done()
+}
 
 function isNumericType(type: string): boolean {
   return ['uint8', 'uint16', 'int8', 'int16', 'int32', 'uint32', 'float'].includes(type)
@@ -158,36 +171,46 @@ async function submitOperationDialog() {
 
   opDialogLoading.value = true
   operationLoading[opKey] = true
+  const id = props.deviceId
+  const generation = operationGeneration
   try {
-    const id = props.deviceId
     const result = await edgeDeviceApi.executeOperation(id, opKey, opParamValues.value)
+    if (generation !== operationGeneration || props.deviceId !== id) return
     await handleOperationResult(opKey, op, result)
+    if (generation !== operationGeneration || props.deviceId !== id) return
     opDialogVisible.value = false
   } catch (error: any) {
+    if (generation !== operationGeneration || props.deviceId !== id) return
     ElMessage.error(error.message || '操作执行失败')
   } finally {
-    opDialogLoading.value = false
-    operationLoading[opKey] = false
+    if (generation === operationGeneration && props.deviceId === id) {
+      opDialogLoading.value = false
+      operationLoading[opKey] = false
+    }
   }
 }
 
 async function executeConfigOperation(opKey: string, op: OperationDef) {
   if (!props.device) return
+  const id = props.deviceId
+  const generation = operationGeneration
   if (op.type === 'write') {
     try {
       await ElMessageBox.confirm(`确定要执行"${op.label}"操作吗？`, '确认操作',
         { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' })
     } catch { return }
   }
+  if (generation !== operationGeneration || props.deviceId !== id) return
   operationLoading[opKey] = true
   try {
-    const id = props.deviceId
     const result = await edgeDeviceApi.executeOperation(id, opKey)
+    if (generation !== operationGeneration || props.deviceId !== id) return
     await handleOperationResult(opKey, op, result)
   } catch (error: any) {
+    if (generation !== operationGeneration || props.deviceId !== id) return
     ElMessage.error(error.message || '操作执行失败')
   } finally {
-    operationLoading[opKey] = false
+    if (generation === operationGeneration && props.deviceId === id) operationLoading[opKey] = false
   }
 }
 
@@ -205,6 +228,17 @@ async function handleOperationResult(opKey: string, op: OperationDef, result: Ex
     }
   }
 }
+
+watch(() => props.deviceId, () => {
+  operationGeneration++
+  opDialogVisible.value = false
+  opDialogLoading.value = false
+  for (const key of Object.keys(operationLoading)) operationLoading[key] = false
+})
+
+onUnmounted(() => {
+  operationGeneration++
+})
 </script>
 
 <style scoped>

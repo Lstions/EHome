@@ -8,7 +8,7 @@
           <div class="avatar-block">
             <el-avatar :size="80" :icon="UserFilled" />
             <h3 class="username">{{ userInfo?.username || '—' }}</h3>
-            <el-tag :type="roleTagType" size="default">{{ roleLabel }}</el-tag>
+            <el-tag type="danger" size="default">系统管理员</el-tag>
             <p class="email">{{ userInfo?.email || '未设置邮箱' }}</p>
           </div>
         </el-card>
@@ -46,22 +46,12 @@ import { UserFilled } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useUserStore } from '@/stores/user'
-import { userApi } from '@/api/user'
+import { authApi } from '@/api/auth'
 import feedback from '@/utils/feedback'
 
 const userStore = useUserStore()
 const userInfo = computed(() => userStore.userInfo)
 
-const roleLabel = computed(() => {
-  const map: Record<string, string> = { admin: '管理员', operator: '操作员', viewer: '观察者' }
-  return map[userInfo.value?.role || 'viewer'] || '观察者'
-})
-const roleTagType = computed<'danger' | 'warning' | 'info'>(() => {
-  const r = userInfo.value?.role
-  if (r === 'admin') return 'danger'
-  if (r === 'operator') return 'warning'
-  return 'info'
-})
 
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
@@ -98,7 +88,7 @@ const handleChangePassword = async () => {
   if (!valid) return
   submitting.value = true
   try {
-    await userApi.changePassword({
+    await authApi.changePassword({
       old_password: form.old_password,
       new_password: form.new_password,
     })

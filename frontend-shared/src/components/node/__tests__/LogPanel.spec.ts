@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, type PropType } from 'vue'
 import type { RealtimeLogLine, RealtimeSearchCountState } from '@/components/node/logTypes'
+import source from '../LogPanel.vue?raw'
 
 const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(),
@@ -132,7 +133,13 @@ async function settlePanel(): Promise<VueWrapper> {
   return wrapper
 }
 
-describe('LogPanel orchestration', () => {
+describe('LogPanel', () => {
+  it('hands loading ownership to the new collector', () => {
+    expect(source).toContain('operationGeneration++')
+    expect(source).toContain('streamLoading.value = false')
+    expect(source).toContain('persistLoading.value = false')
+    expect(source).toContain('operation !== operationGeneration')
+  })
   const wrappers: VueWrapper[] = []
 
   beforeEach(() => {
@@ -163,6 +170,14 @@ describe('LogPanel orchestration', () => {
     wrappers.push(wrapper)
     return wrapper
   }
+
+  it('reloads configuration when collector changes', async () => {
+    const wrapper = track(await settlePanel())
+    await wrapper.setProps({ collectorId: 'node-2', nodeDeviceId: 'NODE-2' })
+    await flushPromises()
+    expect(mocks.getLogConfig).toHaveBeenLastCalledWith('node-2')
+    expect(wrapper.text()).toContain('历史 node-2')
+  })
 
   it('loads configuration, subscribes with cleanup, and always exposes saved history', async () => {
     const wrapper = track(await settlePanel())

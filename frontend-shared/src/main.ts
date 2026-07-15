@@ -7,7 +7,7 @@ import './styles/theme.css'
 import router from './router'
 import i18n from './locales'
 import App from './App.vue'
-import permissionDirective from '@/directives/permission'
+
 import { logger } from '@/utils/logger'
 import { initLoginLockout } from '@/utils/loginLockout'
 
@@ -46,8 +46,6 @@ app.config.warnHandler = (msg, instance, trace) => {
   })
 }
 
-// 注册自定义指令
-app.directive('permission', permissionDirective)
 
 app.use(createPinia())
 app.use(router)

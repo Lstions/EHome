@@ -8,7 +8,7 @@ import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart as BarChartSeries } from 'echarts/charts'
 import { GridComponent, TooltipComponent, TitleComponent, MarkLineComponent } from 'echarts/components'
-import { THEME_COLORS } from '@/utils/theme'
+import { getThemeColors, getThemeSurfaceColors } from '@/utils/theme'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 
 echarts.use([CanvasRenderer, BarChartSeries, GridComponent, TooltipComponent, TitleComponent, MarkLineComponent])
@@ -25,16 +25,20 @@ const props = withDefaults(defineProps<{
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
+let themeObserver: MutationObserver | null = null
 
 function getBarColors(values: number[]): string[] {
+  const colors = getThemeColors()
   return values.map(v => {
-    if (v < 3.0) return THEME_COLORS.danger    // red - too low
-    if (v > 3.6) return THEME_COLORS.warning   // orange - too high
-    return THEME_COLORS.success                 // green - normal
+    if (v < 3.0) return colors.danger
+    if (v > 3.6) return colors.warning
+    return colors.success
   })
 }
 
 function buildChartOption() {
+  const colors = getThemeColors()
+  const surface = getThemeSurfaceColors()
   const labels = Array.from({ length: props.cellCount }, (_, i) => `#${i + 1}`)
   const values = props.voltages.length > 0
     ? props.voltages.slice(0, props.cellCount)
@@ -49,6 +53,9 @@ function buildChartOption() {
     animation: false,
     tooltip: {
       trigger: 'axis' as const,
+      backgroundColor: surface.overlay,
+      borderColor: surface.border,
+      textStyle: { color: surface.text },
       formatter: (params: any) => {
         const p = Array.isArray(params) ? params[0] : params
         return `${p.name}<br/>电压: <b>${typeof p.value === 'number' ? p.value.toFixed(3) : '0.000'}V</b>`
@@ -58,33 +65,38 @@ function buildChartOption() {
     xAxis: {
       type: 'category' as const,
       data: labels,
-      axisLabel: { fontSize: 11 }
+      axisLine: { lineStyle: { color: surface.border } },
+      axisLabel: { color: surface.regular, fontSize: 11 }
     },
     yAxis: {
       type: 'value' as const,
       name: '电压(V)',
       min,
       max,
-      axisLabel: { formatter: (v: number) => v.toFixed(3) }
+      axisLine: { lineStyle: { color: surface.border } },
+      splitLine: { lineStyle: { color: surface.split } },
+      axisLabel: { color: surface.regular, formatter: (v: number) => v.toFixed(3) },
+      nameTextStyle: { color: surface.regular }
     },
     series: [{
       type: 'bar',
       data: values.map(v => ({
         value: v,
-        itemStyle: { color: v === 0 ? THEME_COLORS.info : getBarColors([v])[0] }
+        itemStyle: { color: v === 0 ? colors.info : getBarColors([v])[0] }
       })),
       barWidth: '60%',
       label: {
         show: true,
         position: 'top',
         formatter: (p: any) => p.value > 0 ? p.value.toFixed(3) : '',
-        fontSize: 10
+        fontSize: 10,
+        color: surface.text
       },
       markLine: {
         silent: true,
         data: [
-          { yAxis: 3.0, lineStyle: { color: THEME_COLORS.danger, type: 'dashed' }, label: { formatter: '下限' } },
-          { yAxis: 3.6, lineStyle: { color: THEME_COLORS.warning, type: 'dashed' }, label: { formatter: '上限' } },
+          { yAxis: 3.0, lineStyle: { color: colors.danger, type: 'dashed' }, label: { formatter: '下限', color: surface.regular } },
+          { yAxis: 3.6, lineStyle: { color: colors.warning, type: 'dashed' }, label: { formatter: '上限', color: surface.regular } },
         ]
       }
     }]
@@ -99,25 +111,7 @@ function initChart() {
 
 function updateChart() {
   if (!chartInstance) return
-  const values = props.voltages.length > 0
-    ? props.voltages.slice(0, props.cellCount)
-    : new Array(props.cellCount).fill(0)
-
-  const validValues = values.filter(v => typeof v === 'number' && v > 0)
-  const { min, max } = validValues.length === 0
-    ? { min: 2.5, max: 4.0 }
-    : computeAdaptiveYAxisRange(validValues, { minBound: 2.0, maxBound: 4.5 })
-
-  chartInstance.setOption({
-    animation: false,
-    yAxis: { min, max },
-    series: [{
-      data: values.map(v => ({
-        value: v,
-        itemStyle: { color: v === 0 ? THEME_COLORS.info : getBarColors([v])[0] }
-      }))
-    }]
-  })
+  chartInstance.setOption(buildChartOption(), { notMerge: true })
 }
 
 watch(() => props.voltages, () => updateChart(), { deep: true })
@@ -127,12 +121,16 @@ onMounted(() => {
   if (chartRef.value) {
     resizeObserver = new ResizeObserver(() => chartInstance?.resize())
     resizeObserver.observe(chartRef.value)
+    themeObserver = new MutationObserver(updateChart)
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
   }
 })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  themeObserver?.disconnect()
+  themeObserver = null
   chartInstance?.dispose()
   chartInstance = null
 })

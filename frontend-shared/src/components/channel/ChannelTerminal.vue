@@ -225,6 +225,7 @@ interface LogEntry {
 
 const logEntries = ref<LogEntry[]>([])
 const localChannels = ref<Channel[]>([])
+let channelRequestGeneration = 0
 
 // Command history
 const commandHistory = ref<string[]>([])
@@ -359,6 +360,9 @@ const formatData = (data: string | any, panel: string, index: number): string =>
 // --- Send ---
 const sendData = async () => {
   if (!selectedChannelId.value) return
+  const collectorId = props.collectorId
+  const nodeDeviceId = props.nodeDeviceId
+  const generation = channelRequestGeneration
 
   let hexData: string
   if (inputMode.value === 'ascii') {
@@ -379,6 +383,7 @@ const sendData = async () => {
     return
   }
   const deviceId = String(channel.node_id)
+  const channelId = selectedChannelId.value
 
   // Save to command history
   const historyEntry = inputMode.value === 'ascii' ? `[ASCII] ${inputDataAscii.value}` : inputData.value
@@ -392,11 +397,12 @@ const sendData = async () => {
   lastOptimisticTx.value = { data: hexData, time: Date.now() }
 
   if (wsStore.connected) {
+    if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
     wsStore.send({
       type: 'send',
       payload: {
         device_id: deviceId,
-        channel_id: selectedChannelId.value,
+        channel_id: channelId,
         data_hex: hexData,
         ...(showReadSize.value && readSize.value > 0 && { read_size: readSize.value }),
       }
@@ -407,18 +413,20 @@ const sendData = async () => {
   } else {
     sending.value = true
     try {
-      const result = await channelApi.terminalWrite(selectedChannelId.value!, deviceId, hexData, showReadSize.value ? readSize.value : undefined)
+      const result = await channelApi.terminalWrite(channelId, deviceId, hexData, showReadSize.value ? readSize.value : undefined)
+      if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
       if (result.success) ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
       else {
         ElMessage.error('发送失败')
         addLog({ type: 'error', direction: 'TX', time: now(), data: '操作失败', source: 'manual' })
       }
     } catch (error: any) {
+      if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
       const errMsg = error?.response?.data?.message || error?.message || '未知错误'
       ElMessage.error(`发送失败: ${errMsg}`)
       addLog({ type: 'error', direction: 'TX', time: now(), data: errMsg, source: 'manual' })
     } finally {
-      sending.value = false
+      if (generation === channelRequestGeneration && props.collectorId === collectorId && props.nodeDeviceId === nodeDeviceId) sending.value = false
     }
   }
 }
@@ -473,9 +481,13 @@ const exportLog = () => {
 // --- Channel loading ---
 const loadChannels = async () => {
   if (props.channels?.length) return
+  const generation = ++channelRequestGeneration
+  const collectorId = props.collectorId
+  const nodeDeviceId = props.nodeDeviceId
   try {
-    const queryId = props.nodeDeviceId || props.collectorId
+    const queryId = nodeDeviceId || collectorId
     const result = await channelApi.getList(queryId as any)
+    if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
     localChannels.value = Array.isArray(result) ? result : (result.items || [])
   } catch (error: any) {
     logger.error('加载通道列表失败', { error: String(error) })
@@ -525,8 +537,32 @@ const setupWebSocket = () => {
 
 // --- Lifecycle ---
 onMounted(() => { loadChannels(); setupWebSocket() })
-onUnmounted(() => { if (unsubscribeChannelData) { unsubscribeChannelData(); unsubscribeChannelData = null } })
-watch(() => props.channels, () => { /* no auto-select */ })
+onUnmounted(() => {
+  channelRequestGeneration++
+  sending.value = false
+  if (unsubscribeChannelData) { unsubscribeChannelData(); unsubscribeChannelData = null }
+})
+watch(() => [props.collectorId, props.nodeDeviceId] as const, () => {
+  channelRequestGeneration++
+  selectedChannelId.value = undefined
+  inputData.value = ''
+  inputDataAscii.value = ''
+  readSize.value = 0
+  localChannels.value = []
+  clearLog()
+  lastOptimisticTx.value = null
+  sending.value = false
+  void loadChannels()
+})
+watch(() => props.channels, (channels) => {
+  if (channels?.length) {
+    channelRequestGeneration++
+    localChannels.value = []
+  }
+  if (selectedChannelId.value && !channels?.some(channel => channel.id === selectedChannelId.value)) {
+    selectedChannelId.value = undefined
+  }
+})
 </script>
 
 <style scoped>

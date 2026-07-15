@@ -18,7 +18,7 @@ import (
 func registerLogStreamRoutes(n *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
 	// Every operational log endpoint is an administrator action: logs can expose
 	// topology, configuration, and error detail, and configuration/deletion mutate state.
-	admin := n.Group("", RequireRole("admin"))
+	admin := n.Group("")
 	admin.GET("/:id/log-config", getLogConfig(db))
 	admin.PUT("/:id/log-config", updateLogConfig(db, nodeMgr))
 	admin.PUT("/:id/log-persist", updateLogPersist(db, nodeMgr))

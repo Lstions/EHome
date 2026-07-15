@@ -12,13 +12,15 @@
  *   from high-frequency WS pushes.
  * - Uses useRealtimeData internally for WS subscription + data management.
  */
-import { ref, computed, watch, type Ref } from 'vue'
+import { ref, computed, watch, onUnmounted, type Ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { haApi } from '@/api/homeassistant'
 import { useWebSocketStore } from '@/stores/websocket'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { useRealtimeData } from '@/composables/useRealtimeData'
 import { logger } from '@/utils/logger'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 export interface UseDeviceDataOptions {
   /** Max realtime data items to cache, default 200 */
@@ -34,12 +36,26 @@ export function useDeviceData(
   const { maxItems = 200, errorPrefix = '获取边缘设备详情失败' } = options
 
   const wsStore = useWebSocketStore()
+  const edgeDeviceStore = useEdgeDeviceStore()
   const wsConnected = computed(() => wsStore.connected)
 
   const device = ref<EdgeDevice | null>(null)
   const loading = ref(true)
   const refreshing = ref(false)
   const syncingHA = ref(false)
+  let operationGeneration = 0
+
+  watch(deviceId, () => {
+    operationGeneration++
+    syncingHA.value = false
+    refreshing.value = false
+  })
+
+  onUnmounted(() => {
+    operationGeneration++
+    syncingHA.value = false
+    refreshing.value = false
+  })
 
   // ── Realtime data via shared composable ──────────────────────
   const {
@@ -56,12 +72,16 @@ export function useDeviceData(
   const latestData = realtimeLatest
 
   // ── API: fetch device detail ─────────────────────────────────
-  const fetchDeviceDetail = async () => {
+  let deviceDetailSequence = 0
+  const fetchDeviceDetail = async (throwOnError = false) => {
     const id = deviceId.value
     if (id === null) return
+    const sequence = ++deviceDetailSequence
     loading.value = true
     try {
-      device.value = await edgeDeviceApi.getDetail(id)
+      const result = await edgeDeviceStore.fetchDetail(id, true)
+      if (sequence !== deviceDetailSequence || deviceId.value !== id) return
+      device.value = result
       // Merge device.last_data into latestData without clobbering
       // potential WS real-time updates that arrived during the API call.
       if (device.value.last_data) {
@@ -71,19 +91,23 @@ export function useDeviceData(
           latestData.value = { ...device.value.last_data }
         }
       }
-    } catch {
+    } catch (error) {
       ElMessage.error(errorPrefix)
+      if (throwOnError) throw error
     } finally {
-      loading.value = false
+      if (sequence === deviceDetailSequence) loading.value = false
     }
   }
 
   // ── API: fetch latest data snapshot ──────────────────────────
-  const fetchLatestData = async () => {
+  let latestDataSequence = 0
+  const fetchLatestData = async (throwOnError = false) => {
     const id = deviceId.value
     if (id === null) return
+    const sequence = ++latestDataSequence
     try {
       const response = await edgeDeviceApi.getLatestData(id)
+      if (sequence !== latestDataSequence || deviceId.value !== id) return
       if (response) {
         let parsedData = response.data || {}
         if (response.data_json) {
@@ -107,6 +131,7 @@ export function useDeviceData(
       }
     } catch (error: any) {
       logger.error('获取最新数据失败', { error: String(error) })
+      if (throwOnError) throw error
     }
   }
 
@@ -118,8 +143,8 @@ export function useDeviceData(
   const handleRefresh = async (onChartsRefreshed?: () => void) => {
     refreshing.value = true
     try {
-      await fetchDeviceDetail()
-      await fetchLatestData()
+      await fetchDeviceDetail(true)
+      await fetchLatestData(true)
       onChartsRefreshed?.()
       ElMessage.success('数据已刷新')
     } catch {
@@ -133,14 +158,19 @@ export function useDeviceData(
   const handleSyncToHA = async () => {
     const id = deviceId.value
     if (id === null) return
+    const operation = operationGeneration
+    const sessionGeneration = getSessionGeneration()
     syncingHA.value = true
     try {
       await haApi.syncDevice(id)
+      assertSessionGeneration(sessionGeneration)
+      if (operation !== operationGeneration || deviceId.value !== id) return
       ElMessage.success('设备已同步到HomeAssistant')
     } catch (error: any) {
+      if (operation !== operationGeneration || deviceId.value !== id) return
       ElMessage.error('同步到HomeAssistant失败: ' + (error.message || '未知错误'))
     } finally {
-      syncingHA.value = false
+      if (operation === operationGeneration && deviceId.value === id) syncingHA.value = false
     }
   }
 

@@ -1,4 +1,5 @@
 import axios, { type AxiosInstance, type AxiosError } from 'axios'
+import { clearSessionCaches } from '@/utils/sessionCache'
 
 // 创建 Axios 实例
 const apiClient: AxiosInstance = axios.create({
@@ -35,6 +36,7 @@ apiClient.interceptors.response.use(
   (error: AxiosError) => {
     if (error.response?.status === 401) {
       // Token过期，清除并跳转登录
+      clearSessionCaches()
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
       window.location.href = '/login'

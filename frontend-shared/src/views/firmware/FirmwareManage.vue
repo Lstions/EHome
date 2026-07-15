@@ -223,10 +223,13 @@ const handleBatchDelete = async () => {
 
     batchDeleting.value = true
     const ids = selectedFirmwares.value.map(f => f.id)
-    await Promise.all(ids.map(id => firmwareStore.deleteFirmware(id)))
+    const results = await Promise.allSettled(ids.map(id => firmwareStore.deleteFirmware(id)))
+    const succeeded = results.filter(result => result.status === 'fulfilled').length
+    const failed = results.length - succeeded
     firmwares.value = firmwareStore.list
     total.value = firmwareStore.total
-    ElMessage.success(`已删除 ${count} 个固件`)
+    if (succeeded > 0) ElMessage.success(`已删除 ${succeeded} 个固件`)
+    if (failed > 0) ElMessage.warning(`${failed} 个固件删除失败`)
     selectedFirmwares.value = []
   } catch (error: any) {
     if (error !== 'cancel') {

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeList from '@/views/node/NodeList.vue'
+import nodeListSource from '@/views/node/NodeList.vue?raw'
 
 // Mock vue-router
 const { mockPush, mockRoute } = vi.hoisted(() => ({
@@ -18,6 +19,16 @@ const mockFetchNodes = vi.fn(() => Promise.resolve())
 vi.mock('@/stores/node', () => ({
   useNodeStore: () => ({
     fetchNodes: mockFetchNodes,
+    hasCachedList: vi.fn(() => true),
+    hasFreshList: vi.fn(() => true),
+    getCachedList: vi.fn(() => ({
+      items: [
+        { id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online', connection_quality: 95, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 20 },
+        { id: 2, node_id: 'node-2', name: 'Collector-B', model: 'RPi4', status: 'offline', connection_quality: 0, firmware_version: '1.1.0', last_online_time: '2025-01-01T00:00:00Z', latency_ms: 0 },
+        { id: 3, node_id: 'node-3', name: 'Collector-C', model: 'ESP32', status: 'online', connection_quality: 70, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 50 },
+      ],
+      total: 3,
+    })),
     deleteNode: vi.fn(() => Promise.resolve()),
     nodes: [
       { id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online', connection_quality: 95, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 20 },
@@ -69,6 +80,17 @@ describe('NodeList.vue', () => {
     sessionStorage.clear()
   })
 
+  it('ignores stale component-level list completions', () => {
+    expect(nodeListSource).toContain('sequence !== listRequestSequence')
+  })
+
+  it('propagates explicit refresh errors and immediately removes deleted nodes', () => {
+    expect(nodeListSource).toContain('fetchNodes(false, true, true)')
+    expect(nodeListSource).toContain('catch {')
+    expect(nodeListSource).toContain('nodes.value = nodes.value.filter')
+    expect(nodeListSource).toContain('节点已删除，但列表刷新失败')
+  })
+
   it('renders the collector page container', async () => {
     const wrapper = mount(NodeList, { global: { stubs } })
     await flushPromises()
@@ -79,6 +101,25 @@ describe('NodeList.vue', () => {
     mount(NodeList, { global: { stubs } })
     await flushPromises()
     expect(mockFetchNodes).toHaveBeenCalled()
+  })
+
+  it('keeps cached node content visible while validating the list cache', () => {
+    const wrapper = mount(NodeList, { global: { stubs } })
+    expect(wrapper.find('[data-testid="skeleton-card"]').exists()).toBe(false)
+  })
+
+  it('forces the store request for an explicit user refresh', async () => {
+    const wrapper = mount(NodeList, { global: { stubs } })
+    await flushPromises()
+    mockFetchNodes.mockClear()
+
+    ;(wrapper.vm as any).refreshData()
+    await flushPromises()
+
+    expect(mockFetchNodes).toHaveBeenCalledWith(
+      { page: 1, page_size: 20 },
+      true,
+    )
   })
 
   it('renders stat cards after loading', async () => {

@@ -195,10 +195,7 @@
                   <el-icon><UserFilled /></el-icon>
                   <span>个人设置</span>
                 </el-dropdown-item>
-                <el-dropdown-item v-if="userStore.isAdmin" command="users">
-                  <el-icon><UserFilled /></el-icon>
-                  <span>用户管理</span>
-                </el-dropdown-item>
+
                 <el-dropdown-item divided command="logout">
                   <el-icon><SwitchButton /></el-icon>
                   <span>退出登录</span>
@@ -280,26 +277,18 @@ const warmPrimaryListData = () => Promise.allSettled([
   edgeDeviceStore.fetchList({ page: 1, page_size: 24 }),
 ])
 
-// 菜单项（全部，含角色要求）
+// 单主体模式下，所有菜单仅由登录状态保护。
 const allMenuItems = [
-  { path: '/dashboard', title: '仪表盘', icon: Odometer, roles: undefined },
-  { path: '/node', title: '节点', icon: Connection, roles: undefined },
-  { path: '/edge-device', title: '边缘设备', icon: Cpu, roles: undefined },
-  { path: '/channel', title: '通道管理', icon: Connection, roles: undefined },
-  { path: '/data', title: '数据面板', icon: DataLine, roles: undefined },
-  { path: '/firmware', title: '固件管理', icon: Files, roles: ['admin', 'operator'] as string[] },
-  { path: '/device-configs', title: '配置模板', icon: Setting, roles: ['admin', 'operator'] as string[] },
-  { path: '/monitor', title: '系统监控', icon: DataAnalysis, roles: ['admin'] as string[] },
+	{ path: '/dashboard', title: '仪表盘', icon: Odometer },
+	{ path: '/node', title: '节点', icon: Connection },
+	{ path: '/edge-device', title: '边缘设备', icon: Cpu },
+	{ path: '/channel', title: '通道管理', icon: Connection },
+	{ path: '/data', title: '数据面板', icon: DataLine },
+	{ path: '/firmware', title: '固件管理', icon: Files },
+	{ path: '/device-configs', title: '配置模板', icon: Setting },
+	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
 ]
-
-// 根据角色过滤菜单
-const menuItems = computed(() => {
-  const role = userStore.role
-  return allMenuItems.filter((item) => {
-    if (!item.roles) return true
-    return item.roles.includes(role)
-  })
-})
+const menuItems = computed(() => allMenuItems)
 
 const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
 
@@ -436,8 +425,6 @@ const handleCommand = async (command: string) => {
     router.push('/login')
   } else if (command === 'profile') {
     router.push('/profile')
-  } else if (command === 'users') {
-    router.push('/admin/users')
   }
 }
 
@@ -581,13 +568,13 @@ onUnmounted(() => {
 /* ========== Header ========== */
 .main-header {
   height: 60px;
-  background: #fff;
-  border-bottom: 1px solid #e8eaec;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--header-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
   z-index: 100;
 }
 
@@ -604,7 +591,7 @@ onUnmounted(() => {
 }
 
 .collapse-btn:hover {
-  background: #e8eaec;
+  background: var(--hover-bg);
   transform: scale(1.05);
 }
 
@@ -638,8 +625,8 @@ onUnmounted(() => {
 :deep(.global-search .el-input__wrapper:hover),
 :deep(.global-search .el-input__wrapper.is-focus) {
   border-color: var(--el-color-primary);
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.1);
+  background: var(--bg-color-overlay);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
 }
 
 .search-kbd {
@@ -647,8 +634,8 @@ onUnmounted(() => {
   padding: 2px 6px;
   font-size: 11px;
   font-family: inherit;
-  background: #fff;
-  border: 1px solid #dcdfe6;
+  background: var(--bg-color-overlay);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   color: var(--el-text-color-secondary);
 }
@@ -664,7 +651,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  background: #fef0f0;
+  background: var(--el-color-danger-light-9);
   border-radius: 20px;
   font-size: 12px;
   color: var(--el-color-danger);
@@ -672,7 +659,7 @@ onUnmounted(() => {
 }
 
 .ws-status.connected {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
@@ -702,7 +689,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid #e8eaec;
+  border-bottom: 1px solid var(--divider-color);
   font-weight: 500;
 }
 
@@ -729,7 +716,7 @@ onUnmounted(() => {
 }
 
 .notification-item.unread {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
 }
 
 .notification-icon {
@@ -743,17 +730,17 @@ onUnmounted(() => {
 }
 
 .notification-icon.info {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
 }
 
 .notification-icon.warning {
-  background: #fef0f0;
+  background: var(--el-color-danger-light-9);
   color: var(--el-color-warning);
 }
 
 .notification-icon.success {
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   color: var(--el-color-success);
 }
 
@@ -766,7 +753,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 13px;
   font-weight: 500;
-  color: #303133;
+  color: var(--text-color-primary);
 }
 
 .notification-desc {
@@ -805,7 +792,7 @@ onUnmounted(() => {
 
 .user-name {
   font-size: 14px;
-  color: #303133;
+  color: var(--text-color-primary);
 }
 
 /* ========== 主内容区 ========== */

@@ -283,8 +283,8 @@
         :total="total"
         :page-sizes="[12, 24, 48]"
         layout="total, sizes, prev, pager, next"
-        @current-change="fetchDevices"
-        @size-change="fetchDevices"
+        @current-change="() => fetchDevices()"
+        @size-change="() => fetchDevices()"
       />
     </div>
 
@@ -294,6 +294,9 @@
       :title="editingDeviceId ? '编辑边缘设备' : '创建边缘设备'"
       width="680px"
       :close-on-click-modal="false"
+      :close-on-press-escape="!submitting"
+      :show-close="!submitting"
+      :before-close="handleCreateDialogClose"
       class="create-device-dialog"
     >
       <!-- 步骤指示器 -->
@@ -522,7 +525,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { 
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid, 
@@ -536,7 +539,6 @@ import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { edgeDeviceApi } from '@/api/edgeDevice'
-import { channelApi } from '@/api/channel'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import client from '@/api/client'
 import type { Channel } from '@/api/channel'
@@ -545,6 +547,7 @@ import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 const router = useRouter()
 const route = useRoute()
@@ -562,8 +565,6 @@ const selectedDevices = ref<any[]>([])
 const tableRef = ref()
 
 // 状态
-const loading = ref(false)
-const devices = ref<any[]>([])
 const collectors = ref<any[]>([])
 const currentPage = ref(1)
 const pageSize = ref(24)
@@ -574,6 +575,7 @@ const statusFilter = ref('')
 const hardwareFilter = ref('')
 const showCreateDialog = ref(false)
 const submitting = ref(false)
+let createTransactionGeneration = 0
 
 const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''
 const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
@@ -581,6 +583,17 @@ if (routeSearch) searchKeyword.value = routeSearch
 if (['active', 'online', 'offline', 'warning', 'error', 'disabled'].includes(routeStatus)) {
   statusFilter.value = routeStatus
 }
+
+const getListParams = () => {
+  const params: any = { page: currentPage.value, page_size: pageSize.value }
+  if (typeFilter.value) params.device_type = typeFilter.value
+  if (statusFilter.value) params.status = statusFilter.value
+  return params
+}
+const initialCache = edgeDeviceStore.getCachedList(getListParams())
+const hasInitialCache = !!initialCache
+const loading = ref(!hasInitialCache)
+const devices = ref<any[]>(initialCache?.items || [])
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
 
@@ -602,8 +615,9 @@ const loadTemplates = async () => {
   try {
     const res = await deviceConfigApi.getList({ page_size: 100 })
     availableTemplates.value = res.list || []
-  } catch {
+  } catch (error) {
     availableTemplates.value = []
+    throw error
   }
 }
 
@@ -711,33 +725,48 @@ const filteredDevices = computed(() => {
 })
 
 // 获取边缘设备列表
-const fetchDevices = async () => {
-  loading.value = true
+let listRequestSequence = 0
+const fetchDevices = async (force = false, throwOnError = false) => {
+  const sequence = ++listRequestSequence
+  const params = getListParams()
+  const showInitialSkeleton = !edgeDeviceStore.hasCachedList(params)
+  if (showInitialSkeleton) loading.value = true
   try {
-    const params: any = {
-      page: currentPage.value,
-      page_size: pageSize.value
-    }
-    if (typeFilter.value) params.device_type = typeFilter.value
-    if (statusFilter.value) params.status = statusFilter.value
-    await edgeDeviceStore.fetchList(params, true) // force=true for user-triggered refresh
-    devices.value = edgeDeviceStore.list
-    total.value = edgeDeviceStore.listTotal
+    await edgeDeviceStore.fetchList(params, force)
+    if (sequence !== listRequestSequence) return
+    const cached = edgeDeviceStore.getCachedList(params)
+    devices.value = cached?.items || []
+    total.value = cached?.total || 0
     updateStats()
-  } catch {
-    ElMessage.error('获取边缘设备列表失败')
+  } catch (error) {
+    if (sequence === listRequestSequence && !throwOnError) ElMessage.error('获取边缘设备列表失败')
+    if (throwOnError) throw error
   } finally {
-    loading.value = false
+    if (showInitialSkeleton && sequence === listRequestSequence) loading.value = false
   }
 }
 
 // 获取节点列表
 const fetchNodes = async () => {
+  const params = { page: 1, page_size: 100 }
+  await nodeStore.fetchNodes(params)
+  collectors.value = nodeStore.getCachedList(params)?.items || []
+}
+
+let wizardDataLoaded = false
+const loadCreateWizardData = async () => {
+  if (wizardDataLoaded) return
   try {
-    await nodeStore.fetchNodes({ page: 1, page_size: 100 })
-    collectors.value = nodeStore.nodes
+    await Promise.all([
+      fetchNodes(),
+      channelStore.channels.length === 0 ? channelStore.fetchChannels(undefined, true) : Promise.resolve(),
+      parserStore.parsers.length === 0 ? parserStore.fetchParsers(true) : Promise.resolve(),
+      loadTemplates(),
+    ])
+    wizardDataLoaded = true
   } catch (error) {
-    console.error('获取节点失败', error)
+    wizardDataLoaded = false
+    ElMessage.error('创建向导数据加载失败，请重试')
   }
 }
 
@@ -917,20 +946,27 @@ const handleEdit = (device: any) => {
 }
 
 const handleDelete = async (device: any) => {
+  let deleted = false
   try {
     await ElMessageBox.confirm(
       `确定要删除边缘设备 "${device.name}" 吗？`,
       '警告',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
-    
+
     await edgeDeviceStore.deleteDevice(device.id)
-    devices.value = edgeDeviceStore.list
-    total.value = edgeDeviceStore.listTotal
+    deleted = true
+    devices.value = devices.value.filter(item => item.id !== device.id)
+    total.value = Math.max(0, total.value - 1)
     updateStats()
+    try {
+      await fetchDevices(true, true)
+    } catch {
+      ElMessage.warning('设备已删除，但列表刷新失败，请稍后刷新')
+    }
     ElMessage.success('删除成功')
   } catch (error: any) {
-    if (error !== 'cancel') {
+    if (error !== 'cancel' && !deleted) {
       ElMessage.error('删除失败')
     }
   }
@@ -952,12 +988,21 @@ const handleBatchDelete = async () => {
     )
 
     const ids = selectedDevices.value.map(d => d.id)
-    await Promise.all(ids.map(id => edgeDeviceStore.deleteDevice(id)))
-    devices.value = edgeDeviceStore.list
-    total.value = edgeDeviceStore.listTotal
+    const results = await Promise.allSettled(ids.map(id => edgeDeviceStore.deleteDevice(id)))
+    const succeeded = results.filter(result => result.status === 'fulfilled').length
+    const failed = results.length - succeeded
+    const succeededIds = new Set(ids.filter((_id, index) => results[index].status === 'fulfilled'))
+    devices.value = devices.value.filter(device => !succeededIds.has(device.id))
+    total.value = Math.max(0, total.value - succeeded)
     updateStats()
     selectedDevices.value = []
-    ElMessage.success(`成功删除 ${ids.length} 个设备`)
+    if (succeeded > 0) ElMessage.success(`成功删除 ${succeeded} 个设备`)
+    if (failed > 0) ElMessage.error(`${failed} 个设备删除失败`)
+    try {
+      await fetchDevices(true, true)
+    } catch {
+      ElMessage.warning('删除结果已保存，但列表刷新失败，请稍后刷新')
+    }
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error('批量删除失败')
@@ -998,69 +1043,98 @@ const handleBatchExport = () => {
 // 表单操作
 const handleCreate = async () => {
   if (!deviceFormRef.value) return
+  const sessionGeneration = getSessionGeneration()
+  const transactionGeneration = createTransactionGeneration
   
   try {
     await deviceFormRef.value.validate()
+    assertSessionGeneration(sessionGeneration)
+    if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
     if (!deviceForm.node_id) {
       ElMessage.warning('请选择所属节点')
       return
     }
     submitting.value = true
+    const frozenDeviceForm = { ...deviceForm }
+    const frozenNewChannel = { ...newChannel }
+    const frozenParser = selectedParser.value
+      ? { ...selectedParser.value, hardware_types: [...(selectedParser.value.hardware_types || [])] }
+      : null
+    const selectedChannelConfig = selectedChannel.value?.config
+    const frozenSelectedChannel = selectedChannel.value
+      ? {
+          ...selectedChannel.value,
+          config: typeof selectedChannelConfig === 'string'
+            ? (() => { try { return JSON.parse(selectedChannelConfig) } catch { return {} } })()
+            : { ...(selectedChannelConfig || {}) },
+        }
+      : null
+    const frozenChannelTab = channelTab.value
+    const frozenEditingDeviceId = editingDeviceId.value
 
     // 编辑模式 — 字段对齐后端 UpdateDTO: name/type/enabled/interval_ms/hardware_id/node_id/channel_id
-    if (editingDeviceId.value) {
-      await edgeDeviceApi.update(editingDeviceId.value, {
-        name: deviceForm.name,
-        node_id: String(deviceForm.node_id!),
-        type: deviceForm.device_type,
-        hardware_id: deviceForm.hardware_id,
-        interval_ms: deviceForm.interval_ms,
+    if (frozenEditingDeviceId) {
+      await edgeDeviceApi.update(frozenEditingDeviceId, {
+        name: frozenDeviceForm.name,
+        node_id: String(frozenDeviceForm.node_id!),
+        type: frozenDeviceForm.device_type,
+        hardware_id: frozenDeviceForm.hardware_id,
+        interval_ms: frozenDeviceForm.interval_ms,
       })
+      assertSessionGeneration(sessionGeneration)
+      if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
+      edgeDeviceStore.invalidateLists()
+      edgeDeviceStore.invalidateDetail(frozenEditingDeviceId)
       ElMessage.success('设备更新成功')
       showCreateDialog.value = false
       resetCreateDialog()
-      await fetchDevices()
+      await fetchDevices(true)
       return
     }
 
     let channelId: number | undefined
     
     // 根据 parser 的 hardware_types 推断协议类型
-    const parserHwTypes = selectedParser.value?.hardware_types || []
+    if (!frozenParser) throw new Error('请先选择解析器')
+    const parserHwTypes = frozenParser.hardware_types || []
     const protocol = parserHwTypes.includes('uart') ? 'stream' : 'modbus'
     
     // 如果选了"创建新通道"，先创建通道
     let targetChannel: Channel
-    if (channelTab.value === 'create') {
-      const address = newChannel.hardware_type === 'spi' 
-        ? newChannel.spi_cs.toString()
-        : newChannel.address
+    if (frozenChannelTab === 'create') {
+      const address = frozenNewChannel.hardware_type === 'spi'
+        ? frozenNewChannel.spi_cs.toString()
+        : frozenNewChannel.address
       
       const ch = await channelStore.createChannel({
-        node_id: deviceForm.node_id!,
-        hardware_type: newChannel.hardware_type as any,
-        hardware_id: newChannel.hardware_id,
+        node_id: frozenDeviceForm.node_id!,
+        hardware_type: frozenNewChannel.hardware_type as any,
+        hardware_id: frozenNewChannel.hardware_id,
         address: address || undefined,
         status: 'active',
         config: { 
-          interval_ms: newChannel.interval_ms,
-          device_type: selectedParser.value!.id  // 传递 device_type 以便模板构建
+          interval_ms: frozenNewChannel.interval_ms,
+          device_type: frozenParser.id  // 传递 device_type 以便模板构建
         }
       }) as Channel
+      assertSessionGeneration(sessionGeneration)
+      if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       channelId = ch.id
       targetChannel = ch
-    } else if (selectedChannel.value) {
-      channelId = selectedChannel.value.id
-      targetChannel = selectedChannel.value
+    } else if (frozenSelectedChannel) {
+      channelId = frozenSelectedChannel.id
+      targetChannel = frozenSelectedChannel
       
       // 已有通道场景：如果 channel.config 没有 device_type，补上
       if (!targetChannel.config?.device_type && targetChannel.id) {
-        await channelApi.update(targetChannel.id, {
+        await channelStore.updateChannel(targetChannel.id, {
           config: JSON.stringify({
             ...targetChannel.config,
-            device_type: selectedParser.value!.id
+            device_type: frozenParser.id
           })
         })
+        assertSessionGeneration(sessionGeneration)
+        if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       }
     } else {
       throw new Error('请先选择或创建通道')
@@ -1068,21 +1142,24 @@ const handleCreate = async () => {
     
     // 创建边缘设备 (后端 DTO 字段: type, node_id(string), channel_id, hardware_id)
     await edgeDeviceApi.create({
-      name: String(deviceForm.name),
-      node_id: String(deviceForm.node_id!),
+      name: String(frozenDeviceForm.name),
+      node_id: String(frozenDeviceForm.node_id!),
       channel_id: channelId!,
-      type: selectedParser.value!.id,
+      type: frozenParser.id,
       hardware_id: targetChannel.hardware_id,
     })
+    assertSessionGeneration(sessionGeneration)
+    if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
+    edgeDeviceStore.invalidateLists()
     
     ElMessage.success('创建成功')
     showCreateDialog.value = false
     resetCreateDialog()
-    await fetchDevices()
+    await fetchDevices(true)
   } catch (error: any) {
-    ElMessage.error(error.message || '创建失败')
+    if (transactionGeneration === createTransactionGeneration) ElMessage.error(error.message || '创建失败')
   } finally {
-    submitting.value = false
+    if (transactionGeneration === createTransactionGeneration) submitting.value = false
   }
 }
 
@@ -1140,8 +1217,15 @@ watch([typeFilter, statusFilter], () => {
 })
 
 // 监听对话框打开，重置向导状态
+const handleCreateDialogClose = (done: () => void) => {
+  if (submitting.value) return
+  done()
+}
+
 watch(showCreateDialog, (val) => {
   if (!val) {
+    createTransactionGeneration++
+    submitting.value = false
     createStep.value = 0
     selectedParser.value = null
     selectedChannel.value = null
@@ -1155,18 +1239,16 @@ watch(showCreateDialog, (val) => {
     deviceForm.hardware_id = ''
     deviceForm.interval_ms = 1000
   } else {
-    // 加载解析器和通道列表
-    if (parserStore.parsers.length === 0) parserStore.fetchParsers()
-    if (channelStore.channels.length === 0) channelStore.fetchChannels()
+    void loadCreateWizardData()
   }
 })
 
 onMounted(() => {
   fetchDevices()
-  fetchNodes()
-  channelStore.fetchChannels()
-  parserStore.fetchParsers()
-  loadTemplates()
+})
+
+onUnmounted(() => {
+  createTransactionGeneration++
 })
 </script>
 
@@ -1179,8 +1261,8 @@ onMounted(() => {
 
 .template-quick-pick {
   margin-bottom: 16px;
-  border: 1px dashed #d9d9d9;
-  background: #fafbfc;
+  border: 1px dashed var(--border-color);
+  background: var(--bg-color-secondary);
 }
 .template-pick-row {
   display: flex;
@@ -1216,7 +1298,7 @@ onMounted(() => {
 }
 
 .stat-card {
-  background: #fff;
+  background: var(--card-bg);
   border-radius: 12px;
   padding: 20px;
   display: flex;
@@ -1229,7 +1311,7 @@ onMounted(() => {
 
 .stat-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-md);
 }
 
 .stat-icon {
@@ -1660,8 +1742,8 @@ code.fact-value {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #f0f6ff;
-  border: 1px solid #a3cfff;
+  background: var(--el-color-primary-light-9);
+  border: 1px solid var(--el-color-primary-light-5);
   border-radius: 8px;
   padding: 10px 16px;
 }

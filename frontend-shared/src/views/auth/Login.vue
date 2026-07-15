@@ -61,6 +61,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { authApi, type AuthState } from '@/api/auth'
 import { getRemainingLockSeconds } from '@/utils/loginLockout'
 import LoginForm from '@/components/forms/LoginForm.vue'
 
@@ -69,6 +70,7 @@ const route = useRoute()
 const userStore = useUserStore()
 const loginFormRef = ref()
 const errorMsg = ref('')
+const authState = ref<AuthState | null>(null)
 const lockSeconds = ref(0)
 let lockTimer: ReturnType<typeof setInterval> | null = null
 
@@ -83,6 +85,14 @@ const refreshLock = () => {
 }
 
 onMounted(() => {
+  void authApi.initialization().then((status) => {
+    authState.value = status.state
+    if (status.state === 'migration_required') errorMsg.value = '系统认证迁移尚未完成，请运行 ehomectl auth migration-status 并完成迁移。'
+    if (status.state === 'uninitialized') errorMsg.value = '系统尚未初始化，请先使用本机初始化凭据完成初始化。'
+    if (status.state === 'disabled') errorMsg.value = '系统认证已被禁用，请联系管理员。'
+  }).catch(() => {
+    errorMsg.value = '无法读取系统认证状态，请检查开发后端。'
+  })
   refreshLock()
   if (lockSeconds.value > 0) {
     lockTimer = setInterval(refreshLock, 1000)
@@ -94,6 +104,10 @@ onUnmounted(() => {
 })
 
 const handleLogin = async (username: string, password: string, rememberMe: boolean) => {
+  if (authState.value && authState.value !== 'initialized') {
+    loginFormRef.value?.setLoading?.(false)
+    return
+  }
   errorMsg.value = ''
 
   // 前端锁定检查
@@ -189,9 +203,9 @@ const handleError = (error: any) => {
 .login-box {
   width: 420px;
   padding: 48px 40px 32px;
-  background: rgba(255, 255, 255, 0.97);
+  background: color-mix(in srgb, var(--card-bg) 97%, transparent);
   border-radius: 16px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-lg);
   z-index: 1;
   position: relative;
 }
@@ -214,7 +228,7 @@ const handleError = (error: any) => {
   margin: 0;
   font-size: 24px;
   font-weight: 700;
-  color: #303133;
+  color: var(--text-color-primary);
   letter-spacing: -0.5px;
 }
 .brand-desc {

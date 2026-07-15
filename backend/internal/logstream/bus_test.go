@@ -221,7 +221,7 @@ func TestDBConsumer_AlwaysRegistered(t *testing.T) {
 	}
 }
 
-func TestWSConsumer_BroadcastEventToAdminRole(t *testing.T) {
+func TestWSConsumer_BroadcastsAuthenticatedEvent(t *testing.T) {
 	mockHub := &mockWSHub{}
 	consumer := NewWSConsumer(mockHub)
 
@@ -242,23 +242,18 @@ func TestWSConsumer_BroadcastEventToAdminRole(t *testing.T) {
 	if mockHub.events[0].eventType != "node_log" {
 		t.Errorf("event type = %s, want node_log", mockHub.events[0].eventType)
 	}
-	if mockHub.events[0].role != "admin" {
-		t.Errorf("role = %s, want admin", mockHub.events[0].role)
-	}
 }
 
 type mockWSHub struct {
 	events []struct {
 		eventType string
 		payload   interface{}
-		role      string
 	}
 }
 
-func (m *mockWSHub) BroadcastEventToRole(eventType string, payload interface{}, role string) {
+func (m *mockWSHub) BroadcastAuthenticatedEvent(eventType string, payload interface{}) {
 	m.events = append(m.events, struct {
 		eventType string
 		payload   interface{}
-		role      string
-	}{eventType, payload, role})
+	}{eventType, payload})
 }

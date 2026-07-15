@@ -46,7 +46,7 @@ defineProps<{
 
 <style scoped>
 .skeleton-card {
-  background: #fff;
+  background: var(--card-bg);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -65,7 +65,7 @@ defineProps<{
 
 .skeleton-icon {
   border-radius: 12px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
 }
 
@@ -81,7 +81,7 @@ defineProps<{
   height: 28px;
   width: 60%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   margin-bottom: 8px;
 }
@@ -94,7 +94,7 @@ defineProps<{
   height: 14px;
   width: 40%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
 }
 
@@ -114,7 +114,7 @@ defineProps<{
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   flex-shrink: 0;
 }
@@ -127,7 +127,7 @@ defineProps<{
   height: 16px;
   width: 60%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   margin-bottom: 8px;
 }
@@ -136,7 +136,7 @@ defineProps<{
   height: 12px;
   width: 80%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
 }
 
@@ -145,13 +145,13 @@ defineProps<{
   display: flex;
   gap: 16px;
   padding: 16px 20px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border-color-light);
 }
 
 .skeleton-cell {
   height: 16px;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   flex: 1;
 }
@@ -172,7 +172,7 @@ defineProps<{
 .skeleton-image {
   height: 160px;
   border-radius: 8px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   margin-bottom: 16px;
 }
@@ -187,7 +187,7 @@ defineProps<{
   height: 14px;
   width: 100%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: var(--skeleton-shimmer);
   background-size: 200% 100%;
   margin-bottom: 8px;
 }

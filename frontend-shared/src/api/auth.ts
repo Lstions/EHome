@@ -5,21 +5,27 @@ export interface LoginRequest {
   password: string
 }
 
-export interface LoginResponse {
-  token: string
-  user: {
-    id: number
-    username: string
-    email: string
-    role: string
-  }
+export interface AccountInfo {
+  id: number
+  username: string
+  email: string
+  enabled?: boolean
 }
 
+export interface LoginResponse {
+  token: string
+  user: AccountInfo
+}
+
+export type AuthState = 'uninitialized' | 'initialized' | 'migration_required' | 'disabled'
+
 export const authApi = {
+  async initialization(): Promise<{ state: AuthState }> {
+    const response = await client.get<unknown, any>('/api/v1/auth/initialization')
+    return (response as any).data as { state: AuthState }
+  },
+
   async login(data: LoginRequest): Promise<LoginResponse> {
-    // Backend returns envelope: {code, data: {token, user}, message}
-    // Interceptor returns response.data = the full envelope,
-    // so we must unwrap response.data to get {token, user}
     const response = await client.post<unknown, any>('/api/v1/auth/login', data)
     return (response as any).data as LoginResponse
   },
@@ -28,7 +34,16 @@ export const authApi = {
     await client.post('/api/v1/auth/logout', {})
   },
 
+  async account(): Promise<AccountInfo> {
+    const response = await client.get<unknown, any>('/api/v1/account')
+    return (response as any).data as AccountInfo
+  },
+
+  async changePassword(data: { old_password: string; new_password: string }): Promise<void> {
+    await client.post('/api/v1/account/password', data)
+  },
+
   getToken(): string {
     return localStorage.getItem('token') || sessionStorage.getItem('token') || ''
-  }
+  },
 }

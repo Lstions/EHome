@@ -1,16 +1,17 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	authservice "ehome/backend/internal/auth"
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
 )
 
 const defaultJWTSecret = "ehome-dev-secret-change-me"
@@ -28,8 +29,7 @@ var jwtSecret = []byte(func() string {
 // Development mode is enabled when GIN_MODE is unset (Gin defaults to debug),
 // GIN_MODE=debug, or EHOME_ENV=development.
 func isDevelopmentMode() bool {
-	ginMode := os.Getenv("GIN_MODE")
-	return ginMode == "" || ginMode == "debug" || os.Getenv("EHOME_ENV") == "development"
+	return strings.EqualFold(os.Getenv("EHOME_ENV"), "development") && os.Getenv("GIN_MODE") == "debug"
 }
 
 // ValidateJWTSecret checks that the JWT secret is not the default value in production.
@@ -43,21 +43,15 @@ func ValidateJWTSecret() {
 	}
 }
 
-// Claims represents the JWT payload
+// Claims is retained only for compatibility tests around legacy token parsing.
 type Claims struct {
 	UserID uint   `json:"user_id"`
 	Role   string `json:"role,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// devAuthBypassEnabled permits no-token local development only when explicitly
-// enabled. It is intentionally impossible in production mode, even if the env
-// variable is accidentally inherited.
-func devAuthBypassEnabled() bool {
-	return isDevelopmentMode() && strings.EqualFold(os.Getenv("EHOME_DEV_BYPASS_AUTH"), "true")
-}
-
-// JWTAuth returns a middleware that validates JWT tokens.
+// JWTAuth validates legacy tokens for compatibility tests only. Production
+// routes use JWTAuthWithDB and the authoritative session-version contract.
 // It checks:
 //   - Authorization: Bearer <token> header
 //   - ?token=<jwt> query parameter (for WebSocket connections)
@@ -66,14 +60,6 @@ func devAuthBypassEnabled() bool {
 // On failure, returns 401.
 func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if devAuthBypassEnabled() {
-			// Explicit local-only bypass. Keep role=admin so development E2E can
-			// exercise routes protected by RequireRole without minting a JWT.
-			c.Set("user_id", uint(0))
-			c.Set("role", "admin")
-			c.Next()
-			return
-		}
 
 		tokenStr := ""
 
@@ -123,24 +109,45 @@ func JWTAuth() gin.HandlerFunc {
 	}
 }
 
-// RequireRole returns a middleware that checks the authenticated user's role.
-// It reads "role" from gin context (set by JWTAuth) and returns 403 if it doesn't match.
-func RequireRole(role string) gin.HandlerFunc {
+// JWTAuthWithDB validates the single authenticated subject against the
+// authoritative database on every request.
+func JWTAuthWithDB(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if devAuthBypassEnabled() {
-			c.Next()
+		tokenStr := extractToken(c)
+		if tokenStr == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "missing authentication token"})
 			return
 		}
-		r, exists := c.Get("role")
-		if !exists || r != role {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"code":    403,
-				"message": fmt.Sprintf("%s role required", role),
-			})
+		claims, err := authservice.ParseSessionToken(tokenStr, jwtSecret, time.Now())
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "invalid or expired token"})
 			return
 		}
+		user, err := authservice.ValidateSessionClaims(db, claims)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "invalid or expired token"})
+			return
+		}
+		c.Set("subject_id", user.ID)
+		c.Set("user_id", user.ID)
+		c.Set("session_version", user.SessionVersion)
+		c.Set("token_expires_at", claims.ExpiresAt.Time)
+		c.Set("token_jti", claims.ID)
 		c.Next()
 	}
+}
+
+func extractToken(c *gin.Context) string {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			if token := strings.TrimSpace(parts[1]); token != "" {
+				return token
+			}
+		}
+	}
+	return strings.TrimSpace(c.Query("token"))
 }
 
 // GenerateToken creates a JWT token for a given user ID and role.

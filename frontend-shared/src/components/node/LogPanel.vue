@@ -78,6 +78,7 @@ import { WS_EVENT } from '@/events/events'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { downloadText, exportCSV } from '@/utils/exportData'
 import { logger } from '@/utils/logger'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import {
   levelText,
   formatUptime,
@@ -115,6 +116,7 @@ const realtimeSearchCountState = ref<RealtimeSearchCountState>({
 const MAX_REALTIME_LINES = 5000
 let nextRealtimeLogId = 1
 let unsubWs: (() => void) | null = null
+let operationGeneration = 0
 
 const filteredRealtimeLogs = computed(() => {
   const keyword = normalizedSearchKeyword(searchKeyword.value)
@@ -168,12 +170,15 @@ function onWsMessage(message: WebSocketMessage): void {
 }
 
 async function loadConfig(): Promise<void> {
+  const collectorId = props.collectorId
   try {
-    const config = await nodeApi.getLogConfig(props.collectorId)
+    const config = await nodeApi.getLogConfig(collectorId)
+    if (props.collectorId !== collectorId) return
     streamEnabled.value = config.stream_enabled
     persistEnabled.value = config.persist_enabled
     logLevel.value = config.level
   } catch (error: unknown) {
+    if (props.collectorId !== collectorId) return
     logger.warn('加载节点日志配置失败', {
       collectorId: String(props.collectorId),
       error: errorMessage(error),
@@ -183,37 +188,55 @@ async function loadConfig(): Promise<void> {
 }
 
 async function onStreamToggle(value: boolean): Promise<void> {
+  const collectorId = props.collectorId
+  const operation = operationGeneration
+  const sessionGeneration = getSessionGeneration()
   streamLoading.value = true
   try {
-    await nodeApi.updateLogConfig(props.collectorId, { stream_enabled: value })
+    await nodeApi.updateLogConfig(collectorId, { stream_enabled: value })
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     ElMessage.success(value ? '日志流已开启' : '日志流已关闭')
   } catch (error: unknown) {
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     streamEnabled.value = !value
     ElMessage.error(`操作失败: ${errorMessage(error)}`)
   } finally {
-    streamLoading.value = false
+    if (operation === operationGeneration && props.collectorId === collectorId) streamLoading.value = false
   }
 }
 
 async function onLevelChange(value: number): Promise<void> {
+  const collectorId = props.collectorId
+  const operation = operationGeneration
+  const sessionGeneration = getSessionGeneration()
   try {
-    await nodeApi.updateLogConfig(props.collectorId, { level: value })
+    await nodeApi.updateLogConfig(collectorId, { level: value })
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     ElMessage.success('日志级别已更新')
   } catch (error: unknown) {
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     ElMessage.error(`操作失败: ${errorMessage(error)}`)
   }
 }
 
 async function onPersistToggle(value: boolean): Promise<void> {
+  const collectorId = props.collectorId
+  const operation = operationGeneration
+  const sessionGeneration = getSessionGeneration()
   persistLoading.value = true
   try {
-    await nodeApi.updateLogPersist(props.collectorId, value)
+    await nodeApi.updateLogPersist(collectorId, value)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     ElMessage.success(value ? '持久化已开启' : '持久化已关闭')
   } catch (error: unknown) {
+    if (operation !== operationGeneration || props.collectorId !== collectorId) return
     persistEnabled.value = !value
     ElMessage.error(`操作失败: ${errorMessage(error)}`)
   } finally {
-    persistLoading.value = false
+    if (operation === operationGeneration && props.collectorId === collectorId) persistLoading.value = false
   }
 }
 
@@ -284,7 +307,23 @@ onMounted(() => {
   unsubWs = wsStore.subscribe(WS_EVENT.NODE_LOG, onWsMessage)
 })
 
+watch(() => [props.collectorId, props.nodeDeviceId] as const, ([newCollector, newDevice], [oldCollector, oldDevice]) => {
+  if (newCollector === oldCollector && newDevice === oldDevice) return
+  operationGeneration++
+  streamLoading.value = false
+  persistLoading.value = false
+  clearRealtimeLogs()
+  realtimeReceivedCount.value = 0
+  streamEnabled.value = false
+  persistEnabled.value = false
+  logLevel.value = 2
+  void loadConfig()
+})
+
 onUnmounted(() => {
+  operationGeneration++
+  streamLoading.value = false
+  persistLoading.value = false
   unsubWs?.()
   unsubWs = null
 })

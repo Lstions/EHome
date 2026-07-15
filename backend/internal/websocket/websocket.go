@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strconv"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"ehome/backend/pkg/logger"
 
@@ -21,9 +22,7 @@ type Event struct {
 }
 
 type broadcastMessage struct {
-	data         []byte
-	broadcastAll bool
-	targetRole   string
+	data []byte
 }
 
 // MessageHandler is called when a client sends a message via WebSocket
@@ -45,17 +44,18 @@ type Hub struct {
 	// C4 fix: protected by onMsgMu for concurrent read/write
 	onMsgMu   sync.RWMutex
 	onMessage MessageHandler
+	validator func(subjectID uint, sessionVersion int64) bool
 }
 
 // Client represents a WebSocket client
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
-	// UserID from JWT auth (set during upgrade)
-	UserID string
-	// Role from JWT auth (M3 fix: needed for command authorization)
-	Role string
+	hub            *Hub
+	conn           *websocket.Conn
+	send           chan []byte
+	SubjectID      uint
+	SessionVersion int64
+	ExpiresAt      time.Time
+	JTI            string
 }
 
 var upgrader = websocket.Upgrader{
@@ -66,22 +66,28 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// checkOrigin validates the WebSocket Origin header.
-// Allows all origins — the frontend nginx proxy is the trust boundary.
+// checkOrigin permits same-origin browsers and explicit configured origins.
 func checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		// Non-browser clients (e.g., curl) don't send Origin
+		// Non-browser clients are still authenticated by the session middleware.
 		return true
 	}
-
-	_, err := url.Parse(origin)
+	parsed, err := url.Parse(origin)
 	if err != nil {
 		logger.Errorf("WebSocket origin parse error: %v", err)
 		return false
 	}
 
-	return true
+	if strings.EqualFold(parsed.Host, r.Host) {
+		return true
+	}
+	for _, allowed := range strings.Split(os.Getenv("EHOME_ALLOWED_ORIGINS"), ",") {
+		if strings.EqualFold(strings.TrimSpace(allowed), origin) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewHub creates a new WebSocket hub
@@ -101,6 +107,36 @@ func (h *Hub) SetOnMessage(handler MessageHandler) {
 	h.onMsgMu.Lock()
 	h.onMessage = handler
 	h.onMsgMu.Unlock()
+}
+
+func (h *Hub) SetSessionValidator(validator func(subjectID uint, sessionVersion int64) bool) {
+	h.onMsgMu.Lock()
+	h.validator = validator
+	h.onMsgMu.Unlock()
+}
+
+func (h *Hub) DisconnectSubject(subjectID uint) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	count := 0
+	for client := range h.clients {
+		if client.SubjectID == subjectID {
+			delete(h.clients, client)
+			close(client.send)
+			count++
+		}
+	}
+	return count
+}
+
+func (c *Client) SessionValid() bool {
+	if c.hub == nil || c.SubjectID == 0 || c.SessionVersion <= 0 || c.ExpiresAt.IsZero() || !time.Now().Before(c.ExpiresAt) {
+		return false
+	}
+	c.hub.onMsgMu.RLock()
+	validator := c.hub.validator
+	c.hub.onMsgMu.RUnlock()
+	return validator != nil && validator(c.SubjectID, c.SessionVersion)
 }
 
 // Run starts the hub event loop
@@ -125,7 +161,7 @@ func (h *Hub) Run() {
 		case message := <-h.broadcast:
 			h.mu.Lock()
 			for client := range h.clients {
-				if !message.broadcastAll && (message.targetRole == "" || client.Role != message.targetRole) {
+				if !client.SessionValid() {
 					continue
 				}
 				select {
@@ -156,7 +192,7 @@ func (h *Hub) Run() {
 
 // Broadcast sends a message to all connected clients
 func (h *Hub) Broadcast(data []byte) {
-	h.broadcast <- broadcastMessage{data: data, broadcastAll: true}
+	h.broadcast <- broadcastMessage{data: data}
 }
 
 // Subscribe returns a channel that receives all broadcast events
@@ -177,20 +213,16 @@ func (h *Hub) Unsubscribe(ch chan Event) {
 	close(ch)
 }
 
-// BroadcastEvent sends a structured event to all clients.
+// BroadcastEvent sends a structured event to authenticated clients.
 func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
-	h.broadcastEvent(eventType, payload, true, "")
+	h.broadcastEvent(eventType, payload)
 }
 
-// BroadcastEventToRole sends a structured event only to external clients with
-// the requested role. The target is trimmed before matching and a blank target
-// fails closed for external clients. Internal subscribers still receive the
-// event because they are trusted backend consumers.
-func (h *Hub) BroadcastEventToRole(eventType string, payload interface{}, role string) {
-	h.broadcastEvent(eventType, payload, false, strings.TrimSpace(role))
+func (h *Hub) BroadcastAuthenticatedEvent(eventType string, payload interface{}) {
+	h.broadcastEvent(eventType, payload)
 }
 
-func (h *Hub) broadcastEvent(eventType string, payload interface{}, broadcastAll bool, targetRole string) {
+func (h *Hub) broadcastEvent(eventType string, payload interface{}) {
 	event := Event{
 		Type:    eventType,
 		Payload: payload,
@@ -200,11 +232,7 @@ func (h *Hub) broadcastEvent(eventType string, payload interface{}, broadcastAll
 		logger.Errorf("Failed to marshal event: %v", err)
 		return
 	}
-	h.broadcast <- broadcastMessage{
-		data:         data,
-		broadcastAll: broadcastAll,
-		targetRole:   targetRole,
-	}
+	h.broadcast <- broadcastMessage{data: data}
 }
 
 // HandleWebSocket handles WebSocket upgrade requests
@@ -215,24 +243,23 @@ func (h *Hub) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	// Extract user_id from JWT auth context (set by middleware)
-	// S4 fix: JWT middleware sets user_id as uint (Claims.UserID), handle both types
 	client := &Client{hub: h, conn: conn, send: make(chan []byte, 256)}
-	if userID, exists := c.Get("user_id"); exists {
-		switch v := userID.(type) {
-		case string:
-			client.UserID = v
-		case uint:
-			client.UserID = strconv.FormatUint(uint64(v), 10)
-		case float64:
-			client.UserID = strconv.FormatUint(uint64(v), 10)
-		}
+	if value, exists := c.Get("subject_id"); exists {
+		client.SubjectID, _ = value.(uint)
 	}
-	// M3 fix: also extract role for command authorization
-	if role, exists := c.Get("role"); exists {
-		if r, ok := role.(string); ok {
-			client.Role = r
-		}
+	if value, exists := c.Get("session_version"); exists {
+		client.SessionVersion, _ = value.(int64)
+	}
+	if value, exists := c.Get("token_expires_at"); exists {
+		client.ExpiresAt, _ = value.(time.Time)
+	}
+	if value, exists := c.Get("token_jti"); exists {
+		client.JTI, _ = value.(string)
+	}
+	if client.SubjectID == 0 {
+		logger.Warnf("WebSocket missing authenticated subject")
+		conn.Close()
+		return
 	}
 	h.register <- client
 

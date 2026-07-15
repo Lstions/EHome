@@ -34,11 +34,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/stores/user', () => ({
   useUserStore: () => ({
-    userInfo: { id: 1, username: 'admin', email: 'admin@test.com', role: 'admin' },
-    role: 'admin',
-    isAdmin: true,
-    isOperator: true,
-    isViewer: false,
+    userInfo: { id: 1, username: 'admin', email: 'admin@test.com' },
     logout: vi.fn(() => Promise.resolve()),
   }),
 }))

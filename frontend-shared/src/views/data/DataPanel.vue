@@ -411,8 +411,9 @@ const loadCompareCategories = async () => {
 
 const fetchDevices = async () => {
   try {
-    await edgeDeviceStore.fetchList({ page_size: 500 })
-    deviceList.value = edgeDeviceStore.list
+    const params = { page: 1, page_size: 500 }
+    await edgeDeviceStore.fetchList(params)
+    deviceList.value = edgeDeviceStore.getCachedList(params)?.items || []
   } catch {
     ElMessage.error('获取设备列表失败')
   }
@@ -880,7 +881,7 @@ onUnmounted(() => {
 
 .stat-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-md);
 }
 
 .stat-content {

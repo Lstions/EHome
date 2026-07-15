@@ -117,11 +117,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
 import { levelText, levelTagType } from '@/components/node/logTypes'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 interface Props {
   collectorId: string | number
@@ -202,12 +203,18 @@ async function clearBefore() {
     return
   }
 
+  const collectorId = props.collectorId
+  const operation = requestGeneration
+  const sessionGeneration = getSessionGeneration()
   try {
-    const result = await nodeApi.deleteNodeLogs(props.collectorId, cleanupBefore.value)
+    const result = await nodeApi.deleteNodeLogs(collectorId, cleanupBefore.value)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== requestGeneration || props.collectorId !== collectorId) return
     ElMessage.success(`已删除 ${result.deleted} 条日志`)
     page.value = 1
     await loadLogs()
   } catch (error: unknown) {
+    if (operation !== requestGeneration || props.collectorId !== collectorId) return
     ElMessage.error(`删除失败: ${errorMessage(error)}`)
   }
 }
@@ -227,12 +234,18 @@ async function clearAll() {
     return
   }
 
+  const collectorId = props.collectorId
+  const operation = requestGeneration
+  const sessionGeneration = getSessionGeneration()
   try {
-    const result = await nodeApi.deleteNodeLogs(props.collectorId)
+    const result = await nodeApi.deleteNodeLogs(collectorId)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== requestGeneration || props.collectorId !== collectorId) return
     ElMessage.success(`已删除 ${result.deleted} 条日志`)
     page.value = 1
     await loadLogs()
   } catch (error: unknown) {
+    if (operation !== requestGeneration || props.collectorId !== collectorId) return
     ElMessage.error(`删除失败: ${errorMessage(error)}`)
   }
 }
@@ -266,6 +279,19 @@ function errorMessage(error: unknown): string {
 }
 
 onMounted(loadLogs)
+
+onUnmounted(() => {
+  requestGeneration++
+})
+
+watch(() => props.collectorId, () => {
+  requestGeneration++
+  logs.value = []
+  total.value = 0
+  page.value = 1
+  cleanupBefore.value = null
+  void loadLogs()
+})
 </script>
 
 <style scoped>

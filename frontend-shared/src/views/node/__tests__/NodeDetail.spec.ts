@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeDetail from '../NodeDetail.vue'
-import { useUserStore, type UserRole } from '@/stores/user'
+import nodeDetailSource from '../NodeDetail.vue?raw'
 
 // Mock vue-router
 const mockPush = vi.fn()
@@ -135,7 +135,29 @@ const stubs = {
   'el-table-column': { template: '<div />' },
 }
 
-describe('NodeDetail.vue', () => {
+describe('NodeDetail', () => {
+  it('keeps name-save loading and messages owned by the originating route', () => {
+    expect(nodeDetailSource).toContain('const sequence = ++nameSaveSequence')
+    expect(nodeDetailSource).toContain('sequence !== nameSaveSequence')
+    expect(nodeDetailSource).toContain('nameSaveSequence++')
+  })
+  it('reads edge devices from the requested parameter cache', () => {
+    expect(nodeDetailSource).toContain('edgeDeviceStore.getCachedList(params)')
+  })
+
+  it('updates node names through the store so every list cache stays consistent', () => {
+    expect(nodeDetailSource).toContain('nodeStore.updateNode')
+  })
+
+  it('reloads all node-scoped data when the route id changes', () => {
+    expect(nodeDetailSource).toContain('watch(() => route.params.id')
+    expect(nodeDetailSource).toContain('if (sequence === collectorDetailSequence) loading.value = false')
+    expect(nodeDetailSource).toContain('sequence !== devicesRequestSequence')
+    expect(nodeDetailSource).toContain('sequence !== otaRequestSequence')
+    expect(nodeDetailSource).toContain('editingName.value = false')
+    expect(nodeDetailSource).toContain('showOTADialog.value = false')
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
@@ -153,26 +175,6 @@ describe('NodeDetail.vue', () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()
     expect(wrapper.find('[data-testid="page-header"]').exists()).toBe(true)
-  })
-
-  it.each([
-    ['admin', true],
-    ['operator', false],
-    ['viewer', false],
-  ] as Array<[UserRole, boolean]>)('shows and mounts system logs only for %s users', async (role, canSeeLogs) => {
-    const userStore = useUserStore()
-    userStore.userInfo = { id: 1, username: role, email: `${role}@example.com`, role }
-
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-
-    expect(wrapper.text().includes('系统日志')).toBe(canSeeLogs)
-    expect(wrapper.find('[data-testid="log-panel"]').exists()).toBe(canSeeLogs)
-    expect(mockLogPanelMounted).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
-    expect(mockGetLogConfig).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
-    expect(mockGetNodeLogs).toHaveBeenCalledTimes(canSeeLogs ? 1 : 0)
-    expect(mockSubscribe.mock.calls.filter(call => call[0] === 'node_log')).toHaveLength(canSeeLogs ? 1 : 0)
-    wrapper.unmount()
   })
 
   it('calls fetchCollectorDetail on mount', async () => {

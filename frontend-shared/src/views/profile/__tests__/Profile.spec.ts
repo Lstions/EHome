@@ -21,8 +21,8 @@ vi.mock('@/stores/user', () => ({
   }),
 }))
 
-vi.mock('@/api/user', () => ({
-  userApi: {
+vi.mock('@/api/auth', () => ({
+  authApi: {
     changePassword: mockChangePassword,
   },
 }))
@@ -76,31 +76,10 @@ describe('Profile.vue', () => {
     expect(vm.userInfo?.email).toBe('admin@test.com')
   })
 
-  it('computes roleLabel correctly for admin', async () => {
+  it('renders the fixed system administrator identity', async () => {
     const wrapper = mount(Profile, { global: { stubs } })
     await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.roleLabel).toBe('管理员')
-  })
-
-  it('computes roleTagType correctly for admin', async () => {
-    const wrapper = mount(Profile, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.roleTagType).toBe('danger')
-  })
-
-  it('computes roleLabel correctly for operator', async () => {
-    // This test verifies the computed logic; since store is mocked globally,
-    // we test the mapping logic directly
-    const map: Record<string, string> = { admin: '管理员', operator: '操作员', viewer: '观察者' }
-    expect(map['operator']).toBe('操作员')
-  })
-
-  it('computes roleTagType correctly for operator', async () => {
-    const role = 'operator' as string
-    const result = role === 'admin' ? 'danger' : role === 'operator' ? 'warning' : 'info'
-    expect(result).toBe('warning')
+    expect(wrapper.text()).toContain('系统管理员')
   })
 
   it('initializes form with empty passwords', async () => {

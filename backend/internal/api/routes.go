@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
@@ -37,19 +37,19 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Prometheus metrics endpoint (no auth required)
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
 	// Auth routes (no JWT required)
 	registerAuthRoutes(r, db)
 
 	// Firmware download — no auth (ESP32 fetches without JWT)
 	RegisterFirmwareDownload(r)
 
-	// API v1 with JWT auth
+	// API v1: every route in this group requires the authoritative single
+	// subject session. Public endpoints are registered explicitly above.
 	v1 := r.Group("/api/v1")
-	v1.Use(JWTAuth())
+	v1.Use(JWTAuthWithDB(db))
 	{
+		v1.GET("/metrics/prometheus", gin.WrapH(promhttp.Handler()))
+		registerAccountRoutes(v1, db)
 		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, nodeMgr)
@@ -67,8 +67,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)
 
-		// User CRUD routes
-		registerUserRoutes(v1, db)
+		// Removed multi-user API compatibility surface (authenticated 410).
+		registerLegacyUserRoutes(v1)
 
 		// Data reports (placeholder)
 		registerDataReportRoutes(v1, db)
@@ -100,5 +100,5 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			return nodeMgr.SendWriteCommand(deviceID, channelID, data, readSize)
 		},
 	)
-	r.GET("/api/v1/ws/terminal", JWTAuth(), termWSHandler.HandleTerminalWS)
+	r.GET("/api/v1/ws/terminal", JWTAuthWithDB(db), termWSHandler.HandleTerminalWS)
 }

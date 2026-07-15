@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -72,6 +71,7 @@ func testJWTAuth() gin.HandlerFunc {
 				switch v := uid.(type) {
 				case float64:
 					c.Set("user_id", uint(v))
+					c.Set("subject_id", uint(v))
 				}
 			}
 			if r, ok := (*claims)["role"].(string); ok {
@@ -576,67 +576,5 @@ func TestWSHandler_DataBroadcastFilteredByChannel(t *testing.T) {
 	}
 	if payload["raw_hex"] != "aabbcc" {
 		t.Errorf("expected raw_hex=aabbcc, got %v", payload["raw_hex"])
-	}
-}
-
-func TestWSHandler_SendCommand_ForbiddenForViewer(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	hub := websocket.NewHub()
-	go hub.Run()
-
-	h := NewWSHandler(hub, mockHistoryFetcher, mockWriteSender)
-
-	r := gin.New()
-	r.GET("/ws/terminal", testJWTAuth(), h.HandleTerminalWS)
-
-	server := httptest.NewServer(r)
-	defer server.Close()
-
-	// Connect as viewer (non-admin)
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/terminal?token=" + generateTestToken("viewer")
-	conn, _, err := wslib.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
-
-	// Try to send a command (should be forbidden)
-	sendMsg := map[string]interface{}{
-		"type": "send",
-		"payload": map[string]interface{}{
-			"device_id":  "test-device",
-			"channel_id": 1,
-			"data_hex":   "0102",
-			"read_size":  2,
-		},
-	}
-	msgBytes, _ := json.Marshal(sendMsg)
-	if err := conn.WriteMessage(wslib.TextMessage, msgBytes); err != nil {
-		t.Fatalf("failed to send: %v", err)
-	}
-
-	// Read response
-	_, msg, err := conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("failed to read: %v", err)
-	}
-
-	var resp map[string]interface{}
-	if err := json.Unmarshal(msg, &resp); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
-	}
-
-	if resp["type"] != "error" {
-		t.Errorf("expected error response, got %v", resp["type"])
-	}
-
-	payload, ok := resp["payload"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected payload to be map, got %T", resp["payload"])
-	}
-
-	if !strings.Contains(payload["message"].(string), "forbidden") {
-		t.Errorf("expected forbidden message, got %v", payload["message"])
 	}
 }
