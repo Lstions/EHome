@@ -15,7 +15,7 @@
     </el-card>
 
     <!-- Success: render the resolved component -->
-    <component v-else-if="targetComponent" :is="targetComponent" />
+    <component v-else-if="targetComponent" :is="targetComponent" :key="route.params.id" :data-detail-key="String(route.params.id)" />
   </div>
 </template>
 
@@ -23,9 +23,10 @@
 import { ref, defineAsyncComponent, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { edgeDeviceApi } from '@/api/edgeDevice'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 
 const route = useRoute()
+const edgeDeviceStore = useEdgeDeviceStore()
 const deviceType = ref<string>('')
 
 // Lazy-load page components. Each is code-split.
@@ -43,24 +44,31 @@ const componentMap: Record<string, any> = {
 const targetComponent = ref<any>(null)
 const loading = ref(false)
 const error = ref(false)
+let resolveSequence = 0
 
 async function resolveComponent() {
+  const sequence = ++resolveSequence
   const id = Number(route.params.id)
-  if (!id) return
-
   loading.value = true
   error.value = false
   targetComponent.value = null
+  if (!id) {
+    loading.value = false
+    error.value = true
+    return
+  }
 
   try {
-    const dev = await edgeDeviceApi.getDetail(id)
+    const dev = await edgeDeviceStore.fetchDetail(id, true)
+    if (sequence !== resolveSequence || Number(route.params.id) !== id) return
     deviceType.value = dev.device_type
     targetComponent.value = componentMap[dev.device_type] || GenericDeviceDetail
   } catch {
+    if (sequence !== resolveSequence) return
     error.value = true
     ElMessage.error('获取设备信息失败，请检查网络或稍后重试')
   } finally {
-    loading.value = false
+    if (sequence === resolveSequence) loading.value = false
   }
 }
 

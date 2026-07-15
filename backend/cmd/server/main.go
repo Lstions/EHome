@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"ehome/backend/internal/api"
+	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/drivers"
@@ -85,12 +87,6 @@ func main() {
 		}
 	}
 
-	if err := api.SeedAdminUser(db); err != nil {
-		logger.Warnf("Failed to seed admin user: %v", err)
-	} else {
-		logger.Infof("Admin user seeded (if not existed)")
-	}
-
 	if err := redis.Connect(cfg.RedisAddr()); err != nil {
 		logger.Infof("Redis connection failed (non-fatal): %v", err)
 	} else {
@@ -111,7 +107,21 @@ func main() {
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
 	wsHub := websocket.NewHub()
+	wsHub.SetSessionValidator(func(subjectID uint, version int64) bool {
+		var user models.User
+		if err := db.Where("id = ? AND subject_key = ? AND retired_at IS NULL AND enabled = ?", subjectID, models.SystemAdminSubjectKey, true).First(&user).Error; err != nil {
+			return false
+		}
+		state, err := models.LoadAuthState(db)
+		return err == nil && state.State == models.AuthStateInitialized && user.SessionVersion == version
+	})
 	go wsHub.Run()
+	outboxContext, stopOutbox := context.WithCancel(context.Background())
+	defer stopOutbox()
+	outboxProcessor := authservice.NewOutboxProcessor(db, func(subjectID uint, _ int64, _ string) {
+		wsHub.DisconnectSubject(subjectID)
+	})
+	go outboxProcessor.Run(outboxContext, time.Second)
 
 	haIntegration := homeassistant.NewIntegration(mqttClient)
 	otaMgr := ota.NewManager(db, mqttClient, wsHub)
@@ -121,12 +131,8 @@ func main() {
 
 	wsHub.SetOnMessage(func(client *websocket.Client, evt websocket.Event) {
 		if evt.Type == "send" {
-			if client.UserID == "" {
+			if !client.SessionValid() {
 				logger.Warnf("[WS] Rejecting send command: unauthenticated client")
-				return
-			}
-			if client.Role != "admin" {
-				logger.Warnf("[WS] Rejecting send command: user %s role=%s (admin required)", client.UserID, client.Role)
 				return
 			}
 			payload, err := json.Marshal(evt.Payload)
@@ -149,7 +155,7 @@ func main() {
 				if err := nodeMgr.SendWriteCommand(p.DeviceID, p.ChannelID, data, p.ReadSize); err != nil {
 					logger.Warnf("[WS] SendWriteCommand failed: %v", err)
 				} else {
-					logger.Infof("[WS] Terminal send via WS: device=%s ch=%d data=%s read=%d", p.DeviceID, p.ChannelID, p.DataHex, p.ReadSize)
+					logger.Infof("[WS] Terminal send via WS: subject=%d device=%s ch=%d data=%s read=%d", client.SubjectID, p.DeviceID, p.ChannelID, p.DataHex, p.ReadSize)
 				}
 			}
 		}
@@ -182,11 +188,14 @@ func main() {
 	r.Use(gin.Recovery())
 	// Gzip compression for API responses (20MB JSON → ~3MB)
 	r.Use(gzip.Gzip(gzip.DefaultCompression))
-	// CORS: allow all origins — services listen on 0.0.0.0, LAN/external devices need access
+	allowedOrigins := []string{}
+	for _, origin := range strings.Split(os.Getenv("EHOME_ALLOWED_ORIGINS"), ",") {
+		if value := strings.TrimSpace(origin); value != "" {
+			allowedOrigins = append(allowedOrigins, value)
+		}
+	}
 	r.Use(cors.New(cors.Config{
-		AllowOriginFunc: func(origin string) bool {
-			return true
-		},
+		AllowOrigins:     allowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
 		ExposeHeaders:    []string{"Content-Length", "Content-Type"},

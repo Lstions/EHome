@@ -2,12 +2,14 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
+	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/models"
+	redisstore "ehome/backend/internal/redis"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -23,14 +25,43 @@ type LoginResponse struct {
 	User  struct {
 		ID       uint   `json:"id"`
 		Username string `json:"username"`
-		Role     string `json:"role"`
 	} `json:"user"`
 }
 
 // registerAuthRoutes sets up authentication routes (no JWT required)
 func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
+	registerAuthRoutesWithLimiter(r, db, authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute))
+}
+
+func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authservice.LoginLimiter) {
 	auth := r.Group("/api/v1/auth")
 	{
+		auth.GET("/initialization", func(c *gin.Context) {
+			state, err := models.LoadAuthState(db)
+			if err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_MIGRATION_REQUIRED", "data": gin.H{"state": models.AuthStateMigrationRequired}})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"state": state.State}})
+		})
+		auth.POST("/initialize", func(c *gin.Context) {
+			var request struct {
+				Credential string `json:"credential" binding:"required"`
+				Username   string `json:"username" binding:"required"`
+				Password   string `json:"password" binding:"required"`
+				Email      string `json:"email"`
+			}
+			if err := c.ShouldBindJSON(&request); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid initialization request"})
+				return
+			}
+			user, err := authservice.InitializeSystem(db, authservice.InitializeRequest{Credential: request.Credential, Username: request.Username, Password: request.Password, Email: request.Email})
+			if err != nil {
+				c.JSON(http.StatusConflict, gin.H{"code": "AUTH_INITIALIZATION_REJECTED", "message": "initialization rejected"})
+				return
+			}
+			c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "initialized", "data": gin.H{"id": user.ID, "username": user.Username}})
+		})
 		auth.POST("/login", func(c *gin.Context) {
 			var req LoginRequest
 			if err := c.ShouldBindJSON(&req); err != nil {
@@ -38,21 +69,24 @@ func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
 				return
 			}
 
-			// Find user
-			var user models.User
-			if err := db.Where("username = ?", req.Username).First(&user).Error; err != nil {
+			user, err := authservice.AuthenticateSingleUser(db, req.Username, req.Password)
+			if err != nil {
+				allowed, retryAfter, limitErr := limiter.AllowFailure(c.Request.Context(), c.ClientIP(), req.Username)
+				if limitErr != nil || !allowed {
+					seconds := int(retryAfter.Seconds())
+					if seconds < 1 {
+						seconds = 1
+					}
+					c.Header("Retry-After", strconv.Itoa(seconds))
+					c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "message": "too many login attempts"})
+					return
+				}
 				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "用户名或密码错误"})
 				return
 			}
+			limiter.Reset(c.Request.Context(), c.ClientIP(), req.Username)
 
-			// Verify password
-			if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "用户名或密码错误"})
-				return
-			}
-
-			// Generate JWT token
-			token, err := GenerateToken(user.ID, user.Role)
+			token, err := authservice.SignSessionToken(user, jwtSecret, 24*time.Hour)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to generate token"})
 				return
@@ -64,41 +98,8 @@ func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
 			}
 			resp.User.ID = user.ID
 			resp.User.Username = user.Username
-			resp.User.Role = user.Role
 
 			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": resp})
 		})
-		auth.POST("/logout", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "logged out"})
-		})
 	}
-}
-
-// SeedAdminUser creates the default admin user if not exists
-func SeedAdminUser(db *gorm.DB) error {
-	var count int64
-	db.Model(&models.User{}).Count(&count)
-	if count > 0 {
-		return nil // Users already exist
-	}
-
-	// Hash the default password
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-
-	admin := models.User{
-		Username:     "admin",
-		PasswordHash: string(passwordHash),
-		Role:         "admin",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-	}
-
-	if err := db.Create(&admin).Error; err != nil {
-		return err
-	}
-
-	return nil
 }

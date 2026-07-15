@@ -599,7 +599,7 @@ onMounted(() => {
 }
 
 .stat-card {
-  background: #fff;
+  background: var(--card-bg);
   border-radius: 12px;
   padding: 20px;
   display: flex;
@@ -670,7 +670,7 @@ onMounted(() => {
 
 .config-card:hover {
   transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-lg);
 }
 
 .config-card.inactive {
@@ -698,7 +698,7 @@ onMounted(() => {
 .config-icon.i2c { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
 .config-icon.spi { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
 .config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
-.config-icon.adc { background: linear-gradient(135deg, #9c27b0 0%, #ba68c8 100%); }
+.config-icon.adc { background: linear-gradient(135deg, var(--color-adc) 0%, var(--color-adc-light) 100%); }
 
 .config-info {
   flex: 1;

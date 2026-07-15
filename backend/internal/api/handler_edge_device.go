@@ -245,7 +245,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Create edge device (v2.2 path for POST /devices)
-	v1.POST("/edge-devices", RequireRole("admin"), func(c *gin.Context) {
+	v1.POST("/edge-devices", func(c *gin.Context) {
 		// B1 fix: bind to a separate DTO, then construct from allowed fields only
 		var dto struct {
 			Name           *string `json:"name"`
@@ -315,7 +315,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Update edge device (v2.2 path for PUT /devices/:id)
-	v1.PUT("/edge-devices/:id", RequireRole("admin"), func(c *gin.Context) {
+	v1.PUT("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
@@ -385,7 +385,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Init edge device (trigger InitDevice via deviceinit.Orchestrator)
-	v1.POST("/edge-devices/:id/init", RequireRole("admin"), func(c *gin.Context) {
+	v1.POST("/edge-devices/:id/init", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 
 		// Load the edge device to get device type, channel, and node info
@@ -510,7 +510,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 	// POST /api/v1/edge-devices/:id/execute — execute a device operation
 	// Uses DeviceConfig.Operations JSONB for operation definitions with template engine + CRC
-	e.POST("/:id/execute", RequireRole("admin"), func(c *gin.Context) {
+	e.POST("/:id/execute", func(c *gin.Context) {
 		id := c.Param("id")
 
 		var req struct {
@@ -798,7 +798,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// DEPRECATED: Use POST /:id/execute with operation "change_address" instead.
 	// This endpoint is kept for backward compatibility and will be removed in a future version.
 	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
-	e.POST("/:id/change-address", RequireRole("admin"), func(c *gin.Context) {
+	e.POST("/:id/change-address", func(c *gin.Context) {
 		id := c.Param("id")
 
 		var req struct {

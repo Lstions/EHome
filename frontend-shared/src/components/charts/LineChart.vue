@@ -59,16 +59,37 @@ const props = withDefaults(defineProps<{
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
+let themeObserver: MutationObserver | null = null
 
-// Default color palette
-const SERIES_COLORS = ['#409eff', '#f56c6c', '#e6a23c', '#67c23a', '#909399', '#8b5cf6', '#06b6d4', '#f97316']
+const cssToken = (name: string, fallback: string) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+
+const getThemePalette = () => [
+  cssToken('--color-primary', '#409eff'),
+  cssToken('--color-danger', '#f56c6c'),
+  cssToken('--color-warning', '#e6a23c'),
+  cssToken('--color-success', '#67c23a'),
+  cssToken('--color-info', '#909399'),
+  cssToken('--color-adc', '#9c27b0'),
+  cssToken('--terminal-accent', '#06b6d4'),
+  cssToken('--terminal-warning', '#f97316')
+]
+
+const getChartTheme = () => ({
+  text: cssToken('--text-color-primary', '#303133'),
+  regular: cssToken('--text-color-regular', '#606266'),
+  border: cssToken('--border-color', '#e8eaec'),
+  split: cssToken('--border-color-light', '#ebeef5'),
+  overlay: cssToken('--bg-color-overlay', '#ffffff'),
+  palette: getThemePalette()
+})
 
 /**
  * Build yAxis list for multi-series mode.
  * Series with the same unit share one Y-axis (left side).
  * Series with different units get their own Y-axis (offset right).
  */
-const buildYAxisList = () => {
+const buildYAxisList = (theme = getChartTheme()) => {
   if (!props.series || props.series.length <= 1) return undefined
   const unitGroups: string[] = []
   const seriesToYAxis: number[] = []
@@ -91,13 +112,16 @@ const buildYAxisList = () => {
       offset: i > 1 ? (i - 1) * 60 : 0,
       min: props.yAxisMin,
       max: props.yAxisMax,
-      axisLabel: { formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) }
+      axisLine: { lineStyle: { color: theme.border } },
+      splitLine: { lineStyle: { color: theme.split } },
+      axisLabel: { color: theme.regular, formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) },
+      nameTextStyle: { color: theme.regular }
     })),
     seriesToYAxis
   }
 }
 
-const buildSeries = (seriesToYAxis?: number[]) => {
+const buildSeries = (seriesToYAxis?: number[], palette = getThemePalette()) => {
   // Multi-series mode: use props.series — data as [timestamp, value] pairs
   if (props.series && props.series.length > 0) {
     return props.series.map((s, i) => ({
@@ -107,14 +131,14 @@ const buildSeries = (seriesToYAxis?: number[]) => {
       smooth: props.smooth,
       sampling: 'lttb' as const,
       yAxisIndex: seriesToYAxis ? seriesToYAxis[i] : i,
-      lineStyle: { width: 2, color: SERIES_COLORS[i % SERIES_COLORS.length] },
-      itemStyle: { color: SERIES_COLORS[i % SERIES_COLORS.length] },
+      lineStyle: { width: 2, color: palette[i % palette.length] },
+      itemStyle: { color: palette[i % palette.length] },
       showSymbol: s.data.length > 50 ? false : true,
       ...(props.showArea ? {
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: SERIES_COLORS[i % SERIES_COLORS.length] + '33' },
-            { offset: 1, color: SERIES_COLORS[i % SERIES_COLORS.length] + '0a' }
+            { offset: 0, color: palette[i % palette.length] + '33' },
+            { offset: 1, color: palette[i % palette.length] + '0a' }
           ])
         }
       } : {})
@@ -127,13 +151,13 @@ const buildSeries = (seriesToYAxis?: number[]) => {
     type: 'line' as const,
     data: props.data.map(item => [new Date(item.time).getTime(), item.value]),
     smooth: props.smooth,
-    lineStyle: { width: 2, color: SERIES_COLORS[0] },
-    itemStyle: { color: SERIES_COLORS[0] },
+    lineStyle: { width: 2, color: palette[0] },
+    itemStyle: { color: palette[0] },
     ...(props.showArea ? {
       areaStyle: {
         color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: SERIES_COLORS[0] + '33' },
-          { offset: 1, color: SERIES_COLORS[0] + '0a' }
+          { offset: 0, color: palette[0] + '33' },
+          { offset: 1, color: palette[0] + '0a' }
         ])
       }
     } : {})
@@ -144,10 +168,13 @@ const buildSeries = (seriesToYAxis?: number[]) => {
  * Time-based xAxis config.
  * Uses type: 'time' so series with different timestamps align correctly.
  */
-const getXAxisConfig = () => {
+const getXAxisConfig = (theme = getChartTheme()) => {
   return {
     type: 'time' as const,
+    axisLine: { lineStyle: { color: theme.border } },
+    splitLine: { lineStyle: { color: theme.split } },
     axisLabel: {
+      color: theme.regular,
       fontSize: 11,
       formatter: (value: number) => {
         const d = new Date(value)
@@ -165,79 +192,70 @@ const getXAxisConfig = () => {
   }
 }
 
-const initChart = () => {
-  if (!chartRef.value) return
-
-  chartInstance = echarts.init(chartRef.value)
-
+const applyChartOption = () => {
+  if (!chartInstance) return
+  const theme = getChartTheme()
   const multiSeries = props.series && props.series.length > 1
-  const yAxisInfo = buildYAxisList()
-  const yAxisConfig = yAxisInfo?.yAxisList
-
+  const yAxisInfo = buildYAxisList(theme)
+  const yAxisConfig = yAxisInfo?.yAxisList || {
+    type: 'value' as const,
+    min: props.yAxisMin,
+    max: props.yAxisMax,
+    axisLine: { lineStyle: { color: theme.border } },
+    splitLine: { lineStyle: { color: theme.split } },
+    axisLabel: { color: theme.regular, formatter: (value: number) => value.toFixed(2) }
+  }
   const option: EChartsOption = {
     animation: props.realtime ? false : undefined,
-    title: { text: props.title, left: 'center' },
+    color: theme.palette,
+    title: { text: props.title, left: 'center', textStyle: { color: theme.text } },
     tooltip: {
       trigger: 'axis',
+      backgroundColor: theme.overlay,
+      borderColor: theme.border,
+      textStyle: { color: theme.text },
       formatter: (params: any) => {
         if (!Array.isArray(params) || params.length === 0) return ''
         const ts = params[0].axisValueLabel || params[0].name
         const d = new Date(ts)
         const timeStr = `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
         let html = `${timeStr}<br/>`
-        params.forEach((p: any) => {
-          const val = Array.isArray(p.value) ? p.value[1] : p.value
-          html += `${p.marker} ${p.seriesName}: <b>${typeof val === 'number' ? val.toFixed(3) : val}</b><br/>`
+        params.forEach((item: any) => {
+          const val = Array.isArray(item.value) ? item.value[1] : item.value
+          html += `${item.marker} ${item.seriesName}: <b>${typeof val === 'number' ? val.toFixed(3) : val}</b><br/>`
         })
         return html
       }
     },
-    legend: multiSeries ? { top: 30, type: 'scroll' as const } : undefined,
+    legend: multiSeries ? { top: 30, type: 'scroll' as const, textStyle: { color: theme.regular } } : undefined,
     grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
-    xAxis: getXAxisConfig(),
-    yAxis: yAxisConfig || {
-      type: 'value',
-      min: props.yAxisMin,
-      max: props.yAxisMax,
-      axisLabel: { formatter: (value: number) => value.toFixed(2) }
-    },
-    series: buildSeries(yAxisInfo?.seriesToYAxis)
+    xAxis: getXAxisConfig(theme),
+    yAxis: yAxisConfig,
+    series: buildSeries(yAxisInfo?.seriesToYAxis, theme.palette)
   }
+  chartInstance.setOption(option, { notMerge: true })
+}
 
-  chartInstance.setOption(option)
-
+const initChart = () => {
+  if (!chartRef.value) return
+  chartInstance = echarts.init(chartRef.value)
+  applyChartOption()
   resizeObserver = new ResizeObserver(() => chartInstance?.resize())
   resizeObserver.observe(chartRef.value)
+  themeObserver = new MutationObserver(applyChartOption)
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
 }
 
 // Watch for data changes
 // realtime mode: shallow watch (reference change only) — appendRealtimeData does chartSeries.value = [...]
 // normal mode: deep watch to detect nested data array mutations
-watch(() => [props.data, props.series], () => {
-  if (!chartInstance) return
-
-  const multiSeries = props.series && props.series.length > 1
-  const yAxisInfo = buildYAxisList()
-  const yAxisConfig = yAxisInfo?.yAxisList || {
-    type: 'value' as const,
-    min: props.yAxisMin,
-    max: props.yAxisMax,
-    axisLabel: { formatter: (value: number) => value.toFixed(2) }
-  }
-
-  chartInstance.setOption({
-    animation: props.realtime ? false : undefined,
-    legend: multiSeries ? { top: 30, type: 'scroll' as const } : undefined,
-    grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
-    xAxis: getXAxisConfig(),
-    yAxis: yAxisConfig,
-    series: buildSeries(yAxisInfo?.seriesToYAxis)
-  }, { replaceMerge: ['series'] })
-}, { deep: true })
+watch(() => [props.data, props.series, props.title, props.yAxisMin, props.yAxisMax], applyChartOption, { deep: true })
 
 onUnmounted(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  themeObserver?.disconnect()
+  themeObserver = null
   chartInstance?.dispose()
   chartInstance = null
 })

@@ -31,6 +31,12 @@ vi.mock('@/stores/user', () => ({
   }),
 }))
 
+vi.mock('@/api/auth', () => ({
+  authApi: {
+    initialization: vi.fn().mockResolvedValue({ state: 'initialized' }),
+  },
+}))
+
 // Mock LoginForm component (child) — exposes setLoading so Login.vue's
 // finally block can call it without TypeError.
 vi.mock('@/components/forms/LoginForm.vue', () => ({

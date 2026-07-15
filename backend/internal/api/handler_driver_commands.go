@@ -77,7 +77,7 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 	})
 
 	// PUT /api/v1/edge-devices/:id/commands — update command intervals and trigger config sync
-	v1.PUT("/edge-devices/:id/commands", RequireRole("admin"), func(c *gin.Context) {
+	v1.PUT("/edge-devices/:id/commands", func(c *gin.Context) {
 		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid id"})

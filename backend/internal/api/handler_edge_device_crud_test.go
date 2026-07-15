@@ -151,27 +151,6 @@ func TestEdgeDevice_Create_WithModbusType(t *testing.T) {
 	}
 }
 
-func TestEdgeDevice_Create_NonAdminForbidden(t *testing.T) {
-	r, _ := setupEdgeDeviceTest(t)
-
-	body, _ := json.Marshal(map[string]interface{}{
-		"name":       "New Device",
-		"type":       "temperature",
-		"node_id":    "NODE001",
-		"channel_id": 1,
-	})
-	token, _ := GenerateToken(2, "user")
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/edge-devices", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for non-admin, got %d", w.Code)
-	}
-}
-
 // ==================== EdgeDevice Update Tests ====================
 
 func TestEdgeDevice_Update_Success(t *testing.T) {

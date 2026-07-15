@@ -2,6 +2,27 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
+import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
+
+const {
+  mockFetchNodes,
+  mockChannelGetList,
+  mockParserGetList,
+  mockTemplateGetList,
+  mockEdgeDeviceGetList,
+} = vi.hoisted(() => ({
+  mockFetchNodes: vi.fn(() => Promise.resolve()),
+  mockChannelGetList: vi.fn(() => Promise.resolve([])),
+  mockParserGetList: vi.fn(() => Promise.resolve([])),
+  mockTemplateGetList: vi.fn(() => Promise.resolve({ list: [] })),
+  mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
+    items: [
+      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
+      { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
+    ],
+    total: 2,
+  })),
+}))
 
 // Mock vue-router
 const { mockPush, mockRoute } = vi.hoisted(() => ({
@@ -16,7 +37,10 @@ vi.mock('vue-router', () => ({
 // Mock node store
 vi.mock('@/stores/node', () => ({
   useNodeStore: () => ({
-    fetchNodes: vi.fn(() => Promise.resolve()),
+    fetchNodes: mockFetchNodes,
+    getCachedList: vi.fn(() => ({ items: [
+      { id: 1, node_id: 'node-1', name: 'Collector-A', status: 'online' },
+    ], total: 1 })),
     nodes: [
       { id: 1, node_id: 'node-1', name: 'Collector-A', status: 'online' },
     ],
@@ -36,13 +60,7 @@ vi.mock('@/stores/websocket', () => ({
 // Mock device-related APIs
 vi.mock('@/api/edgeDevice', () => ({
   edgeDeviceApi: {
-    getList: vi.fn(() => Promise.resolve({
-      items: [
-        { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
-        { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
-      ],
-      total: 2,
-    })),
+    getList: mockEdgeDeviceGetList,
     delete: vi.fn(() => Promise.resolve()),
     update: vi.fn(() => Promise.resolve()),
     create: vi.fn(() => Promise.resolve({ id: 3 })),
@@ -51,14 +69,20 @@ vi.mock('@/api/edgeDevice', () => ({
 
 vi.mock('@/api/channel', () => ({
   channelApi: {
-    getList: vi.fn(() => Promise.resolve([])),
+    getList: mockChannelGetList,
     update: vi.fn(() => Promise.resolve()),
   },
 }))
 
 vi.mock('@/api/deviceConfig', () => ({
   deviceConfigApi: {
-    getList: vi.fn(() => Promise.resolve({ list: [] })),
+    getList: mockTemplateGetList,
+  },
+}))
+
+vi.mock('@/api/parser', () => ({
+  parserApi: {
+    getList: mockParserGetList,
   },
 }))
 
@@ -104,6 +128,39 @@ describe('EdgeDeviceList.vue', () => {
     sessionStorage.clear()
   })
 
+  it('forces list refresh after successful writes and deletions', () => {
+    expect(edgeDeviceListSource.match(/await fetchDevices\(true\)/g)).toHaveLength(2)
+    expect(edgeDeviceListSource.match(/await fetchDevices\(true, true\)/g)).toHaveLength(2)
+    expect(edgeDeviceListSource.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
+    expect(edgeDeviceListSource).toContain('edgeDeviceStore.invalidateDetail(frozenEditingDeviceId)')
+    expect(edgeDeviceListSource).toContain('assertSessionGeneration(sessionGeneration)')
+    expect(edgeDeviceListSource).toContain('channelStore.fetchChannels(undefined, true)')
+    expect(edgeDeviceListSource).toContain('parserStore.fetchParsers(true)')
+    expect(edgeDeviceListSource).toContain('wizardDataLoaded = false')
+    expect(edgeDeviceListSource).toContain('createTransactionGeneration++')
+    expect(edgeDeviceListSource).toContain("throw new Error('创建事务已取消')")
+    expect(edgeDeviceListSource).toContain(':before-close="handleCreateDialogClose"')
+    expect(edgeDeviceListSource).toContain('if (submitting.value) return')
+    expect(edgeDeviceListSource).toContain('const frozenDeviceForm = { ...deviceForm }')
+    expect(edgeDeviceListSource).toContain('const frozenNewChannel = { ...newChannel }')
+    expect(edgeDeviceListSource).toContain('const frozenParser = selectedParser.value')
+  })
+
+  it('ignores stale component-level list completions', () => {
+    expect(edgeDeviceListSource).toContain('sequence !== listRequestSequence')
+  })
+
+  it('reads the parameter-specific cache after single and batch deletes', () => {
+    expect(edgeDeviceListSource).toContain('await fetchDevices(true, true)')
+  })
+
+  it('settles all batch deletes and reports partial failures after syncing local state', () => {
+    expect(edgeDeviceListSource).toContain('Promise.allSettled(ids.map')
+    expect(edgeDeviceListSource).toContain('const failed = results.length - succeeded')
+    expect(edgeDeviceListSource).toContain('删除结果已保存，但列表刷新失败')
+    expect(edgeDeviceListSource).toContain('设备已删除，但列表刷新失败')
+  })
+
   it('renders the device page container', async () => {
     const wrapper = mount(EdgeDeviceList, { global: { stubs } })
     await flushPromises()
@@ -115,6 +172,37 @@ describe('EdgeDeviceList.vue', () => {
     await flushPromises()
     const statCards = wrapper.findAll('.stat-card')
     expect(statCards.length).toBe(4) // total, online, offline, todayData
+  })
+
+  it('reuses a matching fresh device-list cache when the page is remounted', async () => {
+    const first = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
+
+    first.unmount()
+    mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+
+    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
+  })
+
+  it('defers create-wizard dependencies until the dialog opens', async () => {
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+
+    expect(mockFetchNodes).not.toHaveBeenCalled()
+    expect(mockChannelGetList).not.toHaveBeenCalled()
+    expect(mockParserGetList).not.toHaveBeenCalled()
+    expect(mockTemplateGetList).not.toHaveBeenCalled()
+
+    ;(wrapper.vm as any).showCreateDialog = true
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+
+    expect(mockFetchNodes).toHaveBeenCalledTimes(1)
+    expect(mockChannelGetList).toHaveBeenCalledTimes(1)
+    expect(mockParserGetList).toHaveBeenCalledTimes(1)
+    expect(mockTemplateGetList).toHaveBeenCalledTimes(1)
   })
 
   it('initializes with card view mode', async () => {

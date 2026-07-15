@@ -83,12 +83,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Connection, Edit, Delete } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 const props = defineProps<{
   device: EdgeDevice | null
@@ -107,6 +109,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 const editDialogVisible = ref(false)
 const editLoading = ref(false)
@@ -118,6 +121,7 @@ const deleteLoading = ref(false)
 const showAddressDialog = ref(false)
 const newAddress = ref(1)
 const changingAddress = ref(false)
+let operationGeneration = 0
 
 const canChangeAddress = computed(() => {
   const dc = props.device?.device_config
@@ -135,49 +139,76 @@ watch(editDialogVisible, (v) => {
 
 async function submitEdit() {
   if (!props.device) return
+  const deviceId = props.device.id
+  const operation = operationGeneration
+  const generation = getSessionGeneration()
   editLoading.value = true
   try {
-    await edgeDeviceApi.update(props.device.id, { name: editForm.value.name })
+    await edgeDeviceApi.update(deviceId, { name: editForm.value.name })
+    if (operation !== operationGeneration) return
+    assertSessionGeneration(generation)
+    if (props.device?.id !== deviceId) throw new Error('设备已变更')
+    edgeDeviceStore.invalidateLists()
+    edgeDeviceStore.invalidateDetail(deviceId)
     ElMessage.success('设备信息已保存')
     editDialogVisible.value = false
     emit('updated')
   } catch (e: any) {
+    if (operation !== operationGeneration || props.device?.id !== deviceId) return
     ElMessage.error(e.message || '保存失败')
   } finally {
-    editLoading.value = false
+    if (props.device?.id === deviceId) editLoading.value = false
   }
 }
 
 async function submitDelete() {
   if (!props.device) return
+  const deviceId = props.device.id
+  const operation = operationGeneration
   deleteLoading.value = true
   try {
-    await edgeDeviceApi.delete(props.device.id)
+    await edgeDeviceStore.deleteDevice(deviceId)
+    if (operation !== operationGeneration) return
+    if (props.device?.id !== deviceId) throw new Error('设备已变更')
     ElMessage.success('设备已删除')
     deleteDialogVisible.value = false
     emit('deleted')
     router.replace('/edge-device')
   } catch (e: any) {
+    if (operation !== operationGeneration || props.device?.id !== deviceId) return
     ElMessage.error(e.message || '删除失败')
   } finally {
-    deleteLoading.value = false
+    if (props.device?.id === deviceId) deleteLoading.value = false
   }
 }
 
 async function handleChangeAddress() {
   if (!props.device) return
+  const deviceId = props.device.id
+  const operation = operationGeneration
+  const generation = getSessionGeneration()
   changingAddress.value = true
   try {
-    await edgeDeviceApi.changeAddress(props.device.id, newAddress.value)
+    await edgeDeviceApi.changeAddress(deviceId, newAddress.value)
+    if (operation !== operationGeneration) return
+    assertSessionGeneration(generation)
+    if (props.device?.id !== deviceId) throw new Error('设备已变更')
+    edgeDeviceStore.invalidateLists()
+    edgeDeviceStore.invalidateDetail(deviceId)
     ElMessage.success(`地址已修改为 ${newAddress.value}`)
     showAddressDialog.value = false
     emit('updated')
   } catch (e: any) {
+    if (operation !== operationGeneration || props.device?.id !== deviceId) return
     ElMessage.error('修改失败: ' + (e.message || '未知错误'))
   } finally {
-    changingAddress.value = false
+    if (props.device?.id === deviceId) changingAddress.value = false
   }
 }
+
+onUnmounted(() => {
+  operationGeneration++
+})
 </script>
 
 <style scoped>

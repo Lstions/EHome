@@ -6,6 +6,11 @@ const { mockRequestHandler, mockResponseFulfilled, mockResponseRejected } = vi.h
   mockResponseFulfilled: vi.fn(),
   mockResponseRejected: vi.fn(),
 }))
+const { mockClearSessionCaches } = vi.hoisted(() => ({
+  mockClearSessionCaches: vi.fn(),
+}))
+
+vi.mock('@/utils/sessionCache', () => ({ clearSessionCaches: mockClearSessionCaches }))
 
 vi.mock('axios', () => {
   const instance = {
@@ -101,6 +106,7 @@ describe('apiClient 拦截器', () => {
 
     expect(localStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('token')).toBeNull()
+    expect(mockClearSessionCaches).toHaveBeenCalledOnce()
     expect(window.location.href).toBe('/login')
 
     // 还原

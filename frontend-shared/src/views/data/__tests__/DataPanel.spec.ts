@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import DataPanel from '@/views/data/DataPanel.vue'
+import dataPanelSource from '@/views/data/DataPanel.vue?raw'
 
 // ── Mock API module (correct path: @/api/edgeDevice, NOT @/api/modules/data) ──
 vi.mock('@/api/edgeDevice', () => ({
@@ -127,6 +128,10 @@ const stubs = {
 }
 
 describe('DataPanel', () => {
+  it('reads devices from the requested parameter cache', () => {
+    expect(dataPanelSource).toContain('edgeDeviceStore.getCachedList(params)')
+  })
+
   const getMounted = () => {
     const pinia = createPinia()
     setActivePinia(pinia)

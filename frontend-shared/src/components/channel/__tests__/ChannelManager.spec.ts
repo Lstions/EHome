@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import ChannelManager from '../ChannelManager.vue'
+import source from '../ChannelManager.vue?raw'
 
 vi.mock('@/api/channel', () => ({ channelApi: { create: vi.fn(), update: vi.fn() } }))
 vi.mock('@/api/node', () => ({ nodeApi: { scanI2C: vi.fn(), syncConfig: vi.fn() } }))
+vi.mock('@/stores/channel', () => ({
+  useChannelStore: () => ({ createChannel: vi.fn(), updateChannel: vi.fn() }),
+}))
 
 const DialogStub = defineComponent({
   inheritAttrs: false,
@@ -98,6 +102,15 @@ const stubs = {
 }
 
 describe('ChannelManager', () => {
+  it('routes writes through the session-aware store and pins the originating collector', () => {
+    expect(source).toContain('channelStore.updateChannel')
+    expect(source).toContain('channelStore.createChannel')
+    expect(source).toContain('assertSessionGeneration(sessionGeneration)')
+    expect(source).toContain('const collectorId = props.collectorId')
+    expect(source).toContain('transactionGeneration++')
+    expect(source).toContain('assertTransaction(transaction, collectorId, sessionGeneration)')
+    expect(source).toContain(':before-close="handleDialogClose"')
+  })
   it('keeps UART parameters editable when capability data is temporarily unavailable', async () => {
     const wrapper = mount(ChannelManager, {
       props: {

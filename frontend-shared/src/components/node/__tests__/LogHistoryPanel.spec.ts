@@ -126,6 +126,14 @@ describe('LogHistoryPanel', () => {
     mocks.confirm.mockResolvedValue('confirm')
   })
 
+  it('reloads history when collector changes', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.setProps({ collectorId: 'collector-2' })
+    await flushPromises()
+    expect(mocks.getNodeLogs).toHaveBeenLastCalledWith('collector-2', expect.any(Object))
+  })
+
   it('loads and displays saved history without consulting persistence configuration', async () => {
     const wrapper = mountPanel()
     await flushPromises()

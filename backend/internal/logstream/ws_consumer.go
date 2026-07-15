@@ -4,14 +4,14 @@ import (
 	"ehome/backend/internal/events"
 )
 
-// WSBroadcaster is the minimal interface for role-restricted WebSocket events.
+// WSBroadcaster is the minimal interface for authenticated WebSocket events.
 type WSBroadcaster interface {
-	BroadcastEventToRole(eventType string, payload interface{}, role string)
+	BroadcastAuthenticatedEvent(eventType string, payload interface{})
 }
 
 // WSConsumer pushes log batches to connected WebSocket clients as "node_log" events.
 // It is always active when registered. The hub limits these sensitive events
-// to administrators; the frontend may additionally filter by node_id.
+// to valid authenticated sessions; the frontend may additionally filter by node_id.
 type WSConsumer struct {
 	hub WSBroadcaster
 }
@@ -42,8 +42,8 @@ func (c *WSConsumer) Consume(batch LogBatch) {
 		}
 	}
 
-	c.hub.BroadcastEventToRole(events.NodeLog, map[string]interface{}{
+	c.hub.BroadcastAuthenticatedEvent(events.NodeLog, map[string]interface{}{
 		"node_id": batch.NodeID,
 		"lines":   lines,
-	}, "admin")
+	})
 }

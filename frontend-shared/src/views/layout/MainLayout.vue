@@ -43,23 +43,33 @@
       size="240px"
       class="mobile-sidebar-drawer"
     >
-      <div class="logo-area" @click="router.push('/dashboard')">
-        <div class="logo-icon">
-          <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
+      <div class="mobile-drawer-body">
+        <!-- Logo 区域 -->
+        <div class="mobile-logo-area" @click="handleMobileLogoClick">
+          <div class="logo-icon">
+            <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
+          </div>
+          <span class="mobile-logo-text">EHomeSystem</span>
         </div>
-        <span class="logo-text">EHomeSystem</span>
+
+        <!-- 导航菜单 -->
+        <el-menu
+          :default-active="activeMenu"
+          router
+          class="mobile-sidebar-menu"
+          @select="mobileDrawerVisible = false"
+        >
+          <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+            <el-icon><component :is="item.icon" /></el-icon>
+            <template #title>{{ item.title }}</template>
+          </el-menu-item>
+        </el-menu>
+
+        <!-- 版本信息 -->
+        <div class="mobile-sidebar-footer">
+          <span class="mobile-version-info">v{{ appVersion }}</span>
+        </div>
       </div>
-      <el-menu
-        :default-active="activeMenu"
-        router
-        class="sidebar-menu"
-        @select="mobileDrawerVisible = false"
-      >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
-          <el-icon><component :is="item.icon" /></el-icon>
-          <template #title>{{ item.title }}</template>
-        </el-menu-item>
-      </el-menu>
     </el-drawer>
 
     <!-- 右侧容器 -->
@@ -185,10 +195,7 @@
                   <el-icon><UserFilled /></el-icon>
                   <span>个人设置</span>
                 </el-dropdown-item>
-                <el-dropdown-item v-if="userStore.isAdmin" command="users">
-                  <el-icon><UserFilled /></el-icon>
-                  <span>用户管理</span>
-                </el-dropdown-item>
+
                 <el-dropdown-item divided command="logout">
                   <el-icon><SwitchButton /></el-icon>
                   <span>退出登录</span>
@@ -202,9 +209,7 @@
       <!-- 主内容区 -->
       <el-main class="main-content">
         <router-view v-slot="{ Component }">
-          <transition name="fade-slide" mode="out-in">
-            <component :is="Component" />
-          </transition>
+          <component :is="Component" />
         </router-view>
       </el-main>
     </el-container>
@@ -239,17 +244,22 @@ import {
 import { useUserStore } from '@/stores/user'
 import { useUIStore } from '@/stores/ui'
 import { useWebSocketStore } from '@/stores/websocket'
+import { useNodeStore } from '@/stores/node'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notification as ApiNotification } from '@/api/notification'
 import { ElMessage } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
+import { preloadPrimaryRoutes } from '@/router/routeLoaders'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const uiStore = useUIStore()
 const wsStore = useWebSocketStore()
+const nodeStore = useNodeStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 // 搜索
 const searchQuery = ref('')
@@ -260,27 +270,25 @@ const isMac = computed(() => /Mac/i.test(navigator.platform))
 // 响应式
 const { isMobile } = useResponsive()
 const mobileDrawerVisible = ref(false)
+let preloadTimer: ReturnType<typeof setTimeout> | null = null
 
-// 菜单项（全部，含角色要求）
+const warmPrimaryListData = () => Promise.allSettled([
+  nodeStore.fetchNodes({ page: 1, page_size: 20 }),
+  edgeDeviceStore.fetchList({ page: 1, page_size: 24 }),
+])
+
+// 单主体模式下，所有菜单仅由登录状态保护。
 const allMenuItems = [
-  { path: '/dashboard', title: '仪表盘', icon: Odometer, roles: undefined },
-  { path: '/node', title: '节点', icon: Connection, roles: undefined },
-  { path: '/edge-device', title: '边缘设备', icon: Cpu, roles: undefined },
-  { path: '/channel', title: '通道管理', icon: Connection, roles: undefined },
-  { path: '/data', title: '数据面板', icon: DataLine, roles: undefined },
-  { path: '/firmware', title: '固件管理', icon: Files, roles: ['admin', 'operator'] as string[] },
-  { path: '/device-configs', title: '配置模板', icon: Setting, roles: ['admin', 'operator'] as string[] },
-  { path: '/monitor', title: '系统监控', icon: DataAnalysis, roles: ['admin'] as string[] },
+	{ path: '/dashboard', title: '仪表盘', icon: Odometer },
+	{ path: '/node', title: '节点', icon: Connection },
+	{ path: '/edge-device', title: '边缘设备', icon: Cpu },
+	{ path: '/channel', title: '通道管理', icon: Connection },
+	{ path: '/data', title: '数据面板', icon: DataLine },
+	{ path: '/firmware', title: '固件管理', icon: Files },
+	{ path: '/device-configs', title: '配置模板', icon: Setting },
+	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
 ]
-
-// 根据角色过滤菜单
-const menuItems = computed(() => {
-  const role = userStore.role
-  return allMenuItems.filter((item) => {
-    if (!item.roles) return true
-    return item.roles.includes(role)
-  })
-})
+const menuItems = computed(() => allMenuItems)
 
 const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
 
@@ -305,6 +313,12 @@ const fetchNotifications = async () => {
 
 // 初始化获取通知
 fetchNotifications()
+
+// 移动端 logo 点击：关闭抽屉并导航
+const handleMobileLogoClick = () => {
+  mobileDrawerVisible.value = false
+  router.push('/dashboard')
+}
 
 // 侧边栏宽度
 const sidebarWidth = computed(() => {
@@ -411,8 +425,6 @@ const handleCommand = async (command: string) => {
     router.push('/login')
   } else if (command === 'profile') {
     router.push('/profile')
-  } else if (command === 'users') {
-    router.push('/admin/users')
   }
 }
 
@@ -432,11 +444,18 @@ onMounted(() => {
     logger.debug('[MainLayout] 未登录，跳过 WebSocket')
   }
   document.addEventListener('keydown', handleKeydown)
+  preloadTimer = setTimeout(() => {
+    void Promise.allSettled([
+      preloadPrimaryRoutes(),
+      warmPrimaryListData(),
+    ])
+  }, 0)
 })
 
 onUnmounted(() => {
   wsStore.disconnect()
   document.removeEventListener('keydown', handleKeydown)
+  if (preloadTimer) clearTimeout(preloadTimer)
 })
 </script>
 
@@ -446,7 +465,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* ========== 侧边栏 (桌面端) ========== */
+/* ========== 侧边栏 (桌面端，深色主题) ========== */
 .sidebar {
   background: linear-gradient(180deg, #1a1f2e 0%, #1e2538 100%);
   display: flex;
@@ -455,7 +474,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* logo-area / logo-text / logo-icon 白字规则限定到 .sidebar */
+/* 桌面端 logo 区域 — 限定在 .sidebar 内 */
 .sidebar .logo-area {
   height: 60px;
   display: flex;
@@ -471,7 +490,7 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.logo-icon {
+.sidebar .logo-icon {
   width: 36px;
   height: 36px;
   background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
@@ -483,6 +502,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* 桌面端 logo 文字 — 白色，仅 .sidebar 内生效 */
 .sidebar .logo-text {
   font-size: 18px;
   font-weight: 600;
@@ -490,14 +510,14 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.sidebar-menu {
+/* 桌面端菜单 — 限定在 .sidebar 内 */
+.sidebar .sidebar-menu {
   flex: 1;
   border-right: none;
   background: transparent;
   padding: 8px;
 }
 
-/* 菜单项白字规则限定到 .sidebar */
 .sidebar :deep(.el-menu-item) {
   height: 44px;
   margin: 2px 0;
@@ -528,7 +548,7 @@ onUnmounted(() => {
   border-radius: 0 3px 3px 0;
 }
 
-.sidebar-footer {
+.sidebar .sidebar-footer {
   padding: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
@@ -548,13 +568,13 @@ onUnmounted(() => {
 /* ========== Header ========== */
 .main-header {
   height: 60px;
-  background: var(--el-bg-color);
-  border-bottom: 1px solid var(--el-border-color-light);
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--header-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
   z-index: 100;
 }
 
@@ -571,7 +591,7 @@ onUnmounted(() => {
 }
 
 .collapse-btn:hover {
-  background: var(--el-fill-color);
+  background: var(--hover-bg);
   transform: scale(1.05);
 }
 
@@ -605,8 +625,8 @@ onUnmounted(() => {
 :deep(.global-search .el-input__wrapper:hover),
 :deep(.global-search .el-input__wrapper.is-focus) {
   border-color: var(--el-color-primary);
-  background: var(--el-bg-color);
-  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.1);
+  background: var(--bg-color-overlay);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
 }
 
 .search-kbd {
@@ -614,8 +634,8 @@ onUnmounted(() => {
   padding: 2px 6px;
   font-size: 11px;
   font-family: inherit;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color);
+  background: var(--bg-color-overlay);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   color: var(--el-text-color-secondary);
 }
@@ -669,7 +689,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--el-border-color-light);
+  border-bottom: 1px solid var(--divider-color);
   font-weight: 500;
 }
 
@@ -733,7 +753,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 13px;
   font-weight: 500;
-  color: var(--el-text-color-primary);
+  color: var(--text-color-primary);
 }
 
 .notification-desc {
@@ -772,7 +792,7 @@ onUnmounted(() => {
 
 .user-name {
   font-size: 14px;
-  color: var(--el-text-color-primary);
+  color: var(--text-color-primary);
 }
 
 /* ========== 主内容区 ========== */
@@ -794,19 +814,90 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: all 0.25s ease;
+
+/* ========== 移动端抽屉 (Teleport 到 body，需用 :global) ========== */
+:global(.mobile-sidebar-drawer .el-drawer__body) {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  background: var(--el-bg-color);
 }
 
-.fade-slide-enter-from {
-  opacity: 0;
-  transform: translateY(10px);
+:global(.mobile-sidebar-drawer .mobile-drawer-body) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
-.fade-slide-leave-to {
-  opacity: 0;
-  transform: translateY(-10px);
+:global(.mobile-sidebar-drawer .mobile-logo-area) {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  transition: background 0.2s;
+}
+
+:global(.mobile-sidebar-drawer .mobile-logo-area:hover) {
+  background: var(--el-fill-color-light);
+}
+
+:global(.mobile-sidebar-drawer .logo-icon) {
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+:global(.mobile-sidebar-drawer .mobile-logo-text) {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  white-space: nowrap;
+}
+
+:global(.mobile-sidebar-drawer .mobile-sidebar-menu) {
+  flex: 1;
+  border-right: none;
+  background: var(--el-bg-color);
+  padding: 8px;
+  overflow-y: auto;
+}
+
+:global(.mobile-sidebar-drawer .el-menu-item) {
+  height: 44px;
+  margin: 2px 0;
+  border-radius: 8px;
+  color: var(--el-text-color-regular);
+  transition: all 0.3s;
+}
+
+:global(.mobile-sidebar-drawer .el-menu-item:hover) {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+
+:global(.mobile-sidebar-drawer .el-menu-item.is-active) {
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+
+:global(.mobile-sidebar-drawer .mobile-sidebar-footer) {
+  padding: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+:global(.mobile-sidebar-drawer .mobile-version-info) {
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 
 /* ========== 响应式 ========== */

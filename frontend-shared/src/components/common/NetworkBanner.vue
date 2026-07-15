@@ -111,13 +111,13 @@ onUnmounted(() => {
   padding: 10px 24px;
   color: #fff;
   font-size: 14px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-md);
 }
 .network-banner.error {
-  background: linear-gradient(90deg, var(--el-color-danger), #ff7875);
+  background: linear-gradient(90deg, var(--el-color-danger), var(--el-color-danger-light-3));
 }
 .network-banner.warning {
-  background: linear-gradient(90deg, var(--el-color-warning), #f0b955);
+  background: linear-gradient(90deg, var(--el-color-warning), var(--el-color-warning-light-3));
   color: #fff;
 }
 .banner-icon {

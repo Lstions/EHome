@@ -6,10 +6,13 @@
       :title="readonly ? '查看通道' : (editingChannel ? '编辑通道' : '创建通道')"
       width="600px"
       :close-on-click-modal="false"
+      :close-on-press-escape="!submitting"
+      :show-close="!submitting"
+      :before-close="handleDialogClose"
       class="channel-manager-dialog"
       @closed="resetForm"
     >
-      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" :disabled="readonly">
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" :disabled="readonly || submitting">
         <!-- 硬件类型（预选时只读） -->
         <el-form-item label="硬件类型" prop="hardware_type">
           <el-select
@@ -188,7 +191,7 @@
       <template #footer>
         <el-button v-if="readonly" type="primary" @click="showDialog = false">关闭</el-button>
         <template v-else>
-          <el-button @click="showDialog = false">取消</el-button>
+          <el-button :disabled="submitting" @click="showDialog = false">取消</el-button>
           <el-button type="primary" :loading="submitting" @click="handleSubmit">
             {{ editingChannel ? '保存' : '创建' }}
           </el-button>
@@ -199,11 +202,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { channelApi, type Channel } from '@/api/channel'
 import { nodeApi } from '@/api/node'
+import { useChannelStore } from '@/stores/channel'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 interface Props {
   collectorId: string
@@ -219,6 +224,7 @@ interface Props {
 }
 
 const props = defineProps<Props>()
+const channelStore = useChannelStore()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -235,6 +241,19 @@ const scanning = ref(false)
 const editingChannel = computed(() => props.initialData ?? null)
 const readonly = computed(() => props.readonly ?? false)
 const formRef = ref<FormInstance>()
+let transactionGeneration = 0
+
+const handleDialogClose = (done: () => void) => {
+  if (submitting.value) return
+  done()
+}
+
+const assertTransaction = (transaction: number, collectorId: string, sessionGeneration: number) => {
+  assertSessionGeneration(sessionGeneration)
+  if (transaction !== transactionGeneration || props.collectorId !== collectorId || !props.modelValue) {
+    throw new Error('通道事务已取消')
+  }
+}
 
 const form = reactive({
   name: '',
@@ -387,9 +406,12 @@ const initConfigDefaults = () => {
 // I2C 扫描
 const scanI2C = async () => {
   if (!form.hardware_id) return
+  const collectorId = props.collectorId
+  const transaction = transactionGeneration
   scanning.value = true
   try {
-    const result = await nodeApi.scanI2C(props.collectorId, form.hardware_id)
+    const result = await nodeApi.scanI2C(collectorId, form.hardware_id)
+    if (transaction !== transactionGeneration || props.collectorId !== collectorId || !props.modelValue) return
     if (result?.devices?.length) {
       ElMessage.success(`发现 ${result.devices.length} 个设备: ${result.devices.join(', ')}`)
       // 自动填入第一个地址
@@ -400,17 +422,22 @@ const scanI2C = async () => {
       ElMessage.info('未发现 I2C 设备')
     }
   } catch (e: any) {
+    if (transaction !== transactionGeneration || props.collectorId !== collectorId || !props.modelValue) return
     ElMessage.warning('扫描失败: ' + (e.message || '未知错误'))
   } finally {
-    scanning.value = false
+    if (transaction === transactionGeneration && props.collectorId === collectorId) scanning.value = false
   }
 }
 
 const handleSubmit = async () => {
   if (!formRef.value) return
   if (readonly.value) return
+  const collectorId = props.collectorId
+  const sessionGeneration = getSessionGeneration()
+  const transaction = transactionGeneration
   try {
     await formRef.value.validate()
+    assertTransaction(transaction, collectorId, sessionGeneration)
     submitting.value = true
 
     // 处理地址
@@ -482,7 +509,7 @@ const handleSubmit = async () => {
     }
 
     const data: Partial<Channel> = {
-      node_id: String(props.collectorId),
+      node_id: String(collectorId),
       hardware_type: form.hardware_type,
       hardware_id: form.hardware_id,
       bus_type: form.hardware_type.toUpperCase(),
@@ -494,31 +521,49 @@ const handleSubmit = async () => {
     }
 
     if (editingChannel.value?.id) {
-      await channelApi.update(editingChannel.value.id, data)
+      await channelStore.updateChannel(editingChannel.value.id, data)
+      assertTransaction(transaction, collectorId, sessionGeneration)
       // 自动同步配置到采集器
       try {
-        await nodeApi.syncConfig(props.collectorId)
+        await nodeApi.syncConfig(collectorId)
+        assertTransaction(transaction, collectorId, sessionGeneration)
         ElMessage.success('更新成功，配置已同步到采集器')
       } catch (syncError: any) {
+        if (
+          syncError?.message === '会话已变更'
+          || transaction !== transactionGeneration
+          || props.collectorId !== collectorId
+          || !props.modelValue
+        ) throw syncError
         ElMessage.warning('更新成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))
       }
     } else {
-      await channelApi.create(data as any)
+      await channelStore.createChannel(data as any)
+      assertTransaction(transaction, collectorId, sessionGeneration)
       // 自动同步配置到采集器
       try {
-        await nodeApi.syncConfig(props.collectorId)
+        await nodeApi.syncConfig(collectorId)
+        assertTransaction(transaction, collectorId, sessionGeneration)
         ElMessage.success('创建成功，配置已同步到采集器')
       } catch (syncError: any) {
+        if (
+          syncError?.message === '会话已变更'
+          || transaction !== transactionGeneration
+          || props.collectorId !== collectorId
+          || !props.modelValue
+        ) throw syncError
         ElMessage.warning('创建成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))
       }
     }
 
+    assertTransaction(transaction, collectorId, sessionGeneration)
+    submitting.value = false
     showDialog.value = false
     emit('refresh')
   } catch (error: any) {
-    if (error !== 'cancel') ElMessage.error(error.message || '操作失败')
+    if (transaction === transactionGeneration && error !== 'cancel') ElMessage.error(error.message || '操作失败')
   } finally {
-    submitting.value = false
+    if (transaction === transactionGeneration) submitting.value = false
   }
 }
 
@@ -534,7 +579,12 @@ const resetForm = () => {
 // ====== 初始化：预选硬件 ======
 
 watch(showDialog, (open) => {
-  if (!open) return
+  if (!open) {
+    transactionGeneration++
+    submitting.value = false
+    scanning.value = false
+    return
+  }
 
   if (editingChannel.value) {
     // 编辑模式：从通道数据填充
@@ -586,6 +636,18 @@ watch(showDialog, (open) => {
     setTimeout(() => initConfigDefaults(), 50)
   }
 })
+
+watch(() => props.collectorId, () => {
+  transactionGeneration++
+  submitting.value = false
+  scanning.value = false
+})
+
+onUnmounted(() => {
+  transactionGeneration++
+  submitting.value = false
+  scanning.value = false
+})
 </script>
 
 <style scoped>
@@ -612,8 +674,8 @@ watch(showDialog, (open) => {
 
 /* 预选硬件时只读字段的视觉提示 */
 :deep(.el-select.is-disabled .el-input__inner) {
-  color: #303133;
-  -webkit-text-fill-color: #303133;
+  color: var(--text-color-primary);
+  -webkit-text-fill-color: var(--text-color-primary);
 }
 </style>
 
@@ -633,7 +695,7 @@ watch(showDialog, (open) => {
 
 .channel-manager-dialog .el-dialog__footer {
   flex-shrink: 0;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--border-color-light);
   padding: 12px 20px;
 }
 </style>

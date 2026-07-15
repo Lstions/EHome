@@ -2,10 +2,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useUserStore } from '../user'
 
+const { mockClearSessionCaches } = vi.hoisted(() => ({
+  mockClearSessionCaches: vi.fn(),
+}))
+
+vi.mock('@/utils/sessionCache', () => ({ clearSessionCaches: mockClearSessionCaches }))
+
 // Mock auth API
 vi.mock('@/api/auth', () => ({
   authApi: {
     login: vi.fn(),
+    logout: vi.fn(),
   },
 }))
 
@@ -45,21 +52,20 @@ describe('user store', () => {
     it('登录成功后保存 userInfo + token', async () => {
       vi.mocked(authApi.login).mockResolvedValue({
         token: 'jwt-abc',
-        user: { id: 1, username: 'admin', email: 'a@x.com', role: 'admin' },
+        user: { id: 1, username: 'admin', email: 'a@x.com' },
       } as any)
       const store = useUserStore()
       await store.login('admin', 'password123', false)
       expect(store.isLoggedIn).toBe(true)
       expect(store.token).toBe('jwt-abc')
       expect(store.userInfo?.username).toBe('admin')
-      expect(store.userInfo?.role).toBe('admin')
       expect(sessionStorage.getItem('token')).toBe('jwt-abc')
     })
 
     it('rememberMe=true 时存到 localStorage', async () => {
       vi.mocked(authApi.login).mockResolvedValue({
         token: 'jwt-persist',
-        user: { id: 2, username: 'u', email: 'u@x.com', role: 'viewer' },
+        user: { id: 2, username: 'u', email: 'u@x.com' },
       } as any)
       const store = useUserStore()
       await store.login('u', 'pass1234', true)
@@ -76,61 +82,29 @@ describe('user store', () => {
   })
 
   describe('logout action', () => {
-    it('清空所有状态和存储', () => {
+    it('先撤销服务端会话，再清空所有状态和存储', async () => {
+      vi.mocked(authApi.logout).mockResolvedValue()
       localStorage.setItem('token', 'x')
       sessionStorage.setItem('token', 'y')
       setActivePinia(createPinia())
       const store = useUserStore()
-      store.logout()
+      await store.logout()
+      expect(authApi.logout).toHaveBeenCalledOnce()
       expect(store.token).toBe('')
       expect(store.userInfo).toBeNull()
       expect(store.isLoggedIn).toBe(false)
       expect(localStorage.getItem('token')).toBeNull()
       expect(sessionStorage.getItem('token')).toBeNull()
-    })
-  })
-
-  describe('角色 getter', () => {
-    it('isAdmin 仅在 role=admin 时为 true', () => {
-      const store = useUserStore()
-      store.userInfo = { id: 1, username: 'u', email: 'u@x.com', role: 'admin' }
-      expect(store.isAdmin).toBe(true)
-      store.userInfo.role = 'operator'
-      expect(store.isAdmin).toBe(false)
+      expect(mockClearSessionCaches).toHaveBeenCalledOnce()
     })
 
-    it('isOperator 在 admin 和 operator 时为 true', () => {
+    it('服务端撤销失败时仍清理本地会话', async () => {
+      vi.mocked(authApi.logout).mockRejectedValue(new Error('network'))
+      localStorage.setItem('token', 'x')
       const store = useUserStore()
-      store.userInfo = { id: 1, username: 'u', email: 'u@x.com', role: 'admin' }
-      expect(store.isOperator).toBe(true)
-      store.userInfo.role = 'operator'
-      expect(store.isOperator).toBe(true)
-      store.userInfo.role = 'viewer'
-      expect(store.isOperator).toBe(false)
-    })
-
-    it('hasRole 含更高级角色 (admin 同时拥有 operator/viewer 权限)', () => {
-      const store = useUserStore()
-      store.userInfo = { id: 1, username: 'u', email: 'u@x.com', role: 'admin' }
-      expect(store.hasRole('admin')).toBe(true)
-      expect(store.hasRole('operator')).toBe(true)
-      expect(store.hasRole('viewer')).toBe(true)
-
-      store.userInfo.role = 'operator'
-      expect(store.hasRole('admin')).toBe(false)
-      expect(store.hasRole('operator')).toBe(true)
-      expect(store.hasRole('viewer')).toBe(true)
-
-      store.userInfo.role = 'viewer'
-      expect(store.hasRole('admin')).toBe(false)
-      expect(store.hasRole('operator')).toBe(false)
-      expect(store.hasRole('viewer')).toBe(true)
-    })
-
-    it('未登录时所有 hasRole 返回 false', () => {
-      const store = useUserStore()
-      expect(store.hasRole('admin')).toBe(false)
-      expect(store.hasRole('viewer')).toBe(false)
+      await store.logout()
+      expect(store.isLoggedIn).toBe(false)
+      expect(localStorage.getItem('token')).toBeNull()
     })
   })
 })

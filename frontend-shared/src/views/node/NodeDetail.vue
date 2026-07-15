@@ -359,7 +359,7 @@
     />
 
     <!-- 系统日志 -->
-    <el-card v-if="collector && userStore.isAdmin" shadow="hover" style="margin-top: 20px;">
+    <el-card v-if="collector" shadow="hover" style="margin-top: 20px;">
       <template #header>
         <span>系统日志</span>
       </template>
@@ -380,6 +380,7 @@ import ChannelPanel from '@/components/node/ChannelPanel.vue'
 import LogPanel from '@/components/node/LogPanel.vue'
 import { nodeApi, type OTARecord } from '@/api/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
+import { useNodeStore } from '@/stores/node'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
@@ -390,12 +391,14 @@ import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 const router = useRouter()
 const route = useRoute()
 const wsStore = useWebSocketStore()
 const dmaStore = useDmaStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+const nodeStore = useNodeStore()
 const userStore = useUserStore()
 
 const collector = ref<any>(null)
@@ -428,19 +431,31 @@ const cancelEditName = () => {
 
 const saveName = async () => {
   if (!collector.value) return
+  const targetId = collector.value.id
+  const targetRouteId = route.params.id as string
+  const targetName = editNameValue.value
+  const sequence = ++nameSaveSequence
   savingName.value = true
   try {
-    await nodeApi.update(collector.value.id, { name: editNameValue.value })
-    collector.value.name = editNameValue.value
+    await nodeStore.updateNode(targetId, { name: targetName })
+    if (sequence !== nameSaveSequence || route.params.id !== targetRouteId || collector.value?.id !== targetId) return
+    collector.value.name = targetName
     editingName.value = false
     ElMessage.success('节点名称已更新')
   } catch (error: any) {
+    if (sequence !== nameSaveSequence || route.params.id !== targetRouteId || collector.value?.id !== targetId) return
     ElMessage.error('保存失败: ' + (error.message || '未知错误'))
   } finally {
-    savingName.value = false
+    if (sequence === nameSaveSequence && route.params.id === targetRouteId && collector.value?.id === targetId) savingName.value = false
   }
 }
 const pendingPingTimeout = ref<ReturnType<typeof setTimeout> | null>(null)
+let collectorDetailSequence = 0
+let devicesRequestSequence = 0
+let otaRequestSequence = 0
+let syncRequestSequence = 0
+let nameSaveSequence = 0
+let componentOperationGeneration = 0
 
 // DMA 通道 — v2.5: 统一由 dmaStore 管理（只读展示，绑定操作在 ChannelPanel 中）
 const dmaChannels = computed(() => dmaStore.mergedChannels)
@@ -515,15 +530,22 @@ const handleEditChannel = (channel: any) => {
 
 const handlePing = async () => {
   if (!collector.value) return
+  const id = route.params.id as string
+  const nodeId = collector.value.node_id
+  const sessionGeneration = getSessionGeneration()
+  const operation = componentOperationGeneration
   pinging.value = true
   try {
-    await nodeApi.ping(collector.value.node_id)
+    await nodeApi.ping(nodeId)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== componentOperationGeneration || route.params.id !== id) return
     const timeout = setTimeout(() => {
       pinging.value = false
       ElMessage.warning('延迟测量超时，采集器可能离线')
     }, 5000)
     pendingPingTimeout.value = timeout
   } catch (err: any) {
+    if (operation !== componentOperationGeneration || route.params.id !== id) return
     pinging.value = false
     ElMessage.error('发送 Ping 失败: ' + (err.message || '未知错误'))
   }
@@ -538,16 +560,19 @@ const fetchCollectorDetail = async () => {
   }
 
   loading.value = true
+  const sequence = ++collectorDetailSequence
   try {
-    collector.value = await nodeApi.getDetail(id)
+    const result = await nodeStore.fetchDetail(id, true)
+    if (sequence !== collectorDetailSequence || route.params.id !== id) return
+    collector.value = result
     // 自动测量延迟（如果在线且无延迟数据）
     if (collector.value?.status === 'online' && (!collector.value.ping_latency_ms || collector.value.ping_latency_ms <= 0)) {
       handlePing()
     }
   } catch (error: any) {
-    ElMessage.error('获取节点详情失败')
+    if (sequence === collectorDetailSequence) ElMessage.error('获取节点详情失败')
   } finally {
-    loading.value = false
+    if (sequence === collectorDetailSequence) loading.value = false
   }
 }
 
@@ -555,22 +580,27 @@ const fetchDevices = async () => {
   const id = route.params.id as string
   if (!id) return
 
+  const sequence = ++devicesRequestSequence
   devicesLoading.value = true
   try {
-    const [channelRes] = await Promise.all([
-      edgeDeviceStore.fetchList({ node_id: id, page: 1, page_size: 100 }, true),
+    const params = { node_id: id, page: 1, page_size: 100 }
+    const [, channelRes] = await Promise.all([
+      edgeDeviceStore.fetchList(params, true),
       channelApi.getList(id)
     ])
-    devices.value = edgeDeviceStore.list
+    if (sequence !== devicesRequestSequence || route.params.id !== id) return
+    devices.value = edgeDeviceStore.getCachedList(params)?.items || []
     // 统一为数组
     channels.value = Array.isArray(channelRes)
       ? channelRes
       : (channelRes?.items || [])
   } catch (error: any) {
-    logger.error('获取设备列表失败', { error: String(error) })
-    ElMessage.error('获取设备列表失败')
+    if (sequence === devicesRequestSequence) {
+      logger.error('获取设备列表失败', { error: String(error) })
+      ElMessage.error('获取设备列表失败')
+    }
   } finally {
-    devicesLoading.value = false
+    if (sequence === devicesRequestSequence) devicesLoading.value = false
   }
 }
 
@@ -586,13 +616,16 @@ const fetchOTAHistory = async () => {
   const id = route.params.id as string
   if (!id) return
 
+  const sequence = ++otaRequestSequence
   otaHistoryLoading.value = true
   try {
-    otaHistory.value = (await nodeApi.getOTAHistory(id)) || []
+    const history = (await nodeApi.getOTAHistory(id)) || []
+    if (sequence !== otaRequestSequence || route.params.id !== id) return
+    otaHistory.value = history
   } catch (error: any) {
-    logger.error('获取OTA历史失败', { error: String(error) })
+    if (sequence === otaRequestSequence) logger.error('获取OTA历史失败', { error: String(error) })
   } finally {
-    otaHistoryLoading.value = false
+    if (sequence === otaRequestSequence) otaHistoryLoading.value = false
   }
 }
 
@@ -601,17 +634,25 @@ const handleSyncConfig = async () => {
   if (!id) return
 
   syncingConfig.value = true
+  const sequence = ++syncRequestSequence
+  const sessionGeneration = getSessionGeneration()
   try {
     await nodeApi.syncConfig(id)
+    assertSessionGeneration(sessionGeneration)
+    if (sequence !== syncRequestSequence || route.params.id !== id) return
     ElMessage.success('配置同步成功')
   } catch (error: any) {
+    if (sequence !== syncRequestSequence || route.params.id !== id) return
     ElMessage.error('配置同步失败: ' + (error.message || '未知错误'))
   } finally {
-    syncingConfig.value = false
+    if (sequence === syncRequestSequence && route.params.id === id) syncingConfig.value = false
   }
 }
 
 const handleCancelOTA = async (record: OTARecord) => {
+  const id = collectorId.value
+  const operation = componentOperationGeneration
+  const sessionGeneration = getSessionGeneration()
   try {
     await ElMessageBox.confirm('确定要取消此OTA升级吗？', '提示', {
       confirmButtonText: '确定',
@@ -619,10 +660,14 @@ const handleCancelOTA = async (record: OTARecord) => {
       type: 'warning'
     })
 
-    await nodeApi.cancelOTA(collectorId.value, record.id)
+    if (operation !== componentOperationGeneration || collectorId.value !== id) return
+    await nodeApi.cancelOTA(id, record.id)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== componentOperationGeneration || collectorId.value !== id) return
     ElMessage.success('已取消OTA升级')
     fetchOTAHistory()
   } catch (error: any) {
+    if (operation !== componentOperationGeneration || collectorId.value !== id) return
     if (error !== 'cancel') {
       ElMessage.error('取消OTA失败')
     }
@@ -747,6 +792,29 @@ watch(() => collector.value?.status, (newStatus, oldStatus) => {
   }
 })
 
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId === oldId) return
+  editingName.value = false
+  editNameValue.value = ''
+  showOTADialog.value = false
+  savingName.value = false
+  nameSaveSequence++
+  syncingConfig.value = false
+  syncRequestSequence++
+  pinging.value = false
+  if (pendingPingTimeout.value) {
+    clearTimeout(pendingPingTimeout.value)
+    pendingPingTimeout.value = null
+  }
+  collector.value = null
+  devices.value = []
+  channels.value = []
+  void fetchCollectorDetail()
+  void fetchDevices()
+  void fetchOTAHistory()
+  void loadDmaChannels()
+})
+
 onMounted(() => {
   fetchCollectorDetail()
   fetchDevices()
@@ -775,6 +843,12 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  componentOperationGeneration++
+  collectorDetailSequence++
+  devicesRequestSequence++
+  otaRequestSequence++
+  syncRequestSequence++
+  nameSaveSequence++
   if (unsubscribe) {
     unsubscribe()
   }

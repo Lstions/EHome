@@ -1,13 +1,14 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import type { UserRole } from '@/stores/user'
+
+import { loadEdgeDeviceList, loadNodeList } from './routeLoaders'
 
 declare module 'vue-router' {
   interface RouteMeta {
     requiresAuth?: boolean
     title?: string
     icon?: string
-    roles?: UserRole[]
+
     hiddenInMenu?: boolean
     hidden?: boolean
   }
@@ -38,7 +39,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'node',
         name: 'NodeList',
-        component: () => import('@/views/node/NodeList.vue'),
+        component: loadNodeList,
         meta: { title: '节点', icon: 'Connection' },
       },
       {
@@ -56,7 +57,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'edge-device',
         name: 'EdgeDeviceList',
-        component: () => import('@/views/edge-device/EdgeDeviceList.vue'),
+        component: loadEdgeDeviceList,
         meta: { title: '边缘设备', icon: 'Cpu' },
       },
       {
@@ -75,25 +76,19 @@ const routes: RouteRecordRaw[] = [
         path: 'firmware',
         name: 'FirmwareManage',
         component: () => import('@/views/firmware/FirmwareManage.vue'),
-        meta: { title: '固件管理', icon: 'Files', roles: ['admin', 'operator'] },
+        meta: { title: '固件管理', icon: 'Files' },
       },
       {
         path: 'device-configs',
         name: 'DeviceConfigList',
         component: () => import('@/views/config/DeviceConfigList.vue'),
-        meta: { title: '配置模板', icon: 'Setting', roles: ['admin', 'operator'] },
+        meta: { title: '配置模板', icon: 'Setting' },
       },
       {
         path: 'monitor',
         name: 'Monitor',
         component: () => import('@/views/monitor/Monitor.vue'),
-        meta: { title: '系统监控', icon: 'DataAnalysis', roles: ['admin'] },
-      },
-      {
-        path: 'admin/users',
-        name: 'UserList',
-        component: () => import('@/views/admin/UserList.vue'),
-        meta: { title: '用户管理', icon: 'UserFilled', roles: ['admin'], hiddenInMenu: true },
+        meta: { title: '系统监控', icon: 'DataAnalysis' },
       },
       {
         path: 'profile',
@@ -134,16 +129,6 @@ router.beforeEach((to, _from) => {
   }
   if (to.path === '/login' && userStore.isLoggedIn) {
     return '/dashboard'
-  }
-
-  // 2. 角色检查
-  const requiredRoles = to.meta.roles as UserRole[] | undefined
-  if (requiredRoles && requiredRoles.length > 0) {
-    const userRole = userStore.role
-    if (!requiredRoles.includes(userRole)) {
-      // 无权限 → 跳 403
-      return { path: '/403', replace: true }
-    }
   }
 })
 

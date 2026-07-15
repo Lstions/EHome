@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ChannelList from '@/views/channel/ChannelList.vue'
+import channelListSource from '@/views/channel/ChannelList.vue?raw'
 
 const mockPush = vi.fn()
 vi.mock('vue-router', () => ({
@@ -29,6 +30,10 @@ vi.mock('@/api/channel', () => ({
 vi.mock('@/stores/node', () => ({
   useNodeStore: () => ({
     fetchNodes: vi.fn(() => Promise.resolve()),
+    getCachedList: vi.fn(() => ({ items: [
+      { id: 1, name: 'Collector-A', status: 'online' },
+      { id: 2, name: 'Collector-B', status: 'offline' },
+    ], total: 2 })),
     nodes: [
       { id: 1, name: 'Collector-A', status: 'online' },
       { id: 2, name: 'Collector-B', status: 'offline' },
@@ -56,6 +61,10 @@ const stubs = {
 }
 
 describe('ChannelList.vue', () => {
+  it('reads node options from the requested parameter cache', () => {
+    expect(channelListSource).toContain('nodeStore.getCachedList(nodeListParams)')
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()

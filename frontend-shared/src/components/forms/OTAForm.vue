@@ -4,6 +4,9 @@
     title="OTA 固件升级"
     width="600px"
     :close-on-click-modal="false"
+    :close-on-press-escape="!otaBusy"
+    :show-close="!otaBusy"
+    :before-close="handleDialogClose"
   >
     <el-form :model="form" :rules="rules" label-width="120px" ref="formRef">
       <el-form-item label="固件版本" prop="firmware_id">
@@ -102,7 +105,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import { firmwareApi, type Firmware } from '@/api/firmware'
@@ -127,11 +130,17 @@ const emit = defineEmits<{
 }>()
 
 const formRef = ref()
+const otaBusy = computed(() => upgradeStatus.value === 'uploading' || upgradeStatus.value === 'upgrading')
+const handleDialogClose = (done: () => void) => {
+  if (otaBusy.value) return
+  done()
+}
 const dialogVisible = computed({
   get: () => props.visible,
   set: (val) => {
     emit('update:visible', val)
     if (!val) {
+      otaGeneration++
       // 重置状态
       form.firmware_id = null
       progress.value = 0
@@ -210,18 +219,24 @@ watch(() => form.firmware_id, (newVal) => {
 })
 
 // 开始升级
+let progressTimer: ReturnType<typeof setInterval> | null = null
+let otaGeneration = 0
+
 const handleStart = async () => {
   if (!form.firmware_id || !selectedFirmware.value) {
     ElMessage.warning('请先选择固件版本')
     return
   }
 
+  const collectorId = props.collectorId
+  const generation = ++otaGeneration
   try {
     upgradeStatus.value = 'uploading'
     statusText.value = '正在创建OTA任务...'
     addLog('开始 OTA 升级')
 
-    const otaRecord = await nodeApi.startOTA(props.collectorId, form.firmware_id)
+    const otaRecord = await nodeApi.startOTA(collectorId, form.firmware_id)
+    if (generation !== otaGeneration || props.collectorId !== collectorId) return
 
     upgradeStatus.value = 'upgrading'
     statusText.value = '正在升级中...'
@@ -229,9 +244,10 @@ const handleStart = async () => {
 
     // 轮询真实进度
     const recordId = otaRecord.ota_record_id || otaRecord.id
-    pollProgress(recordId)
+    pollProgress(collectorId, recordId, generation)
 
   } catch (error: any) {
+    if (generation !== otaGeneration || props.collectorId !== collectorId) return
     ElMessage.error(error.message || '启动升级失败')
     upgradeStatus.value = 'failed'
     statusText.value = '升级失败'
@@ -240,14 +256,13 @@ const handleStart = async () => {
 }
 
 // 轮询真实OTA进度
-let progressTimer: ReturnType<typeof setInterval> | null = null
-
-const pollProgress = (recordId: number) => {
+const pollProgress = (collectorId: string, recordId: number, generation: number) => {
   if (progressTimer) clearInterval(progressTimer)
 
   progressTimer = setInterval(async () => {
     try {
-      const record = await nodeApi.getOTAProgress(props.collectorId, recordId)
+      const record = await nodeApi.getOTAProgress(collectorId, recordId)
+      if (generation !== otaGeneration || props.collectorId !== collectorId) return
       progress.value = record.progress || 0
 
       const statusMap: Record<string, string> = {
@@ -274,7 +289,10 @@ const pollProgress = (recordId: number) => {
         progress.value = 100
         addLog('升级完成！请等待设备重启...')
         emit('success')
-        setTimeout(() => { dialogVisible.value = false }, 3000)
+        const closeGeneration = generation
+        setTimeout(() => {
+          if (closeGeneration === otaGeneration && props.collectorId === collectorId) dialogVisible.value = false
+        }, 3000)
       } else if (record.status === 'failed') {
         clearInterval(progressTimer!)
         progressTimer = null
@@ -298,7 +316,26 @@ const addLog = (message: string) => {
 watch(() => props.visible, (newVal) => {
   if (newVal) {
     fetchFirmwares()
+  } else {
+    otaGeneration++
+    if (progressTimer) clearInterval(progressTimer)
+    progressTimer = null
   }
+})
+
+watch(() => props.collectorId, () => {
+  otaGeneration++
+  if (progressTimer) clearInterval(progressTimer)
+  progressTimer = null
+  upgradeStatus.value = 'idle'
+  progress.value = 0
+  statusText.value = ''
+  upgradeLogs.value = []
+})
+
+onUnmounted(() => {
+  otaGeneration++
+  if (progressTimer) clearInterval(progressTimer)
 })
 </script>
 

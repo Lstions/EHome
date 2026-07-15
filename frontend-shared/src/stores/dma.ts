@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
+import { computed, ref } from 'vue'
 import { nodeApi, type DmaChannelInfo, type DmaChannelConfig } from '@/api/node'
 import { DmaState } from '@/utils/dmaState'
+import { registerSessionCacheClearer } from '@/utils/sessionCache'
 
 /**
  * DMA 通道统一状态管理 (v2.5)
@@ -24,6 +26,10 @@ export const useDmaStore = defineStore('dma', () => {
 
   // bind_to 缓存：关闭时记住，重新打开时恢复
   const bindToCache = ref<Record<number, string>>({})
+  let cacheEpoch = 0
+  let requestSequence = 0
+  let activeCollectorId: string | number | null = null
+  let collectorGeneration = 0
 
   // ========== Getters ==========
 
@@ -46,19 +52,34 @@ export const useDmaStore = defineStore('dma', () => {
   // ========== Actions ==========
 
   async function fetch(collectorId: string | number) {
+    if (activeCollectorId !== collectorId) {
+      activeCollectorId = collectorId
+      collectorGeneration++
+    }
+    const fetchCollectorGeneration = collectorGeneration
     loading.value = true
+    const sequence = ++requestSequence
+    const requestEpoch = cacheEpoch
     try {
       const list = await nodeApi.getDmaChannels(collectorId)
+      if (requestEpoch !== cacheEpoch || sequence !== requestSequence || fetchCollectorGeneration !== collectorGeneration) return
       channels.value = list
       overrideState.value = {}
       bindToCache.value = {}
     } finally {
-      loading.value = false
+      if (sequence === requestSequence) loading.value = false
     }
   }
 
   async function toggle(collectorId: string | number, dma: DmaChannelInfo, enabled: boolean, bindTo?: string) {
     const dmaId = dma.dma_id
+
+    if (activeCollectorId === null) {
+      activeCollectorId = collectorId
+      collectorGeneration++
+    } else if (activeCollectorId !== collectorId) {
+      throw new Error('节点已变更')
+    }
 
     // 并发守卫：防止快速点击触发重复请求
     if (toggling.value[dmaId]) return
@@ -76,6 +97,8 @@ export const useDmaStore = defineStore('dma', () => {
       bindToCache.value[dmaId] = dma.bound_to
     }
     toggling.value[dmaId] = true
+    const operationEpoch = cacheEpoch
+    const operationCollectorGeneration = collectorGeneration
 
     try {
       // v2.5: 只发送需要更新的通道，后端会合并保留其他通道的原状态
@@ -102,17 +125,36 @@ export const useDmaStore = defineStore('dma', () => {
       
       await nodeApi.updateDmaConfig(collectorId, configs)
 
+      if (operationEpoch !== cacheEpoch) throw new Error('会话已变更')
+      if (activeCollectorId !== collectorId || operationCollectorGeneration !== collectorGeneration) throw new Error('节点已变更')
+
       // 刷新真实数据
+      const sequenceBeforeRefresh = requestSequence
       await fetch(collectorId)
+      if (operationEpoch !== cacheEpoch) throw new Error('会话已变更')
+      if (requestSequence !== sequenceBeforeRefresh + 1) throw new Error('节点已变更')
     } catch (e: any) {
+      if (operationEpoch !== cacheEpoch) throw new Error('会话已变更')
       // 回滚乐观更新
       delete overrideState.value[dmaId]
       // 清理残留的 bindToCache，防止脏数据
       delete bindToCache.value[dmaId]
       throw e
     } finally {
-      toggling.value[dmaId] = false
+      if (operationEpoch === cacheEpoch) toggling.value[dmaId] = false
     }
+  }
+
+  function clearCache() {
+    cacheEpoch++
+    requestSequence++
+    activeCollectorId = null
+    collectorGeneration++
+    channels.value = []
+    loading.value = false
+    toggling.value = {}
+    overrideState.value = {}
+    bindToCache.value = {}
   }
 
   return {
@@ -124,6 +166,9 @@ export const useDmaStore = defineStore('dma', () => {
     bindToCache,
     isSwitchOn,
     fetch,
-    toggle
+    toggle,
+    clearCache,
   }
 })
+
+registerSessionCacheClearer(() => useDmaStore().clearCache())

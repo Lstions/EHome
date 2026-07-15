@@ -34,10 +34,10 @@ type WSHandler struct {
 
 // termClient represents a terminal WebSocket client
 type termClient struct {
-	conn *wslib.Conn
-	send chan []byte
-	h    *WSHandler
-	role string // user role from JWT
+	conn          *wslib.Conn
+	send          chan []byte
+	h             *WSHandler
+	authenticated bool
 }
 
 // Incoming message types
@@ -162,15 +162,9 @@ func (h *WSHandler) dispatchEvent(event websocket.Event) {
 
 // HandleTerminalWS handles the /ws/terminal WebSocket endpoint
 // JWT auth is handled by the JWTAuth() middleware (supports both Authorization header
-// and ?token= query param). The middleware sets "user_id" and "role" in context.
+// and ?token= query param). The middleware sets the authenticated subject.
 func (h *WSHandler) HandleTerminalWS(c *gin.Context) {
-	// 1. Extract role from context (set by JWTAuth middleware)
-	role := "viewer" // default
-	if r, exists := c.Get("role"); exists {
-		if roleStr, ok := r.(string); ok && roleStr != "" {
-			role = roleStr
-		}
-	}
+	_, authenticated := c.Get("subject_id")
 
 	// 2. Upgrade to WebSocket
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -180,10 +174,10 @@ func (h *WSHandler) HandleTerminalWS(c *gin.Context) {
 	}
 
 	client := &termClient{
-		conn: conn,
-		send: make(chan []byte, 256),
-		h:    h,
-		role: role,
+		conn:          conn,
+		send:          make(chan []byte, 256),
+		h:             h,
+		authenticated: authenticated,
 	}
 
 	// Register client
@@ -325,11 +319,10 @@ func (c *termClient) readPump() {
 			c.h.unsubscribe(c, p.ChannelID)
 
 		case "send":
-			// Admin-only: only admin role can send commands to devices
-			if c.role != "admin" {
+			if !c.authenticated {
 				c.sendJSON(wsResponse{
 					Type:    "error",
-					Payload: map[string]string{"message": "forbidden: admin role required to send commands"},
+					Payload: map[string]string{"message": "forbidden: authenticated subject required"},
 				})
 				continue
 			}

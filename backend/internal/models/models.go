@@ -53,15 +53,15 @@ type Node struct {
 	LastSyncAt      *time.Time `json:"last_sync_at"`
 	LastSyncID      string     `gorm:"size:64" json:"last_sync_id"`
 	// v2.5: log stream config (sent to ESP32 via ConfigManifest field 10)
-	LogStreamEnabled bool   `gorm:"default:false" json:"log_stream_enabled"`
-	LogStreamLevel   int    `gorm:"default:2" json:"log_stream_level"` // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE
+	LogStreamEnabled bool `gorm:"default:false" json:"log_stream_enabled"`
+	LogStreamLevel   int  `gorm:"default:2" json:"log_stream_level"` // 0=ERROR 1=WARN 2=INFO 3=DEBUG 4=VERBOSE
 	// v2.5: log persistence config (pure backend, NOT sent to ESP32)
-	LogPersistEnabled bool  `gorm:"default:false" json:"log_persist_enabled"`
+	LogPersistEnabled bool `gorm:"default:false" json:"log_persist_enabled"`
 	// v2.2 新增: 标记用 v1 (devices/{id}) 还是 v2 (nodes/{id}) topic — REMOVED: 产品未发布, 无需兼容
 	// MQTTTopicFormat string         `gorm:"size:16;default:v2" json:"mqtt_topic_format"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       time.Time      `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 	// 关联
 	Channels []Channel `gorm:"foreignKey:NodeID;references:NodeID" json:"channels,omitempty"`
 }
@@ -76,30 +76,30 @@ func (Node) TableName() string { return "nodes" }
 // 一个 EdgeDevice = Node + Channel + DeviceConfig 三元组的实例化
 // 字段含义见 docs/设计/边缘设备/详细设计.md
 type EdgeDevice struct {
-	Type           string         `gorm:"column:type;size:32;not null;default:'';index" json:"type"` // deprecated: use DeviceConfig.DeviceType via JOIN. Kept for backward compat.
-	ParserID       string         `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"`                      // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
-	ID             uint           `gorm:"primaryKey" json:"id"`
-	Name           string         `gorm:"size:64;not null" json:"name"`
-	NodeID         string         `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`          // v2.2 显式 FK (was implicit via Channel)
-	ChannelID      uint           `gorm:"index;not null" json:"channel_id"`       // 保留
-	DeviceConfigID uint           `gorm:"index;not null" json:"device_config_id"` // v2.2 关键新增 FK
-	HardwareID     string         `gorm:"size:16;default:''" json:"hardware_id"`           // v2.2 新增 (从 Channel 移过来)
-	IntervalMs     int            `gorm:"default:5000" json:"interval_ms"`
-	Enabled        bool           `gorm:"default:true" json:"enabled"`
-	Status         string         `gorm:"size:20;default:active" json:"status"`
-	ErrorCode      int            `gorm:"default:0" json:"error_code"` // v2.2 新增
-	LastDataAt     *time.Time     `json:"last_data_at"`                // v2.2 新增
-	LastError      string         `gorm:"size:256" json:"last_error"`  // v2.2 新增
-	ConfigVersion  string         `gorm:"size:64" json:"config_version"`
-	InitState      string         `gorm:"size:20;default:pending" json:"init_state"` // v2.2 新增 (G6 准备)
-	InitLastStep   int            `gorm:"default:0" json:"init_last_step"`           // v2.2 新增
-	InitTotalSteps int            `gorm:"default:0" json:"init_total_steps"`         // v2.2 新增
+	Type             string          `gorm:"column:type;size:32;not null;default:'';index" json:"type"`  // deprecated: use DeviceConfig.DeviceType via JOIN. Kept for backward compat.
+	ParserID         string          `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"` // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
+	ID               uint            `gorm:"primaryKey" json:"id"`
+	Name             string          `gorm:"size:64;not null" json:"name"`
+	NodeID           string          `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2 显式 FK (was implicit via Channel)
+	ChannelID        uint            `gorm:"index;not null" json:"channel_id"`                              // 保留
+	DeviceConfigID   uint            `gorm:"index;not null" json:"device_config_id"`                        // v2.2 关键新增 FK
+	HardwareID       string          `gorm:"size:16;default:''" json:"hardware_id"`                         // v2.2 新增 (从 Channel 移过来)
+	IntervalMs       int             `gorm:"default:5000" json:"interval_ms"`
+	Enabled          bool            `gorm:"default:true" json:"enabled"`
+	Status           string          `gorm:"size:20;default:active" json:"status"`
+	ErrorCode        int             `gorm:"default:0" json:"error_code"` // v2.2 新增
+	LastDataAt       *time.Time      `json:"last_data_at"`                // v2.2 新增
+	LastError        string          `gorm:"size:256" json:"last_error"`  // v2.2 新增
+	ConfigVersion    string          `gorm:"size:64" json:"config_version"`
+	InitState        string          `gorm:"size:20;default:pending" json:"init_state"`                        // v2.2 新增 (G6 准备)
+	InitLastStep     int             `gorm:"default:0" json:"init_last_step"`                                  // v2.2 新增
+	InitTotalSteps   int             `gorm:"default:0" json:"init_total_steps"`                                // v2.2 新增
 	CommandIntervals json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"command_intervals"` // per-command polling intervals
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt  `gorm:"index" json:"-"`
 	// 非数据库字段 — 仅用于 API 响应中携带最新传感器数据
-	LastData       map[string]float64 `gorm:"-" json:"last_data,omitempty"`
+	LastData map[string]float64 `gorm:"-" json:"last_data,omitempty"`
 	// 关联
 	Node         Node         `gorm:"foreignKey:NodeID;references:NodeID" json:"node,omitempty"`
 	Channel      Channel      `gorm:"foreignKey:ChannelID" json:"channel,omitempty"`
@@ -118,8 +118,8 @@ func (EdgeDevice) TableName() string { return "edge_devices" }
 type Channel struct {
 	ID           uint           `gorm:"primaryKey" json:"id"`
 	NodeID       string         `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
-	HardwareType string         `gorm:"size:20" json:"hardware_type"`    // SPI/I2C/UART/GPIO/ADC
-	HardwareID   string         `gorm:"size:16;default:''" json:"hardware_id"`    // 总线上的硬件地址 (e.g. I2C 0x76)
+	HardwareType string         `gorm:"size:20" json:"hardware_type"`          // SPI/I2C/UART/GPIO/ADC
+	HardwareID   string         `gorm:"size:16;default:''" json:"hardware_id"` // 总线上的硬件地址 (e.g. I2C 0x76)
 	IntervalMs   int            `gorm:"default:5000" json:"interval_ms"`
 	BusType      string         `gorm:"size:20;default:I2C" json:"bus_type"` // I2C/SPI/UART/GPIO/ADC
 	BusConfig    string         `gorm:"type:text" json:"bus_config"`         // JSON bus配置 (引脚/速率等)
@@ -140,13 +140,13 @@ type Channel struct {
 //
 // 定义读取设备的寄存器序列 (hex write_data + read_length + delay_ms)
 type ConfigTemplate struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	NodeID    string     `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
-	WriteData string    `gorm:"type:text;not null" json:"write_data"`
-	ReadLength uint32   `gorm:"default:0" json:"read_length"`
-	DelayMs   uint32    `gorm:"default:0" json:"delay_ms"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	NodeID     string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
+	WriteData  string    `gorm:"type:text;not null" json:"write_data"`
+	ReadLength uint32    `gorm:"default:0" json:"read_length"`
+	DelayMs    uint32    `gorm:"default:0" json:"delay_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // =====================================================================
@@ -159,20 +159,20 @@ type ConfigTemplate struct {
 // v2.2 新增三大部分 JSONB 字段: connection / parser / init_flow
 // (v2.1 老字段保留作 legacy, 后续 v2.3 软删除)
 type DeviceConfig struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	Name         string `gorm:"size:128;not null;index" json:"name"`
-	Description  string `gorm:"type:text" json:"description"`
-	DeviceType   string `gorm:"size:64;not null;index" json:"device_type"`
-	DeviceModel string `gorm:"size:64" json:"device_model"`
-	Protocol     string `gorm:"size:32" json:"protocol"`      // modbus / stream / custom (legacy)
-	HardwareType string `gorm:"size:32" json:"hardware_type"` // uart / i2c / spi / gpio / adc (legacy)
-	ParserID     string `gorm:"size:64" json:"parser_id"`     // legacy, v2.2 用 parser JSONB
-	Config       json.RawMessage `gorm:"type:jsonb;serializer:json" json:"config"`      // JSON: 硬件参数 (legacy, v2.2 用 connection JSONB)
+	ID           uint            `gorm:"primaryKey" json:"id"`
+	Name         string          `gorm:"size:128;not null;index" json:"name"`
+	Description  string          `gorm:"type:text" json:"description"`
+	DeviceType   string          `gorm:"size:64;not null;index" json:"device_type"`
+	DeviceModel  string          `gorm:"size:64" json:"device_model"`
+	Protocol     string          `gorm:"size:32" json:"protocol"`                  // modbus / stream / custom (legacy)
+	HardwareType string          `gorm:"size:32" json:"hardware_type"`             // uart / i2c / spi / gpio / adc (legacy)
+	ParserID     string          `gorm:"size:64" json:"parser_id"`                 // legacy, v2.2 用 parser JSONB
+	Config       json.RawMessage `gorm:"type:jsonb;serializer:json" json:"config"` // JSON: 硬件参数 (legacy, v2.2 用 connection JSONB)
 	// v2.2 新增三大部分 JSONB 字段 (推荐使用)
 	Connection json.RawMessage `gorm:"type:jsonb;not null;default:'{}';serializer:json" json:"connection"` // 设备连接参数 {protocol, default_params, ...}
-	Parser     json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"parser"`                    // 数据解析器 {id, options}
-	InitFlow    json.RawMessage `gorm:"type:jsonb;default:'[]';serializer:json" json:"init_flow"`               // 业务配置流程 {steps: [...]}
-	Operations  json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"operations"`             // 设备支持的操作 {op_id: {name, params, ...}}
+	Parser     json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"parser"`              // 数据解析器 {id, options}
+	InitFlow   json.RawMessage `gorm:"type:jsonb;default:'[]';serializer:json" json:"init_flow"`           // 业务配置流程 {steps: [...]}
+	Operations json.RawMessage `gorm:"type:jsonb;default:'{}';serializer:json" json:"operations"`          // 设备支持的操作 {op_id: {name, params, ...}}
 	// 关联 (可选)
 	VendorID      *uint `gorm:"index" json:"vendor_id,omitempty"`
 	DeviceModelID *uint `gorm:"index" json:"device_model_id,omitempty"`
@@ -189,7 +189,7 @@ type DeviceConfig struct {
 // DeviceData 原始数据 (保留, v2.2 加 edge_device_id 关联)
 type DeviceData struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
-	DeviceID     uint      `gorm:"index;not null" json:"device_id"`    // v2.2: 改为 EdgeDeviceID
+	DeviceID     uint      `gorm:"index;not null" json:"device_id"`                               // v2.2: 改为 EdgeDeviceID
 	NodeID       string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
 	DataJSON     string    `gorm:"type:text" json:"data_json"`
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
@@ -247,18 +247,18 @@ type OTATask struct {
 
 // Firmware 固件版本 (保留)
 type Firmware struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	Version       string    `gorm:"size:32;not null" json:"version"`
-	Checksum      string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
-	SizeBytes     uint64    `json:"size_bytes"`
-	URL           string    `gorm:"size:256;not null" json:"url"`
-	Filename      string    `gorm:"size:256" json:"filename,omitempty"`
-	StoragePath   string    `gorm:"size:512" json:"storage_path,omitempty"`
-	Changelog     string    `gorm:"type:text" json:"changelog,omitempty"`
-	TargetModel   string    `gorm:"size:64" json:"target_model,omitempty"`
-	MinFromVersion string  `gorm:"size:32" json:"min_from_version,omitempty"` // 最低可升级版本(跳级检测)
-	Stable        bool      `gorm:"default:false" json:"stable"`               // 是否标记为稳定版本
-	CreatedAt     time.Time `json:"created_at"`
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Version        string    `gorm:"size:32;not null" json:"version"`
+	Checksum       string    `gorm:"size:64;not null" json:"checksum"` // SHA256 hex
+	SizeBytes      uint64    `json:"size_bytes"`
+	URL            string    `gorm:"size:256;not null" json:"url"`
+	Filename       string    `gorm:"size:256" json:"filename,omitempty"`
+	StoragePath    string    `gorm:"size:512" json:"storage_path,omitempty"`
+	Changelog      string    `gorm:"type:text" json:"changelog,omitempty"`
+	TargetModel    string    `gorm:"size:64" json:"target_model,omitempty"`
+	MinFromVersion string    `gorm:"size:32" json:"min_from_version,omitempty"` // 最低可升级版本(跳级检测)
+	Stable         bool      `gorm:"default:false" json:"stable"`               // 是否标记为稳定版本
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // =====================================================================
@@ -278,16 +278,24 @@ type Notification struct {
 
 // =====================================================================
 
-// User 用户 (保留)
+// User 用户 (兼容期保留 users 表，活动认证主体最多一个)
+const SystemAdminSubjectKey = "system_admin"
+
 type User struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	Username     string    `gorm:"size:32;uniqueIndex;not null" json:"username"`
-	PasswordHash string    `gorm:"size:128;not null" json:"-"`
-	Email        string    `gorm:"size:128" json:"email"`
-	Role         string    `gorm:"size:20;default:user" json:"role"`
-	Enabled      bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                uint       `gorm:"primaryKey" json:"id"`
+	Username          string     `gorm:"size:32;uniqueIndex;not null" json:"username"`
+	PasswordHash      string     `gorm:"size:128;not null" json:"-"`
+	Email             string     `gorm:"size:128" json:"email"`
+	Role              string     `gorm:"size:20;default:user" json:"role"`
+	Enabled           bool       `gorm:"default:true" json:"enabled"`
+	SubjectKey        *string    `gorm:"size:32;uniqueIndex:idx_users_active_subject,where:subject_key = 'system_admin' AND retired_at IS NULL" json:"-"`
+	RetiredAt         *time.Time `gorm:"index" json:"-"`
+	SessionVersion    int64      `gorm:"not null;default:1;check:session_version > 0" json:"-"`
+	PasswordChangedAt *time.Time `json:"password_changed_at,omitempty"`
+	LastLoginAt       *time.Time `json:"last_login_at,omitempty"`
+	InitializedAt     *time.Time `json:"initialized_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // =====================================================================
@@ -337,12 +345,12 @@ type NodeEvent struct {
 
 // CalibrationCache 校准数据缓存 (保留)
 type CalibrationCache struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	NodeID    string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
-	DeviceType  string    `gorm:"size:32;not null" json:"device_type"`
-	Data        string    `gorm:"type:text;not null" json:"data"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	NodeID     string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
+	DeviceType string    `gorm:"size:32;not null" json:"device_type"`
+	Data       string    `gorm:"type:text;not null" json:"data"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // =====================================================================

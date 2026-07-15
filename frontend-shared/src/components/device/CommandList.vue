@@ -56,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { edgeDeviceApi, type CommandTemplateWithInterval } from '@/api/edgeDevice'
 
@@ -71,13 +71,16 @@ const enabledMap = reactive<Record<string, boolean>>({})
 const saving = ref(false)
 const saved = ref(false)
 const loaded = ref(false)
+let operationGeneration = 0
 
-const schedulableCommands = computed(() => commands.value.filter(c => c.schedulable))
-const triggerCommands = computed(() => commands.value.filter(c => !c.schedulable))
-
-onMounted(async () => {
+async function loadCommands() {
+  const id = props.deviceId
+  const generation = ++operationGeneration
+  loaded.value = false
   try {
-    commands.value = await edgeDeviceApi.getCommandIntervals(props.deviceId)
+    const result = await edgeDeviceApi.getCommandIntervals(id)
+    if (generation !== operationGeneration || props.deviceId !== id) return
+    commands.value = result
     for (const cmd of commands.value) {
       if (cmd.schedulable) {
         localIntervals[cmd.id] = cmd.current_interval_ms
@@ -85,10 +88,19 @@ onMounted(async () => {
       }
     }
   } catch {
-    // No driver commands available — that's OK
+    if (generation !== operationGeneration || props.deviceId !== id) return
+    commands.value = []
+  } finally {
+    if (generation === operationGeneration && props.deviceId === id) loaded.value = true
   }
-  loaded.value = true
-})
+}
+
+const schedulableCommands = computed(() => commands.value.filter(c => c.schedulable))
+const triggerCommands = computed(() => commands.value.filter(c => !c.schedulable))
+
+onMounted(loadCommands)
+watch(() => props.deviceId, loadCommands)
+onUnmounted(() => { operationGeneration++ })
 
 function onToggle(cmdId: string) {
   if (enabledMap[cmdId]) {
@@ -103,6 +115,8 @@ function onToggle(cmdId: string) {
 }
 
 async function save() {
+  const id = props.deviceId
+  const generation = operationGeneration
   saving.value = true
   saved.value = false
   try {
@@ -110,13 +124,15 @@ async function save() {
     for (const cmd of schedulableCommands.value) {
       intervals[cmd.id] = localIntervals[cmd.id]
     }
-    await edgeDeviceApi.updateCommandIntervals(props.deviceId, intervals)
+    await edgeDeviceApi.updateCommandIntervals(id, intervals)
+    if (generation !== operationGeneration || props.deviceId !== id) return
     saved.value = true
     ElMessage.success('指令频率已保存，正在同步到节点')
   } catch (e: any) {
+    if (generation !== operationGeneration || props.deviceId !== id) return
     ElMessage.error(e?.response?.data?.message || '保存失败')
   } finally {
-    saving.value = false
+    if (generation === operationGeneration && props.deviceId === id) saving.value = false
   }
 }
 </script>

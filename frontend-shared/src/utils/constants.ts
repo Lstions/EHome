@@ -45,9 +45,9 @@ export const BUS_TYPE_MAP: Record<string, string> = {
  * 状态颜色映射
  */
 export const STATUS_COLOR_MAP: Record<string, string> = {
-  online: '#67c23a',
-  offline: '#909399',
-  error: '#f56c6c'
+  online: 'var(--color-success)',
+  offline: 'var(--color-info)',
+  error: 'var(--color-danger)'
 }
 
 /**

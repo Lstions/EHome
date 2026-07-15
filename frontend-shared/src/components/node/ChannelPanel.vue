@@ -292,7 +292,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, defineComponent, h } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, defineComponent, h, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Plus } from '@element-plus/icons-vue'
 import { nodeApi } from '@/api/node'
@@ -304,6 +304,8 @@ import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
 import PinResourceList from '@/components/periph/PinResourceList.vue'
 import { logger } from '@/utils/logger'
 import { useDmaStore } from '@/stores/dma'
+import { useChannelStore } from '@/stores/channel'
+import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { DmaState, isDmaRebindable } from '@/utils/dmaState'
 import type { DmaChannelInfo } from '@/api/node'
 
@@ -316,6 +318,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const dmaStore = useDmaStore()
+const channelStore = useChannelStore()
 
 const activeTab = ref('channels')
 const initialLoadingDone = ref(false)
@@ -323,6 +326,10 @@ const loading = ref(false)
 const channelsLoading = ref(false)
 const busesLoaded = ref(false)
 const channelsLoaded = ref(false)
+let panelGeneration = 0
+let busesRequestSequence = 0
+let channelsRequestSequence = 0
+let templatesRequestSequence = 0
 
 // 统一 loading 状态：初始加载未完成 或 手动刷新中
 const contentLoading = computed(() => !initialLoadingDone.value || loading.value || channelsLoading.value)
@@ -379,15 +386,20 @@ async function handleScan(busType: string, hw: any) {
     return
   }
   const ch = channels[0]
+  const collectorId = props.collectorId
+  const generation = panelGeneration
+  const scanHwId = hw.id
   scanningHwId.value = hw.id
   try {
     const scanType = busType === 'i2c' ? 'i2c' : 'modbus'
     const result = await channelApi.scan(ch.id, { scan_type: scanType })
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.success(`扫描完成: 发现 ${result.devices?.length || 0} 个设备`)
   } catch (e: any) {
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.error('扫描失败: ' + (e.message || '未知错误'))
   } finally {
-    scanningHwId.value = null
+    if (generation === panelGeneration && props.collectorId === collectorId && scanningHwId.value === scanHwId) scanningHwId.value = null
   }
 }
 
@@ -488,10 +500,14 @@ const onConfigAssociate = (busType: string, index: number) => {
 
 // 加载配置模板列表
 const loadConfigTemplates = async () => {
+  const sequence = ++templatesRequestSequence
+  const generation = panelGeneration
   try {
     const result = await deviceConfigApi.getList({ page_size: 100 })
+    if (generation !== panelGeneration || sequence !== templatesRequestSequence) return
     configTemplates.value = result.items || result.list || []
   } catch (error: any) {
+    if (generation !== panelGeneration || sequence !== templatesRequestSequence) return
     logger.error('加载配置模板失败', { error: String(error) })
   }
 }
@@ -504,23 +520,30 @@ const checkInitialDone = () => {
 }
 
 const refreshBuses = async () => {
+  const collectorId = props.collectorId
+  const sequence = ++busesRequestSequence
+  const generation = panelGeneration
   loading.value = true
   try {
     // Step 0: 向采集器下发 QueryResources，等待 ReportResources 回填 DB
     try {
-      await nodeApi.queryResources(props.collectorId)
+      await nodeApi.queryResources(collectorId)
       // 等采集器上报 ReportResources（通常 1-2 秒内）
       await new Promise(resolve => setTimeout(resolve, 2000))
     } catch (err) {
       logger.warn('QueryResources 下发失败（或采集器离线），直接从 DB 读取', { error: String(err) })
     }
 
+    if (generation !== panelGeneration || sequence !== busesRequestSequence) return
+
     // Step 1: 获取设备能力（纯 Hardware，不含用户配置）
-    const capData = await nodeApi.getCapabilities(props.collectorId)
+    const capData = await nodeApi.getCapabilities(collectorId)
+    if (generation !== panelGeneration || sequence !== busesRequestSequence) return
     capabilities.value = capData  // 保存到 ref，供 ChannelManager 使用
 
     // Step 2: 获取用户配置（HardwareConfig）
-    const userConfig = await nodeApi.getHardwareConfig(props.collectorId)
+    const userConfig = await nodeApi.getHardwareConfig(collectorId)
+    if (generation !== panelGeneration || sequence !== busesRequestSequence) return
 
     // Step 3: 先在临时变量中构建合并结果，避免中间状态导致 UI 闪烁
     const mergedHardware: Record<string, any[]> = {}
@@ -598,47 +621,63 @@ const refreshBuses = async () => {
       ElMessage.success('配置已刷新')
     }
     // refreshBuses 完成后刷新 DMA store 数据，让 UI 回归真实状态
-    dmaStore.fetch(props.collectorId)
+    void dmaStore.fetch(collectorId)
   } catch (error: any) {
+    if (generation !== panelGeneration || sequence !== busesRequestSequence) return
     logger.error('获取配置失败', { error: String(error) })
     if (initialLoadingDone.value) {
       ElMessage.warning('获取配置失败，使用空配置')
     }
   } finally {
-    loading.value = false
-    busesLoaded.value = true
-    checkInitialDone()
+    if (generation === panelGeneration && sequence === busesRequestSequence) {
+      loading.value = false
+      busesLoaded.value = true
+      checkInitialDone()
+    }
   }
 }
 
 const saveBusConfig = async () => {
+  const collectorId = props.collectorId
+  const generation = panelGeneration
+  const sessionGeneration = getSessionGeneration()
   saving.value = true
   try {
-    await nodeApi.updateHardwareConfig(props.collectorId, hardware.value)
+    await nodeApi.updateHardwareConfig(collectorId, hardware.value)
+    assertSessionGeneration(sessionGeneration)
+    if (generation !== panelGeneration || props.collectorId !== collectorId) throw new Error('节点已变更')
     ElMessage.success('总线配置已保存')
   } catch (error: any) {
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.error('保存失败: ' + (error.message || '未知错误'))
   } finally {
-    saving.value = false
+    if (generation === panelGeneration && props.collectorId === collectorId) saving.value = false
   }
 }
 
 const refreshChannels = async () => {
+  const nodeId = props.nodeDeviceId || props.collectorId
+  const sequence = ++channelsRequestSequence
+  const generation = panelGeneration
   channelsLoading.value = true
   try {
-    const result = await channelApi.getList(props.nodeDeviceId || props.collectorId)
+    const result = await channelApi.getList(nodeId)
+    if (generation !== panelGeneration || sequence !== channelsRequestSequence) return
     // Handle both array and {items: []} response
     allChannels.value = Array.isArray(result) ? result : (result.items || [])
     if (initialLoadingDone.value) {
       ElMessage.success('通道列表已刷新')
     }
   } catch (error: any) {
+    if (generation !== panelGeneration || sequence !== channelsRequestSequence) return
     logger.error('获取通道列表失败', { error: String(error) })
     allChannels.value = []
   } finally {
-    channelsLoading.value = false
-    channelsLoaded.value = true
-    checkInitialDone()
+    if (generation === panelGeneration && sequence === channelsRequestSequence) {
+      channelsLoading.value = false
+      channelsLoaded.value = true
+      checkInitialDone()
+    }
   }
 }
 
@@ -740,17 +779,17 @@ const PinBadges = defineComponent({
     // 按总线类型分配配色主题
     const getRoleTheme = (role: number): { bg: string; fg: string; chipBg: string; chipFg: string } => {
       // SDA/SCL → I2C 青蓝系
-      if (role === 3 || role === 4) return { bg: '#e6f7ff', fg: '#0077cc', chipBg: '#cce8ff', chipFg: '#0055aa' }
+      if (role === 3 || role === 4) return { bg: 'var(--el-color-primary-light-9)', fg: 'var(--el-color-primary)', chipBg: 'var(--el-color-primary-light-7)', chipFg: 'var(--el-color-primary-dark-2)' }
       // MOSI/MISO/SCLK/CS → SPI 紫粉系
-      if (role >= 5 && role <= 8) return { bg: '#f3e8ff', fg: '#7c3aed', chipBg: '#e9d5ff', chipFg: '#5b21b6' }
+      if (role >= 5 && role <= 8) return { bg: 'var(--el-color-info-light-9)', fg: 'var(--color-adc)', chipBg: 'var(--el-color-info-light-7)', chipFg: 'var(--color-adc)' }
       // TX/RX → UART 橙黄系
-      if (role === 1 || role === 2) return { bg: '#fff7e6', fg: '#d97706', chipBg: '#ffe4b3', chipFg: '#b45309' }
+      if (role === 1 || role === 2) return { bg: 'var(--el-color-warning-light-9)', fg: 'var(--el-color-warning)', chipBg: 'var(--el-color-warning-light-7)', chipFg: 'var(--el-color-warning-dark-2)' }
       // GPIO → 绿色系
-      if (role === 9) return { bg: '#ecfdf5', fg: '#059669', chipBg: '#d1fae5', chipFg: '#047857' }
+      if (role === 9) return { bg: 'var(--el-color-success-light-9)', fg: 'var(--el-color-success)', chipBg: 'var(--el-color-success-light-7)', chipFg: 'var(--el-color-success-dark-2)' }
       // CHANNEL → 灰色系
-      if (role === 10) return { bg: '#f3f4f6', fg: '#4b5563', chipBg: '#e5e7eb', chipFg: '#374151' }
+      if (role === 10) return { bg: 'var(--bg-color-secondary)', fg: 'var(--text-color-regular)', chipBg: 'var(--hover-bg)', chipFg: 'var(--text-color-primary)' }
       // default
-      return { bg: '#f9f9f9', fg: '#666', chipBg: '#e0e0e0', chipFg: '#555' }
+      return { bg: 'var(--bg-color-secondary)', fg: 'var(--text-color-regular)', chipBg: 'var(--hover-bg)', chipFg: 'var(--text-color-primary)' }
     }
 
     // 解析单个 pin 条目：支持 {role, pin} 对象 或 "MOSI=10" 字符串
@@ -900,21 +939,29 @@ const canToggleDma = (dma: DmaChannelInfo, busType: string, hw: any): boolean =>
 const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInfo, enabled: boolean) => {
   // Standardize bind_to format: bus_type/hw_id (e.g. "uart/UART1", "spi/SPI2")
   const bindTo = enabled ? `${busType.toLowerCase()}/${hw.id}` : ''
+  const collectorId = props.collectorId
+  const generation = panelGeneration
   try {
-    await dmaStore.toggle(props.collectorId, dma, enabled, bindTo)
+    await dmaStore.toggle(collectorId, dma, enabled, bindTo)
+    if (generation !== panelGeneration || props.collectorId !== collectorId) throw new Error('节点已变更')
     ElMessage.success(enabled ? `DMA ${dma.name} 已启用` : `DMA ${dma.name} 已禁用`)
   } catch (error: any) {
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.error('DMA配置保存失败: ' + (error.message || '未知错误'))
   }
 }
 
 // 删除通道
 const handleDeleteChannel = async (channelId: number) => {
+  const collectorId = props.collectorId
+  const generation = panelGeneration
   try {
-    await channelApi.delete(channelId)
+    await channelStore.deleteChannel(channelId)
+    if (generation !== panelGeneration || props.collectorId !== collectorId) throw new Error('节点已变更')
     ElMessage.success('通道已删除')
     refreshChannels()
   } catch (error: any) {
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.error('删除失败: ' + (error.message || '未知错误'))
   }
 }
@@ -926,14 +973,20 @@ const submitReconfigure = async () => {
     return
   }
   reconfigureLoading.value = true
+  const collectorId = props.collectorId
+  const generation = panelGeneration
+  const sessionGeneration = getSessionGeneration()
   try {
     await channelApi.reconfigure(reconfigureForm.channelId, reconfigureForm.baudrate)
+    assertSessionGeneration(sessionGeneration)
+    if (generation !== panelGeneration || props.collectorId !== collectorId) throw new Error('节点已变更')
     ElMessage.success('重配置命令已发送')
     reconfigureDialogVisible.value = false
   } catch (error: any) {
+    if (generation !== panelGeneration || props.collectorId !== collectorId) return
     ElMessage.error('重配置失败: ' + (error.message || '未知错误'))
   } finally {
-    reconfigureLoading.value = false
+    if (generation === panelGeneration && props.collectorId === collectorId) reconfigureLoading.value = false
   }
 }
 
@@ -1159,6 +1212,33 @@ onMounted(() => {
   refreshPeriph()
 })
 
+onUnmounted(() => {
+  panelGeneration++
+  saving.value = false
+  reconfigureLoading.value = false
+  scanningHwId.value = null
+})
+
+watch(() => [props.collectorId, props.nodeDeviceId] as const, ([newCollector, newDevice], [oldCollector, oldDevice]) => {
+  if (newCollector === oldCollector && newDevice === oldDevice) return
+  panelGeneration++
+  saving.value = false
+  reconfigureLoading.value = false
+  scanningHwId.value = null
+  channelManagerVisible.value = false
+  reconfigureDialogVisible.value = false
+  editingChannelData.value = null
+  initialLoadingDone.value = false
+  busesLoaded.value = false
+  channelsLoaded.value = false
+  hardware.value = { ...emptyBuses }
+  allChannels.value = []
+  capabilities.value = null
+  void loadConfigTemplates()
+  void refreshBuses()
+  void refreshChannels()
+})
+
 defineExpose({
   refreshChannels,
   refreshBuses,
@@ -1183,14 +1263,14 @@ defineExpose({
   margin-bottom: 20px;
   gap: 12px;
   padding-bottom: 14px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border-color-light);
 }
 
 .section-header h3 {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #1a1a2e;
+  color: var(--text-color-primary);
   letter-spacing: 0.3px;
 }
 
@@ -1224,7 +1304,7 @@ defineExpose({
 }
 
 .bus-type-name {
-  color: #303133;
+  color: var(--text-color-primary);
   font-size: 14px;
   font-weight: 500;
 }
@@ -1232,7 +1312,7 @@ defineExpose({
 .bus-count-badge {
   color: var(--el-text-color-secondary);
   font-size: 12px;
-  background: #f4f4f5;
+  background: var(--bg-color-secondary);
   padding: 1px 8px;
   border-radius: 10px;
 }
@@ -1275,13 +1355,13 @@ defineExpose({
   font-weight: 600;
   background: var(--pin-bg);
   border: 1px solid transparent;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-sm);
   transition: box-shadow 0.2s, transform 0.15s;
   cursor: default;
 }
 
 .pin-chip:hover {
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 
@@ -1291,7 +1371,7 @@ defineExpose({
   background: var(--pin-chip-bg);
   color: var(--pin-chip-fg);
   letter-spacing: 0.4px;
-  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  border-right: 1px solid var(--border-color-light);
   white-space: nowrap;
 }
 
@@ -1313,7 +1393,7 @@ defineExpose({
 .tip-box {
   margin-top: 16px;
   padding: 12px;
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
   border-radius: 6px;
   border-left: 4px solid var(--el-color-success);
 }
@@ -1361,7 +1441,7 @@ defineExpose({
 
 .data-raw {
   padding: 4px 8px;
-  background: #e6f7ff;
+  background: var(--el-color-primary-light-9);
   border-radius: 4px;
   font-family: monospace;
   font-size: 12px;
@@ -1383,18 +1463,18 @@ defineExpose({
   border: none;
   border-radius: 10px;
   overflow: hidden;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  background: var(--card-bg);
+  box-shadow: var(--shadow-sm);
 }
 .channel-bus-group :deep(.el-collapse-item__header) {
-  background: linear-gradient(135deg, #f8f9fb 0%, #f0f2f5 100%);
-  border-bottom: 1px solid #ebeef5;
+  background: linear-gradient(135deg, var(--bg-color-secondary) 0%, var(--hover-bg) 100%);
+  border-bottom: 1px solid var(--border-color-light);
   padding: 10px 16px;
   font-weight: normal;
   transition: background 0.2s;
 }
 .channel-bus-group :deep(.el-collapse-item__header:hover) {
-  background: linear-gradient(135deg, #eef2f8 0%, #e6ebf2 100%);
+  background: linear-gradient(135deg, var(--hover-bg) 0%, var(--bg-color-secondary) 100%);
 }
 .channel-bus-group :deep(.el-collapse-item__wrap) {
   background: transparent;
@@ -1424,9 +1504,9 @@ defineExpose({
   flex-direction: column;
   gap: 10px;
   padding: 14px 16px;
-  background: #fafbfc;
+  background: var(--bg-color-secondary);
   border-radius: 10px;
-  border: 1px solid #e6eaef;
+  border: 1px solid var(--border-color);
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
@@ -1439,20 +1519,20 @@ defineExpose({
   top: 0;
   bottom: 0;
   width: 3px;
-  background: #d0d5dd;
+  background: var(--text-color-placeholder);
   border-radius: 3px 0 0 3px;
   transition: background 0.2s;
 }
 
 .hardware-channel-item:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-md);
   transform: translateY(-1px);
 }
 
 /* 有通道：左侧品牌色 + 浅绿底 */
 .hardware-channel-item.has-channel {
-  background: #f6fbf2;
-  border-color: #c5deb4;
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5);
 }
 .hardware-channel-item.has-channel::before {
   background: var(--el-color-success);
@@ -1460,9 +1540,9 @@ defineExpose({
 
 /* 无通道：左侧灰色 + 虚线边框 */
 .hardware-channel-item:not(.has-channel) {
-  background: #fafafa;
+  background: var(--bg-color-secondary);
   border-style: dashed;
-  border-color: #d5dce3;
+  border-color: var(--border-color);
 }
 .hardware-channel-item:not(.has-channel)::before {
   background: var(--el-text-color-placeholder);
@@ -1470,15 +1550,15 @@ defineExpose({
 
 /* 有通道：浅绿色背景 + 实线边框 */
 .hardware-channel-item.has-channel {
-  background: #f0f9eb;
-  border-color: #b3e09b;
+  background: var(--el-color-success-light-9);
+  border-color: var(--el-color-success-light-5);
 }
 
 /* 无通道：浅灰背景 + 虚线边框 */
 .hardware-channel-item:not(.has-channel) {
-  background: #f9f9f9;
+  background: var(--bg-color-secondary);
   border-style: dashed;
-  border-color: #dcdfe6;
+  border-color: var(--border-color);
 }
 
 /* 第一行：名称 + 类型 + 参数 */
@@ -1500,7 +1580,7 @@ defineExpose({
 
 .hardware-id {
   font-weight: 600;
-  color: #1a1a2e;
+  color: var(--text-color-primary);
   font-size: 14px;
   letter-spacing: 0.2px;
 }
@@ -1516,11 +1596,11 @@ defineExpose({
   border-color: var(--el-color-success);
 }
 .hw-enabled-checkbox :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
-  border-color: #fff;
+  border-color: var(--card-bg);
 }
 .hw-enabled-checkbox :deep(.el-checkbox__input.is-disabled .el-checkbox__inner) {
-  background-color: #ebeeef;
-  border-color: #dcdfe6;
+  background-color: var(--hover-bg);
+  border-color: var(--border-color);
 }
 
 /* DMA 开关样式 */
@@ -1533,7 +1613,7 @@ defineExpose({
 
 .dma-switch {
   --el-switch-on-color: var(--el-color-primary);
-  --el-switch-off-color: #dcdfe6;
+  --el-switch-off-color: var(--border-color);
 }
 
 .dma-switch :deep(.el-switch__label) {
@@ -1565,13 +1645,13 @@ defineExpose({
   transition: all 0.2s;
   padding: 4px 10px;
   border-color: var(--el-color-primary);
-  background: #ecf5ff;
-  color: #1d60d6;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 
 .channel-tag:hover {
   opacity: 0.88;
-  background: #d9ecff;
+  background: var(--el-color-primary-light-7);
   transform: scale(1.03);
 }
 
@@ -1599,19 +1679,19 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding: 5px 14px;
-  border: 1px dashed #c8cdd6;
+  border: 1px dashed var(--border-color);
   border-radius: 20px;
-  background: rgba(255, 255, 255, 0.5);
+  background: color-mix(in srgb, var(--card-bg) 50%, transparent);
   transition: all 0.2s;
 }
 
 .no-channel-dashed:hover {
   border-color: var(--el-color-primary);
-  background: rgba(64, 158, 255, 0.04);
+  background: var(--el-color-primary-light-9);
 }
 
 .no-channel-text {
-  color: #b0b8c4;
+  color: var(--text-color-placeholder);
   font-size: 12px;
 }
 
@@ -1624,7 +1704,7 @@ defineExpose({
 }
 
 .add-channel-btn:hover {
-  color: #66b1ff;
+  color: var(--el-color-primary-light-3);
 }
 
 .scan-btn {
@@ -1649,9 +1729,9 @@ defineExpose({
 .terminal-log {
   max-height: 400px;
   overflow-y: auto;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--border-color-light);
   border-radius: 6px;
-  background: #1e1e1e;
+  background: var(--terminal-bg);
   font-family: 'Courier New', monospace;
   font-size: 13px;
 }
@@ -1661,7 +1741,7 @@ defineExpose({
   align-items: flex-start;
   gap: 10px;
   padding: 6px 12px;
-  border-bottom: 1px solid #2d2d2d;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .terminal-entry:last-child {
@@ -1669,15 +1749,15 @@ defineExpose({
 }
 
 .terminal-entry.send {
-  color: #4fc3f7;
+  color: var(--terminal-accent);
 }
 
 .terminal-entry.recv {
-  color: #a5d6a7;
+  color: var(--terminal-success);
 }
 
 .terminal-entry.error {
-  color: #ef5350;
+  color: var(--terminal-danger);
 }
 
 .terminal-direction {
@@ -1687,13 +1767,13 @@ defineExpose({
 }
 
 .terminal-time {
-  color: #888;
+  color: var(--terminal-muted);
   font-size: 11px;
   min-width: 70px;
 }
 
 .terminal-data {
-  color: #e0e0e0;
+  color: var(--terminal-text);
   word-break: break-all;
   background: transparent;
   padding: 0;
@@ -1701,7 +1781,7 @@ defineExpose({
 }
 
 .terminal-error {
-  color: #ef5350;
+  color: var(--terminal-danger);
   font-size: 12px;
 }
 

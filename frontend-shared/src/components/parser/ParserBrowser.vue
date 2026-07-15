@@ -240,7 +240,7 @@ watch(() => props.modelValue, (val) => {
   gap: 12px;
   margin-bottom: 16px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border-color-light);
 }
 
 .parser-list {
@@ -271,7 +271,7 @@ watch(() => props.modelValue, (val) => {
   align-items: flex-start;
   gap: 12px;
   padding: 12px;
-  border: 1px solid #e8eaec;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s;
@@ -280,12 +280,12 @@ watch(() => props.modelValue, (val) => {
 
 .parser-card:hover {
   border-color: var(--el-color-primary);
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
 }
 
 .parser-card.selected {
   border-color: var(--el-color-success);
-  background: #f0f9eb;
+  background: var(--el-color-success-light-9);
 }
 
 .parser-icon {
@@ -308,7 +308,7 @@ watch(() => props.modelValue, (val) => {
 .parser-info h4 {
   margin: 0 0 4px;
   font-size: 14px;
-  color: #303133;
+  color: var(--text-color-primary);
 }
 
 .parser-id {

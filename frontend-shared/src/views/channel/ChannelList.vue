@@ -222,12 +222,14 @@ const currentPage = ref(1)
 const pageSize = 20
 
 // 节点选项
-const nodeOptions = computed(() => nodeStore.nodes)
+const nodeListParams = { page: 1, page_size: 20 }
+const cachedNodes = ref<any[]>([])
+const nodeOptions = computed(() => cachedNodes.value)
 
 // 节点名称映射
 const nodeMap = computed(() => {
   const map = new Map<number, any>()
-  for (const node of nodeStore.nodes) {
+  for (const node of cachedNodes.value) {
     map.set(node.id, node)
   }
   return map
@@ -329,9 +331,8 @@ async function refreshData() {
   loading.value = true
   try {
     // 加载节点列表（用于名称映射）
-    if (nodeStore.nodes.length === 0) {
-      await nodeStore.fetchNodes()
-    }
+    await nodeStore.fetchNodes(nodeListParams)
+    cachedNodes.value = nodeStore.getCachedList(nodeListParams)?.items || []
     // 加载所有通道（不限定节点）
     const res = await channelApi.getList()
     if (Array.isArray(res)) {

@@ -3,11 +3,14 @@
  */
 import { defineStore } from 'pinia'
 import { parserApi, type Parser } from '@/api/parser'
+import { registerSessionCacheClearer } from '@/utils/sessionCache'
 
 export const useParserStore = defineStore('parser', {
   state: () => ({
     parsers: [] as Parser[],
-    loading: false
+    loading: false,
+    cacheEpoch: 0,
+    requestSequence: 0,
   }),
 
   getters: {
@@ -30,17 +33,32 @@ export const useParserStore = defineStore('parser', {
   },
 
   actions: {
-    async fetchParsers() {
+    async fetchParsers(throwOnError = false) {
       this.loading = true
+      const sequence = ++this.requestSequence
+      const requestEpoch = this.cacheEpoch
       try {
-        this.parsers = await parserApi.getList()
+        const parsers = await parserApi.getList()
+        if (requestEpoch !== this.cacheEpoch || sequence !== this.requestSequence) return
+        this.parsers = parsers
       } catch (error) {
+        if (requestEpoch !== this.cacheEpoch || sequence !== this.requestSequence) return
         console.error('获取解析器列表失败', error)
+        if (throwOnError) throw error
       } finally {
-        this.loading = false
+        if (sequence === this.requestSequence) this.loading = false
       }
+    },
+
+    clearCache() {
+      this.cacheEpoch++
+      this.requestSequence++
+      this.parsers = []
+      this.loading = false
     }
   }
 })
+
+registerSessionCacheClearer(() => useParserStore().clearCache())
 
 export default useParserStore

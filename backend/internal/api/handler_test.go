@@ -44,6 +44,9 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.Firmware{},
 		&models.Notification{},
 		&models.User{},
+		&models.AuthState{},
+		&models.InitializationToken{},
+		&models.SecurityAuditEvent{},
 		&models.OperationLog{},
 		&models.Vendor{},
 		&models.DeviceModel{},
@@ -199,12 +202,19 @@ func TestAuth_Login_Success(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupRouter()
 
-	// Seed a user
+	// Seed the unique authenticated subject
 	hash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	now := time.Now().UTC()
+	db.Create(&models.AuthState{Key: models.SystemAuthStateKey, State: models.AuthStateInitialized, SecurityVersion: 1, InitializedAt: &now})
+	subjectKey := models.SystemAdminSubjectKey
 	db.Create(&models.User{
-		Username:     "admin",
-		PasswordHash: string(hash),
-		Role:         "admin",
+		Username:       "admin",
+		PasswordHash:   string(hash),
+		Role:           "admin",
+		Enabled:        true,
+		SubjectKey:     &subjectKey,
+		SessionVersion: 1,
+		InitializedAt:  &now,
 	})
 
 	registerAuthRoutes(r, db)
@@ -227,6 +237,24 @@ func TestAuth_Login_Success(t *testing.T) {
 	}
 	if data["token"] == "" {
 		t.Error("expected token in response")
+	}
+}
+
+func TestAuthLoginRejectsHistoricalNonSubjectAccount(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	now := time.Now().UTC()
+	db.Create(&models.AuthState{Key: models.SystemAuthStateKey, State: models.AuthStateInitialized, SecurityVersion: 1, InitializedAt: &now})
+	hash, _ := bcrypt.GenerateFromPassword([]byte("password123"), bcrypt.DefaultCost)
+	db.Create(&models.User{Username: "historical", PasswordHash: string(hash), Role: "viewer", Enabled: true, SessionVersion: 1})
+	registerAuthRoutes(r, db)
+	body, _ := json.Marshal(LoginRequest{Username: "historical", Password: "password123"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -282,7 +310,7 @@ func TestAuth_Login_MissingFields(t *testing.T) {
 	}
 }
 
-func TestAuth_Logout(t *testing.T) {
+func TestAuthLogoutIsNotPublic(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupRouter()
 	registerAuthRoutes(r, db)
@@ -290,35 +318,19 @@ func TestAuth_Logout(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
 	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("public logout route must not exist, got %d", w.Code)
 	}
 }
 
-func TestSeedAdminUser(t *testing.T) {
+func TestServerDoesNotSeedKnownDefaultAdmin(t *testing.T) {
 	db := setupTestDB(t)
-
-	// First seed should create admin
-	err := SeedAdminUser(db)
-	if err != nil {
-		t.Fatalf("SeedAdminUser: %v", err)
-	}
-
 	var count int64
-	db.Model(&models.User{}).Count(&count)
-	if count != 1 {
-		t.Fatalf("expected 1 user, got %d", count)
+	if err := db.Model(&models.User{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
 	}
-
-	// Second seed should be idempotent
-	err = SeedAdminUser(db)
-	if err != nil {
-		t.Fatalf("SeedAdminUser second call: %v", err)
-	}
-	db.Model(&models.User{}).Count(&count)
-	if count != 1 {
-		t.Fatalf("expected still 1 user after second seed, got %d", count)
+	if count != 0 {
+		t.Fatalf("fresh database should not contain an automatic admin, got %d", count)
 	}
 }
 
@@ -983,44 +995,6 @@ func TestEdgeDevice_Operations(t *testing.T) {
 }
 
 // ==================== RequireRole Tests ====================
-
-func TestRequireRole_Allowed(t *testing.T) {
-	r := setupRouter()
-	r.Use(JWTAuth())
-	r.Use(RequireRole("admin"))
-	r.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-
-	token, _ := GenerateToken(1, "admin")
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
-func TestRequireRole_Denied(t *testing.T) {
-	r := setupRouter()
-	r.Use(JWTAuth())
-	r.Use(RequireRole("admin"))
-	r.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"ok": true})
-	})
-
-	token, _ := GenerateToken(1, "user")
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", w.Code)
-	}
-}
 
 // ==================== getDefaultESP32C6Buses Tests ====================
 

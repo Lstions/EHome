@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -180,14 +181,15 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 				return
 			}
 		}
-		url := fmt.Sprintf("http://%s/api/v1/firmwares/%s/download", extHost, url.PathEscape(filename))
+		baseURL := "http://" + extHost
+		downloadURL := firmwareDownloadURL(url.PathEscape(filename), baseURL, 30*time.Minute, jwtSecret)
 
 		fw := models.Firmware{
 			Version:     version,
 			Filename:    filename,
 			Checksum:    checksum,
 			SizeBytes:   uint64(len(data)),
-			URL:         url,
+			URL:         downloadURL,
 			TargetModel: c.PostForm("target_model"),
 		}
 		if err := db.Create(&fw).Error; err != nil {
@@ -331,6 +333,10 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 func RegisterFirmwareDownload(r *gin.Engine) {
 	r.GET("/api/v1/firmwares/:filename/download", func(c *gin.Context) {
 		filename := filepath.Base(c.Param("filename")) // prevent path traversal
+		if !validateFirmwareDownload(filename, c.Query("expires"), c.Query("signature"), jwtSecret, time.Now().UTC()) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired firmware ticket"})
+			return
+		}
 		dst := filepath.Join("firmwares", filename)
 		if _, err := os.Stat(dst); os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "firmware not found"})

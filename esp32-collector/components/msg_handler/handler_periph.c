@@ -64,8 +64,6 @@ static void send_periph_rsp(uint32_t request_id, bool success, uint32_t value,
                              uint8_t error_code, uint8_t periph_type, uint8_t pin);
 static void process_gpio_cmd(uint32_t request_id, uint8_t pin, uint8_t action,
                               uint32_t value, const uint8_t *config, size_t config_len);
-static void process_pwm_cmd(uint32_t request_id, uint8_t pin, uint8_t action,
-                             uint32_t value, const uint8_t *config, size_t config_len);
 static void process_pwm_cmd_impl(periph_cmd_item_t *item);
 
 /* ========================================================================
