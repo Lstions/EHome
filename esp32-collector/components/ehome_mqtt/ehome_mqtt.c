@@ -18,6 +18,7 @@ enum {
     MQTT_FRAME_TYPE_LOG_STREAM = 0x1D,
 };
 
+
 static int mqtt_publish_qos_for_frame(const uint8_t *data, size_t len)
 {
     return data != NULL && len > 0 && data[0] == MQTT_FRAME_TYPE_LOG_STREAM
@@ -40,6 +41,7 @@ static mqtt_client_ctx_t s_ctx = {
 static char s_node_id[32] = {0};
 static char s_up_topic[64] = {0};
 static char s_down_topic[64] = {0};
+static char s_control_topic[72] = {0};
 
 /* === Internal function declarations === */
 static void set_state(mqtt_client_ctx_t *ctx, mqtt_client_state_t state);
@@ -129,7 +131,14 @@ bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
     }
 
     const int qos = mqtt_publish_qos_for_frame(data, len);
-    int msg_id = esp_mqtt_client_publish(s_ctx.client, s_up_topic, (const char *)data, len, qos, 0);
+    /* Log streaming is best-effort telemetry and must never block the producer
+     * task inside esp_mqtt_client_publish(). Queue it for the MQTT task instead.
+     * Control/status frames keep synchronous QoS-1 publish semantics. */
+    int msg_id = qos == MQTT_PUBLISH_QOS_NO_ACK
+        ? esp_mqtt_client_enqueue(s_ctx.client, s_up_topic,
+                                  (const char *)data, len, qos, 0, false)
+        : esp_mqtt_client_publish(s_ctx.client, s_up_topic,
+                                  (const char *)data, len, qos, 0);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Publish failed");
         UNLOCK_CTX();
@@ -150,7 +159,8 @@ bool mqtt_client_subscribe_impl(const char *topic)
         return false;
     }
 
-    int msg_id = esp_mqtt_client_subscribe(s_ctx.client, topic, 1);
+	int qos = (strcmp(topic, s_control_topic) == 0) ? 1 : 0;
+    int msg_id = esp_mqtt_client_subscribe(s_ctx.client, topic, qos);
     if (msg_id < 0) {
         ESP_LOGE(TAG, "Subscribe failed for %s", topic);
         UNLOCK_CTX();
@@ -208,9 +218,11 @@ static void build_topics(void)
     if (s_node_id[0] != '\0') {
         snprintf(s_up_topic, sizeof(s_up_topic), "nodes/%s/up", s_node_id);
         snprintf(s_down_topic, sizeof(s_down_topic), "nodes/%s/down", s_node_id);
+		snprintf(s_control_topic, sizeof(s_control_topic), "nodes/%s/control", s_node_id);
     } else {
         strlcpy(s_up_topic, "nodes/unknown/up", sizeof(s_up_topic));
         strlcpy(s_down_topic, "nodes/unknown/down", sizeof(s_down_topic));
+		strlcpy(s_control_topic, "nodes/unknown/control", sizeof(s_control_topic));
     }
 }
 
@@ -238,9 +250,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     ESP_LOGI(TAG, "MQTT connected to broker");
         /* Subscribe BEFORE notifying app, so down-topic is ready for ConfigManifest */
         if (s_down_topic[0] != '\0') {
-            esp_mqtt_client_subscribe(s_ctx.client, s_down_topic, 1);
+            esp_mqtt_client_subscribe(s_ctx.client, s_down_topic, 0);
             ESP_LOGI(TAG, "Subscribed to %s", s_down_topic);
         }
+		if (s_control_topic[0] != '\0') {
+			esp_mqtt_client_subscribe(s_ctx.client, s_control_topic, 1);
+			ESP_LOGI(TAG, "Subscribed to reliable %s", s_control_topic);
+		}
         set_state(&s_ctx, MQTT_CLIENT_CONNECTED);
         break;
 

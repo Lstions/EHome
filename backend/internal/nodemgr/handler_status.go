@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
+	"errors"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -27,11 +28,30 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	var configEpoch uint64
 	var syncStateVarint uint64
 	var configHash string // v2.2: config_hash from device
+	var syncID string
+	seen := map[uint8]bool{}
 
 	for {
 		field, err := dec.NextField()
-		if err != nil {
+		if errors.Is(err, frame.ErrEndOfFrame) {
 			break
+		}
+		if err != nil {
+			logger.Warnf("[%s] malformed StatusReport: %v", deviceID, err)
+			return
+		}
+		if field.FieldNum < 1 || field.FieldNum > 8 || (seen[field.FieldNum] && field.FieldNum != 7) {
+			logger.Warnf("[%s] invalid StatusReport field", deviceID)
+			return
+		}
+		seen[field.FieldNum] = true
+		expected := uint8(frame.WireVarint)
+		if field.FieldNum == 2 || field.FieldNum == 6 || field.FieldNum == 7 || field.FieldNum == 8 {
+			expected = frame.WireLengthDelimited
+		}
+		if field.WireType != expected {
+			logger.Warnf("[%s] invalid StatusReport wire type", deviceID)
+			return
 		}
 		switch field.FieldNum {
 		case 1:
@@ -46,7 +66,18 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 			syncStateVarint = frame.GetUint64(field)
 		case 6: // v2.2: config_hash
 			configHash = frame.GetString(field)
+		case 7:
+			if err := validateKnownFields(frame.GetBytes(field), map[uint8]uint8{1: frame.WireVarint, 2: frame.WireLengthDelimited}, []uint8{1}, map[uint8]bool{2: true}); err != nil {
+				logger.Warnf("[%s] malformed channel health", deviceID)
+				return
+			}
+		case 8:
+			syncID = frame.GetString(field)
 		}
+	}
+	if !seen[1] || !seen[2] || !seen[5] || status == "" {
+		logger.Warnf("[%s] StatusReport missing required fields", deviceID)
+		return
 	}
 
 	// Map ESP32 sync_state varint to config_sync_state string.
@@ -55,7 +86,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	var syncState string
 	switch syncStateVarint {
 	case 0:
-		syncState = "in_sync"
+		syncState = "idle"
 	case 1:
 		syncState = "syncing"
 	case 2:
@@ -85,24 +116,46 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		node.LastOnlineTime = &now
 	}
 
-	// v2.1: update config_sync_state and config_epoch from device report
-	if syncState != "" {
-		node.ConfigSyncState = syncState
+	// StatusReport never overwrites synchronization generations. It may only
+	// self-heal a non-syncing node when the current manifest identity matches.
+	recoveryAttempted := false
+	if syncState == "idle" {
+		if configHash != "" && configHash == node.ConfigVersion && syncID != "" && syncID == node.LastSyncID {
+			node.ConfigSyncState = "in_sync"
+			recoveryAttempted = true
+		}
 	}
 	node.ConfigEpoch = configEpoch
 
 	logger.Infof("[%s] StatusReport: status=%s uptime=%d ch=%d epoch=%d sync_state=%d(%s) hash=%s",
 		deviceID, status, uptimeSec, channelCount, configEpoch, syncStateVarint, syncState, configHash)
 
-	m.db.Save(&node)
+	updates := map[string]interface{}{
+		"status": node.Status, "last_seen": node.LastSeen, "uptime_seconds": node.UptimeSeconds,
+		"online_duration": node.OnlineDuration, "last_online_time": node.LastOnlineTime,
+		"config_epoch": node.ConfigEpoch,
+	}
+	if err := m.db.Model(&models.Node{}).Where("id = ?", node.ID).Updates(updates).Error; err != nil {
+		logger.Warnf("[%s] persist StatusReport failed: %v", deviceID, err)
+		return
+	}
+	if recoveryAttempted {
+		result := m.db.Model(&models.Node{}).
+			Where("id = ? AND config_version = ? AND last_sync_id = ? AND config_sync_state = ?", node.ID, configHash, syncID, "syncing").
+			Update("config_sync_state", "in_sync")
+		if result.Error != nil || result.RowsAffected != 1 {
+			logger.Warnf("[%s] status recovery rejected: err=%v rows=%d", deviceID, result.Error, result.RowsAffected)
+			return
+		}
+	}
 
 	// Record event on status change
 	if oldStatus != status {
 		m.db.Create(&models.NodeEvent{
-			NodeID: node.NodeID,
-			EventType:   "status_change",
-			OldStatus:   oldStatus,
-			NewStatus:   status,
+			NodeID:    node.NodeID,
+			EventType: "status_change",
+			OldStatus: oldStatus,
+			NewStatus: status,
 		})
 	}
 

@@ -60,6 +60,8 @@ typedef struct {
  * @return ESP_OK on success
  */
 esp_err_t gpio_ctrl_init(const gpio_config_entry_t *configs, int count);
+esp_err_t gpio_ctrl_preflight(const gpio_config_entry_t *configs, int count);
+int gpio_ctrl_snapshot(gpio_config_entry_t *configs, int capacity);
 
 /**
  * @brief Set GPIO pin output level. No mutex (thread-safe HW op).

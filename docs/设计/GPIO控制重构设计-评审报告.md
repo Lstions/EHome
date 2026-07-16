@@ -38,9 +38,7 @@
 
 更重要的是：如果未来扩展 ADC 等其他外设类型到 PeriphCmd/Rsp 消息族，响应中缺少类型信息会让调试和日志变得困难——只能靠 request_id 查表。
 
-**建议**:
-- PeriphRsp 增加 `field 5: periph_type (varint)` 和 `field 6: pin (varint)` 作为可选字段，至少用于异步事件场景
-- 或者明确声明 PeriphRsp 仅用于同步响应（request_id 匹配），异步事件使用独立消息类型
+**实现纠正（2026-07-15）**：PeriphRsp field 5/6 最终采用 `periph_type + resource_id`；其中 GPIO 的 `resource_id=pin`，PWM 的 `resource_id=LEDC channel`。PWM 输出 pin 由持久化配置关联，不作为 PWM 资源身份。
 
 ### 1.3 🟡 重要 — 统一消息 + type 字段 vs 分离消息类型的权衡
 
@@ -48,7 +46,7 @@
 
 - **action 枚举语义重叠但不可混用**: GPIO action 0=SET_LOW 和 PWM action 0=SET_DUTY 完全不同，解析器必须先判断 periph_type 再解释 action，增加认知负担和出错可能
 - **value 字段类型不一致**: GPIO 的 value 几乎不用（SET_LOW/SET_HIGH/READ 都不需要 value），PWM 的 value 是 duty(0-10000) 或 freq(Hz)，语义差异大
-- **config 编码不一致**: GPIO config 是 `[direction:1B, initial_level:1B]`，PWM config 是 `[freq:4B, duty:2B, resolution:1B]`，长度和含义完全不同
+- **config 编码按外设类型区分**: GPIO config 是 `[direction:1B, initial_level:1B]`；PWM START config 是 `[pin:1B, freq:4B LE, duty:2B LE, resolution:1B]`。PWM pin 仅为输出路由，资源身份仍是 PeriphCmd field 3 的 LEDC channel。
 
 **评估**: 当前 GPIO+PWM 两种类型用统一消息尚可接受，但如果后续 ADC/I2C-expander 等更多外设加入，统一消息会变得臃肿。
 

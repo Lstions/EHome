@@ -136,41 +136,65 @@
             </template>
           </div>
 
-          <!-- GPIO / PWM 引脚资源 — 行式控制面板 -->
-          <div v-if="hardware.gpio?.length > 0 || gpioConfigs.length > 0 || pwmConfigs.length > 0" class="channel-bus-group">
+          <!-- GPIO 硬件资源（身份为物理引脚） -->
+          <div class="channel-bus-group">
             <el-collapse>
               <el-collapse-item>
                 <template #title>
                   <div class="bus-type-header">
-                    <el-tag :type="getBusTagType('gpio')" size="small">GPIO/PWM</el-tag>
-                    <span class="bus-type-name">GPIO / PWM 引脚</span>
-                    <span class="bus-count-badge">共 {{ hardware.gpio?.length || 0 }} · 已配置 {{ gpioConfigs.length + pwmConfigs.length }} · 可用 {{ availablePinCount }}</span>
+                    <el-tag :type="getBusTagType('gpio')" size="small">GPIO</el-tag>
+                    <span class="bus-type-name">GPIO 硬件资源</span>
+                    <span class="bus-count-badge">{{ hardware.gpio?.length || 0 }} 个 ESP32 上报资源</span>
                   </div>
                 </template>
-                <PinResourceList
-                  :hardware-gpio="hardware.gpio || []"
-                  :gpio-configs="gpioConfigs"
-                  :pwm-configs="pwmConfigs"
+                <GPIOResourceList
+                  ref="gpioResourceList"
+                  :resources="hardware.gpio || []"
+                  :configs="gpioConfigs"
                   :node-id="nodeDeviceId || ''"
                   :offline="collectorStatus !== 'online'"
-                  :initial-loading="periphLoading && gpioConfigs.length === 0 && pwmConfigs.length === 0"
-                  :refreshing="periphLoading"
-                  :occupied-pins="occupiedPinMap"
-                  @configure-gpio="openGpioDialogFromRow"
-                  @configure-pwm="openPwmDialogFromRow"
-                  @edit-gpio="openEditGpioDialog"
-                  @edit-pwm="openEditPwmDialog"
-                  @remove-gpio="handleRemoveGpio"
-                  @remove-pwm="handleRemovePwm"
-                  @refresh="refreshPeriph"
-                  @retry="refreshPeriph"
-                  @row-updated="refreshPeriph"
+                  :loading="periphLoading && gpioConfigs.length === 0"
+                  :occupied-pins="gpioOccupiedPinMap"
+				  :register-pending="registerPendingPeripheral"
+                  @configure="openGpioDialogFromRow"
+                  @edit="openEditGpioDialog"
+                  @remove="handleRemoveGpio"
+
                 />
               </el-collapse-item>
             </el-collapse>
           </div>
 
-          <el-empty v-if="allChannels.length === 0 && gpioConfigs.length === 0 && pwmConfigs.length === 0 && !channelsLoading" description="暂无硬件资源" />
+          <!-- PWM 硬件资源（身份为 ESP32 LEDC/PWM channel） -->
+          <div class="channel-bus-group">
+            <el-collapse>
+              <el-collapse-item>
+                <template #title>
+                  <div class="bus-type-header">
+                    <el-tag :type="getBusTagType('pwm')" size="small">PWM</el-tag>
+                    <span class="bus-type-name">PWM 硬件资源</span>
+                    <span class="bus-count-badge">{{ hardware.pwm?.length || 0 }} 个 ESP32 上报资源</span>
+                  </div>
+                </template>
+                <PWMResourceList
+				  ref="pwmResourceList"
+                  :resources="hardware.pwm || []"
+                  :configs="pwmConfigs"
+                  :node-id="nodeDeviceId || ''"
+                  :offline="collectorStatus !== 'online'"
+                  :loading="periphLoading && pwmConfigs.length === 0"
+				  :register-pending="registerPendingPWM"
+                  :available-pins="availablePwmPins"
+                  @configure="openPwmDialogFromRow"
+                  @edit="openEditPwmDialog"
+                  @remove="handleRemovePwm"
+
+                />
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+
+          <el-empty v-if="allChannels.length === 0 && (hardware.gpio?.length || 0) === 0 && (hardware.pwm?.length || 0) === 0 && !channelsLoading" description="等待节点硬件资源上报" />
           </template>
         </div>
       </el-tab-pane>
@@ -229,7 +253,7 @@
     </el-dialog>
 
     <!-- 添加 GPIO 对话框 -->
-    <el-dialog v-model="gpioDialogVisible" title="配置 GPIO 引脚" width="460px" destroy-on-close>
+    <el-dialog v-model="gpioDialogVisible" title="配置 GPIO 引脚" width="460px" destroy-on-close @closed="resetGpioDialogState">
       <el-form :model="gpioForm" label-width="90px">
         <el-form-item label="引脚">
           <el-input :model-value="`GPIO${gpioForm.pin}`" disabled style="width: 100%;" />
@@ -254,15 +278,20 @@
       </el-form>
       <template #footer>
         <el-button @click="gpioDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="gpioSaving" @click="submitGpio">确认添加</el-button>
+        <el-button data-testid="submit-gpio" type="primary" :loading="gpioSaving" @click="submitGpio">{{ editingGpioPin === null ? '确认添加' : '确认保存' }}</el-button>
       </template>
     </el-dialog>
 
     <!-- 添加 PWM 对话框 -->
-    <el-dialog v-model="pwmDialogVisible" title="启用 PWM 输出" width="460px" destroy-on-close>
-      <el-form :model="pwmForm" label-width="90px">
-        <el-form-item label="引脚">
-          <el-input :model-value="`GPIO${pwmForm.pin}`" disabled style="width: 100%;" />
+    <el-dialog v-model="pwmDialogVisible" title="配置 PWM 硬件资源" width="460px" destroy-on-close @closed="resetPwmDialogState">
+      <el-form :model="pwmForm" label-width="100px">
+        <el-form-item label="PWM 资源">
+          <el-input :model-value="`${pwmForm.hardware_id} (channel ${pwmForm.channel})`" disabled style="width: 100%;" />
+        </el-form-item>
+        <el-form-item label="输出引脚">
+          <el-select v-model="pwmForm.pin" placeholder="选择未占用 GPIO" style="width: 100%;">
+            <el-option v-for="pin in availablePwmRoutePins" :key="pin" :value="pin" :label="`GPIO${pin}`" />
+          </el-select>
         </el-form-item>
         <el-form-item label="频率 (Hz)">
           <el-input-number v-model="pwmForm.frequency" :min="1" :max="40000000" style="width: 100%;" placeholder="如 1000" />
@@ -272,8 +301,8 @@
           <div class="pwm-duty-hint">0-10000 (0.00% - 100.00%)，当前: {{ (pwmForm.duty / 100).toFixed(2) }}%</div>
         </el-form-item>
         <el-form-item label="分辨率">
-          <el-input-number v-model="pwmForm.resolution" :min="4" :max="20" style="width: 100%;" />
-          <div class="pwm-duty-hint">4-20 bit，默认 14</div>
+          <el-input-number v-model="pwmForm.resolution" :min="4" :max="selectedPwmMaxResolution" style="width: 100%;" />
+          <div class="pwm-duty-hint">4-{{ selectedPwmMaxResolution }} bit，默认 14</div>
         </el-form-item>
         <el-form-item label="自动启动">
           <el-switch v-model="pwmForm.auto_start" />
@@ -284,7 +313,7 @@
       </el-form>
       <template #footer>
         <el-button @click="pwmDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="pwmSaving" @click="submitPwm">确认添加</el-button>
+        <el-button data-testid="submit-pwm" type="primary" :loading="pwmSaving" @click="submitPwm">{{ editingPwmHardwareId === null ? '确认添加' : '确认保存' }}</el-button>
       </template>
     </el-dialog>
 
@@ -295,19 +324,23 @@
 import { ref, reactive, onMounted, onUnmounted, computed, defineComponent, h, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Plus } from '@element-plus/icons-vue'
-import { nodeApi } from '@/api/node'
+import { nodeApi, type GPIOBusResource, type PWMBusResource } from '@/api/node'
 import { deviceConfigApi } from '@/api/deviceConfig'
 import { channelApi } from '@/api/channel'
 import { gpioApi, pwmApi, type GPIOConfig, type PWMConfig } from '@/api/periph'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
-import PinResourceList from '@/components/periph/PinResourceList.vue'
+import GPIOResourceList from '@/components/periph/GPIOResourceList.vue'
+import PWMResourceList from '@/components/periph/PWMResourceList.vue'
 import { logger } from '@/utils/logger'
 import { useDmaStore } from '@/stores/dma'
 import { useChannelStore } from '@/stores/channel'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { DmaState, isDmaRebindable } from '@/utils/dmaState'
 import type { DmaChannelInfo } from '@/api/node'
+import { enabledChannelPins } from '@/utils/channelPins'
+import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
+import { WS_EVENT } from '@/events/events'
 
 interface Props {
   collectorId: number | string
@@ -319,6 +352,58 @@ interface Props {
 const props = defineProps<Props>()
 const dmaStore = useDmaStore()
 const channelStore = useChannelStore()
+const wsStore = useWebSocketStore()
+const pwmResourceList = ref<InstanceType<typeof PWMResourceList> | null>(null)
+const gpioResourceList = ref<InstanceType<typeof GPIOResourceList> | null>(null)
+let unsubscribePeriphResult: (() => void) | undefined
+const handledPeriphRequests = new Set<number>()
+const pendingPeriphRequests = new Map<number, { generation: number; type: number; resource: string; action: number }>()
+const earlyPeriphResults = new Map<number, { payload: any; receivedAt: number }>()
+const tryApplyPeriphResult = (payload: any): boolean => {
+	const pending = pendingPeriphRequests.get(payload.request_id)
+	if (!pending || pending.generation !== panelGeneration || pending.type !== payload.periph_type || pending.action !== payload.action) return false
+	const responseResource = payload.periph_type === 1 ? String(payload.pin) : payload.hardware_id
+	if (pending.resource !== responseResource) return false
+	pendingPeriphRequests.delete(payload.request_id)
+	if (handledPeriphRequests.size >= 512) handledPeriphRequests.clear()
+	handledPeriphRequests.add(payload.request_id)
+	if (payload.periph_type === 1 && typeof payload.pin === 'number' && [0, 1, 2, 5].includes(payload.action ?? -1)) {
+		gpioResourceList.value?.applyRuntimeLevel(payload.pin, payload.success ? payload.value ?? null : null)
+		return true
+	}
+	if (payload.periph_type === 2 && payload.hardware_id) {
+		if (payload.success) {
+			const duty = (payload.action === 0 || payload.action === 4) ? payload.value : undefined
+			pwmResourceList.value?.applyRuntimeState(payload.hardware_id, payload.running ?? null, duty)
+		} else {
+			const duty = payload.action === 0 ? payload.value : undefined
+			pwmResourceList.value?.applyRuntimeState(payload.hardware_id, null, duty)
+			if (payload.action === 1) void refreshPeriph()
+		}
+		return true
+	}
+	return false
+}
+const registerPendingPeripheral = (payload: { requestId: number; pin: number; action: number }): boolean => {
+	pendingPeriphRequests.set(payload.requestId, { generation: panelGeneration, type: 1, resource: String(payload.pin), action: payload.action })
+	const early = earlyPeriphResults.get(payload.requestId); if (early) { earlyPeriphResults.delete(payload.requestId); return tryApplyPeriphResult(early.payload) }
+	return false
+}
+const registerPendingPWM = (payload: { requestId: number; hardwareId: string; action: number }): boolean => {
+	pendingPeriphRequests.set(payload.requestId, { generation: panelGeneration, type: 2, resource: payload.hardwareId, action: payload.action })
+	const early = earlyPeriphResults.get(payload.requestId); if (early) { earlyPeriphResults.delete(payload.requestId); return tryApplyPeriphResult(early.payload) }
+	return false
+}
+
+const onPeriphResult = (message: WebSocketMessage) => {
+	const payload = message.payload as { node_id?: string; request_id?: number; success?: boolean; periph_type?: number; hardware_id?: string; pin?: number; value?: number; running?: boolean; action?: number } | undefined
+	if (payload?.node_id !== props.nodeDeviceId) return
+	if (!payload.request_id || handledPeriphRequests.has(payload.request_id)) return
+	if (!tryApplyPeriphResult(payload)) {
+		if (earlyPeriphResults.size >= 128) earlyPeriphResults.clear()
+		earlyPeriphResults.set(payload.request_id, { payload, receivedAt: Date.now() })
+	}
+}
 
 const activeTab = ref('channels')
 const initialLoadingDone = ref(false)
@@ -329,6 +414,7 @@ const channelsLoaded = ref(false)
 let panelGeneration = 0
 let busesRequestSequence = 0
 let channelsRequestSequence = 0
+let periphRequestSequence = 0
 let templatesRequestSequence = 0
 
 // 统一 loading 状态：初始加载未完成 或 手动刷新中
@@ -412,7 +498,8 @@ const capabilities = ref<any>(null)
 // 默认资源列表（仅用于空状态保底）
 const emptyBuses = {
   adc: [] as any[],
-  gpio: [] as any[],
+  gpio: [] as GPIOBusResource[],
+  pwm: [] as PWMBusResource[],
   i2c: [] as any[],
   spi: [] as any[],
   uart: [] as any[]
@@ -548,7 +635,7 @@ const refreshBuses = async () => {
     // Step 3: 先在临时变量中构建合并结果，避免中间状态导致 UI 闪烁
     const mergedHardware: Record<string, any[]> = {}
     const capHardware = capData?.buses || {}
-    for (const type of ['adc', 'i2c', 'spi', 'uart', 'gpio']) {
+    for (const type of ['adc', 'i2c', 'spi', 'uart', 'gpio', 'pwm']) {
       if (capHardware[type] && Array.isArray(capHardware[type])) {
         mergedHardware[type] = capHardware[type].map((r: any) => {
           // 从实际 DMA 状态初始化 _dmaEnabled/_dmaId（而非硬编码 false）
@@ -684,16 +771,24 @@ const refreshChannels = async () => {
 // 加载 GPIO/PWM 外设配置
 const refreshPeriph = async () => {
   if (!props.nodeDeviceId) return
+  const deviceId = props.nodeDeviceId
+  const generation = panelGeneration
+  const sequence = ++periphRequestSequence
   periphLoading.value = true
   try {
     const [gpios, pwms] = await Promise.all([
-      gpioApi.list(props.nodeDeviceId).catch(() => []),
-      pwmApi.list(props.nodeDeviceId).catch(() => []),
+      gpioApi.list(deviceId),
+      pwmApi.list(deviceId),
     ])
+    if (generation !== panelGeneration || props.nodeDeviceId !== deviceId || sequence !== periphRequestSequence) return
     gpioConfigs.value = gpios
     pwmConfigs.value = pwms
+  } catch (error: unknown) {
+    if (generation !== panelGeneration || props.nodeDeviceId !== deviceId || sequence !== periphRequestSequence) return
+    logger.error('加载 GPIO/PWM 配置失败', { error: String(error) })
+    if (initialLoadingDone.value) ElMessage.error('加载 GPIO/PWM 配置失败')
   } finally {
-    periphLoading.value = false
+    if (generation === panelGeneration && props.nodeDeviceId === deviceId && sequence === periphRequestSequence) periphLoading.value = false
   }
 }
 
@@ -1005,6 +1100,7 @@ const handleOpenChannelManager = (channel?: any, busType?: string, hardwareId?: 
 // --- GPIO 对话框 ---
 const gpioDialogVisible = ref(false)
 const gpioSaving = ref(false)
+const editingGpioPin = ref<number | null>(null)
 const gpioForm = reactive({
   pin: 5,
   direction: 1,
@@ -1012,58 +1108,58 @@ const gpioForm = reactive({
   label: '',
 })
 
+const resetGpioDialogState = () => {
+  editingGpioPin.value = null
+  gpioForm.pin = 5
+  gpioForm.direction = 1
+  gpioForm.initial_level = 0
+  gpioForm.label = ''
+}
+
 // 根据 pin 查找已有的 GPIOConfig
 const getGpioConfig = (pin: number): GPIOConfig | undefined => {
   return gpioConfigs.value.find(g => g.pin === pin)
 }
 
-// 可用引脚数 = 硬件 GPIO 总数 - 已配置 GPIO - 已配置 PWM
-const availablePinCount = computed(() => {
-  const total = hardware.value.gpio?.length || 0
-  const configured = new Set<number>()
-  for (const g of gpioConfigs.value) configured.add(g.pin)
-  for (const p of pwmConfigs.value) configured.add(p.pin)
-  // 占用映射中的引脚也算非可用
-  for (const pin of occupiedPinMap.value.keys()) configured.add(pin)
-  return Math.max(0, total - configured.size)
+// 总线与外设共同占用的 GPIO。能力报告是唯一资源来源；不按型号推导。
+const busOccupiedPinMap = computed(() => enabledChannelPins(allChannels.value))
+
+const gpioOccupiedPinMap = computed(() => {
+  const occupied = new Map(busOccupiedPinMap.value)
+  for (const config of pwmConfigs.value) occupied.set(config.pin, `${config.hardware_id} 输出`)
+  return occupied
 })
 
-// 已占用引脚映射: 从通道列表中推导总线占用
-// API 降级: 当前无法精确识别所有 occupied 来源，仅从通道 hardware_type/pins 推导
-const occupiedPinMap = computed(() => {
-  const map = new Map<number, string>()
-  // 遍历通道，从 hardware pins 中提取占用信息
-  for (const ch of allChannels.value) {
-    if (ch.hardware_type && ch.pins) {
-      const pins = Array.isArray(ch.pins) ? ch.pins : []
-      for (const p of pins) {
-        const pinNum = typeof p === 'object' ? p.pin : (typeof p === 'string' ? parseInt(p.replace(/\D/g, '')) : null)
-        if (pinNum != null && !isNaN(pinNum)) {
-          const role = typeof p === 'object' ? p.role : 0
-          const roleLabels: Record<number, string> = { 1: 'TX', 2: 'RX', 3: 'SDA', 4: 'SCL', 5: 'MOSI', 6: 'MISO', 7: 'SCLK', 8: 'CS' }
-          const label = roleLabels[role] ? `${ch.hardware_type?.toUpperCase()} ${roleLabels[role]}` : `${ch.hardware_type?.toUpperCase()} 占用`
-          if (!map.has(pinNum)) map.set(pinNum, label)
-        }
-      }
-    }
-  }
-  return map
+const availablePwmPins = computed(() => {
+  const occupied = new Set(busOccupiedPinMap.value.keys())
+  for (const config of gpioConfigs.value) occupied.add(config.pin)
+  for (const config of pwmConfigs.value) occupied.add(config.pin)
+  return (hardware.value.gpio || [])
+    .map((resource: GPIOBusResource) => resource.pin ?? Number(resource.id.match(/\d+/)?.[0]))
+    .filter((pin: number) => Number.isInteger(pin) && !occupied.has(pin))
+    .sort((left: number, right: number) => left - right)
 })
 
-// PinResourceList 事件处理
+const availablePwmRoutePins = computed(() => {
+  const pins = [...availablePwmPins.value]
+  if (Number.isInteger(pwmForm.pin) && !pins.includes(pwmForm.pin)) pins.push(pwmForm.pin)
+  return pins.sort((left, right) => left - right)
+})
+
+// GPIO 资源行以硬件报告为准。
 const openGpioDialogFromRow = (pin: number) => {
   const hw = hardware.value.gpio?.find(h => h.pin === pin)
   openGpioDialog(pin, hw?.id || `GPIO${pin}`)
 }
 
-const openPwmDialogFromRow = (pin: number) => {
-  const hw = hardware.value.gpio?.find(h => h.pin === pin)
-  openPwmDialog(pin, hw?.id || `GPIO${pin}`)
+const openPwmDialogFromRow = (hardwareId: string) => {
+  openPwmDialog(hardwareId)
 }
 
 const openEditGpioDialog = (pin: number) => {
   const cfg = getGpioConfig(pin)
   if (cfg) {
+    editingGpioPin.value = pin
     gpioForm.pin = pin
     gpioForm.direction = cfg.direction
     gpioForm.initial_level = cfg.initial_level
@@ -1072,10 +1168,13 @@ const openEditGpioDialog = (pin: number) => {
   }
 }
 
-const openEditPwmDialog = (pin: number) => {
-  const cfg = getPwmConfig(pin)
+const openEditPwmDialog = (hardwareId: string) => {
+  const cfg = getPwmConfig(hardwareId)
   if (cfg) {
-    pwmForm.pin = pin
+    editingPwmHardwareId.value = hardwareId
+    pwmForm.hardware_id = cfg.hardware_id
+    pwmForm.channel = cfg.channel
+    pwmForm.pin = cfg.pin
     pwmForm.frequency = cfg.frequency
     pwmForm.duty = cfg.duty
     pwmForm.resolution = cfg.resolution
@@ -1086,6 +1185,7 @@ const openEditPwmDialog = (pin: number) => {
 }
 
 const openGpioDialog = (pin: number, hwId: string) => {
+  editingGpioPin.value = null
   gpioForm.pin = pin
   gpioForm.direction = 1
   gpioForm.initial_level = 0
@@ -1098,39 +1198,51 @@ const submitGpio = async () => {
     ElMessage.warning('缺少节点 ID')
     return
   }
+  const nodeId = props.nodeDeviceId
+  const generation = panelGeneration
+  const editingPin = editingGpioPin.value
+  const payload = {
+    direction: gpioForm.direction,
+    initial_level: gpioForm.initial_level,
+    label: gpioForm.label,
+  }
   gpioSaving.value = true
   try {
-    await gpioApi.create(props.nodeDeviceId, {
-      pin: gpioForm.pin,
-      direction: gpioForm.direction,
-      initial_level: gpioForm.initial_level,
-      label: gpioForm.label,
-    })
-    ElMessage.success(`GPIO ${gpioForm.pin} 已添加`)
+    if (editingPin !== null) {
+      await gpioApi.update(nodeId, editingPin, payload)
+    } else {
+      await gpioApi.create(nodeId, { pin: gpioForm.pin, ...payload })
+    }
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
+    ElMessage.success(editingPin !== null ? `GPIO ${editingPin} 已更新` : `GPIO ${gpioForm.pin} 已添加`)
     gpioDialogVisible.value = false
     await refreshPeriph()
   } catch (e: any) {
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
     const msg = e?.message || '未知错误'
-    if (msg.includes('already configured') || msg.includes('Conflict') || msg.includes('409')) {
-      // 该引脚已配置，刷新列表让已配置的卡片显示出来
+    if (editingPin === null && (msg.includes('already configured') || msg.includes('Conflict') || msg.includes('409'))) {
       ElMessage.warning(`GPIO ${gpioForm.pin} 已存在配置`)
       gpioDialogVisible.value = false
       await refreshPeriph()
     } else {
-      ElMessage.error('添加 GPIO 失败: ' + msg)
+      ElMessage.error(`${editingPin === null ? '添加' : '更新'} GPIO 失败: ` + msg)
     }
   } finally {
-    gpioSaving.value = false
+    if (generation === panelGeneration && props.nodeDeviceId === nodeId) gpioSaving.value = false
   }
 }
 
 const handleRemoveGpio = async (pin: number) => {
   if (!props.nodeDeviceId) return
+  const nodeId = props.nodeDeviceId
+  const generation = panelGeneration
   try {
-    await gpioApi.delete(props.nodeDeviceId, pin)
+    await gpioApi.delete(nodeId, pin)
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
     ElMessage.success(`GPIO ${pin} 已删除`)
-    refreshPeriph()
+    void refreshPeriph()
   } catch (e: any) {
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
     ElMessage.error('删除 GPIO 失败: ' + (e?.message || '未知错误'))
   }
 }
@@ -1138,8 +1250,11 @@ const handleRemoveGpio = async (pin: number) => {
 // --- PWM 对话框 ---
 const pwmDialogVisible = ref(false)
 const pwmSaving = ref(false)
+const editingPwmHardwareId = ref<string | null>(null)
 const pwmForm = reactive({
-  pin: 15,
+  hardware_id: '',
+  channel: 0,
+  pin: -1,
   frequency: 1000,
   duty: 0,
   resolution: 14,
@@ -1147,18 +1262,39 @@ const pwmForm = reactive({
   label: '',
 })
 
-// 根据 pin 查找已有的 PWMConfig
-const getPwmConfig = (pin: number): PWMConfig | undefined => {
-  return pwmConfigs.value.find(p => p.pin === pin)
-}
-
-const openPwmDialog = (pin: number, hwId: string) => {
-  pwmForm.pin = pin
+const resetPwmDialogState = () => {
+  editingPwmHardwareId.value = null
+  pwmForm.hardware_id = ''
+  pwmForm.channel = 0
+  pwmForm.pin = -1
   pwmForm.frequency = 1000
   pwmForm.duty = 0
   pwmForm.resolution = 14
   pwmForm.auto_start = false
-  pwmForm.label = hwId || ''
+  pwmForm.label = ''
+}
+
+// 根据 ESP32 报告的硬件身份查找 PWMConfig
+const getPwmConfig = (hardwareId: string): PWMConfig | undefined => {
+  return pwmConfigs.value.find(config => config.hardware_id === hardwareId)
+}
+
+const selectedPwmResource = computed(() =>
+  (hardware.value.pwm || []).find((resource: PWMBusResource) => resource.id === pwmForm.hardware_id))
+const selectedPwmMaxResolution = computed(() => selectedPwmResource.value?.max_resolution_bits || 4)
+
+const openPwmDialog = (hardwareId: string) => {
+  const resource = (hardware.value.pwm || []).find((item: PWMBusResource) => item.id === hardwareId)
+  if (!resource) return
+  editingPwmHardwareId.value = null
+  pwmForm.hardware_id = resource.id
+  pwmForm.channel = resource.channel
+  pwmForm.pin = availablePwmPins.value[0] ?? -1
+  pwmForm.frequency = 1000
+  pwmForm.duty = 0
+  pwmForm.resolution = Math.min(14, resource.max_resolution_bits)
+  pwmForm.auto_start = false
+  pwmForm.label = ''
   pwmDialogVisible.value = true
 }
 
@@ -1167,40 +1303,63 @@ const submitPwm = async () => {
     ElMessage.warning('缺少节点 ID')
     return
   }
+  if (!Number.isInteger(pwmForm.pin) || pwmForm.pin < 0) {
+    ElMessage.warning('请选择未占用的 GPIO 输出引脚')
+    return
+  }
+  const nodeId = props.nodeDeviceId
+  const generation = panelGeneration
   pwmSaving.value = true
   try {
-    await pwmApi.create(props.nodeDeviceId, {
+    const editingHardwareId = editingPwmHardwareId.value
+    const payload = {
       pin: pwmForm.pin,
       frequency: pwmForm.frequency,
       duty: pwmForm.duty,
       resolution: pwmForm.resolution,
       auto_start: pwmForm.auto_start,
       label: pwmForm.label,
-    })
-    ElMessage.success(`PWM GPIO${pwmForm.pin} 已添加`)
+    }
+    if (editingHardwareId !== null) {
+      await pwmApi.update(nodeId, editingHardwareId, payload)
+    } else {
+      await pwmApi.create(nodeId, {
+        hardware_id: pwmForm.hardware_id,
+        ...payload,
+      })
+    }
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
+    ElMessage.success(editingHardwareId !== null
+      ? `${editingHardwareId} 已更新`
+      : `${pwmForm.hardware_id} → GPIO${pwmForm.pin} 已配置`)
     pwmDialogVisible.value = false
     await refreshPeriph()
   } catch (e: any) {
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
     const msg = e?.message || '未知错误'
-    if (msg.includes('already configured') || msg.includes('Conflict') || msg.includes('409')) {
-      ElMessage.warning(`PWM GPIO${pwmForm.pin} 已存在配置`)
+    if (editingPwmHardwareId.value === null && (msg.includes('already configured') || msg.includes('Conflict') || msg.includes('409'))) {
+      ElMessage.warning(`${pwmForm.hardware_id} 已存在配置`)
       pwmDialogVisible.value = false
       await refreshPeriph()
     } else {
-      ElMessage.error('添加 PWM 失败: ' + msg)
+      ElMessage.error(`${editingPwmHardwareId.value === null ? '添加' : '更新'} PWM 失败: ` + msg)
     }
   } finally {
-    pwmSaving.value = false
+    if (generation === panelGeneration && props.nodeDeviceId === nodeId) pwmSaving.value = false
   }
 }
 
-const handleRemovePwm = async (pin: number) => {
+const handleRemovePwm = async (hardwareId: string) => {
   if (!props.nodeDeviceId) return
+  const nodeId = props.nodeDeviceId
+  const generation = panelGeneration
   try {
-    await pwmApi.delete(props.nodeDeviceId, pin)
-    ElMessage.success(`PWM ${pin} 已删除`)
-    refreshPeriph()
+    await pwmApi.delete(nodeId, hardwareId)
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
+    ElMessage.success(`${hardwareId} 已删除`)
+    void refreshPeriph()
   } catch (e: any) {
+    if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
     ElMessage.error('删除 PWM 失败: ' + (e?.message || '未知错误'))
   }
 }
@@ -1210,33 +1369,52 @@ onMounted(() => {
   refreshBuses()
   refreshChannels()
   refreshPeriph()
+	unsubscribePeriphResult = wsStore.subscribe(WS_EVENT.PERIPH_RESULT, onPeriphResult)
 })
 
 onUnmounted(() => {
+	unsubscribePeriphResult?.()
   panelGeneration++
+  handledPeriphRequests.clear()
+  pendingPeriphRequests.clear()
+  earlyPeriphResults.clear()
   saving.value = false
   reconfigureLoading.value = false
   scanningHwId.value = null
+  gpioDialogVisible.value = false
+  pwmDialogVisible.value = false
+  resetGpioDialogState()
+  resetPwmDialogState()
 })
 
 watch(() => [props.collectorId, props.nodeDeviceId] as const, ([newCollector, newDevice], [oldCollector, oldDevice]) => {
   if (newCollector === oldCollector && newDevice === oldDevice) return
   panelGeneration++
+  handledPeriphRequests.clear()
+  pendingPeriphRequests.clear()
+  earlyPeriphResults.clear()
   saving.value = false
   reconfigureLoading.value = false
   scanningHwId.value = null
   channelManagerVisible.value = false
   reconfigureDialogVisible.value = false
+  gpioDialogVisible.value = false
+  pwmDialogVisible.value = false
+  resetGpioDialogState()
+  resetPwmDialogState()
   editingChannelData.value = null
   initialLoadingDone.value = false
   busesLoaded.value = false
   channelsLoaded.value = false
   hardware.value = { ...emptyBuses }
   allChannels.value = []
+  gpioConfigs.value = []
+  pwmConfigs.value = []
   capabilities.value = null
   void loadConfigTemplates()
   void refreshBuses()
   void refreshChannels()
+  void refreshPeriph()
 })
 
 defineExpose({

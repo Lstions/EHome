@@ -90,6 +90,9 @@ func (c *Client) onMessage(client mqtt.Client, msg mqtt.Message) {
 // Publish sends a message to a topic with QoS 1 and a 5-second timeout.
 // Returns error if the broker does not acknowledge within the deadline.
 func (c *Client) Publish(topic string, payload []byte) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("MQTT client not connected")
+	}
 	token := c.client.Publish(topic, 1, false, payload)
 	if !token.WaitTimeout(5 * time.Second) {
 		return fmt.Errorf("mqtt publish timeout")
@@ -138,4 +141,10 @@ func (c *Client) Close() {
 // TopicForNode returns the down topic for a node
 func TopicForNode(nodeID string) string {
 	return fmt.Sprintf("nodes/%s/down", nodeID)
+}
+
+// ControlTopicForNode is the reliable QoS-1 subscription used for manifests
+// and control commands. Telemetry-compatible legacy down traffic remains on /down.
+func ControlTopicForNode(nodeID string) string {
+	return fmt.Sprintf("nodes/%s/control", nodeID)
 }

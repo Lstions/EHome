@@ -69,6 +69,13 @@ typedef struct {
     uint8_t     max_bits;
 } hw_adc_t;
 
+typedef struct {
+    const char *id;
+    uint8_t     channel;
+    uint8_t     timer_count;
+    uint8_t     max_resolution_bits;
+} hw_pwm_t;
+
 /* hw_dma_t is defined in dma_pool.h (included above) */
 
 /* === Platform-specific constants === */
@@ -82,6 +89,7 @@ typedef struct {
   #define HW_SPI_COUNT    2
   #define HW_GPIO_COUNT   12
   #define HW_ADC_COUNT    5
+  #define HW_PWM_COUNT    8
   #define HW_DMA_COUNT    5  /* S3: 5 GDMA channels (CH0-4) */
 
   /* Reserved pins — must NOT be used for user peripherals */
@@ -98,6 +106,7 @@ typedef struct {
   #define HW_SPI_COUNT    1
   #define HW_GPIO_COUNT   8
   #define HW_ADC_COUNT    3
+  #define HW_PWM_COUNT    6
   #define HW_DMA_COUNT    3
 
   /* Reserved pins — must NOT be used for user peripherals */
@@ -111,7 +120,8 @@ typedef struct {
 
 /* Total hardware bus/pin resources (excludes config channels) */
 #define HW_RESOURCE_COUNT  (HW_UART_COUNT + HW_I2C_COUNT + HW_SPI_COUNT + \
-                            HW_GPIO_COUNT + HW_ADC_COUNT + HW_DMA_COUNT)
+                            HW_GPIO_COUNT + HW_ADC_COUNT + HW_PWM_COUNT + \
+                            HW_DMA_COUNT)
 
 /* === Extern const arrays (defined in hw_tables.c) === */
 extern const hw_uart_t hw_uarts[HW_UART_COUNT];
@@ -119,6 +129,7 @@ extern const hw_i2c_t  hw_i2cs[HW_I2C_COUNT];
 extern const hw_spi_t  hw_spis[HW_SPI_COUNT];
 extern const hw_gpio_t hw_gpios[HW_GPIO_COUNT];
 extern const hw_adc_t  hw_adcs[HW_ADC_COUNT];
+extern const hw_pwm_t  hw_pwms[HW_PWM_COUNT];
 extern const hw_dma_t  hw_dmas[HW_DMA_COUNT];
 
 /* === P3-7: Common UART port derivation === */

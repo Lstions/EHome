@@ -265,6 +265,15 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, type, node_id, and channel_id are required"})
 			return
 		}
+		var bindingChannel models.Channel
+		if err := db.Where("id = ? AND node_id = ?", *dto.ChannelID, *dto.NodeID).First(&bindingChannel).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "channel does not belong to node"})
+			return
+		}
+		if err := validateTransportChannel(&bindingChannel); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		dev := models.EdgeDevice{Name: *dto.Name, Type: *dto.Type, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
 		if dto.Enabled != nil {
 			dev.Enabled = *dto.Enabled
@@ -363,9 +372,30 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			}
 		}
 		if dto.ChannelID != nil {
+			targetNodeID := d.NodeID
+			if dto.NodeID != nil {
+				targetNodeID = *dto.NodeID
+			}
+			var bindingChannel models.Channel
+			if err := db.Where("id = ? AND node_id = ?", *dto.ChannelID, targetNodeID).First(&bindingChannel).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "channel does not belong to node"})
+				return
+			}
+			if err := validateTransportChannel(&bindingChannel); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+				return
+			}
 			updates["channel_id"] = *dto.ChannelID
 		}
 		if dto.NodeID != nil {
+			targetChannelID := d.ChannelID
+			if dto.ChannelID != nil {
+				targetChannelID = *dto.ChannelID
+			}
+			if _, err := loadTransportChannel(db, targetChannelID, *dto.NodeID); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+				return
+			}
 			updates["node_id"] = *dto.NodeID
 		}
 		if dto.Status != nil {
@@ -396,6 +426,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		if !dev.Enabled {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "edge device is disabled"})
+			return
+		}
+		if _, err := loadTransportChannel(db, dev.ChannelID, dev.NodeID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
 
@@ -536,6 +574,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				return
 			}
 			Error(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !edge.Enabled {
+			Error(c, http.StatusBadRequest, "edge device is disabled")
+			return
+		}
+		if _, err := loadTransportChannel(db, edge.ChannelID, edge.NodeID); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -829,6 +875,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var ch models.Channel
 		if err := db.First(&ch, edge.ChannelID).Error; err != nil {
 			Error(c, http.StatusNotFound, "associated channel not found")
+			return
+		}
+		if _, err := loadTransportChannel(db, edge.ChannelID, edge.NodeID); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		var node models.Node

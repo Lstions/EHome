@@ -149,7 +149,7 @@ static frame_err_t decoder_read_varint(frame_decoder_t *dec, uint64_t *out)
 frame_err_t frame_decoder_next(frame_decoder_t *dec, frame_field_t *field)
 {
     if (dec->pos >= dec->len) {
-        return FRAME_ERR_UNDERFLOW; /* end of frame */
+        return FRAME_DONE;
     }
 
     /* read tag */

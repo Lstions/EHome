@@ -52,7 +52,7 @@ dma_pool_t *msg_handler_get_dma_pool(void)
 
 /* === Publish === */
 
-void msg_handler_publish(const uint8_t *data, size_t len)
+esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
 {
     transport_t *transport_to_use = NULL;
 
@@ -66,7 +66,7 @@ void msg_handler_publish(const uint8_t *data, size_t len)
         esp_err_t ret = transport_to_use->ops->send(transport_to_use, data, len);
         if (ret == ESP_OK) {
             ESP_LOGD(TAG, "Sent response via current transport (%d bytes)", (int)len);
-            return;
+            return ESP_OK;
         }
         ESP_LOGW(TAG, "Failed to send via current transport, falling back to broadcast");
     }
@@ -74,11 +74,16 @@ void msg_handler_publish(const uint8_t *data, size_t len)
     esp_err_t ret = transport_broadcast(data, len);
     if (ret == ESP_OK) {
         ESP_LOGD(TAG, "Broadcast to all transports (%d bytes)", (int)len);
-        return;
+        return ESP_OK;
     }
 
     ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
-    mqtt_client_publish_impl(data, len);
+    return mqtt_client_publish_impl(data, len) ? ESP_OK : ESP_FAIL;
+}
+
+void msg_handler_publish(const uint8_t *data, size_t len)
+{
+    (void)msg_handler_publish_checked(data, len);
 }
 
 /* === Init / Deinit === */

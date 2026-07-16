@@ -48,7 +48,9 @@ const SliderStub = defineComponent({
   props: ['modelValue', 'min', 'max', 'step', 'showTooltip', 'disabled', 'ariaLabel'],
   emits: ['input', 'change', 'update:modelValue'],
   template: `<div v-bind="$attrs" class="el-slider-stub" :data-disabled="String(Boolean(disabled))" :aria-label="ariaLabel">
-    <input aria-label="duty-slider" type="range" :value="modelValue" :disabled="disabled" />
+    <input aria-label="duty-slider" type="number" :value="modelValue" :disabled="disabled"
+      @input="$emit('input', Number($event.target.value))"
+      @change="$emit('change', Number($event.target.value))" />
   </div>`,
 })
 
@@ -60,6 +62,8 @@ const stubs = {
 
 const pwmConfig = (overrides: Partial<PWMConfig> = {}): PWMConfig => ({
   node_id: 'node-1',
+  hardware_id: 'PWM0',
+  channel: 0,
   pin: 6,
   frequency: 1000,
   duty: 5000,
@@ -131,7 +135,7 @@ describe('PWMChannelRow', () => {
       await startBtn.trigger('click')
       await flushPromises()
 
-      expect(mocks.start).toHaveBeenCalledWith('node-1', 6)
+      expect(mocks.start).toHaveBeenCalledWith('node-1', 'PWM0')
       expect(wrapper.text()).toContain('运行中')
       expect(mocks.success).toHaveBeenCalledOnce()
     })
@@ -161,7 +165,7 @@ describe('PWMChannelRow', () => {
       await stopBtn.trigger('click')
       await flushPromises()
 
-      expect(mocks.stop).toHaveBeenCalledWith('node-1', 6)
+      expect(mocks.stop).toHaveBeenCalledWith('node-1', 'PWM0')
       expect(wrapper.text()).toContain('已停止')
     })
 
@@ -182,12 +186,12 @@ describe('PWMChannelRow', () => {
 
       await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
-      expect(wrapper.emitted('state-change')![0]).toEqual([6, true])
+      expect(wrapper.emitted('state-change')![0]).toEqual(['PWM0', true])
 
       const stopBtn = wrapper.findAll('button').find(b => b.text().includes('停止'))!
       await stopBtn.trigger('click')
       await flushPromises()
-      expect(wrapper.emitted('state-change')![1]).toEqual([6, false])
+      expect(wrapper.emitted('state-change')![1]).toEqual(['PWM0', false])
     })
   })
 
@@ -196,8 +200,8 @@ describe('PWMChannelRow', () => {
       mocks.setDuty.mockResolvedValue(undefined)
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.findComponent(SliderStub)
-      slider.vm.$emit('change', 6000)
+      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      await slider.setValue(6000)
       await flushPromises()
 
       expect(mocks.setDuty).not.toHaveBeenCalled()
@@ -207,15 +211,15 @@ describe('PWMChannelRow', () => {
       mocks.setDuty.mockResolvedValue(undefined)
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.findComponent(SliderStub)
-      slider.vm.$emit('change', 6000)
+      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      await slider.setValue(6000)
       await flushPromises()
 
       vi.advanceTimersByTime(299)
       expect(mocks.setDuty).not.toHaveBeenCalled()
 
       vi.advanceTimersByTime(1)
-      expect(mocks.setDuty).toHaveBeenCalledWith('node-1', 6, 6000)
+      expect(mocks.setDuty).toHaveBeenCalledWith('node-1', 'PWM0', 6000)
     })
 
     it('rolls back duty on setDuty failure', async () => {
@@ -223,8 +227,8 @@ describe('PWMChannelRow', () => {
       mocks.getState.mockResolvedValue({ running: true, duty: 5000, frequency: 1000 })
       const wrapper = track(mountRow(pwmConfig({ duty: 5000 }), false, true))
 
-      const slider = wrapper.findComponent(SliderStub)
-      slider.vm.$emit('change', 8000)
+      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      await slider.setValue(8000)
       await flushPromises()
       vi.advanceTimersByTime(300)
       await flushPromises()
@@ -237,8 +241,8 @@ describe('PWMChannelRow', () => {
     it('updates local display on slider input without API call', async () => {
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.findComponent(SliderStub)
-      slider.vm.$emit('input', 8000)
+      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      await slider.setValue(8000)
       await flushPromises()
 
       expect(wrapper.get('.pwm-duty-value').text()).toBe('80.00%')

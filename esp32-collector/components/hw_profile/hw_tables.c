@@ -11,6 +11,15 @@
 
 #include "hw_tables.h"
 
+/* Compile-time resource inventory contract for every supported target. */
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+_Static_assert(HW_GPIO_COUNT == 8, "C6 GPIO resource count mismatch");
+_Static_assert(HW_PWM_COUNT == 6, "C6 PWM resource count mismatch");
+#elif defined(CONFIG_IDF_TARGET_ESP32S3)
+_Static_assert(HW_GPIO_COUNT == 12, "S3 GPIO resource count mismatch");
+_Static_assert(HW_PWM_COUNT == 8, "S3 PWM resource count mismatch");
+#endif
+
 /* === P3-7: Common UART port derivation === */
 
 uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port)
@@ -93,6 +102,17 @@ const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
     { .id = "ADC1_CH4", .unit = 1, .channel = 4, .pin = 5,  .max_bits = 12 },
 };
 
+const hw_pwm_t hw_pwms[HW_PWM_COUNT] = {
+    { .id = "PWM0", .channel = 0, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM1", .channel = 1, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM2", .channel = 2, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM3", .channel = 3, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM4", .channel = 4, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM5", .channel = 5, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM6", .channel = 6, .timer_count = 4, .max_resolution_bits = 14 },
+    { .id = "PWM7", .channel = 7, .timer_count = 4, .max_resolution_bits = 14 },
+};
+
 /* S3: 5 GDMA channels (CH0-4), all general purpose TX+RX, UART+I2C+SPI compatible */
 const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
     { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
@@ -145,6 +165,15 @@ const hw_adc_t hw_adcs[HW_ADC_COUNT] = {
     { .id = "ADC1_CH0", .unit = 1, .channel = 0, .pin = 0, .max_bits = 12 },
     { .id = "ADC1_CH1", .unit = 1, .channel = 1, .pin = 1, .max_bits = 12 },
     { .id = "ADC1_CH2", .unit = 1, .channel = 2, .pin = 2, .max_bits = 12 },
+};
+
+const hw_pwm_t hw_pwms[HW_PWM_COUNT] = {
+    { .id = "PWM0", .channel = 0, .timer_count = 4, .max_resolution_bits = 20 },
+    { .id = "PWM1", .channel = 1, .timer_count = 4, .max_resolution_bits = 20 },
+    { .id = "PWM2", .channel = 2, .timer_count = 4, .max_resolution_bits = 20 },
+    { .id = "PWM3", .channel = 3, .timer_count = 4, .max_resolution_bits = 20 },
+    { .id = "PWM4", .channel = 4, .timer_count = 4, .max_resolution_bits = 20 },
+    { .id = "PWM5", .channel = 5, .timer_count = 4, .max_resolution_bits = 20 },
 };
 
 /* C6: 3 GDMA channel pairs (TX+RX).  Only CH1 is UART-capable because

@@ -136,7 +136,7 @@ static char *get_bus_hw_id(bus_runtime_t *rt, int idx)
 
 /* ==== Register one channel ==== */
 
-static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
+static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                             uint8_t bus_type,
                             const uint8_t *config, size_t config_len)
 {
@@ -145,7 +145,7 @@ static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
     
     /* Already registered? */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++)
-        if (rt->bus_ch[i] == ch_id && rt->bus_ctx[i].initialized) return;
+        if (rt->bus_ch[i] == ch_id && rt->bus_ctx[i].initialized) return ESP_OK;
 
     /* Find free slot */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
@@ -159,7 +159,12 @@ static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
             
             /* Respect user DMA preference from bus_config flags */
             bool user_wants_dma = bus_config_get_dma_enabled(bus_type, config, config_len);
-            if (user_wants_dma && rt->dma_pool) {
+            if (user_wants_dma) {
+                if (!rt->dma_pool) {
+                    ESP_LOGE(TAG, "ch=%" PRIu32 " DMA requested without a pool", ch_id);
+                    rt->bus_ch[i] = 0;
+                    return ESP_ERR_INVALID_STATE;
+                }
                 uint32_t dma_id = 0;
                 esp_err_t dma_err = dma_pool_allocate(rt->dma_pool, bus_type,
                                                         hw_id, &dma_id);
@@ -168,10 +173,12 @@ static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                     ESP_LOGI(TAG, "ch=%" PRIu32 " DMA allocated (id=%" PRIu32 ")",
                              ch_id, dma_id);
                 } else {
-                    ESP_LOGW(TAG, "ch=%" PRIu32 " DMA requested but unavailable, polled",
-                             ch_id);
+                    ESP_LOGE(TAG, "ch=%" PRIu32 " DMA requested but allocation failed: %s",
+                             ch_id, esp_err_to_name(dma_err));
+                    rt->bus_ch[i] = 0;
+                    return dma_err;
                 }
-            } else if (!user_wants_dma) {
+            } else {
                 ESP_LOGI(TAG, "ch=%" PRIu32 " DMA disabled by user config", ch_id);
             }
             
@@ -192,13 +199,15 @@ static void reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                 rt->bus_ch[i] = 0;
                 /* Release DMA if init failed */
                 if (dma) {
-                    dma_pool_release_by_hw(rt->dma_pool, hw_id);
+                    esp_err_t release_err = dma_pool_release_by_hw(rt->dma_pool, hw_id);
+                    if (release_err != ESP_OK) return release_err;
                 }
             }
-            return;
+            return err;
         }
     }
     ESP_LOGE(TAG, "Bus slots full (max=%d)", SCHED_MAX_CHANNELS);
+    return ESP_ERR_NO_MEM;
 }
 
 /* ==== Public API ==== */
@@ -208,16 +217,29 @@ void bus_manager_init(bus_runtime_t *rt)
     (void)rt; /* pool already zeroed by app_state_init */
 }
 
-void bus_manager_cleanup_all(bus_runtime_t *rt)
+esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt)
 {
+    if (!rt) return ESP_ERR_INVALID_ARG;
+    esp_err_t cleanup_err = ESP_OK;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        char *hw_id_slot = get_bus_hw_id(rt, i);
         if (rt->bus_ctx[i].initialized) {
-            /* Release DMA using saved hw_id (no manifest dependency) */
-            char *hw_id_slot = get_bus_hw_id(rt, i);
-            if (rt->dma_pool && hw_id_slot[0] != '\0') {
-                dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
+            esp_err_t err = bus_dma_deinit(&rt->bus_ctx[i]);
+            if (err != ESP_OK) {
+                cleanup_err = err;
+                continue;
             }
-            bus_dma_deinit(&rt->bus_ctx[i]);
+        }
+        /* Release DMA only after the driver is confirmed detached. If DMA
+         * release fails, retain channel metadata so a later cleanup retries. */
+        if (rt->bus_ch[i] != 0 && rt->dma_pool && hw_id_slot[0] != '\0') {
+            esp_err_t err = dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
+            if (err != ESP_OK) {
+                cleanup_err = err;
+                continue;
+            }
+        }
+        if (rt->bus_ch[i] != 0) {
             rt->bus_ch[i] = 0;
             hw_id_slot[0] = '\0';
         }
@@ -226,36 +248,72 @@ void bus_manager_cleanup_all(bus_runtime_t *rt)
             xQueueReset(rt->pending_queues[i]);
         }
     }
+    return cleanup_err;
 }
 
-void bus_manager_setup_from_manifest(bus_runtime_t *rt)
+esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
-    if (!m || !m->applied) return;
-    for (int i = 0; i < m->channel_count; i++) {
-        if (!m->channels[i].enabled) continue;
-        bus_manager_reg_channel(rt, &m->channels[i]);
-    }
+    if (!m || !m->applied) return ESP_ERR_INVALID_STATE;
+    return bus_manager_apply_manifest(rt, m);
 }
 
 /* v2.4: Incremental single-channel register */
-void bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch)
+esp_err_t bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch)
 {
-    reg_bus_channel(rt, ch->id, ch->bus_type,
-                    ch->bus_config, ch->bus_config_len);
+    if (!rt || !ch || !ch->enabled || ch->id == 0 || ch->bus_config_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return reg_bus_channel(rt, ch->id, ch->bus_type,
+                           ch->bus_config, ch->bus_config_len);
+}
+
+esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t *manifest)
+{
+    if (!rt || !manifest) return ESP_ERR_INVALID_ARG;
+    uint8_t enabled_count = 0;
+    for (int i = 0; i < manifest->channel_count; i++) {
+        if (!manifest->channels[i].enabled) continue;
+        if (manifest->channels[i].id == 0 ||
+            manifest->channels[i].bus_config_len == 0 ||
+            manifest->channels[i].bus_config_len > sizeof(manifest->channels[i].bus_config)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        for (int j = 0; j < i; j++) {
+            if (manifest->channels[j].enabled &&
+                manifest->channels[j].id == manifest->channels[i].id) {
+                return ESP_ERR_INVALID_ARG;
+            }
+        }
+        if (++enabled_count > SCHED_MAX_CHANNELS) return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = bus_manager_cleanup_all(rt);
+    if (err != ESP_OK) return err;
+    for (int i = 0; i < manifest->channel_count; i++) {
+        if (!manifest->channels[i].enabled) continue;
+        err = bus_manager_reg_channel(rt, &manifest->channels[i]);
+        if (err != ESP_OK) {
+            esp_err_t cleanup_err = bus_manager_cleanup_all(rt);
+            return cleanup_err == ESP_OK ? err : cleanup_err;
+        }
+    }
+    return ESP_OK;
 }
 
 /* v2.4: Incremental single-channel unregister */
-void bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
+esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
 {
+    if (!rt || channel_id == 0) return ESP_ERR_INVALID_ARG;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (rt->bus_ch[i] == channel_id && rt->bus_ctx[i].initialized) {
-            /* Release DMA using saved hw_id */
             char *hw_id_slot = get_bus_hw_id(rt, i);
+            esp_err_t err = bus_dma_deinit(&rt->bus_ctx[i]);
+            if (err != ESP_OK) return err;
             if (rt->dma_pool && hw_id_slot[0] != '\0') {
-                dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
+                err = dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
+                if (err != ESP_OK) return err;
             }
-            bus_dma_deinit(&rt->bus_ctx[i]);
             rt->bus_ch[i] = 0;
             hw_id_slot[0] = '\0';
             /* Drain stale pending entries */
@@ -263,10 +321,11 @@ void bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
                 xQueueReset(rt->pending_queues[i]);
             }
             ESP_LOGI(TAG, "Unregistered ch=%lu", (unsigned long)channel_id);
-            return;
+            return ESP_OK;
         }
     }
     ESP_LOGW(TAG, "Unregister ch=%lu: not found", (unsigned long)channel_id);
+    return ESP_ERR_NOT_FOUND;
 }
 
 bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id)

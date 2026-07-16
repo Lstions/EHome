@@ -50,7 +50,7 @@ typedef enum {
 typedef struct {
     uint32_t   request_id;                    /* Correlates WriteResponse/DataReport */
     uint32_t   channel_id;
-    uint8_t    bus_type;                      /* 1=UART, 2=I2C, 3=SPI, 4=GPIO */
+    uint8_t    bus_type;                      /* 1=UART, 2=I2C, 3=SPI; legacy 4=GPIO rejected */
     uint8_t    tx_data[CMD_TX_MAX];
     size_t     tx_len;
     uint32_t   delay_ms;                      /* TX→RX delay (sample only) */

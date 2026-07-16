@@ -2,6 +2,7 @@ package nodemgr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"ehome/backend/internal/events"
@@ -57,6 +58,13 @@ type gpioEntry struct {
 	Pin uint64 `json:"pin"`
 }
 
+type pwmEntry struct {
+	ID                string `json:"id"`
+	Channel           uint64 `json:"channel"`
+	TimerCount        uint64 `json:"timer_count"`
+	MaxResolutionBits uint64 `json:"max_resolution_bits"`
+}
+
 type adcEntry struct {
 	ID      string `json:"id"`
 	Unit    uint64 `json:"unit"`
@@ -71,6 +79,7 @@ type busesData struct {
 	SPI  []spiEntry  `json:"spi,omitempty"`
 	GPIO []gpioEntry `json:"gpio,omitempty"`
 	ADC  []adcEntry  `json:"adc,omitempty"`
+	PWM  []pwmEntry  `json:"pwm,omitempty"`
 }
 
 type channelEntry struct {
@@ -82,6 +91,113 @@ type channelEntry struct {
 	BusConfig   []byte   `json:"-"`
 	TemplateIDs []uint64 `json:"template_ids,omitempty"`
 	DmaEnabled  bool     `json:"dma_enabled"`
+}
+
+func validateKnownFields(data []byte, schema map[uint8]uint8, required []uint8, repeated map[uint8]bool) error {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return err
+	}
+	seen := map[uint8]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			for _, number := range required {
+				if !seen[number] {
+					return fmt.Errorf("missing required field %d", number)
+				}
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		expected, ok := schema[field.FieldNum]
+		if !ok || field.WireType != expected {
+			return fmt.Errorf("field %d has wire type %d", field.FieldNum, field.WireType)
+		}
+		if seen[field.FieldNum] && !repeated[field.FieldNum] {
+			return fmt.Errorf("duplicate field %d", field.FieldNum)
+		}
+		seen[field.FieldNum] = true
+	}
+}
+
+func validateFieldSequence(data []byte) error {
+	return validateKnownFields(data, map[uint8]uint8{1: frame.WireVarint, 2: frame.WireLengthDelimited, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireVarint, 7: frame.WireLengthDelimited, 8: frame.WireVarint}, []uint8{1}, nil)
+}
+
+func validateGenericFieldSequence(data []byte) error {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return err
+	}
+	for {
+		_, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func resourceEntrySchema(kind string, outer uint8) (map[uint8]uint8, []uint8, map[uint8]bool, error) {
+	var schema map[uint8]uint8
+	required := []uint8{1}
+	repeated := map[uint8]bool{}
+	if kind == "channels" {
+		if outer != 1 {
+			return nil, nil, nil, fmt.Errorf("unexpected channel entry field %d", outer)
+		}
+		schema = map[uint8]uint8{1: frame.WireVarint, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireLengthDelimited, 7: frame.WireVarint, 8: frame.WireVarint}
+		repeated[7] = true
+		return schema, required, repeated, nil
+	}
+	switch outer {
+	case 1, 2:
+		schema = map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireVarint}
+	case 3:
+		schema = map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireVarint, 7: frame.WireVarint, 8: frame.WireVarint}
+	case 4:
+		schema = map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireVarint}
+		required = []uint8{1, 2}
+	case 5:
+		schema = map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint}
+	case 6:
+		schema = map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint}
+		required = []uint8{1, 2, 3, 4}
+	default:
+		return nil, nil, nil, fmt.Errorf("unexpected bus entry field %d", outer)
+	}
+	return schema, required, repeated, nil
+}
+
+func validateNestedResourceBlob(data []byte, kind string) error {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return err
+	}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if field.WireType != frame.WireLengthDelimited {
+			return fmt.Errorf("resource entry field %d has wire type %d", field.FieldNum, field.WireType)
+		}
+		schema, required, repeated, schemaErr := resourceEntrySchema(kind, field.FieldNum)
+		if schemaErr != nil {
+			return schemaErr
+		}
+		if err := validateKnownFields(frame.GetBytes(field), schema, required, repeated); err != nil {
+			return fmt.Errorf("resource entry field %d: %w", field.FieldNum, err)
+		}
+	}
 }
 
 // --- Sub-message decoders ---
@@ -201,6 +317,31 @@ func decodeGPIOEntry(data []byte) gpioEntry {
 	return e
 }
 
+func decodePWMEntry(data []byte) pwmEntry {
+	var e pwmEntry
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return e
+	}
+	for {
+		field, err := dec.NextField()
+		if err != nil {
+			break
+		}
+		switch field.FieldNum {
+		case 1:
+			e.ID = frame.GetString(field)
+		case 2:
+			e.Channel = frame.GetUint64(field)
+		case 3:
+			e.TimerCount = frame.GetUint64(field)
+		case 4:
+			e.MaxResolutionBits = frame.GetUint64(field)
+		}
+	}
+	return e
+}
+
 func decodeADCEntry(data []byte) adcEntry {
 	var e adcEntry
 	dec, err := frame.NewSubDecoder(data)
@@ -250,6 +391,8 @@ func decodeBusesBlob(data []byte) busesData {
 			buses.GPIO = append(buses.GPIO, decodeGPIOEntry(frame.GetBytes(field)))
 		case 5: // adc_entry (repeated)
 			buses.ADC = append(buses.ADC, decodeADCEntry(frame.GetBytes(field)))
+		case 6: // pwm_entry (repeated)
+			buses.PWM = append(buses.PWM, decodePWMEntry(frame.GetBytes(field)))
 		}
 	}
 	return buses
@@ -289,12 +432,13 @@ func decodeChannelEntry(data []byte) channelEntry {
 }
 
 // decodeDmaChannel decodes a single DMA channel sub-message (ResourceReport field 8)
-func decodeDmaChannel(data []byte) models.DmaChannelInfo {
+func decodeDmaChannel(data []byte) (models.DmaChannelInfo, bool) {
 	var ch models.DmaChannelInfo
 	dec, err := frame.NewSubDecoder(data)
 	if err != nil {
-		return ch
+		return ch, false
 	}
+	valid := true
 	for {
 		field, err := dec.NextField()
 		if err != nil {
@@ -302,24 +446,57 @@ func decodeDmaChannel(data []byte) models.DmaChannelInfo {
 		}
 		switch field.FieldNum {
 		case 1: // dma_id
-			ch.DmaID = uint32(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > uint64(^uint32(0)) {
+				valid = false
+				break
+			}
+			ch.DmaID = uint32(v)
 		case 2: // name
 			ch.Name = frame.GetString(field)
 		case 3: // dma_type
-			ch.DmaType = uint8(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > 255 {
+				valid = false
+				break
+			}
+			ch.DmaType = uint8(v)
 		case 4: // capabilities
-			ch.Capabilities = uint8(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > 255 {
+				valid = false
+				break
+			}
+			ch.Capabilities = uint8(v)
 		case 5: // max_burst
-			ch.MaxBurst = uint32(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > uint64(^uint32(0)) {
+				valid = false
+				break
+			}
+			ch.MaxBurst = uint32(v)
 		case 6: // state
-			ch.State = uint8(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > 255 {
+				valid = false
+				break
+			}
+			ch.State = uint8(v)
 		case 7: // bound_to
 			ch.BoundTo = frame.GetString(field)
 		case 8: // compatible_bus
-			ch.CompatibleBus = uint8(frame.GetUint64(field))
+			v := frame.GetUint64(field)
+			if v > 255 {
+				valid = false
+				break
+			}
+			ch.CompatibleBus = uint8(v)
 		}
 	}
-	return ch
+	if !valid {
+		return models.DmaChannelInfo{}, false
+	}
+	return ch, true
 }
 
 func decodeChannelsBlob(data []byte) []channelEntry {
@@ -377,23 +554,69 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	var busesBlob []byte
 	var channelsBlob []byte
 	var dmaChannels []models.DmaChannelInfo
+	seenTop := map[uint8]bool{}
 
 	for {
 		field, err := dec.NextField()
-		if err != nil {
+		if errors.Is(err, frame.ErrEndOfFrame) {
 			break
 		}
+		if err != nil {
+			logger.Warnf("[%s] Rejecting malformed ResourceReport: %v", deviceID, err)
+			return
+		}
+		if seenTop[field.FieldNum] && field.FieldNum != 8 {
+			logger.Warnf("[%s] duplicate ResourceReport field %d", deviceID, field.FieldNum)
+			return
+		}
+		seenTop[field.FieldNum] = true
 		switch field.FieldNum {
 		case 1:
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid platform wire type", deviceID)
+				return
+			}
 			platform = frame.GetString(field)
 		case 2:
+			if field.WireType != frame.WireVarint {
+				logger.Warnf("[%s] invalid resource_count wire type", deviceID)
+				return
+			}
 			resourceCount = frame.GetUint64(field)
 		case 3:
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid buses wire type", deviceID)
+				return
+			}
 			busesBlob = frame.GetBytes(field)
 		case 4:
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid channels wire type", deviceID)
+				return
+			}
 			channelsBlob = frame.GetBytes(field)
 		case 8: // dma_channels (repeated DmaChannel sub-messages)
-			dmaChannels = append(dmaChannels, decodeDmaChannel(frame.GetBytes(field)))
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid DMA wire type", deviceID)
+				return
+			}
+			dmaData := frame.GetBytes(field)
+			if err := validateFieldSequence(dmaData); err != nil {
+				logger.Warnf("[%s] Rejecting malformed DMA resource: %v", deviceID, err)
+				return
+			}
+			dma, ok := decodeDmaChannel(dmaData)
+			if !ok {
+				logger.Warnf("[%s] Rejecting overflowing DMA resource", deviceID)
+				return
+			}
+			dmaChannels = append(dmaChannels, dma)
+		}
+	}
+	for _, required := range []uint8{1, 2, 3} {
+		if !seenTop[required] {
+			logger.Warnf("[%s] missing ResourceReport field %d", deviceID, required)
+			return
 		}
 	}
 
@@ -403,12 +626,20 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	// Decode buses sub-message
 	var buses busesData
 	if len(busesBlob) > 0 {
+		if err := validateNestedResourceBlob(busesBlob, "buses"); err != nil {
+			logger.Warnf("[%s] Rejecting malformed buses blob: %v", deviceID, err)
+			return
+		}
 		buses = decodeBusesBlob(busesBlob)
 	}
 
 	// Decode channels sub-message
 	var channels []channelEntry
 	if len(channelsBlob) > 0 {
+		if err := validateNestedResourceBlob(channelsBlob, "channels"); err != nil {
+			logger.Warnf("[%s] Rejecting malformed channels blob: %v", deviceID, err)
+			return
+		}
 		channels = decodeChannelsBlob(channelsBlob)
 	}
 
@@ -424,8 +655,8 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	}
 	hwInfoJSON, _ := json.Marshal(hardwareInfo)
 
-	logger.Infof("[%s] ResourceReport decoded: %d uart, %d i2c, %d spi, %d gpio, %d adc, %d channels, %d dma",
-		deviceID, len(buses.UART), len(buses.I2C), len(buses.SPI), len(buses.GPIO), len(buses.ADC), len(channels), len(dmaChannels))
+	logger.Infof("[%s] ResourceReport decoded: %d uart, %d i2c, %d spi, %d gpio, %d pwm, %d adc, %d channels, %d dma",
+		deviceID, len(buses.UART), len(buses.I2C), len(buses.SPI), len(buses.GPIO), len(buses.PWM), len(buses.ADC), len(channels), len(dmaChannels))
 
 	// Find node
 	var node models.Node
@@ -440,12 +671,17 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		"hardware_info": string(hwInfoJSON),
 		"platform":      platform,
 	}
-	// Store DMA channels
-	if len(dmaChannels) > 0 {
-		dmaJSON, _ := json.Marshal(dmaChannels)
-		updates["dma_channels"] = string(dmaJSON)
+	// An empty reported DMA list is authoritative and clears stale state.
+	dmaJSON, err := json.Marshal(dmaChannels)
+	if err != nil {
+		logger.Errorf("[%s] Failed to encode DMA resources: %v", deviceID, err)
+		return
 	}
-	m.db.Model(&node).Updates(updates)
+	updates["dma_channels"] = string(dmaJSON)
+	if err := m.db.Model(&node).Updates(updates).Error; err != nil {
+		logger.Errorf("[%s] Failed to persist ResourceReport: %v", deviceID, err)
+		return
+	}
 
 	// Build buses map for WebSocket event
 	var busesMap map[string]interface{}
@@ -459,8 +695,6 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		"buses":          busesMap,
 		"channel_count":  len(channels),
 	}
-	if len(dmaChannels) > 0 {
-		wsData["dma_channels"] = dmaChannels
-	}
+	wsData["dma_channels"] = dmaChannels
 	m.wsHub.BroadcastEvent(events.NodeResourcesUpdated, wsData)
 }

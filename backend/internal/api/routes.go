@@ -55,7 +55,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerOTARoutes(v1, db, otaMgr, nodeMgr)
 		registerOTARoutesCompat(v1, db, otaMgr, nodeMgr)
 		registerHARoutes(v1)
-		registerTerminalRoutes(v1, nodeMgr)
+		registerTerminalRoutes(v1, db, nodeMgr)
 		registerMetricsRoutes(v1, db)
 
 		// v2.2 routes
@@ -99,9 +99,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		func(channelID uint) ([]terminal.Entry, error) {
 			return nodeMgr.TerminalMgr().GetHistory(channelID, 256), nil
 		},
-		func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
+		validatedTerminalWriteSender(db, func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
 			return nodeMgr.SendWriteCommand(deviceID, channelID, data, readSize)
-		},
+		}),
 	)
 	r.GET("/api/v1/ws/terminal", JWTAuthWithDB(db), termWSHandler.HandleTerminalWS)
 }

@@ -17,12 +17,12 @@ func init() {
 
 // mockToken implements pahomqtt.Token
 type mockToken struct {
-	err   error
-	wait  bool
-	done  chan struct{}
+	err  error
+	wait bool
+	done chan struct{}
 }
 
-func (t *mockToken) Wait() bool { return t.wait }
+func (t *mockToken) Wait() bool                       { return t.wait }
 func (t *mockToken) WaitTimeout(d time.Duration) bool { return t.wait }
 func (t *mockToken) Done() <-chan struct{} {
 	if t.done == nil {
@@ -35,9 +35,9 @@ func (t *mockToken) Error() error { return t.err }
 
 // mockPahoClient implements pahomqtt.Client for testing
 type mockPahoClient struct {
-	mu         sync.Mutex
-	published  []mockPublish
-	subscribed []mockSubscribe
+	mu           sync.Mutex
+	published    []mockPublish
+	subscribed   []mockSubscribe
 	disconnected bool
 }
 
@@ -54,8 +54,8 @@ type mockSubscribe struct {
 	callback pahomqtt.MessageHandler
 }
 
-func (m *mockPahoClient) IsConnected() bool { return !m.disconnected }
-func (m *mockPahoClient) IsConnectionOpen() bool { return !m.disconnected }
+func (m *mockPahoClient) IsConnected() bool       { return !m.disconnected }
+func (m *mockPahoClient) IsConnectionOpen() bool  { return !m.disconnected }
 func (m *mockPahoClient) Connect() pahomqtt.Token { return &mockToken{wait: true} }
 func (m *mockPahoClient) Disconnect(quiesce uint) { m.disconnected = true }
 func (m *mockPahoClient) Publish(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token {
@@ -73,7 +73,7 @@ func (m *mockPahoClient) Subscribe(topic string, qos byte, callback pahomqtt.Mes
 func (m *mockPahoClient) SubscribeMultiple(filters map[string]byte, callback pahomqtt.MessageHandler) pahomqtt.Token {
 	return &mockToken{wait: true}
 }
-func (m *mockPahoClient) Unsubscribe(topics ...string) pahomqtt.Token { return &mockToken{wait: true} }
+func (m *mockPahoClient) Unsubscribe(topics ...string) pahomqtt.Token             { return &mockToken{wait: true} }
 func (m *mockPahoClient) AddRoute(topic string, callback pahomqtt.MessageHandler) {}
 func (m *mockPahoClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.ClientOptionsReader{}
@@ -82,10 +82,10 @@ func (m *mockPahoClient) OptionsReader() pahomqtt.ClientOptionsReader {
 // timeoutPahoClient returns tokens that timeout
 type timeoutPahoClient struct{}
 
-func (t *timeoutPahoClient) IsConnected() bool                                                { return true }
-func (t *timeoutPahoClient) IsConnectionOpen() bool                                           { return true }
-func (t *timeoutPahoClient) Connect() pahomqtt.Token                                          { return &mockToken{wait: true} }
-func (t *timeoutPahoClient) Disconnect(quiesce uint)                                          {}
+func (t *timeoutPahoClient) IsConnected() bool       { return true }
+func (t *timeoutPahoClient) IsConnectionOpen() bool  { return true }
+func (t *timeoutPahoClient) Connect() pahomqtt.Token { return &mockToken{wait: true} }
+func (t *timeoutPahoClient) Disconnect(quiesce uint) {}
 func (t *timeoutPahoClient) Publish(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token {
 	return &mockToken{wait: false} // timeout
 }
@@ -95,8 +95,10 @@ func (t *timeoutPahoClient) Subscribe(topic string, qos byte, callback pahomqtt.
 func (t *timeoutPahoClient) SubscribeMultiple(filters map[string]byte, callback pahomqtt.MessageHandler) pahomqtt.Token {
 	return &mockToken{wait: true}
 }
-func (t *timeoutPahoClient) Unsubscribe(topics ...string) pahomqtt.Token { return &mockToken{wait: true} }
-func (t *timeoutPahoClient) AddRoute(topic string, callback pahomqtt.MessageHandler)                      {}
+func (t *timeoutPahoClient) Unsubscribe(topics ...string) pahomqtt.Token {
+	return &mockToken{wait: true}
+}
+func (t *timeoutPahoClient) AddRoute(topic string, callback pahomqtt.MessageHandler) {}
 func (t *timeoutPahoClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.ClientOptionsReader{}
 }
@@ -104,10 +106,12 @@ func (t *timeoutPahoClient) OptionsReader() pahomqtt.ClientOptionsReader {
 // errorPahoClient returns tokens with errors
 type errorPahoClient struct{}
 
-func (e *errorPahoClient) IsConnected() bool                                                { return true }
-func (e *errorPahoClient) IsConnectionOpen() bool                                           { return true }
-func (e *errorPahoClient) Connect() pahomqtt.Token                                          { return &mockToken{wait: true, err: errors.New("connect failed")} }
-func (e *errorPahoClient) Disconnect(quiesce uint)                                          {}
+func (e *errorPahoClient) IsConnected() bool      { return true }
+func (e *errorPahoClient) IsConnectionOpen() bool { return true }
+func (e *errorPahoClient) Connect() pahomqtt.Token {
+	return &mockToken{wait: true, err: errors.New("connect failed")}
+}
+func (e *errorPahoClient) Disconnect(quiesce uint) {}
 func (e *errorPahoClient) Publish(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token {
 	return &mockToken{wait: true, err: errors.New("publish failed")}
 }
@@ -117,8 +121,8 @@ func (e *errorPahoClient) Subscribe(topic string, qos byte, callback pahomqtt.Me
 func (e *errorPahoClient) SubscribeMultiple(filters map[string]byte, callback pahomqtt.MessageHandler) pahomqtt.Token {
 	return &mockToken{wait: true}
 }
-func (e *errorPahoClient) Unsubscribe(topics ...string) pahomqtt.Token { return &mockToken{wait: true} }
-func (e *errorPahoClient) AddRoute(topic string, callback pahomqtt.MessageHandler)                      {}
+func (e *errorPahoClient) Unsubscribe(topics ...string) pahomqtt.Token             { return &mockToken{wait: true} }
+func (e *errorPahoClient) AddRoute(topic string, callback pahomqtt.MessageHandler) {}
 func (e *errorPahoClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.ClientOptionsReader{}
 }
@@ -235,6 +239,17 @@ func TestClient_Publish_Timeout(t *testing.T) {
 	}
 	if err.Error() != "mqtt publish timeout" {
 		t.Errorf("error message: got %s, want mqtt publish timeout", err.Error())
+	}
+}
+
+func TestClient_PublishNilClient(t *testing.T) {
+	var client *Client
+	if err := client.Publish("test/topic", []byte("hello")); err == nil {
+		t.Fatal("nil client must fail closed")
+	}
+	client = &Client{}
+	if err := client.Publish("test/topic", []byte("hello")); err == nil {
+		t.Fatal("client without underlying connection must fail closed")
 	}
 }
 
@@ -420,10 +435,10 @@ type mockMessage struct {
 	payload []byte
 }
 
-func (m *mockMessage) Duplicate() bool                  { return false }
-func (m *mockMessage) Qos() byte                        { return 1 }
-func (m *mockMessage) Retained() bool                   { return false }
-func (m *mockMessage) Topic() string                    { return m.topic }
-func (m *mockMessage) MessageID() uint16                { return 1 }
-func (m *mockMessage) Payload() []byte                  { return m.payload }
-func (m *mockMessage) Ack()                             {}
+func (m *mockMessage) Duplicate() bool   { return false }
+func (m *mockMessage) Qos() byte         { return 1 }
+func (m *mockMessage) Retained() bool    { return false }
+func (m *mockMessage) Topic() string     { return m.topic }
+func (m *mockMessage) MessageID() uint16 { return 1 }
+func (m *mockMessage) Payload() []byte   { return m.payload }
+func (m *mockMessage) Ack()              {}

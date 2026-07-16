@@ -72,15 +72,16 @@ void handler_config_process_query_resources(frame_decoder_t *dec)
 
 /* === Send: ConfigResult (0x05) === */
 
-void msg_handler_send_config_result(const char *manifest_id, bool success)
+esp_err_t msg_handler_send_config_result(const char *manifest_id, const char *sync_id, bool success)
 {
     uint8_t buf[128];
     frame_encoder_t enc;
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_CONFIG_RSLT);
     frame_encode_string(&enc, 1, manifest_id);
     frame_encode_varint(&enc, 2, success ? 1 : 0);
+	frame_encode_string(&enc, 4, sync_id ? sync_id : "");
     ESP_LOGI(TAG, "Sending ConfigResult: %s, success=%d", manifest_id, success);
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    return msg_handler_publish_checked(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 /* === Send: ConfigReport (0x11) === */

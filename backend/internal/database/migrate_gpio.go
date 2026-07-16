@@ -14,11 +14,11 @@ import (
 
 // MigrateGPIOChannelsResult records the outcome of a GPIO channel migration run.
 type MigrateGPIOChannelsResult struct {
-	Scanned      int    // total GPIO channels found
-	Migrated     int    // new GPIOConfig rows created
-	Skipped      int    // channels skipped (bad data, already migrated, etc.)
-	Errors       int    // channels that hit unexpected errors
-	Warnings     []string // per-channel warning messages
+	Scanned  int      // total GPIO channels found
+	Migrated int      // new GPIOConfig rows created
+	Skipped  int      // channels skipped (bad data, already migrated, etc.)
+	Errors   int      // channels that hit unexpected errors
+	Warnings []string // per-channel warning messages
 }
 
 // MigrateGPIOChannels performs a one-time, idempotent migration of old GPIO
@@ -47,8 +47,8 @@ func MigrateGPIOChannels(db *gorm.DB) (*MigrateGPIOChannelsResult, error) {
 	// Fetch candidate channels outside the transaction (read-only).
 	var channels []models.Channel
 	if err := db.Where(
-		"LOWER(hardware_type) = ? OR LOWER(bus_type) = ?",
-		"gpio", "gpio",
+		"LOWER(TRIM(hardware_type)) IN ? OR LOWER(TRIM(bus_type)) IN ?",
+		[]string{"gpio", "4"}, []string{"gpio", "4"},
 	).Find(&channels).Error; err != nil {
 		return nil, fmt.Errorf("migrate_gpio: query channels: %w", err)
 	}
@@ -82,29 +82,32 @@ func MigrateGPIOChannels(db *gorm.DB) (*MigrateGPIOChannelsResult, error) {
 // recorded as warnings in result and do not propagate; only DB errors
 // propagate to abort the transaction.
 func migrateOneGPIOChannel(tx *gorm.DB, ch models.Channel, result *MigrateGPIOChannelsResult) error {
+	quarantine := func(reason string) error {
+		if err := retireLegacyChannel(tx, ch.ID); err != nil {
+			result.Errors++
+			return err
+		}
+		result.Skipped++
+		result.Warnings = append(result.Warnings, reason)
+		return nil
+	}
 	// --- 1. Parse pin from bus_config (hex-encoded binary) ---
 	pin, ok := parseGPIOPinFromBusConfig(ch.BusConfig)
 	if !ok {
-		result.Skipped++
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("channel id=%d node_id=%s: cannot parse pin from bus_config %q (need >=2 hex bytes)", ch.ID, ch.NodeID, ch.BusConfig))
-		return nil
+		return quarantine(fmt.Sprintf("channel id=%d node_id=%s: cannot parse pin from bus_config %q", ch.ID, ch.NodeID, ch.BusConfig))
 	}
 
 	// --- 2. Parse direction from bus_config (second byte) ---
-	direction := uint8(0) // default INPUT
-	if dir, ok := parseGPIODirectionFromBusConfig(ch.BusConfig); ok {
-		direction = dir
+	direction, ok := parseGPIODirectionFromBusConfig(ch.BusConfig)
+	if !ok {
+		return quarantine(fmt.Sprintf("channel id=%d node_id=%s: invalid or missing GPIO direction", ch.ID, ch.NodeID))
 	}
 
 	// --- 3. Parse optional fields from config JSON ---
 	var cfgMap map[string]interface{}
 	if ch.Config != "" {
 		if err := json.Unmarshal([]byte(ch.Config), &cfgMap); err != nil {
-			// Bad JSON is a warning, not a fatal error.
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("channel id=%d node_id=%s: invalid config JSON %q: %v", ch.ID, ch.NodeID, ch.Config, err))
-			// Continue with defaults — cfgMap stays nil/empty.
+			return quarantine(fmt.Sprintf("channel id=%d node_id=%s: invalid config JSON %q: %v", ch.ID, ch.NodeID, ch.Config, err))
 		}
 	}
 
@@ -117,16 +120,22 @@ func migrateOneGPIOChannel(tx *gorm.DB, ch models.Channel, result *MigrateGPIOCh
 			label = l
 		}
 		if il, ok := cfgMap["initial_level"]; ok {
+			valid := false
 			switch v := il.(type) {
 			case float64:
 				if v == 0 || v == 1 {
 					initialLevel = uint8(v)
+					valid = true
 				}
 			case json.Number:
 				n, _ := v.Int64()
 				if n == 0 || n == 1 {
 					initialLevel = uint8(n)
+					valid = true
 				}
+			}
+			if !valid {
+				return quarantine(fmt.Sprintf("channel id=%d node_id=%s: invalid initial_level", ch.ID, ch.NodeID))
 			}
 		}
 		if e, ok := cfgMap["enabled"].(bool); ok {
@@ -143,11 +152,15 @@ func migrateOneGPIOChannel(tx *gorm.DB, ch models.Channel, result *MigrateGPIOCh
 		return fmt.Errorf("check existing gpio_config for node_id=%s pin=%d: %w", ch.NodeID, pin, err)
 	}
 	if existing > 0 {
+		if err := retireLegacyChannel(tx, ch.ID); err != nil {
+			result.Errors++
+			return fmt.Errorf("retire migrated GPIO channel id=%d: %w", ch.ID, err)
+		}
 		result.Skipped++
 		return nil
 	}
 
-	// --- 5. Create GPIOConfig ---
+	// --- 5. Create GPIOConfig and retire the legacy executable channel ---
 	// Use a map to avoid GORM's default:true overriding a zero-value false
 	// on the Enabled field.
 	createData := map[string]interface{}{
@@ -162,6 +175,10 @@ func migrateOneGPIOChannel(tx *gorm.DB, ch models.Channel, result *MigrateGPIOCh
 	if err := tx.Model(&models.GPIOConfig{}).Create(createData).Error; err != nil {
 		// If it's a unique constraint violation (race or already exists), skip.
 		if isUniqueConstraintError(err) {
+			if retireErr := retireLegacyChannel(tx, ch.ID); retireErr != nil {
+				result.Errors++
+				return retireErr
+			}
 			result.Skipped++
 			return nil
 		}
@@ -169,7 +186,21 @@ func migrateOneGPIOChannel(tx *gorm.DB, ch models.Channel, result *MigrateGPIOCh
 		return fmt.Errorf("create gpio_config for node_id=%s pin=%d: %w", ch.NodeID, pin, err)
 	}
 
+	if err := retireLegacyChannel(tx, ch.ID); err != nil {
+		result.Errors++
+		return fmt.Errorf("retire migrated GPIO channel id=%d: %w", ch.ID, err)
+	}
 	result.Migrated++
+	return nil
+}
+
+func retireLegacyChannel(tx *gorm.DB, channelID uint) error {
+	if err := tx.Model(&models.EdgeDevice{}).Where("channel_id = ?", channelID).Update("enabled", false).Error; err != nil {
+		return fmt.Errorf("disable dependent edge devices for channel id=%d: %w", channelID, err)
+	}
+	if err := tx.Model(&models.Channel{}).Where("id = ?", channelID).Update("enabled", false).Error; err != nil {
+		return fmt.Errorf("disable legacy channel id=%d: %w", channelID, err)
+	}
 	return nil
 }
 

@@ -3,9 +3,9 @@
 ## 0. 目标与边界
 
 - 目标：让用户在同一视图快速判断“有哪些引脚、谁占用、当前值、能做什么”，并能安全完成 GPIO/PWM 配置与即时控制。
-- **明确拒绝小卡片拼盘**：不再使用 `auto-fill + minmax(150px, 1fr)` 的卡片网格，也不让同一引脚在 GPIO、PWM 两组卡片中重复出现。
+- **明确拒绝 GPIO/PWM 合并视图**：GPIO 与 PWM 是 ESP32 独立上报的两类硬件资源，不以物理 GPIO 行投影或推导 PWM 资源。
 - 采用与现有总线资源、日志控制一致的“分组标题 + 纵向行列表 + 内联控件”语言；保留 Element Plus 的卡片、折叠、标签、按钮与反馈体系。
-- 本规格仅调整前端呈现与组件职责，不定义新后端接口；运行态以现有 API 可返回的数据为准。
+- 本规格以 `capabilities.buses.gpio` / `capabilities.buses.pwm` 为唯一资源事实源；没有报告时显示等待节点硬件资源上报。
 
 ## 1. 现状依据与问题
 
@@ -21,13 +21,10 @@
 
 1. 顶部工具条：`刷新`（次操作）、`保存配置`（仅总线配置变更时主操作）、`新建通道`（主操作）。GPIO/PWM 即时配置不混入“保存配置”的待保存语义。
 2. 通信资源：I2C、UART、SPI、ADC，沿用现有 `el-collapse` 分组。
-3. **引脚资源**：新增单一 `el-collapse-item`，标题为“GPIO / PWM 引脚”，显示汇总标签：`共 N`、`已配置 X`、`可用 Y`。
-4. 引脚分组工具条：
-   - 筛选 `全部 / 已配置 / 可用 / 已占用`（`el-segmented`；版本不支持时用 `el-radio-group`）。
-   - 搜索引脚号/标签（`el-input`，可清除）。
-   - 桌面右侧显示 `刷新状态`；窄屏落到下一行。
-5. 单一资源列表：每个物理 GPIO 只出现一次；按数值升序，GPIO/PWM 配置与占用均投影到该行。
-6. 默认不过度折叠：引脚分组首次进入展开；通信组保持现有行为。列表超过 24 行时仍完整渲染，但工具条 sticky，避免分页破坏硬件全貌。
+- GPIO 与 PWM 分为两个独立 `el-collapse-item`：GPIO 标题汇总 `buses.gpio`，PWM 标题汇总 `buses.pwm`；两者数量都只来自当前 ESP32 报告。
+- GPIO 列表每行身份是物理 GPIO；PWM 列表每行身份是 `PWM0/PWM1...`，已配置时显示 `PWM0 → GPIO6`。
+- PWM 配置先锁定硬件资源，再从 ESP32 报告且未被 GPIO/PWM/UART/I2C/SPI 占用的 GPIO 中选择输出路由。
+- 配置记录不在当前报告中时仅显示“无效配置”，不得补入有效资源行。
 
 ## 3. 统一行容器
 
@@ -139,13 +136,13 @@
 ## 11. 逐文件修改建议
 
 - `src/views/node/NodeDetail.vue`：不新增 GPIO/PWM 页面级卡片；继续通过 `ChannelPanel` 提供节点状态。清理未实际使用的 peripherals/旧外设样式时需另行确认，不属于本次视觉重构必做。
-- `src/components/node/ChannelPanel.vue`：将两个 GPIO/PWM `periph-card-grid` 合并为一个“引脚资源”折叠组；增加归一化 `pinRows` computed、筛选/搜索、统一 loading/error/offline；复用现有 GPIO/PWM 对话框与 API handler。
+- `src/components/node/ChannelPanel.vue`：分别展示 GPIO pin 与 PWM hardware channel 两个折叠组；PWM 行仅把 GPIO 作为 route 显示，复用现有 GPIO/PWM 对话框与 API handler。
 - `src/components/node/LogPanel.vue`：不改业务；复用其 `.log-controls` 的 wrap 思路作为引脚工具条样式基准。
 - `src/views/dashboard/Dashboard.vue`：不改；仅沿用状态色与 768px 响应式断点，不复制 stat-card 视觉到资源列表。
 - `src/components/periph/PeripheralControl.vue`：改为同一行式列表容器；若它缺少硬件能力清单，则仅展示已配置行，并明确空态“暂无已配置外设”，不要伪造可用资源。
 - `src/components/periph/GPIOPinCard.vue`：重命名/重构为 `GPIOPinRow.vue`（可保留兼容导出过渡）；输出改为单 Switch、输入保留读取；移除 ✕ 改更多菜单 + 确认；离线仅禁用操作。
 - `src/components/periph/PWMChannelCard.vue`：重命名/重构为 `PWMChannelRow.vue`；状态不得本地固定 `false` 冒充真实值；停止按钮去 danger；Slider 失败回滚；清理 timer（unmount 时取消）。
-- 建议新增 `src/components/periph/PinResourceList.vue`：承载唯一行合并、排序、筛选和响应式 DOM；两个 Row 仅负责类型特有的配置/运行控件，避免 ChannelPanel 与 PeripheralControl 重复实现。
+- 使用独立 `GPIOResourceList.vue` 和 `PWMResourceList.vue`：前者由 `hardware.gpio` 驱动，后者由 `hardware.pwm` 驱动；禁止统一 pin 行冒充 PWM 资源。
 
 ## 12. 开发验收 Checklist
 

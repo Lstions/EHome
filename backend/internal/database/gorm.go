@@ -43,7 +43,14 @@ func Connect(cfg Config) error {
 }
 
 func AutoMigrate() error {
-	return DB.AutoMigrate(
+	legacyPWM, err := CheckLegacyPWMRows(DB)
+	if err != nil {
+		return err
+	}
+	if legacyPWM.MigrationRequired {
+		return fmt.Errorf("pwm_configs migration_required: %d legacy row(s) lack hardware_id/channel; reconcile rows against a fresh ResourceReport: %+v", len(legacyPWM.Rows), legacyPWM.Rows)
+	}
+	if err := DB.AutoMigrate(
 		// v2.1 表 (保留, GORM 会自动加新字段)
 		&models.Node{},
 		&models.Channel{},
@@ -79,7 +86,14 @@ func AutoMigrate() error {
 		// 如果 struct 尚未定义, 注释掉这两行, 等 struct 改名完成后再启用
 		// &models.Node{},
 		// &models.EdgeDevice{},
-	)
+	); err != nil {
+		return err
+	}
+	if _, err = MigrateGPIOChannels(DB); err != nil {
+		return err
+	}
+	_, err = RetireLegacyPWMChannels(DB)
+	return err
 }
 
 func GetDB() *gorm.DB {

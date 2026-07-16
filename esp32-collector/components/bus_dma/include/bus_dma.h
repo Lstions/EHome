@@ -105,7 +105,7 @@ typedef struct {
 
 esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
                        const uint8_t *config, size_t config_len);
-void bus_dma_deinit(bus_dma_ctx_t *ctx);
+esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx);
 
 /* ==================================================================
  *  UART: independent TX / RX (full-duplex hardware)

@@ -140,7 +140,12 @@ BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_dep
 {
     (void)name;
     (void)stack_depth;
-    (void)priority;
+    if (priority != 2) {
+        fprintf(stderr, "FAIL xTaskCreate: log_tx must remain below MQTT/control task priority\n");
+        s_failures++;
+        *out_task = NULL;
+        return 0;
+    }
     s_create_calls++;
     s_created_task_fn = task;
     s_created_task_arg = arg;
@@ -249,7 +254,8 @@ static void test_start_failure_detaches_and_returns_stopped(void)
 {
     reset_stubs();
     s_create_succeeds = false;
-    log_stream_start(LOG_LEVEL_INFO);
+    CHECK(log_stream_start(LOG_LEVEL_INFO) == ESP_FAIL,
+          "task creation failure must be reported to the caller");
 
     CHECK(!log_stream_is_active(), "task creation failure must restore STOPPED");
     CHECK(s_create_calls == 1, "task creation failure path was not exercised");

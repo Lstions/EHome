@@ -104,6 +104,27 @@ func TestEdgeDevice_Create_MissingRequiredFields(t *testing.T) {
 	}
 }
 
+func TestEdgeDevice_CreateRejectsPeripheralChannelBinding(t *testing.T) {
+	for _, busType := range []string{"GPIO", "PWM"} {
+		t.Run(busType, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+			db.Create(&models.Channel{NodeID: "NODE001", HardwareType: busType, BusType: busType, Enabled: true})
+			body, _ := json.Marshal(map[string]interface{}{
+				"name": "bad binding", "type": "temperature", "node_id": "NODE001", "channel_id": 1,
+			})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/api/v1/edge-devices", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestEdgeDevice_Create_InvalidJSON(t *testing.T) {
 	r, _ := setupEdgeDeviceTest(t)
 
@@ -115,6 +136,48 @@ func TestEdgeDevice_Create_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestEdgeDevice_InitRequiresEnabledEdgeAndMatchingEnabledTransportChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		edge    models.EdgeDevice
+		channel models.Channel
+	}{
+		{"disabled edge", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: false}, models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true}},
+		{"disabled channel", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: false}},
+		{"node mismatch", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE002", HardwareType: "I2C", BusType: "I2C", Enabled: true}},
+		{"numeric PWM alias", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE001", HardwareType: "6", BusType: "6", Enabled: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Node 1", Status: "online"})
+			if tt.channel.NodeID == "NODE002" {
+				db.Create(&models.Node{NodeID: "NODE002", Name: "Node 2", Status: "online"})
+			}
+			db.Create(&tt.channel)
+			db.Create(&tt.edge)
+			if tt.name == "disabled channel" {
+				db.Model(&models.Channel{}).Where("id = ?", tt.channel.ID).Update("enabled", false)
+			}
+			if tt.name == "disabled edge" {
+				db.Model(&models.EdgeDevice{}).Where("id = ?", tt.edge.ID).Update("enabled", false)
+			}
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/init", nil)
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			var got models.EdgeDevice
+			db.First(&got, tt.edge.ID)
+			if got.InitState == "running" {
+				t.Fatal("rejected init was marked running")
+			}
+		})
 	}
 }
 
@@ -184,6 +247,46 @@ func TestEdgeDevice_Update_Success(t *testing.T) {
 	}
 	if dev.Enabled {
 		t.Error("expected enabled=false")
+	}
+}
+
+func TestEdgeDevice_UpdateRejectsPeripheralChannelMassBind(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1})
+	body, _ := json.Marshal(map[string]interface{}{"channel_id": 2})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/v1/edge-devices/1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	db.First(&dev, 1)
+	if dev.ChannelID != 1 {
+		t.Fatalf("rejected mass-bind changed channel_id to %d", dev.ChannelID)
+	}
+}
+
+func TestEdgeDeviceUpdateRejectsChannelFromDifferentNode(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Node 1", Status: "online"})
+	db.Create(&models.Node{NodeID: "NODE002", Name: "Node 2", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE002", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "test", NodeID: "NODE001", ChannelID: 1, Enabled: true})
+	body, _ := json.Marshal(map[string]interface{}{"channel_id": 2})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -436,6 +539,77 @@ func TestEdgeDevice_Execute_DeviceNotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for nonexistent device, got %d", w.Code)
+	}
+}
+
+func TestEdgeDeviceExecuteRejectsLegacyPeripheralDisabledAndStaleChannel(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		channel  models.Channel
+		edgeNode string
+	}{
+		{name: "GPIO", channel: models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true}, edgeNode: "NODE001"},
+		{name: "PWM", channel: models.Channel{NodeID: "NODE001", HardwareType: "PWM", BusType: "PWM", Enabled: true}, edgeNode: "NODE001"},
+		{name: "disabled UART", channel: models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", HardwareID: "force-disabled"}, edgeNode: "NODE001"},
+		{name: "stale ownership", channel: models.Channel{NodeID: "NODE002", HardwareType: "UART", BusType: "UART", Enabled: true}, edgeNode: "NODE001"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Node 1", Status: "online"})
+			db.Create(&models.Node{NodeID: "NODE002", Name: "Node 2", Status: "online"})
+			operations := json.RawMessage(`{"set":{"type":"write","command_template":"01"}}`)
+			dc := models.DeviceConfig{Name: "Writable", DeviceType: "test", HardwareType: "uart", Operations: operations}
+			db.Create(&dc)
+			db.Create(&tt.channel)
+			if tt.channel.HardwareID == "force-disabled" {
+				db.Model(&models.Channel{}).Where("id = ?", tt.channel.ID).UpdateColumn("enabled", false)
+			}
+			edge := models.EdgeDevice{Name: "Device", Type: "test", NodeID: tt.edgeNode, ChannelID: tt.channel.ID, DeviceConfigID: dc.ID, Enabled: true}
+			db.Create(&edge)
+
+			body, _ := json.Marshal(map[string]interface{}{"operation": "set", "params": map[string]interface{}{}})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/execute", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestEdgeDeviceChangeAddressRejectsLegacyPeripheralAndStaleChannel(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		channel  models.Channel
+		edgeNode string
+	}{
+		{name: "GPIO", channel: models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true}, edgeNode: "NODE001"},
+		{name: "PWM", channel: models.Channel{NodeID: "NODE001", HardwareType: "PWM", BusType: "PWM", Enabled: true}, edgeNode: "NODE001"},
+		{name: "disabled UART", channel: models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", HardwareID: "force-disabled"}, edgeNode: "NODE001"},
+		{name: "stale ownership", channel: models.Channel{NodeID: "NODE002", HardwareType: "UART", BusType: "UART", Enabled: true}, edgeNode: "NODE001"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Node 1", Status: "online"})
+			db.Create(&models.Node{NodeID: "NODE002", Name: "Node 2", Status: "online"})
+			db.Create(&tt.channel)
+			if tt.channel.HardwareID == "force-disabled" {
+				db.Model(&models.Channel{}).Where("id = ?", tt.channel.ID).UpdateColumn("enabled", false)
+			}
+			db.Create(&models.EdgeDevice{Name: "Device", Type: "test", NodeID: tt.edgeNode, ChannelID: tt.channel.ID, Enabled: true})
+			body, _ := json.Marshal(map[string]interface{}{"new_address": 5, "command": "010300000001840A"})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/change-address", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

@@ -69,7 +69,12 @@ _Static_assert(MQTT_USER_EVENT == 9, "esp-mqtt USER event ID drifted");
 #define portMAX_DELAY 0
 
 static int published_qos = -1;
+static int enqueued_qos = -1;
+static int subscribed_qos = -1;
+static int subscribed_qos_history[4];
+static int subscribe_calls;
 static int publish_calls;
+static int enqueue_calls;
 static bool capture_suppressed;
 static unsigned captured_log_count;
 static unsigned info_log_count;
@@ -122,8 +127,23 @@ static inline int esp_mqtt_client_publish(esp_mqtt_client_handle_t client, const
     publish_calls++;
     return 1;
 }
+static inline int esp_mqtt_client_enqueue(esp_mqtt_client_handle_t client, const char *topic,
+                                          const char *data, int len, int qos, int retain,
+                                          bool store)
+{
+    (void)client; (void)topic; (void)data; (void)len; (void)retain; (void)store;
+    enqueued_qos = qos;
+    enqueue_calls++;
+    return 1;
+}
 static inline int esp_mqtt_client_subscribe(esp_mqtt_client_handle_t client, const char *topic, int qos)
-{ (void)client; (void)topic; (void)qos; return 1; }
+{
+    (void)client; (void)topic;
+    subscribed_qos = qos;
+    if (subscribe_calls < 4) subscribed_qos_history[subscribe_calls] = qos;
+    subscribe_calls++;
+    return 1;
+}
 #include "../components/ehome_mqtt/ehome_mqtt.c"
 
 static int failures;
@@ -161,12 +181,15 @@ int main(void)
 
     s_ctx.client = (void *)1;
     s_ctx.state = MQTT_CLIENT_CONNECTED;
+    strlcpy(s_down_topic, "nodes/test/down", sizeof(s_down_topic));
+    strlcpy(s_control_topic, "nodes/test/control", sizeof(s_control_topic));
     capture_suppressed = true;
     CHECK(mqtt_client_publish_impl(log_stream_frame, sizeof(log_stream_frame)),
           "MsgLogStream publish failed");
     capture_suppressed = false;
-    CHECK(publish_calls == 1 && published_qos == 0,
-          "publish path must pass QoS 0 for MsgLogStream");
+    CHECK(enqueue_calls == 1 && enqueued_qos == 0 && publish_calls == 0,
+          "MsgLogStream must use non-blocking QoS-0 enqueue");
+
 
     /* esp-mqtt can deliver PUBLISHED after publish() returns, including QoS 0.
      * This event runs after log-stream suppression has been restored, so any
@@ -176,10 +199,15 @@ int main(void)
     CHECK(captured_log_count == 0,
           "asynchronous MQTT_EVENT_PUBLISHED must not create a new remote capture");
 
+
     esp_mqtt_event_t connected_event = { .event_id = MQTT_EVENT_CONNECTED };
     mqtt_event_handler(NULL, NULL, MQTT_EVENT_CONNECTED, &connected_event);
     CHECK(info_log_count >= 1,
           "CONNECTED must retain a broker diagnostic");
+	CHECK(subscribe_calls >= 2 && subscribed_qos_history[0] == 0,
+          "down-topic subscription must use QoS 0; ESP-MQTT inbound QoS acknowledgements can stall broker delivery");
+	CHECK(subscribe_calls >= 2 && subscribed_qos == 1,
+	      "reliable control topic must be subscribed at QoS 1");
 
     esp_mqtt_event_t disconnected_event = { .event_id = MQTT_EVENT_DISCONNECTED };
     mqtt_event_handler(NULL, NULL, MQTT_EVENT_DISCONNECTED, &disconnected_event);
@@ -210,7 +238,7 @@ int main(void)
     s_ctx.state = MQTT_CLIENT_CONNECTED;
     CHECK(mqtt_client_publish_impl(hello_frame, sizeof(hello_frame)),
           "Hello publish failed");
-    CHECK(publish_calls == 2 && published_qos == 1,
+    CHECK(publish_calls == 1 && published_qos == 1,
           "publish path must pass QoS 1 for non-log frames");
 
     if (failures != 0) {

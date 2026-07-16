@@ -1,6 +1,7 @@
 package database
 
 import (
+	"strings"
 	"testing"
 
 	"ehome/backend/internal/models"
@@ -51,6 +52,120 @@ func setupMigrationDB(t *testing.T) *gorm.DB {
 		t.Fatalf("automigrate: %v", err)
 	}
 	return db
+}
+
+func TestPWMConfigResourceIdentityUniqueConstraints(t *testing.T) {
+	db := setupMigrationDB(t)
+
+	first := models.PWMConfig{
+		NodeID: "NODE_PWM", HardwareID: "PWM0", Channel: 0, Pin: 6,
+		Frequency: 1000, Resolution: 14, Enabled: true,
+	}
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("create first PWM config: %v", err)
+	}
+
+	duplicateHardware := models.PWMConfig{
+		NodeID: "NODE_PWM", HardwareID: "PWM0", Channel: 0, Pin: 7,
+		Frequency: 1000, Resolution: 14, Enabled: true,
+	}
+	if err := db.Create(&duplicateHardware).Error; err == nil {
+		t.Fatal("expected duplicate (node_id, hardware_id) to fail")
+	}
+
+	duplicatePin := models.PWMConfig{
+		NodeID: "NODE_PWM", HardwareID: "PWM1", Channel: 1, Pin: 6,
+		Frequency: 1000, Resolution: 14, Enabled: true,
+	}
+	if err := db.Create(&duplicatePin).Error; err == nil {
+		t.Fatal("expected duplicate (node_id, pin) to fail")
+	}
+
+	otherNode := models.PWMConfig{
+		NodeID: "OTHER_NODE", HardwareID: "PWM0", Channel: 0, Pin: 6,
+		Frequency: 1000, Resolution: 14, Enabled: true,
+	}
+	if err := db.Create(&otherNode).Error; err != nil {
+		t.Fatalf("same hardware and pin on another node must be allowed: %v", err)
+	}
+}
+
+func TestCheckLegacyPWMRowsRequiresExplicitIdentityMigration(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TABLE pwm_configs (
+		id integer primary key autoincrement,
+		node_id text not null,
+		pin integer not null,
+		frequency integer not null,
+		duty integer default 0,
+		resolution integer default 14,
+		auto_start numeric default false,
+		label text,
+		enabled numeric default true
+	)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO pwm_configs(node_id,pin,frequency) VALUES ('NODE_OLD',6,1000)`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := CheckLegacyPWMRows(db)
+	if err != nil {
+		t.Fatalf("check legacy PWM rows: %v", err)
+	}
+	if !result.MigrationRequired || len(result.Rows) != 1 {
+		t.Fatalf("expected migration_required with one row, got %+v", result)
+	}
+	row := result.Rows[0]
+	if row.ID != 1 || row.NodeID != "NODE_OLD" || row.Pin != 6 {
+		t.Fatalf("unexpected legacy row identity: %+v", row)
+	}
+	if db.Migrator().HasColumn("pwm_configs", "hardware_id") || db.Migrator().HasColumn("pwm_configs", "channel") {
+		t.Fatal("check must not guess or mutate missing PWM resource identity")
+	}
+}
+
+func TestCheckLegacyPWMRowsAcceptsEmptyOldTable(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TABLE pwm_configs (id integer primary key, node_id text, pin integer)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := CheckLegacyPWMRows(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MigrationRequired || len(result.Rows) != 0 {
+		t.Fatalf("empty old table must not block migration: %+v", result)
+	}
+}
+
+func TestAutoMigrateBlocksLegacyPWMIdentityGuessing(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TABLE pwm_configs (id integer primary key, node_id text, pin integer)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO pwm_configs(id,node_id,pin) VALUES (7,'NODE_OLD',8)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	oldDB := DB
+	DB = db
+	t.Cleanup(func() { DB = oldDB })
+	err = AutoMigrate()
+	if err == nil || !strings.Contains(err.Error(), "migration_required") {
+		t.Fatalf("expected actionable migration_required error, got %v", err)
+	}
+	if db.Migrator().HasColumn("pwm_configs", "hardware_id") || db.Migrator().HasColumn("pwm_configs", "channel") {
+		t.Fatal("AutoMigrate mutated legacy PWM identity before operator reconciliation")
+	}
 }
 
 // createGPIOChannel is a helper to insert a legacy GPIO channel row.
@@ -262,32 +377,27 @@ func TestMigrateGPIOChannels_PreExistingGPIOConfig(t *testing.T) {
 // Bad data: invalid JSON config
 // =====================================================================
 
-func TestMigrateGPIOChannels_InvalidJSONConfig(t *testing.T) {
+func TestMigrateGPIOChannels_InvalidJSONConfigIsQuarantined(t *testing.T) {
 	db := setupMigrationDB(t)
-
-	node := models.Node{NodeID: "N4", Name: "n4"}
-	db.Create(&node)
-
-	// Invalid JSON in config, but valid bus_config
+	db.Create(&models.Node{NodeID: "N4", Name: "n4"})
 	createGPIOChannel(db, "N4", "0801", `{not valid json}`, true)
 
 	result, err := MigrateGPIOChannels(db)
 	if err != nil {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
-
-	// Should still migrate (with defaults) — bad JSON is a warning, not fatal
-	if result.Migrated != 1 {
-		t.Errorf("expected migrated=1 (bad JSON should use defaults), got %d", result.Migrated)
+	if result.Migrated != 0 || result.Skipped != 1 {
+		t.Fatalf("malformed config must be quarantined, got %+v", result)
 	}
 	if len(result.Warnings) == 0 {
-		t.Error("expected at least one warning for invalid JSON")
+		t.Error("expected warning for invalid JSON")
 	}
-
-	var cfg models.GPIOConfig
-	db.Where("node_id = ? AND pin = ?", "N4", 8).First(&cfg)
-	if cfg.Label != "" {
-		t.Errorf("expected empty label from bad JSON, got %s", cfg.Label)
+	var channel models.Channel
+	if err := db.Where("node_id = ?", "N4").First(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if channel.Enabled {
+		t.Fatal("malformed legacy GPIO channel remained enabled")
 	}
 }
 
@@ -297,22 +407,20 @@ func TestMigrateGPIOChannels_InvalidJSONConfig(t *testing.T) {
 
 func TestMigrateGPIOChannels_MissingBusConfig(t *testing.T) {
 	db := setupMigrationDB(t)
-
-	node := models.Node{NodeID: "N5", Name: "n5"}
-	db.Create(&node)
-
-	// Empty bus_config — cannot parse pin
+	db.Create(&models.Node{NodeID: "N5", Name: "n5"})
 	createGPIOChannel(db, "N5", "", "", true)
 
 	result, err := MigrateGPIOChannels(db)
 	if err != nil {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
-	if result.Migrated != 0 {
-		t.Errorf("expected migrated=0, got %d", result.Migrated)
+	if result.Migrated != 0 || result.Skipped != 1 {
+		t.Fatalf("got %+v", result)
 	}
-	if result.Skipped != 1 {
-		t.Errorf("expected skipped=1, got %d", result.Skipped)
+	var channel models.Channel
+	db.Where("node_id = ?", "N5").First(&channel)
+	if channel.Enabled {
+		t.Fatal("unparseable GPIO channel remained enabled")
 	}
 }
 
@@ -320,29 +428,22 @@ func TestMigrateGPIOChannels_MissingBusConfig(t *testing.T) {
 // Bad data: bus_config too short (only 1 byte)
 // =====================================================================
 
-func TestMigrateGPIOChannels_ShortBusConfig(t *testing.T) {
+func TestMigrateGPIOChannels_ShortBusConfigIsQuarantined(t *testing.T) {
 	db := setupMigrationDB(t)
-
-	node := models.Node{NodeID: "N6", Name: "n6"}
-	db.Create(&node)
-
-	// Only 1 byte — pin is parseable but direction is not
+	db.Create(&models.Node{NodeID: "N6", Name: "n6"})
 	createGPIOChannel(db, "N6", "0c", "", true)
 
 	result, err := MigrateGPIOChannels(db)
 	if err != nil {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
-	// Pin can be parsed from 1 byte, so migration should proceed
-	// with direction defaulting to 0 (INPUT).
-	if result.Migrated != 1 {
-		t.Errorf("expected migrated=1 (pin parseable, direction defaults), got %d", result.Migrated)
+	if result.Migrated != 0 || result.Skipped != 1 {
+		t.Fatalf("got %+v", result)
 	}
-
-	var cfg models.GPIOConfig
-	db.Where("node_id = ? AND pin = ?", "N6", 12).First(&cfg)
-	if cfg.Direction != 0 {
-		t.Errorf("expected direction=0 (default), got %d", cfg.Direction)
+	var channel models.Channel
+	db.Where("node_id = ?", "N6").First(&channel)
+	if channel.Enabled {
+		t.Fatal("short GPIO channel remained enabled")
 	}
 }
 
@@ -352,21 +453,20 @@ func TestMigrateGPIOChannels_ShortBusConfig(t *testing.T) {
 
 func TestMigrateGPIOChannels_InvalidHexBusConfig(t *testing.T) {
 	db := setupMigrationDB(t)
-
-	node := models.Node{NodeID: "N7", Name: "n7"}
-	db.Create(&node)
-
+	db.Create(&models.Node{NodeID: "N7", Name: "n7"})
 	createGPIOChannel(db, "N7", "xyz-not-hex", "", true)
 
 	result, err := MigrateGPIOChannels(db)
 	if err != nil {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
-	if result.Migrated != 0 {
-		t.Errorf("expected migrated=0, got %d", result.Migrated)
+	if result.Migrated != 0 || result.Skipped != 1 {
+		t.Fatalf("got %+v", result)
 	}
-	if result.Skipped != 1 {
-		t.Errorf("expected skipped=1, got %d", result.Skipped)
+	var channel models.Channel
+	db.Where("node_id = ?", "N7").First(&channel)
+	if channel.Enabled {
+		t.Fatal("invalid-hex GPIO channel remained enabled")
 	}
 }
 
@@ -374,27 +474,66 @@ func TestMigrateGPIOChannels_InvalidHexBusConfig(t *testing.T) {
 // Bad data: invalid direction (>3) in bus_config
 // =====================================================================
 
-func TestMigrateGPIOChannels_InvalidDirection(t *testing.T) {
+func TestMigrateGPIOChannels_InvalidDirectionIsQuarantined(t *testing.T) {
 	db := setupMigrationDB(t)
-
-	node := models.Node{NodeID: "N8", Name: "n8"}
-	db.Create(&node)
-
-	// pin=1, direction=5 (invalid) → should default to 0 (INPUT)
+	db.Create(&models.Node{NodeID: "N8", Name: "n8"})
 	createGPIOChannel(db, "N8", "0105", "", true)
 
 	result, err := MigrateGPIOChannels(db)
 	if err != nil {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
-	if result.Migrated != 1 {
-		t.Errorf("expected migrated=1 (direction defaults), got %d", result.Migrated)
+	if result.Migrated != 0 || result.Skipped != 1 {
+		t.Fatalf("got %+v", result)
 	}
+	var channel models.Channel
+	db.Where("node_id = ?", "N8").First(&channel)
+	if channel.Enabled {
+		t.Fatal("invalid-direction GPIO channel remained enabled")
+	}
+}
 
-	var cfg models.GPIOConfig
-	db.Where("node_id = ? AND pin = ?", "N8", 1).First(&cfg)
-	if cfg.Direction != 0 {
-		t.Errorf("expected direction=0 (default for invalid), got %d", cfg.Direction)
+func TestMigrateGPIOChannelsRecognizesNumericAliasAndDisablesDependents(t *testing.T) {
+	db := setupMigrationDB(t)
+	db.Create(&models.Node{NodeID: "NUM_GPIO", Name: "numeric"})
+	ch := models.Channel{NodeID: "NUM_GPIO", HardwareType: "4", BusType: "4", BusConfig: "0601", Enabled: true}
+	db.Create(&ch)
+	edge := models.EdgeDevice{Name: "legacy", NodeID: "NUM_GPIO", ChannelID: ch.ID, DeviceConfigID: 1, Enabled: true}
+	db.Create(&edge)
+	result, err := MigrateGPIOChannels(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Migrated != 1 {
+		t.Fatalf("numeric GPIO alias not migrated: %+v", result)
+	}
+	db.First(&ch, ch.ID)
+	db.First(&edge, edge.ID)
+	if ch.Enabled || edge.Enabled {
+		t.Fatal("legacy GPIO execution path or dependent binding remained enabled")
+	}
+}
+
+func TestRetireLegacyPWMChannelsRecognizesAliasesAndDisablesDependents(t *testing.T) {
+	db := setupMigrationDB(t)
+	db.Create(&models.Node{NodeID: "PWM_OLD", Name: "pwm"})
+	for _, alias := range []string{"PWM", "6"} {
+		ch := models.Channel{NodeID: "PWM_OLD", HardwareType: alias, BusType: alias, Enabled: true}
+		db.Create(&ch)
+		db.Create(&models.EdgeDevice{Name: alias, NodeID: "PWM_OLD", ChannelID: ch.ID, DeviceConfigID: 1, Enabled: true})
+	}
+	retired, err := RetireLegacyPWMChannels(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired != 2 {
+		t.Fatalf("retired=%d", retired)
+	}
+	var enabledChannels, enabledEdges int64
+	db.Model(&models.Channel{}).Where("node_id = ? AND enabled = ?", "PWM_OLD", true).Count(&enabledChannels)
+	db.Model(&models.EdgeDevice{}).Where("node_id = ? AND enabled = ?", "PWM_OLD", true).Count(&enabledEdges)
+	if enabledChannels != 0 || enabledEdges != 0 {
+		t.Fatalf("enabled channels=%d edges=%d", enabledChannels, enabledEdges)
 	}
 }
 
@@ -476,16 +615,43 @@ func TestMigrateGPIOChannels_ChannelPreserved(t *testing.T) {
 		t.Fatalf("MigrateGPIOChannels: %v", err)
 	}
 
-	// Verify the channel still exists and is unmodified
+	// Verify the row remains for audit/history but is categorically non-executable.
 	var fetched models.Channel
 	if err := db.First(&fetched, ch.ID).Error; err != nil {
 		t.Fatalf("channel was deleted: %v", err)
 	}
 	if fetched.HardwareType != "gpio" {
-		t.Errorf("channel hardware_type changed: %s", fetched.HardwareType)
+		t.Errorf("expected hardware_type preserved as gpio, got %q", fetched.HardwareType)
 	}
-	if fetched.Enabled != true {
-		t.Error("channel enabled flag changed")
+	if fetched.BusConfig != "0501" {
+		t.Errorf("expected bus_config preserved, got %q", fetched.BusConfig)
+	}
+	if fetched.Enabled {
+		t.Fatal("legacy GPIO channel must be disabled after migration")
+	}
+}
+
+func TestAutoMigrateRunsGPIOChannelMigrationAtStartup(t *testing.T) {
+	db := setupMigrationDB(t)
+	db.Create(&models.Node{NodeID: "AUTO_GPIO", Name: "auto"})
+	ch := createGPIOChannel(db, "AUTO_GPIO", "0601", `{"initial_level":1}`, true)
+	oldDB := DB
+	DB = db
+	t.Cleanup(func() { DB = oldDB })
+
+	if err := AutoMigrate(); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	var cfg models.GPIOConfig
+	if err := db.Where("node_id = ? AND pin = ?", "AUTO_GPIO", 6).First(&cfg).Error; err != nil {
+		t.Fatalf("migrated config: %v", err)
+	}
+	var legacy models.Channel
+	if err := db.First(&legacy, ch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Enabled {
+		t.Fatal("startup migration left legacy GPIO channel executable")
 	}
 }
 
@@ -572,16 +738,16 @@ func TestMigrateGPIOChannels_NoGPIOChannels(t *testing.T) {
 
 func TestParseGPIOPinFromBusConfig(t *testing.T) {
 	cases := []struct {
-		input    string
-		wantPin  int
-		wantOk   bool
+		input   string
+		wantPin int
+		wantOk  bool
 	}{
 		{"0501", 5, true},
 		{"0c", 12, true},
 		{"ff", 255, true},
 		{"", 0, false},
 		{"xyz", 0, false},
-		{"0", 0, false},  // odd-length hex
+		{"0", 0, false}, // odd-length hex
 	}
 	for _, tc := range cases {
 		pin, ok := parseGPIOPinFromBusConfig(tc.input)
@@ -594,16 +760,16 @@ func TestParseGPIOPinFromBusConfig(t *testing.T) {
 
 func TestParseGPIODirectionFromBusConfig(t *testing.T) {
 	cases := []struct {
-		input     string
-		wantDir   uint8
-		wantOk    bool
+		input   string
+		wantDir uint8
+		wantOk  bool
 	}{
-		{"0500", 0, true},   // INPUT
-		{"0501", 1, true},   // OUTPUT
-		{"0502", 2, true},   // INPUT_PULLUP
-		{"0503", 3, true},   // INPUT_PULLDOWN
-		{"0504", 0, false},  // invalid direction → not ok
-		{"05", 0, false},    // too short
+		{"0500", 0, true},  // INPUT
+		{"0501", 1, true},  // OUTPUT
+		{"0502", 2, true},  // INPUT_PULLUP
+		{"0503", 3, true},  // INPUT_PULLDOWN
+		{"0504", 0, false}, // invalid direction → not ok
+		{"05", 0, false},   // too short
 		{"", 0, false},
 		{"xyz", 0, false},
 	}

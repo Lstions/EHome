@@ -28,6 +28,8 @@ const gpio: GPIOConfig = {
 const pwm: PWMConfig = {
   id: 2,
   node_id: NODE,
+  hardware_id: 'PWM0',
+  channel: 0,
   pin: 3,
   frequency: 1000,
   duty: 5000,
@@ -169,9 +171,10 @@ describe('pwmApi', () => {
   it('create posts the config and unwraps the returned data', async () => {
     mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: pwm })
 
-    const result = await pwmApi.create(NODE, { pin: 3, frequency: 1000, duty: 5000, resolution: 14, auto_start: false, label: 'Fan', enabled: true })
+    const result = await pwmApi.create(NODE, { hardware_id: 'PWM0', pin: 3, frequency: 1000, duty: 5000, resolution: 14, auto_start: false, label: 'Fan', enabled: true })
 
     expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm`, {
+      hardware_id: 'PWM0',
       pin: 3,
       frequency: 1000,
       duty: 5000,
@@ -183,24 +186,33 @@ describe('pwmApi', () => {
     expect(result).toEqual(pwm)
   })
 
+  it('create strips a client-supplied channel so the backend remains authoritative', async () => {
+    mockClient.post.mockResolvedValue({ data: pwm })
+    await pwmApi.create(NODE, { hardware_id: 'PWM0', channel: 9, pin: 3 } as Partial<PWMConfig>)
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm`, {
+      hardware_id: 'PWM0',
+      pin: 3,
+    })
+  })
+
   // ---- update ----
 
   it('update sends a PUT with the config body', async () => {
     mockClient.put.mockResolvedValue(undefined)
 
-    await pwmApi.update(NODE, 3, { duty: 8000 })
+    await pwmApi.update(NODE, 'PWM0', { duty: 8000 })
 
-    expect(mockClient.put).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3`, { duty: 8000 })
+    expect(mockClient.put).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0`, { duty: 8000 })
   })
 
   // ---- delete ----
 
-  it('delete sends a DELETE for the specific pin', async () => {
+  it('delete sends a DELETE for the hardware resource identity', async () => {
     mockClient.delete.mockResolvedValue(undefined)
 
-    await pwmApi.delete(NODE, 3)
+    await pwmApi.delete(NODE, 'PWM0')
 
-    expect(mockClient.delete).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3`)
+    expect(mockClient.delete).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0`)
   })
 
   // ---- start ----
@@ -208,9 +220,9 @@ describe('pwmApi', () => {
   it('start posts to the start endpoint', async () => {
     mockClient.post.mockResolvedValue(undefined)
 
-    await pwmApi.start(NODE, 3)
+    await pwmApi.start(NODE, 'PWM0')
 
-    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3/start`)
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/start`)
   })
 
   // ---- stop ----
@@ -218,9 +230,9 @@ describe('pwmApi', () => {
   it('stop posts to the stop endpoint', async () => {
     mockClient.post.mockResolvedValue(undefined)
 
-    await pwmApi.stop(NODE, 3)
+    await pwmApi.stop(NODE, 'PWM0')
 
-    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3/stop`)
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/stop`)
   })
 
   // ---- setDuty ----
@@ -228,9 +240,9 @@ describe('pwmApi', () => {
   it('setDuty posts the duty value', async () => {
     mockClient.post.mockResolvedValue(undefined)
 
-    await pwmApi.setDuty(NODE, 3, 7500)
+    await pwmApi.setDuty(NODE, 'PWM0', 7500)
 
-    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3/duty`, { duty: 7500 })
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/duty`, { duty: 7500 })
   })
 
   // ---- setFreq ----
@@ -238,9 +250,9 @@ describe('pwmApi', () => {
   it('setFreq posts the frequency value', async () => {
     mockClient.post.mockResolvedValue(undefined)
 
-    await pwmApi.setFreq(NODE, 3, 2000)
+    await pwmApi.setFreq(NODE, 'PWM0', 2000)
 
-    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3/freq`, { frequency: 2000 })
+    expect(mockClient.post).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/freq`, { frequency: 2000 })
   })
 
   // ---- getState ----
@@ -249,9 +261,9 @@ describe('pwmApi', () => {
     const state = { running: true, duty: 5000, frequency: 1000 }
     mockClient.get.mockResolvedValue({ code: 200, message: 'ok', data: state })
 
-    const result = await pwmApi.getState(NODE, 3)
+    const result = await pwmApi.getState(NODE, 'PWM0')
 
-    expect(mockClient.get).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/3/state`)
+    expect(mockClient.get).toHaveBeenCalledWith(`/api/v1/nodes/${NODE}/pwm/PWM0/state`)
     expect(result).toEqual(state)
   })
 })

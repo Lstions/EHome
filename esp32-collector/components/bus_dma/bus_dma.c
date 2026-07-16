@@ -525,8 +525,9 @@ static size_t uart_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
     return total;
 }
 
-static void uart_deinit(bus_dma_ctx_t *ctx)
+static esp_err_t uart_deinit(bus_dma_ctx_t *ctx)
 {
+    esp_err_t err = ESP_OK;
     /* Find the port entry and decrement ref count */
     uart_port_entry_t *port_entry = uart_find_port(ctx->cfg.uart.tx_pin, 
                                                     ctx->cfg.uart.rx_pin, 
@@ -537,11 +538,16 @@ static void uart_deinit(bus_dma_ctx_t *ctx)
         
         if (port_entry->ref_count == 0) {
             /* Last channel on this port - delete the driver */
-            uart_driver_delete(ctx->cfg.uart.port);
-            port_entry->port = UART_NUM_MAX;  /* Mark as available */
-            ESP_LOGI(TAG, "UART%d driver deleted", ctx->cfg.uart.port);
+            err = uart_driver_delete(ctx->cfg.uart.port);
+            if (err == ESP_OK) {
+                port_entry->port = UART_NUM_MAX;  /* Mark as available */
+                ESP_LOGI(TAG, "UART%d driver deleted", ctx->cfg.uart.port);
+            } else {
+                port_entry->ref_count++;
+            }
         }
     }
+    return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -767,29 +773,30 @@ static esp_err_t spi_transact(bus_dma_ctx_t *ctx,
     return ESP_OK;
 }
 
-static void spi_deinit(bus_dma_ctx_t *ctx)
+static esp_err_t spi_deinit(bus_dma_ctx_t *ctx)
 {
+    spi_bus_entry_t *bus_entry = spi_find_bus(ctx->cfg.spi.mosi_pin,
+                                               ctx->cfg.spi.miso_pin,
+                                               ctx->cfg.spi.sclk_pin,
+                                               ctx->dma_enabled);
     if (ctx->cfg.spi.dev) {
-        spi_bus_remove_device(ctx->cfg.spi.dev);
+        esp_err_t err = spi_bus_remove_device(ctx->cfg.spi.dev);
+        if (err != ESP_OK) return err;
         ctx->cfg.spi.dev = NULL;
-
-        /* Find the bus entry and decrement ref count */
-        spi_bus_entry_t *bus_entry = spi_find_bus(ctx->cfg.spi.mosi_pin,
-                                                   ctx->cfg.spi.miso_pin,
-                                                   ctx->cfg.spi.sclk_pin,
-                                                   ctx->dma_enabled);
         if (bus_entry && bus_entry->ref_count > 0) {
             bus_entry->ref_count--;
             ESP_LOGI(TAG, "SPI bus ref_count=%lu", (unsigned long)bus_entry->ref_count);
-
-            /* Only free bus if last device */
-            if (bus_entry->ref_count == 0) {
-                spi_bus_free(ctx->cfg.spi.host);
-                bus_entry->host = SPI_HOST_MAX;
-                ESP_LOGI(TAG, "SPI bus freed");
-            }
         }
     }
+    /* A prior free attempt may have failed after device removal. Keep the
+     * zero-ref registry entry intact so this call retries the driver release. */
+    if (bus_entry && bus_entry->ref_count == 0) {
+        esp_err_t err = spi_bus_free(ctx->cfg.spi.host);
+        if (err != ESP_OK) return err;
+        bus_entry->host = SPI_HOST_MAX;
+        ESP_LOGI(TAG, "SPI bus freed");
+    }
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -994,30 +1001,29 @@ static esp_err_t i2c_transact(bus_dma_ctx_t *ctx,
     return r;
 }
 
-static void i2c_deinit(bus_dma_ctx_t *ctx)
+static esp_err_t i2c_deinit(bus_dma_ctx_t *ctx)
 {
+    i2c_bus_entry_t *bus_entry = i2c_find_bus(ctx->cfg.i2c.sda_pin,
+                                               ctx->cfg.i2c.scl_pin);
     if (ctx->cfg.i2c.dev_handle) {
-        i2c_master_bus_rm_device(ctx->cfg.i2c.dev_handle);
+        esp_err_t err = i2c_master_bus_rm_device(ctx->cfg.i2c.dev_handle);
+        if (err != ESP_OK) return err;
         ctx->cfg.i2c.dev_handle = NULL;
-        
-        /* Decrement ref count and delete bus if last device */
-        i2c_bus_entry_t *bus_entry = i2c_find_bus(ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
         if (bus_entry && bus_entry->ref_count > 0) {
             bus_entry->ref_count--;
-            ESP_LOGI(TAG, "I2C device removed, ref_count=%lu", (unsigned long)bus_entry->ref_count);
-            
-            if (bus_entry->ref_count == 0) {
-                /* Last device on this bus - delete the bus */
-                if (ctx->cfg.i2c.bus_handle) {
-                    i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
-                    ctx->cfg.i2c.bus_handle = NULL;
-                    bus_entry->bus_handle = NULL;
-                    ESP_LOGI(TAG, "I2C bus deleted (SDA=%d SCL=%d)", 
-                             ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
-                }
-            }
+            ESP_LOGI(TAG, "I2C device removed, ref_count=%lu",
+                     (unsigned long)bus_entry->ref_count);
         }
     }
+    if (bus_entry && bus_entry->ref_count == 0 && ctx->cfg.i2c.bus_handle) {
+        esp_err_t err = i2c_del_master_bus(ctx->cfg.i2c.bus_handle);
+        if (err != ESP_OK) return err;
+        ctx->cfg.i2c.bus_handle = NULL;
+        bus_entry->bus_handle = NULL;
+        ESP_LOGI(TAG, "I2C bus deleted (SDA=%d SCL=%d)",
+                 ctx->cfg.i2c.sda_pin, ctx->cfg.i2c.scl_pin);
+    }
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1118,15 +1124,19 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx,
     return r;
 }
 
-void bus_dma_deinit(bus_dma_ctx_t *ctx)
+esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx)
 {
-    if (ctx == NULL || !ctx->initialized) return;
+    if (ctx == NULL) return ESP_ERR_INVALID_ARG;
+    if (!ctx->initialized) return ESP_OK;
 
+    esp_err_t err;
     switch (ctx->bus_type) {
-        case BUS_TYPE_UART: uart_deinit(ctx); break;
-        case BUS_TYPE_SPI:  spi_deinit(ctx);  break;
-        case BUS_TYPE_I2C:  i2c_deinit(ctx);  break;
+        case BUS_TYPE_UART: err = uart_deinit(ctx); break;
+        case BUS_TYPE_SPI:  err = spi_deinit(ctx);  break;
+        case BUS_TYPE_I2C:  err = i2c_deinit(ctx);  break;
+        default: return ESP_ERR_NOT_SUPPORTED;
     }
+    if (err != ESP_OK) return err;
 
     if (ctx->tx_mutex) {
         vSemaphoreDelete(ctx->tx_mutex);
@@ -1135,4 +1145,5 @@ void bus_dma_deinit(bus_dma_ctx_t *ctx)
 
     ctx->initialized = false;
     ESP_LOGI(TAG, "Bus type=%d deinit", ctx->bus_type);
+    return ESP_OK;
 }

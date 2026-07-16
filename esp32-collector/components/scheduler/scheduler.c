@@ -32,6 +32,7 @@
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
 static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
+static volatile bool   s_prepared;
 static scheduler_queues_t s_queues;
 
 static void scheduler_task(void *p);
@@ -79,44 +80,82 @@ void scheduler_init(void)
 {
     memset(s_channels, 0, sizeof(s_channels));
     s_running     = false;
+    s_prepared    = false;
     s_task_handle = NULL;
 }
 
-void scheduler_start(const scheduler_queues_t *queues)
+static bool queues_valid(const scheduler_queues_t *queues)
 {
-    if (s_task_handle) return;
+    return queues && (queues->uart0_cmd_queue || queues->uart1_cmd_queue ||
+                      queues->spi_cmd_queue || queues->i2c_cmd_queue);
+}
 
-    if (queues) {
-        s_queues = *queues;
+sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
+                              const config_manifest_t *manifest)
+{
+    if (s_task_handle || s_prepared) return SCHED_ERR_DUPLICATE;
+    if (!queues_valid(queues) || !manifest) {
+        ESP_LOGE(TAG, "invalid queues or manifest, cannot prepare");
+        return SCHED_ERR_INVALID;
     }
-    if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
-        s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
-        ESP_LOGE(TAG, "all queues are NULL, cannot start");
-        return;
-    }
+    s_queues = *queues;
 
-    const config_manifest_t *cfg = config_mgr_get_manifest();
-    if (cfg && cfg->applied) {
-        for (int i = 0; i < cfg->channel_count && i < MAX_CHANNELS; i++) {
-            scheduler_add_channel(&cfg->channels[i]);
+    memset(s_channels, 0, sizeof(s_channels));
+    for (int i = 0; i < manifest->channel_count && i < MAX_CHANNELS; i++) {
+        if (!manifest->channels[i].enabled) continue;
+        sched_err_t err = scheduler_add_channel(&manifest->channels[i]);
+        if (err != SCHED_OK) {
+            memset(s_channels, 0, sizeof(s_channels));
+            return err;
         }
     }
 
-    s_running = true;
-    xTaskCreatePinnedToCore(scheduler_task, "scheduler",
-                            SCHED_TASK_STACK, NULL,
-                            SCHED_TASK_PRIORITY, &s_task_handle,
-                            SCHED_TASK_CORE);
+    s_running = false;
+    s_prepared = true;
+    if (xTaskCreatePinnedToCore(scheduler_task, "scheduler",
+                                SCHED_TASK_STACK, NULL,
+                                SCHED_TASK_PRIORITY, &s_task_handle,
+                                SCHED_TASK_CORE) != pdPASS) {
+        s_prepared = false;
+        s_task_handle = NULL;
+        memset(s_channels, 0, sizeof(s_channels));
+        return SCHED_ERR_NOT_INIT;
+    }
+    return SCHED_OK;
 }
 
-void scheduler_stop(void)
+void scheduler_activate(void)
+{
+    if (s_prepared && s_task_handle) s_running = true;
+}
+
+sched_err_t scheduler_start_manifest(const scheduler_queues_t *queues,
+                                     const config_manifest_t *manifest)
+{
+    sched_err_t err = scheduler_prepare(queues, manifest);
+    if (err == SCHED_OK) scheduler_activate();
+    return err;
+}
+
+sched_err_t scheduler_start(const scheduler_queues_t *queues)
+{
+    const config_manifest_t *cfg = config_mgr_get_manifest();
+    return cfg ? scheduler_start_manifest(queues, cfg) : SCHED_ERR_INVALID;
+}
+
+sched_err_t scheduler_stop(void)
 {
     s_running = false;
+    s_prepared = false;
 
     if (s_task_handle) {
         /* Wait for the task to notice s_running==false and exit its loop. */
         for (int i = 0; i < 100 && eTaskGetState(s_task_handle) != eDeleted; i++) {
             vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (eTaskGetState(s_task_handle) != eDeleted) {
+            ESP_LOGE(TAG, "scheduler task did not stop");
+            return SCHED_ERR_BUS;
         }
         s_task_handle = NULL;
     }
@@ -125,40 +164,49 @@ void scheduler_stop(void)
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_channels[i].active = false;
     }
+    return SCHED_OK;
 }
 
 /* v2.4: Lightweight pause — stops the task loop but preserves channel state.
  * Unlike scheduler_stop(), this does NOT clear s_channels[].active.
  * Caller must call scheduler_resume() to restart the task. */
-void scheduler_pause(void)
+sched_err_t scheduler_pause(void)
 {
     s_running = false;
+    s_prepared = false;
     if (s_task_handle) {
         for (int i = 0; i < 100 && eTaskGetState(s_task_handle) != eDeleted; i++) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
+        if (eTaskGetState(s_task_handle) != eDeleted) return SCHED_ERR_BUS;
         s_task_handle = NULL;
     }
     /* Channel state preserved — s_channels[].active untouched */
+    return SCHED_OK;
 }
 
 /* v2.4: Resume after pause — recreates the task without reloading channels. */
-void scheduler_resume(const scheduler_queues_t *queues)
+sched_err_t scheduler_resume(const scheduler_queues_t *queues)
 {
-    if (s_task_handle) return;
+    if (s_task_handle) return SCHED_ERR_DUPLICATE;
     if (queues) {
         s_queues = *queues;
     }
     if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
         s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
         ESP_LOGE(TAG, "all queues are NULL, cannot resume");
-        return;
+        return SCHED_ERR_INVALID;
     }
     s_running = true;
-    xTaskCreatePinnedToCore(scheduler_task, "scheduler",
-                            SCHED_TASK_STACK, NULL,
-                            SCHED_TASK_PRIORITY, &s_task_handle,
-                            SCHED_TASK_CORE);
+    if (xTaskCreatePinnedToCore(scheduler_task, "scheduler",
+                                SCHED_TASK_STACK, NULL,
+                                SCHED_TASK_PRIORITY, &s_task_handle,
+                                SCHED_TASK_CORE) != pdPASS) {
+        s_running = false;
+        s_task_handle = NULL;
+        return SCHED_ERR_NOT_INIT;
+    }
+    return SCHED_OK;
 }
 
 sched_err_t scheduler_add_channel(const config_channel_t *ch)
@@ -478,6 +526,12 @@ static void scheduler_task(void *p)
     uint32_t queue_full_count = 0;
     uint32_t total_samples = 0;
 
+    TickType_t prepared_at = xTaskGetTickCount();
+    while (s_prepared && !s_running &&
+           xTaskGetTickCount() - prepared_at < pdMS_TO_TICKS(SCHED_PREPARE_TIMEOUT_MS)) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (!s_running) s_prepared = false;
     while (s_running) {
         /* P3-1: Dynamic tick — use 1ms when any channel needs <100ms interval,
          * otherwise use 10ms to save CPU.  Checked every iteration because

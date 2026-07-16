@@ -2,6 +2,7 @@ package nodemgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -283,7 +284,7 @@ func (m *Manager) handlePing(deviceID string, payload []byte) {
 // SendPongAck sends a PongAck (0x18) message to a device in response to MsgPing.
 func (m *Manager) SendPongAck(deviceID string, pingTimestamp uint64) error {
 	enc := frame.NewEncoder(frame.MsgPongAck)
-	enc.EncodeVarint(1, pingTimestamp) // echo back the ping timestamp
+	enc.EncodeVarint(1, pingTimestamp)                  // echo back the ping timestamp
 	enc.EncodeVarint(2, uint64(time.Now().UnixMilli())) // server timestamp
 
 	topic := mqtt.TopicForNode(deviceID)
@@ -304,13 +305,30 @@ func (m *Manager) handlePeriphResponse(deviceID string, payload []byte) {
 	var value uint64
 	var errorCode uint64
 	var periphType uint64
-	var pin uint64
+	var resourceID uint64
+	var running bool
+	var action uint64
+	var runningRaw uint64
+	seen := map[uint8]bool{}
 
 	for {
 		field, err := dec.NextField()
-		if err != nil {
+		if errors.Is(err, frame.ErrEndOfFrame) {
 			break
 		}
+		if err != nil {
+			logger.Warnf("[%s] malformed PeriphRsp: %v", deviceID, err)
+			return
+		}
+		if field.WireType != frame.WireVarint {
+			logger.Warnf("[%s] invalid PeriphRsp wire type", deviceID)
+			return
+		}
+		if field.FieldNum < 1 || field.FieldNum > 8 || seen[field.FieldNum] {
+			logger.Warnf("[%s] duplicate or unknown PeriphRsp field %d", deviceID, field.FieldNum)
+			return
+		}
+		seen[field.FieldNum] = true
 		switch field.FieldNum {
 		case 1:
 			requestID = frame.GetUint64(field)
@@ -323,12 +341,107 @@ func (m *Manager) handlePeriphResponse(deviceID string, payload []byte) {
 		case 5:
 			periphType = frame.GetUint64(field) // optional, for async events
 		case 6:
-			pin = frame.GetUint64(field) // optional, for async events
+			resourceID = frame.GetUint64(field) // optional, GPIO pin or PWM channel
+		case 8:
+			runningRaw = frame.GetUint64(field)
+			if runningRaw > 1 {
+				logger.Warnf("[%s] non-canonical PeriphRsp running", deviceID)
+				return
+			}
+			running = runningRaw == 1
+		case 7:
+			action = frame.GetUint64(field)
 		}
 	}
+	for _, required := range []uint8{1, 2, 5, 6, 7} {
+		if !seen[required] {
+			logger.Warnf("[%s] PeriphRsp missing required field %d", deviceID, required)
+			return
+		}
+	}
+	if successValue, ok := func() (uint64, bool) {
+		dec2, err := frame.NewDecoder(payload)
+		if err != nil {
+			return 0, false
+		}
+		for {
+			f, err := dec2.NextField()
+			if err != nil {
+				return 0, false
+			}
+			if f.FieldNum == 2 {
+				return frame.GetUint64(f), true
+			}
+		}
+	}(); !ok || successValue > 1 {
+		logger.Warnf("[%s] non-canonical PeriphRsp success", deviceID)
+		return
+	}
+	if requestID == 0 {
+		logger.Warnf("[%s] PeriphRsp missing request identity", deviceID)
+		return
+	}
+	if requestID > uint64(^uint32(0)) || value > uint64(^uint32(0)) ||
+		errorCode > 255 || periphType > 255 || resourceID > 255 || action > 255 {
+		logger.Warnf("[%s] PeriphRsp numeric overflow", deviceID)
+		return
+	}
+	m.periphIntentMu.Lock()
+	defer m.periphIntentMu.Unlock()
+	m.periphMu.Lock()
+	meta, pending := m.periphPending[uint32(requestID)]
+	latestKey := fmt.Sprintf("%s:%d:%d:%d", deviceID, periphType, resourceID, action)
+	latestID := m.periphLatest[latestKey]
+	if !pending || meta.deviceID != deviceID || uint64(meta.periphType) != periphType || uint64(meta.resourceID) != resourceID || uint64(meta.action) != action {
+		m.periphMu.Unlock()
+		logger.Warnf("[%s] rejecting unmatched PeriphRsp request_id=%d", deviceID, requestID)
+		return
+	}
+	if latestID != uint32(requestID) {
+		delete(m.periphPending, uint32(requestID))
+		m.periphMu.Unlock()
+		logger.Warnf("[%s] rejecting superseded PeriphRsp request_id=%d latest=%d", deviceID, requestID, latestID)
+		return
+	}
+	if periphType == 2 && !seen[8] {
+		m.periphMu.Unlock()
+		logger.Warnf("[%s] PWM PeriphRsp missing running field", deviceID)
+		return
+	}
+	if !success && periphType == 2 && (action == 0 || action == 1) && m.db != nil {
+		column := "duty"
+		restored := interface{}(uint16(meta.previousValue))
+		if action == 1 {
+			column = "frequency"
+			restored = meta.previousValue
+		}
+		result := m.db.Model(&models.PWMConfig{}).
+			Where("node_id = ? AND channel = ? AND "+column+" = ?", deviceID, uint8(resourceID), meta.provisionalValue).
+			Update(column, restored)
+		if result.Error != nil || result.RowsAffected != 1 {
+			m.periphMu.Unlock()
+			logger.Errorf("[%s] failed to compensate rejected PWM %s: err=%v rows=%d", deviceID, column, result.Error, result.RowsAffected)
+			return
+		}
+		value = uint64(meta.previousValue)
+	}
+	delete(m.periphPending, uint32(requestID))
+	delete(m.periphLatest, latestKey)
+	m.periphMu.Unlock()
 
-	logger.Infof("[%s] PeriphRsp: request_id=%d success=%v value=%d error_code=%d periph_type=%d pin=%d",
-		deviceID, requestID, success, value, errorCode, periphType, pin)
+	var hardwareID string
+	var channel interface{}
+	var pin interface{}
+	if periphType == 1 {
+		pin = resourceID
+	} else if periphType == 2 {
+		channel = resourceID
+		hardwareID = meta.hardwareID
+		pin = meta.pin
+	}
+
+	logger.Infof("[%s] PeriphRsp: request_id=%d success=%v value=%d error_code=%d periph_type=%d resource_id=%d",
+		deviceID, requestID, success, value, errorCode, periphType, resourceID)
 
 	// WebSocket push — PeriphResult event
 	m.wsHub.BroadcastEvent(events.PeriphResult, map[string]interface{}{
@@ -338,6 +451,11 @@ func (m *Manager) handlePeriphResponse(deviceID string, payload []byte) {
 		"value":       value,
 		"error_code":  errorCode,
 		"periph_type": periphType,
+		"resource_id": resourceID,
+		"hardware_id": hardwareID,
+		"channel":     channel,
 		"pin":         pin,
+		"running":     running,
+		"action":      action,
 	})
 }

@@ -142,6 +142,24 @@ static bool encode_adc_entry(uint8_t *out, size_t cap, size_t *out_len,
 }
 
 /* ----------------------------------------------------------------
+ *  Encode a single pwm_entry sub-message
+ * ---------------------------------------------------------------- */
+static bool encode_pwm_entry(uint8_t *out, size_t cap, size_t *out_len,
+                             const hw_pwm_t *p)
+{
+    frame_encoder_t enc;
+    frame_encoder_init(&enc, out, cap, 0);
+
+    if (frame_encode_string(&enc, 1, p->id) != FRAME_OK) return false;
+    if (frame_encode_varint(&enc, 2, p->channel) != FRAME_OK) return false;
+    if (frame_encode_varint(&enc, 3, p->timer_count) != FRAME_OK) return false;
+    if (frame_encode_varint(&enc, 4, p->max_resolution_bits) != FRAME_OK) return false;
+
+    *out_len = frame_encoder_size(&enc);
+    return true;
+}
+
+/* ----------------------------------------------------------------
  *  Encode a single channel_entry sub-message
  * ---------------------------------------------------------------- */
 static bool encode_channel_entry(uint8_t *out, size_t cap, size_t *out_len,
@@ -236,6 +254,16 @@ static bool build_buses_blob(uint8_t *blob, size_t cap, size_t *out_len)
                               &hw_adcs[i]))
             return false;
         if (frame_encode_bytes(&enc, 5, entry_buf + 1,
+                               entry_len - 1) != FRAME_OK)
+            return false;
+    }
+
+    /* field6: pwm_entry (repeated) */
+    for (int i = 0; i < HW_PWM_COUNT; i++) {
+        if (!encode_pwm_entry(entry_buf, sizeof(entry_buf), &entry_len,
+                              &hw_pwms[i]))
+            return false;
+        if (frame_encode_bytes(&enc, 6, entry_buf + 1,
                                entry_len - 1) != FRAME_OK)
             return false;
     }

@@ -128,6 +128,13 @@ export interface GPIOBusResource {
   features?: number
 }
 
+export interface PWMBusResource {
+  id: string
+  channel: number
+  timer_count: number
+  max_resolution_bits: number
+}
+
 export interface ADCBusResource {
   id: string
   enabled: boolean
@@ -176,6 +183,7 @@ export interface Capabilities {
   model?: string
   buses?: {
     gpio?: GPIOBusResource[]
+    pwm?: PWMBusResource[]
     adc?: ADCBusResource[]
     i2c?: I2CBusResource[]
     spi?: SPIBusResource[]

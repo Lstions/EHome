@@ -153,8 +153,8 @@ func TestSender_SendWriteCommand(t *testing.T) {
 	if rec.qos != 2 {
 		t.Errorf("expected QoS 2, got %d", rec.qos)
 	}
-	if rec.topic != "nodes/DEV1/down" {
-		t.Errorf("topic: got %s, want nodes/DEV1/down", rec.topic)
+	if rec.topic != "nodes/DEV1/control" {
+		t.Errorf("topic: got %s, want nodes/DEV1/control", rec.topic)
 	}
 	if rec.payload[0] != frame.MsgWriteCmd {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgWriteCmd)
@@ -509,7 +509,7 @@ func TestSender_SendQueryRequest(t *testing.T) {
 
 func TestParseProtocolVersion(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		input string
 		want  float64
 	}{
@@ -539,7 +539,7 @@ func TestParseProtocolVersion(t *testing.T) {
 
 func TestParseHardwareID(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		input string
 		want  uint64
 	}{

@@ -42,6 +42,8 @@
 
 #define TAG "EHOME"
 
+static bool s_ota_pending_verify = false;
+
 /* ---- status_task — still in main.c (single-loop, minimal dependency) ---- */
 
 static void status_task(void *pv)
@@ -49,10 +51,14 @@ static void status_task(void *pv)
     app_state_t *s = (app_state_t *)pv;
     while (1) {
         s->uptime_sec++;
-        if (mqtt_client_is_connected_impl())
-            msg_handler_send_status(s->uptime_sec, "online",
+		if (mqtt_client_is_connected_impl()) {
+            esp_err_t status_err = msg_handler_send_status(s->uptime_sec, "online",
                                     (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
                                     scheduler_get_state());
+			if (s->ota_need_confirm && status_err == ESP_OK) {
+				if (ota_confirm_valid() == ESP_OK) s->ota_need_confirm = false;
+			}
+		}
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
@@ -197,22 +203,23 @@ void app_main(void)
         if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
             if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
                 ESP_LOGW(TAG, "OTA: running partition is PENDING_VERIFY — boot validation active");
-                /* Validation happens in app_callbacks after WiFi+MQTT+StatusReport succeed.
-                 * If validation fails after 3 attempts, ota_mark_invalid_rollback() is called. */
-                extern void ota_confirm_valid(void);
-                ota_confirm_valid();  /* Will be called again by app_callbacks after full validation */
+                /* Validation happens in app_callbacks only after WiFi, MQTT,
+                 * and the first StatusReport have all succeeded. Do not cancel
+                 * rollback here. */
+				s_ota_pending_verify = true;
             }
         }
-        /* Also check NVS state for power-loss recovery during download */
+        /* A non-zero download NVS state is recovery metadata, not proof that
+         * the running image passed boot validation. Preserve it for OTA
+         * recovery logic and never cancel rollback from here. */
         if (ota_get_nvs_state() != 0) {
-            ESP_LOGW(TAG, "OTA: NVS state=%d (power-loss recovery)", ota_get_nvs_state());
-            extern void ota_confirm_valid(void);
-            ota_confirm_valid();
+            ESP_LOGW(TAG, "OTA: NVS state=%d (power-loss recovery pending)", ota_get_nvs_state());
         }
     }
 
     /* ---- App state (singleton — node_id from MAC, cmd_queue, spinlock) ---- */
     app_state_t *s = app_state_init();
+	s->ota_need_confirm = s_ota_pending_verify;
 
     /* ---- UART0 boot mode check (MUST be before any UART0 driver install) ---- */
     /* If BOOT held at startup, UART0 reserved for download — task blocks here */
@@ -236,7 +243,10 @@ void app_main(void)
     sync_manager_register_send_hello_cb(on_sync_send_hello);
     msg_handler_init();
     log_stream_set_publish_callback(msg_handler_publish);
-    handler_periph_init();   /* v3.0: GPIO/PWM peripheral control queues + tasks */
+    if (handler_periph_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Peripheral handler initialization failed; restarting");
+        esp_restart();
+    }   /* v3.0: GPIO/PWM peripheral control queues + tasks */
     ota_init();
     scheduler_init();
 

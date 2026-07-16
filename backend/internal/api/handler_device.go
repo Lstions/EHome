@@ -19,7 +19,112 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+func isPeripheralChannelType(value string) bool {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "GPIO", "4", "PWM", "6":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTransportChannel(ch *models.Channel) error {
+	if ch == nil {
+		return fmt.Errorf("channel is required")
+	}
+	if !ch.Enabled {
+		return fmt.Errorf("channel is disabled")
+	}
+	return validateTransportChannelType(ch)
+}
+
+func validateTransportChannelType(ch *models.Channel) error {
+	if ch == nil {
+		return fmt.Errorf("channel is required")
+	}
+	if isPeripheralChannelType(ch.HardwareType) || isPeripheralChannelType(ch.BusType) {
+		return fmt.Errorf("GPIO and PWM are peripheral resources, not channels")
+	}
+	return nil
+}
+
+func channelRoutePins(ch models.Channel) ([]int, error) {
+	busType := strings.ToUpper(strings.TrimSpace(ch.BusType))
+	raw := strings.TrimPrefix(strings.TrimSpace(ch.BusConfig), `\x`)
+	bytes, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("malformed bus_config: %w", err)
+	}
+	toInts := func(values ...byte) []int {
+		out := make([]int, 0, len(values))
+		for _, value := range values {
+			out = append(out, int(value))
+		}
+		return out
+	}
+	switch busType {
+	case "UART", "I2C":
+		if len(bytes) < 2 {
+			return nil, fmt.Errorf("%s bus_config requires at least 2 bytes", busType)
+		}
+		return toInts(bytes[0], bytes[1]), nil
+	case "SPI":
+		if len(bytes) != 9 {
+			return nil, fmt.Errorf("SPI bus_config requires 9 bytes")
+		}
+		return toInts(bytes[0], bytes[6], bytes[7], bytes[8]), nil
+	case "ADC":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unsupported transport bus type %q", ch.BusType)
+	}
+}
+
+func validateChannelPeripheralConflicts(tx *gorm.DB, ch models.Channel) error {
+	if !ch.Enabled {
+		return nil
+	}
+	pins, err := channelRoutePins(ch)
+	if err != nil {
+		return err
+	}
+	for _, pin := range pins {
+		var gpioCount, pwmCount int64
+		if err := tx.Model(&models.GPIOConfig{}).Where("node_id = ? AND pin = ?", ch.NodeID, pin).Count(&gpioCount).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.PWMConfig{}).Where("node_id = ? AND pin = ?", ch.NodeID, pin).Count(&pwmCount).Error; err != nil {
+			return err
+		}
+		if gpioCount+pwmCount > 0 {
+			return errPeripheralPinConflict
+		}
+	}
+	return nil
+}
+
+func loadTransportChannel(db *gorm.DB, channelID uint, nodeID string) (*models.Channel, error) {
+	if db == nil {
+		return nil, fmt.Errorf("channel database is unavailable")
+	}
+	if channelID == 0 || strings.TrimSpace(nodeID) == "" {
+		return nil, fmt.Errorf("channel_id and device_id are required")
+	}
+	var ch models.Channel
+	if err := db.Where("id = ? AND node_id = ?", channelID, nodeID).First(&ch).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("channel not found for device")
+		}
+		return nil, fmt.Errorf("failed to load channel: %w", err)
+	}
+	if err := validateTransportChannel(&ch); err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
 
 // registerDeviceRoutes sets up channel + device-config CRUD routes
 func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry) {
@@ -396,12 +501,52 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 
 	// Create channel
 	v1.POST("/channels", func(c *gin.Context) {
-		var ch models.Channel
-		if err := c.ShouldBindJSON(&ch); err != nil {
+		var raw map[string]json.RawMessage
+		if err := c.ShouldBindJSON(&raw); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := db.Create(&ch).Error; err != nil {
+		body, err := json.Marshal(raw)
+		var ch models.Channel
+		if err != nil || json.Unmarshal(body, &ch) != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel payload"})
+			return
+		}
+		desiredEnabled := true
+		if value, ok := raw["enabled"]; ok {
+			if err := json.Unmarshal(value, &desiredEnabled); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "enabled must be boolean"})
+				return
+			}
+		}
+		ch.Enabled = desiredEnabled
+		if err := validateTransportChannelType(&ch); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			var node models.Node
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil {
+				return err
+			}
+			if err := validateChannelPeripheralConflicts(tx, ch); err != nil {
+				return err
+			}
+			if err := tx.Create(&ch).Error; err != nil {
+				return err
+			}
+			if !desiredEnabled {
+				if err := tx.Model(&ch).Update("enabled", false).Error; err != nil {
+					return err
+				}
+				ch.Enabled = false
+			}
+			return nil
+		}); err != nil {
+			if errors.Is(err, errPeripheralPinConflict) {
+				c.JSON(http.StatusConflict, gin.H{"error": "channel route conflicts with GPIO/PWM configuration"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -447,6 +592,25 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
+		candidate := ch
+		if dto.HardwareType != nil {
+			candidate.HardwareType = *dto.HardwareType
+		}
+		if dto.BusType != nil {
+			candidate.BusType = *dto.BusType
+		}
+		if dto.Enabled != nil {
+			candidate.Enabled = *dto.Enabled
+		}
+		if dto.BusConfig != nil {
+			candidate.BusConfig = *dto.BusConfig
+		}
+		/* Validate the requested final type. Re-enabling a currently disabled
+		 * transport channel must not fail because its persisted state is false. */
+		if err := validateTransportChannelType(&candidate); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
 		updates := map[string]interface{}{}
 		if dto.HardwareType != nil {
 			updates["hardware_type"] = *dto.HardwareType
@@ -479,7 +643,16 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "no fields to update"})
 			return
 		}
-		if err := db.Model(&ch).Updates(updates).Error; err != nil {
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			var node models.Node
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
+				return err
+			}
+			return tx.Model(&ch).Updates(updates).Error
+		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
@@ -540,6 +713,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
 			return
 		}
+		if err := validateTransportChannel(&ch); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
 		// Send WriteCommand via pending write (with 10s timeout)
 		deviceID := ch.NodeID
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -580,6 +757,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		var ch models.Channel
 		if err := db.First(&ch, channelID).Error; err != nil {
 			Error(c, http.StatusNotFound, "channel not found")
+			return
+		}
+		if err := validateTransportChannel(&ch); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 

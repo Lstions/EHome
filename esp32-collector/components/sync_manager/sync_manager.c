@@ -196,9 +196,15 @@ sync_state_enum_t sync_manager_get_state_enum(void)
     return s_sync_enum;
 }
 
-void sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id)
+esp_err_t sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id)
 {
-    if (!s_initialized) return;
+    if (!s_initialized || !manifest_id || !manifest_id[0]) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t persist_err = config_mgr_persist_sync_metadata(server_epoch, manifest_id);
+    if (persist_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist sync metadata: %s", esp_err_to_name(persist_err));
+        return persist_err;
+    }
 
     ESP_LOGI(TAG, "Config applied: server_epoch=%llu, manifest_id=%s",
              (unsigned long long)server_epoch, manifest_id ? manifest_id : "(null)");
@@ -206,14 +212,14 @@ void sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_
     /* Update local epoch */
     if (server_epoch > 0) {
         s_state.epoch = server_epoch;
-        config_mgr_set_epoch(server_epoch);
+
     }
 
     /* Update manifest_id */
     if (manifest_id && manifest_id[0] != '\0') {
         strncpy(s_state.manifest_id, manifest_id, sizeof(s_state.manifest_id) - 1);
         s_state.manifest_id[sizeof(s_state.manifest_id) - 1] = '\0';
-        config_mgr_set_manifest_id(manifest_id);
+
     }
 
     /* Update NVS has config flag */
@@ -227,6 +233,7 @@ void sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_
              (unsigned long long)s_state.epoch,
              s_state.manifest_id[0] ? s_state.manifest_id : "(none)",
              s_state.has_active_config);
+	return ESP_OK;
 }
 
 void sync_manager_periodic_task(void *pvParameters)

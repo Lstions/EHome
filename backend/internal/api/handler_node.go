@@ -31,54 +31,10 @@ func findNodeByID(db *gorm.DB, id string) (*models.Node, error) {
 	return &node, nil
 }
 
-// getDefaultESP32C6Buses returns the default hardware resources for ESP32-C6.
-// Used as fallback when DB capabilities field is empty.
-func getDefaultESP32C6Buses() map[string]interface{} {
-	return map[string]interface{}{
-		"uart": []interface{}{
-			map[string]interface{}{"id": "UART0", "port": 0, "default_tx": 16, "default_rx": 17, "max_baud": 5000000,
-				"pins": []interface{}{
-					map[string]interface{}{"pin": 16, "role": 1},
-					map[string]interface{}{"pin": 17, "role": 2},
-				}},
-			map[string]interface{}{"id": "UART1", "port": 1, "default_tx": 21, "default_rx": 20, "max_baud": 5000000,
-				"pins": []interface{}{
-					map[string]interface{}{"pin": 21, "role": 1},
-					map[string]interface{}{"pin": 20, "role": 2},
-				}},
-		},
-		"i2c": []interface{}{
-			map[string]interface{}{"id": "I2C0", "port": 0, "default_sda": 21, "default_scl": 22, "max_freq_hz": 1000000,
-				"pins": []interface{}{
-					map[string]interface{}{"pin": 21, "role": 3},
-					map[string]interface{}{"pin": 22, "role": 4},
-				}},
-		},
-		"spi": []interface{}{
-			map[string]interface{}{"id": "SPI2", "port": 2, "default_mosi": 23, "default_miso": 19, "default_sclk": 18, "default_cs": 5, "max_freq_hz": 40000000,
-				"pins": []interface{}{
-					map[string]interface{}{"pin": 23, "role": 5},
-					map[string]interface{}{"pin": 19, "role": 6},
-					map[string]interface{}{"pin": 18, "role": 7},
-					map[string]interface{}{"pin": 5, "role": 8},
-				}},
-		},
-		"gpio": []interface{}{
-			map[string]interface{}{"id": "GPIO0", "pin": 0, "pins": []interface{}{map[string]interface{}{"pin": 0, "role": 9}}},
-			map[string]interface{}{"id": "GPIO1", "pin": 1, "pins": []interface{}{map[string]interface{}{"pin": 1, "role": 9}}},
-			map[string]interface{}{"id": "GPIO2", "pin": 2, "pins": []interface{}{map[string]interface{}{"pin": 2, "role": 9}}},
-			map[string]interface{}{"id": "GPIO3", "pin": 3, "pins": []interface{}{map[string]interface{}{"pin": 3, "role": 9}}},
-			map[string]interface{}{"id": "GPIO4", "pin": 4, "pins": []interface{}{map[string]interface{}{"pin": 4, "role": 9}}},
-			map[string]interface{}{"id": "GPIO5", "pin": 5, "pins": []interface{}{map[string]interface{}{"pin": 5, "role": 9}}},
-			map[string]interface{}{"id": "GPIO6", "pin": 6, "pins": []interface{}{map[string]interface{}{"pin": 6, "role": 9}}},
-			map[string]interface{}{"id": "GPIO7", "pin": 7, "pins": []interface{}{map[string]interface{}{"pin": 7, "role": 9}}},
-		},
-		"adc": []interface{}{
-			map[string]interface{}{"id": "ADC1_CH0", "unit": 1, "channel": 0, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 0, "role": 10}}},
-			map[string]interface{}{"id": "ADC1_CH1", "unit": 1, "channel": 1, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 1, "role": 10}}},
-			map[string]interface{}{"id": "ADC1_CH2", "unit": 1, "channel": 2, "max_bits": 12, "pins": []interface{}{map[string]interface{}{"pin": 2, "role": 10}}},
-		},
-	}
+// emptyHardwareResources is returned until a node has reported ResourceReport.
+// Hardware capabilities are authoritative node data and must never be invented server-side.
+func emptyHardwareResources() map[string]interface{} {
+	return map[string]interface{}{}
 }
 
 // registerNodeRoutes sets up node CRUD routes
@@ -167,11 +123,16 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 
 	// Create node (v2.2 compat path)
 	v1.POST("/nodes", func(c *gin.Context) {
-		var node models.Node
-		if err := c.ShouldBindJSON(&node); err != nil {
+		var dto struct {
+			NodeID string `json:"node_id" binding:"required"`
+			Name   string `json:"name"`
+			Config string `json:"config"`
+		}
+		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		node := models.Node{NodeID: dto.NodeID, Name: dto.Name, Config: dto.Config}
 		if err := db.Create(&node).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -191,20 +152,8 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		// M1 fix: bind to a separate DTO, then copy allowed fields only
 		var dto struct {
-			Name            *string `json:"name"`
-			Model           *string `json:"model"`
-			FirmwareVersion *string `json:"firmware_version"`
-			ProtocolVersion *string `json:"protocol_version"`
-			Platform        *string `json:"platform"`
-			Status          *string `json:"status"`
-			ConfigVersion   *string `json:"config_version"`
-			ConfigStatus    *string `json:"config_status"`
-			WiFiSSID        *string `json:"wifi_ssid"`
-			WiFiRSSI        *int    `json:"wifi_rssi"`
-			FreeHeapBytes   *int    `json:"free_heap_bytes"`
-			Capabilities    *string `json:"capabilities"`
-			HardwareInfo    *string `json:"hardware_info"`
-			Config          *string `json:"config"`
+			Name   *string `json:"name"`
+			Config *string `json:"config"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -214,42 +163,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		if dto.Name != nil {
 			updates["name"] = *dto.Name
 		}
-		if dto.Model != nil {
-			updates["model"] = *dto.Model
-		}
-		if dto.FirmwareVersion != nil {
-			updates["firmware_version"] = *dto.FirmwareVersion
-		}
-		if dto.ProtocolVersion != nil {
-			updates["protocol_version"] = *dto.ProtocolVersion
-		}
-		if dto.Platform != nil {
-			updates["platform"] = *dto.Platform
-		}
-		if dto.Status != nil {
-			updates["status"] = *dto.Status
-		}
-		if dto.ConfigVersion != nil {
-			updates["config_version"] = *dto.ConfigVersion
-		}
-		if dto.ConfigStatus != nil {
-			updates["config_status"] = *dto.ConfigStatus
-		}
-		if dto.WiFiSSID != nil {
-			updates["wifi_ssid"] = *dto.WiFiSSID
-		}
-		if dto.WiFiRSSI != nil {
-			updates["wifi_rssi"] = *dto.WiFiRSSI
-		}
-		if dto.FreeHeapBytes != nil {
-			updates["free_heap_bytes"] = *dto.FreeHeapBytes
-		}
-		if dto.Capabilities != nil {
-			updates["capabilities"] = *dto.Capabilities
-		}
-		if dto.HardwareInfo != nil {
-			updates["hardware_info"] = *dto.HardwareInfo
-		}
+
 		if dto.Config != nil {
 			updates["config"] = *dto.Config
 		}
@@ -378,13 +292,15 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
-		buses := getDefaultESP32C6Buses()
+		buses := emptyHardwareResources()
 		var capList []string
 		if node.Capabilities != "" && node.Capabilities != "{}" {
 			var parsed map[string]interface{}
 			if json.Unmarshal([]byte(node.Capabilities), &parsed) == nil {
-				if b, ok := parsed["buses"]; ok {
-					buses = b.(map[string]interface{})
+				if raw, ok := parsed["buses"]; ok {
+					if reported, ok := raw.(map[string]interface{}); ok {
+						buses = reported
+					}
 				}
 			}
 		}
@@ -442,11 +358,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid request body"})
 			return
 		}
-		// Store buses from request into hardware_info
-		if buses, ok := req.Hardware["buses"]; ok {
-			hwJSON, _ := json.Marshal(map[string]interface{}{"buses": buses})
-			node.HardwareInfo = string(hwJSON)
-			db.Model(node).Update("hardware_info", node.HardwareInfo)
+		if _, ok := req.Hardware["buses"]; ok {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "hardware.buses is read-only reported state"})
+			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
 			"node_id": node.NodeID,
@@ -840,8 +754,65 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
+		if req.Channels != nil {
+			for _, ch := range *req.Channels {
+				if isPeripheralChannelType(ch.BusType) {
+					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "GPIO and PWM are peripheral resources, not channels"})
+					return
+				}
+			}
+		}
+		if req.EdgeDevices != nil {
+			for _, edge := range *req.EdgeDevices {
+				if edge.ChannelID == nil {
+					continue
+				}
+				var channel models.Channel
+				if err := db.Where("id = ? AND node_id = ?", *edge.ChannelID, node.NodeID).First(&channel).Error; err != nil || validateTransportChannel(&channel) != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "edge device must bind to a transport channel"})
+					return
+				}
+			}
+		}
 
 		var updatedFields []string
+		if req.Channels != nil {
+			if err := db.Transaction(func(tx *gorm.DB) error {
+				var lockedNode models.Node
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", node.NodeID).First(&lockedNode).Error; err != nil {
+					return err
+				}
+				for _, ch := range *req.Channels {
+					if ch.ID == 0 {
+						continue
+					}
+					var existing models.Channel
+					if err := tx.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&existing).Error; err != nil {
+						return err
+					}
+					candidate := existing
+					if ch.BusType != "" {
+						candidate.BusType = ch.BusType
+					}
+					if ch.BusConfig != "" {
+						candidate.BusConfig = ch.BusConfig
+					}
+					if ch.Enabled != nil {
+						candidate.Enabled = *ch.Enabled
+					}
+					if err := validateTransportChannelType(&candidate); err != nil {
+						return err
+					}
+					if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+				return
+			}
+		}
 
 		// Update channels if provided
 		if req.Channels != nil {
@@ -853,6 +824,17 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				var existing models.Channel
 				if err := db.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&existing).Error; err != nil {
 					continue // skip channels not belonging to this node
+				}
+				candidate := existing
+				if ch.BusType != "" {
+					candidate.BusType = ch.BusType
+				}
+				if ch.Enabled != nil {
+					candidate.Enabled = *ch.Enabled
+				}
+				if err := validateTransportChannelType(&candidate); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+					return
 				}
 
 				updates := map[string]interface{}{}
@@ -892,9 +874,36 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				}
 
 				if len(updates) > 0 {
-					result := db.Model(&models.Channel{}).Where("id = ?", ch.ID).Updates(updates)
-					if result.Error != nil {
-						logger.Warnf("Failed to update channel id=%d: %v", ch.ID, result.Error)
+					err := db.Transaction(func(tx *gorm.DB) error {
+						var lockedNode models.Node
+						if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", node.NodeID).First(&lockedNode).Error; err != nil {
+							return err
+						}
+						var current models.Channel
+						if err := tx.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&current).Error; err != nil {
+							return err
+						}
+						candidate := current
+						if ch.BusType != "" {
+							candidate.BusType = ch.BusType
+						}
+						if ch.BusConfig != "" {
+							candidate.BusConfig = ch.BusConfig
+						}
+						if ch.Enabled != nil {
+							candidate.Enabled = *ch.Enabled
+						}
+						if err := validateTransportChannelType(&candidate); err != nil {
+							return err
+						}
+						if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
+							return err
+						}
+						return tx.Model(&models.Channel{}).Where("id = ?", ch.ID).Updates(updates).Error
+					})
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+						return
 					}
 				}
 			}

@@ -69,7 +69,7 @@ void test_hello_encode_decode(void)
     ASSERT_EQ(field.value.varint, 4, "field 4 value");
     
     err = frame_decoder_next(&dec, &field);
-    ASSERT_EQ(err, FRAME_ERR_UNDERFLOW, "end of frame");
+    ASSERT_EQ(err, FRAME_DONE, "end of frame");
 }
 
 void test_data_report_encode_decode(void)

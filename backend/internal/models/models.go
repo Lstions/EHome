@@ -118,10 +118,10 @@ func (EdgeDevice) TableName() string { return "edge_devices" }
 type Channel struct {
 	ID           uint           `gorm:"primaryKey" json:"id"`
 	NodeID       string         `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
-	HardwareType string         `gorm:"size:20" json:"hardware_type"`          // SPI/I2C/UART/GPIO/ADC
+	HardwareType string         `gorm:"size:20" json:"hardware_type"`          // SPI/I2C/UART/ADC; GPIO/PWM are standalone peripherals
 	HardwareID   string         `gorm:"size:16;default:''" json:"hardware_id"` // 总线上的硬件地址 (e.g. I2C 0x76)
 	IntervalMs   int            `gorm:"default:5000" json:"interval_ms"`
-	BusType      string         `gorm:"size:20;default:I2C" json:"bus_type"` // I2C/SPI/UART/GPIO/ADC
+	BusType      string         `gorm:"size:20;default:I2C" json:"bus_type"` // I2C/SPI/UART/ADC; legacy GPIO/PWM rejected
 	BusConfig    string         `gorm:"type:text" json:"bus_config"`         // JSON bus配置 (引脚/速率等)
 	TemplateIDs  string         `gorm:"type:text" json:"template_ids"`       // 逗号分隔的template ID列表
 	Config       string         `gorm:"type:text" json:"config"`             // JSON bus_config (兼容旧字段)
@@ -396,15 +396,18 @@ func (GPIOConfig) TableName() string { return "gpio_configs" }
 
 // PWMConfig PWM 通道配置 (v3.0: 全新, 从通道系统中剥离)
 //
-// 一个 PWMConfig = 一个 PWM 输出引脚的配置 (frequency + duty + resolution + auto_start)
-// (node_id, pin) 复合唯一索引确保同一节点同一引脚只能有一个配置
+// 一个 PWMConfig = 一个 PWM 硬件通道及其当前输出引脚路由的配置。
+// hardware_id/channel 标识 ESP32 ResourceReport 上报的 PWM 资源；pin 仅是输出路由。
+// (node_id, hardware_id) 和 (node_id, pin) 分别保持唯一。
 // AutoStart 替代 Running — 运行时状态不持久化
 type PWMConfig struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
-	NodeID     string    `gorm:"column:node_id;type:varchar(32);index:idx_pwm_node_pin,unique;not null" json:"node_id"`
+	NodeID     string    `gorm:"column:node_id;type:varchar(32);index:idx_pwm_node_hw,unique;index:idx_pwm_node_pin,unique;not null" json:"node_id"`
+	HardwareID string    `gorm:"column:hardware_id;size:16;index:idx_pwm_node_hw,unique;not null" json:"hardware_id"`
+	Channel    uint8     `gorm:"not null" json:"channel"`
 	Pin        int       `gorm:"index:idx_pwm_node_pin,unique;not null" json:"pin"`
 	Frequency  uint32    `gorm:"not null" json:"frequency"`
-	Duty       uint16    `gorm:"default:0" json:"duty"`       // 0-10000 = 0.00%-100.00%
+	Duty       uint16    `gorm:"default:0" json:"duty"`        // 0-10000 = 0.00%-100.00%
 	Resolution uint8     `gorm:"default:14" json:"resolution"` // 分辨率位数 (4-20, 默认 14)
 	AutoStart  bool      `gorm:"default:false" json:"auto_start"`
 	Label      string    `gorm:"size:64" json:"label"`

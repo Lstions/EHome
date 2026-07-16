@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include "frame_codec.h"
 #include "config_mgr.h"
+#include "esp_err.h"
 
 /* Forward declaration */
 typedef struct transport transport_t;
@@ -36,14 +37,14 @@ void msg_handler_process(const uint8_t *data, size_t len);
 /* === Send outgoing messages === */
 void msg_handler_send_hello(const char *node_id, const char *fw_version,
                             const char *model, uint8_t channel_count);
-void msg_handler_send_status(uint32_t uptime_sec, const char *status,
+esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                              uint8_t channel_count, const scheduler_state_t *sched);
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t sequence, const uint8_t *raw_data, size_t raw_len,
                                   uint32_t error_code, uint32_t request_id,
                                   uint32_t edge_device_id, uint32_t command_template_id,
                                   uint8_t command_index);
-void msg_handler_send_config_result(const char *manifest_id, bool success);
+esp_err_t msg_handler_send_config_result(const char *manifest_id, const char *sync_id, bool success);
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                 uint32_t error_code, const char *error_msg);
 void msg_handler_send_pong(uint64_t timestamp_us);
@@ -63,9 +64,10 @@ struct dma_pool_t;
 void msg_handler_set_dma_pool(struct dma_pool_t *pool);
 
 /* === v3.0: Peripheral control (GPIO/PWM) === */
-void handler_periph_init(void);
+esp_err_t handler_periph_init(void);
 void handler_periph_process(frame_decoder_t *dec);
-void handler_periph_apply_configs(const config_manifest_t *cfg);
+esp_err_t handler_periph_apply_configs(const config_manifest_t *cfg);
+esp_err_t handler_periph_apply_configs_locked(const config_manifest_t *cfg);
 
 /* === Weak callbacks - implemented in main.c, declared in handler modules === */
 void on_modbus_scan_req_received(const char *request_id,

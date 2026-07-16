@@ -12,34 +12,17 @@
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "hw_tables.h"
+#include "periph_owner.h"
 #include <string.h>
 
 #define TAG "GPIO_CTRL"
 
-/* === Reserved pins — must not be used for GPIO control === */
-#ifdef CONFIG_IDF_TARGET_ESP32C6
-  #define GPIO_RESERVED_COUNT  3
-  static const int s_reserved_pins[GPIO_RESERVED_COUNT] = {
-      HW_RESERVED_USB_DN,  /* GPIO12 */
-      HW_RESERVED_USB_DP,  /* GPIO13 */
-      HW_RESERVED_LED,     /* GPIO8  */
-  };
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
-  #define GPIO_RESERVED_COUNT  3
-  static const int s_reserved_pins[GPIO_RESERVED_COUNT] = {
-      HW_RESERVED_USB_DN,  /* GPIO19 */
-      HW_RESERVED_USB_DP,  /* GPIO20 */
-      HW_RESERVED_LED,     /* GPIO48 */
-  };
-#else
-  #define GPIO_RESERVED_COUNT  0
-  static const int s_reserved_pins[1] = { -1 };
-#endif
 
 /* === Pin state tracking === */
 typedef struct {
     bool     configured;
     uint8_t  direction;
+    uint8_t  initial_level;
 } gpio_pin_state_t;
 
 static gpio_pin_state_t s_pin_state[GPIO_CTRL_MAX_PINS];
@@ -49,17 +32,12 @@ static volatile bool s_reconfiguring = false;
 
 /* === Internal helpers === */
 
-static bool is_reserved_pin(int pin)
-{
-    for (int i = 0; i < GPIO_RESERVED_COUNT; i++) {
-        if (s_reserved_pins[i] == pin) return true;
-    }
-    return false;
-}
-
 static bool is_valid_pin(int pin)
 {
-    return pin >= 0 && pin < GPIO_CTRL_MAX_PINS && !is_reserved_pin(pin);
+    for (int i = 0; i < HW_GPIO_COUNT; i++) {
+        if (hw_gpios[i].pin == pin) return true;
+    }
+    return false;
 }
 
 /**
@@ -67,42 +45,10 @@ static bool is_valid_pin(int pin)
  * This is a conservative check — only checks reserved hardware pins,
  * not dynamically assigned bus pins (those are checked by bus_manager).
  */
-static bool is_pin_conflict(int pin)
-{
-    /* Check against reserved pins */
-    if (is_reserved_pin(pin)) return true;
-
-    /* Check UART default pins */
-    for (int i = 0; i < HW_UART_COUNT; i++) {
-        if (hw_uarts[i].default_tx_pin == pin ||
-            hw_uarts[i].default_rx_pin == pin) {
-            return true;
-        }
-    }
-
-    /* Check I2C default pins */
-    for (int i = 0; i < HW_I2C_COUNT; i++) {
-        if (hw_i2cs[i].default_sda == pin ||
-            hw_i2cs[i].default_scl == pin) {
-            return true;
-        }
-    }
-
-    /* Check SPI default pins */
-    for (int i = 0; i < HW_SPI_COUNT; i++) {
-        if (hw_spis[i].default_mosi == pin ||
-            hw_spis[i].default_miso == pin ||
-            hw_spis[i].default_sclk == pin ||
-            hw_spis[i].default_cs == pin) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static esp_err_t apply_config(int pin, int direction, int initial_level)
 {
+    esp_err_t claim_err = periph_owner_claim(pin, PERIPH_PIN_OWNER_GPIO, pin);
+    if (claim_err != ESP_OK) return claim_err;
     gpio_config_t io_conf = {0};
 
     switch (direction) {
@@ -127,6 +73,7 @@ static esp_err_t apply_config(int pin, int direction, int initial_level)
         io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
         break;
     default:
+        periph_owner_release(pin, PERIPH_PIN_OWNER_GPIO, pin);
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -135,6 +82,7 @@ static esp_err_t apply_config(int pin, int direction, int initial_level)
 
     esp_err_t ret = gpio_config(&io_conf);
     if (ret != ESP_OK) {
+        periph_owner_release(pin, PERIPH_PIN_OWNER_GPIO, pin);
         ESP_LOGE(TAG, "gpio_config(pin=%d) failed: %s", pin, esp_err_to_name(ret));
         return ret;
     }
@@ -143,22 +91,63 @@ static esp_err_t apply_config(int pin, int direction, int initial_level)
     if (direction == GPIO_DIR_OUTPUT) {
         ret = gpio_set_level(pin, initial_level ? 1 : 0);
         if (ret != ESP_OK) {
+			esp_err_t reset_err = gpio_reset_pin(pin);
+			if (reset_err != ESP_OK) {
+				ESP_LOGE(TAG, "gpio_reset_pin(pin=%d) cleanup failed: %s", pin,
+				         esp_err_to_name(reset_err));
+				/* Hardware may still be live: retain ownership fail-closed. */
+				return reset_err;
+			}
+			periph_owner_release(pin, PERIPH_PIN_OWNER_GPIO, pin);
             ESP_LOGE(TAG, "gpio_set_level(pin=%d, init) failed: %s", pin, esp_err_to_name(ret));
-            return ret;
+			return ret;
         }
         s_output_level[pin] = initial_level ? 1 : 0;
     }
 
     s_pin_state[pin].configured = true;
     s_pin_state[pin].direction = (uint8_t)direction;
+    s_pin_state[pin].initial_level = initial_level ? 1 : 0;
 
     return ESP_OK;
 }
 
 /* === Public API === */
 
+esp_err_t gpio_ctrl_preflight(const gpio_config_entry_t *configs, int count)
+{
+    if (count < 0 || count > GPIO_CTRL_MAX_PINS || (count > 0 && !configs)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!is_valid_pin(configs[i].pin) ||
+            configs[i].direction > GPIO_DIR_INPUT_PULLDOWN ||
+            configs[i].initial_level > 1) return ESP_ERR_INVALID_ARG;
+        for (int j = i + 1; j < count; j++) {
+            if (configs[i].pin == configs[j].pin) return ESP_ERR_PIN_CONFLICT;
+        }
+    }
+    return ESP_OK;
+}
+
+int gpio_ctrl_snapshot(gpio_config_entry_t *configs, int capacity)
+{
+    if (!configs || capacity < 0) return ESP_ERR_INVALID_ARG;
+    int count = 0;
+    for (int pin = 0; pin < GPIO_CTRL_MAX_PINS && count < capacity; pin++) {
+        if (!s_pin_state[pin].configured) continue;
+        configs[count++] = (gpio_config_entry_t){
+            .pin = pin, .direction = s_pin_state[pin].direction,
+            .initial_level = s_pin_state[pin].initial_level,
+        };
+    }
+    return count;
+}
+
 esp_err_t gpio_ctrl_init(const gpio_config_entry_t *configs, int count)
 {
+    esp_err_t preflight = gpio_ctrl_preflight(configs, count);
+    if (preflight != ESP_OK) return preflight;
     if (s_config_mutex == NULL) {
         s_config_mutex = xSemaphoreCreateMutex();
         if (s_config_mutex == NULL) {
@@ -173,7 +162,13 @@ esp_err_t gpio_ctrl_init(const gpio_config_entry_t *configs, int count)
     /* Reset all existing configs */
     for (int i = 0; i < GPIO_CTRL_MAX_PINS; i++) {
         if (s_pin_state[i].configured) {
-            gpio_reset_pin(i);
+			esp_err_t reset_err = gpio_reset_pin(i);
+			if (reset_err != ESP_OK) {
+				ESP_LOGE(TAG, "reset pin %d failed: %s", i, esp_err_to_name(reset_err));
+				s_reconfiguring = false;
+				return reset_err;
+			}
+            periph_owner_release(i, PERIPH_PIN_OWNER_GPIO, i);
             s_pin_state[i].configured = false;
             s_pin_state[i].direction = 0;
         }
@@ -184,10 +179,6 @@ esp_err_t gpio_ctrl_init(const gpio_config_entry_t *configs, int count)
     for (int i = 0; i < count && configs != NULL; i++) {
         if (!is_valid_pin(configs[i].pin)) {
             ESP_LOGW(TAG, "init: skipping invalid pin %d", configs[i].pin);
-            continue;
-        }
-        if (is_pin_conflict(configs[i].pin)) {
-            ESP_LOGW(TAG, "init: skipping conflicting pin %d", configs[i].pin);
             continue;
         }
         esp_err_t ret = apply_config(configs[i].pin, configs[i].direction,
@@ -240,20 +231,18 @@ esp_err_t gpio_ctrl_config(int pin, int direction, int initial_level)
     if (direction < GPIO_DIR_INPUT || direction > GPIO_DIR_INPUT_PULLDOWN) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (is_pin_conflict(pin)) {
-        ESP_LOGW(TAG, "config: pin %d conflicts with bus peripheral", pin);
-        return ESP_ERR_INVALID_STATE;
-    }
-
     xSemaphoreTake(s_config_mutex, portMAX_DELAY);
 
-    /* If already configured, deconfig first */
-    if (s_pin_state[pin].configured) {
-        gpio_reset_pin(pin);
-        s_pin_state[pin].configured = false;
-    }
-
+    gpio_pin_state_t previous = s_pin_state[pin];
     esp_err_t ret = apply_config(pin, direction, initial_level);
+    if (ret != ESP_OK && previous.configured) {
+		esp_err_t restore_err = apply_config(pin, previous.direction, previous.initial_level);
+		if (restore_err != ESP_OK) {
+			ESP_LOGE(TAG, "config rollback failed for pin %d: %s", pin,
+			         esp_err_to_name(restore_err));
+			ret = restore_err;
+		}
+    }
 
     xSemaphoreGive(s_config_mutex);
 
@@ -276,7 +265,12 @@ esp_err_t gpio_ctrl_deconfig(int pin)
 
     /* Idempotent: if not configured, just return OK */
     if (s_pin_state[pin].configured) {
-        gpio_reset_pin(pin);
+		esp_err_t reset_err = gpio_reset_pin(pin);
+		if (reset_err != ESP_OK) {
+			xSemaphoreGive(s_config_mutex);
+			return reset_err;
+		}
+        periph_owner_release(pin, PERIPH_PIN_OWNER_GPIO, pin);
         s_pin_state[pin].configured = false;
         s_pin_state[pin].direction = 0;
         ESP_LOGI(TAG, "deconfig: pin=%d", pin);

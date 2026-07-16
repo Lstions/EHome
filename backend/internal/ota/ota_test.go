@@ -169,7 +169,7 @@ func TestHandleOtaProgressStateMapping(t *testing.T) {
 		otaID = task.OtaID
 
 		payload := encodeProgress(otaID, c.wireStatus, 50)
-		mgr.HandleOtaProgress("dev1", payload)
+		mgr.HandleOtaProgress("1", payload)
 
 		var got models.OTATask
 		db.Where("ota_id = ?", otaID).First(&got)

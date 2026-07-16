@@ -81,6 +81,11 @@ typedef struct dma_pool_t {
     SemaphoreHandle_t mutex;
 } dma_pool_t;
 
+typedef struct {
+    dma_channel_info_t channels[DMA_POOL_MAX_CHANNELS];
+    uint8_t count;
+} dma_pool_state_t;
+
 /* === Public API === */
 
 /**
@@ -99,14 +104,17 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
                              const char *hw_id, uint32_t *out_dma_id);
 
 /** @brief Release a DMA channel by dma_id. */
-void dma_pool_release(dma_pool_t *pool, uint32_t dma_id);
+esp_err_t dma_pool_release(dma_pool_t *pool, uint32_t dma_id);
 
 /** @brief Release all channels bound to a specific hardware resource. */
-void dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id);
+esp_err_t dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id);
 
 /** @brief Apply user DMA config (enable/disable/bind from DmaChannelConfig). */
 esp_err_t dma_pool_apply_config(dma_pool_t *pool, uint32_t dma_id,
                                  bool enabled, const char *bind_to);
+esp_err_t dma_pool_snapshot_state(dma_pool_t *pool, dma_pool_state_t *out);
+esp_err_t dma_pool_restore_state(dma_pool_t *pool, const dma_pool_state_t *state);
+esp_err_t dma_pool_reset_runtime(dma_pool_t *pool);
 
 /**
  * @brief Serialize pool state as raw field-8 entries for ResourceReport.

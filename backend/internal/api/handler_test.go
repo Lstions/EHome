@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -439,7 +440,7 @@ func TestNodeCRUD_Create(t *testing.T) {
 		"node_id": "NODE003",
 		"name":    "New Node",
 		"model":   "ESP32-C6",
-		"status":  "offline",
+		"status":  "online",
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/nodes", bytes.NewReader(body))
@@ -455,6 +456,9 @@ func TestNodeCRUD_Create(t *testing.T) {
 	db.First(&node, "node_id = ?", "NODE003")
 	if node.Name != "New Node" {
 		t.Errorf("expected name 'New Node', got %s", node.Name)
+	}
+	if node.Model != "" || node.Status != "offline" {
+		t.Fatalf("create injected device-owned fields: model=%q status=%q", node.Model, node.Status)
 	}
 }
 
@@ -488,8 +492,17 @@ func TestNodeCRUD_Update(t *testing.T) {
 	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"name":   "New Name",
-		"status": "online",
+		"name":             "New Name",
+		"status":           "online",
+		"platform":         "forged",
+		"model":            "forged",
+		"firmware_version": "forged",
+		"protocol_version": "forged",
+		"config_version":   "forged",
+		"config_status":    "forged",
+		"wifi_ssid":        "forged",
+		"wifi_rssi":        -1,
+		"free_heap_bytes":  -1,
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", "/api/v1/nodes/1", bytes.NewReader(body))
@@ -499,6 +512,16 @@ func TestNodeCRUD_Update(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.Node
+	if err := db.First(&updated, "node_id = ?", "NODE001").Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "New Name" || updated.Status != "offline" || updated.Platform != "" ||
+		updated.Model != "" || updated.FirmwareVersion != "" || updated.ProtocolVersion != "2.2" ||
+		updated.ConfigVersion != "" || updated.ConfigStatus != "pending" || updated.WiFiSSID != "" ||
+		updated.WiFiRSSI != 0 || updated.FreeHeapBytes != 0 {
+		t.Fatalf("generic update injected device-owned fields: %+v", updated)
 	}
 }
 
@@ -634,9 +657,12 @@ func TestNode_Capabilities(t *testing.T) {
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	data := resp["data"].(map[string]interface{})
-	caps := data["capabilities"].([]interface{})
-	if len(caps) == 0 {
-		t.Error("expected some capabilities for default ESP32-C6")
+	if caps, ok := data["capabilities"].([]interface{}); ok && len(caps) != 0 {
+		t.Fatalf("expected no invented capabilities before ResourceReport, got %#v", caps)
+	}
+	buses := data["buses"].(map[string]interface{})
+	if len(buses) != 0 {
+		t.Fatalf("expected empty hardware resources before ResourceReport, got %#v", buses)
 	}
 }
 
@@ -660,7 +686,7 @@ func TestNode_HardwareConfig_Get(t *testing.T) {
 	}
 }
 
-func TestNode_HardwareConfig_Put(t *testing.T) {
+func TestNode_HardwareConfig_PutRejectsReportedBuses(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupRouter()
 
@@ -683,8 +709,143 @@ func TestNode_HardwareConfig_Put(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("hardware.buses is reported state and must be rejected: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var node models.Node
+	if err := db.First(&node, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if node.HardwareInfo != "{}" && node.HardwareInfo != "" {
+		t.Fatalf("hardware config API overwrote reported hardware_info: %s", node.HardwareInfo)
+	}
+}
+
+func TestNode_UpdateCannotInjectReportedResources(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	node := models.Node{
+		NodeID: "NODE001", Name: "before", Status: "online",
+		Capabilities: `{"buses":{"gpio":[{"pin":6}]}}`,
+		HardwareInfo: `{"platform":"ESP32C6","buses":{"gpio":[{"pin":6}]}}`,
+	}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+
+	body := bytes.NewBufferString(`{"name":"after","capabilities":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}","hardware_info":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}"}`)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/v1/nodes/NODE001", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var got models.Node
+	if err := db.First(&got, node.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "after" {
+		t.Fatalf("allowed field was not updated: %+v", got)
+	}
+	if got.Capabilities != node.Capabilities || got.HardwareInfo != node.HardwareInfo {
+		t.Fatalf("generic update injected reported resources: capabilities=%s hardware_info=%s", got.Capabilities, got.HardwareInfo)
+	}
+}
+
+func TestNode_CreateCannotInjectReportedResourcesOrModelFields(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+
+	body := bytes.NewBufferString(`{"id":999,"node_id":"NODE001","name":"created","platform":"forged-platform","capabilities":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}","hardware_info":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}"}`)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var got models.Node
+	if err := db.Where("node_id = ?", "NODE001").First(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == 999 {
+		t.Fatal("create accepted injected model primary key")
+	}
+	if got.Capabilities != "{}" || got.HardwareInfo != "{}" || got.Platform != "" {
+		t.Fatalf("create injected reported resources: capabilities=%s hardware_info=%s platform=%s", got.Capabilities, got.HardwareInfo, got.Platform)
+	}
+}
+
+func TestNodeConfigUpdateRejectsPeripheralChannelTypes(t *testing.T) {
+	for _, busType := range []string{"GPIO", "PWM"} {
+		t.Run(busType, func(t *testing.T) {
+			db := setupTestDB(t)
+			r := setupRouter()
+			node := models.Node{NodeID: "NODE001", Name: "node", Status: "online"}
+			db.Create(&node)
+			ch := models.Channel{NodeID: node.NodeID, HardwareType: "I2C", BusType: "I2C", Enabled: true}
+			db.Create(&ch)
+			v1 := r.Group("/api/v1")
+			v1.Use(JWTAuth())
+			registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+			body, _ := json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{{"id": ch.ID, "bus_type": busType}}})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			db.First(&ch, ch.ID)
+			if ch.BusType != "I2C" {
+				t.Fatalf("rejected config update mutated bus_type to %q", ch.BusType)
+			}
+		})
+	}
+}
+
+func TestNodeConfigCannotEnableStoredLegacyPeripheralChannel(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	node := models.Node{NodeID: "NODE001", Status: "online"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	ch := models.Channel{NodeID: node.NodeID, HardwareType: "GPIO", BusType: "GPIO", Enabled: false}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&ch).UpdateColumn("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	ch.Enabled = false
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	body, _ := json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{{"id": ch.ID, "enabled": true}}})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := db.First(&ch, ch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ch.Enabled {
+		t.Fatal("legacy peripheral channel was re-enabled")
 	}
 }
 
@@ -996,15 +1157,12 @@ func TestEdgeDevice_Operations(t *testing.T) {
 
 // ==================== RequireRole Tests ====================
 
-// ==================== getDefaultESP32C6Buses Tests ====================
+// ==================== Empty hardware resource tests ====================
 
-func TestGetDefaultESP32C6Buses(t *testing.T) {
-	buses := getDefaultESP32C6Buses()
-	expectedBuses := []string{"uart", "i2c", "spi", "gpio", "adc"}
-	for _, name := range expectedBuses {
-		if _, ok := buses[name]; !ok {
-			t.Errorf("expected bus %q in default ESP32-C6 buses", name)
-		}
+func TestEmptyHardwareResources(t *testing.T) {
+	buses := emptyHardwareResources()
+	if len(buses) != 0 {
+		t.Fatalf("server must not invent node hardware resources: %#v", buses)
 	}
 }
 

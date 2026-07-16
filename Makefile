@@ -99,6 +99,9 @@ up: infra ## 启动基础设施 + 本地前后端
 		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
+		EHOME_ENV=development \
+		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
+		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
@@ -151,6 +154,9 @@ restart: ## 重启本地前后端
 		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
+		EHOME_ENV=development \
+		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
+		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
@@ -199,6 +205,9 @@ backend: ## 仅启动本地后端
 		MQTT_BROKER=tcp://localhost:$(EMQX_MQTT_PORT) \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
+		EHOME_ENV=development \
+		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
+		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &

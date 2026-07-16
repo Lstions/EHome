@@ -2,6 +2,7 @@ package nodemgr
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,11 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/redis"
-	"ehome/backend/internal/drivers"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 
@@ -22,29 +23,115 @@ import (
 )
 
 // SendPeriphCmd sends a peripheral control command (GPIO/PWM) to a device.
-// Uses QoS 2 (exactly-once), consistent with SendWriteCommand.
-// periphType: 1=GPIO, 2=PWM; action/value/config per the protocol spec.
-func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, pin uint8,
+// Uses QoS 1. ESP-MQTT subscribes at QoS 1 and does not complete the QoS 2
+// handshake for inbound commands, which leaves broker inflight deliveries stuck.
+// Request IDs provide command correlation; peripheral actions are idempotent.
+// resourceID is a GPIO pin for GPIO commands and a reported PWM channel for PWM commands.
+func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, resourceID uint8,
 	action uint8, value uint32, config []byte) error {
-	requestID := atomic.AddUint32(&nextPeriphRequestID, 1)
+	_, err := m.SendPeriphCmdWithID(deviceID, periphType, resourceID, action, value, config)
+	return err
+}
 
+func (m *Manager) SendPeriphCmdWithID(deviceID string, periphType uint8, resourceID uint8,
+	action uint8, value uint32, config []byte) (uint32, error) {
+	return m.sendPeriphCmdWithPreviousValue(deviceID, periphType, resourceID, action, value, config, 0)
+}
+
+func (m *Manager) SendPeriphCmdWithPreviousValue(deviceID string, periphType uint8, resourceID uint8,
+	action uint8, value uint32, config []byte, previousValue uint32) (uint32, error) {
+	return m.sendPeriphCmdWithPreviousValue(deviceID, periphType, resourceID, action, value, config, previousValue)
+}
+
+func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uint8, resourceID uint8,
+	action uint8, value uint32, config []byte, previousValue uint32) (uint32, error) {
+	if atomic.LoadUint32(&nextPeriphRequestID) == 0 {
+		var seed [4]byte
+		if _, err := rand.Read(seed[:]); err == nil {
+			atomic.CompareAndSwapUint32(&nextPeriphRequestID, 0, uint32(seed[0])<<24|uint32(seed[1])<<16|uint32(seed[2])<<8|uint32(seed[3]))
+		}
+	}
+	requestID := atomic.AddUint32(&nextPeriphRequestID, 1)
+	meta := periphRequestMeta{deviceID: deviceID, periphType: periphType, resourceID: resourceID, action: action, created: time.Now(), previousValue: previousValue, provisionalValue: value}
+	if periphType == 2 && m.db != nil {
+		var cfg models.PWMConfig
+		if err := m.db.Where("node_id = ? AND channel = ?", deviceID, resourceID).First(&cfg).Error; err == nil {
+			meta.hardwareID, meta.pin = cfg.HardwareID, cfg.Pin
+		}
+	}
+	m.periphMu.Lock()
+	if m.periphPending == nil {
+		m.periphPending = make(map[uint32]periphRequestMeta)
+	}
+	if m.periphLatest == nil {
+		m.periphLatest = make(map[string]uint32)
+	}
+	latestKey := fmt.Sprintf("%s:%d:%d:%d", deviceID, periphType, resourceID, action)
+	previousLatest, hadPreviousLatest := m.periphLatest[latestKey]
+	if previousMeta, ok := m.periphPending[previousLatest]; ok && periphType == 2 && (action == 0 || action == 1) && previousMeta.action == action {
+		meta.previousValue = previousMeta.previousValue
+	}
+	m.periphPending[requestID] = meta
+	m.periphLatest[latestKey] = requestID
+	for id, meta := range m.periphPending {
+		if time.Since(meta.created) > time.Minute {
+			delete(m.periphPending, id)
+			key := fmt.Sprintf("%s:%d:%d:%d", meta.deviceID, meta.periphType, meta.resourceID, meta.action)
+			if m.periphLatest[key] == id {
+				delete(m.periphLatest, key)
+			}
+		}
+	}
 	enc := frame.NewEncoder(frame.MsgPeriphCmd)
-	enc.EncodeVarint(1, uint64(requestID))   // field 1: request_id
-	enc.EncodeVarint(2, uint64(periphType))  // field 2: periph_type
-	enc.EncodeVarint(3, uint64(pin))         // field 3: pin
-	enc.EncodeVarint(4, uint64(action))      // field 4: action
+	enc.EncodeVarint(1, uint64(requestID))  // field 1: request_id
+	enc.EncodeVarint(2, uint64(periphType)) // field 2: periph_type
+	enc.EncodeVarint(3, uint64(resourceID)) // field 3: resource_id
+	enc.EncodeVarint(4, uint64(action))     // field 4: action
 	if value > 0 {
 		enc.EncodeVarint(5, uint64(value)) // field 5: value (optional)
 	}
 	if len(config) > 0 {
-		enc.EncodeBytes(6, config)         // field 6: config (optional)
+		enc.EncodeBytes(6, config) // field 6: config (optional)
 	}
 
-	logger.Infof("[%s] SendPeriphCmd: type=%d pin=%d action=%d value=%d config_len=%d reqID=%d",
-		deviceID, periphType, pin, action, value, len(config), requestID)
+	logger.Infof("[%s] SendPeriphCmd: type=%d resource_id=%d action=%d value=%d config_len=%d reqID=%d",
+		deviceID, periphType, resourceID, action, value, len(config), requestID)
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.PublishQoS2(topic, enc.Bytes())
+	topic := mqtt.ControlTopicForNode(deviceID)
+	if m.mqtt == nil {
+		delete(m.periphPending, requestID)
+		if m.periphLatest[latestKey] == requestID {
+			if hadPreviousLatest {
+				if _, stillPending := m.periphPending[previousLatest]; stillPending {
+					m.periphLatest[latestKey] = previousLatest
+				} else {
+					delete(m.periphLatest, latestKey)
+				}
+			} else {
+				delete(m.periphLatest, latestKey)
+			}
+		}
+		m.periphMu.Unlock()
+		return 0, fmt.Errorf("MQTT client not connected")
+	}
+	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		delete(m.periphPending, requestID)
+		if m.periphLatest[latestKey] == requestID {
+			if hadPreviousLatest {
+				if _, stillPending := m.periphPending[previousLatest]; stillPending {
+					m.periphLatest[latestKey] = previousLatest
+				} else {
+					delete(m.periphLatest, latestKey)
+				}
+			} else {
+				delete(m.periphLatest, latestKey)
+			}
+		}
+		m.periphMu.Unlock()
+		return 0, err
+	}
+	m.periphMu.Unlock()
+	return requestID, nil
 }
 
 // nextPeriphRequestID is the atomic counter for PeriphCmd request IDs.
@@ -99,7 +186,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 		enc.EncodeVarint(4, uint64(readSize))
 	}
 
-	topic := mqtt.TopicForNode(deviceID)
+	topic := mqtt.ControlTopicForNode(deviceID)
 	return m.mqtt.PublishQoS2(topic, enc.Bytes())
 }
 
@@ -246,13 +333,23 @@ func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 // SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.
 // The decision carries sync_id, epoch, manifest_id, and reason from SyncGate.
 // ProtocolVersion >= 2.3 uses field 9 (edge_device_groups); older versions use field 3+4.
-func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
+func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	deviceID := decision.DeviceID
+	fail := func(err error) error {
+		logger.Warnf("[sync_id=%s] ConfigManifest rejected: device=%s error=%v", decision.SyncID, deviceID, err)
+		result := m.db.Model(&models.Node{}).
+			Where("node_id = ? AND (last_sync_id = ? OR last_sync_id = '' OR last_sync_id IS NULL)", deviceID, decision.SyncID).
+			Updates(map[string]interface{}{"config_sync_state": "failed", "config_status": "failed", "last_sync_id": decision.SyncID})
+		if result.Error != nil {
+			return fmt.Errorf("%w; persist failed sync state: %v", err, result.Error)
+		}
+		return err
+	}
 
 	var node models.Node
 	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
 		logger.Infof("[%s] Collector not found for config", deviceID)
-		return
+		return fail(fmt.Errorf("collector not found: %w", err))
 	}
 
 	var templates []models.ConfigTemplate
@@ -268,8 +365,22 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		m.db.Where("node_id = ?", node.NodeID).Find(&templates)
 	}
 
-	var channels []models.Channel
-	m.db.Where("node_id = ?", node.NodeID).Find(&channels)
+	var allChannels []models.Channel
+	if err := m.db.Where("node_id = ?", node.NodeID).Find(&allChannels).Error; err != nil {
+		return fail(fmt.Errorf("load channels: %w", err))
+	}
+	var gpioConfigs []models.GPIOConfig
+	if err := m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&gpioConfigs).Error; err != nil {
+		return fail(fmt.Errorf("load GPIO configs: %w", err))
+	}
+	var pwmConfigs []models.PWMConfig
+	if err := m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("channel ASC, hardware_id ASC").Find(&pwmConfigs).Error; err != nil {
+		return fail(fmt.Errorf("load PWM configs: %w", err))
+	}
+	channels, err := validateManifestAuthority(node, allChannels, gpioConfigs, pwmConfigs)
+	if err != nil {
+		return fail(err)
+	}
 
 	manifestID := decision.ManifestID
 	if manifestID == "" {
@@ -288,24 +399,24 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	// v2 path still needs templates — C6's schedule_v2_channel uses
 	// config_mgr_get_template(template_id) to look up write_data/read_length/delay_ms.
 	for _, tmpl := range templates {
-			subEnc := frame.SubEncoder()
-			subEnc.EncodeVarint(1, uint64(tmpl.ID))
-			if tmpl.WriteData != "" {
-				writeHex := tmpl.WriteData
-				if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
-					writeHex = writeHex[2:]
-				}
-				if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
-					subEnc.EncodeBytes(2, writeBytes)
-				}
+		subEnc := frame.SubEncoder()
+		subEnc.EncodeVarint(1, uint64(tmpl.ID))
+		if tmpl.WriteData != "" {
+			writeHex := tmpl.WriteData
+			if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
+				writeHex = writeHex[2:]
 			}
-			if tmpl.ReadLength > 0 {
-				subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
+			if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
+				subEnc.EncodeBytes(2, writeBytes)
 			}
-			if tmpl.DelayMs > 0 {
-				subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
-			}
-			enc.EncodeSubFrame(3, subEnc.Bytes())
+		}
+		if tmpl.ReadLength > 0 {
+			subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
+		}
+		if tmpl.DelayMs > 0 {
+			subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
+		}
+		enc.EncodeSubFrame(3, subEnc.Bytes())
 	}
 
 	// Encode channels (field 4, repeated sub-structure)
@@ -336,7 +447,6 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 			"UART": 1, "1": 1,
 			"I2C": 2, "2": 2,
 			"SPI": 3, "3": 3,
-			"GPIO": 4, "4": 4,
 			"ADC": 5, "5": 5,
 		}
 		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {
@@ -449,7 +559,9 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 		} else {
 			logger.Infof("[%s] No dma_configs key in node.Config (keys: %v)", deviceID, func() []string {
 				keys := make([]string, 0, len(cfg))
-				for k := range cfg { keys = append(keys, k) }
+				for k := range cfg {
+					keys = append(keys, k)
+				}
 				return keys
 			}())
 		}
@@ -480,26 +592,23 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	// Field 11: gpio_configs (repeated sub-messages, v3.0)
 	// Only encode for protocol_version >= 2.4 (older firmware ignores unknown fields)
 	if parseProtocolVersion(node.ProtocolVersion) >= 2.4 {
-		var gpioConfigs []models.GPIOConfig
-		m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&gpioConfigs)
 		for _, gc := range gpioConfigs {
 			subEnc := frame.SubEncoder()
-			subEnc.EncodeVarint(1, uint64(gc.Pin))           // sub-field 1: pin
-			subEnc.EncodeVarint(2, uint64(gc.Direction))     // sub-field 2: direction
-			subEnc.EncodeVarint(3, uint64(gc.InitialLevel))  // sub-field 3: initial_level
+			subEnc.EncodeVarint(1, uint64(gc.Pin))          // sub-field 1: pin
+			subEnc.EncodeVarint(2, uint64(gc.Direction))    // sub-field 2: direction
+			subEnc.EncodeVarint(3, uint64(gc.InitialLevel)) // sub-field 3: initial_level
 			enc.EncodeSubFrame(11, subEnc.Bytes())
 		}
 
 		// Field 12: pwm_configs (repeated sub-messages, v3.0)
-		var pwmConfigs []models.PWMConfig
-		m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&pwmConfigs)
 		for _, pc := range pwmConfigs {
 			subEnc := frame.SubEncoder()
-			subEnc.EncodeVarint(1, uint64(pc.Pin))        // sub-field 1: pin
-			subEnc.EncodeVarint(2, uint64(pc.Frequency))  // sub-field 2: frequency
-			subEnc.EncodeVarint(3, uint64(pc.Duty))       // sub-field 3: duty
-			subEnc.EncodeVarint(4, uint64(pc.Resolution)) // sub-field 4: resolution
-			subEnc.EncodeBool(5, pc.AutoStart)            // sub-field 5: auto_start
+			subEnc.EncodeVarint(1, uint64(pc.Channel))    // sub-field 1: channel
+			subEnc.EncodeVarint(2, uint64(pc.Pin))        // sub-field 2: pin
+			subEnc.EncodeVarint(3, uint64(pc.Frequency))  // sub-field 3: frequency
+			subEnc.EncodeVarint(4, uint64(pc.Duty))       // sub-field 4: duty
+			subEnc.EncodeVarint(5, uint64(pc.Resolution)) // sub-field 5: resolution
+			subEnc.EncodeBool(6, pc.AutoStart)            // sub-field 6: auto_start
 			enc.EncodeSubFrame(12, subEnc.Bytes())
 		}
 	}
@@ -507,29 +616,179 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 	// v2.2: field 8 = sync_id (field 9 sync_reason removed)
 	enc.EncodeString(8, decision.SyncID)
 
-	topic := mqtt.TopicForNode(deviceID)
+	topic := mqtt.ControlTopicForNode(deviceID)
 	payload := enc.Bytes()
-	
+
 	// DEBUG: Log first 120 bytes of ConfigManifest hex
 	hexLen := len(payload)
-	if hexLen > 120 { hexLen = 120 }
+	if hexLen > 120 {
+		hexLen = 120
+	}
 	logger.Infof("[%s] ConfigManifest hex (%d bytes): %s", deviceID, len(payload), hex.EncodeToString(payload[:hexLen]))
-	
+
+	// Persist the exact generation before publish so an immediate valid ACK
+	// cannot race ahead of backend authority.
+	now := time.Now()
+	if err := m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
+		"config_version": manifestID, "config_sync_state": "syncing",
+		"last_sync_at": now, "last_sync_id": decision.SyncID,
+	}).Error; err != nil {
+		return fail(fmt.Errorf("persist syncing state: %w", err))
+	}
+
 	if err := m.mqtt.Publish(topic, payload); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
+		return fail(fmt.Errorf("publish config manifest: %w", err))
 	} else {
 		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s reason=%s %d templates, %d channels",
 			decision.SyncID, deviceID, manifestID, decision.Reason, len(templates), len(channels))
 
-		// Update DB with new manifest ID and mark as syncing
-		now := time.Now()
-		m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
-			"config_version":    manifestID,
-			"config_sync_state": "syncing",
-			"last_sync_at":      now,
-			"last_sync_id":      decision.SyncID,
-		})
 	}
+	return nil
+}
+
+type manifestCapabilities struct {
+	Buses struct {
+		GPIO []struct {
+			Pin int `json:"pin"`
+		} `json:"gpio"`
+		PWM []struct {
+			ID                string `json:"id"`
+			Channel           uint8  `json:"channel"`
+			MaxResolutionBits uint8  `json:"max_resolution_bits"`
+		} `json:"pwm"`
+	} `json:"buses"`
+}
+
+func normalizedManifestBusType(value string) (string, bool, bool) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "UART", "1":
+		return "UART", true, false
+	case "I2C", "2":
+		return "I2C", true, false
+	case "SPI", "3":
+		return "SPI", true, false
+	case "GPIO", "4":
+		return "GPIO", true, true
+	case "ADC", "5":
+		return "ADC", true, false
+	case "PWM", "6":
+		return "PWM", true, true
+	default:
+		return "", false, false
+	}
+}
+
+func decodeManifestTransportPins(ch models.Channel, busType string) ([]int, error) {
+	raw := strings.TrimSpace(ch.BusConfig)
+	raw = strings.TrimPrefix(raw, `\x`)
+	data, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("enabled channel %d has malformed bus_config", ch.ID)
+	}
+	switch busType {
+	case "UART", "I2C":
+		if len(data) < 2 {
+			return nil, fmt.Errorf("enabled channel %d has malformed bus_config", ch.ID)
+		}
+		return []int{int(data[0]), int(data[1])}, nil
+	case "SPI":
+		if len(data) != 9 {
+			return nil, fmt.Errorf("enabled channel %d has malformed bus_config", ch.ID)
+		}
+		pins := []int{int(data[0])}
+		if len(data) >= 9 {
+			pins = append(pins, int(data[6]), int(data[7]), int(data[8]))
+		}
+		return pins, nil
+	case "ADC":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("enabled channel %d has unsupported bus type %q", ch.ID, ch.BusType)
+	}
+}
+
+func validateManifestAuthority(node models.Node, allChannels []models.Channel, gpios []models.GPIOConfig, pwms []models.PWMConfig) ([]models.Channel, error) {
+	var caps manifestCapabilities
+	if strings.TrimSpace(node.Capabilities) == "" || json.Unmarshal([]byte(node.Capabilities), &caps) != nil {
+		return nil, fmt.Errorf("node has not reported usable hardware resources")
+	}
+	gpioPins := make(map[int]bool, len(caps.Buses.GPIO))
+	for _, resource := range caps.Buses.GPIO {
+		gpioPins[resource.Pin] = true
+	}
+	pwmResources := make(map[string]struct{ channel, max uint8 }, len(caps.Buses.PWM))
+	for _, resource := range caps.Buses.PWM {
+		pwmResources[resource.ID] = struct{ channel, max uint8 }{resource.Channel, resource.MaxResolutionBits}
+	}
+	owners := make(map[int]string)
+	claim := func(pin int, owner string) error {
+		if prior, exists := owners[pin]; exists {
+			return fmt.Errorf("GPIO pin %d conflict between %s and %s", pin, prior, owner)
+		}
+		owners[pin] = owner
+		return nil
+	}
+	channels := make([]models.Channel, 0, len(allChannels))
+	for _, ch := range allChannels {
+		busType, known, peripheral := normalizedManifestBusType(ch.BusType)
+		if !known {
+			busType, known, peripheral = normalizedManifestBusType(ch.HardwareType)
+		}
+		if peripheral {
+			if ch.Enabled {
+				return nil, fmt.Errorf("legacy peripheral channel %d is still enabled", ch.ID)
+			}
+			continue
+		}
+		if !known {
+			if ch.Enabled {
+				return nil, fmt.Errorf("enabled channel %d has unsupported bus type %q", ch.ID, ch.BusType)
+			}
+			channels = append(channels, ch)
+			continue
+		}
+		if ch.Enabled {
+			pins, err := decodeManifestTransportPins(ch, busType)
+			if err != nil {
+				return nil, err
+			}
+			for _, pin := range pins {
+				if err := claim(pin, fmt.Sprintf("channel %d", ch.ID)); err != nil {
+					return nil, err
+				}
+			}
+		}
+		channels = append(channels, ch)
+	}
+	for _, cfg := range gpios {
+		if !gpioPins[cfg.Pin] {
+			return nil, fmt.Errorf("GPIO pin %d is absent from current ResourceReport", cfg.Pin)
+		}
+		if cfg.Direction > 3 || cfg.InitialLevel > 1 {
+			return nil, fmt.Errorf("GPIO pin %d has invalid scalar configuration", cfg.Pin)
+		}
+		if err := claim(cfg.Pin, fmt.Sprintf("GPIO %d", cfg.Pin)); err != nil {
+			return nil, err
+		}
+	}
+	for _, cfg := range pwms {
+		resource, ok := pwmResources[cfg.HardwareID]
+		if !ok || resource.channel != cfg.Channel {
+			return nil, fmt.Errorf("PWM resource %q no longer matches current ResourceReport", cfg.HardwareID)
+		}
+		if !gpioPins[cfg.Pin] {
+			return nil, fmt.Errorf("PWM %s route GPIO %d is absent from current ResourceReport", cfg.HardwareID, cfg.Pin)
+		}
+		if cfg.Duty > 10000 || cfg.Frequency == 0 || cfg.Resolution < 4 || cfg.Resolution > 20 ||
+			resource.max == 0 || cfg.Resolution > resource.max || uint64(cfg.Frequency)*(uint64(1)<<cfg.Resolution) > 40000000 {
+			return nil, fmt.Errorf("PWM %s has infeasible scalar configuration", cfg.HardwareID)
+		}
+		if err := claim(cfg.Pin, fmt.Sprintf("PWM %s", cfg.HardwareID)); err != nil {
+			return nil, err
+		}
+	}
+	return channels, nil
 }
 
 // reconcileDriverTemplates ensures every driver CommandTemplate has a matching
@@ -538,10 +797,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) {
 func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []models.ConfigTemplate) bool {
 	// Collect all edge devices for this node and their driver commands
 	type cmdNeed struct {
-		chID    uint
-		writeData string
+		chID       uint
+		writeData  string
 		readLength uint32
-		delayMs   uint32
+		delayMs    uint32
 	}
 	needed := make(map[string]cmdNeed) // key = normalized write_data
 

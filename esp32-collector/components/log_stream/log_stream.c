@@ -14,7 +14,6 @@
 #include "frame_codec.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -24,9 +23,8 @@
 #define TAG "LOG_STREAM"
 
 #define LOG_BATCH_MAX       4
-#define LOG_TX_INTERVAL_MS  200
 #define LOG_TX_STACK        1536
-#define LOG_TX_PRIO         5
+#define LOG_TX_PRIO         2
 #define LOG_TX_BUF_SIZE     768
 #define RING_CAPACITY       4
 #define LOG_TASK_EXITED_BIT BIT0
@@ -40,6 +38,8 @@ typedef enum {
     LOG_STREAM_STOPPING,
 } log_stream_state_t;
 
+#define LOG_STREAM_TX_CYCLE_MS 1000
+
 /* Capture storage is static so a wrapper that was already in flight at detach
  * can never observe freed memory. log_capture_esp_detach() also waits for such
  * readers before stop returns or a subsequent start reinitializes the ring. */
@@ -51,6 +51,7 @@ static uint8_t s_tx_buf[LOG_TX_BUF_SIZE];
 static _Atomic(TaskHandle_t) s_task;
 static atomic_uint s_state;
 static atomic_uint s_capture_users;
+static atomic_uint s_level;
 /* s_seq is NOT atomic: it is only accessed by the single log_tx_task FreeRTOS
  * task during RUNNING. The STOPPED→STARTING→RUNNING state machine barrier ensures
  * s_seq is quiescent (no concurrent reader/writer) when it is reset to 0 in
@@ -114,11 +115,8 @@ static void log_tx_task(void *pv)
      * published its handle/state. The creator releases this one-shot gate only
      * after both are visible. */
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    esp_task_wdt_add(NULL);
-
     while (atomic_load_explicit(&s_state, memory_order_acquire) == LOG_STREAM_RUNNING) {
-        esp_task_wdt_reset();
-
+        const TickType_t cycle_start = xTaskGetTickCount();
         size_t count = log_capture_drain(&s_capture, s_tx_batch, LOG_BATCH_MAX);
         if (count > 0) {
             log_stream_entry_t entries[LOG_BATCH_MAX];
@@ -145,12 +143,19 @@ static void log_tx_task(void *pv)
             }
         }
 
-        /* Stop wakes this wait immediately instead of waiting for the full TX
-         * interval. Notifications are private to this worker task. */
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LOG_TX_INTERVAL_MS));
+        /* Enforce a minimum cycle from the start of the previous drain/publish.
+         * This bounds log traffic even when publish itself returns quickly and
+         * preserves MQTT task time for inbound control frames. */
+        TickType_t wait_ticks = pdMS_TO_TICKS(LOG_STREAM_TX_CYCLE_MS);
+        TickType_t elapsed = xTaskGetTickCount() - cycle_start;
+        if (elapsed < wait_ticks) {
+            wait_ticks -= elapsed;
+        } else {
+            wait_ticks = 1;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
     }
 
-    esp_task_wdt_delete(NULL);
     atomic_store_explicit(&s_task, NULL, memory_order_seq_cst);
     xEventGroupSetBits(s_task_events, LOG_TASK_EXITED_BIT);
     maybe_finish_stop();
@@ -162,7 +167,7 @@ void log_stream_set_publish_callback(log_stream_publish_fn_t publish)
     atomic_store_explicit(&s_publish, publish, memory_order_release);
 }
 
-void log_stream_start(uint8_t level)
+esp_err_t log_stream_start(uint8_t level)
 {
     level = bounded_level(level);
     unsigned expected = LOG_STREAM_STOPPED;
@@ -170,11 +175,11 @@ void log_stream_start(uint8_t level)
             &s_state, &expected, LOG_STREAM_STARTING,
             memory_order_acq_rel, memory_order_acquire)) {
         if (expected == LOG_STREAM_RUNNING) {
-            log_stream_set_level(level);
+            return log_stream_set_level(level);
         }
         /* STARTING/STOPPING are short, owned lifecycle transitions. A second
          * caller must not race initialization or resurrect a stopping task. */
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (s_task_events == NULL) {
@@ -183,17 +188,18 @@ void log_stream_start(uint8_t level)
     if (s_task_events == NULL ||
         atomic_load_explicit(&s_task, memory_order_acquire) != NULL) {
         atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
-        return;
+        return ESP_FAIL;
     }
 
     /* Complete a previous bounded detach before reinitializing static storage. */
     if (!log_capture_esp_detach()) {
         atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
-        return;
+        return ESP_FAIL;
     }
 
     xEventGroupClearBits(s_task_events, LOG_TASK_EXITED_BIT);
     log_capture_init(&s_capture, s_ring, RING_CAPACITY, level);
+    atomic_store_explicit(&s_level, level, memory_order_release);
     s_seq = 0;
     log_capture_esp_attach(&s_capture);
 
@@ -205,22 +211,23 @@ void log_stream_start(uint8_t level)
         atomic_store_explicit(&s_task, NULL, memory_order_release);
         atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
         ESP_LOGE(TAG, "Failed to create log_tx_task");
-        return;
+        return ESP_FAIL;
     }
     atomic_store_explicit(&s_task, task, memory_order_release);
     atomic_store_explicit(&s_state, LOG_STREAM_RUNNING, memory_order_release);
     xTaskNotifyGive(task);
 
     ESP_LOGI(TAG, "Started (level=%u, ring=%u entries)", level, RING_CAPACITY);
+    return ESP_OK;
 }
 
-void log_stream_stop(void)
+esp_err_t log_stream_stop(void)
 {
     unsigned expected = LOG_STREAM_RUNNING;
     if (!atomic_compare_exchange_strong_explicit(
             &s_state, &expected, LOG_STREAM_STOPPING,
             memory_order_acq_rel, memory_order_acquire)) {
-        return;
+        return expected == LOG_STREAM_STOPPED ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
 
     if (!log_capture_esp_detach()) {
@@ -253,7 +260,7 @@ void log_stream_stop(void)
             /* Never force-delete: the worker may be inside publish. It owns its
              * exit and will move STOPPING -> STOPPED after publish returns. */
             ESP_LOGW(TAG, "log_tx_task stop timed out; awaiting cooperative exit");
-            return;
+            return ESP_FAIL;
         }
         /* The exit bit is set after s_task becomes NULL. Complete the state
          * transition here as well so stop never returns while still STOPPING. */
@@ -263,22 +270,31 @@ void log_stream_stop(void)
     }
 
     ESP_LOGI(TAG, "Stopped");
+    return atomic_load_explicit(&s_state, memory_order_acquire) == LOG_STREAM_STOPPED
+        ? ESP_OK : ESP_FAIL;
 }
 
-void log_stream_set_level(uint8_t level)
+esp_err_t log_stream_set_level(uint8_t level)
 {
     if (!capture_user_enter()) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     level = bounded_level(level);
     log_capture_set_level(&s_capture, level);
+    atomic_store_explicit(&s_level, level, memory_order_release);
     capture_user_leave();
     log_stream_emit(LOG_LEVEL_INFO, TAG, "remote level set=%u", level);
+    return ESP_OK;
 }
 
 bool log_stream_is_active(void)
 {
     return atomic_load_explicit(&s_state, memory_order_acquire) == LOG_STREAM_RUNNING;
+}
+
+uint8_t log_stream_get_level(void)
+{
+    return (uint8_t)atomic_load_explicit(&s_level, memory_order_acquire);
 }
 
 void log_stream_emit(uint8_t level, const char *tag, const char *fmt, ...)

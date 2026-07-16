@@ -1,6 +1,7 @@
 package nodemgr
 
 import (
+	"strings"
 	"testing"
 
 	"ehome/backend/internal/models"
@@ -12,11 +13,11 @@ import (
 
 // mockMQTTPublisher 记录所有发布的消息, 用于验证 SendPeriphCmd 编码正确性
 type mockMQTTPublisher struct {
-	publishedTopic  string
-	publishedPayload []byte
-	publishQoS2Topic string
+	publishedTopic     string
+	publishedPayload   []byte
+	publishQoS2Topic   string
 	publishQoS2Payload []byte
-	publishErr       error
+	publishErr         error
 }
 
 func (m *mockMQTTPublisher) Publish(topic string, payload []byte) error {
@@ -54,11 +55,36 @@ func TestSendPeriphCmd_MessageType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendPeriphCmd failed: %v", err)
 	}
-	if len(mock.publishQoS2Payload) < 1 {
+	if len(mock.publishedPayload) < 1 {
 		t.Fatal("empty payload")
 	}
-	if mock.publishQoS2Payload[0] != frame.MsgPeriphCmd {
-		t.Errorf("expected msg type 0x%02X, got 0x%02X", frame.MsgPeriphCmd, mock.publishQoS2Payload[0])
+	if mock.publishedPayload[0] != frame.MsgPeriphCmd {
+		t.Errorf("expected msg type 0x%02X, got 0x%02X", frame.MsgPeriphCmd, mock.publishedPayload[0])
+	}
+}
+
+func TestSendPeriphCmd_NilMQTTFailsClosed(t *testing.T) {
+	db := setupTestDBForPeriph(t)
+	mgr := newManagerWithMock(db, nil)
+	mgr.mqtt = nil
+	if err := mgr.SendPeriphCmd("dev1", 1, 0, 1, 0, nil); err == nil {
+		t.Fatal("nil MQTT client must return an error instead of panicking")
+	}
+}
+
+func TestSendPeriphCmd_UsesQoS1Publish(t *testing.T) {
+	db := setupTestDBForPeriph(t)
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+
+	if err := mgr.SendPeriphCmd("dev1", 1, 0, 1, 0, nil); err != nil {
+		t.Fatalf("SendPeriphCmd failed: %v", err)
+	}
+	if len(mock.publishedPayload) == 0 {
+		t.Fatal("QoS1 Publish was not used")
+	}
+	if len(mock.publishQoS2Payload) != 0 {
+		t.Fatal("QoS2 Publish must not be used for ESP-MQTT peripheral commands")
 	}
 }
 
@@ -72,9 +98,9 @@ func TestSendPeriphCmd_Topic(t *testing.T) {
 	mgr.SendPeriphCmd("dev1", 1, 5, 0, 0, nil)
 
 	// Assert
-	expected := "nodes/dev1/down"
-	if mock.publishQoS2Topic != expected {
-		t.Errorf("expected topic %s, got %s", expected, mock.publishQoS2Topic)
+	expectedTopic := "nodes/dev1/control"
+	if mock.publishedTopic != expectedTopic {
+		t.Errorf("expected topic %s, got %s", expectedTopic, mock.publishedTopic)
 	}
 }
 
@@ -101,26 +127,26 @@ func TestSendPeriphCmd_Fields(t *testing.T) {
 		{
 			name:       "GPIO Config",
 			periphType: 1, pin: 7, action: 3, value: 0, config: []byte{1, 0},
-			expectCfg:  true,
+			expectCfg: true,
 		},
 		{
-			name:        "PWM SetDuty with value",
-			periphType:  2, pin: 6, action: 0, value: 5000, config: nil,
+			name:       "PWM SetDuty with value",
+			periphType: 2, pin: 6, action: 0, value: 5000, config: nil,
 			expectValue: true,
 		},
 		{
 			name:       "PWM Start with config",
 			periphType: 2, pin: 6, action: 2, value: 0,
-			config:     []byte{0xE8, 0x03, 0x00, 0x00, 0x88, 0x13, 0x0E},
-			expectCfg:  true,
+			config:    []byte{0xE8, 0x03, 0x00, 0x00, 0x88, 0x13, 0x0E},
+			expectCfg: true,
 		},
 		{
 			name:       "PWM Stop (no value, no config)",
 			periphType: 2, pin: 6, action: 3, value: 0, config: nil,
 		},
 		{
-			name:        "GPIO Toggle",
-			periphType:  1, pin: 4, action: 5, value: 0, config: nil,
+			name:       "GPIO Toggle",
+			periphType: 1, pin: 4, action: 5, value: 0, config: nil,
 		},
 	}
 
@@ -138,7 +164,7 @@ func TestSendPeriphCmd_Fields(t *testing.T) {
 			}
 
 			// Assert: 解码验证
-			dec, err := frame.NewDecoder(mock.publishQoS2Payload)
+			dec, err := frame.NewDecoder(mock.publishedPayload)
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -214,10 +240,10 @@ func TestSendPeriphCmd_RequestIDIncrement(t *testing.T) {
 
 	// Act: 发送两次命令, request_id 应递增
 	mgr.SendPeriphCmd("dev1", 1, 1, 0, 0, nil)
-	firstPayload := mock.publishQoS2Payload
+	firstPayload := mock.publishedPayload
 
 	mgr.SendPeriphCmd("dev1", 1, 2, 0, 0, nil)
-	secondPayload := mock.publishQoS2Payload
+	secondPayload := mock.publishedPayload
 
 	// Assert: 解码 request_id
 	dec1, _ := frame.NewDecoder(firstPayload)
@@ -276,7 +302,8 @@ func setupTestDBForManifest(t *testing.T, nodeID string, protocolVersion string)
 		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.GPIOConfig{},
 		&models.PWMConfig{}, &models.ConfigMeta{},
 	)
-	db.Create(&models.Node{NodeID: nodeID, Status: "online", ProtocolVersion: protocolVersion})
+	capabilities := `{"buses":{"gpio":[{"id":"GPIO1","pin":1},{"id":"GPIO2","pin":2},{"id":"GPIO5","pin":5},{"id":"GPIO6","pin":6},{"id":"GPIO7","pin":7}],"pwm":[{"id":"PWM0","channel":0,"max_resolution_bits":14},{"id":"PWM1","channel":1,"max_resolution_bits":14}]}}`
+	db.Create(&models.Node{NodeID: nodeID, Status: "online", ProtocolVersion: protocolVersion, Capabilities: capabilities})
 	return db
 }
 
@@ -351,8 +378,8 @@ func TestConfigManifest_PWMConfigs(t *testing.T) {
 	mock := &mockMQTTPublisher{}
 	mgr := newManagerWithMock(db, mock)
 
-	db.Create(&models.PWMConfig{NodeID: "dev1", Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, AutoStart: false, Enabled: true})
-	db.Create(&models.PWMConfig{NodeID: "dev1", Pin: 7, Frequency: 2000, Duty: 8000, Resolution: 12, AutoStart: true, Enabled: true})
+	db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, AutoStart: false, Enabled: true})
+	db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM1", Channel: 1, Pin: 7, Frequency: 2000, Duty: 8000, Resolution: 12, AutoStart: true, Enabled: true})
 
 	// Act
 	mgr.SendConfigManifestWithDecision(SyncDecision{
@@ -384,9 +411,9 @@ func TestConfigManifest_PWMConfigs(t *testing.T) {
 		t.Fatalf("expected 2 PWM sub-frames, got %d", len(pwmSubFrames))
 	}
 
-	// 解码第一个 sub-frame: pin=6, freq=1000, duty=500, resolution=14, auto_start=false
+	// 解码第一个 sub-frame: channel=0, pin=6, freq=1000, duty=500, resolution=14, auto_start=false
 	subDec, _ := frame.NewSubDecoder(pwmSubFrames[0])
-	var pin, freq, duty, resolution uint64
+	var channel, pin, freq, duty, resolution uint64
 	var autoStart bool
 	for {
 		field, err := subDec.NextField()
@@ -395,20 +422,22 @@ func TestConfigManifest_PWMConfigs(t *testing.T) {
 		}
 		switch field.FieldNum {
 		case 1:
-			pin = frame.GetUint64(field)
+			channel = frame.GetUint64(field)
 		case 2:
-			freq = frame.GetUint64(field)
+			pin = frame.GetUint64(field)
 		case 3:
-			duty = frame.GetUint64(field)
+			freq = frame.GetUint64(field)
 		case 4:
-			resolution = frame.GetUint64(field)
+			duty = frame.GetUint64(field)
 		case 5:
+			resolution = frame.GetUint64(field)
+		case 6:
 			autoStart = frame.GetBool(field)
 		}
 	}
-	if pin != 6 || freq != 1000 || duty != 500 || resolution != 14 {
-		t.Errorf("PWM[0]: expected pin=6 freq=1000 duty=500 res=14, got pin=%d freq=%d duty=%d res=%d",
-			pin, freq, duty, resolution)
+	if channel != 0 || pin != 6 || freq != 1000 || duty != 500 || resolution != 14 {
+		t.Errorf("PWM[0]: expected channel=0 pin=6 freq=1000 duty=500 res=14, got channel=%d pin=%d freq=%d duty=%d res=%d",
+			channel, pin, freq, duty, resolution)
 	}
 	if autoStart {
 		t.Error("PWM[0]: expected auto_start=false")
@@ -423,7 +452,7 @@ func TestConfigManifest_PeriphVersionGate(t *testing.T) {
 	mgr := newManagerWithMock(db, mock)
 
 	db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 1, Enabled: true})
-	db.Create(&models.PWMConfig{NodeID: "dev1", Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
+	db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
 
 	// Act
 	mgr.SendConfigManifestWithDecision(SyncDecision{
@@ -534,6 +563,82 @@ func TestConfigManifest_PeriphEmpty(t *testing.T) {
 	}
 }
 
+func TestConfigManifest_RejectsLegacyPeripheralChannelsIncludingNumericAliases(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	db.Create(&models.Channel{NodeID: "dev1", HardwareType: "GPIO", BusType: "GPIO", Enabled: true})
+	db.Create(&models.Channel{NodeID: "dev1", HardwareType: "6", BusType: "6", Enabled: true})
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "sync", ManifestID: "manifest"})
+	if err == nil || !strings.Contains(err.Error(), "legacy peripheral") {
+		t.Fatalf("got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("invalid legacy peripheral manifest was published")
+	}
+}
+
+func TestConfigManifestRevalidatesCurrentAuthorityAndRecordsFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		seed func(*gorm.DB)
+	}{
+		{"stale GPIO membership", func(db *gorm.DB) { db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 99, Direction: 1, Enabled: true}) }},
+		{"invalid GPIO scalar", func(db *gorm.DB) { db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 9, Enabled: true}) }},
+		{"stale PWM identity", func(db *gorm.DB) {
+			db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 1, Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
+		}},
+		{"PWM resolution limit", func(db *gorm.DB) {
+			db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Resolution: 15, Enabled: true})
+		}},
+		{"PWM clock scalar", func(db *gorm.DB) {
+			db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 3000, Resolution: 14, Enabled: true})
+		}},
+		{"enabled transport conflict", func(db *gorm.DB) {
+			db.Create(&models.Channel{NodeID: "dev1", BusType: "I2C", HardwareType: "I2C", BusConfig: "0207", Enabled: true})
+			db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 1, Enabled: true})
+		}},
+		{"malformed enabled transport", func(db *gorm.DB) {
+			db.Create(&models.Channel{NodeID: "dev1", BusType: "I2C", HardwareType: "I2C", BusConfig: "02", Enabled: true})
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTestDBForManifest(t, "dev1", "2.5")
+			mock := &mockMQTTPublisher{}
+			mgr := newManagerWithMock(db, mock)
+			tc.seed(db)
+			err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "authority", ManifestID: "bad"})
+			if err == nil {
+				t.Fatal("expected authority validation failure")
+			}
+			if len(mock.publishedPayload) != 0 {
+				t.Fatal("invalid manifest was published")
+			}
+			var node models.Node
+			db.Where("node_id = ?", "dev1").First(&node)
+			if node.ConfigSyncState != "failed" {
+				t.Fatalf("sync state=%q error=%v", node.ConfigSyncState, err)
+			}
+		})
+	}
+}
+
+func TestConfigManifestIgnoresDisabledTransportPinReservation(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	db.Create(&models.Channel{NodeID: "dev1", BusType: "I2C", HardwareType: "I2C", BusConfig: "0207", Enabled: true})
+	db.Model(&models.Channel{}).Where("node_id = ?", "dev1").Update("enabled", false)
+	db.Create(&models.GPIOConfig{NodeID: "dev1", Pin: 2, Direction: 1, Enabled: true})
+	if err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "ok", ManifestID: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.publishedPayload) == 0 {
+		t.Fatal("valid manifest not published")
+	}
+}
+
 // =====================================================================
 // 辅助函数
 // =====================================================================
@@ -558,9 +663,9 @@ func setupTestDBForPeriph(t *testing.T) *gorm.DB {
 // newManagerWithMock 创建使用 mock MQTT publisher 的 Manager
 func newManagerWithMock(db *gorm.DB, mock *mockMQTTPublisher) *Manager {
 	return &Manager{
-		db:      db,
-		mqtt:    mock,
-		hashMgr: NewConfigHashManager(),
+		db:       db,
+		mqtt:     mock,
+		hashMgr:  NewConfigHashManager(),
 		eventBus: NewConfigEventBus(64),
 	}
 }

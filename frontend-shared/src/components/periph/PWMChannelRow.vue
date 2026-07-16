@@ -1,5 +1,5 @@
 <!--
-  PWMChannelRow.vue — PWM 行式控制（用于 PinResourceList 内部或独立使用）
+  PWMChannelRow.vue — PWM 行式控制，可由 PWM 硬件资源列表复用
   状态 tag (运行中/已停止/未知) + 占空比数值 + slider + 启停按钮
   停止不使用 danger；移除配置通过 emit 给父组件
   规格: docs/设计/GPIO_PWM_UI重设计规格.md §5
@@ -65,9 +65,9 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'remove', pin: number): void
-  (e: 'state-change', pin: number, running: boolean | null): void
-  (e: 'duty-change', pin: number, duty: number): void
+  (e: 'remove', hardwareId: string): void
+  (e: 'state-change', hardwareId: string, running: boolean | null): void
+  (e: 'duty-change', hardwareId: string, duty: number): void
 }>()
 
 const loading = ref(false)
@@ -112,14 +112,14 @@ function onDutyChange(val: number) {
 
   dutyTimer = setTimeout(async () => {
     try {
-      await pwmApi.setDuty(props.nodeId, props.config.pin, val)
+      await pwmApi.setDuty(props.nodeId, props.config.hardware_id, val)
       serverDuty.value = val
-      emit('duty-change', props.config.pin, val)
+      emit('duty-change', props.config.hardware_id, val)
     } catch (e: any) {
       // 回滚到服务端确认值
       localDuty.value = serverDuty.value
       try {
-        const state = await pwmApi.getState(props.nodeId, props.config.pin)
+        const state = await pwmApi.getState(props.nodeId, props.config.hardware_id)
         localDuty.value = state.duty
         serverDuty.value = state.duty
       } catch {
@@ -139,10 +139,10 @@ onUnmounted(() => {
 async function startPwm() {
   loading.value = true
   try {
-    await pwmApi.start(props.nodeId, props.config.pin)
+    await pwmApi.start(props.nodeId, props.config.hardware_id)
     running.value = true
-    emit('state-change', props.config.pin, true)
-    ElMessage.success(`PWM GPIO${props.config.pin} 已启动`)
+    emit('state-change', props.config.hardware_id, true)
+    ElMessage.success(`${props.config.hardware_id} 已启动`)
   } catch (e: any) {
     ElMessage.error(`PWM 启动失败: ${e?.message || '未知错误'}`)
   } finally {
@@ -153,10 +153,10 @@ async function startPwm() {
 async function stopPwm() {
   loading.value = true
   try {
-    await pwmApi.stop(props.nodeId, props.config.pin)
+    await pwmApi.stop(props.nodeId, props.config.hardware_id)
     running.value = false
-    emit('state-change', props.config.pin, false)
-    ElMessage.success(`PWM GPIO${props.config.pin} 已停止`)
+    emit('state-change', props.config.hardware_id, false)
+    ElMessage.success(`${props.config.hardware_id} 已停止`)
   } catch (e: any) {
     ElMessage.error(`PWM 停止失败: ${e?.message || '未知错误'}`)
   } finally {

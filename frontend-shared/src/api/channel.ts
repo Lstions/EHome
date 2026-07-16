@@ -25,7 +25,7 @@ export const channelApi = {
   // 获取通道列表
   // Server returns: { code: 200, data: { items: Channel[], total, page, page_size } }
   // or with collector_id filter: { items: Channel[] }
-  async getList(nodeId?: number): Promise<Channel[] | { items: Channel[]; total?: number }> {
+  async getList(nodeId?: number | string): Promise<Channel[] | { items: Channel[]; total?: number }> {
     const params = nodeId ? { node_id: nodeId } : {}
     const response = await client.get('/api/v1/channels', { params })
     // response is the full body: { code: 200, data: { items, total, ... } }

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +24,7 @@ typedef struct {
     char checksum[128];
     char version[32];
     uint64_t size_bytes;
+    uint32_t sequence;
 } ota_cmd_t;
 
 void ota_init(void);
@@ -31,7 +33,7 @@ void ota_init(void);
  * @brief Start OTA upgrade with command structure
  * @param cmd Heap-allocated command (ota_start takes ownership and will free it)
  */
-void ota_start(const ota_cmd_t *cmd);
+esp_err_t ota_start(const ota_cmd_t *cmd);
 bool ota_is_upgrading(void);
 
 /**
@@ -40,6 +42,15 @@ bool ota_is_upgrading(void);
  * @return true if duplicate (should be ignored), false if new
  */
 bool ota_is_duplicate(const char *ota_id);
+typedef enum {
+    OTA_CMD_NEW = 0,
+    OTA_CMD_EXACT_REPLAY,
+    OTA_CMD_COLLISION,
+    OTA_CMD_BUSY,
+} ota_cmd_class_t;
+ota_cmd_class_t ota_classify_cmd(const ota_cmd_t *cmd);
+void ota_forget_duplicate(const char *ota_id);
+void ota_replay_last_progress(const char *ota_id);
 
 /**
  * @brief Check OTA NVS state for power-loss recovery.
@@ -51,7 +62,7 @@ uint8_t ota_get_nvs_state(void);
  * @brief Confirm current app is valid and cancel rollback.
  * Call after boot validation (e.g. WiFi connected successfully).
  */
-void ota_confirm_valid(void);
+esp_err_t ota_confirm_valid(void);
 
 /**
  * @brief OTA progress callback type for decoupling from msg_handler.

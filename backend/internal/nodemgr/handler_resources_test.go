@@ -14,6 +14,16 @@ func buildSubFrame(fields func(enc *frame.Encoder)) []byte {
 	return enc.Bytes()
 }
 
+func TestValidateFieldSequenceRejectsMalformedResourceData(t *testing.T) {
+	if err := validateFieldSequence([]byte{0x0a, 0x05, 0x01}); err == nil {
+		t.Fatal("truncated length-delimited resource data was accepted")
+	}
+	valid := buildSubFrame(func(enc *frame.Encoder) { enc.EncodeString(1, "GPIO0"); enc.EncodeVarint(2, 0) })
+	if err := validateGenericFieldSequence(valid); err != nil {
+		t.Fatalf("valid resource data rejected: %v", err)
+	}
+}
+
 // --- decodeUARTEntry tests ---
 
 func TestDecodeUARTEntry(t *testing.T) {
@@ -26,11 +36,11 @@ func TestDecodeUARTEntry(t *testing.T) {
 			name: "full UART entry",
 			build: func(enc *frame.Encoder) {
 				enc.EncodeString(1, "uart0")
-				enc.EncodeVarint(2, 1)   // port
-				enc.EncodeVarint(3, 43)  // tx_pin
-				enc.EncodeVarint(4, 44)  // rx_pin
+				enc.EncodeVarint(2, 1)      // port
+				enc.EncodeVarint(3, 43)     // tx_pin
+				enc.EncodeVarint(4, 44)     // rx_pin
 				enc.EncodeVarint(5, 921600) // max_baud
-				enc.EncodeVarint(6, 1)   // flags (bit0=DMA)
+				enc.EncodeVarint(6, 1)      // flags (bit0=DMA)
 			},
 			want: uartEntry{
 				ID: "uart0", Port: 1, DefaultTxPin: 43, DefaultRxPin: 44,
@@ -89,11 +99,11 @@ func TestDecodeI2CEntry(t *testing.T) {
 			name: "full I2C entry",
 			build: func(enc *frame.Encoder) {
 				enc.EncodeString(1, "i2c0")
-				enc.EncodeVarint(2, 0)  // port
-				enc.EncodeVarint(3, 21) // sda
-				enc.EncodeVarint(4, 22) // scl
+				enc.EncodeVarint(2, 0)      // port
+				enc.EncodeVarint(3, 21)     // sda
+				enc.EncodeVarint(4, 22)     // scl
 				enc.EncodeVarint(5, 400000) // max_freq
-				enc.EncodeVarint(6, 1)  // flags (DMA)
+				enc.EncodeVarint(6, 1)      // flags (DMA)
 			},
 			want: i2cEntry{
 				ID: "i2c0", Port: 0, DefaultSdaPin: 21, DefaultSclPin: 22,
@@ -150,13 +160,13 @@ func TestDecodeSPIEntry(t *testing.T) {
 			name: "full SPI entry",
 			build: func(enc *frame.Encoder) {
 				enc.EncodeString(1, "spi0")
-				enc.EncodeVarint(2, 2)  // port
-				enc.EncodeVarint(3, 11) // mosi
-				enc.EncodeVarint(4, 12) // miso
-				enc.EncodeVarint(5, 13) // sclk
-				enc.EncodeVarint(6, 10) // cs
+				enc.EncodeVarint(2, 2)        // port
+				enc.EncodeVarint(3, 11)       // mosi
+				enc.EncodeVarint(4, 12)       // miso
+				enc.EncodeVarint(5, 13)       // sclk
+				enc.EncodeVarint(6, 10)       // cs
 				enc.EncodeVarint(7, 80000000) // max_freq
-				enc.EncodeVarint(8, 1)  // flags (DMA)
+				enc.EncodeVarint(8, 1)        // flags (DMA)
 			},
 			want: spiEntry{
 				ID: "spi0", Port: 2, DefaultMosiPin: 11, DefaultMisoPin: 12,
@@ -253,6 +263,20 @@ func TestDecodeGPIOEntry_Empty(t *testing.T) {
 	}
 }
 
+func TestDecodePWMEntry(t *testing.T) {
+	data := buildSubFrame(func(enc *frame.Encoder) {
+		enc.EncodeString(1, "PWM0")
+		enc.EncodeVarint(2, 0)
+		enc.EncodeVarint(3, 4)
+		enc.EncodeVarint(4, 20)
+	})
+	got := decodePWMEntry(data)
+	want := pwmEntry{ID: "PWM0", Channel: 0, TimerCount: 4, MaxResolutionBits: 20}
+	if got != want {
+		t.Fatalf("decodePWMEntry() = %+v, want %+v", got, want)
+	}
+}
+
 // --- decodeADCEntry tests ---
 
 func TestDecodeADCEntry(t *testing.T) {
@@ -340,7 +364,7 @@ func TestBusTypeToString(t *testing.T) {
 // --- decodeBusesBlob multi-bus combo test ---
 
 func TestDecodeBusesBlob(t *testing.T) {
-	// Build a buses blob with one UART, one I2C, one GPIO, one ADC
+	// Build a buses blob with one UART, one I2C, one GPIO, one ADC and one PWM
 	uartData := buildSubFrame(func(enc *frame.Encoder) {
 		enc.EncodeString(1, "uart0")
 		enc.EncodeVarint(2, 1)
@@ -359,12 +383,19 @@ func TestDecodeBusesBlob(t *testing.T) {
 		enc.EncodeString(1, "adc0")
 		enc.EncodeVarint(5, 12)
 	})
+	pwmData := buildSubFrame(func(enc *frame.Encoder) {
+		enc.EncodeString(1, "PWM0")
+		enc.EncodeVarint(2, 0)
+		enc.EncodeVarint(3, 4)
+		enc.EncodeVarint(4, 20)
+	})
 
 	busesBlob := buildSubFrame(func(enc *frame.Encoder) {
-		enc.EncodeBytes(1, uartData)  // field 1 = UART
-		enc.EncodeBytes(2, i2cData)   // field 2 = I2C
-		enc.EncodeBytes(4, gpioData)  // field 4 = GPIO
-		enc.EncodeBytes(5, adcData)   // field 5 = ADC
+		enc.EncodeBytes(1, uartData) // field 1 = UART
+		enc.EncodeBytes(2, i2cData)  // field 2 = I2C
+		enc.EncodeBytes(4, gpioData) // field 4 = GPIO
+		enc.EncodeBytes(5, adcData)  // field 5 = ADC
+		enc.EncodeBytes(6, pwmData)  // field 6 = PWM
 	})
 
 	buses := decodeBusesBlob(busesBlob)
@@ -395,6 +426,12 @@ func TestDecodeBusesBlob(t *testing.T) {
 	}
 	if buses.ADC[0].ID != "adc0" || buses.ADC[0].MaxBits != 12 {
 		t.Errorf("ADC entry: %+v", buses.ADC[0])
+	}
+	if len(buses.PWM) != 1 {
+		t.Fatalf("PWM count: got %d, want 1", len(buses.PWM))
+	}
+	if buses.PWM[0].ID != "PWM0" || buses.PWM[0].Channel != 0 || buses.PWM[0].TimerCount != 4 || buses.PWM[0].MaxResolutionBits != 20 {
+		t.Errorf("PWM entry: %+v", buses.PWM[0])
 	}
 
 	// SPI should be empty
@@ -446,15 +483,15 @@ func TestDecodeChannelEntry(t *testing.T) {
 		{
 			name: "full channel entry",
 			build: func(enc *frame.Encoder) {
-				enc.EncodeVarint(1, 1)     // id
-				enc.EncodeVarint(2, 2)     // bus_type = I2C
-				enc.EncodeVarint(3, 0x76)  // hardware_id
-				enc.EncodeVarint(4, 5000)  // interval_ms
-				enc.EncodeBool(5, true)    // enabled
+				enc.EncodeVarint(1, 1)                 // id
+				enc.EncodeVarint(2, 2)                 // bus_type = I2C
+				enc.EncodeVarint(3, 0x76)              // hardware_id
+				enc.EncodeVarint(4, 5000)              // interval_ms
+				enc.EncodeBool(5, true)                // enabled
 				enc.EncodeBytes(6, []byte{0x01, 0x02}) // bus_config
-				enc.EncodeVarint(7, 1)     // template_id
-				enc.EncodeVarint(7, 2)     // template_id (repeated)
-				enc.EncodeBool(8, true)    // dma_enabled
+				enc.EncodeVarint(7, 1)                 // template_id
+				enc.EncodeVarint(7, 2)                 // template_id (repeated)
+				enc.EncodeBool(8, true)                // dma_enabled
 			},
 			want: channelEntry{
 				ID: 1, BusType: 2, HardwareID: 0x76, IntervalMs: 5000,
@@ -542,14 +579,14 @@ func TestDecodeDmaChannel(t *testing.T) {
 		{
 			name: "full DMA channel",
 			build: func(enc *frame.Encoder) {
-				enc.EncodeVarint(1, 1)        // dma_id
+				enc.EncodeVarint(1, 1)         // dma_id
 				enc.EncodeString(2, "DMA_CH0") // name
-				enc.EncodeVarint(3, 2)        // dma_type
-				enc.EncodeVarint(4, 3)        // capabilities
-				enc.EncodeVarint(5, 4096)     // max_burst
-				enc.EncodeVarint(6, 0)        // state (free)
-				enc.EncodeString(7, "UART0")  // bound_to
-				enc.EncodeVarint(8, 1)        // compatible_bus (UART)
+				enc.EncodeVarint(3, 2)         // dma_type
+				enc.EncodeVarint(4, 3)         // capabilities
+				enc.EncodeVarint(5, 4096)      // max_burst
+				enc.EncodeVarint(6, 0)         // state (free)
+				enc.EncodeString(7, "UART0")   // bound_to
+				enc.EncodeVarint(8, 1)         // compatible_bus (UART)
 			},
 			want: models.DmaChannelInfo{
 				DmaID: 1, Name: "DMA_CH0", DmaType: 2, Capabilities: 3,
@@ -580,7 +617,10 @@ func TestDecodeDmaChannel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data := buildSubFrame(tt.build)
-			got := decodeDmaChannel(data)
+			got, ok := decodeDmaChannel(data)
+			if !ok {
+				t.Fatalf("decodeDmaChannel rejected valid data")
+			}
 			if got != tt.want {
 				t.Errorf("decodeDmaChannel() = %+v, want %+v", got, tt.want)
 			}
@@ -589,7 +629,7 @@ func TestDecodeDmaChannel(t *testing.T) {
 }
 
 func TestDecodeDmaChannel_Empty(t *testing.T) {
-	got := decodeDmaChannel([]byte{})
+	got, _ := decodeDmaChannel([]byte{})
 	if got.DmaID != 0 || got.Name != "" {
 		t.Errorf("expected zero-value for empty data, got %+v", got)
 	}

@@ -143,6 +143,56 @@ func TestStop_ClosesStopChannel(t *testing.T) {
 	}
 }
 
+func TestLoadInitializableEdgeDevicesRequiresMatchingEnabledTransport(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+	db.Create(&models.Node{NodeID: "node-1", Status: "online"})
+	db.Create(&models.Node{NodeID: "node-2", Status: "online"})
+	channels := []models.Channel{
+		{NodeID: "node-1", HardwareType: "I2C", BusType: "I2C", Enabled: true},
+		{NodeID: "node-1", HardwareType: "UART", BusType: "UART", Enabled: false},
+		{NodeID: "node-1", HardwareType: "GPIO", BusType: "4", Enabled: true},
+		{NodeID: "node-1", HardwareType: "6", BusType: "PWM", Enabled: true},
+		{NodeID: "node-2", HardwareType: "I2C", BusType: "I2C", Enabled: true},
+	}
+	for i := range channels {
+		if err := db.Create(&channels[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if err := db.Model(&models.Channel{}).Where("id = ?", channels[i].ID).Update("enabled", false).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	edges := []models.EdgeDevice{
+		{Name: "valid", Type: "bmp280", NodeID: "node-1", ChannelID: channels[0].ID, Enabled: true},
+		{Name: "disabled-edge", Type: "bmp280", NodeID: "node-1", ChannelID: channels[0].ID, Enabled: false},
+		{Name: "disabled-channel", Type: "bmp280", NodeID: "node-1", ChannelID: channels[1].ID, Enabled: true},
+		{Name: "gpio-alias", Type: "bmp280", NodeID: "node-1", ChannelID: channels[2].ID, Enabled: true},
+		{Name: "pwm-alias", Type: "bmp280", NodeID: "node-1", ChannelID: channels[3].ID, Enabled: true},
+		{Name: "edge-channel-node-mismatch", Type: "bmp280", NodeID: "node-1", ChannelID: channels[4].ID, Enabled: true},
+		{Name: "other-node", Type: "bmp280", NodeID: "node-2", ChannelID: channels[4].ID, Enabled: true},
+	}
+	for i := range edges {
+		if err := db.Create(&edges[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if err := db.Model(&models.EdgeDevice{}).Where("id = ?", edges[i].ID).Update("enabled", false).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, err := mgr.loadInitializableEdgeDevices("node-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "valid" {
+		t.Fatalf("expected only valid edge device, got %+v", got)
+	}
+}
+
 // TestCalcConfigHashForDevice_NotFound verifies error handling on missing node.
 func TestCalcConfigHashForDevice_NotFound(t *testing.T) {
 	db := setupTestDB(t)
@@ -193,8 +243,8 @@ func TestBuildHashData_PWMConfigs(t *testing.T) {
 	db := setupTestDBWithPeriph(t)
 	mgr := NewManager(db, nil, nil, nil, nil, nil)
 
-	pwm1 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
-	pwm2 := []models.PWMConfig{{Pin: 6, Frequency: 2000, Duty: 500, Resolution: 14, Enabled: true}} // frequency 不同
+	pwm1 := []models.PWMConfig{{HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+	pwm2 := []models.PWMConfig{{HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 2000, Duty: 500, Resolution: 14, Enabled: true}} // frequency 不同
 
 	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm1)
 	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm2)
@@ -204,13 +254,46 @@ func TestBuildHashData_PWMConfigs(t *testing.T) {
 	}
 }
 
+func TestBuildHashData_PWMResourceIdentityAndRuntimeConfig(t *testing.T) {
+	db := setupTestDBWithPeriph(t)
+	mgr := NewManager(db, nil, nil, nil, nil, nil)
+	base := models.PWMConfig{
+		HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000,
+		Duty: 500, Resolution: 14, AutoStart: false, Enabled: true,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*models.PWMConfig)
+	}{
+		{"hardware_id", func(p *models.PWMConfig) { p.HardwareID = "PWM1" }},
+		{"channel", func(p *models.PWMConfig) { p.Channel = 1 }},
+		{"pin", func(p *models.PWMConfig) { p.Pin = 7 }},
+		{"frequency", func(p *models.PWMConfig) { p.Frequency++ }},
+		{"duty", func(p *models.PWMConfig) { p.Duty++ }},
+		{"resolution", func(p *models.PWMConfig) { p.Resolution-- }},
+		{"auto_start", func(p *models.PWMConfig) { p.AutoStart = true }},
+		{"enabled", func(p *models.PWMConfig) { p.Enabled = false }},
+	}
+	baseline := string(mgr.buildHashData(nil, nil, nil, nil, nil, nil, []models.PWMConfig{base}))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := base
+			tt.mutate(&changed)
+			got := string(mgr.buildHashData(nil, nil, nil, nil, nil, nil, []models.PWMConfig{changed}))
+			if got == baseline {
+				t.Fatalf("changing %s must change PWM hash data", tt.name)
+			}
+		})
+	}
+}
+
 // TestBuildHashData_GPIOAndPWM 验证 GPIO 和 PWM 都参与 hash
 func TestBuildHashData_GPIOAndPWM(t *testing.T) {
 	db := setupTestDBWithPeriph(t)
 	mgr := NewManager(db, nil, nil, nil, nil, nil)
 
 	gpio := []models.GPIOConfig{{Pin: 2, Direction: 1, InitialLevel: 0, Enabled: true}}
-	pwm := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+	pwm := []models.PWMConfig{{HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
 
 	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio, nil)
 	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, gpio, pwm)
@@ -241,8 +324,8 @@ func TestBuildHashData_PWMResolution(t *testing.T) {
 	db := setupTestDBWithPeriph(t)
 	mgr := NewManager(db, nil, nil, nil, nil, nil)
 
-	pwm14 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
-	pwm12 := []models.PWMConfig{{Pin: 6, Frequency: 1000, Duty: 500, Resolution: 12, Enabled: true}}
+	pwm14 := []models.PWMConfig{{HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true}}
+	pwm12 := []models.PWMConfig{{HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 12, Enabled: true}}
 
 	r1 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm14)
 	r2 := mgr.buildHashData(nil, nil, nil, nil, nil, nil, pwm12)
@@ -279,7 +362,7 @@ func TestCalcConfigHashForDevice_WithPWM(t *testing.T) {
 
 	r1 := mgr.CalcConfigHashForDevice("dev1")
 
-	db.Create(&models.PWMConfig{NodeID: "dev1", Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
+	db.Create(&models.PWMConfig{NodeID: "dev1", HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Resolution: 14, Enabled: true})
 
 	r2 := mgr.CalcConfigHashForDevice("dev1")
 

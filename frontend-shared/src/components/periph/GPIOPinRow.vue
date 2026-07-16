@@ -1,5 +1,5 @@
 <!--
-  GPIOPinRow.vue — GPIO 行式控制（用于 PinResourceList 内部或独立使用）
+  GPIOPinRow.vue — GPIO 行式控制，可由 GPIO 硬件资源列表复用
   OUTPUT: 一个 el-switch HIGH/LOW
   INPUT: 读取按钮 + 电平显示
   移除配置: 通过 emit 给父组件处理（dropdown + 确认）
@@ -82,11 +82,7 @@ const levelDotClass = computed(() => {
 onMounted(async () => {
   if (!isOutput.value && !props.offline && props.nodeId) {
     try {
-      const result = await gpioApi.read(props.nodeId, props.config.pin)
-      if (result && typeof result.level === 'number') {
-        currentLevel.value = result.level
-        emit('level-change', props.config.pin, result.level)
-      }
+		await gpioApi.read(props.nodeId, props.config.pin)
     } catch {
       // 节点可能离线，静默忽略
     }
@@ -122,9 +118,7 @@ async function setLevel(level: 0 | 1) {
 async function readLevel() {
   loading.value = true
   try {
-    const result = await gpioApi.read(props.nodeId, props.config.pin)
-    currentLevel.value = result.level
-    emit('level-change', props.config.pin, result.level)
+	await gpioApi.read(props.nodeId, props.config.pin)
   } catch (e: any) {
     ElMessage.error(`GPIO 读取失败: ${e?.message || '未知错误'}`)
   } finally {

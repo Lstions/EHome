@@ -1,6 +1,7 @@
 package ota
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -200,13 +201,17 @@ func (m *Manager) scanTimeouts() {
 
 	for i := range tasks {
 		t := tasks[i]
-		t.Status = StatusTimeout
-		t.ErrorMsg = fmt.Sprintf("Timed out: no progress for >%v", timeoutThreshold)
-		t.CompletedAt = &now
-		if err := m.db.Save(&t).Error; err != nil {
-			logger.Errorf("[OTA] failed to mark task %s as timeout: %v", t.OtaID, err)
+		errorMsg := fmt.Sprintf("Timed out: no progress for >%v", timeoutThreshold)
+		result := m.db.Model(&models.OTATask{}).
+			Where("id = ? AND status = ? AND updated_at = ?", t.ID, t.Status, t.UpdatedAt).
+			Updates(map[string]interface{}{"status": StatusTimeout, "error_msg": errorMsg, "completed_at": &now})
+		if result.Error != nil || result.RowsAffected != 1 {
+			logger.Warnf("[OTA] stale timeout transition rejected task=%s err=%v rows=%d", t.OtaID, result.Error, result.RowsAffected)
 			continue
 		}
+		t.Status = StatusTimeout
+		t.ErrorMsg = errorMsg
+		t.CompletedAt = &now
 
 		// WebSocket push
 		if m.wsHub != nil {
@@ -447,17 +452,28 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 				} else {
 					logger.Infof("[OTA] ota_id=%s resent (attempt %d/%d)", task.OtaID, attempt+1, ackMaxRetries)
 				}
+				if attempt == ackMaxRetries-1 {
+					select {
+					case <-ackCh:
+						logger.Infof("[OTA] ota_id=%s acknowledged after final resend", task.OtaID)
+						return
+					case <-time.After(ackTimeout):
+					}
+				}
 			}
 		}
 
 		// All retries exhausted — mark task as failed
 		logger.Errorf("[OTA] ota_id=%s failed: no ack after %d attempts", task.OtaID, ackMaxRetries)
 		now := time.Now()
-		m.db.Model(&models.OTATask{}).Where("ota_id = ?", task.OtaID).Updates(map[string]interface{}{
-			"status":       StatusFailed,
-			"error_msg":    fmt.Sprintf("No device acknowledgement after %d retries", ackMaxRetries),
-			"completed_at": &now,
-		})
+		result := m.db.Model(&models.OTATask{}).
+			Where("ota_id = ? AND status IN ?", task.OtaID, []string{StatusPending, StatusDownloading, StatusVerifying, StatusInstalling}).
+			Updates(map[string]interface{}{
+				"status": StatusFailed, "error_msg": fmt.Sprintf("No device acknowledgement after %d retries", ackMaxRetries), "completed_at": &now,
+			})
+		if result.Error != nil || result.RowsAffected != 1 {
+			return
+		}
 
 		if m.wsHub != nil {
 			m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
@@ -501,11 +517,23 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	var taskID string
 	var status, progressPct uint64
 	var errorMsg string
+	seen := map[uint8]bool{}
 
 	for {
 		field, err := dec.NextField()
-		if err != nil {
+		if errors.Is(err, frame.ErrEndOfFrame) {
 			break
+		}
+		if err != nil || field.FieldNum < 1 || field.FieldNum > 4 || seen[field.FieldNum] {
+			return
+		}
+		seen[field.FieldNum] = true
+		expected := uint8(frame.WireVarint)
+		if field.FieldNum == 1 || field.FieldNum == 4 {
+			expected = frame.WireLengthDelimited
+		}
+		if field.WireType != expected {
+			return
 		}
 		switch field.FieldNum {
 		case 1:
@@ -518,25 +546,28 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 			errorMsg = frame.GetString(field)
 		}
 	}
-
-	// Acknowledge pending OtaCmd: device replied with first progress (status=0 = WireDownloading)
-	if status == WireDownloading {
-		_bridge.pendingMu.Lock()
-		if ch, ok := _bridge.pendingCmds[taskID]; ok {
-			close(ch) // signal the ack-wait goroutine
-		}
-		_bridge.pendingMu.Unlock()
+	if !seen[1] || !seen[2] || !seen[3] || taskID == "" || status > WireVerifying || progressPct > 100 {
+		return
 	}
-
-	// Update task in DB
 	var task models.OTATask
-	if err := m.db.Where("ota_id = ?", taskID).First(&task).Error; err != nil {
-		logger.Infof("OTA task not found: %s", taskID)
+	if err := m.db.Where("ota_id = ? AND collector_id = ?", taskID, deviceID).First(&task).Error; err != nil {
+		return
+	}
+	if terminalStates[task.Status] || task.Status == StatusTimeout {
+		logger.Warnf("[%s] OTA progress rejected for inactive task %s state=%s", deviceID, taskID, task.Status)
 		return
 	}
 
+	// Update task in DB
+
 	// Idempotency: terminal state records are immutable
 	if terminalStates[task.Status] {
+		_bridge.pendingMu.Lock()
+		if ch, ok := _bridge.pendingCmds[taskID]; ok {
+			delete(_bridge.pendingCmds, taskID)
+			close(ch)
+		}
+		_bridge.pendingMu.Unlock()
 		logger.Infof("[%s] OTA task %s already in terminal state %s, ignoring progress update",
 			deviceID, taskID, task.Status)
 		return
@@ -546,7 +577,8 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 	task.Progress = uint8(progressPct)
 
 	// Map wire code → state literal
-	wasActive := task.Status == StatusPending
+	originalStatus := task.Status
+	wasActive := originalStatus == StatusPending
 	switch status {
 	case WireDownloading:
 		task.Status = StatusDownloading
@@ -577,10 +609,20 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 		task.StartedAt = &now
 	}
 
-	if err := m.db.Save(&task).Error; err != nil {
-		logger.Errorf("[%s] Failed to save OTA task %s: %v", deviceID, taskID, err)
+	updates := map[string]interface{}{"status": task.Status, "progress": task.Progress, "started_at": task.StartedAt, "completed_at": task.CompletedAt, "error_msg": task.ErrorMsg}
+	result := m.db.Model(&models.OTATask{}).
+		Where("id = ? AND status = ?", task.ID, originalStatus).
+		Updates(updates)
+	if result.Error != nil || result.RowsAffected != 1 {
+		logger.Errorf("[%s] Failed conditional save OTA task %s: err=%v rows=%d", deviceID, taskID, result.Error, result.RowsAffected)
 		return
 	}
+	_bridge.pendingMu.Lock()
+	if ch, ok := _bridge.pendingCmds[taskID]; ok {
+		delete(_bridge.pendingCmds, taskID)
+		close(ch)
+	}
+	_bridge.pendingMu.Unlock()
 
 	// WebSocket push
 	if m.wsHub != nil {

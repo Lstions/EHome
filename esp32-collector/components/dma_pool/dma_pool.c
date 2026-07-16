@@ -168,10 +168,10 @@ esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
  *  Release
  * ---------------------------------------------------------------- */
 
-void dma_pool_release(dma_pool_t *pool, uint32_t dma_id)
+esp_err_t dma_pool_release(dma_pool_t *pool, uint32_t dma_id)
 {
-    if (!pool || !pool->mutex) return;
-    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    if (!pool || !pool->mutex) return ESP_ERR_INVALID_ARG;
+    if (xSemaphoreTake(pool->mutex, portMAX_DELAY) != pdTRUE) return ESP_ERR_TIMEOUT;
     for (int i = 0; i < pool->count; i++) {
         if (pool->channels[i].dma_id == dma_id &&
             pool->channels[i].state == DMA_STATE_ALLOCATED) {
@@ -183,12 +183,13 @@ void dma_pool_release(dma_pool_t *pool, uint32_t dma_id)
         }
     }
     xSemaphoreGive(pool->mutex);
+    return ESP_OK;
 }
 
-void dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id)
+esp_err_t dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id)
 {
-    if (!pool || !pool->mutex || !hw_id) return;
-    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    if (!pool || !pool->mutex || !hw_id) return ESP_ERR_INVALID_ARG;
+    if (xSemaphoreTake(pool->mutex, portMAX_DELAY) != pdTRUE) return ESP_ERR_TIMEOUT;
     for (int i = 0; i < pool->count; i++) {
         if (pool->channels[i].state == DMA_STATE_ALLOCATED &&
             strcmp(pool->channels[i].bound_to, hw_id) == 0) {
@@ -198,6 +199,7 @@ void dma_pool_release_by_hw(dma_pool_t *pool, const char *hw_id)
         }
     }
     xSemaphoreGive(pool->mutex);
+    return ESP_OK;
 }
 
 /* ----------------------------------------------------------------
@@ -254,6 +256,39 @@ esp_err_t dma_pool_apply_config(dma_pool_t *pool, uint32_t dma_id,
 
     xSemaphoreGive(pool->mutex);
     return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t dma_pool_snapshot_state(dma_pool_t *pool, dma_pool_state_t *out)
+{
+    if (!pool || !pool->mutex || !out) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    memcpy(out->channels, pool->channels, sizeof(out->channels));
+    out->count = pool->count;
+    xSemaphoreGive(pool->mutex);
+    return ESP_OK;
+}
+
+esp_err_t dma_pool_restore_state(dma_pool_t *pool, const dma_pool_state_t *state)
+{
+    if (!pool || !pool->mutex || !state || state->count > DMA_POOL_MAX_CHANNELS)
+        return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    memcpy(pool->channels, state->channels, sizeof(pool->channels));
+    pool->count = state->count;
+    xSemaphoreGive(pool->mutex);
+    return ESP_OK;
+}
+
+esp_err_t dma_pool_reset_runtime(dma_pool_t *pool)
+{
+    if (!pool || !pool->mutex) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(pool->mutex, portMAX_DELAY);
+    for (int i = 0; i < pool->count; i++) {
+        pool->channels[i].state = DMA_STATE_FREE;
+        pool->channels[i].bound_to[0] = '\0';
+    }
+    xSemaphoreGive(pool->mutex);
+    return ESP_OK;
 }
 
 /* ----------------------------------------------------------------

@@ -5,14 +5,16 @@
  * All callbacks receive app_state_t *ctx for thread-safe access to
  * shared state.  Config-manifest application is protected by mutex.
  *
- * v2.4: Incremental config apply — only rebuild channels whose bus
- * configuration changed (bus_type, bus_config, DMA binding).  Channels
- * with only parameter changes (interval_ms, template_ids) are updated
- * in-place via scheduler without bus teardown.
+ * Config-manifest application is an ordered transaction: active manifest and
+ * ConfigResult success are published only after DMA, peripheral, bus, and
+ * scheduler setup all succeed. Runtime rollback is checked; unrecoverable
+ * rollback enters a deterministic safe state.
  */
 
 #include "app_state.h"
 #include "app_callbacks.h"
+#include "config_apply_transaction.h"
+#include "periph_config_apply.h"
 #include "bus_manager.h"
 #include "hello_handshake.h"
 #include "msg_handler.h"
@@ -29,9 +31,12 @@
 #include "log_stream.h"
 #include "gpio_ctrl.h"
 #include "pwm_ctrl.h"
+#include "periph_owner.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "frame_codec.h"
 #include <string.h>
+#include <stdlib.h>
 
 #define TAG "CALLBACK"
 
@@ -42,98 +47,216 @@ static bool is_config_manifest(const uint8_t *data, size_t len)
     return len > 0 && data[0] == MSG_CONFIG_MFST;
 }
 
-/* v2.4: Incremental config apply.
- *
- * Instead of full teardown/rebuild, we compare old vs new manifest
- * and only rebuild channels whose bus-level config changed.
- *
- * "Bus-level" = bus_type, bus_config bytes, or DMA binding.
- * "Param-level" = interval_ms, template_ids, enabled flag.
- *
- * Param-only changes → update scheduler in-place, no bus rebuild.
- * Bus-level changes → unreg old bus, reg new bus.
- * Removed channels → unreg bus, remove from scheduler.
- * New channels → reg bus, add to scheduler.
- */
+typedef struct {
+    app_state_t *app;
+    dma_pool_state_t old_dma;
+    periph_runtime_snapshot_t old_peripherals;
+    bool dma_snapshot_valid;
+    bool old_log_active;
+    uint8_t old_log_level;
+    scheduler_queues_t queues;
+} manifest_tx_ctx_t;
+
+static esp_err_t tx_begin(void *opaque)
+{
+    (void)opaque;
+    return periph_owner_transaction_begin();
+}
+
+static void tx_end(void *opaque)
+{
+    (void)opaque;
+    periph_owner_transaction_end();
+}
+
+static esp_err_t tx_snapshot(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    esp_err_t err = ESP_OK;
+    if (tx->app->dma_pool) {
+        err = dma_pool_snapshot_state(tx->app->dma_pool, &tx->old_dma);
+        tx->dma_snapshot_valid = err == ESP_OK;
+    } else {
+        tx->dma_snapshot_valid = true;
+    }
+    tx->old_log_active = log_stream_is_active();
+    tx->old_log_level = log_stream_get_level();
+    if (err == ESP_OK) err = periph_config_snapshot_locked(&tx->old_peripherals);
+    return err;
+}
+
+static esp_err_t tx_prepare(void *opaque)
+{
+    (void)opaque;
+    return !scheduler_is_running() || scheduler_stop() == SCHED_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t tx_apply_dma(void *opaque, const config_manifest_t *manifest)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    if (!tx->app->dma_pool) return manifest->dma_config_count ? ESP_ERR_INVALID_STATE : ESP_OK;
+    esp_err_t err = dma_pool_reset_runtime(tx->app->dma_pool);
+    for (int i = 0; err == ESP_OK && i < manifest->dma_config_count; i++) {
+        const config_dma_channel_t *dc = &manifest->dma_configs[i];
+        err = dma_pool_apply_config(tx->app->dma_pool, dc->dma_id,
+                                    dc->enabled, dc->bind_to);
+    }
+    return err;
+}
+
+static esp_err_t tx_apply_peripherals(void *opaque, const config_manifest_t *manifest)
+{
+    (void)opaque;
+    return handler_periph_apply_configs_locked(manifest);
+}
+
+static esp_err_t tx_apply_buses(void *opaque, const config_manifest_t *manifest)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    return bus_manager_apply_manifest(&tx->app->bus_runtime, manifest);
+}
+
+static esp_err_t tx_apply_scheduler(void *opaque, const config_manifest_t *manifest)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    sched_err_t err = manifest->applied
+        ? scheduler_start_manifest(&tx->queues, manifest)
+        : scheduler_prepare(&tx->queues, manifest);
+    return err == SCHED_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t tx_apply_log_stream(void *opaque, const config_manifest_t *manifest)
+{
+    (void)opaque;
+    if (!manifest->log_stream_enabled) return log_stream_stop();
+    return log_stream_is_active()
+        ? log_stream_set_level(manifest->log_stream_level)
+        : log_stream_start(manifest->log_stream_level);
+}
+
+static bool tx_commit(void *opaque)
+{
+    (void)opaque;
+    if (!config_mgr_commit_staged_manifest()) return false;
+    scheduler_activate();
+    return true;
+}
+
+static esp_err_t tx_stop_scheduler(void *opaque)
+{
+    (void)opaque;
+    return scheduler_stop() == SCHED_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t tx_cleanup_buses(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    return bus_manager_cleanup_all(&tx->app->bus_runtime);
+}
+
+static esp_err_t tx_restore_dma(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    if (!tx->app->dma_pool) return ESP_OK;
+    return tx->dma_snapshot_valid
+        ? dma_pool_restore_state(tx->app->dma_pool, &tx->old_dma)
+        : ESP_FAIL;
+}
+
+static esp_err_t tx_restore_peripherals(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    return periph_config_restore_locked(&tx->old_peripherals);
+}
+
+static esp_err_t tx_restore_log_stream(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    if (!tx->old_log_active) return log_stream_stop();
+    return log_stream_is_active()
+        ? log_stream_set_level(tx->old_log_level)
+        : log_stream_start(tx->old_log_level);
+}
+
+static esp_err_t tx_safe_state(void *opaque)
+{
+    manifest_tx_ctx_t *tx = opaque;
+    static const config_manifest_t empty_manifest;
+    esp_err_t scheduler_err = scheduler_stop() == SCHED_OK ? ESP_OK : ESP_FAIL;
+    if (scheduler_err != ESP_OK) return ESP_FAIL;
+    esp_err_t bus_err = bus_manager_cleanup_all(&tx->app->bus_runtime);
+    esp_err_t dma_err = tx->app->dma_pool
+        ? dma_pool_reset_runtime(tx->app->dma_pool) : ESP_OK;
+    esp_err_t periph_err = handler_periph_apply_configs_locked(&empty_manifest);
+    esp_err_t log_err = log_stream_stop();
+    return scheduler_err == ESP_OK && bus_err == ESP_OK && dma_err == ESP_OK &&
+           periph_err == ESP_OK && log_err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+static const config_apply_ops_t s_manifest_tx_ops = {
+    .begin_transaction = tx_begin,
+    .end_transaction = tx_end,
+    .snapshot = tx_snapshot,
+    .prepare = tx_prepare,
+    .apply_dma = tx_apply_dma,
+    .apply_peripherals = tx_apply_peripherals,
+    .apply_buses = tx_apply_buses,
+    .apply_scheduler = tx_apply_scheduler,
+    .apply_log_stream = tx_apply_log_stream,
+    .commit_manifest = tx_commit,
+    .stop_scheduler = tx_stop_scheduler,
+    .cleanup_buses = tx_cleanup_buses,
+    .restore_dma = tx_restore_dma,
+    .restore_peripherals = tx_restore_peripherals,
+    .restore_log_stream = tx_restore_log_stream,
+    .enter_safe_state = tx_safe_state,
+};
+
+static bool extract_manifest_identity(const uint8_t *data, size_t len,
+                                      char *manifest_id, size_t manifest_cap,
+                                      char *sync_id, size_t sync_cap)
+{
+    frame_decoder_t dec;
+    if (frame_decoder_init(&dec, data, len) != FRAME_OK) return false;
+    frame_field_t field;
+    frame_err_t err;
+    bool have_manifest = false, have_sync = false;
+    while ((err = frame_decoder_next(&dec, &field)) == FRAME_OK) {
+        if (field.field_num == 1) {
+            if (frame_field_get_string(&field, manifest_id, manifest_cap) != FRAME_OK) return false;
+            have_manifest = true;
+        } else if (field.field_num == 8) {
+            if (frame_field_get_string(&field, sync_id, sync_cap) != FRAME_OK) return false;
+            have_sync = true;
+        }
+    }
+    return err == FRAME_DONE && have_manifest && have_sync && manifest_id[0] && sync_id[0];
+}
+
+/* Transactional config apply. A checked full runtime rebuild is intentionally
+ * used for both first and subsequent manifests so no incremental path can
+ * acknowledge a partially applied channel set. */
 static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t len)
 {
-    /* v2.4: Idempotency guard — check BEFORE apply_manifest destroys old config.
-     * We peek at field 1 (manifest_id string) from raw frame bytes to compare
-     * against last known NVS manifest_id, without calling apply_manifest.
-     *
-     * Frame format: [type_byte] [field1_tag] [field1_len] [manifest_id_bytes...]
-     * Field 1 is tag=0x0A (field_num=1, wire_type=2), followed by varint length
-     * then the string bytes. If it matches NVS and scheduler is running → skip. */
-    if (len > 4 && data[0] == MSG_CONFIG_MFST) {
-        const uint8_t *p = data + 1;
-        /* Find field 1: tag byte = (field_num << 3) | wire_type = (1 << 3) | 2 = 0x0A */
-        while (p < data + len - 1) {
-            uint8_t tag = *p++;
-            uint8_t field_num = tag >> 3;
-            uint8_t wire_type = tag & 0x07;
-            if (field_num == 1 && wire_type == 2) {
-                /* Varint length */
-                size_t slen = 0;
-                int shift = 0;
-                while (p < data + len && (*p & 0x80)) {
-                    slen |= ((size_t)(*p++ & 0x7F)) << shift;
-                    shift += 7;
-                }
-                if (p < data + len) slen |= ((size_t)(*p++)) << shift;
-                if (p + slen <= data + len && slen < 64) {
-                    char mid[64];
-                    memcpy(mid, p, slen);
-                    mid[slen] = '\0';
-                    const char *last_id = config_mgr_get_last_known_manifest_id();
-                    if (last_id && strcmp(mid, last_id) == 0 && scheduler_is_running()) {
-                        ESP_LOGI(TAG, "handle_config_applied: SKIP (same manifest %s, scheduler running)", mid);
-                        sync_manager_on_config_applied(0, mid);
-                        sync_manager_cancel_config_timeout();
-                        sync_manager_on_downlink_received(MSG_CONFIG_MFST);
-                        rgb_led_set_state(LED_STATE_RUNNING);
-                        return;
-                    }
-                }
-                break;
-            }
-            if (wire_type == 0) { while (p < data + len && (*p++ & 0x80)); }
-            else if (wire_type == 2) {
-                size_t vlen = 0; int s = 0;
-                while (p < data + len && (*p & 0x80)) { vlen |= ((size_t)(*p++ & 0x7F)) << s; s += 7; }
-                if (p < data + len) vlen |= ((size_t)(*p++)) << s;
-                p += vlen;
-            } else if (wire_type == 5) { p += 4; }
-        }
+    /* Parse and validate the complete manifest first. Same-manifest retransmits
+     * must still echo their current sync generation in ConfigResult. */
+    char incoming_manifest_id[64] = {0};
+    char incoming_sync_id[64] = {0};
+    if (!extract_manifest_identity(data, len, incoming_manifest_id, sizeof(incoming_manifest_id),
+                                   incoming_sync_id, sizeof(incoming_sync_id))) {
+        ESP_LOGE(TAG, "Rejecting ConfigManifest without valid correlation identity");
+        return;
     }
-
-    /* v2.4: Snapshot only channel-level fields needed for diff.
-     * config_manifest_t is ~4.3KB — too large for MQTT callback stack. */
-    struct {
-        uint32_t id;
-        bool     enabled;
-        uint8_t  bus_type;
-        uint8_t  bus_config[128];
-        size_t   bus_config_len;
-    } old_channels[MAX_CHANNELS];
-    uint8_t old_count = 0;
-
-    const config_manifest_t *old_cfg = config_mgr_get_manifest();
-    bool had_old = (old_cfg && old_cfg->applied);
-    if (had_old) {
-        old_count = old_cfg->channel_count;
-        if (old_count > MAX_CHANNELS) old_count = MAX_CHANNELS;
-        for (int i = 0; i < old_count; i++) {
-            old_channels[i].id = old_cfg->channels[i].id;
-            old_channels[i].enabled = old_cfg->channels[i].enabled;
-            old_channels[i].bus_type = old_cfg->channels[i].bus_type;
-            old_channels[i].bus_config_len = old_cfg->channels[i].bus_config_len;
-            if (old_cfg->channels[i].bus_config_len <= sizeof(old_channels[i].bus_config)) {
-                memcpy(old_channels[i].bus_config,
-                       old_cfg->channels[i].bus_config,
-                       old_cfg->channels[i].bus_config_len);
-            }
-        }
+    /* Large rollback state lives in bounded heap, never on the MQTT callback stack. */
+    config_manifest_t *old_snapshot = calloc(1, sizeof(*old_snapshot));
+    manifest_tx_ctx_t *tx = calloc(1, sizeof(*tx));
+    if (!old_snapshot || !tx) {
+        free(old_snapshot);
+        free(tx);
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        return;
     }
+    bool had_old = config_mgr_snapshot_active(old_snapshot);
 
     /* Suspend rx_task/cmd_task before cleanup to prevent race */
     bus_worker_suspend();
@@ -141,139 +264,85 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     /* Mutex — bus teardown/rebuild may block */
     app_state_lock_config();
 
-    /* === Phase 0: Parse new manifest (inside mutex) === */
-    config_mgr_apply_manifest(data, len);
-    {
-        const config_manifest_t *tmp_cfg = config_mgr_get_manifest();
-        ESP_LOGI(TAG, "After apply_manifest: channels=%d, ch[0].edge_device_count=%d",
-                 tmp_cfg ? tmp_cfg->channel_count : 0,
-                 (tmp_cfg && tmp_cfg->channel_count > 0) ? tmp_cfg->channels[0].edge_device_count : -1);
+    /* === Phase 0: Stage and validate new manifest while the active one remains visible. === */
+    if (!config_mgr_stage_manifest(data, len)) {
+        ESP_LOGE(TAG, "Rejecting invalid or conflicting ConfigManifest");
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        free(old_snapshot);
+        free(tx);
+        return;
+    }
+    const config_manifest_t *staged_cfg = config_mgr_get_staged_manifest();
+    if (!staged_cfg) {
+        ESP_LOGE(TAG, "Rejecting ConfigManifest because staging disappeared");
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        free(old_snapshot);
+        free(tx);
+        return;
     }
 
-    /* v3.0: Apply GPIO/PWM peripheral configs from manifest (field 11/12) */
-    {
-        const config_manifest_t *cfg = config_mgr_get_manifest();
-        if (cfg) {
-            handler_periph_apply_configs(cfg);
+    char attempted_id[sizeof(staged_cfg->manifest_id)];
+	char attempted_sync_id[sizeof(staged_cfg->sync_id)];
+    memcpy(attempted_id, staged_cfg->manifest_id, sizeof(attempted_id));
+    attempted_id[sizeof(attempted_id) - 1] = '\0';
+	memcpy(attempted_sync_id, staged_cfg->sync_id, sizeof(attempted_sync_id));
+	attempted_sync_id[sizeof(attempted_sync_id) - 1] = '\0';
+    tx->app = s;
+    tx->queues = (scheduler_queues_t){
+        .uart0_cmd_queue = s->uart0_cmd_queue,
+        .uart1_cmd_queue = s->uart1_cmd_queue,
+        .spi_cmd_queue = s->spi_cmd_queue,
+        .i2c_cmd_queue = s->i2c_cmd_queue,
+    };
+    config_apply_result_t tx_result = config_apply_transaction_execute(
+        &s_manifest_tx_ops, tx, had_old ? old_snapshot : NULL, staged_cfg);
+    if (tx_result != CONFIG_APPLY_OK) {
+        ESP_LOGE(TAG, "Rejecting ConfigManifest transaction: result=%d", (int)tx_result);
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(attempted_id, attempted_sync_id, false);
+        if (config_apply_result_requires_restart(tx_result)) {
+            /* Runtime is neither restored nor safely stopped. Keep bus workers
+             * suspended and retain the config lock until the restart executes. */
+            ESP_LOGE(TAG, "Unrecoverable config transaction; restarting fail-hard");
+            free(old_snapshot);
+            free(tx);
+            esp_restart();
+            return;
         }
+        app_state_unlock_config();
+        bus_worker_resume();
+        free(old_snapshot);
+        free(tx);
+        return;
     }
-
-    /* v2.4: Apply DmaChannelConfig to dma_pool.
-     * Previously done in parse_manifest() but removed (redundant ALLOCATED→FREE→ALLOCATED).
-     * Now applied here inside mutex, before bus rebuild consumes the DMA bindings. */
-    if (s->dma_pool) {
-        const config_manifest_t *m = config_mgr_get_manifest();
-        if (m && m->applied) {
-            for (int i = 0; i < m->dma_config_count; i++) {
-                const config_dma_channel_t *dc = &m->dma_configs[i];
-                dma_pool_apply_config(s->dma_pool, dc->dma_id, dc->enabled, dc->bind_to);
-            }
-        }
-    }
+    free(old_snapshot);
+    free(tx);
 
     const config_manifest_t *new_cfg = config_mgr_get_manifest();
     const char *new_id = new_cfg ? new_cfg->manifest_id : NULL;
+    ESP_LOGI(TAG, "Config transaction committed: manifest=%s channels=%d",
+             new_id ? new_id : "(null)", new_cfg ? new_cfg->channel_count : 0);
 
-    /* Idempotency guard — already checked at function entry with raw frame peek.
-     * If we reach here, either manifest is new or scheduler is not running. */
-
-    ESP_LOGI(TAG, "handle_config_applied: START (manifest=%s, scheduler_running=%d, had_old=%d)",
-             new_id ? new_id : "(null)", scheduler_is_running(), had_old);
-
-    /* === Phase 1: Send ConfigResult + update sync state === */
-    msg_handler_send_config_result(new_id ? new_id : "unknown", true);
-    sync_manager_on_config_applied(0, new_id ? new_id : "");
-    sync_manager_cancel_config_timeout();
-    sync_manager_on_downlink_received(MSG_CONFIG_MFST);
-
-    /* === Phase 2: Incremental bus rebuild === */
-
-    if (had_old && scheduler_is_running()) {
-        /* v2.4: Pause scheduler (preserves channel state) to prevent data race
-         * between scheduler_task reading s_channels[] while we modify it.
-         * scheduler_pause() stops the task loop but keeps s_channels[].active intact,
-         * so scheduler_update_channel / scheduler_remove_channel can still find channels. */
-        scheduler_pause();
-
-        /* --- 2a: Remove channels that no longer exist or are disabled --- */
-        for (int i = 0; i < old_count; i++) {
-            if (!old_channels[i].enabled) continue;
-
-            bool found = false;
-            for (int j = 0; j < new_cfg->channel_count; j++) {
-                if (new_cfg->channels[j].id == old_channels[i].id &&
-                    new_cfg->channels[j].enabled) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                ESP_LOGI(TAG, "Incremental: remove ch=%lu", (unsigned long)old_channels[i].id);
-                bus_manager_unreg_channel(&s->bus_runtime, old_channels[i].id);
-                scheduler_remove_channel(old_channels[i].id);
-            }
-        }
-
-        /* --- 2b: Rebuild channels whose bus-level config changed --- */
-        for (int j = 0; j < new_cfg->channel_count; j++) {
-            const config_channel_t *new_ch = &new_cfg->channels[j];
-            if (!new_ch->enabled) continue;
-
-            /* Find matching old channel */
-            int old_idx = -1;
-            for (int i = 0; i < old_count; i++) {
-                if (old_channels[i].id == new_ch->id && old_channels[i].enabled) {
-                    old_idx = i;
-                    break;
-                }
-            }
-
-            if (old_idx < 0) {
-                /* New channel — full register */
-                ESP_LOGI(TAG, "Incremental: add new ch=%lu", (unsigned long)new_ch->id);
-                bus_manager_reg_channel(&s->bus_runtime, new_ch);
-                scheduler_add_channel(new_ch);
-            } else if (old_channels[old_idx].bus_type != new_ch->bus_type ||
-                       old_channels[old_idx].bus_config_len != new_ch->bus_config_len ||
-                       memcmp(old_channels[old_idx].bus_config, new_ch->bus_config,
-                              new_ch->bus_config_len) != 0) {
-                /* Bus-level config changed — rebuild */
-                ESP_LOGI(TAG, "Incremental: rebuild ch=%lu (bus config changed)",
-                         (unsigned long)new_ch->id);
-                bus_manager_unreg_channel(&s->bus_runtime, old_channels[old_idx].id);
-                bus_manager_reg_channel(&s->bus_runtime, new_ch);
-                scheduler_remove_channel(old_channels[old_idx].id);
-                scheduler_add_channel(new_ch);
-            } else {
-                /* Param-only change — update scheduler in-place */
-                ESP_LOGI(TAG, "Incremental: update ch=%lu (params only)",
-                         (unsigned long)new_ch->id);
-                scheduler_update_channel(new_ch);
-            }
-        }
-
-        /* v2.4: Resume scheduler after pause — incremental modifications done */
-        scheduler_resume(&(scheduler_queues_t){
-            .uart0_cmd_queue = s->uart0_cmd_queue,
-            .uart1_cmd_queue = s->uart1_cmd_queue,
-            .spi_cmd_queue  = s->spi_cmd_queue,
-            .i2c_cmd_queue  = s->i2c_cmd_queue,
-        });
-    } else {
-        /* First-time apply or scheduler not running — full setup */
-        ESP_LOGI(TAG, "Full setup (first apply or scheduler not running)");
-        if (scheduler_is_running()) {
-            scheduler_stop();
-        }
-        bus_manager_cleanup_all(&s->bus_runtime);
-        bus_manager_setup_from_manifest(&s->bus_runtime);
-        scheduler_start(&(scheduler_queues_t){
-            .uart0_cmd_queue = s->uart0_cmd_queue,
-            .uart1_cmd_queue = s->uart1_cmd_queue,
-            .spi_cmd_queue  = s->spi_cmd_queue,
-            .i2c_cmd_queue  = s->i2c_cmd_queue,
-        });
+    /* ConfigResult success is deliberately last: bus, DMA, peripherals,
+     * scheduler creation and active manifest publication all succeeded. */
+    /* Persist synchronization metadata before acknowledging success. */
+    if (sync_manager_on_config_applied(0, new_id ? new_id : "") != ESP_OK) {
+        msg_handler_send_config_result(new_id ? new_id : "unknown", new_cfg ? new_cfg->sync_id : "", false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        return;
     }
+	if (msg_handler_send_config_result(new_id ? new_id : "unknown", new_cfg ? new_cfg->sync_id : "", true) != ESP_OK) {
+		ESP_LOGE(TAG, "Config committed but ConfigResult publish failed; keeping timeout/retry active");
+	} else {
+		sync_manager_cancel_config_timeout();
+		sync_manager_on_downlink_received(MSG_CONFIG_MFST);
+	}
 
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());
 
@@ -282,21 +351,8 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     /* Resume rx_task/cmd_task */
     bus_worker_resume();
 
-    /* v2.5: Apply log_stream config from manifest */
-    {
-        bool log_en = config_mgr_get_log_stream_enabled();
-        uint8_t log_lvl = config_mgr_get_log_stream_level();
-        if (log_en && !log_stream_is_active()) {
-            ESP_LOGI(TAG, "LogStream: starting (level=%d)", log_lvl);
-            log_stream_start(log_lvl);
-        } else if (!log_en && log_stream_is_active()) {
-            ESP_LOGI(TAG, "LogStream: stopping");
-            log_stream_stop();
-        } else if (log_en && log_stream_is_active()) {
-            ESP_LOGI(TAG, "LogStream: updating level=%d", log_lvl);
-            log_stream_set_level(log_lvl);
-        }
-    }
+    /* Log stream state was checked and applied inside the transaction, before
+     * manifest commit and the success ConfigResult. */
 
     rgb_led_set_state(LED_STATE_RUNNING);
     ESP_LOGI(TAG, "handle_config_applied: DONE");
@@ -322,11 +378,8 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
     switch (state) {
     case WIFI_MGR_CONNECTED:
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
-        if (s->ota_need_confirm) {
-            extern void ota_confirm_valid(void);
-            ota_confirm_valid();
-            s->ota_need_confirm = false;
-        }
+        /* Pending OTA images are confirmed only by status_task after MQTT is
+         * connected and the first StatusReport has been sent. */
         /* Defer mqtt_client_start() to a separate task to avoid stack overflow
          * in the WiFi event loop task (which has limited stack). */
         ESP_LOGI(TAG, "WiFi connected, spawning MQTT start task");

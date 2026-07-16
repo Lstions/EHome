@@ -7,4 +7,4 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 
 # C6 has 2 HP UARTs (DMA-capable) + 1 LP UART (no DMA)
 # UART0 (TX16/RX17): user data serial + ROM download fallback
-# UART1 (TX21/RX20): general purpose
+# UART1 (TX20/RX21): general purpose

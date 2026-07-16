@@ -1,3 +1,3 @@
 idf_component_register(SRCS "pwm_ctrl.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES driver esp_driver_ledc esp_driver_gpio hw_profile)
+                       REQUIRES driver esp_driver_ledc esp_driver_gpio hw_profile periph_owner)

@@ -125,7 +125,7 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 	}()
 
 	// Send the command (P3-5: QoS 2 for critical write operations)
-	topic := mqtt.TopicForNode(deviceID)
+	topic := mqtt.ControlTopicForNode(deviceID)
 	if err := m.mqtt.PublishQoS2(topic, enc.Bytes()); err != nil {
 		entry.resolve(&Response{Success: false, ErrorMsg: fmt.Sprintf("failed to publish: %v", err)})
 		return nil, fmt.Errorf("failed to publish: %w", err)
@@ -335,12 +335,12 @@ func (m *Manager) recoverPending() {
 		}
 
 		m.pending[r.RequestID] = &Entry{
-			Response:   make(chan *Response, 1),
-			ReadSize:   r.ReadSize,
-			SentAt:     r.SentAt,
-			DeviceID:   r.DeviceID,
-			ChannelID:  r.ChannelID,
-			Data:       r.Data,
+			Response:  make(chan *Response, 1),
+			ReadSize:  r.ReadSize,
+			SentAt:    r.SentAt,
+			DeviceID:  r.DeviceID,
+			ChannelID: r.ChannelID,
+			Data:      r.Data,
 		}
 
 		// Update nextRequestID to avoid collision with recovered IDs

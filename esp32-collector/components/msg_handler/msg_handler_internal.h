@@ -13,12 +13,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "frame_codec.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /** Publish a frame via current transport or broadcast fallback. */
+esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len);
 void msg_handler_publish(const uint8_t *data, size_t len);
 
 /* ================================================================
@@ -154,6 +156,7 @@ typedef enum {
     OTA_CMD_F_CHECKSUM = 3,
     OTA_CMD_F_SIZE     = 4,
     OTA_CMD_F_VERSION  = 5,
+    OTA_CMD_F_SEQUENCE = 6,
 } ota_cmd_field_t;
 
 /* OtaProg (0x0B) */
@@ -215,7 +218,7 @@ typedef enum {
 typedef enum {
     PERIPH_CMD_F_REQUEST_ID  = 1,
     PERIPH_CMD_F_PERIPH_TYPE = 2,
-    PERIPH_CMD_F_PIN         = 3,
+    PERIPH_CMD_F_RESOURCE_ID = 3,
     PERIPH_CMD_F_ACTION      = 4,
     PERIPH_CMD_F_VALUE       = 5,
     PERIPH_CMD_F_CONFIG      = 6,
@@ -228,7 +231,9 @@ typedef enum {
     PERIPH_RSP_F_VALUE       = 3,
     PERIPH_RSP_F_ERROR_CODE  = 4,
     PERIPH_RSP_F_PERIPH_TYPE = 5,
-    PERIPH_RSP_F_PIN         = 6,
+    PERIPH_RSP_F_RESOURCE_ID = 6,
+    PERIPH_RSP_F_ACTION      = 7,
+    PERIPH_RSP_F_RUNNING     = 8,
 } periph_rsp_field_t;
 
 /* Periph type values */
@@ -258,11 +263,12 @@ typedef enum {
 
 /* ConfigManifest PWM sub-fields (field 12) */
 typedef enum {
-    PWM_CFG_F_PIN        = 1,
-    PWM_CFG_F_FREQUENCY  = 2,
-    PWM_CFG_F_DUTY       = 3,
-    PWM_CFG_F_RESOLUTION = 4,
-    PWM_CFG_F_AUTO_START = 5,
+    PWM_CFG_F_CHANNEL    = 1,
+    PWM_CFG_F_PIN        = 2,
+    PWM_CFG_F_FREQUENCY  = 3,
+    PWM_CFG_F_DUTY       = 4,
+    PWM_CFG_F_RESOLUTION = 5,
+    PWM_CFG_F_AUTO_START = 6,
 } pwm_config_field_t;
 
 #ifdef __cplusplus

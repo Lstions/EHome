@@ -59,8 +59,25 @@ type Manager struct {
 	logCleanup    *logstream.LogCleanup
 
 	// v2.5: Data event bus (replaces inline processDataReportJob heavy logic)
-	dataBus *databus.DataEventBus
+	dataBus        *databus.DataEventBus
+	periphMu       sync.Mutex
+	periphIntentMu sync.Mutex
+	periphPending  map[uint32]periphRequestMeta
+	periphLatest   map[string]uint32
 }
+
+type periphRequestMeta struct {
+	deviceID                       string
+	periphType, resourceID, action uint8
+	hardwareID                     string
+	pin                            int
+	created                        time.Time
+	previousValue                  uint32
+	provisionalValue               uint32
+}
+
+func (m *Manager) LockPeriphIntent()   { m.periphIntentMu.Lock() }
+func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
 
 // NewManager creates a new node manager
 func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager) *Manager {
@@ -77,6 +94,8 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		offlineDetector: offlineDetector,
 		stopCh:          make(chan struct{}),
 		reassembler:     newStreamReassembler(),
+		periphPending:   make(map[uint32]periphRequestMeta),
+		periphLatest:    make(map[string]uint32),
 	}
 	mgr.pingTracker = NewPingTracker()
 
@@ -269,23 +288,38 @@ func (m *Manager) buildHashData(
 		buf = append(buf, []byte(fmt.Sprintf("g:%d:%d:%d:%v:", g.Pin, g.Direction, g.InitialLevel, g.Enabled))...)
 	}
 	for _, p := range pwmConfigs {
-		buf = append(buf, []byte(fmt.Sprintf("p:%d:%d:%d:%d:%v:", p.Pin, p.Frequency, p.Duty, p.Resolution, p.Enabled))...)
+		buf = append(buf, []byte(fmt.Sprintf("p:%s:%d:%d:%d:%d:%d:%v:%v:",
+			p.HardwareID, p.Channel, p.Pin, p.Frequency, p.Duty, p.Resolution, p.AutoStart, p.Enabled))...)
 	}
 	return buf
 }
 
-// triggerDeviceInit finds devices for a node and triggers initialization
+// triggerDeviceInit finds devices for a node and triggers initialization.
 func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
-	var devices []models.EdgeDevice
-	m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
-		Where("channels.node_id = ?", nodeID).
-		Find(&devices)
-
+	devices, err := m.loadInitializableEdgeDevices(nodeID)
+	if err != nil {
+		logger.Warnf("[%s] Failed to load edge devices for init: %v", deviceID, err)
+		return
+	}
 	for _, dev := range devices {
 		if m.deviceInit.InitIfNeeded(deviceID, uint32(dev.ChannelID), dev.Type) {
 			logger.Infof("[%s] Triggered device init: type=%s ch=%d", deviceID, dev.Type, dev.ChannelID)
 		}
 	}
+}
+
+// loadInitializableEdgeDevices applies the same fail-closed transport contract as API init.
+func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevice, error) {
+	var devices []models.EdgeDevice
+	err := m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
+		Where("edge_devices.node_id = ?", nodeID).
+		Where("edge_devices.enabled = ?", true).
+		Where("channels.enabled = ?", true).
+		Where("channels.node_id = edge_devices.node_id").
+		Where("UPPER(TRIM(channels.hardware_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
+		Where("UPPER(TRIM(channels.bus_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
+		Find(&devices).Error
+	return devices, err
 }
 
 // DeviceInit returns the device init orchestrator for external access (e.g. API handlers)

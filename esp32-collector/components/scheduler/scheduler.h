@@ -31,6 +31,11 @@ extern "C" {
 #define SCHED_TASK_PRIORITY 5
 #define SCHED_TASK_CORE     0
 
+/* ESP-IDF's task creation API has no "create suspended" primitive. The task
+ * therefore waits in a dormant prepared state until scheduler_activate().
+ * A finite timeout prevents a failed/cancelled transaction from leaking it. */
+#define SCHED_PREPARE_TIMEOUT_MS 5000
+
 /* === Error codes === */
 typedef enum {
     SCHED_OK              =  0,
@@ -82,13 +87,20 @@ typedef struct {
 
 /* === Public API === */
 void scheduler_init(void);
-void scheduler_start(const scheduler_queues_t *queues);
-void scheduler_stop(void);
+sched_err_t scheduler_start(const scheduler_queues_t *queues);
+sched_err_t scheduler_start_manifest(const scheduler_queues_t *queues,
+                                     const config_manifest_t *manifest);
+/* Prepare channels and create a dormant task. scheduler_activate() is a
+ * no-fail publication step used only after the manifest commit succeeds. */
+sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
+                              const config_manifest_t *manifest);
+void scheduler_activate(void);
+sched_err_t scheduler_stop(void);
 sched_err_t scheduler_add_channel(const config_channel_t *channel);
 sched_err_t scheduler_remove_channel(uint32_t channel_id);
 sched_err_t scheduler_update_channel(const config_channel_t *channel);  /* v2.4: in-place update */
-void scheduler_pause(void);   /* v2.4: pause task loop, preserve channel state */
-void scheduler_resume(const scheduler_queues_t *queues);  /* v2.4: resume after pause */
+sched_err_t scheduler_pause(void);   /* v2.4: pause task loop, preserve channel state */
+sched_err_t scheduler_resume(const scheduler_queues_t *queues);  /* v2.4: resume after pause */
 bool scheduler_is_running(void);
 uint8_t scheduler_get_channel_count(void);
 

@@ -156,13 +156,13 @@ describe('GPIOPinRow', () => {
       expect(wrapper.get('.level-text').text()).toBe('未知')
     })
 
-    it('auto-reads level on mount', async () => {
+    it('queues an asynchronous read on mount without inventing a synchronous level', async () => {
       mocks.read.mockResolvedValue({ level: 1 })
       const wrapper = track(mountRow(inputConfig()))
       await flushPromises()
 
       expect(mocks.read).toHaveBeenCalledWith('node-1', 12)
-      expect(wrapper.get('.level-text').text()).toBe('HIGH')
+      expect(wrapper.get('.level-text').text()).toBe('未知')
     })
 
     it('does not auto-read when offline', async () => {
@@ -194,7 +194,7 @@ describe('GPIOPinRow', () => {
       await flushPromises()
 
       expect(mocks.read).toHaveBeenCalledWith('node-1', 12)
-      expect(wrapper.get('.level-text').text()).toBe('LOW')
+      expect(wrapper.get('.level-text').text()).toBe('未知')
     })
 
     it('shows error on read button failure', async () => {

@@ -34,6 +34,13 @@
 #define OTA_NVS_KEY_STATE   "ota_state"
 #define OTA_NVS_KEY_VERSION "ota_version"
 #define OTA_NVS_KEY_CHECKSUM "ota_checksum"
+#define OTA_NVS_KEY_ID "replay_id"
+#define OTA_NVS_KEY_URL "replay_url"
+#define OTA_NVS_KEY_SIZE "replay_size"
+#define OTA_NVS_KEY_SEQ "replay_seq"
+#define OTA_NVS_KEY_STATUS "replay_status"
+#define OTA_NVS_KEY_PCT "replay_pct"
+#define OTA_NVS_KEY_ERROR "replay_error"
 
 typedef enum {
     OTA_STATE_NONE       = 0,
@@ -43,9 +50,16 @@ typedef enum {
 
 static bool s_upgrading = false;
 static char s_last_ota_id[64] = {0};
+static ota_cmd_t s_last_ota_cmd;
+static bool s_have_last_ota_cmd = false;
+static uint8_t s_last_progress_status;
+static uint8_t s_last_progress_pct;
+static char s_last_progress_error[96];
+static portMUX_TYPE s_ota_cache_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* --- Progress callback injection (decouples from msg_handler) --- */
 static ota_progress_cb_t s_progress_cb = NULL;
+static esp_err_t ota_nvs_persist_replay(const ota_cmd_t *cmd);
 
 void ota_set_progress_callback(ota_progress_cb_t cb)
 {
@@ -55,9 +69,33 @@ void ota_set_progress_callback(ota_progress_cb_t cb)
 static void ota_report_progress(const char *ota_id, uint8_t status,
                                  uint8_t progress_pct, const char *error_msg)
 {
+    bool matches = false;
+    ota_cmd_t snapshot = {0};
+    taskENTER_CRITICAL(&s_ota_cache_lock);
+    if (ota_id && strcmp(s_last_ota_id, ota_id) == 0) {
+		matches = true;
+        s_last_progress_status = status;
+        s_last_progress_pct = progress_pct;
+        snprintf(s_last_progress_error, sizeof(s_last_progress_error), "%s", error_msg ? error_msg : "");
+		snapshot = s_last_ota_cmd;
+    }
+    taskEXIT_CRITICAL(&s_ota_cache_lock);
+	if (matches && snapshot.ota_id[0]) (void)ota_nvs_persist_replay(&snapshot);
     if (s_progress_cb) {
         s_progress_cb(ota_id, status, progress_pct, error_msg);
     }
+}
+
+void ota_replay_last_progress(const char *ota_id)
+{
+    uint8_t status = 0, pct = 0;
+    char error[sizeof(s_last_progress_error)] = {0};
+    bool matches;
+    taskENTER_CRITICAL(&s_ota_cache_lock);
+    matches = ota_id && strcmp(s_last_ota_id, ota_id) == 0;
+    if (matches) { status = s_last_progress_status; pct = s_last_progress_pct; memcpy(error, s_last_progress_error, sizeof(error)); }
+    taskEXIT_CRITICAL(&s_ota_cache_lock);
+    if (matches && s_progress_cb) s_progress_cb(ota_id, status, pct, error[0] ? error : NULL);
 }
 
 /* --- NVS helpers --- */
@@ -99,11 +137,55 @@ static esp_err_t ota_nvs_set_meta(const char *version, const char *checksum)
     return err;
 }
 
+static esp_err_t ota_nvs_persist_replay(const ota_cmd_t *cmd)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(handle, OTA_NVS_KEY_ID, cmd->ota_id);
+    if (err == ESP_OK) err = nvs_set_str(handle, OTA_NVS_KEY_URL, cmd->firmware_url);
+    if (err == ESP_OK) err = nvs_set_str(handle, OTA_NVS_KEY_CHECKSUM, cmd->checksum);
+    if (err == ESP_OK) err = nvs_set_str(handle, OTA_NVS_KEY_VERSION, cmd->version);
+    if (err == ESP_OK) err = nvs_set_u64(handle, OTA_NVS_KEY_SIZE, cmd->size_bytes);
+    if (err == ESP_OK) err = nvs_set_u32(handle, OTA_NVS_KEY_SEQ, cmd->sequence);
+    if (err == ESP_OK) err = nvs_set_u8(handle, OTA_NVS_KEY_STATUS, s_last_progress_status);
+    if (err == ESP_OK) err = nvs_set_u8(handle, OTA_NVS_KEY_PCT, s_last_progress_pct);
+    if (err == ESP_OK) err = nvs_set_str(handle, OTA_NVS_KEY_ERROR, s_last_progress_error);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+static void ota_nvs_load_replay(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
+    ota_cmd_t loaded = {0};
+    size_t id_len = sizeof(loaded.ota_id), url_len = sizeof(loaded.firmware_url);
+    size_t checksum_len = sizeof(loaded.checksum), version_len = sizeof(loaded.version);
+    size_t error_len = sizeof(s_last_progress_error);
+    esp_err_t err = nvs_get_str(handle, OTA_NVS_KEY_ID, loaded.ota_id, &id_len);
+    if (err == ESP_OK) err = nvs_get_str(handle, OTA_NVS_KEY_URL, loaded.firmware_url, &url_len);
+    if (err == ESP_OK) err = nvs_get_str(handle, OTA_NVS_KEY_CHECKSUM, loaded.checksum, &checksum_len);
+    if (err == ESP_OK) err = nvs_get_str(handle, OTA_NVS_KEY_VERSION, loaded.version, &version_len);
+    if (err == ESP_OK) err = nvs_get_u64(handle, OTA_NVS_KEY_SIZE, &loaded.size_bytes);
+    if (err == ESP_OK) err = nvs_get_u32(handle, OTA_NVS_KEY_SEQ, &loaded.sequence);
+    if (err == ESP_OK) err = nvs_get_u8(handle, OTA_NVS_KEY_STATUS, &s_last_progress_status);
+    if (err == ESP_OK) err = nvs_get_u8(handle, OTA_NVS_KEY_PCT, &s_last_progress_pct);
+    if (err == ESP_OK) err = nvs_get_str(handle, OTA_NVS_KEY_ERROR, s_last_progress_error, &error_len);
+    nvs_close(handle);
+    if (err == ESP_OK && loaded.ota_id[0] && loaded.sequence) {
+        s_last_ota_cmd = loaded; s_have_last_ota_cmd = true;
+        snprintf(s_last_ota_id, sizeof(s_last_ota_id), "%s", loaded.ota_id);
+    }
+}
+
 /* --- Public API --- */
 
 void ota_init(void)
 {
     s_upgrading = false;
+    ota_nvs_load_replay();
     ESP_LOGI(TAG, "OTA initialized");
 }
 
@@ -117,6 +199,50 @@ bool ota_is_duplicate(const char *ota_id)
     return false;
 }
 
+ota_cmd_class_t ota_classify_cmd(const ota_cmd_t *cmd)
+{
+    if (!cmd) return OTA_CMD_COLLISION;
+    if (s_have_last_ota_cmd && strcmp(s_last_ota_cmd.ota_id, cmd->ota_id) == 0) {
+        bool exact = strcmp(s_last_ota_cmd.firmware_url, cmd->firmware_url) == 0 &&
+                     strcmp(s_last_ota_cmd.checksum, cmd->checksum) == 0 &&
+                     strcmp(s_last_ota_cmd.version, cmd->version) == 0 &&
+                     s_last_ota_cmd.size_bytes == cmd->size_bytes &&
+                     s_last_ota_cmd.sequence == cmd->sequence;
+        return exact ? OTA_CMD_EXACT_REPLAY : OTA_CMD_COLLISION;
+    }
+    if (s_upgrading) return OTA_CMD_BUSY;
+    s_last_progress_status = 0;
+    s_last_progress_pct = 0;
+    s_last_progress_error[0] = '\0';
+    if (ota_nvs_persist_replay(cmd) != ESP_OK) return OTA_CMD_BUSY;
+    s_last_ota_cmd = *cmd;
+    s_have_last_ota_cmd = true;
+    strncpy(s_last_ota_id, cmd->ota_id, sizeof(s_last_ota_id) - 1);
+    s_last_ota_id[sizeof(s_last_ota_id) - 1] = '\0';
+    return OTA_CMD_NEW;
+}
+
+void ota_forget_duplicate(const char *ota_id)
+{
+    if (ota_id && strcmp(s_last_ota_id, ota_id) == 0) {
+        s_last_ota_id[0] = '\0';
+        memset(&s_last_ota_cmd, 0, sizeof(s_last_ota_cmd));
+        s_have_last_ota_cmd = false;
+		nvs_handle_t handle;
+		if (nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+			nvs_erase_key(handle, OTA_NVS_KEY_ID);
+			nvs_erase_key(handle, OTA_NVS_KEY_URL);
+			nvs_erase_key(handle, OTA_NVS_KEY_SIZE);
+			nvs_erase_key(handle, OTA_NVS_KEY_SEQ);
+			nvs_erase_key(handle, OTA_NVS_KEY_STATUS);
+			nvs_erase_key(handle, OTA_NVS_KEY_PCT);
+			nvs_erase_key(handle, OTA_NVS_KEY_ERROR);
+			nvs_commit(handle);
+			nvs_close(handle);
+		}
+    }
+}
+
 uint8_t ota_get_nvs_state(void)
 {
     nvs_handle_t handle;
@@ -128,16 +254,25 @@ uint8_t ota_get_nvs_state(void)
     return state;
 }
 
-void ota_confirm_valid(void)
+esp_err_t ota_confirm_valid(void)
 {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    esp_err_t state_err = running ? esp_ota_get_state_partition(running, &state) : ESP_ERR_INVALID_STATE;
+    if (state_err == ESP_OK && state == ESP_OTA_IMG_VALID) {
+        /* The bootloader transition already succeeded on an earlier attempt;
+         * only durable recovery-state cleanup still needs retrying. */
+        return ota_nvs_set_state(OTA_STATE_NONE);
+    }
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "App marked valid, rollback cancelled");
+		err = ota_nvs_set_state(OTA_STATE_NONE);
+		if (err != ESP_OK) ESP_LOGE(TAG, "Failed to clear OTA recovery state: %s", esp_err_to_name(err));
     } else {
         ESP_LOGW(TAG, "mark_app_valid failed: %s", esp_err_to_name(err));
     }
-    /* Clear NVS state — OTA fully completed */
-    ota_nvs_set_state(OTA_STATE_NONE);
+    return err;
 }
 
 void ota_mark_invalid_rollback(ota_rollback_trigger_t trigger)
@@ -589,17 +724,17 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
 static void ota_task_func(void *pvParameters);
 
 /* OTA start function */
-void ota_start(const ota_cmd_t *cmd)
+esp_err_t ota_start(const ota_cmd_t *cmd)
 {
     if (!cmd) {
         ESP_LOGE(TAG, "ota_start: NULL command");
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
     if (s_upgrading) {
         ESP_LOGW(TAG, "OTA already in progress");
         free((void *)cmd);
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     s_upgrading = true;
@@ -614,7 +749,9 @@ void ota_start(const ota_cmd_t *cmd)
         ESP_LOGE(TAG, "Failed to create ota_task");
         free((void *)cmd);
         s_upgrading = false;
+        return ESP_ERR_NO_MEM;
     }
+    return ESP_OK;
 }
 
 /* OTA task entry point */

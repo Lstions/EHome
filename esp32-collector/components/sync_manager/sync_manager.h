@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +68,7 @@ sync_state_enum_t sync_manager_get_state_enum(void);
 void sync_manager_periodic_task(void *pvParameters);
 
 /* === Update state after successful ConfigManifest apply === */
-void sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id);
+esp_err_t sync_manager_on_config_applied(uint64_t server_epoch, const char *manifest_id);
 
 /* === Config receive timeout (esp_timer one-shot) === */
 void sync_manager_start_config_timeout(void);

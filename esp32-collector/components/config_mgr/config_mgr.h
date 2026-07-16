@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,7 +56,7 @@ typedef struct {
     uint8_t  template_count;
     uint32_t interval_ms;
     bool     enabled;
-    uint8_t  bus_type;    // 1=UART, 2=I2C, 3=SPI, 4=GPIO, 5=ADC
+    uint8_t  bus_type;    // 1=UART, 2=I2C, 3=SPI, 5=ADC (4=legacy GPIO, rejected)
     uint8_t  bus_config[128];
     size_t   bus_config_len;
     /* v2.3: edge device groups */
@@ -72,7 +73,7 @@ typedef struct {
 
 /* === v3.0: GPIO/PWM peripheral configs (field 11/12) === */
 #define MAX_GPIO_CONFIGS  12
-#define MAX_PWM_CONFIGS   6
+#define MAX_PWM_CONFIGS   8
 
 typedef struct {
     uint8_t pin;
@@ -81,7 +82,8 @@ typedef struct {
 } config_gpio_t;
 
 typedef struct {
-    uint8_t  pin;
+    uint8_t  channel;      /* reported LEDC hardware channel identity */
+    uint8_t  pin;          /* GPIO output route */
     uint32_t frequency;    /* Hz */
     uint16_t duty;         /* 0-10000 = 0.00%-100.00% */
     uint8_t  resolution;   /* bits (4-20, default 14) */
@@ -91,6 +93,7 @@ typedef struct {
 /* === Config state === */
 typedef struct {
     char              manifest_id[64];
+	char              sync_id[64];
     config_template_t templates[MAX_TEMPLATES];
     uint8_t           template_count;
     config_channel_t  channels[MAX_CHANNELS];
@@ -112,6 +115,13 @@ void config_mgr_init(void);
 
 /* === Apply manifest from raw frame data === */
 bool config_mgr_apply_manifest(const uint8_t *data, size_t len);
+bool config_mgr_stage_manifest(const uint8_t *data, size_t len);
+const config_manifest_t *config_mgr_get_staged_manifest(void);
+bool config_mgr_commit_staged_manifest(void);
+void config_mgr_discard_staged_manifest(void);
+/* Copy active state into caller storage so staged commit cannot invalidate
+ * rollback input. Intended for bounded heap transaction workspaces. */
+bool config_mgr_snapshot_active(config_manifest_t *out);
 
 /* === Get current config === */
 const config_manifest_t *config_mgr_get_manifest(void);
@@ -143,6 +153,7 @@ bool config_mgr_has_last_known_manifest(void);
 struct dma_pool_t;
 void config_mgr_set_dma_pool(struct dma_pool_t *pool);
 void config_mgr_set_manifest_id(const char *id);
+esp_err_t config_mgr_persist_sync_metadata(uint64_t epoch, const char *manifest_id);
 
 /* === Double-buffer lock API (for app_callbacks long-lock interval) === */
 void config_mgr_lock(void);

@@ -20,6 +20,7 @@ extern "C" {
 /* === Error codes === */
 typedef enum {
     FRAME_OK = 0,
+    FRAME_DONE = 1,
     FRAME_ERR_OVERFLOW = -1,
     FRAME_ERR_UNDERFLOW = -2,
     FRAME_ERR_INVALID_TAG = -3,

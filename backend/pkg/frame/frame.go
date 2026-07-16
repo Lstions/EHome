@@ -4,8 +4,11 @@ package frame
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
+
+var ErrEndOfFrame = errors.New("end of frame")
 
 // Wire types (protobuf compatible)
 
@@ -23,42 +26,42 @@ const (
 
 // OtaCmd field numbers (MsgOtaCmd = 0x0A)
 //
-//  Field 1: ota_id     (string)
-//  Field 2: url        (string)
-//  Field 3: checksum   (string)
-//  Field 4: size       (varint)
-//  Field 5: version    (string)
-//  Field 6: sequence   (varint, uint32) — monotonic counter for dedup & log tracing
+//	Field 1: ota_id     (string)
+//	Field 2: url        (string)
+//	Field 3: checksum   (string)
+//	Field 4: size       (varint)
+//	Field 5: version    (string)
+//	Field 6: sequence   (varint, uint32) — monotonic counter for dedup & log tracing
 const OtaCmdFieldSequence uint8 = 6
 
 // Message types
 const (
-	MsgHello      = 0x01
-	MsgStatusRpt  = 0x02
-	MsgDataRpt    = 0x03
-	MsgConfigMfst = 0x04
-	MsgConfigRslt = 0x05
-	MsgWriteCmd   = 0x06
-	MsgWriteRsp   = 0x07
-	MsgPing       = 0x08
-	MsgPong       = 0x09
-	MsgOtaCmd     = 0x0A
-	MsgOtaProg    = 0x0B
-	MsgScanRpt    = 0x0C
-	MsgScanReq    = 0x0D
-	MsgQueryReq   = 0x0E
-	MsgQueryRsp   = 0x0F
-	MsgConfigQuery  = 0x10
-	MsgConfigReport = 0x11
-	MsgHelloAck     = 0x12
+	MsgHello          = 0x01
+	MsgStatusRpt      = 0x02
+	MsgDataRpt        = 0x03
+	MsgConfigMfst     = 0x04
+	MsgConfigRslt     = 0x05
+	MsgWriteCmd       = 0x06
+	MsgWriteRsp       = 0x07
+	MsgPing           = 0x08
+	MsgPong           = 0x09
+	MsgOtaCmd         = 0x0A
+	MsgOtaProg        = 0x0B
+	MsgScanRpt        = 0x0C
+	MsgScanReq        = 0x0D
+	MsgQueryReq       = 0x0E
+	MsgQueryRsp       = 0x0F
+	MsgConfigQuery    = 0x10
+	MsgConfigReport   = 0x11
+	MsgHelloAck       = 0x12
 	MsgConfigSyncReq  = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
 	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
-	MsgPongAck          = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
-	MsgResourceReport   = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
-	MsgQueryResources   = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
-	MsgPeriphCmd        = 0x1B // v3.0: PeriphCmd (SVR→ESP, GPIO/PWM peripheral control)
-	MsgPeriphRsp        = 0x1C // v3.0: PeriphRsp (ESP→SVR, peripheral operation result)
-	MsgLogStream        = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
+	MsgPongAck        = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
+	MsgResourceReport = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
+	MsgQueryResources = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
+	MsgPeriphCmd      = 0x1B // v3.0: PeriphCmd (SVR→ESP, GPIO/PWM peripheral control)
+	MsgPeriphRsp      = 0x1C // v3.0: PeriphRsp (ESP→SVR, peripheral operation result)
+	MsgLogStream      = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
 )
 
 // Field represents a decoded field
@@ -165,7 +168,7 @@ func (d *Decoder) MsgType() uint8 {
 // NextField reads the next field from the decoder
 func (d *Decoder) NextField() (*Field, error) {
 	if d.pos >= len(d.buf) {
-		return nil, fmt.Errorf("end of frame")
+		return nil, ErrEndOfFrame
 	}
 
 	tag, newPos, err := d.readVarint(d.pos)
@@ -296,31 +299,31 @@ func Uint32ToBytes(v uint32) []byte {
 // MsgTypeName returns a human-readable name for a message type byte
 func MsgTypeName(msgType uint8) string {
 	names := map[uint8]string{
-		MsgHello:       "hello",
-		MsgStatusRpt:   "status_report",
-		MsgDataRpt:     "data_report",
-		MsgConfigMfst:  "config_manifest",
-		MsgConfigRslt:  "config_result",
-		MsgWriteCmd:    "write_cmd",
-		MsgWriteRsp:    "write_response",
-		MsgPing:        "ping",
-		MsgPong:        "pong",
-		MsgOtaCmd:      "ota_cmd",
-		MsgOtaProg:     "ota_progress",
-		MsgScanRpt:     "scan_report",
-		MsgScanReq:     "scan_request",
-		MsgQueryReq:    "query_request",
-		MsgQueryRsp:    "query_response",
-		MsgConfigQuery: "config_query",
-		MsgConfigReport: "config_report",
-		MsgHelloAck:    "hello_ack",
+		MsgHello:          "hello",
+		MsgStatusRpt:      "status_report",
+		MsgDataRpt:        "data_report",
+		MsgConfigMfst:     "config_manifest",
+		MsgConfigRslt:     "config_result",
+		MsgWriteCmd:       "write_cmd",
+		MsgWriteRsp:       "write_response",
+		MsgPing:           "ping",
+		MsgPong:           "pong",
+		MsgOtaCmd:         "ota_cmd",
+		MsgOtaProg:        "ota_progress",
+		MsgScanRpt:        "scan_report",
+		MsgScanReq:        "scan_request",
+		MsgQueryReq:       "query_request",
+		MsgQueryRsp:       "query_response",
+		MsgConfigQuery:    "config_query",
+		MsgConfigReport:   "config_report",
+		MsgHelloAck:       "hello_ack",
 		MsgConfigSyncReq:  "config_sync_request",
 		MsgConfigSyncRsp:  "config_sync_response",
 		MsgPongAck:        "pong_ack",
 		MsgResourceReport: "resource_report",
 		MsgQueryResources: "query_resources",
-		MsgPeriphCmd:        "periph_cmd",
-		MsgPeriphRsp:        "periph_rsp",
+		MsgPeriphCmd:      "periph_cmd",
+		MsgPeriphRsp:      "periph_rsp",
 		MsgLogStream:      "log_stream",
 	}
 	if name, ok := names[msgType]; ok {

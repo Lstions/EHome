@@ -1,7 +1,7 @@
 # 外设控制重构设计 — GPIO 与 PWM 从通道系统中剥离
 
 > **版本**: v3.0 (2026-07-09, 专家评审修订版)
-> **状态**: 设计方案（未实现）
+> **状态**: 实施与最终验收中（ResourceReport 独立 GPIO/PWM 资源、后端/前端与固件实现已落盘；须待最新 fail-closed 复审、C6 OTA 与实机回归通过后标记完成）
 > **分支**: feat/gpio-control
 > **关联**: [00-术语表.md](../00-术语表.md) | [通道/详细设计.md](通道/详细设计.md) | [ESP32架构设计.md](ESP32架构设计.md)
 > **评审**: [评审报告(嵌入式专家)](GPIO控制重构设计-评审报告.md) | [评审报告(后端+前端专家)](../评审/GPIO_PWM重构设计评审报告.md)
@@ -59,7 +59,7 @@ MsgPeriphRsp = 0x1C  (节点 → 中心端)
 ```
 field 1: request_id  (varint, uint32) — 用于匹配响应
 field 2: periph_type (varint, uint8)  — 1=GPIO, 2=PWM
-field 3: pin         (varint, uint8)  — 引脚号
+field 3: resource_id (varint, uint8)  — GPIO=pin；PWM=LEDC channel
 field 4: action      (varint, uint8)  — 操作类型（见下表）
 field 5: value       (varint, uint32) — 操作参数（如 duty/freq）
 field 6: config      (bytes)          — 配置参数（二进制编码）
@@ -75,7 +75,7 @@ field 2: success     (varint, bool)   — 操作是否成功
 field 3: value       (varint, uint32) — 返回值（如 read 的 level/duty）
 field 4: error_code  (varint, uint8)  — 错误码
 field 5: periph_type (varint, uint8)  — [可选] 类型标识，用于异步事件场景
-field 6: pin         (varint, uint8)  — [可选] 引脚号，用于异步事件场景
+field 6: resource_id (varint, uint8)  — [可选] GPIO=pin；PWM=LEDC channel
 ```
 
 > **评审修订**: 增加 field 5/6 可选字段，为未来异步事件推送预留。同步响应用 request_id 匹配即可。
@@ -101,7 +101,7 @@ GPIO direction 编码：0=INPUT, 1=OUTPUT, 2=INPUT_PULLUP, 3=INPUT_PULLDOWN
 |----|------|-----------|------------|------|
 | 0 | SET_DUTY | duty (0-10000) | — | success |
 | 1 | SET_FREQ | frequency (Hz) | [resolution:1B] | success |
-| 2 | START | — | [freq:4B, duty:2B, resolution:1B] | success |
+| 2 | START | — | [pin:1B, freq:4B LE, duty:2B LE, resolution:1B] | success |
 | 3 | STOP | — | — | success |
 | 4 | READ | — | — | success + value(当前 duty) |
 | 5 | SET_RESOLUTION | resolution_bits (4-20) | — | success |
@@ -111,9 +111,12 @@ GPIO direction 编码：0=INPUT, 1=OUTPUT, 2=INPUT_PULLUP, 3=INPUT_PULLDOWN
 > - 新增 action 5=SET_RESOLUTION，支持运行时动态调整分辨率
 
 PWM START 的 config 编码：
-- byte 0-3: frequency (uint32, little-endian, Hz)
-- byte 4-5: duty (uint16, little-endian, 0-10000 = 0.00%-100.00%)
-- byte 6: resolution_bits (4-20, 默认 14)
+- byte 0: 输出路由 GPIO pin
+- byte 1-4: frequency (uint32, little-endian, Hz)
+- byte 5-6: duty (uint16, little-endian, 0-10000 = 0.00%-100.00%)
+- byte 7: resolution_bits (4-20，并受节点上报 PWM 资源上限约束)
+
+PWM 的资源身份始终是 field 3 的 LEDC channel；START config 中的 pin 只表示该 channel 的 GPIO matrix 输出路由。
 
 ### 2.6 error_code 枚举
 
@@ -254,13 +257,13 @@ type PWMConfig struct {
 |------|------|------|
 | GET | `/api/v1/nodes/:id/pwm` | 列出节点所有 PWM 配置 |
 | POST | `/api/v1/nodes/:id/pwm` | 配置 PWM |
-| PUT | `/api/v1/nodes/:id/pwm/:pin` | 更新 PWM 配置 |
-| DELETE | `/api/v1/nodes/:id/pwm/:pin` | 取消 PWM 配置 |
-| POST | `/api/v1/nodes/:id/pwm/:pin/start` | 启动 PWM 输出 |
-| POST | `/api/v1/nodes/:id/pwm/:pin/stop` | 停止 PWM 输出 |
-| POST | `/api/v1/nodes/:id/pwm/:pin/duty` | 设置占空比 `{duty: 0-10000}` |
-| POST | `/api/v1/nodes/:id/pwm/:pin/freq` | 设置频率 `{frequency: Hz}` |
-| GET | `/api/v1/nodes/:id/pwm/:pin/state` | 读取当前状态 |
+| PUT | `/api/v1/nodes/:id/pwm/:hardware_id` | 更新 PWM 通道配置 |
+| DELETE | `/api/v1/nodes/:id/pwm/:hardware_id` | 取消 PWM 通道配置 |
+| POST | `/api/v1/nodes/:id/pwm/:hardware_id/start` | 启动 PWM 输出 |
+| POST | `/api/v1/nodes/:id/pwm/:hardware_id/stop` | 停止 PWM 输出 |
+| POST | `/api/v1/nodes/:id/pwm/:hardware_id/duty` | 设置占空比 `{duty: 0-10000}` |
+| POST | `/api/v1/nodes/:id/pwm/:hardware_id/freq` | 设置频率 `{frequency: Hz}` |
+| GET | `/api/v1/nodes/:id/pwm/:hardware_id/state` | 读取当前状态 |
 
 > **评审修订**: `:node_id` → `:id`，避免 Gin 路由冲突 panic。
 
@@ -344,13 +347,13 @@ for _, pc := range pwmConfigs {
 ### 4.6 SendPeriphCmd
 
 ```go
-func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, pin uint8,
+func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, resourceID uint8,
     action uint8, value uint32, config []byte) error {
     requestID := atomic.AddUint32(&nextRequestID, 1)
     enc := frame.NewEncoder(frame.MsgPeriphCmd)
     enc.EncodeVarint(1, uint64(requestID))
     enc.EncodeVarint(2, uint64(periphType))
-    enc.EncodeVarint(3, uint64(pin))
+    enc.EncodeVarint(3, uint64(resourceID))
     enc.EncodeVarint(4, uint64(action))
     if value > 0 {
         enc.EncodeVarint(5, uint64(value))
@@ -359,11 +362,11 @@ func (m *Manager) SendPeriphCmd(deviceID string, periphType uint8, pin uint8,
         enc.EncodeBytes(6, config)
     }
     topic := mqtt.TopicForNode(deviceID)
-    return m.mqtt.PublishQoS2(topic, enc.Bytes()) // QoS 2, 与 WriteCmd 一致
+    return m.mqtt.PublishQoS1(topic, enc.Bytes()) // QoS 1；request_id 负责业务关联
 }
 ```
 
-> **评审修订**: 明确使用 QoS 2（exactly-once），与 SendWriteCommand 一致。
+> **实机修订**: 使用 QoS 1，避免 QoS 2 inflight 阻塞；request_id/PeriphRsp 提供命令关联。
 
 ### 4.7 PeriphRsp 处理
 
@@ -540,13 +543,13 @@ typedef struct {
 } pwm_config_entry_t;
 
 esp_err_t pwm_ctrl_init(const pwm_config_entry_t *configs, int count);
-esp_err_t pwm_ctrl_start(int pin, uint32_t freq, uint16_t duty, uint8_t resolution);
-esp_err_t pwm_ctrl_stop(int pin);
-esp_err_t pwm_ctrl_set_duty(int pin, uint16_t duty);
-esp_err_t pwm_ctrl_set_freq(int pin, uint32_t freq, uint8_t resolution);
-esp_err_t pwm_ctrl_set_resolution(int pin, uint8_t resolution);
-uint16_t pwm_ctrl_get_duty(int pin);
-esp_err_t pwm_ctrl_deconfig(int pin);
+esp_err_t pwm_ctrl_start(int channel, int pin, uint32_t freq, uint16_t duty, uint8_t resolution);
+esp_err_t pwm_ctrl_stop(int channel);
+esp_err_t pwm_ctrl_set_duty(int channel, uint16_t duty);
+esp_err_t pwm_ctrl_set_freq(int channel, uint32_t freq, uint8_t resolution);
+esp_err_t pwm_ctrl_set_resolution(int channel, uint8_t resolution);
+esp_err_t pwm_ctrl_get_duty(int channel, uint16_t *duty);
+esp_err_t pwm_ctrl_deconfig(int channel);
 ```
 
 **LEDC 资源管理**：
@@ -701,7 +704,7 @@ typedef enum {
 
 ### PWM（全新 3 跳）
 
-前端→POST /nodes/:id/pwm/:pin/duty→PeriphCmd(0x1B)→periph_worker→pwm_ctrl_set_duty→ledc_set_duty→PeriphRsp(0x1C)→前端
+前端→POST /nodes/:id/pwm/:hardware_id/duty→PeriphCmd(resource_id=channel)→periph_worker→pwm_ctrl_set_duty(channel)→ledc_set_duty→PeriphRsp(0x1C)→前端
 
 ---
 
@@ -782,7 +785,7 @@ func MigrateGPIOChannels(db *gorm.DB) error {
 | 测试文件 | 测试内容 |
 |----------|----------|
 | `handler_periph_test.go` | GPIO/PWM CRUD、重复 pin 返回 409、不存在 node 返回 404 |
-| `sender_test.go` | SendPeriphCmd 编码正确性、QoS2 验证 |
+| `sender_test.go` | SendPeriphCmd 编码正确性、QoS1 + request_id 关联验证 |
 | `handler_response_test.go` | handlePeriphResponse 解码 + WebSocket 推送 |
 | `manager_test.go` | CalcConfigHashForDevice 包含 GPIO/PWM |
 | ConfigManifest 编码测试 | field 11/12 编码正确性 |

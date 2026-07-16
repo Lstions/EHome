@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,10 +28,11 @@ extern "C" {
 
 typedef void (*log_stream_publish_fn_t)(const uint8_t *data, size_t len);
 
-void log_stream_start(uint8_t level);
-void log_stream_stop(void);
-void log_stream_set_level(uint8_t level);
+esp_err_t log_stream_start(uint8_t level);
+esp_err_t log_stream_stop(void);
+esp_err_t log_stream_set_level(uint8_t level);
 bool log_stream_is_active(void);
+uint8_t log_stream_get_level(void);
 
 /* Injected by the application layer to avoid a component dependency cycle. */
 void log_stream_set_publish_callback(log_stream_publish_fn_t publish);

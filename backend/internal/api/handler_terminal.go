@@ -2,16 +2,31 @@ package api
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"ehome/backend/internal/nodemgr"
+	"ehome/backend/internal/terminal"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
+func validatedTerminalWriteSender(db *gorm.DB, send terminal.WriteSender) terminal.WriteSender {
+	return func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
+		if _, err := loadTransportChannel(db, uint(channelID), deviceID); err != nil {
+			return err
+		}
+		if send == nil {
+			return fmt.Errorf("terminal write sender is unavailable")
+		}
+		return send(deviceID, channelID, data, readSize)
+	}
+}
+
 // registerTerminalRoutes sets up channel terminal history + write routes
-func registerTerminalRoutes(v1 *gin.RouterGroup, nodeMgr *nodemgr.Manager) {
+func registerTerminalRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
 	// Get terminal history
 	v1.GET("/channels/:channel_id/terminal", func(c *gin.Context) {
 		channelID, _ := strconv.Atoi(c.Param("channel_id"))
@@ -33,6 +48,10 @@ func registerTerminalRoutes(v1 *gin.RouterGroup, nodeMgr *nodemgr.Manager) {
 			ReadSize int    `json:"read_size"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if _, err := loadTransportChannel(db, uint(channelID), req.DeviceID); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}

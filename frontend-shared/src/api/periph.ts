@@ -1,5 +1,6 @@
 // src/api/periph.ts — GPIO + PWM 外设控制 API
 import client from './client'
+export interface CommandAck { request_id: number }
 
 // === GPIO ===
 
@@ -25,7 +26,7 @@ export const gpioApi = {
 
   async create(nodeId: string, data: Partial<GPIOConfig>): Promise<GPIOConfig> {
     const resp = await client.post(`/api/v1/nodes/${nodeId}/gpio`, data)
-    return (resp as any).data || resp
+    return (resp as any)?.data || resp
   },
 
   async update(nodeId: string, pin: number, data: Partial<GPIOConfig>): Promise<void> {
@@ -36,17 +37,18 @@ export const gpioApi = {
     await client.delete(`/api/v1/nodes/${nodeId}/gpio/${pin}`)
   },
 
-  async set(nodeId: string, pin: number, level: 0 | 1): Promise<void> {
-    await client.post(`/api/v1/nodes/${nodeId}/gpio/${pin}/set`, { level })
+  async set(nodeId: string, pin: number, level: 0 | 1): Promise<CommandAck> {
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/gpio/${pin}/set`, { level })
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 
   async toggle(nodeId: string, pin: number): Promise<void> {
     await client.post(`/api/v1/nodes/${nodeId}/gpio/${pin}/set`, { toggle: true })
   },
 
-  async read(nodeId: string, pin: number): Promise<{ level: number }> {
+  async read(nodeId: string, pin: number): Promise<CommandAck> {
     const resp = await client.post(`/api/v1/nodes/${nodeId}/gpio/${pin}/read`)
-    return (resp as any).data || resp
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 }
 
@@ -55,6 +57,8 @@ export const gpioApi = {
 export interface PWMConfig {
   id?: number
   node_id: string
+  hardware_id: string
+  channel: number
   pin: number
   frequency: number    // Hz
   duty: number         // 0-10000 (0.00%-100.00%)
@@ -75,36 +79,42 @@ export const pwmApi = {
   },
 
   async create(nodeId: string, data: Partial<PWMConfig>): Promise<PWMConfig> {
-    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm`, data)
-    return (resp as any).data || resp
+    const payload = { ...data }
+    delete payload.channel
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm`, payload)
+    return (resp as any)?.data || resp
   },
 
-  async update(nodeId: string, pin: number, data: Partial<PWMConfig>): Promise<void> {
-    await client.put(`/api/v1/nodes/${nodeId}/pwm/${pin}`, data)
+  async update(nodeId: string, hardwareId: string, data: Partial<PWMConfig>): Promise<void> {
+    await client.put(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}`, data)
   },
 
-  async delete(nodeId: string, pin: number): Promise<void> {
-    await client.delete(`/api/v1/nodes/${nodeId}/pwm/${pin}`)
+  async delete(nodeId: string, hardwareId: string): Promise<void> {
+    await client.delete(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}`)
   },
 
-  async start(nodeId: string, pin: number): Promise<void> {
-    await client.post(`/api/v1/nodes/${nodeId}/pwm/${pin}/start`)
+  async start(nodeId: string, hardwareId: string): Promise<CommandAck> {
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/start`)
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 
-  async stop(nodeId: string, pin: number): Promise<void> {
-    await client.post(`/api/v1/nodes/${nodeId}/pwm/${pin}/stop`)
+  async stop(nodeId: string, hardwareId: string): Promise<CommandAck> {
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/stop`)
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 
-  async setDuty(nodeId: string, pin: number, duty: number): Promise<void> {
-    await client.post(`/api/v1/nodes/${nodeId}/pwm/${pin}/duty`, { duty })
+  async setDuty(nodeId: string, hardwareId: string, duty: number): Promise<CommandAck> {
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/duty`, { duty })
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 
-  async setFreq(nodeId: string, pin: number, frequency: number): Promise<void> {
-    await client.post(`/api/v1/nodes/${nodeId}/pwm/${pin}/freq`, { frequency })
+  async setFreq(nodeId: string, hardwareId: string, frequency: number): Promise<CommandAck> {
+    const resp = await client.post(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/freq`, { frequency })
+    return ((resp as any)?.data || resp || { request_id: 0 }) as CommandAck
   },
 
-  async getState(nodeId: string, pin: number): Promise<{ running: boolean; duty: number; frequency: number }> {
-    const resp = await client.get(`/api/v1/nodes/${nodeId}/pwm/${pin}/state`)
-    return (resp as any).data || resp
+  async getState(nodeId: string, hardwareId: string): Promise<{ running: boolean; duty: number; frequency: number; request_id: number }> {
+    const resp = await client.get(`/api/v1/nodes/${nodeId}/pwm/${hardwareId}/state`)
+    return (resp as any)?.data || resp
   },
 }

@@ -29,7 +29,6 @@ extern "C" {
 #define PWM_RES_DEFAULT    14
 #define PWM_RES_MIN        4
 #define PWM_RES_MAX        20
-#define PWM_CTRL_MAX_PINS  30
 
 /* === Action encoding (matches protocol) === */
 typedef enum {
@@ -43,7 +42,8 @@ typedef enum {
 
 /* === Config entry (for batch init from ConfigManifest) === */
 typedef struct {
-    uint8_t  pin;
+    uint8_t  channel;       /* reported LEDC hardware channel identity */
+    uint8_t  pin;           /* routed GPIO output pin */
     uint32_t frequency;
     uint16_t duty;
     uint8_t  resolution;
@@ -60,60 +60,41 @@ typedef struct {
  * @return ESP_OK on success
  */
 esp_err_t pwm_ctrl_init(const pwm_config_entry_t *configs, int count);
+esp_err_t pwm_ctrl_preflight(const pwm_config_entry_t *configs, int count);
+int pwm_ctrl_snapshot(pwm_config_entry_t *configs, int capacity);
 
 /**
- * @brief Start PWM output on a pin.
- * @param pin          GPIO pin number
+ * @brief Start one reported PWM hardware channel routed to a GPIO pin.
+ * @param channel      LEDC channel identity from hw_pwms[]
+ * @param pin          GPIO route pin from hw_gpios[]
  * @param freq         Frequency in Hz
  * @param duty         Duty cycle (0-10000 = 0.00%-100.00%)
  * @param resolution   Resolution bits (4-20, default 14)
- * @return ESP_OK, ESP_ERR_NOT_FOUND (resources exhausted), ESP_ERR_INVALID_ARG
+ * @return ESP_OK, ESP_ERR_NOT_FOUND (timers exhausted), ESP_ERR_INVALID_ARG
  */
-esp_err_t pwm_ctrl_start(int pin, uint32_t freq, uint16_t duty, uint8_t resolution);
+esp_err_t pwm_ctrl_start(int channel, int pin, uint32_t freq, uint16_t duty,
+                         uint8_t resolution);
 
-/**
- * @brief Stop PWM output on a pin. Decrements timer refcount, deinit timer at 0.
- * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE
- */
-esp_err_t pwm_ctrl_stop(int pin);
+/** Stop a reported PWM channel and release its shared timer reference. */
+esp_err_t pwm_ctrl_stop(int channel);
 
-/**
- * @brief Set duty cycle for a running PWM channel.
- * @param duty  Duty (0-10000)
- * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE
- */
-esp_err_t pwm_ctrl_set_duty(int pin, uint16_t duty);
+/** Set duty cycle (0-10000) for a running reported PWM channel. */
+esp_err_t pwm_ctrl_set_duty(int channel, uint16_t duty);
 
-/**
- * @brief Set frequency (and optionally resolution) for a running PWM channel.
- * @param freq        Frequency in Hz
- * @param resolution  Resolution bits (0 = keep current)
- * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE
- */
-esp_err_t pwm_ctrl_set_freq(int pin, uint32_t freq, uint8_t resolution);
+/** Set frequency and optionally resolution (0 keeps current) by channel. */
+esp_err_t pwm_ctrl_set_freq(int channel, uint32_t freq, uint8_t resolution);
 
-/**
- * @brief Set resolution for a running PWM channel.
- * @return ESP_OK, ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE
- */
-esp_err_t pwm_ctrl_set_resolution(int pin, uint8_t resolution);
+/** Set resolution for a running reported PWM channel. */
+esp_err_t pwm_ctrl_set_resolution(int channel, uint8_t resolution);
 
-/**
- * @brief Get current duty value for a pin.
- * @return duty (0-10000), or 0 on error
- */
-uint16_t pwm_ctrl_get_duty(int pin);
+/** Get current duty (0-10000) for a running reported PWM channel. */
+esp_err_t pwm_ctrl_get_duty(int channel, uint16_t *duty);
 
-/**
- * @brief Deconfigure a PWM pin (stop + release resources). Idempotent.
- * @return ESP_OK, ESP_ERR_INVALID_ARG
- */
-esp_err_t pwm_ctrl_deconfig(int pin);
+/** Deconfigure a reported PWM channel. Idempotent. */
+esp_err_t pwm_ctrl_deconfig(int channel);
 
-/**
- * @brief Check if a pin is currently running PWM.
- */
-bool pwm_ctrl_is_running(int pin);
+/** Check whether a reported PWM channel is currently running. */
+bool pwm_ctrl_is_running(int channel);
 
 #ifdef __cplusplus
 }

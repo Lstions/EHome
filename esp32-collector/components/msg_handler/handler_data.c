@@ -33,40 +33,69 @@ void handler_data_process_ota(frame_decoder_t *dec)
     
     frame_err_t err;
     frame_field_t field;
+    uint32_t seen = 0;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
+        if (field.field_num < OTA_CMD_F_OTA_ID || field.field_num > OTA_CMD_F_SEQUENCE ||
+            (seen & (1U << field.field_num))) goto reject;
+        seen |= 1U << field.field_num;
         switch (field.field_num) {
         case OTA_CMD_F_OTA_ID:
-            frame_field_get_string(&field, cmd->ota_id, sizeof(cmd->ota_id));
+            if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len >= sizeof(cmd->ota_id)) goto reject;
+            if (frame_field_get_string(&field, cmd->ota_id, sizeof(cmd->ota_id)) != FRAME_OK) goto reject;
             break;
         case OTA_CMD_F_URL:
-            frame_field_get_string(&field, cmd->firmware_url, sizeof(cmd->firmware_url));
+            if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len >= sizeof(cmd->firmware_url)) goto reject;
+            if (frame_field_get_string(&field, cmd->firmware_url, sizeof(cmd->firmware_url)) != FRAME_OK) goto reject;
             break;
         case OTA_CMD_F_CHECKSUM:
-            frame_field_get_string(&field, cmd->checksum, sizeof(cmd->checksum));
+            if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len >= sizeof(cmd->checksum)) goto reject;
+            if (frame_field_get_string(&field, cmd->checksum, sizeof(cmd->checksum)) != FRAME_OK) goto reject;
             break;
         case OTA_CMD_F_SIZE:
-            frame_field_get_varint(&field, &cmd->size_bytes);
+            if (field.wire_type != WIRE_VARINT) goto reject;
+            if (frame_field_get_varint(&field, &cmd->size_bytes) != FRAME_OK) goto reject;
             break;
         case OTA_CMD_F_VERSION:
-            frame_field_get_string(&field, cmd->version, sizeof(cmd->version));
+            if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len >= sizeof(cmd->version)) goto reject;
+            if (frame_field_get_string(&field, cmd->version, sizeof(cmd->version)) != FRAME_OK) goto reject;
+            break;
+        case OTA_CMD_F_SEQUENCE:
+            if (field.wire_type != WIRE_VARINT || field.value.varint == 0 || field.value.varint > UINT32_MAX) goto reject;
+			cmd->sequence = (uint32_t)field.value.varint;
             break;
         }
     }
+    if (err != FRAME_DONE || !cmd->ota_id[0] || !cmd->firmware_url[0] ||
+        !cmd->checksum[0] || cmd->size_bytes == 0 || !cmd->version[0] || cmd->sequence == 0) goto reject;
     
     ESP_LOGI(TAG, "OtaCmd: id=%s, url=%s, size=%llu", 
              cmd->ota_id, cmd->firmware_url, (unsigned long long)cmd->size_bytes);
     
-    if (ota_is_duplicate(cmd->ota_id)) {
-        ESP_LOGW(TAG, "OTA duplicate ignored: %s", cmd->ota_id);
+    ota_cmd_class_t cmd_class = ota_classify_cmd(cmd);
+    if (cmd_class == OTA_CMD_EXACT_REPLAY) {
+        ESP_LOGW(TAG, "OTA duplicate replayed: %s", cmd->ota_id);
+        ota_replay_last_progress(cmd->ota_id);
         free(cmd);
         return;
     }
-    ota_start(cmd);  /* ota_start takes ownership of cmd */
+    if (cmd_class == OTA_CMD_COLLISION || cmd_class == OTA_CMD_BUSY) {
+        ESP_LOGW(TAG, "OTA command rejected: id=%s class=%d", cmd->ota_id, (int)cmd_class);
+        free(cmd);
+        return;
+    }
+    char ota_id_copy[sizeof(cmd->ota_id)];
+    memcpy(ota_id_copy, cmd->ota_id, sizeof(ota_id_copy));
+    ota_id_copy[sizeof(ota_id_copy) - 1] = '\0';
+    if (ota_start(cmd) != ESP_OK) ota_forget_duplicate(ota_id_copy);
+    return;
+reject:
+    ESP_LOGW(TAG, "Rejecting malformed OtaCmd");
+    free(cmd);
 }
 
 /* === Send: StatusReport (0x02) === */
 
-void msg_handler_send_status(uint32_t uptime_sec, const char *status,
+esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                              uint8_t channel_count, const scheduler_state_t *sched)
 {
     uint8_t buf[512];
@@ -79,10 +108,12 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status,
     frame_encode_varint(&enc, 5, (uint64_t)sync_manager_get_state_enum());
 
     // v2.2: send config_hash so server can decide without waiting for Hello
-    const char *config_hash = config_mgr_get_last_known_manifest_id();
+    const char *config_hash = config_mgr_get_manifest_id();
     if (config_hash != NULL) {
         frame_encode_string(&enc, 6, config_hash);
     }
+    const config_manifest_t *active_cfg = config_mgr_get_manifest();
+    if (active_cfg && active_cfg->sync_id[0]) frame_encode_string(&enc, 8, active_cfg->sync_id);
 
     // v2.3: field 7 — channel_health (repeated nested) → edge_device_health
     if (sched != NULL) {
@@ -135,7 +166,7 @@ void msg_handler_send_status(uint32_t uptime_sec, const char *status,
              (unsigned long long)config_mgr_get_epoch(),
              sync_manager_get_state_enum(),
              config_hash ? config_hash : "(none)");
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    return msg_handler_publish_checked(frame_encoder_data(&enc), frame_encoder_size(&enc));
 }
 
 /* === Send: DataReport (0x03) === */

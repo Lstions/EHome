@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include "bus_worker.h"   /* bus_runtime_t, write_rsp_cb_t */
 #include "config_mgr.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,12 +25,13 @@ extern "C" {
 void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb);
 
 void bus_manager_init(bus_runtime_t *rt);
-void bus_manager_cleanup_all(bus_runtime_t *rt);
-void bus_manager_setup_from_manifest(bus_runtime_t *rt);
+esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt);
+esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt);
+esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t *manifest);
 
-/* v2.4: Incremental config apply — single-channel register/unregister */
-void bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch);
-void bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id);
+/* v2.4: Incremental config apply — checked single-channel lifecycle. */
+esp_err_t bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch);
+esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id);
 
 /**
  * @brief Find a bus_dma_ctx_t by channel id.

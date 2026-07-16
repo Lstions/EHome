@@ -36,6 +36,7 @@ func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.OperationLog{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
 		&models.ConfigMeta{}, &models.PendingWriteRecord{},
+		&models.GPIOConfig{}, &models.PWMConfig{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -639,6 +640,7 @@ func TestChannel_Create_Success(t *testing.T) {
 		"node_id":       "NODE001",
 		"hardware_type": "I2C",
 		"bus_type":      "I2C",
+		"bus_config":    "0102",
 		"enabled":       true,
 		"interval_ms":   5000,
 	})
@@ -656,6 +658,75 @@ func TestChannel_Create_Success(t *testing.T) {
 	db.First(&ch)
 	if ch.NodeID != "NODE001" {
 		t.Errorf("expected node_id NODE001, got %s", ch.NodeID)
+	}
+}
+
+func TestChannel_CreateRejectsMalformedTransportRoute(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	body, _ := json.Marshal(map[string]interface{}{
+		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART", "bus_config": "zz", "enabled": true,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/channels", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code < 400 {
+		t.Fatalf("malformed route accepted: %d %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.Channel{}).Count(&count)
+	if count != 0 {
+		t.Fatalf("malformed channel persisted")
+	}
+}
+
+func TestChannel_CreateRejectsPeripheralTypes(t *testing.T) {
+	for _, peripheralType := range []string{"GPIO", "gpio", "PWM", "pwm"} {
+		t.Run(peripheralType, func(t *testing.T) {
+			r, db := setupDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+			body, _ := json.Marshal(map[string]interface{}{
+				"node_id": "NODE001", "hardware_type": peripheralType, "bus_type": peripheralType,
+			})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/api/v1/channels", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for peripheral channel type, got %d: %s", w.Code, w.Body.String())
+			}
+			var count int64
+			db.Model(&models.Channel{}).Count(&count)
+			if count != 0 {
+				t.Fatalf("rejected peripheral channel was persisted")
+			}
+		})
+	}
+}
+
+func TestChannel_CreateAllowsExplicitDisabledTransport(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	body, _ := json.Marshal(map[string]interface{}{
+		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART", "enabled": false,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/channels", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ch models.Channel
+	if err := db.First(&ch, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ch.Enabled {
+		t.Fatal("explicit disabled state was not preserved")
 	}
 }
 
@@ -690,12 +761,13 @@ func TestChannel_Get_NotFound(t *testing.T) {
 func TestChannel_Update_Success(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true, IntervalMs: 5000})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", BusConfig: "0102", Enabled: true, IntervalMs: 5000})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"node_id":       "NODE001",
 		"hardware_type": "UART",
 		"bus_type":      "UART",
+		"bus_config":    "0304",
 		"enabled":       true,
 		"interval_ms":   10000,
 	})
@@ -707,6 +779,56 @@ func TestChannel_Update_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestChannel_UpdateDisabledTransportCanBeReenabled(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	ch := models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", BusConfig: "0304", Enabled: false}
+	db.Create(&ch)
+	db.Model(&ch).UpdateColumn("enabled", false)
+	if err := db.First(&ch, ch.ID).Error; err != nil || ch.Enabled {
+		t.Fatalf("failed to establish disabled precondition: err=%v enabled=%v", err, ch.Enabled)
+	}
+	body, _ := json.Marshal(map[string]interface{}{"enabled": true})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/api/v1/channels/1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := db.First(&ch, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !ch.Enabled {
+		t.Fatal("channel remained disabled")
+	}
+}
+
+func TestChannel_UpdateRejectsPeripheralTypes(t *testing.T) {
+	for _, field := range []string{"hardware_type", "bus_type"} {
+		for _, peripheralType := range []string{"GPIO", "PWM"} {
+			t.Run(field+"_"+peripheralType, func(t *testing.T) {
+				r, db := setupDeviceTest(t)
+				db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+				body, _ := json.Marshal(map[string]interface{}{field: peripheralType})
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest("PUT", "/api/v1/channels/1", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", authHeader(t))
+				r.ServeHTTP(w, req)
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+				}
+				var ch models.Channel
+				db.First(&ch, 1)
+				if ch.HardwareType != "I2C" || ch.BusType != "I2C" {
+					t.Fatalf("rejected update mutated channel: %+v", ch)
+				}
+			})
+		}
 	}
 }
 
@@ -746,6 +868,68 @@ func TestChannel_Delete_Success(t *testing.T) {
 	db.Model(&models.Channel{}).Count(&count)
 	if count != 0 {
 		t.Errorf("expected 0 channels after delete, got %d", count)
+	}
+}
+
+func TestChannelWriteRejectsLegacyPeripheralOrDisabledChannel(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		channel models.Channel
+	}{
+		{name: "GPIO", channel: models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true}},
+		{name: "PWM", channel: models.Channel{NodeID: "NODE001", HardwareType: "PWM", BusType: "PWM", Enabled: true}},
+		{name: "disabled UART", channel: models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", HardwareID: "force-disabled"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupDeviceTest(t)
+			if err := db.Create(&tt.channel).Error; err != nil {
+				t.Fatalf("create channel: %v", err)
+			}
+			if tt.channel.HardwareID == "force-disabled" {
+				db.Model(&models.Channel{}).Where("id = ?", tt.channel.ID).UpdateColumn("enabled", false)
+			}
+
+			body, _ := json.Marshal(map[string]interface{}{"data": "01", "hex_mode": true})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/channels/1/write", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestChannelScanRejectsLegacyPeripheralOrDisabledChannel(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		channel models.Channel
+	}{
+		{name: "GPIO", channel: models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true}},
+		{name: "PWM", channel: models.Channel{NodeID: "NODE001", HardwareType: "PWM", BusType: "PWM", Enabled: true}},
+		{name: "disabled UART", channel: models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", HardwareID: "force-disabled"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+			if err := db.Create(&tt.channel).Error; err != nil {
+				t.Fatalf("create channel: %v", err)
+			}
+			if tt.channel.HardwareID == "force-disabled" {
+				db.Model(&models.Channel{}).Where("id = ?", tt.channel.ID).UpdateColumn("enabled", false)
+			}
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/channels/1/scan", bytes.NewBufferString(`{"scan_type":"i2c"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -791,9 +975,9 @@ func TestDecodeHexString(t *testing.T) {
 		{"0102", false, 2},
 		{"0x0102", false, 2},
 		{"0X0102", false, 2},
-		{"010", true, 0},  // odd length
-		{"zz", true, 0},   // invalid hex
-		{"", false, 0},    // empty
+		{"010", true, 0}, // odd length
+		{"zz", true, 0},  // invalid hex
+		{"", false, 0},   // empty
 	}
 	for _, tt := range tests {
 		got, err := decodeHexString(tt.input)
