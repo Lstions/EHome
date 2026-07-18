@@ -38,12 +38,14 @@ typedef enum {
     HELLO_F_HAS_MANIFEST  = 6,
     HELLO_F_LAST_MANIFEST = 7,
     HELLO_F_PROTO_VERSION = 8,
+    HELLO_F_HANDSHAKE_NONCE = 9,
 } hello_field_t;
 
 /* HelloAck (0x12) */
 typedef enum {
     HELLO_ACK_F_SERVER_TIME = 1,
     HELLO_ACK_F_FEATURES    = 2,
+    HELLO_ACK_F_HANDSHAKE_NONCE = 3,
 } hello_ack_field_t;
 
 /* Ping (0x08) / Pong (0x09) */

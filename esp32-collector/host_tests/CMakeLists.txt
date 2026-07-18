@@ -180,3 +180,26 @@ add_executable(mqtt_event_tests mqtt_event_tests.c)
 target_include_directories(mqtt_event_tests PRIVATE stubs)
 target_compile_options(mqtt_event_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
 add_test(NAME mqtt_event_tests COMMAND mqtt_event_tests)
+
+add_executable(mqtt_recovery_tests mqtt_recovery_tests.c)
+target_include_directories(mqtt_recovery_tests PRIVATE stubs ../main)
+target_compile_options(mqtt_recovery_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
+add_test(NAME mqtt_recovery_tests COMMAND mqtt_recovery_tests)
+
+add_executable(hello_handshake_tests
+    hello_handshake_tests.c
+    ../main/hello_handshake.c
+    ../main/hello_handshake_runtime.c
+    ../main/hello_handshake_state.c
+    ../components/msg_handler/handler_hello.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(hello_handshake_tests PRIVATE
+    hello_stubs
+    ../main
+    ../components/msg_handler
+    ../components/frame
+)
+target_compile_definitions(hello_handshake_tests PRIVATE HELLO_HANDSHAKE_HOST_TEST=1)
+target_compile_options(hello_handshake_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME hello_handshake_tests COMMAND hello_handshake_tests)

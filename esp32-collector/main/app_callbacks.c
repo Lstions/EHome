@@ -17,6 +17,7 @@
 #include "periph_config_apply.h"
 #include "bus_manager.h"
 #include "hello_handshake.h"
+#include "mqtt_supervisor_notify.h"
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "scheduler.h"
@@ -360,14 +361,60 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
 /* ==== WiFi callback ==== */
 
-/* === Deferred MQTT start (avoid stack overflow in WiFi event loop) === */
+/* === MQTT lifecycle supervisor ===
+ * The supervisor is the sole owner of start/reconnect/retire. WiFi callbacks
+ * only wake it; status_task must remain bounded even when retire drains an
+ * in-flight ESP-MQTT API operation. */
+static TaskHandle_t s_mqtt_supervisor_task;
 
-static void mqtt_start_task(void *pv)
+/* xTaskNotifyGive returns BaseType_t, while the host-testable notification
+ * seam deliberately takes a void callback. Keep that FreeRTOS-specific return
+ * value at this boundary. */
+static void notify_mqtt_supervisor(void *task)
 {
-    ESP_LOGI(TAG, "mqtt_start_task: starting MQTT client...");
-    mqtt_client_start();
-    ESP_LOGI(TAG, "mqtt_start_task: done, deleting task");
-    vTaskDelete(NULL);
+    (void)xTaskNotifyGive((TaskHandle_t)task);
+}
+
+/* MQTT event callbacks may only wake the lifecycle owner. All subscribe,
+ * reconnect, retire, and destroy work remains in mqtt_supervisor_task. */
+void on_mqtt_owner_wake_cb(void *ctx)
+{
+    (void)ctx;
+    mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
+                                      notify_mqtt_supervisor);
+}
+
+static void mqtt_supervisor_task(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        /* This task is the sole caller allowed to create, reconnect, retire,
+         * or destroy the MQTT client. WiFi/transport callbacks only request
+         * state and wake this owner. */
+        mqtt_client_owner_step(wifi_mgr_get_state() == WIFI_MGR_CONNECTED);
+        /* Wake immediately for WiFi state changes, while retaining a bounded
+         * periodic recovery deadline if no callback arrives. */
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    }
+}
+
+static void ensure_mqtt_supervisor(app_state_t *s)
+{
+    if (s_mqtt_supervisor_task != NULL) {
+        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
+                                          notify_mqtt_supervisor);
+        return;
+    }
+    TaskHandle_t created = NULL;
+    if (xTaskCreate(mqtt_supervisor_task, "mqtt_super", 8192, NULL, 5,
+                    &created) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create MQTT supervisor; leaving MQTT failed");
+        (void)mqtt_client_request_stop();
+        rgb_led_set_state(LED_STATE_MQTT_FAILED);
+        on_mqtt_state_cb(MQTT_CLIENT_FAILED, s);
+        return;
+    }
+    s_mqtt_supervisor_task = created;
 }
 
 void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
@@ -380,10 +427,10 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
         /* Pending OTA images are confirmed only by status_task after MQTT is
          * connected and the first StatusReport has been sent. */
-        /* Defer mqtt_client_start() to a separate task to avoid stack overflow
-         * in the WiFi event loop task (which has limited stack). */
-        ESP_LOGI(TAG, "WiFi connected, spawning MQTT start task");
-        xTaskCreate(mqtt_start_task, "mqtt_start", 8192, NULL, 5, NULL);
+        /* WiFi callbacks never own MQTT lifecycle operations. They only wake
+         * the long-lived supervisor, which serializes recovery and teardown. */
+        ESP_LOGI(TAG, "WiFi connected, waking MQTT supervisor");
+        ensure_mqtt_supervisor(s);
         break;
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
@@ -397,10 +444,14 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 
     case WIFI_MGR_CONNECTING:
         rgb_led_set_state(LED_STATE_WIFI_CONNECTING);
+        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
+                                          notify_mqtt_supervisor);
         break;
 
     case WIFI_MGR_FAILED:
         rgb_led_set_state(LED_STATE_WIFI_FAILED);
+        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
+                                          notify_mqtt_supervisor);
         break;
 
     default:
@@ -452,13 +503,21 @@ void on_mqtt_state_cb(mqtt_client_state_t state, void *ctx)
 
     if (state == MQTT_CLIENT_CONNECTED) {
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
-        if (!s->hello_task_running) {
-            msg_handler_reset_hello_ack();
-            hello_handshake_start(s);
-        }
     } else if (state == MQTT_CLIENT_FAILED) {
         rgb_led_set_state(LED_STATE_MQTT_FAILED);
     }
+}
+
+void on_mqtt_transport_cb(uint32_t generation, void *ctx)
+{
+    (void)ctx;
+    hello_handshake_on_transport_connected(generation);
+}
+
+void on_mqtt_ready_cb(uint32_t generation, void *ctx)
+{
+    (void)ctx;
+    hello_handshake_on_ready(generation);
 }
 
 /* ==== MQTT message callback ==== */

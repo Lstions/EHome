@@ -1,6 +1,7 @@
 package nodemgr
 
 import (
+	"bytes"
 	"testing"
 
 	"ehome/backend/internal/models"
@@ -258,8 +259,9 @@ func TestSender_SendScanRequest(t *testing.T) {
 
 func TestSender_SendHelloAck(t *testing.T) {
 	mgr, mock := newSenderManager(t)
+	const nonce uint32 = 0xA1B2C3D4
 
-	err := mgr.SendHelloAck("DEV4", 1700000000, 0x03)
+	err := mgr.SendHelloAck("DEV4", 1700000000, 0x03, nonce)
 	if err != nil {
 		t.Fatalf("SendHelloAck error: %v", err)
 	}
@@ -275,9 +277,9 @@ func TestSender_SendHelloAck(t *testing.T) {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgHelloAck)
 	}
 
-	// Decode: field 1=serverTime (varint), field 2=features (varint)
+	// Decode: field 1=serverTime, field 2=features, field 3=handshakeNonce.
 	dec, _ := frame.NewDecoder(rec.payload)
-	var serverTime, features uint64
+	var serverTime, features, handshakeNonce uint64
 	for {
 		field, err := dec.NextField()
 		if err != nil {
@@ -288,6 +290,8 @@ func TestSender_SendHelloAck(t *testing.T) {
 			serverTime = frame.GetUint64(field)
 		case 2:
 			features = frame.GetUint64(field)
+		case frame.HelloAckFieldHandshakeNonce:
+			handshakeNonce = frame.GetUint64(field)
 		}
 	}
 	if serverTime != 1700000000 {
@@ -295,6 +299,26 @@ func TestSender_SendHelloAck(t *testing.T) {
 	}
 	if features != 0x03 {
 		t.Errorf("features: got %d, want 3", features)
+	}
+	if handshakeNonce != uint64(nonce) {
+		t.Errorf("handshake nonce: got %d, want %d", handshakeNonce, nonce)
+	}
+}
+
+func TestSender_SendHelloAckLegacyOmitsZeroNonceAndPreservesWire(t *testing.T) {
+	mgr, mock := newSenderManager(t)
+
+	if err := mgr.SendHelloAck("LEGACY", 1, 0, 0); err != nil {
+		t.Fatalf("SendHelloAck error: %v", err)
+	}
+
+	rec := mock.lastRecord()
+	if rec == nil {
+		t.Fatal("expected Publish to be called")
+	}
+	want := []byte{frame.MsgHelloAck, 0x08, 0x01, 0x10, 0x00}
+	if !bytes.Equal(rec.payload, want) {
+		t.Fatalf("legacy HelloAck wire changed: got %x, want %x", rec.payload, want)
 	}
 }
 
@@ -505,33 +529,79 @@ func TestSender_SendQueryRequest(t *testing.T) {
 	}
 }
 
-// --- parseProtocolVersion table-driven tests ---
+// --- structured protocol-version parsing and feature gates ---
 
 func TestParseProtocolVersion(t *testing.T) {
-	tests := []struct {
-		name  string
+	for _, tt := range []struct {
 		input string
-		want  float64
+		want  protocolVersion
+		ok    bool
 	}{
-		{"v2.2", "2.2", 2.2},
-		{"v2.3", "2.3", 2.3},
-		{"v1.0", "1.0", 1.0},
-		{"v3.1", "3.1", 3.1},
-		{"empty", "", 0},
-		{"no_dot single number", "5", 0},
-		{"malformed", "abc.def", 0},
-		{"v2.2.3 extra parts uses first two", "2.2.3", 2.2},
-		{"v10.5", "10.5", 10.5},
-		{"v0.0", "0.0", 0.0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseProtocolVersion(tt.input)
-			if got != tt.want {
-				t.Errorf("parseProtocolVersion(%q) = %v, want %v", tt.input, got, tt.want)
+		{input: "2.2", want: protocolVersion{major: 2, minor: 2}, ok: true},
+		{input: "2.3", want: protocolVersion{major: 2, minor: 3}, ok: true},
+		{input: "2.4", want: protocolVersion{major: 2, minor: 4}, ok: true},
+		{input: "2.6", want: protocolVersion{major: 2, minor: 6}, ok: true},
+		{input: "2.10", want: protocolVersion{major: 2, minor: 10}, ok: true},
+		{input: "2.6.0", want: protocolVersion{major: 2, minor: 6}, ok: true},
+		{input: " 2.6.0 ", want: protocolVersion{major: 2, minor: 6}, ok: true},
+		{input: "", ok: false},
+		{input: "2", ok: false},
+		{input: "2.", ok: false},
+		{input: "abc.def", ok: false},
+		{input: "2.-1", ok: false},
+		{input: "2.6.beta", ok: false},
+		{input: "2.6.0.1", ok: false},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			got, ok := parseProtocolVersion(tt.input)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("parseProtocolVersion(%q)=(%#v,%v), want (%#v,%v)",
+					tt.input, got, ok, tt.want, tt.ok)
 			}
 		})
+	}
+}
+
+func TestProtocolVersionAtLeastFeatureGates(t *testing.T) {
+	for _, tt := range []struct {
+		version     string
+		minimum     protocolVersion
+		wantAtLeast bool
+	}{
+		{version: "2.2", minimum: protocolVersion{major: 2, minor: 3}, wantAtLeast: false},
+		{version: "2.3", minimum: protocolVersion{major: 2, minor: 3}, wantAtLeast: true},
+		{version: "2.3", minimum: protocolVersion{major: 2, minor: 4}, wantAtLeast: false},
+		{version: "2.4", minimum: protocolVersion{major: 2, minor: 4}, wantAtLeast: true},
+		{version: "2.6", minimum: protocolVersion{major: 2, minor: 4}, wantAtLeast: true},
+		{version: "2.10", minimum: protocolVersion{major: 2, minor: 4}, wantAtLeast: true},
+		{version: "2.6.0", minimum: protocolVersion{major: 2, minor: 4}, wantAtLeast: true},
+		{version: "malformed", minimum: protocolVersion{major: 2, minor: 3}, wantAtLeast: false},
+	} {
+		if got := protocolVersionAtLeast(tt.version, tt.minimum); got != tt.wantAtLeast {
+			t.Errorf("protocolVersionAtLeast(%q, %#v)=%v, want %v",
+				tt.version, tt.minimum, got, tt.wantAtLeast)
+		}
+	}
+}
+
+func TestNegotiatedProtocolVersionV26(t *testing.T) {
+	if ServerMaxProtocolVersion != "2.6" {
+		t.Fatalf("server max protocol: got %q, want 2.6", ServerMaxProtocolVersion)
+	}
+	for _, tt := range []struct {
+		reported string
+		want     string
+	}{
+		{reported: "2.5", want: "2.5"},
+		{reported: "2.6", want: "2.6"},
+		{reported: "2.7", want: "2.6"},
+		{reported: "2.10", want: "2.6"},
+		{reported: "3.0", want: "2.6"},
+		{reported: "legacy", want: "legacy"},
+	} {
+		if got := negotiatedProtocolVersion(tt.reported); got != tt.want {
+			t.Errorf("negotiatedProtocolVersion(%q)=%q, want %q", tt.reported, got, tt.want)
+		}
 	}
 }
 

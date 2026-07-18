@@ -34,6 +34,13 @@ const (
 //	Field 6: sequence   (varint, uint32) — monotonic counter for dedup & log tracing
 const OtaCmdFieldSequence uint8 = 6
 
+// Hello v2.6 correlation fields. A zero/absent nonce is the legacy mode;
+// non-zero values are echoed by HelloAck but are not authentication data.
+const (
+	HelloFieldHandshakeNonce    uint8 = 9
+	HelloAckFieldHandshakeNonce uint8 = 3
+)
+
 // Message types
 const (
 	MsgHello          = 0x01
@@ -230,6 +237,7 @@ func appendVarint(buf []byte, value uint64) []byte {
 }
 
 func (d *Decoder) readVarint(pos int) (uint64, int, error) {
+	start := pos
 	var result uint64
 	var shift uint
 	for {
@@ -237,9 +245,18 @@ func (d *Decoder) readVarint(pos int) (uint64, int, error) {
 			return 0, pos, fmt.Errorf("incomplete varint")
 		}
 		b := d.buf[pos]
+		// A uint64 varint has at most ten bytes, and at bit offset 63 the
+		// terminal byte may carry only its low bit. Without this check values
+		// such as 0x80*9,0x02 wrap to zero and can bypass uint32 validation.
+		if shift == 63 && b > 1 {
+			return 0, pos, fmt.Errorf("varint overflows uint64")
+		}
 		result |= uint64(b&0x7F) << shift
 		pos++
 		if b&0x80 == 0 {
+			if pos-start > 1 && b == 0 {
+				return 0, pos, fmt.Errorf("non-canonical varint")
+			}
 			break
 		}
 		shift += 7

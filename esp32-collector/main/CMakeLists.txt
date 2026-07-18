@@ -3,6 +3,8 @@ idf_component_register(SRCS "main.c"
                               "app_callbacks.c"
                               "config_apply_transaction.c"
                               "hello_handshake.c"
+                              "hello_handshake_runtime.c"
+                              "hello_handshake_state.c"
                        INCLUDE_DIRS "."
                        REQUIRES freertos nvs_flash
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler

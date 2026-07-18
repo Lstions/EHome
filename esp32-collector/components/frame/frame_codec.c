@@ -124,15 +124,22 @@ static frame_err_t decoder_read_varint(frame_decoder_t *dec, uint64_t *out)
 {
     uint64_t result = 0;
     int shift = 0;
+    size_t start = dec->pos;
 
     while (1) {
         frame_err_t err = decoder_ensure_bytes(dec, 1);
         if (err != FRAME_OK) return err;
 
         uint8_t byte = dec->buf[dec->pos++];
+        if (shift == 63 && byte > 1) {
+            return FRAME_ERR_INVALID_TAG;
+        }
         result |= (uint64_t)(byte & 0x7F) << shift;
 
         if (!(byte & 0x80)) {
+            if (dec->pos - start > 1 && byte == 0) {
+                return FRAME_ERR_INVALID_TAG;
+            }
             break;
         }
 

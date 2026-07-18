@@ -26,14 +26,14 @@ static esp_err_t mqtt_adapter_init(transport_t *transport, const void *config)
 
 static esp_err_t mqtt_adapter_start(transport_t *transport)
 {
-    mqtt_client_start();
-    return ESP_OK;
+    (void)transport;
+    return mqtt_client_request_start();
 }
 
 static esp_err_t mqtt_adapter_stop(transport_t *transport)
 {
-    mqtt_client_stop();
-    return ESP_OK;
+    (void)transport;
+    return mqtt_client_request_stop();
 }
 
 static esp_err_t mqtt_adapter_send(transport_t *transport, const uint8_t *data, size_t len)

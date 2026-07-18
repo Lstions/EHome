@@ -246,11 +246,16 @@ func (m *Manager) SendQueryRequest(deviceID string, queryType uint32) error {
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
-// SendHelloAck sends a HelloAck message to a device (0x12, SVR→ESP)
-func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint32) error {
+// SendHelloAck sends a HelloAck message to a device (0x12, SVR→ESP).
+// handshakeNonce is correlation data, not authentication. Zero preserves the
+// exact legacy field set; a non-zero nonce is echoed verbatim in field 3.
+func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint32, handshakeNonce uint32) error {
 	enc := frame.NewEncoder(frame.MsgHelloAck)
 	enc.EncodeVarint(1, serverTime)
 	enc.EncodeVarint(2, uint64(features))
+	if handshakeNonce != 0 {
+		enc.EncodeVarint(frame.HelloAckFieldHandshakeNonce, uint64(handshakeNonce))
+	}
 
 	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())
@@ -284,17 +289,50 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 
 // ServerMaxProtocolVersion is the highest protocol version this server supports.
 // Negotiated version = min(device-reported, ServerMaxProtocolVersion).
-const ServerMaxProtocolVersion = "2.5"
+const ServerMaxProtocolVersion = "2.6"
 
-// parseProtocolVersion parses a version string like "2.2" or "2.3" into a float64.
-// Returns 0 for empty or unparseable strings.
-func parseProtocolVersion(v string) float64 {
-	parts := strings.Split(v, ".")
-	if len(parts) >= 2 {
-		major, _ := strconv.ParseFloat(parts[0]+"."+parts[1], 64)
-		return major
+type protocolVersion struct {
+	major uint64
+	minor uint64
+}
+
+// parseProtocolVersion is the single parser used by negotiation and feature
+// gates. An optional numeric patch component is accepted but does not affect
+// major/minor protocol compatibility.
+func parseProtocolVersion(v string) (protocolVersion, bool) {
+	parts := strings.Split(strings.TrimSpace(v), ".")
+	if len(parts) < 2 || len(parts) > 3 {
+		return protocolVersion{}, false
 	}
-	return 0
+	major, err := strconv.ParseUint(parts[0], 10, 32)
+	if err != nil {
+		return protocolVersion{}, false
+	}
+	minor, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return protocolVersion{}, false
+	}
+	if len(parts) == 3 {
+		if _, err := strconv.ParseUint(parts[2], 10, 32); err != nil {
+			return protocolVersion{}, false
+		}
+	}
+	return protocolVersion{major: major, minor: minor}, true
+}
+
+func compareProtocolVersions(a, b protocolVersion) int {
+	if a.major < b.major || a.major == b.major && a.minor < b.minor {
+		return -1
+	}
+	if a.major == b.major && a.minor == b.minor {
+		return 0
+	}
+	return 1
+}
+
+func protocolVersionAtLeast(raw string, minimum protocolVersion) bool {
+	version, ok := parseProtocolVersion(raw)
+	return ok && compareProtocolVersions(version, minimum) >= 0
 }
 
 // parseHardwareID converts a hardware ID string to uint64.
@@ -393,7 +431,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	// v2.2: field 2 epoch removed, field 9 sync_reason removed
 
 	// Determine encoding path based on protocol version
-	useV2 := parseProtocolVersion(node.ProtocolVersion) >= 2.3
+	useV2 := protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 3})
 
 	// Encode templates (field 3, repeated sub-structure)
 	// v2 path still needs templates — C6's schedule_v2_channel uses
@@ -591,7 +629,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 
 	// Field 11: gpio_configs (repeated sub-messages, v3.0)
 	// Only encode for protocol_version >= 2.4 (older firmware ignores unknown fields)
-	if parseProtocolVersion(node.ProtocolVersion) >= 2.4 {
+	if protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 4}) {
 		for _, gc := range gpioConfigs {
 			subEnc := frame.SubEncoder()
 			subEnc.EncodeVarint(1, uint64(gc.Pin))          // sub-field 1: pin

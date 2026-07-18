@@ -2,6 +2,7 @@ package frame
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -9,10 +10,10 @@ import (
 func TestHelloWireFormat(t *testing.T) {
 	// Encode Hello
 	enc := NewEncoder(MsgHello)
-	enc.EncodeString(1, "esp32-30eda0a9a808")   // device_id
-	enc.EncodeString(2, "4.0.0")                  // firmware_version
-	enc.EncodeString(3, "ESP32S3")                 // model
-	enc.EncodeVarint(4, 1)                          // channel_count
+	enc.EncodeString(1, "esp32-30eda0a9a808") // device_id
+	enc.EncodeString(2, "4.0.0")              // firmware_version
+	enc.EncodeString(3, "ESP32S3")            // model
+	enc.EncodeVarint(4, 1)                    // channel_count
 
 	wire := enc.Bytes()
 	t.Logf("Encoded: %s", hex.EncodeToString(wire))
@@ -70,9 +71,9 @@ func TestHelloWireFormat(t *testing.T) {
 func TestDataReportWireFormat(t *testing.T) {
 	// Encode DataReport
 	enc := NewEncoder(MsgDataRpt)
-	enc.EncodeVarint(1, 5)                    // channel_id=5
-	enc.EncodeVarint(2, 100000000)            // timestamp_us=100000000
-	enc.EncodeVarint(3, 1)                    // sequence=1
+	enc.EncodeVarint(1, 5)                                               // channel_id=5
+	enc.EncodeVarint(2, 100000000)                                       // timestamp_us=100000000
+	enc.EncodeVarint(3, 1)                                               // sequence=1
 	enc.EncodeBytes(4, []byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32, 0x00}) // raw_data
 
 	wire := enc.Bytes()
@@ -136,9 +137,9 @@ func TestDataReportWireFormat(t *testing.T) {
 func TestStatusRptWireFormat(t *testing.T) {
 	// uptime_sec=3600, status="online", channel_count=2
 	enc := NewEncoder(MsgStatusRpt)
-	enc.EncodeVarint(1, 3600)        // uptime_sec
-	enc.EncodeString(2, "online")     // status
-	enc.EncodeVarint(3, 2)            // channel_count
+	enc.EncodeVarint(1, 3600)     // uptime_sec
+	enc.EncodeString(2, "online") // status
+	enc.EncodeVarint(3, 2)        // channel_count
 
 	wire := enc.Bytes()
 	t.Logf("Encoded: %x", wire)
@@ -217,7 +218,7 @@ func TestUnknownMsgType(t *testing.T) {
 // Test unknown field tag handling (P1.6)
 func TestUnknownFieldTag(t *testing.T) {
 	enc := NewEncoder(MsgHello)
-	enc.EncodeVarint(1, 42)  // known field
+	enc.EncodeVarint(1, 42) // known field
 	// Manually inject unknown field 99
 	enc.EncodeVarint(99, 123)
 
@@ -248,7 +249,7 @@ func TestMalformedMessages(t *testing.T) {
 		{"empty", []byte{}},
 		{"type_only", []byte{0x01}},
 		{"truncated_varint", []byte{0x01, 0x08, 0x80, 0x80}}, // varint never terminates
-		{"truncated_length", []byte{0x01, 0x0A, 0x10}},        // string len=16 but no data
+		{"truncated_length", []byte{0x01, 0x0A, 0x10}},       // string len=16 but no data
 	}
 
 	for _, tt := range tests {
@@ -274,14 +275,14 @@ func TestMalformedMessages(t *testing.T) {
 func TestSubFrameEncoding(t *testing.T) {
 	// Encode a Template sub-structure: id=1, write_data=[0xE0, 0xB6], read_length=25, delay_ms=10
 	sub := SubEncoder()
-	sub.EncodeVarint(1, 1)                                 // id=1
-	sub.EncodeBytes(2, []byte{0xE0, 0xB6})                // write_data
-	sub.EncodeVarint(3, 25)                                // read_length
-	sub.EncodeVarint(4, 10)                                // delay_ms
+	sub.EncodeVarint(1, 1)                 // id=1
+	sub.EncodeBytes(2, []byte{0xE0, 0xB6}) // write_data
+	sub.EncodeVarint(3, 25)                // read_length
+	sub.EncodeVarint(4, 10)                // delay_ms
 
 	enc := NewEncoder(MsgConfigMfst)
-	enc.EncodeString(1, "manifest-001")      // manifest_id
-	enc.EncodeSubFrame(2, sub.Bytes())        // templates[0]
+	enc.EncodeString(1, "manifest-001") // manifest_id
+	enc.EncodeSubFrame(2, sub.Bytes())  // templates[0]
 
 	wire := enc.Bytes()
 	t.Logf("ConfigMfst with sub-frame: %s", hex.EncodeToString(wire))
@@ -398,6 +399,86 @@ func TestHelloAckWireFormat(t *testing.T) {
 	t.Logf("HelloAck encode/decode PASS: server_time=%d features=%d", gotServerTime, gotFeatures)
 }
 
+func TestHelloV26HandshakeNonceRoundTrip(t *testing.T) {
+	const nonce uint32 = 0xA1B2C3D4
+	enc := NewEncoder(MsgHello)
+	enc.EncodeVarint(HelloFieldHandshakeNonce, uint64(nonce))
+
+	wire := enc.Bytes()
+	if len(wire) < 2 || wire[1] != byte(HelloFieldHandshakeNonce<<3|WireVarint) {
+		t.Fatalf("Hello nonce tag: got %x", wire)
+	}
+	dec, err := NewDecoder(wire)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	field, err := dec.NextField()
+	if err != nil {
+		t.Fatalf("NextField: %v", err)
+	}
+	if field.FieldNum != HelloFieldHandshakeNonce || field.WireType != WireVarint || GetUint64(field) != uint64(nonce) {
+		t.Fatalf("nonce field: got %#v, want %d", field, nonce)
+	}
+}
+
+func TestHelloAckV26HandshakeNonceRoundTrip(t *testing.T) {
+	const nonce uint32 = 0xFFFFFFFF
+	enc := NewEncoder(MsgHelloAck)
+	enc.EncodeVarint(1, 1)
+	enc.EncodeVarint(2, 0)
+	enc.EncodeVarint(HelloAckFieldHandshakeNonce, uint64(nonce))
+
+	dec, err := NewDecoder(enc.Bytes())
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	var got uint64
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextField: %v", err)
+		}
+		if field.FieldNum == HelloAckFieldHandshakeNonce {
+			got = GetUint64(field)
+		}
+	}
+	if got != uint64(nonce) {
+		t.Fatalf("echoed nonce: got %d, want %d", got, nonce)
+	}
+}
+
+func TestDecoderRejectsOverflowingVarint(t *testing.T) {
+	wire := []byte{MsgHello, byte(HelloFieldHandshakeNonce << 3)}
+	for range 9 {
+		wire = append(wire, 0x80)
+	}
+	wire = append(wire, 0x02) // tenth byte may carry only bit zero for uint64
+
+	dec, err := NewDecoder(wire)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	if _, err := dec.NextField(); err == nil {
+		t.Fatal("overflowing uint64 varint was accepted")
+	}
+}
+
+func TestDecoderRejectsNonCanonicalVarint(t *testing.T) {
+	wire := []byte{
+		MsgHello, byte(HelloFieldHandshakeNonce << 3), 0x80, 0x00,
+	}
+	dec, err := NewDecoder(wire)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	if _, err := dec.NextField(); err == nil {
+		t.Fatal("non-canonical zero varint was accepted")
+	}
+}
+
 // === Benchmarks (P2.x from acceptance-criteria) ===
 
 // BenchmarkDecodeHello measures decode performance for typical Hello message
@@ -505,7 +586,7 @@ func FuzzDecoder(f *testing.F) {
 	f.Add([]byte{0x03, 0x08, 0x01})                          // DataReport with varint 1
 	f.Add([]byte{0xFF, 0x08, 0x7F})                          // Unknown type, varint 127
 	f.Add([]byte{})                                          // empty
-	f.Add([]byte{0x01, 0x80, 0x80, 0x80, 0x80})             // malformed varint
+	f.Add([]byte{0x01, 0x80, 0x80, 0x80, 0x80})              // malformed varint
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Should never panic

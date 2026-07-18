@@ -93,12 +93,8 @@ func main() {
 		logger.Infof("Redis connected")
 	}
 
-	mqttClient, err := mqtt.Initialize(cfg.MQTTBroker(), cfg.MQTTUser(), cfg.MQTTPassword())
-	if err != nil {
-		logger.Fatalf("Failed to initialize MQTT: %v", err)
-	}
+	mqttClient := mqtt.New(cfg.MQTTBroker(), cfg.MQTTUser(), cfg.MQTTPassword())
 	defer mqttClient.Close()
-	logger.Infof("MQTT connected")
 
 	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
@@ -161,9 +157,22 @@ func main() {
 		}
 	})
 
-	// v2.1: Server startup push — push config to all online nodes (fixes G2)
+	mqttClient.SetHandler(nodeMgr.HandleMessage)
+	mqttContext, stopMQTT := context.WithCancel(context.Background())
+	defer stopMQTT()
 	go func() {
-		time.Sleep(5 * time.Second)
+		if err := mqttClient.Run(mqttContext); err != nil {
+			logger.Errorf("MQTT supervisor stopped: %v", err)
+		}
+	}()
+
+	// v2.1: push only after a real CONNECT+SUBACK, never after an arbitrary sleep.
+	go func() {
+		select {
+		case <-mqttClient.Ready():
+		case <-mqttContext.Done():
+			return
+		}
 		decisions := nodeMgr.SyncGate().OnServerStartup()
 		for _, d := range decisions {
 			if d.Action != nodemgr.SyncActionNone {
@@ -178,10 +187,7 @@ func main() {
 	}()
 
 	otaMgr.Start()
-
 	offlineDetector.Start()
-
-	mqttClient.SetHandler(nodeMgr.HandleMessage)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

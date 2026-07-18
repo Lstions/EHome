@@ -36,7 +36,8 @@ void msg_handler_process(const uint8_t *data, size_t len);
 
 /* === Send outgoing messages === */
 void msg_handler_send_hello(const char *node_id, const char *fw_version,
-                            const char *model, uint8_t channel_count);
+                            const char *model, uint8_t channel_count,
+                            uint32_t handshake_nonce);
 esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                              uint8_t channel_count, const scheduler_state_t *sched);
 void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,

@@ -51,10 +51,11 @@ static void status_task(void *pv)
     app_state_t *s = (app_state_t *)pv;
     while (1) {
         s->uptime_sec++;
-		if (mqtt_client_is_connected_impl()) {
-            esp_err_t status_err = msg_handler_send_status(s->uptime_sec, "online",
-                                    (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
-                                    scheduler_get_state());
+        if (mqtt_client_is_connected_impl()) {
+            esp_err_t status_err = msg_handler_send_status(
+                s->uptime_sec, "online",
+                (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
+                scheduler_get_state());
 			if (s->ota_need_confirm && status_err == ESP_OK) {
 				if (ota_confirm_valid() == ESP_OK) s->ota_need_confirm = false;
 			}
@@ -67,17 +68,17 @@ static void status_task(void *pv)
 
 static void on_sync_send_hello(void)
 {
-    app_state_t *s = app_state_get();
-    msg_handler_send_hello(s->node_id, get_firmware_version(), get_model_name(),
-                           config_mgr_get_active_channel_count());
+    (void)hello_handshake_request_sync();
 }
 
 /* ---- Weak-symbol bridges for msg_handler callbacks ---- */
 
 void on_write_cmd_received(uint32_t rid, uint32_t ch,
-                           const uint8_t *d, size_t l, uint32_t rs)
+                           const uint8_t *d, size_t l, uint32_t rs,
+                           uint32_t edge_device_id)
 {
-    bus_manager_on_write_cmd(&app_state_get()->bus_runtime, rid, ch, d, l, rs);
+    bus_manager_on_write_cmd(&app_state_get()->bus_runtime, rid, ch, d, l, rs,
+                             edge_device_id);
 }
 
 void on_query_resources_received(const char *request_id)
@@ -242,6 +243,8 @@ void app_main(void)
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
     msg_handler_init();
+    /* Create the long-lived Hello supervisor before MQTT can start. */
+    hello_handshake_start(s);
     log_stream_set_publish_callback(msg_handler_publish);
     if (handler_periph_init() != ESP_OK) {
         ESP_LOGE(TAG, "Peripheral handler initialization failed; restarting");
@@ -258,6 +261,9 @@ void app_main(void)
     /* ---- WiFi + callbacks ---- */
     wifi_mgr_register_state_cb(on_wifi_state_cb, s);
     mqtt_client_register_state_cb(on_mqtt_state_cb, s);
+    mqtt_client_register_ready_cb(on_mqtt_ready_cb, s);
+    mqtt_client_register_transport_cb(on_mqtt_transport_cb, s);
+    mqtt_client_register_owner_wake_cb(on_mqtt_owner_wake_cb, s);
     mqtt_client_register_msg_cb(on_mqtt_msg_cb, s);
     mqtt_client_set_node_id(s->node_id);
 
