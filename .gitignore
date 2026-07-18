@@ -9,6 +9,7 @@ backend/vendor/
 
 # ESP-IDF
 esp32-collector/build/
+esp32-collector/build-*
 esp32-collector/sdkconfig
 esp32-collector/sdkconfig.old
 esp32-collector/managed_components/
