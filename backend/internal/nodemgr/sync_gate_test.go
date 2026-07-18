@@ -35,7 +35,7 @@ func TestOnHello_NvsEmpty_ForceSync(t *testing.T) {
 	_, gate, _ := newTestManagerAndGate(t)
 
 	hello := &HelloMsg{
-		NodeID:      "dev1",
+		NodeID:       "dev1",
 		NvsHasConfig: false, // NVS empty — should force full sync
 	}
 	d := gate.OnHello("dev1", hello)
@@ -79,7 +79,7 @@ func TestOnHello_InSync_NoAction(t *testing.T) {
 	serverHash := mgr.CalcConfigHashForDevice(deviceID)
 
 	hello := &HelloMsg{
-		NodeID:      deviceID,
+		NodeID:       deviceID,
 		NvsHasConfig: true,
 		LastManifest: serverHash.ManifestID, // device reports same ManifestID as server
 	}
@@ -96,8 +96,8 @@ func TestOnHello_V2Firmware_LegacyPath(t *testing.T) {
 	// v2.0 firmware: no epoch/nvs_has fields → defaults (epoch=0, nvs_has=true)
 	hello := &HelloMsg{
 		NodeID:          "dev1",
-		NvsHasConfig:    true,  // default for v2.0
-		ConfigEpoch:     0,     // default for v2.0
+		NvsHasConfig:    true, // default for v2.0
+		ConfigEpoch:     0,    // default for v2.0
 		ProtocolVersion: "2.0",
 	}
 	d := gate.OnHello("dev1", hello)
@@ -105,6 +105,16 @@ func TestOnHello_V2Firmware_LegacyPath(t *testing.T) {
 	if d.Reason != "no_server_config" && d.Reason != "hash_mismatch" {
 		// Either is acceptable depending on whether node exists in DB
 		t.Fatalf("expected no_server_config or hash_mismatch, got %s", d.Reason)
+	}
+}
+
+func TestSyncGateRejectsGlobalSentinelNodeID(t *testing.T) {
+	_, gate, _ := newTestManagerAndGate(t)
+	for _, nodeID := range []string{"", "0"} {
+		decisions := gate.OnConfigChange(ConfigChangeEvent{NodeID: nodeID, Type: CfgChangeDeviceConfig, Action: CfgActionUpdate})
+		if len(decisions) != 0 {
+			t.Fatalf("node %q produced fake sync decisions: %#v", nodeID, decisions)
+		}
 	}
 }
 

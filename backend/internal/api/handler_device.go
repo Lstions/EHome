@@ -48,6 +48,14 @@ func validateTransportChannelType(ch *models.Channel) error {
 	if isPeripheralChannelType(ch.HardwareType) || isPeripheralChannelType(ch.BusType) {
 		return fmt.Errorf("GPIO and PWM are peripheral resources, not channels")
 	}
+	hardwareType := strings.TrimSpace(ch.HardwareType)
+	busType := strings.TrimSpace(ch.BusType)
+	if hardwareType == "" || busType == "" {
+		return fmt.Errorf("channel hardware_type and bus_type are required")
+	}
+	if !strings.EqualFold(hardwareType, busType) {
+		return fmt.Errorf("channel hardware_type %q does not match bus_type %q", ch.HardwareType, ch.BusType)
+	}
 	return nil
 }
 
@@ -106,6 +114,33 @@ func validateChannelPeripheralConflicts(tx *gorm.DB, ch models.Channel) error {
 	return nil
 }
 
+// validateChannelBindings prevents channel mutation from invalidating an
+// existing EdgeDevice -> DeviceConfig -> Channel binding. The candidate channel
+// and its referencing devices must be locked by the caller's transaction.
+func validateChannelBindings(tx *gorm.DB, candidate *models.Channel) error {
+	if candidate == nil {
+		return fmt.Errorf("channel is required")
+	}
+	var devices []models.EdgeDevice
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("channel_id = ? AND node_id = ?", candidate.ID, candidate.NodeID).
+		Find(&devices).Error; err != nil {
+		return err
+	}
+	if len(devices) == 0 {
+		return nil
+	}
+	if !candidate.Enabled {
+		return fmt.Errorf("cannot disable channel referenced by edge devices")
+	}
+	for _, device := range devices {
+		if _, err := validateDeviceConfigForChannel(tx, device.DeviceConfigID, candidate); err != nil {
+			return fmt.Errorf("channel update invalidates edge device %d: %w", device.ID, err)
+		}
+	}
+	return nil
+}
+
 func loadTransportChannel(db *gorm.DB, channelID uint, nodeID string) (*models.Channel, error) {
 	if db == nil {
 		return nil, fmt.Errorf("channel database is unavailable")
@@ -124,6 +159,22 @@ func loadTransportChannel(db *gorm.DB, channelID uint, nodeID string) (*models.C
 		return nil, err
 	}
 	return &ch, nil
+}
+
+func affectedDeviceConfigNodes(tx *gorm.DB, configID uint) ([]string, error) {
+	var nodeIDs []string
+	if err := tx.Model(&models.EdgeDevice{}).Distinct("node_id").
+		Where("device_config_id = ? AND deleted_at IS NULL AND node_id <> '' AND node_id <> '0'", configID).
+		Pluck("node_id", &nodeIDs).Error; err != nil {
+		return nil, err
+	}
+	return nodeIDs, nil
+}
+
+func emitDeviceConfigChanges(c *gin.Context, bus *nodemgr.ConfigEventBus, action nodemgr.ConfigChangeAction, nodeIDs []string, configID uint) {
+	for _, nodeID := range nodeIDs {
+		nodemgr.EmitConfigChange(c, bus, nodemgr.CfgChangeDeviceConfig, action, nodeID, fmt.Sprint(configID))
+	}
 }
 
 // registerDeviceRoutes sets up channel + device-config CRUD routes
@@ -219,14 +270,13 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		if tpl.Status == "" {
 			tpl.Status = "active"
+		} else {
+			tpl.Status = strings.ToLower(strings.TrimSpace(tpl.Status))
+			if tpl.Status != "active" && tpl.Status != "inactive" {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "status must be active or inactive"})
+				return
+			}
 		}
-		// 若标记为默认, 取消同 device_type 的其他默认
-		if tpl.IsDefault {
-			db.Model(&models.DeviceConfig{}).
-				Where("device_type = ? AND is_default = ?", tpl.DeviceType, true).
-				Update("is_default", false)
-		}
-		// Normalize v2.2 JSONB fields: 空值 -> 合法 JSON (GORM 不会自动转)
 		if len(tpl.Config) == 0 {
 			tpl.Config = json.RawMessage([]byte("{}"))
 		}
@@ -242,84 +292,118 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		if len(tpl.Operations) == 0 {
 			tpl.Operations = json.RawMessage([]byte("{}"))
 		}
-		if err := db.Create(&tpl).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		// Default replacement and creation are one transaction; no event is emitted
+		// until the transaction commits (a newly-created config has no references).
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if tpl.IsDefault {
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&models.DeviceConfig{}).
+					Where("device_type = ? AND is_default = ?", tpl.DeviceType, true).
+					Update("is_default", false).Error; err != nil {
+					return err
+				}
+			}
+			return tx.Create(&tpl).Error
+		}); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
 			return
 		}
-		// Emit config change (device_config affects all nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionCreate, "0", fmt.Sprint(tpl.ID))
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
 	})
 
 	// Update device-config template
 	v1.PUT("/device-configs/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		var tpl models.DeviceConfig
-		if err := db.First(&tpl, id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		var update models.DeviceConfig
-		if err := c.ShouldBindJSON(&update); err != nil {
+		var raw map[string]json.RawMessage
+		if err := c.ShouldBindJSON(&raw); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
-		update.ID = tpl.ID
-		if update.Name == "" {
+		if _, ok := raw["name"]; !ok {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "name is required"})
 			return
 		}
-		if update.DeviceType == "" {
-			update.DeviceType = tpl.DeviceType
-		}
-		if update.HardwareType == "" {
-			update.HardwareType = tpl.HardwareType
-		}
-		// 若标记为默认, 取消同 device_type 的其他默认
-		if update.IsDefault {
-			db.Model(&models.DeviceConfig{}).
-				Where("device_type = ? AND id <> ? AND is_default = ?", update.DeviceType, tpl.ID, true).
-				Update("is_default", false)
-		}
-		// Normalize v2.2 JSONB fields: 空值 -> 合法 JSON (GORM 不会自动转)
-		if len(update.Config) == 0 {
-			update.Config = json.RawMessage([]byte("{}"))
-		}
-		if len(update.Connection) == 0 {
-			update.Connection = json.RawMessage([]byte("{}"))
-		}
-		if len(update.Parser) == 0 {
-			update.Parser = json.RawMessage([]byte("{}"))
-		}
-		if len(update.InitFlow) == 0 {
-			update.InitFlow = json.RawMessage([]byte("[]"))
-		}
-		if len(update.Operations) == 0 {
-			update.Operations = json.RawMessage([]byte("{}"))
-		}
-		if err := db.Save(&update).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		var update models.DeviceConfig
+		var affectedNodes []string
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			var current models.DeviceConfig
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, id).Error; err != nil {
+				return err
+			}
+			update = current
+			body, err := json.Marshal(raw)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(body, &update); err != nil {
+				return err
+			}
+			update.ID = current.ID
+			if strings.TrimSpace(update.Name) == "" {
+				return fmt.Errorf("name is required")
+			}
+			if strings.TrimSpace(update.Status) == "" {
+				update.Status = current.Status
+			} else {
+				update.Status = strings.ToLower(strings.TrimSpace(update.Status))
+				if update.Status != "active" && update.Status != "inactive" {
+					return fmt.Errorf("status must be active or inactive")
+				}
+			}
+			var references int64
+			if err := tx.Model(&models.EdgeDevice{}).Where("device_config_id = ?", current.ID).Count(&references).Error; err != nil {
+				return err
+			}
+			if references > 0 && (update.DeviceType != current.DeviceType || !strings.EqualFold(update.HardwareType, current.HardwareType) || !strings.EqualFold(update.Status, "active")) {
+				return fmt.Errorf("cannot change type, hardware_type, or active status of a device config referenced by edge devices")
+			}
+			if update.IsDefault {
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&models.DeviceConfig{}).Where("device_type = ? AND id <> ? AND is_default = ?", update.DeviceType, current.ID, true).Update("is_default", false).Error; err != nil {
+					return err
+				}
+			}
+			nodes, nodeErr := affectedDeviceConfigNodes(tx, current.ID)
+			if nodeErr != nil {
+				return nodeErr
+			}
+			affectedNodes = nodes
+			return tx.Save(&update).Error
+		}); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			}
 			return
 		}
-		// Emit config change (device_config affects all nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, "0", fmt.Sprint(update.ID))
+		// Transaction committed: fan out once per real referenced node.
+		emitDeviceConfigChanges(c, eventBus, nodemgr.CfgActionUpdate, affectedNodes, update.ID)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
 	})
 
 	// Delete device-config template
 	v1.DELETE("/device-configs/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		tplID := parseUintID(id)
-		if err := db.Delete(&models.DeviceConfig{}, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			var config models.DeviceConfig
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&config, id).Error; err != nil {
+				return err
+			}
+			var references int64
+			if err := tx.Model(&models.EdgeDevice{}).Where("device_config_id = ?", config.ID).Count(&references).Error; err != nil {
+				return err
+			}
+			if references > 0 {
+				return fmt.Errorf("cannot delete device config referenced by edge devices")
+			}
+			return tx.Delete(&config).Error
+		}); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+			} else {
+				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+			}
 			return
 		}
-		// Emit config change
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionDelete, "0", fmt.Sprint(tplID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 
@@ -357,17 +441,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	v1.POST("/device-configs/:id/default", func(c *gin.Context) {
 		id := c.Param("id")
 		var tpl models.DeviceConfig
-		if err := db.First(&tpl, id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-			return
-		}
-		// 事务: 取消同 device_type 的其他默认, 设当前为默认
 		err := db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&models.DeviceConfig{}).
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&tpl, id).Error; err != nil {
+				return err
+			}
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&models.DeviceConfig{}).
 				Where("device_type = ? AND id <> ? AND is_default = ?", tpl.DeviceType, tpl.ID, true).
 				Update("is_default", false).Error; err != nil {
 				return err
@@ -375,11 +453,13 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return tx.Model(&tpl).Update("is_default", true).Error
 		})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			}
 			return
 		}
-		// Emit config change (default flag change affects nodes using this config)
-		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeDeviceConfig, nodemgr.CfgActionUpdate, "0", fmt.Sprint(tpl.ID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
 	})
 
@@ -648,10 +728,33 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
+			var locked models.Channel
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, id).Error; err != nil {
 				return err
 			}
-			return tx.Model(&ch).Updates(updates).Error
+			finalCandidate := locked
+			if dto.HardwareType != nil {
+				finalCandidate.HardwareType = *dto.HardwareType
+			}
+			if dto.BusType != nil {
+				finalCandidate.BusType = *dto.BusType
+			}
+			if dto.Enabled != nil {
+				finalCandidate.Enabled = *dto.Enabled
+			}
+			if dto.BusConfig != nil {
+				finalCandidate.BusConfig = *dto.BusConfig
+			}
+			if err := validateTransportChannelType(&finalCandidate); err != nil {
+				return err
+			}
+			if err := validateChannelPeripheralConflicts(tx, finalCandidate); err != nil {
+				return err
+			}
+			if err := validateChannelBindings(tx, &finalCandidate); err != nil {
+				return err
+			}
+			return tx.Model(&locked).Updates(updates).Error
 		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
@@ -669,17 +772,28 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	v1.DELETE("/channels/:channel_id", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var ch models.Channel
-		hasNode := db.First(&ch, id).Error == nil
-		nodeID := ch.NodeID
-		channelID := ch.ID
-		if err := db.Delete(&models.Channel{}, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&ch, id).Error; err != nil {
+				return err
+			}
+			var devices []models.EdgeDevice
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("channel_id = ?", ch.ID).Find(&devices).Error; err != nil {
+				return err
+			}
+			if len(devices) > 0 {
+				return fmt.Errorf("cannot delete channel referenced by edge devices")
+			}
+			return tx.Delete(&ch).Error
+		}); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+			} else {
+				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+			}
 			return
 		}
 		// Emit config change
-		if hasNode {
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, nodeID, fmt.Sprint(channelID))
-		}
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(ch.ID))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
 	})
 

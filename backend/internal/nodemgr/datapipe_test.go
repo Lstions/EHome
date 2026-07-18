@@ -42,10 +42,10 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	db.Create(&col)
 
 	ch := models.Channel{
-		NodeID: fmt.Sprintf("%d", col.ID),
-		HardwareID:  "1",
-		IntervalMs:  5000,
-		Enabled:     true,
+		NodeID:     fmt.Sprintf("%d", col.ID),
+		HardwareID: "1",
+		IntervalMs: 5000,
+		Enabled:    true,
 	}
 	db.Create(&ch)
 
@@ -65,22 +65,19 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 
 	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), 0, 0, rawData)
 
-	// Verify unified_data was written
+	// BMP280 samples without a calibration record must fail closed: no plausible
+	// but physically invalid readings may be persisted.
 	var unified []models.UnifiedData
 	db.Where("device_id = ?", dev.ID).Find(&unified)
-	if len(unified) != 2 {
-		// BMP280 produces 2 sensors (temp + pressure)
-		t.Errorf("expected 2 unified_data rows, got %d", len(unified))
+	if len(unified) != 0 {
+		t.Errorf("uncalibrated BMP280 wrote %d unified_data rows", len(unified))
 	}
 
-	// Verify device_data was written (F4.1 R9)
+	// The parsed-device history must likewise remain empty.
 	var deviceData []models.DeviceData
 	db.Where("device_id = ?", dev.ID).Find(&deviceData)
-	if len(deviceData) == 0 {
-		t.Error("expected device_data row, got 0")
-	}
-	if len(deviceData) > 0 && deviceData[0].DataJSON == "" {
-		t.Error("expected device_data.data_json to be populated")
+	if len(deviceData) != 0 {
+		t.Errorf("uncalibrated BMP280 wrote %d device_data rows", len(deviceData))
 	}
 }
 
@@ -150,24 +147,11 @@ func TestDriverRegistry(t *testing.T) {
 	}
 }
 
-// TestBMP280Driver_Parse: ensure BMP280 driver works
+// TestBMP280Driver_Parse: uncalibrated samples must be rejected.
 func TestBMP280Driver_Parse(t *testing.T) {
 	d := &drivers.BMP280Driver{}
-	data, err := d.ParseData([]byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32})
-	if err != nil {
-		t.Fatalf("ParseData: %v", err)
-	}
-	if len(data) != 2 {
-		t.Errorf("expected 2 sensors, got %d", len(data))
-	}
-	sensorNames := map[string]bool{}
-	for _, s := range data {
-		sensorNames[s.Name] = true
-	}
-	for _, expected := range []string{"temperature", "pressure"} {
-		if !sensorNames[expected] {
-			t.Errorf("expected sensor %s not in output", expected)
-		}
+	if _, err := d.ParseData([]byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32}); err == nil {
+		t.Fatal("uncalibrated BMP280 sample must fail closed")
 	}
 }
 
@@ -237,22 +221,22 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 	// Create two channels with explicit DB IDs far from 0/1 so C6 legacy
 	// 0-based indexes cannot collide with real channels.id values.
 	ch1 := models.Channel{
-		ID:           100,
-		NodeID:       node.NodeID,
-		HardwareID:   "1",
-		BusType:      "I2C",
-		IntervalMs:   5000,
-		Enabled:      true,
+		ID:         100,
+		NodeID:     node.NodeID,
+		HardwareID: "1",
+		BusType:    "I2C",
+		IntervalMs: 5000,
+		Enabled:    true,
 	}
 	db.Create(&ch1)
 
 	ch2 := models.Channel{
-		ID:           101,
-		NodeID:       node.NodeID,
-		HardwareID:   "0x76",
-		BusType:      "I2C",
-		IntervalMs:   1000,
-		Enabled:      true,
+		ID:         101,
+		NodeID:     node.NodeID,
+		HardwareID: "0x76",
+		BusType:    "I2C",
+		IntervalMs: 1000,
+		Enabled:    true,
 	}
 	db.Create(&ch2)
 

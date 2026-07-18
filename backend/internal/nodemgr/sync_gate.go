@@ -180,8 +180,13 @@ func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDec
 }
 
 // OnConfigChange handles a ConfigChangeEvent from the bus.
-// Returns one SyncDecision per affected node device.
+// Global/empty node IDs have no broadcast semantics: callers must fan out to
+// concrete affected nodes after their database transaction commits.
 func (g *SyncGate) OnConfigChange(evt ConfigChangeEvent) []SyncDecision {
+	if evt.NodeID == "" || evt.NodeID == "0" {
+		logger.Warnf("rejecting config change with non-concrete node_id=%q", evt.NodeID)
+		return nil
+	}
 	syncID := uuid.New().String()
 	serverHash := g.mgr.CalcConfigHashForDevice(evt.NodeID)
 	d := SyncDecision{

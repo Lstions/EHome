@@ -55,7 +55,7 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "i2c", Status: "active"})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":             "New Device",
@@ -85,6 +85,9 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 	if dev.HardwareID != "0x77" {
 		t.Errorf("expected hardware_id '0x77', got %s", dev.HardwareID)
 	}
+	if dev.IntervalMs != 3000 {
+		t.Errorf("expected interval_ms 3000, got %d", dev.IntervalMs)
+	}
 }
 
 func TestEdgeDevice_Create_MissingRequiredFields(t *testing.T) {
@@ -101,6 +104,65 @@ func TestEdgeDevice_Create_MissingRequiredFields(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEdgeDevice_Create_RequiresActiveCompatibleDeviceConfig(t *testing.T) {
+	tests := []struct {
+		name            string
+		configStatus    string
+		configHardware  string
+		channelHardware string
+		channelBusType  string
+		includeConfigID bool
+		wantStatus      int
+	}{
+		{name: "missing device config", channelHardware: "I2C", wantStatus: http.StatusBadRequest},
+		{name: "inactive device config", configStatus: "inactive", configHardware: "i2c", channelHardware: "I2C", includeConfigID: true, wantStatus: http.StatusBadRequest},
+		{name: "hardware mismatch", configStatus: "active", configHardware: "uart", channelHardware: "I2C", includeConfigID: true, wantStatus: http.StatusBadRequest},
+		{name: "inconsistent channel metadata", configStatus: "active", configHardware: "i2c", channelHardware: "UART", channelBusType: "I2C", includeConfigID: true, wantStatus: http.StatusBadRequest},
+		{name: "compatible config derives type", configStatus: "active", configHardware: "i2c", channelHardware: "I2C", includeConfigID: true, wantStatus: http.StatusCreated},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+			channelBusType := tt.channelBusType
+			if channelBusType == "" {
+				channelBusType = tt.channelHardware
+			}
+			db.Create(&models.Channel{NodeID: "NODE001", HardwareType: tt.channelHardware, BusType: channelBusType, Enabled: true})
+			if tt.configStatus != "" {
+				db.Create(&models.DeviceConfig{Name: "Configured sensor", DeviceType: "configured_type", HardwareType: tt.configHardware, Status: tt.configStatus})
+			}
+
+			body := map[string]interface{}{
+				"name": "Configured device", "type": "client_supplied_type", "node_id": "NODE001", "channel_id": 1,
+			}
+			if tt.includeConfigID {
+				body["device_config_id"] = 1
+			}
+			payload, _ := json.Marshal(body)
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			if tt.wantStatus == http.StatusCreated {
+				var created models.EdgeDevice
+				if err := db.First(&created, "name = ?", "Configured device").Error; err != nil {
+					t.Fatalf("load created device: %v", err)
+				}
+				if created.DeviceConfigID != 1 || created.Type != "configured_type" {
+					t.Fatalf("expected config binding and derived type, got config=%d type=%q", created.DeviceConfigID, created.Type)
+				}
+			}
+		})
 	}
 }
 
@@ -221,7 +283,7 @@ func TestEdgeDevice_Update_Success(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "i2c", Status: "active"})
 	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -247,6 +309,113 @@ func TestEdgeDevice_Update_Success(t *testing.T) {
 	}
 	if dev.Enabled {
 		t.Error("expected enabled=false")
+	}
+}
+
+func TestEdgeDevice_Update_RejectsInactiveOrIncompatibleDeviceConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		configStatus   string
+		configHardware string
+	}{
+		{name: "inactive", configStatus: "inactive", configHardware: "i2c"},
+		{name: "incompatible hardware", configStatus: "active", configHardware: "uart"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, db := setupEdgeDeviceTest(t)
+			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+			db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+			db.Create(&models.DeviceConfig{Name: "Current", DeviceType: "current", HardwareType: "i2c", Status: "active"})
+			db.Create(&models.DeviceConfig{Name: "Candidate", DeviceType: "candidate", HardwareType: tt.configHardware, Status: tt.configStatus})
+			db.Create(&models.EdgeDevice{Name: "Device", Type: "current", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+			payload, _ := json.Marshal(map[string]interface{}{"device_config_id": 2})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", authHeader(t))
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			var updated models.EdgeDevice
+			db.First(&updated, 1)
+			if updated.DeviceConfigID != 1 || updated.Type != "current" {
+				t.Fatalf("rejected update changed config=%d type=%q", updated.DeviceConfigID, updated.Type)
+			}
+		})
+	}
+}
+
+func TestEdgeDevice_Update_RejectsTypeOverrideForConfiguredDevice(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Configured", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	payload, _ := json.Marshal(map[string]interface{}{"type": "spoofed_type"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.EdgeDevice
+	db.First(&updated, 1)
+	if updated.Type != "bmp280" {
+		t.Fatalf("type override changed configured device type to %q", updated.Type)
+	}
+}
+
+func TestEdgeDevice_Update_RejectsChannelIncompatibleWithBoundDeviceConfig(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Configured", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	payload, _ := json.Marshal(map[string]interface{}{"channel_id": 2})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.EdgeDevice
+	db.First(&updated, 1)
+	if updated.ChannelID != 1 {
+		t.Fatalf("rejected update changed configured device channel to %d", updated.ChannelID)
+	}
+}
+
+func TestEdgeDevice_Update_RejectsNodeMoveIncompatibleWithBoundDeviceConfig(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Current", Status: "online"})
+	db.Create(&models.Node{NodeID: "NODE002", Name: "Target", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: "NODE002", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Configured", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	payload, _ := json.Marshal(map[string]interface{}{"node_id": "NODE002", "channel_id": 2})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.EdgeDevice
+	db.First(&updated, 1)
+	if updated.NodeID != "NODE001" || updated.ChannelID != 1 {
+		t.Fatalf("rejected move changed node=%q channel=%d", updated.NodeID, updated.ChannelID)
 	}
 }
 

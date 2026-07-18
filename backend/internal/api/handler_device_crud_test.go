@@ -252,6 +252,34 @@ func TestDeviceConfig_Create_DefaultStatus(t *testing.T) {
 	}
 }
 
+func TestDeviceConfig_CreateCanonicalizesAndRejectsStatus(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	for _, status := range []string{"ACTIVE", "unsupported"} {
+		body, _ := json.Marshal(map[string]interface{}{
+			"name": "Status " + status, "device_type": "temperature", "hardware_type": "uart", "status": status,
+		})
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/device-configs", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if status == "ACTIVE" {
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201 for canonicalized status, got %d: %s", w.Code, w.Body.String())
+			}
+			var config models.DeviceConfig
+			if err := db.Where("name = ?", "Status ACTIVE").First(&config).Error; err != nil {
+				t.Fatal(err)
+			}
+			if config.Status != "active" {
+				t.Fatalf("status was not canonicalized: %q", config.Status)
+			}
+		} else if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for unsupported status, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestDeviceConfig_Create_AsDefault(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
@@ -368,6 +396,62 @@ func TestDeviceConfig_Delete_Success(t *testing.T) {
 	db.Model(&models.DeviceConfig{}).Count(&count)
 	if count != 0 {
 		t.Errorf("expected 0 configs after delete, got %d", count)
+	}
+}
+
+func TestDeviceConfig_RejectsDestructiveChangesWhileReferenced(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Node", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Bound", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Bound device", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	for _, body := range []map[string]interface{}{
+		{"name": "Bound", "hardware_type": "uart", "status": "active"},
+		{"name": "Bound", "hardware_type": "i2c", "status": "inactive"},
+		{"name": "Bound", "hardware_type": "i2c", "status": "unsupported"},
+	} {
+		payload, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/device-configs/1", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+		}
+		var unchanged models.DeviceConfig
+		if err := db.First(&unchanged, 1).Error; err != nil {
+			t.Fatal(err)
+		}
+		if unchanged.Status != "active" {
+			t.Fatalf("rejected mutation changed status: %q", unchanged.Status)
+		}
+	}
+	// Case variants normalize to the one stored canonical spelling instead of
+	// leaving a binding that the exact active-status query would reject.
+	payload, _ := json.Marshal(map[string]interface{}{"name": "Bound", "hardware_type": "i2c", "status": "ACTIVE"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/device-configs/1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected canonicalized update 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var canonical models.DeviceConfig
+	if err := db.First(&canonical, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Status != "active" {
+		t.Fatalf("status was not canonicalized: %q", canonical.Status)
+	}
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/device-configs/1", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -782,6 +866,36 @@ func TestChannel_Update_Success(t *testing.T) {
 	}
 }
 
+func TestChannel_UpdateRejectsInvalidatingBoundEdgeDevice(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Node", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", BusConfig: "0102", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "I2C config", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Bound", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	for _, body := range []map[string]interface{}{
+		{"enabled": false},
+		{"hardware_type": "UART", "bus_type": "UART", "bus_config": "0304"},
+	} {
+		payload, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/channels/1", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusOK {
+			t.Fatalf("invalidating bound channel update succeeded: %s", w.Body.String())
+		}
+	}
+	var channel models.Channel
+	if err := db.First(&channel, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !channel.Enabled || channel.HardwareType != "I2C" || channel.BusType != "I2C" {
+		t.Fatalf("rejected update mutated channel: %+v", channel)
+	}
+}
+
 func TestChannel_UpdateDisabledTransportCanBeReenabled(t *testing.T) {
 	r, db := setupDeviceTest(t)
 	ch := models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", BusConfig: "0304", Enabled: false}
@@ -847,6 +961,25 @@ func TestChannel_Update_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestChannel_DeleteRejectsBoundEdgeDevice(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Node", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", BusConfig: "0102", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "I2C config", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Bound", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/channels/1", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var channel models.Channel
+	if err := db.First(&channel, 1).Error; err != nil {
+		t.Fatal(err)
 	}
 }
 

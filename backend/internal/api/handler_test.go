@@ -838,14 +838,168 @@ func TestNodeConfigCannotEnableStoredLegacyPeripheralChannel(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 	if err := db.First(&ch, ch.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if ch.Enabled {
 		t.Fatal("legacy peripheral channel was re-enabled")
+	}
+}
+
+func TestNodeConfigUpdateEnforcesDeviceConfigBinding(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	node := models.Node{NodeID: "NODE001", Name: "node", Status: "online"}
+	db.Create(&node)
+	db.Create(&models.Channel{NodeID: node.NodeID, HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.Channel{NodeID: node.NodeID, HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Current", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Inactive", DeviceType: "other", HardwareType: "i2c", Status: "inactive"})
+	db.Create(&models.DeviceConfig{Name: "Replacement", DeviceType: "replacement", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: node.NodeID, ChannelID: 1, DeviceConfigID: 1})
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+
+	for _, payload := range []map[string]interface{}{
+		{"edge_devices": []map[string]interface{}{{"id": 1, "channel_id": 2}}},
+		{"edge_devices": []map[string]interface{}{{"id": 1, "device_config_id": 2}}},
+	} {
+		body, _ := json.Marshal(payload)
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"edge_devices": []map[string]interface{}{{"id": 1, "device_config_id": 3}}})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.EdgeDevice
+	db.First(&updated, 1)
+	if updated.DeviceConfigID != 3 || updated.Type != "replacement" {
+		t.Fatalf("config update did not derive binding and type: %+v", updated)
+	}
+
+	// A batch is transactional: a later invalid item must roll back the earlier
+	// valid replacement rather than leaving a partly rebound node configuration.
+	db.Create(&models.EdgeDevice{Name: "Second", Type: "replacement", NodeID: node.NodeID, ChannelID: 1, DeviceConfigID: 3})
+	body, _ = json.Marshal(map[string]interface{}{"edge_devices": []map[string]interface{}{
+		{"id": 1, "device_config_id": 1},
+		{"id": 2, "channel_id": 2},
+	}})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	db.First(&updated, 1)
+	if updated.DeviceConfigID != 3 || updated.Type != "replacement" {
+		t.Fatalf("failed batch partially updated first device: %+v", updated)
+	}
+
+	// Channel and EdgeDevice mutations share one request transaction: an invalid
+	// device candidate must roll back an otherwise valid channel mutation.
+	interval := 4321
+	body, _ = json.Marshal(map[string]interface{}{
+		"channels":     []map[string]interface{}{{"id": 1, "interval_ms": interval}},
+		"edge_devices": []map[string]interface{}{{"id": 1, "device_config_id": 2}},
+	})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var unchangedChannel models.Channel
+	if err := db.First(&unchangedChannel, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if unchangedChannel.IntervalMs == interval {
+		t.Fatalf("failed composite request committed channel mutation: %+v", unchangedChannel)
+	}
+	// Duplicate IDs are rejected before candidate construction; a request cannot
+	// silently overwrite an earlier item with a later stale candidate.
+	body, _ = json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{
+		{"id": 1, "enabled": false},
+		{"id": 1, "interval_ms": 2000},
+	}})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate channel 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body, _ = json.Marshal(map[string]interface{}{"edge_devices": []map[string]interface{}{
+		{"id": 1, "device_config_id": 1},
+		{"id": 1, "device_config_id": 3},
+	}})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate device 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNodeConfigUpdateRejectsDisablingBoundChannel(t *testing.T) {
+	db := setupTestDB(t)
+	r := setupRouter()
+	node := models.Node{NodeID: "NODE001", Name: "node", Status: "online"}
+	db.Create(&node)
+	db.Create(&models.Channel{NodeID: node.NodeID, HardwareType: "I2C", BusType: "I2C", BusConfig: "0102", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Config", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: node.NodeID, ChannelID: 1, DeviceConfigID: 1})
+	v1 := r.Group("/api/v1")
+	v1.Use(JWTAuth())
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
+	registerNodeRoutes(v1, db, mgr)
+
+	bus := mgr.EventBus()
+	events := bus.Subscribe()
+	body, _ := json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{{"id": 1, "enabled": false}}})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var channel models.Channel
+	if err := db.First(&channel, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !channel.Enabled {
+		t.Fatal("bound channel was disabled")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("rejected node config request emitted event: %+v", event)
+	default:
 	}
 }
 

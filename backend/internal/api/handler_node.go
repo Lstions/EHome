@@ -755,7 +755,15 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			return
 		}
 		if req.Channels != nil {
+			seen := make(map[uint]struct{}, len(*req.Channels))
 			for _, ch := range *req.Channels {
+				if ch.ID != 0 {
+					if _, exists := seen[ch.ID]; exists {
+						c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "duplicate channel update"})
+						return
+					}
+					seen[ch.ID] = struct{}{}
+				}
 				if isPeripheralChannelType(ch.BusType) {
 					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "GPIO and PWM are peripheral resources, not channels"})
 					return
@@ -763,7 +771,15 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			}
 		}
 		if req.EdgeDevices != nil {
+			seen := make(map[uint]struct{}, len(*req.EdgeDevices))
 			for _, edge := range *req.EdgeDevices {
+				if edge.ID != 0 {
+					if _, exists := seen[edge.ID]; exists {
+						c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "duplicate edge device update"})
+						return
+					}
+					seen[edge.ID] = struct{}{}
+				}
 				if edge.ChannelID == nil {
 					continue
 				}
@@ -775,189 +791,224 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			}
 		}
 
-		var updatedFields []string
+		channelUpdates := []channelUpdateItem{}
 		if req.Channels != nil {
-			if err := db.Transaction(func(tx *gorm.DB) error {
-				var lockedNode models.Node
-				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", node.NodeID).First(&lockedNode).Error; err != nil {
-					return err
-				}
-				for _, ch := range *req.Channels {
-					if ch.ID == 0 {
-						continue
-					}
-					var existing models.Channel
-					if err := tx.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&existing).Error; err != nil {
-						return err
-					}
-					candidate := existing
-					if ch.BusType != "" {
-						candidate.BusType = ch.BusType
-					}
-					if ch.BusConfig != "" {
-						candidate.BusConfig = ch.BusConfig
-					}
-					if ch.Enabled != nil {
-						candidate.Enabled = *ch.Enabled
-					}
-					if err := validateTransportChannelType(&candidate); err != nil {
-						return err
-					}
-					if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
-						return err
-					}
-				}
-				return nil
-			}); err != nil {
-				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
-				return
-			}
+			channelUpdates = *req.Channels
 		}
-
-		// Update channels if provided
-		if req.Channels != nil {
-			for i, ch := range *req.Channels {
+		edgeDeviceUpdates := []edgeDeviceUpdateItem{}
+		if req.EdgeDevices != nil {
+			edgeDeviceUpdates = *req.EdgeDevices
+		}
+		var updatedFields []string
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			var lockedNode models.Node
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", node.NodeID).First(&lockedNode).Error; err != nil {
+				return err
+			}
+			channelCandidates := make(map[uint]models.Channel)
+			channelWrites := make(map[uint]map[string]interface{})
+			loadChannel := func(id uint) (*models.Channel, error) {
+				if candidate, ok := channelCandidates[id]; ok {
+					return &candidate, nil
+				}
+				var current models.Channel
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", id, node.NodeID).First(&current).Error; err != nil {
+					return nil, err
+				}
+				channelCandidates[id] = current
+				return &current, nil
+			}
+			for _, ch := range channelUpdates {
 				if ch.ID == 0 {
 					continue
 				}
-				// Verify channel belongs to this node
-				var existing models.Channel
-				if err := db.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&existing).Error; err != nil {
-					continue // skip channels not belonging to this node
+				current, err := loadChannel(ch.ID)
+				if err != nil {
+					return err
 				}
-				candidate := existing
-				if ch.BusType != "" {
-					candidate.BusType = ch.BusType
-				}
-				if ch.Enabled != nil {
-					candidate.Enabled = *ch.Enabled
-				}
-				if err := validateTransportChannelType(&candidate); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-					return
-				}
-
+				candidate := *current
 				updates := map[string]interface{}{}
-
-				// Handle "address" field (hex string like "0x77" → HardwareID string)
 				if ch.Address != "" {
-					updates["hardware_id"] = ch.Address
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.address", i))
+					candidate.HardwareID, updates["hardware_id"] = ch.Address, ch.Address
 				}
 				if ch.HardwareID != "" {
-					updates["hardware_id"] = ch.HardwareID
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.hardware_id", i))
+					candidate.HardwareID, updates["hardware_id"] = ch.HardwareID, ch.HardwareID
 				}
 				if ch.IntervalMs != nil {
-					updates["interval_ms"] = *ch.IntervalMs
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.interval_ms", i))
+					candidate.IntervalMs, updates["interval_ms"] = *ch.IntervalMs, *ch.IntervalMs
 				}
 				if ch.BusType != "" {
-					updates["bus_type"] = ch.BusType
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.bus_type", i))
+					candidate.BusType, updates["bus_type"] = ch.BusType, ch.BusType
 				}
 				if ch.BusConfig != "" {
-					updates["bus_config"] = ch.BusConfig
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.bus_config", i))
+					candidate.BusConfig, updates["bus_config"] = ch.BusConfig, ch.BusConfig
 				}
 				if ch.Config != "" {
-					updates["config"] = ch.Config
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.config", i))
+					candidate.Config, updates["config"] = ch.Config, ch.Config
 				}
 				if ch.TemplateIDs != "" {
-					updates["template_ids"] = ch.TemplateIDs
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.template_ids", i))
+					candidate.TemplateIDs, updates["template_ids"] = ch.TemplateIDs, ch.TemplateIDs
 				}
 				if ch.Enabled != nil {
-					updates["enabled"] = *ch.Enabled
-					updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.enabled", i))
+					candidate.Enabled, updates["enabled"] = *ch.Enabled, *ch.Enabled
 				}
-
-				if len(updates) > 0 {
-					err := db.Transaction(func(tx *gorm.DB) error {
-						var lockedNode models.Node
-						if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", node.NodeID).First(&lockedNode).Error; err != nil {
-							return err
-						}
-						var current models.Channel
-						if err := tx.Where("id = ? AND node_id = ?", ch.ID, node.NodeID).First(&current).Error; err != nil {
-							return err
-						}
-						candidate := current
-						if ch.BusType != "" {
-							candidate.BusType = ch.BusType
-						}
-						if ch.BusConfig != "" {
-							candidate.BusConfig = ch.BusConfig
-						}
-						if ch.Enabled != nil {
-							candidate.Enabled = *ch.Enabled
-						}
-						if err := validateTransportChannelType(&candidate); err != nil {
-							return err
-						}
-						if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
-							return err
-						}
-						return tx.Model(&models.Channel{}).Where("id = ?", ch.ID).Updates(updates).Error
-					})
-					if err != nil {
-						c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
-						return
-					}
+				if err := validateTransportChannelType(&candidate); err != nil {
+					return err
 				}
+				if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
+					return err
+				}
+				channelCandidates[ch.ID] = candidate
+				channelWrites[ch.ID] = updates
 			}
-		}
-
-		// Update edge devices if provided
-		if req.EdgeDevices != nil {
-			for i, ed := range *req.EdgeDevices {
+			type edgeWrite struct {
+				existing       models.EdgeDevice
+				updates        map[string]interface{}
+				finalChannelID uint
+			}
+			edgeWrites := make(map[uint]edgeWrite)
+			for _, ed := range edgeDeviceUpdates {
 				if ed.ID == 0 {
 					continue
 				}
-				// Verify edge device belongs to this node
 				var existing models.EdgeDevice
-				if err := db.Where("id = ? AND node_id = ?", ed.ID, node.NodeID).First(&existing).Error; err != nil {
-					continue
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", ed.ID, node.NodeID).First(&existing).Error; err != nil {
+					return err
 				}
-
-				updates := map[string]interface{}{}
-
+				targetChannelID := existing.ChannelID
+				if ed.ChannelID != nil {
+					targetChannelID = *ed.ChannelID
+				}
+				targetChannel, err := loadChannel(targetChannelID)
+				if err != nil {
+					return fmt.Errorf("channel does not belong to node")
+				}
+				if err := validateTransportChannel(targetChannel); err != nil {
+					return err
+				}
+				configID := existing.DeviceConfigID
+				if ed.DeviceConfigID != nil {
+					configID = *ed.DeviceConfigID
+				}
+				config, err := validateDeviceConfigForChannel(tx, configID, targetChannel)
+				if err != nil {
+					return err
+				}
+				updates := map[string]interface{}{"device_config_id": config.ID, "type": config.DeviceType}
 				if ed.Name != "" {
 					updates["name"] = ed.Name
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.name", i))
 				}
 				if ed.ChannelID != nil {
-					updates["channel_id"] = *ed.ChannelID
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.channel_id", i))
-				}
-				if ed.DeviceConfigID != nil {
-					updates["device_config_id"] = *ed.DeviceConfigID
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.device_config_id", i))
+					updates["channel_id"] = targetChannelID
 				}
 				if ed.HardwareID != "" {
 					updates["hardware_id"] = ed.HardwareID
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.hardware_id", i))
 				}
 				if ed.IntervalMs != nil {
 					updates["interval_ms"] = *ed.IntervalMs
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.interval_ms", i))
 				}
 				if ed.Enabled != nil {
 					updates["enabled"] = *ed.Enabled
-					updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.enabled", i))
 				}
-
-				if len(updates) > 0 {
-					result := db.Model(&models.EdgeDevice{}).Where("id = ?", ed.ID).Updates(updates)
-					if result.Error != nil {
-						logger.Warnf("Failed to update edge_device id=%d: %v", ed.ID, result.Error)
+				edgeWrites[ed.ID] = edgeWrite{existing: existing, updates: updates, finalChannelID: targetChannelID}
+			}
+			// Validate every resulting reference to each changed channel. Devices moved
+			// away by this same request do not block a channel lifecycle update.
+			for channelID, candidate := range channelCandidates {
+				if _, changed := channelWrites[channelID]; !changed {
+					continue
+				}
+				if err := validateTransportChannel(&candidate); err != nil {
+					return err
+				}
+				var bound []models.EdgeDevice
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("channel_id = ? AND node_id = ?", channelID, node.NodeID).Find(&bound).Error; err != nil {
+					return err
+				}
+				for _, device := range bound {
+					if write, updated := edgeWrites[device.ID]; updated && write.finalChannelID != channelID {
+						continue
+					}
+					configID := device.DeviceConfigID
+					if write, updated := edgeWrites[device.ID]; updated {
+						configID = write.updates["device_config_id"].(uint)
+					}
+					if _, err := validateDeviceConfigForChannel(tx, configID, &candidate); err != nil {
+						return err
 					}
 				}
 			}
+			for channelID, updates := range channelWrites {
+				if len(updates) == 0 {
+					continue
+				}
+				if err := tx.Model(&models.Channel{}).Where("id = ?", channelID).Updates(updates).Error; err != nil {
+					return err
+				}
+			}
+			for _, write := range edgeWrites {
+				if err := tx.Model(&write.existing).Updates(write.updates).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		for i, ch := range channelUpdates {
+			if ch.ID == 0 {
+				continue
+			}
+			if ch.Address != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.address", i))
+			}
+			if ch.HardwareID != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.hardware_id", i))
+			}
+			if ch.IntervalMs != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.interval_ms", i))
+			}
+			if ch.BusType != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.bus_type", i))
+			}
+			if ch.BusConfig != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.bus_config", i))
+			}
+			if ch.Config != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.config", i))
+			}
+			if ch.TemplateIDs != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.template_ids", i))
+			}
+			if ch.Enabled != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("channels.%d.enabled", i))
+			}
+		}
+		for i, ed := range edgeDeviceUpdates {
+			if ed.ID == 0 {
+				continue
+			}
+			if ed.Name != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.name", i))
+			}
+			if ed.ChannelID != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.channel_id", i))
+			}
+			if ed.DeviceConfigID != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.device_config_id", i))
+			}
+			if ed.HardwareID != "" {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.hardware_id", i))
+			}
+			if ed.IntervalMs != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.interval_ms", i))
+			}
+			if ed.Enabled != nil {
+				updatedFields = append(updatedFields, fmt.Sprintf("edge_devices.%d.enabled", i))
+			}
 		}
 
-		// --- BUG-04: Idempotency check (M7: simplified) ---
 		// Only check if updatedFields is non-empty; skip DB snapshot comparison
 		// to avoid race conditions. Worst case: extra config push, which is safe.
 		configChanged := len(updatedFields) > 0
