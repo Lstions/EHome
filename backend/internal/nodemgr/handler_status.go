@@ -4,6 +4,8 @@ import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -67,8 +69,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		case 6: // v2.2: config_hash
 			configHash = frame.GetString(field)
 		case 7:
-			if err := validateKnownFields(frame.GetBytes(field), map[uint8]uint8{1: frame.WireVarint, 2: frame.WireLengthDelimited}, []uint8{1}, map[uint8]bool{2: true}); err != nil {
-				logger.Warnf("[%s] malformed channel health", deviceID)
+			if err := validateChannelHealth(frame.GetBytes(field)); err != nil {
+				logger.Warnf("[%s] malformed channel health: %v", deviceID, err)
 				return
 			}
 		case 8:
@@ -119,7 +121,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	// StatusReport never overwrites synchronization generations. It may only
 	// self-heal a non-syncing node when the current manifest identity matches.
 	recoveryAttempted := false
-	if syncState == "idle" {
+	if syncState == "idle" && node.ConfigSyncState == "syncing" {
 		if configHash != "" && configHash == node.ConfigVersion && syncID != "" && syncID == node.LastSyncID {
 			node.ConfigSyncState = "in_sync"
 			recoveryAttempted = true
@@ -187,4 +189,88 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		"uptime_seconds": uptimeSec,
 		"channel_count":  channelCount,
 	})
+}
+
+func validateChannelHealth(data []byte) error {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return err
+	}
+	seenChannelID := false
+	edgeHealthCount := 0
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			if !seenChannelID || edgeHealthCount == 0 {
+				return fmt.Errorf("channel health requires channel_id and edge health")
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch field.FieldNum {
+		case 1:
+			if seenChannelID || field.WireType != frame.WireVarint {
+				return fmt.Errorf("invalid channel_id")
+			}
+			seenChannelID = true
+		case 2:
+			if field.WireType != frame.WireLengthDelimited {
+				return fmt.Errorf("invalid edge health wire type")
+			}
+			if err := validateEdgeDeviceHealth(frame.GetBytes(field)); err != nil {
+				return fmt.Errorf("edge health %d: %w", edgeHealthCount, err)
+			}
+			edgeHealthCount++
+		default:
+			return fmt.Errorf("unexpected channel health field %d", field.FieldNum)
+		}
+	}
+}
+
+func validateEdgeDeviceHealth(data []byte) error {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return err
+	}
+	seen := [5]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			for number := uint8(1); number <= 4; number++ {
+				if !seen[number] {
+					return fmt.Errorf("missing field %d", number)
+				}
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if field.FieldNum < 1 || field.FieldNum > 4 || seen[field.FieldNum] ||
+			field.WireType != frame.WireVarint {
+			return fmt.Errorf("invalid field %d", field.FieldNum)
+		}
+		seen[field.FieldNum] = true
+		value := frame.GetUint64(field)
+		switch field.FieldNum {
+		case 1:
+			if value == 0 {
+				return fmt.Errorf("edge_device_id must be non-zero")
+			}
+		case 2:
+			if value > 255 {
+				return fmt.Errorf("command_index out of range")
+			}
+		case 3:
+			if value == 0 || value > math.MaxUint32 {
+				return fmt.Errorf("error_count out of range")
+			}
+		case 4:
+			if value != 1 && value != 2 && value != 3 {
+				return fmt.Errorf("invalid comm_status %d", value)
+			}
+		}
+	}
 }

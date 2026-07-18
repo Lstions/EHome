@@ -246,16 +246,16 @@ func (m *Manager) SendQueryRequest(deviceID string, queryType uint32) error {
 	return m.mqtt.Publish(topic, enc.Bytes())
 }
 
-// SendHelloAck sends a HelloAck message to a device (0x12, SVR→ESP).
-// handshakeNonce is correlation data, not authentication. Zero preserves the
-// exact legacy field set; a non-zero nonce is echoed verbatim in field 3.
+// SendHelloAck sends a nonce-correlated HelloAck (0x12, SVR→ESP).
+// handshakeNonce is correlation data, not authentication.
 func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint32, handshakeNonce uint32) error {
+	if handshakeNonce == 0 {
+		return fmt.Errorf("HelloAck requires non-zero handshake nonce")
+	}
 	enc := frame.NewEncoder(frame.MsgHelloAck)
 	enc.EncodeVarint(1, serverTime)
 	enc.EncodeVarint(2, uint64(features))
-	if handshakeNonce != 0 {
-		enc.EncodeVarint(frame.HelloAckFieldHandshakeNonce, uint64(handshakeNonce))
-	}
+	enc.EncodeVarint(frame.HelloAckFieldHandshakeNonce, uint64(handshakeNonce))
 
 	topic := mqtt.TopicForNode(deviceID)
 	return m.mqtt.Publish(topic, enc.Bytes())

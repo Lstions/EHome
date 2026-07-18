@@ -18,6 +18,13 @@ void frame_encoder_init(frame_encoder_t *enc, uint8_t *buf, size_t cap, uint8_t 
     }
 }
 
+void frame_encoder_init_sub(frame_encoder_t *enc, uint8_t *buf, size_t cap)
+{
+    enc->buf = buf;
+    enc->pos = 0;
+    enc->capacity = cap;
+}
+
 static frame_err_t encoder_ensure_space(frame_encoder_t *enc, size_t needed)
 {
     if (enc->pos + needed > enc->capacity) {

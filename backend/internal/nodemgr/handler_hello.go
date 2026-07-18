@@ -15,6 +15,7 @@ import (
 )
 
 type parsedHello struct {
+	WireNodeID      string
 	FirmwareVersion string
 	Model           string
 	ChannelCount    uint64
@@ -25,15 +26,11 @@ type parsedHello struct {
 	HandshakeNonce  uint32
 }
 
-// parseHello strictly validates every known Hello field while ignoring
-// well-formed unknown fields for forward compatibility. Field 1 and field 9
-// are untrusted wire data: routing identity continues to come from the MQTT
-// topic, and handshake_nonce is correlation only, never authentication.
+// parseHello strictly validates the development protocol. Routing identity
+// continues to come from the MQTT topic; the wire node_id is required as a
+// consistency check, and handshake_nonce is correlation, not authentication.
 func parseHello(payload []byte) (parsedHello, error) {
-	hello := parsedHello{
-		NvsHasConfig:    true,
-		ProtocolVersion: "2.0",
-	}
+	var hello parsedHello
 	dec, err := frame.NewDecoder(payload)
 	if err != nil {
 		return hello, fmt.Errorf("invalid Hello frame: %w", err)
@@ -64,6 +61,7 @@ func parseHello(payload []byte) (parsedHello, error) {
 			if field.WireType != frame.WireLengthDelimited {
 				return hello, fmt.Errorf("invalid Hello node_id wire type %d", field.WireType)
 			}
+			hello.WireNodeID = frame.GetString(field)
 		case 2:
 			if field.WireType != frame.WireLengthDelimited {
 				return hello, fmt.Errorf("invalid Hello firmware_version wire type %d", field.WireType)
@@ -110,6 +108,21 @@ func parseHello(payload []byte) (parsedHello, error) {
 			hello.HandshakeNonce = uint32(value)
 		}
 	}
+	required := []uint8{1, 2, 3, 4, 5, 6, frame.HelloFieldProtocolVersion, frame.HelloFieldHandshakeNonce}
+	for _, number := range required {
+		if !seen[number] {
+			return hello, fmt.Errorf("invalid Hello: missing required field %d", number)
+		}
+	}
+	if hello.WireNodeID == "" || hello.FirmwareVersion == "" || hello.Model == "" {
+		return hello, fmt.Errorf("invalid Hello: node_id, firmware_version, and model are required")
+	}
+	if hello.ProtocolVersion != ServerMaxProtocolVersion {
+		return hello, fmt.Errorf("invalid Hello protocol_version %q, require %s", hello.ProtocolVersion, ServerMaxProtocolVersion)
+	}
+	if hello.HandshakeNonce == 0 {
+		return hello, fmt.Errorf("invalid Hello handshake_nonce: zero")
+	}
 
 	return hello, nil
 }
@@ -131,12 +144,15 @@ func negotiatedProtocolVersion(deviceReported string) string {
 }
 
 // handleHello processes Hello messages (type=0x01)
-// v2.6: parses 8 legacy fields plus optional field 9 handshake_nonce
-// and routes through SyncGate for unified sync decision.
+// v2.6 requires an exact protocol version and non-zero field 9 nonce.
 func (m *Manager) handleHello(deviceID string, payload []byte) {
 	hello, err := parseHello(payload)
 	if err != nil {
 		logger.Warnf("[%s] Rejecting invalid Hello before ACK: %v", deviceID, err)
+		return
+	}
+	if hello.WireNodeID != deviceID {
+		logger.Warnf("[%s] Rejecting Hello with mismatched wire node_id %q", deviceID, hello.WireNodeID)
 		return
 	}
 

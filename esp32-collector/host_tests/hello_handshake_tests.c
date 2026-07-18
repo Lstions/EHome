@@ -209,7 +209,7 @@ static void test_delayed_nonce1_ack_after_nonce2_armed_is_rejected(void)
           "valid ACK must preserve server_time semantics");
 }
 
-static void test_ack_nonce_validation_and_legacy_sync_semantics(void)
+static void test_ack_nonce_is_mandatory(void)
 {
     reset_fixture();
     app_state_t *state = start_fixture();
@@ -223,8 +223,8 @@ static void test_ack_nonce_validation_and_legacy_sync_semantics(void)
           "ACK without nonce must not complete new-firmware handshake");
     CHECK(task_notifications == notify_before,
           "ACK without nonce must not notify handshake worker");
-    CHECK(msg_handler_get_server_time() == 11 && sync_downlink_count == 1,
-          "legacy/sync ACK must retain server-time and sync downlink semantics");
+    CHECK(msg_handler_get_server_time() == 0 && sync_downlink_count == 0,
+          "ACK without nonce must have no handshake side effects");
 
     process_ack(0, true, 12, 1);
     process_ack(armed - 1U, true, 13, 1);
@@ -292,18 +292,22 @@ static void test_ack_parser_rejects_duplicate_wrong_wire_overflow_and_malformed(
                                        "non-canonical zero nonce must be rejected");
 }
 
-static void test_hello_codec_nonce_and_legacy_omission(void)
+static void test_hello_codec_requires_nonce(void)
 {
     reset_fixture();
     msg_handler_send_hello("node", "fw", "model", 2, 0);
-    CHECK(decode_hello_nonce(last_publish, last_publish_len) == 0,
-          "ordinary sync Hello nonce zero must omit field9");
+    CHECK(hello_publish_count == 0 && last_publish_len == 0,
+          "Hello without nonce must not reach the wire");
+
+    msg_handler_send_hello("node", "fw", "model", 2, 77);
+    CHECK(decode_hello_nonce(last_publish, last_publish_len) == 77,
+          "handshake Hello must encode exact field9 nonce");
 
     frame_decoder_t dec;
     frame_field_t field;
     char protocol[8] = {0};
     CHECK(frame_decoder_init(&dec, last_publish, last_publish_len) == FRAME_OK,
-          "legacy Hello must decode");
+          "nonce-correlated Hello must decode");
     while (frame_decoder_next(&dec, &field) == FRAME_OK) {
         if (field.field_num == 8) {
             (void)frame_field_get_string(&field, protocol, sizeof(protocol));
@@ -311,10 +315,6 @@ static void test_hello_codec_nonce_and_legacy_omission(void)
     }
     CHECK(strcmp(protocol, "2.6") == 0,
           "new firmware Hello must advertise protocol 2.6");
-
-    msg_handler_send_hello("node", "fw", "model", 2, 77);
-    CHECK(decode_hello_nonce(last_publish, last_publish_len) == 77,
-          "handshake Hello must encode exact field9 nonce");
 }
 
 static void test_notify_before_wait_and_latest_state_coalescing(void)
@@ -572,9 +572,9 @@ static void test_worker_can_start_before_task_handle_publication(void)
 int main(void)
 {
     test_delayed_nonce1_ack_after_nonce2_armed_is_rejected();
-    test_ack_nonce_validation_and_legacy_sync_semantics();
+    test_ack_nonce_is_mandatory();
     test_ack_parser_rejects_duplicate_wrong_wire_overflow_and_malformed();
-    test_hello_codec_nonce_and_legacy_omission();
+    test_hello_codec_requires_nonce();
     test_notify_before_wait_and_latest_state_coalescing();
     test_periodic_sync_requests_coalesce_into_correlated_handshake();
     test_periodic_sync_request_is_generation_scoped();

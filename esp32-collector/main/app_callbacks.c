@@ -17,7 +17,6 @@
 #include "periph_config_apply.h"
 #include "bus_manager.h"
 #include "hello_handshake.h"
-#include "mqtt_supervisor_notify.h"
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "scheduler.h"
@@ -367,12 +366,10 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
  * in-flight ESP-MQTT API operation. */
 static TaskHandle_t s_mqtt_supervisor_task;
 
-/* xTaskNotifyGive returns BaseType_t, while the host-testable notification
- * seam deliberately takes a void callback. Keep that FreeRTOS-specific return
- * value at this boundary. */
-static void notify_mqtt_supervisor(void *task)
+static void wake_mqtt_supervisor(void)
 {
-    (void)xTaskNotifyGive((TaskHandle_t)task);
+    TaskHandle_t task = s_mqtt_supervisor_task;
+    if (task != NULL) (void)xTaskNotifyGive(task);
 }
 
 /* MQTT event callbacks may only wake the lifecycle owner. All subscribe,
@@ -380,8 +377,7 @@ static void notify_mqtt_supervisor(void *task)
 void on_mqtt_owner_wake_cb(void *ctx)
 {
     (void)ctx;
-    mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
-                                      notify_mqtt_supervisor);
+    wake_mqtt_supervisor();
 }
 
 static void mqtt_supervisor_task(void *pv)
@@ -401,8 +397,7 @@ static void mqtt_supervisor_task(void *pv)
 static void ensure_mqtt_supervisor(app_state_t *s)
 {
     if (s_mqtt_supervisor_task != NULL) {
-        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
-                                          notify_mqtt_supervisor);
+        wake_mqtt_supervisor();
         return;
     }
     TaskHandle_t created = NULL;
@@ -444,14 +439,12 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 
     case WIFI_MGR_CONNECTING:
         rgb_led_set_state(LED_STATE_WIFI_CONNECTING);
-        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
-                                          notify_mqtt_supervisor);
+        wake_mqtt_supervisor();
         break;
 
     case WIFI_MGR_FAILED:
         rgb_led_set_state(LED_STATE_WIFI_FAILED);
-        mqtt_supervisor_notify_if_running(s_mqtt_supervisor_task,
-                                          notify_mqtt_supervisor);
+        wake_mqtt_supervisor();
         break;
 
     default:

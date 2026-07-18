@@ -9,6 +9,10 @@ import (
 )
 
 func encodedHelloWithNonce(nonce uint64) []byte {
+	return encodedHello("2.6", nonce)
+}
+
+func encodedHello(protocol string, nonce uint64) []byte {
 	enc := frame.NewEncoder(frame.MsgHello)
 	enc.EncodeString(1, "wire-node-id-is-not-authentication")
 	enc.EncodeString(2, "2.6.0")
@@ -17,12 +21,12 @@ func encodedHelloWithNonce(nonce uint64) []byte {
 	enc.EncodeVarint(5, 7)
 	enc.EncodeBool(6, true)
 	enc.EncodeString(7, "manifest")
-	enc.EncodeString(8, "2.6")
+	enc.EncodeString(8, protocol)
 	enc.EncodeVarint(frame.HelloFieldHandshakeNonce, nonce)
 	return enc.Bytes()
 }
 
-func TestParseHelloHandshakeNonceCompatibility(t *testing.T) {
+func TestParseHelloRequiresV26Nonce(t *testing.T) {
 	t.Run("nonzero exact", func(t *testing.T) {
 		got, err := parseHello(encodedHelloWithNonce(math.MaxUint32))
 		if err != nil {
@@ -36,33 +40,34 @@ func TestParseHelloHandshakeNonceCompatibility(t *testing.T) {
 		}
 	})
 
-	t.Run("absent is legacy", func(t *testing.T) {
+	t.Run("absent nonce is rejected", func(t *testing.T) {
 		enc := frame.NewEncoder(frame.MsgHello)
 		enc.EncodeString(8, "2.5")
-		got, err := parseHello(enc.Bytes())
-		if err != nil || got.HandshakeNonce != 0 {
-			t.Fatalf("legacy parse: got %#v, err=%v", got, err)
+		if _, err := parseHello(enc.Bytes()); err == nil {
+			t.Fatal("Hello without nonce was accepted")
 		}
 	})
 
-	t.Run("explicit zero is legacy", func(t *testing.T) {
-		got, err := parseHello(encodedHelloWithNonce(0))
-		if err != nil || got.HandshakeNonce != 0 {
-			t.Fatalf("zero parse: got %#v, err=%v", got, err)
+	t.Run("explicit zero is rejected", func(t *testing.T) {
+		if _, err := parseHello(encodedHelloWithNonce(0)); err == nil {
+			t.Fatal("Hello with zero nonce was accepted")
 		}
 	})
 
-	t.Run("unknown fields remain compatible", func(t *testing.T) {
-		enc := frame.NewEncoder(frame.MsgHello)
-		enc.EncodeString(8, "2.6")
-		enc.EncodeString(10, "future")
-		enc.EncodeVarint(11, 99)
-		enc.EncodeVarint(frame.HelloFieldHandshakeNonce, 42)
-		got, err := parseHello(enc.Bytes())
-		if err != nil || got.HandshakeNonce != 42 {
-			t.Fatalf("unknown-field parse: got %#v, err=%v", got, err)
+	t.Run("wrong protocol version is rejected", func(t *testing.T) {
+		if _, err := parseHello(encodedHello("2.5", 42)); err == nil {
+			t.Fatal("Hello with protocol 2.5 was accepted")
 		}
 	})
+}
+
+func TestHandleHelloRejectsWireNodeMismatch(t *testing.T) {
+	mock := &senderMockMQTT{}
+	mgr := &Manager{mqtt: mock}
+	mgr.handleHello("topic-node", encodedHelloWithNonce(42))
+	if len(mock.records) != 0 {
+		t.Fatalf("mismatched wire node published %d frame(s), want none", len(mock.records))
+	}
 }
 
 func invalidNonceHelloFrames() map[string][]byte {

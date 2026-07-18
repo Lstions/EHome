@@ -37,6 +37,7 @@ const OtaCmdFieldSequence uint8 = 6
 // Hello v2.6 correlation fields. A zero/absent nonce is the legacy mode;
 // non-zero values are echoed by HelloAck but are not authentication data.
 const (
+	HelloFieldProtocolVersion   uint8 = 8
 	HelloFieldHandshakeNonce    uint8 = 9
 	HelloAckFieldHandshakeNonce uint8 = 3
 )

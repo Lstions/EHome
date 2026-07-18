@@ -53,6 +53,27 @@ static bool routing_fields_are_in_protocol_order(const uint8_t *buf, size_t len)
     return false;
 }
 
+static void test_sub_encoder_emits_raw_field_sequence(void)
+{
+    uint8_t buf[16];
+    frame_encoder_t enc;
+    frame_encoder_init_sub(&enc, buf, sizeof(buf));
+    CHECK(frame_encode_varint(&enc, 1, 42) == FRAME_OK,
+          "sub-message field encode failed");
+    CHECK(frame_encoder_size(&enc) == 2 && buf[0] == 0x08 && buf[1] == 42,
+          "sub-message must begin with field-1 tag, not type byte zero");
+
+    frame_decoder_t dec;
+    frame_field_t field;
+    CHECK(frame_decoder_init_sub(&dec, buf, frame_encoder_size(&enc)) == FRAME_OK,
+          "sub-message decoder init failed");
+    CHECK(frame_decoder_next(&dec, &field) == FRAME_OK &&
+          field.field_num == 1 && field.value.varint == 42,
+          "sub-message did not round-trip");
+    CHECK(frame_decoder_next(&dec, &field) == FRAME_DONE,
+          "sub-message contains trailing bytes");
+}
+
 static void test_data_report_encodes_template_id_as_field_9(void)
 {
     uint8_t buf[256];
@@ -295,6 +316,7 @@ static void test_scheduler_queue_guard(void)
 
 int main(void)
 {
+    test_sub_encoder_emits_raw_field_sequence();
     test_data_report_encodes_template_id_as_field_9();
     test_data_report_omits_optional_routing_fields_when_zero();
     test_log_stream_entry_is_a_raw_subframe();

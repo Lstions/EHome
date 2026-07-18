@@ -5,9 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef void *TaskHandle_t;
-#include "mqtt_supervisor_notify.h"
-
 void host_test_log_record(char level, const char *tag, const char *format, ...)
 { (void)level; (void)tag; (void)format; }
 
@@ -141,15 +138,6 @@ static int mock_enqueue_calls;
 static bool mock_disable_auto_reconnect;
 static bool mock_request_start_during_stop;
 static int mock_init_delta_during_stop;
-static unsigned mock_notify_calls;
-static TaskHandle_t mock_notified_task;
-
-static void mock_notify(void *task)
-{
-    mock_notify_calls++;
-    mock_notified_task = task;
-}
-
 static SemaphoreHandle_t xSemaphoreCreateMutex(void)
 {
     mock_mutex_create_calls++;
@@ -305,8 +293,6 @@ static void reset_mocks(void)
     mock_disable_auto_reconnect = false;
     mock_request_start_during_stop = false;
     mock_init_delta_during_stop = -1;
-    mock_notify_calls = 0;
-    mock_notified_task = NULL;
     mock_now_us = 0;
     ready_count = 0;
     ready_generation = 0;
@@ -742,21 +728,8 @@ static void test_explicit_stop_survives_failed_drain(void)
           "a later explicit start must reopen shutdown and create a fresh client");
 }
 
-static void test_notification_helper_is_non_owning(void)
-{
-    reset_mocks();
-    TaskHandle_t task = (TaskHandle_t)(uintptr_t)0x1234;
-    mqtt_supervisor_notify_if_running(NULL, mock_notify);
-    CHECK(mock_notify_calls == 0, "missing supervisor must not be notified");
-    mqtt_supervisor_notify_if_running(task, mock_notify);
-    CHECK(mock_notify_calls == 1 && mock_notified_task == task &&
-          mock_client_init_calls == 0 && mock_client_stop_calls == 0,
-          "notification seam must only wake an existing owner");
-}
-
 int main(void)
 {
-    test_notification_helper_is_non_owning();
     test_owner_start_and_batch_ready();
     test_batch_api_failure_recreates_without_retry();
     test_timeout_recreates_without_pair_retry();

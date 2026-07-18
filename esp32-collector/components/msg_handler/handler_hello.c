@@ -82,7 +82,9 @@ void handler_hello_process_ack(frame_decoder_t *dec)
             handshake_nonce = (uint32_t)field.value.varint;
             break;
         default:
-            break; /* Forward-compatible unknown field. */
+            ESP_LOGW(TAG, "Rejecting HelloAck: unknown field %u",
+                     (unsigned)field.field_num);
+            return;
         }
     }
     if (err != FRAME_DONE) {
@@ -90,16 +92,21 @@ void handler_hello_process_ack(frame_decoder_t *dec)
         return;
     }
 
+    if (!seen_server_time || !seen_features || !seen_nonce || handshake_nonce == 0) {
+        ESP_LOGW(TAG, "Rejecting HelloAck: required fields or nonce missing");
+        return;
+    }
+    bool accepted = hello_handshake_notify_ack(handshake_nonce);
+    if (!accepted) {
+        ESP_LOGW(TAG, "Rejecting HelloAck: stale nonce=%u", (unsigned)handshake_nonce);
+        return;
+    }
     s_server_time_ms = server_time;
-    bool accepted = handshake_nonce != 0 &&
-                    hello_handshake_notify_ack(handshake_nonce);
     s_hello_ack_received = accepted;
     (void)features;
     ESP_LOGI(TAG, "HelloAck: server_time=%llu features=%u nonce=%u accepted=%d",
              (unsigned long long)server_time, (unsigned)features,
              (unsigned)handshake_nonce, accepted);
-    /* Missing/zero/stale nonce must not complete the connection handshake,
-     * but a well-formed ACK still closes an ordinary sync_manager Hello. */
     sync_manager_on_downlink_received(MSG_HELLO_ACK);
 }
 
@@ -125,6 +132,10 @@ void msg_handler_send_hello(const char *node_id, const char *fw_version,
                             const char *model, uint8_t channel_count,
                             uint32_t handshake_nonce)
 {
+    if (handshake_nonce == 0) {
+        ESP_LOGE(TAG, "Refusing to send Hello without handshake nonce");
+        return;
+    }
     uint8_t buf[384];
     frame_encoder_t enc;
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_HELLO);
@@ -143,9 +154,7 @@ void msg_handler_send_hello(const char *node_id, const char *fw_version,
         frame_encode_string(&enc, 7, mid);   /* field 7: last_manifest (string) */
     }
     frame_encode_string(&enc, HELLO_F_PROTO_VERSION, "2.6");
-    if (handshake_nonce != 0) {
-        frame_encode_varint(&enc, HELLO_F_HANDSHAKE_NONCE, handshake_nonce);
-    }
+    frame_encode_varint(&enc, HELLO_F_HANDSHAKE_NONCE, handshake_nonce);
 
     /* v2.4: log the SAME value that field 6 encodes (in-memory, not NVS) */
     ESP_LOGI(TAG, "Sending Hello: %s, %s, %s, %d ch, epoch=%llu, nvs_has=%d, last_manifest=%s, proto_ver=2.6 nonce=%u",

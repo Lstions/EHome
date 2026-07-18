@@ -74,6 +74,9 @@ typedef struct {
 } frame_encoder_t;
 
 void frame_encoder_init(frame_encoder_t *enc, uint8_t *buf, size_t cap, uint8_t msg_type);
+/* Initialize an embedded message. Unlike frame_encoder_init(), this does not
+ * prepend a top-level message-type byte. */
+void frame_encoder_init_sub(frame_encoder_t *enc, uint8_t *buf, size_t cap);
 frame_err_t frame_encode_varint(frame_encoder_t *enc, uint8_t field_num, uint64_t value);
 frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const char *str);
 frame_err_t frame_encode_bytes(frame_encoder_t *enc, uint8_t field_num, const uint8_t *data, size_t len);

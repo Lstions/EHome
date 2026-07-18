@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"bytes"
 	"testing"
 
 	"ehome/backend/internal/models"
@@ -305,20 +304,14 @@ func TestSender_SendHelloAck(t *testing.T) {
 	}
 }
 
-func TestSender_SendHelloAckLegacyOmitsZeroNonceAndPreservesWire(t *testing.T) {
+func TestSender_SendHelloAckRejectsZeroNonce(t *testing.T) {
 	mgr, mock := newSenderManager(t)
 
-	if err := mgr.SendHelloAck("LEGACY", 1, 0, 0); err != nil {
-		t.Fatalf("SendHelloAck error: %v", err)
+	if err := mgr.SendHelloAck("NO-NONCE", 1, 0, 0); err == nil {
+		t.Fatal("SendHelloAck accepted zero nonce")
 	}
-
-	rec := mock.lastRecord()
-	if rec == nil {
-		t.Fatal("expected Publish to be called")
-	}
-	want := []byte{frame.MsgHelloAck, 0x08, 0x01, 0x10, 0x00}
-	if !bytes.Equal(rec.payload, want) {
-		t.Fatalf("legacy HelloAck wire changed: got %x, want %x", rec.payload, want)
+	if rec := mock.lastRecord(); rec != nil {
+		t.Fatal("zero-nonce HelloAck must not publish")
 	}
 }
 

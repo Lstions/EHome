@@ -124,39 +124,53 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
             // Build ChannelHealth sub-frame
             uint8_t ch_buf[512];
             frame_encoder_t ch_enc;
-            frame_encoder_init(&ch_enc, ch_buf, sizeof(ch_buf), 0);
-            frame_encode_varint(&ch_enc, 1, ch->config.id); // channel_id
+            frame_encoder_init_sub(&ch_enc, ch_buf, sizeof(ch_buf));
+            if (frame_encode_varint(&ch_enc, 1, ch->config.id) != FRAME_OK) {
+                continue;
+            }
+            size_t unhealthy_count = 0;
 
             for (int ed = 0; ed < ch->edge_device_count; ed++) {
                 const sched_edge_device_t *dev = &ch->edge_devices[ed];
                 for (int ci2 = 0; ci2 < dev->command_count; ci2++) {
                     const sched_command_t *cmd = &dev->commands[ci2];
-                    if (cmd->error_count == 0 && cmd->enabled) continue; // healthy → skip to save bandwidth
+                    /* Disabled commands are intentionally inactive, not a
+                     * communication failure. Only report enabled commands
+                     * with an observed error. */
+                    if (!cmd->enabled || cmd->error_count == 0) continue;
 
                     // Build EdgeDeviceHealth sub-frame
                     uint8_t ed_buf[64];
                     frame_encoder_t ed_enc;
-                    frame_encoder_init(&ed_enc, ed_buf, sizeof(ed_buf), 0);
-                    frame_encode_varint(&ed_enc, 1, dev->edge_device_id);
-                    frame_encode_varint(&ed_enc, 2, ci2);            // command_index
-                    frame_encode_varint(&ed_enc, 3, cmd->error_count);
+                    frame_encoder_init_sub(&ed_enc, ed_buf, sizeof(ed_buf));
+                    if (frame_encode_varint(&ed_enc, 1, dev->edge_device_id) != FRAME_OK ||
+                        frame_encode_varint(&ed_enc, 2, ci2) != FRAME_OK ||
+                        frame_encode_varint(&ed_enc, 3, cmd->error_count) != FRAME_OK) {
+                        continue;
+                    }
                     // comm_status: 0=OK, 1=TIMEOUT, 2=CRC_ERROR, 3=FAULT
                     uint64_t comm_st = cmd->error_count >= 3 ? 3 :
                                        (cmd->error_count > 0  ? 1 : 0);
-                    frame_encode_varint(&ed_enc, 4, comm_st);
+                    if (frame_encode_varint(&ed_enc, 4, comm_st) != FRAME_OK) {
+                        continue;
+                    }
 
-                    frame_encode_bytes(&ch_enc, 2,
-                                       frame_encoder_data(&ed_enc),
-                                       frame_encoder_size(&ed_enc));
+                    if (frame_encode_bytes(&ch_enc, 2,
+                                           frame_encoder_data(&ed_enc),
+                                           frame_encoder_size(&ed_enc)) == FRAME_OK) {
+                        unhealthy_count++;
+                    }
                 }
             }
 
             // Only emit ChannelHealth if it has content beyond channel_id
-            size_t ch_content = frame_encoder_size(&ch_enc);
-            if (ch_content > 0) {
-                frame_encode_bytes(&enc, 7,
-                                   frame_encoder_data(&ch_enc),
-                                   frame_encoder_size(&ch_enc));
+            if (unhealthy_count > 0) {
+                if (frame_encode_bytes(&enc, 7,
+                                       frame_encoder_data(&ch_enc),
+                                       frame_encoder_size(&ch_enc)) != FRAME_OK) {
+                    ESP_LOGW(TAG, "StatusReport channel health truncated");
+                    break;
+                }
             }
         }
     }
