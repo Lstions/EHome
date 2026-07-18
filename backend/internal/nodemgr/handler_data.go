@@ -208,27 +208,26 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 		}
 
 		var drvData []drivers.SensorData
-		// If the driver implements CommandAwareDriver and we have commandIndex,
-		// resolve the ConfigTemplate.WriteData and use ParseDataWithCommand.
-		if commandIndex > 0 {
-			if caDriver, ok := driver.(drivers.CommandAwareDriver); ok {
-				var tmpl models.ConfigTemplate
-				if findErr := m.db.First(&tmpl, commandIndex).Error; findErr == nil && tmpl.WriteData != "" {
-					caErr := func() error {
-						data, innerErr := caDriver.ParseDataWithCommand(rawData, tmpl.WriteData)
-						if innerErr == nil {
-							drvData = data
-						}
-						return innerErr
-					}()
-					if caErr != nil {
-						logger.Infof("[%s] ParseDataWithCommand failed, falling back to ParseData: %v", deviceID, caErr)
-					}
-				}
+		if caDriver, ok := driver.(drivers.CommandAwareDriver); ok {
+			if commandIndex == 0 {
+				logger.Infof("[%s] Command-aware driver requires command context", deviceID)
+				return nil
 			}
-		}
-		// Fall back to plain ParseData if CommandAwareDriver didn't handle it
-		if drvData == nil {
+			var tmpl models.ConfigTemplate
+			if findErr := m.db.First(&tmpl, commandIndex).Error; findErr != nil {
+				logger.Infof("[%s] Failed to resolve command template %d: %v", deviceID, commandIndex, findErr)
+				return nil
+			}
+			if tmpl.WriteData == "" {
+				logger.Infof("[%s] Command template %d has no write data", deviceID, commandIndex)
+				return nil
+			}
+			drvData, err = caDriver.ParseDataWithCommand(rawData, tmpl.WriteData)
+			if err != nil {
+				logger.Infof("[%s] Failed to parse command-aware data: %v", deviceID, err)
+				return nil
+			}
+		} else {
 			drvData, err = driver.ParseData(rawData)
 			if err != nil {
 				logger.Infof("[%s] Failed to parse data: %v", deviceID, err)

@@ -80,7 +80,24 @@ type blockingDataConsumer struct {
 }
 
 type commandAwareTestDriver struct {
-	calledWith chan string
+	calledWith  chan string
+	plainCalled chan struct{}
+	commandErr  error
+}
+
+type plainTestDriver struct{}
+
+func (d *plainTestDriver) DeviceType() string      { return "plain_test" }
+func (d *plainTestDriver) DeviceName() string      { return "plain test" }
+func (d *plainTestDriver) OEM() string             { return "test" }
+func (d *plainTestDriver) Category() string        { return "test" }
+func (d *plainTestDriver) HardwareTypes() []string { return []string{"UART"} }
+func (d *plainTestDriver) ParseData(raw []byte) ([]drivers.SensorData, error) {
+	return []drivers.SensorData{{Name: "plain_value", Value: 1}}, nil
+}
+func (d *plainTestDriver) GetSensorDefinitions() []drivers.SensorData { return nil }
+func (d *plainTestDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return nil
 }
 
 func (d *commandAwareTestDriver) DeviceType() string { return "command_aware_test" }
@@ -91,6 +108,9 @@ func (d *commandAwareTestDriver) HardwareTypes() []string {
 	return []string{"UART"}
 }
 func (d *commandAwareTestDriver) ParseData(raw []byte) ([]drivers.SensorData, error) {
+	if d.plainCalled != nil {
+		d.plainCalled <- struct{}{}
+	}
 	return []drivers.SensorData{{Name: "fallback_value", Value: 1}}, nil
 }
 func (d *commandAwareTestDriver) GetSensorDefinitions() []drivers.SensorData { return nil }
@@ -99,6 +119,9 @@ func (d *commandAwareTestDriver) GetCommandTemplates() []drivers.CommandTemplate
 }
 func (d *commandAwareTestDriver) ParseDataWithCommand(raw []byte, writeData string) ([]drivers.SensorData, error) {
 	d.calledWith <- writeData
+	if d.commandErr != nil {
+		return nil, d.commandErr
+	}
 	return []drivers.SensorData{{Name: "command_value", Value: 1}}, nil
 }
 
@@ -106,6 +129,28 @@ type passthroughReassembler struct{}
 
 func (passthroughReassembler) Append(requestID uint32, data []byte) []byte { return data }
 func (passthroughReassembler) Consume(requestID uint32)                    {}
+
+type recordingReassembler struct {
+	mu       sync.Mutex
+	consumed []uint32
+}
+
+func (r *recordingReassembler) Append(requestID uint32, data []byte) []byte { return data }
+func (r *recordingReassembler) Consume(requestID uint32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.consumed = append(r.consumed, requestID)
+}
+func (r *recordingReassembler) consumedRequest(requestID uint32) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, consumed := range r.consumed {
+		if consumed == requestID {
+			return true
+		}
+	}
+	return false
+}
 
 func newConsumerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -475,12 +520,11 @@ func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
 	if err := db.Create(&channel).Error; err != nil {
 		t.Fatal(err)
 	}
-	device := models.EdgeDevice{Name: "write-fail-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	device := models.EdgeDevice{Name: "write-fail-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "plain_test", Status: "active"}
 	if err := db.Create(&device).Error; err != nil {
 		t.Fatal(err)
 	}
-	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
-	drivers.Register(driver)
+	drivers.Register(&plainTestDriver{})
 	db.Callback().Create().Before("gorm:create").Register("test:fail-unified-data", func(tx *gorm.DB) {
 		if tx.Statement.Table == "unified_data" {
 			tx.AddError(errors.New("forced unified_data write failure"))
@@ -508,12 +552,11 @@ func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
 	if err := db.Create(&channel).Error; err != nil {
 		t.Fatal(err)
 	}
-	device := models.EdgeDevice{Name: "device-data-fail", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	device := models.EdgeDevice{Name: "device-data-fail", NodeID: node.NodeID, ChannelID: channel.ID, Type: "plain_test", Status: "active"}
 	if err := db.Create(&device).Error; err != nil {
 		t.Fatal(err)
 	}
-	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
-	drivers.Register(driver)
+	drivers.Register(&plainTestDriver{})
 	db.Callback().Create().Before("gorm:create").Register("test:fail-device-data", func(tx *gorm.DB) {
 		if tx.Statement.Table == "device_data" {
 			tx.AddError(errors.New("forced device_data write failure"))
@@ -578,6 +621,103 @@ func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 	}
 }
 
+func TestSensorParserConsumer_CommandAwareDriverFailsClosedWithoutCommandContext(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-command-missing"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	device := models.EdgeDevice{Name: "command-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	driver := &commandAwareTestDriver{
+		calledWith:  make(chan string, 1),
+		plainCalled: make(chan struct{}, 1),
+	}
+	drivers.Register(driver)
+	reassembler := &recordingReassembler{}
+	consumer := NewSensorParserConsumer(db, nil, nil, reassembler)
+	consumer.Handle(DataEvent{
+		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 10,
+		RawData: []byte("ambiguous-response"),
+	})
+
+	select {
+	case <-driver.plainCalled:
+		t.Fatal("command-aware driver fell back to plain ParseData without command context")
+	default:
+	}
+	var count int64
+	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count unified data: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("unified data count = %d, want 0", count)
+	}
+	if !reassembler.consumedRequest(10) {
+		t.Fatal("failed command-aware sample left its reassembly buffer behind")
+	}
+}
+
+func TestSensorParserConsumer_CommandAwareParseErrorDoesNotFallback(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-command-error"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "UART0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	device := models.EdgeDevice{Name: "command-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+	template := models.ConfigTemplate{NodeID: node.NodeID, WriteData: "4850560d"}
+	if err := db.Create(&template).Error; err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+
+	driver := &commandAwareTestDriver{
+		calledWith:  make(chan string, 1),
+		plainCalled: make(chan struct{}, 1),
+		commandErr:  errors.New("ambiguous command response"),
+	}
+	drivers.Register(driver)
+	reassembler := &recordingReassembler{}
+	NewSensorParserConsumer(db, nil, nil, reassembler).Handle(DataEvent{
+		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 12,
+		CommandTemplateID: uint64(template.ID), RawData: []byte("ambiguous-response"),
+	})
+
+	select {
+	case <-driver.calledWith:
+	default:
+		t.Fatal("command-aware parser was not called")
+	}
+	select {
+	case <-driver.plainCalled:
+		t.Fatal("command-aware parse error fell back to plain ParseData")
+	default:
+	}
+	var count int64
+	if err := db.Model(&models.UnifiedData{}).Where("device_id = ?", device.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count unified data: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("unified data count = %d, want 0", count)
+	}
+	if !reassembler.consumedRequest(12) {
+		t.Fatal("command-aware parse error left its reassembly buffer behind")
+	}
+}
+
 func TestSensorParserConsumer_ResolvesExplicitEdgeDeviceID(t *testing.T) {
 	db := newConsumerTestDB(t)
 	node := models.Node{NodeID: "node-explicit"}
@@ -588,13 +728,12 @@ func TestSensorParserConsumer_ResolvesExplicitEdgeDeviceID(t *testing.T) {
 	if err := db.Create(&channel).Error; err != nil {
 		t.Fatalf("create channel: %v", err)
 	}
-	device := models.EdgeDevice{Name: "explicit-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "command_aware_test", Status: "active"}
+	device := models.EdgeDevice{Name: "explicit-device", NodeID: node.NodeID, ChannelID: channel.ID, Type: "plain_test", Status: "active"}
 	if err := db.Create(&device).Error; err != nil {
 		t.Fatalf("create device: %v", err)
 	}
 
-	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
-	drivers.Register(driver)
+	drivers.Register(&plainTestDriver{})
 	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: 999, EdgeDeviceID: uint64(device.ID),

@@ -12,10 +12,10 @@ import (
 // BMP280: [7 bytes] → {"temperature": 25.3, "pressure": 1013.2}
 type BMP280Driver struct{}
 
-func (d *BMP280Driver) DeviceType() string     { return "bmp280" }
-func (d *BMP280Driver) DeviceName() string     { return "BMP280 温度气压传感器" }
-func (d *BMP280Driver) OEM() string            { return "博世" }
-func (d *BMP280Driver) Category() string       { return "温度气压传感器" }
+func (d *BMP280Driver) DeviceType() string      { return "bmp280" }
+func (d *BMP280Driver) DeviceName() string      { return "BMP280 温度气压传感器" }
+func (d *BMP280Driver) OEM() string             { return "博世" }
+func (d *BMP280Driver) Category() string        { return "温度气压传感器" }
 func (d *BMP280Driver) HardwareTypes() []string { return []string{"i2c", "spi"} }
 func (d *BMP280Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
@@ -24,24 +24,72 @@ func (d *BMP280Driver) GetSensorDefinitions() []SensorData {
 	}
 }
 
+// ParseData intentionally fails closed: a BMP280 sample has no physical meaning
+// without the calibration registers read from that exact sensor.
 func (d *BMP280Driver) ParseData(raw []byte) ([]SensorData, error) {
 	if len(raw) < 6 {
 		return nil, fmt.Errorf("bmp280: need at least 6 bytes, got %d", len(raw))
 	}
+	return nil, fmt.Errorf("bmp280: calibration missing")
+}
 
-	// Simplified parsing - actual BMP280 requires calibration
-	// raw[0:3] = temperature (20-bit, signed)
-	// raw[3:6] = pressure (20-bit, unsigned)
-	tempRaw := int32((uint32(raw[0]) << 12) | (uint32(raw[1]) << 4) | (uint32(raw[2]) >> 4))
-	pressRaw := uint32((uint32(raw[3]) << 12) | (uint32(raw[4]) << 4) | (uint32(raw[5]) >> 4))
+// ParseDataWithCalibration decodes F7..FC (pressure first, then temperature)
+// using the Bosch BMP280 reference compensation equations.
+func (d *BMP280Driver) ParseDataWithCalibration(raw, calibration []byte) ([]SensorData, error) {
+	if len(raw) < 6 {
+		return nil, fmt.Errorf("bmp280: need at least 6 bytes, got %d", len(raw))
+	}
+	if len(calibration) != 24 {
+		return nil, fmt.Errorf("bmp280: calibration must be 24 bytes, got %d", len(calibration))
+	}
+	allFF := true
+	for _, b := range calibration {
+		if b != 0xff {
+			allFF = false
+			break
+		}
+	}
+	if allFF {
+		return nil, fmt.Errorf("bmp280: invalid all-ff calibration")
+	}
 
-	// Simplified conversion (without calibration)
-	temperature := float64(tempRaw) * 0.01 // Rough approximation
-	pressure := float64(pressRaw) * 0.01   // Rough approximation
+	leU16 := func(offset int) uint16 { return binary.LittleEndian.Uint16(calibration[offset : offset+2]) }
+	leI16 := func(offset int) int16 { return int16(leU16(offset)) }
+	digT1, digT2, digT3 := leU16(0), leI16(2), leI16(4)
+	digP1, digP2, digP3 := leU16(6), leI16(8), leI16(10)
+	digP4, digP5, digP6 := leI16(12), leI16(14), leI16(16)
+	digP7, digP8, digP9 := leI16(18), leI16(20), leI16(22)
+	if digT1 == 0 || digP1 == 0 {
+		return nil, fmt.Errorf("bmp280: invalid calibration")
+	}
 
+	adcP := int32(uint32(raw[0])<<12 | uint32(raw[1])<<4 | uint32(raw[2])>>4)
+	adcT := int32(uint32(raw[3])<<12 | uint32(raw[4])<<4 | uint32(raw[5])>>4)
+	var1 := (float64(adcT)/16384.0 - float64(digT1)/1024.0) * float64(digT2)
+	var2 := ((float64(adcT)/131072.0 - float64(digT1)/8192.0) * (float64(adcT)/131072.0 - float64(digT1)/8192.0)) * float64(digT3)
+	tFine := var1 + var2
+	temperature := tFine / 5120.0
+
+	p1 := tFine/2.0 - 64000.0
+	p2 := p1 * p1 * float64(digP6) / 32768.0
+	p2 += p1 * float64(digP5) * 2.0
+	p2 = p2/4.0 + float64(digP4)*65536.0
+	p1 = (float64(digP3)*p1*p1/524288.0 + float64(digP2)*p1) / 524288.0
+	p1 = (1.0 + p1/32768.0) * float64(digP1)
+	if p1 == 0 {
+		return nil, fmt.Errorf("bmp280: invalid pressure calibration")
+	}
+	pressurePa := 1048576.0 - float64(adcP)
+	pressurePa = (pressurePa - p2/4096.0) * 6250.0 / p1
+	p1 = float64(digP9) * pressurePa * pressurePa / 2147483648.0
+	p2 = pressurePa * float64(digP8) / 32768.0
+	pressurePa += (p1 + p2 + float64(digP7)) / 16.0
+	if temperature < -40 || temperature > 85 || pressurePa < 30000 || pressurePa > 110000 {
+		return nil, fmt.Errorf("bmp280: compensated values out of range")
+	}
 	return []SensorData{
 		{Name: "temperature", Value: temperature, Unit: "°C"},
-		{Name: "pressure", Value: pressure, Unit: "hPa"},
+		{Name: "pressure", Value: pressurePa / 100.0, Unit: "hPa"},
 	}, nil
 }
 
@@ -49,7 +97,7 @@ func (d *BMP280Driver) GetCommandTemplates() []CommandTemplate {
 	return []CommandTemplate{
 		{
 			ID: "read_temp_pressure", Name: "读取温度气压", Type: "read",
-			CmdByte: 0x00, WriteData: "",
+			CmdByte: 0xF7, WriteData: "F7",
 			ReadLength: 6, DelayMs: 50, IntervalMs: 5000, Schedulable: true,
 			Description: "BMP280 温度 (°C) 和气压 (hPa)",
 		},
@@ -60,10 +108,10 @@ func (d *BMP280Driver) GetCommandTemplates() []CommandTemplate {
 // LK-TH01: [8 bytes] → {"temperature": 25.1, "humidity": 65.0}
 type LKTH01Driver struct{}
 
-func (d *LKTH01Driver) DeviceType() string     { return "lk_th01" }
-func (d *LKTH01Driver) DeviceName() string     { return "LK-TH01 温湿度传感器" }
-func (d *LKTH01Driver) OEM() string            { return "路科" }
-func (d *LKTH01Driver) Category() string       { return "温湿度传感器" }
+func (d *LKTH01Driver) DeviceType() string      { return "lk_th01" }
+func (d *LKTH01Driver) DeviceName() string      { return "LK-TH01 温湿度传感器" }
+func (d *LKTH01Driver) OEM() string             { return "路科" }
+func (d *LKTH01Driver) Category() string        { return "温湿度传感器" }
 func (d *LKTH01Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *LKTH01Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
@@ -104,10 +152,10 @@ type SN3000Driver struct {
 	configParser *parser.ConfigParser
 }
 
-func (d *SN3000Driver) DeviceType() string     { return "sn3000" }
-func (d *SN3000Driver) DeviceName() string     { return "SN-3000 风向传感器" }
-func (d *SN3000Driver) OEM() string            { return "普锐森社" }
-func (d *SN3000Driver) Category() string       { return "风向传感器" }
+func (d *SN3000Driver) DeviceType() string      { return "sn3000" }
+func (d *SN3000Driver) DeviceName() string      { return "SN-3000 风向传感器" }
+func (d *SN3000Driver) OEM() string             { return "普锐森社" }
+func (d *SN3000Driver) Category() string        { return "风向传感器" }
 func (d *SN3000Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *SN3000Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
@@ -146,10 +194,10 @@ type PRS3001Driver struct {
 	configParser *parser.ConfigParser
 }
 
-func (d *PRS3001Driver) DeviceType() string     { return "prs3001" }
-func (d *PRS3001Driver) DeviceName() string     { return "PRS-3001 光学雨量光照变送器" }
-func (d *PRS3001Driver) OEM() string            { return "普锐森社" }
-func (d *PRS3001Driver) Category() string       { return "雨量光照传感器" }
+func (d *PRS3001Driver) DeviceType() string      { return "prs3001" }
+func (d *PRS3001Driver) DeviceName() string      { return "PRS-3001 光学雨量光照变送器" }
+func (d *PRS3001Driver) OEM() string             { return "普锐森社" }
+func (d *PRS3001Driver) Category() string        { return "雨量光照传感器" }
 func (d *PRS3001Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *PRS3001Driver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
@@ -242,14 +290,10 @@ func (d *PRS3001Driver) GetCommandTemplates() []CommandTemplate {
 }
 
 // RegisterBuiltInDrivers registers all built-in drivers.
-// If parserJSON is provided for a device type, the driver will use ConfigParser
-// as the primary parsing path, falling back to legacy hardcoded logic.
+// It delegates to the parser-aware entry point so both public registration
+// paths always expose the same driver set.
 func RegisterBuiltInDrivers(registry *Registry) {
-	registry.Register(&BMP280Driver{})
-	registry.Register(&LKTH01Driver{})
-	registry.Register(&SN3000Driver{})
-	registry.Register(&PRS3001Driver{})
-	// JiabaidaBMSDriver registered in RegisterBuiltInDriversWithParsers
+	RegisterBuiltInDriversWithParsers(registry, nil)
 }
 
 // RegisterBuiltInDriversWithParsers registers built-in drivers with ConfigParser overrides.

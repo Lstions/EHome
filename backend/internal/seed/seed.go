@@ -2,6 +2,7 @@ package seed
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
@@ -9,108 +10,98 @@ import (
 	"gorm.io/gorm"
 )
 
-// SeedTestData inserts minimal test data if core tables are empty.
-// Called at server startup; safe to run multiple times (idempotent via FirstOrCreate).
+const developmentSeedLockID int64 = 73522901
+
+// SeedTestData inserts development sample data without overwriting existing rows.
+// Called at server startup when SEED_TEST_DATA=true; safe to run repeatedly.
 func SeedTestData(db *gorm.DB) error {
-	// 1. Seed Node (if empty)
-	var nodeCount int64
-	db.Model(&models.Node{}).Count(&nodeCount)
-	if nodeCount > 0 {
-		logger.Infof("[seed] nodes table already has %d rows, skip seeding", nodeCount)
+	return db.Transaction(func(tx *gorm.DB) error {
+		// PostgreSQL advisory locks serialize concurrent development-server starts.
+		// SQLite is used by unit tests and already serializes this in-memory connection.
+		if tx.Dialector.Name() == "postgres" {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", developmentSeedLockID).Error; err != nil {
+				return err
+			}
+		}
+
+		deviceConfig, createdConfig, err := ensureDefaultDeviceConfig(tx)
+		if err != nil {
+			return err
+		}
+		if createdConfig {
+			logger.Infof("[seed] added default device_config id=%d", deviceConfig.ID)
+		}
+		// Hardware resources are authoritative only after a real ESP32 ResourceReport.
+		// Do not fabricate a node, transport channel, pins, or EdgeDevice in seed data.
 		return nil
-	}
+	})
+}
 
-	logger.Infof("[seed] Core tables empty, inserting seed data...")
-
-	// --- Node ---
-	node := models.Node{
-		NodeID:            "F0F5BD02F35C",
-		Name:              "E2E测试节点",
-		Model:             "esp32c6",
-		FirmwareVersion:   "2.2.0",
-		ProtocolVersion:   "2.2",
-		Platform:          "ESP32C6",
-		Status:            "offline",
-		Capabilities:      `{}`,
-		HardwareInfo:      `{}`,
-		Config:            `{}`,
-		ConnectionType:    "mqtt",
-		ConnectionQuality: 100,
-	}
-	if err := db.Create(&node).Error; err != nil {
-		return err
-	}
-	logger.Infof("[seed] Created node: id=%s.*node_id=%s", node.ID, node.NodeID)
-
-	// --- DeviceConfig ---
-	connJSON, _ := json.Marshal(map[string]interface{}{
+func ensureDefaultDeviceConfig(db *gorm.DB) (*models.DeviceConfig, bool, error) {
+	connection, err := json.Marshal(map[string]interface{}{
 		"protocol": "i2c",
 		"default_params": map[string]interface{}{
-			"address":       "0x76",
-			"read_register": "F7",
+			"address": "0x76", "read_register": "F7",
 		},
 	})
-	parserJSON, _ := json.Marshal(map[string]interface{}{
-		"data_format": "binary",
-		"fields": []map[string]interface{}{
-			{"name": "temperature", "offset": 0, "length": 2, "type": "int16", "scale": 0.01},
-			{"name": "pressure", "offset": 2, "length": 4, "type": "uint32", "scale": 1},
-		},
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal BMP280 connection: %w", err)
+	}
+	// The runtime owns BMP280's 20-bit 6-byte decoding; keep Parser empty so
+	// SensorParserConsumer correctly falls back to the registered driver.
+	parser := json.RawMessage(`{}`)
+	initFlow, err := json.Marshal([]map[string]interface{}{
+		{"name": "reset", "write": "E0B6", "read_size": 0},
+		{"name": "read_chip_id", "write": "D0", "read_size": 1},
+		{"name": "read_calib", "write": "88", "read_size": 24},
+		{"name": "set_ctrl", "write": "F427", "read_size": 0},
+		{"name": "set_config", "write": "F5A0", "read_size": 0},
 	})
-	initFlowJSON, _ := json.Marshal([]map[string]interface{}{
-		{"action": "write", "data": "0xB6", "description": "reset"},
-	})
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal BMP280 init flow: %w", err)
+	}
 
-	deviceConfig := models.DeviceConfig{
+	config := &models.DeviceConfig{
 		Name:         "BMP280 温湿度传感器",
 		Description:  "Bosch BMP280 气压温度传感器",
-		DeviceType:   "BMP280",
-		Protocol:     "I2C",
-		HardwareType: "sensor",
-		Connection:   json.RawMessage(connJSON),
-		Parser:       json.RawMessage(parserJSON),
-		InitFlow:     json.RawMessage(initFlowJSON),
+		DeviceType:   "bmp280",
+		Protocol:     "i2c",
+		HardwareType: "i2c",
+		ParserID:     "bosch.bmp280",
+		Connection:   json.RawMessage(connection),
+		Parser:       parser,
+		InitFlow:     json.RawMessage(initFlow),
 		IsDefault:    true,
 		Status:       "active",
 	}
-	if err := db.Create(&deviceConfig).Error; err != nil {
-		return err
+	var existing models.DeviceConfig
+	if err := db.Where("parser_id = ?", config.ParserID).First(&existing).Error; err == nil {
+		if err := db.Model(&models.DeviceConfig{}).Where("is_default = ? AND device_type = ? AND id <> ?", true, config.DeviceType, existing.ID).Update("is_default", false).Error; err != nil {
+			return nil, false, err
+		}
+		updates := map[string]interface{}{
+			"name": config.Name, "description": config.Description,
+			"device_type": config.DeviceType, "protocol": config.Protocol,
+			"hardware_type": config.HardwareType, "connection": config.Connection,
+			"parser": config.Parser, "init_flow": config.InitFlow,
+			"is_default": true, "status": "active",
+		}
+		if err := db.Model(&existing).Updates(updates).Error; err != nil {
+			return nil, false, err
+		}
+		if err := db.First(&existing, existing.ID).Error; err != nil {
+			return nil, false, err
+		}
+		return &existing, false, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, false, err
 	}
-	logger.Infof("[seed] Created device_config: id=%d, device_type=%s", deviceConfig.ID, deviceConfig.DeviceType)
-
-	// --- Channel (I2C) ---
-	channel := models.Channel{
-		NodeID:       node.NodeID,
-		HardwareType: "I2C",
-		HardwareID:   "0x68",
-		BusType:      "I2C",
-		BusConfig:    `{"sda_pin":21,"scl_pin":22,"clock_hz":400000}`,
-		IntervalMs:   1000,
-		Enabled:      true,
+	if err := db.Model(&models.DeviceConfig{}).Where("is_default = ? AND device_type = ?", true, config.DeviceType).Update("is_default", false).Error; err != nil {
+		return nil, false, err
 	}
-	if err := db.Create(&channel).Error; err != nil {
-		return err
+	if err := db.Create(config).Error; err != nil {
+		return nil, false, err
 	}
-	logger.Infof("[seed] Created channel: id=%d, bus_type=%s", channel.ID, channel.BusType)
-
-	// --- EdgeDevice ---
-	edgeDevice := models.EdgeDevice{
-		Name:           "BMP280 现场 A",
-		Type:           "sensor",
-		NodeID:         node.NodeID,
-		ChannelID:      channel.ID,
-		DeviceConfigID: deviceConfig.ID,
-		HardwareID:     "0x68",
-		IntervalMs:     1000,
-		Enabled:        true,
-		Status:         "active",
-		InitState:      "pending",
-	}
-	if err := db.Create(&edgeDevice).Error; err != nil {
-		return err
-	}
-	logger.Infof("[seed] Created edge_device: id=%d, name=%s", edgeDevice.ID, edgeDevice.Name)
-
-	logger.Infof("[seed] Seed data complete: 1 node + 1 device_config + 1 channel + 1 edge_device")
-	return nil
+	logger.Infof("[seed] created default device_config: id=%d device_type=%s", config.ID, config.DeviceType)
+	return config, true, nil
 }

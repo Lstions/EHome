@@ -90,6 +90,13 @@ func List() []string {
 	return globalRegistry.List()
 }
 
+// CalibrationAwareDriver is implemented by drivers whose raw samples are
+// uninterpretable without per-device calibration data.
+type CalibrationAwareDriver interface {
+	Driver
+	ParseDataWithCalibration(raw, calibration []byte) ([]SensorData, error)
+}
+
 // CommandAwareDriver is an optional interface for drivers that need command
 // context to disambiguate responses with identical formats (e.g. HPV vs HPVB
 // on the Techfine GB3024, which both return "(AAA.A BB.B CCCCC").
@@ -97,7 +104,9 @@ func List() []string {
 // commandWriteData is the hex-encoded WriteData of the ConfigTemplate that
 // was sent to the device (same format as CommandTemplate.WriteData /
 // ConfigTemplate.WriteData — hex-encoded ASCII).  Drivers that implement this
-// interface should decode it the same way the sender does.
+// interface should decode it the same way the sender does. Callers must not
+// fall back to Driver.ParseData when command context is missing or this method
+// returns an error; doing so can silently select the wrong response branch.
 type CommandAwareDriver interface {
 	Driver
 	// ParseDataWithCommand parses raw data with command context.
@@ -105,4 +114,3 @@ type CommandAwareDriver interface {
 	// was sent (e.g. "4850560d" for "HPV\r").
 	ParseDataWithCommand(raw []byte, commandWriteData string) ([]SensorData, error)
 }
-

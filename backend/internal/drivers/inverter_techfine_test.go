@@ -181,16 +181,12 @@ func TestTechfine_HBAT(t *testing.T) {
 // ============================================================================
 
 func TestTechfine_HPV(t *testing.T) {
-	// (120.5 08.0 00960 — 120.5V, 8.0A, 960W
+	// HPV and HPVB have the same wire layout, so parsing without the command
+	// context must not silently label an HPVB response as PV1.
 	raw := []byte("(120.5 08.0 00960\r")
-	data, err := (&TechfineInverterDriver{}).ParseData(raw)
-	if err != nil {
-		t.Fatalf("ParseData error: %v", err)
+	if _, err := (&TechfineInverterDriver{}).ParseData(raw); err == nil {
+		t.Fatal("ambiguous PV response parsed without command context")
 	}
-
-	assertFloat(t, data, "pv1_voltage", 120.5, 0.01)
-	assertFloat(t, data, "pv1_current", 8.0, 0.01)
-	assertFloat(t, data, "pv1_power", 960, 0.01)
 }
 
 func TestTechfine_HPVB_WithCommand(t *testing.T) {
@@ -438,7 +434,7 @@ func TestTechfine_DriverMetadata(t *testing.T) {
 	if d.Category() != "inverter" {
 		t.Errorf("Category: got %q", d.Category())
 	}
-	if len(d.HardwareTypes()) != 1 || d.HardwareTypes()[0] != "GB3024" {
+	if len(d.HardwareTypes()) != 1 || d.HardwareTypes()[0] != "uart" {
 		t.Errorf("HardwareTypes: got %v", d.HardwareTypes())
 	}
 }
@@ -637,11 +633,12 @@ func TestTechfine_CommandAwareDriver(t *testing.T) {
 	// Verify it implements CommandAwareDriver
 	var _ CommandAwareDriver = d
 
-	// Test with empty/invalid commandWriteData falls back to ParseData
+	// Empty command context must fail closed for the ambiguous HPV/HPVB shape.
 	raw := []byte("(120.5 08.0 00960\r")
-	data, err := d.ParseDataWithCommand(raw, "")
-	if err != nil {
-		t.Fatalf("ParseDataWithCommand with empty cmd should fall back: %v", err)
+	if _, err := d.ParseDataWithCommand(raw, ""); err == nil {
+		t.Fatal("empty command context accepted an ambiguous PV response")
 	}
-	assertFloat(t, data, "pv1_voltage", 120.5, 0.01)
+	if _, err := d.ParseDataWithCommand(raw, "not-hex"); err == nil {
+		t.Fatal("invalid command context accepted an ambiguous PV response")
+	}
 }

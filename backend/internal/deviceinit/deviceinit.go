@@ -1,19 +1,18 @@
 package deviceinit
 
 import (
-	"ehome/backend/pkg/logger"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
-
+	"ehome/backend/pkg/logger"
 	"gorm.io/gorm"
 )
 
-// Step represents a single initialization step
 type Step struct {
 	Name     string
 	Data     []byte
@@ -21,74 +20,94 @@ type Step struct {
 	Timeout  time.Duration
 }
 
-// Orchestrator manages device initialization sequences
+type publisher interface {
+	Publish(topic string, payload []byte) error
+}
+
 type Orchestrator struct {
-	db    *gorm.DB
-	mqtt  *mqtt.Client
-	mu    sync.RWMutex
-	cache map[string]*InitState // device_type -> init state
-
-	// v2.1: response tracking for sendAndWait
+	db   *gorm.DB
+	mqtt publisher
+	mu   sync.RWMutex
+	// cache is keyed by the concrete EdgeDevice, never by device type.
+	cache       map[uint]*InitState
 	pendingMu   sync.Mutex
-	pendingResp map[uint32]chan []byte // request_id -> response channel
+	pendingResp map[uint32]pendingResponse
 }
 
-// InitState tracks initialization progress for a device
+type responseKind uint8
+
+const (
+	responseWrite responseKind = iota + 1
+	responseData
+)
+
+type pendingResult struct {
+	raw []byte
+	err error
+}
+
+// pendingResponse is the complete correlation key for an init command.
+// Retaining source, edge, step, response kind, and expected length prevents a
+// malformed report from completing another device's wait.
+type pendingResponse struct {
+	nodeID           string
+	edgeDeviceID     uint
+	stepName         string
+	responseKind     responseKind
+	expectedReadSize uint32
+	response         chan pendingResult
+}
+
 type InitState struct {
-	DeviceType string
-	Steps      []Step
-	CurrentIdx int
-	Completed  bool
-	CalibData  []byte
+	EdgeDeviceID uint
+	NodeID       string
+	DeviceType   string
+	Steps        []Step
+	CurrentIdx   int
+	// CurrentRequestID is the only DataReport request allowed to mutate this
+	// active init step. EdgeDeviceID scopes the flow; request ID scopes the step.
+	CurrentRequestID uint32
+	Completed        bool
+	InProgress       bool
+	CalibData        []byte
 }
 
-// NewOrchestrator creates a new device init orchestrator
-func NewOrchestrator(db *gorm.DB, mqttClient *mqtt.Client) *Orchestrator {
-	return &Orchestrator{
-		db:          db,
-		mqtt:        mqttClient,
-		cache:       make(map[string]*InitState),
-		pendingResp: make(map[uint32]chan []byte),
-	}
+var nextInitRequestID uint32
+
+func NewOrchestrator(db *gorm.DB, mqttClient publisher) *Orchestrator {
+	return &Orchestrator{db: db, mqtt: mqttClient, cache: make(map[uint]*InitState), pendingResp: make(map[uint32]pendingResponse)}
 }
 
-// GetInitSequence returns the initialization sequence for a device type
 func (o *Orchestrator) GetInitSequence(deviceType string) []Step {
 	switch deviceType {
 	case "bmp280":
 		return []Step{
-			{Name: "reset", Data: []byte{0xE0, 0xB6}, ReadSize: 0, Timeout: 100 * time.Millisecond},
+			{Name: "reset", Data: []byte{0xE0, 0xB6}, Timeout: 100 * time.Millisecond},
 			{Name: "read_chip_id", Data: []byte{0xD0}, ReadSize: 1, Timeout: 100 * time.Millisecond},
 			{Name: "read_calib", Data: []byte{0x88}, ReadSize: 24, Timeout: 100 * time.Millisecond},
-			{Name: "set_ctrl", Data: []byte{0xF4, 0x27}, ReadSize: 0, Timeout: 100 * time.Millisecond},
-			{Name: "set_config", Data: []byte{0xF5, 0xA0}, ReadSize: 0, Timeout: 100 * time.Millisecond},
+			{Name: "set_ctrl", Data: []byte{0xF4, 0x27}, Timeout: 100 * time.Millisecond},
+			{Name: "set_config", Data: []byte{0xF5, 0xA0}, Timeout: 100 * time.Millisecond},
 		}
 	case "lk_th01":
-		return []Step{
-			{Name: "reset", Data: []byte{0xFE}, ReadSize: 0, Timeout: 20 * time.Millisecond},
-			{Name: "read_temp", Data: []byte{0xF3}, ReadSize: 3, Timeout: 100 * time.Millisecond},
-		}
+		return []Step{{Name: "reset", Data: []byte{0xFE}, Timeout: 20 * time.Millisecond}, {Name: "read_temp", Data: []byte{0xF3}, ReadSize: 3, Timeout: 100 * time.Millisecond}}
 	default:
 		return nil
 	}
 }
 
-// sendAndWait sends a WriteCommand and waits for the response with timeout.
-// v2.1: replaces time.Sleep with proper async wait (fixes G6).
-func (o *Orchestrator) sendAndWait(deviceID string, channelID uint32, requestID uint32, data []byte, readSize uint32, timeout time.Duration) ([]byte, error) {
-	// Register pending response channel
-	respCh := make(chan []byte, 1)
+func (o *Orchestrator) sendAndWait(nodeID string, edgeDeviceID uint, stepName string, channelID, requestID uint32, data []byte, readSize uint32, timeout time.Duration) ([]byte, error) {
+	if o.mqtt == nil {
+		return nil, fmt.Errorf("mqtt required")
+	}
+	respCh := make(chan pendingResult, 1)
 	o.pendingMu.Lock()
-	o.pendingResp[requestID] = respCh
+	kind := responseWrite
+	if readSize > 0 {
+		kind = responseData
+	}
+	o.pendingResp[requestID] = pendingResponse{nodeID: nodeID, edgeDeviceID: edgeDeviceID, stepName: stepName, responseKind: kind, expectedReadSize: readSize, response: respCh}
 	o.pendingMu.Unlock()
-
-	defer func() {
-		o.pendingMu.Lock()
-		delete(o.pendingResp, requestID)
-		o.pendingMu.Unlock()
-	}()
-
-	// Send WriteCommand
+	defer func() { o.pendingMu.Lock(); delete(o.pendingResp, requestID); o.pendingMu.Unlock() }()
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
 	enc.EncodeVarint(1, uint64(requestID))
 	enc.EncodeVarint(2, uint64(channelID))
@@ -96,166 +115,194 @@ func (o *Orchestrator) sendAndWait(deviceID string, channelID uint32, requestID 
 	if readSize > 0 {
 		enc.EncodeVarint(4, uint64(readSize))
 	}
-
-	topic := mqtt.TopicForNode(deviceID)
-	if err := o.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	// Field 5 is optional for old firmware compatibility: absent decodes as 0.
+	// New firmware echoes it in DataReport to correlate init reads per device.
+	enc.EncodeVarint(5, uint64(edgeDeviceID))
+	if err := o.mqtt.Publish(mqtt.TopicForNode(nodeID), enc.Bytes()); err != nil {
 		return nil, fmt.Errorf("send failed: %w", err)
 	}
-
-	// Wait for response or timeout
 	select {
-	case resp := <-respCh:
-		return resp, nil
+	case result := <-respCh:
+		return result.raw, result.err
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("timeout after %v", timeout)
 	}
 }
 
-// HandleWriteResponse routes a WriteResponse to the waiting sender.
-// Called by node manager when a WriteResponse (0x07) is received.
-func (o *Orchestrator) HandleWriteResponse(requestID uint32, rawData []byte) {
+// HandleWriteResponse completes only write-only init steps. Read commands are
+// completed by HandleDataReportAck, which carries EdgeDeviceID.
+func (o *Orchestrator) HandleWriteResponse(nodeID string, requestID uint32, success bool, errorCode uint32, errorMsg string) {
 	o.pendingMu.Lock()
-	ch, ok := o.pendingResp[requestID]
+	pending, ok := o.pendingResp[requestID]
 	o.pendingMu.Unlock()
-
-	if ok {
+	if !ok || pending.nodeID != nodeID {
+		return
+	}
+	if !success || errorCode != 0 {
+		o.deliver(pending, pendingResult{err: fmt.Errorf("write response error: code=%d msg=%s", errorCode, errorMsg)})
+		return
+	}
+	if pending.responseKind == responseWrite {
 		select {
-		case ch <- rawData:
-		default: // channel full, response already received or timed out
+		case pending.response <- pendingResult{}:
+		default:
 		}
 	}
 }
 
-// InitDevice performs initialization for a device
-func (o *Orchestrator) InitDevice(deviceID string, channelID uint32, deviceType string) error {
-	steps := o.GetInitSequence(deviceType)
+func (o *Orchestrator) deliver(pending pendingResponse, result pendingResult) {
+	select {
+	case pending.response <- result:
+	default:
+	}
+}
+
+func allocateInitRequestID() uint32 {
+	id := atomic.AddUint32(&nextInitRequestID, 1)
+	if id == 0 {
+		id = atomic.AddUint32(&nextInitRequestID, 1)
+	}
+	return id
+}
+
+func (o *Orchestrator) reserve(device models.EdgeDevice, nodeID string) (*InitState, error) {
+	if device.ID == 0 {
+		return nil, fmt.Errorf("edge device id is required")
+	}
+	steps := o.GetInitSequence(device.Type)
 	if steps == nil {
-		return fmt.Errorf("no init sequence for device type: %s", deviceType)
+		return nil, fmt.Errorf("no init sequence for device type: %s", device.Type)
 	}
-
-	state := &InitState{
-		DeviceType: deviceType,
-		Steps:      steps,
-		CurrentIdx: 0,
-	}
-
 	o.mu.Lock()
-	o.cache[deviceType] = state
-	o.mu.Unlock()
-
-	// Execute each step using sendAndWait (v2.1: no more time.Sleep)
-	for i, step := range steps {
-		state.CurrentIdx = i
-		logger.Infof("[Init] %s: executing step %d/%d: %s", deviceID, i+1, len(steps), step.Name)
-
-		requestID := uint32(i + 1)
-		rawData, err := o.sendAndWait(deviceID, channelID, requestID, step.Data, step.ReadSize, step.Timeout)
-		if err != nil {
-			logger.Warnf("[Init] %s: step %s failed: %v", deviceID, step.Name, err)
-			// Continue with next step on failure (best-effort init)
-			continue
-		}
-
-		// Store calibration data if applicable
-		if step.Name == "read_calib" && len(rawData) > 0 {
-			state.CalibData = rawData
-			o.saveCalibData(deviceID, deviceType, rawData)
-		}
-
-		logger.Infof("[Init] %s: step %s completed, data=%x", deviceID, step.Name, rawData)
+	if existing, ok := o.cache[device.ID]; ok && (existing.Completed || existing.InProgress) {
+		o.mu.Unlock()
+		return nil, fmt.Errorf("edge device %d initialization already active or completed", device.ID)
 	}
+	state := &InitState{EdgeDeviceID: device.ID, NodeID: nodeID, DeviceType: device.Type, Steps: steps, InProgress: true}
+	o.cache[device.ID] = state
+	o.mu.Unlock()
+	return state, nil
+}
 
-	state.Completed = true
-	logger.Infof("[Init] %s: initialization complete", deviceID)
+func (o *Orchestrator) InitEdgeDevice(device models.EdgeDevice, nodeID string) error {
+	state, err := o.reserve(device, nodeID)
+	if err != nil {
+		return err
+	}
+	return o.runReserved(device, nodeID, state)
+}
+
+func (o *Orchestrator) runReserved(device models.EdgeDevice, nodeID string, state *InitState) (firstErr error) {
+	defer func() {
+		o.mu.Lock()
+		state.InProgress = false
+		state.Completed = firstErr == nil
+		o.mu.Unlock()
+	}()
+	for _, step := range state.Steps {
+		requestID := allocateInitRequestID()
+		raw, err := o.sendAndWait(nodeID, device.ID, step.Name, uint32(device.ChannelID), requestID, step.Data, step.ReadSize, step.Timeout)
+		if err != nil {
+			logger.Warnf("[Init] %s step %s failed: %v", nodeID, step.Name, err)
+			return fmt.Errorf("%s: %w", step.Name, err)
+		}
+		if step.Name == "read_calib" {
+			if err := o.saveCalibData(device, raw); err != nil {
+				return fmt.Errorf("%s calibration: %w", step.Name, err)
+			}
+			o.mu.Lock()
+			state.CalibData = append([]byte(nil), raw...)
+			o.mu.Unlock()
+		}
+	}
+	return firstErr
+}
+
+// InitDevice is a compatibility entry point. New callers must pass the actual EdgeDevice.
+func (o *Orchestrator) InitDevice(nodeID string, channelID uint32, deviceType string) error {
+	if o.db == nil {
+		return fmt.Errorf("database required to resolve edge device")
+	}
+	var device models.EdgeDevice
+	if err := o.db.Where("node_id = ? AND channel_id = ? AND type = ?", nodeID, channelID, deviceType).First(&device).Error; err != nil {
+		return fmt.Errorf("resolve edge device: %w", err)
+	}
+	return o.InitEdgeDevice(device, nodeID)
+}
+
+func (o *Orchestrator) HandleDataReportAck(nodeID string, edgeDeviceID uint, requestID uint32, errorCode uint64, raw []byte) {
+	if nodeID == "" || edgeDeviceID == 0 || requestID == 0 {
+		return
+	}
+	o.pendingMu.Lock()
+	pending, ok := o.pendingResp[requestID]
+	if !ok || pending.nodeID != nodeID || pending.edgeDeviceID != edgeDeviceID || pending.responseKind != responseData {
+		o.pendingMu.Unlock()
+		return
+	}
+	o.pendingMu.Unlock()
+	if errorCode != 0 {
+		o.deliver(pending, pendingResult{err: fmt.Errorf("data report error: code=%d", errorCode)})
+		return
+	}
+	if uint32(len(raw)) != pending.expectedReadSize {
+		o.deliver(pending, pendingResult{err: fmt.Errorf("data report length %d, expected %d", len(raw), pending.expectedReadSize)})
+		return
+	}
+	o.deliver(pending, pendingResult{raw: append([]byte(nil), raw...)})
+}
+
+func (o *Orchestrator) saveCalibData(device models.EdgeDevice, data []byte) error {
+	if o.db == nil {
+		return fmt.Errorf("database required")
+	}
+	if device.ID == 0 || len(data) != 24 {
+		return fmt.Errorf("invalid calibration length %d", len(data))
+	}
+	allZero := true
+	for _, b := range data {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return fmt.Errorf("invalid all-zero calibration")
+	}
+	value := models.CalibrationCache{NodeID: device.NodeID, EdgeDeviceID: device.ID, DeviceType: device.Type, Data: fmt.Sprintf("%x", data)}
+	if err := o.db.Where("edge_device_id = ? AND device_type = ?", device.ID, device.Type).
+		Assign(value).FirstOrCreate(&value).Error; err != nil {
+		return fmt.Errorf("persist calibration: %w", err)
+	}
 	return nil
 }
 
-// HandleDataReportAck processes DataReport that may be an init response
-func (o *Orchestrator) HandleDataReportAck(deviceID string, requestID uint32, rawData []byte) {
+func (o *Orchestrator) IsInitialized(edgeDeviceID uint) bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-
-	for deviceType, state := range o.cache {
-		if state.Completed {
-			continue
-		}
-		// Check if this response matches current step
-		if int(requestID) == state.CurrentIdx+1 {
-			logger.Infof("[Init] %s: received response for step %d (%s), data=%x",
-				deviceID, state.CurrentIdx, state.Steps[state.CurrentIdx].Name, rawData)
-			// Store calibration data if applicable
-			if state.Steps[state.CurrentIdx].Name == "read_calib" {
-				state.CalibData = rawData
-				// Save to DB
-				o.saveCalibData(deviceID, deviceType, rawData)
-			}
-		}
-	}
+	s, ok := o.cache[edgeDeviceID]
+	return ok && s.Completed
 }
-
-// saveCalibData saves calibration data to database
-func (o *Orchestrator) saveCalibData(deviceID, deviceType string, data []byte) {
-	var node models.Node
-	if err := o.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
-		logger.Infof("[Init] Node not found: %s", deviceID)
-		return
-	}
-
-	// Save to calibration cache
-	o.db.Create(&models.CalibrationCache{
-		NodeID: node.NodeID,
-		DeviceType:  deviceType,
-		Data:        fmt.Sprintf("%x", data),
-	})
-	logger.Infof("[Init] Calibration data saved for %s/%s", deviceID, deviceType)
-}
-
-// IsInitialized checks if a device type has been initialized
-func (o *Orchestrator) IsInitialized(deviceType string) bool {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	state, ok := o.cache[deviceType]
-	return ok && state.Completed
-}
-
-// ClearCache removes init state for a device type
-func (o *Orchestrator) ClearCache(deviceType string) {
+func (o *Orchestrator) ClearCache(edgeDeviceID uint) {
 	o.mu.Lock()
-	delete(o.cache, deviceType)
+	delete(o.cache, edgeDeviceID)
 	o.mu.Unlock()
 }
-
-// InitIfNeeded checks if a device needs initialization and triggers it.
-// This is called when a node transitions from offline to online.
-// deviceID: node device_id
-// channelID: the channel where the device is connected
-// deviceType: the type of device (e.g., "bmp280")
-// Returns true if init was triggered, false if already initialized or no init sequence.
-func (o *Orchestrator) InitIfNeeded(deviceID string, channelID uint32, deviceType string) bool {
-	// Check if already initialized
-	o.mu.RLock()
-	state, ok := o.cache[deviceType]
-	if ok && state.Completed {
-		o.mu.RUnlock()
+func (o *Orchestrator) InitIfNeeded(device models.EdgeDevice, nodeID string) bool {
+	state, err := o.reserve(device, nodeID)
+	if err != nil {
 		return false
 	}
-	o.mu.RUnlock()
-
-	// Get init sequence
-	steps := o.GetInitSequence(deviceType)
-	if steps == nil {
-		return false // No init sequence for this device type
-	}
-
-	// Trigger async initialization
-	go o.InitDevice(deviceID, channelID, deviceType)
+	go func() {
+		if err := o.runReserved(device, nodeID, state); err != nil {
+			logger.Warnf("[Init] edge device %d: %v", device.ID, err)
+		}
+	}()
 	return true
 }
-
-// HasActiveInit checks if there's an active init flow for a device type
-func (o *Orchestrator) HasActiveInit(deviceType string) bool {
+func (o *Orchestrator) HasActiveInit(edgeDeviceID uint) bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	state, ok := o.cache[deviceType]
-	return ok && !state.Completed
+	s, ok := o.cache[edgeDeviceID]
+	return ok && s.InProgress
 }

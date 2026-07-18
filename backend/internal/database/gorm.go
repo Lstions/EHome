@@ -89,6 +89,9 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+	if err := ensureDeviceConfigDefaultConstraint(DB); err != nil {
+		return err
+	}
 	if _, err = MigrateGPIOChannels(DB); err != nil {
 		return err
 	}

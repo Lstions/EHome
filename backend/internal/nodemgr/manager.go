@@ -302,7 +302,7 @@ func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 		return
 	}
 	for _, dev := range devices {
-		if m.deviceInit.InitIfNeeded(deviceID, uint32(dev.ChannelID), dev.Type) {
+		if m.deviceInit.InitIfNeeded(dev, deviceID) {
 			logger.Infof("[%s] Triggered device init: type=%s ch=%d", deviceID, dev.Type, dev.ChannelID)
 		}
 	}

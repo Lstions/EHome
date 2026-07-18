@@ -50,6 +50,12 @@ func (m *Manager) handleWriteResponse(deviceID string, payload []byte) {
 
 	// Route to PendingWriteManager
 	m.pendingWrite.HandleResponse(uint32(requestID), success, uint32(errorCode), errorMsg)
+	// WriteRsp has no EdgeDeviceID, so node ID is the source correlation. Route
+	// both success and failure; the orchestrator only completes write-only on
+	// success, while a read step remains bound to its DataReport response.
+	if m.deviceInit != nil && requestID != 0 {
+		m.deviceInit.HandleWriteResponse(deviceID, uint32(requestID), success, uint32(errorCode), errorMsg)
+	}
 }
 
 // handlePong processes Pong (type=0x09) with anti-forgery verification

@@ -345,7 +345,8 @@ bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id)
  */
 
 void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
-                               const uint8_t *d, size_t l, uint32_t rs)
+                               const uint8_t *d, size_t l, uint32_t rs,
+                               uint32_t edge_device_id)
 {
     const config_manifest_t *m = config_mgr_get_manifest();
 
@@ -365,6 +366,7 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
         .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
         .delay_ms   = 0,    /* WriteCommand: no fixed delay */
         .read_size  = rs,   /* v2.5: expected RX bytes (0 = TX only) */
+        .edge_device_id = edge_device_id, /* 0 when sent by old firmware/backend */
         .type       = CMD_WRITE,
         .uart_port  = derive_uart_port_for_channel(m, ch),
     };

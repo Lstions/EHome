@@ -22,7 +22,7 @@ func (d *TechfineInverterDriver) DeviceType() string      { return "techfine_inv
 func (d *TechfineInverterDriver) DeviceName() string      { return "Techfine GB3024 逆变器" }
 func (d *TechfineInverterDriver) OEM() string             { return "Techfine" }
 func (d *TechfineInverterDriver) Category() string        { return "inverter" }
-func (d *TechfineInverterDriver) HardwareTypes() []string { return []string{"GB3024"} }
+func (d *TechfineInverterDriver) HardwareTypes() []string { return []string{"uart"} }
 
 // GetSensorDefinitions returns all sensor definitions for HA Discovery.
 func (d *TechfineInverterDriver) GetSensorDefinitions() []SensorData {
@@ -206,10 +206,10 @@ func (d *TechfineInverterDriver) ParseData(raw []byte) ([]SensorData, error) {
 	}
 
 	// --- PV: (AAA.A BB.B CCCCC ...) 3 meaningful fields
-	// HPV and HPVB share the same format. Returns pv1_* by default.
-	// Use ParseDataWithCommand to distinguish HPV vs HPVB.
+	// HPV and HPVB share the same response shape. Without the originating
+	// command there is no safe way to select pv1_* or pv2_*.
 	if len(fields) >= 3 {
-		return d.parsePV(fields, "pv1")
+		return nil, fmt.Errorf("techfine: ambiguous HPV/HPVB response requires command context")
 	}
 
 	// --- QPRTL: (MMMMMMMM) — protocol type, single field
@@ -231,24 +231,30 @@ func (d *TechfineInverterDriver) ParseDataWithCommand(raw []byte, commandWriteDa
 	// Decode hex to ASCII
 	decoded, err := hex.DecodeString(commandWriteData)
 	if err != nil {
-		// Fall back to plain ParseData
-		return d.ParseData(raw)
+		return nil, fmt.Errorf("techfine: invalid command write data: %w", err)
 	}
-	cmdStr := string(decoded)
+	cmdStr := strings.ToUpper(strings.TrimSpace(string(decoded)))
 
-	// Check if this is an HPVB command (PV2 query)
-	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(cmdStr)), "HPVB") {
-		// Parse as PV2 data
+	if cmdStr == "HPV" || cmdStr == "HPVB" {
 		s := string(raw)
+		if !strings.HasPrefix(s, "(") {
+			return nil, fmt.Errorf("techfine: response must start with '(', got: %q", s)
+		}
 		s = strings.TrimPrefix(s, "(")
 		s = strings.TrimRight(s, "\r\n\x00 ")
 		fields := strings.Fields(s)
-		if len(fields) >= 3 {
-			return d.parsePV(fields, "pv2")
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("techfine %s: need >=3 fields, got %d", cmdStr, len(fields))
 		}
+		prefix := "pv1"
+		if cmdStr == "HPVB" {
+			prefix = "pv2"
+		}
+		return d.parsePV(fields, prefix)
 	}
 
-	// For all other commands, use regular ParseData
+	// Other response formats are structurally distinguishable. If the response
+	// has the ambiguous PV shape, ParseData still fails closed.
 	return d.ParseData(raw)
 }
 
@@ -893,12 +899,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 	for _, v := range []string{"220", "230", "240"} {
 		cmd := "V" + v
 		settings = append(settings, CommandTemplate{
-			ID:          "set_voltage_" + v,
-			Name:        "设置输出电压" + v + "V",
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_voltage_" + v,
+			Name:       "设置输出电压" + v + "V",
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置输出电压: V220/V230/V240 (带CRC16)",
 		})
 	}
@@ -907,12 +913,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 	for _, f := range []string{"50", "60"} {
 		cmd := "F" + f
 		settings = append(settings, CommandTemplate{
-			ID:          "set_frequency_" + f,
-			Name:        "设置频率" + f + "Hz",
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_frequency_" + f,
+			Name:       "设置频率" + f + "Hz",
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置输出频率: F50/F60 (带CRC16)",
 		})
 	}
@@ -922,12 +928,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 		cmd := "PBT" + pbt
 		name := map[string]string{"00": "AGM", "01": "FLD", "02": "USER"}[pbt]
 		settings = append(settings, CommandTemplate{
-			ID:          "set_battery_type_" + strings.ToLower(name),
-			Name:        "设置电池类型" + name,
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_battery_type_" + strings.ToLower(name),
+			Name:       "设置电池类型" + name,
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置电池类型: PBT" + pbt + "=" + name + " (带CRC16)",
 		})
 	}
@@ -937,12 +943,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 		cmd := "PGR" + pgr
 		name := map[string]string{"00": "APL", "01": "UPS"}[pgr]
 		settings = append(settings, CommandTemplate{
-			ID:          "set_grid_range_" + strings.ToLower(name),
-			Name:        "设置市电范围" + name,
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_grid_range_" + strings.ToLower(name),
+			Name:       "设置市电范围" + name,
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置市电输入范围: PGR" + pgr + "=" + name + " (带CRC16)",
 		})
 	}
@@ -952,12 +958,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 		cmd := "POP" + pop
 		name := map[string]string{"00": "UTI", "01": "SUB", "02": "SBU"}[pop]
 		settings = append(settings, CommandTemplate{
-			ID:          "set_work_mode_" + strings.ToLower(name),
-			Name:        "设置工作模式" + name,
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_work_mode_" + strings.ToLower(name),
+			Name:       "设置工作模式" + name,
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置工作模式: POP" + pop + "=" + name + " (带CRC16)",
 		})
 	}
@@ -968,12 +974,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 		id := map[string]string{"00": "off", "01": "on"}[bmsc]
 		name := map[string]string{"00": "关闭", "01": "开启"}[bmsc]
 		settings = append(settings, CommandTemplate{
-			ID:          "set_bms_" + id,
-			Name:        "BMS" + name,
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         "set_bms_" + id,
+			Name:       "BMS" + name,
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: "设置BMS控制: BMSC" + bmsc + "=" + name + " (带CRC16)",
 		})
 	}
@@ -992,12 +998,12 @@ func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
 	for _, s := range otherSettings {
 		cmd := s.cmd
 		settings = append(settings, CommandTemplate{
-			ID:          s.id,
-			Name:        s.name,
-			Type:        "write",
-			CmdByte:     0,
-			WriteData:   asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
-			ReadLength:  10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
+			ID:         s.id,
+			Name:       s.name,
+			Type:       "write",
+			CmdByte:    0,
+			WriteData:  asciiToHex(cmd + crc16ToHex(cmd) + "\r"),
+			ReadLength: 10, DelayMs: 200, IntervalMs: 0, Schedulable: false,
 			Description: s.desc + " (带CRC16)",
 		})
 	}

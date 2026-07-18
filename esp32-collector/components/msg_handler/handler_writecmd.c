@@ -17,9 +17,10 @@
 
 /* Weak callbacks - implemented in main.c */
 __attribute__((weak)) void on_write_cmd_received(uint32_t request_id, uint32_t channel_id,
-                                                   const uint8_t *data, size_t len, uint32_t read_size)
+                                                   const uint8_t *data, size_t len, uint32_t read_size,
+                                                   uint32_t edge_device_id)
 {
-    (void)request_id; (void)channel_id; (void)data; (void)len; (void)read_size;
+    (void)request_id; (void)channel_id; (void)data; (void)len; (void)read_size; (void)edge_device_id;
 }
 
 __attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t hardware_id)
@@ -37,7 +38,7 @@ __attribute__((weak)) void on_modbus_scan_req_received(const char *request_id,
 
 void handler_writecmd_process(frame_decoder_t *dec)
 {
-    uint32_t request_id = 0, channel_id = 0, read_size = 0;
+    uint32_t request_id = 0, channel_id = 0, read_size = 0, edge_device_id = 0;
     const uint8_t *cmd_data = NULL;
     size_t cmd_len = 0;
     frame_err_t err;
@@ -51,6 +52,7 @@ void handler_writecmd_process(frame_decoder_t *dec)
             cmd_len = field.value.bytes.len;
             break;
         case 4: read_size = (uint32_t)field.value.varint; break;
+        case 5: edge_device_id = (uint32_t)field.value.varint; break;
         }
     }
     ESP_LOGI(TAG, "WriteCmd: req=%lu, ch=%lu, len=%zu",
@@ -62,7 +64,7 @@ void handler_writecmd_process(frame_decoder_t *dec)
         msg_handler_send_write_rsp(request_id, true, 0, NULL);
         factory_reset_trigger();
     } else {
-        on_write_cmd_received(request_id, channel_id, cmd_data, cmd_len, read_size);
+        on_write_cmd_received(request_id, channel_id, cmd_data, cmd_len, read_size, edge_device_id);
     }
 }
 

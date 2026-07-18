@@ -345,12 +345,13 @@ type NodeEvent struct {
 
 // CalibrationCache 校准数据缓存 (保留)
 type CalibrationCache struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	NodeID     string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.3: renamed from CollectorID
-	DeviceType string    `gorm:"size:32;not null" json:"device_type"`
-	Data       string    `gorm:"type:text;not null" json:"data"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	NodeID       string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
+	EdgeDeviceID uint      `gorm:"column:edge_device_id;index:idx_calibration_edge_kind,unique" json:"edge_device_id"`
+	DeviceType   string    `gorm:"size:32;not null;index:idx_calibration_edge_kind,unique" json:"device_type"`
+	Data         string    `gorm:"type:text;not null" json:"data"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // =====================================================================

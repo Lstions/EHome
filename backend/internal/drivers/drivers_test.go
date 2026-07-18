@@ -3,6 +3,8 @@ package drivers
 import (
 	"encoding/binary"
 	"encoding/json"
+	"math"
+	"slices"
 	"testing"
 
 	"ehome/backend/pkg/logger"
@@ -25,29 +27,51 @@ func TestBMP280Driver_ParseData_TooShort(t *testing.T) {
 
 func TestBMP280Driver_ParseData_Exact6Bytes(t *testing.T) {
 	d := &BMP280Driver{}
-	data, err := d.ParseData([]byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32})
+	if _, err := d.ParseData([]byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00}); err == nil {
+		t.Fatal("uncalibrated BMP280 data must fail closed")
+	}
+}
+
+func TestBMP280Driver_ParseDataWithCalibration_BoschReferenceVector(t *testing.T) {
+	d := &BMP280Driver{}
+	calibration := []byte{0x70, 0x6b, 0x43, 0x67, 0x18, 0xfc, 0x7d, 0x8e, 0x43, 0xd6, 0xd0, 0x0b, 0x27, 0x0b, 0x8c, 0x00, 0xf9, 0xff, 0x8c, 0x3c, 0xf8, 0xc6, 0x70, 0x17}
+	data, err := d.ParseDataWithCalibration([]byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00}, calibration)
 	if err != nil {
-		t.Fatalf("ParseData: %v", err)
+		t.Fatalf("ParseDataWithCalibration: %v", err)
 	}
 	if len(data) != 2 {
-		t.Fatalf("expected 2 sensors, got %d", len(data))
+		t.Fatalf("sensor count: got %d, want 2", len(data))
 	}
-	if data[0].Name != "temperature" {
-		t.Errorf("sensor[0] name: got %s, want temperature", data[0].Name)
+	if data[0].Name != "temperature" || math.Abs(data[0].Value-25.08) > 0.02 {
+		t.Fatalf("temperature: got %#v, want about 25.08 C", data[0])
 	}
-	if data[1].Name != "pressure" {
-		t.Errorf("sensor[1] name: got %s, want pressure", data[1].Name)
+	if data[1].Name != "pressure" || math.Abs(data[1].Value-1006.53) > 0.05 {
+		t.Fatalf("pressure: got %#v, want about 1006.53 hPa", data[1])
 	}
+}
+
+func TestBMP280Driver_ParseDataWithCalibration_RejectsInvalidCalibration(t *testing.T) {
+	d := &BMP280Driver{}
+	raw := []byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00}
+	for _, calibration := range [][]byte{nil, make([]byte, 23), bytesOf(0xff, 24), make([]byte, 24)} {
+		if _, err := d.ParseDataWithCalibration(raw, calibration); err == nil {
+			t.Fatalf("invalid calibration %x must fail", calibration)
+		}
+	}
+}
+
+func bytesOf(value byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = value
+	}
+	return out
 }
 
 func TestBMP280Driver_ParseData_7Bytes(t *testing.T) {
 	d := &BMP280Driver{}
-	data, err := d.ParseData([]byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32, 0xFF})
-	if err != nil {
-		t.Fatalf("ParseData: %v", err)
-	}
-	if len(data) != 2 {
-		t.Fatalf("expected 2 sensors, got %d", len(data))
+	if _, err := d.ParseData([]byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32, 0xFF}); err == nil {
+		t.Fatal("uncalibrated BMP280 data must fail closed")
 	}
 }
 
@@ -284,13 +308,13 @@ func TestPRS3001Driver_ParseData_2ByteCount(t *testing.T) {
 func TestPRS3001Driver_ParseData_6ByteCount(t *testing.T) {
 	d := &PRS3001Driver{}
 	// byte_count=6: rainfall + illuminance (uint16)
-	data := make([]byte, 3+6+2) // header(3) + data(6) + crc(2)
-	data[0] = 0x01              // addr
-	data[1] = 0x03              // func
-	data[2] = 0x06              // byte_count
+	data := make([]byte, 3+6+2)                 // header(3) + data(6) + crc(2)
+	data[0] = 0x01                              // addr
+	data[1] = 0x03                              // func
+	data[2] = 0x06                              // byte_count
 	binary.BigEndian.PutUint16(data[3:5], 50)   // rainfall = 5.0mm
-	binary.BigEndian.PutUint16(data[5:7], 0)     // padding
-	binary.BigEndian.PutUint16(data[7:9], 1000)  // illuminance = 1000 Lux
+	binary.BigEndian.PutUint16(data[5:7], 0)    // padding
+	binary.BigEndian.PutUint16(data[7:9], 1000) // illuminance = 1000 Lux
 
 	result, err := d.ParseData(data)
 	if err != nil {
@@ -314,9 +338,9 @@ func TestPRS3001Driver_ParseData_8ByteCount(t *testing.T) {
 	data[0] = 0x01
 	data[1] = 0x03
 	data[2] = 0x08
-	binary.BigEndian.PutUint16(data[3:5], 50)       // rainfall
-	binary.BigEndian.PutUint16(data[5:7], 0)         // padding
-	binary.BigEndian.PutUint32(data[7:11], 50000)    // illuminance uint32
+	binary.BigEndian.PutUint16(data[3:5], 50)     // rainfall
+	binary.BigEndian.PutUint16(data[5:7], 0)      // padding
+	binary.BigEndian.PutUint32(data[7:11], 50000) // illuminance uint32
 
 	result, err := d.ParseData(data)
 	if err != nil {
@@ -434,12 +458,12 @@ func TestRegistry_RegisterOverwrite(t *testing.T) {
 // === Global registry ===
 
 func TestGlobalRegistry(t *testing.T) {
-	// Register built-in drivers (generic path: BMP280, LKTH01, SN3000, PRS3001)
+	// The generic path must register the complete built-in set.
 	RegisterBuiltInDrivers(GlobalRegistry())
 
 	types := List()
-	if len(types) < 4 {
-		t.Errorf("expected at least 4 global drivers, got %d", len(types))
+	if len(types) < 6 {
+		t.Errorf("expected at least 6 global drivers, got %d", len(types))
 	}
 
 	driver, err := Get("bmp280")
@@ -462,11 +486,31 @@ func TestRegisterBuiltInDriversWithParsers(t *testing.T) {
 	}
 }
 
+func TestRegisterBuiltInDrivers_RegistersSameSetAsParserAwareEntryPoint(t *testing.T) {
+	legacy := NewRegistry()
+	withParsers := NewRegistry()
+
+	RegisterBuiltInDrivers(legacy)
+	RegisterBuiltInDriversWithParsers(withParsers, nil)
+
+	legacyTypes := legacy.List()
+	withParserTypes := withParsers.List()
+	slices.Sort(legacyTypes)
+	slices.Sort(withParserTypes)
+	if !slices.Equal(legacyTypes, withParserTypes) {
+		t.Fatalf("registration sets differ: legacy=%v parser-aware=%v", legacyTypes, withParserTypes)
+	}
+	want := []string{"bmp280", "jiabaida_bms", "lk_th01", "prs3001", "sn3000", "techfine_inverter"}
+	if !slices.Equal(legacyTypes, want) {
+		t.Fatalf("registered types = %v, want %v", legacyTypes, want)
+	}
+}
+
 func TestRegisterBuiltInDriversWithParsers_ValidParser(t *testing.T) {
 	reg := NewRegistry()
 
 	parserConfigs := map[string]json.RawMessage{
-		"sn3000": json.RawMessage(`{"data_format":"modbus","fields":[{"name":"wind_direction","type":"uint16","scale":0.1,"offset":3,"unit":"°"}]}`),
+		"sn3000":  json.RawMessage(`{"data_format":"modbus","fields":[{"name":"wind_direction","type":"uint16","scale":0.1,"offset":3,"unit":"°"}]}`),
 		"prs3001": json.RawMessage(`{"data_format":"modbus","fields":[{"name":"rainfall","type":"uint16","scale":0.1,"offset":3,"unit":"mm"}]}`),
 	}
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)

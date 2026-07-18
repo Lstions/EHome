@@ -1,6 +1,7 @@
 package databus
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -42,23 +43,13 @@ func (c *PendingWriteConsumer) ShouldHandle(evt DataEvent) bool {
 	return evt.RequestID != 0
 }
 func (c *PendingWriteConsumer) Handle(evt DataEvent) {
-	// RX timeout
-	if evt.ErrorCode == 0x01 && c.pendingWrite != nil {
-		c.pendingWrite.HandleResponse(uint32(evt.RequestID), false, 0x01, "sensor RX timeout")
-		return
-	}
-	// Normal command response
 	if c.pendingWrite != nil {
-		c.pendingWrite.HandleDataReportAck(uint32(evt.RequestID), evt.RawData)
+		c.pendingWrite.HandleDataReportResult(uint32(evt.RequestID), evt.RawData, evt.ErrorCode)
 	}
-	// Device init notification
-	if c.deviceInit != nil && c.db != nil && evt.EdgeDeviceID > 0 {
-		var device models.EdgeDevice
-		if err := c.db.Where("id = ?", evt.EdgeDeviceID).First(&device).Error; err == nil {
-			if c.deviceInit.HasActiveInit(device.Type) {
-				logger.Infof("[%s] DataReport ack for device init, type=%s", evt.DeviceID, device.Type)
-			}
-		}
+	// Device-init correlation is EdgeDevice-scoped.  A BMP280 response must
+	// never satisfy another BMP280's initialization on the same node.
+	if c.deviceInit != nil && evt.EdgeDeviceID > 0 && evt.RequestID != 0 {
+		c.deviceInit.HandleDataReportAck(evt.DeviceID, uint(evt.EdgeDeviceID), uint32(evt.RequestID), evt.ErrorCode, evt.RawData)
 	}
 }
 
@@ -163,8 +154,11 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	var sensorData []parser.Field
 	var parseMethod string
 
-	// Primary: DeviceConfig.Parser
-	if device.DeviceConfigID > 0 {
+	// Primary: calibration-aware drivers must never be bypassed by a generic
+	// DeviceConfig parser: calibration is part of their decoding invariant.
+	drv, _ := drivers.Get(device.Type)
+	_, calibrationAware := drv.(drivers.CalibrationAwareDriver)
+	if !calibrationAware && device.DeviceConfigID > 0 {
 		var dc models.DeviceConfig
 		if err := c.db.First(&dc, device.DeviceConfigID).Error; err == nil {
 			if len(dc.Parser) > 0 && string(dc.Parser) != "{}" && string(dc.Parser) != "null" {
@@ -191,23 +185,45 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 
 		var drvData []drivers.SensorData
-		if evt.CommandTemplateID > 0 {
-			if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
-				var template models.ConfigTemplate
-				if err := c.db.Where("id = ? AND node_id = ?", evt.CommandTemplateID, evt.DeviceID).First(&template).Error; err == nil && template.WriteData != "" {
-					drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
-					if err != nil {
-						logger.Infof("[%s] ParseDataWithCommand failed, falling back to ParseData: %v", evt.DeviceID, err)
-						drvData = nil
-					}
-				}
+		if calibrationDriver, ok := drv.(drivers.CalibrationAwareDriver); ok {
+			var calibration models.CalibrationCache
+			if err := c.db.Where("edge_device_id = ? AND device_type = ?", device.ID, device.Type).
+				First(&calibration).Error; err != nil {
+				logger.Warn("databus: calibration missing; refusing to persist sample", "node_id", evt.DeviceID, "edge_device_id", device.ID, "device_type", device.Type, "error", err)
+				c.reassembler.Consume(uint32(evt.RequestID))
+				return
 			}
-		}
-		if drvData == nil {
+			calibrationBytes, err := hex.DecodeString(calibration.Data)
+			if err != nil {
+				logger.Warn("databus: calibration encoding invalid; refusing to persist sample", "edge_device_id", device.ID, "error", err)
+				c.reassembler.Consume(uint32(evt.RequestID))
+				return
+			}
+			drvData, err = calibrationDriver.ParseDataWithCalibration(merged, calibrationBytes)
+		} else if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
+			if evt.CommandTemplateID == 0 {
+				logger.Infof("[%s] Command-aware driver requires command template context", evt.DeviceID)
+				c.reassembler.Consume(uint32(evt.RequestID))
+				return
+			}
+			var template models.ConfigTemplate
+			if lookupErr := c.db.Where("id = ? AND node_id = ?", evt.CommandTemplateID, evt.DeviceID).First(&template).Error; lookupErr != nil {
+				logger.Infof("[%s] Failed to resolve command template %d: %v", evt.DeviceID, evt.CommandTemplateID, lookupErr)
+				c.reassembler.Consume(uint32(evt.RequestID))
+				return
+			}
+			if template.WriteData == "" {
+				logger.Infof("[%s] Command template %d has no write data", evt.DeviceID, evt.CommandTemplateID)
+				c.reassembler.Consume(uint32(evt.RequestID))
+				return
+			}
+			drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
+		} else {
 			drvData, err = drv.ParseData(merged)
 		}
 		if err != nil {
 			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, err)
+			c.reassembler.Consume(uint32(evt.RequestID))
 			return
 		}
 		sensorData = make([]parser.Field, len(drvData))

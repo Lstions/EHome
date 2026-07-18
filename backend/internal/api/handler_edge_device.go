@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // operationNameRe validates operation names to prevent injection or malformed input.
@@ -163,6 +164,27 @@ func parseHardwareIDUint(s string) uint64 {
 	return 0
 }
 
+func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *models.Channel) (models.DeviceConfig, error) {
+	if deviceConfigID == 0 {
+		return models.DeviceConfig{}, fmt.Errorf("device_config_id is required")
+	}
+	var config models.DeviceConfig
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND status = ?", deviceConfigID, "active").First(&config).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.DeviceConfig{}, fmt.Errorf("active device config not found")
+		}
+		return models.DeviceConfig{}, err
+	}
+	configHardwareType := strings.TrimSpace(config.HardwareType)
+	if configHardwareType == "" {
+		return models.DeviceConfig{}, fmt.Errorf("device config has no hardware type")
+	}
+	if !strings.EqualFold(configHardwareType, channel.HardwareType) && !strings.EqualFold(configHardwareType, channel.BusType) {
+		return models.DeviceConfig{}, fmt.Errorf("device config hardware type %q is incompatible with channel type %q", config.HardwareType, channel.HardwareType)
+	}
+	return config, nil
+}
+
 // registerEdgeDeviceRoutes sets up edge-device CRUD routes
 func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
 	eventBus := nodeMgr.EventBus()
@@ -261,20 +283,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if dto.Name == nil || dto.Type == nil || dto.NodeID == nil || dto.ChannelID == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name, type, node_id, and channel_id are required"})
+		if dto.Name == nil || dto.NodeID == nil || dto.ChannelID == nil || dto.DeviceConfigID == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name, node_id, channel_id, and device_config_id are required"})
 			return
 		}
-		var bindingChannel models.Channel
-		if err := db.Where("id = ? AND node_id = ?", *dto.ChannelID, *dto.NodeID).First(&bindingChannel).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "channel does not belong to node"})
-			return
-		}
-		if err := validateTransportChannel(&bindingChannel); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		dev := models.EdgeDevice{Name: *dto.Name, Type: *dto.Type, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
+		dev := models.EdgeDevice{Name: *dto.Name, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
 		if dto.Enabled != nil {
 			dev.Enabled = *dto.Enabled
 		}
@@ -284,14 +297,21 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if dto.HardwareID != nil {
 			dev.HardwareID = *dto.HardwareID
 		}
-		if dto.DeviceConfigID != nil {
-			dev.DeviceConfigID = *dto.DeviceConfigID
-			var dc models.DeviceConfig
-			if err := db.First(&dc, *dto.DeviceConfigID).Error; err == nil && dc.DeviceType != "" {
-				dev.Type = dc.DeviceType
-			}
-		}
+
 		if err := db.Transaction(func(tx *gorm.DB) error {
+			var bindingChannel models.Channel
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", *dto.ChannelID, *dto.NodeID).First(&bindingChannel).Error; err != nil {
+				return fmt.Errorf("channel does not belong to node")
+			}
+			if err := validateTransportChannel(&bindingChannel); err != nil {
+				return err
+			}
+			config, err := validateDeviceConfigForChannel(tx, *dto.DeviceConfigID, &bindingChannel)
+			if err != nil {
+				return err
+			}
+			dev.Type = config.DeviceType
+			dev.DeviceConfigID = config.ID
 			// Step 1: Create EdgeDevice (inside transaction)
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
@@ -308,7 +328,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -326,12 +346,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// Update edge device (v2.2 path for PUT /devices/:id)
 	v1.PUT("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		var d models.EdgeDevice
-		if err := db.First(&d, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
-			return
-		}
-		// B1 fix: bind to a separate DTO, then apply only allowed fields via Updates
+		// Bind to a separate DTO, then validate and update the complete candidate state atomically.
 		var dto struct {
 			Name           *string `json:"name"`
 			Type           *string `json:"type"`
@@ -347,65 +362,70 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
 		}
-		updates := map[string]interface{}{}
-		if dto.Name != nil {
-			updates["name"] = *dto.Name
-		}
 		if dto.Type != nil {
-			updates["type"] = *dto.Type
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
+			return
 		}
-		if dto.Enabled != nil {
-			updates["enabled"] = *dto.Enabled
-		}
-		if dto.IntervalMs != nil {
-			updates["interval_ms"] = *dto.IntervalMs
-		}
-		if dto.HardwareID != nil {
-			updates["hardware_id"] = *dto.HardwareID
-		}
-		if dto.DeviceConfigID != nil {
-			updates["device_config_id"] = *dto.DeviceConfigID
-			// P2-7: Sync Type from DeviceConfig when DeviceConfigID changes
-			var dc models.DeviceConfig
-			if err := db.First(&dc, *dto.DeviceConfigID).Error; err == nil && dc.DeviceType != "" {
-				updates["type"] = dc.DeviceType
+		var d models.EdgeDevice
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&d, id).Error; err != nil {
+				return err
 			}
-		}
-		if dto.ChannelID != nil {
-			targetNodeID := d.NodeID
+			targetNodeID, targetChannelID, configID := d.NodeID, d.ChannelID, d.DeviceConfigID
 			if dto.NodeID != nil {
 				targetNodeID = *dto.NodeID
 			}
-			var bindingChannel models.Channel
-			if err := db.Where("id = ? AND node_id = ?", *dto.ChannelID, targetNodeID).First(&bindingChannel).Error; err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "channel does not belong to node"})
-				return
-			}
-			if err := validateTransportChannel(&bindingChannel); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-				return
-			}
-			updates["channel_id"] = *dto.ChannelID
-		}
-		if dto.NodeID != nil {
-			targetChannelID := d.ChannelID
 			if dto.ChannelID != nil {
 				targetChannelID = *dto.ChannelID
 			}
-			if _, err := loadTransportChannel(db, targetChannelID, *dto.NodeID); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
-				return
+			if dto.DeviceConfigID != nil {
+				configID = *dto.DeviceConfigID
 			}
-			updates["node_id"] = *dto.NodeID
+			var targetChannel models.Channel
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", targetChannelID, targetNodeID).First(&targetChannel).Error; err != nil {
+				return fmt.Errorf("channel does not belong to node")
+			}
+			if err := validateTransportChannel(&targetChannel); err != nil {
+				return err
+			}
+			config, err := validateDeviceConfigForChannel(tx, configID, &targetChannel)
+			if err != nil {
+				return err
+			}
+			updates := map[string]interface{}{"device_config_id": config.ID, "type": config.DeviceType}
+			if dto.Name != nil {
+				updates["name"] = *dto.Name
+			}
+			if dto.Enabled != nil {
+				updates["enabled"] = *dto.Enabled
+			}
+			if dto.IntervalMs != nil {
+				updates["interval_ms"] = *dto.IntervalMs
+			}
+			if dto.HardwareID != nil {
+				updates["hardware_id"] = *dto.HardwareID
+			}
+			if dto.NodeID != nil {
+				updates["node_id"] = targetNodeID
+			}
+			if dto.ChannelID != nil {
+				updates["channel_id"] = targetChannelID
+			}
+			if dto.Status != nil {
+				updates["status"] = *dto.Status
+			}
+			if err := tx.Model(&d).Updates(updates).Error; err != nil {
+				return err
+			}
+			return tx.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, d.ID).Error
+		}); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			}
+			return
 		}
-		if dto.Status != nil {
-			updates["status"] = *dto.Status
-		}
-		if len(updates) > 0 {
-			db.Model(&d).Updates(updates)
-		}
-		// Reload to get updated fields (P1 fix: Preload associations so PUT response includes Channel/Node/DeviceConfig)
-		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, id)
 		// EmitConfigChange: find the node via channel
 		var ch models.Channel
 		if db.First(&ch, d.ChannelID).Error == nil {
@@ -452,8 +472,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 
-		// Trigger async initialization
-		go orchestrator.InitDevice(deviceID, uint32(dev.ChannelID), dev.Type)
+		// Reserve and trigger through the orchestrator's single entry point. This
+		// closes the API path's race with automatic online initialization.
+		if !orchestrator.InitIfNeeded(dev, deviceID) {
+			c.JSON(http.StatusConflict, gin.H{"code": 409, "message": "device initialization already active or completed"})
+			return
+		}
 
 		// Update init state on the device record
 		db.Model(&dev).Updates(map[string]interface{}{

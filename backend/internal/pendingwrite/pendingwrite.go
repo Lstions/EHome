@@ -199,6 +199,13 @@ func (m *Manager) HandleResponse(requestID uint32, success bool, errorCode uint3
 // indicating it is an ack/response to a prior WriteCommand with read_size > 0.
 // The raw_data in the DataReport is the read-back data.
 func (m *Manager) HandleDataReportAck(requestID uint32, rawData []byte) {
+	m.HandleDataReportResult(requestID, rawData, 0)
+}
+
+// HandleDataReportResult resolves a read response, including firmware RX
+// timeout/error reports. Errors must be delivered immediately instead of
+// allowing the caller's timer to mask the device's actual failure.
+func (m *Manager) HandleDataReportResult(requestID uint32, rawData []byte, errorCode uint64) {
 	m.mu.Lock()
 	entry, ok := m.pending[requestID]
 	m.mu.Unlock()
@@ -215,6 +222,11 @@ func (m *Manager) HandleDataReportAck(requestID uint32, rawData []byte) {
 		metrics.PendingWriteDuration.Observe(time.Since(entry.SentAt).Seconds())
 	}
 
+	if errorCode != 0 {
+		entry.resolve(&Response{Success: false, ErrorCode: uint32(errorCode), ErrorMsg: fmt.Sprintf("device data report error: code=%d", errorCode)})
+		m.removePersistedEntry(requestID)
+		return
+	}
 	// DataReport ack implies success (device responded with data)
 	entry.resolve(&Response{
 		Success:   true,
