@@ -1,6 +1,7 @@
 package databus
 
 import (
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -158,10 +159,50 @@ func newConsumerTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{}, &models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{}); err != nil {
+	if err := db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{}, &models.ConfigTemplate{}, &models.UnifiedData{}, &models.DeviceData{}, &models.CalibrationCache{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+func TestSensorParserConsumerUsesPersistedBMP280CalibrationAfterRestart(t *testing.T) {
+	db := newConsumerTestDB(t)
+	node := models.Node{NodeID: "node-bmp280-restart"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareID: "I2C0"}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	device := models.EdgeDevice{Name: "bmp280", NodeID: node.NodeID, ChannelID: channel.ID, Type: "bmp280", Status: "active"}
+	if err := db.Create(&device).Error; err != nil {
+		t.Fatal(err)
+	}
+	calibration := []byte{0x70, 0x6b, 0x43, 0x67, 0x18, 0xfc, 0x7d, 0x8e, 0x43, 0xd6, 0xd0, 0x0b, 0x27, 0x0b, 0x8c, 0x00, 0xf9, 0xff, 0x8c, 0x3c, 0xf8, 0xc6, 0x70, 0x17}
+	if err := db.Create(&models.CalibrationCache{
+		NodeID: node.NodeID, EdgeDeviceID: device.ID, DeviceType: device.Type,
+		Data: hex.EncodeToString(calibration),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	drivers.Register(&drivers.BMP280Driver{})
+
+	// A fresh consumer has no initialization-process memory. Successful parsing
+	// therefore proves calibration survives and is reloaded from persistence.
+	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer.Handle(DataEvent{
+		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1,
+		RawData: []byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00},
+	})
+
+	var rows []models.UnifiedData
+	if err := db.Where("device_id = ?", device.ID).Order("sensor_name").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("persisted calibration produced %d sensor rows, want 2", len(rows))
+	}
 }
 
 func (c *blockingDataConsumer) Name() string                    { return c.name }

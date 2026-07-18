@@ -115,8 +115,8 @@ func (o *Orchestrator) sendAndWait(nodeID string, edgeDeviceID uint, stepName st
 	if readSize > 0 {
 		enc.EncodeVarint(4, uint64(readSize))
 	}
-	// Field 5 is optional for old firmware compatibility: absent decodes as 0.
-	// New firmware echoes it in DataReport to correlate init reads per device.
+	// Field 5 is required by the development protocol and echoed in DataReport
+	// to correlate initialization reads to the concrete edge device.
 	enc.EncodeVarint(5, uint64(edgeDeviceID))
 	if err := o.mqtt.Publish(mqtt.TopicForNode(nodeID), enc.Bytes()); err != nil {
 		return nil, fmt.Errorf("send failed: %w", err)
@@ -218,18 +218,6 @@ func (o *Orchestrator) runReserved(device models.EdgeDevice, nodeID string, stat
 	return firstErr
 }
 
-// InitDevice is a compatibility entry point. New callers must pass the actual EdgeDevice.
-func (o *Orchestrator) InitDevice(nodeID string, channelID uint32, deviceType string) error {
-	if o.db == nil {
-		return fmt.Errorf("database required to resolve edge device")
-	}
-	var device models.EdgeDevice
-	if err := o.db.Where("node_id = ? AND channel_id = ? AND type = ?", nodeID, channelID, deviceType).First(&device).Error; err != nil {
-		return fmt.Errorf("resolve edge device: %w", err)
-	}
-	return o.InitEdgeDevice(device, nodeID)
-}
-
 func (o *Orchestrator) HandleDataReportAck(nodeID string, edgeDeviceID uint, requestID uint32, errorCode uint64, raw []byte) {
 	if nodeID == "" || edgeDeviceID == 0 || requestID == 0 {
 		return
@@ -260,14 +248,17 @@ func (o *Orchestrator) saveCalibData(device models.EdgeDevice, data []byte) erro
 		return fmt.Errorf("invalid calibration length %d", len(data))
 	}
 	allZero := true
+	allFF := true
 	for _, b := range data {
 		if b != 0 {
 			allZero = false
-			break
+		}
+		if b != 0xff {
+			allFF = false
 		}
 	}
-	if allZero {
-		return fmt.Errorf("invalid all-zero calibration")
+	if allZero || allFF {
+		return fmt.Errorf("invalid uniform calibration")
 	}
 	value := models.CalibrationCache{NodeID: device.NodeID, EdgeDeviceID: device.ID, DeviceType: device.Type, Data: fmt.Sprintf("%x", data)}
 	if err := o.db.Where("edge_device_id = ? AND device_type = ?", device.ID, device.Type).

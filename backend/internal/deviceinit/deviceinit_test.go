@@ -85,6 +85,13 @@ func TestCalibrationLengthContentAndDBFailuresAreErrors(t *testing.T) {
 	if err := o.saveCalibData(device, make([]byte, 24)); err == nil {
 		t.Fatal("all-zero calibration must fail content validation")
 	}
+	allFF := make([]byte, 24)
+	for i := range allFF {
+		allFF[i] = 0xff
+	}
+	if err := o.saveCalibData(device, allFF); err == nil {
+		t.Fatal("all-ff calibration must fail content validation")
+	}
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatal(err)
