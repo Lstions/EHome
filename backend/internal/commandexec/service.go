@@ -131,7 +131,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		// execution even when the node has since gone offline or its capability
 		// report has become stale; it must never emit a second physical command.
 		def, ok := s.actions.Get(edge.Type, in.ActionID)
-		if !ok || !def.Enabled {
+		if !ok {
 			return ErrActionUnavailable
 		}
 		params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
@@ -155,6 +155,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		}
 
 		if !s.dispatchEnabled {
+			return ErrActionUnavailable
+		}
+		if !def.Enabled {
 			return ErrActionUnavailable
 		}
 		if !edge.Enabled || edge.Status == "inactive" || edge.NodeID == "" || edge.Node.Status != "online" {

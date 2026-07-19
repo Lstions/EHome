@@ -98,6 +98,25 @@ func TestCreateReplaysExistingCommandWhenCapabilitiesBecomeStale(t *testing.T) {
 	}
 }
 
+func TestCreateReplaysExistingCommandWhenRolloutIsDisabled(t *testing.T) {
+	s, edge := setupService(t)
+	first, replayed, err := s.Create(context.Background(), createInput(edge.ID, "request-disabled-replay-0001"))
+	if err != nil || replayed {
+		t.Fatalf("first create err=%v replayed=%v", err, replayed)
+	}
+	if err := s.actions.SetEnabled(edge.Type, "read_rainfall", false); err != nil {
+		t.Fatal(err)
+	}
+
+	second, replayed, err := s.Create(context.Background(), createInput(edge.ID, "request-disabled-replay-0001"))
+	if err != nil || !replayed || second.CommandID != first.CommandID {
+		t.Fatalf("disabled replay err=%v replayed=%v first=%s second=%s", err, replayed, first.CommandID, second.CommandID)
+	}
+	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "request-disabled-new-key-0001")); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("new disabled action error=%v", err)
+	}
+}
+
 func TestCreateRejectsCollisionAndParams(t *testing.T) {
 	s, edge := setupService(t)
 	in := createInput(edge.ID, "request-0002")
