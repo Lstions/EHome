@@ -1,5 +1,7 @@
 # EHomeSystem Production Dockerfile
-# Build stage: Backend (Go)
+# Multi-stage build: backend (Go) + frontend (Vite) → single Alpine image.
+
+# ── Stage 1: Backend build ──────────────────────────────────────────────
 FROM golang:1.25-alpine AS backend-builder
 
 ENV GOPROXY=https://goproxy.cn,direct
@@ -9,18 +11,26 @@ RUN go mod download
 COPY backend/ .
 RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
 
-# Frontend build — must be built before running docker build:
-# cd frontend-shared && pnpm build
+# ── Stage 2: Frontend build ─────────────────────────────────────────────
+FROM node:22-alpine AS frontend-builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+WORKDIR /app
+COPY frontend-shared/package.json frontend-shared/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --ignore-scripts
+COPY frontend-shared/ .
+ENV CI=true
+RUN pnpm build
+
+# ── Stage 3: Runtime ────────────────────────────────────────────────────
 FROM alpine:3.21
 
 RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 COPY --from=backend-builder /app/ehome-server .
-
-COPY frontend-shared/dist ./static/dist
+COPY --from=frontend-builder /app/dist ./static/dist
 RUN mkdir -p /app/firmwares
-RUN ls -la /app/static/dist/
 
 EXPOSE 8080
 
