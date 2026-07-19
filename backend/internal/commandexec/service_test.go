@@ -74,6 +74,30 @@ func TestCreateIsTransactionalAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestCreateReplaysExistingCommandWhenCapabilitiesBecomeStale(t *testing.T) {
+	s, edge := setupService(t)
+	first, replayed, err := s.Create(context.Background(), createInput(edge.ID, "request-stale-replay-0001"))
+	if err != nil || replayed {
+		t.Fatalf("first create err=%v replayed=%v", err, replayed)
+	}
+
+	now := time.Now().UTC()
+	stale := now.Add(-maxCapabilityAge - time.Second)
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("resource_reported_at", stale).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+
+	second, replayed, err := s.Create(context.Background(), createInput(edge.ID, "request-stale-replay-0001"))
+	if err != nil || !replayed || second.CommandID != first.CommandID {
+		t.Fatalf("stale replay err=%v replayed=%v first=%s second=%s", err, replayed, first.CommandID, second.CommandID)
+	}
+	var count int64
+	if err := s.db.Model(&models.CommandOutbox{}).Where("command_id = ?", first.CommandID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("outbox count=%d err=%v", count, err)
+	}
+}
+
 func TestCreateRejectsCollisionAndParams(t *testing.T) {
 	s, edge := setupService(t)
 	in := createInput(edge.ID, "request-0002")

@@ -122,12 +122,40 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 	var result models.CommandExecution
 	replayed := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if !s.dispatchEnabled {
-			return ErrActionUnavailable
-		}
 		var edge models.EdgeDevice
 		if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
 			return err
+		}
+		// Resolve the action and canonical request before checking mutable runtime
+		// gates.  A retry with an existing idempotency key must return the durable
+		// execution even when the node has since gone offline or its capability
+		// report has become stale; it must never emit a second physical command.
+		def, ok := s.actions.Get(edge.Type, in.ActionID)
+		if !ok || !def.Enabled {
+			return ErrActionUnavailable
+		}
+		params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
+		}
+		digest := sha256.Sum256(params)
+		hash := hex.EncodeToString(digest[:])
+		scope := fmt.Sprintf("user:%d:edge:%d:action:%s:v:%d", in.ActorUserID, edge.ID, def.ID, def.Version)
+		var existing models.CommandExecution
+		err = tx.Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
+		if err == nil {
+			if existing.RequestHash != hash {
+				return ErrIdempotencyCollision
+			}
+			result, replayed = existing, true
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		if !s.dispatchEnabled {
+			return ErrActionUnavailable
 		}
 		if !edge.Enabled || edge.Status == "inactive" || edge.NodeID == "" || edge.Node.Status != "online" {
 			return ErrActionUnavailable
@@ -145,32 +173,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		if err != nil {
 			return ErrActionUnavailable
 		}
-		def, ok := s.actions.Get(edge.Type, in.ActionID)
-		if !ok || !def.Enabled {
-			return ErrActionUnavailable
-		}
-		params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
-		}
 		step, err := def.Compile(params)
 		if err != nil || !stepFitsCapabilities(step, capabilities) {
 			return ErrActionUnavailable
-		}
-		digest := sha256.Sum256(params)
-		hash := hex.EncodeToString(digest[:])
-		scope := fmt.Sprintf("user:%d:edge:%d:action:%s:v:%d", in.ActorUserID, edge.ID, def.ID, def.Version)
-		var existing models.CommandExecution
-		err = tx.Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
-		if err == nil {
-			if existing.RequestHash != hash {
-				return ErrIdempotencyCollision
-			}
-			result, replayed = existing, true
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
 		}
 		if confirmationRequired(def.Risk) {
 			if strings.TrimSpace(in.Reason) == "" || len(in.Reason) > 512 {

@@ -17,7 +17,8 @@ Profiles:
 
 Set BUILD_ROOT to place build directories elsewhere.
 Set EXTRA_SDKCONFIG_DEFAULTS to append a semicolon-separated sdkconfig defaults file
-(for example, an isolated development MQTT broker override).
+(for example, an isolated development MQTT broker override). Supplying it regenerates
+the selected profile's derived sdkconfig so the override takes effect.
 EOF
 }
 
