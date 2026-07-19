@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -84,7 +85,8 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if definition.ExecutionShape != "single" {
 		return DispatchResult{}, fmt.Errorf("bounded action plan transport is not advertised by this node")
 	}
-	if definition.Semantics != "read" || definition.Risk != "low" {
+	devHighRisk := os.Getenv("EHOME_ENV") == "development" && os.Getenv("EHOME_ENABLE_HIGH_RISK_ACTIONS") == "true" && definition.Verification != "none"
+	if (definition.Semantics != "read" || definition.Risk != "low") && !devHighRisk {
 		return DispatchResult{}, fmt.Errorf("action requires the future high-risk command engine")
 	}
 	bootID, capabilities, err := currentCapabilities(edge.Node, t.now)

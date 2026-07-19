@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"ehome/backend/pkg/parser"
 )
@@ -299,7 +300,7 @@ func (d *PRS3001Driver) ControlActions() []ControlAction {
 	}, {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
 		Description: "清零后必须读取累计值为零并完成对账；普锐森协议清零帧尚未导入",
-		Semantics: "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+		Semantics:   "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
 		AtMostOnce: true, MaxSteps: 3, AvailabilityCode: "protocol_unverified",
 		AvailabilityReason: "普锐森清零寄存器/CRC 及写入→读回→恢复证据尚未冻结",
 	}}
@@ -320,7 +321,10 @@ func (d *SN3001RainDriver) OEM() string             { return "威盟士" }
 func (d *SN3001RainDriver) Category() string        { return "雨量传感器" }
 func (d *SN3001RainDriver) HardwareTypes() []string { return []string{"uart"} }
 func (d *SN3001RainDriver) GetSensorDefinitions() []SensorData {
-	return []SensorData{{Name: "rainfall", Unit: "mm"}}
+	return []SensorData{
+		{Name: "rainfall", Unit: "mm"}, {Name: "rain_sensitivity", Unit: "raw"},
+		{Name: "device_address", Unit: "address"}, {Name: "baud_rate", Unit: "bit/s"},
+	}
 }
 func (d *SN3001RainDriver) ParseData(raw []byte) ([]SensorData, error) {
 	if len(raw) < 5 {
@@ -357,16 +361,191 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 	return []ControlAction{{
 		ID: "read_rainfall", Version: 1, Name: "读取累计雨量",
 		Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
-		Semantics:   "read", Risk: "low", Enabled: false,
+		Semantics:   "read", Risk: "low", Enabled: true,
 		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0a},
 		ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 	}, {
+		ID: "read_rain_sensitivity", Version: 1, Name: "读取雨量灵敏度",
+		Description: "SN-3001 寄存器 0x0052",
+		Semantics:   "read", Risk: "low", Enabled: true,
+		TXData: modbusReadFrame(0x01, 0x0052, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+	}, {
+		ID: "read_device_address", Version: 1, Name: "读取设备地址",
+		Description: "SN-3001 寄存器 0x07D0",
+		Semantics:   "read", Risk: "low", Enabled: true,
+		TXData: modbusReadFrame(0xff, 0x07d0, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+	}, {
+		ID: "read_baud_rate", Version: 1, Name: "读取设备波特率",
+		Description: "SN-3001 寄存器 0x07D1",
+		Semantics:   "read", Risk: "low", Enabled: true,
+		TXData: modbusReadFrame(0xff, 0x07d1, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+	}, {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
-		Description: "SN-3001 先读取当前值，再发送 06 清零帧，最后读回 0 值完成对账",
-		Semantics: "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-		AtMostOnce: true, MaxSteps: 3, AvailabilityCode: "protocol_unverified",
-		AvailabilityReason: "协议帧已确认，但缺少真实写入 ACK、读回为零和断电/恢复证据",
+		Description: "SN-3001 清零寄存器 0x0000=0x005A；执行后必须重新读取确认",
+		Semantics:   "reset", Risk: "high", Enabled: false, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 3,
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回；生产仍需节点端 bounded plan 与 durable at-most-once",
+	}, {
+		ID: "clear_rainfall_write", Version: 1, Name: "发送雨量清零",
+		Description: "开发验证用单步清零写入；收到回显后必须立即执行读取确认",
+		Semantics:   "reset", Risk: "high", Enabled: false, Verification: "ack", AtMostOnce: true,
+		TXData: modbusWriteFrame(0x01, 0x0000, 0x005a), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "仅允许开发实机证据；生产必须使用 bounded 清零工作流",
+	}, {
+		ID: "set_rain_sensitivity", Version: 1, Name: "设置雨量灵敏度", Description: "写入寄存器 0x0052，默认值 60，修改后需重新读取确认",
+		Semantics: "set", Risk: "high", Enabled: false, Verification: "readback", AtMostOnce: true,
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回；生产仍需 durable at-most-once",
+		Parameters: []ControlParameter{{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)}},
+	}, {
+		ID: "set_device_address", Version: 1, Name: "设置设备地址", Description: "写入寄存器 0x07D0，范围 1~254",
+		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 1→2→1 开发实机恢复；生产仍需原子链路恢复工作流",
+		Parameters: []ControlParameter{
+			{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(1), Maximum: floatPtr(254)},
+			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},
+		},
+	}, {
+		ID: "set_baud_rate", Version: 1, Name: "设置设备波特率", Description: "写入寄存器 0x07D1；2400/4800/9600",
+		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已验证当前 4800 写入/读回；9600 切换需先完成 UART 原子重配",
+		Parameters: []ControlParameter{
+			{Name: "value", Type: "string", Required: true, Enum: []string{"2400", "4800", "9600"}},
+			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},
+		},
 	}}
+}
+
+func floatPtr(value float64) *float64 { return &value }
+
+func modbusReadFrame(address byte, register uint16, count uint16) []byte {
+	frame := []byte{address, 0x03, byte(register >> 8), byte(register), byte(count >> 8), byte(count), 0, 0}
+	crc := parser.ModbusCRC16(frame[:6])
+	frame[6], frame[7] = byte(crc), byte(crc>>8)
+	return frame
+}
+
+func modbusWriteFrame(address byte, register, value uint16) []byte {
+	frame := []byte{address, 0x06, byte(register >> 8), byte(register), byte(value >> 8), byte(value), 0, 0}
+	crc := parser.ModbusCRC16(frame[:6])
+	frame[6], frame[7] = byte(crc), byte(crc>>8)
+	return frame
+}
+
+func (d *SN3001RainDriver) CompileControlAction(actionID string, params json.RawMessage) (CompiledControlStep, error) {
+	var raw struct {
+		Value         json.RawMessage `json:"value"`
+		SourceAddress json.RawMessage `json:"source_address"`
+	}
+	if err := json.Unmarshal(params, &raw); err != nil {
+		return CompiledControlStep{}, fmt.Errorf("decode %s params: %w", actionID, err)
+	}
+	registers := map[string]uint16{"set_rain_sensitivity": 0x0052, "set_device_address": 0x07d0, "set_baud_rate": 0x07d1}
+	register, ok := registers[actionID]
+	if !ok {
+		return CompiledControlStep{}, fmt.Errorf("action %q is not parameterized", actionID)
+	}
+	var value uint64
+	if actionID == "set_baud_rate" {
+		var baud string
+		if err := json.Unmarshal(raw.Value, &baud); err != nil {
+			return CompiledControlStep{}, fmt.Errorf("baud value must be string: %w", err)
+		}
+		switch baud {
+		case "2400":
+			value = 0
+		case "4800":
+			value = 1
+		case "9600":
+			value = 2
+		default:
+			return CompiledControlStep{}, fmt.Errorf("unsupported baud rate %q", baud)
+		}
+	} else {
+		var number json.Number
+		if err := json.Unmarshal(raw.Value, &number); err != nil {
+			return CompiledControlStep{}, fmt.Errorf("value must be integer: %w", err)
+		}
+		parsed, err := strconv.ParseUint(string(number), 10, 16)
+		if err != nil {
+			return CompiledControlStep{}, fmt.Errorf("invalid value: %w", err)
+		}
+		value = parsed
+	}
+	address := uint64(1)
+	if len(raw.SourceAddress) != 0 {
+		var number json.Number
+		if err := json.Unmarshal(raw.SourceAddress, &number); err != nil {
+			return CompiledControlStep{}, fmt.Errorf("source_address must be integer: %w", err)
+		}
+		parsed, err := strconv.ParseUint(string(number), 10, 8)
+		if err != nil || parsed < 1 || parsed > 254 {
+			return CompiledControlStep{}, fmt.Errorf("source_address must be between 1 and 254")
+		}
+		address = parsed
+	}
+	return CompiledControlStep{TXData: modbusWriteFrame(byte(address), register, uint16(value)), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100}, nil
+}
+
+func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	if len(raw) < 5 {
+		return nil, fmt.Errorf("sn3001_rain: response too short")
+	}
+	if got, want := binary.LittleEndian.Uint16(raw[len(raw)-2:]), parser.ModbusCRC16(raw[:len(raw)-2]); got != want {
+		return nil, fmt.Errorf("sn3001_rain: response CRC %04x, want %04x", got, want)
+	}
+	if actionID == "reset_rainfall" || actionID == "clear_rainfall_write" || actionID == "set_rain_sensitivity" || actionID == "set_device_address" || actionID == "set_baud_rate" {
+		step, err := CompiledControlStep{}, error(nil)
+		if actionID == "reset_rainfall" || actionID == "clear_rainfall_write" {
+			step = CompiledControlStep{TXData: modbusWriteFrame(0x01, 0x0000, 0x005a)}
+		} else {
+			step, err = d.CompileControlAction(actionID, params)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if string(raw) != string(step.TXData) {
+			return nil, fmt.Errorf("sn3001_rain: write response does not echo request")
+		}
+		return []SensorData{{Name: "write_ack", Value: 1, Unit: "ack"}}, nil
+	}
+	if raw[1] != 0x03 {
+		return nil, fmt.Errorf("sn3001_rain: unexpected function 0x%02x", raw[1])
+	}
+	if int(raw[2])+5 != len(raw) {
+		return nil, fmt.Errorf("sn3001_rain: invalid response length")
+	}
+	data := raw[3 : 3+int(raw[2])]
+	switch actionID {
+	case "read_rainfall":
+		if len(data) != 2 {
+			return nil, fmt.Errorf("rainfall response data length")
+		}
+		return []SensorData{{Name: "rainfall", Value: float64(binary.BigEndian.Uint16(data)) / 10, Unit: "mm"}}, nil
+	case "read_rain_sensitivity", "read_device_address", "read_baud_rate":
+		if len(data) != 2 {
+			return nil, fmt.Errorf("configuration response data length")
+		}
+		value := float64(binary.BigEndian.Uint16(data))
+		name, unit := "", "raw"
+		switch actionID {
+		case "read_rain_sensitivity":
+			name = "rain_sensitivity"
+		case "read_device_address":
+			name, unit = "device_address", "address"
+		case "read_baud_rate":
+			name, unit = "baud_rate", "bit/s"
+			switch uint16(value) {
+			case 0:
+				value = 2400
+			case 1:
+				value = 4800
+			case 2:
+				value = 9600
+			}
+		}
+		return []SensorData{{Name: name, Value: value, Unit: unit}}, nil
+	default:
+		return nil, fmt.Errorf("unknown SN-3001 action %q", actionID)
+	}
 }
 
 // CompileControlActionPlan compiles the confirmed SN-3001 clear workflow.

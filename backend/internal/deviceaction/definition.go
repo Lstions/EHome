@@ -6,6 +6,7 @@ package deviceaction
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 
 	"ehome/backend/internal/drivers"
@@ -37,8 +38,8 @@ type PlanStep struct {
 }
 
 type BoundedPlan struct {
-	Steps         []PlanStep
-	AtMostOnce    bool
+	Steps           []PlanStep
+	AtMostOnce      bool
 	RequiresFinally bool
 }
 
@@ -48,27 +49,27 @@ type Compiler func(json.RawMessage) (SingleStep, error)
 type Verifier func(json.RawMessage, []byte) ([]drivers.SensorData, error)
 
 type Definition struct {
-	ID          string          `json:"id"`
-	Version     int             `json:"version"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	DeviceType  string          `json:"device_type"`
-	Semantics   string          `json:"semantics"`
-	Risk        string          `json:"risk"`
-	ExecutionShape string       `json:"execution_shape"`
-	Verification   string       `json:"verification"`
-	AtMostOnce     bool         `json:"at_most_once"`
-	MaxSteps       uint8        `json:"max_steps"`
-	Enabled     bool            `json:"enabled"`
-	Transport   string          `json:"transport"`
-	InputSchema ParameterSchema `json:"input_schema"`
-	AvailabilityCode   string   `json:"availability_code,omitempty"`
-	AvailabilityReason string   `json:"availability_reason,omitempty"`
-	SingleStep  SingleStep      `json:"-"`
-	Plan        BoundedPlan     `json:"-"`
-	compiler    Compiler
-	planCompiler PlanCompiler
-	verifier    Verifier
+	ID                 string          `json:"id"`
+	Version            int             `json:"version"`
+	Name               string          `json:"name"`
+	Description        string          `json:"description"`
+	DeviceType         string          `json:"device_type"`
+	Semantics          string          `json:"semantics"`
+	Risk               string          `json:"risk"`
+	ExecutionShape     string          `json:"execution_shape"`
+	Verification       string          `json:"verification"`
+	AtMostOnce         bool            `json:"at_most_once"`
+	MaxSteps           uint8           `json:"max_steps"`
+	Enabled            bool            `json:"enabled"`
+	Transport          string          `json:"transport"`
+	InputSchema        ParameterSchema `json:"input_schema"`
+	AvailabilityCode   string          `json:"availability_code,omitempty"`
+	AvailabilityReason string          `json:"availability_reason,omitempty"`
+	SingleStep         SingleStep      `json:"-"`
+	Plan               BoundedPlan     `json:"-"`
+	compiler           Compiler
+	planCompiler       PlanCompiler
+	verifier           Verifier
 }
 
 type Registry struct {
@@ -277,6 +278,14 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 		return fmt.Errorf("action %s for %s requires the future high-risk command engine", actionID, deviceType)
 	}
 	def.Enabled = enabled
+	if enabled {
+		// A rollout selector is the explicit composition-root evidence gate. It
+		// may clear a Driver's advisory availability reason only in the
+		// development high-risk override; production still requires the normal
+		// engine capability gate below.
+		def.AvailabilityCode = ""
+		def.AvailabilityReason = ""
+	}
 	r.byType[deviceType][actionID] = def
 	return nil
 }
@@ -286,7 +295,10 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 // medium/high/critical actions until risk encoding, durable at-most-once and
 // bounded verification semantics land together.
 func currentEngineAllows(def Definition) bool {
-	return def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce
+	if def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce {
+		return true
+	}
+	return os.Getenv("EHOME_ENV") == "development" && os.Getenv("EHOME_ENABLE_HIGH_RISK_ACTIONS") == "true" && def.ExecutionShape == "single" && def.Verification != "none"
 }
 
 func (r *Registry) List(deviceType string) []Definition {

@@ -3,6 +3,7 @@ package drivers
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -451,6 +452,35 @@ func TestSN3001RainResetPlanGoldenVector(t *testing.T) {
 	}
 	if plan.Steps[1].ReadSize != 8 || plan.Steps[2].Kind != "readback" {
 		t.Fatalf("clear/readback steps = %+v", plan.Steps)
+	}
+}
+
+func TestSN3001ProtocolActionGoldenVectors(t *testing.T) {
+	d := &SN3001RainDriver{}
+	actions := d.ControlActions()
+	if len(actions) != 9 {
+		t.Fatalf("got %d SN-3001 actions, want 9", len(actions))
+	}
+	step, err := d.CompileControlAction("set_rain_sensitivity", json.RawMessage(`{"value":60}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "01 06 00 52 00 3C 28 0A"; got != want {
+		t.Fatalf("sensitivity frame %s, want %s", got, want)
+	}
+	step, err = d.CompileControlAction("set_baud_rate", json.RawMessage(`{"value":"9600"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "01 06 07 D1 00 02 59 46"; got != want {
+		t.Fatalf("baud frame %s, want %s", got, want)
+	}
+	step, err = d.CompileControlAction("set_device_address", json.RawMessage(`{"value":1,"source_address":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "02 06 07 D0 00 01 48 B4"; got != want {
+		t.Fatalf("address restore frame %s, want %s", got, want)
 	}
 }
 

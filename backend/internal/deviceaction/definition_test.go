@@ -140,7 +140,7 @@ func TestBuiltInRainResetPlanCompilerIsRegistered(t *testing.T) {
 	if !ok {
 		t.Fatal("SN-3001 reset action is missing")
 	}
-	if definition.AvailabilityCode != "protocol_unverified" || definition.MaxSteps != 3 {
+	if definition.AvailabilityCode != "hardware_evidence_required" || definition.MaxSteps != 3 {
 		t.Fatalf("unexpected reset gate: %+v", definition)
 	}
 }
