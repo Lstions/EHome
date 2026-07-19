@@ -71,6 +71,9 @@ services:
       EHOME_MQTT_CLIENT_ID: ehome-server
       EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required in production}
       EHOME_JWT_SECRET: ${EHOME_JWT_SECRET:?err — EHOME_JWT_SECRET is required in production}
+      # CORS origin allowlist (comma-separated). Empty = same-origin only (no CORS middleware).
+      # Only needed when the frontend is served from a different origin than the backend.
+      EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
       EHOME_STATIC_DIR: /app/static/dist
     volumes:
       - ./backend/firmwares:/app/firmwares

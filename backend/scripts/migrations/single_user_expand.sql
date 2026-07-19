@@ -1,5 +1,25 @@
+-- ============================================================================
 -- Single-user authentication expand migration (compatibility phase A)
 -- PostgreSQL only. Safe to re-run. This migration never chooses a keep user.
+--
+-- IMPORTANT: This SQL only extends the schema and sets auth_states to
+-- 'migration_required'. After running this migration, you MUST complete the
+-- second step to migrate existing users:
+--
+--   Step 1: Inspect current users
+--     ehomectl auth migration-status
+--
+--   Step 2: Migrate to single-user (replace <KEEP-USER-ID> with the ID to keep)
+--     ehomectl auth migrate-single-user <KEEP-USER-ID>
+--
+--   For NEW installations (no existing users), use the bootstrap workflow:
+--     ehomectl auth bootstrap-database
+--     ehomectl auth create-initialization-token
+--     → POST /api/v1/auth/initialize with the returned token
+--
+-- Without step 2, auth_states remains 'migration_required' and all logins are
+-- rejected — the system will appear to have no working authentication.
+-- ============================================================================
 BEGIN;
 
 SELECT pg_advisory_xact_lock(hashtext('ehome_single_user_auth_expand_v1'));

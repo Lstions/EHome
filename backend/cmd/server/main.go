@@ -200,14 +200,26 @@ func main() {
 			allowedOrigins = append(allowedOrigins, value)
 		}
 	}
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     allowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
-		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
-	}))
+	// CORS is only needed when AllowCredentials=true and the frontend runs on a
+	// different origin. When EHOME_ALLOWED_ORIGINS is unset (empty), the
+	// production deployment serves the frontend from the same origin, so CORS
+	// headers are unnecessary and an empty AllowOrigins slice would panic in
+	// gin-contrib/cors v1.7.7 when AllowCredentials=true.
+	if len(allowedOrigins) > 0 {
+		for _, origin := range allowedOrigins {
+			if strings.TrimSpace(origin) == "*" {
+				logger.Fatalf("EHOME_ALLOWED_ORIGINS must not contain '*' when AllowCredentials=true; use explicit origins")
+			}
+		}
+		r.Use(cors.New(cors.Config{
+			AllowOrigins:     allowedOrigins,
+			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "X-Requested-With"},
+			ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+			AllowCredentials: true,
+			MaxAge:           12 * time.Hour,
+		}))
+	}
 	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry)
 
 	staticDir := os.Getenv("EHOME_STATIC_DIR")
