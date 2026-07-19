@@ -58,12 +58,18 @@ apiClient.interceptors.response.use(
     return response.data
   },
   (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      // Token过期，清除并跳转登录
+    const requestURL = error.config?.url || ''
+    const isLoginAttempt = requestURL.endsWith('/api/v1/auth/login')
+    const hasStoredSession = !!(localStorage.getItem('token') || sessionStorage.getItem('token'))
+    if (error.response?.status === 401 && hasStoredSession && !isLoginAttempt) {
+      // Only an authenticated request can prove that the current session is
+      // invalid. A 401 from the login endpoint is an expected credential
+      // failure; reloading /login would erase its inline error and can leave
+      // the application blank while the hard navigation is in progress.
       clearSessionCaches()
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
-      window.location.href = '/login'
+      if (window.location.pathname !== '/login') window.location.assign('/login')
     }
     const errorData = error.response?.data as ErrorEnvelope | undefined
     return Promise.reject(new ApiError(errorData?.message || error.message, error.response, errorData?.error_code))
