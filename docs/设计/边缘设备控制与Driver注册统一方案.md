@@ -23,8 +23,8 @@
 
 当前代码不是原方案假设的完全未治理状态，而是“部分基础修复已完成，业务控制闭环仍未建立”：
 
-- `RegisterBuiltInDrivers` 已转发 parser-aware 入口，测试和生产注册集合均为 6 个 Driver；Techfine `HardwareTypes` 已是 `uart`；
-- 生产启动仍创建注入 Registry 和全局 Registry 两个实例，热路径仍大量调用包级 `drivers.Get`；
+- `RegisterBuiltInDrivers` 已转发 parser-aware 入口，测试和生产注册集合均为 7 个 Driver；Techfine `HardwareTypes` 已是 `uart`；
+- 生产启动构造一个注入 Registry，tree/test-parser、nodemgr、databus 和 API 热路径均使用该实例；包级 GlobalRegistry 仅保留兼容定义，不在生产热路径使用；
 - `PendingWrite` 已有请求关联、数据库记录、QoS2 发布和 read response 等待，但持久化失败只告警，恢复不重发且无法恢复原调用者，不能替代 CommandExecution/Outbox；
 - ResourceReport 已有严格的顶层字段检查，但没有 boot ID、report timestamp、command engine revision/capabilities 的持久化事实；
 - `/execute` write、change-address、raw channel write、REST/WS terminal write 和内部 device initialization 仍使用 legacy WriteCmd；
@@ -1468,7 +1468,7 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 目标是在不开放任何新业务写动作的前提下，使现有基础可作为后续协议开发基线。
 
 1. 生产单 Registry，并完成热路径依赖注入；保留测试隔离 Registry；
-2. 更新已经完成的 6 Driver 注册事实，只处理剩余元数据；
+2. 更新已经完成的 7 Driver 注册事实，只处理剩余元数据；
 3. legacy WriteCmd 对超长 TX、非法 Channel/bus、wrong wire type、duplicate field 和 dirty EOF fail-closed；
 4. 删除非法 bus → UART0 fallback，RX timeout 由受限字段或构建能力决定；
 5. `/execute` write、change-address、raw channel write、REST/WS terminal、deviceinit、sampling、legacy factory reset 全量分类；
@@ -1827,7 +1827,7 @@ drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
 
 **改动**：`backend/internal/drivers/builtin.go:295-301`
 
-现有 6 Driver 集合测试保留；新增生产 composition root 只构造/注册一次、所有 handler/manager 使用同一 Registry 指针的断言。
+现有 7 Driver 集合测试保留；新增生产 composition root 只构造/注册一次、所有 handler/manager 使用同一 Registry 指针的断言。
 
 ### 阶段 0a-4（本阶段强制）：依赖注入重构
 

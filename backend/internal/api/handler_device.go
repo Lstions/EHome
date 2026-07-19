@@ -22,6 +22,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+var errInactiveDeviceConfigDefault = errors.New("only an active device config can be default")
+
 func isPeripheralChannelType(value string) bool {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "GPIO", "4", "PWM", "6":
@@ -278,6 +280,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				return
 			}
 		}
+		if tpl.IsDefault && tpl.Status != "active" {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": errInactiveDeviceConfigDefault.Error()})
+			return
+		}
 		if len(tpl.Config) == 0 {
 			tpl.Config = json.RawMessage([]byte("{}"))
 		}
@@ -349,6 +355,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				if update.Status != "active" && update.Status != "inactive" {
 					return fmt.Errorf("status must be active or inactive")
 				}
+			}
+			if update.IsDefault && update.Status != "active" {
+				return errInactiveDeviceConfigDefault
 			}
 			var references int64
 			if err := tx.Model(&models.EdgeDevice{}).Where("device_config_id = ?", current.ID).Count(&references).Error; err != nil {
@@ -446,6 +455,9 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&tpl, id).Error; err != nil {
 				return err
 			}
+			if tpl.Status != "active" {
+				return errInactiveDeviceConfigDefault
+			}
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Model(&models.DeviceConfig{}).
 				Where("device_type = ? AND id <> ? AND is_default = ?", tpl.DeviceType, tpl.ID, true).
 				Update("is_default", false).Error; err != nil {
@@ -456,6 +468,8 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+			} else if errors.Is(err, errInactiveDeviceConfigDefault) {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			} else {
 				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			}

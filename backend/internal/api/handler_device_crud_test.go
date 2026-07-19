@@ -536,6 +536,46 @@ func TestDeviceConfig_MarkDefault(t *testing.T) {
 	}
 }
 
+func TestDeviceConfig_DefaultMustBeActive(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.DeviceConfig{Name: "Active default", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Inactive", DeviceType: "temperature", HardwareType: "uart", Status: "inactive"})
+
+	for _, request := range []struct {
+		method string
+		path   string
+		body   map[string]interface{}
+	}{
+		{method: http.MethodPost, path: "/api/v1/device-configs", body: map[string]interface{}{
+			"name": "Inactive create", "device_type": "temperature", "hardware_type": "uart", "status": "inactive", "is_default": true,
+		}},
+		{method: http.MethodPut, path: "/api/v1/device-configs/2", body: map[string]interface{}{
+			"name": "Inactive", "status": "inactive", "is_default": true,
+		}},
+		{method: http.MethodPost, path: "/api/v1/device-configs/2/default"},
+	} {
+		payload, err := json.Marshal(request.body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(request.method, request.path, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s %s: expected 400, got %d: %s", request.method, request.path, w.Code, w.Body.String())
+		}
+		var active models.DeviceConfig
+		if err := db.First(&active, 1).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !active.IsDefault {
+			t.Fatalf("%s %s cleared the active default", request.method, request.path)
+		}
+	}
+}
+
 func TestDeviceConfig_MarkDefault_NotFound(t *testing.T) {
 	r, _ := setupDeviceTest(t)
 
