@@ -334,6 +334,26 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					return SingleStep{TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS}, err
 				}
 			}
+			var planCompiler PlanCompiler
+			if action.ExecutionShape == "bounded_sequence" {
+				driverPlanCompiler, ok := driver.(drivers.ControlActionPlanCompiler)
+				if ok {
+					actionID := action.ID
+					planCompiler = func(params json.RawMessage) (BoundedPlan, error) {
+						compiled, err := driverPlanCompiler.CompileControlActionPlan(actionID, params)
+						if err != nil {
+							return BoundedPlan{}, err
+						}
+						plan := BoundedPlan{AtMostOnce: compiled.AtMostOnce, RequiresFinally: compiled.RequiresFinally}
+						for _, step := range compiled.Steps {
+							plan.Steps = append(plan.Steps, PlanStep{ID: step.ID, Kind: step.Kind, SingleStep: SingleStep{
+								TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS,
+							}})
+						}
+						return plan, nil
+					}
+				}
+			}
 			var verifier Verifier
 			if actionVerifier, ok := driver.(drivers.ControlActionVerifier); ok {
 				actionID := action.ID
@@ -355,7 +375,7 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				AvailabilityCode: action.AvailabilityCode, AvailabilityReason: action.AvailabilityReason,
 				InputSchema: schema,
 				SingleStep: SingleStep{TXData: action.TXData, ReadSize: action.ReadSize,
-					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, compiler: compiler, verifier: verifier}); err != nil {
+					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, Plan: BoundedPlan{}, compiler: compiler, planCompiler: planCompiler, verifier: verifier}); err != nil {
 				panic(err)
 			}
 		}

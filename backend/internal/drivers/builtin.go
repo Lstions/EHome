@@ -362,11 +362,31 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 		ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 	}, {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
-		Description: "清零后必须读取累计值为零并完成对账；SN-3001 清零帧未知",
+		Description: "SN-3001 先读取当前值，再发送 06 清零帧，最后读回 0 值完成对账",
 		Semantics: "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
 		AtMostOnce: true, MaxSteps: 3, AvailabilityCode: "protocol_unverified",
-		AvailabilityReason: "没有可信的 SN-3001 清零命令、CRC 黄金向量及实机恢复证据",
+		AvailabilityReason: "协议帧已确认，但缺少真实写入 ACK、读回为零和断电/恢复证据",
 	}}
+}
+
+// CompileControlActionPlan compiles the confirmed SN-3001 clear workflow.
+// The plan is intentionally not executable by the current single-step node:
+// it must be dispatched atomically with durable at-most-once replay state.
+func (d *SN3001RainDriver) CompileControlActionPlan(actionID string, params json.RawMessage) (CompiledControlPlan, error) {
+	if actionID != "reset_rainfall" {
+		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain action %q has no bounded plan", actionID)
+	}
+	if string(params) != "{}" && len(params) != 0 {
+		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain reset does not accept parameters")
+	}
+	return CompiledControlPlan{
+		AtMostOnce: true,
+		Steps: []CompiledControlPlanStep{
+			{ID: "read_before", Kind: "read", TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A}, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			{ID: "clear_accumulated", Kind: "write", TXData: []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}, ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			{ID: "readback_zero", Kind: "readback", TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A}, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+		},
+	}, nil
 }
 
 // RegisterBuiltInDrivers registers all built-in drivers.

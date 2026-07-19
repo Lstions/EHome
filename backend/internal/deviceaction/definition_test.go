@@ -129,6 +129,20 @@ func TestBoundedPlanDefinitionIsNeverFlattenedIntoSingleStep(t *testing.T) {
 	if _, err := definition.Compile(json.RawMessage(`{}`)); err == nil {
 		t.Fatal("unavailable bounded reset must not compile as a single physical step")
 	}
+	if _, err := definition.CompilePlan(json.RawMessage(`{}`)); err == nil {
+		t.Fatal("hardware-gated bounded reset must not compile for the current node")
+	}
+}
+
+func TestBuiltInRainResetPlanCompilerIsRegistered(t *testing.T) {
+	registry := NewBuiltInRegistry(nil)
+	definition, ok := registry.Get("sn3001_rain", "reset_rainfall")
+	if !ok {
+		t.Fatal("SN-3001 reset action is missing")
+	}
+	if definition.AvailabilityCode != "protocol_unverified" || definition.MaxSteps != 3 {
+		t.Fatalf("unexpected reset gate: %+v", definition)
+	}
 }
 
 func TestBuiltInSetActionUsesTrustedVerifier(t *testing.T) {

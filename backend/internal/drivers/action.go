@@ -70,12 +70,38 @@ type CompiledControlStep struct {
 	PostTXDelayMS uint32
 }
 
+// CompiledControlPlan is the driver-owned representation of a bounded
+// physical workflow. It is intentionally made of the same bounded steps as
+// ChannelCmdV2; no arbitrary script or branching data can enter the plan.
+type CompiledControlPlan struct {
+	Steps           []CompiledControlPlanStep
+	AtMostOnce      bool
+	RequiresFinally bool
+}
+
+type CompiledControlPlanStep struct {
+	ID           string
+	Kind         string
+	TXData       []byte
+	ReadSize     uint32
+	RXTimeoutMS  uint32
+	PostTXDelayMS uint32
+}
+
 // ControlActionCompiler is intentionally separate from ControlActionProvider:
 // parsing-only drivers cannot accidentally make a parameterized action
 // executable. The server persists canonical params and invokes this compiler
 // again for a retry, so implementations must be deterministic.
 type ControlActionCompiler interface {
 	CompileControlAction(actionID string, params json.RawMessage) (CompiledControlStep, error)
+}
+
+// ControlActionPlanCompiler is optional. It is required only by actions whose
+// execution_shape is bounded_sequence, such as rain clear (read → write →
+// readback). The node must advertise a matching batch/NVS capability before
+// the plan can be dispatched.
+type ControlActionPlanCompiler interface {
+	CompileControlActionPlan(actionID string, params json.RawMessage) (CompiledControlPlan, error)
 }
 
 // ControlActionVerifier is the trusted, action-specific interpretation of a

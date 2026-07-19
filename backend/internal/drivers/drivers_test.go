@@ -436,6 +436,24 @@ func TestPRS3001Driver_Metadata(t *testing.T) {
 	}
 }
 
+func TestSN3001RainResetPlanGoldenVector(t *testing.T) {
+	d := &SN3001RainDriver{}
+	plan, err := d.CompileControlActionPlan("reset_rainfall", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if !plan.AtMostOnce || len(plan.Steps) != 3 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	wantClear := []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}
+	if got := plan.Steps[1].TXData; string(got) != string(wantClear) {
+		t.Fatalf("clear frame = % X, want % X", got, wantClear)
+	}
+	if plan.Steps[1].ReadSize != 8 || plan.Steps[2].Kind != "readback" {
+		t.Fatalf("clear/readback steps = %+v", plan.Steps)
+	}
+}
+
 // === Registry edge cases ===
 
 func TestRegistry_GetNonExistent(t *testing.T) {

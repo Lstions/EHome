@@ -1265,7 +1265,8 @@ verification: readback accumulated value
 
 代码已将 `reset_rainfall` 登记到 `prs3001` 与 `sn3001_rain` 的 Driver-owned
 Action Catalog，并固化为 `reset/high/bounded_sequence/readback/at_most_once` 元数据。
-协议未冻结时只返回 `protocol_unverified`，不生成 TX 帧，也不能被当前单步
+SN-3001-GYL-N01 的 OCR 协议已确认 `01 06 00 00 00 5A 09 F1` 清零帧，并由 Driver
+bounded plan 编译为“读当前值→写清零→读回零”；在真实写入/读回证据和节点门禁完成前仍不生成可执行投递，也不能被当前单步
 ChannelCmdV2 dispatcher 执行。统一模型支持可信 Driver 编译的固定
 `read → write → readback → finally` 工作流，最多 8 步；浏览器不能提交脚本、循环或分支。
 节点尚未具备 durable NVS replay capability，因此 bounded plan 仍保持 unavailable。
