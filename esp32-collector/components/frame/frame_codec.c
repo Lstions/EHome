@@ -171,7 +171,9 @@ frame_err_t frame_decoder_next(frame_decoder_t *dec, frame_field_t *field)
     frame_err_t err = decoder_read_varint(dec, &tag);
     if (err != FRAME_OK) return err;
 
-    field->field_num = (uint8_t)(tag >> 3);
+    uint64_t raw_field_num = tag >> 3;
+    if (raw_field_num == 0 || raw_field_num > UINT8_MAX) return FRAME_ERR_INVALID_TAG;
+    field->field_num = (uint8_t)raw_field_num;
     field->wire_type = (uint8_t)(tag & 0x07);
 
     switch (field->wire_type) {
@@ -187,12 +189,14 @@ frame_err_t frame_decoder_next(frame_decoder_t *dec, frame_field_t *field)
             err = decoder_read_varint(dec, &len);
             if (err != FRAME_OK) return err;
 
-            err = decoder_ensure_bytes(dec, len);
+            if (len > SIZE_MAX) return FRAME_ERR_OVERFLOW;
+
+            err = decoder_ensure_bytes(dec, (size_t)len);
             if (err != FRAME_OK) return err;
 
             field->value.bytes.ptr = &dec->buf[dec->pos];
-            field->value.bytes.len = len;
-            dec->pos += len;
+            field->value.bytes.len = (size_t)len;
+            dec->pos += (size_t)len;
             break;
         }
         default:

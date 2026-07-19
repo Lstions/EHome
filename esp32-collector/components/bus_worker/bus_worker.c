@@ -32,7 +32,7 @@
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
 #include "rom/ets_sys.h"   // ets_delay_us — busy-wait without disabling interrupts
-#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include <limits.h>
 #include <inttypes.h>
@@ -56,13 +56,24 @@ static write_rsp_cb_t s_write_rsp_cb = NULL;
 static data_rpt_cb_t s_data_rpt_cb = NULL;
 static channel_cmd_v2_final_cb_t s_channel_cmd_v2_final_cb = NULL;
 
-/* P0-3: Counting semaphore for suspend/resume */
-static SemaphoreHandle_t s_suspend_sem = NULL;
+#define SUSPEND_RX_BIT   BIT0
+#define SUSPEND_U0_BIT   BIT1
+#define SUSPEND_U1_BIT   BIT2
+#define SUSPEND_SPI_BIT  BIT3
+#define SUSPEND_I2C_BIT  BIT4
+#define SUSPEND_ALL_BITS (SUSPEND_RX_BIT | SUSPEND_U0_BIT | SUSPEND_U1_BIT | SUSPEND_SPI_BIT | SUSPEND_I2C_BIT)
+static EventGroupHandle_t s_suspend_events;
+static bool s_suspend_requested;
+static bus_runtime_t *s_runtime;
 
-static void ensure_suspend_sem(void) {
- if (!s_suspend_sem) {
-  s_suspend_sem = xSemaphoreCreateCounting(1, 1);
- }
+static void ensure_suspend_events(void) {
+ if (!s_suspend_events) s_suspend_events = xEventGroupCreate();
+}
+
+static void wait_if_suspended(EventBits_t bit) {
+ if (!__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return;
+ xEventGroupSetBits(s_suspend_events, bit);
+ while (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 /* Task handles */
@@ -161,7 +172,7 @@ static void complete_control(const bus_cmd_t *cmd, bool success, uint32_t code,
 /*  UART cmd loop                                                     */
 /* ------------------------------------------------------------------ */
 
-static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag)
+static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag, EventBits_t suspend_bit)
 {
  bus_cmd_t cmd;
  ESP_LOGI(tag, "Started (prio=%d)", uxTaskPriorityGet(NULL));
@@ -172,15 +183,7 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
 
  while (1) {
   esp_task_wdt_reset();
-  /* P0-3: Suspend check */
-  if (s_suspend_sem) {
-   if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
-    xSemaphoreGive(s_suspend_sem);
-   } else {
-    vTaskDelay(pdMS_TO_TICKS(10));
-    continue;
-   }
-  }
+  wait_if_suspended(suspend_bit);
 
   if (!xQueueReceive(queue, &cmd, pdMS_TO_TICKS(5000))) continue;
 
@@ -281,7 +284,7 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
 /*  SPI/I2C cmd loop                                                  */
 /* ------------------------------------------------------------------ */
 
-static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag)
+static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *tag, EventBits_t suspend_bit)
 {
  bus_cmd_t cmd;
  ESP_LOGI(tag, "Started (prio=%d)", uxTaskPriorityGet(NULL));
@@ -292,14 +295,7 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
 
  while (1) {
   esp_task_wdt_reset();
-  if (s_suspend_sem) {
-   if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
-    xSemaphoreGive(s_suspend_sem);
-   } else {
-    vTaskDelay(pdMS_TO_TICKS(10));
-    continue;
-   }
-  }
+  wait_if_suspended(suspend_bit);
   if (!xQueueReceive(queue, &cmd, pdMS_TO_TICKS(5000))) continue;
 
   bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
@@ -373,19 +369,19 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
 
 static void cmd_task_uart0(void *pv) {
  bus_runtime_t *rt = (bus_runtime_t *)pv;
- uart_cmd_loop(rt, rt->uart0_cmd_queue, TAG_U0);
+ uart_cmd_loop(rt, rt->uart0_cmd_queue, TAG_U0, SUSPEND_U0_BIT);
 }
 static void cmd_task_uart1(void *pv) {
  bus_runtime_t *rt = (bus_runtime_t *)pv;
- uart_cmd_loop(rt, rt->uart1_cmd_queue, TAG_U1);
+ uart_cmd_loop(rt, rt->uart1_cmd_queue, TAG_U1, SUSPEND_U1_BIT);
 }
 static void cmd_task_spi(void *pv) {
  bus_runtime_t *rt = (bus_runtime_t *)pv;
- spi_i2c_cmd_loop(rt, rt->spi_cmd_queue, TAG_SPI);
+ spi_i2c_cmd_loop(rt, rt->spi_cmd_queue, TAG_SPI, SUSPEND_SPI_BIT);
 }
 static void cmd_task_i2c(void *pv) {
  bus_runtime_t *rt = (bus_runtime_t *)pv;
- spi_i2c_cmd_loop(rt, rt->i2c_cmd_queue, TAG_I2C);
+ spi_i2c_cmd_loop(rt, rt->i2c_cmd_queue, TAG_I2C, SUSPEND_I2C_BIT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -443,14 +439,7 @@ static void rx_task(void *pv)
 
  while (1) {
   esp_task_wdt_reset();
-  if (s_suspend_sem) {
-   if (xSemaphoreTake(s_suspend_sem, 0) == pdTRUE) {
-    xSemaphoreGive(s_suspend_sem);
-   } else {
-    vTaskDelay(pdMS_TO_TICKS(10));
-    continue;
-   }
-  }
+  wait_if_suspended(SUSPEND_RX_BIT);
 
   for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
    if (!rt->bus_ctx[i].initialized) continue;
@@ -518,32 +507,22 @@ static void rx_task(void *pv)
    if (!rt->bus_ctx[i].initialized) continue;
    if (rt->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
 
-   pending_cmd_t drained[PENDING_QUEUE_DEPTH];
-   int tmo_count = 0;
    pending_cmd_t pcmd;
-
-   while (xQueueReceive(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
-    if (pcmd.rx_timeout_ms > 0 && pcmd.tx_timestamp > 0) {
-     int64_t now_us = esp_timer_get_time();
-     int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
-     if (elapsed_ms > (int64_t)pcmd.rx_timeout_ms) {
-      s_rx_timeout_count[i]++;
-      ESP_LOGW(TAG_RX, "P1-6: RX timeout reqID=%lu (%lldms)",
-       (unsigned long)pcmd.request_id, (long long)elapsed_ms);
-      if (pcmd.channel_cmd_v2 && s_channel_cmd_v2_final_cb) {
-       s_channel_cmd_v2_final_cb(pcmd.control_slot, false, 1, NULL, 0);
-      } else if (s_data_rpt_cb) {
-       uint64_t ts = (uint64_t)esp_timer_get_time();
-       s_data_rpt_cb(rt->bus_ch[i], ts, 0, NULL, 0,
-        0x01, pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
-      }
-      continue; /* drop — timed out */
-     }
-    }
-    drained[tmo_count++] = pcmd;
-   }
-   for (int j = 0; j < tmo_count; j++) {
-    xQueueSendToBack(rt->pending_queues[i], &drained[j], 0);
+   if (xQueuePeek(rt->pending_queues[i], &pcmd, 0) != pdTRUE ||
+       pcmd.rx_timeout_ms == 0 || pcmd.tx_timestamp == 0) continue;
+   int64_t now_us = esp_timer_get_time();
+   int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
+   if (elapsed_ms <= (int64_t)pcmd.rx_timeout_ms) continue;
+   if (xQueueReceive(rt->pending_queues[i], &pcmd, 0) != pdTRUE) continue;
+   s_rx_timeout_count[i]++;
+   ESP_LOGW(TAG_RX, "P1-6: RX timeout reqID=%lu (%lldms)",
+    (unsigned long)pcmd.request_id, (long long)elapsed_ms);
+   if (pcmd.channel_cmd_v2 && s_channel_cmd_v2_final_cb) {
+    s_channel_cmd_v2_final_cb(pcmd.control_slot, false, 1, NULL, 0);
+   } else if (s_data_rpt_cb) {
+    uint64_t ts = (uint64_t)esp_timer_get_time();
+    s_data_rpt_cb(rt->bus_ch[i], ts, 0, NULL, 0,
+     0x01, pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
    }
   }
 
@@ -569,6 +548,8 @@ static void rx_task(void *pv)
 
 void bus_worker_start(bus_runtime_t *rt)
 {
+ ensure_suspend_events();
+ s_runtime = rt;
  xTaskCreate(rx_task, "rx_task", RX_STACK,
   (void *)rt, RX_PRIO, &s_rx_task_h);
  xTaskCreate(cmd_task_uart0, "cmd_u0", UART_STACK,
@@ -583,16 +564,54 @@ void bus_worker_start(bus_runtime_t *rt)
 
 void bus_worker_suspend(void)
 {
- ensure_suspend_sem();
- ESP_LOGI("BUS_WORKER", "Suspending (config apply)");
- xSemaphoreTake(s_suspend_sem, portMAX_DELAY);
+ ensure_suspend_events();
+ ESP_LOGI("BUS_WORKER", "Suspending and waiting for in-flight transactions");
+ xEventGroupClearBits(s_suspend_events, SUSPEND_ALL_BITS);
+ __atomic_store_n(&s_suspend_requested, true, __ATOMIC_RELEASE);
+ EventBits_t active = 0;
+ if (s_rx_task_h) active |= SUSPEND_RX_BIT;
+ if (s_cmd_u0_h) active |= SUSPEND_U0_BIT;
+ if (s_cmd_u1_h) active |= SUSPEND_U1_BIT;
+ if (s_cmd_spi_h) active |= SUSPEND_SPI_BIT;
+ if (s_cmd_i2c_h) active |= SUSPEND_I2C_BIT;
+ if (active) xEventGroupWaitBits(s_suspend_events, active, pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
 void bus_worker_resume(void)
 {
- if (s_suspend_sem) xSemaphoreGive(s_suspend_sem);
- ESP_LOGI("BUS_WORKER", "Resumed");
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) s_streams[i].len = 0;
+ __atomic_store_n(&s_suspend_requested, false, __ATOMIC_RELEASE);
+ if (s_suspend_events) xEventGroupClearBits(s_suspend_events, SUSPEND_ALL_BITS);
+ ESP_LOGI("BUS_WORKER", "Resumed");
+}
+
+static void discard_command_queue(QueueHandle_t queue)
+{
+ if (!queue) return;
+ bus_cmd_t cmd;
+ while (xQueueReceive(queue, &cmd, 0) == pdTRUE) {
+  if (cmd.channel_cmd_v2) complete_control(&cmd, false, 1007, NULL, 0);
+  else if (cmd.type == CMD_WRITE && s_write_rsp_cb)
+   s_write_rsp_cb(cmd.request_id, false, 1007, "configuration changed before dispatch");
+ }
+}
+
+void bus_worker_discard_queued(bus_runtime_t *rt)
+{
+ if (!rt || rt != s_runtime || !__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return;
+ discard_command_queue(rt->uart0_cmd_queue);
+ discard_command_queue(rt->uart1_cmd_queue);
+ discard_command_queue(rt->spi_cmd_queue);
+ discard_command_queue(rt->i2c_cmd_queue);
+ for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+  pending_cmd_t pending;
+  while (rt->pending_queues[i] && xQueueReceive(rt->pending_queues[i], &pending, 0) == pdTRUE) {
+   if (pending.channel_cmd_v2 && s_channel_cmd_v2_final_cb)
+    s_channel_cmd_v2_final_cb(pending.control_slot, false, 1007, NULL, 0);
+   else if (pending.request_id && s_write_rsp_cb)
+    s_write_rsp_cb(pending.request_id, false, 1007, "configuration changed before response");
+  }
+ }
 }
 
 void bus_worker_stop(void)

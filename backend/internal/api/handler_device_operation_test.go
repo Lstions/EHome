@@ -21,7 +21,7 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := testutil.OpenTestDB(t)
 	reported := time.Now().UTC()
-	node := models.Node{NodeID: "node-action", Name: "node", Status: "online", BootID: "boot-test", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-action", Name: "node", Status: "online", BootID: "boot-test", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}

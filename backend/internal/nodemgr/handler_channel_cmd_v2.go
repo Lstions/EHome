@@ -5,13 +5,16 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
 
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"gorm.io/gorm"
 )
 
 func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
@@ -28,12 +31,8 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 	var execution models.CommandExecution
 	var attempt models.CommandAttempt
 	db := m.commandExec.Database()
-	if err := db.WithContext(context.Background()).First(&execution, "command_id = ?", commandID).Error; err != nil || execution.NodeID != deviceID {
+	if err := loadCommandResponseIdentity(db, commandID, response.Attempt, &execution, &attempt); err != nil || execution.NodeID != deviceID {
 		logger.Warnf("[%s] ChannelCmdV2 response has unknown or mismatched command %s", deviceID, commandID)
-		return
-	}
-	if err := db.WithContext(context.Background()).Where("command_id = ? AND attempt_no = ?", commandID, response.Attempt).First(&attempt).Error; err != nil {
-		logger.Warnf("[%s] ChannelCmdV2 response has unknown attempt command=%s attempt=%d", deviceID, commandID, response.Attempt)
 		return
 	}
 	if attempt.BootID == "" || attempt.BootID != response.BootID || !matchesAttemptDigest(attempt.WireDigest, response.PayloadDigest) {
@@ -72,6 +71,25 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 	if applied && m.wsHub != nil {
 		m.wsHub.BroadcastAuthenticatedEvent(events.DeviceOperationUpdate, updated)
 	}
+}
+
+func loadCommandResponseIdentity(db *gorm.DB, commandID string, attemptNo uint32, execution *models.CommandExecution, attempt *models.CommandAttempt) error {
+	for retry := 0; retry < 10; retry++ {
+		executionErr := db.WithContext(context.Background()).First(execution, "command_id = ?", commandID).Error
+		attemptErr := db.WithContext(context.Background()).Where("command_id = ? AND attempt_no = ?", commandID, attemptNo).First(attempt).Error
+		if executionErr == nil && attemptErr == nil {
+			return nil
+		}
+		if (executionErr != nil && !errors.Is(executionErr, gorm.ErrRecordNotFound)) ||
+			(attemptErr != nil && !errors.Is(attemptErr, gorm.ErrRecordNotFound)) {
+			if executionErr != nil {
+				return executionErr
+			}
+			return attemptErr
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return gorm.ErrRecordNotFound
 }
 
 func matchesAttemptDigest(wireDigest string, value [16]byte) bool {

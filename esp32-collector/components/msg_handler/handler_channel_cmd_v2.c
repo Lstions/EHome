@@ -2,6 +2,14 @@
 #include "esp_log.h"
 #include <string.h>
 
+/* Host decoder tests link this handler without the MQTT transport component;
+ * production provides the strong checked publisher. */
+__attribute__((weak)) esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
+{
+    msg_handler_publish(data, len);
+    return ESP_OK;
+}
+
 #define TAG "CH_CMD_V2"
 #define V2_PROTOCOL 1U
 #define V2_MAX_RX 256U
@@ -42,38 +50,52 @@ __attribute__((weak)) uint64_t channel_cmd_v2_current_time_ms(void) { return 0; 
 __attribute__((weak)) bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot) { (void)cmd; (void)slot; return false; }
 static uint32_t s_event_sequence;
 static uint64_t s_completed_sequence;
+static uint32_t s_reservation_lock;
 static v2_control_slot_t s_slots[CHANNEL_CMD_V2_SLOT_COUNT];
 static uint32_t s_accepted_count;
 static uint32_t s_rejected_count;
 static uint32_t s_completed_count;
 static uint32_t s_replayed_count;
 
-static void send_response(uint8_t type, const channel_cmd_v2_t *cmd, bool success,
+static uint32_t next_event_sequence(void)
+{
+    for (;;) {
+        uint32_t current = __atomic_load_n(&s_event_sequence, __ATOMIC_RELAXED);
+        uint32_t next = current + 1U;
+        if (next == 0) next = 1U;
+        if (__atomic_compare_exchange_n(&s_event_sequence, &current, next, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return next;
+    }
+}
+
+static bool send_response(uint8_t type, const channel_cmd_v2_t *cmd, bool success,
                           uint32_t code, const uint8_t *raw, size_t raw_len, bool replayed)
 {
     uint8_t buf[384]; frame_encoder_t enc;
     frame_encoder_init(&enc, buf, sizeof(buf), type);
     if (cmd) {
-        (void)frame_encode_bytes(&enc, 1, cmd->command_id, 16);
-        (void)frame_encode_bytes(&enc, 2, cmd->payload_digest, 16);
-        (void)frame_encode_varint(&enc, 3, cmd->attempt);
-        (void)frame_encode_string(&enc, 4, cmd->boot_id);
+        if (frame_encode_bytes(&enc, 1, cmd->command_id, 16) != FRAME_OK ||
+            frame_encode_bytes(&enc, 2, cmd->payload_digest, 16) != FRAME_OK ||
+            frame_encode_varint(&enc, 3, cmd->attempt) != FRAME_OK ||
+            frame_encode_string(&enc, 4, cmd->boot_id) != FRAME_OK) return false;
     }
-    (void)frame_encode_varint(&enc, 5, ++s_event_sequence);
-    (void)frame_encode_varint(&enc, 6, success ? 1 : 0);
-    (void)frame_encode_varint(&enc, 7, code);
+    if (frame_encode_varint(&enc, 5, next_event_sequence()) != FRAME_OK ||
+        frame_encode_varint(&enc, 6, success ? 1 : 0) != FRAME_OK ||
+        frame_encode_varint(&enc, 7, code) != FRAME_OK) return false;
     if (type == MSG_CHANNEL_CMD_V2_FINAL) {
-        if (raw && raw_len) (void)frame_encode_bytes(&enc, 8, raw, raw_len);
-        (void)frame_encode_varint(&enc, 9, replayed ? 1 : 0);
+        if (raw && raw_len && frame_encode_bytes(&enc, 8, raw, raw_len) != FRAME_OK) return false;
+        if (frame_encode_varint(&enc, 9, replayed ? 1 : 0) != FRAME_OK) return false;
     }
-    msg_handler_publish(frame_encoder_data(&enc), frame_encoder_size(&enc));
+    return msg_handler_publish_checked(frame_encoder_data(&enc), frame_encoder_size(&enc)) == ESP_OK;
 }
 
 static void send_ack(const channel_cmd_v2_t *cmd, bool accepted, uint32_t code)
 {
 	if (accepted) __atomic_add_fetch(&s_accepted_count, 1, __ATOMIC_RELAXED);
 	else __atomic_add_fetch(&s_rejected_count, 1, __ATOMIC_RELAXED);
-    send_response(MSG_CHANNEL_CMD_V2_ACK, cmd, accepted, code, NULL, 0, false);
+    if (!send_response(MSG_CHANNEL_CMD_V2_ACK, cmd, accepted, code, NULL, 0, false)) {
+        ESP_LOGE(TAG, "Failed to publish ChannelCmdV2 ACK");
+    }
 }
 
 void handler_channel_cmd_v2_get_metrics(channel_cmd_v2_metrics_t *metrics)
@@ -89,7 +111,12 @@ static bool same_identity(const channel_cmd_v2_t *a, const channel_cmd_v2_t *b)
 {
     return a->attempt == b->attempt && strcmp(a->boot_id, b->boot_id) == 0 &&
            memcmp(a->command_id, b->command_id, sizeof(a->command_id)) == 0 &&
-           memcmp(a->payload_digest, b->payload_digest, sizeof(a->payload_digest)) == 0;
+           memcmp(a->payload_digest, b->payload_digest, sizeof(a->payload_digest)) == 0 &&
+           a->edge_device_id == b->edge_device_id && a->channel_id == b->channel_id &&
+           a->deadline_unix_ms == b->deadline_unix_ms && a->tx_len == b->tx_len &&
+           memcmp(a->tx_data, b->tx_data, a->tx_len) == 0 &&
+           a->read_size == b->read_size && a->rx_timeout_ms == b->rx_timeout_ms &&
+           a->post_tx_delay_ms == b->post_tx_delay_ms;
 }
 
 static bool same_command_id(const channel_cmd_v2_t *a, const channel_cmd_v2_t *b)
@@ -108,6 +135,7 @@ static void prepare_slot(v2_control_slot_t *slot, const channel_cmd_v2_t *cmd)
 
 static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
 {
+    while (__atomic_exchange_n(&s_reservation_lock, 1U, __ATOMIC_ACQUIRE) != 0U) { }
     for (;;) {
         *replayed = false;
         int free_slot = -1;
@@ -122,9 +150,13 @@ static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
             if (state == V2_SLOT_RESERVED) continue;
             if (same_identity(&s_slots[i].cmd, cmd)) {
                 *replayed = true;
+                __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
                 return i;
             }
-            if (same_command_id(&s_slots[i].cmd, cmd)) return -2;
+            if (same_command_id(&s_slots[i].cmd, cmd)) {
+                __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
+                return -2;
+            }
             if (state == V2_SLOT_FINAL && s_slots[i].completed_order < oldest_final_order) {
                 oldest_final_order = s_slots[i].completed_order;
                 oldest_final_slot = i;
@@ -136,6 +168,7 @@ static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
                                              false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
             prepare_slot(&s_slots[free_slot], cmd);
             __atomic_store_n(&s_slots[free_slot].state, V2_SLOT_QUEUED, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
             return free_slot;
         }
         if (oldest_final_slot >= 0) {
@@ -144,8 +177,10 @@ static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
                                              false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
             prepare_slot(&s_slots[oldest_final_slot], cmd);
             __atomic_store_n(&s_slots[oldest_final_slot].state, V2_SLOT_QUEUED, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
             return oldest_final_slot;
         }
+        __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
         return -1;
     }
 }
@@ -160,6 +195,11 @@ void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_
         raw_response = NULL;
         raw_len = 0;
     }
+    if (raw_len > 0 && raw_response == NULL) {
+        success = false;
+        error_code = V2_ERR_MALFORMED;
+        raw_len = 0;
+    }
     v2_control_slot_t *entry = &s_slots[slot];
     uint32_t expected = V2_SLOT_QUEUED;
     if (!__atomic_compare_exchange_n(&entry->state, &expected, V2_SLOT_COMPLETING,
@@ -171,8 +211,10 @@ void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_
     entry->completed_order = __atomic_add_fetch(&s_completed_sequence, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&entry->state, V2_SLOT_FINAL, __ATOMIC_RELEASE);
 	__atomic_add_fetch(&s_completed_count, 1, __ATOMIC_RELAXED);
-    send_response(MSG_CHANNEL_CMD_V2_FINAL, &entry->cmd, success, entry->final_error,
-                  entry->final_raw, entry->final_raw_len, false);
+    if (!send_response(MSG_CHANNEL_CMD_V2_FINAL, &entry->cmd, success, entry->final_error,
+                       entry->final_raw, entry->final_raw_len, false)) {
+        ESP_LOGE(TAG, "Failed to publish ChannelCmdV2 Final");
+    }
 }
 
 void handler_channel_cmd_v2_process(frame_decoder_t *dec)
@@ -222,8 +264,10 @@ void handler_channel_cmd_v2_process(frame_decoder_t *dec)
 		__atomic_add_fetch(&s_replayed_count, 1, __ATOMIC_RELAXED);
         send_ack(&cmd, true, 0);
         if (__atomic_load_n(&entry->state, __ATOMIC_ACQUIRE) == V2_SLOT_FINAL) {
-            send_response(MSG_CHANNEL_CMD_V2_FINAL, &entry->cmd, entry->final_success,
-                          entry->final_error, entry->final_raw, entry->final_raw_len, true);
+            if (!send_response(MSG_CHANNEL_CMD_V2_FINAL, &entry->cmd, entry->final_success,
+                               entry->final_error, entry->final_raw, entry->final_raw_len, true)) {
+                ESP_LOGE(TAG, "Failed to publish replayed ChannelCmdV2 Final");
+            }
         }
         return;
     }

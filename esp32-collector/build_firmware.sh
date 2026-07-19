@@ -57,6 +57,7 @@ build_profile() {
 
     echo "==> Building $profile (target=$target, flash=$flash_profile)"
     idf.py \
+        --project-dir "$PROJECT_DIR" \
         -B "$build_dir" \
         -D "IDF_TARGET=$target" \
         -D "SDKCONFIG=$sdkconfig" \

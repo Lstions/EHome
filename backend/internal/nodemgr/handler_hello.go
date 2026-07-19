@@ -217,6 +217,12 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		}
 		node.ConfigEpoch = configEpoch
 		node.LastManifestID = lastManifest
+		// Hello starts a new firmware generation; invalidate the previous
+		// capability report until ResourceReport arrives for this boot.
+		node.BootID = ""
+		node.ResourceReportedAt = nil
+		node.CommandEngineRevision = 0
+		node.CommandEngineCapabilities = "{}"
 		m.db.Save(&node)
 		if oldStatus != "online" {
 			m.db.Create(&models.NodeEvent{

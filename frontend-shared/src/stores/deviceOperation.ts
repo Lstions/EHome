@@ -35,9 +35,11 @@ export const useDeviceOperationStore = defineStore('deviceOperation', () => {
     // ACK/final event that raced ahead of this refresh response.
     for (const operation of history) apply(operation)
   }
-  async function create(id: number, actionId: string, params: Record<string, unknown> = {}, confirmationToken = '', reason = '') {
+  async function create(id: number, actionId: string, params: Record<string, unknown> = {}, confirmationToken = '', reason = '', idempotencyKey?: string) {
     const session = getSessionGeneration()
-    const execution = await deviceOperationApi.create(id, actionId, params, confirmationToken, reason)
+    const execution = idempotencyKey
+      ? await deviceOperationApi.create(id, actionId, params, confirmationToken, reason, idempotencyKey)
+      : await deviceOperationApi.create(id, actionId, params, confirmationToken, reason)
     assertSessionGeneration(session)
     apply(execution)
     return execution

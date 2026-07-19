@@ -190,7 +190,11 @@ func (d *Decoder) NextField() (*Field, error) {
 	}
 	d.pos = newPos
 
-	fieldNum := uint8(tag >> 3)
+	rawFieldNum := tag >> 3
+	if rawFieldNum == 0 || rawFieldNum > 255 {
+		return nil, fmt.Errorf("invalid field number: %d", rawFieldNum)
+	}
+	fieldNum := uint8(rawFieldNum)
 	wireType := uint8(tag & 0x07)
 
 	field := &Field{FieldNum: fieldNum, WireType: wireType}

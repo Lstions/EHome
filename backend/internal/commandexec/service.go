@@ -18,6 +18,7 @@ import (
 	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -69,6 +70,8 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		channelErr = err
 	} else if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
 		channelErr = err
+	} else if err := requireAppliedManifest(edge.Node, edge.Node.ConfigVersion); err != nil {
+		channelErr = err
 	}
 	items := make([]CatalogItem, 0)
 	for _, definition := range s.actions.List(edge.Type) {
@@ -88,9 +91,15 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		} else if channelErr != nil {
 			item.Available = false
 			item.Reason = "action channel is unavailable"
-		} else if _, _, err := currentCapabilities(edge.Node, s.now); err != nil {
+		} else if _, capabilities, err := currentCapabilities(edge.Node, s.now); err != nil {
 			item.Available = false
 			item.Reason = "ChannelCmdV2 capability is unavailable or stale"
+		} else if params, err := deviceaction.CanonicalizeParams(definition.InputSchema, nil); err == nil {
+			step, compileErr := definition.Compile(params)
+			if compileErr != nil || !stepFitsCapabilities(step, capabilities) {
+				item.Available = false
+				item.Reason = "action exceeds node capability"
+			}
 		}
 		items = append(items, item)
 	}
@@ -122,7 +131,11 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
 			return ErrActionUnavailable
 		}
-		if _, _, err := currentCapabilities(edge.Node, s.now); err != nil {
+		if err := requireAppliedManifest(edge.Node, edge.Node.ConfigVersion); err != nil {
+			return ErrActionUnavailable
+		}
+		_, capabilities, err := currentCapabilities(edge.Node, s.now)
+		if err != nil {
 			return ErrActionUnavailable
 		}
 		def, ok := s.actions.Get(edge.Type, in.ActionID)
@@ -132,6 +145,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		params, err := deviceaction.CanonicalizeParams(def.InputSchema, in.Params)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
+		}
+		step, err := def.Compile(params)
+		if err != nil || !stepFitsCapabilities(step, capabilities) {
+			return ErrActionUnavailable
 		}
 		digest := sha256.Sum256(params)
 		hash := hex.EncodeToString(digest[:])
@@ -163,6 +180,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		}
 		result = models.CommandExecution{
 			CommandID: commandID, EdgeDeviceID: edge.ID, NodeID: edge.NodeID,
+			DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: edge.Node.ConfigVersion,
 			ActionID: def.ID, ActionVersion: def.Version, CommandEngineRevision: edge.Node.CommandEngineRevision, ActorUserID: in.ActorUserID,
 			IdempotencyScope: scope, IdempotencyKey: in.IdempotencyKey, RequestHash: hash,
 			ParamsJSON: string(params), Status: StatusQueued, DeadlineAt: now.Add(2 * time.Minute), CreatedAt: now,
@@ -207,10 +225,11 @@ func (s *Service) VerifyFinal(ctx context.Context, execution models.CommandExecu
 	if err := s.db.WithContext(ctx).First(&edge, execution.EdgeDeviceID).Error; err != nil {
 		return nil, err
 	}
-	if edge.NodeID != execution.NodeID {
+	if edge.NodeID != execution.NodeID || edge.Type != execution.DeviceType ||
+		edge.DeviceConfigID != execution.DeviceConfigID || edge.ChannelID != execution.ChannelID {
 		return nil, fmt.Errorf("edge device identity changed")
 	}
-	definition, ok := s.actions.Get(edge.Type, execution.ActionID)
+	definition, ok := s.actions.Get(execution.DeviceType, execution.ActionID)
 	if !ok || definition.Version != execution.ActionVersion {
 		return nil, fmt.Errorf("action definition %s version %d is unavailable", execution.ActionID, execution.ActionVersion)
 	}
@@ -233,7 +252,7 @@ func (s *Service) List(ctx context.Context, edgeDeviceID uint, limit int) ([]mod
 func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*models.CommandExecution, error) {
 	var execution models.CommandExecution
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.First(&execution, "command_id = ?", commandID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "command_id = ?", commandID).Error; err != nil {
 			return err
 		}
 		if execution.ActorUserID != actor || execution.Status != StatusQueued {
@@ -258,6 +277,13 @@ func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*mo
 
 func validIdempotencyKey(key string) bool {
 	return len(key) >= 8 && len(key) <= 128 && strings.TrimSpace(key) == key
+}
+
+func stepFitsCapabilities(step deviceaction.SingleStep, capabilities commandEngineCapabilities) bool {
+	return len(step.TXData) > 0 && uint32(len(step.TXData)) <= capabilities.MaxTXBytes &&
+		step.ReadSize <= capabilities.MaxRXBytes && step.RXTimeoutMS > 0 &&
+		step.RXTimeoutMS <= capabilities.MaxStepTimeoutMS &&
+		step.PostTXDelayMS <= capabilities.MaxStepTimeoutMS
 }
 
 func newCommandID() (string, error) {

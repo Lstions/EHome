@@ -63,7 +63,9 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err := db.WithContext(ctx).Preload("Node").First(&edge, execution.EdgeDeviceID).Error; err != nil {
 		return DispatchResult{}, err
 	}
-	if edge.NodeID != execution.NodeID || !edge.Enabled || edge.Status == "inactive" || edge.ChannelID == 0 {
+	if edge.NodeID != execution.NodeID || edge.Type != execution.DeviceType ||
+		edge.DeviceConfigID != execution.DeviceConfigID || edge.ChannelID != execution.ChannelID ||
+		!edge.Enabled || edge.Status == "inactive" || edge.ChannelID == 0 || edge.Node.Status != "online" {
 		return DispatchResult{}, fmt.Errorf("execution target is no longer available")
 	}
 	if _, err := loadActionChannel(db.WithContext(ctx), edge); err != nil {
@@ -72,7 +74,10 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
 		return DispatchResult{}, err
 	}
-	definition, ok := t.actions.Get(edge.Type, execution.ActionID)
+	if err := requireAppliedManifest(edge.Node, execution.ManifestID); err != nil {
+		return DispatchResult{}, err
+	}
+	definition, ok := t.actions.Get(execution.DeviceType, execution.ActionID)
 	if !ok || !definition.Enabled || definition.Version != execution.ActionVersion || definition.Transport != deviceaction.ChannelCmdV2Adapter {
 		return DispatchResult{}, fmt.Errorf("trusted action definition is unavailable")
 	}
@@ -91,7 +96,7 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	if uint32(len(step.TXData)) > capabilities.MaxTXBytes || step.ReadSize > capabilities.MaxRXBytes || step.RXTimeoutMS > capabilities.MaxStepTimeoutMS || step.PostTXDelayMS > capabilities.MaxStepTimeoutMS {
+	if !stepFitsCapabilities(step, capabilities) {
 		return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
 	}
 	commandID, err := uuidBytes(execution.CommandID)

@@ -34,8 +34,7 @@ function isSupported(parameter: ActionParameter) {
 function reset() {
   for (const key of Object.keys(values)) delete values[key]
   for (const { name, parameter } of fields.value) {
-    if (parameter.type === 'boolean') values[name] = false
-    else if (parameter.enum?.length) values[name] = parameter.enum[0]
+    if (required.value.has(name) && parameter.type === 'boolean') values[name] = false
   }
 }
 function submit() {

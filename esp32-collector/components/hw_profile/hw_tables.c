@@ -135,8 +135,6 @@ const hw_uart_t hw_uarts[HW_UART_COUNT] = {
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, ROM download port */
     { .id = "UART1", .port = 1, .default_tx_pin = 20, .default_rx_pin = 21,
       .max_baud = 5000000, .flags = 0x01 },  /* DMA, avoids USB pins 12/13 */
-    { .id = "LP_UART0", .port = 2, .default_tx_pin = 5,  .default_rx_pin = 4,
-      .max_baud = 1000000, .flags = 0x02 },  /* LP_UART: no DMA, fixed pins, 16B FIFO */
 };
 
 const hw_i2c_t hw_i2cs[HW_I2C_COUNT] = {

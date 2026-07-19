@@ -151,6 +151,7 @@ static esp_err_t tx_stop_scheduler(void *opaque)
 static esp_err_t tx_cleanup_buses(void *opaque)
 {
     manifest_tx_ctx_t *tx = opaque;
+    bus_worker_discard_queued(&tx->app->bus_runtime);
     return bus_manager_cleanup_all(&tx->app->bus_runtime);
 }
 

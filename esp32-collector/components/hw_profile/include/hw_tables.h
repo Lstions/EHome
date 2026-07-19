@@ -100,8 +100,9 @@ typedef struct {
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
 
   #define HW_PLATFORM_STRING  "ESP32C6"
-  /* C6: 2 HP UARTs (DMA-capable) + 1 LP UART (no DMA, fixed pins, 16B FIFO), 1 I2C, 1 SPI */
-  #define HW_UART_COUNT   3
+  /* C6 runtime owns workers for two HP UARTs. LP_UART0 is not advertised
+   * until it has a dedicated command queue and worker route. */
+  #define HW_UART_COUNT   2
   #define HW_I2C_COUNT    1
   #define HW_SPI_COUNT    1
   #define HW_GPIO_COUNT   8

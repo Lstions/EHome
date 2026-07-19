@@ -16,21 +16,21 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
 import { useWebSocketStore } from '@/stores/websocket'
-import type { ActionDefinition, DeviceOperation, EffectiveAction, OperationStatus } from '@/api/deviceOperation'
+import { newIdempotencyKey, type ActionDefinition, type DeviceOperation, type EffectiveAction, type OperationStatus } from '@/api/deviceOperation'
 import ActionForm from './ActionForm.vue'
 import ActionConfirmationDialog from './ActionConfirmationDialog.vue'
 const props = defineProps<{ deviceId: number }>()
 const store = useDeviceOperationStore(); const ws = useWebSocketStore(); const submitting = ref(''); const selectedAction = ref<ActionDefinition | null>(null); const selectedParams = ref<Record<string, unknown>>({}); const formVisible = ref(false); const confirmationVisible = ref(false)
-const catalog = computed(() => store.catalogs.get(props.deviceId) ?? []); const history = computed(() => store.histories.get(props.deviceId) ?? [])
+const catalog = computed(() => store.catalogs.get(props.deviceId) ?? []); const history = computed(() => store.histories.get(props.deviceId) ?? []); const selectedKey = ref('')
 const available = computed(() => catalog.value.filter(item => !availabilityReason(item))); const unavailable = computed(() => catalog.value.filter(item => !!availabilityReason(item)))
 async function load() { if (props.deviceId > 0) await store.refresh(props.deviceId) }
 function availabilityReason(action: EffectiveAction) { if (!action.available) return action.reason || '当前不可用'; const fields = Object.values(action.definition.input_schema?.properties ?? {}); if (fields.some(field => !['string', 'boolean', 'integer', 'number'].includes(field.type) || field.enum && field.type !== 'string')) return '客户端不支持该参数 Schema'; return '' }
 function requiresConfirmation(action: ActionDefinition) { return action.risk === 'medium' || action.risk === 'high' || action.risk === 'critical' }
 function begin(action: ActionDefinition) { selectedAction.value = action; const fields = Object.keys(action.input_schema?.properties ?? {}); if (fields.length === 0) { prepare({}); return }; formVisible.value = true }
 async function submitSelected(params: Record<string, unknown>) { formVisible.value = false; prepare(params) }
-function prepare(params: Record<string, unknown>) { if (!selectedAction.value) return; selectedParams.value = params; if (requiresConfirmation(selectedAction.value)) { confirmationVisible.value = true; return }; void submit(selectedAction.value.id, params) }
-async function confirmSelected(reason: string) { if (!selectedAction.value) return; const action = selectedAction.value; confirmationVisible.value = false; submitting.value = action.id; try { const grant = await store.confirm(props.deviceId, action.id, selectedParams.value, reason); await store.create(props.deviceId, action.id, selectedParams.value, grant.token, reason); ElMessage.info('操作已排队') } catch (error: any) { ElMessage.error(error?.message || '确认或创建操作失败') } finally { submitting.value = '' } }
-async function submit(actionId: string, params: Record<string, unknown>) { submitting.value = actionId; try { await store.create(props.deviceId, actionId, params); ElMessage.info('操作已排队') } catch (error: any) { ElMessage.error(error?.message || '创建操作失败') } finally { submitting.value = '' } }
+function prepare(params: Record<string, unknown>) { if (!selectedAction.value) return; selectedParams.value = params; selectedKey.value = newIdempotencyKey(); if (requiresConfirmation(selectedAction.value)) { confirmationVisible.value = true; return }; void submit(selectedAction.value.id, params) }
+async function confirmSelected(reason: string) { if (!selectedAction.value) return; const action = selectedAction.value; confirmationVisible.value = false; submitting.value = action.id; try { const grant = await store.confirm(props.deviceId, action.id, selectedParams.value, reason); await store.create(props.deviceId, action.id, selectedParams.value, grant.token, reason, selectedKey.value); ElMessage.info('操作已排队') } catch (error: any) { await load(); ElMessage.warning('操作结果未确认，已刷新状态；请勿重复提交') } finally { submitting.value = '' } }
+async function submit(actionId: string, params: Record<string, unknown>) { submitting.value = actionId; try { await store.create(props.deviceId, actionId, params, '', '', selectedKey.value); ElMessage.info('操作已排队') } catch (error: any) { await load(); ElMessage.warning('操作结果未确认，已刷新状态；请勿重复提交') } finally { submitting.value = '' } }
 function timelineType(status: OperationStatus) { return status === 'SUCCEEDED' ? 'success' : status === 'FAILED' || status === 'UNKNOWN' ? 'danger' : status === 'CANCELLED' ? 'info' : 'primary' }
 function format(value: string) { return value ? new Date(value).toLocaleString() : '' }
 function resultSummary(operation: DeviceOperation) { return operation.verified_result?.map(value => `${value.name}=${value.string_value || value.value}${value.unit || ''}`).join(', ') || '' }

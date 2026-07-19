@@ -115,7 +115,11 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 			return err
 		}
 		tokenHash := confirmationHash(rawToken)
-		grant = ConfirmationGrant{Token: rawToken, ExpiresAt: now.Add(confirmationLifetime)}
+		expiresAt := now.Add(confirmationLifetime)
+		if deadline := user.LastLoginAt.Add(recentAuthenticationWindow); deadline.Before(expiresAt) {
+			expiresAt = deadline
+		}
+		grant = ConfirmationGrant{Token: rawToken, ExpiresAt: expiresAt}
 		if err := tx.Create(&models.CommandConfirmation{TokenHash: tokenHash, ActorUserID: in.ActorUserID, EdgeDeviceID: edge.ID, ActionID: definition.ID, ActionVersion: definition.Version, RequestHash: requestHash, ExpiresAt: grant.ExpiresAt, CreatedAt: now}).Error; err != nil {
 			return err
 		}
@@ -132,6 +136,13 @@ func (s *Service) consumeConfirmation(tx *gorm.DB, rawToken string, actorID, edg
 		return ErrConfirmationRequired
 	}
 	now := s.now()
+	var user models.User
+	if err := tx.First(&user, actorID).Error; err != nil {
+		return err
+	}
+	if !user.Enabled || user.LastLoginAt == nil || user.LastLoginAt.Before(now.Add(-recentAuthenticationWindow)) {
+		return ErrRecentAuthRequired
+	}
 	result := tx.Model(&models.CommandConfirmation{}).Where("token_hash = ? AND actor_user_id = ? AND edge_device_id = ? AND action_id = ? AND action_version = ? AND request_hash = ? AND consumed_at IS NULL AND expires_at > ?", confirmationHash(rawToken), actorID, edgeDeviceID, definition.ID, definition.Version, requestHash, now).Update("consumed_at", now)
 	if result.Error != nil {
 		return result.Error

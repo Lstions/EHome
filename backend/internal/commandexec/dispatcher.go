@@ -11,6 +11,7 @@ import (
 	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // DispatchResult is immutable evidence from the transport compiler. The
@@ -88,7 +89,7 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) error {
 	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var execution models.CommandExecution
-		if err := tx.First(&execution, "command_id = ?", outbox.CommandID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "command_id = ?", outbox.CommandID).Error; err != nil {
 			return err
 		}
 		if execution.Status != StatusQueued {
@@ -122,8 +123,12 @@ func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) 
 		if err := tx.Model(&models.CommandAttempt{}).Where("id = ? AND status = ?", attempt.ID, StatusDispatched).Updates(map[string]interface{}{"boot_id": result.BootID, "published_at": result.PublishedAt}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&models.CommandExecution{}).Where("command_id = ? AND status = ?", execution.CommandID, StatusQueued).Update("status", StatusDispatched).Error; err != nil {
-			return err
+		transition := tx.Model(&models.CommandExecution{}).Where("command_id = ? AND status = ?", execution.CommandID, StatusQueued).Update("status", StatusDispatched)
+		if transition.Error != nil {
+			return transition.Error
+		}
+		if transition.RowsAffected != 1 {
+			return fmt.Errorf("execution was cancelled before dispatch commit")
 		}
 		return tx.Model(&models.CommandOutbox{}).Where("id = ? AND state = ? AND fencing_token = ?", outbox.ID, "LEASED", outbox.FencingToken).Updates(map[string]interface{}{"state": "PROCESSED", "processed_at": now, "lease_expires_at": nil}).Error
 	})

@@ -48,7 +48,7 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	reported := now.Add(-time.Minute)
-	node := models.Node{NodeID: "node-v2", Name: "node", Status: "online", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-v2", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 	publisher := &capturePublisher{}
 	transport := NewChannelCmdV2Transport(db, publisher, enabledReadActions(t))
 	transport.now = func() time.Time { return now }
-	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
+	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
 	attempt := models.CommandAttempt{AttemptNo: 1, WireDigest: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
 	result, err := transport.Dispatch(context.Background(), execution, attempt)
 	if err != nil {
@@ -86,7 +86,7 @@ func TestChannelCmdV2TransportRejectsStaleOrDisabledCapability(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	reported := now.Add(-maxCapabilityAge - time.Second)
-	node := models.Node{NodeID: "node-stale", Name: "node", Status: "online", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-stale", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestChannelCmdV2TransportRejectsStaleOrDisabledCapability(t *testing.T) {
 	publisher := &capturePublisher{}
 	transport := NewChannelCmdV2Transport(db, publisher, enabledReadActions(t))
 	transport.now = func() time.Time { return now }
-	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
+	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
 	attempt := models.CommandAttempt{AttemptNo: 1, WireDigest: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
 	if _, err := transport.Dispatch(context.Background(), execution, attempt); err == nil {
 		t.Fatal("stale capability was accepted")
@@ -116,7 +116,7 @@ func TestChannelCmdV2TransportRejectsMissingFinallyCapability(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	reported := now.Add(-time.Minute)
-	node := models.Node{NodeID: "node-no-final", Name: "node", Status: "online", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":false,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-no-final", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":false,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestChannelCmdV2TransportRejectsMissingFinallyCapability(t *testing.T) {
 	publisher := &capturePublisher{}
 	transport := NewChannelCmdV2Transport(db, publisher, enabledReadActions(t))
 	transport.now = func() time.Time { return now }
-	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
+	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute)}
 	attempt := models.CommandAttempt{AttemptNo: 1, WireDigest: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
 	if _, err := transport.Dispatch(context.Background(), execution, attempt); err == nil {
 		t.Fatal("node without final capability was accepted")
@@ -146,7 +146,7 @@ func TestChannelCmdV2TransportRejectsChangedCommandEngineRevision(t *testing.T) 
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	reported := now.Add(-time.Minute)
-	node := models.Node{NodeID: "node-revision", Name: "node", Status: "online", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 2, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-revision", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 2, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestChannelCmdV2TransportRejectsChangedCommandEngineRevision(t *testing.T) 
 	publisher := &capturePublisher{}
 	transport := NewChannelCmdV2Transport(db, publisher, enabledReadActions(t))
 	transport.now = func() time.Time { return now }
-	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: 1, DeadlineAt: now.Add(time.Minute)}
+	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: 1, DeadlineAt: now.Add(time.Minute)}
 	attempt := models.CommandAttempt{AttemptNo: 1, WireDigest: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
 	if _, err := transport.Dispatch(context.Background(), execution, attempt); err == nil {
 		t.Fatal("execution created for a previous engine revision was published")
@@ -176,7 +176,7 @@ func TestChannelCmdV2TransportRejectsInvalidPersistedParams(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
 	reported := now.Add(-time.Minute)
-	node := models.Node{NodeID: "node-invalid-params", Name: "node", Status: "online", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-invalid-params", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestChannelCmdV2TransportRejectsInvalidPersistedParams(t *testing.T) {
 	publisher := &capturePublisher{}
 	transport := NewChannelCmdV2Transport(db, publisher, enabledReadActions(t))
 	transport.now = func() time.Time { return now }
-	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, ParamsJSON: `{"unexpected":true}`, DeadlineAt: now.Add(time.Minute)}
+	execution := models.CommandExecution{CommandID: "00112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, ParamsJSON: `{"unexpected":true}`, DeadlineAt: now.Add(time.Minute)}
 	attempt := models.CommandAttempt{AttemptNo: 1, WireDigest: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}
 	if _, err := transport.Dispatch(context.Background(), execution, attempt); err == nil {
 		t.Fatal("invalid persisted params were compiled")

@@ -41,3 +41,11 @@ func requireReportedActionChannel(node models.Node, channelID uint) error {
 	}
 	return fmt.Errorf("action channel is not applied in node runtime")
 }
+
+func requireAppliedManifest(node models.Node, expected string) error {
+	if strings.TrimSpace(expected) == "" || node.ConfigVersion != expected ||
+		node.ConfigStatus != "applied" || node.ConfigSyncState != "in_sync" {
+		return fmt.Errorf("node manifest is not applied or changed")
+	}
+	return nil
+}

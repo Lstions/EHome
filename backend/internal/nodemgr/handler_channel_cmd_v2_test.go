@@ -48,7 +48,7 @@ func TestChannelCmdV2FinalRequiresIdentityAndDriverParse(t *testing.T) {
 	}
 	commandID := "00112233-4455-6677-8899-aabbccddeeff"
 	digestHex := "102132435465768798a9bacbdcedfe0f00112233445566778899aabbccddeeff"
-	execution := models.CommandExecution{CommandID: commandID, EdgeDeviceID: edge.ID, NodeID: node.NodeID, ActionID: "read_rainfall", ActionVersion: 1, ActorUserID: 1, IdempotencyScope: "test", IdempotencyKey: "test-final-0001", RequestHash: "request", ParamsJSON: "{}", Status: commandexec.StatusDispatched, DeadlineAt: time.Now().Add(time.Minute), CreatedAt: time.Now()}
+	execution := models.CommandExecution{CommandID: commandID, EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ActionID: "read_rainfall", ActionVersion: 1, ActorUserID: 1, IdempotencyScope: "test", IdempotencyKey: "test-final-0001", RequestHash: "request", ParamsJSON: "{}", Status: commandexec.StatusDispatched, DeadlineAt: time.Now().Add(time.Minute), CreatedAt: time.Now()}
 	if err := db.Create(&execution).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestChannelCmdV2FinalRequiresIdentityAndDriverParse(t *testing.T) {
 func TestReadActionOutboxToFinalDriverVerificationSlice(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Now().UTC()
-	node := models.Node{NodeID: "node-v2-e2e", Name: "node", Status: "online", BootID: "boot-e2e", ResourceReportedAt: &now, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	node := models.Node{NodeID: "node-v2-e2e", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-e2e", ResourceReportedAt: &now, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
 	}

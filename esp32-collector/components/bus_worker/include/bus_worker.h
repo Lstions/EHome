@@ -129,6 +129,7 @@ void bus_worker_suspend(void);
 
 /** Resume all worker tasks — call after bus_manager_setup_from_manifest */
 void bus_worker_resume(void);
+void bus_worker_discard_queued(bus_runtime_t *rt);
 
 /** Delete all worker tasks — full teardown */
 void bus_worker_stop(void);
