@@ -298,6 +298,9 @@ func currentEngineAllows(def Definition) bool {
 	if def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce {
 		return true
 	}
+	if def.ExecutionShape == "bounded_sequence" && def.planCompiler != nil && def.AtMostOnce {
+		return true
+	}
 	return os.Getenv("EHOME_ENV") == "development" && os.Getenv("EHOME_ENABLE_HIGH_RISK_ACTIONS") == "true" && def.ExecutionShape == "single" && def.Verification != "none"
 }
 

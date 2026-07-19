@@ -28,6 +28,7 @@
 #include "bus_dma.h"
 #include "cmd_queue.h"
 #include "scheduler.h"
+#include "frame_codec.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
@@ -85,6 +86,7 @@ static TaskHandle_t s_rx_task_h = NULL;
 
 /* 8.1: Runtime counters */
 static uint32_t s_rx_timeout_count[SCHED_MAX_CHANNELS];
+static volatile bool s_plan_active[SCHED_MAX_CHANNELS];
 
 static bool has_pending_cmd(bus_runtime_t *rt, int ch_idx);
 static void wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
@@ -168,6 +170,117 @@ static void complete_control(const bus_cmd_t *cmd, bool success, uint32_t code,
  }
 }
 
+typedef struct {
+ uint32_t kind;
+ uint8_t tx[CMD_TX_MAX];
+ size_t tx_len;
+ uint32_t read_size;
+ uint32_t rx_timeout_ms;
+ uint32_t post_tx_delay_ms;
+} batch_step_t;
+
+static bool decode_batch_step(const uint8_t *data, size_t len, batch_step_t *step)
+{
+ if (!data || !step) return false;
+ frame_decoder_t dec;
+ frame_field_t field;
+ bool seen[6] = {false};
+ memset(step, 0, sizeof(*step));
+ if (frame_decoder_init_sub(&dec, data, len) != FRAME_OK) return false;
+ for (;;) {
+  frame_err_t err = frame_decoder_next(&dec, &field);
+  if (err == FRAME_DONE) break;
+  if (err != FRAME_OK || field.field_num == 0 || field.field_num > 5 || seen[field.field_num]) return false;
+  seen[field.field_num] = true;
+  if (field.field_num == 2) {
+   if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len > CMD_TX_MAX) return false;
+   memcpy(step->tx, field.value.bytes.ptr, field.value.bytes.len);
+   step->tx_len = field.value.bytes.len;
+   continue;
+  }
+  if (field.wire_type != WIRE_VARINT || field.value.varint > UINT32_MAX) return false;
+  switch (field.field_num) {
+  case 1: step->kind = (uint32_t)field.value.varint; break;
+  case 3: step->read_size = (uint32_t)field.value.varint; break;
+  case 4: step->rx_timeout_ms = (uint32_t)field.value.varint; break;
+  case 5: step->post_tx_delay_ms = (uint32_t)field.value.varint; break;
+  default: break;
+  }
+ }
+ return seen[1] && seen[2] && seen[3] && seen[4] && seen[5] && step->kind <= 3 &&
+        step->tx_len > 0 && step->read_size <= 256 && step->rx_timeout_ms > 0 &&
+        step->rx_timeout_ms <= 30000 && step->post_tx_delay_ms <= 30000;
+}
+
+static bool uart_collect_response(bus_dma_ctx_t *ctx, uint8_t *out, size_t cap,
+                                  uint32_t expected, uint32_t timeout_ms, size_t *out_len)
+{
+ int64_t start = esp_timer_get_time();
+ int64_t last_rx = 0;
+ size_t len = 0;
+ uint8_t buf[128];
+ for (;;) {
+  size_t n = bus_dma_read(ctx, buf, sizeof(buf));
+  if (n > 0) {
+   if (len + n > cap) return false;
+   memcpy(out + len, buf, n);
+   len += n;
+   last_rx = esp_timer_get_time();
+  } else if (len > 0 && last_rx > 0 && esp_timer_get_time() - last_rx >= 10000) {
+   *out_len = len;
+   return expected == 0 || len >= expected;
+  }
+  if ((esp_timer_get_time() - start) / 1000 > (int64_t)timeout_ms) return false;
+  esp_task_wdt_reset();
+  vTaskDelay(pdMS_TO_TICKS(1));
+ }
+}
+
+static bool execute_uart_batch(int ch_idx, bus_dma_ctx_t *ctx,
+                               const bus_cmd_t *cmd, uint8_t *raw, size_t *raw_len,
+                               uint32_t *error_code)
+{
+ if (cmd->plan_step_count < 2 || cmd->plan_step_count > CMD_BATCH_MAX_STEPS || cmd->plan_len == 0) return false;
+ s_plan_active[ch_idx] = true;
+ /* Drain bytes left by a previous request before claiming the sequence. */
+ uint8_t drain[128];
+ while (bus_dma_read(ctx, drain, sizeof(drain)) > 0) { }
+ size_t cursor = 0, encoded = 1;
+ raw[0] = cmd->plan_step_count;
+ for (uint8_t i = 0; i < cmd->plan_step_count; i++) {
+  if (cursor + 2 > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
+  uint16_t step_len = (uint16_t)cmd->plan_data[cursor] | ((uint16_t)cmd->plan_data[cursor + 1] << 8);
+  cursor += 2;
+  if (step_len == 0 || cursor + step_len > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
+  batch_step_t step;
+  if (!decode_batch_step(cmd->plan_data + cursor, step_len, &step)) { *error_code = 0x1100U + i; goto fail; }
+  cursor += step_len;
+  if (bus_dma_write(ctx, step.tx, step.tx_len) != ESP_OK) { *error_code = 0x1200U + i; goto fail; }
+  apply_turnaround_delay(compute_turnaround_us(ctx));
+  if (step.post_tx_delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(step.post_tx_delay_ms));
+  if (encoded + 3 > 256) { *error_code = 0x1300U + i; goto fail; }
+  raw[encoded++] = (uint8_t)step.kind;
+  raw[encoded] = 0;
+  raw[encoded + 1] = 0;
+  size_t response_len = 0;
+  if (!uart_collect_response(ctx, raw + encoded + 2, 256 - encoded - 2,
+                             step.read_size, step.rx_timeout_ms, &response_len)) {
+   *error_code = 0x1400U + i;
+   goto fail;
+  }
+  raw[encoded] = (uint8_t)(response_len & 0xffU);
+  raw[encoded + 1] = (uint8_t)(response_len >> 8);
+  encoded += 2 + response_len;
+ }
+ *raw_len = encoded;
+ s_plan_active[ch_idx] = false;
+ return true;
+fail:
+ s_plan_active[ch_idx] = false;
+ *raw_len = 0;
+ return false;
+}
+
 /* ------------------------------------------------------------------ */
 /*  UART cmd loop                                                     */
 /* ------------------------------------------------------------------ */
@@ -213,6 +326,17 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
    * request/response command before rx_task has consumed the prior response. */
   if (cmd.bus_type == BUS_TYPE_UART && (cmd.type == CMD_SAMPLE || cmd.read_size > 0)) {
    wait_for_uart_response_slot(rt, ch_idx, tag, &cmd);
+  }
+
+  if (cmd.channel_cmd_v2 && cmd.plan_step_count > 0) {
+   uint8_t raw[256];
+   size_t raw_len = 0;
+   uint32_t code = 0x1000;
+   bool ok = cmd.bus_type == BUS_TYPE_UART && execute_uart_batch(ch_idx, ctx, &cmd, raw, &raw_len, &code);
+   complete_control(&cmd, ok, ok ? 0 : code, ok ? raw : NULL, ok ? raw_len : 0);
+   if (ok) scheduler_notify_channel_success(cmd.channel_id);
+   else scheduler_notify_channel_error(cmd.channel_id);
+   continue;
   }
 
   if (cmd.type == CMD_WRITE) {
@@ -444,6 +568,7 @@ static void rx_task(void *pv)
   for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
    if (!rt->bus_ctx[i].initialized) continue;
    if (rt->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+   if (s_plan_active[i]) continue;
 
    reads++;
    size_t n = bus_dma_read(&rt->bus_ctx[i], rx, sizeof(rx));

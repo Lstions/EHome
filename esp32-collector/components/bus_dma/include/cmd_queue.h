@@ -21,6 +21,8 @@ extern "C" {
 /* === Queue sizing === */
 #define CMD_QUEUE_DEPTH  16
 #define CMD_TX_MAX       128
+#define CMD_PLAN_MAX     512
+#define CMD_BATCH_MAX_STEPS 8
 #define CONTROL_SLOT_NONE UINT8_MAX
 
 /* === Command types === */
@@ -63,6 +65,9 @@ typedef struct {
     uart_port_t uart_port;                    /* UART port (UART_NUM_0/1), per-port dispatch */
     bool channel_cmd_v2;                      /* true only for control-slot commands */
     uint8_t control_slot;                     /* ChannelCmdV2 sidecar slot, or CONTROL_SLOT_NONE */
+    uint8_t plan_data[CMD_PLAN_MAX];          /* bounded batch step records */
+    size_t plan_len;
+    uint8_t plan_step_count;
     cmd_type_t type;
 } bus_cmd_t;
 

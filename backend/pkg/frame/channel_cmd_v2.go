@@ -11,7 +11,20 @@ const (
 	ChannelCmdV2MaxTX                  = 128
 	ChannelCmdV2MaxRX                  = 256
 	ChannelCmdV2MaxTimeoutMS           = 30000
+	ChannelCmdV2MaxBatchSteps          = 8
+	ChannelCmdV2MaxBatchBytes          = 512
 )
+
+// ChannelCmdV2Step is one fixed physical transaction in a bounded batch.
+// The step is server-compiled; it is never accepted from browser-provided
+// wire bytes without passing the trusted driver and capability checks.
+type ChannelCmdV2Step struct {
+	Kind          uint32
+	TXData        []byte
+	ReadSize      uint32
+	RXTimeoutMS   uint32
+	PostTXDelayMS uint32
+}
 
 // ChannelCmdV2 is the vendor-neutral, bounded physical transaction envelope.
 // The IDs are byte arrays on purpose: command identity and physical digest are
@@ -30,6 +43,7 @@ type ChannelCmdV2 struct {
 	PostTXDelayMS  uint32
 	RiskClass      uint32 // Phase 2 accepts low risk (0) only.
 	Flags          uint32 // Phase 2 requires zero.
+	Plan           []ChannelCmdV2Step
 }
 
 // ChannelCmdV2Response is the identity-bearing Ack or Final envelope. The
@@ -67,6 +81,15 @@ func EncodeChannelCmdV2(cmd ChannelCmdV2) ([]byte, error) {
 	enc.EncodeVarint(12, uint64(cmd.RiskClass))
 	enc.EncodeVarint(13, uint64(cmd.Flags))
 	enc.EncodeVarint(14, uint64(ChannelCmdV2ProtocolVersion))
+	for _, step := range cmd.Plan {
+		sub := SubEncoder()
+		sub.EncodeVarint(1, uint64(step.Kind))
+		sub.EncodeBytes(2, step.TXData)
+		sub.EncodeVarint(3, uint64(step.ReadSize))
+		sub.EncodeVarint(4, uint64(step.RXTimeoutMS))
+		sub.EncodeVarint(5, uint64(step.PostTXDelayMS))
+		enc.EncodeSubFrame(15, sub.Bytes())
+	}
 	return enc.Bytes(), nil
 }
 
@@ -79,7 +102,7 @@ func DecodeChannelCmdV2(payload []byte) (ChannelCmdV2, error) {
 	if dec.MsgType() != MsgChannelCmdV2 {
 		return cmd, fmt.Errorf("unexpected message type 0x%02x", dec.MsgType())
 	}
-	seen := [15]bool{}
+	seen := [16]bool{}
 	for {
 		field, err := dec.NextField()
 		if errors.Is(err, ErrEndOfFrame) {
@@ -88,8 +111,19 @@ func DecodeChannelCmdV2(payload []byte) (ChannelCmdV2, error) {
 		if err != nil {
 			return cmd, err
 		}
-		if field.FieldNum == 0 || field.FieldNum > 14 || seen[field.FieldNum] {
+		if field.FieldNum == 0 || field.FieldNum > 15 || (field.FieldNum != 15 && seen[field.FieldNum]) {
 			return cmd, fmt.Errorf("unknown or duplicate field %d", field.FieldNum)
+		}
+		if field.FieldNum == 15 {
+			if field.WireType != WireLengthDelimited || len(cmd.Plan) >= ChannelCmdV2MaxBatchSteps {
+				return cmd, fmt.Errorf("invalid batch step")
+			}
+			step, err := decodeChannelCmdV2Step(GetBytes(field))
+			if err != nil {
+				return cmd, err
+			}
+			cmd.Plan = append(cmd.Plan, step)
+			continue
 		}
 		seen[field.FieldNum] = true
 		switch field.FieldNum {
@@ -157,6 +191,61 @@ func DecodeChannelCmdV2(payload []byte) (ChannelCmdV2, error) {
 		return cmd, err
 	}
 	return cmd, nil
+}
+
+func decodeChannelCmdV2Step(data []byte) (ChannelCmdV2Step, error) {
+	var step ChannelCmdV2Step
+	dec, err := NewSubDecoder(data)
+	if err != nil {
+		return step, err
+	}
+	seen := [6]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			return step, err
+		}
+		if field.FieldNum == 0 || field.FieldNum > 5 || seen[field.FieldNum] {
+			return step, fmt.Errorf("invalid batch step field %d", field.FieldNum)
+		}
+		seen[field.FieldNum] = true
+		if field.FieldNum == 2 {
+			if field.WireType != WireLengthDelimited {
+				return step, fmt.Errorf("batch tx wire type")
+			}
+			step.TXData = append([]byte(nil), GetBytes(field)...)
+			continue
+		}
+		if field.WireType != WireVarint {
+			return step, fmt.Errorf("batch step field %d wire type", field.FieldNum)
+		}
+		value := GetUint64(field)
+		if value > uint64(^uint32(0)) {
+			return step, fmt.Errorf("batch step field %d overflow", field.FieldNum)
+		}
+		switch field.FieldNum {
+		case 1:
+			step.Kind = uint32(value)
+		case 3:
+			step.ReadSize = uint32(value)
+		case 4:
+			step.RXTimeoutMS = uint32(value)
+		case 5:
+			step.PostTXDelayMS = uint32(value)
+		}
+	}
+	for i := uint8(1); i <= 5; i++ {
+		if !seen[i] {
+			return step, fmt.Errorf("missing batch step field %d", i)
+		}
+	}
+	if err := validateChannelCmdV2Step(step); err != nil {
+		return step, err
+	}
+	return step, nil
 }
 
 func DecodeChannelCmdV2Response(payload []byte) (ChannelCmdV2Response, error) {
@@ -267,6 +356,29 @@ func validateChannelCmdV2(cmd ChannelCmdV2) error {
 	}
 	if cmd.RiskClass != 0 || cmd.Flags != 0 {
 		return fmt.Errorf("unsupported risk class or flags")
+	}
+	if len(cmd.Plan) > ChannelCmdV2MaxBatchSteps {
+		return fmt.Errorf("too many batch steps")
+	}
+	planBytes := 0
+	for _, step := range cmd.Plan {
+		if err := validateChannelCmdV2Step(step); err != nil {
+			return err
+		}
+		// A nested step is bounded by its fixed fields plus the TX payload.
+		planBytes += len(step.TXData) + 32
+	}
+	if planBytes > ChannelCmdV2MaxBatchBytes {
+		return fmt.Errorf("batch plan exceeds %d bytes", ChannelCmdV2MaxBatchBytes)
+	}
+	return nil
+}
+
+func validateChannelCmdV2Step(step ChannelCmdV2Step) error {
+	if step.Kind > 3 || len(step.TXData) == 0 || len(step.TXData) > ChannelCmdV2MaxTX ||
+		step.ReadSize > ChannelCmdV2MaxRX || step.RXTimeoutMS == 0 ||
+		step.RXTimeoutMS > ChannelCmdV2MaxTimeoutMS || step.PostTXDelayMS > ChannelCmdV2MaxTimeoutMS {
+		return fmt.Errorf("bounded batch step fields invalid")
 	}
 	return nil
 }

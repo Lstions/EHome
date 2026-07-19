@@ -15,7 +15,7 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     await page.goto('/edge-device/1')
   }
 
-  async function operation(page: Page, buttonName: string, params: Record<string, unknown> = {}, result: { name: string; value: number; unit: string }) {
+  async function operation(page: Page, buttonName: string, params: Record<string, unknown> = {}, result: { name: string; value: number; unit: string } | Array<{ name: string; value: number; unit: string }>) {
     const button = page.getByRole('button', { name: buttonName, exact: true })
     await expect(button).toBeVisible({ timeout: 20_000 })
     await expect(button).toBeEnabled()
@@ -35,7 +35,7 @@ test.describe('SN-3001 开发实机写入与读回', () => {
       await form.getByRole('button', { name: '继续', exact: true }).click()
     }
 
-    if (result.name === 'write_ack') {
+    if (Array.isArray(result) ? result.some(item => item.name === 'reset_ack') : result.name === 'write_ack') {
       const confirmation = page.locator('.el-dialog:visible').last()
       await confirmation.getByLabel('操作理由').fill(`SN-3001 实机验证：${buttonName} 后读回并恢复`)
       await confirmation.getByRole('button', { name: '确认并排队', exact: true }).click()
@@ -57,7 +57,9 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     }, { timeout: 20_000 }).toContain('SUCCEEDED')
     const newest = page.locator('.el-timeline-item').first()
     await expect(newest).toContainText('SUCCEEDED')
-    await expect(newest).toContainText(`${result.name}=${result.value}${result.unit}`)
+    for (const item of (Array.isArray(result) ? result : [result])) {
+      await expect(newest).toContainText(`${item.name}=${item.value}${item.unit}`)
+    }
 
     // Return the command id through the REST view as an additional durable
     // assertion; the visible timeline is the browser-facing evidence.
@@ -73,7 +75,10 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     test.setTimeout(120_000)
     await login(page)
 
-    await operation(page, '发送雨量清零', {}, { name: 'write_ack', value: 1, unit: 'ack' })
+    await operation(page, '清零累计雨量', {}, [
+      { name: 'rainfall', value: 0, unit: 'mm' },
+      { name: 'reset_ack', value: 1, unit: 'ack' },
+    ])
     await page.getByRole('button', { name: '读取累计雨量', exact: true }).click()
     await expect.poll(async () => page.locator('.el-timeline-item').first().textContent(), { timeout: 20_000 }).toContain('rainfall=0mm')
 
@@ -100,5 +105,14 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 4800, unit: 'bit/s' })
 
     await page.screenshot({ path: '/tmp/e2e-shots/sn3001-real-writes.png', fullPage: true })
+  })
+
+  test('单独清零为重启回放准备持久命令', async ({ page }) => {
+    test.setTimeout(60_000)
+    await login(page)
+    await operation(page, '清零累计雨量', {}, [
+      { name: 'rainfall', value: 0, unit: 'mm' },
+      { name: 'reset_ack', value: 1, unit: 'ack' },
+    ])
   })
 })

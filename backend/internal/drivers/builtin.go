@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -486,6 +487,30 @@ func (d *SN3001RainDriver) CompileControlAction(actionID string, params json.Raw
 }
 
 func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	if actionID == "reset_rainfall" {
+		steps, err := decodeSN3001BatchRaw(raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(steps) != 3 {
+			return nil, fmt.Errorf("sn3001_rain: reset requires three verified responses")
+		}
+		if _, err := verifySN3001ReadRainfall(steps[0]); err != nil {
+			return nil, fmt.Errorf("sn3001_rain: pre-read: %w", err)
+		}
+		clear := modbusWriteFrame(0x01, 0x0000, 0x005a)
+		if !bytes.Equal(steps[1], clear) {
+			return nil, fmt.Errorf("sn3001_rain: clear response does not echo request")
+		}
+		final, err := verifySN3001ReadRainfall(steps[2])
+		if err != nil || final != 0 {
+			if err != nil {
+				return nil, fmt.Errorf("sn3001_rain: readback: %w", err)
+			}
+			return nil, fmt.Errorf("sn3001_rain: readback rainfall is %v, want 0", final)
+		}
+		return []SensorData{{Name: "rainfall", Value: 0, Unit: "mm"}, {Name: "reset_ack", Value: 1, Unit: "ack"}}, nil
+	}
 	if len(raw) < 5 {
 		return nil, fmt.Errorf("sn3001_rain: response too short")
 	}
@@ -546,6 +571,40 @@ func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawM
 	default:
 		return nil, fmt.Errorf("unknown SN-3001 action %q", actionID)
 	}
+}
+
+func decodeSN3001BatchRaw(raw []byte) ([][]byte, error) {
+	if len(raw) < 1 || raw[0] < 2 || raw[0] > 8 {
+		return nil, fmt.Errorf("sn3001_rain: invalid batch response")
+	}
+	steps := make([][]byte, 0, raw[0])
+	pos := 1
+	for i := 0; i < int(raw[0]); i++ {
+		if pos+3 > len(raw) {
+			return nil, fmt.Errorf("sn3001_rain: truncated batch response")
+		}
+		length := int(binary.LittleEndian.Uint16(raw[pos+1 : pos+3]))
+		pos += 3 // kind byte plus little-endian length
+		if length == 0 || pos+length > len(raw) {
+			return nil, fmt.Errorf("sn3001_rain: invalid batch step length")
+		}
+		steps = append(steps, append([]byte(nil), raw[pos:pos+length]...))
+		pos += length
+	}
+	if pos != len(raw) {
+		return nil, fmt.Errorf("sn3001_rain: trailing batch response bytes")
+	}
+	return steps, nil
+}
+
+func verifySN3001ReadRainfall(raw []byte) (float64, error) {
+	if len(raw) != 7 || raw[0] != 0x01 || raw[1] != 0x03 || raw[2] != 0x02 {
+		return 0, fmt.Errorf("invalid rainfall response")
+	}
+	if got, want := binary.LittleEndian.Uint16(raw[5:]), parser.ModbusCRC16(raw[:5]); got != want {
+		return 0, fmt.Errorf("rainfall CRC %04x, want %04x", got, want)
+	}
+	return float64(binary.BigEndian.Uint16(raw[3:5])) / 10, nil
 }
 
 // CompileControlActionPlan compiles the confirmed SN-3001 clear workflow.

@@ -484,6 +484,24 @@ func TestSN3001ProtocolActionGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestSN3001ResetBatchVerificationGoldenVector(t *testing.T) {
+	d := &SN3001RainDriver{}
+	read := []byte{0x01, 0x03, 0x02, 0x00, 0x00, 0xB8, 0x44}
+	clear := []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}
+	raw := append([]byte{3, 1, 7, 0}, read...)
+	raw = append(raw, 2, 8, 0)
+	raw = append(raw, clear...)
+	raw = append(raw, 3, 7, 0)
+	raw = append(raw, read...)
+	got, err := d.VerifyControlAction("reset_rainfall", json.RawMessage(`{}`), raw)
+	if err != nil {
+		t.Fatalf("VerifyControlAction error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "rainfall" || got[0].Value != 0 || got[1].Name != "reset_ack" || got[1].Value != 1 {
+		t.Fatalf("verified result = %+v", got)
+	}
+}
+
 // === Registry edge cases ===
 
 func TestRegistry_GetNonExistent(t *testing.T) {

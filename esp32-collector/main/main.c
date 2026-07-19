@@ -97,7 +97,7 @@ bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot)
     if (!cmd) return false;
     return bus_manager_on_channel_cmd_v2(&app_state_get()->bus_runtime, cmd->channel_id,
         cmd->tx_data, cmd->tx_len, cmd->read_size, cmd->rx_timeout_ms,
-        cmd->post_tx_delay_ms, slot);
+        cmd->post_tx_delay_ms, cmd->plan_data, cmd->plan_len, cmd->plan_step_count, slot);
 }
 
 void on_query_resources_received(const char *request_id)

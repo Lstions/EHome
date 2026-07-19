@@ -374,21 +374,28 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
 bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
                                    const uint8_t *data, size_t len, uint32_t read_size,
                                    uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
+                                   const uint8_t *plan_data, size_t plan_len,
+                                   uint8_t plan_step_count,
                                    uint8_t control_slot)
 {
     if (!rt || control_slot == CONTROL_SLOT_NONE ||
-        !legacy_write_args_valid(ch, data, len, read_size, rx_timeout_ms, CMD_TX_MAX)) return false;
+        !legacy_write_args_valid(ch, data, len, read_size, rx_timeout_ms, CMD_TX_MAX) ||
+        plan_len > CMD_PLAN_MAX || plan_step_count > CMD_BATCH_MAX_STEPS ||
+        (plan_step_count > 0 && (!plan_data || plan_step_count < 2))) return false;
     bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
     if (!bctx) return false;
+    if (plan_step_count > 0 && bctx->bus_type != BUS_TYPE_UART) return false;
     bus_cmd_t cmd = { .channel_id = ch, .bus_type = bctx->bus_type, .tx_len = len,
         .delay_ms = post_tx_delay_ms, .read_size = read_size, .rx_timeout_ms = rx_timeout_ms,
-        .channel_cmd_v2 = true, .control_slot = control_slot, .type = CMD_WRITE };
+        .channel_cmd_v2 = true, .control_slot = control_slot, .plan_len = plan_len,
+        .plan_step_count = plan_step_count, .type = CMD_WRITE };
     if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
     if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) return false;
     /* Only UART has an explicit TX→RX turnaround phase in the shared worker.
      * SPI/I2C transactions are atomic and therefore reject a requested delay. */
     if (cmd.bus_type != BUS_TYPE_UART && post_tx_delay_ms != 0) return false;
     memcpy(cmd.tx_data, data, len);
+    if (plan_len > 0) memcpy(cmd.plan_data, plan_data, plan_len);
     QueueHandle_t target_q = NULL;
     switch (cmd.bus_type) {
     case BUS_TYPE_UART:

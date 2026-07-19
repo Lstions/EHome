@@ -1,6 +1,10 @@
 #include "msg_handler_internal.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>
+#ifdef ESP_PLATFORM
+#include "nvs.h"
+#endif
 
 /* Host decoder tests link this handler without the MQTT transport component;
  * production provides the strong checked publisher. */
@@ -20,6 +24,9 @@ __attribute__((weak)) esp_err_t msg_handler_publish_checked(const uint8_t *data,
 #define V2_ERR_BUSY 1004U
 #define V2_ERR_FINAL_OVERFLOW 1005U
 #define V2_ERR_EXPIRED 1006U
+#define V2_ERR_NVS 1008U
+#define V2_PERSIST_MAGIC 0x56325250UL
+#define V2_PERSIST_NS "ctrl_v2"
 
 typedef enum {
     V2_SLOT_FREE = 0,
@@ -56,6 +63,73 @@ static uint32_t s_accepted_count;
 static uint32_t s_rejected_count;
 static uint32_t s_completed_count;
 static uint32_t s_replayed_count;
+static bool s_persistent_loaded;
+
+typedef struct {
+    uint32_t magic;
+    uint8_t state; /* 1 = admitted/unknown, 2 = final */
+    uint8_t reserved[3];
+    channel_cmd_v2_t cmd;
+    bool final_success;
+    uint32_t final_error;
+    uint8_t final_raw[V2_MAX_RX];
+    size_t final_raw_len;
+} v2_persist_record_t;
+
+#ifdef ESP_PLATFORM
+static bool persist_read(uint8_t index, v2_persist_record_t *record)
+{
+    char key[5];
+    snprintf(key, sizeof(key), "s%u", (unsigned)index);
+    nvs_handle_t handle;
+    if (nvs_open(V2_PERSIST_NS, NVS_READONLY, &handle) != ESP_OK) return false;
+    size_t len = sizeof(*record);
+    esp_err_t err = nvs_get_blob(handle, key, record, &len);
+    nvs_close(handle);
+    return err == ESP_OK && len == sizeof(*record) && record->magic == V2_PERSIST_MAGIC;
+}
+
+static bool persist_write(uint8_t index, const v2_control_slot_t *slot, uint8_t state)
+{
+    char key[5];
+    snprintf(key, sizeof(key), "s%u", (unsigned)index);
+    v2_persist_record_t record = {0};
+    record.magic = V2_PERSIST_MAGIC;
+    record.state = state;
+    record.cmd = slot->cmd;
+    record.final_success = slot->final_success;
+    record.final_error = slot->final_error;
+    record.final_raw_len = slot->final_raw_len;
+    if (record.final_raw_len > V2_MAX_RX) record.final_raw_len = 0;
+    if (record.final_raw_len > 0) memcpy(record.final_raw, slot->final_raw, record.final_raw_len);
+    nvs_handle_t handle;
+    if (nvs_open(V2_PERSIST_NS, NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t err = nvs_set_blob(handle, key, &record, sizeof(record));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+#else
+static bool persist_read(uint8_t index, v2_persist_record_t *record) { (void)index; (void)record; return false; }
+static bool persist_write(uint8_t index, const v2_control_slot_t *slot, uint8_t state) { (void)index; (void)slot; (void)state; return true; }
+#endif
+
+static void load_persistent_slots(void)
+{
+    if (s_persistent_loaded) return;
+    s_persistent_loaded = true;
+    for (uint8_t i = 0; i < CHANNEL_CMD_V2_SLOT_COUNT; i++) {
+        v2_persist_record_t record;
+        if (!persist_read(i, &record)) continue;
+        s_slots[i].cmd = record.cmd;
+        s_slots[i].final_success = record.state == 2 && record.final_success;
+        s_slots[i].final_error = record.state == 2 ? record.final_error : V2_ERR_NVS;
+        s_slots[i].final_raw_len = record.state == 2 && record.final_raw_len <= V2_MAX_RX ? record.final_raw_len : 0;
+        if (s_slots[i].final_raw_len > 0) memcpy(s_slots[i].final_raw, record.final_raw, s_slots[i].final_raw_len);
+        s_slots[i].completed_order = i + 1;
+        __atomic_store_n(&s_slots[i].state, V2_SLOT_FINAL, __ATOMIC_RELEASE);
+    }
+}
 
 static uint32_t next_event_sequence(void)
 {
@@ -109,14 +183,27 @@ void handler_channel_cmd_v2_get_metrics(channel_cmd_v2_metrics_t *metrics)
 
 static bool same_identity(const channel_cmd_v2_t *a, const channel_cmd_v2_t *b)
 {
-    return a->attempt == b->attempt && strcmp(a->boot_id, b->boot_id) == 0 &&
-           memcmp(a->command_id, b->command_id, sizeof(a->command_id)) == 0 &&
+    /* attempt, boot_id and deadline are delivery metadata.  A retry after a
+     * node reboot may change all three, but the physical command identity
+     * must still be replayed from the durable slot rather than transmitted. */
+    return memcmp(a->command_id, b->command_id, sizeof(a->command_id)) == 0 &&
            memcmp(a->payload_digest, b->payload_digest, sizeof(a->payload_digest)) == 0 &&
            a->edge_device_id == b->edge_device_id && a->channel_id == b->channel_id &&
-           a->deadline_unix_ms == b->deadline_unix_ms && a->tx_len == b->tx_len &&
+           a->tx_len == b->tx_len &&
            memcmp(a->tx_data, b->tx_data, a->tx_len) == 0 &&
            a->read_size == b->read_size && a->rx_timeout_ms == b->rx_timeout_ms &&
-           a->post_tx_delay_ms == b->post_tx_delay_ms;
+           a->post_tx_delay_ms == b->post_tx_delay_ms && a->plan_len == b->plan_len &&
+           memcmp(a->plan_data, b->plan_data, a->plan_len) == 0;
+}
+
+static bool has_persisted_identity(const channel_cmd_v2_t *cmd)
+{
+    for (uint8_t i = 0; i < CHANNEL_CMD_V2_SLOT_COUNT; i++) {
+        uint32_t state = __atomic_load_n(&s_slots[i].state, __ATOMIC_ACQUIRE);
+        if (state != V2_SLOT_FREE && memcmp(s_slots[i].cmd.command_id, cmd->command_id, sizeof(cmd->command_id)) == 0 &&
+            memcmp(s_slots[i].cmd.payload_digest, cmd->payload_digest, sizeof(cmd->payload_digest)) == 0) return true;
+    }
+    return false;
 }
 
 static bool same_command_id(const channel_cmd_v2_t *a, const channel_cmd_v2_t *b)
@@ -209,6 +296,12 @@ void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_
     entry->final_raw_len = raw_len;
     if (raw_len && raw_response) memcpy(entry->final_raw, raw_response, raw_len);
     entry->completed_order = __atomic_add_fetch(&s_completed_sequence, 1, __ATOMIC_RELAXED);
+    if (!persist_write(slot, entry, 2)) {
+        success = false;
+        entry->final_success = false;
+        entry->final_error = V2_ERR_NVS;
+        entry->final_raw_len = 0;
+    }
     __atomic_store_n(&entry->state, V2_SLOT_FINAL, __ATOMIC_RELEASE);
 	__atomic_add_fetch(&s_completed_count, 1, __ATOMIC_RELAXED);
     if (!send_response(MSG_CHANNEL_CMD_V2_FINAL, &entry->cmd, success, entry->final_error,
@@ -217,12 +310,55 @@ void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_
     }
 }
 
+static bool validate_batch_step(const uint8_t *data, size_t len)
+{
+    frame_decoder_t sub;
+    frame_field_t field;
+    bool seen[6] = {false};
+    uint32_t kind = 0, read_size = 0, timeout = 0, delay = 0;
+    size_t tx_len = 0;
+    if (!data || len == 0 || frame_decoder_init_sub(&sub, data, len) != FRAME_OK) return false;
+    for (;;) {
+        frame_err_t err = frame_decoder_next(&sub, &field);
+        if (err == FRAME_DONE) break;
+        if (err != FRAME_OK || field.field_num == 0 || field.field_num > 5 || seen[field.field_num]) return false;
+        seen[field.field_num] = true;
+        if (field.field_num == 2) {
+            if (field.wire_type != WIRE_LENGTH_DELIMITED || field.value.bytes.len == 0 || field.value.bytes.len > 128) return false;
+            tx_len = field.value.bytes.len;
+            continue;
+        }
+        if (field.wire_type != WIRE_VARINT || field.value.varint > UINT32_MAX) return false;
+        switch (field.field_num) {
+        case 1: kind = (uint32_t)field.value.varint; break;
+        case 3: read_size = (uint32_t)field.value.varint; break;
+        case 4: timeout = (uint32_t)field.value.varint; break;
+        case 5: delay = (uint32_t)field.value.varint; break;
+        default: break;
+        }
+    }
+    if (!seen[1] || !seen[2] || !seen[3] || !seen[4] || !seen[5]) return false;
+    return kind <= 3 && tx_len > 0 && read_size <= 256 && timeout > 0 && timeout <= 30000 && delay <= 30000;
+}
+
 void handler_channel_cmd_v2_process(frame_decoder_t *dec)
 {
+    load_persistent_slots();
     channel_cmd_v2_t cmd = {0}; uint32_t seen = 0; frame_field_t f; frame_err_t err;
     while ((err = frame_decoder_next(dec, &f)) == FRAME_OK) {
-        if (f.field_num == 0 || f.field_num > 14 || (seen & (1U << f.field_num))) goto malformed;
+        if (f.field_num == 0 || f.field_num > 15 || (f.field_num != CHANNEL_CMD_V2_F_BATCH_STEP && (seen & (1U << f.field_num)))) goto malformed;
         seen |= 1U << f.field_num;
+        if (f.field_num == CHANNEL_CMD_V2_F_BATCH_STEP) {
+            if (f.wire_type != WIRE_LENGTH_DELIMITED || cmd.plan_step_count >= CHANNEL_CMD_V2_MAX_BATCH_STEPS ||
+                f.value.bytes.len > 160 || cmd.plan_len + 2 + f.value.bytes.len > CHANNEL_CMD_V2_MAX_PLAN_BYTES ||
+                !validate_batch_step(f.value.bytes.ptr, f.value.bytes.len)) goto malformed;
+            cmd.plan_data[cmd.plan_len] = (uint8_t)(f.value.bytes.len & 0xffU);
+            cmd.plan_data[cmd.plan_len + 1] = (uint8_t)(f.value.bytes.len >> 8);
+            memcpy(cmd.plan_data + cmd.plan_len + 2, f.value.bytes.ptr, f.value.bytes.len);
+            cmd.plan_len += 2 + f.value.bytes.len;
+            cmd.plan_step_count++;
+            continue;
+        }
         if (f.field_num == 1 || f.field_num == 2 || f.field_num == 4 || f.field_num == 8) {
             if (f.wire_type != WIRE_LENGTH_DELIMITED) goto malformed;
             const uint8_t *p=f.value.bytes.ptr; size_t n=f.value.bytes.len;
@@ -246,7 +382,9 @@ void handler_channel_cmd_v2_process(frame_decoder_t *dec)
     const uint32_t required=(1U<<1)|(1U<<2)|(1U<<3)|(1U<<4)|(1U<<5)|(1U<<6)|(1U<<7)|(1U<<8)|(1U<<9)|(1U<<10)|(1U<<11)|(1U<<12)|(1U<<13)|(1U<<14);
     if ((seen&required)!=required || !cmd.attempt || !cmd.edge_device_id || !cmd.channel_id || !cmd.deadline_unix_ms || cmd.read_size>V2_MAX_RX || !cmd.rx_timeout_ms || cmd.rx_timeout_ms>V2_MAX_TIMEOUT || cmd.post_tx_delay_ms>V2_MAX_TIMEOUT) goto malformed;
     const char *boot=channel_cmd_v2_current_boot_id();
-    if (!boot || strcmp(boot,cmd.boot_id)) { send_ack(&cmd,false,V2_ERR_UNSUPPORTED);return; }
+    if (!boot || (strcmp(boot,cmd.boot_id) != 0 && !has_persisted_identity(&cmd))) {
+        send_ack(&cmd,false,V2_ERR_UNSUPPORTED);return;
+    }
     uint64_t now_ms = channel_cmd_v2_current_time_ms();
     if (now_ms == 0 || cmd.deadline_unix_ms <= now_ms) {
         ESP_LOGW(TAG, "Rejecting expired V2 command: deadline=%llu now=%llu",
@@ -275,8 +413,20 @@ void handler_channel_cmd_v2_process(frame_decoder_t *dec)
              (unsigned long)cmd.channel_id, (unsigned long)cmd.edge_device_id,
              (unsigned)cmd.tx_len, (unsigned long)cmd.read_size,
              (unsigned long)cmd.rx_timeout_ms, (unsigned long)cmd.post_tx_delay_ms, slot);
-    if (!on_channel_cmd_v2_received(&cmd, (uint8_t)slot)) {
+    if (!persist_write((uint8_t)slot, &s_slots[slot], 1)) {
         __atomic_store_n(&s_slots[slot].state, V2_SLOT_FREE, __ATOMIC_RELEASE);
+        send_ack(&cmd, false, V2_ERR_NVS);
+        return;
+    }
+    if (!on_channel_cmd_v2_received(&cmd, (uint8_t)slot)) {
+        /* Keep the durable reservation as UNKNOWN: admission reached the
+         * physical boundary but the bus queue rejected it. A retried command
+         * must never issue a second write after a reboot. */
+        s_slots[slot].final_success = false;
+        s_slots[slot].final_error = V2_ERR_UNSUPPORTED;
+        s_slots[slot].final_raw_len = 0;
+        (void)persist_write((uint8_t)slot, &s_slots[slot], 2);
+        __atomic_store_n(&s_slots[slot].state, V2_SLOT_FINAL, __ATOMIC_RELEASE);
         send_ack(&cmd,false,V2_ERR_UNSUPPORTED); return;
     }
     send_ack(&cmd,true,0); return;

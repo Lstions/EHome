@@ -227,8 +227,12 @@ func decodeCommandEngine(data []byte) (commandEngineReport, error) {
 	if report.MaxTXBytes == 0 || report.MaxTXBytes > 128 || report.MaxRXBytes == 0 || report.MaxRXBytes > 256 || report.MaxStepTimeoutMS == 0 || report.MaxStepTimeoutMS > 30000 {
 		return report, fmt.Errorf("reported bounds invalid")
 	}
-	if report.SupportsBoundedBatch || report.MaxBatchSteps != 0 {
-		return report, fmt.Errorf("bounded batch must remain disabled in Phase 2 single-step engine")
+	if report.SupportsBoundedBatch {
+		if report.MaxBatchSteps < 2 || report.MaxBatchSteps > 8 {
+			return report, fmt.Errorf("bounded batch max steps invalid")
+		}
+	} else if report.MaxBatchSteps != 0 {
+		return report, fmt.Errorf("max_batch_steps requires bounded batch capability")
 	}
 	if report.SupportsChannelCmdV2 && !report.SupportsFinally {
 		return report, fmt.Errorf("ChannelCmdV2 requires final capability")

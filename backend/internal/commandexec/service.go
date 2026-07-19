@@ -126,10 +126,10 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 				capabilityStale = true
 			}
 		} else if params, err := deviceaction.CanonicalizeParams(definition.InputSchema, nil); err == nil {
-			step, compileErr := definition.Compile(params)
-			if compileErr != nil || !stepFitsCapabilities(step, capabilities) {
+			compileErr := definitionFitsCapabilities(definition, params, capabilities)
+			if compileErr != nil {
 				item.Available = false
-				item.Reason = "action exceeds node capability"
+				item.Reason = compileErr.Error()
 			}
 		}
 		items = append(items, item)
@@ -204,8 +204,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		if err != nil {
 			return ErrActionUnavailable
 		}
-		step, err := def.Compile(params)
-		if err != nil || !stepFitsCapabilities(step, capabilities) {
+		if err := definitionFitsCapabilities(def, params, capabilities); err != nil {
 			return ErrActionUnavailable
 		}
 		if confirmationRequired(def.Risk) {
@@ -418,6 +417,35 @@ func stepFitsCapabilities(step deviceaction.SingleStep, capabilities commandEngi
 		step.ReadSize <= capabilities.MaxRXBytes && step.RXTimeoutMS > 0 &&
 		step.RXTimeoutMS <= capabilities.MaxStepTimeoutMS &&
 		step.PostTXDelayMS <= capabilities.MaxStepTimeoutMS
+}
+
+func definitionFitsCapabilities(def deviceaction.Definition, params json.RawMessage, capabilities commandEngineCapabilities) error {
+	if def.ExecutionShape == "bounded_sequence" {
+		if !capabilities.SupportsBoundedBatch || capabilities.MaxBatchSteps == 0 {
+			return fmt.Errorf("bounded batch capability is unavailable")
+		}
+		plan, err := def.CompilePlan(params)
+		if err != nil {
+			return err
+		}
+		if len(plan.Steps) > int(capabilities.MaxBatchSteps) {
+			return fmt.Errorf("action exceeds node batch-step capability")
+		}
+		for _, planStep := range plan.Steps {
+			if !stepFitsCapabilities(planStep.SingleStep, capabilities) {
+				return fmt.Errorf("action exceeds current node capability")
+			}
+		}
+		return nil
+	}
+	step, err := def.Compile(params)
+	if err != nil || !stepFitsCapabilities(step, capabilities) {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("action exceeds current node capability")
+	}
+	return nil
 }
 
 func newCommandID() (string, error) {

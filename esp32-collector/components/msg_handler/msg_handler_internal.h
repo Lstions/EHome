@@ -194,6 +194,7 @@ typedef enum {
     CHANNEL_CMD_V2_F_RISK_CLASS       = 12,
     CHANNEL_CMD_V2_F_FLAGS            = 13,
     CHANNEL_CMD_V2_F_PROTOCOL_VERSION = 14,
+    CHANNEL_CMD_V2_F_BATCH_STEP        = 15,
 } channel_cmd_v2_field_t;
 
 /* ChannelCmdV2Ack (0x16) / ChannelCmdV2Final (0x17) identity fields */
@@ -209,6 +210,9 @@ typedef enum {
     CHANNEL_CMD_V2_RSP_F_REPLAYED       = 9,
 } channel_cmd_v2_response_field_t;
 
+#define CHANNEL_CMD_V2_MAX_PLAN_BYTES 512U
+#define CHANNEL_CMD_V2_MAX_BATCH_STEPS 8U
+
 typedef struct {
     uint8_t command_id[16];
     uint8_t payload_digest[16];
@@ -222,6 +226,9 @@ typedef struct {
     uint32_t read_size;
     uint32_t rx_timeout_ms;
     uint32_t post_tx_delay_ms;
+    uint8_t plan_data[CHANNEL_CMD_V2_MAX_PLAN_BYTES]; /* repeated step subframes, each prefixed by LE16 length */
+    size_t plan_len;
+    uint8_t plan_step_count;
 } channel_cmd_v2_t;
 
 /* Aggregate-only V2 control counters.  They deliberately contain no command

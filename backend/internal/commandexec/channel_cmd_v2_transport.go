@@ -32,7 +32,9 @@ type ChannelCmdV2Transport struct {
 
 type commandEngineCapabilities struct {
 	SupportsChannelCmdV2 bool   `json:"supports_channel_cmd_v2"`
+	SupportsBoundedBatch bool   `json:"supports_bounded_batch"`
 	SupportsFinally      bool   `json:"supports_finally"`
+	MaxBatchSteps        uint32 `json:"max_batch_steps"`
 	MaxTXBytes           uint32 `json:"max_tx_bytes"`
 	MaxRXBytes           uint32 `json:"max_rx_bytes"`
 	MaxStepTimeoutMS     uint32 `json:"max_step_timeout_ms"`
@@ -82,11 +84,11 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if !ok || !definition.Enabled || definition.Version != execution.ActionVersion || definition.Transport != deviceaction.ChannelCmdV2Adapter {
 		return DispatchResult{}, fmt.Errorf("trusted action definition is unavailable")
 	}
-	if definition.ExecutionShape != "single" {
-		return DispatchResult{}, fmt.Errorf("bounded action plan transport is not advertised by this node")
+	if definition.ExecutionShape != "single" && definition.ExecutionShape != "bounded_sequence" {
+		return DispatchResult{}, fmt.Errorf("unsupported action execution shape")
 	}
 	devHighRisk := os.Getenv("EHOME_ENV") == "development" && os.Getenv("EHOME_ENABLE_HIGH_RISK_ACTIONS") == "true" && definition.Verification != "none"
-	if (definition.Semantics != "read" || definition.Risk != "low") && !devHighRisk {
+	if (definition.Semantics != "read" || definition.Risk != "low") && !devHighRisk && definition.ExecutionShape != "bounded_sequence" {
 		return DispatchResult{}, fmt.Errorf("action requires the future high-risk command engine")
 	}
 	bootID, capabilities, err := currentCapabilities(edge.Node, t.now)
@@ -100,12 +102,34 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("persisted action parameters are invalid: %w", err)
 	}
-	step, err := definition.Compile(params)
-	if err != nil {
-		return DispatchResult{}, err
-	}
-	if !stepFitsCapabilities(step, capabilities) {
-		return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
+	var step deviceaction.SingleStep
+	var batch []frame.ChannelCmdV2Step
+	if definition.ExecutionShape == "bounded_sequence" {
+		if !capabilities.SupportsBoundedBatch || capabilities.MaxBatchSteps == 0 {
+			return DispatchResult{}, fmt.Errorf("bounded batch capability is unavailable")
+		}
+		plan, err := definition.CompilePlan(params)
+		if err != nil {
+			return DispatchResult{}, err
+		}
+		if len(plan.Steps) > int(capabilities.MaxBatchSteps) {
+			return DispatchResult{}, fmt.Errorf("action exceeds node batch-step capability")
+		}
+		for _, planStep := range plan.Steps {
+			if !stepFitsCapabilities(planStep.SingleStep, capabilities) {
+				return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
+			}
+			batch = append(batch, frame.ChannelCmdV2Step{Kind: planStepKindCode(planStep.Kind), TXData: planStep.SingleStep.TXData, ReadSize: planStep.SingleStep.ReadSize, RXTimeoutMS: planStep.SingleStep.RXTimeoutMS, PostTXDelayMS: planStep.SingleStep.PostTXDelayMS})
+		}
+		step = plan.Steps[0].SingleStep
+	} else {
+		step, err = definition.Compile(params)
+		if err != nil {
+			return DispatchResult{}, err
+		}
+		if !stepFitsCapabilities(step, capabilities) {
+			return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
+		}
 	}
 	commandID, err := uuidBytes(execution.CommandID)
 	if err != nil {
@@ -124,6 +148,7 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 		BootID: bootID, EdgeDeviceID: uint32(edge.ID), ChannelID: uint32(edge.ChannelID),
 		DeadlineUnixMS: uint64(deadline.UnixMilli()), TXData: append([]byte(nil), step.TXData...),
 		ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS,
+		Plan: batch,
 	})
 	if err != nil {
 		return DispatchResult{}, err
@@ -146,6 +171,21 @@ func currentCapabilities(node models.Node, now func() time.Time) (string, comman
 		return "", capabilities, fmt.Errorf("node does not support ChannelCmdV2")
 	}
 	return node.BootID, capabilities, nil
+}
+
+func planStepKindCode(kind string) uint32 {
+	switch kind {
+	case "read":
+		return 0
+	case "write":
+		return 1
+	case "readback":
+		return 2
+	case "finally":
+		return 3
+	default:
+		return 0
+	}
 }
 
 func uuidBytes(value string) ([16]byte, error) {

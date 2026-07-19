@@ -12,10 +12,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define COMMAND_ENGINE_REVISION 1U
+#define COMMAND_ENGINE_REVISION 2U
 #define COMMAND_ENGINE_BOOT_ID_MAX 17
 #define COMMAND_ENGINE_MAX_TX 128U /* must track cmd_queue.h CMD_TX_MAX */
-#define COMMAND_ENGINE_RAM_DEDUP_ENTRIES 4U /* must track CHANNEL_CMD_V2_SLOT_COUNT */
+#define COMMAND_ENGINE_RAM_DEDUP_ENTRIES 4U /* RAM replay slots; final identity is also persisted in NVS */
 
 static char s_boot_id[COMMAND_ENGINE_BOOT_ID_MAX] = "unknown";
 
@@ -33,9 +33,9 @@ static bool encode_command_engine(frame_encoder_t *enc)
     if (frame_encode_varint(&nested, 1, COMMAND_ENGINE_REVISION) != FRAME_OK ||
         frame_encode_string(&nested, 2, s_boot_id) != FRAME_OK ||
         frame_encode_bool(&nested, 3, true) != FRAME_OK ||
-        frame_encode_bool(&nested, 4, false) != FRAME_OK ||
+        frame_encode_bool(&nested, 4, true) != FRAME_OK ||
         frame_encode_bool(&nested, 5, true) != FRAME_OK ||
-        frame_encode_varint(&nested, 6, 0) != FRAME_OK ||
+        frame_encode_varint(&nested, 6, 8) != FRAME_OK ||
         frame_encode_varint(&nested, 7, COMMAND_ENGINE_MAX_TX) != FRAME_OK ||
         frame_encode_varint(&nested, 8, 256) != FRAME_OK ||
         frame_encode_varint(&nested, 9, 30000) != FRAME_OK ||
@@ -422,7 +422,7 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
         }
     }
 
-    /* field9: bounded single-step ChannelCmdV2 admission/final capability. */
+    /* field9: bounded ChannelCmdV2 admission/final capability. */
     if (!encode_command_engine(&enc)) goto cleanup_fail;
 
     /* field10: ConfigManifest storage bounds. */
