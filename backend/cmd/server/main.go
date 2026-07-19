@@ -162,10 +162,11 @@ func main() {
 		}
 	}()
 	if cfg.ControlConfig().DeviceControlV2Enabled {
+		dispatcherOwner := commandexec.NewDispatcherOwner("server")
 		dispatcher := commandexec.NewDispatcher(db,
-			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry), "server")
+			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry), dispatcherOwner)
 		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
-		logger.Infof("ChannelCmdV2 dispatcher enabled")
+		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)
 	} else {
 		logger.Infof("ChannelCmdV2 dispatcher disabled by configuration")
 	}

@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 	"ehome/backend/testutil"
+
+	"gorm.io/gorm"
 )
 
 func setupService(t *testing.T) (*Service, *models.EdgeDevice) {
@@ -352,6 +355,224 @@ type fakeTransport struct {
 func (f *fakeTransport) Dispatch(_ context.Context, _ models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
 	f.attempts = append(f.attempts, attempt)
 	return DispatchResult{BootID: "boot-test", PublishedAt: time.Now().UTC()}, f.err
+}
+
+type fencingLossTransport struct{}
+
+func (fencingLossTransport) Dispatch(context.Context, models.CommandExecution, models.CommandAttempt) (DispatchResult, error) {
+	return DispatchResult{}, errors.New("transaction-aware dispatch required")
+}
+
+func (fencingLossTransport) DispatchInTransaction(_ context.Context, tx *gorm.DB, execution models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
+	if err := tx.Model(&models.CommandOutbox{}).Where("command_id = ?", execution.CommandID).
+		Update("fencing_token", attempt.FencingToken+1).Error; err != nil {
+		return DispatchResult{}, err
+	}
+	return DispatchResult{BootID: "boot-test", PublishedAt: time.Now().UTC()}, nil
+}
+
+type blockingTransport struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (b *blockingTransport) Dispatch(_ context.Context, _ models.CommandExecution, _ models.CommandAttempt) (DispatchResult, error) {
+	b.enteredOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return DispatchResult{BootID: "boot-test", PublishedAt: time.Now().UTC()}, nil
+}
+
+func TestDispatcherOwnerIsUniqueAndBounded(t *testing.T) {
+	first := NewDispatcherOwner("server")
+	second := NewDispatcherOwner("server")
+	if first == second || !strings.HasPrefix(first, "server:") || !strings.HasPrefix(second, "server:") {
+		t.Fatalf("dispatcher owners are not attributable and unique: %q %q", first, second)
+	}
+	if len(first) > 96 || len(second) > 96 {
+		t.Fatalf("dispatcher owner exceeds storage bound: %d %d", len(first), len(second))
+	}
+	longFirst := NewDispatcherOwner(strings.Repeat("replica", 30))
+	longSecond := NewDispatcherOwner(strings.Repeat("replica", 30))
+	if len(longFirst) != 96 || len(longSecond) != 96 || longFirst == longSecond {
+		t.Fatalf("bounded owner lost its unique suffix: %q %q", longFirst, longSecond)
+	}
+}
+
+func TestDispatcherSerializesActiveChannelLeaseWithoutBlockingOtherChannels(t *testing.T) {
+	s, edge := setupService(t)
+	if !s.db.Migrator().HasIndex(&models.CommandExecution{}, "idx_command_execution_channel") {
+		t.Fatal("command channel lease lookup index is missing")
+	}
+	first, _, err := s.Create(context.Background(), createInput(edge.ID, "channel-lease-first-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := s.Create(context.Background(), createInput(edge.ID, "channel-lease-second-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	leaseExpires := now.Add(time.Minute)
+	if err := s.db.Model(&models.CommandOutbox{}).Where("command_id = ?", first.CommandID).Updates(map[string]interface{}{
+		"state": "LEASED", "lease_owner": "other-replica", "lease_expires_at": leaseExpires, "fencing_token": 1,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	otherChannel := models.Channel{NodeID: edge.NodeID, HardwareType: "uart", BusType: "UART", Enabled: true}
+	if err := s.db.Create(&otherChannel).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("hardware_info",
+		fmt.Sprintf(`{"channels":[{"id":%d,"enabled":true},{"id":%d,"enabled":true}]}`, edge.ChannelID, otherChannel.ID)).Error; err != nil {
+		t.Fatal(err)
+	}
+	otherEdge := models.EdgeDevice{Name: "other-rain", NodeID: edge.NodeID, ChannelID: otherChannel.ID, DeviceConfigID: 1, Type: edge.Type, Enabled: true, Status: "active"}
+	if err := s.db.Create(&otherEdge).Error; err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := s.Create(context.Background(), createInput(otherEdge.ID, "channel-lease-other-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeTransport{}
+	dispatcher := NewDispatcher(s.db, fake, "test-replica")
+	dispatcher.now = func() time.Time { return now }
+	processed, err := dispatcher.ProcessOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("other channel processed=%v err=%v", processed, err)
+	}
+	if len(fake.attempts) != 1 || fake.attempts[0].CommandID != other.CommandID {
+		t.Fatalf("blocked channel prevented independent work or was dispatched: %+v", fake.attempts)
+	}
+	processed, err = dispatcher.ProcessOnce(context.Background())
+	if err != nil || processed {
+		t.Fatalf("same-channel sibling bypassed active lease: processed=%v err=%v", processed, err)
+	}
+	var secondOutbox models.CommandOutbox
+	if err := s.db.First(&secondOutbox, "command_id = ?", second.CommandID).Error; err != nil || secondOutbox.State != "PENDING" {
+		t.Fatalf("same-channel outbox=%+v err=%v", secondOutbox, err)
+	}
+
+	// Expired leases are recovered before selection, preserving outbox order.
+	dispatcher.now = func() time.Time { return leaseExpires.Add(time.Second) }
+	processed, err = dispatcher.ProcessOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("expired lease recovery processed=%v err=%v", processed, err)
+	}
+	if len(fake.attempts) != 2 || fake.attempts[1].CommandID != first.CommandID {
+		t.Fatalf("expired older command was overtaken: %+v", fake.attempts)
+	}
+}
+
+func TestDispatcherRollsBackWhenOutboxFencingIsLost(t *testing.T) {
+	s, edge := setupService(t)
+	execution, _, err := s.Create(context.Background(), createInput(edge.ID, "fencing-loss-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := NewDispatcher(s.db, fencingLossTransport{}, "stale-replica").ProcessOnce(context.Background())
+	if !processed || err == nil || !strings.Contains(err.Error(), "fencing lost") {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	got, getErr := s.Get(context.Background(), execution.CommandID)
+	if getErr != nil || got.Status != StatusQueued {
+		t.Fatalf("execution committed after fencing loss: %+v err=%v", got, getErr)
+	}
+	var attempts int64
+	if err := s.db.Model(&models.CommandAttempt{}).Where("command_id = ?", execution.CommandID).Count(&attempts).Error; err != nil || attempts != 0 {
+		t.Fatalf("attempts=%d err=%v", attempts, err)
+	}
+	var outbox models.CommandOutbox
+	if err := s.db.First(&outbox, "command_id = ?", execution.CommandID).Error; err != nil || outbox.State != "LEASED" || outbox.FencingToken != 1 {
+		t.Fatalf("outbox=%+v err=%v", outbox, err)
+	}
+}
+
+func TestDispatcherRecoversLeaseWithoutExpiryBeforeSibling(t *testing.T) {
+	s, edge := setupService(t)
+	first, _, err := s.Create(context.Background(), createInput(edge.ID, "missing-expiry-first-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = s.Create(context.Background(), createInput(edge.ID, "missing-expiry-second-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&models.CommandOutbox{}).Where("command_id = ?", first.CommandID).Updates(map[string]interface{}{
+		"state": "LEASED", "lease_owner": "broken-replica", "lease_expires_at": nil, "fencing_token": 4,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTransport{}
+	processed, err := NewDispatcher(s.db, fake, "recovery-replica").ProcessOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if len(fake.attempts) != 1 || fake.attempts[0].CommandID != first.CommandID || fake.attempts[0].FencingToken != 5 {
+		t.Fatalf("invalid lease recovery overtook the older command: %+v", fake.attempts)
+	}
+}
+
+func TestPostgresDispatchersDoNotPublishSameChannelConcurrently(t *testing.T) {
+	if !testutil.IsPostgres() {
+		t.Skip("cross-instance row locking requires PostgreSQL")
+	}
+	s, edge := setupService(t)
+	first, _, err := s.Create(context.Background(), createInput(edge.ID, "postgres-channel-first-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := s.Create(context.Background(), createInput(edge.ID, "postgres-channel-second-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &blockingTransport{entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(transport.release) }) }
+	t.Cleanup(release)
+	type processResult struct {
+		processed bool
+		err       error
+	}
+	firstResult := make(chan processResult, 1)
+	go func() {
+		processed, err := NewDispatcher(s.db, transport, "postgres-replica-a").ProcessOnce(context.Background())
+		firstResult <- processResult{processed: processed, err: err}
+	}()
+	select {
+	case <-transport.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first dispatcher did not reach transport")
+	}
+
+	otherTransport := &fakeTransport{}
+	processed, err := NewDispatcher(s.db, otherTransport, "postgres-replica-b").ProcessOnce(context.Background())
+	if err != nil || processed {
+		t.Fatalf("second dispatcher bypassed active channel lease: processed=%v err=%v", processed, err)
+	}
+	if len(otherTransport.attempts) != 0 {
+		t.Fatalf("second dispatcher published concurrently: %+v", otherTransport.attempts)
+	}
+	release()
+	select {
+	case result := <-firstResult:
+		if result.err != nil || !result.processed {
+			t.Fatalf("first dispatcher result=%+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first dispatcher did not complete")
+	}
+	var secondOutbox models.CommandOutbox
+	if err := s.db.First(&secondOutbox, "command_id = ?", second.CommandID).Error; err != nil || secondOutbox.State != "PENDING" {
+		t.Fatalf("second outbox=%+v err=%v", secondOutbox, err)
+	}
+	var attempts int64
+	if err := s.db.Model(&models.CommandAttempt{}).Where("command_id IN ?", []string{first.CommandID, second.CommandID}).Count(&attempts).Error; err != nil || attempts != 1 {
+		t.Fatalf("attempts=%d err=%v", attempts, err)
+	}
 }
 
 func TestDispatcherAndInboxAreExactlyOnceAtDomainBoundary(t *testing.T) {

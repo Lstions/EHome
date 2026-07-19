@@ -886,6 +886,11 @@ CreatedAt / QueuedAt / DispatchedAt / AcceptedAt / CompletedAt
 
 MQTT 允许 at-least-once 发布。纯传输重投必须复用完全相同的 command ID、attempt、wire digest 和 envelope；设备事件先写 Inbox，再推动状态机，重复事件不得产生二次状态迁移。只有能够证明上一物理 attempt 未执行且动作策略允许时，才创建新的物理 attempt；at-most-once 永不自动创建新 attempt。
 
+当前实现以持久 Channel 行的 `FOR UPDATE` 作为跨实例领取互斥，并在获锁后重新检查同一
+`node_id + channel_id` 是否存在 LEASED Outbox。领取前先把过期或缺失 `lease_expires_at` 的异常租约
+恢复为 PENDING，避免后续命令超越旧命令。owner 包含主机、PID 和 UUID，但安全性仍以数据库
+`state + fencing_token` CAS 为准；发布或终态清理影响不到恰好一行时必须回滚，不得让丢失租约的旧实例提交状态。
+
 ## 7.3 审计失败策略
 
 - high/critical：创建审计或 Execution 持久化失败时 fail-closed，不下发；

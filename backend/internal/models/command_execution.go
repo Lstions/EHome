@@ -10,10 +10,10 @@ import (
 type CommandExecution struct {
 	CommandID      string `gorm:"primaryKey;size:36" json:"command_id"`
 	EdgeDeviceID   uint   `gorm:"not null;index" json:"edge_device_id"`
-	NodeID         string `gorm:"size:32;not null;index" json:"node_id"`
+	NodeID         string `gorm:"size:32;not null;index;index:idx_command_execution_channel,priority:1" json:"node_id"`
 	DeviceType     string `gorm:"size:32;not null" json:"device_type"`
 	DeviceConfigID uint   `gorm:"not null" json:"device_config_id"`
-	ChannelID      uint   `gorm:"not null" json:"channel_id"`
+	ChannelID      uint   `gorm:"not null;index:idx_command_execution_channel,priority:2" json:"channel_id"`
 	ManifestID     string `gorm:"size:64;not null" json:"manifest_id"`
 	ActionID       string `gorm:"size:96;not null" json:"action_id"`
 	ActionVersion  int    `gorm:"not null" json:"action_version"`
