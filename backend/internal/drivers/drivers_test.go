@@ -161,7 +161,7 @@ func TestLKTH01Driver_Metadata(t *testing.T) {
 	if d.DeviceType() != "lk_th01" {
 		t.Errorf("DeviceType: got %s", d.DeviceType())
 	}
-	if d.OEM() != "路科" {
+	if d.OEM() != "蓝控" {
 		t.Errorf("OEM: got %s", d.OEM())
 	}
 	if d.Category() != "温湿度传感器" {

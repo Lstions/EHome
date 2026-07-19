@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -22,6 +24,10 @@ func init() {
 
 // setupDeviceTest creates a test router with DB and device-config + channel routes.
 func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
+	return setupDeviceTestWithRegistry(t, nil)
+}
+
+func setupDeviceTestWithRegistry(t *testing.T, driverRegistry *drivers.Registry) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -42,7 +48,7 @@ func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
-	registerDeviceRoutes(v1, db, mgr, nil, ControlPolicy{allowUnsafeRawForTests: true})
+	registerDeviceRoutes(v1, db, mgr, driverRegistry, ControlPolicy{allowUnsafeRawForTests: true})
 	return r, db
 }
 
@@ -1117,6 +1123,28 @@ func TestDeviceConfig_Tree_WithConfigs(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeviceConfig_Tree_UsesInjectedDriverRegistry(t *testing.T) {
+	registry := drivers.NewRegistry()
+	drivers.RegisterBuiltInDrivers(registry)
+	r, _ := setupDeviceTestWithRegistry(t, registry)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/device-configs/tree", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"name":"蓝控"`) || !strings.Contains(body, `"type":"lk_th01"`) {
+		t.Fatalf("injected LK-TH01 metadata is missing: %s", body)
+	}
+	if got := strings.Count(body, `"type":`); got != 7 {
+		t.Fatalf("injected registry driver count=%d, want 7: %s", got, body)
 	}
 }
 

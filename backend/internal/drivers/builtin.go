@@ -110,7 +110,7 @@ type LKTH01Driver struct{}
 
 func (d *LKTH01Driver) DeviceType() string      { return "lk_th01" }
 func (d *LKTH01Driver) DeviceName() string      { return "LK-TH01 温湿度传感器" }
-func (d *LKTH01Driver) OEM() string             { return "路科" }
+func (d *LKTH01Driver) OEM() string             { return "蓝控" }
 func (d *LKTH01Driver) Category() string        { return "温湿度传感器" }
 func (d *LKTH01Driver) HardwareTypes() []string { return []string{"uart"} }
 func (d *LKTH01Driver) GetSensorDefinitions() []SensorData {
@@ -351,8 +351,8 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 	return []ControlAction{{
 		ID: "read_rainfall", Version: 1, Name: "读取累计雨量",
 		Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
-		Semantics: "read", Risk: "low", Enabled: false,
-		TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0a},
+		Semantics:   "read", Risk: "low", Enabled: false,
+		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0a},
 		ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 	}}
 }

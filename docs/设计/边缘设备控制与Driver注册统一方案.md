@@ -425,9 +425,12 @@ MOS 命令的描述（`jiabaida.go:622-637`）标注"需工厂模式"，但嘉�
 
 > **⚠ 待验证**：需在实际硬件上确认 0xE1 是否需要工厂模式前置。若驱动代码的"需工厂模式"注释基于实际测试经验，应以硬件行为为准。
 
-### 3.2.11 Driver 注册双轨 + 元数据错误
+### 3.2.11 Driver 注册与元数据一致性
 
-进程内仍存在两个 Registry 实例。当前 `RegisterBuiltInDrivers` 已转发完整 parser-aware 注册入口，测试已断言两入口都是 6 个 Driver，Techfine `HardwareTypes` 也已是 `uart`；因此“测试只注册 4 个”和“Techfine HardwareTypes=GB3024”已不是当前问题。剩余问题是生产双实例、包级全局 Get/List、Techfine/LK-TH01 名称与 OEM 文本，以及 Action 接口引入前必须完成的依赖注入。详见第 25 节。
+生产 composition root 现在只构造一个 Registry，并将其注入 API、NodeManager、DataBus 和 Action
+Catalog；生产代码不再读取包级 `GlobalRegistry()`。`RegisterBuiltInDrivers` 已转发完整 parser-aware
+注册入口，测试断言两个入口均注册 7 个 Driver（含 `sn3001_rain`）；Techfine `HardwareTypes` 为
+`uart`。仍需保持这条单实例与完整注册集回归，禁止恢复双实例或缩减测试注册集。
 
 ### 3.2.12 用户写旁路不止 `/execute`
 
@@ -1763,18 +1766,14 @@ drivers.RegisterBuiltInDriversWithParsers(drivers.GlobalRegistry(), parserConfig
 
 **结果**：进程内同时存在两个 Registry 实例，各持有 6 个 driver。Register 实现为 map 覆盖不 panic，但产生两条 "Driver registered: techfine_inverter (...)" 日志，并留下设计漏洞。
 
-### 问题 2：两条解析路径并存（实质隐患）
+### 已完成项：生产解析路径使用同一注入 Registry
 
-| 路径 | Registry 实例 | 使用方 |
-|---|---|---|
-| A (注入) | `driverRegistry` (main.go:100) | `handler_device.go:523,961` — `/device-configs/test-parser`、`/device-configs/tree` 端点 |
-| B (全局) | `drivers.GlobalRegistry()` (main.go:102) | 其它所有热路径 |
-
-**热路径走 B，端点 tree/test-parser 走 A**。当前 driver 无状态，行为巧合一致；一旦 driver 变成有状态，A/B 分裂将产生行为漂移。
+`main.go` 构造的 `driverRegistry` 同时注入 API、NodeManager、DataBus 和 Action Catalog；生产源码
+不再调用 `drivers.GlobalRegistry()`。默认构造器仍可为隔离测试创建 Registry，但不属于生产运行路径。
 
 ### 已完成项：`RegisterBuiltInDrivers` 测试与生产集合一致
 
-当前 `RegisterBuiltInDrivers` 已转发 `RegisterBuiltInDriversWithParsers(registry, nil)`；测试断言两个入口都注册 `bmp280`、`jiabaida_bms`、`lk_th01`、`prs3001`、`sn3000`、`techfine_inverter` 六项。该项从待办删除，但保留回归测试。
+当前 `RegisterBuiltInDrivers` 已转发 `RegisterBuiltInDriversWithParsers(registry, nil)`；测试断言两个入口都注册 `bmp280`、`jiabaida_bms`、`lk_th01`、`prs3001`、`sn3000`、`sn3001_rain`、`techfine_inverter` 七项。该项从待办删除，但保留回归测试。
 
 ### 问题 3：Techfine 元数据剩余差异
 
@@ -1783,10 +1782,10 @@ drivers.RegisterBuiltInDriversWithParsers(drivers.GlobalRegistry(), parserConfig
 - OEM "Techfine" → 应为 "泰琪丰"
 - HardwareTypes 当前已为 `["uart"]`，无需再改。
 
-### 问题 4：LK-TH01 OEM 文本待按产品资料确认
+### 已完成项：LK-TH01 OEM 元数据
 
-`backend/internal/drivers/builtin.go:113`:
-- OEM "路科" → 应为 "蓝控"
+`backend/internal/drivers/builtin.go:113` 的 OEM 已从错误的“路科”修正为“蓝控”，并由 Driver
+元数据测试锁定。
 
 ## 25.2 修复方案
 
@@ -2023,10 +2022,10 @@ BMS 响应：DD E1 00 00 -- Checksum_H Checksum_L 77
 | SecurityAuditEvent | `backend/internal/models/security_audit_event.go:5-20` |
 | 审计写入器 | `backend/internal/audit/audit.go:16-63` |
 | PeriphResult 可参考模式 | `backend/internal/nodemgr/handler_response.go:443-460` |
-| Driver 双 Registry 分裂 | `backend/cmd/server/main.go:100-102` |
-| LK-TH01 OEM 错误 | `backend/internal/drivers/builtin.go:113` |
+| Driver 单实例注入 | `backend/cmd/server/main.go:100-126` |
+| LK-TH01 OEM（蓝控） | `backend/internal/drivers/builtin.go:113` |
 | Techfine 元数据错误 | `backend/internal/drivers/inverter_techfine.go:21-25` |
-| RegisterBuiltInDrivers 已统一 6 Driver | `backend/internal/drivers/builtin.go:292-329`、`backend/internal/drivers/drivers_test.go:478-506` |
+| RegisterBuiltInDrivers 已统一 7 Driver | `backend/internal/drivers/builtin.go:360-401`、`backend/internal/drivers/drivers_test.go:478-526` |
 | raw channel write | `backend/internal/api/handler_device.go:800-850` |
 | REST terminal write | `backend/internal/api/handler_terminal.go:42-76` |
 | change-address 发送后立即更新 DB | `backend/internal/api/handler_edge_device.go:1047-1059` |
