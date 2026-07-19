@@ -123,4 +123,59 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("cancel status=%d body=%s", w.Code, w.Body.String())
 	}
+
+	completedAt := time.Now().UTC()
+	unknown := models.CommandExecution{
+		CommandID: "11111111-2222-4333-8444-555555555555", EdgeDeviceID: edge.ID,
+		NodeID: edge.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID,
+		ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, ActorUserID: 11,
+		IdempotencyScope: "api-unknown-scope", IdempotencyKey: "api-unknown-key", RequestHash: "api-unknown-hash",
+		ParamsJSON: "{}", Status: commandexec.StatusUnknown, DeadlineAt: completedAt, FinalReason: "final timeout",
+		CreatedAt: completedAt.Add(-time.Minute), CompletedAt: &completedAt,
+	}
+	if err := db.Create(&unknown).Error; err != nil {
+		t.Fatal(err)
+	}
+	resolutionBody := []byte(`{"outcome":"ACKNOWLEDGED_UNKNOWN","reason":"现场无法取得独立证据"}`)
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/device-operations/"+unknown.CommandID+"/resolve", bytes.NewReader(resolutionBody))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("resolve status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resolvedResponse struct {
+		Data models.CommandExecution `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resolvedResponse); err != nil {
+		t.Fatal(err)
+	}
+	if resolvedResponse.Data.Status != commandexec.StatusUnknown || resolvedResponse.Data.ManualResolution == nil || resolvedResponse.Data.ManualResolution.Outcome != commandexec.ResolutionAcknowledgedUnknown {
+		t.Fatalf("resolved response=%+v", resolvedResponse.Data)
+	}
+
+	// An identical retry after a lost HTTP response is safe and does not create
+	// a second audit conclusion.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/device-operations/"+unknown.CommandID+"/resolve", bytes.NewReader(resolutionBody))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("resolution replay status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/device-operations/"+unknown.CommandID+"/resolve", bytes.NewReader([]byte(`{"outcome":"CONFIRMED_SUCCEEDED","reason":"conflicting evidence"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("conflicting resolution status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/edge-devices/1/operations", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"manual_resolution":{"outcome":"ACKNOWLEDGED_UNKNOWN"`)) {
+		t.Fatalf("history did not include resolution status=%d body=%s", w.Code, w.Body.String())
+	}
 }

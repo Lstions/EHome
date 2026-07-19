@@ -241,4 +241,9 @@ var (
 		Name: "ehome_device_action_dispatch_total",
 		Help: "Outbox dispatch results",
 	}, []string{"result"})
+
+	DeviceActionManualResolutionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_manual_resolution_total",
+		Help: "Manual resolution results for UNKNOWN device actions",
+	}, []string{"result", "outcome"})
 )

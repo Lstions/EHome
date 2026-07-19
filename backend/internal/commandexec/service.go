@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ehome/backend/internal/audit"
 	"ehome/backend/internal/deviceaction"
@@ -26,6 +27,15 @@ var (
 	ErrActionUnavailable    = errors.New("action is unavailable for this device")
 	ErrInvalidParams        = errors.New("action parameters are invalid")
 	ErrNotCancellable       = errors.New("execution is no longer cancellable")
+	ErrInvalidResolution    = errors.New("manual resolution is invalid")
+	ErrNotResolvable        = errors.New("execution is not unknown")
+	ErrAlreadyResolved      = errors.New("execution already has a different manual resolution")
+)
+
+const (
+	ResolutionConfirmedSucceeded  = "CONFIRMED_SUCCEEDED"
+	ResolutionConfirmedFailed     = "CONFIRMED_FAILED"
+	ResolutionAcknowledgedUnknown = "ACKNOWLEDGED_UNKNOWN"
 )
 
 type Service struct {
@@ -52,6 +62,14 @@ type CreateInput struct {
 	SourceIP          string
 	ConfirmationToken string
 	Reason            string
+}
+
+type ResolveUnknownInput struct {
+	CommandID   string
+	ActorUserID uint
+	Outcome     string
+	Reason      string
+	SourceIP    string
 }
 
 type CatalogItem struct {
@@ -142,7 +160,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		hash := hex.EncodeToString(digest[:])
 		scope := fmt.Sprintf("user:%d:edge:%d:action:%s:v:%d", in.ActorUserID, edge.ID, def.ID, def.Version)
 		var existing models.CommandExecution
-		err = tx.Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
+		err = tx.Preload("ManualResolution").Where("idempotency_scope = ? AND idempotency_key = ?", scope, in.IdempotencyKey).First(&existing).Error
 		if err == nil {
 			if existing.RequestHash != hash {
 				return ErrIdempotencyCollision
@@ -181,7 +199,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 			return ErrActionUnavailable
 		}
 		if confirmationRequired(def.Risk) {
-			if strings.TrimSpace(in.Reason) == "" || len(in.Reason) > 512 {
+			if strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
 				return ErrConfirmationRequired
 			}
 			if err := s.consumeConfirmation(tx, in.ConfirmationToken, in.ActorUserID, edge.ID, def, hash); err != nil {
@@ -225,7 +243,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 
 func (s *Service) Get(ctx context.Context, commandID string) (*models.CommandExecution, error) {
 	var execution models.CommandExecution
-	if err := s.db.WithContext(ctx).First(&execution, "command_id = ?", commandID).Error; err != nil {
+	if err := s.db.WithContext(ctx).Preload("ManualResolution").First(&execution, "command_id = ?", commandID).Error; err != nil {
 		return nil, err
 	}
 	return &execution, nil
@@ -260,8 +278,66 @@ func (s *Service) List(ctx context.Context, edgeDeviceID uint, limit int) ([]mod
 		limit = 50
 	}
 	var items []models.CommandExecution
-	err := s.db.WithContext(ctx).Where("edge_device_id = ?", edgeDeviceID).Order("created_at DESC").Limit(limit).Find(&items).Error
+	err := s.db.WithContext(ctx).Preload("ManualResolution").Where("edge_device_id = ?", edgeDeviceID).Order("created_at DESC").Limit(limit).Find(&items).Error
 	return items, err
+}
+
+func (s *Service) ResolveUnknown(ctx context.Context, in ResolveUnknownInput) (*models.CommandExecution, bool, error) {
+	in.CommandID = strings.TrimSpace(in.CommandID)
+	in.Outcome = strings.TrimSpace(in.Outcome)
+	in.Reason = strings.TrimSpace(in.Reason)
+	if in.CommandID == "" || in.ActorUserID == 0 || !validResolutionOutcome(in.Outcome) || in.Reason == "" || utf8.RuneCountInString(in.Reason) > 512 {
+		return nil, false, ErrInvalidResolution
+	}
+
+	var execution models.CommandExecution
+	replayed := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "command_id = ?", in.CommandID).Error; err != nil {
+			return err
+		}
+		if execution.Status != StatusUnknown {
+			return ErrNotResolvable
+		}
+		var existing models.CommandManualResolution
+		err := tx.First(&existing, "command_id = ?", in.CommandID).Error
+		if err == nil {
+			if existing.ResolvedBy == in.ActorUserID && existing.Outcome == in.Outcome && existing.Reason == in.Reason {
+				execution.ManualResolution = &existing
+				replayed = true
+				return nil
+			}
+			return ErrAlreadyResolved
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		resolution := models.CommandManualResolution{
+			CommandID: in.CommandID, Outcome: in.Outcome, Reason: in.Reason,
+			ResolvedBy: in.ActorUserID, ResolvedAt: s.now(),
+		}
+		if err := tx.Create(&resolution).Error; err != nil {
+			return err
+		}
+		if err := audit.NewWriter(tx).Write(audit.Event{
+			ActorType: "user", ActorUserID: &in.ActorUserID, EventName: "device_action.unknown_resolved", Result: strings.ToLower(in.Outcome),
+			RequestID: in.CommandID, SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(execution.EdgeDeviceID),
+			Metadata: map[string]interface{}{"action_id": execution.ActionID, "outcome": in.Outcome, "reason": in.Reason},
+		}); err != nil {
+			return err
+		}
+		execution.ManualResolution = &resolution
+		return nil
+	})
+	if err == nil {
+		result := "resolved"
+		if replayed {
+			result = "replayed"
+		}
+		metrics.DeviceActionManualResolutionTotal.WithLabelValues(result, in.Outcome).Inc()
+	}
+	return &execution, replayed, err
 }
 
 func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*models.CommandExecution, error) {
@@ -292,6 +368,15 @@ func (s *Service) Cancel(ctx context.Context, commandID string, actor uint) (*mo
 
 func validIdempotencyKey(key string) bool {
 	return len(key) >= 8 && len(key) <= 128 && strings.TrimSpace(key) == key
+}
+
+func validResolutionOutcome(outcome string) bool {
+	switch outcome {
+	case ResolutionConfirmedSucceeded, ResolutionConfirmedFailed, ResolutionAcknowledgedUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func stepFitsCapabilities(step deviceaction.SingleStep, capabilities commandEngineCapabilities) bool {

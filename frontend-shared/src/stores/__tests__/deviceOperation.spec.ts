@@ -3,17 +3,18 @@ import { createPinia, setActivePinia } from 'pinia'
 import { clearSessionCaches } from '@/utils/sessionCache'
 import { useDeviceOperationStore } from '../deviceOperation'
 
-const { actions, list, create, confirm, getDetail, queryResources } = vi.hoisted(() => ({
+const { actions, list, create, confirm, resolve, getDetail, queryResources } = vi.hoisted(() => ({
   actions: vi.fn<(...args: any[]) => Promise<any>>(() => Promise.resolve([])),
   list: vi.fn<(...args: any[]) => Promise<any>>(() => Promise.resolve([])),
   create: vi.fn<(...args: any[]) => Promise<any>>(),
   confirm: vi.fn<(...args: any[]) => Promise<any>>(),
+  resolve: vi.fn<(...args: any[]) => Promise<any>>(),
   getDetail: vi.fn<(...args: any[]) => Promise<any>>(),
   queryResources: vi.fn<(...args: any[]) => Promise<any>>(),
 }))
 
 vi.mock('@/api/deviceOperation', () => ({
-  deviceOperationApi: { actions, list, create, confirm },
+  deviceOperationApi: { actions, list, create, confirm, resolve },
 }))
 vi.mock('@/api/edgeDevice', () => ({ edgeDeviceApi: { getDetail } }))
 vi.mock('@/api/node', () => ({ nodeApi: { queryResources } }))
@@ -44,6 +45,18 @@ describe('useDeviceOperationStore ordering', () => {
     expect(store.histories.get(7)?.[0].status).toBe('SUCCEEDED')
   })
 
+  it('merges an additive manual resolution without reopening UNKNOWN', () => {
+    const store = useDeviceOperationStore()
+    store.apply(operation('UNKNOWN'))
+    store.apply({
+      ...operation('UNKNOWN', '2026-07-19T00:00:02Z'),
+      manual_resolution: { outcome: 'CONFIRMED_FAILED', reason: 'checked on site', resolved_by: 1, resolved_at: '2026-07-19T00:00:02Z' },
+    })
+    expect(store.histories.get(7)?.[0].manual_resolution?.outcome).toBe('CONFIRMED_FAILED')
+    store.apply(operation('DISPATCHED', '2026-07-19T00:00:03Z'))
+    expect(store.histories.get(7)?.[0].status).toBe('UNKNOWN')
+  })
+
   it('merges refresh history instead of replacing an early event', async () => {
     const store = useDeviceOperationStore()
     store.apply(operation('DEVICE_ACCEPTED'))
@@ -72,6 +85,17 @@ describe('useDeviceOperationStore ordering', () => {
     const store = useDeviceOperationStore()
     await store.create(7, 'set_mode', { mode: 'SBU' }, 'token-1', 'controlled change')
     expect(create).toHaveBeenCalledWith(7, 'set_mode', { mode: 'SBU' }, 'token-1', 'controlled change')
+  })
+
+  it('forwards and applies an UNKNOWN manual resolution', async () => {
+    resolve.mockResolvedValueOnce({
+      ...operation('UNKNOWN'),
+      manual_resolution: { outcome: 'ACKNOWLEDGED_UNKNOWN', reason: 'no independent evidence', resolved_by: 1, resolved_at: '2026-07-19T00:00:02Z' },
+    })
+    const store = useDeviceOperationStore()
+    await store.resolve('command-1', 'ACKNOWLEDGED_UNKNOWN', 'no independent evidence')
+    expect(resolve).toHaveBeenCalledWith('command-1', 'ACKNOWLEDGED_UNKNOWN', 'no independent evidence')
+    expect(store.histories.get(7)?.[0].manual_resolution?.outcome).toBe('ACKNOWLEDGED_UNKNOWN')
   })
 
   it('refreshes a stale resource snapshot once before reloading the action catalog', async () => {

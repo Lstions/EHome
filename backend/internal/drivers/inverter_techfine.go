@@ -873,6 +873,7 @@ func (d *TechfineInverterDriver) legacyUnsafeCommandTemplates() []CommandTemplat
 	// manufacture a write frame from the Modbus helper.
 	return nil
 
+	/* Historical pre-unification templates retained as inert review material.
 	// Query commands (schedulable polling)
 	queries := []CommandTemplate{
 		{
@@ -1091,4 +1092,5 @@ func (d *TechfineInverterDriver) legacyUnsafeCommandTemplates() []CommandTemplat
 	}
 
 	return append(append(queries, control...), settings...)
+	*/
 }

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { deviceOperationApi, type ConfirmationGrant, type DeviceOperation, type EffectiveAction } from '@/api/deviceOperation'
+import { deviceOperationApi, type ConfirmationGrant, type DeviceOperation, type EffectiveAction, type ManualResolutionOutcome } from '@/api/deviceOperation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import { nodeApi } from '@/api/node'
 import { assertSessionGeneration, getSessionGeneration, registerSessionCacheClearer } from '@/utils/sessionCache'
@@ -22,7 +22,9 @@ function mayReplace(current: DeviceOperation, next: DeviceOperation): boolean {
   // A REST response can arrive after an early WebSocket acceptance/final. Do
   // not let it regress the timeline, and never let any later pending event
   // overwrite an observed terminal result.
-  if (terminalStatuses.has(current.status)) return false
+  if (terminalStatuses.has(current.status)) {
+    return current.status === 'UNKNOWN' && next.status === 'UNKNOWN' && !current.manual_resolution && !!next.manual_resolution
+  }
   return statusRank[next.status] >= statusRank[current.status]
 }
 
@@ -68,6 +70,13 @@ export const useDeviceOperationStore = defineStore('deviceOperation', () => {
     assertSessionGeneration(session)
     return grant
   }
+  async function resolve(commandId: string, outcome: ManualResolutionOutcome, reason: string) {
+    const session = getSessionGeneration()
+    const execution = await deviceOperationApi.resolve(commandId, outcome, reason)
+    assertSessionGeneration(session)
+    apply(execution)
+    return execution
+  }
   function apply(operation: DeviceOperation) {
     const history = histories.value.get(operation.edge_device_id) ?? []
     const index = history.findIndex(item => item.command_id === operation.command_id)
@@ -80,6 +89,6 @@ export const useDeviceOperationStore = defineStore('deviceOperation', () => {
     histories.value.set(operation.edge_device_id, [...history].slice(0, 100))
   }
   function clear() { catalogs.value.clear(); histories.value.clear() }
-  return { catalogs, histories, refresh, create, confirm, apply, clear }
+  return { catalogs, histories, refresh, create, confirm, resolve, apply, clear }
 })
 registerSessionCacheClearer(() => useDeviceOperationStore().clear())

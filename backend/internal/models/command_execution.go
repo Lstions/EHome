@@ -32,10 +32,11 @@ type CommandExecution struct {
 	// VerifiedResultJSON is a server-produced, driver-parsed projection of a
 	// successful Final.  Raw control bytes remain in the device protocol path
 	// and are deliberately not exposed as a generic operation result.
-	VerifiedResultJSON string     `gorm:"type:jsonb;default:'[]'" json:"-"`
-	CreatedAt          time.Time  `gorm:"not null;index" json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	CompletedAt        *time.Time `gorm:"index" json:"completed_at,omitempty"`
+	VerifiedResultJSON string                   `gorm:"type:jsonb;default:'[]'" json:"-"`
+	CreatedAt          time.Time                `gorm:"not null;index" json:"created_at"`
+	UpdatedAt          time.Time                `json:"updated_at"`
+	CompletedAt        *time.Time               `gorm:"index" json:"completed_at,omitempty"`
+	ManualResolution   *CommandManualResolution `gorm:"foreignKey:CommandID;references:CommandID" json:"manual_resolution,omitempty"`
 }
 
 func (c CommandExecution) MarshalJSON() ([]byte, error) {
@@ -48,6 +49,17 @@ func (c CommandExecution) MarshalJSON() ([]byte, error) {
 		alias
 		VerifiedResult json.RawMessage `json:"verified_result"`
 	}{alias: alias(c), VerifiedResult: verified})
+}
+
+// CommandManualResolution appends an operator conclusion to an UNKNOWN
+// execution without rewriting the immutable physical outcome. CommandID is a
+// primary key so concurrent or conflicting second resolutions fail closed.
+type CommandManualResolution struct {
+	CommandID  string    `gorm:"primaryKey;size:36" json:"-"`
+	Outcome    string    `gorm:"size:32;not null;index" json:"outcome"`
+	Reason     string    `gorm:"size:512;not null" json:"reason"`
+	ResolvedBy uint      `gorm:"not null;index" json:"resolved_by"`
+	ResolvedAt time.Time `gorm:"not null;index" json:"resolved_at"`
 }
 
 // CommandAttempt is a physical-delivery attempt. Phase 1 creates an attempt

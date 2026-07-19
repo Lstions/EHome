@@ -7,7 +7,9 @@ export interface ActionDefinition { id: string; version: number; name: string; d
 export interface EffectiveAction { definition: ActionDefinition; available: boolean; reason?: string; reason_code?: string }
 export interface VerifiedSensorValue { name: string; value: number; unit?: string; string_value?: string }
 export interface ConfirmationGrant { token: string; expires_at: string }
-export interface DeviceOperation { command_id: string; edge_device_id: number; node_id: string; action_id: string; action_version: number; status: OperationStatus; final_reason?: string; verified_result?: VerifiedSensorValue[]; created_at: string; updated_at: string; completed_at?: string }
+export type ManualResolutionOutcome = 'CONFIRMED_SUCCEEDED' | 'CONFIRMED_FAILED' | 'ACKNOWLEDGED_UNKNOWN'
+export interface ManualResolution { outcome: ManualResolutionOutcome; reason: string; resolved_by: number; resolved_at: string }
+export interface DeviceOperation { command_id: string; edge_device_id: number; node_id: string; action_id: string; action_version: number; status: OperationStatus; final_reason?: string; verified_result?: VerifiedSensorValue[]; manual_resolution?: ManualResolution; created_at: string; updated_at: string; completed_at?: string }
 const unwrap = <T>(response: any): T => (response?.data ?? response) as T
 export function newIdempotencyKey(): string {
   const cryptoApi = globalThis.crypto as (Crypto & { randomUUID?: () => string }) | undefined
@@ -35,4 +37,5 @@ export const deviceOperationApi = {
     }
   },
   confirm: async (id: number, actionId: string, params: Record<string, unknown>, reason: string) => unwrap<ConfirmationGrant>(await client.post(`/api/v1/edge-devices/${id}/actions/${actionId}/confirm`, { params, reason })),
+  resolve: async (commandId: string, outcome: ManualResolutionOutcome, reason: string) => unwrap<DeviceOperation>(await client.post(`/api/v1/device-operations/${commandId}/resolve`, { outcome, reason })),
 }

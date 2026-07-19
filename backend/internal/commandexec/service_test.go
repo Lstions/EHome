@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -435,5 +436,82 @@ func TestRecoverTerminatesQueuedDeadlineWithoutDispatch(t *testing.T) {
 	var outbox models.CommandOutbox
 	if err := s.db.Where("command_id = ?", exec.CommandID).First(&outbox).Error; err != nil || outbox.State != "CANCELLED" {
 		t.Fatalf("outbox=%+v err=%v", outbox, err)
+	}
+}
+
+func TestResolveUnknownAppendsAuditedIdempotentConclusion(t *testing.T) {
+	s, edge := setupService(t)
+	execution, _, err := s.Create(context.Background(), createInput(edge.ID, "resolve-unknown-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC()
+	if err := s.db.Model(&models.CommandExecution{}).Where("command_id = ?", execution.CommandID).Updates(map[string]interface{}{
+		"status": StatusUnknown, "completed_at": completedAt, "final_reason": "device final was not observed",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	input := ResolveUnknownInput{
+		CommandID: execution.CommandID, ActorUserID: 7,
+		Outcome: ResolutionConfirmedFailed, Reason: strings.Repeat("中", 512), SourceIP: "127.0.0.1",
+	}
+	resolved, replayed, err := s.ResolveUnknown(context.Background(), input)
+	if err != nil || replayed {
+		t.Fatalf("resolve err=%v replayed=%v", err, replayed)
+	}
+	if resolved.Status != StatusUnknown || resolved.ManualResolution == nil || resolved.ManualResolution.Outcome != ResolutionConfirmedFailed {
+		t.Fatalf("resolved execution=%+v", resolved)
+	}
+	if resolved.ManualResolution.ResolvedBy != 7 || resolved.ManualResolution.Reason != input.Reason {
+		t.Fatalf("resolution=%+v", resolved.ManualResolution)
+	}
+
+	loaded, err := s.Get(context.Background(), execution.CommandID)
+	if err != nil || loaded.Status != StatusUnknown || loaded.ManualResolution == nil {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	var auditEvent models.SecurityAuditEvent
+	if err := s.db.Where("request_id = ? AND event_name = ?", execution.CommandID, "device_action.unknown_resolved").First(&auditEvent).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditEvent.Result != "confirmed_failed" {
+		t.Fatalf("audit result=%q", auditEvent.Result)
+	}
+
+	replayedExecution, replayed, err := s.ResolveUnknown(context.Background(), input)
+	if err != nil || !replayed || replayedExecution.ManualResolution == nil {
+		t.Fatalf("idempotent resolve execution=%+v replayed=%v err=%v", replayedExecution, replayed, err)
+	}
+	conflict := input
+	conflict.Outcome = ResolutionAcknowledgedUnknown
+	if _, _, err := s.ResolveUnknown(context.Background(), conflict); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("conflicting resolution error=%v", err)
+	}
+	var resolutionCount int64
+	if err := s.db.Model(&models.CommandManualResolution{}).Where("command_id = ?", execution.CommandID).Count(&resolutionCount).Error; err != nil || resolutionCount != 1 {
+		t.Fatalf("resolution count=%d err=%v", resolutionCount, err)
+	}
+}
+
+func TestResolveUnknownRejectsInvalidOrNonUnknownExecution(t *testing.T) {
+	s, edge := setupService(t)
+	execution, _, err := s.Create(context.Background(), createInput(edge.ID, "resolve-invalid-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := ResolveUnknownInput{CommandID: execution.CommandID, ActorUserID: 7, Outcome: ResolutionConfirmedSucceeded, Reason: "independent readback"}
+	if _, _, err := s.ResolveUnknown(context.Background(), base); !errors.Is(err, ErrNotResolvable) {
+		t.Fatalf("queued resolution error=%v", err)
+	}
+	for _, invalid := range []ResolveUnknownInput{
+		{CommandID: execution.CommandID, ActorUserID: 7, Outcome: "SUCCEEDED", Reason: "invalid outcome"},
+		{CommandID: execution.CommandID, ActorUserID: 7, Outcome: ResolutionConfirmedSucceeded, Reason: "   "},
+		{CommandID: execution.CommandID, ActorUserID: 0, Outcome: ResolutionConfirmedSucceeded, Reason: "missing actor"},
+		{CommandID: execution.CommandID, ActorUserID: 7, Outcome: ResolutionConfirmedSucceeded, Reason: strings.Repeat("中", 513)},
+	} {
+		if _, _, err := s.ResolveUnknown(context.Background(), invalid); !errors.Is(err, ErrInvalidResolution) {
+			t.Fatalf("invalid resolution %+v error=%v", invalid, err)
+		}
 	}
 }

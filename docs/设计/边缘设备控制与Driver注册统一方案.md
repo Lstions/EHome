@@ -1542,6 +1542,12 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 3. 操作告警、指标和 dashboard；
 4. raw diagnostics 定期复核、历史保留和脱敏策略。
 
+截至 2026-07-19，第 2 项已实现：人工处置作为一条不可覆盖的附加结论保存，原 Execution 始终保留
+`UNKNOWN`。可选结论限定为 `CONFIRMED_SUCCEEDED`、`CONFIRMED_FAILED` 和
+`ACKNOWLEDGED_UNKNOWN`，并记录原因、操作者和时间；完全相同的请求可幂等重放，不同的第二次
+结论必须冲突。处置写入与安全审计位于同一事务，统一前端可操作和展示，Prometheus 使用有限标签
+统计成功与重放。其余 1、3、4 项仍按原门禁推进。
+
 ---
 
 # 23. 验收标准

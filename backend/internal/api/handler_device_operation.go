@@ -139,6 +139,38 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 		Success(c, execution)
 	})
 
+	v1.POST("/device-operations/:execution_id/resolve", func(c *gin.Context) {
+		var req struct {
+			Outcome string `json:"outcome"`
+			Reason  string `json:"reason"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, "invalid manual resolution")
+			return
+		}
+		actor, _ := c.Get("subject_id")
+		actorID, _ := actor.(uint)
+		execution, _, err := service.ResolveUnknown(c.Request.Context(), commandexec.ResolveUnknownInput{
+			CommandID: c.Param("execution_id"), ActorUserID: actorID,
+			Outcome: req.Outcome, Reason: req.Reason, SourceIP: c.ClientIP(),
+		})
+		switch {
+		case err == nil:
+			if wsHub != nil {
+				wsHub.BroadcastAuthenticatedEvent(events.DeviceOperationUpdate, execution)
+			}
+			Success(c, execution)
+		case errors.Is(err, commandexec.ErrInvalidResolution):
+			Error(c, http.StatusBadRequest, "invalid manual resolution")
+		case errors.Is(err, commandexec.ErrNotResolvable), errors.Is(err, commandexec.ErrAlreadyResolved):
+			Error(c, http.StatusConflict, "operation cannot be manually resolved")
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			Error(c, http.StatusNotFound, "operation not found")
+		default:
+			Error(c, http.StatusInternalServerError, "resolve operation failed")
+		}
+	})
+
 	v1.POST("/edge-devices/:id/actions/:action_id/confirm", func(c *gin.Context) {
 		id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 		if err != nil {
