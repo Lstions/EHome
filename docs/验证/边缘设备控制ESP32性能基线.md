@@ -36,6 +36,11 @@ S3 目标编译，不构成 S3 板卡的 heap、stack、满载或 watchdog 实�
 `4baaf9dea8ee8f5b1efa7d1a6c25d3a28454dde52c9885392d3d846d026a6e77`。当前 host tests 也为
 16/16 通过，其中包含该字段的编码/解码覆盖。这仍仅证明 S3 目标可构建，不构成 S3 板卡性能验收。
 
+以 `ce98086` 源码基线重新执行规定脚本 `./build_firmware.sh s3-n8`：生成
+`build/s3-n8/ehome_collector.bin`（1206960 bytes），SHA-256
+`674b6b24adb2a367c01cd4bc4fabf08deeac2e08369a120ab6ec58021744bfa3`。该轮仍是交叉编译，
+没有连接或烧录 S3 硬件，不能作为 S3 性能、watchdog 或串口实机门禁的通过证据。
+
 已完成实机验证：nonce 关联 HelloAck、ResourceReport、向不存在 channel 下发 V2 信封的安全 admission 拒绝，以及过期 deadline 的 `1006` 拒绝（均无物理 TX）。
 最近一次复测对应本表 SHA-256：节点 `F0F5BDFFFE02`、boot `C329A2BBE43D47ED`；
 资源报告给出 V2/Final/128/256/30000/RAM-4，过期请求收到
