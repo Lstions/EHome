@@ -48,6 +48,11 @@ build_profile() {
     defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
     if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
         defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
+        # sdkconfig takes precedence over sdkconfig.defaults.  An explicit
+        # override (for example the isolated development MQTT broker) must
+        # therefore regenerate this profile's derived sdkconfig instead of
+        # silently retaining a previous production value.
+        rm -f "$sdkconfig"
     fi
 
     mkdir -p "$build_dir"

@@ -343,6 +343,12 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 	} else {
 		sync_manager_cancel_config_timeout();
 		sync_manager_on_downlink_received(MSG_CONFIG_MFST);
+		/* The backend admits V2 actions only when the latest ResourceReport
+		 * proves the applied runtime channel is enabled.  Hello-time reports
+		 * describe the pre-manifest state, so refresh immediately after a
+		 * successful commit rather than leaving the node falsely channel-less
+		 * until an unrelated QueryResources or reconnect. */
+		msg_handler_send_resource_report();
 	}
 
     ESP_LOGI(TAG, "Config→scheduler %d ch", scheduler_get_channel_count());

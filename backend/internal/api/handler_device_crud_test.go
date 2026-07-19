@@ -745,6 +745,29 @@ func TestChannel_Create_Success(t *testing.T) {
 	}
 }
 
+func TestChannel_Create_PreservesExplicitZeroInterval(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART",
+		"bus_config": "1415000012C0", "enabled": true, "interval_ms": 0,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/channels", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ch models.Channel
+	db.First(&ch)
+	if ch.IntervalMs != 0 {
+		t.Fatalf("explicit interval_ms=0 was replaced with %d", ch.IntervalMs)
+	}
+}
+
 func TestChannel_CreateRejectsMalformedTransportRoute(t *testing.T) {
 	r, db := setupDeviceTest(t)
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})

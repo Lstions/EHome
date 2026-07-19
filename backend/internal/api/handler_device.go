@@ -587,6 +587,18 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// GORM applies the model's default value when a zero-valued field is
+		// inserted.  Keep an explicit interval_ms: 0 distinct from an omitted
+		// interval so callers can intentionally disable scheduling.
+		var requestedInterval *int
+		if value, ok := raw["interval_ms"]; ok {
+			var interval int
+			if err := json.Unmarshal(value, &interval); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "interval_ms must be an integer"})
+				return
+			}
+			requestedInterval = &interval
+		}
 		body, err := json.Marshal(raw)
 		var ch models.Channel
 		if err != nil || json.Unmarshal(body, &ch) != nil {
@@ -615,6 +627,12 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			if err := tx.Create(&ch).Error; err != nil {
 				return err
+			}
+			if requestedInterval != nil && *requestedInterval == 0 {
+				if err := tx.Model(&ch).UpdateColumn("interval_ms", 0).Error; err != nil {
+					return err
+				}
+				ch.IntervalMs = 0
 			}
 			if !desiredEnabled {
 				if err := tx.Model(&ch).Update("enabled", false).Error; err != nil {

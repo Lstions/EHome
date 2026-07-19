@@ -90,6 +90,31 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 	}
 }
 
+func TestEdgeDevice_Create_PreservesExplicitZeroInterval(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Rain", DeviceType: "sn3001_rain", HardwareType: "uart", Status: "active"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "No schedule", "node_id": "NODE001", "channel_id": 1,
+		"device_config_id": 1, "enabled": true, "interval_ms": 0,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	db.First(&dev, "name = ?", "No schedule")
+	if dev.IntervalMs != 0 {
+		t.Fatalf("explicit interval_ms=0 was replaced with %d", dev.IntervalMs)
+	}
+}
+
 func TestEdgeDevice_Create_MissingRequiredFields(t *testing.T) {
 	r, _ := setupEdgeDeviceTest(t)
 

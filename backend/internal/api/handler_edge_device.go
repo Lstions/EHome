@@ -318,6 +318,15 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
 			}
+			// An explicit zero interval means "do not schedule".  The model has a
+			// historical database default of 5000, which GORM otherwise substitutes
+			// for a zero value during INSERT.
+			if dto.IntervalMs != nil && *dto.IntervalMs == 0 {
+				if err := tx.Model(&dev).UpdateColumn("interval_ms", 0).Error; err != nil {
+					return err
+				}
+				dev.IntervalMs = 0
+			}
 
 			// Step 2: Create ConfigTemplates from driver's CommandTemplates (single source of truth)
 			var ch models.Channel
