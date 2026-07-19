@@ -29,6 +29,55 @@ func (p *v2CapturePublisher) Publish(topic string, payload []byte) error {
 func (p *v2CapturePublisher) PublishQoS2(string, []byte) error     { return nil }
 func (p *v2CapturePublisher) PublishRetained(string, []byte) error { return nil }
 
+func TestSN3001BaudSideEffectUpdatesChannelAndPublishesEvent(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := models.Node{NodeID: "node-baud-side-effect", Name: "node", Status: "online"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{
+		NodeID: node.NodeID, HardwareType: "uart", BusType: "UART",
+		BusConfig: "1415000012C0", Enabled: true,
+	}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(db, nil, nil, nil, nil, nil, drivers.NewRegistry())
+	if err := manager.applySN3001ControlSideEffect(models.CommandExecution{
+		NodeID: node.NodeID, ChannelID: channel.ID, DeviceType: "sn3001_rain",
+		ActionID: "set_baud_rate", ParamsJSON: `{"value":"9600"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got models.Channel
+	if err := db.First(&got, channel.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.BusConfig != "141500002580" {
+		t.Fatalf("bus_config=%q, want 141500002580", got.BusConfig)
+	}
+	select {
+	case event := <-manager.EventBus().Subscribe():
+		if event.Type != CfgChangeChannel || event.Action != CfgActionUpdate || event.NodeID != node.NodeID || event.EntityID != fmt.Sprint(channel.ID) {
+			t.Fatalf("unexpected config event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("baud side effect did not publish config event")
+	}
+	// Replaying the same final is idempotent and must not enqueue another sync.
+	if err := manager.applySN3001ControlSideEffect(models.CommandExecution{
+		NodeID: node.NodeID, ChannelID: channel.ID, DeviceType: "sn3001_rain",
+		ActionID: "set_baud_rate", ParamsJSON: `{"value":"9600"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-manager.EventBus().Subscribe():
+		t.Fatalf("idempotent replay published unexpected event=%+v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestChannelCmdV2FinalRequiresIdentityAndDriverParse(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := models.Node{NodeID: "node-v2-final", Name: "node", Status: "online"}

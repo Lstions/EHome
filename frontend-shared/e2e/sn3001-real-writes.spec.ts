@@ -19,6 +19,9 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     const button = page.getByRole('button', { name: buttonName, exact: true })
     await expect(button).toBeVisible({ timeout: 20_000 })
     await expect(button).toBeEnabled()
+    const createResponsePromise = page.waitForResponse(response =>
+      response.request().method() === 'POST' && /\/api\/v1\/edge-devices\/1\/operations$/.test(response.url()),
+    )
     await button.click()
 
     if (Object.keys(params).length > 0) {
@@ -50,7 +53,17 @@ test.describe('SN-3001 开发实机写入与读回', () => {
       await reauth.getByRole('button', { name: '验证并继续', exact: true }).click()
     }
 
+    const createResponse = await createResponsePromise
+    expect(createResponse.status()).toBe(202)
+    const commandID = (await createResponse.json())?.data?.execution?.command_id as string
+    expect(commandID).toMatch(/^[0-9a-f-]{36}$/)
     const token = await page.evaluate(() => localStorage.getItem('token') || sessionStorage.getItem('token') || '')
+    const expectedResult = Array.isArray(result) ? result : [result]
+    await expect.poll(async () => page.evaluate(async ({ id, authToken }) => {
+      const response = await fetch(`/api/v1/device-operations/${id}`, { headers: { Authorization: `Bearer ${authToken}` } })
+      const body = await response.json()
+      return { status: body?.data?.status, result: body?.data?.verified_result }
+    }, { id: commandID, authToken: token }), { timeout: 30_000 }).toEqual({ status: 'SUCCEEDED', result: expectedResult })
     await expect.poll(async () => {
       const timeline = page.locator('.el-timeline-item').first()
       return await timeline.textContent()
@@ -69,6 +82,23 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     }, token)
     expect(history[0]?.status).toBe('SUCCEEDED')
     return history[0]
+  }
+
+  async function waitForChannelBaud(page: Page, expected: number) {
+    const token = await page.evaluate(() => localStorage.getItem('token') || sessionStorage.getItem('token') || '')
+    await expect.poll(async () => page.evaluate(async ({ authToken }) => {
+      const headers = { Authorization: `Bearer ${authToken}` }
+      const [channelsResponse, nodeResponse] = await Promise.all([
+        fetch('/api/v1/nodes/1/channels', { headers }),
+        fetch('/api/v1/nodes/1', { headers }),
+      ])
+      const channels = await channelsResponse.json()
+      const node = await nodeResponse.json()
+      const channel = (channels?.data || []).find((item: any) => item.id === 1)
+      const text = String(channel?.bus_config || '').replace(/^\\x|^0x/i, '')
+      const baud = /^[0-9a-f]+$/i.test(text) && text.length >= 12 ? Number.parseInt(text.slice(4, 12), 16) : 0
+      return { baud, sync: node?.data?.config_sync_state }
+    }, { authToken: token }), { timeout: 45_000 }).toEqual({ baud: expected, sync: 'in_sync' })
   }
 
   test('清零写入 ACK、雨量读回，以及参数写入 ACK 后恢复基线', async ({ page }) => {
@@ -114,5 +144,19 @@ test.describe('SN-3001 开发实机写入与读回', () => {
       { name: 'rainfall', value: 0, unit: 'mm' },
       { name: 'reset_ack', value: 1, unit: 'ack' },
     ])
+  })
+
+  test('真实切换 4800→9600→4800 并在新速率读回', async ({ page }) => {
+    test.setTimeout(150_000)
+    await login(page)
+
+    await operation(page, '设置设备波特率', { value: '9600' }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForChannelBaud(page, 9600)
+    await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 9600, unit: 'bit/s' })
+
+    await operation(page, '设置设备波特率', { value: '4800' }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForChannelBaud(page, 4800)
+    await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 4800, unit: 'bit/s' })
+    await page.screenshot({ path: '/tmp/e2e-shots/sn3001-real-baud-transition.png', fullPage: true })
   })
 })
