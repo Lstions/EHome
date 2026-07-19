@@ -104,6 +104,23 @@ func TestControlV2DisabledIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestCatalogIdentifiesStaleCapabilityForRefresh(t *testing.T) {
+	s, edge := setupService(t)
+	now := time.Now().UTC()
+	stale := now.Add(-maxCapabilityAge - time.Second)
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("resource_reported_at", stale).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+	items, err := s.Catalog(context.Background(), edge.ID)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("catalog=%+v err=%v", items, err)
+	}
+	if items[0].Available || items[0].ReasonCode != "capability_stale" {
+		t.Fatalf("expected stale capability catalog item, got %+v", items[0])
+	}
+}
+
 func TestHighRiskConfirmationIsBoundAndSingleUse(t *testing.T) {
 	s, edge := setupService(t)
 	now := time.Now().UTC()

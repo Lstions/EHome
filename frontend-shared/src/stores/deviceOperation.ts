@@ -1,9 +1,12 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { deviceOperationApi, type ConfirmationGrant, type DeviceOperation, type EffectiveAction } from '@/api/deviceOperation'
+import { edgeDeviceApi } from '@/api/edgeDevice'
+import { nodeApi } from '@/api/node'
 import { assertSessionGeneration, getSessionGeneration, registerSessionCacheClearer } from '@/utils/sessionCache'
 
 const terminalStatuses = new Set(['SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'])
+const resourceReportWaitMs = 2000
 const statusRank: Record<DeviceOperation['status'], number> = {
   QUEUED: 1,
   DISPATCHED: 2,
@@ -28,7 +31,22 @@ export const useDeviceOperationStore = defineStore('deviceOperation', () => {
   const histories = ref(new Map<number, DeviceOperation[]>())
   async function refresh(id: number) {
     const session = getSessionGeneration()
-    const [catalog, history] = await Promise.all([deviceOperationApi.actions(id), deviceOperationApi.list(id)])
+    let [catalog, history] = await Promise.all([deviceOperationApi.actions(id), deviceOperationApi.list(id)])
+    if (catalog.some(item => item.reason_code === 'capability_stale')) {
+      try {
+        const edge = await edgeDeviceApi.getDetail(id)
+        assertSessionGeneration(session)
+        if (edge.node_id) {
+          await nodeApi.queryResources(edge.node_id)
+          await new Promise(resolve => setTimeout(resolve, resourceReportWaitMs))
+          assertSessionGeneration(session)
+          ;[catalog, history] = await Promise.all([deviceOperationApi.actions(id), deviceOperationApi.list(id)])
+        }
+      } catch {
+        // The original unavailable catalog remains authoritative when the
+        // refresh request cannot be delivered or the session changed.
+      }
+    }
     if (session !== getSessionGeneration()) return
     catalogs.value.set(id, catalog)
     // REST is authoritative, but must merge rather than replace to retain an

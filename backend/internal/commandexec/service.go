@@ -58,6 +58,7 @@ type CatalogItem struct {
 	Definition deviceaction.Definition `json:"definition"`
 	Available  bool                    `json:"available"`
 	Reason     string                  `json:"reason,omitempty"`
+	ReasonCode string                  `json:"reason_code,omitempty"`
 }
 
 func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem, error) {
@@ -94,6 +95,12 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		} else if _, capabilities, err := currentCapabilities(edge.Node, s.now); err != nil {
 			item.Available = false
 			item.Reason = "ChannelCmdV2 capability is unavailable or stale"
+			if edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > maxCapabilityAge {
+				// A browser may safely request a fresh ResourceReport and reload the
+				// catalog. Keep this machine-readable so the UI never relies on the
+				// presentation text or retries unrelated safety failures.
+				item.ReasonCode = "capability_stale"
+			}
 		} else if params, err := deviceaction.CanonicalizeParams(definition.InputSchema, nil); err == nil {
 			step, compileErr := definition.Compile(params)
 			if compileErr != nil || !stepFitsCapabilities(step, capabilities) {
