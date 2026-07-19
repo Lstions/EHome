@@ -24,6 +24,8 @@
 > `read/low`。GB3024 setter 缺 CRC/ACK/写入读回恢复证据；嘉佰达 MOS/F2/F3/reset 缺真实 BMS；
 > bounded batch、NVS at-most-once、雨量清零、reboot/reset 尚未实现；S3 只有脚本交叉构建而无实机
 > heap/stack/满载数据。critical 近期认证体验已完成，raw diagnostics 仍是生产 410 且生命周期治理待办。
+> 2026-07-19 已从真实 Chromium 的统一受控操作完成 SN-3001 `read_rainfall` 实机闭环，前端只展示
+> Action Catalog 入口和真实操作时间线；旧的非调度 CommandTemplate 不再伪装成第二个“手动触发”入口。
 
 ## 当前 master 重新评估摘要
 
