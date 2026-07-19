@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"time"
 
+	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
+	redisstore "ehome/backend/internal/redis"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/metrics"
@@ -51,8 +53,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Auth routes (no JWT required)
-	registerAuthRoutes(r, db)
+	// Login and in-session reauthentication share one limiter, including the
+	// bounded in-memory fallback used when Redis is unavailable.
+	authLimiter := authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute)
+	registerAuthRoutesWithLimiter(r, db, authLimiter)
 
 	// Firmware download — no auth (ESP32 fetches without JWT)
 	RegisterFirmwareDownload(r)
@@ -68,7 +72,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			commandService = commandexec.NewService(db, deviceaction.NewBuiltInRegistry(driverRegistry))
 		}
 		v1.GET("/metrics/prometheus", gin.WrapH(promhttp.Handler()))
-		registerAccountRoutes(v1, db)
+		registerAccountRoutesWithLimiter(v1, db, authLimiter)
 		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry, controlPolicy)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, nodeMgr)

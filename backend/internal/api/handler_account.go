@@ -2,10 +2,13 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/models"
+	redisstore "ehome/backend/internal/redis"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -22,6 +25,10 @@ type accountResponse struct {
 }
 
 func registerAccountRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
+	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute))
+}
+
+func registerAccountRoutesWithLimiter(v1 *gin.RouterGroup, db *gorm.DB, limiter *authservice.LoginLimiter) {
 	v1.GET("/account", func(c *gin.Context) {
 		user, ok := currentSubject(c, db)
 		if !ok {
@@ -86,6 +93,39 @@ func registerAccountRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 		Success(c, gin.H{"reauthenticate": true})
+	})
+
+	v1.POST("/account/reauthenticate", func(c *gin.Context) {
+		user, ok := currentSubject(c, db)
+		if !ok {
+			return
+		}
+		var request struct {
+			Password string `json:"password" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&request); err != nil {
+			ErrorWithCode(c, http.StatusBadRequest, "invalid_reauthentication_request", "password is required")
+			return
+		}
+		authenticated, err := authservice.AuthenticateSingleUser(db, user.Username, request.Password)
+		if err != nil {
+			allowed, retryAfter, limitErr := limiter.AllowFailure(c.Request.Context(), c.ClientIP(), user.Username)
+			if limitErr != nil || !allowed {
+				seconds := int(retryAfter.Seconds())
+				if seconds < 1 {
+					seconds = 1
+				}
+				c.Header("Retry-After", strconv.Itoa(seconds))
+				ErrorWithCode(c, http.StatusTooManyRequests, "reauthentication_rate_limited", "too many reauthentication attempts")
+				return
+			}
+			// A bad password must not revoke the still-valid session. The caller
+			// may retry within the bounded limiter window.
+			ErrorWithCode(c, http.StatusForbidden, "invalid_reauthentication_credentials", "reauthentication failed")
+			return
+		}
+		limiter.Reset(c.Request.Context(), c.ClientIP(), user.Username)
+		Success(c, gin.H{"authenticated_at": authenticated.LastLoginAt})
 	})
 
 	revoke := func(c *gin.Context) {

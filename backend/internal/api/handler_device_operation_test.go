@@ -98,9 +98,20 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 	if err := actions.Register(deviceaction.Definition{ID: "medium_read", Version: 1, Name: "medium", DeviceType: edge.Type, Semantics: "read", Risk: "medium", Enabled: true, Transport: deviceaction.ChannelCmdV2Adapter, SingleStep: deviceaction.SingleStep{TXData: []byte{1}, RXTimeoutMS: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
+	staleLogin := time.Now().UTC().Add(-time.Hour)
 	subjectKey := models.SystemAdminSubjectKey
-	if err := db.Create(&models.User{ID: 11, Username: "api-medium", PasswordHash: "hash", Enabled: true, SubjectKey: &subjectKey, SessionVersion: 1, LastLoginAt: &now}).Error; err != nil {
+	if err := db.Create(&models.User{ID: 11, Username: "api-medium", PasswordHash: "hash", Enabled: true, SubjectKey: &subjectKey, SessionVersion: 1, LastLoginAt: &staleLogin}).Error; err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/actions/medium_read/confirm", bytes.NewReader([]byte(`{"params":{},"reason":"recoverable test"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden || !bytes.Contains(w.Body.Bytes(), []byte(`"error_code":"recent_auth_required"`)) {
+		t.Fatalf("recent-auth status=%d body=%s", w.Code, w.Body.String())
+	}
+	now := time.Now().UTC()
+	if err := db.Model(&models.User{}).Where("id = ?", 11).UpdateColumn("last_login_at", now).Error; err != nil {
 		t.Fatal(err)
 	}
 	grant, err := service.IssueConfirmation(context.Background(), commandexec.ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 11, ActionID: "medium_read", Params: json.RawMessage(`{}`), Reason: "recoverable test", SourceIP: "127.0.0.1"})

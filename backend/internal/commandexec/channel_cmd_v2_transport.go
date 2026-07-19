@@ -81,6 +81,9 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if !ok || !definition.Enabled || definition.Version != execution.ActionVersion || definition.Transport != deviceaction.ChannelCmdV2Adapter {
 		return DispatchResult{}, fmt.Errorf("trusted action definition is unavailable")
 	}
+	if definition.Semantics != "read" || definition.Risk != "low" {
+		return DispatchResult{}, fmt.Errorf("action requires the future high-risk command engine")
+	}
 	bootID, capabilities, err := currentCapabilities(edge.Node, t.now)
 	if err != nil {
 		return DispatchResult{}, err

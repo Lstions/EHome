@@ -51,6 +51,12 @@ describe('authApi', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/auth/logout', {})
   })
 
+  it('reauthenticate posts only the current password to the protected endpoint', async () => {
+    mockClient.post.mockResolvedValue({ data: { authenticated_at: '2026-07-19T00:00:00Z' } })
+    await authApi.reauthenticate('current-password')
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/account/reauthenticate', { password: 'current-password' })
+  })
+
   it('getToken reads from localStorage first', () => {
     localStorage.setItem('token', 'local-token')
     expect(authApi.getToken()).toBe('local-token')
@@ -63,6 +69,28 @@ describe('authApi', () => {
 
   it('getToken returns empty string when no token', () => {
     expect(authApi.getToken()).toBe('')
+  })
+})
+
+// ─── deviceOperation ───
+import { deviceOperationApi } from '../deviceOperation'
+
+describe('deviceOperationApi', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('does not retry an authoritative HTTP rejection', async () => {
+    const rejection = Object.assign(new Error('recent authentication is required'), { response: { status: 403 } })
+    mockClient.post.mockRejectedValue(rejection)
+    await expect(deviceOperationApi.create(7, 'set_mode', {}, '', '', 'same-key')).rejects.toBe(rejection)
+    expect(mockClient.post).toHaveBeenCalledOnce()
+  })
+
+  it('retries one ambiguous lost response with the exact idempotency key', async () => {
+    const execution = { command_id: 'cmd-1', edge_device_id: 7, status: 'QUEUED' }
+    mockClient.post.mockRejectedValueOnce(new Error('timeout')).mockResolvedValueOnce({ data: { execution } })
+    await expect(deviceOperationApi.create(7, 'read', {}, '', '', 'same-key')).resolves.toEqual(execution)
+    expect(mockClient.post).toHaveBeenCalledTimes(2)
+    expect(mockClient.post.mock.calls[0]).toEqual(mockClient.post.mock.calls[1])
   })
 })
 

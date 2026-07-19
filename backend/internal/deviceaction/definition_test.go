@@ -25,7 +25,7 @@ type verifiedSetDriver struct{ testActionDriver }
 
 func (verifiedSetDriver) DeviceType() string { return "verified-set" }
 func (verifiedSetDriver) ControlActions() []drivers.ControlAction {
-	return []drivers.ControlAction{{ID: "set_mode", Version: 1, Name: "set", Description: "test", Semantics: "set", Risk: "medium", TXData: []byte{0xaa}, ReadSize: 1, RXTimeoutMS: 1}}
+	return []drivers.ControlAction{{ID: "set_mode", Version: 1, Name: "set", Description: "test", Semantics: "set", Risk: "medium", Enabled: true, TXData: []byte{0xaa}, ReadSize: 1, RXTimeoutMS: 1}}
 }
 func (verifiedSetDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]drivers.SensorData, error) {
 	if actionID != "set_mode" || string(params) != "{}" || len(raw) != 1 || raw[0] != 0x06 {
@@ -111,6 +111,12 @@ func TestBuiltInSetActionUsesTrustedVerifier(t *testing.T) {
 	definition, ok := registry.Get("verified-set", "set_mode")
 	if !ok {
 		t.Fatal("verified set action is missing")
+	}
+	if definition.Enabled {
+		t.Fatal("current single-step/RAM engine must force setters disabled")
+	}
+	if err := registry.SetEnabled("verified-set", "set_mode", true); err == nil {
+		t.Fatal("current engine accepted setter rollout")
 	}
 	result, err := definition.Verify(json.RawMessage(`{}`), []byte{0x06})
 	if err != nil || len(result) != 1 || result[0].Name != "mode_ack" {

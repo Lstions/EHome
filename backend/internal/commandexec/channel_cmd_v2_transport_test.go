@@ -80,6 +80,22 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 	if cmd.BootID != node.BootID || cmd.EdgeDeviceID != uint32(edge.ID) || cmd.ChannelID != uint32(channel.ID) || cmd.ReadSize != 9 || cmd.RXTimeoutMS != 1000 || cmd.PostTXDelayMS != 100 || len(cmd.TXData) != 8 || cmd.TXData[1] != 0x03 {
 		t.Fatalf("compiled command=%+v", cmd)
 	}
+
+	// Defense in depth: even a directly registered/enabled action must not
+	// cross the production transport until the high-risk engine exists.
+	unsafeActions := enabledReadActions(t)
+	if err := unsafeActions.Register(deviceaction.Definition{ID: "medium_read", Version: 1, Name: "medium", DeviceType: edge.Type, Semantics: "read", Risk: "medium", Enabled: true, Transport: deviceaction.ChannelCmdV2Adapter, SingleStep: deviceaction.SingleStep{TXData: []byte{1}, RXTimeoutMS: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	transport.actions = unsafeActions
+	publisher.payload = nil
+	execution.ActionID = "medium_read"
+	if _, err := transport.Dispatch(context.Background(), execution, attempt); err == nil {
+		t.Fatal("medium-risk action crossed the low-risk-only transport")
+	}
+	if len(publisher.payload) != 0 {
+		t.Fatal("rejected medium-risk action was published")
+	}
 }
 
 func TestChannelCmdV2TransportRejectsStaleOrDisabledCapability(t *testing.T) {

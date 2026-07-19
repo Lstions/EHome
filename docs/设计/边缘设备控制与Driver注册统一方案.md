@@ -5,7 +5,7 @@
 > **统筹来源**：
 > 1. `边缘设备控制架构设计.md` — 边缘设备控制架构（主文档）
 > 2. `docs/后端Driver注册单一化与Techfine元数据修复方案.md` — Driver 注册修复
-> 3. `嘉佰达软件板通用协议20220509.pdf_by_PaddleOCR-VL-1.6.md` — 嘉佰达 V19 协议 OCR 来源；当前仓库未包含该文件，Phase 0-B 必须归档原 PDF/OCR、来源和校验摘要后才能作为可复核协议证据
+> 3. `docs/协议/嘉佰达软件板通用协议20220509.md` — 已归档的嘉佰达 V19 协议来源与控制门禁，SHA-256 为 `3904ab4985ec702caf2d64ddd60bfecf8d33f34b107c949731f3176aa15c805c`
 >
 > **适用项目**：EHomeSystem
 >
@@ -18,6 +18,12 @@
 > **规范优先级**：本统一方案是控制面的唯一规范入口；与被引用的历史设计文档冲突时，以本文件为准。历史文档只作为背景和证据，不再作为接口字段定义来源。
 >
 > **资源原则**：后端承担业务编排、厂商协议解析、权限、持久化和验证；ESP32 只实现有界、静态内存优先的 Channel 字节事务执行，不实现通用工作流语言、JSON 规则引擎或厂商协议解释器。
+
+> **2026-07-19 高风险项状态覆盖**：本文早期“尚未建立闭环”的基线描述仅保留为历史审计背景。
+> 当前单步只读闭环、Outbox/Inbox、C6/SN-3001 实机和前端控制面已经落地；但生产引擎仍严格限制为
+> `read/low`。GB3024 setter 缺 CRC/ACK/写入读回恢复证据；嘉佰达 MOS/F2/F3/reset 缺真实 BMS；
+> bounded batch、NVS at-most-once、雨量清零、reboot/reset 尚未实现；S3 只有脚本交叉构建而无实机
+> heap/stack/满载数据。critical 近期认证体验已完成，raw diagnostics 仍是生产 410 且生命周期治理待办。
 
 ## 当前 master 重新评估摘要
 
@@ -1556,8 +1562,11 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 第 3 项已完成可观测性第一切片：后端以有界低基数结果统计 admission/dispatch，记录排队与 accept
 时延直方图、ResourceReport stale 和安全审计写失败；监控 API 从 Execution/Outbox/人工处置记录汇总
 持久状态，统一监控页显示活跃操作、待处理/租约 Outbox、未处置 UNKNOWN、过期能力和审计写失败。
-此切片不包含 cleanup failure 与 NVS 指标、外部告警规则/通道；第 1、4 项也仍未完成，Phase 6
-继续按原门禁推进。
+此切片不包含 cleanup failure 与 NVS 指标、外部告警规则/通道。第 1 项现已完成：后端对
+medium/high/critical 的确认签发与消费实施 10 分钟近期认证窗口，API 返回稳定
+`recent_auth_required`；统一前端可在当前会话内输入密码重新认证，并以原参数、理由和幂等键继续。
+第 4 项仍未完成；raw REST/WS 写路径在生产继续返回 410，不能把 fail-closed 等同于诊断会话的权限、
+时限、审计、保留、脱敏和到期清理已经实现。Phase 6 继续按原门禁推进。
 
 ---
 
@@ -1608,7 +1617,7 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 
 - [ ] 所有 API 有权威会话校验；
 - [ ] high/critical 有服务端强制确认；
-- [ ] critical 可要求近期认证；
+- [x] critical 确认签发/消费要求 10 分钟近期认证，统一前端支持密码重认证后继续原幂等意图；
 - [ ] confirmation token 绑定 params hash；
 - [ ] 审计失败对 high/critical fail-closed；
 - [ ] 普通日志不泄露 secret/raw dangerous command；
@@ -1686,9 +1695,11 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 
 在 C6/S3 上测量 binary、heap、stack、队列和满负载采集影响前，不得承诺 batch 上限或启用危险动作。
 
-### B12：厂商协议原始证据未归档
+### B12：嘉佰达协议已归档但实机控制证据缺失
 
-当前仓库未包含文档声明引用的嘉佰达 PDF/OCR 文件。Phase 0-B 必须补齐可追溯来源和 hash；在此之前，第 26 节只能视为待复核摘录。
+嘉佰达 V19 Markdown、来源路径与 SHA-256 已归档；但没有真实 BMS 的 wake、0xE1 ACK、双 MOS
+优先级、`fet_status` 读回/恢复记录，F2/F3 还存在命令号、长度和 CRC 覆盖歧义。因此协议归档门禁
+已关闭，MOS/F2/F3/reset 的实机门禁仍保持打开，任何写动作继续 unavailable。
 
 ### B13：幂等请求摘要与物理摘要混用
 
@@ -2049,7 +2060,7 @@ BMS 响应：DD E1 00 00 -- Checksum_H Checksum_L 77
 | legacy TX 截断与非法 bus fallback | `esp32-collector/components/bus_manager/bus_manager.c:347-386` |
 | UART RX timeout 固定 1000ms | `esp32-collector/components/bus_worker/bus_worker.c:115-125` |
 | ResourceReport 未持久化 boot/report time/engine revision | `backend/internal/nodemgr/handler_resources.go:545-684`、`backend/internal/models/models.go:19-64` |
-| 嘉佰达 V19 协议摘录 | 当前仅见本文整理；原 PDF/OCR 尚未归档，列为 B12 |
+| 嘉佰达 V19 协议来源 | 已归档 `docs/协议/嘉佰达软件板通用协议20220509.md` 及 SHA-256；真实 BMS 控制证据仍列为 B12 |
 
 ---
 

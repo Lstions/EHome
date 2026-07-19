@@ -1,25 +1,29 @@
-import axios, { type AxiosInstance, type AxiosError } from 'axios'
+import axios, { type AxiosInstance, type AxiosError, type AxiosResponse } from 'axios'
 import { clearSessionCaches } from '@/utils/sessionCache'
 
+interface ErrorEnvelope {
+  code?: number | string
+  message?: string
+  error_code?: string
+}
+
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    public readonly status?: number,
-    public readonly code?: number | string,
-    public readonly retryAfterSeconds?: number,
-  ) {
+  readonly response?: AxiosResponse
+  readonly status?: number
+  readonly errorCode?: string
+
+  constructor(message: string, response?: AxiosResponse, errorCode?: string) {
     super(message)
     this.name = 'ApiError'
+    this.response = response
+    this.status = response?.status
+    this.errorCode = errorCode
   }
 }
 
-const hasAuthorizationHeader = (error: AxiosError): boolean => {
-  const headers = error.config?.headers as Record<string, unknown> | undefined
-  return Boolean(headers?.Authorization || headers?.authorization)
+export function isApiErrorCode(error: unknown, errorCode: string): boolean {
+  return error instanceof ApiError && error.errorCode === errorCode
 }
-
-const isLoginRequest = (error: AxiosError): boolean =>
-  error.config?.url?.includes('/api/v1/auth/login') === true
 
 // 创建 Axios 实例
 const apiClient: AxiosInstance = axios.create({
@@ -46,33 +50,23 @@ apiClient.interceptors.request.use(
 // 响应拦截器 - 统一错误处理
 apiClient.interceptors.response.use(
   (response) => {
-    const data = response.data as { code?: number; message?: string; data?: unknown }
+    const data = response.data as ErrorEnvelope & { data?: unknown }
     // 检查业务状态码：2xx 放行，4xx/5xx 拦截为业务错误
-    if (data.code && data.code >= 400) {
-      return Promise.reject(new ApiError(data.message || '请求失败', undefined, data.code))
+    if (typeof data.code === 'number' && data.code >= 400) {
+      return Promise.reject(new ApiError(data.message || '请求失败', response, data.error_code))
     }
     return response.data
   },
   (error: AxiosError) => {
-    // 登录接口返回 401 表示凭据错误，不能按“已有会话失效”处理，否则
-    // 登录失败页面会被重定向，用户看不到真正的失败反馈。
-    if (error.response?.status === 401 && !isLoginRequest(error) && hasAuthorizationHeader(error)) {
+    if (error.response?.status === 401) {
       // Token过期，清除并跳转登录
       clearSessionCaches()
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
       window.location.href = '/login'
     }
-    const errorData = error.response?.data as { code?: number | string; message?: string } | undefined
-    const retryAfterHeader = error.response?.headers?.['retry-after']
-      ?? (error.response?.headers as any)?.get?.('retry-after')
-    const retryAfterSeconds = Number(retryAfterHeader)
-    return Promise.reject(new ApiError(
-      errorData?.message || error.message,
-      error.response?.status,
-      errorData?.code,
-      Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds : undefined,
-    ))
+    const errorData = error.response?.data as ErrorEnvelope | undefined
+    return Promise.reject(new ApiError(errorData?.message || error.message, error.response, errorData?.error_code))
   }
 )
 

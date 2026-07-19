@@ -61,6 +61,10 @@ export const authApi = {
     await client.post('/api/v1/account/password', data)
   },
 
+  async reauthenticate(password: string): Promise<void> {
+    await client.post('/api/v1/account/reauthenticate', { password })
+  },
+
   getToken(): string {
     return localStorage.getItem('token') || sessionStorage.getItem('token') || ''
   },

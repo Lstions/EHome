@@ -155,9 +155,20 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 	if !ok {
 		return fmt.Errorf("action %s for %s not found", actionID, deviceType)
 	}
+	if enabled && !currentEngineAllows(def) {
+		return fmt.Errorf("action %s for %s requires the future high-risk command engine", actionID, deviceType)
+	}
 	def.Enabled = enabled
 	r.byType[deviceType][actionID] = def
 	return nil
+}
+
+// currentEngineAllows is deliberately narrower than the complete design. The
+// deployed single-step/RAM replay engine cannot safely execute setters or
+// medium/high/critical actions until risk encoding, durable at-most-once and
+// bounded verification semantics land together.
+func currentEngineAllows(def Definition) bool {
+	return def.Semantics == "read" && def.Risk == "low"
 }
 
 func (r *Registry) List(deviceType string) []Definition {
@@ -218,9 +229,10 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					return driver.ParseData(raw)
 				}
 			}
+			enabled := action.Enabled && action.Semantics == "read" && action.Risk == "low"
 			if err := r.Register(Definition{ID: action.ID, Version: action.Version, Name: action.Name,
 				Description: action.Description, DeviceType: deviceType, Semantics: action.Semantics,
-				Risk: action.Risk, Enabled: action.Enabled, Transport: ChannelCmdV2Adapter,
+				Risk: action.Risk, Enabled: enabled, Transport: ChannelCmdV2Adapter,
 				InputSchema: schema,
 				SingleStep: SingleStep{TXData: action.TXData, ReadSize: action.ReadSize,
 					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, compiler: compiler, verifier: verifier}); err != nil {

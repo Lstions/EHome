@@ -29,7 +29,7 @@ vi.mock('axios', () => {
 })
 
 // import 在 mock 之后
-import apiClient from '../client'
+import apiClient, { ApiError, isApiErrorCode } from '../client'
 void apiClient // 触发模块加载 + 拦截器注册
 
 describe('apiClient 拦截器', () => {
@@ -78,6 +78,21 @@ describe('apiClient 拦截器', () => {
   it('业务 code 非 200 时 reject with message', async () => {
     const handler = mockResponseFulfilled.getMockImplementation() as any
     await expect(handler({ data: { code: 400, message: '参数错误' } })).rejects.toThrow('参数错误')
+  })
+
+  it('保留 HTTP 响应和机器错误码供受控操作恢复', async () => {
+    const handler = mockResponseRejected.getMockImplementation() as any
+    const response = { status: 403, data: { message: 'recent authentication is required', error_code: 'recent_auth_required' } }
+    let caught: unknown
+    try {
+      await handler({ response, message: 'Request failed' })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).response).toBe(response)
+    expect((caught as ApiError).status).toBe(403)
+    expect(isApiErrorCode(caught, 'recent_auth_required')).toBe(true)
   })
 
   it('业务 code 200 时 resolve data', () => {
