@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
@@ -38,6 +39,7 @@ type Manager struct {
 	deviceInit      *deviceinit.Orchestrator
 	termMgr         *terminal.Manager
 	offlineDetector *offlinedetector.Detector
+	driverRegistry  *drivers.Registry
 	stopCh          chan struct{}
 	stopOnce        sync.Once
 	wg              sync.WaitGroup     // for worker pool graceful shutdown
@@ -64,6 +66,7 @@ type Manager struct {
 	periphIntentMu sync.Mutex
 	periphPending  map[uint32]periphRequestMeta
 	periphLatest   map[string]uint32
+	commandExec    *commandexec.Service
 }
 
 type periphRequestMeta struct {
@@ -80,7 +83,13 @@ func (m *Manager) LockPeriphIntent()   { m.periphIntentMu.Lock() }
 func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
 
 // NewManager creates a new node manager
-func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager) *Manager {
+func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
+	driverRegistry := drivers.NewRegistry()
+	if len(registries) > 0 && registries[0] != nil {
+		driverRegistry = registries[0]
+	} else {
+		drivers.RegisterBuiltInDrivers(driverRegistry)
+	}
 	mgr := &Manager{
 		db:              db,
 		mqtt:            mqttClient,
@@ -92,6 +101,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient),
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
+		driverRegistry:  driverRegistry,
 		stopCh:          make(chan struct{}),
 		reassembler:     newStreamReassembler(),
 		periphPending:   make(map[uint32]periphRequestMeta),
@@ -122,9 +132,9 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.dataBus.Register(databus.NewPendingWriteConsumer(mgr.pendingWrite, mgr.deviceInit, db))
 	mgr.dataBus.Register(databus.NewDBPersistConsumer(db))
 	if offlineDetector != nil {
-		mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler, offlineDetector.OnEdgeDeviceData))
+		mgr.dataBus.Register(databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, mgr.reassembler, driverRegistry, offlineDetector.OnEdgeDeviceData))
 	} else {
-		mgr.dataBus.Register(databus.NewSensorParserConsumer(db, wsHub, ha, mgr.reassembler))
+		mgr.dataBus.Register(databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, mgr.reassembler, driverRegistry))
 	}
 
 	// G10: Record initial node online count
@@ -173,6 +183,13 @@ func (m *Manager) PendingWrite() *pendingwrite.Manager {
 // TerminalMgr returns the terminal manager for external access
 func (m *Manager) TerminalMgr() *terminal.Manager {
 	return m.termMgr
+}
+
+// SetCommandExecutionService connects the independently constructed control
+// domain after composition root setup. Keeping this setter explicit avoids a
+// nodemgr↔commandexec construction cycle.
+func (m *Manager) SetCommandExecutionService(service *commandexec.Service) {
+	m.commandExec = service
 }
 
 // HandleMessage processes incoming MQTT messages from devices
@@ -228,6 +245,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleConfigSyncRequest(deviceID, payload)
 	case frame.MsgResourceReport:
 		m.handleResourceReport(deviceID, payload)
+	case frame.MsgChannelCmdV2Ack, frame.MsgChannelCmdV2Final:
+		m.handleChannelCmdV2Response(deviceID, payload)
 	case frame.MsgPeriphRsp:
 		m.handlePeriphResponse(deviceID, payload)
 	case frame.MsgLogStream:
@@ -460,7 +479,7 @@ func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
 		Find(&devices)
 
 	for _, dev := range devices {
-		driver, err := drivers.Get(dev.Type)
+		driver, err := m.driverRegistry.Get(dev.Type)
 		if err != nil {
 			continue
 		}

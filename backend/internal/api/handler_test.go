@@ -1174,7 +1174,7 @@ func TestEdgeDevice_List(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices", nil)
@@ -1197,7 +1197,7 @@ func TestEdgeDevice_GetByID(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1", nil)
@@ -1215,7 +1215,7 @@ func TestEdgeDevice_Get_NotFound(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/999", nil)
@@ -1238,7 +1238,7 @@ func TestEdgeDevice_Delete(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1", nil)
@@ -1256,7 +1256,7 @@ func TestEdgeDevice_LatestData(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/latest-data", nil)
@@ -1274,7 +1274,7 @@ func TestEdgeDevice_Data(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=1&page_size=10", nil)
@@ -1286,13 +1286,13 @@ func TestEdgeDevice_Data(t *testing.T) {
 	}
 }
 
-func TestEdgeDevice_Operations(t *testing.T) {
+func TestEdgeDevice_OperationsIsNotProvidedByLegacyRoutes(t *testing.T) {
 	db := setupTestDB(t)
 	r := setupRouter()
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"operation": "read",
@@ -1304,8 +1304,8 @@ func TestEdgeDevice_Operations(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 without the Phase 1 operation service, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

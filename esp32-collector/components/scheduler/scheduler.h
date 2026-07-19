@@ -121,6 +121,15 @@ const scheduler_state_t *scheduler_get_state(void);
 void scheduler_notify_channel_error(uint32_t channel_id);
 void scheduler_notify_channel_success(uint32_t channel_id);
 
+/* Bounded runtime observability for performance gates.  All values are
+ * measured since boot/config start; zero means the corresponding task has not
+ * been created yet. */
+typedef struct {
+    uint32_t min_queue_spaces;
+    uint32_t stack_high_water_words;
+} scheduler_performance_t;
+void scheduler_get_performance(scheduler_performance_t *out);
+
 #ifdef __cplusplus
 }
 #endif

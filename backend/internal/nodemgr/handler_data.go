@@ -201,7 +201,7 @@ func (m *Manager) parseAndStoreData(collectorID uint, deviceID string, channelID
 
 	// Fallback: try Driver registry (legacy, for HA Discovery compatibility)
 	if sensorData == nil {
-		driver, err := drivers.Get(device.Type)
+		driver, err := m.driverRegistry.Get(device.Type)
 		if err != nil {
 			logger.Infof("[%s] No ConfigParser and no driver for type %s", deviceID, device.Type)
 			return nil

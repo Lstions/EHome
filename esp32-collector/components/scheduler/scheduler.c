@@ -34,6 +34,7 @@ static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
 static volatile bool   s_prepared;
 static scheduler_queues_t s_queues;
+static volatile uint32_t s_min_queue_spaces;
 
 static void scheduler_task(void *p);
 
@@ -82,6 +83,7 @@ void scheduler_init(void)
     s_running     = false;
     s_prepared    = false;
     s_task_handle = NULL;
+    s_min_queue_spaces = CMD_QUEUE_DEPTH;
 }
 
 static bool queues_valid(const scheduler_queues_t *queues)
@@ -373,6 +375,14 @@ void scheduler_notify_channel_success(uint32_t channel_id)
     }
 }
 
+void scheduler_get_performance(scheduler_performance_t *out)
+{
+    if (!out) return;
+    out->min_queue_spaces = s_min_queue_spaces;
+    out->stack_high_water_words = s_task_handle
+        ? (uint32_t)uxTaskGetStackHighWaterMark(s_task_handle) : 0;
+}
+
 /* ── scheduler helper functions ──────────────────────────────────── */
 
 /**
@@ -565,6 +575,7 @@ static void scheduler_task(void *p)
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart1_cmd_queue));
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.spi_cmd_queue));
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.i2c_cmd_queue));
+        if (min_spaces < s_min_queue_spaces) s_min_queue_spaces = min_spaces;
         bool queue_pressure = (min_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
 
         /* Iterate through all active channels */

@@ -16,6 +16,7 @@ bool factory_reset_in_progress(void);
 
 /**
  * Trigger factory reset immediately (erases NVS and reboots).
- * Called by WriteCmd handler when channel_id=0, data=[0xFC, 0x00].
+ * Reserved for a future authenticated/privileged control path. Legacy
+ * WriteCmd must never call this function.
  */
 void factory_reset_trigger(void);

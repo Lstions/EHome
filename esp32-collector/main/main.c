@@ -12,6 +12,7 @@
 #include "hello_handshake.h"
 #include "bus_worker.h"
 #include "msg_handler.h"
+#include "msg_handler_internal.h"
 #include "config_mgr.h"
 #include "scheduler.h"
 #include "sync_manager.h"
@@ -75,10 +76,28 @@ static void on_sync_send_hello(void)
 
 void on_write_cmd_received(uint32_t rid, uint32_t ch,
                            const uint8_t *d, size_t l, uint32_t rs,
-                           uint32_t edge_device_id)
+                           uint32_t edge_device_id, uint32_t rx_timeout_ms)
 {
     bus_manager_on_write_cmd(&app_state_get()->bus_runtime, rid, ch, d, l, rs,
-                             edge_device_id);
+                             edge_device_id, rx_timeout_ms);
+}
+
+const char *channel_cmd_v2_current_boot_id(void)
+{
+    return app_state_get()->boot_id;
+}
+
+uint64_t channel_cmd_v2_current_time_ms(void)
+{
+    return msg_handler_get_current_server_time_ms();
+}
+
+bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot)
+{
+    if (!cmd) return false;
+    return bus_manager_on_channel_cmd_v2(&app_state_get()->bus_runtime, cmd->channel_id,
+        cmd->tx_data, cmd->tx_len, cmd->read_size, cmd->rx_timeout_ms,
+        cmd->post_tx_delay_ms, slot);
 }
 
 void on_query_resources_received(const char *request_id)
@@ -279,6 +298,7 @@ void app_main(void)
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
     /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */
     bus_worker_set_callbacks(msg_handler_send_write_rsp, msg_handler_send_data_report);
+    bus_worker_set_channel_cmd_v2_final_cb(handler_channel_cmd_v2_complete);
     bus_manager_set_write_rsp_cb(msg_handler_send_write_rsp);
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */

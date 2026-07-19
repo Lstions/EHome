@@ -16,6 +16,7 @@
 #include "hw_profile.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_random.h"
 #include <string.h>
 #include <inttypes.h>
 
@@ -47,6 +48,12 @@ static void generate_node_id(char *buf, size_t buflen)
     ESP_LOGW(TAG, "MAC read failed, using Kconfig node_id: %s", buf);
 }
 
+static void generate_boot_id(char *buf, size_t buflen)
+{
+    snprintf(buf, buflen, "%08" PRIX32 "%08" PRIX32,
+             esp_random(), esp_random());
+}
+
 /* ---- P2-8: Bus runtime initialization ---- */
 
 void app_state_init_bus_runtime(app_state_t *s, bus_runtime_t *rt)
@@ -71,6 +78,8 @@ app_state_t *app_state_init(void)
 
     /* Unique node_id from hardware MAC */
     generate_node_id(s_app.node_id, sizeof(s_app.node_id));
+    generate_boot_id(s_app.boot_id, sizeof(s_app.boot_id));
+    hw_profile_set_boot_id(s_app.boot_id);
 
     /* Mutex for config-manifest application.
      * Using mutex instead of spinlock because we call blocking functions
@@ -109,8 +118,8 @@ app_state_t *app_state_init(void)
     /* P2-8: Initialize bus_runtime_t from app_state fields */
     app_state_init_bus_runtime(&s_app, &s_app.bus_runtime);
 
-    ESP_LOGI(TAG, "State initialized: node_id=%s fw=%s model=%s",
-             s_app.node_id, FIRMWARE_VERSION, MODEL_NAME);
+    ESP_LOGI(TAG, "State initialized: node_id=%s boot_id=%s fw=%s model=%s",
+             s_app.node_id, s_app.boot_id, FIRMWARE_VERSION, MODEL_NAME);
     return &s_app;
 }
 

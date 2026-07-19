@@ -42,7 +42,7 @@ func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
-	registerDeviceRoutes(v1, db, mgr, nil)
+	registerDeviceRoutes(v1, db, mgr, nil, ControlPolicy{allowUnsafeRawForTests: true})
 	return r, db
 }
 

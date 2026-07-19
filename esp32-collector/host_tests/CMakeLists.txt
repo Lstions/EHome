@@ -21,6 +21,39 @@ target_include_directories(protocol_log_tests PRIVATE
 target_compile_options(protocol_log_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME protocol_log_tests COMMAND protocol_log_tests)
 
+add_executable(writecmd_decoder_tests
+    writecmd_decoder_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/handler_writecmd.c
+)
+target_include_directories(writecmd_decoder_tests PRIVATE
+    stubs
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_options(writecmd_decoder_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME writecmd_decoder_tests COMMAND writecmd_decoder_tests)
+
+add_executable(channel_cmd_v2_decoder_tests
+    channel_cmd_v2_decoder_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/handler_channel_cmd_v2.c
+)
+target_include_directories(channel_cmd_v2_decoder_tests PRIVATE
+    stubs
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
+
+add_executable(legacy_write_guard_tests legacy_write_guard_tests.c)
+target_include_directories(legacy_write_guard_tests PRIVATE
+    ../components/bus_manager/include
+)
+target_compile_options(legacy_write_guard_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME legacy_write_guard_tests COMMAND legacy_write_guard_tests)
+
 add_executable(hw_profile_resource_report_tests
     hw_profile_resource_report_tests.c
     ../components/frame/frame_codec.c

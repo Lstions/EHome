@@ -33,6 +33,8 @@
 #include "esp_task_wdt.h"  // Task watchdog
 #include "rom/ets_sys.h"   // ets_delay_us — busy-wait without disabling interrupts
 #include "freertos/semphr.h"
+#include "freertos/task.h"
+#include <limits.h>
 #include <inttypes.h>
 #include <string.h>
 
@@ -52,6 +54,7 @@
 /* Injected callbacks */
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static data_rpt_cb_t s_data_rpt_cb = NULL;
+static channel_cmd_v2_final_cb_t s_channel_cmd_v2_final_cb = NULL;
 
 /* P0-3: Counting semaphore for suspend/resume */
 static SemaphoreHandle_t s_suspend_sem = NULL;
@@ -72,10 +75,19 @@ static TaskHandle_t s_rx_task_h = NULL;
 /* 8.1: Runtime counters */
 static uint32_t s_rx_timeout_count[SCHED_MAX_CHANNELS];
 
+static bool has_pending_cmd(bus_runtime_t *rt, int ch_idx);
+static void wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
+                                        const char *tag, const bus_cmd_t *cmd);
+
 void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
 {
  s_write_rsp_cb = wr_cb;
  s_data_rpt_cb  = dr_cb;
+}
+
+void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb)
+{
+ s_channel_cmd_v2_final_cb = cb;
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,7 +124,7 @@ static void apply_turnaround_delay(uint32_t us)
 /*  Enqueue pending cmd for rx_task correlation                       */
 /* ------------------------------------------------------------------ */
 
-static void enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
+static bool enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
 {
  pending_cmd_t pcmd = {
   .edge_device_id  = cmd->edge_device_id,
@@ -121,7 +133,9 @@ static void enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
   .request_id      = (cmd->type == CMD_SAMPLE) ? 0 : cmd->request_id,
   .read_size       = cmd->read_size,
   .tx_timestamp    = esp_timer_get_time(),
-  .rx_timeout_ms   = 1000,
+  .rx_timeout_ms   = (cmd->type == CMD_WRITE) ? cmd->rx_timeout_ms : 1000,
+  .channel_cmd_v2  = cmd->channel_cmd_v2,
+  .control_slot    = cmd->control_slot,
  };
  pcmd.cmd_data_len = (cmd->tx_len < PENDING_CMD_DATA_MAX)
    ? cmd->tx_len : PENDING_CMD_DATA_MAX;
@@ -130,6 +144,16 @@ static void enqueue_pending(bus_runtime_t *rt, int ch_idx, const bus_cmd_t *cmd)
  }
  if (!xQueueSend(rt->pending_queues[ch_idx], &pcmd, 0)) {
         ESP_LOGW(TAG_U0, "pending queue full ch%d, dropping", ch_idx);
+        return false;
+ }
+ return true;
+}
+
+static void complete_control(const bus_cmd_t *cmd, bool success, uint32_t code,
+                             const uint8_t *raw, size_t raw_len)
+{
+ if (cmd->channel_cmd_v2 && s_channel_cmd_v2_final_cb) {
+  s_channel_cmd_v2_final_cb(cmd->control_slot, success, code, raw, raw_len);
  }
 }
 
@@ -160,34 +184,63 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
 
   if (!xQueueReceive(queue, &cmd, pdMS_TO_TICKS(5000))) continue;
 
+  if (cmd.channel_cmd_v2) {
+   ESP_LOGI(tag, "V2 execute ch=%lu tx=%u read=%lu timeout=%lu slot=%u",
+    (unsigned long)cmd.channel_id, (unsigned)cmd.tx_len,
+    (unsigned long)cmd.read_size, (unsigned long)cmd.rx_timeout_ms,
+    (unsigned)cmd.control_slot);
+  }
+
   bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
   if (!ctx) {
    no_ctx++;
-   if (cmd.type == CMD_WRITE)
+   if (cmd.channel_cmd_v2) complete_control(&cmd, false, 4, NULL, 0);
+   else if (cmd.type == CMD_WRITE)
     if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, 4, "no ctx");
    scheduler_notify_channel_error(cmd.channel_id);
    continue;
   }
   txn++;
 
+  int ch_idx = -1;
+  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+   if (rt->bus_ch[i] == cmd.channel_id) { ch_idx = i; break; }
+  }
+  /* UART responses carry no request ID.  Never transmit another
+   * request/response command before rx_task has consumed the prior response. */
+  if (cmd.bus_type == BUS_TYPE_UART && (cmd.type == CMD_SAMPLE || cmd.read_size > 0)) {
+   wait_for_uart_response_slot(rt, ch_idx, tag, &cmd);
+  }
+
   if (cmd.type == CMD_WRITE) {
    esp_err_t e = bus_dma_write(ctx, cmd.tx_data, cmd.tx_len);
    if (e == ESP_OK) {
     if (cmd.read_size > 0) {
-     uint32_t tu = compute_turnaround_us(ctx);
-     apply_turnaround_delay(tu);
+     /* Register correlation immediately after TX.  A fast Modbus slave can
+      * start replying before the configured post-TX delay expires; delaying
+      * this enqueue would turn that valid reply into uncorrelated telemetry. */
+     bool pending_enqueued = false;
      for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
       if (rt->bus_ch[i] == cmd.channel_id) {
-       enqueue_pending(rt, i, &cmd);
+       pending_enqueued = enqueue_pending(rt, i, &cmd);
+       if (!pending_enqueued) complete_control(&cmd, false, 0xFFFF, NULL, 0);
        break;
       }
      }
+     uint32_t tu = compute_turnaround_us(ctx);
+     apply_turnaround_delay(tu);
+     if (cmd.channel_cmd_v2 && cmd.delay_ms > 0) {
+      vTaskDelay(pdMS_TO_TICKS(cmd.delay_ms));
+     }
+    } else if (cmd.channel_cmd_v2) {
+     complete_control(&cmd, true, 0, NULL, 0);
     }
-    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
+    if (!cmd.channel_cmd_v2 && s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
     scheduler_notify_channel_success(cmd.channel_id);
    } else {
     errs++;
-    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, (uint32_t)e, "bus err");
+    if (cmd.channel_cmd_v2) complete_control(&cmd, false, (uint32_t)e, NULL, 0);
+    else if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, (uint32_t)e, "bus err");
     scheduler_notify_channel_error(cmd.channel_id);
    }
   }
@@ -200,8 +253,8 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char *ta
    } else {
     scheduler_notify_channel_success(cmd.channel_id);
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-     if (rt->bus_ch[i] == cmd.channel_id) {
-      enqueue_pending(rt, i, &cmd);
+      if (rt->bus_ch[i] == cmd.channel_id) {
+       (void)enqueue_pending(rt, i, &cmd);
       break;
      }
     }
@@ -252,7 +305,8 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
   bus_dma_ctx_t *ctx = rt->find_ctx(rt, cmd.channel_id);
   if (!ctx) {
    no_ctx++;
-   if (cmd.type == CMD_WRITE)
+   if (cmd.channel_cmd_v2) complete_control(&cmd, false, 4, NULL, 0);
+   else if (cmd.type == CMD_WRITE)
     if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, 4, "no ctx");
    scheduler_notify_channel_error(cmd.channel_id);
    continue;
@@ -268,7 +322,8 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
     e = bus_dma_transact(ctx, cmd.tx_data, cmd.tx_len, rx, sizeof(rx), &rl);
    }
    if (e == ESP_OK) {
-    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
+    if (cmd.channel_cmd_v2) complete_control(&cmd, true, 0, rx, rl);
+    else if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, true, 0, NULL);
     scheduler_notify_channel_success(cmd.channel_id);
     if (cmd.read_size > 0 && rl > 0) {
      uint64_t ts = esp_timer_get_time();
@@ -277,7 +332,8 @@ static void spi_i2c_cmd_loop(bus_runtime_t *rt, QueueHandle_t queue, const char 
     }
    } else {
     errs++;
-    if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, (uint32_t)e, "bus err");
+    if (cmd.channel_cmd_v2) complete_control(&cmd, false, (uint32_t)e, NULL, 0);
+    else if (s_write_rsp_cb) s_write_rsp_cb(cmd.request_id, false, (uint32_t)e, "bus err");
     scheduler_notify_channel_error(cmd.channel_id);
    }
   }
@@ -357,6 +413,22 @@ static bool has_pending_cmd(bus_runtime_t *rt, int ch_idx)
    && uxQueueMessagesWaiting(rt->pending_queues[ch_idx]) > 0;
 }
 
+/* A UART response has no inherent request ID.  Sending a second read before
+ * rx_task has consumed the first response makes the FIFO head own the next
+ * bytes, associating a control reply with a periodic sample (or vice versa).
+ * rx_task releases this bounded fence after a complete response or timeout. */
+static void wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
+                                        const char *tag, const bus_cmd_t *cmd)
+{
+ if (ch_idx < 0 || !has_pending_cmd(rt, ch_idx)) return;
+ ESP_LOGI(tag, "waiting for pending UART response ch=%lu before %s",
+          (unsigned long)cmd->channel_id,
+          cmd->channel_cmd_v2 ? "V2 command" : "next command");
+ while (has_pending_cmd(rt, ch_idx)) {
+  vTaskDelay(pdMS_TO_TICKS(RX_POLL_MS));
+ }
+}
+
 static void rx_task(void *pv)
 {
  bus_runtime_t *rt = (bus_runtime_t *)pv;
@@ -413,7 +485,9 @@ static void rx_task(void *pv)
       pending_cmd_t pcmd;
       if (xQueuePeek(rt->pending_queues[i], &pcmd, 0) == pdTRUE) {
        uint64_t ts = (uint64_t)now_us;
-       if (s_data_rpt_cb) {
+       if (pcmd.channel_cmd_v2 && s_channel_cmd_v2_final_cb) {
+        s_channel_cmd_v2_final_cb(pcmd.control_slot, true, 0, s->buffer, s->len);
+       } else if (s_data_rpt_cb) {
         s_data_rpt_cb(rt->bus_ch[i], ts, 0,
          s->buffer, s->len, 0,
          pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
@@ -456,7 +530,9 @@ static void rx_task(void *pv)
       s_rx_timeout_count[i]++;
       ESP_LOGW(TAG_RX, "P1-6: RX timeout reqID=%lu (%lldms)",
        (unsigned long)pcmd.request_id, (long long)elapsed_ms);
-      if (s_data_rpt_cb) {
+      if (pcmd.channel_cmd_v2 && s_channel_cmd_v2_final_cb) {
+       s_channel_cmd_v2_final_cb(pcmd.control_slot, false, 1, NULL, 0);
+      } else if (s_data_rpt_cb) {
        uint64_t ts = (uint64_t)esp_timer_get_time();
        s_data_rpt_cb(rt->bus_ch[i], ts, 0, NULL, 0,
         0x01, pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id, pcmd.command_index);
@@ -532,4 +608,16 @@ uint32_t bus_worker_get_rx_timeout_count(int channel)
 {
  if (channel >= 0 && channel < SCHED_MAX_CHANNELS) return s_rx_timeout_count[channel];
  return 0;
+}
+
+uint32_t bus_worker_get_min_stack_watermark(void)
+{
+ TaskHandle_t handles[] = {s_cmd_u0_h, s_cmd_u1_h, s_cmd_spi_h, s_cmd_i2c_h, s_rx_task_h};
+ uint32_t minimum = UINT32_MAX;
+ for (size_t i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) {
+  if (!handles[i]) continue;
+  uint32_t value = (uint32_t)uxTaskGetStackHighWaterMark(handles[i]);
+  if (value < minimum) minimum = value;
+ }
+ return minimum == UINT32_MAX ? 0 : minimum;
 }

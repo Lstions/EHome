@@ -70,6 +70,8 @@ static void test_resource_report_encodes_independent_c6_pwm_resources(void)
     frame_field_t field;
     const uint8_t *buses = NULL;
     size_t buses_len = 0;
+    const uint8_t *manifest_capacity = NULL;
+    size_t manifest_capacity_len = 0;
     uint64_t resource_count = 0;
     CHECK(frame_decoder_init(&report_dec, report, report_len) == FRAME_OK,
           "ResourceReport decode failed");
@@ -80,10 +82,30 @@ static void test_resource_report_encodes_independent_c6_pwm_resources(void)
         } else if (field.field_num == 3) {
             CHECK(frame_field_get_bytes(&field, &buses, &buses_len) == FRAME_OK,
                   "buses_blob decode failed");
+        } else if (field.field_num == 10) {
+            CHECK(frame_field_get_bytes(&field, &manifest_capacity, &manifest_capacity_len) == FRAME_OK,
+                  "manifest capacity decode failed");
         }
     }
     CHECK(resource_count == HW_RESOURCE_COUNT, "resource_count must include PWM resources");
     CHECK(buses != NULL, "buses_blob is missing");
+    CHECK(manifest_capacity != NULL, "manifest capacity is missing");
+
+    frame_decoder_t capacity_dec;
+    uint64_t max_templates = 0, max_channels = 0, max_template_ids = 0;
+    CHECK(frame_decoder_init_sub(&capacity_dec, manifest_capacity, manifest_capacity_len) == FRAME_OK,
+          "manifest capacity nested decode failed");
+    while (frame_decoder_next(&capacity_dec, &field) == FRAME_OK) {
+        uint64_t value = 0;
+        CHECK(frame_field_get_varint(&field, &value) == FRAME_OK,
+              "manifest capacity value decode failed");
+        if (field.field_num == 1) max_templates = value;
+        if (field.field_num == 2) max_channels = value;
+        if (field.field_num == 3) max_template_ids = value;
+    }
+    CHECK(max_templates == MAX_TEMPLATES, "reported max templates differs from config_mgr");
+    CHECK(max_channels == MAX_CHANNELS, "reported max channels differs from config_mgr");
+    CHECK(max_template_ids == MAX_TEMPLATE_IDS, "reported max template ids differs from config_mgr");
 
     frame_decoder_t buses_dec;
     int pwm_count = 0;

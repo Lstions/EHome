@@ -74,6 +74,8 @@ typedef void (*write_rsp_cb_t)(uint32_t rid, bool ok, uint32_t code, const char 
 typedef void (*data_rpt_cb_t)(uint32_t ch, uint64_t ts, uint32_t seq,
  const uint8_t *data, size_t len, uint32_t code, uint32_t rid,
  uint32_t edge_device_id, uint32_t command_template_id, uint8_t command_index);
+typedef void (*channel_cmd_v2_final_cb_t)(uint8_t slot, bool success, uint32_t error_code,
+                                          const uint8_t *raw_response, size_t raw_len);
 
 
 /* ==================================================================
@@ -96,6 +98,8 @@ typedef struct {
  /* P1-6: RX timeout tracking */
  int64_t tx_timestamp; /* Time when TX completed (esp_timer_get_time()), 0 = no tracking */
  uint32_t rx_timeout_ms; /* RX timeout in ms (0 = no timeout tracking), default 1000 */
+ bool channel_cmd_v2;
+ uint8_t control_slot; /* ChannelCmdV2 slot, or CONTROL_SLOT_NONE */
 } pending_cmd_t;
 
 /* ==================================================================
@@ -115,6 +119,7 @@ typedef struct {
 
 /** Inject msg_handler callbacks (call before bus_worker_start) */
 void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb);
+void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb);
 
 /** Start rx_task + per-bus cmd_tasks (called once at boot) */
 void bus_worker_start(bus_runtime_t *rt);
@@ -130,6 +135,10 @@ void bus_worker_stop(void);
 
 /* P1-6: Get RX timeout count (for debug/status queries) */
 uint32_t bus_worker_get_rx_timeout_count(int channel);
+
+/* Minimum remaining stack watermark across active bus worker tasks, in
+ * FreeRTOS stack words.  Zero means workers are not running yet. */
+uint32_t bus_worker_get_min_stack_watermark(void);
 
 #ifdef __cplusplus
 }

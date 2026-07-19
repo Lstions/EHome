@@ -1,15 +1,46 @@
 package nodemgr
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+type templateOverflowDriver struct{}
+
+func (templateOverflowDriver) DeviceType() string                         { return "template-overflow" }
+func (templateOverflowDriver) DeviceName() string                         { return "template-overflow" }
+func (templateOverflowDriver) OEM() string                                { return "test" }
+func (templateOverflowDriver) Category() string                           { return "test" }
+func (templateOverflowDriver) HardwareTypes() []string                    { return []string{"uart"} }
+func (templateOverflowDriver) GetSensorDefinitions() []drivers.SensorData { return nil }
+func (templateOverflowDriver) ParseData([]byte) ([]drivers.SensorData, error) {
+	return nil, nil
+}
+func (templateOverflowDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return []drivers.CommandTemplate{{ID: "extra", Type: "read", WriteData: "AA", ReadLength: 1, Schedulable: true}}
+}
+
+type fourCommandDriver struct{ templateOverflowDriver }
+
+func (fourCommandDriver) DeviceType() string { return "four-commands" }
+func (fourCommandDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return []drivers.CommandTemplate{
+		{ID: "one", Type: "read", WriteData: "01", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
+		{ID: "two", Type: "read", WriteData: "02", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
+		{ID: "three", Type: "read", WriteData: "03", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
+		{ID: "four", Type: "read", WriteData: "04", ReadLength: 1, IntervalMs: 1000, Schedulable: true},
+	}
+}
 
 // mockMQTTPublisher 记录所有发布的消息, 用于验证 SendPeriphCmd 编码正确性
 type mockMQTTPublisher struct {
@@ -560,6 +591,212 @@ func TestConfigManifest_PeriphEmpty(t *testing.T) {
 	}
 	if hasField12 {
 		t.Error("field 12 should not be present when no PWM configs")
+	}
+}
+
+func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	for i := 0; i < maxManifestTemplates+1; i++ {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "overflow", ManifestID: "overflow"})
+	if err == nil || !strings.Contains(err.Error(), "collector limit") {
+		t.Fatalf("expected template capacity failure, got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("overflow manifest was published")
+	}
+	var node models.Node
+	if err := db.Where("node_id = ?", "dev1").First(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	if node.ConfigSyncState != "failed" || node.ConfigStatus != "failed" {
+		t.Fatalf("overflow did not persist failed sync state: %+v", node)
+	}
+}
+
+func TestConfigManifestHonorsReportedTemplateCapacity(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	if err := db.Model(&models.Node{}).Where("node_id = ?", "dev1").Update("hardware_info", `{"manifest_capacity":{"max_templates":1,"max_channels":8,"max_template_ids":8}}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "reported-capacity", ManifestID: "reported-capacity"})
+	if err == nil || !strings.Contains(err.Error(), "collector limit is 1") {
+		t.Fatalf("expected reported-capacity failure, got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("manifest above reported capacity was published")
+	}
+}
+
+func TestReconcileDriverTemplatesRejectsOverflowBeforeMutation(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxManifestTemplates; i++ {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "template-overflow", Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	registry := drivers.NewRegistry()
+	registry.Register(templateOverflowDriver{})
+	var existing []models.ConfigTemplate
+	if err := db.Where("node_id = ?", "dev1").Find(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := reconcileDriverTemplates(db, registry, "dev1", existing, maxManifestTemplates)
+	if err == nil || !strings.Contains(err.Error(), "collector limit") || created {
+		t.Fatalf("expected non-mutating capacity failure, created=%v err=%v", created, err)
+	}
+	var count int64
+	if err := db.Model(&models.ConfigTemplate{}).Where("node_id = ?", "dev1").Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != maxManifestTemplates {
+		t.Fatalf("reconciliation mutated templates: got %d, want %d", count, maxManifestTemplates)
+	}
+}
+
+func TestConfigManifestRejectsTooManyV2EdgeDevicesBeforePublish(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxEdgeDevicesPerChannel+1; i++ {
+		if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "unknown", Enabled: true, Name: fmt.Sprintf("edge-%d", i)}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "edge-overflow", ManifestID: "edge-overflow"})
+	if err == nil || !strings.Contains(err.Error(), "edge devices") {
+		t.Fatalf("expected V2 edge-device capacity failure, got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("edge-device overflow manifest was published")
+	}
+}
+
+func TestConfigManifestRejectsTooManyV2CommandsBeforePublish(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	registry := drivers.NewRegistry()
+	registry.Register(fourCommandDriver{})
+	mgr.driverRegistry = registry
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "four-commands", Enabled: true, Name: "four"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, writeData := range []string{"01", "02", "03", "04"} {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: writeData, ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "command-overflow", ManifestID: "command-overflow"})
+	if err == nil || !strings.Contains(err.Error(), "commands") {
+		t.Fatalf("expected V2 command capacity failure, got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("command overflow manifest was published")
+	}
+}
+
+func TestConfigManifestV2ExplicitZeroIntervalsEncodeNoPollingCommands(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	registry := drivers.NewRegistry()
+	registry.Register(&drivers.JiabaidaBMSDriver{})
+	mgr.driverRegistry = registry
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000258000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	intervals := json.RawMessage(`{"read_basic_info":0,"read_cell_voltage":0,"read_hardware_version":0,"read_comprehensive":0,"read_protection_count":0}`)
+	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "jiabaida_bms", Enabled: true, Name: "action-only", CommandIntervals: intervals}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range (&drivers.JiabaidaBMSDriver{}).GetCommandTemplates() {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: command.WriteData, ReadLength: command.ReadLength, DelayMs: command.DelayMs}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "zero-intervals", ManifestID: "zero-intervals"}); err != nil {
+		t.Fatal(err)
+	}
+	dec, err := frame.NewDecoder(mock.publishedPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commandCount int
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if field.FieldNum != 4 {
+			continue
+		}
+		channelDec, err := frame.NewSubDecoder(frame.GetBytes(field))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			channelField, err := channelDec.NextField()
+			if errors.Is(err, frame.ErrEndOfFrame) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if channelField.FieldNum != 9 {
+				continue
+			}
+			groupDec, err := frame.NewSubDecoder(frame.GetBytes(channelField))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for {
+				groupField, err := groupDec.NextField()
+				if errors.Is(err, frame.ErrEndOfFrame) {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if groupField.FieldNum == 3 {
+					commandCount++
+				}
+			}
+		}
+	}
+	if commandCount != 0 {
+		t.Fatalf("explicit zero command intervals encoded %d polling commands", commandCount)
 	}
 }
 

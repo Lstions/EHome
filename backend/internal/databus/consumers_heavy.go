@@ -105,10 +105,17 @@ type SensorParserConsumer struct {
 	ha             *homeassistant.Integration
 	reassembler    Reassembler
 	deviceActivity func(uint)
+	driverRegistry *drivers.Registry
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
-	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, ha: ha, reassembler: reassembler}
+	driverRegistry := drivers.NewRegistry()
+	drivers.RegisterBuiltInDrivers(driverRegistry)
+	return NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassembler, driverRegistry, deviceActivity...)
+}
+
+func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, driverRegistry *drivers.Registry, deviceActivity ...func(uint)) *SensorParserConsumer {
+	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, ha: ha, reassembler: reassembler, driverRegistry: driverRegistry}
 	if len(deviceActivity) > 0 {
 		consumer.deviceActivity = deviceActivity[0]
 	}
@@ -156,7 +163,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 
 	// Primary: calibration-aware drivers must never be bypassed by a generic
 	// DeviceConfig parser: calibration is part of their decoding invariant.
-	drv, _ := drivers.Get(device.Type)
+	drv, _ := c.driverRegistry.Get(device.Type)
 	_, calibrationAware := drv.(drivers.CalibrationAwareDriver)
 	if !calibrationAware && device.DeviceConfigID > 0 {
 		var dc models.DeviceConfig
@@ -178,7 +185,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// ConfigTemplate.WriteData so protocols with identical response layouts can
 	// select the correct parser branch.
 	if sensorData == nil {
-		drv, err := drivers.Get(device.Type)
+		drv, err := c.driverRegistry.Get(device.Type)
 		if err != nil {
 			c.reassembler.Consume(uint32(evt.RequestID))
 			return

@@ -289,6 +289,74 @@ func (d *PRS3001Driver) GetCommandTemplates() []CommandTemplate {
 	}
 }
 
+func (d *PRS3001Driver) ControlActions() []ControlAction {
+	return []ControlAction{{
+		ID: "read_rainfall", Version: 1, Name: "读取雨量",
+		Description: "PRS-3001 雨量 (mm) 和光照度 (Lux)，Modbus RTU FC03",
+		Semantics:   "read", Risk: "low", Enabled: false,
+		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b},
+		ReadSize: 9, RXTimeoutMS: 1000, PostTXDelayMS: 100,
+	}}
+}
+
+// SN3001RainDriver handles the SN-3001-GYL RS485 optical rain gauge.  It is
+// intentionally distinct from the legacy PRS-3001 entry: the documented safe
+// read is one Modbus register (7-byte response), rather than a guessed
+// multi-register layout.  The action remains disabled until a real device
+// produces a CRC-valid response in the target deployment.
+type SN3001RainDriver struct {
+	configParser *parser.ConfigParser
+}
+
+func (d *SN3001RainDriver) DeviceType() string      { return "sn3001_rain" }
+func (d *SN3001RainDriver) DeviceName() string      { return "SN-3001 光学雨量计" }
+func (d *SN3001RainDriver) OEM() string             { return "威盟士" }
+func (d *SN3001RainDriver) Category() string        { return "雨量传感器" }
+func (d *SN3001RainDriver) HardwareTypes() []string { return []string{"uart"} }
+func (d *SN3001RainDriver) GetSensorDefinitions() []SensorData {
+	return []SensorData{{Name: "rainfall", Unit: "mm"}}
+}
+func (d *SN3001RainDriver) ParseData(raw []byte) ([]SensorData, error) {
+	if len(raw) < 5 {
+		return nil, fmt.Errorf("sn3001_rain: need at least 5 bytes, got %d", len(raw))
+	}
+	if raw[0] != 0x01 || raw[1] != 0x03 {
+		return nil, fmt.Errorf("sn3001_rain: unexpected address/function %02x/%02x", raw[0], raw[1])
+	}
+	dataLen := int(raw[2])
+	if len(raw) != 3+dataLen+2 {
+		return nil, fmt.Errorf("sn3001_rain: frame length %d does not match byte count %d", len(raw), dataLen)
+	}
+	if got, want := binary.LittleEndian.Uint16(raw[len(raw)-2:]), parser.ModbusCRC16(raw[:len(raw)-2]); got != want {
+		return nil, fmt.Errorf("sn3001_rain: CRC %04x, want %04x", got, want)
+	}
+	if dataLen != 2 {
+		return nil, fmt.Errorf("sn3001_rain: rainfall read requires 2 data bytes, got %d", dataLen)
+	}
+	if d.configParser != nil {
+		if fields, err := d.configParser.Parse(raw); err == nil && len(fields) > 0 {
+			return fieldsToSensorData(fields), nil
+		}
+	}
+	return (&PRS3001Driver{}).parseLegacy(raw)
+}
+func (d *SN3001RainDriver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{{
+		ID: "read_rainfall", Name: "读取累计雨量", Type: "read", CmdByte: 0x03,
+		WriteData: "010300000001840A", ReadLength: 7, DelayMs: 100, IntervalMs: 0,
+		Schedulable: false, Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
+	}}
+}
+func (d *SN3001RainDriver) ControlActions() []ControlAction {
+	return []ControlAction{{
+		ID: "read_rainfall", Version: 1, Name: "读取累计雨量",
+		Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
+		Semantics: "read", Risk: "low", Enabled: false,
+		TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0a},
+		ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+	}}
+}
+
 // RegisterBuiltInDrivers registers all built-in drivers.
 // It delegates to the parser-aware entry point so both public registration
 // paths always expose the same driver set.
@@ -320,6 +388,15 @@ func RegisterBuiltInDriversWithParsers(registry *Registry, parserConfigs map[str
 		}
 	}
 	registry.Register(prs3001)
+
+	// SN-3001 rain gauge with optional ConfigParser.
+	sn3001Rain := &SN3001RainDriver{}
+	if pc, ok := parserConfigs["sn3001_rain"]; ok && len(pc) > 0 {
+		if cp, err := parser.NewConfigParser(pc); err == nil {
+			sn3001Rain.configParser = cp
+		}
+	}
+	registry.Register(sn3001Rain)
 
 	// Jiabaida BMS — no ConfigParser (binary protocol, handled in ParseData)
 	registry.Register(&JiabaidaBMSDriver{})

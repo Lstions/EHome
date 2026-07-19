@@ -1,10 +1,29 @@
 package frame
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"testing"
 )
+
+func TestLegacyWriteCmdGoldenVector(t *testing.T) {
+	enc := NewEncoder(MsgWriteCmd)
+	enc.EncodeVarint(1, 17)
+	enc.EncodeVarint(2, 9)
+	enc.EncodeBytes(3, []byte{0x01, 0x03, 0x00, 0x00})
+	enc.EncodeVarint(4, 8)
+	enc.EncodeVarint(5, 33)
+	enc.EncodeVarint(6, 2500)
+
+	want, err := hex.DecodeString("06081110091a04010300002008282130c413")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(enc.Bytes(), want) {
+		t.Fatalf("WriteCmd wire = %x, want %x", enc.Bytes(), want)
+	}
+}
 
 // Test vector from protocol-spec.md §3.2 Hello
 func TestHelloWireFormat(t *testing.T) {

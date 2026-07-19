@@ -26,9 +26,14 @@ func validatedTerminalWriteSender(db *gorm.DB, send terminal.WriteSender) termin
 }
 
 // registerTerminalRoutes sets up channel terminal history + write routes
-func registerTerminalRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+func registerTerminalRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, policies ...ControlPolicy) {
+	controlPolicy := resolveControlPolicy(policies...)
 	// Get terminal history
 	v1.GET("/channels/:channel_id/terminal", func(c *gin.Context) {
+		if !controlPolicy.rawWritesEnabled() {
+			c.JSON(http.StatusGone, gin.H{"error": "raw terminal diagnostics are disabled"})
+			return
+		}
 		channelID, _ := strconv.Atoi(c.Param("channel_id"))
 		count, _ := strconv.Atoi(c.DefaultQuery("count", "50"))
 		entries := nodeMgr.TerminalMgr().GetHistory(uint(channelID), count)
@@ -41,6 +46,11 @@ func registerTerminalRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.M
 
 	// Send write command via terminal
 	v1.POST("/channels/:channel_id/terminal/write", func(c *gin.Context) {
+		if !controlPolicy.rawWritesEnabled() {
+			c.JSON(http.StatusGone, gin.H{"error": "raw terminal writes are disabled; use an audited diagnostics service"})
+			return
+		}
+
 		channelID, _ := strconv.Atoi(c.Param("channel_id"))
 		var req struct {
 			DeviceID string `json:"device_id" binding:"required"`

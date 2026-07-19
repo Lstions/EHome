@@ -35,6 +35,9 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
                               struct dma_pool_t *dma_pool,
                               const config_channel_t *channels, uint8_t channel_count);
 
+/* Set once during app startup. The ResourceReport owns a copied value. */
+void hw_profile_set_boot_id(const char *boot_id);
+
 #ifdef __cplusplus
 }
 #endif

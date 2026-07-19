@@ -16,6 +16,8 @@ Profiles:
   all      Build all profiles
 
 Set BUILD_ROOT to place build directories elsewhere.
+Set EXTRA_SDKCONFIG_DEFAULTS to append a semicolon-separated sdkconfig defaults file
+(for example, an isolated development MQTT broker override).
 EOF
 }
 
@@ -44,6 +46,9 @@ build_profile() {
     sdkconfig="$build_dir/sdkconfig"
     lock_file="$build_dir/dependencies.lock"
     defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
+    if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
+        defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
+    fi
 
     mkdir -p "$build_dir"
     if [[ ! -f "$lock_file" && -f "$PROJECT_DIR/dependencies.lock" ]]; then

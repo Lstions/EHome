@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"ehome/backend/internal/events"
 	"ehome/backend/pkg/logger"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -11,6 +12,113 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 )
+
+// runtimePerformanceReport is an aggregate-only projection of the bounded
+// firmware counters sent in StatusReport field 9.  Stack values are FreeRTOS
+// words; a zero means the task was not running when the snapshot was made.
+type runtimePerformanceReport struct {
+	FreeHeapBytes          uint32 `json:"free_heap_bytes"`
+	MinFreeHeapBytes       uint32 `json:"min_free_heap_bytes"`
+	SchedulerStackFreeWord uint32 `json:"scheduler_stack_free_words"`
+	WorkerStackFreeWord    uint32 `json:"worker_stack_free_words"`
+	MinCommandQueueSpaces  uint32 `json:"min_command_queue_spaces"`
+}
+
+// controlStatisticsReport is a bounded boot-local aggregate from the V2
+// firmware path.  It has no identifiers or payloads and exists solely for
+// rollout, replay and queue-health observability.
+type controlStatisticsReport struct {
+	Accepted  uint32 `json:"accepted"`
+	Rejected  uint32 `json:"rejected"`
+	Completed uint32 `json:"completed"`
+	Replayed  uint32 `json:"replayed"`
+}
+
+func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
+	var report runtimePerformanceReport
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return report, err
+	}
+	seen := [6]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			return report, err
+		}
+		if field.FieldNum < 1 || field.FieldNum > 5 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+			return report, fmt.Errorf("invalid runtime performance field")
+		}
+		value := frame.GetUint64(field)
+		if value > math.MaxUint32 {
+			return report, fmt.Errorf("runtime performance overflow")
+		}
+		seen[field.FieldNum] = true
+		switch field.FieldNum {
+		case 1:
+			report.FreeHeapBytes = uint32(value)
+		case 2:
+			report.MinFreeHeapBytes = uint32(value)
+		case 3:
+			report.SchedulerStackFreeWord = uint32(value)
+		case 4:
+			report.WorkerStackFreeWord = uint32(value)
+		case 5:
+			report.MinCommandQueueSpaces = uint32(value)
+		}
+	}
+	for field := uint8(1); field <= 5; field++ {
+		if !seen[field] {
+			return report, fmt.Errorf("missing runtime performance field %d", field)
+		}
+	}
+	return report, nil
+}
+
+func decodeControlStatistics(data []byte) (controlStatisticsReport, error) {
+	var report controlStatisticsReport
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return report, err
+	}
+	seen := [5]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			return report, err
+		}
+		if field.FieldNum < 1 || field.FieldNum > 4 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+			return report, fmt.Errorf("invalid control statistics field")
+		}
+		value := frame.GetUint64(field)
+		if value > math.MaxUint32 {
+			return report, fmt.Errorf("control statistics overflow")
+		}
+		seen[field.FieldNum] = true
+		switch field.FieldNum {
+		case 1:
+			report.Accepted = uint32(value)
+		case 2:
+			report.Rejected = uint32(value)
+		case 3:
+			report.Completed = uint32(value)
+		case 4:
+			report.Replayed = uint32(value)
+		}
+	}
+	for field := uint8(1); field <= 4; field++ {
+		if !seen[field] {
+			return report, fmt.Errorf("missing control statistics field %d", field)
+		}
+	}
+	return report, nil
+}
 
 // handleStatusReport processes StatusReport (type=0x02)
 // v2.1: parses 5 fields (2 new: config_epoch, sync_state)
@@ -31,6 +139,8 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	var syncStateVarint uint64
 	var configHash string // v2.2: config_hash from device
 	var syncID string
+	var performance *runtimePerformanceReport
+	var controlStatistics *controlStatisticsReport
 	seen := map[uint8]bool{}
 
 	for {
@@ -42,13 +152,13 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 			logger.Warnf("[%s] malformed StatusReport: %v", deviceID, err)
 			return
 		}
-		if field.FieldNum < 1 || field.FieldNum > 8 || (seen[field.FieldNum] && field.FieldNum != 7) {
+		if field.FieldNum < 1 || field.FieldNum > 10 || (seen[field.FieldNum] && field.FieldNum != 7) {
 			logger.Warnf("[%s] invalid StatusReport field", deviceID)
 			return
 		}
 		seen[field.FieldNum] = true
 		expected := uint8(frame.WireVarint)
-		if field.FieldNum == 2 || field.FieldNum == 6 || field.FieldNum == 7 || field.FieldNum == 8 {
+		if field.FieldNum == 2 || field.FieldNum == 6 || field.FieldNum == 7 || field.FieldNum == 8 || field.FieldNum == 9 || field.FieldNum == 10 {
 			expected = frame.WireLengthDelimited
 		}
 		if field.WireType != expected {
@@ -75,6 +185,20 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 			}
 		case 8:
 			syncID = frame.GetString(field)
+		case 9:
+			decoded, err := decodeRuntimePerformance(frame.GetBytes(field))
+			if err != nil {
+				logger.Warnf("[%s] malformed runtime performance: %v", deviceID, err)
+				return
+			}
+			performance = &decoded
+		case 10:
+			decoded, err := decodeControlStatistics(frame.GetBytes(field))
+			if err != nil {
+				logger.Warnf("[%s] malformed control statistics: %v", deviceID, err)
+				return
+			}
+			controlStatistics = &decoded
 		}
 	}
 	if !seen[1] || !seen[2] || !seen[5] || status == "" {
@@ -136,6 +260,27 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		"status": node.Status, "last_seen": node.LastSeen, "uptime_seconds": node.UptimeSeconds,
 		"online_duration": node.OnlineDuration, "last_online_time": node.LastOnlineTime,
 		"config_epoch": node.ConfigEpoch,
+	}
+	if performance != nil || controlStatistics != nil {
+		if performance != nil {
+			updates["free_heap_bytes"] = int(performance.FreeHeapBytes)
+		}
+		var hardwareInfo map[string]interface{}
+		if json.Unmarshal([]byte(node.HardwareInfo), &hardwareInfo) != nil || hardwareInfo == nil {
+			hardwareInfo = map[string]interface{}{}
+		}
+		if performance != nil {
+			hardwareInfo["runtime_performance"] = performance
+		}
+		if controlStatistics != nil {
+			hardwareInfo["control_statistics"] = controlStatistics
+		}
+		if encoded, err := json.Marshal(hardwareInfo); err != nil {
+			logger.Warnf("[%s] encode runtime performance failed: %v", deviceID, err)
+			return
+		} else {
+			updates["hardware_info"] = string(encoded)
+		}
 	}
 	if err := m.db.Model(&models.Node{}).Where("id = ?", node.ID).Updates(updates).Error; err != nil {
 		logger.Warnf("[%s] persist StatusReport failed: %v", deviceID, err)

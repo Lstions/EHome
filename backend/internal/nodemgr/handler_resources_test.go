@@ -24,6 +24,44 @@ func TestValidateFieldSequenceRejectsMalformedResourceData(t *testing.T) {
 	}
 }
 
+func TestDecodeManifestCapacity(t *testing.T) {
+	valid := buildSubFrame(func(enc *frame.Encoder) {
+		enc.EncodeVarint(1, 16)
+		enc.EncodeVarint(2, 8)
+		enc.EncodeVarint(3, 8)
+	})
+	got, err := decodeManifestCapacity(valid)
+	if err != nil {
+		t.Fatalf("decodeManifestCapacity(valid) error = %v", err)
+	}
+	want := manifestCapacityReport{MaxTemplates: 16, MaxChannels: 8, MaxTemplateIDs: 8}
+	if got != want {
+		t.Fatalf("decodeManifestCapacity(valid) = %+v, want %+v", got, want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"empty", nil},
+		{"missing required field", buildSubFrame(func(enc *frame.Encoder) { enc.EncodeVarint(1, 16); enc.EncodeVarint(2, 8) })},
+		{"zero limit", buildSubFrame(func(enc *frame.Encoder) { enc.EncodeVarint(1, 0); enc.EncodeVarint(2, 8); enc.EncodeVarint(3, 8) })},
+		{"duplicate field", buildSubFrame(func(enc *frame.Encoder) {
+			enc.EncodeVarint(1, 16)
+			enc.EncodeVarint(1, 8)
+			enc.EncodeVarint(2, 8)
+			enc.EncodeVarint(3, 8)
+		})},
+		{"out of bounds", buildSubFrame(func(enc *frame.Encoder) { enc.EncodeVarint(1, 257); enc.EncodeVarint(2, 8); enc.EncodeVarint(3, 8) })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeManifestCapacity(tc.data); err == nil {
+				t.Fatal("decodeManifestCapacity accepted invalid capacity")
+			}
+		})
+	}
+}
+
 // --- decodeUARTEntry tests ---
 
 func TestDecodeUARTEntry(t *testing.T) {

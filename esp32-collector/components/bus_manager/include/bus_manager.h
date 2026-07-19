@@ -46,7 +46,13 @@ bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id);
 void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t request_id,
                                uint32_t channel_id,
                                const uint8_t *data, size_t len,
-                               uint32_t read_size, uint32_t edge_device_id);
+                               uint32_t read_size, uint32_t edge_device_id,
+                               uint32_t rx_timeout_ms);
+
+bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t channel_id,
+                                   const uint8_t *data, size_t len, uint32_t read_size,
+                                   uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
+                                   uint8_t control_slot);
 
 #ifdef __cplusplus
 }

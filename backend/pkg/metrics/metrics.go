@@ -218,4 +218,27 @@ var (
 		Name: "ehome_log_event_bus_dropped_total",
 		Help: "LogEventBus batches dropped under backpressure",
 	}, []string{"stage", "consumer"})
+
+	// DeviceActionCreatedTotal deliberately uses a bounded result label rather
+	// than action, node, command, or parameter identifiers.
+	DeviceActionCreatedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_created_total",
+		Help: "Durable device action creation results",
+	}, []string{"result"})
+
+	DeviceActionTransitionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_transitions_total",
+		Help: "Durable device action state transitions",
+	}, []string{"status"})
+
+	DeviceActionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_device_action_duration_seconds",
+		Help:    "Duration from durable creation to a terminal action state",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+	})
+
+	DeviceActionDispatchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_dispatch_total",
+		Help: "Outbox dispatch results",
+	}, []string{"result"})
 )

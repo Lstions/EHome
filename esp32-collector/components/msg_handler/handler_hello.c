@@ -12,6 +12,7 @@
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include <string.h>
 
 #define TAG "HELLO_H"
@@ -22,6 +23,7 @@ extern bool hello_handshake_notify_ack(uint32_t nonce);
 /* HelloAck state */
 static volatile bool s_hello_ack_received = false;
 static volatile uint64_t s_server_time_ms = 0;
+static volatile int64_t s_server_time_received_us = 0;
 
 /* === HelloAck state accessors === */
 
@@ -35,10 +37,21 @@ uint64_t msg_handler_get_server_time(void)
     return s_server_time_ms;
 }
 
+uint64_t msg_handler_get_current_server_time_ms(void)
+{
+    uint64_t base = s_server_time_ms;
+    int64_t received = s_server_time_received_us;
+    if (base == 0 || received <= 0) return 0;
+    int64_t elapsed = esp_timer_get_time() - received;
+    if (elapsed < 0) return 0;
+    return base + (uint64_t)(elapsed / 1000);
+}
+
 void msg_handler_reset_hello_ack(void)
 {
     s_hello_ack_received = false;
     s_server_time_ms = 0;
+    s_server_time_received_us = 0;
 }
 
 /* === Receive: HelloAck (0x12) === */
@@ -102,6 +115,7 @@ void handler_hello_process_ack(frame_decoder_t *dec)
         return;
     }
     s_server_time_ms = server_time;
+    s_server_time_received_us = esp_timer_get_time();
     s_hello_ack_received = accepted;
     (void)features;
     ESP_LOGI(TAG, "HelloAck: server_time=%llu features=%u nonce=%u accepted=%d",

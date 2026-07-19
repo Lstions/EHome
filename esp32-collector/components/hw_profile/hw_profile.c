@@ -10,6 +10,52 @@
 #include "frame_codec.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+#define COMMAND_ENGINE_REVISION 1U
+#define COMMAND_ENGINE_BOOT_ID_MAX 17
+#define COMMAND_ENGINE_MAX_TX 128U /* must track cmd_queue.h CMD_TX_MAX */
+#define COMMAND_ENGINE_RAM_DEDUP_ENTRIES 4U /* must track CHANNEL_CMD_V2_SLOT_COUNT */
+
+static char s_boot_id[COMMAND_ENGINE_BOOT_ID_MAX] = "unknown";
+
+void hw_profile_set_boot_id(const char *boot_id)
+{
+    if (!boot_id || boot_id[0] == '\0') return;
+    snprintf(s_boot_id, sizeof(s_boot_id), "%s", boot_id);
+}
+
+static bool encode_command_engine(frame_encoder_t *enc)
+{
+    uint8_t sub[96];
+    frame_encoder_t nested;
+    frame_encoder_init_sub(&nested, sub, sizeof(sub));
+    if (frame_encode_varint(&nested, 1, COMMAND_ENGINE_REVISION) != FRAME_OK ||
+        frame_encode_string(&nested, 2, s_boot_id) != FRAME_OK ||
+        frame_encode_bool(&nested, 3, true) != FRAME_OK ||
+        frame_encode_bool(&nested, 4, false) != FRAME_OK ||
+        frame_encode_bool(&nested, 5, true) != FRAME_OK ||
+        frame_encode_varint(&nested, 6, 0) != FRAME_OK ||
+        frame_encode_varint(&nested, 7, COMMAND_ENGINE_MAX_TX) != FRAME_OK ||
+        frame_encode_varint(&nested, 8, 256) != FRAME_OK ||
+        frame_encode_varint(&nested, 9, 30000) != FRAME_OK ||
+        frame_encode_varint(&nested, 10, COMMAND_ENGINE_RAM_DEDUP_ENTRIES) != FRAME_OK) return false;
+    return frame_encode_bytes(enc, 9, sub, frame_encoder_size(&nested)) == FRAME_OK;
+}
+
+/* ConfigManifest storage is fixed by config_mgr.  Publish these bounds as a
+ * device fact so the server can reject an oversized manifest before MQTT
+ * delivery rather than waiting for the collector to reject it. */
+static bool encode_manifest_capacity(frame_encoder_t *enc)
+{
+    uint8_t sub[32];
+    frame_encoder_t nested;
+    frame_encoder_init_sub(&nested, sub, sizeof(sub));
+    if (frame_encode_varint(&nested, 1, MAX_TEMPLATES) != FRAME_OK ||
+        frame_encode_varint(&nested, 2, MAX_CHANNELS) != FRAME_OK ||
+        frame_encode_varint(&nested, 3, MAX_TEMPLATE_IDS) != FRAME_OK) return false;
+    return frame_encode_bytes(enc, 10, sub, frame_encoder_size(&nested)) == FRAME_OK;
+}
 
 /* ================================================================
  *  Sub-message encoding helpers
@@ -375,6 +421,12 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
             free(dma_buf);
         }
     }
+
+    /* field9: bounded single-step ChannelCmdV2 admission/final capability. */
+    if (!encode_command_engine(&enc)) goto cleanup_fail;
+
+    /* field10: ConfigManifest storage bounds. */
+    if (!encode_manifest_capacity(&enc)) goto cleanup_fail;
 
     free(buses_buf);
     free(channels_buf);

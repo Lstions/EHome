@@ -353,14 +353,28 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
     
     if (port_entry == NULL) {
-        /* Find available UART port number — skip UART0 if console is on UART0 */
-        uart_port_t port_num = UART_NUM_MAX;  /* Invalid until found */
-        for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
-            if (s_uart_ports[i].port == UART_NUM_MAX) {
-                uart_port_t candidate = (uart_port_t)(UART_NUM_0 + i);
-                if (candidate >= UART_NUM_MAX) break;  /* Exceeds chip UART count */
-                port_num = candidate;
-                break;
+        /* A profile-owned TX/RX pair must retain its declared controller.
+         * In particular C6 GPIO20/21 is UART1, not merely "the first free
+         * UART".  The old allocator silently bound it to UART0 whenever the
+         * console was USB/JTAG, which made resource reports and runtime
+         * routing disagree.  Custom pin pairs retain the free-port fallback. */
+        uart_port_t port_num = hw_derive_uart_port(tx_pin, rx_pin, UART_NUM_MAX);
+        if (port_num < UART_NUM_MAX) {
+            for (int i = 0; i < MAX_UART_PORTS; i++) {
+                if (s_uart_ports[i].port == port_num) {
+                    ESP_LOGE(TAG, "UART%d is already allocated to a different pin/baud config", port_num);
+                    return ESP_ERR_INVALID_STATE;
+                }
+            }
+        } else {
+            /* Find an available UART port — skip UART0 only when it is the console. */
+            for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
+                if (s_uart_ports[i].port == UART_NUM_MAX) {
+                    uart_port_t candidate = (uart_port_t)(UART_NUM_0 + i);
+                    if (candidate >= UART_NUM_MAX) break;  /* Exceeds chip UART count */
+                    port_num = candidate;
+                    break;
+                }
             }
         }
         if (port_num >= UART_NUM_MAX) {

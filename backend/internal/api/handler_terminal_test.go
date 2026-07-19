@@ -23,7 +23,7 @@ func setupTerminalRouteTest(t *testing.T) (*gin.Engine, *nodemgr.Manager, func(m
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
-	registerTerminalRoutes(v1, db, mgr)
+	registerTerminalRoutes(v1, db, mgr, ControlPolicy{allowUnsafeRawForTests: true})
 	return r, mgr, func(ch models.Channel) {
 		t.Helper()
 		if err := db.Create(&ch).Error; err != nil {

@@ -178,7 +178,8 @@ func emitDeviceConfigChanges(c *gin.Context, bus *nodemgr.ConfigEventBus, action
 }
 
 // registerDeviceRoutes sets up channel + device-config CRUD routes
-func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry) {
+func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry, policies ...ControlPolicy) {
+	controlPolicy := resolveControlPolicy(policies...)
 	// Get the EventBus for emitting config change events
 	eventBus := nodeMgr.EventBus()
 
@@ -799,6 +800,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 
 	// Channel write (send raw data)
 	v1.POST("/channels/:channel_id/write", func(c *gin.Context) {
+		if !controlPolicy.rawWritesEnabled() {
+			c.JSON(http.StatusGone, gin.H{"code": 410, "message": "raw channel writes are disabled; use an audited device action"})
+			return
+		}
+
 		id := c.Param("channel_id")
 		channelID := parseUintID(id)
 		var req struct {

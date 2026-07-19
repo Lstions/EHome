@@ -3,6 +3,7 @@ package nodemgr
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,50 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// These bounds mirror config_mgr's fixed manifest storage on the currently
+// supported ESP32 collectors.  The device must still validate untrusted input,
+// but the server must not publish a manifest it already knows the collector
+// cannot apply.  A future negotiated capability can replace these protocol
+// baseline limits without weakening the fail-closed default.
+const (
+	maxManifestTemplates     = 16
+	maxManifestChannels      = 8
+	maxLegacyTemplateIDs     = 8
+	maxEdgeDevicesPerChannel = 5
+	maxCommandsPerEdgeDevice = 3
+)
+
+type manifestLimits struct {
+	maxTemplates   int
+	maxChannels    int
+	maxTemplateIDs int
+}
+
+func manifestLimitsFor(node models.Node) (manifestLimits, error) {
+	limits := manifestLimits{maxTemplates: maxManifestTemplates, maxChannels: maxManifestChannels, maxTemplateIDs: maxLegacyTemplateIDs}
+	if strings.TrimSpace(node.HardwareInfo) == "" {
+		return limits, nil
+	}
+	var info struct {
+		ManifestCapacity *manifestCapacityReport `json:"manifest_capacity"`
+	}
+	if err := json.Unmarshal([]byte(node.HardwareInfo), &info); err != nil {
+		return manifestLimits{}, fmt.Errorf("decode node manifest capacity: %w", err)
+	}
+	if info.ManifestCapacity == nil {
+		return limits, nil // compatibility with pre-capacity-report firmware
+	}
+	if info.ManifestCapacity.MaxTemplates == 0 || info.ManifestCapacity.MaxChannels == 0 || info.ManifestCapacity.MaxTemplateIDs == 0 {
+		return manifestLimits{}, fmt.Errorf("node manifest capacity is incomplete")
+	}
+	limits.maxTemplates = int(info.ManifestCapacity.MaxTemplates)
+	limits.maxChannels = int(info.ManifestCapacity.MaxChannels)
+	limits.maxTemplateIDs = int(info.ManifestCapacity.MaxTemplateIDs)
+	return limits, nil
+}
+
+var nextLegacyWriteRequestID = uint32(time.Now().UnixNano())
 
 // SendPeriphCmd sends a peripheral control command (GPIO/PWM) to a device.
 // Uses QoS 1. ESP-MQTT subscribes at QoS 1 and does not complete the QoS 2
@@ -173,13 +218,15 @@ func (m *Manager) SendPing(deviceID string) error {
 // SendWriteCommand sends a WriteCommand to a device
 // P3-5: Uses QoS 2 (exactly-once) for critical write operations
 func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byte, readSize uint32) error {
-	// Record TX in terminal
-	m.termMgr.RecordTX(deviceID, uint(channelID), data)
-
-	logger.Infof("[sender] SendWriteCommand: device=%s ch=%d data_hex=%x readSize=%d", deviceID, channelID, data, readSize)
+	digest := sha256.Sum256(data)
+	logger.Infof("[sender] SendWriteCommand: device=%s ch=%d tx_bytes=%d tx_digest=%x readSize=%d", deviceID, channelID, len(data), digest[:8], readSize)
+	requestID := atomic.AddUint32(&nextLegacyWriteRequestID, 1)
+	if requestID == 0 {
+		requestID = atomic.AddUint32(&nextLegacyWriteRequestID, 1)
+	}
 
 	enc := frame.NewEncoder(frame.MsgWriteCmd)
-	enc.EncodeVarint(1, uint64(time.Now().UnixNano())) // request_id
+	enc.EncodeVarint(1, uint64(requestID))
 	enc.EncodeVarint(2, uint64(channelID))
 	enc.EncodeBytes(3, data)
 	if readSize > 0 {
@@ -389,6 +436,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		logger.Infof("[%s] Collector not found for config", deviceID)
 		return fail(fmt.Errorf("collector not found: %w", err))
 	}
+	limits, err := manifestLimitsFor(node)
+	if err != nil {
+		return fail(err)
+	}
 
 	var templates []models.ConfigTemplate
 	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
@@ -397,7 +448,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	// When a driver's command has no matching ConfigTemplate (e.g. device created
 	// before createTemplatesFromDriver was deployed), auto-create the missing
 	// template. This eliminates the fragile write_data hex-string matching gap.
-	reconciled := reconcileDriverTemplates(m.db, node.NodeID, templates)
+	reconciled, err := reconcileDriverTemplates(m.db, m.driverRegistry, node.NodeID, templates, limits.maxTemplates)
+	if err != nil {
+		return fail(fmt.Errorf("reconcile driver templates: %w", err))
+	}
 	if reconciled {
 		// Reload templates after reconciliation
 		m.db.Where("node_id = ?", node.NodeID).Find(&templates)
@@ -419,6 +473,15 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateManifestTemplateCapacity(templates, limits.maxTemplates); err != nil {
+		return fail(err)
+	}
+	// Determine encoding path before checking the exact fixed-size structures
+	// used by config_mgr on the collector.
+	useV2 := protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 3})
+	if err := validateManifestScheduleCapacity(m.db, m.driverRegistry, node.NodeID, templates, channels, useV2, limits); err != nil {
+		return fail(err)
+	}
 
 	manifestID := decision.ManifestID
 	if manifestID == "" {
@@ -429,9 +492,6 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	enc.EncodeString(1, manifestID)
 
 	// v2.2: field 2 epoch removed, field 9 sync_reason removed
-
-	// Determine encoding path based on protocol version
-	useV2 := protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 3})
 
 	// Encode templates (field 3, repeated sub-structure)
 	// v2 path still needs templates — C6's schedule_v2_channel uses
@@ -531,7 +591,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 				if len(edge.CommandIntervals) > 0 {
 					json.Unmarshal(edge.CommandIntervals, &cmdIntervals)
 				}
-				drv, _ := drivers.Get(edge.Type)
+				var drv drivers.Driver
+				if m.driverRegistry != nil {
+					drv, _ = m.driverRegistry.Get(edge.Type)
+				}
 				driverCmds := getCommandTemplatesFromDriver(drv)
 
 				if len(driverCmds) > 0 {
@@ -549,8 +612,8 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 						}
 						tmplID := findTemplateIDForCommand(templates, t.WriteData)
 						if tmplID == 0 {
-							logger.Warnf("[%s] No ConfigTemplate found for command %s (write_data=%s), skipping",
-								deviceID, t.ID, t.WriteData)
+							logger.Warnf("[%s] No ConfigTemplate found for command %s, skipping",
+								deviceID, t.ID)
 							continue
 						}
 						cmdEnc := frame.SubEncoder()
@@ -829,10 +892,84 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 	return channels, nil
 }
 
+func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemplates int) error {
+	if len(templates) > maxTemplates {
+		return fmt.Errorf("manifest has %d templates; collector limit is %d", len(templates), maxTemplates)
+	}
+	return nil
+}
+
+// validateManifestScheduleCapacity mirrors config_mgr's fixed arrays for the
+// selected wire format. It deliberately counts exactly what sender will
+// encode, including enabled edge devices on a disabled transport channel.
+func validateManifestScheduleCapacity(db *gorm.DB, registry *drivers.Registry, nodeID string, templates []models.ConfigTemplate, channels []models.Channel, useV2 bool, limits manifestLimits) error {
+	if len(channels) > limits.maxChannels {
+		return fmt.Errorf("manifest has %d channels; collector limit is %d", len(channels), limits.maxChannels)
+	}
+	for _, channel := range channels {
+		if !useV2 {
+			count := 0
+			for _, value := range strings.Split(channel.TemplateIDs, ",") {
+				if strings.TrimSpace(value) != "" {
+					count++
+				}
+			}
+			if count > limits.maxTemplateIDs {
+				return fmt.Errorf("channel %d has %d template ids; collector limit is %d", channel.ID, count, limits.maxTemplateIDs)
+			}
+			continue
+		}
+
+		var edges []models.EdgeDevice
+		if err := db.Where("channel_id = ? AND node_id = ? AND enabled = ?", channel.ID, nodeID, true).Order("id ASC").Find(&edges).Error; err != nil {
+			return fmt.Errorf("load edge devices for channel %d: %w", channel.ID, err)
+		}
+		if len(edges) > maxEdgeDevicesPerChannel {
+			return fmt.Errorf("channel %d has %d edge devices; collector limit is %d", channel.ID, len(edges), maxEdgeDevicesPerChannel)
+		}
+		for _, edge := range edges {
+			var drv drivers.Driver
+			if registry != nil {
+				drv, _ = registry.Get(edge.Type)
+			}
+			commandCount := 1 // legacy/single-command fallback is always encoded.
+			driverCommands := getCommandTemplatesFromDriver(drv)
+			if len(driverCommands) > 0 {
+				commandCount = 0
+				intervals := make(map[string]int)
+				if len(edge.CommandIntervals) > 0 {
+					_ = json.Unmarshal(edge.CommandIntervals, &intervals)
+				}
+				for _, command := range driverCommands {
+					if !command.Schedulable {
+						continue
+					}
+					interval := command.IntervalMs
+					if value, ok := intervals[command.ID]; ok {
+						interval = value
+					}
+					if interval > 0 && findTemplateIDForCommand(templates, command.WriteData) != 0 {
+						commandCount++
+					}
+				}
+			}
+			if commandCount > maxCommandsPerEdgeDevice {
+				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, maxCommandsPerEdgeDevice)
+			}
+		}
+	}
+	return nil
+}
+
 // reconcileDriverTemplates ensures every driver CommandTemplate has a matching
 // ConfigTemplate in DB. Auto-creates missing templates for self-healing.
-// Returns true if any templates were created.
-func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []models.ConfigTemplate) bool {
+// Returns whether templates were created. Capacity is checked before any
+// mutation, so self-healing cannot manufacture a manifest the collector will
+// reject.
+func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nodeID string, existingTemplates []models.ConfigTemplate, maxTemplates int) (bool, error) {
+	if driverRegistry == nil {
+		return false, nil
+	}
 	// Collect all edge devices for this node and their driver commands
 	type cmdNeed struct {
 		chID       uint
@@ -845,7 +982,7 @@ func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []mo
 	var edges []models.EdgeDevice
 	db.Where("node_id = ? AND enabled = true", nodeID).Find(&edges)
 	for _, edge := range edges {
-		drv, err := drivers.Get(edge.Type)
+		drv, err := driverRegistry.Get(edge.Type)
 		if err != nil {
 			continue
 		}
@@ -873,7 +1010,17 @@ func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []mo
 		existingKeys[strings.ToUpper(strings.TrimSpace(t.WriteData))] = true
 	}
 
-	// Create missing templates
+	missing := 0
+	for key := range needed {
+		if !existingKeys[key] {
+			missing++
+		}
+	}
+	if len(existingTemplates)+missing > maxTemplates {
+		return false, fmt.Errorf("template reconciliation would create %d templates; collector limit is %d", len(existingTemplates)+missing, maxTemplates)
+	}
+
+	// Create missing templates after capacity preflight succeeds.
 	created := false
 	for key, need := range needed {
 		if existingKeys[key] {
@@ -886,18 +1033,18 @@ func reconcileDriverTemplates(db *gorm.DB, nodeID string, existingTemplates []mo
 			DelayMs:    need.delayMs,
 		}
 		if err := db.Create(&tmpl).Error; err != nil {
-			logger.Warnf("[reconcile] Failed to auto-create template for write_data=%s: %v", need.writeData, err)
+			logger.Warnf("[reconcile] Failed to auto-create template (tx_hex_chars=%d): %v", len(need.writeData), err)
 			continue
 		}
 		// Append template ID to channel's template_ids
 		newID := strconv.FormatUint(uint64(tmpl.ID), 10)
 		db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
 			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID))
-		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d write_data=%s for channel=%d",
-			tmpl.ID, need.writeData, need.chID)
+		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
+			tmpl.ID, len(need.writeData), need.chID)
 		created = true
 	}
-	return created
+	return created, nil
 }
 
 // getCommandTemplatesFromDriver returns command templates from a driver, or nil.

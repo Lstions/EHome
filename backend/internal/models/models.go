@@ -17,28 +17,32 @@ import (
 // 一个 Node = 一个物理边缘设备 (ESP32-C6/S3) 的中心端抽象
 // 字段含义见 docs/设计/节点/详细设计.md
 type Node struct {
-	ID              uint       `gorm:"primaryKey" json:"id"`
-	NodeID          string     `gorm:"column:node_id;type:varchar(32);uniqueIndex;not null" json:"node_id"` // 物理 ID (hex string, e.g. "F0F5BD02F35C")
-	Name            string     `gorm:"size:64;not null" json:"name"`
-	Model           string     `gorm:"size:20" json:"model"`
-	FirmwareVersion string     `gorm:"size:32" json:"firmware_version"`
-	ProtocolVersion string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
-	Platform        string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
-	Status          string     `gorm:"size:20;default:offline" json:"status"`
-	ConfigVersion   string     `gorm:"size:64" json:"config_version"`
-	ConfigStatus    string     `gorm:"size:20;default:pending" json:"config_status"`
-	LastSeen        *time.Time `json:"last_seen"`
-	LastPingAt      *time.Time `json:"last_ping_at"`
-	UptimeSeconds   uint32     `json:"uptime_seconds"`
-	PingLatencyMs   int32      `json:"ping_latency_ms"`
-	MQTTTopicUp     string     `gorm:"size:128" json:"mqtt_topic_up"`
-	MQTTTopicDown   string     `gorm:"size:128" json:"mqtt_topic_down"`
-	WiFiSSID        string     `gorm:"size:64" json:"wifi_ssid"`
-	WiFiRSSI        int        `json:"wifi_rssi"`
-	FreeHeapBytes   int        `json:"free_heap_bytes"`
-	Capabilities    string     `gorm:"type:jsonb;default:'{}'" json:"capabilities"`
-	HardwareInfo    string     `gorm:"type:jsonb;default:'{}'" json:"hardware_info"`
-	DmaChannels     string     `gorm:"type:jsonb;default:'[]'" json:"dma_channels"`
+	ID                        uint       `gorm:"primaryKey" json:"id"`
+	NodeID                    string     `gorm:"column:node_id;type:varchar(32);uniqueIndex;not null" json:"node_id"` // 物理 ID (hex string, e.g. "F0F5BD02F35C")
+	Name                      string     `gorm:"size:64;not null" json:"name"`
+	Model                     string     `gorm:"size:20" json:"model"`
+	FirmwareVersion           string     `gorm:"size:32" json:"firmware_version"`
+	ProtocolVersion           string     `gorm:"size:16;default:2.2" json:"protocol_version"` // v2.2
+	Platform                  string     `gorm:"size:16" json:"platform"`                     // ESP32 / ESP32S3 / ESP32C6
+	Status                    string     `gorm:"size:20;default:offline" json:"status"`
+	ConfigVersion             string     `gorm:"size:64" json:"config_version"`
+	ConfigStatus              string     `gorm:"size:20;default:pending" json:"config_status"`
+	LastSeen                  *time.Time `json:"last_seen"`
+	LastPingAt                *time.Time `json:"last_ping_at"`
+	UptimeSeconds             uint32     `json:"uptime_seconds"`
+	PingLatencyMs             int32      `json:"ping_latency_ms"`
+	MQTTTopicUp               string     `gorm:"size:128" json:"mqtt_topic_up"`
+	MQTTTopicDown             string     `gorm:"size:128" json:"mqtt_topic_down"`
+	WiFiSSID                  string     `gorm:"size:64" json:"wifi_ssid"`
+	WiFiRSSI                  int        `json:"wifi_rssi"`
+	FreeHeapBytes             int        `json:"free_heap_bytes"`
+	Capabilities              string     `gorm:"type:jsonb;default:'{}'" json:"capabilities"`
+	HardwareInfo              string     `gorm:"type:jsonb;default:'{}'" json:"hardware_info"`
+	DmaChannels               string     `gorm:"type:jsonb;default:'[]'" json:"dma_channels"`
+	BootID                    string     `gorm:"size:32" json:"boot_id"`
+	ResourceReportedAt        *time.Time `gorm:"index" json:"resource_reported_at"`
+	CommandEngineRevision     uint32     `gorm:"default:0" json:"command_engine_revision"`
+	CommandEngineCapabilities string     `gorm:"type:jsonb;default:'{}'" json:"command_engine_capabilities"`
 	// v2.2 连接元数据
 	ConnectionType    string     `gorm:"size:32" json:"connection_type"`
 	ConnectionQuality int        `gorm:"default:100" json:"connection_quality"`

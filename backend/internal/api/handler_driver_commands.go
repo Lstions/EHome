@@ -15,14 +15,15 @@ import (
 )
 
 // registerDriverCommandRoutes adds endpoints for per-command frequency management.
-func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, registries ...*drivers.Registry) {
+	driverRegistry := resolveDriverRegistry(registries...)
 	eventBus := nodeMgr.EventBus()
 
 	// GET /api/v1/drivers/:type/commands — list commands for a device type
 	v1.GET("/drivers/:type/commands", func(c *gin.Context) {
 		driverType := c.Param("type")
 
-		drv, err := drivers.Get(driverType)
+		drv, err := driverRegistry.Get(driverType)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found: " + driverType})
 			return
@@ -46,7 +47,7 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 			return
 		}
 
-		drv, err := drivers.Get(dev.Type)
+		drv, err := driverRegistry.Get(dev.Type)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found for device type: " + dev.Type})
 			return

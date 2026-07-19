@@ -95,6 +95,14 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 	enc.EncodeBytes(3, data)
 	if readSize > 0 {
 		enc.EncodeVarint(4, uint64(readSize))
+		rxTimeoutMs := timeout.Milliseconds()
+		if rxTimeoutMs < 1 {
+			rxTimeoutMs = 1
+		}
+		if rxTimeoutMs > 30000 {
+			rxTimeoutMs = 30000
+		}
+		enc.EncodeVarint(6, uint64(rxTimeoutMs))
 	}
 
 	entry := &Entry{

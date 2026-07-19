@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,10 +20,60 @@ import (
 type TechfineInverterDriver struct{}
 
 func (d *TechfineInverterDriver) DeviceType() string      { return "techfine_inverter" }
-func (d *TechfineInverterDriver) DeviceName() string      { return "Techfine GB3024 逆变器" }
-func (d *TechfineInverterDriver) OEM() string             { return "Techfine" }
+func (d *TechfineInverterDriver) DeviceName() string      { return "泰琪丰 GB3024 逆变器" }
+func (d *TechfineInverterDriver) OEM() string             { return "泰琪丰" }
 func (d *TechfineInverterDriver) Category() string        { return "inverter" }
 func (d *TechfineInverterDriver) HardwareTypes() []string { return []string{"uart"} }
+
+// ControlActions exposes only documented, side-effect-free ASCII queries.
+// They are individually disabled until the target GB3024 hardware evidence
+// gate is met.  In particular, neither SON nor any CRC-bearing setting is
+// represented here: the V0.5 document does not define the CRC algorithm or
+// provide a verifiable write/readback capture.
+func (d *TechfineInverterDriver) ControlActions() []ControlAction {
+	return []ControlAction{
+		techfineReadAction("read_status", "读取运行状态", "HSTS\r", "故障代码、运行模式与告警标志"),
+		techfineReadAction("read_grid", "读取市电信息", "HGRID\r", "市电电压、频率与丢失阈值"),
+		techfineReadAction("read_output", "读取输出信息", "HOP\r", "输出电压、频率、功率与负载"),
+		techfineReadAction("read_battery", "读取电池信息", "HBAT\r", "电池电压、容量、充放电电流与 BUS 电压"),
+		techfineReadAction("read_pv1", "读取 PV1 信息", "HPV\r", "PV1 电压、电流与功率"),
+		techfineReadAction("read_pv2", "读取 PV2 信息", "HPVB\r", "PV2 电压、电流与功率"),
+		techfineReadAction("read_temperature", "读取温度信息", "HTEMP\r", "温度、风扇转速与状态"),
+		techfineReadAction("read_energy", "读取发电量", "HGEN\r", "日、月、年与总发电量"),
+		techfineReadAction("read_bms", "读取 BMS 信息", "HBMS1\r", "BMS 状态、SOC、电流与限制值"),
+		techfineReadAction("read_eeprom", "读取 EEPROM 设置", "HEEP1\r", "持久化配置与 BMS SOC 阈值"),
+		techfineReadAction("read_version", "读取软件版本", "HIMSG1\r", "软件版本号与发布日期"),
+	}
+}
+
+func techfineReadAction(id, name, command, description string) ControlAction {
+	return ControlAction{
+		ID: id, Version: 1, Name: name, Description: description,
+		Semantics: "read", Risk: "low", Enabled: false,
+		// UART worker returns the entire line-idle-delimited response.  The
+		// envelope cap protects memory and fails closed if the device exceeds it.
+		TXData: []byte(command), ReadSize: 256, RXTimeoutMS: 1000,
+	}
+}
+
+// VerifyControlAction makes final-result parsing command-aware.  HPV and HPVB
+// share the same wire shape, so using generic ParseData here would lose PV1/PV2
+// identity and could persist data under the wrong sensor names.
+func (d *TechfineInverterDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	if string(params) != "{}" {
+		return nil, fmt.Errorf("techfine action %q does not accept parameters", actionID)
+	}
+	command, ok := map[string]string{
+		"read_status": "HSTS\r", "read_grid": "HGRID\r", "read_output": "HOP\r",
+		"read_battery": "HBAT\r", "read_pv1": "HPV\r", "read_pv2": "HPVB\r",
+		"read_temperature": "HTEMP\r", "read_energy": "HGEN\r", "read_bms": "HBMS1\r",
+		"read_eeprom": "HEEP1\r", "read_version": "HIMSG1\r",
+	}[actionID]
+	if !ok {
+		return nil, fmt.Errorf("unknown techfine control action %q", actionID)
+	}
+	return d.ParseDataWithCommand(raw, hex.EncodeToString([]byte(command)))
+}
 
 // GetSensorDefinitions returns all sensor definitions for HA Discovery.
 func (d *TechfineInverterDriver) GetSensorDefinitions() []SensorData {
@@ -787,10 +838,41 @@ func crc16ToHex(s string) string {
 }
 
 // ============================================================================
-// GetCommandTemplates — protocol command templates
-// ============================================================================
-
+// GetCommandTemplates deliberately exposes no schedulable GB3024 traffic.
+// The unified Action Catalog owns the verified on-demand reads above.  Feeding
+// the old broad template set into ConfigManifest would both reintroduce an
+// unaudited transport path and exceed the C6 per-channel/template limits.
+// These retained read templates are non-schedulable compatibility metadata;
+// all writes remain absent from the public provider surface.
 func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
+	return []CommandTemplate{
+		{ID: "query_status", Name: "查询状态", Type: "read", CmdByte: 0, WriteData: asciiToHex("HSTS\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "故障代码、工作模式、告警标志"},
+		{ID: "query_grid", Name: "查询市电信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HGRID\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "市电电压(V)、频率(Hz)"},
+		{ID: "query_output", Name: "查询输出信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HOP\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "输出电压、频率、功率、负载百分比"},
+		{ID: "query_battery", Name: "查询电池信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HBAT\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "电池电压、容量、充放电电流、BUS电压"},
+		{ID: "query_pv1", Name: "查询PV1信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HPV\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV1电压(V)、电流(A)、功率(W)"},
+		{ID: "query_pv2", Name: "查询PV2信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HPVB\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV2电压(V)、电流(A)、功率(W)"},
+		{ID: "query_temperature", Name: "查询温度信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HTEMP\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV/逆变/升压/变压器温度、风扇转速及状态"},
+		{ID: "query_energy", Name: "查询发电量", Type: "read", CmdByte: 0, WriteData: asciiToHex("HGEN\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "日/月/年/总发电量(kWh)"},
+		{ID: "query_bms", Name: "查询BMS信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HBMS1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "BMS通信状态、充放电允许、SOC、充放电电流、温度"},
+		{ID: "query_eeprom", Name: "查询EEPROM设置", Type: "read", CmdByte: 0, WriteData: asciiToHex("HEEP1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "工作模式、充电电流、电池类型等EEPROM设置"},
+		{ID: "query_version", Name: "查询软件版本", Type: "read", CmdByte: 0, WriteData: asciiToHex("HIMSG1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "软件版本号及日期"},
+	}
+}
+
+// legacyUnsafeCommandTemplates is intentionally unexported and unused.  It
+// remains temporarily for source-level migration review only; its Modbus CRC
+// assumption is not evidence for GB3024 and must never be wired to a route,
+// scheduler, manifest, or Action Catalog.
+//
+// Deprecated: remove after legacy config migration is complete.
+func (d *TechfineInverterDriver) legacyUnsafeCommandTemplates() []CommandTemplate {
+	// Keep the historical source below only until downstream configuration data
+	// has been audited.  Returning here makes accidental in-package use fail
+	// closed: GB3024 has no verified CRC algorithm, so this driver must never
+	// manufacture a write frame from the Modbus helper.
+	return nil
+
 	// Query commands (schedulable polling)
 	queries := []CommandTemplate{
 		{

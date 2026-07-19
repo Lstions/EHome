@@ -28,10 +28,12 @@ extern "C" {
 #endif
 
 #define NODE_ID_MAX_LEN  32
+#define BOOT_ID_MAX_LEN  17
 
 typedef struct {
     /* ---- Identity (auto-generated from MAC) ---- */
     char        node_id[NODE_ID_MAX_LEN];
+    char        boot_id[BOOT_ID_MAX_LEN];
 
     /* ---- Bus DMA pool ---- */
     bus_dma_ctx_t bus_ctx[SCHED_MAX_CHANNELS];

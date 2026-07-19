@@ -31,8 +31,8 @@ var executeLimiter = make(chan struct{}, 20)
 
 // driver creates ConfigTemplates from the device driver's CommandTemplates (single source of truth).
 // Falls back to getTemplateParamsFromDeviceConfig for legacy devices without a driver.
-func createTemplatesFromDriver(tx *gorm.DB, ch *models.Channel, dev *models.EdgeDevice) error {
-	drv, err := drivers.Get(dev.Type)
+func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
+	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
 		// No driver registered — try legacy DeviceConfig-based fallback
 		if dev.DeviceConfigID > 0 {
@@ -86,7 +86,7 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, rea
 	).Error; err != nil {
 		return err
 	}
-	logger.Infof("[edge-device-create] ConfigTemplate id=%d write_data=%s channel=%d", tmpl.ID, writeData, ch.ID)
+	logger.Infof("[edge-device-create] ConfigTemplate id=%d tx_hex_chars=%d channel=%d", tmpl.ID, len(writeData), ch.ID)
 	return nil
 }
 
@@ -186,7 +186,9 @@ func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *m
 }
 
 // registerEdgeDeviceRoutes sets up edge-device CRUD routes
-func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry, policies ...ControlPolicy) {
+	driverRegistry = resolveDriverRegistry(driverRegistry)
+	controlPolicy := resolveControlPolicy(policies...)
 	eventBus := nodeMgr.EventBus()
 
 	// List edge devices (v2.2 path for /devices)
@@ -320,7 +322,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			// Step 2: Create ConfigTemplates from driver's CommandTemplates (single source of truth)
 			var ch models.Channel
 			if err := tx.First(&ch, dev.ChannelID).Error; err == nil {
-				if err := createTemplatesFromDriver(tx, &ch, &dev); err != nil {
+				if err := createTemplatesFromDriver(tx, driverRegistry, &ch, &dev); err != nil {
 					logger.Warnf("[edge-device-create] Failed to create ConfigTemplates: %v", err)
 					return err
 				}
@@ -547,29 +549,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"items": data, "total": total}})
 	})
 
-	// POST /api/v1/edge-devices/:id/operations
-	e.POST("/:id/operations", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		var req struct {
-			Operation string                 `json:"operation"`
-			Params    map[string]interface{} `json:"params"`
-		}
-		c.ShouldBindJSON(&req)
-		// NOTE: requires MQTT device gateway integration
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"device_id": id, "operation": req.Operation, "status": "pending",
-		}})
-	})
-
-	// GET /api/v1/edge-devices/:id/operations/history
-	e.GET("/:id/operations/history", func(c *gin.Context) {
-		_, _ = strconv.Atoi(c.Param("id"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-		_ = limit // reserved for future MQTT event pipeline integration
-		// NOTE: operation_logs table populated by MQTT event pipeline
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []interface{}{}})
-	})
-
 	// POST /api/v1/edge-devices/:id/execute — execute a device operation
 	// Uses DeviceConfig.Operations JSONB for operation definitions with template engine + CRC
 	e.POST("/:id/execute", func(c *gin.Context) {
@@ -636,6 +615,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 
 		opType := opConfig.Type
+		if opType == "write" && !controlPolicy.legacyWritesEnabled() {
+			Error(c, http.StatusGone, "legacy device writes are disabled; migrate this operation to a trusted device action")
+			return
+		}
+		// Phase 2 has a durable ChannelCmdV2 read path. Keeping even the old
+		// read branch reachable in production would let callers bypass
+		// CommandExecution, Outbox/Inbox, capability freshness and the timeline.
+		if !controlPolicy.legacyReadBridgeEnabled() {
+			Error(c, http.StatusGone, "legacy execute is retired; use the trusted device operation API")
+			return
+		}
 
 		// 8.1: Track concurrent executions
 		metrics.ExecuteConcurrentActive.Inc()
@@ -683,7 +673,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		deviceID := node.NodeID
 
-		logger.Infof("[execute] edge=%d op=%s type=%s addr=%d data_hex=%x", edge.ID, req.Operation, opConfig.Type, addr, writeData)
+		logger.Infof("[execute] edge=%d op=%s type=%s addr=%d tx_bytes=%d", edge.ID, req.Operation, opConfig.Type, addr, len(writeData))
 
 		// 5. Execute based on type
 		switch opConfig.Type {
@@ -753,7 +743,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			result := gin.H{
 				"status":    "sent",
 				"operation": req.Operation,
-				"data_hex":  fmt.Sprintf("%x", writeData),
 			}
 			if verifyResult != nil {
 				result["verify_value"] = verifyResult
@@ -794,8 +783,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				readSize = 9 // default Modbus response size
 			}
 
-			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v dataHex=%x",
-				req.Operation, deviceID, edge.ChannelID, readSize, timeout, writeData)
+			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v tx_bytes=%d",
+				req.Operation, deviceID, edge.ChannelID, readSize, timeout, len(writeData))
 
 			// 8.1: Track read operation latency
 			readStart := time.Now()
@@ -827,7 +816,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			result := gin.H{
 				"status":    "ok",
 				"operation": req.Operation,
-				"data_hex":  fmt.Sprintf("%x", writeData),
 			}
 
 			if opConfig.ResponseParser != "" && len(resp.RawData) > 0 {
@@ -869,6 +857,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// This endpoint is kept for backward compatibility and will be removed in a future version.
 	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
 	e.POST("/:id/change-address", func(c *gin.Context) {
+		if !controlPolicy.legacyWritesEnabled() {
+			Error(c, http.StatusGone, "legacy address changes are disabled; migrate to a verified device action")
+			return
+		}
+
 		id := c.Param("id")
 
 		var req struct {
@@ -1032,8 +1025,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 					if oldAddr > 0 && (len(writeData) == 0 || writeData[0] == 0 || writeData[0] == newAddr) {
 						writeData = append([]byte{oldAddr}, writeData...)
 					}
-					logger.Infof("[change-address] Using DeviceConfig template for edge=%d, old=%d→new=%d, hex=%x",
-						edge.ID, oldAddr, newAddr, writeData)
+					logger.Infof("[change-address] Using DeviceConfig template for edge=%d, old=%d→new=%d, tx_bytes=%d",
+						edge.ID, oldAddr, newAddr, len(writeData))
 				} else {
 					Error(c, http.StatusBadRequest, "该设备型号不支持地址修改（DeviceConfig 未定义 change_address_command 模板）")
 					return

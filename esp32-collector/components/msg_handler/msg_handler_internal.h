@@ -110,6 +110,8 @@ typedef enum {
     WRITE_CMD_F_CHANNEL_ID = 2,
     WRITE_CMD_F_DATA       = 3,
     WRITE_CMD_F_READ_SIZE  = 4,
+    WRITE_CMD_F_EDGE_DEVICE_ID = 5,
+    WRITE_CMD_F_RX_TIMEOUT_MS = 6,
 } write_cmd_field_t;
 
 /* ScanReq (0x0D) */
@@ -137,6 +139,8 @@ typedef enum {
     STATUS_RPT_F_SYNC_STATE    = 5,
     STATUS_RPT_F_CONFIG_HASH   = 6,
     STATUS_RPT_F_CH_HEALTH     = 7,
+    STATUS_RPT_F_RUNTIME_PERF  = 9,
+    STATUS_RPT_F_CONTROL_STATS = 10,
 } status_report_field_t;
 
 /* DataReport (0x03) */
@@ -173,6 +177,72 @@ typedef enum {
 typedef enum {
     CFG_QUERY_F_REQUEST_ID = 1,
 } config_query_field_t;
+
+/* ChannelCmdV2 (0x15) — strict, versioned single-step control */
+typedef enum {
+    CHANNEL_CMD_V2_F_COMMAND_ID       = 1,
+    CHANNEL_CMD_V2_F_PAYLOAD_DIGEST   = 2,
+    CHANNEL_CMD_V2_F_ATTEMPT          = 3,
+    CHANNEL_CMD_V2_F_BOOT_ID          = 4,
+    CHANNEL_CMD_V2_F_EDGE_DEVICE_ID   = 5,
+    CHANNEL_CMD_V2_F_CHANNEL_ID       = 6,
+    CHANNEL_CMD_V2_F_DEADLINE_UNIX_MS = 7,
+    CHANNEL_CMD_V2_F_TX_DATA          = 8,
+    CHANNEL_CMD_V2_F_READ_SIZE        = 9,
+    CHANNEL_CMD_V2_F_RX_TIMEOUT_MS    = 10,
+    CHANNEL_CMD_V2_F_POST_TX_DELAY_MS = 11,
+    CHANNEL_CMD_V2_F_RISK_CLASS       = 12,
+    CHANNEL_CMD_V2_F_FLAGS            = 13,
+    CHANNEL_CMD_V2_F_PROTOCOL_VERSION = 14,
+} channel_cmd_v2_field_t;
+
+/* ChannelCmdV2Ack (0x16) / ChannelCmdV2Final (0x17) identity fields */
+typedef enum {
+    CHANNEL_CMD_V2_RSP_F_COMMAND_ID     = 1,
+    CHANNEL_CMD_V2_RSP_F_PAYLOAD_DIGEST = 2,
+    CHANNEL_CMD_V2_RSP_F_ATTEMPT        = 3,
+    CHANNEL_CMD_V2_RSP_F_BOOT_ID        = 4,
+    CHANNEL_CMD_V2_RSP_F_EVENT_SEQUENCE = 5,
+    CHANNEL_CMD_V2_RSP_F_STATUS         = 6,
+    CHANNEL_CMD_V2_RSP_F_ERROR_CODE     = 7,
+    CHANNEL_CMD_V2_RSP_F_RAW_RESPONSE   = 8,
+    CHANNEL_CMD_V2_RSP_F_REPLAYED       = 9,
+} channel_cmd_v2_response_field_t;
+
+typedef struct {
+    uint8_t command_id[16];
+    uint8_t payload_digest[16];
+    uint32_t attempt;
+    char boot_id[33];
+    uint32_t edge_device_id;
+    uint32_t channel_id;
+    uint64_t deadline_unix_ms;
+    uint8_t tx_data[128];
+    size_t tx_len;
+    uint32_t read_size;
+    uint32_t rx_timeout_ms;
+    uint32_t post_tx_delay_ms;
+} channel_cmd_v2_t;
+
+/* Aggregate-only V2 control counters.  They deliberately contain no command
+ * identifiers, payloads or per-device state and are reset on boot. */
+typedef struct {
+    uint32_t accepted;
+    uint32_t rejected;
+    uint32_t completed;
+    uint32_t replayed;
+} channel_cmd_v2_metrics_t;
+
+#define CHANNEL_CMD_V2_SLOT_COUNT 4
+#define CHANNEL_CMD_V2_SLOT_NONE UINT8_MAX
+
+void handler_channel_cmd_v2_process(frame_decoder_t *dec);
+/* Called by the bus worker only after a queued V2 transaction has reached
+ * exactly one terminal outcome. The handler retains a bounded RAM replay
+ * record and emits the ChannelCmdV2Final frame. */
+void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_code,
+                                     const uint8_t *raw_response, size_t raw_len);
+void handler_channel_cmd_v2_get_metrics(channel_cmd_v2_metrics_t *metrics);
 
 /* QueryResources (0x1A) */
 typedef enum {

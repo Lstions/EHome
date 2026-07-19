@@ -55,6 +55,11 @@ var allModels = []interface{}{
 	&models.ConfigMeta{},
 	&models.PendingWriteRecord{},
 	&models.NodeLog{},
+	&models.CommandExecution{},
+	&models.CommandAttempt{},
+	&models.CommandOutbox{},
+	&models.CommandInbox{},
+	&models.CommandConfirmation{},
 	// v3.0: GPIO/PWM peripheral control models
 	&models.GPIOConfig{},
 	&models.PWMConfig{},

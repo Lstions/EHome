@@ -17,6 +17,14 @@ import (
 	"gorm.io/gorm"
 )
 
+func newSensorParserTestConsumer(db *gorm.DB, reassembler Reassembler, testDrivers ...drivers.Driver) *SensorParserConsumer {
+	registry := drivers.NewRegistry()
+	for _, driver := range testDrivers {
+		registry.Register(driver)
+	}
+	return NewSensorParserConsumerWithRegistry(db, nil, nil, reassembler, registry)
+}
+
 func counterValue(t *testing.T, collector prometheus.Collector) float64 {
 	t.Helper()
 	ch := make(chan prometheus.Metric, 1)
@@ -186,11 +194,9 @@ func TestSensorParserConsumerUsesPersistedBMP280CalibrationAfterRestart(t *testi
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	drivers.Register(&drivers.BMP280Driver{})
-
 	// A fresh consumer has no initialization-process memory. Successful parsing
 	// therefore proves calibration survives and is reloaded from persistence.
-	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, &drivers.BMP280Driver{})
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1,
 		RawData: []byte{0x65, 0x5a, 0xc0, 0x7e, 0xed, 0x00},
@@ -565,7 +571,6 @@ func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
 	if err := db.Create(&device).Error; err != nil {
 		t.Fatal(err)
 	}
-	drivers.Register(&plainTestDriver{})
 	db.Callback().Create().Before("gorm:create").Register("test:fail-unified-data", func(tx *gorm.DB) {
 		if tx.Statement.Table == "unified_data" {
 			tx.AddError(errors.New("forced unified_data write failure"))
@@ -574,7 +579,7 @@ func TestSensorParserConsumerCountsUnifiedDataWriteFailure(t *testing.T) {
 	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "unified_data")
 	before := counterValue(t, counter)
 
-	NewSensorParserConsumer(db, nil, nil, passthroughReassembler{}).Handle(DataEvent{
+	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
 	})
 
@@ -597,7 +602,6 @@ func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
 	if err := db.Create(&device).Error; err != nil {
 		t.Fatal(err)
 	}
-	drivers.Register(&plainTestDriver{})
 	db.Callback().Create().Before("gorm:create").Register("test:fail-device-data", func(tx *gorm.DB) {
 		if tx.Statement.Table == "device_data" {
 			tx.AddError(errors.New("forced device_data write failure"))
@@ -606,7 +610,7 @@ func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
 	counter := metrics.DataConsumerDBWriteFailures.WithLabelValues("sensor_parser", "device_data")
 	before := counterValue(t, counter)
 
-	NewSensorParserConsumer(db, nil, nil, passthroughReassembler{}).Handle(DataEvent{
+	newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{}).Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1, RawData: []byte("response"),
 	})
 
@@ -635,8 +639,7 @@ func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
 	}
 
 	driver := &commandAwareTestDriver{calledWith: make(chan string, 1)}
-	drivers.Register(driver)
-	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, driver)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 9,
 		CommandIndex:      uint64(template.ID % 256),
@@ -681,9 +684,8 @@ func TestSensorParserConsumer_CommandAwareDriverFailsClosedWithoutCommandContext
 		calledWith:  make(chan string, 1),
 		plainCalled: make(chan struct{}, 1),
 	}
-	drivers.Register(driver)
 	reassembler := &recordingReassembler{}
-	consumer := NewSensorParserConsumer(db, nil, nil, reassembler)
+	consumer := newSensorParserTestConsumer(db, reassembler, driver)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 10,
 		RawData: []byte("ambiguous-response"),
@@ -730,9 +732,8 @@ func TestSensorParserConsumer_CommandAwareParseErrorDoesNotFallback(t *testing.T
 		plainCalled: make(chan struct{}, 1),
 		commandErr:  errors.New("ambiguous command response"),
 	}
-	drivers.Register(driver)
 	reassembler := &recordingReassembler{}
-	NewSensorParserConsumer(db, nil, nil, reassembler).Handle(DataEvent{
+	newSensorParserTestConsumer(db, reassembler, driver).Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: uint64(channel.ID), RequestID: 12,
 		CommandTemplateID: uint64(template.ID), RawData: []byte("ambiguous-response"),
 	})
@@ -774,8 +775,7 @@ func TestSensorParserConsumer_ResolvesExplicitEdgeDeviceID(t *testing.T) {
 		t.Fatalf("create device: %v", err)
 	}
 
-	drivers.Register(&plainTestDriver{})
-	consumer := NewSensorParserConsumer(db, nil, nil, passthroughReassembler{})
+	consumer := newSensorParserTestConsumer(db, passthroughReassembler{}, &plainTestDriver{})
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, ChannelID: 999, EdgeDeviceID: uint64(device.ID),
 		RequestID: 11, RawData: []byte("response"),

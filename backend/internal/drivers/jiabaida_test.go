@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"testing"
 
 	"ehome/backend/pkg/logger"
@@ -106,19 +107,19 @@ func TestParse0x03_KnownResponse(t *testing.T) {
 	// Temp2=3032(0x0BD8) → 303.2K-273.15=30.05°C
 	// Temp3=2932(0x0B74) → 293.2K-273.15=20.05°C
 
-	data := make([]byte, 29) // 23 base + 3×2 temps
-	binary.BigEndian.PutUint16(data[0:2], 52130)    // total voltage: 10mV
-	binary.BigEndian.PutUint16(data[2:4], 5000)     // current: int16 +5000 → 50.00A
-	binary.BigEndian.PutUint16(data[4:6], 50000)    // remaining capacity: 10mAh
-	binary.BigEndian.PutUint16(data[6:8], 60000)    // nominal capacity: 10mAh
-	binary.BigEndian.PutUint16(data[8:10], 100)     // cycle count
+	data := make([]byte, 29)                     // 23 base + 3×2 temps
+	binary.BigEndian.PutUint16(data[0:2], 52130) // total voltage: 10mV
+	binary.BigEndian.PutUint16(data[2:4], 5000)  // current: int16 +5000 → 50.00A
+	binary.BigEndian.PutUint16(data[4:6], 50000) // remaining capacity: 10mAh
+	binary.BigEndian.PutUint16(data[6:8], 60000) // nominal capacity: 10mAh
+	binary.BigEndian.PutUint16(data[8:10], 100)  // cycle count
 	// Skip [10:16] date + balance
 	binary.BigEndian.PutUint16(data[16:18], 0x0001) // protection: bit0 = cell OV
-	data[18] = 1                                     // software version
-	data[19] = 85                                    // RSOC 85%
-	data[20] = 0                                     // FET status
-	data[21] = 16                                    // cell count
-	data[22] = 3                                     // NTC count
+	data[18] = 1                                    // software version
+	data[19] = 85                                   // RSOC 85%
+	data[20] = 0                                    // FET status
+	data[21] = 16                                   // cell count
+	data[22] = 3                                    // NTC count
 	binary.BigEndian.PutUint16(data[23:25], 0x0BA6) // T1: 2982
 	binary.BigEndian.PutUint16(data[25:27], 0x0BD8) // T2: 3032
 	binary.BigEndian.PutUint16(data[27:29], 0x0B74) // T3: 2932
@@ -368,11 +369,9 @@ func TestParseData_UnknownCmd(t *testing.T) {
 func TestParseData_BMSStatusError(t *testing.T) {
 	d := &JiabaidaBMSDriver{}
 	// Response with STATUS=0x80 (error indicator)
-	// Frame: 0xDD | 0x80 | 0x00 | 0xXX...
-	// Actually the plan says error frames have different structure:
-	// 0xDD | 0x80/0x81/0x82 | 0x00 | CHECKSUM_H | CHECKSUM_L | 0x77
+	// Frame: 0xDD | 0x80/0x81/0x82 | LEN(0) | CHECKSUM_H | CHECKSUM_L | 0x77
 	// LEN=0x00 → DATA empty → LEN+DATA = 0x00 → ^0x00+1 = 0x0000
-	frame := []byte{0xDD, 0x80, 0x00, 0x00, 0x00, 0x00, 0x77}
+	frame := []byte{0xDD, 0x80, 0x00, 0x00, 0x00, 0x77}
 	_, err := d.ParseData(frame)
 	parseErr, ok := err.(*ParseError)
 	if !ok {
@@ -380,6 +379,27 @@ func TestParseData_BMSStatusError(t *testing.T) {
 	}
 	if parseErr.Code != ErrBMSStatusError {
 		t.Errorf("error code: got %d, want %d", parseErr.Code, ErrBMSStatusError)
+	}
+}
+
+func TestParseData_BMSStatusErrorWithCallback(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	// The V19 source permits a four-byte callback after 0x77. It must not make
+	// an otherwise valid error response look malformed.
+	frame := []byte{0xDD, 0x81, 0x00, 0x00, 0x00, 0x77, 0x12, 0x34, 0x56, 0x78}
+	_, err := d.ParseData(frame)
+	parseErr, ok := err.(*ParseError)
+	if !ok || parseErr.Code != ErrBMSStatusError {
+		t.Fatalf("ParseData(callback error) = %v, want ErrBMSStatusError", err)
+	}
+}
+
+func TestParseData_BMSStatusErrorRejectsBadChecksum(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	_, err := d.ParseData([]byte{0xDD, 0x82, 0x00, 0x00, 0x01, 0x77})
+	parseErr, ok := err.(*ParseError)
+	if !ok || parseErr.Code != ErrChecksumMismatch {
+		t.Fatalf("ParseData(bad error checksum) = %v, want ErrChecksumMismatch", err)
 	}
 }
 
@@ -393,11 +413,11 @@ func TestCurrentSign(t *testing.T) {
 	// Build a 0x03 frame with negative current: -5000mA = -50.00A
 	// int16 -5000 = 0xEC78
 	data := make([]byte, 23)
-	binary.BigEndian.PutUint16(data[0:2], 52130)    // total voltage
+	binary.BigEndian.PutUint16(data[0:2], 52130) // total voltage
 	// int16 -5000 = 0xEC78 as bytes
 	binary.BigEndian.PutUint16(data[2:4], 0xEC78) // current (int16 -5000)
-	binary.BigEndian.PutUint16(data[4:6], 50000)    // remaining
-	binary.BigEndian.PutUint16(data[6:8], 60000)    // nominal
+	binary.BigEndian.PutUint16(data[4:6], 50000)  // remaining
+	binary.BigEndian.PutUint16(data[6:8], 60000)  // nominal
 	// cycle, date, balance... zeroed
 	data[19] = 85
 	data[21] = 16
@@ -483,6 +503,70 @@ func TestJiabaidaDriver_Metadata(t *testing.T) {
 	defs := d.GetSensorDefinitions()
 	if len(defs) != 12 {
 		t.Errorf("GetSensorDefinitions: got %d, want 12", len(defs))
+	}
+}
+
+func TestJiabaidaPublicTemplatesAreReadOnly(t *testing.T) {
+	templates := (&JiabaidaBMSDriver{}).GetCommandTemplates()
+	if len(templates) != 5 {
+		t.Fatalf("GetCommandTemplates returned %d templates, want 5 documented reads", len(templates))
+	}
+	for _, template := range templates {
+		if template.Type != "read" || !template.Schedulable {
+			t.Fatalf("unsafe public BMS template exposed: %+v", template)
+		}
+		if template.CmdByte == 0xE1 || template.WriteData == "DD5AE1020002FF1B77" || template.WriteData == "DD5AE1020001FF1C77" || template.WriteData == "DD5AE1020000FF1D77" {
+			t.Fatalf("legacy MOS write template leaked: %+v", template)
+		}
+	}
+}
+
+func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	var _ ControlActionProvider = d
+	var _ ControlActionVerifier = d
+	actions := d.ControlActions()
+	if len(actions) != 5 {
+		t.Fatalf("got %d control actions, want 5", len(actions))
+	}
+	want := map[string][]byte{
+		"read_basic_info":       {0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77},
+		"read_cell_voltage":     {0xDD, 0xA5, 0x04, 0x00, 0xFF, 0xFC, 0x77},
+		"read_hardware_version": {0xDD, 0xA5, 0x05, 0x00, 0xFF, 0xFB, 0x77},
+		"read_comprehensive":    {0xDD, 0xA5, 0x0F, 0x00, 0xFF, 0xF1, 0x77},
+		"read_protection_count": {0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77},
+	}
+	for _, action := range actions {
+		frame, ok := want[action.ID]
+		if !ok {
+			t.Fatalf("unexpected action %q", action.ID)
+		}
+		if action.Enabled || action.Semantics != "read" || action.Risk != "low" || string(action.TXData) != string(frame) || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
+			t.Fatalf("unsafe or malformed action %+v", action)
+		}
+		delete(want, action.ID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing actions: %v", want)
+	}
+}
+
+func TestJiabaidaVerifyControlActionBindsResponseCommand(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	// DD 05 00 03 'V' '1' '9' FF 3D 77; the response checksum is LEN+DATA.
+	raw := []byte{0xDD, 0x05, 0x00, 0x03, 'V', '1', '9', 0xFF, 0x3D, 0x77}
+	data, err := d.VerifyControlAction("read_hardware_version", json.RawMessage(`{}`), raw)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(valid) error = %v", err)
+	}
+	if len(data) != 1 || data[0].Name != "hardware_version" || data[0].StringValue != "V19" {
+		t.Fatalf("VerifyControlAction(valid) = %+v", data)
+	}
+	if _, err := d.VerifyControlAction("read_cell_voltage", json.RawMessage(`{}`), raw); err == nil {
+		t.Fatal("wrong response command accepted")
+	}
+	if _, err := d.VerifyControlAction("read_hardware_version", json.RawMessage(`{"unexpected":true}`), raw); err == nil {
+		t.Fatal("parameterized read accepted")
 	}
 }
 

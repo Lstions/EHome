@@ -64,6 +64,11 @@ const (
 	MsgHelloAck       = 0x12
 	MsgConfigSyncReq  = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
 	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
+	// Phase 2: versioned single-step Channel control. 0x15..0x17 were
+	// intentionally reserved between config sync and legacy PongAck.
+	MsgChannelCmdV2      = 0x15 // SVR→ESP
+	MsgChannelCmdV2Ack   = 0x16 // ESP→SVR, accepted/rejected
+	MsgChannelCmdV2Final = 0x17 // ESP→SVR, exactly one terminal result
 	MsgPongAck        = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
 	MsgResourceReport = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
 	MsgQueryResources = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
@@ -337,6 +342,9 @@ func MsgTypeName(msgType uint8) string {
 		MsgHelloAck:       "hello_ack",
 		MsgConfigSyncReq:  "config_sync_request",
 		MsgConfigSyncRsp:  "config_sync_response",
+		MsgChannelCmdV2:      "channel_cmd_v2",
+		MsgChannelCmdV2Ack:   "channel_cmd_v2_ack",
+		MsgChannelCmdV2Final: "channel_cmd_v2_final",
 		MsgPongAck:        "pong_ack",
 		MsgResourceReport: "resource_report",
 		MsgQueryResources: "query_resources",

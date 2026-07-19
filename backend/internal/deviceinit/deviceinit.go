@@ -115,9 +115,19 @@ func (o *Orchestrator) sendAndWait(nodeID string, edgeDeviceID uint, stepName st
 	if readSize > 0 {
 		enc.EncodeVarint(4, uint64(readSize))
 	}
-	// Field 5 is required by the development protocol and echoed in DataReport
-	// to correlate initialization reads to the concrete edge device.
+	// Field 5 is echoed in DataReport to correlate initialization reads to the
+	// concrete edge device.
 	enc.EncodeVarint(5, uint64(edgeDeviceID))
+	if readSize > 0 {
+		rxTimeoutMs := timeout.Milliseconds()
+		if rxTimeoutMs < 1 {
+			rxTimeoutMs = 1
+		}
+		if rxTimeoutMs > 30000 {
+			rxTimeoutMs = 30000
+		}
+		enc.EncodeVarint(6, uint64(rxTimeoutMs))
+	}
 	if err := o.mqtt.Publish(mqtt.TopicForNode(nodeID), enc.Bytes()); err != nil {
 		return nil, fmt.Errorf("send failed: %w", err)
 	}

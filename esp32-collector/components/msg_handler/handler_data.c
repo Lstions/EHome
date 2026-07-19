@@ -13,8 +13,10 @@
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
+#include "bus_worker.h"
 #include "ota.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -173,6 +175,36 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                 }
             }
         }
+    }
+
+    /* Field 9 is a bounded, transport-only performance snapshot.  It is
+     * intentionally aggregate-only: no task names, queues or configuration
+     * details are exposed to the control plane. */
+    scheduler_performance_t perf = {0};
+    scheduler_get_performance(&perf);
+    uint8_t perf_buf[64];
+    frame_encoder_t perf_enc;
+    frame_encoder_init_sub(&perf_enc, perf_buf, sizeof(perf_buf));
+    if (frame_encode_varint(&perf_enc, 1, esp_get_free_heap_size()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 2, esp_get_minimum_free_heap_size()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 3, perf.stack_high_water_words) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 4, bus_worker_get_min_stack_watermark()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 5, perf.min_queue_spaces) == FRAME_OK) {
+        (void)frame_encode_bytes(&enc, STATUS_RPT_F_RUNTIME_PERF,
+                                 frame_encoder_data(&perf_enc), frame_encoder_size(&perf_enc));
+    }
+
+    channel_cmd_v2_metrics_t control = {0};
+    handler_channel_cmd_v2_get_metrics(&control);
+    uint8_t control_buf[48];
+    frame_encoder_t control_enc;
+    frame_encoder_init_sub(&control_enc, control_buf, sizeof(control_buf));
+    if (frame_encode_varint(&control_enc, 1, control.accepted) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 2, control.rejected) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 3, control.completed) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 4, control.replayed) == FRAME_OK) {
+        (void)frame_encode_bytes(&enc, STATUS_RPT_F_CONTROL_STATS,
+                                 frame_encoder_data(&control_enc), frame_encoder_size(&control_enc));
     }
 
     ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d, hash=%s",

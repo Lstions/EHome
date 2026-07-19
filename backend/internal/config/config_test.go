@@ -34,6 +34,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level = %q, want info", cfg.Log.Level)
 	}
+	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled {
+		t.Fatalf("unsafe control defaults: %+v", cfg.Control)
+	}
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -196,5 +199,24 @@ func TestEnvPartialOverride(t *testing.T) {
 	}
 	if cfg.Database.Host != "localhost" {
 		t.Errorf("expected default localhost, got %q", cfg.Database.Host)
+	}
+}
+
+func TestControlEnvOverridesAreBounded(t *testing.T) {
+	t.Setenv("EHOME_LEGACY_DEVICE_WRITE_MODE", "bridge")
+	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "true")
+	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "true")
+	t.Setenv("EHOME_ENABLED_DEVICE_ACTIONS", " prs3001/read_rainfall , techfine_inverter/set_mode ")
+	cfg := Load()
+	if cfg.Control.LegacyDeviceWriteMode != "bridge" || !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled || len(cfg.Control.EnabledDeviceActions) != 2 || cfg.Control.EnabledDeviceActions[0] != "prs3001/read_rainfall" {
+		t.Fatalf("control env override = %+v", cfg.Control)
+	}
+
+	t.Setenv("EHOME_LEGACY_DEVICE_WRITE_MODE", "direct")
+	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "not-a-bool")
+	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "not-a-bool")
+	cfg = Load()
+	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled || cfg.Control.DeviceControlV2Enabled {
+		t.Fatalf("invalid control env was accepted: %+v", cfg.Control)
 	}
 }

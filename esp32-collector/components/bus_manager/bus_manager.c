@@ -6,14 +6,14 @@
  * All bus channel lifecycle operations go through this module.
  *
  * WriteCommand handling: constructs a bus_cmd_t and posts it to the
- * command queue.  No timeout derivation — the ESP32 does not understand
- * timeouts; that is the backend's responsibility.
+ * command queue. Legacy read timeouts are validated and bounded before queueing.
  *
  * P2-8: Decoupled from app_state_t — uses bus_runtime_t for dependency
  * injection.  All s->field accesses replaced with rt->field.
  */
 
 #include "bus_manager.h"
+#include "legacy_write_guard.h"
 #include "bus_dma.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
@@ -96,36 +96,6 @@ static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
         uint8_t b1 = (bus_config && bus_config_len >= 2) ? bus_config[1] : 0;
         snprintf(buf, buflen, "%s/UNKNOWN_%02X_%02X", bus_name, b0, b1);
     }
-}
-
-/* ==== Look up bus_type from config manifest ====
- * P2-9: This is now a fallback — prefer reading bus_type from bus_dma_ctx_t
- * which is set during bus_dma_init(). Used only when ctx is not yet available. */
-
-static uint8_t find_bus_type(const config_manifest_t *m, uint32_t ch)
-{
-    if (!m) return 0;
-    for (int i = 0; i < m->channel_count; i++)
-        if (m->channels[i].id == ch) return m->channels[i].bus_type;
-    return 0;
-}
-
-/* ==== Derive uart_port from channel bus_config via hw_tables ====
- * P3-7: Replaced static derive_uart_port_for_channel with shared hw_derive_uart_port */
-
-static uart_port_t derive_uart_port_for_channel(const config_manifest_t *m, uint32_t ch)
-{
-    if (!m) return UART_NUM_0;
-    for (int i = 0; i < m->channel_count; i++) {
-        if (m->channels[i].id == ch && m->channels[i].bus_type == BUS_TYPE_UART) {
-            const uint8_t *bc = m->channels[i].bus_config;
-            size_t bclen = m->channels[i].bus_config_len;
-            if (bc && bclen >= 2) {
-                return hw_derive_uart_port(bc[0], bc[1], UART_NUM_0);
-            }
-        }
-    }
-    return UART_NUM_0;  /* default */
 }
 
 /* ==== Helper: get bus_hw_id[i] from flat array ==== */
@@ -339,49 +309,99 @@ bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id)
 /* ==== WriteCommand handler ====
  *
  * Constructs a bus_cmd_t and posts it to the command queue.
- * No timeout derivation — the ESP32 does TX only for UART WriteCommands.
- * The backend handles timeout by watching for DataReport with matching
- * request_id.
+ * Legacy read timeouts are validated and bounded before queueing; the worker
+ * applies the value while waiting for the physical response.
  */
 
 void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
                                const uint8_t *d, size_t l, uint32_t rs,
-                               uint32_t edge_device_id)
+                               uint32_t edge_device_id, uint32_t rx_timeout_ms)
 {
-    const config_manifest_t *m = config_mgr_get_manifest();
-
-    /* Validate read_size upper bound */
-    if (rs > 256) {
-        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "read_size too large");
+    if (!rt || !legacy_write_args_valid(ch, d, l, rs, rx_timeout_ms, CMD_TX_MAX)) {
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "invalid write command");
         return;
     }
 
-    /* P2-9: Prefer bus_type from ctx (set during bus_dma_init) over manifest lookup */
     bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
+    if (!bctx) {
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_NOT_FOUND, "channel not found");
+        return;
+    }
 
     bus_cmd_t cmd = {
         .request_id = rid,
         .channel_id = ch,
-        .bus_type   = bctx ? bctx->bus_type : find_bus_type(m, ch),
-        .tx_len     = l < CMD_TX_MAX ? l : CMD_TX_MAX,
+        .bus_type   = bctx->bus_type,
+        .tx_len     = l,
         .delay_ms   = 0,    /* WriteCommand: no fixed delay */
         .read_size  = rs,   /* v2.5: expected RX bytes (0 = TX only) */
+        .rx_timeout_ms = rx_timeout_ms,
         .edge_device_id = edge_device_id, /* 0 when sent by old firmware/backend */
         .type       = CMD_WRITE,
-        .uart_port  = derive_uart_port_for_channel(m, ch),
     };
+    if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
+    if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) {
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "unsupported bus route");
+        return;
+    }
     if (l > 0 && d) memcpy(cmd.tx_data, d, cmd.tx_len);
 
     /* Dispatch to per-bus queue */
     QueueHandle_t target_q;
     switch (cmd.bus_type) {
     case BUS_TYPE_UART:
-        target_q = (cmd.uart_port == UART_NUM_0) ? rt->uart0_cmd_queue : rt->uart1_cmd_queue;
+        if (cmd.uart_port == UART_NUM_0) target_q = rt->uart0_cmd_queue;
+        else if (cmd.uart_port == UART_NUM_1) target_q = rt->uart1_cmd_queue;
+        else {
+            if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "unsupported uart port");
+            return;
+        }
         break;
     case BUS_TYPE_SPI:  target_q = rt->spi_cmd_queue;  break;
     case BUS_TYPE_I2C:  target_q = rt->i2c_cmd_queue;  break;
-    default:            target_q = rt->uart0_cmd_queue; break;
+    default:
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "unsupported bus type");
+        return;
+    }
+    if (!target_q) {
+        if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_STATE, "bus queue unavailable");
+        return;
     }
     if (!xQueueSend(target_q, &cmd, 0))
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
+}
+
+bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
+                                   const uint8_t *data, size_t len, uint32_t read_size,
+                                   uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
+                                   uint8_t control_slot)
+{
+    if (!rt || control_slot == CONTROL_SLOT_NONE ||
+        !legacy_write_args_valid(ch, data, len, read_size, rx_timeout_ms, CMD_TX_MAX)) return false;
+    bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
+    if (!bctx) return false;
+    bus_cmd_t cmd = { .channel_id = ch, .bus_type = bctx->bus_type, .tx_len = len,
+        .delay_ms = post_tx_delay_ms, .read_size = read_size, .rx_timeout_ms = rx_timeout_ms,
+        .channel_cmd_v2 = true, .control_slot = control_slot, .type = CMD_WRITE };
+    if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
+    if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) return false;
+    /* Only UART has an explicit TX→RX turnaround phase in the shared worker.
+     * SPI/I2C transactions are atomic and therefore reject a requested delay. */
+    if (cmd.bus_type != BUS_TYPE_UART && post_tx_delay_ms != 0) return false;
+    memcpy(cmd.tx_data, data, len);
+    QueueHandle_t target_q = NULL;
+    switch (cmd.bus_type) {
+    case BUS_TYPE_UART:
+        target_q = cmd.uart_port == UART_NUM_0 ? rt->uart0_cmd_queue :
+                   cmd.uart_port == UART_NUM_1 ? rt->uart1_cmd_queue : NULL;
+        break;
+    case BUS_TYPE_SPI: target_q = rt->spi_cmd_queue; break;
+    case BUS_TYPE_I2C: target_q = rt->i2c_cmd_queue; break;
+    default: return false;
+    }
+    ESP_LOGI(TAG, "V2 queue ch=%lu bus=%u uart=%d tx=%u read=%lu timeout=%lu slot=%u",
+             (unsigned long)ch, (unsigned)cmd.bus_type, (int)cmd.uart_port,
+             (unsigned)cmd.tx_len, (unsigned long)cmd.read_size,
+             (unsigned long)cmd.rx_timeout_ms, (unsigned)control_slot);
+    return target_q && xQueueSend(target_q, &cmd, 0) == pdTRUE;
 }

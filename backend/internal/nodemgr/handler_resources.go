@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
@@ -80,6 +81,159 @@ type busesData struct {
 	GPIO []gpioEntry `json:"gpio,omitempty"`
 	ADC  []adcEntry  `json:"adc,omitempty"`
 	PWM  []pwmEntry  `json:"pwm,omitempty"`
+}
+
+// commandEngineReport is deliberately transport-only: it declares bounded
+// execution resources but contains no driver or vendor protocol semantics.
+type commandEngineReport struct {
+	Revision             uint32 `json:"revision"`
+	BootID               string `json:"boot_id"`
+	SupportsChannelCmdV2 bool   `json:"supports_channel_cmd_v2"`
+	SupportsBoundedBatch bool   `json:"supports_bounded_batch"`
+	SupportsFinally      bool   `json:"supports_finally"`
+	MaxBatchSteps        uint32 `json:"max_batch_steps"`
+	MaxTXBytes           uint32 `json:"max_tx_bytes"`
+	MaxRXBytes           uint32 `json:"max_rx_bytes"`
+	MaxStepTimeoutMS     uint32 `json:"max_step_timeout_ms"`
+	RAMDedupEntries      uint32 `json:"ram_dedup_entries"`
+}
+
+// manifestCapacityReport is the collector's ConfigManifest storage contract.
+// It is intentionally independent of action semantics and comes from the
+// firmware constants that own the actual allocation.
+type manifestCapacityReport struct {
+	MaxTemplates   uint32 `json:"max_templates"`
+	MaxChannels    uint32 `json:"max_channels"`
+	MaxTemplateIDs uint32 `json:"max_template_ids"`
+}
+
+func decodeManifestCapacity(data []byte) (manifestCapacityReport, error) {
+	var report manifestCapacityReport
+	if len(data) == 0 {
+		return report, fmt.Errorf("empty manifest_capacity")
+	}
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return report, err
+	}
+	seen := [4]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			return report, err
+		}
+		if field.FieldNum == 0 || field.FieldNum > 3 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+			return report, fmt.Errorf("invalid manifest_capacity field %d", field.FieldNum)
+		}
+		seen[field.FieldNum] = true
+		value := frame.GetUint64(field)
+		if value == 0 || value > 256 {
+			return report, fmt.Errorf("manifest_capacity field %d out of bounds", field.FieldNum)
+		}
+		switch field.FieldNum {
+		case 1:
+			report.MaxTemplates = uint32(value)
+		case 2:
+			report.MaxChannels = uint32(value)
+		case 3:
+			report.MaxTemplateIDs = uint32(value)
+		}
+	}
+	for _, required := range []uint8{1, 2, 3} {
+		if !seen[required] {
+			return report, fmt.Errorf("missing manifest_capacity field %d", required)
+		}
+	}
+	return report, nil
+}
+
+func decodeCommandEngine(data []byte) (commandEngineReport, error) {
+	var report commandEngineReport
+	if len(data) == 0 {
+		return report, fmt.Errorf("empty command_engine")
+	}
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return report, err
+	}
+	seen := [11]bool{}
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			return report, err
+		}
+		if field.FieldNum == 0 || field.FieldNum > 10 || seen[field.FieldNum] {
+			return report, fmt.Errorf("invalid or duplicate field %d", field.FieldNum)
+		}
+		seen[field.FieldNum] = true
+		if field.FieldNum == 2 {
+			if field.WireType != frame.WireLengthDelimited {
+				return report, fmt.Errorf("boot_id wire type")
+			}
+			report.BootID = frame.GetString(field)
+			if len(report.BootID) == 0 || len(report.BootID) > 32 {
+				return report, fmt.Errorf("boot_id length")
+			}
+			continue
+		}
+		if field.WireType != frame.WireVarint {
+			return report, fmt.Errorf("field %d wire type", field.FieldNum)
+		}
+		value := frame.GetUint64(field)
+		if value > uint64(^uint32(0)) {
+			return report, fmt.Errorf("field %d overflow", field.FieldNum)
+		}
+		boolValue := value == 1
+		if field.FieldNum == 3 || field.FieldNum == 4 || field.FieldNum == 5 {
+			if value > 1 {
+				return report, fmt.Errorf("field %d non-canonical bool", field.FieldNum)
+			}
+			switch field.FieldNum {
+			case 3:
+				report.SupportsChannelCmdV2 = boolValue
+			case 4:
+				report.SupportsBoundedBatch = boolValue
+			case 5:
+				report.SupportsFinally = boolValue
+			}
+			continue
+		}
+		switch field.FieldNum {
+		case 1:
+			report.Revision = uint32(value)
+		case 6:
+			report.MaxBatchSteps = uint32(value)
+		case 7:
+			report.MaxTXBytes = uint32(value)
+		case 8:
+			report.MaxRXBytes = uint32(value)
+		case 9:
+			report.MaxStepTimeoutMS = uint32(value)
+		case 10:
+			report.RAMDedupEntries = uint32(value)
+		}
+	}
+	for _, required := range []uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10} {
+		if !seen[required] {
+			return report, fmt.Errorf("missing field %d", required)
+		}
+	}
+	if report.MaxTXBytes == 0 || report.MaxTXBytes > 128 || report.MaxRXBytes == 0 || report.MaxRXBytes > 256 || report.MaxStepTimeoutMS == 0 || report.MaxStepTimeoutMS > 30000 {
+		return report, fmt.Errorf("reported bounds invalid")
+	}
+	if report.SupportsBoundedBatch || report.MaxBatchSteps != 0 {
+		return report, fmt.Errorf("bounded batch must remain disabled in Phase 2 single-step engine")
+	}
+	if report.SupportsChannelCmdV2 && !report.SupportsFinally {
+		return report, fmt.Errorf("ChannelCmdV2 requires final capability")
+	}
+	return report, nil
 }
 
 type channelEntry struct {
@@ -554,6 +708,8 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	var busesBlob []byte
 	var channelsBlob []byte
 	var dmaChannels []models.DmaChannelInfo
+	var commandEngine commandEngineReport
+	var manifestCapacity *manifestCapacityReport
 	seenTop := map[uint8]bool{}
 
 	for {
@@ -611,6 +767,28 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 				return
 			}
 			dmaChannels = append(dmaChannels, dma)
+		case 9: // command_engine capability sub-message
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid command_engine wire type", deviceID)
+				return
+			}
+			decoded, err := decodeCommandEngine(frame.GetBytes(field))
+			if err != nil {
+				logger.Warnf("[%s] Rejecting malformed command_engine: %v", deviceID, err)
+				return
+			}
+			commandEngine = decoded
+		case 10: // ConfigManifest capacity sub-message (optional for old firmware)
+			if field.WireType != frame.WireLengthDelimited {
+				logger.Warnf("[%s] invalid manifest_capacity wire type", deviceID)
+				return
+			}
+			decoded, err := decodeManifestCapacity(frame.GetBytes(field))
+			if err != nil {
+				logger.Warnf("[%s] Rejecting malformed manifest_capacity: %v", deviceID, err)
+				return
+			}
+			manifestCapacity = &decoded
 		}
 	}
 	for _, required := range []uint8{1, 2, 3} {
@@ -651,7 +829,16 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		"platform":       platform,
 		"resource_count": resourceCount,
 		"buses":          buses,
+		// This is the firmware-applied truth used by the control domain.  It
+		// must be persisted with the capability report rather than reduced to
+		// a count, otherwise a stale DB Channel can be dispatched to a C6 that
+		// rejected or has not yet applied its ConfigManifest.
+		"channels":       channels,
 		"channel_count":  len(channels),
+		"command_engine": commandEngine,
+	}
+	if manifestCapacity != nil {
+		hardwareInfo["manifest_capacity"] = manifestCapacity
 	}
 	hwInfoJSON, _ := json.Marshal(hardwareInfo)
 
@@ -666,10 +853,16 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 	}
 
 	// Update node: capabilities (buses JSON), hardware_info (full JSON), platform, dma_channels
+	now := time.Now().UTC()
+	commandCapabilities, _ := json.Marshal(commandEngine)
 	updates := map[string]interface{}{
-		"capabilities":  string(busesJSON),
-		"hardware_info": string(hwInfoJSON),
-		"platform":      platform,
+		"capabilities":                string(busesJSON),
+		"hardware_info":               string(hwInfoJSON),
+		"platform":                    platform,
+		"boot_id":                     commandEngine.BootID,
+		"resource_reported_at":        now,
+		"command_engine_revision":     commandEngine.Revision,
+		"command_engine_capabilities": string(commandCapabilities),
 	}
 	// An empty reported DMA list is authoritative and clears stale state.
 	dmaJSON, err := json.Marshal(dmaChannels)
@@ -694,6 +887,7 @@ func (m *Manager) handleResourceReport(deviceID string, payload []byte) {
 		"platform":       platform,
 		"buses":          busesMap,
 		"channel_count":  len(channels),
+		"command_engine": commandEngine,
 	}
 	wsData["dma_channels"] = dmaChannels
 	m.wsHub.BroadcastEvent(events.NodeResourcesUpdated, wsData)
