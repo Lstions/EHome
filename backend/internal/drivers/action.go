@@ -13,6 +13,19 @@ type ControlAction struct {
 	Description string
 	Semantics   string
 	Risk        string
+	// ExecutionShape describes the physical workflow required by the action.
+	// single is the currently deployed one-request envelope; bounded_sequence
+	// is reserved for a fixed, server-compiled sequence (readback/finally),
+	// never for a browser supplied script.
+	ExecutionShape string
+	// Verification is the evidence required before the action may become
+	// SUCCEEDED.  It is metadata as well as a review gate: an ACK alone is not
+	// a readback or reboot observation.
+	Verification string
+	// AtMostOnce means that after a physical dispatch has been accepted, a
+	// transport retry is forbidden and an ambiguous result must become UNKNOWN.
+	AtMostOnce bool
+	MaxSteps   uint8
 	// Enabled is an explicit per-action rollout gate. It must remain false
 	// until the action has passed its own protocol and hardware evidence gate.
 	Enabled       bool
@@ -24,6 +37,11 @@ type ControlAction struct {
 	// executable validation or a template; deviceaction turns it into the
 	// server-side restricted schema before any request is accepted.
 	Parameters []ControlParameter
+	// AvailabilityCode/Reason make a known-but-not-yet-safe capability visible
+	// in the catalog without manufacturing a command frame.  Examples include
+	// protocol_unverified and hardware_evidence_required.
+	AvailabilityCode   string
+	AvailabilityReason string
 }
 
 type ControlParameter struct {

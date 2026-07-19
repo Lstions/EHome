@@ -91,16 +91,43 @@ func TestSetActionRequiresTrustedVerifier(t *testing.T) {
 func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definitions := registry.List("jiabaida_bms")
-	if len(definitions) != 5 {
-		t.Fatalf("got %d Jiabaida read actions, want 5: %+v", len(definitions), definitions)
+	if len(definitions) < 8 {
+		t.Fatalf("got %d Jiabaida actions, want read actions plus guarded capabilities: %+v", len(definitions), definitions)
 	}
+	var mos, restart bool
 	for _, definition := range definitions {
-		if definition.Semantics != "read" || definition.Enabled || definition.Risk != "low" {
-			t.Fatalf("Jiabaida action must be a disabled low-risk read: %+v", definition)
+		if definition.ID == "set_mos_policy" {
+			mos = true
+			if definition.Enabled || definition.ExecutionShape != "bounded_sequence" || !definition.AtMostOnce || definition.Verification != "readback" {
+				t.Fatalf("MOS policy must be guarded bounded action: %+v", definition)
+			}
+		}
+		if definition.ID == "bms_restart" {
+			restart = true
+			if definition.Enabled || definition.Risk != "critical" || definition.Verification != "observation" {
+				t.Fatalf("BMS restart must be guarded critical action: %+v", definition)
+			}
+		}
+		if definition.ID != "set_mos_policy" && definition.ID != "bms_restart" && definition.Semantics != "read" {
+			t.Fatalf("unexpected Jiabaida action: %+v", definition)
 		}
 		if definition.ID == "close_discharge_mos" || definition.ID == "close_charge_mos" || definition.ID == "release_mos" {
 			t.Fatalf("unverified BMS write leaked into the catalog: %+v", definition)
 		}
+	}
+	if !mos || !restart {
+		t.Fatal("guarded BMS capabilities are missing")
+	}
+}
+
+func TestBoundedPlanDefinitionIsNeverFlattenedIntoSingleStep(t *testing.T) {
+	registry := NewBuiltInRegistry(nil)
+	definition, ok := registry.Get("sn3001_rain", "reset_rainfall")
+	if !ok || definition.ExecutionShape != "bounded_sequence" || !definition.AtMostOnce || definition.Verification != "readback" {
+		t.Fatalf("rain reset metadata missing: %+v", definition)
+	}
+	if _, err := definition.Compile(json.RawMessage(`{}`)); err == nil {
+		t.Fatal("unavailable bounded reset must not compile as a single physical step")
 	}
 }
 

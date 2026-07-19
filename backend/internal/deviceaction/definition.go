@@ -24,6 +24,26 @@ type SingleStep struct {
 	PostTXDelayMS uint32
 }
 
+// PlanStep and BoundedPlan model the future high-risk transport without
+// accepting arbitrary scripts. Every step is fixed by trusted Driver code;
+// the node may execute at most eight steps and must preserve the finally step
+// when the plan declares one. This is deliberately a data model first: the
+// current single-step ChannelCmdV2 adapter rejects such plans until the node
+// advertises durable replay protection.
+type PlanStep struct {
+	ID         string
+	Kind       string // read, write, readback, finally
+	SingleStep SingleStep
+}
+
+type BoundedPlan struct {
+	Steps         []PlanStep
+	AtMostOnce    bool
+	RequiresFinally bool
+}
+
+type PlanCompiler func(json.RawMessage) (BoundedPlan, error)
+
 type Compiler func(json.RawMessage) (SingleStep, error)
 type Verifier func(json.RawMessage, []byte) ([]drivers.SensorData, error)
 
@@ -35,11 +55,19 @@ type Definition struct {
 	DeviceType  string          `json:"device_type"`
 	Semantics   string          `json:"semantics"`
 	Risk        string          `json:"risk"`
+	ExecutionShape string       `json:"execution_shape"`
+	Verification   string       `json:"verification"`
+	AtMostOnce     bool         `json:"at_most_once"`
+	MaxSteps       uint8        `json:"max_steps"`
 	Enabled     bool            `json:"enabled"`
 	Transport   string          `json:"transport"`
 	InputSchema ParameterSchema `json:"input_schema"`
+	AvailabilityCode   string   `json:"availability_code,omitempty"`
+	AvailabilityReason string   `json:"availability_reason,omitempty"`
 	SingleStep  SingleStep      `json:"-"`
+	Plan        BoundedPlan     `json:"-"`
 	compiler    Compiler
+	planCompiler PlanCompiler
 	verifier    Verifier
 }
 
@@ -53,10 +81,34 @@ func (r *Registry) Register(def Definition) error {
 	if def.ID == "" || def.Version <= 0 || def.DeviceType == "" || !allowedSemantics(def.Semantics) || !allowedRisk(def.Risk) || def.Transport != ChannelCmdV2Adapter {
 		return fmt.Errorf("invalid restricted action definition %q", def.ID)
 	}
+	if def.ExecutionShape == "" {
+		def.ExecutionShape = "single"
+	}
+	if def.Verification == "" {
+		def.Verification = "ack"
+	}
+	if def.MaxSteps == 0 {
+		def.MaxSteps = 1
+	}
+	if def.ExecutionShape != "single" && def.ExecutionShape != "bounded_sequence" {
+		return fmt.Errorf("invalid execution shape for %q", def.ID)
+	}
+	if def.Verification != "none" && def.Verification != "ack" && def.Verification != "readback" && def.Verification != "observation" {
+		return fmt.Errorf("invalid verification strategy for %q", def.ID)
+	}
+	if def.MaxSteps > 8 || def.ExecutionShape == "single" && def.MaxSteps != 1 {
+		return fmt.Errorf("invalid max steps for %q", def.ID)
+	}
+	if def.ExecutionShape == "bounded_sequence" && def.MaxSteps < 2 {
+		return fmt.Errorf("bounded action %q needs at least two steps", def.ID)
+	}
+	if def.AtMostOnce && def.Risk != "high" && def.Risk != "critical" {
+		return fmt.Errorf("at-most-once action %q must be high or critical risk", def.ID)
+	}
 	if err := def.InputSchema.Validate(); err != nil {
 		return fmt.Errorf("invalid action schema %q: %w", def.ID, err)
 	}
-	if def.Semantics == "set" && def.verifier == nil {
+	if (def.Semantics == "set" || def.Semantics == "reset") && def.verifier == nil && def.AvailabilityCode == "" {
 		// A transport ACK is not evidence that a setting took effect.  Every
 		// setter must supply a trusted ACK/readback verifier before it can enter
 		// the catalog, even while its rollout flag remains disabled.
@@ -69,8 +121,16 @@ func (r *Registry) Register(def Definition) error {
 		if def.compiler == nil {
 			return fmt.Errorf("parameterized action %q requires a trusted compiler", def.ID)
 		}
-	} else if err := validateSingleStep(def.SingleStep); err != nil {
-		return fmt.Errorf("invalid static action step %q: %w", def.ID, err)
+	} else if def.AvailabilityCode == "" && def.ExecutionShape == "single" {
+		if err := validateSingleStep(def.SingleStep); err != nil {
+			return fmt.Errorf("invalid static action step %q: %w", def.ID, err)
+		}
+	} else if def.AvailabilityCode == "" && def.ExecutionShape == "bounded_sequence" {
+		if err := validatePlan(def.Plan, def.MaxSteps, def.AtMostOnce); err != nil {
+			return fmt.Errorf("invalid action plan %q: %w", def.ID, err)
+		}
+	} else if def.AvailabilityCode == "" && def.ExecutionShape != "single" {
+		return fmt.Errorf("invalid action shape %q", def.ID)
 	}
 	def.SingleStep.TXData = append([]byte(nil), def.SingleStep.TXData...)
 	if r.byType[def.DeviceType] == nil {
@@ -84,7 +144,7 @@ func (r *Registry) Register(def Definition) error {
 }
 
 func allowedSemantics(value string) bool {
-	return value == "read" || value == "set"
+	return value == "read" || value == "set" || value == "reset"
 }
 
 func allowedRisk(value string) bool {
@@ -97,6 +157,12 @@ func allowedRisk(value string) bool {
 }
 
 func (def Definition) Compile(params json.RawMessage) (SingleStep, error) {
+	if def.AvailabilityCode != "" {
+		return SingleStep{}, fmt.Errorf("action %q unavailable: %s", def.ID, def.AvailabilityReason)
+	}
+	if def.ExecutionShape != "single" {
+		return SingleStep{}, fmt.Errorf("action %q requires bounded plan transport", def.ID)
+	}
 	if len(params) == 0 {
 		params = json.RawMessage("{}")
 	}
@@ -114,6 +180,29 @@ func (def Definition) Compile(params json.RawMessage) (SingleStep, error) {
 		return SingleStep{}, fmt.Errorf("compiled action %q: %w", def.ID, err)
 	}
 	return cloneStep(step), nil
+}
+
+// CompilePlan validates a fixed multi-step workflow. The current dispatcher
+// intentionally does not flatten it into a single request, which prevents a
+// destructive action from silently losing readback/finally semantics.
+func (def Definition) CompilePlan(params json.RawMessage) (BoundedPlan, error) {
+	if def.AvailabilityCode != "" {
+		return BoundedPlan{}, fmt.Errorf("action %q unavailable: %s", def.ID, def.AvailabilityReason)
+	}
+	if def.ExecutionShape != "bounded_sequence" {
+		return BoundedPlan{}, fmt.Errorf("action %q is not a bounded plan", def.ID)
+	}
+	if def.planCompiler == nil {
+		return BoundedPlan{}, fmt.Errorf("action %q has no trusted plan compiler", def.ID)
+	}
+	plan, err := def.planCompiler(append(json.RawMessage(nil), params...))
+	if err != nil {
+		return BoundedPlan{}, fmt.Errorf("compile action plan %q: %w", def.ID, err)
+	}
+	if err := validatePlan(plan, def.MaxSteps, def.AtMostOnce); err != nil {
+		return BoundedPlan{}, fmt.Errorf("compiled action plan %q: %w", def.ID, err)
+	}
+	return clonePlan(plan), nil
 }
 
 // Verify interprets a successful Final using only trusted Driver code.  This
@@ -142,6 +231,35 @@ func validateSingleStep(step SingleStep) error {
 	return nil
 }
 
+func validatePlan(plan BoundedPlan, maxSteps uint8, atMostOnce bool) error {
+	if len(plan.Steps) < 2 || len(plan.Steps) > int(maxSteps) || len(plan.Steps) > 8 {
+		return fmt.Errorf("step count is outside bounded limit")
+	}
+	if plan.AtMostOnce != atMostOnce {
+		return fmt.Errorf("at-most-once policy mismatch")
+	}
+	if plan.RequiresFinally && plan.Steps[len(plan.Steps)-1].Kind != "finally" {
+		return fmt.Errorf("finally step must be last")
+	}
+	for _, step := range plan.Steps {
+		if step.ID == "" || (step.Kind != "read" && step.Kind != "write" && step.Kind != "readback" && step.Kind != "finally") {
+			return fmt.Errorf("invalid plan step")
+		}
+		if err := validateSingleStep(step.SingleStep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clonePlan(plan BoundedPlan) BoundedPlan {
+	plan.Steps = append([]PlanStep(nil), plan.Steps...)
+	for i := range plan.Steps {
+		plan.Steps[i].SingleStep = cloneStep(plan.Steps[i].SingleStep)
+	}
+	return plan
+}
+
 func (r *Registry) Get(deviceType, actionID string) (Definition, bool) {
 	def, ok := r.byType[deviceType][actionID]
 	return def, ok
@@ -168,7 +286,7 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 // medium/high/critical actions until risk encoding, durable at-most-once and
 // bounded verification semantics land together.
 func currentEngineAllows(def Definition) bool {
-	return def.Semantics == "read" && def.Risk == "low"
+	return def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce
 }
 
 func (r *Registry) List(deviceType string) []Definition {
@@ -229,10 +347,12 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					return driver.ParseData(raw)
 				}
 			}
-			enabled := action.Enabled && action.Semantics == "read" && action.Risk == "low"
+			enabled := action.Enabled && action.Semantics == "read" && action.Risk == "low" && action.ExecutionShape == "single" && !action.AtMostOnce
 			if err := r.Register(Definition{ID: action.ID, Version: action.Version, Name: action.Name,
 				Description: action.Description, DeviceType: deviceType, Semantics: action.Semantics,
-				Risk: action.Risk, Enabled: enabled, Transport: ChannelCmdV2Adapter,
+				Risk: action.Risk, ExecutionShape: action.ExecutionShape, Verification: action.Verification,
+				AtMostOnce: action.AtMostOnce, MaxSteps: action.MaxSteps, Enabled: enabled, Transport: ChannelCmdV2Adapter,
+				AvailabilityCode: action.AvailabilityCode, AvailabilityReason: action.AvailabilityReason,
 				InputSchema: schema,
 				SingleStep: SingleStep{TXData: action.TXData, ReadSize: action.ReadSize,
 					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, compiler: compiler, verifier: verifier}); err != nil {

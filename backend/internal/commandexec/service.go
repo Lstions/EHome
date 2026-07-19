@@ -103,6 +103,10 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		}
 		if !definition.Enabled {
 			item.Reason = "action is not enabled for rollout"
+			if definition.AvailabilityCode != "" {
+				item.Reason = definition.AvailabilityReason
+				item.ReasonCode = definition.AvailabilityCode
+			}
 			items = append(items, item)
 			continue
 		}

@@ -3,7 +3,7 @@ import client from './client'
 export type OperationStatus = 'QUEUED' | 'DISPATCHED' | 'DEVICE_ACCEPTED' | 'VERIFYING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED'
 export interface ActionParameter { type: 'string' | 'boolean' | 'integer' | 'number'; minimum?: number; maximum?: number; min_length?: number; max_length?: number; enum?: string[] }
 export interface ActionParameterSchema { properties?: Record<string, ActionParameter>; required?: string[] }
-export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
+export interface ActionDefinition { id: string; version: number; name: string; description: string; device_type: string; semantics: string; risk: string; execution_shape?: 'single' | 'bounded_sequence'; verification?: 'none' | 'ack' | 'readback' | 'observation'; at_most_once?: boolean; max_steps?: number; availability_code?: string; availability_reason?: string; transport: 'channel_cmd_v2'; input_schema?: ActionParameterSchema }
 export interface EffectiveAction { definition: ActionDefinition; available: boolean; reason?: string; reason_code?: string }
 export interface VerifiedSensorValue { name: string; value: number; unit?: string; string_value?: string }
 export interface ConfirmationGrant { token: string; expires_at: string }

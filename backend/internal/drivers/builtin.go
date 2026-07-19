@@ -296,6 +296,12 @@ func (d *PRS3001Driver) ControlActions() []ControlAction {
 		Semantics:   "read", Risk: "low", Enabled: false,
 		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b},
 		ReadSize: 9, RXTimeoutMS: 1000, PostTXDelayMS: 100,
+	}, {
+		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
+		Description: "清零后必须读取累计值为零并完成对账；普锐森协议清零帧尚未导入",
+		Semantics: "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+		AtMostOnce: true, MaxSteps: 3, AvailabilityCode: "protocol_unverified",
+		AvailabilityReason: "普锐森清零寄存器/CRC 及写入→读回→恢复证据尚未冻结",
 	}}
 }
 
@@ -354,6 +360,12 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 		Semantics:   "read", Risk: "low", Enabled: false,
 		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0a},
 		ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
+	}, {
+		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
+		Description: "清零后必须读取累计值为零并完成对账；SN-3001 清零帧未知",
+		Semantics: "reset", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+		AtMostOnce: true, MaxSteps: 3, AvailabilityCode: "protocol_unverified",
+		AvailabilityReason: "没有可信的 SN-3001 清零命令、CRC 黄金向量及实机恢复证据",
 	}}
 }
 

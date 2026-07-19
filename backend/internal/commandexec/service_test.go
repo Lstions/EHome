@@ -45,6 +45,15 @@ func setupService(t *testing.T) (*Service, *models.EdgeDevice) {
 	return service, &edge
 }
 
+func catalogAction(items []CatalogItem, actionID string) *CatalogItem {
+	for i := range items {
+		if items[i].Definition.ID == actionID {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
 func createInput(edge uint, key string) CreateInput {
 	return CreateInput{EdgeDeviceID: edge, ActorUserID: 7, ActionID: "read_rainfall", Params: json.RawMessage(`{}`), IdempotencyKey: key, SourceIP: "127.0.0.1"}
 }
@@ -143,7 +152,8 @@ func TestControlV2DisabledIsUnavailable(t *testing.T) {
 	s, edge := setupService(t)
 	s.SetDispatchEnabled(false)
 	items, err := s.Catalog(context.Background(), edge.ID)
-	if err != nil || len(items) != 1 || items[0].Available {
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil || item.Available {
 		t.Fatalf("catalog=%+v err=%v", items, err)
 	}
 	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "request-closed-0001")); !errors.Is(err, ErrActionUnavailable) {
@@ -160,11 +170,12 @@ func TestCatalogIdentifiesStaleCapabilityForRefresh(t *testing.T) {
 	}
 	s.now = func() time.Time { return now }
 	items, err := s.Catalog(context.Background(), edge.ID)
-	if err != nil || len(items) != 1 {
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil {
 		t.Fatalf("catalog=%+v err=%v", items, err)
 	}
-	if items[0].Available || items[0].ReasonCode != "capability_stale" {
-		t.Fatalf("expected stale capability catalog item, got %+v", items[0])
+	if item.Available || item.ReasonCode != "capability_stale" {
+		t.Fatalf("expected stale capability catalog item, got %+v", item)
 	}
 }
 
@@ -301,7 +312,8 @@ func TestCatalogAndCreateRejectUnavailableActionChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	items, err := s.Catalog(context.Background(), edge.ID)
-	if err != nil || len(items) != 1 || items[0].Available || items[0].Reason != "action channel is unavailable" {
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil || item.Available || item.Reason != "action channel is unavailable" {
 		t.Fatalf("catalog=%+v err=%v", items, err)
 	}
 	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "request-channel-closed")); !errors.Is(err, ErrActionUnavailable) {
@@ -315,7 +327,8 @@ func TestCatalogAndCreateRejectMissingRuntimeChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	items, err := s.Catalog(context.Background(), edge.ID)
-	if err != nil || len(items) != 1 || items[0].Available || items[0].Reason != "action channel is unavailable" {
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil || item.Available || item.Reason != "action channel is unavailable" {
 		t.Fatalf("catalog=%+v err=%v", items, err)
 	}
 	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "request-runtime-missing")); !errors.Is(err, ErrActionUnavailable) {

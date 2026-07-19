@@ -526,8 +526,8 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 	var _ ControlActionProvider = d
 	var _ ControlActionVerifier = d
 	actions := d.ControlActions()
-	if len(actions) != 5 {
-		t.Fatalf("got %d control actions, want 5", len(actions))
+	if len(actions) < 8 {
+		t.Fatalf("got %d control actions, want reads plus guarded operations", len(actions))
 	}
 	want := map[string][]byte{
 		"read_basic_info":       {0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77},
@@ -537,6 +537,12 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 		"read_protection_count": {0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77},
 	}
 	for _, action := range actions {
+		if action.ID == "set_mos_policy" || action.ID == "read_protection_parameters" || action.ID == "read_system_parameters" || action.ID == "bms_restart" {
+			if action.Enabled || action.AvailabilityCode == "" {
+				t.Fatalf("guarded action became available: %+v", action)
+			}
+			continue
+		}
 		frame, ok := want[action.ID]
 		if !ok {
 			t.Fatalf("unexpected action %q", action.ID)
@@ -548,6 +554,22 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing actions: %v", want)
+	}
+}
+
+func TestJiabaidaMOSPolicyCompilerGoldenVector(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	step, err := d.CompileControlAction("set_mos_policy", json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`))
+	if err != nil {
+		t.Fatalf("CompileControlAction error = %v", err)
+	}
+	// DD 5A E1 02 00 01 FF 1C 77; checksum is two's complement of E1+02+00+01.
+	want := []byte{0xDD, 0x5A, 0xE1, 0x02, 0x00, 0x01, 0xFF, 0x1C, 0x77}
+	if string(step.TXData) != string(want) {
+		t.Fatalf("MOS frame = % X, want % X", step.TXData, want)
+	}
+	if step.ReadSize != 7 || step.RXTimeoutMS == 0 {
+		t.Fatalf("MOS response bounds = %+v", step)
 	}
 }
 

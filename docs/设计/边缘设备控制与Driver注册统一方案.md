@@ -1261,6 +1261,15 @@ verification: readback accumulated value
 
 协议和清零寄存器未在可信 Driver 中冻结前保持 unavailable。执行前展示当前累计值和数据时间；命令一旦可能到达设备便不自动重试。读回为零且响应时间晚于命令才成功；ACK 丢失但读回为零可通过对账收敛，既无 ACK 又无法读回则 UNKNOWN。
 
+### 当前代码交付边界（2026-07-19）
+
+代码已将 `reset_rainfall` 登记到 `prs3001` 与 `sn3001_rain` 的 Driver-owned
+Action Catalog，并固化为 `reset/high/bounded_sequence/readback/at_most_once` 元数据。
+协议未冻结时只返回 `protocol_unverified`，不生成 TX 帧，也不能被当前单步
+ChannelCmdV2 dispatcher 执行。统一模型支持可信 Driver 编译的固定
+`read → write → readback → finally` 工作流，最多 8 步；浏览器不能提交脚本、循环或分支。
+节点尚未具备 durable NVS replay capability，因此 bounded plan 仍保持 unavailable。
+
 ## 18.2 BMS 充电/放电 MOS
 
 ### 协议确认
@@ -1342,6 +1351,19 @@ XX = (charge_software_closed ? bit0 : 0)
 ```
 
 方案 B 使用 bounded batch，步骤总数必须不超过节点上报上限。若硬件验证无法确定正确的 exit 语义，动作保持 unavailable。
+
+### 当前代码交付的 BMS 能力边界
+
+- `set_mos_policy` 已登记参数 schema（充电关闭位、放电关闭位、`user/operator` 优先级），并
+  按 V19 `DD 5A E1` 规则提供编译器和黄金向量；动作保持 `hardware_evidence_required`，
+  必须先有真实 BMS ACK、`fet_status` 读回和恢复证据；
+- `read_protection_parameters` / `read_system_parameters` 对应 F2/F3 bounded factory
+  workflow，当前保持 `protocol_unverified`；
+- `bms_restart` 标记为 `critical/at_most_once/observation`，必须有离线窗口或 restart
+  counter 观测，当前保持 `protocol_unverified`。
+
+这些动作出现在目录中不代表已启用。单步传输、内存 replay 或仅收到 ACK 都不足以把 MOS、F2/F3
+或重启标记为成功。
 
 ### 结果
 

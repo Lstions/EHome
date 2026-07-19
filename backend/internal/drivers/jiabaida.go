@@ -28,18 +28,87 @@ func (d *JiabaidaBMSDriver) HardwareTypes() []string { return []string{"uart"} }
 // model/firmware/line evidence needed for rollout. In particular, no MOS,
 // factory-mode, reset or parameter command is represented here.
 func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
-	return []ControlAction{
+	actions := []ControlAction{
 		jiabaidaReadAction("read_basic_info", "读取基本信息", []byte{0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77}, 60, "总压、电流、容量、SOC、温度与 FET 状态"),
 		jiabaidaReadAction("read_cell_voltage", "读取单体电压", []byte{0xDD, 0xA5, 0x04, 0x00, 0xFF, 0xFC, 0x77}, 50, "各串电芯电压"),
 		jiabaidaReadAction("read_hardware_version", "读取硬件版本", []byte{0xDD, 0xA5, 0x05, 0x00, 0xFF, 0xFB, 0x77}, 40, "硬件版本字符串"),
 		jiabaidaReadAction("read_comprehensive", "读取综合信息", []byte{0xDD, 0xA5, 0x0F, 0x00, 0xFF, 0xF1, 0x77}, 100, "综合状态与单体电压"),
 		jiabaidaReadAction("read_protection_count", "读取保护历史次数", []byte{0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77}, 40, "保护触发次数统计"),
 	}
+	// These capabilities are deliberately visible but unavailable. Their
+	// schemas and evidence requirements are frozen now, while physical
+	// execution remains blocked until a real BMS proves ACK + readback and the
+	// node has durable bounded-plan replay protection.
+	actions = append(actions,
+		ControlAction{
+			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
+			Description: "一次提交充电/放电两个软件关闭位；必须 ACK 后读取 fet_status 对账",
+			Semantics: "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "hardware_evidence_required",
+			AvailabilityReason: "缺少真实 BMS 的 ACK、fet_status 读回和恢复证据",
+			Parameters: []ControlParameter{
+				{Name: "charge_software_closed", Type: "boolean", Required: true},
+				{Name: "discharge_software_closed", Type: "boolean", Required: true},
+				{Name: "priority", Type: "string", Required: true, Enum: []string{"user", "operator"}},
+			},
+		},
+		ControlAction{ID: "read_protection_parameters", Version: 1, Name: "读取 BMS 保护参数",
+			Description: "嘉佰达 F2；需要受控工厂模式工作流，当前仅登记能力",
+			Semantics: "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F2 工厂模式步骤与实机响应尚未冻结"},
+		ControlAction{ID: "read_system_parameters", Version: 1, Name: "读取 BMS 系统参数",
+			Description: "嘉佰达 F3；需要受控工厂模式工作流，当前仅登记能力",
+			Semantics: "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F3 工厂模式步骤与实机响应尚未冻结"},
+		ControlAction{ID: "bms_restart", Version: 1, Name: "重启 BMS",
+			Description: "重启后必须观察离线窗口或 restart counter，不能以 ACK 判定成功",
+			Semantics: "reset", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
+			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified", AvailabilityReason: "未冻结 BMS 重启帧及离线/启动观测证据"},
+	)
+	return actions
 }
 
 func jiabaidaReadAction(id, name string, tx []byte, readSize uint32, description string) ControlAction {
 	return ControlAction{ID: id, Version: 1, Name: name, Description: description, Semantics: "read", Risk: "low", Enabled: false,
 		TXData: append([]byte(nil), tx...), ReadSize: readSize, RXTimeoutMS: 1000}
+}
+
+// CompileControlAction compiles the documented E1 MOS policy frame. The
+// action is still unavailable in the catalog: this compiler exists so the
+// golden vector and future bounded-plan transport can be tested without ever
+// guessing bytes at the HTTP boundary.
+func (d *JiabaidaBMSDriver) CompileControlAction(actionID string, params json.RawMessage) (CompiledControlStep, error) {
+	if actionID != "set_mos_policy" {
+		return CompiledControlStep{}, fmt.Errorf("jiabaida action %q is not parameterized", actionID)
+	}
+	var input struct {
+		ChargeClosed    bool   `json:"charge_software_closed"`
+		DischargeClosed bool   `json:"discharge_software_closed"`
+		Priority        string `json:"priority"`
+	}
+	if err := json.Unmarshal(params, &input); err != nil {
+		return CompiledControlStep{}, fmt.Errorf("decode MOS policy: %w", err)
+	}
+	var priority byte
+	switch input.Priority {
+	case "user":
+		priority = 0x00
+	case "operator":
+		priority = 0xAA
+	default:
+		return CompiledControlStep{}, fmt.Errorf("priority must be user or operator")
+	}
+	var mos byte
+	if input.ChargeClosed {
+		mos |= 0x01
+	}
+	if input.DischargeClosed {
+		mos |= 0x02
+	}
+	frame := []byte{0xDD, 0x5A, 0xE1, 0x02, priority, mos, 0, 0, 0x77}
+	checksum := jiabaidaChecksum(frame[2:6])
+	binary.BigEndian.PutUint16(frame[6:8], checksum)
+	return CompiledControlStep{TXData: frame, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}, nil
 }
 
 // VerifyControlAction binds a successful response to its originating query.
