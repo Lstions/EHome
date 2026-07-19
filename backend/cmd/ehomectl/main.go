@@ -15,7 +15,7 @@ import (
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "auth" {
-		fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|migration-status|migrate-single-user>")
+		fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|migration-status|migrate-single-user|reset-password>")
 	}
 	cfg := config.Load().DBConfig()
 	if err := database.Connect(database.Config{Host: cfg.Host, Port: cfg.Port, User: cfg.User, Password: cfg.Password, DBName: cfg.DBName, SSLMode: cfg.SSLMode}); err != nil {
@@ -81,6 +81,18 @@ func main() {
 			fatal(err.Error())
 		}
 		fmt.Printf("kept_user_id=%d retired=%d\n", report.KeptUserID, report.RetiredCount)
+	case "reset-password":
+		password := os.Getenv("EHOME_NEW_ADMIN_PASSWORD")
+		_ = os.Unsetenv("EHOME_NEW_ADMIN_PASSWORD")
+		if password == "" {
+			fatal("EHOME_NEW_ADMIN_PASSWORD is required and must contain at least 12 characters")
+		}
+		updated, err := authservice.ResetPasswordHostLocal(db, password)
+		password = ""
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Printf("password reset for system administrator id=%d username=%q; existing sessions revoked\n", updated.ID, updated.Username)
 	default:
 		fatal("unknown auth command")
 	}
