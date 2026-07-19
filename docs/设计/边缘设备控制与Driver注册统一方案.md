@@ -27,6 +27,13 @@
 > 2026-07-19 已从真实 Chromium 的统一受控操作完成 SN-3001 `read_rainfall` 实机闭环，前端只展示
 > Action Catalog 入口和真实操作时间线；旧的非调度 CommandTemplate 不再伪装成第二个“手动触发”入口。
 
+> **2026-07-20 SN-3001 实施状态覆盖**：上述高风险项描述是 2026-07-19 的历史基线。
+> 当前专用 C6 已具备 bounded batch、NVS at-most-once 和 finally 能力；`sn3001_rain` 的
+> bounded 清零、单步开发诊断清零、灵敏度/地址/波特率 setter 均已通过真实 UART1 和统一前端
+> 验证。地址/波特率在可信 Final 后分别同步 `EdgeDevice/DeviceConfig`、UART `bus_config`
+> 并重新下发 manifest，读回在 ConfigResult `in_sync` 后执行。该开发灰度证据不改变生产 high/
+> critical 默认关闭和故障注入门禁；BMS、GB3024 和 S3 性能项仍按各自硬件门禁处理。
+
 ## 当前 master 重新评估摘要
 
 当前代码不是原方案假设的完全未治理状态，而是“部分基础修复已完成，业务控制闭环仍未建立”：
@@ -1261,15 +1268,15 @@ verification: readback accumulated value
 
 协议和清零寄存器未在可信 Driver 中冻结前保持 unavailable。执行前展示当前累计值和数据时间；命令一旦可能到达设备便不自动重试。读回为零且响应时间晚于命令才成功；ACK 丢失但读回为零可通过对账收敛，既无 ACK 又无法读回则 UNKNOWN。
 
-### 当前代码交付边界（2026-07-19）
+### 当前代码交付边界（2026-07-20）
 
 代码已将 `reset_rainfall` 登记到 `prs3001` 与 `sn3001_rain` 的 Driver-owned
 Action Catalog，并固化为 `reset/high/bounded_sequence/readback/at_most_once` 元数据。
 SN-3001-GYL-N01 的 OCR 协议已确认 `01 06 00 00 00 5A 09 F1` 清零帧，并由 Driver
-bounded plan 编译为“读当前值→写清零→读回零”；在真实写入/读回证据和节点门禁完成前仍不生成可执行投递，也不能被当前单步
-ChannelCmdV2 dispatcher 执行。统一模型支持可信 Driver 编译的固定
-`read → write → readback → finally` 工作流，最多 8 步；浏览器不能提交脚本、循环或分支。
-节点尚未具备 durable NVS replay capability，因此 bounded plan 仍保持 unavailable。
+bounded plan 编译为“读当前值→写清零→读回零”；专用 C6 已通过真实写入/读回和 NVS Final
+回放证据，开发环境可执行，生产仍由 high-risk/故障注入门禁控制。统一模型支持可信 Driver
+编译的固定 `read → write → readback → finally` 工作流，最多 8 步；浏览器不能提交脚本、循环
+或分支。`set_device_address` 与 `set_baud_rate` 的连接配置副作用同样只在可信 Final 后执行。
 
 ## 18.2 BMS 充电/放电 MOS
 

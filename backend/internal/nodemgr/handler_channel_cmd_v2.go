@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,14 +78,20 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 	}
 }
 
-// applySN3001ControlSideEffect commits the physical UART settings only after
-// the trusted driver verifier has accepted the real device response.  The
-// channel event is consumed by SyncGate, which publishes a fresh manifest to
-// the collector.  Keeping this here makes a baud-rate change part of the
-// audited command lifecycle instead of allowing a UI/API write to silently
-// desynchronise the UART configuration.
+// applySN3001ControlSideEffect commits SN-3001 connection settings only after
+// the trusted driver verifier has accepted the real device response. The
+// resulting config event is consumed by SyncGate, which publishes a fresh
+// manifest to the collector. Keeping this here makes address/baud changes part
+// of the audited command lifecycle instead of allowing a UI/API write to
+// silently desynchronise the UART configuration.
 func (m *Manager) applySN3001ControlSideEffect(execution models.CommandExecution) error {
-	if execution.DeviceType != "sn3001_rain" || execution.ActionID != "set_baud_rate" {
+	if execution.DeviceType != "sn3001_rain" {
+		return nil
+	}
+	if execution.ActionID == "set_device_address" {
+		return m.applySN3001AddressSideEffect(execution)
+	}
+	if execution.ActionID != "set_baud_rate" {
 		return nil
 	}
 	var params struct {
@@ -135,6 +142,69 @@ func (m *Manager) applySN3001ControlSideEffect(execution models.CommandExecution
 	return m.eventBus.Publish(ConfigChangeEvent{
 		Type: CfgChangeChannel, Action: CfgActionUpdate, NodeID: execution.NodeID,
 		EntityID: fmt.Sprint(execution.ChannelID), Actor: "control:set_baud_rate",
+	})
+}
+
+func (m *Manager) applySN3001AddressSideEffect(execution models.CommandExecution) error {
+	var params struct {
+		Value json.Number `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(execution.ParamsJSON), &params); err != nil {
+		return fmt.Errorf("decode address parameters: %w", err)
+	}
+	target, err := strconv.ParseUint(string(params.Value), 10, 8)
+	if err != nil || target < 1 || target > 254 {
+		return fmt.Errorf("unsupported SN-3001 device address %q", params.Value)
+	}
+	changed := false
+	err = m.db.Transaction(func(tx *gorm.DB) error {
+		var edge models.EdgeDevice
+		if err := tx.Where("id = ? AND node_id = ?", execution.EdgeDeviceID, execution.NodeID).First(&edge).Error; err != nil {
+			return err
+		}
+		current := strings.TrimSpace(edge.HardwareID)
+		currentValue, parseErr := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(current, "0x"), "0X"), 0, 8)
+		if parseErr == nil && currentValue == target {
+			return nil
+		}
+		if err := tx.Model(&models.EdgeDevice{}).Where("id = ? AND node_id = ?", edge.ID, edge.NodeID).Update("hardware_id", strconv.FormatUint(target, 10)).Error; err != nil {
+			return err
+		}
+		var config models.DeviceConfig
+		if err := tx.First(&config, edge.DeviceConfigID).Error; err != nil {
+			return fmt.Errorf("load SN-3001 device config: %w", err)
+		}
+		connection := map[string]interface{}{}
+		if len(config.Connection) > 0 {
+			if err := json.Unmarshal(config.Connection, &connection); err != nil {
+				return fmt.Errorf("decode SN-3001 connection: %w", err)
+			}
+		}
+		defaultParams, ok := connection["default_params"].(map[string]interface{})
+		if !ok {
+			defaultParams = map[string]interface{}{}
+		}
+		defaultParams["address"] = target
+		connection["default_params"] = defaultParams
+		encoded, err := json.Marshal(connection)
+		if err != nil {
+			return fmt.Errorf("encode SN-3001 connection: %w", err)
+		}
+		if err := tx.Model(&models.DeviceConfig{}).Where("id = ?", config.ID).Update("connection", encoded).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil || !changed {
+		return err
+	}
+	if m.eventBus == nil {
+		return fmt.Errorf("configuration event bus is unavailable")
+	}
+	return m.eventBus.Publish(ConfigChangeEvent{
+		Type: CfgChangeEdgeDevice, Action: CfgActionUpdate, NodeID: execution.NodeID,
+		EntityID: fmt.Sprint(execution.EdgeDeviceID), Actor: "control:set_device_address",
 	})
 }
 

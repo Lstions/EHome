@@ -101,6 +101,18 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     }, { authToken: token }), { timeout: 45_000 }).toEqual({ baud: expected, sync: 'in_sync' })
   }
 
+  async function waitForEdgeAddress(page: Page, expected: number) {
+    const token = await page.evaluate(() => localStorage.getItem('token') || sessionStorage.getItem('token') || '')
+    await expect.poll(async () => page.evaluate(async ({ authToken }) => {
+      const response = await fetch('/api/v1/edge-devices/1', { headers: { Authorization: `Bearer ${authToken}` } })
+      const body = await response.json()
+      return { address: String(body?.data?.hardware_id || ''), sync: body?.data?.node?.config_sync_state }
+    }, { authToken: token }), { timeout: 45_000 }).toEqual({ address: String(expected), sync: 'in_sync' })
+    // ConfigResult can race the first in_sync status report; leave one full
+    // status interval before issuing the next physical request.
+    await page.waitForTimeout(2_000)
+  }
+
   test('清零写入 ACK、雨量读回，以及参数写入 ACK 后恢复基线', async ({ page }) => {
     test.setTimeout(120_000)
     await login(page)
@@ -109,6 +121,11 @@ test.describe('SN-3001 开发实机写入与读回', () => {
       { name: 'rainfall', value: 0, unit: 'mm' },
       { name: 'reset_ack', value: 1, unit: 'ack' },
     ])
+    // The protocol's raw FC06 clear is also exposed in development as a
+    // separately audited action. It must be followed by a browser readback;
+    // production uses the bounded reset action above instead.
+    await operation(page, '发送雨量清零', {}, { name: 'write_ack', value: 1, unit: 'ack' })
+    await operation(page, '读取累计雨量', {}, { name: 'rainfall', value: 0, unit: 'mm' })
     await page.getByRole('button', { name: '读取累计雨量', exact: true }).click()
     await expect.poll(async () => page.locator('.el-timeline-item').first().textContent(), { timeout: 20_000 }).toContain('rainfall=0mm')
 
@@ -127,8 +144,10 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     // Exercise the address transition itself, using source_address on the
     // second write so the recovery request reaches the new address.
     await operation(page, '设置设备地址', { value: 2 }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForEdgeAddress(page, 2)
     await operation(page, '读取设备地址', {}, { name: 'device_address', value: 2, unit: 'address' })
     await operation(page, '设置设备地址', { value: 1, source_address: 2 }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForEdgeAddress(page, 1)
     await operation(page, '读取设备地址', {}, { name: 'device_address', value: 1, unit: 'address' })
 
     await operation(page, '设置设备波特率', { value: '4800' }, { name: 'write_ack', value: 1, unit: 'ack' })
@@ -158,5 +177,18 @@ test.describe('SN-3001 开发实机写入与读回', () => {
     await waitForChannelBaud(page, 4800)
     await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 4800, unit: 'bit/s' })
     await page.screenshot({ path: '/tmp/e2e-shots/sn3001-real-baud-transition.png', fullPage: true })
+  })
+
+  test('真实切换 4800→2400→4800 并在新速率读回', async ({ page }) => {
+    test.setTimeout(150_000)
+    await login(page)
+
+    await operation(page, '设置设备波特率', { value: '2400' }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForChannelBaud(page, 2400)
+    await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 2400, unit: 'bit/s' })
+
+    await operation(page, '设置设备波特率', { value: '4800' }, { name: 'write_ack', value: 1, unit: 'ack' })
+    await waitForChannelBaud(page, 4800)
+    await operation(page, '读取设备波特率', {}, { name: 'baud_rate', value: 4800, unit: 'bit/s' })
   })
 })

@@ -310,8 +310,9 @@ func (d *PRS3001Driver) ControlActions() []ControlAction {
 // SN3001RainDriver handles the SN-3001-GYL RS485 optical rain gauge.  It is
 // intentionally distinct from the legacy PRS-3001 entry: the documented safe
 // read is one Modbus register (7-byte response), rather than a guessed
-// multi-register layout.  The action remains disabled until a real device
-// produces a CRC-valid response in the target deployment.
+// multi-register layout.  Its development rollout is backed by the dedicated
+// C6/UART1 real-device evidence; production risk gates remain enforced by the
+// command-execution policy.
 type SN3001RainDriver struct {
 	configParser *parser.ConfigParser
 }
@@ -384,7 +385,7 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
 		Description: "SN-3001 清零寄存器 0x0000=0x005A；执行后必须重新读取确认",
 		Semantics:   "reset", Risk: "high", Enabled: false, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 3,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回；生产仍需节点端 bounded plan 与 durable at-most-once",
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回及节点 bounded durable replay；生产仍需独立故障注入放行",
 	}, {
 		ID: "clear_rainfall_write", Version: 1, Name: "发送雨量清零",
 		Description: "开发验证用单步清零写入；收到回显后必须立即执行读取确认",
@@ -394,12 +395,12 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 	}, {
 		ID: "set_rain_sensitivity", Version: 1, Name: "设置雨量灵敏度", Description: "写入寄存器 0x0052，默认值 60，修改后需重新读取确认",
 		Semantics: "set", Risk: "high", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回；生产仍需 durable at-most-once",
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回及节点 durable replay；生产仍需独立高风险放行",
 		Parameters: []ControlParameter{{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)}},
 	}, {
 		ID: "set_device_address", Version: 1, Name: "设置设备地址", Description: "写入寄存器 0x07D0，范围 1~254",
 		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 1→2→1 开发实机恢复；生产仍需原子链路恢复工作流",
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 1→2→1 开发实机恢复和地址配置同步；生产仍需独立高风险放行",
 		Parameters: []ControlParameter{
 			{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(1), Maximum: floatPtr(254)},
 			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},
@@ -407,7 +408,7 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 	}, {
 		ID: "set_baud_rate", Version: 1, Name: "设置设备波特率", Description: "写入寄存器 0x07D1；2400/4800/9600",
 		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已验证当前 4800 写入/读回；9600 切换需先完成 UART 原子重配",
+		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 4800↔9600 开发实机切换、UART manifest 同步和读回；生产仍需独立高风险放行",
 		Parameters: []ControlParameter{
 			{Name: "value", Type: "string", Required: true, Enum: []string{"2400", "4800", "9600"}},
 			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},

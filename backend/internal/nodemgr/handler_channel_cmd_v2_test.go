@@ -78,6 +78,66 @@ func TestSN3001BaudSideEffectUpdatesChannelAndPublishesEvent(t *testing.T) {
 	}
 }
 
+func TestSN3001AddressSideEffectUpdatesEdgeAndConnection(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := models.Node{NodeID: "node-address-side-effect", Name: "node", Status: "online"}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	config := models.DeviceConfig{
+		Name: "SN-3001", DeviceType: "sn3001_rain", Status: "active",
+		Connection: json.RawMessage(`{"protocol":"modbus","default_params":{"address":1}}`),
+	}
+	if err := db.Create(&config).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareType: "uart", BusType: "UART", Enabled: true}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	edge := models.EdgeDevice{NodeID: node.NodeID, ChannelID: channel.ID, DeviceConfigID: config.ID, Type: "sn3001_rain", HardwareID: "1", Enabled: true, Status: "active"}
+	if err := db.Create(&edge).Error; err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(db, nil, nil, nil, nil, nil, drivers.NewRegistry())
+	if err := manager.applySN3001ControlSideEffect(models.CommandExecution{
+		NodeID: node.NodeID, EdgeDeviceID: edge.ID, DeviceType: "sn3001_rain",
+		ActionID: "set_device_address", ParamsJSON: `{"value":2}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var gotEdge models.EdgeDevice
+	if err := db.First(&gotEdge, edge.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotEdge.HardwareID != "2" {
+		t.Fatalf("hardware_id=%q, want 2", gotEdge.HardwareID)
+	}
+	var gotConfig models.DeviceConfig
+	if err := db.First(&gotConfig, config.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var connection struct {
+		DefaultParams struct {
+			Address float64 `json:"address"`
+		} `json:"default_params"`
+	}
+	if err := json.Unmarshal(gotConfig.Connection, &connection); err != nil {
+		t.Fatal(err)
+	}
+	if connection.DefaultParams.Address != 2 {
+		t.Fatalf("connection address=%v, want 2", connection.DefaultParams.Address)
+	}
+	select {
+	case event := <-manager.EventBus().Subscribe():
+		if event.Type != CfgChangeEdgeDevice || event.Action != CfgActionUpdate || event.EntityID != fmt.Sprint(edge.ID) {
+			t.Fatalf("unexpected config event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("address side effect did not publish config event")
+	}
+}
+
 func TestChannelCmdV2FinalRequiresIdentityAndDriverParse(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := models.Node{NodeID: "node-v2-final", Name: "node", Status: "online"}
