@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest'
 import source from '../DeviceHeader.vue?raw'
 
 describe('DeviceHeader cache consistency', () => {
-  it('invalidates parameterized lists after detail-page writes', () => {
-    expect(source.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
-    expect(source.match(/edgeDeviceStore\.invalidateDetail\(deviceId\)/g)).toHaveLength(2)
-    expect(source.match(/assertSessionGeneration\(generation\)/g)).toHaveLength(2)
-    expect(source.match(/props\.device\?\.id !== deviceId/g)).toHaveLength(6)
+  it('keeps editable metadata cache-safe without exposing the retired address write', () => {
+    expect(source).toContain('edgeDeviceStore.invalidateLists()')
+    expect(source).toContain('edgeDeviceStore.invalidateDetail(deviceId)')
+    expect(source).toContain('assertSessionGeneration(generation)')
+    expect(source).toContain('props.device?.id !== deviceId')
+    expect(source).not.toContain('changeAddress')
+    expect(source).not.toContain('修改地址')
     expect(source).toContain('onUnmounted(() =>')
     expect(source).toContain('operationGeneration++')
   })

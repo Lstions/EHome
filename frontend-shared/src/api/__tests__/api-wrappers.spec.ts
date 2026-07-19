@@ -536,6 +536,11 @@ describe('edgeDeviceApi', () => {
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/edge-devices/1')
   })
 
+  it('does not expose retired direct control endpoints', () => {
+    expect(edgeDeviceApi).not.toHaveProperty('executeOperation')
+    expect(edgeDeviceApi).not.toHaveProperty('changeAddress')
+  })
+
   it('getLatestData returns data', async () => {
     mockClient.get.mockResolvedValue({ data: { temp: 25 } })
     const res = await edgeDeviceApi.getLatestData(1)
@@ -548,13 +553,6 @@ describe('edgeDeviceApi', () => {
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/1/data', {
       params: { start_time: '2024-01-01', end_time: '2024-12-31' },
     })
-  })
-
-  it('executeOperation posts', async () => {
-    const execRes = { code: 200, data: { status: 'ok', operation: 'read' }, message: '' }
-    mockClient.post.mockResolvedValue({ data: execRes.data })
-    const res = await edgeDeviceApi.executeOperation(1, 'read', { register: 0 })
-    expect(res).toEqual(execRes.data)
   })
 
   it('getOperationHistory returns array', async () => {
@@ -573,12 +571,6 @@ describe('edgeDeviceApi', () => {
     mockClient.get.mockResolvedValue(null)
     const res = await edgeDeviceApi.getOperationHistory(1)
     expect(res).toEqual([])
-  })
-
-  it('changeAddress posts', async () => {
-    mockClient.post.mockResolvedValue({ data: { success: true } })
-    await edgeDeviceApi.changeAddress(1, 10)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices/1/change-address', { new_address: 10 })
   })
 
   it('normalize maps unknown status', async () => {

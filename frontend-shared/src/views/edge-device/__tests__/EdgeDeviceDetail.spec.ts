@@ -47,8 +47,6 @@ vi.mock('@/api/edgeDevice', () => ({
     getHistoryData: vi.fn(() => Promise.resolve({ items: [] })),
     update: vi.fn(() => Promise.resolve()),
     delete: vi.fn(() => Promise.resolve()),
-    changeAddress: vi.fn(() => Promise.resolve()),
-    executeOperation: vi.fn(() => Promise.resolve({ code: 0, data: { status: 'ok' }, message: '' })),
     getCommandIntervals: vi.fn(() => Promise.resolve([])),
   },
 }))
@@ -102,7 +100,6 @@ const stubs = {
   DeviceInfoCard: { template: '<div data-testid="device-info-card" />' },
   HistoryChartSection: { template: '<div data-testid="history-chart-section" />' },
   CommandFrequencySection: { template: '<div data-testid="command-frequency-section" />' },
-  OperationButtons: { template: '<div data-testid="operation-buttons" />' },
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-skeleton': { template: '<div class="el-skeleton" />' },
   'el-empty': { template: '<div class="el-empty" />' },
@@ -199,9 +196,4 @@ describe('GenericDeviceDetail.vue', () => {
     expect(wrapper.find('[data-testid="history-chart-section"]').exists()).toBe(true)
   })
 
-  it('renders OperationButtons after device loads', async () => {
-    const wrapper = mount(GenericDeviceDetail, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.find('[data-testid="operation-buttons"]').exists()).toBe(true)
-  })
 })

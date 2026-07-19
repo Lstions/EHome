@@ -5,18 +5,6 @@ import type { OperationDef } from './deviceConfig'
 // Extended to support health status: active, warning, error, disabled
 export type DeviceStatus = 'active' | 'online' | 'offline' | 'warning' | 'error' | 'disabled' | 'pending' | 'initializing' | 'unknown'
 
-export interface ExecuteOperationResponse {
-  code: number
-  data: {
-    status: string
-    operation: string
-    value?: number
-    unit?: string
-    data_hex?: string
-  }
-  message: string
-}
-
 export interface EdgeDevice {
   id: number
   node_id: number | string
@@ -191,14 +179,6 @@ export const edgeDeviceApi = {
     return response.data || response
   },
 
-  async executeOperation(id: number, operation: string, params?: Record<string, any>): Promise<ExecuteOperationResponse> {
-    const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/execute`, {
-      operation,
-      params: params || {}
-    })
-    return response.data || response
-  },
-
   async getOperationHistory(id: number, limit: number = 50): Promise<any[]> {
     const response = await client.get<unknown, any>(
       `/api/v1/edge-devices/${id}/operations/history`,
@@ -207,13 +187,6 @@ export const edgeDeviceApi = {
     if (Array.isArray(response)) return response
     if (response?.data) return response.data as any[]
     return []
-  },
-
-  async changeAddress(id: number, newAddress: number): Promise<any> {
-    const response = await client.post<unknown, any>(`/api/v1/edge-devices/${id}/change-address`, {
-      new_address: newAddress
-    })
-    return response.data || response
   },
 
   // Driver command templates
