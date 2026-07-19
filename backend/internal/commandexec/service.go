@@ -93,6 +93,7 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		channelErr = err
 	}
 	items := make([]CatalogItem, 0)
+	capabilityStale := false
 	for _, definition := range s.actions.List(edge.Type) {
 		item := CatalogItem{Definition: definition, Available: definition.Enabled && s.dispatchEnabled && edge.Enabled && edge.Status != "inactive" && edge.Node.Status == "online"}
 		if !s.dispatchEnabled {
@@ -113,11 +114,12 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		} else if _, capabilities, err := currentCapabilities(edge.Node, s.now); err != nil {
 			item.Available = false
 			item.Reason = "ChannelCmdV2 capability is unavailable or stale"
-			if edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > maxCapabilityAge {
+			if edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > MaxCapabilityAge {
 				// A browser may safely request a fresh ResourceReport and reload the
 				// catalog. Keep this machine-readable so the UI never relies on the
 				// presentation text or retries unrelated safety failures.
 				item.ReasonCode = "capability_stale"
+				capabilityStale = true
 			}
 		} else if params, err := deviceaction.CanonicalizeParams(definition.InputSchema, nil); err == nil {
 			step, compileErr := definition.Compile(params)
@@ -128,6 +130,9 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		}
 		items = append(items, item)
 	}
+	if capabilityStale {
+		metrics.DeviceActionCapabilityStaleTotal.Inc()
+	}
 	return items, nil
 }
 
@@ -135,6 +140,7 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 // transport is touched here; the dispatcher is the only publication path.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandExecution, bool, error) {
 	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || !validIdempotencyKey(in.IdempotencyKey) {
+		metrics.DeviceActionAdmissionTotal.WithLabelValues("invalid").Inc()
 		return nil, false, fmt.Errorf("invalid command request")
 	}
 	var result models.CommandExecution
@@ -238,6 +244,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 		}
 		metrics.DeviceActionCreatedTotal.WithLabelValues(resultLabel).Inc()
 	}
+	metrics.DeviceActionAdmissionTotal.WithLabelValues(admissionMetricResult(err, replayed)).Inc()
 	return &result, replayed, err
 }
 
@@ -376,6 +383,29 @@ func validResolutionOutcome(outcome string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func admissionMetricResult(err error, replayed bool) string {
+	if err == nil {
+		if replayed {
+			return "replayed"
+		}
+		return "queued"
+	}
+	switch {
+	case errors.Is(err, ErrIdempotencyCollision):
+		return "collision"
+	case errors.Is(err, ErrInvalidParams):
+		return "invalid"
+	case errors.Is(err, ErrActionUnavailable):
+		return "unavailable"
+	case errors.Is(err, ErrConfirmationRequired), errors.Is(err, ErrConfirmationInvalid), errors.Is(err, ErrRecentAuthRequired):
+		return "confirmation"
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return "not_found"
+	default:
+		return "error"
 	}
 }
 

@@ -30,6 +30,20 @@ export interface MetricsSummary {
     connections_active: number
     messages_total: number
   }
+  control: {
+    operations_total: number
+    active: number
+    queued: number
+    succeeded: number
+    failed: number
+    unknown: number
+    unresolved_unknown: number
+    cancelled: number
+    outbox_pending: number
+    outbox_leased: number
+    capability_stale_nodes: number
+    audit_write_failures: number
+  }
 }
 
 export interface MetricsResponse {

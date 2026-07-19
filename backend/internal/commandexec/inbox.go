@@ -33,8 +33,11 @@ func (s *Service) RecordInbox(ctx context.Context, event InboxEvent) (*models.Co
 	}
 	var execution models.CommandExecution
 	applied := false
+	var acceptDuration time.Duration
+	acceptDurationObserved := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		inbox := models.CommandInbox{EventID: event.EventID, CommandID: event.CommandID, EventType: event.EventType, AttemptNo: event.AttemptNo, BootID: event.BootID, PayloadJSON: string(payload), ReceivedAt: s.now()}
+		receivedAt := s.now()
+		inbox := models.CommandInbox{EventID: event.EventID, CommandID: event.CommandID, EventType: event.EventType, AttemptNo: event.AttemptNo, BootID: event.BootID, PayloadJSON: string(payload), ReceivedAt: receivedAt}
 		insert := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&inbox)
 		if insert.Error != nil {
 			return insert.Error
@@ -63,7 +66,17 @@ func (s *Service) RecordInbox(ctx context.Context, event InboxEvent) (*models.Co
 		if err := validateTransition(execution.Status, to); err != nil {
 			return nil
 		} // stale/terminal events are recorded but inert
-		now := s.now()
+		now := receivedAt
+		if to == StatusDeviceAccepted {
+			var attempt models.CommandAttempt
+			if err := tx.Select("published_at").Where("command_id = ? AND attempt_no = ? AND boot_id = ?", event.CommandID, event.AttemptNo, event.BootID).First(&attempt).Error; err != nil {
+				return err
+			}
+			if attempt.PublishedAt != nil {
+				acceptDuration = now.Sub(*attempt.PublishedAt)
+				acceptDurationObserved = true
+			}
+		}
 		updates := map[string]interface{}{"status": to}
 		if IsTerminal(to) {
 			updates["completed_at"] = now
@@ -107,6 +120,9 @@ func (s *Service) RecordInbox(ctx context.Context, event InboxEvent) (*models.Co
 		metrics.DeviceActionTransitionsTotal.WithLabelValues(execution.Status).Inc()
 		if IsTerminal(execution.Status) && !execution.CreatedAt.IsZero() {
 			metrics.DeviceActionDuration.Observe(s.now().Sub(execution.CreatedAt).Seconds())
+		}
+		if execution.Status == StatusDeviceAccepted && acceptDurationObserved && acceptDuration >= 0 {
+			metrics.DeviceActionAcceptDuration.Observe(acceptDuration.Seconds())
 		}
 	}
 	return &execution, applied, err

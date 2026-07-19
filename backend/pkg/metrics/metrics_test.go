@@ -133,6 +133,14 @@ func TestPrometheusMetricsRegistered(t *testing.T) {
 	t.Run("EventBusDroppedTotal_Inc", func(t *testing.T) {
 		EventBusDroppedTotal.Inc()
 	})
+
+	t.Run("DeviceActionObservability", func(t *testing.T) {
+		DeviceActionAdmissionTotal.WithLabelValues("queued").Inc()
+		DeviceActionQueueDuration.Observe(0.2)
+		DeviceActionAcceptDuration.Observe(0.1)
+		DeviceActionCapabilityStaleTotal.Inc()
+		SecurityAuditWriteFailuresTotal.Inc()
+	})
 }
 
 // TestNewGaugeDoesNotPanic verifies that creating a new Gauge via promauto

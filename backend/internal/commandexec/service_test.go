@@ -83,7 +83,7 @@ func TestCreateReplaysExistingCommandWhenCapabilitiesBecomeStale(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	stale := now.Add(-maxCapabilityAge - time.Second)
+	stale := now.Add(-MaxCapabilityAge - time.Second)
 	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("resource_reported_at", stale).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestControlV2DisabledIsUnavailable(t *testing.T) {
 func TestCatalogIdentifiesStaleCapabilityForRefresh(t *testing.T) {
 	s, edge := setupService(t)
 	now := time.Now().UTC()
-	stale := now.Add(-maxCapabilityAge - time.Second)
+	stale := now.Add(-MaxCapabilityAge - time.Second)
 	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("resource_reported_at", stale).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,10 @@ func TestHighRiskConfirmationIsBoundAndSingleUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.actions = actions
-	grant, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: "controlled test", SourceIP: "127.0.0.1"})
+	if _, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: strings.Repeat("中", 513)}); !errors.Is(err, ErrConfirmationRequired) {
+		t.Fatalf("513-character reason error=%v", err)
+	}
+	grant, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: strings.Repeat("中", 512), SourceIP: "127.0.0.1"})
 	if err != nil || grant.Token == "" || !grant.ExpiresAt.After(now) {
 		t.Fatalf("grant=%+v err=%v", grant, err)
 	}
@@ -200,6 +203,29 @@ func TestHighRiskConfirmationIsBoundAndSingleUse(t *testing.T) {
 	}
 	if _, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: "rate limited"}); !errors.Is(err, ErrConfirmationRateLimited) {
 		t.Fatalf("rate limit error=%v", err)
+	}
+}
+
+func TestDispatcherCancelsStaleOutboxWithoutPublishing(t *testing.T) {
+	s, edge := setupService(t)
+	execution, _, err := s.Create(context.Background(), createInput(edge.ID, "stale-outbox-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&models.CommandExecution{}).Where("command_id = ?", execution.CommandID).Update("status", StatusCancelled).Error; err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeTransport{}
+	processed, err := NewDispatcher(s.db, fake, "test-worker").ProcessOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if len(fake.attempts) != 0 {
+		t.Fatalf("stale outbox was physically dispatched: %+v", fake.attempts)
+	}
+	var outbox models.CommandOutbox
+	if err := s.db.First(&outbox, "command_id = ?", execution.CommandID).Error; err != nil || outbox.State != "CANCELLED" {
+		t.Fatalf("outbox=%+v err=%v", outbox, err)
 	}
 }
 

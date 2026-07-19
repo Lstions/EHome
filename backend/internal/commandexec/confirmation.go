@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ehome/backend/internal/audit"
 	"ehome/backend/internal/deviceaction"
@@ -58,7 +59,7 @@ func confirmationRequired(risk string) bool {
 // current availability facts as Create, so confirmation cannot mint a grant
 // for an offline/stale node and use it later after the environment changed.
 func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (*ConfirmationGrant, error) {
-	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || strings.TrimSpace(in.Reason) == "" || len(in.Reason) > 512 {
+	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
 		return nil, ErrConfirmationRequired
 	}
 	var grant ConfirmationGrant

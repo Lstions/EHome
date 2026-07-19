@@ -65,8 +65,42 @@
       </el-row>
     </div>
 
+    <el-alert
+      v-if="controlAttention > 0"
+      class="control-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="`控制面有 ${controlAttention} 项需要关注`"
+    />
+
     <!-- 详细面板 -->
     <div class="detail-panels">
+      <el-row class="control-health">
+        <el-col :span="24">
+          <el-card shadow="hover">
+            <template #header>
+              <div class="card-header">
+                <span><el-icon><Operation /></el-icon> 控制面健康</span>
+                <el-tag :type="controlAttention > 0 ? 'warning' : 'success'" size="small">
+                  {{ controlAttention > 0 ? '需关注' : '正常' }}
+                </el-tag>
+              </div>
+            </template>
+            <div class="control-grid">
+              <div class="control-metric"><span>操作总数</span><strong>{{ formatNumber(metrics?.control?.operations_total || 0) }}</strong></div>
+              <div class="control-metric"><span>活跃操作</span><strong>{{ metrics?.control?.active || 0 }}</strong></div>
+              <div class="control-metric"><span>Outbox 待处理</span><strong>{{ metrics?.control?.outbox_pending || 0 }}</strong></div>
+              <div class="control-metric"><span>Outbox 租约中</span><strong>{{ metrics?.control?.outbox_leased || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.unresolved_unknown || 0) > 0 }"><span>未处置 UNKNOWN</span><strong>{{ metrics?.control?.unresolved_unknown || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.capability_stale_nodes || 0) > 0 }"><span>能力快照过期</span><strong>{{ metrics?.control?.capability_stale_nodes || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.audit_write_failures || 0) > 0 }"><span>审计写失败</span><strong>{{ metrics?.control?.audit_write_failures || 0 }}</strong></div>
+              <div class="control-metric"><span>成功 / 失败</span><strong>{{ metrics?.control?.succeeded || 0 }} / {{ metrics?.control?.failed || 0 }}</strong></div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+
       <el-row :gutter="16">
         <!-- HTTP 监控 -->
         <el-col :xs="24" :sm="24" :md="12">
@@ -232,7 +266,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
-  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis
+  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis, Operation
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { THEME_COLORS } from '@/utils/theme'
@@ -244,6 +278,12 @@ const { isMobile } = useResponsive()
 const refreshInterval = ref(10000)
 const lastUpdateTime = ref('--')
 let timer: ReturnType<typeof setInterval> | null = null
+
+const controlAttention = computed(() =>
+  (metrics.value?.control?.unresolved_unknown || 0) +
+  (metrics.value?.control?.capability_stale_nodes || 0) +
+  (metrics.value?.control?.audit_write_failures || 0)
+)
 
 // 计算属性
 const deviceTotal = computed(() => {
@@ -400,6 +440,49 @@ onUnmounted(() => {
   margin-bottom: 20px;
 }
 
+.control-alert {
+  margin-bottom: 20px;
+}
+
+.control-health {
+  margin-bottom: 20px;
+}
+
+.control-health .card-header {
+  justify-content: space-between;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid var(--el-border-color-lighter);
+}
+
+.control-metric {
+  min-width: 0;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-right: 1px solid var(--el-border-color-lighter);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.control-metric span {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.control-metric strong {
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.control-metric.attention strong {
+  color: var(--el-color-danger);
+}
+
 .stat-card {
   position: relative;
   overflow: hidden;
@@ -489,5 +572,11 @@ onUnmounted(() => {
   text-align: center;
   color: var(--el-text-color-secondary);
   font-size: 14px;
+}
+
+@media (max-width: 900px) {
+  .control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

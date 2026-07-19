@@ -56,11 +56,12 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 	err := d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := d.now()
 		var candidate models.CommandOutbox
-		if err := tx.Where("state = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", "PENDING", now).Order("id").First(&candidate).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return nil
-			}
-			return err
+		find := tx.Where("state = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", "PENDING", now).Order("id").Limit(1).Find(&candidate)
+		if find.Error != nil {
+			return find.Error
+		}
+		if find.RowsAffected == 0 {
+			return nil
 		}
 		until := now.Add(30 * time.Second)
 		update := tx.Model(&models.CommandOutbox{}).Where("id = ? AND state = ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", candidate.ID, "PENDING", now).Updates(map[string]interface{}{"state": "LEASED", "lease_owner": d.owner, "lease_expires_at": until, "fencing_token": candidate.FencingToken + 1})
@@ -77,17 +78,24 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 	if err != nil || claimed.ID == 0 {
 		return claimed.ID != 0, err
 	}
-	err = d.dispatch(ctx, claimed)
+	published, queueDuration, err := d.dispatch(ctx, claimed)
 	if err != nil {
 		metrics.DeviceActionDispatchTotal.WithLabelValues("error").Inc()
-	} else {
+	} else if published {
 		metrics.DeviceActionDispatchTotal.WithLabelValues("published").Inc()
+		if queueDuration >= 0 {
+			metrics.DeviceActionQueueDuration.Observe(queueDuration.Seconds())
+		}
+	} else {
+		metrics.DeviceActionDispatchTotal.WithLabelValues("cancelled").Inc()
 	}
 	return true, err
 }
 
-func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) error {
-	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) (bool, time.Duration, error) {
+	published := false
+	var queueDuration time.Duration
+	err := d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var execution models.CommandExecution
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&execution, "command_id = ?", outbox.CommandID).Error; err != nil {
 			return err
@@ -130,8 +138,14 @@ func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) 
 		if transition.RowsAffected != 1 {
 			return fmt.Errorf("execution was cancelled before dispatch commit")
 		}
-		return tx.Model(&models.CommandOutbox{}).Where("id = ? AND state = ? AND fencing_token = ?", outbox.ID, "LEASED", outbox.FencingToken).Updates(map[string]interface{}{"state": "PROCESSED", "processed_at": now, "lease_expires_at": nil}).Error
+		if err := tx.Model(&models.CommandOutbox{}).Where("id = ? AND state = ? AND fencing_token = ?", outbox.ID, "LEASED", outbox.FencingToken).Updates(map[string]interface{}{"state": "PROCESSED", "processed_at": now, "lease_expires_at": nil}).Error; err != nil {
+			return err
+		}
+		queueDuration = result.PublishedAt.Sub(execution.CreatedAt)
+		published = true
+		return nil
 	})
+	return published, queueDuration, err
 }
 
 // stableWireDigest is deliberately independent of outbox lease ownership and

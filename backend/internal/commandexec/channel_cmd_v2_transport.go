@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxCapabilityAge = 5 * time.Minute
+const MaxCapabilityAge = 5 * time.Minute
 
 // ChannelCmdV2Transport is the only production transport for business
 // actions. It compiles server-owned ActionDefinition data into a bounded V2
@@ -128,7 +128,7 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 
 func currentCapabilities(node models.Node, now func() time.Time) (string, commandEngineCapabilities, error) {
 	var capabilities commandEngineCapabilities
-	if node.BootID == "" || node.ResourceReportedAt == nil || now().Sub(*node.ResourceReportedAt) > maxCapabilityAge || node.CommandEngineRevision == 0 {
+	if node.BootID == "" || node.ResourceReportedAt == nil || now().Sub(*node.ResourceReportedAt) > MaxCapabilityAge || node.CommandEngineRevision == 0 {
 		return "", capabilities, fmt.Errorf("node command capability is absent or stale")
 	}
 	if err := json.Unmarshal([]byte(node.CommandEngineCapabilities), &capabilities); err != nil {

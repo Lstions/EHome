@@ -1546,7 +1546,13 @@ ESP32 只上报低开销聚合计数：控制命令 accepted/rejected/completed�
 `UNKNOWN`。可选结论限定为 `CONFIRMED_SUCCEEDED`、`CONFIRMED_FAILED` 和
 `ACKNOWLEDGED_UNKNOWN`，并记录原因、操作者和时间；完全相同的请求可幂等重放，不同的第二次
 结论必须冲突。处置写入与安全审计位于同一事务，统一前端可操作和展示，Prometheus 使用有限标签
-统计成功与重放。其余 1、3、4 项仍按原门禁推进。
+统计成功与重放。
+
+第 3 项已完成可观测性第一切片：后端以有界低基数结果统计 admission/dispatch，记录排队与 accept
+时延直方图、ResourceReport stale 和安全审计写失败；监控 API 从 Execution/Outbox/人工处置记录汇总
+持久状态，统一监控页显示活跃操作、待处理/租约 Outbox、未处置 UNKNOWN、过期能力和审计写失败。
+此切片不包含 cleanup failure 与 NVS 指标、外部告警规则/通道；第 1、4 项也仍未完成，Phase 6
+继续按原门禁推进。
 
 ---
 

@@ -85,7 +85,7 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 func TestChannelCmdV2TransportRejectsStaleOrDisabledCapability(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
-	reported := now.Add(-maxCapabilityAge - time.Second)
+	reported := now.Add(-MaxCapabilityAge - time.Second)
 	node := models.Node{NodeID: "node-stale", Name: "node", Status: "online", ConfigVersion: "manifest-test", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-42", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
 	if err := db.Create(&node).Error; err != nil {
 		t.Fatal(err)
