@@ -3,6 +3,8 @@
     v-model="dialogVisible"
     title="OTA 固件升级"
     width="600px"
+    align-center
+    class="dialog-mobile-constrained"
     :close-on-click-modal="false"
     :close-on-press-escape="!otaBusy"
     :show-close="!otaBusy"

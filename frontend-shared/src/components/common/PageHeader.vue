@@ -69,9 +69,15 @@ const goBack = () => {
 
 @media (max-width: 768px) {
   .page-header {
+    flex-direction: column;
     align-items: flex-start;
     gap: 12px;
     padding: 14px 16px;
+  }
+
+  .page-header-left,
+  .page-header-right {
+    width: 100%;
   }
 
   .page-header-left h2 {
@@ -80,7 +86,7 @@ const goBack = () => {
 
   .page-header-right {
     flex-wrap: wrap;
-    justify-content: flex-end;
+    justify-content: stretch;
   }
 }
 </style>

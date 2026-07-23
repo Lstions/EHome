@@ -1,5 +1,10 @@
 <template>
-  <el-card style="margin-top: 20px;" shadow="hover" v-if="hasConfigOperations">
+  <el-card
+    v-if="hasConfigOperations"
+    class="operation-card"
+    :class="{ 'embedded-card': embedded }"
+    :shadow="embedded ? 'never' : 'hover'"
+  >
     <template #header>
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span>设备操作</span>
@@ -32,6 +37,7 @@
     :title="opDialogTitle"
     width="420px"
     align-center
+    class="dialog-mobile-constrained"
     :close-on-press-escape="!opDialogLoading"
     :show-close="!opDialogLoading"
     :before-close="handleDialogClose"
@@ -88,6 +94,7 @@ import { type OperationDef, type OperationParam } from '@/api/deviceConfig'
 const props = defineProps<{
   device: EdgeDevice | null
   deviceId: number
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -242,5 +249,49 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.operation-buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+.operation-card {
+  margin-top: 20px;
+}
+
+.operation-card.embedded-card {
+  margin-top: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+/* 嵌入模式：卡片头降级为轻量分组标题，与折叠面板内容融为一体 */
+.operation-card.embedded-card :deep(.el-card__header) {
+  padding: 12px 0 8px;
+  border-bottom: 0;
+}
+
+.operation-card.embedded-card :deep(.el-card__header span) {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
+}
+
+.operation-card.embedded-card :deep(.el-card__body) {
+  padding: 0;
+}
+
+.operation-buttons {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 768px) {
+  .operation-buttons {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .operation-buttons :deep(.el-button) {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+  }
+}
 </style>

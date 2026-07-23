@@ -1,7 +1,7 @@
 <template>
   <el-card style="margin-top: 20px;" shadow="hover">
     <template #header>
-      <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div class="history-header">
         <span>历史数据</span>
         <div class="header-controls">
           <TimeRangeSelector
@@ -11,7 +11,7 @@
           />
           <el-button
             type="primary"
-            style="margin-left: 10px;"
+            class="export-csv-btn"
             @click="handleExportCSV"
             :disabled="historyData.length === 0 && chartSeries.length === 0"
           >
@@ -435,7 +435,23 @@ onMounted(() => fetchHistoryData())
 </script>
 
 <style scoped>
-.header-controls { display: flex; align-items: center; }
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.export-csv-btn {
+  margin-left: var(--spacing-sm, 8px);
+}
 .chart-grid { display: flex; flex-direction: column; gap: 16px; }
 .chart-sub-section {
   border: 1px solid var(--el-border-color-lighter);
@@ -448,5 +464,18 @@ onMounted(() => fetchHistoryData())
   font-size: 14px;
   font-weight: 600;
   color: var(--el-text-color-primary);
+}
+@media (max-width: 768px) {
+  .history-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .header-controls {
+    justify-content: flex-start;
+    width: 100%;
+  }
+  .export-csv-btn {
+    margin-left: 0;
+  }
 }
 </style>

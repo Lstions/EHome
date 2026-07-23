@@ -15,8 +15,9 @@ import (
 
 // LoginRequest represents the login request body
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username   string `json:"username" binding:"required"`
+	Password   string `json:"password" binding:"required"`
+	RememberMe bool   `json:"rememberMe"`
 }
 
 // LoginResponse represents the login response
@@ -86,7 +87,12 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 			}
 			limiter.Reset(c.Request.Context(), c.ClientIP(), req.Username)
 
-			token, err := authservice.SignSessionToken(user, jwtSecret, 24*time.Hour)
+			// "记住我"勾选时签发 7 天 token，否则 24 小时。
+			tokenTTL := 24 * time.Hour
+			if req.RememberMe {
+				tokenTTL = 7 * 24 * time.Hour
+			}
+			token, err := authservice.SignSessionToken(user, jwtSecret, tokenTTL)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to generate token"})
 				return

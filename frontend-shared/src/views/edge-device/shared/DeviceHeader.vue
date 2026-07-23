@@ -2,11 +2,11 @@
   <PageHeader :title="title" :show-back="true" @back="$emit('back')">
     <template #extra>
       <div class="header-actions">
+        <el-tag :type="wsConnected ? 'success' : 'info'" size="default" class="ws-status-tag">
+          <el-icon :size="14"><Connection /></el-icon>
+          {{ wsConnected ? '实时连接' : '未连接' }}
+        </el-tag>
         <div class="header-actions-group">
-          <el-tag v-if="wsConnected" type="success" size="large">
-            <el-icon :size="16"><Connection /></el-icon>
-            实时连接
-          </el-tag>
           <el-button :icon="Edit" @click="editDialogVisible = true">编辑</el-button>
           <el-button :icon="Connection" @click="$emit('syncToHA')" :loading="syncingHA"
             :disabled="!device || (device.status !== 'online' && device.status !== 'active')">
@@ -30,7 +30,7 @@
   </PageHeader>
 
   <!-- Edit dialog -->
-  <el-dialog v-model="editDialogVisible" title="编辑边缘设备" width="500px">
+  <el-dialog v-model="editDialogVisible" title="编辑边缘设备" width="500px" align-center class="dialog-mobile-constrained">
     <el-form :model="editForm" label-width="80px">
       <el-form-item label="设备名称">
         <el-input v-model="editForm.name" />
@@ -55,7 +55,7 @@
   </el-dialog>
 
   <!-- Delete dialog -->
-  <el-dialog v-model="deleteDialogVisible" title="删除边缘设备" width="400px">
+  <el-dialog v-model="deleteDialogVisible" title="删除边缘设备" width="400px" align-center class="dialog-mobile-constrained">
     <p style="margin: 0;">
       确定要删除边缘设备 <strong>{{ device?.name }}</strong> 吗？此操作不可恢复。
     </p>
@@ -66,7 +66,7 @@
   </el-dialog>
 
   <!-- Change address dialog -->
-  <el-dialog v-model="showAddressDialog" title="修改设备地址" width="400px" align-center>
+  <el-dialog v-model="showAddressDialog" title="修改设备地址" width="400px" align-center class="dialog-mobile-constrained">
     <el-form label-width="80px">
       <el-form-item label="当前地址">
         <el-tag size="small">{{ device?.hardware_id || 'N/A' }}</el-tag>
@@ -217,11 +217,65 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .header-actions-group {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.ws-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 88px;
+  justify-content: center;
+}
+@media (max-width: 1100px) {
+  .header-actions,
+  .header-actions-group {
+    width: 100%;
+  }
+}
+@media (max-width: 768px) {
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .header-actions-group {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .header-actions-group > * {
+    min-width: 0;
+  }
+  .header-actions-group :deep(.el-button) {
+    width: 100%;
+    min-height: 40px;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .header-actions-group .ws-status-tag {
+    width: 100%;
+    min-height: 32px;
+  }
+  .header-actions > .ws-status-tag {
+    width: 100%;
+    justify-content: flex-start;
+    min-height: 32px;
+    margin: 0;
+  }
+  .header-actions > .el-button {
+    width: 100%;
+    min-height: 40px;
+    margin: 0;
+  }
 }
 </style>

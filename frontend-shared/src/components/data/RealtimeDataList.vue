@@ -28,7 +28,7 @@
         v-if="items.length > 0"
         class="scroller"
         :items="items"
-        :item-size="80"
+        :item-size="64"
         key-field="id"
         :buffer="200"
       >
@@ -130,14 +130,18 @@ const bytesToHexLocal = (bytes: number[]): string => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 400px;
+  min-height: 240px;
+  max-height: 520px;
 }
 
 .list-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   padding: 12px 16px;
+  margin-bottom: 4px;
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
 }
@@ -170,10 +174,12 @@ const bytesToHexLocal = (bytes: number[]): string => {
 }
 
 .data-item {
+  min-height: 64px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   transition: background-color 0.2s;
+  box-sizing: border-box;
 }
 
 .data-item:hover {
@@ -209,5 +215,46 @@ const bytesToHexLocal = (bytes: number[]): string => {
   background: var(--el-fill-color-light);
   padding: 8px 12px;
   border-radius: 4px;
+}
+
+@media (max-width: 768px) {
+  .realtime-data-list {
+    min-height: 200px;
+    max-height: 360px;
+  }
+
+  .list-header {
+    align-items: stretch;
+    padding: 10px 0;
+  }
+
+  .display-mode,
+  .list-stats {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .display-mode .label {
+    font-size: 12px;
+  }
+
+  .data-item {
+    padding: 10px 0;
+  }
+
+  .item-header {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .timestamp {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .item-content {
+    font-size: 12px;
+  }
 }
 </style>

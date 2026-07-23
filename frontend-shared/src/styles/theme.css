@@ -12,6 +12,9 @@
   --breakpoint-xl: 1280px;
   --breakpoint-2xl: 1536px;
 
+  /* 移动端对话框共享约束 */
+  --dialog-mobile-max-width: calc(100vw - 24px);
+
   /* ============================================
      亮色主题 (Light Theme)
      ============================================ */
@@ -105,6 +108,67 @@
   --terminal-danger: #ff9d8d;
   --scrollbar-thumb: #c1c1c1;
   --scrollbar-thumb-hover: #a8a8a8;
+}
+
+/* Teleported Element Plus dialogs need a global mobile constraint. */
+.el-dialog.dialog-mobile-constrained {
+  max-width: var(--dialog-mobile-max-width, calc(100vw - 24px));
+  box-sizing: border-box;
+}
+
+.notification-popover {
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+}
+
+.mobile-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-table-wrapper > .el-table {
+  min-width: 680px;
+}
+
+.mobile-table-hint {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 8px;
+  color: var(--text-color-secondary);
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .el-dialog.dialog-mobile-constrained {
+    width: min(100%, var(--dialog-mobile-max-width, calc(100vw - 24px))) !important;
+    margin: 10px auto;
+  }
+
+  .el-dialog.dialog-mobile-constrained .el-dialog__body {
+    max-height: calc(100dvh - 200px);
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .el-dialog.dialog-mobile-constrained .el-dialog__body {
+    max-height: calc(100dvh - 180px);
+    padding: 16px;
+  }
+
+  .el-dialog.dialog-mobile-constrained .el-dialog__footer {
+    padding: 12px 16px;
+  }
+
+  .notification-popover {
+    width: calc(100vw - 24px) !important;
+  }
+
+  .mobile-table-hint {
+    display: flex;
+  }
 }
 
 /* ============================================

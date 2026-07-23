@@ -1,5 +1,5 @@
 <template>
-  <div class="command-intervals" v-if="commands.length > 0">
+  <div class="command-intervals" :class="{ embedded }" v-if="commands.length > 0">
     <!-- 轮询指令 -->
     <template v-if="schedulableCommands.length > 0">
       <h4 class="section-title">轮询指令</h4>
@@ -33,7 +33,8 @@
 
     <!-- 触发指令 -->
     <template v-if="triggerCommands.length > 0">
-      <h4 class="section-title" style="margin-top: 16px;">触发指令</h4>
+      <div class="command-group-divider" />
+      <h4 class="section-title">触发指令</h4>
       <p class="section-desc">一次性触发指令，不计入轮询调度，由用户手动操作或 API 触发</p>
       <div class="command-list">
         <div v-for="cmd in triggerCommands" :key="cmd.id" class="command-item trigger">
@@ -63,6 +64,8 @@ import { edgeDeviceApi, type CommandTemplateWithInterval } from '@/api/edgeDevic
 const props = defineProps<{
   deviceId: number
   deviceType: string
+  /** 嵌入模式（移动端折叠面板内）：去掉灰色面板底，减少嵌套层级 */
+  embedded?: boolean
 }>()
 
 const commands = ref<CommandTemplateWithInterval[]>([])
@@ -139,20 +142,53 @@ async function save() {
 
 <style scoped>
 .command-intervals { margin-top: 16px; padding: 12px; background: var(--el-fill-color-lighter); border-radius: 8px; }
+/* 嵌入模式：去掉灰色面板底，指令行直接平铺，减少一层嵌套 */
+.command-intervals.embedded { margin-top: 0; padding: 0; background: transparent; border-radius: 0; }
 .section-title { margin: 0 0 4px; font-size: 14px; }
 .section-desc { margin: 0 0 12px; font-size: 12px; color: var(--el-text-color-secondary); }
 .command-list { display: flex; flex-direction: column; gap: 8px; }
-.command-item { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; padding: 8px; background: var(--el-bg-color); border-radius: 4px; overflow: hidden; }
+.command-item { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; padding: 8px; background: var(--el-bg-color); border-radius: 4px; overflow: hidden; min-width: 0; }
 .command-item.disabled { opacity: 0.5; }
 .command-item.trigger { border-left: 2px solid var(--el-color-danger); }
-.cmd-info { display: flex; align-items: center; gap: 6px; width: 180px; flex-shrink: 0; }
-.cmd-name { font-weight: 500; font-size: 13px; }
-.cmd-hex { font-family: monospace; font-size: 11px; color: var(--el-text-color-secondary); }
-.cmd-desc { flex: 1; font-size: 11px; color: var(--el-text-color-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cmd-controls { display: flex; align-items: center; gap: 4px; width: 200px; flex-shrink: 0; justify-content: flex-end; }
+.cmd-info { display: flex; align-items: center; gap: 6px; flex: 1 1 40%; min-width: 0; }
+.cmd-name { font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmd-hex { font-family: monospace; font-size: 11px; color: var(--el-text-color-secondary); flex-shrink: 0; }
+.cmd-desc { flex: 1 1 30%; font-size: 11px; color: var(--el-text-color-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-controls { display: flex; align-items: center; gap: 4px; flex: 1 1 60%; min-width: 0; justify-content: flex-end; }
 .interval-unit { font-size: 11px; color: var(--el-text-color-secondary); }
 .trigger-hint { font-size: 11px; color: var(--el-text-color-secondary); font-style: italic; }
 .command-actions { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
 .saved-hint { font-size: 12px; color: var(--el-color-success); }
+/* 轮询指令与触发指令两组之间的分区线，明确"保存"只属于轮询组 */
+.command-group-divider { height: 1px; margin: 16px 0 12px; background: var(--el-border-color-lighter); }
 .no-commands { margin-top: 16px; }
+@media (max-width: 768px) {
+  /* 移动端：每条指令一张带边框的小卡片，信息行 + 控制行上下排布 */
+  .command-item {
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid var(--el-border-color);
+    border-radius: 8px;
+  }
+  /* 触发指令保留红色左强调边，与轮询指令的中性边框形成语义对照 */
+  .command-item.trigger { border-left: 3px solid var(--el-color-danger); }
+  .cmd-info {
+    flex: 1 1 auto;
+    width: auto;
+  }
+  .cmd-desc {
+    flex: 1 1 100%;
+    order: 3;
+    white-space: normal;
+    line-height: 1.4;
+    margin-top: 6px;
+  }
+  .cmd-controls {
+    flex: 0 0 auto;
+    width: auto;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+}
 </style>

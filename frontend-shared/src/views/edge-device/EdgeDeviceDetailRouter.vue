@@ -20,7 +20,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, defineAsyncComponent, watch } from 'vue'
+import { ref, defineAsyncComponent, watch, shallowRef, markRaw } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -41,7 +41,7 @@ const componentMap: Record<string, any> = {
   inverter: InverterDetailPage,
 }
 
-const targetComponent = ref<any>(null)
+const targetComponent = shallowRef<any>(null)
 const loading = ref(false)
 const error = ref(false)
 let resolveSequence = 0
@@ -62,7 +62,7 @@ async function resolveComponent() {
     const dev = await edgeDeviceStore.fetchDetail(id, true)
     if (sequence !== resolveSequence || Number(route.params.id) !== id) return
     deviceType.value = dev.device_type
-    targetComponent.value = componentMap[dev.device_type] || GenericDeviceDetail
+    targetComponent.value = markRaw(componentMap[dev.device_type] || GenericDeviceDetail)
   } catch {
     if (sequence !== resolveSequence) return
     error.value = true

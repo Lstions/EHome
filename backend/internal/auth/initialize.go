@@ -15,6 +15,8 @@ import (
 
 var ErrSystemNotUninitialized = errors.New("system is not available for initialization")
 
+const minimumPasswordLength = 8
+
 type InitializeRequest struct {
 	Credential string
 	Username   string
@@ -23,8 +25,8 @@ type InitializeRequest struct {
 }
 
 func InitializeSystem(db *gorm.DB, request InitializeRequest) (models.User, error) {
-	if strings.TrimSpace(request.Username) == "" || len(request.Password) < 12 {
-		return models.User{}, errors.New("username and a password of at least 12 characters are required")
+	if err := validateInitializationInput(request.Username, request.Password); err != nil {
+		return models.User{}, err
 	}
 	token, err := VerifyInitializationCredential(db, request.Credential, 5)
 	if err != nil {
@@ -97,4 +99,11 @@ func InitializeSystem(db *gorm.DB, request InitializeRequest) (models.User, erro
 			}).Error
 	})
 	return created, err
+}
+
+func validateInitializationInput(username, password string) error {
+	if strings.TrimSpace(username) == "" || len(password) < minimumPasswordLength {
+		return errors.New("username and a password of at least 8 characters are required")
+	}
+	return nil
 }

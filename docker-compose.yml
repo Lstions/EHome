@@ -66,6 +66,12 @@ services:
       EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
       EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
       EHOME_DB_SSLMODE: ${EHOME_DB_SSLMODE:-disable}
+      # Optional first-run administrator bootstrap. Set both username and
+      # password (password must be at least 8 characters); never use a
+      # default password. Existing initialized databases are not modified.
+      EHOME_ADMIN_USERNAME: ${EHOME_ADMIN_USERNAME:-}
+      EHOME_ADMIN_PASSWORD: ${EHOME_ADMIN_PASSWORD:-}
+      EHOME_ADMIN_EMAIL: ${EHOME_ADMIN_EMAIL:-}
       REDIS_ADDR: redis:6379
       MQTT_BROKER: tcp://emqx:1883
       EHOME_MQTT_CLIENT_ID: ehome-server

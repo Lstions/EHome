@@ -20,7 +20,7 @@
 
       <!-- Core metrics -->
       <el-row :gutter="20" style="margin-top: 20px;">
-        <el-col :xs="12" :sm="12" :md="6">
+        <el-col :xs="24" :sm="12" :md="6">
           <el-card shadow="hover" class="metric-card">
             <div class="metric-content">
               <div class="metric-icon pv">
@@ -29,11 +29,12 @@
               <div class="metric-info">
                 <p class="metric-label">PV输入</p>
                 <p class="metric-value">{{ formatPower(totalPvPower) }}</p>
+                <p class="metric-sub">光伏侧合计功率</p>
               </div>
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="12" :sm="12" :md="6">
+        <el-col :xs="24" :sm="12" :md="6">
           <el-card shadow="hover" class="metric-card">
             <div class="metric-content">
               <div class="metric-icon battery">
@@ -50,7 +51,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="12" :sm="12" :md="6">
+        <el-col :xs="24" :sm="12" :md="6">
           <el-card shadow="hover" class="metric-card">
             <div class="metric-content">
               <div class="metric-icon grid">
@@ -64,7 +65,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="12" :sm="12" :md="6">
+        <el-col :xs="24" :sm="12" :md="6">
           <el-card shadow="hover" class="metric-card">
             <div class="metric-content">
               <div class="metric-icon load">
@@ -73,6 +74,7 @@
               <div class="metric-info">
                 <p class="metric-label">负载</p>
                 <p class="metric-value">{{ formatPower(latestData?.load_power ?? latestData?.power ?? 0) }}</p>
+                <p class="metric-sub">交流输出功率</p>
               </div>
             </div>
           </el-card>
@@ -136,6 +138,12 @@
         />
       </el-card>
 
+      <!-- Command frequency -->
+      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
+
+      <!-- Operations -->
+      <OperationButtons :device="device" :device-id="deviceId" @operation-executed="fetchDeviceDetail" />
+
       <!-- History chart -->
       <HistoryChartSection
         ref="historyChartRef"
@@ -143,12 +151,6 @@
         :device-type="device.device_type"
         :device-type-text="deviceTypeText"
       />
-
-      <!-- Command frequency -->
-      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
-
-      <!-- Operations -->
-      <OperationButtons :device="device" :device-id="deviceId" @operation-executed="fetchDeviceDetail" />
     </template>
   </div>
 </template>
@@ -237,24 +239,32 @@ onMounted(() => {
 <style scoped>
 .inverter-detail { padding: 0; }
 
-.metric-card { cursor: default; transition: transform 0.3s, box-shadow 0.3s; }
+.metric-card { cursor: default; transition: transform 0.3s, box-shadow 0.3s; min-height: 110px; }
 .metric-card:hover { transform: translateY(-2px); box-shadow: var(--el-box-shadow-light); }
-.metric-content { display: flex; align-items: center; gap: 12px; }
+.metric-card :deep(.el-card__body) { min-height: 78px; display: flex; align-items: center; }
+.metric-content { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; }
 .metric-icon {
   width: 48px; height: 48px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-  color: #fff;
+  background: transparent; font-size: 28px;
 }
-.metric-icon.pv { background: linear-gradient(135deg, var(--el-color-warning), var(--el-color-warning-light-3)); }
-.metric-icon.battery { background: linear-gradient(135deg, var(--el-color-success), var(--el-color-success-light-3)); }
-.metric-icon.grid { background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3)); }
-.metric-icon.load { background: linear-gradient(135deg, var(--el-color-info), var(--el-color-info-light-3)); }
+.metric-icon :deep(.el-icon) { font-size: 28px; }
+.metric-icon.pv { color: var(--el-color-warning); }
+.metric-icon.battery { color: var(--el-color-success); }
+.metric-icon.grid { color: var(--el-color-primary); }
+.metric-icon.load { color: var(--el-color-info); }
 .metric-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-start; }
 .metric-label { margin: 0 0 4px; font-size: 12px; color: var(--el-text-color-secondary); }
-.metric-value { margin: 0; font-size: 22px; font-weight: 600; color: var(--el-text-color-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
+.metric-value { margin: 0; font-size: 22px; font-weight: 600; color: var(--el-text-color-primary); white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 1.2; }
 .metric-unit { font-size: 15px; font-weight: 400; color: var(--el-text-color-secondary); margin-left: 2px; }
 .metric-sub { margin: 2px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .metric-sub.negative { color: var(--el-color-danger); }
 
 .alarm-list { display: flex; flex-wrap: wrap; gap: 4px; }
+
+@media (max-width: 768px) {
+  .metric-card :deep(.el-card__body) { padding: 14px; }
+  .metric-content { gap: 10px; }
+  .metric-value { font-size: 20px; }
+}
 </style>

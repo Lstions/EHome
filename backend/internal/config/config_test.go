@@ -63,6 +63,9 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	os.Setenv("MQTT_PASSWORD", "mqttpass")
 	os.Setenv("REDIS_ADDR", "redis:6380")
 	os.Setenv("LOG_LEVEL", "debug")
+	os.Setenv("EHOME_ADMIN_USERNAME", "compose-admin")
+	os.Setenv("EHOME_ADMIN_PASSWORD", "compose-password-123")
+	os.Setenv("EHOME_ADMIN_EMAIL", "admin@example.test")
 	defer func() {
 		os.Unsetenv("EHOME_SERVER_ADDR")
 		os.Unsetenv("EHOME_DB_HOST")
@@ -75,6 +78,9 @@ func TestLoadWithEnvOverride(t *testing.T) {
 		os.Unsetenv("MQTT_PASSWORD")
 		os.Unsetenv("REDIS_ADDR")
 		os.Unsetenv("LOG_LEVEL")
+		os.Unsetenv("EHOME_ADMIN_USERNAME")
+		os.Unsetenv("EHOME_ADMIN_PASSWORD")
+		os.Unsetenv("EHOME_ADMIN_EMAIL")
 	}()
 
 	cfg := Load()
@@ -110,6 +116,9 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("expected debug, got %q", cfg.Log.Level)
+	}
+	if cfg.AdminBootstrap.Username != "compose-admin" || cfg.AdminBootstrap.Password != "compose-password-123" || cfg.AdminBootstrap.Email != "admin@example.test" {
+		t.Errorf("unexpected admin bootstrap config: %+v", cfg.AdminBootstrap)
 	}
 }
 

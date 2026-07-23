@@ -18,7 +18,7 @@ var (
 )
 
 func ChangePassword(db *gorm.DB, userID uint, oldPassword, newPassword string) (models.User, error) {
-	if len(newPassword) < 12 || newPassword == oldPassword {
+	if len(newPassword) < minimumPasswordLength || newPassword == oldPassword {
 		return models.User{}, errors.New("new password does not satisfy policy")
 	}
 	var updated models.User

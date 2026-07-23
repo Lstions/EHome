@@ -102,7 +102,10 @@ describe('apiClient 拦截器', () => {
     ;(window as any).location = { ...originalLocation, href: '' }
 
     const handler = mockResponseRejected.getMockImplementation() as any
-    await expect(handler({ response: { status: 401 } })).rejects.toBeDefined()
+    await expect(handler({
+      config: { url: '/api/v1/account', headers: { Authorization: 'Bearer expired' } },
+      response: { status: 401, data: { message: '登录已过期' } },
+    })).rejects.toThrow('登录已过期')
 
     expect(localStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('token')).toBeNull()
@@ -111,6 +114,40 @@ describe('apiClient 拦截器', () => {
 
     // 还原
     ;(window as any).location = originalLocation
+  })
+
+  it('登录接口 401 只返回凭据错误，不清除会话或跳转', async () => {
+    localStorage.setItem('token', 'stale-token')
+    const originalLocation = window.location
+    delete (window as any).location
+    ;(window as any).location = { ...originalLocation, href: '' }
+
+    const handler = mockResponseRejected.getMockImplementation() as any
+    await expect(handler({
+      config: { url: '/api/v1/auth/login', headers: { Authorization: 'Bearer stale-token' } },
+      response: { status: 401, data: { code: 401, message: '用户名或密码错误' } },
+    })).rejects.toThrow('用户名或密码错误')
+
+    expect(localStorage.getItem('token')).toBe('stale-token')
+    expect(mockClearSessionCaches).not.toHaveBeenCalled()
+    expect(window.location.href).toBe('')
+    ;(window as any).location = originalLocation
+  })
+
+  it('429 错误保留 Retry-After，供登录页展示等待时间', async () => {
+    const handler = mockResponseRejected.getMockImplementation() as any
+    await expect(handler({
+      config: { url: '/api/v1/auth/login', headers: {} },
+      response: {
+        status: 429,
+        data: { code: 429, message: 'too many login attempts' },
+        headers: { 'retry-after': '60' },
+      },
+    })).rejects.toMatchObject({
+      status: 429,
+      code: 429,
+      retryAfterSeconds: 60,
+    })
   })
 
   it('非 401 HTTP 错误不跳 /login', async () => {

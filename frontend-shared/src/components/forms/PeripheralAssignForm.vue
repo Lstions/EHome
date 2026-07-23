@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="dialogVisible" :title="`配置外设设备 — ${peripheralLabel}`" width="600px" :close-on-click-modal="false">
+  <el-dialog v-model="dialogVisible" :title="`配置外设设备 — ${peripheralLabel}`" width="600px" align-center class="dialog-mobile-constrained" :close-on-click-modal="false">
     <el-form :model="form" :rules="rules" label-width="100px" ref="formRef">
       <el-form-item label="设备类型" prop="device_type">
         <el-select v-model="form.device_type" placeholder="请选择设备类型" style="width:100%" @change="handleDeviceTypeChange">

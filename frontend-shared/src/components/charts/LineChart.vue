@@ -192,6 +192,11 @@ const getXAxisConfig = (theme = getChartTheme()) => {
   }
 }
 
+const formatTooltipTime = (ts: string | number) => {
+  const d = new Date(ts)
+  return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
+}
+
 const applyChartOption = () => {
   if (!chartInstance) return
   const theme = getChartTheme()
@@ -211,19 +216,45 @@ const applyChartOption = () => {
     title: { text: props.title, left: 'center', textStyle: { color: theme.text } },
     tooltip: {
       trigger: 'axis',
+      // Confine tooltip inside the chart area to avoid clipping by ancestor containers.
+      confine: true,
+      // Prefer following the pointer horizontally so the tooltip stays near the crosshair
+      // while ECharts keeps it within the chart bounds.
+      position: (point: number[]) => [point[0] + 10, point[1]],
       backgroundColor: theme.overlay,
       borderColor: theme.border,
       textStyle: { color: theme.text },
       formatter: (params: any) => {
         if (!Array.isArray(params) || params.length === 0) return ''
         const ts = params[0].axisValueLabel || params[0].name
-        const d = new Date(ts)
-        const timeStr = `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`
-        let html = `${timeStr}<br/>`
-        params.forEach((item: any) => {
-          const val = Array.isArray(item.value) ? item.value[1] : item.value
-          html += `${item.marker} ${item.seriesName}: <b>${typeof val === 'number' ? val.toFixed(3) : val}</b><br/>`
+        const timeStr = formatTooltipTime(ts)
+        // Sort by value descending so the most significant items are always visible first,
+        // especially when the tooltip is clipped by the chart top edge.
+        const sorted = [...params].sort((a: any, b: any) => {
+          const av = Array.isArray(a.value) ? a.value[1] : a.value
+          const bv = Array.isArray(b.value) ? b.value[1] : b.value
+          return (typeof bv === 'number' ? bv : 0) - (typeof av === 'number' ? av : 0)
         })
+        const total = sorted.length
+        // Dynamic two-column layout: up to 12 items per column, max 2 columns.
+        // This keeps the tooltip compact and avoids clipping on mobile.
+        const maxPerColumn = 12
+        const columns = total > maxPerColumn ? 2 : 1
+        const pageSize = columns * maxPerColumn
+        const visible = sorted.slice(0, pageSize)
+        const gridMinWidth = columns === 1 ? 'auto' : '220px'
+        let html = `<div style="white-space:normal;">`
+        html += `<div style="margin-bottom:4px;font-weight:500;">${timeStr}</div>`
+        html += `<div style="display:grid;grid-template-columns:repeat(${columns}, 1fr);gap:4px 16px;min-width:${gridMinWidth};">`
+        visible.forEach((item: any) => {
+          const val = Array.isArray(item.value) ? item.value[1] : item.value
+          html += `<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.marker} ${item.seriesName}: <b>${typeof val === 'number' ? val.toFixed(3) : val}</b></div>`
+        })
+        html += '</div>'
+        if (total > pageSize) {
+          html += `<div style="color:${theme.regular};font-size:12px;margin-top:4px;">... 还有 ${total - pageSize} 项</div>`
+        }
+        html += '</div>'
         return html
       }
     },

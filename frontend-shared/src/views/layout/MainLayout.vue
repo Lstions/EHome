@@ -135,7 +135,7 @@
           </div>
 
           <!-- 通知铃铛 -->
-          <el-popover placement="bottom-end" :width="320" trigger="click">
+          <el-popover placement="bottom-end" :width="320" popper-class="notification-popover" trigger="click">
             <template #reference>
               <el-badge :value="notificationCount" :hidden="notificationCount === 0" class="notification-badge">
                 <el-button :icon="Bell" circle size="default" aria-label="打开通知中心" />
@@ -760,9 +760,8 @@ onUnmounted(() => {
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .notification-time {
@@ -799,11 +798,22 @@ onUnmounted(() => {
 .main-content {
   padding: 20px;
   overflow-y: auto;
-  height: calc(100vh - 60px);
-  background: var(--el-fill-color-light);
+  background: var(--bg-color-page);
+}
+
+@media (max-width: 768px) {
+  .main-content {
+    padding: 12px;
+  }
+}
+@media (max-width: 480px) {
+  .main-content {
+    padding: 8px;
+  }
 }
 
 /* ========== 过渡动画 ========== */
+
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.2s ease;

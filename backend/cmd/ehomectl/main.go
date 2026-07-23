@@ -47,6 +47,13 @@ func main() {
 		}
 		fmt.Println("authentication database bootstrapped")
 	case "create-initialization-token":
+		state, err := models.LoadAuthState(db)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if state.State != models.AuthStateUninitialized {
+			fatal("initialization token refused: auth state is not uninitialized")
+		}
 		credential, err := authservice.CreateInitializationCredential(db, 10*time.Minute, "ehomectl")
 		if err != nil {
 			fatal(err.Error())

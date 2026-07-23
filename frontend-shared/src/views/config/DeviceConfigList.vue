@@ -1,7 +1,7 @@
 <template>
   <div class="config-page">
     <!-- 顶部统计 -->
-    <div class="stats-row">
+    <div class="stats-row desktop-only">
       <div class="stat-card">
         <div class="stat-icon">
           <el-icon><Document /></el-icon>
@@ -41,6 +41,34 @@
           <span class="stat-label">设备类型</span>
         </div>
       </div>
+    </div>
+
+    <!-- 移动端紧凑统计 -->
+    <div class="mobile-stats-row mobile-only">
+      <MobileStatCard
+        :value="stats.total"
+        label="本页模板"
+        :icon="Document"
+        variant="primary"
+      />
+      <MobileStatCard
+        :value="stats.active"
+        label="本页启用"
+        :icon="CircleCheck"
+        variant="success"
+      />
+      <MobileStatCard
+        :value="stats.busTypes"
+        label="总线类型"
+        :icon="Connection"
+        variant="warning"
+      />
+      <MobileStatCard
+        :value="stats.deviceTypes"
+        label="设备类型"
+        :icon="Cpu"
+        variant="info"
+      />
     </div>
 
     <!-- 工具栏 -->
@@ -224,8 +252,8 @@
     </div>
 
     <!-- 预览对话框 -->
-    <el-dialog v-model="previewVisible" title="配置预览" width="640px">
-      <el-descriptions v-if="previewConfig" :column="2" border>
+    <el-dialog v-model="previewVisible" title="配置预览" width="640px" align-center class="dialog-mobile-constrained">
+      <el-descriptions v-if="previewConfig" :column="isMobile ? 1 : 2" border>
         <el-descriptions-item label="模板名称">{{ previewConfig.name }}</el-descriptions-item>
         <el-descriptions-item label="状态">
           <el-tag :type="previewConfig.status === 'active' ? 'success' : 'info'">
@@ -264,11 +292,14 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import MobileStatCard from '@/components/common/MobileStatCard.vue'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
+import { useResponsive } from '@/composables/useResponsive'
 
 // 状态
 const loading = ref(false)
+const { isMobile } = useResponsive()
 const configs = ref<DeviceConfig[]>([])
 const currentPage = ref(1)
 const pageSize = ref(12)
@@ -591,6 +622,35 @@ onMounted(() => {
   gap: 20px;
 }
 
+.desktop-only {
+  display: contents;
+}
+
+.mobile-only {
+  display: none;
+}
+
+.mobile-stats-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .stats-row.desktop-only {
+    display: none;
+  }
+  .mobile-stats-row.mobile-only {
+    display: grid;
+  }
+}
+
+@media (max-width: 360px) {
+  .mobile-stats-row.mobile-only {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* 统计 */
 .stats-row {
   display: grid;
@@ -606,6 +666,7 @@ onMounted(() => {
   align-items: center;
   gap: 16px;
   border: 1px solid var(--el-border-color);
+  min-width: 0;
 }
 
 .stat-icon {
@@ -618,15 +679,107 @@ onMounted(() => {
   color: #fff;
   font-size: 20px;
   background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  flex-shrink: 0;
 }
 
 .stat-icon.active { background: var(--el-color-success); }
 .stat-icon.bus { background: var(--el-color-warning); }
 .stat-icon.device { background: var(--el-text-color-secondary); }
 
-.stat-content { flex: 1; }
+.stat-content { flex: 1; min-width: 0; }
 .stat-value { display: block; font-size: 24px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
+
+@media (max-width: 1200px) {
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 768px) {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 12px;
+    gap: 10px;
+    border-radius: 10px;
+  }
+  .stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    font-size: 22px;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
+  .stat-label {
+    font-size: 12px;
+  }
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0;
+  }
+  .filter-left, .filter-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .search-input {
+    width: 100%;
+    min-width: 0;
+  }
+  .config-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .config-card :deep(.el-card__body) {
+    padding: 14px;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-row {
+    gap: 8px;
+  }
+  .stat-card {
+    padding: 10px;
+    gap: 8px;
+  }
+  .stat-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+  }
+  .stat-value {
+    font-size: 20px;
+  }
+  .stat-label {
+    font-size: 11px;
+  }
+  .filter-left :deep(.el-select) {
+    flex: 1 1 calc(50% - 5px);
+    min-width: 0;
+  }
+  .filter-right {
+    justify-content: space-between;
+  }
+  .filter-right :deep(.el-button) {
+    flex: 1;
+  }
+}
+
+@media (max-width: 360px) {
+  .stats-row {
+    grid-template-columns: 1fr;
+  }
+  .stat-card {
+    padding: 12px;
+  }
+  .filter-left :deep(.el-select) {
+    flex: 1 1 100%;
+  }
+}
 
 /* 工具栏 */
 .toolbar-card :deep(.el-card__body) {

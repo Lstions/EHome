@@ -76,14 +76,18 @@
     />
 
     <!-- 通道表格 -->
-    <el-table
-      v-else
-      :data="paginatedChannels"
-      stripe
-      class="channel-table"
-      @row-click="goToNodeDetail"
-      v-loading="loading"
-    >
+    <div v-else class="table-wrapper">
+      <div class="table-scroll-hint">
+        <el-icon><ArrowRight /></el-icon>
+        <span>可横向滚动查看完整信息</span>
+      </div>
+      <el-table
+        :data="paginatedChannels"
+        stripe
+        class="channel-table"
+        @row-click="goToNodeDetail"
+        v-loading="loading"
+      >
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column label="节点名称" min-width="140">
         <template #default="{ row }">
@@ -145,7 +149,8 @@
           </el-button>
         </template>
       </el-table-column>
-    </el-table>
+      </el-table>
+    </div>
 
     <!-- 分页 -->
     <div v-if="filteredChannels.length > pageSize" class="pagination-wrapper">
@@ -165,7 +170,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh, Filter, Cpu } from '@element-plus/icons-vue'
+import { Refresh, Filter, Cpu, ArrowRight } from '@element-plus/icons-vue'
 import { channelApi, type Channel } from '@/api/channel'
 import { useNodeStore } from '@/stores/node'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -280,9 +285,9 @@ const paginatedChannels = computed(() => {
 })
 
 // 工具函数
-function getHardwareTagType(type: string): '' | 'success' | 'warning' | 'info' | 'danger' {
-  const map: Record<string, '' | 'success' | 'warning' | 'info' | 'danger'> = {
-    uart: '',
+function getHardwareTagType(type: string): 'success' | 'warning' | 'info' | 'danger' {
+  const map: Record<string, 'success' | 'warning' | 'info' | 'danger'> = {
+    uart: 'info',
     i2c: 'success',
     spi: 'warning',
     gpio: 'info',
@@ -388,6 +393,56 @@ onMounted(() => {
 .channel-table {
   width: 100%;
   cursor: pointer;
+  min-width: 720px;
+}
+
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+
+.table-scroll-hint {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+@media (max-width: 768px) {
+  .table-scroll-hint {
+    display: flex;
+  }
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar-left {
+    width: 100%;
+  }
+  .search-input {
+    width: 100%;
+    min-width: 0;
+  }
+  .toolbar-left :deep(.el-select) {
+    flex: 1;
+    min-width: 120px;
+  }
+}
+
+@media (max-width: 480px) {
+  .toolbar-left :deep(.el-select) {
+    width: 100%;
+  }
+  .toolbar-left :deep(.el-select),
+  .search-input {
+    width: 100%;
+  }
 }
 
 .channel-table :deep(.el-table__row) {

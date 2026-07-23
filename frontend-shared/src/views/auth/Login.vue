@@ -41,8 +41,26 @@
         @close="errorMsg = ''"
       />
 
+      <!-- 首次运行成功提示 -->
+      <el-alert
+        v-if="successMsg"
+        :title="successMsg"
+        type="success"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 16px"
+      />
+
+      <!-- 首次运行管理员设置 -->
+      <InitializeAdminForm
+        v-if="authState === 'uninitialized'"
+        ref="initializeFormRef"
+        @submit="handleInitialize"
+      />
+
       <!-- 登录表单 -->
       <LoginForm
+        v-else
         ref="loginFormRef"
         :disabled="lockSeconds > 0"
         @success="handleLogin"
@@ -61,15 +79,18 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
-import { authApi, type AuthState } from '@/api/auth'
+import { authApi, type AuthState, type InitializeRequest } from '@/api/auth'
 import { getRemainingLockSeconds } from '@/utils/loginLockout'
 import LoginForm from '@/components/forms/LoginForm.vue'
+import InitializeAdminForm from '@/components/forms/InitializeAdminForm.vue'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const loginFormRef = ref()
+const initializeFormRef = ref()
 const errorMsg = ref('')
+const successMsg = ref('')
 const authState = ref<AuthState | null>(null)
 const lockSeconds = ref(0)
 let lockTimer: ReturnType<typeof setInterval> | null = null
@@ -84,12 +105,19 @@ const refreshLock = () => {
   }
 }
 
+const statusMessages: Record<AuthState, string> = {
+  initialized: '',
+  migration_required: '系统认证迁移尚未完成，请运行 ehomectl auth migration-status 并完成迁移。',
+  uninitialized: '系统尚未初始化，请先使用本机初始化凭据完成初始化。',
+  disabled: '系统认证已被禁用，请联系管理员。',
+}
+
 onMounted(() => {
   void authApi.initialization().then((status) => {
     authState.value = status.state
-    if (status.state === 'migration_required') errorMsg.value = '系统认证迁移尚未完成，请运行 ehomectl auth migration-status 并完成迁移。'
-    if (status.state === 'uninitialized') errorMsg.value = '系统尚未初始化，请先使用本机初始化凭据完成初始化。'
-    if (status.state === 'disabled') errorMsg.value = '系统认证已被禁用，请联系管理员。'
+    if (status.state !== 'initialized' && status.state !== 'uninitialized') {
+      errorMsg.value = statusMessages[status.state]
+    }
   }).catch(() => {
     errorMsg.value = '无法读取系统认证状态，请检查开发后端。'
   })
@@ -104,14 +132,16 @@ onUnmounted(() => {
 })
 
 const handleLogin = async (username: string, password: string, rememberMe: boolean) => {
-  if (authState.value && authState.value !== 'initialized') {
+  // 1. 先清空前序错误，避免旧状态误导用户
+  errorMsg.value = ''
+  // 2. 锁定检查
+  if (lockSeconds.value > 0) {
     loginFormRef.value?.setLoading?.(false)
     return
   }
-  errorMsg.value = ''
-
-  // 前端锁定检查
-  if (lockSeconds.value > 0) {
+  // 3. 系统未就绪时直接给出明确提示，不调用登录 API
+  if (authState.value && authState.value !== 'initialized') {
+    errorMsg.value = statusMessages[authState.value]
     loginFormRef.value?.setLoading?.(false)
     return
   }
@@ -122,7 +152,25 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
     const redirect = (route.query.redirect as string) || '/dashboard'
     router.push(redirect)
   } catch (error: any) {
-    // 记录失败次数
+    const status = Number(error?.status ?? error?.response?.status ?? error?.code)
+
+    // 服务端限流不是凭据错误，不应继续累加浏览器端失败次数。
+    if (status === 429) {
+      const retryAfter = Number(error?.retryAfterSeconds)
+      errorMsg.value = retryAfter > 0
+        ? `登录尝试过于频繁，请 ${formatRetryAfter(retryAfter)}后重试。`
+        : '登录尝试过于频繁，请稍后重试。'
+      return
+    }
+
+    // 只有明确的 401 凭据错误才计入前端失败次数。网络错误、500 等
+    // 服务异常应直接反馈原因，避免误导用户修改正确密码。
+    if (status !== 401) {
+      errorMsg.value = getLoginErrorMessage(error, status)
+      return
+    }
+
+    // 记录凭据失败次数
     const result = userStore.recordLoginFailure()
     if (result.locked) {
       errorMsg.value = `连续 ${result.attempts} 次登录失败，已锁定 ${Math.ceil(result.remainingSeconds / 60)} 分钟`
@@ -139,8 +187,42 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
   }
 }
 
+const formatRetryAfter = (seconds: number): string => {
+  if (seconds >= 60) return `${Math.ceil(seconds / 60)} 分钟`
+  return `${Math.max(1, Math.ceil(seconds))} 秒`
+}
+
+const getLoginErrorMessage = (error: any, status: number): string => {
+  if (error?.code === 'ERR_NETWORK' || error?.message === 'Network Error') {
+    return '无法连接服务器，请检查网络连接后重试。'
+  }
+  if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
+    return '登录请求超时，请稍后重试。'
+  }
+  if (status >= 500) {
+    return '服务器暂时不可用，请稍后重试。'
+  }
+  return error?.message || '登录失败，请稍后重试。'
+}
+
 const handleError = (error: any) => {
   errorMsg.value = error.message || '登录失败'
+}
+
+const handleInitialize = async (request: InitializeRequest) => {
+  errorMsg.value = ''
+  successMsg.value = ''
+
+  try {
+    await authApi.initialize(request)
+    authState.value = 'initialized'
+    successMsg.value = '管理员账号创建成功，请使用新账号登录。'
+    initializeFormRef.value?.resetForm?.()
+  } catch (error: any) {
+    errorMsg.value = error?.message || '初始化失败，请检查初始化凭据后重试。'
+  } finally {
+    initializeFormRef.value?.setLoading?.(false)
+  }
 }
 </script>
 
@@ -201,13 +283,31 @@ const handleError = (error: any) => {
 }
 
 .login-box {
-  width: 420px;
+  width: min(420px, calc(100vw - 24px));
   padding: 48px 40px 32px;
   background: color-mix(in srgb, var(--card-bg) 97%, transparent);
   border-radius: 16px;
   box-shadow: var(--shadow-lg);
   z-index: 1;
   position: relative;
+  box-sizing: border-box;
+}
+
+@media (max-width: 480px) {
+  .login-box {
+    padding: 32px 20px 24px;
+  }
+  .brand {
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .brand-logo {
+    width: 44px;
+    height: 44px;
+  }
+  .brand-name {
+    font-size: 20px;
+  }
 }
 
 .brand {

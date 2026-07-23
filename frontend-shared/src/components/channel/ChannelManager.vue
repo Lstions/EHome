@@ -9,7 +9,7 @@
       :close-on-press-escape="!submitting"
       :show-close="!submitting"
       :before-close="handleDialogClose"
-      class="channel-manager-dialog"
+      class="channel-manager-dialog dialog-mobile-constrained"
       @closed="resetForm"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" :disabled="readonly || submitting">

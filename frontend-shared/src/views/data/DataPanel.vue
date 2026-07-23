@@ -189,7 +189,9 @@
           :title="queryForm.deviceId ? '该时间范围内暂无数据' : '请选择设备'"
           :description="queryForm.deviceId ? '可调整时间范围，或确认设备已完成采集与同步。' : '选择设备后即可查询历史数据。'"
         />
-        <el-table v-else :data="historyData" stripe>
+        <div v-else class="mobile-table-wrapper">
+        <p class="mobile-table-hint">左右滑动查看完整历史数据</p>
+        <el-table :data="historyData" stripe>
           <el-table-column prop="created_at" label="采集时间" width="180">
             <template #default="{ row }">
               <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
@@ -217,6 +219,7 @@
             </template>
           </el-table-column>
         </el-table>
+        </div>
 
         <el-pagination
           v-model:current-page="currentPage"

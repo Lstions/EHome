@@ -37,8 +37,9 @@ func LoadAuthState(db *gorm.DB) (AuthState, error) {
 	return state, err
 }
 
-// InstallAuthState is for the versioned installation migration only. Runtime
-// request handling must not call it to repair a missing row.
+// InstallAuthState is for the versioned installation migration and the
+// explicit server-startup bootstrap path. Runtime request handling must not
+// call it to repair a missing row.
 func InstallAuthState(db *gorm.DB) error {
 	state := AuthState{
 		Key:             SystemAuthStateKey,

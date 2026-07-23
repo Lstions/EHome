@@ -40,6 +40,16 @@ const applyOption = () => {
   const text = token('--text-color-primary', '#303133')
   const track = token('--border-color-light', '#ebeef5')
   const option: EChartsOption = {
+    tooltip: {
+      trigger: 'item' as const,
+      confine: true,
+      backgroundColor: token('--card-bg', '#fff'),
+      borderColor: token('--border-color-light', '#ebeef5'),
+      textStyle: { color: text },
+      formatter: () => {
+        return `${props.title || '数值'}<br/><b>${props.value.toFixed(2)}${props.unit}</b>`
+      }
+    },
     series: [{
       type: 'gauge', min: props.min, max: props.max,
       startAngle: 225, endAngle: -45, radius: '75%', center: ['50%', '60%'],

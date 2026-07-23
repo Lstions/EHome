@@ -1,65 +1,97 @@
 <template>
   <div class="collector-page">
 <template v-if="loading">
-      <div class="stats-row">
-        <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
+  <div class="stats-row">
+    <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
+  </div>
+  <div class="skeleton-grid">
+    <SkeletonCard v-for="i in 8" :key="i" variant="card" animated />
+  </div>
+</template>
+<template v-else>
+  <!-- 顶部统计卡片 -->
+  <div class="stats-row desktop-only">
+    <div class="stat-card" @click="handleStatClick('all')">
+      <div class="stat-icon" style="color: var(--el-color-primary);">
+        <el-icon><Connection /></el-icon>
       </div>
-      <div class="skeleton-grid">
-        <SkeletonCard v-for="i in 8" :key="i" variant="card" animated />
+      <div class="stat-content">
+        <CountUp :value="stats.total" class="stat-value" />
+        <span class="stat-label">本页节点</span>
       </div>
-    </template>
-    <template v-else>
-      <!-- 顶部统计卡片 -->
-      <div class="stats-row">
-        <div class="stat-card" @click="handleStatClick('all')">
-          <div class="stat-icon" style="color: var(--el-color-primary);">
-            <el-icon><Connection /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">本页节点</span>
-          </div>
-          <div class="stat-action">
-            <el-icon><Plus /></el-icon>
-          </div>
-        </div>
-        
-        <div class="stat-card online" @click="handleStatClick('online')">
-          <div class="stat-icon" style="color: var(--el-color-success);">
-            <el-icon><CircleCheck /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.online" class="stat-value" />
-            <span class="stat-label">本页在线</span>
-          </div>
-          <div class="stat-trend up">
-            <el-icon><TrendCharts /></el-icon>
-            {{ stats.onlineRate }}%
-          </div>
-        </div>
-        
-        <div class="stat-card offline" @click="handleStatClick('offline')">
-          <div class="stat-icon" style="color: var(--el-color-danger);">
-            <el-icon><CircleClose /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.offline" class="stat-value" />
-            <span class="stat-label">本页离线</span>
-          </div>
-        </div>
-        
-        <div class="stat-card warning">
-          <div class="stat-icon" style="color: var(--el-color-warning);">
-            <el-icon><Warning /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.warning" class="stat-value" />
-            <span class="stat-label">本页告警</span>
-          </div>
-        </div>
+      <div class="stat-action">
+        <el-icon><Plus /></el-icon>
       </div>
+    </div>
+        
+    <div class="stat-card online" @click="handleStatClick('online')">
+      <div class="stat-icon" style="color: var(--el-color-success);">
+        <el-icon><CircleCheck /></el-icon>
+      </div>
+      <div class="stat-content">
+        <CountUp :value="stats.online" class="stat-value" />
+        <span class="stat-label">本页在线</span>
+      </div>
+      <div class="stat-trend up">
+        <el-icon><TrendCharts /></el-icon>
+        {{ stats.onlineRate }}%
+      </div>
+    </div>
+        
+    <div class="stat-card offline" @click="handleStatClick('offline')">
+      <div class="stat-icon" style="color: var(--el-color-danger);">
+        <el-icon><CircleClose /></el-icon>
+      </div>
+      <div class="stat-content">
+        <CountUp :value="stats.offline" class="stat-value" />
+        <span class="stat-label">本页离线</span>
+      </div>
+    </div>
+        
+    <div class="stat-card warning">
+      <div class="stat-icon" style="color: var(--el-color-warning);">
+        <el-icon><Warning /></el-icon>
+      </div>
+      <div class="stat-content">
+        <CountUp :value="stats.warning" class="stat-value" />
+        <span class="stat-label">本页告警</span>
+      </div>
+    </div>
+  </div>
 
-    <!-- 工具栏 -->
+  <!-- 移动端紧凑统计 -->
+  <div class="mobile-stats-row mobile-only">
+    <MobileStatCard
+      :value="stats.total"
+      label="本页节点"
+      :icon="Connection"
+      variant="primary"
+      @click="handleStatClick('all')"
+    />
+    <MobileStatCard
+      :value="stats.online"
+      label="本页在线"
+      :icon="CircleCheck"
+      variant="success"
+      :badge="`${stats.onlineRate}%`"
+      @click="handleStatClick('online')"
+    />
+    <MobileStatCard
+      :value="stats.offline"
+      label="本页离线"
+      :icon="CircleClose"
+      variant="danger"
+      @click="handleStatClick('offline')"
+    />
+    <MobileStatCard
+      :value="stats.warning"
+      label="本页告警"
+      :icon="Warning"
+      variant="warning"
+    />
+  </div>
+
+<!-- 工具栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
         <el-input
@@ -187,6 +219,8 @@
 
     <!-- 列表视图 -->
     <el-card v-else class="collector-table-card" shadow="hover">
+      <p class="mobile-table-hint">左右滑动查看完整节点信息</p>
+      <div class="mobile-table-wrapper">
       <el-table 
         :data="filteredNodes" 
         v-loading="loading"
@@ -262,6 +296,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <div class="pagination-wrapper">
         <el-pagination
@@ -306,6 +341,7 @@ import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
+import MobileStatCard from '@/components/common/MobileStatCard.vue'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 
 const router = useRouter()
@@ -556,6 +592,35 @@ onUnmounted(() => {
   gap: 20px;
 }
 
+.desktop-only {
+  display: contents;
+}
+
+.mobile-only {
+  display: none;
+}
+
+.mobile-stats-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .stats-row.desktop-only {
+    display: none;
+  }
+  .mobile-stats-row.mobile-only {
+    display: grid;
+  }
+}
+
+@media (max-width: 360px) {
+  .mobile-stats-row.mobile-only {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* 统计卡片 */
 .stats-row {
   display: grid;
@@ -573,6 +638,7 @@ onUnmounted(() => {
   cursor: pointer;
   transition: all 0.3s;
   border: 1px solid var(--el-border-color);
+  min-width: 0;
 }
 
 .stat-card:hover {
@@ -589,6 +655,7 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 28px;
   color: var(--el-text-color-secondary);
+  flex-shrink: 0;
 }
 
 .stat-card.total .stat-icon { color: var(--el-color-primary); }
@@ -605,6 +672,7 @@ onUnmounted(() => {
 
 .stat-content {
   flex: 1;
+  min-width: 0;
 }
 
 .stat-value {
@@ -627,11 +695,121 @@ onUnmounted(() => {
   font-size: 12px;
   padding: 4px 8px;
   border-radius: 4px;
+  flex-shrink: 0;
 }
 
 .stat-trend.up {
   background: var(--el-color-success-light-9);
   color: var(--el-color-success);
+}
+
+.stat-action {
+  opacity: 0;
+  transition: opacity 0.2s;
+  color: var(--el-color-primary);
+  flex-shrink: 0;
+}
+
+.stat-card:hover .stat-action {
+  opacity: 1;
+}
+
+@media (max-width: 1200px) {
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 12px;
+    gap: 10px;
+    border-radius: 10px;
+  }
+  .stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    font-size: 22px;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
+  .stat-label {
+    font-size: 12px;
+  }
+  .stat-trend {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 12px;
+  }
+  .toolbar-left, .toolbar-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .search-input {
+    width: 100%;
+    min-width: 0;
+  }
+  .collector-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .stat-card {
+    padding: 10px;
+    gap: 8px;
+  }
+  .stat-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+  }
+  .stat-value {
+    font-size: 20px;
+  }
+  .stat-label {
+    font-size: 11px;
+  }
+  .stat-action {
+    display: none;
+  }
+  .toolbar-left :deep(.el-select) {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+  }
+  .toolbar-right {
+    justify-content: space-between;
+  }
+  .toolbar-right :deep(.el-button) {
+    flex: 1;
+  }
+}
+
+@media (max-width: 360px) {
+  .stats-row {
+    grid-template-columns: 1fr;
+  }
+  .stat-card {
+    padding: 12px;
+  }
+  .toolbar-left :deep(.el-select) {
+    flex: 1 1 100%;
+  }
 }
 
 /* 工具栏 */
@@ -643,9 +821,16 @@ onUnmounted(() => {
   padding: 16px 20px;
   border-radius: 12px;
   border: 1px solid var(--el-border-color);
+  gap: 12px;
 }
 
 .toolbar-left {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.toolbar-right {
   display: flex;
   gap: 12px;
 }
@@ -653,11 +838,6 @@ onUnmounted(() => {
 .search-input {
   width: 280px;
   min-width: 200px;
-}
-
-.toolbar-right {
-  display: flex;
-  gap: 12px;
 }
 
 .active-filters {
@@ -898,21 +1078,105 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
   .stats-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
   }
-  
+  .stat-card {
+    padding: 12px;
+    gap: 10px;
+    border-radius: 10px;
+  }
+  .stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    font-size: 22px;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
+  .stat-label {
+    font-size: 12px;
+  }
+  .stat-trend {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
   .toolbar {
     flex-direction: column;
-    gap: 12px;
+    align-items: stretch;
+    padding: 12px;
+    gap: 10px;
   }
-  
   .toolbar-left, .toolbar-right {
     width: 100%;
     flex-wrap: wrap;
   }
-  
   .search-input {
     width: 100%;
+    min-width: 0;
+  }
+  .collector-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .collector-card :deep(.el-card__body) {
+    padding: 14px;
+  }
+  .card-body {
+    padding: 12px 0;
+    gap: 8px;
+  }
+  .card-footer {
+    padding-top: 10px;
   }
 }
+
+@media (max-width: 480px) {
+  .stats-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .stat-card {
+    padding: 10px;
+    gap: 8px;
+  }
+  .stat-icon {
+    width: 36px;
+    height: 36px;
+    font-size: 20px;
+  }
+  .stat-value {
+    font-size: 20px;
+  }
+  .stat-label {
+    font-size: 11px;
+  }
+  .stat-action {
+    display: none;
+  }
+  .toolbar-left :deep(.el-select) {
+    flex: 1 1 calc(50% - 5px);
+    min-width: 0;
+  }
+  .toolbar-right {
+    justify-content: space-between;
+  }
+  .toolbar-right :deep(.el-button) {
+    flex: 1;
+  }
+}
+
+@media (max-width: 360px) {
+  .stats-row {
+    grid-template-columns: 1fr;
+  }
+  .stat-card {
+    padding: 12px;
+  }
+  .toolbar-left :deep(.el-select) {
+    flex: 1 1 100%;
+  }
+}
+
 </style>

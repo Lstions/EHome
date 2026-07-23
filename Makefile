@@ -10,6 +10,7 @@
 #   make restart         - 重启本地前后端（基础设施不动）
 #   make infra           - 仅启动基础设施
 #   make infra-down      - 仅停止基础设施
+#   make auth-bootstrap  - 初始化空开发数据库并生成管理员设置凭据
 #   make backend         - 仅启动本地后端
 #   make frontend        - 仅启动本地前端
 #   make e2e             - 运行 Playwright E2E 测试
@@ -76,7 +77,7 @@ endef
 BACKEND_COVERAGE_THRESHOLD  ?= 35
 FRONTEND_COVERAGE_THRESHOLD ?= 25
 
-.PHONY: dev up down restart infra infra-down backend frontend e2e \
+.PHONY: dev up down restart infra infra-down auth-bootstrap backend frontend e2e \
         test test-backend test-frontend test-integration test-coverage \
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
@@ -85,7 +86,7 @@ FRONTEND_COVERAGE_THRESHOLD ?= 25
 # ---- 一键启动开发环境 ----
 dev: up ## 启动独立开发环境（默认）
 
-up: infra ## 启动基础设施 + 本地前后端
+up: infra auth-bootstrap ## 启动基础设施 + 本地前后端
 	@mkdir -p $(LOG_DIR)
 	@echo "==> Starting local backend (port $(BACKEND_PORT))..."
 	@cd $(BACKEND) && \
@@ -127,6 +128,33 @@ up: infra ## 启动基础设施 + 本地前后端
 	@echo "    EMQX:     localhost:$(EMQX_MQTT_PORT) (dashboard: $(EMQX_DASHBOARD_PORT))"
 	@echo "    Redis:    localhost:$(REDIS_PORT)"
 
+# ---- 首次运行认证引导 ----
+auth-bootstrap: ## 初始化空开发数据库并生成一次性管理员设置凭据
+	@echo "==> Checking first-run authentication..."
+	@cd $(BACKEND) && \
+		if EHOME_DB_HOST=localhost \
+		EHOME_DB_PORT=$(POSTGRES_PORT) \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		EHOME_DB_NAME=$(POSTGRES_DB) \
+		go run ./cmd/ehomectl auth bootstrap-database >/dev/null 2>&1; then \
+			echo "    Empty development database bootstrapped."; \
+		fi
+	@cd $(BACKEND) && \
+		if credential=$$(EHOME_DB_HOST=localhost \
+		EHOME_DB_PORT=$(POSTGRES_PORT) \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		EHOME_DB_NAME=$(POSTGRES_DB) \
+		go run ./cmd/ehomectl auth create-initialization-token 2>/dev/null); then \
+			echo "    First-run setup: http://localhost:$(FRONTEND_PORT)/login"; \
+			echo "    Initialization credential (valid for 10 minutes):"; \
+			echo "    $$credential"; \
+			echo "    Paste this credential into the setup screen."; \
+		else \
+			echo "    Authentication already initialized or requires migration."; \
+		fi
+
 # ---- 停止全部 ----
 down: ## 停止基础设施 + 本地前后端
 	@echo "==> Stopping local backend (port $(BACKEND_PORT))..."
@@ -136,7 +164,7 @@ down: ## 停止基础设施 + 本地前后端
 	@$(MAKE) infra-down
 
 # ---- 重启本地前后端（基础设施不动） ----
-restart: ## 重启本地前后端
+restart: auth-bootstrap ## 重启本地前后端
 	@echo "==> Stopping local services..."
 	$(call kill_port,$(BACKEND_PORT))
 	$(call kill_port,$(FRONTEND_PORT))
@@ -191,7 +219,7 @@ infra-down: ## 仅停止基础设施
 	$(DEV_COMPOSE) down --remove-orphans
 
 # ---- 单独启动 ----
-backend: ## 仅启动本地后端
+backend: auth-bootstrap ## 仅启动本地后端
 	@mkdir -p $(LOG_DIR)
 	$(call kill_port,$(BACKEND_PORT))
 	@cd $(BACKEND) && \
@@ -327,5 +355,4 @@ clean: ## 删除开发环境容器、数据卷和本地进程（不影响生产�
 
 # ---- Help ----
 help: ## Show this help
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)

@@ -36,7 +36,7 @@
       <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
         <el-checkbox v-model="form.rememberMe" label="记住我" :disabled="disabled" />
         <!-- 忘记密码入口（占位，指向管理员联系提示） -->
-        <el-link type="primary" :underline="false" @click="showForgotTip = true">忘记密码？</el-link>
+        <el-link type="primary" underline="never" @click="showForgotTip = true">忘记密码？</el-link>
       </div>
     </el-form-item>
 
@@ -54,12 +54,18 @@
     </el-form-item>
 
     <!-- 忘记密码提示 -->
-    <el-dialog v-model="showForgotTip" title="忘记密码" width="400px" append-to-body>
-      <div style="line-height: 1.8; color: var(--el-text-color-regular);">
+    <el-dialog
+      v-model="showForgotTip"
+      title="忘记密码"
+      width="400px"
+      align-center
+      append-to-body
+      class="forgot-tip-dialog dialog-mobile-constrained"
+    >
+      <div class="forgot-tip-body">
         <p>请联系系统管理员重置密码。</p>
         <p>管理员可通过后端命令行工具执行：</p>
-        <pre style="background: var(--el-fill-color-light); padding: 12px 16px; border-radius: 4px; font-family: monospace; font-size: 13px; color: var(--el-text-color-primary); margin: 12px 0 0;">
-          ehome-cli user reset-password --username &lt;用户名&gt;</pre>
+        <pre class="forgot-tip-code">ehome-cli user reset-password --username &lt;用户名&gt;</pre>
       </div>
     </el-dialog>
   </el-form>
@@ -95,7 +101,7 @@ const rules: FormRules = {
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 6, message: '密码长度至少6位', trigger: 'blur' },
+    { min: 8, message: '密码长度至少 8 位', trigger: 'blur' },
   ],
 }
 
@@ -121,3 +127,22 @@ defineExpose({
   },
 })
 </script>
+
+<style scoped>
+.forgot-tip-body {
+  line-height: 1.8;
+  color: var(--el-text-color-regular);
+}
+.forgot-tip-code {
+  background: var(--el-fill-color-light);
+  padding: 12px 16px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--el-text-color-primary);
+  margin: 12px 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>
