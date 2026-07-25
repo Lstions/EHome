@@ -138,7 +138,7 @@ docker compose up -d
 
 单容器部署：Go 二进制同时服务 API + Vue SPA，容器名 `ehome-web`，端口 `HOME_PORT`（默认 80）。
 
-首次部署可在 `.env` 中设置 `EHOME_ADMIN_USERNAME` 和 `EHOME_ADMIN_PASSWORD`（密码至少 8 位，可选 `EHOME_ADMIN_EMAIL`），容器启动时会仅对空数据库创建管理员一次。已有数据库不会被覆盖；初始化成功后建议移除密码变量。
+首次部署时，容器每次启动都会在日志中输出一个 10 分钟有效的一次性初始化凭据；打开登录页后粘贴凭据并设置管理员账号。完成初始化后，后续启动不再输出凭据。
 
 ## 协议
 

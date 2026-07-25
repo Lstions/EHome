@@ -30,7 +30,7 @@ type AuthState struct {
 // LoadAuthState returns the persistent auth state row. When the row is missing
 // (fresh database), it returns a synthetic uninitialized state without
 // persisting anything. The row is created on first access by the GET
-// /initialization handler or the environment bootstrap path.
+// /initialization handler or the server startup path.
 func LoadAuthState(db *gorm.DB) (AuthState, error) {
 	var state AuthState
 	err := db.Where("key = ?", SystemAuthStateKey).First(&state).Error
