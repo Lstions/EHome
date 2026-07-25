@@ -62,7 +62,7 @@ typedef struct {
     uint32_t   edge_device_id;                /* v2.3: edge device for DataReport routing */
     uint32_t command_template_id;            /* ConfigTemplate.ID for command-aware parsing */
     uint8_t command_index;                 /* v2.3: command index within edge_device */
-    uart_port_t uart_port;                    /* UART port (UART_NUM_0/1), per-port dispatch */
+    uart_port_t uart_port;                    /* UART port (UART_NUM_0/1/2), per-port dispatch */
     bool channel_cmd_v2;                      /* true only for control-slot commands */
     uint8_t control_slot;                     /* ChannelCmdV2 sidecar slot, or CONTROL_SLOT_NONE */
     uint8_t plan_data[CMD_PLAN_MAX];          /* bounded batch step records */

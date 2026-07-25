@@ -4,7 +4,8 @@
  *
  * Design principle:
  *   UART is full-duplex at the hardware level — TX and RX are independent.
- *   cmd_task does TX (fire-and-forget), rx_task does RX (non-blocking poll).
+ *   cmd_task does TX (fire-and-forget), rx_task owns RX event queues and
+ *   performs non-blocking reads only after a driver event.
  *   SPI and I2C are transactional — cmd_task does atomic write+read.
  *
  * Bus sharing:
@@ -19,6 +20,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
@@ -68,7 +71,12 @@ typedef struct {
     uint8_t bus_type;
     bool dma_enabled;
     bool initialized;
+    /* Planner-selected controller lease.  A negative value means use the
+     * normal capability/default-pin allocation policy. */
+    int32_t preferred_controller;
     SemaphoreHandle_t tx_mutex;
+    /* UART RX uses the driver event queue for both DMA and non-DMA paths. */
+    QueueHandle_t uart_event_queue;
 
     union {
         struct {
@@ -91,6 +99,7 @@ typedef struct {
         struct {
             i2c_master_bus_handle_t bus_handle;
             i2c_master_dev_handle_t dev_handle;
+            i2c_port_t port;
             uint8_t    addr;
             uint32_t   freq;
             int        sda_pin;
@@ -105,6 +114,15 @@ typedef struct {
 
 esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
                        const uint8_t *config, size_t config_len);
+
+/**
+ * Initialize a bus while honoring a controller selected by the manifest
+ * planner.  This is what preserves a compatible logical Channel's lease
+ * across a manifest rebuild; -1 uses the legacy dynamic selection policy.
+ */
+esp_err_t bus_dma_init_preferred(bus_dma_ctx_t *ctx, uint8_t bus_type,
+                                 bool dma_enabled, const uint8_t *config,
+                                 size_t config_len, int32_t controller_id);
 esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx);
 
 /* ==================================================================
@@ -121,11 +139,15 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len);
 
 /**
  * @brief Read any available data from UART RX (DMA ring buffer or FIFO).
- *        Non-blocking — returns 0 immediately if no data is waiting.
+ *        Non-blocking — the bus worker calls this only after its event queue
+ *        reports data; callers must not create a second UART reader.
  *
  * @return number of bytes read into buf (0 = nothing available)
  */
 size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size);
+
+/** Return the UART driver event queue owned by this initialized context. */
+QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx);
 
 /* ==================================================================
  *  SPI / I2C: transactional (write then read, atomic)

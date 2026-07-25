@@ -4,11 +4,13 @@
  *
  * Supports UART, SPI, and I2C with dynamic DMA on/off switch.
  * - UART DMA:  driver_install with ring buffers + rx_timeout gap detection
- * - UART polled: flush + write + read with timeout
+ * - UART non-DMA: smaller driver ring, still consumed through the same event
+ *   queue and worker path
  * - SPI DMA:   spi_bus_initialize with SPI_DMA_CH_AUTO
  * - SPI polled: spi_bus_initialize with SPI_DMA_DISABLED
- * - I2C DMA:   new master API (i2c_new_master_bus + i2c_master_bus_add_device)
- * - I2C polled: legacy API (i2c_param_config + i2c_driver_install + cmd_link)
+ * - I2C:        new master API for both DMA settings; the planner rejects
+ *               DMA requests on profiles without I2C DMA capability so the
+ *               flag cannot alter repeated-START/STOP wire semantics
  */
 
 #include "bus_dma.h"
@@ -279,6 +281,7 @@ static inline uint32_t read_be32(const uint8_t *p)
 
 /* Shared UART port registry */
 #define MAX_UART_PORTS 3
+#define UART_EVENT_QUEUE_DEPTH 32
 
 typedef struct {
     uart_port_t port;
@@ -286,6 +289,7 @@ typedef struct {
     int rx_pin;
     uint32_t baud;
     uint32_t ref_count;  /* Number of channels using this port */
+    QueueHandle_t event_queue;
 } uart_port_entry_t;
 
 static uart_port_entry_t s_uart_ports[MAX_UART_PORTS];
@@ -351,6 +355,12 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
     /* Check if port with same config already exists */
     uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
+    if (port_entry && ctx->preferred_controller >= 0 &&
+        port_entry->port != (uart_port_t)ctx->preferred_controller) {
+        ESP_LOGE(TAG, "UART config is already leased by UART%d, preferred UART%ld requested",
+                 port_entry->port, (long)ctx->preferred_controller);
+        return ESP_ERR_INVALID_STATE;
+    }
     
     if (port_entry == NULL) {
         /* A profile-owned TX/RX pair must retain its declared controller.
@@ -358,7 +368,19 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
          * UART".  The old allocator silently bound it to UART0 whenever the
          * console was USB/JTAG, which made resource reports and runtime
          * routing disagree.  Custom pin pairs retain the free-port fallback. */
-        uart_port_t port_num = hw_derive_uart_port(tx_pin, rx_pin, UART_NUM_MAX);
+        uart_port_t port_num = ctx->preferred_controller >= 0
+            ? (uart_port_t)ctx->preferred_controller
+            : hw_derive_uart_port(tx_pin, rx_pin, UART_NUM_MAX);
+        if (ctx->preferred_controller >= 0 && port_num >= UART_NUM_MAX) {
+            ESP_LOGE(TAG, "preferred UART controller %ld is unavailable",
+                     (long)ctx->preferred_controller);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        if (ctx->preferred_controller >= 0 && port_num == UART_NUM_0 &&
+            !bus_dma_uart0_is_available()) {
+            ESP_LOGE(TAG, "preferred UART0 controller is reserved");
+            return ESP_ERR_NOT_SUPPORTED;
+        }
         if (port_num < UART_NUM_MAX) {
             for (int i = 0; i < MAX_UART_PORTS; i++) {
                 if (s_uart_ports[i].port == port_num) {
@@ -443,22 +465,23 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
             }
         }
 
-        if (ctx->dma_enabled) {
-            // DMA mode: TX buffer 1024 avoids blocking, RX ring buffer 256
-            r = uart_driver_install(ctx->cfg.uart.port, 1024, 256, 1024, NULL, 0);
-            if (r != ESP_OK) {
-                ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
-                return r;
-            }
-            uart_set_rx_timeout(ctx->cfg.uart.port, 4);
-        } else {
-            // Polled mode: TX buffer 256 (non-blocking), RX ring buffer 256 for gap detection
-            r = uart_driver_install(ctx->cfg.uart.port, 256, 256, 0, NULL, 0);
-            if (r != ESP_OK) {
-                ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
-                return r;
-            }
+        /* Both DMA and non-DMA paths use the same driver event queue.  DMA
+         * only changes the underlying buffer sizes; it must not change the
+         * public receive flow or route one UART through a different worker. */
+        QueueHandle_t event_queue = NULL;
+        size_t rx_buffer_size = ctx->dma_enabled ? 1024U : 256U;
+        size_t tx_buffer_size = ctx->dma_enabled ? 1024U : 256U;
+        r = uart_driver_install(ctx->cfg.uart.port, rx_buffer_size,
+                                tx_buffer_size, UART_EVENT_QUEUE_DEPTH,
+                                &event_queue, 0);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
+            return r;
         }
+        ctx->uart_event_queue = event_queue;
+        /* A short hardware RX timeout improves event granularity.  The
+         * worker still applies its protocol-independent idle fallback. */
+        uart_set_rx_timeout(ctx->cfg.uart.port, 4);
 
         /* Register in shared port table */
         port_entry = uart_alloc_port();
@@ -473,6 +496,7 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         port_entry->rx_pin = rx_pin;
         port_entry->baud = baud;
         port_entry->ref_count = 0;
+        port_entry->event_queue = ctx->uart_event_queue;
         
         ESP_LOGI(TAG, "UART%d %s init (TX=%d RX=%d baud=%lu)",
                  ctx->cfg.uart.port,
@@ -484,6 +508,7 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         ctx->cfg.uart.baud   = baud;
         ctx->cfg.uart.tx_pin = tx_pin;
         ctx->cfg.uart.rx_pin = rx_pin;
+        ctx->uart_event_queue = port_entry->event_queue;
         ESP_LOGI(TAG, "UART%d %s reused (TX=%d RX=%d baud=%lu)",
                  ctx->cfg.uart.port,
                  ctx->dma_enabled ? "DMA" : "polled",
@@ -512,7 +537,7 @@ static esp_err_t uart_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
-/* ==== UART: independent RX (non-blocking poll) ==== */
+/* ==== UART: independent RX (event-owned, non-blocking read) ==== */
 
 static size_t uart_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
 {
@@ -555,6 +580,7 @@ static esp_err_t uart_deinit(bus_dma_ctx_t *ctx)
             err = uart_driver_delete(ctx->cfg.uart.port);
             if (err == ESP_OK) {
                 port_entry->port = UART_NUM_MAX;  /* Mark as available */
+                port_entry->event_queue = NULL;
                 ESP_LOGI(TAG, "UART%d driver deleted", ctx->cfg.uart.port);
             } else {
                 port_entry->ref_count++;
@@ -663,7 +689,16 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    ctx->cfg.spi.host   = SPI2_HOST;  /* Use SPI2_HOST by default */
+    bool forced_host = ctx->preferred_controller >= 0;
+    spi_host_device_t preferred_host = forced_host
+        ? (spi_host_device_t)ctx->preferred_controller
+        : hw_derive_spi_host(mosi_pin, miso_pin, sclk_pin, SPI_HOST_MAX);
+    if (forced_host && preferred_host >= SPI_HOST_MAX) {
+        ESP_LOGE(TAG, "preferred SPI controller %ld is unavailable",
+                 (long)ctx->preferred_controller);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    ctx->cfg.spi.host = preferred_host < SPI_HOST_MAX ? preferred_host : SPI2_HOST;
     ctx->cfg.spi.cs_pin = cs_pin;
     ctx->cfg.spi.freq   = freq;
     ctx->cfg.spi.mode   = mode;
@@ -673,16 +708,47 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
     /* Check if bus with same config already exists */
     spi_bus_entry_t *bus_entry = spi_find_bus(mosi_pin, miso_pin, sclk_pin, ctx->dma_enabled);
+    if (bus_entry && forced_host && bus_entry->host != preferred_host) {
+        ESP_LOGE(TAG, "SPI pin bus is leased by SPI%d, preferred SPI%d requested",
+                 bus_entry->host, preferred_host);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     if (bus_entry == NULL) {
         /* Find available SPI host */
-        spi_host_device_t host = SPI2_HOST;
-        for (int i = 0; i < MAX_SPI_BUSES; i++) {
-            if (s_spi_buses[i].host == SPI_HOST_MAX) {
-                host = (spi_host_device_t)(SPI2_HOST + i);
-                break;
+        spi_host_device_t host = preferred_host;
+        bool preferred_busy = false;
+        if (host < SPI_HOST_MAX) {
+            for (int i = 0; i < MAX_SPI_BUSES; i++) {
+                if (s_spi_buses[i].host == host) {
+                    preferred_busy = true;
+                    break;
+                }
             }
         }
+        if (forced_host && preferred_busy) {
+            ESP_LOGE(TAG, "preferred SPI%d controller is already occupied",
+                     preferred_host);
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (host >= SPI_HOST_MAX || preferred_busy) {
+            host = SPI_HOST_MAX;
+            for (spi_host_device_t candidate = SPI2_HOST;
+                 candidate < SPI_HOST_MAX; candidate++) {
+                bool busy = false;
+                for (int i = 0; i < MAX_SPI_BUSES; i++) {
+                    if (s_spi_buses[i].host == candidate) {
+                        busy = true;
+                        break;
+                    }
+                }
+                if (!busy) {
+                    host = candidate;
+                    break;
+                }
+            }
+        }
+        if (host >= SPI_HOST_MAX) return ESP_ERR_NOT_SUPPORTED;
 
         /* Default bus pins — caller may override via SPI pin config */
         spi_bus_config_t bus_cfg = {
@@ -822,6 +888,7 @@ static esp_err_t spi_deinit(bus_dma_ctx_t *ctx)
 
 typedef struct {
     i2c_master_bus_handle_t bus_handle;
+    i2c_port_t port;
     int sda_pin;
     int scl_pin;
     uint32_t ref_count;  /* Number of devices using this bus */
@@ -873,20 +940,6 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     uint8_t addr  = cfg[2];
     uint32_t freq = read_be32(&cfg[3]);
 
-    /* Validate I2C bus count — reject if all HW I2C buses are already active */
-    i2c_registry_init();
-    int active_count = 0;
-    for (int i = 0; i < MAX_I2C_BUSES; i++) {
-        if (s_i2c_buses[i].bus_handle != NULL) {
-            active_count++;
-        }
-    }
-    if (active_count >= HW_I2C_COUNT) {
-        ESP_LOGE(TAG, "I2C bus limit reached: %d active, HW_I2C_COUNT=%d",
-                 active_count, HW_I2C_COUNT);
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-
     /* Validate pins (S3: 0-48, C6: 0-30) */
     if (sda < 0 || sda > GPIO_PIN_MAX || scl < 0 || scl > GPIO_PIN_MAX) {
         ESP_LOGE(TAG, "I2C invalid pins: SDA=%d SCL=%d (must be 0-%d)", sda, scl, GPIO_PIN_MAX);
@@ -916,11 +969,70 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
     /* Check if bus with same pins already exists */
     i2c_bus_entry_t *bus_entry = i2c_find_bus(sda, scl);
+    if (bus_entry && ctx->preferred_controller >= 0 &&
+        bus_entry->port != (i2c_port_t)ctx->preferred_controller) {
+        ESP_LOGE(TAG, "I2C pin bus is leased by I2C%d, preferred I2C%ld requested",
+                 bus_entry->port, (long)ctx->preferred_controller);
+        return ESP_ERR_INVALID_STATE;
+    }
     
     if (bus_entry == NULL) {
+        /* Only a new pin pair consumes a hardware I2C controller.  Existing
+         * devices on the same SDA/SCL bus are valid shared-bus leases. */
+        int active_count = 0;
+        for (int i = 0; i < MAX_I2C_BUSES; i++)
+            if (s_i2c_buses[i].bus_handle != NULL) active_count++;
+        if (active_count >= HW_I2C_COUNT) {
+            ESP_LOGE(TAG, "I2C bus limit reached: %d active, HW_I2C_COUNT=%d",
+                     active_count, HW_I2C_COUNT);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
         /* Create new I2C bus */
+        bool forced_port = ctx->preferred_controller >= 0;
+        i2c_port_t port = forced_port
+            ? (i2c_port_t)ctx->preferred_controller
+            : hw_derive_i2c_port(sda, scl, I2C_NUM_MAX);
+        if (forced_port && port >= I2C_NUM_MAX) {
+            ESP_LOGE(TAG, "preferred I2C controller %ld is unavailable",
+                     (long)ctx->preferred_controller);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        if (port >= I2C_NUM_MAX) {
+            for (int p = 0; p < HW_I2C_COUNT; p++) {
+                bool busy = false;
+                for (int j = 0; j < MAX_I2C_BUSES; j++) {
+                    if (s_i2c_buses[j].bus_handle != NULL &&
+                        s_i2c_buses[j].port == (i2c_port_t)hw_i2cs[p].port) {
+                        busy = true;
+                        break;
+                    }
+                }
+                if (!busy) {
+                    port = (i2c_port_t)hw_i2cs[p].port;
+                    break;
+                }
+            }
+        }
+        if (port >= I2C_NUM_MAX) return ESP_ERR_NOT_SUPPORTED;
+        bool forced_port_busy = false;
+        if (forced_port) {
+            for (int i = 0; i < MAX_I2C_BUSES; i++) {
+                if (s_i2c_buses[i].bus_handle != NULL &&
+                    s_i2c_buses[i].port == port) {
+                    forced_port_busy = true;
+                    break;
+                }
+            }
+        }
+        if (forced_port_busy) {
+            ESP_LOGE(TAG, "preferred I2C%d controller is already occupied",
+                     port);
+            return ESP_ERR_INVALID_STATE;
+        }
+        ctx->cfg.i2c.port = port;
         i2c_master_bus_config_t bus_cfg = {
-            .i2c_port        = I2C_NUM_0,
+            .i2c_port        = port,
             .sda_io_num      = sda,
             .scl_io_num      = scl,
             .clk_source      = I2C_CLK_SRC_DEFAULT,
@@ -944,6 +1056,7 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         }
         
         bus_entry->bus_handle = ctx->cfg.i2c.bus_handle;
+        bus_entry->port = port;
         bus_entry->sda_pin = sda;
         bus_entry->scl_pin = scl;
         bus_entry->ref_count = 0;
@@ -952,6 +1065,7 @@ static esp_err_t i2c_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     } else {
         /* Reuse existing bus */
         ctx->cfg.i2c.bus_handle = bus_entry->bus_handle;
+        ctx->cfg.i2c.port = bus_entry->port;
         ESP_LOGI(TAG, "I2C bus reused (SDA=%d SCL=%d)", sda, scl);
     }
 
@@ -995,14 +1109,11 @@ static esp_err_t i2c_transact(bus_dma_ctx_t *ctx,
 
     esp_err_t r;
     if (tx && tx_len > 0 && rx && rx_size > 0) {
-        /* Write then read — DMA uses combined, std uses split */
-        if (ctx->dma_enabled) {
-            r = i2c_master_transmit_receive(dev, tx, tx_len, rx, rx_size, tmo);
-        } else {
-            r = i2c_master_transmit(dev, tx, tx_len, tmo);
-            if (r == ESP_OK)
-                r = i2c_master_receive(dev, rx, rx_size, tmo);
-        }
+        /* Wire semantics are independent of the optional DMA allocation:
+         * every read-after-write uses one repeated-START transaction.  DMA
+         * only changes how the driver moves bytes, never what the peripheral
+         * observes on SDA/SCL. */
+        r = i2c_master_transmit_receive(dev, tx, tx_len, rx, rx_size, tmo);
         if (r == ESP_OK) *rx_len = rx_size;
     } else if (tx && tx_len > 0) {
         r = i2c_master_transmit(dev, tx, tx_len, tmo);
@@ -1046,14 +1157,16 @@ static esp_err_t i2c_deinit(bus_dma_ctx_t *ctx)
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 
-esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
-                       const uint8_t *config, size_t config_len)
+static esp_err_t bus_dma_init_internal(bus_dma_ctx_t *ctx, uint8_t bus_type,
+                                       bool dma_enabled, const uint8_t *config,
+                                       size_t config_len, int32_t controller_id)
 {
     if (ctx == NULL || config == NULL) return ESP_ERR_INVALID_ARG;
 
     memset(ctx, 0, sizeof(*ctx));
     ctx->bus_type    = bus_type;
     ctx->dma_enabled = dma_enabled;
+    ctx->preferred_controller = controller_id;
 
     ctx->tx_mutex = xSemaphoreCreateMutex();
     if (ctx->tx_mutex == NULL) return ESP_ERR_NO_MEM;
@@ -1077,6 +1190,22 @@ esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
 
     ctx->initialized = true;
     return ESP_OK;
+}
+
+esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
+                       const uint8_t *config, size_t config_len)
+{
+    return bus_dma_init_internal(ctx, bus_type, dma_enabled, config,
+                                 config_len, -1);
+}
+
+esp_err_t bus_dma_init_preferred(bus_dma_ctx_t *ctx, uint8_t bus_type,
+                                 bool dma_enabled, const uint8_t *config,
+                                 size_t config_len, int32_t controller_id)
+{
+    if (controller_id < -1) return ESP_ERR_INVALID_ARG;
+    return bus_dma_init_internal(ctx, bus_type, dma_enabled, config,
+                                 config_len, controller_id);
 }
 
 /* ==================================================================
@@ -1106,6 +1235,13 @@ size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
     /* No mutex needed for RX: uart_read_bytes is thread-safe (ESP-IDF
      * internal per-port spinlock), and rx_task is the sole consumer. */
     return uart_read(ctx, buf, buf_size);
+}
+
+QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx)
+{
+    if (ctx == NULL || !ctx->initialized || ctx->bus_type != BUS_TYPE_UART)
+        return NULL;
+    return ctx->uart_event_queue;
 }
 
 /* ---- SPI / I2C: transactional ---- */
@@ -1158,6 +1294,7 @@ esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx)
     }
 
     ctx->initialized = false;
+    ctx->uart_event_queue = NULL;
     ESP_LOGI(TAG, "Bus type=%d deinit", ctx->bus_type);
     return ESP_OK;
 }
