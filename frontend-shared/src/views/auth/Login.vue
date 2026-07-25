@@ -107,7 +107,7 @@ const refreshLock = () => {
 
 const statusMessages: Record<AuthState, string> = {
   initialized: '',
-  migration_required: '系统认证迁移尚未完成，请运行 ehomectl auth migration-status 并完成迁移。',
+  migration_required: '系统认证状态异常，请通过本机运维流程恢复。',
   uninitialized: '系统尚未初始化，请先使用本机初始化凭据完成初始化。',
   disabled: '系统认证已被禁用，请联系管理员。',
 }

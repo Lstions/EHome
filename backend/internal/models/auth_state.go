@@ -15,8 +15,9 @@ const (
 	AuthStateDisabled          = "disabled"
 )
 
-// AuthState is the fixed, system-level authentication state row. Application
-// runtime code must never infer an uninitialized installation from a missing row.
+// AuthState is the fixed, system-level authentication state row. A missing row
+// is treated as a fresh-install condition by the explicit bootstrap paths; any
+// state-changing flow must persist the row before continuing.
 type AuthState struct {
 	Key             string     `gorm:"primaryKey;size:32" json:"key"`
 	State           string     `gorm:"size:32;not null" json:"state"`
@@ -26,13 +27,15 @@ type AuthState struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
-// LoadAuthState fails closed when the fixed state row is missing. It does not
-// persist the synthetic migration_required value.
+// LoadAuthState returns the persistent auth state row. When the row is missing
+// (fresh database), it returns a synthetic uninitialized state without
+// persisting anything. The row is created on first access by the GET
+// /initialization handler or the environment bootstrap path.
 func LoadAuthState(db *gorm.DB) (AuthState, error) {
 	var state AuthState
 	err := db.Where("key = ?", SystemAuthStateKey).First(&state).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return AuthState{Key: SystemAuthStateKey, State: AuthStateMigrationRequired}, nil
+		return AuthState{Key: SystemAuthStateKey, State: AuthStateUninitialized}, nil
 	}
 	return state, err
 }

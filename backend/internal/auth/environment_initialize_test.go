@@ -89,8 +89,8 @@ func TestInitializeSystemFromEnvironmentRequiresCompleteCredentials(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.State != models.AuthStateMigrationRequired {
-		t.Fatalf("state=%q, want migration_required", state.State)
+	if state.State != models.AuthStateUninitialized {
+		t.Fatalf("state=%q, want uninitialized", state.State)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestInitializeSystemFromEnvironmentRefusesExistingUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.State != models.AuthStateMigrationRequired {
-		t.Fatalf("state=%q, want migration_required", state.State)
+	if state.State != models.AuthStateUninitialized {
+		t.Fatalf("state=%q, want uninitialized", state.State)
 	}
 }

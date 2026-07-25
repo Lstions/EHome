@@ -40,8 +40,16 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 		auth.GET("/initialization", func(c *gin.Context) {
 			state, err := models.LoadAuthState(db)
 			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_MIGRATION_REQUIRED", "data": gin.H{"state": models.AuthStateMigrationRequired}})
+				c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_UNAVAILABLE", "data": gin.H{"state": "unavailable"}})
 				return
+			}
+			// Fresh database: persist the uninitialized row so the
+			// POST /initialize endpoint can find it.
+			if state.State == models.AuthStateUninitialized {
+				if err := models.InstallAuthState(db); err != nil {
+					c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_UNAVAILABLE", "data": gin.H{"state": "unavailable"}})
+					return
+				}
 			}
 			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"state": state.State}})
 		})

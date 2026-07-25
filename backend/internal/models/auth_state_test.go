@@ -7,7 +7,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestAuthStateMissingIsMigrationRequired(t *testing.T) {
+func TestAuthStateMissingReturnsUninitialized(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -20,8 +20,8 @@ func TestAuthStateMissingIsMigrationRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.State != AuthStateMigrationRequired {
-		t.Fatalf("state = %q, want %q", state.State, AuthStateMigrationRequired)
+	if state.State != AuthStateUninitialized {
+		t.Fatalf("state = %q, want %q", state.State, AuthStateUninitialized)
 	}
 	var count int64
 	if err := db.Model(&AuthState{}).Count(&count).Error; err != nil {

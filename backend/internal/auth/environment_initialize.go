@@ -45,13 +45,17 @@ func InitializeSystemFromEnvironment(db *gorm.DB, request EnvironmentInitializat
 	if state.State == models.AuthStateDisabled {
 		return false, ErrSystemNotUninitialized
 	}
+	if state.State != models.AuthStateUninitialized {
+		return false, ErrSystemNotUninitialized
+	}
 	if err := validateInitializationInput(username, request.Password); err != nil {
 		return false, err
 	}
 
-	// A missing state row is normally migration_required and must remain so.
-	// The explicit administrator environment is the operator's opt-in to a
-	// fresh-install bootstrap, but only while the database is truly empty.
+	// A missing state row is normally uninitialized and must be persisted
+	// before the initialization flow can proceed. The explicit administrator
+	// environment is the operator's opt-in to a fresh-install bootstrap,
+	// but only while the database is truly empty.
 	var users int64
 	if err := db.Model(&models.User{}).Count(&users).Error; err != nil {
 		return false, err
@@ -59,10 +63,8 @@ func InitializeSystemFromEnvironment(db *gorm.DB, request EnvironmentInitializat
 	if users != 0 {
 		return false, fmt.Errorf("environment bootstrap refused: %d user(s) already exist", users)
 	}
-	if state.State == models.AuthStateMigrationRequired {
-		if err := ensureUninitializedAuthState(db); err != nil {
-			return false, err
-		}
+	if err := models.InstallAuthState(db); err != nil {
+		return false, err
 	}
 
 	// Reuse the audited, transactional initialization flow. The generated
@@ -80,21 +82,4 @@ func InitializeSystemFromEnvironment(db *gorm.DB, request EnvironmentInitializat
 		return false, err
 	}
 	return true, nil
-}
-
-func ensureUninitializedAuthState(db *gorm.DB) error {
-	var persisted models.AuthState
-	err := db.Where("key = ?", models.SystemAuthStateKey).First(&persisted).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return models.InstallAuthState(db)
-	}
-	if err != nil {
-		return err
-	}
-	return db.Model(&models.AuthState{}).
-		Where("key = ? AND state = ?", models.SystemAuthStateKey, models.AuthStateMigrationRequired).
-		Updates(map[string]interface{}{
-			"state":            models.AuthStateUninitialized,
-			"security_version": 1,
-		}).Error
 }
