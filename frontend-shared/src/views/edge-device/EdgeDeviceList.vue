@@ -1105,6 +1105,12 @@ const handleCreate = async () => {
     const frozenParser = selectedParser.value
       ? { ...selectedParser.value, hardware_types: [...(selectedParser.value.hardware_types || [])] }
       : null
+    const matchingDeviceConfig = frozenParser
+      ? availableTemplates.value.find(
+          template => template.parser_id === frozenParser.id || template.device_type === frozenParser.id,
+        )
+      : undefined
+    const deviceConfigId = frozenParser?.device_config_id ?? matchingDeviceConfig?.id
     const selectedChannelConfig = selectedChannel.value?.config
     const frozenSelectedChannel = selectedChannel.value
       ? {
@@ -1185,13 +1191,15 @@ const handleCreate = async () => {
       throw new Error('请先选择或创建通道')
     }
     
-    // 创建边缘设备 (后端 DTO 字段: type, node_id(string), channel_id, hardware_id)
+    // 创建边缘设备 (后端要求通过 device_config_id 绑定设备配置，type 由后端推导)
+    if (!deviceConfigId) throw new Error('所选解析器没有对应的设备配置，请刷新页面后重试')
     await edgeDeviceApi.create({
       name: String(frozenDeviceForm.name),
       node_id: String(frozenDeviceForm.node_id!),
       channel_id: channelId!,
       type: frozenParser.id,
       hardware_id: targetChannel.hardware_id,
+      device_config_id: deviceConfigId,
     })
     assertSessionGeneration(sessionGeneration)
     if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')

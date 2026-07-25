@@ -6,6 +6,7 @@ import client from './client'
 
 export interface Parser {
   id: string              // 唯一标识: "bosch.bmp280"
+  device_config_id?: number // 后端 device_configs.id，用于创建设备时建立外键关联
   name: string            // 显示名称: "BMP280 温度气压传感器"
   vendor: string          // 厂商: "博世"
   category: string          // 类别: "温度气压传感器"
@@ -24,8 +25,10 @@ function resolveHardwareTypes(d: any): string[] {
 }
 
 function normalizeParser(d: any): Parser {
+  const deviceConfigId = Number(d.id)
   return {
     id: d.type || d.device_type,
+    device_config_id: Number.isInteger(deviceConfigId) && deviceConfigId > 0 ? deviceConfigId : undefined,
     name: d.display_name || d.name,
     vendor: d.oem || d.vendor || '',
     category: d.category || '',

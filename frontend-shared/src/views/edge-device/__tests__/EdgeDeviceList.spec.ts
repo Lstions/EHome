@@ -11,6 +11,7 @@ const {
   mockParserGetList,
   mockTemplateGetList,
   mockEdgeDeviceGetList,
+  mockEdgeDeviceCreate,
   mockCompactEdgeDeviceList,
 } = vi.hoisted(() => ({
   mockFetchNodes: vi.fn(() => Promise.resolve()),
@@ -29,6 +30,7 @@ const {
     ],
     total: 2,
   })),
+  mockEdgeDeviceCreate: vi.fn(() => Promise.resolve({ id: 3 })),
   mockCompactEdgeDeviceList: vi.fn((items: unknown) =>
     Array.isArray(items)
       ? items.filter(item => item !== null && typeof item === 'object' && !Array.isArray(item) && 'id' in item)
@@ -76,7 +78,7 @@ vi.mock('@/api/edgeDevice', () => ({
     getList: mockEdgeDeviceGetList,
     delete: vi.fn(() => Promise.resolve()),
     update: vi.fn(() => Promise.resolve()),
-    create: vi.fn(() => Promise.resolve({ id: 3 })),
+    create: mockEdgeDeviceCreate,
   },
 }))
 
@@ -227,6 +229,41 @@ describe('EdgeDeviceList.vue', () => {
     await wrapper.vm.$nextTick()
 
     expect((wrapper.vm as any).availableBusesForType('i2c')).toEqual(['I2C0'])
+  })
+
+  it('submits the selected device config id when creating an edge device', async () => {
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.deviceFormRef = { validate: vi.fn(() => Promise.resolve(true)) }
+    vm.deviceForm.name = 'BMS'
+    vm.deviceForm.node_id = '30EDA0A9A808'
+    vm.selectedParser = {
+      id: 'jiabaida_bms',
+      device_config_id: 42,
+      name: 'BMS',
+      vendor: '嘉佰达',
+      category: 'BMS',
+      hardware_types: ['uart'],
+      measure_types: [],
+    }
+    vm.selectedChannel = {
+      id: 1,
+      node_id: '30EDA0A9A808',
+      hardware_type: 'uart',
+      hardware_id: 'UART0',
+      config: { device_type: 'jiabaida_bms' },
+    }
+
+    await vm.handleCreate()
+
+    expect(mockEdgeDeviceCreate).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'BMS',
+      node_id: '30EDA0A9A808',
+      channel_id: 1,
+      device_config_id: 42,
+    }))
   })
 
   it('reuses a matching fresh device-list cache when the page is remounted', async () => {

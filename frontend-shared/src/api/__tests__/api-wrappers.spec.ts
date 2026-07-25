@@ -525,6 +525,28 @@ describe('edgeDeviceApi', () => {
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices', { params: { node_id: 5, status: 'online' } })
   })
 
+  it('create forwards device_config_id required by the backend', async () => {
+    mockClient.post.mockResolvedValue({ id: 9 })
+
+    await edgeDeviceApi.create({
+      name: 'BMS',
+      node_id: '30EDA0A9A808',
+      channel_id: 1,
+      type: 'jiabaida_bms',
+      hardware_id: 'UART0',
+      device_config_id: 42,
+    })
+
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices', {
+      name: 'BMS',
+      node_id: '30EDA0A9A808',
+      channel_id: 1,
+      type: 'jiabaida_bms',
+      hardware_id: 'UART0',
+      device_config_id: 42,
+    })
+  })
+
   it('getDetail with envelope data', async () => {
     mockClient.get.mockResolvedValue({ data: { id: 1, name: 'dev1', status: 'online' } })
     const res = await edgeDeviceApi.getDetail(1)
@@ -967,13 +989,14 @@ describe('parserApi', () => {
     mockClient.get.mockResolvedValue({
       data: {
         list: [
-          { type: 'bmp280', display_name: 'BMP280', oem: 'Bosch', category: 'temp', hardware_types: ['i2c'], measure_type: ['temperature'], description: 'desc' }
+          { id: 42, type: 'bmp280', display_name: 'BMP280', oem: 'Bosch', category: 'temp', hardware_types: ['i2c'], measure_type: ['temperature'], description: 'desc' }
         ]
       }
     })
     const res = await parserApi.getList()
     expect(res).toHaveLength(1)
     expect(res[0].id).toBe('bmp280')
+    expect(res[0].device_config_id).toBe(42)
     expect(res[0].vendor).toBe('Bosch')
     expect(res[0].hardware_types).toEqual(['i2c'])
   })

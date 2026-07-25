@@ -30,6 +30,7 @@ export interface DeviceConfig {
   name: string
   description: string
   device_type: string
+  parser_id?: string
   protocol?: 'modbus' | 'stream' | 'custom' | ''
   hardware_type: 'uart' | 'i2c' | 'spi' | 'adc'
   config: Record<string, any>
