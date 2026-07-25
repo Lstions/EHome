@@ -295,6 +295,11 @@ static bool parse_channel_fields(config_channel_t *cur_channel, const uint8_t *d
                 memcpy(cur_channel->bus_config, cf.value.bytes.ptr, cf.value.bytes.len);
                 cur_channel->bus_config_len = cf.value.bytes.len;
                 break;
+            case 8: /* dma_enabled (new manifest field) */
+                if (cf.wire_type != WIRE_VARINT) return false;
+                cur_channel->dma_enabled = cf.value.varint != 0;
+                cur_channel->dma_enabled_present = true;
+                break;
             case 9: /* edge_device_groups */
                 if (cf.wire_type != WIRE_LENGTH_DELIMITED || !cf.value.bytes.ptr) return false;
                 if (cur_channel->edge_device_count >= MAX_EDGE_DEVICES_PER_CH) return false;
@@ -832,4 +837,3 @@ void config_mgr_clear_epoch(void)
 
     ESP_LOGI(TAG, "Epoch and manifest_id cleared from NVS");
 }
-
