@@ -82,6 +82,7 @@ static esp_err_t tx_snapshot(void *opaque)
     tx->old_log_active = log_stream_is_active();
     tx->old_log_level = log_stream_get_level();
     if (err == ESP_OK) err = periph_config_snapshot_locked(&tx->old_peripherals);
+    if (err == ESP_OK) bus_manager_snapshot_leases(&tx->app->bus_runtime);
     return err;
 }
 
@@ -259,8 +260,16 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     }
     bool had_old = config_mgr_snapshot_active(old_snapshot);
 
-    /* Suspend rx_task/cmd_task before cleanup to prevent race */
-    bus_worker_suspend();
+    /* Suspend rx_task/cmd_task before cleanup to prevent race.  A worker
+     * waiting on a queue must acknowledge within a bounded deadline; never
+     * proceed to delete driver/event queues after an incomplete suspend. */
+    if (!bus_worker_suspend()) {
+        ESP_LOGE(TAG, "Rejecting ConfigManifest: worker suspend timeout");
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        free(old_snapshot);
+        free(tx);
+        return;
+    }
 
     /* Mutex — bus teardown/rebuild may block */
     app_state_lock_config();
@@ -297,8 +306,11 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     tx->queues = (scheduler_queues_t){
         .uart0_cmd_queue = s->uart0_cmd_queue,
         .uart1_cmd_queue = s->uart1_cmd_queue,
+        .uart2_cmd_queue = s->uart2_cmd_queue,
         .spi_cmd_queue = s->spi_cmd_queue,
         .i2c_cmd_queue = s->i2c_cmd_queue,
+        .uart_route = bus_manager_get_uart_port,
+        .route_ctx = &s->bus_runtime,
     };
     config_apply_result_t tx_result = config_apply_transaction_execute(
         &s_manifest_tx_ops, tx, had_old ? old_snapshot : NULL, staged_cfg);

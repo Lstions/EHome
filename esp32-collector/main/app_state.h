@@ -55,11 +55,20 @@ typedef struct {
     /* ---- Command queue ---- */
     QueueHandle_t cmd_queue;                    /* WriteCommand compat (transition) */
 
-    /* ---- Per-bus command queues (for cmd_task split) ---- */
-    QueueHandle_t uart0_cmd_queue;              /* UART0 CMD_SAMPLE + CMD_WRITE */
-    QueueHandle_t uart1_cmd_queue;              /* UART1 CMD_SAMPLE + CMD_WRITE */
-    QueueHandle_t spi_cmd_queue;                /* SPI   CMD_SAMPLE + CMD_WRITE */
-    QueueHandle_t i2c_cmd_queue;                /* I2C   CMD_SAMPLE + CMD_WRITE */
+    /* ---- Per-controller command queues ----
+     * Sample queues are scheduler-owned; control queues are reserved for
+     * WriteCommand/ChannelCmdV2.  Workers consume both with the same
+     * UART0/UART1/SPI/I2C implementation. */
+    QueueHandle_t uart0_cmd_queue;
+    QueueHandle_t uart1_cmd_queue;
+    QueueHandle_t uart2_cmd_queue;
+    QueueHandle_t spi_cmd_queue;
+    QueueHandle_t i2c_cmd_queue;
+    QueueHandle_t uart0_control_queue;
+    QueueHandle_t uart1_control_queue;
+    QueueHandle_t uart2_control_queue;
+    QueueHandle_t spi_control_queue;
+    QueueHandle_t i2c_control_queue;
 
     /* ---- Pending command state (per channel, FreeRTOS Queue) ---- */
     /* Each UART channel has a queue of pending_cmd_t entries so that

@@ -65,8 +65,14 @@ void app_state_init_bus_runtime(app_state_t *s, bus_runtime_t *rt)
     rt->pending_queues  = s->pending_queues;
     rt->uart0_cmd_queue = s->uart0_cmd_queue;
     rt->uart1_cmd_queue = s->uart1_cmd_queue;
+    rt->uart2_cmd_queue = s->uart2_cmd_queue;
     rt->spi_cmd_queue   = s->spi_cmd_queue;
     rt->i2c_cmd_queue   = s->i2c_cmd_queue;
+    rt->uart0_control_queue = s->uart0_control_queue;
+    rt->uart1_control_queue = s->uart1_control_queue;
+    rt->uart2_control_queue = s->uart2_control_queue;
+    rt->spi_control_queue   = s->spi_control_queue;
+    rt->i2c_control_queue   = s->i2c_control_queue;
     rt->find_ctx        = bus_manager_find_ctx;  /* P2-8: breaks circular dependency */
 }
 
@@ -95,8 +101,14 @@ app_state_t *app_state_init(void)
     /* Per-bus command queues (for cmd_task split) */
     s_app.uart0_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
     s_app.uart1_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
+    s_app.uart2_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
     s_app.spi_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
     s_app.i2c_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.uart0_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.uart1_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.uart2_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.spi_control_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.i2c_control_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
 
     /* Zero the pool markers */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {

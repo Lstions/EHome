@@ -42,6 +42,7 @@
 #endif
 
 #define TAG "EHOME"
+#define STATUS_TASK_STACK 6144
 
 static bool s_ota_pending_verify = false;
 
@@ -294,7 +295,11 @@ void app_main(void)
     wifi_mgr_start();
 
     /* ---- Background tasks ---- */
-    xTaskCreate(status_task, "status", 3072, (void *)s, 3, NULL);
+    /* StatusReport now carries runtime queue/performance metrics and nested
+     * channel health.  Its bounded encoder buffers live on this call stack;
+     * keep a dedicated budget so a valid report cannot trip the stack guard
+     * while UART RX workers are active. */
+    xTaskCreate(status_task, "status", STATUS_TASK_STACK, (void *)s, 3, NULL);
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
     /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */
     bus_worker_set_callbacks(msg_handler_send_write_rsp, msg_handler_send_data_report);
