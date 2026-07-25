@@ -30,7 +30,8 @@ int main(void)
           "oversized timeout accepted");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 0), "UART0 rejected");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 1), "UART1 rejected");
-    CHECK(!legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 2), "UART2 fallback accepted");
+    CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 2), "UART2 rejected");
+    CHECK(!legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 3), "invalid UART route accepted");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_I2C, 0), "I2C rejected");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_SPI, 0), "SPI rejected");
     CHECK(!legacy_write_route_valid(4, 0), "unsupported bus accepted");

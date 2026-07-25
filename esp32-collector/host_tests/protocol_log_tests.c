@@ -118,6 +118,20 @@ static void test_data_report_omits_optional_routing_fields_when_zero(void)
           "command_template_id must be omitted when zero");
 }
 
+static void test_data_report_accepts_event_driven_payload_block(void)
+{
+    uint8_t buf[1400];
+    uint8_t raw[1024];
+    size_t len = 0;
+    for (size_t i = 0; i < sizeof(raw); i++) raw[i] = (uint8_t)i;
+    CHECK(data_report_encode(buf, sizeof(buf), &len,
+                             7, 100, 42, raw, sizeof(raw),
+                             0, 0, 0, 0, 0) == FRAME_OK,
+          "1024-byte event-driven payload must fit DataReport frame");
+    CHECK(len > sizeof(raw) && buf[0] == MSG_DATA_RPT,
+          "large DataReport frame must retain wire header and payload");
+}
+
 static void test_log_stream_entry_is_a_raw_subframe(void)
 {
     uint8_t buf[256];
@@ -314,11 +328,39 @@ static void test_scheduler_queue_guard(void)
     CHECK(scheduler_queue_is_present((const void *)0x1), "non-NULL queue must be accepted");
 }
 
+static void test_frame_encoder_supports_extended_field_tags(void)
+{
+    uint8_t buf[32];
+    frame_encoder_t enc;
+    frame_encoder_init_sub(&enc, buf, sizeof(buf));
+    CHECK(frame_encode_varint(&enc, 18, 42) == FRAME_OK,
+          "extended varint field encode failed");
+    CHECK(frame_encode_bytes(&enc, 23, (const uint8_t *)"x", 1) == FRAME_OK,
+          "extended bytes field encode failed");
+    CHECK(enc.pos >= 7 && buf[0] == 0x90 && buf[1] == 0x01 && buf[2] == 42,
+          "field 18 tag must use a canonical two-byte varint");
+
+    frame_decoder_t dec;
+    frame_field_t field;
+    CHECK(frame_decoder_init_sub(&dec, buf, enc.pos) == FRAME_OK,
+          "extended tag decoder init failed");
+    CHECK(frame_decoder_next(&dec, &field) == FRAME_OK &&
+          field.field_num == 18 && field.value.varint == 42,
+          "field 18 did not round-trip");
+    CHECK(frame_decoder_next(&dec, &field) == FRAME_OK &&
+          field.field_num == 23 && field.value.bytes.len == 1 &&
+          field.value.bytes.ptr[0] == 'x',
+          "field 23 did not round-trip");
+    CHECK(frame_decoder_next(&dec, &field) == FRAME_DONE,
+          "extended tag frame contains trailing bytes");
+}
+
 int main(void)
 {
     test_sub_encoder_emits_raw_field_sequence();
     test_data_report_encodes_template_id_as_field_9();
     test_data_report_omits_optional_routing_fields_when_zero();
+    test_data_report_accepts_event_driven_payload_block();
     test_log_stream_entry_is_a_raw_subframe();
     test_log_stream_rejects_invalid_inputs_and_capacity();
     test_native_log_capture_preserves_metadata_and_encodes_protocol();
@@ -326,6 +368,7 @@ int main(void)
     test_native_log_capture_filters_contention_and_feedback();
     test_native_log_capture_resource_budget();
     test_scheduler_queue_guard();
+    test_frame_encoder_supports_extended_field_tags();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", s_failures);

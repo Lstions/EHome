@@ -54,6 +54,24 @@ target_include_directories(legacy_write_guard_tests PRIVATE
 target_compile_options(legacy_write_guard_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME legacy_write_guard_tests COMMAND legacy_write_guard_tests)
 
+add_executable(bus_queue_policy_tests bus_queue_policy_tests.c)
+target_include_directories(bus_queue_policy_tests PRIVATE
+    ../components/bus_worker/include)
+target_compile_options(bus_queue_policy_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME bus_queue_policy_tests COMMAND bus_queue_policy_tests)
+
+add_executable(bus_rx_boundary_tests bus_rx_boundary_tests.c)
+target_include_directories(bus_rx_boundary_tests PRIVATE
+    ../components/bus_worker/include)
+target_compile_options(bus_rx_boundary_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME bus_rx_boundary_tests COMMAND bus_rx_boundary_tests)
+
+add_executable(bus_lease_policy_tests bus_lease_policy_tests.c)
+target_include_directories(bus_lease_policy_tests PRIVATE
+    ../components/bus_manager/include)
+target_compile_options(bus_lease_policy_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME bus_lease_policy_tests COMMAND bus_lease_policy_tests)
+
 add_executable(hw_profile_resource_report_tests
     hw_profile_resource_report_tests.c
     ../components/frame/frame_codec.c
@@ -111,6 +129,19 @@ target_compile_definitions(config_manifest_pwm_tests PRIVATE
 )
 target_compile_options(config_manifest_pwm_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME config_manifest_pwm_tests COMMAND config_manifest_pwm_tests)
+
+add_executable(dma_pool_contract_tests
+    dma_pool_contract_tests.c
+    ../components/dma_pool/dma_pool.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(dma_pool_contract_tests PRIVATE
+    stubs
+    ../components/dma_pool/include
+    ../components/frame
+)
+target_compile_options(dma_pool_contract_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME dma_pool_contract_tests COMMAND dma_pool_contract_tests)
 
 add_executable(periph_config_apply_tests
     periph_config_apply_tests.c
