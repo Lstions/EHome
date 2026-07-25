@@ -1,0 +1,86 @@
+# EHomeSystem — 镜像部署版 docker-compose
+# 使用 GitHub Packages 构建好的镜像,数据全部持久化到本地 ./data 目录
+# 一键打包整个目录即可迁移: tar czf ehome.tar.gz docker-compose.example.yml .env data/
+# 部署: tar xzf ehome.tar.gz && docker compose -f docker-compose.example.yml --env-file .env up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ehome-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?err — POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err — POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ehome}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ehome-redis
+    restart: unless-stopped
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  emqx:
+    image: emqx/emqx:5.7
+    container_name: ehome-emqx
+    restart: unless-stopped
+    ports:
+      - "${EMQX_MQTT_PORT:-1883}:1883"
+      - "${EMQX_WS_PORT:-8083}:8083"
+      - "${EMQX_DASHBOARD_PORT:-18083}:18083"
+    environment:
+      EMQX_NAME: ehome
+      EMQX_LOADED_MODULES: "emqx_mod_acl_internal"
+    volumes:
+      - ./data/emqx:/opt/emqx/data
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ehome:
+    image: ghcr.io/lstions/ehome:latest
+    container_name: ehome-web
+    restart: unless-stopped
+    ports:
+      - "${HOME_PORT:-80}:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      EHOME_DB_SSLMODE: ${EHOME_DB_SSLMODE:-disable}
+      EHOME_ADMIN_USERNAME: ${EHOME_ADMIN_USERNAME:-}
+      EHOME_ADMIN_PASSWORD: ${EHOME_ADMIN_PASSWORD:-}
+      EHOME_ADMIN_EMAIL: ${EHOME_ADMIN_EMAIL:-}
+      REDIS_ADDR: redis:6379
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-server
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required}
+      EHOME_JWT_SECRET: ${EHOME_JWT_SECRET:?err — EHOME_JWT_SECRET is required}
+      EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
+      EHOME_STATIC_DIR: /app/static/dist
+    volumes:
+      - ./data/firmwares:/app/firmwares
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
