@@ -440,6 +440,28 @@ func TestHelloV26HandshakeNonceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExtendedFieldTagsRoundTrip(t *testing.T) {
+	enc := NewEncoder(MsgStatusRpt)
+	enc.EncodeVarint(18, 42)
+	enc.EncodeBytes(23, []byte("x"))
+	wire := enc.Bytes()
+	if len(wire) < 8 || wire[1] != 0x90 || wire[2] != 0x01 {
+		t.Fatalf("field 18 tag is not canonical: %x", wire)
+	}
+	dec, err := NewDecoder(wire)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	field, err := dec.NextField()
+	if err != nil || field.FieldNum != 18 || GetUint64(field) != 42 {
+		t.Fatalf("field 18 round trip: field=%#v err=%v", field, err)
+	}
+	field, err = dec.NextField()
+	if err != nil || field.FieldNum != 23 || string(GetBytes(field)) != "x" {
+		t.Fatalf("field 23 round trip: field=%#v err=%v", field, err)
+	}
+}
+
 func TestHelloAckV26HandshakeNonceRoundTrip(t *testing.T) {
 	const nonce uint32 = 0xFFFFFFFF
 	enc := NewEncoder(MsgHelloAck)

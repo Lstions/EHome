@@ -106,13 +106,13 @@ func (e *Encoder) Size() int {
 
 // EncodeVarint adds a varint field
 func (e *Encoder) EncodeVarint(fieldNum uint8, value uint64) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireVarint))
+	e.buf = appendTag(e.buf, fieldNum, WireVarint)
 	e.buf = appendVarint(e.buf, value)
 }
 
 // EncodeString adds a string field
 func (e *Encoder) EncodeString(fieldNum uint8, value string) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireLengthDelimited))
+	e.buf = appendTag(e.buf, fieldNum, WireLengthDelimited)
 	data := []byte(value)
 	e.buf = appendVarint(e.buf, uint64(len(data)))
 	e.buf = append(e.buf, data...)
@@ -120,7 +120,7 @@ func (e *Encoder) EncodeString(fieldNum uint8, value string) {
 
 // EncodeBytes adds a bytes field
 func (e *Encoder) EncodeBytes(fieldNum uint8, value []byte) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireLengthDelimited))
+	e.buf = appendTag(e.buf, fieldNum, WireLengthDelimited)
 	e.buf = appendVarint(e.buf, uint64(len(value)))
 	e.buf = append(e.buf, value...)
 }
@@ -233,8 +233,14 @@ func (d *Decoder) NextField() (*Field, error) {
 
 // === Helpers ===
 
-func makeTag(fieldNum uint8, wireType uint8) uint8 {
-	return (fieldNum << 3) | (wireType & 0x07)
+func appendTag(buf []byte, fieldNum uint8, wireType uint8) []byte {
+	// Tags are varints too.  A one-byte tag is sufficient through field 15;
+	// fields 16..31 require the canonical two-byte representation (for
+	// example field 18 is 0x90, 0x01).  Keeping this here avoids truncating
+	// the continuation bit when status telemetry grows beyond the legacy
+	// field range.
+	tag := (uint64(fieldNum) << 3) | uint64(wireType&0x07)
+	return appendVarint(buf, tag)
 }
 
 func appendVarint(buf []byte, value uint64) []byte {
