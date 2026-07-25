@@ -27,6 +27,7 @@
 #include <inttypes.h>
 
 #define TAG "SCHEDULER"
+#define SCHED_CONTROL_QUEUE_RESERVE 2U
 
 /* ── per-channel state (struct definition now in scheduler.h) ──── */
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
@@ -35,6 +36,15 @@ static volatile bool   s_running;
 static volatile bool   s_prepared;
 static scheduler_queues_t s_queues;
 static volatile uint32_t s_min_queue_spaces;
+static scheduler_queue_metrics_t s_queue_metrics;
+
+enum {
+    SCHED_Q_UART0 = 0,
+    SCHED_Q_UART1 = 1,
+    SCHED_Q_UART2 = 2,
+    SCHED_Q_SPI = 3,
+    SCHED_Q_I2C = 4,
+};
 
 static void scheduler_task(void *p);
 
@@ -44,7 +54,10 @@ static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t
 {
     switch (bcmd->bus_type) {
     case BUS_TYPE_UART:
-        return (bcmd->uart_port == UART_NUM_0) ? q->uart0_cmd_queue : q->uart1_cmd_queue;
+        if (bcmd->uart_port == UART_NUM_0) return q->uart0_cmd_queue;
+        if (bcmd->uart_port == UART_NUM_1) return q->uart1_cmd_queue;
+        if (bcmd->uart_port == UART_NUM_2) return q->uart2_cmd_queue;
+        return NULL;
     case BUS_TYPE_SPI:  return q->spi_cmd_queue;
     case BUS_TYPE_I2C:  return q->i2c_cmd_queue;
     default:            return q->uart0_cmd_queue;
@@ -64,6 +77,43 @@ static UBaseType_t min_queue_spaces(UBaseType_t left, UBaseType_t right)
     return left < right ? left : right;
 }
 
+static int queue_metric_index(const bus_cmd_t *cmd)
+{
+    if (!cmd) return -1;
+    switch (cmd->bus_type) {
+    case BUS_TYPE_UART:
+        if (cmd->uart_port == UART_NUM_0) return SCHED_Q_UART0;
+        if (cmd->uart_port == UART_NUM_1) return SCHED_Q_UART1;
+        if (cmd->uart_port == UART_NUM_2) return SCHED_Q_UART2;
+        return -1;
+    case BUS_TYPE_SPI: return SCHED_Q_SPI;
+    case BUS_TYPE_I2C: return SCHED_Q_I2C;
+    default: return -1;
+    }
+}
+
+static UBaseType_t queue_metric_capacity(int index)
+{
+    return (index == SCHED_Q_SPI || index == SCHED_Q_I2C) ? 8U : 16U;
+}
+
+static void observe_queue_metrics(void)
+{
+    QueueHandle_t queues[SCHED_QUEUE_METRIC_COUNT] = {
+        s_queues.uart0_cmd_queue, s_queues.uart1_cmd_queue,
+        s_queues.uart2_cmd_queue, s_queues.spi_cmd_queue,
+        s_queues.i2c_cmd_queue,
+    };
+    for (int i = 0; i < SCHED_QUEUE_METRIC_COUNT; i++) {
+        UBaseType_t spaces = queue_spaces_or_depth(queues[i]);
+        UBaseType_t capacity = queue_metric_capacity(i);
+        s_queue_metrics.current_spaces[i] = (uint32_t)spaces;
+        uint32_t used = spaces <= capacity ? (uint32_t)(capacity - spaces) : 0;
+        if (used > s_queue_metrics.high_water_used[i])
+            s_queue_metrics.high_water_used[i] = used;
+    }
+}
+
 /* ── derive uart_port_t from bus_config bytes via hw_tables ── */
 /* P3-7: Replaced static derive_uart_port with shared hw_derive_uart_port from hw_tables */
 
@@ -75,6 +125,16 @@ static uart_port_t derive_uart_port(const config_channel_t *ch)
     return hw_derive_uart_port(ch->bus_config[0], ch->bus_config[1], UART_NUM_1);
 }
 
+static uart_port_t route_uart_port(const config_channel_t *ch)
+{
+    if (ch && s_queues.uart_route) {
+        uart_port_t leased = s_queues.uart_route(s_queues.route_ctx, ch->id);
+        if (leased >= UART_NUM_0 && leased < UART_NUM_MAX)
+            return leased;
+    }
+    return derive_uart_port(ch);
+}
+
 /* ── public API ──────────────────────────────────────────────────── */
 
 void scheduler_init(void)
@@ -84,11 +144,13 @@ void scheduler_init(void)
     s_prepared    = false;
     s_task_handle = NULL;
     s_min_queue_spaces = CMD_QUEUE_DEPTH;
+    memset(&s_queue_metrics, 0, sizeof(s_queue_metrics));
 }
 
 static bool queues_valid(const scheduler_queues_t *queues)
 {
     return queues && (queues->uart0_cmd_queue || queues->uart1_cmd_queue ||
+                      queues->uart2_cmd_queue ||
                       queues->spi_cmd_queue || queues->i2c_cmd_queue);
 }
 
@@ -195,6 +257,7 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
         s_queues = *queues;
     }
     if (s_queues.uart0_cmd_queue == NULL && s_queues.uart1_cmd_queue == NULL &&
+        s_queues.uart2_cmd_queue == NULL &&
         s_queues.spi_cmd_queue == NULL && s_queues.i2c_cmd_queue == NULL) {
         ESP_LOGE(TAG, "all queues are NULL, cannot resume");
         return SCHED_ERR_INVALID;
@@ -383,6 +446,12 @@ void scheduler_get_performance(scheduler_performance_t *out)
         ? (uint32_t)uxTaskGetStackHighWaterMark(s_task_handle) : 0;
 }
 
+void scheduler_get_queue_metrics(scheduler_queue_metrics_t *out)
+{
+    if (!out) return;
+    memcpy(out, &s_queue_metrics, sizeof(*out));
+}
+
 /* ── scheduler helper functions ──────────────────────────────────── */
 
 /**
@@ -437,9 +506,21 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
             };
             memcpy(bcmd.tx_data, t->write_data, bcmd.tx_len);
 
-            bcmd.uart_port = derive_uart_port(&ch->config);
+            bcmd.uart_port = route_uart_port(&ch->config);
             QueueHandle_t target_q = dispatch_queue(&s_queues, &bcmd);
-            if (!scheduler_queue_is_present(target_q) || xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
+            int metric_index = queue_metric_index(&bcmd);
+            /* Keep a small per-bus reserve for on-demand control commands.
+             * A congested SPI queue must not suppress UART0/UART1 sampling. */
+            if (!scheduler_queue_is_present(target_q) ||
+                uxQueueSpacesAvailable(target_q) <= SCHED_CONTROL_QUEUE_RESERVE ||
+                xQueueSend(target_q, &bcmd, 0) != pdTRUE) {
+                if (metric_index >= 0) {
+                    if (!scheduler_queue_is_present(target_q) ||
+                        uxQueueSpacesAvailable(target_q) <= SCHED_CONTROL_QUEUE_RESERVE)
+                        s_queue_metrics.sample_skipped[metric_index]++;
+                    else
+                        s_queue_metrics.sample_rejected[metric_index]++;
+                }
                 (*queue_full_count)++;
                 scmd->error_count++;
                 if (scmd->error_count > 100) scmd->error_count = 100;
@@ -518,9 +599,19 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
         return;
     }
 
-    cmd.uart_port = derive_uart_port(&ch->config);
+    cmd.uart_port = route_uart_port(&ch->config);
     QueueHandle_t target_q = dispatch_queue(&s_queues, &cmd);
-    if (!scheduler_queue_is_present(target_q) || xQueueSend(target_q, &cmd, 0) != pdTRUE) {
+    int metric_index = queue_metric_index(&cmd);
+    if (!scheduler_queue_is_present(target_q) ||
+        uxQueueSpacesAvailable(target_q) <= SCHED_CONTROL_QUEUE_RESERVE ||
+        xQueueSend(target_q, &cmd, 0) != pdTRUE) {
+        if (metric_index >= 0) {
+            if (!scheduler_queue_is_present(target_q) ||
+                uxQueueSpacesAvailable(target_q) <= SCHED_CONTROL_QUEUE_RESERVE)
+                s_queue_metrics.sample_skipped[metric_index]++;
+            else
+                s_queue_metrics.sample_rejected[metric_index]++;
+        }
         (*queue_full_count)++;
     } else {
         (*total_samples)++;
@@ -573,10 +664,14 @@ static void scheduler_task(void *p)
         UBaseType_t min_spaces = CMD_QUEUE_DEPTH;
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart0_cmd_queue));
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart1_cmd_queue));
+        min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.uart2_cmd_queue));
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.spi_cmd_queue));
         min_spaces = min_queue_spaces(min_spaces, queue_spaces_or_depth(s_queues.i2c_cmd_queue));
+        observe_queue_metrics();
         if (min_spaces < s_min_queue_spaces) s_min_queue_spaces = min_spaces;
-        bool queue_pressure = (min_spaces < (CMD_QUEUE_DEPTH / 4));  /* < 25% free */
+        /* Pressure is evaluated at the destination queue at enqueue time;
+         * global min pressure is retained only for diagnostics. */
+        bool queue_pressure = false;
 
         /* Iterate through all active channels */
         for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
