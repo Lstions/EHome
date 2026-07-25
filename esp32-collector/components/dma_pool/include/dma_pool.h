@@ -98,7 +98,8 @@ void dma_pool_init(dma_pool_t *pool, const hw_dma_t *table, int count);
 
 /**
  * @brief Auto-allocate a DMA channel compatible with bus_type.
- * @return ESP_OK or ESP_ERR_NOT_FOUND (caller degrades to polled)
+ * @return ESP_OK or ESP_ERR_NOT_FOUND.  An explicit DMA request must be
+ *         rejected by the manifest planner when no exclusive channel exists.
  */
 esp_err_t dma_pool_allocate(dma_pool_t *pool, uint8_t bus_type,
                              const char *hw_id, uint32_t *out_dma_id);
