@@ -21,7 +21,7 @@ static inline bool legacy_write_args_valid(uint32_t channel_id,
 
 static inline bool legacy_write_route_valid(uint8_t bus_type, int uart_port)
 {
-    if (bus_type == LEGACY_WRITE_BUS_UART) return uart_port == 0 || uart_port == 1;
+    if (bus_type == LEGACY_WRITE_BUS_UART) return uart_port >= 0 && uart_port < 3;
     return bus_type == LEGACY_WRITE_BUS_I2C || bus_type == LEGACY_WRITE_BUS_SPI;
 }
 

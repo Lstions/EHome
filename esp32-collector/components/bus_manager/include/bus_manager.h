@@ -25,6 +25,7 @@ extern "C" {
 void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb);
 
 void bus_manager_init(bus_runtime_t *rt);
+void bus_manager_snapshot_leases(bus_runtime_t *rt);
 esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt);
 esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt);
 esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t *manifest);
@@ -38,6 +39,9 @@ esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id);
  * @return Pointer to context, or NULL if not found.
  */
 bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id);
+
+/** Resolve the active physical UART lease for scheduler dispatch. */
+uart_port_t bus_manager_get_uart_port(void *runtime, uint32_t channel_id);
 
 /**
  * @brief Called by msg_handler when a WriteCommand (0x06) is received.
