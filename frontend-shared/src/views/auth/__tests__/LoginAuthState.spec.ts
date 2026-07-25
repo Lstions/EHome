@@ -47,7 +47,7 @@ describe('Login auth-state handling', () => {
     await flushPromises()
     await wrapper.get('[data-testid="login"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('认证迁移')
+    expect(wrapper.text()).toContain('认证状态异常')
     expect(mockLogin).not.toHaveBeenCalled()
   })
 
@@ -100,6 +100,6 @@ describe('Login auth-state handling', () => {
     wrapper.vm.errorMsg = ''
     await wrapper.get('[data-testid="login"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('认证迁移')
+    expect(wrapper.text()).toContain('认证状态异常')
   })
 })
