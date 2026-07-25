@@ -86,6 +86,23 @@ interface RawEdgeDevice {
   created_at?: string
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isRawEdgeDevice(value: unknown): value is RawEdgeDevice {
+  return isObjectRecord(value) && value.id !== undefined && value.id !== null
+}
+
+/**
+ * Keeps list consumers from receiving null, undefined, sparse, or otherwise
+ * unusable entries from an API/cache boundary.
+ */
+export function compactEdgeDeviceList(items: unknown): EdgeDevice[] {
+  if (!Array.isArray(items)) return []
+  return items.filter(isRawEdgeDevice) as EdgeDevice[]
+}
+
 // M9 fix: Explicit status mapping from backend values to frontend display values
 // Preserves health status values (active, warning, error, disabled) instead of collapsing to online/offline
 const STATUS_MAP: Record<string, DeviceStatus> = {
@@ -124,6 +141,9 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   device_config: d.device_config
 })
 
+const normalizeList = (items: unknown[]): EdgeDevice[] =>
+  items.filter(isRawEdgeDevice).map(normalize)
+
 // ============================================================
 // API (edgeDeviceApi)
 // ============================================================
@@ -134,14 +154,17 @@ export const edgeDeviceApi = {
     // Backend returns bare array [{...}], not {code, data, message} envelope
     // Interceptor returns response.data (parsed JSON body), so response IS the array
     if (Array.isArray(response)) {
-      return { total: response.length, items: response.map(normalize) }
+      return { total: response.length, items: normalizeList(response) }
     }
     // Handle envelope format if backend changes
-    if (response?.data?.items) {
-      return { total: response.data.total ?? response.data.items.length, items: response.data.items.map(normalize) }
+    if (Array.isArray(response?.data?.items)) {
+      return {
+        total: response.data.total ?? response.data.items.length,
+        items: normalizeList(response.data.items),
+      }
     }
     if (response?.data && Array.isArray(response.data)) {
-      return { total: response.data.length, items: response.data.map(normalize) }
+      return { total: response.data.length, items: normalizeList(response.data) }
     }
     return { total: 0, items: [] }
   },

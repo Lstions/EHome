@@ -1,6 +1,6 @@
 // src/stores/channel.ts
 import { defineStore } from 'pinia'
-import { channelApi, type Channel } from '@/api/channel'
+import { channelApi, compactChannelList, type Channel } from '@/api/channel'
 import { registerSessionCacheClearer } from '@/utils/sessionCache'
 
 export const useChannelStore = defineStore('channel', {
@@ -14,7 +14,7 @@ export const useChannelStore = defineStore('channel', {
 
   getters: {
     getByNodeId: (state) => (nodeId: number) => {
-      return state.channels.filter(ch => ch.node_id === nodeId)
+      return compactChannelList(state.channels).filter(ch => ch.node_id === nodeId)
     },
 
     getById: (state) => (id: number) => {
@@ -33,13 +33,13 @@ export const useChannelStore = defineStore('channel', {
         // API returns paginated response: { items: Channel[], total, page, page_size }
         // or when filtered by collector_id: { items: Channel[] } or Channel[]
         if (Array.isArray(res)) {
-          this.channels = res
+          this.channels = compactChannelList(res)
         } else if (res && typeof res === 'object' && 'items' in res) {
-          this.channels = (res as any).items || []
+          this.channels = compactChannelList((res as any).items)
         } else if (res && typeof res === 'object' && 'data' in res) {
           // nested wrap: { code, data: { items } }
           const inner = (res as any).data
-          this.channels = (inner && inner.items) ? inner.items : []
+          this.channels = compactChannelList(inner?.items)
         } else {
           this.channels = []
         }

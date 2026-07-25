@@ -576,7 +576,7 @@ import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
-import { edgeDeviceApi } from '@/api/edgeDevice'
+import { compactEdgeDeviceList, edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import client from '@/api/client'
 import type { Channel } from '@/api/channel'
@@ -632,7 +632,7 @@ const getListParams = () => {
 const initialCache = edgeDeviceStore.getCachedList(getListParams())
 const hasInitialCache = !!initialCache
 const loading = ref(!hasInitialCache)
-const devices = ref<any[]>(initialCache?.items || [])
+const devices = ref<EdgeDevice[]>(compactEdgeDeviceList(initialCache?.items))
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
 
@@ -747,7 +747,7 @@ const deviceTypes = deviceTypeOptions
 
 // 过滤后的设备
 const filteredDevices = computed(() => {
-  let result = devices.value
+  let result = compactEdgeDeviceList(devices.value)
   
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
@@ -780,7 +780,7 @@ const fetchDevices = async (force = false, throwOnError = false) => {
     await edgeDeviceStore.fetchList(params, force)
     if (sequence !== listRequestSequence) return
     const cached = edgeDeviceStore.getCachedList(params)
-    devices.value = cached?.items || []
+    devices.value = compactEdgeDeviceList(cached?.items)
     total.value = cached?.total || 0
     updateStats()
   } catch (error) {
@@ -817,8 +817,8 @@ const loadCreateWizardData = async () => {
 
 // 更新统计
 const updateStats = () => {
-  stats.total = devices.value.length
-  const allVisible = devices.value
+  const allVisible = compactEdgeDeviceList(devices.value)
+  stats.total = allVisible.length
   stats.online = allVisible.filter(d => d.status === 'active' || d.status === 'online').length
   stats.offline = allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length
   fetchTodayDataCount()
@@ -828,7 +828,7 @@ const updateStats = () => {
 const availableBusesForType = (hardwareType: string): string[] => {
   if (!deviceForm.node_id) return []
   const collectorChannels = channelStore.channels.filter(
-    ch => ch.node_id === deviceForm.node_id && ch.hardware_type === hardwareType
+    ch => ch?.node_id === deviceForm.node_id && ch.hardware_type === hardwareType
   )
   // 提取已有的 hardware_id（如 I2C0, UART1），去重
   const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))]
@@ -868,7 +868,7 @@ const selectedParserBusTypes = computed(() => {
 const existingChannels = computed(() => {
   if (!selectedParser.value) return []
   return channelStore.channels.filter(ch => 
-    ch.node_id === deviceForm.node_id &&
+    ch?.node_id === deviceForm.node_id &&
     selectedParser.value!.hardware_types.includes(ch.hardware_type)
   )
 })
@@ -1001,7 +1001,7 @@ const handleDelete = async (device: any) => {
 
     await edgeDeviceStore.deleteDevice(device.id)
     deleted = true
-    devices.value = devices.value.filter(item => item.id !== device.id)
+    devices.value = devices.value.filter(item => item?.id !== device.id)
     total.value = Math.max(0, total.value - 1)
     updateStats()
     try {
@@ -1037,7 +1037,7 @@ const handleBatchDelete = async () => {
     const succeeded = results.filter(result => result.status === 'fulfilled').length
     const failed = results.length - succeeded
     const succeededIds = new Set(ids.filter((_id, index) => results[index].status === 'fulfilled'))
-    devices.value = devices.value.filter(device => !succeededIds.has(device.id))
+    devices.value = devices.value.filter(device => device && !succeededIds.has(device.id))
     total.value = Math.max(0, total.value - succeeded)
     updateStats()
     selectedDevices.value = []

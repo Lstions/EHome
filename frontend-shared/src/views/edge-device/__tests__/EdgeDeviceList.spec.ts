@@ -7,12 +7,19 @@ import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 const {
   mockFetchNodes,
   mockChannelGetList,
+  mockCompactChannelList,
   mockParserGetList,
   mockTemplateGetList,
   mockEdgeDeviceGetList,
+  mockCompactEdgeDeviceList,
 } = vi.hoisted(() => ({
   mockFetchNodes: vi.fn(() => Promise.resolve()),
   mockChannelGetList: vi.fn(() => Promise.resolve([])),
+  mockCompactChannelList: vi.fn((items: unknown) =>
+    Array.isArray(items)
+      ? items.filter(item => item !== null && typeof item === 'object' && !Array.isArray(item))
+      : [],
+  ),
   mockParserGetList: vi.fn(() => Promise.resolve([])),
   mockTemplateGetList: vi.fn(() => Promise.resolve({ list: [] })),
   mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
@@ -22,6 +29,11 @@ const {
     ],
     total: 2,
   })),
+  mockCompactEdgeDeviceList: vi.fn((items: unknown) =>
+    Array.isArray(items)
+      ? items.filter(item => item !== null && typeof item === 'object' && !Array.isArray(item) && 'id' in item)
+      : [],
+  ),
 }))
 
 // Mock vue-router
@@ -59,6 +71,7 @@ vi.mock('@/stores/websocket', () => ({
 
 // Mock device-related APIs
 vi.mock('@/api/edgeDevice', () => ({
+  compactEdgeDeviceList: mockCompactEdgeDeviceList,
   edgeDeviceApi: {
     getList: mockEdgeDeviceGetList,
     delete: vi.fn(() => Promise.resolve()),
@@ -68,6 +81,7 @@ vi.mock('@/api/edgeDevice', () => ({
 }))
 
 vi.mock('@/api/channel', () => ({
+  compactChannelList: mockCompactChannelList,
   channelApi: {
     getList: mockChannelGetList,
     update: vi.fn(() => Promise.resolve()),
@@ -172,6 +186,47 @@ describe('EdgeDeviceList.vue', () => {
     await flushPromises()
     const statCards = wrapper.findAll('.stat-card')
     expect(statCards.length).toBe(4) // total, online, offline, todayData
+  })
+
+  it('ignores malformed device entries when filtering and calculating stats', async () => {
+    mockEdgeDeviceGetList.mockResolvedValueOnce({
+      items: [
+        undefined,
+        null,
+        { id: 7, name: 'Valid device', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
+      ] as any[],
+      total: 3,
+    })
+
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+
+    expect(wrapper.vm.filteredDevices).toHaveLength(1)
+    expect((wrapper.vm.filteredDevices as any[])[0].id).toBe(7)
+    expect((wrapper.vm as any).stats.total).toBe(1)
+
+    ;(wrapper.vm as any).statusFilter = 'offline'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.filteredDevices).toEqual([])
+  })
+
+  it('opens the create wizard when the channel list contains malformed entries', async () => {
+    mockChannelGetList.mockResolvedValueOnce([
+      undefined,
+      null,
+      { id: 8, node_id: 1, hardware_type: 'i2c', hardware_id: 'I2C0', config: {} },
+    ] as any)
+
+    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+    await flushPromises()
+
+    ;(wrapper.vm as any).showCreateDialog = true
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+    ;(wrapper.vm as any).deviceForm.node_id = 1
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as any).availableBusesForType('i2c')).toEqual(['I2C0'])
   })
 
   it('reuses a matching fresh device-list cache when the page is remounted', async () => {

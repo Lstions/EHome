@@ -93,6 +93,17 @@ describe('channelApi', () => {
     expect(res).toEqual([{ id: 1 }, { id: 2 }])
   })
 
+  it('getList drops malformed channel entries', async () => {
+    mockClient.get.mockResolvedValue({
+      code: 200,
+      data: { items: [undefined, null, { id: 3, node_id: 1 }] },
+    })
+
+    const res = await channelApi.getList()
+
+    expect(res).toEqual({ items: [{ id: 3, node_id: 1 }] })
+  })
+
   it('getList with error code throws', async () => {
     mockClient.get.mockResolvedValue({ code: 400, data: null })
     await expect(channelApi.getList()).rejects.toThrow('获取通道列表失败')
@@ -471,6 +482,21 @@ describe('edgeDeviceApi', () => {
     const res = await edgeDeviceApi.getList()
     expect(res.total).toBe(1)
     expect(res.items[0].status).toBe('online')
+  })
+
+  it('getList drops malformed entries before normalization', async () => {
+    mockClient.get.mockResolvedValue([
+      undefined,
+      null,
+      { name: 'missing-id' },
+      { id: 2, name: 'valid-device', status: 'active' },
+    ])
+
+    const res = await edgeDeviceApi.getList()
+
+    expect(res.total).toBe(4)
+    expect(res.items).toHaveLength(1)
+    expect(res.items[0].id).toBe(2)
   })
 
   it('getList with envelope .data.items', async () => {

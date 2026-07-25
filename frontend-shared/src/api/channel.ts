@@ -21,6 +21,16 @@ export interface Channel {
   created_at?: string
 }
 
+function isChannelRecord(value: unknown): value is Channel {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Remove nullish/sparse entries before channel consumers read channel fields. */
+export function compactChannelList(items: unknown): Channel[] {
+  if (!Array.isArray(items)) return []
+  return items.filter(isChannelRecord)
+}
+
 export const channelApi = {
   // 获取通道列表
   // Server returns: { code: 200, data: { items: Channel[], total, page, page_size } }
@@ -36,8 +46,11 @@ export const channelApi = {
     }
     // Unwrap: { data: { items: [...] } } -> { items: [...] }
     const inner = (body as any).data
-    if (Array.isArray(inner)) return inner
-    return inner || { items: [] }
+    if (Array.isArray(inner)) return compactChannelList(inner)
+    if (inner && typeof inner === 'object' && Array.isArray(inner.items)) {
+      return { ...inner, items: compactChannelList(inner.items) }
+    }
+    return { items: [] }
   },
 
   // 获取单个通道
