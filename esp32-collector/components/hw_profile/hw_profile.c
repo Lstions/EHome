@@ -19,6 +19,66 @@
 
 static char s_boot_id[COMMAND_ENGINE_BOOT_ID_MAX] = "unknown";
 
+typedef struct {
+    bool valid;
+    uint32_t channel_id;
+    uint8_t bus_type;
+    uint32_t controller_id;
+    bool dma_requested;
+    bool dma_allocated;
+    uint32_t generation;
+} runtime_channel_t;
+
+static runtime_channel_t s_runtime_channels[MAX_CHANNELS];
+
+void hw_profile_runtime_set(uint32_t channel_id, uint8_t bus_type,
+                            uint32_t controller_id, bool dma_requested,
+                            bool dma_allocated, uint32_t generation)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id) {
+            s_runtime_channels[i] = (runtime_channel_t){
+                true, channel_id, bus_type, controller_id,
+                dma_requested, dma_allocated, generation};
+            return;
+        }
+    }
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (!s_runtime_channels[i].valid) {
+            s_runtime_channels[i] = (runtime_channel_t){
+                true, channel_id, bus_type, controller_id,
+                dma_requested, dma_allocated, generation};
+            return;
+        }
+    }
+}
+
+void hw_profile_runtime_clear(void)
+{
+    memset(s_runtime_channels, 0, sizeof(s_runtime_channels));
+}
+
+void hw_profile_runtime_remove(uint32_t channel_id)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id) {
+            memset(&s_runtime_channels[i], 0, sizeof(s_runtime_channels[i]));
+            return;
+        }
+    }
+}
+
+static const runtime_channel_t *runtime_for_channel(uint32_t channel_id)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++)
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id)
+            return &s_runtime_channels[i];
+    return NULL;
+}
+
 void hw_profile_set_boot_id(const char *boot_id)
 {
     if (!boot_id || boot_id[0] == '\0') return;
@@ -67,25 +127,6 @@ static bool encode_manifest_capacity(frame_encoder_t *enc)
  * ================================================================ */
 
 /* Temporary buffer sizes for sub-message encoding */
-/* Local copy of bus_config_get_dma_enabled (from bus_dma.h, avoids dependency) */
-static inline bool local_bus_config_get_dma_enabled(uint8_t bus_type,
-                                                      const uint8_t *bus_config,
-                                                      size_t bus_config_len)
-{
-    size_t flags_offset = 0;
-    size_t min_len = 0;
-    switch (bus_type) {
-    case 1: flags_offset = 6; min_len = 7; break;  /* UART */
-    case 2: flags_offset = 7; min_len = 8; break;  /* I2C */
-    case 3: flags_offset = 6; min_len = 7; break;  /* SPI */
-    default: return false;
-    }
-    if (bus_config && bus_config_len >= min_len) {
-        return (bus_config[flags_offset] & 0x01) != 0;
-    }
-    return false;
-}
-
 #define SUB_ENTRY_BUF   128
 #define BUSES_BLOB_BUF  512
 #define CHAN_BLOB_BUF   2048
@@ -234,9 +275,18 @@ static bool encode_channel_entry(uint8_t *out, size_t cap, size_t *out_len,
     }
 
     /* field8: dma_enabled extracted from bus_config flags */
-    bool dma = local_bus_config_get_dma_enabled(ch->bus_type, ch->bus_config,
-                                          ch->bus_config_len);
+    bool dma = config_channel_get_dma_enabled(ch);
     if (frame_encode_varint(&enc, 8, dma ? 1 : 0) != FRAME_OK) return false;
+
+    const runtime_channel_t *runtime = runtime_for_channel(ch->id);
+    if (runtime) {
+        /* Optional fields preserve old consumers while reporting the actual
+         * controller lease and whether DMA was really allocated. */
+        if (frame_encode_varint(&enc, 9, runtime->controller_id) != FRAME_OK ||
+            frame_encode_bool(&enc, 10, runtime->dma_allocated) != FRAME_OK ||
+            frame_encode_varint(&enc, 11, runtime->generation) != FRAME_OK)
+            return false;
+    }
 
     *out_len = frame_encoder_size(&enc);
     return true;

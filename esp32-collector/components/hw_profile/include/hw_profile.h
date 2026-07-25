@@ -38,6 +38,13 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
 /* Set once during app startup. The ResourceReport owns a copied value. */
 void hw_profile_set_boot_id(const char *boot_id);
 
+/** Runtime lease snapshot used to enrich ResourceReport channel entries. */
+void hw_profile_runtime_set(uint32_t channel_id, uint8_t bus_type,
+                            uint32_t controller_id, bool dma_requested,
+                            bool dma_allocated, uint32_t generation);
+void hw_profile_runtime_remove(uint32_t channel_id);
+void hw_profile_runtime_clear(void);
+
 #ifdef __cplusplus
 }
 #endif
