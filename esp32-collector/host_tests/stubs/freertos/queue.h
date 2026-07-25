@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Host-test stubs for FreeRTOS queue APIs.  These provide linkable
  * implementations so source files that use QueueHandle_t / QueueSetHandle_t
@@ -12,6 +13,10 @@
 typedef void *QueueHandle_t;
 typedef void *QueueSetHandle_t;
 typedef void *QueueSetMemberHandle_t;
+
+#ifndef FREERTOS_SEMPHR_H
+typedef void *SemaphoreHandle_t;
+#endif
 
 typedef uint32_t UBaseType_t;
 typedef uint32_t TickType_t;

@@ -187,6 +187,23 @@ target_compile_definitions(bus_dma_lease_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6
 target_compile_options(bus_dma_lease_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME bus_dma_lease_tests COMMAND bus_dma_lease_tests)
 
+add_executable(bus_dma_tests bus_dma_tests.c
+    ../components/hw_profile/hw_tables.c
+)
+target_include_directories(bus_dma_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_dma/include
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+)
+target_compile_definitions(bus_dma_tests PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+    CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=1
+)
+target_compile_options(bus_dma_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_dma_tests COMMAND bus_dma_tests)
+
 add_executable(scheduler_route_tests scheduler_route_tests.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
@@ -225,6 +242,25 @@ target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP
 target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
 
+add_executable(bus_worker_rx_tests bus_worker_rx_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(bus_worker_rx_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+)
+target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
+
 add_executable(perf_metrics_encode_tests perf_metrics_encode_tests.c
     ../components/frame/frame_codec.c
 )
@@ -234,6 +270,55 @@ target_include_directories(perf_metrics_encode_tests PRIVATE
 )
 target_compile_options(perf_metrics_encode_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
+
+add_executable(handler_data_tests handler_data_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_report_codec.c
+)
+target_include_directories(handler_data_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/frame
+    ../components/msg_handler
+    ../components/config_mgr
+    ../components/sync_manager
+    ../components/scheduler
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/ota
+)
+target_compile_definitions(handler_data_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(handler_data_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME handler_data_tests COMMAND handler_data_tests)
+
+add_executable(app_state_tests app_state_tests.c
+    ../components/hw_profile/hw_tables.c
+    ../components/dma_pool/dma_pool.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(app_state_tests PRIVATE
+    stubs
+    stubs/rom
+    ../main
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/transport/include
+)
+target_compile_definitions(app_state_tests PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+    EHOME_PROJECT_VER="test"
+    CONFIG_IDF_TARGET="esp32c6"
+)
+target_compile_options(app_state_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME app_state_tests COMMAND app_state_tests)
 
 add_executable(periph_config_apply_tests
     periph_config_apply_tests.c

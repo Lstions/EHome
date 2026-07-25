@@ -410,6 +410,68 @@ static void test_observe_queue_metrics_null_queues(void)
     CHECK(s_queue_metrics.high_water_used[3] == 0, "NULL spi → used=0 (clamped)");
 }
 
+/* =====================================================================
+ * 5) scheduler_get_queue_metrics — public API snapshot
+ * ===================================================================== */
+static void test_get_queue_metrics_snapshot(void)
+{
+    reset_scheduler_state();
+
+    /* After init, all metrics should be zero */
+    scheduler_queue_metrics_t out;
+    memset(&out, 0xFF, sizeof(out));
+    scheduler_get_queue_metrics(&out);
+    for (int i = 0; i < SCHED_QUEUE_METRIC_COUNT; i++) {
+        CHECK(out.current_spaces[i] == 0, "init: current_spaces should be 0");
+        CHECK(out.high_water_used[i] == 0, "init: high_water_used should be 0");
+        CHECK(out.sample_skipped[i] == 0, "init: sample_skipped should be 0");
+        CHECK(out.sample_rejected[i] == 0, "init: sample_rejected should be 0");
+    }
+
+    /* NULL out → no crash */
+    scheduler_get_queue_metrics(NULL);
+    CHECK(1, "NULL out should not crash");
+}
+
+static void test_get_queue_metrics_reflects_internal_state(void)
+{
+    reset_scheduler_state();
+
+    /* Manually set internal metrics, verify public API copies them */
+    s_queue_metrics.current_spaces[0] = 12;
+    s_queue_metrics.high_water_used[0] = 4;
+    s_queue_metrics.sample_skipped[2] = 7;
+    s_queue_metrics.sample_rejected[3] = 3;
+
+    scheduler_queue_metrics_t out;
+    scheduler_get_queue_metrics(&out);
+    CHECK(out.current_spaces[0] == 12, "should copy current_spaces");
+    CHECK(out.high_water_used[0] == 4, "should copy high_water_used");
+    CHECK(out.sample_skipped[2] == 7, "should copy sample_skipped");
+    CHECK(out.sample_rejected[3] == 3, "should copy sample_rejected");
+    CHECK(out.current_spaces[1] == 0, "untouched fields should be 0");
+}
+
+/* =====================================================================
+ * 6) sample_skipped / sample_rejected counters
+ * ===================================================================== */
+static void test_sample_skip_and_reject_counters(void)
+{
+    reset_scheduler_state();
+
+    /* Simulate what schedule_v2_channel does on backpressure */
+    s_queue_metrics.sample_skipped[0]++;
+    s_queue_metrics.sample_skipped[0]++;
+    s_queue_metrics.sample_rejected[1]++;
+
+    scheduler_queue_metrics_t out;
+    scheduler_get_queue_metrics(&out);
+    CHECK(out.sample_skipped[0] == 2, "uart0 skipped should be 2");
+    CHECK(out.sample_skipped[1] == 0, "uart1 skipped should be 0");
+    CHECK(out.sample_rejected[1] == 1, "uart1 rejected should be 1");
+    CHECK(out.sample_rejected[0] == 0, "uart0 rejected should be 0");
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -429,6 +491,10 @@ int main(void)
 
     test_observe_queue_metrics_updates_spaces_and_high_water();
     test_observe_queue_metrics_null_queues();
+
+    test_get_queue_metrics_snapshot();
+    test_get_queue_metrics_reflects_internal_state();
+    test_sample_skip_and_reject_counters();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);
