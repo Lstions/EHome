@@ -57,3 +57,7 @@ frontend-shared/coverage/
 
 # Local ESP32 host-test build trees
 esp32-collector/host_tests/build*/
+
+# AI agent local files
+.hermes/
+.claude/

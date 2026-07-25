@@ -2,9 +2,23 @@ name: Test CI
 
 on:
   push:
-    branches: [main, develop, 'v*']
+    branches: [main, master, develop, 'v*']
+    paths:
+      - 'backend/**'
+      - 'frontend-shared/**'
+      - 'Dockerfile'
+      - 'docker-compose*.yml'
+      - '.env*'
+      - '.github/workflows/**'
   pull_request:
-    branches: [main, develop]
+    branches: [main, master, develop]
+    paths:
+      - 'backend/**'
+      - 'frontend-shared/**'
+      - 'Dockerfile'
+      - 'docker-compose*.yml'
+      - '.env*'
+      - '.github/workflows/**'
 
 concurrency:
   group: test-${{ github.ref }}
