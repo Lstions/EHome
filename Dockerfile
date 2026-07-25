@@ -2,7 +2,7 @@
 # Multi-stage build: backend (Go) + frontend (Vite) → single Alpine image.
 
 # ── Stage 1: Backend build ──────────────────────────────────────────────
-FROM golang:1.25-alpine AS backend-builder
+FROM golang:1.25.12-alpine AS backend-builder
 
 ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /app
