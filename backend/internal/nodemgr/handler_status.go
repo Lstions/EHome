@@ -17,11 +17,17 @@ import (
 // firmware counters sent in StatusReport field 9.  Stack values are FreeRTOS
 // words; a zero means the task was not running when the snapshot was made.
 type runtimePerformanceReport struct {
-	FreeHeapBytes          uint32 `json:"free_heap_bytes"`
-	MinFreeHeapBytes       uint32 `json:"min_free_heap_bytes"`
-	SchedulerStackFreeWord uint32 `json:"scheduler_stack_free_words"`
-	WorkerStackFreeWord    uint32 `json:"worker_stack_free_words"`
-	MinCommandQueueSpaces  uint32 `json:"min_command_queue_spaces"`
+	FreeHeapBytes          uint32    `json:"free_heap_bytes"`
+	MinFreeHeapBytes       uint32    `json:"min_free_heap_bytes"`
+	SchedulerStackFreeWord uint32    `json:"scheduler_stack_free_words"`
+	WorkerStackFreeWord    uint32    `json:"worker_stack_free_words"`
+	MinCommandQueueSpaces  uint32    `json:"min_command_queue_spaces"`
+	ReportDrops            uint32    `json:"report_drops"`
+	ReportQueueHighWater   uint32    `json:"report_queue_high_water"`
+	QueueCurrentSpaces     [5]uint32 `json:"queue_current_spaces"`
+	QueueHighWaterUsed     [5]uint32 `json:"queue_high_water_used"`
+	QueueSampleSkipped     [5]uint32 `json:"queue_sample_skipped"`
+	QueueSampleRejected    [5]uint32 `json:"queue_sample_rejected"`
 }
 
 // controlStatisticsReport is a bounded boot-local aggregate from the V2
@@ -40,7 +46,7 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 	if err != nil {
 		return report, err
 	}
-	seen := [6]bool{}
+	seen := [28]bool{}
 	for {
 		field, err := dec.NextField()
 		if errors.Is(err, frame.ErrEndOfFrame) {
@@ -49,7 +55,7 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 		if err != nil {
 			return report, err
 		}
-		if field.FieldNum < 1 || field.FieldNum > 5 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+		if field.FieldNum < 1 || field.FieldNum > 27 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
 			return report, fmt.Errorf("invalid runtime performance field")
 		}
 		value := frame.GetUint64(field)
@@ -68,6 +74,18 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 			report.WorkerStackFreeWord = uint32(value)
 		case 5:
 			report.MinCommandQueueSpaces = uint32(value)
+		case 6:
+			report.ReportDrops = uint32(value)
+		case 7:
+			report.ReportQueueHighWater = uint32(value)
+		case 8, 9, 10, 11, 12:
+			report.QueueCurrentSpaces[field.FieldNum-8] = uint32(value)
+		case 13, 14, 15, 16, 17:
+			report.QueueHighWaterUsed[field.FieldNum-13] = uint32(value)
+		case 18, 19, 20, 21, 22:
+			report.QueueSampleSkipped[field.FieldNum-18] = uint32(value)
+		case 23, 24, 25, 26, 27:
+			report.QueueSampleRejected[field.FieldNum-23] = uint32(value)
 		}
 	}
 	for field := uint8(1); field <= 5; field++ {

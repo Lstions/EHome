@@ -26,6 +26,12 @@ func TestStatusReportPersistsBoundedRuntimePerformance(t *testing.T) {
 	perf.EncodeVarint(3, 1200)
 	perf.EncodeVarint(4, 900)
 	perf.EncodeVarint(5, 8)
+	perf.EncodeVarint(6, 3)
+	perf.EncodeVarint(7, 12)
+	perf.EncodeVarint(8, 16)
+	perf.EncodeVarint(13, 6)
+	perf.EncodeVarint(18, 2)
+	perf.EncodeVarint(23, 1)
 	control := frame.NewEncoder(0)
 	control.EncodeVarint(1, 40)
 	control.EncodeVarint(2, 2)
@@ -60,6 +66,12 @@ func TestStatusReportPersistsBoundedRuntimePerformance(t *testing.T) {
 		info.RuntimePerformance.SchedulerStackFreeWord != 1200 ||
 		info.RuntimePerformance.WorkerStackFreeWord != 900 ||
 		info.RuntimePerformance.MinCommandQueueSpaces != 8 ||
+		info.RuntimePerformance.ReportDrops != 3 ||
+		info.RuntimePerformance.ReportQueueHighWater != 12 ||
+		info.RuntimePerformance.QueueCurrentSpaces[0] != 16 ||
+		info.RuntimePerformance.QueueHighWaterUsed[0] != 6 ||
+		info.RuntimePerformance.QueueSampleSkipped[0] != 2 ||
+		info.RuntimePerformance.QueueSampleRejected[0] != 1 ||
 		info.ControlStatistics.Accepted != 40 || info.ControlStatistics.Rejected != 2 ||
 		info.ControlStatistics.Completed != 38 || info.ControlStatistics.Replayed != 4 {
 		t.Fatalf("hardware_info=%s", stored.HardwareInfo)

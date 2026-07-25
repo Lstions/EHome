@@ -241,14 +241,17 @@ func decodeCommandEngine(data []byte) (commandEngineReport, error) {
 }
 
 type channelEntry struct {
-	ID          uint64   `json:"id"`
-	BusType     uint64   `json:"bus_type"`
-	HardwareID  uint64   `json:"hardware_id"`
-	IntervalMs  uint64   `json:"interval_ms"`
-	Enabled     bool     `json:"enabled"`
-	BusConfig   []byte   `json:"-"`
-	TemplateIDs []uint64 `json:"template_ids,omitempty"`
-	DmaEnabled  bool     `json:"dma_enabled"`
+	ID           uint64   `json:"id"`
+	BusType      uint64   `json:"bus_type"`
+	HardwareID   uint64   `json:"hardware_id"`
+	IntervalMs   uint64   `json:"interval_ms"`
+	Enabled      bool     `json:"enabled"`
+	BusConfig    []byte   `json:"-"`
+	TemplateIDs  []uint64 `json:"template_ids,omitempty"`
+	DmaEnabled   bool     `json:"dma_enabled"`
+	ControllerID uint64   `json:"controller_id,omitempty"`
+	DmaAllocated bool     `json:"dma_allocated"`
+	Generation   uint64   `json:"generation,omitempty"`
 }
 
 func validateKnownFields(data []byte, schema map[uint8]uint8, required []uint8, repeated map[uint8]bool) error {
@@ -584,6 +587,12 @@ func decodeChannelEntry(data []byte) channelEntry {
 			ch.TemplateIDs = append(ch.TemplateIDs, frame.GetUint64(field))
 		case 8:
 			ch.DmaEnabled = frame.GetBool(field)
+		case 9:
+			ch.ControllerID = frame.GetUint64(field)
+		case 10:
+			ch.DmaAllocated = frame.GetBool(field)
+		case 11:
+			ch.Generation = frame.GetUint64(field)
 		}
 	}
 	return ch

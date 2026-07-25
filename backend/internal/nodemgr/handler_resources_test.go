@@ -530,11 +530,15 @@ func TestDecodeChannelEntry(t *testing.T) {
 				enc.EncodeVarint(7, 1)                 // template_id
 				enc.EncodeVarint(7, 2)                 // template_id (repeated)
 				enc.EncodeBool(8, true)                // dma_enabled
+				enc.EncodeVarint(9, 1)                 // controller_id
+				enc.EncodeBool(10, true)               // dma_allocated
+				enc.EncodeVarint(11, 7)                // runtime generation
 			},
 			want: channelEntry{
 				ID: 1, BusType: 2, HardwareID: 0x76, IntervalMs: 5000,
 				Enabled: true, BusConfig: []byte{0x01, 0x02},
 				TemplateIDs: []uint64{1, 2}, DmaEnabled: true,
+				ControllerID: 1, DmaAllocated: true, Generation: 7,
 			},
 		},
 		{
@@ -582,6 +586,15 @@ func TestDecodeChannelEntry(t *testing.T) {
 			}
 			if got.DmaEnabled != tt.want.DmaEnabled {
 				t.Errorf("DmaEnabled: got %v, want %v", got.DmaEnabled, tt.want.DmaEnabled)
+			}
+			if got.ControllerID != tt.want.ControllerID {
+				t.Errorf("ControllerID: got %d, want %d", got.ControllerID, tt.want.ControllerID)
+			}
+			if got.DmaAllocated != tt.want.DmaAllocated {
+				t.Errorf("DmaAllocated: got %v, want %v", got.DmaAllocated, tt.want.DmaAllocated)
+			}
+			if got.Generation != tt.want.Generation {
+				t.Errorf("Generation: got %d, want %d", got.Generation, tt.want.Generation)
 			}
 			if string(got.BusConfig) != string(tt.want.BusConfig) {
 				t.Errorf("BusConfig: got %x, want %x", got.BusConfig, tt.want.BusConfig)
