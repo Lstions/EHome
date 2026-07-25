@@ -33,6 +33,28 @@ uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port
     return default_port;
 }
 
+spi_host_device_t hw_derive_spi_host(int mosi_pin, int miso_pin, int sclk_pin,
+                                     spi_host_device_t default_host)
+{
+    for (int i = 0; i < HW_SPI_COUNT; i++) {
+        if (hw_spis[i].default_mosi == mosi_pin &&
+            hw_spis[i].default_miso == miso_pin &&
+            hw_spis[i].default_sclk == sclk_pin)
+            return (spi_host_device_t)hw_spis[i].port;
+    }
+    return default_host;
+}
+
+i2c_port_t hw_derive_i2c_port(int sda_pin, int scl_pin, i2c_port_t default_port)
+{
+    for (int i = 0; i < HW_I2C_COUNT; i++) {
+        if (hw_i2cs[i].default_sda == sda_pin &&
+            hw_i2cs[i].default_scl == scl_pin)
+            return (i2c_port_t)hw_i2cs[i].port;
+    }
+    return default_port;
+}
+
 /* ================================================================
  *  Static Hardware Profile — per-target pin tables
  *

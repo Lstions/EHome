@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include "dma_pool.h"  /* for hw_dma_t */
 #include "driver/uart.h"  /* P3-7: for uart_port_t in hw_derive_uart_port */
+#include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -147,6 +149,11 @@ extern const hw_dma_t  hw_dmas[HW_DMA_COUNT];
  * @return        Matching uart_port_t, or default_port if no match found
  */
 uart_port_t hw_derive_uart_port(int tx_pin, int rx_pin, uart_port_t default_port);
+
+/** Resolve SPI/I2C controller from the configured bus pins. */
+spi_host_device_t hw_derive_spi_host(int mosi_pin, int miso_pin, int sclk_pin,
+                                     spi_host_device_t default_host);
+i2c_port_t hw_derive_i2c_port(int sda_pin, int scl_pin, i2c_port_t default_port);
 
 #ifdef __cplusplus
 }
