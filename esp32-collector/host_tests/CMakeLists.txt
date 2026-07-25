@@ -143,6 +143,98 @@ target_include_directories(dma_pool_contract_tests PRIVATE
 target_compile_options(dma_pool_contract_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME dma_pool_contract_tests COMMAND dma_pool_contract_tests)
 
+# ---- P0-P5 multi-bus tests ----
+
+add_executable(bus_manager_manifest_tests bus_manager_manifest_tests.c
+    ../components/hw_profile/hw_profile.c
+    ../components/hw_profile/hw_tables.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(bus_manager_manifest_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_manager/include
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/scheduler
+)
+target_compile_definitions(bus_manager_manifest_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_manager_manifest_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+add_test(NAME bus_manager_manifest_tests COMMAND bus_manager_manifest_tests)
+
+add_executable(bus_dma_lease_tests bus_dma_lease_tests.c
+    ../components/hw_profile/hw_profile.c
+    ../components/hw_profile/hw_tables.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(bus_dma_lease_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_manager/include
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/scheduler
+)
+target_compile_definitions(bus_dma_lease_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_dma_lease_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+add_test(NAME bus_dma_lease_tests COMMAND bus_dma_lease_tests)
+
+add_executable(scheduler_route_tests scheduler_route_tests.c
+    ../components/hw_profile/hw_tables.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(scheduler_route_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/scheduler
+    ../components/bus_dma/include
+    ../components/bus_worker/include
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+)
+target_compile_definitions(scheduler_route_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(scheduler_route_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME scheduler_route_tests COMMAND scheduler_route_tests)
+
+add_executable(bus_worker_report_tests bus_worker_report_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(bus_worker_report_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+)
+target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
+
+add_executable(perf_metrics_encode_tests perf_metrics_encode_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(perf_metrics_encode_tests PRIVATE
+    stubs
+    ../components/frame
+)
+target_compile_options(perf_metrics_encode_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
+
 add_executable(periph_config_apply_tests
     periph_config_apply_tests.c
     ../components/msg_handler/periph_config_apply.c
