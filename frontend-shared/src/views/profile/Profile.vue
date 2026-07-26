@@ -3,7 +3,7 @@
     <PageHeader title="个人设置" />
 
     <el-row :gutter="20">
-      <el-col :xs="24" :sm="24" :md="8">
+      <el-col :span="8">
         <el-card class="info-card">
           <div class="avatar-block">
             <el-avatar :size="80" :icon="UserFilled" />
@@ -14,19 +14,12 @@
         </el-card>
       </el-col>
 
-      <el-col :xs="24" :sm="24" :md="16">
+      <el-col :span="16">
         <el-card>
           <template #header>
             <span>修改密码</span>
           </template>
-          <el-form
-            ref="formRef"
-            :model="form"
-            :rules="rules"
-            label-width="100px"
-            :label-position="isMobile ? 'top' : 'right'"
-            class="password-form"
-          >
+          <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" style="max-width: 480px">
             <el-form-item label="当前密码" prop="old_password">
               <el-input v-model="form.old_password" type="password" show-password />
             </el-form-item>
@@ -55,11 +48,9 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/auth'
 import feedback from '@/utils/feedback'
-import { useResponsive } from '@/composables/useResponsive'
 
 const userStore = useUserStore()
 const userInfo = computed(() => userStore.userInfo)
-const { isMobile } = useResponsive()
 
 
 const formRef = ref<FormInstance>()
@@ -74,7 +65,7 @@ const rules: FormRules = {
   old_password: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   new_password: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 8, message: '至少 8 位', trigger: 'blur' },
+    { min: 6, message: '至少 6 位', trigger: 'blur' },
   ],
   confirm_password: [
     { required: true, message: '请再次输入新密码', trigger: 'blur' },

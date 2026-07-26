@@ -92,8 +92,12 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 			return
 		}
 		var edge models.EdgeDevice
-		if err := serviceDB(service).First(&edge, uint(id)).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-			Error(c, http.StatusNotFound, "edge device not found")
+		if err := serviceDB(service).First(&edge, uint(id)).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				Error(c, http.StatusNotFound, "edge device not found")
+				return
+			}
+			Error(c, http.StatusInternalServerError, "check edge device failed")
 			return
 		}
 		items, err := service.List(c.Request.Context(), uint(id), 0)

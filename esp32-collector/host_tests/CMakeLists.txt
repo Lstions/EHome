@@ -71,7 +71,6 @@ target_include_directories(bus_lease_policy_tests PRIVATE
     ../components/bus_manager/include)
 target_compile_options(bus_lease_policy_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_lease_policy_tests COMMAND bus_lease_policy_tests)
-
 add_executable(hw_profile_resource_report_tests
     hw_profile_resource_report_tests.c
     ../components/frame/frame_codec.c
@@ -444,3 +443,13 @@ target_include_directories(hello_handshake_tests PRIVATE
 target_compile_definitions(hello_handshake_tests PRIVATE HELLO_HANDSHAKE_HOST_TEST=1)
 target_compile_options(hello_handshake_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME hello_handshake_tests COMMAND hello_handshake_tests)
+
+add_executable(frame_codec_boundary_tests
+    frame_codec_boundary_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(frame_codec_boundary_tests PRIVATE
+    ../components/frame
+)
+target_compile_options(frame_codec_boundary_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME frame_codec_boundary_tests COMMAND frame_codec_boundary_tests)

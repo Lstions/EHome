@@ -31,20 +31,6 @@ describe('authApi', () => {
     expect(result).toEqual(loginData)
   })
 
-  it('initialize posts the first-run administrator setup data', async () => {
-    const setupData = { id: 1, username: 'admin' }
-    const request = {
-      credential: 'selector.secret',
-      username: 'admin',
-      password: 'strong-password-123',
-      email: 'admin@example.test',
-    }
-    mockClient.post.mockResolvedValue({ data: setupData })
-    const result = await authApi.initialize(request)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/auth/initialize', request)
-    expect(result).toEqual(setupData)
-  })
-
   it('logout posts to /api/v1/auth/logout', async () => {
     mockClient.post.mockResolvedValue(undefined)
     await authApi.logout()

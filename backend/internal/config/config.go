@@ -11,12 +11,13 @@ import (
 
 // Config holds all server configuration
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	MQTT     MQTTConfig     `yaml:"mqtt"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Log      LogConfig      `yaml:"log"`
-	Control  ControlConfig  `yaml:"control"`
+	Server         ServerConfig         `yaml:"server"`
+	Database       DatabaseConfig       `yaml:"database"`
+	MQTT           MQTTConfig           `yaml:"mqtt"`
+	Redis          RedisConfig          `yaml:"redis"`
+	Log            LogConfig            `yaml:"log"`
+	Control        ControlConfig        `yaml:"control"`
+	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
 }
 
 type ControlConfig struct {
@@ -60,6 +61,15 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
+// AdminBootstrapConfig is an explicit, first-run-only administrator
+// bootstrap configuration. Both username and password must be supplied;
+// there is intentionally no default account or password.
+type AdminBootstrapConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	Email    string `yaml:"email"`
+}
+
 // Default configuration
 func defaultConfig() *Config {
 	return &Config{
@@ -84,6 +94,7 @@ func defaultConfig() *Config {
 			Level: "info",
 		},
 		Control: ControlConfig{LegacyDeviceWriteMode: "disabled"},
+		AdminBootstrap: AdminBootstrapConfig{},
 	}
 }
 
@@ -163,6 +174,15 @@ func overrideWithEnv(cfg *Config) {
 				cfg.Control.EnabledDeviceActions = append(cfg.Control.EnabledDeviceActions, item)
 			}
 		}
+	}
+	if v := getEnv("EHOME_ADMIN_USERNAME", ""); v != "" {
+		cfg.AdminBootstrap.Username = v
+	}
+	if v := getEnv("EHOME_ADMIN_PASSWORD", ""); v != "" {
+		cfg.AdminBootstrap.Password = v
+	}
+	if v := getEnv("EHOME_ADMIN_EMAIL", ""); v != "" {
+		cfg.AdminBootstrap.Email = v
 	}
 }
 

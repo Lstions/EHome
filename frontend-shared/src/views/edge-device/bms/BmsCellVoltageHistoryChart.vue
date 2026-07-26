@@ -1,7 +1,7 @@
 <template>
   <el-card shadow="hover" style="margin-top: 20px;">
     <template #header>
-      <div class="cell-history-header">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
         <span>电芯电压历史趋势</span>
         <TimeRangeSelector
           v-model="timeRange"
@@ -194,33 +194,10 @@ onMounted(() => fetchCellVoltageHistory())
 </script>
 
 <style scoped>
-.cell-history-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .cell-selector {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   margin-bottom: 12px;
-}
-
-@media (max-width: 768px) {
-  .cell-history-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .cell-history-header :deep(.time-range-selector) {
-    width: 100%;
-  }
-
-  .cell-selector {
-    margin-bottom: 8px;
-  }
 }
 </style>

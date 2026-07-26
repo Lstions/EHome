@@ -123,30 +123,4 @@ const protectionItems = computed(() => {
 .no-protection {
   grid-column: 1 / -1;
 }
-
-@media (max-width: 768px) {
-  .bms-protection-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    padding: 2px 0;
-  }
-
-  .protection-item {
-    min-width: 0;
-    gap: 6px;
-    padding: 8px;
-  }
-
-  .protection-label {
-    min-width: 0;
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .protection-item :deep(.el-tag) {
-    flex-shrink: 0;
-  }
-}
 </style>

@@ -190,3 +190,77 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 		t.Fatalf("history did not include resolution status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// TestDeviceOperationEdgeNotFound verifies that routes querying an edge device
+// return 404 when the device does not exist, covering the error-handling branch
+// added in the uncommitted handler_device_operation.go patch.
+func TestDeviceOperationEdgeNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := testutil.OpenTestDB(t)
+
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	v1.Use(func(c *gin.Context) { c.Set("subject_id", uint(11)); c.Next() })
+	actions := deviceaction.NewBuiltInRegistry(nil)
+	service := commandexec.NewService(db, actions)
+	service.SetDispatchEnabled(true)
+	registerDeviceOperationRoutes(v1, service, nil)
+
+	// GET /edge-devices/9999/actions → 404
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/edge-devices/9999/actions", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("catalog for missing edge: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// GET /edge-devices/9999/operations → 404
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/edge-devices/9999/operations", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("history for missing edge: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// POST /edge-devices/9999/operations → 404
+	body := []byte(`{"action_id":"read_rainfall","params":{}}`)
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/9999/operations", bytes.NewReader(body))
+	req.Header.Set("Idempotency-Key", "missing-edge-0001")
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("create for missing edge: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestDeviceOperationNotFound verifies that single-operation routes return 404
+// for a nonexistent execution ID.
+func TestDeviceOperationNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := testutil.OpenTestDB(t)
+
+	r := gin.New()
+	v1 := r.Group("/api/v1")
+	v1.Use(func(c *gin.Context) { c.Set("subject_id", uint(11)); c.Next() })
+	actions := deviceaction.NewBuiltInRegistry(nil)
+	service := commandexec.NewService(db, actions)
+	service.SetDispatchEnabled(true)
+	registerDeviceOperationRoutes(v1, service, nil)
+
+	// GET /device-operations/<bogus-uuid> → 404
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/device-operations/00000000-0000-0000-0000-000000000000", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("get missing operation: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// POST /device-operations/<bogus-uuid>/cancel → 404
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/device-operations/00000000-0000-0000-0000-000000000000/cancel", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cancel missing operation: status=%d body=%s", w.Code, w.Body.String())
+	}
+}

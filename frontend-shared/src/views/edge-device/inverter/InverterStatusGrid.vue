@@ -167,11 +167,4 @@ const alarmItems = computed(() => {
 .no-alarm {
   grid-column: 1 / -1;
 }
-
-@media (max-width: 480px) {
-  .status-header { gap: 12px; }
-  .alarm-grid { grid-template-columns: 1fr; gap: 8px; }
-  .alarm-item { min-width: 0; padding: 8px 10px; }
-  .alarm-label { overflow-wrap: anywhere; }
-}
 </style>

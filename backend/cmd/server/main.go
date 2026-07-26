@@ -80,6 +80,15 @@ func main() {
 	}
 
 	db := database.GetDB()
+	if initialized, err := authservice.InitializeSystemFromEnvironment(db, authservice.EnvironmentInitializationRequest{
+		Username: cfg.AdminBootstrap.Username,
+		Password: cfg.AdminBootstrap.Password,
+		Email:    cfg.AdminBootstrap.Email,
+	}); err != nil {
+		logger.Fatalf("Failed to initialize administrator from environment: %v", err)
+	} else if initialized {
+		logger.Infof("System administrator initialized from explicit environment configuration")
+	}
 
 	if os.Getenv("SEED_TEST_DATA") == "true" {
 		if err := seed.SeedTestData(db); err != nil {

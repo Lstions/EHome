@@ -4,7 +4,7 @@
     :title="isEdit ? '编辑配置模板' : '新建配置模板'"
     width="680px"
     :close-on-click-modal="false"
-    class="config-form-dialog dialog-mobile-constrained"
+    class="config-form-dialog"
     destroy-on-close
   >
     <el-form :model="form" :rules="rules" label-position="top" ref="formRef">

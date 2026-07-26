@@ -211,9 +211,4 @@ function formatTemp(v: any): string {
 .fan-speed-bar {
   margin-top: 4px;
 }
-
-@media (max-width: 480px) {
-  .temp-grid, .fan-grid { grid-template-columns: 1fr; gap: 8px; }
-  .temp-item, .fan-item { padding: 10px; }
-}
 </style>

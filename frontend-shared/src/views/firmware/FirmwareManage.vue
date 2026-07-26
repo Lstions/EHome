@@ -22,12 +22,7 @@
           <el-button size="small" @click="selectedFirmwares = []">取消选择</el-button>
         </div>
 
-        <div class="table-wrapper">
-          <div class="table-scroll-hint">
-            <el-icon><ArrowRight /></el-icon>
-            <span>可横向滚动查看完整信息</span>
-          </div>
-          <el-table :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef" class="firmware-table">
+        <el-table :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef">
           <el-table-column type="selection" width="45" />
           <el-table-column prop="id" label="ID" width="50" />
           <el-table-column label="版本号" width="120">
@@ -76,7 +71,6 @@
             </template>
           </el-table-column>
         </el-table>
-      </div>
 
         <div style="display: flex; justify-content: center; margin-top: 16px;" v-if="total > 0">
           <el-pagination
@@ -96,14 +90,7 @@
     </el-card>
 
     <!-- 上传固件对话框 -->
-    <el-dialog
-      v-model="showUploadDialog"
-      title="上传固件"
-      align-center
-      width="500px"
-      class="dialog-mobile-constrained"
-      @close="resetUploadForm"
-    >
+    <el-dialog v-model="showUploadDialog" title="上传固件" align-center width="500px" @close="resetUploadForm">
       <el-form :model="uploadForm" :rules="uploadRules" label-width="100px">
         <el-form-item label="版本号" prop="version">
           <el-input v-model="uploadForm.version" placeholder="如: 1.0.0" />
@@ -135,14 +122,7 @@
     </el-dialog>
 
     <!-- 编辑固件对话框 -->
-    <el-dialog
-      v-model="showEditDialog"
-      title="编辑固件"
-      align-center
-      width="560px"
-      class="dialog-mobile-constrained"
-      :close-on-click-modal="false"
-    >
+    <el-dialog v-model="showEditDialog" title="编辑固件" align-center width="560px" :close-on-click-modal="false">
       <el-form :model="editForm" label-width="100px">
         <el-form-item label="版本号">
           <el-input v-model="editForm.version" placeholder="如: 1.0.0" />
@@ -168,7 +148,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled, ArrowRight } from '@element-plus/icons-vue'
+import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type UploadInstance, type UploadProps } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
@@ -419,37 +399,6 @@ onMounted(() => {
 <style scoped>
 .firmware-manage {
   padding: 0;
-}
-
-.table-wrapper {
-  width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-}
-
-.table-scroll-hint {
-  display: none;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-
-.firmware-table {
-  min-width: 900px;
-}
-
-@media (max-width: 768px) {
-  .table-scroll-hint {
-    display: flex;
-  }
-  .batch-bar {
-    flex-wrap: wrap;
-  }
 }
 
 .batch-bar {
