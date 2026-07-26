@@ -43,7 +43,7 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 		ControlAction{
 			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
 			Description: "一次提交充电/放电两个软件关闭位；必须 ACK 后读取 fet_status 对账",
-			Semantics: "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
 			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "hardware_evidence_required",
 			AvailabilityReason: "缺少真实 BMS 的 ACK、fet_status 读回和恢复证据",
 			Parameters: []ControlParameter{
@@ -54,15 +54,15 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 		},
 		ControlAction{ID: "read_protection_parameters", Version: 1, Name: "读取 BMS 保护参数",
 			Description: "嘉佰达 F2；需要受控工厂模式工作流，当前仅登记能力",
-			Semantics: "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
 			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F2 工厂模式步骤与实机响应尚未冻结"},
 		ControlAction{ID: "read_system_parameters", Version: 1, Name: "读取 BMS 系统参数",
 			Description: "嘉佰达 F3；需要受控工厂模式工作流，当前仅登记能力",
-			Semantics: "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
 			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F3 工厂模式步骤与实机响应尚未冻结"},
 		ControlAction{ID: "bms_restart", Version: 1, Name: "重启 BMS",
 			Description: "重启后必须观察离线窗口或 restart counter，不能以 ACK 判定成功",
-			Semantics: "reset", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
+			Semantics:   "reset", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
 			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified", AvailabilityReason: "未冻结 BMS 重启帧及离线/启动观测证据"},
 	)
 	return actions

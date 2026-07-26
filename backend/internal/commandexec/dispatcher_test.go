@@ -15,9 +15,9 @@ import (
 
 // dispatchFakeTransport records dispatch calls and returns a configurable result.
 type dispatchFakeTransport struct {
-	calls   []models.CommandExecution
-	result  DispatchResult
-	err     error
+	calls  []models.CommandExecution
+	result DispatchResult
+	err    error
 }
 
 func (f *dispatchFakeTransport) Dispatch(_ context.Context, exec models.CommandExecution, _ models.CommandAttempt) (DispatchResult, error) {

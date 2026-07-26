@@ -107,8 +107,8 @@ func TestIssueConfirmationInputValidation(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name  string
-		mutate func(*ConfirmationInput)
+		name    string
+		mutate  func(*ConfirmationInput)
 		wantErr error
 	}{
 		{"zero edge", func(in *ConfirmationInput) { in.EdgeDeviceID = 0 }, ErrConfirmationRequired},

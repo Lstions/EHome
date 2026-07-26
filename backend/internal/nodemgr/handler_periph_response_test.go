@@ -45,9 +45,9 @@ func TestPeriphRsp_DecodeBasic(t *testing.T) {
 func TestPeriphRsp_DecodeError(t *testing.T) {
 	// Arrange: 构造错误 PeriphRsp
 	enc := frame.NewEncoder(frame.MsgPeriphRsp)
-	enc.EncodeVarint(1, 99)   // request_id
-	enc.EncodeBool(2, false)  // success=false
-	enc.EncodeVarint(4, 5)    // error_code=5
+	enc.EncodeVarint(1, 99)  // request_id
+	enc.EncodeBool(2, false) // success=false
+	enc.EncodeVarint(4, 5)   // error_code=5
 
 	db := setupTestDBForPeriph(t)
 	wsHub := newTestWSHub()
@@ -115,13 +115,13 @@ func TestPeriphRsp_DecodeInvalidFrame(t *testing.T) {
 // TestPeriphRsp_TableDriven 表驱动测试: 多种 PeriphRsp 场景
 func TestPeriphRsp_TableDriven(t *testing.T) {
 	cases := []struct {
-		name       string
-		requestID  uint64
-		success    bool
-		value      uint64
-		errorCode  uint64
-		perPage    uint64
-		pin        uint64
+		name      string
+		requestID uint64
+		success   bool
+		value     uint64
+		errorCode uint64
+		perPage   uint64
+		pin       uint64
 	}{
 		{
 			name: "GPIO Read Success", requestID: 1, success: true, value: 1,

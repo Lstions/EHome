@@ -12,10 +12,10 @@ import (
 
 // overviewCache caches the /overview response for 30s (C2 fix)
 var (
-	overviewCacheMu    sync.RWMutex
-	overviewCacheData  interface{}
-	overviewCacheTime  time.Time
-	overviewCacheTTL   = 30 * time.Second
+	overviewCacheMu   sync.RWMutex
+	overviewCacheData interface{}
+	overviewCacheTime time.Time
+	overviewCacheTTL  = 30 * time.Second
 )
 
 func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {

@@ -68,7 +68,7 @@ func TestPingTracker_ShouldRetry(t *testing.T) {
 func TestPingTracker_Timeout(t *testing.T) {
 	pt := NewPingTracker()
 	pt.timeout = 50 * time.Millisecond // short timeout for test
-	pt.maxRetry = 1 // only 1 retry for fast test
+	pt.maxRetry = 1                    // only 1 retry for fast test
 	pt.StartWithInterval(50 * time.Millisecond)
 	defer pt.Stop()
 

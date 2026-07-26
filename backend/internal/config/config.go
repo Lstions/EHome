@@ -93,7 +93,7 @@ func defaultConfig() *Config {
 		Log: LogConfig{
 			Level: "info",
 		},
-		Control: ControlConfig{LegacyDeviceWriteMode: "disabled"},
+		Control:        ControlConfig{LegacyDeviceWriteMode: "disabled"},
 		AdminBootstrap: AdminBootstrapConfig{},
 	}
 }
