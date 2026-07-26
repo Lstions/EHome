@@ -37,3 +37,17 @@ export function formatUptime(tsUs: number): string {
   const millis = totalMs % 1000
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
 }
+
+/** Shared log-level dropdown options (ERROR=0 … VERBOSE=4). */
+export const LOG_LEVEL_OPTIONS: ReadonlyArray<{ label: string; value: number }> = [
+  { label: 'ERROR', value: 0 },
+  { label: 'WARN', value: 1 },
+  { label: 'INFO', value: 2 },
+  { label: 'DEBUG', value: 3 },
+  { label: 'VERBOSE', value: 4 },
+]
+
+/** Normalise an unknown catch value to a display string. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '未知错误'
+}

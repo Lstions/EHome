@@ -11,48 +11,28 @@
     <template v-else>
       <!-- 顶部统计 -->
       <div class="stats-row">
-        <div class="stat-card" @click="handleStatClick('all')">
-          <div class="stat-icon total">
-            <el-icon><Cpu /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">本页边缘设备</span>
-          </div>
-          <div class="stat-action">
-            <el-icon><Plus /></el-icon>
-          </div>
-        </div>
-        
-        <div class="stat-card online">
-          <div class="stat-icon online">
-            <el-icon><CircleCheck /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.online" class="stat-value" />
-            <span class="stat-label">本页在线</span>
-          </div>
-        </div>
-        
-        <div class="stat-card offline" @click="handleStatClick('offline')">
-          <div class="stat-icon offline">
-            <el-icon><CircleClose /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.offline" class="stat-value" />
-            <span class="stat-label">本页离线/异常</span>
-          </div>
-        </div>
+        <StatCard label="本页边缘设备" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
+          <template #icon><el-icon><Cpu /></el-icon></template>
+          <template #value><CountUp :value="stats.total" class="stat-value" /></template>
+          <template #suffix>
+            <div class="stat-action"><el-icon><Plus /></el-icon></div>
+          </template>
+        </StatCard>
 
-        <div class="stat-card" @click="handleStatClick('today')">
-          <div class="stat-icon today">
-            <el-icon><DataAnalysis /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.todayData" :decimals="1" suffix="k" class="stat-value" />
-            <span class="stat-label">今日数据</span>
-          </div>
-        </div>
+        <StatCard label="本页在线" icon-color="var(--el-color-success)">
+          <template #icon><el-icon><CircleCheck /></el-icon></template>
+          <template #value><CountUp :value="stats.online" class="stat-value" /></template>
+        </StatCard>
+
+        <StatCard label="本页离线/异常" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
+          <template #icon><el-icon><CircleClose /></el-icon></template>
+          <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
+        </StatCard>
+
+        <StatCard label="今日数据" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
+          <template #icon><el-icon><DataAnalysis /></el-icon></template>
+          <template #value><CountUp :value="stats.todayData" :decimals="1" suffix="k" class="stat-value" /></template>
+        </StatCard>
       </div>
 
     <!-- 工具栏 -->
@@ -364,7 +344,7 @@
               <h4>{{ parser.name }}</h4>
               <p class="parser-vendor">{{ parser.vendor }}</p>
               <div class="parser-tags">
-                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getBusTagType(bus) as any">
+                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus) as any">
                   {{ bus.toUpperCase() }}
                 </el-tag>
               </div>
@@ -414,7 +394,7 @@
                 @click="selectChannel(ch)"
               >
                 <code>{{ ch.name || (ch.hardware_type?.toUpperCase() + ' ' + ch.hardware_id) }}</code>
-                <el-tag size="small" :type="getBusTagType(ch.hardware_type) as any">{{ ch.hardware_type.toUpperCase() }}</el-tag>
+                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ ch.hardware_type.toUpperCase() }}</el-tag>
                 <span class="channel-bus-id">{{ ch.hardware_id }}</span>
                 <div v-if="selectedChannel?.id === ch.id" class="channel-selected-badge">
                   <el-icon><Check /></el-icon>
@@ -546,8 +526,10 @@ import type { Parser } from '@/api/parser'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
+import StatCard from '@/components/common/StatCard.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { getHardwareTagType } from '@/utils/hardwareTag'
 
 const router = useRouter()
 const route = useRoute()
@@ -799,14 +781,6 @@ const availableBusesForType = (hardwareType: string): string[] => {
     }
   }
   return buses
-}
-
-// 根据总线类型获取标签类型
-const getBusTagType = (bus: string) => {
-  const types: Record<string, string> = {
-    uart: '', i2c: 'warning', spi: 'danger', gpio: 'success', adc: 'primary'
-  }
-  return types[bus] || 'info'
 }
 
 // 解析器可选列表

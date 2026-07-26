@@ -72,10 +72,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, watch } from 'vue'
+import { computed, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { GPIOBusResource } from '@/api/node'
 import { gpioApi, type GPIOConfig } from '@/api/periph'
+import { useGuardedOperation } from '@/composables/useGuardedOperation'
 
 interface GPIORow {
   resource: GPIOBusResource
@@ -104,8 +105,12 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (event: 'configure' | 'edit' | 'remove', pin: number): void
 }>()
-let operationGeneration = 0
-let disposed = false
+
+const { run: guardedRun, invalidate } = useGuardedOperation({
+  nodeId: () => props.nodeId,
+  offline: () => props.offline,
+  errorPrefix: 'GPIO 操作失败',
+})
 
 function resourcePin(resource: GPIOBusResource): number {
   if (typeof resource.pin === 'number') return resource.pin
@@ -141,42 +146,17 @@ function levelLabel(level: number | null): string {
   return level === 1 ? 'HIGH' : level === 0 ? 'LOW' : '未知'
 }
 async function setLevel(row: GPIORow, level: 0 | 1) {
-  if (row.busy || props.offline) return
-  const nodeId = props.nodeId
-  const generation = operationGeneration
   const previous = row.level
-  row.busy = true
-  row.feedback = `正在写入 ${level ? 'HIGH' : 'LOW'}…`
-  try {
-    const ack = await gpioApi.set(nodeId, row.pin, level)
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
+  await guardedRun(row, `正在写入 ${level ? 'HIGH' : 'LOW'}…`, async () => {
+    const ack = await gpioApi.set(props.nodeId, row.pin, level)
     if (!props.registerPending?.({ requestId: ack.request_id, pin: row.pin, action: level ? 1 : 0 })) row.feedback = '写入命令已发送，等待设备响应'
-  } catch (error: unknown) {
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-    row.level = previous
-    row.feedback = '写入失败 · 重试'
-    ElMessage.error(`GPIO 操作失败: ${error instanceof Error ? error.message : '未知错误'}`)
-  } finally {
-    if (!disposed && generation === operationGeneration && props.nodeId === nodeId) row.busy = false
-  }
+  }, { rollback: () => { row.level = previous } })
 }
 async function readLevel(row: GPIORow) {
-  if (row.busy || props.offline) return
-  const nodeId = props.nodeId
-  const generation = operationGeneration
-  row.busy = true
-  row.feedback = '正在读取…'
-  try {
-    const ack = await gpioApi.read(nodeId, row.pin)
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
+  await guardedRun(row, '正在读取…', async () => {
+    const ack = await gpioApi.read(props.nodeId, row.pin)
     if (!props.registerPending?.({ requestId: ack.request_id, pin: row.pin, action: 2 })) row.feedback = '读取命令已发送，等待设备响应'
-  } catch (error: unknown) {
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-    row.feedback = '读取失败 · 重试'
-    ElMessage.error(`GPIO 读取失败: ${error instanceof Error ? error.message : '未知错误'}`)
-  } finally {
-    if (!disposed && generation === operationGeneration && props.nodeId === nodeId) row.busy = false
-  }
+  })
 }
 function applyRuntimeLevel(pin: number, level: number | null) {
   const row = rows.value.find(item => item.pin === pin)
@@ -184,8 +164,6 @@ function applyRuntimeLevel(pin: number, level: number | null) {
   if (level === 0 || level === 1) row.level = level
   row.feedback = level === null ? '设备操作失败 · 重试' : ''
 }
-watch(() => props.nodeId, () => { operationGeneration++ })
-onUnmounted(() => { disposed = true; operationGeneration++ })
 defineExpose({ applyRuntimeLevel })
 </script>
 

@@ -46,11 +46,7 @@
         placeholder="级别"
         aria-label="历史日志级别"
       >
-        <el-option label="ERROR" :value="0" />
-        <el-option label="WARN" :value="1" />
-        <el-option label="INFO" :value="2" />
-        <el-option label="DEBUG" :value="3" />
-        <el-option label="VERBOSE" :value="4" />
+        <el-option v-for="opt in LOG_LEVEL_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
       </el-select>
       <el-input
         v-model="draftTag"
@@ -121,7 +117,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
-import { levelText, levelTagType } from '@/components/node/logTypes'
+import { levelText, levelTagType, errorMessage, LOG_LEVEL_OPTIONS } from '@/components/node/logTypes'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 interface Props {
@@ -184,21 +180,26 @@ async function loadLogs() {
   }
 }
 
-async function clearBefore() {
-  if (cleanupBefore.value == null) {
+async function clearLogs(before?: number) {
+  if (before === undefined && cleanupBefore.value == null) {
+    // clearAll path — no time guard needed
+  } else if (before !== undefined && cleanupBefore.value == null) {
     ElMessage.warning('请先选择清理时间点')
     return
   }
+
+  const confirmMsg = before !== undefined
+    ? `确认清理指定时间前的历史日志？清理时间：${formatHistoryTime(cleanupBefore.value!)}`
+    : '确认清理该节点全部历史日志？此操作不可恢复。'
+  const confirmTitle = before !== undefined ? '清理历史日志' : '清理全部历史日志'
+  const confirmBtn = before !== undefined ? '确认清理' : '全部清理'
+
   try {
-    await ElMessageBox.confirm(
-      `确认清理指定时间前的历史日志？清理时间：${formatHistoryTime(cleanupBefore.value)}`,
-      '清理历史日志',
-      {
-        type: 'warning',
-        confirmButtonText: '确认清理',
-        cancelButtonText: '取消',
-      },
-    )
+    await ElMessageBox.confirm(confirmMsg, confirmTitle, {
+      type: 'warning',
+      confirmButtonText: confirmBtn,
+      cancelButtonText: '取消',
+    })
   } catch {
     return
   }
@@ -207,7 +208,9 @@ async function clearBefore() {
   const operation = requestGeneration
   const sessionGeneration = getSessionGeneration()
   try {
-    const result = await nodeApi.deleteNodeLogs(collectorId, cleanupBefore.value)
+    const result = before !== undefined
+      ? await nodeApi.deleteNodeLogs(collectorId, before)
+      : await nodeApi.deleteNodeLogs(collectorId)
     assertSessionGeneration(sessionGeneration)
     if (operation !== requestGeneration || props.collectorId !== collectorId) return
     ElMessage.success(`已删除 ${result.deleted} 条日志`)
@@ -219,35 +222,16 @@ async function clearBefore() {
   }
 }
 
-async function clearAll() {
-  try {
-    await ElMessageBox.confirm(
-      '确认清理该节点全部历史日志？此操作不可恢复。',
-      '清理全部历史日志',
-      {
-        type: 'warning',
-        confirmButtonText: '全部清理',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch {
+function clearBefore() {
+  if (cleanupBefore.value == null) {
+    ElMessage.warning('请先选择清理时间点')
     return
   }
+  void clearLogs(cleanupBefore.value)
+}
 
-  const collectorId = props.collectorId
-  const operation = requestGeneration
-  const sessionGeneration = getSessionGeneration()
-  try {
-    const result = await nodeApi.deleteNodeLogs(collectorId)
-    assertSessionGeneration(sessionGeneration)
-    if (operation !== requestGeneration || props.collectorId !== collectorId) return
-    ElMessage.success(`已删除 ${result.deleted} 条日志`)
-    page.value = 1
-    await loadLogs()
-  } catch (error: unknown) {
-    if (operation !== requestGeneration || props.collectorId !== collectorId) return
-    ElMessage.error(`删除失败: ${errorMessage(error)}`)
-  }
+function clearAll() {
+  void clearLogs(undefined)
 }
 
 function exportCurrentPage() {
@@ -272,10 +256,6 @@ function formatHistoryTime(value: string | number): string {
   return Number.isNaN(date.getTime())
     ? '-'
     : date.toLocaleString('zh-CN', { hour12: false })
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '未知错误'
 }
 
 onMounted(loadLogs)

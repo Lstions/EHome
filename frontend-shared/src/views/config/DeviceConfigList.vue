@@ -2,45 +2,25 @@
   <div class="config-page">
     <!-- 顶部统计 -->
     <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-icon">
-          <el-icon><Document /></el-icon>
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stats.total }}</span>
-          <span class="stat-label">本页模板</span>
-        </div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon active">
-          <el-icon><CircleCheck /></el-icon>
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stats.active }}</span>
-          <span class="stat-label">本页启用</span>
-        </div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon bus">
-          <el-icon><Connection /></el-icon>
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stats.busTypes }}</span>
-          <span class="stat-label">总线类型</span>
-        </div>
-      </div>
-      
-      <div class="stat-card">
-        <div class="stat-icon device">
-          <el-icon><Cpu /></el-icon>
-        </div>
-        <div class="stat-content">
-          <span class="stat-value">{{ stats.deviceTypes }}</span>
-          <span class="stat-label">设备类型</span>
-        </div>
-      </div>
+      <StatCard label="本页模板" icon-color="var(--el-color-primary)">
+        <template #icon><el-icon><Document /></el-icon></template>
+        <template #value><span class="stat-value">{{ stats.total }}</span></template>
+      </StatCard>
+
+      <StatCard label="本页启用" icon-color="var(--el-color-success)">
+        <template #icon><el-icon><CircleCheck /></el-icon></template>
+        <template #value><span class="stat-value">{{ stats.active }}</span></template>
+      </StatCard>
+
+      <StatCard label="总线类型" icon-color="var(--el-color-info)">
+        <template #icon><el-icon><Connection /></el-icon></template>
+        <template #value><span class="stat-value">{{ stats.busTypes }}</span></template>
+      </StatCard>
+
+      <StatCard label="设备类型" icon-color="var(--el-color-warning)">
+        <template #icon><el-icon><Cpu /></el-icon></template>
+        <template #value><span class="stat-value">{{ stats.deviceTypes }}</span></template>
+      </StatCard>
     </div>
 
     <!-- 工具栏 -->
@@ -264,6 +244,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import StatCard from '@/components/common/StatCard.vue'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
 

@@ -11,52 +11,31 @@
     <template v-else>
       <!-- 顶部统计卡片 -->
       <div class="stats-row">
-        <div class="stat-card" @click="handleStatClick('all')">
-          <div class="stat-icon" style="color: var(--el-color-primary);">
-            <el-icon><Connection /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.total" class="stat-value" />
-            <span class="stat-label">本页节点</span>
-          </div>
-          <div class="stat-action">
-            <el-icon><Plus /></el-icon>
-          </div>
-        </div>
-        
-        <div class="stat-card online" @click="handleStatClick('online')">
-          <div class="stat-icon" style="color: var(--el-color-success);">
-            <el-icon><CircleCheck /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.online" class="stat-value" />
-            <span class="stat-label">本页在线</span>
-          </div>
-          <div class="stat-trend up">
-            <el-icon><TrendCharts /></el-icon>
-            {{ stats.onlineRate }}%
-          </div>
-        </div>
-        
-        <div class="stat-card offline" @click="handleStatClick('offline')">
-          <div class="stat-icon" style="color: var(--el-color-danger);">
-            <el-icon><CircleClose /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.offline" class="stat-value" />
-            <span class="stat-label">本页离线</span>
-          </div>
-        </div>
-        
-        <div class="stat-card warning">
-          <div class="stat-icon" style="color: var(--el-color-warning);">
-            <el-icon><Warning /></el-icon>
-          </div>
-          <div class="stat-content">
-            <CountUp :value="stats.warning" class="stat-value" />
-            <span class="stat-label">本页告警</span>
-          </div>
-        </div>
+        <StatCard label="本页节点" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
+          <template #icon><el-icon><Connection /></el-icon></template>
+          <template #value><CountUp :value="stats.total" class="stat-value" /></template>
+          <template #suffix>
+            <div class="stat-action"><el-icon><Plus /></el-icon></div>
+          </template>
+        </StatCard>
+
+        <StatCard label="本页在线" icon-color="var(--el-color-success)" @click="handleStatClick('online')">
+          <template #icon><el-icon><CircleCheck /></el-icon></template>
+          <template #value><CountUp :value="stats.online" class="stat-value" /></template>
+          <template #suffix>
+            <div class="stat-trend up"><el-icon><TrendCharts /></el-icon>{{ stats.onlineRate }}%</div>
+          </template>
+        </StatCard>
+
+        <StatCard label="本页离线" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
+          <template #icon><el-icon><CircleClose /></el-icon></template>
+          <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
+        </StatCard>
+
+        <StatCard label="本页告警" icon-color="var(--el-color-warning)">
+          <template #icon><el-icon><Warning /></el-icon></template>
+          <template #value><CountUp :value="stats.warning" class="stat-value" /></template>
+        </StatCard>
       </div>
 
     <!-- 工具栏 -->
@@ -306,6 +285,7 @@ import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
+import StatCard from '@/components/common/StatCard.vue'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 
 const router = useRouter()

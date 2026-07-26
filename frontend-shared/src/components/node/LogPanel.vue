@@ -20,11 +20,7 @@
           class="level-select"
           @change="onLevelChange"
         >
-          <el-option label="ERROR" :value="0" />
-          <el-option label="WARN" :value="1" />
-          <el-option label="INFO" :value="2" />
-          <el-option label="DEBUG" :value="3" />
-          <el-option label="VERBOSE" :value="4" />
+          <el-option v-for="opt in LOG_LEVEL_OPTIONS" :key="opt.value" :label="opt.label" :value="opt.value" />
         </el-select>
       </div>
       <div class="control-group">
@@ -82,6 +78,8 @@ import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCa
 import {
   levelText,
   formatUptime,
+  errorMessage,
+  LOG_LEVEL_OPTIONS,
   type IncomingRealtimeLogLine,
   type RealtimeLogLine,
   type RealtimeSearchCountState,
@@ -279,10 +277,6 @@ function exportRealtimeLogs(format: 'text' | 'csv'): void {
     .map(line => `${formatUptime(line.ts)} ${levelText(line.level)} ${line.tag} ${line.msg}`)
     .join('\n')
   downloadText(content, `${filename}.txt`)
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '未知错误'
 }
 
 watch(

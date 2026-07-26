@@ -55,13 +55,12 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import LineChart from '@/components/charts/LineChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
-import client from '@/api/client'
 import { computeAdaptiveYAxisRange } from '@/utils/chartRange'
 import { useTimeRange } from '@/composables/useTimeRange'
-import type { HistoryDataPoint, SeriesData } from '@/types/chart'
+import { useHistoryData } from '@/composables/useHistoryData'
+import type { SeriesData } from '@/types/chart'
 
 const props = withDefaults(defineProps<{
   deviceId: number
@@ -70,7 +69,9 @@ const props = withDefaults(defineProps<{
   cellCount: 16
 })
 
-const loading = ref(true)
+const { loading, fetch: historyFetch } = useHistoryData({
+  errorPrefix: '获取电芯电压历史数据失败',
+})
 const allSeries = ref<SeriesData[]>([])
 const selectedCells = ref<number[]>([])
 
@@ -111,72 +112,21 @@ const onTimeRangeChange = () => {
 async function fetchCellVoltageHistory() {
   if (!props.deviceId) return
   const [startTime, endTime] = getTimeRange()
-  loading.value = true
-  try {
-    // 批量请求：1 个请求替代 16 个并行请求，服务端降采样 max_points=500
-    const rawSeries: HistoryDataPoint[][] = new Array(cellCategories.length).fill(null).map(() => [])
-    try {
-      const batchRes = await client.get<unknown, any>('/api/v1/unified-data/historical-batch', {
-        params: {
-          device_pk: props.deviceId,
-          categories: cellCategories.join(','),
-          start_time: startTime.toISOString(),
-          end_time: endTime.toISOString(),
-          max_points: 500
-        }
-      })
-      const batchData = batchRes?.data || batchRes || []
-      if (Array.isArray(batchData)) {
-        for (const result of batchData) {
-          const cat = result.category
-          if (!cat) continue
-          const idx = cellCategories.indexOf(cat)
-          if (idx === -1) continue
-          rawSeries[idx] = (result.data || []).map((item: any) => ({
-            time: item.created_at || item.timestamp,
-            value: item.value
-          }))
-        }
-      }
-    } catch {
-      // Fallback: 逐个请求 + max_points=500
-      const fallbackResults = await Promise.all(
-        cellCategories.map(cat =>
-          client.get<unknown, any>('/api/v1/unified-data/historical', {
-            params: {
-              device_pk: props.deviceId,
-              category: cat,
-              start_time: startTime.toISOString(),
-              end_time: endTime.toISOString(),
-              max_points: 500
-            }
-          }).then(res => ({ cat, data: (res.data || res || []) as any[] })).catch(() => ({ cat, data: [] as any[] }))
-        )
-      )
-      for (const r of fallbackResults) {
-        const idx = cellCategories.indexOf(r.cat)
-        if (idx !== -1) {
-          rawSeries[idx] = r.data.map((item: any) => ({ time: item.created_at || item.timestamp, value: item.value }))
-        }
-      }
-    }
-
-    // 服务端已降采样，直接使用原始数据
-    allSeries.value = cellCategories
-      .map((cat, i) => ({
+  const result = await historyFetch(props.deviceId, cellCategories, startTime, endTime)
+  // Map composable results back to cell-indexed series with cellNumber
+  allSeries.value = cellCategories
+    .map((cat, i) => {
+      const match = result.find(s => s.category === cat)
+      return {
         name: `#${i + 1}`,
         unit: 'V',
         category: cat,
         cellNumber: i + 1,
-        data: rawSeries[i] || []
-      }))
-      .filter(s => s.data.length > 0)
-    selectedCells.value = allSeries.value.map(s => s.cellNumber)
-  } catch {
-    ElMessage.error('获取电芯电压历史数据失败')
-  } finally {
-    loading.value = false
-  }
+        data: match?.data || []
+      }
+    })
+    .filter(s => s.data.length > 0)
+  selectedCells.value = allSeries.value.map(s => s.cellNumber)
 }
 
 const selectAll = () => {

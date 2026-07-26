@@ -17,33 +17,19 @@
     </div>
 
     <!-- Alarm grid -->
-    <div class="alarm-grid">
-      <div
-        v-for="alarm in alarmItems"
-        :key="alarm.key"
-        class="alarm-item"
-        :class="{ active: alarm.active }"
-      >
-        <el-icon :size="18" :color="alarm.active ? THEME_COLORS.danger : THEME_COLORS.success">
-          <component :is="alarm.active ? WarningFilled : CircleCheck" />
-        </el-icon>
-        <span class="alarm-label">{{ alarm.label }}</span>
-        <el-tag size="small" :type="alarm.active ? 'danger' : 'success'" effect="plain">
-          {{ alarm.active ? '异常' : '正常' }}
-        </el-tag>
-      </div>
-    </div>
-
-    <div v-if="!hasAlarmData" class="no-alarm">
-      <el-empty description="无告警状态数据" :image-size="60" />
-    </div>
+    <StatusItemGrid
+      :items="alarmItems"
+      active-text="异常"
+      inactive-text="正常"
+      empty-text="无告警状态数据"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { WarningFilled, CircleCheck } from '@element-plus/icons-vue'
-import { THEME_COLORS } from '@/utils/theme'
+import StatusItemGrid from '@/components/common/StatusItemGrid.vue'
+import type { StatusItem } from '@/components/common/StatusItemGrid.vue'
 
 const props = defineProps<{
   latestData: Record<string, any>
@@ -98,12 +84,7 @@ const ALARM_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'alarm_fan_error', label: '风扇异常' },
 ]
 
-const hasAlarmData = computed(() => {
-  if (!props.latestData) return false
-  return ALARM_FIELDS.some(f => props.latestData[f.key] !== undefined)
-})
-
-const alarmItems = computed(() => {
+const alarmItems = computed<StatusItem[]>(() => {
   if (!props.latestData) return []
   return ALARM_FIELDS
     .filter(f => props.latestData[f.key] !== undefined)
@@ -119,52 +100,19 @@ const alarmItems = computed(() => {
 .inverter-status-grid {
   padding: 4px 0;
 }
-
 .status-header {
   display: flex;
   gap: 24px;
   margin-bottom: 16px;
   flex-wrap: wrap;
 }
-
 .status-item {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-
 .status-label {
   font-size: 13px;
   color: var(--el-text-color-secondary);
-}
-
-.alarm-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 12px;
-}
-
-.alarm-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--el-fill-color-lighter);
-  border-radius: 6px;
-  border: 1px solid var(--el-border-color-lighter);
-}
-
-.alarm-item.active {
-  background: var(--el-color-danger-light-9);
-  border-color: var(--el-color-danger-light-5);
-}
-
-.alarm-label {
-  flex: 1;
-  font-size: 13px;
-}
-
-.no-alarm {
-  grid-column: 1 / -1;
 }
 </style>

@@ -171,6 +171,7 @@ import { useNodeStore } from '@/stores/node'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import { getHardwareTagType, getHardwareLabel } from '@/utils/hardwareTag'
 
 const router = useRouter()
 const nodeStore = useNodeStore()
@@ -280,18 +281,6 @@ const paginatedChannels = computed(() => {
 })
 
 // 工具函数
-function getHardwareTagType(type: string): '' | 'success' | 'warning' | 'info' | 'danger' {
-  const map: Record<string, '' | 'success' | 'warning' | 'info' | 'danger'> = {
-    uart: '',
-    i2c: 'success',
-    spi: 'warning',
-    gpio: 'info',
-    adc: 'danger',
-    pwm: 'info',
-  }
-  return map[type] ?? 'info'
-}
-
 function getBusTypeLabel(type: string): string {
   const map: Record<string, string> = {
     uart: '串行',
