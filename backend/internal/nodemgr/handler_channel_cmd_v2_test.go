@@ -78,7 +78,7 @@ func TestSN3001BaudSideEffectUpdatesChannelAndPublishesEvent(t *testing.T) {
 	}
 }
 
-func TestSN3001AddressSideEffectUpdatesEdgeAndConnection(t *testing.T) {
+func TestSN3001AddressSideEffectUpdatesOnlyEdgeInstance(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	node := models.Node{NodeID: "node-address-side-effect", Name: "node", Status: "online"}
 	if err := db.Create(&node).Error; err != nil {
@@ -117,16 +117,8 @@ func TestSN3001AddressSideEffectUpdatesEdgeAndConnection(t *testing.T) {
 	if err := db.First(&gotConfig, config.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	var connection struct {
-		DefaultParams struct {
-			Address float64 `json:"address"`
-		} `json:"default_params"`
-	}
-	if err := json.Unmarshal(gotConfig.Connection, &connection); err != nil {
-		t.Fatal(err)
-	}
-	if connection.DefaultParams.Address != 2 {
-		t.Fatalf("connection address=%v, want 2", connection.DefaultParams.Address)
+	if string(gotConfig.Connection) != string(config.Connection) {
+		t.Fatalf("shared device config changed from %s to %s", config.Connection, gotConfig.Connection)
 	}
 	select {
 	case event := <-manager.EventBus().Subscribe():
@@ -135,6 +127,13 @@ func TestSN3001AddressSideEffectUpdatesEdgeAndConnection(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("address side effect did not publish config event")
+	}
+	var outbox models.ConfigChangeOutbox
+	if err := db.Where("node_id = ? AND entity_id = ?", node.NodeID, fmt.Sprint(edge.ID)).First(&outbox).Error; err != nil {
+		t.Fatalf("durable config event missing: %v", err)
+	}
+	if outbox.State != "PENDING" || outbox.Type != string(CfgChangeEdgeDevice) {
+		t.Fatalf("unexpected durable config event=%+v", outbox)
 	}
 }
 

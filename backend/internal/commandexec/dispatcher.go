@@ -23,6 +23,7 @@ import (
 type DispatchResult struct {
 	BootID      string
 	PublishedAt time.Time
+	WireDigest  string
 }
 
 // Transport compiles and publishes one already-authorized physical attempt.
@@ -205,7 +206,11 @@ func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) 
 		if result.PublishedAt.IsZero() {
 			result.PublishedAt = now
 		}
-		if err := tx.Model(&models.CommandAttempt{}).Where("id = ? AND status = ?", attempt.ID, StatusDispatched).Updates(map[string]interface{}{"boot_id": result.BootID, "published_at": result.PublishedAt}).Error; err != nil {
+		attemptUpdates := map[string]interface{}{"boot_id": result.BootID, "published_at": result.PublishedAt}
+		if result.WireDigest != "" {
+			attemptUpdates["wire_digest"] = result.WireDigest
+		}
+		if err := tx.Model(&models.CommandAttempt{}).Where("id = ? AND status = ?", attempt.ID, StatusDispatched).Updates(attemptUpdates).Error; err != nil {
 			return err
 		}
 		transition := tx.Model(&models.CommandExecution{}).Where("command_id = ? AND status = ?", execution.CommandID, StatusQueued).Update("status", StatusDispatched)

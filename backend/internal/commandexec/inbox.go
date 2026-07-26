@@ -20,7 +20,20 @@ type InboxEvent struct {
 	VerifiedResultJSON                    string
 }
 
+// InboxFinalizer runs inside the same database transaction that accepts a
+// valid inbox event. It is used for device-side final events whose durable
+// configuration side effects must not be committed independently.
+type InboxFinalizer func(*gorm.DB) error
+
 func (s *Service) RecordInbox(ctx context.Context, event InboxEvent) (*models.CommandExecution, bool, error) {
+	return s.recordInbox(ctx, event, nil)
+}
+
+func (s *Service) RecordInboxWithFinalizer(ctx context.Context, event InboxEvent, finalizer InboxFinalizer) (*models.CommandExecution, bool, error) {
+	return s.recordInbox(ctx, event, finalizer)
+}
+
+func (s *Service) recordInbox(ctx context.Context, event InboxEvent, finalizer InboxFinalizer) (*models.CommandExecution, bool, error) {
 	if event.EventID == "" || event.CommandID == "" {
 		return nil, false, fmt.Errorf("invalid inbox event")
 	}
@@ -104,6 +117,15 @@ func (s *Service) RecordInbox(ctx context.Context, event InboxEvent) (*models.Co
 		}
 		if attemptResult.RowsAffected != 1 {
 			return fmt.Errorf("command attempt identity not found")
+		}
+		// Run durable side effects only after both conditional state transitions
+		// have succeeded. The transaction still provides atomicity, while this
+		// ordering prevents a stale event from applying a config mutation when
+		// its command-state UPDATE affects zero rows.
+		if finalizer != nil {
+			if err := finalizer(tx); err != nil {
+				return err
+			}
 		}
 		execution.Status = to
 		if IsTerminal(to) {

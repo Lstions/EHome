@@ -95,7 +95,7 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 	items := make([]CatalogItem, 0)
 	capabilityStale := false
 	for _, definition := range s.actions.List(edge.Type) {
-		item := CatalogItem{Definition: definition, Available: definition.Enabled && s.dispatchEnabled && edge.Enabled && edge.Status != "inactive" && edge.Node.Status == "online"}
+		item := CatalogItem{Definition: definition, Available: definition.Enabled && deviceaction.CurrentEngineAllows(definition) && s.dispatchEnabled && edge.Enabled && edge.Status != "inactive" && edge.Node.Status == "online"}
 		if !s.dispatchEnabled {
 			item.Reason = "device control v2 is disabled"
 			items = append(items, item)
@@ -107,6 +107,13 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 				item.Reason = definition.AvailabilityReason
 				item.ReasonCode = definition.AvailabilityCode
 			}
+			items = append(items, item)
+			continue
+		}
+		if !deviceaction.CurrentEngineAllows(definition) {
+			item.Available = false
+			item.Reason = "action requires the future high-risk command engine"
+			item.ReasonCode = "command_engine_gate"
 			items = append(items, item)
 			continue
 		}
@@ -186,6 +193,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 			return ErrActionUnavailable
 		}
 		if !def.Enabled {
+			return ErrActionUnavailable
+		}
+		if !deviceaction.CurrentEngineAllows(def) {
 			return ErrActionUnavailable
 		}
 		if !edge.Enabled || edge.Status == "inactive" || edge.NodeID == "" || edge.Node.Status != "online" {
@@ -280,7 +290,7 @@ func (s *Service) VerifyFinal(ctx context.Context, execution models.CommandExecu
 	if err != nil || string(params) != execution.ParamsJSON {
 		return nil, fmt.Errorf("persisted action parameters are invalid")
 	}
-	return definition.Verify(params, raw)
+	return definition.VerifyForAddress(params, raw, edge.HardwareID)
 }
 
 func (s *Service) List(ctx context.Context, edgeDeviceID uint, limit int) ([]models.CommandExecution, error) {

@@ -137,6 +137,10 @@ typedef struct {
 typedef struct {
  uint8_t buffer[STREAM_RX_BUF_SIZE];
  size_t len;
+ /* A UART FIFO/buffer overflow invalidates the current response.  Keep the
+  * marker until the pending descriptor is completed so overflow cannot be
+  * reported as a successful short or idle frame. */
+ bool overflow;
 } stream_rx_t;
 
 /* ==================================================================

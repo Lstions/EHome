@@ -3,6 +3,8 @@ package commandexec
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"ehome/backend/testutil"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // setupInboxService creates a service with a dispatched execution + attempt,
@@ -141,6 +144,44 @@ func TestRecordInboxFinalSucceeded(t *testing.T) {
 	}
 	if result.VerifiedResultJSON != `[{"name":"rainfall","value":42}]` {
 		t.Fatalf("verified_result=%s", result.VerifiedResultJSON)
+	}
+}
+
+func TestRecordInboxFinalizerRollsBackInboxAndState(t *testing.T) {
+	s, exec, _ := setupInboxService(t, StatusDispatched)
+	finalizerErr := fmt.Errorf("simulated side effect failure")
+	_, applied, err := s.RecordInboxWithFinalizer(context.Background(), InboxEvent{
+		EventID: exec.CommandID + ":final", CommandID: exec.CommandID, EventType: "final_succeeded",
+		AttemptNo: 1, BootID: "boot-inbox", VerifiedResultJSON: `[{"name":"rainfall","value":42}]`,
+	}, func(tx *gorm.DB) error {
+		if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", exec.EdgeDeviceID).Update("hardware_id", "99").Error; err != nil {
+			return err
+		}
+		return finalizerErr
+	})
+	if err == nil || !strings.Contains(err.Error(), finalizerErr.Error()) || applied {
+		t.Fatalf("err=%v applied=%v, want rollback", err, applied)
+	}
+	var got models.CommandExecution
+	if err := s.db.First(&got, "command_id = ?", exec.CommandID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusDispatched {
+		t.Fatalf("status=%s, want %s after rollback", got.Status, StatusDispatched)
+	}
+	var edge models.EdgeDevice
+	if err := s.db.First(&edge, exec.EdgeDeviceID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if edge.HardwareID != "" {
+		t.Fatalf("hardware_id=%q, want rollback to empty value", edge.HardwareID)
+	}
+	var inboxCount int64
+	if err := s.db.Model(&models.CommandInbox{}).Where("event_id = ?", exec.CommandID+":final").Count(&inboxCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if inboxCount != 0 {
+		t.Fatalf("inbox rows=%d, want 0 after rollback", inboxCount)
 	}
 }
 

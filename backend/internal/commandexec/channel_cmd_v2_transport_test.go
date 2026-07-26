@@ -98,6 +98,44 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 	}
 }
 
+func TestChannelCmdV2TransportUsesEdgeDeviceAddress(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)
+	reported := now.Add(-time.Minute)
+	node := models.Node{NodeID: "node-addressed", Name: "node", Status: "online", ConfigVersion: "manifest-addressed", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "boot-addressed", ResourceReportedAt: &reported, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":256,"max_step_timeout_ms":30000}`}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	channel := models.Channel{NodeID: node.NodeID, HardwareType: "uart", BusType: "UART", Enabled: true}
+	if err := db.Create(&channel).Error; err != nil {
+		t.Fatal(err)
+	}
+	markChannelReported(t, db, &node, channel.ID)
+	edge := models.EdgeDevice{NodeID: node.NodeID, ChannelID: channel.ID, DeviceConfigID: 1, Type: "sn3001_rain", HardwareID: "7", Name: "rain-7", Enabled: true, Status: "active"}
+	if err := db.Create(&edge).Error; err != nil {
+		t.Fatal(err)
+	}
+	actions := deviceaction.NewBuiltInRegistry(nil)
+	if err := actions.SetEnabled("sn3001_rain", "read_rainfall", true); err != nil {
+		t.Fatal(err)
+	}
+	publisher := &capturePublisher{}
+	transport := NewChannelCmdV2Transport(db, publisher, actions)
+	transport.now = func() time.Time { return now }
+	execution := models.CommandExecution{CommandID: "10112233-4455-6677-8899-aabbccddeeff", EdgeDeviceID: edge.ID, NodeID: node.NodeID, DeviceType: edge.Type, DeviceConfigID: edge.DeviceConfigID, ChannelID: edge.ChannelID, ManifestID: node.ConfigVersion, ActionID: "read_rainfall", ActionVersion: 1, CommandEngineRevision: node.CommandEngineRevision, DeadlineAt: now.Add(time.Minute), ParamsJSON: "{}"}
+	attempt := models.CommandAttempt{AttemptNo: 1}
+	if _, err := transport.Dispatch(context.Background(), execution, attempt); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := frame.DecodeChannelCmdV2(publisher.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cmd.TXData) != 8 || cmd.TXData[0] != 7 || cmd.TXData[1] != 0x03 {
+		t.Fatalf("address-aware command=% X", cmd.TXData)
+	}
+}
+
 func TestChannelCmdV2TransportRejectsStaleOrDisabledCapability(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	now := time.Date(2026, 7, 19, 2, 0, 0, 0, time.UTC)

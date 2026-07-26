@@ -199,16 +199,19 @@ func TestHighRiskConfirmationIsBoundAndSingleUse(t *testing.T) {
 		t.Fatalf("grant=%+v err=%v", grant, err)
 	}
 	input := CreateInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), IdempotencyKey: "high-confirmation-0001", ConfirmationToken: grant.Token, Reason: "controlled test", SourceIP: "127.0.0.1"}
-	if execution, _, err := s.Create(context.Background(), input); err != nil || execution.Status != StatusQueued {
-		t.Fatalf("execution=%+v err=%v", execution, err)
+	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("high-risk action crossed the current engine gate: %v", err)
 	}
 	input.IdempotencyKey = "high-confirmation-0002"
-	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrConfirmationInvalid) {
-		t.Fatalf("reused token error=%v", err)
+	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("high-risk action should remain unavailable: %v", err)
 	}
 	var confirmation models.CommandConfirmation
-	if err := s.db.First(&confirmation, "token_hash = ?", confirmationHash(grant.Token)).Error; err != nil || confirmation.ConsumedAt == nil {
-		t.Fatalf("confirmation=%+v err=%v", confirmation, err)
+	if err := s.db.First(&confirmation, "token_hash = ?", confirmationHash(grant.Token)).Error; err != nil {
+		t.Fatalf("confirmation grant was not persisted: %+v err=%v", confirmation, err)
+	}
+	if confirmation.ConsumedAt != nil {
+		t.Fatal("unavailable high-risk action must not consume its confirmation token")
 	}
 	for index := 0; index < maxConfirmationsPerWindow-1; index++ {
 		if _, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "high_read", Params: json.RawMessage(`{}`), Reason: fmt.Sprintf("controlled test %d", index)}); err != nil {
@@ -256,16 +259,16 @@ func TestMediumRiskRequiresConfirmation(t *testing.T) {
 	}
 	s.actions = actions
 	input := CreateInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "medium_read", Params: json.RawMessage(`{}`), IdempotencyKey: "medium-confirmation-0001", SourceIP: "127.0.0.1"}
-	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrConfirmationRequired) {
-		t.Fatalf("medium risk create without confirmation error=%v", err)
+	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("medium-risk action should be unavailable before confirmation: %v", err)
 	}
 	grant, err := s.IssueConfirmation(context.Background(), ConfirmationInput{EdgeDeviceID: edge.ID, ActorUserID: 7, ActionID: "medium_read", Params: json.RawMessage(`{}`), Reason: "recoverable test", SourceIP: "127.0.0.1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	input.ConfirmationToken, input.Reason = grant.Token, "recoverable test"
-	if execution, _, err := s.Create(context.Background(), input); err != nil || execution.Status != StatusQueued {
-		t.Fatalf("medium risk confirmed create execution=%+v err=%v", execution, err)
+	if _, _, err := s.Create(context.Background(), input); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("medium-risk action crossed the current engine gate: %v", err)
 	}
 }
 

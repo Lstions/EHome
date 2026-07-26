@@ -680,6 +680,127 @@ static void test_idle_completion_chunked_no_residual(void) {
     rt.pending_queues[0] = NULL;
 }
 
+static void test_idle_short_read_is_failure(void) {
+    reset_counters();
+    drain_report_queues();
+    bus_worker_set_channel_cmd_v2_final_cb(test_control_final_cb);
+
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.bus_ch[0] = 91;
+    rt.pending_queues[0] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
+
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.read_size = 100;
+    pcmd.channel_cmd_v2 = true;
+    pcmd.control_slot = 9;
+    xQueueSend(rt.pending_queues[0], &pcmd, 0);
+
+    s_last_rx_us[0] = 1000;
+    s_streams[0].len = 40;
+    memset(s_streams[0].buffer, 0x44, 40);
+
+    CHECK(complete_idle_response(&rt, 0, 15000),
+          "idle short read should complete as a failure");
+    control_final_desc_t final;
+    bool got = s_control_final_q && xQueueReceive(s_control_final_q, &final, 0) == pdTRUE;
+    CHECK(got,
+          "short V2 read should queue a final result");
+    if (got && final.slot == 9) {
+        CHECK(final.success == false, "short V2 read must not be successful");
+        CHECK(final.error_code == 0x03, "short V2 read should use error 0x03");
+    }
+    CHECK(uxQueueMessagesWaiting(rt.pending_queues[0]) == 0,
+          "short read pending descriptor should be consumed");
+    CHECK(s_streams[0].len == 0, "short read buffer should be cleared");
+
+    vQueueDelete(rt.pending_queues[0]);
+    rt.pending_queues[0] = NULL;
+}
+
+static void test_idle_overflow_is_failure(void) {
+    reset_counters();
+    drain_report_queues();
+    bus_worker_set_channel_cmd_v2_final_cb(test_control_final_cb);
+
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.bus_ch[0] = 92;
+    rt.pending_queues[0] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
+
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.read_size = 0;
+    pcmd.channel_cmd_v2 = true;
+    pcmd.control_slot = 10;
+    xQueueSend(rt.pending_queues[0], &pcmd, 0);
+
+    s_last_rx_us[0] = 1000;
+    s_streams[0].overflow = true;
+    s_streams[0].len = 0;
+
+    CHECK(complete_idle_response(&rt, 0, 15000),
+          "overflow should complete as an explicit failure");
+    control_final_desc_t final;
+    bool got = s_control_final_q && xQueueReceive(s_control_final_q, &final, 0) == pdTRUE;
+    CHECK(got,
+          "overflow V2 read should queue a final result");
+    if (got && final.slot == 10) {
+        CHECK(final.success == false, "overflow V2 read must not be successful");
+        CHECK(final.error_code == 0x02, "overflow V2 read should use error 0x02");
+    }
+    CHECK(uxQueueMessagesWaiting(rt.pending_queues[0]) == 0,
+          "overflow pending descriptor should be consumed");
+    CHECK(s_streams[0].overflow == false, "overflow marker should be cleared after reporting");
+
+    vQueueDelete(rt.pending_queues[0]);
+    rt.pending_queues[0] = NULL;
+}
+
+static void test_timeout_discards_partial_stream(void) {
+    reset_counters();
+    drain_report_queues();
+    bus_worker_set_channel_cmd_v2_final_cb(test_control_final_cb);
+
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.bus_ch[0] = 93;
+    rt.bus_ctx[0].initialized = true;
+    rt.bus_ctx[0].bus_type = BUS_TYPE_UART;
+    rt.pending_queues[0] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
+
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.channel_cmd_v2 = true;
+    pcmd.control_slot = 11;
+    pcmd.read_size = 100;
+    pcmd.tx_timestamp = 1000;
+    pcmd.rx_timeout_ms = 1;
+    xQueueSend(rt.pending_queues[0], &pcmd, 0);
+
+    /* The hard timeout fires before the 10ms idle boundary. */
+    g_test_time_us = 3000;
+    s_last_rx_us[0] = 2500;
+    s_streams[0].len = 40;
+    memset(s_streams[0].buffer, 0x55, 40);
+    CHECK(expire_uart_state(&rt) == 1, "partial response should expire once");
+
+    control_final_desc_t final;
+    bool got = s_control_final_q && xQueueReceive(s_control_final_q, &final, 0) == pdTRUE;
+    CHECK(got, "timeout should queue a final result");
+    if (got) {
+        CHECK(final.slot == 11, "timeout slot should be preserved");
+        CHECK(final.success == false, "timeout must not be successful");
+    }
+    CHECK(s_streams[0].len == 0, "timeout must discard partial bytes");
+    CHECK(s_last_rx_us[0] == 0, "timeout must clear idle timestamp");
+    CHECK(s_stream_chunked[0] == false, "timeout must clear chunk state");
+
+    vQueueDelete(rt.pending_queues[0]);
+    rt.pending_queues[0] = NULL;
+}
+
 static void test_idle_no_completion_empty_no_chunked(void) {
     reset_counters();
     drain_report_queues();
@@ -739,6 +860,9 @@ int main(void) {
     test_idle_no_completion_when_last_rx_zero();
     test_idle_completion_with_pending_cmd();
     test_idle_completion_chunked_no_residual();
+    test_idle_short_read_is_failure();
+    test_idle_overflow_is_failure();
+    test_timeout_discards_partial_stream();
     test_idle_no_completion_empty_no_chunked();
 
     /* Clean up */

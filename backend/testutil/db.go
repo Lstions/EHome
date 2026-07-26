@@ -61,6 +61,7 @@ var allModels = []interface{}{
 	&models.CommandInbox{},
 	&models.CommandConfirmation{},
 	&models.CommandManualResolution{},
+	&models.ConfigChangeOutbox{},
 	// v3.0: GPIO/PWM peripheral control models
 	&models.GPIOConfig{},
 	&models.PWMConfig{},

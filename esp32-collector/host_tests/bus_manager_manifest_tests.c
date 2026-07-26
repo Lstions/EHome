@@ -459,6 +459,27 @@ static void test_null_inputs_rejected(void)
     CHECK(err == ESP_ERR_INVALID_ARG, "NULL inputs must be rejected");
 }
 
+static void test_shared_dma_lease_is_retained_for_other_channel(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.bus_ch[0] = 1;
+    rt.bus_ch[1] = 2;
+    rt.bus_ctx[0].initialized = true;
+    rt.bus_ctx[1].initialized = true;
+    strcpy(rt.bus_hw_id + 0 * 16, "uart/UART0");
+    strcpy(rt.bus_hw_id + 1 * 16, "uart/UART0");
+
+    CHECK(runtime_has_other_hw_lease(&rt, 0, "uart/UART0"),
+          "shared physical lease must remain while another channel is active");
+    CHECK(runtime_has_other_hw_lease(&rt, 1, "uart/UART0"),
+          "the other logical channel must be reported as a shared lease");
+
+    rt.bus_ctx[1].initialized = false;
+    CHECK(!runtime_has_other_hw_lease(&rt, 0, "uart/UART0"),
+          "last channel should be allowed to release the physical lease");
+}
+
 int main(void)
 {
     test_null_inputs_rejected();
@@ -474,6 +495,7 @@ int main(void)
     test_i2c_sda_scl_same_rejected();
     test_mixed_bus_manifest_passes();
     test_dma_requested_without_pool_rejected();
+    test_shared_dma_lease_is_retained_for_other_channel();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

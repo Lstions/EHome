@@ -6,8 +6,9 @@ package deviceaction
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
+	"strconv"
+	"strings"
 
 	"ehome/backend/internal/drivers"
 )
@@ -47,6 +48,8 @@ type PlanCompiler func(json.RawMessage) (BoundedPlan, error)
 
 type Compiler func(json.RawMessage) (SingleStep, error)
 type Verifier func(json.RawMessage, []byte) ([]drivers.SensorData, error)
+type AddressCompiler func(json.RawMessage, uint8) (SingleStep, error)
+type AddressVerifier func(json.RawMessage, []byte, uint8) ([]drivers.SensorData, error)
 
 type Definition struct {
 	ID                 string          `json:"id"`
@@ -68,8 +71,10 @@ type Definition struct {
 	SingleStep         SingleStep      `json:"-"`
 	Plan               BoundedPlan     `json:"-"`
 	compiler           Compiler
+	addressCompiler    AddressCompiler
 	planCompiler       PlanCompiler
 	verifier           Verifier
+	addressVerifier    AddressVerifier
 }
 
 type Registry struct {
@@ -183,6 +188,30 @@ func (def Definition) Compile(params json.RawMessage) (SingleStep, error) {
 	return cloneStep(step), nil
 }
 
+// CompileForAddress applies the EdgeDevice-owned physical address when the
+// trusted driver declares that its protocol embeds one.  Non-addressed
+// actions retain the ordinary compiler path.
+func (def Definition) CompileForAddress(params json.RawMessage, hardwareID string) (SingleStep, error) {
+	if def.addressCompiler == nil {
+		return def.Compile(params)
+	}
+	address, err := ParseHardwareAddress(hardwareID)
+	if err != nil {
+		return SingleStep{}, fmt.Errorf("action %q target address: %w", def.ID, err)
+	}
+	if def.AvailabilityCode != "" {
+		return SingleStep{}, fmt.Errorf("action %q unavailable: %s", def.ID, def.AvailabilityReason)
+	}
+	step, err := def.addressCompiler(append(json.RawMessage(nil), params...), address)
+	if err != nil {
+		return SingleStep{}, fmt.Errorf("compile action %q: %w", def.ID, err)
+	}
+	if err := validateSingleStep(step); err != nil {
+		return SingleStep{}, fmt.Errorf("compiled action %q: %w", def.ID, err)
+	}
+	return cloneStep(step), nil
+}
+
 // CompilePlan validates a fixed multi-step workflow. The current dispatcher
 // intentionally does not flatten it into a single request, which prevents a
 // destructive action from silently losing readback/finally semantics.
@@ -218,6 +247,43 @@ func (def Definition) Verify(params json.RawMessage, raw []byte) ([]drivers.Sens
 		params = json.RawMessage("{}")
 	}
 	return def.verifier(append(json.RawMessage(nil), params...), append([]byte(nil), raw...))
+}
+
+// VerifyForAddress binds a final response to the physical EdgeDevice target
+// when the trusted driver supports addressed verification.
+func (def Definition) VerifyForAddress(params json.RawMessage, raw []byte, hardwareID string) ([]drivers.SensorData, error) {
+	if def.addressVerifier == nil {
+		return def.Verify(params, raw)
+	}
+	address, err := ParseHardwareAddress(hardwareID)
+	if err != nil {
+		return nil, fmt.Errorf("action %q target address: %w", def.ID, err)
+	}
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
+	}
+	return def.addressVerifier(append(json.RawMessage(nil), params...), append([]byte(nil), raw...), address)
+}
+
+// ParseHardwareAddress accepts the decimal and 0x-prefixed forms used by
+// EdgeDevice.hardware_id.  Zero/empty means the legacy default address 1 for
+// addressed built-in actions; other values must be valid Modbus unit IDs.
+func ParseHardwareAddress(value string) (uint8, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 1, nil
+	}
+	base := 10
+	text := value
+	if strings.HasPrefix(text, "0x") || strings.HasPrefix(text, "0X") {
+		base = 16
+		text = text[2:]
+	}
+	parsed, err := strconv.ParseUint(text, base, 8)
+	if err != nil || parsed < 1 || parsed > 254 {
+		return 0, fmt.Errorf("hardware_id %q must be an address from 1 to 254", value)
+	}
+	return uint8(parsed), nil
 }
 
 func cloneStep(step SingleStep) SingleStep {
@@ -274,7 +340,7 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 	if !ok {
 		return fmt.Errorf("action %s for %s not found", actionID, deviceType)
 	}
-	if enabled && !currentEngineAllows(def) {
+	if enabled && !CurrentEngineAllows(def) {
 		return fmt.Errorf("action %s for %s requires the future high-risk command engine", actionID, deviceType)
 	}
 	def.Enabled = enabled
@@ -290,18 +356,12 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 	return nil
 }
 
-// currentEngineAllows is deliberately narrower than the complete design. The
+// CurrentEngineAllows is deliberately narrower than the complete design. The
 // deployed single-step/RAM replay engine cannot safely execute setters or
 // medium/high/critical actions until risk encoding, durable at-most-once and
 // bounded verification semantics land together.
-func currentEngineAllows(def Definition) bool {
-	if def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce {
-		return true
-	}
-	if def.ExecutionShape == "bounded_sequence" && def.planCompiler != nil && def.AtMostOnce {
-		return true
-	}
-	return os.Getenv("EHOME_ENV") == "development" && os.Getenv("EHOME_ENABLE_HIGH_RISK_ACTIONS") == "true" && def.ExecutionShape == "single" && def.Verification != "none"
+func CurrentEngineAllows(def Definition) bool {
+	return def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce
 }
 
 func (r *Registry) List(deviceType string) []Definition {
@@ -338,6 +398,7 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				panic(fmt.Errorf("invalid driver action %s/%s: %w", deviceType, action.ID, err))
 			}
 			var compiler Compiler
+			var addressCompiler AddressCompiler
 			if len(action.Parameters) != 0 {
 				driverCompiler, ok := driver.(drivers.ControlActionCompiler)
 				if !ok {
@@ -346,6 +407,13 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				actionID := action.ID
 				compiler = func(params json.RawMessage) (SingleStep, error) {
 					step, err := driverCompiler.CompileControlAction(actionID, params)
+					return SingleStep{TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS}, err
+				}
+			}
+			if targetCompiler, ok := driver.(drivers.ControlActionAddressCompiler); ok {
+				actionID := action.ID
+				addressCompiler = func(params json.RawMessage, address uint8) (SingleStep, error) {
+					step, err := targetCompiler.CompileControlActionForAddress(actionID, params, address)
 					return SingleStep{TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS}, err
 				}
 			}
@@ -370,6 +438,7 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				}
 			}
 			var verifier Verifier
+			var addressVerifier AddressVerifier
 			if actionVerifier, ok := driver.(drivers.ControlActionVerifier); ok {
 				actionID := action.ID
 				verifier = func(params json.RawMessage, raw []byte) ([]drivers.SensorData, error) {
@@ -382,13 +451,19 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					return driver.ParseData(raw)
 				}
 			}
+			if targetVerifier, ok := driver.(drivers.ControlActionAddressVerifier); ok {
+				actionID := action.ID
+				addressVerifier = func(params json.RawMessage, raw []byte, address uint8) ([]drivers.SensorData, error) {
+					return targetVerifier.VerifyControlActionForAddress(actionID, params, raw, address)
+				}
+			}
 			enabled := action.Enabled && action.Semantics == "read" && action.Risk == "low" && action.ExecutionShape == "single" && !action.AtMostOnce
 			if err := r.Register(Definition{ID: action.ID, Version: action.Version, Name: action.Name,
 				Description: action.Description, DeviceType: deviceType, Semantics: action.Semantics,
 				Risk: action.Risk, ExecutionShape: action.ExecutionShape, Verification: action.Verification,
 				AtMostOnce: action.AtMostOnce, MaxSteps: action.MaxSteps, Enabled: enabled, Transport: ChannelCmdV2Adapter,
 				AvailabilityCode: action.AvailabilityCode, AvailabilityReason: action.AvailabilityReason,
-				InputSchema: schema,
+				InputSchema: schema, addressCompiler: addressCompiler, addressVerifier: addressVerifier,
 				SingleStep: SingleStep{TXData: action.TXData, ReadSize: action.ReadSize,
 					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, Plan: BoundedPlan{}, compiler: compiler, planCompiler: planCompiler, verifier: verifier}); err != nil {
 				panic(err)

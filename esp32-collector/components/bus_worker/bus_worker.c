@@ -591,7 +591,7 @@ static void notify_batch_waiter(batch_rx_state_t *state)
 }
 
 static bool has_pending_cmd(bus_runtime_t *rt, int ch_idx);
-static void wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
+static bool wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
                                         const char *tag, const bus_cmd_t *cmd);
 
 /* Queue-set membership is rebuilt only while all workers are suspended.  A
@@ -888,7 +888,12 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
   /* UART responses carry no request ID.  Never transmit another
    * request/response command before rx_task has consumed the prior response. */
   if (cmd.bus_type == BUS_TYPE_UART && (cmd.type == CMD_SAMPLE || cmd.read_size > 0)) {
-   wait_for_uart_response_slot(rt, ch_idx, tag, &cmd);
+   if (!wait_for_uart_response_slot(rt, ch_idx, tag, &cmd)) {
+    if (cmd.channel_cmd_v2) complete_control(&cmd, false, 1007, NULL, 0);
+    else if (cmd.type == CMD_WRITE) queue_write_rsp(cmd.request_id, false, 1007, "configuration changed before dispatch");
+    scheduler_notify_channel_error(cmd.channel_id);
+    continue;
+   }
   }
 
   if (cmd.channel_cmd_v2 && cmd.plan_step_count > 0) {
@@ -1158,16 +1163,19 @@ static uint32_t next_report_sequence(bus_runtime_t *rt, uint32_t channel_id)
  * rx_task has consumed the first response makes the FIFO head own the next
  * bytes, associating a control reply with a periodic sample (or vice versa).
  * rx_task releases this bounded fence after a complete response or timeout. */
-static void wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
+static bool wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
                                         const char *tag, const bus_cmd_t *cmd)
 {
- if (ch_idx < 0 || !has_pending_cmd(rt, ch_idx)) return;
+ if (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return false;
+ if (ch_idx < 0 || !has_pending_cmd(rt, ch_idx)) return true;
  ESP_LOGI(tag, "waiting for pending UART response ch=%lu before %s",
           (unsigned long)cmd->channel_id,
           cmd->channel_cmd_v2 ? "V2 command" : "next command");
  while (has_pending_cmd(rt, ch_idx)) {
+  if (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return false;
   vTaskDelay(pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
  }
+ return !__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE);
 }
 
 static int uart_slot_from_event_queue(bus_runtime_t *rt,
@@ -1190,21 +1198,29 @@ static void rx_append_from_event(bus_runtime_t *rt, int idx, uint8_t *rx,
   size_t n = bus_dma_read(&rt->bus_ctx[idx], rx, rx_cap);
   if (n == 0) break;
   s_last_rx_us[idx] = esp_timer_get_time();
+  if (s->overflow) {
+   /* Continue draining the controller ring, but do not append bytes to an
+    * already invalid frame.  The idle path emits one explicit failure. */
+   continue;
+  }
   if (s->len + n > STREAM_RX_BUF_SIZE) {
    s_rx_overflow_count[idx]++;
    ESP_LOGW(TAG_RX, "ch%d rx overflow (len=%d+%d > %d), flushing boundary",
     idx, (int)s->len, (int)n, (int)STREAM_RX_BUF_SIZE);
    emit_ready_stream_chunks(rt, idx, s_last_rx_us[idx]);
    if (s->len + n > STREAM_RX_BUF_SIZE) {
-    /* Unknown-length V2 is intentionally bounded by its protocol validator;
-     * for every other stream retain the newest bytes after an explicit
-     * overflow accounting event rather than silently overwriting memory. */
+    /* The current response is no longer frameable.  Do not clear the
+     * condition into a successful idle/short response. */
+    s->overflow = true;
     s->len = 0;
+    continue;
    }
   }
   if (n > STREAM_RX_BUF_SIZE) {
    s_rx_overflow_count[idx]++;
-   n = STREAM_RX_BUF_SIZE;
+   s->overflow = true;
+   s->len = 0;
+   continue;
   }
   memcpy(s->buffer + s->len, rx, n);
   s->len += n;
@@ -1219,6 +1235,27 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  if (s_last_rx_us[idx] == 0 ||
      now_us - s_last_rx_us[idx] < UART_IDLE_THRESHOLD_US)
   return false;
+
+ if (s->overflow) {
+  pending_cmd_t pcmd;
+  bool pending = rt->pending_queues[idx] &&
+                 xQueueReceive(rt->pending_queues[idx], &pcmd, 0) == pdTRUE;
+  if (pending && pcmd.channel_cmd_v2) {
+   queue_control_final(pcmd.control_slot, false, 0x02, NULL, 0);
+  } else if (pending) {
+   report_enqueue(rt->bus_ch[idx], (uint64_t)now_us, ++s_rx_sequence[idx],
+    NULL, 0, 0x02, pcmd.request_id, pcmd.edge_device_id,
+    pcmd.command_template_id, pcmd.command_index);
+  } else {
+   report_enqueue(rt->bus_ch[idx], (uint64_t)now_us, ++s_rx_sequence[idx],
+    NULL, 0, 0x02, 0, 0, 0, 0);
+  }
+  s->len = 0;
+  s->overflow = false;
+  s_stream_chunked[idx] = false;
+  s_last_rx_us[idx] = 0;
+  return true;
+ }
 
  /* A length-less pending response may have emitted one or more full chunks.
   * The idle gap closes that descriptor even when the final chunk ended
@@ -1236,6 +1273,20 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  if (has_pending_cmd(rt, idx)) {
   pending_cmd_t pcmd;
   if (xQueuePeek(rt->pending_queues[idx], &pcmd, 0) != pdTRUE) return false;
+  if (pcmd.read_size > 0 && s->len < pcmd.read_size) {
+   (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   if (pcmd.channel_cmd_v2) {
+    queue_control_final(pcmd.control_slot, false, 0x03, NULL, 0);
+   } else {
+    report_enqueue(rt->bus_ch[idx], (uint64_t)now_us, ++s_rx_sequence[idx],
+     NULL, 0, 0x03, pcmd.request_id, pcmd.edge_device_id,
+     pcmd.command_template_id, pcmd.command_index);
+   }
+   s->len = 0;
+   s_stream_chunked[idx] = false;
+   s_last_rx_us[idx] = 0;
+   return true;
+  }
   if (pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, true, 0, s->buffer, s->len);
   } else {
@@ -1311,8 +1362,10 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
  case UART_FIFO_OVF:
  case UART_BUFFER_FULL:
   s_rx_error_count[idx]++;
+  s_rx_overflow_count[idx]++;
   s_streams[idx].len = 0;
-  s_last_rx_us[idx] = 0;
+  s_streams[idx].overflow = true;
+  s_last_rx_us[idx] = esp_timer_get_time();
   (void)uart_flush_input(rt->bus_ctx[idx].cfg.uart.port);
   ESP_LOGW(TAG_RX, "UART%d event=%d size=%" PRIu32 "; input reset",
    (int)rt->bus_ctx[idx].cfg.uart.port, (int)event->type,
@@ -1366,6 +1419,14 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
     pcmd.request_id, pcmd.edge_device_id, pcmd.command_template_id,
     pcmd.command_index);
   }
+  /* The timeout already completed the pending descriptor.  Discard every
+   * residual stream fragment, not only an overflow marker: a short response
+   * that reaches the hard timeout before the idle boundary must never be
+   * reclassified as passive telemetry on a later tick. */
+  s_streams[i].len = 0;
+  s_streams[i].overflow = false;
+  s_stream_chunked[i] = false;
+  s_last_rx_us[i] = 0;
  }
  return completions;
 }
@@ -1377,7 +1438,7 @@ static TickType_t rx_wait_ticks(bus_runtime_t *rt)
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
   if (!rt->bus_ctx[i].initialized || rt->bus_ctx[i].bus_type != BUS_TYPE_UART)
    continue;
-  if (s_streams[i].len > 0 && s_last_rx_us[i] > 0) {
+  if ((s_streams[i].len > 0 || s_streams[i].overflow) && s_last_rx_us[i] > 0) {
    int64_t deadline = s_last_rx_us[i] + UART_IDLE_THRESHOLD_US;
    if (deadline < next_us) next_us = deadline;
   }
@@ -1504,6 +1565,7 @@ void bus_worker_resume(void)
 {
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
   s_streams[i].len = 0;
+  s_streams[i].overflow = false;
   s_stream_chunked[i] = false;
   s_last_rx_us[i] = 0;
  }

@@ -248,6 +248,22 @@ static char *get_bus_hw_id(bus_runtime_t *rt, int idx)
     return rt->bus_hw_id + idx * 16;
 }
 
+/* A DMA pool entry is keyed by the physical resource, while the runtime may
+ * contain multiple logical channels sharing that resource. Releasing by
+ * hw_id is safe only after the last initialized channel detaches. */
+static bool runtime_has_other_hw_lease(const bus_runtime_t *rt, int excluded_idx,
+                                       const char *hw_id)
+{
+    if (!rt || !rt->bus_ctx || !rt->bus_ch || !rt->bus_hw_id ||
+        !hw_id || hw_id[0] == '\0') return false;
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (i == excluded_idx || rt->bus_ch[i] == 0 ||
+            !rt->bus_ctx[i].initialized) continue;
+        if (strcmp(rt->bus_hw_id + i * 16, hw_id) == 0) return true;
+    }
+    return false;
+}
+
 static uint32_t read_be32_config(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -706,7 +722,7 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                          ch_id, esp_err_to_name(err));
                 rt->bus_ch[i] = 0;
                 /* Release DMA if init failed */
-                if (dma) {
+                if (dma && !runtime_has_other_hw_lease(rt, i, hw_id)) {
                     esp_err_t release_err = dma_pool_release_by_hw(rt->dma_pool, hw_id);
                     if (release_err != ESP_OK) return release_err;
                 }
@@ -760,7 +776,8 @@ esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt)
         }
         /* Release DMA only after the driver is confirmed detached. If DMA
          * release fails, retain channel metadata so a later cleanup retries. */
-        if (rt->bus_ch[i] != 0 && rt->dma_pool && hw_id_slot[0] != '\0') {
+        if (rt->bus_ch[i] != 0 && rt->dma_pool && hw_id_slot[0] != '\0' &&
+            !runtime_has_other_hw_lease(rt, i, hw_id_slot)) {
             esp_err_t err = dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
             if (err != ESP_OK) {
                 cleanup_err = err;
@@ -857,7 +874,8 @@ esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
             char *hw_id_slot = get_bus_hw_id(rt, i);
             esp_err_t err = bus_dma_deinit(&rt->bus_ctx[i]);
             if (err != ESP_OK) return err;
-            if (rt->dma_pool && hw_id_slot[0] != '\0') {
+            if (rt->dma_pool && hw_id_slot[0] != '\0' &&
+                !runtime_has_other_hw_lease(rt, i, hw_id_slot)) {
                 err = dma_pool_release_by_hw(rt->dma_pool, hw_id_slot);
                 if (err != ESP_OK) return err;
             }

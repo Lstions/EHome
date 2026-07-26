@@ -92,9 +92,9 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 		t.Fatal("identical request did not report replay")
 	}
 
-	// The HTTP create route must forward the server-issued confirmation token
-	// and reason; otherwise future medium-risk setters would be impossible to
-	// execute even though the service enforces their confirmation policy.
+	// A confirmation token does not bypass the current physical action gate:
+	// medium-risk actions remain unavailable until a separately reviewed
+	// execution engine is deployed.
 	if err := actions.Register(deviceaction.Definition{ID: "medium_read", Version: 1, Name: "medium", DeviceType: edge.Type, Semantics: "read", Risk: "medium", Enabled: true, Transport: deviceaction.ChannelCmdV2Adapter, SingleStep: deviceaction.SingleStep{TXData: []byte{1}, RXTimeoutMS: 1}}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestDeviceOperationReadOnlyLifecycle(t *testing.T) {
 	req.Header.Set("Idempotency-Key", "api-medium-0001")
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusAccepted {
+	if w.Code != http.StatusConflict || !bytes.Contains(w.Body.Bytes(), []byte(`"message":"action unavailable"`)) {
 		t.Fatalf("confirmed medium create status=%d body=%s", w.Code, w.Body.String())
 	}
 

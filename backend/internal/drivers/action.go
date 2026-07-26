@@ -80,11 +80,11 @@ type CompiledControlPlan struct {
 }
 
 type CompiledControlPlanStep struct {
-	ID           string
-	Kind         string
-	TXData       []byte
-	ReadSize     uint32
-	RXTimeoutMS  uint32
+	ID            string
+	Kind          string
+	TXData        []byte
+	ReadSize      uint32
+	RXTimeoutMS   uint32
 	PostTXDelayMS uint32
 }
 
@@ -94,6 +94,15 @@ type CompiledControlPlanStep struct {
 // again for a retry, so implementations must be deterministic.
 type ControlActionCompiler interface {
 	CompileControlAction(actionID string, params json.RawMessage) (CompiledControlStep, error)
+}
+
+// ControlActionAddressCompiler is an optional target-aware compiler for
+// addressed protocols.  The EdgeDevice owns the physical address; drivers
+// that put that address into their wire frame implement this interface so a
+// shared action definition cannot accidentally broadcast to/falsely target
+// address 1 on a multi-device bus.
+type ControlActionAddressCompiler interface {
+	CompileControlActionForAddress(actionID string, params json.RawMessage, address uint8) (CompiledControlStep, error)
 }
 
 // ControlActionPlanCompiler is optional. It is required only by actions whose
@@ -114,4 +123,12 @@ type ControlActionPlanCompiler interface {
 // frames remain confined to the transport boundary.
 type ControlActionVerifier interface {
 	VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error)
+}
+
+// ControlActionAddressVerifier is the verification counterpart of
+// ControlActionAddressCompiler.  It binds a response to the EdgeDevice that
+// originated the request, rather than accepting a valid frame from another
+// addressed device sharing the same channel.
+type ControlActionAddressVerifier interface {
+	VerifyControlActionForAddress(actionID string, params json.RawMessage, raw []byte, address uint8) ([]SensorData, error)
 }

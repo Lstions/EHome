@@ -484,6 +484,28 @@ func TestSN3001ProtocolActionGoldenVectors(t *testing.T) {
 	}
 }
 
+func TestSN3001AddressAwareActionBindsRequestAndResponse(t *testing.T) {
+	d := &SN3001RainDriver{}
+	step, err := d.CompileControlActionForAddress("read_rainfall", json.RawMessage(`{}`), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("% X", step.TXData); got != "07 03 00 00 00 01 84 6C" {
+		t.Fatalf("address-aware read frame = %s", got)
+	}
+
+	read := append([]byte{7, 3, 2, 0, 20}, 0, 0)
+	crc := parser.ModbusCRC16(read[:5])
+	read[5], read[6] = byte(crc), byte(crc>>8)
+	if result, err := d.VerifyControlActionForAddress("read_rainfall", json.RawMessage(`{}`), read, 7); err != nil || len(result) != 1 {
+		t.Fatalf("address-aware response result=%+v err=%v", result, err)
+	}
+	read[0] = 1
+	if _, err := d.VerifyControlActionForAddress("read_rainfall", json.RawMessage(`{}`), read, 7); err == nil {
+		t.Fatal("response from another Modbus unit was accepted")
+	}
+}
+
 func TestSN3001ResetBatchVerificationGoldenVector(t *testing.T) {
 	d := &SN3001RainDriver{}
 	read := []byte{0x01, 0x03, 0x02, 0x00, 0x00, 0xB8, 0x44}

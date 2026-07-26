@@ -487,6 +487,86 @@ func (d *SN3001RainDriver) CompileControlAction(actionID string, params json.Raw
 	return CompiledControlStep{TXData: modbusWriteFrame(byte(address), register, uint16(value)), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100}, nil
 }
 
+// CompileControlActionForAddress binds every SN-3001 Modbus request to the
+// EdgeDevice instance selected by the scheduler.  The catalog is shared, but
+// the unit address is not: using a fixed 0x01 here would make two sensors on
+// one UART indistinguishable and could address the wrong device.
+func (d *SN3001RainDriver) CompileControlActionForAddress(actionID string, params json.RawMessage, address uint8) (CompiledControlStep, error) {
+	var step CompiledControlStep
+	switch actionID {
+	case "read_rainfall":
+		step = CompiledControlStep{TXData: modbusReadFrame(address, 0x0000, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}
+	case "read_rain_sensitivity":
+		step = CompiledControlStep{TXData: modbusReadFrame(address, 0x0052, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}
+	case "read_device_address":
+		step = CompiledControlStep{TXData: modbusReadFrame(address, 0x07d0, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}
+	case "read_baud_rate":
+		step = CompiledControlStep{TXData: modbusReadFrame(address, 0x07d1, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}
+	case "clear_rainfall_write":
+		step = CompiledControlStep{TXData: modbusWriteFrame(address, 0x0000, 0x005a), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100}
+	case "set_rain_sensitivity", "set_device_address", "set_baud_rate":
+		compiled, err := d.CompileControlAction(actionID, params)
+		if err != nil {
+			return CompiledControlStep{}, err
+		}
+		if len(compiled.TXData) < 3 {
+			return CompiledControlStep{}, fmt.Errorf("sn3001_rain: compiled frame is too short")
+		}
+		if explicit := sn3001SourceAddress(params); explicit != 0 && explicit != address {
+			return CompiledControlStep{}, fmt.Errorf("sn3001_rain: source_address %d does not match edge address %d", explicit, address)
+		}
+		compiled.TXData = modbusFrameForAddress(compiled.TXData, address)
+		return compiled, nil
+	default:
+		return CompiledControlStep{}, fmt.Errorf("sn3001_rain action %q is not addressable", actionID)
+	}
+	return step, nil
+}
+
+func sn3001SourceAddress(params json.RawMessage) uint8 {
+	var raw struct {
+		SourceAddress *uint8 `json:"source_address"`
+	}
+	if json.Unmarshal(params, &raw) == nil && raw.SourceAddress != nil {
+		return *raw.SourceAddress
+	}
+	return 0
+}
+
+func modbusFrameForAddress(frame []byte, address byte) []byte {
+	result := append([]byte(nil), frame...)
+	result[0] = address
+	crc := parser.ModbusCRC16(result[:len(result)-2])
+	result[len(result)-2], result[len(result)-1] = byte(crc), byte(crc>>8)
+	return result
+}
+
+// VerifyControlActionForAddress rejects a valid Modbus frame from a different
+// unit before applying the action-specific verifier.  Setter echoes are
+// compared with the target-aware compiled frame as well, so the response and
+// request remain bound to the same EdgeDevice address.
+func (d *SN3001RainDriver) VerifyControlActionForAddress(actionID string, params json.RawMessage, raw []byte, address uint8) ([]SensorData, error) {
+	if len(raw) == 0 || raw[0] != address {
+		return nil, fmt.Errorf("sn3001_rain: response address %02x does not match edge address %02x", func() byte {
+			if len(raw) == 0 {
+				return 0
+			}
+			return raw[0]
+		}(), address)
+	}
+	if actionID == "clear_rainfall_write" || actionID == "set_rain_sensitivity" || actionID == "set_device_address" || actionID == "set_baud_rate" {
+		step, err := d.CompileControlActionForAddress(actionID, params, address)
+		if err != nil {
+			return nil, err
+		}
+		if len(raw) < 5 || !bytes.Equal(raw, step.TXData) {
+			return nil, fmt.Errorf("sn3001_rain: write response does not echo target request")
+		}
+		return []SensorData{{Name: "write_ack", Value: 1, Unit: "ack"}}, nil
+	}
+	return d.VerifyControlAction(actionID, params, raw)
+}
+
 func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
 	if actionID == "reset_rainfall" {
 		steps, err := decodeSN3001BatchRaw(raw)

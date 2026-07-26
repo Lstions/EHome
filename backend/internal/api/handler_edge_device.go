@@ -644,21 +644,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// 3. Resolve current address from EdgeDevice
 		addr := parseHardwareIDUint(edge.HardwareID)
 
-		// Also try to get address from DeviceConfig.Connection
-		if addr == 0 && edge.DeviceConfig.Connection != nil {
-			var conn map[string]interface{}
-			if err := json.Unmarshal(edge.DeviceConfig.Connection, &conn); err == nil {
-				if dp, ok := conn["default_params"].(map[string]interface{}); ok {
-					if a, ok := dp["address"]; ok {
-						if v, err := toUint64(a); err == nil {
-							addr = v
-						}
-					}
-				}
-			}
-		}
-
-		// Default to Modbus slave address 1 if not resolved from hardware_id or connection
+		// DeviceConfig is shared by multiple EdgeDevice instances in the
+		// multi-bus model, so its connection defaults must never supply an
+		// instance address. Default to Modbus slave address 1 only when this
+		// EdgeDevice has no instance address yet.
 		if addr == 0 {
 			addr = 1
 		}
@@ -699,8 +688,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				logger.Warnf("[execute] post_action failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
 			}
 
-			// Trigger config sync
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, edge.NodeID, fmt.Sprint(edge.ID))
+			// Trigger config sync against the entity that owns the changed value.
+			// In multi-bus mode baud belongs to Channel; address belongs to the
+			// individual EdgeDevice instance.
+			changeType, entityID := legacyPostActionConfigChange(edge, opConfig.PostAction)
+			nodemgr.EmitConfigChange(c, eventBus, changeType, nodemgr.CfgActionUpdate, edge.NodeID, entityID)
 
 			// P2-4: Verify write by executing a read operation
 			var verifyResult interface{}
@@ -1076,42 +1068,20 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, params map[string]interface{}) error {
 	switch postAction {
 	case "update_connection_address":
-		// Update EdgeDevice.HardwareID and DeviceConfig.Connection.address atomically
+		// Address is instance-owned. Never write it into the shared DeviceConfig.
 		newAddr, ok := params["new_addr"]
 		if !ok {
 			return fmt.Errorf("new_addr param required for update_connection_address")
 		}
-		newAddrStr := fmt.Sprintf("%v", newAddr)
+		newAddrValue, err := toUint64(newAddr)
+		if err != nil || newAddrValue < 1 || newAddrValue > 254 {
+			return fmt.Errorf("unsupported address %v", newAddr)
+		}
+		newAddrStr := strconv.FormatUint(newAddrValue, 10)
 
-		err := db.Transaction(func(tx *gorm.DB) error {
-			// Update EdgeDevice.HardwareID
-			if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", edge.ID).Update("hardware_id", newAddrStr).Error; err != nil {
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.EdgeDevice{}).Where("id = ? AND node_id = ?", edge.ID, edge.NodeID).Update("hardware_id", newAddrStr).Error; err != nil {
 				return fmt.Errorf("failed to update hardware_id: %w", err)
-			}
-
-			// Update DeviceConfig.Connection.address
-			var dc models.DeviceConfig
-			if err := tx.First(&dc, edge.DeviceConfigID).Error; err != nil {
-				return fmt.Errorf("failed to load device config: %w", err)
-			}
-			var conn map[string]interface{}
-			if dc.Connection != nil {
-				if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-					return fmt.Errorf("failed to parse connection JSON: %w", err)
-				}
-			} else {
-				conn = make(map[string]interface{})
-			}
-			// Update address in default_params
-			dp, ok := conn["default_params"].(map[string]interface{})
-			if !ok {
-				dp = make(map[string]interface{})
-			}
-			dp["address"] = newAddr
-			conn["default_params"] = dp
-			connJSON, _ := json.Marshal(conn)
-			if err := tx.Model(&models.DeviceConfig{}).Where("id = ?", dc.ID).Update("connection", connJSON).Error; err != nil {
-				return fmt.Errorf("failed to update connection: %w", err)
 			}
 			return nil
 		})
@@ -1122,33 +1092,30 @@ func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, p
 		logger.Infof("[execute] post_action update_connection_address: edge=%d new_addr=%v", edge.ID, newAddr)
 
 	case "update_connection_baud":
-		// Update DeviceConfig.Connection.baud_rate
+		// Baud rate belongs to the physical Channel, not the shared device model.
 		newBaud, ok := params["new_baud"]
 		if !ok {
 			return fmt.Errorf("new_baud param required for update_connection_baud")
 		}
 
-		var dc models.DeviceConfig
-		if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
-			return fmt.Errorf("failed to load device config: %w", err)
+		baud := strings.TrimSpace(fmt.Sprint(newBaud))
+		if baud != "2400" && baud != "4800" && baud != "9600" {
+			return fmt.Errorf("unsupported baud rate %q", baud)
 		}
-		var conn map[string]interface{}
-		if dc.Connection != nil {
-			if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-				return fmt.Errorf("failed to parse connection JSON: %w", err)
-			}
-		} else {
-			conn = make(map[string]interface{})
+		var channel models.Channel
+		if err := db.Where("id = ? AND node_id = ?", edge.ChannelID, edge.NodeID).First(&channel).Error; err != nil {
+			return fmt.Errorf("failed to load channel: %w", err)
 		}
-		dp, ok := conn["default_params"].(map[string]interface{})
-		if !ok {
-			dp = make(map[string]interface{})
+		text := strings.TrimSpace(channel.BusConfig)
+		text = strings.TrimPrefix(strings.TrimPrefix(text, "\\x"), "0x")
+		data, err := hex.DecodeString(text)
+		if err != nil || len(data) < 6 {
+			return fmt.Errorf("channel %d has malformed UART bus_config", channel.ID)
 		}
-		dp["baud_rate"] = newBaud
-		conn["default_params"] = dp
-		connJSON, _ := json.Marshal(conn)
-		if err := db.Model(&dc).Update("connection", connJSON).Error; err != nil {
-			return fmt.Errorf("failed to update connection: %w", err)
+		target, _ := strconv.ParseUint(baud, 10, 32)
+		data[2], data[3], data[4], data[5] = byte(target>>24), byte(target>>16), byte(target>>8), byte(target)
+		if err := db.Model(&models.Channel{}).Where("id = ? AND node_id = ?", channel.ID, channel.NodeID).Update("bus_config", strings.ToUpper(hex.EncodeToString(data))).Error; err != nil {
+			return fmt.Errorf("failed to update channel bus_config: %w", err)
 		}
 
 		logger.Infof("[execute] post_action update_connection_baud: edge=%d new_baud=%v", edge.ID, newBaud)
@@ -1161,4 +1128,11 @@ func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, p
 	}
 
 	return nil
+}
+
+func legacyPostActionConfigChange(edge models.EdgeDevice, postAction string) (nodemgr.ConfigChangeType, string) {
+	if postAction == "update_connection_baud" {
+		return nodemgr.CfgChangeChannel, fmt.Sprint(edge.ChannelID)
+	}
+	return nodemgr.CfgChangeEdgeDevice, fmt.Sprint(edge.ID)
 }
