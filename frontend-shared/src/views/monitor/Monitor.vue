@@ -18,7 +18,7 @@
     <!-- 统计卡片 -->
     <div class="stat-cards">
       <el-row :gutter="16">
-        <el-col :span="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card http">
             <div class="stat-icon"><el-icon><Connection /></el-icon></div>
             <div class="stat-content">
@@ -27,7 +27,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card device">
             <div class="stat-icon"><el-icon><Monitor /></el-icon></div>
             <div class="stat-content">
@@ -40,7 +40,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card collector">
             <div class="stat-icon"><el-icon><Cpu /></el-icon></div>
             <div class="stat-content">
@@ -53,7 +53,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :span="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card data">
             <div class="stat-icon"><el-icon><DataLine /></el-icon></div>
             <div class="stat-content">
@@ -103,7 +103,7 @@
 
       <el-row :gutter="16">
         <!-- HTTP 监控 -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -122,7 +122,7 @@
         </el-col>
 
         <!-- MQTT 监控 -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -148,7 +148,7 @@
 
       <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 设备状态 -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -181,7 +181,7 @@
         </el-col>
 
         <!-- 采集器状态 -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -216,7 +216,7 @@
 
       <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 数据采集 -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -235,7 +235,7 @@
         </el-col>
 
         <!-- WebSocket -->
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -532,6 +532,33 @@ onUnmounted(() => {
 @media (max-width: 900px) {
   .control-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .toolbar-actions {
+    flex-wrap: wrap;
+  }
+  .toolbar-actions .el-select {
+    flex: 1;
+  }
+  .stat-card :deep(.el-card__body) {
+    padding: 16px;
+  }
+  .stat-card .stat-icon {
+    font-size: 36px;
+    right: 12px;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
+  .stat-cards .el-col {
+    margin-bottom: 12px;
   }
 }
 </style>

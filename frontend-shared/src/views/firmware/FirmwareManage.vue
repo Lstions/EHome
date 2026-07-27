@@ -54,20 +54,22 @@
               <span>{{ formatTime(row.created_at) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="320" fixed="right">
+          <el-table-column label="操作" min-width="280" class-name="firmware-action-col">
             <template #default="{ row }">
-              <el-button type="primary" size="small" @click="handleEdit(row)">
-                <el-icon><Edit /></el-icon> 编辑
-              </el-button>
-              <el-button size="small" @click="handleCopyUrl(row)">
-                <el-icon><CopyDocument /></el-icon> 复制链接
-              </el-button>
-              <el-button size="small" @click="handleDownload(row)">
-                <el-icon><Download /></el-icon> 下载
-              </el-button>
-              <el-button type="danger" size="small" @click="handleDelete(row)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
+              <div class="action-buttons">
+                <el-button type="primary" size="small" @click="handleEdit(row)">
+                  <el-icon><Edit /></el-icon> 编辑
+                </el-button>
+                <el-button size="small" @click="handleCopyUrl(row)">
+                  <el-icon><CopyDocument /></el-icon> 复制链接
+                </el-button>
+                <el-button size="small" @click="handleDownload(row)">
+                  <el-icon><Download /></el-icon> 下载
+                </el-button>
+                <el-button type="danger" size="small" @click="handleDelete(row)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -448,5 +450,26 @@ onMounted(() => {
   margin-left: 8px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+.action-buttons {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+@media (max-width: 768px) {
+  /* 表格列总宽超出视口时，el-table 原生横向滚动，避免列被压缩 */
+  .firmware-manage :deep(.el-table) {
+    width: 100%;
+  }
+  /* 分页在窄屏下换行并居中 */
+  .firmware-manage :deep(.el-pagination) {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .firmware-manage :deep(.el-pagination .el-pagination__jump) {
+    margin-left: 0;
+  }
 }
 </style>

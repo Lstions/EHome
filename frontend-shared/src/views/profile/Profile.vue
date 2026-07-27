@@ -3,7 +3,7 @@
     <PageHeader title="个人设置" />
 
     <el-row :gutter="20">
-      <el-col :span="8">
+      <el-col :xs="24" :sm="12" :md="8">
         <el-card class="info-card">
           <div class="avatar-block">
             <el-avatar :size="80" :icon="UserFilled" />
@@ -14,7 +14,7 @@
         </el-card>
       </el-col>
 
-      <el-col :span="16">
+      <el-col :xs="24" :sm="12" :md="16">
         <el-card>
           <template #header>
             <span>修改密码</span>
@@ -124,5 +124,20 @@ const handleChangePassword = async () => {
   margin: 12px 0 0;
   font-size: 13px;
   color: var(--text-color-secondary);
+}
+
+@media (max-width: 768px) {
+  .profile-page {
+    padding: 0 12px 16px;
+  }
+  .profile-page .el-col {
+    margin-bottom: 16px;
+  }
+  .profile-page :deep(.el-form-item__label) {
+    width: 84px !important;
+  }
+  .profile-page :deep(.el-form-item__content) {
+    margin-left: 84px !important;
+  }
 }
 </style>
