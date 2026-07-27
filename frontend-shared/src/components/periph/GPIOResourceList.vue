@@ -150,13 +150,13 @@ async function setLevel(row: GPIORow, level: 0 | 1) {
   await guardedRun(row, `正在写入 ${level ? 'HIGH' : 'LOW'}…`, async () => {
     const ack = await gpioApi.set(props.nodeId, row.pin, level)
     if (!props.registerPending?.({ requestId: ack.request_id, pin: row.pin, action: level ? 1 : 0 })) row.feedback = '写入命令已发送，等待设备响应'
-  }, { rollback: () => { row.level = previous } })
+  }, { rollback: () => { row.level = previous }, errorFeedback: '写入失败 · 重试', errorLabel: 'GPIO 写入失败' })
 }
 async function readLevel(row: GPIORow) {
   await guardedRun(row, '正在读取…', async () => {
     const ack = await gpioApi.read(props.nodeId, row.pin)
     if (!props.registerPending?.({ requestId: ack.request_id, pin: row.pin, action: 2 })) row.feedback = '读取命令已发送，等待设备响应'
-  })
+  }, { errorFeedback: '读取失败 · 重试', errorLabel: 'GPIO 读取失败' })
 }
 function applyRuntimeLevel(pin: number, level: number | null) {
   const row = rows.value.find(item => item.pin === pin)

@@ -52,6 +52,10 @@ export function useGuardedOperation(options: GuardedOperationOptions) {
     rollback?: () => void
     /** Called on success with the API result */
     onSuccess?: (result: unknown) => void
+    /** Override the error feedback message (default: '操作失败 · 重试') */
+    errorFeedback?: string
+    /** Override the error toast prefix (default: options.errorPrefix) */
+    errorLabel?: string
   }
 
   async function run<R>(
@@ -75,8 +79,9 @@ export function useGuardedOperation(options: GuardedOperationOptions) {
     } catch (error: unknown) {
       if (isStale(gen, nodeId)) return undefined
       opts.rollback?.()
-      row.feedback = '操作失败 · 重试'
-      ElMessage.error(`${options.errorPrefix}: ${error instanceof Error ? error.message : '未知错误'}`)
+      row.feedback = opts.errorFeedback || '操作失败 · 重试'
+      const label = opts.errorLabel || options.errorPrefix
+      ElMessage.error(`${label}: ${error instanceof Error ? error.message : '未知错误'}`)
       return undefined
     } finally {
       if (!isStale(gen, nodeId)) row.busy = false

@@ -10,6 +10,7 @@
       <div v-if="hasProtectionData" class="protection-summary">
         <el-tag type="success" size="small" effect="dark">保护状态正常 (bitmask=0)</el-tag>
       </div>
+      <el-empty v-else description="无保护状态数据" :image-size="60" />
     </template>
   </StatusItemGrid>
 </template>

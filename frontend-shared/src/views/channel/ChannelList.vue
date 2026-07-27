@@ -171,7 +171,7 @@ import { useNodeStore } from '@/stores/node'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { getHardwareTagType, getHardwareLabel } from '@/utils/hardwareTag'
+import { getHardwareTagType } from '@/utils/hardwareTag'
 
 const router = useRouter()
 const nodeStore = useNodeStore()

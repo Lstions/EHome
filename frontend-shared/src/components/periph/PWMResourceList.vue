@@ -170,13 +170,13 @@ async function start(row: PWMRow) {
   await guardedRun(row, '正在启动…', async () => {
     const ack = await pwmApi.start(props.nodeId, row.resource.id)
     if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 2 })) row.feedback = '启动命令已发送，等待设备响应'
-  })
+  }, { errorFeedback: '启动失败 · 重试', errorLabel: 'PWM 启动失败' })
 }
 async function stop(row: PWMRow) {
   await guardedRun(row, '正在停止…', async () => {
     const ack = await pwmApi.stop(props.nodeId, row.resource.id)
     if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 3 })) row.feedback = '停止命令已发送，等待设备响应'
-  })
+  }, { errorFeedback: '停止失败 · 重试', errorLabel: 'PWM 停止失败' })
 }
 
 const dutyTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -193,7 +193,7 @@ function scheduleDuty(row: PWMRow, duty: number) {
     await guardedRun(row, '待应用', async () => {
       const ack = await pwmApi.setDuty(props.nodeId, row.resource.id, duty)
       if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 0 })) row.feedback = '占空比命令已发送，等待设备响应'
-    }, { skipEntryGuard: true, rollback: () => { row.duty = row.confirmedDuty } })
+    }, { skipEntryGuard: true, rollback: () => { row.duty = row.confirmedDuty }, errorFeedback: '占空比设置失败 · 重试', errorLabel: 'PWM 占空比设置失败' })
     dutyTimers.delete(row.resource.id)
   }, 300))
 }
