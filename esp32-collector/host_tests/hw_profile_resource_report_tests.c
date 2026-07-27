@@ -70,6 +70,8 @@ static void test_resource_report_encodes_independent_c6_pwm_resources(void)
     frame_field_t field;
     const uint8_t *buses = NULL;
     size_t buses_len = 0;
+    const uint8_t *manifest_capacity = NULL;
+    size_t manifest_capacity_len = 0;
     uint64_t resource_count = 0;
     CHECK(frame_decoder_init(&report_dec, report, report_len) == FRAME_OK,
           "ResourceReport decode failed");
@@ -80,10 +82,30 @@ static void test_resource_report_encodes_independent_c6_pwm_resources(void)
         } else if (field.field_num == 3) {
             CHECK(frame_field_get_bytes(&field, &buses, &buses_len) == FRAME_OK,
                   "buses_blob decode failed");
+        } else if (field.field_num == 10) {
+            CHECK(frame_field_get_bytes(&field, &manifest_capacity, &manifest_capacity_len) == FRAME_OK,
+                  "manifest capacity decode failed");
         }
     }
     CHECK(resource_count == HW_RESOURCE_COUNT, "resource_count must include PWM resources");
     CHECK(buses != NULL, "buses_blob is missing");
+    CHECK(manifest_capacity != NULL, "manifest capacity is missing");
+
+    frame_decoder_t capacity_dec;
+    uint64_t max_templates = 0, max_channels = 0, max_template_ids = 0;
+    CHECK(frame_decoder_init_sub(&capacity_dec, manifest_capacity, manifest_capacity_len) == FRAME_OK,
+          "manifest capacity nested decode failed");
+    while (frame_decoder_next(&capacity_dec, &field) == FRAME_OK) {
+        uint64_t value = 0;
+        CHECK(frame_field_get_varint(&field, &value) == FRAME_OK,
+              "manifest capacity value decode failed");
+        if (field.field_num == 1) max_templates = value;
+        if (field.field_num == 2) max_channels = value;
+        if (field.field_num == 3) max_template_ids = value;
+    }
+    CHECK(max_templates == MAX_TEMPLATES, "reported max templates differs from config_mgr");
+    CHECK(max_channels == MAX_CHANNELS, "reported max channels differs from config_mgr");
+    CHECK(max_template_ids == MAX_TEMPLATE_IDS, "reported max template ids differs from config_mgr");
 
     frame_decoder_t buses_dec;
     int pwm_count = 0;
@@ -114,9 +136,94 @@ static void test_resource_report_encodes_independent_c6_pwm_resources(void)
     CHECK(saw_pwm5, "PWM5 resource entry is missing");
 }
 
+static void test_hardware_tables_resolve_dynamic_controllers(void)
+{
+    CHECK(hw_derive_uart_port(16, 17, UART_NUM_MAX) == UART_NUM_0,
+          "C6 UART0 default pins must resolve to UART0");
+    CHECK(hw_derive_uart_port(20, 21, UART_NUM_MAX) == UART_NUM_1,
+          "C6 UART1 default pins must resolve to UART1");
+    CHECK(hw_derive_uart_port(1, 2, UART_NUM_MAX) == UART_NUM_MAX,
+          "custom UART pins must not claim a fixed controller");
+    CHECK(hw_derive_spi_host(23, 19, 18, SPI_HOST_MAX) == SPI2_HOST,
+          "C6 SPI pins must resolve to SPI2");
+    CHECK(hw_derive_i2c_port(21, 22, I2C_NUM_MAX) == I2C_NUM_0,
+          "C6 I2C pins must resolve to I2C0");
+    CHECK(hw_derive_i2c_port(1, 2, I2C_NUM_MAX) == I2C_NUM_MAX,
+          "custom I2C pins must not claim a fixed controller");
+}
+
+static void test_resource_report_encodes_runtime_channel_lease(void)
+{
+    config_channel_t channel = {0};
+    channel.id = 42;
+    channel.bus_type = 1; /* UART */
+    channel.enabled = true;
+    channel.dma_enabled = true;
+    channel.dma_enabled_present = true;
+    channel.bus_config_len = 7;
+    channel.bus_config[0] = 16;
+    channel.bus_config[1] = 17;
+
+    hw_profile_runtime_clear();
+    hw_profile_runtime_set(channel.id, channel.bus_type, UART_NUM_1,
+                           true, true, 7);
+
+    uint8_t report[2048] = {0};
+    size_t report_len = 0;
+    CHECK(hw_profile_build_report(report, sizeof(report), &report_len,
+                                  NULL, &channel, 1),
+          "runtime ResourceReport encode failed");
+
+    frame_decoder_t top;
+    frame_field_t field;
+    const uint8_t *channels_blob = NULL;
+    size_t channels_len = 0;
+    CHECK(frame_decoder_init(&top, report, report_len) == FRAME_OK,
+          "runtime ResourceReport decode failed");
+    while (frame_decoder_next(&top, &field) == FRAME_OK) {
+        if (field.field_num == 4) {
+            CHECK(frame_field_get_bytes(&field, &channels_blob, &channels_len) == FRAME_OK,
+                  "channels blob decode failed");
+        }
+    }
+    CHECK(channels_blob != NULL, "runtime channels blob is missing");
+
+    frame_decoder_t channels;
+    CHECK(frame_decoder_init_sub(&channels, channels_blob, channels_len) == FRAME_OK,
+          "runtime channels nested decode failed");
+    bool saw_entry = false;
+    while (frame_decoder_next(&channels, &field) == FRAME_OK) {
+        if (field.field_num != 1) continue;
+        frame_decoder_t entry;
+        CHECK(frame_decoder_init_sub(&entry, field.value.bytes.ptr,
+                                     field.value.bytes.len) == FRAME_OK,
+              "runtime channel entry decode failed");
+        uint64_t id = 0, controller = 0, generation = 0;
+        uint64_t requested_value = 0, allocated_value = 0;
+        while (frame_decoder_next(&entry, &field) == FRAME_OK) {
+            switch (field.field_num) {
+            case 1: CHECK(frame_field_get_varint(&field, &id) == FRAME_OK, "channel id decode failed"); break;
+            case 8: CHECK(frame_field_get_varint(&field, &requested_value) == FRAME_OK, "dma request decode failed"); break;
+            case 9: CHECK(frame_field_get_varint(&field, &controller) == FRAME_OK, "controller decode failed"); break;
+            case 10: CHECK(frame_field_get_varint(&field, &allocated_value) == FRAME_OK, "dma allocation decode failed"); break;
+            case 11: CHECK(frame_field_get_varint(&field, &generation) == FRAME_OK, "generation decode failed"); break;
+            default: break;
+            }
+        }
+        CHECK(id == 42 && requested_value == 1 && controller == UART_NUM_1 &&
+              allocated_value == 1 && generation == 7,
+              "runtime channel lease fields are incorrect");
+        saw_entry = true;
+    }
+    CHECK(saw_entry, "runtime channel entry is missing");
+    hw_profile_runtime_clear();
+}
+
 int main(void)
 {
     test_resource_report_encodes_independent_c6_pwm_resources();
+    test_hardware_tables_resolve_dynamic_controllers();
+    test_resource_report_encodes_runtime_channel_lease();
     if (s_failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", s_failures);
         return 1;

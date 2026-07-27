@@ -39,7 +39,7 @@
       <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
 
       <!-- Operations -->
-      <OperationButtons :device="device" :device-id="deviceId" @operation-executed="fetchDeviceDetail" />
+      <DeviceControlPanel :device-id="deviceId" />
 
       <!-- History chart -->
       <HistoryChartSection
@@ -59,7 +59,7 @@ import DeviceHeader from './shared/DeviceHeader.vue'
 import DeviceInfoCard from './shared/DeviceInfoCard.vue'
 import HistoryChartSection from './shared/HistoryChartSection.vue'
 import CommandFrequencySection from './shared/CommandFrequencySection.vue'
-import OperationButtons from './shared/OperationButtons.vue'
+import DeviceControlPanel from './shared/DeviceControlPanel.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'

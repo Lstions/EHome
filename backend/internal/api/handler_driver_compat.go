@@ -87,8 +87,8 @@ func registerDriverCompatRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		// Group by hardware_type (as proxy for vendor category)
 		type TreeNode struct {
-			Key      string             `json:"key"`
-			Label    string             `json:"label"`
+			Key      string                `json:"key"`
+			Label    string                `json:"label"`
 			Children []models.DeviceConfig `json:"children"`
 		}
 		groupMap := make(map[string]*TreeNode)

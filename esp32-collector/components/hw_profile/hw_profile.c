@@ -10,6 +10,112 @@
 #include "frame_codec.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+
+#define COMMAND_ENGINE_REVISION 2U
+#define COMMAND_ENGINE_BOOT_ID_MAX 17
+#define COMMAND_ENGINE_MAX_TX 128U /* must track cmd_queue.h CMD_TX_MAX */
+#define COMMAND_ENGINE_RAM_DEDUP_ENTRIES 4U /* RAM replay slots; final identity is also persisted in NVS */
+
+static char s_boot_id[COMMAND_ENGINE_BOOT_ID_MAX] = "unknown";
+
+typedef struct {
+    bool valid;
+    uint32_t channel_id;
+    uint8_t bus_type;
+    uint32_t controller_id;
+    bool dma_requested;
+    bool dma_allocated;
+    uint32_t generation;
+} runtime_channel_t;
+
+static runtime_channel_t s_runtime_channels[MAX_CHANNELS];
+
+void hw_profile_runtime_set(uint32_t channel_id, uint8_t bus_type,
+                            uint32_t controller_id, bool dma_requested,
+                            bool dma_allocated, uint32_t generation)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id) {
+            s_runtime_channels[i] = (runtime_channel_t){
+                true, channel_id, bus_type, controller_id,
+                dma_requested, dma_allocated, generation};
+            return;
+        }
+    }
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (!s_runtime_channels[i].valid) {
+            s_runtime_channels[i] = (runtime_channel_t){
+                true, channel_id, bus_type, controller_id,
+                dma_requested, dma_allocated, generation};
+            return;
+        }
+    }
+}
+
+void hw_profile_runtime_clear(void)
+{
+    memset(s_runtime_channels, 0, sizeof(s_runtime_channels));
+}
+
+void hw_profile_runtime_remove(uint32_t channel_id)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++) {
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id) {
+            memset(&s_runtime_channels[i], 0, sizeof(s_runtime_channels[i]));
+            return;
+        }
+    }
+}
+
+static const runtime_channel_t *runtime_for_channel(uint32_t channel_id)
+{
+    for (size_t i = 0; i < MAX_CHANNELS; i++)
+        if (s_runtime_channels[i].valid &&
+            s_runtime_channels[i].channel_id == channel_id)
+            return &s_runtime_channels[i];
+    return NULL;
+}
+
+void hw_profile_set_boot_id(const char *boot_id)
+{
+    if (!boot_id || boot_id[0] == '\0') return;
+    snprintf(s_boot_id, sizeof(s_boot_id), "%s", boot_id);
+}
+
+static bool encode_command_engine(frame_encoder_t *enc)
+{
+    uint8_t sub[96];
+    frame_encoder_t nested;
+    frame_encoder_init_sub(&nested, sub, sizeof(sub));
+    if (frame_encode_varint(&nested, 1, COMMAND_ENGINE_REVISION) != FRAME_OK ||
+        frame_encode_string(&nested, 2, s_boot_id) != FRAME_OK ||
+        frame_encode_bool(&nested, 3, true) != FRAME_OK ||
+        frame_encode_bool(&nested, 4, true) != FRAME_OK ||
+        frame_encode_bool(&nested, 5, true) != FRAME_OK ||
+        frame_encode_varint(&nested, 6, 8) != FRAME_OK ||
+        frame_encode_varint(&nested, 7, COMMAND_ENGINE_MAX_TX) != FRAME_OK ||
+        frame_encode_varint(&nested, 8, 256) != FRAME_OK ||
+        frame_encode_varint(&nested, 9, 30000) != FRAME_OK ||
+        frame_encode_varint(&nested, 10, COMMAND_ENGINE_RAM_DEDUP_ENTRIES) != FRAME_OK) return false;
+    return frame_encode_bytes(enc, 9, sub, frame_encoder_size(&nested)) == FRAME_OK;
+}
+
+/* ConfigManifest storage is fixed by config_mgr.  Publish these bounds as a
+ * device fact so the server can reject an oversized manifest before MQTT
+ * delivery rather than waiting for the collector to reject it. */
+static bool encode_manifest_capacity(frame_encoder_t *enc)
+{
+    uint8_t sub[32];
+    frame_encoder_t nested;
+    frame_encoder_init_sub(&nested, sub, sizeof(sub));
+    if (frame_encode_varint(&nested, 1, MAX_TEMPLATES) != FRAME_OK ||
+        frame_encode_varint(&nested, 2, MAX_CHANNELS) != FRAME_OK ||
+        frame_encode_varint(&nested, 3, MAX_TEMPLATE_IDS) != FRAME_OK) return false;
+    return frame_encode_bytes(enc, 10, sub, frame_encoder_size(&nested)) == FRAME_OK;
+}
 
 /* ================================================================
  *  Sub-message encoding helpers
@@ -21,25 +127,6 @@
  * ================================================================ */
 
 /* Temporary buffer sizes for sub-message encoding */
-/* Local copy of bus_config_get_dma_enabled (from bus_dma.h, avoids dependency) */
-static inline bool local_bus_config_get_dma_enabled(uint8_t bus_type,
-                                                      const uint8_t *bus_config,
-                                                      size_t bus_config_len)
-{
-    size_t flags_offset = 0;
-    size_t min_len = 0;
-    switch (bus_type) {
-    case 1: flags_offset = 6; min_len = 7; break;  /* UART */
-    case 2: flags_offset = 7; min_len = 8; break;  /* I2C */
-    case 3: flags_offset = 6; min_len = 7; break;  /* SPI */
-    default: return false;
-    }
-    if (bus_config && bus_config_len >= min_len) {
-        return (bus_config[flags_offset] & 0x01) != 0;
-    }
-    return false;
-}
-
 #define SUB_ENTRY_BUF   128
 #define BUSES_BLOB_BUF  512
 #define CHAN_BLOB_BUF   2048
@@ -188,9 +275,18 @@ static bool encode_channel_entry(uint8_t *out, size_t cap, size_t *out_len,
     }
 
     /* field8: dma_enabled extracted from bus_config flags */
-    bool dma = local_bus_config_get_dma_enabled(ch->bus_type, ch->bus_config,
-                                          ch->bus_config_len);
+    bool dma = config_channel_get_dma_enabled(ch);
     if (frame_encode_varint(&enc, 8, dma ? 1 : 0) != FRAME_OK) return false;
+
+    const runtime_channel_t *runtime = runtime_for_channel(ch->id);
+    if (runtime) {
+        /* Optional fields preserve old consumers while reporting the actual
+         * controller lease and whether DMA was really allocated. */
+        if (frame_encode_varint(&enc, 9, runtime->controller_id) != FRAME_OK ||
+            frame_encode_bool(&enc, 10, runtime->dma_allocated) != FRAME_OK ||
+            frame_encode_varint(&enc, 11, runtime->generation) != FRAME_OK)
+            return false;
+    }
 
     *out_len = frame_encoder_size(&enc);
     return true;
@@ -375,6 +471,12 @@ bool hw_profile_build_report(uint8_t *buf, size_t sz, size_t *out_len,
             free(dma_buf);
         }
     }
+
+    /* field9: bounded ChannelCmdV2 admission/final capability. */
+    if (!encode_command_engine(&enc)) goto cleanup_fail;
+
+    /* field10: ConfigManifest storage bounds. */
+    if (!encode_manifest_capacity(&enc)) goto cleanup_fail;
 
     free(buses_buf);
     free(channels_buf);

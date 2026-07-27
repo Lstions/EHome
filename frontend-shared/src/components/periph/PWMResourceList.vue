@@ -88,6 +88,7 @@ import { computed, onUnmounted, reactive, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { PWMBusResource } from '@/api/node'
 import { pwmApi, type PWMConfig } from '@/api/periph'
+import { useGuardedOperation } from '@/composables/useGuardedOperation'
 
 interface PWMRow {
   resource: PWMBusResource
@@ -141,8 +142,13 @@ function applyRuntimeState(hardwareId: string, running: boolean | null, duty?: n
 }
 
 let stateGeneration = 0
-let operationGeneration = 0
-let disposed = false
+
+const { run: guardedRun, invalidate } = useGuardedOperation({
+  nodeId: () => props.nodeId,
+  offline: () => props.offline,
+  errorPrefix: 'PWM 操作失败',
+})
+
 async function refreshStates() {
   const generation = ++stateGeneration
   if (props.offline) return
@@ -161,40 +167,16 @@ async function refreshStates() {
 watch(() => [props.nodeId, props.configs, props.offline] as const, () => { void refreshStates() }, { immediate: true, deep: true })
 
 async function start(row: PWMRow) {
-  if (row.busy || props.offline) return
-  const nodeId = props.nodeId
-  const generation = operationGeneration
-  row.busy = true
-  row.feedback = '正在启动…'
-  try {
-    const ack = await pwmApi.start(nodeId, row.resource.id)
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-	if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 2 })) row.feedback = '启动命令已发送，等待设备响应'
-  } catch (error: unknown) {
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-    row.feedback = '启动失败 · 重试'
-    ElMessage.error(`PWM 启动失败: ${error instanceof Error ? error.message : '未知错误'}`)
-  } finally {
-    if (!disposed && generation === operationGeneration && props.nodeId === nodeId) row.busy = false
-  }
+  await guardedRun(row, '正在启动…', async () => {
+    const ack = await pwmApi.start(props.nodeId, row.resource.id)
+    if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 2 })) row.feedback = '启动命令已发送，等待设备响应'
+  }, { errorFeedback: '启动失败 · 重试', errorLabel: 'PWM 启动失败' })
 }
 async function stop(row: PWMRow) {
-  if (row.busy || props.offline) return
-  const nodeId = props.nodeId
-  const generation = operationGeneration
-  row.busy = true
-  row.feedback = '正在停止…'
-  try {
-    const ack = await pwmApi.stop(nodeId, row.resource.id)
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-	if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 3 })) row.feedback = '停止命令已发送，等待设备响应'
-  } catch (error: unknown) {
-    if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-    row.feedback = '停止失败 · 重试'
-    ElMessage.error(`PWM 停止失败: ${error instanceof Error ? error.message : '未知错误'}`)
-  } finally {
-    if (!disposed && generation === operationGeneration && props.nodeId === nodeId) row.busy = false
-  }
+  await guardedRun(row, '正在停止…', async () => {
+    const ack = await pwmApi.stop(props.nodeId, row.resource.id)
+    if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 3 })) row.feedback = '停止命令已发送，等待设备响应'
+  }, { errorFeedback: '停止失败 · 重试', errorLabel: 'PWM 停止失败' })
 }
 
 const dutyTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -205,34 +187,22 @@ function cancelDutyTimers() {
 function scheduleDuty(row: PWMRow, duty: number) {
   const previousTimer = dutyTimers.get(row.resource.id)
   if (previousTimer) clearTimeout(previousTimer)
-  const nodeId = props.nodeId
-  const generation = operationGeneration
   row.busy = true
   row.feedback = '待应用'
   dutyTimers.set(row.resource.id, setTimeout(async () => {
-	if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-    try {
-      const ack = await pwmApi.setDuty(nodeId, row.resource.id, duty)
-      if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
+    await guardedRun(row, '待应用', async () => {
+      const ack = await pwmApi.setDuty(props.nodeId, row.resource.id, duty)
       if (!props.registerPending?.({ requestId: ack.request_id, hardwareId: row.resource.id, action: 0 })) row.feedback = '占空比命令已发送，等待设备响应'
-    } catch (error: unknown) {
-      if (disposed || generation !== operationGeneration || props.nodeId !== nodeId) return
-      row.duty = row.confirmedDuty
-      row.feedback = '占空比设置失败 · 重试'
-      ElMessage.error(`PWM 占空比设置失败: ${error instanceof Error ? error.message : '未知错误'}`)
-    } finally {
-      if (!disposed && generation === operationGeneration && props.nodeId === nodeId) row.busy = false
-      dutyTimers.delete(row.resource.id)
-    }
+    }, { skipEntryGuard: true, rollback: () => { row.duty = row.confirmedDuty }, errorFeedback: '占空比设置失败 · 重试', errorLabel: 'PWM 占空比设置失败' })
+    dutyTimers.delete(row.resource.id)
   }, 300))
 }
 onUnmounted(() => {
-  disposed = true
-  operationGeneration++
+  invalidate()
   stateGeneration++
-	cancelDutyTimers()
+  cancelDutyTimers()
 })
-watch(() => props.nodeId, () => { operationGeneration++; cancelDutyTimers() })
+watch(() => props.nodeId, () => { invalidate(); cancelDutyTimers() })
 defineExpose({ applyRuntimeState })
 </script>
 

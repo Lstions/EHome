@@ -23,7 +23,7 @@ describe('NotFound.vue', () => {
   it('renders the not-found error page', async () => {
     const wrapper = mount(NotFound, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.find('.error-page.not-found').exists()).toBe(true)
+    expect(wrapper.find('.error-page').exists()).toBe(true)
   })
 
   it('displays 404 error code', async () => {

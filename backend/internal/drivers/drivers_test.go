@@ -3,6 +3,7 @@ package drivers
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"slices"
 	"testing"
@@ -161,7 +162,7 @@ func TestLKTH01Driver_Metadata(t *testing.T) {
 	if d.DeviceType() != "lk_th01" {
 		t.Errorf("DeviceType: got %s", d.DeviceType())
 	}
-	if d.OEM() != "路科" {
+	if d.OEM() != "蓝控" {
 		t.Errorf("OEM: got %s", d.OEM())
 	}
 	if d.Category() != "温湿度传感器" {
@@ -367,6 +368,27 @@ func TestPRS3001Driver_ParseData_UnexpectedByteCount(t *testing.T) {
 	}
 }
 
+func TestSN3001RainDriver_ParseData_ValidFC03(t *testing.T) {
+	driver := &SN3001RainDriver{}
+	raw := []byte{0x01, 0x03, 0x02, 0x00, 0x14}
+	crc := parser.ModbusCRC16(raw)
+	raw = append(raw, byte(crc), byte(crc>>8))
+	values, err := driver.ParseData(raw)
+	if err != nil {
+		t.Fatalf("ParseData: %v", err)
+	}
+	if len(values) != 1 || values[0].Name != "rainfall" || values[0].Value != 2.0 || values[0].Unit != "mm" {
+		t.Fatalf("values = %#v", values)
+	}
+}
+
+func TestSN3001RainDriver_ParseData_RejectsBadCRC(t *testing.T) {
+	_, err := (&SN3001RainDriver{}).ParseData([]byte{0x01, 0x03, 0x02, 0x00, 0x14, 0x00, 0x00})
+	if err == nil {
+		t.Fatal("expected CRC rejection")
+	}
+}
+
 func TestPRS3001Driver_ParseData_FrameTooShort(t *testing.T) {
 	d := &PRS3001Driver{}
 	// byte_count=6 but only 5 data bytes
@@ -412,6 +434,93 @@ func TestPRS3001Driver_Metadata(t *testing.T) {
 	defs := d.GetSensorDefinitions()
 	if len(defs) != 2 {
 		t.Errorf("GetSensorDefinitions: got %d, want 2", len(defs))
+	}
+}
+
+func TestSN3001RainResetPlanGoldenVector(t *testing.T) {
+	d := &SN3001RainDriver{}
+	plan, err := d.CompileControlActionPlan("reset_rainfall", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if !plan.AtMostOnce || len(plan.Steps) != 3 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	wantClear := []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}
+	if got := plan.Steps[1].TXData; string(got) != string(wantClear) {
+		t.Fatalf("clear frame = % X, want % X", got, wantClear)
+	}
+	if plan.Steps[1].ReadSize != 8 || plan.Steps[2].Kind != "readback" {
+		t.Fatalf("clear/readback steps = %+v", plan.Steps)
+	}
+}
+
+func TestSN3001ProtocolActionGoldenVectors(t *testing.T) {
+	d := &SN3001RainDriver{}
+	actions := d.ControlActions()
+	if len(actions) != 9 {
+		t.Fatalf("got %d SN-3001 actions, want 9", len(actions))
+	}
+	step, err := d.CompileControlAction("set_rain_sensitivity", json.RawMessage(`{"value":60}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "01 06 00 52 00 3C 28 0A"; got != want {
+		t.Fatalf("sensitivity frame %s, want %s", got, want)
+	}
+	step, err = d.CompileControlAction("set_baud_rate", json.RawMessage(`{"value":"9600"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "01 06 07 D1 00 02 59 46"; got != want {
+		t.Fatalf("baud frame %s, want %s", got, want)
+	}
+	step, err = d.CompileControlAction("set_device_address", json.RawMessage(`{"value":1,"source_address":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("% X", step.TXData), "02 06 07 D0 00 01 48 B4"; got != want {
+		t.Fatalf("address restore frame %s, want %s", got, want)
+	}
+}
+
+func TestSN3001AddressAwareActionBindsRequestAndResponse(t *testing.T) {
+	d := &SN3001RainDriver{}
+	step, err := d.CompileControlActionForAddress("read_rainfall", json.RawMessage(`{}`), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("% X", step.TXData); got != "07 03 00 00 00 01 84 6C" {
+		t.Fatalf("address-aware read frame = %s", got)
+	}
+
+	read := append([]byte{7, 3, 2, 0, 20}, 0, 0)
+	crc := parser.ModbusCRC16(read[:5])
+	read[5], read[6] = byte(crc), byte(crc>>8)
+	if result, err := d.VerifyControlActionForAddress("read_rainfall", json.RawMessage(`{}`), read, 7); err != nil || len(result) != 1 {
+		t.Fatalf("address-aware response result=%+v err=%v", result, err)
+	}
+	read[0] = 1
+	if _, err := d.VerifyControlActionForAddress("read_rainfall", json.RawMessage(`{}`), read, 7); err == nil {
+		t.Fatal("response from another Modbus unit was accepted")
+	}
+}
+
+func TestSN3001ResetBatchVerificationGoldenVector(t *testing.T) {
+	d := &SN3001RainDriver{}
+	read := []byte{0x01, 0x03, 0x02, 0x00, 0x00, 0xB8, 0x44}
+	clear := []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}
+	raw := append([]byte{3, 1, 7, 0}, read...)
+	raw = append(raw, 2, 8, 0)
+	raw = append(raw, clear...)
+	raw = append(raw, 3, 7, 0)
+	raw = append(raw, read...)
+	got, err := d.VerifyControlAction("reset_rainfall", json.RawMessage(`{}`), raw)
+	if err != nil {
+		t.Fatalf("VerifyControlAction error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "rainfall" || got[0].Value != 0 || got[1].Name != "reset_ack" || got[1].Value != 1 {
+		t.Fatalf("verified result = %+v", got)
 	}
 }
 
@@ -481,8 +590,8 @@ func TestRegisterBuiltInDriversWithParsers(t *testing.T) {
 	// With nil/empty parser configs
 	RegisterBuiltInDriversWithParsers(reg, nil)
 	types := reg.List()
-	if len(types) != 6 {
-		t.Errorf("expected 6 drivers, got %d", len(types))
+	if len(types) != 7 {
+		t.Errorf("expected 7 drivers, got %d", len(types))
 	}
 }
 
@@ -500,7 +609,7 @@ func TestRegisterBuiltInDrivers_RegistersSameSetAsParserAwareEntryPoint(t *testi
 	if !slices.Equal(legacyTypes, withParserTypes) {
 		t.Fatalf("registration sets differ: legacy=%v parser-aware=%v", legacyTypes, withParserTypes)
 	}
-	want := []string{"bmp280", "jiabaida_bms", "lk_th01", "prs3001", "sn3000", "techfine_inverter"}
+	want := []string{"bmp280", "jiabaida_bms", "lk_th01", "prs3001", "sn3000", "sn3001_rain", "techfine_inverter"}
 	if !slices.Equal(legacyTypes, want) {
 		t.Fatalf("registered types = %v, want %v", legacyTypes, want)
 	}
@@ -516,8 +625,8 @@ func TestRegisterBuiltInDriversWithParsers_ValidParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 6 {
-		t.Errorf("expected 6 drivers, got %d", len(types))
+	if len(types) != 7 {
+		t.Errorf("expected 7 drivers, got %d", len(types))
 	}
 }
 
@@ -531,8 +640,8 @@ func TestRegisterBuiltInDriversWithParsers_InvalidParser(t *testing.T) {
 
 	// Should still register the driver (just without ConfigParser)
 	types := reg.List()
-	if len(types) != 6 {
-		t.Errorf("expected 6 drivers even with invalid parser, got %d", len(types))
+	if len(types) != 7 {
+		t.Errorf("expected 7 drivers even with invalid parser, got %d", len(types))
 	}
 }
 
@@ -545,8 +654,8 @@ func TestRegisterBuiltInDriversWithParsers_EmptyParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 6 {
-		t.Errorf("expected 6 drivers, got %d", len(types))
+	if len(types) != 7 {
+		t.Errorf("expected 7 drivers, got %d", len(types))
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -22,6 +24,10 @@ func init() {
 
 // setupDeviceTest creates a test router with DB and device-config + channel routes.
 func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
+	return setupDeviceTestWithRegistry(t, nil)
+}
+
+func setupDeviceTestWithRegistry(t *testing.T, driverRegistry *drivers.Registry) (*gin.Engine, *gorm.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -42,7 +48,7 @@ func setupDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
-	registerDeviceRoutes(v1, db, mgr, nil)
+	registerDeviceRoutes(v1, db, mgr, driverRegistry, ControlPolicy{allowUnsafeRawForTests: true})
 	return r, db
 }
 
@@ -530,6 +536,46 @@ func TestDeviceConfig_MarkDefault(t *testing.T) {
 	}
 }
 
+func TestDeviceConfig_DefaultMustBeActive(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.DeviceConfig{Name: "Active default", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Inactive", DeviceType: "temperature", HardwareType: "uart", Status: "inactive"})
+
+	for _, request := range []struct {
+		method string
+		path   string
+		body   map[string]interface{}
+	}{
+		{method: http.MethodPost, path: "/api/v1/device-configs", body: map[string]interface{}{
+			"name": "Inactive create", "device_type": "temperature", "hardware_type": "uart", "status": "inactive", "is_default": true,
+		}},
+		{method: http.MethodPut, path: "/api/v1/device-configs/2", body: map[string]interface{}{
+			"name": "Inactive", "status": "inactive", "is_default": true,
+		}},
+		{method: http.MethodPost, path: "/api/v1/device-configs/2/default"},
+	} {
+		payload, err := json.Marshal(request.body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(request.method, request.path, bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader(t))
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s %s: expected 400, got %d: %s", request.method, request.path, w.Code, w.Body.String())
+		}
+		var active models.DeviceConfig
+		if err := db.First(&active, 1).Error; err != nil {
+			t.Fatal(err)
+		}
+		if !active.IsDefault {
+			t.Fatalf("%s %s cleared the active default", request.method, request.path)
+		}
+	}
+}
+
 func TestDeviceConfig_MarkDefault_NotFound(t *testing.T) {
 	r, _ := setupDeviceTest(t)
 
@@ -742,6 +788,29 @@ func TestChannel_Create_Success(t *testing.T) {
 	db.First(&ch)
 	if ch.NodeID != "NODE001" {
 		t.Errorf("expected node_id NODE001, got %s", ch.NodeID)
+	}
+}
+
+func TestChannel_Create_PreservesExplicitZeroInterval(t *testing.T) {
+	r, db := setupDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART",
+		"bus_config": "1415000012C0", "enabled": true, "interval_ms": 0,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/channels", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var ch models.Channel
+	db.First(&ch)
+	if ch.IntervalMs != 0 {
+		t.Fatalf("explicit interval_ms=0 was replaced with %d", ch.IntervalMs)
 	}
 }
 
@@ -1094,6 +1163,28 @@ func TestDeviceConfig_Tree_WithConfigs(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeviceConfig_Tree_UsesInjectedDriverRegistry(t *testing.T) {
+	registry := drivers.NewRegistry()
+	drivers.RegisterBuiltInDrivers(registry)
+	r, _ := setupDeviceTestWithRegistry(t, registry)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/device-configs/tree", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"name":"蓝控"`) || !strings.Contains(body, `"type":"lk_th01"`) {
+		t.Fatalf("injected LK-TH01 metadata is missing: %s", body)
+	}
+	if got := strings.Count(body, `"type":`); got != 7 {
+		t.Fatalf("injected registry driver count=%d, want 7: %s", got, body)
 	}
 }
 

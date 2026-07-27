@@ -13,8 +13,10 @@
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
+#include "bus_worker.h"
 #include "ota.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -98,7 +100,10 @@ reject:
 esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                              uint8_t channel_count, const scheduler_state_t *sched)
 {
-    uint8_t buf[512];
+    /* DataReport payloads are produced by the bus-worker fixed block pool
+     * (currently 1024 bytes).  Keep wire framing headroom for routing fields
+     * so a full block does not fail the encode at the old 512-byte limit. */
+    uint8_t buf[1400];
     frame_encoder_t enc;
     frame_encoder_init(&enc, buf, sizeof(buf), MSG_STATUS_RPT);
     frame_encode_varint(&enc, 1, uptime_sec);
@@ -175,6 +180,51 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
         }
     }
 
+    /* Field 9 is a bounded, transport-only performance snapshot.  It is
+     * intentionally aggregate-only: no task names, queues or configuration
+     * details are exposed to the control plane. */
+    scheduler_performance_t perf = {0};
+    scheduler_get_performance(&perf);
+    uint8_t perf_buf[192];
+    frame_encoder_t perf_enc;
+    frame_encoder_init_sub(&perf_enc, perf_buf, sizeof(perf_buf));
+    bool perf_ok = frame_encode_varint(&perf_enc, 1, esp_get_free_heap_size()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 2, esp_get_minimum_free_heap_size()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 3, perf.stack_high_water_words) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 4, bus_worker_get_min_stack_watermark()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 5, perf.min_queue_spaces) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 6, bus_worker_get_report_drop_count()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 7, bus_worker_get_report_queue_high_water()) == FRAME_OK;
+    scheduler_queue_metrics_t queue_metrics = {0};
+    scheduler_get_queue_metrics(&queue_metrics);
+    for (uint8_t i = 0; perf_ok && i < SCHED_QUEUE_METRIC_COUNT; i++) {
+        perf_ok = frame_encode_varint(&perf_enc, 8 + i,
+                                      queue_metrics.current_spaces[i]) == FRAME_OK &&
+                  frame_encode_varint(&perf_enc, 13 + i,
+                                      queue_metrics.high_water_used[i]) == FRAME_OK &&
+                  frame_encode_varint(&perf_enc, 18 + i,
+                                      queue_metrics.sample_skipped[i]) == FRAME_OK &&
+                  frame_encode_varint(&perf_enc, 23 + i,
+                                      queue_metrics.sample_rejected[i]) == FRAME_OK;
+    }
+    if (perf_ok) {
+        (void)frame_encode_bytes(&enc, STATUS_RPT_F_RUNTIME_PERF,
+                                 frame_encoder_data(&perf_enc), frame_encoder_size(&perf_enc));
+    }
+
+    channel_cmd_v2_metrics_t control = {0};
+    handler_channel_cmd_v2_get_metrics(&control);
+    uint8_t control_buf[48];
+    frame_encoder_t control_enc;
+    frame_encoder_init_sub(&control_enc, control_buf, sizeof(control_buf));
+    if (frame_encode_varint(&control_enc, 1, control.accepted) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 2, control.rejected) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 3, control.completed) == FRAME_OK &&
+        frame_encode_varint(&control_enc, 4, control.replayed) == FRAME_OK) {
+        (void)frame_encode_bytes(&enc, STATUS_RPT_F_CONTROL_STATS,
+                                 frame_encoder_data(&control_enc), frame_encoder_size(&control_enc));
+    }
+
     ESP_LOGD(TAG, "Sending StatusReport: %lu sec, %s, %d ch, epoch=%llu, sync_state=%d, hash=%s",
              (unsigned long)uptime_sec, status, channel_count,
              (unsigned long long)config_mgr_get_epoch(),
@@ -191,7 +241,11 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t edge_device_id, uint32_t command_template_id,
                                   uint8_t command_index)
 {
-    uint8_t buf[512];
+    /* Keep this buffer at least as large as the event-driven payload block.
+     * A 512-byte stack buffer cannot carry a full 512-byte chunk once the
+     * message type, field tags, length prefix and routing metadata are
+     * added, so full chunks would be silently rejected by the codec. */
+    uint8_t buf[1400];
     size_t len = 0;
     frame_err_t err = data_report_encode(buf, sizeof(buf), &len,
                                          channel_id, timestamp_us, sequence,

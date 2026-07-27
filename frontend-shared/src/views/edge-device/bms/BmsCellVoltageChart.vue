@@ -53,8 +53,6 @@ function buildChartOption() {
     animation: false,
     tooltip: {
       trigger: 'axis' as const,
-      confine: true,
-      position: (point: number[]) => [point[0] + 10, point[1]],
       backgroundColor: surface.overlay,
       borderColor: surface.border,
       textStyle: { color: surface.text },

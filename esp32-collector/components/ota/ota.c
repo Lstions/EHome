@@ -56,6 +56,7 @@ static uint8_t s_last_progress_status;
 static uint8_t s_last_progress_pct;
 static char s_last_progress_error[96];
 static portMUX_TYPE s_ota_cache_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_download_ota_id[64] = {0};  /* set before download for progress reporting */
 
 /* --- Progress callback injection (decouples from msg_handler) --- */
 static ota_progress_cb_t s_progress_cb = NULL;
@@ -513,6 +514,7 @@ static esp_err_t ota_download(const char *url, uint64_t expected_size,
             int pct = cl > 0 ? (total * 100 / cl) : 0;
             if (pct != last_pct && pct % 10 == 0) {
                 ESP_LOGI(TAG, "Downloaded %d%%", pct);
+                ota_report_progress(s_download_ota_id, 0, (uint8_t)pct, NULL);
                 last_pct = pct;
             }
         }
@@ -604,6 +606,7 @@ static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
         int pct = cl > 0 ? (total * 100 / cl) : 0;
         if (pct != last_pct && pct % 10 == 0) {
             ESP_LOGI(TAG, "Downloaded %d%%", pct);
+            ota_report_progress(s_download_ota_id, 0, (uint8_t)pct, NULL);
             last_pct = pct;
         }
     }
@@ -706,6 +709,7 @@ static esp_err_t ota_try_download(const char *ota_id, const char *url,
     /* Write NVS: downloading */
     ota_nvs_set_state(OTA_STATE_DOWNLOADING);
     ota_nvs_set_meta(version, checksum);
+    snprintf(s_download_ota_id, sizeof(s_download_ota_id), "%s", ota_id);
     ota_report_progress(ota_id, 0, 0, NULL);
 
     uint32_t total_bytes = 0;

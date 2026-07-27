@@ -13,3 +13,15 @@ server:
   addr: ":8080"
 log:
   level: info
+control:
+  # Enables the reviewed V2 outbox dispatcher. Disabled by default.
+  device_control_v2_enabled: false
+  # "bridge" is reserved for the future CommandExecution adapter and never
+  # enables the current fire-and-forget implementation.
+  legacy_device_write_mode: disabled
+  # Operator intent only. Raw routes remain closed until the audited
+  # diagnostics service is implemented.
+  raw_diagnostics_enabled: false
+  # Every business action remains disabled until its protocol and hardware
+  # evidence gate has passed. Format: "device_type/action_id".
+  enabled_device_actions: []

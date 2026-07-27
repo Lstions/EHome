@@ -44,32 +44,37 @@ const (
 
 // Message types
 const (
-	MsgHello          = 0x01
-	MsgStatusRpt      = 0x02
-	MsgDataRpt        = 0x03
-	MsgConfigMfst     = 0x04
-	MsgConfigRslt     = 0x05
-	MsgWriteCmd       = 0x06
-	MsgWriteRsp       = 0x07
-	MsgPing           = 0x08
-	MsgPong           = 0x09
-	MsgOtaCmd         = 0x0A
-	MsgOtaProg        = 0x0B
-	MsgScanRpt        = 0x0C
-	MsgScanReq        = 0x0D
-	MsgQueryReq       = 0x0E
-	MsgQueryRsp       = 0x0F
-	MsgConfigQuery    = 0x10
-	MsgConfigReport   = 0x11
-	MsgHelloAck       = 0x12
-	MsgConfigSyncReq  = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
-	MsgConfigSyncRsp  = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
-	MsgPongAck        = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
-	MsgResourceReport = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
-	MsgQueryResources = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
-	MsgPeriphCmd      = 0x1B // v3.0: PeriphCmd (SVR→ESP, GPIO/PWM peripheral control)
-	MsgPeriphRsp      = 0x1C // v3.0: PeriphRsp (ESP→SVR, peripheral operation result)
-	MsgLogStream      = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
+	MsgHello         = 0x01
+	MsgStatusRpt     = 0x02
+	MsgDataRpt       = 0x03
+	MsgConfigMfst    = 0x04
+	MsgConfigRslt    = 0x05
+	MsgWriteCmd      = 0x06
+	MsgWriteRsp      = 0x07
+	MsgPing          = 0x08
+	MsgPong          = 0x09
+	MsgOtaCmd        = 0x0A
+	MsgOtaProg       = 0x0B
+	MsgScanRpt       = 0x0C
+	MsgScanReq       = 0x0D
+	MsgQueryReq      = 0x0E
+	MsgQueryRsp      = 0x0F
+	MsgConfigQuery   = 0x10
+	MsgConfigReport  = 0x11
+	MsgHelloAck      = 0x12
+	MsgConfigSyncReq = 0x13 // v2.1: ConfigSyncRequest (ESP→SVR)
+	MsgConfigSyncRsp = 0x14 // v2.1: ConfigSyncResponse (SVR→ESP)
+	// Phase 2: versioned single-step Channel control. 0x15..0x17 were
+	// intentionally reserved between config sync and legacy PongAck.
+	MsgChannelCmdV2      = 0x15 // SVR→ESP
+	MsgChannelCmdV2Ack   = 0x16 // ESP→SVR, accepted/rejected
+	MsgChannelCmdV2Final = 0x17 // ESP→SVR, exactly one terminal result
+	MsgPongAck           = 0x18 // v3: PongAck (SVR→ESP, response to MsgPing from device)
+	MsgResourceReport    = 0x19 // v3: ResourceReport (ESP→SVR, hardware resource report)
+	MsgQueryResources    = 0x1A // v3: QueryResources (SVR→ESP, request device to send ResourceReport)
+	MsgPeriphCmd         = 0x1B // v3.0: PeriphCmd (SVR→ESP, GPIO/PWM peripheral control)
+	MsgPeriphRsp         = 0x1C // v3.0: PeriphRsp (ESP→SVR, peripheral operation result)
+	MsgLogStream         = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
 )
 
 // Field represents a decoded field
@@ -101,13 +106,13 @@ func (e *Encoder) Size() int {
 
 // EncodeVarint adds a varint field
 func (e *Encoder) EncodeVarint(fieldNum uint8, value uint64) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireVarint))
+	e.buf = appendTag(e.buf, fieldNum, WireVarint)
 	e.buf = appendVarint(e.buf, value)
 }
 
 // EncodeString adds a string field
 func (e *Encoder) EncodeString(fieldNum uint8, value string) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireLengthDelimited))
+	e.buf = appendTag(e.buf, fieldNum, WireLengthDelimited)
 	data := []byte(value)
 	e.buf = appendVarint(e.buf, uint64(len(data)))
 	e.buf = append(e.buf, data...)
@@ -115,7 +120,7 @@ func (e *Encoder) EncodeString(fieldNum uint8, value string) {
 
 // EncodeBytes adds a bytes field
 func (e *Encoder) EncodeBytes(fieldNum uint8, value []byte) {
-	e.buf = append(e.buf, makeTag(fieldNum, WireLengthDelimited))
+	e.buf = appendTag(e.buf, fieldNum, WireLengthDelimited)
 	e.buf = appendVarint(e.buf, uint64(len(value)))
 	e.buf = append(e.buf, value...)
 }
@@ -185,7 +190,11 @@ func (d *Decoder) NextField() (*Field, error) {
 	}
 	d.pos = newPos
 
-	fieldNum := uint8(tag >> 3)
+	rawFieldNum := tag >> 3
+	if rawFieldNum == 0 || rawFieldNum > 255 {
+		return nil, fmt.Errorf("invalid field number: %d", rawFieldNum)
+	}
+	fieldNum := uint8(rawFieldNum)
 	wireType := uint8(tag & 0x07)
 
 	field := &Field{FieldNum: fieldNum, WireType: wireType}
@@ -224,8 +233,14 @@ func (d *Decoder) NextField() (*Field, error) {
 
 // === Helpers ===
 
-func makeTag(fieldNum uint8, wireType uint8) uint8 {
-	return (fieldNum << 3) | (wireType & 0x07)
+func appendTag(buf []byte, fieldNum uint8, wireType uint8) []byte {
+	// Tags are varints too.  A one-byte tag is sufficient through field 15;
+	// fields 16..31 require the canonical two-byte representation (for
+	// example field 18 is 0x90, 0x01).  Keeping this here avoids truncating
+	// the continuation bit when status telemetry grows beyond the legacy
+	// field range.
+	tag := (uint64(fieldNum) << 3) | uint64(wireType&0x07)
+	return appendVarint(buf, tag)
 }
 
 func appendVarint(buf []byte, value uint64) []byte {
@@ -317,32 +332,35 @@ func Uint32ToBytes(v uint32) []byte {
 // MsgTypeName returns a human-readable name for a message type byte
 func MsgTypeName(msgType uint8) string {
 	names := map[uint8]string{
-		MsgHello:          "hello",
-		MsgStatusRpt:      "status_report",
-		MsgDataRpt:        "data_report",
-		MsgConfigMfst:     "config_manifest",
-		MsgConfigRslt:     "config_result",
-		MsgWriteCmd:       "write_cmd",
-		MsgWriteRsp:       "write_response",
-		MsgPing:           "ping",
-		MsgPong:           "pong",
-		MsgOtaCmd:         "ota_cmd",
-		MsgOtaProg:        "ota_progress",
-		MsgScanRpt:        "scan_report",
-		MsgScanReq:        "scan_request",
-		MsgQueryReq:       "query_request",
-		MsgQueryRsp:       "query_response",
-		MsgConfigQuery:    "config_query",
-		MsgConfigReport:   "config_report",
-		MsgHelloAck:       "hello_ack",
-		MsgConfigSyncReq:  "config_sync_request",
-		MsgConfigSyncRsp:  "config_sync_response",
-		MsgPongAck:        "pong_ack",
-		MsgResourceReport: "resource_report",
-		MsgQueryResources: "query_resources",
-		MsgPeriphCmd:      "periph_cmd",
-		MsgPeriphRsp:      "periph_rsp",
-		MsgLogStream:      "log_stream",
+		MsgHello:             "hello",
+		MsgStatusRpt:         "status_report",
+		MsgDataRpt:           "data_report",
+		MsgConfigMfst:        "config_manifest",
+		MsgConfigRslt:        "config_result",
+		MsgWriteCmd:          "write_cmd",
+		MsgWriteRsp:          "write_response",
+		MsgPing:              "ping",
+		MsgPong:              "pong",
+		MsgOtaCmd:            "ota_cmd",
+		MsgOtaProg:           "ota_progress",
+		MsgScanRpt:           "scan_report",
+		MsgScanReq:           "scan_request",
+		MsgQueryReq:          "query_request",
+		MsgQueryRsp:          "query_response",
+		MsgConfigQuery:       "config_query",
+		MsgConfigReport:      "config_report",
+		MsgHelloAck:          "hello_ack",
+		MsgConfigSyncReq:     "config_sync_request",
+		MsgConfigSyncRsp:     "config_sync_response",
+		MsgChannelCmdV2:      "channel_cmd_v2",
+		MsgChannelCmdV2Ack:   "channel_cmd_v2_ack",
+		MsgChannelCmdV2Final: "channel_cmd_v2_final",
+		MsgPongAck:           "pong_ack",
+		MsgResourceReport:    "resource_report",
+		MsgQueryResources:    "query_resources",
+		MsgPeriphCmd:         "periph_cmd",
+		MsgPeriphRsp:         "periph_rsp",
+		MsgLogStream:         "log_stream",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -35,7 +36,12 @@ func NewWriter(db *gorm.DB) *Writer {
 	return &Writer{db: db}
 }
 
-func (w *Writer) Write(event Event) error {
+func (w *Writer) Write(event Event) (err error) {
+	defer func() {
+		if err != nil {
+			metrics.SecurityAuditWriteFailuresTotal.Inc()
+		}
+	}()
 	if containsSensitiveKey(event.Metadata) {
 		return ErrSensitiveMetadata
 	}
@@ -47,7 +53,7 @@ func (w *Writer) Write(event Event) error {
 	if version == 0 {
 		version = 1
 	}
-	return w.db.Create(&models.SecurityAuditEvent{
+	err = w.db.Create(&models.SecurityAuditEvent{
 		ActorType:     event.ActorType,
 		ActorUserID:   event.ActorUserID,
 		ActorSnapshot: event.ActorSnapshot,
@@ -61,6 +67,7 @@ func (w *Writer) Write(event Event) error {
 		Metadata:      string(metadata),
 		CreatedAt:     time.Now().UTC(),
 	}).Error
+	return err
 }
 
 func containsSensitiveKey(metadata map[string]interface{}) bool {

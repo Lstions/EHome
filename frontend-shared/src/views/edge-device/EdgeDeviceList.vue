@@ -1,92 +1,41 @@
 <template>
   <div class="device-page">
 <template v-if="loading">
-  <div class="stats-row">
-    <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
-  </div>
-  <div class="device-grid">
-    <SkeletonCard v-for="i in 8" :key="i" variant="card" animated />
-  </div>
-</template>
-<template v-else>
-  <!-- 顶部统计 -->
-  <div class="stats-row desktop-only">
-    <div class="stat-card" @click="handleStatClick('all')">
-      <div class="stat-icon total">
-        <el-icon><Cpu /></el-icon>
+      <div class="stats-row">
+        <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
       </div>
-      <div class="stat-content">
-        <CountUp :value="stats.total" class="stat-value" />
-        <span class="stat-label">本页边缘设备</span>
+      <div class="device-grid">
+        <SkeletonCard v-for="i in 8" :key="i" variant="card" animated />
       </div>
-      <div class="stat-action">
-        <el-icon><Plus /></el-icon>
-      </div>
-    </div>
-        
-    <div class="stat-card online">
-      <div class="stat-icon online">
-        <el-icon><CircleCheck /></el-icon>
-      </div>
-      <div class="stat-content">
-        <CountUp :value="stats.online" class="stat-value" />
-        <span class="stat-label">本页在线</span>
-      </div>
-    </div>
-        
-    <div class="stat-card offline" @click="handleStatClick('offline')">
-      <div class="stat-icon offline">
-        <el-icon><CircleClose /></el-icon>
-      </div>
-      <div class="stat-content">
-        <CountUp :value="stats.offline" class="stat-value" />
-        <span class="stat-label">本页离线/异常</span>
-      </div>
-    </div>
+    </template>
+    <template v-else>
+      <!-- 顶部统计 -->
+      <div class="stats-row">
+        <StatCard label="本页边缘设备" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
+          <template #icon><el-icon><Cpu /></el-icon></template>
+          <template #value><CountUp :value="stats.total" class="stat-value" /></template>
+          <template #suffix>
+            <div class="stat-action"><el-icon><Plus /></el-icon></div>
+          </template>
+        </StatCard>
 
-    <div class="stat-card" @click="handleStatClick('today')">
-      <div class="stat-icon today">
-        <el-icon><DataAnalysis /></el-icon>
-      </div>
-      <div class="stat-content">
-        <CountUp :value="stats.todayData" :decimals="1" suffix="k" class="stat-value" />
-        <span class="stat-label">今日数据</span>
-      </div>
-    </div>
-  </div>
+        <StatCard label="本页在线" icon-color="var(--el-color-success)">
+          <template #icon><el-icon><CircleCheck /></el-icon></template>
+          <template #value><CountUp :value="stats.online" class="stat-value" /></template>
+        </StatCard>
 
-  <!-- 移动端紧凑统计 -->
-  <div class="mobile-stats-row mobile-only">
-    <MobileStatCard
-      :value="stats.total"
-      label="本页边缘设备"
-      :icon="Cpu"
-      variant="primary"
-      @click="handleStatClick('all')"
-    />
-    <MobileStatCard
-      :value="stats.online"
-      label="本页在线"
-      :icon="CircleCheck"
-      variant="success"
-    />
-    <MobileStatCard
-      :value="stats.offline"
-      label="本页离线/异常"
-      :icon="CircleClose"
-      variant="danger"
-      @click="handleStatClick('offline')"
-    />
-    <MobileStatCard
-      :value="todayDataK"
-      label="今日数据"
-      :icon="DataAnalysis"
-      variant="warning"
-      @click="handleStatClick('today')"
-    />
-  </div>
+        <StatCard label="本页离线/异常" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
+          <template #icon><el-icon><CircleClose /></el-icon></template>
+          <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
+        </StatCard>
 
-<!-- 工具栏 -->
+        <StatCard label="今日数据" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
+          <template #icon><el-icon><DataAnalysis /></el-icon></template>
+          <template #value><CountUp :value="stats.todayData" :decimals="1" suffix="k" class="stat-value" /></template>
+        </StatCard>
+      </div>
+
+    <!-- 工具栏 -->
     <div class="toolbar">
       <div class="toolbar-left">
         <el-input
@@ -171,18 +120,12 @@
 
     <!-- 设备表格列表 -->
     <el-card v-if="viewMode === 'table'" shadow="hover">
-      <div class="table-wrapper">
-        <div class="table-scroll-hint">
-          <el-icon><ArrowRight /></el-icon>
-          <span>可横向滚动查看完整信息</span>
-        </div>
-        <el-table
-          :data="filteredDevices"
-          stripe
-          @selection-change="handleSelectionChange"
-          ref="tableRef"
-          class="device-table"
-        >
+      <el-table
+        :data="filteredDevices"
+        stripe
+        @selection-change="handleSelectionChange"
+        ref="tableRef"
+      >
         <el-table-column type="selection" width="50" />
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip />
@@ -235,8 +178,7 @@
             </el-button>
           </template>
         </el-table-column>
-        </el-table>
-      </div>
+      </el-table>
     </el-card>
 
     <!-- 设备卡片列表 -->
@@ -335,7 +277,7 @@
       :close-on-press-escape="!submitting"
       :show-close="!submitting"
       :before-close="handleCreateDialogClose"
-      class="create-device-dialog dialog-mobile-constrained"
+      class="create-device-dialog"
     >
       <!-- 步骤指示器 -->
       <el-steps :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
@@ -402,7 +344,7 @@
               <h4>{{ parser.name }}</h4>
               <p class="parser-vendor">{{ parser.vendor }}</p>
               <div class="parser-tags">
-                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getBusTagType(bus) as any">
+                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus) as any">
                   {{ bus.toUpperCase() }}
                 </el-tag>
               </div>
@@ -452,7 +394,7 @@
                 @click="selectChannel(ch)"
               >
                 <code>{{ ch.name || (ch.hardware_type?.toUpperCase() + ' ' + ch.hardware_id) }}</code>
-                <el-tag size="small" :type="getBusTagType(ch.hardware_type) as any">{{ ch.hardware_type.toUpperCase() }}</el-tag>
+                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ ch.hardware_type.toUpperCase() }}</el-tag>
                 <span class="channel-bus-id">{{ ch.hardware_id }}</span>
                 <div v-if="selectedChannel?.id === ch.id" class="channel-selected-badge">
                   <el-icon><Check /></el-icon>
@@ -465,14 +407,14 @@
           <el-tab-pane label="创建新通道" name="create">
             <el-form ref="channelFormRef" :model="newChannel" label-position="top" style="margin-top: 12px;">
               <el-row :gutter="16">
-                <el-col :xs="24" :span="12">
+                <el-col :span="12">
                   <el-form-item label="硬件类型" prop="hardware_type">
                     <el-select v-model="newChannel.hardware_type" style="width: 100%;">
                       <el-option v-for="bus in selectedParserBusTypes" :key="bus" :label="bus.toUpperCase()" :value="bus" />
                     </el-select>
                   </el-form-item>
                 </el-col>
-                <el-col :xs="24" :span="12">
+                <el-col :span="12">
                   <el-form-item label="硬件ID" prop="hardware_id">
                     <el-select v-model="newChannel.hardware_id" style="width: 100%;">
                       <el-option v-for="bus in availableBusesForType(newChannel.hardware_type)" :key="bus" :label="bus" :value="bus" />
@@ -569,7 +511,7 @@ import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid, 
   Plus, View, Edit, Delete, InfoFilled, Check, Warning, Connection, DataLine,
   Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download,
-  Document, ArrowRight
+  Document
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
@@ -584,9 +526,10 @@ import type { Parser } from '@/api/parser'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
-import MobileStatCard from '@/components/common/MobileStatCard.vue'
+import StatCard from '@/components/common/StatCard.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { getHardwareTagType } from '@/utils/hardwareTag'
 
 const router = useRouter()
 const route = useRoute()
@@ -723,12 +666,6 @@ const stats = reactive({
   todayData: 0
 })
 
-const todayDataK = computed(() => {
-  const v = stats.todayData
-  if (v >= 1000) return `${(v / 1000).toFixed(1)}k`
-  return String(v)
-})
-
 // 获取今日数据统计
 const fetchTodayDataCount = async () => {
   try {
@@ -844,14 +781,6 @@ const availableBusesForType = (hardwareType: string): string[] => {
     }
   }
   return buses
-}
-
-// 根据总线类型获取标签类型
-const getBusTagType = (bus: string) => {
-  const types: Record<string, string> = {
-    uart: '', i2c: 'warning', spi: 'danger', gpio: 'success', adc: 'primary'
-  }
-  return types[bus] || 'info'
 }
 
 // 解析器可选列表
@@ -1343,39 +1272,10 @@ onUnmounted(() => {
   text-overflow: ellipsis;
 }
 
-.desktop-only {
-  display: contents;
-}
-
-.mobile-only {
-  display: none;
-}
-
-.mobile-stats-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-@media (max-width: 768px) {
-  .stats-row.desktop-only {
-    display: none;
-  }
-  .mobile-stats-row.mobile-only {
-    display: grid;
-  }
-}
-
-@media (max-width: 360px) {
-  .mobile-stats-row.mobile-only {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* 统计 */
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 16px;
 }
 
@@ -1389,7 +1289,6 @@ onUnmounted(() => {
   cursor: pointer;
   transition: all 0.3s;
   border: 1px solid var(--el-border-color);
-  min-width: 0;
 }
 
 .stat-card:hover {
@@ -1406,7 +1305,6 @@ onUnmounted(() => {
   justify-content: center;
   color: #fff;
   font-size: 20px;
-  flex-shrink: 0;
 }
 
 .stat-icon.total { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
@@ -1414,7 +1312,7 @@ onUnmounted(() => {
 .stat-icon.offline { background: var(--el-text-color-secondary); }
 .stat-icon.today { background: var(--el-color-warning); }
 
-.stat-content { flex: 1; min-width: 0; }
+.stat-content { flex: 1; }
 .stat-value { display: block; font-size: 28px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
@@ -1422,125 +1320,10 @@ onUnmounted(() => {
   opacity: 0;
   transition: opacity 0.2s;
   color: var(--el-color-primary);
-  flex-shrink: 0;
 }
 
 .stat-card:hover .stat-action {
   opacity: 1;
-}
-
-@media (max-width: 768px) {
-  .stats-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
-  }
-  .stat-card {
-    padding: 12px;
-    gap: 10px;
-    border-radius: 10px;
-  }
-  .stat-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    font-size: 22px;
-  }
-  .stat-value {
-    font-size: 22px;
-  }
-  .stat-label {
-    font-size: 12px;
-  }
-  .stat-action {
-    display: none;
-  }
-  .device-grid {
-    grid-template-columns: 1fr;
-    gap: 12px;
-  }
-  .device-card :deep(.el-card__body) {
-    padding: 14px;
-  }
-  .card-header {
-    padding: 14px;
-  }
-  .card-facts {
-    padding: 0 14px 14px;
-  }
-  .card-reading {
-    padding: 10px 14px;
-  }
-  .card-actions {
-    padding: 8px 14px;
-  }
-  .toolbar {
-    padding: 12px;
-    gap: 10px;
-  }
-  .toolbar-left, .toolbar-right {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-  .search-input {
-    width: 100%;
-    min-width: 0;
-  }
-}
-
-@media (max-width: 480px) {
-  .stats-row {
-    gap: 8px;
-  }
-  .stat-card {
-    padding: 10px;
-    gap: 8px;
-  }
-  .stat-icon {
-    width: 36px;
-    height: 36px;
-    font-size: 20px;
-  }
-  .stat-value {
-    font-size: 20px;
-  }
-  .stat-label {
-    font-size: 11px;
-  }
-  .toolbar-left :deep(.el-select) {
-    flex: 1 1 calc(50% - 5px);
-    min-width: 0;
-  }
-  .toolbar-right {
-    justify-content: space-between;
-  }
-  .toolbar-right :deep(.el-button) {
-    flex: 1;
-  }
-}
-
-@media (max-width: 360px) {
-  .stats-row {
-    grid-template-columns: 1fr;
-  }
-  .stat-card {
-    padding: 12px;
-  }
-  .toolbar-left :deep(.el-select) {
-    flex: 1 1 100%;
-  }
-  .card-facts {
-    grid-template-columns: 1fr;
-  }
-  .card-reading {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-  }
-  .reading-value {
-    white-space: normal;
-    word-break: break-word;
-    max-width: 100%;
-  }
 }
 
 /* 工具栏 */
@@ -1548,7 +1331,6 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
   background: var(--el-bg-color);
   padding: 16px 20px;
   border-radius: 12px;
@@ -1557,32 +1339,15 @@ onUnmounted(() => {
 
 .toolbar-left {
   display: flex;
-  flex: 1 1 auto;
   gap: 12px;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: center;
 }
 
-.toolbar-right {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.search-input {
-  width: 280px;
-  min-width: 200px;
-  flex: 1 1 220px;
-}
+.search-input { width: 280px; min-width: 200px; }
 
 /* 设备网格 */
 .device-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 20px;
 }
 
@@ -1995,118 +1760,15 @@ code.fact-value {
   50% { opacity: 0.5; }
 }
 
-.device-table {
-  min-width: 900px;
-}
-
-.table-wrapper {
-  width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-}
-
-.table-scroll-hint {
-  display: none;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-
-@media (max-width: 768px) {
-  .table-scroll-hint {
-    display: flex;
-  }
-  .device-table {
-    min-width: 720px;
-  }
-}
-
-@media (max-width: 480px) {
-  .device-table {
-    min-width: 640px;
-  }
-}
-
 /* 响应式 */
 @media (max-width: 1200px) {
-  .stats-row { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-}
-
-@media (max-width: 1100px) {
-  .toolbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .toolbar-left {
-    width: 100%;
-  }
-  .toolbar-right {
-    width: 100%;
-    justify-content: space-between;
-  }
-  .search-input {
-    width: 100%;
-    flex: 1 1 100%;
-  }
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
   .stats-row { grid-template-columns: 1fr; }
   .toolbar { flex-direction: column; gap: 12px; }
   .toolbar-left { width: 100%; flex-wrap: wrap; }
-  .toolbar-right { width: 100%; }
   .search-input { width: 100%; }
-  .device-grid { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 600px) {
-  .toolbar-left :deep(.el-select) {
-    width: 100%;
-  }
-  .toolbar-right {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .toolbar-right :deep(.el-button-group),
-  .toolbar-right :deep(.el-button) {
-    width: 100%;
-  }
-}
-
-@media (max-width: 360px) {
-  .card-header {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-  }
-  .device-info {
-    width: 100%;
-  }
-  .status-indicator {
-    align-self: flex-end;
-  }
-  .card-facts {
-    grid-template-columns: 1fr;
-  }
-  .card-reading {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-  }
-  .reading-value {
-    white-space: normal;
-    word-break: break-word;
-    max-width: 100%;
-  }
-  .card-actions {
-    width: 100%;
-    justify-content: space-between;
-  }
-  .device-grid { gap: 12px; }
 }
 </style>

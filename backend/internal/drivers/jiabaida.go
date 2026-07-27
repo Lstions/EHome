@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 )
@@ -16,11 +17,119 @@ import (
 // JiabaidaBMSDriver parses Jiabaida BMS binary protocol frames.
 type JiabaidaBMSDriver struct{}
 
-func (d *JiabaidaBMSDriver) DeviceType() string     { return "jiabaida_bms" }
-func (d *JiabaidaBMSDriver) DeviceName() string     { return "嘉佰达 BMS 电池管理系统" }
-func (d *JiabaidaBMSDriver) OEM() string            { return "嘉佰达" }
-func (d *JiabaidaBMSDriver) Category() string       { return "BMS" }
+func (d *JiabaidaBMSDriver) DeviceType() string      { return "jiabaida_bms" }
+func (d *JiabaidaBMSDriver) DeviceName() string      { return "嘉佰达 BMS 电池管理系统" }
+func (d *JiabaidaBMSDriver) OEM() string             { return "嘉佰达" }
+func (d *JiabaidaBMSDriver) Category() string        { return "BMS" }
 func (d *JiabaidaBMSDriver) HardwareTypes() []string { return []string{"uart"} }
+
+// ControlActions moves the documented, side-effect-free V19 queries onto the
+// unified Action Catalog. They remain disabled until a real BMS supplies the
+// model/firmware/line evidence needed for rollout. In particular, no MOS,
+// factory-mode, reset or parameter command is represented here.
+func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
+	actions := []ControlAction{
+		jiabaidaReadAction("read_basic_info", "读取基本信息", []byte{0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77}, 60, "总压、电流、容量、SOC、温度与 FET 状态"),
+		jiabaidaReadAction("read_cell_voltage", "读取单体电压", []byte{0xDD, 0xA5, 0x04, 0x00, 0xFF, 0xFC, 0x77}, 50, "各串电芯电压"),
+		jiabaidaReadAction("read_hardware_version", "读取硬件版本", []byte{0xDD, 0xA5, 0x05, 0x00, 0xFF, 0xFB, 0x77}, 40, "硬件版本字符串"),
+		jiabaidaReadAction("read_comprehensive", "读取综合信息", []byte{0xDD, 0xA5, 0x0F, 0x00, 0xFF, 0xF1, 0x77}, 100, "综合状态与单体电压"),
+		jiabaidaReadAction("read_protection_count", "读取保护历史次数", []byte{0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77}, 40, "保护触发次数统计"),
+	}
+	// These capabilities are deliberately visible but unavailable. Their
+	// schemas and evidence requirements are frozen now, while physical
+	// execution remains blocked until a real BMS proves ACK + readback and the
+	// node has durable bounded-plan replay protection.
+	actions = append(actions,
+		ControlAction{
+			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
+			Description: "一次提交充电/放电两个软件关闭位；必须 ACK 后读取 fet_status 对账",
+			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "hardware_evidence_required",
+			AvailabilityReason: "缺少真实 BMS 的 ACK、fet_status 读回和恢复证据",
+			Parameters: []ControlParameter{
+				{Name: "charge_software_closed", Type: "boolean", Required: true},
+				{Name: "discharge_software_closed", Type: "boolean", Required: true},
+				{Name: "priority", Type: "string", Required: true, Enum: []string{"user", "operator"}},
+			},
+		},
+		ControlAction{ID: "read_protection_parameters", Version: 1, Name: "读取 BMS 保护参数",
+			Description: "嘉佰达 F2；需要受控工厂模式工作流，当前仅登记能力",
+			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F2 工厂模式步骤与实机响应尚未冻结"},
+		ControlAction{ID: "read_system_parameters", Version: 1, Name: "读取 BMS 系统参数",
+			Description: "嘉佰达 F3；需要受控工厂模式工作流，当前仅登记能力",
+			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F3 工厂模式步骤与实机响应尚未冻结"},
+		ControlAction{ID: "bms_restart", Version: 1, Name: "重启 BMS",
+			Description: "重启后必须观察离线窗口或 restart counter，不能以 ACK 判定成功",
+			Semantics:   "reset", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
+			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified", AvailabilityReason: "未冻结 BMS 重启帧及离线/启动观测证据"},
+	)
+	return actions
+}
+
+func jiabaidaReadAction(id, name string, tx []byte, readSize uint32, description string) ControlAction {
+	return ControlAction{ID: id, Version: 1, Name: name, Description: description, Semantics: "read", Risk: "low", Enabled: false,
+		TXData: append([]byte(nil), tx...), ReadSize: readSize, RXTimeoutMS: 1000}
+}
+
+// CompileControlAction compiles the documented E1 MOS policy frame. The
+// action is still unavailable in the catalog: this compiler exists so the
+// golden vector and future bounded-plan transport can be tested without ever
+// guessing bytes at the HTTP boundary.
+func (d *JiabaidaBMSDriver) CompileControlAction(actionID string, params json.RawMessage) (CompiledControlStep, error) {
+	if actionID != "set_mos_policy" {
+		return CompiledControlStep{}, fmt.Errorf("jiabaida action %q is not parameterized", actionID)
+	}
+	var input struct {
+		ChargeClosed    bool   `json:"charge_software_closed"`
+		DischargeClosed bool   `json:"discharge_software_closed"`
+		Priority        string `json:"priority"`
+	}
+	if err := json.Unmarshal(params, &input); err != nil {
+		return CompiledControlStep{}, fmt.Errorf("decode MOS policy: %w", err)
+	}
+	var priority byte
+	switch input.Priority {
+	case "user":
+		priority = 0x00
+	case "operator":
+		priority = 0xAA
+	default:
+		return CompiledControlStep{}, fmt.Errorf("priority must be user or operator")
+	}
+	var mos byte
+	if input.ChargeClosed {
+		mos |= 0x01
+	}
+	if input.DischargeClosed {
+		mos |= 0x02
+	}
+	frame := []byte{0xDD, 0x5A, 0xE1, 0x02, priority, mos, 0, 0, 0x77}
+	checksum := jiabaidaChecksum(frame[2:6])
+	binary.BigEndian.PutUint16(frame[6:8], checksum)
+	return CompiledControlStep{TXData: frame, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}, nil
+}
+
+// VerifyControlAction binds a successful response to its originating query.
+// ParseData alone accepts multiple V19 read commands, so without this check a
+// wrong-device or stale response could be stored under the wrong Action.
+func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	if string(params) != "{}" {
+		return nil, fmt.Errorf("jiabaida action %q does not accept parameters", actionID)
+	}
+	expected, ok := map[string]byte{
+		"read_basic_info": 0x03, "read_cell_voltage": 0x04, "read_hardware_version": 0x05,
+		"read_comprehensive": 0x0F, "read_protection_count": 0xAA,
+	}[actionID]
+	if !ok {
+		return nil, fmt.Errorf("unknown jiabaida control action %q", actionID)
+	}
+	if len(raw) < 2 || raw[0] != 0xDD || raw[1] != expected {
+		return nil, fmt.Errorf("jiabaida action %q received unexpected response command", actionID)
+	}
+	return d.ParseData(raw)
+}
 
 func (d *JiabaidaBMSDriver) GetSensorDefinitions() []SensorData {
 	return []SensorData{
@@ -116,29 +225,42 @@ func verifyJiabaidaChecksum(raw []byte) bool {
 // The frame structure:
 //
 //	Success response: 0xDD | CMD | STATUS(0x00) | LEN | DATA... | CHECKSUM_H | CHECKSUM_L | 0x77 | [CALLBACKID]
-//	Error response:   0xDD | STATUS(0x80/0x81/0x82) | 0x00 | CHECKSUM_H | CHECKSUM_L | 0x77
+//	Error response:   0xDD | STATUS(0x80/0x81/0x82) | LEN(0x00) | CHECKSUM_H | CHECKSUM_L | 0x77 | [CALLBACKID]
 //	Send frame:       0xDD | 0xA5/0x5A | CMD | LEN | DATA... | CHECKSUM_H | CHECKSUM_L | 0x77 | [CALLBACKID]
 //
 // After the stop byte 0x77 there may be up to 4 extra CALLBACKID bytes.
 // We locate the stop byte via the LEN field and ignore trailing bytes.
 func (d *JiabaidaBMSDriver) ParseData(raw []byte) ([]SensorData, error) {
-	if len(raw) < 7 || raw[0] != 0xDD {
+	// A normal frame needs at least seven bytes, but a documented zero-length
+	// error frame is exactly six bytes before an optional callback ID.
+	if len(raw) < 6 || raw[0] != 0xDD {
 		return nil, &ParseError{Code: ErrInvalidFrameStart, Raw: raw}
 	}
 
-	// Detect error response frames: 0xDD | 0x80/0x81/0x82 | 0x00 | CHKSUM_H | CHKSUM_L | 0x77
+	// Detect error response frames before interpreting byte 1 as a command.
+	// V19 permits an optional four-byte callback after the delimiter, so the
+	// delimiter is at its length-derived position (5), not necessarily the last
+	// byte.  For LEN=0, the response checksum is the two's-complement checksum
+	// of zero, i.e. 0x0000.
 	if raw[1] == 0x80 || raw[1] == 0x81 || raw[1] == 0x82 {
 		status := raw[1]
-		if len(raw) >= 6 && raw[len(raw)-1] == 0x77 {
-			// Error frame: handle checksum (LEN implied as 0)
-			// Checksum over LEN(0x00) only → 0x0000
-			return nil, &ParseError{
-				Code:   ErrBMSStatusError,
-				Detail: fmt.Sprintf("BMS status 0x%02X", status),
-				Raw:    raw,
-			}
+		if len(raw) < 6 {
+			return nil, &ParseError{Code: ErrIncompleteFrame, Detail: "truncated BMS error response", Raw: raw}
 		}
-		return nil, &ParseError{Code: ErrInvalidFrameStart, Raw: raw}
+		if raw[2] != 0x00 {
+			return nil, &ParseError{Code: ErrIncompleteFrame, Detail: "BMS error response has nonzero length", Raw: raw}
+		}
+		if raw[5] != 0x77 {
+			return nil, &ParseError{Code: ErrInvalidStopByte, Raw: raw}
+		}
+		if raw[3] != 0x00 || raw[4] != 0x00 {
+			return nil, &ParseError{Code: ErrChecksumMismatch, Raw: raw}
+		}
+		return nil, &ParseError{
+			Code:   ErrBMSStatusError,
+			Detail: fmt.Sprintf("BMS status 0x%02X", status),
+			Raw:    raw,
+		}
 	}
 
 	// Determine if this is a send frame (write command/read request) or response frame.
@@ -194,8 +316,11 @@ func (d *JiabaidaBMSDriver) ParseData(raw []byte) ([]SensorData, error) {
 	// Extract data payload
 	data := raw[4 : 4+length]
 
-	// Route by command — all read commands enabled.
-	// Write commands (0xE1, 0xF2, 0xF3, 0xF6) require factory mode and are triggered via API.
+	// Route only documented read commands.  0xE1 is not a factory-mode command
+	// in the V19 source, but it is still a destructive dual-bit control and is
+	// deliberately unavailable until its Action Catalog/readback gate is met.
+	// F2/F3/F6 stay unavailable as well; their physical workflows require
+	// additional factory-mode and CRC evidence.
 	switch cmd {
 	case 0x03:
 		return d.parse0x03(data)
@@ -584,8 +709,12 @@ func CRC16Modbus(data []byte) uint16 {
 	return crc
 }
 
-// GetCommandTemplates returns the BMS protocol command templates.
-// Read commands are schedulable (polling), write commands are one-shot triggers.
+// GetCommandTemplates exposes only schedulable, side-effect-free polling
+// commands.  Legacy 0xE1 MOS frames used to be returned here as one-shot
+// templates, which let the old driver-command API advertise an unaudited
+// physical-write path.  BMS writes must be represented by a verified Action
+// Catalog definition instead, and none is enabled until real-device evidence
+// covers the two MOS bits, priority, ACK and readback.
 func (d *JiabaidaBMSDriver) GetCommandTemplates() []CommandTemplate {
 	return []CommandTemplate{
 		{
@@ -617,24 +746,6 @@ func (d *JiabaidaBMSDriver) GetCommandTemplates() []CommandTemplate {
 			CmdByte: 0xAA, WriteData: "DDA5AA00FF5677",
 			ReadLength: 40, DelayMs: 100, IntervalMs: 0, Schedulable: true,
 			Description: "12种保护触发次数统计",
-		},
-		{
-			ID: "close_discharge_mos", Name: "关放电MOS", Type: "write",
-			CmdByte: 0xE1, WriteData: "DD5AE1020002FF1B77",
-			ReadLength: 15, DelayMs: 100, IntervalMs: 0, Schedulable: false,
-			Description: "关闭放电MOS管（需工厂模式，一次性触发）",
-		},
-		{
-			ID: "close_charge_mos", Name: "关充电MOS", Type: "write",
-			CmdByte: 0xE1, WriteData: "DD5AE1020001FF1C77",
-			ReadLength: 15, DelayMs: 100, IntervalMs: 0, Schedulable: false,
-			Description: "关闭充电MOS管（需工厂模式，一次性触发）",
-		},
-		{
-			ID: "release_mos", Name: "释放MOS", Type: "write",
-			CmdByte: 0xE1, WriteData: "DD5AE1020000FF1D77",
-			ReadLength: 15, DelayMs: 100, IntervalMs: 0, Schedulable: false,
-			Description: "释放所有MOS管（需工厂模式，一次性触发）",
 		},
 	}
 }

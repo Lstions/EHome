@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -425,10 +426,10 @@ func TestTechfine_DriverMetadata(t *testing.T) {
 	if d.DeviceType() != "techfine_inverter" {
 		t.Errorf("DeviceType: got %q, want %q", d.DeviceType(), "techfine_inverter")
 	}
-	if d.DeviceName() != "Techfine GB3024 逆变器" {
+	if d.DeviceName() != "泰琪丰 GB3024 逆变器" {
 		t.Errorf("DeviceName: got %q", d.DeviceName())
 	}
-	if d.OEM() != "Techfine" {
+	if d.OEM() != "泰琪丰" {
 		t.Errorf("OEM: got %q", d.OEM())
 	}
 	if d.Category() != "inverter" {
@@ -436,6 +437,53 @@ func TestTechfine_DriverMetadata(t *testing.T) {
 	}
 	if len(d.HardwareTypes()) != 1 || d.HardwareTypes()[0] != "uart" {
 		t.Errorf("HardwareTypes: got %v", d.HardwareTypes())
+	}
+}
+
+func TestTechfine_ControlActionsAreDisabledReads(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	var _ ControlActionProvider = d
+	var _ ControlActionVerifier = d
+	actions := d.ControlActions()
+	if len(actions) != 11 {
+		t.Fatalf("got %d actions, want 11", len(actions))
+	}
+	wantCommands := map[string]string{
+		"read_status": "HSTS\r", "read_grid": "HGRID\r", "read_output": "HOP\r",
+		"read_battery": "HBAT\r", "read_pv1": "HPV\r", "read_pv2": "HPVB\r",
+		"read_temperature": "HTEMP\r", "read_energy": "HGEN\r", "read_bms": "HBMS1\r",
+		"read_eeprom": "HEEP1\r", "read_version": "HIMSG1\r",
+	}
+	for _, action := range actions {
+		command, ok := wantCommands[action.ID]
+		if !ok {
+			t.Fatalf("unexpected action %q", action.ID)
+		}
+		if action.Enabled || action.Semantics != "read" || action.Risk != "low" || string(action.TXData) != command || action.ReadSize != 256 || action.RXTimeoutMS != 1000 {
+			t.Fatalf("unsafe or malformed action %+v", action)
+		}
+		delete(wantCommands, action.ID)
+	}
+	if len(wantCommands) != 0 {
+		t.Fatalf("missing actions for %v", wantCommands)
+	}
+}
+
+func TestTechfine_VerifyControlActionUsesCommandContext(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	pv2, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), []byte("(120.5 08.0 00960\r"))
+	if err != nil {
+		t.Fatalf("verify PV2: %v", err)
+	}
+	assertFloat(t, pv2, "pv2_voltage", 120.5, 0.01)
+	if findSensor(pv2, "pv1_voltage") != nil {
+		t.Fatalf("PV2 response was projected as PV1: %+v", pv2)
+	}
+	if _, err := d.VerifyControlAction("read_status", json.RawMessage(`{"unexpected":true}`), []byte("(00 P000000000000\r")); err == nil {
+		t.Fatal("parameterized read was accepted")
+	}
+	if _, err := d.VerifyControlAction("set_voltage", json.RawMessage(`{}`), []byte("ACK\r")); err == nil {
+		t.Fatal("unregistered write action was accepted")
 	}
 }
 
@@ -499,23 +547,24 @@ func TestTechfine_SensorDefinitions(t *testing.T) {
 }
 
 // ============================================================================
-// 14. TestCommandTemplates — Verify templates are generated with CRC16
+// 14. TestCommandTemplates — verify only non-schedulable read compatibility
+// metadata remains public.  Settings require an unverified CRC and must not
+// reach ConfigManifest or an Action Catalog.
 // ============================================================================
 
 func TestTechfine_CommandTemplates(t *testing.T) {
 	d := &TechfineInverterDriver{}
 	templates := d.GetCommandTemplates()
 
-	if len(templates) < 25 {
-		t.Errorf("expected >=25 command templates, got %d", len(templates))
+	if len(templates) != 11 {
+		t.Fatalf("expected 11 public read templates, got %d", len(templates))
 	}
 
 	// Verify query templates
 	queryIDs := []string{
 		"query_status", "query_grid", "query_output", "query_battery",
 		"query_pv1", "query_pv2", "query_temperature", "query_energy",
-		"query_bms", "query_eeprom", "query_version", "query_protocol",
-		"query_pe", "query_pd",
+		"query_bms", "query_eeprom", "query_version",
 	}
 	tmplMap := make(map[string]CommandTemplate)
 	for _, tmpl := range templates {
@@ -526,8 +575,8 @@ func TestTechfine_CommandTemplates(t *testing.T) {
 		if tmpl, ok := tmplMap[id]; !ok {
 			t.Errorf("missing command template: %s", id)
 		} else {
-			if !tmpl.Schedulable {
-				t.Errorf("query template %s should be schedulable", id)
+			if tmpl.Schedulable {
+				t.Errorf("query template %s must not be schedulable", id)
 			}
 			if tmpl.WriteData == "" {
 				t.Errorf("query template %s has empty WriteData", id)
@@ -535,29 +584,9 @@ func TestTechfine_CommandTemplates(t *testing.T) {
 		}
 	}
 
-	// Verify control template
-	if tmpl, ok := tmplMap["turn_on"]; !ok {
-		t.Errorf("missing command template: turn_on")
-	} else {
-		if tmpl.Schedulable {
-			t.Errorf("control template turn_on should not be schedulable")
-		}
-	}
-
-	// Verify parameterized setting templates exist
-	settingIDs := []string{
-		"set_voltage_220", "set_voltage_230", "set_voltage_240",
-		"set_frequency_50", "set_frequency_60",
-		"set_battery_type_agm", "set_battery_type_fld", "set_battery_type_user",
-		"set_grid_range_apl", "set_grid_range_ups",
-		"set_work_mode_uti", "set_work_mode_sub", "set_work_mode_sbu",
-		"set_bms_off", "set_bms_on",
-		"set_lock_voltage", "set_charge_voltage", "set_float_voltage",
-		"set_total_charge_current", "set_mains_charge_current", "system_reset",
-	}
-	for _, id := range settingIDs {
-		if _, ok := tmplMap[id]; !ok {
-			t.Errorf("missing setting template: %s", id)
+	for _, forbidden := range []string{"turn_on", "query_protocol", "query_pe", "query_pd", "set_voltage_220", "system_reset"} {
+		if _, ok := tmplMap[forbidden]; ok {
+			t.Errorf("unsafe template %s is publicly exposed", forbidden)
 		}
 	}
 }
@@ -599,27 +628,9 @@ func TestTechfine_HGRID_HOP_DispatchHardening(t *testing.T) {
 	assertFloat(t, data, "grid_frequency", 50.0, 0.01)
 }
 
-// ============================================================================
-// 15. TestCRC16 — Verify CRC16-Modbus computation
-// ============================================================================
-
-func TestTechfine_CRC16(t *testing.T) {
-	// CRC16-Modbus of "V230" should be deterministic
-	crc := CRC16Modbus([]byte("V230"))
-	if crc == 0 {
-		t.Error("CRC16 of 'V230' should not be 0")
-	}
-
-	// Same input → same output
-	crc2 := CRC16Modbus([]byte("V230"))
-	if crc != crc2 {
-		t.Errorf("CRC16 not deterministic: %d vs %d", crc, crc2)
-	}
-
-	// Different input → different output
-	crc3 := CRC16Modbus([]byte("V220"))
-	if crc == crc3 {
-		t.Error("CRC16 of 'V230' and 'V220' should differ")
+func TestTechfine_LegacyUnsafeTemplatesFailClosed(t *testing.T) {
+	if templates := (&TechfineInverterDriver{}).legacyUnsafeCommandTemplates(); templates != nil {
+		t.Fatalf("unverified legacy templates must fail closed, got %+v", templates)
 	}
 }
 

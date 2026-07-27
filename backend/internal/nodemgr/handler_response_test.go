@@ -20,9 +20,9 @@ func init() {
 // noopPublisher implements mqtt.Publisher for tests — all methods return nil.
 type noopPublisher struct{}
 
-func (n *noopPublisher) Publish(topic string, payload []byte) error          { return nil }
-func (n *noopPublisher) PublishQoS2(topic string, payload []byte) error       { return nil }
-func (n *noopPublisher) PublishRetained(topic string, payload []byte) error   { return nil }
+func (n *noopPublisher) Publish(topic string, payload []byte) error         { return nil }
+func (n *noopPublisher) PublishQoS2(topic string, payload []byte) error     { return nil }
+func (n *noopPublisher) PublishRetained(topic string, payload []byte) error { return nil }
 
 // setupHandlerTestDB creates a fresh SQLite in-memory DB for handler response tests.
 // Uses a different function name to avoid collision with manager_test.go's setupTestDB.
@@ -64,10 +64,10 @@ func TestHandleWriteResponse_Success(t *testing.T) {
 
 	// Build a WriteResponse frame: field1=requestID, field2=success, field3=errorCode, field4=errorMsg
 	enc := frame.NewEncoder(frame.MsgWriteRsp)
-	enc.EncodeVarint(1, 42)       // requestID
-	enc.EncodeBool(2, true)       // success
-	enc.EncodeVarint(3, 0)        // errorCode
-	enc.EncodeString(4, "ok")     // errorMsg
+	enc.EncodeVarint(1, 42)   // requestID
+	enc.EncodeBool(2, true)   // success
+	enc.EncodeVarint(3, 0)    // errorCode
+	enc.EncodeString(4, "ok") // errorMsg
 
 	// Should not panic
 	mgr.handleWriteResponse("test-device-001", enc.Bytes())
@@ -79,9 +79,9 @@ func TestHandleWriteResponse_Error(t *testing.T) {
 	mgr := setupHandlerManager(t)
 
 	enc := frame.NewEncoder(frame.MsgWriteRsp)
-	enc.EncodeVarint(1, 99)           // requestID
-	enc.EncodeBool(2, false)          // success = false
-	enc.EncodeVarint(3, 500)          // errorCode
+	enc.EncodeVarint(1, 99)            // requestID
+	enc.EncodeBool(2, false)           // success = false
+	enc.EncodeVarint(3, 500)           // errorCode
 	enc.EncodeString(4, "device busy") // errorMsg
 
 	// Should not panic

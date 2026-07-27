@@ -16,6 +16,9 @@ Profiles:
   all      Build all profiles
 
 Set BUILD_ROOT to place build directories elsewhere.
+Set EXTRA_SDKCONFIG_DEFAULTS to append a semicolon-separated sdkconfig defaults file
+(for example, an isolated development MQTT broker override). Supplying it regenerates
+the selected profile's derived sdkconfig so the override takes effect.
 EOF
 }
 
@@ -44,6 +47,14 @@ build_profile() {
     sdkconfig="$build_dir/sdkconfig"
     lock_file="$build_dir/dependencies.lock"
     defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
+    if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
+        defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
+        # sdkconfig takes precedence over sdkconfig.defaults.  An explicit
+        # override (for example the isolated development MQTT broker) must
+        # therefore regenerate this profile's derived sdkconfig instead of
+        # silently retaining a previous production value.
+        rm -f "$sdkconfig"
+    fi
 
     mkdir -p "$build_dir"
     if [[ ! -f "$lock_file" && -f "$PROJECT_DIR/dependencies.lock" ]]; then
@@ -52,6 +63,7 @@ build_profile() {
 
     echo "==> Building $profile (target=$target, flash=$flash_profile)"
     idf.py \
+        --project-dir "$PROJECT_DIR" \
         -B "$build_dir" \
         -D "IDF_TARGET=$target" \
         -D "SDKCONFIG=$sdkconfig" \

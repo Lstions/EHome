@@ -183,6 +183,10 @@ void msg_handler_process(const uint8_t *data, size_t len)
         handler_config_process_query(&dec);
         break;
 
+    case MSG_CHANNEL_CMD_V2:
+        handler_channel_cmd_v2_process(&dec);
+        break;
+
     case MSG_HELLO_ACK:
         handler_hello_process_ack(&dec);
         break;

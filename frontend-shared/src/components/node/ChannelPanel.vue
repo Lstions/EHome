@@ -224,7 +224,7 @@
     />
 
     <!-- 改波特率对话框 -->
-    <el-dialog v-model="reconfigureDialogVisible" title="修改波特率" width="400px" align-center class="dialog-mobile-constrained" destroy-on-close>
+    <el-dialog v-model="reconfigureDialogVisible" title="修改波特率" width="400px" destroy-on-close>
       <el-form :model="reconfigureForm" label-width="80px">
         <el-form-item label="选择通道">
           <el-select v-model="reconfigureForm.channelId" placeholder="请选择 UART 通道" style="width: 100%">
@@ -253,7 +253,7 @@
     </el-dialog>
 
     <!-- 添加 GPIO 对话框 -->
-    <el-dialog v-model="gpioDialogVisible" title="配置 GPIO 引脚" width="460px" align-center class="dialog-mobile-constrained" destroy-on-close @closed="resetGpioDialogState">
+    <el-dialog v-model="gpioDialogVisible" title="配置 GPIO 引脚" width="460px" destroy-on-close @closed="resetGpioDialogState">
       <el-form :model="gpioForm" label-width="90px">
         <el-form-item label="引脚">
           <el-input :model-value="`GPIO${gpioForm.pin}`" disabled style="width: 100%;" />
@@ -283,7 +283,7 @@
     </el-dialog>
 
     <!-- 添加 PWM 对话框 -->
-    <el-dialog v-model="pwmDialogVisible" title="配置 PWM 硬件资源" width="460px" align-center class="dialog-mobile-constrained" destroy-on-close @closed="resetPwmDialogState">
+    <el-dialog v-model="pwmDialogVisible" title="配置 PWM 硬件资源" width="460px" destroy-on-close @closed="resetPwmDialogState">
       <el-form :model="pwmForm" label-width="100px">
         <el-form-item label="PWM 资源">
           <el-input :model-value="`${pwmForm.hardware_id} (channel ${pwmForm.channel})`" disabled style="width: 100%;" />

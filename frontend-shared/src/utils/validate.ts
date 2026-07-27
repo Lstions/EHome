@@ -9,7 +9,7 @@ export function validateUsername(username: unknown): username is string {
  * 验证密码
  */
 export function validatePassword(password: unknown): password is string {
-  return typeof password === 'string' && password.length >= 8
+  return typeof password === 'string' && password.length >= 6
 }
 
 /**

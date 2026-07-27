@@ -273,13 +273,23 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
-		// Force a full config push to this node (bypass hash match)
-		decisions := nodeMgr.SyncGate().OnServerStartup()
-		for _, d := range decisions {
-			if d.DeviceID == node.NodeID {
-				nodeMgr.SendConfigManifestWithDecision(d)
-				break
-			}
+		// Force one full config push for this exact node.  Do not reuse
+		// OnServerStartup here: that path consults the manager's transient
+		// online cache, which may be empty immediately after a backend restart
+		// even when this DB-backed node is online.  Returning "syncing" without
+		// publishing a manifest makes the API lie and can send a V2 action to a
+		// device that has no matching runtime channel.
+		decisions := nodeMgr.SyncGate().OnConfigChange(nodemgr.ConfigChangeEvent{
+			Type: nodemgr.CfgChangeNode, Action: nodemgr.CfgActionUpdate,
+			NodeID: node.NodeID, EntityID: node.NodeID, Actor: "api:force_config_sync",
+		})
+		if len(decisions) != 1 {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "unable to create config sync decision"})
+			return
+		}
+		if err := nodeMgr.SendConfigManifestWithDecision(decisions[0]); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": node.NodeID, "status": "syncing"}})
 	})

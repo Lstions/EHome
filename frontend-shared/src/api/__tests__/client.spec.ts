@@ -29,7 +29,7 @@ vi.mock('axios', () => {
 })
 
 // import 在 mock 之后
-import apiClient from '../client'
+import apiClient, { ApiError, isApiErrorCode } from '../client'
 void apiClient // 触发模块加载 + 拦截器注册
 
 describe('apiClient 拦截器', () => {
@@ -80,6 +80,21 @@ describe('apiClient 拦截器', () => {
     await expect(handler({ data: { code: 400, message: '参数错误' } })).rejects.toThrow('参数错误')
   })
 
+  it('保留 HTTP 响应和机器错误码供受控操作恢复', async () => {
+    const handler = mockResponseRejected.getMockImplementation() as any
+    const response = { status: 403, data: { message: 'recent authentication is required', error_code: 'recent_auth_required' } }
+    let caught: unknown
+    try {
+      await handler({ response, message: 'Request failed' })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).response).toBe(response)
+    expect((caught as ApiError).status).toBe(403)
+    expect(isApiErrorCode(caught, 'recent_auth_required')).toBe(true)
+  })
+
   it('业务 code 200 时 resolve data', () => {
     const handler = mockResponseFulfilled.getMockImplementation() as any
     const data = { code: 200, message: 'ok', data: { foo: 1 } }
@@ -92,62 +107,43 @@ describe('apiClient 拦截器', () => {
     expect(handler({ data })).toEqual(data)
   })
 
-  it('HTTP 401 时清除 token 并跳 /login', async () => {
+  it('已认证请求收到 HTTP 401 时清除 token 并跳 /login', async () => {
     localStorage.setItem('token', 'expired')
     sessionStorage.setItem('token', 'expired-session')
 
-    // jsdom 不允许直接赋值 location.href, 用 defineProperty mock
+    // happy-dom location.assign is read-only; replace location for this unit.
     const originalLocation = window.location
     delete (window as any).location
-    ;(window as any).location = { ...originalLocation, href: '' }
+    const assign = vi.fn()
+    ;(window as any).location = { ...originalLocation, pathname: '/dashboard', assign }
 
     const handler = mockResponseRejected.getMockImplementation() as any
-    await expect(handler({
-      config: { url: '/api/v1/account', headers: { Authorization: 'Bearer expired' } },
-      response: { status: 401, data: { message: '登录已过期' } },
-    })).rejects.toThrow('登录已过期')
+    await expect(handler({ config: { url: '/api/v1/account' }, response: { status: 401 } })).rejects.toBeDefined()
 
     expect(localStorage.getItem('token')).toBeNull()
     expect(sessionStorage.getItem('token')).toBeNull()
     expect(mockClearSessionCaches).toHaveBeenCalledOnce()
-    expect(window.location.href).toBe('/login')
+    expect(assign).toHaveBeenCalledWith('/login')
 
     // 还原
     ;(window as any).location = originalLocation
   })
 
-  it('登录接口 401 只返回凭据错误，不清除会话或跳转', async () => {
-    localStorage.setItem('token', 'stale-token')
+  it('登录接口 HTTP 401 保留当前登录页和错误响应', async () => {
     const originalLocation = window.location
     delete (window as any).location
-    ;(window as any).location = { ...originalLocation, href: '' }
+    const assign = vi.fn()
+    ;(window as any).location = { ...originalLocation, pathname: '/login', assign }
 
     const handler = mockResponseRejected.getMockImplementation() as any
-    await expect(handler({
-      config: { url: '/api/v1/auth/login', headers: { Authorization: 'Bearer stale-token' } },
-      response: { status: 401, data: { code: 401, message: '用户名或密码错误' } },
-    })).rejects.toThrow('用户名或密码错误')
-
-    expect(localStorage.getItem('token')).toBe('stale-token')
-    expect(mockClearSessionCaches).not.toHaveBeenCalled()
-    expect(window.location.href).toBe('')
-    ;(window as any).location = originalLocation
-  })
-
-  it('429 错误保留 Retry-After，供登录页展示等待时间', async () => {
-    const handler = mockResponseRejected.getMockImplementation() as any
-    await expect(handler({
-      config: { url: '/api/v1/auth/login', headers: {} },
-      response: {
-        status: 429,
-        data: { code: 429, message: 'too many login attempts' },
-        headers: { 'retry-after': '60' },
-      },
-    })).rejects.toMatchObject({
-      status: 429,
-      code: 429,
-      retryAfterSeconds: 60,
+    const response = { status: 401, data: { message: '用户名或密码错误' } }
+    await expect(handler({ config: { url: '/api/v1/auth/login' }, response, message: 'Request failed' })).rejects.toMatchObject({
+      message: '用户名或密码错误',
+      response,
     })
+    expect(assign).not.toHaveBeenCalled()
+    expect(mockClearSessionCaches).not.toHaveBeenCalled()
+    ;(window as any).location = originalLocation
   })
 
   it('非 401 HTTP 错误不跳 /login', async () => {

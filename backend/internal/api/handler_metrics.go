@@ -4,12 +4,13 @@ import (
 	"net/http"
 	"time"
 
+	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/metrics"
 
 	"github.com/gin-gonic/gin"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"gorm.io/gorm"
 )
 
@@ -43,6 +44,20 @@ type MetricsResponse struct {
 		ConnectionsActive int64 `json:"connections_active"`
 		MessagesTotal     int64 `json:"messages_total"`
 	} `json:"websocket"`
+	Control struct {
+		OperationsTotal      int64 `json:"operations_total"`
+		Active               int64 `json:"active"`
+		Queued               int64 `json:"queued"`
+		Succeeded            int64 `json:"succeeded"`
+		Failed               int64 `json:"failed"`
+		Unknown              int64 `json:"unknown"`
+		UnresolvedUnknown    int64 `json:"unresolved_unknown"`
+		Cancelled            int64 `json:"cancelled"`
+		OutboxPending        int64 `json:"outbox_pending"`
+		OutboxLeased         int64 `json:"outbox_leased"`
+		CapabilityStaleNodes int64 `json:"capability_stale_nodes"`
+		AuditWriteFailures   int64 `json:"audit_write_failures"`
+	} `json:"control"`
 	Timestamp int64 `json:"timestamp"`
 }
 
@@ -93,6 +108,22 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		var otaTotal int64
 		db.Model(&models.OTATask{}).Count(&otaTotal)
 		resp.OTA.UpgradesTotal = otaTotal
+
+		db.Model(&models.CommandExecution{}).Count(&resp.Control.OperationsTotal)
+		db.Model(&models.CommandExecution{}).Where("status IN ?", []string{
+			commandexec.StatusQueued, commandexec.StatusDispatched, commandexec.StatusDeviceAccepted, commandexec.StatusVerifying,
+		}).Count(&resp.Control.Active)
+		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusQueued).Count(&resp.Control.Queued)
+		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusSucceeded).Count(&resp.Control.Succeeded)
+		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusFailed).Count(&resp.Control.Failed)
+		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusUnknown).Count(&resp.Control.Unknown)
+		db.Table("command_executions AS ce").Joins("LEFT JOIN command_manual_resolutions AS cmr ON cmr.command_id = ce.command_id").
+			Where("ce.status = ? AND cmr.command_id IS NULL", commandexec.StatusUnknown).Count(&resp.Control.UnresolvedUnknown)
+		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusCancelled).Count(&resp.Control.Cancelled)
+		db.Model(&models.CommandOutbox{}).Where("state = ?", "PENDING").Count(&resp.Control.OutboxPending)
+		db.Model(&models.CommandOutbox{}).Where("state = ?", "LEASED").Count(&resp.Control.OutboxLeased)
+		db.Model(&models.Node{}).Where("status = ? AND (resource_reported_at IS NULL OR resource_reported_at < ?)", "online", time.Now().UTC().Add(-commandexec.MaxCapabilityAge)).Count(&resp.Control.CapabilityStaleNodes)
+		resp.Control.AuditWriteFailures = readCounterTotal(metrics.SecurityAuditWriteFailuresTotal)
 
 		resp.Timestamp = time.Now().UnixMilli()
 		c.JSON(http.StatusOK, gin.H{

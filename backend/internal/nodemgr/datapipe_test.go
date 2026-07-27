@@ -16,10 +16,12 @@ import (
 
 func init() {
 	_ = logger.Init("warn")
-	// Register built-in drivers in the global registry
-	drivers.Register(&drivers.BMP280Driver{})
-	drivers.Register(&drivers.LKTH01Driver{})
-	drivers.Register(&drivers.SN3000Driver{})
+}
+
+func newDataPipeTestRegistry() *drivers.Registry {
+	registry := drivers.NewRegistry()
+	drivers.RegisterBuiltInDrivers(registry)
+	return registry
 }
 
 // TestDataPipeline_EndToEnd: simulate a DataReport coming in, going through
@@ -61,7 +63,7 @@ func TestDataPipeline_EndToEnd(t *testing.T) {
 	rawData := []byte{0x00, 0x41, 0x6e, 0xeb, 0x67, 0x32}
 
 	// Build a minimal manager
-	mgr := &Manager{db: db}
+	mgr := &Manager{db: db, driverRegistry: newDataPipeTestRegistry()}
 
 	mgr.parseAndStoreData(col.ID, col.NodeID, uint64(ch.ID), 0, 0, rawData)
 
@@ -94,7 +96,7 @@ func TestDataPipeline_UnknownDevice(t *testing.T) {
 	db.Create(&ch)
 	// No device created
 
-	mgr := &Manager{db: db}
+	mgr := &Manager{db: db, driverRegistry: newDataPipeTestRegistry()}
 	mgr.parseAndStoreData(col.ID, "3002", uint64(ch.ID), 0, 0, []byte{1, 2, 3, 4, 5, 6})
 
 	var count int64
@@ -117,7 +119,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 	dev := models.EdgeDevice{Name: "sn3000", ChannelID: ch.ID, Type: "sn3000"}
 	db.Create(&dev)
 
-	mgr := &Manager{db: db}
+	mgr := &Manager{db: db, driverRegistry: newDataPipeTestRegistry()}
 	mgr.parseAndStoreData(col.ID, "3003", uint64(ch.ID), 0, 0, []byte{})
 
 	var count int64
@@ -129,7 +131,7 @@ func TestDataPipeline_EmptyRaw(t *testing.T) {
 
 // TestDriverRegistry: ensure built-in drivers are registered
 func TestDriverRegistry(t *testing.T) {
-	types := drivers.List()
+	types := newDataPipeTestRegistry().List()
 	expected := map[string]bool{
 		"bmp280":  false,
 		"lk_th01": false,
@@ -179,7 +181,7 @@ func TestBackpressure_Fallback(t *testing.T) {
 	// Simulate by setting dataCh to nil and calling processDataReportJob
 	// directly - should not panic
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	mgr := &Manager{db: db}
+	mgr := &Manager{db: db, driverRegistry: newDataPipeTestRegistry()}
 
 	job := dataReportJob{
 		deviceID:  "test",
@@ -192,9 +194,8 @@ func TestBackpressure_Fallback(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
-func TestDriverRegistry_Global(t *testing.T) {
-	// The init() in this file registers them
-	types := drivers.List()
+func TestDriverRegistry_Isolated(t *testing.T) {
+	types := newDataPipeTestRegistry().List()
 	t.Logf("registered: %v", types)
 }
 
@@ -257,7 +258,7 @@ func TestFindEdgeDeviceByChannelID_C6IndexFallback(t *testing.T) {
 	}
 	db.Create(&ed2)
 
-	mgr := &Manager{db: db}
+	mgr := &Manager{db: db, driverRegistry: newDataPipeTestRegistry()}
 
 	// Test 1: Direct lookup by channels.id should work (new firmware path)
 	device, found := mgr.findEdgeDeviceByChannelID(node.NodeID, uint64(ch1.ID), 0)

@@ -254,6 +254,41 @@ static void test_unknown_fields_are_rejected(void)
     CHECK(config_mgr_get_staged_manifest() == NULL);
 }
 
+static void test_channel_dma_field_has_legacy_fallback(void)
+{
+    uint8_t channel[96], frame[160];
+    const uint8_t uart_config[] = {16, 17, 0, 0, 0x25, 0};
+    frame_encoder_t channel_enc;
+    frame_encoder_init(&channel_enc, channel, sizeof(channel), 0);
+    CHECK(frame_encode_varint(&channel_enc, 1, 42) == FRAME_OK);
+    CHECK(frame_encode_varint(&channel_enc, 5, 1) == FRAME_OK);
+    CHECK(frame_encode_varint(&channel_enc, 6, 1) == FRAME_OK);
+    CHECK(frame_encode_bytes(&channel_enc, 7, uart_config, sizeof(uart_config)) == FRAME_OK);
+    CHECK(frame_encode_varint(&channel_enc, 8, 0) == FRAME_OK);
+
+    frame_encoder_t manifest_enc;
+    frame_encoder_init(&manifest_enc, frame, sizeof(frame), MSG_CONFIG_MFST);
+    CHECK(frame_encode_string(&manifest_enc, 1, "dma-field") == FRAME_OK);
+    CHECK(frame_encode_string(&manifest_enc, 8, "dma-sync") == FRAME_OK);
+    CHECK(frame_encode_bytes(&manifest_enc, 4, channel + 1,
+                             frame_encoder_size(&channel_enc) - 1) == FRAME_OK);
+    CHECK(config_mgr_stage_manifest(frame, frame_encoder_size(&manifest_enc)));
+    const config_manifest_t *staged = config_mgr_get_staged_manifest();
+    CHECK(staged != NULL && staged->channel_count == 1);
+    CHECK(staged->channels[0].dma_enabled_present);
+    CHECK(!config_channel_get_dma_enabled(&staged->channels[0]));
+    config_mgr_discard_staged_manifest();
+
+    config_channel_t legacy = {0};
+    legacy.bus_type = 1;
+    memcpy(legacy.bus_config, uart_config, sizeof(uart_config));
+    legacy.bus_config_len = sizeof(uart_config) + 1;
+    legacy.bus_config[6] = 1;
+    CHECK(config_channel_get_dma_enabled(&legacy));
+    legacy.bus_config[6] = 0;
+    CHECK(!config_channel_get_dma_enabled(&legacy));
+}
+
 int main(void)
 {
     uint8_t frame[128];
@@ -282,6 +317,7 @@ int main(void)
     test_nested_repeated_arrays_reject_overflow();
     test_oversized_runtime_fields_are_rejected();
     test_unknown_fields_are_rejected();
+    test_channel_dma_field_has_legacy_fallback();
     puts("config manifest PWM layout tests passed");
     return 0;
 }

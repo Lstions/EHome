@@ -15,6 +15,11 @@ vi.mock('@/api/monitor', () => ({
         collector: { online: 2, offline: 0 },
         data: { points_collected: 5000, points_stored: 4990 },
         websocket: { connections_active: 4, messages_total: 200 },
+        control: {
+          operations_total: 20, active: 2, queued: 1, succeeded: 15, failed: 2,
+          unknown: 1, unresolved_unknown: 1, cancelled: 0, outbox_pending: 1,
+          outbox_leased: 0, capability_stale_nodes: 1, audit_write_failures: 0,
+        },
       },
     })
   ),
@@ -39,6 +44,7 @@ const stubs = {
   'el-descriptions-item': { template: '<div class="el-desc-item"><slot /></div>' },
   'el-progress': { template: '<div class="el-progress" />' },
   'el-tag': { template: '<span class="el-tag"><slot /></span>' },
+  'el-alert': { props: ['title'], template: '<div class="el-alert">{{ title }}</div>' },
 }
 
 describe('Monitor.vue', () => {
@@ -105,6 +111,15 @@ describe('Monitor.vue', () => {
   it('renders detail panels section', () => {
     const wrapper = mount(Monitor, { global: { stubs } })
     expect(wrapper.find('.detail-panels').exists()).toBe(true)
+  })
+
+  it('shows durable control health and attention counts', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('控制面健康')
+    expect(wrapper.text()).toContain('未处置 UNKNOWN')
+    expect(wrapper.text()).toContain('能力快照过期')
+    expect(wrapper.find('.control-alert').text()).toContain('2 项需要关注')
   })
 
   it('renders HTTP monitoring panel', async () => {

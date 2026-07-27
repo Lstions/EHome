@@ -25,6 +25,7 @@ extern "C" {
 void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb);
 
 void bus_manager_init(bus_runtime_t *rt);
+void bus_manager_snapshot_leases(bus_runtime_t *rt);
 esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt);
 esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt);
 esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t *manifest);
@@ -39,6 +40,9 @@ esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id);
  */
 bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id);
 
+/** Resolve the active physical UART lease for scheduler dispatch. */
+uart_port_t bus_manager_get_uart_port(void *runtime, uint32_t channel_id);
+
 /**
  * @brief Called by msg_handler when a WriteCommand (0x06) is received.
  * Constructs a bus_cmd_t and posts it to the command queue.
@@ -46,7 +50,15 @@ bus_dma_ctx_t *bus_manager_find_ctx(bus_runtime_t *rt, uint32_t channel_id);
 void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t request_id,
                                uint32_t channel_id,
                                const uint8_t *data, size_t len,
-                               uint32_t read_size, uint32_t edge_device_id);
+                               uint32_t read_size, uint32_t edge_device_id,
+                               uint32_t rx_timeout_ms);
+
+bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t channel_id,
+                                   const uint8_t *data, size_t len, uint32_t read_size,
+                                   uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
+                                   const uint8_t *plan_data, size_t plan_len,
+                                   uint8_t plan_step_count,
+                                   uint8_t control_slot);
 
 #ifdef __cplusplus
 }

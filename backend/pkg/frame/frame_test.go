@@ -1,10 +1,29 @@
 package frame
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"testing"
 )
+
+func TestLegacyWriteCmdGoldenVector(t *testing.T) {
+	enc := NewEncoder(MsgWriteCmd)
+	enc.EncodeVarint(1, 17)
+	enc.EncodeVarint(2, 9)
+	enc.EncodeBytes(3, []byte{0x01, 0x03, 0x00, 0x00})
+	enc.EncodeVarint(4, 8)
+	enc.EncodeVarint(5, 33)
+	enc.EncodeVarint(6, 2500)
+
+	want, err := hex.DecodeString("06081110091a04010300002008282130c413")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(enc.Bytes(), want) {
+		t.Fatalf("WriteCmd wire = %x, want %x", enc.Bytes(), want)
+	}
+}
 
 // Test vector from protocol-spec.md §3.2 Hello
 func TestHelloWireFormat(t *testing.T) {
@@ -418,6 +437,28 @@ func TestHelloV26HandshakeNonceRoundTrip(t *testing.T) {
 	}
 	if field.FieldNum != HelloFieldHandshakeNonce || field.WireType != WireVarint || GetUint64(field) != uint64(nonce) {
 		t.Fatalf("nonce field: got %#v, want %d", field, nonce)
+	}
+}
+
+func TestExtendedFieldTagsRoundTrip(t *testing.T) {
+	enc := NewEncoder(MsgStatusRpt)
+	enc.EncodeVarint(18, 42)
+	enc.EncodeBytes(23, []byte("x"))
+	wire := enc.Bytes()
+	if len(wire) < 8 || wire[1] != 0x90 || wire[2] != 0x01 {
+		t.Fatalf("field 18 tag is not canonical: %x", wire)
+	}
+	dec, err := NewDecoder(wire)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	field, err := dec.NextField()
+	if err != nil || field.FieldNum != 18 || GetUint64(field) != 42 {
+		t.Fatalf("field 18 round trip: field=%#v err=%v", field, err)
+	}
+	field, err = dec.NextField()
+	if err != nil || field.FieldNum != 23 || string(GetBytes(field)) != "x" {
+		t.Fatalf("field 23 round trip: field=%#v err=%v", field, err)
 	}
 }
 

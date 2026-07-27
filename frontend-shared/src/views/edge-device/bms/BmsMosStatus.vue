@@ -110,28 +110,4 @@ const balanceOn = computed(() => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
-
-@media (max-width: 768px) {
-  .bms-mos-status {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .mos-item {
-    min-width: 0;
-    gap: 8px;
-    padding: 8px 10px;
-  }
-
-  .mos-info {
-    min-width: 0;
-  }
-
-  .mos-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
 </style>

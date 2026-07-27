@@ -35,12 +35,12 @@ static frame_err_t encoder_ensure_space(frame_encoder_t *enc, size_t needed)
 
 frame_err_t frame_encode_varint(frame_encoder_t *enc, uint8_t field_num, uint64_t value)
 {
-    frame_err_t err = encoder_ensure_space(enc, 1 + 10); /* tag + max varint */
+    uint64_t tag = ((uint64_t)field_num << 3) | WIRE_VARINT;
+    size_t tag_size = frame_varint_size(tag);
+    frame_err_t err = encoder_ensure_space(enc, tag_size + 10); /* tag + max varint */
     if (err != FRAME_OK) return err;
 
-    /* tag = (field_num << 3) | WIRE_VARINT */
-    uint8_t tag = (field_num << 3) | WIRE_VARINT;
-    enc->buf[enc->pos++] = tag;
+    enc->pos += frame_encode_varint_to_buf(&enc->buf[enc->pos], tag);
 
     /* varint value */
     while (value > 0x7F) {
@@ -56,12 +56,12 @@ frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const c
 {
     if (str == NULL) str = "";  /* NULL guard: encode as empty string */
     size_t len = strlen(str);
-    frame_err_t err = encoder_ensure_space(enc, 1 + 5 + len); /* tag + varint(len) + data */
+    uint64_t tag = ((uint64_t)field_num << 3) | WIRE_LENGTH_DELIMITED;
+    size_t tag_size = frame_varint_size(tag);
+    frame_err_t err = encoder_ensure_space(enc, tag_size + 5 + len); /* tag + varint(len) + data */
     if (err != FRAME_OK) return err;
 
-    /* tag = (field_num << 3) | WIRE_LENGTH_DELIMITED */
-    uint8_t tag = (field_num << 3) | WIRE_LENGTH_DELIMITED;
-    enc->buf[enc->pos++] = tag;
+    enc->pos += frame_encode_varint_to_buf(&enc->buf[enc->pos], tag);
 
     /* length as varint */
     size_t len_size = frame_encode_varint_to_buf(&enc->buf[enc->pos], len);
@@ -76,11 +76,12 @@ frame_err_t frame_encode_string(frame_encoder_t *enc, uint8_t field_num, const c
 
 frame_err_t frame_encode_bytes(frame_encoder_t *enc, uint8_t field_num, const uint8_t *data, size_t len)
 {
-    frame_err_t err = encoder_ensure_space(enc, 1 + 5 + len);
+    uint64_t tag = ((uint64_t)field_num << 3) | WIRE_LENGTH_DELIMITED;
+    size_t tag_size = frame_varint_size(tag);
+    frame_err_t err = encoder_ensure_space(enc, tag_size + 5 + len);
     if (err != FRAME_OK) return err;
 
-    uint8_t tag = (field_num << 3) | WIRE_LENGTH_DELIMITED;
-    enc->buf[enc->pos++] = tag;
+    enc->pos += frame_encode_varint_to_buf(&enc->buf[enc->pos], tag);
 
     size_t len_size = frame_encode_varint_to_buf(&enc->buf[enc->pos], len);
     enc->pos += len_size;
@@ -171,7 +172,9 @@ frame_err_t frame_decoder_next(frame_decoder_t *dec, frame_field_t *field)
     frame_err_t err = decoder_read_varint(dec, &tag);
     if (err != FRAME_OK) return err;
 
-    field->field_num = (uint8_t)(tag >> 3);
+    uint64_t raw_field_num = tag >> 3;
+    if (raw_field_num == 0 || raw_field_num > UINT8_MAX) return FRAME_ERR_INVALID_TAG;
+    field->field_num = (uint8_t)raw_field_num;
     field->wire_type = (uint8_t)(tag & 0x07);
 
     switch (field->wire_type) {
@@ -187,12 +190,14 @@ frame_err_t frame_decoder_next(frame_decoder_t *dec, frame_field_t *field)
             err = decoder_read_varint(dec, &len);
             if (err != FRAME_OK) return err;
 
-            err = decoder_ensure_bytes(dec, len);
+            if (len > SIZE_MAX) return FRAME_ERR_OVERFLOW;
+
+            err = decoder_ensure_bytes(dec, (size_t)len);
             if (err != FRAME_OK) return err;
 
             field->value.bytes.ptr = &dec->buf[dec->pos];
-            field->value.bytes.len = len;
-            dec->pos += len;
+            field->value.bytes.len = (size_t)len;
+            dec->pos += (size_t)len;
             break;
         }
         default:

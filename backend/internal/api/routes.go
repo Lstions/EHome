@@ -1,12 +1,17 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
+	authservice "ehome/backend/internal/auth"
+	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
+	redisstore "ehome/backend/internal/redis"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/metrics"
@@ -21,7 +26,18 @@ func nowMillis() int64 {
 }
 
 // SetupRoutes configures all API routes by domain
-func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry) {
+func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry, options ...interface{}) {
+	var controlPolicy ControlPolicy
+	var commandService *commandexec.Service
+	for _, option := range options {
+		switch value := option.(type) {
+		case ControlPolicy:
+			controlPolicy = value
+		case *commandexec.Service:
+			commandService = value
+		}
+	}
+	controlPolicy = resolveControlPolicy(controlPolicy)
 	// Global HTTP metrics middleware
 	r.Use(func(c *gin.Context) {
 		path := c.FullPath()
@@ -37,8 +53,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Auth routes (no JWT required)
-	registerAuthRoutes(r, db)
+	// Login and in-session reauthentication share one limiter, including the
+	// bounded in-memory fallback used when Redis is unavailable.
+	authLimiter := authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute)
+	registerAuthRoutesWithLimiter(r, db, authLimiter)
 
 	// Firmware download — no auth (ESP32 fetches without JWT)
 	RegisterFirmwareDownload(r)
@@ -48,20 +66,26 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuthWithDB(db))
 	{
+		// Phase 1 records actions durably but intentionally has no live
+		// transport. The reviewed ChannelCmdV2 dispatcher is a Phase 2 gate.
+		if commandService == nil {
+			commandService = commandexec.NewService(db, deviceaction.NewBuiltInRegistry(driverRegistry))
+		}
 		v1.GET("/metrics/prometheus", gin.WrapH(promhttp.Handler()))
-		registerAccountRoutes(v1, db)
-		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry)
+		registerAccountRoutesWithLimiter(v1, db, authLimiter)
+		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry, controlPolicy)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, nodeMgr)
 		registerOTARoutesCompat(v1, db, otaMgr, nodeMgr)
 		registerHARoutes(v1)
-		registerTerminalRoutes(v1, db, nodeMgr)
+		registerTerminalRoutes(v1, db, nodeMgr, controlPolicy)
 		registerMetricsRoutes(v1, db)
 
 		// v2.2 routes
 		registerNodeRoutes(v1, db, nodeMgr)
-		registerEdgeDeviceRoutes(v1, db, nodeMgr)
-		registerDriverCommandRoutes(v1, db, nodeMgr)
+		registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry, controlPolicy)
+		registerDeviceOperationRoutes(v1, commandService, wsHub)
+		registerDriverCommandRoutes(v1, db, nodeMgr, driverRegistry)
 
 		// v3.0: GPIO/PWM peripheral control routes
 		registerPeriphRoutes(v1, db, nodeMgr)
@@ -97,9 +121,15 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	termWSHandler := terminal.NewWSHandler(
 		wsHub,
 		func(channelID uint) ([]terminal.Entry, error) {
+			if !controlPolicy.rawWritesEnabled() {
+				return nil, fmt.Errorf("raw terminal diagnostics are disabled")
+			}
 			return nodeMgr.TerminalMgr().GetHistory(channelID, 256), nil
 		},
 		validatedTerminalWriteSender(db, func(deviceID string, channelID uint32, data []byte, readSize uint32) error {
+			if !controlPolicy.rawWritesEnabled() {
+				return fmt.Errorf("raw terminal writes are disabled; use an audited diagnostics service")
+			}
 			return nodeMgr.SendWriteCommand(deviceID, channelID, data, readSize)
 		}),
 	)

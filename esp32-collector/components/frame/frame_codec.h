@@ -57,6 +57,10 @@ typedef enum {
 /* v2.1 sync messages */
 #define MSG_CONFIG_SYNC_REQ  0x13
 #define MSG_CONFIG_SYNC_RSP  0x14
+/* Phase 2: versioned single-step Channel control */
+#define MSG_CHANNEL_CMD_V2       0x15
+#define MSG_CHANNEL_CMD_V2_ACK   0x16
+#define MSG_CHANNEL_CMD_V2_FINAL 0x17
 /* v2.4 resource reporting */
 #define MSG_RESOURCE_REPORT  0x19
 #define MSG_QUERY_RESOURCES  0x1A

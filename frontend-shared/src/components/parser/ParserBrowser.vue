@@ -4,7 +4,7 @@
     title="选择解析器"
     width="720px"
     :close-on-click-modal="true"
-    class="parser-browser-dialog dialog-mobile-constrained"
+    class="parser-browser-dialog"
   >
     <!-- 搜索过滤 -->
     <div class="search-bar">

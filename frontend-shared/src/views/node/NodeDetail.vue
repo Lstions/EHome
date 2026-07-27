@@ -38,7 +38,7 @@
         <span>基本信息</span>
       </template>
 
-      <el-descriptions :column="isMobile ? 1 : 2" border>
+      <el-descriptions :column="2" border>
         <el-descriptions-item label="节点名称">
           <div class="editable-name">
             <span v-if="!editingName">{{ collector.name || '(未命名)' }}</span>
@@ -99,7 +99,7 @@
       <template #header>
         <span>配置同步状态 <el-tag :type="syncStateTagType" size="small">{{ syncStateLabel }}</el-tag></span>
       </template>
-      <el-descriptions :column="isMobile ? 1 : 2" border>
+      <el-descriptions :column="2" border>
         <el-descriptions-item label="协议版本">
           {{ collector.protocol_version || '2.0' }}
         </el-descriptions-item>
@@ -232,9 +232,7 @@
       <el-skeleton v-if="devicesLoading" :rows="4" animated />
       <template v-else>
         <el-empty v-if="devices.length === 0" description="暂无设备" />
-        <div v-else class="mobile-table-wrapper">
-        <p class="mobile-table-hint">左右滑动查看完整设备信息</p>
-        <el-table :data="devices" stripe @row-click="handleDeviceClick" style="cursor: pointer;">
+        <el-table v-else :data="devices" stripe @row-click="handleDeviceClick" style="cursor: pointer;">
           <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip />
           <el-table-column label="类型" width="130">
             <template #default="{ row }">
@@ -282,7 +280,6 @@
             </template>
           </el-table-column>
         </el-table>
-        </div>
       </template>
     </el-card>
 
@@ -301,9 +298,7 @@
       <el-skeleton v-if="otaHistoryLoading" :rows="4" animated />
       <template v-else>
         <el-empty v-if="otaHistory.length === 0" description="暂无升级记录" />
-        <div v-else class="mobile-table-wrapper">
-        <p class="mobile-table-hint">左右滑动查看完整升级记录</p>
-        <el-table :data="otaHistory" stripe>
+        <el-table v-else :data="otaHistory" stripe>
           <el-table-column label="升级版本" width="120">
             <template #default="{ row }">
               {{ row.from_version }} → {{ row.to_version }}
@@ -350,7 +345,6 @@
             </template>
           </el-table-column>
         </el-table>
-        </div>
       </template>
     </el-card>
 
@@ -398,7 +392,6 @@ import { getQualityColor, getLatencyColor } from '@/utils/theme'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
-import { useResponsive } from '@/composables/useResponsive'
 
 const router = useRouter()
 const route = useRoute()
@@ -407,7 +400,6 @@ const dmaStore = useDmaStore()
 const edgeDeviceStore = useEdgeDeviceStore()
 const nodeStore = useNodeStore()
 const userStore = useUserStore()
-const { isMobile } = useResponsive()
 
 const collector = ref<any>(null)
 const devices = ref<any[]>([])

@@ -55,6 +55,13 @@ var allModels = []interface{}{
 	&models.ConfigMeta{},
 	&models.PendingWriteRecord{},
 	&models.NodeLog{},
+	&models.CommandExecution{},
+	&models.CommandAttempt{},
+	&models.CommandOutbox{},
+	&models.CommandInbox{},
+	&models.CommandConfirmation{},
+	&models.CommandManualResolution{},
+	&models.ConfigChangeOutbox{},
 	// v3.0: GPIO/PWM peripheral control models
 	&models.GPIOConfig{},
 	&models.PWMConfig{},
@@ -109,21 +116,46 @@ func openPostgres(t *testing.T) *gorm.DB {
 	pass := envOr("EHOME_DB_PASSWORD", "ehome123")
 	dbname := envOr("EHOME_DB_NAME", "ehome_test")
 
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+	// First connection: create the isolated schema
+	baseDSN := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, pass, dbname)
+
+	base, err := gorm.Open(postgres.Open(baseDSN), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("open postgres (base): %v (dsn: host=%s port=%s user=%s dbname=%s)", err, host, port, user, dbname)
+	}
+
+	schemaName := fmt.Sprintf("test_%s", randomSuffix())
+	if err := base.Exec(fmt.Sprintf("CREATE SCHEMA %s", schemaName)).Error; err != nil {
+		sqlDB, _ := base.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
+		t.Fatalf("create postgres schema %s: %v", schemaName, err)
+	}
+
+	// Close the base connection and reopen with search_path in the DSN so
+	// every connection in the pool resolves unqualified table names correctly.
+	sqlDB, err := base.DB()
+	if err != nil {
+		t.Fatalf("get postgres base connection: %v (schema: %s)", err, schemaName)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close postgres base connection: %v (schema: %s)", err, schemaName)
+	}
+
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable search_path=%s,public",
+		host, port, user, pass, dbname, schemaName)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger:                                   gormlogger.Default.LogMode(gormlogger.Silent),
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
-		t.Fatalf("open postgres: %v (dsn: host=%s port=%s user=%s dbname=%s)", err, host, port, user, dbname)
+		t.Fatalf("open postgres: %v (dsn: host=%s port=%s user=%s dbname=%s schema=%s)", err, host, port, user, dbname, schemaName)
 	}
-
-	// Create an isolated schema per test for parallel safety
-	schemaName := fmt.Sprintf("test_%s", randomSuffix())
-	db.Exec(fmt.Sprintf("CREATE SCHEMA %s", schemaName))
-	db.Exec(fmt.Sprintf("SET search_path TO %s, public", schemaName))
 
 	if err := db.AutoMigrate(allModels...); err != nil {
 		t.Fatalf("postgres automigrate: %v", err)

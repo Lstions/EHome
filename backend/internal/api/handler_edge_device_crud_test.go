@@ -41,10 +41,10 @@ func setupEdgeDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	// Register drivers so createTemplatesFromDriver works in tests
-	drivers.RegisterBuiltInDrivers(drivers.GlobalRegistry())
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
-	registerEdgeDeviceRoutes(v1, db, mgr)
+	registry := drivers.NewRegistry()
+	drivers.RegisterBuiltInDrivers(registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	registerEdgeDeviceRoutes(v1, db, mgr, registry, ControlPolicy{allowUnsafeLegacyForTests: true})
 	return r, db
 }
 
@@ -87,6 +87,31 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 	}
 	if dev.IntervalMs != 3000 {
 		t.Errorf("expected interval_ms 3000, got %d", dev.IntervalMs)
+	}
+}
+
+func TestEdgeDevice_Create_PreservesExplicitZeroInterval(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Rain", DeviceType: "sn3001_rain", HardwareType: "uart", Status: "active"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "No schedule", "node_id": "NODE001", "channel_id": 1,
+		"device_config_id": 1, "enabled": true, "interval_ms": 0,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	db.First(&dev, "name = ?", "No schedule")
+	if dev.IntervalMs != 0 {
+		t.Fatalf("explicit interval_ms=0 was replaced with %d", dev.IntervalMs)
 	}
 }
 
@@ -184,6 +209,31 @@ func TestEdgeDevice_CreateRejectsPeripheralChannelBinding(t *testing.T) {
 				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestEdgeDeviceExecuteReadIsRetiredInFavorOfOperationAPI(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	if err := db.Create(&models.Node{NodeID: "NODE001", Name: "Node 1", Status: "online"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	operations := json.RawMessage(`{"read":{"type":"read","command_template":"010300000002C40B","read_size":9}}`)
+	if err := db.Create(&models.DeviceConfig{Name: "Readable", DeviceType: "test", HardwareType: "uart", Operations: operations}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.EdgeDevice{Name: "Device", Type: "test", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices/1/execute", bytes.NewReader([]byte(`{"operation":"read","params":{}}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusGone {
+		t.Fatalf("expected V2 operation migration response, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -627,7 +677,7 @@ func TestEdgeDevice_Data_WithTimeRange(t *testing.T) {
 	}
 }
 
-func TestEdgeDevice_Operations_Post(t *testing.T) {
+func TestEdgeDevice_Operations_PostIsNotProvidedByLegacyRoutes(t *testing.T) {
 	r, _ := setupEdgeDeviceTest(t)
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -640,12 +690,12 @@ func TestEdgeDevice_Operations_Post(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 without the Phase 1 operation service, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestEdgeDevice_Operations_History(t *testing.T) {
+func TestEdgeDevice_OperationsHistoryIsNotProvidedByLegacyRoutes(t *testing.T) {
 	r, _ := setupEdgeDeviceTest(t)
 
 	w := httptest.NewRecorder()
@@ -653,8 +703,8 @@ func TestEdgeDevice_Operations_History(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 without the Phase 1 operation service, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

@@ -58,8 +58,12 @@ test.describe('认证流程', () => {
     // 登录失败后应显示错误提示 (el-alert type=error)
     await page.waitForSelector('.el-alert--error, .el-message--error', { timeout: 10000 });
 
-    // 仍在登录页
-    expect(page.url()).toContain('/login');
+    // 仍在同一个登录文档中：不得因登录接口自身的 401 强制 reload，
+    // 否则错误提示和输入状态都会被清空，并产生空白/闪白页面。
+    expect(new URL(page.url()).pathname).toBe('/login');
+    await expect(page.locator('.login-box')).toBeVisible();
+    await expect(page.locator('input').first()).toHaveValue('wrong_user');
+    await expect(page.locator('.el-alert--error')).toContainText('用户名或密码错误');
   });
 
   test('登出 → 返回登录页', async ({ page }) => {

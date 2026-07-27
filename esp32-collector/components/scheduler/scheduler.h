@@ -1,9 +1,10 @@
 /**
  * @file scheduler.h
- * @brief Channel Scheduler - periodic sampling via unified command queue
+ * @brief Channel Scheduler - periodic sampling via per-controller queues
  *
  * The scheduler is a pure timer.  All bus transactions (UART/SPI/I2C) are
- * dispatched through the shared command queue consumed by the bus worker.
+ * dispatched through the active controller's independent command queue; the
+ * worker selected by the dynamic lease performs the transaction.
  *
  * v2.3: supports per-edge-device per-command independent timing.
  * When a channel has edge_devices, the scheduler walks a three-level loop
@@ -19,7 +20,15 @@
 #include <stddef.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "driver/uart.h"
 #include "config_mgr.h"
+
+/* ESP-IDF omits UART_NUM_2 on targets that expose only HP UART0/1 (for
+ * example C6's third UART is LP-only).  Keep the dynamic route value
+ * representable; the hardware planner still rejects unavailable resources. */
+#ifndef UART_NUM_2
+#define UART_NUM_2 ((uart_port_t)2)
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -78,11 +87,20 @@ typedef struct {
 } sched_channel_t;
 
 /* === Per-bus queue set (injected by caller, avoids app_state_t coupling) === */
+/* The scheduler asks the active runtime lease for the physical UART.  The
+ * fallback remains pin-derived for compatibility with callers that do not
+ * provide a route callback. */
+typedef uart_port_t (*scheduler_uart_route_fn)(void *route_ctx,
+                                               uint32_t channel_id);
+
 typedef struct {
     QueueHandle_t uart0_cmd_queue;
     QueueHandle_t uart1_cmd_queue;
+    QueueHandle_t uart2_cmd_queue;
     QueueHandle_t spi_cmd_queue;
     QueueHandle_t i2c_cmd_queue;
+    scheduler_uart_route_fn uart_route;
+    void *route_ctx;
 } scheduler_queues_t;
 
 /* === Public API === */
@@ -120,6 +138,24 @@ const scheduler_state_t *scheduler_get_state(void);
 /* === Performance tracking === */
 void scheduler_notify_channel_error(uint32_t channel_id);
 void scheduler_notify_channel_success(uint32_t channel_id);
+
+/* Bounded runtime observability for performance gates.  All values are
+ * measured since boot/config start; zero means the corresponding task has not
+ * been created yet. */
+typedef struct {
+    uint32_t min_queue_spaces;
+    uint32_t stack_high_water_words;
+} scheduler_performance_t;
+void scheduler_get_performance(scheduler_performance_t *out);
+
+#define SCHED_QUEUE_METRIC_COUNT 5
+typedef struct {
+    uint32_t current_spaces[SCHED_QUEUE_METRIC_COUNT];
+    uint32_t high_water_used[SCHED_QUEUE_METRIC_COUNT];
+    uint32_t sample_skipped[SCHED_QUEUE_METRIC_COUNT];
+    uint32_t sample_rejected[SCHED_QUEUE_METRIC_COUNT];
+} scheduler_queue_metrics_t;
+void scheduler_get_queue_metrics(scheduler_queue_metrics_t *out);
 
 #ifdef __cplusplus
 }

@@ -28,6 +28,7 @@ void msg_handler_deinit(void);
 /* === HelloAck state === */
 bool msg_handler_is_hello_ack_received(void);
 uint64_t msg_handler_get_server_time(void);
+uint64_t msg_handler_get_current_server_time_ms(void);
 void msg_handler_reset_hello_ack(void);
 
 /* === Message processing === */

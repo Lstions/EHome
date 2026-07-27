@@ -74,6 +74,8 @@ services:
       # CORS origin allowlist (comma-separated). Empty = same-origin only (no CORS middleware).
       # Only needed when the frontend is served from a different origin than the backend.
       EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
+      EHOME_DEVICE_CONTROL_V2_ENABLED: ${EHOME_DEVICE_CONTROL_V2_ENABLED:-false}
+      EHOME_ENABLED_DEVICE_ACTIONS: ${EHOME_ENABLED_DEVICE_ACTIONS:-}
       EHOME_STATIC_DIR: /app/static/dist
     volumes:
       - ./backend/firmwares:/app/firmwares

@@ -56,6 +56,11 @@ typedef struct {
     uint8_t  template_count;
     uint32_t interval_ms;
     bool     enabled;
+    /* P0: field-8 DMA preference.  Presence is tracked so old manifests can
+     * still fall back to bus_config flags without confusing missing with
+     * explicit false. */
+    bool     dma_enabled;
+    bool     dma_enabled_present;
     uint8_t  bus_type;    // 1=UART, 2=I2C, 3=SPI, 5=ADC (4=legacy GPIO, rejected)
     uint8_t  bus_config[128];
     size_t   bus_config_len;
@@ -63,6 +68,25 @@ typedef struct {
     config_edge_device_t edge_devices[MAX_EDGE_DEVICES_PER_CH];
     uint8_t  edge_device_count;
 } config_channel_t;
+
+/** Resolve DMA preference with field-8/legacy bus_config compatibility. */
+static inline bool config_channel_get_dma_enabled(const config_channel_t *channel)
+{
+    if (!channel) return false;
+    if (channel->dma_enabled_present) return channel->dma_enabled;
+
+    size_t flags_offset = 0;
+    size_t min_len = 0;
+    switch (channel->bus_type) {
+    case 1: flags_offset = 6; min_len = 7; break;
+    case 2: flags_offset = 7; min_len = 8; break;
+    case 3: flags_offset = 6; min_len = 7; break;
+    default: return false;
+    }
+    if (channel->bus_config_len >= min_len)
+        return (channel->bus_config[flags_offset] & 0x01U) != 0;
+    return true;
+}
 
 /* === DMA Channel Config (persisted with manifest) === */
 typedef struct {

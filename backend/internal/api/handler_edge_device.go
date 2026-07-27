@@ -31,8 +31,8 @@ var executeLimiter = make(chan struct{}, 20)
 
 // driver creates ConfigTemplates from the device driver's CommandTemplates (single source of truth).
 // Falls back to getTemplateParamsFromDeviceConfig for legacy devices without a driver.
-func createTemplatesFromDriver(tx *gorm.DB, ch *models.Channel, dev *models.EdgeDevice) error {
-	drv, err := drivers.Get(dev.Type)
+func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
+	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
 		// No driver registered — try legacy DeviceConfig-based fallback
 		if dev.DeviceConfigID > 0 {
@@ -86,7 +86,7 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, rea
 	).Error; err != nil {
 		return err
 	}
-	logger.Infof("[edge-device-create] ConfigTemplate id=%d write_data=%s channel=%d", tmpl.ID, writeData, ch.ID)
+	logger.Infof("[edge-device-create] ConfigTemplate id=%d tx_hex_chars=%d channel=%d", tmpl.ID, len(writeData), ch.ID)
 	return nil
 }
 
@@ -186,7 +186,9 @@ func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *m
 }
 
 // registerEdgeDeviceRoutes sets up edge-device CRUD routes
-func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry, policies ...ControlPolicy) {
+	driverRegistry = resolveDriverRegistry(driverRegistry)
+	controlPolicy := resolveControlPolicy(policies...)
 	eventBus := nodeMgr.EventBus()
 
 	// List edge devices (v2.2 path for /devices)
@@ -316,11 +318,20 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
 			}
+			// An explicit zero interval means "do not schedule".  The model has a
+			// historical database default of 5000, which GORM otherwise substitutes
+			// for a zero value during INSERT.
+			if dto.IntervalMs != nil && *dto.IntervalMs == 0 {
+				if err := tx.Model(&dev).UpdateColumn("interval_ms", 0).Error; err != nil {
+					return err
+				}
+				dev.IntervalMs = 0
+			}
 
 			// Step 2: Create ConfigTemplates from driver's CommandTemplates (single source of truth)
 			var ch models.Channel
 			if err := tx.First(&ch, dev.ChannelID).Error; err == nil {
-				if err := createTemplatesFromDriver(tx, &ch, &dev); err != nil {
+				if err := createTemplatesFromDriver(tx, driverRegistry, &ch, &dev); err != nil {
 					logger.Warnf("[edge-device-create] Failed to create ConfigTemplates: %v", err)
 					return err
 				}
@@ -547,29 +558,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"items": data, "total": total}})
 	})
 
-	// POST /api/v1/edge-devices/:id/operations
-	e.POST("/:id/operations", func(c *gin.Context) {
-		id, _ := strconv.Atoi(c.Param("id"))
-		var req struct {
-			Operation string                 `json:"operation"`
-			Params    map[string]interface{} `json:"params"`
-		}
-		c.ShouldBindJSON(&req)
-		// NOTE: requires MQTT device gateway integration
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
-			"device_id": id, "operation": req.Operation, "status": "pending",
-		}})
-	})
-
-	// GET /api/v1/edge-devices/:id/operations/history
-	e.GET("/:id/operations/history", func(c *gin.Context) {
-		_, _ = strconv.Atoi(c.Param("id"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-		_ = limit // reserved for future MQTT event pipeline integration
-		// NOTE: operation_logs table populated by MQTT event pipeline
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []interface{}{}})
-	})
-
 	// POST /api/v1/edge-devices/:id/execute — execute a device operation
 	// Uses DeviceConfig.Operations JSONB for operation definitions with template engine + CRC
 	e.POST("/:id/execute", func(c *gin.Context) {
@@ -636,6 +624,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 
 		opType := opConfig.Type
+		if opType == "write" && !controlPolicy.legacyWritesEnabled() {
+			Error(c, http.StatusGone, "legacy device writes are disabled; migrate this operation to a trusted device action")
+			return
+		}
+		// Phase 2 has a durable ChannelCmdV2 read path. Keeping even the old
+		// read branch reachable in production would let callers bypass
+		// CommandExecution, Outbox/Inbox, capability freshness and the timeline.
+		if !controlPolicy.legacyReadBridgeEnabled() {
+			Error(c, http.StatusGone, "legacy execute is retired; use the trusted device operation API")
+			return
+		}
 
 		// 8.1: Track concurrent executions
 		metrics.ExecuteConcurrentActive.Inc()
@@ -645,21 +644,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// 3. Resolve current address from EdgeDevice
 		addr := parseHardwareIDUint(edge.HardwareID)
 
-		// Also try to get address from DeviceConfig.Connection
-		if addr == 0 && edge.DeviceConfig.Connection != nil {
-			var conn map[string]interface{}
-			if err := json.Unmarshal(edge.DeviceConfig.Connection, &conn); err == nil {
-				if dp, ok := conn["default_params"].(map[string]interface{}); ok {
-					if a, ok := dp["address"]; ok {
-						if v, err := toUint64(a); err == nil {
-							addr = v
-						}
-					}
-				}
-			}
-		}
-
-		// Default to Modbus slave address 1 if not resolved from hardware_id or connection
+		// DeviceConfig is shared by multiple EdgeDevice instances in the
+		// multi-bus model, so its connection defaults must never supply an
+		// instance address. Default to Modbus slave address 1 only when this
+		// EdgeDevice has no instance address yet.
 		if addr == 0 {
 			addr = 1
 		}
@@ -683,7 +671,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		deviceID := node.NodeID
 
-		logger.Infof("[execute] edge=%d op=%s type=%s addr=%d data_hex=%x", edge.ID, req.Operation, opConfig.Type, addr, writeData)
+		logger.Infof("[execute] edge=%d op=%s type=%s addr=%d tx_bytes=%d", edge.ID, req.Operation, opConfig.Type, addr, len(writeData))
 
 		// 5. Execute based on type
 		switch opConfig.Type {
@@ -700,8 +688,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				logger.Warnf("[execute] post_action failed for edge=%d op=%s: %v", edge.ID, req.Operation, err)
 			}
 
-			// Trigger config sync
-			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, edge.NodeID, fmt.Sprint(edge.ID))
+			// Trigger config sync against the entity that owns the changed value.
+			// In multi-bus mode baud belongs to Channel; address belongs to the
+			// individual EdgeDevice instance.
+			changeType, entityID := legacyPostActionConfigChange(edge, opConfig.PostAction)
+			nodemgr.EmitConfigChange(c, eventBus, changeType, nodemgr.CfgActionUpdate, edge.NodeID, entityID)
 
 			// P2-4: Verify write by executing a read operation
 			var verifyResult interface{}
@@ -753,7 +744,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			result := gin.H{
 				"status":    "sent",
 				"operation": req.Operation,
-				"data_hex":  fmt.Sprintf("%x", writeData),
 			}
 			if verifyResult != nil {
 				result["verify_value"] = verifyResult
@@ -794,8 +784,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				readSize = 9 // default Modbus response size
 			}
 
-			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v dataHex=%x",
-				req.Operation, deviceID, edge.ChannelID, readSize, timeout, writeData)
+			logger.Infof("[execute] read op=%s deviceID=%s ch=%d readSize=%d timeout=%v tx_bytes=%d",
+				req.Operation, deviceID, edge.ChannelID, readSize, timeout, len(writeData))
 
 			// 8.1: Track read operation latency
 			readStart := time.Now()
@@ -827,7 +817,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			result := gin.H{
 				"status":    "ok",
 				"operation": req.Operation,
-				"data_hex":  fmt.Sprintf("%x", writeData),
 			}
 
 			if opConfig.ResponseParser != "" && len(resp.RawData) > 0 {
@@ -869,6 +858,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// This endpoint is kept for backward compatibility and will be removed in a future version.
 	// POST /api/v1/edge-devices/:id/change-address — modify edge device address
 	e.POST("/:id/change-address", func(c *gin.Context) {
+		if !controlPolicy.legacyWritesEnabled() {
+			Error(c, http.StatusGone, "legacy address changes are disabled; migrate to a verified device action")
+			return
+		}
+
 		id := c.Param("id")
 
 		var req struct {
@@ -1032,8 +1026,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 					if oldAddr > 0 && (len(writeData) == 0 || writeData[0] == 0 || writeData[0] == newAddr) {
 						writeData = append([]byte{oldAddr}, writeData...)
 					}
-					logger.Infof("[change-address] Using DeviceConfig template for edge=%d, old=%d→new=%d, hex=%x",
-						edge.ID, oldAddr, newAddr, writeData)
+					logger.Infof("[change-address] Using DeviceConfig template for edge=%d, old=%d→new=%d, tx_bytes=%d",
+						edge.ID, oldAddr, newAddr, len(writeData))
 				} else {
 					Error(c, http.StatusBadRequest, "该设备型号不支持地址修改（DeviceConfig 未定义 change_address_command 模板）")
 					return
@@ -1074,42 +1068,20 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, params map[string]interface{}) error {
 	switch postAction {
 	case "update_connection_address":
-		// Update EdgeDevice.HardwareID and DeviceConfig.Connection.address atomically
+		// Address is instance-owned. Never write it into the shared DeviceConfig.
 		newAddr, ok := params["new_addr"]
 		if !ok {
 			return fmt.Errorf("new_addr param required for update_connection_address")
 		}
-		newAddrStr := fmt.Sprintf("%v", newAddr)
+		newAddrValue, err := toUint64(newAddr)
+		if err != nil || newAddrValue < 1 || newAddrValue > 254 {
+			return fmt.Errorf("unsupported address %v", newAddr)
+		}
+		newAddrStr := strconv.FormatUint(newAddrValue, 10)
 
-		err := db.Transaction(func(tx *gorm.DB) error {
-			// Update EdgeDevice.HardwareID
-			if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", edge.ID).Update("hardware_id", newAddrStr).Error; err != nil {
+		err = db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.EdgeDevice{}).Where("id = ? AND node_id = ?", edge.ID, edge.NodeID).Update("hardware_id", newAddrStr).Error; err != nil {
 				return fmt.Errorf("failed to update hardware_id: %w", err)
-			}
-
-			// Update DeviceConfig.Connection.address
-			var dc models.DeviceConfig
-			if err := tx.First(&dc, edge.DeviceConfigID).Error; err != nil {
-				return fmt.Errorf("failed to load device config: %w", err)
-			}
-			var conn map[string]interface{}
-			if dc.Connection != nil {
-				if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-					return fmt.Errorf("failed to parse connection JSON: %w", err)
-				}
-			} else {
-				conn = make(map[string]interface{})
-			}
-			// Update address in default_params
-			dp, ok := conn["default_params"].(map[string]interface{})
-			if !ok {
-				dp = make(map[string]interface{})
-			}
-			dp["address"] = newAddr
-			conn["default_params"] = dp
-			connJSON, _ := json.Marshal(conn)
-			if err := tx.Model(&models.DeviceConfig{}).Where("id = ?", dc.ID).Update("connection", connJSON).Error; err != nil {
-				return fmt.Errorf("failed to update connection: %w", err)
 			}
 			return nil
 		})
@@ -1120,33 +1092,30 @@ func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, p
 		logger.Infof("[execute] post_action update_connection_address: edge=%d new_addr=%v", edge.ID, newAddr)
 
 	case "update_connection_baud":
-		// Update DeviceConfig.Connection.baud_rate
+		// Baud rate belongs to the physical Channel, not the shared device model.
 		newBaud, ok := params["new_baud"]
 		if !ok {
 			return fmt.Errorf("new_baud param required for update_connection_baud")
 		}
 
-		var dc models.DeviceConfig
-		if err := db.First(&dc, edge.DeviceConfigID).Error; err != nil {
-			return fmt.Errorf("failed to load device config: %w", err)
+		baud := strings.TrimSpace(fmt.Sprint(newBaud))
+		if baud != "2400" && baud != "4800" && baud != "9600" {
+			return fmt.Errorf("unsupported baud rate %q", baud)
 		}
-		var conn map[string]interface{}
-		if dc.Connection != nil {
-			if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-				return fmt.Errorf("failed to parse connection JSON: %w", err)
-			}
-		} else {
-			conn = make(map[string]interface{})
+		var channel models.Channel
+		if err := db.Where("id = ? AND node_id = ?", edge.ChannelID, edge.NodeID).First(&channel).Error; err != nil {
+			return fmt.Errorf("failed to load channel: %w", err)
 		}
-		dp, ok := conn["default_params"].(map[string]interface{})
-		if !ok {
-			dp = make(map[string]interface{})
+		text := strings.TrimSpace(channel.BusConfig)
+		text = strings.TrimPrefix(strings.TrimPrefix(text, "\\x"), "0x")
+		data, err := hex.DecodeString(text)
+		if err != nil || len(data) < 6 {
+			return fmt.Errorf("channel %d has malformed UART bus_config", channel.ID)
 		}
-		dp["baud_rate"] = newBaud
-		conn["default_params"] = dp
-		connJSON, _ := json.Marshal(conn)
-		if err := db.Model(&dc).Update("connection", connJSON).Error; err != nil {
-			return fmt.Errorf("failed to update connection: %w", err)
+		target, _ := strconv.ParseUint(baud, 10, 32)
+		data[2], data[3], data[4], data[5] = byte(target>>24), byte(target>>16), byte(target>>8), byte(target)
+		if err := db.Model(&models.Channel{}).Where("id = ? AND node_id = ?", channel.ID, channel.NodeID).Update("bus_config", strings.ToUpper(hex.EncodeToString(data))).Error; err != nil {
+			return fmt.Errorf("failed to update channel bus_config: %w", err)
 		}
 
 		logger.Infof("[execute] post_action update_connection_baud: edge=%d new_baud=%v", edge.ID, newBaud)
@@ -1159,4 +1128,11 @@ func executePostAction(db *gorm.DB, edge models.EdgeDevice, postAction string, p
 	}
 
 	return nil
+}
+
+func legacyPostActionConfigChange(edge models.EdgeDevice, postAction string) (nodemgr.ConfigChangeType, string) {
+	if postAction == "update_connection_baud" {
+		return nodemgr.CfgChangeChannel, fmt.Sprint(edge.ChannelID)
+	}
+	return nodemgr.CfgChangeEdgeDevice, fmt.Sprint(edge.ID)
 }

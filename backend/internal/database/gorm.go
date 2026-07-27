@@ -76,6 +76,15 @@ func AutoMigrate() error {
 		&models.ConfigMeta{},         // v2.1: epoch persistence
 		&models.PendingWriteRecord{}, // P3-4: pending write persistence
 		&models.NodeLog{},            // v2.5: remote ESP32 system-log history
+		// Phase 1: durable device-action control domain. These are additive
+		// tables; no legacy operation history is rewritten during migration.
+		&models.CommandExecution{},
+		&models.CommandAttempt{},
+		&models.CommandOutbox{},
+		&models.CommandInbox{},
+		&models.CommandConfirmation{},
+		&models.CommandManualResolution{},
+		&models.ConfigChangeOutbox{},
 
 		// v3.0: GPIO/PWM peripheral control models
 		&models.GPIOConfig{},

@@ -16,7 +16,7 @@
       end-placeholder="结束时间"
       format="YYYY-MM-DD HH:mm"
       value-format="YYYY-MM-DD HH:mm:ss"
-      class="custom-date-picker"
+      style="margin-left: 10px; width: 340px;"
       @change="emit('change')"
     />
   </div>
@@ -55,26 +55,5 @@ const handleChange = () => {
 .time-range-selector {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  min-width: 0;
-}
-
-.custom-date-picker {
-  width: 340px;
-}
-
-@media (max-width: 480px) {
-  .time-range-selector :deep(.el-radio-group) {
-    display: flex;
-    flex-wrap: wrap;
-    width: 100%;
-  }
-  .time-range-selector :deep(.el-radio-button) {
-    flex: 1 1 auto;
-  }
-  .custom-date-picker {
-    width: 100% !important;
-  }
 }
 </style>

@@ -33,14 +33,14 @@ describe('validateUsername', () => {
 // ── validatePassword ────────────────────────────
 
 describe('validatePassword', () => {
-  it('accepts password >= 8 chars', () => {
-    expect(validatePassword('12345678')).toBe(true)
+  it('accepts password >= 6 chars', () => {
+    expect(validatePassword('abc123')).toBe(true)
     expect(validatePassword('password')).toBe(true)
   })
 
-  it('rejects password < 8 chars', () => {
+  it('rejects password < 6 chars', () => {
     expect(validatePassword('abc')).toBe(false)
-    expect(validatePassword('1234567')).toBe(false)
+    expect(validatePassword('12345')).toBe(false)
     expect(validatePassword('')).toBe(false)
   })
 

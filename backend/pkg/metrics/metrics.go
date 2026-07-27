@@ -218,4 +218,59 @@ var (
 		Name: "ehome_log_event_bus_dropped_total",
 		Help: "LogEventBus batches dropped under backpressure",
 	}, []string{"stage", "consumer"})
+
+	// DeviceActionCreatedTotal deliberately uses a bounded result label rather
+	// than action, node, command, or parameter identifiers.
+	DeviceActionCreatedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_created_total",
+		Help: "Durable device action creation results",
+	}, []string{"result"})
+
+	DeviceActionAdmissionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_admission_total",
+		Help: "Device action admission requests by bounded result",
+	}, []string{"result"})
+
+	DeviceActionTransitionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_transitions_total",
+		Help: "Durable device action state transitions",
+	}, []string{"status"})
+
+	DeviceActionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_device_action_duration_seconds",
+		Help:    "Duration from durable creation to a terminal action state",
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+	})
+
+	DeviceActionQueueDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_device_action_queue_duration_seconds",
+		Help:    "Duration from durable creation until MQTT publication",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
+	})
+
+	DeviceActionAcceptDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "ehome_device_action_accept_duration_seconds",
+		Help:    "Duration from MQTT publication until collector acceptance",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
+	})
+
+	DeviceActionDispatchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_dispatch_total",
+		Help: "Outbox dispatch results",
+	}, []string{"result"})
+
+	DeviceActionManualResolutionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_action_manual_resolution_total",
+		Help: "Manual resolution results for UNKNOWN device actions",
+	}, []string{"result", "outcome"})
+
+	DeviceActionCapabilityStaleTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_device_action_capability_stale_total",
+		Help: "Action catalog responses rejected by a stale ResourceReport",
+	})
+
+	SecurityAuditWriteFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_security_audit_write_failures_total",
+		Help: "Security audit events that failed validation, encoding, or persistence",
+	})
 )

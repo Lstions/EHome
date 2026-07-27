@@ -4,7 +4,10 @@ import (
 	"testing"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/metrics"
 	"ehome/backend/testutil"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestWriterPersistsControlledAuditEvent(t *testing.T) {
@@ -38,10 +41,23 @@ func TestWriterPersistsControlledAuditEvent(t *testing.T) {
 func TestWriterRejectsSensitiveMetadataKeys(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	writer := NewWriter(db)
+	before := auditFailureMetricValue(t)
 	for _, key := range []string{"password", "token", "authorization", "secret"} {
 		err := writer.Write(Event{ActorType: "system", EventName: "test", Result: "failure", Metadata: map[string]interface{}{key: "leak"}})
 		if err == nil {
 			t.Fatalf("sensitive key %q should be rejected", key)
 		}
 	}
+	if delta := auditFailureMetricValue(t) - before; delta != 4 {
+		t.Fatalf("audit failure metric delta=%v", delta)
+	}
+}
+
+func auditFailureMetricValue(t *testing.T) float64 {
+	t.Helper()
+	var metric dto.Metric
+	if err := metrics.SecurityAuditWriteFailuresTotal.Write(&metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetCounter().GetValue()
 }

@@ -72,7 +72,7 @@ const mpptChannels = computed<MpptChannel[]>(() => {
 
 <style scoped>
 .mppt-cards { display: flex; gap: 16px; flex-wrap: wrap; }
-.mppt-card { min-width: 200px; flex: 1 1 200px; }
+.mppt-card { min-width: 200px; flex: 1; }
 .mppt-card.offline { opacity: 0.6; }
 .mppt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .mppt-title { font-weight: 600; font-size: 14px; }
@@ -81,10 +81,4 @@ const mpptChannels = computed<MpptChannel[]>(() => {
 .mppt-label { font-size: 12px; color: var(--el-text-color-secondary); }
 .mppt-value { font-size: 14px; font-weight: 500; }
 .mppt-value.power { color: var(--el-color-success); font-size: 16px; }
-
-@media (max-width: 480px) {
-  .mppt-cards { gap: 10px; }
-  .mppt-card { min-width: 0; flex-basis: 100%; }
-  .mppt-card :deep(.el-card__body) { padding: 14px; }
-}
 </style>

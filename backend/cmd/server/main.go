@@ -12,9 +12,12 @@ import (
 
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
+	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
@@ -25,7 +28,6 @@ import (
 	"ehome/backend/internal/seed"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
-	"encoding/hex"
 	"encoding/json"
 
 	"github.com/gin-contrib/cors"
@@ -104,7 +106,6 @@ func main() {
 	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
-	drivers.RegisterBuiltInDriversWithParsers(drivers.GlobalRegistry(), parserConfigs)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
 	wsHub := websocket.NewHub()
@@ -127,38 +128,33 @@ func main() {
 	haIntegration := homeassistant.NewIntegration(mqttClient)
 	otaMgr := ota.NewManager(db, mqttClient, wsHub)
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
-	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr)
+	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
+	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
+	for _, selector := range cfg.ControlConfig().EnabledDeviceActions {
+		parts := strings.SplitN(selector, "/", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			logger.Warnf("Ignoring invalid device action rollout selector %q; expected device_type/action_id", selector)
+			continue
+		}
+		if err := actionRegistry.SetEnabled(parts[0], parts[1], true); err != nil {
+			logger.Warnf("Ignoring unavailable device action rollout selector %q: %v", selector, err)
+			continue
+		}
+		logger.Infof("Enabled device action rollout: %s", selector)
+	}
+	commandService := commandexec.NewService(db, actionRegistry)
+	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)
+	nodeMgr.SetCommandExecutionService(commandService)
 	go nodeMgr.Start()
 
 	wsHub.SetOnMessage(func(client *websocket.Client, evt websocket.Event) {
 		if evt.Type == "send" {
-			if !client.SessionValid() {
-				logger.Warnf("[WS] Rejecting send command: unauthenticated client")
-				return
-			}
-			payload, err := json.Marshal(evt.Payload)
-			if err != nil {
-				logger.Warnf("[WS] Failed to marshal send payload: %v", err)
-				return
-			}
-			var p struct {
-				DeviceID  string `json:"device_id"`
-				ChannelID uint32 `json:"channel_id"`
-				DataHex   string `json:"data_hex"`
-				ReadSize  uint32 `json:"read_size"`
-			}
-			if err := json.Unmarshal(payload, &p); err == nil && p.DeviceID != "" && p.DataHex != "" {
-				data, err := hex.DecodeString(p.DataHex)
-				if err != nil {
-					logger.Warnf("[WS] Invalid hex in terminal send: %v", err)
-					return
-				}
-				if err := nodeMgr.SendWriteCommand(p.DeviceID, p.ChannelID, data, p.ReadSize); err != nil {
-					logger.Warnf("[WS] SendWriteCommand failed: %v", err)
-				} else {
-					logger.Infof("[WS] Terminal send via WS: subject=%d device=%s ch=%d data=%s read=%d", client.SubjectID, p.DeviceID, p.ChannelID, p.DataHex, p.ReadSize)
-				}
-			}
+			// Generic WebSocket events must never be a raw WriteCmd transport.
+			// The former handler bypassed REST diagnostics gating, audit and the
+			// CommandExecution control domain. Raw diagnostics have no audited
+			// implementation yet, so reject rather than preserving a second
+			// physical-TX path.
+			logger.Warnf("[WS] Rejecting retired raw send event for subject=%d", client.SubjectID)
 		}
 	})
 
@@ -170,6 +166,15 @@ func main() {
 			logger.Errorf("MQTT supervisor stopped: %v", err)
 		}
 	}()
+	if cfg.ControlConfig().DeviceControlV2Enabled {
+		dispatcherOwner := commandexec.NewDispatcherOwner("server")
+		dispatcher := commandexec.NewDispatcher(db,
+			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry), dispatcherOwner)
+		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
+		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)
+	} else {
+		logger.Infof("ChannelCmdV2 dispatcher disabled by configuration")
+	}
 
 	// v2.1: push only after a real CONNECT+SUBACK, never after an arbitrary sleep.
 	go func() {
@@ -225,7 +230,11 @@ func main() {
 			MaxAge:           12 * time.Hour,
 		}))
 	}
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry)
+	controlCfg := cfg.ControlConfig()
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, api.ControlPolicy{
+		LegacyDeviceWriteMode: controlCfg.LegacyDeviceWriteMode,
+		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
+	})
 
 	staticDir := os.Getenv("EHOME_STATIC_DIR")
 	if staticDir != "" {
@@ -302,4 +311,27 @@ func loadDeviceConfigParsers(db *gorm.DB) map[string]json.RawMessage {
 		}
 	}
 	return configs
+}
+
+func runCommandDispatcher(ctx context.Context, dispatcher *commandexec.Dispatcher, service *commandexec.Service, wsHub *websocket.Hub) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := dispatcher.ProcessOnce(ctx); err != nil {
+				logger.Errorf("ChannelCmdV2 dispatch failed: %v", err)
+			}
+			expired, err := service.RecoverExpired(ctx)
+			if err != nil {
+				logger.Errorf("ChannelCmdV2 recovery failed: %v", err)
+			} else if wsHub != nil {
+				for _, execution := range expired {
+					wsHub.BroadcastAuthenticatedEvent(events.DeviceOperationUpdate, execution)
+				}
+			}
+		}
+	}
 }

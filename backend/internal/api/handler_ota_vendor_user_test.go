@@ -3,10 +3,14 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
@@ -558,7 +562,8 @@ func setupMetricsTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	}
 	db.AutoMigrate(
 		&models.Node{}, &models.EdgeDevice{}, &models.UnifiedData{},
-		&models.OTATask{}, &models.User{},
+		&models.OTATask{}, &models.User{}, &models.CommandExecution{},
+		&models.CommandOutbox{}, &models.CommandManualResolution{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -615,6 +620,68 @@ func TestMetrics_Summary_WithData(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestMetricsSummaryIncludesDurableControlHealth(t *testing.T) {
+	r, db := setupMetricsTest(t)
+	now := time.Now().UTC()
+	fresh := now.Add(-time.Minute)
+	stale := now.Add(-commandexec.MaxCapabilityAge - time.Second)
+	for _, node := range []models.Node{
+		{NodeID: "fresh-control", Name: "Fresh", Status: "online", ResourceReportedAt: &fresh},
+		{NodeID: "stale-control", Name: "Stale", Status: "online", ResourceReportedAt: &stale},
+		{NodeID: "missing-control", Name: "Missing", Status: "online"},
+		{NodeID: "offline-control", Name: "Offline", Status: "offline"},
+	} {
+		if err := db.Create(&node).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	statuses := []string{
+		commandexec.StatusQueued, commandexec.StatusDispatched, commandexec.StatusSucceeded,
+		commandexec.StatusFailed, commandexec.StatusUnknown, commandexec.StatusUnknown, commandexec.StatusCancelled,
+	}
+	for i, status := range statuses {
+		commandID := fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1)
+		execution := models.CommandExecution{
+			CommandID: commandID, EdgeDeviceID: 1, NodeID: "fresh-control", DeviceType: "test", DeviceConfigID: 1, ChannelID: 1,
+			ManifestID: "manifest", ActionID: "read", ActionVersion: 1, CommandEngineRevision: 1, ActorUserID: 1,
+			IdempotencyScope: fmt.Sprintf("metrics-scope-%d", i), IdempotencyKey: fmt.Sprintf("metrics-key-%d", i),
+			RequestHash: strings.Repeat("a", 64), ParamsJSON: "{}", Status: status, DeadlineAt: now.Add(time.Minute), CreatedAt: now,
+		}
+		if err := db.Create(&execution).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&models.CommandManualResolution{CommandID: "00000000-0000-4000-8000-000000000005", Outcome: commandexec.ResolutionAcknowledgedUnknown, Reason: "reviewed", ResolvedBy: 1, ResolvedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i, state := range []string{"PENDING", "LEASED", "PROCESSED"} {
+		if err := db.Create(&models.CommandOutbox{CommandID: fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1), EventType: "command.dispatch", PayloadJSON: "{}", State: state, CreatedAt: now}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/metrics/summary", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data MetricsResponse `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	control := response.Data.Control
+	if control.OperationsTotal != 7 || control.Active != 2 || control.Queued != 1 || control.Succeeded != 1 || control.Failed != 1 || control.Unknown != 2 || control.UnresolvedUnknown != 1 || control.Cancelled != 1 {
+		t.Fatalf("control status summary=%+v", control)
+	}
+	if control.OutboxPending != 1 || control.OutboxLeased != 1 || control.CapabilityStaleNodes != 2 {
+		t.Fatalf("control health summary=%+v", control)
 	}
 }
 

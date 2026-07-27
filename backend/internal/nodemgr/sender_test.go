@@ -162,7 +162,7 @@ func TestSender_SendWriteCommand(t *testing.T) {
 
 	// Decode frame: field 1=request_id, field 2=channelID, field 3=data, field 4=readSize
 	dec, _ := frame.NewDecoder(rec.payload)
-	var channelID, readSize uint64
+	var requestID, channelID, readSize uint64
 	var cmdData []byte
 	for {
 		field, err := dec.NextField()
@@ -170,6 +170,8 @@ func TestSender_SendWriteCommand(t *testing.T) {
 			break
 		}
 		switch field.FieldNum {
+		case 1:
+			requestID = frame.GetUint64(field)
 		case 2:
 			channelID = frame.GetUint64(field)
 		case 3:
@@ -177,6 +179,9 @@ func TestSender_SendWriteCommand(t *testing.T) {
 		case 4:
 			readSize = frame.GetUint64(field)
 		}
+	}
+	if requestID == 0 || requestID > uint64(^uint32(0)) {
+		t.Errorf("requestID: got %d, want non-zero uint32", requestID)
 	}
 	if channelID != 5 {
 		t.Errorf("channelID: got %d, want 5", channelID)

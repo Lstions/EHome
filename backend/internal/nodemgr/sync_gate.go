@@ -2,7 +2,9 @@ package nodemgr
 
 import (
 	"fmt"
+	"time"
 
+	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
@@ -261,16 +263,63 @@ func (g *SyncGate) OnFactoryReset(deviceID string) SyncDecision {
 func (g *SyncGate) Start() {
 	go func() {
 		ch := g.eventBus.Subscribe()
-		for evt := range ch {
-			decisions := g.OnConfigChange(evt)
-			for _, d := range decisions {
-				if d.Action == SyncActionFull {
-					logger.Infof("[sync_id=%s] ConfigChange push: device=%s reason=%s",
-						d.SyncID, d.DeviceID, d.Reason)
-					g.mgr.SendConfigManifestWithDecision(d)
+		// Replay committed control-side-effect notifications before consuming
+		// new in-memory events. This closes the event-bus-full/process-restart
+		// gap without making the command Inbox depend on MQTT availability.
+		g.replayConfigChangeOutbox()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case evt, ok := <-ch:
+				if !ok {
+					logger.Infof("SyncGate event consumer stopped")
+					return
 				}
+				g.processConfigChange(evt)
+			case <-ticker.C:
+				g.replayConfigChangeOutbox()
 			}
 		}
-		logger.Infof("SyncGate event consumer stopped")
 	}()
+}
+
+func (g *SyncGate) processConfigChange(evt ConfigChangeEvent) bool {
+	decisions := g.OnConfigChange(evt)
+	processed := true
+	for _, d := range decisions {
+		if d.Action != SyncActionFull {
+			continue
+		}
+		logger.Infof("[sync_id=%s] ConfigChange push: device=%s reason=%s",
+			d.SyncID, d.DeviceID, d.Reason)
+		if err := g.mgr.SendConfigManifestWithDecision(d); err != nil {
+			processed = false
+		}
+	}
+	if processed && evt.EventID != "" {
+		now := time.Now().UTC()
+		result := g.mgr.db.Model(&models.ConfigChangeOutbox{}).
+			Where("event_id = ? AND state = ?", evt.EventID, "PENDING").
+			Updates(map[string]interface{}{"state": "PROCESSED", "processed_at": now})
+		if result.Error != nil {
+			logger.Warnf("[event_id=%s] durable config event acknowledgement failed: %v", evt.EventID, result.Error)
+			return false
+		}
+	}
+	return processed
+}
+
+func (g *SyncGate) replayConfigChangeOutbox() {
+	var pending []models.ConfigChangeOutbox
+	if err := g.mgr.db.Where("state = ?", "PENDING").Order("created_at ASC").Limit(100).Find(&pending).Error; err != nil {
+		logger.Warnf("SyncGate durable config event query failed: %v", err)
+		return
+	}
+	for _, row := range pending {
+		g.processConfigChange(ConfigChangeEvent{
+			EventID: row.EventID, Type: ConfigChangeType(row.Type), Action: ConfigChangeAction(row.Action),
+			NodeID: row.NodeID, EntityID: row.EntityID, Actor: row.Actor,
+		})
+	}
 }

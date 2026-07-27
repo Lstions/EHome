@@ -2,25 +2,29 @@
  * @file handler_writecmd.c
  * @brief WriteCommand/ScanReq/QueryReq message handler
  *
- * Receives: MSG_WRITE_CMD (0x06), MSG_SCAN_REQ (0x07), MSG_QUERY_REQ (0x0E)
- * Sends:    WriteRsp (0x0A), ScanRpt (0x0B), QueryRsp (0x0F)
+ * Receives: MSG_WRITE_CMD (0x06), MSG_SCAN_REQ (0x0D), MSG_QUERY_REQ (0x0E)
+ * Sends:    WriteRsp (0x07), ScanRpt (0x0C), QueryRsp (0x0F)
  */
 
-#include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
-#include "factory_reset.h"
 #include "esp_log.h"
+#include <limits.h>
 #include <string.h>
 
 #define TAG "WCMD_H"
+#define LEGACY_WRITE_CMD_DATA_MAX 128U
+
+void msg_handler_send_query_rsp(const char *request_id, bool success,
+                                const char *error_msg);
 
 /* Weak callbacks - implemented in main.c */
 __attribute__((weak)) void on_write_cmd_received(uint32_t request_id, uint32_t channel_id,
                                                    const uint8_t *data, size_t len, uint32_t read_size,
-                                                   uint32_t edge_device_id)
+                                                   uint32_t edge_device_id, uint32_t rx_timeout_ms)
 {
-    (void)request_id; (void)channel_id; (void)data; (void)len; (void)read_size; (void)edge_device_id;
+    (void)request_id; (void)channel_id; (void)data; (void)len; (void)read_size;
+    (void)edge_device_id; (void)rx_timeout_ms;
 }
 
 __attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t hardware_id)
@@ -39,33 +43,68 @@ __attribute__((weak)) void on_modbus_scan_req_received(const char *request_id,
 void handler_writecmd_process(frame_decoder_t *dec)
 {
     uint32_t request_id = 0, channel_id = 0, read_size = 0, edge_device_id = 0;
+    uint32_t rx_timeout_ms = 1000;
     const uint8_t *cmd_data = NULL;
     size_t cmd_len = 0;
+    uint32_t seen = 0;
     frame_err_t err;
     frame_field_t field;
     while ((err = frame_decoder_next(dec, &field)) == FRAME_OK) {
+        if (field.field_num < WRITE_CMD_F_REQUEST_ID || field.field_num > WRITE_CMD_F_RX_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "Rejecting WriteCmd unknown field=%u", field.field_num);
+            return;
+        }
+        uint32_t bit = 1U << field.field_num;
+        if ((seen & bit) != 0) {
+            ESP_LOGW(TAG, "Rejecting WriteCmd duplicate field=%u", field.field_num);
+            return;
+        }
+        seen |= bit;
         switch (field.field_num) {
-        case 1: request_id = (uint32_t)field.value.varint; break;
-        case 2: channel_id = (uint32_t)field.value.varint; break;
-        case 3:
+        case WRITE_CMD_F_REQUEST_ID:
+            if (field.wire_type != WIRE_VARINT || field.value.varint == 0 || field.value.varint > UINT32_MAX) return;
+            request_id = (uint32_t)field.value.varint;
+            break;
+        case WRITE_CMD_F_CHANNEL_ID:
+            if (field.wire_type != WIRE_VARINT || field.value.varint == 0 || field.value.varint > UINT32_MAX) return;
+            channel_id = (uint32_t)field.value.varint;
+            break;
+        case WRITE_CMD_F_DATA:
+            if (field.wire_type != WIRE_LENGTH_DELIMITED) return;
+            if (field.value.bytes.len > LEGACY_WRITE_CMD_DATA_MAX) return;
             cmd_data = field.value.bytes.ptr;
             cmd_len = field.value.bytes.len;
             break;
-        case 4: read_size = (uint32_t)field.value.varint; break;
-        case 5: edge_device_id = (uint32_t)field.value.varint; break;
+        case WRITE_CMD_F_READ_SIZE:
+            if (field.wire_type != WIRE_VARINT || field.value.varint > 256) return;
+            read_size = (uint32_t)field.value.varint;
+            break;
+        case WRITE_CMD_F_EDGE_DEVICE_ID:
+            if (field.wire_type != WIRE_VARINT || field.value.varint > UINT32_MAX) return;
+            edge_device_id = (uint32_t)field.value.varint;
+            break;
+        case WRITE_CMD_F_RX_TIMEOUT_MS:
+            if (field.wire_type != WIRE_VARINT || field.value.varint == 0 || field.value.varint > 30000) return;
+            rx_timeout_ms = (uint32_t)field.value.varint;
+            break;
         }
+    }
+    if (err != FRAME_DONE) {
+        ESP_LOGW(TAG, "Rejecting malformed WriteCmd: decode error %d", err);
+        return;
+    }
+    const uint32_t required = (1U << WRITE_CMD_F_REQUEST_ID) |
+                              (1U << WRITE_CMD_F_CHANNEL_ID) |
+                              (1U << WRITE_CMD_F_DATA);
+    if ((seen & required) != required) {
+        ESP_LOGW(TAG, "Rejecting WriteCmd missing required fields");
+        return;
     }
     ESP_LOGI(TAG, "WriteCmd: req=%lu, ch=%lu, len=%zu",
              (unsigned long)request_id, (unsigned long)channel_id, cmd_len);
 
-    /* Check for factory reset command: channel_id=0, data=[0xFC, 0x00] */
-    if (channel_id == 0 && cmd_len == 2 && cmd_data && cmd_data[0] == 0xFC && cmd_data[1] == 0x00) {
-        ESP_LOGI(TAG, "Factory reset command received");
-        msg_handler_send_write_rsp(request_id, true, 0, NULL);
-        factory_reset_trigger();
-    } else {
-        on_write_cmd_received(request_id, channel_id, cmd_data, cmd_len, read_size, edge_device_id);
-    }
+    on_write_cmd_received(request_id, channel_id, cmd_data, cmd_len, read_size,
+                          edge_device_id, rx_timeout_ms);
 }
 
 /* === Receive: ScanReq (0x07) === */
@@ -123,7 +162,7 @@ void handler_writecmd_process_query(frame_decoder_t *dec)
     msg_handler_send_query_rsp(request_id, true, NULL);
 }
 
-/* === Send: WriteRsp (0x0A) === */
+/* === Send: WriteRsp (0x07) === */
 
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                 uint32_t error_code, const char *error_msg)

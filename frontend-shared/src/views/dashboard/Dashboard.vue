@@ -8,7 +8,7 @@
       </div>
     </template>
     <template v-else>
-      <div class="dashboard-stats desktop-only">
+      <div class="dashboard-stats">
         <el-card shadow="hover" class="stat-card" @click="router.push('/node')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-primary);">
@@ -57,37 +57,6 @@
           </div>
         </el-card>
       </div>
-
-      <div class="mobile-stats-row mobile-only">
-        <MobileStatCard
-          :value="overview.nodes?.total || 0"
-          label="采集器总数"
-          :icon="Connection"
-          variant="primary"
-          @click="router.push('/node')"
-        />
-        <MobileStatCard
-          :value="overview.nodes?.online || 0"
-          label="在线采集器"
-          :icon="CircleCheck"
-          variant="success"
-          @click="router.push('/node?status=online')"
-        />
-        <MobileStatCard
-          :value="overview.edge_devices?.total || 0"
-          label="设备总数"
-          :icon="Cpu"
-          variant="warning"
-          @click="router.push('/edge-device')"
-        />
-        <MobileStatCard
-          :value="overview.edge_devices?.online || 0"
-          label="在线设备"
-          :icon="CircleCheck"
-          variant="success"
-          @click="router.push('/edge-device?status=online')"
-        />
-      </div>
     </template>
 
     <!-- 告警 / 异常摘要 -->
@@ -102,7 +71,7 @@
             </div>
           </template>
           <el-row :gutter="16">
-            <el-col v-if="offlineCollectors > 0" :xs="24" :sm="8">
+            <el-col v-if="offlineCollectors > 0" :span="8">
               <div class="alert-item" @click="router.push('/node?status=offline')">
                 <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
                 <div>
@@ -111,7 +80,7 @@
                 </div>
               </div>
             </el-col>
-            <el-col v-if="offlineDevices > 0" :xs="24" :sm="8">
+            <el-col v-if="offlineDevices > 0" :span="8">
               <div class="alert-item" @click="router.push('/edge-device?status=offline')">
                 <el-icon color="var(--el-color-danger)" :size="28"><Cpu /></el-icon>
                 <div>
@@ -120,7 +89,7 @@
                 </div>
               </div>
             </el-col>
-            <el-col v-if="dataErrorCount > 0" :xs="24" :sm="8">
+            <el-col v-if="dataErrorCount > 0" :span="8">
               <div class="alert-item" @click="router.push('/data')">
                 <el-icon color="var(--el-color-warning)" :size="28"><WarningFilled /></el-icon>
                 <div>
@@ -228,9 +197,7 @@
             </div>
           </template>
           <el-skeleton v-if="loading" :rows="5" animated />
-          <p v-if="!loading && (overview.latest_data || []).length > 0" class="mobile-table-hint">左右滑动查看完整数据</p>
-          <div v-if="!loading && (overview.latest_data || []).length > 0" class="mobile-table-wrapper">
-          <el-table :data="overview.latest_data" stripe>
+          <el-table v-else-if="(overview.latest_data || []).length > 0" :data="overview.latest_data" stripe>
             <el-table-column prop="device_name" label="设备名称" width="150">
               <template #default="{ row }">
                 <router-link :to="`/edge-device/${row.device_id}`" class="device-link">
@@ -262,9 +229,8 @@
               </template>
             </el-table-column>
           </el-table>
-          </div>
           <EmptyState
-            v-if="!loading && (overview.latest_data || []).length === 0"
+            v-else
             icon="FolderOpened"
             title="暂无数据"
             description="添加采集器和设备后，数据将在此处显示"
@@ -288,7 +254,6 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import LineChart from '@/components/charts/LineChart.vue'
-import MobileStatCard from '@/components/common/MobileStatCard.vue'
 import { dataApi, type Overview } from '@/api/data'
 import client from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -620,49 +585,18 @@ onUnmounted(() => {
   }
 })
 </script>
+
 <style scoped>
 .dashboard {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  padding: 0;
 }
 
 .dashboard-stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 20px;
 }
 
-.desktop-only {
-  display: contents;
-}
-
-.mobile-only {
-  display: none;
-}
-
-.mobile-stats-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-@media (max-width: 768px) {
-  .dashboard-stats.desktop-only {
-    display: none;
-  }
-  .mobile-stats-row.mobile-only {
-    display: grid;
-  }
-}
-
-@media (max-width: 360px) {
-  .mobile-stats-row.mobile-only {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* 统计 */
 .stat-card {
   cursor: pointer;
   transition: transform 0.3s, box-shadow 0.3s;
@@ -687,12 +621,10 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   color: #fff;
-  flex-shrink: 0;
 }
 
 .stat-info {
   flex: 1;
-  min-width: 0;
 }
 
 .stat-label {
@@ -754,85 +686,36 @@ onUnmounted(() => {
   margin-top: 2px;
 }
 
-@media (max-width: 1200px) {
-  .dashboard-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-  }
-  .stat-content {
-    gap: 12px;
-  }
-  .stat-icon {
-    width: 48px;
-    height: 48px;
-  }
-  .stat-icon :deep(.el-icon) {
-    font-size: 24px;
-  }
-  .stat-value {
-    font-size: 24px;
-  }
-  .stat-label {
-    font-size: 13px;
-    margin-bottom: 4px;
-  }
-}
-
 @media (max-width: 768px) {
   .dashboard-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 12px;
   }
+
   .stat-content {
     gap: 10px;
   }
+
   .stat-icon {
     width: 40px;
     height: 40px;
   }
-  .stat-icon :deep(.el-icon) {
-    font-size: 22px;
-  }
-  .stat-value {
-    font-size: 22px;
-  }
+
   .stat-label {
-    font-size: 12px;
-    margin-bottom: 2px;
+    line-height: 1.35;
+    margin-bottom: 4px;
   }
+
+  .stat-value {
+    font-size: 24px;
+    white-space: nowrap;
+  }
+
   :deep(.stat-card) {
-    margin-bottom: 0;
+    margin-bottom: 8px;
   }
   :deep(.alert-item) {
     margin-bottom: 8px;
-  }
-}
-
-@media (max-width: 480px) {
-  .dashboard-stats {
-    gap: 8px;
-  }
-  .stat-content {
-    gap: 8px;
-  }
-  .stat-icon {
-    width: 36px;
-    height: 36px;
-  }
-  .stat-icon :deep(.el-icon) {
-    font-size: 20px;
-  }
-  .stat-value {
-    font-size: 20px;
-  }
-  .stat-label {
-    font-size: 11px;
-  }
-}
-
-@media (max-width: 360px) {
-  .dashboard-stats {
-    grid-template-columns: 1fr;
   }
 }
 </style>

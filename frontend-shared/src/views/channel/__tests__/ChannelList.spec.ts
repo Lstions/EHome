@@ -151,7 +151,7 @@ describe('ChannelList.vue', () => {
   it('computes hardware tag type correctly', async () => {
     const wrapper = mount(ChannelList, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.vm.getHardwareTagType('uart')).toBe('info')
+    expect(wrapper.vm.getHardwareTagType('uart')).toBe('')
     expect(wrapper.vm.getHardwareTagType('i2c')).toBe('success')
     expect(wrapper.vm.getHardwareTagType('spi')).toBe('warning')
     expect(wrapper.vm.getHardwareTagType('gpio')).toBe('info')

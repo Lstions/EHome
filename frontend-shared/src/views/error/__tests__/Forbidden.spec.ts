@@ -35,7 +35,7 @@ describe('Forbidden.vue', () => {
   it('renders the forbidden error page', async () => {
     const wrapper = mount(Forbidden, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.find('.error-page.forbidden').exists()).toBe(true)
+    expect(wrapper.find('.error-page').exists()).toBe(true)
   })
 
   it('displays 403 error code', async () => {

@@ -18,7 +18,7 @@
     <!-- 统计卡片 -->
     <div class="stat-cards">
       <el-row :gutter="16">
-        <el-col :xs="24" :sm="12" :md="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card http">
             <div class="stat-icon"><el-icon><Connection /></el-icon></div>
             <div class="stat-content">
@@ -27,7 +27,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="24" :sm="12" :md="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card device">
             <div class="stat-icon"><el-icon><Monitor /></el-icon></div>
             <div class="stat-content">
@@ -40,7 +40,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="24" :sm="12" :md="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card collector">
             <div class="stat-icon"><el-icon><Cpu /></el-icon></div>
             <div class="stat-content">
@@ -53,7 +53,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :xs="24" :sm="12" :md="6">
+        <el-col :xs="12" :sm="12" :md="6">
           <el-card shadow="hover" class="stat-card data">
             <div class="stat-icon"><el-icon><DataLine /></el-icon></div>
             <div class="stat-content">
@@ -65,18 +65,52 @@
       </el-row>
     </div>
 
+    <el-alert
+      v-if="controlAttention > 0"
+      class="control-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="`控制面有 ${controlAttention} 项需要关注`"
+    />
+
     <!-- 详细面板 -->
     <div class="detail-panels">
+      <el-row class="control-health">
+        <el-col :span="24">
+          <el-card shadow="hover">
+            <template #header>
+              <div class="card-header">
+                <span><el-icon><Operation /></el-icon> 控制面健康</span>
+                <el-tag :type="controlAttention > 0 ? 'warning' : 'success'" size="small">
+                  {{ controlAttention > 0 ? '需关注' : '正常' }}
+                </el-tag>
+              </div>
+            </template>
+            <div class="control-grid">
+              <div class="control-metric"><span>操作总数</span><strong>{{ formatNumber(metrics?.control?.operations_total || 0) }}</strong></div>
+              <div class="control-metric"><span>活跃操作</span><strong>{{ metrics?.control?.active || 0 }}</strong></div>
+              <div class="control-metric"><span>Outbox 待处理</span><strong>{{ metrics?.control?.outbox_pending || 0 }}</strong></div>
+              <div class="control-metric"><span>Outbox 租约中</span><strong>{{ metrics?.control?.outbox_leased || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.unresolved_unknown || 0) > 0 }"><span>未处置 UNKNOWN</span><strong>{{ metrics?.control?.unresolved_unknown || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.capability_stale_nodes || 0) > 0 }"><span>能力快照过期</span><strong>{{ metrics?.control?.capability_stale_nodes || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.audit_write_failures || 0) > 0 }"><span>审计写失败</span><strong>{{ metrics?.control?.audit_write_failures || 0 }}</strong></div>
+              <div class="control-metric"><span>成功 / 失败</span><strong>{{ metrics?.control?.succeeded || 0 }} / {{ metrics?.control?.failed || 0 }}</strong></div>
+            </div>
+          </el-card>
+        </el-col>
+      </el-row>
+
       <el-row :gutter="16">
         <!-- HTTP 监控 -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
                 <span><el-icon><Connection /></el-icon> HTTP 监控</span>
               </div>
             </template>
-            <el-descriptions :column="isMobile ? 1 : 2" border>
+            <el-descriptions :column="2" border>
               <el-descriptions-item label="请求总数">
                 {{ formatNumber(metrics?.http?.requests_total || 0) }}
               </el-descriptions-item>
@@ -88,14 +122,14 @@
         </el-col>
 
         <!-- MQTT 监控 -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
                 <span><el-icon><Promotion /></el-icon> MQTT 监控</span>
               </div>
             </template>
-            <el-descriptions :column="isMobile ? 1 : 2" border>
+            <el-descriptions :column="2" border>
               <el-descriptions-item label="接收消息">
                 {{ formatNumber(metrics?.mqtt?.messages_received || 0) }}
               </el-descriptions-item>
@@ -114,7 +148,7 @@
 
       <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 设备状态 -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -124,9 +158,9 @@
             <div class="status-bars">
               <div class="status-item">
                 <span class="status-label">在线</span>
-                <el-progress
-                  :percentage="deviceOnlinePercent"
-                  :stroke-width="16"
+                <el-progress 
+                  :percentage="deviceOnlinePercent" 
+                  :stroke-width="20"
                   :color="THEME_COLORS.success"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
@@ -136,7 +170,7 @@
                 <span class="status-label">离线</span>
                 <el-progress
                   :percentage="deviceOfflinePercent"
-                  :stroke-width="16"
+                  :stroke-width="20"
                   :color="THEME_COLORS.danger"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
@@ -147,7 +181,7 @@
         </el-col>
 
         <!-- 采集器状态 -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
@@ -157,9 +191,9 @@
             <div class="status-bars">
               <div class="status-item">
                 <span class="status-label">在线</span>
-                <el-progress
-                  :percentage="collectorOnlinePercent"
-                  :stroke-width="16"
+                <el-progress 
+                  :percentage="collectorOnlinePercent" 
+                  :stroke-width="20"
                   :color="THEME_COLORS.success"
                 >
                   <span>{{ metrics?.collector?.online || 0 }}</span>
@@ -169,7 +203,7 @@
                 <span class="status-label">离线</span>
                 <el-progress
                   :percentage="collectorOfflinePercent"
-                  :stroke-width="16"
+                  :stroke-width="20"
                   :color="THEME_COLORS.danger"
                 >
                   <span>{{ metrics?.collector?.offline || 0 }}</span>
@@ -182,14 +216,14 @@
 
       <el-row :gutter="16" style="margin-top: 20px;">
         <!-- 数据采集 -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
                 <span><el-icon><DataLine /></el-icon> 数据采集</span>
               </div>
             </template>
-            <el-descriptions :column="isMobile ? 1 : 2" border>
+            <el-descriptions :column="2" border>
               <el-descriptions-item label="已采集">
                 {{ formatNumber(metrics?.data?.points_collected || 0) }}
               </el-descriptions-item>
@@ -201,14 +235,14 @@
         </el-col>
 
         <!-- WebSocket -->
-        <el-col :xs="24" :sm="24" :md="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
                 <span><el-icon><Connection /></el-icon> WebSocket</span>
               </div>
             </template>
-            <el-descriptions :column="isMobile ? 1 : 2" border>
+            <el-descriptions :column="2" border>
               <el-descriptions-item label="活跃连接">
                 {{ metrics?.websocket?.connections_active || 0 }}
               </el-descriptions-item>
@@ -232,18 +266,22 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
-  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis
+  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis, Operation
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { THEME_COLORS } from '@/utils/theme'
-import { useResponsive } from '@/composables/useResponsive'
 
 // 状态
 const metrics = ref<MetricsSummary | null>(null)
-const { isMobile } = useResponsive()
 const refreshInterval = ref(10000)
 const lastUpdateTime = ref('--')
 let timer: ReturnType<typeof setInterval> | null = null
+
+const controlAttention = computed(() =>
+  (metrics.value?.control?.unresolved_unknown || 0) +
+  (metrics.value?.control?.capability_stale_nodes || 0) +
+  (metrics.value?.control?.audit_write_failures || 0)
+)
 
 // 计算属性
 const deviceTotal = computed(() => {
@@ -338,8 +376,6 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
-  gap: 12px;
-  flex-wrap: wrap;
 }
 
 .toolbar h2 {
@@ -353,51 +389,53 @@ onUnmounted(() => {
 .toolbar-actions {
   display: flex;
   gap: 12px;
-  flex-wrap: wrap;
-}
-
-@media (max-width: 768px) {
-  .toolbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-  .toolbar-actions {
-    width: 100%;
-  }
-  .toolbar-actions :deep(.el-select) {
-    flex: 1;
-  }
-}
-
-@media (max-width: 480px) {
-  .toolbar-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .toolbar-actions :deep(.el-select),
-  .toolbar-actions :deep(.el-button) {
-    width: 100%;
-  }
-  .toolbar h2 {
-    font-size: 20px;
-  }
-  .stat-card :deep(.el-card__body) {
-    padding: 16px;
-  }
-  .stat-value {
-    font-size: 24px;
-  }
-  .stat-icon {
-    font-size: 36px;
-  }
-  .status-label {
-    width: 36px;
-    font-size: 13px;
-  }
 }
 
 .stat-cards {
   margin-bottom: 20px;
+}
+
+.control-alert {
+  margin-bottom: 20px;
+}
+
+.control-health {
+  margin-bottom: 20px;
+}
+
+.control-health .card-header {
+  justify-content: space-between;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid var(--el-border-color-lighter);
+}
+
+.control-metric {
+  min-width: 0;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-right: 1px solid var(--el-border-color-lighter);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.control-metric span {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.control-metric strong {
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+
+.control-metric.attention strong {
+  color: var(--el-color-danger);
 }
 
 .stat-card {
@@ -489,5 +527,38 @@ onUnmounted(() => {
   text-align: center;
   color: var(--el-text-color-secondary);
   font-size: 14px;
+}
+
+@media (max-width: 900px) {
+  .control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .toolbar-actions {
+    flex-wrap: wrap;
+  }
+  .toolbar-actions .el-select {
+    flex: 1;
+  }
+  .stat-card :deep(.el-card__body) {
+    padding: 16px;
+  }
+  .stat-card .stat-icon {
+    font-size: 36px;
+    right: 12px;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
+  .stat-cards .el-col {
+    margin-bottom: 12px;
+  }
 }
 </style>

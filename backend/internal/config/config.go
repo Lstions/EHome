@@ -4,17 +4,29 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config holds all server configuration
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	MQTT     MQTTConfig     `yaml:"mqtt"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Log      LogConfig      `yaml:"log"`
+	Server         ServerConfig         `yaml:"server"`
+	Database       DatabaseConfig       `yaml:"database"`
+	MQTT           MQTTConfig           `yaml:"mqtt"`
+	Redis          RedisConfig          `yaml:"redis"`
+	Log            LogConfig            `yaml:"log"`
+	Control        ControlConfig        `yaml:"control"`
+	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
+}
+
+type ControlConfig struct {
+	DeviceControlV2Enabled bool   `yaml:"device_control_v2_enabled"`
+	LegacyDeviceWriteMode  string `yaml:"legacy_device_write_mode"`
+	RawDiagnosticsEnabled  bool   `yaml:"raw_diagnostics_enabled"`
+	// EnabledDeviceActions contains explicit "device_type/action_id" rollout
+	// selectors. An empty list keeps every built-in action unavailable.
+	EnabledDeviceActions []string `yaml:"enabled_device_actions"`
 }
 
 // ServerConfig holds HTTP server settings
@@ -49,6 +61,15 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
+// AdminBootstrapConfig is an explicit, first-run-only administrator
+// bootstrap configuration. Both username and password must be supplied;
+// there is intentionally no default account or password.
+type AdminBootstrapConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	Email    string `yaml:"email"`
+}
+
 // Default configuration
 func defaultConfig() *Config {
 	return &Config{
@@ -72,6 +93,8 @@ func defaultConfig() *Config {
 		Log: LogConfig{
 			Level: "info",
 		},
+		Control:        ControlConfig{LegacyDeviceWriteMode: "disabled"},
+		AdminBootstrap: AdminBootstrapConfig{},
 	}
 }
 
@@ -130,6 +153,37 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
 	}
+	if v := getEnv("EHOME_LEGACY_DEVICE_WRITE_MODE", ""); v == "disabled" || v == "bridge" {
+		cfg.Control.LegacyDeviceWriteMode = v
+	}
+	if v := getEnv("EHOME_DEVICE_CONTROL_V2_ENABLED", ""); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Control.DeviceControlV2Enabled = enabled
+		}
+	}
+	if v := getEnv("EHOME_RAW_DIAGNOSTICS_ENABLED", ""); v != "" {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			cfg.Control.RawDiagnosticsEnabled = enabled
+		}
+	}
+	if v := getEnv("EHOME_ENABLED_DEVICE_ACTIONS", ""); v != "" {
+		items := strings.Split(v, ",")
+		cfg.Control.EnabledDeviceActions = cfg.Control.EnabledDeviceActions[:0]
+		for _, item := range items {
+			if item = strings.TrimSpace(item); item != "" {
+				cfg.Control.EnabledDeviceActions = append(cfg.Control.EnabledDeviceActions, item)
+			}
+		}
+	}
+	if v := getEnv("EHOME_ADMIN_USERNAME", ""); v != "" {
+		cfg.AdminBootstrap.Username = v
+	}
+	if v := getEnv("EHOME_ADMIN_PASSWORD", ""); v != "" {
+		cfg.AdminBootstrap.Password = v
+	}
+	if v := getEnv("EHOME_ADMIN_EMAIL", ""); v != "" {
+		cfg.AdminBootstrap.Email = v
+	}
 }
 
 func getEnv(key, defaultValue string) string {
@@ -150,5 +204,6 @@ func (c *Config) DatabaseURL() string {
 		c.Database.User, c.Database.Password, c.Database.Host,
 		c.Database.Port, c.Database.DBName, c.Database.SSLMode)
 }
-func (c *Config) LogLevel() string         { return c.Log.Level }
-func (c *Config) DBConfig() DatabaseConfig { return c.Database }
+func (c *Config) LogLevel() string             { return c.Log.Level }
+func (c *Config) DBConfig() DatabaseConfig     { return c.Database }
+func (c *Config) ControlConfig() ControlConfig { return c.Control }

@@ -81,19 +81,11 @@ const batteryLabel = computed(() => {
   display: flex;
   justify-content: center;
   padding: 12px 0;
-  width: 100%;
-  overflow-x: auto;
 }
 .power-flow-svg {
   width: 100%;
   max-width: 600px;
   height: 200px;
-  min-width: 520px;
-}
-
-@media (max-width: 480px) {
-  .power-flow-container { justify-content: flex-start; }
-  .power-flow-svg { min-width: 520px; }
 }
 .node circle {
   fill: var(--el-fill-color-light);
