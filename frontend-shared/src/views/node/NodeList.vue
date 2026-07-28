@@ -43,7 +43,7 @@
       <div class="toolbar-left">
         <el-input
           v-model="searchKeyword"
-          placeholder="搜索节点名称、型号..."
+          placeholder="搜索名称/型号"
           prefix-icon="Search"
           clearable
           class="search-input"

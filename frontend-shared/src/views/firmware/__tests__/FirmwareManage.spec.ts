@@ -88,8 +88,11 @@ describe('FirmwareManage.vue', () => {
     vi.mocked(firmwareApi.getList).mockResolvedValueOnce({ list: [], total: 0 } as any)
     const wrapper = mount(FirmwareManage, { global: { stubs } })
     await flushPromises()
-    // el-empty is rendered when firmwares.length === 0 (after loading completes)
-    expect(wrapper.find('.el-empty').exists()).toBe(true)
+    // EmptyState is rendered when firmwares.length === 0 (after loading completes),
+    // and the table (with its header row) is not rendered at all
+    expect(wrapper.find('.empty-state').exists()).toBe(true)
+    expect(wrapper.text()).toContain('暂无固件数据')
+    expect(wrapper.find('.el-table').exists()).toBe(false)
   })
 
   it('opens upload dialog on upload button click', async () => {

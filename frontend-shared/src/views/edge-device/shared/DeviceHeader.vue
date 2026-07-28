@@ -1,5 +1,5 @@
 <template>
-  <PageHeader :title="title" :show-back="true" @back="$emit('back')">
+  <PageHeader class="device-page-header" :title="title" :show-back="true" @back="$emit('back')">
     <template #extra>
       <div class="header-actions">
         <div class="header-actions-group">
@@ -18,6 +18,7 @@
           </el-button>
         </div>
         <!-- 删除按钮单独隔离，避免误触 -->
+        <el-divider direction="vertical" class="action-divider" />
         <el-button :icon="Delete" type="danger" plain @click="deleteDialogVisible = true">删除</el-button>
       </div>
     </template>
@@ -166,5 +167,50 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.action-divider {
+  margin: 0 4px;
+}
+
+/* 移动端：按钮组统一小尺寸、等宽换行排列；标题限制两行；隐藏换行后无意义的竖分隔符 */
+@media (max-width: 768px) {
+  /* 长标题最多两行，避免折行过多挤压右侧按钮区 */
+  .device-page-header :deep(.page-header-left) {
+    min-width: 0;
+  }
+  .device-page-header :deep(.page-header-left h2) {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+  }
+
+  .header-actions {
+    gap: 8px;
+    width: 100%;
+  }
+  /* 扁平化内层分组，让删除按钮与主按钮组参与同一 flex 换行流，行间左缘对齐 */
+  .header-actions-group {
+    display: contents;
+  }
+  /* 按钮换行后竖分隔符会变成孤立的"|"，移动端隐藏 */
+  .action-divider {
+    display: none;
+  }
+  .header-actions :deep(.el-button) {
+    flex: 1 1 auto;
+    height: 28px;
+    padding: 5px 11px;
+    font-size: 12px;
+  }
+  .header-actions :deep(.el-button + .el-button) {
+    margin-left: 0;
+  }
+  .header-actions :deep(.el-tag) {
+    height: 28px;
+    padding: 0 8px;
+    font-size: 12px;
+  }
 }
 </style>

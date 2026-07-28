@@ -45,4 +45,25 @@ describe('NodeDetail mobile responsive (behavior)', () => {
     expect(src.match(/class="mobile-table-wrapper"/g)?.length).toBe(2)
     expect(src.match(/class="mobile-table-hint"/g)?.length).toBe(2)
   })
+
+  it('keeps the page title horizontal on mobile (no per-character vertical stacking)', () => {
+    // 标题容器可收缩 + 禁止逐字换行，空间不足时省略而非竖排
+    expect(src).toContain('.page-header-left')
+    expect(src).toContain('min-width: 0')
+    expect(src).toContain('white-space: nowrap')
+    expect(src).toContain('text-overflow: ellipsis')
+  })
+
+  it('shrinks the header action buttons on mobile instead of squeezing the title', () => {
+    expect(src).toContain(':size="isMobile ? \'small\' : \'default\'"')
+    // 空间不足时头部整体换行，按钮区让位
+    expect(src).toContain('flex-wrap: wrap')
+  })
+
+  it('overrides sync state badge to 离线 when the node is offline', () => {
+    // 离线设备不可能"同步中"：前端覆盖后端快照状态
+    expect(src).toContain("if (collector.value?.status === 'offline') return '离线'")
+    // 在线节点的真实"同步中"展示不受影响
+    expect(src).toContain("syncing: '同步中'")
+  })
 })

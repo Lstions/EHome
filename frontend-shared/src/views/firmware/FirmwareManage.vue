@@ -22,7 +22,7 @@
           <el-button size="small" @click="selectedFirmwares = []">取消选择</el-button>
         </div>
 
-        <el-table :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef">
+        <el-table v-if="firmwares.length > 0" :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef">
           <el-table-column type="selection" width="45" />
           <el-table-column prop="id" label="ID" width="50" />
           <el-table-column label="版本号" width="120">
@@ -85,9 +85,16 @@
             @current-change="fetchFirmwares"
           />
         </div>
-        <el-empty v-if="firmwares.length === 0" description="暂无固件数据">
-          <el-button type="primary" @click="showUploadDialog = true">上传固件</el-button>
-        </el-empty>
+        <EmptyState
+          v-else
+          kind="empty"
+          :icon="Upload"
+          title="暂无固件数据"
+          description="上传固件后，可在此管理版本并执行 OTA 升级。"
+          :quick-actions="[
+            { label: '上传固件', icon: Upload, type: 'primary', handler: () => { showUploadDialog = true } }
+          ]"
+        />
       </template>
     </el-card>
 
@@ -153,6 +160,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type UploadInstance, type UploadProps } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
 

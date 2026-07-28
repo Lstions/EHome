@@ -55,6 +55,7 @@ defineProps<{
 }
 .stat-content {
   flex: 1;
+  min-width: 0;
 }
 .stat-value {
   display: block;
@@ -66,5 +67,28 @@ defineProps<{
 .stat-label {
   font-size: 13px;
   color: var(--el-text-color-secondary);
+  /* 中文标签防止逐字断行竖排 */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+/* 窄屏（如移动端 2 列网格，卡宽 ~160px）改为纵向堆叠，保证标签横向显示 */
+@media (max-width: 768px) {
+  .stat-card {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    padding: 14px 12px;
+  }
+  .stat-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    font-size: 18px;
+  }
+  .stat-content {
+    width: 100%;
+  }
 }
 </style>

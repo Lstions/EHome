@@ -8,8 +8,8 @@
           <div class="avatar-block">
             <el-avatar :size="80" :icon="UserFilled" />
             <h3 class="username">{{ userInfo?.username || '—' }}</h3>
-            <el-tag type="danger" size="default">系统管理员</el-tag>
-            <p class="email">{{ userInfo?.email || '未设置邮箱' }}</p>
+            <el-tag type="primary" size="default">系统管理员</el-tag>
+            <p v-if="userInfo?.email" class="email">{{ userInfo.email }}</p>
           </div>
         </el-card>
       </el-col>
@@ -19,15 +19,16 @@
           <template #header>
             <span>修改密码</span>
           </template>
-          <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" style="max-width: 480px">
+          <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" :label-position="isMobile ? 'top' : 'right'" style="max-width: 480px">
             <el-form-item label="当前密码" prop="old_password">
-              <el-input v-model="form.old_password" type="password" show-password />
+              <el-input v-model="form.old_password" type="password" show-password placeholder="请输入当前密码" />
             </el-form-item>
             <el-form-item label="新密码" prop="new_password">
-              <el-input v-model="form.new_password" type="password" show-password />
+              <el-input v-model="form.new_password" type="password" show-password placeholder="至少 8 位字符" />
+              <div class="form-tip">至少 8 位字符，且不能与当前密码相同</div>
             </el-form-item>
             <el-form-item label="确认新密码" prop="confirm_password">
-              <el-input v-model="form.confirm_password" type="password" show-password />
+              <el-input v-model="form.confirm_password" type="password" show-password placeholder="请再次输入新密码" />
             </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="submitting" @click="handleChangePassword">提交</el-button>
@@ -47,10 +48,12 @@ import type { FormInstance, FormRules } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/auth'
+import { useResponsive } from '@/composables/useResponsive'
 import feedback from '@/utils/feedback'
 
 const userStore = useUserStore()
 const userInfo = computed(() => userStore.userInfo)
+const { isMobile } = useResponsive()
 
 
 const formRef = ref<FormInstance>()
@@ -65,7 +68,7 @@ const rules: FormRules = {
   old_password: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   new_password: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '至少 6 位', trigger: 'blur' },
+    { min: 8, message: '至少 8 位', trigger: 'blur' },
   ],
   confirm_password: [
     { required: true, message: '请再次输入新密码', trigger: 'blur' },
@@ -125,6 +128,12 @@ const handleChangePassword = async () => {
   font-size: 13px;
   color: var(--text-color-secondary);
 }
+.form-tip {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-color-secondary);
+}
 
 @media (max-width: 768px) {
   .profile-page {
@@ -133,11 +142,6 @@ const handleChangePassword = async () => {
   .profile-page .el-col {
     margin-bottom: 16px;
   }
-  .profile-page :deep(.el-form-item__label) {
-    width: 84px !important;
-  }
-  .profile-page :deep(.el-form-item__content) {
-    margin-left: 84px !important;
-  }
+  /* 移动端 label-on-top 通过 el-form :label-position 响应式绑定实现（label-width 在 top 模式下自动失效） */
 }
 </style>

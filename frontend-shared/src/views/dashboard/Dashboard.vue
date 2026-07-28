@@ -15,8 +15,8 @@
               <el-icon :size="32"><Connection /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-label">采集器总数</p>
               <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
+              <p class="stat-label">采集器总数</p>
             </div>
           </div>
         </el-card>
@@ -27,8 +27,8 @@
               <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-label">在线采集器</p>
               <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
+              <p class="stat-label">在线采集器</p>
             </div>
           </div>
         </el-card>
@@ -39,8 +39,8 @@
               <el-icon :size="32"><Cpu /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-label">设备总数</p>
               <p class="stat-value">{{ overview.edge_devices?.total || 0 }}</p>
+              <p class="stat-label">设备总数</p>
             </div>
           </div>
         </el-card>
@@ -51,8 +51,8 @@
               <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-label">在线设备</p>
               <p class="stat-value">{{ overview.edge_devices?.online || 0 }}</p>
+              <p class="stat-label">在线设备</p>
             </div>
           </div>
         </el-card>
@@ -60,45 +60,45 @@
     </template>
 
     <!-- 告警 / 异常摘要 -->
-    <el-row v-if="overview && (offlineDevices > 0 || offlineCollectors > 0 || dataErrorCount > 0)" :gutter="20" style="margin-top: 20px;">
+    <el-row v-if="overview" :gutter="20" style="margin-top: 20px;">
       <el-col :span="24">
         <el-card shadow="hover" class="alert-summary">
           <template #header>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <el-icon color="var(--el-color-warning)" :size="20"><WarningFilled /></el-icon>
+              <el-icon :color="hasAlerts ? 'var(--el-color-warning)' : 'var(--el-color-success)'" :size="20">
+                <component :is="hasAlerts ? WarningFilled : CircleCheck" />
+              </el-icon>
               <span>异常摘要</span>
-              <el-tag size="small" type="warning">需关注</el-tag>
+              <el-tag size="small" :type="hasAlerts ? 'warning' : 'success'">{{ hasAlerts ? '需关注' : '运行正常' }}</el-tag>
             </div>
           </template>
-          <el-row :gutter="16">
-            <el-col v-if="offlineCollectors > 0" :span="8">
-              <div class="alert-item" @click="router.push('/node?status=offline')">
-                <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
-                <div>
-                  <div class="alert-value">{{ offlineCollectors }}</div>
-                  <div class="alert-label">离线采集器</div>
-                </div>
+          <div v-if="hasAlerts" class="alert-list">
+            <div v-if="offlineCollectors > 0" class="alert-item" @click="router.push('/node?status=offline')">
+              <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
+              <div>
+                <div class="alert-value">{{ offlineCollectors }}</div>
+                <div class="alert-label">离线采集器</div>
               </div>
-            </el-col>
-            <el-col v-if="offlineDevices > 0" :span="8">
-              <div class="alert-item" @click="router.push('/edge-device?status=offline')">
-                <el-icon color="var(--el-color-danger)" :size="28"><Cpu /></el-icon>
-                <div>
-                  <div class="alert-value">{{ offlineDevices }}</div>
-                  <div class="alert-label">离线设备</div>
-                </div>
+            </div>
+            <div v-if="offlineDevices > 0" class="alert-item" @click="router.push('/edge-device?status=offline')">
+              <el-icon color="var(--el-color-danger)" :size="28"><Cpu /></el-icon>
+              <div>
+                <div class="alert-value">{{ offlineDevices }}</div>
+                <div class="alert-label">离线设备</div>
               </div>
-            </el-col>
-            <el-col v-if="dataErrorCount > 0" :span="8">
-              <div class="alert-item" @click="router.push('/data')">
-                <el-icon color="var(--el-color-warning)" :size="28"><WarningFilled /></el-icon>
-                <div>
-                  <div class="alert-value">{{ dataErrorCount }}</div>
-                  <div class="alert-label">采集错误（近 1h）</div>
-                </div>
+            </div>
+            <div v-if="dataErrorCount > 0" class="alert-item" @click="router.push('/data')">
+              <el-icon color="var(--el-color-warning)" :size="28"><WarningFilled /></el-icon>
+              <div>
+                <div class="alert-value">{{ dataErrorCount }}</div>
+                <div class="alert-label">采集错误（近 1h）</div>
               </div>
-            </el-col>
-          </el-row>
+            </div>
+          </div>
+          <div v-else class="alert-ok">
+            <el-icon color="var(--el-color-success)" :size="20"><CircleCheck /></el-icon>
+            <span>采集器与设备均在线，暂无采集错误。</span>
+          </div>
         </el-card>
       </el-col>
     </el-row>
@@ -108,15 +108,15 @@
       <el-col :span="24">
         <el-card shadow="hover">
           <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div class="trend-card-header">
               <span>{{ trendRangeLabel }}趋势</span>
-              <div style="display: flex; gap: 8px; align-items: center;">
+              <div class="trend-controls">
                 <el-radio-group v-model="trendRange" size="small" @change="fetchTrendData">
                   <el-radio-button value="1h">1小时</el-radio-button>
                   <el-radio-button value="24h">24小时</el-radio-button>
                   <el-radio-button value="7d">7天</el-radio-button>
                 </el-radio-group>
-                <el-select v-model="trendCategory" size="small" style="width: 140px;">
+                <el-select v-model="trendCategory" size="small" class="trend-category-select">
                   <el-option
                     v-for="cat in availableTrendCategories"
                     :key="cat.value"
@@ -128,7 +128,7 @@
             </div>
           </template>
           <el-skeleton v-if="trendLoading" :rows="4" animated />
-          <div v-else style="min-height: 300px;">
+          <div v-else style="min-height: 240px;">
             <LineChart
               v-if="trendSeries.length > 0"
               :series="trendSeries"
@@ -138,6 +138,7 @@
             <EmptyState
               v-else
               icon="TrendCharts"
+              size="small"
               title="暂无趋势数据"
               description="需要设备数据才能显示趋势图表"
               :quick-actions="[
@@ -306,10 +307,14 @@ watch(() => overview.value.latest_data, (newData) => {
   }
 }, { deep: true, immediate: true })
 
-// 从缓存集合生成可用传感器类型列表
+// 从缓存集合生成可用传感器类型列表；始终包含当前选中项，保证下拉显示中文标签而非字段 key
 const availableTrendCategories = computed(() => {
   const knownOrder = SENSOR_ORDER
-  return [...seenCategoryKeys.value].sort((a, b) => {
+  const keys = [...seenCategoryKeys.value]
+  if (trendCategory.value && !keys.includes(trendCategory.value)) {
+    keys.push(trendCategory.value)
+  }
+  return keys.sort((a, b) => {
     const ia = knownOrder.indexOf(a)
     const ib = knownOrder.indexOf(b)
     if (ia !== -1 && ib !== -1) return ia - ib
@@ -329,6 +334,7 @@ const offlineDevices = computed(() => Math.max(0, (overview.value.edge_devices?.
 const dataErrorCount = computed(() => {
   return (overview.value.latest_data || []).filter(d => (d.error_code && d.error_code > 0)).length
 })
+const hasAlerts = computed(() => offlineCollectors.value > 0 || offlineDevices.value > 0 || dataErrorCount.value > 0)
 
 let unsubscribeStatus: (() => void) | null = null
 let unsubscribeData: (() => void) | null = null
@@ -628,9 +634,12 @@ onUnmounted(() => {
 }
 
 .stat-label {
-  margin: 0 0 8px;
+  margin: 8px 0 0;
   font-size: 14px;
   color: var(--el-text-color-secondary);
+  /* 中文标签防止逐字断行竖排 */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .stat-value {
@@ -660,7 +669,40 @@ onUnmounted(() => {
   font-family: monospace;
 }
 
+.trend-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.trend-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.trend-category-select {
+  width: 140px;
+}
+
+.alert-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.alert-ok {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 14px;
+}
+
 .alert-item {
+  flex: 1 1 220px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -684,6 +726,9 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-color-secondary);
   margin-top: 2px;
+  /* 防止移动端窄宽下中文逐字竖排 */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 @media (max-width: 768px) {
@@ -693,7 +738,15 @@ onUnmounted(() => {
   }
 
   .stat-content {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
     gap: 10px;
+  }
+
+  .stat-info {
+    width: 100%;
+    min-width: 0;
   }
 
   .stat-icon {
@@ -703,7 +756,7 @@ onUnmounted(() => {
 
   .stat-label {
     line-height: 1.35;
-    margin-bottom: 4px;
+    margin-top: 4px;
   }
 
   .stat-value {
@@ -714,8 +767,32 @@ onUnmounted(() => {
   :deep(.stat-card) {
     margin-bottom: 8px;
   }
-  :deep(.alert-item) {
-    margin-bottom: 8px;
+
+  /* 分段控件与指标下拉各自整行，避免"7天"折行、边框残缺 */
+  .trend-controls {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .trend-controls :deep(.el-radio-group) {
+    display: flex;
+    width: 100%;
+  }
+
+  .trend-controls :deep(.el-radio-button) {
+    flex: 1;
+  }
+
+  .trend-controls :deep(.el-radio-button__inner) {
+    width: 100%;
+    padding-left: 8px;
+    padding-right: 8px;
+    text-align: center;
+  }
+
+  .trend-category-select {
+    width: 100%;
   }
 }
 </style>

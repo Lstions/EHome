@@ -2,11 +2,11 @@
   <el-card shadow="hover">
     <template #header><span>基本信息</span></template>
     <el-descriptions :column="2" border>
-      <el-descriptions-item label="设备名称">{{ device.name }}</el-descriptions-item>
+      <el-descriptions-item label="设备名称">{{ device.name || '-' }}</el-descriptions-item>
       <el-descriptions-item label="设备类型">{{ deviceTypeText }}</el-descriptions-item>
-      <el-descriptions-item label="通信协议">{{ device.protocol?.toUpperCase() }}</el-descriptions-item>
-      <el-descriptions-item label="硬件类型">{{ device.hardware_type?.toUpperCase() }}</el-descriptions-item>
-      <el-descriptions-item label="硬件ID">{{ device.hardware_id }}</el-descriptions-item>
+      <el-descriptions-item label="通信协议">{{ device.protocol ? device.protocol.toUpperCase() : '-' }}</el-descriptions-item>
+      <el-descriptions-item label="硬件类型">{{ device.hardware_type ? device.hardware_type.toUpperCase() : '-' }}</el-descriptions-item>
+      <el-descriptions-item label="硬件ID">{{ device.hardware_id || '-' }}</el-descriptions-item>
       <el-descriptions-item label="健康状态">
         <StatusBadge :status="device.status" effect="dark" />
       </el-descriptions-item>

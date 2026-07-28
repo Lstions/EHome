@@ -34,10 +34,14 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="fetchData" :loading="loading">查询</el-button>
-          <el-button @click="handleExport" :disabled="!queryForm.deviceId || !historyData || historyData.length === 0">
-            <el-icon><Download /></el-icon>
-            导出CSV
-          </el-button>
+          <el-tooltip content="请先查询数据" placement="top" :disabled="canExport">
+            <span>
+              <el-button @click="handleExport" :disabled="!canExport">
+                <el-icon><Download /></el-icon>
+                导出CSV
+              </el-button>
+            </span>
+          </el-tooltip>
         </el-form-item>
       </el-form>
     </el-card>
@@ -160,14 +164,14 @@
       kind="initial"
       icon="Cpu"
       title="选择设备后查看数据"
-      description="选择边缘设备和时间范围后，可查看历史趋势、最新指标与实时数据。"
+      description="选择设备和时间范围后，可查看历史趋势与实时数据。"
       :quick-actions="[
         { label: '管理边缘设备', icon: Cpu, type: 'primary', handler: () => router.push('/edge-device') }
       ]"
     />
 
-    <!-- 历史数据表格 -->
-    <el-card style="margin-top: 20px;">
+    <!-- 历史数据表格（未选择设备时由上方引导空状态接管，整个卡片不渲染） -->
+    <el-card style="margin-top: 20px;" v-if="queryForm.deviceId">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>历史数据</span>
@@ -184,10 +188,10 @@
       <template v-else>
         <EmptyState
           v-if="!historyData || historyData.length === 0"
-          :kind="queryForm.deviceId ? 'empty' : 'initial'"
+          kind="empty"
           icon="DataAnalysis"
-          :title="queryForm.deviceId ? '该时间范围内暂无数据' : '请选择设备'"
-          :description="queryForm.deviceId ? '可调整时间范围，或确认设备已完成采集与同步。' : '选择设备后即可查询历史数据。'"
+          title="该时间范围内暂无数据"
+          description="可调整时间范围，或确认设备已完成采集与同步。"
         />
         <el-table v-else :data="historyData" stripe>
           <el-table-column prop="created_at" label="采集时间" width="180">
@@ -360,6 +364,8 @@ const queryForm = reactive({
   timeRange: '24h',
   compareCategory: 'temperature' as string
 })
+
+const canExport = computed(() => !!queryForm.deviceId && historyData.value.length > 0)
 
 const wsStore = useWebSocketStore()
 const edgeDeviceStore = useEdgeDeviceStore()

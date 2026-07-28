@@ -57,18 +57,10 @@ describe('Forbidden.vue', () => {
     expect(vm.username).toBe('viewer1')
   })
 
-  it('computes roleLabel for viewer', async () => {
+  it('displays the fixed system administrator identity', async () => {
     const wrapper = mount(Forbidden, { global: { stubs } })
     await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.roleLabel).toBe('观察者')
-  })
-
-  it('computes roleTagType for viewer as info', async () => {
-    const wrapper = mount(Forbidden, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.roleTagType).toBe('info')
+    expect(wrapper.text()).toContain('系统管理员')
   })
 
   it('goHome navigates to dashboard', async () => {

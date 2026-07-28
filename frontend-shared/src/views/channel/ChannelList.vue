@@ -25,8 +25,8 @@
           v-model="nodeFilter"
           placeholder="节点筛选"
           clearable
+          class="filter-select"
           @change="handleFilter"
-          style="min-width: 160px;"
         >
           <template #prefix>
             <el-icon><Filter /></el-icon>
@@ -44,8 +44,8 @@
           v-model="hardwareTypeFilter"
           placeholder="硬件类型筛选"
           clearable
+          class="filter-select"
           @change="handleFilter"
-          style="min-width: 130px;"
         >
           <template #prefix>
             <el-icon><Filter /></el-icon>
@@ -75,9 +75,10 @@
       :description="searchKeyword || nodeFilter || hardwareTypeFilter ? '没有匹配的通道，请调整筛选条件' : '还没有配置任何通道，请先在节点详情中添加通道'"
     />
 
-    <!-- 通道表格 -->
-    <el-table
-      v-else
+    <!-- 通道表格（移动端可横向滚动，见 theme.css .mobile-table-wrapper） -->
+    <div v-else class="mobile-table-wrapper">
+      <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+      <el-table
       :data="paginatedChannels"
       stripe
       class="channel-table"
@@ -114,13 +115,18 @@
           <span v-else class="text-muted">-</span>
         </template>
       </el-table-column>
-      <el-table-column label="启用状态" width="100" align="center">
+      <el-table-column label="启用状态" width="110" align="center">
         <template #default="{ row }">
-          <el-switch
-            :model-value="row.enabled"
-            size="small"
-            disabled
-          />
+          <div class="status-cell">
+            <el-switch
+              :model-value="row.enabled"
+              size="small"
+              disabled
+            />
+            <span class="status-text" :class="{ off: !row.enabled }">
+              {{ row.enabled ? '启用' : '禁用' }}
+            </span>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="180" align="center">
@@ -146,6 +152,7 @@
         </template>
       </el-table-column>
     </el-table>
+    </div>
 
     <!-- 分页 -->
     <div v-if="filteredChannels.length > pageSize" class="pagination-wrapper">
@@ -364,8 +371,25 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.search-input {
-  width: 240px;
+.search-input,
+.filter-select {
+  width: 200px;
+}
+
+.status-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.status-text {
+  font-size: 12px;
+  color: var(--el-color-success);
+}
+
+.status-text.off {
+  color: var(--el-text-color-secondary);
 }
 
 .skeleton-grid {
@@ -401,5 +425,27 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* 移动端：筛选区竖排堆叠 */
+@media (max-width: 768px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-left {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-input,
+  .filter-select {
+    width: 100%;
+  }
+
+  .pagination-wrapper {
+    justify-content: center;
+  }
 }
 </style>

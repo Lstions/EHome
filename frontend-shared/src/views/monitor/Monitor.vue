@@ -4,7 +4,13 @@
     <div class="toolbar">
       <h2><el-icon aria-hidden="true"><DataAnalysis /></el-icon> 系统监控</h2>
       <div class="toolbar-actions">
-        <el-select v-model="refreshInterval" placeholder="刷新间隔" size="default" @change="handleIntervalChange">
+        <el-select
+          v-model="refreshInterval"
+          class="refresh-interval-select"
+          size="default"
+          aria-label="自动刷新间隔"
+          @change="handleIntervalChange"
+        >
           <el-option label="5秒" :value="5000" />
           <el-option label="10秒" :value="10000" />
           <el-option label="30秒" :value="30000" />
@@ -32,9 +38,9 @@
             <div class="stat-icon"><el-icon><Monitor /></el-icon></div>
             <div class="stat-content">
               <div class="stat-value">
-                <span class="online">{{ metrics?.device?.online || 0 }}</span>
+                <span :class="onlineValueClass(metrics?.device?.online, deviceTotal)">{{ metrics?.device?.online || 0 }}</span>
                 <span class="separator">/</span>
-                <span>{{ (metrics?.device?.online || 0) + (metrics?.device?.offline || 0) }}</span>
+                <span>{{ deviceTotal }}</span>
               </div>
               <div class="stat-label">设备在线状态</div>
             </div>
@@ -45,9 +51,9 @@
             <div class="stat-icon"><el-icon><Cpu /></el-icon></div>
             <div class="stat-content">
               <div class="stat-value">
-                <span class="online">{{ metrics?.collector?.online || 0 }}</span>
+                <span :class="onlineValueClass(metrics?.collector?.online, collectorTotal)">{{ metrics?.collector?.online || 0 }}</span>
                 <span class="separator">/</span>
-                <span>{{ (metrics?.collector?.online || 0) + (metrics?.collector?.offline || 0) }}</span>
+                <span>{{ collectorTotal }}</span>
               </div>
               <div class="stat-label">采集器在线状态</div>
             </div>
@@ -90,12 +96,38 @@
             <div class="control-grid">
               <div class="control-metric"><span>操作总数</span><strong>{{ formatNumber(metrics?.control?.operations_total || 0) }}</strong></div>
               <div class="control-metric"><span>活跃操作</span><strong>{{ metrics?.control?.active || 0 }}</strong></div>
-              <div class="control-metric"><span>Outbox 待处理</span><strong>{{ metrics?.control?.outbox_pending || 0 }}</strong></div>
-              <div class="control-metric"><span>Outbox 租约中</span><strong>{{ metrics?.control?.outbox_leased || 0 }}</strong></div>
-              <div class="control-metric" :class="{ attention: (metrics?.control?.unresolved_unknown || 0) > 0 }"><span>未处置 UNKNOWN</span><strong>{{ metrics?.control?.unresolved_unknown || 0 }}</strong></div>
-              <div class="control-metric" :class="{ attention: (metrics?.control?.capability_stale_nodes || 0) > 0 }"><span>能力快照过期</span><strong>{{ metrics?.control?.capability_stale_nodes || 0 }}</strong></div>
-              <div class="control-metric" :class="{ attention: (metrics?.control?.audit_write_failures || 0) > 0 }"><span>审计写失败</span><strong>{{ metrics?.control?.audit_write_failures || 0 }}</strong></div>
-              <div class="control-metric"><span>成功 / 失败</span><strong>{{ metrics?.control?.succeeded || 0 }} / {{ metrics?.control?.failed || 0 }}</strong></div>
+              <div class="control-metric">
+                <el-tooltip content="Outbox 待处理：已写入待发送队列、等待投递的控制消息数" placement="top">
+                  <span class="term">Outbox 待处理</span>
+                </el-tooltip>
+                <strong>{{ metrics?.control?.outbox_pending || 0 }}</strong>
+              </div>
+              <div class="control-metric">
+                <el-tooltip content="Outbox 租约中：已被投递任务领取（租约锁定）、正在发送中的消息数" placement="top">
+                  <span class="term">Outbox 租约中</span>
+                </el-tooltip>
+                <strong>{{ metrics?.control?.outbox_leased || 0 }}</strong>
+              </div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.unresolved_unknown || 0) > 0 }">
+                <el-tooltip content="执行结果未知（UNKNOWN）且尚未人工处置的操作数" placement="top">
+                  <span class="term">未处置 UNKNOWN</span>
+                </el-tooltip>
+                <strong>{{ metrics?.control?.unresolved_unknown || 0 }}</strong>
+              </div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.capability_stale_nodes || 0) > 0 }">
+                <el-tooltip content="能力快照超过有效期未上报的节点数" placement="top">
+                  <span class="term">能力快照过期</span>
+                </el-tooltip>
+                <strong>{{ metrics?.control?.capability_stale_nodes || 0 }}</strong>
+              </div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.audit_write_failures || 0) > 0 }">
+                <el-tooltip content="审计日志写入失败的次数" placement="top">
+                  <span class="term">审计写失败</span>
+                </el-tooltip>
+                <strong>{{ metrics?.control?.audit_write_failures || 0 }}</strong>
+              </div>
+              <div class="control-metric"><span>操作成功</span><strong>{{ metrics?.control?.succeeded || 0 }}</strong></div>
+              <div class="control-metric" :class="{ attention: (metrics?.control?.failed || 0) > 0 }"><span>操作失败</span><strong>{{ metrics?.control?.failed || 0 }}</strong></div>
             </div>
           </el-card>
         </el-col>
@@ -313,6 +345,11 @@ const collectorOfflinePercent = computed(() => {
 })
 
 // 方法
+// 在线数为 0 且总数 > 0 时用告警色，避免与同页"离线=红"的语义冲突
+const onlineValueClass = (online: number | undefined, total: number) => {
+  return total > 0 && (online || 0) === 0 ? 'online-none' : 'online'
+}
+
 const fetchMetrics = async () => {
   try {
     const res = await getMetricsSummary()
@@ -391,6 +428,10 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.refresh-interval-select {
+  width: 130px;
+}
+
 .stat-cards {
   margin-bottom: 20px;
 }
@@ -410,23 +451,28 @@ onUnmounted(() => {
 .control-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0;
-  border: 1px solid var(--el-border-color-lighter);
+  gap: 8px;
 }
 
 .control-metric {
   min-width: 0;
-  padding: 14px 16px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  border-right: 1px solid var(--el-border-color-lighter);
-  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
 }
 
 .control-metric span {
   color: var(--el-text-color-secondary);
   font-size: 13px;
+}
+
+.control-metric .term {
+  cursor: help;
+  text-decoration: underline dotted var(--el-text-color-placeholder);
+  text-underline-offset: 3px;
 }
 
 .control-metric strong {
@@ -475,6 +521,10 @@ onUnmounted(() => {
 
 .stat-value .online {
   color: var(--el-color-success);
+}
+
+.stat-value .online-none {
+  color: var(--el-color-danger);
 }
 
 .stat-value .separator {

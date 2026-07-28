@@ -91,9 +91,9 @@ const iconSize = computed(() => {
   width: 100px;
   height: 100px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--el-fill-color-light) 0%, var(--el-fill-color) 100%);
+  background: linear-gradient(135deg, var(--el-fill-color) 0%, var(--el-fill-color-darker) 100%);
   margin-bottom: 20px;
-  color: var(--el-text-color-placeholder);
+  color: var(--el-text-color-secondary);
 }
 
 .empty-state.small .empty-illustration {
@@ -142,7 +142,7 @@ const iconSize = computed(() => {
 }
 
 .empty-state.filtered .empty-illustration {
-  background: var(--el-fill-color-light);
+  background: var(--el-fill-color-dark);
   color: var(--el-text-color-secondary);
 }
 

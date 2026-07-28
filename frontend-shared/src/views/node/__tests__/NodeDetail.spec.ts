@@ -242,6 +242,29 @@ describe('NodeDetail', () => {
     expect(vm.syncStateTagType).toBe('success')
   })
 
+  it('downgrades the sync state badge to 离线 when the node is offline', async () => {
+    mockGetDetail.mockReturnValueOnce(Promise.resolve({
+      id: 2,
+      node_id: 'node-1',
+      name: 'Collector-B',
+      model: 'ESP32',
+      status: 'offline',
+      firmware_version: '1.2.0',
+      connection_quality: 0,
+      ping_latency_ms: 0,
+      last_online_time: new Date().toISOString(),
+      online_duration: 0,
+      config_sync_state: 'syncing',
+      protocol_version: '2.0',
+    }))
+    const wrapper = mount(NodeDetail, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    expect(vm.collector.status).toBe('offline')
+    expect(vm.syncStateLabel).toBe('离线')
+    expect(vm.syncStateTagType).toBe('info')
+  })
+
   it('computes collectorId from route params', async () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()

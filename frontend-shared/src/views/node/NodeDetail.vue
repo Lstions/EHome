@@ -1,32 +1,52 @@
 <template>
   <div class="collector-detail">
-    <PageHeader title="节点详情" :show-back="true" @back="goBack">
+    <el-breadcrumb separator="/" class="node-breadcrumb">
+      <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
+      <el-breadcrumb-item :to="{ path: '/node' }">节点管理</el-breadcrumb-item>
+      <el-breadcrumb-item>{{ nodeDisplayName }}</el-breadcrumb-item>
+    </el-breadcrumb>
+    <PageHeader :title="pageTitle" :show-back="true" @back="goBack">
       <template #extra>
-        <el-button
-          :icon="RefreshRight"
-          @click="handleSyncConfig"
-          :loading="syncingConfig"
-          :disabled="!collector || collector.status === 'offline'"
-        >
-          同步配置
-        </el-button>
-        <el-button
-          type="primary"
-          :icon="Upload"
-          @click="showOTADialog = true"
-          :disabled="!collector || collector.status === 'offline'"
-        >
-          OTA 升级
-        </el-button>
-        <el-button
-          type="primary"
-          :icon="Connection"
-          :loading="pinging"
-          :disabled="!collector || collector.status === 'offline'"
-          @click="handlePing"
-        >
-          测延迟
-        </el-button>
+        <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!collectorOffline">
+          <span>
+            <el-button
+              :icon="RefreshRight"
+              :size="isMobile ? 'small' : 'default'"
+              @click="handleSyncConfig"
+              :loading="syncingConfig"
+              :disabled="collectorOffline"
+            >
+              同步配置
+            </el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!collectorOffline">
+          <span>
+            <el-button
+              type="primary"
+              :icon="Upload"
+              :size="isMobile ? 'small' : 'default'"
+              @click="showOTADialog = true"
+              :disabled="collectorOffline"
+            >
+              OTA 升级
+            </el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!collectorOffline">
+          <span>
+            <el-button
+              type="primary"
+              :icon="Connection"
+              :size="isMobile ? 'small' : 'default'"
+              :loading="pinging"
+              :disabled="collectorOffline"
+              @click="handlePing"
+            >
+              测延迟
+            </el-button>
+          </span>
+        </el-tooltip>
       </template>
     </PageHeader>
 
@@ -68,7 +88,9 @@
           <StatusBadge :status="collector.status" />
         </el-descriptions-item>
         <el-descriptions-item label="连接质量">
-          <span v-if="collector.status !== 'online'">-</span>
+          <el-tooltip v-if="collector.status !== 'online'" content="设备离线，暂无数据" placement="top">
+            <span class="field-na">-</span>
+          </el-tooltip>
           <el-progress
             v-else-if="collector.connection_quality !== undefined"
             :percentage="collector.connection_quality"
@@ -83,13 +105,18 @@
                 :style="{ color: getLatencyColor(collector.ping_latency_ms) }">
             {{ collector.ping_latency_ms }} ms
           </span>
+          <el-tooltip v-else-if="collector.status === 'offline'" content="设备离线，暂无数据" placement="top">
+            <span class="field-na">-</span>
+          </el-tooltip>
           <span v-else>-</span>
         </el-descriptions-item>
         <el-descriptions-item label="上线时间">
           {{ formatTime(collector.last_online_time) }}
         </el-descriptions-item>
         <el-descriptions-item label="在线时长">
-          {{ sessionDuration }}
+          <el-tooltip content="设备离线，暂无数据" placement="top" :disabled="collector.status === 'online' || sessionDuration !== '-'">
+            <span :class="{ 'field-na': sessionDuration === '-' && collector.status !== 'online' }">{{ sessionDuration }}</span>
+          </el-tooltip>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -421,6 +448,9 @@ const showOTADialog = ref(false)
 const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
 
+// 节点离线（或未加载）时顶部操作按钮不可用
+const collectorOffline = computed(() => !collector.value || collector.value.status === 'offline')
+
 // 移动端：描述列表单列，桌面双列
 const { isMobile } = useResponsive()
 const descColumns = computed(() => (isMobile.value ? 1 : 2))
@@ -499,8 +529,21 @@ const sessionDuration = computed(() => {
 
 const collectorId = computed(() => route.params.id as string)
 
+// 面包屑当前节点：优先名称，未命名时显示设备ID短码
+const nodeDisplayName = computed(() => {
+  if (collector.value?.name) return collector.value.name
+  const id = collector.value?.node_id || collectorId.value || ''
+  if (!id) return '节点详情'
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id
+})
+
+// 页面标题：优先节点名称，未命名时与面包屑一致显示设备ID短码，"节点详情"仅作最终兜底
+const pageTitle = computed(() => collector.value?.name || nodeDisplayName.value)
+
 // 配置同步状态
 const syncStateLabel = computed(() => {
+  // 离线设备不可能正在同步：覆盖后端快照中可能残留的"同步中"等状态
+  if (collector.value?.status === 'offline') return '离线'
   const s = collector.value?.config_sync_state
   return {
     in_sync: '已同步',
@@ -512,6 +555,7 @@ const syncStateLabel = computed(() => {
 })
 
 const syncStateTagType = computed(() => {
+  if (collector.value?.status === 'offline') return 'info'
   return {
     in_sync: 'success',
     syncing: 'warning',
@@ -875,6 +919,58 @@ onUnmounted(() => {
 <style scoped>
 .collector-detail {
   padding: 0;
+}
+
+.node-breadcrumb {
+  margin-bottom: 12px;
+}
+
+/* 离线导致的占位符：统一灰色，提示无数据 */
+.field-na {
+  color: var(--el-text-color-placeholder);
+}
+
+/* 移动端：标题保持横排，空间不足时整体换行压缩按钮区而非挤压标题 */
+@media (max-width: 768px) {
+  .collector-detail :deep(.page-header) {
+    flex-wrap: wrap;
+  }
+
+  .collector-detail :deep(.page-header-left) {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .collector-detail :deep(.page-header-left > div) {
+    min-width: 0;
+  }
+
+  .collector-detail :deep(.page-header-left h2) {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .collector-detail :deep(.page-header-right) {
+    flex-shrink: 0;
+    gap: 6px;
+  }
+}
+
+/* 离线禁用按钮：三种 type 统一为灰色禁用态。
+   Element Plus 对 primary 类型会把 --el-button-disabled-* 变量重定义为浅蓝色，
+   且 .el-button--primary.is-disabled 选择器特异性更高，
+   因此这里必须显式使用灰色变量并追加 --primary 覆盖才能生效 */
+.collector-detail :deep(.el-button.is-disabled),
+.collector-detail :deep(.el-button.is-disabled:hover),
+.collector-detail :deep(.el-button.is-disabled:focus),
+.collector-detail :deep(.el-button--primary.is-disabled),
+.collector-detail :deep(.el-button--primary.is-disabled:hover),
+.collector-detail :deep(.el-button--primary.is-disabled:focus) {
+  background-color: var(--el-fill-color-light);
+  border-color: var(--el-border-color);
+  color: var(--el-text-color-placeholder);
+  opacity: 0.6;
 }
 
 .editable-name {

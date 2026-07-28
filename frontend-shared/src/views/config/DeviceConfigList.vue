@@ -2,7 +2,7 @@
   <div class="config-page">
     <!-- 顶部统计 -->
     <div class="stats-row">
-      <StatCard label="本页模板" icon-color="var(--el-color-primary)">
+      <StatCard label="模板总数" icon-color="var(--el-color-primary)">
         <template #icon><el-icon><Document /></el-icon></template>
         <template #value><span class="stat-value">{{ stats.total }}</span></template>
       </StatCard>
@@ -36,21 +36,21 @@
             @input="handleSearch"
           />
           
-          <el-select v-model="typeFilter" placeholder="设备类型" clearable>
+          <el-select v-model="typeFilter" placeholder="设备类型" clearable class="filter-select">
             <template #prefix>
               <el-icon><Grid /></el-icon>
             </template>
             <el-option v-for="t in deviceTypeOptions" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
           
-          <el-select v-model="hardwareFilter" placeholder="硬件类型" clearable>
+          <el-select v-model="hardwareFilter" placeholder="硬件类型" clearable class="filter-select">
             <el-option label="UART" value="uart" />
             <el-option label="I2C" value="i2c" />
             <el-option label="SPI" value="spi" />
             <el-option label="ADC" value="adc" />
           </el-select>
           
-          <el-select v-model="statusFilter" placeholder="状态" clearable>
+          <el-select v-model="statusFilter" placeholder="状态" clearable class="filter-select">
             <el-option label="启用" value="active" />
             <el-option label="禁用" value="inactive" />
           </el-select>
@@ -116,9 +116,10 @@
             
             <div class="spec-item">
               <span class="label">通信协议</span>
-              <el-tag :type="config.protocol === 'modbus' ? 'primary' : 'info'" size="small">
-                {{ config.protocol?.toUpperCase() }}
+              <el-tag v-if="config.protocol" :type="config.protocol === 'modbus' ? 'primary' : 'info'" size="small">
+                {{ config.protocol.toUpperCase() }}
               </el-tag>
+              <span v-else class="text-muted">-</span>
             </div>
             
             <div class="spec-item">
@@ -214,7 +215,7 @@
         </el-descriptions-item>
         <el-descriptions-item label="设备类型">{{ getDeviceTypeLabel(previewConfig.device_type) }}</el-descriptions-item>
         <el-descriptions-item label="硬件类型">{{ previewConfig.hardware_type?.toUpperCase() }}</el-descriptions-item>
-        <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() }}</el-descriptions-item>
+        <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() || '-' }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatTime(previewConfig.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="描述" :span="2">{{ previewConfig.description || '无' }}</el-descriptions-item>
       </el-descriptions>
@@ -322,8 +323,9 @@ const fetchConfigs = async () => {
 }
 
 // 更新统计
+// total 用服务端返回的全量总数；其余指标仅有本页数据，保持本页口径（标签已注明"本页"）
 const updateStats = () => {
-  stats.total = configs.value.length
+  stats.total = total.value
   stats.active = configs.value.filter(c => c.status === 'active').length
   
   const hardwareTypes = new Set(configs.value.map(c => c.hardware_type))
@@ -629,7 +631,15 @@ onMounted(() => {
 }
 
 .search-input {
-  width: 200px;
+  width: 240px;
+}
+
+.filter-select {
+  width: 140px;
+}
+
+.text-muted {
+  color: var(--el-text-color-secondary);
 }
 
 .filter-right {
@@ -789,14 +799,21 @@ onMounted(() => {
   overflow: auto;
 }
 
-/* 响应式 */
+/* 响应式：中屏 2 列；移动端保持 2 列（与 NodeList/EdgeDeviceList 一致，避免单列占高过大） */
 @media (max-width: 1200px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
-  .stats-row { grid-template-columns: 1fr; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
+  .filter-left { flex-direction: column; align-items: stretch; }
   .filter-left, .filter-right { width: 100%; }
+  .filter-right { justify-content: flex-end; }
+  .search-input, .filter-select { width: 100%; }
   .config-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 480px) {
+  .stats-row { gap: 10px; }
 }
 </style>

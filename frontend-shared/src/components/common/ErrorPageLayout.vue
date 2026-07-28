@@ -1,5 +1,9 @@
 <template>
   <div class="error-page">
+    <div class="error-brand">
+      <img src="/favicon.svg" alt="EHomeSystem" class="error-brand-logo" />
+      <span class="error-brand-name">EHomeSystem</span>
+    </div>
     <div class="error-content" :style="{ maxWidth }">
       <div class="error-code" :style="{ background: gradient, '-webkit-background-clip': 'text', '-webkit-text-fill-color': 'transparent', 'background-clip': 'text' }">
         {{ code }}
@@ -30,12 +34,32 @@ withDefaults(defineProps<{
 
 <style scoped>
 .error-page {
+  position: relative;
   display: flex;
   justify-content: center;
   align-items: center;
+  box-sizing: border-box;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg-color-page);
   padding: 24px;
+}
+.error-brand {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.error-brand-logo {
+  width: 28px;
+  height: 28px;
+}
+.error-brand-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-color-primary);
 }
 .error-content {
   text-align: center;

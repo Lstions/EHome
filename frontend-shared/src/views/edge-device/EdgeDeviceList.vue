@@ -31,7 +31,7 @@
 
         <StatCard label="今日数据" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
           <template #icon><el-icon><DataAnalysis /></el-icon></template>
-          <template #value><CountUp :value="stats.todayData" :decimals="1" suffix="k" class="stat-value" /></template>
+          <template #value><CountUp :value="todayDataDisplay.value" :decimals="todayDataDisplay.decimals" :suffix="todayDataDisplay.suffix" class="stat-value" /></template>
         </StatCard>
       </div>
 
@@ -40,7 +40,7 @@
       <div class="toolbar-left">
         <el-input
           v-model="searchKeyword"
-          placeholder="搜索边缘设备名称、类型..."
+          placeholder="搜索名称/类型..."
           prefix-icon="Search"
           clearable
           class="search-input"
@@ -212,7 +212,11 @@
             <el-icon :size="16"><Connection /></el-icon>
             <div class="fact-content">
               <span class="fact-label">所属节点</span>
-              <span class="fact-value" :title="device.node?.name || ('#' + device.node_id)">{{ device.node?.name || ('#' + device.node_id) }}</span>
+              <span
+                class="fact-value copyable"
+                :title="`点击复制：${device.node?.name || ('#' + device.node_id)}`"
+                @click="copyText(device.node?.name || ('#' + device.node_id))"
+              >{{ device.node?.name || ('#' + device.node_id) }}</span>
             </div>
           </div>
           <div class="fact-item">
@@ -239,7 +243,7 @@
         <div class="card-actions">
           <el-button size="small" type="primary" text :icon="View" @click="goToDetail(device.id)">详情</el-button>
           <el-button size="small" text :icon="Edit" @click="handleEdit(device)">编辑</el-button>
-          <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${device.name}`" @click="handleDelete(device)" />
+          <el-button size="small" type="danger" text :icon="Delete" :aria-label="`删除 ${device.name}`" @click="handleDelete(device)">删除</el-button>
         </div>
       </el-card>
     </div>
@@ -676,6 +680,14 @@ const fetchTodayDataCount = async () => {
   }
 }
 
+// 今日数据展示：<1000 显示原始整数（避免 "0.0k"），>=1000 以千为单位带一位小数
+const todayDataDisplay = computed(() => {
+  const count = stats.todayData
+  return count >= 1000
+    ? { value: count / 1000, decimals: 1, suffix: 'k' }
+    : { value: count, decimals: 0, suffix: '' }
+})
+
 // 只显示在线节点
 const onlineCollectors = computed(() => collectors.value.filter((c: any) => c.status === 'online'))
 
@@ -688,7 +700,11 @@ const filteredDevices = computed(() => {
   
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
-    result = result.filter(d => d.name?.toLowerCase().includes(kw))
+    result = result.filter(d =>
+      d.name?.toLowerCase().includes(kw) ||
+      d.device_type?.toLowerCase().includes(kw) ||
+      getDeviceTypeLabel(d.device_type)?.toLowerCase().includes(kw)
+    )
   }
   
   if (typeFilter.value) {
@@ -889,6 +905,16 @@ const clearFilters = () => {
   statusFilter.value = ''
   hardwareFilter.value = ''
   currentPage.value = 1
+}
+
+// 复制到剪贴板（跟随 FirmwareManage 的复制交互模式）
+const copyText = async (text: string) => {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制: ' + text)
+  } catch {
+    ElMessage.error('复制失败，请手动复制: ' + text)
+  }
 }
 
 const handleStatClick = (status: string) => {
@@ -1487,6 +1513,14 @@ code.fact-value {
   font-family: var(--el-font-family);
 }
 
+.fact-value.copyable {
+  cursor: pointer;
+}
+
+.fact-value.copyable:hover {
+  color: var(--el-color-primary);
+}
+
 .card-reading {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr) max-content;
@@ -1769,6 +1803,13 @@ code.fact-value {
   .toolbar { flex-direction: column; gap: 12px; }
   .toolbar-left { width: 100%; flex-wrap: wrap; }
   .search-input { width: 100%; }
+  /* 设备名移动端允许两行，放宽截断 */
+  .device-info h3 {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
 }
 
 @media (max-width: 480px) {
