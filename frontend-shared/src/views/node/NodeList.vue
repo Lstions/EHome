@@ -543,15 +543,6 @@ onUnmounted(() => {
   gap: 16px;
 }
 
-/* 响应式：中屏 2 列，移动端保持 2 列（避免单列占高过大挤出内容） */
-@media (max-width: 1200px) {
-  .stats-row { grid-template-columns: repeat(2, 1fr); }
-}
-
-@media (max-width: 480px) {
-  .stats-row { gap: 10px; }
-}
-
 .stat-card {
   background: var(--card-bg);
   border-radius: 12px;
@@ -878,7 +869,7 @@ onUnmounted(() => {
   padding: 60px 0;
 }
 
-/* 响应式 */
+/* 响应式：中屏 2 列；移动端保持 2 列（避免单列占高过大挤出内容，基线缺陷③） */
 @media (max-width: 1200px) {
   .stats-row {
     grid-template-columns: repeat(2, 1fr);
@@ -886,22 +877,22 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .stats-row {
-    grid-template-columns: 1fr;
-  }
-  
   .toolbar {
     flex-direction: column;
     gap: 12px;
   }
-  
+
   .toolbar-left, .toolbar-right {
     width: 100%;
     flex-wrap: wrap;
   }
-  
+
   .search-input {
     width: 100%;
   }
+}
+
+@media (max-width: 480px) {
+  .stats-row { gap: 10px; }
 }
 </style>
