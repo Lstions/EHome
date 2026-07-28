@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeDetail from '../NodeDetail.vue'
@@ -106,6 +107,16 @@ vi.mock('@/events/events', () => ({
   WS_EVENT: { NODE_STATUS: 'node_status', NODE_LOG: 'node_log' },
 }))
 
+// Mock useResponsive — 默认桌面端（descColumns=2）
+vi.mock('@/composables/useResponsive', () => ({
+  useResponsive: () => ({
+    width: ref(1440),
+    isMobile: ref(false),
+    isTablet: ref(false),
+    isDesktop: ref(true),
+  }),
+}))
+
 // Stub child components
 const stubs = {
   PageHeader: { template: '<div data-testid="page-header"><slot /><slot name="extra" /></div>' },
@@ -156,6 +167,15 @@ describe('NodeDetail', () => {
     expect(nodeDetailSource).toContain('sequence !== otaRequestSequence')
     expect(nodeDetailSource).toContain('editingName.value = false')
     expect(nodeDetailSource).toContain('showOTADialog.value = false')
+  })
+
+  it('adapts descriptions column and table wrappers for mobile viewports', () => {
+    // 移动端响应式：描述列表列数由 useResponsive 驱动，表格包滚动容器 + 横滑提示
+    expect(nodeDetailSource).toContain('useResponsive')
+    expect(nodeDetailSource).toContain('descColumns = computed(() => (isMobile.value ? 1 : 2))')
+    expect(nodeDetailSource).toContain(':column="descColumns"')
+    expect(nodeDetailSource.match(/mobile-table-wrapper/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(nodeDetailSource.match(/mobile-table-hint/g)?.length).toBeGreaterThanOrEqual(2)
   })
 
   beforeEach(() => {

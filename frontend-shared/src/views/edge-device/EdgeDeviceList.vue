@@ -1760,15 +1760,18 @@ code.fact-value {
   50% { opacity: 0.5; }
 }
 
-/* 响应式 */
+/* 响应式：中屏 2 列，移动端保持 2 列（避免单列占高过大挤出内容，基线缺陷③） */
 @media (max-width: 1200px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
-  .stats-row { grid-template-columns: 1fr; }
   .toolbar { flex-direction: column; gap: 12px; }
   .toolbar-left { width: 100%; flex-wrap: wrap; }
   .search-input { width: 100%; }
+}
+
+@media (max-width: 480px) {
+  .stats-row { gap: 10px; }
 }
 </style>

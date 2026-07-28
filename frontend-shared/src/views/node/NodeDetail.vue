@@ -38,7 +38,7 @@
         <span>基本信息</span>
       </template>
 
-      <el-descriptions :column="2" border>
+      <el-descriptions :column="descColumns" border>
         <el-descriptions-item label="节点名称">
           <div class="editable-name">
             <span v-if="!editingName">{{ collector.name || '(未命名)' }}</span>
@@ -99,7 +99,7 @@
       <template #header>
         <span>配置同步状态 <el-tag :type="syncStateTagType" size="small">{{ syncStateLabel }}</el-tag></span>
       </template>
-      <el-descriptions :column="2" border>
+      <el-descriptions :column="descColumns" border>
         <el-descriptions-item label="协议版本">
           {{ collector.protocol_version || '2.0' }}
         </el-descriptions-item>
@@ -109,7 +109,7 @@
         <el-descriptions-item label="Last Sync">
           {{ formatTime(collector.last_sync_at) }}
         </el-descriptions-item>
-        <el-descriptions-item v-if="collector.last_sync_id" label="Last Sync ID" :span="2">
+        <el-descriptions-item v-if="collector.last_sync_id" label="Last Sync ID" :span="descColumns">
           <code>{{ collector.last_sync_id }}</code>
         </el-descriptions-item>
       </el-descriptions>
@@ -232,7 +232,9 @@
       <el-skeleton v-if="devicesLoading" :rows="4" animated />
       <template v-else>
         <el-empty v-if="devices.length === 0" description="暂无设备" />
-        <el-table v-else :data="devices" stripe @row-click="handleDeviceClick" style="cursor: pointer;">
+        <div v-else class="mobile-table-wrapper">
+          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+          <el-table :data="devices" stripe @row-click="handleDeviceClick" style="cursor: pointer;">
           <el-table-column prop="name" label="设备名称" min-width="140" show-overflow-tooltip />
           <el-table-column label="类型" width="130">
             <template #default="{ row }">
@@ -279,7 +281,8 @@
               </el-button>
             </template>
           </el-table-column>
-        </el-table>
+          </el-table>
+        </div>
       </template>
     </el-card>
 
@@ -298,7 +301,9 @@
       <el-skeleton v-if="otaHistoryLoading" :rows="4" animated />
       <template v-else>
         <el-empty v-if="otaHistory.length === 0" description="暂无升级记录" />
-        <el-table v-else :data="otaHistory" stripe>
+        <div v-else class="mobile-table-wrapper">
+          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+          <el-table :data="otaHistory" stripe>
           <el-table-column label="升级版本" width="120">
             <template #default="{ row }">
               {{ row.from_version }} → {{ row.to_version }}
@@ -344,7 +349,8 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-        </el-table>
+          </el-table>
+        </div>
       </template>
     </el-card>
 
@@ -371,6 +377,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useResponsive } from '@/composables/useResponsive'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, Refresh, RefreshRight, Link, Connection, Warning, Edit } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -413,6 +420,10 @@ const syncingConfig = ref(false)
 const showOTADialog = ref(false)
 const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
+
+// 移动端：描述列表单列，桌面双列
+const { isMobile } = useResponsive()
+const descColumns = computed(() => (isMobile.value ? 1 : 2))
 
 // 节点名称编辑
 const editingName = ref(false)

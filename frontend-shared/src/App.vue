@@ -53,4 +53,14 @@ html, body {
   align-items: center;
   justify-content: center;
 }
+
+/* 移动端输入防缩放：iOS Safari 对 font-size < 16px 的输入框聚焦时自动放大页面。
+   全局 <style> 中 :deep() 无效，必须用普通选择器。 */
+@media (max-width: 768px) {
+  .el-input__inner,
+  .el-textarea__inner,
+  .el-select__wrapper {
+    font-size: 16px;
+  }
+}
 </style>

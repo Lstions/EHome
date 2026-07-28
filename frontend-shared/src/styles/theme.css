@@ -366,6 +366,35 @@ html.dark .el-descriptions__content {
    响应式工具类
    ============================================ */
 
+/* 对话框移动端兜底：项目内 el-dialog 普遍硬编码 width（500px/560px 等），
+   窄视口下会溢出。全局 clamp 到 92vw，桌面端不受影响。 */
+.el-dialog {
+  max-width: 92vw;
+}
+
+/* 移动端表格横向滚动模式：
+   宽表格包一层 .mobile-table-wrapper，窄屏显示滚动提示。
+   el-table 自带横向滚动，wrapper 仅提供提示与边界。 */
+.mobile-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.mobile-table-hint {
+  display: none;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+  text-align: center;
+  padding: 4px 0 8px;
+  user-select: none;
+}
+
+@media (max-width: 768px) {
+  .mobile-table-hint {
+    display: block;
+  }
+}
+
 /* 隐藏滚动条但保持滚动功能 */
 .scrollbar-hidden {
   -ms-overflow-style: none;
