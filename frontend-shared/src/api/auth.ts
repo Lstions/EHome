@@ -5,6 +5,13 @@ export interface LoginRequest {
   password: string
 }
 
+export interface InitializeRequest {
+  credential: string
+  username: string
+  password: string
+  email?: string
+}
+
 export interface AccountInfo {
   id: number
   username: string
@@ -28,6 +35,10 @@ export const authApi = {
   async login(data: LoginRequest): Promise<LoginResponse> {
     const response = await client.post<unknown, any>('/api/v1/auth/login', data)
     return (response as any).data as LoginResponse
+  },
+
+  async initialize(data: InitializeRequest): Promise<void> {
+    await client.post('/api/v1/auth/initialize', data)
   },
 
   async logout(): Promise<void> {
