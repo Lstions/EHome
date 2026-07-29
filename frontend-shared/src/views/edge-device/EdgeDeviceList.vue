@@ -11,20 +11,17 @@
     <template v-else>
       <!-- 顶部统计 -->
       <div class="stats-row">
-        <StatCard label="本页边缘设备" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
+        <StatCard label="本页边缘设备" mobile-label="边缘设备" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
           <template #icon><el-icon><Cpu /></el-icon></template>
           <template #value><CountUp :value="stats.total" class="stat-value" /></template>
-          <template #suffix>
-            <div class="stat-action"><el-icon><Plus /></el-icon></div>
-          </template>
         </StatCard>
 
-        <StatCard label="本页在线" icon-color="var(--el-color-success)">
+        <StatCard label="本页在线" mobile-label="在线" icon-color="var(--el-color-success)">
           <template #icon><el-icon><CircleCheck /></el-icon></template>
           <template #value><CountUp :value="stats.online" class="stat-value" /></template>
         </StatCard>
 
-        <StatCard label="本页离线/异常" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
+        <StatCard label="本页离线/异常" mobile-label="离线/异常" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
           <template #icon><el-icon><CircleClose /></el-icon></template>
           <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
         </StatCard>
@@ -1342,15 +1339,6 @@ onUnmounted(() => {
 .stat-value { display: block; font-size: 28px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
 
-.stat-card .stat-action {
-  opacity: 0;
-  transition: opacity 0.2s;
-  color: var(--el-color-primary);
-}
-
-.stat-card:hover .stat-action {
-  opacity: 1;
-}
 
 /* 工具栏 */
 .toolbar {
@@ -1794,12 +1782,19 @@ code.fact-value {
   50% { opacity: 0.5; }
 }
 
-/* 响应式：中屏 2 列，移动端保持 2 列（避免单列占高过大挤出内容，基线缺陷③） */
+/* 响应式：中屏 2 列，移动端单行 4 列紧凑横排（占高约一行，让位给列表） */
 @media (max-width: 1200px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
+  .stats-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  /* 覆盖桌面 .stat-card 基础块（padding 20px/图标 48px），单行 4 列纵向紧凑小卡 */
+  .stat-card { flex-direction: column; align-items: center; text-align: center; gap: 4px; padding: 8px 4px; border-radius: 10px; }
+  .stat-icon { width: 22px; height: 22px; border-radius: 6px; font-size: 13px; flex-shrink: 0; }
+  .stat-content { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .stat-value { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .stat-label { font-size: 10px; line-height: 1.3; max-height: 2.6em; overflow: hidden; word-break: keep-all; overflow-wrap: break-word; }
   .toolbar { flex-direction: column; gap: 12px; }
   .toolbar-left { width: 100%; flex-wrap: wrap; }
   .search-input { width: 100%; }
@@ -1812,7 +1807,4 @@ code.fact-value {
   }
 }
 
-@media (max-width: 480px) {
-  .stats-row { gap: 10px; }
-}
 </style>

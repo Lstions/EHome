@@ -46,12 +46,14 @@ describe('NodeDetail mobile responsive (behavior)', () => {
     expect(src.match(/class="mobile-table-hint"/g)?.length).toBe(2)
   })
 
-  it('keeps the page title horizontal on mobile (no per-character vertical stacking)', () => {
-    // 标题容器可收缩 + 禁止逐字换行，空间不足时省略而非竖排
+  it('page title uses line-clamp instead of nowrap to prevent 0-width collapse on mobile', () => {
+    // 标题容器可收缩 + 允许折行（最多两行），避免被 flex 挤压为 0px
     expect(src).toContain('.page-header-left')
     expect(src).toContain('min-width: 0')
-    expect(src).toContain('white-space: nowrap')
-    expect(src).toContain('text-overflow: ellipsis')
+    expect(src).toContain('-webkit-line-clamp: 2')
+    expect(src).toContain('white-space: normal')
+    // 按钮区独占一行，标题获得整行宽度
+    expect(src).toContain('width: 100%')
   })
 
   it('shrinks the header action buttons on mobile instead of squeezing the title', () => {

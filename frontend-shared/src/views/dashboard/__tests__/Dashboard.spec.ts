@@ -106,6 +106,22 @@ describe('Dashboard.vue', () => {
     expect(wrapper.find('.dashboard-stats').exists()).toBe(true)
   })
 
+  it('makes dashboard KPI navigation cards keyboard-operable', async () => {
+    const wrapper = mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    const firstCard = wrapper.findAll('.stat-card')[0]
+
+    expect(firstCard.attributes('role')).toBe('link')
+    expect(firstCard.attributes('tabindex')).toBe('0')
+    expect(firstCard.attributes('aria-label')).toBe('查看采集器总数')
+
+    await firstCard.trigger('keydown.enter')
+    expect(mockPush).toHaveBeenCalledWith('/node')
+
+    await firstCard.trigger('keydown.space')
+    expect(mockPush).toHaveBeenLastCalledWith('/node')
+  })
+
   it('does not render a simulated status timeline as operational data', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()

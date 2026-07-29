@@ -188,6 +188,7 @@ describe('EdgeDeviceList.vue', () => {
     await flushPromises()
     const statCards = wrapper.findAll('.stat-card')
     expect(statCards.length).toBe(4) // total, online, offline, todayData
+    expect(wrapper.find('.stat-action').exists()).toBe(false)
   })
 
   it('ignores malformed device entries when filtering and calculating stats', async () => {

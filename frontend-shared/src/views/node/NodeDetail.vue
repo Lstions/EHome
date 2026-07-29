@@ -930,7 +930,8 @@ onUnmounted(() => {
   color: var(--el-text-color-placeholder);
 }
 
-/* 移动端：标题保持横排，空间不足时整体换行压缩按钮区而非挤压标题 */
+/* 移动端：标题独占一行（超长最多两行），按钮区换行到第二行右对齐
+   参考 DeviceHeader.vue 的成熟模式，避免标题被 flex 挤压为 0px */
 @media (max-width: 768px) {
   .collector-detail :deep(.page-header) {
     flex-wrap: wrap;
@@ -946,13 +947,17 @@ onUnmounted(() => {
   }
 
   .collector-detail :deep(.page-header-left h2) {
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
+    word-break: break-word;
+    white-space: normal;
   }
 
   .collector-detail :deep(.page-header-right) {
-    flex-shrink: 0;
+    width: 100%;
+    justify-content: flex-end;
     gap: 6px;
   }
 }

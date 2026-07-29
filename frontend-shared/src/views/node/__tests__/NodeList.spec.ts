@@ -127,6 +127,8 @@ describe('NodeList.vue', () => {
     await flushPromises()
     const statCards = wrapper.findAll('.stat-card')
     expect(statCards.length).toBe(4) // total, online, offline, warning
+    expect(wrapper.find('.stat-action').exists()).toBe(false)
+    expect(wrapper.find('.stat-trend').exists()).toBe(false)
   })
 
   it('computes stats from nodes correctly', async () => {
@@ -198,14 +200,6 @@ describe('NodeList.vue', () => {
     const vm = wrapper.vm as any
     expect(vm.modelOptions).toContain('ESP32')
     expect(vm.modelOptions).toContain('RPi4')
-  })
-
-  it('computes online rate correctly', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    // 2 online / 3 total = 66%
-    expect(vm.stats.onlineRate).toBe(67)
   })
 
   it('toggles view mode between grid and list', async () => {

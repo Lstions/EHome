@@ -9,7 +9,7 @@
     </template>
     <template v-else>
       <div class="dashboard-stats">
-        <el-card shadow="hover" class="stat-card" @click="router.push('/node')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看采集器总数" @click="router.push('/node')" @keydown.enter.prevent="router.push('/node')" @keydown.space.prevent="router.push('/node')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-primary);">
               <el-icon :size="32"><Connection /></el-icon>
@@ -21,7 +21,7 @@
           </div>
         </el-card>
 
-        <el-card shadow="hover" class="stat-card" @click="router.push('/node?status=online')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看在线采集器" @click="router.push('/node?status=online')" @keydown.enter.prevent="router.push('/node?status=online')" @keydown.space.prevent="router.push('/node?status=online')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-success);">
               <el-icon :size="32"><CircleCheck /></el-icon>
@@ -33,7 +33,7 @@
           </div>
         </el-card>
 
-        <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看设备总数" @click="router.push('/edge-device')" @keydown.enter.prevent="router.push('/edge-device')" @keydown.space.prevent="router.push('/edge-device')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-warning);">
               <el-icon :size="32"><Cpu /></el-icon>
@@ -45,7 +45,7 @@
           </div>
         </el-card>
 
-        <el-card shadow="hover" class="stat-card" @click="router.push('/edge-device?status=online')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看在线设备" @click="router.push('/edge-device?status=online')" @keydown.enter.prevent="router.push('/edge-device?status=online')" @keydown.space.prevent="router.push('/edge-device?status=online')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-success);">
               <el-icon :size="32"><CircleCheck /></el-icon>
@@ -610,7 +610,11 @@ onUnmounted(() => {
 
 .stat-card:hover {
   transform: translateY(-4px);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-lg);
+}
+.stat-card:focus-visible {
+  outline: 3px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 .stat-content {
@@ -731,41 +735,60 @@ onUnmounted(() => {
   overflow-wrap: break-word;
 }
 
+/* 移动端：单行 4 列纵向紧凑小卡，压低统计卡占高让位给内容区 */
 @media (max-width: 768px) {
   .dashboard-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
   }
 
   .stat-content {
     flex-direction: column;
     align-items: center;
     text-align: center;
-    gap: 10px;
-  }
-
-  .stat-info {
-    width: 100%;
-    min-width: 0;
+    gap: 4px;
   }
 
   .stat-icon {
-    width: 40px;
-    height: 40px;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+
+  .stat-icon :deep(.el-icon) {
+    font-size: 13px;
+  }
+
+  .stat-info {
+    min-width: 0;
+    width: 100%;
   }
 
   .stat-label {
-    line-height: 1.35;
-    margin-top: 4px;
+    font-size: 10px;
+    line-height: 1.3;
+    margin-top: 1px;
+    max-height: 2.6em;
+    overflow: hidden;
+    word-break: keep-all;
+    overflow-wrap: break-word;
   }
 
   .stat-value {
-    font-size: 24px;
+    font-size: 16px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
   }
 
   :deep(.stat-card) {
-    margin-bottom: 8px;
+    margin-bottom: 0;
+  }
+
+  :deep(.stat-card .el-card__body) {
+    padding: 8px 4px;
   }
 
   /* 分段控件与指标下拉各自整行，避免"7天"折行、边框残缺 */
