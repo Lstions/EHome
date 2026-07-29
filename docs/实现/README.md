@@ -2,7 +2,7 @@
 
 > **位置**: `docs/实现/`
 > **对应设计**: `docs/设计/`
-> **状态**: v2.5 完整实现 (P0-P3 + BMS/逆变器驱动 + 通道终端 + 逐指令 ConfigManifest + 生产单容器部署)
+> **状态**: v2.7 完整实现 (P0-P3 + BMS/逆变器驱动 + 通道终端 + 逐指令 ConfigManifest + 生产单容器部署 + 多总线事件驱动架构)
 
 ## 📖 阅读路径
 
@@ -22,7 +22,7 @@
 | 3 | **边缘设备** | [边缘设备.md](边缘设备.md) | `handler_edge_device.go` | `views/edge-device/` | `components/proto_engine/`, `msg_handler/` |
 | 4 | **通道** | [通道.md](通道.md) | `internal/api/handler_node.go` (通道 DMA 配置)<br/>`internal/api/handler_device.go` (channel 段) | `components/channel/` | `components/bus_dma/`, `config_mgr/`, `bus_manager.c` |
 | 5 | **设备配置** | [设备配置.md](设备配置.md) | `handler_device_config.go` | `views/config/DeviceConfigList.vue` | - |
-| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus_worker.c` (TX/RX 分离) |
+| 6 | **数据采集** | [数据采集.md](数据采集.md) | `internal/nodemgr/handler_data.go` | `views/data/DataPanel.vue` | `components/scheduler/`, `bus_worker/` (事件驱动 RX/TX + 异步报告), `bus_dma/`, `bus_manager/` |
 | 7 | **固件OTA** | [固件OTA.md](固件OTA.md) | `internal/ota/ota.go` | `views/firmware/FirmwareManage.vue` | `components/ota/` |
 | 8 | **通知中心** | [通知中心.md](通知中心.md) | `internal/api/handler_notification.go` | `views/notification/` | - |
 | 9 | **系统监控** | [系统监控.md](系统监控.md) | `internal/api/handler_metrics.go` (P2) | `views/monitor/Monitor.vue` (P2) | - |
@@ -33,6 +33,7 @@
 | **14** | **逐指令 ConfigManifest (v2.5.16+)** | — | `internal/drivers/command_template.go` | `views/channel/` (CommandList) | `components/sync_manager/` |
 | **15** | **统一解析器 (v2.5)** | — | `pkg/parser/` (替代旧 3 套解析系统) | — | — |
 | **16** | **服务端降采样 (v2.5)** | — | `internal/api/handler_data.go` (/historical-batch + max_points) | `views/data/` (图表降采样) | — |
+| **17** | **多总线事件驱动 (v2.7)** | — | — | — | `components/bus_worker/` (事件驱动 RX + 异步报告), `bus_manager/` (控制器租约), `scheduler/` (队列分发), `msg_handler/handler_channel_cmd_v2.c` |
 
 ## 📊 实现完整度总览
 
@@ -52,7 +53,8 @@
 | 逐指令 Manifest (v2.5.16+) | ✅ 完整 | ✅ 完整 | — | 🟢 完整 |
 | 统一解析器 (v2.5) | ✅ 完整 | — | — | 🟢 完整 |
 | 降采样+gzip (v2.5) | ✅ 完整 | ✅ 完整 | 2 | 🟢 完整 |
-| **总计** | **114 Go 文件** | **144 Vue/TS 文件** | **~60** | **45 后端 + 31 前端测试** |
+| 多总线事件驱动 (v2.7) | — | — | — | 🟢 ~6000 行 host 测试 |
+| **总计** | **114 Go 文件** | **144 Vue/TS 文件** | **~60** | **45 后端 + 31 前端 + ~6000 行固件 host 测试** |
 
 ## 🔧 通用技术栈
 

@@ -1,10 +1,10 @@
 # EHomeSystem ESP32 节点架构设计文档
 
-**版本**: v2.5  
-**日期**: 2026-06-17  
-**分支**: feat/dma-resource-protocol  
-**状态**: 大部分已实现。dma_pool、uart0_boot、hw_tables 组件已编码，DIP 模式已落地，msg_handler 已拆分。前端 DMA 面板已对接。剩余: DMA 冲突检测增强、Linux 平台适配。
-**最近更新**: 2026-06-18 — 同步代码实现状态。关联 commit: ac3bed1..84b931c
+**版本**: v2.7  
+**日期**: 2026-07-30  
+**分支**: main (codex/multi-bus-event-driven-plan 已合入)  
+**状态**: 全部已实现。事件驱动 RX、控制器租约、控制/采样队列分离、异步报告路径、ChannelCmdV2、host 测试覆盖均已落地。  
+**最近更新**: 2026-07-30 — 同步 multi-bus 事件驱动架构合入。关联 merge: 87767c7
 
 ---
 
@@ -40,10 +40,15 @@
 └─────────┘ └────┬────┘ └──────────┘ └────────────┘
                  │
                  ▼
-           ┌──────────┐
-           │ bus_dma  │
-           │(驱动层)   │
-           └──────────┘
+           ┌──────────┐     ┌──────────────┐
+           │ bus_dma  │────→│ bus_worker   │
+           │(驱动层)   │     │(事件驱动RX/TX)│
+           └──────────┘     └──────┬───────┘
+                                   │
+                            ┌──────┴───────┐
+                            │  scheduler   │
+                            │(定时采样调度) │
+                            └──────────────┘
 ```
 
 ### 1.3 组件依赖图 (无环)
@@ -55,9 +60,11 @@ bus_dma             ← freertos, driver
 uart0_boot          ← driver, rgb_led
 hw_profile          ← frame_codec, config_mgr, dma_pool
 config_mgr          ← frame_codec, nvs_flash, dma_pool
-msg_handler         ← frame_codec, config_mgr, hw_profile, dma_pool, ...
-bus_manager (main)  ← dma_pool, bus_dma, config_mgr
-app_state (main)    ← dma_pool, hw_profile, bus_dma, config_mgr
+bus_worker          ← bus_dma, cmd_queue, scheduler, frame_codec, freertos
+scheduler           ← config_mgr, freertos, driver(uart)
+msg_handler         ← frame_codec, config_mgr, hw_profile, dma_pool, bus_worker, scheduler, ...
+bus_manager (main)  ← dma_pool, bus_dma, config_mgr, hw_profile, bus_lease_policy
+app_state (main)    ← dma_pool, hw_profile, bus_dma, config_mgr, bus_worker, scheduler
 main.c              ← 所有组件 (编排层)
 ```
 
@@ -77,7 +84,17 @@ typedef struct {
     struct dma_pool_t *dma_pool;                // DMA资源池 (DIP注入)
     SemaphoreHandle_t config_mutex;              // 配置锁
     transport_t *tcp_transport;                  // TCP传输
-    QueueHandle_t cmd_queue;                     // 命令队列
+    QueueHandle_t cmd_queue;                     // 命令队列 (legacy, 保留兼容)
+    QueueHandle_t uart0_sample_queue;            // UART0 采样队列 (scheduler)
+    QueueHandle_t uart0_control_queue;           // UART0 控制队列 (WriteCmd/V2)
+    QueueHandle_t uart1_sample_queue;            // UART1 采样队列
+    QueueHandle_t uart1_control_queue;           // UART1 控制队列
+    QueueHandle_t uart2_sample_queue;            // UART2 采样队列
+    QueueHandle_t uart2_control_queue;           // UART2 控制队列
+    QueueHandle_t spi_sample_queue;              // SPI 采样队列
+    QueueHandle_t spi_control_queue;             // SPI 控制队列
+    QueueHandle_t i2c_sample_queue;              // I2C 采样队列
+    QueueHandle_t i2c_control_queue;             // I2C 控制队列
     uint32_t    uptime_sec;
     bool        config_received;
     // ...
@@ -139,7 +156,21 @@ typedef struct {
 #endif
 ```
 
-运行时通过 `dma_pool_init(pool, hw_dmas, HW_DMA_COUNT)` 传入，dma_pool 本身不包含任何芯片特定代码。
+运行时通过 `dma_pool_init(pool, hw_dmas, HW_DMA_COUNT)` 传入，dma_pool 本身不包含任何芯片特定的代码。
+
+### 2.5 事件驱动总线架构 (v2.7)
+
+v2.7 将总线事务从"共享队列轮询"升级为"事件驱动 + 控制器租约 + 控制/采样分离"：
+
+**RX 事件驱动**: rx_task 不再每 5ms 轮询 UART FIFO，而是通过 UART 驱动 event queue + QueueSet 等待事件。250ms 周期唤醒仅用于生命周期管理和超时检查。CPU 占用大幅降低。
+
+**控制/采样队列分离**: 每个控制器拥有两条独立队列——sample queue（scheduler 定时采样）和 control queue（WriteCommand/ChannelCmdV2 控制命令）。遥测背压无法消耗控制容量，控制命令始终有 2 个保留槽位。
+
+**控制器租约 (lease)**: manifest 应用前由 bus_lease_policy 为每个 channel 选定具体控制器（UART port / SPI host / I2C port），而非运行时动态分配。bus_manager_snapshot_leases() 在事务前快照当前租约，失败回滚时恢复原始绑定。
+
+**异步报告路径**: 独立 report_task（优先级 5）通过三个内存池（critical 4块 / emergency 1块 / telemetry 12块，每块 1024B）异步编码发布。关键报告（error_code≠0 或 request_id≠0）使用保留池，遥测压力不挤占关键响应。
+
+**生命周期加固**: suspend 用 EventGroup 逐任务确认，2s 超时返回 bool。suspend 失败时中止配置事务，不删除活跃队列。
 
 ---
 
@@ -229,12 +260,15 @@ DmaChannelConfig (嵌套消息, field 5, 可重复):
 | 资源 | 数量 | DMA | 备注 |
 |------|------|-----|------|
 | UART0 | TX16/RX17 | ✓ | ROM下载口 + 用户数据 |
-| UART1 | TX21/RX20 | ✓ | |
+| UART1 | TX20/RX21 | ✓ | |
 | I2C0 | SDA21/SCL22 | ✓ | |
 | SPI2 | MOSI23/MISO19/SCLK18/CS5 | ✓ | |
 | GDMA | 3通道 (CH0/CH2通用, CH1 SPI专用TX) | | |
 | GPIO | 8个可用 | | |
 | ADC | 3通道 (ADC1_CH0-2) | | |
+
+> **v2.7 变更**: LP_UART0 (port=2, GPIO5/4) 已从 hw_uarts 表移除。
+> 该端口无 DMA、仅 16B FIFO，不适合生产数据采集。
 
 ### 4.3 UART0 双用机制
 
@@ -282,7 +316,8 @@ app_main()
   ├── app_state_init()
   │   ├── generate_node_id()          ← MAC地址 → 12字符hex
   │   ├── dma_pool_init(hw_dmas, HW_DMA_COUNT)  ← 芯片DMA表
-  │   └── s_app.dma_pool = &s_dma_pool
+  │   ├── s_app.dma_pool = &s_dma_pool
+  │   └── 创建 5×2 控制/采样队列对 (UART0/1/2, SPI, I2C)
   │
   ├── uart0_boot_init()               ← BOOT检测
   │   └── [BOOT按下] → download_wait_task (阻塞)
@@ -294,18 +329,25 @@ app_main()
   ├── config_mgr_load_from_nvs()
   │   └── [有DmaChannelConfig] → dma_pool_apply_config()
   │
-  ├── bus_manager_setup_from_manifest()
+  ├── bus_manager_init(rt)
+  ├── bus_manager_snapshot_leases(rt)  ← 快照当前租约
+  ├── bus_manager_setup_from_manifest(rt)
   │   └── 每个channel:
-  │       ├── derive_hw_id(bus_type, ch_id)
+  │       ├── bus_lease_policy 选定控制器
   │       ├── dma_pool_allocate(pool, bus_type, hw_id, &dma_id)
-  │       │   ├── ESP_OK → bus_dma_init(dma=true)
-  │       │   └── ESP_ERR_NOT_FOUND → bus_dma_init(dma=false)
+  │       │   ├── ESP_OK → bus_dma_init_preferred(dma=true, controller_id)
+  │       │   └── ESP_ERR_NOT_FOUND → bus_dma_init_preferred(dma=false)
+  │       ├── hw_profile_runtime_set()  ← 记录运行时租约
   │       └── [init失败] → dma_pool_release_by_hw()
   │
-  ├── scheduler_start()
+  ├── bus_worker_set_callbacks(wr_cb, dr_cb)
+  ├── bus_worker_set_channel_cmd_v2_final_cb(v2_cb)
+  ├── bus_worker_start(rt)            ← 事件驱动 RX + 5 cmd_task + report_task
+  ├── scheduler_init()
+  ├── scheduler_resume(queues)        ← 注入 5 条采样队列 + uart_route 回调
   ├── transport_manager_init()
   ├── wifi_mgr_start()
-  └── bus_worker_start()
+  └── hw_profile_send_resource_report()  ← Hello 后上报资源
 ```
 
 ---
@@ -427,18 +469,11 @@ app_main()
 
 ## 10. 已知技术债务
 
-### 10.1 全局变量 `g_cmd_queue` (app_state.c:23)
+### 10.1 全局变量 `g_cmd_queue` (app_state.c) — ✅ 已解决
 
-**现状**: `scheduler.c` 仍通过全局变量 `g_cmd_queue` 访问命令队列，而非通过 `app_state_t` 注入。
+**原状**: `scheduler.c` 通过全局变量访问命令队列。
 
-**影响**: 违反 DIP 原则，scheduler 模块与 app_state 存在隐式耦合。
-
-**迁移计划**:
-1. 修改 `scheduler_start()` 接受 `app_state_t*` 参数
-2. scheduler 内部存储队列引用，不再依赖全局变量
-3. 删除 `app_state.c` 中的 `g_cmd_queue` 全局变量
-
-**优先级**: 低 (功能正常，仅影响架构纯净度)
+**解决**: v2.7 引入 `scheduler_queues_t` 结构体，通过 `scheduler_resume(queues)` 注入 5 条采样队列 + uart_route 回调，彻底消除全局依赖。
 
 ### 10.2 NVS Blob 前向兼容性
 
@@ -453,35 +488,26 @@ app_main()
 
 **优先级**: 中 (当前结构体稳定，但未来扩展需注意)
 
-### 10.3 单元测试缺失
+### 10.3 单元测试缺失 — ✅ 已解决
 
-**现状**: `dma_pool` 的三级分配策略和 `apply_config` 抢占逻辑缺少自动化测试。
+**原状**: `dma_pool`、`bus_manager`、`scheduler` 缺少自动化测试。
 
-**建议测试用例**:
-- 所有通道已满时的降级行为
-- 部分能力通道的降级分配
-- `apply_config` 的抢占逻辑 (绑定已占用通道)
-- `serialize` 的 buffer overflow 保护
+**解决**: v2.7 新增 ~6000 行 host 测试，覆盖：
+- bus_dma (933行)、bus_worker_rx (838行)、bus_worker_report (877行)
+- bus_manager_manifest (506行)、scheduler_route (505行)
+- handler_data (478行)、bus_dma_lease (319行)、app_state (250行)
+- channel_cmd_v2_decoder (235行)、frame_codec_boundary (216行)
+- writecmd_decoder (209行)、perf_metrics_encode (183行)
+- hw_profile_resource_report (107行)、dma_pool_contract (89行)
 
-**实现方式**:
-- 使用 ESP-IDF 的 `unity` 测试框架
-- 在 `main/test_dma_pool.c` 中添加测试
-- 通过 `idf.py -p PORT flash monitor` 运行测试
+测试位于 `esp32-collector/host_tests/`，含完整 FreeRTOS/ESP-IDF stub 层。
 
-**优先级**: 中 (核心逻辑已通过手动验证，但缺少回归测试)
+### 10.4 hw_profile 职责过重 — ✅ 已解决
 
-### 10.4 hw_profile 职责过重
+**原状**: `hw_profile.c` 同时负责硬件描述、协议编码、config 查询、DMA 序列化。
 
-**现状**: `hw_profile.c` 同时负责:
-- 硬件描述 (const 表)
-- 协议编码 (ResourceReport)
-- config 状态查询
-- DMA 序列化调用
+**解决**: v2.7 拆分为：
+- `hw_tables.c` — 纯硬件描述表 (const 数据) + 控制器推导函数
+- `hw_profile.c` — 协议编码逻辑 (ResourceReport) + 运行时租约跟踪
 
-**建议拆分**:
-```
-hw_tables.c        — 纯硬件描述表 (const 数据)
-resource_report.c  — 协议编码逻辑
-```
-
-**优先级**: 低 (当前模块大小可控，拆分收益有限)
+新增 `hw_derive_spi_host()` 和 `hw_derive_i2c_port()`，与 UART 推导对齐。
