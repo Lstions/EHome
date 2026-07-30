@@ -1,0 +1,577 @@
+import { defineComponent, h, type Component } from 'vue'
+import { config } from '@vue/test-utils'
+
+/**
+ * 全局 Element Plus 组件 stub 注册
+ *
+ * 根因：vitest.config.ts 的 vue() 插件没有 unplugin-vue-components，
+ * 导致 SFC 中 <el-tag> 等被编译器视为原生自定义元素而非组件。
+ * Vue Test Utils 的 stubs 只匹配组件名，不匹配原生元素。
+ *
+ * 方案：用 global.components 注册 PascalCase 名的 stub，
+ * Vue 编译器会将 <el-tag> 解析为已注册的 ElTag 组件。
+ *
+ * 所有 stub 都使用 class 名（如 "el-tag"）而非 data-testid，
+ * 以兼容现有测试的选择器。
+ */
+
+// --- 基础交互组件 ---
+
+const ElButton = defineComponent({
+  props: {
+    type: { type: String, default: 'default' },
+    size: { type: String, default: 'default' },
+    plain: Boolean,
+    round: Boolean,
+    circle: Boolean,
+    loading: Boolean,
+    disabled: Boolean,
+    icon: [String, Object],
+    autofocus: Boolean,
+    nativeType: { type: String, default: 'button' },
+  },
+  emits: ['click'],
+  setup(props, { slots, emit }) {
+    return () => h('button', {
+      class: ['el-button', `el-button--${props.type}`, props.size ? `el-button--${props.size}` : ''],
+      disabled: props.disabled,
+      onClick: (e) => emit('click', e),
+    }, slots.default?.())
+  },
+})
+
+const ElInput = defineComponent({
+  props: {
+    modelValue: { type: [String, Number], default: '' },
+    type: { type: String, default: 'text' },
+    size: String,
+    disabled: Boolean,
+    clearable: Boolean,
+    showPassword: Boolean,
+    placeholder: String,
+    maxlength: [String, Number],
+    rows: { type: Number, default: 2 },
+    autosize: [Boolean, Object],
+  },
+  emits: ['update:modelValue', 'input', 'change', 'blur', 'focus', 'clear'],
+  setup(props, { emit, attrs }) {
+    const onInput = (e: Event) => {
+      const val = (e.target as HTMLInputElement).value
+      emit('update:modelValue', val)
+      emit('input', val)
+    }
+    const onBlur = (e: Event) => emit('blur', e)
+    const onFocus = (e: Event) => emit('focus', e)
+    return () => {
+      if (props.type === 'textarea') {
+        return h('textarea', {
+          class: 'el-textarea__inner',
+          value: props.modelValue,
+          placeholder: props.placeholder,
+          disabled: props.disabled,
+          rows: props.rows,
+          onInput,
+          onBlur,
+          onFocus,
+          ...attrs,
+        })
+      }
+      return h('input', {
+        class: 'el-input__inner',
+        type: props.showPassword ? 'password' : props.type,
+        value: props.modelValue,
+        placeholder: props.placeholder,
+        disabled: props.disabled,
+        maxlength: props.maxlength,
+        onInput,
+        onBlur,
+        onFocus,
+        ...attrs,
+      })
+    }
+  },
+})
+
+const ElSelect = defineComponent({
+  props: {
+    modelValue: { type: [String, Number, Array], default: '' },
+    disabled: Boolean,
+    clearable: Boolean,
+    multiple: Boolean,
+    size: String,
+    placeholder: String,
+    filterable: Boolean,
+  },
+  emits: ['update:modelValue', 'change', 'blur', 'focus', 'visible-change'],
+  setup(props, { slots, emit }) {
+    return () => h('div', {
+      class: 'el-select',
+      onClick: () => emit('visible-change', true),
+    }, [
+      h('div', { class: 'el-select__wrapper' }, [
+        h('span', { class: 'el-select__selected-item' }, String(props.modelValue || props.placeholder || '')),
+      ]),
+      slots.default?.(),
+    ])
+  },
+})
+
+const ElOption = defineComponent({
+  props: {
+    value: { type: [String, Number, Object], required: true },
+    label: String,
+    disabled: Boolean,
+  },
+  setup() {
+    return () => h('div', { class: 'el-option' })
+  },
+})
+
+const ElCheckbox = defineComponent({
+  props: {
+    modelValue: { type: [Boolean, Array], default: false },
+    label: String,
+    disabled: Boolean,
+    indeterminate: Boolean,
+  },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { slots, emit }) {
+    return () => h('label', { class: 'el-checkbox' }, [
+      h('input', {
+        type: 'checkbox',
+        checked: Array.isArray(props.modelValue) ? props.modelValue.includes(props.label) : props.modelValue,
+        disabled: props.disabled,
+        onChange: (e: Event) => {
+          const checked = (e.target as HTMLInputElement).checked
+          emit('update:modelValue', checked)
+          emit('change', checked)
+        },
+      }),
+      h('span', { class: 'el-checkbox__label' }, slots.default?.()),
+    ])
+  },
+})
+
+// --- 展示型组件 ---
+
+const ElTag = defineComponent({
+  props: {
+    type: { type: String, default: '' },
+    size: { type: String, default: 'default' },
+    effect: { type: String, default: 'light' },
+    closable: Boolean,
+    round: Boolean,
+  },
+  setup(props, { slots }) {
+    return () => h('span', {
+      class: ['el-tag', `el-tag--${props.type}`, `el-tag--${props.size}`, `el-tag--${props.effect}`],
+      'data-type': props.type,
+      'data-effect': props.effect,
+    }, slots.default?.())
+  },
+})
+
+const ElIcon = defineComponent({
+  props: {
+    size: { type: [String, Number], default: '' },
+    color: String,
+  },
+  setup(props, { slots }) {
+    return () => h('span', {
+      class: 'el-icon',
+      style: { fontSize: typeof props.size === 'number' ? `${props.size}px` : props.size, color: props.color },
+    }, slots.default?.())
+  },
+})
+
+const ElEmpty = defineComponent({
+  props: {
+    description: { type: String, default: '暂无数据' },
+    imageSize: { type: Number, default: 0 },
+    image: String,
+  },
+  setup(props, { slots }) {
+    return () => h('div', { class: 'el-empty' }, [
+      slots.image?.() ?? h('div', { class: 'el-empty__image' }),
+      h('p', { class: 'el-empty__description' }, props.description),
+      slots.default?.(),
+    ])
+  },
+})
+
+const ElDialog = defineComponent({
+  props: {
+    modelValue: { type: Boolean, default: false },
+    title: String,
+    width: { type: String, default: '50%' },
+    fullscreen: Boolean,
+    showClose: { type: Boolean, default: true },
+    beforeClose: Function,
+    appendToBody: Boolean,
+    modal: { type: Boolean, default: true },
+  },
+  emits: ['update:modelValue', 'close', 'open', 'closed', 'opened'],
+  setup(props, { slots, emit }) {
+    return () => props.modelValue ? h('div', {
+      class: 'el-dialog__wrapper',
+    }, [
+      h('div', {
+        class: 'el-dialog',
+        style: { width: props.width },
+      }, [
+        h('div', { class: 'el-dialog__header' }, [
+          h('span', { class: 'el-dialog__title' }, props.title),
+        ]),
+        h('div', { class: 'el-dialog__body' }, slots.default?.()),
+        slots.footer ? h('div', { class: 'el-dialog__footer' }, slots.footer()) : null,
+      ]),
+    ]) : null
+  },
+})
+
+const ElCard = defineComponent({
+  props: {
+    header: String,
+    shadow: { type: String, default: 'always' },
+    bodyStyle: [String, Object],
+  },
+  setup(props, { slots }) {
+    return () => h('div', { class: ['el-card', `is-${props.shadow}-shadow`] }, [
+      slots.header ? h('div', { class: 'el-card__header' }, slots.header()) : (props.header ? h('div', { class: 'el-card__header' }, props.header) : null),
+      h('div', { class: 'el-card__body' }, slots.default?.()),
+    ])
+  },
+})
+
+const ElTooltip = defineComponent({
+  props: {
+    content: String,
+    placement: { type: String, default: 'top' },
+    effect: { type: String, default: 'dark' },
+    disabled: Boolean,
+    visible: Boolean,
+  },
+  setup(props, { slots }) {
+    return () => h('span', { class: 'el-tooltip' }, slots.default?.())
+  },
+})
+
+const ElTable = defineComponent({
+  props: {
+    data: { type: Array, default: () => [] },
+    border: Boolean,
+    stripe: Boolean,
+    height: [String, Number],
+    rowKey: [String, Function],
+  },
+  emits: ['selection-change', 'row-click', 'sort-change'],
+  setup(props, { slots }) {
+    return () => h('table', { class: 'el-table' }, [
+      slots.default?.(),
+    ])
+  },
+})
+
+const ElTableColumn = defineComponent({
+  props: {
+    prop: String,
+    label: String,
+    width: [String, Number],
+    minWidth: [String, Number],
+    fixed: [String, Boolean],
+    type: String,
+    align: String,
+    sortable: Boolean,
+  },
+  setup() {
+    return () => h('td', { class: 'el-table-column' })
+  },
+})
+
+const ElPagination = defineComponent({
+  props: {
+    total: { type: Number, default: 0 },
+    currentPage: { type: Number, default: 1 },
+    pageSize: { type: Number, default: 10 },
+    pageSizes: { type: Array, default: () => [10, 20, 50, 100] },
+    layout: { type: String, default: 'prev, pager, next' },
+  },
+  emits: ['update:currentPage', 'size-change', 'current-change'],
+  setup(props) {
+    return () => h('div', { class: 'el-pagination' }, `共 ${props.total} 条`)
+  },
+})
+
+const ElSwitch = defineComponent({
+  props: {
+    modelValue: { type: [Boolean, String, Number], default: false },
+    disabled: Boolean,
+    activeText: String,
+    inactiveText: String,
+    activeValue: { default: true },
+    inactiveValue: { default: false },
+  },
+  emits: ['update:modelValue', 'change', 'input'],
+  setup(props, { emit }) {
+    return () => h('button', {
+      class: ['el-switch', { 'is-checked': props.modelValue === props.activeValue }],
+      disabled: props.disabled,
+      onClick: () => {
+        const val = props.modelValue === props.activeValue ? props.inactiveValue : props.activeValue
+        emit('update:modelValue', val)
+        emit('change', val)
+        emit('input', val)
+      },
+    })
+  },
+})
+
+const ElAlert = defineComponent({
+  props: {
+    title: String,
+    type: { type: String, default: 'info' },
+    description: String,
+    closable: { type: Boolean, default: true },
+    showIcon: Boolean,
+    center: Boolean,
+    effect: { type: String, default: 'light' },
+  },
+  setup(props, { slots }) {
+    return () => h('div', { class: ['el-alert', `el-alert--${props.type}`] }, [
+      h('div', { class: 'el-alert__content' }, [
+        // 支持 #title slot 和 title prop 两种用法
+        slots.title ? h('div', { class: 'el-alert__title' }, slots.title()) : (props.title ? h('div', { class: 'el-alert__title' }, props.title) : null),
+        slots.default?.() || (props.description ? h('div', { class: 'el-alert__description' }, props.description) : null),
+      ]),
+    ])
+  },
+})
+
+const ElDivider = defineComponent({
+  props: {
+    direction: { type: String, default: 'horizontal' },
+    borderStyle: { type: String, default: 'solid' },
+  },
+  setup() {
+    return () => h('div', { class: 'el-divider' })
+  },
+})
+
+const ElRow = defineComponent({
+  props: {
+    gutter: { type: Number, default: 0 },
+    justify: { type: String, default: 'start' },
+    align: { type: String, default: 'top' },
+  },
+  setup(props, { slots }) {
+    return () => h('div', { class: ['el-row', `is-justify-${props.justify}`, `is-align-${props.align}`] }, slots.default?.())
+  },
+})
+
+const ElCol = defineComponent({
+  props: {
+    span: { type: Number, default: 24 },
+    offset: { type: Number, default: 0 },
+    push: { type: Number, default: 0 },
+    pull: { type: Number, default: 0 },
+    xs: [Number, Object],
+    sm: [Number, Object],
+    md: [Number, Object],
+    lg: [Number, Object],
+    xl: [Number, Object],
+  },
+  setup(props, { slots }) {
+    return () => h('div', {
+      class: ['el-col', `el-col-${props.span}`],
+    }, slots.default?.())
+  },
+})
+
+const ElDropdown = defineComponent({
+  props: {
+    trigger: { type: String, default: 'hover' },
+    type: String,
+    size: String,
+    splitButton: Boolean,
+  },
+  emits: ['command', 'visible-change', 'click'],
+  setup(props, { slots }) {
+    return () => h('div', { class: 'el-dropdown' }, [
+      slots.default?.(),
+      slots.dropdown?.(),
+    ])
+  },
+})
+
+const ElDropdownMenu = defineComponent({
+  setup(_, { slots }) {
+    return () => h('div', { class: 'el-dropdown-menu' }, slots.default?.())
+  },
+})
+
+const ElDropdownItem = defineComponent({
+  props: { command: [String, Number, Object], disabled: Boolean, divided: Boolean },
+  emits: ['click'],
+  setup(props, { slots, emit }) {
+    return () => h('div', {
+      class: ['el-dropdown-menu__item', { 'is-disabled': props.disabled }],
+      'data-command': String(props.command),
+      onClick: () => emit('click'),
+    }, slots.default?.())
+  },
+})
+
+const ElForm = defineComponent({
+  props: {
+    model: Object,
+    rules: Object,
+    labelWidth: String,
+    labelPosition: { type: String, default: 'right' },
+    inline: Boolean,
+    disabled: Boolean,
+  },
+  emits: ['validate'],
+  setup(_, { slots }) {
+    return () => h('form', { class: 'el-form' }, slots.default?.())
+  },
+})
+
+const ElFormItem = defineComponent({
+  props: {
+    label: String,
+    prop: String,
+    required: Boolean,
+    rules: [Object, Array],
+    error: String,
+    labelWidth: String,
+  },
+  setup(props, { slots }) {
+    return () => h('div', { class: 'el-form-item' }, [
+      props.label ? h('label', { class: 'el-form-item__label' }, props.label) : null,
+      h('div', { class: 'el-form-item__content' }, slots.default?.()),
+    ])
+  },
+})
+
+const ElProgress = defineComponent({
+  props: {
+    percentage: { type: Number, default: 0 },
+    type: { type: String, default: 'line' },
+    status: String,
+    strokeWidth: { type: Number, default: 6 },
+    color: [String, Array, Function],
+  },
+  setup(props) {
+    return () => h('div', { class: 'el-progress' }, [
+      h('div', { class: 'el-progress-bar' }, [
+        h('div', { class: 'el-progress-bar__outer', style: { width: '100%' } }, [
+          h('div', { class: 'el-progress-bar__inner', style: { width: `${props.percentage}%` } }),
+        ]),
+      ]),
+    ])
+  },
+})
+
+const ElRadioGroup = defineComponent({
+  props: { modelValue: [String, Number, Boolean], disabled: Boolean },
+  emits: ['update:modelValue', 'change'],
+  setup(_, { slots }) {
+    return () => h('div', { class: 'el-radio-group' }, slots.default?.())
+  },
+})
+
+const ElRadio = defineComponent({
+  props: { label: [String, Number, Boolean], disabled: Boolean, modelValue: [String, Number, Boolean] },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { slots }) {
+    return () => h('label', { class: 'el-radio' }, [
+      h('input', { type: 'radio', class: 'el-radio__input' }),
+      h('span', { class: 'el-radio__label' }, slots.default?.()),
+    ])
+  },
+})
+
+// --- 注册全部 stub ---
+
+const elStubs: Record<string, Component> = {
+  ElButton,
+  ElInput,
+  ElSelect,
+  ElOption,
+  ElCheckbox,
+  ElTag,
+  ElIcon,
+  ElEmpty,
+  ElDialog,
+  ElCard,
+  ElTooltip,
+  ElTable,
+  ElTableColumn,
+  ElPagination,
+  ElSwitch,
+  ElAlert,
+  ElDivider,
+  ElRow,
+  ElCol,
+  ElDropdown,
+  ElDropdownMenu,
+  ElDropdownItem,
+  ElForm,
+  ElFormItem,
+  ElProgress,
+  ElRadioGroup,
+  ElRadio,
+}
+
+// 全局注册，使 <el-*> 在 SFC 中被解析为组件
+for (const [name, comp] of Object.entries(elStubs)) {
+  config.global.components[name] = comp
+  // 同时注册 kebab-case 别名
+  const kebab = name.replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')
+  config.global.components[kebab] = comp
+}
+
+// --- 额外注册项目中用到但未单独定义的 Element Plus 组件 ---
+// 使用通用 stub：渲染为一个带 class 的 div/span，传递 slot 内容
+const genericElComponents = [
+  'ElAside', 'ElAvatar', 'ElBadge', 'ElBreadcrumb', 'ElBreadcrumbItem',
+  'ElContainer', 'ElDrawer', 'ElHeader', 'ElMain',
+  'ElPopover', 'ElScrollbar', 'ElCascader', 'ElCollapse', 'ElCollapseItem',
+  'ElDatePicker', 'ElDescriptions', 'ElDescriptionsItem', 'ElInputNumber',
+  'ElLink', 'ElOptionGroup', 'ElRadioButton', 'ElResult', 'ElSkeleton',
+  'ElSlider', 'ElStep', 'ElSteps', 'ElTabPane', 'ElTabs', 'ElTimeline',
+  'ElTimelineItem', 'ElUpload', 'ElButtonGroup',
+]
+
+// ElMenu/ElMenuItem 需要特殊处理：渲染 class + data-index + emit select
+config.global.components['ElMenu'] = defineComponent({
+  props: { defaultActive: String, collapse: Boolean, mode: String },
+  emits: ['select'],
+  setup(_, { slots }) {
+    return () => h('div', { class: 'el-menu' }, slots.default?.())
+  },
+})
+config.global.components['el-menu'] = config.global.components['ElMenu']
+
+config.global.components['ElMenuItem'] = defineComponent({
+  props: { index: String, disabled: Boolean },
+  emits: ['click', 'select'],
+  setup(props, { slots }) {
+    return () => h('div', { class: 'el-menu-item', 'data-index': props.index }, slots.default?.())
+  },
+})
+config.global.components['el-menu-item'] = config.global.components['ElMenuItem']
+
+for (const name of genericElComponents) {
+  if (!config.global.components[name]) {
+    config.global.components[name] = defineComponent({
+      props: { modelValue: null, disabled: Boolean, loading: Boolean },
+      emits: ['update:modelValue', 'change', 'click', 'input', 'blur', 'focus', 'select'],
+      setup(_, { slots, attrs }) {
+        return () => h('div', { class: name.toLowerCase().replace(/([A-Z])/g, '-$1').replace(/^-/, ''), ...attrs }, slots.default?.())
+      },
+    })
+    const kebab = name.replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '')
+    config.global.components[kebab] = config.global.components[name]
+  }
+}

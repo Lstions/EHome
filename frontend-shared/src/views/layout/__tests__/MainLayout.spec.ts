@@ -90,47 +90,26 @@ vi.mock('@/utils/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }))
 
-// Stub all Element Plus components to avoid full DOM rendering
+// Mock element-plus ElMessage
+vi.mock('element-plus', () => ({
+  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}))
+
+// Mock useResponsive composable
+vi.mock('@/composables/useResponsive', () => ({
+  useResponsive: () => ({
+    width: { value: 375 },
+    isMobile: { value: true },
+    isTablet: { value: false },
+    isDesktop: { value: false },
+  }),
+}))
+
+// 全局 Element Plus stub 已在 src/test-setup.ts 注册。
+// 仅 stub 项目内组件 ThemeSwitch 和 RouterView。
 const stubs = {
   ThemeSwitch: { template: '<div data-testid="theme-switch" />' },
   RouterView: { template: '<div class="router-view" />' },
-  'el-container': { template: '<div class="el-container"><slot /></div>' },
-  'el-aside': { template: '<div class="el-aside"><slot /></div>' },
-  'el-header': { template: '<div class="el-header"><slot /></div>' },
-  'el-main': { template: '<div class="el-main"><slot /></div>' },
-  'el-menu': {
-    template: '<div class="el-menu"><slot /></div>',
-    emits: ['select'],
-    setup(_props: any, { emit }: { emit: (event: string, ...args: any[]) => void }) {
-      return {
-        selectHandler: (index: string) => emit('select', index),
-      }
-    },
-  },
-  'el-menu-item': {
-    template: '<div class="el-menu-item" :data-index="index"><slot /></div>',
-    props: ['index'],
-  },
-  'el-drawer': {
-    template: '<div class="el-drawer" v-if="modelValue"><slot /></div>',
-    props: ['modelValue', 'direction', 'withHeader', 'size'],
-    emits: ['update:modelValue'],
-  },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
-  'el-button': {
-    template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>',
-    emits: ['click'],
-  },
-  'el-breadcrumb': { template: '<div class="el-breadcrumb"><slot /></div>' },
-  'el-breadcrumb-item': { template: '<span class="el-breadcrumb-item"><slot /></span>' },
-  'el-input': { template: '<input class="el-input" />' },
-  'el-badge': { template: '<div class="el-badge"><slot /></div>' },
-  'el-popover': { template: '<div class="el-popover"><slot /><slot name="reference" /></div>' },
-  'el-scrollbar': { template: '<div class="el-scrollbar"><slot /></div>' },
-  'el-dropdown': { template: '<div class="el-dropdown"><slot /><slot name="dropdown" /></div>' },
-  'el-dropdown-menu': { template: '<div class="el-dropdown-menu"><slot /></div>' },
-  'el-dropdown-item': { template: '<div class="el-dropdown-item"><slot /></div>' },
-  'el-avatar': { template: '<div class="el-avatar"><slot /></div>' },
 }
 
 // ── Tests ──────────────────────────────────────────────

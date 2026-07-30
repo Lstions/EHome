@@ -74,6 +74,21 @@ vi.mock('@/utils/feedback', () => ({
   },
 }))
 
+// 补充缺失的 mock
+vi.mock('@/stores/node', () => ({
+  useNodeStore: () => ({ fetchNodes: vi.fn(() => Promise.resolve()) }),
+}))
+vi.mock('@/stores/edgeDevice', () => ({
+  useEdgeDeviceStore: () => ({ fetchList: vi.fn(() => Promise.resolve()) }),
+}))
+vi.mock('@/router/routeLoaders', () => ({
+  preloadPrimaryRoutes: vi.fn(() => Promise.resolve([])),
+}))
+vi.mock('element-plus', () => ({
+  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}))
+// 不 mock @element-plus/icons-vue，让真实 SVG 组件导入
+
 // Mock ThemeSwitch component
 vi.mock('@/components/common/ThemeSwitch.vue', () => ({
   default: { template: '<div class="theme-switch-stub" />' },

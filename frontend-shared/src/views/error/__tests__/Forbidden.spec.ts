@@ -17,11 +17,24 @@ vi.mock('@/stores/user', () => ({
   }),
 }))
 
-// Stub child components
+// Mock icons
+vi.mock('@element-plus/icons-vue', () => ({
+  HomeFilled: { name: 'HomeFilled', template: '<i />' },
+  SwitchButton: { name: 'SwitchButton', template: '<i />' },
+}))
+
+// 全局 Element Plus stub 已在 src/test-setup.ts 注册。
+// ErrorPageLayout 是项目内组件，需要 stub 以隔离测试。
 const stubs = {
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
+  ErrorPageLayout: {
+    props: ['code', 'title', 'gradient', 'maxWidth'],
+    template: `<div class="error-page">
+      <div class="error-code">{{ code }}</div>
+      <div class="error-title">{{ title }}</div>
+      <div class="error-description"><slot name="description" /></div>
+      <div class="error-actions"><slot name="actions" /></div>
+    </div>`,
+  },
 }
 
 describe('Forbidden.vue', () => {
@@ -53,8 +66,8 @@ describe('Forbidden.vue', () => {
   it('computes username from store', async () => {
     const wrapper = mount(Forbidden, { global: { stubs } })
     await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.username).toBe('viewer1')
+    // <script setup> 不暴露 vm 属性，通过渲染文本验证 username
+    expect(wrapper.text()).toContain('viewer1')
   })
 
   it('displays the fixed system administrator identity', async () => {
@@ -66,8 +79,12 @@ describe('Forbidden.vue', () => {
   it('goHome navigates to dashboard', async () => {
     const wrapper = mount(Forbidden, { global: { stubs } })
     await flushPromises()
-    const vm = wrapper.vm as any
-    vm.goHome()
+    // 通过 DOM 交互触发 goHome，而非 wrapper.vm.goHome()
+    // "返回首页" 按钮绑定了 @click="goHome"
+    const buttons = wrapper.findAll('.el-button')
+    const homeBtn = buttons.find(b => b.text().includes('返回首页'))
+    expect(homeBtn).toBeTruthy()
+    await homeBtn!.trigger('click')
     expect(mockPush).toHaveBeenCalledWith('/dashboard')
   })
 })

@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
 import type { DataItem } from '@/types/realtime'
 
+// 全局 Element Plus stub 已在 src/test-setup.ts 注册。
+// ElButton/ElTag/ElEmpty 由全局 stub 提供。
+// ElRadioGroup/ElRadioButton 不在全局 stub 中，需本地补充。
+
 const RadioGroupStub = defineComponent({
   name: 'ElRadioGroup',
   props: {
@@ -16,13 +20,6 @@ const RadioGroupStub = defineComponent({
 const stubs = {
   ElRadioGroup: RadioGroupStub,
   ElRadioButton: { template: '<button class="el-radio-button"><slot /></button>' },
-  ElTag: { template: '<span class="el-tag"><slot /></span>' },
-  ElButton: {
-    props: ['disabled'],
-    emits: ['click'],
-    template: '<button class="el-button" :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
-  },
-  ElEmpty: { template: '<div class="el-empty" />' },
 }
 
 const items: DataItem[] = [

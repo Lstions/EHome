@@ -3,22 +3,8 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ThemeSwitch from '../ThemeSwitch.vue'
 
-const stubs = {
-  'el-dropdown': {
-    props: ['trigger'],
-    template: '<div data-testid="dropdown"><slot /><slot name="dropdown" /></div>',
-  },
-  'el-dropdown-menu': { template: '<div data-testid="menu"><slot /></div>' },
-  'el-dropdown-item': {
-    props: ['command', 'disabled', 'divided'],
-    template: '<div data-testid="item" :data-command="command" :data_disabled="disabled"><slot /></div>',
-  },
-  'el-button': {
-    props: ['icon'],
-    template: '<button data-testid="btn"><slot /></button>',
-  },
-  'el-icon': { template: '<i><slot /></i>' },
-}
+// 全局 Element Plus stub 已在 src/test-setup.ts 注册，
+// ElDropdown 渲染为 <div class="el-dropdown">, ElDropdownMenu 为 <div class="el-dropdown-menu">, 等。
 
 // Mock the icons so we don't need the full @element-plus/icons-vue
 vi.mock('@element-plus/icons-vue', () => ({
@@ -49,15 +35,15 @@ describe('ThemeSwitch.vue', () => {
   })
 
   it('renders dropdown with theme options', () => {
-    const wrapper = mount(ThemeSwitch, { global: { stubs } })
-    expect(wrapper.find('[data-testid="dropdown"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="menu"]').exists()).toBe(true)
-    const items = wrapper.findAll('[data-testid="item"]')
+    const wrapper = mount(ThemeSwitch)
+    expect(wrapper.find('.el-dropdown').exists()).toBe(true)
+    expect(wrapper.find('.el-dropdown-menu').exists()).toBe(true)
+    const items = wrapper.findAll('.el-dropdown-menu__item')
     expect(items).toHaveLength(3) // light, dark, system
   })
 
   it('renders option labels in Chinese', () => {
-    const wrapper = mount(ThemeSwitch, { global: { stubs } })
+    const wrapper = mount(ThemeSwitch)
     const text = wrapper.text()
     expect(text).toContain('亮色模式')
     expect(text).toContain('暗色模式')
