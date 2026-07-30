@@ -38,13 +38,16 @@ const items: DataItem[] = [
   },
 ]
 
-function mountList(props: { items?: DataItem[]; autoScroll?: boolean } = {}): VueWrapper {
+function mountList(
+  props: { items?: DataItem[]; autoScroll?: boolean; onClear?: () => void } = {},
+): VueWrapper {
   return mount(RealtimeDataList, {
     attachTo: document.body,
     props: {
       items: props.items ?? items,
       autoScroll: props.autoScroll ?? true,
-    },
+      onClear: props.onClear,
+    } as any,
     global: { stubs },
   })
 }
@@ -79,15 +82,16 @@ describe('RealtimeDataList with vue-virtual-scroller 3', () => {
     expect(wrapper.text()).toContain('历史')
   })
 
-  it('switches to hexadecimal raw data and emits clear', async () => {
-    const wrapper = track(mountList())
+  it('switches to hexadecimal raw data and notifies clear', async () => {
+    const onClear = vi.fn()
+    const wrapper = track(mountList({ onClear }))
 
     wrapper.findComponent(RadioGroupStub).vm.$emit('update:modelValue', 'hex')
     await nextTick()
 
     expect(wrapper.find('.item-content').text()).toBe('01 AF')
     await wrapper.find('.list-stats .el-button').trigger('click')
-    expect(wrapper.emitted('clear')).toHaveLength(1)
+    expect(onClear).toHaveBeenCalledOnce()
   })
 
   it('scrolls back to the first row when a new item arrives', async () => {

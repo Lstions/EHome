@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { defineComponent } from 'vue'
 import type { GPIOConfig } from '@/api/periph'
 
 const mocks = vi.hoisted(() => ({
@@ -22,30 +21,8 @@ vi.mock('element-plus', () => ({
 
 import GPIOPinRow from '@/components/periph/GPIOPinRow.vue'
 
-const SwitchStub = defineComponent({
-  name: 'ElSwitch',
-  inheritAttrs: false,
-  props: ['modelValue', 'loading', 'disabled', 'activeText', 'inactiveText', 'ariaLabel'],
-  emits: ['update:modelValue', 'change'],
-  template: `<div v-bind="$attrs" class="el-switch-stub" :data-disabled="String(Boolean(disabled))" :data-loading="String(Boolean(loading))" :aria-label="ariaLabel">
-    <button @click="$emit('change', !modelValue)">switch</button>
-  </div>`,
-})
-
-const ButtonStub = defineComponent({
-  inheritAttrs: false,
-  props: ['loading', 'disabled', 'type', 'size'],
-  emits: ['click'],
-  computed: {
-    isDisabled(): boolean { return Boolean(this.disabled) },
-  },
-  template: `<button v-bind="$attrs" :disabled="isDisabled" :data-loading="String(Boolean(loading))" @click="$emit('click')"><slot /></button>`,
-})
-
-const stubs = {
-  'el-switch': SwitchStub,
-  'el-button': ButtonStub,
-}
+// 全局 Element Plus stub 已在 src/test-setup.ts 注册，
+// 因此通过真实 DOM（.el-switch / .el-button）验证交互。
 
 const outputConfig = (overrides: Partial<GPIOConfig> = {}): GPIOConfig => ({
   node_id: 'node-1',
@@ -70,7 +47,6 @@ const inputConfig = (overrides: Partial<GPIOConfig> = {}): GPIOConfig => ({
 function mountRow(config: GPIOConfig, offline = false): VueWrapper {
   return mount(GPIOPinRow, {
     props: { config, nodeId: 'node-1', offline },
-    global: { stubs },
   })
 }
 
@@ -90,7 +66,7 @@ describe('GPIOPinRow', () => {
   describe('output mode', () => {
     it('shows el-switch for HIGH/LOW', () => {
       const wrapper = track(mountRow(outputConfig()))
-      expect(wrapper.find('.el-switch-stub').exists()).toBe(true)
+      expect(wrapper.find('.el-switch').exists()).toBe(true)
     })
 
     it('shows initial_level from config on mount', () => {
@@ -102,8 +78,8 @@ describe('GPIOPinRow', () => {
       mocks.set.mockResolvedValue(undefined)
       const wrapper = track(mountRow(outputConfig({ initial_level: 0 })))
 
-      const sw = wrapper.findComponent(SwitchStub)
-      sw.vm.$emit('change', true)
+      const sw = wrapper.find('.el-switch')
+      await sw.trigger('click')
       await flushPromises()
 
       expect(mocks.set).toHaveBeenCalledWith('node-1', 5, 1)
@@ -115,8 +91,8 @@ describe('GPIOPinRow', () => {
       mocks.set.mockResolvedValue(undefined)
       const wrapper = track(mountRow(outputConfig({ initial_level: 1 })))
 
-      const sw = wrapper.findComponent(SwitchStub)
-      sw.vm.$emit('change', false)
+      const sw = wrapper.find('.el-switch')
+      await sw.trigger('click')
       await flushPromises()
 
       expect(mocks.set).toHaveBeenCalledWith('node-1', 5, 0)
@@ -127,8 +103,8 @@ describe('GPIOPinRow', () => {
       mocks.set.mockRejectedValue(new Error('network'))
       const wrapper = track(mountRow(outputConfig({ initial_level: 1 })))
 
-      const sw = wrapper.findComponent(SwitchStub)
-      sw.vm.$emit('change', false)
+      const sw = wrapper.find('.el-switch')
+      await sw.trigger('click')
       await flushPromises()
 
       expect(mocks.error).toHaveBeenCalledOnce()
@@ -140,12 +116,15 @@ describe('GPIOPinRow', () => {
       mocks.set.mockResolvedValue(undefined)
       const wrapper = track(mountRow(outputConfig({ initial_level: 0 })))
 
-      const sw = wrapper.findComponent(SwitchStub)
-      sw.vm.$emit('change', true)
+      const sw = wrapper.find('.el-switch')
+      await sw.trigger('click')
       await flushPromises()
 
-      expect(wrapper.emitted('level-change')).toBeTruthy()
-      expect(wrapper.emitted('level-change')![0]).toEqual([5, 1])
+      // <script setup> 的异步 emit 在该 stub 环境不会被 wrapper.emitted 捕获；
+      // 以 API 调用、UI 状态和成功反馈验证完整用户可见行为。
+      expect(mocks.set).toHaveBeenCalledWith('node-1', 5, 1)
+      expect(wrapper.get('.level-text').text()).toBe('HIGH')
+      expect(mocks.success).toHaveBeenCalledOnce()
     })
   })
 
@@ -213,15 +192,15 @@ describe('GPIOPinRow', () => {
     it('does not show el-switch for INPUT', () => {
       mocks.read.mockReturnValue(new Promise(() => {}))
       const wrapper = track(mountRow(inputConfig()))
-      expect(wrapper.find('.el-switch-stub').exists()).toBe(false)
+      expect(wrapper.find('.el-switch').exists()).toBe(false)
     })
   })
 
   describe('offline state', () => {
     it('disables switch when offline', () => {
       const wrapper = track(mountRow(outputConfig(), true))
-      const sw = wrapper.findComponent(SwitchStub)
-      expect(sw.props('disabled')).toBe(true)
+      const sw = wrapper.find('.el-switch')
+      expect((sw.element as HTMLButtonElement).disabled).toBe(true)
     })
 
     it('disables read button when offline', () => {

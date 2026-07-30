@@ -32,6 +32,32 @@ vi.mock('@/stores/websocket', () => ({
 }))
 vi.mock('element-plus', () => ({ ElMessage: { success: mocks.success, error: mocks.error } }))
 
+// PeripheralControl 显式 import 子组件；使用模块 mock（而非 global.stubs）确保替换生效。
+vi.mock('@/components/periph/GPIOResourceList.vue', () => ({
+  default: {
+    name: 'GPIOResourceList',
+    props: ['resources', 'configs', 'nodeId', 'offline', 'loading', 'occupiedPins'],
+    emits: ['configure', 'edit', 'remove'],
+    template: `<div class="gpio-list" :data-count="resources.length" :data-offline="String(offline)" :data-occupied="[...occupiedPins.keys()].sort((a,b)=>a-b).join(',')">
+      <span v-for="item in resources" :key="item.id" class="gpio-resource">{{ item.id }}</span>
+      <button class="configure-gpio" @click="$emit('configure', 2)">configure gpio</button>
+      <button class="remove-gpio" @click="$emit('remove', 2)">remove gpio</button>
+    </div>`,
+  },
+}))
+vi.mock('@/components/periph/PWMResourceList.vue', () => ({
+  default: {
+    name: 'PWMResourceList',
+    props: ['resources', 'configs', 'nodeId', 'offline', 'loading', 'availablePins'],
+    emits: ['configure', 'edit', 'remove'],
+    template: `<div class="pwm-list" :data-count="resources.length" :data-pins="availablePins.join(',')">
+      <span v-for="item in resources" :key="item.id" class="pwm-resource">{{ item.id }}</span>
+      <button class="configure-pwm" @click="$emit('configure', 'PWM1')">configure pwm</button>
+      <button class="remove-pwm" @click="$emit('remove', 'PWM0')">remove pwm</button>
+    </div>`,
+  },
+}))
+
 import PeripheralControl from '@/components/periph/PeripheralControl.vue'
 
 const GPIOListStub = defineComponent({
@@ -62,9 +88,9 @@ const ButtonStub = defineComponent({
 const stubs = {
   GPIOResourceList: GPIOListStub,
   PWMResourceList: PWMListStub,
-  'el-button': ButtonStub,
-  'el-icon': defineComponent({ template: '<i><slot /></i>' }),
-  'el-alert': defineComponent({ props: ['title'], template: '<div class="alert">{{ title }}<slot /></div>' }),
+  ElButton: ButtonStub,
+  ElIcon: defineComponent({ template: '<i><slot /></i>' }),
+  ElAlert: defineComponent({ props: ['title'], template: '<div class="alert">{{ title }}<slot /></div>' }),
   Refresh: defineComponent({ template: '<i />' }),
 }
 
@@ -92,8 +118,15 @@ beforeEach(() => {
   mocks.subscribe.mockReturnValue(mocks.unsubscribe)
 })
 
-function mountControl(offline = false) {
-  return track(mount(PeripheralControl, { props: { nodeId: 'node-1', offline }, global: { stubs } }))
+function mountControl(
+  offline = false,
+  onConfigureGpio?: (pin: number) => void,
+  onConfigurePwm?: (hardwareId: string) => void,
+) {
+  return track(mount(PeripheralControl, {
+    props: { nodeId: 'node-1', offline, onConfigureGpio, onConfigurePwm } as any,
+    global: { stubs },
+  }))
 }
 
 describe('PeripheralControl', () => {
@@ -136,15 +169,17 @@ describe('PeripheralControl', () => {
     expect(wrapper.get('.pwm-list').attributes('data-pins')).toBe('')
   })
 
-  it('passes offline state and emits independent configuration identities', async () => {
-    const wrapper = mountControl(true)
+  it('passes offline state and notifies parent with independent configuration identities', async () => {
+    const onConfigureGpio = vi.fn()
+    const onConfigurePwm = vi.fn()
+    const wrapper = mountControl(true, onConfigureGpio, onConfigurePwm)
     await flushPromises()
 
     expect(wrapper.get('.gpio-list').attributes('data-offline')).toBe('true')
     await wrapper.get('.configure-gpio').trigger('click')
     await wrapper.get('.configure-pwm').trigger('click')
-    expect(wrapper.emitted('configure-gpio')).toEqual([[2]])
-    expect(wrapper.emitted('configure-pwm')).toEqual([['PWM1']])
+    expect(onConfigureGpio).toHaveBeenCalledWith(2)
+    expect(onConfigurePwm).toHaveBeenCalledWith('PWM1')
   })
 
   it('deletes PWM by hardware_id and reloads capabilities and configs', async () => {

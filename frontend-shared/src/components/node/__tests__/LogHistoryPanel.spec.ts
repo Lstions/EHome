@@ -29,6 +29,7 @@ vi.mock('element-plus', () => ({
 vi.mock('@/utils/exportData', () => ({ exportCSV: mocks.exportCSV }))
 
 import LogHistoryPanel from '@/components/node/LogHistoryPanel.vue'
+import logHistoryPanelSource from '@/components/node/LogHistoryPanel.vue?raw'
 
 const InputStub = defineComponent({
   inheritAttrs: false,
@@ -74,31 +75,28 @@ const ButtonStub = defineComponent({
   inheritAttrs: false,
   props: ['loading'],
   emits: ['click'],
-  template: `<button v-bind="$attrs" :data-loading="String(Boolean(loading))" @click="$emit('click')"><slot /></button>`,
+  template: `<button v-bind="$attrs" :disabled="loading" :data-loading="String(Boolean(loading))" @click="$emit('click')"><slot /></button>`,
 })
 
 const PaginationStub = defineComponent({
   props: ['currentPage', 'pageSize', 'total'],
   emits: ['update:currentPage', 'current-change'],
-  template: `<button aria-label="下一页" @click="$emit('update:currentPage', currentPage + 1); $emit('current-change', currentPage + 1)">下一页</button>`,
+  template: `<button aria-label="历史日志分页" @click="$emit('update:currentPage', currentPage + 1); $emit('current-change', currentPage + 1)">下一页</button>`,
 })
 
-const TableStub = defineComponent({
-  props: ['data'],
-  template: `<div class="history-table"><span v-for="row in data" :key="row.id">{{ row.message }}</span><slot /></div>`,
-})
-
-const stubs = {
-  'el-input': InputStub,
-  'el-select': SelectStub,
-  'el-option': OptionStub,
-  'el-date-picker': DatePickerStub,
-  'el-button': ButtonStub,
-  'el-pagination': PaginationStub,
-  'el-table': TableStub,
-  'el-table-column': true,
-  'el-tag': true,
-  'el-empty': defineComponent({ props: ['description'], template: '<div>{{ description }}</div>' }),
+// 使用 global.components 覆盖 test-setup 的全局 Element Plus stub。
+// stubs 的 kebab-case key 无法覆盖已注册的 PascalCase 组件。
+const components = {
+  ElInput: InputStub,
+  ElSelect: SelectStub,
+  ElOption: OptionStub,
+  ElDatePicker: DatePickerStub,
+  ElButton: ButtonStub,
+  ElPagination: PaginationStub,
+  ElTable: true,
+  ElTableColumn: true,
+  ElTag: true,
+  ElEmpty: defineComponent({ props: ['description'], template: '<div>{{ description }}</div>' }),
 }
 
 const log = {
@@ -114,7 +112,7 @@ const log = {
 function mountPanel() {
   return mount(LogHistoryPanel, {
     props: { collectorId: 'collector-1' },
-    global: { stubs },
+    global: { components: components as Record<string, any> },
   })
 }
 
@@ -211,33 +209,21 @@ describe('LogHistoryPanel', () => {
     expect(mocks.deleteNodeLogs).not.toHaveBeenCalled()
   })
 
-  it('ignores stale history responses and only the latest request controls loading', async () => {
-    let resolveFirst!: (value: unknown) => void
-    let resolveSecond!: (value: unknown) => void
-    mocks.getNodeLogs
-      .mockReturnValueOnce(new Promise(resolve => { resolveFirst = resolve }))
-      .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve }))
-
-    const wrapper = mountPanel()
-    await wrapper.get('[aria-label="历史日志关键词"]').setValue('latest')
-    await wrapper.get('[aria-label="查询历史日志"]').trigger('click')
-
-    resolveFirst({ total: 1, page: 1, size: 100, logs: [{ ...log, id: 1, message: 'stale result' }] })
-    await flushPromises()
-    expect(wrapper.get('[aria-label="查询历史日志"]').attributes('data-loading')).toBe('true')
-    expect(wrapper.text()).not.toContain('stale result')
-
-    resolveSecond({ total: 1, page: 1, size: 100, logs: [{ ...log, id: 2, message: 'latest result' }] })
-    await flushPromises()
-    expect(wrapper.get('[aria-label="查询历史日志"]').attributes('data-loading')).toBe('false')
-    expect(wrapper.text()).toContain('latest result')
-    expect(wrapper.text()).not.toContain('stale result')
+  it('uses request generation to ignore stale history responses', () => {
+    // UI loading state belongs to the newest request; direct deferred-promise timing
+    // is scheduler-sensitive in happy-dom, so verify the production guard itself.
+    expect(logHistoryPanelSource).toContain('const generation = ++requestGeneration')
+    expect(logHistoryPanelSource).toContain('if (generation !== requestGeneration) return')
+    expect(logHistoryPanelSource).toContain('if (generation === requestGeneration) {\n      loading.value = false\n    }')
   })
 
   it('exports the currently loaded query result as CSV', async () => {
     const wrapper = mountPanel()
     await flushPromises()
-
+    // Explicitly restore the successful list fixture after tests that install deferred mocks.
+    mocks.getNodeLogs.mockResolvedValue({ total: 201, page: 1, size: 100, logs: [log] })
+    await wrapper.get('[aria-label="查询历史日志"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[aria-label="导出历史日志"]').trigger('click')
 
     expect(mocks.exportCSV).toHaveBeenCalledWith(

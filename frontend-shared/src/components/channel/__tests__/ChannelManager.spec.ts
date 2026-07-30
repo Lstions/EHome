@@ -86,19 +86,20 @@ const IconStub = defineComponent({
   template: '<i><slot /></i>',
 })
 
-const stubs = {
-  'el-dialog': DialogStub,
-  'el-form': FormStub,
-  'el-form-item': FormItemStub,
-  'el-select': SelectStub,
-  'el-option': OptionStub,
-  'el-input': InputStub,
-  'el-input-number': InputNumberStub,
-  'el-radio-group': RadioGroupStub,
-  'el-radio-button': RadioButtonStub,
-  'el-switch': SwitchStub,
-  'el-button': ButtonStub,
-  'el-icon': IconStub,
+// ChannelManager 显式解析 Element Plus 组件；用 global.components 覆盖全局轻量 stub。
+const components = {
+  ElDialog: DialogStub,
+  ElForm: FormStub,
+  ElFormItem: FormItemStub,
+  ElSelect: SelectStub,
+  ElOption: OptionStub,
+  ElInput: InputStub,
+  ElInputNumber: InputNumberStub,
+  ElRadioGroup: RadioGroupStub,
+  ElRadioButton: RadioButtonStub,
+  ElSwitch: SwitchStub,
+  ElButton: ButtonStub,
+  ElIcon: IconStub,
 }
 
 describe('ChannelManager', () => {
@@ -125,7 +126,7 @@ describe('ChannelManager', () => {
           config: { baud_rate: 9600, data_bits: 8, stop_bits: 1, parity: 'none' },
         },
       },
-      global: { stubs },
+      global: { components: components as Record<string, any> },
     })
 
     await wrapper.setProps({ modelValue: true })

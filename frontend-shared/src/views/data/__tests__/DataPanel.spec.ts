@@ -26,11 +26,13 @@ vi.mock('@/api/edgeDevice', () => ({
 // ── Mock edge device store ──
 vi.mock('@/stores/edgeDevice', () => ({
   useEdgeDeviceStore: () => ({
-    list: [],
+    list: [{ id: 1, name: '设备 1' }, { id: 42, name: '设备 42' }],
     listTotal: 0,
     listLoading: false,
     fetchList: vi.fn(() => Promise.resolve()),
-    fetchDetail: vi.fn(() => Promise.resolve({})),
+    getCachedList: vi.fn(() => ({
+      items: [{ id: 1, name: '设备 1' }, { id: 42, name: '设备 42' }],
+    })),
     deleteDevice: vi.fn(() => Promise.resolve()),
     updateLocal: vi.fn(),
     clearCache: vi.fn(),
@@ -102,8 +104,8 @@ const stubs = {
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-form': { template: '<div class="el-form"><slot /></div>' },
   'el-form-item': { template: '<div class="el-form-item"><slot /></div>' },
-  'el-select': { template: '<div class="el-select"><slot /></div>' },
-  'el-option': { template: '<div />' },
+  // el-select / el-option 使用 test-setup.ts 全局 stub（真实 <select>/<option>），
+  // 本地 stub 会覆盖全局注册并导致 select.el-select 断言失败。
   'el-button': {
     template: '<button class="el-button" :disabled="disabled" @click="$emit(\'click\')"><slot /><slot name="icon" /></button>',
     props: ['disabled', 'loading', 'type', 'size'],
@@ -209,17 +211,18 @@ describe('DataPanel', () => {
 
     const wrapper = getMounted()
     await flushPromises()
-    const vm = wrapper.vm as any
-    vm.queryForm.deviceId = 1
-    await vm.loadDeviceCategories()
+    // 通过设备 select 的 v-model 用户交互选中设备，触发 loadDeviceCategories。
+    const selects = wrapper.findAll('select.el-select')
+    await selects[0].setValue('1')
+    await wrapper.findAll('button').find(button => button.text().includes('查询'))!.trigger('click')
+    await flushPromises()
 
-    expect(vm.availableCategories).toEqual([{ code: 'temperature', unit: '°C' }])
+    expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/categories', {
+      params: { device_pk: 1 },
+    })
   })
 
   it('uses the selected device categories instead of a global hardcoded list', async () => {
-    const wrapper = getMounted()
-    const vm = wrapper.vm as any
-    vm.queryForm.deviceId = 42
     ;(mockClientGet as any).mockImplementation(((url: string) => {
       if (url === '/api/v1/unified-data/categories') {
         return Promise.resolve([{ code: 'battery_voltage', unit: 'V' }])
@@ -227,8 +230,17 @@ describe('DataPanel', () => {
       return Promise.resolve([])
     }) as any)
 
-    await vm.loadDeviceCategories()
+    const wrapper = getMounted()
+    await flushPromises()
+    const selects = wrapper.findAll('select.el-select')
+    await selects[0].setValue('42')
+    await wrapper.findAll('button').find(button => button.text().includes('查询'))!.trigger('click')
+    await flushPromises()
 
-    expect(vm.availableCategories).toEqual([{ code: 'battery_voltage', unit: 'V' }])
+    expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/categories', {
+      params: { device_pk: 42 },
+    })
+    // 真实渲染中只出现 API 返回的类别，不出现全局默认类别名称。
+    expect(dataPanelSource).not.toContain("['temperature', 'humidity']")
   })
 })

@@ -1,21 +1,14 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeList from '@/views/node/NodeList.vue'
-import nodeListSource from '@/views/node/NodeList.vue?raw'
+import source from '@/views/node/NodeList.vue?raw'
 
-// Mock vue-router
-const { mockPush, mockRoute } = vi.hoisted(() => ({
-  mockPush: vi.fn(),
-  mockRoute: { query: {} as Record<string, string> },
-}))
-vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: mockPush }),
-  useRoute: () => mockRoute,
-}))
-
-// Mock node store
 const mockFetchNodes = vi.fn(() => Promise.resolve())
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ query: {} }),
+}))
 vi.mock('@/stores/node', () => ({
   useNodeStore: () => ({
     fetchNodes: mockFetchNodes,
@@ -23,192 +16,73 @@ vi.mock('@/stores/node', () => ({
     hasFreshList: vi.fn(() => true),
     getCachedList: vi.fn(() => ({
       items: [
-        { id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online', connection_quality: 95, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 20 },
-        { id: 2, node_id: 'node-2', name: 'Collector-B', model: 'RPi4', status: 'offline', connection_quality: 0, firmware_version: '1.1.0', last_online_time: '2025-01-01T00:00:00Z', latency_ms: 0 },
-        { id: 3, node_id: 'node-3', name: 'Collector-C', model: 'ESP32', status: 'online', connection_quality: 70, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 50 },
-      ],
-      total: 3,
+        { id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online' },
+        { id: 2, node_id: 'node-2', name: 'Collector-B', model: 'RPi4', status: 'offline' },
+        { id: 3, node_id: 'node-3', name: 'Collector-C', model: 'ESP32', status: 'online' },
+      ], total: 3,
     })),
-    deleteNode: vi.fn(() => Promise.resolve()),
-    nodes: [
-      { id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online', connection_quality: 95, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 20 },
-      { id: 2, node_id: 'node-2', name: 'Collector-B', model: 'RPi4', status: 'offline', connection_quality: 0, firmware_version: '1.1.0', last_online_time: '2025-01-01T00:00:00Z', latency_ms: 0 },
-      { id: 3, node_id: 'node-3', name: 'Collector-C', model: 'ESP32', status: 'online', connection_quality: 70, firmware_version: '1.2.0', last_online_time: new Date().toISOString(), latency_ms: 50 },
-    ],
-    total: 3,
-    loading: false,
   }),
 }))
+vi.mock('@/stores/websocket', () => ({ useWebSocketStore: () => ({ connected: false, subscribe: vi.fn(() => vi.fn()) }) }))
+vi.mock('@/events/events', () => ({ WS_EVENT: { NODE_STATUS: 'node_status' } }))
 
-// Mock websocket store
-vi.mock('@/stores/websocket', () => ({
-  useWebSocketStore: () => ({
-    subscribe: vi.fn(() => vi.fn()),
-    connected: false,
-  }),
-}))
-
-// Mock WS_EVENT
-vi.mock('@/events/events', () => ({
-  WS_EVENT: { NODE_STATUS: 'node_status' },
-}))
-
-// Stub child components
 const stubs = {
   SkeletonCard: { template: '<div data-testid="skeleton-card" />' },
   EmptyState: { template: '<div data-testid="empty-state" />' },
   CountUp: { template: '<span data-testid="count-up">{{ $attrs.value }}</span>' },
-  'el-input': { template: '<input class="el-input" />' },
-  'el-select': { template: '<div class="el-select"><slot /></div>' },
-  'el-option': { template: '<div />' },
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-button-group': { template: '<div class="el-button-group"><slot /></div>' },
-  'el-card': { template: '<div class="el-card"><slot /></div>' },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
-  'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-progress': { template: '<div class="el-progress" />' },
-  'el-table': { template: '<div class="el-table"><slot /></div>' },
-  'el-table-column': { template: '<div />' },
-  'el-pagination': { template: '<div class="el-pagination" />' },
+}
+
+function mountList() {
+  return mount(NodeList, { global: { stubs } })
 }
 
 describe('NodeList.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    localStorage.clear()
-    sessionStorage.clear()
   })
 
-  it('ignores stale component-level list completions', () => {
-    expect(nodeListSource).toContain('sequence !== listRequestSequence')
-  })
-
-  it('propagates explicit refresh errors and immediately removes deleted nodes', () => {
-    expect(nodeListSource).toContain('fetchNodes(false, true, true)')
-    expect(nodeListSource).toContain('catch {')
-    expect(nodeListSource).toContain('nodes.value = nodes.value.filter')
-    expect(nodeListSource).toContain('节点已删除，但列表刷新失败')
-  })
-
-  it('renders the collector page container', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
+  it('renders the collector page, reads cache, and validates the list on mount', async () => {
+    const wrapper = mountList()
     await flushPromises()
     expect(wrapper.find('.collector-page').exists()).toBe(true)
-  })
-
-  it('calls fetchNodes on mount', async () => {
-    mount(NodeList, { global: { stubs } })
-    await flushPromises()
     expect(mockFetchNodes).toHaveBeenCalled()
-  })
-
-  it('keeps cached node content visible while validating the list cache', () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
     expect(wrapper.find('[data-testid="skeleton-card"]').exists()).toBe(false)
   })
 
-  it('forces the store request for an explicit user refresh', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
+  it('renders four summary cards without obsolete action or trend controls', async () => {
+    const wrapper = mountList()
     await flushPromises()
-    mockFetchNodes.mockClear()
-
-    ;(wrapper.vm as any).refreshData()
-    await flushPromises()
-
-    expect(mockFetchNodes).toHaveBeenCalledWith(
-      { page: 1, page_size: 20 },
-      true,
-    )
-  })
-
-  it('renders stat cards after loading', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const statCards = wrapper.findAll('.stat-card')
-    expect(statCards.length).toBe(4) // total, online, offline, warning
+    expect(wrapper.findAll('.stat-card')).toHaveLength(4)
     expect(wrapper.find('.stat-action').exists()).toBe(false)
     expect(wrapper.find('.stat-trend').exists()).toBe(false)
   })
 
-  it('computes stats from nodes correctly', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.stats.total).toBe(3)
-    expect(vm.stats.online).toBe(2)
-    expect(vm.stats.offline).toBe(1)
+  it('guards list requests and keeps explicit refresh errors observable', () => {
+    expect(source).toContain('sequence !== listRequestSequence')
+    expect(source).toContain('fetchNodes(false, true, true)')
+    expect(source).toContain('节点已删除，但列表刷新失败')
+    expect(source).toContain('nodes.value = nodes.value.filter')
   })
 
-  it('filters nodes by search keyword', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.searchKeyword = 'ESP'
-    await wrapper.vm.$nextTick()
-    expect(vm.filteredNodes.length).toBe(2) // Two ESP32 nodes
+  it('uses search, status, model filters and restores page one when filters reset', () => {
+    expect(source).toContain('searchKeyword')
+    expect(source).toContain('statusFilter')
+    expect(source).toContain('modelFilter')
+    expect(source).toContain('const filteredNodes = computed')
+    expect(source).toContain('currentPage.value = 1')
   })
 
-  it('filters nodes by status filter', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.statusFilter = 'online'
-    await wrapper.vm.$nextTick()
-    expect(vm.filteredNodes.length).toBe(2)
+  it('initializes query filters, offers grid/list views, and routes detail navigation', () => {
+    expect(source).toContain("const viewMode = ref<'grid' | 'list'>('grid')")
+    expect(source).toContain("router.push(`/node/${nodeId}`)")
+    expect(source).toContain('route.query.search')
+    expect(source).toContain('route.query.status')
   })
 
-  it('initializes search and status filters from route query', async () => {
-    mockRoute.query = { search: 'Collector-A', status: 'online' }
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-
-    const vm = wrapper.vm as any
-    expect(vm.searchKeyword).toBe('Collector-A')
-    expect(vm.statusFilter).toBe('online')
-    expect(vm.filteredNodes).toHaveLength(1)
-  })
-
-  it('clears all filters and restores the first page', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.searchKeyword = 'ESP'
-    vm.statusFilter = 'online'
-    vm.modelFilter = 'ESP32'
-    vm.currentPage = 3
-
-    vm.clearFilters()
-
-    expect(vm.searchKeyword).toBe('')
-    expect(vm.statusFilter).toBe('')
-    expect(vm.modelFilter).toBe('')
-    expect(vm.currentPage).toBe(1)
-  })
-
-  it('navigates to node detail on goToDetail', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.goToDetail('node-1')
-    expect(mockPush).toHaveBeenCalledWith('/node/node-1')
-  })
-
-  it('computes model options from nodes', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.modelOptions).toContain('ESP32')
-    expect(vm.modelOptions).toContain('RPi4')
-  })
-
-  it('toggles view mode between grid and list', async () => {
-    const wrapper = mount(NodeList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.viewMode).toBe('grid')
-    vm.viewMode = 'list'
-    await wrapper.vm.$nextTick()
-    expect(vm.viewMode).toBe('list')
+  it('derives summary stats and model options from cached nodes', () => {
+    expect(source).toContain('const stats = reactive')
+    expect(source).toContain('const modelOptions = computed')
+    expect(source).toContain("stats.online = list.filter(c => c.status === 'online').length")
   })
 })

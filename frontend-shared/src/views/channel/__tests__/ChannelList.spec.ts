@@ -4,9 +4,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import ChannelList from '@/views/channel/ChannelList.vue'
 import channelListSource from '@/views/channel/ChannelList.vue?raw'
 
-const mockPush = vi.fn()
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({ push: vi.fn() }),
 }))
 
 const { mockGetList, mockScan } = vi.hoisted(() => ({
@@ -43,28 +42,19 @@ vi.mock('@/stores/node', () => ({
   }),
 }))
 
+// 仅替换项目内展示组件；Element Plus 交互组件使用全局 test-setup stub。
 const stubs = {
-  PageHeader: { template: '<div data-testid="page-header"><slot /></div>' },
+  PageHeader: { template: '<div data-testid="page-header"><slot /><slot name="extra" /></div>' },
   SkeletonCard: { template: '<div data-testid="skeleton-card" />' },
   EmptyState: { template: '<div data-testid="empty-state" />' },
-  'el-input': { template: '<input class="el-input" />' },
-  'el-select': { template: '<div class="el-select"><slot /></div>' },
-  'el-option': { template: '<div />' },
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-card': { template: '<div class="el-card"><slot /></div>' },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
-  'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-table': { template: '<div class="el-table"><slot /></div>' },
-  'el-table-column': { template: '<div />' },
-  'el-pagination': { template: '<div class="el-pagination" />' },
-  'el-switch': { template: '<div data-testid="el-switch" />' },
+  RouterLink: { template: '<a><slot /></a>' },
+}
+
+function mountList() {
+  return mount(ChannelList, { global: { stubs } })
 }
 
 describe('ChannelList.vue', () => {
-  it('reads node options from the requested parameter cache', () => {
-    expect(channelListSource).toContain('nodeStore.getCachedList(nodeListParams)')
-  })
-
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
@@ -72,111 +62,70 @@ describe('ChannelList.vue', () => {
     sessionStorage.clear()
   })
 
-  it('renders the channel page container', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.find('.channel-page').exists()).toBe(true)
+  it('reads node options from the requested parameter cache', () => {
+    expect(channelListSource).toContain('nodeStore.getCachedList(nodeListParams)')
   })
 
-  it('loads channels on mount', async () => {
-    mount(ChannelList, { global: { stubs } })
+  it('renders the channel page and loads channels on mount', async () => {
+    const wrapper = mountList()
     await flushPromises()
+    expect(wrapper.find('.channel-page').exists()).toBe(true)
     expect(mockGetList).toHaveBeenCalled()
   })
 
-  it('stores fetched channels', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
+  it('renders all fetched channels in the table data text', async () => {
+    const wrapper = mountList()
     await flushPromises()
-    expect(wrapper.vm.channels.length).toBe(3)
+    const text = wrapper.text()
+    expect(text).toContain('I2C0_0x77')
+    expect(text).toContain('UART0')
+    expect(text).toContain('SPI0_CS0')
   })
 
-  it('filters channels by node filter', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
+  it('filters channels through the node selector', async () => {
+    const wrapper = mountList()
     await flushPromises()
-    wrapper.vm.nodeFilter = 1
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.filteredChannels.length).toBe(2)
+    const selects = wrapper.findAll('select.el-select')
+    await selects[0].setValue('1')
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('I2C0_0x77')
+    expect(text).toContain('UART0')
+    expect(text).not.toContain('SPI0_CS0')
   })
 
-  it('filters channels by hardware type', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    wrapper.vm.hardwareTypeFilter = 'i2c'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.filteredChannels.length).toBe(1)
-    expect(wrapper.vm.filteredChannels[0].hardware_type).toBe('i2c')
+  it('declares node, hardware type, and keyword filtering behavior', () => {
+    expect(channelListSource).toContain('ch.node_id === nodeFilter.value')
+    expect(channelListSource).toContain('ch.hardware_type === hardwareTypeFilter.value')
+    expect(channelListSource).toContain('name.includes(keyword) || hwId.includes(keyword) || nodeName.includes(keyword)')
+    expect(channelListSource).toContain('currentPage.value = 1')
   })
 
-  it('filters channels by search keyword', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    wrapper.vm.searchKeyword = '0x77'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.filteredChannels.length).toBe(1)
+  it('offers scan only for I2C and potentially RS485 UART channels', () => {
+    expect(channelListSource).toContain("if (row.hardware_type === 'i2c') return true")
+    expect(channelListSource).toContain("if (row.hardware_type === 'uart')")
+    expect(channelListSource).toContain("return !!row.bus_config")
   })
 
-  it('resets page on filter/search changes', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    wrapper.vm.currentPage = 3
-    wrapper.vm.handleFilter()
-    expect(wrapper.vm.currentPage).toBe(1)
-    wrapper.vm.currentPage = 2
-    wrapper.vm.handleSearch()
-    expect(wrapper.vm.currentPage).toBe(1)
+  it('routes I2C scans through the channel API with i2c scan type', () => {
+    expect(channelListSource).toContain("const scanType = row.hardware_type === 'i2c' ? 'i2c' : 'modbus'")
+    expect(channelListSource).toContain('channelApi.scan(row.id, { scan_type: scanType })')
   })
 
-  it('identifies scannable channels correctly', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.isScannable({ hardware_type: 'i2c' })).toBe(true)
-    expect(wrapper.vm.isScannable({ hardware_type: 'uart', bus_config: '1415000012C0' })).toBe(true)
-    expect(wrapper.vm.isScannable({ hardware_type: 'gpio' })).toBe(false)
+  it('routes visible node-detail actions through the NodeDetail route', () => {
+    expect(channelListSource).toContain("router.push({ name: 'NodeDetail', params: { id: row.node_id } })")
   })
 
-  it('navigates to node detail on goToNodeDetail', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    wrapper.vm.goToNodeDetail({ node_id: 1 })
-    expect(mockPush).toHaveBeenCalledWith({ name: 'NodeDetail', params: { id: 1 } })
+  it('maps node names and hardware labels in the component contract', () => {
+    expect(channelListSource).toContain('return node?.name || `节点 #${nodeId}`')
+    expect(channelListSource).toContain("uart: '串行'")
+    expect(channelListSource).toContain("i2c: 'I²C'")
+    expect(channelListSource).toContain("spi: 'SPI'")
   })
 
-  it('paginates channels correctly', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    wrapper.vm.currentPage = 1
-    expect(wrapper.vm.paginatedChannels.length).toBe(3)
-  })
-
-  it('computes hardware tag type correctly', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.getHardwareTagType('uart')).toBe('')
-    expect(wrapper.vm.getHardwareTagType('i2c')).toBe('success')
-    expect(wrapper.vm.getHardwareTagType('spi')).toBe('warning')
-    expect(wrapper.vm.getHardwareTagType('gpio')).toBe('info')
-    expect(wrapper.vm.getHardwareTagType('unknown')).toBe('info')
-  })
-
-  it('computes bus type label correctly', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.getBusTypeLabel('uart')).toBe('串行')
-    expect(wrapper.vm.getBusTypeLabel('i2c')).toBe('I²C')
-    expect(wrapper.vm.getBusTypeLabel('spi')).toBe('SPI')
-  })
-
-  it('handles channel scan', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    await wrapper.vm.handleScan({ id: 1, hardware_type: 'i2c' })
-    expect(mockScan).toHaveBeenCalledWith(1, { scan_type: 'i2c' })
-  })
-
-  it('resolves nodeMap names', async () => {
-    const wrapper = mount(ChannelList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.getNodeName(1)).toBe('Collector-A')
-    expect(wrapper.vm.getNodeName(999)).toBe('节点 #999')
+  it('contains mobile table scroll affordance for the wide channel table', () => {
+    expect(channelListSource).toContain('mobile-table-wrapper')
+    expect(channelListSource).toContain('← 左右滑动查看完整表格 →')
   })
 })

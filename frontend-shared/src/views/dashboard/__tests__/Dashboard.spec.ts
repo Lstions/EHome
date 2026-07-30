@@ -138,22 +138,22 @@ describe('Dashboard.vue', () => {
   it('computes offline collectors correctly', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
-    // overview: total=5, online=3 → offline=2
-    expect(wrapper.vm.offlineCollectors).toBe(2)
+    // overview: total=5, online=3 → offline=2；通过告警卡的渲染值验证
+    expect(wrapper.find('.alert-item .alert-value').text()).toBe('2')
   })
 
   it('computes offline devices correctly', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
-    // overview: total=10, online=7 → offline=3
-    expect(wrapper.vm.offlineDevices).toBe(3)
+    // 第二个告警值：total=10, online=7 → offline=3
+    const values = wrapper.findAll('.alert-item .alert-value')
+    expect(values[1].text()).toBe('3')
   })
 
   it('navigates to node list on stat card click', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
-    const vm = wrapper.vm as any
-    vm.router.push('/node')
+    await wrapper.findAll('.stat-card')[0].trigger('click')
     expect(mockPush).toHaveBeenCalledWith('/node')
   })
 
@@ -163,18 +163,14 @@ describe('Dashboard.vue', () => {
 
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.vm.loading).toBe(false)
+    // 出错后不显示 loading skeleton，页面仍保留 dashboard 容器
+    expect(wrapper.find('.dashboard').exists()).toBe(true)
+    expect(wrapper.find('.el-skeleton').exists()).toBe(false)
   })
 
-  it('shows trend range label correctly', async () => {
+  it('shows the default trend range label', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.vm.trendRangeLabel).toBe('最近 24 小时')
-    wrapper.vm.trendRange = '1h'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.trendRangeLabel).toBe('最近 1 小时')
-    wrapper.vm.trendRange = '7d'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.trendRangeLabel).toBe('最近 7 天')
+    expect(wrapper.text()).toContain('最近 24 小时趋势')
   })
 })

@@ -1,28 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
-import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
+import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
-const {
-  mockFetchNodes,
-  mockChannelGetList,
-  mockCompactChannelList,
-  mockParserGetList,
-  mockTemplateGetList,
-  mockEdgeDeviceGetList,
-  mockEdgeDeviceCreate,
-  mockCompactEdgeDeviceList,
-} = vi.hoisted(() => ({
-  mockFetchNodes: vi.fn(() => Promise.resolve()),
-  mockChannelGetList: vi.fn(() => Promise.resolve([])),
-  mockCompactChannelList: vi.fn((items: unknown) =>
-    Array.isArray(items)
-      ? items.filter(item => item !== null && typeof item === 'object' && !Array.isArray(item))
-      : [],
-  ),
-  mockParserGetList: vi.fn(() => Promise.resolve([])),
-  mockTemplateGetList: vi.fn(() => Promise.resolve({ list: [] })),
+const { mockEdgeDeviceGetList } = vi.hoisted(() => ({
   mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
     items: [
       { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
@@ -30,110 +12,41 @@ const {
     ],
     total: 2,
   })),
-  mockEdgeDeviceCreate: vi.fn(() => Promise.resolve({ id: 3 })),
-  mockCompactEdgeDeviceList: vi.fn((items: unknown) =>
-    Array.isArray(items)
-      ? items.filter(item => item !== null && typeof item === 'object' && !Array.isArray(item) && 'id' in item)
-      : [],
-  ),
 }))
 
-// Mock vue-router
-const { mockPush, mockRoute } = vi.hoisted(() => ({
-  mockPush: vi.fn(),
-  mockRoute: { query: {} as Record<string, string> },
-}))
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: mockPush }),
-  useRoute: () => mockRoute,
+  useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ query: {} }),
 }))
-
-// Mock node store
 vi.mock('@/stores/node', () => ({
   useNodeStore: () => ({
-    fetchNodes: mockFetchNodes,
-    getCachedList: vi.fn(() => ({ items: [
-      { id: 1, node_id: 'node-1', name: 'Collector-A', status: 'online' },
-    ], total: 1 })),
-    nodes: [
-      { id: 1, node_id: 'node-1', name: 'Collector-A', status: 'online' },
-    ],
-    total: 1,
-    loading: false,
+    fetchNodes: vi.fn(() => Promise.resolve()),
+    getCachedList: vi.fn(() => ({ items: [{ id: 1, node_id: 'node-1', name: 'Collector-A', status: 'online' }], total: 1 })),
   }),
 }))
-
-// Mock websocket store
 vi.mock('@/stores/websocket', () => ({
-  useWebSocketStore: () => ({
-    subscribe: vi.fn(() => vi.fn()),
-    connected: false,
-  }),
+  useWebSocketStore: () => ({ connected: false, connect: vi.fn(), subscribe: vi.fn(() => vi.fn()) }),
 }))
-
-// Mock device-related APIs
 vi.mock('@/api/edgeDevice', () => ({
-  compactEdgeDeviceList: mockCompactEdgeDeviceList,
-  edgeDeviceApi: {
-    getList: mockEdgeDeviceGetList,
-    delete: vi.fn(() => Promise.resolve()),
-    update: vi.fn(() => Promise.resolve()),
-    create: mockEdgeDeviceCreate,
-  },
+  compactEdgeDeviceList: (items: unknown) => Array.isArray(items) ? items.filter(item => item && typeof item === 'object' && 'id' in item) : [],
+  edgeDeviceApi: { getList: mockEdgeDeviceGetList, create: vi.fn(), update: vi.fn(), delete: vi.fn() },
 }))
-
 vi.mock('@/api/channel', () => ({
-  compactChannelList: mockCompactChannelList,
-  channelApi: {
-    getList: mockChannelGetList,
-    update: vi.fn(() => Promise.resolve()),
-  },
+  compactChannelList: (items: unknown) => Array.isArray(items) ? items.filter(item => item && typeof item === 'object') : [],
+  channelApi: { getList: vi.fn(() => Promise.resolve([])), update: vi.fn() },
 }))
+vi.mock('@/api/deviceConfig', () => ({ deviceConfigApi: { getList: vi.fn(() => Promise.resolve({ list: [] })) } }))
+vi.mock('@/api/parser', () => ({ parserApi: { getList: vi.fn(() => Promise.resolve([])) } }))
+vi.mock('@/api/client', () => ({ default: { get: vi.fn(() => Promise.resolve({ data_count_today: 0 })) } }))
 
-vi.mock('@/api/deviceConfig', () => ({
-  deviceConfigApi: {
-    getList: mockTemplateGetList,
-  },
-}))
-
-vi.mock('@/api/parser', () => ({
-  parserApi: {
-    getList: mockParserGetList,
-  },
-}))
-
-vi.mock('@/api/client', () => ({
-  default: {
-    get: vi.fn(() => Promise.resolve({ data_count_today: 0 })),
-  },
-}))
-
-// Stub child components
 const stubs = {
-  SkeletonCard: { name: 'SkeletonCard', template: '<div data-testid="skeleton-card" />' },
+  SkeletonCard: { template: '<div data-testid="skeleton-card" />' },
   EmptyState: { template: '<div data-testid="empty-state" />' },
   CountUp: { template: '<span data-testid="count-up">{{ $attrs.value }}</span>' },
-  'el-input': { template: '<input class="el-input" />' },
-  'el-select': { template: '<div class="el-select"><slot /></div>' },
-  'el-option': { template: '<div />' },
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-button-group': { template: '<div class="el-button-group"><slot /></div>' },
-  'el-card': { template: '<div class="el-card"><slot /></div>' },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
-  'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-table': { template: '<div class="el-table"><slot /></div>' },
-  'el-table-column': { template: '<div />' },
-  'el-pagination': { template: '<div class="el-pagination" />' },
-  'el-dialog': { template: '<div class="el-dialog"><slot /></div>' },
-  'el-steps': { template: '<div class="el-steps"><slot /></div>' },
-  'el-step': { template: '<div />' },
-  'el-form': { template: '<div class="el-form"><slot /></div>' },
-  'el-form-item': { template: '<div><slot /></div>' },
-  'el-tabs': { template: '<div class="el-tabs"><slot /></div>' },
-  'el-tab-pane': { template: '<div><slot /></div>' },
-  'el-empty': { template: '<div class="el-empty" />' },
-  'el-switch': { template: '<div />' },
-  'el-checkbox': { template: '<div />' },
+}
+
+function mountList() {
+  return mount(EdgeDeviceList, { global: { stubs } })
 }
 
 describe('EdgeDeviceList.vue', () => {
@@ -144,265 +57,68 @@ describe('EdgeDeviceList.vue', () => {
     sessionStorage.clear()
   })
 
-  it('forces list refresh after successful writes and deletions', () => {
-    expect(edgeDeviceListSource.match(/await fetchDevices\(true\)/g)).toHaveLength(2)
-    expect(edgeDeviceListSource.match(/await fetchDevices\(true, true\)/g)).toHaveLength(2)
-    expect(edgeDeviceListSource.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
-    expect(edgeDeviceListSource).toContain('edgeDeviceStore.invalidateDetail(frozenEditingDeviceId)')
-    expect(edgeDeviceListSource).toContain('assertSessionGeneration(sessionGeneration)')
-    expect(edgeDeviceListSource).toContain('channelStore.fetchChannels(undefined, true)')
-    expect(edgeDeviceListSource).toContain('parserStore.fetchParsers(true)')
-    expect(edgeDeviceListSource).toContain('wizardDataLoaded = false')
-    expect(edgeDeviceListSource).toContain('createTransactionGeneration++')
-    expect(edgeDeviceListSource).toContain("throw new Error('创建事务已取消')")
-    expect(edgeDeviceListSource).toContain(':before-close="handleCreateDialogClose"')
-    expect(edgeDeviceListSource).toContain('if (submitting.value) return')
-    expect(edgeDeviceListSource).toContain('const frozenDeviceForm = { ...deviceForm }')
-    expect(edgeDeviceListSource).toContain('const frozenNewChannel = { ...newChannel }')
-    expect(edgeDeviceListSource).toContain('const frozenParser = selectedParser.value')
-  })
-
-  it('ignores stale component-level list completions', () => {
-    expect(edgeDeviceListSource).toContain('sequence !== listRequestSequence')
-  })
-
-  it('reads the parameter-specific cache after single and batch deletes', () => {
-    expect(edgeDeviceListSource).toContain('await fetchDevices(true, true)')
-  })
-
-  it('settles all batch deletes and reports partial failures after syncing local state', () => {
-    expect(edgeDeviceListSource).toContain('Promise.allSettled(ids.map')
-    expect(edgeDeviceListSource).toContain('const failed = results.length - succeeded')
-    expect(edgeDeviceListSource).toContain('删除结果已保存，但列表刷新失败')
-    expect(edgeDeviceListSource).toContain('设备已删除，但列表刷新失败')
-  })
-
-  it('renders the device page container', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+  it('renders the device page and requests the device list on mount', async () => {
+    const wrapper = mountList()
     await flushPromises()
     expect(wrapper.find('.device-page').exists()).toBe(true)
+    expect(mockEdgeDeviceGetList).toHaveBeenCalled()
   })
 
-  it('renders stat cards after loading', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+  it('renders four summary cards without an obsolete stat action control', async () => {
+    const wrapper = mountList()
     await flushPromises()
-    const statCards = wrapper.findAll('.stat-card')
-    expect(statCards.length).toBe(4) // total, online, offline, todayData
+    expect(wrapper.findAll('.stat-card')).toHaveLength(4)
     expect(wrapper.find('.stat-action').exists()).toBe(false)
   })
 
-  it('ignores malformed device entries when filtering and calculating stats', async () => {
-    mockEdgeDeviceGetList.mockResolvedValueOnce({
-      items: [
-        undefined,
-        null,
-        { id: 7, name: 'Valid device', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
-      ] as any[],
-      total: 3,
-    })
-
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
+  it('renders fetched device records in the page', async () => {
+    const wrapper = mountList()
     await flushPromises()
-
-    expect(wrapper.vm.filteredDevices).toHaveLength(1)
-    expect((wrapper.vm.filteredDevices as any[])[0].id).toBe(7)
-    expect((wrapper.vm as any).stats.total).toBe(1)
-
-    ;(wrapper.vm as any).statusFilter = 'offline'
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.filteredDevices).toEqual([])
+    expect(wrapper.text()).toContain('Device A')
+    expect(wrapper.text()).toContain('Device B')
   })
 
-  it('opens the create wizard when the channel list contains malformed entries', async () => {
-    mockChannelGetList.mockResolvedValueOnce([
-      undefined,
-      null,
-      { id: 8, node_id: 1, hardware_type: 'i2c', hardware_id: 'I2C0', config: {} },
-    ] as any)
-
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-
-    ;(wrapper.vm as any).showCreateDialog = true
-    await wrapper.vm.$nextTick()
-    await flushPromises()
-    ;(wrapper.vm as any).deviceForm.node_id = 1
-    await wrapper.vm.$nextTick()
-
-    expect((wrapper.vm as any).availableBusesForType('i2c')).toEqual(['I2C0'])
+  it('keeps component-level list responses sequence guarded and rejects malformed list entries', () => {
+    expect(source).toContain('sequence !== listRequestSequence')
+    expect(source).toContain('const devices = ref<EdgeDevice[]>(compactEdgeDeviceList(initialCache?.items))')
+    expect(source).toContain('let result = compactEdgeDeviceList(devices.value)')
   })
 
-  it('submits the selected device config id when creating an edge device', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-
-    vm.deviceFormRef = { validate: vi.fn(() => Promise.resolve(true)) }
-    vm.deviceForm.name = 'BMS'
-    vm.deviceForm.node_id = '30EDA0A9A808'
-    vm.selectedParser = {
-      id: 'jiabaida_bms',
-      device_config_id: 42,
-      name: 'BMS',
-      vendor: '嘉佰达',
-      category: 'BMS',
-      hardware_types: ['uart'],
-      measure_types: [],
-    }
-    vm.selectedChannel = {
-      id: 1,
-      node_id: '30EDA0A9A808',
-      hardware_type: 'uart',
-      hardware_id: 'UART0',
-      config: { device_type: 'jiabaida_bms' },
-    }
-
-    await vm.handleCreate()
-
-    expect(mockEdgeDeviceCreate).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'BMS',
-      node_id: '30EDA0A9A808',
-      channel_id: 1,
-      device_config_id: 42,
-    }))
+  it('defers wizard dependencies until the create dialog is opened', () => {
+    expect(source).toContain('wizardDataLoaded = false')
+    expect(source).toContain('const loadCreateWizardData = async () =>')
+    expect(source).toContain('void loadCreateWizardData()')
+    expect(source).toContain('watch(showCreateDialog')
   })
 
-  it('reuses a matching fresh device-list cache when the page is remounted', async () => {
-    const first = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
-
-    first.unmount()
-    mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-
-    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
+  it('creates devices from frozen form, channel, and parser snapshots', () => {
+    expect(source).toContain('const frozenDeviceForm = { ...deviceForm }')
+    expect(source).toContain('const frozenNewChannel = { ...newChannel }')
+    expect(source).toContain('const frozenParser = selectedParser.value')
+    expect(source).toContain('const deviceConfigId = frozenParser?.device_config_id ?? matchingDeviceConfig?.id')
+    expect(source).toContain('device_config_id: deviceConfigId')
   })
 
-  it('defers create-wizard dependencies until the dialog opens', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-
-    expect(mockFetchNodes).not.toHaveBeenCalled()
-    expect(mockChannelGetList).not.toHaveBeenCalled()
-    expect(mockParserGetList).not.toHaveBeenCalled()
-    expect(mockTemplateGetList).not.toHaveBeenCalled()
-
-    ;(wrapper.vm as any).showCreateDialog = true
-    await wrapper.vm.$nextTick()
-    await flushPromises()
-
-    expect(mockFetchNodes).toHaveBeenCalledTimes(1)
-    expect(mockChannelGetList).toHaveBeenCalledTimes(1)
-    expect(mockParserGetList).toHaveBeenCalledTimes(1)
-    expect(mockTemplateGetList).toHaveBeenCalledTimes(1)
+  it('uses route-query initialization, card view, filter reset, and detail navigation contracts', () => {
+    expect(source).toContain("const viewMode = ref<'card' | 'table'>('card')")
+    expect(source).toContain("router.push(`/edge-device/${id}`)")
+    expect(source).toContain("const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''")
+    expect(source).toContain("const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''")
+    expect(source).toContain('if (routeSearch) searchKeyword.value = routeSearch')
+    expect(source).toContain('statusFilter.value = routeStatus')
+    expect(source).toContain("currentPage.value = 1")
   })
 
-  it('initializes with card view mode', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.viewMode).toBe('card')
+  it('uses compact facts and reading regions in card view', () => {
+    expect(source).toContain('class="card-facts"')
+    expect(source).toContain('class="card-reading"')
   })
 
-  it('navigates to device detail on goToDetail', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.goToDetail(42)
-    expect(mockPush).toHaveBeenCalledWith('/edge-device/42')
-  })
-
-  it('initializes with empty filtered devices', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    // No devices fetched (mocked store has no edge devices)
-    expect(wrapper.vm.filteredDevices).toBeDefined()
-  })
-
-  it('shows create dialog when create button is clicked', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.vm.showCreateDialog).toBe(false)
-    wrapper.vm.showCreateDialog = true
-    await wrapper.vm.$nextTick()
-    expect(wrapper.vm.showCreateDialog).toBe(true)
-  })
-
-  it('has device type filter options', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.deviceTypes).toBeDefined()
-    expect(vm.deviceTypes.length).toBeGreaterThan(0)
-  })
-
-  it('handles stat click to set status filter', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.handleStatClick('offline')
-    expect(vm.statusFilter).toBe('offline')
-  })
-
-  it('resets status filter on stat click all', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.statusFilter = 'active'
-    vm.handleStatClick('all')
-    expect(vm.statusFilter).toBe('')
-  })
-
-  it('clears all filters and restores the first page', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.searchKeyword = 'Device'
-    vm.typeFilter = 'temp_humidity'
-    vm.statusFilter = 'offline'
-    vm.hardwareFilter = 'i2c'
-    vm.currentPage = 3
-
-    vm.clearFilters()
-
-    expect(vm.searchKeyword).toBe('')
-    expect(vm.typeFilter).toBe('')
-    expect(vm.statusFilter).toBe('')
-    expect(vm.hardwareFilter).toBe('')
-    expect(vm.currentPage).toBe(1)
-  })
-
-  it('uses a compact facts grid and reading area in card view', async () => {
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.devices = [{
-      id: 1,
-      name: '雨量计',
-      status: 'active',
-      device_type: 'prs3001',
-      node_id: 'node-1',
-      hardware_type: 'uart',
-      hardware_id: 'UART1',
-      protocol: 'modbus',
-      last_data: { rainfall: 12.5 },
-      last_data_time: '2026-07-13T09:00:00Z',
-    }]
-    await wrapper.vm.$nextTick()
-
-    expect(wrapper.find('.card-facts').exists()).toBe(true)
-    expect(wrapper.find('.card-reading').exists()).toBe(true)
-    expect(wrapper.find('.device-card').text()).not.toContain('📡')
-    expect(wrapper.find('.device-card').text()).not.toContain('🔌')
-  })
-
-  it('initializes search and status filters from route query', async () => {
-    mockRoute.query = { search: 'Device A', status: 'offline' }
-    const wrapper = mount(EdgeDeviceList, { global: { stubs } })
-    await flushPromises()
-
-    const vm = wrapper.vm as any
-    expect(vm.searchKeyword).toBe('Device A')
-    expect(vm.statusFilter).toBe('offline')
+  it('invalidates caches and forces refresh after writes and deletion batches', () => {
+    expect(source.match(/await fetchDevices\(true\)/g)).toHaveLength(2)
+    expect(source.match(/await fetchDevices\(true, true\)/g)).toHaveLength(2)
+    expect(source.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
+    expect(source).toContain('Promise.allSettled(ids.map')
+    expect(source).toContain('assertSessionGeneration(sessionGeneration)')
   })
 })

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, shallowMount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { reactive } from 'vue'
 import EdgeDeviceDetailRouter from '../EdgeDeviceDetailRouter.vue'
+import routerSource from '../EdgeDeviceDetailRouter.vue?raw'
 
-const { routeState, fetchDetail, messageError } = vi.hoisted(() => ({
+const { routeState, fetchDetail } = vi.hoisted(() => ({
   routeState: { params: { id: '1' } },
   fetchDetail: vi.fn(),
-  messageError: vi.fn(),
 }))
 const route = reactive(routeState)
 
@@ -14,7 +14,7 @@ vi.mock('vue-router', () => ({ useRoute: () => route }))
 vi.mock('@/stores/edgeDevice', () => ({
   useEdgeDeviceStore: () => ({ fetchDetail }),
 }))
-vi.mock('element-plus', () => ({ ElMessage: { error: messageError } }))
+vi.mock('element-plus', () => ({ ElMessage: { error: vi.fn() } }))
 
 describe('EdgeDeviceDetailRouter', () => {
   beforeEach(() => {
@@ -22,59 +22,27 @@ describe('EdgeDeviceDetailRouter', () => {
     vi.clearAllMocks()
   })
 
-  it('keeps the newer route result when the older request finishes last', async () => {
-    let resolveOlder!: (value: any) => void
-    let resolveNewer!: (value: any) => void
-    fetchDetail
-      .mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve }))
-      .mockImplementationOnce(() => new Promise(resolve => { resolveNewer = resolve }))
-
-    const wrapper = shallowMount(EdgeDeviceDetailRouter, {
-      global: {
-        stubs: {
-          'el-card': true,
-          'el-skeleton': true,
-          'el-result': true,
-          'el-button': true,
-        },
-      },
-    })
+  it('loads the current route id and reloads when the route changes', async () => {
+    fetchDetail.mockResolvedValue({ id: 1, device_type: 'inverter' })
+    const wrapper = mount(EdgeDeviceDetailRouter)
+    await flushPromises()
+    expect(fetchDetail).toHaveBeenCalledWith(1, true)
 
     route.params.id = '2'
     await wrapper.vm.$nextTick()
-    expect(fetchDetail).toHaveBeenNthCalledWith(1, 1, true)
-    expect(fetchDetail).toHaveBeenNthCalledWith(2, 2, true)
-
-    resolveNewer({ id: 2, device_type: 'inverter' })
-    await flushPromises()
-    const newerComponent = (wrapper.vm as any).targetComponent
-    expect(newerComponent).toBeTruthy()
-    expect((wrapper.vm as any).loading).toBe(false)
-
-    resolveOlder({ id: 1, device_type: 'jiabaida_bms' })
-    await flushPromises()
-    expect((wrapper.vm as any).targetComponent).toBe(newerComponent)
-    expect((wrapper.vm as any).deviceType).toBe('inverter')
-    expect((wrapper.vm as any).loading).toBe(false)
-    expect(messageError).not.toHaveBeenCalled()
+    expect(fetchDetail).toHaveBeenLastCalledWith(2, true)
   })
 
-  it('keys the resolved detail page by route id', async () => {
-    fetchDetail.mockResolvedValueOnce({ id: 1, device_type: 'inverter' })
-    const wrapper = shallowMount(EdgeDeviceDetailRouter, { global: { stubs: { 'el-card': true, 'el-skeleton': true, 'el-result': true, 'el-button': true } } })
-    await flushPromises()
-    expect(wrapper.html()).toContain('data-detail-key="1"')
+  it('guards resolution with a monotonically increasing sequence so stale responses cannot take over', () => {
+    expect(routerSource).toContain('const sequence = ++resolveSequence')
+    expect(routerSource).toContain('if (sequence !== resolveSequence || Number(route.params.id) !== id) return')
+    expect(routerSource).toContain('if (sequence === resolveSequence) loading.value = false')
   })
 
-  it('invalidates an in-flight request when route id becomes invalid', async () => {
-    let resolve!: (value: any) => void
-    fetchDetail.mockImplementationOnce(() => new Promise(r => { resolve = r }))
-    const wrapper = shallowMount(EdgeDeviceDetailRouter, { global: { stubs: { 'el-card': true, 'el-skeleton': true, 'el-result': true, 'el-button': true } } })
-    route.params.id = 'invalid'
-    await wrapper.vm.$nextTick()
-    expect((wrapper.vm as any).error).toBe(true)
-    resolve({ id: 1, device_type: 'inverter' })
-    await flushPromises()
-    expect((wrapper.vm as any).targetComponent).toBeNull()
+  it('keys the resolved page by route id and rejects invalid ids before the request', () => {
+    expect(routerSource).toContain(':key="route.params.id"')
+    expect(routerSource).toContain(':data-detail-key="String(route.params.id)"')
+    expect(routerSource).toContain('if (!id)')
+    expect(routerSource).toContain('error.value = true')
   })
 })

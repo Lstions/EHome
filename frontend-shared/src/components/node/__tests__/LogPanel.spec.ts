@@ -30,8 +30,18 @@ vi.mock('@/api/node', () => ({
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ subscribe: mocks.subscribe }),
 }))
+// 修复 ECONNREFUSED / "No ElInput export" / stub 不生效错误：
+// 1. LogRealtimeViewer.vue 在模块加载阶段从 element-plus 导入 ElInput/ElButton，
+//    vi.mock 替换了整个模块，导致这些导出不存在。
+//    即使测试用 global.stubs 替换组件，传递导入仍会执行 import 语句。
+//    因此 mock 必须同时暴露所有被导入的 Element Plus 组件。
+// 2. <script setup> 组件（LogRealtimeViewer/LogHistoryPanel）的 stub 通过
+//    @vue/test-utils 的 global.stubs 不生效，改为用 vi.mock 在模块级别替换。
 vi.mock('element-plus', () => ({
   ElMessage: { success: mocks.success, error: mocks.error, warning: mocks.warning },
+  ElInput: { name: 'ElInput', template: '<input />' },
+  ElButton: { name: 'ElButton', template: '<button><slot /></button>' },
+  ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) },
 }))
 vi.mock('@/utils/logger', () => ({
   logger: { warn: mocks.loggerWarn },
@@ -41,8 +51,47 @@ vi.mock('@/utils/exportData', () => ({
   downloadText: mocks.downloadText,
 }))
 
+// 用 vi.mock 替换子组件模块，使 @vue/test-utils stubs 无法生效的 <script setup> 子组件被替换
+vi.mock('@/components/node/LogRealtimeViewer.vue', () => ({
+  default: defineComponent({
+    name: 'LogRealtimeViewer',
+    props: {
+      logs: { type: Array as PropType<RealtimeLogLine[]>, default: () => [] },
+      receivedCount: { type: Number, default: 0 },
+      generation: { type: Number, default: 0 },
+      paused: Boolean,
+      searchKeyword: { type: String, default: '' },
+      searchCountState: {
+        type: Object as PropType<RealtimeSearchCountState>,
+        default: () => ({ epoch: 0, baselineId: 0, baselineMatchIds: [], matchedAfterBaseline: 0 }),
+      },
+    },
+    emits: ['update:paused', 'update:searchKeyword', 'clear', 'export'],
+    template: `<section aria-label="实时日志组件">
+      <span data-testid="realtime-state">{{ logs.length }}|{{ receivedCount }}|{{ generation }}|{{ paused }}|{{ searchKeyword }}</span>
+      <span data-testid="search-count-state">{{ searchCountState.epoch }}|{{ searchCountState.baselineId }}|{{ searchCountState.baselineMatchIds.length }}|{{ searchCountState.matchedAfterBaseline }}</span>
+      <input aria-label="搜索实时日志" :value="searchKeyword" @input="$emit('update:searchKeyword', $event.target.value)" />
+      <span v-for="line in logs" :key="line.id" class="received-log" :data-log-id="line.id">{{ line.msg }}</span>
+      <button aria-label="切换暂停" @click="$emit('update:paused', !paused)">切换暂停</button>
+      <button aria-label="清空实时日志" @click="$emit('clear')">清空</button>
+      <button aria-label="导出实时文本" @click="$emit('export', 'text')">文本</button>
+      <button aria-label="导出实时 CSV" @click="$emit('export', 'csv')">CSV</button>
+    </section>`,
+  }),
+}))
+
+vi.mock('@/components/node/LogHistoryPanel.vue', () => ({
+  default: defineComponent({
+    name: 'LogHistoryPanel',
+    props: ['collectorId'],
+    template: '<section aria-label="历史日志组件">历史 {{ collectorId }}</section>',
+  }),
+}))
+
 import LogPanel from '@/components/node/LogPanel.vue'
 
+// 以下 stub 仅用于 LogPanel.vue 模板中直接使用的 Element Plus 组件。
+// 子组件 LogRealtimeViewer/LogHistoryPanel 已通过 vi.mock 在模块级别替换。
 const SwitchStub = defineComponent({
   inheritAttrs: false,
   props: { modelValue: Boolean },
@@ -69,52 +118,22 @@ const InputStub = defineComponent({
   template: `<input v-bind="$attrs" :value="modelValue ?? ''" @input="$emit('update:modelValue', $event.target.value)" />`,
 })
 
-const RealtimeViewerStub = defineComponent({
-  name: 'LogRealtimeViewer',
-  props: {
-    logs: { type: Array as PropType<RealtimeLogLine[]>, default: () => [] },
-    receivedCount: { type: Number, default: 0 },
-    generation: { type: Number, default: 0 },
-    paused: Boolean,
-    searchKeyword: { type: String, default: '' },
-    searchCountState: {
-      type: Object as PropType<RealtimeSearchCountState>,
-      default: () => ({ epoch: 0, baselineId: 0, baselineMatchIds: [], matchedAfterBaseline: 0 }),
-    },
-  },
-  emits: ['update:paused', 'update:searchKeyword', 'clear', 'export'],
-  template: `<section aria-label="实时日志组件">
-    <span data-testid="realtime-state">{{ logs.length }}|{{ receivedCount }}|{{ generation }}|{{ paused }}|{{ searchKeyword }}</span>
-    <span data-testid="search-count-state">{{ searchCountState.epoch }}|{{ searchCountState.baselineId }}|{{ searchCountState.baselineMatchIds.length }}|{{ searchCountState.matchedAfterBaseline }}</span>
-    <input aria-label="搜索实时日志" :value="searchKeyword" @input="$emit('update:searchKeyword', $event.target.value)" />
-    <span v-for="line in logs" :key="line.id" class="received-log" :data-log-id="line.id">{{ line.msg }}</span>
-    <button aria-label="切换暂停" @click="$emit('update:paused', !paused)">切换暂停</button>
-    <button aria-label="清空实时日志" @click="$emit('clear')">清空</button>
-    <button aria-label="导出实时文本" @click="$emit('export', 'text')">文本</button>
-    <button aria-label="导出实时 CSV" @click="$emit('export', 'csv')">CSV</button>
-  </section>`,
-})
-
-const HistoryPanelStub = defineComponent({
-  name: 'LogHistoryPanel',
-  props: ['collectorId'],
-  template: '<section aria-label="历史日志组件">历史 {{ collectorId }}</section>',
-})
-
 const stubs = {
   'el-switch': SwitchStub,
   'el-select': SelectStub,
   'el-option': OptionStub,
   'el-alert': defineComponent({ template: '<div><slot /></div>' }),
   'el-input': InputStub,
-  LogRealtimeViewer: RealtimeViewerStub,
-  LogHistoryPanel: HistoryPanelStub,
 }
 
+// 修复：使用 global.components 而非 global.stubs，以覆盖 test-setup.ts 中
+// 通过 config.global.components 注册的全局 ElSelect/ElSwitch 等 stub。
+// @vue/test-utils 的 stubs 选项优先级低于 config.global.components，
+// 导致 test-setup.ts 的 ElSelect（div 渲染）覆盖了本测试的 SelectStub（select 渲染）。
 function mountPanel(): VueWrapper {
   return mount(LogPanel, {
     props: { collectorId: 'node-1', nodeDeviceId: 'NODE-1' },
-    global: { stubs },
+    global: { components: stubs },
   })
 }
 

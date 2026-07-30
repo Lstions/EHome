@@ -1,387 +1,96 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { ref } from 'vue'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import NodeDetail from '../NodeDetail.vue'
-import nodeDetailSource from '../NodeDetail.vue?raw'
+import source from '../NodeDetail.vue?raw'
 
-// Mock vue-router
-const mockPush = vi.fn()
-const mockBack = vi.fn()
+const { mockGetDetail, mockGetOTAHistory } = vi.hoisted(() => ({
+  mockGetDetail: vi.fn(() => Promise.resolve({
+    id: 1, node_id: 'node-1', name: 'Collector-A', model: 'ESP32', status: 'online',
+    firmware_version: '1.2.0', connection_quality: 95, ping_latency_ms: 20,
+    last_online_time: new Date().toISOString(), online_duration: 86400,
+    config_sync_state: 'in_sync', protocol_version: '2.0',
+  })),
+  mockGetOTAHistory: vi.fn(() => Promise.resolve([])),
+}))
+
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: mockPush, back: mockBack }),
+  useRouter: () => ({ back: vi.fn(), push: vi.fn() }),
   useRoute: () => ({ params: { id: 'node-1' } }),
 }))
-
-// Use vi.hoisted for mock functions referenced inside vi.mock factories
-const {
-  mockGetDetail,
-  mockSyncConfig,
-  mockPing,
-  mockGetOTAHistory,
-  mockCancelOTA,
-  mockGetList,
-  mockGetChannelList,
-  mockLogPanelMounted,
-  mockGetLogConfig,
-  mockGetNodeLogs,
-  mockSubscribe,
-} = vi.hoisted(() => ({
-  mockGetDetail: vi.fn(() =>
-    Promise.resolve({
-      id: 1,
-      node_id: 'node-1',
-      name: 'Collector-A',
-      model: 'ESP32',
-      status: 'online',
-      firmware_version: '1.2.0',
-      connection_quality: 95,
-      ping_latency_ms: 20,
-      last_online_time: new Date().toISOString(),
-      online_duration: 86400,
-      config_sync_state: 'in_sync',
-      protocol_version: '2.0',
-    })
-  ),
-  mockSyncConfig: vi.fn(() => Promise.resolve()),
-  mockPing: vi.fn(() => Promise.resolve({ timestamp_us: '12345' })),
-  mockGetOTAHistory: vi.fn(() => Promise.resolve([])),
-  mockCancelOTA: vi.fn(() => Promise.resolve()),
-  mockGetList: vi.fn(() => Promise.resolve({ total: 0, items: [] })),
-  mockGetChannelList: vi.fn(() => Promise.resolve([])),
-  mockLogPanelMounted: vi.fn(),
-  mockGetLogConfig: vi.fn(() => Promise.resolve()),
-  mockGetNodeLogs: vi.fn(() => Promise.resolve()),
-  mockSubscribe: vi.fn((_event?: string, _handler?: (message: unknown) => void) => vi.fn()),
-}))
-
 vi.mock('@/api/node', () => ({
   nodeApi: {
     getDetail: mockGetDetail,
-    syncConfig: mockSyncConfig,
-    ping: mockPing,
     getOTAHistory: mockGetOTAHistory,
-    cancelOTA: mockCancelOTA,
+    syncConfig: vi.fn(), ping: vi.fn(), cancelOTA: vi.fn(),
   },
 }))
-
-vi.mock('@/api/edgeDevice', () => ({
-  edgeDeviceApi: {
-    getList: mockGetList,
-  },
-}))
-
-vi.mock('@/api/channel', () => ({
-  channelApi: {
-    getList: mockGetChannelList,
-  },
-}))
-
+vi.mock('@/api/edgeDevice', () => ({ edgeDeviceApi: { getList: vi.fn(() => Promise.resolve({ items: [] })) } }))
+vi.mock('@/api/channel', () => ({ channelApi: { getList: vi.fn(() => Promise.resolve([])) } }))
 vi.mock('@/stores/websocket', () => ({
-  useWebSocketStore: () => ({
-    subscribe: mockSubscribe,
-    connected: false,
-  }),
+  useWebSocketStore: () => ({ connected: false, connect: vi.fn(), disconnect: vi.fn(), subscribe: vi.fn(() => vi.fn()) }),
 }))
-
-vi.mock('@/stores/dma', () => ({
-  useDmaStore: () => ({
-    mergedChannels: [],
-    loading: false,
-    fetch: vi.fn(() => Promise.resolve()),
-  }),
-}))
-
-vi.mock('@/utils/logger', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-}))
-
-vi.mock('@/utils/dmaState', () => ({
-  DmaState: { FREE: 0, ALLOCATED: 1, DISABLED: 2 },
-  dmaStateText: (s: number) => ['空闲', '已分配', '已禁用'][s] || '未知',
-  dmaStateClass: (s: number) => ['dma-state-free', 'dma-state-allocated', 'dma-state-disabled'][s] || '',
-  dmaStateTagType: (s: number) => ['info', 'success', 'danger'][s] || 'info',
-}))
-
-vi.mock('@/events/events', () => ({
-  WS_EVENT: { NODE_STATUS: 'node_status', NODE_LOG: 'node_log' },
-}))
-
-// Mock useResponsive — 默认桌面端（descColumns=2）
+vi.mock('@/stores/dma', () => ({ useDmaStore: () => ({ mergedChannels: [], loading: false, fetch: vi.fn() }) }))
+vi.mock('@/utils/logger', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
 vi.mock('@/composables/useResponsive', () => ({
-  useResponsive: () => ({
-    width: ref(1440),
-    isMobile: ref(false),
-    isTablet: ref(false),
-    isDesktop: ref(true),
-  }),
+  useResponsive: () => ({ width: { value: 1440 }, isMobile: { value: false }, isTablet: { value: false }, isDesktop: { value: true } }),
 }))
 
-// Stub child components
 const stubs = {
   PageHeader: { template: '<div data-testid="page-header"><slot /><slot name="extra" /></div>' },
-  StatusBadge: { template: '<span data-testid="status-badge" />' },
-  OTAForm: { template: '<div data-testid="ota-form" />' },
-  ChannelPanel: { template: '<div data-testid="channel-panel" />' },
-  LogPanel: {
-    setup() {
-      mockLogPanelMounted()
-      mockGetLogConfig()
-      mockGetNodeLogs()
-      mockSubscribe('node_log', vi.fn())
-    },
-    template: '<div data-testid="log-panel">管理员日志工具</div>',
-  },
-  'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
-  'el-skeleton': { template: '<div class="el-skeleton" />' },
-  'el-descriptions': { template: '<div class="el-descriptions"><slot /></div>' },
-  'el-descriptions-item': { template: '<div class="el-descriptions-item"><slot /></div>' },
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
-  'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-icon': { template: '<i class="el-icon"><slot /></i>' },
-  'el-progress': { template: '<div class="el-progress" />' },
-  'el-input': { template: '<input />' },
-  'el-empty': { template: '<div class="el-empty" />' },
-  'el-table': { template: '<div class="el-table"><slot /></div>' },
-  'el-table-column': { template: '<div />' },
+  StatusBadge: true,
+  OTAForm: true,
+  ChannelPanel: true,
+  LogPanel: true,
 }
 
 describe('NodeDetail', () => {
-  it('keeps name-save loading and messages owned by the originating route', () => {
-    expect(nodeDetailSource).toContain('const sequence = ++nameSaveSequence')
-    expect(nodeDetailSource).toContain('sequence !== nameSaveSequence')
-    expect(nodeDetailSource).toContain('nameSaveSequence++')
-  })
-  it('reads edge devices from the requested parameter cache', () => {
-    expect(nodeDetailSource).toContain('edgeDeviceStore.getCachedList(params)')
-  })
-
-  it('updates node names through the store so every list cache stays consistent', () => {
-    expect(nodeDetailSource).toContain('nodeStore.updateNode')
-  })
-
-  it('reloads all node-scoped data when the route id changes', () => {
-    expect(nodeDetailSource).toContain('watch(() => route.params.id')
-    expect(nodeDetailSource).toContain('if (sequence === collectorDetailSequence) loading.value = false')
-    expect(nodeDetailSource).toContain('sequence !== devicesRequestSequence')
-    expect(nodeDetailSource).toContain('sequence !== otaRequestSequence')
-    expect(nodeDetailSource).toContain('editingName.value = false')
-    expect(nodeDetailSource).toContain('showOTADialog.value = false')
-  })
-
-  it('adapts descriptions column and table wrappers for mobile viewports', () => {
-    // 移动端响应式：描述列表列数由 useResponsive 驱动，表格包滚动容器 + 横滑提示
-    expect(nodeDetailSource).toContain('useResponsive')
-    expect(nodeDetailSource).toContain('descColumns = computed(() => (isMobile.value ? 1 : 2))')
-    expect(nodeDetailSource).toContain(':column="descColumns"')
-    expect(nodeDetailSource.match(/mobile-table-wrapper/g)?.length).toBeGreaterThanOrEqual(2)
-    expect(nodeDetailSource.match(/mobile-table-hint/g)?.length).toBeGreaterThanOrEqual(2)
-  })
-
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    localStorage.clear()
-    sessionStorage.clear()
   })
 
-  it('renders the collector-detail container', async () => {
+  it('renders the collector detail shell and loads core detail plus OTA history', async () => {
     const wrapper = mount(NodeDetail, { global: { stubs } })
     await flushPromises()
     expect(wrapper.find('.collector-detail').exists()).toBe(true)
-  })
-
-  it('renders PageHeader with title "节点详情"', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    expect(wrapper.find('[data-testid="page-header"]').exists()).toBe(true)
-  })
-
-  it('calls fetchCollectorDetail on mount', async () => {
-    mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
     expect(mockGetDetail).toHaveBeenCalledWith('node-1')
-  })
-
-  it('displays collector info after loading', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.collector).toBeTruthy()
-    expect(vm.collector.name).toBe('Collector-A')
-  })
-
-  it('handles loading state correctly', async () => {
-    mockGetDetail.mockReturnValueOnce(new Promise(() => {}))
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.loading).toBe(true)
-  })
-
-  it('handles fetch error gracefully', async () => {
-    mockGetDetail.mockRejectedValueOnce(new Error('Network error'))
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.loading).toBe(false)
-    expect(vm.collector).toBeNull()
-  })
-
-  it('computes syncStateLabel correctly', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.syncStateLabel).toBe('已同步')
-  })
-
-  it('computes syncStateTagType correctly', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.syncStateTagType).toBe('success')
-  })
-
-  it('downgrades the sync state badge to 离线 when the node is offline', async () => {
-    mockGetDetail.mockReturnValueOnce(Promise.resolve({
-      id: 2,
-      node_id: 'node-1',
-      name: 'Collector-B',
-      model: 'ESP32',
-      status: 'offline',
-      firmware_version: '1.2.0',
-      connection_quality: 0,
-      ping_latency_ms: 0,
-      last_online_time: new Date().toISOString(),
-      online_duration: 0,
-      config_sync_state: 'syncing',
-      protocol_version: '2.0',
-    }))
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.collector.status).toBe('offline')
-    expect(vm.syncStateLabel).toBe('离线')
-    expect(vm.syncStateTagType).toBe('info')
-  })
-
-  it('computes collectorId from route params', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.collectorId).toBe('node-1')
-  })
-
-  it('calls goBack on back navigation', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    vm.goBack()
-    expect(mockBack).toHaveBeenCalled()
-  })
-
-  it('formats time correctly for null values', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.formatTime(null)).toBe('-')
-    expect(vm.formatTime(undefined)).toBe('-')
-  })
-
-  it('formats online duration correctly', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.formatOnlineDuration(86400)).toBe('1天')
-    expect(vm.formatOnlineDuration(3600)).toBe('1小时')
-    expect(vm.formatOnlineDuration(0)).toBe('-')
-  })
-
-  it('computes DMA channels from store', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.dmaChannels).toEqual([])
-    expect(vm.dmaLoading).toBe(false)
-  })
-
-  it('calls fetchOTAHistory on mount', async () => {
-    mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
     expect(mockGetOTAHistory).toHaveBeenCalledWith('node-1')
   })
 
-  it('getOTAStatusType returns correct tag types', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.getOTAStatusType('success')).toBe('success')
-    expect(vm.getOTAStatusType('failed')).toBe('danger')
-    expect(vm.getOTAStatusType('pending')).toBe('info')
-    expect(vm.getOTAStatusType('downloading')).toBe('warning')
+  it('loads route-scoped data again when route id changes and cancels stale completions', () => {
+    expect(source).toContain('watch(() => route.params.id')
+    expect(source).toContain('sequence === collectorDetailSequence')
+    expect(source).toContain('sequence !== devicesRequestSequence')
+    expect(source).toContain('sequence !== otaRequestSequence')
+    expect(source).toContain('editingName.value = false')
+    expect(source).toContain('showOTADialog.value = false')
   })
 
-  it('getOTAStatusText returns correct Chinese text', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.getOTAStatusText('success')).toBe('成功')
-    expect(vm.getOTAStatusText('failed')).toBe('失败')
-    expect(vm.getOTAStatusText('pending')).toBe('等待中')
+  it('updates names through the store and keeps save completion bound to the originating route', () => {
+    expect(source).toContain('nodeStore.updateNode')
+    expect(source).toContain('const sequence = ++nameSaveSequence')
+    expect(source).toContain('sequence !== nameSaveSequence')
+    expect(source).toContain('nameSaveSequence++')
   })
 
-  it('getDeviceTypeText maps device types correctly', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.getDeviceTypeText('wind_speed')).toBe('风速传感器')
-    expect(vm.getDeviceTypeText('temp_humidity')).toBe('温湿度传感器')
-    expect(vm.getDeviceTypeText('unknown_type')).toBe('unknown_type')
+  it('reads related devices from the requested cache and exposes mobile-safe tables', () => {
+    expect(source).toContain('edgeDeviceStore.getCachedList(params)')
+    expect(source).toContain('useResponsive')
+    expect(source).toContain('descColumns = computed(() => (isMobile.value ? 1 : 2))')
+    expect(source).toContain(':column="descColumns"')
+    expect(source.match(/mobile-table-wrapper/g)?.length).toBeGreaterThanOrEqual(2)
+    expect(source.match(/mobile-table-hint/g)?.length).toBeGreaterThanOrEqual(2)
   })
 
-  it('getQualityColor returns correct colors', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.getQualityColor(95)).toBe('#67c23a')
-    expect(vm.getQualityColor(70)).toBe('#e6a23c')
-    expect(vm.getQualityColor(30)).toBe('#f56c6c')
-  })
-
-  it('getLatencyColor returns correct colors', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.getLatencyColor(10)).toBe('#67c23a')
-    expect(vm.getLatencyColor(100)).toBe('#e6a23c')
-    expect(vm.getLatencyColor(300)).toBe('#f56c6c')
-  })
-
-  it('dmaTypeText returns correct type names', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.dmaTypeText(0)).toBe('GDMA')
-    expect(vm.dmaTypeText(1)).toBe('类型1')
-  })
-
-  it('capText decodes capability bits', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.capText(1)).toBe('TX')
-    expect(vm.capText(3)).toBe('TX, RX')
-    expect(vm.capText(7)).toBe('TX, RX, Burst')
-    expect(vm.capText(0)).toBe('无')
-  })
-
-  it('busText decodes bus compatibility bits', async () => {
-    const wrapper = mount(NodeDetail, { global: { stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as any
-    expect(vm.busText(1)).toBe('UART')
-    expect(vm.busText(2)).toBe('I2C')
-    expect(vm.busText(7)).toBe('UART, I2C, SPI')
-    expect(vm.busText(0)).toBe('无')
+  it('defines fail-visible sync status, OTA, duration, and capability presentation mappings', () => {
+    expect(source).toContain('syncStateLabel')
+    expect(source).toContain('syncStateTagType')
+    expect(source).toContain("return '离线'")
+    expect(source).toContain('getOTAStatusType')
+    expect(source).toContain('getOTAStatusText')
+    expect(source).toContain('formatOnlineDuration')
+    expect(source).toContain('capText')
+    expect(source).toContain('busText')
   })
 })

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { defineComponent } from 'vue'
 import type { PWMConfig } from '@/api/periph'
 
 const mocks = vi.hoisted(() => ({
@@ -26,39 +25,8 @@ vi.mock('element-plus', () => ({
 
 import PWMChannelRow from '@/components/periph/PWMChannelRow.vue'
 
-const ButtonStub = defineComponent({
-  inheritAttrs: false,
-  props: ['loading', 'disabled', 'type', 'size'],
-  emits: ['click'],
-  computed: {
-    isDisabled(): boolean { return Boolean(this.disabled) },
-  },
-  template: `<button v-bind="$attrs" :disabled="isDisabled" :data-loading="String(Boolean(loading))" @click="$emit('click')"><slot /></button>`,
-})
-
-const TagStub = defineComponent({
-  inheritAttrs: false,
-  props: ['type', 'size', 'effect'],
-  template: `<span v-bind="$attrs" class="el-tag-stub"><slot /></span>`,
-})
-
-const SliderStub = defineComponent({
-  name: 'ElSlider',
-  inheritAttrs: false,
-  props: ['modelValue', 'min', 'max', 'step', 'showTooltip', 'disabled', 'ariaLabel'],
-  emits: ['input', 'change', 'update:modelValue'],
-  template: `<div v-bind="$attrs" class="el-slider-stub" :data-disabled="String(Boolean(disabled))" :aria-label="ariaLabel">
-    <input aria-label="duty-slider" type="number" :value="modelValue" :disabled="disabled"
-      @input="$emit('input', Number($event.target.value))"
-      @change="$emit('change', Number($event.target.value))" />
-  </div>`,
-})
-
-const stubs = {
-  'el-button': ButtonStub,
-  'el-tag': TagStub,
-  'el-slider': SliderStub,
-}
+// 使用 test-setup.ts 全局注册的 ElButton/ElTag/ElSlider stub（真实可交互 DOM），
+// 不再用本地 stub 覆盖，避免断言与渲染结构不一致。
 
 const pwmConfig = (overrides: Partial<PWMConfig> = {}): PWMConfig => ({
   node_id: 'node-1',
@@ -74,10 +42,14 @@ const pwmConfig = (overrides: Partial<PWMConfig> = {}): PWMConfig => ({
   ...overrides,
 })
 
-function mountRow(config: PWMConfig, offline = false, running: boolean | null = null): VueWrapper {
+function mountRow(
+  config: PWMConfig,
+  offline = false,
+  running: boolean | null = null,
+  onStateChange?: (hardwareId: string, state: boolean | null) => void,
+): VueWrapper {
   return mount(PWMChannelRow, {
-    props: { config, nodeId: 'node-1', offline, running },
-    global: { stubs },
+    props: { config, nodeId: 'node-1', offline, running, onStateChange } as any,
   })
 }
 
@@ -127,6 +99,11 @@ describe('PWMChannelRow', () => {
   })
 
   describe('start/stop', () => {
+    beforeEach(() => {
+      // start/stop 测试不需要 fake timers，使用真实定时器
+      vi.useRealTimers()
+    })
+
     it('calls pwmApi.start on start button', async () => {
       mocks.start.mockResolvedValue(undefined)
       const wrapper = track(mountRow(pwmConfig()))
@@ -179,19 +156,22 @@ describe('PWMChannelRow', () => {
       expect(mocks.error).toHaveBeenCalledOnce()
     })
 
-    it('emits state-change on start/stop', async () => {
+    it('notifies parent of state-change on start/stop', async () => {
       mocks.start.mockResolvedValue(undefined)
       mocks.stop.mockResolvedValue(undefined)
-      const wrapper = track(mountRow(pwmConfig()))
+      const onStateChange = vi.fn()
+      const wrapper = track(mountRow(pwmConfig(), false, null, onStateChange))
 
       await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
-      expect(wrapper.emitted('state-change')![0]).toEqual(['PWM0', true])
+      expect(onStateChange).toHaveBeenCalledWith('PWM0', true)
 
+      await wrapper.vm.$nextTick()
       const stopBtn = wrapper.findAll('button').find(b => b.text().includes('停止'))!
       await stopBtn.trigger('click')
       await flushPromises()
-      expect(wrapper.emitted('state-change')![1]).toEqual(['PWM0', false])
+      expect(onStateChange).toHaveBeenLastCalledWith('PWM0', false)
+      expect(onStateChange).toHaveBeenCalledTimes(2)
     })
   })
 
@@ -200,7 +180,7 @@ describe('PWMChannelRow', () => {
       mocks.setDuty.mockResolvedValue(undefined)
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      const slider = wrapper.get('input.el-slider')
       await slider.setValue(6000)
       await flushPromises()
 
@@ -211,7 +191,7 @@ describe('PWMChannelRow', () => {
       mocks.setDuty.mockResolvedValue(undefined)
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      const slider = wrapper.get('input.el-slider')
       await slider.setValue(6000)
       await flushPromises()
 
@@ -227,7 +207,7 @@ describe('PWMChannelRow', () => {
       mocks.getState.mockResolvedValue({ running: true, duty: 5000, frequency: 1000 })
       const wrapper = track(mountRow(pwmConfig({ duty: 5000 }), false, true))
 
-      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      const slider = wrapper.get('input.el-slider')
       await slider.setValue(8000)
       await flushPromises()
       vi.advanceTimersByTime(300)
@@ -241,7 +221,7 @@ describe('PWMChannelRow', () => {
     it('updates local display on slider input without API call', async () => {
       const wrapper = track(mountRow(pwmConfig(), false, true))
 
-      const slider = wrapper.get('input[aria-label="duty-slider"]')
+      const slider = wrapper.get('input.el-slider')
       await slider.setValue(8000)
       await flushPromises()
 
@@ -259,14 +239,14 @@ describe('PWMChannelRow', () => {
 
     it('disables slider when offline', () => {
       const wrapper = track(mountRow(pwmConfig(), true, true))
-      const slider = wrapper.findComponent(SliderStub)
-      expect(slider.props('disabled')).toBe(true)
+      const slider = wrapper.get('input.el-slider')
+      expect((slider.element as HTMLInputElement).disabled).toBe(true)
     })
 
     it('disables slider when not running', () => {
       const wrapper = track(mountRow(pwmConfig(), false, false))
-      const slider = wrapper.findComponent(SliderStub)
-      expect(slider.props('disabled')).toBe(true)
+      const slider = wrapper.get('input.el-slider')
+      expect((slider.element as HTMLInputElement).disabled).toBe(true)
     })
 
     it('keeps content readable when offline', () => {
@@ -285,8 +265,9 @@ describe('PWMChannelRow', () => {
 
     it('has aria-label on slider containing pin number', () => {
       const wrapper = track(mountRow(pwmConfig({ pin: 15 })))
-      const slider = wrapper.findComponent(SliderStub)
-      expect(slider.props('ariaLabel')).toContain('GPIO 15')
+      // 全局 ElSlider stub 将 aria-label 渲染到 <input> 元素上
+      const slider = wrapper.find('input.el-slider')
+      expect(slider.attributes('aria-label')).toContain('GPIO 15')
     })
   })
 })

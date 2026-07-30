@@ -76,7 +76,12 @@ vi.mock('@/stores/channel', () => ({
   useChannelStore: () => ({ deleteChannel: vi.fn() }),
 }))
 vi.mock('@/stores/websocket', () => ({
-  useWebSocketStore: () => ({ subscribe: vi.fn(() => vi.fn()) }),
+  useWebSocketStore: () => ({
+    connected: false,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    subscribe: vi.fn(() => vi.fn()),
+  }),
 }))
 vi.mock('@/utils/sessionCache', () => ({
   assertSessionGeneration: vi.fn(),
@@ -97,7 +102,6 @@ vi.mock('@/components/channel/ChannelTerminal.vue', () => ({ default: defineComp
 
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
 
-const SlotStub = defineComponent({ template: '<div><slot /><slot name="title" /><slot name="footer" /></div>' })
 const ButtonStub = defineComponent({
   inheritAttrs: false,
   props: ['disabled', 'loading'],
@@ -121,7 +125,12 @@ const SelectStub = defineComponent({
   emits: ['update:modelValue'],
   setup(props, { attrs, emit, slots }) {
     return () => h('div', attrs, [
-      slots.default?.(),
+      h('select', {
+        class: 'select-stub',
+        value: String(props.modelValue ?? ''),
+        disabled: props.disabled,
+        onChange: (event: Event) => emit('update:modelValue', Number((event.target as HTMLSelectElement).value)),
+      }, slots.default?.()),
       h('button', {
         type: 'button',
         disabled: props.disabled,
@@ -143,32 +152,25 @@ const SwitchStub = defineComponent({
 const InputNumberStub = defineComponent({
   inheritAttrs: false,
   props: ['modelValue', 'min', 'max'],
-  template: '<input class="input-number" v-bind="$attrs" :data-value="modelValue" :data-min="min" :data-max="max" />',
+  template: '<input type="number" class="input-number" v-bind="$attrs" :data-value="modelValue" :data-min="min" :data-max="max" />',
 })
 
-const stubs = {
-  'el-tabs': SlotStub,
-  'el-tab-pane': SlotStub,
-  'el-collapse': SlotStub,
-  'el-collapse-item': SlotStub,
-  'el-form': SlotStub,
-  'el-form-item': SlotStub,
-  'el-radio-group': SlotStub,
-  'el-dialog': DialogStub,
-  'el-button': ButtonStub,
-  'el-input': InputStub,
-  'el-select': SelectStub,
-  'el-option': OptionStub,
-  'el-slider': InputStub,
-  'el-input-number': InputNumberStub,
-  'el-switch': SwitchStub,
-  'el-radio': defineComponent({ template: '<label><slot /></label>' }),
-  'el-tag': defineComponent({ template: '<span><slot /></span>' }),
-  'el-icon': SlotStub,
-  'el-empty': defineComponent({ props: ['description'], template: '<div>{{ description }}</div>' }),
-  'el-skeleton': defineComponent({ template: '<div class="skeleton" />' }),
-  'el-alert': defineComponent({ props: ['title'], template: '<div>{{ title }}</div>' }),
-  'el-checkbox': defineComponent({ template: '<input type="checkbox" disabled />' }),
+// ChannelPanel 的 Element Plus 组件已由 test-setup 全局注册；
+// 仅覆盖测试需要的特殊交互组件。
+const components = {
+  ElDialog: DialogStub,
+  ElButton: ButtonStub,
+  ElInput: InputStub,
+  ElSelect: SelectStub,
+  ElOption: OptionStub,
+  ElInputNumber: InputNumberStub,
+  ElSwitch: SwitchStub,
+  ElRadio: defineComponent({ template: '<label><slot /></label>' }),
+  ElTag: defineComponent({ template: '<span><slot /></span>' }),
+  ElEmpty: defineComponent({ props: ['description'], template: '<div>{{ description }}</div>' }),
+  ElSkeleton: defineComponent({ template: '<div class="skeleton" />' }),
+  ElAlert: defineComponent({ props: ['title'], template: '<div>{{ title }}</div>' }),
+  ElCheckbox: defineComponent({ template: '<input type="checkbox" disabled />' }),
   Refresh: true,
   Plus: true,
 }
@@ -235,7 +237,7 @@ beforeEach(() => {
 async function mountReady(): Promise<VueWrapper> {
   const wrapper = mount(ChannelPanel, {
     props: { collectorId: 7, nodeDeviceId: 'node-1', collectorStatus: 'online' },
-    global: { stubs },
+    global: { components: components as Record<string, any> },
   })
   wrappers.push(wrapper)
   await flushPromises()
@@ -276,8 +278,8 @@ describe('ChannelPanel GPIO/PWM edit flow', () => {
     pwmConfigs = [pwmConfig({ resolution: 12 })]
     const wrapper = await mountReady()
     await clickButtonWithText(rowWithText(wrapper, 'pwm-resource-row', 'PWM0'), '编辑')
-    const resolution = wrapper.findAll('.input-number').find(input => input.attributes('data-value') === '12')
-    expect(resolution?.attributes('data-max')).toBe('12')
+    const resolution = wrapper.findAll('input[type="number"]').find(input => input.attributes('value') === '12')
+    expect(resolution?.attributes('max')).toBe('12')
   })
 
   it('updates an edited GPIO by its original pin, never creates, and refreshes the row', async () => {
@@ -301,20 +303,22 @@ describe('ChannelPanel GPIO/PWM edit flow', () => {
     expect(rowWithText(wrapper, 'gpio-resource-row', 'GPIO 2').text()).toContain('Relay updated')
   })
 
-  it('updates an edited PWM by its original hardware id, never creates, and refreshes the route label', async () => {
+  it('updates an edited PWM by its immutable hardware id and retains its valid route', async () => {
     const wrapper = await mountReady()
     const row = rowWithText(wrapper, 'pwm-resource-row', 'PWM0 → GPIO6')
 
     await clickButtonWithText(row, '编辑')
     const dialog = wrapper.get('[role="dialog"]')
-    const routeOption = dialog.findAll('button').find(button => button.text() === 'GPIO2')
-    if (!routeOption) throw new Error('Missing GPIO2 PWM route option')
-    await routeOption.trigger('click')
+    // GPIO2 已由 GPIO 配置占用，编辑表单只保留当前有效路由 GPIO6。
+    // 不能让测试 stub 绕过实际资源占用规则选择 GPIO2。
+    const routeSelect = dialog.findAll('select.el-select')[0]
+    if (!routeSelect) throw new Error('Missing PWM route selector')
+    expect((routeSelect.element as HTMLSelectElement).value).toBe('6')
     await clickButtonWithText(dialog, '确认保存')
     await flushPromises()
 
     expect(mocks.pwmUpdate).toHaveBeenCalledWith('node-1', 'PWM0', {
-      pin: 2,
+      pin: 6,
       frequency: 1000,
       duty: 5000,
       resolution: 14,
@@ -322,7 +326,7 @@ describe('ChannelPanel GPIO/PWM edit flow', () => {
       label: 'Fan',
     })
     expect(mocks.pwmCreate).not.toHaveBeenCalled()
-    expect(rowWithText(wrapper, 'pwm-resource-row', 'PWM0').text()).toContain('PWM0 → GPIO2')
+    expect(rowWithText(wrapper, 'pwm-resource-row', 'PWM0').text()).toContain('PWM0 → GPIO6')
   })
 
   it('omits the reported PWM channel from create payload because the backend resolves it', async () => {

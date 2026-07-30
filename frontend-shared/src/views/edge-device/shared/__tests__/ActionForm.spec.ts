@@ -1,21 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ActionForm from '../ActionForm.vue'
 import type { ActionDefinition } from '@/api/deviceOperation'
-
-const stubs = {
-  'el-dialog': { template: '<div class="el-dialog-stub" v-if="modelValue"><slot /><slot name="footer" /></div>', props: ['modelValue', 'title', 'width', 'closeOnClickModal'], emits: ['update:model-value'] },
-  'el-alert': { template: '<div class="el-alert-stub" :title="title" />', props: ['type', 'closable', 'title'] },
-  'el-form': { template: '<form><slot /></form>', props: ['labelPosition'] },
-  'el-form-item': { template: '<div class="form-item" :data-label="label"><slot /></div>', props: ['label', 'required'] },
-  'el-switch': { template: '<input type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />', props: ['modelValue'], emits: ['update:modelValue'] },
-  'el-select': { template: '<select :value="modelValue" @change="$emit(\'update:modelValue\', $event.target.value)"><slot /></select>', props: ['modelValue'], emits: ['update:modelValue'] },
-  'el-option': { template: '<option :value="value">{{ label }}</option>', props: ['label', 'value'] },
-  'el-input-number': { template: '<input type="number" :value="modelValue" @input="$emit(\'update:modelValue\', Number($event.target.value))" :min="min" :max="max" />', props: ['modelValue', 'min', 'max', 'precision'], emits: ['update:modelValue'] },
-  'el-input': { template: '<input type="text" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" :maxlength="maxlength" />', props: ['modelValue', 'maxlength'], emits: ['update:modelValue'] },
-  'el-button': { template: '<button :disabled="disabled" :class="type" @click="$emit(\'click\')"><slot /></button>', props: ['type', 'disabled'], emits: ['click'] },
-}
 
 function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefinition {
   return {
@@ -36,81 +23,54 @@ function makeDefinition(overrides: Partial<ActionDefinition> = {}): ActionDefini
 
 function mountForm(props: Record<string, unknown> = {}) {
   return mount(ActionForm, {
-    props: { visible: true, definition: makeDefinition(), ...props },
-    global: { stubs },
+    props: { visible: true, definition: makeDefinition(), ...props } as any,
   })
+}
+
+function submitButton(wrapper: ReturnType<typeof mount>) {
+  return wrapper.findAll('button').find(button => button.text().includes('继续'))!
 }
 
 describe('ActionForm', () => {
   it('renders fields sorted alphabetically from input_schema', () => {
     const wrapper = mountForm()
-    const items = wrapper.findAll('.form-item')
-    expect(items.length).toBe(3)
-    // Sorted: enabled, mode, threshold
-    expect(items[0].attributes('data-label')).toBe('enabled')
-    expect(items[1].attributes('data-label')).toBe('mode')
-    expect(items[2].attributes('data-label')).toBe('threshold')
+    const labels = wrapper.findAll('.el-form-item__label').map(label => label.text())
+    expect(labels).toEqual(['enabled', 'mode', 'threshold'])
   })
 
-  it('renders enum as select with options', () => {
+  it('renders enum, boolean, and integer editors with constraints', () => {
     const wrapper = mountForm()
-    const select = wrapper.find('select')
-    expect(select.exists()).toBe(true)
-    const options = select.findAll('option')
-    expect(options.length).toBe(2)
-    expect(options[0].text()).toBe('auto')
-    expect(options[1].text()).toBe('manual')
-  })
-
-  it('renders boolean as switch (checkbox)', () => {
-    const wrapper = mountForm()
-    const checkbox = wrapper.find('input[type="checkbox"]')
-    expect(checkbox.exists()).toBe(true)
-  })
-
-  it('renders integer as number input with min/max', () => {
-    const wrapper = mountForm()
+    const selects = wrapper.findAll('select.el-select')
+    expect(selects).toHaveLength(1)
+    expect(selects[0].findAll('option')).toHaveLength(3) // placeholder + 2 enum choices
+    // 当前全局 ElSwitch 是 button，实现合同由 class 和 model binding 确认。
+    expect(wrapper.find('.el-switch').exists()).toBe(true)
     const numberInput = wrapper.find('input[type="number"]')
-    expect(numberInput.exists()).toBe(true)
     expect(numberInput.attributes('min')).toBe('0')
     expect(numberInput.attributes('max')).toBe('100')
   })
 
-  it('disables submit when required fields are incomplete', () => {
+  it('disables submit until required fields are complete', async () => {
     const wrapper = mountForm()
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    expect(submitBtn).toBeTruthy()
-    expect(submitBtn!.attributes('disabled')).toBeDefined()
-  })
+    expect(submitButton(wrapper).attributes('disabled')).toBeDefined()
 
-  it('enables submit when all required fields are filled', async () => {
-    const wrapper = mountForm()
-    // Fill mode (select)
-    const select = wrapper.find('select')
-    await select.setValue('auto')
-    // Fill threshold (number)
-    const numberInput = wrapper.find('input[type="number"]')
-    await numberInput.setValue(50)
+    await wrapper.find('select.el-select').setValue('auto')
+    await wrapper.find('input[type="number"]').setValue(50)
     await nextTick()
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    expect(submitBtn!.attributes('disabled')).toBeUndefined()
+    expect(submitButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
-  it('emits submit with collected params', async () => {
-    const wrapper = mountForm()
-    await wrapper.find('select').setValue('manual')
+  it('notifies parent with collected parameters', async () => {
+    const onSubmit = vi.fn()
+    const wrapper = mountForm({ onSubmit })
+    await wrapper.find('select.el-select').setValue('manual')
     await wrapper.find('input[type="number"]').setValue(75)
     await nextTick()
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    await submitBtn!.trigger('click')
-    expect(wrapper.emitted('submit')).toBeTruthy()
-    const params = wrapper.emitted('submit')![0][0] as Record<string, unknown>
-    expect(params.mode).toBe('manual')
-    expect(params.threshold).toBe(75)
+    await submitButton(wrapper).trigger('click')
+    expect(onSubmit).toHaveBeenCalledWith({ mode: 'manual', threshold: 75 })
   })
 
   it('shows unsupported alert and disables submit for unsupported types', () => {
-    // The component considers enum on non-string as unsupported
     const wrapper = mountForm({
       definition: makeDefinition({
         input_schema: {
@@ -119,53 +79,39 @@ describe('ActionForm', () => {
         },
       }),
     })
-    expect(wrapper.find('.el-alert-stub').exists()).toBe(true)
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    expect(submitBtn!.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('此动作的参数类型尚未获得客户端支持')
+    expect(submitButton(wrapper).attributes('disabled')).toBeDefined()
   })
 
-  it('emits update:visible false on cancel', async () => {
-    const wrapper = mountForm()
-    const cancelBtn = wrapper.findAll('button').find(b => b.text().includes('取消'))
-    await cancelBtn!.trigger('click')
-    expect(wrapper.emitted('update:visible')).toBeTruthy()
-    expect(wrapper.emitted('update:visible')![0]).toEqual([false])
+  it('notifies parent when cancel closes the dialog', async () => {
+    const onVisibleUpdate = vi.fn()
+    const wrapper = mountForm({ 'onUpdate:visible': onVisibleUpdate })
+    const cancelButton = wrapper.findAll('button').find(button => button.text().includes('取消'))!
+    await cancelButton.trigger('click')
+    expect(onVisibleUpdate).toHaveBeenCalledWith(false)
   })
 
-  it('resets values when definition changes', async () => {
+  it('resets values when definition changes and initializes required booleans', async () => {
     const wrapper = mountForm()
-    await wrapper.find('select').setValue('auto')
+    await wrapper.find('select.el-select').setValue('auto')
     await wrapper.find('input[type="number"]').setValue(50)
-    await nextTick()
     await wrapper.setProps({ definition: makeDefinition({ id: 'other_action' }) })
     await nextTick()
-    // After reset, submit should be disabled again (required fields empty)
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    expect(submitBtn!.attributes('disabled')).toBeDefined()
-  })
+    expect(submitButton(wrapper).attributes('disabled')).toBeDefined()
 
-  it('initializes required boolean fields to false on reset', async () => {
-    const wrapper = mountForm({
+    await wrapper.setProps({
       definition: makeDefinition({
-        input_schema: {
-          properties: { active: { type: 'boolean' } },
-          required: ['active'],
-        },
+        id: 'boolean_action',
+        input_schema: { properties: { active: { type: 'boolean' } }, required: ['active'] },
       }),
     })
     await nextTick()
-    // Required boolean should be initialized to false → complete is true
-    const submitBtn = wrapper.findAll('button').find(b => b.text().includes('继续'))
-    expect(submitBtn!.attributes('disabled')).toBeUndefined()
+    expect(submitButton(wrapper).attributes('disabled')).toBeUndefined()
   })
 
   it('handles null definition gracefully', () => {
     const wrapper = mountForm({ definition: null })
-    const dialog = wrapper.find('.el-dialog-stub')
-    expect(dialog.exists()).toBe(true)
-    // No fields render with null definition
-    expect(wrapper.findAll('.form-item').length).toBe(0)
-    // No unsupported alert
-    expect(wrapper.find('.el-alert-stub').exists()).toBe(false)
+    expect(wrapper.findAll('.el-form-item')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('此动作的参数类型尚未获得客户端支持')
   })
 })

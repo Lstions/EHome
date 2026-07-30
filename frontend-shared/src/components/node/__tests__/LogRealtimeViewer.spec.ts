@@ -1,7 +1,6 @@
 import { nextTick } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Delete, Download, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import LogRealtimeViewer from '@/components/node/LogRealtimeViewer.vue'
 import LogRealtimeViewerSource from '@/components/node/LogRealtimeViewer.vue?raw'
 import type { RealtimeLogLine as LogLine, RealtimeSearchCountState as SearchCountState } from '@/components/node/logTypes'
@@ -43,6 +42,10 @@ function mountViewer(props: {
   paused?: boolean
   searchKeyword?: string
   searchCountState?: SearchCountState
+  onPausedUpdate?: (paused: boolean) => void
+  onSearchKeywordUpdate?: (keyword: string) => void
+  onClear?: () => void
+  onExport?: (format: 'text' | 'csv') => void
 } = {}): VueWrapper {
   const logs = props.logs ?? makeLogs(10)
   const receivedCount = props.receivedCount ?? logs.length
@@ -63,6 +66,10 @@ function mountViewer(props: {
             baselineMatchIds: [],
             matchedAfterBaseline: 0,
           }),
+      'onUpdate:paused': props.onPausedUpdate,
+      'onUpdate:searchKeyword': props.onSearchKeywordUpdate,
+      onClear: props.onClear,
+      onExport: props.onExport,
     },
   })
 }
@@ -194,7 +201,8 @@ describe('LogRealtimeViewer', () => {
 
   it('pauses only automatic following and retains logs received while paused', async () => {
     const initialLogs = makeLogs(30)
-    const wrapper = track(mountViewer({ logs: initialLogs, paused: true }))
+    const onPausedUpdate = vi.fn()
+    const wrapper = track(mountViewer({ logs: initialLogs, paused: true, onPausedUpdate }))
     await nextTick()
 
     const scroller = wrapper.find('.log-scroller').element as HTMLElement
@@ -207,7 +215,7 @@ describe('LogRealtimeViewer', () => {
     expect(wrapper.get('.unread-button').text()).toContain('2 条新日志')
 
     await wrapper.get('.pause-button').trigger('click')
-    expect(wrapper.emitted('update:paused')).toEqual([[false]])
+    expect(onPausedUpdate).toHaveBeenCalledWith(false)
 
     await wrapper.setProps({ paused: false })
     expect(scroller.scrollTop).toBe(416)
@@ -683,16 +691,16 @@ describe('LogRealtimeViewer', () => {
       expect(button.classes()).toContain('el-button--small')
     })
     expect(pauseButton.classes()).not.toContain('el-button--warning')
-    expect(pauseButton.findComponent(VideoPause).exists()).toBe(true)
+    // 图标通过 :icon prop 传给 Element Plus；在轻量 stub 中不依赖具体 SVG DOM 结构。
+    expect(LogRealtimeViewerSource).toContain(':icon="paused ? VideoPlay : VideoPause"')
     expect(clearButton.classes()).not.toContain('el-button--danger')
-    expect(clearButton.findComponent(Delete).exists()).toBe(true)
-    expect(exportTextButton.findComponent(Download).exists()).toBe(true)
-    expect(exportCsvButton.findComponent(Download).exists()).toBe(true)
+    expect(LogRealtimeViewerSource).toContain(':icon="Delete"')
+    expect(LogRealtimeViewerSource).toContain(':icon="Download"')
 
     await wrapper.setProps({ paused: true })
 
     expect(pauseButton.classes()).toContain('el-button--warning')
-    expect(pauseButton.findComponent(VideoPlay).exists()).toBe(true)
+    expect(LogRealtimeViewerSource).toContain(':icon="paused ? VideoPlay : VideoPause"')
     expect(LogRealtimeViewerSource).toMatch(
       /\.log-toolbar-actions[\s\S]*?gap: 8px;[\s\S]*?margin-left: auto;/,
     )
@@ -702,8 +710,13 @@ describe('LogRealtimeViewer', () => {
     )
   })
 
-  it('keeps the title, count, search, and actions in one toolbar and emits search updates', async () => {
-    const wrapper = track(mountViewer({ logs: makeLogs(3), searchKeyword: 'message' }))
+  it('keeps the title, count, search, and actions in one toolbar and notifies search updates', async () => {
+    const onSearchKeywordUpdate = vi.fn()
+    const wrapper = track(mountViewer({
+      logs: makeLogs(3),
+      searchKeyword: 'message',
+      onSearchKeywordUpdate,
+    }))
     await nextTick()
 
     const toolbar = wrapper.get('.log-toolbar')
@@ -717,7 +730,7 @@ describe('LogRealtimeViewer', () => {
 
     await toolbar.get('[aria-label="搜索实时日志"]').setValue('error')
 
-    expect(wrapper.emitted('update:searchKeyword')).toEqual([['error']])
+    expect(onSearchKeywordUpdate).toHaveBeenCalledWith('error')
   })
 
   it('groups related actions so responsive wrapping never splits individual button pairs', async () => {
@@ -763,15 +776,18 @@ describe('LogRealtimeViewer', () => {
     )
   })
 
-  it('emits clear and both export actions from the toolbar', async () => {
-    const wrapper = track(mountViewer({ logs: makeLogs(3) }))
+  it('notifies clear and both export actions from the toolbar', async () => {
+    const onClear = vi.fn()
+    const onExport = vi.fn()
+    const wrapper = track(mountViewer({ logs: makeLogs(3), onClear, onExport }))
     await nextTick()
 
     await wrapper.get('.clear-button').trigger('click')
     await wrapper.get('.export-text-button').trigger('click')
     await wrapper.get('.export-csv-button').trigger('click')
 
-    expect(wrapper.emitted('clear')).toEqual([[]])
-    expect(wrapper.emitted('export')).toEqual([['text'], ['csv']])
+    expect(onClear).toHaveBeenCalledOnce()
+    expect(onExport).toHaveBeenNthCalledWith(1, 'text')
+    expect(onExport).toHaveBeenNthCalledWith(2, 'csv')
   })
 })

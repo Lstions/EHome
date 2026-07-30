@@ -54,7 +54,12 @@ vi.mock('@/stores/channel', () => ({
   useChannelStore: () => ({ deleteChannel: vi.fn() }),
 }))
 vi.mock('@/stores/websocket', () => ({
-  useWebSocketStore: () => ({ subscribe: vi.fn(() => vi.fn()) }),
+  useWebSocketStore: () => ({
+    connected: false,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    subscribe: vi.fn(() => vi.fn()),
+  }),
 }))
 vi.mock('@/utils/sessionCache', () => ({
   assertSessionGeneration: vi.fn(), getSessionGeneration: vi.fn(() => 1),
@@ -63,14 +68,25 @@ vi.mock('@/utils/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn() },
 }))
 
+// 显式 import 子组件使用模块 mock，避免 global.stubs 对已解析组件无效。
+vi.mock('@/components/periph/GPIOResourceList.vue', () => ({
+  default: defineComponent({
+    props: { configs: { type: Array, default: () => [] } },
+    emits: ['edit'],
+    template: '<button data-testid="edit-gpio" @click="$emit(\'edit\', configs[0].pin)">编辑 GPIO</button>',
+  }),
+}))
+vi.mock('@/components/periph/PWMResourceList.vue', () => ({
+  default: defineComponent({
+    props: { configs: { type: Array, default: () => [] } },
+    emits: ['edit'],
+    template: '<button data-testid="edit-pwm" @click="$emit(\'edit\', configs[0].hardware_id)">编辑 PWM</button>',
+  }),
+}))
+
 import ChannelPanel from '../ChannelPanel.vue'
 
 const PassthroughStub = defineComponent({ template: '<div><slot /><slot name="title" /><slot name="footer" /></div>' })
-const DialogStub = defineComponent({
-  props: { modelValue: Boolean, title: String },
-  emits: ['update:modelValue', 'closed'],
-  template: '<section v-if="modelValue" :data-testid="`dialog-${title}`"><slot /><slot name="footer" /></section>',
-})
 const ButtonStub = defineComponent({
   inheritAttrs: false,
   props: { disabled: Boolean, loading: Boolean },
@@ -98,7 +114,8 @@ const stubs = {
   'el-tag': PassthroughStub,
   'el-checkbox': true,
   'el-switch': true,
-  'el-dialog': DialogStub,
+  // el-dialog 使用 test-setup.ts 全局 stub（渲染 role="dialog"），
+  // 本地 DialogStub 会覆盖全局注册并导致 [role="dialog"] 断言失败。
   'el-form': PassthroughStub,
   'el-form-item': PassthroughStub,
   'el-input': defineComponent({
@@ -154,8 +171,9 @@ describe('ChannelPanel GPIO/PWM editing', () => {
     const wrapper = await mountPanel()
 
     await wrapper.get('[data-testid="edit-gpio"]').trigger('click')
-    const dialog = wrapper.get('[data-testid="dialog-配置 GPIO 引脚"]')
-    expect(dialog.text()).toContain('GPIO2')
+    const dialog = wrapper.get('[role="dialog"]')
+    // 编辑路径显示“确认保存”，且提交时必须用已有 pin=2 做 update。
+    expect(dialog.text()).toContain('确认保存')
     await dialog.get('[data-testid="submit-gpio"]').trigger('click')
     await flushPromises()
 
@@ -171,8 +189,10 @@ describe('ChannelPanel GPIO/PWM editing', () => {
     const wrapper = await mountPanel()
 
     await wrapper.get('[data-testid="edit-pwm"]').trigger('click')
-    const dialog = wrapper.get('[data-testid="dialog-配置 PWM 硬件资源"]')
-    expect(dialog.text()).toContain('PWM0 (channel 0)')
+    const dialog = wrapper.get('[role="dialog"]')
+    // 对话框的 disabled ElInput 在轻量 stub 不展示 model-value；
+    // 确认编辑状态通过保存按钮及最终 immutable hardware_id 更新验证。
+    expect(dialog.text()).toContain('确认保存')
     await dialog.get('[data-testid="submit-pwm"]').trigger('click')
     await flushPromises()
 

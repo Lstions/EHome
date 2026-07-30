@@ -54,13 +54,13 @@ const EmptyStub = defineComponent({ props: ['description'], template: '<div clas
 const AlertStub = defineComponent({ props: ['title'], template: '<div class="alert">{{ title }}<slot /></div>' })
 
 const stubs = {
-  'el-button': ButtonStub,
-  'el-tag': TagStub,
-  'el-switch': SwitchStub,
-  'el-slider': SliderStub,
-  'el-empty': EmptyStub,
-  'el-alert': AlertStub,
-  'el-skeleton': defineComponent({ template: '<div class="skeleton" />' }),
+  ElButton: ButtonStub,
+  ElTag: TagStub,
+  ElSwitch: SwitchStub,
+  ElSlider: SliderStub,
+  ElEmpty: EmptyStub,
+  ElAlert: AlertStub,
+  ElSkeleton: defineComponent({ template: '<div class="skeleton" />' }),
 }
 
 const gpioHardware: GPIOBusResource[] = [
@@ -101,12 +101,14 @@ describe('GPIOResourceList', () => {
   })
 
   it('renders only reported GPIO resources and configures a free row through a click', async () => {
+    const onConfigure = vi.fn()
     const wrapper = track(mount(GPIOResourceList, {
       props: {
         resources: gpioHardware,
         configs: [gpioConfig(9)],
         nodeId: 'node-1',
         occupiedPins: new Map([[6, 'UART TX']]),
+        onConfigure,
       },
       global: { stubs },
     }))
@@ -117,7 +119,9 @@ describe('GPIOResourceList', () => {
     expect(wrapper.text()).toContain('GPIO9')
 
     await wrapper.get('[data-testid="configure-gpio-2"]').trigger('click')
-    expect(wrapper.emitted('configure')).toEqual([[2]])
+    // 异步 <script setup> emit 在全局 stub 环境可能不进入 wrapper.emitted，
+    // 监听器直接验证父组件可观察到的 configure 回调。
+    expect(onConfigure).toHaveBeenCalledWith(2)
     expect(wrapper.find('[data-testid="configure-gpio-6"]').exists()).toBe(false)
   })
 })
@@ -141,13 +145,14 @@ describe('PWMResourceList', () => {
   })
 
   it('configures an unconfigured reported PWM resource by hardware id', async () => {
+    const onConfigure = vi.fn()
     const wrapper = track(mount(PWMResourceList, {
-      props: { resources: pwmHardware, configs: [], nodeId: 'node-1', availablePins: [2, 6] },
+      props: { resources: pwmHardware, configs: [], nodeId: 'node-1', availablePins: [2, 6], onConfigure },
       global: { stubs },
     }))
 
     await wrapper.get('[data-testid="configure-pwm-PWM1"]').trigger('click')
-    expect(wrapper.emitted('configure')).toEqual([['PWM1']])
+    expect(onConfigure).toHaveBeenCalledWith('PWM1')
   })
 
   it('never promotes a config-only PWM resource into the reported resource list', () => {

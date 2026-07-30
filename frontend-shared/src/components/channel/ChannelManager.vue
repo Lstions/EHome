@@ -90,6 +90,31 @@
           </el-form-item>
         </template>
 
+        <!-- UART 无能力数据时的保守编辑兜底：保持已有配置可修改，
+             不将能力暂缺误判为不可编辑。资源约束仍由后端 manifest 校验。 -->
+        <template v-if="form.hardware_type === 'uart' && !currentCaps">
+          <el-form-item label="波特率">
+            <el-input-number v-model="form.config.baud_rate" :min="1200" :max="921600" :step="1200" style="width: 100%;" />
+          </el-form-item>
+          <el-form-item label="数据位">
+            <el-radio-group v-model="form.config.data_bits">
+              <el-radio-button v-for="bit in [5, 6, 7, 8]" :key="bit" :value="bit">{{ bit }}</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="停止位">
+            <el-radio-group v-model="form.config.stop_bits">
+              <el-radio-button v-for="bit in [1, 2]" :key="bit" :value="bit">{{ bit }}</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="校验">
+            <el-select v-model="form.config.parity" style="width: 100%;">
+              <el-option label="无" value="none" />
+              <el-option label="奇校验" value="odd" />
+              <el-option label="偶校验" value="even" />
+            </el-select>
+          </el-form-item>
+        </template>
+
         <!-- I2C 参数 -->
         <template v-if="form.hardware_type === 'i2c' && currentCaps">
           <el-form-item label="从机地址" prop="address">

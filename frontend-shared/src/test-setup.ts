@@ -34,9 +34,13 @@ const ElButton = defineComponent({
   setup(props, { slots, emit }) {
     return () => h('button', {
       class: ['el-button', `el-button--${props.type}`, props.size ? `el-button--${props.size}` : ''],
-      disabled: props.disabled,
+      'data-loading': String(Boolean(props.loading)),
+      disabled: props.disabled || props.loading,
       onClick: (e) => emit('click', e),
-    }, slots.default?.())
+    }, [
+      props.icon ? h(props.icon as any, { class: 'el-button__icon' }) : null,
+      slots.default?.(),
+    ])
   },
 })
 
@@ -103,14 +107,21 @@ const ElSelect = defineComponent({
     filterable: Boolean,
   },
   emits: ['update:modelValue', 'change', 'blur', 'focus', 'visible-change'],
-  setup(props, { slots, emit }) {
-    return () => h('div', {
+  setup(props, { slots, emit, attrs }) {
+    const onChange = (e: Event) => {
+      const value = (e.target as HTMLSelectElement).value
+      const normalized = value === '' ? undefined : (/^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : value)
+      emit('update:modelValue', normalized)
+      emit('change', normalized)
+    }
+    return () => h('select', {
       class: 'el-select',
-      onClick: () => emit('visible-change', true),
+      'aria-label': attrs['aria-label'] as string,
+      value: String(props.modelValue ?? ''),
+      disabled: props.disabled,
+      onChange,
     }, [
-      h('div', { class: 'el-select__wrapper' }, [
-        h('span', { class: 'el-select__selected-item' }, String(props.modelValue || props.placeholder || '')),
-      ]),
+      h('option', { value: '' }, props.placeholder || ''),
       slots.default?.(),
     ])
   },
@@ -122,8 +133,8 @@ const ElOption = defineComponent({
     label: String,
     disabled: Boolean,
   },
-  setup() {
-    return () => h('div', { class: 'el-option' })
+  setup(props) {
+    return () => h('option', { class: 'el-option', value: String(props.value), disabled: props.disabled }, props.label ?? String(props.value))
   },
 })
 
@@ -211,12 +222,13 @@ const ElDialog = defineComponent({
     modal: { type: Boolean, default: true },
   },
   emits: ['update:modelValue', 'close', 'open', 'closed', 'opened'],
-  setup(props, { slots, emit }) {
+  setup(props, { slots }) {
     return () => props.modelValue ? h('div', {
       class: 'el-dialog__wrapper',
     }, [
       h('div', {
         class: 'el-dialog',
+        role: 'dialog',
         style: { width: props.width },
       }, [
         h('div', { class: 'el-dialog__header' }, [
@@ -251,7 +263,7 @@ const ElTooltip = defineComponent({
     disabled: Boolean,
     visible: Boolean,
   },
-  setup(props, { slots }) {
+  setup(_, { slots }) {
     return () => h('span', { class: 'el-tooltip' }, slots.default?.())
   },
 })
@@ -268,6 +280,10 @@ const ElTable = defineComponent({
   setup(props, { slots }) {
     return () => h('table', { class: 'el-table' }, [
       slots.default?.(),
+      // 轻量环境中保留 row 文本，使历史记录等表格测试仍可验证数据呈现。
+      h('tbody', props.data.map((row: any, index: number) => h('tr', { key: row?.id ?? index }, [
+        h('td', { class: 'el-table__cell' }, Object.values(row ?? {}).map(String).join(' ')),
+      ]))),
     ])
   },
 })
@@ -297,8 +313,16 @@ const ElPagination = defineComponent({
     layout: { type: String, default: 'prev, pager, next' },
   },
   emits: ['update:currentPage', 'size-change', 'current-change'],
-  setup(props) {
-    return () => h('div', { class: 'el-pagination' }, `共 ${props.total} 条`)
+  setup(props, { emit, attrs }) {
+    return () => h('button', {
+      class: 'el-pagination',
+      'aria-label': attrs['aria-label'] as string,
+      onClick: () => {
+        const next = props.currentPage + 1
+        emit('update:currentPage', next)
+        emit('current-change', next)
+      },
+    }, `共 ${props.total} 条`)
   },
 })
 
@@ -395,7 +419,7 @@ const ElDropdown = defineComponent({
     splitButton: Boolean,
   },
   emits: ['command', 'visible-change', 'click'],
-  setup(props, { slots }) {
+  setup(_, { slots }) {
     return () => h('div', { class: 'el-dropdown' }, [
       slots.default?.(),
       slots.dropdown?.(),
@@ -483,7 +507,7 @@ const ElRadioGroup = defineComponent({
 const ElRadio = defineComponent({
   props: { label: [String, Number, Boolean], disabled: Boolean, modelValue: [String, Number, Boolean] },
   emits: ['update:modelValue', 'change'],
-  setup(props, { slots }) {
+  setup(_, { slots }) {
     return () => h('label', { class: 'el-radio' }, [
       h('input', { type: 'radio', class: 'el-radio__input' }),
       h('span', { class: 'el-radio__label' }, slots.default?.()),
@@ -537,9 +561,9 @@ const genericElComponents = [
   'ElAside', 'ElAvatar', 'ElBadge', 'ElBreadcrumb', 'ElBreadcrumbItem',
   'ElContainer', 'ElDrawer', 'ElHeader', 'ElMain',
   'ElPopover', 'ElScrollbar', 'ElCascader', 'ElCollapse', 'ElCollapseItem',
-  'ElDatePicker', 'ElDescriptions', 'ElDescriptionsItem', 'ElInputNumber',
+  'ElDescriptions',
   'ElLink', 'ElOptionGroup', 'ElRadioButton', 'ElResult', 'ElSkeleton',
-  'ElSlider', 'ElStep', 'ElSteps', 'ElTabPane', 'ElTabs', 'ElTimeline',
+  'ElStep', 'ElSteps', 'ElTabPane', 'ElTabs', 'ElTimeline',
   'ElTimelineItem', 'ElUpload', 'ElButtonGroup',
 ]
 
@@ -561,6 +585,122 @@ config.global.components['ElMenuItem'] = defineComponent({
   },
 })
 config.global.components['el-menu-item'] = config.global.components['ElMenuItem']
+
+// ElSlider 需要渲染 <input> 以便测试通过 aria-label 查找和 trigger change
+config.global.components['ElSlider'] = defineComponent({
+  props: {
+    modelValue: { type: Number, default: 0 },
+    min: { type: Number, default: 0 },
+    max: { type: Number, default: 100 },
+    step: { type: Number, default: 1 },
+    disabled: Boolean,
+    showTooltip: { type: Boolean, default: true },
+  },
+  emits: ['update:modelValue', 'change', 'input'],
+  setup(props, { emit, attrs }) {
+    return () => h('input', {
+      type: 'range',
+      class: 'el-slider',
+      'aria-label': (attrs['aria-label'] as string) || 'duty-slider',
+      min: String(props.min),
+      max: String(props.max),
+      step: String(props.step),
+      value: String(props.modelValue),
+      disabled: props.disabled,
+      onInput: (e: Event) => {
+        const val = Number((e.target as HTMLInputElement).value)
+        emit('update:modelValue', val)
+        emit('input', val)
+      },
+      onChange: (e: Event) => {
+        const val = Number((e.target as HTMLInputElement).value)
+        emit('change', val)
+      },
+    })
+  },
+})
+config.global.components['el-slider'] = config.global.components['ElSlider']
+
+// ElDatePicker 需渲染可编辑 input；日期范围和单点时间均支持 v-model。
+config.global.components['ElDatePicker'] = defineComponent({
+  props: { modelValue: { type: [String, Number, Array, Object], default: null }, type: String, disabled: Boolean },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { emit, attrs }) {
+    const update = (e: Event) => {
+      const value = (e.target as HTMLInputElement).value
+      emit('update:modelValue', value === '' ? null : Number(value))
+      emit('change', value === '' ? null : Number(value))
+    }
+    const updateRange = (index: number, e: Event) => {
+      const values = Array.isArray(props.modelValue) ? [...props.modelValue] : ['', '']
+      const value = (e.target as HTMLInputElement).value
+      values[index] = value === '' ? '' : Number(value)
+      emit('update:modelValue', values)
+      emit('change', values)
+    }
+    return () => props.type === 'datetimerange'
+      ? h('div', { class: 'el-date-picker', 'aria-label': attrs['aria-label'] as string }, [
+          h('input', {
+            'aria-label': '历史开始时间',
+            value: Array.isArray(props.modelValue) ? String(props.modelValue[0] ?? '') : '',
+            disabled: props.disabled,
+            onInput: (e: Event) => updateRange(0, e),
+          }),
+          h('input', {
+            'aria-label': '历史结束时间',
+            value: Array.isArray(props.modelValue) ? String(props.modelValue[1] ?? '') : '',
+            disabled: props.disabled,
+            onInput: (e: Event) => updateRange(1, e),
+          }),
+        ])
+      : h('input', {
+          class: 'el-date-picker',
+          'aria-label': attrs['aria-label'] as string,
+          value: String(props.modelValue ?? ''),
+          disabled: props.disabled,
+          onInput: update,
+        })
+  },
+})
+config.global.components['el-date-picker'] = config.global.components['ElDatePicker']
+
+// ElInputNumber 使用真实 number input，供配置表单测试和用户输入交互使用。
+config.global.components['ElInputNumber'] = defineComponent({
+  props: { modelValue: { type: Number, default: 0 }, min: Number, max: Number, step: Number, disabled: Boolean },
+  emits: ['update:modelValue', 'change'],
+  setup(props, { emit, attrs }) {
+    const update = (e: Event) => {
+      const value = Number((e.target as HTMLInputElement).value)
+      emit('update:modelValue', value)
+      emit('change', value)
+    }
+    return () => h('input', {
+      type: 'number',
+      class: 'el-input-number',
+      value: String(props.modelValue),
+      min: props.min == null ? undefined : String(props.min),
+      max: props.max == null ? undefined : String(props.max),
+      step: props.step == null ? undefined : String(props.step),
+      disabled: props.disabled,
+      'aria-label': attrs['aria-label'] as string,
+      onInput: update,
+      onChange: update,
+    })
+  },
+})
+config.global.components['el-input-number'] = config.global.components['ElInputNumber']
+
+// ElDescriptionsItem 为内容提供语义容器。
+config.global.components['ElDescriptionsItem'] = defineComponent({
+  props: { label: String, span: Number },
+  setup(props, { slots }) {
+    return () => h('div', { class: 'el-descriptions-item' }, [
+      props.label ? h('span', { class: 'el-descriptions-item__label' }, props.label) : null,
+      h('span', { class: 'el-descriptions-item__content' }, slots.default?.()),
+    ])
+  },
+})
+config.global.components['el-descriptions-item'] = config.global.components['ElDescriptionsItem']
 
 for (const name of genericElComponents) {
   if (!config.global.components[name]) {
