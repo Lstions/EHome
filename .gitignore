@@ -70,3 +70,4 @@ screenshots/
 
 # Dev environment with secrets — never commit
 .env.dev
+agents/
