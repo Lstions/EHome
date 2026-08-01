@@ -45,4 +45,40 @@ describe('StatCard.vue', () => {
     expect(wrapper.get('.stat-label-mobile').text()).toBe('边缘设备')
     expect(wrapper.get('.stat-label-mobile').attributes('aria-hidden')).toBe('true')
   })
+
+  it('hides the mobile label on desktop by default (no duplicate text)', async () => {
+    const wrapper = mount(StatCard, {
+      props: { label: '本页边缘设备', mobileLabel: '边缘设备' },
+    })
+
+    // Both label spans exist in the DOM for responsive switching
+    const desktopSpan = wrapper.find('.stat-label-desktop')
+    const mobileSpan = wrapper.find('.stat-label-mobile')
+    expect(desktopSpan.exists()).toBe(true)
+    expect(mobileSpan.exists()).toBe(true)
+    expect(mobileSpan.attributes('aria-hidden')).toBe('true')
+
+    // jsdom does not inject scoped <style> into the DOM, so read the
+    // SFC source directly to confirm the desktop-default hiding rule
+    // exists outside of any @media block.
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const sfcPath = path.resolve(__dirname, '../StatCard.vue')
+    const sfcSource = fs.readFileSync(sfcPath, 'utf-8')
+    // Extract the <style> block content (before closing tag)
+    const styleMatch = sfcSource.match(/<style[^>]*>([\s\S]*?)<\/style>/)
+    expect(styleMatch).not.toBeNull()
+    const css = styleMatch![1]
+    // Desktop default: .stat-label-mobile { display: none } must appear
+    // before the @media block (i.e. at top level, not inside @media)
+    const mediaIdx = css.indexOf('@media')
+    const ruleIdx = css.indexOf('.stat-label-mobile')
+    expect(ruleIdx).toBeGreaterThan(-1)
+    // The rule must appear before the @media block to be a desktop default
+    expect(ruleIdx).toBeLessThan(mediaIdx)
+    // And must contain display: none
+    const ruleEnd = css.indexOf('}', ruleIdx)
+    const ruleBlock = css.slice(ruleIdx, ruleEnd)
+    expect(ruleBlock).toContain('display: none')
+  })
 })

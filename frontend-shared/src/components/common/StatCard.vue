@@ -103,6 +103,8 @@ function handleKeyboardActivate(event: KeyboardEvent) {
   word-break: keep-all;
   overflow-wrap: break-word;
 }
+/* 桌面端默认隐藏移动端简写标签，仅显示完整标签 */
+.stat-label-mobile { display: none; }
 
 /* 移动端：单行 4 列纵向紧凑小卡（卡宽 ~80px），压低占高让位给内容区 */
 @media (max-width: 768px) {
