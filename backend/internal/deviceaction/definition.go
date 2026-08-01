@@ -356,12 +356,22 @@ func (r *Registry) SetEnabled(deviceType, actionID string, enabled bool) error {
 	return nil
 }
 
-// CurrentEngineAllows is deliberately narrower than the complete design. The
-// deployed single-step/RAM replay engine cannot safely execute setters or
-// medium/high/critical actions until risk encoding, durable at-most-once and
-// bounded verification semantics land together.
+// CurrentEngineAllows gates which actions the deployed engine may execute.
+// Low-risk reads are always allowed. Reset/set actions are permitted only
+// when the execution shape is bounded_sequence — the ESP32 command engine
+// supports bounded durable replay with channel_cmd_v2 and readback/finally
+// verification. Single-step reset/set is rejected because a transport ACK is
+// not evidence that a setting took effect, and the future high-risk engine
+// gate has not yet shipped. The rollout selector in configuration provides
+// the explicit per-action evidence gate on top of this engine gate.
 func CurrentEngineAllows(def Definition) bool {
-	return def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce
+	if def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce {
+		return true
+	}
+	if def.Semantics == "reset" || def.Semantics == "set" {
+		return def.ExecutionShape == "bounded_sequence"
+	}
+	return false
 }
 
 func (r *Registry) List(deviceType string) []Definition {

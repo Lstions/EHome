@@ -660,8 +660,8 @@ func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
@@ -705,7 +705,7 @@ func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"code": 200,
 			"data": nodeConfigResponse{
-				Node:            node,
+				Node:            *node,
 				Channels:        channels,
 				EdgeDevices:     edgeDeviceItems,
 				DeviceConfigs:   deviceConfigs,
@@ -753,8 +753,8 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}
@@ -1061,8 +1061,8 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
-		var node models.Node
-		if err := db.First(&node, id).Error; err != nil {
+		node, err := findNodeByID(db, id)
+		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
 			return
 		}

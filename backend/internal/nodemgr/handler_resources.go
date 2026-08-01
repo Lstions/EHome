@@ -312,7 +312,7 @@ func resourceEntrySchema(kind string, outer uint8) (map[uint8]uint8, []uint8, ma
 		if outer != 1 {
 			return nil, nil, nil, fmt.Errorf("unexpected channel entry field %d", outer)
 		}
-		schema = map[uint8]uint8{1: frame.WireVarint, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireLengthDelimited, 7: frame.WireVarint, 8: frame.WireVarint}
+		schema = map[uint8]uint8{1: frame.WireVarint, 2: frame.WireVarint, 3: frame.WireVarint, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireLengthDelimited, 7: frame.WireVarint, 8: frame.WireVarint, 9: frame.WireVarint, 10: frame.WireVarint, 11: frame.WireVarint}
 		repeated[7] = true
 		return schema, required, repeated, nil
 	}

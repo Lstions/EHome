@@ -351,8 +351,12 @@ func validateChannelCmdV2(cmd ChannelCmdV2) error {
 	if len(cmd.BootID) == 0 || len(cmd.BootID) > 32 {
 		return fmt.Errorf("boot_id length")
 	}
+	// ESP32 firmware requires all top-level identity fields (1-14) to be
+	// present and non-zero.  The transport populates them from the first
+	// plan step (bounded batch) or from the compiled single step so the
+	// envelope passes firmware validation.
 	if len(cmd.TXData) == 0 || len(cmd.TXData) > ChannelCmdV2MaxTX || cmd.ReadSize > ChannelCmdV2MaxRX || cmd.RXTimeoutMS == 0 || cmd.RXTimeoutMS > ChannelCmdV2MaxTimeoutMS || cmd.PostTXDelayMS > ChannelCmdV2MaxTimeoutMS {
-		return fmt.Errorf("bounded transaction fields invalid")
+		return fmt.Errorf("transaction fields invalid")
 	}
 	if cmd.RiskClass != 0 || cmd.Flags != 0 {
 		return fmt.Errorf("unsupported risk class or flags")

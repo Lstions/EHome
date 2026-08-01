@@ -355,8 +355,8 @@ func (d *SN3001RainDriver) ParseData(raw []byte) ([]SensorData, error) {
 func (d *SN3001RainDriver) GetCommandTemplates() []CommandTemplate {
 	return []CommandTemplate{{
 		ID: "read_rainfall", Name: "读取累计雨量", Type: "read", CmdByte: 0x03,
-		WriteData: "010300000001840A", ReadLength: 7, DelayMs: 100, IntervalMs: 0,
-		Schedulable: false, Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
+		WriteData: "010300000001840A", ReadLength: 7, DelayMs: 100, IntervalMs: 5000,
+		Schedulable: true, Description: "SN-3001 雨量寄存器 0x0000，Modbus RTU FC03",
 	}}
 }
 func (d *SN3001RainDriver) ControlActions() []ControlAction {
@@ -384,12 +384,12 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 	}, {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
 		Description: "SN-3001 清零寄存器 0x0000=0x005A；执行后必须重新读取确认",
-		Semantics:   "reset", Risk: "high", Enabled: false, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 3,
+		Semantics:   "reset", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 3,
 		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回及节点 bounded durable replay；生产仍需独立故障注入放行",
 	}, {
 		ID: "clear_rainfall_write", Version: 1, Name: "发送雨量清零",
 		Description: "开发验证用单步清零写入；收到回显后必须立即执行读取确认",
-		Semantics:   "reset", Risk: "high", Enabled: false, Verification: "ack", AtMostOnce: true,
+		Semantics:   "reset", Risk: "high", Enabled: true, Verification: "ack", AtMostOnce: true,
 		TXData: modbusWriteFrame(0x01, 0x0000, 0x005a), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "仅允许开发实机证据；生产必须使用 bounded 清零工作流",
 	}, {
@@ -546,6 +546,12 @@ func modbusFrameForAddress(frame []byte, address byte) []byte {
 // compared with the target-aware compiled frame as well, so the response and
 // request remain bound to the same EdgeDevice address.
 func (d *SN3001RainDriver) VerifyControlActionForAddress(actionID string, params json.RawMessage, raw []byte, address uint8) ([]SensorData, error) {
+	// Bounded batch responses use a step-count envelope (raw[0] = N steps),
+	// not a Modbus unit address.  Delegate directly to the batch-aware
+	// verifier which extracts and validates each step's response frame.
+	if actionID == "reset_rainfall" {
+		return d.VerifyControlAction(actionID, params, raw)
+	}
 	if len(raw) == 0 || raw[0] != address {
 		return nil, fmt.Errorf("sn3001_rain: response address %02x does not match edge address %02x", func() byte {
 			if len(raw) == 0 {

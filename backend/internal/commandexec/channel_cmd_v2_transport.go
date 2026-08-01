@@ -99,13 +99,6 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err != nil {
 		return DispatchResult{}, fmt.Errorf("persisted action parameters are invalid: %w", err)
 	}
-	step, err := definition.CompileForAddress(params, edge.HardwareID)
-	if err != nil {
-		return DispatchResult{}, err
-	}
-	if !stepFitsCapabilities(step, capabilities) {
-		return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
-	}
 	commandID, err := uuidBytes(execution.CommandID)
 	if err != nil {
 		return DispatchResult{}, err
@@ -114,18 +107,73 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if !deadline.After(t.now()) {
 		return DispatchResult{}, fmt.Errorf("execution deadline has expired")
 	}
-	wireDigest := channelCmdV2WireDigest(execution, attempt.AttemptNo, bootID, edge.ChannelID, deadline, step, nil)
+
+	var envelope frame.ChannelCmdV2
+	envelope.CommandID = commandID
+	envelope.Attempt = attempt.AttemptNo
+	envelope.BootID = bootID
+	envelope.EdgeDeviceID = uint32(edge.ID)
+	envelope.ChannelID = uint32(edge.ChannelID)
+	envelope.DeadlineUnixMS = uint64(deadline.UnixMilli())
+
+	var step deviceaction.SingleStep
+	var planSteps []frame.ChannelCmdV2Step
+
+	if definition.ExecutionShape == "bounded_sequence" {
+		plan, planErr := definition.CompilePlan(params)
+		if planErr != nil {
+			return DispatchResult{}, planErr
+		}
+		if len(plan.Steps) > int(capabilities.MaxBatchSteps) {
+			return DispatchResult{}, fmt.Errorf("action exceeds node batch-step capability")
+		}
+		for _, ps := range plan.Steps {
+			if !stepFitsCapabilities(ps.SingleStep, capabilities) {
+				return DispatchResult{}, fmt.Errorf("action plan step %q exceeds current node capability", ps.ID)
+			}
+			planSteps = append(planSteps, frame.ChannelCmdV2Step{
+				Kind:          planStepKindCode(ps.Kind),
+				TXData:        append([]byte(nil), ps.SingleStep.TXData...),
+				ReadSize:      ps.SingleStep.ReadSize,
+				RXTimeoutMS:   ps.SingleStep.RXTimeoutMS,
+				PostTXDelayMS: ps.SingleStep.PostTXDelayMS,
+			})
+		}
+		envelope.Plan = planSteps
+		// ESP32 firmware requires all top-level identity fields (8-11) to be
+		// present and non-zero even for bounded batches.  Populate them from
+		// the first plan step; the firmware executes the Plan steps, not the
+		// top-level fields.
+		first := plan.Steps[0].SingleStep
+		envelope.TXData = append([]byte(nil), first.TXData...)
+		envelope.ReadSize = first.ReadSize
+		envelope.RXTimeoutMS = first.RXTimeoutMS
+		envelope.PostTXDelayMS = first.PostTXDelayMS
+		// Bind the wire digest to the actual first plan step so it includes
+		// meaningful top-level transaction fields rather than zero values.
+		step = first
+	} else {
+		step, err = definition.CompileForAddress(params, edge.HardwareID)
+		if err != nil {
+			return DispatchResult{}, err
+		}
+		if !stepFitsCapabilities(step, capabilities) {
+			return DispatchResult{}, fmt.Errorf("action exceeds current node capability")
+		}
+		envelope.TXData = append([]byte(nil), step.TXData...)
+		envelope.ReadSize = step.ReadSize
+		envelope.RXTimeoutMS = step.RXTimeoutMS
+		envelope.PostTXDelayMS = step.PostTXDelayMS
+	}
+
+	wireDigest := channelCmdV2WireDigest(execution, attempt.AttemptNo, bootID, edge.ChannelID, deadline, step, planSteps)
 	digest, err := digestBytes(wireDigest)
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	payload, err := frame.EncodeChannelCmdV2(frame.ChannelCmdV2{
-		CommandID: commandID, PayloadDigest: digest, Attempt: attempt.AttemptNo,
-		BootID: bootID, EdgeDeviceID: uint32(edge.ID), ChannelID: uint32(edge.ChannelID),
-		DeadlineUnixMS: uint64(deadline.UnixMilli()), TXData: append([]byte(nil), step.TXData...),
-		ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS,
-		Plan: nil,
-	})
+	envelope.PayloadDigest = digest
+
+	payload, err := frame.EncodeChannelCmdV2(envelope)
 	if err != nil {
 		return DispatchResult{}, err
 	}
