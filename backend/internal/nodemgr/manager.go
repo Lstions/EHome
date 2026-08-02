@@ -327,6 +327,12 @@ func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 	}
 }
 
+// peripheralExcludedTypes lists channel types that represent standalone
+// peripheral resources (GPIO/PWM) rather than bus channels. Only the string
+// forms are used — the numeric ESP32 enum values "4"/"6" were legacy
+// magic numbers and are intentionally excluded.
+var peripheralExcludedTypes = []string{"GPIO", "PWM"}
+
 // loadInitializableEdgeDevices applies the same fail-closed transport contract as API init.
 func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevice, error) {
 	var devices []models.EdgeDevice
@@ -335,8 +341,8 @@ func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevi
 		Where("edge_devices.enabled = ?", true).
 		Where("channels.enabled = ?", true).
 		Where("channels.node_id = edge_devices.node_id").
-		Where("UPPER(TRIM(channels.hardware_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
-		Where("UPPER(TRIM(channels.bus_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
+		Where("UPPER(TRIM(channels.hardware_type)) NOT IN ?", peripheralExcludedTypes).
+		Where("UPPER(TRIM(channels.bus_type)) NOT IN ?", peripheralExcludedTypes).
 		Find(&devices).Error
 	return devices, err
 }

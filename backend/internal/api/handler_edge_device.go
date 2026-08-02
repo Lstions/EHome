@@ -177,10 +177,21 @@ func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *m
 	}
 	configHardwareType := strings.TrimSpace(config.HardwareType)
 	if configHardwareType == "" {
+		// v2.2: fall back to Connection JSONB bus_type when legacy hardware_type is absent.
+		if len(config.Connection) > 0 {
+			var conn map[string]any
+			if err := json.Unmarshal(config.Connection, &conn); err == nil {
+				if bt, ok := conn["bus_type"].(string); ok {
+					configHardwareType = strings.TrimSpace(bt)
+				}
+			}
+		}
+	}
+	if configHardwareType == "" {
 		return models.DeviceConfig{}, fmt.Errorf("device config has no hardware type")
 	}
 	if !strings.EqualFold(configHardwareType, channel.HardwareType) && !strings.EqualFold(configHardwareType, channel.BusType) {
-		return models.DeviceConfig{}, fmt.Errorf("device config hardware type %q is incompatible with channel type %q", config.HardwareType, channel.HardwareType)
+		return models.DeviceConfig{}, fmt.Errorf("device config hardware type %q is incompatible with channel type %q", configHardwareType, channel.HardwareType)
 	}
 	return config, nil
 }
@@ -285,6 +296,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if dto.Type != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
+			return
+		}
 		if dto.Name == nil || dto.NodeID == nil || dto.ChannelID == nil || dto.DeviceConfigID == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, node_id, channel_id, and device_config_id are required"})
 			return
@@ -333,7 +348,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := tx.First(&ch, dev.ChannelID).Error; err == nil {
 				if err := createTemplatesFromDriver(tx, driverRegistry, &ch, &dev); err != nil {
 					logger.Warnf("[edge-device-create] Failed to create ConfigTemplates: %v", err)
-					return err
 				}
 			}
 
@@ -351,8 +365,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		// Reload with associations for response
 		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&dev, dev.ID)
-		c.JSON(http.StatusCreated, dev)
-	})
+		SuccessWithCode(c, http.StatusCreated, dev)
+		})
 
 	// Update edge device (v2.2 path for PUT /devices/:id)
 	v1.PUT("/edge-devices/:id", func(c *gin.Context) {

@@ -59,7 +59,6 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":             "New Device",
-		"type":             "temperature",
 		"node_id":          "NODE001",
 		"channel_id":       1,
 		"device_config_id": 1,
@@ -163,7 +162,7 @@ func TestEdgeDevice_Create_RequiresActiveCompatibleDeviceConfig(t *testing.T) {
 			}
 
 			body := map[string]interface{}{
-				"name": "Configured device", "type": "client_supplied_type", "node_id": "NODE001", "channel_id": 1,
+				"name": "Configured device", "node_id": "NODE001", "channel_id": 1,
 			}
 			if tt.includeConfigID {
 				body["device_config_id"] = 1
@@ -260,7 +259,7 @@ func TestEdgeDevice_InitRequiresEnabledEdgeAndMatchingEnabledTransportChannel(t 
 		{"disabled edge", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: false}, models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true}},
 		{"disabled channel", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: false}},
 		{"node mismatch", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE002", HardwareType: "I2C", BusType: "I2C", Enabled: true}},
-		{"numeric PWM alias", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE001", HardwareType: "6", BusType: "6", Enabled: true}},
+		{"peripheral PWM channel", models.EdgeDevice{Name: "sensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, Enabled: true}, models.Channel{NodeID: "NODE001", HardwareType: "PWM", BusType: "PWM", Enabled: true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -302,7 +301,6 @@ func TestEdgeDevice_Create_WithModbusType(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":             "Wind Sensor",
-		"type":             "sn3000",
 		"node_id":          "NODE001",
 		"channel_id":       1,
 		"device_config_id": 1,
@@ -417,6 +415,31 @@ func TestEdgeDevice_Update_RejectsTypeOverrideForConfiguredDevice(t *testing.T) 
 	db.First(&updated, 1)
 	if updated.Type != "bmp280" {
 		t.Fatalf("type override changed configured device type to %q", updated.Type)
+	}
+}
+
+func TestEdgeDevice_Create_RejectsTypeOverrideForConfiguredDevice(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Configured", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"name": "Spoofed", "type": "spoofed_type", "node_id": "NODE001",
+		"channel_id": 1, "device_config_id": 1,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.EdgeDevice{}).Where("name = ?", "Spoofed").Count(&count)
+	if count != 0 {
+		t.Fatalf("type-rejected request should not create a device, found %d rows", count)
 	}
 }
 
