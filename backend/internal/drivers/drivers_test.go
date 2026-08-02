@@ -590,8 +590,8 @@ func TestRegisterBuiltInDriversWithParsers(t *testing.T) {
 	// With nil/empty parser configs
 	RegisterBuiltInDriversWithParsers(reg, nil)
 	types := reg.List()
-	if len(types) != 7 {
-		t.Errorf("expected 7 drivers, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 drivers, got %d", len(types))
 	}
 }
 
@@ -609,7 +609,7 @@ func TestRegisterBuiltInDrivers_RegistersSameSetAsParserAwareEntryPoint(t *testi
 	if !slices.Equal(legacyTypes, withParserTypes) {
 		t.Fatalf("registration sets differ: legacy=%v parser-aware=%v", legacyTypes, withParserTypes)
 	}
-	want := []string{"bmp280", "jiabaida_bms", "lk_th01", "prs3001", "sn3000", "sn3001_rain", "techfine_inverter"}
+	want := []string{"bmp280", "generic_i2c", "generic_modbus", "jiabaida_bms", "lk_th01", "prs3001", "sn3000", "sn3001_rain", "techfine_inverter"}
 	if !slices.Equal(legacyTypes, want) {
 		t.Fatalf("registered types = %v, want %v", legacyTypes, want)
 	}
@@ -625,8 +625,8 @@ func TestRegisterBuiltInDriversWithParsers_ValidParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 7 {
-		t.Errorf("expected 7 drivers, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 drivers, got %d", len(types))
 	}
 }
 
@@ -640,8 +640,8 @@ func TestRegisterBuiltInDriversWithParsers_InvalidParser(t *testing.T) {
 
 	// Should still register the driver (just without ConfigParser)
 	types := reg.List()
-	if len(types) != 7 {
-		t.Errorf("expected 7 drivers even with invalid parser, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 drivers even with invalid parser, got %d", len(types))
 	}
 }
 
@@ -654,8 +654,8 @@ func TestRegisterBuiltInDriversWithParsers_EmptyParser(t *testing.T) {
 	RegisterBuiltInDriversWithParsers(reg, parserConfigs)
 
 	types := reg.List()
-	if len(types) != 7 {
-		t.Errorf("expected 7 drivers, got %d", len(types))
+	if len(types) != 9 {
+		t.Errorf("expected 9 drivers, got %d", len(types))
 	}
 }
 

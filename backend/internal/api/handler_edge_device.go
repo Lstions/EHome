@@ -29,22 +29,18 @@ var operationNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // executeLimiter limits concurrent /execute read operations to prevent resource exhaustion.
 var executeLimiter = make(chan struct{}, 20)
 
-// driver creates ConfigTemplates from the device driver's CommandTemplates (single source of truth).
-// Falls back to getTemplateParamsFromDeviceConfig for legacy devices without a driver.
+// createTemplatesFromDriver creates ConfigTemplates from the device driver's
+// CommandTemplates (single source of truth).  Devices without a registered
+// driver get no templates — the legacy getTemplateParamsFromDeviceConfig
+// fallback has been superseded by GenericModbusDriver / GenericI2CDriver.
 func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
 	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
-		// No driver registered — try legacy DeviceConfig-based fallback
-		if dev.DeviceConfigID > 0 {
-			var dc models.DeviceConfig
-			if err2 := tx.First(&dc, dev.DeviceConfigID).Error; err2 == nil {
-				writeData, readLength, delayMs := getTemplateParamsFromDeviceConfig(dc, dev.HardwareID)
-				if writeData != "" {
-					return createSingleTemplate(tx, ch, writeData, readLength, delayMs)
-				}
-			}
-		}
-		return nil // no templates to create — that's OK for unregistered device types
+		// No driver registered — no templates. The generic_modbus and
+		// generic_i2c drivers cover the former DeviceConfig-derived cases;
+		// other device types should register a dedicated driver.
+		logger.Warnf("[edge-device-create] no driver registered for type=%s, skipping ConfigTemplate creation", dev.Type)
+		return nil
 	}
 
 	provider, ok := drv.(drivers.CommandTemplateProvider)
@@ -92,6 +88,10 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, rea
 
 // getTemplateParamsFromDeviceConfig attempts to derive ConfigTemplate parameters
 // from a DeviceConfig's Connection JSONB field. Returns ("", 0, 0) if no params can be derived.
+//
+// Deprecated: Superseded by GenericModbusDriver / GenericI2CDriver. createTemplatesFromDriver
+// no longer calls this function — register a driver (generic or dedicated) instead.
+// Retained only for the transitional test suite in handler_edge_device_crud_test.go.
 func getTemplateParamsFromDeviceConfig(dc models.DeviceConfig, hardwareID string) (string, uint32, uint32) {
 	if dc.Connection == nil {
 		return "", 0, 0
@@ -131,10 +131,6 @@ func getTemplateParamsFromDeviceConfig(dc models.DeviceConfig, hardwareID string
 			if addr, ok := dp["read_register"].(string); ok {
 				return addr, 6, 100
 			}
-			// Default I2C read for common sensors
-			if strings.Contains(strings.ToLower(dc.DeviceType), "bmp") {
-				return "F7", 6, 100
-			}
 		}
 		return "", 0, 0
 
@@ -166,7 +162,8 @@ func parseHardwareIDUint(s string) uint64 {
 
 func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *models.Channel) (models.DeviceConfig, error) {
 	if deviceConfigID == 0 {
-		return models.DeviceConfig{}, fmt.Errorf("device_config_id is required")
+		// 0 = no template; caller resolves type/hardware_types from the driver registry.
+		return models.DeviceConfig{}, nil
 	}
 	var config models.DeviceConfig
 	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND status = ?", deviceConfigID, "active").First(&config).Error; err != nil {
@@ -296,12 +293,23 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if dto.Type != nil {
+		if dto.Type != nil && dto.DeviceConfigID != nil && *dto.DeviceConfigID != 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
 			return
 		}
-		if dto.Name == nil || dto.NodeID == nil || dto.ChannelID == nil || dto.DeviceConfigID == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name, node_id, channel_id, and device_config_id are required"})
+		if dto.Name == nil || dto.NodeID == nil || dto.ChannelID == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name, node_id, and channel_id are required"})
+			return
+		}
+		// Resolve effective device_config_id (0 when absent or explicitly 0)
+		var cfgID uint
+		if dto.DeviceConfigID != nil {
+			cfgID = *dto.DeviceConfigID
+		}
+		// When no DeviceConfig template is provided, type must be supplied by the caller
+		// and validated against the driver registry.
+		if cfgID == 0 && (dto.Type == nil || strings.TrimSpace(*dto.Type) == "") {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is required when device_config_id is not provided"})
 			return
 		}
 		dev := models.EdgeDevice{Name: *dto.Name, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
@@ -323,12 +331,23 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := validateTransportChannel(&bindingChannel); err != nil {
 				return err
 			}
-			config, err := validateDeviceConfigForChannel(tx, *dto.DeviceConfigID, &bindingChannel)
+			config, err := validateDeviceConfigForChannel(tx, cfgID, &bindingChannel)
 			if err != nil {
 				return err
 			}
-			dev.Type = config.DeviceType
-			dev.DeviceConfigID = config.ID
+			if cfgID > 0 {
+				// DeviceConfig path: type derived from config
+				dev.Type = config.DeviceType
+				dev.DeviceConfigID = config.ID
+			} else {
+				// No template: validate type against the driver registry
+				devType := strings.TrimSpace(*dto.Type)
+				if _, derr := driverRegistry.Get(devType); derr != nil {
+					return fmt.Errorf("device type %q is not registered: %w", devType, derr)
+				}
+				dev.Type = devType
+				dev.DeviceConfigID = 0
+			}
 			// Step 1: Create EdgeDevice (inside transaction)
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
@@ -388,8 +407,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 		if dto.Type != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
-			return
+			// Will be validated inside the transaction once we know the effective configID.
 		}
 		var d models.EdgeDevice
 		if err := db.Transaction(func(tx *gorm.DB) error {
@@ -406,6 +424,24 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if dto.DeviceConfigID != nil {
 				configID = *dto.DeviceConfigID
 			}
+			// G1: type may only be supplied by the caller on the driver-registry path (no DeviceConfig template).
+			if dto.Type != nil && configID != 0 {
+				return fmt.Errorf("type is derived from device_config_id")
+			}
+			// When there is no template, a caller-supplied type must be a registered driver.
+			if configID == 0 {
+				if dto.Type != nil {
+					devType := strings.TrimSpace(*dto.Type)
+					if devType == "" {
+						return fmt.Errorf("type must not be empty")
+					}
+					if _, derr := driverRegistry.Get(devType); derr != nil {
+						return fmt.Errorf("device type %q is not registered: %w", devType, derr)
+					}
+				} else if d.Type == "" {
+					return fmt.Errorf("type is required when device_config_id is not provided")
+				}
+			}
 			var targetChannel models.Channel
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", targetChannelID, targetNodeID).First(&targetChannel).Error; err != nil {
 				return fmt.Errorf("channel does not belong to node")
@@ -417,7 +453,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err != nil {
 				return err
 			}
-			updates := map[string]interface{}{"device_config_id": config.ID, "type": config.DeviceType}
+			updates := map[string]interface{}{}
+			if configID > 0 {
+				updates["device_config_id"] = config.ID
+				updates["type"] = config.DeviceType
+			} else {
+				updates["device_config_id"] = uint(0)
+				if dto.Type != nil {
+					updates["type"] = strings.TrimSpace(*dto.Type)
+				}
+			}
 			if dto.Name != nil {
 				updates["name"] = *dto.Name
 			}

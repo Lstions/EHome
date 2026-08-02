@@ -980,3 +980,153 @@ func TestGetTemplateParamsFromDeviceConfig_InvalidJSON(t *testing.T) {
 		t.Error("expected empty writeData for invalid JSON")
 	}
 }
+
+// ==================== DeviceConfig-optional (driver fallback) tests ====================
+
+func TestEdgeDevice_Create_WithoutDeviceConfigID(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":        "DriverBacked",
+		"node_id":     "NODE001",
+		"channel_id":  1,
+		"type":        "bmp280",
+		"hardware_id": "0x76",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	if err := db.First(&dev, "name = ?", "DriverBacked").Error; err != nil {
+		t.Fatalf("load created device: %v", err)
+	}
+	if dev.Type != "bmp280" {
+		t.Errorf("expected type bmp280, got %q", dev.Type)
+	}
+	if dev.DeviceConfigID != 0 {
+		t.Errorf("expected DeviceConfigID=0, got %d", dev.DeviceConfigID)
+	}
+	// ConfigTemplate should be auto-created via the driver's CommandTemplates
+	var tmpl models.ConfigTemplate
+	if err := db.First(&tmpl, "node_id = ?", "NODE001").Error; err != nil {
+		t.Fatalf("expected ConfigTemplate created via driver for bmp280: %v", err)
+	}
+	if tmpl.WriteData == "" {
+		t.Error("expected non-empty write_data for bmp280 driver-backed template")
+	}
+}
+
+func TestEdgeDevice_Create_WithoutDeviceConfigID_UnknownType(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":       "UnknownDriver",
+		"node_id":    "NODE001",
+		"channel_id": 1,
+		"type":       "not_a_real_driver",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unregistered type, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.EdgeDevice{}).Where("name = ?", "UnknownDriver").Count(&count)
+	if count != 0 {
+		t.Fatalf("device with unregistered type should not be created, found %d rows", count)
+	}
+}
+
+func TestEdgeDevice_Create_WithoutDeviceConfigID_MissingType(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+
+	// No device_config_id and no type — should be rejected with 400.
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":       "NoTypeNoConfig",
+		"node_id":    "NODE001",
+		"channel_id": 1,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.EdgeDevice{}).Where("name = ?", "NoTypeNoConfig").Count(&count)
+	if count != 0 {
+		t.Fatalf("device without type or config should not be created, found %d rows", count)
+	}
+}
+
+func TestEdgeDevice_Create_WithoutDeviceConfigID_AllowsTypeForDriverBacked(t *testing.T) {
+	// When device_config_id is 0, supplying type must NOT be rejected (G1 inversion).
+	// Sanity: ensure that when device_config_id is set, type is still rejected.
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Cfg", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "Spoof", "type": "bmp280", "node_id": "NODE001",
+		"channel_id": 1, "device_config_id": 1,
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for type+device_config_id combo, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEdgeDevice_Update_SwitchesToDriverBackedWhenDeviceConfigIDSetToZero(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.DeviceConfig{Name: "Cfg", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Dev", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+
+	// Switch to driver-backed by setting device_config_id=0 and providing type.
+	payload, _ := json.Marshal(map[string]interface{}{
+		"device_config_id": 0,
+		"type":             "bmp280",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated models.EdgeDevice
+	db.First(&updated, 1)
+	if updated.DeviceConfigID != 0 {
+		t.Errorf("expected DeviceConfigID=0 after switch, got %d", updated.DeviceConfigID)
+	}
+	if updated.Type != "bmp280" {
+		t.Errorf("expected type bmp280, got %q", updated.Type)
+	}
+}
