@@ -43,6 +43,14 @@ export interface CreateEdgeDeviceParams {
   enabled?: boolean
   interval_ms?: number
   device_config_id?: number
+  // F: inline channel creation — when channel_id is 0/absent and channel is
+  // provided, the backend creates the channel inside the same transaction.
+  channel?: {
+    hardware_type: string
+    hardware_id?: string
+    address?: string
+    config?: Record<string, unknown>
+  }
 }
 
 // ============================================================

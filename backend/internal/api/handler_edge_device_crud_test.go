@@ -1130,3 +1130,59 @@ func TestEdgeDevice_Update_SwitchesToDriverBackedWhenDeviceConfigIDSetToZero(t *
 		t.Errorf("expected type bmp280, got %q", updated.Type)
 	}
 }
+
+// F: inline channel creation — when channel_id is absent and a channel sub-object
+// is provided, the backend should create the channel and the edge device inside
+// the same transaction, eliminating orphan-channel risk.
+func TestEdgeDevice_Create_WithInlineChannel(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	// No pre-existing channel — the inline path should create one
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":       "InlineChannel",
+		"node_id":    "NODE001",
+		"type":       "bmp280",
+		"hardware_id": "0x76",
+		"channel": map[string]interface{}{
+			"hardware_type": "i2c",
+			"hardware_id":   "0x76",
+			"config": map[string]interface{}{
+				"interval_ms":  1000,
+				"device_type":  "bmp280",
+			},
+		},
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify the edge device was created
+	var dev models.EdgeDevice
+	db.First(&dev, "name = ?", "InlineChannel")
+	if dev.ID == 0 {
+		t.Fatalf("edge device not created")
+	}
+	if dev.Type != "bmp280" {
+		t.Errorf("expected type bmp280, got %s", dev.Type)
+	}
+
+	// Verify the inline channel was created and linked
+	var ch models.Channel
+	db.First(&ch, dev.ChannelID)
+	if ch.ID == 0 {
+		t.Fatalf("inline channel not created")
+	}
+	if ch.HardwareType != "i2c" {
+		t.Errorf("expected hardware_type i2c, got %s", ch.HardwareType)
+	}
+	if ch.NodeID != "NODE001" {
+		t.Errorf("expected node_id NODE001, got %s", ch.NodeID)
+	}
+}

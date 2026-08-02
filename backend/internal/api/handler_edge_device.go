@@ -288,6 +288,15 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			IntervalMs     *int    `json:"interval_ms"`
 			HardwareID     *string `json:"hardware_id"`
 			DeviceConfigID *uint   `json:"device_config_id"`
+			// F: inline channel creation — when channel_id is 0/absent and
+			// channel is provided, the channel is created inside the same
+			// transaction, eliminating the two-phase-commit orphan risk.
+			Channel *struct {
+				HardwareType *string        `json:"hardware_type"`
+				HardwareID   *string        `json:"hardware_id"`
+				Address     *string        `json:"address"`
+				Config      *json.RawMessage `json:"config"`
+			} `json:"channel"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -297,8 +306,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
 			return
 		}
-		if dto.Name == nil || dto.NodeID == nil || dto.ChannelID == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name, node_id, and channel_id are required"})
+		// channel_id is required unless an inline channel object is provided
+		hasInlineChannel := dto.Channel != nil && dto.Channel.HardwareType != nil
+		if dto.ChannelID == nil && !hasInlineChannel {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "channel_id or channel is required"})
+			return
+		}
+		if dto.Name == nil || dto.NodeID == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name and node_id are required"})
 			return
 		}
 		// Resolve effective device_config_id (0 when absent or explicitly 0)
@@ -312,7 +327,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is required when device_config_id is not provided"})
 			return
 		}
-		dev := models.EdgeDevice{Name: *dto.Name, NodeID: *dto.NodeID, ChannelID: *dto.ChannelID}
+		// Resolve the effective channel ID: use channel_id when provided,
+		// otherwise the inline channel object will be created inside the transaction.
+		var effectiveChannelID uint
+		if dto.ChannelID != nil {
+			effectiveChannelID = *dto.ChannelID
+		}
+		dev := models.EdgeDevice{Name: *dto.Name, NodeID: *dto.NodeID}
 		if dto.Enabled != nil {
 			dev.Enabled = *dto.Enabled
 		}
@@ -325,12 +346,55 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		if err := db.Transaction(func(tx *gorm.DB) error {
 			var bindingChannel models.Channel
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", *dto.ChannelID, *dto.NodeID).First(&bindingChannel).Error; err != nil {
-				return fmt.Errorf("channel does not belong to node")
+			if effectiveChannelID > 0 {
+				// Existing channel path
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ? AND node_id = ?", effectiveChannelID, *dto.NodeID).First(&bindingChannel).Error; err != nil {
+					return fmt.Errorf("channel does not belong to node")
+				}
+				if err := validateTransportChannel(&bindingChannel); err != nil {
+					return err
+				}
+			} else {
+				// F: inline channel creation path
+				chInput := dto.Channel
+				hwType := strings.TrimSpace(*chInput.HardwareType)
+				busType := strings.ToUpper(hwType) // hardware_type == bus_type for transport channels
+				bindingChannel = models.Channel{
+					NodeID:       *dto.NodeID,
+					HardwareType: hwType,
+					BusType:      busType,
+					Enabled:      true,
+				}
+				if chInput.HardwareID != nil {
+					bindingChannel.HardwareID = *chInput.HardwareID
+				}
+				if chInput.Address != nil && *chInput.Address != "" {
+					bindingChannel.HardwareID = *chInput.Address
+				}
+				if chInput.Config != nil {
+					bindingChannel.Config = string(*chInput.Config)
+				}
+				if err := validateTransportChannelType(&bindingChannel); err != nil {
+					return err
+				}
+				// Lock the node row to prevent concurrent channel creation races
+				var node models.Node
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", bindingChannel.NodeID).First(&node).Error; err != nil {
+					return err
+				}
+				// Peripheral conflict check only meaningful when bus_config (pin route) is specified.
+				// Inline channel creation from the device wizard may not include bus_config.
+				if bindingChannel.BusConfig != "" {
+					if err := validateChannelPeripheralConflicts(tx, bindingChannel); err != nil {
+						return err
+					}
+				}
+				if err := tx.Create(&bindingChannel).Error; err != nil {
+					return err
+				}
+				effectiveChannelID = bindingChannel.ID
 			}
-			if err := validateTransportChannel(&bindingChannel); err != nil {
-				return err
-			}
+			dev.ChannelID = effectiveChannelID
 			config, err := validateDeviceConfigForChannel(tx, cfgID, &bindingChannel)
 			if err != nil {
 				return err

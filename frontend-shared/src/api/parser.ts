@@ -5,8 +5,8 @@
 import client from './client'
 
 export interface Parser {
-  id: string              // 唯一标识: "bosch.bmp280"
-  device_config_id?: number // 后端 device_configs.id，用于创建设备时建立外键关联
+  id: string              // device_type (DeviceConfig.DeviceType)，非数据库主键；作为解析器标识
+  device_config_id?: number // 数据库主键 (后端 DeviceConfig.ID)，0 或 undefined = 无模板
   name: string            // 显示名称: "BMP280 温度气压传感器"
   vendor: string          // 厂商: "博世"
   category: string          // 类别: "温度气压传感器"
