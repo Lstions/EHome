@@ -328,10 +328,12 @@ func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 }
 
 // peripheralExcludedTypes lists channel types that represent standalone
-// peripheral resources (GPIO/PWM) rather than bus channels. Only the string
-// forms are used — the numeric ESP32 enum values "4"/"6" were legacy
-// magic numbers and are intentionally excluded.
-var peripheralExcludedTypes = []string{"GPIO", "PWM"}
+// peripheral resources (GPIO/PWM) rather than bus channels. The numeric
+// ESP32 enum values "4"/"6" are retained for backward compatibility with
+// legacy stored rows: MigrateGPIOChannels / RetireLegacyPWMChannels disable
+// (do not delete) such rows at startup, so pre-migration numeric values can
+// still appear in Channel.hardware_type / bus_type.
+var peripheralExcludedTypes = []string{"GPIO", "PWM", "4", "6"}
 
 // loadInitializableEdgeDevices applies the same fail-closed transport contract as API init.
 func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevice, error) {

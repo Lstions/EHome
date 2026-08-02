@@ -292,14 +292,21 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			// channel is provided, the channel is created inside the same
 			// transaction, eliminating the two-phase-commit orphan risk.
 			Channel *struct {
-				HardwareType *string        `json:"hardware_type"`
-				HardwareID   *string        `json:"hardware_id"`
-				Address     *string        `json:"address"`
-				Config      *json.RawMessage `json:"config"`
+				HardwareType *string          `json:"hardware_type"`
+				HardwareID   *string          `json:"hardware_id"`
+				Address      *string          `json:"address"`
+				Config       *json.RawMessage `json:"config"`
+				// bus_config carries the hex-encoded pin-route payload (the
+				// same shape as Channel.BusConfig). The device wizard's inline
+				// path typically omits it (no pin route to validate); a
+				// caller that supplies one gets the same
+				// validateChannelPeripheralConflicts gate as the dedicated
+				// channel-create path.
+				BusConfig *string `json:"bus_config"`
 			} `json:"channel"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		if dto.Type != nil && dto.DeviceConfigID != nil && *dto.DeviceConfigID != 0 {
@@ -309,11 +316,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// channel_id is required unless an inline channel object is provided
 		hasInlineChannel := dto.Channel != nil && dto.Channel.HardwareType != nil
 		if dto.ChannelID == nil && !hasInlineChannel {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "channel_id or channel is required"})
+			Error(c, http.StatusBadRequest, "channel_id or channel is required")
 			return
 		}
 		if dto.Name == nil || dto.NodeID == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name and node_id are required"})
+			Error(c, http.StatusBadRequest, "name and node_id are required")
 			return
 		}
 		// Resolve effective device_config_id (0 when absent or explicitly 0)
@@ -374,6 +381,9 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				if chInput.Config != nil {
 					bindingChannel.Config = string(*chInput.Config)
 				}
+				if chInput.BusConfig != nil {
+					bindingChannel.BusConfig = *chInput.BusConfig
+				}
 				if err := validateTransportChannelType(&bindingChannel); err != nil {
 					return err
 				}
@@ -382,8 +392,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", bindingChannel.NodeID).First(&node).Error; err != nil {
 					return err
 				}
-				// Peripheral conflict check only meaningful when bus_config (pin route) is specified.
-				// Inline channel creation from the device wizard may not include bus_config.
+				// Peripheral pin-conflict check runs only when a bus_config (pin
+				// route) is supplied — consistent with handler_node.go channel
+				// updates. The inline wizard path omits bus_config (no route to
+				// validate), so the check is intentionally skipped there; a
+				// caller that supplies bus_config gets the same gate as the
+				// dedicated channel-create path.
 				if bindingChannel.BusConfig != "" {
 					if err := validateChannelPeripheralConflicts(tx, bindingChannel); err != nil {
 						return err
@@ -436,7 +450,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -449,7 +463,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Reload with associations for response
 		db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&dev, dev.ID)
 		SuccessWithCode(c, http.StatusCreated, dev)
-		})
+	})
 
 	// Update edge device (v2.2 path for PUT /devices/:id)
 	v1.PUT("/edge-devices/:id", func(c *gin.Context) {
@@ -469,9 +483,6 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if err := c.ShouldBindJSON(&dto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
 			return
-		}
-		if dto.Type != nil {
-			// Will be validated inside the transaction once we know the effective configID.
 		}
 		var d models.EdgeDevice
 		if err := db.Transaction(func(tx *gorm.DB) error {

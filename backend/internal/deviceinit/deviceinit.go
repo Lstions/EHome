@@ -128,9 +128,9 @@ func fromDriverInitSteps(in []drivers.InitStep) []Step {
 type initFlowStep struct {
 	Name      string `json:"name"`
 	Data      string `json:"data"`       // hex-encoded command bytes
-	ReadSize  uint32 `json:"read_size"`   // expected response length (0 = write-only)
-	TimeoutMs int    `json:"timeout_ms"`  // per-step timeout in milliseconds
-	Role      string `json:"role"`        // semantic tag (e.g. "calib")
+	ReadSize  uint32 `json:"read_size"`  // expected response length (0 = write-only)
+	TimeoutMs int    `json:"timeout_ms"` // per-step timeout in milliseconds
+	Role      string `json:"role"`       // semantic tag (e.g. "calib")
 }
 
 // loadInitFlowFromDB resolves the default DeviceConfig for deviceType and
@@ -312,7 +312,7 @@ func (o *Orchestrator) runReserved(device models.EdgeDevice, nodeID string, stat
 			logger.Warnf("[Init] %s step %s failed: %v", nodeID, step.Name, err)
 			return fmt.Errorf("%s: %w", step.Name, err)
 		}
-		if step.Role == "calib" {
+		if step.Role == "calib" || (step.Role == "" && step.Name == "read_calib") {
 			if err := o.saveCalibData(device, raw); err != nil {
 				return fmt.Errorf("%s calibration: %w", step.Name, err)
 			}

@@ -50,6 +50,10 @@ export interface CreateEdgeDeviceParams {
     hardware_id?: string
     address?: string
     config?: Record<string, unknown>
+    // hex-encoded pin-route payload; the wizard's inline path omits this (no
+    // route to validate), a caller that supplies one gets the backend's
+    // peripheral pin-conflict gate.
+    bus_config?: string
   }
 }
 

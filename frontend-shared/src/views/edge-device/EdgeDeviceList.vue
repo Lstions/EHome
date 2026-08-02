@@ -1099,8 +1099,6 @@ const handleCreate = async () => {
     
     // 根据 parser 的 hardware_types 推断协议类型
     if (!frozenParser) throw new Error('请先选择设备型号')
-    const parserHwTypes = frozenParser.hardware_types || []
-    const protocol = parserHwTypes.includes('uart') ? 'stream' : 'modbus'
     
     // F: inline channel creation — no two-phase commit
     let targetChannel: Channel
@@ -1124,7 +1122,7 @@ const handleCreate = async () => {
         ? { device_config_id: deviceConfigId }
         : { type: frozenParser.id }
 
-      const res = await edgeDeviceApi.create({
+      await edgeDeviceApi.create({
         name: String(frozenDeviceForm.name),
         node_id: String(frozenDeviceForm.node_id!),
         hardware_id: channelPayload.hardware_id,
@@ -1140,9 +1138,11 @@ const handleCreate = async () => {
       if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       // Refresh channel store to pick up the newly-created channel
       await channelStore.fetchChannels(frozenDeviceForm.node_id)
-      // Construct a local targetChannel reference for potential downstream use
-      targetChannel = { ...frozenNewChannel, id: res.id } as Channel
-      channelId = undefined // not used in the inline path
+      // No downstream targetChannel/channelId are needed on the inline path —
+      // the channel was created server-side inside the device-create tx and
+      // is now visible via fetchChannels. Keep targetChannel as the form data
+      // (no id) only to satisfy the existing-channel branch's type contract.
+      targetChannel = { ...frozenNewChannel } as Channel
     } else if (frozenSelectedChannel) {
       channelId = frozenSelectedChannel.id
       targetChannel = frozenSelectedChannel
