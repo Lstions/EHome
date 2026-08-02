@@ -3,7 +3,8 @@ import client from './client'
 
 export interface Channel {
   id?: number
-  node_id: number
+  // 后端 node_id 是物理序列号(string,如 'F0F5BDFFFE02');历史声明为 number 是类型债。
+  node_id: number | string
   name?: string              // 通道名称（后端自动生成，如 "I2C0_0x77"）
   hardware_type: 'uart' | 'i2c' | 'spi' | 'adc'
   hardware_id: string            // "I2C0"

@@ -100,6 +100,7 @@ declare module 'vue' {
     PeripheralControl: typeof import('./components/periph/PeripheralControl.vue')['default']
     PWMChannelRow: typeof import('./components/periph/PWMChannelRow.vue')['default']
     PWMResourceList: typeof import('./components/periph/PWMResourceList.vue')['default']
+    QuickCreateDeviceDialog: typeof import('./components/node/QuickCreateDeviceDialog.vue')['default']
     RealtimeDataList: typeof import('./components/data/RealtimeDataList.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

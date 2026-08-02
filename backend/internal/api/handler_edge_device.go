@@ -160,6 +160,35 @@ func parseHardwareIDUint(s string) uint64 {
 	return 0
 }
 
+// checkDeviceUniqueness guards against two devices of the same model sharing one
+// slave address on a channel. Multi-drop buses (SPI with several CS lines, I2C
+// with several addresses) stay valid because they map to distinct channels or
+// distinct hardware_id values. When hardware_id is empty we fall back to
+// (channel_id, type) so address-less devices are still de-duplicated.
+// excludeID (non-zero) excludes the device being updated from the check.
+func checkDeviceUniqueness(tx *gorm.DB, channelID uint, devType, hardwareID string, excludeID uint) error {
+	addr := strings.TrimSpace(hardwareID)
+	dupQuery := tx.Model(&models.EdgeDevice{}).
+		Where("channel_id = ? AND type = ?", channelID, devType)
+	if addr != "" {
+		dupQuery = dupQuery.Where("hardware_id = ?", addr)
+	}
+	if excludeID != 0 {
+		dupQuery = dupQuery.Where("id <> ?", excludeID)
+	}
+	var dupCount int64
+	if err := dupQuery.Count(&dupCount).Error; err != nil {
+		return err
+	}
+	if dupCount > 0 {
+		if addr != "" {
+			return fmt.Errorf("channel %d already hosts a %q device at address %q", channelID, devType, addr)
+		}
+		return fmt.Errorf("channel %d already hosts a %q device", channelID, devType)
+	}
+	return nil
+}
+
 func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *models.Channel) (models.DeviceConfig, error) {
 	if deviceConfigID == 0 {
 		// 0 = no template; caller resolves type/hardware_types from the driver registry.
@@ -426,6 +455,15 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				dev.Type = devType
 				dev.DeviceConfigID = 0
 			}
+			// Uniqueness guard: the same slave address must not host two devices of the
+			// same model on one channel. Multi-drop buses (e.g. SPI with several CS
+			// lines, I2C with several addresses) stay valid because they map to
+			// distinct channels or distinct hardware_id values. When hardware_id is
+			// empty we fall back to (channel_id, type) so address-less devices are
+			// still de-duplicated.
+			if err := checkDeviceUniqueness(tx, dev.ChannelID, dev.Type, dev.HardwareID, 0); err != nil {
+				return err
+			}
 			// Step 1: Create EdgeDevice (inside transaction)
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
@@ -558,6 +596,22 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			}
 			if dto.Status != nil {
 				updates["status"] = *dto.Status
+			}
+			// Uniqueness guard on update: compute the candidate (channel_id, type,
+			// hardware_id) triple after applying the requested changes, then reject
+			// if it would collide with another device. excludeID = d.ID so the device
+			// does not collide with itself. This closes the bypass where a PUT could
+			// move a device onto a channel/address/type already taken by another.
+			candidateType := d.Type
+			if v, ok := updates["type"]; ok {
+				candidateType, _ = v.(string)
+			}
+			candidateHardwareID := d.HardwareID
+			if dto.HardwareID != nil {
+				candidateHardwareID = *dto.HardwareID
+			}
+			if err := checkDeviceUniqueness(tx, targetChannelID, candidateType, candidateHardwareID, d.ID); err != nil {
+				return err
 			}
 			if err := tx.Model(&d).Updates(updates).Error; err != nil {
 				return err

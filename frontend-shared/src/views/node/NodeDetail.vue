@@ -249,10 +249,16 @@
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span>关联设备</span>
-          <el-button size="small" @click="fetchDevices" :loading="devicesLoading">
-            <el-icon><Refresh /></el-icon>
-            刷新
-          </el-button>
+          <div>
+            <el-button size="small" type="primary" :disabled="!collector?.node_id" @click="showQuickCreate = true">
+              <el-icon><Plus /></el-icon>
+              创建设备
+            </el-button>
+            <el-button size="small" @click="fetchDevices" :loading="devicesLoading">
+              <el-icon><Refresh /></el-icon>
+              刷新
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -391,6 +397,16 @@
       @update:visible="showOTADialog = $event"
     />
 
+    <!-- 快速创建边缘设备对话框(预填节点+通道,无需设备模板) -->
+    <QuickCreateDeviceDialog
+      v-model="showQuickCreate"
+      :node-id="collector?.node_id || ''"
+      :node-name="collector?.name || ''"
+      :channels="channels"
+      :channels-loading="devicesLoading"
+      @created="handleQuickCreated"
+    />
+
     <!-- 系统日志 -->
     <el-card v-if="collector" shadow="hover" style="margin-top: 20px;">
       <template #header>
@@ -406,11 +422,12 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useResponsive } from '@/composables/useResponsive'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Refresh, RefreshRight, Link, Connection, Warning, Edit } from '@element-plus/icons-vue'
+import { Upload, Refresh, RefreshRight, Link, Connection, Warning, Edit, Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelPanel from '@/components/node/ChannelPanel.vue'
+import QuickCreateDeviceDialog from '@/components/node/QuickCreateDeviceDialog.vue'
 import LogPanel from '@/components/node/LogPanel.vue'
 import { nodeApi, type OTARecord } from '@/api/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
@@ -445,6 +462,7 @@ const devicesLoading = ref(true)
 const otaHistoryLoading = ref(true)
 const syncingConfig = ref(false)
 const showOTADialog = ref(false)
+const showQuickCreate = ref(false)
 const pinging = ref(false)
 const busConfigPanelRef = ref<any>(null)
 
@@ -620,6 +638,9 @@ const fetchCollectorDetail = async () => {
     const result = await nodeStore.fetchDetail(id, true)
     if (sequence !== collectorDetailSequence || route.params.id !== id) return
     collector.value = result
+    // 序列号就绪后按序列号重拉设备/通道(onMounted 时 collector 未加载,
+    // fetchDevices 只能先用数字主键,查不到数据)。
+    if (collector.value?.node_id) void fetchDevices()
     // 自动测量延迟（如果在线且无延迟数据）
     if (collector.value?.status === 'online' && (!collector.value.ping_latency_ms || collector.value.ping_latency_ms <= 0)) {
       handlePing()
@@ -628,6 +649,9 @@ const fetchCollectorDetail = async () => {
     if (sequence === collectorDetailSequence) ElMessage.error('获取节点详情失败')
   } finally {
     if (sequence === collectorDetailSequence) loading.value = false
+    // R3: collector 加载失败(无序列号)时,关联设备区不能一直 loading——
+    // fetchDevices 现在只由上方 :642 在序列号就绪后触发,这里兜底关 loading。
+    if (!collector.value?.node_id) devicesLoading.value = false
   }
 }
 
@@ -638,10 +662,14 @@ const fetchDevices = async () => {
   const sequence = ++devicesRequestSequence
   devicesLoading.value = true
   try {
-    const params = { node_id: id, page: 1, page_size: 100 }
+    // 后端 node_id 是物理序列号(如 'F0F5BDFFFE02'),不是数字主键。
+    // route.params.id 是数字主键,需用 collector.node_id(序列号)查询,
+    // 否则设备/通道列表都查不到(getChannelForDevice 按 channel.id 匹配,不受影响)。
+    const serial = collector.value?.node_id || id
+    const params = { node_id: serial, page: 1, page_size: 100 }
     const [, channelRes] = await Promise.all([
       edgeDeviceStore.fetchList(params, true),
-      channelApi.getList(id)
+      channelApi.getList(serial)
     ])
     if (sequence !== devicesRequestSequence || route.params.id !== id) return
     devices.value = edgeDeviceStore.getCachedList(params)?.items || []
@@ -657,6 +685,12 @@ const fetchDevices = async () => {
   } finally {
     if (sequence === devicesRequestSequence) devicesLoading.value = false
   }
+}
+
+// 快速创建成功: 刷新设备列表(channel store 无需变,通道是已有的)
+const handleQuickCreated = async () => {
+  edgeDeviceStore.invalidateLists()
+  await fetchDevices()
 }
 
 const handleOTASuccess = () => {
@@ -864,15 +898,15 @@ watch(() => route.params.id, (newId, oldId) => {
   collector.value = null
   devices.value = []
   channels.value = []
+  // R3: fetchDevices 不再单独调——collector 序列号就绪后由 fetchCollectorDetail
+  // 内部回调触发,避免用数字主键的无效首次查询(必为空 + 闪烁)。
   void fetchCollectorDetail()
-  void fetchDevices()
   void fetchOTAHistory()
   void loadDmaChannels()
 })
 
 onMounted(() => {
   fetchCollectorDetail()
-  fetchDevices()
   fetchOTAHistory()
   loadDmaChannels()
 

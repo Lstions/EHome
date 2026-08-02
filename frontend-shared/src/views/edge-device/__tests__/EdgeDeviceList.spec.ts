@@ -121,4 +121,52 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain('Promise.allSettled(ids.map')
     expect(source).toContain('assertSessionGeneration(sessionGeneration)')
   })
+
+  // P0-1: 选解析器后同步新通道硬件类型到解析器第一个可用总线,
+  // 避免默认 i2c 与 uart 解析器不匹配。
+  it('P0-1: selectParser syncs newChannel.hardware_type to the parser bus', () => {
+    expect(source).toContain('const selectParser = (parser: Parser) => {')
+    expect(source).toContain('const buses = parser.hardware_types || []')
+    expect(source).toContain('if (buses.length > 0 && !buses.includes(newChannel.hardware_type)) {')
+    expect(source).toContain('newChannel.hardware_type = buses[0]')
+  })
+
+  // P0-2: 硬件总线/已有通道过滤对 node_id(string 序列号 vs number)和
+  // hardware_type(后端大写 UART vs 表单小写 uart)做归一化宽松匹配。
+  it('P0-2: bus and existing-channel lookups normalize node_id and hardware_type', () => {
+    expect(source).toContain('const nodeIdStr = String(deviceForm.node_id)')
+    expect(source).toContain("const hwTypeLower = hardwareType.toLowerCase()")
+    expect(source).toContain("String(ch.node_id) === nodeIdStr && (ch.hardware_type || '').toLowerCase() === hwTypeLower")
+    expect(source).toContain("const parserBuses = selectedParser.value!.hardware_types.map(b => b.toLowerCase())")
+    expect(source).toContain("parserBuses.includes((ch.hardware_type || '').toLowerCase())")
+  })
+
+  // P0-3: 步骤指示器标题不折行。
+  it('P0-3: wizard step titles do not wrap', () => {
+    expect(source).toContain('width="760px"')
+    expect(source).toContain('.create-device-dialog :deep(.el-step__title) {')
+    expect(source).toContain('white-space: nowrap;')
+  })
+
+  // P1-1: 编辑模式不走向导——隐藏步骤指示器与前两步,只改基本信息,且不传 type。
+  it('P1-1: edit mode bypasses the wizard and never resubmits type', () => {
+    expect(source).toContain('v-if="!editingDeviceId" :active="createStep"')
+    expect(source).toContain('v-show="!editingDeviceId && createStep === 0"')
+    expect(source).toContain('v-show="!editingDeviceId && createStep === 1"')
+    expect(source).toContain('v-show="editingDeviceId || createStep === 2"')
+    expect(source).toContain('保存修改')
+    // 编辑提交不得携带 type(后端 G1 在 device_config_id>0 时拒绝)
+    const editBlock = source.slice(source.indexOf('if (frozenEditingDeviceId) {'))
+    const updateCall = editBlock.slice(0, editBlock.indexOf('})'))
+    expect(updateCall).not.toContain('type:')
+  })
+
+  // Step2 通道模板 hardware_type 兜底:防 hardware_type 缺失(undefined/null)时
+  // .toUpperCase() 抛 TypeError。带可选链的 ch.hardware_type?.toUpperCase() 是合法的。
+  it('Step2 template guards ch.hardware_type with a fallback before toUpperCase()', () => {
+    expect(source).toContain("(ch.hardware_type || '').toUpperCase()")
+    // 不允许裸的 ch.hardware_type.toUpperCase()(允许可选链 ?. 形式)
+    const bareMatches = source.match(/ch\.hardware_type\.toUpperCase\(\)/g)
+    expect(bareMatches).toBeNull()
+  })
 })

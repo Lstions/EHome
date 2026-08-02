@@ -93,4 +93,27 @@ describe('NodeDetail', () => {
     expect(source).toContain('capText')
     expect(source).toContain('busText')
   })
+
+  // R4/R3: 关联设备/通道按序列号查询,collector 就绪后由回调作为唯一入口重拉,
+  // 不再在挂载时用数字主键做无效首次查询;collector 加载失败兜底关 loading。
+  it('queries related devices/channels by serial node_id only after the collector is ready', () => {
+    // 序列号查询: serial = collector.node_id || id,并传给 fetchList 和 channelApi.getList
+    expect(source).toContain('const serial = collector.value?.node_id || id')
+    expect(source).toContain('const params = { node_id: serial, page: 1, page_size: 100 }')
+    expect(source).toContain('channelApi.getList(serial)')
+    // collector 就绪后由 fetchCollectorDetail 回调重拉(唯一入口)
+    expect(source).toContain('if (collector.value?.node_id) void fetchDevices()')
+    // collector 加载失败兜底关 loading,避免关联设备区一直转圈
+    expect(source).toContain('if (!collector.value?.node_id) devicesLoading.value = false')
+    // R3: onMounted 不再单独调 fetchDevices(避免数字主键无效首查)
+    const mountedBlock = source.slice(source.indexOf('onMounted(() => {'), source.indexOf('onMounted(() => {') + 400)
+    expect(mountedBlock).not.toContain('fetchDevices()')
+  })
+
+  // R1: 创建设备按钮等 collector 序列号就绪才可用,杜绝空序列号提交。
+  it('disables quick-create button until the collector serial is ready', () => {
+    expect(source).toContain(':disabled="!collector?.node_id"')
+    expect(source).toContain('QuickCreateDeviceDialog')
+    expect(source).toContain(':channels-loading="devicesLoading"')
+  })
 })

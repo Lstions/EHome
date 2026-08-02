@@ -1140,16 +1140,16 @@ func TestEdgeDevice_Create_WithInlineChannel(t *testing.T) {
 	// No pre-existing channel — the inline path should create one
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"name":       "InlineChannel",
-		"node_id":    "NODE001",
-		"type":       "bmp280",
+		"name":        "InlineChannel",
+		"node_id":     "NODE001",
+		"type":        "bmp280",
 		"hardware_id": "0x76",
 		"channel": map[string]interface{}{
 			"hardware_type": "i2c",
 			"hardware_id":   "0x76",
 			"config": map[string]interface{}{
-				"interval_ms":  1000,
-				"device_type":  "bmp280",
+				"interval_ms": 1000,
+				"device_type": "bmp280",
 			},
 		},
 	})
@@ -1184,5 +1184,180 @@ func TestEdgeDevice_Create_WithInlineChannel(t *testing.T) {
 	}
 	if ch.NodeID != "NODE001" {
 		t.Errorf("expected node_id NODE001, got %s", ch.NodeID)
+	}
+}
+
+// ==================== Duplicate-device uniqueness guard ====================
+
+// 同一通道(channel_id)+同从机地址(hardware_id)+同型号(type)不可重复;
+// 但同通道不同从机地址(SPI 多 CS / I2C 多地址)允许。
+func TestEdgeDevice_Create_RejectsDuplicateTypeAtSameAddress(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Existing", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "Dup", "node_id": "NODE001", "channel_id": 1,
+		"type": "bmp280", "hardware_id": "0x76",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate channel+hardware_id+type, got %d: %s", w.Code, w.Body.String())
+	}
+	var count int64
+	db.Model(&models.EdgeDevice{}).Where("name = ?", "Dup").Count(&count)
+	if count != 0 {
+		t.Fatalf("duplicate device should not be created, found %d rows", count)
+	}
+}
+
+// 多从机总线: 同通道同型号但不同从机地址是合法的(如 SPI 多 CS、I2C 多地址)。
+func TestEdgeDevice_Create_AllowsSameTypeAtDifferentAddress(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Slave-A", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "Slave-B", "node_id": "NODE001", "channel_id": 1,
+		"type": "bmp280", "hardware_id": "0x77",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for different address on multi-drop bus, got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	if err := db.First(&dev, "name = ?", "Slave-B").Error; err != nil {
+		t.Fatalf("expected Slave-B created on multi-drop bus: %v", err)
+	}
+}
+
+// 无地址设备: hardware_id 为空时按 (channel_id, type) 去重。
+func TestEdgeDevice_Create_RejectsDuplicateTypeWhenAddressEmpty(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Existing", Type: "sn3001_rain", NodeID: "NODE001", ChannelID: 1, HardwareID: "", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "DupNoAddr", "node_id": "NODE001", "channel_id": 1,
+		"type": "sn3001_rain",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate channel+type with empty address, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// 同通道同地址但不同型号是合法的(守卫只按 channel+type+hardware_id 三元组去重,
+// 不同 type 不冲突;此处验证守卫不误伤不同 type)。
+func TestEdgeDevice_Create_AllowsDifferentTypeAtSameAddress(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "TempSensor", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "HumiditySensor", "node_id": "NODE001", "channel_id": 1,
+		"type": "lk_th01", "hardware_id": "0x76",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for different type at same address, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// 纯空格 hardware_id 应走空地址分支(TrimSpace 后为空),与已有空地址同型号设备冲突。
+func TestEdgeDevice_Create_TreatsWhitespaceAddressAsEmpty(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Existing", Type: "sn3001_rain", NodeID: "NODE001", ChannelID: 1, HardwareID: "", Enabled: true})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name": "DupWhitespace", "node_id": "NODE001", "channel_id": 1,
+		"type": "sn3001_rain", "hardware_id": "   ",
+	})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/edge-devices", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for whitespace-only address colliding with empty-address device, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// UPDATE 路径碰撞: PUT 把设备移到另一设备已占的 (channel, type, hardware_id) 应被拒。
+func TestEdgeDevice_Update_RejectsCollisionWithOtherDevice(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "DeviceA", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "DeviceB", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x77", Enabled: true})
+
+	// 把 DeviceB 的地址改成 DeviceA 的 0x76 → 碰撞
+	body, _ := json.Marshal(map[string]interface{}{"hardware_id": "0x76"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/2", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for update colliding with another device, got %d: %s", w.Code, w.Body.String())
+	}
+	// DeviceB 地址不应被改
+	var devB models.EdgeDevice
+	db.First(&devB, 2)
+	if devB.HardwareID != "0x77" {
+		t.Errorf("DeviceB hardware_id should remain 0x77, got %q", devB.HardwareID)
+	}
+}
+
+// UPDATE 自身不碰撞: 重存相同三元组不应误判(excludeID 排除自身)。
+func TestEdgeDevice_Update_AllowsSelfResave(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "DeviceA", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76", Enabled: true})
+
+	// 只改名字,三元组不变 → 不应碰撞自身
+	body, _ := json.Marshal(map[string]interface{}{"name": "RenamedA"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/edge-devices/1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for self-resave (no collision with self), got %d: %s", w.Code, w.Body.String())
+	}
+	var dev models.EdgeDevice
+	db.First(&dev, 1)
+	if dev.Name != "RenamedA" {
+		t.Errorf("expected name RenamedA, got %q", dev.Name)
 	}
 }

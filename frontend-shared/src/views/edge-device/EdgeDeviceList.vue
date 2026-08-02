@@ -273,22 +273,22 @@
     <el-dialog
       v-model="showCreateDialog"
       :title="editingDeviceId ? '编辑边缘设备' : '创建边缘设备'"
-      width="680px"
+      width="760px"
       :close-on-click-modal="false"
       :close-on-press-escape="!submitting"
       :show-close="!submitting"
       :before-close="handleCreateDialogClose"
       class="create-device-dialog"
     >
-      <!-- 步骤指示器 -->
-      <el-steps :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
+      <!-- 步骤指示器(仅创建模式;编辑模式只改基本信息,不走向导) -->
+      <el-steps v-if="!editingDeviceId" :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
         <el-step title="选择设备型号" />
         <el-step title="选择节点 & 通道" />
         <el-step title="基本信息" />
       </el-steps>
-      
-      <!-- Step 1: 选择设备型号 -->
-      <div v-show="createStep === 0">
+
+      <!-- Step 1: 选择设备型号(仅创建模式) -->
+      <div v-show="!editingDeviceId && createStep === 0">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
           <span>选择此设备使用的<strong>设备型号</strong>，设备型号决定了原始字节到物理量的解析方式</span>
@@ -357,8 +357,8 @@
         </div>
       </div>
       
-      <!-- Step 2: 选择/创建通道 -->
-      <div v-show="createStep === 1">
+      <!-- Step 2: 选择/创建通道(仅创建模式) -->
+      <div v-show="!editingDeviceId && createStep === 1">
         <el-form :model="deviceForm" :rules="deviceRules">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
@@ -395,7 +395,7 @@
                 @click="selectChannel(ch)"
               >
                 <code>{{ ch.name || (ch.hardware_type?.toUpperCase() + ' ' + ch.hardware_id) }}</code>
-                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ ch.hardware_type.toUpperCase() }}</el-tag>
+                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ (ch.hardware_type || '').toUpperCase() }}</el-tag>
                 <span class="channel-bus-id">{{ ch.hardware_id }}</span>
                 <div v-if="selectedChannel?.id === ch.id" class="channel-selected-badge">
                   <el-icon><Check /></el-icon>
@@ -443,25 +443,25 @@
         </el-form>
       </div>
       
-      <!-- Step 3: 基本信息 -->
-      <div v-show="createStep === 2">
+      <!-- Step 3: 基本信息(创建模式 createStep===2;编辑模式直接显示) -->
+      <div v-show="editingDeviceId || createStep === 2">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
-          <span>填写设备<strong>基本信息</strong>并确认配置</span>
+          <span>{{ editingDeviceId ? '修改设备基本信息(设备型号与通道绑定不可在编辑中变更)' : '填写设备基本信息并确认配置' }}</span>
         </div>
-        
+
         <el-form ref="deviceFormRef" :model="deviceForm" :rules="deviceRules" label-position="top">
           <el-form-item label="边缘设备名称" prop="name">
             <el-input v-model="deviceForm.name" placeholder="请输入边缘设备名称" />
           </el-form-item>
-          
+
           <el-form-item label="采集间隔 (ms)" prop="interval_ms">
             <el-input-number v-model="deviceForm.interval_ms" :min="100" :max="3600000" :step="100" />
           </el-form-item>
         </el-form>
-        
-        <!-- 配置确认卡片 -->
-        <div class="confirm-card">
+
+        <!-- 配置确认卡片(仅创建模式;编辑模式无解析器/通道选择上下文) -->
+        <div class="confirm-card" v-if="!editingDeviceId">
           <h4>配置确认</h4>
           <div class="confirm-items">
             <div class="confirm-item">
@@ -489,14 +489,19 @@
           </div>
         </div>
       </div>
-      
+
       <template #footer>
-        <el-button v-if="createStep > 0" @click="createStep--">上一步</el-button>
-        <el-button v-if="createStep < 2" type="primary" :disabled="!canGoNext" @click="createStep++">
-          下一步
-        </el-button>
-        <el-button v-if="createStep === 2" type="primary" :loading="submitting" @click="handleCreate">
-          创建边缘设备
+        <template v-if="!editingDeviceId">
+          <el-button v-if="createStep > 0" @click="createStep--">上一步</el-button>
+          <el-button v-if="createStep < 2" type="primary" :disabled="!canGoNext" @click="createStep++">
+            下一步
+          </el-button>
+          <el-button v-if="createStep === 2" type="primary" :loading="submitting" @click="handleCreate">
+            创建边缘设备
+          </el-button>
+        </template>
+        <el-button v-else type="primary" :loading="submitting" @click="handleCreate">
+          保存修改
         </el-button>
       </template>
     </el-dialog>
@@ -777,11 +782,17 @@ const updateStats = () => {
 // 获取可用总线（从该节点的已有通道中提取，fallback 到默认选项）
 const availableBusesForType = (hardwareType: string): string[] => {
   if (!deviceForm.node_id) return []
+  // P0-2: node_id / hardware_type 比较归一化——channel.node_id 可能是
+  // string(设备序列号如 'F0F5BDFFFE02')也可能是 number;channel.hardware_type
+  // 后端存大写 'UART',表单是小写 'uart'。两者都需宽松匹配,否则 filter 空导致
+  // 硬件ID下拉无选项且无 fallback。
+  const nodeIdStr = String(deviceForm.node_id)
+  const hwTypeLower = hardwareType.toLowerCase()
   const collectorChannels = channelStore.channels.filter(
-    ch => ch?.node_id === deviceForm.node_id && ch.hardware_type === hardwareType
+    ch => ch && String(ch.node_id) === nodeIdStr && (ch.hardware_type || '').toLowerCase() === hwTypeLower
   )
   // 提取已有的 hardware_id（如 I2C0, UART1），去重
-  const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))]
+  const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))].filter(Boolean)
   // 如果已有总线为空（该节点还没有任何此类通道），提供默认选项
   if (buses.length === 0) {
     switch (hardwareType) {
@@ -809,9 +820,11 @@ const selectedParserBusTypes = computed(() => {
 // 已有通道列表（按节点和解析器总线类型过滤）
 const existingChannels = computed(() => {
   if (!selectedParser.value) return []
-  return channelStore.channels.filter(ch => 
-    ch?.node_id === deviceForm.node_id &&
-    selectedParser.value!.hardware_types.includes(ch.hardware_type)
+  const nodeIdStr = String(deviceForm.node_id ?? '')
+  const parserBuses = selectedParser.value!.hardware_types.map(b => b.toLowerCase())
+  return channelStore.channels.filter(ch =>
+    ch && String(ch.node_id) === nodeIdStr &&
+    parserBuses.includes((ch.hardware_type || '').toLowerCase())
   )
 })
 
@@ -841,6 +854,13 @@ const canGoNext = computed(() => {
 const selectParser = (parser: Parser) => {
   selectedParser.value = parser
   selectedChannel.value = null
+  // P0-1: 同步新通道硬件类型到解析器第一个可用总线,避免默认值 i2c 与
+  // 解析器 hardware_types 不匹配(如选 uart 解析器但表单默认 i2c)。
+  const buses = parser.hardware_types || []
+  if (buses.length > 0 && !buses.includes(newChannel.hardware_type)) {
+    newChannel.hardware_type = buses[0]
+    newChannel.hardware_id = ''
+  }
 }
 
 const selectChannel = (ch: Channel) => {
@@ -1075,12 +1095,12 @@ const handleCreate = async () => {
     const frozenChannelTab = channelTab.value
     const frozenEditingDeviceId = editingDeviceId.value
 
-    // 编辑模式 — 字段对齐后端 UpdateDTO: name/type/enabled/interval_ms/hardware_id/node_id/channel_id
+    // 编辑模式 — 字段对齐后端 UpdateDTO: name/enabled/interval_ms/hardware_id/node_id/channel_id
+    // 不传 type: 设备型号绑定在编辑中不可变,且后端 G1 在 device_config_id>0 时拒绝 type。
     if (frozenEditingDeviceId) {
       await edgeDeviceApi.update(frozenEditingDeviceId, {
         name: frozenDeviceForm.name,
         node_id: String(frozenDeviceForm.node_id!),
-        type: frozenDeviceForm.device_type,
         hardware_id: frozenDeviceForm.hardware_id,
         interval_ms: frozenDeviceForm.interval_ms,
       })
@@ -1590,6 +1610,12 @@ code.fact-value {
 /* 对话框 */
 .create-device-dialog :deep(.el-dialog__body) {
   padding-top: 10px;
+}
+
+/* P0-3: 步骤指示器标题不折行——"选择节点 & 通道"含空格和 & 在窄 dialog
+   下会 wrap 成两行,破坏对齐。强制单行。 */
+.create-device-dialog :deep(.el-step__title) {
+  white-space: nowrap;
 }
 
 /* 向导相关样式 */
