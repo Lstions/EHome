@@ -43,6 +43,18 @@ export interface CreateEdgeDeviceParams {
   enabled?: boolean
   interval_ms?: number
   device_config_id?: number
+  // F: inline channel creation — when channel_id is 0/absent and channel is
+  // provided, the backend creates the channel inside the same transaction.
+  channel?: {
+    hardware_type: string
+    hardware_id?: string
+    address?: string
+    config?: Record<string, unknown>
+    // hex-encoded pin-route payload; the wizard's inline path omits this (no
+    // route to validate), a caller that supplies one gets the backend's
+    // peripheral pin-conflict gate.
+    bus_config?: string
+  }
 }
 
 // ============================================================

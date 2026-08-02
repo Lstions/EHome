@@ -86,7 +86,7 @@ type EdgeDevice struct {
 	Name             string          `gorm:"size:64;not null" json:"name"`
 	NodeID           string          `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2 显式 FK (was implicit via Channel)
 	ChannelID        uint            `gorm:"index;not null" json:"channel_id"`                              // 保留
-	DeviceConfigID   uint            `gorm:"index;not null" json:"device_config_id"`                        // v2.2 关键新增 FK
+	DeviceConfigID   uint            `gorm:"index" json:"device_config_id"`                                  // v2.2 FK; 0 = no template (driver fallback)
 	HardwareID       string          `gorm:"size:16;default:''" json:"hardware_id"`                         // v2.2 新增 (从 Channel 移过来)
 	IntervalMs       int             `gorm:"default:5000" json:"interval_ms"`
 	Enabled          bool            `gorm:"default:true" json:"enabled"`

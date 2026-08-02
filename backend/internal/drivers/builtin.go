@@ -760,4 +760,11 @@ func RegisterBuiltInDriversWithParsers(registry *Registry, parserConfigs map[str
 
 	// Techfine GB3024 inverter — ASCII protocol, no ConfigParser
 	registry.Register(&TechfineInverterDriver{})
+
+	// Generic protocol-level drivers — replace the legacy
+	// getTemplateParamsFromDeviceConfig fallback in the API layer.
+	// They only provide CommandTemplates; ParseData fails closed so
+	// device-specific parsing still routes through ConfigParser / dedicated drivers.
+	registry.Register(&GenericModbusDriver{})
+	registry.Register(&GenericI2CDriver{})
 }

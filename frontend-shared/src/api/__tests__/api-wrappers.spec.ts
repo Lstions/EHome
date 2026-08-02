@@ -991,6 +991,18 @@ import { parserApi } from '../parser'
 describe('parserApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
+  it('getList requests status=active filter', async () => {
+    mockClient.get.mockResolvedValue({
+      data: {
+        list: [
+          { id: 42, type: 'bmp280', display_name: 'BMP280', oem: 'Bosch', category: 'temp', hardware_types: ['i2c'], measure_type: ['temperature'], description: 'desc' }
+        ]
+      }
+    })
+    await parserApi.getList()
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/device-configs', { params: { status: 'active' } })
+  })
+
   it('getList normalizes drivers', async () => {
     mockClient.get.mockResolvedValue({
       data: {

@@ -1183,8 +1183,8 @@ func TestDeviceConfig_Tree_UsesInjectedDriverRegistry(t *testing.T) {
 	if !strings.Contains(body, `"name":"蓝控"`) || !strings.Contains(body, `"type":"lk_th01"`) {
 		t.Fatalf("injected LK-TH01 metadata is missing: %s", body)
 	}
-	if got := strings.Count(body, `"type":`); got != 7 {
-		t.Fatalf("injected registry driver count=%d, want 7: %s", got, body)
+	if got := strings.Count(body, `"type":`); got != 9 {
+		t.Fatalf("injected registry driver count=%d, want 9: %s", got, body)
 	}
 }
 

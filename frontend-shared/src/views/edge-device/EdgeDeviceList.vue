@@ -282,16 +282,16 @@
     >
       <!-- 步骤指示器 -->
       <el-steps :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
-        <el-step title="选择解析器" />
+        <el-step title="选择设备型号" />
         <el-step title="选择节点 & 通道" />
         <el-step title="基本信息" />
       </el-steps>
       
-      <!-- Step 1: 选择解析器 -->
+      <!-- Step 1: 选择设备型号 -->
       <div v-show="createStep === 0">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
-          <span>选择此设备使用的<strong>解析器</strong>，解析器负责将原始字节转换为物理量</span>
+          <span>选择此设备使用的<strong>设备型号</strong>，设备型号决定了原始字节到物理量的解析方式</span>
         </div>
 
         <!-- 使用配置模板（可选） -->
@@ -1098,61 +1098,88 @@ const handleCreate = async () => {
     let channelId: number | undefined
     
     // 根据 parser 的 hardware_types 推断协议类型
-    if (!frozenParser) throw new Error('请先选择解析器')
-    const parserHwTypes = frozenParser.hardware_types || []
-    const protocol = parserHwTypes.includes('uart') ? 'stream' : 'modbus'
+    if (!frozenParser) throw new Error('请先选择设备型号')
     
-    // 如果选了"创建新通道"，先创建通道
+    // F: inline channel creation — no two-phase commit
     let targetChannel: Channel
     if (frozenChannelTab === 'create') {
       const address = frozenNewChannel.hardware_type === 'spi'
         ? frozenNewChannel.spi_cs.toString()
         : frozenNewChannel.address
-      
-      const ch = await channelStore.createChannel({
-        node_id: frozenDeviceForm.node_id!,
+
+      const channelPayload = {
         hardware_type: frozenNewChannel.hardware_type as any,
         hardware_id: frozenNewChannel.hardware_id,
         address: address || undefined,
-        status: 'active',
-        config: { 
+        config: {
           interval_ms: frozenNewChannel.interval_ms,
-          device_type: frozenParser.id  // 传递 device_type 以便模板构建
-        }
-      }) as Channel
+          device_type: frozenParser.id,  // 传递 device_type 以便模板构建
+        },
+      }
+
+      // F: 传 channel 子对象给后端,事务内创建通道+设备,消除孤儿通道风险
+      const baseParams = deviceConfigId
+        ? { device_config_id: deviceConfigId }
+        : { type: frozenParser.id }
+
+      await edgeDeviceApi.create({
+        name: String(frozenDeviceForm.name),
+        node_id: String(frozenDeviceForm.node_id!),
+        hardware_id: channelPayload.hardware_id,
+        ...baseParams,
+        channel: {
+          hardware_type: channelPayload.hardware_type,
+          hardware_id: channelPayload.hardware_id,
+          address: address || undefined,
+          config: channelPayload.config,
+        },
+      })
       assertSessionGeneration(sessionGeneration)
       if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
-      channelId = ch.id
-      targetChannel = ch
+      // Refresh channel store to pick up the newly-created channel
+      await channelStore.fetchChannels(frozenDeviceForm.node_id)
+      // No downstream targetChannel/channelId are needed on the inline path —
+      // the channel was created server-side inside the device-create tx and
+      // is now visible via fetchChannels. Keep targetChannel as the form data
+      // (no id) only to satisfy the existing-channel branch's type contract.
+      targetChannel = { ...frozenNewChannel } as Channel
     } else if (frozenSelectedChannel) {
       channelId = frozenSelectedChannel.id
       targetChannel = frozenSelectedChannel
-      
+
       // 已有通道场景：如果 channel.config 没有 device_type，补上
       if (!targetChannel.config?.device_type && targetChannel.id) {
         await channelStore.updateChannel(targetChannel.id, {
           config: JSON.stringify({
             ...targetChannel.config,
-            device_type: frozenParser.id
-          })
+            device_type: frozenParser.id,
+          }),
         })
         assertSessionGeneration(sessionGeneration)
         if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       }
+
+      // 创建边缘设备: 根据 device_config_id 是否存在决定传 device_config_id 还是 type
+      if (deviceConfigId) {
+        await edgeDeviceApi.create({
+          name: String(frozenDeviceForm.name),
+          node_id: String(frozenDeviceForm.node_id!),
+          channel_id: channelId!,
+          hardware_id: targetChannel.hardware_id,
+          device_config_id: deviceConfigId,
+        })
+      } else {
+        await edgeDeviceApi.create({
+          name: String(frozenDeviceForm.name),
+          node_id: String(frozenDeviceForm.node_id!),
+          channel_id: channelId!,
+          type: frozenParser.id,
+          hardware_id: targetChannel.hardware_id,
+        })
+      }
     } else {
       throw new Error('请先选择或创建通道')
     }
-    
-    // 创建边缘设备 (后端要求通过 device_config_id 绑定设备配置，type 由后端推导)
-    if (!deviceConfigId) throw new Error('所选解析器没有对应的设备配置，请刷新页面后重试')
-    await edgeDeviceApi.create({
-      name: String(frozenDeviceForm.name),
-      node_id: String(frozenDeviceForm.node_id!),
-      channel_id: channelId!,
-      type: frozenParser.id,
-      hardware_id: targetChannel.hardware_id,
-      device_config_id: deviceConfigId,
-    })
     assertSessionGeneration(sessionGeneration)
     if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
     edgeDeviceStore.invalidateLists()

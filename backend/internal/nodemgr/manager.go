@@ -98,7 +98,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		otaMgr:          otaMgr,
 		hashMgr:         NewConfigHashManager(),
 		pendingWrite:    pendingwrite.NewManager(mqttClient, db),
-		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient),
+		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient, driverRegistry),
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
 		driverRegistry:  driverRegistry,
@@ -327,6 +327,14 @@ func (m *Manager) triggerDeviceInit(nodeID string, deviceID string) {
 	}
 }
 
+// peripheralExcludedTypes lists channel types that represent standalone
+// peripheral resources (GPIO/PWM) rather than bus channels. The numeric
+// ESP32 enum values "4"/"6" are retained for backward compatibility with
+// legacy stored rows: MigrateGPIOChannels / RetireLegacyPWMChannels disable
+// (do not delete) such rows at startup, so pre-migration numeric values can
+// still appear in Channel.hardware_type / bus_type.
+var peripheralExcludedTypes = []string{"GPIO", "PWM", "4", "6"}
+
 // loadInitializableEdgeDevices applies the same fail-closed transport contract as API init.
 func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevice, error) {
 	var devices []models.EdgeDevice
@@ -335,8 +343,8 @@ func (m *Manager) loadInitializableEdgeDevices(nodeID string) ([]models.EdgeDevi
 		Where("edge_devices.enabled = ?", true).
 		Where("channels.enabled = ?", true).
 		Where("channels.node_id = edge_devices.node_id").
-		Where("UPPER(TRIM(channels.hardware_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
-		Where("UPPER(TRIM(channels.bus_type)) NOT IN ?", []string{"GPIO", "PWM", "4", "6"}).
+		Where("UPPER(TRIM(channels.hardware_type)) NOT IN ?", peripheralExcludedTypes).
+		Where("UPPER(TRIM(channels.bus_type)) NOT IN ?", peripheralExcludedTypes).
 		Find(&devices).Error
 	return devices, err
 }

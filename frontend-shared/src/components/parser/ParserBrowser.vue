@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="选择解析器"
+    title="选择设备型号"
     width="720px"
     :close-on-click-modal="true"
     class="parser-browser-dialog"

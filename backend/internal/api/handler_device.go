@@ -24,6 +24,14 @@ import (
 
 var errInactiveDeviceConfigDefault = errors.New("only an active device config can be default")
 
+// peripheralExcludedTypes lists channel types that represent standalone
+// peripheral resources (GPIO/PWM) rather than bus channels. The numeric
+// ESP32 enum values "4"/"6" are retained for backward compatibility with
+// legacy stored rows: MigrateGPIOChannels / RetireLegacyPWMChannels disable
+// (do not delete) such rows at startup, so pre-migration numeric values can
+// still appear in Channel.hardware_type / bus_type.
+var peripheralExcludedTypes = []string{"GPIO", "PWM", "4", "6"}
+
 func isPeripheralChannelType(value string) bool {
 	switch strings.ToUpper(strings.TrimSpace(value)) {
 	case "GPIO", "4", "PWM", "6":
