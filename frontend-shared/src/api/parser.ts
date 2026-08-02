@@ -43,7 +43,7 @@ export const parserApi = {
    * 获取所有解析器列表
    */
   async getList(): Promise<Parser[]> {
-    const response = await client.get('/api/v1/device-configs')
+    const response = await client.get('/api/v1/device-configs', { params: { status: 'active' } })
     // Backend returns {code, data: {list: [...], total, ...}, message}
     const envelope = response as any
     const drivers = envelope.data?.list || envelope.data || []

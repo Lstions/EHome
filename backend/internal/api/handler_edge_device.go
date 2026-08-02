@@ -497,6 +497,23 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 
+		// G3K: devices without an init sequence must not be marked "running"
+		// with a 0/N progress bar. Short-circuit to "completed"/"not_required"
+		// before touching the orchestrator's reservation cache.
+		steps := orchestrator.GetInitSequence(dev.Type)
+		if len(steps) == 0 {
+			db.Model(&dev).Updates(map[string]interface{}{
+				"init_state":       "completed",
+				"init_last_step":   0,
+				"init_total_steps": 0,
+			})
+			c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+				"id": id, "status": "not_required", "message": "no init sequence for this device type",
+				"device_type": dev.Type, "device_id": deviceID,
+			}})
+			return
+		}
+
 		// Reserve and trigger through the orchestrator's single entry point. This
 		// closes the API path's race with automatic online initialization.
 		if !orchestrator.InitIfNeeded(dev, deviceID) {
@@ -508,7 +525,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		db.Model(&dev).Updates(map[string]interface{}{
 			"init_state":       "running",
 			"init_last_step":   0,
-			"init_total_steps": len(orchestrator.GetInitSequence(dev.Type)),
+			"init_total_steps": len(steps),
 		})
 
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{

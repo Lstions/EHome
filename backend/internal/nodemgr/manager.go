@@ -98,7 +98,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		otaMgr:          otaMgr,
 		hashMgr:         NewConfigHashManager(),
 		pendingWrite:    pendingwrite.NewManager(mqttClient, db),
-		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient),
+		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient, driverRegistry),
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
 		driverRegistry:  driverRegistry,

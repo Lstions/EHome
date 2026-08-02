@@ -1,5 +1,7 @@
 package drivers
 
+import "time"
+
 // CommandTemplate defines a protocol command exposed by a device driver.
 // Each driver can provide a list of command templates.
 //
@@ -24,4 +26,23 @@ type CommandTemplate struct {
 // to expose their protocol commands as templates.
 type CommandTemplateProvider interface {
 	GetCommandTemplates() []CommandTemplate
+}
+
+// InitStep describes a single initialization step for a device driver.
+// Role is a stable semantic tag (e.g. "calib") that callers use to dispatch
+// side-effects (calibration persistence) instead of matching on step.Name,
+// which is driver-specific and fragile.
+type InitStep struct {
+	Name     string
+	Data     []byte
+	ReadSize uint32
+	Timeout  time.Duration
+	Role     string
+}
+
+// InitSequenceProvider is an optional interface that drivers can implement to
+// declare their device's initialization sequence. When implemented, this takes
+// priority over DeviceConfig.InitFlow JSONB and the hardcoded fallback switch.
+type InitSequenceProvider interface {
+	GetInitSequence() []InitStep
 }

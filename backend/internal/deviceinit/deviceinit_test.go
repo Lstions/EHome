@@ -24,7 +24,7 @@ func testDB(t *testing.T) *gorm.DB {
 	return db
 }
 func TestGetInitSequenceBMP280IsRuntimeConsumable(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	s := o.GetInitSequence("bmp280")
 	if len(s) != 5 || s[0].Name != "reset" || s[0].Data[0] != 0xE0 || s[2].Name != "read_calib" || s[2].ReadSize != 24 {
 		t.Fatalf("unexpected BMP280 sequence: %#v", s)
@@ -43,7 +43,7 @@ func TestInitRequestIDsAreGloballyUniqueAndNeverZero(t *testing.T) {
 }
 func TestCalibrationIsUpsertedPerEdgeDevice(t *testing.T) {
 	db := testDB(t)
-	o := NewOrchestrator(db, nil)
+	o := NewOrchestrator(db, nil, nil)
 	data := make([]byte, 24)
 	data[0] = 1
 	a := models.EdgeDevice{ID: 1, NodeID: "node", Type: "bmp280"}
@@ -63,7 +63,7 @@ func TestCalibrationIsUpsertedPerEdgeDevice(t *testing.T) {
 }
 func TestInvalidCalibrationIsNotPersisted(t *testing.T) {
 	db := testDB(t)
-	o := NewOrchestrator(db, nil)
+	o := NewOrchestrator(db, nil, nil)
 	o.saveCalibData(models.EdgeDevice{ID: 1, NodeID: "n", Type: "bmp280"}, make([]byte, 23))
 	var n int64
 	db.Model(&models.CalibrationCache{}).Count(&n)
@@ -74,7 +74,7 @@ func TestInvalidCalibrationIsNotPersisted(t *testing.T) {
 
 func TestCalibrationLengthContentAndDBFailuresAreErrors(t *testing.T) {
 	db := testDB(t)
-	o := NewOrchestrator(db, nil)
+	o := NewOrchestrator(db, nil, nil)
 	device := models.EdgeDevice{ID: 1, NodeID: "n", Type: "bmp280"}
 	if err := o.saveCalibData(device, make([]byte, 23)); err == nil {
 		t.Fatal("23-byte calibration must fail")
@@ -132,7 +132,7 @@ func (p *blockingPublisher) Publish(string, []byte) error {
 
 func TestInitFailsFastAndCanBeRetried(t *testing.T) {
 	p := &failingPublisher{}
-	o := NewOrchestrator(nil, p)
+	o := NewOrchestrator(nil, p, nil)
 	device := models.EdgeDevice{ID: 10, NodeID: "node", Type: "bmp280"}
 	if err := o.InitEdgeDevice(device, "node"); err == nil {
 		t.Fatal("first step failure must fail init")
@@ -154,7 +154,7 @@ func TestConcurrentInitIfNeededReservesExactlyOnce(t *testing.T) {
 		release:  make(chan struct{}),
 		finished: make(chan struct{}),
 	}
-	o := NewOrchestrator(nil, p)
+	o := NewOrchestrator(nil, p, nil)
 	device := models.EdgeDevice{ID: 11, NodeID: "node", Type: "unknown"}
 	// Unknown types fail closed before reservation.
 	if o.InitIfNeeded(device, "node") {
@@ -194,7 +194,7 @@ func TestConcurrentInitIfNeededReservesExactlyOnce(t *testing.T) {
 	}
 }
 func TestInitStateIsEdgeDeviceScoped(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	o.cache[1] = &InitState{Completed: true}
 	o.cache[2] = &InitState{Completed: false, InProgress: true}
 	if !o.IsInitialized(1) || o.IsInitialized(2) || !o.HasActiveInit(2) {
@@ -206,7 +206,7 @@ func TestInitStateIsEdgeDeviceScoped(t *testing.T) {
 	}
 }
 func TestInitIfNeededRejectsUnknownType(t *testing.T) {
-	if NewOrchestrator(nil, nil).InitIfNeeded(models.EdgeDevice{ID: 1, Type: "unknown"}, "node") {
+	if NewOrchestrator(nil, nil, nil).InitIfNeeded(models.EdgeDevice{ID: 1, Type: "unknown"}, "node") {
 		t.Fatal("unknown driver init started")
 	}
 }
@@ -224,7 +224,7 @@ func (p *capturePublisher) Publish(_ string, payload []byte) error {
 
 func TestWriteCmdFrameCarriesEdgeDeviceID(t *testing.T) {
 	p := &capturePublisher{published: make(chan struct{})}
-	o := NewOrchestrator(nil, p)
+	o := NewOrchestrator(nil, p, nil)
 	done := make(chan error, 1)
 	go func() { _, err := o.sendAndWait("node", 42, "read", 7, 99, []byte{0xD0}, 1, time.Second); done <- err }()
 	<-p.published
@@ -255,7 +255,7 @@ func TestWriteCmdFrameCarriesEdgeDeviceID(t *testing.T) {
 }
 
 func TestDataReportAckRequiresExactPendingEdgeDevice(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	first, second := make(chan pendingResult, 1), make(chan pendingResult, 1)
 	o.pendingResp[700] = pendingResponse{nodeID: "node", edgeDeviceID: 9, stepName: "read_calib", responseKind: responseData, expectedReadSize: 1, response: first}
 	o.pendingResp[701] = pendingResponse{nodeID: "node", edgeDeviceID: 10, stepName: "read_calib", responseKind: responseData, expectedReadSize: 1, response: second}
@@ -278,7 +278,7 @@ func TestDataReportAckRequiresExactPendingEdgeDevice(t *testing.T) {
 }
 
 func TestWriteResponseCompletesOnlyWriteOnlyPendingStep(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	writeCh, readCh := make(chan pendingResult, 1), make(chan pendingResult, 1)
 	o.pendingResp[1] = pendingResponse{nodeID: "node", edgeDeviceID: 1, stepName: "reset", responseKind: responseWrite, response: writeCh}
 	o.pendingResp[2] = pendingResponse{nodeID: "node", edgeDeviceID: 1, stepName: "read_chip_id", responseKind: responseData, expectedReadSize: 1, response: readCh}
@@ -295,7 +295,7 @@ func TestWriteResponseCompletesOnlyWriteOnlyPendingStep(t *testing.T) {
 }
 
 func TestDataReportErrorsAndLengthFailFast(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	result := make(chan pendingResult, 1)
 	o.pendingResp[3] = pendingResponse{nodeID: "node-a", edgeDeviceID: 7, responseKind: responseData, expectedReadSize: 2, response: result}
 	o.HandleDataReportAck("node-b", 7, 3, 0, []byte{1, 2})
@@ -317,7 +317,7 @@ func TestDataReportErrorsAndLengthFailFast(t *testing.T) {
 }
 
 func TestWriteFailureRoutesToReadAndWritePending(t *testing.T) {
-	o := NewOrchestrator(nil, nil)
+	o := NewOrchestrator(nil, nil, nil)
 	write, read := make(chan pendingResult, 1), make(chan pendingResult, 1)
 	o.pendingResp[5] = pendingResponse{nodeID: "node", responseKind: responseWrite, response: write}
 	o.pendingResp[6] = pendingResponse{nodeID: "node", responseKind: responseData, expectedReadSize: 1, response: read}
