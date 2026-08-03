@@ -65,6 +65,8 @@ var allModels = []interface{}{
 	// v3.0: GPIO/PWM peripheral control models
 	&models.GPIOConfig{},
 	&models.PWMConfig{},
+	// 数据生命周期 P0: 逻辑设备身份
+	&models.LogicalDevice{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.
