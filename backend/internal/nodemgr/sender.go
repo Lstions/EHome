@@ -418,8 +418,26 @@ func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 // SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.
 // The decision carries sync_id, epoch, manifest_id, and reason from SyncGate.
 // ProtocolVersion >= 2.3 uses field 9 (edge_device_groups); older versions use field 3+4.
+//
+// F2: The whole "reconcile → snapshot read → hash → encode" pipeline runs inside
+// a single REPEATABLE READ transaction, so the manifestID written into field 1 and
+// the encoded bytes (field 3/4/9/11/12) always come from the same snapshot. MQTT
+// publish happens AFTER commit to keep the transaction short. reconcile failures
+// now abort the whole manifest (fail-closed) instead of warn+continue.
 func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	deviceID := decision.DeviceID
+
+	// State that must only be acted on after commit.
+	type outcome struct {
+		snap       *manifestSnapshot
+		limits     manifestLimits
+		useV2      bool
+		channels   []models.Channel
+		manifestID string
+	}
+	var done outcome
+	// persistFail marks the node failed only when the outer transaction really
+	// failed. It runs after commit/rollback so it cannot hold the tx lock.
 	fail := func(err error) error {
 		logger.Warnf("[sync_id=%s] ConfigManifest rejected: device=%s error=%v", decision.SyncID, deviceID, err)
 		result := m.db.Model(&models.Node{}).
@@ -431,307 +449,90 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		return err
 	}
 
-	var node models.Node
-	if err := m.db.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
-		logger.Infof("[%s] Collector not found for config", deviceID)
-		return fail(fmt.Errorf("collector not found: %w", err))
-	}
-	limits, err := manifestLimitsFor(node)
+	err := m.db.Transaction(func(tx *gorm.DB) error {
+		// F2: REPEATABLE READ on PG so reconcile + snapshot read + hash + encode
+		// all observe one consistent snapshot. SQLite is SERIALIZABLE by default
+		// (strictly stronger) so the helper is a no-op there.
+		SetTransactionIsolation(tx)
+
+		var node models.Node
+		if err := tx.Where("node_id = ?", deviceID).First(&node).Error; err != nil {
+			return fmt.Errorf("collector not found: %w", err)
+		}
+		limits, err := manifestLimitsFor(node)
+		if err != nil {
+			return err
+		}
+
+		// Self-healing: reconcile driver CommandTemplates with DB ConfigTemplates.
+		// When a driver's command has no matching ConfigTemplate (e.g. device created
+		// before createTemplatesFromDriver was deployed), auto-create the missing
+		// template. This eliminates the fragile write_data hex-string matching gap.
+		// Capacity is checked before any mutation; a mid-reconcile failure returns
+		// an error that rolls back the whole transaction (no orphan templates).
+		var templates []models.ConfigTemplate
+		if err := tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&templates).Error; err != nil {
+			return fmt.Errorf("load templates: %w", err)
+		}
+		if _, err := reconcileDriverTemplates(tx, m.driverRegistry, node.NodeID, templates, limits.maxTemplates); err != nil {
+			return fmt.Errorf("reconcile driver templates: %w", err)
+		}
+
+		// Snapshot read: hash input and encoded bytes share this exact read set.
+		snap, err := m.loadManifestSnapshot(tx, node, nil)
+		if err != nil {
+			return err
+		}
+
+		channels, err := validateManifestAuthority(node, snap.channels, snap.gpioConfigs, snap.pwmConfigs)
+		if err != nil {
+			return err
+		}
+		if err := validateManifestTemplateCapacity(snap.templates, limits.maxTemplates); err != nil {
+			return err
+		}
+		useV2 := protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 3})
+		if err := validateManifestScheduleCapacityFromSnapshot(snap, m.driverRegistry, channels, useV2, limits); err != nil {
+			return err
+		}
+
+		// F2 (v2 修订1): the wire manifestID is ALWAYS derived from the post-reconcile
+		// snapshot inside this transaction. decision.ManifestID was computed by
+		// SyncGate BEFORE reconcile ran, so honoring it would make field 1 differ from
+		// the hash of the very bytes being encoded → device-echoed config_hash would
+		// never match the server hash → endless Hello re-push loop. Deriving here makes
+		// hash input and encoded byte stream same-source by construction.
+		derived := m.calcHashFromSnapshot(snap).ManifestID
+		if decision.ManifestID != "" && decision.ManifestID != derived {
+			logger.Warnf("[sync_id=%s] decision carried stale manifestID %q differs from snapshot-derived %q (reconcile created templates or concurrent change); wire uses the snapshot-derived ID",
+				decision.SyncID, decision.ManifestID, derived)
+		}
+		manifestID := derived
+
+		done = outcome{snap: snap, limits: limits, useV2: useV2, channels: channels, manifestID: manifestID}
+		return nil
+	})
 	if err != nil {
+		// Persist the failed sync state on the main connection (after commit).
 		return fail(err)
 	}
 
-	var templates []models.ConfigTemplate
-	m.db.Where("node_id = ?", node.NodeID).Find(&templates)
-
-	// Self-healing: reconcile driver CommandTemplates with DB ConfigTemplates.
-	// When a driver's command has no matching ConfigTemplate (e.g. device created
-	// before createTemplatesFromDriver was deployed), auto-create the missing
-	// template. This eliminates the fragile write_data hex-string matching gap.
-	reconciled, err := reconcileDriverTemplates(m.db, m.driverRegistry, node.NodeID, templates, limits.maxTemplates)
+	// Publish AFTER the transaction committed. The manifest bytes come from the
+	// committed snapshot, and the syncing state is persisted first so a valid
+	// ACK cannot race ahead of backend authority.
+	snap := done.snap
+	payload, err := encodeConfigManifest(snap, done.channels, done.useV2, decision, m.driverRegistry, done.manifestID)
 	if err != nil {
-		return fail(fmt.Errorf("reconcile driver templates: %w", err))
+		return fail(fmt.Errorf("encode config manifest: %w", err))
 	}
-	if reconciled {
-		// Reload templates after reconciliation
-		m.db.Where("node_id = ?", node.NodeID).Find(&templates)
-	}
-
-	var allChannels []models.Channel
-	if err := m.db.Where("node_id = ?", node.NodeID).Find(&allChannels).Error; err != nil {
-		return fail(fmt.Errorf("load channels: %w", err))
-	}
-	var gpioConfigs []models.GPIOConfig
-	if err := m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("pin ASC").Find(&gpioConfigs).Error; err != nil {
-		return fail(fmt.Errorf("load GPIO configs: %w", err))
-	}
-	var pwmConfigs []models.PWMConfig
-	if err := m.db.Where("node_id = ? AND enabled = ?", node.NodeID, true).Order("channel ASC, hardware_id ASC").Find(&pwmConfigs).Error; err != nil {
-		return fail(fmt.Errorf("load PWM configs: %w", err))
-	}
-	channels, err := validateManifestAuthority(node, allChannels, gpioConfigs, pwmConfigs)
-	if err != nil {
-		return fail(err)
-	}
-	if err := validateManifestTemplateCapacity(templates, limits.maxTemplates); err != nil {
-		return fail(err)
-	}
-	// Determine encoding path before checking the exact fixed-size structures
-	// used by config_mgr on the collector.
-	useV2 := protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 3})
-	if err := validateManifestScheduleCapacity(m.db, m.driverRegistry, node.NodeID, templates, channels, useV2, limits); err != nil {
-		return fail(err)
-	}
-
-	manifestID := decision.ManifestID
-	if manifestID == "" {
-		manifestID = fmt.Sprintf("v2-%d", time.Now().UnixMilli())
-	}
-
-	enc := frame.NewEncoder(frame.MsgConfigMfst)
-	enc.EncodeString(1, manifestID)
-
-	// v2.2: field 2 epoch removed, field 9 sync_reason removed
-
-	// Encode templates (field 3, repeated sub-structure)
-	// v2 path still needs templates — C6's schedule_v2_channel uses
-	// config_mgr_get_template(template_id) to look up write_data/read_length/delay_ms.
-	for _, tmpl := range templates {
-		subEnc := frame.SubEncoder()
-		subEnc.EncodeVarint(1, uint64(tmpl.ID))
-		if tmpl.WriteData != "" {
-			writeHex := tmpl.WriteData
-			if strings.HasPrefix(writeHex, "\\x") || strings.HasPrefix(writeHex, "0x") {
-				writeHex = writeHex[2:]
-			}
-			if writeBytes, err := hex.DecodeString(writeHex); err == nil && len(writeBytes) > 0 {
-				subEnc.EncodeBytes(2, writeBytes)
-			}
-		}
-		if tmpl.ReadLength > 0 {
-			subEnc.EncodeVarint(3, uint64(tmpl.ReadLength))
-		}
-		if tmpl.DelayMs > 0 {
-			subEnc.EncodeVarint(4, uint64(tmpl.DelayMs))
-		}
-		enc.EncodeSubFrame(3, subEnc.Bytes())
-	}
-
-	// Encode channels (field 4, repeated sub-structure)
-	for _, ch := range channels {
-		subEnc := frame.SubEncoder()
-		subEnc.EncodeVarint(1, uint64(ch.ID))
-
-		if !useV2 {
-			// Old path: field 2 hardware_id, field 3 template_ids, field 4 interval_ms
-			subEnc.EncodeString(2, ch.HardwareID)
-
-			// Packed repeated template_ids (field 3)
-			if ch.TemplateIDs != "" {
-				for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
-					if id, err := strconv.ParseUint(strings.TrimSpace(idStr), 10, 32); err == nil {
-						subEnc.EncodeVarint(3, id)
-					}
-				}
-			}
-
-			subEnc.EncodeVarint(4, uint64(ch.IntervalMs))
-		}
-
-		subEnc.EncodeBool(5, ch.Enabled)
-
-		// Bus type
-		busTypeMap := map[string]uint8{
-			"UART": 1, "1": 1,
-			"I2C": 2, "2": 2,
-			"SPI": 3, "3": 3,
-			"ADC": 5, "5": 5,
-		}
-		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {
-			subEnc.EncodeVarint(6, uint64(bt))
-		}
-
-		// Bus config
-		busConfigData := ch.BusConfig
-		if busConfigData == "" {
-			busConfigData = ch.Config
-		}
-		if busConfigData != "" {
-			/* Try hex decode first — PostgreSQL bytea may already be binary in-memory */
-			if decoded, err := hex.DecodeString(busConfigData); err == nil && len(decoded) > 0 {
-				subEnc.EncodeBytes(7, decoded)
-			} else if strings.HasPrefix(busConfigData, "\\x") {
-				hexStr := busConfigData[2:]
-				if decoded, err := hex.DecodeString(hexStr); err == nil && len(decoded) > 0 {
-					subEnc.EncodeBytes(7, decoded)
-				} else {
-					subEnc.EncodeString(7, busConfigData)
-				}
-			} else {
-				subEnc.EncodeString(7, busConfigData)
-			}
-		}
-
-		// Field 8: dma_enabled
-		subEnc.EncodeBool(8, ch.DmaEnabled)
-
-		if useV2 {
-			// New path: field 9 edge_device_groups (repeated sub-messages)
-			var edges []models.EdgeDevice
-			m.db.Where("channel_id = ? AND node_id = ? AND enabled = true", ch.ID, node.NodeID).Find(&edges)
-			logger.Infof("[%s] ConfigManifest ch=%d: useV2=true, found %d edge_devices (query: channel_id=%d node_id=%s)", deviceID, ch.ID, len(edges), ch.ID, node.NodeID)
-
-			for _, edge := range edges {
-				grpEnc := frame.SubEncoder()
-				grpEnc.EncodeVarint(1, uint64(edge.ID))
-				grpEnc.EncodeVarint(2, parseHardwareID(edge.HardwareID))
-
-				// Per-command intervals: check driver CommandTemplates for multi-command support
-				cmdIntervals := make(map[string]int)
-				if len(edge.CommandIntervals) > 0 {
-					json.Unmarshal(edge.CommandIntervals, &cmdIntervals)
-				}
-				var drv drivers.Driver
-				if m.driverRegistry != nil {
-					drv, _ = m.driverRegistry.Get(edge.Type)
-				}
-				driverCmds := getCommandTemplatesFromDriver(drv)
-
-				if len(driverCmds) > 0 {
-					// Multiple commands: encode only Schedulable commands
-					for _, t := range driverCmds {
-						if !t.Schedulable {
-							continue // one-shot trigger, not for ConfigManifest
-						}
-						interval := t.IntervalMs
-						if v, ok := cmdIntervals[t.ID]; ok {
-							interval = v
-						}
-						if interval <= 0 {
-							continue // disabled
-						}
-						tmplID := findTemplateIDForCommand(templates, t.WriteData)
-						if tmplID == 0 {
-							logger.Warnf("[%s] No ConfigTemplate found for command %s, skipping",
-								deviceID, t.ID)
-							continue
-						}
-						cmdEnc := frame.SubEncoder()
-						cmdEnc.EncodeVarint(1, tmplID)
-						cmdEnc.EncodeVarint(2, uint64(interval))
-						cmdEnc.EncodeBool(3, true)
-						grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
-					}
-				} else {
-					// Single command: use edge default interval
-					interval := edge.IntervalMs
-					if v, ok := cmdIntervals["default"]; ok {
-						interval = v
-					}
-					cmdEnc := frame.SubEncoder()
-					cmdEnc.EncodeVarint(1, findTemplateID(ch, edge))
-					cmdEnc.EncodeVarint(2, uint64(interval))
-					cmdEnc.EncodeBool(3, edge.Enabled)
-					grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
-				}
-
-				subEnc.EncodeSubFrame(9, grpEnc.Bytes())
-			}
-		}
-
-		enc.EncodeSubFrame(4, subEnc.Bytes())
-	}
-
-	// Field 5: dma_channel_configs (repeated DmaChannelConfig sub-messages)
-	// These are loaded from node.DmaChannels if present, or from DB config
-	var dmaConfigs []models.DmaChannelConfig
-	if node.Config != "" {
-		var cfg map[string]interface{}
-		if err := json.Unmarshal([]byte(node.Config), &cfg); err != nil {
-			logger.Warnf("[%s] Failed to parse node.Config JSON in sender: %v", deviceID, err)
-		} else if dc, ok := cfg["dma_configs"]; ok {
-			if dcJSON, err := json.Marshal(dc); err == nil {
-				if err := json.Unmarshal(dcJSON, &dmaConfigs); err != nil {
-					logger.Warnf("[%s] Failed to parse dma_configs for sender: %v", deviceID, err)
-				} else {
-					logger.Infof("[%s] Loaded %d dma_configs from node.Config", deviceID, len(dmaConfigs))
-				}
-			}
-		} else {
-			logger.Infof("[%s] No dma_configs key in node.Config (keys: %v)", deviceID, func() []string {
-				keys := make([]string, 0, len(cfg))
-				for k := range cfg {
-					keys = append(keys, k)
-				}
-				return keys
-			}())
-		}
-	}
-	for _, dc := range dmaConfigs {
-		subEnc := frame.SubEncoder()
-		subEnc.EncodeVarint(1, uint64(dc.DmaID))
-		enabled := uint64(0)
-		if dc.Enabled {
-			enabled = 1
-		}
-		subEnc.EncodeVarint(2, enabled)
-		if dc.BindTo != "" {
-			subEnc.EncodeString(3, dc.BindTo)
-		}
-		enc.EncodeSubFrame(5, subEnc.Bytes())
-	}
-
-	// v2.5: field 10 = log_stream config (sub-frame: 1=enabled, 2=level)
-	// Read from node DB fields (LogStreamEnabled, LogStreamLevel)
-	{
-		lsEnc := frame.SubEncoder()
-		lsEnc.EncodeBool(1, node.LogStreamEnabled)
-		lsEnc.EncodeVarint(2, uint64(node.LogStreamLevel))
-		enc.EncodeSubFrame(10, lsEnc.Bytes())
-	}
-
-	// Field 11: gpio_configs (repeated sub-messages, v3.0)
-	// Only encode for protocol_version >= 2.4 (older firmware ignores unknown fields)
-	if protocolVersionAtLeast(node.ProtocolVersion, protocolVersion{major: 2, minor: 4}) {
-		for _, gc := range gpioConfigs {
-			subEnc := frame.SubEncoder()
-			subEnc.EncodeVarint(1, uint64(gc.Pin))          // sub-field 1: pin
-			subEnc.EncodeVarint(2, uint64(gc.Direction))    // sub-field 2: direction
-			subEnc.EncodeVarint(3, uint64(gc.InitialLevel)) // sub-field 3: initial_level
-			enc.EncodeSubFrame(11, subEnc.Bytes())
-		}
-
-		// Field 12: pwm_configs (repeated sub-messages, v3.0)
-		for _, pc := range pwmConfigs {
-			subEnc := frame.SubEncoder()
-			subEnc.EncodeVarint(1, uint64(pc.Channel))    // sub-field 1: channel
-			subEnc.EncodeVarint(2, uint64(pc.Pin))        // sub-field 2: pin
-			subEnc.EncodeVarint(3, uint64(pc.Frequency))  // sub-field 3: frequency
-			subEnc.EncodeVarint(4, uint64(pc.Duty))       // sub-field 4: duty
-			subEnc.EncodeVarint(5, uint64(pc.Resolution)) // sub-field 5: resolution
-			subEnc.EncodeBool(6, pc.AutoStart)            // sub-field 6: auto_start
-			enc.EncodeSubFrame(12, subEnc.Bytes())
-		}
-	}
-
-	// v2.2: field 8 = sync_id (field 9 sync_reason removed)
-	enc.EncodeString(8, decision.SyncID)
 
 	topic := mqtt.ControlTopicForNode(deviceID)
-	payload := enc.Bytes()
-
-	// DEBUG: Log first 120 bytes of ConfigManifest hex
-	hexLen := len(payload)
-	if hexLen > 120 {
-		hexLen = 120
-	}
-	logger.Infof("[%s] ConfigManifest hex (%d bytes): %s", deviceID, len(payload), hex.EncodeToString(payload[:hexLen]))
 
 	// Persist the exact generation before publish so an immediate valid ACK
 	// cannot race ahead of backend authority.
 	now := time.Now()
 	if err := m.db.Model(&models.Node{}).Where("node_id = ?", deviceID).Updates(map[string]interface{}{
-		"config_version": manifestID, "config_sync_state": "syncing",
+		"config_version": done.manifestID, "config_sync_state": "syncing",
 		"last_sync_at": now, "last_sync_id": decision.SyncID,
 	}).Error; err != nil {
 		return fail(fmt.Errorf("persist syncing state: %w", err))
@@ -740,11 +541,9 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	if err := m.mqtt.Publish(topic, payload); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 		return fail(fmt.Errorf("publish config manifest: %w", err))
-	} else {
-		logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s reason=%s %d templates, %d channels",
-			decision.SyncID, deviceID, manifestID, decision.Reason, len(templates), len(channels))
-
 	}
+	logger.Infof("[sync_id=%s] ConfigManifest sent: device=%s id=%s reason=%s %d templates, %d channels",
+		decision.SyncID, deviceID, done.manifestID, decision.Reason, len(snap.templates), len(done.channels))
 	return nil
 }
 
@@ -863,6 +662,9 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 		channels = append(channels, ch)
 	}
 	for _, cfg := range gpios {
+		if !cfg.Enabled {
+			continue // disabled GPIOs are not encoded into the manifest; hash input includes them but authority only governs the wire
+		}
 		if !gpioPins[cfg.Pin] {
 			return nil, fmt.Errorf("GPIO pin %d is absent from current ResourceReport", cfg.Pin)
 		}
@@ -874,6 +676,9 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 		}
 	}
 	for _, cfg := range pwms {
+		if !cfg.Enabled {
+			continue // disabled PWM configs are not encoded into the manifest; authority only governs the wire
+		}
 		resource, ok := pwmResources[cfg.HardwareID]
 		if !ok || resource.channel != cfg.Channel {
 			return nil, fmt.Errorf("PWM resource %q no longer matches current ResourceReport", cfg.HardwareID)
@@ -899,73 +704,19 @@ func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemp
 	return nil
 }
 
-// validateManifestScheduleCapacity mirrors config_mgr's fixed arrays for the
-// selected wire format. It deliberately counts exactly what sender will
-// encode, including enabled edge devices on a disabled transport channel.
-func validateManifestScheduleCapacity(db *gorm.DB, registry *drivers.Registry, nodeID string, templates []models.ConfigTemplate, channels []models.Channel, useV2 bool, limits manifestLimits) error {
-	if len(channels) > limits.maxChannels {
-		return fmt.Errorf("manifest has %d channels; collector limit is %d", len(channels), limits.maxChannels)
-	}
-	for _, channel := range channels {
-		if !useV2 {
-			count := 0
-			for _, value := range strings.Split(channel.TemplateIDs, ",") {
-				if strings.TrimSpace(value) != "" {
-					count++
-				}
-			}
-			if count > limits.maxTemplateIDs {
-				return fmt.Errorf("channel %d has %d template ids; collector limit is %d", channel.ID, count, limits.maxTemplateIDs)
-			}
-			continue
-		}
-
-		var edges []models.EdgeDevice
-		if err := db.Where("channel_id = ? AND node_id = ? AND enabled = ?", channel.ID, nodeID, true).Order("id ASC").Find(&edges).Error; err != nil {
-			return fmt.Errorf("load edge devices for channel %d: %w", channel.ID, err)
-		}
-		if len(edges) > maxEdgeDevicesPerChannel {
-			return fmt.Errorf("channel %d has %d edge devices; collector limit is %d", channel.ID, len(edges), maxEdgeDevicesPerChannel)
-		}
-		for _, edge := range edges {
-			var drv drivers.Driver
-			if registry != nil {
-				drv, _ = registry.Get(edge.Type)
-			}
-			commandCount := 1 // legacy/single-command fallback is always encoded.
-			driverCommands := getCommandTemplatesFromDriver(drv)
-			if len(driverCommands) > 0 {
-				commandCount = 0
-				intervals := make(map[string]int)
-				if len(edge.CommandIntervals) > 0 {
-					_ = json.Unmarshal(edge.CommandIntervals, &intervals)
-				}
-				for _, command := range driverCommands {
-					if !command.Schedulable {
-						continue
-					}
-					interval := command.IntervalMs
-					if value, ok := intervals[command.ID]; ok {
-						interval = value
-					}
-					if interval > 0 && findTemplateIDForCommand(templates, command.WriteData) != 0 {
-						commandCount++
-					}
-				}
-			}
-			if commandCount > maxCommandsPerEdgeDevice {
-				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, maxCommandsPerEdgeDevice)
-			}
-		}
-	}
-	return nil
-}
+// validateManifestScheduleCapacityFromSnapshot mirrors config_mgr's fixed arrays for the
+// selected wire format. It deliberately counts exactly what encodeConfigManifest will
+// encode, including enabled edge devices on a disabled transport channel. See
+// sender_snapshot.go — it uses the shared snapshot (single edges query).
 
 // reconcileDriverTemplates ensures every driver CommandTemplate has a matching
 // ConfigTemplate in DB. Auto-creates missing templates for self-healing.
-// Returns whether templates were created. Capacity is checked before any
-// mutation, so self-healing cannot manufacture a manifest the collector will
-// reject.
+// Capacity is checked before any mutation, so self-healing cannot manufacture a
+// manifest the collector will reject.
+//
+// F2 fail-closed: runs inside the SendConfigManifestWithDecision transaction.
+// A single template Create failure now returns an error (aborting the whole
+// transaction, leaving no orphan templates) instead of the old warn+continue.
 func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nodeID string, existingTemplates []models.ConfigTemplate, maxTemplates int) (bool, error) {
 	if driverRegistry == nil {
 		return false, nil
@@ -1033,13 +784,15 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 			DelayMs:    need.delayMs,
 		}
 		if err := db.Create(&tmpl).Error; err != nil {
-			logger.Warnf("[reconcile] Failed to auto-create template (tx_hex_chars=%d): %v", len(need.writeData), err)
-			continue
+			// F2 fail-closed: a failed Create aborts the whole transaction.
+			return created, fmt.Errorf("auto-create ConfigTemplate (tx_hex_chars=%d): %w", len(need.writeData), err)
 		}
 		// Append template ID to channel's template_ids
 		newID := strconv.FormatUint(uint64(tmpl.ID), 10)
-		db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
-			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID))
+		if err := db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
+			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID)).Error; err != nil {
+			return created, fmt.Errorf("append template_id %d to channel %d: %w", tmpl.ID, need.chID, err)
+		}
 		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
 			tmpl.ID, len(need.writeData), need.chID)
 		created = true
