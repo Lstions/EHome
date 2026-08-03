@@ -14,7 +14,9 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.Node{}, &models.NodeEvent{}, &models.ConfigMeta{})
+	db.AutoMigrate(&models.Node{}, &models.NodeEvent{}, &models.ConfigMeta{},
+		&models.Channel{}, &models.ConfigTemplate{}, &models.EdgeDevice{},
+		&models.DeviceConfig{}, &models.GPIOConfig{}, &models.PWMConfig{})
 	return db
 }
 
