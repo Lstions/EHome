@@ -56,6 +56,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.ConfigMeta{},
 		&models.PendingWriteRecord{},
 		&models.NodeLog{},
+		&models.LogicalDevice{},
 	)
 	if err != nil {
 		t.Fatalf("auto migrate: %v", err)

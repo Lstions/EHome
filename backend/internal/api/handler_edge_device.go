@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -709,8 +710,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Delete edge device (v2.2 path for DELETE /devices/:id)
+	// 方案 v3.3 §2.3/§九: +delete_data 查询参数 (默认 false)。事务内:
+	// 缺逻辑身份则补建 (§2.3.1 路径 3) → GORM 软删实例 → delete_data=true
+	// 时置 logical_devices.purge_requested 标记; 数据硬删由 purge 后台任务
+	// 异步分批执行 (§4.3), 不在 API 事务里删数据。
 	v1.DELETE("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		deleteData := c.Query("delete_data") == "true" || c.Query("delete_data") == "1"
+
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
@@ -719,7 +726,42 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Find node before deletion for event emission
 		var ch models.Channel
 		hasNode := db.First(&ch, d.ChannelID).Error == nil
-		if err := db.Delete(&models.EdgeDevice{}, id).Error; err != nil {
+
+		var logicalID uint
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var inst models.EdgeDevice
+			if err := tx.First(&inst, d.ID).Error; err != nil {
+				return err
+			}
+			if inst.LogicalDeviceID == nil {
+				// §2.3.1 路径 3: 删除时补建——允许复用既有 key (复用前跟随
+				// merged_into 链挂到最终目标; 目标 purge_requested=TRUE 时
+				// 禁止复用, 退序号 key)。保证任何被删设备都有逻辑身份锚点。
+				ld, err := datalifecycle.EnsureLogicalDevice(tx, &inst, datalifecycle.PathDelete, datalifecycle.SystemRetentionDays())
+				if err != nil {
+					return err
+				}
+				if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", inst.ID).
+					Update("logical_device_id", ld.ID).Error; err != nil {
+					return err
+				}
+				logicalID = ld.ID
+			} else {
+				logicalID = *inst.LogicalDeviceID
+			}
+			if err := tx.Delete(&models.EdgeDevice{}, inst.ID).Error; err != nil {
+				return err
+			}
+			if deleteData {
+				// 只置标记; purge 后台任务 (v3.3-N1 守卫后) 分批硬删数据。
+				if err := tx.Model(&models.LogicalDevice{}).Where("id = ?", logicalID).
+					Update("purge_requested", true).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
@@ -727,11 +769,70 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if hasNode {
 			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(d.ID))
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{
+			"deleted":           id,
+			"logical_device_id": logicalID,
+			"delete_data":       deleteData,
+			"purge_requested":   deleteData,
+		}})
 	})
 
 	// Edge device routes group for :id sub-resources
 	e := v1.Group("/edge-devices")
+
+	// GET /api/v1/edge-devices/:id/logical-device-info — 删除弹窗信息区
+	// (方案 v3.3 §2.1/§1.3): 异步加载逻辑设备信息。row_estimate 用估算
+	// (PG EXPLAIN reltuples / SQLite 截断 COUNT), 3s 超时降级为不含数据量
+	// (row_estimate 字段省略)。最终形态: GET 单资源, 实例缺逻辑身份时
+	// 按实例自身数据范围估算 (logical_device_id 为 null, 其余字段置空)。
+	e.GET("/:id/logical-device-info", func(c *gin.Context) {
+		id := c.Param("id")
+		var d models.EdgeDevice
+		if err := db.First(&d, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+
+		resp := gin.H{"code": 200, "data": gin.H{
+			"edge_device_id":    d.ID,
+			"name":              d.Name,
+			"logical_device_id": nil,
+			"retention_days":    nil,
+			"instance_count":    int64(1), // 至少包含本实例自身
+		}}
+
+		if d.LogicalDeviceID != nil {
+			var ld models.LogicalDevice
+			if err := db.First(&ld, *d.LogicalDeviceID).Error; err == nil {
+				resp = gin.H{"code": 200, "data": gin.H{
+					"edge_device_id":    d.ID,
+					"name":              ld.Name,
+					"logical_device_id": ld.ID,
+					"retention_days":    ld.RetentionDays,
+				}}
+				count, err := datalifecycle.CountInstances(db, ld.ID)
+				if err == nil {
+					resp["data"].(gin.H)["instance_count"] = count
+				}
+				if rows, ok := datalifecycle.EstimateRowCount(db, ld.ID); ok {
+					resp["data"].(gin.H)["row_estimate"] = rows
+				}
+			} else {
+				resp["data"].(gin.H)["instance_count"] = int64(1)
+			}
+		} else {
+			// 尚未建立逻辑身份: 按实例自身范围估算 (NULL-logical 行)。
+			scope := &datalifecycle.Scope{InstanceIDs: []uint{d.ID}}
+			if rows, ok := datalifecycle.EstimateScopeRows(db, scope); ok {
+				resp["data"].(gin.H)["row_estimate"] = rows
+			}
+		}
+		c.JSON(http.StatusOK, resp)
+	})
 
 	// GET /api/v1/edge-devices/:id/latest-data
 	e.GET("/:id/latest-data", func(c *gin.Context) {

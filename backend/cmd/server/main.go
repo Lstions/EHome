@@ -15,6 +15,7 @@ import (
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
@@ -80,6 +81,22 @@ func main() {
 	}
 
 	db := database.GetDB()
+
+	// 数据生命周期 P0 (方案 v3.3 §2.3.1 路径 1 + §4.1): 注册系统级保留期
+	// 快照源, 并对全量 edge_devices (含软删) 幂等补建 logical_device。
+	datalifecycle.SetSystemRetentionDays(cfg.DataRetentionDays())
+	if backfilled, err := datalifecycle.BackfillLogicalDevices(db, cfg.DataRetentionDays()); err != nil {
+		logger.Errorf("Logical device backfill failed: %v", err)
+	} else if backfilled > 0 {
+		logger.Infof("Logical device backfill: %d instance(s) attached", backfilled)
+	} else {
+		logger.Infof("Logical device backfill: all instances already attached")
+	}
+
+	// purge 后台任务 (§4.3 任务 2): 每日分批硬删 purge_requested 的逻辑设备数据。
+	purger := datalifecycle.NewPurger(db)
+	purger.Start()
+
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
 		logger.Fatalf("Failed to create initialization credential: %v", err)
 	} else if credential != "" {
@@ -271,6 +288,9 @@ func main() {
 	sig := <-quit
 
 	logger.Infof("Received signal %v, shutting down gracefully...", sig)
+
+	purger.Stop()
+	logger.Infof("Data lifecycle purger stopped")
 
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")
