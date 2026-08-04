@@ -402,8 +402,10 @@ func parseHardwareID(s string) uint64 {
 	return 0
 }
 
-// findTemplateID returns a template ID for the given channel and edge device.
-// Uses the first template_id from Channel.TemplateIDs; falls back to 1.
+// findTemplateID returns the first template ID from Channel.TemplateIDs for
+// the given channel and edge device. Returns 0 when the channel carries no
+// template_ids or none of them parse — the caller must skip encoding rather
+// than fall back to a magic template (F3: no more silent fallback=1).
 func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 	if ch.TemplateIDs != "" {
 		for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
@@ -412,7 +414,7 @@ func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 			}
 		}
 	}
-	return 1
+	return 0
 }
 
 // SendConfigManifestWithDecision sends a ConfigManifest (0x04) with v2.1 sync metadata.

@@ -12,6 +12,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -162,10 +163,9 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 			if registry != nil {
 				drv, _ = registry.Get(edge.Type)
 			}
-			commandCount := 1 // legacy/single-command fallback is always encoded.
+			commandCount := 0 // F3: legacy single-command only counts when a valid template_id exists.
 			driverCommands := getCommandTemplatesFromDriver(drv)
 			if len(driverCommands) > 0 {
-				commandCount = 0
 				intervals := make(map[string]int)
 				if len(edge.CommandIntervals) > 0 {
 					_ = json.Unmarshal(edge.CommandIntervals, &intervals)
@@ -182,6 +182,10 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 						commandCount++
 					}
 				}
+			} else if findTemplateID(channel, edge) != 0 && manifestTemplateExists(snap.templates, findTemplateID(channel, edge)) {
+				// Legacy single-command branch: encoded only when the channel's
+				// template_ids resolves to a template that exists in this snapshot.
+				commandCount = 1
 			}
 			if commandCount > maxCommandsPerEdgeDevice {
 				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, maxCommandsPerEdgeDevice)
@@ -189,6 +193,18 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 		}
 	}
 	return nil
+}
+
+// manifestTemplateExists reports whether a template with the given ID is
+// present in the snapshot's template set. Used by the legacy single-command
+// branch to refuse dangling template_id references (F3).
+func manifestTemplateExists(templates []models.ConfigTemplate, id uint64) bool {
+	for _, t := range templates {
+		if uint64(t.ID) == id {
+			return true
+		}
+	}
+	return false
 }
 
 // encodeConfigManifest produces the ConfigManifest (0x04) wire bytes from a
@@ -341,11 +357,25 @@ func encodeConfigManifest(snap *manifestSnapshot, channels []models.Channel, use
 					if v, ok := cmdIntervals["default"]; ok {
 						interval = v
 					}
-					cmdEnc := frame.SubEncoder()
-					cmdEnc.EncodeVarint(1, findTemplateID(ch, edge))
-					cmdEnc.EncodeVarint(2, uint64(interval))
-					cmdEnc.EncodeBool(3, edge.Enabled)
-					grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+					tmplID := findTemplateID(ch, edge)
+					if tmplID == 0 || !manifestTemplateExists(snap.templates, tmplID) {
+						// F3: no usable template_id (channel.template_ids empty,
+						// dangling, or unparseable). Never encode varint 0 (wire-legal
+						// but meaningless on the device) nor a dangling reference —
+						// skip this edge's command sub-frame. The edge group below is
+						// still encoded via EncodeSubFrame(9) with zero commands; the
+						// firmware parses an empty command group (command_count=0) and
+						// schedules nothing for it, so the device stops sampling this
+						// edge until the channel's template_ids are repaired.
+						logger.Warnf("[%s] edge_device %d (channel %d): no valid template_id in channel.template_ids %q (resolved %d), skipping command encoding", deviceID, edge.ID, ch.ID, ch.TemplateIDs, tmplID)
+						metrics.ManifestCommandSkippedNoTemplate.WithLabelValues(deviceID).Inc()
+					} else {
+						cmdEnc := frame.SubEncoder()
+						cmdEnc.EncodeVarint(1, tmplID)
+						cmdEnc.EncodeVarint(2, uint64(interval))
+						cmdEnc.EncodeBool(3, edge.Enabled)
+						grpEnc.EncodeSubFrame(3, cmdEnc.Bytes())
+					}
 				}
 
 				subEnc.EncodeSubFrame(9, grpEnc.Bytes())

@@ -86,6 +86,10 @@ func TestPrometheusMetricsRegistered(t *testing.T) {
 		SyncDecisionsTotal.WithLabelValues("epoch_mismatch", "push").Inc()
 	})
 
+	t.Run("ManifestCommandSkippedNoTemplate_Inc", func(t *testing.T) {
+		ManifestCommandSkippedNoTemplate.WithLabelValues("node1").Inc()
+	})
+
 	t.Run("PendingWriteActiveEntries_Set", func(t *testing.T) {
 		PendingWriteActiveEntries.Set(2)
 	})

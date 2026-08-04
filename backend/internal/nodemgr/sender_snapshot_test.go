@@ -402,3 +402,190 @@ func TestManifestSnapshotEdgesByChannel_SelfConsistentUnderConcurrency(t *testin
 	close(stop)
 	wg.Wait()
 }
+
+// =====================================================================
+// F3: findTemplateID 移除 fallback=1
+// =====================================================================
+
+// TestFindTemplateIDNoFallback covers the F3 unit contract: an empty,
+// unparseable, or dangling template_ids list yields 0 (never the old magic
+// template 1), and a valid list yields its first parseable id.
+func TestFindTemplateIDNoFallback(t *testing.T) {
+	edge := models.EdgeDevice{ID: 7}
+	cases := []struct {
+		name     string
+		template string
+		want     uint64
+	}{
+		{"empty", "", 0},
+		{"whitespace", "  ", 0},
+		{"unparseable", "abc,def", 0},
+		{"dangling", "99,100", 99}, // first id returned; existence is the caller's job
+		{"mixed", "  7 ,8", 7},
+		{"valid", "1,2,3", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findTemplateID(models.Channel{TemplateIDs: tc.template}, edge)
+			if got != tc.want {
+				t.Fatalf("findTemplateID(%q) = %d, want %d", tc.template, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestManifestEdgeWithDanglingTemplateIDsSkipsCommandEncoding verifies the F3
+// wire contract end-to-end: when a channel's template_ids are dangling (or
+// empty) and the edge takes the legacy single-command branch (driver without
+// CommandTemplates), the command sub-frame is NOT encoded — no varint 0 ever
+// reaches the wire. The edge group itself is still emitted (field 9) with zero
+// commands; the firmware parses that as command_count=0 and schedules nothing.
+func TestManifestEdgeWithDanglingTemplateIDsSkipsCommandEncoding(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	const nodeID = "f3-dangling"
+	if err := db.Create(&models.Node{NodeID: nodeID, Status: "online", ProtocolVersion: "2.5", Capabilities: snapshotCapabilities}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// template_ids references templates that do NOT exist (dangling, like the
+	// dev PG channel 3 case: "9,10,11,12,13,14" over an 8-row table).
+	if err := db.Create(&models.Channel{NodeID: nodeID, BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000258000", TemplateIDs: "99,100"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// One real template exists; the dangling refs must not silently fall back to
+	// it (or to template 1) — the edge must simply not be commanded.
+	if err := db.Create(&models.ConfigTemplate{NodeID: nodeID, WriteData: "010300000001840A", ReadLength: 7, DelayMs: 10}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Type "unknown" → registry.Get returns nil → getCommandTemplatesFromDriver
+	// returns nil → legacy single-command branch (findTemplateID call site).
+	if err := db.Create(&models.EdgeDevice{NodeID: nodeID, ChannelID: 1, Type: "no-such-driver", HardwareID: "0x76", IntervalMs: 3000, Enabled: true, Name: "dangling-edge"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	registry := drivers.NewRegistry() // empty — no driver resolves
+	mgr, mock := newManifestTestManager(t, db, registry)
+
+	if err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: nodeID, SyncID: "f3-1", Action: SyncActionFull, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.publishedPayload) == 0 {
+		t.Fatal("no manifest was published")
+	}
+
+	_, edges := decodeManifestChannels(t, mock.publishedPayload)
+	if len(edges) != 1 {
+		t.Fatalf("got %d edge groups, want 1 (edge group must still be emitted)", len(edges))
+	}
+	// The edge group must NOT contain any command sub-frame (field 3).
+	grpDec, err := frame.NewSubDecoder(edges[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		gf, gerr := grpDec.NextField()
+		if errors.Is(gerr, frame.ErrEndOfFrame) {
+			break
+		}
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		if gf.FieldNum == 3 {
+			t.Fatalf("edge group contains a command sub-frame (template_id %d) — dangling template_ids must not be encoded", frame.GetUint64(gf))
+		}
+	}
+	// The whole payload must not contain a bare varint 0 template reference.
+	// Scan every command sub-frame of every edge group for template_id == 0.
+	if found := manifestContainsTemplateIDZero(t, mock.publishedPayload); found {
+		t.Fatal("payload contains a template_id == 0 command — varint 0 must never go on the wire")
+	}
+}
+
+// manifestContainsTemplateIDZero scans every edge_device_group command
+// sub-frame (field 9 → field 3 → field 1) for a template_id of 0.
+func manifestContainsTemplateIDZero(t *testing.T, payload []byte) bool {
+	t.Helper()
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		field, ferr := dec.NextField()
+		if errors.Is(ferr, frame.ErrEndOfFrame) {
+			break
+		}
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		if field.FieldNum != 4 {
+			continue
+		}
+		chDec, _ := frame.NewSubDecoder(frame.GetBytes(field))
+		for {
+			chField, cerr := chDec.NextField()
+			if errors.Is(cerr, frame.ErrEndOfFrame) {
+				break
+			}
+			if cerr != nil {
+				t.Fatal(cerr)
+			}
+			if chField.FieldNum != 9 {
+				continue
+			}
+			grpDec, _ := frame.NewSubDecoder(frame.GetBytes(chField))
+			for {
+				gf, gerr := grpDec.NextField()
+				if errors.Is(gerr, frame.ErrEndOfFrame) {
+					break
+				}
+				if gerr != nil {
+					t.Fatal(gerr)
+				}
+				if gf.FieldNum != 3 {
+					continue
+				}
+				cmdDec, _ := frame.NewSubDecoder(frame.GetBytes(gf))
+				for {
+					cf, cerr := cmdDec.NextField()
+					if errors.Is(cerr, frame.ErrEndOfFrame) {
+						break
+					}
+					if cerr != nil {
+						t.Fatal(cerr)
+					}
+					if cf.FieldNum == 1 && frame.GetUint64(cf) == 0 {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestManifestEdgeWithEmptyTemplateIDsSkipsCommandEncoding is the same wire
+// contract for a channel whose template_ids is empty (the dev PG "0/4 empty"
+// case): the command must be skipped, no varint 0 on the wire.
+func TestManifestEdgeWithEmptyTemplateIDsSkipsCommandEncoding(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	const nodeID = "f3-empty"
+	if err := db.Create(&models.Node{NodeID: nodeID, Status: "online", ProtocolVersion: "2.5", Capabilities: snapshotCapabilities}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Channel{NodeID: nodeID, BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000258000", TemplateIDs: ""}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.EdgeDevice{NodeID: nodeID, ChannelID: 1, Type: "no-such-driver", HardwareID: "0x77", IntervalMs: 3000, Enabled: true, Name: "empty-edge"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	registry := drivers.NewRegistry()
+	mgr, mock := newManifestTestManager(t, db, registry)
+
+	if err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: nodeID, SyncID: "f3-2", Action: SyncActionFull, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.publishedPayload) == 0 {
+		t.Fatal("no manifest was published")
+	}
+	if found := manifestContainsTemplateIDZero(t, mock.publishedPayload); found {
+		t.Fatal("payload contains a template_id == 0 command — varint 0 must never go on the wire")
+	}
+}

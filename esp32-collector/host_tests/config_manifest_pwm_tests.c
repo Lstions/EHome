@@ -289,6 +289,86 @@ static void test_channel_dma_field_has_legacy_fallback(void)
     CHECK(!config_channel_get_dma_enabled(&legacy));
 }
 
+/*
+ * F3: an edge_device_group (channel field 9) whose command list is EMPTY
+ * (zero field-3 sub-frames) must parse successfully — the edge device is
+ * registered with command_count=0 and the scheduler simply never schedules
+ * commands for it. This is the wire shape the backend now produces when a
+ * channel's template_ids are empty/dangling (findTemplateID returns 0 and
+ * the command sub-frame is skipped). It must NOT be rejected as malformed,
+ * and must NOT write the next channel's bytes into this edge's command.
+ */
+static void test_edge_group_with_empty_commands_parses(void)
+{
+    uint8_t edge[64], channel[96], frame[192];
+    frame_encoder_t edge_enc, channel_enc, manifest_enc;
+
+    /* Edge device group with ONLY identity fields (1=edge id, 2=hw id),
+     * no field-3 command sub-frames. */
+    frame_encoder_init(&edge_enc, edge, sizeof(edge), 0);
+    CHECK(frame_encode_varint(&edge_enc, 1, 7) == FRAME_OK);
+    CHECK(frame_encode_varint(&edge_enc, 2, 0x76) == FRAME_OK);
+
+    frame_encoder_init(&channel_enc, channel, sizeof(channel), 0);
+    CHECK(frame_encode_varint(&channel_enc, 1, 5) == FRAME_OK);
+    CHECK(frame_encode_varint(&channel_enc, 6, 1) == FRAME_OK);
+    CHECK(frame_encode_bytes(&channel_enc, 9, edge + 1,
+                             frame_encoder_size(&edge_enc) - 1) == FRAME_OK);
+
+    frame_encoder_init(&manifest_enc, frame, sizeof(frame), MSG_CONFIG_MFST);
+    CHECK(frame_encode_string(&manifest_enc, 1, "empty-cmd-group") == FRAME_OK);
+    CHECK(frame_encode_string(&manifest_enc, 8, "f3-empty-cmd") == FRAME_OK);
+    CHECK(frame_encode_bytes(&manifest_enc, 4, channel + 1,
+                             frame_encoder_size(&channel_enc) - 1) == FRAME_OK);
+
+    CHECK(config_mgr_stage_manifest(frame, frame_encoder_size(&manifest_enc)));
+    const config_manifest_t *staged = config_mgr_get_staged_manifest();
+    CHECK(staged != NULL && staged->channel_count == 1);
+    const config_channel_t *ch = &staged->channels[0];
+    CHECK(ch->edge_device_count == 1);
+    CHECK(ch->edge_devices[0].edge_device_id == 7);
+    CHECK(ch->edge_devices[0].hardware_id == 0x76);
+    CHECK(ch->edge_devices[0].command_count == 0);
+    config_mgr_discard_staged_manifest();
+
+    /* Follow-up channel after the empty-command edge must still parse */
+    uint8_t cmd[48];
+    frame_encoder_t cmd_enc;
+    frame_encoder_init(&cmd_enc, cmd, sizeof(cmd), 0);
+    CHECK(frame_encode_varint(&cmd_enc, 1, 1) == FRAME_OK);    /* template_id */
+    CHECK(frame_encode_varint(&cmd_enc, 2, 2000) == FRAME_OK); /* interval_ms */
+    CHECK(frame_encode_varint(&cmd_enc, 3, 1) == FRAME_OK);    /* enabled */
+
+    frame_encoder_init(&edge_enc, edge, sizeof(edge), 0);
+    CHECK(frame_encode_varint(&edge_enc, 1, 8) == FRAME_OK);
+    CHECK(frame_encode_varint(&edge_enc, 2, 0x77) == FRAME_OK);
+    CHECK(frame_encode_bytes(&edge_enc, 3, cmd + 1,
+                             frame_encoder_size(&cmd_enc) - 1) == FRAME_OK);
+
+    frame_encoder_init(&channel_enc, channel, sizeof(channel), 0);
+    CHECK(frame_encode_varint(&channel_enc, 1, 6) == FRAME_OK);
+    CHECK(frame_encode_varint(&channel_enc, 6, 1) == FRAME_OK);
+    CHECK(frame_encode_bytes(&channel_enc, 9, edge + 1,
+                             frame_encoder_size(&edge_enc) - 1) == FRAME_OK);
+
+    frame_encoder_init(&manifest_enc, frame, sizeof(frame), MSG_CONFIG_MFST);
+    CHECK(frame_encode_string(&manifest_enc, 1, "mixed-cmd-group") == FRAME_OK);
+    CHECK(frame_encode_string(&manifest_enc, 8, "f3-mixed-cmd") == FRAME_OK);
+    CHECK(frame_encode_bytes(&manifest_enc, 4, channel + 1,
+                             frame_encoder_size(&channel_enc) - 1) == FRAME_OK);
+    CHECK(config_mgr_stage_manifest(frame, frame_encoder_size(&manifest_enc)));
+    staged = config_mgr_get_staged_manifest();
+    CHECK(staged != NULL && staged->channel_count == 1);
+    ch = &staged->channels[0];
+    CHECK(ch->edge_device_count == 1);
+    CHECK(ch->edge_devices[0].edge_device_id == 8);
+    CHECK(ch->edge_devices[0].command_count == 1);
+    CHECK(ch->edge_devices[0].commands[0].template_id == 1);
+    CHECK(ch->edge_devices[0].commands[0].interval_ms == 2000);
+    CHECK(ch->edge_devices[0].commands[0].enabled);
+    config_mgr_discard_staged_manifest();
+}
+
 int main(void)
 {
     uint8_t frame[128];
@@ -318,6 +398,7 @@ int main(void)
     test_oversized_runtime_fields_are_rejected();
     test_unknown_fields_are_rejected();
     test_channel_dma_field_has_legacy_fallback();
+    test_edge_group_with_empty_commands_parses();
     puts("config manifest PWM layout tests passed");
     return 0;
 }
