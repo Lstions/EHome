@@ -40,7 +40,7 @@ func setupOTATest(t *testing.T) (*gin.Engine, *gorm.DB, *ota.Manager) {
 		&models.User{}, &models.OTATask{}, &models.Firmware{},
 		&models.Vendor{}, &models.Notification{}, &models.OperationLog{},
 		&models.DeviceModel{}, &models.NodeEvent{},
-		&models.CalibrationCache{}, &models.ConfigMeta{},
+		&models.CalibrationCache{},
 		&models.PendingWriteRecord{},
 	)
 	r := gin.New()

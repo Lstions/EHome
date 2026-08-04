@@ -36,7 +36,7 @@ func setupEdgeDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.OperationLog{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
-		&models.ConfigMeta{}, &models.PendingWriteRecord{},
+		&models.PendingWriteRecord{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")

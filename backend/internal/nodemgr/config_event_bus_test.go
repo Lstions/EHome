@@ -4,8 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"ehome/backend/internal/models"
-
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -16,7 +14,7 @@ func setupEventBusTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.ConfigMeta{})
+	db.AutoMigrate()
 	return db
 }
 

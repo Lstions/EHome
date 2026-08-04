@@ -16,7 +16,7 @@ func newTestManagerAndGate(t *testing.T) (*Manager, *SyncGate, *ConfigEventBus) 
 	if err != nil {
 		t.Fatalf("sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.ConfigMeta{}, &models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
+	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
 		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.GPIOConfig{}, &models.PWMConfig{})
 
 	bus := NewConfigEventBus(64)

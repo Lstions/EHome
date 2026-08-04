@@ -52,7 +52,6 @@ var allModels = []interface{}{
 	&models.DeviceModel{},
 	&models.NodeEvent{},
 	&models.CalibrationCache{},
-	&models.ConfigMeta{},
 	&models.PendingWriteRecord{},
 	&models.NodeLog{},
 	&models.CommandExecution{},

@@ -38,7 +38,7 @@ func setupPeriphTest(t *testing.T) (*gin.Engine, *gorm.DB, *nodemgr.Manager) {
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.OperationLog{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
-		&models.ConfigMeta{}, &models.PendingWriteRecord{},
+		&models.PendingWriteRecord{},
 		&models.NodeLog{}, &models.GPIOConfig{}, &models.PWMConfig{},
 	)
 	// 创建默认用户 (JWT 需要 user_id=1 存在)

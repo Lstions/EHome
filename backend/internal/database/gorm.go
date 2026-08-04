@@ -73,7 +73,6 @@ func AutoMigrate() error {
 		&models.DeviceModel{},
 		&models.NodeEvent{},
 		&models.CalibrationCache{},
-		&models.ConfigMeta{},         // v2.1: epoch persistence
 		&models.PendingWriteRecord{}, // P3-4: pending write persistence
 		&models.NodeLog{},            // v2.5: remote ESP32 system-log history
 		// Phase 1: durable device-action control domain. These are additive
