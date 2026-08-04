@@ -81,6 +81,15 @@ func (d *JiabaidaBMSDriver) CompileControlAction(actionID string, params json.Ra
 	if actionID != "set_mos_policy" {
 		return CompiledControlStep{}, fmt.Errorf("jiabaida action %q is not parameterized", actionID)
 	}
+	step, err := d.compileMOSFrame(params)
+	if err != nil {
+		return CompiledControlStep{}, err
+	}
+	return step, nil
+}
+
+// compileMOSFrame builds the E1 MOS policy write step from canonical params.
+func (d *JiabaidaBMSDriver) compileMOSFrame(params json.RawMessage) (CompiledControlStep, error) {
 	var input struct {
 		ChargeClosed    bool   `json:"charge_software_closed"`
 		DischargeClosed bool   `json:"discharge_software_closed"`
@@ -111,10 +120,98 @@ func (d *JiabaidaBMSDriver) CompileControlAction(actionID string, params json.Ra
 	return CompiledControlStep{TXData: frame, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100}, nil
 }
 
+// CompileControlActionPlan compiles the E1 MOS set workflow as a bounded
+// plan: write the dual-bit MOS policy, then read back basic info (0x03) whose
+// fet_status confirms the software-close state.  The readback step reuses the
+// golden 0x03 read request; the verifier (VerifyControlAction) binds the
+// final response to the originating action.
+//
+// bms_restart compiles the V19 §7.7 reset frame (0x0E, fixed code 0x8118)
+// followed by a readback of protection history (0xAA) whose restart_count
+// observes the reboot side effect.  The latter is a "readback" step so the
+// batch verifier can surface restart_count to the operator; the action's
+// observation semantics (offline window / uptime change) remain an operator
+// concern in the UI timeline.
+func (d *JiabaidaBMSDriver) CompileControlActionPlan(actionID string, params json.RawMessage) (CompiledControlPlan, error) {
+	switch actionID {
+	case "set_mos_policy":
+		writeStep, err := d.compileMOSFrame(params)
+		if err != nil {
+			return CompiledControlPlan{}, err
+		}
+		return CompiledControlPlan{
+			AtMostOnce: true,
+			Steps: []CompiledControlPlanStep{
+				{ID: "write_mos", Kind: "write", TXData: writeStep.TXData, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_fet", Kind: "readback", TXData: []byte{0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77}, ReadSize: 60, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			},
+		}, nil
+	case "bms_restart":
+		if string(params) != "{}" && len(params) != 0 {
+			return CompiledControlPlan{}, fmt.Errorf("jiabaida bms_restart does not accept parameters")
+		}
+		rebootFrame := []byte{0xDD, 0x5A, 0x0E, 0x00, 0x81, 0x18, 0, 0, 0x77}
+		checksum := jiabaidaChecksum(rebootFrame[2:6])
+		binary.BigEndian.PutUint16(rebootFrame[6:8], checksum)
+		return CompiledControlPlan{
+			AtMostOnce: true,
+			Steps: []CompiledControlPlanStep{
+				{ID: "write_reboot", Kind: "write", TXData: rebootFrame, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_restart_count", Kind: "readback", TXData: []byte{0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77}, ReadSize: 40, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			},
+		}, nil
+	default:
+		return CompiledControlPlan{}, fmt.Errorf("jiabaida action %q has no bounded plan", actionID)
+	}
+}
+
 // VerifyControlAction binds a successful response to its originating query.
 // ParseData alone accepts multiple V19 read commands, so without this check a
 // wrong-device or stale response could be stored under the wrong Action.
 func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	if actionID == "set_mos_policy" {
+		// The bounded plan reports a step-count envelope: raw[0] = N steps,
+		// then per step: kind(1B) + length_le(2B) + response.  Step 1 is the
+		// E1 MOS write ACK (DD E1 00 00 CRC 77), step 2 is the 0x03 readback
+		// whose fet_status confirms the software-close state.
+		steps, err := decodeJiabaidaBatchRaw(raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(steps) != 2 {
+			return nil, fmt.Errorf("jiabaida set_mos_policy requires two verified responses, got %d", len(steps))
+		}
+		ack := steps[0]
+		if len(ack) < 7 || ack[0] != 0xDD || ack[1] != 0xE1 || ack[2] != 0x00 || ack[3] != 0x00 || ack[6] != 0x77 {
+			return nil, fmt.Errorf("jiabaida set_mos_policy ACK frame malformed")
+		}
+		readback, err := d.ParseData(steps[1])
+		if err != nil {
+			return nil, fmt.Errorf("jiabaida set_mos_policy readback: %w", err)
+		}
+		return append([]SensorData{{Name: "mos_ack", Value: 1, Unit: "ack"}}, readback...), nil
+	}
+	if actionID == "bms_restart" {
+		// Step-count envelope: step 1 = 0x0E reset ACK (DD 0E 00 00 CRC 77),
+		// step 2 = 0xAA protection history readback whose restart_count is
+		// surfaced for offline-window/uptime reconciliation.
+		steps, err := decodeJiabaidaBatchRaw(raw)
+		if err != nil {
+			return nil, err
+		}
+		if len(steps) != 2 {
+			return nil, fmt.Errorf("jiabaida bms_restart requires two verified responses, got %d", len(steps))
+		}
+		ack := steps[0]
+		if len(ack) < 7 || ack[0] != 0xDD || ack[1] != 0x0E || ack[2] != 0x00 || ack[3] != 0x00 || ack[6] != 0x77 {
+			return nil, fmt.Errorf("jiabaida bms_restart ACK frame malformed")
+		}
+		readback, err := d.ParseData(steps[1])
+		if err != nil {
+			return nil, fmt.Errorf("jiabaida bms_restart readback: %w", err)
+		}
+		return append([]SensorData{{Name: "reboot_ack", Value: 1, Unit: "ack"}}, readback...), nil
+	}
 	if string(params) != "{}" {
 		return nil, fmt.Errorf("jiabaida action %q does not accept parameters", actionID)
 	}
@@ -748,4 +845,31 @@ func (d *JiabaidaBMSDriver) GetCommandTemplates() []CommandTemplate {
 			Description: "12种保护触发次数统计",
 		},
 	}
+}
+
+// decodeJiabaidaBatchRaw decodes the ChannelCmdV2 bounded-plan step-count
+// envelope produced by the firmware: raw[0] = N steps, then per step
+// kind(1B) + length_le(2B) + response bytes.
+func decodeJiabaidaBatchRaw(raw []byte) ([][]byte, error) {
+	if len(raw) < 1 || raw[0] < 1 || raw[0] > 8 {
+		return nil, fmt.Errorf("jiabaida: invalid batch response")
+	}
+	steps := make([][]byte, 0, raw[0])
+	pos := 1
+	for i := 0; i < int(raw[0]); i++ {
+		if pos+3 > len(raw) {
+			return nil, fmt.Errorf("jiabaida: truncated batch response")
+		}
+		length := int(binary.LittleEndian.Uint16(raw[pos+1 : pos+3]))
+		pos += 3 // kind byte plus little-endian length
+		if length == 0 || pos+length > len(raw) {
+			return nil, fmt.Errorf("jiabaida: invalid batch step length")
+		}
+		steps = append(steps, append([]byte(nil), raw[pos:pos+length]...))
+		pos += length
+	}
+	if pos != len(raw) {
+		return nil, fmt.Errorf("jiabaida: batch response has trailing bytes")
+	}
+	return steps, nil
 }

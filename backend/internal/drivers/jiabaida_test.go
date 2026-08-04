@@ -592,6 +592,165 @@ func TestJiabaidaVerifyControlActionBindsResponseCommand(t *testing.T) {
 	}
 }
 
+func TestJiabaidaMOSPolicyPlanCompilerGoldenVector(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	plan, err := d.CompileControlActionPlan("set_mos_policy", json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`))
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if !plan.AtMostOnce || len(plan.Steps) != 2 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	wantWrite := []byte{0xDD, 0x5A, 0xE1, 0x02, 0x00, 0x01, 0xFF, 0x1C, 0x77}
+	if got := plan.Steps[0].TXData; string(got) != string(wantWrite) {
+		t.Fatalf("write step = % X, want % X", got, wantWrite)
+	}
+	wantReadback := []byte{0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77}
+	if got := plan.Steps[1].TXData; string(got) != string(wantReadback) {
+		t.Fatalf("readback step = % X, want % X", got, wantReadback)
+	}
+	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
+		t.Fatalf("step kinds = %q/%q", plan.Steps[0].Kind, plan.Steps[1].Kind)
+	}
+}
+
+func TestJiabaidaBMSRestartPlanCompilerGoldenVector(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	plan, err := d.CompileControlActionPlan("bms_restart", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan(bms_restart) error = %v", err)
+	}
+	if !plan.AtMostOnce || len(plan.Steps) != 2 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	// DD 5A 0E 00 81 18 CHK_H CHK_L 77; checksum is two's complement of 0E+00+81+18 = 0xFF59.
+	wantWrite := []byte{0xDD, 0x5A, 0x0E, 0x00, 0x81, 0x18, 0xFF, 0x59, 0x77}
+	if got := plan.Steps[0].TXData; string(got) != string(wantWrite) {
+		t.Fatalf("reboot write step = % X, want % X", got, wantWrite)
+	}
+	wantReadback := []byte{0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77}
+	if got := plan.Steps[1].TXData; string(got) != string(wantReadback) {
+		t.Fatalf("restart_count readback step = % X, want % X", got, wantReadback)
+	}
+	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
+		t.Fatalf("step kinds = %q/%q", plan.Steps[0].Kind, plan.Steps[1].Kind)
+	}
+	if _, err := d.CompileControlActionPlan("read_protection_parameters", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("read_protection_parameters plan compiled without a frozen factory workflow")
+	}
+}
+
+func TestJiabaidaVerifyMOSPolicyAckAndReadback(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
+	// ACK frame: DD E1 00 00 00 00 77 (checksum of LEN=0 is 0x0000).
+	ack := []byte{0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77}
+	// Readback: 0x03 basic info frame (fet_status byte at offset 20 of payload).
+	payload := make([]byte, 31)
+	payload[20] = 0x01 // fet_status = charge MOS closed
+	ckraw := append([]byte{0x1F}, payload...)
+	ck := jiabaidaChecksum(ckraw)
+	readback := append([]byte{0xDD, 0x03, 0x00, 0x1F}, payload...)
+	readback = append(readback, byte(ck>>8), byte(ck&0xFF), 0x77)
+	// Build the step-count envelope: [count][kind(1) + len_le(2) + data...] per step.
+	envelope := []byte{2}
+	envelope = append(envelope, 0x00) // step 1 kind
+	envelope = append(envelope, byte(len(ack))&0xFF, byte(len(ack)>>8))
+	envelope = append(envelope, ack...)
+	envelope = append(envelope, 0x00) // step 2 kind
+	envelope = append(envelope, byte(len(readback))&0xFF, byte(len(readback)>>8))
+	envelope = append(envelope, readback...)
+
+	data, err := d.VerifyControlAction("set_mos_policy", params, envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(envelope) error = %v", err)
+	}
+	if len(data) < 2 || data[0].Name != "mos_ack" || data[0].Value != 1 {
+		t.Fatalf("VerifyControlAction(envelope) = %+v", data)
+	}
+	found := false
+	for _, s := range data[1:] {
+		if s.Name == "fet_status" {
+			found = true
+			if s.Value != 1 {
+				t.Fatalf("fet_status = %v, want 1", s.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("readback result missing fet_status: %+v", data)
+	}
+	// Wrong step count must be rejected.
+	bad := []byte{1, 0x00}
+	bad = append(bad, byte(len(ack))&0xFF, byte(len(ack)>>8))
+	bad = append(bad, ack...)
+	if _, err := d.VerifyControlAction("set_mos_policy", params, bad); err == nil {
+		t.Fatal("wrong step count accepted for set_mos_policy")
+	}
+	// Malformed ACK (wrong command byte) must be rejected.
+	wrongAck := []byte{0xDD, 0x04, 0x00, 0x00, 0x00, 0x00, 0x77}
+	badAck := []byte{2, 0x00}
+	badAck = append(badAck, byte(len(wrongAck))&0xFF, byte(len(wrongAck)>>8))
+	badAck = append(badAck, wrongAck...)
+	badAck = append(badAck, 0x00) // step 2 kind
+	badAck = append(badAck, byte(len(readback))&0xFF, byte(len(readback)>>8))
+	badAck = append(badAck, readback...)
+	if _, err := d.VerifyControlAction("set_mos_policy", params, badAck); err == nil {
+		t.Fatal("wrong ACK command accepted for set_mos_policy")
+	}
+}
+
+func TestJiabaidaVerifyBMSRestartAckAndReadback(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	// 0x0E reset ACK: DD 0E 00 00 00 00 77 (LEN=0, checksum of LEN+DATA = 0x0000).
+	ack := []byte{0xDD, 0x0E, 0x00, 0x00, 0x00, 0x00, 0x77}
+	// 0xAA protection history readback: 12×uint16, restart_count=5 at offset 22.
+	payload := make([]byte, 24)
+	payload[22], payload[23] = 0x00, 0x05
+	ckraw := append([]byte{0x18}, payload...)
+	ck := jiabaidaChecksum(ckraw)
+	readback := append([]byte{0xDD, 0xAA, 0x00, 0x18}, payload...)
+	readback = append(readback, byte(ck>>8), byte(ck&0xFF), 0x77)
+	// Batch envelope: [count][kind, len_le, ack][kind, len_le, readback].
+	envelope := []byte{2, 0x00}
+	envelope = append(envelope, byte(len(ack))&0xFF, byte(uint16(len(ack))>>8))
+	envelope = append(envelope, ack...)
+	envelope = append(envelope, 0x00)
+	envelope = append(envelope, byte(len(readback))&0xFF, byte(uint16(len(readback))>>8))
+	envelope = append(envelope, readback...)
+
+	data, err := d.VerifyControlAction("bms_restart", json.RawMessage(`{}`), envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(bms_restart) error = %v", err)
+	}
+	if len(data) < 2 || data[0].Name != "reboot_ack" || data[0].Value != 1 {
+		t.Fatalf("VerifyControlAction(bms_restart) = %+v", data)
+	}
+	found := false
+	for _, s := range data[1:] {
+		if s.Name == "restart_count" {
+			found = true
+			if s.Value != 5 {
+				t.Fatalf("restart_count = %v, want 5", s.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("readback result missing restart_count: %+v", data)
+	}
+	// Malformed ACK (wrong command byte) must be rejected.
+	wrongAck := []byte{0xDD, 0x04, 0x00, 0x00, 0x00, 0x00, 0x77}
+	bad := []byte{2, 0x00}
+	bad = append(bad, byte(len(wrongAck))&0xFF, byte(uint16(len(wrongAck))>>8))
+	bad = append(bad, wrongAck...)
+	bad = append(bad, 0x00)
+	bad = append(bad, byte(len(readback))&0xFF, byte(uint16(len(readback))>>8))
+	bad = append(bad, readback...)
+	if _, err := d.VerifyControlAction("bms_restart", json.RawMessage(`{}`), bad); err == nil {
+		t.Fatal("wrong ACK command accepted for bms_restart")
+	}
+}
+
 func TestCRC16Modbus(t *testing.T) {
 	// Known test vector: Modbus CRC-16
 	data := []byte{0x01, 0x03, 0x02, 0x00, 0x01}
