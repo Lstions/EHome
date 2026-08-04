@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
@@ -243,16 +244,35 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Parse succeeded — consume reassembly buffer
 	c.reassembler.Consume(uint32(evt.RequestID))
 
+	// 写入双写 (§八): logical_device_id = 实例逻辑身份经 followMergeChain
+	// 解析到最终目标 (v3.2-F1: 写入与查询同链 — 合并进行中实例仍在写入时,
+	// 数据直接落目标, 不产生"目标缺新数据"窗口)。无逻辑身份的实例
+	// (backfill 前旧数据) 保持 NULL, 由 dataScopeCondition 的 OR 回退分支
+	// 按 device_id 兜住。解析失败时同样落 NULL + warn: device_id 血缘仍在,
+	// 查询/清理的 OR 分支照常覆盖, 不丢数据。
+	var logicalTarget *uint
+	if device.LogicalDeviceID != nil && *device.LogicalDeviceID > 0 {
+		target, err := datalifecycle.ResolveMergeTarget(c.db, *device.LogicalDeviceID)
+		if err != nil {
+			logger.Warn("databus: resolve merge target failed; writing logical_device_id NULL",
+				"consumer", c.Name(), "edge_device_id", device.ID,
+				"logical_device_id", *device.LogicalDeviceID, "error", err)
+		} else if target > 0 {
+			logicalTarget = &target
+		}
+	}
+
 	// Store parsed data
 	now := time.Now()
 	records := make([]models.UnifiedData, 0, len(sensorData))
 	for _, sd := range sensorData {
 		records = append(records, models.UnifiedData{
-			DeviceID:   device.ID,
-			SensorName: sd.Name,
-			Value:      sd.Value,
-			Unit:       sd.Unit,
-			Timestamp:  now,
+			DeviceID:        device.ID,
+			LogicalDeviceID: logicalTarget,
+			SensorName:      sd.Name,
+			Value:           sd.Value,
+			Unit:            sd.Unit,
+			Timestamp:       now,
 		})
 	}
 	if len(records) > 0 {
@@ -297,10 +317,11 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	if err != nil {
 		logger.Warn("databus: failed to marshal parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
 	} else if err := c.db.Session(&gorm.Session{}).Create(&models.DeviceData{
-		DeviceID:  device.ID,
-		NodeID:    evt.DeviceID,
-		DataJSON:  string(dataJSON),
-		Timestamp: now,
+		DeviceID:        device.ID,
+		LogicalDeviceID: logicalTarget,
+		NodeID:          evt.DeviceID,
+		DataJSON:        string(dataJSON),
+		Timestamp:       now,
 	}).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "device_data").Inc()
 		logger.Warn("databus: failed to persist parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)

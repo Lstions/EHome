@@ -598,6 +598,49 @@ describe('edgeDeviceApi', () => {
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/edge-devices/1')
   })
 
+  it('delete with delete_data=true appends the query param (方案 v3.3 §2.1)', async () => {
+    mockClient.delete.mockResolvedValue(undefined)
+    await edgeDeviceApi.delete(1, { delete_data: true })
+    expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/edge-devices/1', {
+      params: { delete_data: 'true' },
+    })
+  })
+
+  it('delete with delete_data=false keeps the legacy request shape', async () => {
+    mockClient.delete.mockResolvedValue(undefined)
+    await edgeDeviceApi.delete(2, { delete_data: false })
+    expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/edge-devices/2')
+  })
+
+  it('getLogicalDeviceInfo unwraps the envelope', async () => {
+    const info = {
+      edge_device_id: 1,
+      name: 'BMS',
+      logical_device_id: 7,
+      retention_days: 30,
+      instance_count: 2,
+      row_estimate: 1200,
+    }
+    mockClient.get.mockResolvedValue({ code: 200, data: info, message: 'ok' })
+    const res = await edgeDeviceApi.getLogicalDeviceInfo(1)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices/1/logical-device-info')
+    expect(res).toEqual(info)
+  })
+
+  it('getLogicalDeviceInfo tolerates degraded response without row_estimate', async () => {
+    const info = {
+      edge_device_id: 1,
+      name: null,
+      logical_device_id: null,
+      retention_days: null,
+      instance_count: 1,
+    }
+    mockClient.get.mockResolvedValue({ code: 200, data: info })
+    const res = await edgeDeviceApi.getLogicalDeviceInfo(1)
+    expect(res.row_estimate).toBeUndefined()
+    expect(res.instance_count).toBe(1)
+  })
+
   it('does not expose retired direct control endpoints', () => {
     expect(edgeDeviceApi).not.toHaveProperty('executeOperation')
     expect(edgeDeviceApi).not.toHaveProperty('changeAddress')

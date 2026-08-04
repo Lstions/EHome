@@ -17,6 +17,7 @@ type Config struct {
 	Redis          RedisConfig          `yaml:"redis"`
 	Log            LogConfig            `yaml:"log"`
 	Control        ControlConfig        `yaml:"control"`
+	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
 }
 
@@ -61,6 +62,16 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
+// DefaultDataRetentionDays is the system-level retention applied to newly
+// created logical devices (方案 v3.3 §4.1). Existing logical devices keep the
+// value snapshotted at creation time; changing this setting never retroacts.
+const DefaultDataRetentionDays = 365
+
+// DataRetentionConfig holds the system-level data retention policy.
+type DataRetentionConfig struct {
+	Days int `yaml:"days"` // EHOME_DATA_RETENTION_DAYS; 新建 logical_device 的保留天数快照
+}
+
 // AdminBootstrapConfig is an explicit, first-run-only administrator
 // bootstrap configuration. Both username and password must be supplied;
 // there is intentionally no default account or password.
@@ -94,6 +105,7 @@ func defaultConfig() *Config {
 			Level: "info",
 		},
 		Control:        ControlConfig{LegacyDeviceWriteMode: "disabled"},
+		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
 	}
 }
@@ -184,6 +196,11 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("EHOME_ADMIN_EMAIL", ""); v != "" {
 		cfg.AdminBootstrap.Email = v
 	}
+	if v := getEnv("EHOME_DATA_RETENTION_DAYS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.DataRetention.Days = n
+		}
+	}
 }
 
 func getEnv(key, defaultValue string) string {
@@ -207,3 +224,12 @@ func (c *Config) DatabaseURL() string {
 func (c *Config) LogLevel() string             { return c.Log.Level }
 func (c *Config) DBConfig() DatabaseConfig     { return c.Database }
 func (c *Config) ControlConfig() ControlConfig { return c.Control }
+
+// DataRetentionDays returns the system-level retention (days) snapshotted
+// into newly created logical devices. Never returns <= 0.
+func (c *Config) DataRetentionDays() int {
+	if c.DataRetention.Days > 0 {
+		return c.DataRetention.Days
+	}
+	return DefaultDataRetentionDays
+}

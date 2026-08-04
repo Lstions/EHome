@@ -1,21 +1,47 @@
-// Command ehomectl provides host-local authentication administration.
+// Command ehomectl provides host-local administration.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
 
+	"gorm.io/gorm"
+
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
 )
 
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "auth" {
-		fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>")
+	if len(os.Args) < 2 {
+		usage()
 	}
+	switch os.Args[1] {
+	case "auth":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		runAuth()
+	case "datalifecycle":
+		if len(os.Args) < 3 {
+			usage()
+		}
+		runDatalifecycle()
+	default:
+		usage()
+	}
+}
+
+func usage() {
+	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
+		"       ehomectl datalifecycle backfill")
+}
+
+func connectDB() *gorm.DB {
 	cfg := config.Load().DBConfig()
 	if err := database.Connect(database.Config{Host: cfg.Host, Port: cfg.Port, User: cfg.User, Password: cfg.Password, DBName: cfg.DBName, SSLMode: cfg.SSLMode}); err != nil {
 		fatal(err.Error())
@@ -24,6 +50,54 @@ func main() {
 	if err := database.AutoMigrate(); err != nil {
 		fatal(err.Error())
 	}
+	return db
+}
+
+// runDatalifecycle 数据生命周期 M 迁移步骤的同步执行入口 (方案 v3.3 §七)。
+// 与服务端启动钩子不同, 本命令同步执行并以退出码报告校验结果——
+// 校验自检 (§七-3) 非 0 或执行失败时 exit 非零, 供运维脚本判定。
+func runDatalifecycle() {
+	switch os.Args[2] {
+	case "backfill":
+		db := connectDB()
+		ctx := context.Background()
+
+		if err := datalifecycle.EnsureLogicalDataIndexes(ctx, db); err != nil {
+			fatal(fmt.Sprintf("index creation failed: %v", err))
+		}
+		fmt.Println("composite indexes ensured")
+
+		results, err := datalifecycle.NewBackfiller(db).RunOnce(ctx)
+		if err != nil {
+			fatal(err.Error())
+		}
+		failed := false
+		for _, r := range results {
+			if r.Err != "" {
+				fmt.Fprintf(os.Stderr, "backfill %s FAILED: %s\n", r.Table, r.Err)
+				failed = true
+				continue
+			}
+			fmt.Printf("backfill %s: rows_updated=%d batches=%d resumed_from=%d\n",
+				r.Table, r.RowsUpdated, r.Batches, r.ResumedFrom)
+			if !r.VerifyPassed {
+				fmt.Fprintf(os.Stderr, "verify %s FAILED: %d row(s) still NULL while instance has logical_device_id\n",
+					r.Table, r.RowsMissing)
+				failed = true
+				continue
+			}
+			fmt.Printf("verify %s: PASSED (0 rows missing)\n", r.Table)
+		}
+		if failed {
+			os.Exit(1)
+		}
+	default:
+		fatal("unknown datalifecycle command")
+	}
+}
+
+func runAuth() {
+	db := connectDB()
 
 	switch os.Args[2] {
 	case "bootstrap-database":

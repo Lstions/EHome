@@ -15,6 +15,7 @@ import (
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
@@ -80,6 +81,43 @@ func main() {
 	}
 
 	db := database.GetDB()
+
+	// 数据生命周期 P0 (方案 v3.3 §2.3.1 路径 1 + §4.1): 注册系统级保留期
+	// 快照源, 并对全量 edge_devices (含软删) 幂等补建 logical_device。
+	datalifecycle.SetSystemRetentionDays(cfg.DataRetentionDays())
+	if backfilled, err := datalifecycle.BackfillLogicalDevices(db, cfg.DataRetentionDays()); err != nil {
+		logger.Errorf("Logical device backfill failed: %v", err)
+	} else if backfilled > 0 {
+		logger.Infof("Logical device backfill: %d instance(s) attached", backfilled)
+	} else {
+		logger.Infof("Logical device backfill: all instances already attached")
+	}
+
+	// purge 后台任务 (§4.3 任务 2): 每日分批硬删 purge_requested 的逻辑设备数据。
+	purger := datalifecycle.NewPurger(db)
+	purger.Start()
+
+	// 数据生命周期 M 迁移步骤 (方案 v3.3 §七 + §1.1): 复合索引
+	// CONCURRENTLY 创建 + 大表 logical_device_id 分批回填, 全部在后台
+	// goroutine 内执行——墙钟随存量数据量增长, 不能阻塞启动; 回填进度
+	// 持久化在 backfill_jobs 水位表, 中断重启自动续跑 (§4.3); 两者均幂等,
+	// 失败下次启动重试。运维可用 `ehomectl datalifecycle backfill`
+	// 同步执行并以退出码判定校验结果。
+	// 前置: P0 身份补建 (上方 BackfillLogicalDevices) 必须先完成,
+	// 回填依赖实例已挂载 logical_device_id。
+	backfiller := datalifecycle.NewBackfiller(db)
+	backfiller.Start()
+
+	// 数据生命周期 P3 (方案 v3.3 §4.3 任务 3): 合并搬迁 worker — 处理
+	// merge_status='pending' 源的数据搬迁, 水位断点续跑 + 失败通知/重试。
+	migrator := datalifecycle.NewMigrator(db)
+	migrator.Start()
+
+	// 数据生命周期 P3 (方案 v3.3 §4.1/§4.2/§4.3 任务 1): retention 每日
+	// 任务 — 到期前 30/7 天通知 + 到期分批硬删。
+	retentionTask := datalifecycle.NewRetentionTask(db)
+	retentionTask.Start()
+
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
 		logger.Fatalf("Failed to create initialization credential: %v", err)
 	} else if credential != "" {
@@ -107,6 +145,16 @@ func main() {
 	driverRegistry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
+
+	// 数据生命周期 P4 收尾 (方案 v3.3 §2.4-2/§七-3): 尽力回填
+	// config_templates.edge_device_id 归属。依赖 driverRegistry 已就绪
+	// (WriteData 匹配需 driver CommandTemplates); 幂等, 失败仅告警不阻断
+	// 启动 (归属匹配不上留 NULL, 宁留勿删)。
+	if backfilled, err := datalifecycle.BackfillConfigTemplateOwnership(db, driverRegistry); err != nil {
+		logger.Warnf("ConfigTemplate ownership backfill failed: %v", err)
+	} else if backfilled > 0 {
+		logger.Infof("ConfigTemplate ownership backfill: %d template(s) attributed", backfilled)
+	}
 
 	wsHub := websocket.NewHub()
 	wsHub.SetSessionValidator(func(subjectID uint, version int64) bool {
@@ -271,6 +319,18 @@ func main() {
 	sig := <-quit
 
 	logger.Infof("Received signal %v, shutting down gracefully...", sig)
+
+	purger.Stop()
+	logger.Infof("Data lifecycle purger stopped")
+
+	backfiller.Stop()
+	logger.Infof("Data lifecycle backfiller stopped")
+
+	migrator.Stop()
+	logger.Infof("Data lifecycle merge migrator stopped")
+
+	retentionTask.Stop()
+	logger.Infof("Data lifecycle retention task stopped")
 
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")

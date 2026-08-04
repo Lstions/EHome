@@ -86,7 +86,7 @@ type EdgeDevice struct {
 	Name             string          `gorm:"size:64;not null" json:"name"`
 	NodeID           string          `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2 显式 FK (was implicit via Channel)
 	ChannelID        uint            `gorm:"index;not null" json:"channel_id"`                              // 保留
-	DeviceConfigID   uint            `gorm:"index" json:"device_config_id"`                                  // v2.2 FK; 0 = no template (driver fallback)
+	DeviceConfigID   uint            `gorm:"index" json:"device_config_id"`                                 // v2.2 FK; 0 = no template (driver fallback)
 	HardwareID       string          `gorm:"size:16;default:''" json:"hardware_id"`                         // v2.2 新增 (从 Channel 移过来)
 	IntervalMs       int             `gorm:"default:5000" json:"interval_ms"`
 	Enabled          bool            `gorm:"default:true" json:"enabled"`
@@ -95,6 +95,7 @@ type EdgeDevice struct {
 	LastDataAt       *time.Time      `json:"last_data_at"`                // v2.2 新增
 	LastError        string          `gorm:"size:256" json:"last_error"`  // v2.2 新增
 	ConfigVersion    string          `gorm:"size:64" json:"config_version"`
+	LogicalDeviceID  *uint           `gorm:"index" json:"logical_device_id,omitempty"`                         // 数据生命周期 P0: 逻辑身份锚点 (FK logical_devices, 不带级联)
 	InitState        string          `gorm:"size:20;default:pending" json:"init_state"`                        // v2.2 新增 (G6 准备)
 	InitLastStep     int             `gorm:"default:0" json:"init_last_step"`                                  // v2.2 新增
 	InitTotalSteps   int             `gorm:"default:0" json:"init_total_steps"`                                // v2.2 新增
@@ -112,6 +113,38 @@ type EdgeDevice struct {
 
 // TableName GORM 表名
 func (EdgeDevice) TableName() string { return "edge_devices" }
+
+// =====================================================================
+
+// LogicalDevice 逻辑设备身份 (数据生命周期 P0, 方案 v3.3 §1.1)
+//
+// 一个 LogicalDevice = 跨实例/跨时间的设备身份锚点。edge_devices 行
+// (含软删) 通过 logical_device_id 挂载到身份上; unified_data/device_data
+// 的 logical_device_id 是普通列 (无 FK), 由写入路径回填。
+//
+// 不变量 (§3.3-3): 同一 logical_device 最多一个存活 edge_device 实例。
+// 删除 logical_device 行只允许在 purge 任务确认数据清理完成后执行。
+type LogicalDevice struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	IdentityKey    string    `gorm:"column:identity_key;size:64;uniqueIndex;not null" json:"identity_key"` // type:hardware_id, 创建后只读
+	Name           string    `gorm:"size:128;not null" json:"name"`                                        // 用户可编辑
+	DeviceType     string    `gorm:"size:32;not null;index" json:"device_type"`
+	RetentionDays  int       `gorm:"default:365" json:"retention_days"`    // 创建时快照系统级配置 (§4.1)
+	MergedInto     *uint     `gorm:"index" json:"merged_into"`             // 自引用 logical_devices(id), 无级联; 仅 purge 前显式解除
+	MergeStatus    *string   `gorm:"size:16" json:"merge_status"`          // NULL / pending / done
+	PurgeRequested bool      `gorm:"default:false" json:"purge_requested"` // 删除设备勾选"同时删除数据"时置位
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// TableName GORM 表名
+func (LogicalDevice) TableName() string { return "logical_devices" }
+
+// 合并状态取值 (MergeStatus)
+const (
+	MergeStatusPending = "pending"
+	MergeStatusDone    = "done"
+)
 
 // =====================================================================
 
@@ -144,13 +177,21 @@ type Channel struct {
 //
 // 定义读取设备的寄存器序列 (hex write_data + read_length + delay_ms)
 type ConfigTemplate struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	NodeID     string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
-	WriteData  string    `gorm:"type:text;not null" json:"write_data"`
-	ReadLength uint32    `gorm:"default:0" json:"read_length"`
-	DelayMs    uint32    `gorm:"default:0" json:"delay_ms"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	NodeID     string `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
+	WriteData  string `gorm:"type:text;not null" json:"write_data"`
+	ReadLength uint32 `gorm:"default:0" json:"read_length"`
+	DelayMs    uint32 `gorm:"default:0" json:"delay_ms"`
+	// EdgeDeviceID is the owning edge device (方案 v3.3 §2.4, 可空).
+	//   - createSingleTemplate 创建路径写入归属;
+	//   - 存量模板按 WriteData 尽力 backfill, 匹配不上 (multi-drop 共享池)
+	//     留 NULL — 宁留勿删, 删除设备时只处理归属明确的模板;
+	//   - sender.reconcileDriverTemplates 自愈路径创建的无归属模板同理留
+	//     NULL (自愈目标消灭缺失, 不负责归属推断)。
+	// 加在 CreatedAt 前仅对齐测试断言习惯 (模板 ID 不因字段位置变化)。
+	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // =====================================================================
@@ -199,6 +240,9 @@ type DeviceData struct {
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt    time.Time `json:"created_at"`
 	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增 (与 DeviceID 二选一)
+	// 数据生命周期 P0: 逻辑身份列 (普通列, 无 FK; §1.2 大表不引入软删除)。
+	// 本卡不建 (logical_device_id, timestamp) 复合索引——M 迁移步骤负责。
+	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
 // =====================================================================
@@ -213,6 +257,8 @@ type UnifiedData struct {
 	Timestamp    time.Time `gorm:"index" json:"timestamp"`
 	CreatedAt    time.Time `json:"created_at"`
 	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增
+	// 数据生命周期 P0: 逻辑身份列 (普通列, 无 FK; §1.2 大表不引入软删除)。
+	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
 // =====================================================================

@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import QuickCreateDeviceDialog from '@/components/node/QuickCreateDeviceDialog.vue'
+import source from '@/components/node/QuickCreateDeviceDialog.vue?raw'
 
-const { mockCreate } = vi.hoisted(() => ({
+const { mockCreate, mockGetCandidates } = vi.hoisted(() => ({
   mockCreate: vi.fn((..._args: any[]) => Promise.resolve({ id: 99 })),
+  mockGetCandidates: vi.fn(() => Promise.resolve([])),
 }))
 
 vi.mock('@/api/edgeDevice', () => ({
-  edgeDeviceApi: { create: mockCreate },
+  edgeDeviceApi: { create: mockCreate, getCandidates: mockGetCandidates },
 }))
 
 const parsers = [
@@ -134,5 +136,91 @@ describe('QuickCreateDeviceDialog.vue', () => {
     expect(vm.form.channelId).toBeUndefined()
     expect(vm.form.name).toBe('')
     expect(vm.form.interval_ms).toBe(1000)
+  })
+
+  // ---- 数据生命周期 T5: 继承历史数据折叠区 (方案 v3.3 §3.1 入口2) ----
+
+  it('折叠区默认折叠: 渲染标题但不请求 candidates (延迟加载)', async () => {
+    const wrapper = mountDialog()
+    const vm = wrapper.vm as any
+    vm.form.parserId = 'sn3001_rain'
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+
+    // 折叠区标题文案 (§3.1 入口2; ElCollapseItem 为通用 stub 不渲染
+    // #title 具名插槽, 标题用源码契约断言, 折叠区正文提示用渲染断言)
+    expect(source).toContain('继承历史数据（可选）')
+    expect(wrapper.text()).toContain('若为更换/重建的同一台物理设备')
+    // 默认折叠状态
+    expect(vm.inheritCollapsed).toEqual([])
+    expect(vm.inheritExpanded).toBe(false)
+    // active=false → 候选组件不请求 (延迟加载, 折叠时零开销)
+    expect(mockGetCandidates).not.toHaveBeenCalled()
+  })
+
+  it('展开折叠区: 以当前型号+节点+通道上下文请求 candidates', async () => {
+    const wrapper = mountDialog()
+    const vm = wrapper.vm as any
+    vm.form.parserId = 'sn3001_rain'
+    vm.form.channelId = 1
+    await wrapper.vm.$nextTick()
+
+    // 展开折叠区 (el-collapse v-model 含 name='inherit')
+    vm.inheritCollapsed = ['inherit']
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+
+    expect(vm.inheritExpanded).toBe(true)
+    expect(mockGetCandidates).toHaveBeenCalledTimes(1)
+    expect(mockGetCandidates).toHaveBeenCalledWith({
+      type: 'sn3001_rain',
+      node_id: 'F0F5BDFFFE02',
+      hardware_id: '0x01',
+      channel_id: 1,
+    })
+  })
+
+  it('已选候选时提交携带 logical_device_id', async () => {
+    const wrapper = mountDialog()
+    const vm = wrapper.vm as any
+    vm.form.parserId = 'sn3001_rain'
+    vm.form.channelId = 1
+    vm.form.name = '雨量计-重建'
+    vm.form.interval_ms = 1000
+    vm.inheritLogicalDeviceId = 42
+    vm.formRef = { validate: () => Promise.resolve() }
+    await vm.handleSubmit()
+    await flushPromises()
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
+      name: '雨量计-重建',
+      node_id: 'F0F5BDFFFE02',
+      channel_id: 1,
+      type: 'sn3001_rain',
+      logical_device_id: 42,
+    }))
+  })
+
+  it('未选候选(默认折叠)时提交不携带 logical_device_id', async () => {
+    const wrapper = mountDialog()
+    const vm = wrapper.vm as any
+    vm.form.parserId = 'sn3001_rain'
+    vm.form.channelId = 1
+    vm.form.name = '雨量计-新'
+    vm.formRef = { validate: () => Promise.resolve() }
+    await vm.handleSubmit()
+    await flushPromises()
+    const arg = mockCreate.mock.calls[0][0] as any
+    expect(arg.logical_device_id).toBeUndefined()
+  })
+
+  it('关闭重置清空折叠区状态与继承选择', async () => {
+    const wrapper = mountDialog()
+    const vm = wrapper.vm as any
+    vm.inheritCollapsed = ['inherit']
+    vm.inheritLogicalDeviceId = 7
+    await wrapper.setProps({ modelValue: false })
+    await wrapper.vm.$nextTick()
+    expect(vm.inheritCollapsed).toEqual([])
+    expect(vm.inheritLogicalDeviceId).toBeNull()
   })
 })

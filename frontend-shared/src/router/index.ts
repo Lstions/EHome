@@ -67,6 +67,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '边缘设备详情', hidden: true },
       },
       {
+        path: 'logical-device',
+        name: 'LogicalDeviceList',
+        component: () => import('@/views/logical-device/LogicalDeviceList.vue'),
+        meta: { title: '逻辑设备', icon: 'Share' },
+      },
+      {
         path: 'data',
         name: 'DataPanel',
         component: () => import('@/views/data/DataPanel.vue'),

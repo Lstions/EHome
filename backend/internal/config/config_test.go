@@ -211,3 +211,27 @@ func TestControlEnvOverridesAreBounded(t *testing.T) {
 		t.Fatalf("invalid control env was accepted: %+v", cfg.Control)
 	}
 }
+
+func TestDataRetentionDays(t *testing.T) {
+	// 默认 365
+	cfg := Load()
+	if got := cfg.DataRetentionDays(); got != DefaultDataRetentionDays {
+		t.Errorf("expected default %d, got %d", DefaultDataRetentionDays, got)
+	}
+
+	// 环境变量覆盖
+	t.Setenv("EHOME_DATA_RETENTION_DAYS", "30")
+	cfg = Load()
+	if got := cfg.DataRetentionDays(); got != 30 {
+		t.Errorf("expected 30 from env, got %d", got)
+	}
+
+	// 非法值 (非数字 / 非正数) 被拒绝, 回落默认
+	for _, bad := range []string{"not-a-number", "0", "-5"} {
+		t.Setenv("EHOME_DATA_RETENTION_DAYS", bad)
+		cfg = Load()
+		if got := cfg.DataRetentionDays(); got != DefaultDataRetentionDays {
+			t.Errorf("invalid %q accepted as %d, want default %d", bad, got, DefaultDataRetentionDays)
+		}
+	}
+}

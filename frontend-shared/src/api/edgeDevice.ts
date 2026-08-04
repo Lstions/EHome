@@ -21,7 +21,40 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
+  // 数据生命周期 P0: 逻辑身份锚点 (后端 omitempty — 未建立时字段缺省为 undefined)
+  logical_device_id?: number
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
+}
+
+// GET /edge-devices/:id/logical-device-info 响应 (方案 v3.3 §2.1)
+// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
+export interface LogicalDeviceInfo {
+  edge_device_id: number
+  name: string | null
+  logical_device_id: number | null
+  retention_days: number | null
+  instance_count: number
+  row_estimate?: number
+}
+
+// GET /edge-devices/candidates 响应项 (方案 v3.3 §1.3)。
+// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
+export interface LogicalDeviceCandidate {
+  id: number
+  name: string
+  device_type: string
+  retention_days: number
+  instance_count: number
+  last_data_at: string | null
+  match_weight: number
+  row_estimate?: number
+}
+
+export interface CandidateQueryParams {
+  type: string
+  node_id?: string
+  hardware_id?: string
+  channel_id?: number
 }
 
 export interface EdgeDeviceListParams {
@@ -43,6 +76,10 @@ export interface CreateEdgeDeviceParams {
   enabled?: boolean
   interval_ms?: number
   device_config_id?: number
+  // 方案 v3.3 §3.3/§九: 继承目标逻辑设备 (可选)。指定时后端校验
+  // 目标存在/type 匹配/merged_into NULL/purge_requested FALSE +
+  // 存活实例唯一性; 未指定则后端新建逻辑身份。
+  logical_device_id?: number
   // F: inline channel creation — when channel_id is 0/absent and channel is
   // provided, the backend creates the channel inside the same transaction.
   channel?: {
@@ -84,6 +121,7 @@ interface RawEdgeDevice {
   error_code?: number
   last_error_code?: number
   created_at?: string
+  logical_device_id?: number
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -138,6 +176,7 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   last_data_time: d.last_data_at || d.last_data_time || null,
   last_error_code: d.error_code ?? d.last_error_code ?? undefined,
   created_at: d.created_at || '',
+  logical_device_id: d.logical_device_id ?? undefined,
   device_config: d.device_config
 })
 
@@ -195,8 +234,32 @@ export const edgeDeviceApi = {
     await client.put(`/api/v1/edge-devices/${id}`, data)
   },
 
-  async delete(id: number): Promise<void> {
+  // 方案 v3.3 §2.1/§九: delete_data 可选查询参数 (默认 false = 保留历史数据)。
+  // 现有调用方 delete(id) 不带第二参数 → 请求与旧版完全一致 (不附加 config)。
+  async delete(id: number, options?: { delete_data?: boolean }): Promise<void> {
+    if (options?.delete_data === true) {
+      await client.delete(`/api/v1/edge-devices/${id}`, { params: { delete_data: 'true' } })
+      return
+    }
     await client.delete(`/api/v1/edge-devices/${id}`)
+  },
+
+  // 方案 v3.3 §2.1: 删除弹窗信息区 — 逻辑设备信息 (实例数/数据量估算/保留天数)。
+  // 失败由调用方降级处理 (不显示信息区, 不阻塞删除)。
+  async getLogicalDeviceInfo(id: number): Promise<LogicalDeviceInfo> {
+    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/logical-device-info`)
+    const data = response?.data && typeof response.data === 'object' ? response.data : response
+    return data as LogicalDeviceInfo
+  },
+
+  // 方案 v3.3 §1.3/§九: 创建继承候选逻辑设备列表 (Unscoped 聚合,
+  // 权重排序, 数据量估算 + 3s 超时降级)。失败由调用方降级处理。
+  async getCandidates(params: CandidateQueryParams): Promise<LogicalDeviceCandidate[]> {
+    const response = await client.get<unknown, any>('/api/v1/edge-devices/candidates', { params })
+    const data = response?.data
+    if (Array.isArray(data)) return data as LogicalDeviceCandidate[]
+    if (Array.isArray(response)) return response as LogicalDeviceCandidate[]
+    return []
   },
 
   async getLatestData(id: number): Promise<any> {

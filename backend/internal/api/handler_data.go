@@ -7,11 +7,26 @@ import (
 	"sync"
 	"time"
 
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// dataScopeCond renders the §六 data-scope condition for a resolved query
+// scope: the logical scope condition (query and cleanup share it, §4.3 —
+// the OR fallback branch for NULL-logical rows is permanent, independent
+// of any backfill marker), or the plain device_id fallback for instances
+// without a logical identity yet (兼容 backfill 前旧数据). The column
+// names are identical in unified_data and device_data, so one condition
+// serves both tables.
+func dataScopeCond(qs *datalifecycle.DataQueryScope) (string, []interface{}) {
+	if qs.LogicalID > 0 {
+		return qs.Scope.Cond()
+	}
+	return "device_id = ?", []interface{}{qs.FallbackDeviceID}
+}
 
 // downsampleUnifiedData uniformly samples data to at most maxPoints rows.
 // If maxPoints <= 0 or data already fits, returns data unchanged.
@@ -45,6 +60,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
+		// 查询协议 (§六): 前端始终传 edge_device_id, 后端解析逻辑身份。
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(deviceID))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
 		limitStr := c.DefaultQuery("limit", "100")
 		limit, _ := strconv.Atoi(limitStr)
 		if limit <= 0 || limit > 1000 {
@@ -54,7 +76,8 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		sinceStr := c.Query("since")
 		sensorName := c.Query("sensor")
 
-		query := db.Where("device_id = ?", deviceID)
+		cond, args := dataScopeCond(qs)
+		query := db.Where(cond, args...)
 		if sinceStr != "" {
 			if since, err := time.Parse(time.RFC3339, sinceStr); err == nil {
 				query = query.Where("timestamp >= ?", since)
@@ -64,6 +87,9 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			query = query.Where("sensor_name = ?", sensorName)
 		}
 
+		if qs.DedupNeeded {
+			query = datalifecycle.ApplyShapeDedup(db.Session(&gorm.Session{}), query)
+		}
 		var data []models.UnifiedData
 		query.Order("timestamp DESC").Limit(limit).Find(&data)
 		c.JSON(http.StatusOK, data)
@@ -140,6 +166,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
+		// 查询协议 (§六): resolve → scope 条件 (+ 保形去重)。
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(deviceID))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+
 		sensorName := c.Query("sensor")
 
 		// Support start_time/end_time from frontend
@@ -166,9 +199,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			endTime = time.Now()
 		}
 
-		q := db.Where("device_id = ? AND timestamp >= ? AND timestamp <= ?", deviceID, startTime, endTime)
+		cond, args := dataScopeCond(qs)
+		q := db.Where(cond+" AND timestamp >= ? AND timestamp <= ?", append(args, startTime, endTime)...)
 		if sensorName != "" {
 			q = q.Where("sensor_name = ?", sensorName)
+		}
+		if qs.DedupNeeded {
+			q = datalifecycle.ApplyShapeDedup(db.Session(&gorm.Session{}), q)
 		}
 
 		var data []models.UnifiedData
@@ -191,14 +228,23 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
+		// 查询协议 (§六): resolve → scope 条件。类别列表本身无 timestamp
+		// 维度, 无需保形去重 (GROUP BY sensor_name 已是聚合)。
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
 		type category struct {
 			Code string `json:"code"`
 			Unit string `json:"unit"`
 		}
 		var categories []category
+		cond, args := dataScopeCond(qs)
 		if err := db.Model(&models.UnifiedData{}).
 			Select("sensor_name AS code, MAX(unit) AS unit").
-			Where("device_id = ?", devicePK).
+			Where(cond, args...).
 			Group("sensor_name").
 			Order("sensor_name ASC").
 			Scan(&categories).Error; err != nil {
@@ -218,6 +264,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			return
+		}
+
+		// 查询协议 (§六): resolve → scope 条件 (+ 保形去重)。
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -241,11 +294,14 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
+		cond, args := dataScopeCond(qs)
+		q := db.Where(cond+" AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+			append(args, sensorName, startTime, endTime)...)
+		if qs.DedupNeeded {
+			q = datalifecycle.ApplyShapeDedup(db.Session(&gorm.Session{}), q)
+		}
 		var data []models.UnifiedData
-		db.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
-			devicePK, sensorName, startTime, endTime).
-			Order("timestamp ASC").
-			Find(&data)
+		q.Order("timestamp ASC").Find(&data)
 
 		// Server-side downsampling: if max_points specified and data exceeds it,
 		// uniformly sample to cap response size.
@@ -268,6 +324,14 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			return
+		}
+
+		// 查询协议 (§六): resolve → scope 条件 (+ 保形去重)。goroutine
+		// 并发段之前解析一次, 各 goroutine 只读复用 (Scope 不可变)。
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -294,6 +358,8 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
 
+		cond, args := dataScopeCond(qs)
+
 		// Query all categories in parallel
 		type catResult struct {
 			Category string               `json:"category"`
@@ -311,11 +377,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 				// Session{}, concurrent db.Where() calls race and corrupt each other's conditions,
 				// causing some queries to return 0 rows.
 				session := db.Session(&gorm.Session{})
+				q := session.Where(cond+" AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+					append(append([]interface{}{}, args...), category, startTime, endTime)...)
+				if qs.DedupNeeded {
+					q = datalifecycle.ApplyShapeDedup(session.Session(&gorm.Session{}), q)
+				}
 				var data []models.UnifiedData
-				session.Where("device_id = ? AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
-					devicePK, category, startTime, endTime).
-					Order("timestamp ASC").
-					Find(&data)
+				q.Order("timestamp ASC").Find(&data)
 				data = downsampleUnifiedData(data, maxPoints)
 				results[idx] = catResult{Category: category, Data: data}
 			}(i, cat)

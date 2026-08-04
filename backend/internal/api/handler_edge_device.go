@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -53,7 +54,7 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 		if !cmd.Schedulable {
 			continue // one-shot triggers don't need ConfigTemplates
 		}
-		if err := createSingleTemplate(tx, ch, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
+		if err := createSingleTemplate(tx, ch, dev.ID, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
 			return fmt.Errorf("failed to create template for command %s: %w", cmd.ID, err)
 		}
 		created++
@@ -63,7 +64,9 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 }
 
 // createSingleTemplate inserts one ConfigTemplate and appends its ID to the channel's template_ids.
-func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, readLength uint32, delayMs uint32) error {
+// edgeDeviceID records the owning edge device (方案 v3.3 §2.4); 0 leaves the
+// ownership column NULL (self-healing / callers without a device instance).
+func createSingleTemplate(tx *gorm.DB, ch *models.Channel, edgeDeviceID uint, writeData string, readLength uint32, delayMs uint32) error {
 	if writeData == "" {
 		return nil
 	}
@@ -72,6 +75,9 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, rea
 		WriteData:  writeData,
 		ReadLength: readLength,
 		DelayMs:    delayMs,
+	}
+	if edgeDeviceID > 0 {
+		tmpl.EdgeDeviceID = &edgeDeviceID
 	}
 	if err := tx.Create(&tmpl).Error; err != nil {
 		return err
@@ -291,6 +297,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Get single edge device by id (v2.2 path for /devices/:id)
+	// 方案 v3.3 T5 P2: candidates 静态路由 (§1.3 §九) — gin 静态段优先于
+	// :id 通配符, 必须先注册以显式声明共存关系。
+	registerEdgeDeviceCandidateRoutes(v1, db)
+
 	v1.GET("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var d models.EdgeDevice
@@ -317,6 +327,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			IntervalMs     *int    `json:"interval_ms"`
 			HardwareID     *string `json:"hardware_id"`
 			DeviceConfigID *uint   `json:"device_config_id"`
+			// 方案 v3.3 §3.3/§九: 继承目标 (可选)。指定时校验目标存在 +
+			// device_type 匹配 + merged_into IS NULL + purge_requested=FALSE,
+			// 并做存活实例唯一性校验; 未指定则新建 logical_device
+			// (永不复用既有 key)。
+			LogicalDeviceID *uint `json:"logical_device_id"`
 			// F: inline channel creation — when channel_id is 0/absent and
 			// channel is provided, the channel is created inside the same
 			// transaction, eliminating the two-phase-commit orphan risk.
@@ -464,8 +479,35 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := checkDeviceUniqueness(tx, dev.ChannelID, dev.Type, dev.HardwareID, 0); err != nil {
 				return err
 			}
+			// 方案 v3.3 §3.3: 创建继承 (可选)。指定 logical_device_id:
+			// 事务内校验目标存在 + device_type 匹配 + merged_into IS NULL +
+			// purge_requested=FALSE (v3.3-N1), 再做存活实例唯一性校验
+			// (§3.3-3, 双存活实例混合数据无物理意义)。未指定: 创建后新建
+			// logical_device, 永不复用既有 key (§2.3.1 路径表)。
+			if dto.LogicalDeviceID != nil {
+				target, err := validateInheritanceTarget(tx, *dto.LogicalDeviceID, dev.Type)
+				if err != nil {
+					return err
+				}
+				if err := checkLivingInstanceUniqueness(tx, target); err != nil {
+					return err
+				}
+				dev.LogicalDeviceID = &target.ID
+			}
 			// Step 1: Create EdgeDevice (inside transaction)
 			if err := tx.Create(&dev).Error; err != nil {
+				return err
+			}
+			if dto.LogicalDeviceID == nil {
+				// §3.3-4: "作为新设备创建"路径——任何设备都有逻辑身份,
+				// 与删除流程 §2.3-2 对称。dev.ID 已就绪 (空 hardware_id 的
+				// 确定性派生需要稳定基准)。
+				if err := attachNewLogicalDevice(tx, &dev); err != nil {
+					return err
+				}
+			}
+			// §2.5: 仅"原位置重建"场景 (权重 100 档) 复制校准行。
+			if err := copyCalibrationIfInPlace(tx, &dev); err != nil {
 				return err
 			}
 			// An explicit zero interval means "do not schedule".  The model has a
@@ -488,6 +530,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
+			var conflict conflictError
+			if errors.As(err, &conflict) {
+				// §3.3-2/§3.3-3: 继承校验失败与存活实例冲突为 409 语义。
+				Error(c, http.StatusConflict, err.Error())
+				return
+			}
 			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -709,8 +757,14 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Delete edge device (v2.2 path for DELETE /devices/:id)
+	// 方案 v3.3 §2.3/§九: +delete_data 查询参数 (默认 false)。事务内:
+	// 缺逻辑身份则补建 (§2.3.1 路径 3) → GORM 软删实例 → delete_data=true
+	// 时置 logical_devices.purge_requested 标记; 数据硬删由 purge 后台任务
+	// 异步分批执行 (§4.3), 不在 API 事务里删数据。
 	v1.DELETE("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
+		deleteData := c.Query("delete_data") == "true" || c.Query("delete_data") == "1"
+
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
@@ -719,7 +773,45 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Find node before deletion for event emission
 		var ch models.Channel
 		hasNode := db.First(&ch, d.ChannelID).Error == nil
-		if err := db.Delete(&models.EdgeDevice{}, id).Error; err != nil {
+
+		var logicalID uint
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var inst models.EdgeDevice
+			if err := tx.First(&inst, d.ID).Error; err != nil {
+				return err
+			}
+			if inst.LogicalDeviceID == nil {
+				// §2.3.1 路径 3: 删除时补建——允许复用既有 key (复用前跟随
+				// merged_into 链挂到最终目标; 目标 purge_requested=TRUE 时
+				// 禁止复用, 退序号 key)。保证任何被删设备都有逻辑身份锚点。
+				ld, err := datalifecycle.EnsureLogicalDevice(tx, &inst, datalifecycle.PathDelete, datalifecycle.SystemRetentionDays())
+				if err != nil {
+					return err
+				}
+				if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", inst.ID).
+					Update("logical_device_id", ld.ID).Error; err != nil {
+					return err
+				}
+				logicalID = ld.ID
+			} else {
+				logicalID = *inst.LogicalDeviceID
+			}
+			if err := handleConfigTemplateOnDelete(tx, &inst); err != nil {
+				return err
+			}
+			if err := tx.Delete(&models.EdgeDevice{}, inst.ID).Error; err != nil {
+				return err
+			}
+			if deleteData {
+				// 只置标记; purge 后台任务 (v3.3-N1 守卫后) 分批硬删数据。
+				if err := tx.Model(&models.LogicalDevice{}).Where("id = ?", logicalID).
+					Update("purge_requested", true).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
@@ -727,30 +819,119 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if hasNode {
 			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(d.ID))
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{
+			"deleted":           id,
+			"logical_device_id": logicalID,
+			"delete_data":       deleteData,
+			"purge_requested":   deleteData,
+		}})
 	})
 
 	// Edge device routes group for :id sub-resources
 	e := v1.Group("/edge-devices")
 
+	// GET /api/v1/edge-devices/:id/logical-device-info — 删除弹窗信息区
+	// (方案 v3.3 §2.1/§1.3): 异步加载逻辑设备信息。row_estimate 用估算
+	// (PG EXPLAIN reltuples / SQLite 截断 COUNT), 3s 超时降级为不含数据量
+	// (row_estimate 字段省略)。最终形态: GET 单资源, 实例缺逻辑身份时
+	// 按实例自身数据范围估算 (logical_device_id 为 null, 其余字段置空)。
+	e.GET("/:id/logical-device-info", func(c *gin.Context) {
+		id := c.Param("id")
+		var d models.EdgeDevice
+		if err := db.First(&d, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+
+		resp := gin.H{"code": 200, "data": gin.H{
+			"edge_device_id":    d.ID,
+			"name":              d.Name,
+			"logical_device_id": nil,
+			"retention_days":    nil,
+			"instance_count":    int64(1), // 至少包含本实例自身
+		}}
+
+		if d.LogicalDeviceID != nil {
+			var ld models.LogicalDevice
+			if err := db.First(&ld, *d.LogicalDeviceID).Error; err == nil {
+				resp = gin.H{"code": 200, "data": gin.H{
+					"edge_device_id":    d.ID,
+					"name":              ld.Name,
+					"logical_device_id": ld.ID,
+					"retention_days":    ld.RetentionDays,
+				}}
+				count, err := datalifecycle.CountInstances(db, ld.ID)
+				if err == nil {
+					resp["data"].(gin.H)["instance_count"] = count
+				}
+				// T1.1: 估算段挂端点级超时兜底 — 超时/失败走降级路径
+				// (省略 row_estimate), 保证端点不阻塞 (方案 §1.3)。
+				estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
+				if rows, ok := datalifecycle.EstimateRowCount(estCtx, db, ld.ID); ok {
+					resp["data"].(gin.H)["row_estimate"] = rows
+				}
+				cancel()
+			} else {
+				resp["data"].(gin.H)["instance_count"] = int64(1)
+			}
+		} else {
+			// 尚未建立逻辑身份: 按实例自身范围估算 (NULL-logical 行)。
+			estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
+			scope := &datalifecycle.Scope{InstanceIDs: []uint{d.ID}}
+			if rows, ok := datalifecycle.EstimateScopeRows(estCtx, db, scope); ok {
+				resp["data"].(gin.H)["row_estimate"] = rows
+			}
+			cancel()
+		}
+		c.JSON(http.StatusOK, resp)
+	})
+
 	// GET /api/v1/edge-devices/:id/latest-data
+	// 查询协议 (§六/§十二): 实例已删 → 404 (实例语义); 存活 → resolve
+	// 逻辑身份后查 device_data 最新一条。
 	e.GET("/:id/latest-data", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		if qs.InstanceDeleted {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			return
+		}
 		// 从 device_data 表查最新一条
 		var data models.DeviceData
-		db.Where("device_id = ?", id).Order("created_at DESC").First(&data)
+		cond, args := dataScopeCond(qs)
+		db.Where(cond, args...).Order("created_at DESC").First(&data)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": data})
 	})
 
 	// GET /api/v1/edge-devices/:id/data
+	// 查询协议 (§六/§十二): 实例已删 → 404; 存活 → resolve 后查全量历史
+	// (含继承/合并前数据, device_id 与 logical_device_id 列同名共用条件)。
 	e.GET("/:id/data", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		if qs.InstanceDeleted {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			return
+		}
 		from := c.Query("start_time")
 		to := c.Query("end_time")
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		cond, args := dataScopeCond(qs)
 		var data []models.DeviceData
-		q := db.Where("device_id = ?", id)
+		q := db.Where(cond, args...)
 		if from != "" {
 			q = q.Where("created_at >= ?", from)
 		}

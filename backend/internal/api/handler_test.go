@@ -55,6 +55,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.CalibrationCache{},
 		&models.PendingWriteRecord{},
 		&models.NodeLog{},
+		&models.LogicalDevice{},
 	)
 	if err != nil {
 		t.Fatalf("auto migrate: %v", err)
@@ -1262,8 +1263,9 @@ func TestEdgeDevice_LatestData(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// §十二: 实例已删/不存在 → 404 (实例语义)。
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1280,8 +1282,9 @@ func TestEdgeDevice_Data(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// §十二: 实例已删/不存在 → 404 (实例语义)。
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1351,7 +1354,7 @@ func TestCreateSingleTemplate(t *testing.T) {
 
 	t.Run("valid template", func(t *testing.T) {
 		err := db.Transaction(func(tx *gorm.DB) error {
-			return createSingleTemplate(tx, &ch, "DDA50300FFFD77", 60, 100)
+			return createSingleTemplate(tx, &ch, 7, "DDA50300FFFD77", 60, 100)
 		})
 		if err != nil {
 			t.Fatalf("createSingleTemplate failed: %v", err)
@@ -1364,11 +1367,30 @@ func TestCreateSingleTemplate(t *testing.T) {
 		if tmpl.ReadLength != 60 || tmpl.DelayMs != 100 {
 			t.Errorf("unexpected template params: read_length=%d delay_ms=%d", tmpl.ReadLength, tmpl.DelayMs)
 		}
+		if tmpl.EdgeDeviceID == nil || *tmpl.EdgeDeviceID != 7 {
+			t.Errorf("expected edge_device_id=7 recorded, got %v", tmpl.EdgeDeviceID)
+		}
+	})
+
+	t.Run("zero edge_device_id leaves ownership NULL", func(t *testing.T) {
+		err := db.Transaction(func(tx *gorm.DB) error {
+			return createSingleTemplate(tx, &ch, 0, "AABBCC", 8, 50)
+		})
+		if err != nil {
+			t.Fatalf("createSingleTemplate failed: %v", err)
+		}
+		var tmpl models.ConfigTemplate
+		if err := db.Where("write_data = ?", "AABBCC").First(&tmpl).Error; err != nil {
+			t.Fatalf("template not found: %v", err)
+		}
+		if tmpl.EdgeDeviceID != nil {
+			t.Errorf("expected edge_device_id NULL for owner=0, got %v", *tmpl.EdgeDeviceID)
+		}
 	})
 
 	t.Run("empty write_data", func(t *testing.T) {
 		err := db.Transaction(func(tx *gorm.DB) error {
-			return createSingleTemplate(tx, &ch, "", 10, 100)
+			return createSingleTemplate(tx, &ch, 7, "", 10, 100)
 		})
 		if err != nil {
 			t.Fatalf("createSingleTemplate with empty write_data should not error: %v", err)

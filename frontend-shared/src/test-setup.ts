@@ -1,4 +1,4 @@
-import { defineComponent, h, type Component } from 'vue'
+import { defineComponent, h, inject, provide, type Component, type InjectionKey } from 'vue'
 import { config } from '@vue/test-utils'
 
 /**
@@ -277,14 +277,36 @@ const ElTable = defineComponent({
     rowKey: [String, Function],
   },
   emits: ['selection-change', 'row-click', 'sort-change'],
-  setup(props, { slots }) {
-    return () => h('table', { class: 'el-table' }, [
-      slots.default?.(),
-      // 轻量环境中保留 row 文本，使历史记录等表格测试仍可验证数据呈现。
-      h('tbody', props.data.map((row: any, index: number) => h('tr', { key: row?.id ?? index }, [
-        h('td', { class: 'el-table__cell' }, Object.values(row ?? {}).map(String).join(' ')),
-      ]))),
-    ])
+  setup(props, { slots, emit }) {
+    // 行选中状态 (对象身份集合); type="selection" 列存在时每行渲染 checkbox,
+    // 勾选切换触发 selection-change, 与真实 el-table 的多选契约一致。
+    const selectedRows = new Set<any>()
+    return () => {
+      const columnVNodes = slots.default?.() ?? []
+      const flat = Array.isArray(columnVNodes) ? columnVNodes : [columnVNodes]
+      const hasSelection = flat.some((vn: any) => vn?.props?.type === 'selection')
+      return h('table', { class: 'el-table' }, [
+        columnVNodes,
+        // 轻量环境中保留 row 文本，使历史记录等表格测试仍可验证数据呈现。
+        h('tbody', props.data.map((row: any, index: number) => h('tr', { key: row?.id ?? index }, [
+          hasSelection ? h('td', { class: 'el-table__cell el-table__selection-cell' }, [
+            h('input', {
+              type: 'checkbox',
+              class: 'el-table__row-checkbox',
+              'aria-label': `选择行 ${row?.id ?? index}`,
+              checked: selectedRows.has(row),
+              onChange: (event: Event) => {
+                const checked = (event.target as HTMLInputElement).checked
+                if (checked) selectedRows.add(row)
+                else selectedRows.delete(row)
+                emit('selection-change', Array.from(selectedRows))
+              },
+            }),
+          ]) : null,
+          h('td', { class: 'el-table__cell' }, Object.values(row ?? {}).map(String).join(' ')),
+        ]))),
+      ])
+    }
   },
 })
 
@@ -496,22 +518,69 @@ const ElProgress = defineComponent({
   },
 })
 
+// ElRadioGroup/ElRadio — 交互式 stub (provide/inject):
+// group 提供当前值 + 选中回调; radio 渲染真实 <input type="radio">,
+// checked 反映 group 当前值, click/change 触发 update:modelValue + change。
+// 支持 Element Plus 2.x 的 value prop (新) 与 label prop (旧) 双写法。
+interface RadioGroupContext {
+  currentValue: () => string | number | boolean | undefined
+  disabled: () => boolean
+  select: (value: string | number | boolean) => void
+}
+const RADIO_GROUP_KEY: InjectionKey<RadioGroupContext> = Symbol('el-radio-group-stub')
+
 const ElRadioGroup = defineComponent({
   props: { modelValue: [String, Number, Boolean], disabled: Boolean },
   emits: ['update:modelValue', 'change'],
-  setup(_, { slots }) {
-    return () => h('div', { class: 'el-radio-group' }, slots.default?.())
+  setup(props, { slots, emit }) {
+    provide(RADIO_GROUP_KEY, {
+      currentValue: () => props.modelValue,
+      disabled: () => props.disabled,
+      select: (value) => {
+        emit('update:modelValue', value)
+        emit('change', value)
+      },
+    })
+    return () => h('div', { class: 'el-radio-group', role: 'radiogroup' }, slots.default?.())
   },
 })
 
 const ElRadio = defineComponent({
-  props: { label: [String, Number, Boolean], disabled: Boolean, modelValue: [String, Number, Boolean] },
+  props: {
+    label: [String, Number, Boolean],
+    value: [String, Number, Boolean],
+    disabled: Boolean,
+    modelValue: [String, Number, Boolean],
+  },
   emits: ['update:modelValue', 'change'],
-  setup(_, { slots }) {
-    return () => h('label', { class: 'el-radio' }, [
-      h('input', { type: 'radio', class: 'el-radio__input' }),
-      h('span', { class: 'el-radio__label' }, slots.default?.()),
-    ])
+  setup(props, { slots, emit }) {
+    const group = inject(RADIO_GROUP_KEY, null)
+    return () => {
+      // EP 2.x: value 优先, label 兼容旧写法
+      const ownValue = props.value !== undefined ? props.value : props.label
+      const current = group ? group.currentValue() : props.modelValue
+      const checked = current === ownValue
+      const disabled = props.disabled || (group ? group.disabled() : false)
+      const select = () => {
+        if (disabled) return
+        if (group) group.select(ownValue as string | number | boolean)
+        else {
+          emit('update:modelValue', ownValue)
+          emit('change', ownValue)
+        }
+      }
+      return h('label', { class: ['el-radio', checked ? 'is-checked' : ''] }, [
+        h('input', {
+          type: 'radio',
+          class: 'el-radio__input',
+          checked,
+          disabled,
+          onClick: select,
+          onChange: select,
+        }),
+        h('span', { class: 'el-radio__label' }, slots.default?.()),
+      ])
+    }
   },
 })
 
