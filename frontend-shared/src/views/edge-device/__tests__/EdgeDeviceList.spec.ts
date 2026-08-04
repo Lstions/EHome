@@ -100,8 +100,8 @@ describe('EdgeDeviceList.vue', () => {
 
   it('keeps component-level list responses sequence guarded and rejects malformed list entries', () => {
     expect(source).toContain('sequence !== listRequestSequence')
-    expect(source).toContain('const devices = ref<EdgeDevice[]>(compactEdgeDeviceList(initialCache?.items))')
-    expect(source).toContain('let result = compactEdgeDeviceList(devices.value)')
+    expect(source).toContain('devices.value = compactEdgeDeviceList(initialCache?.items)')
+    expect(source).toContain('let result = _searchFilteredItems.value')
   })
 
   it('defers wizard dependencies until the create dialog is opened', () => {
@@ -138,7 +138,7 @@ describe('EdgeDeviceList.vue', () => {
     expect(source.match(/await fetchDevices\(true\)/g)).toHaveLength(2)
     expect(source.match(/await fetchDevices\(true, true\)/g)).toHaveLength(2)
     expect(source.match(/edgeDeviceStore\.invalidateLists\(\)/g)).toHaveLength(2)
-    expect(source).toContain('Promise.allSettled(ids.map')
+    expect(source).toContain('confirmBatchDeleteBase(deleteData)')
     expect(source).toContain('assertSessionGeneration(sessionGeneration)')
   })
 
@@ -340,7 +340,7 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).not.toContain('ElMessageBox.confirm')
     expect(source).toContain('DeviceDeleteDialog')
     expect(source).toContain('DeviceBatchDeleteDialog')
-    expect(source).toContain('delete_data: deleteData')
+    expect(source).toContain('useDeviceDelete')
   })
 
   // ---- 数据生命周期 T5: 创建继承 步骤 0 (方案 v3.3 §3.1/§3.2) ----

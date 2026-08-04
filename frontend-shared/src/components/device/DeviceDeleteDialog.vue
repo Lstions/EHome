@@ -58,7 +58,7 @@
           <el-radio value="keep" class="data-action-radio">
             保留历史数据<span v-if="retentionSuffix" class="data-action-hint">（{{ retentionSuffix }}）</span>
           </el-radio>
-          <el-radio value="delete" class="data-action-radio">
+          <el-radio value="delete" class="data-action-radio data-action-radio-danger">
             <span class="danger-text">同时删除历史数据（将在后台删除，不可恢复）</span>
           </el-radio>
         </el-radio-group>
@@ -263,5 +263,15 @@ const handleConfirm = () => {
 
 .danger-text {
   color: var(--el-color-danger, #f56c6c);
+}
+
+/* 危险 radio 选中时圆圈变红 */
+.data-action-radio-danger :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: var(--el-color-danger);
+  background: var(--el-color-danger);
+}
+
+.data-action-radio-danger :deep(.el-radio__input.is-checked + .el-radio__label) {
+  color: var(--el-color-danger);
 }
 </style>

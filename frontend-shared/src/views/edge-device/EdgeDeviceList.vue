@@ -101,8 +101,8 @@
     </div>
 
     <!-- 批量操作栏 -->
-    <div class="batch-bar" v-if="viewMode === 'table' && selectedDevices.length > 0">
-      <span class="batch-info">已选择 <strong>{{ selectedDevices.length }}</strong> 个设备</span>
+    <div class="batch-bar" v-if="viewMode === 'table' && (selectedDevices?.length || 0) > 0">
+      <span class="batch-info">已选择 <strong>{{ selectedDevices?.length || 0 }}</strong> 个设备</span>
       <div class="batch-actions">
         <el-button type="danger" size="small" @click="handleBatchDelete">
           <el-icon><Delete /></el-icon>
@@ -247,7 +247,7 @@
 
     <!-- 空状态 -->
     <EmptyState
-      v-if="!loading && filteredDevices.length === 0"
+      v-if="!loading && (filteredDevices?.length || 0) === 0"
       icon="Cpu"
       title="暂无边缘设备"
       description='进入节点详情页，点击“创建边缘设备”按钮开始添加'
@@ -319,7 +319,7 @@
         </div>
 
         <!-- 使用配置模板（可选） -->
-        <el-card shadow="never" class="template-quick-pick" v-if="availableTemplates.length > 0">
+        <el-card shadow="never" class="template-quick-pick" v-if="availableTemplates?.length > 0">
           <div class="template-pick-row">
             <div class="template-pick-label">
               <el-icon><Document /></el-icon>
@@ -410,7 +410,7 @@
         <!-- 通道 Tabs: 选择已有 / 创建新 -->
         <el-tabs v-model="channelTab" style="margin-top: 20px;">
           <el-tab-pane label="选择已有通道" name="existing">
-            <div v-if="existingChannels.length > 0" class="channel-list">
+            <div v-if="existingChannels?.length > 0" class="channel-list">
               <div
                 v-for="ch in existingChannels"
                 :key="ch.id"
@@ -553,11 +553,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { 
-  Cpu, CircleCheck, CircleClose, DataAnalysis, Grid, 
+import {
+  Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
   Plus, View, Edit, Delete, InfoFilled, Check, Warning, Connection, DataLine,
-  Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download,
-  Document
+  List, Download, Document
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
@@ -578,7 +577,10 @@ import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog
 import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { useWebSocketStore } from '@/stores/websocket'
 import { getHardwareTagType } from '@/utils/hardwareTag'
+import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
+import { useDeviceDelete } from '@/composables/useDeviceDelete'
 
 const router = useRouter()
 const route = useRoute()
@@ -590,8 +592,6 @@ const edgeDeviceStore = useEdgeDeviceStore()
 // 视图模式：card | table
 const viewMode = ref<'card' | 'table'>('card')
 
-// 表格多选
-const selectedDevices = ref<any[]>([])
 // @ts-ignore - table ref used in template
 const tableRef = ref()
 
@@ -600,7 +600,7 @@ const collectors = ref<any[]>([])
 const currentPage = ref(1)
 const pageSize = ref(24)
 const total = ref(0)
-const searchKeyword = ref('')
+const devices = ref<EdgeDevice[]>([])
 const typeFilter = ref('')
 const statusFilter = ref('')
 const hardwareFilter = ref('')
@@ -610,10 +610,6 @@ let createTransactionGeneration = 0
 
 const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''
 const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
-if (routeSearch) searchKeyword.value = routeSearch
-if (['active', 'online', 'offline', 'warning', 'error', 'disabled'].includes(routeStatus)) {
-  statusFilter.value = routeStatus
-}
 
 const getListParams = () => {
   const params: any = { page: currentPage.value, page_size: pageSize.value }
@@ -624,9 +620,49 @@ const getListParams = () => {
 const initialCache = edgeDeviceStore.getCachedList(getListParams())
 const hasInitialCache = !!initialCache
 const loading = ref(!hasInitialCache)
-const devices = ref<EdgeDevice[]>(compactEdgeDeviceList(initialCache?.items))
+devices.value = compactEdgeDeviceList(initialCache?.items)
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
+
+// 搜索 debounce — 减少不必要的 filter 计算
+const {
+  searchKeyword,
+  debouncedKeyword: _debouncedSearchKeyword,
+  filteredItems: _searchFilteredItems,
+  clear: clearSearch,
+} = useDebouncedSearch(devices, {
+  searchFields: (d) => [d.name || '', d.device_type || '', getDeviceTypeLabel(d.device_type) || ''],
+})
+
+// 路由参数初始化（必须在 useDebouncedSearch 之后）
+if (routeSearch) searchKeyword.value = routeSearch
+if (['active', 'online', 'offline', 'warning', 'error', 'disabled'].includes(routeStatus)) {
+  statusFilter.value = routeStatus
+}
+
+// 删除管理 — 由 useDeviceDelete composable 封装
+const {
+  selectedDevices,
+  showDeleteDialog,
+  deletingDevice,
+  deleteSubmitting,
+  handleDelete,
+  confirmDelete: confirmDeleteBase,
+  showBatchDeleteDialog,
+  batchDeleteSubmitting,
+  handleBatchDelete,
+  confirmBatchDelete: confirmBatchDeleteBase,
+  handleSelectionChange,
+} = useDeviceDelete({
+  onSuccess: (deletedIds, _deleteData) => {
+    devices.value = devices.value.filter(d => !deletedIds.includes(d.id))
+    total.value = Math.max(0, total.value - deletedIds.length)
+    updateStats()
+    fetchDevices(true).catch(() => {
+      ElMessage.warning('删除结果已保存，但列表刷新失败，请稍后刷新')
+    })
+  },
+})
 
 // 向导状态
 const createStep = ref(0)
@@ -676,7 +712,7 @@ const onTemplateSelected = async (templateId: number | undefined | null) => {
   deviceForm.hardware_type = (tpl.hardware_type as any) || 'uart'
   deviceForm.protocol = (tpl.protocol as any) || 'modbus'
   // 尝试自动选解析器 (用 parser_id 匹配)
-  if (tpl.parser_id && availableParsers.value.length > 0) {
+  if (tpl.parser_id && availableParsers.value?.length > 0) {
     const matched = availableParsers.value.find(
       (p: Parser) => p.id === tpl.parser_id || p.id?.endsWith(tpl.parser_id || ''),
     )
@@ -751,31 +787,22 @@ const onlineCollectors = computed(() => collectors.value.filter((c: any) => c.st
 // 设备类型定义 — 从 deviceType.ts 统一导入
 const deviceTypes = deviceTypeOptions
 
-// 过滤后的设备
+// 过滤后的设备 — 结合 debounce 搜索与其他筛选
 const filteredDevices = computed(() => {
-  let result = compactEdgeDeviceList(devices.value)
-  
-  if (searchKeyword.value) {
-    const kw = searchKeyword.value.toLowerCase()
-    result = result.filter(d =>
-      d.name?.toLowerCase().includes(kw) ||
-      d.device_type?.toLowerCase().includes(kw) ||
-      getDeviceTypeLabel(d.device_type)?.toLowerCase().includes(kw)
-    )
-  }
-  
+  let result = _searchFilteredItems.value
+
   if (typeFilter.value) {
     result = result.filter(d => d.device_type === typeFilter.value)
   }
-  
+
   if (statusFilter.value) {
     result = result.filter(d => d.status === statusFilter.value)
   }
-  
+
   if (hardwareFilter.value) {
     result = result.filter(d => d.hardware_type === hardwareFilter.value)
   }
-  
+
   return result
 })
 
@@ -864,7 +891,7 @@ const availableBusesForType = (hardwareType: string): string[] => {
 
 // 解析器可选列表
 const availableParsers = computed(() => {
-  return parserStore.parsers.filter(p => p.hardware_types.length > 0)
+  return parserStore.parsers.filter(p => p.hardware_types?.length > 0)
 })
 
 // 根据已选解析器，筛选可用的总线类型
@@ -975,15 +1002,6 @@ function statusLabel(status: string): string {
   }
 }
 
-// 操作
-const clearFilters = () => {
-  searchKeyword.value = ''
-  typeFilter.value = ''
-  statusFilter.value = ''
-  hardwareFilter.value = ''
-  currentPage.value = 1
-}
-
 // 复制到剪贴板（跟随 FirmwareManage 的复制交互模式）
 const copyText = async (text: string) => {
   try {
@@ -1023,24 +1041,11 @@ const handleEdit = (device: any) => {
 }
 
 // 删除确认弹窗 (方案 v3.3 §2.1: ElDialog + radio + 异步逻辑设备信息)
-const showDeleteDialog = ref(false)
-const deletingDevice = ref<EdgeDevice | null>(null)
-const deleteSubmitting = ref(false)
-
-const handleDelete = (device: any) => {
-  deletingDevice.value = device
-  showDeleteDialog.value = true
-}
-
+// 由 useDeviceDelete composable 管理状态，此处仅包装刷新逻辑
 const confirmDelete = async (deleteData: boolean) => {
-  const device = deletingDevice.value
-  if (!device) return
-  deleteSubmitting.value = true
-  let deleted = false
-  try {
-    await edgeDeviceStore.deleteDevice(device.id, { delete_data: deleteData })
-    deleted = true
-    devices.value = devices.value.filter(item => item?.id !== device.id)
+  const result = await confirmDeleteBase(deleteData)
+  if (result.success && result.id) {
+    devices.value = devices.value.filter(item => item?.id !== result.id)
     total.value = Math.max(0, total.value - 1)
     updateStats()
     try {
@@ -1048,60 +1053,23 @@ const confirmDelete = async (deleteData: boolean) => {
     } catch {
       ElMessage.warning('设备已删除，但列表刷新失败，请稍后刷新')
     }
-    ElMessage.success(deleteData ? '删除成功，历史数据将在后台删除' : '删除成功')
-    showDeleteDialog.value = false
-  } catch {
-    if (!deleted) {
-      ElMessage.error('删除失败')
-    }
-  } finally {
-    deleteSubmitting.value = false
   }
 }
 
-// 表格多选
-const handleSelectionChange = (selection: any[]) => {
-  selectedDevices.value = selection
-}
-
-// 批量删除 (方案 v3.3 §2.2: 汇总视图 + 统一 radio, 沿用逐条 API 循环删除)
-const showBatchDeleteDialog = ref(false)
-const batchDeleteSubmitting = ref(false)
-
-const handleBatchDelete = () => {
-  if (selectedDevices.value.length === 0) return
-  showBatchDeleteDialog.value = true
-}
-
+// 批量删除 (方案 v3.3 §2.2: 汇总视图 + 统一 radio)
+// 由 useDeviceDelete composable 管理状态，此处仅包装刷新逻辑
 const confirmBatchDelete = async (deleteData: boolean) => {
-  const ids = selectedDevices.value.map(d => d.id)
-  if (ids.length === 0) {
-    showBatchDeleteDialog.value = false
-    return
-  }
-  batchDeleteSubmitting.value = true
-  try {
-    const results = await Promise.allSettled(ids.map(id => edgeDeviceStore.deleteDevice(id, { delete_data: deleteData })))
-    const succeeded = results.filter(result => result.status === 'fulfilled').length
-    const failed = results.length - succeeded
-    const succeededIds = new Set(ids.filter((_id, index) => results[index].status === 'fulfilled'))
+  const result = await confirmBatchDeleteBase(deleteData)
+  if (result.success && result.succeededIds) {
+    const succeededIds = new Set(result.succeededIds)
     devices.value = devices.value.filter(device => device && !succeededIds.has(device.id))
-    total.value = Math.max(0, total.value - succeeded)
+    total.value = Math.max(0, total.value - result.succeeded)
     updateStats()
-    selectedDevices.value = []
-    if (succeeded > 0) ElMessage.success(`成功删除 ${succeeded} 个设备`)
-    if (failed > 0) ElMessage.error(`${failed} 个设备删除失败`)
     try {
       await fetchDevices(true, true)
     } catch {
       ElMessage.warning('删除结果已保存，但列表刷新失败，请稍后刷新')
     }
-    // 全部失败时保留弹窗供重试; 有任一成功即关闭
-    if (succeeded > 0) showBatchDeleteDialog.value = false
-  } catch {
-    ElMessage.error('批量删除失败')
-  } finally {
-    batchDeleteSubmitting.value = false
   }
 }
 
@@ -1362,6 +1330,15 @@ watch([typeFilter, statusFilter], () => {
   currentPage.value = 1
   fetchDevices()
 })
+
+// 清空筛选时同时清空搜索
+const clearFilters = () => {
+  clearSearch()
+  typeFilter.value = ''
+  statusFilter.value = ''
+  hardwareFilter.value = ''
+  currentPage.value = 1
+}
 
 // 监听对话框打开，重置向导状态
 const handleCreateDialogClose = (done: () => void) => {

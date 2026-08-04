@@ -84,7 +84,18 @@
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty description="暂无逻辑设备" :image-size="80" />
+          <div class="empty-state-enhanced">
+            <el-empty description="暂无逻辑设备" :image-size="80">
+              <template #description>
+                <p class="empty-title">暂无逻辑设备</p>
+                <p class="empty-desc">逻辑设备用于聚合边缘设备数据，实现统一视图和数据保留策略管理。您还没有边缘设备，请先创建边缘设备。</p>
+              </template>
+              <el-button type="primary" @click="goToEdgeDevice">
+                <el-icon><Plus /></el-icon>
+                去创建边缘设备
+              </el-button>
+            </el-empty>
+          </div>
         </template>
       </el-table>
     </div>
@@ -121,6 +132,8 @@
                   class="timeline-bar"
                   :class="{ overlap: src.overlap_with_others }"
                   :style="timelineBarStyle(src)"
+                  :aria-label="`${src.name} 数据时间范围: ${src.first_data_at ? formatTime(src.first_data_at) : '无'} 至 ${src.last_data_at ? formatTime(src.last_data_at) : '无'}${src.overlap_with_others ? ', 与其他源存在重叠' : ''}`"
+                  role="img"
                 ></div>
               </div>
               <div class="timeline-meta">
@@ -253,7 +266,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Connection, Refresh, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
+import { Connection, Refresh, InfoFilled, WarningFilled, Plus } from '@element-plus/icons-vue'
 import { deviceTypeOptions, getDeviceTypeLabel } from '@/utils/deviceType'
 import {
   logicalDeviceApi,
@@ -264,13 +277,27 @@ import {
   type MergeJob,
   type MergeConflict,
 } from '@/api/logicalDevice'
+import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
 
 const router = useRouter()
 const route = useRoute()
 
+// 空状态 CTA：跳转到边缘设备页面创建
+const goToEdgeDevice = () => {
+  router.push('/edge-device')
+}
+
 const loading = ref(false)
 const items = ref<LogicalDeviceItem[]>([])
-const searchKeyword = ref('')
+
+// 搜索 debounce — 减少不必要的 filter 计算
+const {
+  searchKeyword,
+  filteredItems: searchFilteredItems,
+} = useDebouncedSearch(items, {
+  searchFields: (i) => [i.name || ''],
+})
+
 const typeFilter = ref('')
 const selection = ref<LogicalDeviceItem[]>([])
 
@@ -288,9 +315,7 @@ const fetchList = async () => {
 }
 
 const filteredItems = computed(() => {
-  let list = items.value
-  const kw = searchKeyword.value.trim().toLowerCase()
-  if (kw) list = list.filter(i => i.name.toLowerCase().includes(kw))
+  let list = searchFilteredItems.value
   if (typeFilter.value) list = list.filter(i => i.device_type === typeFilter.value)
   return list
 })
@@ -682,12 +707,20 @@ onMounted(async () => {
   top: 2px;
   bottom: 2px;
   border-radius: 5px;
-  background: var(--el-color-primary);
+  background: linear-gradient(90deg, var(--el-color-primary), var(--el-color-primary-light-3));
   min-width: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
 }
 
 .timeline-bar.overlap {
-  background: var(--el-color-warning);
+  background: linear-gradient(90deg, var(--el-color-warning), var(--el-color-warning-light-3));
+  box-shadow: 0 1px 4px rgba(230, 162, 60, 0.3);
+}
+
+.timeline-bar:hover {
+  transform: scaleY(1.2);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
 .timeline-meta {
@@ -796,6 +829,33 @@ onMounted(async () => {
   margin-left: 10px;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+/* 空状态增强 */
+.empty-state-enhanced {
+  padding: 20px 0;
+}
+
+.empty-state-enhanced :deep(.el-empty__description) {
+  margin-top: 8px;
+}
+
+.empty-title {
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  margin: 0 0 4px;
+}
+
+.empty-desc {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin: 0 0 16px;
+  max-width: 320px;
+  line-height: 1.5;
+}
+
+.empty-state-enhanced :deep(.el-empty__bottom) {
+  margin-top: 16px;
 }
 
 @media (max-width: 768px) {

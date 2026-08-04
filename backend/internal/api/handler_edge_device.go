@@ -830,6 +830,90 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// Edge device routes group for :id sub-resources
 	e := v1.Group("/edge-devices")
 
+	// POST /api/v1/edge-devices/batch-delete — 批量删除边缘设备
+	// 方案 v3.3 §2.2: 批量删除复用单删逻辑 (事务内逐条处理),
+	// 返回每条结果汇总。delete_data 语义与单删一致。
+	e.POST("/batch-delete", func(c *gin.Context) {
+		var req struct {
+			IDs        []uint `json:"ids" binding:"required,min=1,max=100"`
+			DeleteData bool   `json:"delete_data"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+
+		type result struct {
+			ID      uint   `json:"id"`
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}
+		results := make([]result, 0, len(req.IDs))
+
+		for _, id := range req.IDs {
+			r := result{ID: id}
+			var d models.EdgeDevice
+			if err := db.First(&d, id).Error; err != nil {
+				r.Error = err.Error()
+				results = append(results, r)
+				continue
+			}
+
+			var logicalID uint
+			err := db.Transaction(func(tx *gorm.DB) error {
+				var inst models.EdgeDevice
+				if err := tx.First(&inst, d.ID).Error; err != nil {
+					return err
+				}
+				if inst.LogicalDeviceID == nil {
+					ld, err := datalifecycle.EnsureLogicalDevice(tx, &inst, datalifecycle.PathDelete, datalifecycle.SystemRetentionDays())
+					if err != nil {
+						return err
+					}
+					if err := tx.Model(&models.EdgeDevice{}).Where("id = ?", inst.ID).
+						Update("logical_device_id", ld.ID).Error; err != nil {
+						return err
+					}
+					logicalID = ld.ID
+				} else {
+					logicalID = *inst.LogicalDeviceID
+				}
+				if err := handleConfigTemplateOnDelete(tx, &inst); err != nil {
+					return err
+				}
+				if err := tx.Delete(&models.EdgeDevice{}, inst.ID).Error; err != nil {
+					return err
+				}
+				if req.DeleteData {
+					if err := tx.Model(&models.LogicalDevice{}).Where("id = ?", logicalID).
+						Update("purge_requested", true).Error; err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				r.Error = err.Error()
+			} else {
+				r.Success = true
+			}
+			results = append(results, r)
+		}
+
+		succeeded := 0
+		for _, r := range results {
+			if r.Success {
+				succeeded++
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			"total":     len(results),
+			"succeeded": succeeded,
+			"failed":    len(results) - succeeded,
+			"results":   results,
+		}})
+	})
+
 	// GET /api/v1/edge-devices/:id/logical-device-info — 删除弹窗信息区
 	// (方案 v3.3 §2.1/§1.3): 异步加载逻辑设备信息。row_estimate 用估算
 	// (PG EXPLAIN reltuples / SQLite 截断 COUNT), 3s 超时降级为不含数据量

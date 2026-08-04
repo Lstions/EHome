@@ -244,6 +244,26 @@ export const edgeDeviceApi = {
     await client.delete(`/api/v1/edge-devices/${id}`)
   },
 
+  // 方案 v3.3 §2.2: 批量删除边缘设备。复用单删逻辑，返回每条结果汇总。
+  async batchDelete(ids: number[], options?: { delete_data?: boolean }): Promise<{
+    total: number
+    succeeded: number
+    failed: number
+    results: Array<{ id: number; success: boolean; error?: string }>
+  }> {
+    const response = await client.post<unknown, any>('/api/v1/edge-devices/batch-delete', {
+      ids,
+      delete_data: options?.delete_data === true,
+    })
+    const data = response?.data && typeof response.data === 'object' ? response.data : response
+    return data as {
+      total: number
+      succeeded: number
+      failed: number
+      results: Array<{ id: number; success: boolean; error?: string }>
+    }
+  },
+
   // 方案 v3.3 §2.1: 删除弹窗信息区 — 逻辑设备信息 (实例数/数据量估算/保留天数)。
   // 失败由调用方降级处理 (不显示信息区, 不阻塞删除)。
   async getLogicalDeviceInfo(id: number): Promise<LogicalDeviceInfo> {
