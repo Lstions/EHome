@@ -841,23 +841,47 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// GET /api/v1/edge-devices/:id/latest-data
+	// 查询协议 (§六/§十二): 实例已删 → 404 (实例语义); 存活 → resolve
+	// 逻辑身份后查 device_data 最新一条。
 	e.GET("/:id/latest-data", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		if qs.InstanceDeleted {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			return
+		}
 		// 从 device_data 表查最新一条
 		var data models.DeviceData
-		db.Where("device_id = ?", id).Order("created_at DESC").First(&data)
+		cond, args := dataScopeCond(qs)
+		db.Where(cond, args...).Order("created_at DESC").First(&data)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "data": data})
 	})
 
 	// GET /api/v1/edge-devices/:id/data
+	// 查询协议 (§六/§十二): 实例已删 → 404; 存活 → resolve 后查全量历史
+	// (含继承/合并前数据, device_id 与 logical_device_id 列同名共用条件)。
 	e.GET("/:id/data", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
+		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			return
+		}
+		if qs.InstanceDeleted {
+			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			return
+		}
 		from := c.Query("start_time")
 		to := c.Query("end_time")
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		cond, args := dataScopeCond(qs)
 		var data []models.DeviceData
-		q := db.Where("device_id = ?", id)
+		q := db.Where(cond, args...)
 		if from != "" {
 			q = q.Where("created_at >= ?", from)
 		}
