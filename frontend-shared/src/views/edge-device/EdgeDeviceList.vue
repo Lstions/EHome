@@ -506,6 +506,22 @@
       </template>
     </el-dialog>
 
+    <!-- 单删确认弹窗 (方案 v3.3 §2.1) -->
+    <DeviceDeleteDialog
+      v-model:visible="showDeleteDialog"
+      :device="deletingDevice"
+      :submitting="deleteSubmitting"
+      @confirm="confirmDelete"
+    />
+
+    <!-- 批量删除确认弹窗 (方案 v3.3 §2.2) -->
+    <DeviceBatchDeleteDialog
+      v-model:visible="showBatchDeleteDialog"
+      :devices="selectedDevices"
+      :submitting="batchDeleteSubmitting"
+      @confirm="confirmBatchDelete"
+    />
+
     </template>
   </div>
 </template>
@@ -519,7 +535,7 @@ import {
   Odometer, Sunny, Cloudy, Lightning, Open, SetUp, List, Download,
   Document
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
@@ -533,6 +549,8 @@ import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
 import StatCard from '@/components/common/StatCard.vue'
+import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
+import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { getHardwareTagType } from '@/utils/hardwareTag'
@@ -962,16 +980,23 @@ const handleEdit = (device: any) => {
   showCreateDialog.value = true
 }
 
-const handleDelete = async (device: any) => {
+// 删除确认弹窗 (方案 v3.3 §2.1: ElDialog + radio + 异步逻辑设备信息)
+const showDeleteDialog = ref(false)
+const deletingDevice = ref<EdgeDevice | null>(null)
+const deleteSubmitting = ref(false)
+
+const handleDelete = (device: any) => {
+  deletingDevice.value = device
+  showDeleteDialog.value = true
+}
+
+const confirmDelete = async (deleteData: boolean) => {
+  const device = deletingDevice.value
+  if (!device) return
+  deleteSubmitting.value = true
   let deleted = false
   try {
-    await ElMessageBox.confirm(
-      `确定要删除边缘设备 "${device.name}" 吗？`,
-      '警告',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
-    )
-
-    await edgeDeviceStore.deleteDevice(device.id)
+    await edgeDeviceStore.deleteDevice(device.id, { delete_data: deleteData })
     deleted = true
     devices.value = devices.value.filter(item => item?.id !== device.id)
     total.value = Math.max(0, total.value - 1)
@@ -981,11 +1006,14 @@ const handleDelete = async (device: any) => {
     } catch {
       ElMessage.warning('设备已删除，但列表刷新失败，请稍后刷新')
     }
-    ElMessage.success('删除成功')
-  } catch (error: any) {
-    if (error !== 'cancel' && !deleted) {
+    ElMessage.success(deleteData ? '删除成功，历史数据将在后台删除' : '删除成功')
+    showDeleteDialog.value = false
+  } catch {
+    if (!deleted) {
       ElMessage.error('删除失败')
     }
+  } finally {
+    deleteSubmitting.value = false
   }
 }
 
@@ -994,18 +1022,24 @@ const handleSelectionChange = (selection: any[]) => {
   selectedDevices.value = selection
 }
 
-// 批量删除
-const handleBatchDelete = async () => {
-  if (selectedDevices.value.length === 0) return
-  try {
-    await ElMessageBox.confirm(
-      `确定要删除选中的 ${selectedDevices.value.length} 个设备吗？此操作不可撤销。`,
-      '批量删除确认',
-      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }
-    )
+// 批量删除 (方案 v3.3 §2.2: 汇总视图 + 统一 radio, 沿用逐条 API 循环删除)
+const showBatchDeleteDialog = ref(false)
+const batchDeleteSubmitting = ref(false)
 
-    const ids = selectedDevices.value.map(d => d.id)
-    const results = await Promise.allSettled(ids.map(id => edgeDeviceStore.deleteDevice(id)))
+const handleBatchDelete = () => {
+  if (selectedDevices.value.length === 0) return
+  showBatchDeleteDialog.value = true
+}
+
+const confirmBatchDelete = async (deleteData: boolean) => {
+  const ids = selectedDevices.value.map(d => d.id)
+  if (ids.length === 0) {
+    showBatchDeleteDialog.value = false
+    return
+  }
+  batchDeleteSubmitting.value = true
+  try {
+    const results = await Promise.allSettled(ids.map(id => edgeDeviceStore.deleteDevice(id, { delete_data: deleteData })))
     const succeeded = results.filter(result => result.status === 'fulfilled').length
     const failed = results.length - succeeded
     const succeededIds = new Set(ids.filter((_id, index) => results[index].status === 'fulfilled'))
@@ -1020,10 +1054,12 @@ const handleBatchDelete = async () => {
     } catch {
       ElMessage.warning('删除结果已保存，但列表刷新失败，请稍后刷新')
     }
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error('批量删除失败')
-    }
+    // 全部失败时保留弹窗供重试; 有任一成功即关闭
+    if (succeeded > 0) showBatchDeleteDialog.value = false
+  } catch {
+    ElMessage.error('批量删除失败')
+  } finally {
+    batchDeleteSubmitting.value = false
   }
 }
 

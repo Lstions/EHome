@@ -21,7 +21,20 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
+  // 数据生命周期 P0: 逻辑身份锚点 (后端 omitempty — 未建立时字段缺省为 undefined)
+  logical_device_id?: number
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
+}
+
+// GET /edge-devices/:id/logical-device-info 响应 (方案 v3.3 §2.1)
+// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
+export interface LogicalDeviceInfo {
+  edge_device_id: number
+  name: string | null
+  logical_device_id: number | null
+  retention_days: number | null
+  instance_count: number
+  row_estimate?: number
 }
 
 export interface EdgeDeviceListParams {
@@ -84,6 +97,7 @@ interface RawEdgeDevice {
   error_code?: number
   last_error_code?: number
   created_at?: string
+  logical_device_id?: number
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -138,6 +152,7 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   last_data_time: d.last_data_at || d.last_data_time || null,
   last_error_code: d.error_code ?? d.last_error_code ?? undefined,
   created_at: d.created_at || '',
+  logical_device_id: d.logical_device_id ?? undefined,
   device_config: d.device_config
 })
 
@@ -195,8 +210,22 @@ export const edgeDeviceApi = {
     await client.put(`/api/v1/edge-devices/${id}`, data)
   },
 
-  async delete(id: number): Promise<void> {
+  // 方案 v3.3 §2.1/§九: delete_data 可选查询参数 (默认 false = 保留历史数据)。
+  // 现有调用方 delete(id) 不带第二参数 → 请求与旧版完全一致 (不附加 config)。
+  async delete(id: number, options?: { delete_data?: boolean }): Promise<void> {
+    if (options?.delete_data === true) {
+      await client.delete(`/api/v1/edge-devices/${id}`, { params: { delete_data: 'true' } })
+      return
+    }
     await client.delete(`/api/v1/edge-devices/${id}`)
+  },
+
+  // 方案 v3.3 §2.1: 删除弹窗信息区 — 逻辑设备信息 (实例数/数据量估算/保留天数)。
+  // 失败由调用方降级处理 (不显示信息区, 不阻塞删除)。
+  async getLogicalDeviceInfo(id: number): Promise<LogicalDeviceInfo> {
+    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/logical-device-info`)
+    const data = response?.data && typeof response.data === 'object' ? response.data : response
+    return data as LogicalDeviceInfo
   },
 
   async getLatestData(id: number): Promise<any> {

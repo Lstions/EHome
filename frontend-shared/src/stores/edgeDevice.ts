@@ -132,10 +132,11 @@ export const useEdgeDeviceStore = defineStore('edgeDevice', () => {
     return detailCache.value.get(id)?.device
   }
 
-  /** Delete remotely, then consistently remove it from all local list entries. */
-  async function deleteDevice(id: number) {
+  /** Delete remotely, then consistently remove it from all local list entries.
+   *  options.delete_data (方案 v3.3 §2.1) 透传给 API; 缺省 false = 保留历史数据。 */
+  async function deleteDevice(id: number, options?: { delete_data?: boolean }) {
     const generation = sessionGeneration
-    await edgeDeviceApi.delete(id)
+    await edgeDeviceApi.delete(id, options)
     if (generation !== sessionGeneration) throw new Error('会话已变更')
     cacheEpoch++
     inFlight.clear()

@@ -4,14 +4,26 @@ import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
-const { mockEdgeDeviceGetList } = vi.hoisted(() => ({
+const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo } = vi.hoisted(() => ({
   mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
     items: [
-      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
+      { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
       { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
     ],
     total: 2,
   })),
+  mockGetLogicalDeviceInfo: vi.fn(() => Promise.resolve({
+    edge_device_id: 1,
+    name: 'Logic-A',
+    logical_device_id: 11,
+    retention_days: 30,
+    instance_count: 2,
+    row_estimate: 500,
+  })),
+}))
+
+vi.mock('element-plus', () => ({
+  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
 vi.mock('vue-router', () => ({
@@ -29,7 +41,13 @@ vi.mock('@/stores/websocket', () => ({
 }))
 vi.mock('@/api/edgeDevice', () => ({
   compactEdgeDeviceList: (items: unknown) => Array.isArray(items) ? items.filter(item => item && typeof item === 'object' && 'id' in item) : [],
-  edgeDeviceApi: { getList: mockEdgeDeviceGetList, create: vi.fn(), update: vi.fn(), delete: vi.fn() },
+  edgeDeviceApi: {
+    getList: mockEdgeDeviceGetList,
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    getLogicalDeviceInfo: mockGetLogicalDeviceInfo,
+  },
 }))
 vi.mock('@/api/channel', () => ({
   compactChannelList: (items: unknown) => Array.isArray(items) ? items.filter(item => item && typeof item === 'object') : [],
@@ -168,5 +186,156 @@ describe('EdgeDeviceList.vue', () => {
     // 不允许裸的 ch.hardware_type.toUpperCase()(允许可选链 ?. 形式)
     const bareMatches = source.match(/ch\.hardware_type\.toUpperCase\(\)/g)
     expect(bareMatches).toBeNull()
+  })
+
+  // ---- 数据生命周期 T2: 删除确认弹窗改造 (方案 v3.3 §2.1/§2.2) ----
+
+  it('单删: 卡片视图点击删除打开 DeviceDeleteDialog 并异步加载逻辑设备信息', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+
+    // 卡片视图 (默认) 中的删除按钮
+    const deleteButtons = wrapper.findAll('.device-grid .el-button--danger')
+    expect(deleteButtons.length).toBeGreaterThan(0)
+    await deleteButtons[0].trigger('click')
+    await flushPromises()
+
+    // 弹窗渲染: 基本信息即时可见
+    const dialog = wrapper.find('.el-dialog')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('Device A')
+    expect(dialog.text()).toContain('删除边缘设备')
+    // 信息区异步加载完成 (mock resolve)
+    expect(mockGetLogicalDeviceInfo).toHaveBeenCalledWith(1)
+    expect(dialog.text()).toContain('Logic-A')
+    expect(dialog.text()).toContain('约 500 条')
+    expect(dialog.text()).toContain('保留 30 天')
+  })
+
+  it('单删: 默认保留历史数据 → delete_data=false 提交', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+
+    await wrapper.findAll('.device-grid .el-button--danger')[0].trigger('click')
+    await flushPromises()
+
+    // 默认 radio = 保留
+    const radios = wrapper.findAll('.data-action-group input[type="radio"]')
+    expect((radios[0].element as HTMLInputElement).checked).toBe(true)
+
+    await wrapper.find('.el-dialog__footer .el-button--danger').trigger('click')
+    await flushPromises()
+
+    expect(edgeDeviceApi.delete).toHaveBeenCalledWith(1, { delete_data: false })
+  })
+
+  it('单删: 选择同时删除历史数据 → delete_data=true 提交', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+
+    await wrapper.findAll('.device-grid .el-button--danger')[0].trigger('click')
+    await flushPromises()
+
+    const radios = wrapper.findAll('.data-action-group input[type="radio"]')
+    await radios[1].setValue(true)
+    await wrapper.find('.el-dialog__footer .el-button--danger').trigger('click')
+    await flushPromises()
+
+    expect(edgeDeviceApi.delete).toHaveBeenCalledWith(1, { delete_data: true })
+  })
+
+  it('单删: 信息请求失败降级 — 信息区不显示但删除仍可提交', async () => {
+    mockGetLogicalDeviceInfo.mockImplementationOnce(() => Promise.reject(new Error('network down')))
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+
+    await wrapper.findAll('.device-grid .el-button--danger')[0].trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('.el-dialog')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('Device A')
+    expect(dialog.find('.logical-info').exists()).toBe(false)
+
+    await wrapper.find('.el-dialog__footer .el-button--danger').trigger('click')
+    await flushPromises()
+    expect(edgeDeviceApi.delete).toHaveBeenCalledWith(1, { delete_data: false })
+  })
+
+  it('批删: 表格多选打开汇总弹窗, 展示 N 台/M 台逻辑设备, 统一 radio 默认保留', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+
+    // 切换到表格视图
+    const tableModeButton = wrapper.findAll('button').find((b: any) => b.attributes('aria-label') === '表格视图')
+    expect(tableModeButton).toBeTruthy()
+    await tableModeButton!.trigger('click')
+    await flushPromises()
+
+    // 勾选两行 (Device A 有 logical_device_id, Device B 无)
+    const checkboxes = wrapper.findAll('.el-table__row-checkbox')
+    expect(checkboxes).toHaveLength(2)
+    await checkboxes[0].setValue(true)
+    await checkboxes[1].setValue(true)
+    await flushPromises()
+
+    // 批量删除按钮出现并点击
+    const batchDeleteButton = wrapper.findAll('button').find((b: any) => b.text().includes('批量删除'))
+    expect(batchDeleteButton).toBeTruthy()
+    await batchDeleteButton!.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('.el-dialog')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('批量删除确认')
+    expect(dialog.text()).toContain('将删除')
+    expect(dialog.text()).toContain('2')
+    expect(dialog.text()).toContain('1')
+    expect(dialog.text()).toContain('逻辑设备')
+
+    // 统一 radio 默认全部保留
+    const radios = dialog.findAll('.data-action-group input[type="radio"]')
+    expect(radios).toHaveLength(2)
+    expect((radios[0].element as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('批删: 确认逐条调用 delete(id, {delete_data}) 并传入 radio 选择', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+
+    const tableModeButton = wrapper.findAll('button').find((b: any) => b.attributes('aria-label') === '表格视图')
+    await tableModeButton!.trigger('click')
+    await flushPromises()
+
+    const checkboxes = wrapper.findAll('.el-table__row-checkbox')
+    await checkboxes[0].setValue(true)
+    await checkboxes[1].setValue(true)
+    await flushPromises()
+
+    const batchDeleteButton = wrapper.findAll('button').find((b: any) => b.text().includes('批量删除'))
+    await batchDeleteButton!.trigger('click')
+    await flushPromises()
+
+    // 选择全部删除
+    const dialog = wrapper.find('.el-dialog')
+    const radios = dialog.findAll('.data-action-group input[type="radio"]')
+    await radios[1].setValue(true)
+    await dialog.find('.el-dialog__footer .el-button--danger').trigger('click')
+    await flushPromises()
+
+    expect(edgeDeviceApi.delete).toHaveBeenCalledTimes(2)
+    expect(edgeDeviceApi.delete).toHaveBeenCalledWith(1, { delete_data: true })
+    expect(edgeDeviceApi.delete).toHaveBeenCalledWith(2, { delete_data: true })
+  })
+
+  it('删除弹窗不再使用 ElMessageBox (源码契约)', () => {
+    expect(source).not.toContain('ElMessageBox.confirm')
+    expect(source).toContain('DeviceDeleteDialog')
+    expect(source).toContain('DeviceBatchDeleteDialog')
+    expect(source).toContain('delete_data: deleteData')
   })
 })
