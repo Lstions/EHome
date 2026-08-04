@@ -656,7 +656,8 @@ func TestEdgeDevice_Delete_NonExistent(t *testing.T) {
 
 // ==================== EdgeDevice Sub-resource Tests ====================
 
-func TestEdgeDevice_LatestData_Empty(t *testing.T) {
+func TestEdgeDevice_LatestData_DeletedInstanceReturns404(t *testing.T) {
+	// §十二: 实例已删 (或不存在) → 404, 不再返回空 200。
 	r, _ := setupEdgeDeviceTest(t)
 
 	w := httptest.NewRecorder()
@@ -664,12 +665,13 @@ func TestEdgeDevice_LatestData_Empty(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing/deleted instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestEdgeDevice_Data_WithPagination(t *testing.T) {
+func TestEdgeDevice_Data_DeletedInstanceReturns404(t *testing.T) {
+	// §十二: /:id/data 同样按实例语义 — 已删实例 404。
 	r, _ := setupEdgeDeviceTest(t)
 
 	w := httptest.NewRecorder()
@@ -677,20 +679,17 @@ func TestEdgeDevice_Data_WithPagination(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data := resp["data"].(map[string]interface{})
-	if data["total"] != float64(0) {
-		t.Errorf("expected total=0 for empty data, got %v", data["total"])
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing/deleted instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestEdgeDevice_Data_WithTimeRange(t *testing.T) {
-	r, _ := setupEdgeDeviceTest(t)
+func TestEdgeDevice_Data_LivingInstanceTimeRange(t *testing.T) {
+	// 存活实例: resolve 后按 scope 查询 (无数据 → total=0 的 200)。
+	r, db := setupEdgeDeviceTest(t)
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?start_time=2024-01-01T00:00:00Z&end_time=2025-12-31T23:59:59Z", nil)
@@ -698,7 +697,13 @@ func TestEdgeDevice_Data_WithTimeRange(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 200 for living instance, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	data := resp["data"].(map[string]interface{})
+	if data["total"] != float64(0) {
+		t.Errorf("expected total=0 for empty data, got %v", data["total"])
 	}
 }
 

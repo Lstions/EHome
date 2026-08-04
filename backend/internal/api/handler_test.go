@@ -1264,8 +1264,9 @@ func TestEdgeDevice_LatestData(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// §十二: 实例已删/不存在 → 404 (实例语义)。
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1282,8 +1283,9 @@ func TestEdgeDevice_Data(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// §十二: 实例已删/不存在 → 404 (实例语义)。
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing instance, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
