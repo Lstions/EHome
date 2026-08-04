@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -376,6 +375,12 @@ type ConfigHashResult struct {
 // consistent snapshot (no partial view of a concurrent write).
 // P2-6: All Find queries use ORDER BY id ASC so the hash is deterministic regardless
 // of database row-ordering differences.
+//
+// F2: delegates to the shared snapshot pipeline so the hash input is identical to
+// what encodeConfigManifest consumes. The transaction is read-only except for the
+// optional driver-template reconciliation (which SendConfigManifestWithDecision
+// performs); callers that only need the hash (SyncGate.decide) read the snapshot
+// directly.
 func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 	var result ConfigHashResult
 
@@ -390,61 +395,15 @@ func (m *Manager) CalcConfigHashForDevice(deviceID string) ConfigHashResult {
 			return err
 		}
 
-		// P2-6: ORDER BY id ASC for deterministic hash
-		var templates []models.ConfigTemplate
-		tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&templates)
-		var channels []models.Channel
-		tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&channels)
-
-		// 从 node.Config JSON 解析 DMA configs
-		var dmaConfigs []models.DmaChannelConfig
-		if node.Config != "" {
-			var cfg map[string]interface{}
-			if err := json.Unmarshal([]byte(node.Config), &cfg); err == nil {
-				if dc, ok := cfg["dma_configs"]; ok {
-					if dcJSON, err := json.Marshal(dc); err == nil {
-						json.Unmarshal(dcJSON, &dmaConfigs)
-					}
-				}
-			}
+		snap, err := m.loadManifestSnapshot(tx, node, nil)
+		if err != nil {
+			return err
 		}
-
-		// v2.4: query edge_devices for hash calculation
-		// P2-6: ORDER BY id ASC for deterministic hash
-		var edgeDevices []models.EdgeDevice
-		tx.Order("id ASC").Where("node_id = ? AND enabled = true", node.NodeID).Find(&edgeDevices)
-
-		deviceConfigIDs := make([]uint, 0, len(edgeDevices))
-		seenDeviceConfigIDs := make(map[uint]struct{}, len(edgeDevices))
-		for _, ed := range edgeDevices {
-			if ed.DeviceConfigID > 0 {
-				if _, ok := seenDeviceConfigIDs[ed.DeviceConfigID]; !ok {
-					seenDeviceConfigIDs[ed.DeviceConfigID] = struct{}{}
-					deviceConfigIDs = append(deviceConfigIDs, ed.DeviceConfigID)
-				}
-			}
-		}
-		var deviceConfigs []models.DeviceConfig
-		if len(deviceConfigIDs) > 0 {
-			tx.Order("id ASC").Where("id IN ?", deviceConfigIDs).Find(&deviceConfigs)
-		}
-
-		// v3.0: query GPIO/PWM configs for hash calculation
-		var gpioConfigs []models.GPIOConfig
-		tx.Order("pin ASC").Where("node_id = ?", node.NodeID).Find(&gpioConfigs)
-		var pwmConfigs []models.PWMConfig
-		tx.Order("pin ASC").Where("node_id = ?", node.NodeID).Find(&pwmConfigs)
-
-		hashData := m.buildHashData(templates, channels, edgeDevices, deviceConfigs, dmaConfigs, gpioConfigs, pwmConfigs)
-		// v2.5: include log_stream config in hash so changes trigger manifest push
-		hashData = append(hashData, []byte(fmt.Sprintf("ls:%v:%d:", node.LogStreamEnabled, node.LogStreamLevel))...)
-		hash := m.hashMgr.CalcConfigHash(hashData)
-		manifestID := fmt.Sprintf("v2-%s", hash)
-
+		computed := m.calcHashFromSnapshot(snap)
 		result = ConfigHashResult{
-			Hash:         hash,
-			ManifestID:   manifestID,
-			ChannelCount: len(channels),
+			Hash:         computed.Hash,
+			ManifestID:   computed.ManifestID,
+			ChannelCount: computed.ChannelCount,
 		}
 		return nil
 	})
