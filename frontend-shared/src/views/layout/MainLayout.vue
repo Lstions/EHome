@@ -224,6 +224,7 @@ import {
   Odometer,
   Connection,
   Cpu,
+  Share,
   DataLine,
   Files,
   Setting,
@@ -282,6 +283,7 @@ const allMenuItems = [
 	{ path: '/dashboard', title: '仪表盘', icon: Odometer },
 	{ path: '/node', title: '节点', icon: Connection },
 	{ path: '/edge-device', title: '边缘设备', icon: Cpu },
+	{ path: '/logical-device', title: '逻辑设备', icon: Share },
 	{ path: '/channel', title: '通道管理', icon: Connection },
 	{ path: '/data', title: '数据面板', icon: DataLine },
 	{ path: '/firmware', title: '固件管理', icon: Files },
@@ -405,7 +407,21 @@ const handleNotificationClick = async (item: ApiNotification) => {
   } catch (error) {
     // 静默失败
   }
-  // 根据通知类型跳转
+  // 通知跳转 (方案 v3.3 §六 D-2): 优先按 Notification.source 结构化路由,
+  // 替代脆弱的 title 字符串匹配; 离线通知保留原 title 匹配行为。
+  //   source=merge_failed       → /logical-device (合并搬迁失败→管理页,
+  //     source_id 是 merge_job id, 管理页可按任务查看进度/重试)
+  //   source=retention_expiring → /logical-device?retention=<logical_id>
+  //     (到期提醒→管理页 retention 编辑深链)
+  if (item.source === 'merge_failed') {
+    router.push('/logical-device')
+    return
+  }
+  if (item.source === 'retention_expiring') {
+    const logicalId = item.source_id
+    router.push(logicalId != null && logicalId !== '' ? `/logical-device?retention=${logicalId}` : '/logical-device')
+    return
+  }
   if (item.title.includes('离线')) {
     router.push('/edge-device')
   }

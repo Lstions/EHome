@@ -115,7 +115,7 @@ describe('MainLayout.vue', () => {
     window.dispatchEvent(new Event('resize'))
   })
 
-  it('renders all 8 admin menu items', async () => {
+  it('renders all 9 admin menu items', async () => {
     const wrapper = mount(MainLayout, {
       global: {
         stubs,
@@ -125,12 +125,13 @@ describe('MainLayout.vue', () => {
     await flushPromises()
 
     const menuItems = wrapper.findAll('.el-menu-item')
-    expect(menuItems).toHaveLength(8)
+    expect(menuItems).toHaveLength(9)
     const paths = menuItems.map((el) => el.attributes('data-index'))
     expect(paths).toEqual([
       '/dashboard',
       '/node',
       '/edge-device',
+      '/logical-device',
       '/channel',
       '/data',
       '/firmware',
@@ -286,4 +287,48 @@ describe('MainLayout.vue', () => {
     expect(layoutSource).not.toMatch(/^\s*\.logo-icon\s*\{/m)
   })
 
+  // ── 通知跳转路由 (方案 v3.3 §六 D-2: 按 Notification.source 结构化路由) ──
+
+  const mountWithNotifications = async (items: any[]) => {
+    const { getNotifications } = await import('@/api/notification')
+    vi.mocked(getNotifications).mockResolvedValue(items as any)
+    const wrapper = mount(MainLayout, { global: { stubs } })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('merge_failed 通知跳转逻辑设备管理页', async () => {
+    const wrapper = await mountWithNotifications([
+      { id: 1, type: 'error', title: '数据合并失败（已放弃重试）', description: '', source: 'merge_failed', source_id: '42', read: false, created_at: '' },
+    ])
+    const item = wrapper.find('.notification-item')
+    expect(item.exists()).toBe(true)
+    await item.trigger('click')
+    expect(mockPush).toHaveBeenCalledWith('/logical-device')
+  })
+
+  it('retention_expiring 通知带 retention 深链跳转', async () => {
+    const wrapper = await mountWithNotifications([
+      { id: 2, type: 'warning', title: '数据即将到期', description: '', source: 'retention_expiring', source_id: '7', read: false, created_at: '' },
+    ])
+    await wrapper.find('.notification-item').trigger('click')
+    expect(mockPush).toHaveBeenCalledWith('/logical-device?retention=7')
+  })
+
+  it('离线通知保留原 title 字符串匹配行为', async () => {
+    const wrapper = await mountWithNotifications([
+      { id: 3, type: 'warning', title: '节点离线', description: '', source: 'node_offline', source_id: '', read: false, created_at: '' },
+    ])
+    await wrapper.find('.notification-item').trigger('click')
+    expect(mockPush).toHaveBeenCalledWith('/edge-device')
+  })
+
+  it('source 优先于 title 匹配 (source=merge_failed 但 title 含"离线")', async () => {
+    const wrapper = await mountWithNotifications([
+      { id: 4, type: 'error', title: '离线设备合并搬迁失败', description: '', source: 'merge_failed', source_id: '9', read: false, created_at: '' },
+    ])
+    await wrapper.find('.notification-item').trigger('click')
+    expect(mockPush).toHaveBeenCalledWith('/logical-device')
+    expect(mockPush).not.toHaveBeenCalledWith('/edge-device')
+  })
 })
