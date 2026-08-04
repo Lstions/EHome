@@ -180,13 +180,6 @@ func TestAutoMigrate(t *testing.T) {
 		}
 	})
 
-	t.Run("ConfigMeta", func(t *testing.T) {
-		cm := models.ConfigMeta{ID: 1, Epoch: 42}
-		if err := db.Create(&cm).Error; err != nil {
-			t.Fatalf("create config meta: %v", err)
-		}
-	})
-
 	t.Run("ConfigTemplate", func(t *testing.T) {
 		ct := models.ConfigTemplate{NodeID: "TEST001", WriteData: "010300000002", ReadLength: 9}
 		if err := db.Create(&ct).Error; err != nil {

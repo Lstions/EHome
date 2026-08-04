@@ -331,7 +331,7 @@ func setupTestDBForManifest(t *testing.T, nodeID string, protocolVersion string)
 	db.AutoMigrate(
 		&models.Node{}, &models.Channel{}, &models.ConfigTemplate{},
 		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.GPIOConfig{},
-		&models.PWMConfig{}, &models.ConfigMeta{},
+		&models.PWMConfig{},
 	)
 	capabilities := `{"buses":{"gpio":[{"id":"GPIO1","pin":1},{"id":"GPIO2","pin":2},{"id":"GPIO5","pin":5},{"id":"GPIO6","pin":6},{"id":"GPIO7","pin":7}],"pwm":[{"id":"PWM0","channel":0,"max_resolution_bits":14},{"id":"PWM1","channel":1,"max_resolution_bits":14}]}}`
 	db.Create(&models.Node{NodeID: nodeID, Status: "online", ProtocolVersion: protocolVersion, Capabilities: capabilities})
@@ -893,7 +893,7 @@ func setupTestDBForPeriph(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.Node{}, &models.ConfigMeta{})
+	db.AutoMigrate(&models.Node{})
 	return db
 }
 

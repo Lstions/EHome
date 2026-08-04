@@ -17,7 +17,6 @@ type SyncAction int
 const (
 	SyncActionNone  SyncAction = iota // No action needed — device is in sync
 	SyncActionFull                    // Send full ConfigManifest
-	SyncActionPatch                   // Send incremental patch (future, v2.2)
 	SyncActionDefer                   // Defer — within dedup window
 )
 
@@ -80,8 +79,6 @@ func recordDecision(d SyncDecision) {
 	switch d.Action {
 	case SyncActionFull:
 		actionStr = "full"
-	case SyncActionPatch:
-		actionStr = "patch"
 	case SyncActionDefer:
 		actionStr = "defer"
 	}

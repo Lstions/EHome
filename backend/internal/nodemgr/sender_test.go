@@ -59,7 +59,7 @@ func setupSenderTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	db.AutoMigrate(&models.Node{}, &models.NodeEvent{}, &models.ConfigMeta{})
+	db.AutoMigrate(&models.Node{}, &models.NodeEvent{})
 	return db
 }
 

@@ -38,7 +38,6 @@ type ConfigChangeEvent struct {
 	Action    ConfigChangeAction
 	NodeID    string // affected node (0 = all / unknown)
 	EntityID  string // changed entity ID
-	Epoch     uint64 // global epoch after increment (retained for struct compat, no longer used)
 	Timestamp time.Time
 	Actor     string // "api:admin", "init:factory_reset", "system:startup"
 }

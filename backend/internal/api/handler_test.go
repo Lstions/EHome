@@ -53,7 +53,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.DeviceModel{},
 		&models.NodeEvent{},
 		&models.CalibrationCache{},
-		&models.ConfigMeta{},
 		&models.PendingWriteRecord{},
 		&models.NodeLog{},
 	)

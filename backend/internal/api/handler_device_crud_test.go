@@ -41,7 +41,7 @@ func setupDeviceTestWithRegistry(t *testing.T, driverRegistry *drivers.Registry)
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.OperationLog{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
-		&models.ConfigMeta{}, &models.PendingWriteRecord{},
+		&models.PendingWriteRecord{},
 		&models.GPIOConfig{}, &models.PWMConfig{},
 	)
 	r := gin.New()

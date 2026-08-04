@@ -1,8 +1,6 @@
 package models
 
-// ConfigMeta stores global configuration metadata (epoch persistence).
-// Single-row table (id=1) used by EpochGenerator.
-type ConfigMeta struct {
-	ID    uint   `gorm:"primaryKey;autoIncrement:false" json:"id"`
-	Epoch uint64 `gorm:"not null;default:0" json:"epoch"`
-}
+// ConfigMeta is intentionally removed: the v2.1 EpochGenerator it persisted
+// for was retired (ConfigEventBus.CurrentEpoch is a hardcoded 0 API-compat
+// stub). The historical config_meta table is left in place for existing
+// databases and is simply no longer registered for AutoMigrate.
