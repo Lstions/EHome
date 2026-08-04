@@ -340,13 +340,16 @@ static void report_task(void *pv)
    * bounded wait so the loop can reset the watchdog even when no report is
    * pending.
    *
-   * F8.2: the explicit critical/emergency pre-scan was removed.  The
-   * critical and critical-emergency queues are members of the ready set in
-   * xQueueAddToSet order (critical before emergency before telemetry, see
-   * report_path_init), and FreeRTOS xQueueSelectFromSet returns the member
-   * that became ready first in that order — so a critical report still wins
-   * over telemetry when both are pending.  This relies on FreeRTOS set
-   * selection semantics instead of the removed explicit scan. */
+   * F8.2: the explicit critical/emergency pre-scan was removed per the
+   * approved plan (边缘设备修复优化方案-v2.md F8.2).  Selection among the
+   * ready-set members is FreeRTOS arrival-order FIFO: each member queue that
+   * transitions empty→non-empty posts its handle to the set's internal event
+   * queue, and xQueueSelectFromSet pops that FIFO.  Therefore when telemetry
+   * becomes ready before a critical report, telemetry is serviced first —
+   * critical/emergency priority is best-effort, not strict, under this
+   * approved tradeoff (the plan's "add-to-set order" mitigation does not
+   * change arrival order).  control_final/write_rsp keep strict priority via
+   * the pre-scans above. */
   bool got_desc = false;
   {
    QueueSetMemberHandle_t member = s_report_ready_set

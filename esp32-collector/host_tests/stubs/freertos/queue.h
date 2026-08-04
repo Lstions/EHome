@@ -35,6 +35,9 @@ typedef struct {
     size_t count;
     size_t head;
     size_t tail;
+    /* QueueSet membership (real FreeRTOS pxQueueSetContainer).  A queue
+     * that transitions empty -> non-empty notifies its set's event queue. */
+    void *set_container;
 } host_queue_t;
 
 static inline QueueHandle_t xQueueCreate(UBaseType_t queue_length, size_t item_size)
@@ -72,6 +75,8 @@ static inline void vQueueDelete(QueueHandle_t queue)
     free(queue);
 }
 
+static inline void host_queue_set_notify(host_queue_t *q); /* fwd, defined below */
+
 static inline BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickType_t ticks)
 {
     (void)ticks;
@@ -81,6 +86,7 @@ static inline BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickT
     memcpy(q->buf + q->tail * q->item_size, item, q->item_size);
     q->tail = (q->tail + 1) % q->capacity;
     q->count++;
+    host_queue_set_notify(q);
     return pdPASS;
 }
 
@@ -94,6 +100,7 @@ static inline BaseType_t xQueueSendToFront(QueueHandle_t queue, const void *item
     else q->head--;
     memcpy(q->buf + q->head * q->item_size, item, q->item_size);
     q->count++;
+    host_queue_set_notify(q);
     return pdPASS;
 }
 
@@ -142,42 +149,73 @@ static inline UBaseType_t uxQueueSpacesAvailable(const QueueHandle_t queue)
     return (UBaseType_t)(q->capacity - q->count);
 }
 
-/* QueueSet: minimal host simulation — just track member queues in a list */
+/* QueueSet: faithful host model of FreeRTOS arrival-order FIFO.
+ *
+ * Real FreeRTOS keeps a per-set event queue: a member queue that
+ * transitions empty -> non-empty posts its own handle to the set's event
+ * queue (prvNotifyQueueSetContainer), and xQueueSelectFromSet pops that
+ * event queue.  Selection is therefore ARRIVAL order, not the order in
+ * which members were added to the set.
+ */
 #define MAX_QUEUE_SET_MEMBERS 16
+
 typedef struct {
     QueueHandle_t members[MAX_QUEUE_SET_MEMBERS];
     size_t member_count;
+    QueueHandle_t event_queue; /* FIFO of member handles that became ready */
 } host_queue_set_t;
+
+/* Notify a queue-set that a member became non-empty (empty -> non-empty
+ * transition only, matching prvNotifyQueueSetContainer). */
+static inline void host_queue_set_notify(host_queue_t *q)
+{
+    host_queue_set_t *s = (host_queue_set_t *)q->set_container;
+    if (!s || !s->event_queue) return;
+    if (q->count != 1) return; /* only 0 -> 1 posts an event */
+    QueueHandle_t member = (QueueHandle_t)q;
+    (void)xQueueSend(s->event_queue, &member, 0); /* FIFO append, drop if full */
+}
 
 static inline QueueSetHandle_t xQueueCreateSet(UBaseType_t max_length)
 {
-    (void)max_length;
     host_queue_set_t *s = (host_queue_set_t *)calloc(1, sizeof(host_queue_set_t));
+    if (!s) return NULL;
+    s->event_queue = xQueueCreate(max_length, sizeof(QueueHandle_t));
+    if (!s->event_queue) { free(s); return NULL; }
     return (QueueSetHandle_t)s;
 }
 
 static inline void vQueueDeleteSet(QueueSetHandle_t set)
 {
-    if (set) free(set);
+    if (!set) return;
+    host_queue_set_t *s = (host_queue_set_t *)set;
+    if (s->event_queue) vQueueDelete(s->event_queue);
+    free(set);
 }
 
 static inline BaseType_t xQueueAddToSet(QueueHandle_t queue, QueueSetHandle_t set)
 {
     if (!queue || !set) return pdFAIL;
+    host_queue_t *q = (host_queue_t *)queue;
     host_queue_set_t *s = (host_queue_set_t *)set;
-    if (s->member_count >= MAX_QUEUE_SET_MEMBERS) return pdFAIL;
+    if (q->set_container != NULL || s->member_count >= MAX_QUEUE_SET_MEMBERS)
+        return pdFAIL;
     s->members[s->member_count++] = queue;
+    q->set_container = s;
     return pdPASS;
 }
 
 static inline BaseType_t xQueueRemoveFromSet(QueueHandle_t queue, QueueSetHandle_t set)
 {
     if (!queue || !set) return pdFAIL;
+    host_queue_t *q = (host_queue_t *)queue;
     host_queue_set_t *s = (host_queue_set_t *)set;
+    if (q->set_container != s) return pdFAIL;
     for (size_t i = 0; i < s->member_count; i++) {
         if (s->members[i] == queue) {
             s->members[i] = s->members[s->member_count - 1];
             s->member_count--;
+            q->set_container = NULL;
             return pdPASS;
         }
     }
@@ -189,10 +227,9 @@ static inline QueueSetMemberHandle_t xQueueSelectFromSet(QueueSetHandle_t set, T
     (void)ticks;
     if (!set) return NULL;
     host_queue_set_t *s = (host_queue_set_t *)set;
-    for (size_t i = 0; i < s->member_count; i++) {
-        if (s->members[i] && uxQueueMessagesWaiting(s->members[i]) > 0)
-            return (QueueSetMemberHandle_t)s->members[i];
-    }
+    QueueHandle_t member = NULL;
+    if (xQueueReceive(s->event_queue, &member, 0) == pdTRUE)
+        return (QueueSetMemberHandle_t)member;
     return NULL;
 }
 
