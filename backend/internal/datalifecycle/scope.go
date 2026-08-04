@@ -41,7 +41,13 @@ func (s *Scope) Cond() (cond string, args []interface{}) {
 	case len(s.InstanceIDs) == 0:
 		return "logical_device_id IN ?", []interface{}{s.LogicalIDs}
 	default:
-		return "logical_device_id IN ? OR (logical_device_id IS NULL AND device_id IN ?)",
+		// The whole condition is wrapped in parentheses so callers can safely
+		// append " AND ..." — AND binds tighter than OR, so without the outer
+		// parentheses a composed time/sensor filter would apply only to the
+		// NULL-logical fallback branch and the logical branch would leak rows
+		// outside the filter (history/historical/historical-batch compose the
+		// condition this way, §六).
+		return "(logical_device_id IN ? OR (logical_device_id IS NULL AND device_id IN ?))",
 			[]interface{}{s.LogicalIDs, s.InstanceIDs}
 	}
 }

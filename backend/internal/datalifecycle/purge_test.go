@@ -59,7 +59,7 @@ func TestScopeCond_Variants(t *testing.T) {
 		{"logical only", Scope{LogicalIDs: []uint{1}}, "logical_device_id IN ?", 1},
 		{"instance only", Scope{InstanceIDs: []uint{5}}, "logical_device_id IS NULL AND device_id IN ?", 1},
 		{"full", Scope{LogicalIDs: []uint{1}, InstanceIDs: []uint{5}},
-			"logical_device_id IN ? OR (logical_device_id IS NULL AND device_id IN ?)", 2},
+			"(logical_device_id IN ? OR (logical_device_id IS NULL AND device_id IN ?))", 2},
 	}
 	for _, tc := range cases {
 		cond, args := tc.scope.Cond()
