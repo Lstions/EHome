@@ -91,6 +91,7 @@ declare module 'vue' {
     InitializeAdminForm: typeof import('./components/forms/InitializeAdminForm.vue')['default']
     LineChart: typeof import('./components/charts/LineChart.vue')['default']
     LogHistoryPanel: typeof import('./components/node/LogHistoryPanel.vue')['default']
+    LogicalDeviceCandidateSelect: typeof import('./components/device/LogicalDeviceCandidateSelect.vue')['default']
     LoginForm: typeof import('./components/forms/LoginForm.vue')['default']
     LogPanel: typeof import('./components/node/LogPanel.vue')['default']
     LogRealtimeViewer: typeof import('./components/node/LogRealtimeViewer.vue')['default']
