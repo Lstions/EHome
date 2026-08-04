@@ -1,0 +1,36 @@
+# F6 数据落库失败告警 — 可选 Prometheus + Alertmanager 一键部署
+#
+# 用法: docker compose -f docker-compose.monitoring.yml up -d
+# 不加入主 docker-compose.yml: 监控属于可选基础设施, 不应拖慢主栈启动。
+# 端口: Prometheus 9090 / Alertmanager 9093。
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ehome-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ehome-prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ehome-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ehome-alertmanager-data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+
+volumes:
+  ehome-prometheus-data:
+  ehome-alertmanager-data:

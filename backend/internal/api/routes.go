@@ -48,6 +48,12 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.Next()
 	})
 
+	// Prometheus metrics endpoint — the canonical unauthenticated scrape
+	// target. Prometheus/Alertmanager scrape from outside the API; requiring a
+	// session token would break scraping. Exposed format only carries counts
+	// over labels (consumer/table) — no row payloads, no PII.
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	// Health check (no auth required)
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
