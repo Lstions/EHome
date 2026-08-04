@@ -1,0 +1,36 @@
+# F6 数据落库失败告警 — Alertmanager 配置
+#
+# 路由: 两个 F6 告警 (warning/critical) 走 email receiver;
+#       其他非 ehome 告警 fallthrough 到默认 receiver (静默丢弃)。
+# webhook 接收器示例 (企业微信/钉钉/自建) 见 README.md。
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "consumer", "table"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: default
+  routes:
+    # F6 数据落库告警: 按 consumer/table 分组的持续通知 (repeat 4h)
+    - matchers:
+        - alertname =~ "EhomeDataConsumerDBWriteFailures.*"
+      receiver: email-alerts
+      continue: false
+    # 其他告警: 不再逐条投递, 避免刷屏
+    - matchers:
+        - severity =~ "critical"
+      receiver: default
+
+receivers:
+  - name: default
+  - name: email-alerts
+    email_configs:
+      - to: ${ALERT_EMAIL}
+        from: ${ALERT_EMAIL_FROM}
+        smarthost: ${SMTP_HOST}:${SMTP_PORT}
+        auth_username: ${SMTP_USER}
+        auth_password: ${SMTP_PASSWORD}
+        require_tls: true

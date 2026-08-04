@@ -1,0 +1,44 @@
+# F6 数据落库失败告警 — Prometheus 告警规则
+#
+# 目标指标: ehome_data_consumer_db_write_failures_total (pkg/metrics/metrics.go:213)
+#   标签: consumer (数据消费者名), table (device_data / unified_data)
+#   语义: DataEventBus 消费者持久化到对应表失败次数的单调递增计数器
+#   递增点: consumers_heavy.go:93 / :260 / :305 (db.Create/.Save 返回 error 时 Inc)
+#
+# 部署: 本文件挂载到 Prometheus 容器的 rules 目录 (见 deploy/monitoring/README.md),
+#       由 alertmanager 路由到接收器。rate 窗口 1m 与方案 F6 一期一致。
+#
+# 注意: 计数器只在 Write 立即失败时递增。DB 故障期间系统继续接收数据,
+#       失败全部计数 —— 恢复后不再递增, rate 自然回落。用 for: 2m 防抖动。
+
+groups:
+  - name: ehome-data-persistence
+    rules:
+      # 任一消费者对任一表的落库失败速率持续 >1 次/分钟
+      - alert: EhomeDataConsumerDBWriteFailures
+        expr: |
+          rate(ehome_data_consumer_db_write_failures_total[1m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据落库失败持续发生 ({{ $labels.consumer }} / {{ $labels.table }})"
+          description: >-
+            consumer={{ $labels.consumer }} table={{ $labels.table }} 的 DB 写入失败
+            速率 over 1m 已持续超过 1 次/分钟 (当前 {{ $value | humanize }})。
+            请在 ehome-server 日志中检索 "failed to persist" / "databus:" WARN,
+            检查 PostgreSQL 连接池、磁盘与表状态。
+
+      # 任意消费者 10 分钟内累计失败超过 100 次 —— 持续故障, 升级为 critical
+      - alert: EhomeDataConsumerDBWriteFailuresSustained
+        expr: |
+          sum by (consumer, table) (increase(ehome_data_consumer_db_write_failures_total[10m])) > 100
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "数据落库持续失败, 累计突破阈值 ({{ $labels.consumer }} / {{ $labels.table }})"
+          description: >-
+            consumer={{ $labels.consumer }} table={{ $labels.table }} 近 10 分钟
+            累计落库失败 {{ $value | humanize }} 次, 数据已经丢失。
+            需要立即处理: 排查 PostgreSQL 可用性 / 表损坏 / 磁盘满。
