@@ -17,6 +17,7 @@ import (
 	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -582,6 +583,31 @@ func TestMetrics_BasicEndpoint(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestMetrics_PrometheusUnauthenticated ensures the canonical Prometheus
+// scrape endpoint is reachable without a session token — a required property
+// for external Prometheus/Alertmanager scraping (F6: DataConsumerDBWriteFailures
+// alerting). The route is registered in SetupRoutes; constructing the full
+// router needs live subsystems (nodeMgr), so register the same handler on a
+// minimal router to verify the unauthenticated property of the handler.
+func TestMetrics_PrometheusUnauthenticated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for unauthenticated /metrics, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "ehome_") {
+		t.Errorf("expected ehome_* metrics in /metrics body, got %d bytes", len(body))
 	}
 }
 

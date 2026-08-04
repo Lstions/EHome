@@ -3,6 +3,8 @@ package databus
 import (
 	"encoding/hex"
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"ehome/backend/pkg/metrics"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -617,6 +620,56 @@ func TestSensorParserConsumerCountsDeviceDataWriteFailure(t *testing.T) {
 	if got := counterValue(t, counter) - before; got != 1 {
 		t.Fatalf("device_data write failure metric delta = %v, want 1", got)
 	}
+}
+
+// TestDataConsumerDBWriteFailuresPrometheusExposition asserts the F6 alerting
+// prerequisite end-to-end: after a DB write failure increments the counter, the
+// promhttp exposition served by the (unauthenticated) /metrics endpoint
+// (routes.go:55) carries the series with its consumer/table labels and counter
+// TYPE declaration — the exact input PromQL rate(...[1m]) consumes.
+func TestDataConsumerDBWriteFailuresPrometheusExposition(t *testing.T) {
+	before := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data"))
+
+	db := newConsumerTestDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	NewDBPersistConsumer(db).Handle(DataEvent{DeviceID: "exposition-node", ReceivedAt: time.Now()})
+
+	if got := counterValue(t, metrics.DataConsumerDBWriteFailures.WithLabelValues("db_persist", "device_data")) - before; got != 1 {
+		t.Fatalf("DB write failure metric delta = %v, want 1", got)
+	}
+
+	rec := httptest.NewRecorder()
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `ehome_data_consumer_db_write_failures_total{consumer="db_persist",table="device_data"} `) {
+		t.Fatalf("exposition missing labeled counter series; sample:\n%s", sampleMetrics(body))
+	}
+	if !strings.Contains(body, "# TYPE ehome_data_consumer_db_write_failures_total counter") {
+		t.Fatalf("exposition missing counter TYPE declaration; sample:\n%s", sampleMetrics(body))
+	}
+}
+
+// sampleMetrics returns a short excerpt of the exposition around the F6 metric
+// for readable failure output.
+func sampleMetrics(body string) string {
+	lines := strings.Split(body, "\n")
+	var out []string
+	for _, l := range lines {
+		if strings.Contains(l, "db_write_failures") {
+			out = append(out, l)
+		}
+		if len(out) >= 4 {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestSensorParserConsumer_UsesCommandWriteData(t *testing.T) {
