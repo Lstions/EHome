@@ -198,7 +198,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		}
 		m.db.Create(&node)
 		// Populate node_id → node.ID cache for worker pool lookups
-		nodeIDCache.Store(deviceID, node.ID)
+		nodeIDCache.Store(deviceID, nodeIDCacheEntry{nodeID: node.ID, writtenAt: time.Now()})
 		m.db.Create(&models.NodeEvent{
 			NodeID:    deviceID,
 			EventType: "online",
