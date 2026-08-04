@@ -43,7 +43,7 @@ func setupLifecycleTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
 		&models.OperationLog{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
-		&models.ConfigMeta{}, &models.PendingWriteRecord{},
+		&models.PendingWriteRecord{},
 		&models.LogicalDevice{}, &models.CommandExecution{}, &models.CommandAttempt{},
 	); err != nil {
 		t.Fatalf("auto migrate: %v", err)
