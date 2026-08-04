@@ -1,6 +1,7 @@
 package datalifecycle
 
 import (
+	"strings"
 	"testing"
 
 	"gorm.io/gorm"
@@ -42,26 +43,41 @@ func seedDevice(t *testing.T, db *gorm.DB, name, devType, hardwareID string, sof
 // ==================== IdentityKey ====================
 
 func TestIdentityKey(t *testing.T) {
-	if got := IdentityKey("bms_jbd", "0x76"); got != "bms_jbd:0x76" {
+	if got := IdentityKey("bms_jbd", "0x76", 3); got != "bms_jbd:0x76" {
 		t.Errorf("expected bms_jbd:0x76, got %q", got)
 	}
 	// whitespace trimmed
-	if got := IdentityKey(" bms_jbd ", " 0x76 "); got != "bms_jbd:0x76" {
+	if got := IdentityKey(" bms_jbd ", " 0x76 ", 3); got != "bms_jbd:0x76" {
 		t.Errorf("expected trimmed key, got %q", got)
 	}
-	// empty hardware_id → uuid suffix (type:{uuid}, 36 chars + type + colon ≤ 64)
-	got := IdentityKey("bms_jbd", "")
-	if len(got) <= len("bms_jbd:") || got[:8] != "bms_jbd:" {
-		t.Errorf("expected uuid-suffixed key with type prefix, got %q", got)
+	// 非空 hardware_id 行为不受 instanceID 影响 (T1.1: 保持既有行为)。
+	if got := IdentityKey("bms_jbd", "0x76", 0); got != "bms_jbd:0x76" {
+		t.Errorf("non-empty hardware_id must ignore instanceID, got %q", got)
 	}
-	got2 := IdentityKey("bms_jbd", "")
-	if got == got2 {
-		t.Errorf("expected distinct uuid keys for empty hardware_id, got %q twice", got)
+	// 空 hardware_id + 非零实例 ID → 确定性 uuid v5 后缀。
+	got := IdentityKey("bms_jbd", "", 7)
+	if !strings.HasPrefix(got, "bms_jbd:") {
+		t.Errorf("expected type-prefixed key, got %q", got)
+	}
+	if len(got) > identityKeyMaxLen {
+		t.Errorf("key exceeds %d bytes: %d", identityKeyMaxLen, len(got))
+	}
+	if got2 := IdentityKey("bms_jbd", "", 7); got != got2 {
+		t.Errorf("same instance must derive identical key, got %q vs %q", got, got2)
+	}
+	if other := IdentityKey("bms_jbd", "", 8); other == got {
+		t.Errorf("different instances must derive different keys, both %q", got)
+	}
+	// 空 hardware_id + instanceID 0 (未落库) → 退化为随机 uuid, 仍带类型前缀。
+	rand1 := IdentityKey("bms_jbd", "", 0)
+	rand2 := IdentityKey("bms_jbd", "", 0)
+	if !strings.HasPrefix(rand1, "bms_jbd:") || rand1 == rand2 {
+		t.Errorf("instanceID 0 must fall back to random uuid, got %q / %q", rand1, rand2)
 	}
 }
 
 func TestSequenceKeyTruncation(t *testing.T) {
-	base := IdentityKey("some_very_long_device_type_name_x", "0xffffffff")
+	base := IdentityKey("some_very_long_device_type_name_x", "0xffffffff", 1)
 	got := sequenceKey(base, 2)
 	if len(got) > identityKeyMaxLen {
 		t.Errorf("sequence key exceeds %d chars: %d", identityKeyMaxLen, len(got))
@@ -299,5 +315,120 @@ func TestCountInstances_IncludesSoftDeleted(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("expected 2 instances (1 living + 1 soft-deleted), got %d", n)
+	}
+}
+
+// ==================== 空 hardware_id 确定性 key (T1.1 复审修复) ====================
+
+// TestEnsure_EmptyHardwareID_StableAcrossRebuilds — 同一空 hw 实例两次
+// EnsureLogicalDevice 返回同一 logical_device: 确定性 key 使第二次调用
+// 命中既有权并走 PathStartup 复用 (无存活实例), 而非生成 #2。
+func TestEnsure_EmptyHardwareID_StableAcrossRebuilds(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	dev := seedDevice(t, db, "no-hw", "sn3001_rain", "", false)
+
+	first, err := EnsureLogicalDevice(db, dev, PathStartup, 365)
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	if !strings.HasPrefix(first.IdentityKey, "sn3001_rain:") || first.IdentityKey == "sn3001_rain:" {
+		t.Fatalf("expected deterministic type:{uuid} key, got %q", first.IdentityKey)
+	}
+	// 实例挂到该身份并软删 → 无存活实例。
+	db.Model(dev).Update("logical_device_id", first.ID)
+	db.Delete(dev)
+
+	second, err := EnsureLogicalDevice(db, dev, PathStartup, 365)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("expected reuse of logical device %d (key %q), got %d (key %q)",
+			first.ID, first.IdentityKey, second.ID, second.IdentityKey)
+	}
+
+	var count int64
+	db.Model(&models.LogicalDevice{}).Where("identity_key = ?", first.IdentityKey).Count(&count)
+	if count != 1 {
+		t.Errorf("expected exactly 1 logical_device row for key %q, got %d", first.IdentityKey, count)
+	}
+}
+
+// TestEnsure_EmptyHardwareID_DualReplicaNoOrphan — 模拟双副本并发补建同
+// 一空 hw 实例: 确定性 key + uniqueIndex + ON CONFLICT DoNothing 防护下,
+// 两副本必须返回同一 logical_device, 表内该 key 恰好 1 行, 无孤儿。
+// SQLite :memory: 每连接独立库, 故 MaxOpenConns(1) 强制共享单连接。
+func TestEnsure_EmptyHardwareID_DualReplicaNoOrphan(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+
+	dev := seedDevice(t, db, "no-hw", "sn3001_rain", "", false)
+
+	const replicas = 2
+	results := make(chan *models.LogicalDevice, replicas)
+	errs := make(chan error, replicas)
+	for i := 0; i < replicas; i++ {
+		go func() {
+			ld, err := EnsureLogicalDevice(db, dev, PathStartup, 365)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- ld
+		}()
+	}
+	var got []*models.LogicalDevice
+	for i := 0; i < replicas; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("replica ensure failed: %v", err)
+		case ld := <-results:
+			got = append(got, ld)
+		}
+	}
+	if got[0].ID != got[1].ID {
+		t.Fatalf("dual replica produced orphan logical devices: %d vs %d (keys %q / %q)",
+			got[0].ID, got[1].ID, got[0].IdentityKey, got[1].IdentityKey)
+	}
+
+	var rows int64
+	if err := db.Model(&models.LogicalDevice{}).
+		Where("identity_key = ?", got[0].IdentityKey).Count(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("expected exactly 1 row for key %q, got %d", got[0].IdentityKey, rows)
+	}
+}
+
+// TestEnsure_EmptyHardwareID_DistinctInstancesDistinctKeys — 不同空 hw
+// 实例派生不同 key (确定性按实例主键), 各自独立成行。
+func TestEnsure_EmptyHardwareID_DistinctInstancesDistinctKeys(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	dev1 := seedDevice(t, db, "no-hw-1", "sn3001_rain", "", false)
+	dev2 := seedDevice(t, db, "no-hw-2", "sn3001_rain", "", false)
+
+	ld1, err := EnsureLogicalDevice(db, dev1, PathStartup, 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ld2, err := EnsureLogicalDevice(db, dev2, PathStartup, 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ld1.ID == ld2.ID {
+		t.Fatalf("distinct instances must get distinct logical devices")
+	}
+	if ld1.IdentityKey == ld2.IdentityKey {
+		t.Errorf("distinct instances must get distinct keys, both %q", ld1.IdentityKey)
+	}
+	var count int64
+	db.Model(&models.LogicalDevice{}).Count(&count)
+	if count != 2 {
+		t.Errorf("expected 2 logical devices, got %d", count)
 	}
 }

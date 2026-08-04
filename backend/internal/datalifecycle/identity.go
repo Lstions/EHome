@@ -40,11 +40,20 @@ const (
 
 // IdentityKey derives the identity key for a device instance
 // (方案 §1.1): `type:hardware_id`; hardware_id 为空时 `type:{uuid}`。
-func IdentityKey(deviceType, hardwareID string) string {
+// 空 hardware_id 分支必须确定性: 基于实例主键派生 uuid v5
+// (NameSpaceOID + "edge:<id>"), 同一实例跨补建/跨副本生成同一 key,
+// ON CONFLICT 并发防护才真正生效 (T1.1 复审修复)。instanceID 为 0
+// (未落库实例, 无稳定身份基准) 时退化为随机 uuid。
+func IdentityKey(deviceType, hardwareID string, instanceID uint) string {
 	deviceType = strings.TrimSpace(deviceType)
 	hardwareID = strings.TrimSpace(hardwareID)
 	if hardwareID == "" {
-		hardwareID = uuid.NewString()
+		if instanceID == 0 {
+			hardwareID = uuid.NewString()
+		} else {
+			hardwareID = uuid.NewSHA1(uuid.NameSpaceOID,
+				[]byte(fmt.Sprintf("edge:%d", instanceID))).String()
+		}
 	}
 	key := deviceType + ":" + hardwareID
 	if len(key) > identityKeyMaxLen {
@@ -96,7 +105,7 @@ func EnsureLogicalDevice(db *gorm.DB, dev *models.EdgeDevice, path Path, retenti
 	if retentionDays <= 0 {
 		retentionDays = 365
 	}
-	baseKey := IdentityKey(dev.Type, dev.HardwareID)
+	baseKey := IdentityKey(dev.Type, dev.HardwareID, dev.ID)
 	name := strings.TrimSpace(dev.Name)
 	if name == "" {
 		name = baseKey
