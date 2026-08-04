@@ -94,6 +94,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)
 
+		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
+		registerLogicalDeviceRoutes(v1, db)
+
 		// Removed multi-user API compatibility surface (authenticated 410).
 		registerLegacyUserRoutes(v1)
 

@@ -108,6 +108,16 @@ func main() {
 	backfiller := datalifecycle.NewBackfiller(db)
 	backfiller.Start()
 
+	// 数据生命周期 P3 (方案 v3.3 §4.3 任务 3): 合并搬迁 worker — 处理
+	// merge_status='pending' 源的数据搬迁, 水位断点续跑 + 失败通知/重试。
+	migrator := datalifecycle.NewMigrator(db)
+	migrator.Start()
+
+	// 数据生命周期 P3 (方案 v3.3 §4.1/§4.2/§4.3 任务 1): retention 每日
+	// 任务 — 到期前 30/7 天通知 + 到期分批硬删。
+	retentionTask := datalifecycle.NewRetentionTask(db)
+	retentionTask.Start()
+
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
 		logger.Fatalf("Failed to create initialization credential: %v", err)
 	} else if credential != "" {
@@ -305,6 +315,12 @@ func main() {
 
 	backfiller.Stop()
 	logger.Infof("Data lifecycle backfiller stopped")
+
+	migrator.Stop()
+	logger.Infof("Data lifecycle merge migrator stopped")
+
+	retentionTask.Stop()
+	logger.Infof("Data lifecycle retention task stopped")
 
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")

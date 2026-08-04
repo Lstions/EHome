@@ -201,7 +201,7 @@ func (p *Purger) purgeOne(ctx context.Context, ld *models.LogicalDevice) PurgeRe
 	}
 
 	// 守卫 2: 是某 pending 合并的目标或源 → 顺延至合并终态后再执行。
-	pendingTarget, err := p.isPendingMergeParticipant(ctx, ld.ID)
+	pendingTarget, err := isPendingMergeParticipant(ctx, p.db, ld.ID)
 	if err != nil {
 		result.Outcome = PurgeFailed
 		result.Error = err.Error()
@@ -268,10 +268,11 @@ func (p *Purger) purgeOne(ctx context.Context, ld *models.LogicalDevice) PurgeRe
 }
 
 // isPendingMergeParticipant reports whether the logical device is the target
-// of any pending merge or itself a pending source.
-func (p *Purger) isPendingMergeParticipant(ctx context.Context, logicalID uint) (bool, error) {
+// of any pending merge or itself a pending source. Shared by purge (§4.3
+// 任务 2 守卫) and retention (§4.3 任务 1 顺延).
+func isPendingMergeParticipant(ctx context.Context, db *gorm.DB, logicalID uint) (bool, error) {
 	var incoming int64
-	if err := p.db.WithContext(ctx).Model(&models.LogicalDevice{}).
+	if err := db.WithContext(ctx).Model(&models.LogicalDevice{}).
 		Where("merged_into = ? AND merge_status = ?", logicalID, models.MergeStatusPending).
 		Count(&incoming).Error; err != nil {
 		return false, fmt.Errorf("check pending merge target: %w", err)
@@ -280,7 +281,7 @@ func (p *Purger) isPendingMergeParticipant(ctx context.Context, logicalID uint) 
 		return true, nil
 	}
 	var self models.LogicalDevice
-	if err := p.db.WithContext(ctx).First(&self, logicalID).Error; err != nil {
+	if err := db.WithContext(ctx).First(&self, logicalID).Error; err != nil {
 		return false, fmt.Errorf("reload logical_device %d: %w", logicalID, err)
 	}
 	if self.MergedInto != nil && self.MergeStatus != nil && *self.MergeStatus == models.MergeStatusPending {
