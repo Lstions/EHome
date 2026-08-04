@@ -37,6 +37,26 @@ export interface LogicalDeviceInfo {
   row_estimate?: number
 }
 
+// GET /edge-devices/candidates 响应项 (方案 v3.3 §1.3)。
+// row_estimate 在估算超时时由后端省略 → 前端按可选处理。
+export interface LogicalDeviceCandidate {
+  id: number
+  name: string
+  device_type: string
+  retention_days: number
+  instance_count: number
+  last_data_at: string | null
+  match_weight: number
+  row_estimate?: number
+}
+
+export interface CandidateQueryParams {
+  type: string
+  node_id?: string
+  hardware_id?: string
+  channel_id?: number
+}
+
 export interface EdgeDeviceListParams {
   node_id?: number | string
   device_type?: string
@@ -56,6 +76,10 @@ export interface CreateEdgeDeviceParams {
   enabled?: boolean
   interval_ms?: number
   device_config_id?: number
+  // 方案 v3.3 §3.3/§九: 继承目标逻辑设备 (可选)。指定时后端校验
+  // 目标存在/type 匹配/merged_into NULL/purge_requested FALSE +
+  // 存活实例唯一性; 未指定则后端新建逻辑身份。
+  logical_device_id?: number
   // F: inline channel creation — when channel_id is 0/absent and channel is
   // provided, the backend creates the channel inside the same transaction.
   channel?: {
@@ -226,6 +250,16 @@ export const edgeDeviceApi = {
     const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/logical-device-info`)
     const data = response?.data && typeof response.data === 'object' ? response.data : response
     return data as LogicalDeviceInfo
+  },
+
+  // 方案 v3.3 §1.3/§九: 创建继承候选逻辑设备列表 (Unscoped 聚合,
+  // 权重排序, 数据量估算 + 3s 超时降级)。失败由调用方降级处理。
+  async getCandidates(params: CandidateQueryParams): Promise<LogicalDeviceCandidate[]> {
+    const response = await client.get<unknown, any>('/api/v1/edge-devices/candidates', { params })
+    const data = response?.data
+    if (Array.isArray(data)) return data as LogicalDeviceCandidate[]
+    if (Array.isArray(response)) return response as LogicalDeviceCandidate[]
+    return []
   },
 
   async getLatestData(id: number): Promise<any> {

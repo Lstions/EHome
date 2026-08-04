@@ -47,6 +47,8 @@ vi.mock('@/api/edgeDevice', () => ({
     update: vi.fn(),
     delete: vi.fn(),
     getLogicalDeviceInfo: mockGetLogicalDeviceInfo,
+    // 方案 v3.3 §1.3: 步骤 0 候选组件依赖; 测试默认空候选集
+    getCandidates: vi.fn(() => Promise.resolve([])),
   },
 }))
 vi.mock('@/api/channel', () => ({
@@ -166,12 +168,14 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain('white-space: nowrap;')
   })
 
-  // P1-1: 编辑模式不走向导——隐藏步骤指示器与前两步,只改基本信息,且不传 type。
+  // P1-1: 编辑模式不走向导——隐藏步骤指示器与前三步,只改基本信息,且不传 type。
+  // (步骤编号含 v3.3 §3.1 新增的步骤 0"历史数据继承": 0=继承 1=型号 2=通道 3=基本信息)
   it('P1-1: edit mode bypasses the wizard and never resubmits type', () => {
     expect(source).toContain('v-if="!editingDeviceId" :active="createStep"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 0"')
     expect(source).toContain('v-show="!editingDeviceId && createStep === 1"')
-    expect(source).toContain('v-show="editingDeviceId || createStep === 2"')
+    expect(source).toContain('v-show="!editingDeviceId && createStep === 2"')
+    expect(source).toContain('v-show="editingDeviceId || createStep === 3"')
     expect(source).toContain('保存修改')
     // 编辑提交不得携带 type(后端 G1 在 device_config_id>0 时拒绝)
     const editBlock = source.slice(source.indexOf('if (frozenEditingDeviceId) {'))
@@ -337,5 +341,143 @@ describe('EdgeDeviceList.vue', () => {
     expect(source).toContain('DeviceDeleteDialog')
     expect(source).toContain('DeviceBatchDeleteDialog')
     expect(source).toContain('delete_data: deleteData')
+  })
+
+  // ---- 数据生命周期 T5: 创建继承 步骤 0 (方案 v3.3 §3.1/§3.2) ----
+
+  it('步骤0: 向导默认"作为新设备创建", 不渲染候选组件', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    // 打开创建对话框
+    const createBtn = wrapper.findAll('button').find(b => b.text().includes('创建边缘设备'))
+    expect(createBtn).toBeTruthy()
+    await createBtn!.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('.el-dialog')
+    expect(dialog.exists()).toBe(true)
+    // 步骤指示器含新增的步骤 0 (ElSteps/ElStep 为通用 stub 不渲染 title prop,
+    // 用源码契约断言步骤标题)
+    expect(source).toContain('<el-step title="历史数据继承" />')
+    expect(dialog.text()).toContain('此设备是否要继承历史数据')
+    // 默认 radio = 作为新设备创建 (is-checked 在第一个 radio 上)
+    const radios = dialog.findAll('.inherit-mode-radio input[type="radio"]')
+    expect(radios.length).toBe(2)
+    expect((radios[0].element as HTMLInputElement).checked).toBe(true)
+    expect((radios[1].element as HTMLInputElement).checked).toBe(false)
+    // 未选"继承" → 候选组件不渲染
+    expect(dialog.find('.inherit-candidate-area').exists()).toBe(false)
+  })
+
+  it('步骤0: 选"继承历史数据"展开候选组件, 型号未选时显示引导', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const createBtn = wrapper.findAll('button').find(b => b.text().includes('创建边缘设备'))
+    await createBtn!.trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('.el-dialog')
+    const radios = dialog.findAll('.inherit-mode-radio input[type="radio"]')
+    await radios[1].setValue(true)
+    await flushPromises()
+
+    expect(dialog.find('.inherit-candidate-area').exists()).toBe(true)
+    // 步骤 0 时型号未选 (type=''), 候选组件显示"先选型号"引导而非空列表
+    expect(dialog.find('[data-testid="candidate-awaiting-type"]').exists()).toBe(true)
+  })
+
+  it('步骤0: 默认与选"继承"均可进入下一步 (候选依赖型号, 提交时拦截)', () => {
+    // 交互死锁防护: 候选列表依赖设备型号 (步骤 1), 若步骤 0 要求先选候选
+    // 才能进步骤 1 会形成死锁; 故步骤 0 恒可过, 拦截逻辑在 handleCreate。
+    expect(source).toContain('if (createStep.value === 0) return true')
+    expect(source).toContain("inheritMode.value === 'inherit' && inheritLogicalDeviceId.value === null")
+    expect(source).toContain('已选择"继承历史数据"但未选中候选逻辑设备')
+  })
+
+  it('创建: "作为新设备创建"不携带 logical_device_id', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    // 构造创建上下文: 型号 + 已有通道 + 表单
+    vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
+    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = '新雨量计'
+    vm.deviceForm.node_id = 1
+    vm.inheritMode = 'new'
+    vm.inheritLogicalDeviceId = null
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).toHaveBeenCalledTimes(1)
+    const arg = (edgeDeviceApi.create as any).mock.calls[0][0]
+    expect(arg).toEqual(expect.objectContaining({
+      name: '新雨量计',
+      node_id: '1',
+      channel_id: 5,
+      type: 'sn3001_rain',
+    }))
+    expect(arg.logical_device_id).toBeUndefined()
+  })
+
+  it('创建: 选"继承"且已选候选 → create 携带 logical_device_id', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
+    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = '雨量计-重建'
+    vm.deviceForm.node_id = 1
+    vm.inheritMode = 'inherit'
+    vm.inheritLogicalDeviceId = 42
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).toHaveBeenCalledWith(expect.objectContaining({
+      name: '雨量计-重建',
+      logical_device_id: 42,
+    }))
+  })
+
+  it('创建: 选"继承"但未选候选 → 提交拦截, 不调 create', async () => {
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const { ElMessage } = await import('element-plus')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.selectedParser = { id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] }
+    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = '雨量计'
+    vm.deviceForm.node_id = 1
+    vm.inheritMode = 'inherit'
+    vm.inheritLogicalDeviceId = null
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).not.toHaveBeenCalled()
+    expect(ElMessage.warning).toHaveBeenCalledWith(expect.stringContaining('未选中候选逻辑设备'))
+  })
+
+  it('创建对话框关闭/重置清空继承状态', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.inheritMode = 'inherit'
+    vm.inheritLogicalDeviceId = 7
+    vm.resetCreateDialog()
+    expect(vm.inheritMode).toBe('new')
+    expect(vm.inheritLogicalDeviceId).toBeNull()
+    expect(vm.createStep).toBe(0)
   })
 })

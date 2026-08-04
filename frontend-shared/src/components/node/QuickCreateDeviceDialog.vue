@@ -76,6 +76,29 @@
       <el-form-item label="采集间隔 (ms)" prop="interval_ms">
         <el-input-number v-model="form.interval_ms" :min="100" :max="3600000" :step="100" />
       </el-form-item>
+
+      <!-- 继承历史数据 (方案 v3.3 §3.1 入口2: 可折叠区, 默认折叠) -->
+      <el-collapse v-model="inheritCollapsed" class="inherit-collapse">
+        <el-collapse-item name="inherit">
+          <template #title>
+            <span class="inherit-collapse-title">
+              继承历史数据（可选）
+              <el-tag v-if="inheritLogicalDeviceId !== null" size="small" type="success" style="margin-left: 8px;">已选择</el-tag>
+            </span>
+          </template>
+          <div class="inherit-collapse-body">
+            <div class="inherit-collapse-tip">若为更换/重建的同一台物理设备，可继承其历史数据；默认作为新设备创建</div>
+            <LogicalDeviceCandidateSelect
+              v-model="inheritLogicalDeviceId"
+              :type="form.parserId"
+              :node-id="props.nodeId"
+              :hardware-id="selectedChannel?.hardware_id || ''"
+              :channel-id="selectedChannel?.id"
+              :active="inheritExpanded"
+            />
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </el-form>
 
     <template #footer>
@@ -93,6 +116,7 @@ import { InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useParserStore } from '@/stores/parser'
 import { edgeDeviceApi } from '@/api/edgeDevice'
+import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
 import type { Parser } from '@/api/parser'
 import type { Channel } from '@/api/channel'
 
@@ -171,6 +195,13 @@ const canSubmit = computed(() =>
   Boolean(form.parserId && form.channelId && form.name.trim()),
 )
 
+// 方案 v3.3 §3.1 入口2 — "继承历史数据（可选）"折叠区, 默认折叠。
+// el-collapse v-model 为激活 name 数组; 空数组 = 全部折叠。
+// active=inheritExpanded 传给候选组件: 折叠时不发请求 (延迟加载)。
+const inheritCollapsed = ref<string[]>([])
+const inheritExpanded = computed(() => inheritCollapsed.value.includes('inherit'))
+const inheritLogicalDeviceId = ref<number | null>(null)
+
 const onParserChange = () => {
   // 切换设备型号时清空已选通道(可能不再匹配)
   form.channelId = undefined
@@ -181,6 +212,8 @@ const reset = () => {
   form.channelId = undefined
   form.name = ''
   form.interval_ms = 1000
+  inheritCollapsed.value = []
+  inheritLogicalDeviceId.value = null
 }
 
 const handleSubmit = async () => {
@@ -196,6 +229,8 @@ const handleSubmit = async () => {
   submitting.value = true
   try {
     // driver-backed 创建: device_config_id=0(无模板),type=parser.id
+    // 方案 v3.3 §3.2/§3.3: 折叠区已选候选时携带 logical_device_id 继承
+    // 历史数据; 未选 (默认折叠) 不传, 后端新建逻辑身份。
     await edgeDeviceApi.create({
       name: form.name.trim(),
       node_id: String(props.nodeId),
@@ -203,6 +238,9 @@ const handleSubmit = async () => {
       hardware_id: ch.hardware_id,
       type: selectedParser.value.id,
       interval_ms: form.interval_ms,
+      ...(inheritLogicalDeviceId.value !== null
+        ? { logical_device_id: inheritLogicalDeviceId.value }
+        : {}),
     })
     ElMessage.success('创建成功')
     visible.value = false
@@ -250,6 +288,28 @@ watch(() => props.modelValue, (val) => {
 }
 
 .channel-hint--loading {
+  color: var(--el-text-color-secondary);
+}
+
+/* 方案 v3.3 §3.1 入口2 — 继承历史数据折叠区 (默认折叠) */
+.inherit-collapse {
+  margin-top: 4px;
+  border-top: none;
+}
+
+.inherit-collapse-title {
+  display: inline-flex;
+  align-items: center;
+  font-size: 14px;
+}
+
+.inherit-collapse-body {
+  padding: 4px 2px 8px;
+}
+
+.inherit-collapse-tip {
+  margin-bottom: 10px;
+  font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 </style>

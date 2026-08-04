@@ -282,13 +282,37 @@
     >
       <!-- 步骤指示器(仅创建模式;编辑模式只改基本信息,不走向导) -->
       <el-steps v-if="!editingDeviceId" :active="createStep" finish-status="success" simple style="margin-bottom: 24px;">
+        <el-step title="历史数据继承" />
         <el-step title="选择设备型号" />
         <el-step title="选择节点 & 通道" />
         <el-step title="基本信息" />
       </el-steps>
 
-      <!-- Step 1: 选择设备型号(仅创建模式) -->
+      <!-- Step 0: 历史数据继承 (方案 v3.3 §3.1/§3.2, 默认"作为新设备创建") -->
       <div v-show="!editingDeviceId && createStep === 0">
+        <div class="step-tip">
+          <el-icon><InfoFilled /></el-icon>
+          <span>此设备是否要<strong>继承历史数据</strong>？默认作为新设备创建；若为更换/重建的同一台物理设备，可继承其历史数据</span>
+        </div>
+
+        <el-radio-group v-model="inheritMode" class="inherit-mode-radio">
+          <el-radio value="new">作为新设备创建（默认，新建独立逻辑身份）</el-radio>
+          <el-radio value="inherit">继承历史数据（从候选逻辑设备中选择）</el-radio>
+        </el-radio-group>
+
+        <div v-if="inheritMode === 'inherit'" class="inherit-candidate-area">
+          <LogicalDeviceCandidateSelect
+            v-model="inheritLogicalDeviceId"
+            :type="selectedParser?.id || ''"
+            :node-id="deviceForm.node_id ? String(deviceForm.node_id) : ''"
+            :hardware-id="inheritCandidateHardwareId"
+            :channel-id="inheritCandidateChannelId"
+          />
+        </div>
+      </div>
+
+      <!-- Step 1: 选择设备型号(仅创建模式) -->
+      <div v-show="!editingDeviceId && createStep === 1">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
           <span>选择此设备使用的<strong>设备型号</strong>，设备型号决定了原始字节到物理量的解析方式</span>
@@ -358,7 +382,7 @@
       </div>
       
       <!-- Step 2: 选择/创建通道(仅创建模式) -->
-      <div v-show="!editingDeviceId && createStep === 1">
+      <div v-show="!editingDeviceId && createStep === 2">
         <el-form :model="deviceForm" :rules="deviceRules">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
@@ -443,8 +467,8 @@
         </el-form>
       </div>
       
-      <!-- Step 3: 基本信息(创建模式 createStep===2;编辑模式直接显示) -->
-      <div v-show="editingDeviceId || createStep === 2">
+      <!-- Step 3: 基本信息(创建模式 createStep===3;编辑模式直接显示) -->
+      <div v-show="editingDeviceId || createStep === 3">
         <div class="step-tip">
           <el-icon><InfoFilled /></el-icon>
           <span>{{ editingDeviceId ? '修改设备基本信息(设备型号与通道绑定不可在编辑中变更)' : '填写设备基本信息并确认配置' }}</span>
@@ -493,10 +517,10 @@
       <template #footer>
         <template v-if="!editingDeviceId">
           <el-button v-if="createStep > 0" @click="createStep--">上一步</el-button>
-          <el-button v-if="createStep < 2" type="primary" :disabled="!canGoNext" @click="createStep++">
+          <el-button v-if="createStep < 3" type="primary" :disabled="!canGoNext" @click="createStep++">
             下一步
           </el-button>
-          <el-button v-if="createStep === 2" type="primary" :loading="submitting" @click="handleCreate">
+          <el-button v-if="createStep === 3" type="primary" :loading="submitting" @click="handleCreate">
             创建边缘设备
           </el-button>
         </template>
@@ -551,6 +575,7 @@ import CountUp from '@/components/common/CountUp.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
 import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog.vue'
+import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { getHardwareTagType } from '@/utils/hardwareTag'
@@ -608,6 +633,18 @@ const createStep = ref(0)
 const selectedParser = ref<Parser | null>(null)
 const selectedChannel = ref<Channel | null>(null)
 const channelTab = ref('existing')
+
+// 方案 v3.3 §3.1/§3.2 — 步骤 0"历史数据继承": 默认"作为新设备创建"。
+// inheritMode='inherit' 时必须选中一个候选才可进入下一步 (显式语义)。
+const inheritMode = ref<'new' | 'inherit'>('new')
+const inheritLogicalDeviceId = ref<number | null>(null)
+// 候选权重计算上下文: 创建位置的 hardware_id/channel_id (步骤 2 之后才有值;
+// 步骤 0 时为空 → 服务端按同 type 档排序, 用户回到步骤 0 时自动重查)。
+const inheritCandidateHardwareId = computed(() => {
+  if (channelTab.value === 'existing') return selectedChannel.value?.hardware_id || ''
+  return newChannel.hardware_id || ''
+})
+const inheritCandidateChannelId = computed(() => selectedChannel.value?.id)
 
 // 模板选择 (Step 0 可选)
 const availableTemplates = ref<DeviceConfig[]>([])
@@ -859,13 +896,18 @@ const generatedChannelName = computed(() => {
 
 // 是否可以进入下一步
 const canGoNext = computed(() => {
-  if (createStep.value === 0) return !!selectedParser.value
-  if (createStep.value === 1) {
+  // 步骤 0 历史数据继承: 始终可过。候选列表依赖设备型号 (步骤 1 才选),
+  // 首次进入步骤 0 时 type 未知, 候选组件显示"先选型号"引导; 用户选"继承"
+  // 后可先进步骤 1 选型号, 再回到步骤 0 选候选 (组件随 type 变化自动重查)。
+  // 若选"继承"却未选候选, 在提交时拦截并提示 (见 handleCreate)。
+  if (createStep.value === 0) return true
+  if (createStep.value === 1) return !!selectedParser.value
+  if (createStep.value === 2) {
     if (!deviceForm.node_id) return false
     if (channelTab.value === 'existing') return !!selectedChannel.value
     if (channelTab.value === 'create') return !!newChannel.hardware_id
   }
-  if (createStep.value === 2) return !!deviceForm.name
+  if (createStep.value === 3) return !!deviceForm.name
   return false
 })
 
@@ -1107,12 +1149,24 @@ const handleCreate = async () => {
       ElMessage.warning('请选择所属节点')
       return
     }
+    // 方案 v3.3 §3.2: 用户勾选了"继承历史数据"但未选中候选 (候选依赖型号,
+    // 步骤 0 可先跳过) 时, 在提交处拦截——继承语义要求显式目标, 不能静默
+    // 回退为"作为新设备创建"违背用户的显式选择。
+    if (inheritMode.value === 'inherit' && inheritLogicalDeviceId.value === null) {
+      ElMessage.warning('已选择"继承历史数据"但未选中候选逻辑设备，请回到"历史数据继承"步骤选择候选，或改为"作为新设备创建"')
+      return
+    }
     submitting.value = true
     const frozenDeviceForm = { ...deviceForm }
     const frozenNewChannel = { ...newChannel }
     const frozenParser = selectedParser.value
       ? { ...selectedParser.value, hardware_types: [...(selectedParser.value.hardware_types || [])] }
       : null
+    // 方案 v3.3 §3.2: 步骤 0 继承选择快照 — "继承历史数据"且已选候选时
+    // 携带 logical_device_id; "作为新设备创建"不传 (后端新建逻辑身份)。
+    const frozenInheritParams = inheritMode.value === 'inherit' && inheritLogicalDeviceId.value !== null
+      ? { logical_device_id: inheritLogicalDeviceId.value }
+      : {}
     const matchingDeviceConfig = frozenParser
       ? availableTemplates.value.find(
           template => template.parser_id === frozenParser.id || template.device_type === frozenParser.id,
@@ -1183,6 +1237,7 @@ const handleCreate = async () => {
         node_id: String(frozenDeviceForm.node_id!),
         hardware_id: channelPayload.hardware_id,
         ...baseParams,
+        ...frozenInheritParams,
         channel: {
           hardware_type: channelPayload.hardware_type,
           hardware_id: channelPayload.hardware_id,
@@ -1223,6 +1278,7 @@ const handleCreate = async () => {
           channel_id: channelId!,
           hardware_id: targetChannel.hardware_id,
           device_config_id: deviceConfigId,
+          ...frozenInheritParams,
         })
       } else {
         await edgeDeviceApi.create({
@@ -1231,6 +1287,7 @@ const handleCreate = async () => {
           channel_id: channelId!,
           type: frozenParser.id,
           hardware_id: targetChannel.hardware_id,
+          ...frozenInheritParams,
         })
       }
     } else {
@@ -1256,6 +1313,8 @@ const resetCreateDialog = () => {
   selectedParser.value = null
   selectedChannel.value = null
   channelTab.value = 'existing'
+  inheritMode.value = 'new'
+  inheritLogicalDeviceId.value = null
   deviceForm.name = ''
   deviceForm.node_id = null
   deviceForm.interval_ms = 1000
@@ -1318,6 +1377,8 @@ watch(showCreateDialog, (val) => {
     selectedParser.value = null
     selectedChannel.value = null
     editingDeviceId.value = null
+    inheritMode.value = 'new'
+    inheritLogicalDeviceId.value = null
     // 重置表单
     deviceForm.name = ''
     deviceForm.node_id = null
@@ -1665,6 +1726,21 @@ code.fact-value {
   color: var(--el-color-success);
   font-size: 14px;
   margin-bottom: 20px;
+}
+
+/* 方案 v3.3 §3.1 — 步骤 0 历史数据继承 */
+.inherit-mode-radio {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.inherit-candidate-area {
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 8px;
 }
 
 .parser-select-list {
