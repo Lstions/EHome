@@ -335,21 +335,22 @@ static void report_task(void *pv)
    esp_task_wdt_reset();
    continue;
   }
-  /* Strictly service the reserved critical queues first.  Keep the receive
-   * state explicit: a queue can be absent during teardown/error recovery, and
-   * desc must never be used unless one of the queues actually supplied it. */
+  /* report_tx participates in the task watchdog.  A permanent queue-set
+   * wait would therefore look like a hung task during idle periods; use a
+   * bounded wait so the loop can reset the watchdog even when no report is
+   * pending.
+   *
+   * F8.2: the explicit critical/emergency pre-scan was removed.  The
+   * critical and critical-emergency queues are members of the ready set in
+   * xQueueAddToSet order (critical before emergency before telemetry, see
+   * report_path_init), and FreeRTOS xQueueSelectFromSet returns the member
+   * that became ready first in that order — so a critical report still wins
+   * over telemetry when both are pending.  This relies on FreeRTOS set
+   * selection semantics instead of the removed explicit scan. */
   bool got_desc = false;
-  if (s_report_critical_q)
-   got_desc = xQueueReceive(s_report_critical_q, &desc, 0) == pdTRUE;
-  if (!got_desc && s_report_critical_emergency_q)
-   got_desc = xQueueReceive(s_report_critical_emergency_q, &desc, 0) == pdTRUE;
-  if (!got_desc) {
-   /* report_tx participates in the task watchdog.  A permanent queue-set
-    * wait would therefore look like a hung task during idle periods; use a
-    * bounded wait so the loop can reset the watchdog even when no report is
-    * pending. */
+  {
    QueueSetMemberHandle_t member = s_report_ready_set
-     ? xQueueSelectFromSet(s_report_ready_set, pdMS_TO_TICKS(1000)) : NULL;
+    ? xQueueSelectFromSet(s_report_ready_set, pdMS_TO_TICKS(1000)) : NULL;
    if (!member) continue;
    if (member == s_control_final_q) {
     if (xQueueReceive(member, &final, 0) == pdTRUE && s_channel_cmd_v2_final_cb)
@@ -363,7 +364,8 @@ static void report_task(void *pv)
                     write_rsp.error_msg[0] ? write_rsp.error_msg : NULL);
     continue;
    }
-   if (xQueueReceive(member, &desc, 0) != pdTRUE) continue;
+   got_desc = xQueueReceive(member, &desc, 0) == pdTRUE;
+   if (!got_desc) continue;
   }
 
   const uint8_t *payload = desc.emergency

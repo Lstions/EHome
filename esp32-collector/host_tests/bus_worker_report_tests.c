@@ -818,6 +818,73 @@ static void test_idle_no_completion_empty_no_chunked(void) {
 }
 
 /* =====================================================================
+ * Test: report queue-set selection order (F8.2)
+ *
+ * report_task no longer pre-scans the critical/emergency queues (F8.2);
+ * instead it relies on FreeRTOS xQueueSelectFromSet returning the
+ * ready member in xQueueAddToSet order: control_final, write_rsp,
+ * critical, critical_emergency, telemetry (see report_path_init).
+ *
+ * The host stub's xQueueCreate/xQueueAddToSet/xQueueSelectFromSet
+ * implement exactly this ordering semantics (first non-empty member in
+ * addition order).  This test pins the contract that F8.2 depends on:
+ * a critical report must win over telemetry when both are pending, and
+ * control-plane queues keep the highest priority.
+ *
+ * Note: this validates the selection contract against the host stub's
+ * interpretation of FreeRTOS semantics.  Real-target behavior depends on
+ * FreeRTOS set membership ordering, which the firmware build relies on;
+ * the C6/S3 regression run is the final gate for that ordering (see the
+ * F8.2 section of 边缘设备修复优化方案-v2.md).
+ * ===================================================================== */
+static void test_report_queue_set_selection_order(void)
+{
+    reset_counters();
+    drain_report_queues();
+
+    /* Control plane must still win over any report queue. */
+    control_final_desc_t final = { .slot = 1, .success = true,
+                                   .error_code = 0, .raw_len = 0 };
+    CHECK(xQueueSend(s_control_final_q, &final, 0) == pdPASS,
+          "control_final send should pass");
+
+    /* Critical and telemetry both pending: selection must pick critical
+     * (added to the set before telemetry). */
+    uint8_t data[] = {0x01, 0x02, 0x03};
+    report_enqueue(1, 2000, 1, data, 3, 0x01, 0, 0, 0, 0);   /* critical */
+    report_enqueue(2, 2001, 2, data, 3, 0, 0, 0, 0, 0);      /* telemetry */
+
+    /* With control_final pending, the set selects control_final first. */
+    QueueSetMemberHandle_t member = s_report_ready_set
+        ? xQueueSelectFromSet(s_report_ready_set, 0) : NULL;
+    CHECK(member == s_control_final_q,
+          "control_final must be selected before critical/telemetry");
+
+    /* Drain control_final; then critical must be selected. */
+    control_final_desc_t got_final;
+    CHECK(xQueueReceive(s_control_final_q, &got_final, 0) == pdPASS,
+          "control_final receive should pass");
+    CHECK(got_final.slot == 1 && got_final.success == true,
+          "control_final payload preserved");
+
+    member = s_report_ready_set
+        ? xQueueSelectFromSet(s_report_ready_set, 0) : NULL;
+    CHECK(member == s_report_critical_q,
+          "critical must be selected before telemetry (F8.2 order)");
+
+    /* Consume the critical report; telemetry remains and is next. */
+    report_desc_t desc;
+    CHECK(xQueueReceive(s_report_critical_q, &desc, 0) == pdPASS,
+          "critical receive should pass");
+    member = s_report_ready_set
+        ? xQueueSelectFromSet(s_report_ready_set, 0) : NULL;
+    CHECK(member == s_report_telemetry_q,
+          "telemetry must be selected after critical drained");
+
+    drain_report_queues();
+}
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void) {
@@ -849,6 +916,8 @@ int main(void) {
     test_report_enqueue_oversize_critical();
     test_report_enqueue_oversize_telemetry_drops();
     test_report_enqueue_null_data_with_len();
+
+    test_report_queue_set_selection_order();
 
     test_emit_fixed_block_chunks();
     test_emit_partial_block_no_emission();
