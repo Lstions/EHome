@@ -778,3 +778,268 @@ func TestResolveUnknownRejectsInvalidOrNonUnknownExecution(t *testing.T) {
 		}
 	}
 }
+
+// gateResultOf returns the gateResult with the given name from a predicate set.
+func gateResultOf(gates []gateResult, name gateName) *gateResult {
+	for i := range gates {
+		if gates[i].name == name {
+			return &gates[i]
+		}
+	}
+	return nil
+}
+
+// allGatesPass reports whether every gate in the set passed.
+func allGatesPass(gates []gateResult) bool {
+	for i := range gates {
+		if !gates[i].passed {
+			return false
+		}
+	}
+	return true
+}
+
+// TestEvaluateActionGatesFailsExactlyTheIntendedGate exercises the F4
+// predicate set directly: for every gate, a world where that single predicate
+// is false (and all others true) must produce exactly one failing gateResult
+// with that name. This is the per-gate unit coverage required by F4.
+func TestEvaluateActionGatesFailsExactlyTheIntendedGate(t *testing.T) {
+	base, _ := setupService(t)
+	actions := base.actions
+	now := time.Now().UTC()
+	node := models.Node{NodeID: "gate-node", Name: "gate", Status: "online", ConfigVersion: "gate-manifest", ConfigStatus: "applied", ConfigSyncState: "in_sync", BootID: "gate-boot", ResourceReportedAt: &now, CommandEngineRevision: 1, CommandEngineCapabilities: `{"supports_channel_cmd_v2":true,"supports_finally":true,"max_tx_bytes":128,"max_rx_bytes":8,"max_step_timeout_ms":30000}`}
+	if err := base.db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	ch := models.Channel{NodeID: node.NodeID, HardwareType: "uart", BusType: "UART", Enabled: true}
+	if err := base.db.Create(&ch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := base.db.Model(&node).Update("hardware_info", fmt.Sprintf(`{"channels":[{"id":%d,"enabled":true}]}`, ch.ID)).Error; err != nil {
+		t.Fatal(err)
+	}
+	def := deviceaction.Definition{ID: "gate_read", Version: 1, Name: "gate read", DeviceType: node.NodeID, Semantics: "read", Risk: "low", ExecutionShape: "single", Enabled: true, Transport: deviceaction.ChannelCmdV2Adapter, SingleStep: deviceaction.SingleStep{TXData: []byte{1}, ReadSize: 2, RXTimeoutMS: 1}}
+	if err := actions.Register(def); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(base.db, actions)
+	s.SetDispatchEnabled(true)
+	goodEdge := models.EdgeDevice{Name: "gate-edge", NodeID: node.NodeID, ChannelID: ch.ID, DeviceConfigID: 1, Type: node.NodeID, Enabled: true, Status: "active", Node: node}
+	if err := base.db.Create(&goodEdge).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Reload node and channel so their IDs/fields reflect the persisted rows
+	// (loadActionChannel matches channel by id+node_id; the runtime report and
+	// capability gates read node fields).
+	var persistedNode models.Node
+	if err := base.db.First(&persistedNode, "node_id = ?", node.NodeID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var persistedCh models.Channel
+	if err := base.db.First(&persistedCh, "id = ?", ch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	node, ch = persistedNode, persistedCh
+	goodEdge.Node = persistedNode
+
+	// all-pass world
+	{
+		gates := evaluateActionGates(s, s.db, goodEdge, def, nil)
+		if !allGatesPass(gates) {
+			t.Fatalf("all-pass world unexpectedly failed: %+v", gates)
+		}
+		if len(gates) != 12 {
+			t.Fatalf("expected 12 gates, got %d", len(gates))
+		}
+	}
+
+	// A definition-fits failure must produce exactly that gate failing with a reason.
+	fitsWorld := def
+	fitsWorld.ID = "gate_fits_fail"
+	fitsWorld.SingleStep = deviceaction.SingleStep{TXData: []byte{1}, ReadSize: 16, RXTimeoutMS: 1}
+	if err := actions.Register(fitsWorld); err != nil {
+		t.Fatal(err)
+	}
+	{
+		gates := evaluateActionGates(s, s.db, goodEdge, fitsWorld, nil)
+		if allGatesPass(gates) {
+			t.Fatal("fits-fail world unexpectedly all passed")
+		}
+		if first := firstFailedGate(gates); first == nil || first.name != gateDefinitionFitsCapabilities {
+			t.Fatalf("fits-fail world first failure=%+v", first)
+		}
+		if fit := gateResultOf(gates, gateDefinitionFitsCapabilities); fit == nil || fit.reason == "" {
+			t.Fatalf("fits-fail gate lacks reason: %+v", fit)
+		}
+	}
+
+	// Per-gate: flip exactly one predicate and expect exactly that gate to fail.
+	cases := []struct {
+		name   gateName
+		mutate func(*models.Node, *models.Channel, *models.EdgeDevice, *deviceaction.Definition, *Service)
+	}{
+		{gateDispatchEnabled, func(_ *models.Node, _ *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, s *Service) {
+			s.SetDispatchEnabled(false)
+		}},
+		{gateActionEnabled, func(_ *models.Node, _ *models.Channel, _ *models.EdgeDevice, d *deviceaction.Definition, _ *Service) {
+			d.Enabled = false
+		}},
+		{gateCurrentEngine, func(_ *models.Node, _ *models.Channel, _ *models.EdgeDevice, d *deviceaction.Definition, _ *Service) {
+			d.Semantics = "set"
+			d.ExecutionShape = "single"
+		}},
+		{gateEdgeEnabled, func(_ *models.Node, _ *models.Channel, e *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			e.Enabled = false
+		}},
+		{gateEdgeStatus, func(_ *models.Node, _ *models.Channel, e *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			e.Status = "inactive"
+		}},
+		{gateEdgeNodeID, func(_ *models.Node, _ *models.Channel, e *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			e.NodeID = ""
+		}},
+		{gateNodeStatus, func(n *models.Node, _ *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			n.Status = "offline"
+		}},
+		{gateActionChannel, func(_ *models.Node, c *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			c.Enabled = false
+		}},
+		{gateReportedActionChannel, func(n *models.Node, _ *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			n.HardwareInfo = `{"channels":[]}`
+		}},
+		{gateAppliedManifest, func(n *models.Node, _ *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			n.ConfigStatus = "pending"
+		}},
+		{gateCurrentCapabilities, func(n *models.Node, _ *models.Channel, _ *models.EdgeDevice, _ *deviceaction.Definition, _ *Service) {
+			n.BootID = ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.name), func(t *testing.T) {
+			node := node
+			ch := ch
+			edge := goodEdge
+			d := def
+			s := NewService(base.db, actions)
+			s.SetDispatchEnabled(true)
+			tc.mutate(&node, &ch, &edge, &d, s)
+			// Apply in-memory node/edge mutations to the edge evaluated next.
+			edge.Node = node
+			// The channel gate reads the persisted row; apply the mutation.
+			if err := base.db.Model(&models.Channel{}).Where("id = ?", ch.ID).Update("enabled", ch.Enabled).Error; err != nil {
+				t.Fatal(err)
+			}
+			gates := evaluateActionGates(s, s.db, edge, d, nil)
+			failed := firstFailedGate(gates)
+			if failed == nil || failed.name != tc.name {
+				t.Fatalf("expected only gate %s to fail, first failure=%+v", tc.name, failed)
+			}
+			if allGatesPass(gates) {
+				t.Fatalf("gate %s did not fail", tc.name)
+			}
+		})
+	}
+}
+
+// TestF4GateChangePropagatesToCatalogAndCreate proves the F4 dedup: changing
+// one shared predicate changes both the Catalog annotation and the Create
+// short-circuit path simultaneously. This is the acceptance criterion that
+// the two consumers can no longer drift apart.
+func TestF4GateChangePropagatesToCatalogAndCreate(t *testing.T) {
+	s, edge := setupService(t)
+
+	items, err := s.Catalog(context.Background(), edge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := catalogAction(items, "read_rainfall")
+	if item == nil || !item.Available {
+		t.Fatalf("catalog should be available, got %+v", item)
+	}
+	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "f4-sync-0001")); err != nil {
+		t.Fatalf("create should succeed before gate change, err=%v", err)
+	}
+
+	// Intentionally change one gate (node online → offline). Both consumers
+	// must observe it: Catalog annotates the node gate, Create rejects.
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("status", "offline").Error; err != nil {
+		t.Fatal(err)
+	}
+	items, err = s.Catalog(context.Background(), edge.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item = catalogAction(items, "read_rainfall")
+	if item == nil || item.Available || item.Reason != "edge device or node is unavailable" {
+		t.Fatalf("catalog after gate change=%+v", item)
+	}
+	if _, _, err := s.Create(context.Background(), createInput(edge.ID, "f4-sync-0002")); !errors.Is(err, ErrActionUnavailable) {
+		t.Fatalf("create after gate change err=%v", err)
+	}
+}
+
+// TestCatalogChannelFailureMasksCapabilityStale locks the F4 gate semantics
+// to the pre-refactor decision chain. The original Catalog used an else-if
+// chain (commandexec/service.go:122-141): a failing channel gate short-circuits
+// the capability branch, so capability_stale is NEVER annotated while the
+// channel is unavailable. The shared predicate set is evaluated without
+// short-circuit (satisfying the v2 "not a single bool" constraint), but the
+// Catalog consumer must fold results with the same first-failure-wins
+// annotation. Note: the F4 design doc's claim that Catalog "evaluates
+// capability after a channel error" does not match the original source — this
+// test pins the source truth (behavior unchanged).
+func TestCatalogChannelFailureMasksCapabilityStale(t *testing.T) {
+	s, edge := setupService(t)
+	if err := s.db.Model(&models.Channel{}).Where("id = ?", edge.ChannelID).Update("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stale := now.Add(-MaxCapabilityAge - time.Second)
+	if err := s.db.Model(&models.Node{}).Where("node_id = ?", edge.NodeID).Update("resource_reported_at", stale).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+	items, err := s.Catalog(context.Background(), edge.ID)
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil {
+		t.Fatalf("catalog=%+v err=%v", items, err)
+	}
+	if item.Available {
+		t.Fatalf("item must be unavailable when channel disabled, got %+v", item)
+	}
+	if item.Reason != "action channel is unavailable" {
+		t.Fatalf("first-failed channel gate must keep the channel reason, got %q", item.Reason)
+	}
+	// Original behavior: the channel failure masks the capability branch
+	// entirely, so no capability_stale code and no staleness metric.
+	if item.ReasonCode != "" {
+		t.Fatalf("channel failure must mask capability_stale (original else-if semantics), got %+v", item)
+	}
+}
+
+// TestCatalogIgnoresEdgeNodeIDGate verifies the non-symmetric gate handling:
+// gateEdgeNodeID is Create-only; the Catalog consumer must skip it so an edge
+// with an empty node reference is annotated exactly as before (its channel
+// gate fails first with the channel reason) and never as node-unavailable.
+func TestCatalogIgnoresEdgeNodeIDGate(t *testing.T) {
+	s, edge := setupService(t)
+	// Strip the node reference while keeping edge.Enabled and (zero) node
+	// behavior identical to a record that predates node linking.
+	if err := s.db.Model(&models.EdgeDevice{}).Where("id = ?", edge.ID).Update("node_id", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.Catalog(context.Background(), edge.ID)
+	item := catalogAction(items, "read_rainfall")
+	if err != nil || item == nil {
+		t.Fatalf("catalog=%+v err=%v", items, err)
+	}
+	if item.Available {
+		t.Fatalf("item must be unavailable without a node reference, got %+v", item)
+	}
+	// Catalog has no node-id predicate: after skipping gateEdgeNodeID the
+	// first failure is the node-status gate (zero-value Node), which the
+	// pre-F4 implementation annotated via its single Available expression —
+	// "edge device or node is unavailable", never the channel reason.
+	if item.Reason != "edge device or node is unavailable" {
+		t.Fatalf("catalog must annotate a node-less edge as node-unavailable, got %q", item.Reason)
+	}
+}

@@ -79,65 +79,163 @@ type CatalogItem struct {
 	ReasonCode string                  `json:"reason_code,omitempty"`
 }
 
+// gateName identifies one availability predicate shared by Catalog and Create.
+// Keep the set in sync in both consumers — this single source of truth is the
+// F4 deduplication. Non-symmetric predicates are marked with onlyCreate/onlyCatalog.
+type gateName string
+
+const (
+	gateDispatchEnabled            gateName = "dispatch_enabled"
+	gateActionEnabled              gateName = "action_enabled"
+	gateCurrentEngine              gateName = "current_engine"
+	gateEdgeEnabled                gateName = "edge_enabled"
+	gateEdgeStatus                 gateName = "edge_status"
+	gateEdgeNodeID                 gateName = "edge_node_id" // Create-only: Catalog has no such check
+	gateNodeStatus                 gateName = "node_status"
+	gateActionChannel              gateName = "action_channel"
+	gateReportedActionChannel      gateName = "reported_action_channel"
+	gateAppliedManifest            gateName = "applied_manifest"
+	gateCurrentCapabilities        gateName = "current_capabilities"
+	gateDefinitionFitsCapabilities gateName = "definition_fits_capabilities"
+)
+
+// gateResult is one evaluated availability predicate. The whole predicate set
+// is evaluated per action (no early return) so both consumers share one
+// decision tree; Catalog folds results into the original first-failure-wins
+// annotation, Create folds them into a short-circuit reject. This satisfies
+// the F4 v2 constraint that the signature is a per-gate result set, not a
+// single bool, while preserving the pre-refactor else-if chain semantics
+// (e.g. a failing channel gate masks capability_stale, exactly as before).
+type gateResult struct {
+	name       gateName
+	passed     bool
+	reasonCode string
+	reason     string
+}
+
+// evaluateActionGates runs the shared per-action predicate set and returns
+// one gateResult per gate. The gates capture the *exact* predicate set of the
+// old Catalog/Create availability checks:
+//
+//   - Catalog annotations follow the original decision chain:
+//     dispatchEnabled → def.Enabled → CurrentEngineAllows → edge availability
+//     → channel → capabilities → definition fits capabilities.
+//   - gateActionEnabled reports definition.Enabled alone; a disabled-but-engine
+//     allowed action is annotated "not enabled", an engine-rejected action is
+//     annotated command_engine_gate — both as before.
+//   - gateEdgeNodeID is Create-only (Create checks edge.NodeID == ""); Catalog
+//     has no such check and it does not affect Catalog availability. The gate
+//     is still evaluated so both consumers share one predicate list.
+//   - capability_stale: the old Catalog surfaced it only when the *first*
+//     failing gate was currentCapabilities; a channel failure masked it. This
+//     shared version preserves that short-circuit annotation: an item whose
+//     first failure is gateCurrentCapabilities and whose resource report is
+//     stale gets the machine-readable code (never for definition-fits failures,
+//     which are capability *value* mismatches, not staleness).
+//   - definitionFitsCapabilities in Catalog is evaluated with canonical nil
+//     params ({}), as before; Create passes the real canonical params.
+func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, definition deviceaction.Definition, params json.RawMessage) []gateResult {
+	results := make([]gateResult, 0, 12)
+	appendResult := func(name gateName, passed bool, reasonCode, reason string) {
+		results = append(results, gateResult{name: name, passed: passed, reasonCode: reasonCode, reason: reason})
+	}
+	channelErr := loadActionChannelError(tx, edge)
+	reportedErr := requireReportedActionChannelError(edge.Node, edge.ChannelID)
+	manifestErr := requireAppliedManifestError(edge.Node, edge.Node.ConfigVersion)
+	_, capabilities, capabilitiesErr := currentCapabilitiesError(edge.Node, s.now)
+
+	appendResult(gateDispatchEnabled, s.dispatchEnabled, "", "")
+	appendResult(gateActionEnabled, definition.Enabled, "", "")
+	appendResult(gateCurrentEngine, deviceaction.CurrentEngineAllows(definition), "command_engine_gate", "action requires the future high-risk command engine")
+	appendResult(gateEdgeEnabled, edge.Enabled, "", "")
+	appendResult(gateEdgeStatus, edge.Status != "inactive", "", "")
+	// gateEdgeNodeID is Create-only (Catalog has no equivalent check): the
+	// edge must reference a node to have a transport.
+	appendResult(gateEdgeNodeID, edge.NodeID != "", "", "")
+	appendResult(gateNodeStatus, edge.Node.Status == "online", "", "")
+	appendResult(gateActionChannel, channelErr == nil, "", "")
+	appendResult(gateReportedActionChannel, reportedErr == nil, "", "")
+	appendResult(gateAppliedManifest, manifestErr == nil, "", "")
+	appendResult(gateCurrentCapabilities, capabilitiesErr == nil, "", "")
+	fitsReason := ""
+	fitsPassed := false
+	if capabilitiesErr == nil {
+		// Reflect the original Catalog behavior: compilation runs against the
+		// canonicalized params, and a params set that cannot canonicalize
+		// (e.g. a required-parameter action with no values) skips the fits
+		// check entirely rather than failing it.
+		fitsParams, canonErr := deviceaction.CanonicalizeParams(definition.InputSchema, params)
+		if canonErr != nil {
+			fitsPassed = true
+		} else {
+			fitsErr := definitionFitsCapabilities(definition, fitsParams, capabilities)
+			fitsPassed = fitsErr == nil
+			if fitsErr != nil {
+				fitsReason = fitsErr.Error()
+			}
+		}
+	}
+	appendResult(gateDefinitionFitsCapabilities, fitsPassed, "", fitsReason)
+	return results
+}
+
+// loadActionChannelError is the predicate wrapper for loadActionChannel.
+func loadActionChannelError(tx *gorm.DB, edge models.EdgeDevice) error {
+	_, err := loadActionChannel(tx, edge)
+	return err
+}
+
+// requireReportedActionChannelError is the predicate wrapper for requireReportedActionChannel.
+func requireReportedActionChannelError(node models.Node, channelID uint) error {
+	return requireReportedActionChannel(node, channelID)
+}
+
+// requireAppliedManifestError is the predicate wrapper for requireAppliedManifest.
+func requireAppliedManifestError(node models.Node, expected string) error {
+	return requireAppliedManifest(node, expected)
+}
+
+// currentCapabilitiesError is the predicate wrapper for currentCapabilities.
+func currentCapabilitiesError(node models.Node, now func() time.Time) (string, commandEngineCapabilities, error) {
+	return currentCapabilities(node, now)
+}
+
 func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem, error) {
 	var edge models.EdgeDevice
 	if err := s.db.WithContext(ctx).Preload("Node").First(&edge, edgeDeviceID).Error; err != nil {
 		return nil, err
 	}
-	var channelErr error
-	if _, err := loadActionChannel(s.db.WithContext(ctx), edge); err != nil {
-		channelErr = err
-	} else if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
-		channelErr = err
-	} else if err := requireAppliedManifest(edge.Node, edge.Node.ConfigVersion); err != nil {
-		channelErr = err
-	}
 	items := make([]CatalogItem, 0)
 	capabilityStale := false
 	for _, definition := range s.actions.List(edge.Type) {
-		item := CatalogItem{Definition: definition, Available: definition.Enabled && deviceaction.CurrentEngineAllows(definition) && s.dispatchEnabled && edge.Enabled && edge.Status != "inactive" && edge.Node.Status == "online"}
-		if !s.dispatchEnabled {
-			item.Reason = "device control v2 is disabled"
-			items = append(items, item)
-			continue
-		}
-		if !definition.Enabled {
-			item.Reason = "action is not enabled for rollout"
-			if definition.AvailabilityCode != "" {
+		item := CatalogItem{Definition: definition}
+		// Evaluate every gate without short-circuiting so a channel failure
+		// still annotates capability_stale in the same cases as before.
+		gates := evaluateActionGates(s, s.db.WithContext(ctx), edge, definition, nil)
+		firstFailed := firstFailedGateForCatalog(gates)
+		item.Available = firstFailed == nil
+		if firstFailed != nil {
+			item.Reason = reasonForGate(firstFailed.name)
+			item.ReasonCode = firstFailed.reasonCode
+			if !s.dispatchEnabled {
+				// The dispatch gate is load-bearing and reported distinctly.
+				item.Reason = "device control v2 is disabled"
+				item.ReasonCode = ""
+			} else if !definition.Enabled && definition.AvailabilityCode != "" {
 				item.Reason = definition.AvailabilityReason
 				item.ReasonCode = definition.AvailabilityCode
+			} else if firstFailed.name == gateDefinitionFitsCapabilities && firstFailed.reason != "" {
+				// Preserve the old fits-gate reason string (compile error).
+				item.Reason = firstFailed.reason
 			}
-			items = append(items, item)
-			continue
 		}
-		if !deviceaction.CurrentEngineAllows(definition) {
-			item.Available = false
-			item.Reason = "action requires the future high-risk command engine"
-			item.ReasonCode = "command_engine_gate"
-			items = append(items, item)
-			continue
-		}
-		if !item.Available {
-			item.Reason = "edge device or node is unavailable"
-		} else if channelErr != nil {
-			item.Available = false
-			item.Reason = "action channel is unavailable"
-		} else if _, capabilities, err := currentCapabilities(edge.Node, s.now); err != nil {
-			item.Available = false
-			item.Reason = "ChannelCmdV2 capability is unavailable or stale"
-			if edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > MaxCapabilityAge {
-				// A browser may safely request a fresh ResourceReport and reload the
-				// catalog. Keep this machine-readable so the UI never relies on the
-				// presentation text or retries unrelated safety failures.
-				item.ReasonCode = "capability_stale"
-				capabilityStale = true
-			}
-		} else if params, err := deviceaction.CanonicalizeParams(definition.InputSchema, nil); err == nil {
-			compileErr := definitionFitsCapabilities(definition, params, capabilities)
-			if compileErr != nil {
-				item.Available = false
-				item.Reason = compileErr.Error()
-			}
+		if firstFailed != nil && firstFailed.name == gateCurrentCapabilities &&
+			(edge.Node.ResourceReportedAt == nil || s.now().Sub(*edge.Node.ResourceReportedAt) > MaxCapabilityAge) {
+			// A browser may safely request a fresh ResourceReport and reload the
+			// catalog. Keep this machine-readable so the UI never relies on the
+			// presentation text or retries unrelated safety failures.
+			item.ReasonCode = "capability_stale"
+			capabilityStale = true
 		}
 		items = append(items, item)
 	}
@@ -145,6 +243,56 @@ func (s *Service) Catalog(ctx context.Context, edgeDeviceID uint) ([]CatalogItem
 		metrics.DeviceActionCapabilityStaleTotal.Inc()
 	}
 	return items, nil
+}
+
+// firstFailedGate returns the first failing gate in predicate order, or nil.
+func firstFailedGate(gates []gateResult) *gateResult {
+	for i := range gates {
+		if !gates[i].passed {
+			return &gates[i]
+		}
+	}
+	return nil
+}
+
+// firstFailedGateForCatalog is firstFailedGate for the Catalog consumer: the
+// Catalog has no edge-node-id predicate (Create-only), so that gate must never
+// influence Catalog availability.  This keeps the shared predicate set intact
+// while preserving the original Catalog behavior for edge devices with an
+// empty node reference.
+func firstFailedGateForCatalog(gates []gateResult) *gateResult {
+	for i := range gates {
+		if gates[i].name == gateEdgeNodeID {
+			continue
+		}
+		if !gates[i].passed {
+			return &gates[i]
+		}
+	}
+	return nil
+}
+
+// reasonForGate produces the Catalog annotation reason for a failed gate.
+// These strings are the UI contract and must not change.
+func reasonForGate(name gateName) string {
+	switch name {
+	case gateDispatchEnabled:
+		return "device control v2 is disabled"
+	case gateActionEnabled:
+		return "action is not enabled for rollout"
+	case gateCurrentEngine:
+		return "action requires the future high-risk command engine"
+	case gateEdgeEnabled, gateEdgeStatus, gateEdgeNodeID, gateNodeStatus:
+		return "edge device or node is unavailable"
+	case gateActionChannel, gateReportedActionChannel, gateAppliedManifest:
+		return "action channel is unavailable"
+	case gateCurrentCapabilities:
+		return "ChannelCmdV2 capability is unavailable or stale"
+	case gateDefinitionFitsCapabilities:
+		return "action exceeds current node capability"
+	default:
+		return "action is unavailable"
+	}
 }
 
 // Create persists execution, audit event and outbox in one transaction. No
@@ -189,33 +337,15 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 			return err
 		}
 
-		if !s.dispatchEnabled {
-			return ErrActionUnavailable
-		}
-		if !def.Enabled {
-			return ErrActionUnavailable
-		}
-		if !deviceaction.CurrentEngineAllows(def) {
-			return ErrActionUnavailable
-		}
-		if !edge.Enabled || edge.Status == "inactive" || edge.NodeID == "" || edge.Node.Status != "online" {
-			return ErrActionUnavailable
-		}
-		if _, err := loadActionChannel(tx, edge); err != nil {
-			return ErrActionUnavailable
-		}
-		if err := requireReportedActionChannel(edge.Node, edge.ChannelID); err != nil {
-			return ErrActionUnavailable
-		}
-		if err := requireAppliedManifest(edge.Node, edge.Node.ConfigVersion); err != nil {
-			return ErrActionUnavailable
-		}
-		_, capabilities, err := currentCapabilities(edge.Node, s.now)
-		if err != nil {
-			return ErrActionUnavailable
-		}
-		if err := definitionFitsCapabilities(def, params, capabilities); err != nil {
-			return ErrActionUnavailable
+		// Availability gates. The first failing gate rejects the request.
+		// This folds the exact shared predicate set from evaluateActionGates
+		// (F4): the same single source of truth drives Catalog annotations.
+		// The gate order deliberately mirrors the original Create checks so a
+		// new gate failure still yields ErrActionUnavailable.
+		for _, gate := range evaluateActionGates(s, tx, edge, def, params) {
+			if !gate.passed {
+				return ErrActionUnavailable
+			}
 		}
 		if confirmationRequired(def.Risk) {
 			if strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
