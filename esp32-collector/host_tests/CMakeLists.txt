@@ -47,6 +47,19 @@ target_include_directories(channel_cmd_v2_decoder_tests PRIVATE
 target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
 
+add_executable(channel_cmd_v2_slot_tests
+    channel_cmd_v2_slot_tests.c
+    channel_cmd_v2_slot_app_stubs.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(channel_cmd_v2_slot_tests PRIVATE
+    stubs
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_options(channel_cmd_v2_slot_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME channel_cmd_v2_slot_tests COMMAND channel_cmd_v2_slot_tests)
+
 add_executable(legacy_write_guard_tests legacy_write_guard_tests.c)
 target_include_directories(legacy_write_guard_tests PRIVATE
     ../components/bus_manager/include
@@ -259,6 +272,26 @@ target_include_directories(bus_worker_rx_tests PRIVATE
 target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
+
+add_executable(bus_worker_batch_tests bus_worker_batch_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(bus_worker_batch_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_definitions(bus_worker_batch_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_worker_batch_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_worker_batch_tests COMMAND bus_worker_batch_tests)
 
 add_executable(perf_metrics_encode_tests perf_metrics_encode_tests.c
     ../components/frame/frame_codec.c
