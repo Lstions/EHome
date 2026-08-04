@@ -292,6 +292,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	})
 
 	// Get single edge device by id (v2.2 path for /devices/:id)
+	// 方案 v3.3 T5 P2: candidates 静态路由 (§1.3 §九) — gin 静态段优先于
+	// :id 通配符, 必须先注册以显式声明共存关系。
+	registerEdgeDeviceCandidateRoutes(v1, db)
+
 	v1.GET("/edge-devices/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var d models.EdgeDevice
@@ -318,6 +322,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			IntervalMs     *int    `json:"interval_ms"`
 			HardwareID     *string `json:"hardware_id"`
 			DeviceConfigID *uint   `json:"device_config_id"`
+			// 方案 v3.3 §3.3/§九: 继承目标 (可选)。指定时校验目标存在 +
+			// device_type 匹配 + merged_into IS NULL + purge_requested=FALSE,
+			// 并做存活实例唯一性校验; 未指定则新建 logical_device
+			// (永不复用既有 key)。
+			LogicalDeviceID *uint `json:"logical_device_id"`
 			// F: inline channel creation — when channel_id is 0/absent and
 			// channel is provided, the channel is created inside the same
 			// transaction, eliminating the two-phase-commit orphan risk.
@@ -465,8 +474,35 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := checkDeviceUniqueness(tx, dev.ChannelID, dev.Type, dev.HardwareID, 0); err != nil {
 				return err
 			}
+			// 方案 v3.3 §3.3: 创建继承 (可选)。指定 logical_device_id:
+			// 事务内校验目标存在 + device_type 匹配 + merged_into IS NULL +
+			// purge_requested=FALSE (v3.3-N1), 再做存活实例唯一性校验
+			// (§3.3-3, 双存活实例混合数据无物理意义)。未指定: 创建后新建
+			// logical_device, 永不复用既有 key (§2.3.1 路径表)。
+			if dto.LogicalDeviceID != nil {
+				target, err := validateInheritanceTarget(tx, *dto.LogicalDeviceID, dev.Type)
+				if err != nil {
+					return err
+				}
+				if err := checkLivingInstanceUniqueness(tx, target); err != nil {
+					return err
+				}
+				dev.LogicalDeviceID = &target.ID
+			}
 			// Step 1: Create EdgeDevice (inside transaction)
 			if err := tx.Create(&dev).Error; err != nil {
+				return err
+			}
+			if dto.LogicalDeviceID == nil {
+				// §3.3-4: "作为新设备创建"路径——任何设备都有逻辑身份,
+				// 与删除流程 §2.3-2 对称。dev.ID 已就绪 (空 hardware_id 的
+				// 确定性派生需要稳定基准)。
+				if err := attachNewLogicalDevice(tx, &dev); err != nil {
+					return err
+				}
+			}
+			// §2.5: 仅"原位置重建"场景 (权重 100 档) 复制校准行。
+			if err := copyCalibrationIfInPlace(tx, &dev); err != nil {
 				return err
 			}
 			// An explicit zero interval means "do not schedule".  The model has a
@@ -489,6 +525,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 			return nil // commit transaction
 		}); err != nil {
+			var conflict conflictError
+			if errors.As(err, &conflict) {
+				// §3.3-2/§3.3-3: 继承校验失败与存活实例冲突为 409 语义。
+				Error(c, http.StatusConflict, err.Error())
+				return
+			}
 			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
