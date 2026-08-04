@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1610,5 +1611,88 @@ func TestEdgeDevice_LogicalDeviceInfo_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEdgeDevice_LogicalDeviceInfo_DegradesWhenEstimateFails — T1.1:
+// 估算段失败 (此处删除数据表模拟查询失败) 时端点仍 200 且省略
+// row_estimate (降级路径, 方案 §1.3), 不得 500。
+func TestEdgeDevice_LogicalDeviceInfo_DegradesWhenEstimateFails(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
+
+	// 估算失败注入: 数据表不存在 → estimateTruncatedCount 返回 ok=false。
+	if err := db.Exec("DROP TABLE unified_data").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("DROP TABLE device_data").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when estimation fails, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			EdgeDeviceID uint            `json:"edge_device_id"`
+			RowEstimate  json.RawMessage `json:"row_estimate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if resp.Code != 200 || resp.Data.EdgeDeviceID != 1 {
+		t.Errorf("expected code 200 with edge_device_id 1, got %+v", resp)
+	}
+	if resp.Data.RowEstimate != nil {
+		t.Errorf("expected row_estimate omitted on degradation, got %s", resp.Data.RowEstimate)
+	}
+}
+
+// TestEdgeDevice_LogicalDeviceInfo_DegradesOnRequestDeadline — T1.1:
+// 请求 ctx 已超时 (端点级超时兜底生效) 时估算段快速降级, 端点仍 200
+// 且省略 row_estimate, 不阻塞。
+func TestEdgeDevice_LogicalDeviceInfo_DegradesOnRequestDeadline(t *testing.T) {
+	r, db := setupEdgeDeviceTest(t)
+
+	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bms_jbd", NodeID: "NODE001", ChannelID: 1, HardwareID: "0x76"})
+	db.Create(&models.UnifiedData{DeviceID: 1, SensorName: "voltage", Value: 12})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 模拟请求 deadline 已耗尽
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/logical-device-info", nil).WithContext(ctx)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 even on expired request ctx, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int `json:"code"`
+		Data struct {
+			RowEstimate json.RawMessage `json:"row_estimate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if resp.Code != 200 {
+		t.Errorf("expected code 200, got %d", resp.Code)
+	}
+	if resp.Data.RowEstimate != nil {
+		t.Errorf("expected row_estimate omitted on deadline degradation, got %s", resp.Data.RowEstimate)
 	}
 }

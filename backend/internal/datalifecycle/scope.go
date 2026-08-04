@@ -86,9 +86,11 @@ func ApplyScope(tx *gorm.DB, scope *Scope) *gorm.DB {
 // never trigger a full-table scan.
 const rowEstimateCap = 100000
 
-// estimateTimeout is the §1.3 degradation deadline: when exceeded the info
+// EstimateTimeout is the §1.3 degradation deadline: when exceeded the info
 // endpoint returns without a data-volume figure instead of blocking.
-const estimateTimeout = 3 * time.Second
+// T1.1: 端点估算段在该值上挂独立外层超时; 对未携带 deadline 的调用方
+// ctx, 它也作为兜底 deadline 生效。
+const EstimateTimeout = 3 * time.Second
 
 var explainRowsRe = regexp.MustCompile(`rows=(\d+)`)
 
@@ -98,19 +100,26 @@ var explainRowsRe = regexp.MustCompile(`rows=(\d+)`)
 // SQLite uses a truncated COUNT capped at rowEstimateCap. The boolean
 // return is false when the estimate is unavailable (timeout/parse failure),
 // in which case callers must omit the figure (降级).
-func EstimateRowCount(db *gorm.DB, logicalID uint) (int64, bool) {
+// ctx bounds the whole estimation segment (scope resolution + both tables):
+// callers pass an endpoint-level timeout so the handler never blocks
+// (T1.1).
+func EstimateRowCount(ctx context.Context, db *gorm.DB, logicalID uint) (int64, bool) {
+	ctx, cancel := estimateDeadline(ctx)
+	defer cancel()
+	db = db.WithContext(ctx)
 	scope, err := ResolveScope(db, logicalID)
 	if err != nil {
 		return 0, false
 	}
-	return EstimateScopeRows(db, scope)
+	return EstimateScopeRows(ctx, db, scope)
 }
 
 // EstimateScopeRows estimates data rows for an already-resolved scope.
 // See EstimateRowCount for estimation and degradation semantics.
-func EstimateScopeRows(db *gorm.DB, scope *Scope) (int64, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), estimateTimeout)
+func EstimateScopeRows(ctx context.Context, db *gorm.DB, scope *Scope) (int64, bool) {
+	ctx, cancel := estimateDeadline(ctx)
 	defer cancel()
+	db = db.WithContext(ctx)
 
 	cond, args := scope.Cond()
 	var total int64
@@ -122,6 +131,15 @@ func EstimateScopeRows(db *gorm.DB, scope *Scope) (int64, bool) {
 		total += n
 	}
 	return total, true
+}
+
+// estimateDeadline keeps the §1.3 degradation bound even when the caller's
+// context carries no deadline; endpoint callers pass their own timeout.
+func estimateDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, EstimateTimeout)
 }
 
 func estimateTable(ctx context.Context, db *gorm.DB, table, cond string, args []interface{}) (int64, bool) {

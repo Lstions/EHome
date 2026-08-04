@@ -818,18 +818,24 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				if err == nil {
 					resp["data"].(gin.H)["instance_count"] = count
 				}
-				if rows, ok := datalifecycle.EstimateRowCount(db, ld.ID); ok {
+				// T1.1: 估算段挂端点级超时兜底 — 超时/失败走降级路径
+				// (省略 row_estimate), 保证端点不阻塞 (方案 §1.3)。
+				estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
+				if rows, ok := datalifecycle.EstimateRowCount(estCtx, db, ld.ID); ok {
 					resp["data"].(gin.H)["row_estimate"] = rows
 				}
+				cancel()
 			} else {
 				resp["data"].(gin.H)["instance_count"] = int64(1)
 			}
 		} else {
 			// 尚未建立逻辑身份: 按实例自身范围估算 (NULL-logical 行)。
+			estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
 			scope := &datalifecycle.Scope{InstanceIDs: []uint{d.ID}}
-			if rows, ok := datalifecycle.EstimateScopeRows(db, scope); ok {
+			if rows, ok := datalifecycle.EstimateScopeRows(estCtx, db, scope); ok {
 				resp["data"].(gin.H)["row_estimate"] = rows
 			}
+			cancel()
 		}
 		c.JSON(http.StatusOK, resp)
 	})
