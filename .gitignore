@@ -1,7 +1,8 @@
 # Go
 backend/bin/
-backend/server
-backend/ehome-server
+/backend/server
+/backend/ehome-server
+/backend/ehomectl
 backend/vendor/
 *.exe
 *.dll

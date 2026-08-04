@@ -3,9 +3,10 @@
 
 # Build output
 bin/
-server
-ehome-server
-ehome-server-final
+/server
+/ehome-server
+/ehome-server-final
+/ehomectl
 migrate_v21_to_v22
 
 # Coverage
