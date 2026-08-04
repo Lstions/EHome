@@ -358,3 +358,49 @@ func TestPurge_OnlyTouchesRequestedLogicalDevices(t *testing.T) {
 		t.Errorf("bystander logical device must survive: %v", err)
 	}
 }
+
+// TestPurge_EmptyScope_CalibrationCleanupRunsUnconditionally — T1.1:
+// scope 为空 (无任何实例挂在该 logical device 下) 时, calibration_cache
+// 清理步骤仍必须执行 (无条件, §4.3 任务 2), 且空 IN 子句不报错、不误伤
+// 其他实例的校准行; 整体流程以 Purged 成功收尾。
+func TestPurge_EmptyScope_CalibrationCleanupRunsUnconditionally(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	// 目标 logical device: 无实例 (scope.InstanceIDs 为空)。
+	ld := &models.LogicalDevice{IdentityKey: "bms_jbd:empty", Name: "empty", DeviceType: "bms_jbd", RetentionDays: 365, PurgeRequested: true}
+	if err := db.Create(ld).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 旁观实例的 calibration 行 (不在 scope 内, 必须幸存)。
+	bystander := seedDevice(t, db, "bystander", "bms_jbd", "0x77", false)
+	if err := db.Create(&models.CalibrationCache{
+		NodeID: "NODE001", EdgeDeviceID: bystander.ID, DeviceType: "bms_jbd", Data: "{}",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewPurger(db)
+	p.SetSchedule(0, 0, 0)
+	results, err := p.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Outcome != Purged {
+		t.Fatalf("expected purged even with empty scope, got %+v", results)
+	}
+	if results[0].RowsDeleted != 0 {
+		t.Errorf("empty scope must delete 0 data rows, got %d", results[0].RowsDeleted)
+	}
+	// 旁观实例的 calibration 行幸存 (空 IN 不误伤)。
+	var calRows int64
+	if err := db.Model(&models.CalibrationCache{}).Count(&calRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if calRows != 1 {
+		t.Errorf("bystander calibration row must survive empty-scope cleanup, got %d rows", calRows)
+	}
+	// logical_device 行已删。
+	var gone models.LogicalDevice
+	if err := db.First(&gone, ld.ID).Error; err == nil {
+		t.Errorf("purged logical device row must be deleted")
+	}
+}

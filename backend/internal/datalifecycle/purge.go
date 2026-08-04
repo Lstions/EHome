@@ -230,14 +230,13 @@ func (p *Purger) purgeOne(ctx context.Context, ld *models.LogicalDevice) PurgeRe
 
 	// 完成后清理 (§4.3 任务 2 + §2.5):
 	// 1. calibration_cache 孤儿行 (数据已清除的实例的工厂校准值)。
-	if len(scope.InstanceIDs) > 0 {
-		if err := p.db.WithContext(ctx).
-			Where("edge_device_id IN ?", scope.InstanceIDs).
-			Delete(&models.CalibrationCache{}).Error; err != nil {
-			result.Outcome = PurgeFailed
-			result.Error = fmt.Sprintf("clean calibration_cache: %v", err)
-			return result
-		}
+	//    无条件执行 (T1.1): scope 为空时 IN 子句自然命中 0 行, 无需特判。
+	if err := p.db.WithContext(ctx).
+		Where("edge_device_id IN ?", scope.InstanceIDs).
+		Delete(&models.CalibrationCache{}).Error; err != nil {
+		result.Outcome = PurgeFailed
+		result.Error = fmt.Sprintf("clean calibration_cache: %v", err)
+		return result
 	}
 	// 2. F6 出边: 解除软删实例的 FK 引用 (Unscoped 含软删实例)。
 	if err := p.db.WithContext(ctx).Unscoped().
