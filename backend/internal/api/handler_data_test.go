@@ -23,6 +23,12 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	// In-memory SQLite gives every NEW connection its own empty database;
+	// the historical-batch endpoint fans out to concurrent goroutines, so pin
+	// the pool to one connection to keep all queries on the seeded database.
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.DeviceConfig{}, &models.UnifiedData{}, &models.DeviceData{},
 		&models.User{}, &models.OTATask{}, &models.Firmware{}, &models.Vendor{},
