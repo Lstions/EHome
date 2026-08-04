@@ -54,10 +54,13 @@ type Migrator struct {
 	initialDelay time.Duration
 	batchSleep   time.Duration
 	batchSize    int // 0 → dialect default (PG 1万 / SQLite 1千)
-	startOnce    sync.Once
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
+	// batchHook 在每批事务执行前调用 (table, watermark, windowEnd);
+	// 返回错误模拟批次失败——测试注入点, 生产恒为 nil。
+	batchHook func(table string, watermark, windowEnd int64) error
+	startOnce sync.Once
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 }
 
 // NewMigrator creates the merge-migration worker: first run 10s after
@@ -88,6 +91,15 @@ func (m *Migrator) SetBatchSize(n int) {
 	if n > 0 {
 		m.batchSize = n
 	}
+}
+
+// SetBatchSleep overrides the inter-batch sleep (tests only; 0 disables).
+func (m *Migrator) SetBatchSleep(d time.Duration) { m.batchSleep = d }
+
+// SetBatchHook installs a pre-batch failure injection (tests only; pass
+// nil to clear). The hook runs before each batch transaction.
+func (m *Migrator) SetBatchHook(hook func(table string, watermark, windowEnd int64) error) {
+	m.batchHook = hook
 }
 
 // Start launches the migrator goroutine once.
@@ -297,6 +309,11 @@ func (m *Migrator) migrateTable(ctx context.Context, job *models.MergeJob, table
 
 		var affected int64
 		err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if m.batchHook != nil {
+				if herr := m.batchHook(table, watermark, windowEnd); herr != nil {
+					return herr
+				}
+			}
 			// 批内原子: 行搬迁 + 水位推进同事务——崩溃时整批回滚,
 			// 重试窗口内的行仍属源 scope, UPDATE 幂等不重复计数。
 			res := tx.Exec(

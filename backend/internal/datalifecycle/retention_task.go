@@ -77,6 +77,9 @@ func (r *RetentionTask) SetBatchSize(n int) {
 	}
 }
 
+// SetBatchSleep overrides the inter-batch sleep (tests only; 0 disables).
+func (r *RetentionTask) SetBatchSleep(d time.Duration) { r.batchSleep = d }
+
 // Start launches the retention goroutine once.
 func (r *RetentionTask) Start() {
 	r.startOnce.Do(func() {
@@ -295,25 +298,4 @@ func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retenti
 		}
 	}
 	return total, nil
-}
-
-// scopeOldestTimestamp returns MIN(timestamp) across both data tables for
-// the scope, or nil when the scope holds no rows.
-func scopeOldestTimestamp(ctx context.Context, db *gorm.DB, scope *Scope) (*time.Time, error) {
-	cond, args := scope.Cond()
-	var oldest *time.Time
-	for _, table := range []string{"unified_data", "device_data"} {
-		var lo *time.Time
-		err := db.WithContext(ctx).Raw(
-			fmt.Sprintf("SELECT MIN(timestamp) FROM %s WHERE %s", table, cond),
-			args...,
-		).Row().Scan(&lo)
-		if err != nil {
-			return nil, fmt.Errorf("oldest timestamp of %s: %w", table, err)
-		}
-		if lo != nil && (oldest == nil || lo.Before(*oldest)) {
-			oldest = lo
-		}
-	}
-	return oldest, nil
 }

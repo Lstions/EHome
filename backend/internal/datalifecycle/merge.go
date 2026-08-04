@@ -51,13 +51,14 @@ type MergeResult struct {
 }
 
 // ValidateMergeRequest 做事务外的基础校验: 源数量、去重、目标名非空。
+// 数量校验在去重之后 ([3,3] 去重后只剩 1 个源, 同样不满足 ≥2)。
 func ValidateMergeRequest(req *MergeRequest) error {
 	req.TargetName = strings.TrimSpace(req.TargetName)
 	if req.TargetName == "" {
 		return errors.New("target_name is required")
 	}
-	if len(req.SourceIDs) < 2 {
-		return errors.New("merge requires at least 2 source logical devices")
+	if len(req.SourceIDs) == 0 {
+		return errors.New("source_ids is required")
 	}
 	seen := make(map[uint]struct{}, len(req.SourceIDs))
 	deduped := make([]uint, 0, len(req.SourceIDs))
@@ -72,6 +73,9 @@ func ValidateMergeRequest(req *MergeRequest) error {
 		deduped = append(deduped, id)
 	}
 	req.SourceIDs = deduped
+	if len(req.SourceIDs) < 2 {
+		return errors.New("merge requires at least 2 distinct source logical devices")
+	}
 	return nil
 }
 

@@ -32,7 +32,8 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.DeviceConfig{}, &models.UnifiedData{}, &models.DeviceData{},
 		&models.User{}, &models.OTATask{}, &models.Firmware{}, &models.Vendor{},
-		&models.Notification{}, &models.OperationLog{}, &models.LogicalDevice{})
+		&models.Notification{}, &models.OperationLog{}, &models.LogicalDevice{},
+		&models.MergeJob{})
 
 	r := gin.New()
 	v1 := r.Group("/api/v1")
@@ -40,6 +41,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	registerNodeRoutes(v1, db, mgr)
 	registerEdgeDeviceRoutes(v1, db, mgr, nil)
 	registerDataRoutes(v1, db)
+	registerLogicalDeviceRoutes(v1, db)
 	return r, db
 }
 

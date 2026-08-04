@@ -110,26 +110,66 @@ func ScopeTimeRange(ctx context.Context, db *gorm.DB, scope *Scope) (*time.Time,
 }
 
 // scopeTimeRange 返回 scope 在 unified_data/device_data 两表中的
-// MIN/MAX(timestamp) 包络。无数据返回 (nil, nil)。MIN/MAX 对空集
-// 返回 NULL → 扫描进 *time.Time 得 nil (database/sql 原生支持)。
+// 首/末数据时间包络。无数据返回 (nil, nil)。
+//
+// 实现: ORDER BY timestamp ASC/DESC + LIMIT 1 取实际行, 走
+// idx_unified_logical_ts 索引边界扫描 (与 MIN/MAX 同等量级, §3.4)。
+// 不用 MIN/MAX 聚合 + *time.Time 扫描: mattn/go-sqlite3 把 timestamp
+// 存为文本, 聚合结果绕过 GORM 的行级时间转换, Scan 报 unsupported。
 func scopeTimeRange(ctx context.Context, db *gorm.DB, scope *Scope) (*time.Time, *time.Time, error) {
-	cond, args := scope.Cond()
-	var first, last *time.Time
-	for _, table := range []string{"unified_data", "device_data"} {
-		var lo, hi *time.Time
-		err := db.WithContext(ctx).Raw(
-			fmt.Sprintf("SELECT MIN(timestamp), MAX(timestamp) FROM %s WHERE %s", table, cond),
-			args...,
-		).Row().Scan(&lo, &hi)
-		if err != nil {
-			return nil, nil, fmt.Errorf("time range of %s: %w", table, err)
-		}
-		if lo != nil && (first == nil || lo.Before(*first)) {
-			first = lo
-		}
-		if hi != nil && (last == nil || hi.After(*last)) {
-			last = hi
-		}
+	first, err := scopeBoundaryTimestamp(ctx, db, scope, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	last, err := scopeBoundaryTimestamp(ctx, db, scope, false)
+	if err != nil {
+		return nil, nil, err
 	}
 	return first, last, nil
+}
+
+// scopeOldestTimestamp returns the oldest timestamp across both data
+// tables for the scope, or nil when the scope holds no rows. Same
+// implementation note as scopeTimeRange (SQLite text-timestamp driver).
+func scopeOldestTimestamp(ctx context.Context, db *gorm.DB, scope *Scope) (*time.Time, error) {
+	return scopeBoundaryTimestamp(ctx, db, scope, true)
+}
+
+// scopeBoundaryTimestamp scans unified_data and device_data for the scope's
+// earliest (first=true) or latest (first=false) data timestamp.
+func scopeBoundaryTimestamp(ctx context.Context, db *gorm.DB, scope *Scope, first bool) (*time.Time, error) {
+	cond, args := scope.Cond()
+	order := "timestamp DESC"
+	if first {
+		order = "timestamp ASC"
+	}
+	var boundary *time.Time
+	for _, table := range []string{"unified_data", "device_data"} {
+		var ts *time.Time
+		// SELECT timestamp 单列 + LIMIT 1: 行级扫描路径, 两方言一致。
+		var rows []time.Time
+		err := db.WithContext(ctx).Table(table).
+			Select("timestamp").
+			Where(cond, args...).
+			Order(order).
+			Limit(1).
+			Scan(&rows).Error
+		if err != nil {
+			return nil, fmt.Errorf("boundary timestamp of %s: %w", table, err)
+		}
+		if len(rows) > 0 {
+			ts = &rows[0]
+		}
+		if ts == nil {
+			continue
+		}
+		if boundary == nil {
+			boundary = ts
+			continue
+		}
+		if first && ts.Before(*boundary) || !first && ts.After(*boundary) {
+			boundary = ts
+		}
+	}
+	return boundary, nil
 }

@@ -69,6 +69,8 @@ var allModels = []interface{}{
 	&models.LogicalDevice{},
 	// 数据生命周期 M 迁移: 大表回填进度水位
 	&models.BackfillJob{},
+	// 数据生命周期 P3: 合并搬迁任务进度
+	&models.MergeJob{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.
