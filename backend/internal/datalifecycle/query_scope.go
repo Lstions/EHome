@@ -85,10 +85,18 @@ func ResolveDataQueryScope(db *gorm.DB, edgeDeviceID uint) (*DataQueryScope, err
 // Unified window-function spelling for PostgreSQL AND SQLite — never
 // DISTINCT ON (v3.2-F5 闭环).
 //
-// base must be a fresh Model/Table query carrying WHERE conditions ONLY
-// (no Select/Order/Limit — they belong on the returned query so they
-// apply after dedup). base is consumed: do not reuse it afterwards.
+// base must be a fresh query carrying WHERE conditions ONLY (no
+// Select/Order/Limit — they belong on the returned query so they apply
+// after dedup). base is consumed: do not reuse it afterwards. When base
+// carries no Model (endpoints build it via db.Where(...)), the subquery
+// would have no FROM table — GORM resolves the destination-derived table
+// only at Find time, which never happens for a subquery — so unified_data
+// is pinned here (the function is unified_data-specific anyway: its
+// partition keys are unified_data columns).
 func ApplyShapeDedup(db *gorm.DB, base *gorm.DB) *gorm.DB {
+	if base.Statement == nil || base.Statement.Model == nil {
+		base = base.Model(&models.UnifiedData{})
+	}
 	sub := base.Select("*, ROW_NUMBER() OVER (PARTITION BY sensor_name, timestamp ORDER BY id DESC) AS dedup_rn")
 	return db.Table("(?) AS deduped", sub).Where("dedup_rn = 1")
 }
