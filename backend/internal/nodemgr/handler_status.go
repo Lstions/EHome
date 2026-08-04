@@ -245,7 +245,7 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	}
 
 	// Populate node_id → node.ID cache for worker pool lookups
-	nodeIDCache.Store(deviceID, node.ID)
+	nodeIDCache.Store(deviceID, nodeIDCacheEntry{nodeID: node.ID, writtenAt: time.Now()})
 
 	oldStatus := node.Status
 	now := time.Now()
