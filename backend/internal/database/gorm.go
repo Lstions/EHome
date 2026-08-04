@@ -92,6 +92,8 @@ func AutoMigrate() error {
 
 		// 数据生命周期 P0: 逻辑设备身份 (方案 v3.3 §1.1)
 		&models.LogicalDevice{},
+		// 数据生命周期 M 迁移: 大表回填进度水位 (§4.3 断点续跑)
+		&models.BackfillJob{},
 
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加

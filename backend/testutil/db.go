@@ -67,6 +67,8 @@ var allModels = []interface{}{
 	&models.PWMConfig{},
 	// 数据生命周期 P0: 逻辑设备身份
 	&models.LogicalDevice{},
+	// 数据生命周期 M 迁移: 大表回填进度水位
+	&models.BackfillJob{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

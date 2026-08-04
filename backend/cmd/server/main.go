@@ -97,6 +97,17 @@ func main() {
 	purger := datalifecycle.NewPurger(db)
 	purger.Start()
 
+	// 数据生命周期 M 迁移步骤 (方案 v3.3 §七 + §1.1): 复合索引
+	// CONCURRENTLY 创建 + 大表 logical_device_id 分批回填, 全部在后台
+	// goroutine 内执行——墙钟随存量数据量增长, 不能阻塞启动; 回填进度
+	// 持久化在 backfill_jobs 水位表, 中断重启自动续跑 (§4.3); 两者均幂等,
+	// 失败下次启动重试。运维可用 `ehomectl datalifecycle backfill`
+	// 同步执行并以退出码判定校验结果。
+	// 前置: P0 身份补建 (上方 BackfillLogicalDevices) 必须先完成,
+	// 回填依赖实例已挂载 logical_device_id。
+	backfiller := datalifecycle.NewBackfiller(db)
+	backfiller.Start()
+
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
 		logger.Fatalf("Failed to create initialization credential: %v", err)
 	} else if credential != "" {
@@ -291,6 +302,9 @@ func main() {
 
 	purger.Stop()
 	logger.Infof("Data lifecycle purger stopped")
+
+	backfiller.Stop()
+	logger.Infof("Data lifecycle backfiller stopped")
 
 	offlineDetector.Stop()
 	logger.Infof("Offline detector stopped")
