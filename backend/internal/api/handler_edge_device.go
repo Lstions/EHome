@@ -54,7 +54,7 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 		if !cmd.Schedulable {
 			continue // one-shot triggers don't need ConfigTemplates
 		}
-		if err := createSingleTemplate(tx, ch, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
+		if err := createSingleTemplate(tx, ch, dev.ID, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
 			return fmt.Errorf("failed to create template for command %s: %w", cmd.ID, err)
 		}
 		created++
@@ -64,7 +64,9 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 }
 
 // createSingleTemplate inserts one ConfigTemplate and appends its ID to the channel's template_ids.
-func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, readLength uint32, delayMs uint32) error {
+// edgeDeviceID records the owning edge device (方案 v3.3 §2.4); 0 leaves the
+// ownership column NULL (self-healing / callers without a device instance).
+func createSingleTemplate(tx *gorm.DB, ch *models.Channel, edgeDeviceID uint, writeData string, readLength uint32, delayMs uint32) error {
 	if writeData == "" {
 		return nil
 	}
@@ -73,6 +75,9 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, writeData string, rea
 		WriteData:  writeData,
 		ReadLength: readLength,
 		DelayMs:    delayMs,
+	}
+	if edgeDeviceID > 0 {
+		tmpl.EdgeDeviceID = &edgeDeviceID
 	}
 	if err := tx.Create(&tmpl).Error; err != nil {
 		return err
@@ -790,6 +795,9 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				logicalID = ld.ID
 			} else {
 				logicalID = *inst.LogicalDeviceID
+			}
+			if err := handleConfigTemplateOnDelete(tx, &inst); err != nil {
+				return err
 			}
 			if err := tx.Delete(&models.EdgeDevice{}, inst.ID).Error; err != nil {
 				return err

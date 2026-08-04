@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"ehome/backend/internal/datalifecycle"
@@ -93,6 +94,70 @@ func attachNewLogicalDevice(tx *gorm.DB, dev *models.EdgeDevice) error {
 		return fmt.Errorf("back-write logical_device_id of edge_device %d: %w", dev.ID, err)
 	}
 	dev.LogicalDeviceID = &ld.ID
+	return nil
+}
+
+// handleConfigTemplateOnDelete 删除设备时的 ConfigTemplate 归属处理 (方案
+// v3.3 §2.4): 查 edge_device_id=:id 的模板 → 引用检查 (同 channel 有其他
+// 存活同 type 设备则保留) → 无引用则从 channel.template_ids 移除 (字符串
+// 解析重建) 并删除 ConfigTemplate 行。edge_device_id IS NULL 的旧模板
+// (multi-drop 共享池 / 自愈创建) 不在删除时动, 宁留勿删。
+//
+// 必须在删除事务内调用 (与软删同事务, 失败回滚)。inst 是被删实例的
+// 已加载行 (含 ChannelID/Type)。
+func handleConfigTemplateOnDelete(tx *gorm.DB, inst *models.EdgeDevice) error {
+	var owned []models.ConfigTemplate
+	if err := tx.Where("edge_device_id = ?", inst.ID).Find(&owned).Error; err != nil {
+		return fmt.Errorf("query owned config_templates of edge_device %d: %w", inst.ID, err)
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+
+	// 引用检查: 同 channel 是否还有其他存活同 type 设备 (multi-drop 场景)。
+	// 有 → 模板保留不删 (可能仍被其他实例引用)。
+	var living int64
+	if err := tx.Model(&models.EdgeDevice{}).
+		Where("channel_id = ? AND type = ? AND id <> ?", inst.ChannelID, inst.Type, inst.ID).
+		Count(&living).Error; err != nil {
+		return fmt.Errorf("count living same-type devices on channel %d: %w", inst.ChannelID, err)
+	}
+	if living > 0 {
+		return nil // 保留模板, 不删除
+	}
+
+	// 无其他引用 → 从 channel.template_ids 移除这些 ID (字符串解析重建),
+	// 再删除 ConfigTemplate 行。
+	ownedIDs := make(map[string]struct{}, len(owned))
+	for i := range owned {
+		ownedIDs[strconv.FormatUint(uint64(owned[i].ID), 10)] = struct{}{}
+	}
+	var ch models.Channel
+	if err := tx.First(&ch, inst.ChannelID).Error; err != nil {
+		return fmt.Errorf("load channel %d for template cleanup: %w", inst.ChannelID, err)
+	}
+	if strings.TrimSpace(ch.TemplateIDs) != "" {
+		var kept []string
+		for _, idStr := range strings.Split(ch.TemplateIDs, ",") {
+			idStr = strings.TrimSpace(idStr)
+			if idStr == "" {
+				continue
+			}
+			if _, drop := ownedIDs[idStr]; drop {
+				continue
+			}
+			kept = append(kept, idStr)
+		}
+		newIDs := strings.Join(kept, ",")
+		if err := tx.Model(&models.Channel{}).Where("id = ?", ch.ID).
+			Update("template_ids", newIDs).Error; err != nil {
+			return fmt.Errorf("rebuild channel %d template_ids: %w", ch.ID, err)
+		}
+	}
+	// 删除归属模板行 (无 FK 级联, 显式删除)。
+	if err := tx.Where("edge_device_id = ?", inst.ID).Delete(&models.ConfigTemplate{}).Error; err != nil {
+		return fmt.Errorf("delete owned config_templates of edge_device %d: %w", inst.ID, err)
+	}
 	return nil
 }
 

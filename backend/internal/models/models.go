@@ -182,8 +182,16 @@ type ConfigTemplate struct {
 	WriteData  string    `gorm:"type:text;not null" json:"write_data"`
 	ReadLength uint32    `gorm:"default:0" json:"read_length"`
 	DelayMs    uint32    `gorm:"default:0" json:"delay_ms"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// EdgeDeviceID is the owning edge device (方案 v3.3 §2.4, 可空).
+	//   - createSingleTemplate 创建路径写入归属;
+	//   - 存量模板按 WriteData 尽力 backfill, 匹配不上 (multi-drop 共享池)
+	//     留 NULL — 宁留勿删, 删除设备时只处理归属明确的模板;
+	//   - sender.reconcileDriverTemplates 自愈路径创建的无归属模板同理留
+	//     NULL (自愈目标消灭缺失, 不负责归属推断)。
+	// 加在 CreatedAt 前仅对齐测试断言习惯 (模板 ID 不因字段位置变化)。
+	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // =====================================================================

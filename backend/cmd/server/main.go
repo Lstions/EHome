@@ -146,6 +146,16 @@ func main() {
 	drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
+	// 数据生命周期 P4 收尾 (方案 v3.3 §2.4-2/§七-3): 尽力回填
+	// config_templates.edge_device_id 归属。依赖 driverRegistry 已就绪
+	// (WriteData 匹配需 driver CommandTemplates); 幂等, 失败仅告警不阻断
+	// 启动 (归属匹配不上留 NULL, 宁留勿删)。
+	if backfilled, err := datalifecycle.BackfillConfigTemplateOwnership(db, driverRegistry); err != nil {
+		logger.Warnf("ConfigTemplate ownership backfill failed: %v", err)
+	} else if backfilled > 0 {
+		logger.Infof("ConfigTemplate ownership backfill: %d template(s) attributed", backfilled)
+	}
+
 	wsHub := websocket.NewHub()
 	wsHub.SetSessionValidator(func(subjectID uint, version int64) bool {
 		var user models.User
