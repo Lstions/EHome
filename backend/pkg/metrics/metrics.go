@@ -119,6 +119,15 @@ var (
 		Help: "Sync decisions total",
 	}, []string{"reason", "action"})
 
+	// ManifestCommandSkippedNoTemplate counts edge-device command sub-frames
+	// skipped during ConfigManifest encoding because the channel has no
+	// usable template_id (channel.template_ids empty/dangling/unparseable).
+	// F3: findTemplateID no longer falls back to template 1.
+	ManifestCommandSkippedNoTemplate = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_manifest_command_skipped_no_template_total",
+		Help: "ConfigManifest edge commands skipped due to missing template_id",
+	}, []string{"node_id"})
+
 	// --- 8.1: PendingWrite observability metrics ---
 
 	// PendingWriteActiveEntries tracks current pending write entries
