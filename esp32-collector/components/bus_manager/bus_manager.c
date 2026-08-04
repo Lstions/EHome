@@ -94,10 +94,15 @@ static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
     if (id) {
         snprintf(buf, buflen, "%s/%s", bus_name, id);
     } else {
-        /* Unique fallback: encode bus_type + first 2 config bytes */
+        /* Unique fallback: encode bus_type + first 2 config bytes.  The
+         * bus_name prefix is bounded with %.*s (7) so the worst-case output
+         * ("uart/UNKNOWN_FF_FF" = 20 chars) provably fits a 16-byte hw_id
+         * consumer after the caller's own truncation; all current bus names
+         * (uart/spi/i2c) are shorter than 7, so produced strings are
+         * identical to the unbounded form. */
         uint8_t b0 = (bus_config && bus_config_len >= 1) ? bus_config[0] : 0;
         uint8_t b1 = (bus_config && bus_config_len >= 2) ? bus_config[1] : 0;
-        snprintf(buf, buflen, "%s/UNKNOWN_%02X_%02X", bus_name, b0, b1);
+        snprintf(buf, buflen, "%.*s/UNKNOWN_%02X_%02X", 7, bus_name, b0, b1);
     }
 }
 
