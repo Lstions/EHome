@@ -28,9 +28,6 @@ typedef enum {
     /* A completion owns the slot while publishing its result.  This prevents
      * a replay from observing a partially written final response. */
     V2_SLOT_COMPLETING = 3,
-    /* A reservation is initializing command fields.  It is deliberately not
-     * considered a command identity until the QUEUED release-store. */
-    V2_SLOT_RESERVED = 4,
 } v2_slot_state_t;
 typedef struct {
     volatile uint32_t state;
@@ -141,6 +138,11 @@ static void prepare_slot(v2_control_slot_t *slot, const channel_cmd_v2_t *cmd)
 static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
 {
     while (__atomic_exchange_n(&s_reservation_lock, 1U, __ATOMIC_ACQUIRE) != 0U) { }
+    /* Single-pass: the reservation lock serializes reserve() callers, so a
+     * slot observed in a given state under the lock cannot be concurrently
+     * consumed by another producer.  Every pass ends in an explicit return
+     * (claim, replay, collision, or BUSY), so the loop is never re-entered
+     * (kept as a guard for future callers that may reintroduce a retry). */
     for (;;) {
         *replayed = false;
         int free_slot = -1;
@@ -152,7 +154,6 @@ static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
                 if (free_slot < 0) free_slot = i;
                 continue;
             }
-            if (state == V2_SLOT_RESERVED) continue;
             if (same_identity(&s_slots[i].cmd, cmd)) {
                 *replayed = true;
                 __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
@@ -168,18 +169,23 @@ static int reserve_slot(const channel_cmd_v2_t *cmd, bool *replayed)
             }
         }
         if (free_slot >= 0) {
-            uint32_t expected = V2_SLOT_FREE;
-            if (!__atomic_compare_exchange_n(&s_slots[free_slot].state, &expected, V2_SLOT_RESERVED,
-                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+            /* The reservation lock serializes reserve() callers, so under
+             * the lock the FREE slot cannot be concurrently consumed by
+             * another producer and a plain store suffices (the lock-free
+             * RESERVED state was removed in F8.1).  Keep the original
+             * ordering guarantee: initialize the command fields while the
+             * slot still reads FREE (completions only CAS QUEUED and would
+             * fail here), then make it visible as QUEUED. */
             prepare_slot(&s_slots[free_slot], cmd);
             __atomic_store_n(&s_slots[free_slot].state, V2_SLOT_QUEUED, __ATOMIC_RELEASE);
             __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
             return free_slot;
         }
         if (oldest_final_slot >= 0) {
-            uint32_t expected = V2_SLOT_FINAL;
-            if (!__atomic_compare_exchange_n(&s_slots[oldest_final_slot].state, &expected, V2_SLOT_RESERVED,
-                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+            /* Same ordering as above: prepare on the FINAL state (a
+             * completion of a FINAL slot loses its QUEUED->COMPLETING CAS
+             * and returns — exactly the observable behavior the RESERVED
+             * state provided), then flip to QUEUED. */
             prepare_slot(&s_slots[oldest_final_slot], cmd);
             __atomic_store_n(&s_slots[oldest_final_slot].state, V2_SLOT_QUEUED, __ATOMIC_RELEASE);
             __atomic_store_n(&s_reservation_lock, 0U, __ATOMIC_RELEASE);
