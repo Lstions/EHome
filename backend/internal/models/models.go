@@ -177,11 +177,11 @@ type Channel struct {
 //
 // 定义读取设备的寄存器序列 (hex write_data + read_length + delay_ms)
 type ConfigTemplate struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	NodeID     string    `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
-	WriteData  string    `gorm:"type:text;not null" json:"write_data"`
-	ReadLength uint32    `gorm:"default:0" json:"read_length"`
-	DelayMs    uint32    `gorm:"default:0" json:"delay_ms"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	NodeID     string `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2: renamed from CollectorID
+	WriteData  string `gorm:"type:text;not null" json:"write_data"`
+	ReadLength uint32 `gorm:"default:0" json:"read_length"`
+	DelayMs    uint32 `gorm:"default:0" json:"delay_ms"`
 	// EdgeDeviceID is the owning edge device (方案 v3.3 §2.4, 可空).
 	//   - createSingleTemplate 创建路径写入归属;
 	//   - 存量模板按 WriteData 尽力 backfill, 匹配不上 (multi-drop 共享池)

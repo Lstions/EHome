@@ -104,7 +104,10 @@ func attachNewLogicalDevice(tx *gorm.DB, dev *models.EdgeDevice) error {
 // (multi-drop 共享池 / 自愈创建) 不在删除时动, 宁留勿删。
 //
 // 必须在删除事务内调用 (与软删同事务, 失败回滚)。inst 是被删实例的
-// 已加载行 (含 ChannelID/Type)。
+// 已加载行 (含 ChannelID/Type)。被删实例在事务内已置 DeletedAt (软删),
+// 因此引用检查用 Unscoped 统计同 channel 同 type 的实例 —— 若只存在
+// 已删的同型实例 (multi-drop 逐个删), 其归属模板同样清理, 防止残留
+// 模板与 template_ids 条目 (ESP32 maxTemplates=16 溢出风险)。
 func handleConfigTemplateOnDelete(tx *gorm.DB, inst *models.EdgeDevice) error {
 	var owned []models.ConfigTemplate
 	if err := tx.Where("edge_device_id = ?", inst.ID).Find(&owned).Error; err != nil {
@@ -116,9 +119,12 @@ func handleConfigTemplateOnDelete(tx *gorm.DB, inst *models.EdgeDevice) error {
 
 	// 引用检查: 同 channel 是否还有其他存活同 type 设备 (multi-drop 场景)。
 	// 有 → 模板保留不删 (可能仍被其他实例引用)。
+	// 注意: 同型实例已全部软删 (含本次被删与先前删的) 时, 其归属模板
+	// 一并清理 —— 先收集所有同 channel 同 type 实例 (Unscoped) 的归属
+	// 模板, 再统一移除。
 	var living int64
 	if err := tx.Model(&models.EdgeDevice{}).
-		Where("channel_id = ? AND type = ? AND id <> ?", inst.ChannelID, inst.Type, inst.ID).
+		Where("channel_id = ? AND type = ? AND id <> ? AND deleted_at IS NULL", inst.ChannelID, inst.Type, inst.ID).
 		Count(&living).Error; err != nil {
 		return fmt.Errorf("count living same-type devices on channel %d: %w", inst.ChannelID, err)
 	}
@@ -126,11 +132,28 @@ func handleConfigTemplateOnDelete(tx *gorm.DB, inst *models.EdgeDevice) error {
 		return nil // 保留模板, 不删除
 	}
 
-	// 无其他引用 → 从 channel.template_ids 移除这些 ID (字符串解析重建),
-	// 再删除 ConfigTemplate 行。
+	// 无其他存活引用 → 收集同 channel 同 type 全部实例 (含已软删) 的
+	// 归属模板, 一并从 channel.template_ids 移除并删除行。
 	ownedIDs := make(map[string]struct{}, len(owned))
 	for i := range owned {
 		ownedIDs[strconv.FormatUint(uint64(owned[i].ID), 10)] = struct{}{}
+	}
+	var allSameType []models.EdgeDevice
+	if err := tx.Unscoped().Where("channel_id = ? AND type = ?", inst.ChannelID, inst.Type).
+		Find(&allSameType).Error; err != nil {
+		return fmt.Errorf("scan same-type instances on channel %d: %w", inst.ChannelID, err)
+	}
+	for i := range allSameType {
+		if allSameType[i].ID == inst.ID {
+			continue
+		}
+		var more []models.ConfigTemplate
+		if err := tx.Where("edge_device_id = ?", allSameType[i].ID).Find(&more).Error; err != nil {
+			return fmt.Errorf("query owned config_templates of edge_device %d: %w", allSameType[i].ID, err)
+		}
+		for j := range more {
+			ownedIDs[strconv.FormatUint(uint64(more[j].ID), 10)] = struct{}{}
+		}
 	}
 	var ch models.Channel
 	if err := tx.First(&ch, inst.ChannelID).Error; err != nil {
@@ -155,10 +178,21 @@ func handleConfigTemplateOnDelete(tx *gorm.DB, inst *models.EdgeDevice) error {
 		}
 	}
 	// 删除归属模板行 (无 FK 级联, 显式删除)。
-	if err := tx.Where("edge_device_id = ?", inst.ID).Delete(&models.ConfigTemplate{}).Error; err != nil {
+	if err := tx.Where("edge_device_id IN ?", keysToUints(ownedIDs)).Delete(&models.ConfigTemplate{}).Error; err != nil {
 		return fmt.Errorf("delete owned config_templates of edge_device %d: %w", inst.ID, err)
 	}
 	return nil
+}
+
+// keysToUints 把模板 ID 字符串集合转成 uint 切片 (供 IN 查询)。
+func keysToUints(keys map[string]struct{}) []uint {
+	out := make([]uint, 0, len(keys))
+	for k := range keys {
+		if v, err := strconv.ParseUint(k, 10, 64); err == nil {
+			out = append(out, uint(v))
+		}
+	}
+	return out
 }
 
 // copyCalibrationIfInPlace 原位置重建场景复制校准数据 (方案 §2.5):
