@@ -561,6 +561,40 @@ describe('edgeDeviceApi', () => {
     })
   })
 
+  it('create forwards command_intervals (EDGE-WIZ-004 per-command polling)', async () => {
+    mockClient.post.mockResolvedValue({ id: 9 })
+
+    await edgeDeviceApi.create({
+      name: 'BMS',
+      node_id: '30EDA0A9A808',
+      channel_id: 1,
+      type: 'jiabaida_bms',
+      hardware_id: 'UART0',
+      command_intervals: {
+        read_basic_info: 10000,
+        read_cell_voltage: 0,
+        read_hardware_version: 0,
+        read_comprehensive: 0,
+        read_protection_count: 0,
+      },
+    })
+
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/edge-devices', {
+      name: 'BMS',
+      node_id: '30EDA0A9A808',
+      channel_id: 1,
+      type: 'jiabaida_bms',
+      hardware_id: 'UART0',
+      command_intervals: {
+        read_basic_info: 10000,
+        read_cell_voltage: 0,
+        read_hardware_version: 0,
+        read_comprehensive: 0,
+        read_protection_count: 0,
+      },
+    })
+  })
+
   it('getDetail with envelope data', async () => {
     mockClient.get.mockResolvedValue({ data: { id: 1, name: 'dev1', status: 'online' } })
     const res = await edgeDeviceApi.getDetail(1)
@@ -1115,6 +1149,130 @@ describe('parserApi', () => {
     const res = await parserApi.getById('bmp280')
     expect(res.id).toBe('bmp280')
     expect(res.vendor).toBe('Bosch')
+  })
+
+  // 回归: 新部署/空 device_configs 表时, tree 内置驱动兜底 (issue: 创建向导型号列表为空)
+  it('getList falls back to built-in drivers from tree when DB device-configs is empty', async () => {
+    // DB 列表空数组 + tree 含内置驱动
+    mockClient.get.mockResolvedValueOnce({
+      data: { list: [], total: 0, page: 1, page_size: 20, code: 200 },
+    })
+    mockClient.get.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'bosch', name: '博世',
+          children: [{
+            id: 'temp', name: '温度气压传感器',
+            drivers: [
+              { type: 'bmp280', model: 'BMP280', display_name: 'BMP280 温度气压传感器', hardware_types: ['i2c', 'spi'], description: 'desc' },
+            ],
+          }],
+        },
+      ],
+    })
+    const res = await parserApi.getList()
+    expect(res.length).toBeGreaterThan(0)
+    expect(res[0].id).toBe('bmp280')
+    expect(res[0].name).toBe('BMP280 温度气压传感器')
+    expect(res[0].vendor).toBe('博世')
+    expect(res[0].category).toBe('温度气压传感器')
+    expect(res[0].hardware_types).toEqual(['i2c', 'spi'])
+    expect(res[0].device_config_id).toBeUndefined()
+  })
+
+  it('getList keeps DB item and its device_config_id when the same type exists in the tree', async () => {
+    const dbItem = {
+      id: 42, type: 'bmp280', display_name: 'BMP280 定制模板', oem: 'Bosch', category: 'temp',
+      hardware_types: ['i2c'], measure_type: ['temperature'], description: 'db',
+    }
+    mockClient.get.mockResolvedValueOnce({ data: { list: [dbItem], total: 1, page: 1, page_size: 20 } })
+    mockClient.get.mockResolvedValueOnce({
+      data: [{
+        id: 'generic', name: '通用',
+        children: [{ id: 'cat', name: 'Cat', drivers: [{ type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c', 'spi'] }] }],
+      }],
+    })
+    const res = await parserApi.getList()
+    expect(res).toHaveLength(1)
+    expect(res[0].id).toBe('bmp280')
+    expect(res[0].device_config_id).toBe(42)
+    expect(res[0].name).toBe('BMP280 定制模板')
+    expect(res[0].vendor).toBe('Bosch')
+  })
+
+  it('getList merges DB items with tree built-in drivers, dedup by type', async () => {
+    const dbItem = {
+      id: 7, type: 'sn3001_rain', display_name: 'SN-3001 光学雨量计', oem: '威盟士',
+      hardware_types: ['uart'], measure_type: ['rain'], description: 'db',
+    }
+    mockClient.get.mockResolvedValueOnce({ data: { list: [dbItem], total: 1, page: 1, page_size: 20 } })
+    mockClient.get.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'oem1', name: 'OEM1',
+          children: [{ id: 'cat', name: 'Cat', drivers: [{ type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c'] }] }],
+        },
+        {
+          id: 'oem2', name: 'OEM2',
+          children: [{ id: 'cat2', name: 'Cat2', drivers: [{ type: 'sn3001_rain', display_name: 'SN-3001', hardware_types: ['uart'] }] }],
+        },
+      ],
+    })
+    const res = await parserApi.getList()
+    expect(res).toHaveLength(2)
+    const rain = res.find(p => p.id === 'sn3001_rain')
+    expect(rain!.device_config_id).toBe(7) // DB 优先
+    expect(rain!.name).toBe('SN-3001 光学雨量计')
+    const bmp = res.find(p => p.id === 'bmp280')
+    expect(bmp!.vendor).toBe('OEM1')
+    expect(bmp!.category).toBe('Cat')
+  })
+
+  it('getList tolerates tree request failure and still returns DB items', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { list: [{ id: 1, type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c'] }], total: 1 } })
+    mockClient.get.mockRejectedValueOnce(new Error('tree unreachable'))
+    const res = await parserApi.getList()
+    expect(res).toHaveLength(1)
+    expect(res[0].id).toBe('bmp280')
+  })
+
+  it('getList throws when both DB and tree requests fail', async () => {
+    mockClient.get.mockRejectedValueOnce(new Error('db down'))
+    mockClient.get.mockRejectedValueOnce(new Error('tree down'))
+    await expect(parserApi.getList()).rejects.toThrow('db down')
+  })
+
+  it('normalize lowercases and array-izes hardware_types', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { list: [] } })
+    mockClient.get.mockResolvedValueOnce({
+      data: [{
+        id: 'oem', name: 'OEM',
+        children: [{ id: 'cat', name: 'Cat', drivers: [{ type: 'd1', display_name: 'D1', hardware_types: ['I2C', 'SPI'] }] }],
+      }],
+    })
+    const res = await parserApi.getList()
+    expect(res).toHaveLength(1)
+    expect(res[0].hardware_types).toEqual(['i2c', 'spi'])
+  })
+
+  it('tree leaves without parent vendor/category get generic empty values', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { list: [] } })
+    mockClient.get.mockResolvedValueOnce({
+      data: [{ id: 'flat-oem', name: 'FlatOEM', drivers: [{ type: 'd1', display_name: 'D1', hardware_types: [] }] }],
+    })
+    const res = await parserApi.getList()
+    expect(res).toHaveLength(1)
+    expect(res[0].id).toBe('d1')
+    expect(res[0].vendor).toBe('FlatOEM')
+    expect(res[0].category).toBe('')
+  })
+
+  // 回归: 空库时 DB 与 tree 均空 → 返回空列表
+  it('getList returns [] when both sources are empty', async () => {
+    mockClient.get.mockResolvedValueOnce({ data: { list: [], total: 0 } })
+    mockClient.get.mockResolvedValueOnce({ data: [] })
+    const res = await parserApi.getList()
+    expect(res).toEqual([])
   })
 })
 
