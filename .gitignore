@@ -73,3 +73,6 @@ screenshots/
 .env.dev
 agents/
 backend/f6-env-dev.env
+
+# Git worktrees
+.worktrees/
