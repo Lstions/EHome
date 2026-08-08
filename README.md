@@ -169,6 +169,8 @@ docker compose up -d
 | PongAck | 0x18 | SVR→ESP | Pong 确认 (v3) |
 | ResourceReport | 0x19 | ESP→SVR | 硬件资源上报 (v3) |
 | QueryResources | 0x1A | SVR→ESP | 资源查询 (v3) |
+| PeriphCmd | 0x1B | SVR→ESP | 外设控制指令 (v3.0, GPIO/PWM) |
+| PeriphRsp | 0x1C | ESP→SVR | 外设操作结果 (v3.0) |
 
 详见 `docs/协议/二进制帧协议.md`
 
@@ -285,6 +287,11 @@ EHomeSystem/
 | v2.5: BMS 驱动 + 多指令采集 + ConfigManifest | ✅ 完成 |
 | v2.5.16+: Techfine 逆变器 + 逐指令配置 + 通道终端 | ✅ 完成 |
 | 生产部署: 单容器 + EMQX + 降采样 + gzip | ✅ 完成 |
+| v2.7: 多总线事件驱动 + 动态接口分配 | ✅ 完成 |
+| v3.0: GPIO/PWM 外设控制重构 (独立资源 + PeriphCmd/Rsp) | ✅ 完成 |
+| v3.3: 边缘设备数据生命周期 (逻辑设备身份/继承/合并/retention) | ✅ 完成 |
+
+> 详细版本变更见 `docs/README.md` 变更清单。
 
 ## License
 

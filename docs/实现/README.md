@@ -2,7 +2,7 @@
 
 > **位置**: `docs/实现/`
 > **对应设计**: `docs/设计/`
-> **状态**: v2.7 完整实现 (P0-P3 + BMS/逆变器驱动 + 通道终端 + 逐指令 ConfigManifest + 生产单容器部署 + 多总线事件驱动架构)
+> **状态**: v3.3 完整实现 (P0-P3 + BMS/逆变器驱动 + 通道终端 + 逐指令 ConfigManifest + 生产单容器部署 + 多总线事件驱动 + GPIO/PWM 外设控制 + 边缘设备数据生命周期)
 
 ## 📖 阅读路径
 
@@ -34,6 +34,8 @@
 | **15** | **统一解析器 (v2.5)** | — | `pkg/parser/` (替代旧 3 套解析系统) | — | — |
 | **16** | **服务端降采样 (v2.5)** | — | `internal/api/handler_data.go` (/historical-batch + max_points) | `views/data/` (图表降采样) | — |
 | **17** | **多总线事件驱动 (v2.7)** | — | — | — | `components/bus_worker/` (事件驱动 RX + 异步报告), `bus_manager/` (控制器租约), `scheduler/` (队列分发), `msg_handler/handler_channel_cmd_v2.c` |
+| **18** | **GPIO/PWM 外设控制 (v3.0)** | — | `internal/api/handler_periph.go` (PeriphCmd/Rsp) | `views/edge-device/` (行式资源控制面板) | `components/gpio_ctrl/` + `components/periph_owner/` (GPIOConfig/PWMConfig + API) |
+| **19** | **边缘设备数据生命周期 (v3.3)** | — | `internal/models/models.go` (LogicalDevice) + `internal/datalifecycle/` (merge/merge_chain/retention) + `handler_logical_device.go`/`handler_edge_device_lifecycle.go` | `views/logical-device/` (逻辑设备管理页) | — |
 
 ## 📊 实现完整度总览
 
@@ -54,7 +56,9 @@
 | 统一解析器 (v2.5) | ✅ 完整 | — | — | 🟢 完整 |
 | 降采样+gzip (v2.5) | ✅ 完整 | ✅ 完整 | 2 | 🟢 完整 |
 | 多总线事件驱动 (v2.7) | — | — | — | 🟢 ~6000 行 host 测试 |
-| **总计** | **114 Go 文件** | **144 Vue/TS 文件** | **~60** | **45 后端 + 31 前端 + ~6000 行固件 host 测试** |
+| GPIO/PWM 外设控制 (v3.0) | ✅ handler_periph.go + 测试 | ✅ 行式资源控制面板 | 10 | 🟢 77 单元测试 |
+| 数据生命周期 (v3.3) | ✅ datalifecycle + logical handler | ✅ 逻辑设备管理页 | 5 | 🟢 全链路集成测试 |
+| **总计** | **114+ Go 文件** | **144+ Vue/TS 文件** | **~75** | **45+ 后端 + 31+ 前端 + ~6000 行固件 host 测试** |
 
 ## 🔧 通用技术栈
 
