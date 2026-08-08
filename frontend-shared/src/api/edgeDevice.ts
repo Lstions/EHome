@@ -92,6 +92,10 @@ export interface CreateEdgeDeviceParams {
     // peripheral pin-conflict gate.
     bus_config?: string
   }
+  // EDGE-WIZ-004: 逐指令轮询间隔 (command_id → interval_ms, 0 = 禁用)。
+  // 创建接口按最终设备类型校验 schedulable command id, 未知/非轮询 id 会被拒绝;
+  // 仅当驱动声明了 schedulable 轮询指令时才应携带。
+  command_intervals?: Record<string, number>
 }
 
 // ============================================================

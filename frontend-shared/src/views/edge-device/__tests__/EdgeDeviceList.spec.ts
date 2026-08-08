@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
-const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo } = vi.hoisted(() => ({
+const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands } = vi.hoisted(() => ({
   mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
     items: [
       { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
@@ -20,6 +20,9 @@ const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo } = vi.hoisted(() => ({
     instance_count: 2,
     row_estimate: 500,
   })),
+  // EDGE-WIZ-004/005: 默认返回空指令集 (普通驱动); 具体测试按需覆盖为
+  // jiabaida_bms 的 5 条 schedulable 指令。
+  mockGetDriverCommands: vi.fn((..._args: any[]) => Promise.resolve([])),
 }))
 
 vi.mock('element-plus', () => ({
@@ -49,6 +52,8 @@ vi.mock('@/api/edgeDevice', () => ({
     getLogicalDeviceInfo: mockGetLogicalDeviceInfo,
     // 方案 v3.3 §1.3: 步骤 0 候选组件依赖; 测试默认空候选集
     getCandidates: vi.fn(() => Promise.resolve([])),
+    // EDGE-WIZ-004/005: 创建向导逐指令轮询间隔依赖
+    getDriverCommands: mockGetDriverCommands,
   },
 }))
 vi.mock('@/api/channel', () => ({
@@ -384,6 +389,191 @@ describe('EdgeDeviceList.vue', () => {
     expect(dialog.find('.inherit-candidate-area').exists()).toBe(true)
     // 步骤 0 时型号未选 (type=''), 候选组件显示"先选型号"引导而非空列表
     expect(dialog.find('[data-testid="candidate-awaiting-type"]').exists()).toBe(true)
+  })
+
+  // ---- EDGE-WIZ-003: 打开创建向导强制刷新通道 ----
+
+  it('EDGE-WIZ-003: 打开创建向导强制刷新通道 (即使 store 已有旧数据)', () => {
+    expect(source).toContain('channelStore.fetchChannels(undefined, true)')
+    expect(source).not.toContain('channelStore.channels.length === 0 ? channelStore.fetchChannels')
+  })
+
+  it('EDGE-WIZ-003: 节点 change 事件也会刷新通道列表', () => {
+    expect(source).toContain('@change="handleNodeChange"')
+    expect(source).toContain('const handleNodeChange = () => {')
+    expect(source).toContain('void channelStore.fetchChannels(undefined, true)')
+  })
+
+  it('EDGE-WIZ-003: 行为验证 — 通道 store 已有旧数据时打开向导仍强制刷新通道', async () => {
+    const { useChannelStore } = await import('@/stores/channel')
+    const channelStore = useChannelStore()
+    // 模拟旧缓存: store 里已经有通道 (节点页此前加载过)
+    channelStore.channels = [
+      { id: 99, node_id: 'node-1', hardware_type: 'i2c' as const, hardware_id: 'I2C0', config: {} },
+    ]
+    const spy = vi.spyOn(channelStore, 'fetchChannels').mockResolvedValue(undefined as any)
+
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    // 打开创建向导 (触发 watch(showCreateDialog) → loadCreateWizardData)
+    vm.showCreateDialog = true
+    await flushPromises()
+
+    // 虽然 store 已有通道, 仍强制 fetchChannels(undefined, force=true)
+    expect(spy).toHaveBeenCalledWith(undefined, true)
+    expect(channelStore.channels.length).toBeGreaterThan(0)
+    spy.mockRestore()
+  })
+
+  // ---- EDGE-WIZ-002: 通道卡片字体 ----
+
+  it('EDGE-WIZ-002: 通道卡片不再使用原生 <code> 默认等宽字体', () => {
+    // 卡片内容用 span.channel-name + 正文字体; 原生 <code> 展示通道名的写法已移除
+    expect(source).toContain('<span class="channel-name"')
+    expect(source).not.toContain('<code>{{ ch.name ||')
+    expect(source).toContain('.channel-select-card .channel-name')
+    expect(source).toContain('font-family: var(--el-font-family);')
+  })
+
+  it('EDGE-WIZ-002: 通道卡片仍保留硬件类型与硬件ID信息', () => {
+    expect(source).toContain('class="channel-bus-id"')
+    expect(source).toContain('getHardwareTagType(ch.hardware_type)')
+  })
+
+  // ---- EDGE-WIZ-004/005: 创建向导逐指令轮询间隔 ----
+
+  const jiabaidaCommands = () => [
+    { id: 'read_basic_info', name: '读取基本信息', type: 'read', cmd_byte: 0x03, write_data: '', read_length: 60, delay_ms: 100, interval_ms: 5000, schedulable: true, description: '总电压、电流、剩余容量' },
+    { id: 'read_cell_voltage', name: '读取单体电压', type: 'read', cmd_byte: 0x04, write_data: '', read_length: 50, delay_ms: 100, interval_ms: 0, schedulable: true, description: '每串电芯电压' },
+    { id: 'read_hardware_version', name: '读取硬件版本', type: 'read', cmd_byte: 0x05, write_data: '', read_length: 40, delay_ms: 100, interval_ms: 0, schedulable: true, description: '硬件版本字符串' },
+    { id: 'read_comprehensive', name: '读取综合信息', type: 'read', cmd_byte: 0x0F, write_data: '', read_length: 100, delay_ms: 100, interval_ms: 0, schedulable: true, description: '0x03超集' },
+    { id: 'read_protection_count', name: '读取保护历史次数', type: 'read', cmd_byte: 0xAA, write_data: '', read_length: 40, delay_ms: 100, interval_ms: 0, schedulable: true, description: '保护触发次数统计' },
+  ]
+
+  // 打开创建对话框并选中指定型号, 使 CreateWizardCommandIntervals 挂载
+  const openWizardWithParser = async (wrapper: any, parser: any) => {
+    const createBtn = wrapper.findAll('button').find((b: any) => b.text().includes('创建边缘设备'))
+    await createBtn!.trigger('click')
+    await flushPromises()
+    wrapper.vm.selectedParser = parser
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+    return wrapper.vm
+  }
+
+  it('EDGE-WIZ-004/005: 选择 jiabaida_bms 后加载并渲染 5 条 schedulable 轮询指令', async () => {
+    mockGetDriverCommands.mockImplementationOnce(() => Promise.resolve(jiabaidaCommands() as any))
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = await openWizardWithParser(wrapper, { id: 'jiabaida_bms', name: '嘉佰达 BMS', hardware_types: ['uart'] })
+
+    expect(mockGetDriverCommands).toHaveBeenCalledWith('jiabaida_bms')
+    // 子组件公开的 schedulable 指令列表
+    const el = vm.commandIntervalsRef
+    expect(el).toBeTruthy()
+    const schedulable = el?.schedulableCommands || []
+    expect(schedulable.map((c: any) => c.id)).toEqual([
+      'read_basic_info', 'read_cell_voltage', 'read_hardware_version',
+      'read_comprehensive', 'read_protection_count',
+    ])
+    expect(schedulable).toHaveLength(5)
+  })
+
+  it('EDGE-WIZ-004/005: 修改一条指令间隔、禁用另一条后 create 携带正确 command_intervals', async () => {
+    mockGetDriverCommands.mockImplementationOnce(() => Promise.resolve(jiabaidaCommands() as any))
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = await openWizardWithParser(wrapper, { id: 'jiabaida_bms', name: '嘉佰达 BMS', hardware_types: ['uart'] })
+
+    vm.selectedChannel = { id: 5, hardware_id: 'UART0', config: { device_type: 'jiabaida_bms' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = 'BMS-2'
+    vm.deviceForm.node_id = 1
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+
+    const el = vm.commandIntervalsRef
+    expect(el).toBeTruthy()
+    // 直接驱动子组件内部状态等价于用户编辑 input-number
+    el.setInterval('read_basic_info', 10000)
+    el.setInterval('read_protection_count', 0)  // 禁用
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).toHaveBeenCalledTimes(1)
+    const arg = (edgeDeviceApi.create as any).mock.calls[0][0]
+    expect(arg.command_intervals).toEqual({
+      read_basic_info: 10000,
+      read_cell_voltage: 0,
+      read_hardware_version: 0,
+      read_comprehensive: 0,
+      read_protection_count: 0,
+    })
+  })
+
+  it('EDGE-WIZ-004/005: 有 schedulable 指令时隐藏全局“采集间隔”, 无则保留', () => {
+    // 有 schedulable → 全局 input-number 不渲染, 显示“按下方轮询指令逐条设置”
+    expect(source).toContain('v-if="!hasSchedulableCommands" label="采集间隔 (ms)"')
+    expect(source).toContain('该设备型号按下方“轮询指令”逐条设置间隔（0 = 禁用）')
+    // 确认卡片: 有快照显示“N 条已配置”, 否则显示全局间隔
+    expect(source).toContain('轮询指令')
+    expect(source).toContain('条已配置')
+    expect(source).toContain('const hasSchedulableCommands = computed(() => {')
+  })
+
+  it('EDGE-WIZ-004/005: 切换设备型号不会携带旧型号的 command_intervals', async () => {
+    mockGetDriverCommands.mockImplementationOnce(() => Promise.resolve(jiabaidaCommands() as any))
+    mockGetDriverCommands.mockImplementationOnce(() => Promise.resolve([] as any))  // 新型号无 schedulable 指令
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = await openWizardWithParser(wrapper, { id: 'jiabaida_bms', name: '嘉佰达 BMS', hardware_types: ['uart'] })
+
+    const el = vm.commandIntervalsRef
+    expect(el).toBeTruthy()
+    el.setInterval('read_basic_info', 7000)
+
+    // 切换到无 schedulable 指令的型号
+    vm.selectParser({ id: 'sn3001_rain', name: 'SN-3001', hardware_types: ['uart'] })
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+
+    vm.selectedChannel = { id: 5, hardware_id: '0x01', config: { device_type: 'sn3001_rain' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = 'SN'
+    vm.deviceForm.node_id = 1
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).toHaveBeenCalledTimes(1)
+    const arg = (edgeDeviceApi.create as any).mock.calls[0][0]
+    expect(arg.command_intervals).toBeUndefined()
+  })
+
+  it('EDGE-WIZ-004/005: 驱动指令加载失败时拦截提交并提示, 不携带旧间隔', async () => {
+    mockGetDriverCommands.mockRejectedValueOnce(new Error('driver down'))
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const { ElMessage } = await import('element-plus')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = await openWizardWithParser(wrapper, { id: 'jiabaida_bms', name: '嘉佰达 BMS', hardware_types: ['uart'] })
+
+    vm.selectedChannel = { id: 5, hardware_id: 'UART0', config: { device_type: 'jiabaida_bms' } }
+    vm.channelTab = 'existing'
+    vm.deviceForm.name = 'BMS'
+    vm.deviceForm.node_id = 1
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+
+    // 加载失败 → 子组件 loadFailed 置位, 父组件记录错误
+    expect(vm.commandIntervalsError).toBeTruthy()
+    expect((vm.commandIntervalsRef as any)?.loadFailed).toBe(true)
+    expect(ElMessage.error).toHaveBeenCalled()
+
+    await vm.handleCreate()
+    await flushPromises()
+    expect(edgeDeviceApi.create).not.toHaveBeenCalled()
   })
 
   it('步骤0: 默认与选"继承"均可进入下一步 (候选依赖型号, 提交时拦截)', () => {

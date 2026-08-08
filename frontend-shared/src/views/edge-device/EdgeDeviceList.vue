@@ -397,7 +397,7 @@
         
         <!-- 节点选择（Step 2） -->
         <el-form-item label="所属节点" prop="node_id" style="margin-bottom: 16px;">
-          <el-select v-model="deviceForm.node_id" placeholder="选择节点" style="width: 100%;" @change="selectedChannel = null">
+          <el-select v-model="deviceForm.node_id" placeholder="选择节点" style="width: 100%;" @change="handleNodeChange">
             <el-option 
               v-for="c in onlineCollectors" 
               :key="c.id" 
@@ -418,7 +418,7 @@
                 :class="{ selected: selectedChannel?.id === ch.id }"
                 @click="selectChannel(ch)"
               >
-                <code>{{ ch.name || (ch.hardware_type?.toUpperCase() + ' ' + ch.hardware_id) }}</code>
+                <span class="channel-name" :title="ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}`">{{ ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}` }}</span>
                 <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ (ch.hardware_type || '').toUpperCase() }}</el-tag>
                 <span class="channel-bus-id">{{ ch.hardware_id }}</span>
                 <div v-if="selectedChannel?.id === ch.id" class="channel-selected-badge">
@@ -479,10 +479,26 @@
             <el-input v-model="deviceForm.name" placeholder="请输入边缘设备名称" />
           </el-form-item>
 
-          <el-form-item label="采集间隔 (ms)" prop="interval_ms">
+          <!-- EDGE-WIZ-004/005: 驱动声明 schedulable 轮询指令时, 以逐指令间隔为
+               主配置; 全局 interval_ms 仅作后端兼容字段, 不再展示以避免误导。
+               无 schedulable 指令的驱动保持原有单个采集间隔。 -->
+          <el-form-item v-if="!hasSchedulableCommands" label="采集间隔 (ms)" prop="interval_ms">
             <el-input-number v-model="deviceForm.interval_ms" :min="100" :max="3600000" :step="100" />
           </el-form-item>
+          <el-alert v-else :closable="false" type="info" show-icon style="margin-bottom: 16px;">
+            <template #title>该设备型号按下方“轮询指令”逐条设置间隔（0 = 禁用）</template>
+          </el-alert>
         </el-form>
+
+        <!-- EDGE-WIZ-004/005: 逐指令轮询间隔 (仅创建模式) — 驱动声明了
+             schedulable 指令时展示, 替代/补充全局采集间隔的误导。 -->
+        <CreateWizardCommandIntervals
+          v-if="!editingDeviceId && selectedParser?.id"
+          ref="commandIntervalsRef"
+          :device-type="selectedParser.id"
+          :saving-disabled="submitting"
+          @load-error="handleDriverCommandsLoadError"
+        />
 
         <!-- 配置确认卡片(仅创建模式;编辑模式无解析器/通道选择上下文) -->
         <div class="confirm-card" v-if="!editingDeviceId">
@@ -506,7 +522,11 @@
               <span class="label">总线</span>
               <span class="value">{{ selectedChannel?.hardware_id || newChannel.hardware_id }}</span>
             </div>
-            <div class="confirm-item">
+            <div v-if="commandIntervalsSnapshot && Object.keys(commandIntervalsSnapshot).length > 0" class="confirm-item">
+              <span class="label">轮询指令</span>
+              <span class="value">{{ Object.keys(commandIntervalsSnapshot).length }} 条已配置</span>
+            </div>
+            <div v-else class="confirm-item">
               <span class="label">采集间隔</span>
               <span class="value">{{ deviceForm.interval_ms }}ms</span>
             </div>
@@ -575,6 +595,7 @@ import StatCard from '@/components/common/StatCard.vue'
 import DeviceDeleteDialog from '@/components/device/DeviceDeleteDialog.vue'
 import DeviceBatchDeleteDialog from '@/components/device/DeviceBatchDeleteDialog.vue'
 import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
+import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { useWebSocketStore } from '@/stores/websocket'
@@ -835,13 +856,39 @@ const fetchNodes = async () => {
   collectors.value = nodeStore.getCachedList(params)?.items || []
 }
 
+// EDGE-WIZ-003: 打开创建向导时必须强制刷新通道列表。旧缓存 (节点页刚创建通道
+// 后不刷新浏览器) 会导致新建通道不进列表。通道 store 的 fetchChannels 自带
+// requestSequence/cacheEpoch 防竞态, 不破坏其 sessionGeneration 机制。
 let wizardDataLoaded = false
+let channelsRefreshing = false
+let nodesFetched = false
+const refreshWizardChannels = async () => {
+  channelsRefreshing = true
+  try {
+    await channelStore.fetchChannels(undefined, true)
+  } finally {
+    channelsRefreshing = false
+  }
+}
 const loadCreateWizardData = async () => {
-  if (wizardDataLoaded) return
+  if (wizardDataLoaded) {
+    // 向导已初始化过: 节点/型号/模板不再重复拉取, 但通道列表每次打开都强制
+    // 刷新 — 节点页刚创建的通道必须立即可见。并发守卫在 store 内
+    // (requestSequence), 此处只需防重复请求压栈。
+    void refreshWizardChannels().catch(() => {
+      // 失败保留已有列表, 用户可通过切换节点或重开向导重试
+    })
+    return
+  }
   try {
     await Promise.all([
-      fetchNodes(),
-      channelStore.channels.length === 0 ? channelStore.fetchChannels(undefined, true) : Promise.resolve(),
+      (async () => {
+        // 节点列表只需要拉取一次即可; 通道列表每次打开向导都强制刷新
+        if (nodesFetched) return
+        await fetchNodes()
+        nodesFetched = true
+      })(),
+      refreshWizardChannels(),
       parserStore.parsers.length === 0 ? parserStore.fetchParsers(true) : Promise.resolve(),
       loadTemplates(),
     ])
@@ -849,6 +896,17 @@ const loadCreateWizardData = async () => {
   } catch (error) {
     wizardDataLoaded = false
     ElMessage.error('创建向导数据加载失败，请重试')
+  }
+}
+
+// EDGE-WIZ-003: 切换节点时也保证通道列表可见。fetchChannels 内部有
+// requestSequence 防竞态: 并发请求只由最新序号写回, 不会互相覆盖。
+const handleNodeChange = () => {
+  selectedChannel.value = null
+  if (wizardDataLoaded && !channelsRefreshing) {
+    void channelStore.fetchChannels(undefined, true).catch(() => {
+      // 失败时保留已有列表, 用户仍可重试 (切回再切或重开向导)
+    })
   }
 }
 
@@ -941,6 +999,11 @@ const canGoNext = computed(() => {
 const selectParser = (parser: Parser) => {
   selectedParser.value = parser
   selectedChannel.value = null
+  // EDGE-WIZ-004/005: 切换设备型号时清理旧型号的逐指令轮询间隔。
+  // CreateWizardCommandIntervals 监听 deviceType 自动重置已加载指令;
+  // 此处同步清空提交时使用的快照, 保证重选型号不带旧 intervals。
+  commandIntervalsError.value = ''
+  prepareCommandIntervals()
   // P0-1: 同步新通道硬件类型到解析器第一个可用总线,避免默认值 i2c 与
   // 解析器 hardware_types 不匹配(如选 uart 解析器但表单默认 i2c)。
   const buses = parser.hardware_types || []
@@ -948,6 +1011,47 @@ const selectParser = (parser: Parser) => {
     newChannel.hardware_type = buses[0]
     newChannel.hardware_id = ''
   }
+}
+
+// ---- EDGE-WIZ-004/005: 创建向导逐指令轮询间隔 ----
+// 由 CreateWizardCommandIntervals 子组件 (仅创建模式) 加载驱动 schedulable
+// 指令并维护每条的间隔; 提交时经 freezeCommandIntervals 冻结到快照参与 payload。
+// commandIntervalsError: 驱动指令列表加载失败时的错误信息 (用于拦截静默提交)。
+const commandIntervalsRef = ref()
+const commandIntervalsReady = ref(false)
+const commandIntervalsSnapshot = ref<Record<string, number> | null>(null)
+const commandIntervalsError = ref('')
+
+// 当前型号驱动是否声明了 schedulable 轮询指令 — 有则隐藏全局 interval_ms
+// (避免误导), 无则保留原有单个采集间隔。
+const hasSchedulableCommands = computed(() => {
+  const el = commandIntervalsRef.value as any
+  if (!el || typeof el.schedulableCommands === 'undefined') return false
+  return (el?.schedulableCommands || []).length > 0
+})
+
+const prepareCommandIntervals = () => {
+  commandIntervalsReady.value = false
+  commandIntervalsSnapshot.value = null
+}
+
+const handleDriverCommandsLoadError = (message: string) => {
+  commandIntervalsError.value = message
+  commandIntervalsReady.value = false
+  commandIntervalsSnapshot.value = null
+  ElMessage.error(message)
+}
+
+// 提交时一致快照。加载失败/进行中 → null (不携带任何 intervals, 更不会带
+// 旧驱动的数据); 就绪 → 全部 schedulable 指令的当前间隔。
+const freezeCommandIntervals = (): Record<string, number> | null => {
+  const el = commandIntervalsRef.value as any
+  if (!el || typeof el.getIntervals !== 'function') return commandIntervalsSnapshot.value
+  const intervals = el.getIntervals()
+  if (intervals === null) return commandIntervalsSnapshot.value
+  commandIntervalsSnapshot.value = intervals
+  commandIntervalsReady.value = true
+  return intervals
 }
 
 const selectChannel = (ch: Channel) => {
@@ -1153,6 +1257,12 @@ const handleCreate = async () => {
     const frozenChannelTab = channelTab.value
     const frozenEditingDeviceId = editingDeviceId.value
 
+    // EDGE-WIZ-004/005: 提交流程先等驱动指令加载结算 (成功或失败), 再冻结
+    // 逐指令轮询间隔快照。加载失败时以下拦截, 不允许携带旧驱动的 intervals
+    // 静默提交。
+    await (commandIntervalsRef.value as any)?.whenLoaded?.()
+    const frozenCommandIntervals = freezeCommandIntervals()
+
     // 编辑模式 — 字段对齐后端 UpdateDTO: name/enabled/interval_ms/hardware_id/node_id/channel_id
     // 不传 type: 设备型号绑定在编辑中不可变,且后端 G1 在 device_config_id>0 时拒绝 type。
     if (frozenEditingDeviceId) {
@@ -1177,6 +1287,16 @@ const handleCreate = async () => {
     
     // 根据 parser 的 hardware_types 推断协议类型
     if (!frozenParser) throw new Error('请先选择设备型号')
+
+    // EDGE-WIZ-004/005: 驱动指令加载失败必须显式处理 — 提示并让用户退回
+    // 重选型号或点击重试, 绝不能静默提交 (旧驱动 intervals 已在 selectParser
+    // 切换时清空, 此处兜底拦截)。
+    if (commandIntervalsError.value) {
+      ElMessage.warning('驱动轮询指令未成功加载，请重试或返回上一步重新选择设备型号')
+      createStep.value = 3
+      submitting.value = false
+      return
+    }
     
     // F: inline channel creation — no two-phase commit
     let targetChannel: Channel
@@ -1206,6 +1326,8 @@ const handleCreate = async () => {
         hardware_id: channelPayload.hardware_id,
         ...baseParams,
         ...frozenInheritParams,
+        // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
+        ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
         channel: {
           hardware_type: channelPayload.hardware_type,
           hardware_id: channelPayload.hardware_id,
@@ -1247,6 +1369,8 @@ const handleCreate = async () => {
           hardware_id: targetChannel.hardware_id,
           device_config_id: deviceConfigId,
           ...frozenInheritParams,
+          // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
+          ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
         })
       } else {
         await edgeDeviceApi.create({
@@ -1256,6 +1380,8 @@ const handleCreate = async () => {
           type: frozenParser.id,
           hardware_id: targetChannel.hardware_id,
           ...frozenInheritParams,
+          // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
+          ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
         })
       }
     } else {
@@ -1283,6 +1409,10 @@ const resetCreateDialog = () => {
   channelTab.value = 'existing'
   inheritMode.value = 'new'
   inheritLogicalDeviceId.value = null
+  // EDGE-WIZ-004/005: 清空逐指令间隔快照与加载错误
+  commandIntervalsError.value = ''
+  commandIntervalsSnapshot.value = null
+  commandIntervalsReady.value = false
   deviceForm.name = ''
   deviceForm.node_id = null
   deviceForm.interval_ms = 1000
@@ -1356,6 +1486,10 @@ watch(showCreateDialog, (val) => {
     editingDeviceId.value = null
     inheritMode.value = 'new'
     inheritLogicalDeviceId.value = null
+    // EDGE-WIZ-004/005: 关闭清空逐指令间隔快照与错误
+    commandIntervalsError.value = ''
+    commandIntervalsSnapshot.value = null
+    commandIntervalsReady.value = false
     // 重置表单
     deviceForm.name = ''
     deviceForm.node_id = null
@@ -1829,15 +1963,28 @@ code.fact-value {
   background: var(--el-color-success-light-9);
 }
 
-.channel-select-card code {
-  font-size: 13px;
+/* EDGE-WIZ-002: 通道名使用 Element Plus 正文字体 (不再用原生 <code> 等宽),
+   避免与页面其他表单文本风格突兀; 硬件类型 tag + 右侧总线 ID 保留必要信息。 */
+.channel-select-card .channel-name {
+  font-family: var(--el-font-family);
+  font-size: 14px;
+  font-weight: 500;
   color: var(--el-text-color-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.channel-select-card.selected .channel-name {
+  color: var(--el-color-success);
 }
 
 .channel-bus-id {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .parser-id {
