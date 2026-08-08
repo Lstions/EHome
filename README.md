@@ -62,31 +62,33 @@
 cd /home/sun/workspace/EHomeSystem
 ```
 
-### 2. 启动开发环境
+### 2. 启动统一环境
+
+本地开发（本机 Go/Vite）与生产共用同一套容器基础设施（`docker-compose.yml` 的 postgres/redis/emqx，无独立 dev 栈）。
 
 ```bash
-# 一键启动：独立开发基础设施 + 本地前后端（make 不带参数效果相同）
-make dev
+# 一键启动：确保统一基础设施运行 + 启动本机前后端（make 不带参数效果相同）
+make up
 
 # 或分步启动
-make infra       # 仅启动基础设施
+make infra       # 确保统一基础设施 (PG/Redis/EMQX) 运行
 make backend     # 仅启动后端 (:8082)
 make frontend    # 仅启动前端 (:5174)
 ```
 
-开发与测试共用 `ehome-dev` Compose 项目；其中 PostgreSQL 同时包含 `ehome` 和 `ehome_test` 两个数据库。开发栈使用独立容器、网络、持久卷和主机端口，所有 `make down/clean` 操作均不会管理生产 Compose 项目。
+统一 PostgreSQL 同时包含 `ehome` 和 `ehome_test` 两个数据库。基础设施与生产共用容器、网络、持久卷，生产数据卷（`ehome-pgdata` 等）不受 `make down/clean` 影响。
 
-本地开发端口：
+本地端口（统一基础设施主机端口仅绑定 127.0.0.1）：
 
-| 服务 | 开发/测试端口 | 生产端口 |
-|------|---------------|---------|
-| PostgreSQL | 5435 | 5432（容器内） |
-| Redis | 6380 | 6379（容器内） |
-| EMQX MQTT | 1884 | 1883 |
-| EMQX WebSocket | 8084 | 8083 |
-| EMQX Dashboard | 18084 | 18083 |
-| 后端 API | 8082 | 8080 |
-| 前端 | 5174 | 80 |
+| 服务 | 本地/统一端口 | 生产容器内端口 |
+|------|--------------|---------------|
+| PostgreSQL | 5432 | 5432 |
+| Redis | 6379 | 6379 |
+| EMQX MQTT | 1883 | 1883 |
+| EMQX WebSocket | 8083 | 8083 |
+| EMQX Dashboard | 18083 | 18083 |
+| 后端 API | 8082 | 8080（ehome-web） |
+| 前端 | 5174 | 80（ehome-web 内 SPA） |
 
 ### 3. 构建 ESP32 固件
 

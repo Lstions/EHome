@@ -1,9 +1,11 @@
 services:
-  # PostgreSQL database (production: no external port, inter-container only)
+  # PostgreSQL database (unified infra: host port bound to 127.0.0.1 for local dev)
   postgres:
     image: postgres:16-alpine
     container_name: ehome-postgres
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?err — POSTGRES_PASSWORD is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err — POSTGRES_PASSWORD is required}
@@ -16,11 +18,13 @@ services:
       timeout: 3s
       retries: 5
 
-  # Redis cache (production: no external port)
+  # Redis cache (unified infra: host port bound to 127.0.0.1 for local dev)
   redis:
     image: redis:7-alpine
     container_name: ehome-redis
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
     volumes:
       - ehome-redisdata:/data
     healthcheck:
@@ -29,15 +33,15 @@ services:
       timeout: 3s
       retries: 5
 
-  # EMQX MQTT broker
+  # EMQX MQTT broker (unified infra: host ports bound to 127.0.0.1)
   emqx:
     image: emqx/emqx:5.7
     container_name: ehome-emqx
     restart: unless-stopped
     ports:
-      - "${EMQX_MQTT_PORT:-1883}:1883"
-      - "${EMQX_WS_PORT:-8083}:8083"
-      - "${EMQX_DASHBOARD_PORT:-18083}:18083"
+      - "127.0.0.1:${EMQX_MQTT_PORT:-1883}:1883"
+      - "127.0.0.1:${EMQX_WS_PORT:-8083}:8083"
+      - "127.0.0.1:${EMQX_DASHBOARD_PORT:-18083}:18083"
     environment:
       EMQX_NAME: ehome
       EMQX_LOADED_MODULES: "emqx_mod_acl_internal"
