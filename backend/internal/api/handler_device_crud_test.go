@@ -1166,6 +1166,32 @@ func TestDeviceConfig_Tree_WithConfigs(t *testing.T) {
 	}
 }
 
+func TestDeviceConfig_Tree_ExcludesInactiveConfigs(t *testing.T) {
+	r, db := setupDeviceTest(t)
+
+	// active 与 inactive 各一条, device_type 互不相同且不与内置驱动重名,
+	// 避免被驱动注册表分支吸收。tree 只应暴露 active 配置——与
+	// GET /device-configs?status=active (前端 parserApi 主数据源) 对齐。
+	db.Create(&models.DeviceConfig{Name: "ActiveOnly", DeviceType: "review_active_only", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "InactiveOnly", DeviceType: "review_inactive_only", HardwareType: "i2c", Status: "inactive"})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/device-configs/tree", nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"type":"review_active_only"`) {
+		t.Fatalf("active config must appear in tree: %s", body)
+	}
+	if strings.Contains(body, `"type":"review_inactive_only"`) {
+		t.Fatalf("inactive config must not leak into tree: %s", body)
+	}
+}
+
 func TestDeviceConfig_Tree_UsesInjectedDriverRegistry(t *testing.T) {
 	registry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(registry)

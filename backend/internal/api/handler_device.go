@@ -1019,8 +1019,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 
 		// 2. DB device-configs (supplement, dedup by type)
+		// 与 GET /device-configs?status=active (前端 parserApi 主数据源) 对齐:
+		// 只暴露 active 配置。否则被禁用 (inactive) 的模板会绕过列表接口的
+		// status 过滤重新出现在创建向导的型号列表里 (2026-08-08 review 发现)。
 		var configs []models.DeviceConfig
-		db.Find(&configs)
+		db.Where("status = ?", "active").Find(&configs)
 		for _, cfg := range configs {
 			oem := "通用"
 			if cfg.VendorID != nil {
