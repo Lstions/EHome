@@ -63,6 +63,49 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 	return nil
 }
 
+// validateAndNormalizeCommandIntervals validates a create-time
+// command_intervals payload against the device type's schedulable command
+// templates. Every provided command id must belong to the driver's
+// schedulable template set — unknown ids and ids of one-shot (non-schedulable)
+// templates are rejected so invalid polling configuration can never reach the
+// database. Negative intervals are normalized to 0 (0 = disabled), matching
+// the PUT /edge-devices/:id/commands behavior. Returns the JSON payload to
+// persist, or nil when the input map is empty.
+func validateAndNormalizeCommandIntervals(driverRegistry *drivers.Registry, devType string, intervals map[string]int) (json.RawMessage, error) {
+	if len(intervals) == 0 {
+		return nil, nil
+	}
+	drv, err := driverRegistry.Get(devType)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate command_intervals: driver for type %q is not registered", devType)
+	}
+	provider, ok := drv.(drivers.CommandTemplateProvider)
+	if !ok {
+		return nil, fmt.Errorf("cannot validate command_intervals: driver for type %q provides no command templates", devType)
+	}
+	schedulable := make(map[string]struct{}, 8)
+	for _, tmpl := range provider.GetCommandTemplates() {
+		if tmpl.Schedulable {
+			schedulable[tmpl.ID] = struct{}{}
+		}
+	}
+	normalized := make(map[string]int, len(intervals))
+	for id, interval := range intervals {
+		if _, ok := schedulable[id]; !ok {
+			return nil, fmt.Errorf("command_intervals: command %q is not a schedulable command of driver %q", id, devType)
+		}
+		if interval < 0 {
+			interval = 0
+		}
+		normalized[id] = interval
+	}
+	raw, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal command_intervals: %w", err)
+	}
+	return raw, nil
+}
+
 // createSingleTemplate inserts one ConfigTemplate and appends its ID to the channel's template_ids.
 // edgeDeviceID records the owning edge device (方案 v3.3 §2.4); 0 leaves the
 // ownership column NULL (self-healing / callers without a device instance).
@@ -327,6 +370,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			IntervalMs     *int    `json:"interval_ms"`
 			HardwareID     *string `json:"hardware_id"`
 			DeviceConfigID *uint   `json:"device_config_id"`
+			// CommandIntervals (optional): per-command polling interval map
+			// (command_id → interval_ms, 0 = disabled). Validated against the
+			// device type's schedulable command templates once dev.Type is
+			// resolved (after DeviceConfig derivation, if any).
+			CommandIntervals map[string]int `json:"command_intervals"`
 			// 方案 v3.3 §3.3/§九: 继承目标 (可选)。指定时校验目标存在 +
 			// device_type 匹配 + merged_into IS NULL + purge_requested=FALSE,
 			// 并做存活实例唯一性校验; 未指定则新建 logical_device
@@ -495,6 +543,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				dev.LogicalDeviceID = &target.ID
 			}
 			// Step 1: Create EdgeDevice (inside transaction)
+			// command_intervals validation must run after dev.Type is resolved
+			// (DeviceConfig-derived or explicit type). Unknown ids and
+			// non-schedulable ids are rejected; negatives are normalized to 0.
+			if len(dto.CommandIntervals) > 0 {
+				intervalsJSON, vErr := validateAndNormalizeCommandIntervals(driverRegistry, dev.Type, dto.CommandIntervals)
+				if vErr != nil {
+					return vErr
+				}
+				dev.CommandIntervals = intervalsJSON
+			}
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
 			}
