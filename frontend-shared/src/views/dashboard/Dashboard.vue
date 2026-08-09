@@ -247,14 +247,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Cpu, CircleCheck, Refresh, Connection, TrendCharts, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import LineChart from '@/components/charts/LineChart.vue'
+// 异步拆分：LineChart（echarts 核心）渲染耗时且仅趋势区使用，
+// 独立 chunk 延迟加载，避免阻塞仪表盘首屏。
+const LineChart = defineAsyncComponent(() => import('@/components/charts/LineChart.vue'))
 import { dataApi, type Overview } from '@/api/data'
 import client from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
