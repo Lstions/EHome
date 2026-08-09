@@ -72,10 +72,30 @@
         <el-input v-model="form.name" placeholder="请输入边缘设备名称" />
       </el-form-item>
 
-      <!-- 采集间隔 -->
-      <el-form-item label="采集间隔 (ms)" prop="interval_ms">
+      <!-- EDGE-WIZ-004/005: 驱动声明 schedulable 轮询指令时以逐指令间隔为主配置;
+           全局采集间隔仅作后端兼容字段, 隐藏以避免误导。 -->
+      <el-form-item v-if="!hasSchedulableCommands" label="采集间隔 (ms)" prop="interval_ms">
         <el-input-number v-model="form.interval_ms" :min="100" :max="3600000" :step="100" />
       </el-form-item>
+      <el-alert
+        v-else
+        type="info"
+        :closable="false"
+        show-icon
+        class="interval-hint"
+      >
+        <template #title>该设备型号按下方“轮询指令”逐条设置间隔（0 = 禁用）</template>
+      </el-alert>
+
+      <!-- EDGE-WIZ-004/005: 逐指令轮询间隔 — 选定型号后拉取驱动 schedulable
+           指令; 切换型号自动重置; 加载失败拦截提交。 -->
+      <CreateWizardCommandIntervals
+        v-if="form.parserId"
+        ref="commandIntervalsRef"
+        :device-type="form.parserId"
+        :saving-disabled="submitting"
+        @load-error="handleDriverCommandsLoadError"
+      />
 
       <!-- 继承历史数据 (方案 v3.3 §3.1 入口2: 可折叠区, 默认折叠) -->
       <el-collapse v-model="inheritCollapsed" class="inherit-collapse">
@@ -117,6 +137,7 @@ import { ElMessage } from 'element-plus'
 import { useParserStore } from '@/stores/parser'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandidateSelect.vue'
+import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import type { Parser } from '@/api/parser'
 import type { Channel } from '@/api/channel'
 
@@ -205,6 +226,59 @@ const inheritLogicalDeviceId = ref<number | null>(null)
 const onParserChange = () => {
   // 切换设备型号时清空已选通道(可能不再匹配)
   form.channelId = undefined
+  // EDGE-WIZ-004/005: 切换型号清理旧型号逐指令间隔快照与加载错误;
+  // CreateWizardCommandIntervals 自身监听 deviceType 重置已加载指令, 此处
+  // 同步清空提交时使用的快照, 保证重选型号不带旧 intervals。
+  commandIntervalsError.value = ''
+  commandIntervalsSnapshot.value = null
+  commandIntervalsReady.value = false
+}
+
+// ---- EDGE-WIZ-004/005: 逐指令轮询间隔 (行为对齐创建向导) ----
+// 复用 CreateWizardCommandIntervals: 组件只依赖 deviceType (驱动指令模板),
+// 不依赖向导上下文; 有 schedulable 指令时隐藏全局采集间隔, 提交时以快照
+// 参与 payload。加载失败时拦截提交, 绝不携带旧驱动数据静默创建。
+const commandIntervalsRef = ref()
+const commandIntervalsReady = ref(false)
+const commandIntervalsSnapshot = ref<Record<string, number> | null>(null)
+const commandIntervalsError = ref('')
+
+// 当前型号驱动是否声明了 schedulable 轮询指令 — 有则隐藏全局 interval_ms
+const hasSchedulableCommands = computed(() => {
+  const el = commandIntervalsRef.value as any
+  if (!el || typeof el.schedulableCommands === 'undefined') return false
+  return (el?.schedulableCommands || []).length > 0
+})
+
+const handleDriverCommandsLoadError = (message: string) => {
+  commandIntervalsError.value = message
+  commandIntervalsReady.value = false
+  commandIntervalsSnapshot.value = null
+  ElMessage.error(message)
+}
+
+// 提交时一致快照: 先等驱动指令加载结算, 再读取间隔。
+// 加载失败/进行中 → null (不携带任何 intervals, 更不会带旧驱动数据)。
+const freezeCommandIntervals = async (): Promise<Record<string, number> | null> => {
+  if (!form.parserId) return null
+  const el = commandIntervalsRef.value as any
+  if (!el || typeof el.whenLoaded !== 'function') {
+    return commandIntervalsSnapshot.value
+  }
+  await el.whenLoaded()
+  if (commandIntervalsError.value) return null
+  if (el.loadFailed) return null
+  if (typeof el.getIntervals !== 'function') return commandIntervalsSnapshot.value
+  const intervals = el.getIntervals()
+  if (intervals === null) {
+    // 无 schedulable 指令: 不携带 intervals, 回退到全局 interval_ms
+    commandIntervalsSnapshot.value = null
+    commandIntervalsReady.value = true
+    return null
+  }
+  commandIntervalsSnapshot.value = intervals
+  commandIntervalsReady.value = true
+  return intervals
 }
 
 const reset = () => {
@@ -214,6 +288,10 @@ const reset = () => {
   form.interval_ms = 1000
   inheritCollapsed.value = []
   inheritLogicalDeviceId.value = null
+  // EDGE-WIZ-004/005: 重置逐指令间隔状态
+  commandIntervalsError.value = ''
+  commandIntervalsSnapshot.value = null
+  commandIntervalsReady.value = false
 }
 
 const handleSubmit = async () => {
@@ -228,9 +306,18 @@ const handleSubmit = async () => {
 
   submitting.value = true
   try {
+    // EDGE-WIZ-004/005: 先等驱动指令加载结算并冻结逐指令间隔快照。
+    // 加载失败时这里拦截, 不允许携带旧驱动的 intervals 静默提交。
+    const frozenCommandIntervals = await freezeCommandIntervals()
+    if (commandIntervalsError.value) {
+      ElMessage.warning('驱动轮询指令未成功加载，请重试或重新选择设备型号')
+      return
+    }
+
     // driver-backed 创建: device_config_id=0(无模板),type=parser.id
     // 方案 v3.3 §3.2/§3.3: 折叠区已选候选时携带 logical_device_id 继承
     // 历史数据; 未选 (默认折叠) 不传, 后端新建逻辑身份。
+    // EDGE-WIZ-004: 仅驱动声明 schedulable 指令时携带 command_intervals。
     await edgeDeviceApi.create({
       name: form.name.trim(),
       node_id: String(props.nodeId),
@@ -238,6 +325,7 @@ const handleSubmit = async () => {
       hardware_id: ch.hardware_id,
       type: selectedParser.value.id,
       interval_ms: form.interval_ms,
+      ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
       ...(inheritLogicalDeviceId.value !== null
         ? { logical_device_id: inheritLogicalDeviceId.value }
         : {}),
@@ -289,6 +377,10 @@ watch(() => props.modelValue, (val) => {
 
 .channel-hint--loading {
   color: var(--el-text-color-secondary);
+}
+
+.interval-hint {
+  margin-bottom: 8px;
 }
 
 /* 方案 v3.3 §3.1 入口2 — 继承历史数据折叠区 (默认折叠) */
