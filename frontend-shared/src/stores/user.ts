@@ -28,7 +28,7 @@ export const useUserStore = defineStore('user', {
   },
   actions: {
     async login(username: string, password: string, rememberMe = false) {
-      const response = await authApi.login({ username, password })
+      const response = await authApi.login({ username, password, rememberMe })
       this.token = response.token
       this.userInfo = response.user as UserInfo
       this.isLoggedIn = true

@@ -3,6 +3,7 @@ import client from './client'
 export interface LoginRequest {
   username: string
   password: string
+  rememberMe?: boolean
 }
 
 export interface InitializeRequest {

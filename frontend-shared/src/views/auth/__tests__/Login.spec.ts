@@ -122,6 +122,39 @@ describe('Login.vue', () => {
     expect(wrapper.text()).toContain('用户名或密码错误')
   })
 
+  it('does not report network failures as wrong credentials', async () => {
+    mockLogin.mockRejectedValue(new Error('Network Error'))
+
+    const wrapper = mount(Login)
+    await flushPromises()
+
+    const form = wrapper.findComponent({ name: 'LoginForm' })
+    form.vm.$emit('success', 'admin', 'password', false)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('无法连接服务器，请检查网络连接后重试。')
+    expect(mockRecordLoginFailure).not.toHaveBeenCalled()
+  })
+
+  it('shows server rate-limit feedback with retry time', async () => {
+    mockLogin.mockRejectedValue(Object.assign(new Error('too many login attempts'), {
+      status: 429,
+      retryAfterSeconds: 60,
+    }))
+
+    const wrapper = mount(Login)
+    await flushPromises()
+
+    const form = wrapper.findComponent({ name: 'LoginForm' })
+    form.vm.$emit('success', 'admin', 'password', false)
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('登录尝试过于频繁，请 1 分钟后重试。')
+    expect(mockRecordLoginFailure).not.toHaveBeenCalled()
+  })
+
   it('redirects to dashboard on successful login', async () => {
     mockLogin.mockResolvedValue(undefined)
 
