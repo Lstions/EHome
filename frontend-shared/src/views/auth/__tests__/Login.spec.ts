@@ -56,12 +56,38 @@ vi.mock('@/components/forms/InitializeAdminForm.vue', () => ({
   },
 }))
 
+// —— P0-A 预取调度验证 ——
+// 预取函数抽在 utils/prefetch.ts（字面量动态 import 路径与 router 懒加载一致）。
+// mock 该模块导出函数：vi.fn 每次调用都记录，不受「mock 工厂只在模块首次导入
+// 时执行一次」的缓存限制，也不依赖用例执行顺序。
+import {
+  prefetchMainLayout as mockPrefetchMainLayout,
+  prefetchDashboard as mockPrefetchDashboard,
+} from '@/utils/prefetch'
+vi.mock('@/utils/prefetch', () => ({
+  prefetchMainLayout: vi.fn().mockResolvedValue({}),
+  prefetchDashboard: vi.fn().mockResolvedValue({}),
+}))
+
 describe('Login.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     localStorage.clear()
     sessionStorage.clear()
+  })
+
+  // 必须先于本文件中任何其他 mount(Login) 执行：mock 工厂在本文件内每个模块
+  // 只运行一次（模块注册表缓存，之后的 import() 复用已求值模块不会再跑工厂），
+  // 因此工厂计数只能证明「本文件内第一次 import 该模块」——即此测试自身触发的那次。
+  it('prefetches main layout and dashboard chunks on mount (P0-A)', async () => {
+    mount(Login)
+    await flushPromises()
+    // happy-dom 无 requestIdleCallback，Login.vue 回退 setTimeout(prefetch, 0)；
+    // 等待宏任务执行完毕后，两条预取应各被调度一次。
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(mockPrefetchMainLayout).toHaveBeenCalledTimes(1)
+    expect(mockPrefetchDashboard).toHaveBeenCalledTimes(1)
   })
 
   it('renders login container with brand', async () => {
@@ -109,6 +135,57 @@ describe('Login.vue', () => {
 
     expect(mockLogin).toHaveBeenCalledWith('admin', 'admin123', true)
     expect(mockPush).toHaveBeenCalledWith('/dashboard')
+  })
+
+  it('shows fullscreen brand overlay while navigating (P0-B)', async () => {
+    mockLogin.mockResolvedValue(undefined)
+    // 手动控制的 pending promise：保证断言时 push 尚未 resolve
+    let resolvePush!: () => void
+    let pushStarted = false
+    mockPush.mockImplementation(() => {
+      pushStarted = true
+      return new Promise((resolve) => {
+        resolvePush = resolve
+      })
+    })
+
+    const wrapper = mount(Login)
+    await flushPromises()
+
+    const form = wrapper.findComponent({ name: 'LoginForm' })
+    form.vm.$emit('success', 'admin', 'admin123', true)
+
+    // push 已调用且尚未 resolve：过渡层应显示
+    await flushPromises()
+    expect(pushStarted).toBe(true)
+    expect(wrapper.find('.login-transition').exists()).toBe(true)
+    expect(wrapper.find('.login-transition__logo').exists()).toBe(true)
+    expect(wrapper.find('.login-transition__text').text()).toContain('正在进入系统')
+
+    // 手动 resolve，验证过渡层随后关闭（等一个宏任务让 await 恢复）
+    resolvePush()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.login-transition').exists()).toBe(false)
+  })
+
+  it('hides overlay and surfaces error when navigation fails (P0-B)', async () => {
+    mockLogin.mockResolvedValue(undefined)
+    // 导航失败（例如懒加载 chunk 下载失败 → router.push 拒绝）
+    mockPush.mockRejectedValue(new Error('Failed to fetch dynamically imported module'))
+
+    const wrapper = mount(Login)
+    await flushPromises()
+
+    const form = wrapper.findComponent({ name: 'LoginForm' })
+    form.vm.$emit('success', 'admin', 'admin123', true)
+    await flushPromises()
+    await nextTick()
+
+    expect(mockPush).toHaveBeenCalledWith('/dashboard')
+    expect(wrapper.find('.login-transition').exists()).toBe(false)
+    expect(wrapper.text()).toContain('页面加载失败，请刷新重试')
   })
 
   it('redirects to query.redirect on successful login', async () => {

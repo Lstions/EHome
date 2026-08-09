@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 
 import { loadEdgeDeviceList, loadNodeList } from './routeLoaders'
+import { useRouteProgress } from '@/stores/routeProgress'
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -128,6 +129,8 @@ const router = createRouter({
 // 路由守卫
 router.beforeEach((to, _from) => {
   const userStore = useUserStore()
+  // 进度反馈：懒加载 chunk 下载/路由解析耗时无法预测，开始导航即唤起顶部进度条
+  useRouteProgress().start()
 
   // 1. 认证检查
   if (to.meta.requiresAuth && !userStore.isLoggedIn) {
@@ -136,6 +139,19 @@ router.beforeEach((to, _from) => {
   if (to.path === '/login' && userStore.isLoggedIn) {
     return '/dashboard'
   }
+})
+
+// 导航完成/失败时收敛进度条（收满后淡出）。
+// 注意 afterEach 在重定向链最后一段成功后触发（而非每次重定向），
+// 与 beforeEach 的 start() 防重入配合，避免进度条过早消失。
+router.afterEach(() => {
+  useRouteProgress().done()
+})
+
+// 导航错误（如懒加载 chunk 加载失败）：同样收敛，避免进度条卡死。
+// 失败路径的视觉收敛与成功一致，由组件层（登录过渡层）负责补充错误提示。
+router.onError(() => {
+  useRouteProgress().fail()
 })
 
 export default router

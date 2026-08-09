@@ -285,13 +285,8 @@ func main() {
 	})
 
 	staticDir := os.Getenv("EHOME_STATIC_DIR")
-	if staticDir != "" {
-		r.Static("/assets", staticDir+"/assets")
-		r.StaticFile("/favicon.svg", staticDir+"/favicon.svg")
-		r.NoRoute(func(c *gin.Context) {
-			c.File(staticDir + "/index.html")
-		})
-	}
+	// P2：静态资源缓存头（/assets immutable、SPA 入口 no-cache）封装在 static.go
+	setupStaticRoutes(r, staticDir)
 
 	r.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
