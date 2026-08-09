@@ -1,5 +1,5 @@
 <template>
-  <div class="command-intervals" v-if="schedulableCommands.length > 0">
+  <div class="command-intervals" :class="{ embedded }" v-if="schedulableCommands.length > 0">
     <h4 class="section-title">轮询指令</h4>
     <p class="section-desc">每条指令可独立设置轮询间隔（0 = 禁用）</p>
     <div class="command-list">
@@ -41,6 +41,8 @@ import { edgeDeviceApi, type CommandTemplateWithInterval } from '@/api/edgeDevic
 const props = defineProps<{
   deviceId: number
   deviceType: string
+  /** 嵌入模式（移动端折叠面板内）：去掉灰色面板底，减少嵌套层级 */
+  embedded?: boolean
 }>()
 
 const commands = ref<CommandTemplateWithInterval[]>([])
@@ -116,6 +118,8 @@ async function save() {
 
 <style scoped>
 .command-intervals { margin-top: 16px; padding: 12px; background: var(--el-fill-color-lighter); border-radius: 8px; }
+/* 嵌入模式：去掉灰色面板底，指令行直接平铺，减少一层嵌套 */
+.command-intervals.embedded { margin-top: 0; padding: 0; background: transparent; border-radius: 0; }
 .section-title { margin: 0 0 4px; font-size: 14px; }
 .section-desc { margin: 0 0 12px; font-size: 12px; color: var(--el-text-color-secondary); }
 .command-list { display: flex; flex-direction: column; gap: 8px; }

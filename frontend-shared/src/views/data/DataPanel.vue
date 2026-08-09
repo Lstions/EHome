@@ -193,34 +193,36 @@
           title="该时间范围内暂无数据"
           description="可调整时间范围，或确认设备已完成采集与同步。"
         />
-        <el-table v-else :data="historyData" stripe>
-          <el-table-column prop="created_at" label="采集时间" width="180">
-            <template #default="{ row }">
-              <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="data" label="数据">
-            <template #default="{ row }">
-              <span>{{ formatData(row.parsed_data || row.data) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="原始数据" width="120" align="center">
-            <template #default="{ row }">
-              <span v-if="row.raw_data" style="font-size: 12px; color: var(--el-text-color-secondary);">{{ formatRawData(row.raw_data) }}</span>
-              <span v-else style="color: var(--el-text-color-placeholder);">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100" align="center">
-            <template #default="{ row }">
-              <el-tag v-if="row.error_code && row.error_code > 0"
-                      :type="getErrorInfo(row.error_code).type"
-                      size="small">
-                {{ getErrorInfo(row.error_code).label }}
-              </el-tag>
-              <span v-else style="color: var(--el-color-success);">正常</span>
-            </template>
-          </el-table-column>
-        </el-table>
+        <div v-else class="mobile-table-wrapper">
+          <el-table :data="historyData" stripe>
+            <el-table-column prop="created_at" label="采集时间" width="180">
+              <template #default="{ row }">
+                <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="data" label="数据">
+              <template #default="{ row }">
+                <span>{{ formatData(row.parsed_data || row.data) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="原始数据" width="120" align="center">
+              <template #default="{ row }">
+                <span v-if="row.raw_data" style="font-size: 12px; color: var(--el-text-color-secondary);">{{ formatRawData(row.raw_data) }}</span>
+                <span v-else style="color: var(--el-text-color-placeholder);">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.error_code && row.error_code > 0"
+                        :type="getErrorInfo(row.error_code).type"
+                        size="small">
+                  {{ getErrorInfo(row.error_code).label }}
+                </el-tag>
+                <span v-else style="color: var(--el-color-success);">正常</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
 
         <el-pagination
           v-model:current-page="currentPage"
