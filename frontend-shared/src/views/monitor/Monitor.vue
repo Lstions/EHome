@@ -142,7 +142,7 @@
                 <span><el-icon><Connection /></el-icon> HTTP 监控</span>
               </div>
             </template>
-            <el-descriptions :column="2" border>
+            <el-descriptions :column="isMobile ? 1 : 2" border>
               <el-descriptions-item label="请求总数">
                 {{ formatNumber(metrics?.http?.requests_total || 0) }}
               </el-descriptions-item>
@@ -161,7 +161,7 @@
                 <span><el-icon><Promotion /></el-icon> MQTT 监控</span>
               </div>
             </template>
-            <el-descriptions :column="2" border>
+            <el-descriptions :column="isMobile ? 1 : 2" border>
               <el-descriptions-item label="接收消息">
                 {{ formatNumber(metrics?.mqtt?.messages_received || 0) }}
               </el-descriptions-item>
@@ -255,7 +255,7 @@
                 <span><el-icon><DataLine /></el-icon> 数据采集</span>
               </div>
             </template>
-            <el-descriptions :column="2" border>
+            <el-descriptions :column="isMobile ? 1 : 2" border>
               <el-descriptions-item label="已采集">
                 {{ formatNumber(metrics?.data?.points_collected || 0) }}
               </el-descriptions-item>
@@ -274,7 +274,7 @@
                 <span><el-icon><Connection /></el-icon> WebSocket</span>
               </div>
             </template>
-            <el-descriptions :column="2" border>
+            <el-descriptions :column="isMobile ? 1 : 2" border>
               <el-descriptions-item label="活跃连接">
                 {{ metrics?.websocket?.connections_active || 0 }}
               </el-descriptions-item>
@@ -301,7 +301,10 @@ import {
   Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis, Operation
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
+import { useResponsive } from '@/composables/useResponsive'
 import { THEME_COLORS } from '@/utils/theme'
+
+const { isMobile } = useResponsive()
 
 // 状态
 const metrics = ref<MetricsSummary | null>(null)
@@ -412,6 +415,8 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 20px;
 }
 
@@ -426,6 +431,7 @@ onUnmounted(() => {
 .toolbar-actions {
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .refresh-interval-select {
@@ -609,6 +615,33 @@ onUnmounted(() => {
   }
   .stat-cards .el-col {
     margin-bottom: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .toolbar-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar-actions :deep(.el-select),
+  .toolbar-actions :deep(.el-button) {
+    width: 100%;
+  }
+  .toolbar h2 {
+    font-size: 20px;
+  }
+  .stat-card :deep(.el-card__body) {
+    padding: 16px;
+  }
+  .stat-value {
+    font-size: 24px;
+  }
+  .stat-icon {
+    font-size: 36px;
+  }
+  .status-label {
+    width: 36px;
+    font-size: 13px;
   }
 }
 </style>

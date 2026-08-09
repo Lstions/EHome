@@ -389,9 +389,20 @@ html.dark .el-descriptions__content {
   user-select: none;
 }
 
+.notification-popover {
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+}
+
 @media (max-width: 768px) {
   .mobile-table-hint {
     display: block;
+  }
+}
+
+@media (max-width: 480px) {
+  .notification-popover {
+    width: calc(100vw - 24px) !important;
   }
 }
 

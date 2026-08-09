@@ -135,7 +135,7 @@
           </div>
 
           <!-- 通知铃铛 -->
-          <el-popover placement="bottom-end" :width="320" trigger="click">
+          <el-popover placement="bottom-end" :width="320" trigger="click" popper-class="notification-popover">
             <template #reference>
               <el-badge :value="notificationCount" :hidden="notificationCount === 0" class="notification-badge">
                 <el-button :icon="Bell" circle size="default" aria-label="打开通知中心" />
