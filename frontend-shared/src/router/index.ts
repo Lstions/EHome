@@ -112,6 +112,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/error/Forbidden.vue'),
     meta: { requiresAuth: false },
   },
+  // 离线 UI 验证：注入模拟数据渲染 BMS 指标区，无需后端/登录（仅开发/测试用）
+  {
+    path: '/dev/mock-bms',
+    name: 'MockBmsPanel',
+    component: () => import('@/dev/MockBmsPanel.vue'),
+    meta: { requiresAuth: false, hidden: true },
+  },
   // 404 兜底（必须放最后）
   {
     path: '/:pathMatch(.*)*',
