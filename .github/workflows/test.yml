@@ -25,7 +25,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.25"
+  # 与 backend/go.mod 及 Dockerfile (golang:1.26.5-alpine) 保持一致，
+  # 避免 runner 上触发 Go 工具链自动下载（慢且偶发失败）
+  GO_VERSION: "1.26.5"
   NODE_VERSION: "22"
   PNPM_VERSION: "10"
 

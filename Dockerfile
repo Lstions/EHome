@@ -4,7 +4,10 @@
 # ── Stage 1: Backend build ──────────────────────────────────────────────
 FROM golang:1.26.5-alpine AS backend-builder
 
-ENV GOPROXY=https://goproxy.cn,direct
+# Go 模块代理：默认官方代理，保证 GitHub Actions 等海外 CI 直连可用；
+# 国内网络本地构建时覆盖：docker build --build-arg GOPROXY=https://goproxy.cn,direct .
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /app
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
