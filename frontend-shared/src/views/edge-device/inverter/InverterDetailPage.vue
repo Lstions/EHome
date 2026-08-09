@@ -257,4 +257,10 @@ onMounted(() => {
 .metric-sub.negative { color: var(--el-color-danger); }
 
 .alarm-list { display: flex; flex-wrap: wrap; gap: 4px; }
+
+@media (max-width: 768px) {
+  .metric-card :deep(.el-card__body) { padding: 14px; }
+  .metric-content { gap: 10px; }
+  .metric-value { font-size: 20px; }
+}
 </style>
