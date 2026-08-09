@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import RouteProgressBar from '@/components/common/RouteProgressBar.vue'
 
 /**
@@ -62,5 +64,51 @@ describe('RouteProgressBar.vue', () => {
     expect(wrapper.find('.route-progress-bar').classes()).toContain('route-progress-bar')
     expect(wrapper.find('.route-progress-bar').attributes('aria-hidden')).toBe('true')
     expect(wrapper.find('.route-progress-bar').attributes('style')).toBeUndefined()
+  })
+})
+
+/**
+ * CSS transition 方向性断言（源码级）：
+ * happy-dom 不解析 scoped CSS，无法从计算样式验证过渡时长；
+ * 直接读组件源码，锁定「淡入快（0.15s）、淡出慢（0.25s）」的声明结构——
+ * 基类（隐藏态）携带淡出过渡，.is-visible（可见态）携带淡入过渡，
+ * 防止回退到「同一声明写两个同属性 transition、后者整体胜出」的错误写法。
+ */
+describe('RouteProgressBar.vue CSS transition 方向性', () => {
+  // happy-dom 下 import.meta.url 非 file:// 协议，不能用 fileURLToPath；
+  // vitest 以项目根（frontend-shared）为 cwd 运行，直接按根相对路径读取源码。
+  const componentPath = resolve(process.cwd(), 'src/components/common/RouteProgressBar.vue')
+  const source = readFileSync(componentPath, 'utf-8')
+
+  /** 提取某个选择器块的样式文本（简易花括号配对） */
+  function extractBlock(css: string, selector: string): string {
+    const idx = css.indexOf(selector)
+    expect(idx, `未找到选择器块: ${selector}`).toBeGreaterThanOrEqual(0)
+    const open = css.indexOf('{', idx)
+    let depth = 0
+    for (let i = open; i < css.length; i++) {
+      if (css[i] === '{') depth++
+      else if (css[i] === '}') {
+        depth--
+        if (depth === 0) return css.slice(open + 1, i)
+      }
+    }
+    throw new Error(`选择器块未闭合: ${selector}`)
+  }
+
+  it('基类（隐藏态）仅声明淡出过渡 opacity 0.25s ease-out', () => {
+    const block = extractBlock(source, '.route-progress-bar {')
+    const transitions = block.match(/transition:\s*[^;]+;/g) ?? []
+    expect(transitions).toHaveLength(1)
+    expect(transitions[0]).toContain('opacity 0.25s ease-out')
+    // 禁止回退写法：同一声明内不得出现第二个 opacity transition
+    expect(transitions[0]?.match(/opacity/g) ?? []).toHaveLength(1)
+  })
+
+  it('.is-visible（可见态）声明淡入过渡 opacity 0.15s ease-in', () => {
+    const block = extractBlock(source, '.route-progress-bar.is-visible {')
+    const transitions = block.match(/transition:\s*[^;]+;/g) ?? []
+    expect(transitions).toHaveLength(1)
+    expect(transitions[0]).toContain('opacity 0.15s ease-in')
   })
 })

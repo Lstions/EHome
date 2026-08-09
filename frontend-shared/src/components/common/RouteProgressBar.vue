@@ -38,12 +38,18 @@ const { progress, visible } = useRouteProgress()
   z-index: 4000;
   pointer-events: none;
   opacity: 0;
-  /* 淡入快、淡出慢：开始导航时立即出现，收尾时配合 250ms 隐藏延迟平滑消失 */
-  transition: opacity 0.15s ease-in, opacity 0.25s ease-out;
+  /* 淡入快、淡出慢：transition 声明跟随状态方向——
+     基类（隐藏态）携带「淡出」过渡（0.25s），.is-visible（可见态）携带
+     「淡入」过渡（0.15s）。CSS transition 按切换后的目标状态取值，
+     因此出现时 0.15s 快进、收尾隐藏时 0.25s 慢出（配合 routeProgress
+     内部 250ms 隐藏延迟）。旧写法把两个 transition 写在同一声明里，
+     同属性后者整体胜出，淡入淡出都被 0.25s 覆盖，意图未生效。 */
+  transition: opacity 0.25s ease-out;
 }
 
 .route-progress-bar.is-visible {
   opacity: 1;
+  transition: opacity 0.15s ease-in;
 }
 
 .route-progress-bar__fill {
