@@ -72,6 +72,15 @@
         <span class="version">v{{ appVersion }}</span>
       </div>
     </div>
+
+    <!-- 登录成功后的全屏品牌过渡层：掩盖懒加载 chunk（echarts/element 等）下载期间的空窗 -->
+    <div v-if="showTransition" class="login-transition" aria-live="polite">
+      <img src="/favicon.svg" alt="" class="login-transition__logo" />
+      <p class="login-transition__text">正在进入系统</p>
+      <div class="login-transition__track">
+        <div class="login-transition__bar" />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -83,6 +92,10 @@ import { authApi, type AuthState, type InitializeRequest } from '@/api/auth'
 import { getRemainingLockSeconds } from '@/utils/loginLockout'
 import LoginForm from '@/components/forms/LoginForm.vue'
 import InitializeAdminForm from '@/components/forms/InitializeAdminForm.vue'
+// 登录后待跳转主框架的懒加载 chunk 预取：与 router 懒加载同一 chunk，
+// 登录成功后立即 hot 命中缓存，大幅缩短主界面首帧等待。
+const prefetchMainLayout = () => import('@/views/layout/MainLayout.vue')
+const prefetchDashboard = () => import('@/views/dashboard/Dashboard.vue')
 
 const router = useRouter()
 const route = useRoute()
@@ -91,6 +104,7 @@ const loginFormRef = ref()
 const initializeFormRef = ref()
 const errorMsg = ref('')
 const successMsg = ref('')
+const showTransition = ref(false)
 const authState = ref<AuthState | null>(null)
 const lockSeconds = ref(0)
 let lockTimer: ReturnType<typeof setInterval> | null = null
@@ -125,6 +139,13 @@ onMounted(() => {
   if (lockSeconds.value > 0) {
     lockTimer = setInterval(refreshLock, 1000)
   }
+  // 非阻塞预取：target=nextIdle 保证不抢登录页首帧；catch 兜底避免拆包缺失时抛错
+  if (typeof requestIdleCallback === 'function') {
+    window.requestIdleCallback(() => {
+      prefetchMainLayout().catch(() => {})
+      prefetchDashboard().catch(() => {})
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -150,7 +171,18 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
     await userStore.login(username, password, rememberMe)
     // 跳转到 redirect 参数或首页
     const redirect = (route.query.redirect as string) || '/dashboard'
-    router.push(redirect)
+    // 先展示全屏过渡层，再触发路由跳转：懒加载 chunk 下载期间用户看到的
+    // 是品牌过渡动画而非冻结的登录表单。
+    showTransition.value = true
+    try {
+      await router.push(redirect)
+    } catch (navigateError: any) {
+      // chunk 加载失败等导航错误：收起过渡层并提示重试，避免白屏卡死
+      showTransition.value = false
+      errorMsg.value = '页面加载失败，请刷新重试'
+      // 继续抛出，交给外层统一处理登录态；失败场景下不重复弹提示
+      throw navigateError
+    }
   } catch (error: any) {
     const status = Number(error?.status ?? error?.response?.status ?? error?.code)
 
@@ -345,5 +377,52 @@ const handleInitialize = async (request: InitializeRequest) => {
 .version {
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+/* 登录成功后的全屏品牌过渡层 */
+.login-transition {
+  position: fixed;
+  inset: 0;
+  z-index: 5000; /* 高于顶部进度条 (4000) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  background: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
+}
+.login-transition__logo {
+  width: 72px;
+  height: 72px;
+  animation: transitionPulse 1.6s ease-in-out infinite;
+}
+.login-transition__text {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: 4px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.login-transition__track {
+  width: min(220px, 60vw);
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+}
+.login-transition__bar {
+  height: 100%;
+  border-radius: 3px;
+  /* 不定长循环：中段往返扩张，视觉上始终在加载 */
+  background: linear-gradient(90deg, var(--el-color-primary-light-5), var(--el-color-primary));
+  animation: transitionBar 1.4s ease-in-out infinite;
+}
+@keyframes transitionPulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+@keyframes transitionBar {
+  0% { width: 0%; margin-left: 0; }
+  40% { width: 45%; margin-left: 5%; }
+  100% { width: 55%; margin-left: 100%; }
 }
 </style>

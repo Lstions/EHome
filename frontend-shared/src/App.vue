@@ -2,6 +2,8 @@
   <el-config-provider :locale="locale">
     <ErrorBoundary>
       <NetworkBanner />
+      <!-- 全局路由进度条：懒加载 chunk 下载期间保持可见反馈。ErrorBoundary 之前，确保路由级错误也能被覆盖 -->
+      <RouteProgressBar />
       <router-view />
     </ErrorBoundary>
   </el-config-provider>
@@ -13,6 +15,7 @@ import { useThemeStore } from '@/stores/theme'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
 import NetworkBanner from '@/components/common/NetworkBanner.vue'
+import RouteProgressBar from '@/components/common/RouteProgressBar.vue'
 
 const themeStore = useThemeStore()
 
