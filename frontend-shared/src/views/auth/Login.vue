@@ -94,8 +94,8 @@ import LoginForm from '@/components/forms/LoginForm.vue'
 import InitializeAdminForm from '@/components/forms/InitializeAdminForm.vue'
 // 登录后待跳转主框架的懒加载 chunk 预取：与 router 懒加载同一 chunk，
 // 登录成功后立即 hot 命中缓存，大幅缩短主界面首帧等待。
-const prefetchMainLayout = () => import('@/views/layout/MainLayout.vue')
-const prefetchDashboard = () => import('@/views/dashboard/Dashboard.vue')
+// P0-A：首跳 chunk 预取（字面量路径与 router 懒加载定义一致，详见 utils/prefetch.ts）
+import { prefetchMainLayout, prefetchDashboard } from '@/utils/prefetch'
 
 const router = useRouter()
 const route = useRoute()
@@ -139,12 +139,16 @@ onMounted(() => {
   if (lockSeconds.value > 0) {
     lockTimer = setInterval(refreshLock, 1000)
   }
-  // 非阻塞预取：target=nextIdle 保证不抢登录页首帧；catch 兜底避免拆包缺失时抛错
-  if (typeof requestIdleCallback === 'function') {
-    window.requestIdleCallback(() => {
-      prefetchMainLayout().catch(() => {})
-      prefetchDashboard().catch(() => {})
-    })
+  // 非阻塞预取：target=nextIdle 保证不抢登录页首帧；catch 兜底避免拆包缺失时抛错。
+  // 测试环境（happy-dom）无 requestIdleCallback，回退到宏任务仍能覆盖行为。
+  const prefetch = () => {
+    prefetchMainLayout().catch(() => {})
+    prefetchDashboard().catch(() => {})
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(prefetch)
+  } else {
+    setTimeout(prefetch, 0)
   }
 })
 
@@ -176,12 +180,16 @@ const handleLogin = async (username: string, password: string, rememberMe: boole
     showTransition.value = true
     try {
       await router.push(redirect)
-    } catch (navigateError: any) {
-      // chunk 加载失败等导航错误：收起过渡层并提示重试，避免白屏卡死
+      // 导航成功后显式收起过渡层：正常流程中组件会随路由切换卸载，
+      // 此处兜底「push 已 resolve 但页面尚未卸载」的边界场景，保证不冻结。
+      showTransition.value = false
+    } catch (navigateError) {
+      // chunk 加载失败等导航错误：收起过渡层并提示重试，避免白屏卡死。
+      // 登录凭据已通过，此处不再复用外层凭据错误分支（return 终止），
+      // 避免外层 catch 用 error.message 覆盖导航失败提示。
       showTransition.value = false
       errorMsg.value = '页面加载失败，请刷新重试'
-      // 继续抛出，交给外层统一处理登录态；失败场景下不重复弹提示
-      throw navigateError
+      return
     }
   } catch (error: any) {
     const status = Number(error?.status ?? error?.response?.status ?? error?.code)

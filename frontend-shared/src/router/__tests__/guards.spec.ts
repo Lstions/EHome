@@ -56,6 +56,30 @@ function createTestRouter(): Router {
   return router
 }
 
+// The real router also drives the global route progress singleton.
+// We cannot observe those calls through the duplicated-guard test router,
+// so assert the integration on the production router instance instead.
+// To avoid pulling heavy view modules, mock the route-progress API lazily
+// and simply verify the guards in index.ts wire start/done/fail.
+vi.mock('@/stores/routeProgress', () => {
+  const { ref } = require('vue')
+  const progress = ref(0)
+  const visible = ref(false)
+  const calls: string[] = []
+  return {
+    __calls: calls,
+    useRouteProgress: () => ({
+      progress,
+      visible,
+      start: () => { calls.push('start') },
+      done: () => { calls.push('done') },
+      fail: () => { calls.push('fail') },
+      reset: () => { calls.length = 0 },
+      isBusy: () => visible.value,
+    }),
+  }
+})
+
 // We need to mock useUserStore to control auth state
 // Since the guard calls useUserStore() at runtime, we mock the module
 let mockAuthState = {
@@ -89,6 +113,23 @@ describe('Router Guards', () => {
 
   beforeEach(() => {
     router = setupRouter()
+  })
+
+  // ── 0. Route progress integration (P0-B) ─────────────────────
+
+  describe('Route Progress wiring', () => {
+    it('production router starts progress on navigation and finishes on success', async () => {
+      const { default: prodRouter } = await import('@/router')
+      const { __calls } = await import('@/stores/routeProgress')
+
+      // 登录页无需鉴权，可直接完成
+      await prodRouter.push('/login')
+      await prodRouter.isReady()
+
+      expect(__calls).toContain('start')
+      expect(__calls).toContain('done')
+      expect(__calls).not.toContain('fail')
+    })
   })
 
   // ── 1. Auth Guard ──────────────────────────────────
