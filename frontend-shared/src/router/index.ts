@@ -112,13 +112,15 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/error/Forbidden.vue'),
     meta: { requiresAuth: false },
   },
-  // 离线 UI 验证：注入模拟数据渲染 BMS 指标区，无需后端/登录（仅开发/测试用）
-  {
+  // 离线 UI 验证：注入模拟数据渲染 BMS 指标区，无需后端/登录（仅开发环境）。
+  // DEV 门禁：生产构建时 import.meta.env.DEV 为 false，路由与懒加载 chunk 均被
+  // Vite 静态消除——MockBmsPanel 对 edgeDeviceApi 的 mock 补丁不可能进入生产。
+  ...(import.meta.env.DEV ? [{
     path: '/dev/mock-bms',
     name: 'MockBmsPanel',
     component: () => import('@/dev/MockBmsPanel.vue'),
     meta: { requiresAuth: false, hidden: true },
-  },
+  }] : []),
   // 404 兜底（必须放最后）
   {
     path: '/:pathMatch(.*)*',
