@@ -126,21 +126,34 @@ describe('LogicalDeviceList.vue', () => {
   })
 
   it('filters by search keyword', async () => {
-    mockList.mockResolvedValue({
-      items: [makeItem({ id: 3, name: '客厅BMS' }), makeItem({ id: 5, name: '卧室BMS' })],
-      total: 2,
-    })
-    const wrapper = mountPage()
-    await flushPromises()
+    // useDebouncedSearch 有 300ms 防抖; 该测试与防抖隔离用 fake timers,
+    // 先断言防抖窗口内未生效, 再推进 300ms 断言过滤结果。
+    vi.useFakeTimers()
+    try {
+      mockList.mockResolvedValue({
+        items: [makeItem({ id: 3, name: '客厅BMS' }), makeItem({ id: 5, name: '卧室BMS' })],
+        total: 2,
+      })
+      const wrapper = mountPage()
+      await flushPromises()
 
-    const search = wrapper.find('input[placeholder="搜索逻辑设备名称..."]')
-    expect(search.exists()).toBe(true)
-    await search.setValue('卧室')
-    await flushPromises()
+      const search = wrapper.find('input[placeholder="搜索逻辑设备名称..."]')
+      expect(search.exists()).toBe(true)
+      await search.setValue('卧室')
+      await flushPromises()
 
-    const rows = wrapper.findAll('tbody tr')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].text()).toContain('卧室BMS')
+      // 防抖未到: 仍显示全部行
+      expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+
+      await vi.advanceTimersByTimeAsync(300)
+      await flushPromises()
+
+      const rows = wrapper.findAll('tbody tr')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].text()).toContain('卧室BMS')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // ─── 合并门控 ───
