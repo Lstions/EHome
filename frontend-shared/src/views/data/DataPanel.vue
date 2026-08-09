@@ -194,6 +194,7 @@
           description="可调整时间范围，或确认设备已完成采集与同步。"
         />
         <div v-else class="mobile-table-wrapper">
+          <p class="mobile-table-hint">左右滑动查看完整历史数据</p>
           <el-table :data="historyData" stripe>
             <el-table-column prop="created_at" label="采集时间" width="180">
               <template #default="{ row }">
