@@ -18,64 +18,39 @@
     <template v-else-if="device">
       <DeviceInfoCard :device="device" />
 
-      <!-- Core metrics -->
+      <!-- Core metrics：统一共享组件 MetricStatCard（透明底彩色图标 + 辅助槽恒占位等高 + 充放电方向语义色） -->
       <el-row :gutter="20" style="margin-top: 20px;">
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon pv">
-                <el-icon :size="20"><Sunrise /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">PV输入</p>
-                <p class="metric-value">{{ formatPower(totalPvPower) }}</p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard label="PV输入" :value="formatPower(totalPvPower)" tone="warning">
+            <template #icon><el-icon :size="20"><Sunrise /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon battery">
-                <el-icon :size="20"><Lightning /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">电池</p>
-                <p class="metric-value">{{ formatNum(latestData?.battery_voltage ?? latestData?.voltage, 1) }}<span class="metric-unit">V</span></p>
-                <p class="metric-sub" :class="{ negative: (latestData?.battery_current ?? latestData?.current ?? 0) < 0 }">
-                  {{ (latestData?.battery_current ?? latestData?.current ?? 0) < 0 ? '充电' : '放电' }}
-                  {{ Math.abs(latestData?.battery_current ?? latestData?.current ?? 0).toFixed(1) }}A
-                </p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="电池"
+            :value="formatNum(latestData?.battery_voltage ?? latestData?.voltage, 1)"
+            unit="V"
+            tone="success"
+            :direction="(latestData?.battery_current ?? latestData?.current ?? 0) < 0 ? 'charge' : (latestData?.battery_current ?? latestData?.current ?? 0) > 0 ? 'discharge' : 'idle'"
+          >
+            <template #icon><el-icon :size="20"><Lightning /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon grid">
-                <el-icon :size="20"><Connection /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">电网</p>
-                <p class="metric-value">{{ formatNum(latestData?.grid_voltage, 0) }}<span class="metric-unit">V</span></p>
-                <p class="metric-sub">{{ formatNum(latestData?.grid_frequency ?? latestData?.frequency, 1) }}Hz</p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="电网"
+            :value="formatNum(latestData?.grid_voltage, 0)"
+            unit="V"
+            tone="primary"
+            :sub-text="`${formatNum(latestData?.grid_frequency ?? latestData?.frequency, 1)}Hz`"
+          >
+            <template #icon><el-icon :size="20"><Connection /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon load">
-                <el-icon :size="20"><HomeFilled /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">负载</p>
-                <p class="metric-value">{{ formatPower(latestData?.load_power ?? latestData?.power ?? 0) }}</p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard label="负载" :value="formatPower(latestData?.load_power ?? latestData?.power ?? 0)" tone="info">
+            <template #icon><el-icon :size="20"><HomeFilled /></el-icon></template>
+          </MetricStatCard>
         </el-col>
       </el-row>
 
@@ -168,6 +143,7 @@ import InverterStatusGrid from './InverterStatusGrid.vue'
 import InverterTempCard from './InverterTempCard.vue'
 import InverterEnergyCard from './InverterEnergyCard.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
+import MetricStatCard from '@/components/common/MetricStatCard.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { formatPower } from '@/utils/format'
@@ -237,30 +213,5 @@ onMounted(() => {
 <style scoped>
 .inverter-detail { padding: 0; }
 
-.metric-card { cursor: default; transition: transform 0.3s, box-shadow 0.3s; }
-.metric-card:hover { transform: translateY(-2px); box-shadow: var(--el-box-shadow-light); }
-.metric-content { display: flex; align-items: center; gap: 12px; }
-.metric-icon {
-  width: 48px; height: 48px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-  color: #fff;
-}
-.metric-icon.pv { background: linear-gradient(135deg, var(--el-color-warning), var(--el-color-warning-light-3)); }
-.metric-icon.battery { background: linear-gradient(135deg, var(--el-color-success), var(--el-color-success-light-3)); }
-.metric-icon.grid { background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3)); }
-.metric-icon.load { background: linear-gradient(135deg, var(--el-color-info), var(--el-color-info-light-3)); }
-.metric-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-start; }
-.metric-label { margin: 0 0 4px; font-size: 12px; color: var(--el-text-color-secondary); }
-.metric-value { margin: 0; font-size: 22px; font-weight: 600; color: var(--el-text-color-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
-.metric-unit { font-size: 15px; font-weight: 400; color: var(--el-text-color-secondary); margin-left: 2px; }
-.metric-sub { margin: 2px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
-.metric-sub.negative { color: var(--el-color-danger); }
-
 .alarm-list { display: flex; flex-wrap: wrap; gap: 4px; }
-
-@media (max-width: 768px) {
-  .metric-card :deep(.el-card__body) { padding: 14px; }
-  .metric-content { gap: 10px; }
-  .metric-value { font-size: 20px; }
-}
 </style>

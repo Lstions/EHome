@@ -89,7 +89,8 @@ function formatTime(time: string | null | undefined) {
 
 .mobile-info-row {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
+  /* 标签列宽由最长字段推导（最后数据时间 ≈98px 含 padding），不再硬编码固定像素列宽 */
+  grid-template-columns: minmax(max-content, 106px) minmax(0, 1fr);
   align-items: center;
   min-height: 44px;
   border-bottom: 1px solid var(--el-border-color-lighter);
@@ -108,6 +109,10 @@ function formatTime(time: string | null | undefined) {
   color: var(--el-text-color-regular);
   font-size: 13px;
   font-weight: 500;
+  /* 标签禁折行（防「最后数据时间」拆字），超长时省略而非拆字 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mobile-info-value {

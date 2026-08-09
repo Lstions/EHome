@@ -27,6 +27,25 @@ let chartInstance: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
 let themeObserver: MutationObserver | null = null
 
+/** 柱顶标签降级阈值：单柱可用宽度(px)低于该值时，仅保留关键节标签（越界/最高/最低） */
+const LABEL_DEGRADE_THRESHOLD = 36
+
+/** 当前图表容器宽度（由 ResizeObserver 维护，驱动容器感知标签降级） */
+const chartWidth = ref(0)
+
+/**
+ * 容器感知标签降级判定：
+ * - 单柱可用宽度 ≥ 阈值：全量显示标签（v > 0）
+ * - 单柱可用宽度 < 阈值：仅对越界节（<3.0 或 >3.6，与 getBarColors 阈值一致）与
+ *   最高/最低节返回标签，其余返回 ''（全量精确数值仍可通过 axis tooltip 查看）
+ */
+function shouldShowCellLabel(value: number, cellWidthPx: number, maxValue: number, minValue: number): boolean {
+  if (cellWidthPx >= LABEL_DEGRADE_THRESHOLD) return value > 0
+  if (value <= 0) return false
+  if (value < 3.0 || value > 3.6) return true
+  return value === maxValue || value === minValue
+}
+
 function getBarColors(values: number[]): string[] {
   const colors = getThemeColors()
   return values.map(v => {
@@ -48,6 +67,12 @@ function buildChartOption() {
   const { min, max } = validValues.length === 0
     ? { min: 2.5, max: 4.0 }
     : computeAdaptiveYAxisRange(validValues, { minBound: 2.0, maxBound: 4.5 })
+
+  // 最高/最低节（降级模式下仍保留标签的关键信息）
+  const maxValue = validValues.length > 0 ? Math.max(...validValues) : 0
+  const minValue = validValues.length > 0 ? Math.min(...validValues) : 0
+  // 单柱可用宽度 = 容器宽度 / 电芯数，驱动标签降级（容器感知，非写死 media query）
+  const cellWidthPx = props.cellCount > 0 ? chartWidth.value / props.cellCount : 0
 
   return {
     animation: false,
@@ -90,7 +115,10 @@ function buildChartOption() {
       label: {
         show: true,
         position: 'top',
-        formatter: (p: any) => p.value > 0 ? p.value.toFixed(3) : '',
+        formatter: (p: any) => {
+          const v = p.value
+          return shouldShowCellLabel(v, cellWidthPx, maxValue, minValue) ? v.toFixed(3) : ''
+        },
         fontSize: 10,
         color: surface.text
       },
@@ -119,9 +147,17 @@ function updateChart() {
 watch(() => props.voltages, () => updateChart(), { deep: true })
 
 onMounted(() => {
+  // 先记录初始容器宽度，保证首帧渲染即采用正确的标签降级策略
+  if (chartRef.value) chartWidth.value = chartRef.value.clientWidth
   initChart()
   if (chartRef.value) {
-    resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+    // 容器尺寸变化时同步重绘：更新宽度后 setOption 刷新（标签降级随宽度自适应）
+    resizeObserver = new ResizeObserver(() => {
+      if (!chartRef.value) return
+      chartWidth.value = chartRef.value.clientWidth
+      chartInstance?.resize()
+      updateChart()
+    })
     resizeObserver.observe(chartRef.value)
     themeObserver = new MutationObserver(updateChart)
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })

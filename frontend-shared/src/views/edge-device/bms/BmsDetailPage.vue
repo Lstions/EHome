@@ -18,81 +18,59 @@
     <template v-else-if="device">
       <DeviceInfoCard :device="device" />
 
-      <!-- Core metrics -->
+      <!-- Core metrics：统一共享组件 MetricStatCard（透明底彩色图标 + 辅助槽恒占位等高 + 放电方向不用 danger 红） -->
       <el-row :gutter="20" style="margin-top: 20px;">
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon soc">
-                <el-icon :size="20"><PieChart /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">SOC</p>
-                <p class="metric-value">{{ formatNum(latestData?.rsoc ?? latestData?.soc, 1) }}<span class="metric-unit">%</span></p>
-                <el-progress
-                  :percentage="Math.round(latestData?.rsoc ?? latestData?.soc ?? 0)"
-                  :stroke-width="6"
-                  :show-text="false"
-                  :color="socProgressColor"
-                  style="margin-top: 4px;"
-                />
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="SOC"
+            :value="formatNum(latestData?.rsoc ?? latestData?.soc, 1)"
+            unit="%"
+            tone="success"
+            :progress="Math.round(latestData?.rsoc ?? latestData?.soc ?? 0)"
+          >
+            <template #icon><el-icon :size="20"><PieChart /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon soh">
-                <el-icon :size="20"><Odometer /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">剩余容量</p>
-                <p class="metric-value">{{ formatNum(latestData?.remaining_capacity, 2) }}<span class="metric-unit">Ah</span></p>
-                <p class="metric-sub">/ {{ formatNum(latestData?.nominal_capacity, 0) }}Ah</p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="剩余容量"
+            :value="formatNum(latestData?.remaining_capacity, 2)"
+            unit="Ah"
+            tone="primary"
+            :sub-text="`/ ${formatNum(latestData?.nominal_capacity, 0)}Ah`"
+          >
+            <template #icon><el-icon :size="20"><Odometer /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon voltage">
-                <el-icon :size="20"><DataLine /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">总电压</p>
-                <p class="metric-value">{{ formatNum(latestData?.total_voltage ?? latestData?.voltage, 3) }}<span class="metric-unit">V</span></p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="总电压"
+            :value="formatNum(latestData?.total_voltage ?? latestData?.voltage, 3)"
+            unit="V"
+            tone="warning"
+          >
+            <template #icon><el-icon :size="20"><DataLine /></el-icon></template>
+          </MetricStatCard>
         </el-col>
         <el-col :xs="12" :sm="12" :md="6">
-          <el-card shadow="hover" class="metric-card">
-            <div class="metric-content">
-              <div class="metric-icon current" :class="{ negative: (latestData?.current ?? 0) < 0 }">
-                <el-icon :size="20"><Lightning /></el-icon>
-              </div>
-              <div class="metric-info">
-                <p class="metric-label">电流</p>
-                <p class="metric-value" :class="{ negative: (latestData?.current ?? 0) < 0 }">
-                  {{ formatNum(latestData?.current, 3) }}<span class="metric-unit">A</span>
-                </p>
-                <p class="metric-sub" :class="{ negative: (latestData?.current ?? 0) < 0 }">
-                  {{ (latestData?.current ?? 0) < 0 ? '放电中' : (latestData?.current ?? 0) > 0 ? '充电中' : '静止' }}
-                </p>
-              </div>
-            </div>
-          </el-card>
+          <MetricStatCard
+            label="电流"
+            :value="formatNum(latestData?.current, 3)"
+            unit="A"
+            tone="primary"
+            :direction="(latestData?.current ?? 0) < 0 ? 'discharge' : (latestData?.current ?? 0) > 0 ? 'charge' : 'idle'"
+          >
+            <template #icon><el-icon :size="20"><Lightning /></el-icon></template>
+          </MetricStatCard>
         </el-col>
       </el-row>
 
       <!-- Cell voltage chart -->
       <el-card style="margin-top: 20px;" shadow="hover">
         <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span>电芯电压</span>
-            <el-tag v-if="cellVoltages.length > 0" size="small" type="info">
+          <div class="cell-voltage-header">
+            <span class="cell-voltage-title">电芯电压</span>
+            <el-tag v-if="cellVoltages.length > 0" size="small" type="info" class="cell-voltage-summary">
               {{ cellVoltages.length }}节 · 最低{{ Math.min(...cellVoltages).toFixed(3) }}V · 最高{{ Math.max(...cellVoltages).toFixed(3) }}V · 压差{{ (Math.max(...cellVoltages) - Math.min(...cellVoltages)).toFixed(3) }}V
             </el-tag>
           </div>
@@ -105,7 +83,7 @@
 
       <!-- Temperature & MOS status -->
       <el-row :gutter="20" style="margin-top: 20px;">
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header><span>温度探头</span></template>
             <div class="temp-list">
@@ -119,7 +97,7 @@
             </div>
           </el-card>
         </el-col>
-        <el-col :span="12">
+        <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header><span>MOS状态</span></template>
             <BmsMosStatus :data="latestData" />
@@ -130,10 +108,10 @@
       <!-- Protection status -->
       <el-card style="margin-top: 20px;" shadow="hover">
         <template #header>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span>保护状态</span>
-            <el-tag v-if="hasActiveProtection" type="danger" size="small">有保护触发</el-tag>
-            <el-tag v-else-if="latestData" type="success" size="small">全部正常</el-tag>
+          <div class="protection-header">
+            <span class="protection-title">保护状态</span>
+            <el-tag v-if="hasActiveProtection" type="danger" size="small" class="protection-summary">有保护触发</el-tag>
+            <el-tag v-else-if="latestData" type="success" size="small" class="protection-summary">全部正常</el-tag>
           </div>
         </template>
         <BmsProtectionGrid :data="latestData" />
@@ -190,6 +168,7 @@ import BmsCellVoltageHistoryChart from './BmsCellVoltageHistoryChart.vue'
 import BmsProtectionGrid from './BmsProtectionGrid.vue'
 import BmsMosStatus from './BmsMosStatus.vue'
 import RealtimeDataList from '@/components/data/RealtimeDataList.vue'
+import MetricStatCard from '@/components/common/MetricStatCard.vue'
 import { useDeviceData } from '@/composables/useDeviceData'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 
@@ -219,9 +198,6 @@ const activeCollapses = ref<string[]>([])
 
 // 实时数据条数
 const realtimeCount = computed(() => realtimeDataItems.value.length)
-
-// SOC progress bar color — green theme to match card icon
-const socProgressColor = 'var(--el-color-success)'
 
 // Extract cell voltages from last_data: cell_voltage_1..16 or cell_v_1..16
 const cellVoltages = computed<number[]>(() => {
@@ -270,29 +246,24 @@ onMounted(() => {
 <style scoped>
 .bms-detail { padding: 0; }
 
-.metric-card { cursor: default; transition: transform 0.3s, box-shadow 0.3s; }
-.metric-card:hover { transform: translateY(-2px); box-shadow: var(--el-box-shadow-light); }
-.metric-content { display: flex; align-items: center; gap: 12px; }
-.metric-icon {
-  width: 48px; height: 48px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-  background: linear-gradient(135deg, var(--el-color-success), var(--el-color-success-light-3));
-  color: #fff;
+/* 卡片头部：标题单行不收缩；摘要（长 el-tag）空间不足时换到第二行，防移动端逐字断行 */
+.cell-voltage-header,
+.protection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
-.metric-icon.soc { background: linear-gradient(135deg, var(--el-color-success), var(--el-color-success-light-3)); }
-.metric-icon.soh { background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3)); }
-.metric-icon.voltage { background: linear-gradient(135deg, var(--el-color-warning), var(--el-color-warning-light-3)); }
-.metric-icon.current { background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3)); }
-.metric-icon.current.negative { background: linear-gradient(135deg, var(--el-color-danger), var(--el-color-danger-light-3)); }
-.metric-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-start; }
-.metric-label { margin: 0 0 4px; font-size: 12px; color: var(--el-text-color-secondary); }
-.metric-value { margin: 0; font-size: 22px; font-weight: 600; color: var(--el-text-color-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
-.metric-value.negative { color: var(--el-color-danger); }
-.metric-unit { font-size: 15px; font-weight: 400; color: var(--el-text-color-secondary); margin-left: 2px; }
-.metric-sub {
-  margin: 4px 0 0; font-size: 12px; color: var(--el-text-color-secondary);
+.cell-voltage-title,
+.protection-title {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.metric-sub.negative { color: var(--el-color-danger); }
+.cell-voltage-summary,
+.protection-summary {
+  margin-left: auto;
+}
 
 .temp-list { display: flex; flex-direction: row; gap: 8px; }
 .temp-item {

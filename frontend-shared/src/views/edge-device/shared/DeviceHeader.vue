@@ -7,19 +7,42 @@
             <el-icon :size="16"><Connection /></el-icon>
             实时连接
           </el-tag>
-          <el-button :icon="Edit" @click="editDialogVisible = true">编辑</el-button>
-          <el-button :icon="Connection" @click="$emit('syncToHA')" :loading="syncingHA"
-            :disabled="!device || (device.status !== 'online' && device.status !== 'active')">
-            同步到HA
-          </el-button>
+          <!-- 桌面端：编辑/同步到HA 横排 -->
+          <template v-if="!isMobile">
+            <el-button :icon="Edit" @click="editDialogVisible = true">编辑</el-button>
+            <el-button :icon="Connection" @click="$emit('syncToHA')" :loading="syncingHA"
+              :disabled="!device || (device.status !== 'online' && device.status !== 'active')">
+              同步到HA
+            </el-button>
+          </template>
+          <!-- 主操作：刷新数据（桌面/移动端均保留） -->
           <el-button v-if="device?.status === 'online' || device?.status === 'active'"
             type="primary" :icon="Refresh" :loading="refreshing" @click="$emit('refresh')">
             刷新数据
           </el-button>
+          <!-- 移动端：编辑/同步到HA/删除 收进溢出下拉，消除按钮群挤压标题 -->
+          <el-dropdown v-if="isMobile" trigger="click" popper-class="device-header-more-popover"
+            @command="handleMoreCommand">
+            <el-button :icon="MoreFilled" circle aria-label="更多操作" />
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="edit" :icon="Edit">编辑</el-dropdown-item>
+                <el-dropdown-item command="syncToHA" :icon="Connection"
+                  :disabled="!device || (device.status !== 'online' && device.status !== 'active')">
+                  同步到HA
+                </el-dropdown-item>
+                <el-dropdown-item command="delete" :icon="Delete" divided>
+                  <span style="color: var(--el-color-danger);">删除</span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
-        <!-- 删除按钮单独隔离，避免误触 -->
-        <el-divider direction="vertical" class="action-divider" />
-        <el-button :icon="Delete" type="danger" plain @click="deleteDialogVisible = true">删除</el-button>
+        <!-- 桌面端：删除按钮单独隔离，避免误触 -->
+        <template v-if="!isMobile">
+          <el-divider direction="vertical" class="action-divider" />
+          <el-button :icon="Delete" type="danger" plain @click="deleteDialogVisible = true">删除</el-button>
+        </template>
       </div>
     </template>
   </PageHeader>
@@ -66,8 +89,9 @@
 import { ref, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh, Connection, Edit, Delete } from '@element-plus/icons-vue'
+import { Refresh, Connection, Edit, Delete, MoreFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
@@ -90,6 +114,9 @@ const emit = defineEmits<{
 
 const router = useRouter()
 const edgeDeviceStore = useEdgeDeviceStore()
+
+// 移动端操作收敛：≤768px 时编辑/同步到HA/删除收进溢出下拉
+const { isMobile } = useResponsive()
 
 const editDialogVisible = ref(false)
 const editLoading = ref(false)
@@ -150,6 +177,13 @@ async function submitDelete() {
   }
 }
 
+/** 移动端溢出下拉命令分发：与桌面端按钮行为保持一致 */
+function handleMoreCommand(command: string) {
+  if (command === 'edit') editDialogVisible.value = true
+  else if (command === 'syncToHA') emit('syncToHA')
+  else if (command === 'delete') deleteDialogVisible.value = true
+}
+
 onUnmounted(() => {
   operationGeneration++
 })
@@ -190,19 +224,15 @@ onUnmounted(() => {
     gap: 8px;
     width: 100%;
   }
-  /* 扁平化内层分组，让删除按钮与主按钮组参与同一 flex 换行流，行间左缘对齐 */
-  .header-actions-group {
-    display: contents;
-  }
-  /* 按钮换行后竖分隔符会变成孤立的"|"，移动端隐藏 */
-  .action-divider {
-    display: none;
-  }
+  /* 移动端仅保留 实时连接/刷新数据/⋯溢出下拉，按钮紧凑小尺寸；圆形更多按钮保持正圆 */
   .header-actions :deep(.el-button) {
-    flex: 1 1 auto;
     height: 28px;
     padding: 5px 11px;
     font-size: 12px;
+  }
+  .header-actions :deep(.el-button.is-circle) {
+    width: 28px;
+    padding: 0;
   }
   .header-actions :deep(.el-button + .el-button) {
     margin-left: 0;
@@ -212,5 +242,12 @@ onUnmounted(() => {
     padding: 0 8px;
     font-size: 12px;
   }
+}
+
+/* el-dropdown 弹出层 teleport 到 body，scoped 样式不生效，需 :global 包裹；
+   参照 theme.css .notification-popover 的限宽写法（.el-dialog 的 92vw 兜底不覆盖 popover），防窄屏溢出 */
+:global(.device-header-more-popover) {
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
 }
 </style>

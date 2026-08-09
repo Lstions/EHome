@@ -96,6 +96,7 @@ declare module 'vue' {
     LoginForm: typeof import('./components/forms/LoginForm.vue')['default']
     LogPanel: typeof import('./components/node/LogPanel.vue')['default']
     LogRealtimeViewer: typeof import('./components/node/LogRealtimeViewer.vue')['default']
+    MetricStatCard: typeof import('./components/common/MetricStatCard.vue')['default']
     NetworkBanner: typeof import('./components/common/NetworkBanner.vue')['default']
     OTAForm: typeof import('./components/forms/OTAForm.vue')['default']
     PageHeader: typeof import('./components/common/PageHeader.vue')['default']
