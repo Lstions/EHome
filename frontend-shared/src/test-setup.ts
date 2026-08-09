@@ -584,6 +584,35 @@ const ElRadio = defineComponent({
   },
 })
 
+// ElRadioButton：与 ElRadio 同一注入协议（RADIO_GROUP_KEY），渲染为按钮形态，
+// 供 displayMode 切换等 segmented-control 场景做真实点击测试。
+const ElRadioButton = defineComponent({
+  props: {
+    label: [String, Number, Boolean],
+    value: [String, Number, Boolean],
+    disabled: Boolean,
+  },
+  setup(props, { slots }) {
+    const group = inject(RADIO_GROUP_KEY, null)
+    return () => {
+      const ownValue = props.value !== undefined ? props.value : props.label
+      const current = group ? group.currentValue() : undefined
+      const checked = current === ownValue
+      const disabled = props.disabled || (group ? group.disabled() : false)
+      const select = () => {
+        if (disabled) return
+        if (group) group.select(ownValue as string | number | boolean)
+      }
+      return h('button', {
+        type: 'button',
+        class: ['el-radio-button', checked ? 'is-active' : ''],
+        disabled,
+        onClick: select,
+      }, slots.default?.())
+    }
+  },
+})
+
 // --- 注册全部 stub ---
 
 const elStubs: Record<string, Component> = {
@@ -625,13 +654,17 @@ for (const [name, comp] of Object.entries(elStubs)) {
 }
 
 // --- 额外注册项目中用到但未单独定义的 Element Plus 组件 ---
+// ElRadioButton 已有交互式 stub（RADIO_GROUP_KEY 注入协议），从通用列表移除
+config.global.components['ElRadioButton'] = ElRadioButton
+config.global.components['el-radio-button'] = ElRadioButton
+
 // 使用通用 stub：渲染为一个带 class 的 div/span，传递 slot 内容
 const genericElComponents = [
   'ElAside', 'ElAvatar', 'ElBadge', 'ElBreadcrumb', 'ElBreadcrumbItem',
   'ElContainer', 'ElDrawer', 'ElHeader', 'ElMain',
   'ElPopover', 'ElScrollbar', 'ElCascader', 'ElCollapse', 'ElCollapseItem',
   'ElDescriptions',
-  'ElLink', 'ElOptionGroup', 'ElRadioButton', 'ElResult', 'ElSkeleton',
+  'ElLink', 'ElOptionGroup', 'ElResult', 'ElSkeleton',
   'ElStep', 'ElSteps', 'ElTabPane', 'ElTabs', 'ElTimeline',
   'ElTimelineItem', 'ElUpload', 'ElButtonGroup',
 ]

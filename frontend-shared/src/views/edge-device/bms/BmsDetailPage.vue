@@ -126,7 +126,6 @@
           </template>
           <RealtimeDataList
             :items="realtimeDataItems"
-            :max-items="100"
             :auto-scroll="true"
             :device-type="device?.device_type"
             @clear="clearRealtimeData"
@@ -138,7 +137,7 @@
       <el-collapse v-model="activeCollapses" style="margin-top: 20px;">
         <el-collapse-item name="config">
           <template #title><span>指令频率配置</span></template>
-          <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
+          <CommandFrequencySection :device-id="deviceId" embedded />
           <DeviceControlPanel :device-id="deviceId" />
         </el-collapse-item>
       </el-collapse>

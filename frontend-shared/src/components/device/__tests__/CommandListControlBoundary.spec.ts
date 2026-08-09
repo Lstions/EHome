@@ -46,7 +46,7 @@ describe('CommandList control boundary', () => {
   it('does not present non-schedulable templates as a second trigger path', async () => {
     mocks.getCommandIntervals.mockResolvedValue([command(false)])
     const wrapper = mount(CommandList, {
-      props: { deviceId: 1, deviceType: 'sn3001_rain' },
+      props: { deviceId: 1 },
       global: { stubs },
     })
     await flushPromises()
@@ -60,7 +60,7 @@ describe('CommandList control boundary', () => {
   it('continues to render schedulable commands as polling configuration', async () => {
     mocks.getCommandIntervals.mockResolvedValue([command(true), command(false)])
     const wrapper = mount(CommandList, {
-      props: { deviceId: 1, deviceType: 'sn3001_rain' },
+      props: { deviceId: 1 },
       global: { stubs },
     })
     await flushPromises()

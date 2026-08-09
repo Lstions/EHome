@@ -23,58 +23,57 @@
       </div>
     </div>
 
-    <div class="list-container" ref="listContainer">
-      <RecycleScroller
-        v-if="items.length > 0"
-        class="scroller"
-        :items="items"
-        :item-size="64"
-        key-field="id"
-        :buffer="200"
-      >
-        <template #default="{ item }">
-          <div class="data-item">
-            <div class="item-header">
-              <span class="timestamp">{{ formatTime((item as DataItem).timestamp) }}</span>
-              <el-tag v-if="(item as DataItem).data?.error_code && (item as DataItem).data.error_code > 0" :type="getErrorInfo((item as DataItem).data.error_code).type" size="small">
-                {{ getErrorInfo((item as DataItem).data.error_code).label }}
-              </el-tag>
-              <el-tag size="small" :type="(item as DataItem).isRealtime ? 'success' : 'info'">
-                {{ (item as DataItem).isRealtime ? '实时' : '历史' }}
-              </el-tag>
-            </div>
-            <div class="item-content" :class="{ 'hex-mode': displayMode === 'hex' }">
-              {{ formatItemData(item as DataItem) }}
-            </div>
+    <!-- 普通滚动列表：行高随内容自然撑开（多行帧不裁剪），条数上限由数据层 composable 截断 -->
+    <div v-if="items.length > 0" class="plain-list" ref="listContainer">
+      <div v-for="item in items" :key="item.id" class="data-item">
+        <div class="item-header">
+          <span class="timestamp">{{ formatTime(item.timestamp) }}</span>
+          <div class="item-tags">
+            <el-tag
+              v-if="item.data?.error_code && item.data.error_code > 0"
+              :type="getErrorInfo(item.data.error_code).type"
+              size="small"
+            >
+              {{ getErrorInfo(item.data.error_code).label }}
+            </el-tag>
+            <el-tag size="small" :type="item.isRealtime ? 'success' : 'info'">
+              {{ item.isRealtime ? '实时' : '历史' }}
+            </el-tag>
           </div>
-        </template>
-      </RecycleScroller>
-
-      <el-empty v-else description="暂无实时数据，等待设备上报..." />
+        </div>
+        <div class="item-content" :class="{ 'hex-mode': displayMode === 'hex' }">
+          {{ formatItemData(item) }}
+        </div>
+      </div>
     </div>
+
+    <EmptyState
+      v-else
+      kind="initial"
+      size="small"
+      title="暂无实时数据"
+      description="等待设备上报..."
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, nextTick, watch } from 'vue'
-import { RecycleScroller } from 'vue-virtual-scroller'
-import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { Delete } from '@element-plus/icons-vue'
-import { formatTime, formatDataPlainText, dataToHexString } from '@/utils/format'
+import EmptyState from '@/components/common/EmptyState.vue'
+import { formatTime, formatDataPlainText, dataToHexString, bytesToHex } from '@/utils/format'
 import { getErrorInfo } from '@/utils/errorCode'
 
 import type { DataItem } from '@/types/realtime'
 
 interface Props {
   items: DataItem[]
-  maxItems?: number
   autoScroll?: boolean
   deviceType?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
   items: () => [],
-  maxItems: 500,
   autoScroll: true,
   deviceType: ''
 })
@@ -92,36 +91,35 @@ const handleClear = () => {
   emit('clear')
 }
 
-// Auto-scroll to top when new items arrive
-watch(() => props.items.length, () => {
+// 新数据到达时滚回顶部（最新在前）。
+// 监听首条 id 而非 items.length：上游按 maxItems 截断后满额增删同进，
+// length 恒定不变，watch length 会永不触发。
+watch(() => props.items[0]?.id, () => {
   if (props.autoScroll) {
     nextTick(() => {
       if (listContainer.value) {
-        const scroller = listContainer.value.querySelector('.scroller')
-        if (scroller) {
-          scroller.scrollTop = 0
-        }
+        listContainer.value.scrollTop = 0
       }
     })
   }
 })
 
-// 格式化数据项
+// 格式化数据项；结果为空时给中性占位，不出现疑似渲染失败的裸占位符（规范 3.4.5）
 const formatItemData = (item: DataItem): string => {
+  let text: string
   if (displayMode.value === 'hex') {
     if (item.rawData && item.rawData.length > 0) {
-      return bytesToHexLocal(item.rawData)
+      text = bytesToHex(item.rawData)
+    } else if (item.data && typeof item.data === 'object' && Object.keys(item.data).length === 0) {
+      // 空对象走兜底：dataToHexString({}) 会产出 '7B 7D'，形似真实 2 字节帧，误导
+      text = ''
+    } else {
+      text = dataToHexString(item.data)
     }
-    return dataToHexString(item.data)
+  } else {
+    text = formatDataPlainText(item.data, props.deviceType)
   }
-  return formatDataPlainText(item.data, props.deviceType)
-}
-
-// 本地16进制格式化
-const bytesToHexLocal = (bytes: number[]): string => {
-  return bytes
-    .map(byte => byte.toString(16).toUpperCase().padStart(2, '0'))
-    .join(' ')
+  return text.trim() ? text : '(无数据字段)'
 }
 </script>
 
@@ -130,8 +128,6 @@ const bytesToHexLocal = (bytes: number[]): string => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  min-height: 240px;
-  max-height: 520px;
 }
 
 .list-header {
@@ -163,23 +159,22 @@ const bytesToHexLocal = (bytes: number[]): string => {
   gap: 12px;
 }
 
-.list-container {
-  flex: 1;
-  overflow: hidden;
-  position: relative;
-}
-
-.scroller {
-  height: 100%;
+/* 滚动容器：高度随内容增长，封顶 max-height；条数少时不撑空白框 */
+.plain-list {
+  overflow-y: auto;
+  max-height: 520px;
 }
 
 .data-item {
-  min-height: 64px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   transition: background-color 0.2s;
   box-sizing: border-box;
+}
+
+.data-item:last-child {
+  border-bottom: none;
 }
 
 .data-item:hover {
@@ -190,7 +185,15 @@ const bytesToHexLocal = (bytes: number[]): string => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 8px;
+}
+
+.item-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
 }
 
 .timestamp {
@@ -218,8 +221,7 @@ const bytesToHexLocal = (bytes: number[]): string => {
 }
 
 @media (max-width: 768px) {
-  .realtime-data-list {
-    min-height: 200px;
+  .plain-list {
     max-height: 360px;
   }
 
@@ -240,17 +242,6 @@ const bytesToHexLocal = (bytes: number[]): string => {
 
   .data-item {
     padding: 10px 0;
-  }
-
-  .item-header {
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .timestamp {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .item-content {

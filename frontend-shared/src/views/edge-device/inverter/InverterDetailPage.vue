@@ -104,7 +104,6 @@
         </template>
         <RealtimeDataList
           :items="realtimeDataItems"
-          :max-items="100"
           :auto-scroll="true"
           :device-type="device?.device_type"
           @clear="clearRealtimeData"
@@ -120,7 +119,7 @@
       />
 
       <!-- Command frequency -->
-      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
+      <CommandFrequencySection :device-id="deviceId" />
 
       <!-- Operations -->
       <DeviceControlPanel :device-id="deviceId" />

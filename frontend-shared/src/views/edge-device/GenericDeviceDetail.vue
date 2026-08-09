@@ -28,7 +28,6 @@
         </template>
         <RealtimeDataList
           :items="displayRealtimeItems"
-          :max-items="200"
           :auto-scroll="true"
           :device-type="device?.device_type"
           @clear="clearRealtimeData"
@@ -36,7 +35,7 @@
       </el-card>
 
       <!-- Command frequency -->
-      <CommandFrequencySection :device-id="deviceId" :device-type="device.device_type" />
+      <CommandFrequencySection :device-id="deviceId" />
 
       <!-- Operations -->
       <DeviceControlPanel :device-id="deviceId" />

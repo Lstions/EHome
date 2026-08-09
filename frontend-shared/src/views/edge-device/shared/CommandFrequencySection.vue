@@ -1,13 +1,13 @@
 <template>
   <el-card
-    v-if="deviceType"
+    v-if="deviceId"
     class="command-frequency-card"
     :class="{ 'embedded-card': embedded }"
     :shadow="embedded ? 'never' : 'hover'"
   >
     <!-- 嵌入模式（移动端折叠面板内）：外层折叠标题已说明用途，不再重复"指令频率"卡片头 -->
     <template v-if="!embedded" #header><span>指令频率</span></template>
-    <CommandList :device-id="deviceId" :device-type="deviceType" :embedded="embedded" />
+    <CommandList :device-id="deviceId" :embedded="embedded" />
   </el-card>
 </template>
 
@@ -16,7 +16,6 @@ import CommandList from '@/components/device/CommandList.vue'
 
 defineProps<{
   deviceId: number
-  deviceType: string
   embedded?: boolean
 }>()
 </script>
