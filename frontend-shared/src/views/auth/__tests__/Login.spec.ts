@@ -140,12 +140,12 @@ describe('Login.vue', () => {
   it('shows fullscreen brand overlay while navigating (P0-B)', async () => {
     mockLogin.mockResolvedValue(undefined)
     // 手动控制的 pending promise：保证断言时 push 尚未 resolve
-    let resolvePush!: () => void
+    let resolvePush: () => void = () => {}
     let pushStarted = false
     mockPush.mockImplementation(() => {
       pushStarted = true
-      return new Promise((resolve) => {
-        resolvePush = resolve
+      return new Promise<void>((resolve) => {
+        resolvePush = () => resolve()
       })
     })
 

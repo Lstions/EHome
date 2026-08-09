@@ -20,6 +20,8 @@ vi.mock('@/stores/routeProgress', () => {
       reset: vi.fn(),
       isBusy: vi.fn(() => visible.value),
     }),
+    // 与真实模块对齐：暴露可写的单例 ref 供测试直接驱动状态
+    __routeProgressState: () => ({ progress, visible }),
   }
 })
 
@@ -36,8 +38,8 @@ describe('RouteProgressBar.vue', () => {
 
   it('visible 时添加 is-visible class', async () => {
     const wrapper = mount(RouteProgressBar)
-    const { useRouteProgress } = await import('@/stores/routeProgress')
-    const { visible } = useRouteProgress()
+    const { __routeProgressState } = await import('@/stores/routeProgress')
+    const { visible } = __routeProgressState()
     visible.value = true
     await wrapper.vm.$nextTick()
     expect(wrapper.find('.route-progress-bar').classes()).toContain('is-visible')
@@ -45,8 +47,8 @@ describe('RouteProgressBar.vue', () => {
 
   it('fill 宽度随 progress 百分比渲染', async () => {
     const wrapper = mount(RouteProgressBar)
-    const { useRouteProgress } = await import('@/stores/routeProgress')
-    const { progress } = useRouteProgress()
+    const { __routeProgressState } = await import('@/stores/routeProgress')
+    const { progress } = __routeProgressState()
     progress.value = 42
     await wrapper.vm.$nextTick()
     const fill = wrapper.find('.route-progress-bar__fill')

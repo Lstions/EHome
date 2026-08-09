@@ -120,7 +120,9 @@ describe('Router Guards', () => {
   describe('Route Progress wiring', () => {
     it('production router starts progress on navigation and finishes on success', async () => {
       const { default: prodRouter } = await import('@/router')
-      const { __calls } = await import('@/stores/routeProgress')
+      // __calls 由本文件顶部 vi.mock('@/stores/routeProgress') 注入，
+      // 真实模块类型中不存在，断言前做类型收窄
+      const { __calls } = (await import('@/stores/routeProgress')) as unknown as { __calls: string[] }
 
       // 登录页无需鉴权，可直接完成
       await prodRouter.push('/login')

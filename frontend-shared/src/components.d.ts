@@ -106,6 +106,7 @@ declare module 'vue' {
     PWMResourceList: typeof import('./components/periph/PWMResourceList.vue')['default']
     QuickCreateDeviceDialog: typeof import('./components/node/QuickCreateDeviceDialog.vue')['default']
     RealtimeDataList: typeof import('./components/data/RealtimeDataList.vue')['default']
+    RouteProgressBar: typeof import('./components/common/RouteProgressBar.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SkeletonCard: typeof import('./components/common/SkeletonCard.vue')['default']
