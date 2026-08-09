@@ -56,21 +56,18 @@ vi.mock('@/components/forms/InitializeAdminForm.vue', () => ({
   },
 }))
 
-// —— P0-A 预取路径验证 ——
-// Login.vue 仅在 onMounted 中以动态 import() 引用这两个视图（与路由懒加载同一 chunk）。
-// 每个模块只注册一次 mock（重复注册「最后一次生效」会丢弃先注册工厂的副作用）。
-// 用模块级计数器判断预取动态 import 是否真的执行：mock 工厂只在模块首次被
-// import() 解析时运行一次，因此计数 > 0 ⇔ 预取路径确实发起并完成了下载。
-const prefetchLayoutCalls = { n: 0 }
-const prefetchDashboardCalls = { n: 0 }
-vi.mock('@/views/layout/MainLayout.vue', () => {
-  prefetchLayoutCalls.n++
-  return { default: { name: 'MainLayoutMock', template: '<div />' } }
-})
-vi.mock('@/views/dashboard/Dashboard.vue', () => {
-  prefetchDashboardCalls.n++
-  return { default: { name: 'DashboardMock', template: '<div />' } }
-})
+// —— P0-A 预取调度验证 ——
+// 预取函数抽在 utils/prefetch.ts（字面量动态 import 路径与 router 懒加载一致）。
+// mock 该模块导出函数：vi.fn 每次调用都记录，不受「mock 工厂只在模块首次导入
+// 时执行一次」的缓存限制，也不依赖用例执行顺序。
+import {
+  prefetchMainLayout as mockPrefetchMainLayout,
+  prefetchDashboard as mockPrefetchDashboard,
+} from '@/utils/prefetch'
+vi.mock('@/utils/prefetch', () => ({
+  prefetchMainLayout: vi.fn().mockResolvedValue({}),
+  prefetchDashboard: vi.fn().mockResolvedValue({}),
+}))
 
 describe('Login.vue', () => {
   beforeEach(() => {
@@ -78,8 +75,6 @@ describe('Login.vue', () => {
     vi.clearAllMocks()
     localStorage.clear()
     sessionStorage.clear()
-    prefetchLayoutCalls.n = 0
-    prefetchDashboardCalls.n = 0
   })
 
   // 必须先于本文件中任何其他 mount(Login) 执行：mock 工厂在本文件内每个模块
@@ -89,10 +84,10 @@ describe('Login.vue', () => {
     mount(Login)
     await flushPromises()
     // happy-dom 无 requestIdleCallback，Login.vue 回退 setTimeout(prefetch, 0)；
-    // 等待宏任务执行完毕后，两条预取动态 import 应已 resolve（工厂计数各 +1）。
+    // 等待宏任务执行完毕后，两条预取应各被调度一次。
     await new Promise((resolve) => setTimeout(resolve, 30))
-    expect(prefetchLayoutCalls.n).toBe(1)
-    expect(prefetchDashboardCalls.n).toBe(1)
+    expect(mockPrefetchMainLayout).toHaveBeenCalledTimes(1)
+    expect(mockPrefetchDashboard).toHaveBeenCalledTimes(1)
   })
 
   it('renders login container with brand', async () => {
