@@ -83,6 +83,9 @@ func checkOrigin(r *http.Request) bool {
 		return true
 	}
 	for _, allowed := range strings.Split(os.Getenv("EHOME_ALLOWED_ORIGINS"), ",") {
+		if strings.TrimSpace(allowed) == "*" {
+			return true
+		}
 		if strings.EqualFold(strings.TrimSpace(allowed), origin) {
 			return true
 		}

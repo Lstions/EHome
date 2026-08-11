@@ -99,7 +99,7 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
-		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
+		EHOME_ALLOWED_ORIGINS=* \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
@@ -181,7 +181,7 @@ restart: auth-bootstrap ## 重启本机前后端
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
-		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
+		EHOME_ALLOWED_ORIGINS=* \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
@@ -229,7 +229,7 @@ backend: auth-bootstrap ## 仅启动本机后端（连统一基础设施）
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
 		EHOME_ENV=development \
 		EHOME_JWT_SECRET=ehome-dev-jwt-secret-not-for-production \
-		EHOME_ALLOWED_ORIGINS=http://localhost:$(FRONTEND_PORT) \
+		EHOME_ALLOWED_ORIGINS=* \
 		LOG_LEVEL=debug \
 		GIN_MODE=debug \
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &

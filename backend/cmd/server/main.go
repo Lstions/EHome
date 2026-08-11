@@ -263,12 +263,10 @@ func main() {
 	// production deployment serves the frontend from the same origin, so CORS
 	// headers are unnecessary and an empty AllowOrigins slice would panic in
 	// gin-contrib/cors v1.7.7 when AllowCredentials=true.
+	// 支持通配符 "*"（放开任意来源）：gin-contrib/cors 在 AllowOrigins 含 "*"
+	// 且 AllowCredentials=true 时会自动回显请求 Origin 而非字面 "*"，因此
+	// 既允许任何来源的浏览器访问，也保留凭据（Cookie/Authorization）传递。
 	if len(allowedOrigins) > 0 {
-		for _, origin := range allowedOrigins {
-			if strings.TrimSpace(origin) == "*" {
-				logger.Fatalf("EHOME_ALLOWED_ORIGINS must not contain '*' when AllowCredentials=true; use explicit origins")
-			}
-		}
 		r.Use(cors.New(cors.Config{
 			AllowOrigins:     allowedOrigins,
 			AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
