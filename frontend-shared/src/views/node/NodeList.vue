@@ -142,6 +142,10 @@
         </div>
         
         <div class="card-footer">
+          <el-button size="small" text type="primary" @click.stop="goToOverview(node.node_id)">
+            <el-icon><DataLine /></el-icon>
+            总览
+          </el-button>
           <el-button size="small" text @click.stop="handleQuickAction('config', node)">
             <el-icon><Setting /></el-icon>
             配置
@@ -228,8 +232,9 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" type="primary" text @click.stop="goToOverview(row.node_id)">总览</el-button>
             <el-button size="small" @click.stop="goToDetail(row.node_id)">详情</el-button>
             <el-button size="small" type="danger" text @click.stop="handleDelete(row)">删除</el-button>
           </template>
@@ -270,7 +275,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { 
   Connection, CircleCheck, CircleClose, Warning, Cpu, Search, 
   Filter, Grid, List, Refresh, Setting, Upload, Delete,
-  Plus
+  Plus, DataLine
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useNodeStore } from '@/stores/node'
@@ -429,6 +434,11 @@ const handleStatClick = (status: string) => {
 // 跳转详情
 const goToDetail = (nodeId: string) => {
   router.push(`/node/${nodeId}`)
+}
+
+// 跳转总览（新节点详情页）
+const goToOverview = (nodeId: string) => {
+  router.push(`/node/${nodeId}/overview`)
 }
 
 // 快捷操作

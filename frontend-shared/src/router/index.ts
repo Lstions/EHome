@@ -50,6 +50,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '节点详情', hidden: true },
       },
       {
+        path: 'node/:id/overview',
+        name: 'NodeOverview',
+        component: () => import('@/views/node/NodeOverview.vue'),
+        meta: { title: '节点总览', hidden: true },
+      },
+      {
         path: 'channel',
         name: 'ChannelList',
         component: () => import('@/views/channel/ChannelList.vue'),
