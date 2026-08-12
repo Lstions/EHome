@@ -39,9 +39,9 @@ services:
     container_name: ehome-emqx
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${EMQX_MQTT_PORT:-1883}:1883"
-      - "127.0.0.1:${EMQX_WS_PORT:-8083}:8083"
-      - "127.0.0.1:${EMQX_DASHBOARD_PORT:-18083}:18083"
+      - "${EMQX_MQTT_PORT:-1883}:1883"
+      - "${EMQX_WS_PORT:-8083}:8083"
+      - "${EMQX_DASHBOARD_PORT:-18083}:18083"
     environment:
       EMQX_NAME: ehome
       EMQX_LOADED_MODULES: "emqx_mod_acl_internal"
