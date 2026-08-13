@@ -265,6 +265,33 @@ describe('NodeOverview (生产页)', () => {
       expect(source).toContain('html.dark .node-overview-page')
     })
 
+    it('字体层级使用稳定的页面 token，而不是让标题、字段和弱提示退化为同一层级', () => {
+      expect(source).toContain('--no-text-secondary: #526072')
+      expect(source).toContain('--no-text-muted: #69778B')
+      expect(source).toContain('--no-text-faint: #A7B1BF')
+      expect(source).toContain('--no-text-secondary: var(--text-color-regular, #C0C6D0)')
+      expect(source).toContain('--no-text-muted: var(--text-color-secondary, #8A93A3)')
+
+      expect(source).toContain('.card-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }')
+      expect(source).toContain('.stat-label { font-size: 12px; line-height: 18px; color: var(--no-text-secondary); }')
+      expect(source).toContain('.stat-value { font-size: 14px; font-weight: 500; line-height: 20px;')
+      expect(source).toContain('.btn {\n  height: 36px; padding: 0 16px; border-radius: 6px; font-size: 13px; font-weight: 500; line-height: 20px;')
+    })
+
+    it('总线工作台文本层级与响应式关键规则由 scoped CSS 明确约束', () => {
+      expect(source).toContain('.bus-subtab.active { border-bottom-color: var(--no-primary); font-weight: 600; }')
+      expect(source).toContain('.bus-desc { margin: 12px 0 16px; color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }')
+      expect(source).toContain('.bus-stat-label { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; white-space: nowrap; }')
+      expect(source).toContain('.bus-stat-value { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 22px; }')
+      expect(source).toContain('.bus-table th { height: 42px; padding: 0 6px; color: var(--no-text-secondary); text-align: left; font-size: 12px; font-weight: 500; line-height: 18px;')
+      expect(source).toContain('.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px;')
+      expect(source).toContain('.bus-tool-group-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }')
+      expect(source).toContain('.bus-create-field span { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }')
+      expect(source).toContain('.bus-create-field b { color: var(--no-text); font-size: 13px; font-weight: 500; line-height: 20px; }')
+      expect(source).toContain('.tab-bar { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;')
+      expect(source).toContain('.bus-table { min-width: 680px; table-layout: auto; }')
+    })
+
     it('防竞态：序列号守卫 + 会话代际断言', () => {
       expect(source).toContain('detailSequence')
       expect(source).toContain('assertSessionGeneration')
