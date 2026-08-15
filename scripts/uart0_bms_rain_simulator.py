@@ -130,10 +130,24 @@ def modbus_crc16(data: bytes) -> int:
     return crc
 
 
-def sn3001_read_rainfall_response(mm: float) -> bytes:
-    """SN-3001 读雨量响应: 01 03 02 <rainfall*10> <CRC16 LE>."""
+def sn3001_read_rainfall_response(mm: float, addr: int = 0x01) -> bytes:
+    """SN-3001 读雨量响应: <addr> 03 02 <rainfall*10> <CRC16 LE>."""
     rain_raw = int(mm * 10)
-    payload = bytes([0x01, 0x03, 0x02]) + struct.pack(">H", rain_raw)
+    payload = bytes([addr, 0x03, 0x02]) + struct.pack(">H", rain_raw)
+    crc = modbus_crc16(payload)
+    return payload + struct.pack("<H", crc)
+
+
+def sn3001_read_register_response(addr: int, reg: int, value: int) -> bytes:
+    """SN-3001 读寄存器响应: <addr> 03 02 <value BE> <CRC16 LE>."""
+    payload = bytes([addr, 0x03, 0x02]) + struct.pack(">H", value)
+    crc = modbus_crc16(payload)
+    return payload + struct.pack("<H", crc)
+
+
+def sn3001_write_register_response(addr: int, reg: int, value: int) -> bytes:
+    """SN-3001 写寄存器响应 (echo): <addr> 06 <reg BE> <value BE> <CRC16 LE>."""
+    payload = bytes([addr, 0x06]) + struct.pack(">H", reg) + struct.pack(">H", value)
     crc = modbus_crc16(payload)
     return payload + struct.pack("<H", crc)
 
@@ -148,6 +162,7 @@ def main() -> int:
     ap.add_argument("--rain-mm", type=float, default=0.5)
     ap.add_argument("--mos", type=lambda x: int(x, 0), default=0x00)
     ap.add_argument("--restart-count", type=int, default=0, help="0xAA restart_count 初值")
+    ap.add_argument("--sensitivity", type=int, default=60, help="SN-3001 0x0052 灵敏度寄存器初值")
     ap.add_argument("--duration", type=float, default=0.0, help="0=一直运行")
     args = ap.parse_args()
 
@@ -157,7 +172,8 @@ def main() -> int:
         print(f"无法打开 {args.port}: {e}", file=sys.stderr)
         return 1
 
-    print(f"[模拟器] 监听 {args.port} @ {args.baud}, BMS+雨量计, mos=0x{args.mos:02x}")
+    print(f"[模拟器] 监听 {args.port} @ {args.baud}, BMS+雨量计, mos=0x{args.mos:02x}, "
+          f"sensitivity=0x{args.sensitivity:04x}")
     start = time.time()
     try:
         while True:
@@ -178,7 +194,7 @@ def main() -> int:
                     end = i + 4 + ln + 2 + 1  # +crc2 +0x77
                     if end <= len(data):
                         frame = data[i:end]
-                        resp = handle_bms(cmd, rw, args)
+                        resp = handle_bms(cmd, rw, args, frame)
                         if resp:
                             s.write(resp)
                             print(f"  BMS req 0x{cmd:02x} -> {resp.hex()}")
@@ -186,15 +202,45 @@ def main() -> int:
                             print(f"  BMS req 0x{cmd:02x} (无响应)")
                         i = end
                         continue
-                # SN-3001 Modbus 读雨量帧
-                if b == 0x01 and i + 3 < len(data) and data[i + 1] == 0x03:
+                # SN-3001 Modbus 帧 (任意从机地址 addr): 03 读寄存器 / 06 写寄存器
+                if i + 7 < len(data) and data[i + 1] in (0x03, 0x06):
+                    addr = data[i]
+                    fc = data[i + 1]
+                    reg = struct.unpack(">H", data[i + 2:i + 4])[0]
                     end = i + 8
-                    if end <= len(data):
-                        resp = sn3001_read_rainfall_response(args.rain_mm)
-                        s.write(resp)
-                        print(f"  雨量计 req -> {resp.hex()}")
-                        i = end
+                    if end > len(data):
+                        i += 1
                         continue
+                    if fc == 0x03:
+                        # 读雨量累计 (0x0000) 或灵敏度 (0x0052)
+                        if reg == 0x0000:
+                            resp = sn3001_read_rainfall_response(args.rain_mm, addr)
+                            print(f"  雨量计[0x{addr:02x}] req 0x03 0x{reg:04x} -> {resp.hex()}")
+                        elif reg == 0x0052:
+                            resp = sn3001_read_register_response(addr, reg, args.sensitivity)
+                            print(f"  雨量计[0x{addr:02x}] req 0x03 0x{reg:04x} (灵敏度) -> {resp.hex()} "
+                                  f"(value=0x{args.sensitivity:04x})")
+                        else:
+                            resp = None
+                            print(f"  雨量计[0x{addr:02x}] req 0x03 0x{reg:04x} (无实现)")
+                    else:  # fc == 0x06 写寄存器
+                        value = struct.unpack(">H", data[i + 4:i + 6])[0]
+                        if reg == 0x0052:
+                            args.sensitivity = value
+                            print(f"  [写] 雨量计[0x{addr:02x}] 灵敏度 0x{reg:04x} <- 0x{value:04x}")
+                            resp = sn3001_write_register_response(addr, reg, value)
+                        elif reg == 0x0000:
+                            # 清零累计雨量 (reset workflow: write 0x005A 到 0x0000)
+                            args.rain_mm = 0.0
+                            print(f"  [写] 雨量计[0x{addr:02x}] 清零累计雨量 0x{reg:04x} <- 0x{value:04x} (rain now 0)")
+                            resp = sn3001_write_register_response(addr, reg, value)
+                        else:
+                            resp = None
+                            print(f"  [写] 雨量计[0x{addr:02x}] 0x{reg:04x} <- 0x{value:04x} (无实现)")
+                    if resp:
+                        s.write(resp)
+                    i = end
+                    continue
                 i += 1
     except KeyboardInterrupt:
         pass
@@ -203,11 +249,21 @@ def main() -> int:
     return 0
 
 
-def handle_bms(cmd: int, rw: int, args) -> bytes | None:
-    """构造 BMS 响应. rw 0xA5=读, 0x5A=写."""
+def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | None:
+    """构造 BMS 响应. rw 0xA5=读, 0x5A=写. frame 为完整请求帧(写命令解析用)."""
     if rw == 0x5A:
         # 写命令: 0xE1 MOS 策略 / 0x0E BMS 复位 → 成功响应
         if cmd == 0xE1:
+            # MOS 策略写: 更新 args.mos 使后续 0x03 readback 反映新状态
+            # 帧: DD 5A E1 02 YY XX CRC 77 (YY=00 user/AA operator, XX bit0 禁充/bit1 禁放)
+            if frame:
+                try:
+                    yy = frame[4]
+                    xx = frame[5]
+                    args.mos = xx & 0x03
+                    print(f"  [写] BMS MOS 策略 -> 0x{args.mos:02x} (priority=0x{yy:02x})")
+                except IndexError:
+                    print(f"  [写] BMS MOS 策略帧过短: {frame.hex()}")
             return bms_response(0xE1, b"")
         if cmd == 0x0E:
             # BMS 复位: 收到后进入复位重启状态, 返回 DD 0E 00 00 CRC 77
