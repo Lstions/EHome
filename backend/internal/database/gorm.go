@@ -4,6 +4,9 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/logger"
 	"fmt"
+	"log"
+	"os"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -27,7 +30,16 @@ func Connect(cfg Config) error {
 
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger:                                   gormlogger.Default.LogMode(gormlogger.Warn),
+		Logger: gormlogger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormlogger.Config{
+			SlowThreshold: 200 * time.Millisecond,
+			LogLevel:      gormlogger.Warn,
+			// record not found 是业务正常路径(如 datalifecycle.identity.go 查询
+			// 不存在的 identity_key 后即创建), 业务代码已用 errors.Is 区分。
+			// 不忽略则 GORM logger 每次以 Error 级打印 SQL 到 stdout,
+			// 不受 LOG_LEVEL 控制——压测/高频上报时成噪声源。
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  false,
+		}),
 		DisableForeignKeyConstraintWhenMigrating: true, // GORM AutoMigrate creates wrong-direction FKs; real FKs managed via SQL migration
 	})
 	if err != nil {
