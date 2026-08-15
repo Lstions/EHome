@@ -377,5 +377,5 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		})
 	}
 
-	logger.Infof("[%s] Parsed %d sensors using %s", evt.DeviceID, len(sensorData), parseMethod)
+	logger.Debugf("[%s] Parsed %d sensors using %s", evt.DeviceID, len(sensorData), parseMethod)
 }

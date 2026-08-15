@@ -54,7 +54,7 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 		}
 	}
 
-	logger.Infof("[%s] DataReport: ch=%d ts=%d seq=%d req=%d err=%d raw=%x",
+	logger.Debugf("[%s] DataReport: ch=%d ts=%d seq=%d req=%d err=%d raw=%x",
 		deviceID, channelID, timestamp, sequence, requestID, errorCode, rawData)
 
 	// G10: Record data received metric

@@ -211,7 +211,7 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 	}
 
 	msgType := payload[0]
-	logger.Infof("[%s] Received msg type 0x%02X (%d bytes)", deviceID, msgType, len(payload))
+	logger.Debugf("[%s] Received msg type 0x%02X (%d bytes)", deviceID, msgType, len(payload))
 
 	// Record message type as metric
 	typeName := frame.MsgTypeName(msgType)
