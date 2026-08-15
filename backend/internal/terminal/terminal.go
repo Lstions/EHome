@@ -4,8 +4,6 @@ import (
 	"encoding/hex"
 	"sync"
 	"time"
-
-	"ehome/backend/pkg/logger"
 )
 
 const (
@@ -98,30 +96,13 @@ func (t *ChannelTerminal) Count() int {
 type Manager struct {
 	mu        sync.RWMutex
 	terminals map[uint]*ChannelTerminal // key: channel_id
-	wsCh      chan TerminalEvent        // WebSocket broadcast channel
-}
-
-// TerminalEvent is sent via WebSocket on new TX/RX
-type TerminalEvent struct {
-	DeviceID  string `json:"device_id"`
-	ChannelID uint   `json:"channel_id"`
-	Direction string `json:"direction"`
-	DataHex   string `json:"data_hex"`
-	DataASCII string `json:"data_ascii"`
-	Timestamp int64  `json:"timestamp"`
 }
 
 // NewManager creates a new terminal manager
 func NewManager() *Manager {
 	return &Manager{
 		terminals: make(map[uint]*ChannelTerminal),
-		wsCh:      make(chan TerminalEvent, 256),
 	}
-}
-
-// Events returns the channel for WebSocket broadcasting
-func (m *Manager) Events() <-chan TerminalEvent {
-	return m.wsCh
 }
 
 // RecordTX records a transmitted command
@@ -150,22 +131,6 @@ func (m *Manager) record(deviceID string, channelID uint, dir Direction, data []
 	}
 
 	t.Append(dir, data)
-
-	// Send WebSocket event
-	evt := TerminalEvent{
-		DeviceID:  deviceID,
-		ChannelID: channelID,
-		Direction: directionString(dir),
-		DataHex:   hex.EncodeToString(data),
-		DataASCII: safeASCII(data),
-		Timestamp: time.Now().UnixMilli(),
-	}
-
-	select {
-	case m.wsCh <- evt:
-	default:
-		logger.Warnf("Terminal WS channel full, dropping event for ch=%d", channelID)
-	}
 }
 
 // GetHistory returns terminal history for a channel

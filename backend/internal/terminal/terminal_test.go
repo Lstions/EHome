@@ -147,32 +147,6 @@ func TestManagerGetHistoryNonExistent(t *testing.T) {
 	}
 }
 
-func TestManagerEvents(t *testing.T) {
-	mgr := NewManager()
-
-	// Record an event
-	mgr.RecordTX("device1", 1, []byte{0xAA, 0xBB})
-
-	// Read from events channel
-	select {
-	case evt := <-mgr.Events():
-		if evt.DeviceID != "device1" {
-			t.Errorf("event device_id: expected device1, got %s", evt.DeviceID)
-		}
-		if evt.ChannelID != 1 {
-			t.Errorf("event channel_id: expected 1, got %d", evt.ChannelID)
-		}
-		if evt.Direction != "tx" {
-			t.Errorf("event direction: expected tx, got %s", evt.Direction)
-		}
-		if evt.DataHex != "aabb" {
-			t.Errorf("event data_hex: expected aabb, got %s", evt.DataHex)
-		}
-	default:
-		t.Fatal("expected event on Events channel")
-	}
-}
-
 func TestDirectionString(t *testing.T) {
 	if directionString(DirectionTX) != "tx" {
 		t.Error("DirectionTX should be 'tx'")
