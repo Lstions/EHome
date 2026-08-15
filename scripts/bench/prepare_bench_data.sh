@@ -29,3 +29,6 @@ FROM generate_series(1, $N) AS i;
 echo "==> 验证"
 $PSQL -t -c "SELECT 'nodes=' || count(*) FROM nodes WHERE node_id LIKE 'SIM%';"
 $PSQL -t -c "SELECT 'devices=' || count(*) FROM edge_devices WHERE node_id LIKE 'SIM%';"
+# 输出实际 edge_device id 范围: DELETE 不重置序列, ehload 的 --device-base 必须用 min_id
+# (否则压测帧携带不存在的设备 id, 后端查不到记录直接丢弃)。
+$PSQL -t -c "SELECT 'device_base=' || min(id) || ' device_max=' || max(id) FROM edge_devices WHERE node_id LIKE 'SIM%';"
