@@ -21,6 +21,13 @@ type Publisher interface {
 	PublishRetained(topic string, payload []byte) error
 }
 
+// TelemetryPublisher is the optional best-effort publishing capability used for
+// high-rate telemetry. It deliberately extends Publisher rather than widening
+// the control-plane interface and breaking command-path implementations.
+type TelemetryPublisher interface {
+	PublishQoS0(topic string, payload []byte) error
+}
+
 type transportAttempt struct {
 	client     mqtt.Client
 	generation uint64
@@ -82,7 +89,11 @@ const (
 	connectTimeout   = 5 * time.Second
 	subscribeTimeout = 5 * time.Second
 	publishTimeout   = 5 * time.Second
-	publishQoS2Time  = 10 * time.Second
+	// publishQoS0Timeout bounds best-effort telemetry only. Control-plane QoS 1/2
+	// keeps the longer timeout; a stuck broker must not let high-rate telemetry
+	// holds starve command/config publishes on the shared operation mutex.
+	publishQoS0Timeout = 1 * time.Second
+	publishQoS2Time    = 10 * time.Second
 )
 
 func supervisorBackoff(attempt int) time.Duration {
@@ -483,6 +494,12 @@ func (c *Client) waitPublicToken(attempt *transportAttempt, token mqtt.Token, ti
 // Publish sends a message with QoS 1.
 func (c *Client) Publish(topic string, payload []byte) error {
 	return c.publish(topic, 1, false, payload, publishTimeout, "mqtt publish timeout")
+}
+
+// PublishQoS0 sends best-effort telemetry without waiting for a broker acknowledgement.
+// It must not be used for device commands, configuration, OTA, or discovery messages.
+func (c *Client) PublishQoS0(topic string, payload []byte) error {
+	return c.publish(topic, 0, false, payload, publishQoS0Timeout, "mqtt QoS 0 publish timeout")
 }
 
 // PublishQoS2 sends a message with QoS 2.

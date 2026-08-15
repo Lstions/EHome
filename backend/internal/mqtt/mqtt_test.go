@@ -504,6 +504,9 @@ func TestPublishVariantsAndTokenErrors(t *testing.T) {
 	if err := c.Publish("qos1", []byte("one")); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.PublishQoS0("qos0", []byte("zero")); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.PublishQoS2("qos2", []byte("two")); err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +516,7 @@ func TestPublishVariantsAndTokenErrors(t *testing.T) {
 	fake.mu.Lock()
 	got := append([]fakePublish(nil), fake.publishes...)
 	fake.mu.Unlock()
-	if len(got) != 3 || got[0].qos != 1 || got[0].retained || got[1].qos != 2 || !got[2].retained {
+	if len(got) != 4 || got[0].qos != 1 || got[0].retained || got[1].qos != 0 || got[1].retained || got[2].qos != 2 || !got[3].retained {
 		t.Fatalf("unexpected publishes: %#v", got)
 	}
 

@@ -135,6 +135,9 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	} else {
 		mgr.dataBus.Register(databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, mgr.reassembler, driverRegistry))
 	}
+	if ha != nil {
+		ha.StartPublishWorker()
+	}
 
 	// G10: Record initial node online count
 	var onlineCount int64
@@ -157,6 +160,9 @@ func (m *Manager) Start() {
 	m.wg.Wait()
 	if m.dataBus != nil {
 		m.dataBus.Stop()
+	}
+	if m.ha != nil {
+		m.ha.StopPublishWorker()
 	}
 	if m.logBus != nil {
 		m.logBus.Stop()
