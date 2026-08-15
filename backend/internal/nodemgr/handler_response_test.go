@@ -50,7 +50,6 @@ func setupHandlerManager(t *testing.T) *Manager {
 		pendingWrite: pendingwrite.NewManager(nil, db),
 		pingTracker:  NewPingTracker(),
 		mqtt:         &noopPublisher{},
-		reassembler:  newStreamReassembler(),
 	}
 	return mgr
 }

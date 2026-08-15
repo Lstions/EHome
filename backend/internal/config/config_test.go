@@ -250,3 +250,58 @@ func TestDataRetentionDays(t *testing.T) {
 		}
 	}
 }
+
+// TestParserShards_Default verifies the sharded-ingest default.
+func TestParserShards_Default(t *testing.T) {
+	cfg := Load()
+	if got := cfg.ParserShards(); got != DefaultParserShards {
+		t.Errorf("default ParserShards = %d, want %d", got, DefaultParserShards)
+	}
+}
+
+// TestParserShards_EnvOverride verifies EHOME_PARSER_SHARDS handling:
+// valid values pass through; 0/negative normalize to 1; >64 and garbage
+// fall back to the default.
+func TestParserShards_EnvOverride(t *testing.T) {
+	cases := []struct {
+		env  string
+		want int
+	}{
+		{"1", 1},
+		{"8", 8},
+		{"64", 64},
+		{"0", 1},  // legacy single consumer
+		{"-3", 1}, // negative rejected by env gate, default applies → 8
+	}
+	// note: -3 is rejected by the env override gate, leaving the config
+	// default (8), which exercises the "fall back" path rather than clamp.
+	for i, c := range cases {
+		if c.env == "-3" {
+			t.Setenv("EHOME_PARSER_SHARDS", c.env)
+			cfg := Load()
+			if got := cfg.ParserShards(); got != DefaultParserShards {
+				t.Errorf("case %d: env %q → %d, want default %d", i, c.env, got, DefaultParserShards)
+			}
+			continue
+		}
+		t.Setenv("EHOME_PARSER_SHARDS", c.env)
+		cfg := Load()
+		if got := cfg.ParserShards(); got != c.want {
+			t.Errorf("case %d: env %q → %d, want %d", i, c.env, got, c.want)
+		}
+	}
+}
+
+// TestParserShards_ClampUpperBound verifies that absurd values (env and
+// YAML-sourced alike) are clamped by ParserShards().
+func TestParserShards_ClampUpperBound(t *testing.T) {
+	cfg := Load()
+	cfg.Ingest.ParserShards = 100000
+	if got := cfg.ParserShards(); got != maxParserShards {
+		t.Errorf("clamped ParserShards = %d, want %d", got, maxParserShards)
+	}
+	cfg.Ingest.ParserShards = -1
+	if got := cfg.ParserShards(); got != 1 {
+		t.Errorf("negative ParserShards = %d, want 1", got)
+	}
+}

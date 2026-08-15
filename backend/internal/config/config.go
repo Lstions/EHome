@@ -16,6 +16,7 @@ type Config struct {
 	Redis          RedisConfig          `yaml:"redis"`
 	Log            LogConfig            `yaml:"log"`
 	Control        ControlConfig        `yaml:"control"`
+	Ingest         IngestConfig         `yaml:"ingest"`
 	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
 }
@@ -34,6 +35,21 @@ type ControlConfig struct {
 type ServerConfig struct {
 	Addr string `yaml:"addr"`
 }
+
+// IngestConfig holds data-ingest pipeline parallelism settings.
+type IngestConfig struct {
+	// ParserShards is the number of independent bus workers the heavy
+	// consumers (sensor_parser, db_persist) are fanned out into. Devices are
+	// hashed by node ID, so per-device ordering is preserved within a shard.
+	// Fixed for the process lifetime; 0/1 means the legacy single consumer.
+	ParserShards int `yaml:"parser_shards"`
+}
+
+// DefaultParserShards fans the heavy consumers out across 8 workers. The
+// ingest pipeline was measured saturating a single serial consumer at
+// ~64 evt/s; 8 shards lift the ceiling ~8x while staying well inside the
+// default PostgreSQL connection budget (25 conns; each shard holds ≤1).
+const DefaultParserShards = 8
 
 // DatabaseConfig holds PostgreSQL settings
 type DatabaseConfig struct {
@@ -105,6 +121,7 @@ func defaultConfig() *Config {
 			Level: "info",
 		},
 		Control:        ControlConfig{DeviceControlV2Enabled: true, LegacyDeviceWriteMode: "disabled"},
+		Ingest:         IngestConfig{ParserShards: DefaultParserShards},
 		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
 	}
@@ -192,6 +209,11 @@ func overrideWithEnv(cfg *Config) {
 			cfg.DataRetention.Days = n
 		}
 	}
+	if v := getEnv("EHOME_PARSER_SHARDS", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 64 {
+			cfg.Ingest.ParserShards = n
+		}
+	}
 }
 
 func getEnv(key, defaultValue string) string {
@@ -223,4 +245,22 @@ func (c *Config) DataRetentionDays() int {
 		return c.DataRetention.Days
 	}
 	return DefaultDataRetentionDays
+}
+
+// maxParserShards bounds the shard count from any source (env or YAML):
+// each shard is a bus worker with its own mailbox and may hold a DB
+// connection, so an absurd YAML value must not create thousands of workers.
+const maxParserShards = 64
+
+// ParserShards returns the heavy-consumer shard count, clamped to
+// [1, maxParserShards]; 0/negative is normalized to 1 (legacy single
+// consumer).
+func (c *Config) ParserShards() int {
+	if c.Ingest.ParserShards <= 0 {
+		return 1
+	}
+	if c.Ingest.ParserShards > maxParserShards {
+		return maxParserShards
+	}
+	return c.Ingest.ParserShards
 }

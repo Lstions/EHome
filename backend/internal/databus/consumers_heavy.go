@@ -22,9 +22,11 @@ import (
 )
 
 // Reassembler is the interface for frame reassembly (implemented by nodemgr.streamReassembler).
+// Buffering is scoped per (deviceID, requestID): requestID alone is not
+// unique across devices once consumers run concurrently.
 type Reassembler interface {
-	Append(requestID uint32, data []byte) []byte
-	Consume(requestID uint32)
+	Append(deviceID string, requestID uint32, data []byte) []byte
+	Consume(deviceID string, requestID uint32)
 }
 
 // PendingWriteConsumer routes command responses to the pendingWrite manager
@@ -133,7 +135,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	}
 
 	// Frame reassembly for multi-frame protocols
-	merged := c.reassembler.Append(uint32(evt.RequestID), evt.RawData)
+	merged := c.reassembler.Append(evt.DeviceID, uint32(evt.RequestID), evt.RawData)
 
 	// Find edge device. Preserve both firmware encodings: explicit edge_device_id,
 	// real channels.id, and legacy 0-based channel-list index.
@@ -188,7 +190,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	if sensorData == nil {
 		drv, err := c.driverRegistry.Get(device.Type)
 		if err != nil {
-			c.reassembler.Consume(uint32(evt.RequestID))
+			c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 			return
 		}
 
@@ -198,31 +200,31 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 			if err := c.db.Where("edge_device_id = ? AND device_type = ?", device.ID, device.Type).
 				First(&calibration).Error; err != nil {
 				logger.Warn("databus: calibration missing; refusing to persist sample", "node_id", evt.DeviceID, "edge_device_id", device.ID, "device_type", device.Type, "error", err)
-				c.reassembler.Consume(uint32(evt.RequestID))
+				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 				return
 			}
 			calibrationBytes, err := hex.DecodeString(calibration.Data)
 			if err != nil {
 				logger.Warn("databus: calibration encoding invalid; refusing to persist sample", "edge_device_id", device.ID, "error", err)
-				c.reassembler.Consume(uint32(evt.RequestID))
+				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 				return
 			}
 			drvData, err = calibrationDriver.ParseDataWithCalibration(merged, calibrationBytes)
 		} else if commandAware, ok := drv.(drivers.CommandAwareDriver); ok {
 			if evt.CommandTemplateID == 0 {
 				logger.Infof("[%s] Command-aware driver requires command template context", evt.DeviceID)
-				c.reassembler.Consume(uint32(evt.RequestID))
+				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 				return
 			}
 			var template models.ConfigTemplate
 			if lookupErr := c.db.Where("id = ? AND node_id = ?", evt.CommandTemplateID, evt.DeviceID).First(&template).Error; lookupErr != nil {
 				logger.Infof("[%s] Failed to resolve command template %d: %v", evt.DeviceID, evt.CommandTemplateID, lookupErr)
-				c.reassembler.Consume(uint32(evt.RequestID))
+				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 				return
 			}
 			if template.WriteData == "" {
 				logger.Infof("[%s] Command template %d has no write data", evt.DeviceID, evt.CommandTemplateID)
-				c.reassembler.Consume(uint32(evt.RequestID))
+				c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 				return
 			}
 			drvData, err = commandAware.ParseDataWithCommand(merged, template.WriteData)
@@ -231,7 +233,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 		if err != nil {
 			logger.Infof("[%s] Failed to parse data: %v", evt.DeviceID, err)
-			c.reassembler.Consume(uint32(evt.RequestID))
+			c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 			return
 		}
 		sensorData = make([]parser.Field, len(drvData))
@@ -242,7 +244,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	}
 
 	// Parse succeeded — consume reassembly buffer
-	c.reassembler.Consume(uint32(evt.RequestID))
+	c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
 
 	// 写入双写 (§八): logical_device_id = 实例逻辑身份经 followMergeChain
 	// 解析到最终目标 (v3.2-F1: 写入与查询同链 — 合并进行中实例仍在写入时,

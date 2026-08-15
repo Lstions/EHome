@@ -93,11 +93,14 @@ func checkOrigin(r *http.Request) bool {
 	return false
 }
 
-// NewHub creates a new WebSocket hub
+// NewHub creates a new WebSocket hub.
+// broadcast is buffered: parser shards publish WS events from their own
+// goroutines and must never block on the hub loop — with an unbuffered
+// channel a slow hub consumer would back-pressure every data shard.
 func NewHub() *Hub {
 	return &Hub{
 		clients:     make(map[*Client]bool),
-		broadcast:   make(chan broadcastMessage),
+		broadcast:   make(chan broadcastMessage, 256),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		subscribers: make(map[chan Event]bool),

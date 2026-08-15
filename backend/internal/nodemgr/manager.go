@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/config"
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
@@ -44,9 +45,6 @@ type Manager struct {
 	wg              sync.WaitGroup     // for worker pool graceful shutdown
 	dataCh          chan dataReportJob // worker pool job channel
 
-	// S3: requestID-level frame reassembly (P1-8 safety net)
-	reassembler *streamReassembler
-
 	// F7.6: Ping tracking for retry/timeout
 	pingTracker *PingTracker
 
@@ -81,7 +79,12 @@ type periphRequestMeta struct {
 func (m *Manager) LockPeriphIntent()   { m.periphIntentMu.Lock() }
 func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
 
-// NewManager creates a new node manager
+// NewManager creates a new node manager.
+//
+// parserShards fans the heavy consumers (sensor_parser, db_persist) out into
+// that many independent bus workers keyed by node ID (0/1 = legacy single
+// consumer). Each shard uses its own streamReassembler: buffers are keyed by
+// (deviceID, requestID), so per-device reassembly stays shard-local.
 func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
 	driverRegistry := drivers.NewRegistry()
 	if len(registries) > 0 && registries[0] != nil {
@@ -102,7 +105,6 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		offlineDetector: offlineDetector,
 		driverRegistry:  driverRegistry,
 		stopCh:          make(chan struct{}),
-		reassembler:     newStreamReassembler(),
 		periphPending:   make(map[uint32]periphRequestMeta),
 		periphLatest:    make(map[string]uint32),
 	}
@@ -129,11 +131,26 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.dataBus.Register(databus.NewWSPushConsumer(wsHub))
 	mgr.dataBus.Register(databus.NewDataMetricsConsumer())
 	mgr.dataBus.Register(databus.NewPendingWriteConsumer(mgr.pendingWrite, mgr.deviceInit, db))
-	mgr.dataBus.Register(databus.NewDBPersistConsumer(db))
+
+	var deviceActivity func(uint)
 	if offlineDetector != nil {
-		mgr.dataBus.Register(databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, mgr.reassembler, driverRegistry, offlineDetector.OnEdgeDeviceData))
-	} else {
-		mgr.dataBus.Register(databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, mgr.reassembler, driverRegistry))
+		deviceActivity = offlineDetector.OnEdgeDeviceData
+	}
+	parserShards := parserShardCount()
+	var reassemblers []databus.Reassembler
+	for i := 0; i < parserShards; i++ {
+		reassemblers = append(reassemblers, newStreamReassembler())
+	}
+	for i := 0; i < parserShards; i++ {
+		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
+		persist := databus.NewDBPersistConsumer(db)
+		if parserShards <= 1 {
+			mgr.dataBus.Register(parser)
+			mgr.dataBus.Register(persist)
+			break
+		}
+		mgr.dataBus.Register(databus.NewShardConsumer(parser, i, parserShards))
+		mgr.dataBus.Register(databus.NewShardConsumer(persist, i, parserShards))
 	}
 	if ha != nil {
 		ha.StartPublishWorker()
@@ -145,6 +162,25 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	metrics.NodesOnline.Set(float64(onlineCount))
 
 	return mgr
+}
+
+// parserShardOverride lets tests pin the heavy-consumer shard count. In
+// production the value comes from config.Load() (ingest.parser_shards /
+// EHOME_PARSER_SHARDS), which reads the same config.yaml main.go already
+// loaded; NewManager runs before any override matters.
+var parserShardOverride int
+
+// parserShardCount resolves the heavy-consumer shard count. Each parser
+// shard owns its own streamReassembler; reassembly buffers are keyed by
+// (deviceID, requestID) so they stay shard-local.
+func parserShardCount() int {
+	if parserShardOverride > 0 {
+		return parserShardOverride
+	}
+	if cfg := config.Load(); cfg != nil {
+		return cfg.ParserShards()
+	}
+	return 1
 }
 
 func (m *Manager) Start() {

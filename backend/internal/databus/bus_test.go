@@ -139,16 +139,20 @@ func (d *commandAwareTestDriver) ParseDataWithCommand(raw []byte, writeData stri
 
 type passthroughReassembler struct{}
 
-func (passthroughReassembler) Append(requestID uint32, data []byte) []byte { return data }
-func (passthroughReassembler) Consume(requestID uint32)                    {}
+func (passthroughReassembler) Append(deviceID string, requestID uint32, data []byte) []byte {
+	return data
+}
+func (passthroughReassembler) Consume(deviceID string, requestID uint32) {}
 
 type recordingReassembler struct {
 	mu       sync.Mutex
 	consumed []uint32
 }
 
-func (r *recordingReassembler) Append(requestID uint32, data []byte) []byte { return data }
-func (r *recordingReassembler) Consume(requestID uint32) {
+func (r *recordingReassembler) Append(deviceID string, requestID uint32, data []byte) []byte {
+	return data
+}
+func (r *recordingReassembler) Consume(deviceID string, requestID uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.consumed = append(r.consumed, requestID)

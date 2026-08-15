@@ -79,8 +79,10 @@ func newDataPipeTestRegistry() *drivers.Registry {
 // passthroughReassembler 直接透传数据、不保留状态,用于不关心重组缓冲的用例。
 type passthroughReassembler struct{}
 
-func (passthroughReassembler) Append(requestID uint32, data []byte) []byte { return data }
-func (passthroughReassembler) Consume(requestID uint32)                    {}
+func (passthroughReassembler) Append(deviceID string, requestID uint32, data []byte) []byte {
+	return data
+}
+func (passthroughReassembler) Consume(deviceID string, requestID uint32) {}
 
 // datapipeSignalingConsumer 包装 SensorParserConsumer,在 Handle 返回后计数。
 // SensorParserConsumer 的寻址失败路径(consumers_heavy.go:141-158)直接 return、
