@@ -197,9 +197,8 @@ func TestControlEnvOverridesAreBounded(t *testing.T) {
 	t.Setenv("EHOME_LEGACY_DEVICE_WRITE_MODE", "bridge")
 	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "true")
 	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "true")
-	t.Setenv("EHOME_ENABLED_DEVICE_ACTIONS", " prs3001/read_rainfall , techfine_inverter/set_mode ")
 	cfg := Load()
-	if cfg.Control.LegacyDeviceWriteMode != "bridge" || !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled || len(cfg.Control.EnabledDeviceActions) != 2 || cfg.Control.EnabledDeviceActions[0] != "prs3001/read_rainfall" {
+	if cfg.Control.LegacyDeviceWriteMode != "bridge" || !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
 		t.Fatalf("control env override = %+v", cfg.Control)
 	}
 
@@ -207,8 +206,24 @@ func TestControlEnvOverridesAreBounded(t *testing.T) {
 	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "not-a-bool")
 	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "not-a-bool")
 	cfg = Load()
-	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled || cfg.Control.DeviceControlV2Enabled {
-		t.Fatalf("invalid control env was accepted: %+v", cfg.Control)
+	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
+		t.Fatalf("invalid control env was accepted or default was lost: %+v", cfg.Control)
+	}
+}
+
+// TestDeviceControlV2EnabledByDefault verifies the default-enabled principle:
+// the V2 dispatcher runs without any allowlist or environment variable, and
+// can still be turned off as an emergency kill switch.
+func TestDeviceControlV2EnabledByDefault(t *testing.T) {
+	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "")
+	cfg := Load()
+	if !cfg.Control.DeviceControlV2Enabled {
+		t.Fatal("device control v2 must be enabled by default")
+	}
+	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "false")
+	cfg = Load()
+	if cfg.Control.DeviceControlV2Enabled {
+		t.Fatal("device control v2 must be disableable as an emergency kill switch")
 	}
 }
 

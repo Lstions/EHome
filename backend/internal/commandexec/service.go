@@ -564,7 +564,7 @@ func definitionFitsCapabilities(def deviceaction.Definition, params json.RawMess
 		if !capabilities.SupportsBoundedBatch || capabilities.MaxBatchSteps == 0 {
 			return fmt.Errorf("bounded batch capability is unavailable")
 		}
-		plan, err := def.CompilePlan(params)
+		plan, err := def.CompilePlanForAddress(params, "1") // fit check is address-agnostic; compile errors surface in dispatch
 		if err != nil {
 			return err
 		}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,12 +21,13 @@ type Config struct {
 }
 
 type ControlConfig struct {
+	// DeviceControlV2Enabled defaults to true: implemented control actions
+	// are available without an environment-variable allowlist.  Turning it
+	// off stops the ChannelCmdV2 dispatcher entirely (emergency kill switch),
+	// which also makes every operation unavailable.
 	DeviceControlV2Enabled bool   `yaml:"device_control_v2_enabled"`
 	LegacyDeviceWriteMode  string `yaml:"legacy_device_write_mode"`
 	RawDiagnosticsEnabled  bool   `yaml:"raw_diagnostics_enabled"`
-	// EnabledDeviceActions contains explicit "device_type/action_id" rollout
-	// selectors. An empty list keeps every built-in action unavailable.
-	EnabledDeviceActions []string `yaml:"enabled_device_actions"`
 }
 
 // ServerConfig holds HTTP server settings
@@ -104,7 +104,7 @@ func defaultConfig() *Config {
 		Log: LogConfig{
 			Level: "info",
 		},
-		Control:        ControlConfig{LegacyDeviceWriteMode: "disabled"},
+		Control:        ControlConfig{DeviceControlV2Enabled: true, LegacyDeviceWriteMode: "disabled"},
 		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
 	}
@@ -176,15 +176,6 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("EHOME_RAW_DIAGNOSTICS_ENABLED", ""); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {
 			cfg.Control.RawDiagnosticsEnabled = enabled
-		}
-	}
-	if v := getEnv("EHOME_ENABLED_DEVICE_ACTIONS", ""); v != "" {
-		items := strings.Split(v, ",")
-		cfg.Control.EnabledDeviceActions = cfg.Control.EnabledDeviceActions[:0]
-		for _, item := range items {
-			if item = strings.TrimSpace(item); item != "" {
-				cfg.Control.EnabledDeviceActions = append(cfg.Control.EnabledDeviceActions, item)
-			}
 		}
 	}
 	if v := getEnv("EHOME_ADMIN_USERNAME", ""); v != "" {

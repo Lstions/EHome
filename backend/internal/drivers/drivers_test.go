@@ -455,6 +455,67 @@ func TestSN3001RainResetPlanGoldenVector(t *testing.T) {
 	}
 }
 
+// TestSN3001SetSensitivityBoundedPlanGoldenVector verifies the set
+// sensitivity action compiles as a write + readback bounded plan whose
+// frames are bound to the EdgeDevice-owned Modbus address.
+func TestSN3001SetSensitivityBoundedPlanGoldenVector(t *testing.T) {
+	d := &SN3001RainDriver{}
+	plan, err := d.CompileControlActionPlanForAddress("set_rain_sensitivity", json.RawMessage(`{"value":60}`), 2)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlanForAddress error = %v", err)
+	}
+	if !plan.AtMostOnce || len(plan.Steps) != 2 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
+		t.Fatalf("step kinds = %+v", []string{plan.Steps[0].Kind, plan.Steps[1].Kind})
+	}
+	// write frame bound to address 2: 02 06 00 52 00 3C + CRC(28 39)
+	wantWrite := []byte{0x02, 0x06, 0x00, 0x52, 0x00, 0x3C, 0x28, 0x39}
+	if got := plan.Steps[0].TXData; string(got) != string(wantWrite) {
+		t.Fatalf("write frame = % X, want % X", got, wantWrite)
+	}
+	// readback frame bound to address 2: 02 03 00 52 00 01 + CRC(25 E8)
+	gotRead := fmt.Sprintf("% X", plan.Steps[1].TXData)
+	if wantRead := "02 03 00 52 00 01 25 E8"; gotRead != wantRead {
+		t.Fatalf("readback frame = %s, want %s", gotRead, wantRead)
+	}
+}
+
+// TestSN3001SetSensitivityBoundedVerify verifies the batch verifier
+// reconciles the write echo and the readback value against the requested
+// sensitivity.
+func TestSN3001SetSensitivityBoundedVerify(t *testing.T) {
+	d := &SN3001RainDriver{}
+	// Two-step batch envelope: [count=2][kind=1, len=8, write echo][kind=2, len=7, readback=0x3C]
+	writeEcho := []byte{0x01, 0x06, 0x00, 0x52, 0x00, 0x3C, 0x28, 0x0A}
+	readback := []byte{0x01, 0x03, 0x02, 0x00, 0x3C, 0xB8, 0x55}
+	raw := []byte{2, 1, 8, 0}
+	raw = append(raw, writeEcho...)
+	raw = append(raw, 2, 7, 0)
+	raw = append(raw, readback...)
+	got, err := d.VerifyControlAction("set_rain_sensitivity", json.RawMessage(`{"value":60}`), raw)
+	if err != nil {
+		t.Fatalf("VerifyControlAction error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "rain_sensitivity" || got[0].Value != 60 || got[1].Name != "set_ack" || got[1].Value != 1 {
+		t.Fatalf("verified result = %+v", got)
+	}
+	// Mismatched readback must fail closed.
+	bad := append([]byte(nil), raw...)
+	// The readback step payload is the last 7 bytes; replace value 0x3C with 0x2D.
+	bad[len(bad)-4] = 0x2D
+	bad[len(bad)-3] = 0x00
+	// Recompute CRC for the modified frame: bytes 0..4 of the readback frame.
+	readbackStart := len(bad) - 7
+	bad[len(bad)-2], bad[len(bad)-1] = 0, 0
+	crc := parser.ModbusCRC16(bad[readbackStart : readbackStart+5])
+	bad[len(bad)-2], bad[len(bad)-1] = byte(crc), byte(crc>>8)
+	if _, err := d.VerifyControlAction("set_rain_sensitivity", json.RawMessage(`{"value":60}`), bad); err == nil {
+		t.Fatal("readback mismatch was accepted")
+	}
+}
+
 func TestSN3001ProtocolActionGoldenVectors(t *testing.T) {
 	d := &SN3001RainDriver{}
 	actions := d.ControlActions()
@@ -685,5 +746,74 @@ func TestFieldsToSensorData_Empty(t *testing.T) {
 	result := fieldsToSensorData([]parser.Field{})
 	if len(result) != 0 {
 		t.Errorf("expected 0, got %d", len(result))
+	}
+}
+
+// TestSN3001SetSensitivityForAddressDispatchVerify covers the dispatch path:
+// Definition.VerifyForAddress routes addressed drivers through
+// VerifyControlActionForAddress, which must decode the bounded batch envelope
+// (raw[0] = step count, not a Modbus unit address) and validate every step
+// frame against the EdgeDevice-owned unit address.
+func TestSN3001SetSensitivityForAddressDispatchVerify(t *testing.T) {
+	d := &SN3001RainDriver{}
+	const addr = uint8(2)
+	// Address-2 write echo + address-2 readback: [count=2][kind=1 len=8 echo][kind=2 len=7 readback]
+	writeEcho := []byte{0x02, 0x06, 0x00, 0x52, 0x00, 0x3C, 0x28, 0x39}
+	readback := []byte{0x02, 0x03, 0x02, 0x00, 0x3C, 0xFC, 0x55}
+	raw := []byte{2, 1, 8, 0}
+	raw = append(raw, writeEcho...)
+	raw = append(raw, 2, 7, 0)
+	raw = append(raw, readback...)
+
+	got, err := d.VerifyControlActionForAddress("set_rain_sensitivity", json.RawMessage(`{"value":60}`), raw, addr)
+	if err != nil {
+		t.Fatalf("VerifyControlActionForAddress error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "rain_sensitivity" || got[0].Value != 60 || got[1].Name != "set_ack" || got[1].Value != 1 {
+		t.Fatalf("verified result = %+v", got)
+	}
+
+	// A batch whose first step echoes the wrong unit address must fail closed.
+	wrongAddr := append([]byte(nil), raw...)
+	wrongAddr[4] = 0x01 // write echo address byte -> 0x01, recompute CRC below
+	crc := parser.ModbusCRC16(wrongAddr[4:12])
+	wrongAddr[10], wrongAddr[11] = byte(crc), byte(crc>>8)
+	if _, err := d.VerifyControlActionForAddress("set_rain_sensitivity", json.RawMessage(`{"value":60}`), wrongAddr, addr); err == nil {
+		t.Fatal("wrong unit address in write echo was accepted")
+	}
+
+	// A batch with a mismatched readback value must fail closed.
+	badValue := append([]byte(nil), raw...)
+	badValue[len(badValue)-4] = 0x2D
+	badValue[len(badValue)-3] = 0x00
+	crc = parser.ModbusCRC16(badValue[len(badValue)-7 : len(badValue)-2])
+	badValue[len(badValue)-2], badValue[len(badValue)-1] = byte(crc), byte(crc>>8)
+	if _, err := d.VerifyControlActionForAddress("set_rain_sensitivity", json.RawMessage(`{"value":60}`), badValue, addr); err == nil {
+		t.Fatal("readback mismatch was accepted")
+	}
+}
+
+// TestSN3001ResetForAddressDispatchVerify covers the reset_rainfall bounded
+// workflow through the ForAddress dispatch path: envelope decoding + per-step
+// address binding remain intact when the device's unit address is not 1.
+func TestSN3001ResetForAddressDispatchVerify(t *testing.T) {
+	d := &SN3001RainDriver{}
+	const addr = uint8(2)
+	readBefore := []byte{0x02, 0x03, 0x02, 0x00, 0x05, 0x3C, 0x47}
+	clearEcho := []byte{0x02, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xC2}
+	readZero := []byte{0x02, 0x03, 0x02, 0x00, 0x00, 0xFC, 0x44}
+	raw := []byte{3, 1, 7, 0}
+	raw = append(raw, readBefore...)
+	raw = append(raw, 1, 8, 0)
+	raw = append(raw, clearEcho...)
+	raw = append(raw, 2, 7, 0)
+	raw = append(raw, readZero...)
+
+	got, err := d.VerifyControlActionForAddress("reset_rainfall", json.RawMessage(`{}`), raw, addr)
+	if err != nil {
+		t.Fatalf("reset VerifyControlActionForAddress error = %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "rainfall" || got[0].Value != 0 || got[1].Name != "reset_ack" || got[1].Value != 1 {
+		t.Fatalf("verified result = %+v", got)
 	}
 }

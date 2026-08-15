@@ -98,8 +98,8 @@ func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 	for _, definition := range definitions {
 		if definition.ID == "set_mos_policy" {
 			mos = true
-			if definition.Enabled || definition.ExecutionShape != "bounded_sequence" || !definition.AtMostOnce || definition.Verification != "readback" {
-				t.Fatalf("MOS policy must be guarded bounded action: %+v", definition)
+			if !definition.Enabled || definition.ExecutionShape != "bounded_sequence" || !definition.AtMostOnce || definition.Verification != "readback" || definition.AvailabilityCode != "" {
+				t.Fatalf("MOS policy must be default-enabled bounded action: %+v", definition)
 			}
 		}
 		if definition.ID == "bms_restart" {
@@ -129,8 +129,11 @@ func TestBoundedPlanDefinitionIsNeverFlattenedIntoSingleStep(t *testing.T) {
 	if _, err := definition.Compile(json.RawMessage(`{}`)); err == nil {
 		t.Fatal("unavailable bounded reset must not compile as a single physical step")
 	}
-	if _, err := definition.CompilePlan(json.RawMessage(`{}`)); err == nil {
-		t.Fatal("hardware-gated bounded reset must not compile for the current node")
+	// Default-enablement principle: the bounded reset carries a trusted
+	// verifier + readback declaration, so its plan compiler must be
+	// reachable at runtime without any environment allowlist.
+	if _, err := definition.CompilePlan(json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("default-enabled bounded reset must compile a plan: %v", err)
 	}
 }
 
@@ -140,7 +143,7 @@ func TestBuiltInRainResetPlanCompilerIsRegistered(t *testing.T) {
 	if !ok {
 		t.Fatal("SN-3001 reset action is missing")
 	}
-	if definition.AvailabilityCode != "hardware_evidence_required" || definition.MaxSteps != 3 {
+	if definition.AvailabilityCode != "" || definition.MaxSteps != 3 {
 		t.Fatalf("unexpected reset gate: %+v", definition)
 	}
 }
@@ -162,5 +165,38 @@ func TestBuiltInSetActionUsesTrustedVerifier(t *testing.T) {
 	result, err := definition.Verify(json.RawMessage(`{}`), []byte{0x06})
 	if err != nil || len(result) != 1 || result[0].Name != "mode_ack" {
 		t.Fatalf("trusted verifier result=%+v err=%v", result, err)
+	}
+}
+
+// TestBuiltInSN3001SettersEnabledByDefault verifies the default-enabled
+// principle: SN-3001 set actions that carry a trusted verifier and a
+// declared readback reconciliation (address/baud via lifecycle side effect)
+// start enabled without any environment-variable allowlist.
+func TestBuiltInSN3001SettersEnabledByDefault(t *testing.T) {
+	registry := NewBuiltInRegistry(nil)
+	for _, actionID := range []string{"set_rain_sensitivity", "set_device_address", "set_baud_rate"} {
+		def, ok := registry.Get("sn3001_rain", actionID)
+		if !ok {
+			t.Fatalf("SN-3001 %s is missing", actionID)
+		}
+		if !def.Enabled {
+			t.Fatalf("SN-3001 %s must be enabled by default (implemented + trusted verifier + readback reconciliation)", actionID)
+		}
+		if def.AvailabilityCode != "" {
+			t.Fatalf("SN-3001 %s must not carry an availability gate", actionID)
+		}
+	}
+	// set_rain_sensitivity is the bounded write+readback workflow.
+	def, ok := registry.Get("sn3001_rain", "set_rain_sensitivity")
+	if !ok || def.ExecutionShape != "bounded_sequence" || def.MaxSteps != 2 {
+		t.Fatalf("set_rain_sensitivity must be bounded_sequence, got %+v", def)
+	}
+	// set_device_address / set_baud_rate stay single-step because the
+	// communication parameter domain changes; lifecycle readback applies.
+	for _, actionID := range []string{"set_device_address", "set_baud_rate"} {
+		def, _ := registry.Get("sn3001_rain", actionID)
+		if def.ExecutionShape != "single" || def.Verification != "readback" {
+			t.Fatalf("%s must be single-step readback-verified, got %+v", actionID, def)
+		}
 	}
 }

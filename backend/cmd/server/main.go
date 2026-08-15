@@ -178,18 +178,6 @@ func main() {
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
 	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
-	for _, selector := range cfg.ControlConfig().EnabledDeviceActions {
-		parts := strings.SplitN(selector, "/", 2)
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-			logger.Warnf("Ignoring invalid device action rollout selector %q; expected device_type/action_id", selector)
-			continue
-		}
-		if err := actionRegistry.SetEnabled(parts[0], parts[1], true); err != nil {
-			logger.Warnf("Ignoring unavailable device action rollout selector %q: %v", selector, err)
-			continue
-		}
-		logger.Infof("Enabled device action rollout: %s", selector)
-	}
 	commandService := commandexec.NewService(db, actionRegistry)
 	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)
 	nodeMgr.SetCommandExecutionService(commandService)

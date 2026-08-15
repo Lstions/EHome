@@ -120,7 +120,7 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	var planSteps []frame.ChannelCmdV2Step
 
 	if definition.ExecutionShape == "bounded_sequence" {
-		plan, planErr := definition.CompilePlan(params)
+		plan, planErr := definition.CompilePlanForAddress(params, edge.HardwareID)
 		if planErr != nil {
 			return DispatchResult{}, planErr
 		}

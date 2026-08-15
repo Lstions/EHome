@@ -45,6 +45,7 @@ type BoundedPlan struct {
 }
 
 type PlanCompiler func(json.RawMessage) (BoundedPlan, error)
+type PlanAddressCompiler func(json.RawMessage, uint8) (BoundedPlan, error)
 
 type Compiler func(json.RawMessage) (SingleStep, error)
 type Verifier func(json.RawMessage, []byte) ([]drivers.SensorData, error)
@@ -73,6 +74,7 @@ type Definition struct {
 	compiler           Compiler
 	addressCompiler    AddressCompiler
 	planCompiler       PlanCompiler
+	planAddrCompiler   PlanAddressCompiler
 	verifier           Verifier
 	addressVerifier    AddressVerifier
 }
@@ -132,8 +134,16 @@ func (r *Registry) Register(def Definition) error {
 			return fmt.Errorf("invalid static action step %q: %w", def.ID, err)
 		}
 	} else if def.AvailabilityCode == "" && def.ExecutionShape == "bounded_sequence" {
-		if err := validatePlan(def.Plan, def.MaxSteps, def.AtMostOnce); err != nil {
-			return fmt.Errorf("invalid action plan %q: %w", def.ID, err)
+		// Bounded plans are either statically declared (def.Plan) or compiled
+		// dynamically at dispatch time (planCompiler/planAddrCompiler).  A
+		// dynamic compiler re-validates the plan against MaxSteps on every
+		// CompilePlan call, so an empty static Plan is legitimate here.
+		if len(def.Plan.Steps) != 0 {
+			if err := validatePlan(def.Plan, def.MaxSteps, def.AtMostOnce); err != nil {
+				return fmt.Errorf("invalid action plan %q: %w", def.ID, err)
+			}
+		} else if def.planCompiler == nil && def.planAddrCompiler == nil {
+			return fmt.Errorf("bounded action %q has no plan source", def.ID)
 		}
 	} else if def.AvailabilityCode == "" && def.ExecutionShape != "single" {
 		return fmt.Errorf("invalid action shape %q", def.ID)
@@ -226,6 +236,37 @@ func (def Definition) CompilePlan(params json.RawMessage) (BoundedPlan, error) {
 		return BoundedPlan{}, fmt.Errorf("action %q has no trusted plan compiler", def.ID)
 	}
 	plan, err := def.planCompiler(append(json.RawMessage(nil), params...))
+	if err != nil {
+		return BoundedPlan{}, fmt.Errorf("compile action plan %q: %w", def.ID, err)
+	}
+	if err := validatePlan(plan, def.MaxSteps, def.AtMostOnce); err != nil {
+		return BoundedPlan{}, fmt.Errorf("compiled action plan %q: %w", def.ID, err)
+	}
+	return clonePlan(plan), nil
+}
+
+// CompilePlanForAddress applies the EdgeDevice-owned physical address to a
+// bounded plan when the trusted driver declares that its protocol embeds one
+// (e.g. Modbus unit address in every plan step).  Non-addressed plans retain
+// the ordinary CompilePlan path.
+func (def Definition) CompilePlanForAddress(params json.RawMessage, hardwareID string) (BoundedPlan, error) {
+	if def.planAddrCompiler == nil {
+		return def.CompilePlan(params)
+	}
+	address, err := ParseHardwareAddress(hardwareID)
+	if err != nil {
+		return BoundedPlan{}, fmt.Errorf("action %q target address: %w", def.ID, err)
+	}
+	if def.AvailabilityCode != "" {
+		return BoundedPlan{}, fmt.Errorf("action %q unavailable: %s", def.ID, def.AvailabilityReason)
+	}
+	if def.ExecutionShape != "bounded_sequence" {
+		return BoundedPlan{}, fmt.Errorf("action %q is not a bounded plan", def.ID)
+	}
+	if def.planAddrCompiler == nil {
+		return BoundedPlan{}, fmt.Errorf("action %q has no trusted plan compiler", def.ID)
+	}
+	plan, err := def.planAddrCompiler(append(json.RawMessage(nil), params...), address)
 	if err != nil {
 		return BoundedPlan{}, fmt.Errorf("compile action plan %q: %w", def.ID, err)
 	}
@@ -369,7 +410,22 @@ func CurrentEngineAllows(def Definition) bool {
 		return true
 	}
 	if def.Semantics == "reset" || def.Semantics == "set" {
-		return def.ExecutionShape == "bounded_sequence"
+		// bounded_sequence: the multi-step workflow itself performs the
+		// write + readback reconciliation inside one durable batch.
+		if def.ExecutionShape == "bounded_sequence" {
+			return true
+		}
+		// single + ack-echo + readback verification: the driver's write
+		// response is an explicit echo of its own requested frame (transport
+		// ACK is not evidence), and the confirming readback is performed by
+		// the command lifecycle after the write (e.g. SN-3001 address/baud
+		// changes reconcile hardware_id/bus_config and re-push the manifest,
+		// then a subsequent read verifies the new parameter domain).  This is
+		// still a write + readback reconciliation, just split across the
+		// command lifecycle instead of one physical batch.
+		if def.ExecutionShape == "single" && def.Verification == "readback" && def.verifier != nil {
+			return true
+		}
 	}
 	return false
 }
@@ -428,22 +484,26 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				}
 			}
 			var planCompiler PlanCompiler
+			var planAddrCompiler PlanAddressCompiler
 			if action.ExecutionShape == "bounded_sequence" {
-				driverPlanCompiler, ok := driver.(drivers.ControlActionPlanCompiler)
-				if ok {
+				if driverPlanCompiler, ok := driver.(drivers.ControlActionPlanCompiler); ok {
 					actionID := action.ID
 					planCompiler = func(params json.RawMessage) (BoundedPlan, error) {
 						compiled, err := driverPlanCompiler.CompileControlActionPlan(actionID, params)
 						if err != nil {
 							return BoundedPlan{}, err
 						}
-						plan := BoundedPlan{AtMostOnce: compiled.AtMostOnce, RequiresFinally: compiled.RequiresFinally}
-						for _, step := range compiled.Steps {
-							plan.Steps = append(plan.Steps, PlanStep{ID: step.ID, Kind: step.Kind, SingleStep: SingleStep{
-								TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS,
-							}})
+						return planFromDriver(compiled), nil
+					}
+				}
+				if driverPlanAddrCompiler, ok := driver.(drivers.ControlActionPlanCompilerForAddress); ok {
+					actionID := action.ID
+					planAddrCompiler = func(params json.RawMessage, address uint8) (BoundedPlan, error) {
+						compiled, err := driverPlanAddrCompiler.CompileControlActionPlanForAddress(actionID, params, address)
+						if err != nil {
+							return BoundedPlan{}, err
 						}
-						return plan, nil
+						return planFromDriver(compiled), nil
 					}
 				}
 			}
@@ -467,7 +527,27 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 					return targetVerifier.VerifyControlActionForAddress(actionID, params, raw, address)
 				}
 			}
-			enabled := action.Enabled && action.Semantics == "read" && action.Risk == "low" && action.ExecutionShape == "single" && !action.AtMostOnce
+			// 默认启用原则：功能实现出来就应该默认可用。不需要环境变量白名单
+			// 来"批准"一个已实现的受控操作——真正的门禁是运行时 gate
+			// (dispatchEnabled / node capability / edge/node 状态 / manifest /
+			// 通道上报)。但 fail-closed 仍保留：只有具备完整执行链(compiler/
+			// planCompiler/verifier)且声明了对账语义(Verification)的操作才默认启用；
+			// 尚未具备完整执行链或协议未验证的操作保持 disabled。
+			//
+			// set/reset: 写操作必须声明对账语义(readback = 写入后读回验证；
+			// observation = 写后观察确认)且具备可信 verifier，否则强制 disabled。
+			// 具备完整执行链的写操作忽略驱动出厂 Enabled:false（如 BMS
+			// set_mos_policy 有 bounded compiler + verifier + readback 声明，
+			// 无需白名单即可启用）；仅带 AvailabilityCode 的仍保持禁用（协议
+			// 未冻结等显式门禁）。
+			enabled := action.Enabled
+			if action.Semantics == "set" || action.Semantics == "reset" {
+				if verifier != nil && action.Verification != "" && action.AvailabilityCode == "" {
+					enabled = true
+				} else {
+					enabled = false
+				}
+			}
 			if err := r.Register(Definition{ID: action.ID, Version: action.Version, Name: action.Name,
 				Description: action.Description, DeviceType: deviceType, Semantics: action.Semantics,
 				Risk: action.Risk, ExecutionShape: action.ExecutionShape, Verification: action.Verification,
@@ -475,12 +555,24 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 				AvailabilityCode: action.AvailabilityCode, AvailabilityReason: action.AvailabilityReason,
 				InputSchema: schema, addressCompiler: addressCompiler, addressVerifier: addressVerifier,
 				SingleStep: SingleStep{TXData: action.TXData, ReadSize: action.ReadSize,
-					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, Plan: BoundedPlan{}, compiler: compiler, planCompiler: planCompiler, verifier: verifier}); err != nil {
+					RXTimeoutMS: action.RXTimeoutMS, PostTXDelayMS: action.PostTXDelayMS}, Plan: BoundedPlan{}, compiler: compiler, planCompiler: planCompiler, planAddrCompiler: planAddrCompiler, verifier: verifier}); err != nil {
 				panic(err)
 			}
 		}
 	}
 	return r
+}
+
+// planFromDriver converts a driver-owned CompiledControlPlan into the
+// deviceaction.BoundedPlan representation shared by the dispatcher.
+func planFromDriver(compiled drivers.CompiledControlPlan) BoundedPlan {
+	plan := BoundedPlan{AtMostOnce: compiled.AtMostOnce, RequiresFinally: compiled.RequiresFinally}
+	for _, step := range compiled.Steps {
+		plan.Steps = append(plan.Steps, PlanStep{ID: step.ID, Kind: step.Kind, SingleStep: SingleStep{
+			TXData: step.TXData, ReadSize: step.ReadSize, RXTimeoutMS: step.RXTimeoutMS, PostTXDelayMS: step.PostTXDelayMS,
+		}})
+	}
+	return plan
 }
 
 func schemaFromDriver(parameters []drivers.ControlParameter) (ParameterSchema, error) {

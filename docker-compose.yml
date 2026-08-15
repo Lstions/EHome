@@ -78,8 +78,6 @@ services:
       # CORS origin allowlist (comma-separated). Empty = same-origin only (no CORS middleware).
       # Only needed when the frontend is served from a different origin than the backend.
       EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
-      EHOME_DEVICE_CONTROL_V2_ENABLED: ${EHOME_DEVICE_CONTROL_V2_ENABLED:-false}
-      EHOME_ENABLED_DEVICE_ACTIONS: ${EHOME_ENABLED_DEVICE_ACTIONS:-}
       # 数据保留期快照 (天): 新建逻辑设备 retention_days 的默认值; 存量不受后续变更影响
       EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-365}
       EHOME_STATIC_DIR: /app/static/dist

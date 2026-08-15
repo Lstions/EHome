@@ -39,13 +39,17 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	// schemas and evidence requirements are frozen now, while physical
 	// execution remains blocked until a real BMS proves ACK + readback and the
 	// node has durable bounded-plan replay protection.
+	//
+	// set_mos_policy shipped default-enabled once the bounded compiler,
+	// verifier and readback reconciliation were implemented (default-enablement
+	// principle, 2026-08-14); the other entries keep their gates because their
+	// protocol steps are not yet frozen against physical responses.
 	actions = append(actions,
 		ControlAction{
 			ID: "set_mos_policy", Version: 1, Name: "设置充放电 MOS 软件策略",
-			Description: "一次提交充电/放电两个软件关闭位；必须 ACK 后读取 fet_status 对账",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "hardware_evidence_required",
-			AvailabilityReason: "缺少真实 BMS 的 ACK、fet_status 读回和恢复证据",
+			Description: "一次提交充电/放电两个软件关闭位；bounded 写+读回 fet_status 对账",
+			Semantics:   "set", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "charge_software_closed", Type: "boolean", Required: true},
 				{Name: "discharge_software_closed", Type: "boolean", Required: true},

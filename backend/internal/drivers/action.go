@@ -113,6 +113,15 @@ type ControlActionPlanCompiler interface {
 	CompileControlActionPlan(actionID string, params json.RawMessage) (CompiledControlPlan, error)
 }
 
+// ControlActionPlanCompilerForAddress is the plan-level counterpart of
+// ControlActionAddressCompiler.  Drivers whose bounded plans embed a Modbus
+// unit address implement this interface so a shared multi-device bus never
+// executes a plan against the hard-coded address 1.  When implemented, the
+// dispatcher binds every plan step to the EdgeDevice-owned physical address.
+type ControlActionPlanCompilerForAddress interface {
+	CompileControlActionPlanForAddress(actionID string, params json.RawMessage, address uint8) (CompiledControlPlan, error)
+}
+
 // ControlActionVerifier is the trusted, action-specific interpretation of a
 // successful ChannelCmdV2 Final.  It is intentionally separate from
 // ParseData: a setter's ACK or readback is not a sensor sample.  Future set

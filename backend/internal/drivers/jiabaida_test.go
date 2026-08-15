@@ -537,7 +537,16 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 		"read_protection_count": {0xDD, 0xA5, 0xAA, 0x00, 0xFF, 0x56, 0x77},
 	}
 	for _, action := range actions {
-		if action.ID == "set_mos_policy" || action.ID == "read_protection_parameters" || action.ID == "read_system_parameters" || action.ID == "bms_restart" {
+		if action.ID == "set_mos_policy" {
+			// Default-enablement: bounded compiler + verifier + readback
+			// declaration means the MOS policy switch is usable without an
+			// allowlist (2026-08-14).
+			if !action.Enabled || action.AvailabilityCode != "" || action.ExecutionShape != "bounded_sequence" || action.Verification != "readback" {
+				t.Fatalf("MOS policy must be default-enabled bounded action: %+v", action)
+			}
+			continue
+		}
+		if action.ID == "read_protection_parameters" || action.ID == "read_system_parameters" || action.ID == "bms_restart" {
 			if action.Enabled || action.AvailabilityCode == "" {
 				t.Fatalf("guarded action became available: %+v", action)
 			}

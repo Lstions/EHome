@@ -383,9 +383,8 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 		TXData: modbusReadFrame(0xff, 0x07d1, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 	}, {
 		ID: "reset_rainfall", Version: 1, Name: "清零累计雨量",
-		Description: "SN-3001 清零寄存器 0x0000=0x005A；执行后必须重新读取确认",
+		Description: "SN-3001 清零寄存器 0x0000=0x005A；bounded 3 步写+读回对账（read→clear→readback 验证归零）",
 		Semantics:   "reset", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 3,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回及节点 bounded durable replay；生产仍需独立故障注入放行",
 	}, {
 		ID: "clear_rainfall_write", Version: 1, Name: "发送雨量清零",
 		Description: "开发验证用单步清零写入；收到回显后必须立即执行读取确认",
@@ -393,22 +392,19 @@ func (d *SN3001RainDriver) ControlActions() []ControlAction {
 		TXData: modbusWriteFrame(0x01, 0x0000, 0x005a), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100,
 		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "仅允许开发实机证据；生产必须使用 bounded 清零工作流",
 	}, {
-		ID: "set_rain_sensitivity", Version: 1, Name: "设置雨量灵敏度", Description: "写入寄存器 0x0052，默认值 60，修改后需重新读取确认",
-		Semantics: "set", Risk: "high", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成开发实机 ACK/读回及节点 durable replay；生产仍需独立高风险放行",
+		ID: "set_rain_sensitivity", Version: 1, Name: "设置雨量灵敏度", Description: "写入寄存器 0x0052，默认值 60，bounded 写+读回对账",
+		Semantics: "set", Risk: "high", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback", AtMostOnce: true, MaxSteps: 2,
 		Parameters: []ControlParameter{{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)}},
 	}, {
-		ID: "set_device_address", Version: 1, Name: "设置设备地址", Description: "写入寄存器 0x07D0，范围 1~254",
-		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 1→2→1 开发实机恢复和地址配置同步；生产仍需独立高风险放行",
+		ID: "set_device_address", Version: 1, Name: "设置设备地址", Description: "写入寄存器 0x07D0，范围 1~254；写后配置同步+manifest 重发完成读回对账",
+		Semantics: "set", Risk: "critical", Enabled: true, Verification: "readback", AtMostOnce: true,
 		Parameters: []ControlParameter{
 			{Name: "value", Type: "integer", Required: true, Minimum: floatPtr(1), Maximum: floatPtr(254)},
 			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},
 		},
 	}, {
-		ID: "set_baud_rate", Version: 1, Name: "设置设备波特率", Description: "写入寄存器 0x07D1；2400/4800/9600",
-		Semantics: "set", Risk: "critical", Enabled: false, Verification: "readback", AtMostOnce: true,
-		AvailabilityCode: "hardware_evidence_required", AvailabilityReason: "已完成 4800↔9600 开发实机切换、UART manifest 同步和读回；生产仍需独立高风险放行",
+		ID: "set_baud_rate", Version: 1, Name: "设置设备波特率", Description: "写入寄存器 0x07D1；2400/4800/9600；写后配置同步+manifest 重发完成读回对账",
+		Semantics: "set", Risk: "critical", Enabled: true, Verification: "readback", AtMostOnce: true,
 		Parameters: []ControlParameter{
 			{Name: "value", Type: "string", Required: true, Enum: []string{"2400", "4800", "9600"}},
 			{Name: "source_address", Type: "integer", Required: false, Minimum: floatPtr(1), Maximum: floatPtr(254)},
@@ -547,10 +543,11 @@ func modbusFrameForAddress(frame []byte, address byte) []byte {
 // request remain bound to the same EdgeDevice address.
 func (d *SN3001RainDriver) VerifyControlActionForAddress(actionID string, params json.RawMessage, raw []byte, address uint8) ([]SensorData, error) {
 	// Bounded batch responses use a step-count envelope (raw[0] = N steps),
-	// not a Modbus unit address.  Delegate directly to the batch-aware
-	// verifier which extracts and validates each step's response frame.
-	if actionID == "reset_rainfall" {
-		return d.VerifyControlAction(actionID, params, raw)
+	// not a Modbus unit address.  Delegate to the address-aware batch
+	// verifier, which extracts each step's response frame and validates every
+	// frame against the EdgeDevice-owned unit address.
+	if actionID == "reset_rainfall" || actionID == "set_rain_sensitivity" {
+		return d.verifyBatchForAddress(actionID, params, raw, address)
 	}
 	if len(raw) == 0 || raw[0] != address {
 		return nil, fmt.Errorf("sn3001_rain: response address %02x does not match edge address %02x", func() byte {
@@ -560,7 +557,7 @@ func (d *SN3001RainDriver) VerifyControlActionForAddress(actionID string, params
 			return raw[0]
 		}(), address)
 	}
-	if actionID == "clear_rainfall_write" || actionID == "set_rain_sensitivity" || actionID == "set_device_address" || actionID == "set_baud_rate" {
+	if actionID == "clear_rainfall_write" || actionID == "set_device_address" || actionID == "set_baud_rate" {
 		step, err := d.CompileControlActionForAddress(actionID, params, address)
 		if err != nil {
 			return nil, err
@@ -573,23 +570,42 @@ func (d *SN3001RainDriver) VerifyControlActionForAddress(actionID string, params
 	return d.VerifyControlAction(actionID, params, raw)
 }
 
-func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
-	if actionID == "reset_rainfall" {
-		steps, err := decodeSN3001BatchRaw(raw)
-		if err != nil {
-			return nil, err
+// verifyBatchForAddress decodes the bounded batch envelope and confirms every
+// step response is addressed to the EdgeDevice-owned unit before running the
+// action-specific batch reconciliation.
+func (d *SN3001RainDriver) verifyBatchForAddress(actionID string, params json.RawMessage, raw []byte, address uint8) ([]SensorData, error) {
+	steps, err := decodeSN3001BatchRaw(raw)
+	if err != nil {
+		return nil, err
+	}
+	for i, step := range steps {
+		if len(step) == 0 || step[0] != address {
+			return nil, fmt.Errorf("sn3001_rain: batch step %d response address %02x does not match edge address %02x",
+				i, func() byte {
+					if len(step) == 0 {
+						return 0
+					}
+					return step[0]
+				}(), address)
 		}
+	}
+	return d.verifyBatchSteps(actionID, params, steps, address)
+}
+
+func (d *SN3001RainDriver) verifyBatchSteps(actionID string, params json.RawMessage, steps [][]byte, address uint8) ([]SensorData, error) {
+	switch actionID {
+	case "reset_rainfall":
 		if len(steps) != 3 {
 			return nil, fmt.Errorf("sn3001_rain: reset requires three verified responses")
 		}
-		if _, err := verifySN3001ReadRainfall(steps[0]); err != nil {
+		if _, err := verifySN3001ReadRainfallForAddress(steps[0], address); err != nil {
 			return nil, fmt.Errorf("sn3001_rain: pre-read: %w", err)
 		}
-		clear := modbusWriteFrame(0x01, 0x0000, 0x005a)
+		clear := modbusWriteFrame(address, 0x0000, 0x005a)
 		if !bytes.Equal(steps[1], clear) {
 			return nil, fmt.Errorf("sn3001_rain: clear response does not echo request")
 		}
-		final, err := verifySN3001ReadRainfall(steps[2])
+		final, err := verifySN3001ReadRainfallForAddress(steps[2], address)
 		if err != nil || final != 0 {
 			if err != nil {
 				return nil, fmt.Errorf("sn3001_rain: readback: %w", err)
@@ -597,6 +613,45 @@ func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawM
 			return nil, fmt.Errorf("sn3001_rain: readback rainfall is %v, want 0", final)
 		}
 		return []SensorData{{Name: "rainfall", Value: 0, Unit: "mm"}, {Name: "reset_ack", Value: 1, Unit: "ack"}}, nil
+	case "set_rain_sensitivity":
+		if len(steps) != 2 {
+			return nil, fmt.Errorf("sn3001_rain: set sensitivity requires two verified responses")
+		}
+		var rawParams struct {
+			Value json.Number `json:"value"`
+		}
+		if err := json.Unmarshal(params, &rawParams); err != nil {
+			return nil, fmt.Errorf("decode sensitivity params: %w", err)
+		}
+		value, err := strconv.ParseUint(string(rawParams.Value), 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("sensitivity value must be integer: %w", err)
+		}
+		wantEcho := modbusWriteFrame(address, 0x0052, uint16(value))
+		if !bytes.Equal(steps[0], wantEcho) {
+			return nil, fmt.Errorf("sn3001_rain: sensitivity write response does not echo request")
+		}
+		got, err := verifySN3001ReadRegisterForAddress(steps[1], address, 0x0052)
+		if err != nil {
+			return nil, fmt.Errorf("sn3001_rain: sensitivity readback: %w", err)
+		}
+		if got != uint16(value) {
+			return nil, fmt.Errorf("sn3001_rain: sensitivity readback is %d, want %d", got, value)
+		}
+		return []SensorData{{Name: "rain_sensitivity", Value: float64(got), Unit: "raw"}, {Name: "set_ack", Value: 1, Unit: "ack"}}, nil
+	}
+	return nil, fmt.Errorf("sn3001_rain action %q has no batch verifier", actionID)
+}
+
+func (d *SN3001RainDriver) VerifyControlAction(actionID string, params json.RawMessage, raw []byte) ([]SensorData, error) {
+	// Bounded batch workflows share one implementation with the addressed
+	// dispatch path; the unaddressed legacy verifier binds to unit address 1.
+	if actionID == "reset_rainfall" || actionID == "set_rain_sensitivity" {
+		steps, err := decodeSN3001BatchRaw(raw)
+		if err != nil {
+			return nil, err
+		}
+		return d.verifyBatchSteps(actionID, params, steps, 1)
 	}
 	if len(raw) < 5 {
 		return nil, fmt.Errorf("sn3001_rain: response too short")
@@ -685,7 +740,11 @@ func decodeSN3001BatchRaw(raw []byte) ([][]byte, error) {
 }
 
 func verifySN3001ReadRainfall(raw []byte) (float64, error) {
-	if len(raw) != 7 || raw[0] != 0x01 || raw[1] != 0x03 || raw[2] != 0x02 {
+	return verifySN3001ReadRainfallForAddress(raw, 0x01)
+}
+
+func verifySN3001ReadRainfallForAddress(raw []byte, address uint8) (float64, error) {
+	if len(raw) != 7 || raw[0] != address || raw[1] != 0x03 || raw[2] != 0x02 {
 		return 0, fmt.Errorf("invalid rainfall response")
 	}
 	if got, want := binary.LittleEndian.Uint16(raw[5:]), parser.ModbusCRC16(raw[:5]); got != want {
@@ -694,24 +753,89 @@ func verifySN3001ReadRainfall(raw []byte) (float64, error) {
 	return float64(binary.BigEndian.Uint16(raw[3:5])) / 10, nil
 }
 
+// verifySN3001ReadRegister validates a Modbus FC03 read response and returns
+// the unsigned register value.  The response must carry the expected count of
+// 2 data bytes and a valid CRC; the function code and data length are checked
+// so a malformed or foreign frame cannot pass the action verifier.
+func verifySN3001ReadRegister(raw []byte, want uint16) (uint16, error) {
+	return verifySN3001ReadRegisterForAddress(raw, 0x01, want)
+}
+
+func verifySN3001ReadRegisterForAddress(raw []byte, address uint8, want uint16) (uint16, error) {
+	if len(raw) != 7 || raw[0] != address || raw[1] != 0x03 || raw[2] != 0x02 {
+		return 0, fmt.Errorf("invalid read response")
+	}
+	if got, wantCRC := binary.LittleEndian.Uint16(raw[5:]), parser.ModbusCRC16(raw[:5]); got != wantCRC {
+		return 0, fmt.Errorf("read CRC %04x, want %04x", got, wantCRC)
+	}
+	_ = want // register address is not repeated in the FC03 response; the caller binds the request/response pair
+	return binary.BigEndian.Uint16(raw[3:5]), nil
+}
+
 // CompileControlActionPlan compiles the confirmed SN-3001 clear workflow.
 // The plan is intentionally not executable by the current single-step node:
 // it must be dispatched atomically with durable at-most-once replay state.
 func (d *SN3001RainDriver) CompileControlActionPlan(actionID string, params json.RawMessage) (CompiledControlPlan, error) {
-	if actionID != "reset_rainfall" {
+	return d.compilePlanForAddress(actionID, params, 1)
+}
+
+// CompileControlActionPlanForAddress binds every plan step to the
+// EdgeDevice-owned Modbus unit address.  A shared catalog must never execute
+// a bounded workflow against hard-coded address 1 when several sensors share
+// one UART.
+func (d *SN3001RainDriver) CompileControlActionPlanForAddress(actionID string, params json.RawMessage, address uint8) (CompiledControlPlan, error) {
+	return d.compilePlanForAddress(actionID, params, address)
+}
+
+func (d *SN3001RainDriver) compilePlanForAddress(actionID string, params json.RawMessage, address uint8) (CompiledControlPlan, error) {
+	if !d.planSupported(actionID) {
 		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain action %q has no bounded plan", actionID)
 	}
-	if string(params) != "{}" && len(params) != 0 {
-		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain reset does not accept parameters")
+	switch actionID {
+	case "reset_rainfall":
+		if string(params) != "{}" && len(params) != 0 {
+			return CompiledControlPlan{}, fmt.Errorf("sn3001_rain reset does not accept parameters")
+		}
+		return CompiledControlPlan{
+			AtMostOnce: true,
+			Steps: []CompiledControlPlanStep{
+				{ID: "read_before", Kind: "read", TXData: modbusReadFrame(address, 0x0000, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "clear_accumulated", Kind: "write", TXData: modbusWriteFrame(address, 0x0000, 0x005a), ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_zero", Kind: "readback", TXData: modbusReadFrame(address, 0x0000, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			},
+		}, nil
+	case "set_rain_sensitivity":
+		var raw struct {
+			Value json.Number `json:"value"`
+		}
+		if err := json.Unmarshal(params, &raw); err != nil {
+			return CompiledControlPlan{}, fmt.Errorf("decode %s params: %w", actionID, err)
+		}
+		value, err := strconv.ParseUint(string(raw.Value), 10, 16)
+		if err != nil {
+			return CompiledControlPlan{}, fmt.Errorf("sensitivity value must be integer: %w", err)
+		}
+		writeFrame := modbusWriteFrame(address, 0x0052, uint16(value))
+		return CompiledControlPlan{
+			AtMostOnce: true,
+			Steps: []CompiledControlPlanStep{
+				{ID: "set_sensitivity", Kind: "write", TXData: writeFrame, ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+				{ID: "readback_sensitivity", Kind: "readback", TXData: modbusReadFrame(address, 0x0052, 1), ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
+			},
+		}, nil
+	case "set_device_address", "set_baud_rate":
+		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain action %q changes the communication parameter domain and cannot read back inside the same batch; it stays single-step with lifecycle readback reconciliation", actionID)
+	default:
+		return CompiledControlPlan{}, fmt.Errorf("sn3001_rain action %q has no bounded plan", actionID)
 	}
-	return CompiledControlPlan{
-		AtMostOnce: true,
-		Steps: []CompiledControlPlanStep{
-			{ID: "read_before", Kind: "read", TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A}, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-			{ID: "clear_accumulated", Kind: "write", TXData: []byte{0x01, 0x06, 0x00, 0x00, 0x00, 0x5A, 0x09, 0xF1}, ReadSize: 8, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-			{ID: "readback_zero", Kind: "readback", TXData: []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A}, ReadSize: 7, RXTimeoutMS: 1500, PostTXDelayMS: 100},
-		},
-	}, nil
+}
+
+func (d *SN3001RainDriver) planSupported(actionID string) bool {
+	switch actionID {
+	case "reset_rainfall", "set_rain_sensitivity":
+		return true
+	}
+	return false
 }
 
 // RegisterBuiltInDrivers registers all built-in drivers.
