@@ -81,6 +81,14 @@
       <!-- Cell voltage history trend -->
       <BmsCellVoltageHistoryChart ref="cellVoltageHistoryRef" :device-id="deviceId" :cell-count="16" />
 
+      <!-- 运行趋势（历史数据多指标） -->
+      <HistoryChartSection
+        ref="historyChartRef"
+        :device-id="deviceId"
+        :device-type="device.device_type"
+        :device-type-text="deviceTypeText"
+      />
+
       <!-- Temperature & MOS status -->
       <el-row :gutter="20" style="margin-top: 20px;">
         <el-col :xs="24" :sm="12">
@@ -89,9 +97,8 @@
             <div class="temp-list">
               <div v-for="(temp, i) in tempProbes" :key="i" class="temp-item">
                 <span class="temp-label">探头{{ i + 1 }}</span>
-                <el-tag :type="temp > 60 ? 'danger' : temp > 45 ? 'warning' : 'success'" size="small">
-                  {{ temp.toFixed(1) }}°C
-                </el-tag>
+                <span class="temp-value" :class="`is-${tempLevel(temp)}`">{{ temp.toFixed(1) }}°C</span>
+                <el-tag :type="tempLevel(temp)" size="small">{{ tempStatus(temp) }}</el-tag>
               </div>
               <el-empty v-if="tempProbes.length === 0" description="无温度数据" :image-size="60" />
             </div>
@@ -99,7 +106,12 @@
         </el-col>
         <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
-            <template #header><span>MOS状态</span></template>
+            <template #header>
+              <div class="mos-header">
+                <span>MOS状态</span>
+                <span class="mos-hint">开关控制请使用下方「受控操作」</span>
+              </div>
+            </template>
             <BmsMosStatus :data="latestData" />
           </el-card>
         </el-col>
@@ -117,38 +129,32 @@
         <BmsProtectionGrid :data="latestData" />
       </el-card>
 
-      <!-- Realtime data stream (collapsible) -->
-      <el-collapse v-model="activeCollapses" style="margin-top: 20px;">
-        <el-collapse-item name="realtime">
-          <template #title>
-            <span>实时数据流</span>
-            <el-tag size="small" type="success" style="margin-left: 8px;">{{ realtimeCount }} 条</el-tag>
-          </template>
-          <RealtimeDataList
-            :items="realtimeDataItems"
-            :auto-scroll="true"
-            :device-type="device?.device_type"
-            @clear="clearRealtimeData"
-          />
-        </el-collapse-item>
-      </el-collapse>
-
-      <!-- Command frequency & operations (collapsible) -->
-      <el-collapse v-model="activeCollapses" style="margin-top: 20px;">
-        <el-collapse-item name="config">
-          <template #title><span>指令频率配置</span></template>
-          <CommandFrequencySection :device-id="deviceId" embedded />
+      <!-- 底部：实时数据流（左） + 指令频率/受控操作/操作历史（右） -->
+      <el-row :gutter="20" style="margin-top: 20px;" class="bottom-row">
+        <el-col :xs="24" :md="14">
+          <el-card shadow="hover">
+            <template #header>
+              <div class="realtime-header">
+                <span>实时数据流</span>
+                <el-tag size="small" type="success">{{ realtimeCount }} 条</el-tag>
+              </div>
+            </template>
+            <RealtimeDataList
+              :items="realtimeDataItems"
+              :auto-scroll="true"
+              :device-type="device?.device_type"
+              @clear="clearRealtimeData"
+            />
+          </el-card>
+        </el-col>
+        <el-col :xs="24" :md="10">
+          <el-card shadow="hover" class="command-card">
+            <template #header><span>指令频率配置</span></template>
+            <CommandFrequencySection :device-id="deviceId" embedded />
+          </el-card>
           <DeviceControlPanel :device-id="deviceId" />
-        </el-collapse-item>
-      </el-collapse>
-
-      <!-- History chart -->
-      <HistoryChartSection
-        ref="historyChartRef"
-        :device-id="deviceId"
-        :device-type="device.device_type"
-        :device-type-text="deviceTypeText"
-      />
+        </el-col>
+      </el-row>
     </template>
   </div>
 </template>
@@ -192,11 +198,16 @@ const handleRefresh = () => composableHandleRefresh(() => {
 
 const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : 'BMS')
 
-// 折叠面板状态（默认全部折叠）
-const activeCollapses = ref<string[]>([])
-
 // 实时数据条数
 const realtimeCount = computed(() => realtimeDataItems.value.length)
+
+// 温度探头分档：>60°C 过高(danger)，>45°C 偏高(warning)，其余正常(success)
+function tempLevel(temp: number): 'success' | 'warning' | 'danger' {
+  return temp > 60 ? 'danger' : temp > 45 ? 'warning' : 'success'
+}
+function tempStatus(temp: number): string {
+  return temp > 60 ? '过高' : temp > 45 ? '偏高' : '正常'
+}
 
 // Extract cell voltages from last_data: cell_voltage_1..16 or cell_v_1..16
 const cellVoltages = computed<number[]>(() => {
@@ -264,11 +275,43 @@ onMounted(() => {
   margin-left: auto;
 }
 
-.temp-list { display: flex; flex-direction: row; gap: 8px; }
-.temp-item {
-  flex: 1;
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 12px; background: var(--el-fill-color-lighter); border-radius: 6px;
+.temp-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
 }
-.temp-label { font-size: 13px; color: var(--el-text-color-regular); }
+.temp-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 8px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 8px;
+}
+.temp-label { font-size: 12px; color: var(--el-text-color-regular); }
+.temp-value { font-size: 18px; font-weight: 600; }
+.temp-value.is-success { color: var(--el-color-success); }
+.temp-value.is-warning { color: var(--el-color-warning); }
+.temp-value.is-danger { color: var(--el-color-danger); }
+
+.mos-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mos-hint { font-size: 12px; font-weight: normal; color: var(--el-text-color-secondary); }
+
+.realtime-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 992px) {
+  /* 右列（指令频率/受控操作）在平板以下堆叠到实时数据流下方，补间距 */
+  .bottom-row .command-card { margin-top: 20px; }
+}
 </style>

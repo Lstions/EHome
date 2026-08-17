@@ -598,8 +598,42 @@ describe('edgeDeviceApi', () => {
   it('getDetail with envelope data', async () => {
     mockClient.get.mockResolvedValue({ data: { id: 1, name: 'dev1', status: 'online' } })
     const res = await edgeDeviceApi.getDetail(1)
+
     expect(res.id).toBe(1)
     expect(res.status).toBe('online')
+  })
+
+  it('getDetail maps config_version and node.firmware_version', async () => {
+    mockClient.get.mockResolvedValue({
+      data: {
+        id: 1,
+        name: 'bms-1',
+        status: 'active',
+        node_id: 'F0F5BDFFFE02',
+        config_version: 'v2-abc123',
+        node: { id: 7, name: 'node-A', firmware_version: '2.5.21' },
+      },
+    })
+    const res = await edgeDeviceApi.getDetail(1)
+    expect(res.config_version).toBe('v2-abc123')
+    expect(res.node).toEqual({ id: 7, name: 'node-A', firmware_version: '2.5.21' })
+  })
+
+  it('getDetail omits empty config_version and node firmware', async () => {
+    mockClient.get.mockResolvedValue({
+      data: { id: 1, name: 'bms-1', status: 'active', node_id: 'F0F5BDFFFE02', config_version: '', node: { id: 7, name: 'node-A' } },
+    })
+    const res = await edgeDeviceApi.getDetail(1)
+    expect(res.config_version).toBeUndefined()
+    expect(res.node?.firmware_version).toBeUndefined()
+  })
+
+  it('getDetail keeps an unnamed node for id/firmware (display falls back to node_id)', async () => {
+    mockClient.get.mockResolvedValue({
+      data: { id: 1, name: 'bms-1', status: 'active', node_id: 'F0F5BDFFFE02', node: { id: 1, name: '', firmware_version: '2.5.21' } },
+    })
+    const res = await edgeDeviceApi.getDetail(1)
+    expect(res.node).toEqual({ id: 1, name: '', firmware_version: '2.5.21' })
   })
 
   it('getDetail with bare object', async () => {
@@ -743,10 +777,10 @@ describe('edgeDeviceApi', () => {
     expect(res.items[0].node).toEqual({ id: 5, name: 'node5' })
   })
 
-  it('normalize omits node when no name', async () => {
+  it('normalize keeps an unnamed node for its id (link/firmware survive)', async () => {
     mockClient.get.mockResolvedValue([{ id: 1, node: { id: 5 } }])
     const res = await edgeDeviceApi.getList()
-    expect(res.items[0].node).toBeUndefined()
+    expect(res.items[0].node).toEqual({ id: 5, name: '' })
   })
 })
 

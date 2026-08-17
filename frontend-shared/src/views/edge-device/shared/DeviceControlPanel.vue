@@ -2,8 +2,23 @@
   <el-card class="panel" shadow="hover" data-testid="operation-buttons">
     <template #header><div class="header"><span>受控操作</span><el-tag v-if="!ws.isConnected" type="info" size="small">实时连接断开</el-tag></div></template>
     <el-alert v-if="available.length === 0" type="info" :closable="false" title="当前没有可执行的受控操作" />
-    <div v-else class="actions"><el-button v-for="action in available" :key="action.definition.id" type="primary" :loading="submitting === action.definition.id" @click="begin(action.definition)">{{ action.definition.name }}</el-button></div>
-    <el-collapse v-if="unavailable.length" class="unavailable"><el-collapse-item title="不可用操作" name="unavailable"><p v-for="action in unavailable" :key="action.definition.id">{{ action.definition.name }}：{{ availabilityReason(action) }}</p></el-collapse-item></el-collapse>
+    <template v-else>
+      <div class="ops-sub">当前设备可执行的受控操作</div>
+      <div class="op-list">
+        <div v-for="action in available" :key="action.definition.id" class="op-item" :class="{ busy: submitting === action.definition.id }" role="button" tabindex="0" @click="begin(action.definition)" @keydown.enter.space.prevent="begin(action.definition)">
+          <el-icon :size="18" class="op-icon"><component :is="actionIcon(action.definition)" /></el-icon>
+          <div class="op-text">
+            <div class="op-name">
+              <span>{{ action.definition.name }}</span>
+              <el-tag v-if="action.definition.risk === 'critical'" type="danger" size="small" effect="plain">严重风险</el-tag>
+              <el-tag v-else-if="action.definition.risk === 'high'" type="warning" size="small" effect="plain">高风险</el-tag>
+            </div>
+            <div v-if="action.definition.description" class="op-desc">{{ action.definition.description }}</div>
+          </div>
+        </div>
+      </div>
+    </template>
+    <el-collapse v-if="unavailable.length" class="unavailable"><el-collapse-item :title="`暂不可用操作（${unavailable.length}）`" name="unavailable"><p v-for="action in unavailable" :key="action.definition.id">{{ action.definition.name }}：{{ availabilityReason(action) }}</p></el-collapse-item></el-collapse>
     <el-divider>操作历史</el-divider>
     <el-empty v-if="history.length === 0" description="暂无操作记录" :image-size="64" />
     <el-timeline v-else><el-timeline-item v-for="operation in history" :key="operation.command_id" :type="timelineType(operation.status)" :timestamp="format(operation.manual_resolution?.resolved_at || operation.updated_at)"><div class="timeline-line"><strong>{{ operation.action_id }}</strong><span class="status">{{ operation.status }}</span><span v-if="operation.final_reason"> · {{ operation.final_reason }}</span><span v-if="resultSummary(operation)" class="result"> · {{ resultSummary(operation) }}</span><el-button v-if="operation.status === 'UNKNOWN' && !operation.manual_resolution" text type="warning" size="small" @click="beginResolution(operation)">人工处置</el-button></div><div v-if="operation.manual_resolution" class="resolution">人工结论：{{ resolutionLabel(operation.manual_resolution.outcome) }} · {{ operation.manual_resolution.reason }}</div></el-timeline-item></el-timeline>
@@ -26,6 +41,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { EditPen, RefreshLeft, Operation, View } from '@element-plus/icons-vue'
 import { authApi } from '@/api/auth'
 import { ApiError, isApiErrorCode } from '@/api/client'
 import { useDeviceOperationStore } from '@/stores/deviceOperation'
@@ -42,6 +58,7 @@ const available = computed(() => catalog.value.filter(item => !availabilityReaso
 async function load() { if (props.deviceId > 0) await store.refresh(props.deviceId) }
 function availabilityReason(action: EffectiveAction) { if (!action.available) return action.reason || '当前不可用'; const fields = Object.values(action.definition.input_schema?.properties ?? {}); if (fields.some(field => !['string', 'boolean', 'integer', 'number'].includes(field.type) || field.enum && field.type !== 'string')) return '客户端不支持该参数 Schema'; return '' }
 function requiresConfirmation(action: ActionDefinition) { return action.risk === 'medium' || action.risk === 'high' || action.risk === 'critical' }
+function actionIcon(action: ActionDefinition) { return action.semantics === 'reset' ? RefreshLeft : action.semantics === 'read' ? View : action.semantics === 'set' ? EditPen : Operation }
 function begin(action: ActionDefinition) { selectedAction.value = action; const fields = Object.keys(action.input_schema?.properties ?? {}); if (fields.length === 0) { prepare({}); return }; formVisible.value = true }
 async function submitSelected(params: Record<string, unknown>) { formVisible.value = false; prepare(params) }
 function prepare(params: Record<string, unknown>) { if (!selectedAction.value) return; selectedParams.value = params; selectedKey.value = newIdempotencyKey(); if (requiresConfirmation(selectedAction.value)) { confirmationVisible.value = true; return }; void submit(selectedAction.value.id, params) }
@@ -61,4 +78,4 @@ const offEvent = ws.subscribe('device_operation_update', message => { const oper
 const offConnected = typeof ws.onConnected === 'function' ? ws.onConnected(load) : () => {}
 watch(() => props.deviceId, load); onMounted(load); onUnmounted(() => { offEvent(); offConnected() })
 </script>
-<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.actions{display:flex;gap:8px;flex-wrap:wrap}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}</style>
+<style scoped>.panel{margin-top:20px}.header{display:flex;justify-content:space-between;align-items:center}.ops-sub{margin:0 0 10px;font-size:12px;color:var(--el-text-color-secondary)}.op-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}.op-item{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--el-border-color-lighter);border-radius:8px;cursor:pointer;transition:border-color .15s,box-shadow .15s}.op-item:hover{border-color:var(--el-color-primary-light-5);box-shadow:var(--el-box-shadow-light)}.op-item:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:1px}.op-item.busy{opacity:.6;pointer-events:none}.op-icon{flex-shrink:0;margin-top:2px;color:var(--el-color-primary)}.op-text{min-width:0}.op-name{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--el-text-color-primary)}.op-desc{margin-top:4px;font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.unavailable{margin-top:12px}.unavailable p{margin:6px 0;color:var(--el-text-color-secondary)}.timeline-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.status{margin-left:2px}.result{color:var(--el-color-success-dark-2)}.resolution{margin-top:4px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.resolution-select{width:100%}.reauthentication-form{margin-top:16px}@media (max-width:768px){.op-list{grid-template-columns:1fr}}</style>

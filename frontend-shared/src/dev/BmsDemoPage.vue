@@ -2,6 +2,8 @@
   <!-- BMS 设备详情页设计稿像素级 demo:静态 mock 数据,仅开发环境可见(DEV 门禁路由) -->
   <!-- 复刻 designs/bms.png 整页 + 全量交互:导航/搜索/通知/设备操作/趋势切换/MOS/数据流/指令频率/受控操作/历史 -->
   <div class="bms-demo">
+    <!-- DEV 水印：防止被误当生产页（本页全部为静态 mock 数据） -->
+    <div class="dev-watermark">DEV DEMO · 设计稿预览（全部数据均为 mock，非生产页面）</div>
     <!-- ══════════ 左侧边栏 ══════════ -->
     <aside class="sidebar">
       <div class="sidebar-logo">
@@ -750,6 +752,15 @@ onUnmounted(() => {
   display: flex; background: #f4f6fa;
   font-size: 12px; color: #1f2d3d;
   overflow: hidden;
+}
+
+/* DEV 水印条：固定底部，始终可见，不遮挡设计稿内容 */
+.dev-watermark {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3100;
+  padding: 3px 12px;
+  background: repeating-linear-gradient(45deg, #b45309, #b45309 12px, #d97706 12px, #d97706 24px);
+  color: #fff; font-size: 11px; font-weight: 600; text-align: center;
+  letter-spacing: 0.5px; pointer-events: none;
 }
 
 /* ═══════ 侧边栏 ═══════ */

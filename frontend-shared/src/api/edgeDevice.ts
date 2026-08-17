@@ -9,7 +9,7 @@ export interface EdgeDevice {
   id: number
   node_id: number | string
   channel_id: number
-  node?: { id: number | string; name: string }
+  node?: { id: number | string; name: string; firmware_version?: string }
   name: string
   device_type: string
   protocol: string
@@ -21,6 +21,8 @@ export interface EdgeDevice {
   last_data_time: string | null
   last_error_code?: number
   created_at: string
+  // 配置版本 (后端 EdgeDevice.ConfigVersion，配置清单版本标识)
+  config_version?: string
   // 数据生命周期 P0: 逻辑身份锚点 (后端 omitempty — 未建立时字段缺省为 undefined)
   logical_device_id?: number
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
@@ -108,7 +110,7 @@ interface RawEdgeDevice {
   id: number
   node_id?: number | string
   channel_id?: number
-  node?: { id?: number | string; name?: string }
+  node?: { id?: number | string; name?: string; firmware_version?: string }
   name?: string
   type?: string
   device_type?: string
@@ -125,6 +127,7 @@ interface RawEdgeDevice {
   error_code?: number
   last_error_code?: number
   created_at?: string
+  config_version?: string
   logical_device_id?: number
 }
 
@@ -168,7 +171,10 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   id: d.id,
   node_id: d.node_id ?? 0,
   channel_id: d.channel_id ?? 0,
-  node: d.node && d.node.name ? { id: (d.node.id ?? d.node_id ?? 0) as string | number, name: d.node.name } : undefined,
+  // node 名为空（节点未命名）时仍保留 id/firmware_version，展示层回退为 node_id 序列号
+  node: d.node && (d.node.name || d.node.id !== undefined || d.node.firmware_version)
+    ? { id: (d.node.id ?? d.node_id ?? 0) as string | number, name: d.node.name || '', firmware_version: d.node.firmware_version || undefined }
+    : undefined,
   name: d.name || '',
   device_type: d.type || d.device_type || '',
   protocol: d.protocol || d.device_config?.protocol || '',
@@ -180,6 +186,7 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   last_data_time: d.last_data_at || d.last_data_time || null,
   last_error_code: d.error_code ?? d.last_error_code ?? undefined,
   created_at: d.created_at || '',
+  config_version: d.config_version || undefined,
   logical_device_id: d.logical_device_id ?? undefined,
   device_config: d.device_config
 })

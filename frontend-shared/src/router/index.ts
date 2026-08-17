@@ -126,6 +126,12 @@ const routes: RouteRecordRaw[] = [
     name: 'MockBmsPanel',
     component: () => import('@/dev/MockBmsPanel.vue'),
     meta: { requiresAuth: false, hidden: true },
+  }, {
+    // BMS 详情页设计稿像素级预览（designs/bms.png 复刻，静态 mock 数据，带 DEV 水印）。
+    path: '/dev/bms-demo',
+    name: 'BmsDemoPage',
+    component: () => import('@/dev/BmsDemoPage.vue'),
+    meta: { requiresAuth: false, hidden: true },
   }] : []),
   // 404 兜底（必须放最后）
   {

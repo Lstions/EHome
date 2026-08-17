@@ -38,6 +38,32 @@ describe('ActionForm', () => {
     expect(labels).toEqual(['enabled', 'mode', 'threshold'])
   })
 
+  it('orders numbered parameters naturally (resistance_1, 2, … 10) for jiabaida 内阻类动作', () => {
+    const properties: Record<string, unknown> = {}
+    for (const i of [1, 2, 3, 10, 11, 20]) properties[`resistance_${i}`] = { type: 'integer', minimum: -32768, maximum: 32767 }
+    const wrapper = mountForm({
+      definition: makeDefinition({
+        input_schema: { properties: properties as any, required: Object.keys(properties) },
+      }),
+    })
+    const labels = wrapper.findAll('.el-form-item__label').map(label => label.text())
+    expect(labels).toEqual(['resistance_1', 'resistance_2', 'resistance_3', 'resistance_10', 'resistance_11', 'resistance_20'])
+  })
+
+  it('switches to two-column wide dialog when many parameters (>6)', () => {
+    const few = mountForm()
+    expect(few.find('.multi-column').exists()).toBe(false)
+
+    const properties: Record<string, unknown> = {}
+    for (let i = 1; i <= 8; i++) properties[`p_${i}`] = { type: 'integer', minimum: 0, maximum: 65535 }
+    const many = mountForm({
+      definition: makeDefinition({
+        input_schema: { properties: properties as any, required: [] },
+      }),
+    })
+    expect(many.find('.multi-column').exists()).toBe(true)
+  })
+
   it('renders enum, boolean, and integer editors with constraints', () => {
     const wrapper = mountForm()
     const selects = wrapper.findAll('select.el-select')

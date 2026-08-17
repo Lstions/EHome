@@ -1,7 +1,7 @@
 <template>
-  <el-dialog :model-value="visible" :title="definition?.name || '受控操作'" width="440px" :close-on-click-modal="false" @update:model-value="emit('update:visible', $event)">
+  <el-dialog :model-value="visible" :title="definition?.name || '受控操作'" :width="manyFields ? '640px' : '440px'" :close-on-click-modal="false" @update:model-value="emit('update:visible', $event)">
     <el-alert v-if="unsupported" type="warning" :closable="false" title="此动作的参数类型尚未获得客户端支持，已安全禁用。" />
-    <el-form v-else label-position="top">
+    <el-form v-else label-position="top" :class="{ 'multi-column': manyFields }">
       <el-form-item v-for="field in fields" :key="field.name" :label="field.name" :required="required.has(field.name)">
         <el-switch v-if="field.parameter.type === 'boolean'" v-model="values[field.name]" />
         <el-select v-else-if="field.parameter.enum?.length" v-model="values[field.name]" style="width:100%">
@@ -23,7 +23,10 @@ const props = defineProps<{ visible: boolean; definition: ActionDefinition | nul
 const emit = defineEmits<{ 'update:visible': [value: boolean]; submit: [params: Record<string, unknown>] }>()
 const values = reactive<Record<string, unknown>>({})
 const properties = computed(() => props.definition?.input_schema?.properties ?? {})
-const fields = computed(() => Object.entries(properties.value).sort(([a], [b]) => a.localeCompare(b)).map(([name, parameter]) => ({ name, parameter })))
+// 数字感知自然排序：resistance_1, resistance_2, …, resistance_10（字母序会排成 1,10,11,…,2）
+const fields = computed(() => Object.entries(properties.value).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true })).map(([name, parameter]) => ({ name, parameter })))
+// 多参数动作（如 write_internal_resistance 30 串内阻）用双列宽对话框，避免单列过长
+const manyFields = computed(() => fields.value.length > 6)
 const required = computed(() => new Set(props.definition?.input_schema?.required ?? []))
 const unsupported = computed(() => fields.value.some(({ parameter }) => !isSupported(parameter)))
 const complete = computed(() => [...required.value].every(name => values[name] !== undefined && values[name] !== ''))
@@ -42,3 +45,16 @@ function submit() {
 }
 watch(() => [props.visible, props.definition?.id], reset, { immediate: true })
 </script>
+
+<style scoped>
+.multi-column {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+@media (max-width: 768px) {
+  .multi-column {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
