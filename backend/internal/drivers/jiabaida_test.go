@@ -2,7 +2,11 @@ package drivers
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	"ehome/backend/pkg/logger"
@@ -86,6 +90,53 @@ func TestChecksum_RespFrame(t *testing.T) {
 
 	if !verifyJiabaidaChecksum(frame) {
 		t.Error("response frame checksum verification failed")
+	}
+}
+
+// TestJiabaidaReadFrameGoldenVectors locks jiabaidaReadFrame against the
+// protocol's known read-request vectors.  Checksums are the two's-complement
+// sum over frame[2:4] (CMD + 0x00), i.e. 0x10000 - CMD; the vectors below are
+// derived with that rule (0xA2 → 0xFF5E, NOT 0xFF5D).
+func TestJiabaidaReadFrameGoldenVectors(t *testing.T) {
+	cases := []struct {
+		cmd  byte
+		want string
+	}{
+		{0x03, "DDA50300FFFD77"},
+		{0x04, "DDA50400FFFC77"},
+		{0x05, "DDA50500FFFB77"},
+		{0x0F, "DDA50F00FFF177"},
+		{0xAA, "DDA5AA00FF5677"},
+		{0x0C, "DDA50C00FFF477"},
+		{0xF0, "DDA5F000FF1077"},
+		{0xF2, "DDA5F200FF0E77"},
+		{0xF3, "DDA5F300FF0D77"},
+		{0xF6, "DDA5F600FF0A77"},
+		{0xA2, "DDA5A200FF5E77"},
+	}
+	for _, tc := range cases {
+		frame := jiabaidaReadFrame(tc.cmd)
+		if got := strings.ToUpper(hex.EncodeToString(frame)); got != tc.want {
+			t.Errorf("jiabaidaReadFrame(0x%02X) = %s, want %s", tc.cmd, got, tc.want)
+		}
+		if len(frame) != 7 || frame[0] != 0xDD || frame[1] != 0xA5 || frame[2] != tc.cmd || frame[3] != 0x00 || frame[6] != 0x77 {
+			t.Errorf("jiabaidaReadFrame(0x%02X) malformed: % X", tc.cmd, frame)
+		}
+		if chk := jiabaidaChecksum(frame[2:4]); chk != binary.BigEndian.Uint16(frame[4:6]) {
+			t.Errorf("jiabaidaReadFrame(0x%02X) checksum = %04X, want %04X", tc.cmd, binary.BigEndian.Uint16(frame[4:6]), chk)
+		}
+		if !verifyJiabaidaChecksum(frame) {
+			t.Errorf("jiabaidaReadFrame(0x%02X) fails verifyJiabaidaChecksum", tc.cmd)
+		}
+	}
+	// GetCommandTemplates' hex WriteData must be exactly the frame builder's
+	// output — no second hand-written copy of the golden vectors.
+	templates := (&JiabaidaBMSDriver{}).GetCommandTemplates()
+	for _, tmpl := range templates {
+		want := hex.EncodeToString(jiabaidaReadFrame(tmpl.CmdByte))
+		if tmpl.WriteData != want {
+			t.Errorf("template %s WriteData = %s, want frame-built %s", tmpl.ID, tmpl.WriteData, want)
+		}
 	}
 }
 
@@ -552,6 +603,39 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 			}
 			continue
 		}
+		// The V19 write/factory-mode actions added 2026-08-16 are catalog-visible
+		// but stay fail-closed behind protocol_unverified until real-device
+		// evidence exists.  None may ship Enabled, and each keeps its declared
+		// verification semantics.
+		guardedWrites := map[string]struct{ shape, verification string }{
+			"write_protection_parameters": {"bounded_sequence", "readback"},
+			"write_system_parameters":     {"bounded_sequence", "readback"},
+			"test_charge_mos":             {"bounded_sequence", "readback"},
+			"test_discharge_mos":          {"bounded_sequence", "readback"},
+			"force_balance":               {"bounded_sequence", "readback"},
+			"find_car":                    {"bounded_sequence", "ack"},
+			"clear_alarm":                 {"bounded_sequence", "ack"},
+			"auto_test_edv":               {"bounded_sequence", "ack"},
+			"write_custom_attributes":     {"bounded_sequence", "readback"},
+			"write_internal_resistance":   {"bounded_sequence", "readback"},
+			"set_static_correction_time":  {"bounded_sequence", "ack"},
+			"set_report_interval":         {"bounded_sequence", "ack"},
+			"set_charge_time_window":      {"bounded_sequence", "ack"},
+			"set_discharge_time_limit":    {"bounded_sequence", "ack"},
+			"write_sn":                    {"bounded_sequence", "readback"},
+		}
+		if wantShape, ok := guardedWrites[action.ID]; ok {
+			if action.Enabled || action.AvailabilityCode == "" || action.ExecutionShape != wantShape.shape || action.Verification != wantShape.verification {
+				t.Fatalf("guarded write action lost its fail-closed gate: %+v", action)
+			}
+			continue
+		}
+		if action.ID == "read_test_mos_status" || action.ID == "read_custom_attributes" {
+			if action.Enabled || action.Semantics != "read" || action.Risk != "low" || len(action.TXData) == 0 || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
+				t.Fatalf("unsafe or malformed extended read action %+v", action)
+			}
+			continue
+		}
 		frame, ok := want[action.ID]
 		if !ok {
 			t.Fatalf("unexpected action %q", action.ID)
@@ -644,8 +728,20 @@ func TestJiabaidaBMSRestartPlanCompilerGoldenVector(t *testing.T) {
 	if plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" {
 		t.Fatalf("step kinds = %q/%q", plan.Steps[0].Kind, plan.Steps[1].Kind)
 	}
-	if _, err := d.CompileControlActionPlan("read_protection_parameters", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("read_protection_parameters plan compiled without a frozen factory workflow")
+	// The F2 factory-mode read workflow is now compiled (enter → read → finally
+	// exit).  The action itself remains catalog-gated on physical evidence.
+	readPlan, err := d.CompileControlActionPlan("read_protection_parameters", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan(read_protection_parameters) error = %v", err)
+	}
+	if len(readPlan.Steps) != 3 || !readPlan.RequiresFinally || readPlan.Steps[2].Kind != "finally" {
+		t.Fatalf("read_protection_parameters plan = %+v", readPlan)
+	}
+	if got := readPlan.Steps[0].TXData; string(got) != string(FactoryModeEnterCmd()) {
+		t.Fatalf("enter factory step = % X, want % X", got, FactoryModeEnterCmd())
+	}
+	if got := readPlan.Steps[2].TXData; string(got) != string(FactoryModeExitForRead()) {
+		t.Fatalf("exit factory step = % X, want % X", got, FactoryModeExitForRead())
 	}
 }
 
@@ -656,7 +752,7 @@ func TestJiabaidaVerifyMOSPolicyAckAndReadback(t *testing.T) {
 	ack := []byte{0xDD, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x77}
 	// Readback: 0x03 basic info frame (fet_status byte at offset 20 of payload).
 	payload := make([]byte, 31)
-	payload[20] = 0x01 // fet_status = charge MOS closed
+	payload[20] = 0x02 // fet_status: bit1=1 discharge open, bit0=0 charge closed (matches charge_software_closed:true)
 	ckraw := append([]byte{0x1F}, payload...)
 	ck := jiabaidaChecksum(ckraw)
 	readback := append([]byte{0xDD, 0x03, 0x00, 0x1F}, payload...)
@@ -681,8 +777,8 @@ func TestJiabaidaVerifyMOSPolicyAckAndReadback(t *testing.T) {
 	for _, s := range data[1:] {
 		if s.Name == "fet_status" {
 			found = true
-			if s.Value != 1 {
-				t.Fatalf("fet_status = %v, want 1", s.Value)
+			if s.Value != 2 {
+				t.Fatalf("fet_status = %v, want 2", s.Value)
 			}
 		}
 	}
@@ -792,5 +888,856 @@ func TestFactoryModeHelpers(t *testing.T) {
 	exitWrite := FactoryModeExitForWrite()
 	if !verifyJiabaidaChecksum(exitWrite) {
 		t.Error("FactoryModeExitForWrite has invalid checksum")
+	}
+}
+
+// jiabaidaTestResponse builds a checksum-valid response frame
+// DD CMD 00 LEN DATA... CHK_H CHK_L 77 (response checksum covers LEN+DATA).
+func jiabaidaTestResponse(t *testing.T, cmd byte, data []byte) []byte {
+	t.Helper()
+	frame := []byte{0xDD, cmd, 0x00, byte(len(data))}
+	frame = append(frame, data...)
+	chk := jiabaidaChecksum(frame[3:])
+	return append(frame, byte(chk>>8), byte(chk), 0x77)
+}
+
+// jiabaidaZeroAck is the zero-length write ACK for cmd: DD CMD 00 00 00 00 77.
+func jiabaidaZeroAck(cmd byte) []byte {
+	return []byte{0xDD, cmd, 0x00, 0x00, 0x00, 0x00, 0x77}
+}
+
+// jiabaidaTestEnvelope encodes steps into the ChannelCmdV2 batch envelope:
+// [count] then per step [kind][len_le_lo][len_le_hi][response...].
+func jiabaidaTestEnvelope(t *testing.T, steps ...[]byte) []byte {
+	t.Helper()
+	env := []byte{byte(len(steps))}
+	for _, step := range steps {
+		if len(step) > 0xFFFF {
+			t.Fatalf("test step too long: %d", len(step))
+		}
+		env = append(env, 0x00, byte(len(step)), byte(len(step)>>8))
+		env = append(env, step...)
+	}
+	return env
+}
+
+// jiabaidaMOSEnvelope builds the two-step set_mos_policy response envelope:
+// the E1 write ACK plus a 0x03 basic-info readback whose FET control byte
+// (payload offset 20) is set to fet.
+func jiabaidaMOSEnvelope(t *testing.T, ack []byte, fet byte) []byte {
+	t.Helper()
+	payload := make([]byte, 31)
+	payload[20] = fet
+	ckraw := append([]byte{0x1F}, payload...)
+	ck := jiabaidaChecksum(ckraw)
+	readback := append([]byte{0xDD, 0x03, 0x00, 0x1F}, payload...)
+	readback = append(readback, byte(ck>>8), byte(ck&0xFF), 0x77)
+	return jiabaidaTestEnvelope(t, ack, readback)
+}
+
+// jiabaidaHardwareVersionReadback is the known-good 0x05 response used by the
+// readback step of setter workflows whose verification contract is ACK plus a
+// parseable follow-up sample (mirrors the MOS policy verifier semantics).
+func jiabaidaHardwareVersionReadback() []byte {
+	return []byte{0xDD, 0x05, 0x00, 0x03, 'V', '1', '9', 0xFF, 0x3D, 0x77}
+}
+
+func jiabaidaF2TestParams(t *testing.T) json.RawMessage {
+	t.Helper()
+	fields := map[string]any{
+		"cell_ov_protect": 3650, "cell_ov_release": 3550,
+		"cell_uv_protect": 2800, "cell_uv_release": 2900,
+		"pack_ov_protect": 5840, "pack_ov_release": 5680,
+		"pack_uv_protect": 4480, "pack_uv_release": 4640,
+		"cell_ov_delay": 30, "cell_uv_delay": 30,
+		"pack_ov_delay": 30, "pack_uv_delay": 30,
+		"chg_ot_protect": 3181, "chg_ot_release": 3131,
+		"chg_ut_protect": 2731, "chg_ut_release": 2761,
+		"dis_ot_protect": 3281, "dis_ot_release": 3231,
+		"dis_ut_protect": 2631, "dis_ut_release": 2681,
+		"chg_ot_delay": 10, "chg_ut_delay": 10,
+		"dis_ot_delay": 10, "dis_ut_delay": 10,
+		"chg_oc_protect": 20000, "chg_oc_delay": 5, "chg_oc_release_delay": 10,
+		"dis_oc_protect": 25000, "dis_oc_delay": 5, "dis_oc_release_delay": 10,
+		"short_circuit_protect": 3, "hardware_oc_protect": 2, "short_circuit_release": 30,
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal F2 params: %v", err)
+	}
+	return raw
+}
+
+func jiabaidaF3TestParams(t *testing.T) json.RawMessage {
+	t.Helper()
+	fields := map[string]any{
+		"function_config": 255, "ntc_config": 3, "cell_count_config": 15,
+		"shunt_resistance": 100, "balance_start_voltage": 3400, "balance_diff": 30,
+		"gps_shutdown_voltage": 2800, "gps_shutdown_delay": 60,
+		"nominal_capacity_cfg": 10000, "cycle_capacity_cfg": 9800,
+		"cell_full_voltage": 3650, "cell_empty_voltage": 2800,
+		"self_discharge_rate": 50, "soc100_voltage": 3600, "soc0_voltage": 2900,
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal F3 params: %v", err)
+	}
+	return raw
+}
+
+// TestJiabaidaFactoryReadPlanGoldenVectors anchors the factory-mode read
+// request frames to the checksums printed in the V19 protocol document
+// (§7.11: F2 read FF0E, F3 read FF0D).
+func TestJiabaidaFactoryReadPlanGoldenVectors(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	cases := []struct {
+		action string
+		want   []byte
+	}{
+		{"read_protection_parameters", []byte{0xDD, 0xA5, 0xF2, 0x00, 0xFF, 0x0E, 0x77}},
+		{"read_system_parameters", []byte{0xDD, 0xA5, 0xF3, 0x00, 0xFF, 0x0D, 0x77}},
+	}
+	for _, tc := range cases {
+		plan, err := d.CompileControlActionPlan(tc.action, json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatalf("CompileControlActionPlan(%s) error = %v", tc.action, err)
+		}
+		if len(plan.Steps) != 3 || !plan.RequiresFinally || plan.Steps[2].Kind != "finally" {
+			t.Fatalf("%s plan shape = %+v", tc.action, plan)
+		}
+		if got := plan.Steps[1].TXData; string(got) != string(tc.want) {
+			t.Fatalf("%s read step = % X, want % X", tc.action, got, tc.want)
+		}
+	}
+}
+
+func TestJiabaidaWriteProtectionParametersPlanAndVerifier(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := jiabaidaF2TestParams(t)
+	plan, err := d.CompileControlActionPlan("write_protection_parameters", params)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if !plan.AtMostOnce || !plan.RequiresFinally || len(plan.Steps) != 4 {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	kinds := []string{plan.Steps[0].Kind, plan.Steps[1].Kind, plan.Steps[2].Kind, plan.Steps[3].Kind}
+	if kinds[0] != "write" || kinds[1] != "write" || kinds[2] != "readback" || kinds[3] != "finally" {
+		t.Fatalf("step kinds = %v", kinds)
+	}
+	if string(plan.Steps[0].TXData) != string(FactoryModeEnterCmd()) {
+		t.Fatalf("enter factory step = % X", plan.Steps[0].TXData)
+	}
+	if string(plan.Steps[3].TXData) != string(FactoryModeExitForWrite()) {
+		t.Fatalf("exit factory step = % X", plan.Steps[3].TXData)
+	}
+	writeFrame := plan.Steps[1].TXData
+	if len(writeFrame) != 60 || writeFrame[0] != 0xDD || writeFrame[1] != 0x5A || writeFrame[2] != 0xF2 || writeFrame[3] != 53 {
+		t.Fatalf("F2 write frame header = % X", writeFrame[:4])
+	}
+	if !verifyJiabaidaChecksum(writeFrame) {
+		t.Fatal("F2 write frame checksum invalid")
+	}
+	block := writeFrame[4:57]
+	// Round-trip: parse0xF2 is the inverse mapping of compileF2Block.
+	fields, err := d.parse0xF2(block)
+	if err != nil {
+		t.Fatalf("parse0xF2(compiled block) error = %v", err)
+	}
+	got := map[string]float64{}
+	for _, f := range fields {
+		got[f.Name] = f.Value
+	}
+	// chg_oc_protect is stored raw (10mA) but parsed as /100 → A, so raw
+	// 20000 round-trips to 200 A.  short_circuit_release is a raw u8.
+	if got["cell_ov_protect"] != 3650 || got["chg_oc_protect"] != 200 || got["short_circuit_release"] != 30 {
+		t.Fatalf("F2 round-trip mismatch: %+v", got)
+	}
+	// Verifier accepts the exact readback of the written block.
+	readback := jiabaidaTestResponse(t, 0xF2, block)
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xF2), readback, jiabaidaZeroAck(0x01))
+	data, err := d.VerifyControlAction("write_protection_parameters", params, envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(write_protection_parameters) error = %v", err)
+	}
+	if len(data) < 2 || data[0].Name != "write_ack" || data[0].Value != 1 {
+		t.Fatalf("verified result = %+v", data)
+	}
+	// A readback that does not match the written block must be rejected.
+	tampered := append([]byte(nil), block...)
+	tampered[0] ^= 0xFF
+	badEnvelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xF2),
+		jiabaidaTestResponse(t, 0xF2, tampered), jiabaidaZeroAck(0x01))
+	if _, err := d.VerifyControlAction("write_protection_parameters", params, badEnvelope); err == nil {
+		t.Fatal("mismatched F2 readback accepted")
+	}
+	// Missing parameters are rejected at compile time.
+	if _, err := d.CompileControlActionPlan("write_protection_parameters", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("empty F2 params accepted")
+	}
+}
+
+func TestJiabaidaWriteSystemParametersPlanAndVerifier(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := jiabaidaF3TestParams(t)
+	plan, err := d.CompileControlActionPlan("write_system_parameters", params)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if len(plan.Steps) != 4 || !plan.RequiresFinally {
+		t.Fatalf("plan metadata = %+v", plan)
+	}
+	writeFrame := plan.Steps[1].TXData
+	if len(writeFrame) != 59 || writeFrame[2] != 0xF3 || writeFrame[3] != 52 || !verifyJiabaidaChecksum(writeFrame) {
+		t.Fatalf("F3 write frame = % X", writeFrame)
+	}
+	block := writeFrame[4:56]
+	fields, err := d.parse0xF3(block)
+	if err != nil {
+		t.Fatalf("parse0xF3(compiled block) error = %v", err)
+	}
+	for _, f := range fields {
+		// nominal_capacity_cfg is written raw (10000 = 100.00 Ah units of 0.01Ah).
+		if f.Name == "nominal_capacity_cfg" && f.Value != 100 {
+			t.Fatalf("nominal_capacity_cfg round-trip = %v, want 100", f.Value)
+		}
+		if f.Name == "cell_count_config" && f.Value != 15 {
+			t.Fatalf("cell_count_config round-trip = %v, want 15", f.Value)
+		}
+	}
+	readback := jiabaidaTestResponse(t, 0xF3, block)
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xF3), readback, jiabaidaZeroAck(0x01))
+	data, err := d.VerifyControlAction("write_system_parameters", params, envelope)
+	if err != nil || len(data) < 2 || data[0].Name != "write_ack" {
+		t.Fatalf("VerifyControlAction(write_system_parameters) = %+v, err = %v", data, err)
+	}
+}
+
+// TestJiabaidaFieldTableCoversAllDeclaredBytes locks the P1-2 field tables:
+// the F2 table must cover bytes 0..50 continuously with no holes/overlaps,
+// the F3 table must cover exactly {0-15, 20-31, 48-49} (reserved ranges
+// 16-19 / 32-47 and the CRC tail stay uncovered), the derived reconciliation
+// spans must match, and compile/schema must be driven by the same tables.
+func TestJiabaidaFieldTableCoversAllDeclaredBytes(t *testing.T) {
+	cover := func(fields []jiabaidaField) (map[int]bool, map[string]int) {
+		covered := map[int]bool{}
+		byName := map[string]int{}
+		for _, f := range fields {
+			if f.Width != 1 && f.Width != 2 {
+				t.Fatalf("field %s has invalid width %d", f.Name, f.Width)
+			}
+			if f.Min < 0 || f.Max < f.Min {
+				t.Fatalf("field %s has invalid Min/Max %v/%v", f.Name, f.Min, f.Max)
+			}
+			for i := f.Offset; i < f.Offset+f.Width; i++ {
+				if covered[i] {
+					t.Fatalf("field %s overlaps at byte %d", f.Name, i)
+				}
+				covered[i] = true
+			}
+			byName[f.Name] = f.Offset
+		}
+		return covered, byName
+	}
+
+	// F2: bytes 0..50 all declared, no holes.
+	f2Covered, f2ByName := cover(jiabaidaF2Fields())
+	for i := 0; i <= 50; i++ {
+		if !f2Covered[i] {
+			t.Fatalf("F2 byte %d not covered by field table", i)
+		}
+	}
+	if len(f2ByName) != 33 {
+		t.Fatalf("F2 table has %d fields, want 33", len(f2ByName))
+	}
+	wantF2Spans := [][2]int{{0, 50}}
+	if got := jiabaidaF2FieldSpans(); !reflect.DeepEqual(got, wantF2Spans) {
+		t.Fatalf("F2 spans = %v, want %v", got, wantF2Spans)
+	}
+
+	// F3: declared bytes exactly {0-15, 20-31, 48-49}.
+	f3Covered, f3ByName := cover(jiabaidaF3Fields())
+	declared3 := func(lo, hi int) {
+		for i := lo; i <= hi; i++ {
+			if !f3Covered[i] {
+				t.Fatalf("F3 declared byte %d not covered by field table", i)
+			}
+		}
+	}
+	declared3(0, 15)
+	declared3(20, 31)
+	declared3(48, 49)
+	for _, i := range []int{16, 17, 18, 19, 32, 33, 47, 50, 51} {
+		if f3Covered[i] {
+			t.Fatalf("F3 byte %d is reserved/CRC but covered by field table", i)
+		}
+	}
+	if len(f3ByName) != 15 {
+		t.Fatalf("F3 table has %d fields, want 15", len(f3ByName))
+	}
+	wantF3Spans := [][2]int{{0, 15}, {20, 31}, {48, 49}}
+	if got := jiabaidaF3FieldSpans(); !reflect.DeepEqual(got, wantF3Spans) {
+		t.Fatalf("F3 spans = %v, want %v", got, wantF3Spans)
+	}
+
+	// compileF3Block must write exactly the table's fields and leave the
+	// reserved byte ranges zero (CRC covers only the 50 field bytes).
+	params := jiabaidaF3TestParams(t)
+	block, err := compileF3Block(params)
+	if err != nil {
+		t.Fatalf("compileF3Block error = %v", err)
+	}
+	if len(block) != 52 {
+		t.Fatalf("F3 block length = %d, want 52", len(block))
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(params, &fields); err != nil {
+		t.Fatalf("unmarshal F3 params: %v", err)
+	}
+	for _, f := range jiabaidaF3Fields() {
+		want, err := jiabaidaUint16Param(fields, f.Name)
+		if err != nil {
+			t.Fatalf("decode %s: %v", f.Name, err)
+		}
+		if got := binary.BigEndian.Uint16(block[f.Offset : f.Offset+2]); got != want {
+			t.Fatalf("compileF3Block wrote %s = %d, want %d", f.Name, got, want)
+		}
+	}
+	for _, i := range []int{16, 17, 18, 19, 32, 33, 47} {
+		if block[i] != 0 {
+			t.Fatalf("F3 reserved byte %d = %02X, want 0", i, block[i])
+		}
+	}
+
+	// Schema must be generated from the table: same names, same order, same
+	// Min/Max.
+	for name, params := range map[string][]ControlParameter{
+		"F2": jiabaidaF2Parameters(),
+		"F3": jiabaidaF3Parameters(),
+	} {
+		var table []jiabaidaField
+		if name == "F2" {
+			table = jiabaidaF2Fields()
+		} else {
+			table = jiabaidaF3Fields()
+		}
+		if len(params) != len(table) {
+			t.Fatalf("%s schema has %d params, table has %d fields", name, len(params), len(table))
+		}
+		for i, f := range table {
+			p := params[i]
+			if p.Name != f.Name || p.Type != "integer" || !p.Required ||
+				p.Minimum == nil || *p.Minimum != f.Min || p.Maximum == nil || *p.Maximum != f.Max {
+				t.Fatalf("%s schema[%d] = %+v, want table field %+v", name, i, p, f)
+			}
+		}
+	}
+
+	// Parse projection must be exactly the legacy emission: F2 emits 23 of
+	// its 33 fields (delay/protection counters excluded) and F3 emits all 15,
+	// in table (= legacy) order.
+	d := &JiabaidaBMSDriver{}
+	f2Fields, err := d.parse0xF2(f2Block(t, jiabaidaF2TestParams(t)))
+	if err != nil {
+		t.Fatalf("parse0xF2 error = %v", err)
+	}
+	f2Names := make([]string, 0, len(f2Fields))
+	for _, f := range f2Fields {
+		f2Names = append(f2Names, f.Name)
+	}
+	wantF2Names := []string{
+		"cell_ov_protect", "cell_ov_release", "cell_uv_protect", "cell_uv_release",
+		"pack_ov_protect", "pack_ov_release", "pack_uv_protect", "pack_uv_release",
+		"cell_ov_delay", "cell_uv_delay", "pack_ov_delay", "pack_uv_delay",
+		"chg_ot_protect", "chg_ot_release", "chg_ut_protect", "chg_ut_release",
+		"dis_ot_protect", "dis_ot_release", "dis_ut_protect", "dis_ut_release",
+		"chg_oc_protect", "dis_oc_protect", "short_circuit_release",
+	}
+	if !reflect.DeepEqual(f2Names, wantF2Names) {
+		t.Fatalf("parse0xF2 names = %v, want %v", f2Names, wantF2Names)
+	}
+	f3Fields, err := d.parse0xF3(f3Block(t, jiabaidaF3TestParams(t)))
+	if err != nil {
+		t.Fatalf("parse0xF3 error = %v", err)
+	}
+	f3Names := make([]string, 0, len(f3Fields))
+	for _, f := range f3Fields {
+		f3Names = append(f3Names, f.Name)
+	}
+	wantF3Names := []string{
+		"function_config", "ntc_config", "cell_count_config", "shunt_resistance",
+		"balance_start_voltage", "balance_diff", "gps_shutdown_voltage", "gps_shutdown_delay",
+		"nominal_capacity_cfg", "cycle_capacity_cfg", "cell_full_voltage", "cell_empty_voltage",
+		"self_discharge_rate", "soc100_voltage", "soc0_voltage",
+	}
+	if !reflect.DeepEqual(f3Names, wantF3Names) {
+		t.Fatalf("parse0xF3 names = %v, want %v", f3Names, wantF3Names)
+	}
+}
+
+// f2Block compiles the F2 test params into the 53-byte block (helper).
+func f2Block(t *testing.T, params json.RawMessage) []byte {
+	t.Helper()
+	block, err := compileF2Block(params)
+	if err != nil {
+		t.Fatalf("compileF2Block error = %v", err)
+	}
+	return block
+}
+
+// f3Block compiles the F3 test params into the 52-byte block (helper).
+func f3Block(t *testing.T, params json.RawMessage) []byte {
+	t.Helper()
+	block, err := compileF3Block(params)
+	if err != nil {
+		t.Fatalf("compileF3Block error = %v", err)
+	}
+	return block
+}
+
+// TestJiabaidaF2F3ReadbackDeclaredFieldSpans locks the P0-1 readback
+// reconciliation: only DECLARED field bytes are compared, so reserved bytes
+// (F3 16-19 / 32-47) and CRC bytes may differ on readback without failing,
+// while any declared-field difference still fails hard.
+func TestJiabaidaF2F3ReadbackDeclaredFieldSpans(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	verify := func(action string, params json.RawMessage, block []byte, cmd byte) error {
+		t.Helper()
+		envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(cmd),
+			jiabaidaTestResponse(t, cmd, block), jiabaidaZeroAck(0x01))
+		_, err := d.VerifyControlAction(action, params, envelope)
+		return err
+	}
+
+	// F3: reserved bytes differ (byte 17 in 16-19, byte 33 in 32-47) but
+	// every declared field matches → verification must pass.
+	f3Params := jiabaidaF3TestParams(t)
+	f3Block, err := compileF3Block(f3Params)
+	if err != nil {
+		t.Fatalf("compileF3Block error = %v", err)
+	}
+	reserved := append([]byte(nil), f3Block...)
+	reserved[17] ^= 0xFF
+	reserved[33] ^= 0xFF
+	if err := verify("write_system_parameters", f3Params, reserved, 0xF3); err != nil {
+		t.Fatalf("F3 readback with differing reserved bytes rejected: %v", err)
+	}
+	// F3: CRC bytes differ (declared fields identical) → still passes, since
+	// a real BMS may recompute the CRC.
+	recrc := append([]byte(nil), f3Block...)
+	recrc[50] ^= 0xFF
+	recrc[51] ^= 0xFF
+	if err := verify("write_system_parameters", f3Params, recrc, 0xF3); err != nil {
+		t.Fatalf("F3 readback with differing CRC bytes rejected: %v", err)
+	}
+	// F3: a declared field differs (balance_diff at bytes 10-11) → fail.
+	declared := append([]byte(nil), f3Block...)
+	declared[10] ^= 0xFF
+	if err := verify("write_system_parameters", f3Params, declared, 0xF3); err == nil {
+		t.Fatal("F3 readback with differing declared field accepted")
+	}
+	// F3: truncated readback (declared span out of bounds) → fail.
+	trunc := append([]byte(nil), f3Block...)
+	if err := verify("write_system_parameters", f3Params, trunc[:45], 0xF3); err == nil {
+		t.Fatal("F3 truncated readback accepted")
+	}
+
+	// F2: any declared byte differs → fail (byte 25 sits inside chg_ut_protect).
+	f2Params := jiabaidaF2TestParams(t)
+	f2Block, err := compileF2Block(f2Params)
+	if err != nil {
+		t.Fatalf("compileF2Block error = %v", err)
+	}
+	bad := append([]byte(nil), f2Block...)
+	bad[25] ^= 0xFF
+	if err := verify("write_protection_parameters", f2Params, bad, 0xF2); err == nil {
+		t.Fatal("F2 readback with differing declared field accepted")
+	}
+	// F2: CRC bytes differ (declared fields identical) → passes.
+	f2crc := append([]byte(nil), f2Block...)
+	f2crc[51] ^= 0xFF
+	f2crc[52] ^= 0xFF
+	if err := verify("write_protection_parameters", f2Params, f2crc, 0xF2); err != nil {
+		t.Fatalf("F2 readback with differing CRC bytes rejected: %v", err)
+	}
+}
+
+func TestJiabaidaSimpleSetterPlansAndVerifier(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	cases := []struct {
+		action     string
+		params     string
+		cmd        byte
+		data       []byte
+		atMostOnce bool
+	}{
+		{"force_balance", `{}`, 0xF5, []byte{0x00, 0x01}, true},
+		{"test_charge_mos", `{}`, 0x0C, []byte{0x00, 0x01}, true},
+		{"test_discharge_mos", `{}`, 0x0C, []byte{0x00, 0x02}, true},
+		{"find_car", `{"enabled":true}`, 0xF1, []byte{0x18, 0x01}, false},
+		{"find_car", `{"enabled":false}`, 0xF1, []byte{0x18, 0x00}, false},
+		{"clear_alarm", `{}`, 0xE6, []byte{0x18, 0x81}, false},
+		{"auto_test_edv", `{"rest_minutes":30}`, 0x0D, []byte{0x00, 0x1E}, true},
+		{"set_static_correction_time", `{"minutes":120}`, 0xF7, []byte{0x00, 0x78}, false},
+		{"set_report_interval", `{"static_interval_s":60,"charge_interval_s":10,"discharge_interval_s":30}`, 0xF8, []byte{0x00, 0x3C, 0x00, 0x0A, 0x00, 0x1E}, false},
+		{"set_charge_time_window", `{"delay_s":100,"duration_s":200}`, 0xFA, []byte{0x00, 0x64, 0x00, 0xC8}, false},
+		{"set_discharge_time_limit", `{"enabled":true,"days":100}`, 0xFB, []byte{0x01, 0x00, 0x64}, true},
+		{"set_discharge_time_limit", `{"enabled":false,"days":0}`, 0xFB, []byte{0x00, 0x00, 0x00}, true},
+	}
+	for _, tc := range cases {
+		plan, err := d.CompileControlActionPlan(tc.action, json.RawMessage(tc.params))
+		if err != nil {
+			t.Fatalf("CompileControlActionPlan(%s, %s) error = %v", tc.action, tc.params, err)
+		}
+		// AtMostOnce must match the catalog definition: only high/critical-risk
+		// actions may be at-most-once (deviceaction registry invariant); the
+		// idempotent low/medium-risk setters are safely retryable.
+		if len(plan.Steps) != 2 || plan.Steps[0].Kind != "write" || plan.Steps[1].Kind != "readback" || plan.AtMostOnce != tc.atMostOnce {
+			t.Fatalf("%s plan shape = %+v, want atMostOnce=%v", tc.action, plan, tc.atMostOnce)
+		}
+		frame := plan.Steps[0].TXData
+		if frame[0] != 0xDD || frame[1] != 0x5A || frame[2] != tc.cmd || int(frame[3]) != len(tc.data) ||
+			string(frame[4:4+len(tc.data)]) != string(tc.data) || !verifyJiabaidaChecksum(frame) {
+			t.Fatalf("%s write frame = % X, want cmd %02X data % X", tc.action, frame, tc.cmd, tc.data)
+		}
+		// Verifier: ACK for the setter cmd plus a parseable readback sample.
+		envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(tc.cmd), jiabaidaHardwareVersionReadback())
+		data, err := d.VerifyControlAction(tc.action, json.RawMessage(tc.params), envelope)
+		if err != nil {
+			t.Fatalf("VerifyControlAction(%s) error = %v", tc.action, err)
+		}
+		if len(data) == 0 || data[0].Value != 1 {
+			t.Fatalf("%s verified result = %+v", tc.action, data)
+		}
+		// A wrong ACK command must be rejected.
+		badAck := tc.cmd ^ 0xFF
+		bad := jiabaidaTestEnvelope(t, jiabaidaZeroAck(badAck), jiabaidaHardwareVersionReadback())
+		if _, err := d.VerifyControlAction(tc.action, json.RawMessage(tc.params), bad); err == nil {
+			t.Fatalf("%s accepted wrong ACK cmd %02X", tc.action, badAck)
+		}
+	}
+}
+
+func TestJiabaidaTestMOSReadbackSurfacesStatus(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	plan, err := d.CompileControlActionPlan("test_charge_mos", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("plan error = %v", err)
+	}
+	_ = plan
+	// 0x0C readback: discharge status = 2 (NG), charge status = 1 (OK).
+	readback := jiabaidaTestResponse(t, 0x0C, []byte{0x02, 0x01})
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x0C), readback)
+	data, err := d.VerifyControlAction("test_charge_mos", json.RawMessage(`{}`), envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(test_charge_mos) error = %v", err)
+	}
+	got := map[string]float64{}
+	for _, f := range data {
+		got[f.Name] = f.Value
+	}
+	if got["discharge_mos_test_status"] != 2 || got["charge_mos_test_status"] != 1 {
+		t.Fatalf("MOS test readback = %+v", got)
+	}
+}
+
+func TestJiabaidaWriteCustomAttributesRoundTrip(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"custom_1":1,"custom_2":2,"custom_3":65535}`)
+	plan, err := d.CompileControlActionPlan("write_custom_attributes", params)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if len(plan.Steps) != 2 {
+		t.Fatalf("plan shape = %+v", plan)
+	}
+	frame := plan.Steps[0].TXData
+	wantData := []byte{0x00, 0x01, 0x00, 0x02, 0xFF, 0xFF}
+	if frame[2] != 0xF0 || string(frame[4:10]) != string(wantData) || !verifyJiabaidaChecksum(frame) {
+		t.Fatalf("F0 write frame = % X", frame)
+	}
+	readback := jiabaidaTestResponse(t, 0xF0, wantData)
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0xF0), readback)
+	data, err := d.VerifyControlAction("write_custom_attributes", params, envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(write_custom_attributes) error = %v", err)
+	}
+	for _, f := range data {
+		if f.Name == "custom_attr_3" && f.Value != 65535 {
+			t.Fatalf("custom_attr_3 = %v, want 65535", f.Value)
+		}
+	}
+	// Readback carrying different values must be rejected.
+	mismatch := jiabaidaTestResponse(t, 0xF0, []byte{0x00, 0x01, 0x00, 0x02, 0x00, 0x00})
+	bad := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0xF0), mismatch)
+	if _, err := d.VerifyControlAction("write_custom_attributes", params, bad); err == nil {
+		t.Fatal("mismatched F0 readback accepted")
+	}
+}
+
+func TestJiabaidaWriteInternalResistance(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	// The catalog schema is scalar-only, so the fixed-30 F6 block is passed
+	// as resistance_1..resistance_30.
+	resistances := make([]int, 30)
+	for i := range resistances {
+		resistances[i] = 100
+	}
+	resistances[29] = -5 // negative 0.1mΩ is legal per protocol
+	params := map[string]any{}
+	for i, v := range resistances {
+		params[fmt.Sprintf("resistance_%d", i+1)] = v
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal resistances: %v", err)
+	}
+	plan, err := d.CompileControlActionPlan("write_internal_resistance", raw)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	frame := plan.Steps[0].TXData
+	if frame[2] != 0xF6 || frame[3] != 60 || !verifyJiabaidaChecksum(frame) {
+		t.Fatalf("F6 write frame = % X", frame[:6])
+	}
+	if frame[4+58] != 0xFF || frame[4+59] != 0xFB {
+		t.Fatalf("resistance[29] encoding = % X, want FF FB (-5)", frame[4+58:4+60])
+	}
+	readback := jiabaidaTestResponse(t, 0xF6, frame[4:64])
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0xF6), readback)
+	data, err := d.VerifyControlAction("write_internal_resistance", raw, envelope)
+	if err != nil || len(data) < 31 {
+		t.Fatalf("VerifyControlAction(write_internal_resistance) = %d fields, err = %v", len(data), err)
+	}
+	// A missing scalar parameter is rejected at compile time.
+	shortParams := map[string]any{}
+	for i := 0; i < 29; i++ {
+		shortParams[fmt.Sprintf("resistance_%d", i+1)] = 100
+	}
+	short, _ := json.Marshal(shortParams)
+	if _, err := d.CompileControlActionPlan("write_internal_resistance", short); err == nil {
+		t.Fatal("29-parameter resistance set accepted")
+	}
+}
+
+func TestJiabaidaWriteSN(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"sn":"BMS-2026-001"}`)
+	plan, err := d.CompileControlActionPlan("write_sn", params)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	if len(plan.Steps) != 4 || !plan.RequiresFinally || plan.Steps[3].Kind != "finally" {
+		t.Fatalf("write_sn plan = %+v", plan)
+	}
+	writeFrame := plan.Steps[1].TXData
+	if writeFrame[2] != 0xA2 || writeFrame[3] != 13 || writeFrame[4] != 12 || string(writeFrame[5:17]) != "BMS-2026-001" {
+		t.Fatalf("SN write frame = % X", writeFrame)
+	}
+	// Verifier: enter ack, write ack, SN readback matching, exit ack.
+	snData := append([]byte{12}, []byte("BMS-2026-001")...)
+	readback := jiabaidaTestResponse(t, 0xA2, snData)
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xA2), readback, jiabaidaZeroAck(0x01))
+	data, err := d.VerifyControlAction("write_sn", params, envelope)
+	if err != nil {
+		t.Fatalf("VerifyControlAction(write_sn) error = %v", err)
+	}
+	foundSN := ""
+	for _, f := range data {
+		if f.Name == "serial_number" {
+			foundSN = f.StringValue
+		}
+	}
+	if foundSN != "BMS-2026-001" {
+		t.Fatalf("write_sn readback sn = %q", foundSN)
+	}
+	// A readback carrying a different SN must be rejected.
+	otherData := append([]byte{9}, []byte("DIFFERENT")...)
+	bad := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xA2),
+		jiabaidaTestResponse(t, 0xA2, otherData), jiabaidaZeroAck(0x01))
+	if _, err := d.VerifyControlAction("write_sn", params, bad); err == nil {
+		t.Fatal("mismatched SN readback accepted")
+	}
+	// Non-printable ASCII and oversized SN are rejected at compile time.
+	if _, err := d.CompileControlActionPlan("write_sn", json.RawMessage(`{"sn":"bad	tab"}`)); err == nil {
+		t.Fatal("non-printable SN accepted")
+	}
+	if _, err := d.CompileControlActionPlan("write_sn", json.RawMessage(`{"sn":"01234567890123456789012345678901"}`)); err == nil {
+		t.Fatal("32-char SN accepted")
+	}
+}
+
+func TestJiabaidaParse0x0CAnd0xF0(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	frame0C := jiabaidaTestResponse(t, 0x0C, []byte{0x02, 0x01})
+	data, err := d.ParseData(frame0C)
+	if err != nil {
+		t.Fatalf("ParseData(0x0C) error = %v", err)
+	}
+	got := map[string]float64{}
+	for _, f := range data {
+		got[f.Name] = f.Value
+	}
+	if got["discharge_mos_test_status"] != 2 || got["charge_mos_test_status"] != 1 {
+		t.Fatalf("0x0C parse = %+v", got)
+	}
+	frameF0 := jiabaidaTestResponse(t, 0xF0, []byte{0x00, 0x0A, 0x00, 0x14, 0x00, 0x1E})
+	data, err = d.ParseData(frameF0)
+	if err != nil {
+		t.Fatalf("ParseData(0xF0) error = %v", err)
+	}
+	got = map[string]float64{}
+	for _, f := range data {
+		got[f.Name] = f.Value
+	}
+	if got["custom_attr_1"] != 10 || got["custom_attr_2"] != 20 || got["custom_attr_3"] != 30 {
+		t.Fatalf("0xF0 parse = %+v", got)
+	}
+	// Short payloads are rejected.
+	if _, err := d.parse0x0C([]byte{0x01}); err == nil {
+		t.Fatal("short 0x0C accepted")
+	}
+	if _, err := d.parse0xF0([]byte{0x00, 0x01}); err == nil {
+		t.Fatal("short 0xF0 accepted")
+	}
+}
+
+// ============================================================================
+// P0-3: ACK checksum verification — negative paths
+// ============================================================================
+
+func TestJiabaidaVerifyMOSPolicyRejectsBadAckChecksum(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
+	// Structurally the frame is a valid zero-length ACK (DD E1 00 00 ?? ?? 77),
+	// but the checksum bytes must be 00 00 for LEN=0 — FF FF must be rejected.
+	badAck := []byte{0xDD, 0xE1, 0x00, 0x00, 0xFF, 0xFF, 0x77}
+	envelope := jiabaidaMOSEnvelope(t, badAck, 0x02)
+	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err == nil {
+		t.Fatal("set_mos_policy accepted ACK with invalid checksum")
+	}
+	// Sanity: the same envelope with the correct checksum passes.
+	good := jiabaidaMOSEnvelope(t, jiabaidaZeroAck(0xE1), 0x02)
+	if _, err := d.VerifyControlAction("set_mos_policy", params, good); err != nil {
+		t.Fatalf("set_mos_policy valid envelope rejected: %v", err)
+	}
+}
+
+func TestJiabaidaFactoryWriteRejectsBadEnterFactoryChecksum(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := jiabaidaF2TestParams(t)
+	plan, err := d.CompileControlActionPlan("write_protection_parameters", params)
+	if err != nil {
+		t.Fatalf("CompileControlActionPlan error = %v", err)
+	}
+	block := plan.Steps[1].TXData[4:57]
+	// Enter-factory ACK with a structurally valid shape but wrong checksum.
+	badEnter := []byte{0xDD, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x77}
+	envelope := jiabaidaTestEnvelope(t, badEnter, jiabaidaZeroAck(0xF2),
+		jiabaidaTestResponse(t, 0xF2, block), jiabaidaZeroAck(0x01))
+	if _, err := d.VerifyControlAction("write_protection_parameters", params, envelope); err == nil {
+		t.Fatal("write_protection_parameters accepted enter-factory ACK with invalid checksum")
+	}
+	// Sanity: the same envelope with the correct enter-factory checksum passes.
+	good := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x00), jiabaidaZeroAck(0xF2),
+		jiabaidaTestResponse(t, 0xF2, block), jiabaidaZeroAck(0x01))
+	if _, err := d.VerifyControlAction("write_protection_parameters", params, good); err != nil {
+		t.Fatalf("write_protection_parameters valid envelope rejected: %v", err)
+	}
+}
+
+// ============================================================================
+// P0-2: set_mos_policy fet_status bit-level readback reconciliation
+// ============================================================================
+
+func TestJiabaidaVerifyMOSPolicyFetReconciliation(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	cases := []struct {
+		name   string
+		params string
+		fet    byte
+	}{
+		{"charge closed discharge open", `{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`, 0x02},
+		{"charge open discharge closed", `{"charge_software_closed":false,"discharge_software_closed":true,"priority":"user"}`, 0x01},
+		{"both open", `{"charge_software_closed":false,"discharge_software_closed":false,"priority":"user"}`, 0x03},
+		{"both closed", `{"charge_software_closed":true,"discharge_software_closed":true,"priority":"user"}`, 0x00},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			envelope := jiabaidaMOSEnvelope(t, jiabaidaZeroAck(0xE1), tc.fet)
+			data, err := d.VerifyControlAction("set_mos_policy", json.RawMessage(tc.params), envelope)
+			if err != nil {
+				t.Fatalf("VerifyControlAction error = %v", err)
+			}
+			if len(data) < 2 || data[0].Name != "mos_ack" || data[0].Value != 1 {
+				t.Fatalf("verified result = %+v", data)
+			}
+			found := false
+			for _, s := range data[1:] {
+				if s.Name == "fet_status" {
+					found = true
+					if s.Value != float64(tc.fet) {
+						t.Fatalf("fet_status = %v, want %d", s.Value, tc.fet)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("readback missing fet_status: %+v", data)
+			}
+		})
+	}
+}
+
+func TestJiabaidaVerifyMOSPolicyFetReconciliationMismatch(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
+	// Charge close requested, but the readback reports both FETs open (0x03):
+	// bit0=1 contradicts the requested closed charge MOS.
+	envelope := jiabaidaMOSEnvelope(t, jiabaidaZeroAck(0xE1), 0x03)
+	_, err := d.VerifyControlAction("set_mos_policy", params, envelope)
+	if err == nil {
+		t.Fatal("mismatched fet_status accepted")
+	}
+	if !strings.Contains(err.Error(), "fet") || !strings.Contains(err.Error(), "protection") {
+		t.Fatalf("error should mention fet bits and the protection hint: %v", err)
+	}
+}
+
+func TestJiabaidaVerifyMOSPolicyFetStatusMissing(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	params := json.RawMessage(`{"charge_software_closed":true,"discharge_software_closed":false,"priority":"user"}`)
+	// Second step parses fine (0x05 hardware version) but its projection has
+	// no fet_status entry, so reconciliation must fail.
+	envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0xE1), jiabaidaHardwareVersionReadback())
+	if _, err := d.VerifyControlAction("set_mos_policy", params, envelope); err == nil {
+		t.Fatal("set_mos_policy accepted readback without fet_status")
+	}
+}
+
+// ============================================================================
+// parse0xAA / parse0x05 short-input defenses
+// ============================================================================
+
+func TestParse0xAA_TooShort(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	_, err := d.parse0xAA(make([]byte, 22))
+	parseErr, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if parseErr.Code != ErrDataTooShort {
+		t.Errorf("error code: got %d, want %d", parseErr.Code, ErrDataTooShort)
+	}
+}
+
+func TestParse0x05_Empty(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	_, err := d.parse0x05([]byte{})
+	parseErr, ok := err.(*ParseError)
+	if !ok {
+		t.Fatalf("expected *ParseError, got %T", err)
+	}
+	if parseErr.Code != ErrDataTooShort {
+		t.Errorf("error code: got %d, want %d", parseErr.Code, ErrDataTooShort)
 	}
 }

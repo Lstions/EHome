@@ -95,6 +95,20 @@ func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 		t.Fatalf("got %d Jiabaida actions, want read actions plus guarded capabilities: %+v", len(definitions), definitions)
 	}
 	var mos, restart bool
+	// V19 write/test capabilities that may appear in the catalog ONLY as
+	// fail-closed guarded entries (Enabled=false + AvailabilityCode) until
+	// real-device evidence is frozen.  Any other non-read action leaks an
+	// unverified BMS write.
+	guardedWrites := map[string]bool{
+		"read_protection_parameters": true, "read_system_parameters": true,
+		"write_protection_parameters": true, "write_system_parameters": true,
+		"test_charge_mos": true, "test_discharge_mos": true,
+		"force_balance": true, "find_car": true, "clear_alarm": true,
+		"auto_test_edv": true, "write_custom_attributes": true,
+		"write_internal_resistance": true, "set_static_correction_time": true,
+		"set_report_interval": true, "set_charge_time_window": true,
+		"set_discharge_time_limit": true, "write_sn": true,
+	}
 	for _, definition := range definitions {
 		if definition.ID == "set_mos_policy" {
 			mos = true
@@ -107,6 +121,15 @@ func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 			if definition.Enabled || definition.Risk != "critical" || definition.Verification != "observation" {
 				t.Fatalf("BMS restart must be guarded critical action: %+v", definition)
 			}
+		}
+		if guardedWrites[definition.ID] {
+			if definition.Enabled || definition.AvailabilityCode == "" || definition.ExecutionShape != "bounded_sequence" {
+				t.Fatalf("V19 write capability must stay fail-closed bounded: %+v", definition)
+			}
+			if definition.AtMostOnce && definition.Risk != "high" && definition.Risk != "critical" {
+				t.Fatalf("at-most-once capability %q must be high/critical risk: %+v", definition.ID, definition)
+			}
+			continue
 		}
 		if definition.ID != "set_mos_policy" && definition.ID != "bms_restart" && definition.Semantics != "read" {
 			t.Fatalf("unexpected Jiabaida action: %+v", definition)

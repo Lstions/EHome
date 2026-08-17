@@ -44,6 +44,13 @@ def bms_response(cmd: int, data: bytes, target_len: int = 0) -> bytes:
     return bytes([0xDD, cmd, 0x00, len(data)]) + data + struct.pack(">H", ck) + bytes([0x77])
 
 
+def bms_error_response(status: int) -> bytes:
+    """嘉佰达错误响应帧: DD STATUS 00 00 00 77 (LEN=0, 校验和 0x0000).
+    status: 0x80 命令不存在 / 0x81 无效操作(未进工厂模式等) / 0x82 校验错误.
+    与 jiabaida.go ParseData 的 6 字节错误帧解析一致."""
+    return bytes([0xDD, status, 0x00, 0x00, 0x00, 0x77])
+
+
 def bms_basic_info(total_v: float, current_a: float, remaining_ah: float,
                    nominal_ah: float, cycle: int, rsoc: int,
                    fet_status: int, cell_count: int, ntc_count: int,
@@ -163,8 +170,25 @@ def main() -> int:
     ap.add_argument("--mos", type=lambda x: int(x, 0), default=0x00)
     ap.add_argument("--restart-count", type=int, default=0, help="0xAA restart_count 初值")
     ap.add_argument("--sensitivity", type=int, default=60, help="SN-3001 0x0052 灵敏度寄存器初值")
+    ap.add_argument("--sn", default="SIM-BMS-0001", help="BMS SN 初值 (A2 读写)")
     ap.add_argument("--duration", type=float, default=0.0, help="0=一直运行")
     args = ap.parse_args()
+
+    # ---- 扩展 BMS 状态: 工厂模式 / 参数块 / SN / 内阻 / 自定义属性 / MOS 测试 ----
+    args.factory_mode = False
+    f2_default = bytearray(53)
+    struct.pack_into(">H", f2_default, 51, modbus_crc16(bytes(f2_default[:51])))
+    args.bms_params = bytes(f2_default)
+    f3_default = bytearray(52)
+    struct.pack_into(">H", f3_default, 50, modbus_crc16(bytes(f3_default[:50])))
+    args.bms_sys_params = bytes(f3_default)
+    if not args.sn or len(args.sn) > 31:
+        args.sn = "SIM-BMS-0001"
+    args.custom_attrs = bytes(6)
+    args.resistances = bytes(60)
+    args.test_mos_status = bytes(2)
+    args.force_balance = False
+    args.find_car = False
 
     try:
         s = serial.Serial(args.port, args.baud, timeout=0.3)
@@ -270,6 +294,113 @@ def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | N
             args.restart_count = (getattr(args, "restart_count", 0) + 1) & 0xFFFF
             print(f"  [写] BMS 复位触发, restart_count -> {args.restart_count}")
             return bms_response(0x0E, b"")
+        if cmd == 0x00:
+            # 进入工厂模式: 数据必须为 0x5678
+            if frame and frame[4:6] == bytes([0x56, 0x78]):
+                args.factory_mode = True
+                print("  [写] BMS 进入工厂模式")
+                return bms_response(0x00, b"")
+            print("  [写] 工厂模式进入被拒(需 0x5678)")
+            return bms_error_response(0x81)
+        if cmd == 0x01:
+            # 退出工厂模式: 0000=退出不初始化(读用) / 2828=退出并初始化参数(写用)
+            if not args.factory_mode:
+                return bms_error_response(0x81)
+            args.factory_mode = False
+            mode = frame[4:6].hex() if frame and len(frame) >= 6 else "?"
+            print(f"  [写] BMS 退出工厂模式 (data={mode})")
+            return bms_response(0x01, b"")
+        if cmd in (0xF2, 0xF3):
+            # 写保护参数(53B)/系统参数(52B): 必须工厂模式 + CRC-16 校验通过才存储
+            if not args.factory_mode:
+                print(f"  [写] cmd=0x{cmd:02x} 拒绝: 未进入工厂模式")
+                return bms_error_response(0x81)
+            need = 53 if cmd == 0xF2 else 52
+            if not frame or frame[3] != need:
+                print(f"  [写] cmd=0x{cmd:02x} 长度错误")
+                return bms_error_response(0x81)
+            block = frame[4:4 + need]
+            got_crc = struct.unpack(">H", block[-2:])[0]
+            want_crc = modbus_crc16(block[:-2])
+            if got_crc != want_crc:
+                print(f"  [写] cmd=0x{cmd:02x} CRC 错误: got 0x{got_crc:04x} want 0x{want_crc:04x}")
+                return bms_error_response(0x82)
+            if cmd == 0xF2:
+                args.bms_params = block
+            else:
+                args.bms_sys_params = block
+            print(f"  [写] BMS 0x{cmd:02X} 参数块已存储 ({need}B, CRC OK)")
+            return bms_response(cmd, b"")
+        if cmd == 0xA2:
+            # 写 SN: 工厂模式 + [len][ASCII], 长度 1..31
+            if not args.factory_mode:
+                return bms_error_response(0x81)
+            if not frame or len(frame) < 5:
+                return bms_error_response(0x81)
+            sn_len = frame[4]
+            if frame[3] != 1 + sn_len or sn_len < 1 or sn_len > 31:
+                return bms_error_response(0x81)
+            args.sn = frame[5:5 + sn_len].decode("ascii", "replace")
+            print(f"  [写] BMS SN 更新: {args.sn}")
+            return bms_response(0xA2, b"")
+        if cmd == 0xF6:
+            # 写电芯内阻: 30 串 × 2B (0.1mΩ 有符号)
+            if not frame or frame[3] != 60:
+                return bms_error_response(0x81)
+            args.resistances = frame[4:64]
+            print("  [写] BMS 电芯内阻已存储 (30×0.1mΩ)")
+            return bms_response(0xF6, b"")
+        if cmd == 0xF0:
+            # 写自定义属性: 3×uint16
+            if not frame or frame[3] != 6:
+                return bms_error_response(0x81)
+            args.custom_attrs = frame[4:10]
+            print(f"  [写] BMS 自定义属性 <- {args.custom_attrs.hex()}")
+            return bms_response(0xF0, b"")
+        if cmd == 0x0C:
+            # MOS 测试: data[0]=0x00, data[1]=01 测充电/02 测放电 → 模拟结果 OK(1)
+            if not frame or frame[3] != 2:
+                return bms_error_response(0x81)
+            which = frame[5]
+            status = bytearray(args.test_mos_status)
+            if which == 0x01:
+                status[1] = 0x01
+            elif which == 0x02:
+                status[0] = 0x01
+            else:
+                return bms_error_response(0x81)
+            args.test_mos_status = bytes(status)
+            print(f"  [写] BMS MOS 测试 (0x{which:02x}) -> OK")
+            return bms_response(0x0C, b"")
+        if cmd == 0xF5:
+            args.force_balance = True
+            print("  [写] BMS 强制均衡模式开启")
+            return bms_response(0xF5, b"")
+        if cmd == 0xF1:
+            on = bool(frame and frame[3] == 2 and frame[5] == 0x01)
+            args.find_car = on
+            print(f"  [写] BMS 寻车(蜂鸣器) {'开' if on else '关'}")
+            return bms_response(0xF1, b"")
+        if cmd == 0xE6:
+            print("  [写] BMS 告警已清除")
+            return bms_response(0xE6, b"")
+        if cmd == 0x0D:
+            minutes = int.from_bytes(frame[4:6], "big") if frame and frame[3] == 2 else 0
+            print(f"  [写] BMS EDV 测试静止时间 = {minutes} 分钟")
+            return bms_response(0x0D, b"")
+        if cmd == 0xF7:
+            minutes = int.from_bytes(frame[4:6], "big") if frame and frame[3] == 2 else 0
+            print(f"  [写] BMS 静态修正时间 = {minutes} 分钟")
+            return bms_response(0xF7, b"")
+        if cmd == 0xF8:
+            print(f"  [写] BMS 上报间隔 <- {frame[4:10].hex() if frame and frame[3] == 6 else '?'}")
+            return bms_response(0xF8, b"")
+        if cmd == 0xFA:
+            print(f"  [写] BMS 充电时间窗 <- {frame[4:8].hex() if frame and frame[3] == 4 else '?'}")
+            return bms_response(0xFA, b"")
+        if cmd == 0xFB:
+            print(f"  [写] BMS 放电时限 <- {frame[4:7].hex() if frame and frame[3] == 3 else '?'}")
+            return bms_response(0xFB, b"")
         print(f"  [写] cmd=0x{cmd:02x} 无实现")
         return None
     # 读命令
@@ -283,10 +414,35 @@ def handle_bms(cmd: int, rw: int, args, frame: bytes | None = None) -> bytes | N
         return bms_response(0x04, bms_cell_voltage([3250] * 16), target_len=50)
     if cmd == 0x05:
         return bms_response(0x05, bms_hardware_version("V1.0"), target_len=40)
+    if cmd == 0x0C:
+        # MOS 测试状态读回: [放电状态, 充电状态]
+        return bms_response(0x0C, args.test_mos_status)
     if cmd == 0x0F:
         return bms_response(0x0F, bms_comprehensive(), target_len=100)
+    if cmd == 0xA2:
+        # 读 SN: 需要工厂模式
+        if not args.factory_mode:
+            return bms_error_response(0x81)
+        sn = args.sn.encode("ascii")
+        return bms_response(0xA2, bytes([len(sn)]) + sn)
     if cmd == 0xAA:
         return bms_response(0xAA, bms_protection_count(getattr(args, "restart_count", 0)), target_len=40)
+    if cmd == 0xF0:
+        return bms_response(0xF0, args.custom_attrs)
+    if cmd == 0xF2:
+        # 读保护参数块 (53B): 需要工厂模式, 原样返回存储块供读回对账
+        if not args.factory_mode:
+            print("  [读] F2 拒绝: 未进入工厂模式")
+            return bms_error_response(0x81)
+        return bms_response(0xF2, args.bms_params)
+    if cmd == 0xF3:
+        # 读系统参数块 (52B): 需要工厂模式
+        if not args.factory_mode:
+            print("  [读] F3 拒绝: 未进入工厂模式")
+            return bms_error_response(0x81)
+        return bms_response(0xF3, args.bms_sys_params)
+    if cmd == 0xF6:
+        return bms_response(0xF6, args.resistances)
     print(f"  [读] cmd=0x{cmd:02x} 无实现")
     return None
 
