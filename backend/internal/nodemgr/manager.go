@@ -23,6 +23,7 @@ import (
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
+	"ehome/backend/pkg/parser"
 
 	"gorm.io/gorm"
 )
@@ -50,6 +51,11 @@ type Manager struct {
 	// latestSinkFn 数据层时序化 (v3.4 §3.2.4): 最新值缓存更新回调,
 	// main.go 启动时经 SetLatestSinkFn 注入 (api.SetLatestValue), nil 时跳过。
 	latestSinkFn func(models.UnifiedData)
+	// alertEvaluator 阈值告警引擎 (方案 v0.4 §5 任务C): main.go 经
+	// SetAlertEvaluator 注入, 构造 SensorParserConsumer 时注入解析后回调。
+	alertEvaluator interface {
+		Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
+	}
 
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
@@ -85,6 +91,13 @@ func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
 // SetLatestSinkFn 注入最新值缓存回调 (数据层时序化 v3.4 §3.2.4, main.go 接线)。
 func (m *Manager) SetLatestSinkFn(fn func(models.UnifiedData)) {
 	m.latestSinkFn = fn
+}
+
+// SetAlertEvaluator 注入阈值告警求值器 (方案 v0.4 §5.1.2, main.go 接线)。
+func (m *Manager) SetAlertEvaluator(ev interface {
+	Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
+}) {
+	m.alertEvaluator = ev
 }
 
 // NewManager creates a new node manager.
@@ -149,6 +162,8 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调 (main.go 经 SetLatestSinkFn 接线,
 	// 避免 nodemgr→api 编译期依赖)。
 	latestSinkFn := mgr.latestSinkFn
+	// 阈值告警引擎 (方案 v0.4 §5.1.2): 求值器 (main.go 经 SetAlertEvaluator 接线)。
+	alertEval := mgr.alertEvaluator
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -165,6 +180,10 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		// 依赖 (api 已依赖 nodemgr); main.go 启动时接线。
 		if latestSinkFn != nil {
 			parser.SetLatestSink(latestSinkFn)
+		}
+		// 阈值告警引擎 (方案 v0.4 §5.1.2): 解析后回调注入 (alert.Evaluator)。
+		if alertEval != nil {
+			parser.SetAlertSink(alertEval.Evaluate)
 		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {

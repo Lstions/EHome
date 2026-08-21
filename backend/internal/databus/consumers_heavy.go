@@ -114,6 +114,9 @@ type SensorParserConsumer struct {
 	rollupSink func([]models.UnifiedData)
 	// latestSink 数据层时序化 (v3.4 §3.2.4): 最新值缓存更新回调 (api.SetLatestValue)。
 	latestSink func(models.UnifiedData)
+	// alertSink 阈值告警引擎 (方案 v0.4 §5 任务C): 解析后回调注入 alert.Evaluator。
+	// 复用 rollupSink 回调先例, 只对解析成功的物理量求值, nil 时跳过。
+	alertSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -138,6 +141,11 @@ func (c *SensorParserConsumer) SetRollupSink(sink func([]models.UnifiedData)) {
 // SetLatestSink 注入最新值缓存更新回调 (数据层时序化 v3.4 §3.2.4)。
 func (c *SensorParserConsumer) SetLatestSink(sink func(models.UnifiedData)) {
 	c.latestSink = sink
+}
+
+// SetAlertSink 注入阈值告警求值回调 (方案 v0.4 §5.1.2, main.go 接线)。
+func (c *SensorParserConsumer) SetAlertSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
+	c.alertSink = sink
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
@@ -306,6 +314,13 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 				}
 			}
 		}
+	}
+
+	// 阈值告警引擎 (方案 v0.4 §5.1.2): 解析成功后对物理量求值 (解析后回调,
+	// 非独立 consumer — 避免每事件重复解析 RawData)。独立于持久化结果:
+	// 解析成功即求值, 与 ShouldHandle 语义等价。
+	if c.alertSink != nil && len(sensorData) > 0 {
+		c.alertSink(device.ID, sensorData, now)
 	}
 
 	// Update edge device status. Keep last_data_at fresh for every successful

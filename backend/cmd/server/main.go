@@ -13,6 +13,7 @@ import (
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/alert"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/datalifecycle"
@@ -202,6 +203,11 @@ func main() {
 	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调接线 (api 包函数, 避免包依赖环)。
 	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
+	// 阈值告警引擎 (方案 v0.4 §5 任务C): 求值器构造 + 解析后回调接线。
+	alertEvaluator := alert.NewEvaluator(db, wsHub.BroadcastEvent)
+	nodeMgr.SetAlertEvaluator(alertEvaluator)
+	go alertEvaluator.Start()
+	defer alertEvaluator.Stop()
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
 	commandService := commandexec.NewService(db, actionRegistry)
 	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)

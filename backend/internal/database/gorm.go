@@ -111,6 +111,10 @@ func AutoMigrate() error {
 		// 数据生命周期 P3: 合并搬迁任务进度 (§4.3 任务 3)
 		&models.MergeJob{},
 
+		// 阈值告警引擎 (方案 v0.4 §5.1.1 任务C)
+		&models.AlertRule{},
+		&models.AlertEvent{},
+
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
 		// 如果 struct 尚未定义, 注释掉这两行, 等 struct 改名完成后再启用
