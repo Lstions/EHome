@@ -68,6 +68,36 @@ func main() {
 	}
 	logger.Infof("Database connected and migrated")
 
+	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data 分区迁移 + 滚动分区保障。
+	// 失败降级为 Error 不 Fatal——分区功能异常不阻塞服务启动（表仍以普通表形态可用）。
+	db := database.GetDB()
+	if err := datalifecycle.MigrateUnifiedDataToPartitioned(db); err != nil {
+		logger.Errorf("unified_data partition migration failed (continuing with flat table): %v", err)
+	} else {
+		pm := datalifecycle.NewPartitionManager(db)
+		if err := pm.EnsurePartitions(3); err != nil {
+			logger.Errorf("ensure partitions failed: %v", err)
+		}
+		// 每日滚动检查: 创建下月分区（retention 到期分区由 retention_task 触发 DROP）。
+		partitionStop := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-partitionStop:
+					return
+				case <-ticker.C:
+					if err := pm.EnsurePartitions(3); err != nil {
+						logger.Errorf("daily ensure partitions failed: %v", err)
+					}
+				}
+			}
+		}()
+		// 与其他后台任务同序收尾。
+		defer close(partitionStop)
+	}
+
 	// v3.0: One-time idempotent migration of old GPIO channels → gpio_configs
 	if migrateResult, err := database.MigrateGPIOChannels(database.GetDB()); err != nil {
 		logger.Warnf("GPIO channel migration failed (non-fatal): %v", err)
@@ -79,7 +109,7 @@ func main() {
 		}
 	}
 
-	db := database.GetDB()
+	// db 已在上方分区迁移处获取 (database.GetDB())。
 
 	// 数据生命周期 P0 (方案 v3.3 §2.3.1 路径 1 + §4.1): 注册系统级保留期
 	// 快照源, 并对全量 edge_devices (含软删) 幂等补建 logical_device。
