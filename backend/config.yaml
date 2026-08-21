@@ -7,8 +7,6 @@ database:
   sslmode: disable
 mqtt:
   broker: tcp://localhost:1883
-redis:
-  addr: localhost:6379
 server:
   addr: ":8080"
 log:

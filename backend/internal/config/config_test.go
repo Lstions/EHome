@@ -28,9 +28,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.MQTT.Broker != "tcp://localhost:1883" {
 		t.Errorf("default mqtt broker = %q, want tcp://localhost:1883", cfg.MQTT.Broker)
 	}
-	if cfg.Redis.Addr != "localhost:6379" {
-		t.Errorf("default redis addr = %q, want localhost:6379", cfg.Redis.Addr)
-	}
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level = %q, want info", cfg.Log.Level)
 	}
@@ -64,7 +61,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	os.Setenv("MQTT_BROKER", "tcp://mqtt:1883")
 	os.Setenv("MQTT_USER", "mqttuser")
 	os.Setenv("MQTT_PASSWORD", "mqttpass")
-	os.Setenv("REDIS_ADDR", "redis:6380")
 	os.Setenv("LOG_LEVEL", "debug")
 	defer func() {
 		os.Unsetenv("EHOME_SERVER_ADDR")
@@ -76,7 +72,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 		os.Unsetenv("MQTT_BROKER")
 		os.Unsetenv("MQTT_USER")
 		os.Unsetenv("MQTT_PASSWORD")
-		os.Unsetenv("REDIS_ADDR")
 		os.Unsetenv("LOG_LEVEL")
 	}()
 
@@ -108,9 +103,6 @@ func TestLoadWithEnvOverride(t *testing.T) {
 	if cfg.MQTT.Password != "mqttpass" {
 		t.Errorf("expected mqttpass, got %q", cfg.MQTT.Password)
 	}
-	if cfg.Redis.Addr != "redis:6380" {
-		t.Errorf("expected redis:6380, got %q", cfg.Redis.Addr)
-	}
 	if cfg.Log.Level != "debug" {
 		t.Errorf("expected debug, got %q", cfg.Log.Level)
 	}
@@ -121,7 +113,6 @@ func TestConvenienceAccessors(t *testing.T) {
 		Server:   ServerConfig{Addr: ":9090"},
 		Database: DatabaseConfig{Host: "h", Port: 5432, User: "u", Password: "p", DBName: "d", SSLMode: "disable"},
 		MQTT:     MQTTConfig{Broker: "tcp://m:1883", User: "mu", Password: "mp"},
-		Redis:    RedisConfig{Addr: "r:6379"},
 		Log:      LogConfig{Level: "warn"},
 	}
 
@@ -136,9 +127,6 @@ func TestConvenienceAccessors(t *testing.T) {
 	}
 	if cfg.MQTTPassword() != "mp" {
 		t.Errorf("MQTTPassword = %q", cfg.MQTTPassword())
-	}
-	if cfg.RedisAddr() != "r:6379" {
-		t.Errorf("RedisAddr = %q", cfg.RedisAddr())
 	}
 	if cfg.LogLevel() != "warn" {
 		t.Errorf("LogLevel = %q, want warn", cfg.LogLevel())

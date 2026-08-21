@@ -3,7 +3,6 @@ module ehome/backend
 go 1.26.5
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/gin-contrib/cors v1.7.7
 	github.com/gin-contrib/gzip v1.2.6
@@ -13,7 +12,6 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
-	github.com/redis/go-redis/v9 v9.21.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -57,9 +55,7 @@ require (
 	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
-	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.8.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.29.0 // indirect
 	golang.org/x/net v0.57.0 // indirect

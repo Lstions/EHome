@@ -25,7 +25,6 @@ import (
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
-	"ehome/backend/internal/redis"
 	"ehome/backend/internal/seed"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
@@ -130,12 +129,6 @@ func main() {
 		} else {
 			logger.Infof("Test data seeded")
 		}
-	}
-
-	if err := redis.Connect(cfg.RedisAddr()); err != nil {
-		logger.Infof("Redis connection failed (non-fatal): %v", err)
-	} else {
-		logger.Infof("Redis connected")
 	}
 
 	mqttClient := mqtt.New(cfg.MQTTBroker(), cfg.MQTTUser(), cfg.MQTTPassword())

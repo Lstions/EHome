@@ -13,7 +13,6 @@ type Config struct {
 	Server         ServerConfig         `yaml:"server"`
 	Database       DatabaseConfig       `yaml:"database"`
 	MQTT           MQTTConfig           `yaml:"mqtt"`
-	Redis          RedisConfig          `yaml:"redis"`
 	Log            LogConfig            `yaml:"log"`
 	Control        ControlConfig        `yaml:"control"`
 	Ingest         IngestConfig         `yaml:"ingest"`
@@ -68,11 +67,6 @@ type MQTTConfig struct {
 	Password string `yaml:"password"`
 }
 
-// RedisConfig holds Redis settings
-type RedisConfig struct {
-	Addr string `yaml:"addr"`
-}
-
 // LogConfig holds logging settings
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -113,9 +107,6 @@ func defaultConfig() *Config {
 		},
 		MQTT: MQTTConfig{
 			Broker: "tcp://localhost:1883",
-		},
-		Redis: RedisConfig{
-			Addr: "localhost:6379",
 		},
 		Log: LogConfig{
 			Level: "info",
@@ -176,9 +167,6 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("MQTT_PASSWORD", ""); v != "" {
 		cfg.MQTT.Password = v
 	}
-	if v := getEnv("REDIS_ADDR", ""); v != "" {
-		cfg.Redis.Addr = v
-	}
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
 	}
@@ -228,7 +216,6 @@ func (c *Config) MQTTBroker() string   { return c.MQTT.Broker }
 func (c *Config) MQTTUser() string     { return c.MQTT.User }
 func (c *Config) MQTTPassword() string { return c.MQTT.Password }
 func (c *Config) APIAddr() string      { return c.Server.Addr }
-func (c *Config) RedisAddr() string    { return c.Redis.Addr }
 func (c *Config) DatabaseURL() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.Database.User, c.Database.Password, c.Database.Host,
