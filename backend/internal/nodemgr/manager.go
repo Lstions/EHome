@@ -242,7 +242,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 	}
 	deviceID := parts[1]
 
-	// Update heartbeat on every message (Redis TTL refresh)
+	// Update heartbeat on every message (no-op since Redis retirement;
+	// offline detection relies on DB last_seen)
 	if m.offlineDetector != nil {
 		m.offlineDetector.UpdateHeartbeat(deviceID)
 	}
