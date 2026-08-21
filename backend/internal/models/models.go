@@ -264,6 +264,24 @@ type UnifiedData struct {
 	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
+// UnifiedDataRollup1m 分钟级聚合表 (数据层时序化, 方案 v3.4 §3.2.2)。
+// 写入: RollupConsumer UPSERT (仅 PG); 读取: historical API precision=rollup。
+// retention 365 天 (量小 DELETE)。SQLite 测试库不建此表 (consumer no-op)。
+type UnifiedDataRollup1m struct {
+	DeviceID   uint      `gorm:"primaryKey;column:device_id" json:"device_id"`
+	SensorName string    `gorm:"primaryKey;column:sensor_name;size:32" json:"sensor_name"`
+	Bucket     time.Time `gorm:"primaryKey;column:bucket" json:"bucket"` // 分钟对齐
+	MinV       float64   `gorm:"column:min_v" json:"min_v"`
+	MaxV       float64   `gorm:"column:max_v" json:"max_v"`
+	AvgV       float64   `gorm:"column:avg_v" json:"avg_v"`
+	LastV      float64   `gorm:"column:last_v" json:"last_v"`
+	LastID     uint      `gorm:"column:last_id" json:"last_id"` // 保形去重语义锚点(MAX(id))
+	Cnt        int64     `gorm:"column:cnt" json:"cnt"`
+}
+
+// TableName GORM 表名。
+func (UnifiedDataRollup1m) TableName() string { return "unified_data_rollup_1m" }
+
 // =====================================================================
 
 // DataSource 数据源主备管理 (保留)

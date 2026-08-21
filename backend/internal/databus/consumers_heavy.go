@@ -109,6 +109,9 @@ type SensorParserConsumer struct {
 	reassembler    Reassembler
 	deviceActivity func(uint)
 	driverRegistry *drivers.Registry
+	// rollupSink 数据层时序化 (v3.4 §3.2.2): 解析成功并持久化后的聚合回调
+	// (注入 RollupConsumer.Upsert)。nil 时跳过。
+	rollupSink func([]models.UnifiedData)
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -123,6 +126,11 @@ func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, ha *
 		consumer.deviceActivity = deviceActivity[0]
 	}
 	return consumer
+}
+
+// SetRollupSink 注入 rollup 聚合回调 (数据层时序化 v3.4 §3.2.2)。
+func (c *SensorParserConsumer) SetRollupSink(sink func([]models.UnifiedData)) {
+	c.rollupSink = sink
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
@@ -281,6 +289,9 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		if err := c.db.Session(&gorm.Session{}).Create(&records).Error; err != nil {
 			metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
 			logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
+		} else if c.rollupSink != nil {
+			// 数据层时序化 (v3.4 §3.2.2): 持久化成功后聚合进 rollup 表 (仅 PG 生效)。
+			c.rollupSink(records)
 		}
 	}
 

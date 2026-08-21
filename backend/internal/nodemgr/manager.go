@@ -136,6 +136,8 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	if offlineDetector != nil {
 		deviceActivity = offlineDetector.OnEdgeDeviceData
 	}
+	// 数据层时序化 (v3.4 §3.2.2): rollup 聚合器单实例 (UPSERT 幂等, 无需分片)。
+	rollup := databus.NewRollupConsumer(db)
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -143,6 +145,10 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	for i := 0; i < parserShards; i++ {
 		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
+		// 数据层时序化 (v3.4 §3.2.2): rollup 聚合回调注入 (单实例共享, 无需分片)。
+		if rollup != nil {
+			parser.SetRollupSink(rollup.Upsert)
+		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {
 			mgr.dataBus.Register(parser)
