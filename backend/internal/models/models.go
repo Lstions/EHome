@@ -249,12 +249,15 @@ type DeviceData struct {
 
 // UnifiedData 统一数据 (保留)
 type UnifiedData struct {
+	// 数据层时序化 (方案 v3.4 §3.2.1): PG 生产库为分区母表, 主键复合 (id,timestamp)
+	// (PG 分区表约束: 分区键必须进主键)。id 序列全局不变, 业务零感知。
+	// SQLite 测试库仍由 AutoMigrate 建普通表 (tag 兼容)。
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	DeviceID     uint      `gorm:"index;not null" json:"device_id"` // v2.2: 改为 EdgeDeviceID
 	SensorName   string    `gorm:"size:32;not null;index" json:"sensor_name"`
 	Value        float64   `gorm:"not null" json:"value"`
 	Unit         string    `gorm:"size:16" json:"unit"`
-	Timestamp    time.Time `gorm:"index" json:"timestamp"`
+	Timestamp    time.Time `gorm:"primaryKey;index" json:"timestamp"` // 复合主键第二列 + 分区键
 	CreatedAt    time.Time `json:"created_at"`
 	EdgeDeviceID *uint     `gorm:"index" json:"edge_device_id,omitempty"` // v2.2 新增
 	// 数据生命周期 P0: 逻辑身份列 (普通列, 无 FK; §1.2 大表不引入软删除)。
