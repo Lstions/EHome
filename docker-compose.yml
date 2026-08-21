@@ -18,21 +18,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # Redis cache (unified infra: host port bound to 127.0.0.1 for local dev)
-  redis:
-    image: redis:7-alpine
-    container_name: ehome-redis
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - ehome-redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   # EMQX MQTT broker (unified infra: host ports bound to 127.0.0.1)
   emqx:
     image: emqx/emqx:5.8
@@ -70,7 +55,6 @@ services:
       EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
       EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
       EHOME_DB_SSLMODE: ${EHOME_DB_SSLMODE:-disable}
-      REDIS_ADDR: redis:6379
       MQTT_BROKER: tcp://emqx:1883
       EHOME_MQTT_CLIENT_ID: ehome-server
       EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required in production}
@@ -86,12 +70,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       emqx:
         condition: service_healthy
 
 volumes:
   ehome-pgdata:
-  ehome-redisdata:
   ehome-emqxdata:

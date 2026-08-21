@@ -2,14 +2,14 @@
 # EHomeSystem Makefile
 # ============================================================
 # 统一环境：本地开发（本机 Go/Vite）与生产共用同一套容器基础设施
-# （docker-compose.yml：postgres/redis/emqx）。无独立 dev 栈。
+# （docker-compose.yml：postgres/emqx）。无独立 dev 栈。
 #
 # Usage:
 #   make up             - 确保统一基础设施运行 + 启动本机前后端（默认目标）
 #   make dev            - make up 的别名（历史兼容）
 #   make down           - 停止本机前后端（统一基础设施保持运行，手动 docker compose down 停止）
 #   make restart        - 重启本机前后端（基础设施不动）
-#   make infra          - 确保统一基础设施（PG/Redis/EMQX）运行
+#   make infra          - 确保统一基础设施（PG/EMQX）运行
 #   make infra-down     - 停止统一基础设施
 #   make auth-bootstrap - 初始化统一数据库并生成管理员设置凭据
 #   make backend        - 仅启动本机后端（连统一基础设施）
@@ -28,11 +28,11 @@
 #   make clean          - 停止本机前后端并清理日志（不删统一基础设施/数据卷）
 #
 # 说明：
-#   - 统一基础设施 = docker-compose.yml 的 postgres/redis/emqx，与生产共用。
+#   - 统一基础设施 = docker-compose.yml 的 postgres/emqx，与生产共用。
 #     生产数据卷（ehome-pgdata 等）不受 make down/clean 影响。
 #   - 生产 web 服务（ehome）由 docker compose 直接管理，不受本 Makefile 控制。
 #   - 本地开发端口：后端 :8082、前端 :5174；
-#     统一基础设施主机端口：PG :5432、Redis :6379、EMQX :1883（仅绑定 127.0.0.1）。
+#     统一基础设施主机端口：PG :5432、EMQX :1883（仅绑定 127.0.0.1）。
 # ============================================================
 
 .DEFAULT_GOAL := up
@@ -61,7 +61,7 @@ BACKEND  := $(ROOT)/backend
 FRONTEND := $(ROOT)/frontend-shared
 LOG_DIR  := $(ROOT)/.logs
 
-# 统一基础设施 Compose：与生产共用 docker-compose.yml（只操作 postgres/redis/emqx）
+# 统一基础设施 Compose：与生产共用 docker-compose.yml（只操作 postgres/emqx）
 COMPOSE := docker compose -f $(ROOT)/docker-compose.yml
 
 # 按端口杀进程（可靠，不依赖 PID 文件）
@@ -93,7 +93,6 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		REDIS_ADDR=127.0.0.1:6379 \
 		MQTT_BROKER=tcp://127.0.0.1:1883 \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
@@ -123,7 +122,6 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 	else echo "    Frontend: FAILED — check $(LOG_DIR)/frontend.log"; fi
 	@echo "    Postgres: 127.0.0.1:5432 (统一基础设施)"
 	@echo "    EMQX:     127.0.0.1:1883 (dashboard: 127.0.0.1:18083)"
-	@echo "    Redis:    127.0.0.1:6379"
 
 # ---- 首次运行认证引导 ----
 auth-bootstrap: ## 初始化统一数据库并生成一次性管理员设置凭据
@@ -175,7 +173,6 @@ restart: auth-bootstrap ## 重启本机前后端
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		REDIS_ADDR=127.0.0.1:6379 \
 		MQTT_BROKER=tcp://127.0.0.1:1883 \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
@@ -200,13 +197,13 @@ restart: auth-bootstrap ## 重启本机前后端
 	@echo "==> Restarted!"
 
 # ---- 统一基础设施 ----
-infra: ## 确保统一基础设施 (PG/Redis/EMQX) 运行
+infra: ## 确保统一基础设施 (PG/EMQX) 运行
 	@echo "==> Ensuring unified infrastructure running (docker-compose.yml)..."
-	@$(COMPOSE) up -d --wait postgres redis emqx
+	@$(COMPOSE) up -d --wait postgres emqx
 	@$(COMPOSE) exec -T postgres psql -U $(POSTGRES_USER) -d postgres -tAc \
 		"SELECT 1 FROM pg_database WHERE datname = 'ehome_test'" | grep -q 1 || \
 		$(COMPOSE) exec -T postgres createdb -U $(POSTGRES_USER) ehome_test
-	@echo "==> Unified infrastructure ready (PG:5432 Redis:6379 EMQX:1883)"
+	@echo "==> Unified infrastructure ready (PG:5432 EMQX:1883)"
 
 infra-down: ## 停止统一基础设施
 	@echo "==> Stopping unified infrastructure..."
@@ -223,7 +220,6 @@ backend: auth-bootstrap ## 仅启动本机后端（连统一基础设施）
 		EHOME_DB_USER=$(POSTGRES_USER) \
 		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		EHOME_DB_NAME=$(POSTGRES_DB) \
-		REDIS_ADDR=127.0.0.1:6379 \
 		MQTT_BROKER=tcp://127.0.0.1:1883 \
 		EHOME_MQTT_CLIENT_ID=ehome-backend-dev \
 		EHOME_EXTERNAL_HOST=$(EHOME_EXTERNAL_HOST) \
@@ -322,8 +318,8 @@ e2e: ## Run Playwright E2E tests (run make up first)
 
 # ---- 状态 ----
 status: ## 查看服务状态
-	@echo "==> Unified infrastructure (docker-compose.yml postgres/redis/emqx):"
-	@$(COMPOSE) ps postgres redis emqx
+	@echo "==> Unified infrastructure (docker-compose.yml postgres/emqx):"
+	@$(COMPOSE) ps postgres emqx
 	@echo ""
 	@echo "==> Local services:"
 	@if lsof -ti :$(BACKEND_PORT) >/dev/null 2>&1; then \

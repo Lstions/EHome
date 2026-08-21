@@ -43,7 +43,7 @@
 |----|------|
 | 边缘节点 | ESP32-S3 / ESP32-C6, FreeRTOS, WiFi STA, ESP-IDF 6.0.1 |
 | 消息中间件 | EMQX 5.7 (MQTT 5.0, QoS 1) |
-| 服务端 | Go 1.25, Gin, GORM, PostgreSQL 16, Redis |
+| 服务端 | Go 1.25, Gin, GORM, PostgreSQL 16 |
 | 前端 | Vue 3.5, Vite 8, Element Plus 2.13, ECharts 6, Pinia 3, Tailwind CSS |
 | 部署 | Docker (Alpine 单服务), Makefile 本地开发 |
 
@@ -64,14 +64,14 @@ cd /home/sun/workspace/EHomeSystem
 
 ### 2. 启动统一环境
 
-本地开发（本机 Go/Vite）与生产共用同一套容器基础设施（`docker-compose.yml` 的 postgres/redis/emqx，无独立 dev 栈）。
+本地开发（本机 Go/Vite）与生产共用同一套容器基础设施（`docker-compose.yml` 的 postgres/emqx，无独立 dev 栈）。
 
 ```bash
 # 一键启动：确保统一基础设施运行 + 启动本机前后端（make 不带参数效果相同）
 make up
 
 # 或分步启动
-make infra       # 确保统一基础设施 (PG/Redis/EMQX) 运行
+make infra       # 确保统一基础设施 (PG/EMQX) 运行
 make backend     # 仅启动后端 (:8082)
 make frontend    # 仅启动前端 (:5174)
 ```
@@ -83,7 +83,6 @@ make frontend    # 仅启动前端 (:5174)
 | 服务 | 本地/统一端口 | 生产容器内端口 |
 |------|--------------|---------------|
 | PostgreSQL | 5432 | 5432 |
-| Redis | 6379 | 6379 |
 | EMQX MQTT | 1883 | 1883 |
 | EMQX WebSocket | 8083 | 8083 |
 | EMQX Dashboard | 18083 | 18083 |
@@ -232,7 +231,6 @@ EHomeSystem/
 │   │   ├── offlinedetector/ # 离线检测
 │   │   ├── ota/           # OTA 升级管理
 │   │   ├── pendingwrite/  # 写操作队列
-│   │   ├── redis/         # Redis 客户端
 │   │   ├── seed/          # 数据初始化
 │   │   ├── terminal/      # 通道终端 WebSocket
 │   │   └── websocket/     # WebSocket Hub
