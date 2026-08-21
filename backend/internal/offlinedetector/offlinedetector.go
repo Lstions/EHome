@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/redis"
 	"ehome/backend/internal/websocket"
 
 	"gorm.io/gorm"
@@ -63,17 +62,14 @@ func (d *Detector) loop() {
 	}
 }
 
-// checkOffline performs three-layer offline detection (parallel).
+// checkOffline performs two-layer offline detection (parallel).
 // Each layer uses a session-isolated DB handle (db.Session) to avoid
 // Statement races between concurrent GORM calls.
+// Redis 退役 (方案 v3.4 §4 任务B): 原 checkRedisHeartbeats (L1) 已删除，
+// checkDBLastSeen (L3) 是采集器离线判定的唯一路径。
 func (d *Detector) checkOffline() {
 	var wg sync.WaitGroup
-	wg.Add(3)
-
-	go func() {
-		defer wg.Done()
-		d.checkRedisHeartbeats(d.db.Session(&gorm.Session{}))
-	}()
+	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
@@ -88,30 +84,9 @@ func (d *Detector) checkOffline() {
 	wg.Wait()
 }
 
-// checkRedisHeartbeats checks Redis TTL for all nodes.
-// BUG-05 fix: Instead of scanning Redis keys (which won't find expired ones),
-// query DB for online nodes and verify their heartbeat key still exists.
-func (d *Detector) checkRedisHeartbeats(db *gorm.DB) {
-	if redis.Client == nil {
-		return // Redis not connected
-	}
-
-	// Get all nodes currently marked as online in DB
-	var onlineNodes []models.Node
-	if err := db.Where("status = ?", "online").Find(&onlineNodes).Error; err != nil {
-		return
-	}
-
-	for _, col := range onlineNodes {
-		deviceID := col.NodeID
-		if !redis.IsOnline(deviceID) {
-			// Heartbeat key missing/expired — mark offline
-			d.markOffline(db, deviceID, "redis_ttl_expired")
-		}
-	}
-}
-
-// checkDBLastSeen checks DB last_seen for collectors without Redis heartbeat
+// checkDBLastSeen checks DB last_seen for online collectors — the single
+// offline-detection path since Redis retirement (方案 v3.4 §4 任务B).
+// Nodes with LastSeen==nil are skipped (unchanged semantics).
 func (d *Detector) checkDBLastSeen(db *gorm.DB) {
 	var collectors []models.Node
 	if err := db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
@@ -120,12 +95,7 @@ func (d *Detector) checkDBLastSeen(db *gorm.DB) {
 
 	now := time.Now()
 	for _, col := range collectors {
-		// Skip if still has Redis heartbeat
-		if redis.IsOnline(col.NodeID) {
-			continue
-		}
-
-		// Check if last_seen is older than 90s (L3: DB fallback)
+		// Check if last_seen is older than 90s (18 个 5s 心跳周期)
 		if col.LastSeen != nil && now.Sub(*col.LastSeen) > 90*time.Second {
 			d.markOffline(db, col.NodeID, "db_last_seen_timeout")
 		}
@@ -262,9 +232,10 @@ func (d *Detector) markEdgeDeviceOffline(db *gorm.DB, dev models.EdgeDevice) {
 	}
 }
 
-// UpdateHeartbeat updates the heartbeat for a node
+// UpdateHeartbeat updates the heartbeat for a node.
+// Redis 退役 (方案 v3.4 §4 任务B): 原 redis.SetHeartbeat TTL 刷新已删除。
+// 方法保留为 no-op 以维持 Detector 接口稳定——未来多实例部署时
+// 在此接入分布式心跳实现即可（方案 §4.2 升级路径）。
 func (d *Detector) UpdateHeartbeat(deviceID string) {
-	if redis.Client != nil {
-		redis.SetHeartbeat(deviceID, 15*time.Second)
-	}
+	_ = deviceID // no-op: offline detection now relies solely on DB last_seen
 }

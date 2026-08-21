@@ -5,10 +5,8 @@ import (
 	"time"
 
 	ehomeModels "ehome/backend/internal/models"
-	ehomeRedis "ehome/backend/internal/redis"
 	"ehome/backend/internal/websocket"
 
-	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -35,33 +33,12 @@ func setupExtraDetector(t *testing.T) (*Detector, *gorm.DB) {
 	return d, db
 }
 
-// ensureRedisNil makes sure redis.Client is nil so that redis.IsOnline
-// short-circuits in checkRedisHeartbeats (which checks `if redis.Client == nil`).
-// For checkDBLastSeen, which calls redis.IsOnline unconditionally, we use
-// a non-nil but disconnected client instead (see setupDisconnectedRedis).
-func ensureRedisNil() {
-	ehomeRedis.Client = nil
-}
-
-// setupDisconnectedRedis sets redis.Client to a non-nil but unconnected client.
-// This prevents nil-pointer panics in redis.IsOnline — TTL() returns an error
-// (connection refused), and .Val() returns 0, so IsOnline returns false.
-func setupDisconnectedRedis() {
-	ehomeRedis.Client = redis.NewClient(&redis.Options{
-		Addr: "localhost:0", // invalid address — connection will fail
-	})
-}
-
-func restoreRedis() {
-	ehomeRedis.Client = nil
-}
+// Redis 退役 (方案 v3.4 §4 任务B): 原 ensureRedisNil/setupDisconnectedRedis/
+// restoreRedis 辅助已删除 — checkDBLastSeen/UpdateHeartbeat 不再依赖 redis.Client。
 
 // TestCheckDBLastSeen_NoNodes verifies that checkDBLastSeen does not error
 // when there are no nodes in the database.
 func TestCheckDBLastSeen_NoNodes(t *testing.T) {
-	ensureRedisNil()
-	defer restoreRedis()
-
 	d, db := setupExtraDetector(t)
 	// No nodes in DB — should be a no-op
 	d.checkDBLastSeen(db.Session(&gorm.Session{}))
@@ -76,10 +53,6 @@ func TestCheckDBLastSeen_NoNodes(t *testing.T) {
 // TestCheckDBLastSeen_OfflineNode verifies that a node whose last_seen is
 // older than 90s (and no Redis heartbeat) gets marked offline.
 func TestCheckDBLastSeen_OfflineNode(t *testing.T) {
-	// Use a disconnected redis client so IsOnline returns false without panic
-	setupDisconnectedRedis()
-	defer restoreRedis()
-
 	d, db := setupExtraDetector(t)
 
 	oldTime := time.Now().Add(-120 * time.Second)
@@ -120,19 +93,13 @@ func TestCheckEdgeDevicesOffline_NoDevices(t *testing.T) {
 	}
 }
 
-// TestUpdateHeartbeat verifies that UpdateHeartbeat does not panic when
-// redis is nil (it checks `if redis.Client != nil`).
+// TestUpdateHeartbeat verifies that UpdateHeartbeat (now a no-op after Redis
+// retirement) does not panic.
 func TestUpdateHeartbeat(t *testing.T) {
-	ensureRedisNil()
-	defer restoreRedis()
-
 	d, _ := setupExtraDetector(t)
 
-	// Should be a no-op when redis is nil
+	// Should be a safe no-op
 	d.UpdateHeartbeat("test-node-001")
-
-	// With disconnected redis — should not panic
-	setupDisconnectedRedis()
 	d.UpdateHeartbeat("test-node-002")
 }
 
