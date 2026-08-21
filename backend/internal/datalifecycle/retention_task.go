@@ -259,6 +259,19 @@ func (r *RetentionTask) notifyExpiry(ctx context.Context, ld *models.LogicalDevi
 // deleteExpired batch-deletes rows older than the retention cutoff.
 // Same batching strategy as purge (§4.3 锁交互说明).
 func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retentionDays int, now time.Time) (int64, error) {
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+
+	// 数据层时序化 (v3.4 §3.2.1): PG 下 unified_data 到期改整分区 DROP
+	// (O(1) 替代逐行 DELETE)；device_data 维持 DELETE 不动。
+	// 注意: 分区 DROP 是整月粒度, 与按 Scope 的精确 retention 并存——
+	// DROP 仅删除整个分区都到期的数据, 未整月到期的仍走下方 DELETE 批次。
+	if r.db.Dialector != nil && r.db.Dialector.Name() == "postgres" && IsUnifiedDataPartitioned(r.db) {
+		pm := NewPartitionManager(r.db)
+		if _, err := pm.DropPartitionsBefore(cutoff); err != nil {
+			return 0, fmt.Errorf("retention drop partitions: %w", err)
+		}
+	}
+
 	batchSize := r.batchSize
 	if batchSize <= 0 {
 		batchSize = purgeBatchSizePostgres
@@ -266,7 +279,6 @@ func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retenti
 			batchSize = purgeBatchSizeSQLite
 		}
 	}
-	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	cond, args := scope.Cond()
 
 	var total int64
