@@ -28,12 +28,17 @@ func nowMillis() int64 {
 func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *nodemgr.Manager, otaMgr *ota.Manager, driverRegistry *drivers.Registry, options ...interface{}) {
 	var controlPolicy ControlPolicy
 	var commandService *commandexec.Service
+	// alertEvaluatorOpt 阈值告警求值器 (方案 v0.4 §5.1.3): 经 *alert.Evaluator
+	// option 注入 (main.go), CRUD 写路径调用 Invalidate 即时失效规则缓存。
+	var alertEvaluatorOpt alertEvaluator
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
 			controlPolicy = value
 		case *commandexec.Service:
 			commandService = value
+		case alertEvaluator:
+			alertEvaluatorOpt = value
 		}
 	}
 	controlPolicy = resolveControlPolicy(controlPolicy)
@@ -98,6 +103,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// Overview + Notification routes
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)
+
+		// 阈值告警引擎 (方案 v0.4 §5.1.3 任务C): 规则 CRUD + 事件查询。
+		// evaluator 经 options 注入 (main.go), 单测可传 nil。
+		registerAlertRoutes(v1, db, alertEvaluatorOpt)
 
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)

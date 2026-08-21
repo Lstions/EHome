@@ -296,7 +296,7 @@ func main() {
 		}))
 	}
 	controlCfg := cfg.ControlConfig()
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, api.ControlPolicy{
 		LegacyDeviceWriteMode: controlCfg.LegacyDeviceWriteMode,
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
