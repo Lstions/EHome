@@ -66,11 +66,30 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		var allVals []sensorVal
 		if len(deviceIDs) > 0 {
-			db.Table("unified_data").
-				Select("unified_data.device_id, unified_data.sensor_name, unified_data.value").
-				Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON unified_data.device_id = latest.device_id AND unified_data.created_at = latest.created_at", deviceIDs).
-				Where("unified_data.device_id IN ?", deviceIDs).
-				Find(&allVals)
+			// 数据层时序化 (v3.4 §3.2.4): 缓存优先, miss 的设备回落原 DISTINCT ON SQL。
+			var missed []uint
+			cacheByDevice := make(map[uint][]sensorVal)
+			for _, did := range deviceIDs {
+				if rec, ok := LatestValue(did); ok {
+					cacheByDevice[did] = append(cacheByDevice[did], sensorVal{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value})
+				} else {
+					missed = append(missed, did)
+				}
+			}
+			if len(missed) > 0 {
+				var fallback []sensorVal
+				db.Table("unified_data").
+					Select("unified_data.device_id, unified_data.sensor_name, unified_data.value").
+					Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON unified_data.device_id = latest.device_id AND unified_data.created_at = latest.created_at", missed).
+					Where("unified_data.device_id IN ?", missed).
+					Find(&fallback)
+				for _, v := range fallback {
+					cacheByDevice[v.DeviceID] = append(cacheByDevice[v.DeviceID], v)
+				}
+			}
+			for _, vals := range cacheByDevice {
+				allVals = append(allVals, vals...)
+			}
 		}
 
 		// Group by device ID

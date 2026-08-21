@@ -316,11 +316,30 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Single query: get latest 10 rows per device using DISTINCT ON (PostgreSQL)
 		var allEntries []lastDataEntry
 		if len(deviceIDs) > 0 {
-			db.Table("unified_data ud").
-				Select("ud.device_id, ud.sensor_name, ud.value, ud.unit").
-				Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON ud.device_id = latest.device_id AND ud.created_at = latest.created_at", deviceIDs).
-				Where("ud.device_id IN ?", deviceIDs).
-				Find(&allEntries)
+			// 数据层时序化 (v3.4 §3.2.4): 缓存优先, miss 的设备回落原 DISTINCT ON SQL。
+			var missed []uint
+			cacheByDevice := make(map[uint][]lastDataEntry)
+			for _, did := range deviceIDs {
+				if rec, ok := LatestValue(did); ok {
+					cacheByDevice[did] = append(cacheByDevice[did], lastDataEntry{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value, Unit: rec.Unit})
+				} else {
+					missed = append(missed, did)
+				}
+			}
+			if len(missed) > 0 {
+				var fallback []lastDataEntry
+				db.Table("unified_data ud").
+					Select("ud.device_id, ud.sensor_name, ud.value, ud.unit").
+					Joins("INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data WHERE device_id IN ? ORDER BY device_id, created_at DESC) latest ON ud.device_id = latest.device_id AND ud.created_at = latest.created_at", missed).
+					Where("ud.device_id IN ?", missed).
+					Find(&fallback)
+				for _, e := range fallback {
+					cacheByDevice[e.DeviceID] = append(cacheByDevice[e.DeviceID], e)
+				}
+			}
+			for _, entries := range cacheByDevice {
+				allEntries = append(allEntries, entries...)
+			}
 		}
 		// Group by device ID
 		dataByDevice := make(map[uint]map[string]float64, len(devices))

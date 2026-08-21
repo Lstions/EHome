@@ -47,6 +47,9 @@ type Manager struct {
 
 	// F7.6: Ping tracking for retry/timeout
 	pingTracker *PingTracker
+	// latestSinkFn 数据层时序化 (v3.4 §3.2.4): 最新值缓存更新回调,
+	// main.go 启动时经 SetLatestSinkFn 注入 (api.SetLatestValue), nil 时跳过。
+	latestSinkFn func(models.UnifiedData)
 
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
@@ -78,6 +81,11 @@ type periphRequestMeta struct {
 
 func (m *Manager) LockPeriphIntent()   { m.periphIntentMu.Lock() }
 func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
+
+// SetLatestSinkFn 注入最新值缓存回调 (数据层时序化 v3.4 §3.2.4, main.go 接线)。
+func (m *Manager) SetLatestSinkFn(fn func(models.UnifiedData)) {
+	m.latestSinkFn = fn
+}
 
 // NewManager creates a new node manager.
 //
@@ -138,6 +146,9 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	// 数据层时序化 (v3.4 §3.2.2): rollup 聚合器单实例 (UPSERT 幂等, 无需分片)。
 	rollup := databus.NewRollupConsumer(db)
+	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调 (main.go 经 SetLatestSinkFn 接线,
+	// 避免 nodemgr→api 编译期依赖)。
+	latestSinkFn := mgr.latestSinkFn
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -148,6 +159,12 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		// 数据层时序化 (v3.4 §3.2.2): rollup 聚合回调注入 (单实例共享, 无需分片)。
 		if rollup != nil {
 			parser.SetRollupSink(rollup.Upsert)
+		}
+		// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调注入。
+		// 注意: 通过函数变量间接引用 api.SetLatestValue, 避免 nodemgr→api 编译期
+		// 依赖 (api 已依赖 nodemgr); main.go 启动时接线。
+		if latestSinkFn != nil {
+			parser.SetLatestSink(latestSinkFn)
 		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {

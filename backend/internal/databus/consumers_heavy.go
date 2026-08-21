@@ -112,6 +112,8 @@ type SensorParserConsumer struct {
 	// rollupSink 数据层时序化 (v3.4 §3.2.2): 解析成功并持久化后的聚合回调
 	// (注入 RollupConsumer.Upsert)。nil 时跳过。
 	rollupSink func([]models.UnifiedData)
+	// latestSink 数据层时序化 (v3.4 §3.2.4): 最新值缓存更新回调 (api.SetLatestValue)。
+	latestSink func(models.UnifiedData)
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -131,6 +133,11 @@ func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, ha *
 // SetRollupSink 注入 rollup 聚合回调 (数据层时序化 v3.4 §3.2.2)。
 func (c *SensorParserConsumer) SetRollupSink(sink func([]models.UnifiedData)) {
 	c.rollupSink = sink
+}
+
+// SetLatestSink 注入最新值缓存更新回调 (数据层时序化 v3.4 §3.2.4)。
+func (c *SensorParserConsumer) SetLatestSink(sink func(models.UnifiedData)) {
+	c.latestSink = sink
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
@@ -290,8 +297,14 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 			metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
 			logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
 		} else if c.rollupSink != nil {
-			// 数据层时序化 (v3.4 §3.2.2): 持久化成功后聚合进 rollup 表 (仅 PG 生效)。
+			// 数据层时序化 (v3.4 §3.2.2/§3.2.4): 持久化成功后聚合进 rollup 表
+			// (仅 PG 生效) + 更新最新值缓存 (回调注入, 保持 databus 不依赖 api 包)。
 			c.rollupSink(records)
+			if c.latestSink != nil {
+				for i := range records {
+					c.latestSink(records[i])
+				}
+			}
 		}
 	}
 
