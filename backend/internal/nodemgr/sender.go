@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
@@ -14,7 +13,6 @@ import (
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
-	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 
@@ -180,19 +178,17 @@ func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uin
 // nextPeriphRequestID is the atomic counter for PeriphCmd request IDs.
 var nextPeriphRequestID uint32
 
-// SendPing sends a Ping message to a device and records timestamp in Redis for verification
+// SendPing sends a Ping message to a device and registers the timestamp in
+// the PingTracker for anti-forgery verification and retry-on-timeout.
 // F7.6: Track the ping for retry on timeout
 func (m *Manager) SendPing(deviceID string) error {
 	ts := time.Now().UnixMicro()
 	enc := frame.NewEncoder(frame.MsgPing)
 	enc.EncodeVarint(1, uint64(ts))
 
-	// Store ping timestamp in Redis for anti-forgery verification (TTL=30s)
-	if redis.Client != nil {
-		redis.Client.Set(context.Background(), fmt.Sprintf("ping:%s", deviceID), ts, 30*time.Second)
-	}
-
-	// F7.6: Register pending ping for retry/timeout
+	// F7.6: Register pending ping for retry/timeout + anti-forgery
+	// verification (the tracked timestamp replaces the former Redis TTL key;
+	// the tracker's 10s timeout cleanup preserves the TTL semantics).
 	if m.pingTracker != nil {
 		m.pingTracker.Track(deviceID, ts, func(latencyMs int64, success bool) {
 			if !success {

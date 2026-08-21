@@ -1,7 +1,6 @@
 package nodemgr
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -9,7 +8,6 @@ import (
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
-	"ehome/backend/internal/redis"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -77,20 +75,19 @@ func (m *Manager) handlePong(deviceID string, payload []byte) {
 		}
 	}
 
-	// Anti-forgery: verify this Pong matches a Ping we sent
-	if redis.Client != nil {
-		pingKey := fmt.Sprintf("ping:%s", deviceID)
-		storedTs, err := redis.Client.Get(context.Background(), pingKey).Int64()
-		if err != nil {
-			logger.Warnf("[%s] Pong rejected: no matching Ping found in Redis", deviceID)
+	// Anti-forgery: verify this Pong matches a Ping we sent. The pending
+	// record lives in the PingTracker (in-process, replaces the former Redis
+	// key). Complete() is the one-time consumption, equivalent to Redis Del.
+	if m.pingTracker != nil {
+		rec, ok := m.pingTracker.Peek(deviceID)
+		if !ok {
+			logger.Warnf("[%s] Pong rejected: no matching Ping found in PingTracker", deviceID)
 			return
 		}
-		if storedTs != int64(timestamp) {
-			logger.Warnf("[%s] Pong rejected: timestamp mismatch (expected %d, got %d)", deviceID, storedTs, timestamp)
+		if rec.timestamp != int64(timestamp) {
+			logger.Warnf("[%s] Pong rejected: timestamp mismatch (expected %d, got %d)", deviceID, rec.timestamp, timestamp)
 			return
 		}
-		// Delete used ping key (one-time use)
-		redis.Client.Del(context.Background(), pingKey)
 	}
 
 	// Calculate RTT
@@ -98,7 +95,7 @@ func (m *Manager) handlePong(deviceID string, payload []byte) {
 	logger.Infof("[%s] Pong verified, RTT=%v", deviceID, rtt)
 	metrics.PingRTT.Observe(float64(rtt.Milliseconds()))
 
-	// F7.6: Complete the pending ping record
+	// F7.6: Consume the pending ping record (one-time use)
 	if m.pingTracker != nil {
 		if rec, ok := m.pingTracker.Complete(deviceID); ok {
 			if rec.callback != nil {

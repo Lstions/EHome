@@ -61,6 +61,16 @@ func (pt *PingTracker) Track(deviceID string, timestamp int64, callback func(lat
 	}
 }
 
+// Peek returns the pending ping record WITHOUT completing it.
+// Used by Pong anti-forgery verification: the caller compares the Pong
+// timestamp against the tracked record, then consumes it via Complete.
+func (pt *PingTracker) Peek(deviceID string) (*pingRecord, bool) {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	rec, ok := pt.pending[deviceID]
+	return rec, ok
+}
+
 // Complete marks a ping as completed (Pong received)
 // Returns the record if it existed
 func (pt *PingTracker) Complete(deviceID string) (*pingRecord, bool) {
