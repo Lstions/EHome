@@ -7,7 +7,6 @@ import (
 
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/models"
-	redisstore "ehome/backend/internal/redis"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -31,7 +30,7 @@ type LoginResponse struct {
 
 // registerAuthRoutes sets up authentication routes (no JWT required)
 func registerAuthRoutes(r *gin.Engine, db *gorm.DB) {
-	registerAuthRoutesWithLimiter(r, db, authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute))
+	registerAuthRoutesWithLimiter(r, db, authservice.NewLoginLimiter(5, 15*time.Minute))
 }
 
 func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authservice.LoginLimiter) {

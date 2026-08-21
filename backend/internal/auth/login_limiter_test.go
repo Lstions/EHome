@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoginLimiterBlocksAfterConfiguredFailures(t *testing.T) {
-	limiter := NewLoginLimiter(nil, 3, time.Minute)
+	limiter := NewLoginLimiter(3, time.Minute)
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		allowed, _, err := limiter.AllowFailure(ctx, "127.0.0.1", "admin")
@@ -28,7 +28,7 @@ func TestLoginLimiterBlocksAfterConfiguredFailures(t *testing.T) {
 }
 
 func TestLoginLimiterResetClearsAccountAndSourceFailures(t *testing.T) {
-	limiter := NewLoginLimiter(nil, 1, time.Minute)
+	limiter := NewLoginLimiter(1, time.Minute)
 	ctx := context.Background()
 	allowed, _, _ := limiter.AllowFailure(ctx, "127.0.0.1", "admin")
 	if !allowed {

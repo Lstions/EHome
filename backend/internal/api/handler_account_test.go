@@ -32,7 +32,7 @@ func setupAccountRouter(t *testing.T) (*gin.Engine, *models.User, string) {
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuthWithDB(db))
-	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(nil, 2, time.Minute))
+	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(2, time.Minute))
 	return r, &user, token
 }
 

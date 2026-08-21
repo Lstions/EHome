@@ -11,7 +11,6 @@ import (
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/internal/ota"
-	redisstore "ehome/backend/internal/redis"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/metrics"
@@ -59,9 +58,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Login and in-session reauthentication share one limiter, including the
-	// bounded in-memory fallback used when Redis is unavailable.
-	authLimiter := authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute)
+	// Login and in-session reauthentication share one limiter (in-process
+	// sliding window; Redis retired in 方案 v3.4 §4 任务B).
+	authLimiter := authservice.NewLoginLimiter(5, 15*time.Minute)
 	registerAuthRoutesWithLimiter(r, db, authLimiter)
 
 	// Firmware download — no auth (ESP32 fetches without JWT)

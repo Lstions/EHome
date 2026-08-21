@@ -8,7 +8,6 @@ import (
 
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/models"
-	redisstore "ehome/backend/internal/redis"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -25,7 +24,7 @@ type accountResponse struct {
 }
 
 func registerAccountRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
-	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(redisstore.Client, 5, 15*time.Minute))
+	registerAccountRoutesWithLimiter(v1, db, authservice.NewLoginLimiter(5, 15*time.Minute))
 }
 
 func registerAccountRoutesWithLimiter(v1 *gin.RouterGroup, db *gorm.DB, limiter *authservice.LoginLimiter) {
