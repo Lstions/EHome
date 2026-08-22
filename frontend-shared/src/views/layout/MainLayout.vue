@@ -289,6 +289,7 @@ const allMenuItems = [
 	{ path: '/firmware', title: '固件管理', icon: Files },
 	{ path: '/device-configs', title: '配置模板', icon: Setting },
 	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
+	{ path: '/alerts', title: '告警规则', icon: Bell },
 ]
 const menuItems = computed(() => allMenuItems)
 

@@ -70,6 +70,9 @@ var allModels = []interface{}{
 	&models.BackfillJob{},
 	// 数据生命周期 P3: 合并搬迁任务进度
 	&models.MergeJob{},
+	// 阈值告警引擎 (方案 v0.4 §5.1.1 任务C; 与生产 AutoMigrate 列表同步)
+	&models.AlertRule{},
+	&models.AlertEvent{},
 }
 
 // OpenTestDB opens a test database based on EHOME_TEST_DB env var.

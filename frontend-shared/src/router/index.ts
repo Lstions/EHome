@@ -104,6 +104,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '系统监控', icon: 'DataAnalysis' },
       },
       {
+        path: 'alerts',
+        name: 'AlertRules',
+        component: () => import('@/views/alert/AlertRules.vue'),
+        meta: { title: '告警规则', icon: 'Bell' },
+      },
+      {
         path: 'profile',
         name: 'Profile',
         component: () => import('@/views/profile/Profile.vue'),
