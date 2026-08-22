@@ -457,13 +457,142 @@
         </div>
       </template>
 
-      <!-- 其他 tab 占位 -->
-      <div v-else class="card tab-placeholder">
-        <el-icon :size="40" color="#C9D2DE"><Files /></el-icon>
-        <div class="tp-title">「{{ activeTab }}」设计稿未包含</div>
-        <div class="tp-sub">当前仅实现「基本信息」页;总线配置见 designs/new-node-2.png</div>
-        <button class="btn btn-plain" @click="activeTab = '基本信息'">返回基本信息</button>
-      </div>
+      <!-- DMA 通道：只读资源视图，绑定操作在总线配置 TAB -->
+      <template v-else-if="activeTab === 'DMA 通道'">
+        <section class="card dma-card">
+          <div v-if="dmaLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
+          <div v-else-if="dmaChannels.length === 0" class="card-empty">该节点暂无 DMA 通道</div>
+          <div v-else class="dma-grid">
+            <div v-for="dma in dmaChannels" :key="dma.dma_id" class="dma-item">
+              <div class="dma-item-head">
+                <span class="mono">{{ dma.name || `DMA${dma.dma_id}` }}</span>
+                <span class="bus-tag" :class="dmaTagClass(dma.state)">{{ dmaStateText(dma.state) }}</span>
+              </div>
+              <div class="dma-item-row"><span>类型</span><b class="mono">{{ dmaTypeText(dma.dma_type) }}</b></div>
+              <div class="dma-item-row"><span>能力</span><b class="mono">{{ capText(dma.capabilities) }}</b></div>
+              <div class="dma-item-row"><span>最大突发</span><b class="mono">{{ dma.max_burst }}</b></div>
+              <div class="dma-item-row"><span>绑定</span><b class="mono">{{ dma.bound_to || '未绑定' }}</b></div>
+              <div class="dma-item-row"><span>兼容总线</span><b class="mono">{{ busText(dma.compatible_bus) }}</b></div>
+            </div>
+          </div>
+        </section>
+      </template>
+
+      <!-- 关联设备 -->
+      <template v-else-if="activeTab === '关联设备'">
+        <section class="card device-card">
+          <div class="card-head">
+            <span class="card-title">关联设备<span v-if="devices.length > 0" class="device-count">（共 {{ devices.length }}）</span></span>
+            <span class="device-card-actions">
+              <span class="view-switch" role="tablist" aria-label="视图切换">
+                <button type="button" class="view-switch-btn" :class="{ active: deviceViewMode === 'list' }" @click="deviceViewMode = 'list'">列表</button>
+                <button type="button" class="view-switch-btn" :class="{ active: deviceViewMode === 'card' }" @click="deviceViewMode = 'card'">卡片</button>
+              </span>
+              <button class="btn btn-primary btn-sm" :disabled="!node?.node_id || nodeOffline" @click="showQuickCreate = true"><el-icon :size="13"><Plus /></el-icon>创建设备</button>
+              <button class="btn btn-plain btn-sm" :disabled="devicesLoading" @click="fetchDevices"><el-icon :size="13" :class="{ spin: devicesLoading }"><RefreshRight /></el-icon>{{ devicesLoading ? '加载中…' : '刷新' }}</button>
+            </span>
+          </div>
+          <div v-if="devicesLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
+          <div v-else-if="devices.length === 0" class="card-empty">暂无设备</div>
+          <!-- 列表视图 -->
+          <div v-else-if="deviceViewMode === 'list'" class="chan-list">
+            <div v-for="row in devices" :key="row.id" class="chan-row device-row">
+              <span class="chan-icon"><el-icon :size="14"><Connection /></el-icon></span>
+              <span class="chan-name">{{ row.name }}</span>
+              <span class="chan-sub">{{ getDeviceTypeLabel(row.device_type) }}</span>
+              <span class="chan-sub mono">{{ String(row.hardware_id || '') }}</span>
+              <span class="chan-sub mono">{{ deviceChannelText(row) }}</span>
+              <span class="chan-sub device-last-data">{{ formatLastData(row.last_data) }}</span>
+              <StatusBadge :status="row.status" />
+              <span class="chan-sub device-last-time">{{ row.last_data_time ? formatTime(row.last_data_time) : '—' }}</span>
+              <button class="link-btn" type="button" @click="viewDevice(row)"><el-icon :size="12"><View /></el-icon>查看</button>
+            </div>
+          </div>
+          <!-- 卡片视图（设计稿 new-node-edge.png 卡片模式） -->
+          <div v-else class="device-grid">
+            <div v-for="row in devices" :key="row.id" class="device-tile" :class="{ 'is-offline': row.status !== 'online' }" @click="viewDevice(row)">
+              <div class="device-tile-head">
+                <span class="device-tile-icon"><el-icon :size="18"><Connection /></el-icon></span>
+                <div class="device-tile-title">
+                  <b class="device-tile-name" :title="row.name">{{ row.name }}</b>
+                  <span class="device-tile-type">{{ getDeviceTypeLabel(row.device_type) }}</span>
+                </div>
+                <StatusBadge :status="row.status" />
+              </div>
+              <div class="device-tile-body">
+                <div class="device-tile-row"><span>总线地址</span><b class="mono">{{ String(row.hardware_id || '—') }}</b></div>
+                <div class="device-tile-row"><span>所在通道</span><b class="mono">{{ deviceChannelText(row) }}</b></div>
+              </div>
+              <div class="device-tile-reading" :class="{ 'no-data': !row.last_data }">
+                <template v-if="row.last_data">
+                  <span class="reading-label">最新读数</span>
+                  <strong class="reading-value" :title="formatLastData(row.last_data)">{{ formatLastData(row.last_data) }}</strong>
+                  <span class="reading-time">{{ row.last_data_time ? formatTime(row.last_data_time) : '—' }}</span>
+                </template>
+                <template v-else><span class="reading-none">等待首条采集数据</span></template>
+              </div>
+            </div>
+          </div>
+        </section>
+      </template>
+
+      <!-- OTA 历史 -->
+      <template v-else-if="activeTab === 'OTA 历史'">
+        <section class="card ota-card">
+          <div class="card-head">
+            <span class="card-title">OTA 升级历史</span>
+            <button class="btn btn-plain btn-sm" :disabled="otaHistoryLoading" @click="fetchOTAHistory"><el-icon :size="13" :class="{ spin: otaHistoryLoading }"><RefreshRight /></el-icon>{{ otaHistoryLoading ? '加载中…' : '刷新' }}</button>
+          </div>
+          <div v-if="otaHistoryLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
+          <div v-else-if="otaHistory.length === 0" class="card-empty">暂无升级记录</div>
+          <div v-else class="bus-table-wrap ota-table-wrap">
+            <table class="bus-table ota-table">
+              <thead>
+                <tr>
+                  <th>升级版本</th>
+                  <th>状态</th>
+                  <th>进度</th>
+                  <th>开始时间</th>
+                  <th>完成时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="record in otaHistory" :key="record.id">
+                  <td class="mono">{{ record.from_version }} → {{ record.to_version }}</td>
+                  <td><span class="bus-tag" :class="otaTagClass(record.status)">{{ otaStatusText(record.status) }}</span></td>
+                  <td>
+                    <div class="ota-progress"><span class="ota-progress-bar" :style="{ width: otaProgressWidth(record) }"></span></div>
+                    <span class="ota-progress-num">{{ otaProgressText(record) }}</span>
+                  </td>
+                  <td>{{ formatTime(record.created_at) }}</td>
+                  <td>{{ record.completed_at ? formatTime(record.completed_at) : '—' }}</td>
+                  <td>
+                    <button v-if="record.status === 'pending' || record.status === 'downloading'" class="link-btn link-btn-danger" type="button" :disabled="nodeOffline" @click="handleCancelOTA(record)">取消</button>
+                    <span v-else class="ota-na">—</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </template>
+
+      <!-- 系统日志 -->
+      <template v-else-if="activeTab === '系统日志'">
+        <section class="card log-card">
+          <div class="card-head"><span class="card-title">系统日志</span></div>
+          <LogPanel :collector-id="nodeSerial" :node-device-id="node?.node_id" />
+        </section>
+      </template>
+
+      <!-- 通道终端 -->
+      <template v-else-if="activeTab === '通道终端'">
+        <section class="card terminal-card">
+          <div class="card-head"><span class="card-title">通道终端</span></div>
+          <ChannelTerminal :collector-id="nodeSerial" :node-device-id="node?.node_id" :channels="channels" />
+        </section>
+      </template>
     </template>
 
     <!-- 加载失败空态 -->
@@ -521,6 +650,16 @@
       @refresh="handleChannelManagerRefresh"
     />
 
+    <!-- 关联设备 TAB：快速创建设备（写操作，node_id 就绪才可打开） -->
+    <QuickCreateDeviceDialog
+      v-model="showQuickCreate"
+      :node-id="nodeSerial"
+      :node-name="node?.name"
+      :channels="channels"
+      :channels-loading="channelsLoading"
+      @created="handleDeviceCreated"
+    />
+
     <!-- 后端重配置端点当前为 stub，不能对用户伪报下发成功。 -->
     <el-dialog v-model="baudToolVisible" title="批量修改波特率" width="440px">
       <el-alert type="warning" :closable="false" title="服务端尚未实现通道重配置下发，无法安全执行此操作。" />
@@ -532,24 +671,31 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowRight, Clock, Cloudy, Connection, CopyDocument, Cpu, DataLine, Document,
-  EditPen, Files, Grid, House, InfoFilled, Link, Lock, MagicStick, Odometer, Plus, Refresh,
+  EditPen, Grid, House, InfoFilled, Link, Lock, MagicStick, Monitor, Odometer, Plus, Refresh,
   RefreshRight, Search, Select, Share, SwitchButton, Timer, Tools, UploadFilled, UserFilled,
   View, WarningFilled,
 } from '@element-plus/icons-vue'
-import { nodeApi, type Capabilities, type DmaChannelInfo, type Node } from '@/api/node'
+import { nodeApi, type Capabilities, type DmaChannelInfo, type Node, type OTARecord } from '@/api/node'
 import { channelApi, type Channel } from '@/api/channel'
 import client from '@/api/client'
 import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
+import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
+import LogPanel from '@/components/node/LogPanel.vue'
+import QuickCreateDeviceDialog from '@/components/node/QuickCreateDeviceDialog.vue'
+import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
+import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { WS_EVENT } from '@/events/events'
 import { getSessionGeneration, assertSessionGeneration } from '@/utils/sessionCache'
-import { isDmaRebindable } from '@/utils/dmaState'
+import { DmaState, dmaStateText, isDmaRebindable } from '@/utils/dmaState'
 import { formatTime } from '@/utils/format'
+import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
+import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { logger } from '@/utils/logger'
 
 // ── 类型 ──
@@ -569,12 +715,15 @@ const route = useRoute()
 const router = useRouter()
 const wsStore = useWebSocketStore()
 const dmaStore = useDmaStore()
+const edgeDeviceStore = useEdgeDeviceStore()
 
 // ── 防竞态序列号（NodeDetail 模式） ──
 let detailSequence = 0
 let channelsSequence = 0
 let eventsSequence = 0
 let capabilitiesSequence = 0
+let devicesSequence = 0
+let otaSequence = 0
 let componentOperationGeneration = 0
 
 // ── 页面状态 ──
@@ -585,6 +734,10 @@ const channels = ref<Channel[]>([])
 const channelsLoading = ref(false)
 const nodeEvents = ref<NodeEvent[]>([])
 const eventsLoading = ref(false)
+const devices = ref<any[]>([])
+const devicesLoading = ref(false)
+const otaHistory = ref<OTARecord[]>([])
+const otaHistoryLoading = ref(false)
 
 // 页头操作
 const syncing = ref(false)
@@ -623,13 +776,29 @@ const tabs = [
   { label: '关联设备', icon: UserFilled },
   { label: 'OTA 历史', icon: Cloudy },
   { label: '系统日志', icon: Document },
+  { label: '通道终端', icon: Monitor },
 ]
 const activeTab = ref('基本信息')
+const deviceViewMode = ref<'list' | 'card'>('list')
+const showQuickCreate = ref(false)
 
 function activateTab(label: string) {
   activeTab.value = label
   if (label === '总线配置' && node.value && !busLoading.value && !busDataLoaded.value) {
     void fetchBusData()
+  }
+  if (label === 'DMA 通道') {
+    const serial = nodeSerial.value
+    if (serial && dmaStore.mergedChannels.length === 0 && !dmaStore.loading) {
+      void dmaStore.fetch(serial).catch(err => logger.warn('获取 DMA 通道失败', { error: String(err) }))
+    }
+  }
+  if (label === '关联设备') {
+    // 首次进入或创建后才强制刷新；来回切换走 store 30s TTL 缓存，不穿透
+    if (devices.value.length === 0 && !devicesLoading.value) void fetchDevices()
+  }
+  if (label === 'OTA 历史' && otaHistory.value.length === 0 && !otaHistoryLoading.value) {
+    void fetchOTAHistory()
   }
 }
 
@@ -643,6 +812,8 @@ let unsubscribe: (() => void) | null = null
 const nodeSerial = computed(() => node.value?.node_id || (route.params.id as string))
 const nodeOnline = computed(() => node.value?.status === 'online')
 const nodeOffline = computed(() => node.value?.status !== 'online')
+const dmaChannels = computed(() => dmaStore.mergedChannels)
+const dmaLoading = computed(() => dmaStore.loading)
 
 const busTabs: Array<{ type: BusType; label: string; icon: any; description: string }> = [
   { type: 'i2c', label: 'I2C', icon: Cpu, description: 'I2C 总线用于连接低速外设，支持多主多从通信' },
@@ -788,6 +959,78 @@ const channelStats = computed(() => {
   return { total, ok, error, other: total - ok - error }
 })
 
+// ── DMA 辅助（与 NodeDetail.vue 相同的共享工具） ──
+function dmaTypeText(type: number): string {
+  return type === 0 ? 'GDMA' : `类型${type}`
+}
+function capText(cap: number): string {
+  const parts: string[] = []
+  if (cap & 1) parts.push('TX')
+  if (cap & 2) parts.push('RX')
+  if (cap & 4) parts.push('Burst')
+  return parts.join(', ') || '无'
+}
+function busText(bus: number): string {
+  const parts: string[] = []
+  if (bus & 1) parts.push('UART')
+  if (bus & 2) parts.push('I2C')
+  if (bus & 4) parts.push('SPI')
+  return parts.join(', ') || '无'
+}
+function dmaTagClass(state: number): string {
+  // 复用 DMA 状态枚举，映射到页面 .bus-tag 色系（蓝=空闲/绿=已分配/灰=已禁用）
+  if (state === DmaState.ALLOCATED) return 'bus-tag-green'
+  if (state === DmaState.DISABLED) return 'bus-tag-gray'
+  return 'bus-tag-blue'
+}
+
+// ── 关联设备辅助 ──
+function deviceChannelText(row: any): string {
+  const channel = channels.value.find(ch => ch.id === row.channel_id)
+  if (!channel) return '—'
+  return `${(channel.hardware_type || '').toUpperCase()} ${channel.hardware_id || ''}`.trim()
+}
+function viewDevice(row: any) {
+  router.push(`/edge-device/${row.id}`)
+}
+function formatLastData(data: Record<string, any> | null): string {
+  if (!data) return '—'
+  const entries = Object.entries(data).filter(([k]) => k !== 'error_code' && k !== 'raw_data')
+  if (entries.length === 0) return '—'
+  return entries.slice(0, 3).map(([k, v]) => {
+    const unit = sensorUnitMap[k] || ''
+    const name = sensorNameMap[k] || k
+    return `${name}: ${typeof v === 'number' ? v.toFixed(v < 10 ? 2 : 0) : v}${unit ? unit : ''}`
+  }).join('  ')
+}
+
+// ── OTA 辅助 ──
+function otaStatusText(status: string): string {
+  const texts: Record<string, string> = {
+    pending: '等待中', downloading: '下载中', installing: '安装中',
+    success: '成功', failed: '失败', cancelled: '已取消',
+  }
+  return texts[status] || status
+}
+function otaTagClass(status: string): string {
+  const classes: Record<string, string> = {
+    pending: 'bus-tag-blue', downloading: 'bus-tag-blue', installing: 'bus-tag-blue',
+    success: 'bus-tag-green', failed: 'bus-tag-gray', cancelled: 'bus-tag-gray',
+  }
+  return classes[status] || 'bus-tag-gray'
+}
+function otaProgressWidth(record: OTARecord): string {
+  const progress = Number(record.progress)
+  if (!Number.isFinite(progress) || progress <= 0) return '0%'
+  return `${Math.min(100, Math.max(0, progress))}%`
+}
+function otaProgressText(record: OTARecord): string {
+  // 进度数字与进度条共用同一钳制值，避免"满条 + 150%"不一致
+  const progress = Number(record.progress)
+  if (!Number.isFinite(progress) || progress <= 0) return '0%'
+  return `${Math.min(100, Math.max(0, progress))}%`
+}
+
 function busTypeMask(type: BusType): number {
   return { uart: 1, i2c: 2, spi: 4 }[type] || 0
 }
@@ -930,7 +1173,9 @@ async function fetchDetail() {
     // 序列号就绪后拉通道/事件（channel/events 按 node_id 序列号过滤）
     void fetchChannels()
     void fetchEvents()
+    void fetchDevices()
     if (activeTab.value === '总线配置') void fetchBusData()
+    if (activeTab.value === 'OTA 历史') void fetchOTAHistory()
     // 在线且无延迟数据时自动测一次延迟
     if (result.status === 'online' && !result.ping_latency_ms && !result.latency_ms) {
       void handlePing()
@@ -1066,11 +1311,6 @@ async function scanSelectedI2C() {
   }
 }
 
-function diagnoseSelectedBus() {
-  // 服务端没有独立诊断端点；触发真实资源查询，避免 demo 式伪成功。
-  void requestBusResourceRefresh()
-}
-
 function openBaudTool() {
   baudToolVisible.value = true
 }
@@ -1102,6 +1342,76 @@ async function fetchEvents() {
     }
   } finally {
     if (sequence === eventsSequence) eventsLoading.value = false
+  }
+}
+
+// ── 关联设备 ──
+async function fetchDevices() {
+  const id = route.params.id as string
+  const serial = nodeSerial.value
+  if (!id || !serial) return
+  const sequence = ++devicesSequence
+  devicesLoading.value = true
+  try {
+    const params = { node_id: serial, page: 1, page_size: 100 }
+    await edgeDeviceStore.fetchList(params, true)
+    if (sequence !== devicesSequence || route.params.id !== id) return
+    devices.value = edgeDeviceStore.getCachedList(params)?.items || []
+  } catch (err: any) {
+    if (sequence === devicesSequence) {
+      devices.value = []
+      logger.error('获取关联设备失败', { error: String(err) })
+    }
+  } finally {
+    if (sequence === devicesSequence) devicesLoading.value = false
+  }
+}
+
+function handleDeviceCreated() {
+  edgeDeviceStore.invalidateLists()
+  void fetchDevices()
+}
+
+// ── OTA 历史 ──
+async function fetchOTAHistory() {
+  const id = route.params.id as string
+  if (!id) return
+  const sequence = ++otaSequence
+  otaHistoryLoading.value = true
+  try {
+    const history = (await nodeApi.getOTAHistory(id)) || []
+    if (sequence !== otaSequence || route.params.id !== id) return
+    otaHistory.value = history
+  } catch (err: any) {
+    if (sequence === otaSequence) {
+      otaHistory.value = []
+      logger.error('获取 OTA 历史失败', { error: String(err) })
+    }
+  } finally {
+    if (sequence === otaSequence) otaHistoryLoading.value = false
+  }
+}
+
+async function handleCancelOTA(record: OTARecord) {
+  if (nodeOffline.value) return
+  const id = route.params.id as string
+  const operation = componentOperationGeneration
+  const sessionGeneration = getSessionGeneration()
+  try {
+    await ElMessageBox.confirm('确定要取消此 OTA 升级吗？', '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    if (operation !== componentOperationGeneration || route.params.id !== id) return
+    await nodeApi.cancelOTA(id, record.id)
+    assertSessionGeneration(sessionGeneration)
+    if (operation !== componentOperationGeneration || route.params.id !== id) return
+    ElMessage.success('已取消 OTA 升级')
+    void fetchOTAHistory()
+  } catch (err: any) {
+    if (operation !== componentOperationGeneration || route.params.id !== id) return
+    if (err !== 'cancel') ElMessage.error('取消 OTA 失败')
   }
 }
 
@@ -1203,10 +1513,14 @@ watch(() => route.params.id, () => {
   channelsSequence++
   eventsSequence++
   capabilitiesSequence++
+  devicesSequence++
+  otaSequence++
   componentOperationGeneration++
   node.value = null
   channels.value = []
   nodeEvents.value = []
+  devices.value = []
+  otaHistory.value = []
   capabilities.value = { buses: {} }
   busDataLoaded.value = false
   selectedResourceId.value = ''
@@ -1255,6 +1569,8 @@ onUnmounted(() => {
   channelsSequence++
   eventsSequence++
   capabilitiesSequence++
+  devicesSequence++
+  otaSequence++
   if (unsubscribe) unsubscribe()
   if (pendingPingTimeout.value) clearTimeout(pendingPingTimeout.value)
   if (sessionTimer) clearInterval(sessionTimer)
@@ -1371,10 +1687,88 @@ html.dark .node-overview-page {
   content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--no-primary);
 }
 
-/* Tab 占位 */
-.tab-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 64px 20px; gap: 12px; }
-.tp-title { font-size: 15px; font-weight: 600; color: var(--no-text-secondary); }
-.tp-sub { font-size: 13px; color: var(--no-text-muted); }
+/* DMA 通道卡片网格 */
+.dma-card { padding: 16px 20px; }
+.dma-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.dma-item {
+  min-width: 0; border: 1px solid var(--no-border-light); border-radius: 6px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px; background: var(--card-bg, #fff);
+}
+.dma-item-head { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.dma-item-head > span:first-child { color: var(--no-text); font-size: 14px; font-weight: 600; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dma-item-head .bus-tag { margin-right: 0; flex: 0 0 auto; }
+.dma-item-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; line-height: 20px; }
+.dma-item-row span { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }
+.dma-item-row b { color: var(--no-text); font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+
+/* 关联设备 */
+.device-card .chan-sub { font-size: 12px; color: var(--no-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.device-row { gap: 10px; }
+.device-row .device-last-data { flex: 1 1 18%; min-width: 0; color: var(--no-text-secondary); }
+.device-row .device-last-time { flex: 0 0 auto; color: var(--no-text-muted); }
+.device-row .link-btn { flex: 0 0 auto; white-space: nowrap; }
+.device-count { font-size: 13px; font-weight: 400; color: var(--no-text-muted); }
+
+/* 列表/卡片切换（设计稿 segmented 文字切换） */
+.view-switch { display: inline-flex; align-items: center; background: var(--no-chip-off-bg); border-radius: 6px; padding: 2px; gap: 2px; }
+.view-switch-btn {
+  height: 26px; padding: 0 14px; border: 0; border-radius: 5px; font-size: 12px; cursor: pointer;
+  background: transparent; color: var(--no-text-secondary); font-family: inherit; transition: all .15s;
+}
+.view-switch-btn.active { background: var(--no-primary); color: #fff; font-weight: 500; }
+.view-switch-btn:not(.active):hover { color: var(--no-primary); }
+
+/* 卡片视图网格 */
+.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.device-tile {
+  min-width: 0; border: 1px solid var(--no-border-light); border-radius: 8px; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px; background: var(--card-bg, #fff);
+  cursor: pointer; transition: border-color .15s, box-shadow .15s;
+}
+.device-tile:hover { border-color: var(--no-primary); box-shadow: var(--no-shadow, 0 2px 8px rgba(16,24,40,.08)); }
+.device-tile.is-offline { opacity: .72; }
+.device-tile-head { display: flex; align-items: flex-start; gap: 10px; }
+.device-tile-icon {
+  width: 36px; height: 36px; border-radius: 8px; flex: 0 0 auto;
+  background: var(--no-bg-active); color: var(--no-primary);
+  display: flex; align-items: center; justify-content: center;
+}
+.device-tile-title { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.device-tile-name { font-size: 14px; font-weight: 600; color: var(--no-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.device-tile-type { font-size: 12px; color: var(--no-text-muted); }
+.device-tile-body { display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--no-border-light); padding-top: 10px; }
+.device-tile-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+.device-tile-row span { color: var(--no-text-muted); }
+.device-tile-row b { color: var(--no-text); font-weight: 500; overflow-wrap: anywhere; text-align: right; }
+.device-tile-reading { border-top: 1px solid var(--no-border-light); padding-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+.device-tile-reading .reading-label { font-size: 11px; color: var(--no-text-muted); }
+.device-tile-reading .reading-value { font-size: 14px; font-weight: 600; color: var(--no-text); overflow-wrap: anywhere; }
+.device-tile-reading .reading-time { font-size: 11px; color: var(--no-text-muted); }
+.device-tile-reading.no-data .reading-none { font-size: 12px; color: var(--no-text-muted); }
+.device-row .chan-name { min-width: 0; flex: 1 1 22%; }
+.device-row .chan-sub { flex: 0 1 16%; min-width: 0; }
+.device-row .chan-badge { flex: 0 0 auto; }
+.device-card-actions { display: flex; align-items: center; gap: 8px; }
+
+/* OTA 历史 */
+.ota-card { overflow: hidden; }
+.ota-table { min-width: 680px; table-layout: auto; }
+.ota-table th:nth-child(1), .ota-table td:nth-child(1) { width: 20%; }
+.ota-table th:nth-child(2), .ota-table td:nth-child(2) { width: 14%; }
+.ota-table th:nth-child(3), .ota-table td:nth-child(3) { width: 18%; }
+.ota-table th:nth-child(4), .ota-table td:nth-child(4) { width: 18%; }
+.ota-table th:nth-child(5), .ota-table td:nth-child(5) { width: 18%; }
+.ota-table th:nth-child(6), .ota-table td:nth-child(6) { width: 12%; }
+.ota-progress { display: inline-block; width: 72px; height: 6px; border-radius: 3px; background: var(--no-chip-off-bg); overflow: hidden; vertical-align: middle; margin-right: 6px; }
+.ota-progress-bar { display: block; height: 100%; border-radius: 3px; background: var(--no-primary); }
+.ota-progress-num { font-size: 12px; color: var(--no-text-secondary); font-variant-numeric: tabular-nums; }
+.ota-na { color: var(--no-text-faint); }
+.link-btn-danger { color: var(--no-danger); }
+.link-btn-danger:hover:not(:disabled) { color: var(--no-danger); opacity: .8; }
+
+/* 系统日志 / 通道终端 */
+.log-card, .terminal-card { overflow: hidden; }
+.log-card .card-head, .terminal-card .card-head { border-bottom-color: var(--no-border-light); }
 
 /* 总线配置：双栏资源视图（对齐 designs/new-node-2.png） */
 .bus-alert { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px; margin-bottom: 16px; color: var(--no-text-secondary); background: var(--no-warning-bg); border: 1px solid #FCD98C; border-radius: 6px; font-size: 13px; }
@@ -1628,5 +2022,12 @@ html.dark .node-overview-page {
   .bus-create-field-grid { grid-template-columns: 1fr; }
   .bus-create-actions { flex-wrap: wrap; }
   .bus-create-actions .btn { flex: 1; justify-content: center; }
+  /* 新 TAB 移动端：DMA 单列；设备行纵向紧凑；宽表容器内滚动不溢出页面 */
+  .dma-grid { grid-template-columns: 1fr; }
+  .device-row { flex-wrap: wrap; height: auto; min-height: 44px; padding: 8px 4px; gap: 6px 10px; }
+  .device-row .chan-name { flex: 1 1 100%; }
+  .device-row .chan-sub { flex: 1 1 40%; }
+  .device-card-actions { flex-wrap: wrap; }
+  .ota-table-wrap { margin: 0 -16px; padding: 0 16px; }
 }
 </style>

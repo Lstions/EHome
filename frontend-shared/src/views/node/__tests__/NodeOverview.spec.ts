@@ -5,7 +5,7 @@ import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
-const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch } = vi.hoisted(() => ({
+const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() => Promise.resolve({
     id: 1, node_id: 'F0F5BDFFFE02', name: '机房采集器', model: 'esp32s3', status: 'online',
     firmware_version: '2.5.18', protocol_version: '2.2', connection_type: 'wifi',
@@ -34,11 +34,20 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
     return Promise.resolve({ data: null })
   }),
   mockSubscribe: vi.fn(() => vi.fn()),
-  mockDmaFetch: vi.fn(() => Promise.resolve()),
+  mockDmaFetch: vi.fn((..._args: any[]) => Promise.resolve()),
+  mockRouterPush: vi.fn(),
+  mockFetchDevices: vi.fn((..._args: any[]) => Promise.resolve()),
+  mockGetCachedList: vi.fn((..._args: any[]): { items: any[]; total: number } => ({ items: [], total: 0 })),
+  mockInvalidateLists: vi.fn(),
+  mockGetOTAHistory: vi.fn((..._args: any[]): Promise<any[]> => Promise.resolve([])),
+  mockCancelOTA: vi.fn((..._args: any[]) => Promise.resolve()),
+  mockElMessageBoxConfirm: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
+  // 可变 DMA store 数据（测试可注入）
+  mockDmaChannelsRef: { value: [] as any[] },
 }))
 
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ back: vi.fn(), push: vi.fn() }),
+  useRouter: () => ({ back: vi.fn(), push: mockRouterPush }),
   useRoute: () => ({ params: { id: '1' } }),
 }))
 vi.mock('@/api/node', () => ({
@@ -50,6 +59,8 @@ vi.mock('@/api/node', () => ({
     getCapabilities: mockGetCapabilities,
     scanI2C: vi.fn(() => Promise.resolve({ devices: [] })),
     queryResources: vi.fn(() => Promise.resolve({ request_id: 'query-1' })),
+    getOTAHistory: mockGetOTAHistory,
+    cancelOTA: mockCancelOTA,
   },
 }))
 vi.mock('@/api/channel', () => ({ channelApi: { getList: mockChannelList } }))
@@ -58,11 +69,46 @@ vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ connected: true, subscribe: mockSubscribe }),
 }))
 vi.mock('@/stores/dma', () => ({
-  useDmaStore: () => ({ mergedChannels: [], toggling: {}, fetch: mockDmaFetch, clearCache: vi.fn(), toggle: vi.fn() }),
+  useDmaStore: () => ({ mergedChannels: mockDmaChannelsRef.value, loading: false, toggling: {}, fetch: mockDmaFetch, clearCache: vi.fn(), toggle: vi.fn() }),
 }))
+vi.mock('@/stores/edgeDevice', () => ({
+  useEdgeDeviceStore: () => ({
+    fetchList: mockFetchDevices,
+    getCachedList: mockGetCachedList,
+    invalidateLists: mockInvalidateLists,
+    clearCache: vi.fn(),
+  }),
+}))
+vi.mock('element-plus', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('element-plus')>()
+  return {
+    ...actual,
+    ElMessageBox: { confirm: mockElMessageBoxConfirm },
+  }
+})
 vi.mock('@/utils/logger', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
 
-const stubs = { OTAForm: true, ChannelManager: true }
+const stubs = {
+  OTAForm: true,
+  ChannelManager: true,
+  ChannelTerminal: {
+    template: '<div class="channel-terminal-stub"><slot /><span v-if="collectorId">collector={{ collectorId }}</span><span v-if="nodeDeviceId">device={{ nodeDeviceId }}</span><span v-if="channels">channels={{ channels.length }}</span></div>',
+    props: ['collectorId', 'nodeDeviceId', 'channels'],
+  },
+  LogPanel: {
+    template: '<div class="log-panel-stub"><span v-if="collectorId">collector={{ collectorId }}</span><span v-if="nodeDeviceId">device={{ nodeDeviceId }}</span></div>',
+    props: ['collectorId', 'nodeDeviceId'],
+  },
+  QuickCreateDeviceDialog: {
+    name: 'QuickCreateDeviceDialog',
+    template: '<div class="quick-create-stub"><span v-if="modelValue">open</span></div>',
+    props: ['modelValue', 'nodeId', 'nodeName', 'channels', 'channelsLoading'],
+  },
+  StatusBadge: {
+    template: '<span class="status-badge-stub">{{ status }}</span>',
+    props: ['status'],
+  },
+}
 
 describe('NodeOverview (生产页)', () => {
   beforeEach(() => {
@@ -237,6 +283,218 @@ describe('NodeOverview (生产页)', () => {
     await flushPromises()
     expect(wrapper.find('.bus-alert-offline').exists()).toBe(true)
     expect(wrapper.find('.bus-tool-card .btn-primary').attributes('disabled')).toBeDefined()
+  })
+
+  // ── 新 TAB：DMA 通道 / 关联设备 / OTA 历史 / 系统日志 / 通道终端 ──
+
+  it('DMA 通道 TAB：进入时拉取 store 数据并渲染卡片（名称/状态/绑定），空数据时空态', async () => {
+    // 先验证空数组 → 空态 + 触发 fetch
+    mockDmaChannelsRef.value = []
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    await tab?.trigger('click')
+    await flushPromises()
+    expect(mockDmaFetch).toHaveBeenCalledWith('F0F5BDFFFE02')
+    expect(wrapper.find('.dma-card').text()).toContain('该节点暂无 DMA 通道')
+
+    // 再验证有数据 → 渲染卡片（重新 mount）
+    mockDmaChannelsRef.value = [
+      { dma_id: 0, name: 'DMA0', dma_type: 0, capabilities: 3, max_burst: 128, state: 0, bound_to: '', compatible_bus: 3 },
+      { dma_id: 1, name: 'DMA1', dma_type: 1, capabilities: 1, max_burst: 64, state: 1, bound_to: 'i2c/i2c0', compatible_bus: 2 },
+    ] as any[]
+    const wrapper2 = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab2 = wrapper2.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    await tab2?.trigger('click')
+    await flushPromises()
+    const card = wrapper2.find('.dma-card')
+    const items = card.findAll('.dma-item')
+    expect(items).toHaveLength(2)
+    expect(items[0].text()).toContain('GDMA')
+    expect(items[0].text()).toContain('TX, RX')
+    expect(items[0].text()).toContain('UART, I2C') // 兼容总线 3 = UART(1) + I2C(2)
+    expect(items[0].text()).toContain('128')
+    expect(items[0].text()).toContain('未绑定')
+    expect(items[1].text()).toContain('i2c/i2c0')
+  })
+
+  it('关联设备 TAB：渲染设备名称/类型/地址，点查看跳转 edge-device', async () => {
+    const serial = 'F0F5BDFFFE02'
+    const devices = [
+      { id: 11, name: '温湿度传感器', device_type: 'sensor.temp_humidity', hardware_id: 'I2C0-01', channel_id: 1, status: 'online', last_data: { temperature: 25.6, humidity: 60.2 }, last_data_time: new Date().toISOString(), config: {}, node_id: serial },
+      { id: 12, name: '电表', device_type: 'meter', hardware_id: 'UART1-02', channel_id: 2, status: 'offline', last_data: null, last_data_time: null, config: {}, node_id: serial },
+    ] as any[]
+    mockGetCachedList.mockReturnValue({ items: devices, total: 2 } as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('关联设备'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const card = wrapper.find('.device-card')
+    expect(mockFetchDevices).toHaveBeenCalledWith({ node_id: serial, page: 1, page_size: 100 }, true)
+    expect(card.text()).toContain('温湿度传感器')
+    const row = card.findAll('.device-row')[0]
+    expect(row.text()).toContain('I2C0-01')
+    expect(row.text()).toContain('I2C I2C0') // 通道列：hardware_type + hardware_id
+    // 最新一条数据列（last_data → formatLastData；>=10 的数 toFixed(0)）
+    expect(row.text()).toContain('温度')
+    expect(row.text()).toContain('26')
+    // 状态徽标（StatusBadge stub）
+    expect(row.find('.status-badge-stub').text()).toBe('online')
+    // 点「查看」→ push
+    await row.findAll('button').find(b => b.text().includes('查看'))?.trigger('click')
+    expect(mockRouterPush).toHaveBeenCalledWith('/edge-device/11')
+  })
+
+  it('关联设备 TAB：列表/卡片切换，卡片视图渲染读数与离线态，点卡片跳转', async () => {
+    const serial = 'F0F5BDFFFE02'
+    const devices = [
+      { id: 11, name: '温湿度传感器', device_type: 'sensor.temp_humidity', hardware_id: 'I2C0-01', channel_id: 1, status: 'online', last_data: { temperature: 25.6 }, last_data_time: new Date().toISOString(), config: {}, node_id: serial },
+      { id: 12, name: '电表', device_type: 'meter', hardware_id: 'UART1-02', channel_id: 2, status: 'offline', last_data: null, last_data_time: null, config: {}, node_id: serial },
+    ] as any[]
+    mockGetCachedList.mockReturnValue({ items: devices, total: 2 } as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('关联设备'))
+    await tab?.trigger('click')
+    await flushPromises()
+    // 默认列表视图
+    expect(wrapper.find('.chan-list').exists()).toBe(true)
+    expect(wrapper.find('.device-grid').exists()).toBe(false)
+    // 切到卡片视图
+    const switchBtns = wrapper.findAll('.view-switch-btn')
+    await switchBtns.find(b => b.text() === '卡片')?.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.device-grid').exists()).toBe(true)
+    expect(wrapper.find('.chan-list').exists()).toBe(false)
+    const tiles = wrapper.findAll('.device-tile')
+    expect(tiles).toHaveLength(2)
+    // 在线设备卡片：读数区有数据
+    expect(tiles[0].text()).toContain('温湿度传感器')
+    expect(tiles[0].text()).toContain('最新读数')
+    expect(tiles[0].text()).toContain('温度')
+    // 离线设备卡片：is-offline 类 + 无数据占位
+    expect(tiles[1].classes()).toContain('is-offline')
+    expect(tiles[1].text()).toContain('等待首条采集数据')
+    // 点卡片跳转
+    await tiles[0].trigger('click')
+    expect(mockRouterPush).toHaveBeenCalledWith('/edge-device/11')
+    // 切回列表
+    await switchBtns.find(b => b.text() === '列表')?.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.chan-list').exists()).toBe(true)
+  })
+
+  it('关联设备 TAB：node 无 node_id 时创建设备按钮禁用', async () => {
+    mockGetDetail.mockResolvedValueOnce({
+      id: 9, node_id: '', name: '无序列号节点', model: 'esp32s3', status: 'online', firmware_version: '1.0.0',
+      connection_quality: 0, latency_ms: 0, ping_latency_ms: 0, wifi_rssi: 0, free_heap_bytes: 0,
+      uptime_seconds: 0, capabilities: {}, config: {},
+    } as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('关联设备'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const createBtn = wrapper.find('.device-card .btn-primary')
+    expect(createBtn.attributes('disabled')).toBeDefined()
+  })
+
+  it('OTA 历史 TAB：渲染版本/状态中文，pending 行有取消，success 行没有，点取消走 confirm+cancelOTA', async () => {
+    mockGetOTAHistory.mockResolvedValueOnce([
+      { id: 1, node_id: 1, firmware_id: 1, from_version: '2.5.18', to_version: '2.6.0', status: 'success', progress: 100, created_at: new Date().toISOString(), completed_at: new Date().toISOString() },
+      { id: 2, node_id: 1, firmware_id: 2, from_version: '2.5.0', to_version: '2.5.18', status: 'pending', progress: 0, created_at: new Date().toISOString() },
+      { id: 3, node_id: 1, firmware_id: 3, from_version: '2.4.0', to_version: '2.5.0', status: 'downloading', progress: 45, created_at: new Date().toISOString() },
+    ] as any[])
+    // 取消 OTA 后 fetchOTAHistory 会再次调用 —— 让它返回空避免额外干扰
+    mockGetOTAHistory.mockResolvedValueOnce([])
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const card = wrapper.find('.ota-card')
+    expect(mockGetOTAHistory).toHaveBeenCalledWith('1')
+    expect(card.text()).toContain('2.5.18 → 2.6.0')
+    expect(card.text()).toContain('成功')
+    expect(card.text()).toContain('等待中')
+    expect(card.text()).toContain('下载中')
+    expect(card.text()).toContain('45%')
+    // pending 行有取消按钮
+    const rows = card.findAll('.bus-table tbody tr')
+    const pendingRow = rows.find(r => r.text().includes('等待中'))
+    expect(pendingRow?.find('button').text()).toContain('取消')
+    const successRow = rows.find(r => r.text().includes('成功'))
+    expect(successRow?.find('button').exists()).toBe(false)
+    // 点取消 → confirm → cancelOTA
+    mockElMessageBoxConfirm.mockResolvedValueOnce('confirm')
+    await pendingRow?.find('button').trigger('click')
+    await flushPromises()
+    expect(mockElMessageBoxConfirm).toHaveBeenCalled()
+    expect(mockCancelOTA).toHaveBeenCalledWith('1', 2)
+  })
+
+  it('OTA 历史 TAB：离线时取消按钮禁用', async () => {
+    mockGetDetail.mockResolvedValueOnce({
+      id: 2, node_id: 'OFFLINE01', name: '离线节点', model: 'esp32c6', status: 'offline',
+      firmware_version: '2.5.0', connection_quality: 0, latency_ms: 0, ping_latency_ms: 0,
+      wifi_rssi: 0, free_heap_bytes: 0, uptime_seconds: 0, capabilities: {}, config: {},
+    } as any)
+    mockGetOTAHistory.mockResolvedValueOnce([
+      { id: 1, node_id: 2, firmware_id: 1, from_version: '2.5.0', to_version: '2.6.0', status: 'pending', progress: 10, created_at: new Date().toISOString() },
+    ] as any[])
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const cancelBtn = wrapper.find('.ota-card tbody tr button')
+    expect(cancelBtn.text()).toContain('取消')
+    expect(cancelBtn.attributes('disabled')).toBeDefined()
+  })
+
+  it('系统日志 TAB：渲染 LogPanel 并传递 collector-id / node-device-id', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('系统日志'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const panel = wrapper.find('.log-panel-stub')
+    expect(panel.exists()).toBe(true)
+    expect(panel.text()).toContain('collector=F0F5BDFFFE02')
+    expect(panel.text()).toContain('device=F0F5BDFFFE02')
+  })
+
+  it('通道终端 TAB：渲染 ChannelTerminal 并传递 channels 全量', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('通道终端'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const terminal = wrapper.find('.channel-terminal-stub')
+    expect(terminal.exists()).toBe(true)
+    expect(terminal.text()).toContain('collector=F0F5BDFFFE02')
+    expect(terminal.text()).toContain('device=F0F5BDFFFE02')
+    expect(terminal.text()).toContain('channels=2')
+  })
+
+  it('关联设备 TAB：创建设备弹窗打开后 created 触发后刷新列表', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('关联设备'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const createBtn = wrapper.find('.device-card .btn-primary')
+    await createBtn.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.quick-create-stub').text()).toContain('open')
+    // emit created → invalidateLists + 重新 fetch
+    const dialog = wrapper.findComponent({ name: 'QuickCreateDeviceDialog' })
+    dialog.vm.$emit('created')
+    await flushPromises()
+    expect(mockInvalidateLists).toHaveBeenCalled()
+    expect(mockFetchDevices).toHaveBeenCalled()
   })
 
   // ── 源码契约断言（防回退） ──

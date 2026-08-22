@@ -191,12 +191,15 @@ interface Props {
   collectorId: number | string
   nodeDeviceId?: string
   channels?: Channel[]
+  initialChannelId?: number   // 挂载/变化时预选通道（self-fetch 与 channels prop 异步到达均只预选一次）
 }
 
 const props = defineProps<Props>()
 
 // --- State ---
 const selectedChannelId = ref<number | undefined>()
+// 初始预选只执行一次：之后用户手动切换不被 channels/initialChannelId 变化覆盖
+let hasAppliedInitial = false
 const inputData = ref('')
 const inputDataAscii = ref('')
 const inputMode = ref<'hex' | 'ascii'>('hex')
@@ -482,6 +485,27 @@ const exportLog = () => {
   URL.revokeObjectURL(url)
 }
 
+// --- Initial channel pre-selection ---
+const applyInitialChannel = () => {
+  // 仅在 initialChannelId 设置了且尚未预选成功时生效
+  if (hasAppliedInitial || props.initialChannelId === undefined) return
+  if (allChannels.value.some(ch => ch.id === props.initialChannelId)) {
+    hasAppliedInitial = true
+    selectedChannelId.value = props.initialChannelId
+  }
+}
+
+const applyInitialChannelChange = () => {
+  // initialChannelId 显式变化：父组件主动意图，有效则跟随更新；
+  // 无效（undefined/不存在）时不动作（不清空用户当前选择）
+  const id = props.initialChannelId
+  if (id === undefined) return
+  if (allChannels.value.some(ch => ch.id === id)) {
+    hasAppliedInitial = true   // 保持状态机一致：预选已发生，channels watch 不再重复 apply
+    selectedChannelId.value = id
+  }
+}
+
 // --- Channel loading ---
 const loadChannels = async () => {
   if (props.channels?.length) return
@@ -493,6 +517,9 @@ const loadChannels = async () => {
     const result = await channelApi.getList(queryId as any)
     if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
     localChannels.value = Array.isArray(result) ? result : (result.items || [])
+    // self-fetch 模式下 props.channels 恒为空/未变，watch 不会触发；
+    // 这里补一次预选，覆盖"异步 channels 到达"路径（hasAppliedInitial 保证只生效一次）
+    applyInitialChannel()
   } catch (error: any) {
     logger.error('加载通道列表失败', { error: String(error) })
   }
@@ -540,7 +567,7 @@ const setupWebSocket = () => {
 }
 
 // --- Lifecycle ---
-onMounted(() => { loadChannels(); setupWebSocket() })
+onMounted(() => { loadChannels(); setupWebSocket(); applyInitialChannel() })
 onUnmounted(() => {
   channelRequestGeneration++
   sending.value = false
@@ -558,11 +585,16 @@ watch(() => [props.collectorId, props.nodeDeviceId] as const, () => {
   sending.value = false
   void loadChannels()
 })
+watch(() => props.initialChannelId, () => {
+  applyInitialChannelChange()
+})
 watch(() => props.channels, (channels) => {
   if (channels?.length) {
     channelRequestGeneration++
     localChannels.value = []
   }
+  // 初始预选：channels 异步到达后首次出现该 id 时选中（hasAppliedInitial 保证只一次）
+  applyInitialChannel()
   if (selectedChannelId.value && !channels?.some(channel => channel.id === selectedChannelId.value)) {
     selectedChannelId.value = undefined
   }
