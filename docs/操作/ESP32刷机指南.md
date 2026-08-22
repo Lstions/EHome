@@ -1,143 +1,70 @@
-# ESP32 烧录与验证指南
+# ESP32刷机指南
 
-## 环境要求
+> **状态**: 已实现（v2.7 当前流程：S3/C6 双目标构建；NVS 配网；Log V2 远程日志）
+> **版本**: v1.1
+> **日期**: 2026-08-22
+> **关联**: [../设计/ESP32固件架构.md](../设计/ESP32固件架构.md) | [../设计/节点.md](../设计/节点.md)
 
-- ESP-IDF v5.0+
-- Python 3.8+
-- CMake 3.16+
-- 串口工具 (esptool.py)
+## 1. 环境要求
 
-## 构建步骤
+- ESP-IDF v5.x（v6.0 勿用：vprintf hook 在 C6 crash）
+- 目标芯片：ESP32-S3 或 ESP32-C6 开发板
+- 串口驱动：CP210x（数据口 ttyUSB0）与 USB-Serial-JTAG（日志口 ttyACM0）可能并存，烧录用数据口
+
+## 2. 构建步骤（双目标）
 
 ```bash
-cd /home/bcat/workspace/ehome-system/esp32-collector
-
-# 设置ESP-IDF环境
-. $HOME/esp/esp-idf/export.sh
-
-# 配置目标芯片
-idf.py set-target esp32s3
-
-# 配置WiFi和MQTT
-idf.py menuconfig
-# → EHomeSystem Config → WiFi SSID/Password
-# → EHomeSystem Config → MQTT Broker URL
-
-# 编译
+cd esp32-collector
+# 选择目标（二选一）
+idf.py set-target esp32s3   # 或 esp32c6
 idf.py build
-
-# 烧录
-idf.py -p /dev/ttyUSB0 flash
-
-# 监控串口
-idf.py -p /dev/ttyUSB0 monitor
+idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-## 验证流程
+要点：
 
-### 1. 上电验证
+- 双目标独立 sdkconfig：sdkconfig.defaults.s3 / sdkconfig.defaults.c6；分区表 partitions_*.csv。
+- MQTT broker URL 默认 CONFIG_COLLECTOR_MQTT_BROKER_URL —— 部署时用 sdkconfig 或 defaults 覆盖。
+- 固件双目标构建是发布门禁（S3 + C6 都必须过）。
 
-```
-[0.000] EHomeSystem Collector v2.0 starting...
-[0.500] LED: 白色呼吸 (启动中)
-[1.000] NVS initialized
-[1.500] WiFi connecting...
-[2.000] LED: 蓝色慢闪 (WiFi连接中)
-```
+## 3. 配网（NVS / SoftAP）
 
-### 2. WiFi连接验证
+- 首次上电无 Wi-Fi 凭据：节点自启 SoftAP + HTTP 配网页，提交后凭据写入 NVS。
+- 之后自动重连，无需再配网。
+- 恢复出厂：**BOOT 键长按 5 秒**（S3 GPIO0 / C6 GPIO9）→ 清 NVS 重启（含 Wi-Fi 凭据与同步元数据）。
 
-```
-[5.000] WiFi connected, IP: 192.168.1.xxx
-[5.500] LED: 青色慢闪 (MQTT连接中)
-[6.000] MQTT connected
-[6.500] LED: 绿色常亮 (正常运行)
-```
+## 4. 验证流程
 
-### 3. Hello握手验证
+1. **上电**：RGB LED（WS2812）状态灯（见 §6 LED 诊断）。
+2. **Wi-Fi**：获得 IP（SoftAP 页或日志）。
+3. **Hello 握手**：中心端节点列表出现该节点 → 状态 online。
+4. **数据采集**：配置通道 + 边缘设备后 DataPanel 有数据。
+5. **心跳**：StatusReport 5s 心跳；90s 无心跳判离线。
 
-```
-[7.000] Sending Hello...
-[7.100] Hello sent (32 bytes)
-[7.200] ConfigManifest received
-[7.300] Config applied, sending ConfigResult
-[7.500] LED: 绿色常亮
-```
+## 5. 故障排查
 
-### 4. 数据采集验证
+### 5.1 LED 状态诊断
 
-```
-[12.000] DataReport: ch=1, seq=1, raw=0102030405
-[17.000] DataReport: ch=1, seq=2, raw=0102030405
-[22.000] DataReport: ch=1, seq=3, raw=0102030405
-... (每5s)
-```
+- 不同颜色/快闪代表启动阶段（连接中/已连接/OTA/异常）—— 按固件 RGB 状态机对照。
 
-### 5. 心跳验证
+### 5.2 串口与日志
 
-```
-[10.000] StatusReport: uptime=10s, status=online, channels=2
-[15.000] StatusReport: uptime=15s, status=online, channels=2
-... (每5s)
-```
+- ttyACM0（USB_SERIAL_JTAG）通常挂固件启动日志；ttyUSB0（CP210x）是数据总线口（HP_UART0）。
+- **远程日志优先**：线上诊断用 Log V2（节点总览→系统日志 TAB），不必插串口。
+- 抓串口日志：`python3 -c` + pyserial 读 /dev/ttyACM0（idf.py monitor 在无 timeout 环境不可用）。
 
-## 故障排查
+### 5.3 常见问题
 
-### LED状态诊断
+| 症状 | 诊断方向 |
+|------|---------|
+| 节点 offline | Wi-Fi 凭据 / broker 地址 / 心跳链（看日志 TAG） |
+| 传感器无数据 err=1 | 物理层无应答：波特率不匹配 / 接线 / 从机地址（UART RX timeout 1001ms = 无应答） |
+| ConfigManifest rejected | 模板/通道数超上限（16 模板等）——查 ResourceReport manifest_capacity |
+| 数据全 0x00 | 波特率不匹配陷阱（扫波特率找非零帧） |
+| 重启循环 | 事务应用失败进入安全状态；看 ConfigResult 错误码 |
 
-| LED状态 | 含义 | 处理 |
-|---------|------|------|
-| 白色呼吸 | 启动中 | 正常, 等待 |
-| 黄色快闪 | WiFi未配置 | 进入配网模式 |
-| 蓝色慢闪 | WiFi连接中 | 正常, 等待 |
-| 红色双闪 | WiFi连接失败 | 检查SSID/密码 |
-| 青色慢闪 | MQTT连接中 | 正常, 等待 |
-| 红色三闪 | MQTT连接失败 | 检查broker地址 |
-| 橙色慢闪 | Server离线 | 检查server状态 |
-| 绿色常亮 | 正常运行 | 无需处理 |
-| 紫色呼吸 | OTA升级中 | 正常, 等待 |
-| 黄色单闪 | 采集错误 | 检查传感器 |
-| 红色快闪 | 恢复出厂中 | 正常, 等待重启 |
+## 6. 相关操作
 
-### 串口命令
-
-```bash
-# 查看WiFi状态
-AT+WIFI?
-
-# 设置WiFi
-AT+WIFI=ssid,password
-
-# 恢复出厂
-AT+FACTORY
-
-# 查看设备信息
-AT+INFO
-
-# 查看MQTT状态
-AT+MQTT?
-```
-
-## 验证检查清单
-
-- [ ] ESP-IDF环境配置正确
-- [ ] WiFi SSID/密码设置正确
-- [ ] MQTT broker地址可达
-- [ ] 串口连接正常
-- [ ] 固件编译成功
-- [ ] 烧录成功
-- [ ] Hello消息发送成功
-- [ ] ConfigManifest接收成功
-- [ ] DataReport上报成功
-- [ ] StatusReport心跳正常
-- [ ] LED状态指示正确
-
-## 预期结果
-
-```
-上电 → 白色呼吸 → 蓝色慢闪 → 青色慢闪 → 绿色常亮
-  ↓
-Hello → ConfigManifest → DataReport → StatusReport(每5s)
-  ↓
-系统正常运行, 数据正常上报
-```
+- 配置同步人工触发：/nodes/:id/config/sync。
+- I2C 扫描：节点总览总线配置 TAB 或 API。
+- 固件 OTA：固件管理页上传 → 创建 OTA 任务（不必再插线刷机）。
