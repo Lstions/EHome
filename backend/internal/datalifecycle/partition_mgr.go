@@ -69,21 +69,23 @@ func (pm *PartitionManager) EnsurePartitions(months int) error {
 	for i := -1; i <= months; i++ {
 		start := addMonths(now, i)
 		end := addMonths(start, 1)
-		if err := pm.createPartitionIfNotExists(partitionName(start), start, end); err != nil {
+		if err := pm.createPartitionIfNotExists(partitionName(start), partitionedTable, start, end); err != nil {
 			return fmt.Errorf("ensure partition %s: %w", partitionName(start), err)
 		}
 	}
 	return nil
 }
 
-// createPartitionIfNotExists creates one RANGE partition when absent.
+// tableExistsSQL 统计当前 schema 内指定 relkind 的同名表数量。
+// schema 限定 (n.nspname = current_schema()) 必须: 集成测试每用例独立
+// schema, 无限定则跨 schema 误判存在性 (生产单 schema 下同样更健壮)。
+const tableExistsSQL = `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = ? AND c.relkind = ? AND n.nspname = current_schema()`
+
+// createPartitionIfNotExists creates one RANGE partition under parent when absent.
 // 存在性判断走 pg_class（PG 无 CREATE TABLE IF NOT EXISTS ... PARTITION OF）。
-func (pm *PartitionManager) createPartitionIfNotExists(name string, start, end time.Time) error {
+func (pm *PartitionManager) createPartitionIfNotExists(name, parent string, start, end time.Time) error {
 	var count int64
-	err := pm.db.Raw(
-		"SELECT count(*) FROM pg_class WHERE relname = ? AND relkind = 'r'",
-		name,
-	).Scan(&count).Error
+	err := pm.db.Raw(tableExistsSQL, name, "r").Scan(&count).Error
 	if err != nil {
 		return fmt.Errorf("check pg_class: %w", err)
 	}
@@ -92,13 +94,13 @@ func (pm *PartitionManager) createPartitionIfNotExists(name string, start, end t
 	}
 	ddl := fmt.Sprintf(
 		"CREATE TABLE %s PARTITION OF %s FOR VALUES FROM ('%s') TO ('%s')",
-		name, partitionedTable,
+		name, parent,
 		start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"),
 	)
 	if err := pm.db.Exec(ddl).Error; err != nil {
 		return err
 	}
-	slog.Info("partition_mgr: created partition", "partition", name)
+	slog.Info("partition_mgr: created partition", "partition", name, "parent", parent)
 	return nil
 }
 
@@ -111,7 +113,8 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	}
 	var names []string
 	rows, err := pm.db.Raw(
-		"SELECT relname FROM pg_class WHERE relname LIKE ? AND relkind = 'r'",
+		`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE c.relname LIKE ? AND c.relkind = 'r' AND n.nspname = current_schema()`,
 		partitionedTable+"_%",
 	).Rows()
 	if err != nil {
@@ -128,7 +131,10 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	cutoffMonth := monthStart(cutoff)
 	var dropped []string
 	for _, n := range names {
-		pt, parseErr := time.Parse("200601", n[len(partitionedTable):])
+		// 分区名形如 unified_data_YYYYMM: 跳过母表名+下划线再解析月份。
+		// (修复 off-by-one: 此前 n[len(partitionedTable):] 带下划线,
+		// time.Parse 恒失败, 导致到期分区永不 DROP。)
+		pt, parseErr := time.Parse("200601", n[len(partitionedTable)+1:])
 		if parseErr != nil {
 			continue // 非 YYYYMM 后缀的表不碰
 		}
@@ -145,6 +151,43 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	return dropped, nil
 }
 
+// EnsureRollupTable idempotently creates the minute-level rollup table
+// (方案 v3.4 §3.2.2 DDL). No-op on non-postgres dialects (SQLite 测试库
+// 不建此表, RollupConsumer no-op)。
+//
+// 建表责任方裁决: rollup 表与分区母表同属数据层时序化迁移面, 由启动接线
+// 调用 (main.go), 不放 AutoMigrate (与 UnifiedData 移出 AutoMigrate 同因:
+// 时序化表结构由迁移面显式定义, 不交给 GORM tag 推导)。
+func EnsureRollupTable(db *gorm.DB) error {
+	if !isPostgres(db) {
+		return nil
+	}
+	var count int64
+	if err := db.Raw(tableExistsSQL, "unified_data_rollup_1m", "r").Scan(&count).Error; err != nil {
+		return fmt.Errorf("check rollup table existence: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	ddl := `CREATE TABLE unified_data_rollup_1m (
+		device_id   BIGINT NOT NULL,
+		sensor_name VARCHAR(32) NOT NULL,
+		bucket      TIMESTAMP NOT NULL,
+		min_v       DOUBLE PRECISION,
+		max_v       DOUBLE PRECISION,
+		avg_v       DOUBLE PRECISION,
+		last_v      DOUBLE PRECISION,
+		last_id     BIGINT,
+		cnt         INTEGER,
+		PRIMARY KEY (device_id, sensor_name, bucket)
+	)`
+	if err := db.Exec(ddl).Error; err != nil {
+		return fmt.Errorf("create rollup table: %w", err)
+	}
+	slog.Info("partition_mgr: created rollup table unified_data_rollup_1m")
+	return nil
+}
+
 // IsUnifiedDataPartitioned reports whether the partitioned parent table is
 // already in place (migration done).
 func IsUnifiedDataPartitioned(db *gorm.DB) bool {
@@ -153,10 +196,7 @@ func IsUnifiedDataPartitioned(db *gorm.DB) bool {
 	}
 	var count int64
 	// 分区母表 relkind='p'（partitioned table），普通表为 'r'。
-	db.Raw(
-		"SELECT count(*) FROM pg_class WHERE relname = ? AND relkind = 'p'",
-		partitionedTable,
-	).Scan(&count)
+	db.Raw(tableExistsSQL, partitionedTable, "p").Scan(&count)
 	return count > 0
 }
 
@@ -177,12 +217,19 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 		slog.Info("migrate_partitioned: already partitioned, skip")
 		return nil
 	}
-	// 原表不存在（全新部署）→ 直接建分区母表后返回。
+	// 原表不存在（全新部署）→ 直接以最终名 unified_data 建分区母表。
+	// 不走 _new 中转: fresh 路径无数据搬迁, 无需 RENAME swap; 且
+	// EnsurePartitions 的 DDL 以 unified_data 为母表名硬编码, 用 _new
+	// 名建表会导致分区创建失败。
 	var flatExists int64
-	db.Raw("SELECT count(*) FROM pg_class WHERE relname = ? AND relkind = 'r'", partitionedTable).Scan(&flatExists)
+	db.Raw(tableExistsSQL, partitionedTable, "r").Scan(&flatExists)
 	if flatExists == 0 {
 		slog.Info("migrate_partitioned: no legacy flat table, creating fresh partitioned parent")
-		return createPartitionedParent(db, partitionedTable+"_new", true)
+		// 幂等: 清理上次中断残留的 new 表。
+		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", partitionedTable+"_new")).Error; err != nil {
+			return fmt.Errorf("drop stale %s: %w", partitionedTable+"_new", err)
+		}
+		return createPartitionedParent(db, partitionedTable, true)
 	}
 
 	newTable := partitionedTable + "_new"
@@ -201,9 +248,23 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	if oldest.IsZero() {
 		oldest = now // 空表
 	}
+	pm := &PartitionManager{db: db}
 	for m := monthStart(oldest); !m.After(monthStart(now)); m = addMonths(m, 1) {
+		// 历史月份的分区必须先建好, 否则 INSERT INTO new 母表报
+		// "no partition of relation found" (PG 分区表无兜底 default 分区)。
+		if err := pm.createPartitionIfNotExists(partitionName(m), newTable, monthStart(m), addMonths(m, 1)); err != nil {
+			return fmt.Errorf("create history partition %s: %w", partitionName(m), err)
+		}
 		if err := copyMonthBatched(db, newTable, m); err != nil {
 			return fmt.Errorf("copy month %04d-%02d: %w", m.Year(), int(m.Month()), err)
+		}
+	}
+	// 未来分区 (含上月兜底): 在 swap 前于 new 母表下建好, RENAME 后即刻可写。
+	// 不能调 EnsurePartitions — 它以 unified_data 为母表, 此刻仍是旧平表。
+	for i := -1; i <= partitionRollaheadMonths; i++ {
+		start := addMonths(now, i)
+		if err := pm.createPartitionIfNotExists(partitionName(start), newTable, start, addMonths(start, 1)); err != nil {
+			return fmt.Errorf("ensure partition %s: %w", partitionName(start), err)
 		}
 	}
 
@@ -223,6 +284,14 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 		return tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", newTable, partitionedTable)).Error
 	}); err != nil {
 		return fmt.Errorf("rename swap: %w", err)
+	}
+	// 推进 id 序列至 MAX(id): BIGSERIAL 的 INSERT...SELECT 搬迁不触碰
+	// sequence, 不推进则迁移后首条新数据 nextval 回到 1 (违反 "id 序列
+	// 全局不变" 承诺, id 单调排序语义被破坏)。
+	if err := db.Exec(fmt.Sprintf(
+		"SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 1))",
+		partitionedTable, partitionedTable)).Error; err != nil {
+		return fmt.Errorf("advance id sequence: %w", err)
 	}
 	slog.Info("migrate_partitioned: migration complete",
 		"rows", dstCount, "legacy_table", legacyTable)

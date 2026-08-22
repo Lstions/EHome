@@ -99,6 +99,12 @@ func main() {
 		defer close(partitionStop)
 	}
 
+	// 数据层时序化 (方案 v3.4 §3.2.2): rollup 分钟聚合表建表 (幂等)。
+	// 与分区迁移相互独立, 失败同样降级不阻塞启动 (rollup fail-open 语义)。
+	if err := datalifecycle.EnsureRollupTable(db); err != nil {
+		logger.Errorf("ensure rollup table failed (rollup aggregation disabled until fixed): %v", err)
+	}
+
 	// v3.0: One-time idempotent migration of old GPIO channels → gpio_configs
 	if migrateResult, err := database.MigrateGPIOChannels(database.GetDB()); err != nil {
 		logger.Warnf("GPIO channel migration failed (non-fatal): %v", err)
