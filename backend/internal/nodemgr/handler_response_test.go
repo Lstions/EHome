@@ -105,7 +105,8 @@ func TestHandleWriteResponse_InvalidPayload(t *testing.T) {
 // --- handlePong tests ---
 
 // TestHandlePong_ValidPayload verifies that a valid Pong frame is processed
-// without panic (redis.Client is nil, so anti-forgery check is skipped).
+// without panic. The anti-forgery check rejects it (no matching Ping tracked),
+// which is the expected rejection path for an untracked Pong.
 func TestHandlePong_ValidPayload(t *testing.T) {
 	mgr := setupHandlerManager(t)
 
@@ -120,8 +121,16 @@ func TestHandlePong_ValidPayload(t *testing.T) {
 	enc := frame.NewEncoder(frame.MsgPong)
 	enc.EncodeVarint(1, uint64(1234567890))
 
-	// Should not panic — redis.Client is nil so anti-forgery is skipped
+	// Should not panic — no tracked Ping, so the Pong is rejected by
+	// anti-forgery before any DB/WS side effects.
 	mgr.handlePong("pong-device-001", enc.Bytes())
+
+	var n models.Node
+	mgr.db.First(&n, "node_id = ?", "pong-device-001")
+	if n.PingLatencyMs != 0 || n.LastPingAt != nil {
+		t.Errorf("rejected Pong must not update node RTT, got latency=%d last_ping=%v",
+			n.PingLatencyMs, n.LastPingAt)
+	}
 }
 
 // TestHandlePong_InvalidPayload verifies that invalid payload does not panic.
@@ -136,6 +145,89 @@ func TestHandlePong_InvalidPayload(t *testing.T) {
 
 	// Just the msg type byte, no fields
 	mgr.handlePong("pong-device-002", []byte{frame.MsgPong})
+}
+
+// TestHandlePong_MatchedPing_AcceptsAndConsumes verifies the positive
+// anti-forgery path (Redis 退役步骤 1/4 缺口3): a Pong whose timestamp
+// matches a tracked Ping is accepted — callback fires, node RTT is stored,
+// and the record is consumed exactly once (Complete == former Redis Del).
+func TestHandlePong_MatchedPing_AcceptsAndConsumes(t *testing.T) {
+	mgr := setupHandlerManager(t)
+	mgr.db.Create(&models.Node{NodeID: "pong-device-010", Status: "online"})
+
+	ts := uint64(1750000000123456) // microseconds
+	var cbLatency int64 = -2
+	var cbSuccess bool
+	mgr.pingTracker.Track("pong-device-010", int64(ts), func(latencyMs int64, success bool) {
+		cbLatency = latencyMs
+		cbSuccess = success
+	})
+
+	enc := frame.NewEncoder(frame.MsgPong)
+	enc.EncodeVarint(1, ts)
+	mgr.handlePong("pong-device-010", enc.Bytes())
+
+	if !cbSuccess {
+		t.Fatal("callback must report success for a matched Pong")
+	}
+	if cbLatency < 0 {
+		t.Errorf("callback latency = %d, want non-negative RTT", cbLatency)
+	}
+	if mgr.pingTracker.PendingCount() != 0 {
+		t.Errorf("pending count = %d, want 0 (record consumed once)", mgr.pingTracker.PendingCount())
+	}
+	var n models.Node
+	mgr.db.First(&n, "node_id = ?", "pong-device-010")
+	if n.LastPingAt == nil {
+		t.Error("node last_ping_at must be set after verified Pong")
+	}
+}
+
+// TestHandlePong_TimestampMismatch_Rejected verifies that a Pong with a
+// tracked device but a wrong timestamp is rejected without consuming the
+// pending record (防伪造: forged Pong cannot close a real in-flight Ping).
+func TestHandlePong_TimestampMismatch_Rejected(t *testing.T) {
+	mgr := setupHandlerManager(t)
+	mgr.db.Create(&models.Node{NodeID: "pong-device-011", Status: "online"})
+
+	called := false
+	mgr.pingTracker.Track("pong-device-011", 1750000000000000, func(int64, bool) { called = true })
+
+	enc := frame.NewEncoder(frame.MsgPong)
+	enc.EncodeVarint(1, uint64(1750000000999999)) // mismatched timestamp
+	mgr.handlePong("pong-device-011", enc.Bytes())
+
+	if called {
+		t.Error("callback must not fire for a mismatched Pong")
+	}
+	if mgr.pingTracker.PendingCount() != 1 {
+		t.Errorf("pending count = %d, want 1 (record must survive rejection)", mgr.pingTracker.PendingCount())
+	}
+	var n models.Node
+	mgr.db.First(&n, "node_id = ?", "pong-device-011")
+	if n.LastPingAt != nil || n.PingLatencyMs != 0 {
+		t.Error("mismatched Pong must not update node RTT")
+	}
+}
+
+// TestHandlePong_ReplayRejected verifies one-time consumption: a second
+// Pong carrying the same (already consumed) timestamp is rejected.
+func TestHandlePong_ReplayRejected(t *testing.T) {
+	mgr := setupHandlerManager(t)
+	mgr.db.Create(&models.Node{NodeID: "pong-device-012", Status: "online"})
+
+	ts := uint64(1750000000555555)
+	callbacks := 0
+	mgr.pingTracker.Track("pong-device-012", int64(ts), func(int64, bool) { callbacks++ })
+
+	enc := frame.NewEncoder(frame.MsgPong)
+	enc.EncodeVarint(1, ts)
+	mgr.handlePong("pong-device-012", enc.Bytes())
+	mgr.handlePong("pong-device-012", enc.Bytes()) // replay
+
+	if callbacks != 1 {
+		t.Errorf("callback fired %d times, want exactly 1 (replay must be rejected)", callbacks)
+	}
 }
 
 // --- handlePing tests ---

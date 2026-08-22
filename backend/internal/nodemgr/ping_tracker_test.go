@@ -101,3 +101,39 @@ func TestPingTracker_Config(t *testing.T) {
 		t.Errorf("default timeout: got %v, want 10s", pt.Timeout())
 	}
 }
+
+// TestPingTracker_Peek covers the anti-forgery helper added by
+// Redis 退役步骤 1/4: Peek returns the pending record WITHOUT consuming it
+// (Complete 仍是唯一消费点)。
+func TestPingTracker_Peek(t *testing.T) {
+	pt := NewPingTracker()
+	defer pt.Stop()
+
+	if _, ok := pt.Peek("missing"); ok {
+		t.Error("Peek on unknown device must return ok=false")
+	}
+
+	pt.Track("device-peek", 777, nil)
+
+	// Peek 不得消费记录。
+	for i := 0; i < 3; i++ {
+		rec, ok := pt.Peek("device-peek")
+		if !ok {
+			t.Fatalf("Peek #%d must find the tracked record", i)
+		}
+		if rec.timestamp != 777 {
+			t.Errorf("Peek #%d timestamp = %d, want 777", i, rec.timestamp)
+		}
+	}
+	if pt.PendingCount() != 1 {
+		t.Errorf("pending after repeated Peek = %d, want 1 (Peek must not consume)", pt.PendingCount())
+	}
+
+	// Complete 消费后 Peek 必须 miss。
+	if _, ok := pt.Complete("device-peek"); !ok {
+		t.Fatal("Complete must find the record")
+	}
+	if _, ok := pt.Peek("device-peek"); ok {
+		t.Error("Peek after Complete must miss (record consumed)")
+	}
+}
