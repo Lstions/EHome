@@ -1,7 +1,7 @@
 # EHomeSystem 实现文档
 
 > **位置**: `docs/实现/`
-> **状态**: v3.3 已交付 + v3.4 开发中。本目录自 2026-08-22 体系重建起仅存索引——模块实现记录已并入 [../设计/](../设计/) 三合一模块文档（§6 实现记录节）。
+> **状态**: v3.3 已交付 + v3.4 已落地（时序化 5/5 / 告警 3/4 / Redis 退役 4/4）。本目录自 2026-08-22 体系重建起仅存索引——模块实现记录已并入 [../设计/](../设计/) 三合一模块文档（§6 实现记录节）。
 
 ## 📖 如何找实现信息
 
@@ -34,7 +34,7 @@
 
 ### 后端
 
-- Go（go.mod 当前版本）、Gin、GORM、PostgreSQL 16（JSONB）、Paho MQTT、手写二进制帧（无 protobuf）、结构化日志、Prometheus、env 配置（EHOME_*）。
+| 后端 | Go（go 1.26）、Gin、GORM、PostgreSQL（compose 用 postgres:18-alpine）、Paho MQTT、手写二进制帧（无 protobuf）、结构化日志、Prometheus、env 配置（EHOME_*）。 |
 
 ### 前端
 
