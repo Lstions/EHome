@@ -1764,6 +1764,11 @@ html.dark .node-overview-page {
 /* 系统日志 / 通道终端 */
 .log-card, .terminal-card { overflow: hidden; }
 .log-card .card-head, .terminal-card .card-head { border-bottom-color: var(--no-border-light); }
+/* 内容区与 card-head 的 20px 水平对齐一致（card-head padding 16px 20px 12px） */
+.log-card > :not(.card-head):not(.card-loading):not(.card-empty),
+.terminal-card > :not(.card-head):not(.card-loading):not(.card-empty) {
+  padding: 0 20px 16px;
+}
 
 /* 总线配置：双栏资源视图（对齐 designs/new-node-2.png） */
 .bus-alert { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px; margin-bottom: 16px; color: var(--no-text-secondary); background: var(--no-warning-bg); border: 1px solid #FCD98C; border-radius: 6px; font-size: 13px; }
