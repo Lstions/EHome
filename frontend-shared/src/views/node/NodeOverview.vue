@@ -78,7 +78,6 @@
             <div class="stat-value">{{ node.model || '-' }}</div>
           </div>
         </div>
-        <div class="stat-sep"></div>
         <div class="stat-item">
           <div class="stat-icon"><el-icon :size="16"><Document /></el-icon></div>
           <div class="stat-text">
@@ -86,7 +85,6 @@
             <div class="stat-value">{{ node.firmware_version || '-' }}</div>
           </div>
         </div>
-        <div class="stat-sep"></div>
         <div class="stat-item">
           <div class="stat-icon"><el-icon :size="16"><Clock /></el-icon></div>
           <div class="stat-text">
@@ -94,7 +92,6 @@
             <div class="stat-value">{{ lastOnlineText }}</div>
           </div>
         </div>
-        <div class="stat-sep"></div>
         <div class="stat-item">
           <div class="stat-icon"><el-icon :size="16"><Timer /></el-icon></div>
           <div class="stat-text">
@@ -102,7 +99,6 @@
             <div class="stat-value">{{ sessionDuration }}</div>
           </div>
         </div>
-        <div class="stat-sep"></div>
         <div class="stat-item">
           <div class="stat-icon"><el-icon :size="16"><Share /></el-icon></div>
           <div class="stat-text">
@@ -1673,7 +1669,6 @@ html.dark .node-overview-page {
 .stat-text { min-width: 0; }
 .stat-label { font-size: 12px; line-height: 18px; color: var(--no-text-secondary); }
 .stat-value { font-size: 14px; font-weight: 500; line-height: 20px; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stat-sep { width: 1px; height: 40px; background: var(--no-border); flex-shrink: 0; }
 
 /* Tab 栏 */
 .tab-bar { display: flex; align-items: center; height: 48px; padding: 0 20px; gap: 24px; margin-bottom: 16px; border-bottom: 1px solid var(--no-border); border-radius: 8px 8px 0 0; }
@@ -1984,7 +1979,6 @@ html.dark .node-overview-page {
   .row-1 > .card { width: 100%; }
   .stat-strip { flex-wrap: wrap; gap: 12px; }
   .stat-item { flex: 1 1 30%; }
-  .stat-sep { display: none; }
 }
 /* 右栏固定为 468px，六项资源统计最少需要约 640px 内容宽；
    在有桌面侧栏的中等视口继续双栏会把左栏压缩并被卡片裁切。 */
