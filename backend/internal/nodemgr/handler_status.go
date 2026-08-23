@@ -28,6 +28,9 @@ type runtimePerformanceReport struct {
 	QueueHighWaterUsed     [5]uint32 `json:"queue_high_water_used"`
 	QueueSampleSkipped     [5]uint32 `json:"queue_sample_skipped"`
 	QueueSampleRejected    [5]uint32 `json:"queue_sample_rejected"`
+	// WiFiRssiAbs is |RSSI| in dBm from sub-frame field 28 (v2.3+).
+	// 0 = no data; positive values convert to dBm via rssi = -int(WiFiRssiAbs).
+	WiFiRssiAbs uint32 `json:"wifi_rssi_abs"`
 }
 
 // controlStatisticsReport is a bounded boot-local aggregate from the V2
@@ -46,7 +49,7 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 	if err != nil {
 		return report, err
 	}
-	seen := [28]bool{}
+	seen := [29]bool{}
 	for {
 		field, err := dec.NextField()
 		if errors.Is(err, frame.ErrEndOfFrame) {
@@ -55,7 +58,7 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 		if err != nil {
 			return report, err
 		}
-		if field.FieldNum < 1 || field.FieldNum > 27 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
+		if field.FieldNum < 1 || field.FieldNum > 28 || seen[field.FieldNum] || field.WireType != frame.WireVarint {
 			return report, fmt.Errorf("invalid runtime performance field")
 		}
 		value := frame.GetUint64(field)
@@ -86,6 +89,8 @@ func decodeRuntimePerformance(data []byte) (runtimePerformanceReport, error) {
 			report.QueueSampleSkipped[field.FieldNum-18] = uint32(value)
 		case 23, 24, 25, 26, 27:
 			report.QueueSampleRejected[field.FieldNum-23] = uint32(value)
+		case 28: // v2.3: WiFi RSSI absolute value (|dBm|), 0 = no data
+			report.WiFiRssiAbs = uint32(value)
 		}
 	}
 	for field := uint8(1); field <= 5; field++ {
@@ -282,6 +287,26 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	if performance != nil || controlStatistics != nil {
 		if performance != nil {
 			updates["free_heap_bytes"] = int(performance.FreeHeapBytes)
+
+			// v2.3: derive wifi_rssi + connection_quality from runtime performance
+			// field 28 (|RSSI| dBm) and the last measured ping RTT.
+			rssiDbm := 0
+			hasRssi := false
+			if performance.WiFiRssiAbs > 0 {
+				rssiDbm = -int(performance.WiFiRssiAbs)
+				hasRssi = true
+				// NOTE: gorm derives the column as wi_fi_rssi (WiFiRSSI has no
+				// explicit column tag in models.go) — match the real schema.
+				updates["wi_fi_rssi"] = rssiDbm
+			}
+			rttMs := int(node.PingLatencyMs)
+			// Only write connection_quality when at least one real input exists,
+			// so we never clobber a good score with 0 on a data-less report.
+			// Offline reports (status != "online") keep the previous score: the
+			// link is down, so RSSI/RTT samples are not meaningful anyway.
+			if status == "online" && (hasRssi || rttMs > 0) {
+				updates["connection_quality"] = ComputeConnectionQuality(rssiDbm, rttMs, hasRssi)
+			}
 		}
 		var hardwareInfo map[string]interface{}
 		if json.Unmarshal([]byte(node.HardwareInfo), &hardwareInfo) != nil || hardwareInfo == nil {
