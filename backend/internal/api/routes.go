@@ -6,6 +6,7 @@ import (
 	"time"
 
 	authservice "ehome/backend/internal/auth"
+	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
@@ -31,12 +32,19 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// alertEvaluatorOpt 阈值告警求值器 (方案 v0.4 §5.1.3): 经 *alert.Evaluator
 	// option 注入 (main.go), CRUD 写路径调用 Invalidate 即时失效规则缓存。
 	var alertEvaluatorOpt alertEvaluator
+	// automationEvaluatorOpt 自动化策略求值器 (设计/自动化策略引擎方案.md v0.1):
+	// 经 *automation.Evaluator option 注入 (main.go), 同上失效缓存。
+	var automationEvaluatorOpt automationEvaluator
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
 			controlPolicy = value
 		case *commandexec.Service:
 			commandService = value
+		// 具体类型判断 (非接口): *automation.Evaluator 与 *alert.Evaluator 都实现
+		// Invalidate() 接口, 若用接口 case 会按序首个匹配, automation 永不到达。
+		case *automation.Evaluator:
+			automationEvaluatorOpt = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -107,6 +115,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// 阈值告警引擎 (方案 v0.4 §5.1.3 任务C): 规则 CRUD + 事件查询。
 		// evaluator 经 options 注入 (main.go), 单测可传 nil。
 		registerAlertRoutes(v1, db, alertEvaluatorOpt)
+
+		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 规则 CRUD + 事件查询。
+		registerAutomationRoutes(v1, db, automationEvaluatorOpt)
 
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)
