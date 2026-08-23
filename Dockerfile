@@ -17,6 +17,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
 # ── Stage 2: Frontend build ─────────────────────────────────────────────
 FROM node:22-alpine AS frontend-builder
 
+# 子路径前缀部署（反代 /ehome-dev 场景）：docker build --build-arg VITE_BASE_PATH=/ehome-dev/
+# 与 VITE_API_BASE_URL / VITE_WS_URL 一起注入前端构建环境
+ARG VITE_BASE_PATH
+ARG VITE_API_BASE_URL
+ARG VITE_WS_URL
+ENV VITE_BASE_PATH=${VITE_BASE_PATH} \
+    VITE_API_BASE_URL=${VITE_API_BASE_URL} \
+    VITE_WS_URL=${VITE_WS_URL}
+
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 COPY frontend-shared/package.json frontend-shared/pnpm-lock.yaml ./
