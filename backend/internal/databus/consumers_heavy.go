@@ -117,6 +117,9 @@ type SensorParserConsumer struct {
 	// alertSink 阈值告警引擎 (方案 v0.4 §5 任务C): 解析后回调注入 alert.Evaluator。
 	// 复用 rollupSink 回调先例, 只对解析成功的物理量求值, nil 时跳过。
 	alertSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
+	// automationSink 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 解析后回调注入
+	// automation.Evaluator, 与 alertSink 并列不合并。nil 时跳过。
+	automationSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -146,6 +149,12 @@ func (c *SensorParserConsumer) SetLatestSink(sink func(models.UnifiedData)) {
 // SetAlertSink 注入阈值告警求值回调 (方案 v0.4 §5.1.2, main.go 接线)。
 func (c *SensorParserConsumer) SetAlertSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
 	c.alertSink = sink
+}
+
+// SetAutomationSink 注入自动化策略求值回调 (设计/自动化策略引擎方案.md v0.1,
+// main.go 接线), 与 alertSink 并列不合并。
+func (c *SensorParserConsumer) SetAutomationSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
+	c.automationSink = sink
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
@@ -321,6 +330,11 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// 解析成功即求值, 与 ShouldHandle 语义等价。
 	if c.alertSink != nil && len(sensorData) > 0 {
 		c.alertSink(device.ID, sensorData, now)
+	}
+	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 与 alertSink 同点挂接,
+	// 同一批解析后物理量 (裁决: 避免独立 consumer 的重复解析开销)。
+	if c.automationSink != nil && len(sensorData) > 0 {
+		c.automationSink(device.ID, sensorData, now)
 	}
 
 	// Update edge device status. Keep last_data_at fresh for every successful

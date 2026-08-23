@@ -56,6 +56,11 @@ type Manager struct {
 	alertEvaluator interface {
 		Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
 	}
+	// automationEvaluator 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1):
+	// main.go 经 SetAutomationEvaluator 注入, 与 alertEvaluator 并列不合并。
+	automationEvaluator interface {
+		Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
+	}
 
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
@@ -98,6 +103,14 @@ func (m *Manager) SetAlertEvaluator(ev interface {
 	Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
 }) {
 	m.alertEvaluator = ev
+}
+
+// SetAutomationEvaluator 注入自动化策略求值器 (设计/自动化策略引擎方案.md v0.1,
+// main.go 接线), 与 alertEvaluator 并列不合并。
+func (m *Manager) SetAutomationEvaluator(ev interface {
+	Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
+}) {
+	m.automationEvaluator = ev
 }
 
 // NewManager creates a new node manager.
@@ -164,6 +177,9 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	latestSinkFn := mgr.latestSinkFn
 	// 阈值告警引擎 (方案 v0.4 §5.1.2): 求值器 (main.go 经 SetAlertEvaluator 接线)。
 	alertEval := mgr.alertEvaluator
+	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 求值器 (main.go 经
+	// SetAutomationEvaluator 接线), 与 alertEval 并列。
+	automationEval := mgr.automationEvaluator
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -184,6 +200,11 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		// 阈值告警引擎 (方案 v0.4 §5.1.2): 解析后回调注入 (alert.Evaluator)。
 		if alertEval != nil {
 			parser.SetAlertSink(alertEval.Evaluate)
+		}
+		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 解析后回调注入,
+		// 与 alertSink 同点并列。
+		if automationEval != nil {
+			parser.SetAutomationSink(automationEval.Evaluate)
 		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {

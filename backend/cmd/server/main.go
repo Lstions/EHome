@@ -12,6 +12,7 @@ import (
 
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
+	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/alert"
 	"ehome/backend/internal/config"
@@ -214,8 +215,25 @@ func main() {
 	nodeMgr.SetAlertEvaluator(alertEvaluator)
 	go alertEvaluator.Start()
 	defer alertEvaluator.Stop()
+
+	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 求值器+执行器构造接线。
+	// 与 alert 并列挂同一批解析后物理量; 动作执行一律走 commandexec (9 gate+幂等+审计)。
+	// 系统 actor = 单主体管理员 (subject_key=system_admin), 策略执行归因到该主体。
+	var systemActorID uint
+	{
+		var adminUser models.User
+		if err := db.Where("subject_key = ? AND retired_at IS NULL", models.SystemAdminSubjectKey).First(&adminUser).Error; err == nil {
+			systemActorID = adminUser.ID
+		} else {
+			logger.Warnf("[automation] 未找到系统主体用户 (subject_key=system_admin), 策略 device_action 执行将受阻: %v", err)
+		}
+	}
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
 	commandService := commandexec.NewService(db, actionRegistry)
+	automationEvaluator := automation.NewEvaluator(db, automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID))
+	nodeMgr.SetAutomationEvaluator(automationEvaluator)
+	go automationEvaluator.Start()
+	defer automationEvaluator.Stop()
 	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)
 	nodeMgr.SetCommandExecutionService(commandService)
 	go nodeMgr.Start()
@@ -302,7 +320,7 @@ func main() {
 		}))
 	}
 	controlCfg := cfg.ControlConfig()
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, api.ControlPolicy{
 		LegacyDeviceWriteMode: controlCfg.LegacyDeviceWriteMode,
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
