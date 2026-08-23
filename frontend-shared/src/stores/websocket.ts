@@ -128,7 +128,15 @@ export const useWebSocketStore = defineStore('websocket', () => {
 
     manuallyClosed.value = false
 
-    const wsUrl = import.meta.env.VITE_WS_URL || '/api/v1/ws'
+    // 反代子路径部署（VITE_BASE_PATH）时，相对 WS 路径自动带前缀。
+    // 仅对相对路径（/ 开头）加前缀；完整 URL（ws:// 等）保持原样，由用户显式指定。
+    const wsBasePrefix = import.meta.env.VITE_BASE_PATH
+      ? import.meta.env.VITE_BASE_PATH.replace(/\/+$/, '')
+      : ''
+    const rawWsUrl = import.meta.env.VITE_WS_URL || '/api/v1/ws'
+    const wsUrl = rawWsUrl.startsWith('/')
+      ? (wsBasePrefix ? `${wsBasePrefix}${rawWsUrl}` : rawWsUrl)
+      : rawWsUrl
     let statusUrl: string
 
     // If wsUrl is already a full URL (ws:// or wss://), use it directly;

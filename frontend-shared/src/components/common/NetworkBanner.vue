@@ -15,6 +15,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { CircleCloseFilled, WarningFilled, Link } from '@element-plus/icons-vue'
 import { useWebSocketStore } from '@/stores/websocket'
+import { loginPath } from '@/utils/basePath'
 
 const wsStore = useWebSocketStore()
 const visible = ref(false)
@@ -53,7 +54,7 @@ const onRetry = () => {
     window.location.reload()
   } else if (!wsStore.isAuthenticated) {
     // 未登录时跳转到登录页
-    window.location.href = '/login'
+    window.location.href = loginPath()
   } else {
     wsStore.connect()
     hide()

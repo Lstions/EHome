@@ -22,7 +22,15 @@ class Logger {
   private buffer: LogEntry[] = []
   private flushInterval = 5000 // 5秒批量发送
   private maxBufferSize = 50 // 最大缓冲数量
-  private endpoint = '/api/v1/logs'
+  // 日志上报端点：优先 VITE_LOG_ENDPOINT（完整覆盖），否则默认 /api/v1/logs；
+  // 相对路径时自动带 VITE_BASE_PATH 前缀（反代子路径部署）
+  private endpoint = (() => {
+    const raw = import.meta.env.VITE_LOG_ENDPOINT || '/api/v1/logs'
+    const basePrefix = import.meta.env.VITE_BASE_PATH
+      ? import.meta.env.VITE_BASE_PATH.replace(/\/+$/, '')
+      : ''
+    return raw.startsWith('/') && basePrefix ? `${basePrefix}${raw}` : raw
+  })()
   private service = 'frontend'
   private enabled = false // 禁用网络传输，仅输出到控制台
   private timer: ReturnType<typeof setInterval> | null = null

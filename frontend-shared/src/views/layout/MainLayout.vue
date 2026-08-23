@@ -5,7 +5,7 @@
       <!-- Logo 区域 -->
       <div class="logo-area" @click="router.push('/dashboard')">
         <div class="logo-icon">
-          <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
+          <img :src="withBase('/favicon.svg')" alt="EHomeSystem" style="width: 24px; height: 24px;" />
         </div>
         <transition name="fade">
           <span v-if="!uiStore.sidebarCollapsed" class="logo-text">EHomeSystem</span>
@@ -47,7 +47,7 @@
         <!-- Logo 区域 -->
         <div class="mobile-logo-area" @click="handleMobileLogoClick">
           <div class="logo-icon">
-            <img src="/favicon.svg" alt="EHomeSystem" style="width: 24px; height: 24px;" />
+            <img :src="withBase('/favicon.svg')" alt="EHomeSystem" style="width: 24px; height: 24px;" />
           </div>
           <span class="mobile-logo-text">EHomeSystem</span>
         </div>
@@ -243,6 +243,7 @@ import {
   Menu,
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
+import { withBase } from '@/utils/basePath'
 import { useUIStore } from '@/stores/ui'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useNodeStore } from '@/stores/node'

@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance, type AxiosError, type AxiosResponse } from 'axios'
 import { clearSessionCaches } from '@/utils/sessionCache'
+import { loginPath } from '@/utils/basePath'
 
 interface ErrorEnvelope {
   code?: number | string
@@ -26,8 +27,12 @@ export function isApiErrorCode(error: unknown, errorCode: string): boolean {
 }
 
 // 创建 Axios 实例
+// baseURL：优先 VITE_API_BASE_URL（完整覆盖）；否则跟随 VITE_BASE_PATH 前缀（反代子路径部署）
+const apiBaseURL = import.meta.env.VITE_API_BASE_URL
+  ? import.meta.env.VITE_API_BASE_URL
+  : (import.meta.env.VITE_BASE_PATH ? import.meta.env.VITE_BASE_PATH.replace(/\/+$/, '') : '')
 const apiClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '',
+  baseURL: apiBaseURL,
   timeout: 10000,
   // 不设置默认 Content-Type，让 axios 根据请求体自动处理
   // (FormData 需要浏览器自动生成 multipart/form-data + boundary)
@@ -69,7 +74,7 @@ apiClient.interceptors.response.use(
       clearSessionCaches()
       localStorage.removeItem('token')
       sessionStorage.removeItem('token')
-      if (window.location.pathname !== '/login') window.location.assign('/login')
+      if (window.location.pathname !== loginPath()) window.location.assign(loginPath())
     }
     const errorData = error.response?.data as ErrorEnvelope | undefined
     return Promise.reject(new ApiError(errorData?.message || error.message, error.response, errorData?.error_code))

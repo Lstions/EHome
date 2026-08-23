@@ -50,6 +50,7 @@ import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/auth'
 import { useResponsive } from '@/composables/useResponsive'
 import feedback from '@/utils/feedback'
+import { loginPath } from '@/utils/basePath'
 
 const userStore = useUserStore()
 const userInfo = computed(() => userStore.userInfo)
@@ -98,7 +99,7 @@ const handleChangePassword = async () => {
     feedback.success('密码修改成功，请重新登录')
     setTimeout(async () => {
       await userStore.logout()
-      window.location.href = '/login'
+      window.location.href = loginPath()
     }, 1500)
   } catch (err) {
     feedback.handleError(err)

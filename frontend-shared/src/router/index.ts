@@ -149,7 +149,8 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  // 子路径前缀部署（反代 /ehome-dev 场景）：history base 跟随 VITE_BASE_PATH
+  history: createWebHistory(import.meta.env.VITE_BASE_PATH || '/'),
   routes,
 })
 
