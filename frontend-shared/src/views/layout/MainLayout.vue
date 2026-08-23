@@ -818,6 +818,7 @@ onUnmounted(() => {
   overflow-y: auto;
   height: calc(100vh - 60px);
   background: var(--el-fill-color-light);
+  scrollbar-gutter: stable;
 }
 
 /* ========== 过渡动画 ========== */
