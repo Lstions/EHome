@@ -320,6 +320,7 @@ target_include_directories(handler_data_tests PRIVATE
     ../components/dma_pool/include
     ../components/hw_profile/include
     ../components/ota
+    ../components/wifi_mgr
 )
 target_compile_definitions(handler_data_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(handler_data_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -486,3 +487,16 @@ target_include_directories(frame_codec_boundary_tests PRIVATE
 )
 target_compile_options(frame_codec_boundary_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME frame_codec_boundary_tests COMMAND frame_codec_boundary_tests)
+
+add_executable(wifi_mgr_rssi_tests wifi_mgr_rssi_tests.c)
+target_include_directories(wifi_mgr_rssi_tests PRIVATE
+    wifi_stubs
+    stubs
+    ../components/wifi_mgr
+)
+target_compile_definitions(wifi_mgr_rssi_tests PRIVATE
+    CONFIG_COLLECTOR_WIFI_SSID=""
+    CONFIG_COLLECTOR_WIFI_PASSWORD=""
+)
+target_compile_options(wifi_mgr_rssi_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter)
+add_test(NAME wifi_mgr_rssi_tests COMMAND wifi_mgr_rssi_tests)

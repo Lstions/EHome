@@ -15,6 +15,7 @@
 #include "scheduler.h"
 #include "bus_worker.h"
 #include "ota.h"
+#include "wifi_mgr.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include <string.h>
@@ -206,6 +207,14 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                                       queue_metrics.sample_skipped[i]) == FRAME_OK &&
                   frame_encode_varint(&perf_enc, 23 + i,
                                       queue_metrics.sample_rejected[i]) == FRAME_OK;
+    }
+    /* Field 28: WiFi RSSI.  Transport carries the absolute value of the
+     * negative dBm reading (e.g. -55 dBm -> 55); the backend negates it.
+     * 0 means "no WiFi data" (disconnected or query failed). */
+    if (perf_ok) {
+        int rssi_dbm = wifi_mgr_get_rssi_dbm();
+        uint64_t rssi_abs = (rssi_dbm < 0) ? (uint64_t)(-rssi_dbm) : 0;
+        perf_ok = frame_encode_varint(&perf_enc, 28, rssi_abs) == FRAME_OK;
     }
     if (perf_ok) {
         (void)frame_encode_bytes(&enc, STATUS_RPT_F_RUNTIME_PERF,

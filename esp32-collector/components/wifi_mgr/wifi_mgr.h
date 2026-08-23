@@ -32,6 +32,14 @@ void wifi_mgr_stop(void);
 wifi_mgr_state_t wifi_mgr_get_state(void);
 bool wifi_mgr_is_connected(void);
 
+/* === RSSI query === */
+/**
+ * @brief Get current WiFi RSSI in dBm.
+ * @return Negative dBm value (e.g. -55) when connected;
+ *         0 when disconnected or query fails.
+ */
+int wifi_mgr_get_rssi_dbm(void);
+
 /* === Credentials (NVS) === */
 bool wifi_mgr_save_credentials(const char *ssid, const char *password);
 bool wifi_mgr_load_credentials(char *ssid, size_t ssid_len, char *password, size_t pwd_len);

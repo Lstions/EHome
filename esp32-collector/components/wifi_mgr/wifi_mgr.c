@@ -131,6 +131,19 @@ bool wifi_mgr_is_connected(void)
     return s_state == WIFI_MGR_CONNECTED;
 }
 
+int wifi_mgr_get_rssi_dbm(void)
+{
+    if (s_state != WIFI_MGR_CONNECTED) {
+        return 0;
+    }
+
+    wifi_ap_record_t ap_info = {0};
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        return 0;
+    }
+    return ap_info.rssi;
+}
+
 bool wifi_mgr_save_credentials(const char *ssid, const char *password)
 {
     if (!ssid) return false;

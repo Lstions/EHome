@@ -39,6 +39,7 @@
 #include "scheduler.h"
 #include "bus_worker.h"
 #include "ota.h"
+#include "wifi_mgr.h"
 
 /* =====================================================================
  * Test infrastructure
@@ -134,6 +135,13 @@ void handler_channel_cmd_v2_get_metrics(channel_cmd_v2_metrics_t *m) {
 }
 
 /* =====================================================================
+ * wifi_mgr stubs — controllable RSSI
+ * ===================================================================== */
+static int g_mock_rssi_dbm = 0;   /* 0 => disconnected / no WiFi data */
+
+int wifi_mgr_get_rssi_dbm(void) { return g_mock_rssi_dbm; }
+
+/* =====================================================================
  * OTA stubs
  * ===================================================================== */
 static int g_ota_start_count = 0;
@@ -215,7 +223,7 @@ static void test_status_report_perf_field_count(void) {
     }
     CHECK(perf_len > 0, "perf sub-message should be present");
 
-    /* Count fields in perf sub-message: expect 7 base + 5*4 queue = 27 */
+    /* Count fields in perf sub-message: expect 7 base + 5*4 queue + rssi = 28 */
     frame_decoder_t pdec;
     frame_field_t pfield;
     frame_decoder_init_sub(&pdec, perf_data, perf_len);
@@ -226,8 +234,67 @@ static void test_status_report_perf_field_count(void) {
         if ((int)pfield.field_num > max_field_num)
             max_field_num = (int)pfield.field_num;
     }
-    CHECK(field_count == 27, "perf sub-message should have 27 fields (7 base + 20 queue)");
-    CHECK(max_field_num == 27, "highest field number should be 27");
+    CHECK(field_count == 28, "perf sub-message should have 28 fields (7 base + 20 queue + rssi)");
+    CHECK(max_field_num == 28, "highest field number should be 28 (wifi rssi)");
+}
+
+/* =====================================================================
+ * Test 2b: StatusReport perf field 28 carries |RSSI|; 0 when disconnected
+ * ===================================================================== */
+static uint64_t extract_perf_field28(const uint8_t *frame, size_t frame_len,
+                                     bool *found) {
+    *found = false;
+    frame_decoder_t dec;
+    frame_field_t field;
+    frame_decoder_init(&dec, frame, frame_len);
+    while (frame_decoder_next(&dec, &field) == FRAME_OK) {
+        if (field.field_num == STATUS_RPT_F_RUNTIME_PERF &&
+            field.wire_type == WIRE_LENGTH_DELIMITED) {
+            frame_decoder_t pdec;
+            frame_field_t pfield;
+            frame_decoder_init_sub(&pdec, field.value.bytes.ptr,
+                                   field.value.bytes.len);
+            while (frame_decoder_next(&pdec, &pfield) == FRAME_OK) {
+                if (pfield.field_num == 28 && pfield.wire_type == WIRE_VARINT) {
+                    *found = true;
+                    return pfield.value.varint;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static void test_status_report_rssi_field28(void) {
+    bool found;
+    uint64_t v;
+
+    /* Connected at -55 dBm -> wire value 55 */
+    reset_publish();
+    g_test_manifest_valid = false;
+    g_mock_rssi_dbm = -55;
+    msg_handler_send_status(100, "ok", 0, NULL);
+    v = extract_perf_field28(g_published, g_published_len, &found);
+    CHECK(found, "field 28 must be present when RSSI available");
+    CHECK(v == 55, "field 28 should encode abs(RSSI): -55 dBm -> 55");
+
+    /* Connected at -92 dBm -> wire value 92 */
+    reset_publish();
+    g_mock_rssi_dbm = -92;
+    msg_handler_send_status(100, "ok", 0, NULL);
+    v = extract_perf_field28(g_published, g_published_len, &found);
+    CHECK(found, "field 28 must be present");
+    CHECK(v == 92, "field 28 should encode abs(RSSI): -92 dBm -> 92");
+
+    /* Disconnected / query failed -> wire value 0 ("no WiFi data") */
+    reset_publish();
+    g_mock_rssi_dbm = 0;
+    msg_handler_send_status(100, "ok", 0, NULL);
+    v = extract_perf_field28(g_published, g_published_len, &found);
+    CHECK(found, "field 28 must still be present when disconnected");
+    CHECK(v == 0, "field 28 should be 0 when no WiFi data");
+
+    g_mock_rssi_dbm = 0;
 }
 
 /* =====================================================================
@@ -459,6 +526,7 @@ int main(void)
 {
     test_status_report_full_perf();
     test_status_report_perf_field_count();
+    test_status_report_rssi_field28();
     test_status_report_channel_health();
     test_data_report_512_payload();
     test_data_report_1024_payload();
