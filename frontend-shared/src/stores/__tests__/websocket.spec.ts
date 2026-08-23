@@ -141,6 +141,39 @@ describe('useWebSocketStore', () => {
     expect(MockWebSocket.instances.length).toBe(1)
   })
 
+  // ── 子路径前缀部署（VITE_BASE_PATH）──────────────────
+
+  it('connect 相对 WS 路径自动带 VITE_BASE_PATH 前缀', () => {
+    vi.stubEnv('VITE_BASE_PATH', '/ehome-dev/')
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    expect(MockWebSocket.instances.length).toBe(1)
+    const url = MockWebSocket.instances[0].url
+    // 完整 URL = ws://host + 前缀 + 相对路径 + token
+    expect(url).toBe(`ws://${window.location.host}/ehome-dev/api/v1/ws?token=test-token`)
+    vi.unstubAllEnvs()
+  })
+
+  it('connect 无 VITE_BASE_PATH 时 WS 路径不带前缀', () => {
+    vi.stubEnv('VITE_BASE_PATH', '')
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    expect(MockWebSocket.instances.length).toBe(1)
+    expect(MockWebSocket.instances[0].url).toContain('/api/v1/ws')
+    vi.unstubAllEnvs()
+  })
+
+  it('connect VITE_WS_URL 为完整 URL 时不加前缀', () => {
+    vi.stubEnv('VITE_WS_URL', 'wss://example.com/ws')
+    vi.stubEnv('VITE_BASE_PATH', '/ehome-dev/')
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    expect(MockWebSocket.instances.length).toBe(1)
+    expect(MockWebSocket.instances[0].url).toContain('wss://example.com/ws')
+    expect(MockWebSocket.instances[0].url).not.toContain('/ehome-dev')
+    vi.unstubAllEnvs()
+  })
+
   it('connected becomes true on open', () => {
     localStorage.setItem('token', 'test-token')
     store.connect()

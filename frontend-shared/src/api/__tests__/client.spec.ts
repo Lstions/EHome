@@ -129,6 +129,25 @@ describe('apiClient 拦截器', () => {
     ;(window as any).location = originalLocation
   })
 
+  it('已认证请求收到 HTTP 401 时跳转带 VITE_BASE_PATH 前缀的登录页', async () => {
+    vi.stubEnv('VITE_BASE_PATH', '/ehome-dev/')
+    localStorage.setItem('token', 'expired')
+
+    const originalLocation = window.location
+    delete (window as any).location
+    const assign = vi.fn()
+    ;(window as any).location = { ...originalLocation, pathname: '/dashboard', assign }
+
+    const handler = mockResponseRejected.getMockImplementation() as any
+    await expect(handler({ config: { url: '/api/v1/account' }, response: { status: 401 } })).rejects.toBeDefined()
+
+    expect(assign).toHaveBeenCalledWith('/ehome-dev/login')
+
+    // 还原
+    ;(window as any).location = originalLocation
+    vi.unstubAllEnvs()
+  })
+
   it('登录接口 HTTP 401 保留当前登录页和错误响应', async () => {
     const originalLocation = window.location
     delete (window as any).location
