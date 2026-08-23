@@ -46,7 +46,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'node/:id',
         name: 'NodeDetail',
-        component: () => import('@/views/node/NodeDetail.vue'),
+        component: () => import('@/views/node/NodeOverview.vue'),
         meta: { title: '节点详情', hidden: true },
       },
       {
