@@ -115,6 +115,10 @@ func AutoMigrate() error {
 		&models.AlertRule{},
 		&models.AlertEvent{},
 
+		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)
+		&models.AutomationRule{},
+		&models.AutomationEvent{},
+
 		// v2.2 新表 (Phase 2A-2: DB 迁移)
 		// 注意: Node 和 EdgeDevice struct 由 T-BE-RENAME-01 并行添加
 		// 如果 struct 尚未定义, 注释掉这两行, 等 struct 改名完成后再启用
