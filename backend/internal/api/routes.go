@@ -35,6 +35,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// automationEvaluatorOpt 自动化策略求值器 (设计/自动化策略引擎方案.md v0.1):
 	// 经 *automation.Evaluator option 注入 (main.go), 同上失效缓存。
 	var automationEvaluatorOpt automationEvaluator
+	// automationPlannerOpt 自动化编排器 (裁决 4 确认制闭环): 经 *automation.Planner
+	// option 注入 (main.go), POST /automation-events/:id/confirm 人工确认执行。
+	var automationPlannerOpt automationPlanner
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
@@ -45,6 +48,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// Invalidate() 接口, 若用接口 case 会按序首个匹配, automation 永不到达。
 		case *automation.Evaluator:
 			automationEvaluatorOpt = value
+		// 具体类型: *automation.Planner 有 ConfirmEvent 方法, 与上述无方法集交集。
+		case *automation.Planner:
+			automationPlannerOpt = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -117,7 +123,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerAlertRoutes(v1, db, alertEvaluatorOpt)
 
 		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 规则 CRUD + 事件查询。
-		registerAutomationRoutes(v1, db, automationEvaluatorOpt)
+		// planner 供裁决 4 确认制闭环 (POST /automation-events/:id/confirm)。
+		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt)
 
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)

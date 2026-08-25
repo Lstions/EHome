@@ -44,6 +44,7 @@ const (
 	AutomationResultFailedGate            = "failed_gate"             // availability gate fail-closed
 	AutomationResultFailedDispatch        = "failed_dispatch"         // Create 调用失败
 	AutomationResultNotification          = "notification"            // 纯通知动作已发出
+	AutomationResultExpired               = "expired"                 // pending_confirm 超时未确认 (24h 清扫置位)
 )
 
 // AutomationCondition 附加条件 (全部 AND 求值, ConditionsJSON 内嵌数组)。

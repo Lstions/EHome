@@ -230,10 +230,19 @@ func main() {
 	}
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
 	commandService := commandexec.NewService(db, actionRegistry)
-	automationEvaluator := automation.NewEvaluator(db, automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID))
+	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID)
+	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
+	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
+	automationPlanner.SetLatestValueFn(api.LatestValue)
+	automationEvaluator := automation.NewEvaluator(db, automationPlanner)
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
+	// 裁决 4 确认制闭环: pending_confirm 事件 24h 超时清扫 goroutine (设计/自动化确认制闭环实现方案.md §3.4)。
+	// 独立挂 Planner (非 evaluator ticker): evaluator 只缓存 sensor_threshold 规则会漏扫其它触发类型。
+	automationCleanupContext, automationPlannerStopCleanup := context.WithCancel(context.Background())
+	go automationPlanner.StartCleanup(automationCleanupContext)
+	defer automationPlannerStopCleanup()
 	commandService.SetDispatchEnabled(cfg.ControlConfig().DeviceControlV2Enabled)
 	nodeMgr.SetCommandExecutionService(commandService)
 	go nodeMgr.Start()
@@ -320,7 +329,7 @@ func main() {
 		}))
 	}
 	controlCfg := cfg.ControlConfig()
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, api.ControlPolicy{
 		LegacyDeviceWriteMode: controlCfg.LegacyDeviceWriteMode,
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})

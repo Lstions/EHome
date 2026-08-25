@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"strconv"
 
+	"ehome/backend/internal/automation"
+	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +34,12 @@ var (
 // automationEvaluator 供 CRUD 写路径失效规则缓存 (避免 api→automation 编译期依赖)。
 type automationEvaluator interface {
 	Invalidate()
+}
+
+// automationPlanner 供 confirm 端点人工确认执行 pending_confirm 事件 (裁决 4 确认制闭环)。
+// 同 evaluator 模式避免 api→automation 编译期依赖; 单测可传 nil (confirm 端点拒 503)。
+type automationPlanner interface {
+	ConfirmEvent(ctx context.Context, eventID, actorID uint, sourceIP string) (models.AutomationEvent, error)
 }
 
 type createAutomationRuleRequest struct {
@@ -80,7 +90,8 @@ type updateAutomationRuleRequest struct {
 
 // registerAutomationRoutes 注册自动化策略规则/事件 API (设计/自动化策略引擎方案.md v0.1)。
 // 权限对齐 alert: 单主体模式写操作登录即可, evaluator 经 options 注入 (main.go)。
-func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator) {
+// planner 为确认制闭环 (POST /automation-events/:id/confirm) 提供编排入口, 单测可传 nil。
+func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner) {
 	rules := v1.Group("/automation-rules")
 	{
 		rules.GET("", listAutomationRules(db))
@@ -94,6 +105,7 @@ func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automa
 	events := v1.Group("/automation-events")
 	{
 		events.GET("", listAutomationEvents(db))
+		events.POST("/:id/confirm", confirmAutomationEvent(planner))
 	}
 }
 
@@ -145,10 +157,15 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 			Error(c, 400, "参数错误: "+err.Error())
 			return
 		}
+		createRequireConfirmed := false
+		if req.RequireConfirmed != nil {
+			createRequireConfirmed = *req.RequireConfirmed
+		}
 		if msg := validateAutomationRuleFields(req.Name, req.TriggerType, req.ActionType,
 			req.TriggerEdgeDeviceID, req.TriggerSensorName, req.TriggerComparator, req.TriggerThreshold,
 			req.TriggerWindowStart, req.TriggerWindowEnd, req.TriggerWindowEdge,
-			req.ActionDeviceID, req.ActionID, req.ActionLevel); msg != "" {
+			req.ActionDeviceID, req.ActionID, req.ActionLevel,
+			createRequireConfirmed, false); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
@@ -241,7 +258,11 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 		}
 		aid := pickStr(req.ActionID, rule.ActionID)
 		alv := pickStr(req.ActionLevel, rule.ActionLevel)
-		if msg := validateAutomationRuleFields(name, tt, at, &teid, sn, cmp, &thr, ws, we, we2, &adevid, aid, alv); msg != "" {
+		rc := rule.RequireConfirmed
+		if req.RequireConfirmed != nil {
+			rc = *req.RequireConfirmed
+		}
+		if msg := validateAutomationRuleFields(name, tt, at, &teid, sn, cmp, &thr, ws, we, we2, &adevid, aid, alv, rc, true); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
 		}
@@ -392,11 +413,65 @@ func listAutomationEvents(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
+// POST /api/v1/automation-events/:id/confirm
+// 裁决 4 确认制闭环: 人工确认 pending_confirm 事件后真正下发动作。
+// 前置: 操作者须先经 POST /auth/manual-confirmation 刷新 LastLoginAt (近认证门)。
+// 无 body; planner 即铸即销 token, token 不跨请求存储。
+func confirmAutomationEvent(planner automationPlanner) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if planner == nil {
+			Error(c, 503, "自动化引擎未启用")
+			return
+		}
+		eventID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+		if err != nil || eventID == 0 {
+			Error(c, 400, "无效的事件 ID")
+			return
+		}
+		actorID, _ := c.Get("subject_id")
+		aid, _ := actorID.(uint)
+		if aid == 0 {
+			Error(c, 401, "未认证")
+			return
+		}
+		ev, err := planner.ConfirmEvent(c.Request.Context(), uint(eventID), aid, c.ClientIP())
+		if err != nil {
+			switch {
+			case errors.Is(err, automation.ErrConfirmEventNotFound):
+				Error(c, 404, "事件不存在")
+			case errors.Is(err, automation.ErrConfirmEventExpired):
+				ErrorWithCode(c, 409, "EVENT_EXPIRED", "确认窗口已超时 (24h), 事件已过期")
+			case errors.Is(err, automation.ErrConfirmNotPending):
+				Error(c, 409, "事件不在待确认状态 (可能已执行/过期/已确认)")
+			case errors.Is(err, automation.ErrConfirmRuleMissing):
+				Error(c, 410, "规则已删除, 无法确认")
+			case errors.Is(err, automation.ErrConfirmActionChanged):
+				ErrorWithCode(c, 409, "RULE_CHANGED", "规则动作在触发后已变更, 为保一致性拒绝确认; 请按新配置重新触发")
+			case errors.Is(err, automation.ErrConfirmInvalidParams):
+				ErrorWithCode(c, 409, "INVALID_PARAMS", "规则动作参数非法, 无法确认")
+			case errors.Is(err, commandexec.ErrRecentAuthRequired):
+				ErrorWithCode(c, 403, "RECENT_AUTH_REQUIRED", "需先完成手动确认 (刷新近认证)")
+			case errors.Is(err, commandexec.ErrConfirmationInvalid):
+				ErrorWithCode(c, 409, "CONFIRMATION_INVALID", "确认令牌无效或已过期")
+			default:
+				Error(c, 500, "确认失败: "+err.Error())
+			}
+			return
+		}
+		Success(c, ev)
+	}
+}
+
 // validateAutomationRuleFields 候选值校验 (fail-closed, 与 alert 同款风格)。
+// requireConfirmed 传入合并后的候选值: 裁决 4 确认制仅对 device_action 有意义
+// (notification 是纯通知无需人工确认), 非 device_action 配 require_confirmed=true 拒绝。
+// event 触发器: isUpdate=false (创建) 时禁配 (无 sensor 值与 trigger_value 语义错位);
+// isUpdate=true (更新) 时兼容存量规则 (评审③灰度: 不锁死历史 event 规则)。
 func validateAutomationRuleFields(name, triggerType, actionType string,
 	triggerEdgeDeviceID *uint, sensorName, comparator string, threshold *float64,
 	windowStart, windowEnd, windowEdge string,
-	actionDeviceID *uint, actionID, actionLevel string) string {
+	actionDeviceID *uint, actionID, actionLevel string,
+	requireConfirmed bool, isUpdate bool) string {
 	if name == "" {
 		return "name 不能为空"
 	}
@@ -405,6 +480,16 @@ func validateAutomationRuleFields(name, triggerType, actionType string,
 	}
 	if !validAutomationActionTypes[actionType] {
 		return "action_type 非法: " + actionType
+	}
+	// event 触发器: 创建时禁配 (评审③: 其无 sensor 值语义, 与 trigger_value 错位);
+	// 更新存量规则不拦 (历史 event 规则仍可改其它字段), 但创建新 event 规则拒绝。
+	if triggerType == models.AutomationTriggerEvent && !isUpdate {
+		return "trigger_type=event 暂不支持创建 (语义未冻结)"
+	}
+	// time_window 触发器: 创建时禁配 (F1 完整性评审: 字段/校验存在但求值 ticker 整体缺失,
+	// 创建即死规则永不触发 — fail-closed 防半成品误导)。更新存量不拦, 求值器落地后解禁。
+	if triggerType == models.AutomationTriggerTimeWindow && !isUpdate {
+		return "trigger_type=time_window 暂不支持创建 (求值器未实现, 见 §5.5 分期)"
 	}
 	switch triggerType {
 	case models.AutomationTriggerSensorThreshold:
@@ -428,7 +513,6 @@ func validateAutomationRuleFields(name, triggerType, actionType string,
 			return "trigger_window_edge 非法: " + windowEdge
 		}
 	}
-	// event 触发器仅占位 (明确不做), 无额外约束。
 	switch actionType {
 	case models.AutomationActionDeviceAction:
 		if actionDeviceID == nil || *actionDeviceID == 0 {
@@ -441,6 +525,10 @@ func validateAutomationRuleFields(name, triggerType, actionType string,
 		if actionLevel == "" {
 			return "action_level 不能为空 (notification)"
 		}
+	}
+	// 交叉校验: require_confirmed 仅 device_action 有意义 (notification 本就纯通知)。
+	if requireConfirmed && actionType != models.AutomationActionDeviceAction {
+		return "require_confirmed=true 仅对 action_type=device_action 有意义 (notification 是纯通知)"
 	}
 	return ""
 }

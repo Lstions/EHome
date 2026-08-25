@@ -78,7 +78,62 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 		stopCh:    make(chan struct{}),
 	}
 	e.LoadRules()
+	e.rebuildCooldowns()
 	return e
+}
+
+// rebuildCooldowns 启动重建冷却状态 (H1 修复, 方案 §9 R2): triggered map 纯内存,
+// 重启清空后冷却期规则被误判 armed, 条件仍满足时立即重触发。启动时对每条 enabled
+// 规则查最近一条 result=executed 的触发时刻回填 triggered[ruleID]。
+func (e *Evaluator) rebuildCooldowns() {
+	rows := []struct {
+		RuleID uint
+		MaxAt  *string // SQLite MAX(timestamp) 返回字符串, 需手动解析
+	}{}
+	if err := e.db.Model(&models.AutomationEvent{}).
+		Select("rule_id, MAX(triggered_at) AS max_at").
+		Where("result = ?", models.AutomationResultExecuted).
+		Group("rule_id").Scan(&rows).Error; err != nil {
+		logger.Warn("automation: failed to rebuild cooldowns", "error", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	e.mu.Lock()
+	for _, r := range rows {
+		if r.MaxAt == nil {
+			continue
+		}
+		at, err := parseDBTime(*r.MaxAt)
+		if err != nil {
+			logger.Warn("automation: rebuild cooldowns parse time failed",
+				"rule_id", r.RuleID, "raw", *r.MaxAt, "error", err)
+			continue
+		}
+		e.triggered[r.RuleID] = at
+	}
+	e.mu.Unlock()
+}
+
+// parseDBTime 解析 SQLite 返回的时间字符串 (gorm sqlite driver 写 time.Time
+// 的默认格式为 RFC3339Nano, 但 MAX() 聚合可能返回空格分隔格式, 逐一尝试)。
+func parseDBTime(s string) (time.Time, error) {
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	}
+	var err error
+	var t time.Time
+	for _, l := range layouts {
+		if t, err = time.Parse(l, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, err
 }
 
 // LoadRules 全量加载 enabled 的 sensor_threshold 规则 (CRUD 写路径经 Invalidate
@@ -137,27 +192,36 @@ func (e *Evaluator) Evaluate(edgeDeviceID uint, fields []parser.Field, at time.T
 	if len(fields) == 0 || edgeDeviceID == 0 {
 		return
 	}
+	// H2 修复 (锁放大): RLock 内只快照 rules 浅拷贝, resolveLogicalID 的 SQL 往返
+	// 移到 RUnlock 之后 — 写锁等待会阻塞所有 RLock, DB 慢查询时求值 stall。
 	e.mu.RLock()
-	target := edgeDeviceID
-	var logicalID uint
 	rules := make([]models.AutomationRule, 0, len(e.rules))
 	for _, r := range e.rules {
+		rules = append(rules, r)
+	}
+	e.mu.RUnlock()
+
+	target := edgeDeviceID
+	var logicalID uint
+	resolved := false
+	matched := rules[:0]
+	for _, r := range rules {
 		// 规则匹配: TriggerEdgeDeviceID=0 表示任意设备上报该字段即触发 (不推荐,
 		// 文档标注); 否则必须精确命中上报设备 (或其逻辑身份)。
 		if r.TriggerEdgeDeviceID != 0 && r.TriggerEdgeDeviceID != target {
-			if logicalID == 0 {
+			if !resolved {
 				logicalID = e.resolveLogicalID(target)
+				resolved = true
 			}
 			if logicalID == 0 || r.TriggerEdgeDeviceID != logicalID {
 				continue
 			}
 		}
-		rules = append(rules, r)
+		matched = append(matched, r)
 	}
-	e.mu.RUnlock()
 
-	for i := range rules {
-		e.evalRule(rules[i], fields, at)
+	for i := range matched {
+		e.evalRule(matched[i], fields, at)
 	}
 }
 
@@ -209,6 +273,7 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
 		if at.Sub(firedAt) < cooldown {
 			e.mu.Unlock()
+			e.recordSuppressed(rule, firedAt, at, value) // F3: 冷却命中落审计 (防抖可观测, 同窗节流)
 			return // 冷却期内, 不更新窗口不重复触发
 		}
 		delete(e.triggered, rule.ID) // 冷却到期, 回 armed
@@ -230,6 +295,38 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 
 	if e.handler != nil {
 		e.handler.HandleTrigger(TriggerEvent{Rule: rule, Value: value, At: at})
+	}
+}
+
+// recordSuppressed F3 修复 (方案 §3.4①): 冷却命中时落一条 result=suppressed_cooldown
+// 审计事件 — 此前该常量全仓 0 写入点, 触发历史看不到被冷却压制的触发 (防抖不可观测)。
+// 字段写法对齐 planner.recordRet (fail-open: 写失败只告警不阻塞求值)。
+//
+// 同窗节流 (主 Agent 复审补): Evaluate 每帧上报都触发 (databus consumers_heavy.go:337),
+// 冷却期内高频越阈会每帧落一行刷量 (1s 上报 × 1h 冷却 = 3600 行)。故同一冷却窗
+// (自窗起点 windowStart 起) 只落首条 suppressed_cooldown, 后续命中查询到已有即跳过。
+func (e *Evaluator) recordSuppressed(rule models.AutomationRule, windowStart, at time.Time, value float64) {
+	// 同一冷却窗内已有 suppressed_cooldown 行则跳过 (节流, 防高频上报刷量)。
+	var cnt int64
+	if err := e.db.Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND result = ? AND triggered_at >= ?",
+			rule.ID, models.AutomationResultSuppressedCooldown, windowStart).
+		Count(&cnt).Error; err == nil && cnt > 0 {
+		return
+	}
+	ev := models.AutomationEvent{
+		RuleID:      rule.ID,
+		TriggeredAt: at,
+		Result:      models.AutomationResultSuppressedCooldown,
+		Detail:      "cooldown active",
+		CreatedAt:   at,
+	}
+	if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
+		ev.TriggerValue = &value
+	}
+	if err := e.db.Create(&ev).Error; err != nil {
+		logger.Warn("automation: failed to record suppressed_cooldown event",
+			"rule_id", rule.ID, "error", err)
 	}
 }
 

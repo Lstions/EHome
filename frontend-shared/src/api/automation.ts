@@ -1,31 +1,47 @@
 import client from './client'
 
 /**
- * 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1)。
+ * 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1 + 设计/自动化确认制闭环实现方案.md)。
  * 后端: backend/internal/api/handler_automation.go (路由 /api/v1/automation-rules|automation-events)。
  * 求值: backend/internal/automation/evaluator.go (armed→triggered→cooldown 三态)。
+ * 确认制闭环 (裁决 4): require_confirmed=true 触发落 pending_confirm 事件 + 纯通知,
+ *   人工经 confirmEvent 确认后才真正下发 commandexec。
  */
 
-/** 触发器类型 */
+/** 触发器类型 (与后端 models/automation.go:18-22 对齐) */
 export type AutomationTriggerType =
-  | 'sensor_threshold' // 传感器阈值 (主触发)
-  | 'time_window'      // 时间窗口 (TriggerWindowStart/End/Edge)
-  | 'device_state'     // 设备状态变化 (event 占位, P0 仅挂载)
-  | 'manual'           // 手动触发
+  | 'sensor_threshold' // 数据驱动: 滑动窗口连续满足
+  | 'time_window'      // 时钟驱动: 每日窗口 enter/exit/inside
+  | 'event'            // 事件驱动 (本期占位; 创建时后端禁配, 更新兼容存量)
 
 /** 比较符 (复用 alert 阈值原语) */
 export type AutomationComparator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'
 
-/** 时间窗口触发沿 */
-export type AutomationWindowEdge = 'enter' | 'exit'
+/** 时间窗口触发沿 (后端 models/automation.go:31-35, inside=窗口内每 tick 求值) */
+export type AutomationWindowEdge = 'enter' | 'exit' | 'inside'
 
-/** 动作类型 */
+/** 动作类型 (与后端 models/automation.go:25-28 对齐) */
 export type AutomationActionType =
-  | 'device_command' // 设备控制命令 (经 commandexec, 9 项 availability gate)
-  | 'notification'   // 纯通知 (ActionLevel 必填)
+  | 'device_action' // 走 commandexec 受控操作链路 (9 项 availability gate + 幂等 + 审计)
+  | 'notification'  // 纯通知 (ActionLevel 必填; 无需 require_confirmed)
 
 /** 通知级别 (后端映射 Notification.Type) */
 export type AutomationActionLevel = 'info' | 'warning' | 'critical'
+
+/**
+ * 触发/执行结果 (AutomationEvent.result 取值, 与后端 models/automation.go:38-48 对齐)。
+ * 注意: 是 result 不是 state —— 前端旧版误用 state/armed/confirmed_pending/failed 等字段名。
+ */
+export type AutomationEventResult =
+  | 'executed'                // 已提交 commandexec 执行
+  | 'pending_confirm'         // 高风险动作, 等待人工确认 (confirmEvent 闭环)
+  | 'suppressed_cooldown'     // 冷却期内抑制
+  | 'suppressed_daily_limit'  // 达到每日熔断上限
+  | 'condition_changed'       // 触发到执行间条件失效
+  | 'failed_gate'             // availability gate fail-closed
+  | 'failed_dispatch'         // commandexec.Create 调用失败
+  | 'notification'            // 纯通知动作已发出
+  | 'expired'                 // pending_confirm 超时未确认 (24h 清扫置位)
 
 /** 自动化策略规则 */
 export interface AutomationRule {
@@ -60,7 +76,7 @@ export interface AutomationRule {
   cooldown_sec: number
   /** 每日最大执行次数, 0=不限 */
   max_daily_exec: number
-  /** 高风险动作需人工确认 (BMS MOS 等) */
+  /** 高风险动作需人工确认 (BMS MOS 等); 仅 device_action 有意义 (后端 fail-closed 校验) */
   require_confirmed: boolean
 
   created_at: string
@@ -113,27 +129,32 @@ export interface UpdateAutomationRuleRequest {
   require_confirmed?: boolean
 }
 
-/** 策略触发事件 (armed→triggered/cooldown 记录) */
+/** 策略触发/执行审计 (后端 AutomationEvent, 一行 = 一次触发决策) */
 export interface AutomationEvent {
   id: number
   rule_id: number
-  /** armed | triggered | cooldown | executed | confirmed_pending | failed */
-  state: string
-  /** 触发时实际采样值 */
-  value?: number
-  /** 关联 commandexec 执行 ID (device_command 时) */
-  execution_id?: string
-  message?: string
-  fired_at?: string | null
+  /** 触发时刻 (索引) */
+  triggered_at: string
+  /** sensor_threshold 触发时实际采样值 */
+  trigger_value?: number
+  /** 触发/执行结果, 取值见 AutomationEventResult */
+  result: AutomationEventResult
+  /** 关联 commandexecutions (device_action 执行时回填) */
+  command_id?: string
+  /** 失败/抑制原因 */
+  detail?: string
   created_at: string
 }
 
 export interface AutomationEventListParams {
   rule_id?: number
-  state?: string
-  start_time?: string
-  end_time?: string
+  /** 按 result 过滤 (非旧版 state) */
+  result?: AutomationEventResult
 }
+
+/** 裁决 4 确认制闭环: 后端 planner 即铸即销 confirmation token, 不跨请求存储。
+ *  confirm 端点无 body —— 操作者身份来自 JWT (subject_id),
+ *  前置仅须先调 POST /auth/manual-confirmation (核密码刷 LastLoginAt, 10min 窗)。 */
 
 /** 拦截器返回 response.data (envelope {code,data,message}), 用 any 双跳转取 data 字段 */
 type Envelope<T> = { code: number; data: T; message: string }
@@ -167,5 +188,15 @@ export const automationApi = {
   },
   async listEvents(params?: AutomationEventListParams): Promise<AutomationEvent[]> {
     return unwrap<AutomationEvent[]>(client.get('/api/v1/automation-events', { params }))
+  },
+  /**
+   * 裁决 4 确认制闭环: 人工确认 pending_confirm 事件, 触发真实下发。
+   * 前置: 前端须先调 POST /auth/manual-confirmation (核密码刷 LastLoginAt, 10min 窗),
+   *       再调本端点 (后端即铸即销 token, 近认证门不豁免)。本端点无 body。
+   * 幂等: 同一事件重复 confirm 命中同 (scope,key,hash) → 唯一索引 replay 只读不写;
+   *       且 planner 条件 UPDATE (result='pending_confirm') 闸门防双发。
+   */
+  async confirmEvent(id: number): Promise<AutomationEvent> {
+    return unwrap<AutomationEvent>(client.post(`/api/v1/automation-events/${id}/confirm`))
   },
 }

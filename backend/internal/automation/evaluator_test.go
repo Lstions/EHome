@@ -205,7 +205,202 @@ func TestEvaluateDisabledRuleSkipped(t *testing.T) {
 	}
 }
 
-// Invalidate 重载缓存: 删除规则后不再触发。
+// H1 回归: 重启后冷却状态重建 — 库内已有 executed 历史行的规则,
+// NewEvaluator 后冷却期内同条件不重复触发, 冷却到期可再触发。
+func TestRebuildCooldownsOnRestart(t *testing.T) {
+	db := newTestDB(t)
+	r := automationRule(1, "illuminance", "gt", 500, 0)
+	r.CooldownSec = 300
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	t0 := time.Now()
+	// 模拟重启前的 executed 审计行 (t0 时刻触发过)。
+	v := 600.0
+	if err := db.Create(&models.AutomationEvent{
+		RuleID:       r.ID,
+		TriggeredAt:  t0,
+		TriggerValue: &v,
+		Result:       models.AutomationResultExecuted,
+		CreatedAt:    t0,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 重启: 新建 Evaluator 应回填 triggered, 冷却期内同条件不触发。
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second))
+	if len(h.events) != 0 {
+		t.Fatalf("expect 0 trigger (cooldown rebuilt after restart), got %d", len(h.events))
+	}
+
+	// 冷却到期 (t0+301s) 回 armed, 可再触发。
+	ev.Evaluate(1, illuminanceField(700), t0.Add(301*time.Second))
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger after rebuilt cooldown expiry, got %d", len(h.events))
+	}
+}
+
+// H1 边界: 无 executed 历史行的规则, NewEvaluator 不重建冷却, 满足即触发。
+func TestRebuildCooldownsNoHistory(t *testing.T) {
+	db := newTestDB(t)
+	r := automationRule(1, "illuminance", "gt", 500, 0)
+	r.CooldownSec = 300
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 只有 pending_confirm 历史行, 不是 executed — 不应回填冷却。
+	if err := db.Create(&models.AutomationEvent{
+		RuleID:      r.ID,
+		TriggeredAt: time.Now(),
+		Result:      models.AutomationResultPendingConfirm,
+		CreatedAt:   time.Now(),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	ev.Evaluate(1, illuminanceField(600), time.Now())
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger (no executed history, no cooldown), got %d", len(h.events))
+	}
+}
+
+// H2 回归: 规则匹配语义不变 — 逻辑身份命中 (resolveLogicalID 移出 RLock 后)。
+// 规则 TriggerEdgeDeviceID=逻辑设备 ID, 上报设备=绑定该逻辑身份的边缘设备, 应触发。
+func TestEvaluateLogicalIdentityMatch(t *testing.T) {
+	db := newTestDB(t)
+	ld := models.LogicalDevice{IdentityKey: "test:ld-1", Name: "逻辑设备1"}
+	if err := db.Create(&ld).Error; err != nil {
+		t.Fatal(err)
+	}
+	ed := models.EdgeDevice{HardwareID: "edge-1", Name: "边缘设备1", LogicalDeviceID: &ld.ID}
+	if err := db.Create(&ed).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := automationRule(1, "illuminance", "gt", 500, 0)
+	r.TriggerEdgeDeviceID = ld.ID // 指向逻辑身份
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	ev.Evaluate(ed.ID, illuminanceField(600), time.Now())
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger via logical identity match, got %d", len(h.events))
+	}
+}
+
+// H2 回归: TriggerEdgeDeviceID=0 任意设备匹配 + 不匹配设备仍被过滤。
+func TestEvaluateMatchSemanticsUnchanged(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+
+	// 规则1: TriggerEdgeDeviceID=0 → 任意设备命中。
+	r0 := automationRule(1, "illuminance", "gt", 500, 0)
+	r0.TriggerEdgeDeviceID = 0
+	if err := db.Create(&r0).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 规则2: TriggerEdgeDeviceID=99 → 设备 2 上报不命中。
+	r2 := automationRule(2, "illuminance", "gt", 500, 0)
+	r2.TriggerEdgeDeviceID = 99
+	if err := db.Create(&r2).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	ev.Evaluate(2, illuminanceField(600), time.Now())
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger (only wildcard rule matches), got %d", len(h.events))
+	}
+	if h.events[0].Rule.ID != 1 {
+		t.Fatalf("expect wildcard rule 1 to fire, got rule %d", h.events[0].Rule.ID)
+	}
+}
+
+// F3 回归: 冷却命中落 suppressed_cooldown 审计事件 (防抖可观测)。
+func TestCooldownSuppressionRecordsEvent(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := automationRule(1, "illuminance", "gt", 500, 0)
+	r.CooldownSec = 60
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	t0 := time.Now()
+	ev.Evaluate(1, illuminanceField(600), t0)                      // 触发 #1
+	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second))  // 冷却命中 → suppressed_cooldown
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger, got %d", len(h.events))
+	}
+
+	var evs []models.AutomationEvent
+	if err := db.Where("rule_id = ? AND result = ?",
+		r.ID, models.AutomationResultSuppressedCooldown).Find(&evs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("expect 1 suppressed_cooldown event, got %d", len(evs))
+	}
+	got := evs[0]
+	if got.TriggerValue == nil || *got.TriggerValue != 700 {
+		t.Fatalf("suppressed event trigger_value mismatch: %+v", got.TriggerValue)
+	}
+	if !got.TriggeredAt.Equal(t0.Add(10 * time.Second)) {
+		t.Fatalf("suppressed event triggered_at mismatch: %v", got.TriggeredAt)
+	}
+	if got.Detail == "" {
+		t.Fatalf("suppressed event detail empty")
+	}
+}
+
+// F3 节流回归 (主 Agent 复审补): 同一冷却窗内高频命中只落首条 suppressed_cooldown,
+// 防 Evaluate 每帧上报刷量 (consumers_heavy.go:337)。冷却到期回 armed 后新窗可再落。
+func TestCooldownSuppressionThrottledPerWindow(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := automationRule(1, "illuminance", "gt", 500, 0)
+	r.CooldownSec = 60
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	t0 := time.Now()
+	ev.Evaluate(1, illuminanceField(600), t0)                     // 触发 #1 → 进入冷却窗 [t0, t0+60s)
+	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second)) // 同窗命中 1
+	ev.Evaluate(1, illuminanceField(800), t0.Add(20*time.Second)) // 同窗命中 2
+	ev.Evaluate(1, illuminanceField(900), t0.Add(30*time.Second)) // 同窗命中 3
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger, got %d", len(h.events))
+	}
+
+	var evs []models.AutomationEvent
+	if err := db.Where("rule_id = ? AND result = ?",
+		r.ID, models.AutomationResultSuppressedCooldown).Find(&evs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("same cooldown window must record only 1 suppressed_cooldown, got %d", len(evs))
+	}
+	// 首条是被抑制的第一次命中 (trigger_value=700), 后续 800/900 被节流
+	if evs[0].TriggerValue == nil || *evs[0].TriggerValue != 700 {
+		t.Fatalf("first suppressed event should capture value 700, got %+v", evs[0].TriggerValue)
+	}
+}
+
 func TestInvalidateReloads(t *testing.T) {
 	db := newTestDB(t)
 	h := &captureHandler{}
