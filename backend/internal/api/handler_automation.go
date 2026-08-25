@@ -44,6 +44,13 @@ type automationPlanner interface {
 	ConfirmEvent(ctx context.Context, eventID, actorID uint, sourceIP string) (models.AutomationEvent, error)
 }
 
+// automationManualTrigger 供手动触发端点 (POST /automation-rules/:id/trigger)。
+// 与 automationPlanner 分离注入, 避免单测传 nil 时 confirm 端点误报 503。
+// 实际实现者也是 *automation.Planner (TriggerRule 方法)。
+type automationManualTrigger interface {
+	TriggerRule(ctx context.Context, ruleID, actorID uint, sourceIP string) (models.AutomationEvent, error)
+}
+
 // automationCatalogQuerier 供 device_action 创建/更新时校验 action_id 存在性 +
 // action_params_json CanonicalizeParams (§5.3 校验补强)。commandexec.Service 实现。
 // 接口注入避免 api→commandexec 直接依赖 (单测可传 mock)。
@@ -101,7 +108,7 @@ type updateAutomationRuleRequest struct {
 // 权限对齐 alert: 单主体模式写操作登录即可, evaluator 经 options 注入 (main.go)。
 // planner 为确认制闭环 (POST /automation-events/:id/confirm) 提供编排入口, 单测可传 nil。
 // catalog 为 §5.3 校验补强提供 action_id 存在性 + params 规范化校验, 单测可传 nil (跳过校验)。
-func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner, catalog automationCatalogQuerier) {
+func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner, trigger automationManualTrigger, catalog automationCatalogQuerier) {
 	rules := v1.Group("/automation-rules")
 	{
 		rules.GET("", listAutomationRules(db))
@@ -110,6 +117,7 @@ func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automa
 		rules.PUT("/:id", updateAutomationRule(db, evaluator, catalog))
 		rules.DELETE("/:id", deleteAutomationRule(db, evaluator))
 		rules.PATCH("/:id/enabled", patchAutomationRuleEnabled(db, evaluator))
+		rules.POST("/:id/trigger", triggerAutomationRule(trigger))
 	}
 
 	events := v1.Group("/automation-events")
@@ -454,6 +462,43 @@ func listAutomationEvents(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		Success(c, items)
+	}
+}
+
+// POST /api/v1/automation-rules/:id/trigger
+// 手动触发端点: 跳过条件评估与确认制 (用户点击即确认),
+// 但保留 cooldown / max_daily_exec / 日熔断安全门禁。
+// 返回落库的 AutomationEvent (含 result), 前端据此展示执行状态。
+func triggerAutomationRule(trigger automationManualTrigger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if trigger == nil {
+			Error(c, 503, "自动化引擎未启用")
+			return
+		}
+		ruleID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+		if err != nil || ruleID == 0 {
+			Error(c, 400, "无效的规则 ID")
+			return
+		}
+		actorID, _ := c.Get("subject_id")
+		aid, _ := actorID.(uint)
+		if aid == 0 {
+			Error(c, 401, "未认证")
+			return
+		}
+		ev, err := trigger.TriggerRule(c.Request.Context(), uint(ruleID), aid, c.ClientIP())
+		if err != nil {
+			switch {
+			case errors.Is(err, automation.ErrTriggerRuleNotFound):
+				Error(c, 404, "策略不存在")
+			case errors.Is(err, automation.ErrTriggerRuleDisabled):
+				Error(c, 409, "策略已禁用, 无法手动触发")
+			default:
+				Error(c, 500, "触发失败: "+err.Error())
+			}
+			return
+		}
+		Success(c, ev)
 	}
 }
 

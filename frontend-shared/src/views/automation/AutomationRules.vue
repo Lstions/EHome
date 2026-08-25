@@ -44,8 +44,9 @@
             <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: boolean) => onToggle(row, v)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
+            <el-button link type="warning" size="small" :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(row)">触发</el-button>
             <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="onDelete(row)">删除</el-button>
           </template>
@@ -82,6 +83,12 @@
           <template #default="{ row }">
             <span v-if="row.trigger_value !== undefined" class="mono">{{ formatValue(row.trigger_value) }}</span>
             <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源" width="70">
+          <template #default="{ row }">
+            <el-tag v-if="row.trigger_source === 'manual'" type="warning" size="small">手动</el-tag>
+            <span v-else class="text-muted">自动</span>
           </template>
         </el-table-column>
         <el-table-column label="命令 ID" width="110">
@@ -529,6 +536,41 @@ async function onConfirmEvent(event: AutomationEvent) {
     void fetchEvents()
   } catch {
     /* 取消或失败静默 */
+  }
+}
+
+// ── 手动触发 ──
+const triggeringId = ref<number | null>(null)
+
+async function onTrigger(rule: AutomationRule) {
+  try {
+    await ElMessageBox.confirm(
+      `手动触发规则「${rule.name}」？将跳过条件评估与确认制直接执行动作 (cooldown/日熔断仍生效)。`,
+      '手动触发',
+      { type: 'warning', confirmButtonText: '触发', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  triggeringId.value = rule.id
+  try {
+    const ev = await automationApi.triggerRule(rule.id)
+    const msg = resultText(ev.result)
+    if (ev.result === 'executed' || ev.result === 'notification') {
+      ElMessage.success(`已触发: ${msg}`)
+    } else if (ev.result === 'suppressed_cooldown') {
+      ElMessage.warning(`触发被抑制: ${msg} (${ev.detail ?? ''})`)
+    } else if (ev.result === 'suppressed_daily_limit') {
+      ElMessage.warning(`触发被抑制: ${msg}`)
+    } else {
+      ElMessage.info(`触发结果: ${msg}${ev.detail ? ' — ' + ev.detail : ''}`)
+    }
+    void fetchEvents()
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { message?: string } } }
+    ElMessage.error(err?.response?.data?.message ?? '触发失败')
+  } finally {
+    triggeringId.value = null
   }
 }
 

@@ -585,3 +585,173 @@ func TestHandleTriggerDailyLimitIgnoresPendingConfirm(t *testing.T) {
 		t.Fatalf("suppressed count=%d want 1 (after 2 executed, 3rd should be suppressed)", suppressed)
 	}
 }
+
+// ─── 手动触发 (POST /api/v1/automation-rules/:id/trigger) ──
+// 与自动触发 (HandleTrigger) 的差异: 跳过条件评估/确认制, 但保留 cooldown/max_daily_exec。
+
+func TestTriggerRuleManualSuccess(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	newAdminOperator(t, p.db, 7)
+
+	rule := models.AutomationRule{
+		Name:               "手动触发",
+		Enabled:            true,
+		TriggerType:        models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		TriggerSensorName:  "illuminance",
+		TriggerComparator:  "gt",
+		TriggerThreshold:   500,
+		CooldownSec:        0,
+		RequireConfirmed:   true, // 手动触发跳过确认制
+		ActionType:         models.AutomationActionDeviceAction,
+		ActionDeviceID:     edge.ID,
+		ActionID:           "low_read",
+		ActionParamsJSON:   `{}`,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	ev, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("manual trigger failed: %v", err)
+	}
+	if ev.Result != models.AutomationResultExecuted {
+		t.Fatalf("result=%s want executed", ev.Result)
+	}
+	if ev.TriggerSource != models.AutomationTriggerSourceManual {
+		t.Fatalf("trigger_source=%s want manual", ev.TriggerSource)
+	}
+	if ev.CommandID == "" {
+		t.Fatal("command_id empty (manual trigger must dispatch)")
+	}
+}
+
+func TestTriggerRuleManualNotFound(t *testing.T) {
+	p, _ := setupConfirmPlanner(t)
+	_, err := p.TriggerRule(context.Background(), 9999, 7, "127.0.0.1")
+	if !errors.Is(err, ErrTriggerRuleNotFound) {
+		t.Fatalf("expect ErrTriggerRuleNotFound, got %v", err)
+	}
+}
+
+func TestTriggerRuleManualDisabled(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	rule := models.AutomationRule{
+		Name:    "禁用规则",
+		Enabled: false,
+		TriggerType: models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		ActionType: models.AutomationActionNotification,
+		ActionLevel: models.AlertLevelInfo,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if !errors.Is(err, ErrTriggerRuleDisabled) {
+		t.Fatalf("expect ErrTriggerRuleDisabled, got %v", err)
+	}
+}
+
+func TestTriggerRuleManualCooldownSuppressed(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	newAdminOperator(t, p.db, 7)
+
+	rule := models.AutomationRule{
+		Name:               "冷却测试",
+		Enabled:            true,
+		TriggerType:        models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		TriggerSensorName:  "illuminance",
+		TriggerComparator:  "gt",
+		TriggerThreshold:   500,
+		CooldownSec:        3600, // 1h
+		ActionType:         models.AutomationActionDeviceAction,
+		ActionDeviceID:     edge.ID,
+		ActionID:           "low_read",
+		ActionParamsJSON:   `{}`,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一次触发: 成功
+	ev1, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil || ev1.Result != models.AutomationResultExecuted {
+		t.Fatalf("first trigger failed: %v result=%s", err, ev1.Result)
+	}
+
+	// 第二次触发: cooldown 抑制
+	ev2, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("second trigger err: %v", err)
+	}
+	if ev2.Result != models.AutomationResultSuppressedCooldown {
+		t.Fatalf("result=%s want suppressed_cooldown", ev2.Result)
+	}
+	if ev2.TriggerSource != models.AutomationTriggerSourceManual {
+		t.Fatalf("trigger_source=%s want manual", ev2.TriggerSource)
+	}
+}
+
+func TestTriggerRuleManualDailyLimit(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	newAdminOperator(t, p.db, 7)
+
+	rule := models.AutomationRule{
+		Name:               "日熔断",
+		Enabled:            true,
+		TriggerType:        models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		TriggerSensorName:  "illuminance",
+		TriggerComparator:  "gt",
+		TriggerThreshold:   500,
+		CooldownSec:        0,
+		MaxDailyExec:       1,
+		ActionType:         models.AutomationActionDeviceAction,
+		ActionDeviceID:     edge.ID,
+		ActionID:           "low_read",
+		ActionParamsJSON:   `{}`,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一次触发: 成功 (占额 1)
+	ev1, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil || ev1.Result != models.AutomationResultExecuted {
+		t.Fatalf("first trigger failed: %v result=%s", err, ev1.Result)
+	}
+
+	// 第二次触发: 达限 → suppressed_daily_limit
+	ev2, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("second trigger err: %v", err)
+	}
+	if ev2.Result != models.AutomationResultSuppressedDailyLimit {
+		t.Fatalf("result=%s want suppressed_daily_limit", ev2.Result)
+	}
+}
+
+func TestTriggerRuleManualNotification(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+	rule := models.AutomationRule{
+		Name:    "通知规则",
+		Enabled: true,
+		TriggerType: models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		ActionType: models.AutomationActionNotification,
+		ActionLevel: models.AlertLevelInfo,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev, err := p.TriggerRule(context.Background(), rule.ID, 7, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("notification trigger failed: %v", err)
+	}
+	if ev.Result != models.AutomationResultNotification {
+		t.Fatalf("result=%s want notification", ev.Result)
+	}
+}

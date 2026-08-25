@@ -38,6 +38,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// automationPlannerOpt 自动化编排器 (裁决 4 确认制闭环): 经 *automation.Planner
 	// option 注入 (main.go), POST /automation-events/:id/confirm 人工确认执行。
 	var automationPlannerOpt automationPlanner
+	// automationManualTriggerOpt 手动触发器: 与 planner 同实例 (*automation.Planner),
+	// 单独变量承接避免接口类型不含 TriggerRule 方法。
+	var automationManualTriggerOpt automationManualTrigger
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
@@ -51,6 +54,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// 具体类型: *automation.Planner 有 ConfirmEvent 方法, 与上述无方法集交集。
 		case *automation.Planner:
 			automationPlannerOpt = value
+			automationManualTriggerOpt = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -122,10 +126,11 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// evaluator 经 options 注入 (main.go), 单测可传 nil。
 		registerAlertRoutes(v1, db, alertEvaluatorOpt)
 
-		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 规则 CRUD + 事件查询。
+		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 规则 CRUD + 事件查询 + 手动触发。
 		// planner 供裁决 4 确认制闭环 (POST /automation-events/:id/confirm)。
+		// trigger 供手动触发端点 (POST /automation-rules/:id/trigger), 与 planner 同实例。
 		// commandService 供 §5.3 校验补强 (action_id Catalog 存在性 + params 规范化)。
-		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt, commandService)
+		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt, automationManualTriggerOpt, commandService)
 
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)

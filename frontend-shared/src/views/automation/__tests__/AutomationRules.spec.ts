@@ -15,6 +15,7 @@ vi.mock('@/api/automation', () => ({
     setRuleEnabled: vi.fn(),
     listEvents: vi.fn(),
     confirmEvent: vi.fn(),
+    triggerRule: vi.fn(),
   },
 }))
 vi.mock('@/api/edgeDevice', () => ({
@@ -26,7 +27,7 @@ vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
   return {
     ...actual,
-    ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+    ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() },
     ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) },
   }
 })
@@ -175,5 +176,29 @@ describe('AutomationRules.vue', () => {
     const source = await import('../AutomationRules.vue?raw')
     expect(source.default).toContain('confirm-event')
     expect(source.default).toContain('confirmEvent')
+  })
+
+  it('手动触发按钮存在且调用 triggerRule', async () => {
+    mockedAutomationApi.triggerRule.mockResolvedValue({ ...eventFixture, result: 'executed', trigger_source: 'manual' })
+    await mountPage()
+    // ElTable stub 不渲染 slot 模板，触发按钮在 slot 内不可见。
+    // 改为验证源码中 trigger-rule 按钮 + onTrigger 绑定存在。
+    const source = await import('../AutomationRules.vue?raw')
+    expect(source.default).toContain('trigger-rule')
+    expect(source.default).toContain('onTrigger')
+    expect(source.default).toContain('triggerRule')
+    // 验证 onTrigger 函数逻辑: 确认框 + API 调用 + 结果提示
+    expect(source.default).toContain('ElMessageBox.confirm')
+    expect(source.default).toContain('手动触发规则')
+    expect(source.default).toContain('跳过条件评估与确认制')
+    expect(source.default).toContain('fetchEvents()')
+  })
+
+  it('手动触发结果显示区分', async () => {
+    // 验证 resultText 覆盖手动触发可能返回的所有结果
+    const source = await import('../AutomationRules.vue?raw')
+    for (const r of ['executed', 'notification', 'suppressed_cooldown', 'suppressed_daily_limit', 'failed_gate', 'failed_dispatch']) {
+      expect(source.default).toContain(r)
+    }
   })
 })

@@ -347,6 +347,189 @@ const pendingConfirmTTL = 24 * time.Hour
 // sensor_threshold 规则, time_window 事件会漏扫且职责错位)。
 const cleanupInterval = 5 * time.Minute
 
+// ── 手动触发 (POST /api/v1/automation-rules/:id/trigger) ──
+
+// TriggerRule 手动触发错误哨兵 (handler 据此映射 HTTP 状态码)。
+var (
+	ErrTriggerRuleNotFound = errors.New("automation rule not found")
+	ErrTriggerRuleDisabled = errors.New("automation rule is disabled")
+)
+
+// TriggerRule 手动触发一条自动化规则 (手动触发端点)。
+//
+// 与自动触发 (HandleTrigger) 的差异:
+//   - 跳过条件评估: 用户点击即确认, 不查 F4 conditions
+//   - 跳过确认制:   require_confirmed=true 的规则也直接执行 (点击按钮=人工确认)
+//   - 保留安全门禁: cooldown / max_daily_exec / 日熔断 仍然生效
+//   - 审计标记:     TriggerSource = manual, Reason 带触发者 ID
+//
+// 返回落库的 AutomationEvent (含 result), 调用方据此返回 HTTP 200/409。
+func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceIP string) (models.AutomationEvent, error) {
+	var rule models.AutomationRule
+	if err := p.db.WithContext(ctx).First(&rule, ruleID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.AutomationEvent{}, ErrTriggerRuleNotFound
+		}
+		return models.AutomationEvent{}, err
+	}
+	if !rule.Enabled {
+		return models.AutomationEvent{}, ErrTriggerRuleDisabled
+	}
+
+	at := p.nowFn()
+
+	// ── 日熔断: MaxDailyExec > 0 时统计当日 executed 行数 (与自动触发同口径) ──
+	if rule.MaxDailyExec > 0 {
+		dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
+		var cnt int64
+		if err := p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
+			Where("rule_id = ? AND triggered_at >= ? AND result = ?",
+				rule.ID, dayStart, models.AutomationResultExecuted).
+			Count(&cnt).Error; err == nil && int(cnt) >= rule.MaxDailyExec {
+			ev := models.AutomationEvent{
+				RuleID:        rule.ID,
+				TriggeredAt:   at,
+				TriggerSource: models.AutomationTriggerSourceManual,
+				Result:        models.AutomationResultSuppressedDailyLimit,
+				Detail:        fmt.Sprintf("daily limit %d reached", rule.MaxDailyExec),
+				CreatedAt:     at,
+			}
+			_ = p.db.WithContext(ctx).Create(&ev).Error
+			p.notifyDailyLimitOnce(rule, at, ev.ID)
+			return ev, nil
+		}
+	}
+
+	// ── 冷却抑制: 查最近一次 executed/pending_confirm 的 triggered_at,
+	//    与自动触发 evaluator 的内存 cooldown 等价 (planner 侧 DB 兜底) ──
+	if rule.CooldownSec > 0 {
+		var lastEv models.AutomationEvent
+		err := p.db.WithContext(ctx).
+			Where("rule_id = ? AND result IN ?", rule.ID,
+				[]string{models.AutomationResultExecuted, models.AutomationResultPendingConfirm}).
+			Order("triggered_at DESC").First(&lastEv).Error
+		if err == nil {
+			cooldown := time.Duration(rule.CooldownSec) * time.Second
+			if at.Sub(lastEv.TriggeredAt) < cooldown {
+				remaining := cooldown - at.Sub(lastEv.TriggeredAt)
+				ev := models.AutomationEvent{
+					RuleID:        rule.ID,
+					TriggeredAt:   at,
+					TriggerSource: models.AutomationTriggerSourceManual,
+					Result:        models.AutomationResultSuppressedCooldown,
+					Detail:        fmt.Sprintf("cooldown active (%.0fs remaining)", remaining.Seconds()),
+					CreatedAt:     at,
+				}
+				_ = p.db.WithContext(ctx).Create(&ev).Error
+				return ev, nil
+			}
+		}
+	}
+
+	// ── 动作分发 ──
+	switch rule.ActionType {
+	case models.AutomationActionNotification:
+		p.notifyAction(rule, at, 0)
+		ev := models.AutomationEvent{
+			RuleID:        rule.ID,
+			TriggeredAt:   at,
+			TriggerSource: models.AutomationTriggerSourceManual,
+			Result:        models.AutomationResultNotification,
+			CreatedAt:     at,
+		}
+		_ = p.db.WithContext(ctx).Create(&ev).Error
+		return ev, nil
+	case models.AutomationActionDeviceAction:
+		return p.executeManualDeviceAction(ctx, rule, at, actorID, sourceIP)
+	default:
+		ev := models.AutomationEvent{
+			RuleID:        rule.ID,
+			TriggeredAt:   at,
+			TriggerSource: models.AutomationTriggerSourceManual,
+			Result:        models.AutomationResultFailedDispatch,
+			Detail:        "unknown action_type: " + rule.ActionType,
+			CreatedAt:     at,
+		}
+		_ = p.db.WithContext(ctx).Create(&ev).Error
+		return ev, nil
+	}
+}
+
+// executeManualDeviceAction 手动触发的 device_action 执行。
+// 跳过 F4 条件复核 (用户已确认), 但走全 commandexec.Service.Create 的
+// availability gate + 幂等 + 审计链路。
+func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.AutomationRule,
+	at time.Time, actorID uint, sourceIP string) (models.AutomationEvent, error) {
+	params, err := rule.ParseActionParams()
+	if err != nil {
+		ev := models.AutomationEvent{
+			RuleID:        rule.ID,
+			TriggeredAt:   at,
+			TriggerSource: models.AutomationTriggerSourceManual,
+			Result:        models.AutomationResultFailedDispatch,
+			Detail:        "invalid action_params: " + err.Error(),
+			CreatedAt:     at,
+		}
+		_ = p.db.WithContext(ctx).Create(&ev).Error
+		return ev, nil
+	}
+
+	// 幂等键: 手动触发独立命名空间, 当日序号
+	dayStart := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
+	var seq int64
+	_ = p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND triggered_at >= ? AND result = ? AND trigger_source = ?",
+			rule.ID, dayStart, models.AutomationResultExecuted, models.AutomationTriggerSourceManual).
+		Count(&seq).Error
+	idempotencyKey := fmt.Sprintf("automation:manual:%d:%s:%d", rule.ID, at.Format("20060102"), seq+1)
+
+	exec, _, err := p.cmdSvc.Create(ctx, commandexec.CreateInput{
+		EdgeDeviceID:   rule.ActionDeviceID,
+		ActorUserID:    actorID,
+		ActionID:       rule.ActionID,
+		Params:         params,
+		IdempotencyKey: idempotencyKey,
+		SourceIP:       sourceIP,
+		Reason:         fmt.Sprintf("automation:manual:%d:%s:by_user:%d", rule.ID, rule.Name, actorID),
+	})
+	if err != nil {
+		result := models.AutomationResultFailedDispatch
+		if isGateError(err) {
+			result = models.AutomationResultFailedGate
+		}
+		ev := models.AutomationEvent{
+			RuleID:        rule.ID,
+			TriggeredAt:   at,
+			TriggerSource: models.AutomationTriggerSourceManual,
+			Result:        result,
+			Detail:        err.Error(),
+			CreatedAt:     at,
+		}
+		_ = p.db.WithContext(ctx).Create(&ev).Error
+		return ev, nil
+	}
+	ev := models.AutomationEvent{
+		RuleID:        rule.ID,
+		TriggeredAt:   at,
+		TriggerSource: models.AutomationTriggerSourceManual,
+		Result:        models.AutomationResultExecuted,
+		CommandID:     exec.CommandID,
+		CreatedAt:     at,
+	}
+	_ = p.db.WithContext(ctx).Create(&ev).Error
+	if p.broadcast != nil {
+		p.broadcast("automation_event", gin.H{
+			"rule_id":        rule.ID,
+			"rule_name":      rule.Name,
+			"event_id":       ev.ID,
+			"result":         ev.Result,
+			"command_id":     exec.CommandID,
+			"trigger_source": models.AutomationTriggerSourceManual,
+		})
+	}
+	return ev, nil
+}
+
 // ConfirmEvent 错误哨兵 (handler 据此映射 HTTP 状态码)。
 var (
 	ErrConfirmEventNotFound   = errors.New("automation event not found")

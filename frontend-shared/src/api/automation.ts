@@ -137,6 +137,8 @@ export interface AutomationEvent {
   triggered_at: string
   /** sensor_threshold 触发时实际采样值 */
   trigger_value?: number
+  /** 触发来源: auto=求值器/ticker 自动触发, manual=手动触发 */
+  trigger_source?: 'auto' | 'manual'
   /** 触发/执行结果, 取值见 AutomationEventResult */
   result: AutomationEventResult
   /** 关联 commandexecutions (device_action 执行时回填) */
@@ -198,5 +200,13 @@ export const automationApi = {
    */
   async confirmEvent(id: number): Promise<AutomationEvent> {
     return unwrap<AutomationEvent>(client.post(`/api/v1/automation-events/${id}/confirm`))
+  },
+  /**
+   * 手动触发端点: 跳过条件评估与确认制 (用户点击即确认),
+   * 但保留 cooldown / max_daily_exec / 日熔断安全门禁。
+   * 返回落库的 AutomationEvent (含 result), 前端据此展示执行状态。
+   */
+  async triggerRule(id: number): Promise<AutomationEvent> {
+    return unwrap<AutomationEvent>(client.post(`/api/v1/automation-rules/${id}/trigger`))
   },
 }

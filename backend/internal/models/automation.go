@@ -47,6 +47,14 @@ const (
 	AutomationResultExpired               = "expired"                 // pending_confirm 超时未确认 (24h 清扫置位)
 )
 
+// 触发来源 (AutomationEvent.TriggerSource 取值)
+// 手动触发走 POST /api/v1/automation-rules/:id/trigger, 跳过条件评估与确认制
+// (用户点击即确认), 但仍计入 cooldown / max_daily_exec (防误连点)。
+const (
+	AutomationTriggerSourceAuto   = "auto"   // 求值器/ticker 自动触发 (默认)
+	AutomationTriggerSourceManual = "manual" // 手动触发 (POST /automation-rules/:id/trigger)
+)
+
 // AutomationCondition 附加条件 (全部 AND 求值, ConditionsJSON 内嵌数组)。
 type AutomationCondition struct {
 	SensorName string  `json:"sensor_name"`        // 与 parser.Field.Name 同域
@@ -135,15 +143,17 @@ func (AutomationRule) TableName() string { return "automation_rules" }
 
 // AutomationEvent 策略触发/执行审计 (一行 = 一次触发决策)。
 // CommandID 回填关联 command_executions, 策略执行历史 = automation_events JOIN command_executions。
+// TriggerSource 区分自动触发 (auto, 求值器/ticker) 与手动触发 (manual, 用户点击"立即触发")。
 type AutomationEvent struct {
-	ID           uint       `gorm:"primaryKey" json:"id"`
-	RuleID       uint       `gorm:"not null;index" json:"rule_id"`
-	TriggeredAt  time.Time  `gorm:"not null;index" json:"triggered_at"`
-	TriggerValue *float64   `json:"trigger_value,omitempty"` // sensor_threshold 触发时值
-	Result       string     `gorm:"size:32;not null;index" json:"result"`
-	CommandID    string     `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
-	Detail       string     `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
-	CreatedAt    time.Time  `json:"created_at"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	RuleID        uint       `gorm:"not null;index" json:"rule_id"`
+	TriggeredAt   time.Time  `gorm:"not null;index" json:"triggered_at"`
+	TriggerValue  *float64   `json:"trigger_value,omitempty"` // sensor_threshold 触发时值
+	TriggerSource string     `gorm:"size:8;not null;default:auto;index" json:"trigger_source"` // auto|manual
+	Result        string     `gorm:"size:32;not null;index" json:"result"`
+	CommandID     string     `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
+	Detail        string     `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 func (AutomationEvent) TableName() string { return "automation_events" }
