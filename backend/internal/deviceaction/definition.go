@@ -15,6 +15,13 @@ import (
 
 const ChannelCmdV2Adapter = "channel_cmd_v2"
 
+// PeriphCmdAdapter is the transport adapter for node-level peripherals
+// (GPIO/PWM) controlled via the PeriphCmd (0x1B) protocol frame. Peripherals
+// are not EdgeDevices and have no channel/manifest/capability lifecycle, so
+// the dispatcher routes these actions to PeriphTransport instead of the
+// ChannelCmdV2 transport.
+const PeriphCmdAdapter = "periph_cmd"
+
 // SingleStep is the only physical transport shape currently permitted. It is
 // compiled by trusted server code, never sourced from request parameters.
 // Keeping it next to the action definition makes the Action Catalog the sole
@@ -86,7 +93,7 @@ type Registry struct {
 func NewRegistry() *Registry { return &Registry{byType: make(map[string]map[string]Definition)} }
 
 func (r *Registry) Register(def Definition) error {
-	if def.ID == "" || def.Version <= 0 || def.DeviceType == "" || !allowedSemantics(def.Semantics) || !allowedRisk(def.Risk) || def.Transport != ChannelCmdV2Adapter {
+	if def.ID == "" || def.Version <= 0 || def.DeviceType == "" || !allowedSemantics(def.Semantics) || !allowedRisk(def.Risk) || !allowedTransport(def.Transport) {
 		return fmt.Errorf("invalid restricted action definition %q", def.ID)
 	}
 	if def.ExecutionShape == "" {
@@ -116,20 +123,29 @@ func (r *Registry) Register(def Definition) error {
 	if err := def.InputSchema.Validate(); err != nil {
 		return fmt.Errorf("invalid action schema %q: %w", def.ID, err)
 	}
-	if (def.Semantics == "set" || def.Semantics == "reset") && def.verifier == nil && def.AvailabilityCode == "" {
+	if (def.Semantics == "set" || def.Semantics == "reset") && def.verifier == nil && def.AvailabilityCode == "" && def.Transport != PeriphCmdAdapter {
 		// A transport ACK is not evidence that a setting took effect.  Every
 		// setter must supply a trusted ACK/readback verifier before it can enter
 		// the catalog, even while its rollout flag remains disabled.
+		//
+		// PeriphCmd actions are the declared exception: their confirmation is the
+		// PeriphRsp observation pushed over the event bus, not a byte-level
+		// readback, and the frame is constructed by PeriphTransport (no compiler).
 		return fmt.Errorf("set action %q requires a trusted verifier", def.ID)
 	}
 	if len(def.InputSchema.Properties) != 0 || len(def.InputSchema.Required) != 0 {
-		// Do not let a parameterized definition look executable until a trusted
-		// compiler is attached. The compiler is server code, never data from a
-		// browser or DeviceConfig record, and is re-run from persisted params.
-		if def.compiler == nil {
+		if def.Transport == PeriphCmdAdapter {
+			// PeriphCmd carries declared parameters inside the frame built by
+			// PeriphTransport from canonical params; there is no TXData compiler.
+			// Schema validation above plus gate/dispatch-time CanonicalizeParams
+			// remain the parameter safety net.
+		} else if def.compiler == nil {
+			// Do not let a parameterized definition look executable until a trusted
+			// compiler is attached. The compiler is server code, never data from a
+			// browser or DeviceConfig record, and is re-run from persisted params.
 			return fmt.Errorf("parameterized action %q requires a trusted compiler", def.ID)
 		}
-	} else if def.AvailabilityCode == "" && def.ExecutionShape == "single" {
+	} else if def.AvailabilityCode == "" && def.ExecutionShape == "single" && def.Transport != PeriphCmdAdapter {
 		if err := validateSingleStep(def.SingleStep); err != nil {
 			return fmt.Errorf("invalid static action step %q: %w", def.ID, err)
 		}
@@ -161,6 +177,10 @@ func (r *Registry) Register(def Definition) error {
 
 func allowedSemantics(value string) bool {
 	return value == "read" || value == "set" || value == "reset"
+}
+
+func allowedTransport(value string) bool {
+	return value == ChannelCmdV2Adapter || value == PeriphCmdAdapter
 }
 
 func allowedRisk(value string) bool {
@@ -410,6 +430,13 @@ func CurrentEngineAllows(def Definition) bool {
 		return true
 	}
 	if def.Semantics == "reset" || def.Semantics == "set" {
+		// PeriphCmd single-step setters are confirmed by the PeriphRsp
+		// observation event (WS push), not by a driver readback verifier. The
+		// PeriphCmd protocol is idempotent by level/duty value, so a single
+		// bounded step with observation is sufficient evidence.
+		if def.Transport == PeriphCmdAdapter {
+			return def.ExecutionShape == "single" && def.Verification == "observation" && !def.AtMostOnce
+		}
 		// bounded_sequence: the multi-step workflow itself performs the
 		// write + readback reconciliation inside one durable batch.
 		if def.ExecutionShape == "bounded_sequence" {
@@ -560,6 +587,7 @@ func NewBuiltInRegistry(driverRegistry *drivers.Registry) *Registry {
 			}
 		}
 	}
+	RegisterPeriphActions(r)
 	return r
 }
 
