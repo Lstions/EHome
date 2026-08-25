@@ -67,6 +67,32 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 		if !s.dispatchEnabled {
 			return ErrActionUnavailable
 		}
+		// periph_cmd 分流: GPIO/PWM 动作无 channel/manifest/capability 事实,
+		// 目标解析与 gate 与 Create 同源 (resolveActionTarget)。
+		if deviceaction.IsPeriphAction(in.ActionID) {
+			edge, err := resolveActionTarget(tx, CreateInput{EdgeDeviceID: in.EdgeDeviceID, ActionID: in.ActionID})
+			if err != nil {
+				return err
+			}
+			if edge.Node.Status != "online" {
+				return ErrActionUnavailable
+			}
+			definition, ok := s.actions.Get(edge.Type, in.ActionID)
+			if !ok || !definition.Enabled || !deviceaction.CurrentEngineAllows(definition) {
+				return ErrActionUnavailable
+			}
+			if !confirmationRequired(definition.Risk) {
+				return ErrConfirmationNotNeeded
+			}
+			params, err := deviceaction.CanonicalizeParams(definition.InputSchema, in.Params)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidParams, err)
+			}
+			if err := requirePeriphConfig(tx, edge.NodeID, definition.ID, params); err != nil {
+				return ErrActionUnavailable
+			}
+			return s.issueConfirmation(tx, &grant, in.ActorUserID, edge.ID, definition, params, in.Reason, in.SourceIP)
+		}
 		var edge models.EdgeDevice
 		if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
 			return err
@@ -94,42 +120,50 @@ func (s *Service) IssueConfirmation(ctx context.Context, in ConfirmationInput) (
 		if err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidParams, err)
 		}
-		digest := sha256.Sum256(params)
-		requestHash := hex.EncodeToString(digest[:])
-		var user models.User
-		if err := tx.First(&user, in.ActorUserID).Error; err != nil {
-			return err
-		}
-		now := s.now()
-		if !user.Enabled || user.SubjectKey == nil || *user.SubjectKey != models.SystemAdminSubjectKey || user.LastLoginAt == nil || user.LastLoginAt.Before(now.Add(-recentAuthenticationWindow)) {
-			return ErrRecentAuthRequired
-		}
-		var issued int64
-		if err := tx.Model(&models.CommandConfirmation{}).Where("actor_user_id = ? AND edge_device_id = ? AND action_id = ? AND created_at >= ?", in.ActorUserID, edge.ID, definition.ID, now.Add(-confirmationRateWindow)).Count(&issued).Error; err != nil {
-			return err
-		}
-		if issued >= maxConfirmationsPerWindow {
-			return ErrConfirmationRateLimited
-		}
-		rawToken, err := randomConfirmationToken()
-		if err != nil {
-			return err
-		}
-		tokenHash := confirmationHash(rawToken)
-		expiresAt := now.Add(confirmationLifetime)
-		if deadline := user.LastLoginAt.Add(recentAuthenticationWindow); deadline.Before(expiresAt) {
-			expiresAt = deadline
-		}
-		grant = ConfirmationGrant{Token: rawToken, ExpiresAt: expiresAt}
-		if err := tx.Create(&models.CommandConfirmation{TokenHash: tokenHash, ActorUserID: in.ActorUserID, EdgeDeviceID: edge.ID, ActionID: definition.ID, ActionVersion: definition.Version, RequestHash: requestHash, ExpiresAt: grant.ExpiresAt, CreatedAt: now}).Error; err != nil {
-			return err
-		}
-		return audit.NewWriter(tx).Write(audit.Event{ActorType: "user", ActorUserID: &in.ActorUserID, EventName: "device_action.confirmation_issued", Result: "issued", SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(edge.ID), Metadata: map[string]interface{}{"action_id": definition.ID, "action_version": definition.Version, "request_hash": requestHash, "reason": in.Reason}})
+		return s.issueConfirmation(tx, &grant, in.ActorUserID, edge.ID, definition, params, in.Reason, in.SourceIP)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &grant, nil
+}
+
+// issueConfirmation is the shared token-minting tail of IssueConfirmation:
+// recent-auth + rate-limit + single-use token persistence + audit. Caller
+// supplies canonical params and the resolved target id (edge_devices id for
+// channel_cmd_v2, nodes id for periph_cmd).
+func (s *Service) issueConfirmation(tx *gorm.DB, grant *ConfirmationGrant, actorUserID, targetID uint, definition deviceaction.Definition, params []byte, reason, sourceIP string) error {
+	digest := sha256.Sum256(params)
+	requestHash := hex.EncodeToString(digest[:])
+	var user models.User
+	if err := tx.First(&user, actorUserID).Error; err != nil {
+		return err
+	}
+	now := s.now()
+	if !user.Enabled || user.SubjectKey == nil || *user.SubjectKey != models.SystemAdminSubjectKey || user.LastLoginAt == nil || user.LastLoginAt.Before(now.Add(-recentAuthenticationWindow)) {
+		return ErrRecentAuthRequired
+	}
+	var issued int64
+	if err := tx.Model(&models.CommandConfirmation{}).Where("actor_user_id = ? AND edge_device_id = ? AND action_id = ? AND created_at >= ?", actorUserID, targetID, definition.ID, now.Add(-confirmationRateWindow)).Count(&issued).Error; err != nil {
+		return err
+	}
+	if issued >= maxConfirmationsPerWindow {
+		return ErrConfirmationRateLimited
+	}
+	rawToken, err := randomConfirmationToken()
+	if err != nil {
+		return err
+	}
+	tokenHash := confirmationHash(rawToken)
+	expiresAt := now.Add(confirmationLifetime)
+	if deadline := user.LastLoginAt.Add(recentAuthenticationWindow); deadline.Before(expiresAt) {
+		expiresAt = deadline
+	}
+	*grant = ConfirmationGrant{Token: rawToken, ExpiresAt: expiresAt}
+	if err := tx.Create(&models.CommandConfirmation{TokenHash: tokenHash, ActorUserID: actorUserID, EdgeDeviceID: targetID, ActionID: definition.ID, ActionVersion: definition.Version, RequestHash: requestHash, ExpiresAt: grant.ExpiresAt, CreatedAt: now}).Error; err != nil {
+		return err
+	}
+	return audit.NewWriter(tx).Write(audit.Event{ActorType: "user", ActorUserID: &actorUserID, EventName: "device_action.confirmation_issued", Result: "issued", SourceIP: sourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(targetID), Metadata: map[string]interface{}{"action_id": definition.ID, "action_version": definition.Version, "request_hash": requestHash, "reason": reason}})
 }
 
 func (s *Service) consumeConfirmation(tx *gorm.DB, rawToken string, actorID, edgeDeviceID uint, definition deviceaction.Definition, requestHash string) error {

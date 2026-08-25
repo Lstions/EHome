@@ -238,6 +238,10 @@ func main() {
 	nodeMgr.SetAutomationEvaluator(automationEvaluator)
 	go automationEvaluator.Start()
 	defer automationEvaluator.Stop()
+	// B1 接线: time_window 触发器独立 1min ticker (不挂传感器解析回调)。
+	automationWindowCtx, automationWindowStop := context.WithCancel(context.Background())
+	automationEvaluator.StartWindowTicker(automationWindowCtx)
+	defer automationWindowStop()
 	// 裁决 4 确认制闭环: pending_confirm 事件 24h 超时清扫 goroutine (设计/自动化确认制闭环实现方案.md §3.4)。
 	// 独立挂 Planner (非 evaluator ticker): evaluator 只缓存 sensor_threshold 规则会漏扫其它触发类型。
 	automationCleanupContext, automationPlannerStopCleanup := context.WithCancel(context.Background())
@@ -268,8 +272,12 @@ func main() {
 	}()
 	if cfg.ControlConfig().DeviceControlV2Enabled {
 		dispatcherOwner := commandexec.NewDispatcherOwner("server")
-		dispatcher := commandexec.NewDispatcher(db,
-			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry), dispatcherOwner)
+		// MultiTransport 按 action Transport 路由: channel_cmd_v2 → 通道指令,
+		// periph_cmd → GPIO/PWM 外设帧 (PeriphCmd 0x1B)。
+		transport := commandexec.NewMultiTransport(
+			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry),
+			commandexec.NewPeriphTransport(db, mqttClient, actionRegistry))
+		dispatcher := commandexec.NewDispatcher(db, transport, dispatcherOwner)
 		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
 		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)
 	} else {

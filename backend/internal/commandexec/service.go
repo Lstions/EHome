@@ -97,6 +97,11 @@ const (
 	gateAppliedManifest            gateName = "applied_manifest"
 	gateCurrentCapabilities        gateName = "current_capabilities"
 	gateDefinitionFitsCapabilities gateName = "definition_fits_capabilities"
+	// gatePeriphConfig is the periph_cmd-only gate: the GPIO/PWM config row
+	// for the target node+resource must exist and be enabled. Peripherals
+	// have no channel/manifest/capability facts, so the four channel-domain
+	// gates above never apply to them (no fabricated channel data).
+	gatePeriphConfig gateName = "periph_config"
 )
 
 // gateResult is one evaluated availability predicate. The whole predicate set
@@ -134,7 +139,14 @@ type gateResult struct {
 //     which are capability *value* mismatches, not staleness).
 //   - definitionFitsCapabilities in Catalog is evaluated with canonical nil
 //     params ({}), as before; Create passes the real canonical params.
+//   - PeriphCmdAdapter definitions (GPIO/PWM) take an independent gate list:
+//     the shared node-state gates plus gatePeriphConfig. GPIO/PWM have no
+//     channel, manifest or capability facts, so the four channel-domain gates
+//     are never evaluated for them (no fabricated channel data).
 func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, definition deviceaction.Definition, params json.RawMessage) []gateResult {
+	if definition.Transport == deviceaction.PeriphCmdAdapter {
+		return evaluatePeriphActionGates(s, tx, edge, definition, params)
+	}
 	results := make([]gateResult, 0, 12)
 	appendResult := func(name gateName, passed bool, reasonCode, reason string) {
 		results = append(results, gateResult{name: name, passed: passed, reasonCode: reasonCode, reason: reason})
@@ -177,6 +189,112 @@ func evaluateActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, defini
 	}
 	appendResult(gateDefinitionFitsCapabilities, fitsPassed, "", fitsReason)
 	return results
+}
+
+// evaluatePeriphActionGates is the periph_cmd gate list (§A2 分流裁决):
+// dispatch_enabled / action_enabled / current_engine / edge_enabled /
+// edge_status / edge_node_id / node_status + gatePeriphConfig. The `edge`
+// argument is a synthetic projection built by resolveActionTarget (ID carries
+// the node DB id, NodeID the physical node id, Node the preloaded row);
+// only node-level fields are read here.
+func evaluatePeriphActionGates(s *Service, tx *gorm.DB, edge models.EdgeDevice, definition deviceaction.Definition, params json.RawMessage) []gateResult {
+	results := make([]gateResult, 0, 8)
+	appendResult := func(name gateName, passed bool, reasonCode, reason string) {
+		results = append(results, gateResult{name: name, passed: passed, reasonCode: reasonCode, reason: reason})
+	}
+	appendResult(gateDispatchEnabled, s.dispatchEnabled, "", "")
+	appendResult(gateActionEnabled, definition.Enabled, "", "")
+	appendResult(gateCurrentEngine, deviceaction.CurrentEngineAllows(definition), "command_engine_gate", "action requires the future high-risk command engine")
+	appendResult(gateEdgeEnabled, edge.Enabled, "", "")
+	appendResult(gateEdgeStatus, edge.Status != "inactive", "", "")
+	appendResult(gateEdgeNodeID, edge.NodeID != "", "", "")
+	appendResult(gateNodeStatus, edge.Node.Status == "online", "", "")
+	periphErr := requirePeriphConfig(tx, edge.NodeID, definition.ID, params)
+	appendResult(gatePeriphConfig, periphErr == nil, "", "")
+	return results
+}
+
+// requirePeriphConfig enforces the periph_cmd-specific gate: the GPIO/PWM
+// config row for (node, resource) must exist and be enabled. params are the
+// canonical action params produced by CanonicalizeParams (Create); Catalog
+// passes nil, in which case an absent/invalid parameter set fails closed.
+func requirePeriphConfig(tx *gorm.DB, nodeID, actionID string, params json.RawMessage) error {
+	if strings.TrimSpace(nodeID) == "" {
+		return fmt.Errorf("periph action has no target node")
+	}
+	switch actionID {
+	case deviceaction.ActionGPIOSet:
+		var p struct {
+			Pin int `json:"pin"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return fmt.Errorf("gpio params unavailable: %w", err)
+		}
+		var cfg models.GPIOConfig
+		if err := tx.Where("node_id = ? AND pin = ?", nodeID, p.Pin).First(&cfg).Error; err != nil {
+			return fmt.Errorf("gpio config for pin %d: %w", p.Pin, err)
+		}
+		if !cfg.Enabled {
+			return fmt.Errorf("gpio config for pin %d is disabled", p.Pin)
+		}
+		return nil
+	case deviceaction.ActionPWMSetDuty:
+		var p struct {
+			HardwareID string `json:"hardware_id"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return fmt.Errorf("pwm params unavailable: %w", err)
+		}
+		var cfg models.PWMConfig
+		if err := tx.Where("node_id = ? AND hardware_id = ?", nodeID, p.HardwareID).First(&cfg).Error; err != nil {
+			return fmt.Errorf("pwm config for hardware_id %q: %w", p.HardwareID, err)
+		}
+		if !cfg.Enabled {
+			return fmt.Errorf("pwm config for hardware_id %q is disabled", p.HardwareID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown periph action %q", actionID)
+	}
+}
+
+// resolveActionTarget loads the admission target for in.ActionID.
+// ChannelCmdV2 actions keep the edge_devices row semantics; periph_cmd
+// actions interpret in.EdgeDeviceID as the nodes table DB id (裁决:
+// action_device_id 对 GPIO 动作 = 节点 ID) and return a synthetic EdgeDevice
+// projection whose ID is that node id — no edge_devices row is fabricated.
+func resolveActionTarget(tx *gorm.DB, in CreateInput) (models.EdgeDevice, error) {
+	if deviceaction.IsPeriphAction(in.ActionID) {
+		var node models.Node
+		if err := tx.First(&node, in.EdgeDeviceID).Error; err != nil {
+			return models.EdgeDevice{}, err
+		}
+		return models.EdgeDevice{
+			ID:      node.ID,
+			NodeID:  node.NodeID,
+			Type:    periphDeviceTypeFor(in.ActionID),
+			Enabled: true,
+			Status:  "active",
+			Node:    node,
+		}, nil
+	}
+	var edge models.EdgeDevice
+	if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
+		return models.EdgeDevice{}, err
+	}
+	return edge, nil
+}
+
+// periphDeviceTypeFor maps a periph action to its catalog device type.
+func periphDeviceTypeFor(actionID string) string {
+	switch actionID {
+	case deviceaction.ActionGPIOSet:
+		return deviceaction.DeviceTypeGPIO
+	case deviceaction.ActionPWMSetDuty:
+		return deviceaction.DeviceTypePWM
+	default:
+		return ""
+	}
 }
 
 // loadActionChannelError is the predicate wrapper for loadActionChannel.
@@ -290,6 +408,8 @@ func reasonForGate(name gateName) string {
 		return "ChannelCmdV2 capability is unavailable or stale"
 	case gateDefinitionFitsCapabilities:
 		return "action exceeds current node capability"
+	case gatePeriphConfig:
+		return "peripheral config is unavailable or disabled"
 	default:
 		return "action is unavailable"
 	}
@@ -305,8 +425,8 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 	var result models.CommandExecution
 	replayed := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var edge models.EdgeDevice
-		if err := tx.Preload("Node").First(&edge, in.EdgeDeviceID).Error; err != nil {
+		edge, err := resolveActionTarget(tx, in)
+		if err != nil {
 			return err
 		}
 		// Resolve the action and canonical request before checking mutable runtime
