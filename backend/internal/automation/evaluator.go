@@ -7,6 +7,8 @@
 package automation
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -56,12 +58,16 @@ type Evaluator struct {
 	handler TriggerHandler
 
 	mu sync.RWMutex
-	// rules 规则缓存 (仅 enabled 且 trigger_type=sensor_threshold), key: rule ID。
+	// rules 规则缓存 (仅 enabled 且 trigger_type IN (sensor_threshold, time_window)), key: rule ID。
 	rules map[uint]models.AutomationRule
-	// windows 每规则滑动窗口, key: rule ID。
+	// windows 每规则滑动窗口, key: rule ID (sensor_threshold 专用)。
 	windows map[uint][]sample
 	// triggered 规则当前是否处于 triggered 态 (冷却中)。
 	triggered map[uint]time.Time // rule ID → 触发时刻
+	// windowStates time_window 规则上次 tick 是否在窗口内 (rule ID → wasInside)。
+	// 重启后清空 — 首次 tick 以当前是否在窗口内为基准 (保守: enter 规则首次 tick
+	// 若在窗口内则触发, exit 规则首次 tick 若在窗口内则不触发)。
+	windowStates map[uint]bool
 
 	stopCh chan struct{}
 	once   sync.Once
@@ -70,12 +76,13 @@ type Evaluator struct {
 // NewEvaluator 构造求值器并全量加载 enabled 规则缓存。
 func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 	e := &Evaluator{
-		db:        db,
-		handler:   handler,
-		rules:     make(map[uint]models.AutomationRule),
-		windows:   make(map[uint][]sample),
-		triggered: make(map[uint]time.Time),
-		stopCh:    make(chan struct{}),
+		db:           db,
+		handler:      handler,
+		rules:        make(map[uint]models.AutomationRule),
+		windows:      make(map[uint][]sample),
+		triggered:    make(map[uint]time.Time),
+		windowStates: make(map[uint]bool),
+		stopCh:       make(chan struct{}),
 	}
 	e.LoadRules()
 	e.rebuildCooldowns()
@@ -136,11 +143,12 @@ func parseDBTime(s string) (time.Time, error) {
 	return time.Time{}, err
 }
 
-// LoadRules 全量加载 enabled 的 sensor_threshold 规则 (CRUD 写路径经 Invalidate
-// 即时调用; Start 兜底刷新仅作保险)。
+// LoadRules 全量加载 enabled 的 sensor_threshold + time_window 规则 (CRUD 写路径经 Invalidate
+// 即时调用; Start 兜底刷新仅作保险)。time_window 规则不挂传感器回调, 由独立 ticker 求值。
 func (e *Evaluator) LoadRules() {
 	var rules []models.AutomationRule
-	if err := e.db.Where("enabled = ? AND trigger_type = ?", true, models.AutomationTriggerSensorThreshold).
+	if err := e.db.Where("enabled = ? AND trigger_type IN ?",
+		true, []string{models.AutomationTriggerSensorThreshold, models.AutomationTriggerTimeWindow}).
 		Find(&rules).Error; err != nil {
 		logger.Warn("automation: failed to load rules", "error", err)
 		return
@@ -155,6 +163,12 @@ func (e *Evaluator) LoadRules() {
 		if _, ok := next[id]; !ok {
 			delete(e.windows, id)
 			delete(e.triggered, id)
+		}
+	}
+	// time_window 规则清理: 从缓存移除的规则同时清理窗口状态。
+	for id := range e.windowStates {
+		if _, ok := next[id]; !ok {
+			delete(e.windowStates, id)
 		}
 	}
 	e.mu.Unlock()
@@ -181,9 +195,151 @@ func (e *Evaluator) Start() {
 	}()
 }
 
-// Stop 停止兜底刷新。
+// Stop 停止兜底刷新 + time_window ticker。
 func (e *Evaluator) Stop() {
 	e.once.Do(func() { close(e.stopCh) })
+}
+
+// StartWindowTicker 启动 time_window 触发器独立求值 ticker (1min 周期)。
+// 与 sensor_threshold 的 Evaluate 路径完全独立 — 时钟驱动不挂传感器解析回调。
+// ctx 取消时优雅退出 (main.go 接线用)。
+func (e *Evaluator) StartWindowTicker(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-e.stopCh:
+				return
+			case <-ticker.C:
+				e.evalTimeWindows(time.Now())
+			}
+		}
+	}()
+}
+
+// evalTimeWindows 对所有 time_window 规则执行一次 tick 求值。
+// 由 StartWindowTicker 每 1min 调用; 时间源一律用后端本地时间 (time.Now())。
+func (e *Evaluator) evalTimeWindows(now time.Time) {
+	e.mu.RLock()
+	var windowRules []models.AutomationRule
+	for _, r := range e.rules {
+		if r.TriggerType == models.AutomationTriggerTimeWindow {
+			windowRules = append(windowRules, r)
+		}
+	}
+	e.mu.RUnlock()
+
+	for _, rule := range windowRules {
+		e.evalWindowRule(rule, now)
+	}
+}
+
+// evalWindowRule 单条 time_window 规则状态机: 判定当前时刻是否在窗口内,
+// 根据 edge 语义 (enter/exit/inside) 决定是否触发, 受 CooldownSec 抑制。
+func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
+	inside, err := isInWindow(rule.TriggerWindowStart, rule.TriggerWindowEnd, now)
+	if err != nil {
+		logger.Warn("automation: invalid time window format",
+			"rule_id", rule.ID, "start", rule.TriggerWindowStart, "end", rule.TriggerWindowEnd, "error", err)
+		return
+	}
+
+	e.mu.Lock()
+	wasInside, exists := e.windowStates[rule.ID]
+	// 更新窗口状态 (无论是否触发都要记录本次状态)。
+	e.windowStates[rule.ID] = inside
+
+	// 冷却判定 (与 sensor_threshold 共用 triggered map)。
+	cooldown := time.Duration(rule.CooldownSec) * time.Second
+	if rule.CooldownSec <= 0 {
+		cooldown = defaultCooldown * time.Second
+	}
+	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
+		if now.Sub(firedAt) < cooldown {
+			e.mu.Unlock()
+			return // 冷却期内, 不重复触发
+		}
+		delete(e.triggered, rule.ID) // 冷却到期, 回 armed
+	}
+	e.mu.Unlock()
+
+	// 边沿触发判定。
+	var shouldTrigger bool
+	var edge string
+	switch rule.TriggerWindowEdge {
+	case models.AutomationWindowEnter:
+		// enter: 上次不在窗口内、本次在窗口内 → 触发。
+		// 重启后首次 tick (exists=false): 保守处理 — 当前在窗口内则触发。
+		shouldTrigger = inside && (!exists || !wasInside)
+		edge = models.AutomationWindowEnter
+	case models.AutomationWindowExit:
+		// exit: 上次在窗口内、本次不在窗口内 → 触发。
+		// 重启后首次 tick (exists=false): 当前不在窗口内则触发 (保守: 无法判断是否在窗口内, 不触发)。
+		shouldTrigger = !inside && exists && wasInside
+		edge = models.AutomationWindowExit
+	case models.AutomationWindowInside:
+		// inside: 窗口内每次 tick 都参与求值 (受 CooldownSec 抑制)。
+		shouldTrigger = inside
+		edge = models.AutomationWindowInside
+	default:
+		return
+	}
+
+	if !shouldTrigger {
+		return
+	}
+
+	// armed → triggered: 记录触发时刻, 提交 Planner。
+	e.mu.Lock()
+	e.triggered[rule.ID] = now
+	e.mu.Unlock()
+
+	if e.handler != nil {
+		e.handler.HandleTrigger(TriggerEvent{
+			Rule:       rule,
+			At:         now,
+			WindowEdge: edge,
+		})
+	}
+}
+
+// isInWindow 判定当前时刻是否在时间窗口内。
+// start/end 为 "HH:MM" 格式; 窗口可跨零点 (start > end 时跨日)。
+// 返回 (是否在窗口内, 解析错误)。
+func isInWindow(start, end string, now time.Time) (bool, error) {
+	startT, err := parseHHMM(start)
+	if err != nil {
+		return false, fmt.Errorf("parse start %q: %w", start, err)
+	}
+	endT, err := parseHHMM(end)
+	if err != nil {
+		return false, fmt.Errorf("parse end %q: %w", end, err)
+	}
+
+	// 当日窗口时间点 (本地时间)。
+	year, month, day := now.Date()
+	startToday := time.Date(year, month, day, startT.Hour(), startT.Minute(), 0, 0, now.Location())
+	endToday := time.Date(year, month, day, endT.Hour(), endT.Minute(), 0, 0, now.Location())
+
+	if startToday.Equal(endToday) {
+		// start == end: 视为全天窗口 (24h), 始终在内。
+		return true, nil
+	}
+	if startToday.Before(endToday) {
+		// 非跨零点窗口: [start, end)。
+		return !now.Before(startToday) && now.Before(endToday), nil
+	}
+	// 跨零点窗口: [start, 24:00) ∪ [00:00, end)。
+	// 等价于: now >= start || now < end。
+	return !now.Before(startToday) || now.Before(endToday), nil
+}
+
+// parseHHMM 解析 "HH:MM" 格式为 time.Time (仅取时分)。
+func parseHHMM(s string) (time.Time, error) {
+	return time.Parse("15:04", s)
 }
 
 // Evaluate 解析后回调入口: 对 edgeDeviceID 的物理量 fields 逐规则求值。

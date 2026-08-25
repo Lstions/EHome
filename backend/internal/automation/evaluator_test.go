@@ -423,3 +423,272 @@ func TestInvalidateReloads(t *testing.T) {
 		t.Fatalf("expect still 1 trigger after delete+invalidate, got %d", len(h.events))
 	}
 }
+
+// =====================================================================
+// B1: time_window 求值器测试
+// =====================================================================
+
+func timeWindowRule(id uint, start, end, edge string) models.AutomationRule {
+	return models.AutomationRule{
+		ID:                 id,
+		Name:               "时间窗口策略",
+		Enabled:            true,
+		TriggerType:        models.AutomationTriggerTimeWindow,
+		TriggerWindowStart: start,
+		TriggerWindowEnd:   end,
+		TriggerWindowEdge:  edge,
+		CooldownSec:        300,
+		ActionType:         models.AutomationActionNotification,
+		ActionLevel:        models.AlertLevelInfo,
+	}
+}
+
+// enter 触发: 规则窗口 08:00-18:00, 从窗口外进入窗口时触发。
+func TestTimeWindowEnterTrigger(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowEnter)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	// 构造今天 07:59 的时间 (窗口外)。
+	now := time.Now()
+	outside := time.Date(now.Year(), now.Month(), now.Day(), 7, 59, 0, 0, now.Location())
+	ev.evalTimeWindows(outside)
+	if len(h.events) != 0 {
+		t.Fatalf("expect 0 trigger outside window, got %d", len(h.events))
+	}
+
+	// 08:00 进入窗口 → 触发。
+	inside := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(inside)
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger on window enter, got %d", len(h.events))
+	}
+	if h.events[0].WindowEdge != models.AutomationWindowEnter {
+		t.Fatalf("expect WindowEdge=enter, got %q", h.events[0].WindowEdge)
+	}
+}
+
+// exit 触发: 从窗口内离开窗口时触发。
+func TestTimeWindowExitTrigger(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowExit)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	now := time.Now()
+	// 先进窗口 (记录状态)。
+	inside := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(inside)
+	if len(h.events) != 0 {
+		t.Fatalf("expect 0 trigger inside window (exit edge), got %d", len(h.events))
+	}
+
+	// 18:00 离开窗口 → 触发。
+	outside := time.Date(now.Year(), now.Month(), now.Day(), 18, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(outside)
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger on window exit, got %d", len(h.events))
+	}
+	if h.events[0].WindowEdge != models.AutomationWindowExit {
+		t.Fatalf("expect WindowEdge=exit, got %q", h.events[0].WindowEdge)
+	}
+}
+
+// inside 触发: 窗口内每次 tick 都触发 (受 cooldown 抑制)。
+func TestTimeWindowInsideTrigger(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowInside)
+	r.CooldownSec = 60
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	now := time.Now()
+	t0 := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	// 窗口内第一次 tick → 触发。
+	ev.evalTimeWindows(t0)
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger inside window, got %d", len(h.events))
+	}
+	if h.events[0].WindowEdge != models.AutomationWindowInside {
+		t.Fatalf("expect WindowEdge=inside, got %q", h.events[0].WindowEdge)
+	}
+	// 冷却期内第二次 tick → 抑制。
+	ev.evalTimeWindows(t0.Add(30 * time.Second))
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger (cooldown suppress), got %d", len(h.events))
+	}
+	// 冷却到期第三次 tick → 再触发。
+	ev.evalTimeWindows(t0.Add(61 * time.Second))
+	if len(h.events) != 2 {
+		t.Fatalf("expect 2 trigger after cooldown expiry, got %d", len(h.events))
+	}
+}
+
+// 跨零点窗口: 19:00-06:00 正确求值。
+func TestTimeWindowCrossMidnight(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "19:00", "06:00", models.AutomationWindowEnter)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	now := time.Now()
+	// 20:00 在窗口内 (跨零点: 19:00-06:00)。
+	evening := time.Date(now.Year(), now.Month(), now.Day(), 20, 0, 0, 0, now.Location())
+	inside, err := isInWindow("19:00", "06:00", evening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inside {
+		t.Fatal("20:00 should be inside 19:00-06:00 window")
+	}
+
+	// 03:00 也在窗口内。
+	earlyMorning := time.Date(now.Year(), now.Month(), now.Day(), 3, 0, 0, 0, now.Location())
+	inside, err = isInWindow("19:00", "06:00", earlyMorning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inside {
+		t.Fatal("03:00 should be inside 19:00-06:00 window")
+	}
+
+	// 12:00 不在窗口内。
+	noon := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	inside, err = isInWindow("19:00", "06:00", noon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inside {
+		t.Fatal("12:00 should not be inside 19:00-06:00 window")
+	}
+}
+
+// 冷却抑制: time_window 触发后冷却期内不再触发。
+func TestTimeWindowCooldownSuppression(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowEnter)
+	r.CooldownSec = 300
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	now := time.Now()
+	// 先进窗口触发一次。
+	inside := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(inside)
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger, got %d", len(h.events))
+	}
+
+	// 出窗口再进窗口 (冷却期内) → 不触发。
+	outside := time.Date(now.Year(), now.Month(), now.Day(), 19, 0, 0, 0, now.Location())
+	ev.evalTimeWindows(outside)
+	inside2 := time.Date(now.Year(), now.Month(), now.Day(), 20, 0, 0, 0, now.Location())
+	// 重置窗口状态 (模拟出窗后再进)。
+	ev.mu.Lock()
+	ev.windowStates[1] = false
+	ev.mu.Unlock()
+	ev.evalTimeWindows(inside2)
+	if len(h.events) != 1 {
+		t.Fatalf("expect 1 trigger (cooldown suppress), got %d", len(h.events))
+	}
+}
+
+// 重启后窗口状态: 清空后首次 tick 保守处理 (enter 规则首次 tick 若在窗口内则触发)。
+func TestTimeWindowRestartConservative(t *testing.T) {
+	db := newTestDB(t)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowEnter)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一次启动: 在窗口内触发一次。
+	h1 := &captureHandler{}
+	ev1 := NewEvaluator(db, h1)
+	now := time.Now()
+	inside := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, now.Location())
+	ev1.evalTimeWindows(inside)
+	if len(h1.events) != 1 {
+		t.Fatalf("expect 1 trigger on first start, got %d", len(h1.events))
+	}
+
+	// 模拟重启: 新建 Evaluator (windowStates 清空), 再次在窗口内 → 保守触发。
+	h2 := &captureHandler{}
+	ev2 := NewEvaluator(db, h2)
+	ev2.evalTimeWindows(inside)
+	if len(h2.events) != 1 {
+		t.Fatalf("expect 1 trigger after restart (conservative enter), got %d", len(h2.events))
+	}
+}
+
+// time_window 规则不走 sensor_threshold 的 Evaluate 路径。
+func TestTimeWindowNotInSensorEvaluate(t *testing.T) {
+	db := newTestDB(t)
+	h := &captureHandler{}
+	ev := NewEvaluator(db, h)
+	r := timeWindowRule(1, "08:00", "18:00", models.AutomationWindowEnter)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+
+	// Evaluate 只处理 sensor_threshold 规则, time_window 规则不应被触发。
+	ev.Evaluate(1, illuminanceField(600), time.Now())
+	if len(h.events) != 0 {
+		t.Fatalf("expect 0 trigger from Evaluate for time_window rule, got %d", len(h.events))
+	}
+}
+
+// isInWindow 单元测试: 非跨零点 + 跨零点 + 边界值。
+func TestIsInWindow(t *testing.T) {
+	loc := time.Local
+	tests := []struct {
+		name   string
+		start  string
+		end    string
+		now    time.Time
+		want   bool
+	}{
+		{"non-cross inside", "08:00", "18:00", time.Date(2025, 1, 1, 12, 0, 0, 0, loc), true},
+		{"non-cross before", "08:00", "18:00", time.Date(2025, 1, 1, 7, 59, 0, 0, loc), false},
+		{"non-cross at start", "08:00", "18:00", time.Date(2025, 1, 1, 8, 0, 0, 0, loc), true},
+		{"non-cross at end", "08:00", "18:00", time.Date(2025, 1, 1, 18, 0, 0, 0, loc), false},
+		{"cross midnight evening", "19:00", "06:00", time.Date(2025, 1, 1, 20, 0, 0, 0, loc), true},
+		{"cross midnight early morning", "19:00", "06:00", time.Date(2025, 1, 1, 3, 0, 0, 0, loc), true},
+		{"cross midnight noon", "19:00", "06:00", time.Date(2025, 1, 1, 12, 0, 0, 0, loc), false},
+		{"cross midnight at start", "19:00", "06:00", time.Date(2025, 1, 1, 19, 0, 0, 0, loc), true},
+		{"cross midnight at end", "19:00", "06:00", time.Date(2025, 1, 1, 6, 0, 0, 0, loc), false},
+		{"same start end", "08:00", "08:00", time.Date(2025, 1, 1, 8, 0, 0, 0, loc), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isInWindow(tt.start, tt.end, tt.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("isInWindow(%q, %q, %v) = %v, want %v", tt.start, tt.end, tt.now, got, tt.want)
+			}
+		})
+	}
+}

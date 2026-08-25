@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +42,13 @@ type automationEvaluator interface {
 // 同 evaluator 模式避免 api→automation 编译期依赖; 单测可传 nil (confirm 端点拒 503)。
 type automationPlanner interface {
 	ConfirmEvent(ctx context.Context, eventID, actorID uint, sourceIP string) (models.AutomationEvent, error)
+}
+
+// automationCatalogQuerier 供 device_action 创建/更新时校验 action_id 存在性 +
+// action_params_json CanonicalizeParams (§5.3 校验补强)。commandexec.Service 实现。
+// 接口注入避免 api→commandexec 直接依赖 (单测可传 mock)。
+type automationCatalogQuerier interface {
+	Catalog(ctx context.Context, edgeDeviceID uint) ([]commandexec.CatalogItem, error)
 }
 
 type createAutomationRuleRequest struct {
@@ -91,13 +100,14 @@ type updateAutomationRuleRequest struct {
 // registerAutomationRoutes 注册自动化策略规则/事件 API (设计/自动化策略引擎方案.md v0.1)。
 // 权限对齐 alert: 单主体模式写操作登录即可, evaluator 经 options 注入 (main.go)。
 // planner 为确认制闭环 (POST /automation-events/:id/confirm) 提供编排入口, 单测可传 nil。
-func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner) {
+// catalog 为 §5.3 校验补强提供 action_id 存在性 + params 规范化校验, 单测可传 nil (跳过校验)。
+func registerAutomationRoutes(v1 *gin.RouterGroup, db *gorm.DB, evaluator automationEvaluator, planner automationPlanner, catalog automationCatalogQuerier) {
 	rules := v1.Group("/automation-rules")
 	{
 		rules.GET("", listAutomationRules(db))
-		rules.POST("", createAutomationRule(db, evaluator))
+		rules.POST("", createAutomationRule(db, evaluator, catalog))
 		rules.GET("/:id", getAutomationRule(db))
-		rules.PUT("/:id", updateAutomationRule(db, evaluator))
+		rules.PUT("/:id", updateAutomationRule(db, evaluator, catalog))
 		rules.DELETE("/:id", deleteAutomationRule(db, evaluator))
 		rules.PATCH("/:id/enabled", patchAutomationRuleEnabled(db, evaluator))
 	}
@@ -150,7 +160,7 @@ func getAutomationRule(db *gorm.DB) gin.HandlerFunc {
 }
 
 // POST /api/v1/automation-rules
-func createAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.HandlerFunc {
+func createAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog automationCatalogQuerier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req createAutomationRuleRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -168,6 +178,19 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 			createRequireConfirmed, false); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
+		}
+		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + device_action 的
+		// action_id Catalog 存在性 + action_params_json CanonicalizeParams。
+		if msg := validateAutomationRuleConstraints(req.CooldownSec, req.MaxDailyExec); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
+		if req.ActionType == models.AutomationActionDeviceAction && req.ActionDeviceID != nil {
+			if msg := validateDeviceActionCatalog(c.Request.Context(), catalog,
+				*req.ActionDeviceID, req.ActionID, req.ActionParamsJSON); msg != "" {
+				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+				return
+			}
 		}
 		rule := models.AutomationRule{
 			Name:               req.Name,
@@ -219,7 +242,7 @@ func createAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 }
 
 // PUT /api/v1/automation-rules/:id
-func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.HandlerFunc {
+func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator, catalog automationCatalogQuerier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var rule models.AutomationRule
 		if err := db.First(&rule, c.Param("id")).Error; err != nil {
@@ -257,6 +280,7 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 			adevid = *req.ActionDeviceID
 		}
 		aid := pickStr(req.ActionID, rule.ActionID)
+		apj := pickStr(req.ActionParamsJSON, rule.ActionParamsJSON)
 		alv := pickStr(req.ActionLevel, rule.ActionLevel)
 		rc := rule.RequireConfirmed
 		if req.RequireConfirmed != nil {
@@ -265,6 +289,26 @@ func updateAutomationRule(db *gorm.DB, evaluator automationEvaluator) gin.Handle
 		if msg := validateAutomationRuleFields(name, tt, at, &teid, sn, cmp, &thr, ws, we, we2, &adevid, aid, alv, rc, true); msg != "" {
 			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
 			return
+		}
+		// §5.3 校验补强: cooldown_sec / max_daily_exec 边界 + device_action 的
+		// action_id Catalog 存在性 + action_params_json CanonicalizeParams。
+		cs := rule.CooldownSec
+		if req.CooldownSec != nil {
+			cs = *req.CooldownSec
+		}
+		mde := rule.MaxDailyExec
+		if req.MaxDailyExec != nil {
+			mde = *req.MaxDailyExec
+		}
+		if msg := validateAutomationRuleConstraints(&cs, mde); msg != "" {
+			ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+			return
+		}
+		if at == models.AutomationActionDeviceAction {
+			if msg := validateDeviceActionCatalog(c.Request.Context(), catalog, adevid, aid, apj); msg != "" {
+				ErrorWithCode(c, 400, "invalid_automation_rule", msg)
+				return
+			}
 		}
 		updates := map[string]interface{}{}
 		if req.Name != nil {
@@ -486,11 +530,6 @@ func validateAutomationRuleFields(name, triggerType, actionType string,
 	if triggerType == models.AutomationTriggerEvent && !isUpdate {
 		return "trigger_type=event 暂不支持创建 (语义未冻结)"
 	}
-	// time_window 触发器: 创建时禁配 (F1 完整性评审: 字段/校验存在但求值 ticker 整体缺失,
-	// 创建即死规则永不触发 — fail-closed 防半成品误导)。更新存量不拦, 求值器落地后解禁。
-	if triggerType == models.AutomationTriggerTimeWindow && !isUpdate {
-		return "trigger_type=time_window 暂不支持创建 (求值器未实现, 见 §5.5 分期)"
-	}
 	switch triggerType {
 	case models.AutomationTriggerSensorThreshold:
 		if triggerEdgeDeviceID == nil || *triggerEdgeDeviceID == 0 {
@@ -529,6 +568,56 @@ func validateAutomationRuleFields(name, triggerType, actionType string,
 	// 交叉校验: require_confirmed 仅 device_action 有意义 (notification 本就纯通知)。
 	if requireConfirmed && actionType != models.AutomationActionDeviceAction {
 		return "require_confirmed=true 仅对 action_type=device_action 有意义 (notification 是纯通知)"
+	}
+	return ""
+}
+
+// validateAutomationRuleConstraints §5.3 校验补强: cooldown_sec / max_daily_exec 边界。
+// cooldownSec 为 nil 时跳过 (创建时由应用层赋默认值); 非 nil 校验 [0, 86400]。
+// maxDailyExec 校验 [0, 1000] (0=不限)。
+func validateAutomationRuleConstraints(cooldownSec *int, maxDailyExec int) string {
+	if cooldownSec != nil && (*cooldownSec < 0 || *cooldownSec > 86400) {
+		return "cooldown_sec 必须在 [0, 86400] 范围内"
+	}
+	if maxDailyExec < 0 || maxDailyExec > 1000 {
+		return "max_daily_exec 必须在 [0, 1000] 范围内"
+	}
+	return ""
+}
+
+// validateDeviceActionCatalog §5.3 校验补强: device_action 的 action_id Catalog 存在性 +
+// action_params_json CanonicalizeParams。catalog=nil 时跳过 (单测兼容)。
+// 校验逻辑: Catalog(ctx, deviceID) → 遍历 items 找 actionID → 不存在则 400;
+// 找到后取 Definition.InputSchema → CanonicalizeParams(schema, rawParams) → 非法则 400。
+// Catalog 需要 edge_device 存在, action_device_id 无效时 Catalog 本身报错。
+func validateDeviceActionCatalog(ctx context.Context, catalog automationCatalogQuerier,
+	deviceID uint, actionID string, paramsJSON string) string {
+	if catalog == nil {
+		return "" // 无 catalog 注入时跳过 (单测/兼容路径)
+	}
+	items, err := catalog.Catalog(ctx, deviceID)
+	if err != nil {
+		return "action_device_id 无效: " + err.Error()
+	}
+	var schema deviceaction.ParameterSchema
+	found := false
+	for _, item := range items {
+		if item.Definition.ID == actionID {
+			schema = item.Definition.InputSchema
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "action_id 在设备能力目录中不存在: " + actionID
+	}
+	// action_params_json 为空时传 "{}" (CanonicalizeParams 内部会处理空输入)。
+	raw := json.RawMessage(paramsJSON)
+	if len(raw) == 0 {
+		raw = json.RawMessage("{}")
+	}
+	if _, err := deviceaction.CanonicalizeParams(schema, raw); err != nil {
+		return "action_params_json 非法: " + err.Error()
 	}
 	return ""
 }

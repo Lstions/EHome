@@ -124,7 +124,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 
 		// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 规则 CRUD + 事件查询。
 		// planner 供裁决 4 确认制闭环 (POST /automation-events/:id/confirm)。
-		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt)
+		// commandService 供 §5.3 校验补强 (action_id Catalog 存在性 + params 规范化)。
+		registerAutomationRoutes(v1, db, automationEvaluatorOpt, automationPlannerOpt, commandService)
 
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)
