@@ -110,6 +110,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '告警规则', icon: 'Bell' },
       },
       {
+        path: 'automation',
+        name: 'AutomationRules',
+        component: () => import('@/views/automation/AutomationRules.vue'),
+        meta: { title: '自动化策略', icon: 'SetUp' },
+      },
+      {
         path: 'profile',
         name: 'Profile',
         component: () => import('@/views/profile/Profile.vue'),

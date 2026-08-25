@@ -233,6 +233,7 @@ import {
   DataAnalysis,
   HomeFilled,
   Bell,
+  SetUp,
   User,
   UserFilled,
   SwitchButton,
@@ -291,6 +292,7 @@ const allMenuItems = [
 	{ path: '/device-configs', title: '配置模板', icon: Setting },
 	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
 	{ path: '/alerts', title: '告警规则', icon: Bell },
+	{ path: '/automation', title: '自动化策略', icon: SetUp },
 ]
 const menuItems = computed(() => allMenuItems)
 

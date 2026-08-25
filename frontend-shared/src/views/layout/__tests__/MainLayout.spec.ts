@@ -125,7 +125,7 @@ describe('MainLayout.vue', () => {
     await flushPromises()
 
     const menuItems = wrapper.findAll('.el-menu-item')
-    expect(menuItems).toHaveLength(10)
+    expect(menuItems).toHaveLength(11)
     const paths = menuItems.map((el) => el.attributes('data-index'))
     expect(paths).toEqual([
       '/dashboard',
@@ -138,6 +138,7 @@ describe('MainLayout.vue', () => {
       '/device-configs',
       '/monitor',
       '/alerts',
+      '/automation',
     ])
   })
 
