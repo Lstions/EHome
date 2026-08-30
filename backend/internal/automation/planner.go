@@ -137,6 +137,7 @@ func (p *Planner) executeDeviceAction(rule models.AutomationRule, at time.Time, 
 	exec, _, err := p.cmdSvc.Create(context.Background(), commandexec.CreateInput{
 		EdgeDeviceID:   rule.ActionDeviceID,
 		ActorUserID:    p.systemActorID,
+		ActorKind:      commandexec.ActorKindSystem,
 		ActionID:       rule.ActionID,
 		Params:         params,
 		IdempotencyKey: idemKey,

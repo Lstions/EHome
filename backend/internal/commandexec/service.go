@@ -56,12 +56,33 @@ func (s *Service) Database() *gorm.DB { return s.db }
 type CreateInput struct {
 	EdgeDeviceID      uint
 	ActorUserID       uint
+	// ActorKind: "user" (默认, 人工操作) / "system" (自动化引擎/系统任务)。
+	// system 路径跳过 medium/low risk 的 confirmation (高风险 high/critical 仍强制)。
+	// 仅 Planner/内部系统调用方使用, 不接受 API 请求体直接指定。
+	ActorKind         string
 	ActionID          string
 	Params            json.RawMessage
 	IdempotencyKey    string
 	SourceIP          string
 	ConfirmationToken string
 	Reason            string
+}
+
+const (
+	// ActorKindUser 默认值, 人工操作 (走完整 confirmation 流程)。
+	ActorKindUser = "user"
+	// ActorKindSystem 系统内部调用 (automation planner/告警引擎)。
+	// 跳过 low/medium 风险 confirmation, 但 high/critical 仍须 confirmation。
+	ActorKindSystem = "system"
+)
+
+// actorTypeForAudit 把 CreateInput.ActorKind 映射到 SecurityAuditEvent.ActorType 取值。
+// 空 / 未识别值统一回落 "user" (向后兼容: 现有 API 调用方均未传 ActorKind)。
+func actorTypeForAudit(kind string) string {
+	if kind == ActorKindSystem {
+		return ActorKindSystem
+	}
+	return ActorKindUser
 }
 
 type ResolveUnknownInput struct {
@@ -467,7 +488,14 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 				return ErrActionUnavailable
 			}
 		}
-		if confirmationRequired(def.Risk) {
+		// 确认制门禁: high/critical 一律须 confirmation; medium 仅人工路径须 confirmation
+		// (system 路径放行 — 自动化引擎 IOC 场景, 已在 planner 层独立审计)。
+		// low 本就不需要 confirmation (confirmationRequired 返回 false)。
+		needsConfirmation := confirmationRequired(def.Risk)
+		if in.ActorKind == ActorKindSystem && (def.Risk == "low" || def.Risk == "medium") {
+			needsConfirmation = false
+		}
+		if needsConfirmation {
 			if strings.TrimSpace(in.Reason) == "" || utf8.RuneCountInString(in.Reason) > 512 {
 				return ErrConfirmationRequired
 			}
@@ -495,7 +523,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandEx
 			return err
 		}
 		return audit.NewWriter(tx).Write(audit.Event{
-			ActorType: "user", ActorUserID: &in.ActorUserID, EventName: "device_action.created", Result: "queued",
+			ActorType: actorTypeForAudit(in.ActorKind), ActorUserID: &in.ActorUserID, EventName: "device_action.created", Result: "queued",
 			RequestID: commandID, SourceIP: in.SourceIP, TargetType: "edge_device", TargetID: fmt.Sprint(edge.ID),
 			Metadata: map[string]interface{}{"action_id": def.ID, "action_version": def.Version, "request_hash": hash},
 		})

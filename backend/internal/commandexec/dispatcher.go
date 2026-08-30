@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/metrics"
 
@@ -107,17 +108,22 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 			return nil
 		}
 		var execution models.CommandExecution
-		if err := tx.Select("node_id", "channel_id").First(&execution, "command_id = ?", candidate.CommandID).Error; err != nil {
+		if err := tx.Select("node_id", "channel_id", "action_id").First(&execution, "command_id = ?", candidate.CommandID).Error; err != nil {
 			return err
 		}
-		// The Channel row is the portable cross-instance mutex for this physical
-		// scheduling boundary. Recheck after acquiring it because another replica
-		// may have selected a sibling outbox before either transaction held it.
-		var channel models.Channel
-		if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND node_id = ?", execution.ChannelID, execution.NodeID).
-			First(&channel).Error; err != nil {
-			return fmt.Errorf("lock command channel: %w", err)
+		// Channel 锁仅对 ChannelCmdV2 有意义 (物理 UART 互斥); periph_cmd (GPIO/PWM)
+		// 是节点级命令, 不走 channel 行 — channel_id=0, 跳过 channel 锁避免
+		// "record not found" 失败。
+		if !deviceaction.IsPeriphAction(execution.ActionID) {
+			// The Channel row is the portable cross-instance mutex for this physical
+			// scheduling boundary. Recheck after acquiring it because another replica
+			// may have selected a sibling outbox before either transaction held it.
+			var channel models.Channel
+			if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id = ? AND node_id = ?", execution.ChannelID, execution.NodeID).
+				First(&channel).Error; err != nil {
+				return fmt.Errorf("lock command channel: %w", err)
+			}
 		}
 		var activeLeases int64
 		if err := tx.Table("command_outboxes AS active_outbox").

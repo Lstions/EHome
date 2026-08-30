@@ -755,3 +755,75 @@ func TestTriggerRuleManualNotification(t *testing.T) {
 		t.Fatalf("result=%s want notification", ev.Result)
 	}
 }
+
+// TestHandleTriggerAutoSystemActorSkipsMediumConfirmation 集成断言:
+// planner 自动触发 (executeDeviceAction) 走 ActorKind=system 调 commandexec.Create,
+// 对 medium risk 动作跳过 confirmation; command_executions 落库 + audit 落 actor_type=system。
+// 用 gpio_set (periph transport, medium) — ChannelCmdV2 transport 只接 low risk, 用 channel 动作过不了 transport gate。
+func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
+	p, edge := setupConfirmPlanner(t)
+
+	// 配置 gpio_configs 行使 periph gate 通过
+	if err := p.db.Create(&models.GPIOConfig{
+		NodeID: edge.NodeID, Pin: 5, Direction: 1, Enabled: true,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 规则: 自动触发 + device_action + medium risk (gpio_set) + require_confirmed=false
+	// 注意: periph 动作的 ActionDeviceID = node.id (resolveActionTarget 的 periph 分支)
+	rule := models.AutomationRule{
+		Name:                "auto-medium-skip-confirm",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edge.ID,
+		TriggerSensorName:   "humidity",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    80,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID, // 在 setupConfirmPlanner 里 edge.ID == node.ID 是巧合对齐
+		ActionID:            "gpio_set",
+		ActionParamsJSON:    `{"pin":5,"level":1}`,
+	}
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 触发: planner.HandleTrigger
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 90, At: time.Now()})
+
+	// 1) automation_events 落 executed
+	var ev models.AutomationEvent
+	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if ev.Result != models.AutomationResultExecuted {
+		t.Fatalf("event result = %q, want %q (detail: %s)", ev.Result, models.AutomationResultExecuted, ev.Detail)
+	}
+	if ev.CommandID == "" {
+		t.Fatal("executed event must carry command_id")
+	}
+
+	// 2) command_executions 落库, ActorUserID=systemActorID (900)
+	var exec models.CommandExecution
+	if err := p.db.Where("command_id = ?", ev.CommandID).First(&exec).Error; err != nil {
+		t.Fatalf("command execution missing: %v", err)
+	}
+	if exec.ActorUserID != 900 {
+		t.Fatalf("actor_user_id = %d, want 900 (system actor)", exec.ActorUserID)
+	}
+	if exec.ActionID != "gpio_set" {
+		t.Fatalf("action_id = %q, want gpio_set", exec.ActionID)
+	}
+
+	// 3) 审计: ActorType=system (而非默认 user)
+	var audit models.SecurityAuditEvent
+	if err := p.db.Where("request_id = ?", ev.CommandID).First(&audit).Error; err != nil {
+		t.Fatalf("audit row missing: %v", err)
+	}
+	if audit.ActorType != "system" {
+		t.Fatalf("audit actor_type = %q, want system", audit.ActorType)
+	}
+}

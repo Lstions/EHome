@@ -365,3 +365,118 @@ func itoa(v int) string {
 	}
 	return "1"
 }
+
+// TestSystemActorSkipsMediumConfirmation 验证 system actor 路径跳过 medium risk 的 confirmation:
+// automation planner 以 ActorKind=system 调 Create, gpio_set (medium) 无需 token 即可下发,
+// 且审计落 ActorType=system。
+// 对照: 同一动作以默认 ActorKind (空=user) 调用则仍须 ErrConfirmationRequired。
+func TestSystemActorSkipsMediumConfirmation(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := setupPeriphNode(t, db)
+	s := NewService(db, periphActions(t))
+	s.SetDispatchEnabled(true)
+
+	params := json.RawMessage(`{"pin":5,"level":1}`)
+
+	// 1) system actor: 跳过 medium confirmation
+	systemIn := CreateInput{
+		EdgeDeviceID: node.ID, ActorUserID: 7, ActorKind: ActorKindSystem,
+		ActionID: deviceaction.ActionGPIOSet, Params: params,
+		IdempotencyKey: "system-actor-gpio-1", Reason: "automation:1:test",
+	}
+	exec, replayed, err := s.Create(context.Background(), systemIn)
+	if err != nil {
+		t.Fatalf("system actor medium action must skip confirmation: %v", err)
+	}
+	if replayed {
+		t.Fatal("first call must not be a replay")
+	}
+	if exec.Status != StatusQueued {
+		t.Fatalf("expected status queued, got %s", exec.Status)
+	}
+	// 审计: ActorType=system
+	var auditRow models.SecurityAuditEvent
+	if err := db.Where("request_id = ?", exec.CommandID).First(&auditRow).Error; err != nil {
+		t.Fatalf("audit row missing: %v", err)
+	}
+	if auditRow.ActorType != ActorKindSystem {
+		t.Fatalf("audit actor_type = %q, want %q", auditRow.ActorType, ActorKindSystem)
+	}
+
+	// 2) 默认 (user) 路径: medium 仍须 confirmation, 缺 token 报错
+	userIn := CreateInput{
+		EdgeDeviceID: node.ID, ActorUserID: 7,
+		ActionID: deviceaction.ActionGPIOSet, Params: params,
+		IdempotencyKey: "user-actor-gpio-1", Reason: "manual test reason",
+	}
+	if _, _, err := s.Create(context.Background(), userIn); !errors.Is(err, ErrConfirmationRequired) {
+		t.Fatalf("user actor medium action must still require confirmation, got %v", err)
+	}
+}
+
+// TestSystemActorHighRiskStillRequiresConfirmation 验证 system actor 路径对 high risk 不放行:
+// pwm_set_duty 是 medium, 但若把风险调高(注册一个 high 变体), 即便 ActorKind=system 也须 token。
+// 用现有的 BMS set_mos_policy (risk=high) 等同断言不可行 (其走 channel_cmd_v2 gate 链),
+// 改为注册一个 high risk 的伪 periph 定义直接驱动 confirmation 分支。
+func TestSystemActorHighRiskStillRequiresConfirmation(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	node := setupPeriphNode(t, db)
+
+	// 注册一个 high risk 的 gpio_set 变体 (复制内建定义但改 Risk)。
+	actions := deviceaction.NewRegistry()
+	minPin, maxPin := 0.0, 255.0
+	minLevel, maxLevel := 0.0, 1.0
+	highGPIO := deviceaction.Definition{
+		ID:             deviceaction.ActionGPIOSet,
+		Version:        1,
+		Name:           "GPIO set (high)",
+		DeviceType:     deviceaction.DeviceTypeGPIO,
+		Semantics:      "set",
+		Risk:           "high",
+		Enabled:        true,
+		ExecutionShape: "single",
+		Verification:   "observation",
+		Transport:      deviceaction.PeriphCmdAdapter,
+		InputSchema: deviceaction.ParameterSchema{
+			Properties: map[string]deviceaction.Parameter{
+				"pin":   {Type: "integer", Minimum: &minPin, Maximum: &maxPin},
+				"level": {Type: "integer", Minimum: &minLevel, Maximum: &maxLevel},
+			},
+			Required: []string{"pin", "level"},
+		},
+	}
+	if err := actions.Register(highGPIO); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(db, actions)
+	s.SetDispatchEnabled(true)
+
+	params := json.RawMessage(`{"pin":5,"level":1}`)
+	in := CreateInput{
+		EdgeDeviceID: node.ID, ActorUserID: 7, ActorKind: ActorKindSystem,
+		ActionID: deviceaction.ActionGPIOSet, Params: params,
+		IdempotencyKey: "system-actor-gpio-high-1", Reason: "automation:1:test",
+	}
+	if _, _, err := s.Create(context.Background(), in); !errors.Is(err, ErrConfirmationRequired) {
+		t.Fatalf("system actor high-risk action must still require confirmation, got %v", err)
+	}
+}
+
+// TestActorTypeForAuditMapping 验证 audit actor_type 映射规则:
+// 空 / 未识别 / user 一律 "user"; 仅 "system" 映射 "system"。
+func TestActorTypeForAuditMapping(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ActorKindUser},
+		{ActorKindUser, ActorKindUser},
+		{ActorKindSystem, ActorKindSystem},
+		{"unknown", ActorKindUser},
+	}
+	for _, c := range cases {
+		if got := actorTypeForAudit(c.in); got != c.want {
+			t.Errorf("actorTypeForAudit(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
