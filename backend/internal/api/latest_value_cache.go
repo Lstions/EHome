@@ -20,13 +20,15 @@ type latestValueCache struct {
 var globalLatestValueCache = &latestValueCache{entries: make(map[uint]models.UnifiedData)}
 
 // SetLatestValue 更新单设备最新值 (persist 成功路径调用; rollupSink 同点注入)。
+// 注: UnifiedData.DeviceID 在 v2.2 即表示 edge_device_id (见 models.go:256 注释);
+// EdgeDeviceID 字段是另一独立指针列, 历史回填不全, 不能作为缓存键。
 func SetLatestValue(rec models.UnifiedData) {
-	if rec.EdgeDeviceID == nil {
+	if rec.DeviceID == 0 {
 		return
 	}
 	globalLatestValueCache.mu.Lock()
 	defer globalLatestValueCache.mu.Unlock()
-	globalLatestValueCache.entries[*rec.EdgeDeviceID] = rec
+	globalLatestValueCache.entries[rec.DeviceID] = rec
 }
 
 // LatestValue returns the cached record for a device; ok=false on miss.
@@ -38,18 +40,19 @@ func LatestValue(deviceID uint) (models.UnifiedData, bool) {
 }
 
 // WarmupLatestValues 启动回填: 每设备最新 1 页 (DISTINCT ON 原查询, 仅启动一次)。
+// 与 SetLatestValue 同步: 缓存键用 device_id (= edge_device_id 的 v2.2 语义)。
 func WarmupLatestValues(db gormDB) {
 	var rows []models.UnifiedData
 	if err := db.
-		Raw("SELECT DISTINCT ON (edge_device_id) * FROM unified_data WHERE edge_device_id IS NOT NULL ORDER BY edge_device_id, created_at DESC").
+		Raw("SELECT DISTINCT ON (device_id) * FROM unified_data WHERE device_id IS NOT NULL ORDER BY device_id, created_at DESC").
 		Scan(&rows).Error; err != nil {
 		return // 回填失败不阻塞启动, miss 回落原 SQL 兜底
 	}
 	globalLatestValueCache.mu.Lock()
 	defer globalLatestValueCache.mu.Unlock()
 	for _, r := range rows {
-		if r.EdgeDeviceID != nil {
-			globalLatestValueCache.entries[*r.EdgeDeviceID] = r
+		if r.DeviceID != 0 {
+			globalLatestValueCache.entries[r.DeviceID] = r
 		}
 	}
 }
