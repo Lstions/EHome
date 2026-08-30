@@ -78,6 +78,11 @@ type Manager struct {
 	periphPending  map[uint32]periphRequestMeta
 	periphLatest   map[string]uint32
 	commandExec    *commandexec.Service
+
+	// parserConsumers 持有所有 sensor_parser 消费者引用, 供 setter
+	// 在 NewManager 之后注入 alert/automation/latest sink (并发安全: setter 与
+	// 数据帧消费在 main.go 启动序列上串行, 之后 sink 不再变更)。
+	parserConsumers []*databus.SensorParserConsumer
 }
 
 type periphRequestMeta struct {
@@ -94,8 +99,13 @@ func (m *Manager) LockPeriphIntent()   { m.periphIntentMu.Lock() }
 func (m *Manager) UnlockPeriphIntent() { m.periphIntentMu.Unlock() }
 
 // SetLatestSinkFn 注入最新值缓存回调 (数据层时序化 v3.4 §3.2.4, main.go 接线)。
+// 同时推送给所有已构建的 sensor_parser consumers — NewManager 注册时 sink 还是 nil,
+// 必须 setter 二阶段注入, 否则 consumers 持有的 sink 字段永远是 nil。
 func (m *Manager) SetLatestSinkFn(fn func(models.UnifiedData)) {
 	m.latestSinkFn = fn
+	for _, p := range m.parserConsumers {
+		p.SetLatestSink(fn)
+	}
 }
 
 // SetAlertEvaluator 注入阈值告警求值器 (方案 v0.4 §5.1.2, main.go 接线)。
@@ -103,6 +113,9 @@ func (m *Manager) SetAlertEvaluator(ev interface {
 	Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
 }) {
 	m.alertEvaluator = ev
+	for _, p := range m.parserConsumers {
+		p.SetAlertSink(ev.Evaluate)
+	}
 }
 
 // SetAutomationEvaluator 注入自动化策略求值器 (设计/自动化策略引擎方案.md v0.1,
@@ -111,6 +124,9 @@ func (m *Manager) SetAutomationEvaluator(ev interface {
 	Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
 }) {
 	m.automationEvaluator = ev
+	for _, p := range m.parserConsumers {
+		p.SetAutomationSink(ev.Evaluate)
+	}
 }
 
 // NewManager creates a new node manager.
@@ -166,6 +182,35 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	mgr.dataBus.Register(databus.NewDataMetricsConsumer())
 	mgr.dataBus.Register(databus.NewPendingWriteConsumer(mgr.pendingWrite, mgr.deviceInit, db))
 
+	// 解析器消费者立即构建 (sensor_parser/db_persist), sink 由 setter 后续注入。
+	// 之所以允许 setter 后注入: sensorParser 把 sink 当函数指针读 (非持有值拷贝),
+	// 调用方 (main.go) 的 SetAlertEvaluator / SetAutomationEvaluator / SetLatestSinkFn
+	// 在 NewManager 之后 / Start 之前调用, 时序仍然安全 (单线程 main goroutine)。
+	mgr.buildParserConsumers()
+
+	if ha != nil {
+		ha.StartPublishWorker()
+	}
+
+	// G10: Record initial node online count
+	var onlineCount int64
+	mgr.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineCount)
+	metrics.NodesOnline.Set(float64(onlineCount))
+
+	return mgr
+}
+
+// buildParserConsumers 构建 sensor_parser/db_persist 消费者并注册到 dataBus。
+// 由 NewManager 调用一次; alert/automation/latest sink 此时仍为 nil,
+// 由 main.go 在 NewManager 之后经 setter 二阶段注入 (setter 会推送到
+// mgr.parserConsumers 持有的所有 consumer 引用)。
+func (mgr *Manager) buildParserConsumers() {
+	db := mgr.db
+	wsHub := mgr.wsHub
+	ha := mgr.ha
+	offlineDetector := mgr.offlineDetector
+	driverRegistry := mgr.driverRegistry
+
 	var deviceActivity func(uint)
 	if offlineDetector != nil {
 		deviceActivity = offlineDetector.OnEdgeDeviceData
@@ -187,6 +232,7 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 	}
 	for i := 0; i < parserShards; i++ {
 		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
+		mgr.parserConsumers = append(mgr.parserConsumers, parser)
 		// 数据层时序化 (v3.4 §3.2.2): rollup 聚合回调注入 (单实例共享, 无需分片)。
 		if rollup != nil {
 			parser.SetRollupSink(rollup.Upsert)
@@ -215,16 +261,6 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		mgr.dataBus.Register(databus.NewShardConsumer(parser, i, parserShards))
 		mgr.dataBus.Register(databus.NewShardConsumer(persist, i, parserShards))
 	}
-	if ha != nil {
-		ha.StartPublishWorker()
-	}
-
-	// G10: Record initial node online count
-	var onlineCount int64
-	mgr.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineCount)
-	metrics.NodesOnline.Set(float64(onlineCount))
-
-	return mgr
 }
 
 // parserShardOverride lets tests pin the heavy-consumer shard count. In
