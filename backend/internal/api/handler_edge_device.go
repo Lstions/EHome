@@ -63,49 +63,6 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 	return nil
 }
 
-// validateAndNormalizeCommandIntervals validates a create-time
-// command_intervals payload against the device type's schedulable command
-// templates. Every provided command id must belong to the driver's
-// schedulable template set — unknown ids and ids of one-shot (non-schedulable)
-// templates are rejected so invalid polling configuration can never reach the
-// database. Negative intervals are normalized to 0 (0 = disabled), matching
-// the PUT /edge-devices/:id/commands behavior. Returns the JSON payload to
-// persist, or nil when the input map is empty.
-func validateAndNormalizeCommandIntervals(driverRegistry *drivers.Registry, devType string, intervals map[string]int) (json.RawMessage, error) {
-	if len(intervals) == 0 {
-		return nil, nil
-	}
-	drv, err := driverRegistry.Get(devType)
-	if err != nil {
-		return nil, fmt.Errorf("cannot validate command_intervals: driver for type %q is not registered", devType)
-	}
-	provider, ok := drv.(drivers.CommandTemplateProvider)
-	if !ok {
-		return nil, fmt.Errorf("cannot validate command_intervals: driver for type %q provides no command templates", devType)
-	}
-	schedulable := make(map[string]struct{}, 8)
-	for _, tmpl := range provider.GetCommandTemplates() {
-		if tmpl.Schedulable {
-			schedulable[tmpl.ID] = struct{}{}
-		}
-	}
-	normalized := make(map[string]int, len(intervals))
-	for id, interval := range intervals {
-		if _, ok := schedulable[id]; !ok {
-			return nil, fmt.Errorf("command_intervals: command %q is not a schedulable command of driver %q", id, devType)
-		}
-		if interval < 0 {
-			interval = 0
-		}
-		normalized[id] = interval
-	}
-	raw, err := json.Marshal(normalized)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal command_intervals: %w", err)
-	}
-	return raw, nil
-}
-
 // createSingleTemplate inserts one ConfigTemplate and appends its ID to the channel's template_ids.
 // edgeDeviceID records the owning edge device (方案 v3.3 §2.4); 0 leaves the
 // ownership column NULL (self-healing / callers without a device instance).
