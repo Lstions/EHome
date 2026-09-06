@@ -234,11 +234,11 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 	}
 	if p.broadcast != nil {
 		p.broadcast("automation_event", gin.H{
-			"rule_id":   rule.ID,
-			"rule_name": rule.Name,
-			"event_id":  ev.ID,
-			"result":    result,
-			"value":     value,
+			"rule_id":    rule.ID,
+			"rule_name":  rule.Name,
+			"event_id":   ev.ID,
+			"result":     result,
+			"value":      value,
 			"command_id": commandID,
 		})
 	}
@@ -533,12 +533,12 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 
 // ConfirmEvent 错误哨兵 (handler 据此映射 HTTP 状态码)。
 var (
-	ErrConfirmEventNotFound   = errors.New("automation event not found")
-	ErrConfirmNotPending      = errors.New("automation event is not awaiting confirmation")
-	ErrConfirmRuleMissing     = errors.New("automation rule no longer exists")
-	ErrConfirmActionChanged   = errors.New("automation rule action changed, cannot confirm")
-	ErrConfirmInvalidParams   = errors.New("automation rule action params invalid")
-	ErrConfirmEventExpired    = errors.New("automation event confirmation window expired")
+	ErrConfirmEventNotFound = errors.New("automation event not found")
+	ErrConfirmNotPending    = errors.New("automation event is not awaiting confirmation")
+	ErrConfirmRuleMissing   = errors.New("automation rule no longer exists")
+	ErrConfirmActionChanged = errors.New("automation rule action changed, cannot confirm")
+	ErrConfirmInvalidParams = errors.New("automation rule action params invalid")
+	ErrConfirmEventExpired  = errors.New("automation event confirmation window expired")
 )
 
 // ConfirmEvent 人工确认执行 pending_confirm 事件 (路径 B: 操作者 confirm 当下即铸即销 token)。

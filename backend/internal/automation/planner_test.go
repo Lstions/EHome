@@ -63,7 +63,7 @@ func setupConfirmPlanner(t *testing.T) (*Planner, *models.EdgeDevice) {
 	if err := actions.Register(deviceaction.Definition{
 		ID: "confirm_reset", Version: 1, Name: "confirm reset", DeviceType: "prs3001",
 		Semantics: "read", Risk: "medium", Enabled: true,
-		Transport: deviceaction.ChannelCmdV2Adapter,
+		Transport:  deviceaction.ChannelCmdV2Adapter,
 		SingleStep: deviceaction.SingleStep{TXData: []byte{0x01, 0x05}, RXTimeoutMS: 1},
 	}); err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func setupConfirmPlanner(t *testing.T) (*Planner, *models.EdgeDevice) {
 	if err := actions.Register(deviceaction.Definition{
 		ID: "low_read", Version: 1, Name: "low risk read", DeviceType: "prs3001",
 		Semantics: "read", Risk: "low", Enabled: true,
-		Transport: deviceaction.ChannelCmdV2Adapter,
+		Transport:  deviceaction.ChannelCmdV2Adapter,
 		SingleStep: deviceaction.SingleStep{TXData: []byte{0x01, 0x06}, RXTimeoutMS: 1},
 	}); err != nil {
 		t.Fatal(err)
@@ -117,19 +117,19 @@ func f64(v float64) *float64 { return &v }
 // confirmedRule 造 require_confirmed=true 的 device_action 规则 (绑定 edge/read_rainfall)。
 func confirmedRule(edgeID uint) models.AutomationRule {
 	return models.AutomationRule{
-		Name:               "确认制规则",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "确认制规则",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edgeID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   true,
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edgeID,
-		ActionID:           "confirm_reset",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    true,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edgeID,
+		ActionID:            "confirm_reset",
+		ActionParamsJSON:    `{}`,
 	}
 }
 
@@ -235,7 +235,7 @@ func TestSweepExpiredPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := p.nowFn().Add(-pendingConfirmTTL - time.Hour) // 25h 前, 超窗
-	fresh := p.nowFn()                                    // 现在, 未超窗
+	fresh := p.nowFn()                                   // 现在, 未超窗
 
 	expiredEv := pendingEvent(t, p, rule.ID, 1, old)
 	freshEv := pendingEvent(t, p, rule.ID, 2, fresh)
@@ -369,19 +369,19 @@ func TestHandleTriggerConditionChanged(t *testing.T) {
 	})
 
 	rule := models.AutomationRule{
-		Name:               "条件复核规则",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "条件复核规则",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   false,
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "confirm_reset",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "confirm_reset",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -404,20 +404,20 @@ func TestHandleTriggerConditionChanged(t *testing.T) {
 
 	// 场景②: 附加条件失效 (conditions_json 中 temperature > 30, 最新值不满足)
 	rule2 := models.AutomationRule{
-		Name:               "附加条件复核",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "附加条件复核",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		ConditionsJSON:     `[{"sensor_name":"illuminance","comparator":"gt","threshold":400}]`,
-		CooldownSec:        0,
-		RequireConfirmed:   false,
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "confirm_reset",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		ConditionsJSON:      `[{"sensor_name":"illuminance","comparator":"gt","threshold":400}]`,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "confirm_reset",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule2).Error; err != nil {
 		t.Fatal(err)
@@ -432,19 +432,19 @@ func TestHandleTriggerConditionChanged(t *testing.T) {
 	// 场景③: 条件仍满足 → 正常执行 (复核通过, 走 commandexec)
 	latestValue = 600.0 // 恢复满足阈值
 	rule3 := models.AutomationRule{
-		Name:               "条件仍满足",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "条件仍满足",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   false,
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "confirm_reset",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "confirm_reset",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule3).Error; err != nil {
 		t.Fatal(err)
@@ -464,20 +464,20 @@ func TestHandleTriggerDailyLimitNotification(t *testing.T) {
 	// 不注入 latestValueFn → 跳过 F4 复核, 聚焦 F5
 
 	rule := models.AutomationRule{
-		Name:               "日熔断测试",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "日熔断测试",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   false,
-		MaxDailyExec:       1, // 限额 1
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "low_read",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		MaxDailyExec:        1, // 限额 1
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -525,20 +525,20 @@ func TestHandleTriggerDailyLimitIgnoresPendingConfirm(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
 
 	rule := models.AutomationRule{
-		Name:               "pending不占额",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "pending不占额",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   false,
-		MaxDailyExec:       2, // 限额 2
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "low_read",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		MaxDailyExec:        2, // 限额 2
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -548,8 +548,8 @@ func TestHandleTriggerDailyLimitIgnoresPendingConfirm(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		ev := models.AutomationEvent{
 			RuleID: rule.ID, TriggerValue: f64(600),
-			Result: models.AutomationResultPendingConfirm,
-			Detail: "awaiting manual confirmation",
+			Result:      models.AutomationResultPendingConfirm,
+			Detail:      "awaiting manual confirmation",
 			TriggeredAt: p.nowFn(),
 		}
 		if err := p.db.Create(&ev).Error; err != nil {
@@ -594,19 +594,19 @@ func TestTriggerRuleManualSuccess(t *testing.T) {
 	newAdminOperator(t, p.db, 7)
 
 	rule := models.AutomationRule{
-		Name:               "手动触发",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "手动触发",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		RequireConfirmed:   true, // 手动触发跳过确认制
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "low_read",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    true, // 手动触发跳过确认制
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -638,12 +638,12 @@ func TestTriggerRuleManualNotFound(t *testing.T) {
 func TestTriggerRuleManualDisabled(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
 	rule := models.AutomationRule{
-		Name:    "禁用规则",
-		Enabled: false,
-		TriggerType: models.AutomationTriggerSensorThreshold,
+		Name:                "禁用规则",
+		Enabled:             false,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		ActionType: models.AutomationActionNotification,
-		ActionLevel: models.AlertLevelInfo,
+		ActionType:          models.AutomationActionNotification,
+		ActionLevel:         models.AlertLevelInfo,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -659,18 +659,18 @@ func TestTriggerRuleManualCooldownSuppressed(t *testing.T) {
 	newAdminOperator(t, p.db, 7)
 
 	rule := models.AutomationRule{
-		Name:               "冷却测试",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "冷却测试",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        3600, // 1h
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "low_read",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         3600, // 1h
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -700,19 +700,19 @@ func TestTriggerRuleManualDailyLimit(t *testing.T) {
 	newAdminOperator(t, p.db, 7)
 
 	rule := models.AutomationRule{
-		Name:               "日熔断",
-		Enabled:            true,
-		TriggerType:        models.AutomationTriggerSensorThreshold,
+		Name:                "日熔断",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		TriggerSensorName:  "illuminance",
-		TriggerComparator:  "gt",
-		TriggerThreshold:   500,
-		CooldownSec:        0,
-		MaxDailyExec:       1,
-		ActionType:         models.AutomationActionDeviceAction,
-		ActionDeviceID:     edge.ID,
-		ActionID:           "low_read",
-		ActionParamsJSON:   `{}`,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		MaxDailyExec:        1,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edge.ID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    `{}`,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)
@@ -737,12 +737,12 @@ func TestTriggerRuleManualDailyLimit(t *testing.T) {
 func TestTriggerRuleManualNotification(t *testing.T) {
 	p, edge := setupConfirmPlanner(t)
 	rule := models.AutomationRule{
-		Name:    "通知规则",
-		Enabled: true,
-		TriggerType: models.AutomationTriggerSensorThreshold,
+		Name:                "通知规则",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
 		TriggerEdgeDeviceID: edge.ID,
-		ActionType: models.AutomationActionNotification,
-		ActionLevel: models.AlertLevelInfo,
+		ActionType:          models.AutomationActionNotification,
+		ActionLevel:         models.AlertLevelInfo,
 	}
 	if err := p.db.Create(&rule).Error; err != nil {
 		t.Fatal(err)

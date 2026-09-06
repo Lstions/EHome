@@ -11,8 +11,8 @@ import (
 	"ehome/backend/internal/models"
 )
 
-func u32p(v uint) *uint          { return &v }
-func f64p(v float64) *float64    { return &v }
+func u32p(v uint) *uint       { return &v }
+func f64p(v float64) *float64 { return &v }
 
 // 合法的 sensor_threshold 全字段 (动作=notification 最简), 作基准用例。
 func validSensorThresholdArgs() (string, string, string, *uint, string, string, *float64,
@@ -70,10 +70,10 @@ func TestValidateSensorThresholdAccepted(t *testing.T) {
 // §5.3 校验补强: cooldown_sec / max_daily_exec 边界。
 func TestValidateAutomationRuleConstraints(t *testing.T) {
 	tests := []struct {
-		name        string
-		cooldownSec *int
+		name         string
+		cooldownSec  *int
 		maxDailyExec int
-		wantErr     bool
+		wantErr      bool
 	}{
 		{"cooldown nil ok", nil, 0, false},
 		{"cooldown 0 ok", intp(0), 0, false},
@@ -99,4 +99,3 @@ func TestValidateAutomationRuleConstraints(t *testing.T) {
 }
 
 func intp(v int) *int { return &v }
-

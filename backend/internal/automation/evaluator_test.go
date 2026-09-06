@@ -125,7 +125,7 @@ func TestEvaluateCooldownSuppression(t *testing.T) {
 	ev.LoadRules()
 
 	t0 := time.Now()
-	ev.Evaluate(1, illuminanceField(600), t0) // 触发 #1
+	ev.Evaluate(1, illuminanceField(600), t0)                     // 触发 #1
 	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second)) // 冷却期内, 抑制
 	if len(h.events) != 1 {
 		t.Fatalf("expect 1 trigger (cooldown suppress), got %d", len(h.events))
@@ -339,8 +339,8 @@ func TestCooldownSuppressionRecordsEvent(t *testing.T) {
 	ev.LoadRules()
 
 	t0 := time.Now()
-	ev.Evaluate(1, illuminanceField(600), t0)                      // 触发 #1
-	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second))  // 冷却命中 → suppressed_cooldown
+	ev.Evaluate(1, illuminanceField(600), t0)                     // 触发 #1
+	ev.Evaluate(1, illuminanceField(700), t0.Add(10*time.Second)) // 冷却命中 → suppressed_cooldown
 	if len(h.events) != 1 {
 		t.Fatalf("expect 1 trigger, got %d", len(h.events))
 	}
@@ -663,11 +663,11 @@ func TestTimeWindowNotInSensorEvaluate(t *testing.T) {
 func TestIsInWindow(t *testing.T) {
 	loc := time.Local
 	tests := []struct {
-		name   string
-		start  string
-		end    string
-		now    time.Time
-		want   bool
+		name  string
+		start string
+		end   string
+		now   time.Time
+		want  bool
 	}{
 		{"non-cross inside", "08:00", "18:00", time.Date(2025, 1, 1, 12, 0, 0, 0, loc), true},
 		{"non-cross before", "08:00", "18:00", time.Date(2025, 1, 1, 7, 59, 0, 0, loc), false},

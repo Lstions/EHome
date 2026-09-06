@@ -54,8 +54,8 @@ func (s *Service) SetDispatchEnabled(enabled bool) { s.dispatchEnabled = enabled
 func (s *Service) Database() *gorm.DB { return s.db }
 
 type CreateInput struct {
-	EdgeDeviceID      uint
-	ActorUserID       uint
+	EdgeDeviceID uint
+	ActorUserID  uint
 	// ActorKind: "user" (默认, 人工操作) / "system" (自动化引擎/系统任务)。
 	// system 路径跳过 medium/low risk 的 confirmation (高风险 high/critical 仍强制)。
 	// 仅 Planner/内部系统调用方使用, 不接受 API 请求体直接指定。

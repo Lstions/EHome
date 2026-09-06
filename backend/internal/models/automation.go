@@ -36,15 +36,15 @@ const (
 
 // 触发/执行结果 (AutomationEvent.Result 取值)
 const (
-	AutomationResultExecuted              = "executed"                // 已提交 commandexec 执行
-	AutomationResultPendingConfirm        = "pending_confirm"         // 高风险动作, 等待人工确认
-	AutomationResultSuppressedCooldown    = "suppressed_cooldown"     // 冷却期内抑制
-	AutomationResultSuppressedDailyLimit  = "suppressed_daily_limit"  // 达到每日熔断上限
-	AutomationResultConditionChanged      = "condition_changed"       // 触发到执行间条件失效
-	AutomationResultFailedGate            = "failed_gate"             // availability gate fail-closed
-	AutomationResultFailedDispatch        = "failed_dispatch"         // Create 调用失败
-	AutomationResultNotification          = "notification"            // 纯通知动作已发出
-	AutomationResultExpired               = "expired"                 // pending_confirm 超时未确认 (24h 清扫置位)
+	AutomationResultExecuted             = "executed"               // 已提交 commandexec 执行
+	AutomationResultPendingConfirm       = "pending_confirm"        // 高风险动作, 等待人工确认
+	AutomationResultSuppressedCooldown   = "suppressed_cooldown"    // 冷却期内抑制
+	AutomationResultSuppressedDailyLimit = "suppressed_daily_limit" // 达到每日熔断上限
+	AutomationResultConditionChanged     = "condition_changed"      // 触发到执行间条件失效
+	AutomationResultFailedGate           = "failed_gate"            // availability gate fail-closed
+	AutomationResultFailedDispatch       = "failed_dispatch"        // Create 调用失败
+	AutomationResultNotification         = "notification"           // 纯通知动作已发出
+	AutomationResultExpired              = "expired"                // pending_confirm 超时未确认 (24h 清扫置位)
 )
 
 // 触发来源 (AutomationEvent.TriggerSource 取值)
@@ -57,8 +57,8 @@ const (
 
 // AutomationCondition 附加条件 (全部 AND 求值, ConditionsJSON 内嵌数组)。
 type AutomationCondition struct {
-	SensorName string  `json:"sensor_name"`        // 与 parser.Field.Name 同域
-	Comparator string  `json:"comparator"`         // gt|gte|lt|lte|eq|neq
+	SensorName string  `json:"sensor_name"` // 与 parser.Field.Name 同域
+	Comparator string  `json:"comparator"`  // gt|gte|lt|lte|eq|neq
 	Threshold  float64 `json:"threshold"`
 }
 
@@ -100,13 +100,13 @@ func (e errorString) Error() string { return string(e) }
 //   - device_action: ActionDeviceID/ActionID 必填, ActionParamsJSON 必须过 CanonicalizeParams
 //   - notification: ActionLevel 必填
 type AutomationRule struct {
-	ID      uint   `gorm:"primaryKey" json:"id"`
-	Name    string `gorm:"size:64;not null" json:"name"`
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"size:64;not null" json:"name"`
 	// Enabled 默认启用语义: GORM 的 default:true tag 会把 bool 零值 false 在 INSERT
 	// 时序列化为 SQLite 字面量 true (2026-08-23 探针实锤, alert.go 同缺陷) ——
 	// 禁用规则被静默存为启用。因此此处不带 default tag, 默认 true 由应用层
 	// (handler_automation.go Create) 显式赋值, fail-closed 不依赖 DB 默认值。
-	Enabled bool   `gorm:"index" json:"enabled"`
+	Enabled bool `gorm:"index" json:"enabled"`
 
 	// ── Trigger ──
 	TriggerType         string  `gorm:"size:24;not null;index" json:"trigger_type"`
@@ -145,15 +145,15 @@ func (AutomationRule) TableName() string { return "automation_rules" }
 // CommandID 回填关联 command_executions, 策略执行历史 = automation_events JOIN command_executions。
 // TriggerSource 区分自动触发 (auto, 求值器/ticker) 与手动触发 (manual, 用户点击"立即触发")。
 type AutomationEvent struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	RuleID        uint       `gorm:"not null;index" json:"rule_id"`
-	TriggeredAt   time.Time  `gorm:"not null;index" json:"triggered_at"`
-	TriggerValue  *float64   `json:"trigger_value,omitempty"` // sensor_threshold 触发时值
-	TriggerSource string     `gorm:"size:8;not null;default:auto;index" json:"trigger_source"` // auto|manual
-	Result        string     `gorm:"size:32;not null;index" json:"result"`
-	CommandID     string     `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
-	Detail        string     `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
-	CreatedAt     time.Time  `json:"created_at"`
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	RuleID        uint      `gorm:"not null;index" json:"rule_id"`
+	TriggeredAt   time.Time `gorm:"not null;index" json:"triggered_at"`
+	TriggerValue  *float64  `json:"trigger_value,omitempty"`                                  // sensor_threshold 触发时值
+	TriggerSource string    `gorm:"size:8;not null;default:auto;index" json:"trigger_source"` // auto|manual
+	Result        string    `gorm:"size:32;not null;index" json:"result"`
+	CommandID     string    `gorm:"size:36;index" json:"command_id,omitempty"` // FK→command_executions (执行时回填)
+	Detail        string    `gorm:"size:512" json:"detail,omitempty"`          // 失败/抑制原因
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func (AutomationEvent) TableName() string { return "automation_events" }

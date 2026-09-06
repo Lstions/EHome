@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	maxWindowSamples  = 1000
-	defaultCooldown   = 300
+	maxWindowSamples = 1000
+	defaultCooldown  = 300
 )
 
 // sample 滑动窗口单点 (同 alert 先例)。
@@ -33,10 +33,10 @@ type sample struct {
 
 // TriggerEvent 触发事件: 求值器产出, Planner 消费。
 type TriggerEvent struct {
-	Rule         models.AutomationRule
-	Value        float64 // 触发时值 (sensor_threshold)
-	At           time.Time
-	WindowEdge   string  // time_window: enter|exit (sensor_threshold 为 "")
+	Rule       models.AutomationRule
+	Value      float64 // 触发时值 (sensor_threshold)
+	At         time.Time
+	WindowEdge string // time_window: enter|exit (sensor_threshold 为 "")
 }
 
 // TriggerHandler Planner 消费接口 (避免 automation→service 编译期反向依赖)。
@@ -47,8 +47,9 @@ type TriggerHandler interface {
 // Evaluator 策略求值器: 规则缓存 + 每规则滑动窗口 + armed/triggered 状态机。
 //
 // 状态机 (裁决 5, 与告警不同):
-//   armed → triggered: 连续满足 DurationSec (DurationSec=0 直通)
-//   triggered → armed: CooldownSec 到期 (时间维度, 不是条件复位!)
+//
+//	armed → triggered: 连续满足 DurationSec (DurationSec=0 直通)
+//	triggered → armed: CooldownSec 到期 (时间维度, 不是条件复位!)
 //
 // ⚠️ armed 恢复条件是冷却到期, 不是条件复位 — "光照弱"持续整夜, 触发一次
 // 开灯后进入冷却, 冷却到期后若条件仍满足可再次触发; 若等条件复位(天亮),
@@ -430,7 +431,7 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 		if at.Sub(firedAt) < cooldown {
 			e.mu.Unlock()
 			e.recordSuppressed(rule, firedAt, at, value) // F3: 冷却命中落审计 (防抖可观测, 同窗节流)
-			return // 冷却期内, 不更新窗口不重复触发
+			return                                       // 冷却期内, 不更新窗口不重复触发
 		}
 		delete(e.triggered, rule.ID) // 冷却到期, 回 armed
 	}
