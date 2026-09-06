@@ -817,3 +817,32 @@ func TestSN3001ResetForAddressDispatchVerify(t *testing.T) {
 		t.Fatalf("verified result = %+v", got)
 	}
 }
+
+// TestBuiltInDriversTemplatesAllSchedulable asserts the third-state abolition
+// (演进方案 P2/W2): every built-in driver's GetCommandTemplates() output must
+// be Schedulable==true. Any future driver that sneaks a one-shot command into
+// the template domain turns this test red.
+func TestBuiltInDriversTemplatesAllSchedulable(t *testing.T) {
+	registry := NewRegistry()
+	RegisterBuiltInDrivers(registry)
+	checked := 0
+	for _, typ := range registry.List() {
+		drv, err := registry.Get(typ)
+		if err != nil {
+			t.Fatalf("registry.Get(%q): %v", typ, err)
+		}
+		provider, ok := drv.(CommandTemplateProvider)
+		if !ok {
+			continue // driver without templates is fine
+		}
+		for _, tmpl := range provider.GetCommandTemplates() {
+			checked++
+			if !tmpl.Schedulable {
+				t.Errorf("built-in driver %q template %q has Schedulable=false — the third state is abolished (演进方案 P2)", typ, tmpl.ID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("防线未覆盖任何模板 — 内置驱动注册或 CommandTemplateProvider 判定异常")
+	}
+}

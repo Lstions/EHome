@@ -5,10 +5,13 @@ import "time"
 // CommandTemplate defines a protocol command exposed by a device driver.
 // Each driver can provide a list of command templates.
 //
-// Two modes:
+// Schedulable=true  → polling command, encoded in ConfigManifest with interval.
+// Schedulable=false → DEPRECATED transition state ("trigger command").
 //
-//	Schedulable=true  → polling command, encoded in ConfigManifest with interval.
-//	Schedulable=false → trigger command, executed only on user request via API.
+// 演进方案 P2: 元数据二选一，第三态废除。轮询帧进 CommandTemplate 且
+// Schedulable 恒为 true；一次性/受控操作进 ControlAction (Action Catalog)。
+// 新驱动禁止返回 Schedulable=false 的模板 —
+// TestBuiltInDriversTemplatesAllSchedulable 是防回潮测试防线。
 type CommandTemplate struct {
 	ID          string `json:"id"`          // e.g. "read_basic_info", "close_discharge_mos"
 	Name        string `json:"name"`        // "读取基本信息", "关放电MOS"
