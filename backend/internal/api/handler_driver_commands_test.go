@@ -178,3 +178,103 @@ func TestPutCommands_DriverNotFound(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// ==================== C3: GET schedulable filtering ====================
+
+type commandIDView struct {
+	ID                string `json:"id"`
+	CurrentIntervalMs int    `json:"current_interval_ms"`
+}
+
+func getCommandJSON(t *testing.T, r *gin.Engine, path string) (int, []byte) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+	return w.Code, w.Body.Bytes()
+}
+
+func commandIDs(t *testing.T, body []byte, wantSchedulableFlag bool) map[string]struct{} {
+	t.Helper()
+	var resp struct {
+		Code int `json:"code"`
+		Data []struct {
+			ID          string `json:"id"`
+			Schedulable bool   `json:"schedulable"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, body)
+	}
+	ids := map[string]struct{}{}
+	for _, c := range resp.Data {
+		if wantSchedulableFlag && !c.Schedulable {
+			t.Fatalf("non-schedulable template %q leaked into GET response", c.ID)
+		}
+		ids[c.ID] = struct{}{}
+	}
+	return ids
+}
+
+func TestGetDriverCommands_FiltersNonSchedulable(t *testing.T) {
+	r, _ := setupDriverCommandsTest(t)
+	code, body := getCommandJSON(t, r, "/api/v1/drivers/fake_multi/commands")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", code, body)
+	}
+	ids := commandIDs(t, body, true)
+	assertStringSet(t, "GET /drivers/fake_multi/commands", ids, "read_a", "read_b")
+	if _, ok := ids["one_shot"]; ok {
+		t.Fatal("one_shot leaked into GET /drivers/:type/commands")
+	}
+}
+
+func TestGetEdgeDeviceCommands_FiltersNonSchedulable(t *testing.T) {
+	r, db := setupDriverCommandsTest(t)
+	dev := createFakeMultiDevice(t, db, map[string]int{"read_a": 3000})
+	code, body := getCommandJSON(t, r, "/api/v1/edge-devices/"+itoa(int(dev.ID))+"/commands")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", code, body)
+	}
+	ids := commandIDs(t, body, true)
+	assertStringSet(t, "GET /edge-devices/:id/commands", ids, "read_a", "read_b")
+	if _, ok := ids["one_shot"]; ok {
+		t.Fatal("one_shot leaked into GET /edge-devices/:id/commands")
+	}
+}
+
+func TestGetEdgeDeviceCommands_OverlayStillWorks(t *testing.T) {
+	r, db := setupDriverCommandsTest(t)
+	dev := createFakeMultiDevice(t, db, map[string]int{"read_a": 3000})
+	code, body := getCommandJSON(t, r, "/api/v1/edge-devices/"+itoa(int(dev.ID))+"/commands")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", code, body)
+	}
+	var resp struct {
+		Data []commandIDView `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, body)
+	}
+	byID := map[string]commandIDView{}
+	for _, v := range resp.Data {
+		byID[v.ID] = v
+	}
+	if got := byID["read_a"].CurrentIntervalMs; got != 3000 {
+		t.Fatalf("read_a overlay: got %d, want 3000", got)
+	}
+	// read_b has no stored interval; because the stored map is non-empty the
+	// device-default branch is skipped → template default IntervalMs (0) wins.
+	if got := byID["read_b"].CurrentIntervalMs; got != 0 {
+		t.Fatalf("read_b overlay: got %d, want 0 (template default)", got)
+	}
+}
+
+func TestGetDriverCommands_UnknownDriver404(t *testing.T) {
+	r, _ := setupDriverCommandsTest(t)
+	code, _ := getCommandJSON(t, r, "/api/v1/drivers/nope/commands")
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown driver, got %d", code)
+	}
+}

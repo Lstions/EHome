@@ -30,7 +30,9 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 		}
 
 		cmds := getCommandTemplates(drv)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cmds})
+		// I-2: only schedulable polling templates are returned; one-shot
+		// commands belong to the Action Catalog (DeviceControlPanel).
+		c.JSON(http.StatusOK, gin.H{"code": 200, "data": filterSchedulableTemplates(cmds)})
 	})
 
 	// GET /api/v1/edge-devices/:id/commands — get current command intervals for an edge device
@@ -53,7 +55,7 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 			return
 		}
 
-		templates := getCommandTemplates(drv)
+		templates := filterSchedulableTemplates(getCommandTemplates(drv))
 
 		// Overlay stored intervals from edge device
 		storedIntervals := parseCommandIntervals(dev.CommandIntervals)
@@ -149,6 +151,20 @@ func getCommandTemplates(drv drivers.Driver) []drivers.CommandTemplate {
 		return provider.GetCommandTemplates()
 	}
 	return nil
+}
+
+// filterSchedulableTemplates returns only Schedulable templates, preserving
+// order. I-2: GET endpoints return schedulable templates only; the frontend's
+// client-side filter (CommandList.vue:131, CreateWizardCommandIntervals.vue:109)
+// stays as defense in depth.
+func filterSchedulableTemplates(templates []drivers.CommandTemplate) []drivers.CommandTemplate {
+	filtered := make([]drivers.CommandTemplate, 0, len(templates))
+	for _, t := range templates {
+		if t.Schedulable {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }
 
 // parseCommandIntervals parses the JSONB map of command_id → interval_ms.
