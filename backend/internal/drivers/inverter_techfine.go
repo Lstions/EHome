@@ -831,24 +831,13 @@ func asciiToHex(s string) string {
 }
 
 // ============================================================================
-// GetCommandTemplates deliberately exposes no schedulable GB3024 traffic.
-// The unified Action Catalog owns the verified on-demand reads above.  Feeding
-// the old broad template set into ConfigManifest would both reintroduce an
-// unaudited transport path and exceed the C6 per-channel/template limits.
-// These retained read templates are non-schedulable compatibility metadata;
-// all writes remain absent from the public provider surface.
+// GetCommandTemplates returns no templates.  The 11 query_* compatibility
+// templates were removed (演进方案 C6, 2026-09-06): the third state
+// CommandTemplate{Schedulable:false} is abolished, and the same physical
+// reads are owned by the Action Catalog (ControlActions, read_*).
+// Pre-deletion audit: see commit message — 0 unowned config_templates rows
+// matched the removed frame set, so template_backfill loses no matchable
+// rows (宁留勿删 semantics unchanged).
 func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
-	return []CommandTemplate{
-		{ID: "query_status", Name: "查询状态", Type: "read", CmdByte: 0, WriteData: asciiToHex("HSTS\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "故障代码、工作模式、告警标志"},
-		{ID: "query_grid", Name: "查询市电信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HGRID\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "市电电压(V)、频率(Hz)"},
-		{ID: "query_output", Name: "查询输出信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HOP\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "输出电压、频率、功率、负载百分比"},
-		{ID: "query_battery", Name: "查询电池信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HBAT\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "电池电压、容量、充放电电流、BUS电压"},
-		{ID: "query_pv1", Name: "查询PV1信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HPV\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV1电压(V)、电流(A)、功率(W)"},
-		{ID: "query_pv2", Name: "查询PV2信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HPVB\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV2电压(V)、电流(A)、功率(W)"},
-		{ID: "query_temperature", Name: "查询温度信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HTEMP\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "PV/逆变/升压/变压器温度、风扇转速及状态"},
-		{ID: "query_energy", Name: "查询发电量", Type: "read", CmdByte: 0, WriteData: asciiToHex("HGEN\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "日/月/年/总发电量(kWh)"},
-		{ID: "query_bms", Name: "查询BMS信息", Type: "read", CmdByte: 0, WriteData: asciiToHex("HBMS1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "BMS通信状态、充放电允许、SOC、充放电电流、温度"},
-		{ID: "query_eeprom", Name: "查询EEPROM设置", Type: "read", CmdByte: 0, WriteData: asciiToHex("HEEP1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "工作模式、充电电流、电池类型等EEPROM设置"},
-		{ID: "query_version", Name: "查询软件版本", Type: "read", CmdByte: 0, WriteData: asciiToHex("HIMSG1\r"), ReadLength: 256, DelayMs: 0, Schedulable: false, Description: "软件版本号及日期"},
-	}
+	return nil
 }

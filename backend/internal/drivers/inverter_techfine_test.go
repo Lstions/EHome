@@ -553,41 +553,12 @@ func TestTechfine_SensorDefinitions(t *testing.T) {
 // ============================================================================
 
 func TestTechfine_CommandTemplates(t *testing.T) {
-	d := &TechfineInverterDriver{}
-	templates := d.GetCommandTemplates()
-
-	if len(templates) != 11 {
-		t.Fatalf("expected 11 public read templates, got %d", len(templates))
-	}
-
-	// Verify query templates
-	queryIDs := []string{
-		"query_status", "query_grid", "query_output", "query_battery",
-		"query_pv1", "query_pv2", "query_temperature", "query_energy",
-		"query_bms", "query_eeprom", "query_version",
-	}
-	tmplMap := make(map[string]CommandTemplate)
-	for _, tmpl := range templates {
-		tmplMap[tmpl.ID] = tmpl
-	}
-
-	for _, id := range queryIDs {
-		if tmpl, ok := tmplMap[id]; !ok {
-			t.Errorf("missing command template: %s", id)
-		} else {
-			if tmpl.Schedulable {
-				t.Errorf("query template %s must not be schedulable", id)
-			}
-			if tmpl.WriteData == "" {
-				t.Errorf("query template %s has empty WriteData", id)
-			}
-		}
-	}
-
-	for _, forbidden := range []string{"turn_on", "query_protocol", "query_pe", "query_pd", "set_voltage_220", "system_reset"} {
-		if _, ok := tmplMap[forbidden]; ok {
-			t.Errorf("unsafe template %s is publicly exposed", forbidden)
-		}
+	// C6: the 11 query_* compatibility templates are deleted; the third state
+	// CommandTemplate{Schedulable:false} is abolished. GetCommandTemplates
+	// must return no templates — one-shot reads live in ControlActions().
+	templates := (&TechfineInverterDriver{}).GetCommandTemplates()
+	if len(templates) != 0 {
+		t.Fatalf("expected 0 templates after C6 removal, got %d: %+v", len(templates), templates)
 	}
 }
 

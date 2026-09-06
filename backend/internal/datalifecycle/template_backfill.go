@@ -103,8 +103,12 @@ func matchTemplateOwner(driverRegistry *drivers.Registry, tmpl *models.ConfigTem
 	}
 }
 
-// driverTemplateMatches reports whether any schedulable CommandTemplate of the
-// driver has WriteData equal (case-normalized) to the template's WriteData.
+// driverTemplateMatches reports whether any CommandTemplate of the driver has
+// WriteData equal (case-normalized) to the template's WriteData.
+// The match source is the driver's *currently declared* template set
+// (演进方案 §2.4). A driver that declares no templates (e.g. techfine after
+// C6) can never match, so its historical rows stay unowned — 宁留勿删,
+// correct by design. Do not re-add templates merely to make backfill match.
 func driverTemplateMatches(provider drivers.CommandTemplateProvider, writeData string) bool {
 	want := strings.ToUpper(strings.TrimSpace(writeData))
 	for _, cmd := range provider.GetCommandTemplates() {
