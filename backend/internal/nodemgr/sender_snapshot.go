@@ -171,14 +171,7 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 					_ = json.Unmarshal(edge.CommandIntervals, &intervals)
 				}
 				for _, command := range driverCommands {
-					if !command.Schedulable {
-						continue
-					}
-					interval := command.IntervalMs
-					if value, ok := intervals[command.ID]; ok {
-						interval = value
-					}
-					if interval > 0 && findTemplateIDForCommand(snap.templates, command.WriteData) != 0 {
+					if CommandIsManifestCandidate(command, intervals, snap.templates) {
 						commandCount++
 					}
 				}
@@ -193,6 +186,23 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 		}
 	}
 	return nil
+}
+
+// CommandIsManifestCandidate reports whether a driver command would be encoded
+// as a per-command sub-frame in the ConfigManifest: Schedulable, effective
+// interval (stored override → template default) > 0, and a matching
+// ConfigTemplate exists in the snapshot.
+// 演进方案 C4: this predicate is the single authority for the "manifest
+// candidate set" of the four-set contract test.
+func CommandIsManifestCandidate(command drivers.CommandTemplate, storedIntervals map[string]int, templates []models.ConfigTemplate) bool {
+	if !command.Schedulable {
+		return false
+	}
+	interval := command.IntervalMs
+	if value, ok := storedIntervals[command.ID]; ok {
+		interval = value
+	}
+	return interval > 0 && findTemplateIDForCommand(templates, command.WriteData) != 0
 }
 
 // manifestTemplateExists reports whether a template with the given ID is
