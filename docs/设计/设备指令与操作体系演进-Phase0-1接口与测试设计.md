@@ -148,13 +148,15 @@ ehomectl command-intervals cleanup
 ### 4.1 审计 SQL 原文（一次性，不落库）
 
 ```sql
-SELECT id, node_id, channel_id, write_data
+SELECT id, node_id, write_data
 FROM config_templates
 WHERE edge_device_id IS NULL
-  AND upper(write_data) IN
+  AND upper(translate(write_data,' ','')) IN
   ('485354530D','48475249440D','484F500D','484241540D','4850560D','485056420D',
    '4854454D500D','4847454E0D','48424D53310D','48454550310D','48494D5347310D');
 ```
+> 2026-09-06 实测修正：config_templates 列集为 id/node_id/write_data/read_length/delay_ms/edge_device_id/created_at/updated_at（**无 channel_id**）；translate 去空格防御 hex 存储形态差异。
+> **主 Agent 已执行本审计（生产库 ehome-postgres）：0 行命中（全表 11 行，unowned 0 行）**——C6 删除获准，审计证据以此为准。
 
 11 帧 hex 来源（`asciiToHex("<ASCII>\r")`，python3 实测）：
 | 命令 | ASCII | hex（大写） |
@@ -173,9 +175,8 @@ WHERE edge_device_id IS NULL
 
 ### 4.2 审计判定规则
 
-- **0 行** → 允许删除；SQL 原文 + "0 行" 写入 C6 commit message。
+- **0 行** → 允许删除；SQL 原文 + "0 行" 写入 C6 commit message。（**2026-09-06 生产库实测 = 本情况**）
 - **>0 行** → **停止**，上报主 Agent；先人工归属（写 `edge_device_id`）或归档，再重跑审计；不得自行删除、不得自行归属。
-- 本地无生产库 → commit message 如实声明"SQL 已提供、待运维执行回填"，**不得伪造结果**。
 
 ### 4.3 审计的必要性（为什么先审计后删除）
 

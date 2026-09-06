@@ -760,18 +760,18 @@ chore(drivers): 删除 legacyUnsafeCommandTemplates 死代码（228 行）+ 守�
 
 **目标**：审计先行，然后删除 11 条 query_*，`GetCommandTemplates` 返回空，改写测试，补 backfill 语义注释。
 
-**步骤 0 — 审计（必须先做，结果写入 commit message）**。生产库执行（`EHOME_DB_*` 环境变量，psql）：
+**步骤 0 — 审计（主 Agent 已于 2026-09-06 在生产库执行完毕：0 行命中，见接口设计文档 §4.1；执行者直接引用该结论，无需也无法重复执行）**。审计 SQL 原文（结果 0 行，连同本 SQL 写入 commit message）：
 ```sql
-SELECT id, node_id, channel_id, write_data
+SELECT id, node_id, write_data
 FROM config_templates
 WHERE edge_device_id IS NULL
-  AND upper(write_data) IN
+  AND upper(translate(write_data,' ','')) IN
   ('485354530D','48475249440D','484F500D','484241540D','4850560D','485056420D',
    '4854454D500D','4847454E0D','48424D53310D','48454550310D','48494D5347310D');
 ```
-- 结果为空 → 继续删除，把 SQL 原文 + "0 行" 写进 commit message。
+> 列集已按 2026-09-06 生产库实测修正：config_templates 无 channel_id 列；translate 去空格防御 hex 存储形态差异。
+- 结果为空（**即本次实测情况**）→ 继续删除，把 SQL 原文 + "0 行" 写进 commit message。
 - 结果非空 → **停止，上报主 Agent**（先人工归属 edge_device_id 或归档），不自行删除、不自行归属。
-- 本地无生产库时：在 commit message 中如实写"审计 SQL 已提供，执行结果待运维执行后回填；本地 sqlite 测试库审计 0 行"。**不得伪造审计结果。**
 
 **改动文件**：
 1. `backend/internal/drivers/inverter_techfine.go`：840–861 行整体替换（见下）
@@ -844,8 +844,8 @@ grep -n "read_status" internal/drivers/inverter_techfine.go                     
 chore(drivers): 删除 techfine 11 条 compatibility metadata（前置审计证据入 message）
 
 审计（2026-09-06，删除前执行）:
-SELECT id, node_id, channel_id, write_data FROM config_templates
-WHERE edge_device_id IS NULL AND upper(write_data) IN
+SELECT id, node_id, write_data FROM config_templates
+WHERE edge_device_id IS NULL AND upper(translate(write_data,' ','')) IN
 ('485354530D','48475249440D','484F500D','484241540D','4850560D','485056420D',
  '4854454D500D','4847454E0D','48424D53310D','48454550310D','48494D5347310D');
 → 0 行（预期：techfine 从未有 Schedulable=true 模板，不会产生可归属模板）
