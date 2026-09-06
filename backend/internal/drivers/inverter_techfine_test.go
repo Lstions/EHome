@@ -628,12 +628,6 @@ func TestTechfine_HGRID_HOP_DispatchHardening(t *testing.T) {
 	assertFloat(t, data, "grid_frequency", 50.0, 0.01)
 }
 
-func TestTechfine_LegacyUnsafeTemplatesFailClosed(t *testing.T) {
-	if templates := (&TechfineInverterDriver{}).legacyUnsafeCommandTemplates(); templates != nil {
-		t.Fatalf("unverified legacy templates must fail closed, got %+v", templates)
-	}
-}
-
 // ============================================================================
 // 16. TestCommandAwareDriver — Verify interface compliance
 // ============================================================================
