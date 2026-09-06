@@ -104,14 +104,24 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 			return
 		}
 
-		// Merge with existing intervals
+		// Merge with existing intervals (partial update: request keys overlay
+		// the stored map).
 		existing := parseCommandIntervals(dev.CommandIntervals)
 		for cmdID, interval := range req.Intervals {
-			if interval < 0 {
-				interval = 0
-			}
 			existing[cmdID] = interval
 		}
+
+		// I-3 (演进方案 §3.1): validate the *merged* map against the driver's
+		// schedulable set — the same helper as the create path. Unknown ids
+		// and non-schedulable ids are rejected with 400 before any DB write.
+		// Validation runs on the merged map (not the request subset) because
+		// PUT is a partial update; legacy dirty keys are removed by the C2
+		// cleanup script before this gate goes live.
+		if err := ValidateCommandIntervals(driverRegistry, dev.Type, existing); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			return
+		}
+		existing = NormalizeCommandIntervals(existing)
 
 		intervalsJSON, err := json.Marshal(existing)
 		if err != nil {

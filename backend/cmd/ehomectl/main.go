@@ -31,6 +31,8 @@ func main() {
 			usage()
 		}
 		runDatalifecycle()
+	case "command-intervals":
+		runCommandIntervalsCleanupCLI()
 	default:
 		usage()
 	}
@@ -38,7 +40,8 @@ func main() {
 
 func usage() {
 	fatal("usage: ehomectl auth <bootstrap-database|create-initialization-token|reset-password>\n" +
-		"       ehomectl datalifecycle backfill")
+		"       ehomectl datalifecycle backfill\n" +
+		"       ehomectl command-intervals cleanup")
 }
 
 func connectDB() *gorm.DB {
