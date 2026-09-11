@@ -235,13 +235,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		var items []models.DeviceConfig
 		if err := q.Order("is_default DESC, id DESC").
 			Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200, "message": "ok",
-			"data": gin.H{"list": items, "total": total, "page": page, "page_size": pageSize},
-		})
+		Success(c, gin.H{"list": items, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// Get device-config detail
@@ -250,33 +247,33 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		var tpl models.DeviceConfig
 		if err := db.First(&tpl, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				Error(c, http.StatusNotFound, "device config not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+		Success(c, tpl)
 	})
 
 	// Create device-config template
 	v1.POST("/device-configs", func(c *gin.Context) {
 		var tpl models.DeviceConfig
 		if err := c.ShouldBindJSON(&tpl); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		// 服务端兜底: 必填字段
 		if tpl.Name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "name is required"})
+			Error(c, http.StatusBadRequest, "name is required")
 			return
 		}
 		if tpl.DeviceType == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "device_type is required"})
+			Error(c, http.StatusBadRequest, "device_type is required")
 			return
 		}
 		if tpl.HardwareType == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "hardware_type is required"})
+			Error(c, http.StatusBadRequest, "hardware_type is required")
 			return
 		}
 		if tpl.Status == "" {
@@ -284,12 +281,12 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		} else {
 			tpl.Status = strings.ToLower(strings.TrimSpace(tpl.Status))
 			if tpl.Status != "active" && tpl.Status != "inactive" {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "status must be active or inactive"})
+				Error(c, http.StatusBadRequest, "status must be active or inactive")
 				return
 			}
 		}
 		if tpl.IsDefault && tpl.Status != "active" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": errInactiveDeviceConfigDefault.Error()})
+			Error(c, http.StatusBadRequest, errInactiveDeviceConfigDefault.Error())
 			return
 		}
 		if len(tpl.Config) == 0 {
@@ -319,10 +316,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			return tx.Create(&tpl).Error
 		}); err != nil {
-			c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+			Error(c, http.StatusConflict, err.Error())
 			return
 		}
-		c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "created", "data": tpl})
+		SuccessWithCodeMsg(c, http.StatusCreated, tpl, "created")
 	})
 
 	// Update device-config template
@@ -330,11 +327,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		id := c.Param("id")
 		var raw map[string]json.RawMessage
 		if err := c.ShouldBindJSON(&raw); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		if _, ok := raw["name"]; !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "name is required"})
+			Error(c, http.StatusBadRequest, "name is required")
 			return
 		}
 		var update models.DeviceConfig
@@ -387,15 +384,15 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return tx.Save(&update).Error
 		}); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				Error(c, http.StatusNotFound, "device config not found")
 			} else {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+				Error(c, http.StatusBadRequest, err.Error())
 			}
 			return
 		}
 		// Transaction committed: fan out once per real referenced node.
 		emitDeviceConfigChanges(c, eventBus, nodemgr.CfgActionUpdate, affectedNodes, update.ID)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": update})
+		Success(c, update)
 	})
 
 	// Delete device-config template
@@ -416,13 +413,13 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return tx.Delete(&config).Error
 		}); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				Error(c, http.StatusNotFound, "device config not found")
 			} else {
-				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+				Error(c, http.StatusConflict, err.Error())
 			}
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+		SuccessMsg(c, gin.H{"deleted": id}, "deleted")
 	})
 
 	// Get default device-config for a device_type
@@ -436,7 +433,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		err := db.Where("device_type = ? AND is_default = ? AND status = ?", dt, true, "active").
 			Order("id DESC").First(&tpl).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// 2. 兜底: 任意 active
@@ -444,15 +441,15 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			err = db.Where("device_type = ? AND status = ?", dt, "active").
 				Order("id DESC").First(&tpl).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "no default config for device_type", "data": nil})
+				Error(c, http.StatusNotFound, "no default config for device_type")
 				return
 			}
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+				Error(c, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+		Success(c, tpl)
 	})
 
 	// Mark a device-config as default (取消同 device_type 的其他默认)
@@ -475,15 +472,15 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		})
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "device config not found"})
+				Error(c, http.StatusNotFound, "device config not found")
 			} else if errors.Is(err, errInactiveDeviceConfigDefault) {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+				Error(c, http.StatusBadRequest, err.Error())
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+				Error(c, http.StatusInternalServerError, err.Error())
 			}
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+		Success(c, tpl)
 	})
 
 	// Get init-flow for a device-config
@@ -491,10 +488,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		id, _ := strconv.Atoi(c.Param("id"))
 		var cfg models.DeviceConfig
 		if err := db.First(&cfg, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cfg.InitFlow})
+		Success(c, cfg.InitFlow)
 	})
 
 	// Get operations for a device-config
@@ -502,10 +499,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		id, _ := strconv.Atoi(c.Param("id"))
 		var cfg models.DeviceConfig
 		if err := db.First(&cfg, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": cfg.Operations})
+		Success(c, cfg.Operations)
 	})
 
 	// Test parser for a device-config
@@ -517,7 +514,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		id, _ := strconv.Atoi(c.Param("id"))
 		var cfg models.DeviceConfig
 		if err := db.First(&cfg, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
 
@@ -532,10 +529,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if cp, err := parser.NewConfigParser(cfg.Parser); err == nil {
 				fields, parseErr := cp.Parse(rawBytes)
 				if parseErr == nil {
-					c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+					Success(c, gin.H{
 						"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
 						"raw_data": req.RawData, "parsed": fields, "parser": "device_config",
-					}})
+					})
 					return
 				}
 			}
@@ -546,16 +543,16 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if driver, err := driverRegistry.Get(cfg.DeviceType); err == nil {
 				sensorData, parseErr := driver.ParseData(rawBytes)
 				if parseErr != nil {
-					c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+					Success(c, gin.H{
 						"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
 						"raw_data": req.RawData, "parsed": gin.H{}, "error": parseErr.Error(), "parser": "driver",
-					}})
+					})
 					return
 				}
-				c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+				Success(c, gin.H{
 					"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
 					"raw_data": req.RawData, "parsed": sensorData, "parser": "driver",
-				}})
+				})
 				return
 			}
 		}
@@ -568,10 +565,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				parsed = gin.H{"json": jsonObj}
 			}
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"device_type": cfg.DeviceType, "parser_id": cfg.ParserID,
 			"raw_data": req.RawData, "parsed": parsed,
-		}})
+		})
 	})
 
 	// ============================================================
@@ -589,7 +586,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				if err := db.Where("node_id = ?", nid).First(&node).Error; err == nil {
 					q = q.Where("node_id = ?", node.NodeID)
 				} else {
-					c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []models.Channel{}})
+					Success(c, []models.Channel{})
 					return
 				}
 			}
@@ -599,7 +596,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": chs})
+		Success(c, chs)
 	})
 
 	// Create channel
@@ -673,7 +670,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		// Emit config change for the node
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionCreate, ch.NodeID, fmt.Sprint(ch.ID))
-		c.JSON(http.StatusCreated, ch)
+		SuccessWithCode(c, http.StatusCreated, ch)
 	})
 
 	v1.GET("/channels/:channel_id", func(c *gin.Context) {
@@ -681,13 +678,13 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		var ch models.Channel
 		if err := db.First(&ch, id).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+				Error(c, http.StatusNotFound, "channel not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
+		Success(c, ch)
 	})
 
 	// Update a channel (DTO pattern to prevent mass assignment)
@@ -695,7 +692,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		id := c.Param("channel_id")
 		var ch models.Channel
 		if err := db.First(&ch, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+			Error(c, http.StatusNotFound, "channel not found")
 			return
 		}
 		var dto struct {
@@ -710,7 +707,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			DmaEnabled   *bool   `json:"dma_enabled"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		candidate := ch
@@ -729,7 +726,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		/* Validate the requested final type. Re-enabling a currently disabled
 		 * transport channel must not fail because its persisted state is false. */
 		if err := validateTransportChannelType(&candidate); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		updates := map[string]interface{}{}
@@ -761,7 +758,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			updates["dma_enabled"] = *dto.DmaEnabled
 		}
 		if len(updates) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "no fields to update"})
+			Error(c, http.StatusBadRequest, "no fields to update")
 			return
 		}
 		if err := db.Transaction(func(tx *gorm.DB) error {
@@ -797,7 +794,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			return tx.Model(&locked).Updates(updates).Error
 		}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// Reload to get updated record with new timestamps
@@ -806,7 +803,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		// Emit config change for the node
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(ch.ID))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": ch})
+		Success(c, ch)
 	})
 
 	// Delete a channel
@@ -827,21 +824,21 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return tx.Delete(&ch).Error
 		}); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+				Error(c, http.StatusNotFound, "channel not found")
 			} else {
-				c.JSON(http.StatusConflict, gin.H{"code": 409, "message": err.Error()})
+				Error(c, http.StatusConflict, err.Error())
 			}
 			return
 		}
 		// Emit config change
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(ch.ID))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"deleted": id}})
+		SuccessMsg(c, gin.H{"deleted": id}, "deleted")
 	})
 
 	// Channel write (send raw data)
 	v1.POST("/channels/:channel_id/write", func(c *gin.Context) {
 		if !controlPolicy.rawWritesEnabled() {
-			c.JSON(http.StatusGone, gin.H{"code": 410, "message": "raw channel writes are disabled; use an audited device action"})
+			Error(c, http.StatusGone, "raw channel writes are disabled; use an audited device action")
 			return
 		}
 
@@ -852,7 +849,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			HexMode bool   `json:"hex_mode"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Decode data (hex or raw)
@@ -861,7 +858,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			var err error
 			data, err = hex.DecodeString(req.Data)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid hex data"})
+				Error(c, http.StatusBadRequest, "invalid hex data")
 				return
 			}
 		} else {
@@ -870,11 +867,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		// Look up channel to get node_id
 		var ch models.Channel
 		if err := db.First(&ch, channelID).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "channel not found"})
+			Error(c, http.StatusNotFound, "channel not found")
 			return
 		}
 		if err := validateTransportChannel(&ch); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		// Send WriteCommand via pending write (with 10s timeout)
@@ -883,17 +880,14 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		defer cancel()
 		resp, err := nodeMgr.PendingWrite().SendWriteCommand(ctx, deviceID, uint32(channelID), data, 0, 10*time.Second)
 		if err != nil {
-			c.JSON(http.StatusGatewayTimeout, gin.H{"code": 504, "message": err.Error()})
+			Error(c, http.StatusGatewayTimeout, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": gin.H{
-				"channel_id": channelID,
-				"success":    resp.Success,
-				"error_code": resp.ErrorCode,
-				"error_msg":  resp.ErrorMsg,
-			},
+		Success(c, gin.H{
+			"channel_id": channelID,
+			"success":    resp.Success,
+			"error_code": resp.ErrorCode,
+			"error_msg":  resp.ErrorMsg,
 		})
 	})
 
@@ -940,15 +934,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				Error(c, http.StatusInternalServerError, "failed to trigger Modbus scan: "+err.Error())
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"message": "ok",
-				"data": gin.H{
-					"channel_id": channelID,
-					"scan_type":  "modbus",
-					"request_id": requestID,
-					"message":    "Modbus 扫描已触发，等待结果",
-				},
+			Success(c, gin.H{
+				"channel_id": channelID,
+				"scan_type":  "modbus",
+				"request_id": requestID,
+				"message":    "Modbus 扫描已触发，等待结果",
 			})
 		} else {
 			// I2C scan: use existing SendScanRequest
@@ -957,15 +947,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				Error(c, http.StatusInternalServerError, "failed to trigger I2C scan: "+err.Error())
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"message": "ok",
-				"data": gin.H{
-					"channel_id": channelID,
-					"scan_type":  "i2c",
-					"request_id": fmt.Sprintf("scan-%d", time.Now().Unix()),
-					"message":    "I2C 扫描已触发，等待结果",
-				},
+			Success(c, gin.H{
+				"channel_id": channelID,
+				"scan_type":  "i2c",
+				"request_id": fmt.Sprintf("scan-%d", time.Now().Unix()),
+				"message":    "I2C 扫描已触发，等待结果",
 			})
 		}
 	})
@@ -978,7 +964,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			ClockHz  int `json:"clock_hz"`
 		}
 		c.ShouldBindJSON(&req)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"status": "reconfigured", "request_id": fmt.Sprintf("reconf-%s-%d", id, time.Now().Unix())}})
+		Success(c, gin.H{"status": "reconfigured", "request_id": fmt.Sprintf("reconf-%s-%d", id, time.Now().Unix())})
 	})
 
 	// Device config tree (driver hierarchy: OEM → Category → Driver)
@@ -1070,7 +1056,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			tree = append(tree, oemNode)
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tree})
+		Success(c, tree)
 	})
 }
 
