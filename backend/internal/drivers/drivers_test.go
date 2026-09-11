@@ -625,18 +625,19 @@ func TestRegistry_RegisterOverwrite(t *testing.T) {
 	}
 }
 
-// === Global registry ===
+// === Built-in driver registration ===
 
-func TestGlobalRegistry(t *testing.T) {
+func TestBuiltInDrivers_GenericEntryPointRegistersFullSet(t *testing.T) {
 	// The generic path must register the complete built-in set.
-	RegisterBuiltInDrivers(GlobalRegistry())
+	registry := NewRegistry()
+	RegisterBuiltInDrivers(registry)
 
-	types := List()
+	types := registry.List()
 	if len(types) < 6 {
-		t.Errorf("expected at least 6 global drivers, got %d", len(types))
+		t.Errorf("expected at least 6 built-in drivers, got %d", len(types))
 	}
 
-	driver, err := Get("bmp280")
+	driver, err := registry.Get("bmp280")
 	if err != nil {
 		t.Fatalf("Get bmp280: %v", err)
 	}

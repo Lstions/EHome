@@ -928,66 +928,6 @@ func TestEdgeDevice_ChangeAddress_DeviceNotFound(t *testing.T) {
 	}
 }
 
-// ==================== getTemplateParamsFromDeviceConfig Tests ====================
-
-func TestGetTemplateParamsFromDeviceConfig_Modbus(t *testing.T) {
-	dc := models.DeviceConfig{
-		Connection: json.RawMessage(`{"protocol":"modbus","default_params":{"start_register":0,"register_count":2}}`),
-	}
-	writeData, readLength, _ := getTemplateParamsFromDeviceConfig(dc, "3")
-	if writeData == "" {
-		t.Error("expected non-empty writeData for Modbus device config")
-	}
-	if readLength == 0 {
-		t.Error("expected non-zero readLength")
-	}
-}
-
-func TestGetTemplateParamsFromDeviceConfig_I2C(t *testing.T) {
-	dc := models.DeviceConfig{
-		DeviceType: "bmp280",
-		Connection: json.RawMessage(`{"protocol":"i2c","default_params":{"read_register":"F7"}}`),
-	}
-	writeData, readLength, _ := getTemplateParamsFromDeviceConfig(dc, "")
-	if writeData == "" {
-		t.Error("expected non-empty writeData for I2C device config")
-	}
-	if readLength == 0 {
-		t.Error("expected non-zero readLength for I2C")
-	}
-}
-
-func TestGetTemplateParamsFromDeviceConfig_NilConnection(t *testing.T) {
-	dc := models.DeviceConfig{}
-	writeData, readLength, delayMs := getTemplateParamsFromDeviceConfig(dc, "")
-	if writeData != "" {
-		t.Error("expected empty writeData for nil connection")
-	}
-	if readLength != 0 || delayMs != 0 {
-		t.Error("expected zero for nil connection")
-	}
-}
-
-func TestGetTemplateParamsFromDeviceConfig_UnknownProtocol(t *testing.T) {
-	dc := models.DeviceConfig{
-		Connection: json.RawMessage(`{"protocol":"unknown"}`),
-	}
-	writeData, _, _ := getTemplateParamsFromDeviceConfig(dc, "")
-	if writeData != "" {
-		t.Error("expected empty writeData for unknown protocol")
-	}
-}
-
-func TestGetTemplateParamsFromDeviceConfig_InvalidJSON(t *testing.T) {
-	dc := models.DeviceConfig{
-		Connection: json.RawMessage(`not json`),
-	}
-	writeData, _, _ := getTemplateParamsFromDeviceConfig(dc, "")
-	if writeData != "" {
-		t.Error("expected empty writeData for invalid JSON")
-	}
-}
-
 // ==================== DeviceConfig-optional (driver fallback) tests ====================
 
 func TestEdgeDevice_Create_WithoutDeviceConfigID(t *testing.T) {

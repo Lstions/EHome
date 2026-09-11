@@ -32,8 +32,8 @@ var executeLimiter = make(chan struct{}, 20)
 
 // createTemplatesFromDriver creates ConfigTemplates from the device driver's
 // CommandTemplates (single source of truth).  Devices without a registered
-// driver get no templates — the legacy getTemplateParamsFromDeviceConfig
-// fallback has been superseded by GenericModbusDriver / GenericI2CDriver.
+// driver get no templates — that legacy DeviceConfig-derived fallback has been
+// superseded by GenericModbusDriver / GenericI2CDriver.
 func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
 	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
@@ -90,59 +90,6 @@ func createSingleTemplate(tx *gorm.DB, ch *models.Channel, edgeDeviceID uint, wr
 	}
 	logger.Infof("[edge-device-create] ConfigTemplate id=%d tx_hex_chars=%d channel=%d", tmpl.ID, len(writeData), ch.ID)
 	return nil
-}
-
-// getTemplateParamsFromDeviceConfig attempts to derive ConfigTemplate parameters
-// from a DeviceConfig's Connection JSONB field. Returns ("", 0, 0) if no params can be derived.
-//
-// Deprecated: Superseded by GenericModbusDriver / GenericI2CDriver. createTemplatesFromDriver
-// no longer calls this function — register a driver (generic or dedicated) instead.
-// Retained only for the transitional test suite in handler_edge_device_crud_test.go.
-func getTemplateParamsFromDeviceConfig(dc models.DeviceConfig, hardwareID string) (string, uint32, uint32) {
-	if dc.Connection == nil {
-		return "", 0, 0
-	}
-
-	var conn map[string]interface{}
-	if err := json.Unmarshal(dc.Connection, &conn); err != nil {
-		return "", 0, 0
-	}
-
-	protocol, _ := conn["protocol"].(string)
-	switch strings.ToLower(protocol) {
-	case "modbus", "modbus-rtu", "uart":
-		// Modbus RTU: build read holding registers command
-		slaveAddr := uint8(1)
-		if v := parseHardwareIDUint(hardwareID); v > 0 && v <= 247 {
-			slaveAddr = uint8(v)
-		}
-		// Check for custom params in connection.default_params
-		startReg := uint16(0)
-		regCount := uint16(2)
-		if dp, ok := conn["default_params"].(map[string]interface{}); ok {
-			if sr, ok := dp["start_register"].(float64); ok {
-				startReg = uint16(sr)
-			}
-			if rc, ok := dp["register_count"].(float64); ok {
-				regCount = uint16(rc)
-			}
-		}
-		writeData := fmt.Sprintf("%02X03%04X%04X", slaveAddr, startReg, regCount)
-		readLength := uint32(3 + regCount*2 + 2) // addr + func + byte_count + data + CRC
-		return writeData, readLength, 100
-
-	case "i2c":
-		// I2C: use register address from connection.default_params
-		if dp, ok := conn["default_params"].(map[string]interface{}); ok {
-			if addr, ok := dp["read_register"].(string); ok {
-				return addr, 6, 100
-			}
-		}
-		return "", 0, 0
-
-	default:
-		return "", 0, 0
-	}
 }
 
 // parseHardwareIDUint converts a hardware ID string to uint64.

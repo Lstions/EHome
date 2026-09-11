@@ -67,29 +67,6 @@ func (r *Registry) List() []string {
 	return types
 }
 
-// Global registry instance
-var globalRegistry = NewRegistry()
-
-// GlobalRegistry returns the process-wide driver registry.
-func GlobalRegistry() *Registry {
-	return globalRegistry
-}
-
-// Register registers a driver globally
-func Register(driver Driver) {
-	globalRegistry.Register(driver)
-}
-
-// Get gets a driver from global registry
-func Get(deviceType string) (Driver, error) {
-	return globalRegistry.Get(deviceType)
-}
-
-// List lists all drivers in global registry
-func List() []string {
-	return globalRegistry.List()
-}
-
 // CalibrationAwareDriver is implemented by drivers whose raw samples are
 // uninterpretable without per-device calibration data.
 type CalibrationAwareDriver interface {

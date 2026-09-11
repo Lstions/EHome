@@ -13,8 +13,8 @@ import (
 // through the CommandTemplateProvider interface; devices needing non-default
 // parameters should register a dedicated driver (e.g. BMP280Driver).
 //
-// This driver replaces the legacy getTemplateParamsFromDeviceConfig I2C
-// fallback (including the former bmp280 special case) in the API layer
+// This driver replaces the legacy DeviceConfig-derived I2C fallback
+// (including the former bmp280 special case) in the API layer
 // (handler_edge_device.go), unifying template creation onto the driver
 // registry as the single source of truth.
 type GenericI2CDriver struct{}

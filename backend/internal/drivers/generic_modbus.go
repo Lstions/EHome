@@ -15,7 +15,7 @@ import (
 // through the CommandTemplateProvider interface; devices needing non-default
 // parameters should register a dedicated driver.
 //
-// This driver replaces the legacy getTemplateParamsFromDeviceConfig fallback
+// This driver replaces the legacy DeviceConfig-derived fallback
 // in the API layer (handler_edge_device.go), unifying template creation onto
 // the driver registry as the single source of truth.
 type GenericModbusDriver struct{}

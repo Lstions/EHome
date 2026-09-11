@@ -886,7 +886,7 @@ func RegisterBuiltInDriversWithParsers(registry *Registry, parserConfigs map[str
 	registry.Register(&TechfineInverterDriver{})
 
 	// Generic protocol-level drivers — replace the legacy
-	// getTemplateParamsFromDeviceConfig fallback in the API layer.
+	// DeviceConfig-derived fallback in the API layer.
 	// They only provide CommandTemplates; ParseData fails closed so
 	// device-specific parsing still routes through ConfigParser / dedicated drivers.
 	registry.Register(&GenericModbusDriver{})
