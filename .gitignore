@@ -76,3 +76,7 @@ backend/f6-env-dev.env
 
 # Git worktrees
 .worktrees/
+
+# 数据库备份产物（pg_dump/校验文件，不入库）
+backups/
+*.dump

@@ -25,6 +25,8 @@
 #   make lint           - 运行全部 lint
 #   make status         - 查看服务状态
 #   make logs           - 查看后端日志 (LOGS=frontend 查看前端)
+#   make backup         - PostgreSQL 备份（pg_dump custom + TOC 自校验，产物在 backups/）
+#   make restore        - 恢复到指定库（DUMP=<文件> DB=<库名>；生产库需 FORCE=1）
 #   make clean          - 停止本机前后端并清理日志（不删统一基础设施/数据卷）
 #
 # 说明：
@@ -78,7 +80,7 @@ FRONTEND_COVERAGE_THRESHOLD ?= 25
         test test-backend test-frontend test-integration test-coverage \
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
-        status logs clean help
+        status logs backup restore clean help
 
 # ---- 一键启动统一环境 ----
 dev: up ## 启动统一环境（历史兼容别名）
@@ -332,6 +334,25 @@ status: ## 查看服务状态
 # ---- 日志 ----
 logs: ## 查看后端日志 (LOGS=frontend 查看前端)
 	@tail -f $(LOG_DIR)/$(or $(LOGS),backend).log
+
+# ---- 数据库备份/恢复（scripts/backup_pg.sh、scripts/restore_pg.sh）----
+backup: ## PostgreSQL 备份（BACKUP_DIR=./backups BACKUP_KEEP=7 可调）
+	@COMPOSE_FILE=$(ROOT)/docker-compose.yml \
+		POSTGRES_USER=$(POSTGRES_USER) POSTGRES_DB=$(POSTGRES_DB) \
+		bash $(ROOT)/scripts/backup_pg.sh
+
+DUMP ?=
+DB   ?=
+RESTORE_FLAGS := $(if $(filter 1 true yes,$(FORCE)),--force,) $(if $(filter 1 true yes,$(DROP)),--drop,)
+restore: ## 恢复：make restore DUMP=backups/xxx.dump DB=临时库（生产库需 FORCE=1）
+	@if [ -z "$(DUMP)" ] || [ -z "$(DB)" ]; then \
+		echo "用法: make restore DUMP=<dump文件> DB=<目标库> [DROP=1] [FORCE=1]"; \
+		echo "  演练请指定临时库名（如 DB=ehome_restore_drill），恢复进 $(POSTGRES_DB) 需 FORCE=1"; \
+		exit 1; \
+	fi
+	@COMPOSE_FILE=$(ROOT)/docker-compose.yml \
+		POSTGRES_USER=$(POSTGRES_USER) POSTGRES_DB=$(POSTGRES_DB) \
+		bash $(ROOT)/scripts/restore_pg.sh "$(DUMP)" "$(DB)" $(RESTORE_FLAGS)
 
 # ---- 清理 ----
 clean: ## 停止本机前后端并清理日志（不删除统一基础设施/数据卷）
