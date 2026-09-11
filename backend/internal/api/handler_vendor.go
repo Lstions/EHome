@@ -38,7 +38,10 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 		vendor := models.Vendor{Name: dto.Name}
-		db.Create(&vendor)
+		if err := db.Create(&vendor).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to create vendor"})
+			return
+		}
 		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": vendor})
 	})
 	v1.PUT("/vendors/:id", func(c *gin.Context) {

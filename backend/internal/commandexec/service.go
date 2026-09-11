@@ -30,6 +30,7 @@ var (
 	ErrInvalidResolution    = errors.New("manual resolution is invalid")
 	ErrNotResolvable        = errors.New("execution is not unknown")
 	ErrAlreadyResolved      = errors.New("execution already has a different manual resolution")
+	ErrInvalidRequest       = errors.New("invalid command request")
 )
 
 const (
@@ -441,7 +442,7 @@ func reasonForGate(name gateName) string {
 func (s *Service) Create(ctx context.Context, in CreateInput) (*models.CommandExecution, bool, error) {
 	if in.EdgeDeviceID == 0 || in.ActorUserID == 0 || strings.TrimSpace(in.ActionID) == "" || !validIdempotencyKey(in.IdempotencyKey) {
 		metrics.DeviceActionAdmissionTotal.WithLabelValues("invalid").Inc()
-		return nil, false, fmt.Errorf("invalid command request")
+		return nil, false, ErrInvalidRequest
 	}
 	var result models.CommandExecution
 	replayed := false

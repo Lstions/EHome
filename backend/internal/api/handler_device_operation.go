@@ -72,6 +72,8 @@ func registerDeviceOperationRoutes(v1 *gin.RouterGroup, service *commandexec.Ser
 			Error(c, http.StatusConflict, "action unavailable")
 		case errors.Is(err, commandexec.ErrInvalidParams):
 			Error(c, http.StatusBadRequest, "invalid action parameters")
+		case errors.Is(err, commandexec.ErrInvalidRequest):
+			Error(c, http.StatusBadRequest, "invalid command request")
 		case errors.Is(err, commandexec.ErrConfirmationRequired), errors.Is(err, commandexec.ErrConfirmationInvalid):
 			Error(c, http.StatusConflict, "valid confirmation is required")
 		case errors.Is(err, commandexec.ErrRecentAuthRequired):

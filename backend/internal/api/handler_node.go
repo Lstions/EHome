@@ -134,7 +134,11 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		node := models.Node{NodeID: dto.NodeID, Name: dto.Name, Config: dto.Config}
 		if err := db.Create(&node).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			if isUniqueConstraintError(err) {
+				c.JSON(http.StatusConflict, gin.H{"error": "node_id already exists"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
 			return
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.NodeID, fmt.Sprint(node.ID))
@@ -168,11 +172,17 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			updates["config"] = *dto.Config
 		}
 		if len(updates) > 0 {
-			db.Model(node).Updates(updates)
+			if err := db.Model(node).Updates(updates).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
+				return
+			}
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, fmt.Sprint(node.ID))
 		// Reload node to get updated fields
-		db.First(node, node.ID)
+		if err := db.First(node, node.ID).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload node"})
+			return
+		}
 		Success(c, node)
 	})
 

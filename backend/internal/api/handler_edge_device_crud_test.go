@@ -649,8 +649,8 @@ func TestEdgeDevice_Delete_NonExistent(t *testing.T) {
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for delete of nonexistent, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for delete of nonexistent, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

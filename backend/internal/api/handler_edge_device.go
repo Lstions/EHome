@@ -801,6 +801,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
 			return
 		}
@@ -1302,7 +1306,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				if errors.Is(err, context.DeadlineExceeded) {
 					Error(c, http.StatusGatewayTimeout, "device did not respond")
 				} else if errors.Is(err, context.Canceled) {
-					Error(c, 499, "client disconnected")
+					Error(c, http.StatusRequestTimeout, "client disconnected")
 				} else {
 					Error(c, http.StatusInternalServerError, "command failed: "+err.Error())
 				}
