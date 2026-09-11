@@ -60,7 +60,7 @@ describe('GenericDeviceDetail.vue', () => {
   })
 
   it('uses route id, composable state, back navigation, and device type label contracts', () => {
-    expect(source).toContain('const deviceId = ref(Number(route.params.id) || null)')
+    expect(source).toContain('const deviceId = ref(Number(route.params.id) || 0)')
     expect(source).toContain('const goBack = () => router.back()')
     expect(source).toContain('const deviceTypeText = computed(() => device.value ? getDeviceTypeLabel(device.value.device_type) : \'\')')
     expect(source).toContain('fetchDeviceDetail()')

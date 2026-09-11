@@ -48,7 +48,9 @@ import { computed } from 'vue'
 import { THEME_COLORS } from '@/utils/theme'
 
 const props = defineProps<{
-  latestData: Record<string, any>
+  // 后端实时数据可能尚未到达（此时为 null），组件内部已按 `!props.latestData` 兜底；
+  // 类型上放开 null 以与实际运行时形态一致。
+  latestData: Record<string, any> | null
 }>()
 
 const TEMP_FIELDS: Array<{ key: string; label: string }> = [
@@ -62,24 +64,27 @@ const TEMP_FIELDS: Array<{ key: string; label: string }> = [
 ]
 
 const hasTempData = computed(() => {
-  if (!props.latestData) return false
-  return TEMP_FIELDS.some(f => props.latestData[f.key] !== undefined)
+  const data = props.latestData
+  if (!data) return false
+  return TEMP_FIELDS.some(f => data[f.key] !== undefined)
 })
 
 const hasFanData = computed(() => {
-  if (!props.latestData) return false
-  return props.latestData.fan1_speed !== undefined || props.latestData.fan2_speed !== undefined ||
-    props.latestData.fan1_status !== undefined || props.latestData.fan2_status !== undefined
+  const data = props.latestData
+  if (!data) return false
+  return data.fan1_speed !== undefined || data.fan2_speed !== undefined ||
+    data.fan1_status !== undefined || data.fan2_status !== undefined
 })
 
 const tempItems = computed(() => {
-  if (!props.latestData) return []
+  const data = props.latestData
+  if (!data) return []
   return TEMP_FIELDS
-    .filter(f => props.latestData[f.key] !== undefined)
+    .filter(f => data[f.key] !== undefined)
     .map(f => ({
       key: f.key,
       label: f.label,
-      value: props.latestData[f.key],
+      value: data[f.key],
     }))
 })
 

@@ -375,7 +375,7 @@
                 type="danger"
                 text
                 size="small"
-                @click="handleCancelOTA(row)"
+                @click="handleCancelOTA(asOTARecord(row))"
               >
                 取消
               </el-button>
@@ -441,6 +441,7 @@ import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { DmaState, dmaStateText, dmaStateClass, dmaStateTagType } from '@/utils/dmaState'
+import type { TagType } from '@/utils/tagType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 const router = useRouter()
@@ -569,15 +570,16 @@ const syncStateLabel = computed(() => {
   }[s as string] || '未知'
 })
 
-const syncStateTagType = computed(() => {
+const syncStateTagType = computed<TagType>(() => {
   if (collector.value?.status === 'offline') return 'info'
-  return {
+  const map: Record<string, TagType> = {
     in_sync: 'success',
     syncing: 'warning',
     lag: 'danger',
     error: 'danger',
     unknown: 'info',
-  }[collector.value?.config_sync_state as string] || 'info'
+  }
+  return map[collector.value?.config_sync_state as string] ?? 'info'
 })
 
 const getDeviceTypeText = (type: string) => {
@@ -735,6 +737,9 @@ const handleSyncConfig = async () => {
   }
 }
 
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄。 */
+const asOTARecord = (row: unknown) => row as OTARecord
+
 const handleCancelOTA = async (record: OTARecord) => {
   const id = collectorId.value
   const operation = componentOperationGeneration
@@ -760,8 +765,8 @@ const handleCancelOTA = async (record: OTARecord) => {
   }
 }
 
-const getOTAStatusType = (status: string) => {
-  const types: Record<string, string> = {
+const getOTAStatusType = (status: string): TagType => {
+  const types: Record<string, TagType> = {
     pending: 'info',
     downloading: 'warning',
     installing: 'warning',

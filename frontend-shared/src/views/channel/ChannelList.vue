@@ -145,7 +145,7 @@
             type="primary"
             text
             size="small"
-            @click.stop="goToNodeDetail(row)"
+            @click.stop="goToNodeDetail(asChannel(row))"
           >
             查看节点
           </el-button>
@@ -236,20 +236,21 @@ const nodeOptions = computed(() => cachedNodes.value)
 
 // 节点名称映射
 const nodeMap = computed(() => {
-  const map = new Map<number, any>()
+  const map = new Map<string, any>()
   for (const node of cachedNodes.value) {
-    map.set(node.id, node)
+    // node_id 后端可能是数字或物理序列号字符串，统一按字符串键索引
+    map.set(String(node.id), node)
   }
   return map
 })
 
-function getNodeName(nodeId: number): string {
-  const node = nodeMap.value.get(nodeId)
+function getNodeName(nodeId: number | string): string {
+  const node = nodeMap.value.get(String(nodeId))
   return node?.name || `节点 #${nodeId}`
 }
 
-function getNodeStatus(nodeId: number): string {
-  const node = nodeMap.value.get(nodeId)
+function getNodeStatus(nodeId: number | string): string {
+  const node = nodeMap.value.get(String(nodeId))
   return node?.status || 'unknown'
 }
 
@@ -312,6 +313,9 @@ function handleFilter() {
 function goToNodeDetail(row: Channel) {
   router.push({ name: 'NodeDetail', params: { id: row.node_id } })
 }
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asChannel = (row: unknown) => row as Channel
 
 // 数据加载
 async function refreshData() {

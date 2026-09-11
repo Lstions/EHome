@@ -80,7 +80,7 @@
         </el-table-column>
         <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="primary" size="small" @click="openEdit(asLogical(row))">编辑</el-button>
           </template>
         </el-table-column>
         <template #empty>
@@ -278,6 +278,9 @@ import {
   type MergeConflict,
 } from '@/api/logicalDevice'
 import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asLogical = (row: unknown) => row as LogicalDeviceItem
 
 const router = useRouter()
 const route = useRoute()

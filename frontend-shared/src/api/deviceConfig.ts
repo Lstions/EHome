@@ -68,12 +68,14 @@ export interface CreateDeviceConfigParams {
 }
 
 export interface UpdateDeviceConfigParams {
+  // 后端 PUT /device-configs/:id 是"以当前行为底做 JSON 合并"的局部更新：只有 name 强制要求，
+  // 其余字段缺失即保持原值。因此这里不能声明成必填，否则调用方只能伪造整份 payload。
   name: string
   description?: string
-  device_type: string
+  device_type?: string
   protocol?: 'modbus' | 'stream' | 'custom' | ''
-  hardware_type: 'uart' | 'i2c' | 'spi' | 'adc'
-  config: Record<string, any>
+  hardware_type?: 'uart' | 'i2c' | 'spi' | 'adc'
+  config?: Record<string, any>
   operations?: Record<string, OperationDef>
   is_default?: boolean
   status?: string

@@ -690,7 +690,7 @@ const appendRealtimeData = (payload: RealtimeDataPayload) => {
   }
 }
 
-const toggleRealtime = (enabled: boolean) => {
+const toggleRealtime = (enabled: string | number | boolean) => {
   if (enabled) {
     // 订阅实时数据
     unsubscribeData = wsStore.subscribe(WS_EVENT.DATA_UPDATE, handleDataUpdate)
@@ -795,8 +795,9 @@ const formatData = (data: Record<string, unknown>) => {
     .map(([key, value]) => {
       // 支持 {value, unit} 格式
       if (typeof value === 'object' && value !== null && 'value' in value) {
-        const val = value.value
-        const unit = value.unit || ''
+        const entry = value as { value: unknown; unit?: unknown }
+        const val = entry.value
+        const unit = typeof entry.unit === 'string' ? entry.unit : ''
         if (typeof val === 'number') {
           return `${key}: ${val.toFixed(2)} ${unit}`.trim()
         }

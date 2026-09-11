@@ -25,7 +25,9 @@ import { computed } from 'vue'
 import { Sunrise, Calendar, DataAnalysis, TrendCharts } from '@element-plus/icons-vue'
 
 defineProps<{
-  latestData: Record<string, any>
+  // 后端实时数据可能尚未到达（此时为 null），模板已按可选链兜底；
+  // 类型上放开 null 以与实际运行时形态一致。
+  latestData: Record<string, any> | null
 }>()
 
 const energyItems = computed(() => [

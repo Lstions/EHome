@@ -144,7 +144,7 @@
         <el-table-column prop="status" label="状态" width="90">
           <template #default="{ row }">
             <el-tag 
-              :type="statusTagType(row.status)" 
+              :type="statusTagType(row.status)"  
               size="small"
               effect="dark">
               {{ statusLabel(row.status) }}
@@ -170,7 +170,7 @@
             <el-button size="small" @click="handleEdit(row)">
               <el-icon><Edit /></el-icon>
             </el-button>
-            <el-button size="small" type="danger" text @click="handleDelete(row)">
+            <el-button size="small" type="danger" text @click="handleDelete(asDevice(row))">
               <el-icon><Delete /></el-icon>
             </el-button>
           </template>
@@ -369,7 +369,7 @@
               <h4>{{ parser.name }}</h4>
               <p class="parser-vendor">{{ parser.vendor }}</p>
               <div class="parser-tags">
-                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus) as any">
+                <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus)">
                   {{ bus.toUpperCase() }}
                 </el-tag>
               </div>
@@ -599,6 +599,10 @@ import CreateWizardCommandIntervals from '@/components/device/CreateWizardComman
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { getHardwareTagType } from '@/utils/hardwareTag'
+import type { TagType } from '@/utils/tagType'
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asDevice = (row: unknown) => row as EdgeDevice
 import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
 import { useDeviceDelete } from '@/composables/useDeviceDelete'
 
@@ -1080,7 +1084,7 @@ const getDeviceTypeLabel = (type: string) => {
 }
 
 // Health status tag type mapping (Element Plus tag types)
-function statusTagType(status: string): string {
+function statusTagType(status: string): TagType {
   switch (status) {
     case 'active': return 'success'
     case 'online': return 'success'
@@ -1305,7 +1309,7 @@ const handleCreate = async () => {
         : frozenNewChannel.address
 
       const channelPayload = {
-        hardware_type: frozenNewChannel.hardware_type as any,
+        hardware_type: toChannelHardwareType(frozenNewChannel.hardware_type),
         hardware_id: frozenNewChannel.hardware_id,
         address: address || undefined,
         config: {
@@ -1337,21 +1341,28 @@ const handleCreate = async () => {
       assertSessionGeneration(sessionGeneration)
       if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       // Refresh channel store to pick up the newly-created channel
-      await channelStore.fetchChannels(frozenDeviceForm.node_id)
+      await channelStore.fetchChannels(frozenDeviceForm.node_id ?? undefined)
       // No downstream targetChannel/channelId are needed on the inline path —
       // the channel was created server-side inside the device-create tx and
       // is now visible via fetchChannels. Keep targetChannel as the form data
       // (no id) only to satisfy the existing-channel branch's type contract.
-      targetChannel = { ...frozenNewChannel } as Channel
+      targetChannel = {
+        node_id: String(frozenDeviceForm.node_id ?? ''),
+        hardware_type: toChannelHardwareType(frozenNewChannel.hardware_type),
+        hardware_id: frozenNewChannel.hardware_id,
+        address: frozenNewChannel.address || undefined,
+        interval_ms: frozenNewChannel.interval_ms,
+        config: {},
+      }
     } else if (frozenSelectedChannel) {
       channelId = frozenSelectedChannel.id
       targetChannel = frozenSelectedChannel
 
       // 已有通道场景：如果 channel.config 没有 device_type，补上
-      if (!targetChannel.config?.device_type && targetChannel.id) {
+      if (!channelConfigObject(targetChannel).device_type && targetChannel.id) {
         await channelStore.updateChannel(targetChannel.id, {
           config: JSON.stringify({
-            ...targetChannel.config,
+            ...channelConfigObject(targetChannel),
             device_type: frozenParser.id,
           }),
         })
@@ -1422,7 +1433,27 @@ const resetCreateDialog = () => {
   newChannel.interval_ms = 1000
 }
 
-const formatRelativeTime = (time: string) => {
+/** 归一化硬件类型到 Channel 契约（UI 表单是宽松 string，此处按白名单收窄，非法值回退 i2c）。 */
+const toChannelHardwareType = (value: string): Channel['hardware_type'] => {
+  const lower = value.toLowerCase()
+  return lower === 'uart' || lower === 'i2c' || lower === 'spi' || lower === 'adc'
+    ? (lower as Channel['hardware_type'])
+    : 'i2c'
+}
+
+/** 读通道 config 的对象形态（后端 Channel.Config 是 text 列，可能返回 JSON 字符串）。 */
+const channelConfigObject = (ch: Channel): { device_type?: string; [key: string]: unknown } => {
+  if (typeof ch.config === 'string') {
+    try {
+      return JSON.parse(ch.config) ?? {}
+    } catch {
+      return {}
+    }
+  }
+  return ch.config ?? {}
+}
+
+const formatRelativeTime = (time: string | null | undefined) => {
   if (!time) return '-'
   const now = new Date()
   const date = new Date(time)

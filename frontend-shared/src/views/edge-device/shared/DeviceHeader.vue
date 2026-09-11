@@ -1,5 +1,5 @@
 <template>
-  <PageHeader class="device-page-header" :title="title" :show-back="true" @back="$emit('back')">
+  <PageHeader class="device-page-header" :title="title ?? ''" :show-back="true" @back="$emit('back')">
     <template #extra>
       <div class="header-actions">
         <div class="header-actions-group">

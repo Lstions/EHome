@@ -32,7 +32,9 @@ import StatusItemGrid from '@/components/common/StatusItemGrid.vue'
 import type { StatusItem } from '@/components/common/StatusItemGrid.vue'
 
 const props = defineProps<{
-  latestData: Record<string, any>
+  // 后端实时数据可能尚未到达（此时为 null），组件内部已按 `!props.latestData` 兜底；
+  // 类型上放开 null 以与实际运行时形态一致。
+  latestData: Record<string, any> | null
 }>()
 
 // Work mode decoding: numeric encoding from backend
@@ -85,13 +87,14 @@ const ALARM_FIELDS: Array<{ key: string; label: string }> = [
 ]
 
 const alarmItems = computed<StatusItem[]>(() => {
-  if (!props.latestData) return []
+  const data = props.latestData
+  if (!data) return []
   return ALARM_FIELDS
-    .filter(f => props.latestData[f.key] !== undefined)
+    .filter(f => data[f.key] !== undefined)
     .map(f => ({
       key: f.key,
       label: f.label,
-      active: props.latestData[f.key] === 1 || props.latestData[f.key] > 0,
+      active: data[f.key] === 1 || data[f.key] > 0,
     }))
 })
 </script>

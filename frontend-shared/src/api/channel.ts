@@ -9,6 +9,7 @@ export interface Channel {
   // 后端 hardware_type 回大写（UART/I2C/…），历史小写声明是类型债，两侧都保留。
   hardware_type: 'uart' | 'i2c' | 'spi' | 'adc' | 'UART' | 'I2C' | 'SPI' | 'ADC'
   hardware_id: string            // "I2C0"
+  interval_ms?: number      // 后端 Channel.IntervalMs（json: interval_ms）
   bus_type?: string         // 后端 Channel.BusType（json: bus_type），如 "UART"
   bus_config?: string       // 后端 Channel.BusConfig（引脚/速率等 hex 串）
   enabled?: boolean         // 后端 Channel.Enabled

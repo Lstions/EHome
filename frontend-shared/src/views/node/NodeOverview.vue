@@ -184,7 +184,7 @@
                 <el-icon :size="13"><Odometer /></el-icon>
               </span>
               <span class="metric-name">空闲堆内存</span>
-              <span class="metric-val" v-if="node.free_heap_bytes > 0">{{ freeHeapText }}<span class="metric-unit"> KB</span></span>
+              <span class="metric-val" v-if="(node.free_heap_bytes ?? 0) > 0">{{ freeHeapText }}<span class="metric-unit"> KB</span></span>
               <span class="metric-val dim" v-else>—</span>
             </div>
             <div class="metric-row">
@@ -446,7 +446,7 @@
               </div>
               <div class="bus-create-actions">
                 <button class="btn btn-plain" :disabled="!selectedResource" @click="selectedResourceId = ''">取消选择</button>
-                <button class="btn btn-primary" :disabled="nodeOffline || !selectedResource || selectedResource.enabled === false || !busSupportsChannels" @click="openChannelManager(selectedResource)">{{ busSupportsChannels ? '新建通道' : '此资源不支持通道' }}</button>
+                <button class="btn btn-primary" :disabled="nodeOffline || !selectedResource || selectedResource.enabled === false || !busSupportsChannels" @click="selectedResource ? openChannelManager(selectedResource) : undefined">{{ busSupportsChannels ? '新建通道' : '此资源不支持通道' }}</button>
               </div>
             </section>
           </aside>
@@ -1025,8 +1025,11 @@ function otaProgressText(record: OTARecord): string {
   return `${Math.min(100, Math.max(0, progress))}%`
 }
 
+// 位掩码表只覆盖有掩码位的总线类型；gpio/pwm/adc 无掩码位（索引结果为 undefined → 走 || 0）。
+const BUS_TYPE_MASKS: Partial<Record<BusType, number>> = { uart: 1, i2c: 2, spi: 4 }
+
 function busTypeMask(type: BusType): number {
-  return { uart: 1, i2c: 2, spi: 4 }[type] || 0
+  return BUS_TYPE_MASKS[type] || 0
 }
 
 function resourceMountedChannels(resource: BusResource): Channel[] {
@@ -1041,7 +1044,8 @@ function canonicalHardwareId(type: BusType, rawId: unknown): number | null {
   if (/^\d+$/.test(raw)) return Number(raw)
   const index = Number(raw.replace(/\D/g, ''))
   if (!Number.isFinite(index)) return null
-  const base = { i2c: 1, spi: 10, uart: 20, gpio: 30, adc: 40 }[type]
+  // 资源 ID 基数表只覆盖有基数约定的总线类型；pwm 无基数（→ undefined 时直接用索引）。
+  const base = ({ i2c: 1, spi: 10, uart: 20, gpio: 30, adc: 40 } as Partial<Record<BusType, number>>)[type]
   return base === undefined ? index : base + index
 }
 
@@ -1537,7 +1541,7 @@ onMounted(() => {
     if (node.value && message.payload?.status) {
       node.value = {
         ...node.value,
-        status: message.payload.status,
+        status: message.payload.status === 'online' ? 'online' : 'offline',
         uptime_seconds: message.payload.uptime_seconds ?? node.value.uptime_seconds,
       }
     }

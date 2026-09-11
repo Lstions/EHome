@@ -5,6 +5,8 @@
  * 状态值与后端 proto 定义对齐：0=free, 1=allocated, 2=disabled
  */
 
+import type { TagType } from './tagType'
+
 /** DMA 通道状态枚举 */
 export enum DmaState {
   /** 空闲 — 未被任何硬件占用 */
@@ -30,7 +32,7 @@ const DMA_STATE_CLASS: Record<DmaState, string> = {
 }
 
 /** DMA 状态 → Element Plus tag type */
-const DMA_STATE_TAG_TYPE: Record<DmaState, string> = {
+const DMA_STATE_TAG_TYPE: Record<DmaState, TagType> = {
   [DmaState.FREE]: 'info',
   [DmaState.ALLOCATED]: 'success',
   [DmaState.DISABLED]: 'danger',
@@ -44,7 +46,7 @@ export function dmaStateClass(state: number): string {
   return DMA_STATE_CLASS[state as DmaState] ?? ''
 }
 
-export function dmaStateTagType(state: number): string {
+export function dmaStateTagType(state: number): TagType {
   return DMA_STATE_TAG_TYPE[state as DmaState] ?? 'info'
 }
 

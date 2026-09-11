@@ -31,13 +31,13 @@
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: boolean) => onToggle(row, v)" />
+            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="onDelete(row)">删除</el-button>
+            <el-button link type="primary" size="small" @click="openEdit(asRule(row))">编辑</el-button>
+            <el-button link type="danger" size="small" @click="onDelete(asRule(row))">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>暂无规则，点击右上角创建</template>
@@ -133,6 +133,9 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import { useAlertStore } from '@/stores/alert'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asRule = (row: unknown) => row as AlertRule
 
 const store = useAlertStore()
 const devices = ref<EdgeDevice[]>([])

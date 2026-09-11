@@ -179,7 +179,7 @@ import { getDeviceTypeLabel } from '@/utils/deviceType'
 
 const router = useRouter()
 const route = useRoute()
-const deviceId = ref(Number(route.params.id) || null)
+const deviceId = ref(Number(route.params.id) || 0)
 
 const historyChartRef = ref<InstanceType<typeof HistoryChartSection> | null>(null)
 const cellVoltageHistoryRef = ref<InstanceType<typeof BmsCellVoltageHistoryChart> | null>(null)

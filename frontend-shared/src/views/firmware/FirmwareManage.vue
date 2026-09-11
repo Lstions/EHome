@@ -57,16 +57,16 @@
           <el-table-column label="操作" min-width="280" class-name="firmware-action-col">
             <template #default="{ row }">
               <div class="action-buttons">
-                <el-button type="primary" size="small" @click="handleEdit(row)">
+                <el-button type="primary" size="small" @click="handleEdit(asFirmware(row))">
                   <el-icon><Edit /></el-icon> 编辑
                 </el-button>
-                <el-button size="small" @click="handleCopyUrl(row)">
+                <el-button size="small" @click="handleCopyUrl(asFirmware(row))">
                   <el-icon><CopyDocument /></el-icon> 复制链接
                 </el-button>
-                <el-button size="small" @click="handleDownload(row)">
+                <el-button size="small" @click="handleDownload(asFirmware(row))">
                   <el-icon><Download /></el-icon> 下载
                 </el-button>
-                <el-button type="danger" size="small" @click="handleDelete(row)">
+                <el-button type="danger" size="small" @click="handleDelete(asFirmware(row))">
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </div>
@@ -162,6 +162,9 @@ import { ElMessage, ElMessageBox, type UploadInstance, type UploadProps } from '
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asFirmware = (row: unknown) => row as Firmware
 import { useFirmwareStore } from '@/stores/firmware'
 
 const firmwareStore = useFirmwareStore()

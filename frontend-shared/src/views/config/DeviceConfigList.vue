@@ -449,7 +449,8 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
     case 'toggle':
       try {
         const newStatus = config.status === 'active' ? 'inactive' : 'active'
-        await deviceConfigApi.update(config.id, { status: newStatus })
+        // 后端 PUT 要求 name 必填（缺失即 400），且以其当前行为底合并，故只发 name + status。
+        await deviceConfigApi.update(config.id, { name: config.name, status: newStatus })
         ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
         await fetchConfigs()
       } catch (error) {

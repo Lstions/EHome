@@ -14,7 +14,7 @@
           <template #default="{ row }">
             <div class="trigger-cell">
               <el-tag size="small" class="trigger-type-tag">{{ triggerTypeText(row.trigger_type) }}</el-tag>
-              <span class="mono trigger-summary">{{ triggerSummary(row) }}</span>
+              <span class="mono trigger-summary">{{ triggerSummary(asRule(row)) }}</span>
             </div>
           </template>
         </el-table-column>
@@ -24,7 +24,7 @@
               <el-tag size="small" :type="row.action_type === 'device_action' ? 'warning' : 'info'">
                 {{ row.action_type === 'device_action' ? '设备动作' : '通知' }}
               </el-tag>
-              <span class="mono action-summary">{{ actionSummary(row) }}</span>
+              <span class="mono action-summary">{{ actionSummary(asRule(row)) }}</span>
             </div>
           </template>
         </el-table-column>
@@ -41,14 +41,14 @@
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: boolean) => onToggle(row, v)" />
+            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button link type="warning" size="small" :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(row)">触发</el-button>
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="onDelete(row)">删除</el-button>
+            <el-button link type="warning" size="small" :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
+            <el-button link type="primary" size="small" @click="openEdit(asRule(row))">编辑</el-button>
+            <el-button link type="danger" size="small" @click="onDelete(asRule(row))">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>暂无规则，点击右上角创建</template>
@@ -108,7 +108,7 @@
               type="warning"
               size="small"
               data-test="confirm-event"
-              @click="onConfirmEvent(row)"
+              @click="onConfirmEvent(asEvent(row))"
             >
               确认执行
             </el-button>
@@ -264,6 +264,10 @@ import {
   type CreateAutomationRuleRequest,
   type UpdateAutomationRuleRequest,
 } from '@/api/automation'
+
+/** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
+const asRule = (row: unknown) => row as AutomationRule
+const asEvent = (row: unknown) => row as AutomationEvent
 
 const devices = ref<EdgeDevice[]>([])
 
