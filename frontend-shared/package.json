@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc --noEmit",
-    "typecheck:vue": "vue-tsc --noEmit",
+    "typecheck": "vue-tsc --noEmit",
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
     "test": "vitest",
