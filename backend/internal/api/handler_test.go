@@ -1159,6 +1159,20 @@ func TestDataRoutes_FailoverLogs(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+
+	// 契约锁定:data 必须是数组（前端 api/dataSource.ts:getFailoverLogs 声明
+	// `client.get<{ data: FailoverLog[] }>`，只读 data 且期望数组）。
+	// 若把该响应改成 data 为对象的嵌套形态，前端拿到的将是对象而非列表。
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v (%s)", err, w.Body.String())
+	}
+	if code, _ := resp["code"].(float64); int(code) != http.StatusOK {
+		t.Errorf("expected envelope code 200, got %v (%s)", resp["code"], w.Body.String())
+	}
+	if _, ok := resp["data"].([]interface{}); !ok {
+		t.Errorf("expected data to be a JSON array, got %T (%s)", resp["data"], w.Body.String())
+	}
 }
 
 // ==================== Edge Device Tests ====================

@@ -312,9 +312,10 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	})
 
 	// GET /api/v1/devices/:id/failover-logs
+	// 占位端点（主备数据源功能尚未接通 UI）：data 恒为空数组，
+	// 保持 {data: FailoverLog[]} 契约——前端 api/dataSource.ts:getFailoverLogs 只读 data。
 	v1.GET("/devices/:id/failover-logs", func(c *gin.Context) {
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		Success(c, gin.H{"data": []gin.H{}, "total": 0, "limit": limit})
+		Success(c, []gin.H{})
 	})
 
 	// Batch historical query — eliminates N+1 request pattern
