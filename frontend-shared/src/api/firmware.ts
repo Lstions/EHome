@@ -31,7 +31,11 @@ export const firmwareApi = {
 
   async upload(formData: FormData): Promise<Firmware> {
     const response = await client.post('/api/v1/firmwares/upload', formData)
-    return (response as any).data
+    // 后端 POST /api/v1/firmwares/upload（handler_ota.go:199 `c.JSON(http.StatusCreated, fw)`）
+    // 返回的是**裸 Firmware 对象**，不是 envelope —— 只取 `.data` 会恒为 undefined。
+    // 与 periph.ts 的 `?.data || resp` 同款双向兼容（envelope / 裸对象都能取到）。
+    const raw = response as any
+    return (raw?.data ?? raw) as Firmware
   },
 
   async update(id: number, data: { version?: string; changelog?: string }): Promise<void> {

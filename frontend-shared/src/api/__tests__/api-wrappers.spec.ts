@@ -815,6 +815,16 @@ describe('firmwareApi', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/firmwares/upload', fd)
   })
 
+  it('upload 兼容后端真实形状:裸 Firmware 对象（非 envelope）', async () => {
+    // 后端 POST /api/v1/firmwares/upload 实际回 `c.JSON(201, fw)` —— 裸对象、无 data 包裹。
+    // 旧实现只取 `.data` → 恒为 undefined（返回值类型 Promise<Firmware> 是个空承诺）。
+    const fd = new FormData()
+    mockClient.post.mockResolvedValue({ id: 9, version: '3.1', filename: 'fw.bin' })
+    const res = await firmwareApi.upload(fd)
+    expect(res).toEqual({ id: 9, version: '3.1', filename: 'fw.bin' })
+    expect(res.version).toBe('3.1')
+  })
+
   it('update calls put', async () => {
     mockClient.put.mockResolvedValue(undefined)
     await firmwareApi.update(1, { version: '2.0' })
