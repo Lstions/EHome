@@ -157,22 +157,6 @@ export const useEdgeDeviceStore = defineStore('edgeDevice', () => {
     }
   }
 
-  /**
-   * Update a device in local cache (after edit operations).
-   */
-  function updateLocal(device: EdgeDevice) {
-    latestDetailRequest.set(device.id, ++detailRequestSequence)
-    const idx = list.value.findIndex(d => d.id === device.id)
-    if (idx >= 0) {
-      list.value[idx] = device
-    }
-    for (const cached of listCache.values()) {
-      const cachedIndex = cached.items.findIndex(d => d.id === device.id)
-      if (cachedIndex >= 0) cached.items[cachedIndex] = device
-    }
-    detailCache.value.set(device.id, { device, ts: Date.now() })
-  }
-
   function invalidateDetail(id: number) {
     latestDetailRequest.set(id, ++detailRequestSequence)
     detailCache.value.delete(id)
@@ -218,7 +202,6 @@ export const useEdgeDeviceStore = defineStore('edgeDevice', () => {
     fetchDetail,
     getCachedDetail,
     deleteDevice,
-    updateLocal,
     invalidateDetail,
     invalidateLists,
     clearCache,

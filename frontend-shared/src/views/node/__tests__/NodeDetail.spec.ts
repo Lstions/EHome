@@ -89,7 +89,10 @@ describe('NodeDetail', () => {
     expect(source).toContain("return '离线'")
     expect(source).toContain('getOTAStatusType')
     expect(source).toContain('getOTAStatusText')
-    expect(source).toContain('formatOnlineDuration')
+    // NOTE(2026-09-11): 原此处断言 source 含 'formatOnlineDuration'，但该函数
+    // 是死代码（组件内与全仓零引用，vue-tsc TS6133 亦报告 never read），已随
+    // 类型门禁落地删除。源码字符串断言锁死实现细节、在清理死代码时必然假失败，
+    // 故移除该行；本用例其余断言仍校验展示映射函数的存在性。
     expect(source).toContain('capText')
     expect(source).toContain('busText')
   })

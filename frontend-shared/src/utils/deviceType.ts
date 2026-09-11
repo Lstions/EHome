@@ -3,7 +3,7 @@
  *
  * Replaces the 5+ hardcoded deviceTypeMap/deviceTypes/deviceTypeOptions
  * scattered across EdgeDeviceList, EdgeDeviceDetail, NodeDetail,
- * PeripheralAssignForm, DeviceConfigList.
+ * DeviceConfigList.
  */
 
 import type { Component } from 'vue'

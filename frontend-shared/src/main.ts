@@ -5,7 +5,6 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import 'element-plus/theme-chalk/el-message-box.css'
 import './styles/theme.css'
 import router from './router'
-import i18n from './locales'
 import App from './App.vue'
 
 import { logger } from '@/utils/logger'
@@ -49,7 +48,6 @@ app.config.warnHandler = (msg, instance, trace) => {
 
 app.use(createPinia())
 app.use(router)
-app.use(i18n)
 
 logger.info('应用挂载', { element: '#app' })
 app.mount('#app')

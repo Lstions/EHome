@@ -216,19 +216,6 @@ describe('useEdgeDeviceStore list cache', () => {
     expect(store.getCachedDetail(1)?.name).toBe('Newer')
   })
 
-  it('does not let a pre-write detail request overwrite updateLocal', async () => {
-    let resolveOlder!: (value: any) => void
-    mockGetDetail.mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve }))
-    const store = useEdgeDeviceStore()
-    const older = store.fetchDetail(1, true)
-
-    store.updateLocal({ id: 1, name: 'Written' } as any)
-    resolveOlder({ id: 1, name: 'Older' })
-    await older
-
-    expect(store.getCachedDetail(1)?.name).toBe('Written')
-  })
-
   it('invalidates detail cache and blocks a pre-write response', async () => {
     let resolveOlder!: (value: any) => void
     mockGetDetail.mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve }))

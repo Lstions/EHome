@@ -422,7 +422,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useResponsive } from '@/composables/useResponsive'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Upload, Refresh, RefreshRight, Link, Connection, Warning, Edit, Plus } from '@element-plus/icons-vue'
+import { Upload, Refresh, RefreshRight, Connection, Edit, Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import OTAForm from '@/components/forms/OTAForm.vue'
@@ -435,7 +435,6 @@ import { useNodeStore } from '@/stores/node'
 import { channelApi } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { useDmaStore } from '@/stores/dma'
-import { useUserStore } from '@/stores/user'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
@@ -450,13 +449,11 @@ const wsStore = useWebSocketStore()
 const dmaStore = useDmaStore()
 const edgeDeviceStore = useEdgeDeviceStore()
 const nodeStore = useNodeStore()
-const userStore = useUserStore()
 
 const collector = ref<any>(null)
 const devices = ref<any[]>([])
 const channels = ref<any[]>([])
 const otaHistory = ref<OTARecord[]>([])
-const peripherals = ref<Capabilities | null>(null)
 const loading = ref(false)
 const devicesLoading = ref(true)
 const otaHistoryLoading = ref(true)
@@ -814,33 +811,9 @@ const formatLastData = (data: Record<string, any>): string => {
   }).join('  ')
 }
 
-const formatOnlineDuration = (seconds: number) => {
-  if (!seconds) return '-'
-
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-
-  const parts = []
-  if (days > 0) parts.push(`${days}天`)
-  if (hours > 0) parts.push(`${hours}小时`)
-  if (minutes > 0) parts.push(`${minutes}分钟`)
-
-  return parts.length > 0 ? parts.join(' ') : '0分钟'
-}
-
 const goBack = () => {
   router.back()
 }
-
-// 检查是否有外设
-const hasPeripherals = computed(() => {
-  if (!peripherals.value?.hardware) return false
-  const hardware = peripherals.value.hardware
-  return (hardware.uart?.length || 0) > 0 ||
-         (hardware.i2c?.length || 0) > 0 ||
-         (hardware.spi?.length || 0) > 0
-})
 
 // ============================================================
 // DMA 辅助函数 — 使用共享枚举 (dmaState.ts)
