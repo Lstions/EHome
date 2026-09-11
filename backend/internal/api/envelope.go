@@ -82,3 +82,17 @@ func ErrorWithCode(c *gin.Context, statusCode int, errorCode, msg string) {
 		ErrorCode: errorCode,
 	})
 }
+
+// AbortError is Error plus c.Abort(): it stops the handler chain (middleware
+// guards must not fall through to the next handler) while still emitting the
+// standard envelope, so clients can rely on the same response shape as every
+// other error path.
+//
+//	AbortError(c, http.StatusUnauthorized, "invalid or expired token")
+func AbortError(c *gin.Context, statusCode int, msg string) {
+	c.AbortWithStatusJSON(statusCode, envelope{
+		Code:    statusCode,
+		Data:    nil,
+		Message: msg,
+	})
+}

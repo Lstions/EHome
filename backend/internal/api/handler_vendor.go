@@ -19,35 +19,35 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var total int64
 		db.Model(&models.Vendor{}).Count(&total)
 		db.Offset((page - 1) * pageSize).Limit(pageSize).Find(&vendors)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"items": vendors, "total": total, "page": page, "page_size": pageSize}})
+		Success(c, gin.H{"items": vendors, "total": total, "page": page, "page_size": pageSize})
 	})
 	v1.GET("/vendors/:id", func(c *gin.Context) {
 		var vendor models.Vendor
 		if err := db.First(&vendor, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": vendor})
+		Success(c, vendor)
 	})
 	v1.POST("/vendors", func(c *gin.Context) {
 		var dto struct {
 			Name string `json:"name" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		vendor := models.Vendor{Name: dto.Name}
 		if err := db.Create(&vendor).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to create vendor"})
+			Error(c, http.StatusInternalServerError, "failed to create vendor")
 			return
 		}
-		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": vendor})
+		SuccessWithCode(c, http.StatusCreated, vendor)
 	})
 	v1.PUT("/vendors/:id", func(c *gin.Context) {
 		var vendor models.Vendor
 		if err := db.First(&vendor, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
 		var dto struct {
@@ -61,11 +61,11 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		if len(updates) > 0 {
 			db.Model(&vendor).Updates(updates)
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": vendor})
+		Success(c, vendor)
 	})
 	v1.DELETE("/vendors/:id", func(c *gin.Context) {
 		db.Delete(&models.Vendor{}, c.Param("id"))
-		c.JSON(http.StatusOK, gin.H{"code": 200})
+		Success(c, nil)
 	})
 
 	// === Device Models ===
@@ -81,15 +81,15 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		q.Count(&total)
 		q.Offset((page - 1) * pageSize).Limit(pageSize).Find(&deviceModels)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"items": deviceModels, "total": total, "page": page, "page_size": pageSize}})
+		Success(c, gin.H{"items": deviceModels, "total": total, "page": page, "page_size": pageSize})
 	})
 	v1.GET("/device-models/:id", func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm})
+		Success(c, dm)
 	})
 	v1.POST("/device-models", func(c *gin.Context) {
 		var dto struct {
@@ -99,17 +99,17 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			Fields   string `json:"fields"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		dm := models.DeviceModel{Name: dto.Name, Type: dto.Type, VendorID: dto.VendorID, Fields: dto.Fields}
 		db.Create(&dm)
-		c.JSON(http.StatusCreated, gin.H{"code": 201, "data": dm})
+		SuccessWithCode(c, http.StatusCreated, dm)
 	})
 	v1.PUT("/device-models/:id", func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
 		var dto struct {
@@ -135,26 +135,26 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		if len(updates) > 0 {
 			db.Model(&dm).Updates(updates)
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm})
+		Success(c, dm)
 	})
 	v1.DELETE("/device-models/:id", func(c *gin.Context) {
 		db.Delete(&models.DeviceModel{}, c.Param("id"))
-		c.JSON(http.StatusOK, gin.H{"code": 200})
+		Success(c, nil)
 	})
 
 	// Device model fields (definitions)
 	v1.GET("/device-models/:id/fields", func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": dm.Fields})
+		Success(c, dm.Fields)
 	})
 	v1.PUT("/device-models/:id/fields", func(c *gin.Context) {
 		var dm models.DeviceModel
 		if err := db.First(&dm, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
 		var req struct {
@@ -162,13 +162,13 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		c.ShouldBindJSON(&req)
 		db.Model(&dm).Update("fields", req.Fields)
-		c.JSON(http.StatusOK, gin.H{"code": 200})
+		Success(c, nil)
 	})
 
 	// === Device Categories (distinct type values) ===
 	v1.GET("/device-categories", func(c *gin.Context) {
 		var categories []string
 		db.Model(&models.DeviceModel{}).Distinct("type").Pluck("type", &categories)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": categories})
+		Success(c, categories)
 	})
 }

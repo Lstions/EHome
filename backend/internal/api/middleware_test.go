@@ -22,8 +22,10 @@ func TestJWTAuth_MissingToken(t *testing.T) {
 	}
 	var body map[string]string
 	json.Unmarshal(w.Body.Bytes(), &body)
-	if body["error"] != "missing authentication token" {
-		t.Errorf("unexpected error: %v", body["error"])
+	// 统一 envelope:鉴权失败也回 {"code":401,"data":null,"message":"..."}，
+	// 不再是 {"error":"..."}（前端 client.ts 只读 message）。
+	if body["message"] != "missing authentication token" {
+		t.Errorf("unexpected message: %v", body["message"])
 	}
 }
 

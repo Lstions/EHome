@@ -56,14 +56,14 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		deviceIDStr := c.Param("id")
 		deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device id"})
+			Error(c, http.StatusBadRequest, "invalid device id")
 			return
 		}
 
 		// 查询协议 (§六): 前端始终传 edge_device_id, 后端解析逻辑身份。
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(deviceID))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -101,7 +101,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
@@ -146,7 +146,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		`, channelIDs).Scan(&results).Error
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			Error(c, http.StatusInternalServerError, "query failed")
 			return
 		}
 
@@ -224,7 +224,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	v1.GET("/unified-data/categories", func(c *gin.Context) {
 		devicePK, err := strconv.ParseUint(c.Query("device_pk"), 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			Error(c, http.StatusBadRequest, "invalid device_pk")
 			return
 		}
 
@@ -232,7 +232,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		// 维度, 无需保形去重 (GROUP BY sensor_name 已是聚合)。
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -248,7 +248,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			Group("sensor_name").
 			Order("sensor_name ASC").
 			Scan(&categories).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query categories failed"})
+			Error(c, http.StatusInternalServerError, "query categories failed")
 			return
 		}
 		if categories == nil {
@@ -263,34 +263,34 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		devicePKStr := c.Query("device_pk")
 		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			Error(c, http.StatusBadRequest, "invalid device_pk")
 			return
 		}
 
 		// 查询协议 (§六): resolve → scope 条件 (+ 保形去重)。
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		sensorName := c.Query("category")
 		if sensorName == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "category parameter required"})
+			Error(c, http.StatusBadRequest, "category parameter required")
 			return
 		}
 
 		startStr := c.Query("start_time")
 		endStr := c.Query("end_time")
 		if startStr == "" || endStr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time required"})
+			Error(c, http.StatusBadRequest, "start_time and end_time required")
 			return
 		}
 
 		startTime, err1 := time.Parse(time.RFC3339, startStr)
 		endTime, err2 := time.Parse(time.RFC3339, endStr)
 		if err1 != nil || err2 != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid time format (RFC3339 expected)"})
+			Error(c, http.StatusBadRequest, "invalid time format (RFC3339 expected)")
 			return
 		}
 
@@ -324,7 +324,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		devicePKStr := c.Query("device_pk")
 		devicePK, err := strconv.ParseUint(devicePKStr, 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid device_pk"})
+			Error(c, http.StatusBadRequest, "invalid device_pk")
 			return
 		}
 
@@ -332,13 +332,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		// 并发段之前解析一次, 各 goroutine 只读复用 (Scope 不可变)。
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(devicePK))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
 		categoriesStr := c.Query("categories")
 		if categoriesStr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "categories parameter required (comma-separated)"})
+			Error(c, http.StatusBadRequest, "categories parameter required (comma-separated)")
 			return
 		}
 		categories := strings.Split(categoriesStr, ",")
@@ -346,14 +346,14 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		startStr := c.Query("start_time")
 		endStr := c.Query("end_time")
 		if startStr == "" || endStr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "start_time and end_time required"})
+			Error(c, http.StatusBadRequest, "start_time and end_time required")
 			return
 		}
 
 		startTime, err1 := time.Parse(time.RFC3339, startStr)
 		endTime, err2 := time.Parse(time.RFC3339, endStr)
 		if err1 != nil || err2 != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid time format (RFC3339 expected)"})
+			Error(c, http.StatusBadRequest, "invalid time format (RFC3339 expected)")
 			return
 		}
 

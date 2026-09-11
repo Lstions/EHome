@@ -39,18 +39,22 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 		auth.GET("/initialization", func(c *gin.Context) {
 			state, err := models.LoadAuthState(db)
 			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_UNAVAILABLE", "data": gin.H{"state": "unavailable"}})
+				// 原先回 {"code":"AUTH_UNAVAILABLE","data":{"state":"unavailable"}}：
+				// 该 data 在应用内**不可达** —— 503 会被 axios 当错误抛出，前端拦截器
+				// 只读 message（client.ts:80），Login.vue 又是 .catch() 兜底。
+				// 故机器可读原因改走 envelope 的 error_code 字段，不再伪造 data。
+				ErrorWithCode(c, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "auth state unavailable")
 				return
 			}
 			// Fresh database: persist the uninitialized row so the
 			// POST /initialize endpoint can find it.
 			if state.State == models.AuthStateUninitialized {
 				if err := models.InstallAuthState(db); err != nil {
-					c.JSON(http.StatusServiceUnavailable, gin.H{"code": "AUTH_UNAVAILABLE", "data": gin.H{"state": "unavailable"}})
+					ErrorWithCode(c, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "auth state unavailable")
 					return
 				}
 			}
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"state": state.State}})
+			Success(c, gin.H{"state": state.State})
 		})
 		auth.POST("/initialize", func(c *gin.Context) {
 			var request struct {
@@ -60,20 +64,20 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 				Email      string `json:"email"`
 			}
 			if err := c.ShouldBindJSON(&request); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid initialization request"})
+				Error(c, http.StatusBadRequest, "invalid initialization request")
 				return
 			}
 			user, err := authservice.InitializeSystem(db, authservice.InitializeRequest{Credential: request.Credential, Username: request.Username, Password: request.Password, Email: request.Email})
 			if err != nil {
-				c.JSON(http.StatusConflict, gin.H{"code": "AUTH_INITIALIZATION_REJECTED", "message": "initialization rejected"})
+				ErrorWithCode(c, http.StatusConflict, "AUTH_INITIALIZATION_REJECTED", "initialization rejected")
 				return
 			}
-			c.JSON(http.StatusCreated, gin.H{"code": 201, "message": "initialized", "data": gin.H{"id": user.ID, "username": user.Username}})
+			SuccessWithCodeMsg(c, http.StatusCreated, gin.H{"id": user.ID, "username": user.Username}, "initialized")
 		})
 		auth.POST("/login", func(c *gin.Context) {
 			var req LoginRequest
 			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "username and password required"})
+				Error(c, http.StatusBadRequest, "username and password required")
 				return
 			}
 
@@ -86,10 +90,10 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 						seconds = 1
 					}
 					c.Header("Retry-After", strconv.Itoa(seconds))
-					c.JSON(http.StatusTooManyRequests, gin.H{"code": 429, "message": "too many login attempts"})
+					Error(c, http.StatusTooManyRequests, "too many login attempts")
 					return
 				}
-				c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "用户名或密码错误"})
+				Error(c, http.StatusUnauthorized, "用户名或密码错误")
 				return
 			}
 			limiter.Reset(c.Request.Context(), c.ClientIP(), req.Username)
@@ -101,7 +105,7 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 			}
 			token, err := authservice.SignSessionToken(user, jwtSecret, tokenTTL)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to generate token"})
+				Error(c, http.StatusInternalServerError, "failed to generate token")
 				return
 			}
 
@@ -112,7 +116,7 @@ func registerAuthRoutesWithLimiter(r *gin.Engine, db *gorm.DB, limiter *authserv
 			resp.User.ID = user.ID
 			resp.User.Username = user.Username
 
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": resp})
+			Success(c, resp)
 		})
 	}
 }

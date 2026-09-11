@@ -60,13 +60,13 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			FirmwareID uint   `json:"firmware_id" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		task, err := otaMgr.CreateTask(req.NodeID, req.FirmwareID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -77,7 +77,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			task.Status = "failed"
 			task.ErrorMsg = fmt.Sprintf("send failed: %v", err)
 			db.Save(task)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": task.ErrorMsg})
+			Error(c, http.StatusInternalServerError, task.ErrorMsg)
 			return
 		}
 
@@ -89,7 +89,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		id := c.Param("id")
 		var task models.OTATask
 		if err := db.First(&task, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			Error(c, http.StatusNotFound, "task not found")
 			return
 		}
 		Success(c, task)
@@ -125,20 +125,20 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 		version := c.PostForm("version")
 		if version == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "version required"})
+			Error(c, http.StatusBadRequest, "version required")
 			return
 		}
 
 		file, err := c.FormFile("file")
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "file required"})
+			Error(c, http.StatusBadRequest, "file required")
 			return
 		}
 
 		// Validate file extension
 		filename := filepath.Base(file.Filename)
 		if !strings.HasSuffix(strings.ToLower(filename), ".bin") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "only .bin firmware files are allowed"})
+			Error(c, http.StatusBadRequest, "only .bin firmware files are allowed")
 			return
 		}
 
@@ -151,7 +151,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			"":                         true, // Some clients omit Content-Type for multipart files
 		}
 		if !allowedTypes[contentType] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unsupported content type: %s", contentType)})
+			Error(c, http.StatusBadRequest, fmt.Sprintf("unsupported content type: %s", contentType))
 			return
 		}
 
@@ -160,7 +160,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		os.MkdirAll(fwDir, 0755)
 		dst := filepath.Join(fwDir, filename)
 		if err := c.SaveUploadedFile(file, dst); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -177,7 +177,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 				logger.Warnf("EHOME_EXTERNAL_HOST not set, falling back to request Host header for firmware URL (potential Host Header Injection)")
 				extHost = c.Request.Host
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "EHOME_EXTERNAL_HOST not configured; cannot generate firmware download URL"})
+				Error(c, http.StatusInternalServerError, "EHOME_EXTERNAL_HOST not configured; cannot generate firmware download URL")
 				return
 			}
 		}
@@ -193,7 +193,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			TargetModel: c.PostForm("target_model"),
 		}
 		if err := db.Create(&fw).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		c.JSON(http.StatusCreated, fw)
@@ -273,12 +273,12 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 			FirmwareID uint   `json:"firmware_id" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		task, err := otaMgr.CreateTask(req.NodeID, req.FirmwareID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -287,7 +287,7 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 			task.Status = "failed"
 			task.ErrorMsg = fmt.Sprintf("send failed: %v", err)
 			db.Save(task)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": task.ErrorMsg})
+			Error(c, http.StatusInternalServerError, task.ErrorMsg)
 			return
 		}
 
@@ -334,12 +334,12 @@ func RegisterFirmwareDownload(r *gin.Engine) {
 	r.GET("/api/v1/firmwares/:filename/download", func(c *gin.Context) {
 		filename := filepath.Base(c.Param("filename")) // prevent path traversal
 		if !validateFirmwareDownload(filename, c.Query("expires"), c.Query("signature"), jwtSecret, time.Now().UTC()) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired firmware ticket"})
+			Error(c, http.StatusUnauthorized, "invalid or expired firmware ticket")
 			return
 		}
 		dst := filepath.Join("firmwares", filename)
 		if _, err := os.Stat(dst); os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "firmware not found"})
+			Error(c, http.StatusNotFound, "firmware not found")
 			return
 		}
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))

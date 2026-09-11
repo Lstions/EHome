@@ -39,13 +39,10 @@ func registerDriverCompatRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var items []models.DeviceConfig
 		if err := q.Order("is_default DESC, id DESC").
 			Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200, "message": "ok",
-			"data": gin.H{"list": items, "total": total, "page": page, "page_size": pageSize},
-		})
+		Success(c, gin.H{"list": items, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// GET /drivers/:type — single device-config by device_type
@@ -56,33 +53,33 @@ func registerDriverCompatRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			var tpl models.DeviceConfig
 			if err := db.First(&tpl, id).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found"})
+					Error(c, http.StatusNotFound, "driver not found")
 					return
 				}
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+				Error(c, http.StatusInternalServerError, err.Error())
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+			Success(c, tpl)
 			return
 		}
 		// Otherwise look up by device_type
 		var tpl models.DeviceConfig
 		if err := db.Where("device_type = ?", dt).Order("is_default DESC, id DESC").First(&tpl).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found"})
+				Error(c, http.StatusNotFound, "driver not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tpl})
+		Success(c, tpl)
 	})
 
 	// GET /drivers/tree — driver tree grouped by vendor/hardware_type
 	v1.GET("/drivers/tree", func(c *gin.Context) {
 		var configs []models.DeviceConfig
 		if err := db.Where("status = ?", "active").Order("hardware_type, device_type").Find(&configs).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// Group by hardware_type (as proxy for vendor category)
@@ -108,6 +105,6 @@ func registerDriverCompatRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			}
 			groupMap[key].Children = append(groupMap[key].Children, configs[i])
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": tree})
+		Success(c, tree)
 	})
 }

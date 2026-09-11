@@ -25,33 +25,33 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 
 		drv, err := driverRegistry.Get(driverType)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found: " + driverType})
+			Error(c, http.StatusNotFound, "driver not found: "+driverType)
 			return
 		}
 
 		cmds := getCommandTemplates(drv)
 		// I-2: only schedulable polling templates are returned; one-shot
 		// commands belong to the Action Catalog (DeviceControlPanel).
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": filterSchedulableTemplates(cmds)})
+		Success(c, filterSchedulableTemplates(cmds))
 	})
 
 	// GET /api/v1/edge-devices/:id/commands — get current command intervals for an edge device
 	v1.GET("/edge-devices/:id/commands", func(c *gin.Context) {
 		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid id"})
+			Error(c, http.StatusBadRequest, "invalid id")
 			return
 		}
 
 		var dev models.EdgeDevice
 		if err := db.First(&dev, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
 
 		drv, err := driverRegistry.Get(dev.Type)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "driver not found for device type: " + dev.Type})
+			Error(c, http.StatusNotFound, "driver not found for device type: "+dev.Type)
 			return
 		}
 
@@ -76,14 +76,14 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 			result[i] = commandView{CommandTemplate: t, CurrentIntervalMs: interval}
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": result})
+		Success(c, result)
 	})
 
 	// PUT /api/v1/edge-devices/:id/commands — update command intervals and trigger config sync
 	v1.PUT("/edge-devices/:id/commands", func(c *gin.Context) {
 		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid id"})
+			Error(c, http.StatusBadRequest, "invalid id")
 			return
 		}
 
@@ -91,18 +91,18 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 			Intervals map[string]int `json:"intervals"` // command_id → interval_ms (0=disabled)
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		if len(req.Intervals) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "intervals is required"})
+			Error(c, http.StatusBadRequest, "intervals is required")
 			return
 		}
 
 		var dev models.EdgeDevice
 		if err := db.First(&dev, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
 
@@ -120,14 +120,14 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 		// PUT is a partial update; legacy dirty keys are removed by the C2
 		// cleanup script before this gate goes live.
 		if err := ValidateCommandIntervals(driverRegistry, dev.Type, existing); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		existing = NormalizeCommandIntervals(existing)
 
 		intervalsJSON, err := json.Marshal(existing)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to marshal intervals"})
+			Error(c, http.StatusInternalServerError, "failed to marshal intervals")
 			return
 		}
 
@@ -141,7 +141,7 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 		}
 
 		logger.Infof("[commands] Updated intervals for edge_device=%d type=%s: %v", dev.ID, dev.Type, existing)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"command_intervals": existing}})
+		Success(c, gin.H{"command_intervals": existing})
 	})
 }
 

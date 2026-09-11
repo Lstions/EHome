@@ -45,7 +45,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	v1.GET("/nodes", func(c *gin.Context) {
 		var nodes []models.Node
 		if err := db.Find(&nodes).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		Success(c, nodes)
@@ -71,7 +71,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Order("event.created_at DESC").
 			Limit(limit).
 			Scan(&events).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query node status history failed"})
+			Error(c, http.StatusInternalServerError, "query node status history failed")
 			return
 		}
 		Success(c, events)
@@ -90,7 +90,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		// Fallback: lookup by node_id string
 		if err := db.Where("node_id = ?", id).First(&node).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		Success(c, node)
@@ -101,7 +101,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	v1.GET("/nodes/:id/status-history", func(c *gin.Context) {
 		node, err := findNodeByID(db, c.Param("id"))
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
@@ -115,7 +115,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Order("created_at DESC").
 			Limit(limit).
 			Find(&events).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "query node status history failed"})
+			Error(c, http.StatusInternalServerError, "query node status history failed")
 			return
 		}
 		Success(c, events)
@@ -129,16 +129,16 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Config string `json:"config"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		node := models.Node{NodeID: dto.NodeID, Name: dto.Name, Config: dto.Config}
 		if err := db.Create(&node).Error; err != nil {
 			if isUniqueConstraintError(err) {
-				c.JSON(http.StatusConflict, gin.H{"error": "node_id already exists"})
+				Error(c, http.StatusConflict, "node_id already exists")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create node"})
+			Error(c, http.StatusInternalServerError, "failed to create node")
 			return
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.NodeID, fmt.Sprint(node.ID))
@@ -151,7 +151,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		// M1 fix: bind to a separate DTO, then copy allowed fields only
@@ -160,7 +160,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Config *string `json:"config"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		updates := map[string]interface{}{}
@@ -173,14 +173,14 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		if len(updates) > 0 {
 			if err := db.Model(node).Updates(updates).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update node"})
+				Error(c, http.StatusInternalServerError, "failed to update node")
 				return
 			}
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, fmt.Sprint(node.ID))
 		// Reload node to get updated fields
 		if err := db.First(node, node.ID).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload node"})
+			Error(c, http.StatusInternalServerError, "failed to reload node")
 			return
 		}
 		Success(c, node)
@@ -191,12 +191,12 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		nodeIDStr := node.NodeID
 		if err := db.Delete(node).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		nodemgr.InvalidateNodeIDCache(nodeIDStr)
@@ -209,7 +209,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		var channels []models.Channel
@@ -224,7 +224,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		limit, _ := strconv.Atoi(limitStr)
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		var data []models.DeviceData
@@ -237,11 +237,11 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		if err := nodeMgr.SendPing(node.NodeID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		SuccessMsg(c, nil, "ping sent")
@@ -262,7 +262,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		var req struct {

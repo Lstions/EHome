@@ -78,9 +78,7 @@ func JWTAuth() gin.HandlerFunc {
 		}
 
 		if tokenStr == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "missing authentication token",
-			})
+			AbortError(c, http.StatusUnauthorized, "missing authentication token")
 			return
 		}
 
@@ -94,9 +92,7 @@ func JWTAuth() gin.HandlerFunc {
 		})
 
 		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid or expired token",
-			})
+			AbortError(c, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
 
@@ -115,17 +111,17 @@ func JWTAuthWithDB(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenStr := extractToken(c)
 		if tokenStr == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "missing authentication token"})
+			AbortError(c, http.StatusUnauthorized, "missing authentication token")
 			return
 		}
 		claims, err := authservice.ParseSessionToken(tokenStr, jwtSecret, time.Now())
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "invalid or expired token"})
+			AbortError(c, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
 		user, err := authservice.ValidateSessionClaims(db, claims)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "invalid or expired token"})
+			AbortError(c, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
 		c.Set("subject_id", user.ID)

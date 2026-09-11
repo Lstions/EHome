@@ -235,6 +235,6 @@ func registerEdgeDeviceCandidateRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			candidates[i].RowEstimate = &rows
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": candidates})
+		Success(c, candidates)
 	})
 }
