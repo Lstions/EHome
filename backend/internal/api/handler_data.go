@@ -162,14 +162,14 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		deviceIDStr := c.Param("id")
 		deviceID, err := strconv.ParseUint(deviceIDStr, 10, 32)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid device id"})
+			Error(c, http.StatusBadRequest, "invalid device id")
 			return
 		}
 
 		// 查询协议 (§六): resolve → scope 条件 (+ 保形去重)。
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(deviceID))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -185,7 +185,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			startTime, err1 = time.Parse(time.RFC3339, startStr)
 			endTime, err2 = time.Parse(time.RFC3339, endStr)
 			if err1 != nil || err2 != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid time format (RFC3339 expected)"})
+				Error(c, http.StatusBadRequest, "invalid time format (RFC3339 expected)")
 				return
 			}
 		} else {
@@ -216,7 +216,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
 		data = downsampleUnifiedData(data, maxPoints)
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
+		Success(c, data)
 	})
 
 	// Get available measurement categories for one edge device.
@@ -314,7 +314,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	// GET /api/v1/devices/:id/failover-logs
 	v1.GET("/devices/:id/failover-logs", func(c *gin.Context) {
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": []gin.H{}, "total": 0, "limit": limit})
+		Success(c, gin.H{"data": []gin.H{}, "total": 0, "limit": limit})
 	})
 
 	// Batch historical query — eliminates N+1 request pattern

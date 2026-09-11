@@ -201,7 +201,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		nodemgr.InvalidateNodeIDCache(nodeIDStr)
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionDelete, nodeIDStr, nodeIDStr)
-		c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+		SuccessMsg(c, nil, "deleted")
 	})
 
 	// Get channels for node
@@ -244,7 +244,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "ping sent"})
+		SuccessMsg(c, nil, "ping sent")
 	})
 
 	// Get node config (v2.2 ConfigManifest)
@@ -270,9 +270,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		}
 		c.ShouldBindJSON(&req)
 		// NOTE: requires MQTT broadcast I2C_SCAN to node firmware
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%s-%d", node.NodeID, time.Now().Unix()),
-		}})
+		})
 	})
 
 	// POST /api/v1/nodes/:id/config/sync
@@ -280,7 +280,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		// Force one full config push for this exact node.  Do not reuse
@@ -294,14 +294,14 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			NodeID: node.NodeID, EntityID: node.NodeID, Actor: "api:force_config_sync",
 		})
 		if len(decisions) != 1 {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "unable to create config sync decision"})
+			Error(c, http.StatusInternalServerError, "unable to create config sync decision")
 			return
 		}
 		if err := nodeMgr.SendConfigManifestWithDecision(decisions[0]); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"node_id": node.NodeID, "status": "syncing"}})
+		Success(c, gin.H{"node_id": node.NodeID, "status": "syncing"})
 	})
 
 	// GET /api/v1/nodes/:id/capabilities
@@ -309,7 +309,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		buses := emptyHardwareResources()
@@ -328,10 +328,10 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			capList = append(capList, k)
 		}
 		sort.Strings(capList)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"capabilities": capList,
 			"buses":        buses,
-		}})
+		})
 	})
 
 	// GET /api/v1/nodes/:id/hardware/config
@@ -339,7 +339,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		hardware := gin.H{
@@ -358,9 +358,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		if hardware["buses"] == nil {
 			hardware["buses"] = gin.H{}
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"hardware": hardware,
-		}})
+		})
 	})
 
 	// PUT /api/v1/nodes/:id/hardware/config
@@ -368,24 +368,24 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		var req struct {
 			Hardware map[string]interface{} `json:"hardware"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid request body"})
+			Error(c, http.StatusBadRequest, "invalid request body")
 			return
 		}
 		if _, ok := req.Hardware["buses"]; ok {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "hardware.buses is read-only reported state"})
+			Error(c, http.StatusBadRequest, "hardware.buses is read-only reported state")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"node_id": node.NodeID,
 			"status":  "updated",
-		}})
+		})
 	})
 
 	// POST /api/v1/nodes/:id/query-resources
@@ -393,20 +393,20 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 		deviceID := node.NodeID
 		requestID, err := nodeMgr.SendQueryResources(deviceID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"node_id":    id,
 			"request_id": requestID,
 			"status":     "sent",
-		}})
+		})
 	})
 
 	// GET /api/v1/nodes/:id/dma-channels — get DMA channel info for a node
@@ -416,7 +416,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		id := c.Param("id")
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
@@ -456,9 +456,9 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"dma_channels": channels,
-		}})
+		})
 	})
 
 	// PUT /api/v1/nodes/:id/dma-config — update DMA configuration for a node
@@ -469,7 +469,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 
 		var configs []models.DmaChannelConfig
 		if err := c.ShouldBindJSON(&configs); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -478,12 +478,12 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		for i, cfg := range configs {
 
 			if seen[cfg.DmaID] {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("duplicate dma_id %d", cfg.DmaID)})
+				Error(c, http.StatusBadRequest, fmt.Sprintf("duplicate dma_id %d", cfg.DmaID))
 				return
 			}
 			seen[cfg.DmaID] = true
 			if len(cfg.BindTo) > 16 {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": fmt.Sprintf("configs[%d].bind_to exceeds 16 characters", i)})
+				Error(c, http.StatusBadRequest, fmt.Sprintf("configs[%d].bind_to exceeds 16 characters", i))
 				return
 			}
 		}
@@ -493,7 +493,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		var node models.Node
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", id).First(&node).Error; err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
@@ -537,12 +537,12 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		cfgJSON, err := json.Marshal(cfg)
 		if err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to marshal config"})
+			Error(c, http.StatusInternalServerError, "failed to marshal config")
 			return
 		}
 		if err := tx.Model(&node).Update("config", string(cfgJSON)).Error; err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -581,12 +581,12 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		dmaJSON, err := json.Marshal(devChannels)
 		if err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to marshal dma_channels"})
+			Error(c, http.StatusInternalServerError, "failed to marshal dma_channels")
 			return
 		}
 		if err := tx.Model(&node).Update("dma_channels", string(dmaJSON)).Error; err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
@@ -595,10 +595,10 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		// Trigger config sync to push updated manifest to device
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionUpdate, node.NodeID, node.NodeID)
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"node_id": node.NodeID,
 			"status":  "sent",
-		}})
+		})
 	})
 
 	// v2.5: Log stream routes
@@ -672,7 +672,7 @@ func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
@@ -712,18 +712,14 @@ func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			protocolVersion = "2.2"
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": nodeConfigResponse{
-				Node:            *node,
-				Channels:        channels,
-				EdgeDevices:     edgeDeviceItems,
-				DeviceConfigs:   deviceConfigs,
-				Epoch:           epoch,
-				ProtocolVersion: protocolVersion,
-			},
-			"message": "ok",
-		})
+		Success(c, gin.H{"data": nodeConfigResponse{
+			Node:            *node,
+			Channels:        channels,
+			EdgeDevices:     edgeDeviceItems,
+			DeviceConfigs:   deviceConfigs,
+			Epoch:           epoch,
+			ProtocolVersion: protocolVersion,
+		}, "message": "ok"})
 	}
 }
 
@@ -765,13 +761,13 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
 		var req nodeConfigUpdateRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		if req.Channels != nil {
@@ -779,13 +775,13 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			for _, ch := range *req.Channels {
 				if ch.ID != 0 {
 					if _, exists := seen[ch.ID]; exists {
-						c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "duplicate channel update"})
+						Error(c, http.StatusBadRequest, "duplicate channel update")
 						return
 					}
 					seen[ch.ID] = struct{}{}
 				}
 				if isPeripheralChannelType(ch.BusType) {
-					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "GPIO and PWM are peripheral resources, not channels"})
+					Error(c, http.StatusBadRequest, "GPIO and PWM are peripheral resources, not channels")
 					return
 				}
 			}
@@ -795,7 +791,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			for _, edge := range *req.EdgeDevices {
 				if edge.ID != 0 {
 					if _, exists := seen[edge.ID]; exists {
-						c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "duplicate edge device update"})
+						Error(c, http.StatusBadRequest, "duplicate edge device update")
 						return
 					}
 					seen[edge.ID] = struct{}{}
@@ -805,7 +801,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				}
 				var channel models.Channel
 				if err := db.Where("id = ? AND node_id = ?", *edge.ChannelID, node.NodeID).First(&channel).Error; err != nil || validateTransportChannel(&channel) != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "edge device must bind to a transport channel"})
+					Error(c, http.StatusBadRequest, "edge device must bind to a transport channel")
 					return
 				}
 			}
@@ -973,7 +969,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			}
 			return nil
 		}); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		for i, ch := range channelUpdates {
@@ -1052,14 +1048,10 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 		// (EmitConfigChange publishes to the bus, SyncGate consumes and pushes)
 		// No need to manually call PushConfig here.
 
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": gin.H{
-				"epoch":          newEpoch,
-				"updated_fields": updatedFields,
-			},
-			"message": "config updated",
-		})
+		Success(c, gin.H{"data": gin.H{
+			"epoch":          newEpoch,
+			"updated_fields": updatedFields,
+		}, "message": "config updated"})
 	}
 }
 
@@ -1073,16 +1065,13 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 
 		node, err := findNodeByID(db, id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "node not found"})
+			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
 
 		var tasks []models.OTATask
 		db.Where("collector_id = ?", node.NodeID).Order("created_at DESC").Find(&tasks)
 
-		c.JSON(http.StatusOK, gin.H{
-			"code": 200,
-			"data": tasks,
-		})
+		Success(c, gin.H{"data": tasks})
 	}
 }

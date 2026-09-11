@@ -272,13 +272,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var d models.EdgeDevice
 		if err := db.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				Error(c, http.StatusNotFound, "edge device not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
+		Success(c, d)
 	})
 
 	// Create edge device (v2.2 path for POST /devices)
@@ -325,7 +325,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return
 		}
 		if dto.Type != nil && dto.DeviceConfigID != nil && *dto.DeviceConfigID != 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is derived from device_config_id"})
+			Error(c, http.StatusBadRequest, "type is derived from device_config_id")
 			return
 		}
 		// channel_id is required unless an inline channel object is provided
@@ -346,7 +346,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// When no DeviceConfig template is provided, type must be supplied by the caller
 		// and validated against the driver registry.
 		if cfgID == 0 && (dto.Type == nil || strings.TrimSpace(*dto.Type) == "") {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "type is required when device_config_id is not provided"})
+			Error(c, http.StatusBadRequest, "type is required when device_config_id is not provided")
 			return
 		}
 		// Resolve the effective channel ID: use channel_id when provided,
@@ -548,7 +548,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			Status         *string `json:"status"`
 		}
 		if err := c.ShouldBindJSON(&dto); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 		var d models.EdgeDevice
@@ -648,9 +648,9 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return tx.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, d.ID).Error
 		}); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				Error(c, http.StatusNotFound, "edge device not found")
 			} else {
-				c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+				Error(c, http.StatusBadRequest, err.Error())
 			}
 			return
 		}
@@ -659,7 +659,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		if db.First(&ch, d.ChannelID).Error == nil {
 			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(d.ID))
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": d})
+		Success(c, d)
 	})
 
 	// Init edge device (trigger InitDevice via deviceinit.Orchestrator)
@@ -670,25 +670,25 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var dev models.EdgeDevice
 		if err := db.First(&dev, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				Error(c, http.StatusNotFound, "edge device not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if !dev.Enabled {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "edge device is disabled"})
+			Error(c, http.StatusBadRequest, "edge device is disabled")
 			return
 		}
 		if _, err := loadTransportChannel(db, dev.ChannelID, dev.NodeID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		// Resolve the MQTT device ID from the associated Node
 		node, err := findNodeByID(db, dev.NodeID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "associated node not found"})
+			Error(c, http.StatusBadRequest, "associated node not found")
 			return
 		}
 		deviceID := node.NodeID
@@ -696,7 +696,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Use the deviceinit Orchestrator to trigger init
 		orchestrator := nodeMgr.DeviceInit()
 		if orchestrator == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "device init orchestrator not available"})
+			Error(c, http.StatusInternalServerError, "device init orchestrator not available")
 			return
 		}
 
@@ -710,17 +710,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				"init_last_step":   0,
 				"init_total_steps": 0,
 			})
-			c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+			SuccessMsg(c, gin.H{
 				"id": id, "status": "not_required", "message": "no init sequence for this device type",
 				"device_type": dev.Type, "device_id": deviceID,
-			}})
+			}, "no init sequence for this device type")
 			return
 		}
 
 		// Reserve and trigger through the orchestrator's single entry point. This
 		// closes the API path's race with automatic online initialization.
 		if !orchestrator.InitIfNeeded(dev, deviceID) {
-			c.JSON(http.StatusConflict, gin.H{"code": 409, "message": "device initialization already active or completed"})
+			Error(c, http.StatusConflict, "device initialization already active or completed")
 			return
 		}
 
@@ -731,10 +731,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			"init_total_steps": len(steps),
 		})
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		SuccessMsg(c, gin.H{
 			"id": id, "status": "running", "message": "init triggered",
 			"device_type": dev.Type, "device_id": deviceID,
-		}})
+		}, "init triggered")
 	})
 
 	// Delete edge device (v2.2 path for DELETE /devices/:id)
@@ -749,10 +749,10 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				Error(c, http.StatusNotFound, "edge device not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// Find node before deletion for event emission
@@ -797,19 +797,19 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			return nil
 		})
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// EmitConfigChange
 		if hasNode {
 			nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionDelete, ch.NodeID, fmt.Sprint(d.ID))
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{
+		SuccessMsg(c, gin.H{
 			"deleted":           id,
 			"logical_device_id": logicalID,
 			"delete_data":       deleteData,
 			"purge_requested":   deleteData,
-		}})
+		}, "deleted")
 	})
 
 	// Edge device routes group for :id sub-resources
@@ -824,7 +824,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			DeleteData bool   `json:"delete_data"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
 
@@ -891,12 +891,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				succeeded++
 			}
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{
+		Success(c, gin.H{
 			"total":     len(results),
 			"succeeded": succeeded,
 			"failed":    len(results) - succeeded,
 			"results":   results,
-		}})
+		})
 	})
 
 	// GET /api/v1/edge-devices/:id/logical-device-info — 删除弹窗信息区
@@ -909,54 +909,54 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var d models.EdgeDevice
 		if err := db.First(&d, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+				Error(c, http.StatusNotFound, "edge device not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 
-		resp := gin.H{"code": 200, "data": gin.H{
+		data := gin.H{
 			"edge_device_id":    d.ID,
 			"name":              d.Name,
 			"logical_device_id": nil,
 			"retention_days":    nil,
 			"instance_count":    int64(1), // 至少包含本实例自身
-		}}
+		}
 
 		if d.LogicalDeviceID != nil {
 			var ld models.LogicalDevice
 			if err := db.First(&ld, *d.LogicalDeviceID).Error; err == nil {
-				resp = gin.H{"code": 200, "data": gin.H{
+				data = gin.H{
 					"edge_device_id":    d.ID,
 					"name":              ld.Name,
 					"logical_device_id": ld.ID,
 					"retention_days":    ld.RetentionDays,
-				}}
+				}
 				count, err := datalifecycle.CountInstances(db, ld.ID)
 				if err == nil {
-					resp["data"].(gin.H)["instance_count"] = count
+					data["instance_count"] = count
 				}
 				// T1.1: 估算段挂端点级超时兜底 — 超时/失败走降级路径
 				// (省略 row_estimate), 保证端点不阻塞 (方案 §1.3)。
 				estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
 				if rows, ok := datalifecycle.EstimateRowCount(estCtx, db, ld.ID); ok {
-					resp["data"].(gin.H)["row_estimate"] = rows
+					data["row_estimate"] = rows
 				}
 				cancel()
 			} else {
-				resp["data"].(gin.H)["instance_count"] = int64(1)
+				data["instance_count"] = int64(1)
 			}
 		} else {
 			// 尚未建立逻辑身份: 按实例自身范围估算 (NULL-logical 行)。
 			estCtx, cancel := context.WithTimeout(c.Request.Context(), datalifecycle.EstimateTimeout)
 			scope := &datalifecycle.Scope{InstanceIDs: []uint{d.ID}}
 			if rows, ok := datalifecycle.EstimateScopeRows(estCtx, db, scope); ok {
-				resp["data"].(gin.H)["row_estimate"] = rows
+				data["row_estimate"] = rows
 			}
 			cancel()
 		}
-		c.JSON(http.StatusOK, resp)
+		Success(c, data)
 	})
 
 	// GET /api/v1/edge-devices/:id/latest-data
@@ -966,18 +966,18 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		id, _ := strconv.Atoi(c.Param("id"))
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if qs.InstanceDeleted {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
 		// 从 device_data 表查最新一条
 		var data models.DeviceData
 		cond, args := dataScopeCond(qs)
 		db.Where(cond, args...).Order("created_at DESC").First(&data)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": data})
+		Success(c, data)
 	})
 
 	// GET /api/v1/edge-devices/:id/data
@@ -987,11 +987,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		id, _ := strconv.Atoi(c.Param("id"))
 		qs, err := datalifecycle.ResolveDataQueryScope(db, uint(id))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if qs.InstanceDeleted {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "edge device not found"})
+			Error(c, http.StatusNotFound, "edge device not found")
 			return
 		}
 		from := c.Query("start_time")
@@ -1010,7 +1010,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		var total int64
 		q.Model(&models.DeviceData{}).Count(&total)
 		q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&data)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": gin.H{"items": data, "total": total}})
+		Success(c, gin.H{"items": data, "total": total})
 	})
 
 	// POST /api/v1/edge-devices/:id/execute — execute a device operation
@@ -1507,15 +1507,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		// Trigger config sync so device gets the updated address
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeEdgeDevice, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(edge.ID))
 
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data": gin.H{
-				"id":          edge.ID,
-				"new_address": req.NewAddress,
-				"message":     "地址修改命令已发送",
-			},
-		})
+		Success(c, gin.H{"message": "ok", "data": gin.H{
+			"id":          edge.ID,
+			"new_address": req.NewAddress,
+			"message":     "地址修改命令已发送",
+		}})
 	})
 }
 

@@ -29,20 +29,20 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		nodeID := c.Param("nodeId")
 		status, err := otaMgr.GetNodeOTAStatus(nodeID)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": err.Error()})
+			Error(c, http.StatusNotFound, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": status})
+		Success(c, status)
 	})
 
 	// POST /api/v1/ota/rollback/:nodeId — manual rollback to last stable version
 	v1.POST("/ota/rollback/:nodeId", func(c *gin.Context) {
 		nodeID := c.Param("nodeId")
 		if err := otaMgr.AutoRollback(nodeID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "rollback initiated", "data": gin.H{"node_id": nodeID}})
+		SuccessMsg(c, gin.H{"node_id": nodeID}, "rollback initiated")
 	})
 
 	// ── Existing OTA task + firmware routes ──
@@ -101,14 +101,14 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		id := c.Param("id")
 		taskID, err := strconv.ParseUint(id, 10, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid task id"})
+			Error(c, http.StatusBadRequest, "invalid task id")
 			return
 		}
 		if err := otaMgr.CancelTask(uint(taskID)); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "cancelled", "data": gin.H{"id": taskID}})
+		SuccessMsg(c, gin.H{"id": taskID}, "cancelled")
 	})
 
 	// List firmwares
@@ -204,7 +204,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 	v1.PUT("/firmwares/:id", func(c *gin.Context) {
 		var firmware models.Firmware
 		if err := db.First(&firmware, c.Param("id")).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
 		var req struct {
@@ -234,7 +234,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		db.Model(&firmware).Updates(updates)
 		// Reload to return updated data
 		db.First(&firmware, firmware.ID)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": firmware})
+		Success(c, firmware)
 	})
 
 	// - DELETE /api/v1/firmwares/:id
@@ -243,10 +243,10 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		var fw models.Firmware
 		if err := db.First(&fw, id).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "firmware not found"})
+				Error(c, http.StatusNotFound, "firmware not found")
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// Also remove the .bin file from disk
@@ -255,10 +255,10 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			_ = os.Remove(filepath.Join("firmwares", binary))
 		}
 		if err := db.Delete(&fw).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": err.Error()})
+			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "deleted", "data": gin.H{"id": id, "version": fw.Version}})
+		SuccessMsg(c, gin.H{"id": id, "version": fw.Version}, "deleted")
 	})
 }
 
@@ -291,7 +291,7 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": task})
+		Success(c, task)
 	})
 
 	// GET /api/v1/ota/progress/:id
@@ -299,32 +299,32 @@ func registerOTARoutesCompat(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manag
 		id, _ := strconv.Atoi(c.Param("id"))
 		var task models.OTATask
 		if err := db.First(&task, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404})
+			Error(c, http.StatusNotFound, "")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": task})
+		Success(c, task)
 	})
 
 	// GET /api/v1/ota/history/:nodeId
 	v1.GET("/ota/history/:nodeId", func(c *gin.Context) {
 		nodeID := c.Param("nodeId")
 		if nodeID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "missing nodeId"})
+			Error(c, http.StatusBadRequest, "missing nodeId")
 			return
 		}
 		var tasks []models.OTATask
 		db.Where("collector_id = ?", nodeID).Order("created_at DESC").Find(&tasks)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "data": tasks})
+		Success(c, tasks)
 	})
 
 	// POST /api/v1/ota/cancel/:id
 	v1.POST("/ota/cancel/:id", func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		if err := otaMgr.CancelTask(uint(id)); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": err.Error()})
+			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200})
+		Success(c, nil)
 	})
 }
 
