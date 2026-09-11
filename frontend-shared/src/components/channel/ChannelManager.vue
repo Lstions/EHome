@@ -236,7 +236,7 @@ import { useChannelStore } from '@/stores/channel'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 interface Props {
-  collectorId: string
+  collectorId: string | number
   modelValue: boolean
   capabilities?: any
   initialData?: any | null
@@ -273,7 +273,7 @@ const handleDialogClose = (done: () => void) => {
   done()
 }
 
-const assertTransaction = (transaction: number, collectorId: string, sessionGeneration: number) => {
+const assertTransaction = (transaction: number, collectorId: string | number, sessionGeneration: number) => {
   assertSessionGeneration(sessionGeneration)
   if (transaction !== transactionGeneration || props.collectorId !== collectorId || !props.modelValue) {
     throw new Error('通道事务已取消')
@@ -282,7 +282,7 @@ const assertTransaction = (transaction: number, collectorId: string, sessionGene
 
 const form = reactive({
   name: '',
-  hardware_type: 'i2c' as string,
+  hardware_type: 'i2c' as HardwareBusType,
   hardware_id: '',
   address: '',
   enabled: true,
@@ -295,6 +295,16 @@ const rules = {
 }
 
 // ====== 能力数据 ======
+
+/** 前端建模的总线类型（与后端 Channel.hardware_type 的小写形态对齐）。 */
+const HW_TYPES = ['uart', 'i2c', 'spi', 'adc'] as const
+type HardwareBusType = (typeof HW_TYPES)[number]
+
+/** 运行时收窄：后端可能回大写或未知类型，统一转小写，非法值回退 i2c（原默认值）。 */
+const toBusType = (value: unknown): HardwareBusType => {
+  const lower = typeof value === 'string' ? value.toLowerCase() : ''
+  return (HW_TYPES as readonly string[]).includes(lower) ? (lower as HardwareBusType) : 'i2c'
+}
 
 // 获取当前选中硬件的能力数据。能力上报尚未到达时提供安全兜底，
 // 以确保既有通道在编辑时仍可修改其已保存的参数。
@@ -358,7 +368,24 @@ const currentCaps = computed(() => {
 })
 
 // 获取指定类型的硬件列表（完整对象）
-const availableHardwareList = computed(() => {
+/** 能力上报里的硬件资源条目（字段随总线类型变化，只声明实际读取的字段）。 */
+interface HardwareResource {
+  id: string | number
+  name?: string
+  pins?: Array<{ pin?: number; label?: string }>
+  default_tx_pin?: number
+  default_rx_pin?: number
+  default_sda_pin?: number
+  default_scl_pin?: number
+  default_cs_pin?: number
+  default_mosi?: number
+  default_miso?: number
+  default_sclk?: number
+  max_freq_hz?: number
+  [key: string]: unknown
+}
+
+const availableHardwareList = computed<HardwareResource[]>(() => {
   if (!props.capabilities?.buses?.[form.hardware_type]) return []
   return props.capabilities.buses[form.hardware_type] || []
 })
@@ -612,7 +639,7 @@ watch(showDialog, (open) => {
 
   if (editingChannel.value) {
     // 编辑模式：从通道数据填充
-    form.hardware_type = String(editingChannel.value.hardware_type || 'i2c').toLowerCase()
+    form.hardware_type = toBusType(editingChannel.value.hardware_type)
     form.hardware_id = editingChannel.value.hardware_id || ''
     form.address = editingChannel.value.address || ''
     form.name = editingChannel.value.name || ''
@@ -651,7 +678,7 @@ watch(showDialog, (open) => {
     resetForm()
     // 应用预选硬件类型和ID（从硬件卡片点击"创建通道"时传入）
     if (props.presetHardwareType) {
-      form.hardware_type = props.presetHardwareType
+      form.hardware_type = toBusType(props.presetHardwareType)
     }
     if (props.presetHardwareId) {
       form.hardware_id = props.presetHardwareId

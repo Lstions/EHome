@@ -561,7 +561,7 @@ function genSeriesData(base: number, amp: number, phase: number, points: number)
   return pts
 }
 
-function buildOption(): echarts.EChartsOption {
+function buildOption(): echarts.EChartsCoreOption {
   const m = currentMetric.value
   const points = activeRange.value === '7天' ? 56 : 48
   const series = m.names.map((name, i) => ({

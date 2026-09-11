@@ -38,7 +38,7 @@
                 :aria-label="`GPIO ${row.pin} 输出电平`"
                 active-text="HIGH"
                 inactive-text="LOW"
-                @change="(value: boolean) => setLevel(row, value ? 1 : 0)"
+                @change="(value: string | number | boolean) => setLevel(row, value === true ? 1 : 0)"
               />
             </template>
             <template v-else-if="row.config">

@@ -8,7 +8,7 @@ import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { GaugeChart as GaugeChartSeries } from 'echarts/charts'
 import { TitleComponent, TooltipComponent } from 'echarts/components'
-import type { EChartsOption } from 'echarts/core'
+import type { EChartsCoreOption } from 'echarts/core'
 
 echarts.use([CanvasRenderer, GaugeChartSeries, TitleComponent, TooltipComponent])
 
@@ -39,7 +39,7 @@ const applyOption = () => {
       : token('--color-primary', '#409eff')
   const text = token('--text-color-primary', '#303133')
   const track = token('--border-color-light', '#ebeef5')
-  const option: EChartsOption = {
+  const option: EChartsCoreOption = {
     series: [{
       type: 'gauge', min: props.min, max: props.max,
       startAngle: 225, endAngle: -45, radius: '75%', center: ['50%', '60%'],

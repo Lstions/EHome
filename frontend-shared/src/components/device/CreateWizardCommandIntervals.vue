@@ -70,7 +70,7 @@
               :disabled="savingDisabled"
               size="small"
               :aria-label="`${cmd.name} 启用`"
-              @change="onToggle(cmd.id, $event)"
+              @change="(v: string | number | boolean) => onToggle(cmd.id, v === true)"
             />
           </div>
         </div>

@@ -13,7 +13,7 @@ import {
   LegendComponent,
   GridComponent
 } from 'echarts/components'
-import type { EChartsOption } from 'echarts/core'
+import type { EChartsCoreOption } from 'echarts/core'
 
 // Register required ECharts components for tree-shaking mode
 echarts.use([
@@ -210,7 +210,7 @@ const applyChartOption = () => {
     splitLine: { lineStyle: { color: theme.split } },
     axisLabel: { color: theme.regular, formatter: (value: number) => value.toFixed(2) }
   }
-  const option: EChartsOption = {
+  const option: EChartsCoreOption = {
     animation: props.realtime ? false : undefined,
     color: theme.palette,
     title: { text: props.title, left: 'center', textStyle: { color: theme.text } },

@@ -3,6 +3,8 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import QuickCreateDeviceDialog from '@/components/node/QuickCreateDeviceDialog.vue'
 import source from '@/components/node/QuickCreateDeviceDialog.vue?raw'
+// 类型-only import（编译期擦除，不影响下方 vi.mock 对运行时模块的替换）
+import type { Channel } from '@/api/channel'
 
 const { mockCreate, mockGetCandidates, mockGetDriverCommands } = vi.hoisted(() => ({
   mockCreate: vi.fn((..._args: any[]) => Promise.resolve({ id: 99 })),
@@ -35,7 +37,8 @@ vi.mock('@/stores/parser', () => ({
   }),
 }))
 
-const channels = [
+// 后端 hardware_type 回大写（UART/I2C），与生产 Channel 契约保持一致
+const channels: Channel[] = [
   { id: 1, node_id: 'F0F5BDFFFE02', hardware_type: 'UART', hardware_id: '0x01', config: {} },
   { id: 2, node_id: 'F0F5BDFFFE02', hardware_type: 'I2C', hardware_id: 'I2C0', config: {} },
 ]

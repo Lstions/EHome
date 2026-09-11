@@ -19,7 +19,7 @@
             v-for="ch in group.channels"
             :key="ch.id"
             :label="getChannelLabel(ch)"
-            :value="ch.id"
+            :value="ch.id ?? 0"
           />
         </el-option-group>
       </el-select>
@@ -282,9 +282,10 @@ const txEntries = computed(() => logEntries.value.filter(e => e.direction === 'T
 const rxEntries = computed(() => logEntries.value.filter(e => e.direction === 'RX'))
 
 // --- Helpers ---
-const getTagType = (type: string) => {
-  const types: Record<string, string> = { adc: 'success', i2c: 'warning', spi: 'danger', uart: '' }
-  return types[type] || ''
+// Element Plus 默认外观（'' 与 'primary' 视觉一致），此处归一到联合类型以匹配 el-tag :type。
+const getTagType = (type: string): 'success' | 'primary' | 'info' | 'warning' | 'danger' => {
+  const types: Record<string, 'success' | 'primary' | 'info' | 'warning' | 'danger'> = { adc: 'success', i2c: 'warning', spi: 'danger', uart: 'primary' }
+  return types[type] || 'primary'
 }
 
 const getChannelLabel = (ch: Channel) => {
@@ -438,7 +439,10 @@ const sendData = async () => {
 
 // GPIO 快捷操作已移至 PeripheralControl 组件
 
-const handleKeydown = (e: KeyboardEvent) => {
+// el-input 的 @keydown 声明为 (evt: Event | KeyboardEvent) => any，入口收窄为 KeyboardEvent。
+const handleKeydown = (evt: Event | KeyboardEvent) => {
+  const e = evt instanceof KeyboardEvent ? evt : null
+  if (!e) return
   if (e.key === 'ArrowUp') {
     e.preventDefault()
     if (historyIndex.value < commandHistory.value.length - 1) {

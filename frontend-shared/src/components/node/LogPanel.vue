@@ -140,7 +140,8 @@ function onWsMessage(message: WebSocketMessage): void {
   const data = envelope.payload ?? envelope.data ?? envelope
   if (data.node_id !== props.nodeDeviceId || !Array.isArray(data.lines)) return
 
-  const appendedLogs = data.lines.map(line => ({
+  const lines: IncomingRealtimeLogLine[] = data.lines
+  const appendedLogs = lines.map((line: IncomingRealtimeLogLine) => ({
     id: nextRealtimeLogId++,
     ts: Number(line.ts ?? 0),
     level: Number(line.level ?? 0),
@@ -185,19 +186,21 @@ async function loadConfig(): Promise<void> {
   }
 }
 
-async function onStreamToggle(value: boolean): Promise<void> {
+/** el-switch 的 @change 首参是 string | number | boolean，此处归一为 boolean。 */
+async function onStreamToggle(value: string | number | boolean): Promise<void> {
+  const on = value === true
   const collectorId = props.collectorId
   const operation = operationGeneration
   const sessionGeneration = getSessionGeneration()
   streamLoading.value = true
   try {
-    await nodeApi.updateLogConfig(collectorId, { stream_enabled: value })
+    await nodeApi.updateLogConfig(collectorId, { stream_enabled: on })
     assertSessionGeneration(sessionGeneration)
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    ElMessage.success(value ? '日志流已开启' : '日志流已关闭')
+    ElMessage.success(on ? '日志流已开启' : '日志流已关闭')
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    streamEnabled.value = !value
+    streamEnabled.value = !on
     ElMessage.error(`操作失败: ${errorMessage(error)}`)
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) streamLoading.value = false
@@ -219,19 +222,21 @@ async function onLevelChange(value: number): Promise<void> {
   }
 }
 
-async function onPersistToggle(value: boolean): Promise<void> {
+/** el-switch 的 @change 首参是 string | number | boolean，此处归一为 boolean。 */
+async function onPersistToggle(value: string | number | boolean): Promise<void> {
+  const on = value === true
   const collectorId = props.collectorId
   const operation = operationGeneration
   const sessionGeneration = getSessionGeneration()
   persistLoading.value = true
   try {
-    await nodeApi.updateLogPersist(collectorId, value)
+    await nodeApi.updateLogPersist(collectorId, on)
     assertSessionGeneration(sessionGeneration)
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    ElMessage.success(value ? '持久化已开启' : '持久化已关闭')
+    ElMessage.success(on ? '持久化已开启' : '持久化已关闭')
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    persistEnabled.value = !value
+    persistEnabled.value = !on
     ElMessage.error(`操作失败: ${errorMessage(error)}`)
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) persistLoading.value = false

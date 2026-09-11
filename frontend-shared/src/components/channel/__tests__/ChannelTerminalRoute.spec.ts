@@ -3,6 +3,8 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ChannelTerminal from '../ChannelTerminal.vue'
 import source from '../ChannelTerminal.vue?raw'
+// 类型-only import（编译期擦除，不影响上方 vi.mock 对运行时模块的替换）
+import type { Channel } from '@/api/channel'
 
 vi.mock('@/api/channel', () => ({
   channelApi: { getList: vi.fn().mockResolvedValue([]), terminalWrite: vi.fn() },
@@ -36,7 +38,7 @@ describe('ChannelTerminal collector isolation', () => {
 })
 
 // 通道终端初始预选（initialChannelId）行为测试
-const mkChannel = (id: number, hardwareType: 'uart' | 'i2c' | 'spi' | 'adc' = 'uart') => ({
+const mkChannel = (id: number, hardwareType: Channel['hardware_type'] = 'uart'): Channel => ({
   id,
   node_id: 'TESTNODE001',
   name: `ch-${id}`,
@@ -45,12 +47,20 @@ const mkChannel = (id: number, hardwareType: 'uart' | 'i2c' | 'spi' | 'adc' = 'u
   config: {},
 })
 
-const baseProps = (overrides: Record<string, unknown> = {}) => ({
+/** 生产 props 契约（与 ChannelTerminal 的 defineProps 对齐；不再用 Record<string, unknown> 绕过）。 */
+interface TerminalProps {
+  collectorId: number | string
+  nodeDeviceId?: string
+  channels?: Channel[]
+  initialChannelId?: number
+}
+
+const baseProps = (overrides: Partial<TerminalProps> = {}): TerminalProps => ({
   collectorId: 1,
   ...overrides,
 })
 
-const mountTerminal = async (props: Record<string, unknown>) => {
+const mountTerminal = async (props: TerminalProps) => {
   const wrapper = mount(ChannelTerminal, {
     props,
     global: { plugins: [createPinia()] },

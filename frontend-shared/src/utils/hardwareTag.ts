@@ -2,10 +2,12 @@
  * 硬件总线类型 → Element Plus tag type 统一映射。
  * 单一来源，消除 EdgeDeviceList / ChannelList 等页面的重复定义和颜色不一致。
  */
-export type HardwareTagType = '' | 'success' | 'warning' | 'info' | 'danger' | 'primary'
+import type { TagType } from './tagType'
+
+export type HardwareTagType = TagType
 
 const HARDWARE_TAG_MAP: Record<string, HardwareTagType> = {
-  uart: '',
+  uart: 'primary',
   i2c: 'success',
   spi: 'warning',
   gpio: 'info',

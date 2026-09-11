@@ -164,9 +164,10 @@ const weightLabel = (w: number): string => {
   }
 }
 
-const weightTagType = (w: number): '' | 'success' | 'warning' | 'info' => {
+const weightTagType = (w: number): 'success' | 'primary' | 'info' | 'warning' | 'danger' => {
   if (w >= 100) return 'success'
-  if (w >= 60) return ''
+  // 中等权重：Element Plus 默认外观（原实现返回 ''，与 'primary' 视觉一致）
+  if (w >= 60) return 'primary'
   return 'info'
 }
 

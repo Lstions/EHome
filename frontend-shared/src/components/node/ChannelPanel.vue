@@ -65,7 +65,7 @@
                               :model-value="dmaStore.isSwitchOn(dma) && isDmaBoundTo(dma, busType, hw)"
                               :disabled="!canToggleDma(dma, busType, hw)"
                               :loading="dmaStore.toggling[dma.dma_id] || false"
-                              @change="(val: boolean) => toggleDmaForHardware(busType, hw, dma, val)"
+                              @change="(val: string | number | boolean) => toggleDmaForHardware(busType, hw, dma, val === true)"
                               size="small"
                               :active-text="dma.name"
                               class="dma-switch"
@@ -397,6 +397,7 @@ const registerPendingPWM = (payload: { requestId: number; hardwareId: string; ac
 
 const onPeriphResult = (message: WebSocketMessage) => {
 	const payload = message.payload as { node_id?: string; request_id?: number; success?: boolean; periph_type?: number; hardware_id?: string; pin?: number; value?: number; running?: boolean; action?: number } | undefined
+	if (!payload) return
 	if (payload?.node_id !== props.nodeDeviceId) return
 	if (!payload.request_id || handledPeriphRequests.has(payload.request_id)) return
 	if (!tryApplyPeriphResult(payload)) {
@@ -514,8 +515,8 @@ const gpioConfigs = ref<GPIOConfig[]>([])
 const pwmConfigs = ref<PWMConfig[]>([])
 const periphLoading = ref(false)
 
-const getBusTagType = (type: string) => {
-  const types: Record<string, string> = {
+const getBusTagType = (type: string): 'success' | 'primary' | 'info' | 'warning' | 'danger' => {
+  const types: Record<string, 'success' | 'primary' | 'info' | 'warning' | 'danger'> = {
     adc: 'success',
     i2c: 'warning',
     spi: 'danger',
@@ -575,10 +576,11 @@ const refreshBuses = async () => {
 
     // Step 3: 先在临时变量中构建合并结果，避免中间状态导致 UI 闪烁
     const mergedHardware: Record<string, any[]> = {}
-    const capHardware = capData?.buses || {}
+    const capHardware: Record<string, any[]> = capData?.buses || {}
     for (const type of ['adc', 'i2c', 'spi', 'uart', 'gpio', 'pwm']) {
-      if (capHardware[type] && Array.isArray(capHardware[type])) {
-        mergedHardware[type] = capHardware[type].map((r: any) => {
+      const capList = capHardware[type]
+      if (capList && Array.isArray(capList)) {
+        mergedHardware[type] = capList.map((r: any) => {
           // 从实际 DMA 状态初始化 _dmaEnabled/_dmaId（而非硬编码 false）
           let dmaEnabled = false
           let dmaId: number | null = null
@@ -1089,7 +1091,7 @@ const availablePwmRoutePins = computed(() => {
 
 // GPIO 资源行以硬件报告为准。
 const openGpioDialogFromRow = (pin: number) => {
-  const hw = hardware.value.gpio?.find(h => h.pin === pin)
+  const hw = hardware.value.gpio?.find((h: { id?: string; pin?: number }) => h.pin === pin)
   openGpioDialog(pin, hw?.id || `GPIO${pin}`)
 }
 

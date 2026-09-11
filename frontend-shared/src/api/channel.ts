@@ -6,10 +6,15 @@ export interface Channel {
   // 后端 node_id 是物理序列号(string,如 'F0F5BDFFFE02');历史声明为 number 是类型债。
   node_id: number | string
   name?: string              // 通道名称（后端自动生成，如 "I2C0_0x77"）
-  hardware_type: 'uart' | 'i2c' | 'spi' | 'adc'
+  // 后端 hardware_type 回大写（UART/I2C/…），历史小写声明是类型债，两侧都保留。
+  hardware_type: 'uart' | 'i2c' | 'spi' | 'adc' | 'UART' | 'I2C' | 'SPI' | 'ADC'
   hardware_id: string            // "I2C0"
+  bus_type?: string         // 后端 Channel.BusType（json: bus_type），如 "UART"
+  bus_config?: string       // 后端 Channel.BusConfig（引脚/速率等 hex 串）
+  enabled?: boolean         // 后端 Channel.Enabled
   address?: string          // "0x77" 或 "10"
-  config: {
+  // 后端 Config 是 text 列（JSON 字符串）；读侧需归一化（见 ChannelPanel typeof 判断）。
+  config: string | {
     commands?: Array<{
       write?: string        // hex 字符串 "F4"
       delay_ms?: number

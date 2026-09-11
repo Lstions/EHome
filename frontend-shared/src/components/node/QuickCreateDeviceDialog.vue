@@ -55,7 +55,7 @@
             v-for="ch in filteredChannels"
             :key="ch.id"
             :label="`${(ch.hardware_type || '').toUpperCase()} ${ch.hardware_id}${ch.address ? ' / ' + ch.address : ''}`"
-            :value="ch.id"
+            :value="ch.id ?? 0"
           />
         </el-select>
         <!-- R2: 区分"加载中"与"加载完但无匹配通道"两种状态 -->

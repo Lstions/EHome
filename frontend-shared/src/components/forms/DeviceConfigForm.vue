@@ -50,7 +50,7 @@
 
       <!-- 选中的驱动信息 -->
       <el-alert v-if="selectedDriver" :closable="false" type="info" style="margin-bottom: 16px;">
-        已选择: <strong>{{ selectedDriver.manufacturer }}</strong> - {{ selectedDriver.model }}
+        已选择: {{ selectedDriver.model }}
       </el-alert>
 
       <!-- 第二行：硬件类型 -->
@@ -223,7 +223,14 @@ const submitting = ref(false)
 // 驱动相关
 const driverOptions = ref<any[]>([])
 const driverList = ref<DriverLeaf[]>([])
-const availableBusTypes = ref<{ value: string; label: string }[]>([])
+const availableBusTypes = ref<{ value: BusType; label: string }[]>([])
+
+const BUS_TYPES = ['uart', 'i2c', 'spi', 'adc'] as const
+type BusType = (typeof BUS_TYPES)[number]
+
+/** 运行时收窄：驱动声明的 hardware_types 可能含前端未建模的类型，非总线类型直接丢弃。 */
+const isBusType = (value: unknown): value is BusType =>
+  typeof value === 'string' && (BUS_TYPES as readonly string[]).includes(value)
 
 const busOptions = [
   { value: 'uart', label: 'UART' },
@@ -252,8 +259,8 @@ const form = reactive({
   description: '',
   device_type: '',
   driverPath: [] as string[],
-  hardware_type: 'uart',
-  protocol: 'modbus',
+  hardware_type: 'uart' as BusType,
+  protocol: 'modbus' as 'modbus' | 'stream' | 'custom' | '',
   is_default: false,
   config: {
     baudrate: 9600,
@@ -296,21 +303,21 @@ const loadDrivers = async () => {
 }
 
 // 驱动选择变化
-const onDriverChange = (path: string[]) => {
-  if (path && path.length >= 3) {
+const onDriverChange = (value: unknown) => {
+  const path = Array.isArray(value) ? value.map(String) : []
+  if (path.length >= 3) {
     form.device_type = path[2]
     
     // 获取驱动支持的 hardware_types
     const driver = driverList.value.find(d => d.type === form.device_type)
     if (driver?.hardware_types) {
-      availableBusTypes.value = driver.hardware_types.map(b => {
-        const opt = busOptions.find(o => o.value === b)
-        return { value: b, label: opt?.label || b }
-      })
+      availableBusTypes.value = driver.hardware_types
+        .filter(isBusType)
+        .map(b => ({ value: b, label: busOptions.find(o => o.value === b)?.label || b }))
       
       // 自动选择第一个支持的类型
       if (!availableBusTypes.value.find(b => b.value === form.hardware_type)) {
-        form.hardware_type = availableBusTypes.value[0]?.value || 'uart'
+        form.hardware_type = availableBusTypes.value[0]?.value ?? 'uart'
       }
     }
   }

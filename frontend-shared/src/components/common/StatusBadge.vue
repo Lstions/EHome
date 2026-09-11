@@ -15,7 +15,7 @@ const props = withDefaults(defineProps<{
   effect: 'light'
 })
 
-const tagType = computed(() => {
+const tagType = computed<'success' | 'primary' | 'info' | 'warning' | 'danger'>(() => {
   switch (props.status) {
     case 'online':
     case 'active':
@@ -33,7 +33,7 @@ const tagType = computed(() => {
     case 'unknown':
       return 'info'
     default:
-      return ''
+      return 'primary'
   }
 })
 
