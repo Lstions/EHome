@@ -32,19 +32,19 @@ const (
 // AlertRule 阈值规则 (方案 v0.4 §5.1.1)。
 // 挂接点: SensorParserConsumer 解析后回调 (alertSink), 非独立 DataConsumer。
 type AlertRule struct {
-	ID         uint    `gorm:"primaryKey" json:"id"`
-	TargetType string  `gorm:"size:20;not null;index;default:'edge_device'" json:"target_type"` // edge_device | logical_device
-	TargetID   uint    `gorm:"not null;index" json:"target_id"`
-	SensorName string  `gorm:"size:64;not null;index" json:"sensor_name"` // 与 UnifiedData.SensorName 同域
-	Comparator string  `gorm:"size:8;not null;default:'gt'" json:"comparator"` // gt|gte|lt|lte|eq|neq
-	Threshold  float64 `json:"threshold"`
-	DurationSec int    `gorm:"default:0" json:"duration_sec"` // 连续满足时长, 0=立即
-	SilenceSec  int    `gorm:"default:300" json:"silence_sec"` // 恢复后静默窗口, 默认 300
-	Level      string  `gorm:"size:10;not null;default:'warning'" json:"level"` // info|warning|critical
-	Enabled    bool    `gorm:"default:true" json:"enabled"`
-	Name       string  `gorm:"size:64;not null" json:"name"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	TargetType  string    `gorm:"size:20;not null;index;default:'edge_device'" json:"target_type"` // edge_device | logical_device
+	TargetID    uint      `gorm:"not null;index" json:"target_id"`
+	SensorName  string    `gorm:"size:64;not null;index" json:"sensor_name"`      // 与 UnifiedData.SensorName 同域
+	Comparator  string    `gorm:"size:8;not null;default:'gt'" json:"comparator"` // gt|gte|lt|lte|eq|neq
+	Threshold   float64   `json:"threshold"`
+	DurationSec int       `gorm:"default:0" json:"duration_sec"`                   // 连续满足时长, 0=立即
+	SilenceSec  int       `gorm:"default:300" json:"silence_sec"`                  // 恢复后静默窗口, 默认 300
+	Level       string    `gorm:"size:10;not null;default:'warning'" json:"level"` // info|warning|critical
+	Enabled     bool      `gorm:"default:true" json:"enabled"`
+	Name        string    `gorm:"size:64;not null" json:"name"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (AlertRule) TableName() string { return "alert_rules" }
@@ -56,7 +56,7 @@ type AlertEvent struct {
 	ID         uint       `gorm:"primaryKey" json:"id"`
 	RuleID     uint       `gorm:"not null;index" json:"rule_id"`
 	State      string     `gorm:"size:10;not null;index" json:"state"` // firing | resolved
-	Value      float64    `json:"value"`                                // 触发/恢复时值
+	Value      float64    `json:"value"`                               // 触发/恢复时值
 	FiredAt    *time.Time `json:"fired_at"`
 	ResolvedAt *time.Time `json:"resolved_at"`
 	NotifiedAt *time.Time `json:"notified_at"`

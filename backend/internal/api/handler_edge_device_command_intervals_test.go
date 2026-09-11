@@ -78,9 +78,9 @@ func TestEdgeDevice_CommandIntervals_PersistsValidSchedulableIds(t *testing.T) {
 
 	w := createJiabaidaBMS(t, r, map[string]interface{}{
 		"command_intervals": map[string]interface{}{
-			"read_basic_info":        3000,
-			"read_cell_voltage":      0, // 0 = disabled, explicit
-			"read_hardware_version":  7000,
+			"read_basic_info":       3000,
+			"read_cell_voltage":     0, // 0 = disabled, explicit
+			"read_hardware_version": 7000,
 		},
 	})
 	if w.Code != http.StatusCreated {
@@ -136,7 +136,7 @@ func TestEdgeDevice_CommandIntervals_RejectsNonSchedulableId(t *testing.T) {
 
 	body := map[string]interface{}{
 		"name": "Inverter", "node_id": "NODE001", "channel_id": 1,
-		"type": "techfine_inverter",
+		"type":              "techfine_inverter",
 		"command_intervals": map[string]interface{}{"query_status": 5000},
 	}
 	w := postEdgeDevice(t, r, body)

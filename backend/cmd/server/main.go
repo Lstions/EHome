@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"ehome/backend/internal/alert"
 	"ehome/backend/internal/api"
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
-	"ehome/backend/internal/alert"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/datalifecycle"

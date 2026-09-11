@@ -32,16 +32,16 @@ type alertEvaluator interface {
 }
 
 type createAlertRuleRequest struct {
-	TargetType  string  `json:"target_type"`
-	TargetID    *uint   `json:"target_id"`
-	SensorName  string  `json:"sensor_name"`
-	Comparator  string  `json:"comparator"`
+	TargetType  string   `json:"target_type"`
+	TargetID    *uint    `json:"target_id"`
+	SensorName  string   `json:"sensor_name"`
+	Comparator  string   `json:"comparator"`
 	Threshold   *float64 `json:"threshold"`
-	DurationSec int     `json:"duration_sec"`
-	SilenceSec  *int    `json:"silence_sec"`
-	Level       string  `json:"level"`
-	Enabled     *bool   `json:"enabled"`
-	Name        string  `json:"name"`
+	DurationSec int      `json:"duration_sec"`
+	SilenceSec  *int     `json:"silence_sec"`
+	Level       string   `json:"level"`
+	Enabled     *bool    `json:"enabled"`
+	Name        string   `json:"name"`
 }
 
 type updateAlertRuleRequest struct {

@@ -6,8 +6,8 @@ import (
 
 	"ehome/backend/internal/models"
 
-	"github.com/gin-gonic/gin"
 	"ehome/backend/pkg/parser"
+	"github.com/gin-gonic/gin"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -32,17 +32,17 @@ func newTestEvaluator(t *testing.T, db *gorm.DB, broadcast func(string, any)) *E
 
 func rule(id uint, sensor string, cmp string, threshold float64, durationSec int) models.AlertRule {
 	return models.AlertRule{
-		ID:         id,
-		Name:       "测试规则",
-		TargetType: models.AlertTargetEdgeDevice,
-		TargetID:   1,
-		SensorName: sensor,
-		Comparator: cmp,
-		Threshold:  threshold,
+		ID:          id,
+		Name:        "测试规则",
+		TargetType:  models.AlertTargetEdgeDevice,
+		TargetID:    1,
+		SensorName:  sensor,
+		Comparator:  cmp,
+		Threshold:   threshold,
 		DurationSec: durationSec,
-		SilenceSec: defaultSilenceSec,
-		Level:      models.AlertLevelWarning,
-		Enabled:    true,
+		SilenceSec:  defaultSilenceSec,
+		Level:       models.AlertLevelWarning,
+		Enabled:     true,
 	}
 }
 
@@ -276,9 +276,9 @@ func TestEvaluateTargetMatching(t *testing.T) {
 // compare 全比较符覆盖。
 func TestCompare(t *testing.T) {
 	cases := []struct {
-		op        string
-		v, th     float64
-		want      bool
+		op    string
+		v, th float64
+		want  bool
 	}{
 		{"gt", 51, 50, true}, {"gt", 50, 50, false},
 		{"gte", 50, 50, true}, {"gte", 49.9, 50, false},
