@@ -24,7 +24,7 @@
 import { computed } from 'vue'
 import { Sunrise, Calendar, DataAnalysis, TrendCharts } from '@element-plus/icons-vue'
 
-const props = defineProps<{
+defineProps<{
   latestData: Record<string, any>
 }>()
 

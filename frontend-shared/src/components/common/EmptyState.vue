@@ -33,7 +33,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { FolderOpened, Document, User, Warning } from '@element-plus/icons-vue'
+import { FolderOpened } from '@element-plus/icons-vue'
 
 interface QuickAction {
   label: string

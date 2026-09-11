@@ -39,7 +39,7 @@
           filterable
           @change="onDriverChange"
         >
-          <template #default="{ node, data }">
+          <template #default="{ data }">
             <div class="driver-option">
               <span>{{ data.label }}</span>
               <el-tag v-if="data.hardware_types?.length" size="small" type="info">{{ data.hardware_types.join(',') }}</el-tag>

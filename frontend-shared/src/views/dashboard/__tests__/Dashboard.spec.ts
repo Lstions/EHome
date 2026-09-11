@@ -173,4 +173,26 @@ describe('Dashboard.vue', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('最近 24 小时趋势')
   })
+
+  // 真 bug 回归（2026-09-11 类型门禁落地）：后端 latestEntry 缺 error_code 字段
+  // 导致 dataErrorCount 恒 0、"采集错误"告警维度永不触发。后端已补字段，
+  // 前端类型已同步；本用例证明 error_code>0 时告警渲染。
+  it('renders the data-error alert dimension when latest_data contains error_code > 0', async () => {
+    const { dataApi } = await import('@/api/data')
+    vi.mocked(dataApi.getOverview).mockResolvedValueOnce({
+      nodes: { total: 5, online: 5, offline: 0 },
+      edge_devices: { total: 10, online: 10, offline: 0 },
+      latest_data: [
+        { device_id: 1, device_name: 'a', node_name: 'n', data: {}, collected_at: '', error_code: 2 },
+        { device_id: 2, device_name: 'b', node_name: 'n', data: {}, collected_at: '', error_code: 0 },
+        { device_id: 3, device_name: 'c', node_name: 'n', data: {}, collected_at: '' },
+      ],
+    })
+    const wrapper = mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    const alertLabels = wrapper.findAll('.alert-item .alert-label').map(n => n.text())
+    expect(alertLabels).toContain('采集错误（近 1h）')
+    const values = wrapper.findAll('.alert-item .alert-value').map(n => n.text())
+    expect(values).toContain('1')
+  })
 })

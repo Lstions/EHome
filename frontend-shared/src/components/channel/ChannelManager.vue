@@ -230,7 +230,7 @@
 import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance } from 'element-plus'
-import { channelApi, type Channel } from '@/api/channel'
+import { type Channel } from '@/api/channel'
 import { nodeApi } from '@/api/node'
 import { useChannelStore } from '@/stores/channel'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
@@ -367,7 +367,6 @@ const availableHardwareList = computed(() => {
 
 const parityLabel = (p: string) => ({ none: '无', odd: '奇校验', even: '偶校验', mark: 'Mark', space: 'Space' }[p] || p)
 const flowControlLabel = (f: string) => ({ none: '无', rts_cts: 'RTS/CTS', xon_xoff: 'XON/XOFF' }[f] || f)
-const directionLabel = (d: string) => ({ INPUT: '输入', OUTPUT: '输出', INPUT_PULLUP: '输入上拉', INPUT_PULLDOWN: '输入下拉' }[d] || d)
 const attenuationLabel = (a: number) => ({ 0: '0dB', 1: '2.5dB', 2: '6dB', 3: '11dB' }[a] || `${a}`)
 
 const formatPinsBrief = (pins: any[]) => {

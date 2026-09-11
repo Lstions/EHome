@@ -16,7 +16,7 @@
 <script setup lang="ts">
 import { ArrowLeft } from '@element-plus/icons-vue'
 
-const props = defineProps<{
+defineProps<{
   title: string
   subtitle?: string
   showBack?: boolean

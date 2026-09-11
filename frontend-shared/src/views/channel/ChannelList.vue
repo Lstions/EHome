@@ -300,15 +300,6 @@ function getBusTypeLabel(type: string): string {
   return map[type] || type
 }
 
-function getStatusLabel(status?: string): string {
-  const map: Record<string, string> = {
-    active: '启用',
-    inactive: '停用',
-    error: '错误',
-  }
-  return map[status || ''] || '未知'
-}
-
 // 事件处理
 function handleSearch() {
   currentPage.value = 1

@@ -238,9 +238,9 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { 
-  Document, CircleCheck, Connection, Cpu, Search, Grid, 
+  Document, CircleCheck, Connection, Cpu, Grid, 
   Upload, Download, Plus, View, Edit, CopyDocument, MoreFilled,
-  DataBoard, DataAnalysis, Files, Cpu as CpuIcon
+  DataBoard, DataAnalysis, Files
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'

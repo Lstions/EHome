@@ -26,6 +26,21 @@ export interface Node {
   capabilities: Record<string, any>
   config: Record<string, any>
   created_at: string
+  // 与后端 models.Node json tag 对齐的遥测/硬件字段
+  uptime_seconds?: number
+  wifi_rssi?: number
+  wifi_ssid?: string
+  free_heap_bytes?: number
+  platform?: string
+  hardware_info?: Record<string, any>
+  dma_channels?: unknown[]
+  config_version?: string
+  config_status?: string
+  last_seen?: string | null
+  boot_id?: string
+  log_stream_enabled?: boolean
+  log_stream_level?: number
+  log_persist_enabled?: boolean
   // v2.2 同步机制字段
   protocol_version?: string
   config_sync_state?: 'in_sync' | 'syncing' | 'lag' | 'error' | 'unknown'
@@ -50,13 +65,19 @@ export interface NodeListParams {
 
 export interface OTARecord {
   id: number
-  node_id: number
+  /** 后端 models.OTATask.NodeID（DB 列 collector_id，json 名 node_id） */
+  node_id: string
+  ota_id?: string
   firmware_id: number
-  from_version: string
-  to_version: string
+  /** 后端字段名是 to_version（非 to_version 别名 from_version 不存在于 OTATask） */
+  to_version?: string
+  from_version?: string
   status: string
   progress: number
+  /** 后端 models.OTATask.ErrorMsg json:"error_msg" */
+  error_msg?: string
   error_message?: string
+  started_at?: string
   created_at: string
   completed_at?: string
 }
@@ -292,8 +313,8 @@ export const nodeApi = {
     await client.post(`/api/v1/nodes/${id}/config/sync`)
   },
 
-  async startOTA(id: number | string, firmwareId: number, force: boolean = false): Promise<{ota_record_id: number, status: string}> {
-    const response = await client.post<unknown, ApiResponse<{ota_record_id: number, status: string}>>(
+  async startOTA(id: number | string, firmwareId: number, force: boolean = false): Promise<{ota_record_id?: number, id?: number, status: string}> {
+    const response = await client.post<unknown, ApiResponse<{ota_record_id?: number, id?: number, status: string}>>(
       `/api/v1/ota/start`,
       { node_id: id, firmware_id: firmwareId, force }
     )

@@ -761,8 +761,6 @@ const scanResult = ref<string[] | null>(null)
 const resourceQuerying = ref(false)
 const channelManagerVisible = ref(false)
 const baudToolVisible = ref(false)
-let pendingResourceRefreshTimeout: ReturnType<typeof setTimeout> | null = null
-let resolveResourceRefreshWait: (() => void) | null = null
 
 // ── Tab 栏 ──
 const tabs = [

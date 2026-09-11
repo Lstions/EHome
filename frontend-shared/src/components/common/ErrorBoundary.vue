@@ -18,7 +18,7 @@
 
 <script setup lang="ts">
 import { ref, onErrorCaptured, watch } from 'vue'
-import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { logger } from '@/utils/logger'
 
 const error = ref<Error | null>(null)
@@ -29,7 +29,7 @@ let errorRoutePath: string | null = null
 
 // Only clear error when navigating AWAY from the route that caused the error
 // to a different valid route. Don't clear on every route change.
-watch(() => route.path, (newPath, oldPath) => {
+watch(() => route.path, (newPath) => {
   // Only clear if we had an error AND we're navigating to a different route
   // (not just a param change on the same route pattern)
   if (error.value && errorRoutePath !== null && newPath !== errorRoutePath) {

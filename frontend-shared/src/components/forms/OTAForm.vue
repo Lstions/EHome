@@ -80,7 +80,6 @@
             :key="index"
             :timestamp="log.time"
             placement="top"
-            size="small"
           >
             <div>{{ log.message }}</div>
           </el-timeline-item>
@@ -108,7 +107,7 @@
 import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
-import { firmwareApi, type Firmware } from '@/api/firmware'
+import { type Firmware } from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
 import { formatFileSize } from '@/utils/format'
 
@@ -183,8 +182,9 @@ const rules = {
   firmware_id: [{ required: true, message: '请选择固件版本', trigger: 'change' }]
 }
 
-// 获取型号名称
-const getModelName = (model: string): string => {
+// 获取型号名称（Firmware.target_model 可选，缺省时原样返回空）
+const getModelName = (model?: string): string => {
+  if (!model) return ''
   return MODEL_NAMES[model] || model
 }
 
@@ -240,10 +240,13 @@ const handleStart = async () => {
 
     upgradeStatus.value = 'upgrading'
     statusText.value = '正在升级中...'
-    addLog(`OTA 任务已创建，ID: ${otaRecord.ota_record_id || otaRecord.id}`)
+    addLog(`OTA 任务已创建，ID: ${otaRecord.ota_record_id ?? otaRecord.id}`)
 
     // 轮询真实进度
-    const recordId = otaRecord.ota_record_id || otaRecord.id
+    const recordId = otaRecord.ota_record_id ?? otaRecord.id
+    if (recordId == null) {
+      throw new Error('后端未返回 OTA 记录 ID')
+    }
     pollProgress(collectorId, recordId, generation)
 
   } catch (error: any) {

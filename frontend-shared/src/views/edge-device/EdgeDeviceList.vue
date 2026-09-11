@@ -598,7 +598,6 @@ import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandi
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
-import { useWebSocketStore } from '@/stores/websocket'
 import { getHardwareTagType } from '@/utils/hardwareTag'
 import { useDebouncedSearch } from '@/composables/useDebouncedSearch'
 import { useDeviceDelete } from '@/composables/useDeviceDelete'
@@ -1434,13 +1433,6 @@ const formatRelativeTime = (time: string) => {
   if (minutes < 60) return `${minutes}分钟前`
   if (minutes < 1440) return `${Math.floor(minutes / 60)}小时前`
   return `${Math.floor(minutes / 1440)}天前`
-}
-
-// 检查是否有特定类型数据
-const hasSpecificData = (device: any): boolean => {
-  const d = device.last_data
-  return !!(d?.temperature !== undefined || d?.humidity !== undefined ||
-             d?.pressure !== undefined || d?.wind_speed !== undefined)
 }
 
 // 格式化通用数据为可读字符串

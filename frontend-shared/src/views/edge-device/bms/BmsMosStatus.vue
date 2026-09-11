@@ -56,11 +56,6 @@ const hasFetStatus = computed(() => {
   return props.data.fet_status !== undefined || props.data.mos_charge !== undefined
 })
 
-const fetStatus = computed(() => {
-  if (!props.data) return 0
-  return props.data.fet_status ?? 0
-})
-
 const chargeOn = computed(() => {
   if (!props.data) return false
   // Check fet_status bitmask first, then fallback to explicit fields

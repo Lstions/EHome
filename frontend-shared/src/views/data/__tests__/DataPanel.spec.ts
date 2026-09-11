@@ -34,7 +34,6 @@ vi.mock('@/stores/edgeDevice', () => ({
       items: [{ id: 1, name: '设备 1' }, { id: 42, name: '设备 42' }],
     })),
     deleteDevice: vi.fn(() => Promise.resolve()),
-    updateLocal: vi.fn(),
     clearCache: vi.fn(),
     isFresh: vi.fn(() => false),
   }),

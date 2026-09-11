@@ -53,9 +53,11 @@ export interface MetricsResponse {
 
 /**
  * 获取系统指标摘要
+ * 注意：响应拦截器已解包 envelope，故用 <unknown, MetricsResponse> 双泛型
+ * （与 api/node.ts 的 ApiResponse 模式一致），避免 axios 把返回值建模为 AxiosResponse。
  */
 export function getMetricsSummary() {
-  return request.get<MetricsResponse>('/api/v1/metrics/summary')
+  return request.get<unknown, MetricsResponse>('/api/v1/metrics/summary')
 }
 
 /**

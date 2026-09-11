@@ -85,7 +85,6 @@
 
 <script setup lang="ts">
 import { computed, onUnmounted, reactive, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import type { PWMBusResource } from '@/api/node'
 import { pwmApi, type PWMConfig } from '@/api/periph'
 import { useGuardedOperation } from '@/composables/useGuardedOperation'

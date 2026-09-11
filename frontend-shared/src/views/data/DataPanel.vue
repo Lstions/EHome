@@ -254,13 +254,11 @@ import client from '@/api/client'
 import { getErrorInfo } from '@/utils/errorCode'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
-import { exportCSV, exportJSON } from '@/utils/exportData'
-import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 
 const router = useRouter()
-const deviceList = ref<Device[]>([])
+const deviceList = ref<EdgeDevice[]>([])
 const historyData = ref<any[]>([])
 const chartSeries = ref<any[]>([])
 const loading = ref(false)

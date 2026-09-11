@@ -73,7 +73,6 @@
 
 <script setup lang="ts">
 import { computed, reactive } from 'vue'
-import { ElMessage } from 'element-plus'
 import type { GPIOBusResource } from '@/api/node'
 import { gpioApi, type GPIOConfig } from '@/api/periph'
 import { useGuardedOperation } from '@/composables/useGuardedOperation'
@@ -106,7 +105,7 @@ const emit = defineEmits<{
   (event: 'configure' | 'edit' | 'remove', pin: number): void
 }>()
 
-const { run: guardedRun, invalidate } = useGuardedOperation({
+const { run: guardedRun } = useGuardedOperation({
   nodeId: () => props.nodeId,
   offline: () => props.offline,
   errorPrefix: 'GPIO 操作失败',

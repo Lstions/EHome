@@ -526,65 +526,6 @@ const getBusTagType = (type: string) => {
   return types[type] || 'info'
 }
 
-const formatTime = (timestamp: number) => {
-  return new Date(timestamp).toLocaleString('zh-CN')
-}
-
-// 获取可关联的配置模板（过滤同类型且未被占用的）
-const getAvailableConfigs = (busType: string, currentBusId: string) => {
-  // 获取同类型的所有模板
-  const sameTypeConfigs = configTemplates.value.filter(cfg => cfg.hardware_type === busType)
-  
-  // 获取已经被其他总线关联的模板ID
-  const usedConfigIds = new Set<number>()
-  for (const type of ['adc', 'i2c', 'spi', 'uart']) {
-    for (const bus of hardware.value[type] || []) {
-      if (bus.config_id && bus.id !== currentBusId) {
-        usedConfigIds.add(bus.config_id)
-      }
-    }
-  }
-  
-  // 返回未被占用的模板
-  return sameTypeConfigs.filter(cfg => !usedConfigIds.has(cfg.id))
-}
-
-// 根据ID获取配置模板
-const getConfigById = (configId: number) => {
-  return configTemplates.value.find(cfg => cfg.id === configId)
-}
-
-// 获取采集器角色（与传感器角色互补）
-const getCollectorMode = (bus: any) => {
-  if (bus.config_id) {
-    const config = getConfigById(bus.config_id)
-    if (config?.config?.sensor_role) {
-      // 传感器是从机 → 采集器是主机
-      // 传感器是主机 → 采集器是从机
-      return config.config.sensor_role === 'slave' ? 'master' : 'slave'
-    }
-  }
-  // 没有关联模板时，使用总线自身的mode字段
-  return bus.mode || 'master'
-}
-
-// 关联配置模板时的处理
-const onConfigAssociate = (busType: string, index: number) => {
-  const bus = hardware.value[busType][index]
-  if (bus.config_id) {
-    const config = getConfigById(bus.config_id)
-    if (config?.config) {
-      // 从模板同步参数到总线配置
-      if (config.config.clock_hz) {
-        bus.freq_hz = config.config.clock_hz
-        bus.clock_hz = config.config.clock_hz
-      }
-      // 标记为启用
-      bus.enabled = true
-    }
-  }
-}
-
 // 加载配置模板列表
 const loadConfigTemplates = async () => {
   const sequence = ++templatesRequestSequence

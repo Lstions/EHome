@@ -18,6 +18,7 @@ export interface Overview {
     data: Record<string, any>
     collected_at: string
     raw_data?: string
+    error_code?: number
   }>
 }
 

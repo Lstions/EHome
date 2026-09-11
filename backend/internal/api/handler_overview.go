@@ -48,6 +48,7 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			Data          map[string]float64 `json:"data"`
 			CollectedAt   string             `json:"collected_at"`
 			RawData       string             `json:"raw_data,omitempty"`
+			ErrorCode     int                `json:"error_code"`
 		}
 
 		// Only load devices with data
@@ -109,6 +110,7 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 				NodeName:      dev.Node.Name,
 				CollectorName: dev.Node.Name, // legacy alias — same as node_name for backward compat
 				CollectedAt:   dev.LastDataAt.Format("2006-01-02T15:04:05Z"),
+				ErrorCode:     dev.ErrorCode,
 			}
 			if dm, ok := dataByDevice[dev.ID]; ok && len(dm) > 0 {
 				entry.Data = dm

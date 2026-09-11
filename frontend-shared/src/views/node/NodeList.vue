@@ -268,7 +268,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { 
-  Connection, CircleCheck, CircleClose, Warning, Cpu, Search, 
+  Connection, CircleCheck, CircleClose, Warning, Cpu, 
   Filter, Grid, List, Refresh, Setting, Upload, Delete,
   Plus
 } from '@element-plus/icons-vue'

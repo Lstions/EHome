@@ -225,7 +225,7 @@
               </template>
             </el-table-column>
             <el-table-column label="状态" width="100">
-              <template #default="{ row }">
+              <template #default>
                 <el-tag size="small" type="success">在线</el-tag>
               </template>
             </el-table-column>
@@ -249,7 +249,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Cpu, CircleCheck, Refresh, Connection, TrendCharts, WarningFilled } from '@element-plus/icons-vue'
+import { Cpu, CircleCheck, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -334,7 +334,7 @@ const availableTrendCategories = computed(() => {
 const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
 const offlineDevices = computed(() => Math.max(0, (overview.value.edge_devices?.total || 0) - (overview.value.edge_devices?.online || 0)))
 const dataErrorCount = computed(() => {
-  return (overview.value.latest_data || []).filter(d => (d.error_code && d.error_code > 0)).length
+  return (overview.value.latest_data || []).filter(d => (d.error_code ?? 0) > 0).length
 })
 const hasAlerts = computed(() => offlineCollectors.value > 0 || offlineDevices.value > 0 || dataErrorCount.value > 0)
 
@@ -355,7 +355,6 @@ const fetchTrendData = async () => {
     const startTime = new Date(endTime.getTime() - (rangeMs[trendRange.value] || rangeMs['24h']))
 
     const unitMap = sensorUnitMap
-    const nameMap = sensorNameMap
 
     // 从概览数据中获取设备列表，逐个查询
     const deviceIds = overview.value.latest_data?.map(d => d.device_id).filter(Boolean) || []
@@ -552,7 +551,7 @@ const availableCategoryKeys = computed(() => {
   return availableTrendCategories.value.map(c => c.value).join(',')
 })
 
-watch(availableCategoryKeys, (newKeys, oldKeys) => {
+watch(availableCategoryKeys, () => {
   const cats = availableTrendCategories.value
   if (cats.length > 0 && !cats.some(c => c.value === trendCategory.value)) {
     trendCategory.value = cats[0].value

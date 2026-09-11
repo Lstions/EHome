@@ -25,7 +25,9 @@ const offlineByBrowser = ref(false)
 
 const iconComp = computed(() => {
   if (offlineByBrowser.value) return CircleCloseFilled
-  if (wsStore.lastError) return WarningFilled
+  // 浏览器在线但 WebSocket 连接断开 → 警告图标（lastError 字段不存在于
+  // websocket store，曾导致本分支永远 falsy、警告图标永不显示）
+  if (!wsStore.connected) return WarningFilled
   return Link
 })
 

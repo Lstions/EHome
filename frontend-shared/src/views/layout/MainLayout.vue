@@ -240,7 +240,6 @@ import {
   WarningFilled,
   SuccessFilled,
   InfoFilled,
-  Search,
   Menu,
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
