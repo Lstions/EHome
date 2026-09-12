@@ -56,7 +56,7 @@ func TestMergeDevices_Success(t *testing.T) {
 	src2 := seedMergeSource(t, db, "src2", 2, base.Add(24*time.Hour))
 
 	SetSystemRetentionDays(200)
-	defer SetSystemRetentionDays(365)
+	defer SetSystemRetentionDays(90)
 
 	result, err := MergeDevices(db, &MergeRequest{TargetName: "合并BMS", SourceIDs: []uint{src1.ID, src2.ID}})
 	if err != nil {

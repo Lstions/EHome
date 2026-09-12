@@ -9,7 +9,7 @@ import "sync/atomic"
 var systemRetentionDays atomic.Int64
 
 func init() {
-	systemRetentionDays.Store(365)
+	systemRetentionDays.Store(90) // must match config.DefaultDataRetentionDays
 }
 
 // SetSystemRetentionDays updates the snapshot source (values <= 0 ignored).

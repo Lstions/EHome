@@ -103,7 +103,7 @@ func EnsureLogicalDevice(db *gorm.DB, dev *models.EdgeDevice, path Path, retenti
 		return nil, errors.New("datalifecycle: nil edge device")
 	}
 	if retentionDays <= 0 {
-		retentionDays = 365
+		retentionDays = 90 // must match config.DefaultDataRetentionDays
 	}
 	baseKey := IdentityKey(dev.Type, dev.HardwareID, dev.ID)
 	name := strings.TrimSpace(dev.Name)

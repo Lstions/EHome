@@ -527,7 +527,7 @@ onBeforeUnmount(stopPolling)
 const editVisible = ref(false)
 const saving = ref(false)
 const editing = ref<LogicalDeviceItem | null>(null)
-const editForm = ref({ name: '', retention_days: 365 })
+const editForm = ref({ name: '', retention_days: 90 })
 
 const openEdit = (row: LogicalDeviceItem) => {
   editing.value = row

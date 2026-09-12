@@ -17,7 +17,7 @@ func TestPreviewMerge_TimeRangesAndOverlap(t *testing.T) {
 	src2 := seedMergeSource(t, db, "src2", 3, base.Add(time.Hour))
 
 	SetSystemRetentionDays(123)
-	defer SetSystemRetentionDays(365)
+	defer SetSystemRetentionDays(90)
 
 	preview, err := PreviewMerge(context.Background(), db, []uint{src1.ID, src2.ID})
 	if err != nil {

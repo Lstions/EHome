@@ -164,7 +164,7 @@ func TestRetentionTask_DefersPendingMerge(t *testing.T) {
 	src2 := seedRetentionDevice(t, db, "msrc2", 1, now.AddDate(0, 0, -400))
 	// 目标继承系统级快照: 置 1 天使搬迁完成后的合并数据同样到期。
 	SetSystemRetentionDays(1)
-	defer SetSystemRetentionDays(365)
+	defer SetSystemRetentionDays(90)
 	startMerge(t, db, src1, src2) // 两源均 pending
 
 	r := NewRetentionTask(db)
