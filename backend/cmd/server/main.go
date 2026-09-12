@@ -72,14 +72,17 @@ func main() {
 	logger.Infof("Database connected and migrated")
 
 	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data / device_data 分区迁移 +
-	// 滚动分区保障。失败降级为 Error 不 Fatal——分区功能异常不阻塞服务启动
-	// （表仍以普通表形态可用）。
+	// 滚动分区保障。迁移失败即 Fatal 中止启动, 不再静默降级为"继续用平表":
+	// 失败路径已保证源平表与 legacy/_new 表完整 (安全门禁在行数校验前不 swap),
+	// 且搬迁幂等 (主键 (id,timestamp) + ON CONFLICT), 修好后重跑即可收敛;
+	// 而"带着未完成的迁移继续跑"会让后半段行为与预期不符且极难排查。
+	// 非 PG 方言 (SQLite 测试) 下两个迁移函数均为 no-op 返回 nil, 不受影响。
 	db := database.GetDB()
 	if err := datalifecycle.MigrateUnifiedDataToPartitioned(db); err != nil {
-		logger.Errorf("unified_data partition migration failed (continuing with flat table): %v", err)
+		logger.Fatalf("unified_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
 	}
 	if err := datalifecycle.MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
-		logger.Errorf("device_data partition migration failed (continuing with flat table): %v", err)
+		logger.Fatalf("device_data partition migration failed (aborting startup, source tables intact, fix and restart to resume): %v", err)
 	}
 	// 滚动分区保障: 已分区的时序表各自确保 [上月, 未来 3 月] 分区存在。
 	// 未分区表 (迁移失败/非 PG) 跳过, 避免对普通表执行 PARTITION OF 报错。

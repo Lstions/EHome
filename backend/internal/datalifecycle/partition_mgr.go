@@ -270,9 +270,18 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 	}
 
 	newTable := table + "_new"
-	// 幂等: 清理上次中断残留的 new 表。
+	// 幂等: 清理上次中断残留的 new 表 (CASCADE 连带挂在它下面的月份分区)。
 	if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", newTable)).Error; err != nil {
 		return fmt.Errorf("drop stale %s: %w", newTable, err)
+	}
+	// M3: 清理同名月份分区残留。上次迁移可能在 <table>_new 下建过
+	// <table>_YYYYMM 并灌入部分数据; 若这些关系未随 _new 一起消失 (detached
+	// 或其它中断形态), createPartitionIfNotExists 会因"同名表已存在"而跳过在
+	// new 母表下建分区, 随后 INSERT 报 "no partition of relation found", 迁移
+	// 永不收敛。此刻 <table> 仍是平表 (尚未 swap), 这些残留分区只是平表行的
+	// 副本, 平表完整保留 → DROP 不丢任何源数据。
+	if err := dropStaleMonthPartitions(db, table); err != nil {
+		return err
 	}
 	if err := createPartitionedParent(db, table, newTable, false); err != nil {
 		return fmt.Errorf("create %s: %w", newTable, err)
@@ -376,6 +385,52 @@ func dropLegacyTable(db *gorm.DB, table, legacyName string) error {
 	}
 	slog.Info("partition_mgr: dropped legacy flat table",
 		"table", table, "legacy_table", legacyName, "legacy_rows", rows, "legacy_bytes", bytes)
+	return nil
+}
+
+// dropStaleMonthPartitions 删除 <table>_YYYYMM 形态的残留月份分区 (M3)。
+//
+// 只在 <table> 尚未 swap (仍是平表) 的迁移开始阶段调用: 此时任何
+// <table>_YYYYMM 关系都是上一次中断迁移的产物, 其行是对平表数据
+// (INSERT ... SELECT) 的副本, 且平表完整保留 → DROP 不丢任何源数据。
+// 清理后由 createPartitionIfNotExists 在 <table>_new 下重建干净分区, 保证
+// 重跑能收敛。
+//
+// 仅匹配后缀可解析为 YYYYMM 的关系: <table>_legacy / <table>_new /
+// <table>_rollup_1m 等一律不碰。名称 LIKE 的匹配走 schema 限定; 这里已确认
+// <table> 是平表 (flatExists>0 且 IsTablePartitioned=false), 因此不会误删
+// 已分区母表的分区。
+func dropStaleMonthPartitions(db *gorm.DB, table string) error {
+	rows, err := db.Raw(
+		`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE c.relname LIKE ? AND c.relkind = 'r' AND n.nspname = current_schema()`,
+		table+"_%",
+	).Rows()
+	if err != nil {
+		return fmt.Errorf("list stale partitions of %s: %w", table, err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err == nil {
+			names = append(names, n)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan stale partitions of %s: %w", table, err)
+	}
+	for _, n := range names {
+		// 分区名形如 <table>_YYYYMM; 其余 (legacy/new/rollup...) 跳过。
+		if _, err := time.Parse("200601", n[len(table)+1:]); err != nil {
+			continue
+		}
+		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", n)).Error; err != nil {
+			return fmt.Errorf("drop stale partition %s: %w", n, err)
+		}
+		slog.Info("partition_mgr: dropped stale month partition from interrupted migration",
+			"table", table, "partition", n)
+	}
 	return nil
 }
 
@@ -483,7 +538,16 @@ func oldestRowMonthFor(db *gorm.DB, table string) time.Time {
 }
 
 // copyMonthBatched copies one calendar month from src into dst in batches of
-// migrateBatchSizePostgres using an id-watermark loop (断点续跑: 重跑幂等).
+// migrateBatchSizePostgres. 断点续跑: (id,timestamp) 主键 + ON CONFLICT DO
+// NOTHING, 重跑幂等。
+//
+// 批次上界必须取自"本批实际扫描到的行的最大 id", 而不是"本月剩余行的
+// max(id)"。后者会在 id 稀疏时一次跳到整月末: 第一批只覆盖很小一段 id,
+// 但水位被设为整月最大 id, 下一批 `id > watermark` 无行可搬而提前
+// 退出。真实开发库实测因此只搬了恰好一批 (src=87487 dst=10000, id 稀疏)。
+// 这里先用 `... ORDER BY id LIMIT N` 的子查询固定本批上界 batchMax, 再搬迁
+// (watermark, batchMax] 区间; ON CONFLICT 跳过的行仍计入 batchMax, 因此水位
+// 推进与 RowsAffected 完全解耦。
 func copyMonthBatched(db *gorm.DB, dst, src string, month time.Time) error {
 	cols := partitionCopyColumns[src]
 	if cols == "" {
@@ -494,32 +558,51 @@ func copyMonthBatched(db *gorm.DB, dst, src string, month time.Time) error {
 	end := addMonths(month, 1)
 	watermark := int64(0)
 	for {
-		res := db.Exec(fmt.Sprintf(
+		// 结束判定基于源表剩余行数, 与批大小/被 ON CONFLICT 跳过的行数无关:
+		// 只要本月还有 id > watermark 的行, 循环就继续。
+		var remaining int64
+		if err := db.Raw(fmt.Sprintf(
+			"SELECT count(*) FROM %s WHERE id > ? AND timestamp >= ? AND timestamp < ?",
+			src),
+			watermark, start, end,
+		).Scan(&remaining).Error; err != nil {
+			return err
+		}
+		if remaining == 0 {
+			return nil // 本月搬完
+		}
+		// 本批上界: 本月 id > watermark 的最小 N 行中的最大 id (无行则 0)。
+		var batchMax int64
+		if err := db.Raw(fmt.Sprintf(
+			`SELECT COALESCE(max(id), 0) FROM (
+				SELECT id FROM %s
+				WHERE id > ? AND timestamp >= ? AND timestamp < ?
+				ORDER BY id LIMIT %d
+			) AS batch`,
+			src, migrateBatchSizePostgres),
+			watermark, start, end,
+		).Scan(&batchMax).Error; err != nil {
+			return err
+		}
+		// 无进展保护: 有剩余行却拿不到更大的上界 (理论上不可达) → 报错退出,
+		// 避免水位不前进时死循环。
+		if batchMax <= watermark {
+			return fmt.Errorf("copyMonthBatched: no progress for %s month %s (watermark=%d remaining=%d)",
+				src, start.Format("2006-01"), watermark, remaining)
+		}
+		// 搬迁 (watermark, batchMax] 区间的全部行。ON CONFLICT 只负责幂等,
+		// 不参与退出/水位判定。
+		if err := db.Exec(fmt.Sprintf(
 			`INSERT INTO %s (%s)
 			 SELECT %s
 			 FROM %s
-			 WHERE id > ? AND timestamp >= ? AND timestamp < ?
-			 ORDER BY id LIMIT %d
+			 WHERE id > ? AND id <= ? AND timestamp >= ? AND timestamp < ?
 			 ON CONFLICT (id, timestamp) DO NOTHING`,
-			dst, cols, cols, src, migrateBatchSizePostgres),
-			watermark, start, end,
-		)
-		if res.Error != nil {
-			return res.Error
+			dst, cols, cols, src),
+			watermark, batchMax, start, end,
+		).Error; err != nil {
+			return err
 		}
-		if res.RowsAffected < int64(migrateBatchSizePostgres) {
-			return nil // 本月搬完
-		}
-		// 推进水位: 取本批最大 id。
-		var maxID int64
-		db.Raw(fmt.Sprintf(
-			"SELECT COALESCE(max(id), ?) FROM %s WHERE id > ? AND timestamp >= ? AND timestamp < ?",
-			src),
-			watermark, watermark, start, end,
-		).Scan(&maxID)
-		if maxID <= watermark {
-			return nil
-		}
-		watermark = maxID
+		watermark = batchMax
 	}
 }
