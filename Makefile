@@ -77,7 +77,7 @@ BACKEND_COVERAGE_THRESHOLD  ?= 35
 FRONTEND_COVERAGE_THRESHOLD ?= 25
 
 .PHONY: dev up down restart infra infra-down auth-bootstrap backend frontend e2e \
-        test test-backend test-frontend test-integration test-coverage \
+        test test-backend test-frontend test-integration test-coverage test-scenarios \
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
         status logs backup restore clean help
@@ -281,6 +281,21 @@ test-integration: infra ## 使用统一 PostgreSQL 的 ehome_test 数据库运�
 		EHOME_DB_NAME=ehome_test \
 		go test -race -count=1 -tags=integration ./...
 	@echo "✅ Integration tests passed"
+
+# 场景仿真验证（设计 docs/设计/场景仿真验证框架.md §8）：
+# 真实组合根子进程 + 真实 PG（ehome_sim_*）+ 真实 EMQX。
+# SCENARIO=SIM-DS 只跑某个域（-run 过滤）；不带则全量。
+SCENARIO ?=
+test-scenarios: ## 运行场景仿真验证（需 make infra）
+	@echo "==> Running scenario simulation (real server + real PG + real EMQX)..."
+	@cd $(BACKEND) && EHOME_DB_HOST=127.0.0.1 \
+		EHOME_DB_PORT=5432 \
+		EHOME_DB_USER=$(POSTGRES_USER) \
+		EHOME_DB_PASSWORD=$(POSTGRES_PASSWORD) \
+		MQTT_BROKER=tcp://127.0.0.1:1883 \
+		go test -tags=simulation -count=1 -timeout=30m -v \
+		-run "$(if $(SCENARIO),TestScenarios/$(SCENARIO),TestScenarios|TestCatalogGate)" ./simulation/...
+	@echo "✅ Scenario simulation passed"
 
 test-coverage: ## 运行全部测试并生成覆盖率报告
 	@echo "==> Running all tests with coverage..."
