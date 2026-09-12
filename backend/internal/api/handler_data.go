@@ -92,7 +92,10 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 		var data []models.UnifiedData
 		query.Order("timestamp DESC").Limit(limit).Find(&data)
-		c.JSON(http.StatusOK, data)
+		if data == nil {
+			data = []models.UnifiedData{}
+		}
+		Success(c, data)
 	})
 
 	// Get latest sensor values for a node (all edge devices) — single query via correlated subquery
@@ -110,7 +113,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		db.Model(&models.Channel{}).Where("node_id = ? AND enabled = ?", node.NodeID, true).Pluck("id", &channelIDs)
 
 		if len(channelIDs) == 0 {
-			c.JSON(http.StatusOK, gin.H{
+			Success(c, gin.H{
 				"node_id": node.NodeID,
 				"values":  []map[string]interface{}{},
 			})
@@ -150,7 +153,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
+		Success(c, gin.H{
 			"node_id": node.NodeID,
 			"values":  results,
 		})
@@ -254,7 +257,7 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		if categories == nil {
 			categories = []category{}
 		}
-		c.JSON(http.StatusOK, categories)
+		Success(c, categories)
 	})
 
 	// Historical unified data for trend charts (Dashboard)
@@ -307,15 +310,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		// uniformly sample to cap response size.
 		maxPoints, _ := strconv.Atoi(c.DefaultQuery("max_points", "0"))
 		data = downsampleUnifiedData(data, maxPoints)
+		if data == nil {
+			data = []models.UnifiedData{}
+		}
 
-		c.JSON(http.StatusOK, data)
-	})
-
-	// GET /api/v1/devices/:id/failover-logs
-	// 占位端点（主备数据源功能尚未接通 UI）：data 恒为空数组，
-	// 保持 {data: FailoverLog[]} 契约——前端 api/dataSource.ts:getFailoverLogs 只读 data。
-	v1.GET("/devices/:id/failover-logs", func(c *gin.Context) {
-		Success(c, []gin.H{})
+		Success(c, data)
 	})
 
 	// Batch historical query — eliminates N+1 request pattern
@@ -390,7 +389,10 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			}(i, cat)
 		}
 		wg.Wait()
+		if results == nil {
+			results = []catResult{}
+		}
 
-		c.JSON(http.StatusOK, results)
+		Success(c, results)
 	})
 }

@@ -18,6 +18,7 @@ import (
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
 	"ehome/backend/internal/datalifecycle"
+	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
@@ -230,6 +231,9 @@ func main() {
 	}
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
 	commandService := commandexec.NewService(db, actionRegistry)
+	// 数据源主备领域服务 (B1 已实现)。本批仅构造并注入 HTTP 层；
+	// 引擎接线 (Start/MarkSuccess/MarkFailure) 由后续批次完成。
+	datasourceSvc := datasource.New(db, datasource.Options{})
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
@@ -337,7 +341,7 @@ func main() {
 		}))
 	}
 	controlCfg := cfg.ControlConfig()
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, api.ControlPolicy{
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, api.ControlPolicy{
 		LegacyDeviceWriteMode: controlCfg.LegacyDeviceWriteMode,
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})

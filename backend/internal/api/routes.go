@@ -8,6 +8,7 @@ import (
 	authservice "ehome/backend/internal/auth"
 	"ehome/backend/internal/automation"
 	"ehome/backend/internal/commandexec"
+	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/nodemgr"
@@ -41,6 +42,9 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// automationManualTriggerOpt 手动触发器: 与 planner 同实例 (*automation.Planner),
 	// 单独变量承接避免接口类型不含 TriggerRule 方法。
 	var automationManualTriggerOpt automationManualTrigger
+	// datasourceSvc 数据源主备领域服务 (设计/数据源主备与故障转移.md v1.0 §7):
+	// 经 *datasource.Service option 注入 (main.go); 测试未注入时为 nil。
+	var datasourceSvc *datasource.Service
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
@@ -55,6 +59,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		case *automation.Planner:
 			automationPlannerOpt = value
 			automationManualTriggerOpt = value
+		case *datasource.Service:
+			datasourceSvc = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -144,8 +150,15 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// Driver compatibility routes (reuse device-configs)
 		registerDriverCompatRoutes(v1, db)
 
-		// Data source CRUD routes
-		registerDataSourceRoutes(v1.Group("/data-sources"), db)
+		// Data source CRUD routes + /devices/:id/failover-logs (v1.0 §7)。
+		// 未注入领域服务时注册显式 503 占位，避免 nil 解引用 panic，并保持路由存在。
+		if datasourceSvc == nil {
+			registerDataSourceUnavailable(v1.Group("/data-sources"))
+			registerFailoverLogUnavailable(v1)
+		} else {
+			registerDataSourceRoutes(v1.Group("/data-sources"), datasourceSvc)
+			registerFailoverLogRoutes(v1, datasourceSvc)
+		}
 
 		// Vendor + DeviceModel + DeviceCategory CRUD
 		registerVendorRoutes(v1, db)

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -41,6 +42,8 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.DeviceData{},
 		&models.UnifiedData{},
 		&models.DataSource{},
+		&models.DataSourceHealth{},
+		&models.FailoverLog{},
 		&models.OTATask{},
 		&models.Firmware{},
 		&models.Notification{},
@@ -1150,6 +1153,8 @@ func TestDataRoutes_FailoverLogs(t *testing.T) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registerDataRoutes(v1, db)
+	// failover-logs 已从数据查询域移交数据源域 (handler_data_source.go)。
+	registerFailoverLogRoutes(v1, datasource.New(db, datasource.Options{}))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/devices/1/failover-logs?limit=10", nil)
