@@ -14,6 +14,10 @@ import (
 // unified_data 改 PG 声明式 RANGE 分区（月粒度，分区键 timestamp）。
 // SQLite（单测环境）不分区：所有函数在非 postgres 方言下直接返回 no-op，
 // 与 purge.go:300 / backfill.go:178 的方言分支模式一致。
+//
+// 分区机制已泛化为按表名参数化（*For 系列）；unified_data 仅作默认表，
+// 既有 EnsurePartitions/DropPartitionsBefore/MigrateUnifiedDataToPartitioned
+// 保留旧签名并委托，调用方零改动。
 
 const (
 	// partitionRollaheadMonths 启动/每日检查时确保未来 N 个月的分区存在。
@@ -26,7 +30,7 @@ const (
 	// 搬迁批次复用 migrate.go 的 migrateBatchSizePostgres（同包常量，PG 1 万行）。
 )
 
-// PartitionManager 管理 unified_data 的月分区生命周期。
+// PartitionManager 管理时序表的月分区生命周期（默认 unified_data）。
 type PartitionManager struct {
 	db *gorm.DB
 }
@@ -40,9 +44,9 @@ func isPostgres(db *gorm.DB) bool {
 	return db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres"
 }
 
-// partitionName renders the monthly partition table name for t.
-func partitionName(t time.Time) string {
-	return fmt.Sprintf("%s_%04d%02d", partitionedTable, t.Year(), int(t.Month()))
+// partitionName renders the monthly partition table name of table for t.
+func partitionName(table string, t time.Time) string {
+	return fmt.Sprintf("%s_%04d%02d", table, t.Year(), int(t.Month()))
 }
 
 // monthStart truncates t to the first day of its month (UTC).
@@ -55,10 +59,10 @@ func addMonths(t time.Time, n int) time.Time {
 	return monthStart(t).AddDate(0, n, 0)
 }
 
-// EnsurePartitions creates any missing monthly partitions covering
+// EnsurePartitionsFor creates any missing monthly partitions of table covering
 // [currentMonth-1, currentMonth+months]. Safe to call repeatedly.
 // No-op on non-postgres dialects.
-func (pm *PartitionManager) EnsurePartitions(months int) error {
+func (pm *PartitionManager) EnsurePartitionsFor(table string, months int) error {
 	if !isPostgres(pm.db) {
 		slog.Debug("partition_mgr: non-postgres dialect, skip")
 		return nil
@@ -71,12 +75,17 @@ func (pm *PartitionManager) EnsurePartitions(months int) error {
 	for i := -1; i <= months; i++ {
 		start := addMonths(now, i)
 		end := addMonths(start, 1)
-		if err := pm.createPartitionIfNotExists(partitionName(start), partitionedTable, start, end); err != nil {
+		if err := pm.createPartitionIfNotExists(partitionName(table, start), table, start, end); err != nil {
 			metrics.LifecycleTaskFailures.WithLabelValues("partition").Inc()
-			return fmt.Errorf("ensure partition %s: %w", partitionName(start), err)
+			return fmt.Errorf("ensure partition %s: %w", partitionName(table, start), err)
 		}
 	}
 	return nil
+}
+
+// EnsurePartitions 保留旧签名，委托给 EnsurePartitionsFor("unified_data", ...)。
+func (pm *PartitionManager) EnsurePartitions(months int) error {
+	return pm.EnsurePartitionsFor(partitionedTable, months)
 }
 
 // tableExistsSQL 统计当前 schema 内指定 relkind 的同名表数量。
@@ -107,10 +116,10 @@ func (pm *PartitionManager) createPartitionIfNotExists(name, parent string, star
 	return nil
 }
 
-// DropPartitionsBefore drops all monthly partitions whose entire range is
-// older than cutoff. Retention 的 O(1) 替代：整分区 DROP 替代逐行 DELETE。
+// DropPartitionsBeforeFor drops all monthly partitions of table whose entire
+// range is older than cutoff. Retention 的 O(1) 替代：整分区 DROP 替代逐行 DELETE。
 // Returns the dropped partition names.
-func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, error) {
+func (pm *PartitionManager) DropPartitionsBeforeFor(table string, cutoff time.Time) ([]string, error) {
 	if !isPostgres(pm.db) {
 		return nil, nil
 	}
@@ -118,7 +127,7 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	rows, err := pm.db.Raw(
 		`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE c.relname LIKE ? AND c.relkind = 'r' AND n.nspname = current_schema()`,
-		partitionedTable+"_%",
+		table+"_%",
 	).Rows()
 	if err != nil {
 		metrics.LifecycleTaskFailures.WithLabelValues("partition").Inc()
@@ -135,10 +144,10 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	cutoffMonth := monthStart(cutoff)
 	var dropped []string
 	for _, n := range names {
-		// 分区名形如 unified_data_YYYYMM: 跳过母表名+下划线再解析月份。
+		// 分区名形如 <table>_YYYYMM: 跳过母表名+下划线再解析月份。
 		// (修复 off-by-one: 此前 n[len(partitionedTable):] 带下划线,
 		// time.Parse 恒失败, 导致到期分区永不 DROP。)
-		pt, parseErr := time.Parse("200601", n[len(partitionedTable)+1:])
+		pt, parseErr := time.Parse("200601", n[len(table)+1:])
 		if parseErr != nil {
 			continue // 非 YYYYMM 后缀的表不碰
 		}
@@ -155,6 +164,11 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 		}
 	}
 	return dropped, nil
+}
+
+// DropPartitionsBefore 保留旧签名，委托给 DropPartitionsBeforeFor("unified_data", ...)。
+func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, error) {
+	return pm.DropPartitionsBeforeFor(partitionedTable, cutoff)
 }
 
 // EnsureRollupTable idempotently creates the minute-level rollup table
@@ -196,51 +210,55 @@ func EnsureRollupTable(db *gorm.DB) error {
 	return nil
 }
 
-// IsUnifiedDataPartitioned reports whether the partitioned parent table is
-// already in place (migration done).
-func IsUnifiedDataPartitioned(db *gorm.DB) bool {
+// IsTablePartitioned reports whether table is already a partitioned parent
+// (relkind='p', migration done).
+func IsTablePartitioned(db *gorm.DB, table string) bool {
 	if !isPostgres(db) {
 		return false
 	}
 	var count int64
 	// 分区母表 relkind='p'（partitioned table），普通表为 'r'。
-	db.Raw(tableExistsSQL, partitionedTable, "p").Scan(&count)
+	db.Raw(tableExistsSQL, table, "p").Scan(&count)
 	return count > 0
 }
 
-// MigrateUnifiedDataToPartitioned converts the flat unified_data table into a
-// declarative RANGE-partitioned parent (monthly, key=timestamp), preserving:
+// IsUnifiedDataPartitioned 保留旧签名，委托给 IsTablePartitioned("unified_data")。
+func IsUnifiedDataPartitioned(db *gorm.DB) bool {
+	return IsTablePartitioned(db, partitionedTable)
+}
+
+// MigrateTableToPartitioned converts the flat table into a declarative
+// RANGE-partitioned parent (monthly, key=timestamp), preserving:
 //   - id 序列全局不变（业务零感知，id 单调排序语义不变）
 //   - 全部既有索引（分区级重建）
 //   - 原表数据（双表并存搬迁 + legacy RENAME 保留，不 DROP）
 //
-// 幂等：母表已存在（已迁移过）直接返回。SQLite no-op。
+// legacyName 为迁移后原平表的保留名。幂等：母表已存在（已迁移过）直接返回。
+// SQLite no-op。
 // 步骤: 建 new 母表 → 按月分批 INSERT SELECT → 校验行数 → RENAME swap。
-func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
+func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 	if !isPostgres(db) {
 		slog.Debug("migrate_partitioned: non-postgres dialect, skip")
 		return nil
 	}
-	if IsUnifiedDataPartitioned(db) {
+	if IsTablePartitioned(db, table) {
 		slog.Info("migrate_partitioned: already partitioned, skip")
 		return nil
 	}
-	// 原表不存在（全新部署）→ 直接以最终名 unified_data 建分区母表。
-	// 不走 _new 中转: fresh 路径无数据搬迁, 无需 RENAME swap; 且
-	// EnsurePartitions 的 DDL 以 unified_data 为母表名硬编码, 用 _new
-	// 名建表会导致分区创建失败。
+	// 原表不存在（全新部署）→ 直接以最终名建分区母表。
+	// 不走 _new 中转: fresh 路径无数据搬迁, 无需 RENAME swap。
 	var flatExists int64
-	db.Raw(tableExistsSQL, partitionedTable, "r").Scan(&flatExists)
+	db.Raw(tableExistsSQL, table, "r").Scan(&flatExists)
 	if flatExists == 0 {
-		slog.Info("migrate_partitioned: no legacy flat table, creating fresh partitioned parent")
+		slog.Info("migrate_partitioned: no legacy flat table, creating fresh partitioned parent", "table", table)
 		// 幂等: 清理上次中断残留的 new 表。
-		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", partitionedTable+"_new")).Error; err != nil {
-			return fmt.Errorf("drop stale %s: %w", partitionedTable+"_new", err)
+		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", table+"_new")).Error; err != nil {
+			return fmt.Errorf("drop stale %s: %w", table+"_new", err)
 		}
-		return createPartitionedParent(db, partitionedTable, true)
+		return createPartitionedParent(db, table, true)
 	}
 
-	newTable := partitionedTable + "_new"
+	newTable := table + "_new"
 	// 幂等: 清理上次中断残留的 new 表。
 	if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", newTable)).Error; err != nil {
 		return fmt.Errorf("drop stale %s: %w", newTable, err)
@@ -252,7 +270,7 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	// 按月分批搬迁（水位断点续跑: 失败重跑时 INSERT 已存在行会被 ON CONFLICT 跳过——
 	// 主键 (id,timestamp) 天生幂等）。
 	now := time.Now()
-	oldest := oldestRowMonth(db)
+	oldest := oldestRowMonthFor(db, table)
 	if oldest.IsZero() {
 		oldest = now // 空表
 	}
@@ -260,36 +278,38 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	for m := monthStart(oldest); !m.After(monthStart(now)); m = addMonths(m, 1) {
 		// 历史月份的分区必须先建好, 否则 INSERT INTO new 母表报
 		// "no partition of relation found" (PG 分区表无兜底 default 分区)。
-		if err := pm.createPartitionIfNotExists(partitionName(m), newTable, monthStart(m), addMonths(m, 1)); err != nil {
-			return fmt.Errorf("create history partition %s: %w", partitionName(m), err)
+		// 分区名以最终母表 (table) 为前缀, 挂在 new 母表下; RENAME 后即
+		// table_YYYYMM (与既有 unified_data 命名/retention 扫描一致)。
+		if err := pm.createPartitionIfNotExists(partitionName(table, m), newTable, monthStart(m), addMonths(m, 1)); err != nil {
+			return fmt.Errorf("create history partition %s: %w", partitionName(table, m), err)
 		}
-		if err := copyMonthBatched(db, newTable, m); err != nil {
+		if err := copyMonthBatched(db, newTable, table, m); err != nil {
 			return fmt.Errorf("copy month %04d-%02d: %w", m.Year(), int(m.Month()), err)
 		}
 	}
 	// 未来分区 (含上月兜底): 在 swap 前于 new 母表下建好, RENAME 后即刻可写。
-	// 不能调 EnsurePartitions — 它以 unified_data 为母表, 此刻仍是旧平表。
+	// 不能调 EnsurePartitionsFor(table) — 它以 table (此刻仍是旧平表) 为母表。
 	for i := -1; i <= partitionRollaheadMonths; i++ {
 		start := addMonths(now, i)
-		if err := pm.createPartitionIfNotExists(partitionName(start), newTable, start, addMonths(start, 1)); err != nil {
-			return fmt.Errorf("ensure partition %s: %w", partitionName(start), err)
+		if err := pm.createPartitionIfNotExists(partitionName(table, start), newTable, start, addMonths(start, 1)); err != nil {
+			return fmt.Errorf("ensure partition %s: %w", partitionName(table, start), err)
 		}
 	}
 
 	// 行数校验门禁（§8 风险表: 搬迁丢数据缓解）。
 	var srcCount, dstCount int64
-	db.Raw("SELECT count(*) FROM " + partitionedTable).Scan(&srcCount)
+	db.Raw("SELECT count(*) FROM " + table).Scan(&srcCount)
 	db.Raw("SELECT count(*) FROM " + newTable).Scan(&dstCount)
 	if srcCount != dstCount {
 		return fmt.Errorf("row count mismatch after migration: src=%d dst=%d (aborting, tables intact)", srcCount, dstCount)
 	}
 
-	// RENAME swap: 原表→legacy 保留不删（降险），new→unified_data。
+	// RENAME swap: 原表→legacy 保留不删（降险），new→table。
 	if err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", partitionedTable, legacyTable)).Error; err != nil {
+		if err := tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", table, legacyName)).Error; err != nil {
 			return err
 		}
-		return tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", newTable, partitionedTable)).Error
+		return tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", newTable, table)).Error
 	}); err != nil {
 		return fmt.Errorf("rename swap: %w", err)
 	}
@@ -298,12 +318,17 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	// 全局不变" 承诺, id 单调排序语义被破坏)。
 	if err := db.Exec(fmt.Sprintf(
 		"SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 1))",
-		partitionedTable, partitionedTable)).Error; err != nil {
+		table, table)).Error; err != nil {
 		return fmt.Errorf("advance id sequence: %w", err)
 	}
 	slog.Info("migrate_partitioned: migration complete",
-		"rows", dstCount, "legacy_table", legacyTable)
+		"table", table, "rows", dstCount, "legacy_table", legacyName)
 	return nil
+}
+
+// MigrateUnifiedDataToPartitioned 保留旧签名，委托给 MigrateTableToPartitioned。
+func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
+	return MigrateTableToPartitioned(db, partitionedTable, legacyTable)
 }
 
 // createPartitionedParent creates the partitioned parent table with the
@@ -339,26 +364,27 @@ func createPartitionedParent(db *gorm.DB, name string, fresh bool) error {
 	}
 	if fresh {
 		pm := &PartitionManager{db: db}
-		if err := pm.EnsurePartitions(partitionRollaheadMonths); err != nil {
+		if err := pm.EnsurePartitionsFor(name, partitionRollaheadMonths); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// oldestRowMonth returns the month of the earliest row, or zero time if empty.
-func oldestRowMonth(db *gorm.DB) time.Time {
+// oldestRowMonthFor returns the month of the earliest row in table, or zero
+// time if empty.
+func oldestRowMonthFor(db *gorm.DB, table string) time.Time {
 	var ts *time.Time
-	db.Raw("SELECT min(timestamp) FROM " + partitionedTable).Scan(&ts)
+	db.Raw("SELECT min(timestamp) FROM " + table).Scan(&ts)
 	if ts == nil {
 		return time.Time{}
 	}
 	return monthStart(*ts)
 }
 
-// copyMonthBatched copies one calendar month in batches of
+// copyMonthBatched copies one calendar month from src into dst in batches of
 // migrateBatchSizePostgres using an id-watermark loop (断点续跑: 重跑幂等).
-func copyMonthBatched(db *gorm.DB, dst string, month time.Time) error {
+func copyMonthBatched(db *gorm.DB, dst, src string, month time.Time) error {
 	start := monthStart(month)
 	end := addMonths(month, 1)
 	watermark := int64(0)
@@ -370,7 +396,7 @@ func copyMonthBatched(db *gorm.DB, dst string, month time.Time) error {
 			 WHERE id > ? AND timestamp >= ? AND timestamp < ?
 			 ORDER BY id LIMIT %d
 			 ON CONFLICT (id, timestamp) DO NOTHING`,
-			dst, partitionedTable, migrateBatchSizePostgres),
+			dst, src, migrateBatchSizePostgres),
 			watermark, start, end,
 		)
 		if res.Error != nil {
@@ -383,7 +409,7 @@ func copyMonthBatched(db *gorm.DB, dst string, month time.Time) error {
 		var maxID int64
 		db.Raw(fmt.Sprintf(
 			"SELECT COALESCE(max(id), ?) FROM %s WHERE id > ? AND timestamp >= ? AND timestamp < ?",
-			partitionedTable),
+			src),
 			watermark, watermark, start, end,
 		).Scan(&maxID)
 		if maxID <= watermark {

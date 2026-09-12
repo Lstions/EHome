@@ -37,7 +37,7 @@ func TestPartitionName(t *testing.T) {
 		{time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC), "unified_data_202612"},
 	}
 	for _, c := range cases {
-		if got := partitionName(c.ts); got != c.want {
+		if got := partitionName(partitionedTable, c.ts); got != c.want {
 			t.Errorf("partitionName(%v) = %q, want %q", c.ts, got, c.want)
 		}
 	}
@@ -78,13 +78,32 @@ func TestNoopOnNonPostgres(t *testing.T) {
 	}
 }
 
+// TestGenericPartitionAPIs_NoopOnNonPostgres covers the table-parameterized
+// (*For / IsTablePartitioned / MigrateTableToPartitioned) surface on SQLite.
+func TestGenericPartitionAPIs_NoopOnNonPostgres(t *testing.T) {
+	db := newSQLiteDB(t)
+	pm := NewPartitionManager(db)
+	if err := pm.EnsurePartitionsFor("device_data", 3); err != nil {
+		t.Fatalf("EnsurePartitionsFor on sqlite should be no-op, got err=%v", err)
+	}
+	if dropped, err := pm.DropPartitionsBeforeFor("device_data", time.Now()); err != nil || dropped != nil {
+		t.Errorf("DropPartitionsBeforeFor on sqlite should be no-op, got %v %v", dropped, err)
+	}
+	if IsTablePartitioned(db, "device_data") {
+		t.Error("IsTablePartitioned must be false on sqlite")
+	}
+	if err := MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
+		t.Errorf("MigrateTableToPartitioned on sqlite should be no-op, got %v", err)
+	}
+}
+
 func TestPartitionDDLSyntax(t *testing.T) {
 	// 验证 DDL 模板的关键片段（防回归: 分区命名/RANGE 边界格式）。
 	start := monthStart(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC))
 	end := addMonths(start, 1)
 	ddl := fmt.Sprintf(
 		"CREATE TABLE %s PARTITION OF %s FOR VALUES FROM ('%s') TO ('%s')",
-		partitionName(start), partitionedTable,
+		partitionName(partitionedTable, start), partitionedTable,
 		start.Format("2006-01-02 15:04:05"), end.Format("2006-01-02 15:04:05"),
 	)
 	for _, want := range []string{

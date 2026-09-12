@@ -58,7 +58,7 @@ func TestMigrateUnifiedData_FreshDeploy_PartitionedParentAtFinalName(t *testing.
 	}
 	now := time.Now()
 	for i := -1; i <= partitionRollaheadMonths; i++ {
-		name := partitionName(addMonths(now, i))
+		name := partitionName(partitionedTable, addMonths(now, i))
 		if tableExistsInSchema(t, db, name, "r") == 0 {
 			t.Errorf("expected partition %s to exist after fresh migration", name)
 		}
@@ -105,8 +105,8 @@ func TestMigrateUnifiedData_LegacyData_PreservesRowsAndAdvancesSequence(t *testi
 		t.Error("legacy table must be retained after migration")
 	}
 	// 历史月份分区已创建 (修复回归: 无分区则 INSERT 报 no partition of relation)。
-	if tableExistsInSchema(t, db, partitionName(oldMonth), "r") == 0 {
-		t.Errorf("history partition %s must exist", partitionName(oldMonth))
+	if tableExistsInSchema(t, db, partitionName(partitionedTable, oldMonth), "r") == 0 {
+		t.Errorf("history partition %s must exist", partitionName(partitionedTable, oldMonth))
 	}
 
 	// id 序列推进 (修复回归: 不推进则新行 id 回到 1)。
@@ -174,6 +174,14 @@ func TestRetentionTask_PartitionDrop(t *testing.T) {
 	// 另加一条未到期行 (retention 30 天, now-48h 仍在保留窗口内)。
 	dev := seedDevice(t, db, "rp-recent", "bms_jbd", "rp-recent-hw", false)
 	db.Model(dev).Update("logical_device_id", ld.ID)
+	// 分区滚动窗口按真实时钟创建 (EnsurePartitions -1..+3 月); 本用例固定
+	// now=2026-08-01, recent 行 (now-48h) 的月份可能已漂出该窗口, 此处显式
+	// 补建其月份分区, 否则 INSERT 报 "no partition of relation found"。
+	// (纯 setup 修复, 不改动任何断言; 原先在 2026-08 运行时依赖窗口恰好覆盖。)
+	recentMonth := monthStart(now.Add(-48 * time.Hour))
+	if err := pm.createPartitionIfNotExists(partitionName(partitionedTable, recentMonth), partitionedTable, recentMonth, addMonths(recentMonth, 1)); err != nil {
+		t.Fatalf("create recent-month partition: %v", err)
+	}
 	recent := models.UnifiedData{
 		DeviceID: dev.ID, SensorName: "voltage", Value: 2,
 		Timestamp: now.Add(-48 * time.Hour), LogicalDeviceID: &ld.ID,
@@ -224,7 +232,7 @@ func TestDropPartitionsBefore_CurrentMonthKept(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	now := time.Now()
-	curName := partitionName(now)
+	curName := partitionName(partitionedTable, now)
 	if tableExistsInSchema(t, db, curName, "r") == 0 {
 		t.Skipf("partition %s unexpectedly missing", curName)
 	}
