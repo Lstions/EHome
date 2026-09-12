@@ -222,6 +222,98 @@ func TestRetentionTask_PartitionDrop(t *testing.T) {
 	}
 }
 
+// TestRetention_PartitionDropUsesMaxRetention — P0 防回归 (跨设备数据丢失)。
+//
+// 分区 DROP 是全局整月粒度操作 (DropPartitionsBeforeFor 扫描 unified_data_%,
+// 不区分数据归属), 因此 cutoff 必须由**所有**逻辑设备共同决定: 一个分区只有
+// 对**每一个**数据所有者都已到期时才可删除。设分区年龄为 age, 则该条件为
+//
+//	age > retention_i 对所有 i 成立  ⟺  age > max(retention_i),
+//
+// 即安全语义要求取所有设备中**最长**的 retention_days。
+//
+// 取 max 而非 min: min 会让 cutoff 最靠近现在、删得最多, 与旧实现逐设备各算
+// 一次 (等价于取 min) 行为一致, 无法防止长保留期设备的数据被短保留期设备连带
+// 删除。本用例正是钉死这一点。
+//
+// 场景: A=30 天, B=365 天。
+//   - 生存分区 = now-6 个月 (≈180 天): 对 A 已到期、对 B 未到期 → 必须保留。
+//   - 全到期分区 = now-14 个月 (≈426 天, 远超 365): 对 A/B 均到期 → 必须 DROP。
+//
+// 两条断言缺一不可: 既证明该留的留住 (旧实现按单设备 A 的 30 天会整表 DROP 生存
+// 分区, B 数据丢失), 也证明该删的仍会删 (若修复只是把分区 DROP 关掉, 则是"假修复")。
+func TestRetention_PartitionDropUsesMaxRetention(t *testing.T) {
+	requirePostgres(t)
+	db := testutil.OpenTestDB(t)
+	dropUnifiedDataFlat(t, db)
+	if err := MigrateUnifiedDataToPartitioned(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	surviveStart := monthStart(now).AddDate(0, -6, 0) // 2026-02: 对 A 到期, 对 B 未到期
+	dropStart := monthStart(now).AddDate(0, -14, 0)   // 2025-06: 对 A/B 均到期
+
+	pm := NewPartitionManager(db)
+	for _, s := range []time.Time{surviveStart, dropStart} {
+		if err := pm.createPartitionIfNotExists(partitionName(partitionedTable, s), partitionedTable, s, addMonths(s, 1)); err != nil {
+			t.Fatalf("create partition %s: %v", partitionName(partitionedTable, s), err)
+		}
+	}
+
+	// A: 30 天保留; B: 365 天保留。两行都落在「生存分区」内 (手工建的分区)。
+	ldA := seedRetentionDevice(t, db, "maxA", 30, surviveStart.Add(24*time.Hour))
+	ldB := seedRetentionDevice(t, db, "maxB", 365, surviveStart.Add(48*time.Hour))
+
+	var devA, devB models.EdgeDevice
+	if err := db.Unscoped().Where("logical_device_id = ?", ldA.ID).First(&devA).Error; err != nil {
+		t.Fatalf("load A edge device: %v", err)
+	}
+	if err := db.Unscoped().Where("logical_device_id = ?", ldB.ID).First(&devB).Error; err != nil {
+		t.Fatalf("load B edge device: %v", err)
+	}
+	// 全到期分区内同时含 A 与 B 的行, 证明该分区被整表 DROP。
+	for _, row := range []models.UnifiedData{
+		{DeviceID: devA.ID, SensorName: "voltage", Value: 7, Timestamp: dropStart.Add(24 * time.Hour), LogicalDeviceID: &ldA.ID},
+		{DeviceID: devB.ID, SensorName: "voltage", Value: 8, Timestamp: dropStart.Add(48 * time.Hour), LogicalDeviceID: &ldB.ID},
+	} {
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatalf("seed all-expired row: %v", err)
+		}
+	}
+
+	r := NewRetentionTask(db)
+	r.now = func() time.Time { return now }
+	r.SetBatchSleep(0)
+	if _, err := r.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// (1) 生存分区未被 DROP: B 的 365 天尚未到期。
+	if tableExistsInSchema(t, db, partitionName(partitionedTable, surviveStart), "r") == 0 {
+		t.Errorf("partition %s must NOT be dropped: device B(retention=365d) still needs it",
+			partitionName(partitionedTable, surviveStart))
+	}
+	// (2) B 在生存分区内的行仍在 (未被 A 的 30 天保留期连带删除/连带 DROP)。
+	var bRows int64
+	if err := db.Model(&models.UnifiedData{}).
+		Where("logical_device_id = ? AND timestamp >= ? AND timestamp < ?",
+			ldB.ID, surviveStart, addMonths(surviveStart, 1)).
+		Count(&bRows).Error; err != nil {
+		t.Fatalf("count B rows: %v", err)
+	}
+	if bRows != 1 {
+		t.Errorf("device B rows in surviving partition = %d, want 1 (A's 30d retention must not touch B's 365d data)", bRows)
+	}
+	// (3) 正向断言: 对**所有**设备都已到期 (≈426 天 > 365 天) 的分区必须被 DROP。
+	// 这条防"假修复": 若把全局分区清扫整个关掉, 该断言会失败 —— 证明修复是
+	// "按最长保留期清扫", 而非"不再清扫"。
+	if tableExistsInSchema(t, db, partitionName(partitionedTable, dropStart), "r") != 0 {
+		t.Errorf("all-expired partition %s must be dropped (fix must still reap fully expired partitions)",
+			partitionName(partitionedTable, dropStart))
+	}
+}
+
 // TestRollupRetentionUnaffected verifies partition DROP 的 cutoff 计算:
 // cutoff 月当月分区不删 (整月未到期)。
 func TestDropPartitionsBefore_CurrentMonthKept(t *testing.T) {

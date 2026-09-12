@@ -156,6 +156,21 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
 		return nil, fmt.Errorf("datalifecycle: scan logical devices: %w", err)
 	}
+	// 全局分区清扫 (v3.4 §3.2.1): 每轮仅一次, 不再按设备各做一次。
+	//
+	// 为什么必须上移且不能按单设备 retention: DropPartitionsBeforeFor 扫描
+	// unified_data_% 并整表 DROP, 是**不区分数据所有者**的全局操作; 若按某个设备
+	// 的 retention 计算 cutoff, 短保留期设备会连带删除长保留期设备仍应保留的历史
+	// 整月分区 (P0 静默不可恢复数据丢失)。cutoff 取所有逻辑设备中最长 retention,
+	// 保证一个分区只有在它对每一个数据所有者都已到期时才被删除。
+	//
+	// 清扫失败不得中断逐设备的 scope 精确 DELETE: 只记指标 + 日志, 继续。
+	if err := r.dropExpiredPartitionsOnce(ctx, r.now()); err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
+		slog.Error("datalifecycle: retention global partition sweep failed; continuing per-device deletes",
+			"error", err)
+	}
+
 	results := make([]RetentionResult, 0, len(devices))
 	for i := range devices {
 		select {
@@ -173,6 +188,58 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 		results = append(results, res)
 	}
 	return results, nil
+}
+
+// dropExpiredPartitionsOnce performs the per-run GLOBAL monthly partition reap
+// for unified_data (v3.4 §3.2.1). It is intentionally the ONLY place retention
+// drops partitions. No-op unless unified_data is a partitioned PostgreSQL table.
+//
+// cutoff 语义 (防回归, 见 deleteExpired 注记): 分区 DROP 是不可分割的全局整月
+// 操作, 一个分区只有对**每一个**数据所有者都已到期时才可删除, 因此 cutoff 取
+// now - max(retention_days) (所有逻辑设备中**最长**的保留期)。若取较短保留期
+// (或按单设备取), 会在处理该设备时连带 DROP 掉长保留期设备仍需要的历史整月
+// 分区, 造成跨设备、静默、不可恢复的数据丢失。
+func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.Time) error {
+	if !IsUnifiedDataPartitioned(r.db) {
+		return nil // 非 PG / 未分区: 分区机制 no-op (SQLite 主路径不受影响)
+	}
+	days, ok, err := r.globalPartitionRetentionDays(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// 无逻辑设备 = 无数据所有者: 保守起见不动任何分区 (宁可多留, 不可误删)。
+		return nil
+	}
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	pm := NewPartitionManager(r.db)
+	if _, err := pm.DropPartitionsBefore(cutoff); err != nil {
+		return fmt.Errorf("retention drop partitions: %w", err)
+	}
+	return nil
+}
+
+// globalPartitionRetentionDays returns the retention window (days) governing the
+// global partition sweep: the LONGEST retention_days across ALL logical_devices
+// (including purge_requested ones — 保守)。
+//
+// retention_days <= 0 的脏数据按 1 天处理, 避免负值算出未来 cutoff 而删除本不该
+// 删的分区。无设备行 (MAX 为 NULL) 时 ok=false, 调用方跳过清扫。
+func (r *RetentionTask) globalPartitionRetentionDays(ctx context.Context) (days int, ok bool, err error) {
+	var longest *int
+	if scanErr := r.db.WithContext(ctx).
+		Raw("SELECT MAX(retention_days) FROM logical_devices").
+		Scan(&longest).Error; scanErr != nil {
+		return 0, false, fmt.Errorf("scan logical devices max retention_days: %w", scanErr)
+	}
+	if longest == nil {
+		return 0, false, nil
+	}
+	days = *longest
+	if days <= 0 {
+		days = 1
+	}
+	return days, true, nil
 }
 
 func (r *RetentionTask) processOne(ctx context.Context, ld *models.LogicalDevice) RetentionResult {
@@ -270,17 +337,19 @@ func (r *RetentionTask) notifyExpiry(ctx context.Context, ld *models.LogicalDevi
 func (r *RetentionTask) deleteExpired(ctx context.Context, scope *Scope, retentionDays int, now time.Time) (int64, error) {
 	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 
-	// 数据层时序化 (v3.4 §3.2.1): PG 下 unified_data 到期改整分区 DROP
-	// (O(1) 替代逐行 DELETE)；device_data 维持 DELETE 不动。
-	// 注意: 分区 DROP 是整月粒度, 与按 Scope 的精确 retention 并存——
-	// DROP 仅删除整个分区都到期的数据, 未整月到期的仍走下方 DELETE 批次。
-	if r.db.Dialector != nil && r.db.Dialector.Name() == "postgres" && IsUnifiedDataPartitioned(r.db) {
-		pm := NewPartitionManager(r.db)
-		if _, err := pm.DropPartitionsBefore(cutoff); err != nil {
-			return 0, fmt.Errorf("retention drop partitions: %w", err)
-		}
-	}
-
+	// 防回归 (P0 数据丢失, 2026-09): 本函数**严禁**再调用
+	// DropPartitionsBefore / DropPartitionsBeforeFor。
+	//
+	// 为什么: 分区 DROP 是全局整月粒度操作 (DropPartitionsBeforeFor 扫描
+	// unified_data_%, 不区分该分区里的数据属于哪个逻辑设备), 而本函数的 cutoff
+	// 由**单一 scope 的 retentionDays** 算出。若在此做全局 DROP, 处理短保留期
+	// 设备 A(retention_days=30) 时, 会把长保留期设备 B(365) 仍应保留的历史整月
+	// 分区**整表 DROP**, 连带删除 B 的数据 —— 静默、不可恢复, 且任何一方都不会
+	// 收到错误提示。
+	//
+	// 全局分区清扫已上移到 RunOnce (每轮一次), 并以**所有**逻辑设备中**最长**的
+	// retention_days 计算 cutoff, 保证一个分区只有对每一个数据所有者都已到期时
+	// 才被删除。本函数只保留按 scope 限定的精确 DELETE 批次 (安全, 不变)。
 	batchSize := r.batchSize
 	if batchSize <= 0 {
 		batchSize = purgeBatchSizePostgres

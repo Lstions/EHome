@@ -256,3 +256,48 @@ func TestRetentionTask_ScopeUsesInstanceFallback(t *testing.T) {
 		t.Errorf("remaining = %d, want 1", remaining)
 	}
 }
+
+// TestRetentionTask_SQLiteDeletesExpiredWithoutPartitions — 非 PG 防回归:
+// 全局分区清扫上移到 RunOnce 后, SQLite (无分区) 主路径必须原样工作:
+// RunOnce 仍按 scope 精确分批 DELETE 到期行, 不因分区清扫 no-op 而受影响。
+func TestRetentionTask_SQLiteDeletesExpiredWithoutPartitions(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	if name := db.Dialector.Name(); name != "sqlite" {
+		t.Skipf("sqlite-only case (got dialect %q); PG path covered by TestRetention_PartitionDropUsesMaxRetention", name)
+	}
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// 到期行 (now-400d) 应被删; 未到期行 (now-10d) 应保留。
+	ld := seedRetentionDevice(t, db, "sqlite-expired", 365, now.AddDate(0, 0, -400))
+	freshDev := seedDevice(t, db, "sqlite-fresh", "bms_jbd", "sqlite-fresh-hw", false)
+	db.Model(freshDev).Update("logical_device_id", ld.ID)
+	db.Delete(freshDev)
+	fresh := now.AddDate(0, 0, -10)
+	if err := db.Create(&models.UnifiedData{
+		DeviceID: freshDev.ID, SensorName: "voltage", Value: 2,
+		Timestamp: fresh, LogicalDeviceID: &ld.ID,
+	}).Error; err != nil {
+		t.Fatalf("seed fresh row: %v", err)
+	}
+
+	r := NewRetentionTask(db)
+	r.now = func() time.Time { return now }
+	r.SetBatchSize(1) // 强制分批
+	r.SetBatchSleep(0)
+	results, err := r.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if results[0].RowsDeleted != 1 {
+		t.Fatalf("RowsDeleted = %d, want 1 (expired row must still be deleted on sqlite)", results[0].RowsDeleted)
+	}
+	var remaining int64
+	db.Model(&models.UnifiedData{}).Count(&remaining)
+	if remaining != 1 {
+		t.Errorf("remaining rows = %d, want 1 (fresh row kept)", remaining)
+	}
+	var kept models.UnifiedData
+	db.First(&kept)
+	if !kept.Timestamp.Equal(fresh) {
+		t.Errorf("kept row timestamp = %v, want fresh %v", kept.Timestamp, fresh)
+	}
+}
