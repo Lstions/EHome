@@ -142,7 +142,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeNode, nodemgr.CfgActionCreate, node.NodeID, fmt.Sprint(node.ID))
-		c.JSON(http.StatusCreated, node)
+		SuccessWithCode(c, http.StatusCreated, node)
 	})
 
 	// Update node (v2.2 path for PUT /collectors/:id)

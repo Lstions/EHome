@@ -384,7 +384,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 		}
 
-		c.JSON(http.StatusCreated, cfg)
+		SuccessWithCode(c, http.StatusCreated, cfg)
 	})
 
 	// PUT /api/v1/nodes/:id/gpio/:pin — update GPIO config
@@ -484,7 +484,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			logger.Warnf("[%s] Failed to apply GPIO enabled state: %v", node.NodeID, err)
 		}
 
-		c.JSON(http.StatusOK, cfg)
+		Success(c, cfg)
 	})
 
 	// DELETE /api/v1/nodes/:id/gpio/:pin — deconfigure GPIO pin
@@ -715,7 +715,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			return
 		}
 		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangePWM, nodemgr.CfgActionCreate, node.NodeID, fmt.Sprint(cfg.ID))
-		c.JSON(http.StatusCreated, cfg)
+		SuccessWithCode(c, http.StatusCreated, cfg)
 	})
 
 	// PUT /api/v1/nodes/:id/pwm/:hardware_id — update PWM config
@@ -859,7 +859,7 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				return
 			}
 		}
-		c.JSON(http.StatusOK, cfg)
+		Success(c, cfg)
 	})
 
 	// DELETE /api/v1/nodes/:id/pwm/:hardware_id — deconfigure PWM hardware resource

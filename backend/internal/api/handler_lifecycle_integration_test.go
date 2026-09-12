@@ -198,13 +198,19 @@ func TestLifecycle_FullJourney_DeleteKeepData_Inherit_Purge(t *testing.T) {
 		t.Fatalf("nodes/latest after delete: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	var nodeLatest struct {
-		Values []map[string]interface{} `json:"values"`
+		Data struct {
+			NodeID string                   `json:"node_id"`
+			Values []map[string]interface{} `json:"values"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &nodeLatest); err != nil {
 		t.Fatalf("nodes/latest decode: %v", err)
 	}
+	if nodeLatest.Data.NodeID == "" {
+		t.Error("nodes/latest envelope data must carry node_id")
+	}
 	// 软删实例 (dev1) 的数据仍出现在 nodes/latest (B9 现状行为, 非回归)。
-	if len(nodeLatest.Values) == 0 {
+	if len(nodeLatest.Data.Values) == 0 {
 		t.Errorf("nodes/latest must keep returning soft-deleted instance data (B9 现状行为), values empty")
 	}
 
@@ -221,10 +227,7 @@ func TestLifecycle_FullJourney_DeleteKeepData_Inherit_Purge(t *testing.T) {
 
 	// ---- §十二 行 2: 图表/历史查询 → resolve 后返回全量 (含继承前历史) ----
 	resp := getJSON(t, r, fmt.Sprintf("/api/v1/devices/%d/sensor-data?limit=100", dev2ID))
-	var data []models.UnifiedData
-	if err := json.Unmarshal(resp, &data); err != nil {
-		t.Fatalf("sensor-data decode: %v", err)
-	}
+	data := envelopeData[[]models.UnifiedData](t, resp)
 	if len(data) != 2 {
 		t.Fatalf("sensor-data after inherit: expected 2 rows (full history), got %d: %#v", len(data), data)
 	}

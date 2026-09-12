@@ -56,11 +56,10 @@ func TestSensorData_EmptyResult(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var result []interface{}
-	json.Unmarshal(w.Body.Bytes(), &result)
-	// Should return empty array, not null
-	if w.Body.String() == "null" {
-		t.Error("Expected empty array, got null")
+	// Envelope data must be an empty array, not null.
+	data := envelopeData[[]models.UnifiedData](t, w.Body.Bytes())
+	if data == nil {
+		t.Error("Expected envelope data to be an empty array, got nil/null")
 	}
 }
 
@@ -251,13 +250,11 @@ func TestUnifiedDataCategories_ReturnsOnlyCategoriesForSelectedDevice(t *testing
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var body []struct {
+	type category struct {
 		Code string `json:"code"`
 		Unit string `json:"unit"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	body := envelopeData[[]category](t, w.Body.Bytes())
 	if len(body) != 2 || body[0].Code != "humidity" || body[1].Code != "temperature" {
 		t.Fatalf("unexpected categories: %#v", body)
 	}

@@ -110,10 +110,7 @@ func TestQueryProtocol_E2E_MergedSourcesVisibleAndDeduped(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var data []models.UnifiedData
-	if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
-		t.Fatal(err)
-	}
+	data := envelopeData[[]models.UnifiedData](t, w.Body.Bytes())
 
 	// Expected survivors: voltage@t0 (source/migrated), voltage@t1 (target),
 	// current@t1 (NULL-logical fallback), soc@t1 deduped to the newest. The
@@ -164,13 +161,11 @@ func TestQueryProtocol_E2E_CategoriesUnionAcrossMergedSources(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var cats []struct {
+	type category struct {
 		Code string `json:"code"`
 		Unit string `json:"unit"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &cats); err != nil {
-		t.Fatal(err)
-	}
+	cats := envelopeData[[]category](t, w.Body.Bytes())
 	// voltage+soc come (partly) from the merged source; current from the
 	// NULL-logical fallback branch — all three must be visible via dev1.
 	if len(cats) != 3 {
@@ -191,10 +186,7 @@ func TestQueryProtocol_E2E_HistoricalAndBatch(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("historical: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var hist []models.UnifiedData
-	if err := json.Unmarshal(w.Body.Bytes(), &hist); err != nil {
-		t.Fatal(err)
-	}
+	hist := envelopeData[[]models.UnifiedData](t, w.Body.Bytes())
 	if len(hist) != 1 || hist[0].Value != 56.0 {
 		t.Fatalf("historical soc rows = %#v, want exactly the deduped newest row 56.0", hist)
 	}
@@ -209,13 +201,11 @@ func TestQueryProtocol_E2E_HistoricalAndBatch(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("historical-batch: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var batch []struct {
+	type batchCategory struct {
 		Category string               `json:"category"`
 		Data     []models.UnifiedData `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &batch); err != nil {
-		t.Fatal(err)
-	}
+	batch := envelopeData[[]batchCategory](t, w.Body.Bytes())
 	if len(batch) != 2 {
 		t.Fatalf("historical-batch returned %d categories, want 2", len(batch))
 	}
@@ -297,10 +287,7 @@ func TestQueryProtocol_E2E_NoMergeHistoryKeepsRawShape(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var data []models.UnifiedData
-	if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
-		t.Fatal(err)
-	}
+	data := envelopeData[[]models.UnifiedData](t, w.Body.Bytes())
 	if len(data) != 2 {
 		t.Fatalf("no-merge-history device returned %d rows, want both kept (dedup must stay off)", len(data))
 	}

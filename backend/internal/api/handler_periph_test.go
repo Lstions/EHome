@@ -182,8 +182,7 @@ func TestGPIO_Create_Success(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.GPIOConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.GPIOConfig](t, w.Body.Bytes())
 	if cfg.Pin != 6 {
 		t.Errorf("expected pin=6, got %d", cfg.Pin)
 	}
@@ -214,8 +213,7 @@ func TestGPIO_Create_WithEnabledFalse(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.GPIOConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.GPIOConfig](t, w.Body.Bytes())
 	if cfg.Enabled {
 		t.Fatal("explicit enabled=false was overwritten")
 	}
@@ -393,8 +391,7 @@ func TestGPIO_Update_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.GPIOConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.GPIOConfig](t, w.Body.Bytes())
 	if cfg.Direction != 1 {
 		t.Errorf("expected direction=1, got %d", cfg.Direction)
 	}
@@ -466,8 +463,7 @@ func TestGPIO_Update_EnabledFlag(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.GPIOConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.GPIOConfig](t, w.Body.Bytes())
 	if cfg.Enabled {
 		t.Error("expected enabled=false after update")
 	}
@@ -724,10 +720,7 @@ func TestPWM_Create_ResolvesReportedChannel(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.PWMConfig
-	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
-		t.Fatal(err)
-	}
+	cfg := envelopeData[models.PWMConfig](t, w.Body.Bytes())
 	if cfg.HardwareID != "PWM1" || cfg.Channel != 1 || cfg.Pin != 6 {
 		t.Fatalf("unexpected resolved PWM identity: %+v", cfg)
 	}
@@ -828,8 +821,7 @@ func TestPWM_Update_UsesHardwareIDIdentity(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.PWMConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.PWMConfig](t, w.Body.Bytes())
 	if cfg.HardwareID != "PWM0" || cfg.Frequency != 2000 {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
@@ -1002,8 +994,7 @@ func TestPWM_Create_Success(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.PWMConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.PWMConfig](t, w.Body.Bytes())
 	if cfg.Pin != 7 {
 		t.Errorf("expected pin=7, got %d", cfg.Pin)
 	}
@@ -1035,8 +1026,7 @@ func TestPWM_Create_DefaultResolution(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.PWMConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.PWMConfig](t, w.Body.Bytes())
 	if cfg.Resolution != 14 {
 		t.Errorf("expected default resolution=14, got %d", cfg.Resolution)
 	}
@@ -1157,8 +1147,7 @@ func TestPWM_Update_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var cfg models.PWMConfig
-	json.Unmarshal(w.Body.Bytes(), &cfg)
+	cfg := envelopeData[models.PWMConfig](t, w.Body.Bytes())
 	if cfg.Frequency != 2000 {
 		t.Errorf("expected frequency=2000, got %d", cfg.Frequency)
 	}

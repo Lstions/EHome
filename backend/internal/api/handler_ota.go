@@ -81,7 +81,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			return
 		}
 
-		c.JSON(http.StatusCreated, task)
+		SuccessWithCode(c, http.StatusCreated, task)
 	})
 
 	// Get OTA task status
@@ -196,7 +196,7 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		c.JSON(http.StatusCreated, fw)
+		SuccessWithCode(c, http.StatusCreated, fw)
 	})
 
 	// Update firmware metadata
