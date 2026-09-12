@@ -9,6 +9,7 @@ import (
 
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/logger"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -213,7 +214,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		var data []models.UnifiedData
-		q.Order("timestamp ASC").Find(&data)
+		if err := q.Order("timestamp ASC").Find(&data).Error; err != nil {
+			logger.Warnf("[devices-history] query failed device_id=%d: %v", deviceID, err)
+			Error(c, http.StatusInternalServerError, "failed to query device history")
+			return
+		}
 
 		// Server-side downsampling: if max_points specified and data exceeds it,
 		// uniformly sample to cap response size.
@@ -306,7 +311,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			q = datalifecycle.ApplyShapeDedup(db.WithContext(c.Request.Context()).Session(&gorm.Session{}), q)
 		}
 		var data []models.UnifiedData
-		q.Order("timestamp ASC").Find(&data)
+		if err := q.Order("timestamp ASC").Find(&data).Error; err != nil {
+			logger.Warnf("[unified-data-historical] query failed device_pk=%d category=%s: %v", devicePK, sensorName, err)
+			Error(c, http.StatusInternalServerError, "failed to query historical data")
+			return
+		}
 
 		// Server-side downsampling: if max_points specified and data exceeds it,
 		// uniformly sample to cap response size.

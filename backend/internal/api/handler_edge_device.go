@@ -204,7 +204,11 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			query = query.Where("status = ?", st)
 		}
 
-		query.Find(&devices)
+		if err := query.Find(&devices).Error; err != nil {
+			logger.Warnf("[edge-devices-list] query failed: %v", err)
+			Error(c, http.StatusInternalServerError, "failed to query edge devices")
+			return
+		}
 
 		// Enrich each device with latest sensor data from unified_data (C1 fix: batch query)
 		type lastDataEntry struct {
@@ -1010,8 +1014,16 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			q = q.Where("created_at <= ?", to)
 		}
 		var total int64
-		q.Model(&models.DeviceData{}).Count(&total)
-		q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&data)
+		if err := q.Model(&models.DeviceData{}).Count(&total).Error; err != nil {
+			logger.Warnf("[edge-device-data] count failed id=%d: %v", id, err)
+			Error(c, http.StatusInternalServerError, "failed to count device data")
+			return
+		}
+		if err := q.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&data).Error; err != nil {
+			logger.Warnf("[edge-device-data] query failed id=%d: %v", id, err)
+			Error(c, http.StatusInternalServerError, "failed to query device data")
+			return
+		}
 		Success(c, gin.H{"items": data, "total": total})
 	})
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,17 +15,16 @@ import (
 )
 
 // ===========================================================================
-// P2.2 取消传播 (WithContext) 测试
+// P2.2 取消传播 (WithContext) + 读路径错误暴露测试
 //
-// 目标: 证明 4 个重查询接入 db.WithContext(c.Request.Context()) 后, 请求的
-// 取消信号确实被带到了数据库执行链的最末端。
+// 4 个重查询均已接入 db.WithContext(c.Request.Context()) 并且都检查查询
+// 错误: 请求上下文被取消时 GORM 返回 error, handler 统一走 500 分支 (不再
+// 吞错返回 200 + 空数组)。正常 context 下仍必须 200, 且空结果集仍必须序列化
+// 为 [] (不能把"没有数据"和"查询失败"混为一谈)。
 //
-// 现状说明 (测试策略): 这 4 个重查询中只有 GET /nodes 会检查查询错误并走 500
-// 分支; 其余 3 个 (edge-devices 全量列表 / unified-data historical 全量 /
-// device_data 分页) 沿用既有 "尽力而为" 语义忽略 .Error, 因此仅靠 HTTP 状态码
-// 无法观察取消 (取消时它们依旧返回 200)。为在不改动业务逻辑的前提下证明取消
-// 确实下传, 这里通过 GORM 的 query callback 捕获每条查询执行时的
-// Statement.Context, 断言重查询拿到的是已取消的请求上下文。
+// 除 HTTP 状态码外, 这里还用 GORM 的 query callback 捕获每条查询执行时的
+// Statement.Context, 证明取消信号确实下传到了数据库执行链的最末端 (包括
+// ApplyShapeDedup 的保形去重外层链)。
 // ===========================================================================
 
 // canceledGET builds a GET request whose context is already canceled, mirroring
@@ -92,10 +92,15 @@ func TestNodesList_CanceledRequest_ReturnsNon200(t *testing.T) {
 	}
 }
 
-// TestHeavyQueries_CanceledRequest_ReachesDB — 对每个重查询: 正常 context 下
-// 仍 200 (防误伤); 已取消的 context 下, 该重查询的执行链必须观察到 canceled
-// 的请求上下文 (取消真的传播到了 DB 层)。
-func TestHeavyQueries_CanceledRequest_ReachesDB(t *testing.T) {
+// TestHeavyQueries_CanceledRequest_Returns500AndReachesDB — 对每个重查询:
+//   - 正常 context → 200 (防误伤);
+//   - 已取消 context → 500 (查询错误必须暴露给客户端, 不再 200 + 空数组);
+//   - 取消后的执行链必须观察到 canceled 的请求上下文 (取消真的传播到 DB 层)。
+//
+// 覆盖: edge-devices 全量列表 / unified-data historical (含 dedup-session 变体) /
+// devices-history / edge-device-data 分页。上一批 3 个忽略 .Error 的端点现已全部
+// 可通过 HTTP 状态码直接观察取消, 不再依赖 DB callback 间接证明。
+func TestHeavyQueries_CanceledRequest_Returns500AndReachesDB(t *testing.T) {
 	cases := []struct {
 		name   string
 		target string
@@ -153,16 +158,50 @@ func TestHeavyQueries_CanceledRequest_ReachesDB(t *testing.T) {
 				t.Fatalf("normal request: expected 200, got %d: %s", w.Code, w.Body.String())
 			}
 
-			// 取消传播: 重查询必须拿到已取消的请求 context。
+			// 读路径错误暴露: 取消 → 500 (而不是 200 + 空数组)。
 			rec.reset()
 			w = httptest.NewRecorder()
 			r.ServeHTTP(w, canceledGET(tc.target))
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("canceled request: expected 500 (query error surfaced), got %d: %s", w.Code, w.Body.String())
+			}
+			// 取消传播: 重查询必须拿到已取消的请求 context。
 			if !rec.sawCanceled() {
 				t.Fatalf("canceled request: no DB query observed the canceled request context (status %d)", w.Code)
 			}
-			// 记录实际状态: 这 3 个端点忽略查询错误, 因此取消后仍可能是 200,
-			// 这正是本测试用 callback 而非状态码来证明传播的原因。
-			t.Logf("canceled status=%d (handler error-swallowing is pre-existing)", w.Code)
+		})
+	}
+}
+
+// TestHeavyQueries_NormalContext_EmptyIsArray — 正常 context 且无数据时,
+// 空结果集必须仍是 200 + [] (补错误检查后不得把空集误判为失败)。
+func TestHeavyQueries_NormalContext_EmptyIsArray(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"edge-devices-list", "/api/v1/edge-devices"},
+		{"devices-history", "/api/v1/devices/1/history?hours=24"},
+		{"unified-data-historical", "/api/v1/unified-data/historical?device_pk=1&category=voltage&start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := setupTestRouter(t)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			var env struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				t.Fatalf("response is not valid JSON: %v (%s)", err, w.Body.String())
+			}
+			if string(env.Data) != "[]" {
+				t.Fatalf("empty result must serialize as [], got %s", string(env.Data))
+			}
 		})
 	}
 }
