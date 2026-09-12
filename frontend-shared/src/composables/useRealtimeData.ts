@@ -128,7 +128,7 @@ export function useRealtimeData(options: RealtimeDataOptions): RealtimeDataRetur
   // WS 消息处理
   const handleMessage = (message: WebSocketMessage) => {
     const p = (message.payload || message) as any
-    const msgDeviceId = Number(p.sensor_device_id || p.edge_device_id || p.device_id)
+    const msgDeviceId = Number(p.edge_device_id)
     const targetId = getDeviceId()
 
     // W6: Reject messages without a device ID — NaN would match ALL device pages

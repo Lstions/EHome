@@ -289,7 +289,7 @@ interface MeasurementBatch {
   data: MeasurementPoint[]
 }
 interface RealtimeDataPayload {
-  device_id?: number
+  edge_device_id?: number
   collected_at?: string
   data?: Record<string, unknown>
   sensors?: Record<string, unknown>
@@ -643,7 +643,7 @@ const scheduleDebounced = () => {
 
 const handleDataUpdate = (message: WebSocketMessage) => {
   const payload = message.payload as RealtimeDataPayload | undefined
-  if (!payload || payload.device_id !== queryForm.deviceId) return
+  if (!payload || payload.edge_device_id !== queryForm.deviceId) return
 
   realtimeCount.value++
   const newItem = {

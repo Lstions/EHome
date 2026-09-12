@@ -6,11 +6,10 @@ export interface WebSocketMessage {
   type: string
   topic?: string
   payload?: {
-    collector_id?: number
-    device_id?: number
     edge_device_id?: number
-    sensor_device_id?: number
+    edge_device_name?: string
     node_id?: number | string
+    node_name?: string
     status?: string
     devices?: any[]
     data?: any
@@ -21,8 +20,6 @@ export interface WebSocketMessage {
     progress?: number
     record_id?: number
     latency_ms?: number
-    device_name?: string
-    collector_name?: string
     channel_id?: number
     uptime_seconds?: number
     channel_count?: number
@@ -30,10 +27,8 @@ export interface WebSocketMessage {
     firmware?: string
     reason?: string
   }
-  // Flat-format fields (legacy compatibility)
+  // Flat-format fields
   data?: any
-  device_id?: number
-  sensor_device_id?: number
   edge_device_id?: number
   timestamp?: number
 }

@@ -431,36 +431,33 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	}
 	if c.wsHub != nil {
 		channelEvent := map[string]interface{}{
-			"device_id":          evt.DeviceID,
-			"node_id":            evt.DeviceID,
-			"channel_id":         evt.ChannelID,
-			"raw_hex":            fmt.Sprintf("%x", evt.RawData),
-			"timestamp":          now.Unix(),
-			"error_code":         evt.ErrorCode,
-			"request_id":         evt.RequestID,
-			"edge_device_id":     evt.EdgeDeviceID,
-			"command_index":      evt.CommandIndex,
-			"data":               dataMap,
-			"sensor_device_id":   device.ID,
-			"sensor_device_name": device.Name,
-			"sensor_type":        device.Type,
+			"device_id":        evt.DeviceID,
+			"node_id":          evt.DeviceID,
+			"channel_id":       evt.ChannelID,
+			"raw_hex":          fmt.Sprintf("%x", evt.RawData),
+			"timestamp":        now.Unix(),
+			"error_code":       evt.ErrorCode,
+			"request_id":       evt.RequestID,
+			"edge_device_id":   device.ID,
+			"edge_device_name": device.Name,
+			"command_index":    evt.CommandIndex,
+			"data":             dataMap,
 		}
 		c.wsHub.BroadcastEvent(events.ChannelData, channelEvent)
 	}
 
-	// Broadcast data_update event, retaining the legacy numeric collector/node
-	// identifiers expected by existing dashboard clients.
+	// Broadcast data_update with canonical terminology: node = node_id/node_name,
+	// edge device = edge_device_id/edge_device_name. The legacy collector_* names
+	// and the duplicate device_id alias are no longer emitted.
 	if c.wsHub != nil && len(sensorData) > 0 {
 		c.wsHub.BroadcastEvent(events.DataUpdate, map[string]interface{}{
-			"device_id":      device.ID,
-			"edge_device_id": device.ID,
-			"device_name":    device.Name,
-			"collector_id":   device.Node.ID,
-			"collector_name": device.Node.Name,
-			"node_id":        device.Node.ID,
-			"channel_id":     evt.ChannelID,
-			"data":           dataMap,
-			"collected_at":   now.Format(time.RFC3339),
+			"edge_device_id":   device.ID,
+			"edge_device_name": device.Name,
+			"node_id":          device.Node.ID,
+			"node_name":        device.Node.Name,
+			"channel_id":       evt.ChannelID,
+			"data":             dataMap,
+			"collected_at":     now.Format(time.RFC3339),
 		})
 	}
 
