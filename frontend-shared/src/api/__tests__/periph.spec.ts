@@ -55,12 +55,20 @@ describe('gpioApi', () => {
     expect(result).toEqual([gpio])
   })
 
-  it('list accepts a bare array response', async () => {
+  it('list ignores a bare array response and requires the envelope', async () => {
     mockClient.get.mockResolvedValue([gpio])
 
     const result = await gpioApi.list(NODE)
 
-    expect(result).toEqual([gpio])
+    expect(result).toEqual([])
+  })
+
+  it('set reads request_id from the unified envelope data', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 42 } })
+
+    const result = await gpioApi.set(NODE, 2, 1)
+
+    expect(result).toEqual({ request_id: 42 })
   })
 
   it('list throws when the envelope reports code >= 400', async () => {
@@ -152,12 +160,20 @@ describe('pwmApi', () => {
     expect(result).toEqual([pwm])
   })
 
-  it('list accepts a bare array response', async () => {
+  it('list ignores a bare array response and requires the envelope', async () => {
     mockClient.get.mockResolvedValue([pwm])
 
     const result = await pwmApi.list(NODE)
 
-    expect(result).toEqual([pwm])
+    expect(result).toEqual([])
+  })
+
+  it('start reads request_id from the unified envelope data', async () => {
+    mockClient.post.mockResolvedValue({ code: 200, message: 'ok', data: { request_id: 7 } })
+
+    const result = await pwmApi.start(NODE, 'PWM0')
+
+    expect(result).toEqual({ request_id: 7 })
   })
 
   it('list throws when the envelope reports code >= 400', async () => {

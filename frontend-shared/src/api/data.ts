@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 export interface Overview {
   nodes: {
@@ -24,16 +24,16 @@ export interface Overview {
 
 export const dataApi = {
   async getOverview(): Promise<Overview> {
-    const response = await client.get<unknown, any>('/api/v1/overview')
+    const response = await client.get<unknown, ApiEnvelope<Overview>>('/api/v1/overview')
     // Interceptor returns {code, data, message} → response.data = the overview
-    return (response as any).data
+    return response.data
   },
 
   async getNodeDevicesData(nodeId: number, params: {
     start_time: string
     end_time: string
   }): Promise<any> {
-    const response = await client.get<unknown, any>(`/api/v1/nodes/${nodeId}/latest`, { params })
-    return (response as any).data
+    const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/nodes/${nodeId}/latest`, { params })
+    return response.data
   }
 }

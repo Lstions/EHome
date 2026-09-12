@@ -46,13 +46,13 @@ export const channelApi = {
     const params = nodeId ? { node_id: nodeId } : {}
     const response = await client.get('/api/v1/channels', { params })
     // response is the full body: { code: 200, data: { items, total, ... } }
-    const body = response as { code?: number; data?: unknown }
+    const body = response as { code?: number; data?: Channel[] | { items?: Channel[]; total?: number } }
     // 2xx 为成功，4xx/5xx 为业务错误（与 client.ts 拦截器逻辑一致）
     if (body.code && body.code >= 400) {
       throw new Error('获取通道列表失败')
     }
     // Unwrap: { data: { items: [...] } } -> { items: [...] }
-    const inner = (body as any).data
+    const inner = body.data
     if (Array.isArray(inner)) return compactChannelList(inner)
     if (inner && typeof inner === 'object' && Array.isArray(inner.items)) {
       return { ...inner, items: compactChannelList(inner.items) }

@@ -8,6 +8,16 @@ interface ErrorEnvelope {
   error_code?: string
 }
 
+/**
+ * 后端统一响应 envelope。axios 响应拦截器返回整个 envelope（response.data），
+ * 因此各 API 方法以 <unknown, ApiEnvelope<T>> 双泛型取值，只读 envelope.data。
+ */
+export interface ApiEnvelope<T> {
+  code: number
+  message: string
+  data: T
+}
+
 export class ApiError extends Error {
   readonly response?: AxiosResponse
   readonly status?: number

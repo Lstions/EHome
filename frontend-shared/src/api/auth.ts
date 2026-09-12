@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 export interface LoginRequest {
   username: string
@@ -29,13 +29,13 @@ export type AuthState = 'uninitialized' | 'initialized' | 'migration_required' |
 
 export const authApi = {
   async initialization(): Promise<{ state: AuthState }> {
-    const response = await client.get<unknown, any>('/api/v1/auth/initialization')
-    return (response as any).data as { state: AuthState }
+    const response = await client.get<unknown, ApiEnvelope<{ state: AuthState }>>('/api/v1/auth/initialization')
+    return response.data
   },
 
   async login(data: LoginRequest): Promise<LoginResponse> {
-    const response = await client.post<unknown, any>('/api/v1/auth/login', data)
-    return (response as any).data as LoginResponse
+    const response = await client.post<unknown, ApiEnvelope<LoginResponse>>('/api/v1/auth/login', data)
+    return response.data
   },
 
   async initialize(data: InitializeRequest): Promise<void> {
@@ -47,8 +47,8 @@ export const authApi = {
   },
 
   async account(): Promise<AccountInfo> {
-    const response = await client.get<unknown, any>('/api/v1/account')
-    return (response as any).data as AccountInfo
+    const response = await client.get<unknown, ApiEnvelope<AccountInfo>>('/api/v1/account')
+    return response.data
   },
 
   async changePassword(data: { old_password: string; new_password: string }): Promise<void> {

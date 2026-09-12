@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 // 方案 v3.3 §九 — 逻辑设备管理端点 (GET /logical-devices, merge, preview,
 // merge-jobs/:id, PUT /logical-devices/:id)。
@@ -81,39 +81,39 @@ export function extractMergeConflicts(error: unknown): MergeConflict[] {
 export const logicalDeviceApi = {
   // GET /api/v1/logical-devices — 管理列表 (实例数含已删, 数据量估算降级)
   async list(): Promise<LogicalDeviceListResponse> {
-    const response = await client.get<unknown, any>('/api/v1/logical-devices')
-    const data = response?.data ?? response
+    const response = await client.get<unknown, ApiEnvelope<{ items?: LogicalDeviceItem[]; total?: number }>>('/api/v1/logical-devices')
+    const data = response.data
     const items: LogicalDeviceItem[] = Array.isArray(data?.items) ? data.items : []
     return { items, total: typeof data?.total === 'number' ? data.total : items.length }
   },
 
   // POST /api/v1/logical-devices/merge/preview — 合并预览 (§3.4)
   async mergePreview(sourceIds: number[]): Promise<MergePreviewResponse> {
-    const response = await client.post<unknown, any>('/api/v1/logical-devices/merge/preview', {
+    const response = await client.post<unknown, ApiEnvelope<MergePreviewResponse>>('/api/v1/logical-devices/merge/preview', {
       source_ids: sourceIds,
     })
-    return (response?.data ?? response) as MergePreviewResponse
+    return response.data
   },
 
   // POST /api/v1/logical-devices/merge — 发起合并 (§3.4 乐观占位, 201)。
   // 409 时 axios 抛错, 用 extractMergeConflicts(error) 取 conflicts。
   async merge(targetName: string, sourceIds: number[]): Promise<MergeResult> {
-    const response = await client.post<unknown, any>('/api/v1/logical-devices/merge', {
+    const response = await client.post<unknown, ApiEnvelope<MergeResult>>('/api/v1/logical-devices/merge', {
       target_name: targetName,
       source_ids: sourceIds,
     })
-    return (response?.data ?? response) as MergeResult
+    return response.data
   },
 
   // GET /api/v1/logical-devices/merge-jobs/:id — 搬迁进度轮询
   async mergeJob(jobId: number): Promise<MergeJob> {
-    const response = await client.get<unknown, any>(`/api/v1/logical-devices/merge-jobs/${jobId}`)
-    return (response?.data ?? response) as MergeJob
+    const response = await client.get<unknown, ApiEnvelope<MergeJob>>(`/api/v1/logical-devices/merge-jobs/${jobId}`)
+    return response.data
   },
 
   // PUT /api/v1/logical-devices/:id — 改 name / retention_days
   async update(id: number, updates: { name?: string; retention_days?: number }): Promise<LogicalDeviceItem> {
-    const response = await client.put<unknown, any>(`/api/v1/logical-devices/${id}`, updates)
-    return (response?.data ?? response) as LogicalDeviceItem
+    const response = await client.put<unknown, ApiEnvelope<LogicalDeviceItem>>(`/api/v1/logical-devices/${id}`, updates)
+    return response.data
   },
 }

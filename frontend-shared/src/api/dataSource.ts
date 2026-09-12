@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 /** 数据源状态 */
 export type DataSourceStatus = 'active' | 'standby' | 'error' | 'disabled'
@@ -96,46 +96,40 @@ export interface DataSourceListResult {
   total: number
 }
 
-/** 拦截器返回 response.data (envelope {code,data,message}), 用 any 双跳转取 data 字段 */
-type Envelope<T> = { code: number; data: T; message: string }
-
-async function unwrap<T>(p: Promise<unknown>): Promise<T> {
-  const res = (await p) as unknown as Envelope<T> | T
-  if (res && typeof res === 'object' && 'data' in (res as Envelope<T>)) {
-    return (res as Envelope<T>).data
-  }
-  return res as T
+/** 拦截器返回后端统一 envelope；只从 envelope.data 取值。 */
+async function unwrap<T>(p: Promise<ApiEnvelope<T>>): Promise<T> {
+  return (await p).data
 }
 
 export const dataSourceApi = {
   async list(params?: DataSourceListParams): Promise<DataSourceListResult> {
-    return unwrap<DataSourceListResult>(client.get('/api/v1/data-sources', { params }))
+    return unwrap<DataSourceListResult>(client.get<unknown, ApiEnvelope<DataSourceListResult>>('/api/v1/data-sources', { params }))
   },
   async get(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.get(`/api/v1/data-sources/${id}`))
+    return unwrap<DataSource>(client.get<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}`))
   },
   async create(data: CreateDataSourceRequest): Promise<DataSource> {
-    return unwrap<DataSource>(client.post('/api/v1/data-sources', data))
+    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>('/api/v1/data-sources', data))
   },
   async update(id: number, data: UpdateDataSourceRequest): Promise<DataSource> {
-    return unwrap<DataSource>(client.put(`/api/v1/data-sources/${id}`, data))
+    return unwrap<DataSource>(client.put<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}`, data))
   },
   async remove(id: number): Promise<void> {
     await client.delete(`/api/v1/data-sources/${id}`)
   },
   async activate(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post(`/api/v1/data-sources/${id}/activate`))
+    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/activate`))
   },
   async deactivate(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post(`/api/v1/data-sources/${id}/deactivate`))
+    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/deactivate`))
   },
   async reset(id: number): Promise<DataSource> {
-    return unwrap<DataSource>(client.post(`/api/v1/data-sources/${id}/reset`))
+    return unwrap<DataSource>(client.post<unknown, ApiEnvelope<DataSource>>(`/api/v1/data-sources/${id}/reset`))
   },
   async getHealth(id: number, limit?: number): Promise<DataSourceHealth[]> {
-    return unwrap<DataSourceHealth[]>(client.get(`/api/v1/data-sources/${id}/health`, { params: { limit } }))
+    return unwrap<DataSourceHealth[]>(client.get<unknown, ApiEnvelope<DataSourceHealth[]>>(`/api/v1/data-sources/${id}/health`, { params: { limit } }))
   },
   async getFailoverLogs(deviceId: number, params?: { limit?: number; category?: string }): Promise<FailoverLog[]> {
-    return unwrap<FailoverLog[]>(client.get(`/api/v1/devices/${deviceId}/failover-logs`, { params }))
+    return unwrap<FailoverLog[]>(client.get<unknown, ApiEnvelope<FailoverLog[]>>(`/api/v1/devices/${deviceId}/failover-logs`, { params }))
   },
 }

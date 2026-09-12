@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 import type { OperationDef } from './deviceConfig'
 
 // M10 fix: Export DeviceStatus type for use across components
@@ -200,44 +200,28 @@ const normalizeList = (items: unknown[]): EdgeDevice[] =>
 
 export const edgeDeviceApi = {
   async getList(params?: EdgeDeviceListParams): Promise<{total: number, items: EdgeDevice[]}> {
-    const response = await client.get<unknown, any>('/api/v1/edge-devices', { params })
-    // Backend returns bare array [{...}], not {code, data, message} envelope
-    // Interceptor returns response.data (parsed JSON body), so response IS the array
-    if (Array.isArray(response)) {
-      return { total: response.length, items: normalizeList(response) }
+    // 拦截器返回统一 envelope；后端 GET /edge-devices 的 data 为设备数组。
+    const response = await client.get<unknown, ApiEnvelope<EdgeDevice[] | { items: unknown[]; total?: number }>>('/api/v1/edge-devices', { params })
+    const data = response?.data
+    if (Array.isArray(data)) {
+      return { total: data.length, items: normalizeList(data) }
     }
-    // Handle envelope format if backend changes
-    if (Array.isArray(response?.data?.items)) {
-      return {
-        total: response.data.total ?? response.data.items.length,
-        items: normalizeList(response.data.items),
-      }
-    }
-    if (response?.data && Array.isArray(response.data)) {
-      return { total: response.data.length, items: normalizeList(response.data) }
+    if (data && Array.isArray(data.items)) {
+      return { total: data.total ?? data.items.length, items: normalizeList(data.items) }
     }
     return { total: 0, items: [] }
   },
 
   async getDetail(id: number): Promise<EdgeDevice> {
-    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}`)
-    // GET /edge-devices/:id returns envelope {code, data, message}
-    if (response?.data && typeof response.data === 'object') {
-      return normalize(response.data)
-    }
-    return normalize(response)
+    // GET /edge-devices/:id 的 data 为设备对象。
+    const response = await client.get<unknown, ApiEnvelope<RawEdgeDevice>>(`/api/v1/edge-devices/${id}`)
+    return normalize(response.data)
   },
 
   async create(data: CreateEdgeDeviceParams): Promise<{id: number}> {
-    const response = await client.post<unknown, any>('/api/v1/edge-devices', data)
-    // POST returns bare object (the created device)
-    if (response?.id !== undefined) {
-      return { id: response.id }
-    }
-    if (response?.data?.id !== undefined) {
-      return { id: response.data.id }
-    }
-    return response as unknown as {id: number}
+    // POST 的 data 为新建设备对象。
+    const response = await client.post<unknown, ApiEnvelope<{ id: number }>>('/api/v1/edge-devices', data)
+    return { id: response.data.id }
   },
 
   // 更新参数 — 对齐后端 UpdateDTO
@@ -262,40 +246,36 @@ export const edgeDeviceApi = {
     failed: number
     results: Array<{ id: number; success: boolean; error?: string }>
   }> {
-    const response = await client.post<unknown, any>('/api/v1/edge-devices/batch-delete', {
-      ids,
-      delete_data: options?.delete_data === true,
-    })
-    const data = response?.data && typeof response.data === 'object' ? response.data : response
-    return data as {
+    const response = await client.post<unknown, ApiEnvelope<{
       total: number
       succeeded: number
       failed: number
       results: Array<{ id: number; success: boolean; error?: string }>
-    }
+    }>>('/api/v1/edge-devices/batch-delete', {
+      ids,
+      delete_data: options?.delete_data === true,
+    })
+    return response.data
   },
 
   // 方案 v3.3 §2.1: 删除弹窗信息区 — 逻辑设备信息 (实例数/数据量估算/保留天数)。
   // 失败由调用方降级处理 (不显示信息区, 不阻塞删除)。
   async getLogicalDeviceInfo(id: number): Promise<LogicalDeviceInfo> {
-    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/logical-device-info`)
-    const data = response?.data && typeof response.data === 'object' ? response.data : response
-    return data as LogicalDeviceInfo
+    const response = await client.get<unknown, ApiEnvelope<LogicalDeviceInfo>>(`/api/v1/edge-devices/${id}/logical-device-info`)
+    return response.data
   },
 
   // 方案 v3.3 §1.3/§九: 创建继承候选逻辑设备列表 (Unscoped 聚合,
   // 权重排序, 数据量估算 + 3s 超时降级)。失败由调用方降级处理。
   async getCandidates(params: CandidateQueryParams): Promise<LogicalDeviceCandidate[]> {
-    const response = await client.get<unknown, any>('/api/v1/edge-devices/candidates', { params })
+    const response = await client.get<unknown, ApiEnvelope<LogicalDeviceCandidate[]>>('/api/v1/edge-devices/candidates', { params })
     const data = response?.data
-    if (Array.isArray(data)) return data as LogicalDeviceCandidate[]
-    if (Array.isArray(response)) return response as LogicalDeviceCandidate[]
-    return []
+    return Array.isArray(data) ? data : []
   },
 
   async getLatestData(id: number): Promise<any> {
-    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/latest-data`)
-    return response.data || response
+    const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/edge-devices/${id}/latest-data`)
+    return response.data
   },
 
   async getHistoryData(id: number, params: {
@@ -304,34 +284,31 @@ export const edgeDeviceApi = {
     page?: number
     page_size?: number
   }): Promise<any> {
-    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${id}/data`, { params })
-    return response.data || response
+    const response = await client.get<unknown, ApiEnvelope<any>>(`/api/v1/edge-devices/${id}/data`, { params })
+    return response.data
   },
 
   async getOperationHistory(id: number, limit: number = 50): Promise<any[]> {
-    const response = await client.get<unknown, any>(
+    const response = await client.get<unknown, ApiEnvelope<unknown[]>>(
       `/api/v1/edge-devices/${id}/operations/history`,
       { params: { limit } }
     )
-    if (Array.isArray(response)) return response
-    if (response?.data) return response.data as any[]
-    return []
+    const data = response?.data
+    return Array.isArray(data) ? data : []
   },
 
   // Driver command templates
   async getDriverCommands(deviceType: string): Promise<CommandTemplate[]> {
-    const response = await client.get<unknown, any>(`/api/v1/drivers/${deviceType}/commands`)
-    if (Array.isArray(response?.data)) return response.data
-    if (Array.isArray(response)) return response
-    return []
+    const response = await client.get<unknown, ApiEnvelope<CommandTemplate[]>>(`/api/v1/drivers/${deviceType}/commands`)
+    const data = response?.data
+    return Array.isArray(data) ? data : []
   },
 
   // Edge device command intervals
   async getCommandIntervals(edgeDeviceId: number): Promise<CommandTemplateWithInterval[]> {
-    const response = await client.get<unknown, any>(`/api/v1/edge-devices/${edgeDeviceId}/commands`)
-    if (Array.isArray(response?.data)) return response.data
-    if (Array.isArray(response)) return response
-    return []
+    const response = await client.get<unknown, ApiEnvelope<CommandTemplateWithInterval[]>>(`/api/v1/edge-devices/${edgeDeviceId}/commands`)
+    const data = response?.data
+    return Array.isArray(data) ? data : []
   },
 
   async updateCommandIntervals(edgeDeviceId: number, intervals: Record<string, number>): Promise<void> {

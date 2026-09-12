@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 export interface Firmware {
   id: number
@@ -23,19 +23,16 @@ export interface FirmwareListParams {
 
 export const firmwareApi = {
   async getList(params?: FirmwareListParams): Promise<{total: number, list: Firmware[]}> {
-    const response = await client.get('/api/v1/firmwares', { params })
-    // Interceptor returns {code, data, message} → response.data = the array
-    const list = (response as any).data as Firmware[] ?? []
+    // 后端统一 envelope: {code, data: Firmware[], message}
+    const response = await client.get<unknown, ApiEnvelope<Firmware[]>>('/api/v1/firmwares', { params })
+    const list = response.data ?? []
     return { total: list.length, list }
   },
 
   async upload(formData: FormData): Promise<Firmware> {
-    const response = await client.post('/api/v1/firmwares/upload', formData)
-    // 后端 POST /api/v1/firmwares/upload（handler_ota.go:199 `c.JSON(http.StatusCreated, fw)`）
-    // 返回的是**裸 Firmware 对象**，不是 envelope —— 只取 `.data` 会恒为 undefined。
-    // 与 periph.ts 的 `?.data || resp` 同款双向兼容（envelope / 裸对象都能取到）。
-    const raw = response as any
-    return (raw?.data ?? raw) as Firmware
+    // 后端统一 envelope: {code, data: Firmware, message}
+    const response = await client.post<unknown, ApiEnvelope<Firmware>>('/api/v1/firmwares/upload', formData)
+    return response.data
   },
 
   async update(id: number, data: { version?: string; changelog?: string }): Promise<void> {

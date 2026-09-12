@@ -453,11 +453,10 @@ describe('driver API', () => {
     expect(res).toEqual(list)
   })
 
-  it('getDriverList returns envelope.data if no .list', async () => {
-    const list = [{ type: 'bmp280' }]
-    mockClient.get.mockResolvedValue({ data: list })
+  it('getDriverList reads envelope.data.list and ignores data without .list', async () => {
+    mockClient.get.mockResolvedValue({ data: { total: 1 } })
     const res = await getDriverList()
-    expect(res).toEqual(list)
+    expect(res).toEqual([])
   })
 
   it('getDriverList returns [] if not array', async () => {
@@ -538,20 +537,21 @@ import { edgeDeviceApi } from '../edgeDevice'
 describe('edgeDeviceApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('getList with bare array response', async () => {
+  it('getList requires the envelope and ignores a bare array response', async () => {
     mockClient.get.mockResolvedValue([{ id: 1, name: 'dev1', status: 'online' }])
     const res = await edgeDeviceApi.getList()
-    expect(res.total).toBe(1)
-    expect(res.items[0].status).toBe('online')
+    expect(res).toEqual({ total: 0, items: [] })
   })
 
   it('getList drops malformed entries before normalization', async () => {
-    mockClient.get.mockResolvedValue([
-      undefined,
-      null,
-      { name: 'missing-id' },
-      { id: 2, name: 'valid-device', status: 'active' },
-    ])
+    mockClient.get.mockResolvedValue({
+      data: [
+        undefined,
+        null,
+        { name: 'missing-id' },
+        { id: 2, name: 'valid-device', status: 'active' },
+      ],
+    })
 
     const res = await edgeDeviceApi.getList()
 
@@ -581,13 +581,13 @@ describe('edgeDeviceApi', () => {
   })
 
   it('getList passes params', async () => {
-    mockClient.get.mockResolvedValue([])
+    mockClient.get.mockResolvedValue({ data: [] })
     await edgeDeviceApi.getList({ node_id: 5, status: 'online' })
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices', { params: { node_id: 5, status: 'online' } })
   })
 
   it('create forwards device_config_id required by the backend', async () => {
-    mockClient.post.mockResolvedValue({ id: 9 })
+    mockClient.post.mockResolvedValue({ data: { id: 9 } })
 
     await edgeDeviceApi.create({
       name: 'BMS',
@@ -609,7 +609,7 @@ describe('edgeDeviceApi', () => {
   })
 
   it('create forwards command_intervals (EDGE-WIZ-004 per-command polling)', async () => {
-    mockClient.post.mockResolvedValue({ id: 9 })
+    mockClient.post.mockResolvedValue({ data: { id: 9 } })
 
     await edgeDeviceApi.create({
       name: 'BMS',
@@ -681,18 +681,6 @@ describe('edgeDeviceApi', () => {
     })
     const res = await edgeDeviceApi.getDetail(1)
     expect(res.node).toEqual({ id: 1, name: '', firmware_version: '2.5.21' })
-  })
-
-  it('getDetail with bare object', async () => {
-    mockClient.get.mockResolvedValue({ id: 1, status: 'warning' })
-    const res = await edgeDeviceApi.getDetail(1)
-    expect(res.status).toBe('warning')
-  })
-
-  it('create with response.id', async () => {
-    mockClient.post.mockResolvedValue({ id: 1 })
-    const res = await edgeDeviceApi.create({ name: 'new' })
-    expect(res).toEqual({ id: 1 })
   })
 
   it('create with envelope data.id', async () => {
@@ -775,8 +763,8 @@ describe('edgeDeviceApi', () => {
     })
   })
 
-  it('getOperationHistory returns array', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1 }, { id: 2 }])
+  it('getOperationHistory reads the envelope data array', async () => {
+    mockClient.get.mockResolvedValue({ code: 200, message: 'ok', data: [{ id: 1 }, { id: 2 }] })
     const res = await edgeDeviceApi.getOperationHistory(1, 10)
     expect(res).toHaveLength(2)
   })
@@ -794,38 +782,38 @@ describe('edgeDeviceApi', () => {
   })
 
   it('normalize maps unknown status', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, status: 'weird_status' }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, status: 'weird_status' }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].status).toBe('unknown')
   })
 
   it('normalize maps empty status to offline', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1 }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1 }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].status).toBe('offline')
   })
 
   it('normalize falls back device_type from type', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, type: 'sensor' }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, type: 'sensor' }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].device_type).toBe('sensor')
   })
 
   it('normalize uses channel.hardware_type fallback', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, channel: { hardware_type: 'i2c', hardware_id: 'I2C0' } }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, channel: { hardware_type: 'i2c', hardware_id: 'I2C0' } }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].hardware_type).toBe('i2c')
     expect(res.items[0].hardware_id).toBe('I2C0')
   })
 
   it('normalize uses node info', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, node: { id: 5, name: 'node5' } }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, node: { id: 5, name: 'node5' } }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].node).toEqual({ id: 5, name: 'node5' })
   })
 
   it('normalize keeps an unnamed node for its id (link/firmware survive)', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, node: { id: 5 } }])
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, node: { id: 5 } }] })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].node).toEqual({ id: 5, name: '' })
   })
@@ -862,11 +850,10 @@ describe('firmwareApi', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/firmwares/upload', fd)
   })
 
-  it('upload 兼容后端真实形状:裸 Firmware 对象（非 envelope）', async () => {
-    // 后端 POST /api/v1/firmwares/upload 实际回 `c.JSON(201, fw)` —— 裸对象、无 data 包裹。
-    // 旧实现只取 `.data` → 恒为 undefined（返回值类型 Promise<Firmware> 是个空承诺）。
+  it('upload reads the unified envelope data', async () => {
+    // 后端统一 envelope: {code, data: Firmware, message}
     const fd = new FormData()
-    mockClient.post.mockResolvedValue({ id: 9, version: '3.1', filename: 'fw.bin' })
+    mockClient.post.mockResolvedValue({ code: 201, message: 'ok', data: { id: 9, version: '3.1', filename: 'fw.bin' } })
     const res = await firmwareApi.upload(fd)
     expect(res).toEqual({ id: 9, version: '3.1', filename: 'fw.bin' })
     expect(res.version).toBe('3.1')
@@ -954,11 +941,10 @@ import { nodeApi } from '../node'
 describe('nodeApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('getList with bare array wraps it', async () => {
+  it('getList requires the envelope and ignores a bare array response', async () => {
     mockClient.get.mockResolvedValue([{ id: 1, node_id: 'n1' }])
     const res = await nodeApi.getList()
-    expect(res.items).toHaveLength(1)
-    expect(res.total).toBe(1)
+    expect(res).toEqual({ total: 0, page: 1, page_size: 20, items: [] })
   })
 
   it('getList with envelope .data.items', async () => {
@@ -984,12 +970,6 @@ describe('nodeApi', () => {
     mockClient.get.mockResolvedValue({ data: { id: 1, node_id: 'n1' } })
     const res = await nodeApi.getDetail(1)
     expect(res.node_id).toBe('n1')
-  })
-
-  it('getDetail with bare object', async () => {
-    mockClient.get.mockResolvedValue({ id: 1, node_id: 'n1' })
-    const res = await nodeApi.getDetail(1)
-    expect(res.id).toBe(1)
   })
 
   it('delete calls delete', async () => {
@@ -1020,31 +1000,33 @@ describe('nodeApi', () => {
     mockClient.post.mockResolvedValue({ code: 200, data: { ota_record_id: 1, status: 'started' }, message: 'ok' })
     const res = await nodeApi.startOTA(1, 5, true)
     expect(res).toEqual({ ota_record_id: 1, status: 'started' })
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/start', { node_id: 1, firmware_id: 5, force: true })
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/tasks', { node_id: 1, firmware_id: 5, force: true })
   })
 
   it('startOTA default force=false', async () => {
     mockClient.post.mockResolvedValue({ code: 200, data: { ota_record_id: 2, status: 'started' }, message: 'ok' })
     await nodeApi.startOTA(1, 5)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/start', { node_id: 1, firmware_id: 5, force: false })
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/tasks', { node_id: 1, firmware_id: 5, force: false })
   })
 
   it('getOTAProgress returns data', async () => {
     mockClient.get.mockResolvedValue({ code: 200, data: { id: 1, progress: 50 }, message: 'ok' })
     const res = await nodeApi.getOTAProgress(1, 1)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/ota/tasks/1')
     expect(res.progress).toBe(50)
   })
 
   it('getOTAHistory returns array', async () => {
     mockClient.get.mockResolvedValue({ code: 200, data: [{ id: 1 }], message: 'ok' })
     const res = await nodeApi.getOTAHistory(1)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/nodes/1/ota/history')
     expect(res).toHaveLength(1)
   })
 
   it('cancelOTA posts', async () => {
     mockClient.post.mockResolvedValue(undefined)
     await nodeApi.cancelOTA(1, 1)
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/cancel/1')
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/ota/tasks/1/cancel')
   })
 
   it('getHardwareConfig returns data', async () => {
@@ -1185,14 +1167,6 @@ describe('parserApi', () => {
     expect(res[0].device_config_id).toBe(42)
     expect(res[0].vendor).toBe('Bosch')
     expect(res[0].hardware_types).toEqual(['i2c'])
-  })
-
-  it('getList with envelope.data directly (no .list)', async () => {
-    mockClient.get.mockResolvedValue({
-      data: [{ type: 'bme680', display_name: 'BME680', vendor: 'Bosch' }]
-    })
-    const res = await parserApi.getList()
-    expect(res).toHaveLength(1)
   })
 
   it('getList resolves hardware_types via bus_types fallback', async () => {

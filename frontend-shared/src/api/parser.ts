@@ -2,8 +2,15 @@
  * Parser API - 解析器管理
  */
 
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 import { getDriverTree } from './driver'
+
+// 驱动树节点（后端 /device-configs/tree 的 data）的局部形状。
+interface RawDriverTreeNode {
+  name?: unknown
+  drivers?: Array<Record<string, unknown>>
+  children?: unknown[]
+}
 
 export interface Parser {
   id: string              // device_type (DeviceConfig.DeviceType)，非数据库主键；作为解析器标识
@@ -76,7 +83,7 @@ function flattenTreeToParsers(tree: unknown): Parser[] {
     if (!Array.isArray(nodes)) return
     for (const node of nodes) {
       if (!node || typeof node !== 'object') continue
-      const n = node as any
+      const n = node as RawDriverTreeNode
       const nodeName = typeof n.name === 'string' && n.name !== '' ? n.name : ''
       const effectiveVendor = depth === 0 ? (nodeName || vendor) : vendor
       const effectiveCategory = depth === 1 ? (nodeName || category) : category
@@ -114,10 +121,9 @@ export const parserApi = {
     let dbParsers: Parser[] = []
     let dbError: unknown = null
     try {
-      const response = await client.get('/api/v1/device-configs', { params: { status: 'active' } })
-      // Backend returns {code, data: {list: [...], total, ...}, message}
-      const envelope = response as any
-      const drivers = envelope.data?.list || envelope.data || []
+      // 后端统一 envelope: {code, data: {list, total, ...}, message}
+      const response = await client.get<unknown, ApiEnvelope<{ list?: unknown[] }>>('/api/v1/device-configs', { params: { status: 'active' } })
+      const drivers = response.data?.list
       dbParsers = (Array.isArray(drivers) ? drivers : []).map(normalizeParser)
     } catch (error) {
       dbError = error
@@ -147,10 +153,9 @@ export const parserApi = {
    * 获取单个解析器详情
    */
   async getById(id: string): Promise<Parser> {
-    const response = await client.get(`/api/v1/device-configs/${id}`)
-    // Backend returns {code, data: DeviceConfig, message}
-    const envelope = response as any
-    return normalizeParser(envelope.data)
+    // 后端统一 envelope: {code, data: DeviceConfig, message}
+    const response = await client.get<unknown, ApiEnvelope<Record<string, unknown>>>(`/api/v1/device-configs/${id}`)
+    return normalizeParser(response.data)
   }
 }
 

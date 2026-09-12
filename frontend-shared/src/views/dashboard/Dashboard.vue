@@ -258,7 +258,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 // 独立 chunk 延迟加载，避免阻塞仪表盘首屏。
 const LineChart = defineAsyncComponent(() => import('@/components/charts/LineChart.vue'))
 import { dataApi, type Overview } from '@/api/data'
-import client from '@/api/client'
+import client, { type ApiEnvelope } from '@/api/client'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
@@ -366,7 +366,7 @@ const fetchTrendData = async () => {
 
     const series: any[] = []
     const promises = deviceIds.slice(0, 5).map(deviceId =>
-      client.get<unknown, any>('/api/v1/unified-data/historical', {
+      client.get<unknown, ApiEnvelope<any[]>>('/api/v1/unified-data/historical', {
         params: {
           device_pk: deviceId,
           category: trendCategory.value,
@@ -377,7 +377,7 @@ const fetchTrendData = async () => {
       }).then(res => ({
         deviceId,
         deviceName: overview.value.latest_data?.find(d => d.device_id === deviceId)?.device_name || `设备${deviceId}`,
-        data: Array.isArray(res) ? res : (res.data || [])
+        data: res.data ?? []
       }))
     )
 
@@ -413,8 +413,8 @@ const fetchTrendData = async () => {
 
 const fetchStatusHistory = async () => {
   try {
-    const response = await client.get<unknown, any>('/api/v1/nodes/status-history', { params: { limit: 20 } })
-    const events = response?.data || response || []
+    const response = await client.get<unknown, ApiEnvelope<Array<{ id: number; node_id: string; node_name?: string; new_status: string; created_at: string }>>>('/api/v1/nodes/status-history', { params: { limit: 20 } })
+    const events = response.data ?? []
     statusHistory.value = Array.isArray(events) ? events : []
   } catch (error) {
     logger.warn('获取节点状态历史失败', { error: String(error) })
@@ -439,7 +439,7 @@ const scheduleOverviewRefresh = () => {
 const handleStatusUpdate = (message: WebSocketMessage) => {
   logger.debug('状态更新', { payload: message.payload })
 
-  if (message.payload?.collector_id || message.payload?.device_id || message.payload?.node_id) {
+  if (message.payload?.node_id || message.payload?.edge_device_id) {
     scheduleOverviewRefresh()
     fetchStatusHistory()
   }

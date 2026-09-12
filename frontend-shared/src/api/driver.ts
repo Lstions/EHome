@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 export interface DriverMeta {
   type: string
@@ -29,26 +29,23 @@ export interface DriverTreeNode {
 // 获取驱动层级树
 // v2.2: backend now supports /api/v1/device-configs/tree endpoint
 export async function getDriverTree(): Promise<DriverTreeNode[]> {
-  const response = await client.get('/api/v1/device-configs/tree')
-  const envelope = response as any
-  return envelope.data || []
+  // 后端统一 envelope: {code, data: [...], message}
+  const response = await client.get<unknown, ApiEnvelope<DriverTreeNode[]>>('/api/v1/device-configs/tree')
+  return response.data ?? []
 }
 
 // 获取驱动列表（扁平）
 export async function getDriverList(): Promise<DriverMeta[]> {
-  const response = await client.get('/api/v1/device-configs')
-  // Backend returns {code, data: {list: [...], total, page, page_size}, message}
-  const envelope = response as any
-  const list = envelope.data?.list || envelope.data || []
-  return Array.isArray(list) ? list : []
+  // 后端统一 envelope: {code, data: {list, total, page, page_size}, message}
+  const response = await client.get<unknown, ApiEnvelope<{ list?: DriverMeta[] }>>('/api/v1/device-configs')
+  return response.data?.list ?? []
 }
 
 // 获取驱动详情
 export async function getDriverDetail(type: string): Promise<DriverMeta> {
-  const response = await client.get(`/api/v1/device-configs/${encodeURIComponent(type)}`)
-  // Backend returns {code, data: DeviceConfig, message}
-  const envelope = response as any
-  return envelope.data || ({} as DriverMeta)
+  // 后端统一 envelope: {code, data: DeviceConfig, message}
+  const response = await client.get<unknown, ApiEnvelope<DriverMeta>>(`/api/v1/device-configs/${encodeURIComponent(type)}`)
+  return response.data ?? ({} as DriverMeta)
 }
 
 // Cascader 选项类型

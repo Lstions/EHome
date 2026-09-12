@@ -1,4 +1,4 @@
-import client from './client'
+import client, { type ApiEnvelope } from './client'
 
 export interface Notification {
   id: number
@@ -14,15 +14,15 @@ export interface Notification {
 }
 
 export async function getNotifications(limit = 20): Promise<Notification[]> {
-  const response = await client.get(`/api/v1/notifications?limit=${limit}`)
+  const response = await client.get<unknown, ApiEnvelope<Notification[]>>(`/api/v1/notifications?limit=${limit}`)
   // Interceptor returns {code, data, message} → response.data = the array
-  return (response as any).data ?? []
+  return response.data ?? []
 }
 
 export async function getUnreadCount(): Promise<number> {
-  const response = await client.get('/api/v1/notifications/unread-count')
+  const response = await client.get<unknown, ApiEnvelope<{ count: number }>>('/api/v1/notifications/unread-count')
   // Interceptor returns {code, data: {count}, message} → response.data.count
-  return (response as any).data?.count ?? 0
+  return response.data?.count ?? 0
 }
 
 export async function markAsRead(id: number): Promise<void> {

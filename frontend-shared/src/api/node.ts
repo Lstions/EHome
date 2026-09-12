@@ -249,47 +249,27 @@ export interface PeripheralAssignment {
 
 export const nodeApi = {
   async getList(params?: NodeListParams): Promise<NodeListResponse> {
-    const response = await client.get('/api/v1/nodes', { params })
-    // Client interceptor returns response.data (parsed JSON body)
-    // Backend v2.2 returns bare array [{...}], not an envelope
-    const raw = response as any
-    if (Array.isArray(raw)) {
-      // Backend returns bare array [{...}], wrap it
+    // 拦截器返回后端统一 envelope；data 为节点数组（后端 GET /nodes Success(c, nodes)）。
+    const response = await client.get<unknown, ApiResponse<Node[] | NodeListResponse>>('/api/v1/nodes', { params })
+    const inner = response.data
+    if (Array.isArray(inner)) {
       return {
-        total: raw.length,
+        total: inner.length,
         page: params?.page || 1,
-        page_size: params?.page_size || raw.length,
-        items: raw as unknown as Node[]
+        page_size: params?.page_size || inner.length,
+        items: inner,
       }
     }
-    // If backend returns proper envelope format {code, data: {items, total, ...}, message}
-    if (raw?.data) {
-      const inner = raw.data
-      if (inner.items) {
-        return inner as NodeListResponse
-      }
-      // data is the list directly
-      if (Array.isArray(inner)) {
-        return {
-          total: inner.length,
-          page: params?.page || 1,
-          page_size: params?.page_size || inner.length,
-          items: inner as unknown as Node[]
-        }
-      }
+    if (inner && Array.isArray(inner.items)) {
+      return inner
     }
-    // Fallback
     return { total: 0, page: 1, page_size: 20, items: [] }
   },
 
   async getDetail(id: number | string): Promise<Node> {
-    const response = await client.get(`/api/v1/nodes/${id}`)
-    // Backend may return bare object or envelope
-    const raw = response as any
-    if (raw?.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
-      return raw.data as Node
-    }
-    return raw as unknown as Node
+    // 拦截器返回后端统一 envelope；data 为节点对象。
+    const response = await client.get<unknown, ApiResponse<Node>>(`/api/v1/nodes/${id}`)
+    return response.data
   },
 
   async update(id: number | string, data: { name?: string }): Promise<void> {
@@ -315,7 +295,7 @@ export const nodeApi = {
 
   async startOTA(id: number | string, firmwareId: number, force: boolean = false): Promise<{ota_record_id?: number, id?: number, status: string}> {
     const response = await client.post<unknown, ApiResponse<{ota_record_id?: number, id?: number, status: string}>>(
-      `/api/v1/ota/start`,
+      `/api/v1/ota/tasks`,
       { node_id: id, firmware_id: firmwareId, force }
     )
     return response.data
@@ -323,18 +303,18 @@ export const nodeApi = {
 
   async getOTAProgress(_id: number | string, recordId: number): Promise<OTARecord> {
     const response = await client.get<unknown, ApiResponse<OTARecord>>(
-      `/api/v1/ota/progress/${recordId}`
+      `/api/v1/ota/tasks/${recordId}`
     )
     return response.data
   },
 
   async getOTAHistory(id: number | string): Promise<OTARecord[]> {
-    const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/ota/history/${id}`)
+    const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/nodes/${id}/ota/history`)
     return response.data
   },
 
   async cancelOTA(_id: number | string, recordId: number): Promise<void> {
-    await client.post(`/api/v1/ota/cancel/${recordId}`)
+    await client.post(`/api/v1/ota/tasks/${recordId}/cancel`)
   },
 
   // 硬件配置管理
