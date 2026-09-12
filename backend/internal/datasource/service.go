@@ -405,10 +405,13 @@ func (s *Service) FailoverLogs(deviceID uint, category string, limit int) ([]mod
 }
 
 // Activate 手动切换为权威 (R7)。
+//
+// v1.1 修订：activate 的语义是"使该来源成为权威"，disabled 只是"人工停用"、必须可逆，
+// 因此目标为 disabled 时不再返回 ErrConflict，而是正常走切换流程（即"重新启用"）。
 //   - 不存在 → ErrNotFound
-//   - disabled → ErrConflict
 //   - 已是 active → 幂等返回，不写日志/通知
-//   - 否则目标 → active、原 active → standby，写 failover_logs(reason=manual) + 通知
+//   - 目标为 standby/error/disabled → 目标 active、原 active → standby，
+//     写 failover_logs(reason=manual) + health(transition) + 通知
 func (s *Service) Activate(id uint) (*models.DataSource, error) {
 	var out models.DataSource
 	var notes []models.Notification
@@ -419,9 +422,6 @@ func (s *Service) Activate(id uint) (*models.DataSource, error) {
 				return fmt.Errorf("%w: data source %d", ErrNotFound, id)
 			}
 			return err
-		}
-		if target.Status == StatusDisabled {
-			return fmt.Errorf("%w: data source %d is disabled and cannot be activated", ErrConflict, id)
 		}
 		if target.Status == StatusActive {
 			out = target
@@ -447,10 +447,17 @@ func (s *Service) Activate(id uint) (*models.DataSource, error) {
 		if err := s.writeFailoverLog(tx, target.DeviceID, target.Category, fromID, target.ID, ReasonManual, ""); err != nil {
 			return err
 		}
+		msg := fmt.Sprintf("设备 %d 类别 %s 来源 %d → active (原因: %s)", target.DeviceID, target.Category, target.ID, ReasonManual)
+		if hasCurrent {
+			msg = fmt.Sprintf("设备 %d 类别 %s 来源 %d → active，原权威来源 %d → standby (原因: %s)",
+				target.DeviceID, target.Category, target.ID, fromID, ReasonManual)
+		}
+		if err := s.recordHealth(tx, target.ID, target.DeviceID, target.Category, healthStatusTransition, msg, 0); err != nil {
+			return err
+		}
 		target.Status = StatusActive
 		out = target
-		notes = append(notes, s.newNotification(notifyTypeInfo, "数据源切换",
-			fmt.Sprintf("设备 %d 类别 %s 来源 %d 手动切换为权威 (原因: %s)", target.DeviceID, target.Category, target.ID, ReasonManual), target.ID))
+		notes = append(notes, s.newNotification(notifyTypeInfo, "数据源切换", msg, target.ID))
 		return nil
 	})
 	if err != nil {
@@ -463,7 +470,7 @@ func (s *Service) Activate(id uint) (*models.DataSource, error) {
 // Deactivate 停用来源 (R5/R6/R8)。
 //   - 不存在 → ErrNotFound
 //   - active 且组内无健康候选 → ErrConflict (R6，要求先指定接替者)
-//   - active 且有候选 → 候选接替 (reason=manual_deactivate) 后原来源 disabled (R5)
+//   - active 且有候选 → 候选接替 (reason=manual_deactivate) + health(transition)，原来源 disabled (R5)
 //   - 非 active → 直接 disabled (R8)
 func (s *Service) Deactivate(id uint) (*models.DataSource, error) {
 	var out models.DataSource
@@ -504,10 +511,14 @@ func (s *Service) Deactivate(id uint) (*models.DataSource, error) {
 		if err := s.writeFailoverLog(tx, target.DeviceID, target.Category, target.ID, candidate.ID, ReasonManualDeactivate, ""); err != nil {
 			return err
 		}
+		msg := fmt.Sprintf("设备 %d 类别 %s 来源 %d → disabled，来源 %d → active (原因: %s)",
+			target.DeviceID, target.Category, target.ID, candidate.ID, ReasonManualDeactivate)
+		if err := s.recordHealth(tx, candidate.ID, target.DeviceID, target.Category, healthStatusTransition, msg, 0); err != nil {
+			return err
+		}
 		target.Status = StatusDisabled
 		out = target
-		notes = append(notes, s.newNotification(notifyTypeInfo, "数据源切换",
-			fmt.Sprintf("设备 %d 类别 %s 停用来源 %d，来源 %d 接替 (原因: %s)", target.DeviceID, target.Category, target.ID, candidate.ID, ReasonManualDeactivate), candidate.ID))
+		notes = append(notes, s.newNotification(notifyTypeInfo, "数据源切换", msg, candidate.ID))
 		return nil
 	})
 	if err != nil {

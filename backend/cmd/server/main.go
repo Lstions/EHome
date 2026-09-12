@@ -231,9 +231,29 @@ func main() {
 	}
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
 	commandService := commandexec.NewService(db, actionRegistry)
-	// 数据源主备领域服务 (B1 已实现)。本批仅构造并注入 HTTP 层；
-	// 引擎接线 (Start/MarkSuccess/MarkFailure) 由后续批次完成。
+	// 数据源主备领域服务 (B1 已实现)。显式 Options{} 即 §4 默认语义:
+	// Cooldown 5m / MinResidency 2m / Staleness 5m / ScanInterval 60s。
 	datasourceSvc := datasource.New(db, datasource.Options{})
+	// 数据源主备引擎接线 (设计/数据源主备与故障转移.md §4/§6):
+	//   解析成功 → MarkSuccess; 边缘设备离线 → MarkFailure; 停滞扫描 → Start。
+	// 硬约束: sink 注入必须在 nodemgr.NewManager 之后 (nodeMgr 已构建);
+	// SetSourceHealthSink 会把回调推送到所有已构建 parserConsumers, 否则
+	// consumer 持有的 sink 永远为 nil, 引擎"从未触发"。
+	datasourceSvc.SetNotifier(func(n models.Notification) {
+		if err := db.Create(&n).Error; err != nil {
+			logger.Warn("datasource: failed to write notification", "source_id", n.SourceID, "error", err)
+		}
+	})
+	nodeMgr.SetSourceHealthSink(func(edgeDeviceID uint, names []string, at time.Time) {
+		datasourceSvc.MarkSuccess(edgeDeviceID, names, at)
+	})
+	offlineDetector.SetDeviceOfflineHook(func(edgeDeviceID uint) {
+		datasourceSvc.MarkFailure(edgeDeviceID, datasource.TriggerDeviceOffline)
+	})
+	dataSourceCtx, dataSourceStop := context.WithCancel(context.Background())
+	defer dataSourceStop()
+	go datasourceSvc.Start(dataSourceCtx)
+
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。

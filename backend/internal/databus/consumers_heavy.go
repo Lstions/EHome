@@ -120,6 +120,9 @@ type SensorParserConsumer struct {
 	// automationSink 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 解析后回调注入
 	// automation.Evaluator, 与 alertSink 并列不合并。nil 时跳过。
 	automationSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
+	// sourceHealthSink 数据源健康 (设计/数据源主备与故障转移.md §4): 解析成功回调。
+	// 参数一: 边缘设备 ID; 参数二: 本次解析出的敏感量名; 参数三: 时间。
+	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
 }
 
 func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
@@ -155,6 +158,18 @@ func (c *SensorParserConsumer) SetAlertSink(sink func(edgeDeviceID uint, fields 
 // main.go 接线), 与 alertSink 并列不合并。
 func (c *SensorParserConsumer) SetAutomationSink(sink func(edgeDeviceID uint, fields []parser.Field, at time.Time)) {
 	c.automationSink = sink
+}
+
+// SetSourceHealthSink 注入数据源健康成功回调 (设计/数据源主备与故障转移.md §4,
+// main.go 经 nodemgr 二阶段接线), 与 alertSink/automationSink 同点并列。
+func (c *SensorParserConsumer) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames []string, at time.Time)) {
+	c.sourceHealthSink = sink
+}
+
+// HasSourceHealthSink 报告解析成功健康回调是否已注入 (接线测试只读辅助;
+// 项目历史上缺此类断言导致 alert/automation 引擎"从未触发"而单测全绿)。
+func (c *SensorParserConsumer) HasSourceHealthSink() bool {
+	return c.sourceHealthSink != nil
 }
 
 func (c *SensorParserConsumer) Name() string { return "sensor_parser" }
@@ -335,6 +350,23 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// 同一批解析后物理量 (裁决: 避免独立 consumer 的重复解析开销)。
 	if c.automationSink != nil && len(sensorData) > 0 {
 		c.automationSink(device.ID, sensorData, now)
+	}
+	// 数据源健康 (设计/数据源主备与故障转移.md §4): 解析成功回调, 与
+	// alertSink/automationSink 同点挂接。空集合也调用——服务层按 category
+	// 匹配, 不命中则不更新。sink 失败/panic 只 Warn, 绝不影响入库/推送。
+	if c.sourceHealthSink != nil {
+		sensorNames := make([]string, 0, len(sensorData))
+		for i := range sensorData {
+			sensorNames = append(sensorNames, sensorData[i].Name)
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Warn("databus: source health sink panicked", "consumer", c.Name(), "edge_device_id", device.ID, "panic", r)
+				}
+			}()
+			c.sourceHealthSink(device.ID, sensorNames, now)
+		}()
 	}
 
 	// Update edge device status. Keep last_data_at fresh for every successful

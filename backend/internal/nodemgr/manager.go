@@ -61,6 +61,9 @@ type Manager struct {
 	automationEvaluator interface {
 		Evaluate(edgeDeviceID uint, fields []parser.Field, at time.Time)
 	}
+	// sourceHealthSink 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功
+	// 健康回调, main.go 经 SetSourceHealthSink 二阶段注入到所有已构建 consumer。
+	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
 
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
@@ -126,6 +129,17 @@ func (m *Manager) SetAutomationEvaluator(ev interface {
 	m.automationEvaluator = ev
 	for _, p := range m.parserConsumers {
 		p.SetAutomationSink(ev.Evaluate)
+	}
+}
+
+// SetSourceHealthSink 注入数据源健康成功回调 (设计/数据源主备与故障转移.md §4,
+// main.go 接线)。完全仿 SetLatestSinkFn: 必须同时推送到所有已构建的
+// parserConsumers——NewManager 注册时 sink 还是 nil, 只赋值字段不推送则
+// consumer 持有的 sink 永远为 nil (引擎"从未触发"复发的根因)。
+func (m *Manager) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames []string, at time.Time)) {
+	m.sourceHealthSink = sink
+	for _, p := range m.parserConsumers {
+		p.SetSourceHealthSink(sink)
 	}
 }
 
@@ -225,6 +239,9 @@ func (mgr *Manager) buildParserConsumers() {
 	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 求值器 (main.go 经
 	// SetAutomationEvaluator 接线), 与 alertEval 并列。
 	automationEval := mgr.automationEvaluator
+	// 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功健康回调 (main.go
+	// 经 SetSourceHealthSink 接线), 与 alertEval/automationEval 并列。
+	sourceHealthSink := mgr.sourceHealthSink
 	parserShards := parserShardCount()
 	var reassemblers []databus.Reassembler
 	for i := 0; i < parserShards; i++ {
@@ -251,6 +268,11 @@ func (mgr *Manager) buildParserConsumers() {
 		// 与 alertSink 同点并列。
 		if automationEval != nil {
 			parser.SetAutomationSink(automationEval.Evaluate)
+		}
+		// 数据源主备 (设计/数据源主备与故障转移.md §4): 解析成功健康回调注入,
+		// 与 alertSink/automationSink 同点并列。
+		if sourceHealthSink != nil {
+			parser.SetSourceHealthSink(sourceHealthSink)
 		}
 		persist := databus.NewDBPersistConsumer(db)
 		if parserShards <= 1 {

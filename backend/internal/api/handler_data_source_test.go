@@ -404,12 +404,21 @@ func TestDataSourceActivate(t *testing.T) {
 	w = doDSRequest(t, r, http.MethodPost, "/api/v1/data-sources/9999/activate", nil)
 	dsAssertCode(t, w, http.StatusNotFound)
 
-	// disabled → 409
+	// disabled → 允许 activate（= 重新启用，R7 v1.1 修订）
 	if err := db.Model(&models.DataSource{}).Where("id = ?", a.ID).Update("status", datasource.StatusDisabled).Error; err != nil {
 		t.Fatal(err)
 	}
 	w = doDSRequest(t, r, http.MethodPost, fmt.Sprintf("/api/v1/data-sources/%d/activate", a.ID), nil)
-	dsAssertCode(t, w, http.StatusConflict)
+	resp = dsAssertCode(t, w, http.StatusOK)
+	if dsDataMap(t, resp)["status"] != datasource.StatusActive {
+		t.Fatalf("activate disabled status = %v want active", dsDataMap(t, resp)["status"])
+	}
+	var reA, reB models.DataSource
+	db.First(&reA, a.ID)
+	db.First(&reB, b.ID)
+	if reA.Status != datasource.StatusActive || reB.Status != datasource.StatusStandby {
+		t.Fatalf("after re-enable a=%s b=%s want active/standby", reA.Status, reB.Status)
+	}
 }
 
 // ---------- POST /data-sources/:id/deactivate ----------

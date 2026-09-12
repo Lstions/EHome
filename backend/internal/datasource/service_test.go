@@ -343,6 +343,9 @@ func TestR5_DeactivateActivePromotesCandidate(t *testing.T) {
 	if len(logs) != 1 || logs[0].Reason != ReasonManualDeactivate || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
 		t.Fatalf("R5 log mismatch: %+v", logs)
 	}
+	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got != 1 {
+		t.Fatalf("R5 transition health=%d want 1", got)
+	}
 	if len(*notes) != 1 || (*notes)[0].Type != notifyTypeInfo || !strings.Contains((*notes)[0].Message, ReasonManualDeactivate) {
 		t.Fatalf("R5 notification wrong: %+v", *notes)
 	}
@@ -401,6 +404,116 @@ func TestR7_ActivateManualSwitch(t *testing.T) {
 	}
 	if logs2 := failoverLogs(t, db, 1, "temperature"); len(logs2) != 1 {
 		t.Fatalf("R7 idempotent produced extra logs: %d", len(logs2))
+	}
+}
+
+// R7 (v1.1): disabled 是人工可逆状态，activate 即重新启用；写 failover_logs(reason=manual)
+// 与 health(transition)。
+func TestR7_ActivateDisabledReenablesSource(t *testing.T) {
+	base := testBase()
+	now := base
+	svc, db, _ := newTestService(t, &now)
+	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
+	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
+
+	// B 为 standby，停用走 R8 → disabled，不写切换日志/健康事件。
+	if _, err := svc.Deactivate(b.ID); err != nil {
+		t.Fatalf("deactivate standby: %v", err)
+	}
+	if rb := reloadDS(t, db, b.ID); rb.Status != StatusDisabled {
+		t.Fatalf("b=%s want disabled", rb.Status)
+	}
+	if got := countRows(t, db, &models.FailoverLog{}, ""); got != 0 {
+		t.Fatalf("deactivate standby wrote %d logs want 0", got)
+	}
+
+	now = base.Add(time.Minute)
+	got, err := svc.Activate(b.ID)
+	if err != nil {
+		t.Fatalf("activate disabled: %v want nil", err)
+	}
+	if got.ID != b.ID || got.Status != StatusActive {
+		t.Fatalf("activate disabled returned %+v", got)
+	}
+	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
+		t.Fatalf("b=%s want active", rb.Status)
+	}
+	if ra := reloadDS(t, db, a.ID); ra.Status != StatusStandby {
+		t.Fatalf("a=%s want standby", ra.Status)
+	}
+	if got := activeCount(t, db, 1, "temperature"); got != 1 {
+		t.Fatalf("active count=%d want 1", got)
+	}
+	logs := failoverLogs(t, db, 1, "temperature")
+	if len(logs) != 1 || logs[0].Reason != ReasonManual || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
+		t.Fatalf("log mismatch: %+v", logs)
+	}
+	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got < 1 {
+		t.Fatalf("activate transition health rows for b=%d want >=1", got)
+	}
+}
+
+// R7 (v1.1): 组内无 active 时，disabled 来源可被 activate 提升为权威；
+// 覆盖 Deactivate(R5) 与 Activate 两条切换路径的 health(transition) 留痕。
+func TestR7_ActivateDisabledWhenNoActive(t *testing.T) {
+	base := testBase()
+	now := base
+	svc, db, _ := newTestService(t, &now)
+	a := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1})
+	b := mustCreate(t, svc, CreateInput{DeviceID: 1, Category: "temperature", EdgeDeviceID: 2})
+
+	// Deactivate A（active 且有候选 B）→ B 接替、A disabled。
+	if _, err := svc.Deactivate(a.ID); err != nil {
+		t.Fatalf("deactivate a: %v", err)
+	}
+	if ra := reloadDS(t, db, a.ID); ra.Status != StatusDisabled {
+		t.Fatalf("a=%s want disabled", ra.Status)
+	}
+	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
+		t.Fatalf("b=%s want active", rb.Status)
+	}
+
+	// Deactivate B（active 且无候选）→ R6 409，状态不变。
+	if _, err := svc.Deactivate(b.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("deactivate b err=%v want ErrConflict", err)
+	}
+	if rb := reloadDS(t, db, b.ID); rb.Status != StatusActive {
+		t.Fatalf("409 must not mutate b, got %s", rb.Status)
+	}
+
+	// Activate A（disabled → active），B → standby。
+	now = base.Add(time.Minute)
+	got, err := svc.Activate(a.ID)
+	if err != nil {
+		t.Fatalf("activate disabled when no active: %v want nil", err)
+	}
+	if got.ID != a.ID || got.Status != StatusActive {
+		t.Fatalf("activate returned %+v", got)
+	}
+	if ra := reloadDS(t, db, a.ID); ra.Status != StatusActive {
+		t.Fatalf("a=%s want active", ra.Status)
+	}
+	if rb := reloadDS(t, db, b.ID); rb.Status != StatusStandby {
+		t.Fatalf("b=%s want standby", rb.Status)
+	}
+	if got := activeCount(t, db, 1, "temperature"); got != 1 {
+		t.Fatalf("active count=%d want 1", got)
+	}
+	logs := failoverLogs(t, db, 1, "temperature")
+	if len(logs) != 2 {
+		t.Fatalf("failover logs=%d want 2", len(logs))
+	}
+	if logs[0].Reason != ReasonManualDeactivate || logs[0].FromSourceID != a.ID || logs[0].ToSourceID != b.ID {
+		t.Fatalf("first log mismatch: %+v", logs[0])
+	}
+	if logs[1].Reason != ReasonManual || logs[1].FromSourceID != b.ID || logs[1].ToSourceID != a.ID {
+		t.Fatalf("second log mismatch: %+v", logs[1])
+	}
+	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", b.ID, healthStatusTransition); got < 1 {
+		t.Fatalf("R5 deactivate transition health rows for b=%d want >=1", got)
+	}
+	if got := countRows(t, db, &models.DataSourceHealth{}, "source_id = ? AND status = ?", a.ID, healthStatusTransition); got < 1 {
+		t.Fatalf("activate transition health rows for a=%d want >=1", got)
 	}
 }
 
@@ -610,7 +723,7 @@ func TestScanStaleNilLastSuccessIsStale(t *testing.T) {
 func TestValidationErrors(t *testing.T) {
 	base := testBase()
 	now := base
-	svc, _, _ := newTestService(t, &now)
+	svc, db, _ := newTestService(t, &now)
 
 	t.Run("required_fields", func(t *testing.T) {
 		for _, in := range []CreateInput{
@@ -668,14 +781,24 @@ func TestValidationErrors(t *testing.T) {
 			t.Fatalf("Reset err=%v", err)
 		}
 	})
-	t.Run("activate_disabled_conflict", func(t *testing.T) {
-		_, _ = svc.Create(CreateInput{DeviceID: 3, Category: "voltage", EdgeDeviceID: 1})
+	t.Run("activate_disabled_reenables", func(t *testing.T) {
+		a := mustCreate(t, svc, CreateInput{DeviceID: 3, Category: "voltage", EdgeDeviceID: 1})
 		b := mustCreate(t, svc, CreateInput{DeviceID: 3, Category: "voltage", EdgeDeviceID: 2})
 		if _, err := svc.Deactivate(b.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := svc.Activate(b.ID); !errors.Is(err, ErrConflict) {
-			t.Fatalf("err=%v want ErrConflict", err)
+		if rb := reloadDS(t, db, b.ID); rb.Status != StatusDisabled {
+			t.Fatalf("setup b=%s want disabled", rb.Status)
+		}
+		got, err := svc.Activate(b.ID)
+		if err != nil {
+			t.Fatalf("activate disabled err=%v want nil", err)
+		}
+		if got.ID != b.ID || got.Status != StatusActive {
+			t.Fatalf("activate disabled returned %+v", got)
+		}
+		if ra := reloadDS(t, db, a.ID); ra.Status != StatusStandby {
+			t.Fatalf("previous active=%s want standby", ra.Status)
 		}
 	})
 }

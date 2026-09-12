@@ -23,6 +23,10 @@ type Detector struct {
 	mu            sync.RWMutex
 	activeDevices map[uint]time.Time // device PK → last_data_at (only active devices)
 	cacheReady    bool
+
+	// sourceOfflineHook 数据源主备 (设计/数据源主备与故障转移.md §4): 边缘设备
+	// 离线回调, main.go 注入 (本包不反向依赖 datasource); nil 时跳过。
+	sourceOfflineHook func(edgeDeviceID uint)
 }
 
 // NewDetector creates a new offline detector
@@ -161,12 +165,30 @@ func (d *Detector) OnEdgeDeviceData(deviceID uint) {
 	d.mu.Unlock()
 }
 
+// SetDeviceOfflineHook 设备离线回调 (设计/数据源主备与故障转移.md §4)。
+func (d *Detector) SetDeviceOfflineHook(fn func(edgeDeviceID uint)) {
+	d.sourceOfflineHook = fn
+}
+
 // OnEdgeDeviceOffline is called when an edge device is marked offline.
 // M5 fix: Remove from the in-memory cache.
 func (d *Detector) OnEdgeDeviceOffline(deviceID uint) {
 	d.mu.Lock()
 	delete(d.activeDevices, deviceID)
 	d.mu.Unlock()
+
+	// 数据源主备 (设计 §4): 边缘设备离线即对承载来源计一次失败。
+	// 独立 goroutine + recover: 钩子阻塞/panic 绝不影响离线检测主流程。
+	if hook := d.sourceOfflineHook; hook != nil {
+		go func(id uint) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Warnf("[OfflineDetector] source offline hook panicked for edge_device %d: %v", id, r)
+				}
+			}()
+			hook(id)
+		}(deviceID)
+	}
 }
 
 // OnEdgeDeviceCreated is called when a new edge device is created with active status.
