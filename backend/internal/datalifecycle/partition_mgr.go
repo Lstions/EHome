@@ -255,7 +255,7 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", table+"_new")).Error; err != nil {
 			return fmt.Errorf("drop stale %s: %w", table+"_new", err)
 		}
-		return createPartitionedParent(db, table, true)
+		return createPartitionedParent(db, table, table, true)
 	}
 
 	newTable := table + "_new"
@@ -263,7 +263,7 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 	if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", newTable)).Error; err != nil {
 		return fmt.Errorf("drop stale %s: %w", newTable, err)
 	}
-	if err := createPartitionedParent(db, newTable, false); err != nil {
+	if err := createPartitionedParent(db, table, newTable, false); err != nil {
 		return fmt.Errorf("create %s: %w", newTable, err)
 	}
 
@@ -331,11 +331,15 @@ func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	return MigrateTableToPartitioned(db, partitionedTable, legacyTable)
 }
 
-// createPartitionedParent creates the partitioned parent table with the
-// composite PK (id, timestamp) and per-partition indexes inherited via the
-// parent definition. When fresh=true it also creates the first partitions.
-func createPartitionedParent(db *gorm.DB, name string, fresh bool) error {
-	ddl := fmt.Sprintf(`CREATE TABLE %s (
+// partitionParentDDL maps a logical table name to the CREATE TABLE template of
+// its partitioned parent (%s = physical table name; <table> on the fresh path,
+// <table>_new during legacy migration). Per-table switch keeps the existing
+// unified_data column definition verbatim (防回归) while device_data aligns
+// with models.DeviceData. Both use the composite PK (id, timestamp) required
+// by PG partitioning (the partition key must be part of the primary key) and
+// RANGE-partition on timestamp.
+var partitionParentDDL = map[string]string{
+	"unified_data": `CREATE TABLE %s (
 		id BIGSERIAL,
 		device_id BIGINT NOT NULL,
 		sensor_name VARCHAR(32) NOT NULL,
@@ -346,19 +350,67 @@ func createPartitionedParent(db *gorm.DB, name string, fresh bool) error {
 		edge_device_id BIGINT,
 		logical_device_id BIGINT,
 		PRIMARY KEY (id, timestamp)
-	) PARTITION BY RANGE (timestamp)`, name)
-	if err := db.Exec(ddl).Error; err != nil {
+	) PARTITION BY RANGE (timestamp)`,
+	// device_data: data_json TEXT; device_id/node_id NOT NULL (models 对齐)。
+	"device_data": `CREATE TABLE %s (
+		id BIGSERIAL,
+		device_id BIGINT NOT NULL,
+		node_id VARCHAR(32) NOT NULL,
+		data_json TEXT,
+		timestamp TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ,
+		edge_device_id BIGINT,
+		logical_device_id BIGINT,
+		PRIMARY KEY (id, timestamp)
+	) PARTITION BY RANGE (timestamp)`,
+}
+
+// partitionParentIndexes maps a logical table name to the CREATE INDEX
+// templates (%s、%s = physical table name) rebuilding the flat table's b-tree
+// indexes at partition level. The (logical_device_id, timestamp DESC) composite
+// index is intentionally NOT created here — indexes.go owns it
+// (EnsureLogicalDataIndexes). 索引名沿用既有 <name>_<column>_idx 约定。
+var partitionParentIndexes = map[string][]string{
+	"unified_data": {
+		"CREATE INDEX %s_device_id_idx ON %s (device_id)",
+		"CREATE INDEX %s_sensor_name_idx ON %s (sensor_name)",
+		"CREATE INDEX %s_timestamp_idx ON %s (timestamp)",
+		"CREATE INDEX %s_edge_device_id_idx ON %s (edge_device_id)",
+	},
+	"device_data": {
+		"CREATE INDEX %s_device_id_idx ON %s (device_id)",
+		"CREATE INDEX %s_node_id_idx ON %s (node_id)",
+		"CREATE INDEX %s_timestamp_idx ON %s (timestamp)",
+		"CREATE INDEX %s_edge_device_id_idx ON %s (edge_device_id)",
+	},
+}
+
+// partitionCopyColumns maps a logical table name to the column list the
+// migration INSERT...SELECT copies. 两张表列集不同, 必须按表生成 (否则列不存在
+// 或列数不匹配)。
+var partitionCopyColumns = map[string]string{
+	"unified_data": "id, device_id, sensor_name, value, unit, timestamp, created_at, edge_device_id, logical_device_id",
+	"device_data":  "id, device_id, node_id, data_json, timestamp, created_at, edge_device_id, logical_device_id",
+}
+
+// createPartitionedParent creates the partitioned parent for logical table
+// table, physically named name (table on the fresh path, table+"_new" during
+// legacy migration), with the composite PK (id, timestamp) and per-partition
+// indexes inherited via the parent definition. When fresh=true it also creates
+// the first partitions.
+func createPartitionedParent(db *gorm.DB, table, name string, fresh bool) error {
+	ddlTemplate, indexTemplates := partitionParentDDL[table], partitionParentIndexes[table]
+	if ddlTemplate == "" {
+		// 未登记表沿用 unified_data 列结构 (与泛化探针测试及历史硬编码行为向后兼容);
+		// 登记表 (unified_data / device_data) 按上表各自定义。
+		ddlTemplate, indexTemplates = partitionParentDDL[partitionedTable], partitionParentIndexes[partitionedTable]
+	}
+	if err := db.Exec(fmt.Sprintf(ddlTemplate, name)).Error; err != nil {
 		return err
 	}
 	// 既有 b-tree 索引在分区级重建（与 models.go 原 index 定义一致）。
-	indexes := []string{
-		fmt.Sprintf("CREATE INDEX %s_device_id_idx ON %s (device_id)", name, name),
-		fmt.Sprintf("CREATE INDEX %s_sensor_name_idx ON %s (sensor_name)", name, name),
-		fmt.Sprintf("CREATE INDEX %s_timestamp_idx ON %s (timestamp)", name, name),
-		fmt.Sprintf("CREATE INDEX %s_edge_device_id_idx ON %s (edge_device_id)", name, name),
-	}
-	for _, idx := range indexes {
-		if err := db.Exec(idx).Error; err != nil {
+	for _, tmpl := range indexTemplates {
+		if err := db.Exec(fmt.Sprintf(tmpl, name, name)).Error; err != nil {
 			return err
 		}
 	}
@@ -385,18 +437,23 @@ func oldestRowMonthFor(db *gorm.DB, table string) time.Time {
 // copyMonthBatched copies one calendar month from src into dst in batches of
 // migrateBatchSizePostgres using an id-watermark loop (断点续跑: 重跑幂等).
 func copyMonthBatched(db *gorm.DB, dst, src string, month time.Time) error {
+	cols := partitionCopyColumns[src]
+	if cols == "" {
+		// 未登记表沿用 unified_data 列清单 (见 createPartitionedParent 注记)。
+		cols = partitionCopyColumns[partitionedTable]
+	}
 	start := monthStart(month)
 	end := addMonths(month, 1)
 	watermark := int64(0)
 	for {
 		res := db.Exec(fmt.Sprintf(
-			`INSERT INTO %s (id, device_id, sensor_name, value, unit, timestamp, created_at, edge_device_id, logical_device_id)
-			 SELECT id, device_id, sensor_name, value, unit, timestamp, created_at, edge_device_id, logical_device_id
+			`INSERT INTO %s (%s)
+			 SELECT %s
 			 FROM %s
 			 WHERE id > ? AND timestamp >= ? AND timestamp < ?
 			 ORDER BY id LIMIT %d
 			 ON CONFLICT (id, timestamp) DO NOTHING`,
-			dst, src, migrateBatchSizePostgres),
+			dst, cols, cols, src, migrateBatchSizePostgres),
 			watermark, start, end,
 		)
 		if res.Error != nil {

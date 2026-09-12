@@ -69,7 +69,10 @@ func AutoMigrate() error {
 		&models.ConfigTemplate{},
 		&models.EdgeDevice{},
 		&models.DeviceConfig{},
-		&models.DeviceData{},
+		// 数据层时序化 (v3.4 §3.2.1): DeviceData 移出 AutoMigrate — PG 生产库
+		// 由 partition_mgr.MigrateTableToPartitioned 建分区母表 (复合主键
+		// (id,timestamp))，AutoMigrate 无法建分区表且会把母表降级改写。
+		// SQLite 测试库由 testutil/db.go 的 AutoMigrate 覆盖。
 		// 数据层时序化 (v3.4 §3.2.1): UnifiedData 移出 AutoMigrate — PG 生产库
 		// 由 partition_mgr.MigrateUnifiedDataToPartitioned 建分区母表 (复合主键
 		// (id,timestamp))，AutoMigrate 无法建分区表且会把母表降级改写。

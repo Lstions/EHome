@@ -55,11 +55,11 @@ func ensureSQLiteIndexes(ctx context.Context, db *gorm.DB) error {
 }
 
 func ensurePostgresIndexes(ctx context.Context, db *gorm.DB) error {
-	// 分区母表禁止 CONCURRENTLY (PG 0A000): unified_data 已分区时改普通
-	// CREATE INDEX (PG 自动传播到各分区); device_data 仍走 CONCURRENTLY。
-	unifiedPartitioned := IsUnifiedDataPartitioned(db)
 	for _, spec := range logicalIndexSpecs {
-		concurrently := !(spec.Table == partitionedTable && unifiedPartitioned)
+		// 分区母表禁止 CONCURRENTLY (PG 0A000): 改用普通 CREATE INDEX, PG
+		// 自动把索引传播到各分区; 普通表仍走 CONCURRENTLY 不阻塞在线写入。
+		partitioned := IsTablePartitioned(db, spec.Table)
+		concurrently := !partitioned
 		if concurrently {
 			// INVALID 索引检测: CONCURRENTLY 构建失败会留下 indisvalid=false
 			// 的残骸, IF NOT EXISTS 对其生效 → 索引实际缺失却被静默跳过。
@@ -80,6 +80,14 @@ WHERE c.relname = ? AND NOT i.indisvalid`, spec.Name).
 				slog.Warn("datalifecycle: dropped INVALID index before rebuild",
 					"index", spec.Name)
 			}
+		} else {
+			// 分区母表分支: IF NOT EXISTS 以 schema 全局关系名为准 (非按表)。
+			// 分区迁移把原平表保留为 <table>_legacy, 其上的同名复合索引仍占用
+			// 规范名, 不移走则 CREATE INDEX IF NOT EXISTS 被静默跳过, 分区母表
+			// 永久缺失该复合索引。先释放规范名 (幂等)。
+			if err := releaseIndexNameFromNonTarget(ctx, db, spec.Name, spec.Table); err != nil {
+				return err
+			}
 		}
 
 		stmt := fmt.Sprintf("CREATE INDEX %sIF NOT EXISTS %s ON %s %s",
@@ -94,6 +102,50 @@ WHERE c.relname = ? AND NOT i.indisvalid`, spec.Name).
 		slog.Info("datalifecycle: index ensured",
 			"index", spec.Name, "table", spec.Table, "concurrently", concurrently)
 	}
+	return nil
+}
+
+// releaseIndexNameFromNonTarget frees indexName for target before a
+// non-CONCURRENTLY CREATE INDEX IF NOT EXISTS on a partitioned parent.
+//
+// PG's IF NOT EXISTS is keyed on the schema-global relation name, so a
+// same-named index retained by a non-target relation (the <table>_legacy
+// snapshot kept by the partition migration) turns the CREATE into a silent
+// no-op. When the name is held by another relation we rename it to
+// <index>_legacy; if that name is already taken (previous interrupted run)
+// the stale index is dropped instead. Both paths are idempotent.
+func releaseIndexNameFromNonTarget(ctx context.Context, db *gorm.DB, indexName, target string) error {
+	var owner string
+	if err := db.WithContext(ctx).Raw(
+		`SELECT t.relname FROM pg_class i
+JOIN pg_index x ON x.indexrelid = i.oid
+JOIN pg_class t ON t.oid = x.indrelid
+JOIN pg_namespace n ON n.oid = i.relnamespace
+WHERE i.relname = ? AND n.nspname = current_schema()`, indexName).
+		Scan(&owner).Error; err != nil {
+		return fmt.Errorf("resolve owner of index %s: %w", indexName, err)
+	}
+	if owner == "" || owner == target {
+		return nil
+	}
+	legacyName := indexName + "_legacy"
+	var legacyExists int64
+	if err := db.WithContext(ctx).Raw(tableExistsSQL, legacyName, "i").Scan(&legacyExists).Error; err != nil {
+		return fmt.Errorf("check index %s: %w", legacyName, err)
+	}
+	if legacyExists > 0 {
+		if err := db.WithContext(ctx).Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s", indexName)).Error; err != nil {
+			return fmt.Errorf("drop stale index %s: %w", indexName, err)
+		}
+		slog.Warn("datalifecycle: dropped stale duplicate index off target table",
+			"index", indexName, "owner", owner)
+		return nil
+	}
+	if err := db.WithContext(ctx).Exec(fmt.Sprintf("ALTER INDEX %s RENAME TO %s", indexName, legacyName)).Error; err != nil {
+		return fmt.Errorf("rename stale index %s: %w", indexName, err)
+	}
+	slog.Warn("datalifecycle: renamed stale index off target table",
+		"index", indexName, "owner", owner, "renamed_to", legacyName)
 	return nil
 }
 

@@ -191,17 +191,26 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 }
 
 // dropExpiredPartitionsOnce performs the per-run GLOBAL monthly partition reap
-// for unified_data (v3.4 §3.2.1). It is intentionally the ONLY place retention
-// drops partitions. No-op unless unified_data is a partitioned PostgreSQL table.
+// for every partitioned time-series table (unified_data, device_data)
+// (v3.4 §3.2.1). It is intentionally the ONLY place retention drops partitions.
+// No-op unless at least one of those tables is a partitioned PostgreSQL table.
 //
 // cutoff 语义 (防回归, 见 deleteExpired 注记): 分区 DROP 是不可分割的全局整月
 // 操作, 一个分区只有对**每一个**数据所有者都已到期时才可删除, 因此 cutoff 取
 // now - max(retention_days) (所有逻辑设备中**最长**的保留期)。若取较短保留期
 // (或按单设备取), 会在处理该设备时连带 DROP 掉长保留期设备仍需要的历史整月
-// 分区, 造成跨设备、静默、不可恢复的数据丢失。
+// 分区, 造成跨设备、静默、不可恢复的数据丢失。两张表共用同一 cutoff, 语义不变。
 func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.Time) error {
-	if !IsUnifiedDataPartitioned(r.db) {
-		return nil // 非 PG / 未分区: 分区机制 no-op (SQLite 主路径不受影响)
+	// 各表先判断是否已分区: 未分区 (非 PG / 迁移未完成) 的表跳过, 一张表未分区
+	// 不影响另一张。SQLite 下 IsTablePartitioned 恒 false → 整体 no-op。
+	var partitioned []string
+	for _, table := range []string{"unified_data", "device_data"} {
+		if IsTablePartitioned(r.db, table) {
+			partitioned = append(partitioned, table)
+		}
+	}
+	if len(partitioned) == 0 {
+		return nil // 非 PG / 均未分区: 分区机制 no-op (SQLite 主路径不受影响)
 	}
 	days, ok, err := r.globalPartitionRetentionDays(ctx)
 	if err != nil {
@@ -213,8 +222,10 @@ func (r *RetentionTask) dropExpiredPartitionsOnce(ctx context.Context, now time.
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
 	pm := NewPartitionManager(r.db)
-	if _, err := pm.DropPartitionsBefore(cutoff); err != nil {
-		return fmt.Errorf("retention drop partitions: %w", err)
+	for _, table := range partitioned {
+		if _, err := pm.DropPartitionsBeforeFor(table, cutoff); err != nil {
+			return fmt.Errorf("retention drop %s partitions: %w", table, err)
+		}
 	}
 	return nil
 }

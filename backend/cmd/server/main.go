@@ -71,35 +71,46 @@ func main() {
 	}
 	logger.Infof("Database connected and migrated")
 
-	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data 分区迁移 + 滚动分区保障。
-	// 失败降级为 Error 不 Fatal——分区功能异常不阻塞服务启动（表仍以普通表形态可用）。
+	// 数据层时序化 (方案 v3.4 §3.2.1): unified_data / device_data 分区迁移 +
+	// 滚动分区保障。失败降级为 Error 不 Fatal——分区功能异常不阻塞服务启动
+	// （表仍以普通表形态可用）。
 	db := database.GetDB()
 	if err := datalifecycle.MigrateUnifiedDataToPartitioned(db); err != nil {
 		logger.Errorf("unified_data partition migration failed (continuing with flat table): %v", err)
-	} else {
-		pm := datalifecycle.NewPartitionManager(db)
-		if err := pm.EnsurePartitions(3); err != nil {
-			logger.Errorf("ensure partitions failed: %v", err)
-		}
-		// 每日滚动检查: 创建下月分区（retention 到期分区由 retention_task 触发 DROP）。
-		partitionStop := make(chan struct{})
-		go func() {
-			ticker := time.NewTicker(24 * time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-partitionStop:
-					return
-				case <-ticker.C:
-					if err := pm.EnsurePartitions(3); err != nil {
-						logger.Errorf("daily ensure partitions failed: %v", err)
-					}
-				}
-			}
-		}()
-		// 与其他后台任务同序收尾。
-		defer close(partitionStop)
 	}
+	if err := datalifecycle.MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
+		logger.Errorf("device_data partition migration failed (continuing with flat table): %v", err)
+	}
+	// 滚动分区保障: 已分区的时序表各自确保 [上月, 未来 3 月] 分区存在。
+	// 未分区表 (迁移失败/非 PG) 跳过, 避免对普通表执行 PARTITION OF 报错。
+	pm := datalifecycle.NewPartitionManager(db)
+	ensurePartitions := func() {
+		for _, table := range []string{"unified_data", "device_data"} {
+			if !datalifecycle.IsTablePartitioned(db, table) {
+				continue
+			}
+			if err := pm.EnsurePartitionsFor(table, 3); err != nil {
+				logger.Errorf("ensure %s partitions failed: %v", table, err)
+			}
+		}
+	}
+	ensurePartitions()
+	// 每日滚动检查: 创建下月分区（retention 到期分区由 retention_task 触发 DROP）。
+	partitionStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-partitionStop:
+				return
+			case <-ticker.C:
+				ensurePartitions()
+			}
+		}
+	}()
+	// 与其他后台任务同序收尾。
+	defer close(partitionStop)
 
 	// 数据层时序化 (方案 v3.4 §3.2.2): rollup 分钟聚合表建表 (幂等)。
 	// 与分区迁移相互独立, 失败同样降级不阻塞启动 (rollup fail-open 语义)。

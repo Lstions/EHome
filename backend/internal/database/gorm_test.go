@@ -104,6 +104,12 @@ func TestAutoMigrate(t *testing.T) {
 	})
 
 	t.Run("DeviceData", func(t *testing.T) {
+		// 数据层时序化 (v3.4 §3.2.1): DeviceData 移出 AutoMigrate（PG 生产库走
+		// partition_mgr 分区母表）。本测试库无该表，改为验证模型 tag 可迁移性:
+		// 单独 AutoMigrate 该模型确认复合主键 tag 合法 (与上方 UnifiedData 同款)。
+		if err := db.AutoMigrate(&models.DeviceData{}); err != nil {
+			t.Fatalf("automigrate device_data: %v", err)
+		}
 		dd := models.DeviceData{DeviceID: 1, NodeID: "TEST001", DataJSON: `{"temp": 25.5}`}
 		if err := db.Create(&dd).Error; err != nil {
 			t.Fatalf("create device data: %v", err)
