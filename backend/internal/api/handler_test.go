@@ -1341,27 +1341,6 @@ func TestEmptyHardwareResources(t *testing.T) {
 	}
 }
 
-// ==================== parseHardwareIDUint Tests ====================
-
-func TestParseHardwareIDUint(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected uint64
-	}{
-		{"0x76", 118},
-		{"5", 5},
-		{"", 0},
-		{"0xFF", 255},
-		{"invalid", 0},
-	}
-	for _, tt := range tests {
-		got := parseHardwareIDUint(tt.input)
-		if got != tt.expected {
-			t.Errorf("parseHardwareIDUint(%q) = %d, want %d", tt.input, got, tt.expected)
-		}
-	}
-}
-
 // ==================== createSingleTemplate Tests ====================
 
 func TestCreateSingleTemplate(t *testing.T) {

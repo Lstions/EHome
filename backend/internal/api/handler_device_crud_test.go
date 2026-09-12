@@ -48,7 +48,7 @@ func setupDeviceTestWithRegistry(t *testing.T, driverRegistry *drivers.Registry)
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
-	registerDeviceRoutes(v1, db, mgr, driverRegistry, ControlPolicy{allowUnsafeRawForTests: true})
+	registerDeviceRoutes(v1, db, mgr, driverRegistry, ControlPolicy{RawDiagnosticsEnabled: true})
 	return r, db
 }
 

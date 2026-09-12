@@ -235,7 +235,7 @@ func (m *Manager) maybeAutoRollback(nodeID string) {
 	since := time.Now().Add(-rollbackWindow)
 	var failCount int64
 	m.db.Model(&models.OTATask{}).
-		Where("collector_id = ? AND status IN ? AND completed_at >= ?",
+		Where("node_id = ? AND status IN ? AND completed_at >= ?",
 			nodeID,
 			[]string{StatusFailed, StatusTimeout, StatusNeedsRetry},
 			since,
@@ -264,7 +264,7 @@ func (m *Manager) AutoRollback(nodeID string) error {
 
 	// Find the last successful OTA for this node — that tells us the previous stable version
 	var lastSuccess models.OTATask
-	err := m.db.Where("collector_id = ? AND status = ?", nodeID, StatusSuccess).
+	err := m.db.Where("node_id = ? AND status = ?", nodeID, StatusSuccess).
 		Order("completed_at DESC").
 		First(&lastSuccess).Error
 	if err != nil {
@@ -307,7 +307,7 @@ func (m *Manager) GetNodeOTAStatus(nodeID string) (map[string]interface{}, error
 	// Last successful OTA
 	var lastSuccess models.OTATask
 	lastUpgradeTime := (*time.Time)(nil)
-	err := m.db.Where("collector_id = ? AND status = ?", nodeID, StatusSuccess).
+	err := m.db.Where("node_id = ? AND status = ?", nodeID, StatusSuccess).
 		Order("completed_at DESC").
 		First(&lastSuccess).Error
 	if err == nil {
@@ -318,7 +318,7 @@ func (m *Manager) GetNodeOTAStatus(nodeID string) (map[string]interface{}, error
 	since := time.Now().Add(-rollbackWindow)
 	var failCount int64
 	m.db.Model(&models.OTATask{}).
-		Where("collector_id = ? AND status IN ? AND completed_at >= ?",
+		Where("node_id = ? AND status IN ? AND completed_at >= ?",
 			nodeID,
 			[]string{StatusFailed, StatusTimeout, StatusNeedsRetry},
 			since,
@@ -348,7 +348,7 @@ func (m *Manager) CreateTask(collectorID string, firmwareID uint) (*models.OTATa
 	// §6.4.1: Supersede any prior in-flight OTA for this node
 	now := time.Now()
 	res := m.db.Model(&models.OTATask{}).
-		Where("collector_id = ? AND status IN ?", collectorID, activeStates).
+		Where("node_id = ? AND status IN ?", collectorID, activeStates).
 		Updates(map[string]interface{}{
 			"status":       StatusFailed,
 			"error_msg":    "Superseded by new attempt",
@@ -550,7 +550,7 @@ func (m *Manager) HandleOtaProgress(deviceID string, payload []byte) {
 		return
 	}
 	var task models.OTATask
-	if err := m.db.Where("ota_id = ? AND collector_id = ?", taskID, deviceID).First(&task).Error; err != nil {
+	if err := m.db.Where("ota_id = ? AND node_id = ?", taskID, deviceID).First(&task).Error; err != nil {
 		return
 	}
 	if terminalStates[task.Status] || task.Status == StatusTimeout {
@@ -657,7 +657,7 @@ func (m *Manager) HandleHelloOTACompletion(collectorID string, deviceID, firmwar
 
 	// Find the latest non-terminal OTA record for this node
 	var task models.OTATask
-	err := m.db.Where("collector_id = ? AND status IN ?", collectorID, activeStates).
+	err := m.db.Where("node_id = ? AND status IN ?", collectorID, activeStates).
 		Order("id DESC").
 		First(&task).Error
 	if err != nil {

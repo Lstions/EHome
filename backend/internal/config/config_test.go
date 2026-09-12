@@ -31,7 +31,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level = %q, want info", cfg.Log.Level)
 	}
-	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled {
+	if cfg.Control.RawDiagnosticsEnabled {
 		t.Fatalf("unsafe control defaults: %+v", cfg.Control)
 	}
 }
@@ -182,19 +182,17 @@ func TestEnvPartialOverride(t *testing.T) {
 }
 
 func TestControlEnvOverridesAreBounded(t *testing.T) {
-	t.Setenv("EHOME_LEGACY_DEVICE_WRITE_MODE", "bridge")
 	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "true")
 	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "true")
 	cfg := Load()
-	if cfg.Control.LegacyDeviceWriteMode != "bridge" || !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
+	if !cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
 		t.Fatalf("control env override = %+v", cfg.Control)
 	}
 
-	t.Setenv("EHOME_LEGACY_DEVICE_WRITE_MODE", "direct")
 	t.Setenv("EHOME_RAW_DIAGNOSTICS_ENABLED", "not-a-bool")
 	t.Setenv("EHOME_DEVICE_CONTROL_V2_ENABLED", "not-a-bool")
 	cfg = Load()
-	if cfg.Control.LegacyDeviceWriteMode != "disabled" || cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
+	if cfg.Control.RawDiagnosticsEnabled || !cfg.Control.DeviceControlV2Enabled {
 		t.Fatalf("invalid control env was accepted or default was lost: %+v", cfg.Control)
 	}
 }
@@ -216,7 +214,7 @@ func TestDeviceControlV2EnabledByDefault(t *testing.T) {
 }
 
 func TestDataRetentionDays(t *testing.T) {
-	// 默认 365
+	// 默认 90
 	cfg := Load()
 	if got := cfg.DataRetentionDays(); got != DefaultDataRetentionDays {
 		t.Errorf("expected default %d, got %d", DefaultDataRetentionDays, got)

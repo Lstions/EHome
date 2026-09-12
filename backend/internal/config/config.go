@@ -25,9 +25,8 @@ type ControlConfig struct {
 	// are available without an environment-variable allowlist.  Turning it
 	// off stops the ChannelCmdV2 dispatcher entirely (emergency kill switch),
 	// which also makes every operation unavailable.
-	DeviceControlV2Enabled bool   `yaml:"device_control_v2_enabled"`
-	LegacyDeviceWriteMode  string `yaml:"legacy_device_write_mode"`
-	RawDiagnosticsEnabled  bool   `yaml:"raw_diagnostics_enabled"`
+	DeviceControlV2Enabled bool `yaml:"device_control_v2_enabled"`
+	RawDiagnosticsEnabled  bool `yaml:"raw_diagnostics_enabled"`
 }
 
 // ServerConfig holds HTTP server settings
@@ -73,9 +72,11 @@ type LogConfig struct {
 }
 
 // DefaultDataRetentionDays is the system-level retention applied to newly
-// created logical devices (方案 v3.3 §4.1). Existing logical devices keep the
-// value snapshotted at creation time; changing this setting never retroacts.
-const DefaultDataRetentionDays = 365
+// created logical devices (方案 v3.3 §4.1). Overridable via the
+// EHOME_DATA_RETENTION_DAYS environment variable (or data_retention.days in
+// config.yaml). Existing logical devices keep the value snapshotted at
+// creation time; changing this setting never retroacts.
+const DefaultDataRetentionDays = 90
 
 // DataRetentionConfig holds the system-level data retention policy.
 type DataRetentionConfig struct {
@@ -111,7 +112,7 @@ func defaultConfig() *Config {
 		Log: LogConfig{
 			Level: "info",
 		},
-		Control:        ControlConfig{DeviceControlV2Enabled: true, LegacyDeviceWriteMode: "disabled"},
+		Control:        ControlConfig{DeviceControlV2Enabled: true},
 		Ingest:         IngestConfig{ParserShards: DefaultParserShards},
 		DataRetention:  DataRetentionConfig{Days: DefaultDataRetentionDays},
 		AdminBootstrap: AdminBootstrapConfig{},
@@ -169,9 +170,6 @@ func overrideWithEnv(cfg *Config) {
 	}
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
-	}
-	if v := getEnv("EHOME_LEGACY_DEVICE_WRITE_MODE", ""); v == "disabled" || v == "bridge" {
-		cfg.Control.LegacyDeviceWriteMode = v
 	}
 	if v := getEnv("EHOME_DEVICE_CONTROL_V2_ENABLED", ""); v != "" {
 		if enabled, err := strconv.ParseBool(v); err == nil {

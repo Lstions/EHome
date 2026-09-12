@@ -155,33 +155,6 @@ var (
 		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10},
 	})
 
-	// --- 8.1: /execute observability metrics ---
-
-	// ExecuteRequestTotal counts execute requests by type and status
-	ExecuteRequestTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "ehome_execute_request_total",
-		Help: "Request count",
-	}, []string{"type", "status"})
-
-	// ExecuteReadDuration records read operation latency
-	ExecuteReadDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "ehome_execute_read_duration_seconds",
-		Help:    "Read operation latency",
-		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10},
-	})
-
-	// ExecuteConcurrentActive tracks current concurrent executions
-	ExecuteConcurrentActive = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "ehome_execute_concurrent_active",
-		Help: "Current concurrent executions",
-	})
-
-	// ExecuteRateLimitRejected counts rate limit rejections
-	ExecuteRateLimitRejected = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "ehome_execute_rate_limit_rejected_total",
-		Help: "Rate limit rejection count",
-	})
-
 	// --- 8.1: Worker pool observability metrics ---
 
 	// WorkerPoolOverflowTotal counts queue overflow events

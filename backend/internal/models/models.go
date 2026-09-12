@@ -129,7 +129,7 @@ type LogicalDevice struct {
 	IdentityKey    string    `gorm:"column:identity_key;size:64;uniqueIndex;not null" json:"identity_key"` // type:hardware_id, 创建后只读
 	Name           string    `gorm:"size:128;not null" json:"name"`                                        // 用户可编辑
 	DeviceType     string    `gorm:"size:32;not null;index" json:"device_type"`
-	RetentionDays  int       `gorm:"default:365" json:"retention_days"`    // 创建时快照系统级配置 (§4.1)
+	RetentionDays  int       `gorm:"default:90" json:"retention_days"`     // 创建时快照系统级配置 (§4.1)
 	MergedInto     *uint     `gorm:"index" json:"merged_into"`             // 自引用 logical_devices(id), 无级联; 仅 purge 前显式解除
 	MergeStatus    *string   `gorm:"size:16" json:"merge_status"`          // NULL / pending / done
 	PurgeRequested bool      `gorm:"default:false" json:"purge_requested"` // 删除设备勾选"同时删除数据"时置位
@@ -266,7 +266,8 @@ type UnifiedData struct {
 
 // UnifiedDataRollup1m 分钟级聚合表 (数据层时序化, 方案 v3.4 §3.2.2)。
 // 写入: RollupConsumer UPSERT (仅 PG); 读取: historical API precision=rollup。
-// retention 365 天 (量小 DELETE)。SQLite 测试库不建此表 (consumer no-op)。
+// retention 为独立策略，文档记录 365 天 (与 raw 默认解耦; 当前代码未见自动清理路径)。
+// SQLite 测试库不建此表 (consumer no-op)。
 type UnifiedDataRollup1m struct {
 	DeviceID   uint      `gorm:"primaryKey;column:device_id" json:"device_id"`
 	SensorName string    `gorm:"primaryKey;column:sensor_name;size:32" json:"sensor_name"`
@@ -301,7 +302,6 @@ type DataSource struct {
 	LastSuccess  *time.Time `json:"last_success"`
 	LastFailure  *time.Time `json:"last_failure"`
 	Config       string     `gorm:"type:text" json:"config"`
-	Type         string     `gorm:"size:20;default:''" json:"-"` // 旧骨架兼容列, v2 清理
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
@@ -336,11 +336,11 @@ func (FailoverLog) TableName() string { return "failover_logs" }
 
 // =====================================================================
 
-// OTATask OTA升级任务 (v2.3: CollectorID → NodeID, DB 列名 collector_id 不变)
+// OTATask OTA升级任务 (v2.3: CollectorID → NodeID, DB 列名 node_id)
 type OTATask struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
 	OtaID       string     `gorm:"column:ota_id;size:64;uniqueIndex;not null" json:"ota_id"`
-	NodeID      string     `gorm:"column:collector_id;type:varchar(32);index;not null" json:"node_id"`
+	NodeID      string     `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"`
 	FirmwareID  uint       `gorm:"index" json:"firmware_id"`
 	Status      string     `gorm:"size:20;default:pending" json:"status"`
 	Progress    uint8      `gorm:"default:0" json:"progress"`

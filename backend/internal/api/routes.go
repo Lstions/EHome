@@ -110,14 +110,13 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerDeviceRoutes(v1, db, nodeMgr, driverRegistry, controlPolicy)
 		registerDataRoutes(v1, db)
 		registerOTARoutes(v1, db, otaMgr, nodeMgr)
-		registerOTARoutesCompat(v1, db, otaMgr, nodeMgr)
 		registerHARoutes(v1)
 		registerTerminalRoutes(v1, db, nodeMgr, controlPolicy)
 		registerMetricsRoutes(v1, db)
 
 		// v2.2 routes
 		registerNodeRoutes(v1, db, nodeMgr)
-		registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry, controlPolicy)
+		registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry)
 		registerDeviceOperationRoutes(v1, commandService, wsHub)
 		registerDriverCommandRoutes(v1, db, nodeMgr, driverRegistry)
 
@@ -141,14 +140,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// 数据生命周期 P3: 逻辑设备管理 + 多源合并 (§3.4/§九)
 		registerLogicalDeviceRoutes(v1, db)
 
-		// Removed multi-user API compatibility surface (authenticated 410).
-		registerLegacyUserRoutes(v1)
-
 		// Data reports (placeholder)
 		registerDataReportRoutes(v1, db)
-
-		// Driver compatibility routes (reuse device-configs)
-		registerDriverCompatRoutes(v1, db)
 
 		// Data source CRUD routes + /devices/:id/failover-logs (v1.0 §7)。
 		// 未注入领域服务时注册显式 503 占位，避免 nil 解引用 panic，并保持路由存在。

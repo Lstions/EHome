@@ -1071,7 +1071,7 @@ func getNodeOTAHistory(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		var tasks []models.OTATask
-		db.Where("collector_id = ?", node.NodeID).Order("created_at DESC").Find(&tasks)
+		db.Where("node_id = ?", node.NodeID).Order("created_at DESC").Find(&tasks)
 
 		Success(c, gin.H{"data": tasks})
 	}

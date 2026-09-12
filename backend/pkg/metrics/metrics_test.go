@@ -106,22 +106,6 @@ func TestPrometheusMetricsRegistered(t *testing.T) {
 		PendingWriteDuration.Observe(1.5)
 	})
 
-	t.Run("ExecuteRequestTotal_Inc", func(t *testing.T) {
-		ExecuteRequestTotal.WithLabelValues("read", "ok").Inc()
-	})
-
-	t.Run("ExecuteReadDuration_Observe", func(t *testing.T) {
-		ExecuteReadDuration.Observe(0.3)
-	})
-
-	t.Run("ExecuteConcurrentActive_Set", func(t *testing.T) {
-		ExecuteConcurrentActive.Set(4)
-	})
-
-	t.Run("ExecuteRateLimitRejected_Inc", func(t *testing.T) {
-		ExecuteRateLimitRejected.Inc()
-	})
-
 	t.Run("WorkerPoolOverflowTotal_Inc", func(t *testing.T) {
 		WorkerPoolOverflowTotal.Inc()
 	})
