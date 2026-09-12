@@ -168,7 +168,23 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	logger.Infof("[%s] Hello: fw=%s model=%s channels=%d epoch=%d nvs=%v manifest=%s proto=%s nonce=%d",
 		deviceID, firmwareVersion, model, channelCount, configEpoch, nvsHasConfig, lastManifest, protocolVersion, handshakeNonce)
 
-	// Immediately send HelloAck (0x12) to confirm handshake
+	// deviceID is already the string node_id (e.g. "F0F5BD02F35C")
+
+	// Persist the node registration *before* acknowledging it: a device that
+	// receives HelloAck believes it is registered, so the Ack must never be sent
+	// for a handshake whose row failed to persist (fail-closed).
+	reg, err := m.registerNodeFromHello(deviceID, hello)
+	if err != nil {
+		logger.Errorf("[%s] Rejecting Hello without HelloAck: node registration was not persisted: %v", deviceID, err)
+		return
+	}
+
+	// Populate node_id → node.ID cache for worker pool lookups. A zero primary
+	// key must never enter the cache, otherwise every later DataReport of this
+	// device would be processed under node ID 0.
+	storeNodeIDCache(deviceID, reg.node.ID)
+
+	// HelloAck (0x12) confirms a registration that is already durable.
 	serverTime := uint64(time.Now().UnixMilli())
 	if err := m.SendHelloAck(deviceID, serverTime, 0, handshakeNonce); err != nil {
 		logger.Infof("[%s] Failed to send HelloAck: %v", deviceID, err)
@@ -176,63 +192,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 		logger.Infof("[%s] HelloAck sent: server_time=%d features=0 nonce=%d", deviceID, serverTime, handshakeNonce)
 	}
 
-	// deviceID is already the string node_id (e.g. "F0F5BD02F35C")
-
-	// Upsert node
-	var node models.Node
-	result := m.db.Where("node_id = ?", deviceID).First(&node)
-	now := time.Now()
-	oldStatus := ""
-	if result.Error == gorm.ErrRecordNotFound {
-		node = models.Node{
-			NodeID:          deviceID,
-			Model:           model,
-			FirmwareVersion: firmwareVersion,
-			ProtocolVersion: negotiatedProtocolVersion(protocolVersion),
-			Status:          "online",
-			LastSeen:        &now,
-			LastOnlineTime:  &now,
-			UptimeSeconds:   0,
-			ConfigEpoch:     configEpoch,
-			LastManifestID:  lastManifest,
-		}
-		m.db.Create(&node)
-		// Populate node_id → node.ID cache for worker pool lookups
-		nodeIDCache.Store(deviceID, nodeIDCacheEntry{nodeID: node.ID, writtenAt: time.Now()})
-		m.db.Create(&models.NodeEvent{
-			NodeID:    deviceID,
-			EventType: "online",
-			NewStatus: "online",
-		})
-	} else {
-		oldStatus = node.Status
-		node.FirmwareVersion = firmwareVersion
-		node.Model = model
-		node.ProtocolVersion = negotiatedProtocolVersion(protocolVersion)
-		node.Status = "online"
-		node.LastSeen = &now
-		// last_online_time 只在 offline→online 转换时设置，在线期间不覆盖
-		if oldStatus != "online" {
-			node.LastOnlineTime = &now
-		}
-		node.ConfigEpoch = configEpoch
-		node.LastManifestID = lastManifest
-		// Hello starts a new firmware generation; invalidate the previous
-		// capability report until ResourceReport arrives for this boot.
-		node.BootID = ""
-		node.ResourceReportedAt = nil
-		node.CommandEngineRevision = 0
-		node.CommandEngineCapabilities = "{}"
-		m.db.Save(&node)
-		if oldStatus != "online" {
-			m.db.Create(&models.NodeEvent{
-				NodeID:    deviceID,
-				EventType: "online",
-				OldStatus: oldStatus,
-				NewStatus: "online",
-			})
-		}
-	}
+	oldStatus := reg.oldStatus
 
 	// WebSocket push
 	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
@@ -275,7 +235,7 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	}
 
 	// HomeAssistant Discovery: publish on first registration or status change
-	if result.Error == gorm.ErrRecordNotFound || oldStatus == "offline" || oldStatus == "" {
+	if reg.created || oldStatus == "offline" || oldStatus == "" {
 		m.publishHADiscovery(deviceID, deviceID)
 	}
 
@@ -288,4 +248,131 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 			logger.Warnf("[%s] Ping failed: %v", deviceID, err)
 		}
 	}()
+}
+
+// nodeRegistration is the outcome of the Hello → nodes upsert.
+type nodeRegistration struct {
+	node      models.Node // persisted row (primary key populated)
+	oldStatus string      // status fed into transition side effects ("" = first registration)
+	created   bool        // a new row was inserted
+	revived   bool        // a soft-deleted row was restored and reused
+}
+
+// registerNodeFromHello upserts the nodes row for a validated Hello.
+//
+// The dedup lookup is deliberately Unscoped(): deleting a node is a soft delete
+// (models.Node.DeletedAt), and the same physical device coming back after a
+// power cycle must reuse its former row instead of being inserted again. Reuse
+// preserves the node's historical data lineage (unified_data ownership and the
+// NodeEvent timeline), which is the correct model for "this device
+// re-registered". nodes.node_id carries a table-wide unique index (it also
+// covers soft-deleted rows), so an Unscoped First can match at most one row.
+//
+// Every write error is returned to the caller so handleHello can abort before
+// sending HelloAck: silently swallowing a unique-key collision here is exactly
+// what produced "device believes it is registered, center has no row".
+func (m *Manager) registerNodeFromHello(deviceID string, hello parsedHello) (nodeRegistration, error) {
+	var reg nodeRegistration
+	var node models.Node
+
+	result := m.db.Unscoped().Where("node_id = ?", deviceID).First(&node)
+	if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return reg, fmt.Errorf("lookup node: %w", result.Error)
+	}
+
+	now := time.Now()
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		node = models.Node{
+			NodeID:          deviceID,
+			Model:           hello.Model,
+			FirmwareVersion: hello.FirmwareVersion,
+			ProtocolVersion: negotiatedProtocolVersion(hello.ProtocolVersion),
+			Status:          "online",
+			LastSeen:        &now,
+			LastOnlineTime:  &now,
+			UptimeSeconds:   0,
+			ConfigEpoch:     hello.ConfigEpoch,
+			LastManifestID:  hello.LastManifest,
+		}
+		if err := m.db.Create(&node).Error; err != nil {
+			return reg, fmt.Errorf("create node: %w", err)
+		}
+		if err := m.db.Create(&models.NodeEvent{
+			NodeID:    deviceID,
+			EventType: "online",
+			NewStatus: "online",
+		}).Error; err != nil {
+			// Auxiliary write: the node row is already durable, so this must not
+			// fail the handshake — but it must not vanish silently either.
+			logger.Errorf("[%s] Failed to record online NodeEvent: %v", deviceID, err)
+		}
+		reg.node = node
+		reg.created = true
+		return reg, nil
+	}
+
+	// Reuse the existing row — including a soft-deleted one being restored.
+	reg.oldStatus = node.Status
+	reg.revived = node.DeletedAt.Valid
+	if reg.revived {
+		// A soft-deleted row is not part of the live node set: this handshake is a
+		// fresh registration, so suppress the stale pre-deletion status for the
+		// transition logic (last_online_time, NodeEvent, device init, HA discovery).
+		reg.oldStatus = ""
+		node.DeletedAt = gorm.DeletedAt{}
+	}
+
+	node.FirmwareVersion = hello.FirmwareVersion
+	node.Model = hello.Model
+	node.ProtocolVersion = negotiatedProtocolVersion(hello.ProtocolVersion)
+	node.Status = "online"
+	node.LastSeen = &now
+	// last_online_time 只在 offline→online 转换时设置，在线期间不覆盖
+	if reg.oldStatus != "online" {
+		node.LastOnlineTime = &now
+	}
+	node.ConfigEpoch = hello.ConfigEpoch
+	node.LastManifestID = hello.LastManifest
+	// Hello starts a new firmware generation; invalidate the previous
+	// capability report until ResourceReport arrives for this boot.
+	node.BootID = ""
+	node.ResourceReportedAt = nil
+	node.CommandEngineRevision = 0
+	node.CommandEngineCapabilities = "{}"
+
+	// A scoped Save would append "AND deleted_at IS NULL" and silently update
+	// zero rows while restoring a soft-deleted node, so the restore runs
+	// Unscoped and its error is checked.
+	saveTx := m.db
+	if reg.revived {
+		saveTx = m.db.Unscoped()
+	}
+	if err := saveTx.Save(&node).Error; err != nil {
+		return reg, fmt.Errorf("update node: %w", err)
+	}
+
+	if reg.oldStatus != "online" {
+		if err := m.db.Create(&models.NodeEvent{
+			NodeID:    deviceID,
+			EventType: "online",
+			OldStatus: reg.oldStatus,
+			NewStatus: "online",
+		}).Error; err != nil {
+			logger.Errorf("[%s] Failed to record online NodeEvent: %v", deviceID, err)
+		}
+	}
+
+	reg.node = node
+	return reg, nil
+}
+
+// storeNodeIDCache records deviceID → node.ID for worker pool lookups.
+// A zero primary key is never cached: it would make every subsequent
+// DataReport of this device resolve to node ID 0.
+func storeNodeIDCache(deviceID string, nodeID uint) {
+	if nodeID == 0 {
+		logger.Warnf("[%s] Refusing to cache zero node primary key in node ID cache", deviceID)
+		return
+	}
+	nodeIDCache.Store(deviceID, nodeIDCacheEntry{nodeID: nodeID, writtenAt: time.Now()})
 }
