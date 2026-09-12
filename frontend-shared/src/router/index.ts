@@ -80,6 +80,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '逻辑设备', icon: 'Share' },
       },
       {
+        path: 'data-sources',
+        name: 'DataSourceList',
+        component: () => import('@/views/data-source/DataSourceList.vue'),
+        meta: { title: '数据源', icon: 'Link' },
+      },
+      {
         path: 'data',
         name: 'DataPanel',
         component: () => import('@/views/data/DataPanel.vue'),

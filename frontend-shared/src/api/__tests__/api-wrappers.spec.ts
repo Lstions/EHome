@@ -251,64 +251,111 @@ import { dataSourceApi } from '../dataSource'
 describe('dataSourceApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('list calls get with params', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [], total: 0 } })
-    await dataSourceApi.list({ page: 1, page_size: 10 })
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources', { params: { page: 1, page_size: 10 } })
+  it('list calls get with params and unwraps { items, total }', async () => {
+    const payload = { items: [{ id: 1, device_id: 10, category: 'temperature' }], total: 1 }
+    mockClient.get.mockResolvedValue({ code: 200, data: payload, message: 'ok' })
+    const res = await dataSourceApi.list({ device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources', {
+      params: { device_id: 10, category: 'temperature', status: 'active', page: 1, page_size: 10 },
+    })
+    expect(res).toEqual(payload)
   })
 
-  it('get calls get with id', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: { id: 1 } } })
-    await dataSourceApi.get(1)
+  it('list without params forwards undefined params', async () => {
+    mockClient.get.mockResolvedValue({ code: 200, data: { items: [], total: 0 }, message: 'ok' })
+    const res = await dataSourceApi.list()
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources', { params: undefined })
+    expect(res).toEqual({ items: [], total: 0 })
+  })
+
+  it('get calls get with id and unwraps data', async () => {
+    const source = { id: 1, device_id: 10, category: 'temperature' }
+    mockClient.get.mockResolvedValue({ code: 200, data: source, message: 'ok' })
+    const res = await dataSourceApi.get(1)
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources/1')
+    expect(res).toEqual(source)
   })
 
-  it('create posts data', async () => {
-    mockClient.post.mockResolvedValue({ data: { data: { id: 1 } } })
-    await dataSourceApi.create({ device_id: 1, category: 'test', name: 'ds1' })
-    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources', { device_id: 1, category: 'test', name: 'ds1' })
+  it('create posts body and unwraps data', async () => {
+    const req = { device_id: 10, category: 'temperature', edge_device_id: 100 }
+    const created = { id: 1, ...req, name: 'ds1' }
+    mockClient.post.mockResolvedValue({ code: 200, data: created, message: 'ok' })
+    const res = await dataSourceApi.create(req)
+    expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources', req)
+    expect(res).toEqual(created)
   })
 
-  it('update puts data', async () => {
-    mockClient.put.mockResolvedValue({ data: {} })
-    await dataSourceApi.update(1, { name: 'updated' })
-    expect(mockClient.put).toHaveBeenCalledWith('/api/v1/data-sources/1', { name: 'updated' })
+  it('update puts body and unwraps data', async () => {
+    const req = { name: 'updated', priority: 5 }
+    const updated = { id: 1, name: 'updated', priority: 5 }
+    mockClient.put.mockResolvedValue({ code: 200, data: updated, message: 'ok' })
+    const res = await dataSourceApi.update(1, req)
+    expect(mockClient.put).toHaveBeenCalledWith('/api/v1/data-sources/1', req)
+    expect(res).toEqual(updated)
   })
 
-  it('delete calls delete', async () => {
+  it('remove calls delete and returns undefined', async () => {
     mockClient.delete.mockResolvedValue(undefined)
-    await dataSourceApi.delete(1)
+    const res = await dataSourceApi.remove(1)
     expect(mockClient.delete).toHaveBeenCalledWith('/api/v1/data-sources/1')
+    expect(res).toBeUndefined()
   })
 
-  it('activate posts', async () => {
-    mockClient.post.mockResolvedValue(undefined)
-    await dataSourceApi.activate(1)
+  it('activate posts and unwraps data', async () => {
+    const source = { id: 1, status: 'active' }
+    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
+    const res = await dataSourceApi.activate(1)
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/activate')
+    expect(res).toEqual(source)
   })
 
-  it('deactivate posts', async () => {
-    mockClient.post.mockResolvedValue(undefined)
-    await dataSourceApi.deactivate(1)
+  it('deactivate posts and unwraps data', async () => {
+    const source = { id: 1, status: 'disabled' }
+    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
+    const res = await dataSourceApi.deactivate(1)
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/deactivate')
+    expect(res).toEqual(source)
   })
 
-  it('reset posts', async () => {
-    mockClient.post.mockResolvedValue(undefined)
-    await dataSourceApi.reset(1)
+  it('reset posts and unwraps data', async () => {
+    const source = { id: 1, status: 'standby' }
+    mockClient.post.mockResolvedValue({ code: 200, data: source, message: 'ok' })
+    const res = await dataSourceApi.reset(1)
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/data-sources/1/reset')
+    expect(res).toEqual(source)
   })
 
-  it('getHealth passes limit param', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [] } })
-    await dataSourceApi.getHealth(1, 10)
+  it('getHealth passes limit and unwraps array', async () => {
+    const records = [{ id: 1, source_id: 1, status: 'failure' }]
+    mockClient.get.mockResolvedValue({ code: 200, data: records, message: 'ok' })
+    const res = await dataSourceApi.getHealth(1, 10)
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources/1/health', { params: { limit: 10 } })
+    expect(res).toEqual(records)
   })
 
-  it('getFailoverLogs passes deviceId and limit', async () => {
-    mockClient.get.mockResolvedValue({ data: { data: [] } })
-    await dataSourceApi.getFailoverLogs(5, 20)
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/5/failover-logs', { params: { limit: 20 } })
+  it('getHealth 空数组返回 [] (不是 undefined)', async () => {
+    mockClient.get.mockResolvedValue({ code: 200, data: [], message: 'ok' })
+    const res = await dataSourceApi.getHealth(1)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/data-sources/1/health', { params: { limit: undefined } })
+    expect(res).toEqual([])
+    expect(res).toHaveLength(0)
+  })
+
+  it('getFailoverLogs passes deviceId/category/limit and unwraps array', async () => {
+    const logs = [{ id: 1, device_id: 10, reason: 'auto', trigger: 'device_offline' }]
+    mockClient.get.mockResolvedValue({ code: 200, data: logs, message: 'ok' })
+    const res = await dataSourceApi.getFailoverLogs(10, { limit: 20, category: 'temperature' })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/10/failover-logs', {
+      params: { limit: 20, category: 'temperature' },
+    })
+    expect(res).toEqual(logs)
+  })
+
+  it('getFailoverLogs 空数组返回 [] (不是 undefined)', async () => {
+    mockClient.get.mockResolvedValue({ code: 200, data: [], message: 'ok' })
+    const res = await dataSourceApi.getFailoverLogs(10)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/devices/10/failover-logs', { params: undefined })
+    expect(res).toEqual([])
   })
 })
 

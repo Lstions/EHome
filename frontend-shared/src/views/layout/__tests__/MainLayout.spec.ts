@@ -125,13 +125,14 @@ describe('MainLayout.vue', () => {
     await flushPromises()
 
     const menuItems = wrapper.findAll('.el-menu-item')
-    expect(menuItems).toHaveLength(11)
+    expect(menuItems).toHaveLength(12)
     const paths = menuItems.map((el) => el.attributes('data-index'))
     expect(paths).toEqual([
       '/dashboard',
       '/node',
       '/edge-device',
       '/logical-device',
+      '/data-sources',
       '/channel',
       '/data',
       '/firmware',
