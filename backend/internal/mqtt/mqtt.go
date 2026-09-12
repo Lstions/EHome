@@ -11,6 +11,8 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"ehome/backend/pkg/metrics"
 )
 
 // Publisher is the interface for MQTT publishing operations.
@@ -450,7 +452,14 @@ func (c *Client) currentClientForOperation() (mqtt.Client, *transportAttempt, er
 	return c.current.client, c.current, nil
 }
 
-func (c *Client) publish(topic string, qos byte, retained bool, payload []byte, timeout time.Duration, timeoutMessage string) error {
+func (c *Client) publish(topic string, qos byte, retained bool, payload []byte, timeout time.Duration, timeoutMessage string) (err error) {
+	// Every failed publish path increments the existing failure counter exactly
+	// once, including the nil/not-connected and token-error cases.
+	defer func() {
+		if err != nil {
+			metrics.MqttPublishFailures.WithLabelValues(topic).Inc()
+		}
+	}()
 	if c == nil {
 		return fmt.Errorf("MQTT client not connected")
 	}

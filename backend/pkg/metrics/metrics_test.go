@@ -145,6 +145,26 @@ func TestPrometheusMetricsRegistered(t *testing.T) {
 		DeviceActionCapabilityStaleTotal.Inc()
 		SecurityAuditWriteFailuresTotal.Inc()
 	})
+
+	t.Run("LifecycleTaskFailures_Inc", func(t *testing.T) {
+		labels := map[string]string{"task": "retention"}
+		before, _ := promCounterValue(t, "ehome_lifecycle_task_failures_total", labels)
+		LifecycleTaskFailures.WithLabelValues("retention").Inc()
+		assertCounterIncrement(t, "ehome_lifecycle_task_failures_total", labels, before, 1)
+	})
+
+	t.Run("LifecyclePurgedRows_Add", func(t *testing.T) {
+		labels := map[string]string{"task": "purge"}
+		before, _ := promCounterValue(t, "ehome_lifecycle_purged_rows_total", labels)
+		LifecyclePurgedRows.WithLabelValues("purge").Add(7)
+		assertCounterIncrement(t, "ehome_lifecycle_purged_rows_total", labels, before, 7)
+	})
+
+	t.Run("LifecycleDroppedPartitions_Inc", func(t *testing.T) {
+		before, _ := promCounterValue(t, "ehome_lifecycle_dropped_partitions_total", nil)
+		LifecycleDroppedPartitions.Inc()
+		assertCounterIncrement(t, "ehome_lifecycle_dropped_partitions_total", nil, before, 1)
+	})
 }
 
 // TestNewGaugeDoesNotPanic verifies that creating a new Gauge via promauto
@@ -210,4 +230,57 @@ func assertCounterValue(t *testing.T, name string, expected float64, labels ...s
 	t.Helper()
 	// We just verify the counter is usable; exact value is hard to check
 	// due to other tests potentially incrementing. Just ensure no panic.
+}
+
+// promCounterValue returns the current value of the counter series identified
+// by name and its exact label set. found reports whether the series exists in
+// the default registry.
+func promCounterValue(t *testing.T, name string, labels map[string]string) (value float64, found bool) {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if metricLabelsMatch(metric, labels) {
+				return metric.GetCounter().GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// metricLabelsMatch reports whether metric carries exactly the given labels.
+func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
+	got := make(map[string]string, len(metric.GetLabel()))
+	for _, pair := range metric.GetLabel() {
+		got[pair.GetName()] = pair.GetValue()
+	}
+	if len(got) != len(labels) {
+		return false
+	}
+	for name, value := range labels {
+		if got[name] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// assertCounterIncrement asserts the named series exists with the expected
+// labels and advanced by want since before.
+func assertCounterIncrement(t *testing.T, name string, labels map[string]string, before, want float64) {
+	t.Helper()
+	after, found := promCounterValue(t, name, labels)
+	if !found {
+		t.Errorf("metric %s%v not found in default registry", name, labels)
+		return
+	}
+	if got := after - before; got != want {
+		t.Errorf("%s%v increment = %v, want %v", name, labels, got, want)
+	}
 }

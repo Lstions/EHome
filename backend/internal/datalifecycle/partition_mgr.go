@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"ehome/backend/pkg/metrics"
 )
 
 // 数据层时序化 (方案 docs/设计/架构优化实施方案.md v0.4 §3.2.1)。
@@ -70,6 +72,7 @@ func (pm *PartitionManager) EnsurePartitions(months int) error {
 		start := addMonths(now, i)
 		end := addMonths(start, 1)
 		if err := pm.createPartitionIfNotExists(partitionName(start), partitionedTable, start, end); err != nil {
+			metrics.LifecycleTaskFailures.WithLabelValues("partition").Inc()
 			return fmt.Errorf("ensure partition %s: %w", partitionName(start), err)
 		}
 	}
@@ -118,6 +121,7 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 		partitionedTable+"_%",
 	).Rows()
 	if err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("partition").Inc()
 		return nil, fmt.Errorf("list partitions: %w", err)
 	}
 	defer rows.Close()
@@ -142,9 +146,11 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 		// 整分区早于 cutoff 才删：分区起点 < cutoff 月起点。
 		if pStart.Before(cutoffMonth) {
 			if err := pm.db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", n)).Error; err != nil {
+				metrics.LifecycleTaskFailures.WithLabelValues("partition").Inc()
 				return dropped, fmt.Errorf("drop %s: %w", n, err)
 			}
 			dropped = append(dropped, n)
+			metrics.LifecycleDroppedPartitions.Inc()
 			slog.Info("partition_mgr: dropped expired partition", "partition", n)
 		}
 	}
@@ -164,6 +170,7 @@ func EnsureRollupTable(db *gorm.DB) error {
 	}
 	var count int64
 	if err := db.Raw(tableExistsSQL, "unified_data_rollup_1m", "r").Scan(&count).Error; err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("rollup").Inc()
 		return fmt.Errorf("check rollup table existence: %w", err)
 	}
 	if count > 0 {
@@ -182,6 +189,7 @@ func EnsureRollupTable(db *gorm.DB) error {
 		PRIMARY KEY (device_id, sensor_name, bucket)
 	)`
 	if err := db.Exec(ddl).Error; err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("rollup").Inc()
 		return fmt.Errorf("create rollup table: %w", err)
 	}
 	slog.Info("partition_mgr: created rollup table unified_data_rollup_1m")

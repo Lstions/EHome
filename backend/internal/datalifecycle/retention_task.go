@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/metrics"
 )
 
 // retention 通知文案 (§4.2): 到期前 30/7 天各一条, 文案含延长保留期入口。
@@ -152,6 +153,7 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 		Where("purge_requested = ?", false).
 		Order("id").
 		Find(&devices).Error; err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
 		return nil, fmt.Errorf("datalifecycle: scan logical devices: %w", err)
 	}
 	results := make([]RetentionResult, 0, len(devices))
@@ -161,7 +163,14 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 			return results, ctx.Err()
 		default:
 		}
-		results = append(results, r.processOne(ctx, &devices[i]))
+		res := r.processOne(ctx, &devices[i])
+		if res.Err != "" {
+			metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
+		}
+		if res.RowsDeleted > 0 {
+			metrics.LifecyclePurgedRows.WithLabelValues("retention").Add(float64(res.RowsDeleted))
+		}
+		results = append(results, res)
 	}
 	return results, nil
 }

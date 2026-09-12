@@ -282,4 +282,27 @@ var (
 		Name: "ehome_security_audit_write_failures_total",
 		Help: "Security audit events that failed validation, encoding, or persistence",
 	})
+
+	// --- Data lifecycle task observability metrics ---
+
+	// LifecycleTaskFailures counts data lifecycle task failures by task type
+	// (retention|purge|partition|rollup).
+	LifecycleTaskFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_lifecycle_task_failures_total",
+		Help: "Data lifecycle task failures by task",
+	}, []string{"task"})
+
+	// LifecyclePurgedRows counts rows deleted by data lifecycle tasks
+	// (retention|purge). Partition DROP uses LifecycleDroppedPartitions instead.
+	LifecyclePurgedRows = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_lifecycle_purged_rows_total",
+		Help: "Rows purged by data lifecycle task",
+	}, []string{"task"})
+
+	// LifecycleDroppedPartitions counts monthly partitions dropped by the
+	// partition manager during retention cleanup.
+	LifecycleDroppedPartitions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_lifecycle_dropped_partitions_total",
+		Help: "Partitions dropped by data lifecycle partition management",
+	})
 )

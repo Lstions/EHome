@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/metrics"
 )
 
 // Batch sizes per §4.3 锁交互说明: PostgreSQL 每批 1 万行独立事务;
@@ -161,6 +162,7 @@ func (p *Purger) RunOnce(ctx context.Context) ([]PurgeResult, error) {
 		Where("purge_requested = ?", true).
 		Order("id").
 		Find(&targets).Error; err != nil {
+		metrics.LifecycleTaskFailures.WithLabelValues("purge").Inc()
 		return nil, fmt.Errorf("datalifecycle: scan purge_requested: %w", err)
 	}
 	results := make([]PurgeResult, 0, len(targets))
@@ -170,7 +172,16 @@ func (p *Purger) RunOnce(ctx context.Context) ([]PurgeResult, error) {
 			return results, ctx.Err()
 		default:
 		}
-		results = append(results, p.purgeOne(ctx, &targets[i]))
+		res := p.purgeOne(ctx, &targets[i])
+		switch res.Outcome {
+		case PurgeFailed:
+			metrics.LifecycleTaskFailures.WithLabelValues("purge").Inc()
+		case Purged:
+			if res.RowsDeleted > 0 {
+				metrics.LifecyclePurgedRows.WithLabelValues("purge").Add(float64(res.RowsDeleted))
+			}
+		}
+		results = append(results, res)
 	}
 	return results, nil
 }
