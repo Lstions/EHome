@@ -184,7 +184,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	// List edge devices (v2.2 path for /devices)
 	v1.GET("/edge-devices", func(c *gin.Context) {
 		var devices []models.EdgeDevice
-		query := db.Preload("Channel").Preload("Node").Preload("DeviceConfig")
+		// P2.2 取消传播: 全量列表及其 Preload 链绑定请求上下文。
+		query := db.WithContext(c.Request.Context()).Preload("Channel").Preload("Node").Preload("DeviceConfig")
 
 		// Apply optional node_id filter (frontend sends as collector_id)
 		nodeID := c.Query("node_id")
@@ -1000,7 +1001,8 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 		cond, args := dataScopeCond(qs)
 		var data []models.DeviceData
-		q := db.Where(cond, args...)
+		// P2.2 取消传播: device_data 分页查询绑定请求上下文。
+		q := db.WithContext(c.Request.Context()).Where(cond, args...)
 		if from != "" {
 			q = q.Where("created_at >= ?", from)
 		}

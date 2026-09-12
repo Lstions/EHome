@@ -203,12 +203,13 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		cond, args := dataScopeCond(qs)
-		q := db.Where(cond+" AND timestamp >= ? AND timestamp <= ?", append(args, startTime, endTime)...)
+		// P2.2 取消传播: 全量拉取 (含保形去重外层链) 绑定请求上下文。
+		q := db.WithContext(c.Request.Context()).Where(cond+" AND timestamp >= ? AND timestamp <= ?", append(args, startTime, endTime)...)
 		if sensorName != "" {
 			q = q.Where("sensor_name = ?", sensorName)
 		}
 		if qs.DedupNeeded {
-			q = datalifecycle.ApplyShapeDedup(db.Session(&gorm.Session{}), q)
+			q = datalifecycle.ApplyShapeDedup(db.WithContext(c.Request.Context()).Session(&gorm.Session{}), q)
 		}
 
 		var data []models.UnifiedData
@@ -298,10 +299,11 @@ func registerDataRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		}
 
 		cond, args := dataScopeCond(qs)
-		q := db.Where(cond+" AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
+		// P2.2 取消传播: 全量拉取 (含保形去重外层链) 绑定请求上下文。
+		q := db.WithContext(c.Request.Context()).Where(cond+" AND sensor_name = ? AND timestamp BETWEEN ? AND ?",
 			append(args, sensorName, startTime, endTime)...)
 		if qs.DedupNeeded {
-			q = datalifecycle.ApplyShapeDedup(db.Session(&gorm.Session{}), q)
+			q = datalifecycle.ApplyShapeDedup(db.WithContext(c.Request.Context()).Session(&gorm.Session{}), q)
 		}
 		var data []models.UnifiedData
 		q.Order("timestamp ASC").Find(&data)

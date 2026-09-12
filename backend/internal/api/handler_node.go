@@ -44,7 +44,8 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	// List nodes (v2.2 compat path)
 	v1.GET("/nodes", func(c *gin.Context) {
 		var nodes []models.Node
-		if err := db.Find(&nodes).Error; err != nil {
+		// P2.2 取消传播: 无分页全量列表绑定请求上下文。
+		if err := db.WithContext(c.Request.Context()).Find(&nodes).Error; err != nil {
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
