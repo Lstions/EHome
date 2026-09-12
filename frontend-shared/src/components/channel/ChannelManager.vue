@@ -574,11 +574,11 @@ const handleSubmit = async () => {
     if (editingChannel.value?.id) {
       await channelStore.updateChannel(editingChannel.value.id, data)
       assertTransaction(transaction, collectorId, sessionGeneration)
-      // 自动同步配置到采集器
+      // 自动同步配置到节点
       try {
         await nodeApi.syncConfig(collectorId)
         assertTransaction(transaction, collectorId, sessionGeneration)
-        ElMessage.success('更新成功，配置已同步到采集器')
+        ElMessage.success('更新成功，配置已同步到节点')
       } catch (syncError: any) {
         if (
           syncError?.message === '会话已变更'
@@ -586,16 +586,16 @@ const handleSubmit = async () => {
           || props.collectorId !== collectorId
           || !props.modelValue
         ) throw syncError
-        ElMessage.warning('更新成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))
+        ElMessage.warning('更新成功，但配置同步失败：' + (syncError.message || '节点可能离线'))
       }
     } else {
       await channelStore.createChannel(data as any)
       assertTransaction(transaction, collectorId, sessionGeneration)
-      // 自动同步配置到采集器
+      // 自动同步配置到节点
       try {
         await nodeApi.syncConfig(collectorId)
         assertTransaction(transaction, collectorId, sessionGeneration)
-        ElMessage.success('创建成功，配置已同步到采集器')
+        ElMessage.success('创建成功，配置已同步到节点')
       } catch (syncError: any) {
         if (
           syncError?.message === '会话已变更'
@@ -603,7 +603,7 @@ const handleSubmit = async () => {
           || props.collectorId !== collectorId
           || !props.modelValue
         ) throw syncError
-        ElMessage.warning('创建成功，但配置同步失败：' + (syncError.message || '采集器可能离线'))
+        ElMessage.warning('创建成功，但配置同步失败：' + (syncError.message || '节点可能离线'))
       }
     }
 

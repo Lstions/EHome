@@ -493,7 +493,7 @@ async function handleScan(busType: string, hw: any) {
 // 配置模板列表
 const configTemplates = ref<any[]>([])
 
-// 采集器能力
+// 节点能力
 const capabilities = ref<any>(null)
 
 // 默认资源列表（仅用于空状态保底）
@@ -554,13 +554,13 @@ const refreshBuses = async () => {
   const generation = panelGeneration
   loading.value = true
   try {
-    // Step 0: 向采集器下发 QueryResources，等待 ReportResources 回填 DB
+    // Step 0: 向节点下发 QueryResources，等待 ReportResources 回填 DB
     try {
       await nodeApi.queryResources(collectorId)
-      // 等采集器上报 ReportResources（通常 1-2 秒内）
+      // 等节点上报 ReportResources（通常 1-2 秒内）
       await new Promise(resolve => setTimeout(resolve, 2000))
     } catch (err) {
-      logger.warn('QueryResources 下发失败（或采集器离线），直接从 DB 读取', { error: String(err) })
+      logger.warn('QueryResources 下发失败（或节点离线），直接从 DB 读取', { error: String(err) })
     }
 
     if (generation !== panelGeneration || sequence !== busesRequestSequence) return

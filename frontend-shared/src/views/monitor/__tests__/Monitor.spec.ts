@@ -12,7 +12,7 @@ vi.mock('@/api/monitor', () => ({
         http: { requests_total: 100, requests_in_flight: 2 },
         mqtt: { messages_received: 50, messages_sent: 30, connection_errors: 0 },
         device: { online: 3, offline: 1 },
-        collector: { online: 2, offline: 0 },
+        node: { online: 2, offline: 0 },
         data: { points_collected: 5000, points_stored: 4990 },
         websocket: { connections_active: 4, messages_total: 200 },
         control: {
@@ -102,10 +102,10 @@ describe('Monitor.vue', () => {
     expect(wrapper.text()).toContain('设备在线状态')
   })
 
-  it('displays collector online/offline status', async () => {
+  it('displays node online/offline status', async () => {
     const wrapper = mount(Monitor, { global: { stubs } })
     await flushPromises()
-    expect(wrapper.text()).toContain('采集器在线状态')
+    expect(wrapper.text()).toContain('节点在线状态')
   })
 
   it('renders detail panels section', () => {

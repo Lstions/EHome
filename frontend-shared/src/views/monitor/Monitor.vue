@@ -51,11 +51,11 @@
             <div class="stat-icon"><el-icon><Cpu /></el-icon></div>
             <div class="stat-content">
               <div class="stat-value">
-                <span :class="onlineValueClass(metrics?.collector?.online, collectorTotal)">{{ metrics?.collector?.online || 0 }}</span>
+                <span :class="onlineValueClass(metrics?.node?.online, nodeTotal)">{{ metrics?.node?.online || 0 }}</span>
                 <span class="separator">/</span>
-                <span>{{ collectorTotal }}</span>
+                <span>{{ nodeTotal }}</span>
               </div>
-              <div class="stat-label">采集器在线状态</div>
+              <div class="stat-label">节点在线状态</div>
             </div>
           </el-card>
         </el-col>
@@ -212,33 +212,33 @@
           </el-card>
         </el-col>
 
-        <!-- 采集器状态 -->
+        <!-- 节点状态 -->
         <el-col :xs="24" :sm="12">
           <el-card shadow="hover">
             <template #header>
               <div class="card-header">
-                <span><el-icon><Cpu /></el-icon> 采集器状态</span>
+                <span><el-icon><Cpu /></el-icon> 节点状态</span>
               </div>
             </template>
             <div class="status-bars">
               <div class="status-item">
                 <span class="status-label">在线</span>
                 <el-progress 
-                  :percentage="collectorOnlinePercent" 
+                  :percentage="nodeOnlinePercent" 
                   :stroke-width="20"
                   :color="THEME_COLORS.success"
                 >
-                  <span>{{ metrics?.collector?.online || 0 }}</span>
+                  <span>{{ metrics?.node?.online || 0 }}</span>
                 </el-progress>
               </div>
               <div class="status-item">
                 <span class="status-label">离线</span>
                 <el-progress
-                  :percentage="collectorOfflinePercent"
+                  :percentage="nodeOfflinePercent"
                   :stroke-width="20"
                   :color="THEME_COLORS.danger"
                 >
-                  <span>{{ metrics?.collector?.offline || 0 }}</span>
+                  <span>{{ metrics?.node?.offline || 0 }}</span>
                 </el-progress>
               </div>
             </div>
@@ -333,18 +333,18 @@ const deviceOfflinePercent = computed(() => {
   return Math.round(((metrics.value?.device?.offline || 0) / deviceTotal.value) * 100)
 })
 
-const collectorTotal = computed(() => {
-  return (metrics.value?.collector?.online || 0) + (metrics.value?.collector?.offline || 0)
+const nodeTotal = computed(() => {
+  return (metrics.value?.node?.online || 0) + (metrics.value?.node?.offline || 0)
 })
 
-const collectorOnlinePercent = computed(() => {
-  if (collectorTotal.value === 0) return 0
-  return Math.round(((metrics.value?.collector?.online || 0) / collectorTotal.value) * 100)
+const nodeOnlinePercent = computed(() => {
+  if (nodeTotal.value === 0) return 0
+  return Math.round(((metrics.value?.node?.online || 0) / nodeTotal.value) * 100)
 })
 
-const collectorOfflinePercent = computed(() => {
-  if (collectorTotal.value === 0) return 0
-  return Math.round(((metrics.value?.collector?.offline || 0) / collectorTotal.value) * 100)
+const nodeOfflinePercent = computed(() => {
+  if (nodeTotal.value === 0) return 0
+  return Math.round(((metrics.value?.node?.offline || 0) / nodeTotal.value) * 100)
 })
 
 // 方法

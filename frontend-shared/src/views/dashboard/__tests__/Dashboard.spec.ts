@@ -113,7 +113,7 @@ describe('Dashboard.vue', () => {
 
     expect(firstCard.attributes('role')).toBe('link')
     expect(firstCard.attributes('tabindex')).toBe('0')
-    expect(firstCard.attributes('aria-label')).toBe('查看采集器总数')
+    expect(firstCard.attributes('aria-label')).toBe('查看节点总数')
 
     await firstCard.trigger('keydown.enter')
     expect(mockPush).toHaveBeenCalledWith('/node')
@@ -135,7 +135,7 @@ describe('Dashboard.vue', () => {
     expect(client.get).toHaveBeenCalledWith('/api/v1/nodes/status-history', { params: { limit: 20 } })
   })
 
-  it('computes offline collectors correctly', async () => {
+  it('computes offline nodes correctly', async () => {
     const wrapper = mount(Dashboard, { global: { stubs } })
     await flushPromises()
     // overview: total=5, online=3 → offline=2；通过告警卡的渲染值验证

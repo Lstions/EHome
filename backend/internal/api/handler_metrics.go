@@ -29,10 +29,10 @@ type MetricsResponse struct {
 		Online  int64 `json:"online"`
 		Offline int64 `json:"offline"`
 	} `json:"device"`
-	Collector struct {
+	Node struct {
 		Online  int64 `json:"online"`
 		Offline int64 `json:"offline"`
-	} `json:"collector"`
+	} `json:"node"`
 	Data struct {
 		PointsCollected int64 `json:"points_collected"`
 		PointsStored    int64 `json:"points_stored"`
@@ -94,11 +94,11 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		resp.Device.Online = devOnline
 		resp.Device.Offline = devOffline
 
-		var colOnline, colOffline int64
-		db.Model(&models.Node{}).Where("status = ?", "online").Count(&colOnline)
-		db.Model(&models.Node{}).Where("status = ?", "offline").Count(&colOffline)
-		resp.Collector.Online = colOnline
-		resp.Collector.Offline = colOffline
+		var nodeOnline, nodeOffline int64
+		db.Model(&models.Node{}).Where("status = ?", "online").Count(&nodeOnline)
+		db.Model(&models.Node{}).Where("status = ?", "offline").Count(&nodeOffline)
+		resp.Node.Online = nodeOnline
+		resp.Node.Offline = nodeOffline
 
 		var points int64
 		db.Model(&models.UnifiedData{}).Count(&points)

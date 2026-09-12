@@ -324,7 +324,7 @@ const modelOptions = computed(() => {
   return Array.from(models)
 })
 
-// 过滤后的采集器
+// 过滤后的节点
 const filteredNodes = computed(() => {
   let result = nodes.value
   

@@ -9,26 +9,26 @@
     </template>
     <template v-else>
       <div class="dashboard-stats">
-        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看采集器总数" @click="router.push('/node')" @keydown.enter.prevent="router.push('/node')" @keydown.space.prevent="router.push('/node')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看节点总数" @click="router.push('/node')" @keydown.enter.prevent="router.push('/node')" @keydown.space.prevent="router.push('/node')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-primary);">
               <el-icon :size="32"><Connection /></el-icon>
             </div>
             <div class="stat-info">
               <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
-              <p class="stat-label">采集器总数</p>
+              <p class="stat-label">节点总数</p>
             </div>
           </div>
         </el-card>
 
-        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看在线采集器" @click="router.push('/node?status=online')" @keydown.enter.prevent="router.push('/node?status=online')" @keydown.space.prevent="router.push('/node?status=online')">
+        <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看在线节点" @click="router.push('/node?status=online')" @keydown.enter.prevent="router.push('/node?status=online')" @keydown.space.prevent="router.push('/node?status=online')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-success);">
               <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
             <div class="stat-info">
               <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
-              <p class="stat-label">在线采集器</p>
+              <p class="stat-label">在线节点</p>
             </div>
           </div>
         </el-card>
@@ -77,7 +77,7 @@
               <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
               <div>
                 <div class="alert-value">{{ offlineCollectors }}</div>
-                <div class="alert-label">离线采集器</div>
+                <div class="alert-label">离线节点</div>
               </div>
             </div>
             <div v-if="offlineDevices > 0" class="alert-item" @click="router.push('/edge-device?status=offline')">
@@ -97,7 +97,7 @@
           </div>
           <div v-else class="alert-ok">
             <el-icon color="var(--el-color-success)" :size="20"><CircleCheck /></el-icon>
-            <span>采集器与设备均在线，暂无采集错误。</span>
+            <span>节点与设备均在线，暂无采集错误。</span>
           </div>
         </el-card>
       </el-col>
@@ -206,7 +206,7 @@
                 </router-link>
               </template>
             </el-table-column>
-            <el-table-column prop="collector_name" label="所属采集器" width="150" />
+            <el-table-column prop="node_name" label="所属节点" width="150" />
             <!-- 解析后数据 -->
             <el-table-column label="解析数据" width="280">
               <template #default="{ row }">
@@ -234,9 +234,9 @@
             v-else
             icon="FolderOpened"
             title="暂无数据"
-            description="添加采集器和设备后，数据将在此处显示"
+            description="添加节点和设备后，数据将在此处显示"
             :quick-actions="[
-              { label: '查看采集器', icon: Connection, type: 'primary', handler: () => router.push('/node') },
+              { label: '查看节点', icon: Connection, type: 'primary', handler: () => router.push('/node') },
               { label: '查看设备', icon: Cpu, handler: () => router.push('/edge-device') }
             ]"
           />

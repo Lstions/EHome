@@ -197,7 +197,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	// DeviceConfig 设备级配置模板 (前端 src/api/deviceConfig.ts)
 	// ============================================================
 	//
-	// 与采集器级 ConfigTemplate (hex 读寄存器) 不同, 本组端点管理
+	// 与节点级 ConfigTemplate (hex 读寄存器) 不同, 本组端点管理
 	// 设备级元数据模板: 名称/描述/协议/硬件类型/参数/默认标志, 用于
 	// 创建设备时一键套用。
 	//

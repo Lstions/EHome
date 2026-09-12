@@ -613,7 +613,7 @@ const handlePing = async () => {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
     const timeout = setTimeout(() => {
       pinging.value = false
-      ElMessage.warning('延迟测量超时，采集器可能离线')
+      ElMessage.warning('延迟测量超时，节点可能离线')
     }, 5000)
     pendingPingTimeout.value = timeout
   } catch (err: any) {
@@ -637,7 +637,7 @@ const fetchCollectorDetail = async () => {
     const result = await nodeStore.fetchDetail(id, true)
     if (sequence !== collectorDetailSequence || route.params.id !== id) return
     collector.value = result
-    // 序列号就绪后按序列号重拉设备/通道(onMounted 时 collector 未加载,
+    // 序列号就绪后按序列号重拉设备/通道(onMounted 时节点未加载,
     // fetchDevices 只能先用数字主键,查不到数据)。
     if (collector.value?.node_id) void fetchDevices()
     // 自动测量延迟（如果在线且无延迟数据）
@@ -648,7 +648,7 @@ const fetchCollectorDetail = async () => {
     if (sequence === collectorDetailSequence) ElMessage.error('获取节点详情失败')
   } finally {
     if (sequence === collectorDetailSequence) loading.value = false
-    // R3: collector 加载失败(无序列号)时,关联设备区不能一直 loading——
+    // R3: 节点加载失败(无序列号)时,关联设备区不能一直 loading——
     // fetchDevices 现在只由上方 :642 在序列号就绪后触发,这里兜底关 loading。
     if (!collector.value?.node_id) devicesLoading.value = false
   }
@@ -850,10 +850,10 @@ const loadDmaChannels = async () => {
   await dmaStore.fetch(collectorId.value)
 }
 
-// 采集器上线时刷新通道列表
+// 节点上线时刷新通道列表
 watch(() => collector.value?.status, (newStatus, oldStatus) => {
   if (oldStatus === 'offline' && newStatus === 'online') {
-    // 采集器上线，刷新总线配置和通道列表
+    // 节点上线，刷新总线配置和通道列表
     busConfigPanelRef.value?.refreshChannels?.()
     busConfigPanelRef.value?.refreshBuses?.()
   }
@@ -876,7 +876,7 @@ watch(() => route.params.id, (newId, oldId) => {
   collector.value = null
   devices.value = []
   channels.value = []
-  // R3: fetchDevices 不再单独调——collector 序列号就绪后由 fetchCollectorDetail
+  // R3: fetchDevices 不再单独调——节点序列号就绪后由 fetchCollectorDetail
   // 内部回调触发,避免用数字主键的无效首次查询(必为空 + 闪烁)。
   void fetchCollectorDetail()
   void fetchOTAHistory()

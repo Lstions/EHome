@@ -70,7 +70,7 @@ func (d *Detector) loop() {
 // Each layer uses a session-isolated DB handle (db.Session) to avoid
 // Statement races between concurrent GORM calls.
 // Redis 退役 (方案 v3.4 §4 任务B): 原 checkRedisHeartbeats (L1) 已删除，
-// checkDBLastSeen (L3) 是采集器离线判定的唯一路径。
+// checkDBLastSeen (L3) 是节点离线判定的唯一路径。
 func (d *Detector) checkOffline() {
 	var wg sync.WaitGroup
 	wg.Add(2)

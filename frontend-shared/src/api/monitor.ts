@@ -15,7 +15,7 @@ export interface MetricsSummary {
     online: number
     offline: number
   }
-  collector: {
+  node: {
     online: number
     offline: number
   }

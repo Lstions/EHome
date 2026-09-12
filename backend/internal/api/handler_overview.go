@@ -41,14 +41,13 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		// Build latest_data from edge devices + unified_data (C2 fix: batch query)
 		type latestEntry struct {
-			DeviceID      uint               `json:"device_id"`
-			DeviceName    string             `json:"device_name"`
-			NodeName      string             `json:"node_name"`
-			CollectorName string             `json:"collector_name"`
-			Data          map[string]float64 `json:"data"`
-			CollectedAt   string             `json:"collected_at"`
-			RawData       string             `json:"raw_data,omitempty"`
-			ErrorCode     int                `json:"error_code"`
+			DeviceID    uint               `json:"device_id"`
+			DeviceName  string             `json:"device_name"`
+			NodeName    string             `json:"node_name"`
+			Data        map[string]float64 `json:"data"`
+			CollectedAt string             `json:"collected_at"`
+			RawData     string             `json:"raw_data,omitempty"`
+			ErrorCode   int                `json:"error_code"`
 		}
 
 		// Only load devices with data
@@ -105,12 +104,11 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		latestData := make([]latestEntry, 0, len(devices))
 		for _, dev := range devices {
 			entry := latestEntry{
-				DeviceID:      dev.ID,
-				DeviceName:    dev.Name,
-				NodeName:      dev.Node.Name,
-				CollectorName: dev.Node.Name, // legacy alias — same as node_name for backward compat
-				CollectedAt:   dev.LastDataAt.Format("2006-01-02T15:04:05Z"),
-				ErrorCode:     dev.ErrorCode,
+				DeviceID:    dev.ID,
+				DeviceName:  dev.Name,
+				NodeName:    dev.Node.Name,
+				CollectedAt: dev.LastDataAt.Format("2006-01-02T15:04:05Z"),
+				ErrorCode:   dev.ErrorCode,
 			}
 			if dm, ok := dataByDevice[dev.ID]; ok && len(dm) > 0 {
 				entry.Data = dm
