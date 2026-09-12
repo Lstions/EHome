@@ -73,6 +73,41 @@ services:
       emqx:
         condition: service_healthy
 
+  # ── Optional monitoring stack (profile: monitoring) ───────────────────────
+  # Not part of the default startup: enabling the profile is the only opt-in.
+  # Joined to the main stack default network so the scrape target
+  # `ehome-web:8080` (deploy/monitoring/prometheus.yml) resolves.
+  # Start with: docker compose --profile monitoring up -d
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ehome-prometheus
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ehome-prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ehome-alertmanager
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./deploy/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ehome-alertmanager-data:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+
 volumes:
   ehome-pgdata:
   ehome-emqxdata:
+  ehome-prometheus-data:
+  ehome-alertmanager-data:

@@ -1,4 +1,7 @@
-# F6 数据落库失败告警 — Prometheus 抓取配置
+# EHomeSystem — Prometheus 抓取配置
+#
+# 用法: docker compose --profile monitoring up -d
+#        (监控是可选 profile, 默认不随主栈启动, 不拖慢主栈)
 #
 # 抓取目标: ehome-server 的公开 Prometheus 端点
 #   生产:  http://ehome-web:8080/metrics   (docker-compose.yml ehome 服务, 容器内端口 8080)

@@ -1,19 +1,22 @@
-# F6 数据落库失败告警 — Prometheus 告警规则
+# EHomeSystem — Prometheus 告警规则
 #
-# 目标指标: ehome_data_consumer_db_write_failures_total (pkg/metrics/metrics.go:213)
-#   标签: consumer (数据消费者名), table (device_data / unified_data)
-#   语义: DataEventBus 消费者持久化到对应表失败次数的单调递增计数器
-#   递增点: consumers_heavy.go:93 / :260 / :305 (db.Create/.Save 返回 error 时 Inc)
+# 指标唯一真源: backend/pkg/metrics/metrics.go (promauto 注册)。
+# 每条规则的注释标注了 指标定义位置 与 (若存在) 代码递增/更新点。
+# 禁止在此文件出现 backend/pkg/metrics 未定义的 ehome_* 指标名。
 #
-# 部署: 本文件挂载到 Prometheus 容器的 rules 目录 (见 deploy/monitoring/README.md),
-#       由 alertmanager 路由到接收器。rate 窗口 1m 与方案 F6 一期一致。
+# 部署: 随主栈 profile 加载 —— docker compose --profile monitoring up -d
+#       (Prometheus 容器将本文件挂载到 /etc/prometheus/alert_rules.yml, 见根 docker-compose.yml)
 #
-# 注意: 计数器只在 Write 立即失败时递增。DB 故障期间系统继续接收数据,
-#       失败全部计数 —— 恢复后不再递增, rate 自然回落。用 for: 2m 防抖动。
+# 说明: 计数器只在对应故障路径递增; rate 窗口内无新增即回落。用 for 防抖动。
 
 groups:
+  # ── 数据落库失败 (F6, 既有规则保留不动) ──────────────────────────────
   - name: ehome-data-persistence
     rules:
+      # 指标定义: backend/pkg/metrics/metrics.go:213
+      #           标签 consumer / table; 递增点: backend/internal/databus/consumers_heavy.go:96/:314/:381,
+      #           backend/internal/automation/planner.go:231/:274/:302/:334,
+      #           backend/internal/alert/evaluator.go:232/:273/:308
       # 任一消费者对任一表的落库失败速率持续 >1 次/分钟
       - alert: EhomeDataConsumerDBWriteFailures
         expr: |
@@ -29,6 +32,7 @@ groups:
             请在 ehome-server 日志中检索 "failed to persist" / "databus:" WARN,
             检查 PostgreSQL 连接池、磁盘与表状态。
 
+      # 指标定义: backend/pkg/metrics/metrics.go:213 (同上)
       # 任意消费者 10 分钟内累计失败超过 100 次 —— 持续故障, 升级为 critical
       - alert: EhomeDataConsumerDBWriteFailuresSustained
         expr: |
@@ -42,3 +46,157 @@ groups:
             consumer={{ $labels.consumer }} table={{ $labels.table }} 近 10 分钟
             累计落库失败 {{ $value | humanize }} 次, 数据已经丢失。
             需要立即处理: 排查 PostgreSQL 可用性 / 表损坏 / 磁盘满。
+
+  # ── 数据摄入丢率 / 事件总线丢弃 / 队列积压 ───────────────────────────
+  - name: ehome-data-ingestion
+    rules:
+      # 指标定义: backend/pkg/metrics/metrics.go:220 (Counter, 无标签)
+      # 递增点:   backend/internal/databus/bus.go:114 (有界输入队列满, 上报数据被丢弃)
+      - alert: EhomeDataEventBusDropped
+        expr: rate(ehome_data_event_bus_dropped_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DataEventBus 正在丢弃数据上报"
+          description: >-
+            DataEventBus 有界输入队列已满, 近 5 分钟持续丢弃数据上报
+            (速率 {{ $value | humanize }}/s), 数据永久丢失。
+            排查方向: 消费者是否阻塞 (DB 慢/锁等待)、worker 消费能力、队列容量;
+            对照 EhomeDataConsumerDBWriteFailures 判断是否 DB 写失败导致反向背压。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:207 (Counter)
+      # 递增点:   backend/internal/nodemgr/config_event_bus.go:74
+      - alert: EhomeConfigEventBusDropped
+        expr: rate(ehome_event_bus_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ConfigEventBus 丢弃配置事件"
+          description: >-
+            ConfigEventBus 近 5 分钟持续丢弃配置事件 (速率 {{ $value | humanize }}/s),
+            节点可能收不到配置变更。
+            排查方向: nodemgr 配置事件消费是否阻塞、事件总线容量、上游配置更新速率。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:226 (CounterVec, 标签 stage / consumer)
+      # 递增点:   backend/internal/logstream/bus.go:151
+      - alert: EhomeLogEventBusDropped
+        expr: rate(ehome_log_event_bus_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LogEventBus 丢弃日志批次 ({{ $labels.stage }} / {{ $labels.consumer }})"
+          description: >-
+            stage={{ $labels.stage }} consumer={{ $labels.consumer }} 近 5 分钟持续
+            丢弃日志批次 (速率 {{ $value | humanize }}/s)。
+            排查方向: 日志消费落库是否阻塞、DB 写入延迟、消费并发与批量大小。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:47 (Gauge)
+      # 更新点:   backend/internal/nodemgr/worker_pool.go:99
+      - alert: EhomeWorkerPoolQueueBacklog
+        expr: ehome_worker_pool_queue_size > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据上报 worker 队列积压"
+          description: >-
+            数据上报 worker 池队列深度持续 5 分钟 > 100 (当前 {{ $value }})。
+            排查方向: 下游 DB 写入慢、worker 数不足、节点上报突发;
+            队列持续满会触发 overflow 并丢弃数据。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:188 (Counter)
+      # 递增点:   backend/internal/nodemgr/handler_data.go:87
+      - alert: EhomeWorkerPoolOverflow
+        expr: rate(ehome_worker_pool_overflow_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "数据上报 worker 队列溢出丢数据"
+          description: >-
+            近 2 分钟 worker 池队列溢出持续发生 (速率 {{ $value | humanize }}/s),
+            上报数据被拒绝并丢失。
+            排查方向: 立即检查 DB 可用性与慢查询、worker 池容量与背压策略。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:194 (Counter)
+      # 递增点:   backend/internal/nodemgr/handler_data.go:92
+      - alert: EhomeWorkerPoolBackpressureBlock
+        expr: rate(ehome_worker_pool_backpressure_block_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据上报触发背压阻塞"
+          description: >-
+            近 5 分钟 MQTT 回调被 worker 池背压阻塞 (速率 {{ $value | humanize }}/s)。
+            排查方向: 消费速度跟不上摄入速度; 长期阻塞会拖慢整个 MQTT 消费循环。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:34 (Counter)
+      # 递增点:   backend/internal/databus/consumers_light.go:51
+      - alert: EhomeDataReportErrors
+        expr: rate(ehome_data_report_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据上报处理出错"
+          description: >-
+            近 5 分钟数据上报处理错误持续出现 (速率 {{ $value | humanize }}/s)。
+            排查方向: 报文解析/字段校验失败、设备 ID 映射、下游消费者异常;
+            对照 EhomeDataEventBusDropped 判断是否已造成丢弃。
+
+      # 指标定义: backend/pkg/metrics/metrics.go:140 (Counter)
+      # 递增点:   backend/internal/pendingwrite/pendingwrite.go:391 (清理超时条目)
+      - alert: EhomePendingWriteTimeouts
+        expr: rate(ehome_pendingwrite_timeout_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "待确认写命令超时"
+          description: >-
+            近 5 分钟持续出现待确认写命令超时 (速率 {{ $value | humanize }}/s),
+            设备可能已离线或响应链路中断。
+            排查方向: 设备在线状态、MQTT 下行发布、响应主题订阅、超时配置。
+
+  # ── MQTT ─────────────────────────────────────────────────────────────
+  - name: ehome-mqtt
+    rules:
+      # 指标定义: backend/pkg/metrics/metrics.go:104 (CounterVec, 标签 topic)
+      # 注意: 该指标已在 pkg/metrics 定义, 但当前 backend 代码尚无递增点
+      #       (仅 metrics_test.go 调用)。本规则为前向兼容: 一旦接入 publish
+      #       失败计数即自动生效, 无序列时不产生误报。
+      - alert: EhomeMqttPublishFailures
+        expr: rate(ehome_mqtt_publish_failures_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MQTT 发布失败 ({{ $labels.topic }})"
+          description: >-
+            topic={{ $labels.topic }} 近 2 分钟 MQTT 发布失败持续发生
+            (速率 {{ $value | humanize }}/s)。
+            排查方向: EMQX 连通性/认证、broker 可达性、QoS 队列积压、TLS/ACL 配置。
+
+  # ── 设备在线健康 ──────────────────────────────────────────────────────
+  - name: ehome-device-health
+    rules:
+      # 指标定义: backend/pkg/metrics/metrics.go:10 (Gauge)
+      # 更新点:   backend/internal/nodemgr/manager.go:198 (onlineCount)
+      # 门控指标定义: backend/pkg/metrics/metrics.go:98 (ehome_data_received_total);
+      #             递增点: backend/internal/nodemgr/handler_data.go:65
+      # 门控避免"全新空环境无设备"误报: 仅当历史上有过数据上报时, 在线数归零才告警。
+      - alert: EhomeAllNodesOffline
+        expr: (ehome_nodes_online == 0) and (count(ehome_data_received_total) > 0)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "全部节点离线 (在线数为 0)"
+          description: >-
+            平台历史上有过数据上报, 但 ehome_nodes_online 已持续 15 分钟为 0。
+            排查方向: EMQX 连接数与断连日志、nodemgr 心跳/离线判定逻辑、
+            后端与 broker 网络、节点供电与网络。
