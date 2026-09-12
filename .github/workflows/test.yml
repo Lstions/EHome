@@ -114,6 +114,90 @@ jobs:
         run: |
           go test -race -count=1 -tags=integration ./...
 
+  # ─── Backend: scenario simulation (real PostgreSQL + real EMQX) ──
+  # backend/simulation 的 preflight 是硬的：必须连真实 PostgreSQL（自建/自删
+  # ehome_sim_<runid>，连维护库 postgres 执行 CREATE/DROP）与真实 EMQX（真实
+  # MQTT 收发二进制帧），缺任何一方直接失败而非跳过。
+  # 就绪判定一律用健康检查 + 显式轮询，不用固定 sleep。
+  backend-scenarios:
+    name: Backend (scenario simulation)
+    runs-on: ubuntu-latest
+    needs: backend
+    services:
+      # 与 backend-integration 完全相同的 PG 配置（同镜像 / 账号 / 库）。
+      # POSTGRES_USER=ehome 即集群超级用户，故具备 CREATEDB 权限（harness 必需）。
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: ehome
+          POSTGRES_PASSWORD: ehome123
+          POSTGRES_DB: ehome_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ehome"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      # emqx ping = 节点存活探针（bin/emqx: assert_node_alive），已启动即 exit 0
+      emqx:
+        image: emqx/emqx:5.8
+        ports:
+          - 1883:1883
+        options: >-
+          --health-cmd "emqx ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      # 服务容器健康检查只覆盖"容器内 EMQX 已启动"，不覆盖宿主端口映射；
+      # 这里从 runner 侧显式轮询 1883，连得上才算真的可用（上限 60s）。
+      - name: Wait for EMQX MQTT port (1883)
+        run: |
+          for i in $(seq 1 30); do
+            if timeout 2 bash -c '</dev/tcp/127.0.0.1/1883' 2>/dev/null; then
+              echo "EMQX 1883 已就绪（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::EMQX 1883 在 60s 内不可达"
+          exit 1
+
+      - name: Run scenario simulation tests (real server + PG + EMQX)
+        env:
+          EHOME_DB_HOST: 127.0.0.1
+          EHOME_DB_PORT: 5432
+          EHOME_DB_USER: ehome
+          EHOME_DB_PASSWORD: ehome123
+          MQTT_BROKER: tcp://127.0.0.1:1883
+          # 抢不到 run 级排他锁时快速失败，而不是等默认的 45m
+          EHOME_SIM_LOCK_WAIT: 3s
+        run: go test -tags=simulation -count=1 -timeout=30m ./simulation/...
+
+      # summary.json（失败详情 + 证据）与 server.log 在失败时最有价值。
+      # 路径是仓库根的 .logs/simulation，不是 backend/.logs —— harness 的证据目录
+      # 固定在 repoRoot/.logs/simulation（env.go:198 经 repoRoot 向上查找 backend/go.mod），
+      # 与 go test 的工作目录无关；uses 步骤的 path 也相对 GITHUB_WORKSPACE 而非
+      # defaults.run.working-directory。写成 backend/.logs/... 会永远匹配不到。
+      - name: Upload simulation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulation-evidence
+          path: .logs/simulation/
+          if-no-files-found: ignore
+
   # ─── Frontend: lint + unit tests ─────────────────────────────────
   frontend:
     name: Frontend (lint + test)
@@ -195,16 +279,18 @@ jobs:
     name: CI Summary
     if: always()
     runs-on: ubuntu-latest
-    needs: [backend, backend-integration, frontend, firmware]
+    needs: [backend, backend-integration, backend-scenarios, frontend, firmware]
     steps:
       - name: Check results
         run: |
           echo "Backend:       ${{ needs.backend.result }}"
           echo "Integration:   ${{ needs.backend-integration.result }}"
+          echo "Scenarios:     ${{ needs.backend-scenarios.result }}"
           echo "Frontend:      ${{ needs.frontend.result }}"
           echo "Firmware:      ${{ needs.firmware.result }}"
           if [ "${{ needs.backend.result }}" = "failure" ] || \
              [ "${{ needs.backend-integration.result }}" = "failure" ] || \
+             [ "${{ needs.backend-scenarios.result }}" = "failure" ] || \
              [ "${{ needs.frontend.result }}" = "failure" ] || \
              [ "${{ needs.firmware.result }}" = "failure" ]; then
             echo "::error::One or more CI jobs failed"
