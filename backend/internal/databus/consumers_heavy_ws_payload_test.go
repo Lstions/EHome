@@ -81,6 +81,15 @@ func TestSensorParserConsumerBroadcastsCanonicalWSFieldNames(t *testing.T) {
 			t.Errorf("data_update missing canonical field %q: %v", key, dataUpdate)
 		}
 	}
+	// node_id is the STRING node serial (node.NodeID) — the same value channel_data,
+	// edge_device_status and the REST API publish. It used to leak the numeric
+	// primary key, so field-presence alone is not enough: pin type and value.
+	if got := dataUpdate["node_id"]; got != node.NodeID {
+		t.Errorf("data_update node_id = %v (%T), want string node serial %q", got, got, node.NodeID)
+	}
+	if _, isString := dataUpdate["node_id"].(string); !isString {
+		t.Errorf("data_update node_id must be a string node serial, got %T (%v)", dataUpdate["node_id"], dataUpdate["node_id"])
+	}
 	for _, key := range []string{"collector_id", "collector_name", "device_id", "device_name", "sensor_device_id"} {
 		if _, ok := dataUpdate[key]; ok {
 			t.Errorf("data_update must not carry legacy field %q: %v", key, dataUpdate)
@@ -92,6 +101,13 @@ func TestSensorParserConsumerBroadcastsCanonicalWSFieldNames(t *testing.T) {
 		if _, ok := channelData[key]; !ok {
 			t.Errorf("channel_data missing canonical field %q: %v", key, channelData)
 		}
+	}
+	// Both payloads must agree on node_id; divergence was the defect.
+	if got := channelData["node_id"]; got != node.NodeID {
+		t.Errorf("channel_data node_id = %v (%T), want string node serial %q", got, got, node.NodeID)
+	}
+	if channelData["node_id"] != dataUpdate["node_id"] {
+		t.Errorf("channel_data node_id = %v and data_update node_id = %v must match", channelData["node_id"], dataUpdate["node_id"])
 	}
 	for _, key := range []string{"sensor_device_id", "sensor_device_name", "sensor_type"} {
 		if _, ok := channelData[key]; ok {

@@ -207,6 +207,30 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		}
 	}
 
+	// ---- 摄入边界 fail-closed 门: 已注销节点不得再产生历史数据/WS 推送 ----
+	// 节点注销是 nodes 行的软删除 (docs/设计/节点.md §注销), 注销时该节点的
+	// channels/edge_devices 行按设计保留 (历史归属不能丢), 因此"edge_device 命中"
+	// 绝不等于"节点仍存活": 旧通道上的上报仍会走到这里。
+	// Preload("Node") 带软删范围, 对已注销节点返回零值 (Node.ID == 0, 已实测),
+	// 对确实不存在的节点同样为零值 —— 两种情形统一按"节点不可用"拒收, 与
+	// commandexec 的 fail-closed 门同风格。门内拦截范围: 解析 / unified_data /
+	// device_data / rollup / 最新值缓存 / 告警 / 自动化 / 数据源健康 / HA / WS。
+	// 注意: 这里不额外查库 (零值即拒收), 健康路径查询次数不变。
+	if device.Node.ID == 0 {
+		logger.Warn("databus: node retired; refusing sample at ingest boundary",
+			"consumer", c.Name(),
+			"node_id", device.NodeID,
+			"reported_node_id", evt.DeviceID,
+			"edge_device_id", device.ID,
+			"channel_id", evt.ChannelID,
+			"request_id", evt.RequestID,
+			"reason", c.nodeIngestDropReason(device.NodeID),
+		)
+		// 帧已完整重组, 丢弃前释放重组缓冲, 避免已注销节点持续上报堆积内存。
+		c.reassembler.Consume(evt.DeviceID, uint32(evt.RequestID))
+		return
+	}
+
 	// Parse sensor data
 	var sensorData []parser.Field
 	var parseMethod string
@@ -449,11 +473,23 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Broadcast data_update with canonical terminology: node = node_id/node_name,
 	// edge device = edge_device_id/edge_device_name. The legacy collector_* names
 	// and the duplicate device_id alias are no longer emitted.
+	//
+	// node_id carries the STRING node serial (device.NodeID). It used to carry
+	// device.Node.ID, the numeric primary key, so the same field name meant two
+	// different things inside this one function: channel_data above (evt.DeviceID),
+	// edge_device_status and the REST API (handler_data.go, handler_node.go) all
+	// use the string serial. No consumer needs the primary key - the frontend only
+	// resolves node_id against serials (NodeList/NodeDetail/NodeOverview/
+	// ChannelPanel compare it to a serial; stores/websocket.ts types it as
+	// number-or-string; the data_update subscribers Dashboard.vue and
+	// useRealtimeData.ts ignore node_id entirely) - and row identity is already
+	// addressable through edge_device_id. Hence the unification, without adding a
+	// separate node_db_id field that nothing consumes.
 	if c.wsHub != nil && len(sensorData) > 0 {
 		c.wsHub.BroadcastEvent(events.DataUpdate, map[string]interface{}{
 			"edge_device_id":   device.ID,
 			"edge_device_name": device.Name,
-			"node_id":          device.Node.ID,
+			"node_id":          device.NodeID,
 			"node_name":        device.Node.Name,
 			"channel_id":       evt.ChannelID,
 			"data":             dataMap,
@@ -462,4 +498,24 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	}
 
 	logger.Debugf("[%s] Parsed %d sensors using %s", evt.DeviceID, len(sensorData), parseMethod)
+}
+
+// nodeIngestDropReason 为摄入边界 fail-closed 门给出可排查的丢弃原因。
+// 只在丢弃路径调用 (冷路径), 健康摄入路径不增加查询; 正因为默认范围恰好
+// 隐藏了要找的那一行, 这里必须 Unscoped。
+func (c *SensorParserConsumer) nodeIngestDropReason(nodeID string) string {
+	if nodeID == "" {
+		return "node_id_empty"
+	}
+	var node models.Node
+	if err := c.db.Unscoped().Select("id", "deleted_at").
+		Where("node_id = ?", nodeID).First(&node).Error; err != nil {
+		return "node_missing"
+	}
+	if node.DeletedAt.Valid {
+		return "node_soft_deleted"
+	}
+	// 节点行仍存活却走到丢弃路径: Preload 未回填 (理论上不可达)。仍然 fail-closed,
+	// 由运维按该原因继续排查。
+	return "node_unresolved"
 }
