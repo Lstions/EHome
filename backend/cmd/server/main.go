@@ -234,13 +234,20 @@ func main() {
 	// 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 求值器+执行器构造接线。
 	// 与 alert 并列挂同一批解析后物理量; 动作执行一律走 commandexec (9 gate+幂等+审计)。
 	// 系统 actor = 单主体管理员 (subject_key=system_admin), 策略执行归因到该主体。
-	var systemActorID uint
+	//
+	// 这里只是**启动期预检**, 不是取值来源: 命中则作为 Planner 的初值 (省掉首次
+	// 惰性查询); 未命中是全新安装的正常状态 —— 该用户由 POST /api/v1/auth/initialize
+	// 在进程启动**之后**创建。因此: 不中止启动, 也**不把 0 当有效值冻结**。
+	// 真正的取值由 Planner 在首次自动 device_action 触发时惰性解析并缓存
+	// (automation.Planner.resolveSystemActorID), 否则整条自动执行链会在进程整个
+	// 生命周期内失效, 直到重启才自愈。
+	var systemActorPrecheckID uint
 	{
 		var adminUser models.User
 		if err := db.Where("subject_key = ? AND retired_at IS NULL", models.SystemAdminSubjectKey).First(&adminUser).Error; err == nil {
-			systemActorID = adminUser.ID
+			systemActorPrecheckID = adminUser.ID
 		} else {
-			logger.Warnf("[automation] 未找到系统主体用户 (subject_key=system_admin), 策略 device_action 执行将受阻: %v", err)
+			logger.Infof("[automation] 系统主体用户尚未创建 (subject_key=system_admin), 首次自动 device_action 触发时将惰性解析: %v", err)
 		}
 	}
 	actionRegistry := deviceaction.NewBuiltInRegistry(driverRegistry)
@@ -268,7 +275,8 @@ func main() {
 	defer dataSourceStop()
 	go datasourceSvc.Start(dataSourceCtx)
 
-	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorID)
+	// systemActorPrecheckID 可能为 0 (全新安装): 语义是"待 Planner 惰性解析", 不是有效 actor。
+	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorPrecheckID)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)
@@ -348,8 +356,18 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	// Gzip compression for API responses (20MB JSON → ~3MB)
-	r.Use(gzip.Gzip(gzip.DefaultCompression))
+	// Gzip compression for API responses (20MB JSON → ~3MB).
+	// /metrics and /api/v1/metrics/prometheus are excluded: promhttp.Handler()
+	// performs its own gzip negotiation and emits its own gzip framing, so
+	// wrapping it in this middleware produced a doubly-framed body
+	// ([gzip header][gzip header][single deflate stream]) that no standard
+	// gzip decoder can read — breaking real Prometheus scrapes. Excluding the
+	// paths lets promhttp negotiate gzip correctly and set its own
+	// Content-Encoding header, so compression is preserved.
+	r.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPaths([]string{
+		"/metrics",
+		"/api/v1/metrics/prometheus",
+	})))
 	allowedOrigins := []string{}
 	for _, origin := range strings.Split(os.Getenv("EHOME_ALLOWED_ORIGINS"), ",") {
 		if value := strings.TrimSpace(origin); value != "" {

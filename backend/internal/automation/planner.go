@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/commandexec"
@@ -29,10 +30,18 @@ import (
 // 铁律 4: require_confirmed=true 的规则不直接执行, 仅生成"建议执行"通知
 // + IssueConfirmation 占位 (人工确认后走既有 confirmation 链路)。
 type Planner struct {
-	db            *gorm.DB
-	cmdSvc        *commandexec.Service
-	broadcast     func(eventType string, payload any) // nil 时跳过 WS 广播
-	systemActorID uint                                // main.go 注入, 内置系统用户 ID
+	db        *gorm.DB
+	cmdSvc    *commandexec.Service
+	broadcast func(eventType string, payload any) // nil 时跳过 WS 广播
+
+	// actorMu 保护 systemActorID 的惰性解析与缓存。HandleTrigger 会被多个
+	// worker 并发调用, 首次解析必须串行化 (顺带保证只查一次库)。
+	// 注意: 持锁期间做一次 DB 查询可接受 —— 只有未命中缓存的首次调用才会查。
+	actorMu sync.Mutex
+	// systemActorID 内置系统主体用户 ID (subject_key=system_admin)。
+	// 0 = "尚未解析", 不是有效 actor: 首次自动 device_action 触发时由
+	// resolveSystemActorID 惰性解析并缓存 (见 NewPlanner 注释)。
+	systemActorID uint
 
 	// latestValueFn 数据层时序化 (方案 v3.4 §3.2.4): 最新值查询回调,
 	// 默认走 api.LatestValue; 测试注入内存实现。nil 时跳过 F4 条件复核。
@@ -42,8 +51,15 @@ type Planner struct {
 	nowFn func() time.Time
 }
 
-// NewPlanner 构造编排器。systemActorID 必须是 users 表内置系统用户 (is_system),
-// 由 main.go 在启动时确保存在后注入; 0 会被 commandexec 外键拒绝。
+// NewPlanner 构造编排器。systemActorID 是 users 表内置系统主体用户
+// (subject_key=system_admin AND retired_at IS NULL) 的 ID; main.go 的启动期
+// 预检若命中则作为初值传入, 省掉首次惰性查询。
+//
+// 允许传 0, 语义是"尚未解析"而非有效 actor: 全新安装时该用户由
+// POST /api/v1/auth/initialize 在进程启动**之后**创建, 启动期解析必然拿不到。
+// 真正的取值在首次自动 device_action 触发时由 resolveSystemActorID 惰性解析并缓存,
+// **绝不能**把启动期的 0 冻结成长期状态 —— 那会让自动 device_action 在进程整个
+// 生命周期内被 commandexec 的 ActorUserID==0 fail-closed 校验拒绝, 直到重启才自愈。
 func NewPlanner(db *gorm.DB, cmdSvc *commandexec.Service, broadcast func(string, any), systemActorID uint) *Planner {
 	return &Planner{
 		db:            db,
@@ -114,6 +130,34 @@ func (p *Planner) HandleTrigger(ev TriggerEvent) {
 	}
 }
 
+// ── 系统 actor 惰性解析 (P0: 全新安装后自动 device_action 永久失败) ──
+
+// resolveSystemActorID 返回内置系统主体用户 ID, 首次调用时解析并缓存。
+//
+// 为什么必须惰性: main.go 的启动期预检发生在 POST /api/v1/auth/initialize 之前,
+// 全新安装时 users 表还是空的; 若把启动期的 0 当终值冻结, 自动 device_action 会在
+// 进程整个生命周期内被 commandexec 的 ActorUserID==0 fail-closed 校验拒绝
+// (事件恒为 failed_dispatch "invalid command request"), 只有重启才自愈。
+//
+// 并发: 用 actorMu 串行化解析 (HandleTrigger 可能被多个 worker 并发调用),
+// 已缓存非 0 时走快路径直接返回, 后续触发不再查库。
+func (p *Planner) resolveSystemActorID() (uint, error) {
+	p.actorMu.Lock()
+	defer p.actorMu.Unlock()
+	if p.systemActorID != 0 {
+		return p.systemActorID, nil
+	}
+	var admin models.User
+	if err := p.db.
+		Where("subject_key = ? AND retired_at IS NULL", models.SystemAdminSubjectKey).
+		First(&admin).Error; err != nil {
+		return 0, fmt.Errorf("active system_admin user not found: %w", err)
+	}
+	p.systemActorID = admin.ID
+	logger.Info("automation: resolved system actor lazily", "user_id", admin.ID)
+	return admin.ID, nil
+}
+
 // executeDeviceAction 走 commandexec.Service.Create (裁决 1)。
 // 幂等键 = automation:<rule_id>:<yyyymmdd>:<seq> (裁决 3) — seq 为当日该规则
 // 已执行次数+1, 保证同日多次触发幂等键不同, 跨日自然重置。
@@ -134,9 +178,20 @@ func (p *Planner) executeDeviceAction(rule models.AutomationRule, at time.Time, 
 		Count(&seq).Error
 	idemKey := fmt.Sprintf("automation:%d:%s:%d", rule.ID, at.Format("20060102"), seq+1)
 
+	// 系统 actor 惰性解析: 全新安装下该用户在进程启动后才创建, 这里才第一次拿得到。
+	// 解析失败 = 自动路径被禁用 (未初始化 / 主体被停用): 照常留审计, 但 Detail 写
+	// 真实原因 (不是笼统的 "invalid command request"), 并补一条面向用户的通知。
+	actorID, err := p.resolveSystemActorID()
+	if err != nil {
+		eventID := p.recordRet(rule, at, value, models.AutomationResultFailedDispatch, "",
+			"system actor unavailable: "+err.Error())
+		p.notifySystemActorUnavailableOnce(at, eventID, err)
+		return
+	}
+
 	exec, _, err := p.cmdSvc.Create(context.Background(), commandexec.CreateInput{
 		EdgeDeviceID:   rule.ActionDeviceID,
-		ActorUserID:    p.systemActorID,
+		ActorUserID:    actorID,
 		ActorKind:      commandexec.ActorKindSystem,
 		ActionID:       rule.ActionID,
 		Params:         params,
@@ -198,13 +253,22 @@ func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (str
 
 // isGateError 判定 commandexec 返回错误是否属于 availability gate fail-closed
 // (gate 拒绝 = 预期安全行为, 与 dispatch 传输失败在审计上区分)。
+//
+// 必须用 errors.Is 而不是比对错误文本: commandexec 的 gate 拒绝返回的是哨兵
+// ErrActionUnavailable ("action is unavailable for this device", service.go:27),
+// 旧实现的 len(msg)>=18 && msg[:18]=="action unavailable" 与它**恒不相等**
+// ("action is unavail" != "action unavailable") —— failed_gate 因此全仓没有生产者,
+// 门禁拒绝被错误地记成 failed_dispatch。
+//
+// Create 的所有失败出口都在 gorm 事务回调里直接 return 哨兵本身(service.go:449-531):
+//   - 动作目录未命中 / 任一 availability gate 不通过 → ErrActionUnavailable (原样返回)
+//   - 参数不可解析 → fmt.Errorf("%w: %v", ErrInvalidParams, err) (包装, 本就不是 gate)
+//   - 其余 gate (确认制/近认证) → 各自的哨兵
+//
+// gorm 的 Transaction 用 defer 直接 return 回调的 err, 不再包一层, 因此 errors.Is
+// 能可靠穿透。此处不再保留文案兜底: 文案比对正是这个缺陷的成因, 留着只会再次腐烂。
 func isGateError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// gate 失败错误均带 "action unavailable" 前缀 (commandexec/service.go)。
-	return len(msg) >= 18 && msg[:18] == "action unavailable"
+	return errors.Is(err, commandexec.ErrActionUnavailable)
 }
 
 // record 落审计行 (fail-open: 写失败只计指标不阻塞, 对齐 alert 风格)。
@@ -280,6 +344,56 @@ func (p *Planner) notifyDailyLimitOnce(rule models.AutomationRule, at time.Time,
 			"rule_name": rule.Name,
 			"event_id":  eventID,
 			"limit":     rule.MaxDailyExec,
+		})
+	}
+}
+
+// 系统 actor 不可用通知的幂等键 (查询与落库共用同一组常量)。
+// 与 notifyDailyLimitOnce 同样是 (source, source_id, title) 三元组幂等, 但**不按天重置**:
+// "未初始化 / 主体被停用"是持续性的系统状态, 不是每日配额; 同一原因只发一条,
+// 避免每次触发都往通知中心刷 (修好前每次触发的原因完全相同)。
+const (
+	automationSystemActorSource   = "automation_system"
+	automationSystemActorSourceID = "system_admin"
+	automationSystemActorTitle    = "自动化执行已禁用: 系统主体用户不可用"
+)
+
+// notifySystemActorUnavailableOnce 系统 actor 解析失败的告警通知 (同一原因只发一次)。
+//
+// 为什么必须通知: 解析失败时自动 device_action 全部静默失败 (事件只落审计表),
+// 用户会误以为策略生效。这里是唯一面向用户的提示 —— 级别用 critical (type=error),
+// 与"整条自动化执行链被禁用"的严重度相称, 比日熔断的 warning 更醒目。
+func (p *Planner) notifySystemActorUnavailableOnce(at time.Time, eventID uint, cause error) {
+	var cnt int64
+	// 幂等闸: 已有同 (source, source_id, title) 通知则跳过 (全部历史, 不按天)
+	if err := p.db.Model(&models.Notification{}).
+		Where("source = ? AND source_id = ? AND title = ?",
+			automationSystemActorSource, automationSystemActorSourceID, automationSystemActorTitle).
+		Count(&cnt).Error; err == nil && cnt > 0 {
+		return
+	}
+	desc := fmt.Sprintf("自动化 device_action 执行已被禁用: 无法解析系统主体用户 (subject_key=%s)。"+
+		"若系统尚未初始化, 请完成初始化 (POST /api/v1/auth/initialize); 若已初始化, "+
+		"请检查该主体是否被停用 (retired_at)。原因: %v (event_id=%d)",
+		models.SystemAdminSubjectKey, cause, eventID)
+	n := models.Notification{
+		Type:        models.NotificationType(models.AlertLevelCritical),
+		Title:       automationSystemActorTitle,
+		Message:     desc,
+		Description: desc,
+		Source:      automationSystemActorSource,
+		SourceID:    automationSystemActorSourceID,
+		Read:        false,
+		CreatedAt:   at,
+	}
+	if err := p.db.Create(&n).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
+		logger.Warn("automation: failed to create system actor notification", "error", err)
+	}
+	if p.broadcast != nil {
+		p.broadcast("automation_system_actor_unavailable", gin.H{
+			"event_id": eventID,
+			"reason":   cause.Error(),
 		})
 	}
 }

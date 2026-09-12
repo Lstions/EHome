@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,8 +25,15 @@ import (
 
 // setupConfirmPlanner 造可走通 ConfirmEvent 成功路径的最小真实链路:
 // node(capability 新鲜)+channel+edge(prs3001/read_rainfall 启用)+planner(dispatch on)。
-// 返回 planner / cmdSvc / edge。
+// 返回 planner / cmdSvc / edge。systemActorID 固定 900 (仅触发路径归因占位)。
 func setupConfirmPlanner(t *testing.T) (*Planner, *models.EdgeDevice) {
+	t.Helper()
+	return setupPlannerWithActor(t, 900)
+}
+
+// setupPlannerWithActor 同 setupConfirmPlanner, 但显式指定 systemActorID —
+// 惰性解析测试传 0 (= 全新安装: 用户在进程启动后才由 initialize 创建)。
+func setupPlannerWithActor(t *testing.T, systemActorID uint) (*Planner, *models.EdgeDevice) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db := testutil.OpenTestDB(t)
@@ -81,8 +90,7 @@ func setupConfirmPlanner(t *testing.T) (*Planner, *models.EdgeDevice) {
 	svc := commandexec.NewService(db, actions)
 	svc.SetDispatchEnabled(true)
 
-	// systemActorID=900 内置系统用户占位 (仅触发路径归因, 本文件主测 confirm 操作者路径)。
-	return NewPlanner(db, svc, nil, 900), &edge
+	return NewPlanner(db, svc, nil, systemActorID), &edge
 }
 
 func itoa(v uint) string {
@@ -172,10 +180,12 @@ func TestConfirmEventCreateFailureFlipsFailed(t *testing.T) {
 	if err := p.db.First(&after, ev.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	// isGateError(Create 的 ErrActionUnavailable)=false → failed_dispatch (planner.go:339-341;
-	// command_engine_gate 在 Create 内部归为 dispatch 失败, 非 availability gate 前置失败)。
-	if after.Result != models.AutomationResultFailedDispatch {
-		t.Fatalf("result=%s want failed_dispatch (create gate 拦截后须翻转)", after.Result)
+	// isGateError(Create 的 ErrActionUnavailable)=true → failed_gate。
+	// command_engine_gate 是 Create 内 9 项 availability gate 之一, 它的拒绝就是
+	// 门禁拒绝, 必须落在冻结结果码 failed_gate 上 (设计 §4 / SIM-ACTN-005)。
+	// 旧断言期望 failed_dispatch, 固化的正是 isGateError 文案比对失效这个缺陷。
+	if after.Result != models.AutomationResultFailedGate {
+		t.Fatalf("result=%s want failed_gate (create gate 拦截后须翻转)", after.Result)
 	}
 }
 
@@ -450,11 +460,15 @@ func TestHandleTriggerConditionChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.HandleTrigger(TriggerEvent{Rule: rule3, Value: 600, At: p.nowFn()})
+	// confirm_reset 是 medium risk 的 single-read, 必然被 command_engine_gate 拦,
+	// 因此实际落 failed_gate (门禁拒绝), 不是 executed。
+	// 本场景的断言对象是"F4 条件复核通过、走到了动作分发"—— 门禁失败同样是走到了
+	// 分发的证据 (旧断言列的 failed_dispatch 是 isGateError 死分支时期的错误契约)。
 	var ev3 models.AutomationEvent
 	if err := p.db.Where("rule_id = ? AND result IN ?", rule3.ID,
-		[]string{models.AutomationResultExecuted, models.AutomationResultFailedDispatch}).
+		[]string{models.AutomationResultExecuted, models.AutomationResultFailedGate}).
 		First(&ev3).Error; err != nil {
-		t.Fatalf("executed/failed_dispatch event missing (condition passed): %v", err)
+		t.Fatalf("executed/failed_gate event missing (condition passed): %v", err)
 	}
 }
 
@@ -825,5 +839,188 @@ func TestHandleTriggerAutoSystemActorSkipsMediumConfirmation(t *testing.T) {
 	}
 	if audit.ActorType != "system" {
 		t.Fatalf("audit actor_type = %q, want system", audit.ActorType)
+	}
+}
+
+// ─── 系统 actor 惰性解析 (P0: 全新安装后自动 device_action 永不执行) ───
+//
+// 缺陷链: main.go 在进程启动时解析 system_admin, 而该用户由 POST /auth/initialize
+// 在启动**之后**创建 → 整个进程生命周期内 systemActorID=0 → commandexec 的
+// ActorUserID==0 fail-closed 校验直接拒绝 (事件恒为 failed_dispatch)。
+// 以下四条覆盖: ①用户后创建也能解析 ②解析结果被缓存 ③失败 Detail 写真实原因 ④只通知一次。
+
+// newSystemActorUser 造 users 表内置系统主体用户 —— 全新安装里它由
+// POST /api/v1/auth/initialize 在服务进程启动**之后**创建。
+func newSystemActorUser(t *testing.T, db *gorm.DB, id uint) models.User {
+	t.Helper()
+	sk := models.SystemAdminSubjectKey
+	u := models.User{ID: id, Username: "sys-" + itoa(id), PasswordHash: "hash",
+		Enabled: true, SubjectKey: &sk, SessionVersion: 1}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatalf("create system actor user: %v", err)
+	}
+	return u
+}
+
+// autoDeviceActionRule 造自动触发 + device_action 规则 (low_read: 低风险 read,
+// 过 ChannelCmdV2 transport gate, 无确认制 → 直接执行落 executed)。
+func autoDeviceActionRule(edgeID uint) models.AutomationRule {
+	return models.AutomationRule{
+		Name:                "自动执行系统 actor",
+		Enabled:             true,
+		TriggerType:         models.AutomationTriggerSensorThreshold,
+		TriggerEdgeDeviceID: edgeID,
+		TriggerSensorName:   "illuminance",
+		TriggerComparator:   "gt",
+		TriggerThreshold:    500,
+		CooldownSec:         0,
+		RequireConfirmed:    false,
+		ActionType:          models.AutomationActionDeviceAction,
+		ActionDeviceID:      edgeID,
+		ActionID:            "low_read",
+		ActionParamsJSON:    "{}",
+	}
+}
+
+// 要求 1: Planner 构造时传 0 (用户尚不存在), 库中随后出现该用户 → 首次触发解析成功并执行。
+func TestHandleTriggerAutoResolvesSystemActorCreatedAfterStartup(t *testing.T) {
+	p, edge := setupPlannerWithActor(t, 0)
+	// 进程启动时用户还不存在 (构造传 0), 之后 initialize 才创建它。
+	admin := newSystemActorUser(t, p.db, 901)
+
+	rule := autoDeviceActionRule(edge.ID)
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 600, At: p.nowFn()})
+
+	var ev models.AutomationEvent
+	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if ev.Result != models.AutomationResultExecuted {
+		t.Fatalf("event result=%q want %q (detail: %q)", ev.Result, models.AutomationResultExecuted, ev.Detail)
+	}
+	if ev.CommandID == "" {
+		t.Fatal("executed event must carry command_id")
+	}
+	// 归因必须落在后创建的系统主体上 (不是 0, 也不是别的用户)。
+	var exec models.CommandExecution
+	if err := p.db.Where("command_id = ?", ev.CommandID).First(&exec).Error; err != nil {
+		t.Fatalf("command execution missing: %v", err)
+	}
+	if exec.ActorUserID != admin.ID {
+		t.Fatalf("actor_user_id=%d want %d (惰性解析出的系统主体)", exec.ActorUserID, admin.ID)
+	}
+}
+
+// 要求 2: 解析结果被缓存 —— 连续两次触发只查一次 users 表。
+func TestHandleTriggerAutoCachesResolvedSystemActor(t *testing.T) {
+	p, edge := setupPlannerWithActor(t, 0)
+	newSystemActorUser(t, p.db, 902)
+
+	rule := autoDeviceActionRule(edge.ID)
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// GORM 查询计数: 照 datalifecycle/merge_chain_test.go 的写法注册在
+	// After("gorm:query") —— 此时 Statement.Table 才由 BuildQuerySQL 解析出来。
+	var usersQueries atomic.Int32
+	if err := p.db.Callback().Query().After("gorm:query").
+		Register("test:count-system-actor-users-query", func(tx *gorm.DB) {
+			if tx.Statement.Table == "users" {
+				usersQueries.Add(1)
+			}
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 600, At: p.nowFn()})
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 600, At: p.nowFn()})
+
+	// 两次都必须真的执行 (第二次幂等键 seq 不同, 不是被 commandexec 幂等 replay 挡掉)。
+	var executed int64
+	p.db.Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND result = ?", rule.ID, models.AutomationResultExecuted).Count(&executed)
+	if executed != 2 {
+		t.Fatalf("executed events=%d want 2 (两次触发都应下发)", executed)
+	}
+	if got := usersQueries.Load(); got != 1 {
+		t.Fatalf("users 表查询次数=%d want 1 (解析结果必须缓存, 不能每次触发都查)", got)
+	}
+}
+
+// 要求 3: 解析失败 → failed_dispatch 且 Detail 写明真实原因 (不是 invalid command request)。
+func TestHandleTriggerAutoSystemActorUnavailableDetail(t *testing.T) {
+	p, edge := setupPlannerWithActor(t, 0) // 库里没有 system_admin (全新安装未初始化)
+	rule := autoDeviceActionRule(edge.ID)
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	p.HandleTrigger(TriggerEvent{Rule: rule, Value: 600, At: p.nowFn()})
+
+	var ev models.AutomationEvent
+	if err := p.db.Where("rule_id = ?", rule.ID).Order("id DESC").First(&ev).Error; err != nil {
+		t.Fatalf("event missing: %v", err)
+	}
+	if ev.Result != models.AutomationResultFailedDispatch {
+		t.Fatalf("result=%q want %q", ev.Result, models.AutomationResultFailedDispatch)
+	}
+	if !strings.Contains(ev.Detail, "system actor unavailable") {
+		t.Fatalf("detail=%q 应写明系统 actor 不可用", ev.Detail)
+	}
+	if !strings.Contains(ev.Detail, models.SystemAdminSubjectKey) {
+		t.Fatalf("detail=%q 应点明缺失的主体 (system_admin)", ev.Detail)
+	}
+	if strings.Contains(ev.Detail, "invalid command request") {
+		t.Fatalf("detail=%q 仍是笼统的 invalid command request, 未写明真实原因", ev.Detail)
+	}
+	// fail-closed 防线保留: 没有解析出 actor 就绝不允许执行。
+	var execs int64
+	p.db.Model(&models.CommandExecution{}).Count(&execs)
+	if execs != 0 {
+		t.Fatalf("system actor 不可用时不得产生 command_executions, 实际 %d 条", execs)
+	}
+}
+
+// 要求 4: 解析失败只通知一次 (同一原因不刷屏), 但审计一次不落。
+func TestHandleTriggerAutoSystemActorUnavailableNotifiesOnce(t *testing.T) {
+	p, edge := setupPlannerWithActor(t, 0)
+	rule := autoDeviceActionRule(edge.ID)
+	if err := p.db.Create(&rule).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 3; i++ {
+		p.HandleTrigger(TriggerEvent{Rule: rule, Value: 600, At: p.nowFn()})
+	}
+
+	// ① 审计不丢: 3 次触发 → 3 条 failed_dispatch (通知幂等不得吃掉审计行)
+	var failed int64
+	p.db.Model(&models.AutomationEvent{}).
+		Where("rule_id = ? AND result = ?", rule.ID, models.AutomationResultFailedDispatch).Count(&failed)
+	if failed != 3 {
+		t.Fatalf("failed_dispatch events=%d want 3 (审计不得被通知幂等吃掉)", failed)
+	}
+	// ② 面向用户的通知只有 1 条
+	var notes int64
+	p.db.Model(&models.Notification{}).
+		Where("source = ? AND source_id = ? AND title = ?",
+			automationSystemActorSource, automationSystemActorSourceID, automationSystemActorTitle).
+		Count(&notes)
+	if notes != 1 {
+		t.Fatalf("系统 actor 不可用通知=%d want 1 (同一原因只通知一次)", notes)
+	}
+	// ③ 通知内容要点明"完成系统初始化"
+	var note models.Notification
+	if err := p.db.Where("source = ? AND source_id = ?", automationSystemActorSource, automationSystemActorSourceID).
+		First(&note).Error; err != nil {
+		t.Fatalf("notification missing: %v", err)
+	}
+	if !strings.Contains(note.Message, "auth/initialize") {
+		t.Fatalf("通知文案=%q 应指引用户完成系统初始化", note.Message)
 	}
 }

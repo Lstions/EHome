@@ -504,7 +504,10 @@ func triggerAutomationRule(trigger automationManualTrigger) gin.HandlerFunc {
 
 // POST /api/v1/automation-events/:id/confirm
 // 裁决 4 确认制闭环: 人工确认 pending_confirm 事件后真正下发动作。
-// 前置: 操作者须先经 POST /auth/manual-confirmation 刷新 LastLoginAt (近认证门)。
+// 前置: 操作者须先经 POST /api/v1/account/reauthenticate 重新认证 (校验密码后
+// 由 authservice.AuthenticateSingleUser 刷新 LastLoginAt, 见 handler_account.go),
+// 以通过 commandexec 的近认证门 —— 该窗口为 10 分钟
+// (commandexec/confirmation.go: recentAuthenticationWindow)。
 // 无 body; planner 即铸即销 token, token 不跨请求存储。
 func confirmAutomationEvent(planner automationPlanner) gin.HandlerFunc {
 	return func(c *gin.Context) {
