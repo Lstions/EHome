@@ -75,6 +75,8 @@ func AutoMigrate() error {
 		// (id,timestamp))，AutoMigrate 无法建分区表且会把母表降级改写。
 		// SQLite 测试库由 testutil/db.go 的 AutoMigrate 覆盖。
 		&models.DataSource{},
+		&models.DataSourceHealth{},
+		&models.FailoverLog{},
 		&models.OTATask{},
 		&models.Firmware{},
 		&models.Notification{},

@@ -39,6 +39,8 @@ var allModels = []interface{}{
 	&models.DeviceData{},
 	&models.UnifiedData{},
 	&models.DataSource{},
+	&models.DataSourceHealth{},
+	&models.FailoverLog{},
 	&models.OTATask{},
 	&models.Firmware{},
 	&models.Notification{},

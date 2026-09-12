@@ -284,17 +284,55 @@ func (UnifiedDataRollup1m) TableName() string { return "unified_data_rollup_1m" 
 
 // =====================================================================
 
-// DataSource 数据源主备管理 (保留)
+// DataSource 数据源主备 (设计/数据源主备与故障转移.md v1.0)
 type DataSource struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"size:64;not null" json:"name"`
-	Type      string    `gorm:"size:20;not null" json:"type"`
-	Config    string    `gorm:"type:text" json:"config"` // JSON
-	Priority  int       `gorm:"default:0" json:"priority"`
-	Status    string    `gorm:"size:20;default:active" json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	DeviceID     uint       `gorm:"not null;index:idx_ds_device_status,priority:1;uniqueIndex:uniq_ds_source,priority:1" json:"device_id"` // LogicalDevice.ID
+	Category     string     `gorm:"size:32;not null;index:idx_ds_device_status,priority:2;uniqueIndex:uniq_ds_source,priority:2" json:"category"`
+	EdgeDeviceID uint       `gorm:"not null;index;uniqueIndex:uniq_ds_source,priority:3" json:"edge_device_id"`
+	SourceType   string     `gorm:"size:20;not null;default:edge_device" json:"source_type"`
+	Name         string     `gorm:"size:64;not null" json:"name"`
+	Description  string     `gorm:"size:255" json:"description"`
+	Priority     int        `gorm:"default:0" json:"priority"`
+	IsPrimary    bool       `gorm:"default:false" json:"is_primary"`
+	MaxFailCount int        `gorm:"default:3" json:"max_fail_count"`
+	FailCount    int        `gorm:"default:0" json:"fail_count"`
+	Status       string     `gorm:"size:20;not null;default:standby;index:idx_ds_device_status,priority:3" json:"status"`
+	LastSuccess  *time.Time `json:"last_success"`
+	LastFailure  *time.Time `json:"last_failure"`
+	Config       string     `gorm:"type:text" json:"config"`
+	Type         string     `gorm:"size:20;default:''" json:"-"` // 旧骨架兼容列, v2 清理
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
+
+// DataSourceHealth 数据源健康事件 (failure|transition)
+type DataSourceHealth struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	SourceID     uint      `gorm:"not null;index" json:"source_id"`
+	DeviceID     uint      `gorm:"index" json:"device_id"`
+	Category     string    `gorm:"size:32" json:"category"`
+	Status       string    `gorm:"size:20;not null" json:"status"`
+	Message      string    `gorm:"size:255" json:"message"`
+	ResponseTime int       `gorm:"default:0" json:"response_time"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (DataSourceHealth) TableName() string { return "data_source_health" }
+
+// FailoverLog 故障切换日志
+type FailoverLog struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	DeviceID     uint      `gorm:"not null;index" json:"device_id"`
+	Category     string    `gorm:"size:32;not null" json:"category"`
+	FromSourceID uint      `json:"from_source_id"`
+	ToSourceID   uint      `json:"to_source_id"`
+	Reason       string    `gorm:"size:32;not null" json:"reason"`
+	Trigger      string    `gorm:"size:32" json:"trigger"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (FailoverLog) TableName() string { return "failover_logs" }
 
 // =====================================================================
 

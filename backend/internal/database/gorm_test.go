@@ -173,7 +173,7 @@ func TestAutoMigrate(t *testing.T) {
 	})
 
 	t.Run("DataSource", func(t *testing.T) {
-		ds := models.DataSource{Name: "test-source", Type: "mqtt", Config: "{}"}
+		ds := models.DataSource{DeviceID: 1, Category: "temperature", EdgeDeviceID: 1, SourceType: "edge_device", Name: "test-source", Config: "{}"}
 		if err := db.Create(&ds).Error; err != nil {
 			t.Fatalf("create data source: %v", err)
 		}
