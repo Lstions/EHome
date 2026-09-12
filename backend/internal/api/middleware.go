@@ -25,9 +25,16 @@ var jwtSecret = []byte(func() string {
 	return defaultJWTSecret
 }())
 
-// isDevelopmentMode returns true if the server is running in development mode.
-// Development mode is enabled when GIN_MODE is unset (Gin defaults to debug),
-// GIN_MODE=debug, or EHOME_ENV=development.
+// isDevelopmentMode returns true if the server is explicitly running in
+// development mode. It is an AND, not an OR: BOTH variables must be set -
+// EHOME_ENV=development (case-insensitive) AND GIN_MODE=debug (exact; an unset or
+// empty GIN_MODE does NOT enable development mode).
+//
+// Callers rely on this:
+//   - ValidateJWTSecret below: in development mode the built-in default JWT secret
+//     is only warned about; otherwise startup aborts.
+//   - handler_ota.go firmware upload: with EHOME_EXTERNAL_HOST unset, this enables
+//     the request-Host fallback used to build the download URL.
 func isDevelopmentMode() bool {
 	return strings.EqualFold(os.Getenv("EHOME_ENV"), "development") && os.Getenv("GIN_MODE") == "debug"
 }

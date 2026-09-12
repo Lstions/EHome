@@ -185,11 +185,16 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		downloadURL := firmwareDownloadURL(url.PathEscape(filename), baseURL, 30*time.Minute, jwtSecret)
 
 		fw := models.Firmware{
-			Version:     version,
-			Filename:    filename,
-			Checksum:    checksum,
+			Version:  version,
+			Filename: filename,
+			Checksum: checksum,
+			// StoragePath is what DELETE /firmwares/:id uses to find the binary on
+			// disk (URL is a signed download ticket, not a path). Filename keeps its
+			// existing meaning (the uploaded base name); StoragePath records where
+			// the bytes were actually written.
 			SizeBytes:   uint64(len(data)),
 			URL:         downloadURL,
+			StoragePath: dst,
 			TargetModel: c.PostForm("target_model"),
 		}
 		if err := db.Create(&fw).Error; err != nil {
@@ -249,10 +254,19 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Also remove the .bin file from disk
-		if fw.URL != "" {
-			binary := filepath.Base(fw.URL)
-			_ = os.Remove(filepath.Join("firmwares", binary))
+		// Also remove the .bin file from disk. The path must come from
+		// StoragePath/Filename, never from URL (see firmwareBinaryDiskPath).
+		if path := firmwareBinaryDiskPath(fw.StoragePath, fw.Filename); path != "" {
+			if err := os.Remove(path); err != nil {
+				if os.IsNotExist(err) {
+					// Already gone (manual cleanup, restored DB, ...): not an error.
+					logger.Debugf("firmware %d: binary already absent at %s", fw.ID, path)
+				} else {
+					// Never swallow this again: a silent os.Remove failure is exactly
+					// why deleted firmwares kept occupying disk indefinitely.
+					logger.Warnf("firmware %d: failed to remove binary at %s: %v", fw.ID, path, err)
+				}
+			}
 		}
 		if err := db.Delete(&fw).Error; err != nil {
 			Error(c, http.StatusInternalServerError, err.Error())
@@ -260,6 +274,30 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		}
 		SuccessMsg(c, gin.H{"id": id, "version": fw.Version}, "deleted")
 	})
+}
+
+// firmwareBinaryDiskPath resolves the on-disk path of an uploaded firmware binary
+// from stored metadata. Firmware.URL must NOT be used for this: it is a signed
+// download ticket of the form
+// http://host/api/v1/firmwares/<name>.bin/download?expires=...&signature=...
+// (see firmwareDownloadURL), so filepath.Base(URL) yields "download?expires=..."
+// and the real file is never removed.
+//
+// Resolution order: StoragePath when set (written by the upload endpoint), else
+// firmwares/<base(Filename)> for rows created before StoragePath existed. The
+// candidate is re-based with filepath.Base before the final join so a corrupted or
+// hostile DB value cannot escape the firmwares/ directory - the same guard the
+// download endpoint applies. Returns "" when both fields are empty (nothing to
+// delete, e.g. an externally hosted firmware).
+func firmwareBinaryDiskPath(storagePath, filename string) string {
+	path := strings.TrimSpace(storagePath)
+	if path == "" {
+		if strings.TrimSpace(filename) == "" {
+			return ""
+		}
+		path = filepath.Join("firmwares", filepath.Base(filename))
+	}
+	return filepath.Join("firmwares", filepath.Base(path))
 }
 
 // RegisterFirmwareDownload registers the firmware download endpoint WITHOUT auth.
