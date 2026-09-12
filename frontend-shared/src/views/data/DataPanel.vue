@@ -303,6 +303,15 @@ const latestStats = reactive({
   duration: '--'
 })
 
+/** 后端 envelope 解包：数组统一从 data 取（兼容裸数组返回） */
+function unwrapList<T>(res: unknown): T[] {
+  if (Array.isArray(res)) return res as T[]
+  if (res && typeof res === 'object' && Array.isArray((res as { data?: unknown }).data)) {
+    return (res as { data: T[] }).data
+  }
+  return []
+}
+
 const extractNumericValue = (value: unknown): number | null => {
   if (typeof value === 'number') return value
   if (typeof value === 'object' && value !== null && 'value' in value) {
@@ -381,11 +390,9 @@ const loadDeviceCategories = async () => {
     const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', {
       params: { device_pk: queryForm.deviceId },
     })
-    availableCategories.value = Array.isArray(response)
-      ? response
-        .filter((item): item is MeasurementCategory => typeof item?.code === 'string' && item.code.length > 0)
-        .map(item => ({ code: item.code, unit: item.unit || sensorUnitMap[item.code] || '' }))
-      : []
+    availableCategories.value = unwrapList<MeasurementCategory>(response)
+      .filter((item): item is MeasurementCategory => typeof item?.code === 'string' && item.code.length > 0)
+      .map(item => ({ code: item.code, unit: item.unit || sensorUnitMap[item.code] || '' }))
   } catch (error) {
     logger.warn('获取设备指标类别失败', { error: String(error) })
     availableCategories.value = []
@@ -400,7 +407,7 @@ const loadCompareCategories = async () => {
   try {
     const categoryLists = await Promise.all(compareDevices.value.map(async (deviceId) => {
       const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', { params: { device_pk: deviceId } })
-      return Array.isArray(response) ? response : []
+      return unwrapList<MeasurementCategory>(response)
     }))
     const [first, ...rest] = categoryLists
     compareCategories.value = (first || []).filter((candidate: MeasurementCategory) =>
@@ -521,8 +528,9 @@ const buildChartSeries = async () => {
         params: batchParams
       })
       // 批量 API 返回格式: [{category: "temperature", data: [{...}]}, ...]
-      if (Array.isArray(batchRes)) {
-        for (const result of batchRes) {
+      const batchResults = unwrapList<MeasurementBatch>(batchRes)
+      if (batchResults.length > 0) {
+        for (const result of batchResults) {
           const cat = result.category
           if (!cat) continue
           const items = (result.data || []).filter((item) => {
@@ -560,7 +568,7 @@ const buildChartSeries = async () => {
             end_time: endTime.toISOString(),
             max_points: 500
           }
-        }).then(res => ({ cat, data: Array.isArray(res) ? res : [] }))
+        }).then(res => ({ cat, data: unwrapList<MeasurementPoint>(res) }))
           .catch(() => ({ cat, data: [] as MeasurementPoint[] }))
       )
 
@@ -756,7 +764,7 @@ const fetchCompareData = async () => {
       return {
         deviceId,
         deviceName: deviceList.value.find(d => d.id === deviceId)?.name || String(deviceId),
-        data: Array.isArray(response) ? response : []
+        data: unwrapList<MeasurementPoint>(response)
       }
     })
 

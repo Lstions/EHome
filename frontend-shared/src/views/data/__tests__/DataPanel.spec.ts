@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import DataPanel from '@/views/data/DataPanel.vue'
 import dataPanelSource from '@/views/data/DataPanel.vue?raw'
+import { edgeDeviceApi } from '@/api/edgeDevice'
 
 // ── Mock API module (correct path: @/api/edgeDevice, NOT @/api/modules/data) ──
 vi.mock('@/api/edgeDevice', () => ({
@@ -241,5 +242,88 @@ describe('DataPanel', () => {
     })
     // 真实渲染中只出现 API 返回的类别，不出现全局默认类别名称。
     expect(dataPanelSource).not.toContain("['temperature', 'humidity']")
+  })
+
+  // 后端契约变更回归：/unified-data/{categories,historical-batch,historical}
+  // 现返回 {code,data,message} envelope；若仍按裸数组解包会静默走空数组路径。
+  const triggerQuery = async (wrapper: ReturnType<typeof getMounted>, deviceId: string) => {
+    const selects = wrapper.findAll('select.el-select')
+    await selects[0].setValue(deviceId)
+    await wrapper.findAll('button').find(button => button.text().includes('查询'))!.trigger('click')
+    await flushPromises()
+    await flushPromises()
+  }
+
+  const mockHistoryWithOneRow = () => {
+    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({
+      items: [{ id: 1, collected_at: '2024-01-01T00:00:00Z', data: { temperature: 21 } }],
+      total: 1,
+    })
+  }
+
+  it('unwraps envelope categories + historical-batch to render chart series', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation((url: string) => {
+      if (url === '/api/v1/unified-data/categories') {
+        return Promise.resolve({ code: 200, data: [{ code: 'temperature', unit: '°C' }], message: 'ok' })
+      }
+      if (url === '/api/v1/unified-data/historical-batch') {
+        return Promise.resolve({
+          code: 200,
+          data: [{ category: 'temperature', data: [{ timestamp: '2024-01-01T00:00:00Z', value: 21 }] }],
+          message: 'ok',
+        })
+      }
+      return Promise.resolve({ code: 200, data: [], message: 'ok' })
+    })
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    // categories envelope 被解包 → 批量请求带上真实 category（而非空类别短路）
+    expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', {
+      params: expect.objectContaining({ categories: 'temperature' }),
+    })
+    // historical-batch envelope 被解包 → 图表真实渲染
+    expect(wrapper.find('.line-chart').exists()).toBe(true)
+  })
+
+  it('still builds chart series when APIs return bare arrays (backward compatible)', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation((url: string) => {
+      if (url === '/api/v1/unified-data/categories') {
+        return Promise.resolve([{ code: 'temperature', unit: '°C' }])
+      }
+      if (url === '/api/v1/unified-data/historical-batch') {
+        return Promise.resolve([{ category: 'temperature', data: [{ timestamp: '2024-01-01T00:00:00Z', value: 21 }] }])
+      }
+      return Promise.resolve([])
+    })
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', {
+      params: expect.objectContaining({ categories: 'temperature' }),
+    })
+    expect(wrapper.find('.line-chart').exists()).toBe(true)
+  })
+
+  it('falls back to empty trend state when categories envelope data is empty', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    expect(mockClientGet).toHaveBeenCalledWith('/api/v1/unified-data/categories', {
+      params: { device_pk: 1 },
+    })
+    // 空类别 → buildChartSeries 提前返回，不再请求批量历史，图表走空态
+    expect(mockClientGet).not.toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', expect.anything())
+    expect(wrapper.find('.line-chart').exists()).toBe(false)
   })
 })
