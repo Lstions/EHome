@@ -100,9 +100,9 @@ func TestMigrateUnifiedData_LegacyData_PreservesRowsAndAdvancesSequence(t *testi
 	if count != int64(len(seed)) {
 		t.Errorf("rows after migration = %d, want %d", count, len(seed))
 	}
-	// legacy 表保留不删 (降险)。
-	if tableExistsInSchema(t, db, legacyTable, "r") == 0 {
-		t.Error("legacy table must be retained after migration")
+	// 迁移校验通过后 legacy 旧表被 DROP (不再保留回滚副本)。
+	if tableExistsInSchema(t, db, legacyTable, "r") != 0 {
+		t.Error("legacy table must be dropped after successful migration")
 	}
 	// 历史月份分区已创建 (修复回归: 无分区则 INSERT 报 no partition of relation)。
 	if tableExistsInSchema(t, db, partitionName(partitionedTable, oldMonth), "r") == 0 {

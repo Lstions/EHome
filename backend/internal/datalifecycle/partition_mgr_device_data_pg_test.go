@@ -45,8 +45,8 @@ func seedDeviceDataRow(t *testing.T, db *gorm.DB, deviceID, logicalID uint, ts t
 
 // TestMigrateDeviceDataToPartitioned covers the legacy-data path: flat
 // device_data + rows spanning months → partitioned parent (relkind='p') with
-// month partitions, row/column conservation, retained legacy snapshot and
-// idempotent re-run.
+// month partitions, row/column conservation, legacy snapshot DROPped after the
+// row-count gate and idempotent re-run.
 func TestMigrateDeviceDataToPartitioned(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
@@ -95,9 +95,9 @@ func TestMigrateDeviceDataToPartitioned(t *testing.T) {
 	if got.NodeID != "n1" || got.DataJSON != `{"v":1}` || got.DeviceID != 1 {
 		t.Errorf("migrated row = %+v, want device_id=1 node_id=n1 data_json=%s", got, `{"v":1}`)
 	}
-	// legacy 平表保留不删 (降险)。
-	if tableExistsInSchema(t, db, "device_data_legacy", "r") == 0 {
-		t.Error("device_data_legacy must be retained after migration")
+	// legacy 平表在校验通过后被 DROP (不再保留回滚副本)。
+	if tableExistsInSchema(t, db, "device_data_legacy", "r") != 0 {
+		t.Error("device_data_legacy must be dropped after successful migration")
 	}
 	// 幂等: 二次迁移直接跳过, 不报错、不重复搬。
 	if err := MigrateTableToPartitioned(db, "device_data", "device_data_legacy"); err != nil {
@@ -144,11 +144,12 @@ func TestMigrateDeviceData_FreshDeploy_PartitionedParentAtFinalName(t *testing.T
 }
 
 // TestDeviceDataLogicalIndexSurvivesPartitionMigration pins the indexes.go
-// partitioned branch: PG names indexes schema-globally, so after the swap the
-// canonical composite index name is still held by device_data_legacy. The
-// migration-time partition sweep only happens while releaseIndexNameFromNonTarget
-// returns the canonical name to the partitioned parent — otherwise the parent
-// silently loses the (logical_device_id, timestamp DESC) index.
+// partitioned branch: after the flat table carried the canonical composite
+// index, the partition migration rebuilds it on the partitioned parent. Since
+// the legacy snapshot is now DROPped after verification, the canonical index
+// name is naturally free, but this test still guards that the
+// (logical_device_id, timestamp DESC) index ends up owned by device_data and
+// remains valid across repeated EnsureLogicalDataIndexes.
 func TestDeviceDataLogicalIndexSurvivesPartitionMigration(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)

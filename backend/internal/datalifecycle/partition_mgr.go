@@ -23,7 +23,8 @@ const (
 	// partitionRollaheadMonths 启动/每日检查时确保未来 N 个月的分区存在。
 	partitionRollaheadMonths = 3
 
-	// partitionedTable 分区母表名；legacyTable 迁移后原表保留名。
+	// partitionedTable 分区母表名；legacyTable 为 unified_data 迁移后原平表的
+	// 临时名——行数校验通过后即被 DROP，不再作为回滚副本长期保留。
 	partitionedTable = "unified_data"
 	legacyTable      = "unified_data_legacy"
 
@@ -231,11 +232,16 @@ func IsUnifiedDataPartitioned(db *gorm.DB) bool {
 // RANGE-partitioned parent (monthly, key=timestamp), preserving:
 //   - id 序列全局不变（业务零感知，id 单调排序语义不变）
 //   - 全部既有索引（分区级重建）
-//   - 原表数据（双表并存搬迁 + legacy RENAME 保留，不 DROP）
+//   - 原表数据（双表并存搬迁；校验通过后 DROP legacy 旧表，不保留回滚副本）
 //
-// legacyName 为迁移后原平表的保留名。幂等：母表已存在（已迁移过）直接返回。
+// legacyName 为迁移 swap 期间原平表的临时名，行数校验通过后立即 DROP
+// （产品决策：不再保留回滚副本以节省空间，代价是失去回滚能力）。
+// 安全门禁：仅当"迁移后母表行数 == 迁移前平表行数"校验通过才 DROP；校验
+// 失败时绝不动 legacy（旧表原样保留并报错返回）。
+// 幂等：母表已存在（已迁移过）直接返回；若此时仍残留 legacy 旧表（历史遗留），
+// 在确认母表已分区后一并 DROP。
 // SQLite no-op。
-// 步骤: 建 new 母表 → 按月分批 INSERT SELECT → 校验行数 → RENAME swap。
+// 步骤: 建 new 母表 → 按月分批 INSERT SELECT → 校验行数 → RENAME swap → DROP legacy。
 func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 	if !isPostgres(db) {
 		slog.Debug("migrate_partitioned: non-postgres dialect, skip")
@@ -243,6 +249,11 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 	}
 	if IsTablePartitioned(db, table) {
 		slog.Info("migrate_partitioned: already partitioned, skip")
+		// 幂等路径: 母表已确认分区 (迁移已完成), 若历史遗留仍保留着
+		// <table>_legacy 旧表, 一并清理 (不再作为回滚副本保留)。
+		if err := dropLegacyTable(db, table, legacyName); err != nil {
+			return err
+		}
 		return nil
 	}
 	// 原表不存在（全新部署）→ 直接以最终名建分区母表。
@@ -304,7 +315,8 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 		return fmt.Errorf("row count mismatch after migration: src=%d dst=%d (aborting, tables intact)", srcCount, dstCount)
 	}
 
-	// RENAME swap: 原表→legacy 保留不删（降险），new→table。
+	// RENAME swap: 原表→legacy（临时名），new→table。
+	// 行数校验已在上方通过 (安全门禁)，才会执行到这里。
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec(fmt.Sprintf("ALTER TABLE %s RENAME TO %s", table, legacyName)).Error; err != nil {
 			return err
@@ -321,14 +333,50 @@ func MigrateTableToPartitioned(db *gorm.DB, table, legacyName string) error {
 		table, table)).Error; err != nil {
 		return fmt.Errorf("advance id sequence: %w", err)
 	}
+	// 安全门禁通过: 不再保留 legacy 回滚副本, 直接 DROP (产品决策, 省空间)。
+	// 放在 swap/setval 之后: 前面的步骤失败时 legacy 原样保留。
+	if err := dropLegacyTable(db, table, legacyName); err != nil {
+		return err
+	}
 	slog.Info("migrate_partitioned: migration complete",
-		"table", table, "rows", dstCount, "legacy_table", legacyName)
+		"table", table, "rows", dstCount, "legacy_table", legacyName, "legacy_dropped", true)
 	return nil
 }
 
 // MigrateUnifiedDataToPartitioned 保留旧签名，委托给 MigrateTableToPartitioned。
 func MigrateUnifiedDataToPartitioned(db *gorm.DB) error {
 	return MigrateTableToPartitioned(db, partitionedTable, legacyTable)
+}
+
+// dropLegacyTable 删除迁移 swap 后遗留的 <table>_legacy 旧平表。
+//
+// 调用约束 (安全门禁): 只在母表已确认为分区表时调用——正常迁移路径在行数
+// 校验通过之后调用; 幂等早返回路径在 IsTablePartitioned 成立之后调用。
+// 行数校验失败的分支绝不调用本函数, 因此旧表在校验未通过时绝不会被删除。
+//
+// 先采集旧表行数与占用字节数 (写入日志), 再用 IF EXISTS + CASCADE 幂等清理。
+// CASCADE 只连带依附于该 legacy 表自身的对象 (其索引/序列), 不触碰其他表。
+func dropLegacyTable(db *gorm.DB, table, legacyName string) error {
+	if legacyName == "" {
+		return nil
+	}
+	var exists int64
+	if err := db.Raw(tableExistsSQL, legacyName, "r").Scan(&exists).Error; err != nil {
+		return fmt.Errorf("check legacy table %s: %w", legacyName, err)
+	}
+	if exists == 0 {
+		return nil
+	}
+	var rows, bytes int64
+	db.Raw("SELECT count(*) FROM " + legacyName).Scan(&rows)
+	// 大小仅用于日志, 查询失败不阻断 DROP (bytes 保持 0)。
+	db.Raw("SELECT pg_total_relation_size(?::regclass)", legacyName).Scan(&bytes)
+	if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", legacyName)).Error; err != nil {
+		return fmt.Errorf("drop legacy table %s: %w", legacyName, err)
+	}
+	slog.Info("partition_mgr: dropped legacy flat table",
+		"table", table, "legacy_table", legacyName, "legacy_rows", rows, "legacy_bytes", bytes)
+	return nil
 }
 
 // partitionParentDDL maps a logical table name to the CREATE TABLE template of
