@@ -2,6 +2,21 @@
   <div class="dashboard">
     <PageHeader title="仪表盘" />
 
+    <!-- 概览接口失败：常驻错误态 + 重试入口（范式同 views/data-source/DataSourceList.vue） -->
+    <el-alert
+      v-if="overviewError"
+      type="error"
+      :closable="false"
+      show-icon
+      class="dashboard-error-alert"
+      data-test="dashboard-error"
+    >
+      <template #title>
+        <span class="dashboard-error-text">获取概览数据失败：{{ overviewError }}</span>
+        <el-button link type="primary" size="small" data-test="dashboard-retry" @click="retryLoad">重试</el-button>
+      </template>
+    </el-alert>
+
     <template v-if="loading">
       <div class="dashboard-stats">
         <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
@@ -15,7 +30,7 @@
               <el-icon :size="32"><Connection /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-value">{{ overview.nodes?.total || 0 }}</p>
+              <p class="stat-value">{{ metric(overview.nodes?.total) }}</p>
               <p class="stat-label">节点总数</p>
             </div>
           </div>
@@ -27,7 +42,7 @@
               <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-value">{{ overview.nodes?.online || 0 }}</p>
+              <p class="stat-value">{{ metric(overview.nodes?.online) }}</p>
               <p class="stat-label">在线节点</p>
             </div>
           </div>
@@ -39,7 +54,7 @@
               <el-icon :size="32"><Cpu /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-value">{{ overview.edge_devices?.total || 0 }}</p>
+              <p class="stat-value">{{ metric(overview.edge_devices?.total) }}</p>
               <p class="stat-label">设备总数</p>
             </div>
           </div>
@@ -51,7 +66,7 @@
               <el-icon :size="32"><CircleCheck /></el-icon>
             </div>
             <div class="stat-info">
-              <p class="stat-value">{{ overview.edge_devices?.online || 0 }}</p>
+              <p class="stat-value">{{ metric(overview.edge_devices?.online) }}</p>
               <p class="stat-label">在线设备</p>
             </div>
           </div>
@@ -65,14 +80,20 @@
         <el-card shadow="hover" class="alert-summary">
           <template #header>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <el-icon :color="hasAlerts ? 'var(--el-color-warning)' : 'var(--el-color-success)'" :size="20">
-                <component :is="hasAlerts ? WarningFilled : CircleCheck" />
+              <el-icon :color="summaryIconColor" :size="20">
+                <component :is="summaryIcon" />
               </el-icon>
               <span>异常摘要</span>
-              <el-tag size="small" :type="hasAlerts ? 'warning' : 'success'">{{ hasAlerts ? '需关注' : '运行正常' }}</el-tag>
+              <el-tag size="small" :type="summaryTagType" data-test="dashboard-summary-tag">{{ summaryTagText }}</el-tag>
             </div>
           </template>
-          <div v-if="hasAlerts" class="alert-list">
+          <el-skeleton v-if="loading" :rows="2" animated />
+          <!-- 概览未知时不得断言运行正常：显式呈现未知态 -->
+          <div v-else-if="overviewError" class="alert-error" data-test="dashboard-summary-error">
+            <el-icon color="var(--el-color-danger)" :size="20"><WarningFilled /></el-icon>
+            <span>概览数据获取失败，节点与设备状态未知。</span>
+          </div>
+          <div v-else-if="hasAlerts" class="alert-list">
             <div v-if="offlineCollectors > 0" class="alert-item" @click="router.push('/node?status=offline')">
               <el-icon color="var(--el-color-danger)" :size="28"><Connection /></el-icon>
               <div>
@@ -136,6 +157,18 @@
               height="300px"
             />
             <EmptyState
+              v-else-if="overviewError"
+              kind="error"
+              icon="WarningFilled"
+              size="small"
+              data-test="dashboard-trend-error"
+              title="趋势数据加载失败"
+              description="概览接口不可用，无法确定设备列表，趋势图暂时无法加载。"
+              :quick-actions="[
+                { label: '重试', type: 'primary', handler: retryLoad }
+              ]"
+            />
+            <EmptyState
               v-else
               icon="TrendCharts"
               size="small"
@@ -157,7 +190,7 @@
           <template #header>
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span>节点状态变化</span>
-              <span class="status-history-hint">最近 {{ statusHistory.length }} 条真实状态事件</span>
+              <span class="status-history-hint">{{ statusHistoryHint }}</span>
             </div>
           </template>
           <el-timeline v-if="statusHistory.length > 0">
@@ -173,6 +206,18 @@
               </el-tag>
             </el-timeline-item>
           </el-timeline>
+          <EmptyState
+            v-else-if="statusHistoryUnknown"
+            kind="error"
+            icon="WarningFilled"
+            size="small"
+            data-test="dashboard-history-error"
+            title="状态变化记录加载失败"
+            description="无法确认节点是否发生过状态变化。"
+            :quick-actions="[
+              { label: '重试', type: 'primary', handler: retryLoad }
+            ]"
+          />
           <EmptyState
             v-else
             icon="Connection"
@@ -231,6 +276,17 @@
             </el-table-column>
           </el-table>
           <EmptyState
+            v-else-if="overviewError"
+            kind="error"
+            icon="WarningFilled"
+            data-test="dashboard-latest-error"
+            title="最新数据加载失败"
+            description="概览接口返回失败，当前没有可信的数据状态。"
+            :quick-actions="[
+              { label: '重试', type: 'primary', handler: retryLoad }
+            ]"
+          />
+          <EmptyState
             v-else
             icon="FolderOpened"
             title="暂无数据"
@@ -249,7 +305,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Cpu, CircleCheck, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
+import { Cpu, CircleCheck, CloseBold, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -274,6 +330,10 @@ const overview = ref<Overview>({
 
 const loading = ref(true)
 const refreshing = ref(false)
+// 概览接口是否已成功加载过。区分「尚未加载 / 加载失败 / 已加载」三态：
+// 失败时 KPI 与摘要必须显示未知，而不是把缺失数据渲染成 0 或"运行正常"。
+const overviewLoaded = ref(false)
+const overviewError = ref('')
 const wsStore = useWebSocketStore()
 
 // 趋势图相关
@@ -281,6 +341,8 @@ const trendLoading = ref(false)
 const trendCategory = ref('temperature')
 const trendSeries = ref<any[]>([])
 const statusHistory = ref<Array<{ id: number; node_id: string; node_name?: string; new_status: string; created_at: string }>>([])
+// 状态历史接口自身失败（而非"确实没有记录"）的标记，用于区分两种空列表。
+const statusHistoryUnknown = ref(false)
 const trendRange = ref<'1h' | '24h' | '7d'>('24h')
 const trendRangeLabel = computed(() => {
   const map: Record<string, string> = { '1h': '最近 1 小时', '24h': '最近 24 小时', '7d': '最近 7 天' }
@@ -336,7 +398,38 @@ const offlineDevices = computed(() => Math.max(0, (overview.value.edge_devices?.
 const dataErrorCount = computed(() => {
   return (overview.value.latest_data || []).filter(d => (d.error_code ?? 0) > 0).length
 })
-const hasAlerts = computed(() => offlineCollectors.value > 0 || offlineDevices.value > 0 || dataErrorCount.value > 0)
+// 仅在概览成功加载后，"无告警"才等价于"运行正常"。
+// 失败时三者都不得断言，否则会把接口故障伪装成健康状态。
+const metricsReady = computed(() => overviewLoaded.value && !overviewError.value)
+const hasAlerts = computed(() => metricsReady.value && (offlineCollectors.value > 0 || offlineDevices.value > 0 || dataErrorCount.value > 0))
+
+/** 未知态统一显示 '—'：0 是"确实是 0"，'—' 是"接口没说"。 */
+function metric(value: number | undefined): string | number {
+  return metricsReady.value ? (value ?? '—') : '—'
+}
+
+const summaryTagText = computed(() => {
+  if (!metricsReady.value) return '状态未知'
+  return hasAlerts.value ? '需关注' : '运行正常'
+})
+const summaryTagType = computed<'warning' | 'success' | 'info'>(() => {
+  if (!metricsReady.value) return 'info'
+  return hasAlerts.value ? 'warning' : 'success'
+})
+const summaryIcon = computed(() => {
+  if (!metricsReady.value) return CloseBold
+  return hasAlerts.value ? WarningFilled : CircleCheck
+})
+const summaryIconColor = computed(() => {
+  if (!metricsReady.value) return 'var(--el-color-info)'
+  return hasAlerts.value ? 'var(--el-color-warning)' : 'var(--el-color-success)'
+})
+
+/** 状态事件数量在接口失败时是未知的，不能报成 "最近 0 条"。 */
+const statusHistoryHint = computed(() => {
+  if (statusHistoryUnknown.value) return '状态变化记录暂时不可用'
+  return `最近 ${statusHistory.value.length} 条真实状态事件`
+})
 
 let unsubscribeStatus: (() => void) | null = null
 let unsubscribeData: (() => void) | null = null
@@ -361,6 +454,7 @@ const fetchTrendData = async () => {
     if (deviceIds.length === 0) {
       logger.warn('没有可用的设备数据，无法加载趋势图')
       trendSeries.value = []
+      // 概览失败时这里没有可信的设备列表，保持错误态交由模板呈现，不额外写错误文案。
       return
     }
 
@@ -419,6 +513,8 @@ const fetchStatusHistory = async () => {
   } catch (error) {
     logger.warn('获取节点状态历史失败', { error: String(error) })
     statusHistory.value = []
+    // 概览不可用时，空数组不代表"没有状态变化"，标记未知以免误导。
+    if (!metricsReady.value) statusHistoryUnknown.value = true
   }
 }
 
@@ -472,11 +568,32 @@ const fetchOverview = async (silent = false) => {
   try {
     const data = await dataApi.getOverview()
     overview.value = data
+    overviewLoaded.value = true
+    overviewError.value = ''
   } catch (error: any) {
+    // 失败必须留下常驻痕迹：KPI 与摘要据此显示未知态并给出重试入口。
+    // 静默刷新（WebSocket 触发）失败与首次加载失败同等对待——接口一旦不可用，
+    // 就不能再断言"运行正常"；保留上一份数据继续显示绿色对勾正是本缺陷本身。
+    // 唯一差别是不弹 toast：后台刷新不该刷屏，常驻横幅已经足够。
+    overviewLoaded.value = false
+    overview.value = {
+      nodes: { total: 0, online: 0, offline: 0 },
+      edge_devices: { total: 0, online: 0, offline: 0 },
+      latest_data: []
+    }
+    overviewError.value = error?.message || '网络请求失败'
     if (!silent) ElMessage.error('获取概览数据失败')
   } finally {
     if (!silent) loading.value = false
   }
+}
+
+/** 错误态的重试入口：清空错误后重新拉取概览与其派生数据。 */
+const retryLoad = async () => {
+  overviewError.value = ''
+  statusHistoryUnknown.value = false
+  await fetchOverview()
+  await Promise.all([fetchTrendData(), fetchStatusHistory()])
 }
 
 const handleRefresh = async () => {
@@ -696,6 +813,23 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.dashboard-error-alert {
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
+
+.dashboard-error-text {
+  margin-right: 8px;
+}
+
+.alert-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--el-color-danger);
+  font-size: 14px;
 }
 
 .alert-ok {
