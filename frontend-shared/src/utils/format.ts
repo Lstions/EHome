@@ -1,10 +1,22 @@
 /**
+ * 未知 / 空值 / 未配置的统一占位符：em dash「—」（规范 §3.4.5 MUST）。
+ *
+ * 为什么必须是常量而不是各处写字面量：半角连字符 `'-'` 与减号、路径分隔符、正则字符类、
+ * CSS 值与 `0001-01-01` 这类哨兵日期**同形**，散落在模板里既无法用搜索区分，
+ * 也无法在评审中证明"所有未知值都被统一"。集中定义后，占位语义只有一处权威实现。
+ *
+ * 注意：`—` 表示「接口没说 / 未配置」，`0` 表示「确实是 0」，二者不得互相顶替
+ * （规范 §3.2.5 不得以本地默认值伪造事实）。
+ */
+export const UNKNOWN = '—'
+
+/**
  * 格式化时间
  */
 export function formatTime(time: string | Date | null | undefined): string {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = typeof time === 'string' ? new Date(time) : time
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -37,7 +49,7 @@ export function formatNumber(num: number, decimals: number = 2): string {
  * 格式化对象数据为可读字符串
  */
 export function formatObjectData(data: Record<string, any>): string {
-  if (!data) return '-'
+  if (!data) return UNKNOWN
   return Object.entries(data)
     .map(([key, value]) => `${key}: ${value}`)
     .join(', ')
@@ -198,8 +210,8 @@ export function formatDataDisplay(data: any, mode: 'text' | 'hex' = 'text', devi
  * @param known 该数值是否已经可信；传 false（加载失败或尚未加载）时一律返回「—」
  * @returns 可信时返回原数值，否则返回「—」
  */
-export function metricOrDash(value: number | null | undefined, known = true): number | '—' {
-  return known ? (value ?? '—') : '—'
+export function metricOrDash(value: number | null | undefined, known = true): number | typeof UNKNOWN {
+  return known ? (value ?? UNKNOWN) : UNKNOWN
 }
 
 /**

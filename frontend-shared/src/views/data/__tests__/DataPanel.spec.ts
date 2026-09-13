@@ -394,6 +394,125 @@ describe('DataPanel', () => {
     expect(params.page).toBe(1)
   })
 
+  // ─── 统计卡范围标注（F14 / §4.3 统计卡 MUST） ───
+  // 改前「本次数据点」「采集覆盖时长」都无范围词，且与分页器「共 N 条」并排：
+  // 「本次数据点」是服务端按筛选条件的全量总数，而「采集覆盖时长」只由当前页 20 行算出。
+  // 两种范围混排且都不标注 ⇒ 用户会把「本页 9 分钟」读成「30 天只采到 9 分钟」。
+
+  const SCALE_WORDS = /本页|当前筛选|全局/
+
+  const mockMultiPageHistory = () => {
+    // 关键：total(137) 远大于本页行数(3)，复现审计现场「共 137 条」与「本次数据点」并排的歧义
+    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({
+      items: [
+        { id: 1, collected_at: '2024-01-01T00:00:00Z', data: { temperature: 21 } },
+        { id: 2, collected_at: '2024-01-01T00:05:00Z', data: { temperature: 22 } },
+        { id: 3, collected_at: '2024-01-01T00:20:00Z', data: { temperature: 23 } },
+      ],
+      total: 137,
+    })
+  }
+
+  it('每张统计卡都带范围词，且范围与实际计算口径一致', async () => {
+    mockMultiPageHistory()
+    mockClientGet.mockImplementation((url: string) => {
+      if (url === '/api/v1/unified-data/categories') {
+        return Promise.resolve([{ code: 'temperature', unit: '°C' }])
+      }
+      return Promise.resolve([])
+    })
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    const cards = wrapper.findAll('.stat-card')
+    expect(cards.length).toBeGreaterThan(0)
+
+    // ① 每张卡都必须能读出范围词（§4.3.1 MUST）
+    const labels = cards.map(c => c.find('.stat-label').text())
+    for (let i = 0; i < labels.length; i++) {
+      expect(labels[i], '第 ' + i + ' 张统计卡缺少范围词: ' + labels[i]).toMatch(SCALE_WORDS)
+    }
+
+    // ② 范围口径必须与真实数据来源一致（§4.3.4 数值必须与实际记录一致）
+    const totalCard = wrapper.find('[data-testid="stat-total-points"]')
+    expect(totalCard.exists()).toBe(true)
+    // 「数据点总数」= 服务端全量 total（137），所以范围词必须是「当前筛选」而不是「本页」
+    expect(totalCard.text()).toBe('137')
+    expect(cards.find(c => c.text().includes('数据点总数'))!.find('.stat-label').text()).toContain('当前筛选')
+
+    // ③「采集覆盖时长」只由当前页 3 行算出，范围词必须是「本页」
+    const durationCard = wrapper.find('[data-testid="stat-duration"]')
+    expect(durationCard.exists()).toBe(true)
+    expect(cards.find(c => c.text().includes('采集覆盖时长'))!.find('.stat-label').text()).toContain('本页')
+    // 本页 3 行跨 20 分钟 → 数值确由当前页算出（而非 137 条的全量跨度）
+    expect(durationCard.text()).toBe('20分钟')
+  })
+
+  it('范围词与分页器总数并排时不再产生「全量」歧义', async () => {
+    mockMultiPageHistory()
+    mockClientGet.mockImplementation(() => Promise.resolve([]))
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    // 分页器显示全量 137 条；相邻的「采集覆盖时长」必须自带「本页」限定，
+    // 否则两者并排会让用户误以为 137 条只覆盖了 20 分钟。
+    const pagination = wrapper.find('.el-pagination')
+    expect(pagination.text()).toContain('137')
+    const durationLabel = wrapper.findAll('.stat-card')
+      .find(c => c.text().includes('采集覆盖时长'))!
+      .find('.stat-label').text()
+    expect(durationLabel).toContain('本页')
+    // 不能只写「覆盖时长」——范围词必须真实出现，而不是靠上下文暗示
+    expect(durationLabel).not.toBe('采集覆盖时长')
+  })
+
+  it('本页无数据时时长显示统一未知占位符 —，而不是 0 或 --', async () => {
+    // 空数组 = 「本页没有数据」，不是「时长 0 分钟」
+    vi.mocked(edgeDeviceApi.getHistoryData).mockResolvedValue({ items: [], total: 0 })
+    mockClientGet.mockImplementation(() => Promise.resolve([]))
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    // historyData 为空 ⇒ 统计卡整组不渲染（v-if），因此这里断言的是"不得出现伪造的 0/--"
+    expect(wrapper.find('[data-testid="stat-duration"]').exists()).toBe(false)
+    expect(dataPanelSource).not.toContain("duration = '--'")
+    expect(dataPanelSource).not.toMatch(/duration:\s*'--'/)
+  })
+
+  // 移动端标签逐字竖排护栏（§4.2.5）
+  // 实测根因：165px 卡里 图标48 + gap12 + 卡片内边距40 只给标签留 63px，
+  // 「数据点总数」「采集覆盖时长」(72px) 折成末行仅 1 字的「……数」/「……长」。
+  // 这里的断言锁定"给标签留出足够宽度"的三条 CSS 依据 —— 三者缺一即退回孤字换行。
+  it('移动端为统计标签预留足够宽度，避免末行只剩 1 个字（§4.2.5 防逐字竖排）', () => {
+    const css = dataPanelSource.replace(/\/\*[\s\S]*?\*\//g, '')
+    const mobile = css.slice(css.indexOf('@media (max-width: 768px)'))
+
+    // ① 图标收窄到 32px（48px 会吃掉标签空间）
+    expect(mobile).toMatch(/\.stat-icon\s*\{[^}]*width:\s*32px/)
+    // ② 图标与文字间距收到 8px
+    expect(mobile).toMatch(/\.stat-content\s*\{[^}]*gap:\s*8px/)
+    // ③ 字号必须保持 12px：不得靠"缩小到不可读"来塞下标签（§4.4.1）
+    expect(mobile).not.toMatch(/\.stat-label\s*\{[^}]*font-size:\s*(?:[0-9]|10|11)px/)
+    // ④ 卡片内边距收窄：360px 档（规范 §4.4.1 核心下限）实测 20px 内边距
+    //    仍会让「采集覆盖时长」折成末行只剩「长」一个字，16px 才够
+    expect(mobile).toMatch(/\.stat-card\s*:deep\(\.el-card__body\)\s*\{[^}]*padding:\s*16px/)
+    // ⑤ 范围词 chip 仍是独立元素且允许换行到下一行
+    expect(mobile).toMatch(/\.stat-scope\s*\{[^}]*margin-top/)
+  })
+
+  it('源码不再残留半角连字符占位符（§3.4.5 统一为 —）', () => {
+    // 表格「原始数据」列的空值分支改前渲染字面量 '-'，与全站 '—' 不一致
+    expect(dataPanelSource).not.toMatch(/>\s*-\s*<\/span>/)
+    expect(dataPanelSource).not.toMatch(/return\s+'-'/)
+    expect(dataPanelSource).not.toMatch(/\?\s*'[^']*'\s*:\s*'-'/)
+  })
+
   it('翻页本身不重置页码 (分页控件入口不得被打回第 1 页)', async () => {
     mockHistoryWithOneRow()
     mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))

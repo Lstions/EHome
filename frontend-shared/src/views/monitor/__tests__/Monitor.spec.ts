@@ -233,6 +233,53 @@ describe('Monitor.vue', () => {
     wrapper.unmount()
   })
 
+  // ─── KPI 范围标注（审计 Q3 三页均无范围标注 / §4.3 统计卡 MUST） ───
+
+  it('四个 KPI 都带范围词，且范围与后端统计口径一致', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    const cards = wrapper.findAll('.stat-card')
+    expect(cards).toHaveLength(4)
+
+    // ① 每张卡都必须能读出范围词（§4.3.1 MUST）
+    for (const card of cards) {
+      expect(card.find('.stat-label').text(), '缺少范围词: ' + card.find('.stat-label').text())
+        .toMatch(/本页|当前筛选|全局|进程启动以来/)
+    }
+
+    // ② 口径校验：计数器类 KPI 是 Prometheus Counter（进程启动以来累计），
+    //    设备/节点在线数是全表 COUNT（全局）。范围词必须与之一致，否则是"标注了但标错"。
+    const labelOf = (text: string) => cards.find(c => c.text().includes(text))!.find('.stat-label').text()
+    expect(labelOf('HTTP 请求总数')).toContain('进程启动以来')
+    expect(labelOf('数据点采集总数')).toContain('进程启动以来')
+    expect(labelOf('设备在线状态')).toContain('全局')
+    expect(labelOf('节点在线状态')).toContain('全局')
+  })
+
+  it('范围词不与数值/标签重叠：是标签内的独立元素而非拼接字符串', async () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    await flushPromises()
+
+    // 范围词必须是可单独取样式与断行的元素（窄屏要换行，§4.2.5 防逐字竖排），
+    // 因此不能只把文字塞进标签字符串里。
+    const scopes = wrapper.findAll('.stat-scope')
+    expect(scopes).toHaveLength(4)
+    for (const s of scopes) {
+      expect(s.text().length).toBeGreaterThan(0)
+      // 范围词不能为空标签（空 chip 是"渲染失败"的观感）
+      expect(s.text().trim()).not.toBe('')
+    }
+  })
+
+  it('源码不再用 -- 作未知占位（§3.4.5 统一为 —）', async () => {
+    const monitorSource = (await import('../Monitor.vue?raw')).default as string
+    expect(monitorSource).not.toMatch(/ref\('--'\)/)
+    expect(monitorSource).not.toMatch(/lastUpdateTime\s*=\s*'--'/)
+    // 未拉取到指标前，「最后更新」不得伪造成一个具体时刻
+    expect(monitorSource).toContain("ref(UNKNOWN)")
+  })
+
   it('restarts polling when the refresh interval changes', async () => {
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
     const wrapper = mount(Monitor, { global: { stubs } })

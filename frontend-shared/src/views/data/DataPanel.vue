@@ -46,7 +46,14 @@
       </el-form>
     </el-card>
 
-    <!-- 统计概览卡片 -->
+    <!-- 统计概览卡片
+         规范 §4.3 统计卡 MUST「统计值必须标明范围」：本卡片组里**两种范围混排**，
+         所以范围词必须逐个标注、不能共用一句页脚说明：
+           · 最新<指标>  —— 取自当前页最新一条记录（本页）
+           · 本次数据点  —— total.value，是服务端按时间范围筛出的**全量总数**（当前筛选）
+           · 采集覆盖时长 —— calculateStats() 只遍历 historyData（当前页 20 条）
+         改前三个标签都没有范围词，与分页器「共 N 条」并排显示时，
+         用户会把「本页覆盖时长」读成「30 天只采到 9 分钟」，从而误判数据完整性。 -->
     <div v-if="queryForm.deviceId && historyData.length > 0" class="data-stats">
       <el-card v-for="stat in dynamicStats" :key="stat.code" class="stat-card" shadow="hover">
         <div class="stat-content">
@@ -54,7 +61,7 @@
             <el-icon><DataAnalysis /></el-icon>
           </div>
           <div class="stat-info">
-            <p class="stat-label">{{ stat.label }}</p>
+            <p class="stat-label">{{ stat.label }}<span class="stat-scope">{{ SCOPE_PAGE }}</span></p>
             <p class="stat-value">{{ stat.value }}<span v-if="stat.unit" class="stat-unit">{{ stat.unit }}</span></p>
           </div>
         </div>
@@ -63,8 +70,8 @@
         <div class="stat-content">
           <div class="stat-icon"><el-icon><DocumentChecked /></el-icon></div>
           <div class="stat-info">
-            <p class="stat-label">本次数据点</p>
-            <p class="stat-value">{{ total }}</p>
+            <p class="stat-label">数据点总数<span class="stat-scope">{{ SCOPE_FILTERED }}</span></p>
+            <p class="stat-value" data-testid="stat-total-points">{{ total }}</p>
           </div>
         </div>
       </el-card>
@@ -72,8 +79,8 @@
         <div class="stat-content">
           <div class="stat-icon"><el-icon><Timer /></el-icon></div>
           <div class="stat-info">
-            <p class="stat-label">采集覆盖时长</p>
-            <p class="stat-value">{{ latestStats.duration }}</p>
+            <p class="stat-label">采集覆盖时长<span class="stat-scope">{{ SCOPE_PAGE }}</span></p>
+            <p class="stat-value" data-testid="stat-duration">{{ latestStats.duration }}</p>
           </div>
         </div>
       </el-card>
@@ -209,7 +216,7 @@
             <el-table-column label="原始数据" width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.raw_data" style="font-size: 12px; color: var(--el-text-color-secondary);">{{ formatRawData(row.raw_data) }}</span>
-                <span v-else style="color: var(--el-text-color-placeholder);">-</span>
+                <span v-else style="color: var(--el-text-color-placeholder);" data-testid="raw-unknown">{{ UNKNOWN }}</span>
               </template>
             </el-table-column>
             <el-table-column label="状态" width="100" align="center">
@@ -256,6 +263,7 @@ import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
+import { UNKNOWN } from '@/utils/format'
 
 const router = useRouter()
 const deviceList = ref<EdgeDevice[]>([])
@@ -297,10 +305,21 @@ interface RealtimeDataPayload {
 const availableCategories = ref<MeasurementCategory[]>([])
 const compareCategories = ref<MeasurementCategory[]>([])
 
+/**
+ * 统计卡范围词（规范 §4.3 统计卡 MUST）。
+ *
+ * 为什么是常量而不是模板里的字面量：同一卡片组里存在**两种范围**，
+ * 验收时要能机械地数出"每个统计值都带了范围词"，字面量散落则无法审计。
+ *   · SCOPE_PAGE     —— 值只由当前页 historyData（pageSize 条）算出
+ *   · SCOPE_FILTERED —— 值由服务端按「设备 + 时间范围」筛出的全量得出
+ */
+const SCOPE_PAGE = '本页'
+const SCOPE_FILTERED = '当前筛选'
+
 // 统计概览数据
 const latestStats = reactive({
   totalPoints: 0,
-  duration: '--'
+  duration: UNKNOWN
 })
 
 /** 后端 envelope 解包：数组统一从 data 取（兼容裸数组返回） */
@@ -344,7 +363,9 @@ const calculateStats = () => {
   const items = historyData.value
   latestStats.totalPoints = total.value
   if (!items || items.length === 0) {
-    latestStats.duration = '--'
+    // 空数组是「本页没有数据」，不是「时长为 0」；用统一未知占位符而非 '--'
+    // （'--' 是第三种占位写法，规范 §3.4.5 要求未知值统一为 '—'）。
+    latestStats.duration = UNKNOWN
     return
   }
 
@@ -806,15 +827,15 @@ const fetchCompareData = async () => {
 }
 
 const formatTime = (time: string) => {
-  return time ? new Date(time).toLocaleString('zh-CN') : '-'
+  return time ? new Date(time).toLocaleString('zh-CN') : UNKNOWN
 }
 
 const formatData = (data: Record<string, unknown>) => {
-  if (!data) return '-'
+  if (!data) return UNKNOWN
 
   // Filter out raw_data from display (shown in separate column)
   const entries = Object.entries(data).filter(([key]) => key !== 'raw_data')
-  if (entries.length === 0) return '-'
+  if (entries.length === 0) return UNKNOWN
 
   return entries
     .map(([key, value]) => {
@@ -837,7 +858,7 @@ const formatData = (data: Record<string, unknown>) => {
 }
 
 const formatRawData = (rawData: string | Record<string, any>) => {
-  if (!rawData) return '-'
+  if (!rawData) return UNKNOWN
   // raw_data may be a hex string from data field, or base64 from raw_data field
   if (typeof rawData === 'string') {
     // Detect hex pattern (all lowercase hex chars)
@@ -946,6 +967,25 @@ onUnmounted(() => {
   color: var(--el-text-color-secondary);
 }
 
+/**
+ * 范围词（§4.3 统计卡 MUST）。
+ * 用小号 chip 与标签区分层级（§4.2.4 文字层级清晰），且 word-break: keep-all
+ * 防止「本页」在窄卡里被逐字竖排（§4.2.5）。
+ */
+.stat-scope {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color);
+  white-space: nowrap;
+  word-break: keep-all;
+  vertical-align: 1px;
+}
+
 .stat-value {
   margin: 0;
   font-size: 22px;
@@ -987,6 +1027,37 @@ onUnmounted(() => {
 
   .realtime-indicator {
     flex-wrap: wrap;
+  }
+
+  /* 移动端 165px 卡宽：范围词换到标签下一行，避免把标签挤成逐字竖排（§4.2.5） */
+  .stat-scope {
+    margin-left: 0;
+    margin-top: 2px;
+  }
+
+  /* 165px 卡里图标(48px) + gap(12px) + 内边距(40px) 只给标签留下 63px，
+     「数据点总数」「采集覆盖时长」这两个 6 字标签因此会折成「……数」/「……长」——
+     末行仅剩 1 个字，属规范 §4.2.5 明令禁止的逐字竖排观感（实测 390px 与 360px 均复现）。
+     这里收窄图标与间距把标签让到 83px，**保持 12px 字号不变**（不为塞下而缩小到不可读，
+     规范 §4.4.1 禁止靠缩小到不可读来解决响应式）。
+     32px 图标与 8px 间距与 StatCard.vue 的移动端紧凑档（22-32px）同属一个视觉体系。 */
+  .stat-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    font-size: 16px;
+  }
+
+  .stat-content {
+    gap: 8px;
+  }
+
+  /* 卡片内边距从 Element Plus 默认的 20px 收到 16px。
+     360px 档（本项目规范 §4.4.1 的核心下限）实测：图标32 + gap8 + 内边距40 仍只给标签 68px，
+     而「采集覆盖时长」需 72px ⇒ 仍会折成末行只剩「长」一个字。
+     收到 16px 后标签得 76px，360/390/414/768 四档全部单行显示。 */
+  .stat-card :deep(.el-card__body) {
+    padding: 16px;
   }
 }
 </style>

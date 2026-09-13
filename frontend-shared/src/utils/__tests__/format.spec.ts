@@ -1,33 +1,60 @@
 import { describe, it, expect } from 'vitest'
-import { formatTime, formatFileSize, formatNumber, formatObjectData, bytesToHex, formatPower, metricOrDash, debounce, throttle } from '../format'
+import { UNKNOWN, formatTime, formatFileSize, formatNumber, formatObjectData, bytesToHex, formatPower, metricOrDash, debounce, throttle } from '../format'
+
+// ── UNKNOWN：未知值统一占位符（规范 §3.4.5 MUST）──
+// 为什么先钉死常量本身：下面每个格式化函数的断言都写成 toBe(UNKNOWN)，
+// 若常量被改回半角连字符，这里先红，报告里能直接指出"占位符被改写"。
+describe('UNKNOWN', () => {
+  it("是 em dash「—」而不是半角连字符 '-'", () => {
+    expect(UNKNOWN).toBe('—')
+    expect(UNKNOWN).not.toBe('-')
+  })
+
+  it('不是任何形式的 ASCII 连字符（区别于分隔符/负号/路径）', () => {
+    expect(UNKNOWN).not.toMatch(/[\u002d\u2010\u2011\u2012\u2015]/)
+    // 码位可核验：U+2014 EM DASH
+    expect(UNKNOWN.codePointAt(0)).toBe(0x2014)
+  })
+})
 
 // ── formatTime ──────────────────────────────────
 
 describe('formatTime', () => {
-  it('returns "-" for null/undefined/empty', () => {
-    expect(formatTime(null)).toBe('-')
-    expect(formatTime(undefined)).toBe('-')
-    expect(formatTime('')).toBe('-')
+  it('returns "—" for null/undefined/empty', () => {
+    expect(formatTime(null)).toBe('—')
+    expect(formatTime(undefined)).toBe('—')
+    expect(formatTime('')).toBe('—')
   })
 
-  it('returns "-" for epoch zero dates', () => {
-    expect(formatTime('0001-01-01T00:00:00Z')).toBe('-')
-    expect(formatTime('1970-01-01T00:00:00Z')).toBe('-')
+  it('returns "—" for epoch zero dates', () => {
+    expect(formatTime('0001-01-01T00:00:00Z')).toBe('—')
+    expect(formatTime('1970-01-01T00:00:00Z')).toBe('—')
   })
 
-  it('returns "-" for invalid date string', () => {
-    expect(formatTime('not-a-date')).toBe('-')
+  it('returns "—" for invalid date string', () => {
+    expect(formatTime('not-a-date')).toBe('—')
+  })
+
+  it('从未知值返回 UNKNOWN 常量本身（不是另写的字面量）', () => {
+    expect(formatTime(null)).toBe(UNKNOWN)
+    expect(formatTime('not-a-date')).toBe(UNKNOWN)
+  })
+
+  it('不再向界面泄漏半角连字符占位符', () => {
+    for (const input of [null, undefined, '', '0001-01-01T00:00:00Z', '1970-01-01T00:00:00Z', 'not-a-date']) {
+      expect(formatTime(input)).not.toBe('-')
+    }
   })
 
   it('formats valid ISO date string', () => {
     const result = formatTime('2024-06-15T10:30:00Z')
-    expect(result).not.toBe('-')
+    expect(result).not.toBe('—')
     expect(result).toContain('2024')
   })
 
   it('formats Date object', () => {
     const result = formatTime(new Date('2024-06-15T10:30:00Z'))
-    expect(result).not.toBe('-')
+    expect(result).not.toBe('—')
     expect(result).toContain('2024')
   })
 })
@@ -73,8 +100,9 @@ describe('formatNumber', () => {
 // ── formatObjectData ────────────────────────────
 
 describe('formatObjectData', () => {
-  it('returns "-" for null', () => {
-    expect(formatObjectData(null as any)).toBe('-')
+  it('returns "—" for null', () => {
+    expect(formatObjectData(null as any)).toBe('—')
+    expect(formatObjectData(null as any)).toBe(UNKNOWN)
   })
 
   it('formats simple object', () => {
@@ -169,6 +197,8 @@ describe('metricOrDash', () => {
   it('renders dash when the field is missing from the response (undefined/null)', () => {
     expect(metricOrDash(undefined)).toBe('—')
     expect(metricOrDash(null)).toBe('—')
+    // 与 format.ts 的 UNKNOWN 是同一个值，而不是两处各写一遍的字面量
+    expect(metricOrDash(undefined)).toBe(UNKNOWN)
   })
 
   it('renders dash for every value while the metric is not trustworthy (known=false)', () => {

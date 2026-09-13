@@ -21,7 +21,13 @@
       </div>
     </div>
 
-    <!-- 统计卡片 -->
+    <!-- 统计卡片
+         规范 §4.3 统计卡 MUST「统计值必须标明范围」。
+         本页四个 KPI 取自两种不同的统计口径，必须逐个标注，否则用户会把
+         「进程启动以来的计数器」误读成「库里累计的数据量」：
+           · HTTP 请求总数 / 数据点采集总数 —— Prometheus Counter，**进程启动以来**的累计值，
+             服务重启即归零（后代 handler_metrics.go:82/106 readCounterTotal）
+           · 设备/节点在线状态 —— 直接 COUNT 全表，**全局**口径，与页面筛选无关 -->
     <div class="stat-cards">
       <el-row :gutter="16">
         <el-col :xs="12" :sm="12" :md="6">
@@ -29,7 +35,7 @@
             <div class="stat-icon"><el-icon><Connection /></el-icon></div>
             <div class="stat-content">
               <div class="stat-value">{{ formatNumber(metrics?.http?.requests_total || 0) }}</div>
-              <div class="stat-label">HTTP 请求总数</div>
+              <div class="stat-label">HTTP 请求总数<span class="stat-scope">{{ SCOPE_PROCESS }}</span></div>
             </div>
           </el-card>
         </el-col>
@@ -42,7 +48,7 @@
                 <span class="separator">/</span>
                 <span>{{ deviceTotal }}</span>
               </div>
-              <div class="stat-label">设备在线状态</div>
+              <div class="stat-label">设备在线状态<span class="stat-scope">{{ SCOPE_GLOBAL }}</span></div>
             </div>
           </el-card>
         </el-col>
@@ -55,7 +61,7 @@
                 <span class="separator">/</span>
                 <span>{{ nodeTotal }}</span>
               </div>
-              <div class="stat-label">节点在线状态</div>
+              <div class="stat-label">节点在线状态<span class="stat-scope">{{ SCOPE_GLOBAL }}</span></div>
             </div>
           </el-card>
         </el-col>
@@ -64,7 +70,7 @@
             <div class="stat-icon"><el-icon><DataLine /></el-icon></div>
             <div class="stat-content">
               <div class="stat-value">{{ formatNumber(metrics?.data?.points_collected || 0) }}</div>
-              <div class="stat-label">数据点采集总数</div>
+              <div class="stat-label">数据点采集总数<span class="stat-scope">{{ SCOPE_PROCESS }}</span></div>
             </div>
           </el-card>
         </el-col>
@@ -303,6 +309,7 @@ import {
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { useResponsive } from '@/composables/useResponsive'
 import { getThemeColors } from '@/utils/theme'
+import { UNKNOWN } from '@/utils/format'
 
 const { isMobile } = useResponsive()
 
@@ -323,10 +330,18 @@ onMounted(() => {
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
 })
 
+/**
+ * 统计卡范围词（规范 §4.3 统计卡 MUST）。
+ * 常量化的理由：验收要能机械地证明"每个统计值都带了范围词"，
+ * 字面量散落则无法审计，也无法与 /data 的范围词保持一致。
+ */
+const SCOPE_PROCESS = '进程启动以来'
+const SCOPE_GLOBAL = '全局'
+
 // 状态
 const metrics = ref<MetricsSummary | null>(null)
 const refreshInterval = ref(10000)
-const lastUpdateTime = ref('--')
+const lastUpdateTime = ref(UNKNOWN)
 let timer: ReturnType<typeof setInterval> | null = null
 
 const controlAttention = computed(() =>
@@ -563,6 +578,24 @@ onUnmounted(() => {
   margin-top: 4px;
 }
 
+/**
+ * 范围词（§4.3 统计卡 MUST）。
+ * 移动端 2×2 栅格下卡宽仅约 165px，范围词因此另起一行并禁止逐字断行（§4.2.5）。
+ */
+.stat-scope {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color);
+  white-space: nowrap;
+  word-break: keep-all;
+  vertical-align: 1px;
+}
+
 .card-header {
   display: flex;
   align-items: center;
@@ -634,6 +667,11 @@ onUnmounted(() => {
   }
   .stat-cards .el-col {
     margin-bottom: 12px;
+  }
+  /* 窄卡里范围词换行显示，避免与标签挤在同一行被压成逐字竖排 */
+  .stat-scope {
+    margin-left: 0;
+    margin-top: 2px;
   }
 }
 
