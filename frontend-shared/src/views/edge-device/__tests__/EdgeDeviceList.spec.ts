@@ -341,6 +341,31 @@ describe('EdgeDeviceList.vue', () => {
     expect(edgeDeviceApi.delete).toHaveBeenCalledWith(2, { delete_data: true })
   })
 
+  it('包裹移动端横滚容器并显示滑动提示 (源码契约)', () => {
+    // 移动端宽表（规范 §4.3.4.1 MUST）：表格必须包在 .mobile-table-wrapper 内并提供横滑提示
+    expect(source).toContain('<div class="mobile-table-wrapper">')
+    expect(source).toContain('<div class="mobile-table-hint">')
+    expect(/<div class="mobile-table-wrapper">[\s\S]*<el-table[\s\S]*<\/el-table>[\s\S]*<\/div>/.test(source)).toBe(true)
+    // 容器闭合必须落在表格所在的 el-card 内（不能把卡片列表一起包进去）
+    const wrapperClose = source.indexOf('</el-table>')
+    const cardClose = source.indexOf('</el-card>', wrapperClose)
+    // 用"设备卡片列表"分区注释作锚点：页首 loading 骨架屏也有一个 .device-grid
+    const cardListStart = source.indexOf('<!-- 设备卡片列表 -->')
+    expect(wrapperClose).toBeGreaterThan(-1)
+    expect(cardClose).toBeGreaterThan(wrapperClose)
+    expect(cardClose).toBeLessThan(cardListStart)
+  })
+
+  it('窄屏操作列收窄到 96px 并给行内图标按钮补触控热区 (源码契约)', () => {
+    // 原 160px 固定操作列在 390px 视口占 41%：三个按钮都只有图标，96px 足够
+    expect(source).toContain('<el-table-column label="操作" width="96" fixed="right">')
+    expect(source).not.toContain('<el-table-column label="操作" width="160" fixed="right">')
+    // 每个行内图标按钮都有可访问名称 + 热区类
+    expect(source).toContain('class="touch-target" :aria-label="`查看 ${row.name}`"')
+    expect(source).toContain('class="touch-target" :aria-label="`编辑 ${row.name}`"')
+    expect(source).toContain('class="touch-target" :aria-label="`删除 ${row.name}`"')
+  })
+
   it('删除弹窗不再使用 ElMessageBox (源码契约)', () => {
     expect(source).not.toContain('ElMessageBox.confirm')
     expect(source).toContain('DeviceDeleteDialog')

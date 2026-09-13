@@ -80,6 +80,28 @@ describe('NodeList.vue', () => {
     expect(source).toContain('route.query.status')
   })
 
+  it('wraps the wide table view with the mobile scroll container and hint', () => {
+    // 移动端宽表（规范 §4.3.4.1 MUST）：表格必须包在 .mobile-table-wrapper 内并提供横滑提示
+    expect(source).toContain('<div class="mobile-table-wrapper">')
+    expect(source).toContain('<div class="mobile-table-hint">')
+    // 容器必须真的包住 el-table，而不是只出现在注释里
+    expect(/<div class="mobile-table-wrapper">[\s\S]*<el-table[\s\S]*<\/el-table>[\s\S]*<\/div>/.test(source)).toBe(true)
+    // 操作列宽度收窄到能容纳"详情/删除"两个 2 字按钮（原 240px 在 390px 视口占 62%）
+    expect(source).toContain('<el-table-column label="操作" width="120" fixed="right">')
+    expect(source).not.toContain('<el-table-column label="操作" width="240" fixed="right">')
+  })
+
+  it('deletes through the danger confirm contract instead of a bare ElMessageBox', () => {
+    // 危险确认（规范 §3.4.3 / §4.3.4 MUST）：删除节点必须带对象身份 + 不可逆影响，
+    // 并走 feedback.confirmDanger（danger 确认键 + 焦点不落在破坏性按钮上）。
+    expect(source).toContain('feedback.confirmDanger(')
+    expect(source).toContain('此操作不可恢复')
+    expect(source).toContain("confirmText: '删除'")
+    expect(source).not.toContain('ElMessageBox')
+    // 取消必须直接 return，不能继续执行删除
+    expect(source).toContain('if (!confirmed) return')
+  })
+
   it('derives summary stats and model options from cached nodes', () => {
     expect(source).toContain('const stats = reactive')
     expect(source).toContain('const modelOptions = computed')

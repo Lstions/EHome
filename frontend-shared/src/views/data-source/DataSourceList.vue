@@ -251,8 +251,8 @@
       </template>
     </el-dialog>
 
-    <!-- 详情抽屉 -->
-    <el-drawer v-model="detailVisible" title="数据源详情" size="560px" data-test="ds-drawer">
+    <!-- 详情抽屉：尺寸走 DETAIL_DRAWER_SIZE（见 script），窄视口下不溢出 -->
+    <el-drawer v-model="detailVisible" title="数据源详情" :size="DETAIL_DRAWER_SIZE" data-test="ds-drawer">
       <div v-if="detailSource" class="detail-body">
         <el-descriptions :column="1" border>
           <el-descriptions-item label="ID">{{ detailSource.id }}</el-descriptions-item>
@@ -308,11 +308,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import feedback from '@/utils/feedback'
 import { Plus, Connection, CircleCheck, Clock, WarningFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { useDataSourceStore } from '@/stores/dataSource'
 import { logicalDeviceApi, type LogicalDeviceItem } from '@/api/logicalDevice'
 import type {
@@ -324,6 +326,18 @@ import type {
   FailoverReason,
   FailoverTrigger,
 } from '@/api/dataSource'
+
+const { width: viewportWidth } = useResponsive()
+
+/**
+ * 详情抽屉宽度：桌面保持 560px，窄视口按 92vw 收敛（与全局 .el-dialog 的 92vw 兜底同一比例），
+ * 保证 360px 视口下抽屉左边缘仍 >= 0、内部 el-descriptions 的 label 不被推出可视区。
+ * 为什么在组件侧算而不是写 CSS 兜底：el-drawer 默认 teleport 到 body，组件的 scoped <style>
+ * 命中不了它（规范 §4.3.2.3）；而 Element Plus 把 size 直接写进 drawer 根节点的 inline style
+ * （useResizable → addUnit(props.size)），全局 .el-drawer max-width 兜底又会波及所有抽屉。
+ * 用 useResponsive 的共享视口宽度而非 useMediaQuery：抽屉宽度随视口连续收敛，断点处不突变。
+ */
+const DETAIL_DRAWER_SIZE = computed(() => `${Math.min(560, Math.round(viewportWidth.value * 0.92))}px`)
 
 /** el-table 作用域槽的 row 未从 EP 包根导出，此处做一次具名类型的边界收窄（非 any）。 */
 const asSource = (row: unknown) => row as DataSource
@@ -458,15 +472,12 @@ async function onActivate(source: DataSource) {
 
 async function onDeactivate(source: DataSource) {
   if (source.status === 'active') {
-    try {
-      await ElMessageBox.confirm(
-        `停用权威来源「${source.name || `#${source.id}`}」？组内候选将自动接替。`,
-        '确认停用',
-        { type: 'warning' },
-      )
-    } catch {
-      return
-    }
+    // 停用权威来源会改变组内接手方：按破坏性动作处理（danger 确认按钮）。
+    const confirmed = await feedback.confirmDanger(
+      `停用权威来源「${source.name || `#${source.id}`}」？组内候选将自动接替。`,
+      { title: '确认停用', confirmText: '停用', cancelText: '取消' },
+    )
+    if (!confirmed) return
   }
   actingId.value = source.id
   try {
@@ -492,15 +503,13 @@ async function onReset(source: DataSource) {
 }
 
 async function onDelete(source: DataSource) {
-  try {
-    await ElMessageBox.confirm(
-      `删除数据源「${source.name || `#${source.id}`}」？`,
-      '确认删除',
-      { type: 'warning' },
-    )
-  } catch {
-    return
-  }
+  // 删除数据源不可恢复：确认文案含对象身份，确认按钮为 danger。
+  const confirmed = await feedback.confirmDanger(
+    `删除数据源「${source.name || `#${source.id}`}」？此操作不可恢复。`,
+    { title: '确认删除', confirmText: '删除', cancelText: '取消' },
+  )
+  if (!confirmed) return
+
   actingId.value = source.id
   try {
     await store.removeSource(source.id)

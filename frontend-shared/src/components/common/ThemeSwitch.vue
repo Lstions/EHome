@@ -45,4 +45,14 @@ const handleCommand = (command: string) => {
   display: flex;
   align-items: center;
 }
+
+/* 移动端页头主题按钮触控目标（规范 §4.4.5 MUST：≥44×44px）。
+   circle 按钮默认 32×32，这里把实际盒子补到 44×44（真实布局盒，
+   可用 getBoundingClientRect 验收，也能被真实指针与读屏正确识别）。 */
+@media (max-width: 768px) {
+  .el-button.is-circle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
 </style>

@@ -250,7 +250,8 @@ import { useWebSocketStore } from '@/stores/websocket'
 import { useNodeStore } from '@/stores/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notification as ApiNotification } from '@/api/notification'
-import { ElMessage } from 'element-plus'
+import { WS_EVENT } from '@/events/events'
+import { ElMessage, ElNotification } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
@@ -303,13 +304,17 @@ const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
 const notifications = ref<ApiNotification[]>([])
 const notificationCount = ref(0)
 
+// 通知列表保留上限：与 REST 默认 limit 一致（api/notification.ts getNotifications(20)），
+// 避免实时推送插入导致列表无限增长。
+const NOTIFICATION_LIMIT = 20
+
 const fetchNotifications = async () => {
   try {
     const [notifs, count] = await Promise.all([
-      getNotifications(20),
+      getNotifications(NOTIFICATION_LIMIT),
       getUnreadCount()
     ])
-    notifications.value = notifs
+    notifications.value = notifs.slice(0, NOTIFICATION_LIMIT)
     notificationCount.value = count
   } catch (error) {
     // API 失败时显示空列表，不报错
@@ -318,8 +323,109 @@ const fetchNotifications = async () => {
   }
 }
 
+// insertNotification 实时推送落列表：按 id 去重（重复推送 / 与 REST 拉取重叠）
+// + 头部插入 + 未读数 +1（read=false）+ 上限截断。
+// 返回 true 表示确实新增了一条（用于测试断言与调用方判断）。
+const insertNotification = (raw: Partial<ApiNotification> | undefined | null): boolean => {
+  if (!raw || raw.id == null) return false
+  const existing = notifications.value.find(item => item.id === raw.id)
+  if (existing) {
+    // 同 id 已存在：只做就地更新（例如推送与 REST 竞态时字段更全），不重复计数。
+    Object.assign(existing, raw)
+    return false
+  }
+  // 后端广播载荷与 models.Notification 同形；这里兜底默认值，避免缺字段导致渲染异常。
+  const item: ApiNotification = {
+    id: raw.id,
+    type: raw.type ?? 'info',
+    title: raw.title ?? '',
+    description: raw.description ?? '',
+    source: raw.source ?? '',
+    source_id: raw.source_id,
+    read: raw.read ?? false,
+    created_at: raw.created_at ?? '',
+  }
+  notifications.value = [item, ...notifications.value].slice(0, NOTIFICATION_LIMIT)
+  if (!item.read) notificationCount.value += 1
+  return true
+}
+
 // 初始化获取通知
 fetchNotifications()
+
+// ── 实时通知：订阅 WS 推送（负债 D-3）──
+// 后端 events.Notification 的载荷是通知实体本身（与 REST 列表项同形），收到即插入。
+// 订阅 automation 的 3 个自定义事件：它们同样携带通知实体（顶层）与自动化领域详情
+// （detail），前端按语义给出差异化用户反馈。
+const handleNotificationPush = (message: { payload?: any; data?: any }) => {
+  // 兼容两种 WS 消息形状：{type, payload} 与扁平 {type, ...fields}
+  const body = (message?.payload ?? message?.data) as Partial<ApiNotification> | undefined
+  const inserted = insertNotification(body)
+  if (inserted) {
+    logger.debug('[MainLayout] 收到实时通知', { id: body?.id })
+  }
+}
+
+const handleAutomationDailyLimit = (message: { payload?: any; data?: any }) => {
+  handleNotificationPush(message)
+  const body = (message?.payload ?? message?.data) as any
+  const ruleName = body?.detail?.rule_name ?? body?.title ?? ''
+  feedback.warning(`策略「${ruleName}」已达日执行上限，今日后续触发将被抑制`)
+}
+
+const handleAutomationSystemActorUnavailable = (message: { payload?: any; data?: any }) => {
+  handleNotificationPush(message)
+  feedback.error('自动化执行已禁用：系统主体用户不可用，请检查初始化状态')
+}
+
+const handleAutomationPendingConfirm = (message: { payload?: any; data?: any }) => {
+  handleNotificationPush(message)
+  const body = (message?.payload ?? message?.data) as any
+  const ruleName = body?.detail?.rule_name ?? body?.title ?? ''
+  // 待确认事件 → 用户可见提示 + 跳转自动化策略页处理。
+  // ElNotification 支持 onClick（ElMessage 不支持），点击提示即前往确认。
+  ElNotification({
+    type: 'warning',
+    duration: 6000,
+    title: '策略等待确认',
+    message: `策略「${ruleName}」等待人工确认，点击前往处理`,
+    onClick: () => { router.push('/automation') },
+  })
+}
+
+let unsubscribeNotification: (() => void) | null = null
+let unsubscribeDailyLimit: (() => void) | null = null
+let unsubscribeSystemActor: (() => void) | null = null
+let unsubscribePendingConfirm: (() => void) | null = null
+// removeConnectionRefresh 解绑 wsStore.onConnected 注册的"重连成功后刷新"处理器。
+let removeConnectionRefresh: (() => void) | null = null
+
+// 页面重新可见时刷新（长时间挂后台的页面计数会过期）。
+// 刻意不用定时轮询：只在 visibilitychange → visible 这一个真实事件上拉取。
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    void fetchNotifications()
+  }
+}
+
+const setupRealtimeNotifications = () => {
+  unsubscribeNotification = wsStore.subscribe(WS_EVENT.NOTIFICATION, handleNotificationPush)
+  unsubscribeDailyLimit = wsStore.subscribe('automation_daily_limit', handleAutomationDailyLimit)
+  unsubscribeSystemActor = wsStore.subscribe('automation_system_actor_unavailable', handleAutomationSystemActorUnavailable)
+  unsubscribePendingConfirm = wsStore.subscribe('automation_pending_confirm', handleAutomationPendingConfirm)
+  // WS 重连成功 → 重新拉取，补齐断线期间错过的推送（不依赖轮询）。
+  removeConnectionRefresh = wsStore.onConnected(() => { void fetchNotifications() })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+}
+
+const teardownRealtimeNotifications = () => {
+  unsubscribeNotification?.(); unsubscribeNotification = null
+  unsubscribeDailyLimit?.(); unsubscribeDailyLimit = null
+  unsubscribeSystemActor?.(); unsubscribeSystemActor = null
+  unsubscribePendingConfirm?.(); unsubscribePendingConfirm = null
+  removeConnectionRefresh?.(); removeConnectionRefresh = null
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+}
 
 // 移动端 logo 点击：关闭抽屉并导航
 const handleMobileLogoClick = () => {
@@ -397,6 +503,9 @@ const handleSearch = () => {
 const clearNotifications = async () => {
   try {
     await markAllAsRead()
+    // 本地列表与计数同步收敛（不依赖随后的网络往返，避免"点了没反应"的窗口期）。
+    notifications.value.forEach(item => { item.read = true })
+    notificationCount.value = 0
     await fetchNotifications()
     feedback.success('已全部标记为已读')
   } catch (error) {
@@ -407,8 +516,11 @@ const clearNotifications = async () => {
 const handleNotificationClick = async (item: ApiNotification) => {
   try {
     await markAsRead(item.id)
-    item.read = true
-    notificationCount.value = Math.max(0, notificationCount.value - 1)
+    // 已读同步：仅当此前确实未读才递减，避免重复点击把计数减成负数。
+    if (!item.read) {
+      item.read = true
+      notificationCount.value = Math.max(0, notificationCount.value - 1)
+    }
   } catch (error) {
     // 静默失败
   }
@@ -464,6 +576,8 @@ onMounted(() => {
   } else {
     logger.debug('[MainLayout] 未登录，跳过 WebSocket')
   }
+  // 实时通知订阅（含 3 个 automation 自定义事件）+ 重连/可见性刷新
+  setupRealtimeNotifications()
   document.addEventListener('keydown', handleKeydown)
   preloadTimer = setTimeout(() => {
     void Promise.allSettled([
@@ -474,6 +588,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  teardownRealtimeNotifications()
   wsStore.disconnect()
   document.removeEventListener('keydown', handleKeydown)
   if (preloadTimer) clearTimeout(preloadTimer)
@@ -614,6 +729,19 @@ onUnmounted(() => {
 .collapse-btn:hover {
   background: var(--hover-bg);
   transform: scale(1.05);
+}
+
+/* 移动端页头图标按钮触控目标（规范 §4.4.5 MUST：≥44×44px）。
+   Element Plus 的 circle 按钮默认 32×32，这里把实际盒子补到 44×44
+   （页头高 60px，放得下，不引起换行）。不使用伪元素外扩热区：
+   实测伪元素在部分容器内会被裁剪（el-table 单元格内即失效），
+   且不参与布局盒、无法用 getBoundingClientRect 验收，
+   真实指针也点不到视觉盒之外的伪元素区域。 */
+@media (max-width: 768px) {
+  .main-header .el-button.is-circle {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 .breadcrumb {

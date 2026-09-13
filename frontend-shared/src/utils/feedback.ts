@@ -68,7 +68,19 @@ export const feedback = {
         confirmButtonText: options.confirmText ?? '确定',
         cancelButtonText: options.cancelText ?? '取消',
         type: 'warning',
+        // 破坏性确认键必须是 danger 类目（规范 §3.4.3）：
+        // - confirmButtonType 决定按钮语义类型（EP 2.14.3 实测：只给 class 时
+        //   按钮同时带 el-button--primary 与 el-button--danger，靠 CSS 层叠兜底，
+        //   语义类名是错的）；
+        // - confirmButtonClass 保留给按 class 选择器的既有验收断言与主题覆盖。
+        confirmButtonType: 'danger',
         confirmButtonClass: 'el-button--danger',
+        // 规范 §4.3.4：危险确认的默认焦点必须避开破坏性按钮。
+        // Element Plus 在 autofocus !== false 时会把初始焦点交给确认按钮
+        // （其 index.vue 的 visible watcher: focusStartRef = confirmRef），
+        // 因此这里显式关闭，让焦点回落到对话框根节点，取消键与确认键之间
+        // 需要一次 Tab 才能到达危险按钮，避免"回车即删除"的诱导性确认。
+        autofocus: false,
         draggable: true,
       })
       return true

@@ -667,7 +667,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import feedback from '@/utils/feedback'
 import {
   ArrowRight, Clock, Cloudy, Connection, CopyDocument, Cpu, DataLine, Document,
   EditPen, Grid, House, InfoFilled, Link, Lock, MagicStick, Monitor, Odometer, Plus, Refresh,
@@ -1395,21 +1396,24 @@ async function handleCancelOTA(record: OTARecord) {
   const id = route.params.id as string
   const operation = componentOperationGeneration
   const sessionGeneration = getSessionGeneration()
+  // 取消 OTA 会中断设备侧升级流程：按破坏性动作处理（danger 确认按钮 + 焦点不落在破坏性按钮上）。
+  const confirmed = await feedback.confirmDanger('确定要取消此 OTA 升级吗？', {
+    title: '提示',
+    confirmText: '确定',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
+  if (operation !== componentOperationGeneration || route.params.id !== id) return
+
   try {
-    await ElMessageBox.confirm('确定要取消此 OTA 升级吗？', '提示', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-    if (operation !== componentOperationGeneration || route.params.id !== id) return
     await nodeApi.cancelOTA(id, record.id)
     assertSessionGeneration(sessionGeneration)
     if (operation !== componentOperationGeneration || route.params.id !== id) return
     ElMessage.success('已取消 OTA 升级')
     void fetchOTAHistory()
-  } catch (err: any) {
+  } catch {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
-    if (err !== 'cancel') ElMessage.error('取消 OTA 失败')
+    ElMessage.error('取消 OTA 失败')
   }
 }
 

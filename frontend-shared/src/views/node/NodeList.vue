@@ -160,6 +160,9 @@
 
     <!-- 列表视图 -->
     <el-card v-else class="collector-table-card" shadow="hover">
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table 
         :data="filteredNodes" 
         v-loading="loading"
@@ -228,13 +231,16 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" width="240" fixed="right">
+        <!-- 操作列只需容纳"详情/删除"两个 2 字 text 按钮：120px（原 240px 在 390px
+             视口下占 62%，@360 达 69%，把固定列变成整屏）。触控热区由 .touch-target 补足。 -->
+        <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" text @click.stop="goToDetail(row.node_id)">详情</el-button>
-            <el-button size="small" type="danger" text @click.stop="handleDelete(row)">删除</el-button>
+            <el-button size="small" type="primary" text class="touch-target" @click.stop="goToDetail(row.node_id)">详情</el-button>
+            <el-button size="small" type="danger" text class="touch-target" :aria-label="`删除 ${row.name}`" @click.stop="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <div class="pagination-wrapper">
         <el-pagination
@@ -272,7 +278,8 @@ import {
   Filter, Grid, List, Refresh, Setting, Upload, Delete,
   Plus
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import feedback from '@/utils/feedback'
 import { useNodeStore } from '@/stores/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
@@ -444,12 +451,12 @@ const handleQuickAction = (action: string, node: any) => {
 const handleDelete = async (row: any) => {
   let deleted = false
   try {
-    await ElMessageBox.confirm(
+    const confirmed = await feedback.confirmDanger(
       `确定要删除节点 "${row.name}" 吗？此操作不可恢复。`,
-      '警告',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+      { title: '警告', confirmText: '删除', cancelText: '取消' }
     )
-    
+    if (!confirmed) return
+
     await nodeStore.deleteNode(row.id)
     deleted = true
     nodes.value = nodes.value.filter(node => node.id !== row.id && node.node_id !== String(row.id))

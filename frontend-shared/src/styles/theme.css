@@ -15,14 +15,22 @@
   /* ============================================
      亮色主题 (Light Theme)
      ============================================ */
-  /* 基础色 */
-  --color-primary: #409eff;
-  --color-primary-light: #79bbff;
-  --color-primary-lighter: #a0cfff;
-  --color-success: #67c23a;
-  --color-warning: #e6a23c;
-  --color-danger: #f56c6c;
-  --color-info: #909399;
+  /* 基础色（可访问性 F4：亮色对比度）
+     这组值同时承担两种角色，两者都要求 ≥4.5:1：
+       ① 实心填充色 —— 白色文字落在其上（el-button--primary、el-tag effect=dark、el-select 选中项）；
+       ② 浅底徽标的文字色 —— 由本文件桥接的 --el-color-*-light-9 作底（el-tag/el-alert 默认 is-light）。
+     故每个基色必须同时满足「对白字 ≥4.5」与「对白/页/浅灰底作为文字 ≥4.5」。
+     实测（frontend-shared/tools/theme-contrast-measure.mjs，WCAG 2.x 相对亮度）：
+       primary #1f5ad8 白字 5.98 / 白底文字 5.98；success #147a3a 5.42/5.42；
+       warning #9a5b06 5.42/5.42；danger #b91c1c 6.47/6.47；info #5e6673 5.79/5.79。
+     改前为 EP 默认调色板：#409eff 白字 2.78、#67c23a 浅底文字 2.08、#e6a23c 2.04、#f56c6c 2.61。 */
+  --color-primary: #1f5ad8;
+  --color-primary-light: #628ce4;
+  --color-primary-lighter: #8fadec;
+  --color-success: #147a3a;
+  --color-warning: #9a5b06;
+  --color-danger: #b91c1c;
+  --color-info: #5e6673;
   --color-adc: #9c27b0;
   --color-adc-light: #ba68c8;
 
@@ -32,11 +40,15 @@
   --bg-color-overlay: #ffffff;
   --bg-color-secondary: #f8f9fb;
 
-  /* 文字颜色 */
+  /* 文字颜色
+     次级/占位两档必须自身达标（表头、统计标签、空态文案、页头副标题、placeholder 直接消费）：
+       secondary #5e6673 → 白底 5.79 / 页底 5.40 / 浅灰底 5.26（改前 #909399 = 3.08/2.87）
+       placeholder #6b7280 → 白底 4.83 / 页底 4.50（改前 #a8abb2 = 2.30）
+       regular #4b5563 = 白底 7.56（改前 #606266 = 6.11，同为提升） */
   --text-color-primary: #303133;
-  --text-color-regular: #606266;
-  --text-color-secondary: #909399;
-  --text-color-placeholder: #a8abb2;
+  --text-color-regular: #4b5563;
+  --text-color-secondary: #5e6673;
+  --text-color-placeholder: #6b7280;
 
   /* 边框颜色 */
   --border-color: #e8eaec;
@@ -108,6 +120,77 @@
 }
 
 /* ============================================
+   Element Plus 变量桥接 —— 亮色（此前缺失的基础设施）
+   EP 的 -light-9 家族是 el-tag/el-alert 的**背景**，EP 基色是其**文字**；
+   项目此前只桥接了 EP 的暗色文字色，-light-9 与基色的组合完全走 EP 默认调色板，
+   导致亮色下 el-tag--success 2.08、el-tag--warning 2.04、el-alert--warning 2.04、
+   el-tag primary 2.53、el-tag--danger 2.61、el-button--primary 白字 2.78、el-table th 3.08。
+   这里把 EP 变量统一映射到上面的项目语义 token；浅色档按 EP 官方公式
+   light-N = base*(1-N/10) + #fff*(N/10) 由基色生成，使「浅底 + 基色文字」稳定在 4.7–5.5。
+   -rgb 变量必须同步：EP 用 rgba(var(--el-color-*-rgb), a) 生成半透明层，不同步会回落到默认色。
+   ============================================ */
+:root {
+  /* 语义基色 → 实心填充 + 浅底文字（两者共用同一个值，见文件顶部注释） */
+  --el-color-primary: var(--color-primary);
+  --el-color-primary-rgb: 31, 90, 216;
+  --el-color-success: var(--color-success);
+  --el-color-success-rgb: 20, 122, 58;
+  --el-color-warning: var(--color-warning);
+  --el-color-warning-rgb: 154, 91, 6;
+  --el-color-danger: var(--color-danger);
+  --el-color-danger-rgb: 185, 28, 28;
+  --el-color-error: var(--color-danger);
+  --el-color-error-rgb: 185, 28, 28;
+  --el-color-info: var(--color-info);
+  --el-color-info-rgb: 94, 102, 115;
+
+  /* 浅色档（EP 公式生成） */
+  --el-color-primary-light-3: #628ce4;
+  --el-color-primary-light-5: #8fadec;
+  --el-color-primary-light-7: #bccef3;
+  --el-color-primary-light-8: #d2def7;
+  --el-color-primary-light-9: #e9effb; /* 基色文字于其上 5.18（改前 #ecf5ff = 2.53） */
+  --el-color-success-light-3: #5ba275;
+  --el-color-success-light-5: #8abd9d;
+  --el-color-success-light-7: #b9d7c4;
+  --el-color-success-light-8: #d0e4d8;
+  --el-color-success-light-9: #e8f2eb; /* 4.73（改前 #f0f9eb = 2.08） */
+  --el-color-warning-light-3: #b88c51;
+  --el-color-warning-light-5: #cdad83;
+  --el-color-warning-light-7: #e1ceb4;
+  --el-color-warning-light-8: #ebdecd;
+  --el-color-warning-light-9: #f5efe6; /* 4.74（改前 #fdf6ec = 2.04） */
+  --el-color-danger-light-3: #ce6060;
+  --el-color-danger-light-5: #dc8e8e;
+  --el-color-danger-light-7: #eabbbb;
+  --el-color-danger-light-8: #f1d2d2;
+  --el-color-danger-light-9: #f8e8e8; /* 5.45（改前 #fef0f0 = 2.61） */
+  --el-color-error-light-3: #ce6060;
+  --el-color-error-light-5: #dc8e8e;
+  --el-color-error-light-7: #eabbbb;
+  --el-color-error-light-8: #f1d2d2;
+  --el-color-error-light-9: #f8e8e8;
+  --el-color-info-light-3: #8e949d;
+  --el-color-info-light-5: #afb3b9;
+  --el-color-info-light-7: #cfd1d5;
+  --el-color-info-light-8: #dfe0e3;
+  --el-color-info-light-9: #eff0f1; /* 5.08 */
+
+  /* 文字：表格表头 / 空态 / 统计标签 / 页头副标题都走 secondary 档 */
+  --el-text-color-primary: var(--text-color-primary);
+  --el-text-color-regular: var(--text-color-regular);
+  --el-text-color-secondary: var(--text-color-secondary);
+  --el-text-color-placeholder: var(--text-color-placeholder);
+  --el-text-color-disabled: #797f89; /* 禁用项（用户菜单邮箱项等）≥3:1；改前 EP #c0c4cc = 1.75 */
+
+  /* 填充：el-tag 默认底 / 行悬浮 / 斑马纹 / 次级中性徽标底 */
+  --el-fill-color: #f0f2f5;
+  --el-fill-color-light: var(--bg-color-page); /* #f5f7fa：次级灰文字于其上 5.40（改前 2.87） */
+  --el-fill-color-lighter: var(--bg-color-secondary);
+  --el-fill-color-blank: var(--bg-color);
+}
+
+/* ============================================
    暗色主题 (Dark Theme)
    ============================================ */
 [data-theme="dark"],
@@ -130,11 +213,15 @@ html.dark {
   --bg-color-overlay: #252526;
   --bg-color-secondary: #1e1e1e;
 
-  /* 文字颜色 - 调亮以便阅读 */
+  /* 文字颜色 - 调亮以便阅读（可访问性 F4：暗色不得回归）
+     EP 暗色档 --el-text-color-secondary 为 #a3a6ad；项目此前用更暗的 #8d9095，
+     落在 --el-fill-color-light(#262727) / 浅灰徽标底(#2c2c2c) 上只有 3.76 / 4.36。
+     提到 EP 档位后：卡片 #29292b 5.96、徽标底 #2c2c2c 5.73、填充 #262727 5.27。
+     placeholder #6c7080 → #82858d：卡片 3.93 / 页底 5.26（改前 2.95 / 3.95）。 */
   --text-color-primary: #e5eaf3;
-  --text-color-regular: #a3a6ad;
-  --text-color-secondary: #8d9095;
-  --text-color-placeholder: #6c7080;
+  --text-color-regular: #b4b7be;
+  --text-color-secondary: #a3a6ad;
+  --text-color-placeholder: #82858d;
 
   /* 边框颜色 */
   --border-color: #4a4a4c;
@@ -200,6 +287,60 @@ html.dark {
   --el-text-color-regular: var(--text-color-regular);
   --el-text-color-secondary: var(--text-color-secondary);
   --el-text-color-placeholder: var(--text-color-placeholder);
+  --el-text-color-disabled: #797f89; /* EP 暗色默认 #6c6e72 → 卡片 2.84；提到 3:1 以上 */
+
+  /* 语义色：与项目暗色 token 同步。
+     注意 --el-color-*-light-9 保持 EP 暗色档（#1c2518 等），暗色下浅底徽标
+     可达 6.88–8.47；改基色后仍全部 ≥6.8，不产生回归。 */
+  --el-color-primary: var(--color-primary);
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-color-error: var(--color-danger);
+  --el-color-info: var(--color-info);
+  --el-color-primary-rgb: 64, 158, 255;
+  --el-color-success-rgb: 133, 206, 97;
+  --el-color-warning-rgb: 235, 181, 99;
+  --el-color-danger-rgb: 247, 137, 137;
+  --el-color-error-rgb: 247, 137, 137;
+  --el-color-info-rgb: 156, 163, 175;
+
+  /* 浅色档（暗色）
+     light-9 是暗色下 el-tag/el-alert 的**背景**，EP 暗色档取值与本项目暗色
+     组件底一致，保持不变以免暗色视觉与对比度回归。
+     light-3/-5/-8 恢复 EP 暗色档的「往黑混」语义（EP 用它们作 hover 背景 /
+     浅底徽标边框）；若沿用亮色的「往白混」值，白字 hover 只有 3.02、
+     浅色描边在深底上会形成白边。 */
+  --el-color-primary-light-3: #3375b9;
+  --el-color-primary-light-5: #2a598a;
+  --el-color-primary-light-7: #213d5b;
+  --el-color-primary-light-8: #1d3043;
+  --el-color-primary-light-9: #18222b;
+  --el-color-success-light-3: #4e8e2f;
+  --el-color-success-light-5: #3e6b27;
+  --el-color-success-light-7: #2d481f;
+  --el-color-success-light-8: #25371c;
+  --el-color-success-light-9: #1c2518;
+  --el-color-warning-light-3: #a77730;
+  --el-color-warning-light-5: #7d5b28;
+  --el-color-warning-light-7: #533f20;
+  --el-color-warning-light-8: #3e301c;
+  --el-color-warning-light-9: #292218;
+  --el-color-danger-light-3: #b25252;
+  --el-color-danger-light-5: #854040;
+  --el-color-danger-light-7: #582e2e;
+  --el-color-danger-light-8: #412626;
+  --el-color-danger-light-9: #2a1d1d;
+  --el-color-error-light-3: #b25252;
+  --el-color-error-light-5: #854040;
+  --el-color-error-light-7: #582e2e;
+  --el-color-error-light-8: #412626;
+  --el-color-error-light-9: #2a1d1d;
+  --el-color-info-light-3: #6b6d71;
+  --el-color-info-light-5: #525457;
+  --el-color-info-light-7: #393a3c;
+  --el-color-info-light-8: #2d2d2f;
+  --el-color-info-light-9: #202121;
 
   /* 边框颜色 */
   --el-border-color: var(--border-color);
@@ -380,6 +521,23 @@ html.dark .el-descriptions__content {
   overflow-x: auto;
 }
 
+/* 触控目标工具类（规范 §4.4.5 / §4.4.7）：
+   给紧凑行内控件（表格行操作等）补足"实际可点击区域"。
+
+   实现方式说明（重要）：曾尝试用 ::after 伪元素外扩热区以完全保持视觉尺寸，
+   但 Chromium 实测伪元素在 el-table 单元格内被单元格/行盒裁剪——
+   elementFromPoint 在按钮下方 12px 处命中的是 td 而不是按钮，
+   真实鼠标点击落在视觉盒外也收不到 click。因此改为直接给控件本身设置
+   min-width/min-height（真实布局盒）：既可用 getBoundingClientRect 验收，
+   也能被真实指针点击与键盘/读屏正确识别。
+
+   36px 是规范 §4.4.5 对"极高密度、非主要任务工具栏"允许的下限；
+   窄屏与粗指针环境再升到 44px（MUST）。 */
+.touch-target {
+  min-width: 36px;
+  min-height: 36px;
+}
+
 .mobile-table-hint {
   display: none;
   font-size: 12px;
@@ -403,6 +561,75 @@ html.dark .el-descriptions__content {
 @media (max-width: 480px) {
   .notification-popover {
     width: calc(100vw - 24px) !important;
+  }
+}
+
+/* 触控目标尺寸（规范 §4.4.5 / §4.4.7）。
+   本项目是紧凑运维密度（§4.2.3），不整体放大行高；这里只补可点击区域：
+   1) 窄屏 + 粗指针环境：把紧凑控件（行操作、小图标按钮）补到 >=44px ——
+      规范对"移动端图标按钮与 Switch/Slider"的要求；
+   2) 表内 Switch 由 Element Plus 固定 20px 高，给容器补最小高度，
+      开关本体尺寸与行内视觉节奏不变。 */
+
+@media (max-width: 768px) {
+  /* 表格行内操作（30×18 的小 text/link 按钮）是审计量化出的最大单一根因：
+     自动化页 257 个 <36px 目标全部来自它。这里统一补到 36px —— 规范 §4.4.5
+     允许"极高密度、非主要任务的工具栏"降到 36px，行高只增加 18px，
+     保留紧凑运维密度（§4.2.3），不整体放大表格。 */
+  .el-table .el-button--small {
+    min-height: 36px;
+  }
+
+  /* ≤768px 的文本输入与选择器：Element Plus 默认 32px 高。
+     输入框是移动端主要输入目标，补到 44px（§4.4.5 MUST）。
+     只改高度与内部对齐，不改字号/颜色（§4.2.3 紧凑密度）。 */
+  .el-input__wrapper,
+  .el-select__wrapper,
+  .el-textarea__inner {
+    min-height: 44px;
+  }
+
+  /* 表单工具条/页头里的默认尺寸按钮（32px）：非表格区域补到 44px。
+     .el-table 内的按钮走上面的 36px 例外（极高密度工具栏）。 */
+  .el-button:not(.el-button--small):not(.is-circle):not(.is-link):not(.is-text) {
+    min-height: 44px;
+  }
+
+  .touch-target {
+    min-height: 44px;
+  }
+
+  .el-table .el-switch {
+    min-height: 44px;
+  }
+
+  .el-table .el-switch .el-switch__core {
+    margin-top: auto;
+    margin-bottom: auto;
+  }
+}
+
+@media (pointer: coarse) {
+  /* 规范 §4.4.7：不以浏览器宽度单独推断输入方式。
+     粗指针设备（手机/平板/触屏笔记本）无论宽度，紧凑控件都补足热区。 */
+  .touch-target {
+    min-height: 44px;
+  }
+
+  .el-table .el-button--small:not(.touch-target),
+  .el-table .el-switch {
+    min-height: 44px;
+  }
+
+  .el-table .el-switch .el-switch__core {
+    margin-top: auto;
+    margin-bottom: auto;
+  }
+
+  /* 高密度、非主要任务的工具栏允许降到 36px（§4.4.5 MUST 的例外）。 */
+  .el-button-group .el-button {
+    min-width: 36px;
+    min-height: 36px;
   }
 }
 

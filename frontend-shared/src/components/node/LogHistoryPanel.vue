@@ -114,7 +114,8 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import feedback from '@/utils/feedback'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
 import { levelText, levelTagType, errorMessage, LOG_LEVEL_OPTIONS } from '@/components/node/logTypes'
@@ -194,15 +195,13 @@ async function clearLogs(before?: number) {
   const confirmTitle = before !== undefined ? '清理历史日志' : '清理全部历史日志'
   const confirmBtn = before !== undefined ? '确认清理' : '全部清理'
 
-  try {
-    await ElMessageBox.confirm(confirmMsg, confirmTitle, {
-      type: 'warning',
-      confirmButtonText: confirmBtn,
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
-  }
+  // 删除日志不可恢复：走统一的危险确认（danger 确认按钮 + 焦点不落在破坏性按钮上）。
+  const confirmed = await feedback.confirmDanger(confirmMsg, {
+    title: confirmTitle,
+    confirmText: confirmBtn,
+    cancelText: '取消',
+  })
+  if (!confirmed) return
 
   const collectorId = props.collectorId
   const operation = requestGeneration

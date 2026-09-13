@@ -158,7 +158,8 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox, type UploadInstance, type UploadProps } from 'element-plus'
+import { ElMessage, type UploadInstance, type UploadProps } from 'element-plus'
+import feedback from '@/utils/feedback'
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
@@ -227,13 +228,12 @@ const handleSelectionChange = (rows: Firmware[]) => {
 
 const handleBatchDelete = async () => {
   const count = selectedFirmwares.value.length
-  try {
-    await ElMessageBox.confirm(
-      `确定要删除选中的 ${count} 个固件吗？此操作不可恢复。`,
-      '批量删除',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
-    )
+  if (!(await feedback.confirmDanger(
+    `确定要删除选中的 ${count} 个固件吗？此操作不可恢复。`,
+    { title: '批量删除', confirmText: '删除', cancelText: '取消' }
+  ))) return
 
+  try {
     batchDeleting.value = true
     const ids = selectedFirmwares.value.map(f => f.id)
     const results = await Promise.allSettled(ids.map(id => firmwareStore.deleteFirmware(id)))
@@ -245,9 +245,7 @@ const handleBatchDelete = async () => {
     if (failed > 0) ElMessage.warning(`${failed} 个固件删除失败`)
     selectedFirmwares.value = []
   } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error('批量删除失败: ' + (error.message || '未知错误'))
-    }
+    ElMessage.error('批量删除失败: ' + (error?.message || '未知错误'))
   } finally {
     batchDeleting.value = false
   }
@@ -255,21 +253,20 @@ const handleBatchDelete = async () => {
 
 // 单个删除
 const handleDelete = async (row: Firmware) => {
-  try {
-    await ElMessageBox.confirm(
-      `确定要删除固件版本 "${formatVersion(row.version)}" 吗？`,
-      '提示',
-      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
-    )
+  // 删除固件版本不可恢复：确认框必须带对象身份与不可逆影响，且确认按钮为 danger。
+  const confirmed = await feedback.confirmDanger(
+    `确定要删除固件版本 "${formatVersion(row.version)}" 吗？此操作不可恢复。`,
+    { title: '删除固件', confirmText: '删除', cancelText: '取消' }
+  )
+  if (!confirmed) return
 
+  try {
     await firmwareStore.deleteFirmware(row.id)
     firmwares.value = firmwareStore.list
     total.value = firmwareStore.total
     ElMessage.success('删除成功')
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error('删除失败')
-    }
+  } catch {
+    ElMessage.error('删除失败')
   }
 }
 

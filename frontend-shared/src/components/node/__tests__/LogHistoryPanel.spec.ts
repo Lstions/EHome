@@ -176,10 +176,17 @@ describe('LogHistoryPanel', () => {
     await wrapper.get('[aria-label="清理指定时间前日志"]').trigger('click')
     await flushPromises()
 
+    // 删除日志不可恢复：必须走 feedback.confirmDanger 的 danger 契约
+    // （确认键 danger 语义类型 + class，且默认焦点不落在破坏性按钮上）。
     expect(mocks.confirm).toHaveBeenCalledWith(
       expect.stringContaining('指定时间前'),
       expect.any(String),
-      expect.objectContaining({ type: 'warning' }),
+      expect.objectContaining({
+        type: 'warning',
+        confirmButtonType: 'danger',
+        confirmButtonClass: 'el-button--danger',
+        autofocus: false,
+      }),
     )
     expect(mocks.deleteNodeLogs).toHaveBeenCalledWith('collector-1', 1783933200000)
 
@@ -189,6 +196,23 @@ describe('LogHistoryPanel', () => {
     expect(mocks.confirm).toHaveBeenCalledTimes(2)
     expect(mocks.deleteNodeLogs).toHaveBeenLastCalledWith('collector-1')
     expect(mocks.getNodeLogs.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('cancelling the danger confirm aborts the log deletion', async () => {
+    // ElMessageBox.confirm 在用户取消时 reject('cancel')，confirmDanger 据此返回 false
+    mocks.confirm.mockRejectedValueOnce(new Error('cancel'))
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await wrapper.get('[aria-label="清理时间点"]').setValue('1783933200000')
+    await wrapper.get('[aria-label="清理指定时间前日志"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.confirm).toHaveBeenCalled()
+    // 取消后必须完全不进入删除请求路径
+    await flushPromises()
+    expect(mocks.deleteNodeLogs).not.toHaveBeenCalled()
+    expect(mocks.success).not.toHaveBeenCalled()
   })
 
   it('never turns a cleared cutoff picker into a full-delete request', async () => {

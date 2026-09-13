@@ -117,6 +117,9 @@
 
     <!-- 设备表格列表 -->
     <el-card v-if="viewMode === 'table'" shadow="hover">
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table
         :data="filteredDevices"
         stripe
@@ -162,20 +165,23 @@
             {{ formatRelativeTime(row.last_data_time) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <!-- 操作列仅图标，窄屏 96px 已足够（原 160px 占 390px 视口的 41%）。
+             touch-target 给三个图标按钮补 ≥36px 热区，视觉尺寸不变。 -->
+        <el-table-column label="操作" width="96" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click="goToDetail(row.id)">
+            <el-button size="small" class="touch-target" :aria-label="`查看 ${row.name}`" @click="goToDetail(row.id)">
               <el-icon><View /></el-icon>
             </el-button>
-            <el-button size="small" @click="handleEdit(row)">
+            <el-button size="small" class="touch-target" :aria-label="`编辑 ${row.name}`" @click="handleEdit(row)">
               <el-icon><Edit /></el-icon>
             </el-button>
-            <el-button size="small" type="danger" text @click="handleDelete(asDevice(row))">
+            <el-button size="small" type="danger" text class="touch-target" :aria-label="`删除 ${row.name}`" @click="handleDelete(asDevice(row))">
               <el-icon><Delete /></el-icon>
             </el-button>
           </template>
         </el-table-column>
       </el-table>
+      </div>
     </el-card>
 
     <!-- 设备卡片列表 -->
