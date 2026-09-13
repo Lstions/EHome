@@ -190,10 +190,10 @@
             <div class="status-bars">
               <div class="status-item">
                 <span class="status-label">在线</span>
-                <el-progress 
-                  :percentage="deviceOnlinePercent" 
+                <el-progress
+                  :percentage="deviceOnlinePercent"
                   :stroke-width="20"
-                  :color="THEME_COLORS.success"
+                  :color="themeColors.success"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
                 </el-progress>
@@ -203,7 +203,7 @@
                 <el-progress
                   :percentage="deviceOfflinePercent"
                   :stroke-width="20"
-                  :color="THEME_COLORS.danger"
+                  :color="themeColors.danger"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
                 </el-progress>
@@ -223,10 +223,10 @@
             <div class="status-bars">
               <div class="status-item">
                 <span class="status-label">在线</span>
-                <el-progress 
-                  :percentage="nodeOnlinePercent" 
+                <el-progress
+                  :percentage="nodeOnlinePercent"
                   :stroke-width="20"
-                  :color="THEME_COLORS.success"
+                  :color="themeColors.success"
                 >
                   <span>{{ metrics?.node?.online || 0 }}</span>
                 </el-progress>
@@ -236,7 +236,7 @@
                 <el-progress
                   :percentage="nodeOfflinePercent"
                   :stroke-width="20"
-                  :color="THEME_COLORS.danger"
+                  :color="themeColors.danger"
                 >
                   <span>{{ metrics?.node?.offline || 0 }}</span>
                 </el-progress>
@@ -302,9 +302,26 @@ import {
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { useResponsive } from '@/composables/useResponsive'
-import { THEME_COLORS } from '@/utils/theme'
+import { getThemeColors } from '@/utils/theme'
 
 const { isMobile } = useResponsive()
+
+/**
+ * el-progress 的 :color 是 canvas 之外的 JS 取值点，无法用 var(--color-*)，
+ * 必须经 getThemeColors() 解析当前主题 token（规范 §3.6.2：禁止组件内写独立亮色调色盘）。
+ * 这里把解析结果包成 ref 并在主题切换时刷新，否则暗色下仍会沿用亮色的 #67c23a。
+ */
+const themeColors = ref(getThemeColors())
+
+let themeObserver: MutationObserver | null = null
+
+onMounted(() => {
+  // 主题切换由 stores/theme.ts 改写 html 的 class / data-theme，观察这两个属性即可重建颜色。
+  themeObserver = new MutationObserver(() => {
+    themeColors.value = getThemeColors()
+  })
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
+})
 
 // 状态
 const metrics = ref<MetricsSummary | null>(null)
@@ -403,6 +420,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopPolling()
+  themeObserver?.disconnect()
+  themeObserver = null
 })
 </script>
 

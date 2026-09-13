@@ -7,9 +7,9 @@
   >
     <template #description>
       <p style="margin: 0 auto 8px; max-width: 400px; line-height: 1.8; color: var(--text-color-regular);">
-        当前账号 <strong>{{ username }}</strong>（<el-tag type="primary" size="default" style="vertical-align: middle;">系统管理员</el-tag>）没有访问该页面的权限。
+        当前账号 <strong>{{ username }}</strong> 没有访问该页面的权限。
       </p>
-      <p style="font-size: 13px; color: var(--text-color-secondary); margin: 0;">如需访问该功能，请联系系统管理员调整角色权限。</p>
+      <p style="font-size: 13px; color: var(--text-color-secondary); margin: 0;">如需访问该功能，请联系管理员调整角色权限。</p>
     </template>
     <template #actions>
       <el-button type="primary" :icon="HomeFilled" @click="goHome">返回首页</el-button>
