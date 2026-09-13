@@ -152,8 +152,13 @@ const MEASURE = () => {
     mobileTableWrapper: document.querySelectorAll('.mobile-table-wrapper').length,
     pagination: document.querySelectorAll('.el-pagination').length,
     cardCount: document.querySelectorAll('.el-card').length,
-    emptyState: document.querySelectorAll('.el-empty').length,
-    emptyText: txt(q('.el-empty__description')),
+    // 空态（§4.3 空态条款）。**本项目主用自研 .empty-state，不是 Element Plus 的 .el-empty**：
+    // 只查 .el-empty 会系统性漏报（D1 域审计指出，主控核实：自研 .empty-state 33 处 vs
+    // el-empty 2 处；实测 /dashboard 在接口失败时 .empty-state 命中 2 个而 .el-empty 为 0）。
+    // 与 clickableNotFocusable 同属契约 §2.3 的假阴性家族。
+    emptyState: document.querySelectorAll('.empty-state, .el-empty').length,
+    emptyStateElOnly: document.querySelectorAll('.el-empty').length,
+    emptyText: txt(q('.empty-state__description, .empty-state, .el-empty__description')),
     skeleton: document.querySelectorAll('[class*="skeleton"], .el-skeleton').length,
     inlineStyled: document.querySelectorAll('[style]:not([style=""])').length,
     bodyBg: cs.backgroundColor,
@@ -168,10 +173,28 @@ const MEASURE = () => {
     clipped: clipped.slice(0, 8),
     overflowCount: overflowing.length,
     overflowing: overflowing.slice(0, 6),
-    // 键盘可达性：可点击但不可聚焦
-    clickableNotFocusable: [...document.querySelectorAll('[role="button"], .el-button, button')]
-      .filter(el => el.tabIndex < 0).length,
-    // 图片/图标缺失
+    // 键盘可达性（§3.1.3）。**必须用 cursor:pointer 扫描，不能用选择器白名单**：
+    // 首版只扫 [role=button]/.el-button/button，而带 @click 的 div/li（侧栏 el-menu-item、
+    // 通知条目、.logo-area）全部漏掉，导致全站计数为 0 的**假阴性**（由 D4 域审计指出，
+    // 主控独立复现：cursor:pointer 元素 221 个，其中 208 个 tabIndex<0）。
+    // 这是契约 §2.2「探针会误报」的镜像错误 —— 凡以「某计数为 0」下结论前，
+    // 必须核对选择器的覆盖范围。
+    clickableNotFocusable: [...document.querySelectorAll('*')].filter(el => {
+      const cs = getComputedStyle(el);
+      return cs.cursor === 'pointer' && el.offsetParent !== null && el.tabIndex < 0;
+    }).length,
+    pointerElements: [...document.querySelectorAll('*')].filter(el => {
+      const cs = getComputedStyle(el);
+      return cs.cursor === 'pointer' && el.offsetParent !== null;
+    }).length,
+    // 焦点陷阱：移动抽屉打开时 Tab 是否会被困在抽屉内
+    drawerFocusTrap: (() => {
+      const drawer = document.querySelector('.mobile-sidebar, .el-drawer, aside');
+      if (!drawer) return null;
+      return { present: true, hasTabindex: drawer.tabIndex >= 0 };
+    })(),
+    // 图片/图标缺失。**必须同时给出分母**：imgsBroken=0 且 imgsTotal=0 意味着
+    // "页面没有 img 元素"，不是"没有坏图"（D1 域审计指出，属 §2.3 假阴性家族）。
     imgsBroken: [...document.querySelectorAll('img')].filter(i => i.complete && i.naturalWidth === 0).length,
     imgsTotal: document.querySelectorAll('img').length,
   };
