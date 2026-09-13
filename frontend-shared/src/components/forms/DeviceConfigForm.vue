@@ -22,8 +22,10 @@
         </el-form-item>
       </div>
 
-      <!-- 驱动选择 -->
-      <el-form-item label="传感器驱动" prop="driverPath">
+      <!-- 驱动选择：创建专属字段。后端 PUT /device-configs/:id 以 models.DeviceConfig 反序列化，
+           其中没有 driverPath（只有 device_type），编辑态渲染可编辑级联选择器会让用户的修改
+           在提交时被静默丢弃（规范 §4.3.2.2：编辑不得展示或接受创建专属字段）。 -->
+      <el-form-item v-if="!isEdit" label="传感器驱动" prop="driverPath">
         <el-cascader
           v-model="form.driverPath"
           :options="driverOptions"
@@ -48,8 +50,15 @@
         </el-cascader>
       </el-form-item>
 
-      <!-- 选中的驱动信息 -->
-      <el-alert v-if="selectedDriver" :closable="false" type="info" style="margin-bottom: 16px;">
+      <!-- 编辑态：只读展示当前驱动类型（不做可编辑控件，也不参与提交），并说明创建后不可修改 -->
+      <el-form-item v-else label="传感器驱动">
+        <span class="driver-readonly" data-test="driver-readonly">
+          {{ form.device_type || '未设置' }}（创建后不可修改）
+        </span>
+      </el-form-item>
+
+      <!-- 选中的驱动信息（仅创建态） -->
+      <el-alert v-if="!isEdit && selectedDriver" :closable="false" type="info" style="margin-bottom: 16px;">
         已选择: {{ selectedDriver.model }}
       </el-alert>
 
@@ -342,6 +351,9 @@ const handleSubmit = async () => {
 
   submitting.value = true
   try {
+    // driverPath 只是级联选择器（OEM → 种类 → 型号）的前端回显路径，后端 DeviceConfig
+    // 没有对应字段（models.DeviceConfig 仅有 device_type）：提交它只会被静默忽略，
+    // 故不作为请求字段；device_type 由选择驱动时派生，编辑态沿用配置自身的值。
     const submitData = {
       name: form.name,
       description: form.description,
@@ -438,6 +450,10 @@ onMounted(() => {
 
 .form-row :deep(.el-form-item__content) {
   margin-left: 0 !important;
+}
+
+.driver-readonly {
+  color: var(--el-text-color-regular);
 }
 
 .driver-option {

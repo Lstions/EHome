@@ -646,6 +646,11 @@ onMounted(() => {
 .filter-right {
   display: flex;
   gap: 8px;
+  /* 三个操作按钮（导入/导出/新建模板）总宽 261px，360px 视口下 .filter-bar 可用宽仅 270px。
+     不允许换行时「导入」被推出卡片内容区左边界，且祖先链 overflow 全为 visible/auto 且
+     scrollWidth === clientWidth（scrollable:false）⇒ 真实裁切而非可滚动溢出。
+     .filter-bar / .filter-left 均已声明 flex-wrap: wrap，此处补齐同一约束。 */
+  flex-wrap: wrap;
 }
 
 /* 配置网格 */

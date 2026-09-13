@@ -82,4 +82,23 @@ describe('DeviceConfigList.vue', () => {
     expect(source).toContain('@media (max-width: 768px)')
     expect(source).toContain('.stats-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }')
   })
+
+  // 360px 实测: card__body 内容宽 310px，.filter-bar 可用 270px；三个动作按钮
+  // 合计 261px + 2×8px gap = 277px > 270px。.filter-bar / .filter-left 均有 flex-wrap，
+  // 缺了 .filter-right 时「导入」被推到内容区左界之外（x=9.95 < 21）且祖先链
+  // scrollWidth === clientWidth（真实裁切，非可滚动溢出）。
+  it('toolbar action group allows wrapping so no action is clipped on narrow viewports', () => {
+    const start = source.indexOf('.filter-right {')
+    expect(start).toBeGreaterThan(-1)
+    const block = source.slice(start, source.indexOf('}', start) + 1)
+    expect(block).toContain('flex-wrap: wrap;')
+  })
+
+  it('wrapping the toolbar actions does not drop any of the three actions', async () => {
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+
+    const actions = wrapper.find('.filter-right').findAll('button')
+    expect(actions.map(button => button.text().replace(/\s+/g, ''))).toEqual(['导入', '导出', '新建模板'])
+  })
 })
