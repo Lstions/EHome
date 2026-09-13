@@ -76,6 +76,10 @@ describe('useWebSocketStore', () => {
     localStorage.clear()
     sessionStorage.clear()
     vi.clearAllTimers()
+    // 每个用例都从确定的基线环境开始：否则某个用例的 vi.unstubAllEnvs()
+    // 会让后续用例落回「未显式 stub」状态，URL 的来源变得不可判定。
+    vi.stubEnv('VITE_WS_URL', '/api/v1/ws')
+    vi.stubEnv('VITE_BASE_PATH', '')
     store = useWebSocketStore()
   })
 
@@ -129,7 +133,8 @@ describe('useWebSocketStore', () => {
     localStorage.setItem('token', 'test-token')
     store.connect()
     expect(MockWebSocket.instances.length).toBe(1)
-    expect(MockWebSocket.instances[0].url).toContain('token=test-token')
+    // 逐字符全等（原为 toContain('token=test-token')，任何多余路径都会漏过）
+    expect(MockWebSocket.instances[0].url).toBe(`ws://${window.location.host}/api/v1/ws?token=test-token`)
   })
 
   it('connect does not create duplicate when already connected', () => {
@@ -159,19 +164,53 @@ describe('useWebSocketStore', () => {
     localStorage.setItem('token', 'test-token')
     store.connect()
     expect(MockWebSocket.instances.length).toBe(1)
-    expect(MockWebSocket.instances[0].url).toContain('/api/v1/ws')
+    // 逐字符全等（原为 toContain('/api/v1/ws')，缺陷 URL 同样通过）
+    expect(MockWebSocket.instances[0].url).toBe(`ws://${window.location.host}/api/v1/ws?token=test-token`)
     vi.unstubAllEnvs()
   })
 
-  it('connect VITE_WS_URL 为完整 URL 时不加前缀', () => {
+  it('connect VITE_WS_URL 为完整端点时不加前缀、不追加路径', () => {
     vi.stubEnv('VITE_WS_URL', 'wss://example.com/ws')
     vi.stubEnv('VITE_BASE_PATH', '/ehome-dev/')
     localStorage.setItem('token', 'test-token')
     store.connect()
     expect(MockWebSocket.instances.length).toBe(1)
-    expect(MockWebSocket.instances[0].url).toContain('wss://example.com/ws')
+    // 逐字符全等（原为 toContain('wss://example.com/ws')，曾被二次追加为
+    // wss://example.com/ws/api/v1/ws 而断言恒真）——规范 §6 P0 的直接回归位。
+    expect(MockWebSocket.instances[0].url).toBe('wss://example.com/ws?token=test-token')
     expect(MockWebSocket.instances[0].url).not.toContain('/ehome-dev')
+    expect(MockWebSocket.instances[0].url).not.toContain('/api/v1/ws')
     vi.unstubAllEnvs()
+  })
+
+  // ── VITE_WS_URL × VITE_BASE_PATH 输入矩阵（规范 §6 P0 回归）──────
+  //
+  // 契约（二选一，语义唯一）：
+  //   完整端点 — 以 ws:// 或 wss:// 开头：原样使用，不追加任何路径，
+  //              且不受 VITE_BASE_PATH 影响；wss://host 就是完整端点本身
+  //              （等价 wss://host/），不会自动补 /api/v1/ws。
+  //   相对路径 — 以 / 开头：拼 VITE_BASE_PATH 前缀后基于当前页面 origin 组装。
+  //
+  // 每行都断言 new WebSocket 收到的 URL 与期望串逐字符全等：
+  // 任何一次多余的路径追加（缺陷）或漏加前缀都会让对应行立即变红。
+  describe('VITE_WS_URL 输入矩阵（new WebSocket URL 逐字符全等）', () => {
+    const origin = `ws://${window.location.host}`
+
+    it.each([
+      ['相对路径 + 根部署', '/api/v1/ws', '', `${origin}/api/v1/ws?token=t`],
+      ['相对路径 + 子路径部署', '/api/v1/ws', '/ehome-dev/', `${origin}/ehome-dev/api/v1/ws?token=t`],
+      ['完整端点（含路径）+ 根部署', 'wss://host/api/v1/ws', '', 'wss://host/api/v1/ws?token=t'],
+      ['完整端点（无路径）+ 根部署', 'wss://host', '', 'wss://host?token=t'],
+      ['完整端点 + 子路径前缀（不受影响）', 'wss://example.com/ws', '/ehome-dev/', 'wss://example.com/ws?token=t'],
+    ])('%s', (_label, wsUrl, basePath, expected) => {
+      vi.stubEnv('VITE_WS_URL', wsUrl)
+      vi.stubEnv('VITE_BASE_PATH', basePath)
+      localStorage.setItem('token', 't')
+      store.connect()
+      expect(MockWebSocket.instances.length).toBe(1)
+      expect(MockWebSocket.instances[0].url).toBe(expected)
+      vi.unstubAllEnvs()
+    })
   })
 
   it('connected becomes true on open', () => {

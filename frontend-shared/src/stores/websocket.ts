@@ -134,10 +134,14 @@ export const useWebSocketStore = defineStore('websocket', () => {
       : rawWsUrl
     let statusUrl: string
 
-    // If wsUrl is already a full URL (ws:// or wss://), use it directly;
-    // otherwise construct from current location for same-origin proxy
+    // VITE_WS_URL 语义契约（唯一，二选一；收敛规范 §6 P0）：
+    //   (a) 完整端点：以 ws:// 或 wss:// 开头 → 原样使用，绝不追加任何路径。
+    //       注意 wss://host（无路径）同样按完整端点处理，结果为 wss://host?token=...，
+    //       不会补默认路径 —— 需要默认路径时请显式配置 wss://host/api/v1/ws。
+    //   (b) 相对路径：以 / 开头 → 拼 VITE_BASE_PATH 前缀后基于当前页面 origin 组装。
+    // 两种语义互斥：完整端点不受 VITE_BASE_PATH 影响，相对路径才受其影响。
     if (wsUrl.startsWith('ws://') || wsUrl.startsWith('wss://')) {
-      statusUrl = `${wsUrl}/api/v1/ws`
+      statusUrl = wsUrl
     } else {
       // Relative path — construct from current page origin
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
