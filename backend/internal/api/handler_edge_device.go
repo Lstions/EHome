@@ -150,39 +150,102 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 	eventBus := nodeMgr.EventBus()
 
 	// List edge devices (v2.2 path for /devices)
+	//
+	// 分页契约 (架构与接口评估 P1.2 裁决: items + total; 参数语义与
+	// /automation-events、/logical-devices、/nodes 一致):
+	// 查询参数 page (默认 1, <1 归 1) / page_size (默认 20, 超出 [1,200] 归 20),
+	// 响应 data = {items, total, page, page_size}。
+	// total 语义: **过滤后全量**条数, 不是当前页条数。
+	//
+	// 历史 (为什么必须改, 负债 I-11「假分页」): 本端点原为无参全量 Find + 3 Preload
+	// + 裸数组返回 —— 前端 EdgeDeviceList.vue 一直发 page/page_size, 后端**静默丢弃**,
+	// :data 绑定的是本地全量数组, el-pagination 纯装饰。search/status/hardware
+	// 三个筛选也只在前端当前页本地过滤 (§3.3.5)。
+	//
+	// Order("id") 不是装饰: 真分页必须有稳定全序 (见 handler_node.go 同段说明)。
 	v1.GET("/edge-devices", func(c *gin.Context) {
-		var devices []models.EdgeDevice
-		// P2.2 取消传播: 全量列表及其 Preload 链绑定请求上下文。
-		query := db.WithContext(c.Request.Context()).Preload("Channel").Preload("Node").Preload("DeviceConfig")
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
+
+		// 过滤条件必须在 Count 与 Find **两侧同时**生效, 否则 total 会变成未过滤的
+		// 全量、分页器算出多余页数 (用户翻到空页)。
+		// 过滤链刻意**不含 Preload**: Count 只需要 WHERE, 带 Preload 的 Count 会
+		// 退化成 join 计数; Find 时再挂 Preload 链。
+		query := db.WithContext(c.Request.Context()).Model(&models.EdgeDevice{})
 
 		// Apply optional node_id filter
-		nodeID := c.Query("node_id")
+		nodeID := strings.TrimSpace(c.Query("node_id"))
 		if nodeID != "" {
 			query = query.Where("node_id = ?", nodeID)
 		}
 
 		// Apply optional device_type & status filters
-		if dt := c.Query("device_type"); dt != "" {
+		if dt := strings.TrimSpace(c.Query("device_type")); dt != "" {
 			query = query.Where("type = ?", dt)
 		}
-		if st := c.Query("status"); st != "" {
+		if st := strings.TrimSpace(c.Query("status")); st != "" {
 			query = query.Where("status = ?", st)
 		}
 
-		if err := query.Find(&devices).Error; err != nil {
+		// hardware_type 过滤: edge_devices 表没有该列, 真源在 channels.hardware_type
+		// (GET /edge-devices/:id 的响应里 hardware_type 也是从 Channel 归一化来的)。
+		// 用 EXISTS 子查询而不是 JOIN: JOIN edge_devices 必须配合 DISTINCT, 否则
+		// 同一设备多通道时会重复行, Count/Offset 全错。大小写归一 —— DB 存 'UART',
+		// 前端筛选值是小写 'uart'。
+		if hw := strings.TrimSpace(c.Query("hardware_type")); hw != "" {
+			query = query.Where(
+				"EXISTS (SELECT 1 FROM channels ch WHERE ch.id = edge_devices.channel_id AND ch.deleted_at IS NULL AND LOWER(ch.hardware_type) = ?)",
+				strings.ToLower(hw),
+			)
+		}
+
+		// search 是**服务端**全库检索 (§3.3.5): 与前端本地过滤同口径
+		// (名称 / 设备类型 / 设备类型中文标签)。LOWER+LIKE 在 PostgreSQL 与 SQLite
+		// 测试库都可用 (与 handler_logical_device.go:60 同一写法)。
+		// 注: 中文标签 (如 "BMS 电池管理系统") 由前端 getDeviceTypeLabel 派生,
+		// 服务端搜不到中文标签 —— 类型筛选请走 device_type, 此处覆盖 name/type。
+		if search := strings.TrimSpace(c.Query("search")); search != "" {
+			like := "%" + strings.ToLower(search) + "%"
+			query = query.Where("LOWER(name) LIKE ? OR LOWER(type) LIKE ?", like, like)
+		}
+
+		var total int64
+		if err := query.Count(&total).Error; err != nil {
+			logger.Warnf("[edge-devices-list] count failed: %v", err)
+			Error(c, http.StatusInternalServerError, "failed to query edge devices")
+			return
+		}
+
+		// 非 nil 空切片: 空集序列化为 [] 而非 null (与 handler_data_source.go 同约定)。
+		devices := make([]models.EdgeDevice, 0)
+		if err := query.
+			Preload("Channel").Preload("Node").Preload("DeviceConfig").
+			Order("edge_devices.id").
+			Offset((page - 1) * pageSize).Limit(pageSize).
+			Find(&devices).Error; err != nil {
 			logger.Warnf("[edge-devices-list] query failed: %v", err)
 			Error(c, http.StatusInternalServerError, "failed to query edge devices")
 			return
 		}
 
 		// Enrich each device with latest sensor data from unified_data (C1 fix: batch query)
+		//
+		// 富化范围**只限当前页** (本任务的关键约束): 这里收集的 deviceIDs 是上面
+		// Limit 之后的当前页, 而不是全表 —— 否则「分页」了但仍在全表捞数据,
+		// 首屏开销与改前一样, 等于没优化 (DISTINCT ON 全表扫描 + 缓存逐设备查找)。
 		type lastDataEntry struct {
 			DeviceID   uint    `json:"device_id"`
 			SensorName string  `json:"sensor_name"`
 			Value      float64 `json:"value"`
 			Unit       string  `json:"unit"`
 		}
-		// Collect all device IDs
+		// Collect all device IDs — current page only.
 		deviceIDs := make([]uint, len(devices))
 		for i, d := range devices {
 			deviceIDs[i] = d.ID
@@ -229,7 +292,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			}
 		}
 
-		Success(c, devices)
+		Success(c, gin.H{"items": devices, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// Get single edge device by id (v2.2 path for /devices/:id)

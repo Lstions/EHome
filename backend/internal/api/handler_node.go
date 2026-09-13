@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -42,14 +43,58 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	eventBus := nodeMgr.EventBus()
 
 	// List nodes (v2.2 compat path)
+	//
+	// 分页契约 (架构与接口评估 P1.2 裁决: items + total; 参数语义与
+	// /automation-events、/logical-devices、/vendors、/device-configs 一致):
+	// 查询参数 page (默认 1, <1 归 1) / page_size (默认 20, 超出 [1,200] 归 20),
+	// 响应 data = {items, total, page, page_size}。
+	// total 语义: **过滤后全量**条数, 不是当前页条数 (前端分页器用它算总页数)。
+	//
+	// 历史 (为什么必须改, 负债 I-11「假分页」): 本端点原为无参全量 Find + 裸数组
+	// 返回 —— 前端 NodeList.vue 一直发 page/page_size, 后端**静默丢弃**,
+	// :data 绑定的是本地全量数组, el-pagination 纯装饰: 用户以为在翻页, 实际是
+	// 本地切片。同时 status/model/search 三个筛选也都只在前端当前页本地过滤
+	// (§3.3.5 禁止把当前页本地筛选伪装成全局检索)。
+	//
+	// Order("id") 不是装饰: 真分页必须有稳定全序, 否则跨页可能重复或漏项
+	// (无 ORDER BY 时 PG/SQLite 都不保证两次 OFFSET 查询的相对次序一致)。
 	v1.GET("/nodes", func(c *gin.Context) {
-		var nodes []models.Node
-		// P2.2 取消传播: 无分页全量列表绑定请求上下文。
-		if err := db.WithContext(c.Request.Context()).Find(&nodes).Error; err != nil {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
+		// 过滤条件必须在 Count 与 Find **两侧同时**生效, 否则 total 会变成未过滤的
+		// 全量、分页器算出多余页数 (用户翻到空页)。
+		q := db.WithContext(c.Request.Context()).Model(&models.Node{})
+		if st := strings.TrimSpace(c.Query("status")); st != "" {
+			q = q.Where("status = ?", st)
+		}
+		if model := strings.TrimSpace(c.Query("model")); model != "" {
+			q = q.Where("model = ?", model)
+		}
+		// search 是**服务端**全库检索 (§3.3.5): 与前端本地过滤同口径 (name 或 model)。
+		// LOWER+LIKE 在 PostgreSQL 与 SQLite 测试库都可用 (与 handler_logical_device.go:60
+		// 同一写法)。
+		if search := strings.TrimSpace(c.Query("search")); search != "" {
+			like := "%" + strings.ToLower(search) + "%"
+			q = q.Where("LOWER(name) LIKE ? OR LOWER(model) LIKE ?", like, like)
+		}
+		var total int64
+		if err := q.Count(&total).Error; err != nil {
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		Success(c, nodes)
+		// 非 nil 空切片: 空集序列化为 [] 而非 null (与 handler_data_source.go 同约定)。
+		nodes := make([]models.Node, 0)
+		if err := q.Order("id").Offset((page - 1) * pageSize).Limit(pageSize).Find(&nodes).Error; err != nil {
+			Error(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		Success(c, gin.H{"items": nodes, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// Global status transition history for the dashboard's operational timeline.

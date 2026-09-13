@@ -199,6 +199,23 @@ func TestHeavyQueries_NormalContext_EmptyIsArray(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 				t.Fatalf("response is not valid JSON: %v (%s)", err, w.Body.String())
 			}
+			// edge-devices 列表自主任务起改为分页契约 (P1.2: items+total),
+			// 空结果集的不变式随之落在 **items** 上: 必须序列化为 [] 而非 null。
+			// 这不是放宽断言 —— null 与 [] 的区别正是本用例要钉死的东西,
+			// 所以仍然逐字节比较, 只是把比较对象换成了分页信封里的 items。
+			// 其余两个用例仍是裸数组端点, 保持原断言不变。
+			if tc.name == "edge-devices-list" {
+				var page struct {
+					Items json.RawMessage `json:"items"`
+				}
+				if err := json.Unmarshal(env.Data, &page); err != nil {
+					t.Fatalf("paginated data is not an object with items: %v (%s)", err, string(env.Data))
+				}
+				if string(page.Items) != "[]" {
+					t.Fatalf("empty page items must serialize as [], got %s", string(page.Items))
+				}
+				return
+			}
 			if string(env.Data) != "[]" {
 				t.Fatalf("empty result must serialize as [], got %s", string(env.Data))
 			}

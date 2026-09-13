@@ -361,14 +361,28 @@ func TestNodeCRUD_List(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data, ok := resp["data"].([]interface{})
-	if !ok {
-		t.Fatalf("expected data array, got %v", resp["data"])
+	// 分页契约 (P1.2 / 负债 I-11): data 由裸数组改为 {items,total,page,page_size}。
+	// 断言逐字段写死形状 —— 不再用"是不是数组"这种兼容两种契约的宽松判断,
+	// 否则契约回退成裸数组时本用例仍会通过。
+	var resp struct {
+		Data struct {
+			Items    []map[string]interface{} `json:"items"`
+			Total    int64                    `json:"total"`
+			Page     int                      `json:"page"`
+			PageSize int                      `json:"page_size"`
+		} `json:"data"`
 	}
-	if len(data) != 2 {
-		t.Errorf("expected 2 nodes, got %d", len(data))
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal list response: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Data.Items) != 2 {
+		t.Errorf("expected 2 nodes, got %d", len(resp.Data.Items))
+	}
+	if resp.Data.Total != 2 {
+		t.Errorf("expected total 2, got %d", resp.Data.Total)
+	}
+	if resp.Data.Page != 1 || resp.Data.PageSize != 20 {
+		t.Errorf("expected page/page_size 1/20, got %d/%d", resp.Data.Page, resp.Data.PageSize)
 	}
 }
 
