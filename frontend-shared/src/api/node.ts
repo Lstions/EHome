@@ -58,7 +58,12 @@ export interface NodeListResponse {
 }
 
 export interface NodeListParams {
+  /** 状态筛选, 服务端生效 (Count 与 Find 两侧同时应用) */
   status?: string
+  /** 型号筛选, 服务端精确匹配 */
+  model?: string
+  /** 服务端全库检索 (name/model 模糊匹配, 大小写不敏感) */
+  search?: string
   page?: number
   page_size?: number
 }
@@ -248,22 +253,34 @@ export interface PeripheralAssignment {
 // ============================================================
 
 export const nodeApi = {
+  /**
+   * GET /api/v1/nodes — 真分页列表 (负债 I-11)。
+   *
+   * 契约 (架构评估 P1.2 裁决, 与 /automation-events、/logical-devices 一致):
+   * `data = { items, total, page, page_size }`; total 是**过滤后全量**条数
+   * (不是当前页条数), page/page_size 是后端 clamp 后的回显。
+   *
+   * 历史 (为什么必须改): 本方法原先兼容"后端返回裸数组"这一旧形状, 并对裸数组
+   * 回填 `page_size: inner.length` —— 那正是"假分页"的最后一块遮羞布: 后端忽略
+   * page 参数时, 前端照样能拼出一个看起来自洽的分页信封, 掩盖了"翻页其实没生效"。
+   * 后端补分页后该兼容分支失去意义, 且**有害**: 它会让契约回退到裸数组时静默通过。
+   * 因此这里只认新契约, 形状不符即返回空页 (调用方展示空态, 而不是假装成功)。
+   */
   async getList(params?: NodeListParams): Promise<NodeListResponse> {
-    // 拦截器返回后端统一 envelope；data 为节点数组（后端 GET /nodes Success(c, nodes)）。
-    const response = await client.get<unknown, ApiResponse<Node[] | NodeListResponse>>('/api/v1/nodes', { params })
+    // 拦截器返回后端统一 envelope; data 为 {items,total,page,page_size}。
+    const response = await client.get<unknown, ApiResponse<NodeListResponse>>('/api/v1/nodes', { params })
     const inner = response.data
-    if (Array.isArray(inner)) {
+    if (inner && Array.isArray(inner.items)) {
       return {
-        total: inner.length,
-        page: params?.page || 1,
-        page_size: params?.page_size || inner.length,
-        items: inner,
+        // 后端自本任务起回显 page/page_size; 旧后端缺省时以请求值兜底,
+        // 保证分页器受控值不跳变。total 缺失时退化为当前页条数 (不假装有更多页)。
+        total: inner.total ?? inner.items.length,
+        page: inner.page ?? params?.page ?? 1,
+        page_size: inner.page_size ?? params?.page_size ?? 20,
+        items: inner.items,
       }
     }
-    if (inner && Array.isArray(inner.items)) {
-      return inner
-    }
-    return { total: 0, page: 1, page_size: 20, items: [] }
+    return { total: 0, page: params?.page ?? 1, page_size: params?.page_size ?? 20, items: [] }
   },
 
   async getDetail(id: number | string): Promise<Node> {

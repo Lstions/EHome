@@ -241,4 +241,73 @@ describe('useEdgeDeviceStore list cache', () => {
     expect(store.list).toEqual([])
     expect(store.listLoading).toBe(false)
   })
+
+  // ── 缓存键完整性 (负债 I-11 附带发现; 主控批准扩权修复) ──────────
+  //
+  // 缺陷: listCacheKey 原先是**显式枚举** {node_id, device_type, status, page,
+  // page_size}, 本轮新增的 search/hardware_type 会被静默丢弃 (就像 node store
+  // 之前丢弃 search/model 那样): 两个不同检索落到同一个键上 → 命中 30s 新鲜缓存
+  // 直接 return, 页面显示上一次的结果、**且从不发请求**。
+  // 跨视图后果: NodeDetail.vue:669 / NodeOverview.vue:1355 / DataPanel.vue:428 都用
+  // 固定 params 读同一张缓存表, 带筛选的结果一旦写进无筛选的键, 那三处的设备列表
+  // 会被污染 (表现为"某页面莫名其妙少了几台设备")。
+
+  it('不同 search 不得命中同一缓存 (且第二次确实发请求)', async () => {
+    const store = useEdgeDeviceStore()
+    mockGetList.mockResolvedValue({ items: [{ id: 1, name: 'D' }], total: 1 })
+
+    await store.fetchList({ page: 1, page_size: 24, search: 'alpha' })
+    const callsAfterFirst = mockGetList.mock.calls.length
+
+    await store.fetchList({ page: 1, page_size: 24, search: 'beta' })
+
+    expect(mockGetList.mock.calls.length).toBe(callsAfterFirst + 1)
+    expect(store.hasCachedList({ page: 1, page_size: 24, search: 'alpha' })).toBe(true)
+    expect(store.hasCachedList({ page: 1, page_size: 24, search: 'beta' })).toBe(true)
+  })
+
+  it('不同 hardware_type 不得命中同一缓存', async () => {
+    const store = useEdgeDeviceStore()
+    mockGetList.mockResolvedValue({ items: [{ id: 1, name: 'D' }], total: 1 })
+
+    await store.fetchList({ page: 1, page_size: 24, hardware_type: 'uart' })
+    const callsAfterFirst = mockGetList.mock.calls.length
+
+    await store.fetchList({ page: 1, page_size: 24, hardware_type: 'i2c' })
+
+    expect(mockGetList.mock.calls.length).toBe(callsAfterFirst + 1)
+  })
+
+  it('带筛选的查询不得污染"无筛选"键 (NodeDetail/DataPanel 设备列表回归)', async () => {
+    const store = useEdgeDeviceStore()
+    // NodeDetail.vue:669 读的就是 {node_id, page:1, page_size:100} 这个键。
+    const nodeDetailKey = { node_id: 'F0F5BDFFFE02', page: 1, page_size: 100 }
+    mockGetList.mockResolvedValueOnce({
+      items: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }], total: 2,
+    })
+    await store.fetchList(nodeDetailKey)
+
+    // 列表页做一次带 status 筛选的查询, 后端只回 1 条。
+    mockGetList.mockResolvedValueOnce({ items: [{ id: 1, name: 'A' }], total: 1 })
+    await store.fetchList({ page: 1, page_size: 24, status: 'active' })
+
+    // 设备详情页读到的必须仍是完整的两台, 不能被列表页的筛选结果覆盖。
+    const forDetailPage = store.getCachedList(nodeDetailKey)
+    expect(forDetailPage?.items).toHaveLength(2)
+    expect(forDetailPage?.total).toBe(2)
+    // 筛选结果落在自己的键上。
+    expect(store.getCachedList({ page: 1, page_size: 24, status: 'active' })?.total).toBe(1)
+  })
+
+  it('筛选键与分页键相互独立 (page 维度不被筛选吞掉)', async () => {
+    const store = useEdgeDeviceStore()
+    mockGetList.mockResolvedValue({ items: [{ id: 1, name: 'D' }], total: 1 })
+
+    await store.fetchList({ page: 1, page_size: 24, search: 'x' })
+    const calls = mockGetList.mock.calls.length
+    await store.fetchList({ page: 2, page_size: 24, search: 'x' })
+
+    expect(mockGetList.mock.calls.length).toBe(calls + 1)
+    expect(store.hasCachedList({ page: 2, page_size: 24, search: 'x' })).toBe(true)
+  })
 })

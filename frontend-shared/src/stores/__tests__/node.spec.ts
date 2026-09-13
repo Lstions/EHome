@@ -334,4 +334,74 @@ describe('useNodeStore', () => {
     expect(store.total).toBe(0)
     expect(store.getCachedDetail(1)).toBeUndefined()
   })
+
+  // ── 缓存键完整性 (负债 I-11 附带发现; 主控批准扩权修复) ──────────
+  //
+  // 缺陷: listCacheKey 原先是**显式枚举** {status, page, page_size}, 视图层新增的
+  // search/model 被静默丢弃。两个不同检索因此落到同一个键上 —— fetchNodes 命中
+  // 15s 新鲜缓存直接 return, 页面显示上一次的结果、**且从不发请求**。这是
+  // "看起来在工作、实际返回别人的数据"。跨视图后果更重: ChannelList.vue:366 用
+  // getCachedList({page:1,page_size:20}) 做**节点名映射**, 带筛选的结果一旦写进
+  // 这个"无筛选"键, 通道页的名称映射就会被打空/打错。
+
+  it('不同 search 不得命中同一缓存 (且第二次确实发请求)', async () => {
+    const { nodeApi } = await import('@/api/node')
+    vi.mocked(nodeApi.getList).mockResolvedValue({ items: mockNodes, total: 2 } as any)
+
+    await store.fetchNodes({ page: 1, page_size: 20, search: 'alpha' })
+    const callsAfterFirst = vi.mocked(nodeApi.getList).mock.calls.length
+
+    await store.fetchNodes({ page: 1, page_size: 20, search: 'beta' })
+
+    // 关键: 第二次**必须**真的发请求, 不能命中 alpha 的缓存。
+    expect(vi.mocked(nodeApi.getList).mock.calls.length).toBe(callsAfterFirst + 1)
+    expect(nodeApi.getList).toHaveBeenLastCalledWith({ page: 1, page_size: 20, search: 'beta' })
+    expect(store.hasCachedList({ page: 1, page_size: 20, search: 'alpha' })).toBe(true)
+    expect(store.hasCachedList({ page: 1, page_size: 20, search: 'beta' })).toBe(true)
+  })
+
+  it('不同 model 不得命中同一缓存', async () => {
+    const { nodeApi } = await import('@/api/node')
+    vi.mocked(nodeApi.getList).mockResolvedValue({ items: mockNodes, total: 2 } as any)
+
+    await store.fetchNodes({ page: 1, page_size: 20, model: 'ESP32' })
+    const callsAfterFirst = vi.mocked(nodeApi.getList).mock.calls.length
+
+    await store.fetchNodes({ page: 1, page_size: 20, model: 'RPi4' })
+
+    expect(vi.mocked(nodeApi.getList).mock.calls.length).toBe(callsAfterFirst + 1)
+  })
+
+  it('带筛选的查询不得污染"无筛选"键 (ChannelList 节点名映射回归)', async () => {
+    const { nodeApi } = await import('@/api/node')
+    // 先造出"无筛选"的权威全量缓存 —— ChannelList.vue:366 就是读这个键做名称映射。
+    vi.mocked(nodeApi.getList).mockResolvedValueOnce({ items: mockNodes, total: 2 } as any)
+    await store.fetchNodes({ page: 1, page_size: 20 })
+
+    // 再做一次带 search 的检索, 后端只回 1 条 (命中的那条)。
+    vi.mocked(nodeApi.getList).mockResolvedValueOnce({
+      items: [{ ...mockNodes[0], name: 'Node-1' }], total: 1,
+    } as any)
+    await store.fetchNodes({ page: 1, page_size: 20, search: 'node-1' })
+
+    // 无筛选键必须仍是**完整的两条**, 不能被检索结果覆盖 ——
+    // 否则通道页的名称映射会凭空少掉一个节点。
+    const unfiltered = store.getCachedList({ page: 1, page_size: 20 })
+    expect(unfiltered?.items).toHaveLength(2)
+    expect(unfiltered?.total).toBe(2)
+    // 检索结果落在自己的键上。
+    expect(store.getCachedList({ page: 1, page_size: 20, search: 'node-1' })?.total).toBe(1)
+  })
+
+  it('筛选键与分页键相互独立 (page 维度不被筛选吞掉)', async () => {
+    const { nodeApi } = await import('@/api/node')
+    vi.mocked(nodeApi.getList).mockResolvedValue({ items: mockNodes, total: 2 } as any)
+
+    await store.fetchNodes({ page: 1, page_size: 20, search: 'x' })
+    const calls = vi.mocked(nodeApi.getList).mock.calls.length
+    await store.fetchNodes({ page: 2, page_size: 20, search: 'x' })
+
+    expect(vi.mocked(nodeApi.getList).mock.calls.length).toBe(calls + 1)
+    expect(store.hasCachedList({ page: 2, page_size: 20, search: 'x' })).toBe(true)
+  })
 })

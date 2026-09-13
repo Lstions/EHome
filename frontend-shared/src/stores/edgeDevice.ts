@@ -6,11 +6,18 @@ import { registerSessionCacheClearer } from '@/utils/sessionCache'
 const LIST_CACHE_TTL = 30_000 // 30s — list data is shared across views
 const DETAIL_CACHE_TTL = 10_000 // 10s — detail may have fresher last_data
 
+// 缓存键必须**逐个枚举**所有"视图层真的会传且影响结果"的字段 ——
+// 为什么不能 ...params 展开、为什么"键不全"是独立缺陷, 见 stores/node.ts 同段说明。
+// 本 store 的跨视图后果: NodeDetail.vue:669 / NodeOverview.vue:1355 / DataPanel.vue:428
+// 都用固定 params 读同一张缓存表, 带筛选的结果一旦写进无筛选的键, 那三处的设备列表
+// 就会被污染 (表现为"某页面莫名其妙少了几台设备")。
 function listCacheKey(params?: EdgeDeviceListParams): string {
   return JSON.stringify({
     node_id: params?.node_id ?? '',
     device_type: params?.device_type || '',
     status: params?.status || '',
+    hardware_type: params?.hardware_type || '',
+    search: params?.search || '',
     page: params?.page || 1,
     page_size: params?.page_size || 20,
   })

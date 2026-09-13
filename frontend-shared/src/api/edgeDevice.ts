@@ -63,6 +63,20 @@ export interface EdgeDeviceListParams {
   node_id?: number | string
   device_type?: string
   status?: string
+  /** 总线类型 (uart/i2c/spi/...), 服务端按 channels.hardware_type 大小写不敏感匹配 */
+  hardware_type?: string
+  /** 服务端全库检索 (name/type 模糊匹配, 大小写不敏感) */
+  search?: string
+  page?: number
+  page_size?: number
+}
+
+/** GET /edge-devices 的分页信封 (架构评估 P1.2: items + total, 非 list)。 */
+export interface EdgeDeviceListResponse {
+  items: EdgeDevice[]
+  /** 过滤后的**全量**条数 (不是当前页条数); 分页器用它算总页数 */
+  total: number
+  /** 后端自负债 I-11 起回显; 旧后端缺省时由 getList() 以请求值兜底 */
   page?: number
   page_size?: number
 }
@@ -199,17 +213,30 @@ const normalizeList = (items: unknown[]): EdgeDevice[] =>
 // ============================================================
 
 export const edgeDeviceApi = {
-  async getList(params?: EdgeDeviceListParams): Promise<{total: number, items: EdgeDevice[]}> {
-    // 拦截器返回统一 envelope；后端 GET /edge-devices 的 data 为设备数组。
-    const response = await client.get<unknown, ApiEnvelope<EdgeDevice[] | { items: unknown[]; total?: number }>>('/api/v1/edge-devices', { params })
+  /**
+   * GET /api/v1/edge-devices — 真分页列表 (负债 I-11)。
+   *
+   * 契约 (架构评估 P1.2 裁决): `data = { items, total, page, page_size }`,
+   * total 是**过滤后全量**条数。latest-data 富化由后端只对**当前页**执行。
+   *
+   * 历史 (为什么必须改): 本方法原先同时兼容 `data` 是裸数组和是 {items,total}
+   * 两种形状 —— 对裸数组直接 `total = data.length`, 于是后端忽略 page 参数时
+   * 前端仍能拿到一个"自洽"的信封, "假分页"因此在两端都不报错。后端补分页后只认
+   * 新契约, 形状不符即返回空页 (调用方展示空态, 而不是假装成功)。
+   */
+  async getList(params?: EdgeDeviceListParams): Promise<EdgeDeviceListResponse> {
+    // 拦截器返回统一 envelope; data 为 {items,total,page,page_size}。
+    const response = await client.get<unknown, ApiEnvelope<{ items: unknown[]; total?: number; page?: number; page_size?: number }>>('/api/v1/edge-devices', { params })
     const data = response?.data
-    if (Array.isArray(data)) {
-      return { total: data.length, items: normalizeList(data) }
-    }
     if (data && Array.isArray(data.items)) {
-      return { total: data.total ?? data.items.length, items: normalizeList(data.items) }
+      return {
+        total: data.total ?? data.items.length,
+        page: data.page ?? params?.page ?? 1,
+        page_size: data.page_size ?? params?.page_size ?? 20,
+        items: normalizeList(data.items),
+      }
     }
-    return { total: 0, items: [] }
+    return { total: 0, page: params?.page ?? 1, page_size: params?.page_size ?? 20, items: [] }
   },
 
   async getDetail(id: number): Promise<EdgeDevice> {

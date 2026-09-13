@@ -537,24 +537,36 @@ import { edgeDeviceApi } from '../edgeDevice'
 describe('edgeDeviceApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('getList requires the envelope and ignores a bare array response', async () => {
-    mockClient.get.mockResolvedValue([{ id: 1, name: 'dev1', status: 'online' }])
+  // ── 负债 I-11: GET /edge-devices 改为真分页契约 {items,total,page,page_size} ──
+  // 改前这里同时接受"data 是裸数组"与"data 是 {items,total}"两种形状, 并对裸数组
+  // 回填 total = data.length —— 后端口径不明时前端照样能拼出"自洽"的分页信封,
+  // 这正是"假分页"在两端都不报错的原因。以下断言全部收紧到**只认新契约**。
+
+  it('getList ignores a bare array response (旧契约已废弃)', async () => {
+    // 裸数组是新契约的反面: 必须返回空页, 而不是把它当成"全量一页"。
+    mockClient.get.mockResolvedValue({ data: [{ id: 1, name: 'dev1', status: 'online' }] })
     const res = await edgeDeviceApi.getList()
-    expect(res).toEqual({ total: 0, items: [] })
+    expect(res.total).toBe(0)
+    expect(res.items).toEqual([])
   })
 
   it('getList drops malformed entries before normalization', async () => {
     mockClient.get.mockResolvedValue({
-      data: [
-        undefined,
-        null,
-        { name: 'missing-id' },
-        { id: 2, name: 'valid-device', status: 'active' },
-      ],
+      data: {
+        items: [
+          undefined,
+          null,
+          { name: 'missing-id' },
+          { id: 2, name: 'valid-device', status: 'active' },
+        ],
+        total: 4,
+      },
     })
 
     const res = await edgeDeviceApi.getList()
 
+    // total 用**后端给的** 4 (含无法渲染的条目), 不是压缩后的 1 ——
+    // 分页器必须按后端口径算总页数, 否则与真实数据量对不上。
     expect(res.total).toBe(4)
     expect(res.items).toHaveLength(1)
     expect(res.items[0].id).toBe(2)
@@ -567,23 +579,46 @@ describe('edgeDeviceApi', () => {
     expect(res.items[0].status).toBe('offline')
   })
 
-  it('getList with envelope .data as array', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, status: 'active' }] })
-    const res = await edgeDeviceApi.getList()
-    expect(res.total).toBe(1)
-    expect(res.items[0].status).toBe('active')
+  it('getList 回显后端 clamp 后的 page/page_size', async () => {
+    // 后端会把 page=0 归 1、page_size=100000 归 20 —— 前端受控值必须跟随回显,
+    // 否则分页器显示 100000/页、实际拿到 20 条。
+    mockClient.get.mockResolvedValue({
+      data: { items: [{ id: 1 }], total: 25, page: 1, page_size: 20 },
+    })
+    const res = await edgeDeviceApi.getList({ page: 0, page_size: 100000 })
+    expect(res.page).toBe(1)
+    expect(res.page_size).toBe(20)
+    expect(res.total).toBe(25)
+  })
+
+  it('getList 旧后端缺省回显时以请求值兜底', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1 }], total: 25 } })
+    const res = await edgeDeviceApi.getList({ page: 3, page_size: 10 })
+    expect(res.page).toBe(3)
+    expect(res.page_size).toBe(10)
   })
 
   it('getList with unexpected format returns empty', async () => {
     mockClient.get.mockResolvedValue({ data: null })
     const res = await edgeDeviceApi.getList()
-    expect(res).toEqual({ total: 0, items: [] })
+    expect(res.items).toEqual([])
+    expect(res.total).toBe(0)
   })
 
   it('getList passes params', async () => {
-    mockClient.get.mockResolvedValue({ data: [] })
+    mockClient.get.mockResolvedValue({ data: { items: [], total: 0 } })
     await edgeDeviceApi.getList({ node_id: 5, status: 'online' })
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices', { params: { node_id: 5, status: 'online' } })
+  })
+
+  it('getList 转发服务端筛选参数 (search/hardware_type)', async () => {
+    // 筛选下沉服务端 (§3.3.5) 的前提是这些参数真的被发出去 —— 少传一个,
+    // 后端就收不到、页面就退回"本地过滤伪装全局检索"。
+    mockClient.get.mockResolvedValue({ data: { items: [], total: 0 } })
+    await edgeDeviceApi.getList({ search: 'bms', hardware_type: 'uart', page: 2, page_size: 24 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/edge-devices', {
+      params: { search: 'bms', hardware_type: 'uart', page: 2, page_size: 24 },
+    })
   })
 
   it('create forwards device_config_id required by the backend', async () => {
@@ -782,38 +817,38 @@ describe('edgeDeviceApi', () => {
   })
 
   it('normalize maps unknown status', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, status: 'weird_status' }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, status: 'weird_status' }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].status).toBe('unknown')
   })
 
   it('normalize maps empty status to offline', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1 }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1 }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].status).toBe('offline')
   })
 
   it('normalize falls back device_type from type', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, type: 'sensor' }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, type: 'sensor' }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].device_type).toBe('sensor')
   })
 
   it('normalize uses channel.hardware_type fallback', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, channel: { hardware_type: 'i2c', hardware_id: 'I2C0' } }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, channel: { hardware_type: 'i2c', hardware_id: 'I2C0' } }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].hardware_type).toBe('i2c')
     expect(res.items[0].hardware_id).toBe('I2C0')
   })
 
   it('normalize uses node info', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, node: { id: 5, name: 'node5' } }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, node: { id: 5, name: 'node5' } }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].node).toEqual({ id: 5, name: 'node5' })
   })
 
   it('normalize keeps an unnamed node for its id (link/firmware survive)', async () => {
-    mockClient.get.mockResolvedValue({ data: [{ id: 1, node: { id: 5 } }] })
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, node: { id: 5 } }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].node).toEqual({ id: 5, name: '' })
   })
@@ -953,11 +988,38 @@ describe('nodeApi', () => {
     expect(res.total).toBe(1)
   })
 
-  it('getList with envelope .data as array', async () => {
+  // 负债 I-11: nodeApi.getList 不再兼容"后端返回裸数组" —— 该分支对裸数组回填
+  // page_size = inner.length, 会掩盖"后端忽略 page 参数"。裸数组现在必须返回空页。
+  it('getList 旧契约(裸数组)已废弃, 返回空页', async () => {
     mockClient.get.mockResolvedValue({ data: [{ id: 1 }] })
     const res = await nodeApi.getList({ page: 2, page_size: 10 })
-    expect(res.items).toHaveLength(1)
+    expect(res.items).toEqual([])
     expect(res.page).toBe(2)
+  })
+
+  it('getList 回显后端 clamp 后的 page/page_size', async () => {
+    mockClient.get.mockResolvedValue({
+      data: { items: [{ id: 1 }], total: 25, page: 1, page_size: 20 },
+    })
+    const res = await nodeApi.getList({ page: 0, page_size: 100000 })
+    expect(res.page).toBe(1)
+    expect(res.page_size).toBe(20)
+    expect(res.total).toBe(25)
+  })
+
+  it('getList 旧后端缺省回显时以请求值兜底', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1 }], total: 25 } })
+    const res = await nodeApi.getList({ page: 3, page_size: 10 })
+    expect(res.page).toBe(3)
+    expect(res.page_size).toBe(10)
+  })
+
+  it('getList 转发服务端筛选参数 (search/status/model)', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [], total: 0 } })
+    await nodeApi.getList({ search: 'esp32', status: 'online', model: 'ESP32-C6', page: 2 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/nodes', {
+      params: { search: 'esp32', status: 'online', model: 'ESP32-C6', page: 2 },
+    })
   })
 
   it('getList fallback returns empty', async () => {

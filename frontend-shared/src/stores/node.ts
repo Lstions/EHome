@@ -6,9 +6,23 @@ import { registerSessionCacheClearer } from '@/utils/sessionCache'
 const DETAIL_CACHE_TTL = 15_000 // 15s
 const LIST_CACHE_TTL = 15_000
 
+// 缓存键必须**逐个枚举**所有"视图层真的会传且影响结果"的字段。
+//
+// 为什么不能 `...params` 展开: 展开会把语义相同但拼写不同的参数带进来
+// (如 {page:1} 与 {page:1, status: undefined} 会产生两个键), 缓存永不命中,
+// 每次翻页/挂载都重新打请求。所以保持显式列举 —— 但**每新增一个筛选参数都必须
+// 同步加进这个键**。
+//
+// 为什么"键不全"是**独立缺陷**而不只是白名单缺口: 只要视图层传了 search 而这里
+// 不认, 两个不同检索就会落到**同一个键**上 —— fetchNodes 命中新鲜缓存直接 return,
+// 页面显示上一次的结果、**且从不发请求**。这是"看起来在工作、实际返回别人的数据"。
+// 跨视图后果更重: ChannelList.vue:366 用 getCachedList({page:1,page_size:20}) 做
+// **节点名映射**, 带筛选的结果一旦写进这个"无筛选"键, 通道页的名称映射就会被打空/打错。
 function listCacheKey(params?: NodeListParams): string {
   return JSON.stringify({
     status: params?.status || '',
+    model: params?.model || '',
+    search: params?.search || '',
     page: params?.page || 1,
     page_size: params?.page_size || 20,
   })
