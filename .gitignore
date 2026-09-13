@@ -52,6 +52,15 @@ backend/firmwares/
 backend/coverage.out
 backend/api_cover.out
 backend/cover.out
+
+# 临时调试产物（执行者的探针/草稿，不应入库）
+# 为什么必须显式忽略：本轮多个执行者会在仓库内就地写探针脚本与调试 spec
+# （.tmp-probe/、__dbg_*.spec.ts、_tmp-*.mjs 等），若不加规则会随 `git add -A` 混入提交。
+# 约定：可复用的工具放 tools/ 并入库（如 uiux-audit.mjs）；一次性的草稿放这些目录。
+frontend-shared/.tmp-probe/
+**/__dbg_*
+**/_tmp-*
+**/__scratch_*
 backend/coverage_raw.out
 coverage.out
 frontend-shared/coverage/
