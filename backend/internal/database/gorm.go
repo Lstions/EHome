@@ -83,6 +83,9 @@ func AutoMigrate() error {
 		&models.OTATask{},
 		&models.Firmware{},
 		&models.Notification{},
+		// 外发通知通道 (设计/外发通知通道.md §3)
+		&models.NotificationChannel{},
+		&models.NotificationDelivery{},
 		&models.User{},
 		&models.AuthState{},
 		&models.AuthOutbox{},

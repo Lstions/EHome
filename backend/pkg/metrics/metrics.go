@@ -278,4 +278,27 @@ var (
 		Name: "ehome_lifecycle_dropped_partitions_total",
 		Help: "Partitions dropped by data lifecycle partition management",
 	})
+
+	// --- 外发通知通道出站投递可观测性 (设计/外发通知通道.md §6) ---
+
+	// NotificationDeliveriesTotal deliberately uses bounded labels only:
+	// channel_type | result (delivered|failed|retrying). Channel id and target
+	// URL must never become labels — unbounded cardinality and credential leak.
+	NotificationDeliveriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_notification_deliveries_total",
+		Help: "Outbound notification delivery attempts by channel type and result",
+	}, []string{"channel_type", "result"})
+
+	NotificationDeliveryDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ehome_notification_delivery_duration_seconds",
+		Help:    "Outbound notification delivery duration in seconds",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
+	}, []string{"channel_type"})
+
+	// NotificationChannelsEnabled reports how many channels currently participate
+	// in outbound delivery (enabled=true).
+	NotificationChannelsEnabled = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ehome_notification_channels_enabled",
+		Help: "Number of enabled outbound notification channels",
+	})
 )

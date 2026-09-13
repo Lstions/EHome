@@ -44,6 +44,8 @@ var allModels = []interface{}{
 	&models.OTATask{},
 	&models.Firmware{},
 	&models.Notification{},
+	&models.NotificationChannel{},
+	&models.NotificationDelivery{},
 	&models.User{},
 	&models.AuthState{},
 	&models.AuthOutbox{},
