@@ -100,6 +100,15 @@ vi.mock('@/utils/logger', () => ({
 }))
 
 // ── Stub Element Plus components and local components ──
+/**
+ * 取 getHistoryData 最后一次调用的实参。
+ * 用索引而非 Array.prototype.at —— tsconfig 的 lib 未含 ES2022。
+ */
+function lastHistoryCall() {
+  const calls = vi.mocked(edgeDeviceApi.getHistoryData).mock.calls
+  return calls[calls.length - 1]
+}
+
 const stubs = {
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-form': { template: '<div class="el-form"><slot /></div>' },
@@ -119,7 +128,10 @@ const stubs = {
   'el-empty': { template: '<div class="el-empty"><slot /></div>' },
   'el-table': { template: '<table class="el-table"><slot /></table>' },
   'el-table-column': { template: '<col />' },
-  'el-pagination': { template: '<div class="el-pagination" />' },
+  // 不再本地 stub 'el-pagination': 原先的 { template: '<div class="el-pagination" />' }
+  // 是**惰性**替身 (不渲染 total、不 emit current-change), 使「翻页」在测试里根本无法发生,
+  // 也就无法断言"筛选变化重置页码"。改用 src/test-setup.ts 的全局 ElPagination stub ——
+  // 它点击时 emit update:currentPage + current-change, 与真实组件契约一致。
   'el-checkbox-group': { template: '<div class="el-checkbox-group"><slot /></div>' },
   'el-checkbox': { template: '<label class="el-checkbox"><slot /></label>' },
   PageHeader: { template: '<div class="page-header"><slot /><slot name="extra" /></div>' },
@@ -326,4 +338,78 @@ describe('DataPanel', () => {
     expect(mockClientGet).not.toHaveBeenCalledWith('/api/v1/unified-data/historical-batch', expect.anything())
     expect(wrapper.find('.line-chart').exists()).toBe(false)
   })
+
+  // ─── 查询范围变化重置页码 (U-4 / §3.2.6 MUST) ───
+  // 断言真实请求参数: 审计实测「翻到第 3 页后换设备/时间范围, 新查询仍发 page=3」。
+
+  it('查询按钮重置页码: 翻页后换设备再查询, 请求的 page 参数为 1', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
+
+    const wrapper = getMounted()
+    await flushPromises()
+
+    // 第 1 次查询 (设备 1)
+    await triggerQuery(wrapper, '1')
+    const first = lastHistoryCall()
+    expect((first[1] as Record<string, unknown>).page).toBe(1)
+
+    // 翻到第 3 页: 直接点分页器两次 (真实分页组件的 current-change)
+    const pagination = wrapper.find('.el-pagination')
+    expect(pagination.exists()).toBe(true)
+    await pagination.trigger('click')
+    await flushPromises() // 两次点击之间必须 flush: 否则第二次仍读到旧 props.currentPage
+    await wrapper.find('.el-pagination').trigger('click')
+    await flushPromises()
+    const paged = lastHistoryCall()
+    expect((paged[1] as Record<string, unknown>).page).toBe(3)
+
+    // 换设备后点「查询」→ 必须以 page=1 发出 (改前会继续发 page=3)
+    await triggerQuery(wrapper, '42')
+    const afterDevice = lastHistoryCall()
+    expect(afterDevice[0]).toBe(42)
+    expect((afterDevice[1] as Record<string, unknown>).page).toBe(1)
+  })
+
+  it('查询按钮重置页码: 换时间范围后请求的 page 参数为 1', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    const pagination = wrapper.find('.el-pagination')
+    await pagination.trigger('click')
+    await flushPromises()
+    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(2)
+
+    // 换时间范围 (第二个 select) 后再查询
+    const selects = wrapper.findAll('select.el-select')
+    await selects[1].setValue('7d')
+    await wrapper.find('[data-test="query"]').trigger('click')
+    await flushPromises()
+
+    const params = lastHistoryCall()[1] as Record<string, unknown>
+    expect(params.page).toBe(1)
+  })
+
+  it('翻页本身不重置页码 (分页控件入口不得被打回第 1 页)', async () => {
+    mockHistoryWithOneRow()
+    mockClientGet.mockImplementation(() => Promise.resolve({ code: 200, data: [], message: 'ok' }))
+
+    const wrapper = getMounted()
+    await flushPromises()
+    await triggerQuery(wrapper, '1')
+
+    const pagination = wrapper.find('.el-pagination')
+    await pagination.trigger('click')
+    await flushPromises()
+    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(2)
+
+    await wrapper.find('.el-pagination').trigger('click')
+    await flushPromises()
+    expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(3)
+  })
 })
+

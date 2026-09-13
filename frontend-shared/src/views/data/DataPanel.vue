@@ -33,7 +33,7 @@
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="fetchData" :loading="loading">查询</el-button>
+          <el-button type="primary" data-test="query" @click="handleQuery" :loading="loading">查询</el-button>
           <el-tooltip content="请先查询数据" placement="top" :disabled="canExport">
             <span>
               <el-button @click="handleExport" :disabled="!canExport">
@@ -431,6 +431,23 @@ const fetchDevices = async () => {
   } catch {
     ElMessage.error('获取设备列表失败')
   }
+}
+
+/**
+ * 查询按钮入口 —— 与分页控件的翻页入口分离。
+ *
+ * §3.2.6 MUST: 设备/时间范围是「会改变查询范围的输入」, 其变化必须重置分页派生状态。
+ * 改前 currentPage 是独立 ref, 只有分页组件会改它: 用户翻到第 3 页后换设备/换时间范围,
+ * 新查询仍以 page=3 发出 (实测网络原文 /edge-devices/2/data?...&page=3), 第 3 页在更小的
+ * 结果集里可能直接越界 → 显示空表却没有任何解释。
+ *
+ * 为什么在这里重置而不是 watch(queryForm): 用户点「查询」也可能只是想刷新当前页,
+ * 但那与「换条件」无法区分; 而按查询按钮重新查询本身就应当从第 1 页开始 —— 这是
+ * 用户对"新一次查询"的预期。分页控件的 @current-change 不经过本函数, 因此翻页不受影响。
+ */
+const handleQuery = () => {
+  currentPage.value = 1
+  void fetchData()
 }
 
 const fetchData = async () => {

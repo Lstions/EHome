@@ -22,7 +22,18 @@ export interface LogicalDeviceItem {
 
 export interface LogicalDeviceListResponse {
   items: LogicalDeviceItem[]
+  /** 过滤后的**全量**逻辑设备条数 (不是当前页条数); 分页器用它算总页数 */
   total: number
+  /** 后端自本任务起回显; 旧后端缺省时由 list() 以请求值兜底 */
+  page?: number
+  page_size?: number
+}
+
+export interface LogicalDeviceListParams {
+  /** 页码, 从 1 起; 后端 <1 归 1 */
+  page?: number
+  /** 每页条数, 后端默认 20, 取值 [1,200] 外归 20 */
+  page_size?: number
 }
 
 export interface MergePreviewSource {
@@ -79,12 +90,27 @@ export function extractMergeConflicts(error: unknown): MergeConflict[] {
 }
 
 export const logicalDeviceApi = {
-  // GET /api/v1/logical-devices — 管理列表 (实例数含已删, 数据量估算降级)
-  async list(): Promise<LogicalDeviceListResponse> {
-    const response = await client.get<unknown, ApiEnvelope<{ items?: LogicalDeviceItem[]; total?: number }>>('/api/v1/logical-devices')
+  // GET /api/v1/logical-devices — 管理列表 (实例数含已删, 数据量估算降级)。
+  //
+  // 服务端分页: page/page_size 与全站一致 (默认 1/20)。改前本方法不传任何分页参数,
+  // 后端全量返回 1003 条, 页面一次性渲染 1003 行 / 28541 个 DOM 元素且无分页控件 (D2-02)。
+  // 返回结构保持既有的 {items,total}, 仅纯增量读取 page/page_size 回显。
+  async list(params?: LogicalDeviceListParams): Promise<LogicalDeviceListResponse> {
+    const response = await client.get<unknown, ApiEnvelope<{
+      items?: LogicalDeviceItem[]
+      total?: number
+      page?: number
+      page_size?: number
+    }>>('/api/v1/logical-devices', { params })
     const data = response.data
     const items: LogicalDeviceItem[] = Array.isArray(data?.items) ? data.items : []
-    return { items, total: typeof data?.total === 'number' ? data.total : items.length }
+    return {
+      items,
+      total: typeof data?.total === 'number' ? data.total : items.length,
+      // 旧后端不回显 page/page_size 时以请求值兜底, 避免分页器算错当前页。
+      page: typeof data?.page === 'number' ? data.page : (params?.page ?? 1),
+      page_size: typeof data?.page_size === 'number' ? data.page_size : (params?.page_size ?? items.length),
+    }
   },
 
   // POST /api/v1/logical-devices/merge/preview — 合并预览 (§3.4)

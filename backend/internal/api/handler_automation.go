@@ -445,9 +445,26 @@ func patchAutomationRuleEnabled(db *gorm.DB, evaluator automationEvaluator) gin.
 }
 
 // GET /api/v1/automation-events
+//
+// 分页契约 (架构与接口评估 P1.2 裁决: items + total): 查询参数 page (默认 1, <1 归 1) /
+// page_size (默认 20, 超出 [1,200] 归 20), 响应 data = {items,total,page,page_size}。
+// 参数语义与 /vendors、/device-configs 完全一致; 结构用 items 而非 list ——
+// /device-configs 的 {list,...} 是待收敛的旧方言, 不在此扩散。rule_id / result 筛选原样保留。
+//
+// 历史 (为什么必须改): 本端点曾硬编码 Limit(500) 静默截断。实测交叉筛选证明真实事件
+// >1006 条 (rule_id=1、rule_id=3、result=executed、result=expired 各自均触顶 500,
+// rule_id=3&result=expired 仍触顶), 即用户只看到一半历史且**没有任何截断提示**。
+// 改为真分页后 total 如实反映过滤后的全量条数, 前端据此渲染分页器。
 func listAutomationEvents(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var items []models.AutomationEvent
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
 		q := db.Model(&models.AutomationEvent{})
 		if rid := c.Query("rule_id"); rid != "" {
 			if id, err := strconv.ParseUint(rid, 10, 64); err == nil {
@@ -457,11 +474,18 @@ func listAutomationEvents(db *gorm.DB) gin.HandlerFunc {
 		if res := c.Query("result"); res != "" {
 			q = q.Where("result = ?", res)
 		}
-		if err := q.Order("id DESC").Limit(500).Find(&items).Error; err != nil {
+		var total int64
+		if err := q.Count(&total).Error; err != nil {
 			Error(c, 500, "查询策略事件失败")
 			return
 		}
-		Success(c, items)
+		// 非 nil 空切片: 空集序列化为 [] 而非 null (与 handler_data_source.go 同约定)。
+		items := make([]models.AutomationEvent, 0)
+		if err := q.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+			Error(c, 500, "查询策略事件失败")
+			return
+		}
+		Success(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
 	}
 }
 

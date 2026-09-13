@@ -98,6 +98,21 @@
           </div>
         </template>
       </el-table>
+      <!-- 分页 (真分页: 表格数据来自接口当前页)。
+           改前 :data="filteredItems" 是本地全量数组 —— 后端一次返回 1003 条,
+           页面渲染 1003 行 / 28541 个 DOM 元素且无分页控件 (D2-02)。 -->
+      <div v-if="total > 0" class="ld-pagination">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          data-test="ld-pagination"
+          @current-change="() => fetchList()"
+          @size-change="onPageSizeChange"
+        />
+      </div>
     </div>
 
     <!-- 合并预览弹窗 (§3.4: 时间轴对比/重叠提示/数据量合计/target_retention_days, 二次确认) -->
@@ -293,10 +308,18 @@ const goToEdgeDevice = () => {
 const loading = ref(false)
 const items = ref<LogicalDeviceItem[]>([])
 
-// 搜索 debounce — 减少不必要的 filter 计算
+// ─── 分页 (服务端) ───
+const currentPage = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+
+// 搜索 debounce — 关键词 300ms 后触发**服务端**检索 (§3.3.5)。
+// 注意: 这里只 debounce 输入, 真正过滤由后端 search 参数完成 —— 分页落地前
+// useDebouncedSearch 的 filteredItems 只在当前页本地过滤, 1003 条时"搜不到"
+// 其实只是"不在当前页", 属"把本地筛选伪装成全局检索"。
 const {
   searchKeyword,
-  filteredItems: searchFilteredItems,
+  debouncedKeyword,
 } = useDebouncedSearch(items, {
   searchFields: (i) => [i.name || ''],
 })
@@ -308,8 +331,15 @@ const selection = ref<LogicalDeviceItem[]>([])
 const fetchList = async () => {
   loading.value = true
   try {
-    const res = await logicalDeviceApi.list()
+    const params: { page: number; page_size: number; search?: string; device_type?: string } = {
+      page: currentPage.value,
+      page_size: pageSize.value,
+    }
+    if (debouncedKeyword.value.trim()) params.search = debouncedKeyword.value.trim()
+    if (typeFilter.value) params.device_type = typeFilter.value
+    const res = await logicalDeviceApi.list(params)
     items.value = res.items
+    total.value = res.total
   } catch (error: any) {
     ElMessage.error('加载逻辑设备列表失败: ' + (error?.message || '未知错误'))
   } finally {
@@ -317,11 +347,23 @@ const fetchList = async () => {
   }
 }
 
-const filteredItems = computed(() => {
-  let list = searchFilteredItems.value
-  if (typeFilter.value) list = list.filter(i => i.device_type === typeFilter.value)
-  return list
+// 筛选/搜索变化 → 重置页码后重新查询 (§3.2.6 MUST)。
+// 改前 typeFilter/searchKeyword 只影响本地 computed, 从不重新请求, 页码也无从重置。
+let filterReady = false
+watch([debouncedKeyword, typeFilter], () => {
+  if (!filterReady) return
+  currentPage.value = 1
+  void fetchList()
 })
+
+/** 每页条数变化: 页码回到第 1 页 (原页在新页长下可能已越界)。 */
+function onPageSizeChange() {
+  currentPage.value = 1
+  void fetchList()
+}
+
+// 表格直接渲染接口返回的当前页, 不再做本地切片/过滤 (真分页)。
+const filteredItems = computed(() => items.value)
 
 // ─── 合并门控 (§3.4: 2+ 个同 device_type; 已合并/合并中/purge 的不可选) ───
 const isSelectable = (row: LogicalDeviceItem) =>
@@ -590,6 +632,8 @@ const formatTime = (iso: string | number | null) => {
 
 onMounted(async () => {
   await fetchList()
+  // 首次加载后再武装筛选 watch, 避免挂载期初值触发一次多余请求。
+  filterReady = true
   handleRetentionDeepLink()
 })
 </script>
@@ -611,6 +655,13 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ld-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
   flex-wrap: wrap;
 }
 

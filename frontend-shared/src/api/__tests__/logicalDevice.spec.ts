@@ -23,9 +23,28 @@ describe('logicalDeviceApi', () => {
     const items = [{ id: 1, name: 'LD-1', device_type: 'bms', retention_days: 365, instance_count: 2 }]
     mockClient.get.mockResolvedValue({ data: { items, total: 1 } })
     const res = await logicalDeviceApi.list()
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/logical-devices')
+    // 无参调用: params 为 undefined (分页参数由调用方按需传入)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/logical-devices', { params: undefined })
     expect(res.items).toEqual(items)
     expect(res.total).toBe(1)
+  })
+
+  it('list 透传 page/page_size, 并把后端回显读回', async () => {
+    const items = [{ id: 1, name: 'LD-1' }]
+    mockClient.get.mockResolvedValue({ data: { items, total: 1003, page: 2, page_size: 20 } })
+    const res = await logicalDeviceApi.list({ page: 2, page_size: 20 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/logical-devices', { params: { page: 2, page_size: 20 } })
+    // total 是全量 1003, 不是当前页 1 条 —— 分页器靠它算总页数
+    expect(res.total).toBe(1003)
+    expect(res.page).toBe(2)
+    expect(res.page_size).toBe(20)
+  })
+
+  it('list 在后端未回显 page/page_size 时以请求值兜底', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [{ id: 1 }], total: 50 } })
+    const res = await logicalDeviceApi.list({ page: 3, page_size: 10 })
+    expect(res.page).toBe(3)
+    expect(res.page_size).toBe(10)
   })
 
   it('list tolerates bare-array responses', async () => {

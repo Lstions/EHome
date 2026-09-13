@@ -61,6 +61,15 @@ const makeItem = (over: Partial<any> = {}) => ({
   ...over,
 })
 
+/**
+ * 取 list() 最后一次调用的实参。
+ * 用索引而非 Array.prototype.at —— tsconfig 的 lib 未含 ES2022。
+ */
+function lastListParams(): Record<string, unknown> {
+  const calls = mockList.mock.calls
+  return calls[calls.length - 1][0] as Record<string, unknown>
+}
+
 const mountPage = () =>
   mount(LogicalDeviceList, {
     global: {
@@ -126,8 +135,9 @@ describe('LogicalDeviceList.vue', () => {
   })
 
   it('filters by search keyword', async () => {
-    // useDebouncedSearch 有 300ms 防抖; 该测试与防抖隔离用 fake timers,
-    // 先断言防抖窗口内未生效, 再推进 300ms 断言过滤结果。
+    // useDebouncedSearch 有 300ms 防抖。**本用例已随分页改造更新**: 搜索不再是
+    // 当前页本地过滤 (§3.3.5 禁止把本地筛选伪装成全局检索), 而是防抖后带
+    // search 参数重新请求服务端, 并把页码重置为 1。
     vi.useFakeTimers()
     try {
       mockList.mockResolvedValue({
@@ -136,24 +146,83 @@ describe('LogicalDeviceList.vue', () => {
       })
       const wrapper = mountPage()
       await flushPromises()
+      const callsBefore = mockList.mock.calls.length
 
       const search = wrapper.find('input[placeholder="搜索逻辑设备名称..."]')
       expect(search.exists()).toBe(true)
       await search.setValue('卧室')
       await flushPromises()
 
-      // 防抖未到: 仍显示全部行
-      expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+      // 防抖未到: 尚未发起新的服务端查询
+      expect(mockList.mock.calls.length).toBe(callsBefore)
 
       await vi.advanceTimersByTimeAsync(300)
       await flushPromises()
 
-      const rows = wrapper.findAll('tbody tr')
-      expect(rows).toHaveLength(1)
-      expect(rows[0].text()).toContain('卧室BMS')
+      // 防抖到点: 以 search 参数重新请求, 且页码重置为 1
+      expect(mockList.mock.calls.length).toBe(callsBefore + 1)
+      const params = lastListParams()
+      expect(params.search).toBe('卧室')
+      expect(params.page).toBe(1)
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // ─── 分页与「筛选变化重置页码」 (§3.2.6 MUST) ───
+  // 断言真实请求参数, 不是源码字符串。
+
+  it('首次加载按默认页码请求 (page=1, page_size=20)', async () => {
+    mountPage()
+    await flushPromises()
+    const params = mockList.mock.calls[0][0] as Record<string, unknown>
+    expect(params.page).toBe(1)
+    expect(params.page_size).toBe(20)
+  })
+
+  it('翻到第 2 页后请求带 page=2', async () => {
+    mockList.mockResolvedValue({ items: [makeItem()], total: 50 })
+    const wrapper = mountPage()
+    await flushPromises()
+
+    await wrapper.find('[data-test="ld-pagination"]').trigger('click')
+    await flushPromises()
+
+    const params = lastListParams()
+    expect(params.page).toBe(2)
+  })
+
+  it('设备类型筛选变化后请求的 page 参数被重置为 1', async () => {
+    mockList.mockResolvedValue({ items: [makeItem()], total: 50 })
+    const wrapper = mountPage()
+    await flushPromises()
+
+    // 先翻到第 3 页, 制造「页码非 1」的前置状态
+    await wrapper.find('[data-test="ld-pagination"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="ld-pagination"]').trigger('click')
+    await flushPromises()
+    expect((lastListParams()).page).toBe(3)
+
+    // 换设备类型 → 必须以 page=1 重新查询。
+    // 取值必须来自 deviceTypeOptions (utils/deviceType.ts) 的真实项, 否则 el-select
+    // 的 stub 会因 value 不匹配而回落到空值, 断言就失去意义。
+    await wrapper.find('select.filter-select').setValue('jiabaida_bms')
+    await flushPromises()
+
+    const params = lastListParams()
+    expect(params.page).toBe(1)
+    expect(params.device_type).toBe('jiabaida_bms')
+  })
+
+  it('total 来自接口响应而非当前页长度 (分页器算总页数用)', async () => {
+    mockList.mockResolvedValue({ items: [makeItem()], total: 1003 })
+    const wrapper = mountPage()
+    await flushPromises()
+    expect(wrapper.find('[data-test="ld-pagination"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="ld-pagination"]').text()).toContain('共 1003 条')
+    // 只渲染当前页 1 行, 不是 1003 行
+    expect(wrapper.findAll('tbody tr')).toHaveLength(1)
   })
 
   // ─── 合并门控 ───

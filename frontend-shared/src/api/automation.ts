@@ -152,6 +152,23 @@ export interface AutomationEventListParams {
   rule_id?: number
   /** 按 result 过滤 (非旧版 state) */
   result?: AutomationEventResult
+  /** 页码, 从 1 起; 后端 <1 归 1 */
+  page?: number
+  /** 每页条数, 后端默认 20, 取值 [1,200] 外归 20 */
+  page_size?: number
+}
+
+/**
+ * 分页响应 (后端 `GET /automation-events` 的 `data`)。
+ * 契约依据: 架构与接口评估及优化方案 P1.2「裁决 items + total」。
+ * 用 `items` 而非 `list` —— `/device-configs` 的 `{list,...}` 是待收敛的旧方言。
+ */
+export interface AutomationEventPage {
+  items: AutomationEvent[]
+  /** 过滤后的**全量**条数 (不是当前页条数); 分页器用它算总页数 */
+  total: number
+  page: number
+  page_size: number
 }
 
 /** 裁决 4 确认制闭环: 后端 planner 即铸即销 confirmation token, 不跨请求存储。
@@ -188,8 +205,39 @@ export const automationApi = {
   async setRuleEnabled(id: number, enabled: boolean): Promise<AutomationRule> {
     return unwrap<AutomationRule>(client.patch(`/api/v1/automation-rules/${id}/enabled`, { enabled }))
   },
-  async listEvents(params?: AutomationEventListParams): Promise<AutomationEvent[]> {
-    return unwrap<AutomationEvent[]>(client.get('/api/v1/automation-events', { params }))
+  /**
+   * 触发历史 (服务端分页)。
+   *
+   * 后端自本任务起返回 `{items,total,page,page_size}`; 此处**同时兼容裸数组**,
+   * 原因是 `backend/simulation/catalog/auto.go:134-144` (autoListEvents) 仍按裸数组
+   * `json.Unmarshal(r.Data, &rows)` 解包, 而该文件带 `//go:build simulation` 标签、
+   * 不在主门禁内, 本任务无权改动它。
+   * **何时可删这段兼容**: 仿真套件同步改为读 `.items` 后, 即可把返回值收窄为
+   * `AutomationEventPage` 并删除 Array.isArray 分支。
+   *
+   * 归一化后调用方拿到的永远是分页形状, 因此前端不再有「全量 or 分页」两种可能,
+   * 也就不会重演内联分页器却本地全量渲染的假分页。
+   */
+  async listEvents(params?: AutomationEventListParams): Promise<AutomationEventPage> {
+    const data = await unwrap<AutomationEvent[] | Partial<AutomationEventPage>>(
+      client.get('/api/v1/automation-events', { params }),
+    )
+    if (Array.isArray(data)) {
+      // 旧后端 (或仿真夹具) 裸数组: total 取数组长度, page/page_size 回显请求值。
+      return {
+        items: data,
+        total: data.length,
+        page: params?.page ?? 1,
+        page_size: params?.page_size ?? data.length,
+      }
+    }
+    const items = Array.isArray(data?.items) ? data.items : []
+    return {
+      items,
+      total: typeof data?.total === 'number' ? data.total : items.length,
+      page: typeof data?.page === 'number' ? data.page : (params?.page ?? 1),
+      page_size: typeof data?.page_size === 'number' ? data.page_size : (params?.page_size ?? items.length),
+    }
   },
   /**
    * 裁决 4 确认制闭环: 人工确认 pending_confirm 事件, 触发真实下发。
