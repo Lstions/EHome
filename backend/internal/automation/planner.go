@@ -309,6 +309,31 @@ func (p *Planner) recordRet(rule models.AutomationRule, at time.Time, value floa
 	return ev.ID
 }
 
+// notificationBroadcastPayload 构造自动化通知的 WS 广播载荷 (负债 D-3 契约):
+// 顶层 = 通知实体本身, 与前端 api/notification.ts 的 Notification 接口、
+// GET /notifications 列表项同形 (id/type/title/description/message/source/
+// source_id/read/created_at); 自动化领域详情 (rule_id/event_id/...) 收进嵌套
+// detail 字段, 不与通知字段平铺混淆。
+//
+// 调用前提: 通知行已 Create 成功 (n.ID != 0) —— 只有拿到自增 ID 才广播,
+// 否则前端会插入一条库里不存在的通知且永远无法标记已读。
+func notificationBroadcastPayload(n models.Notification, detail gin.H) gin.H {
+	return gin.H{
+		// ── 通知实体 (与列表项同形) ──
+		"id":          n.ID,
+		"type":        n.Type,
+		"title":       n.Title,
+		"description": n.Description,
+		"message":     n.Message,
+		"source":      n.Source,
+		"source_id":   n.SourceID,
+		"read":        n.Read,
+		"created_at":  n.CreatedAt,
+		// ── 自动化领域详情 (嵌套, 不平铺) ──
+		"detail": detail,
+	}
+}
+
 // notifyDailyLimitOnce F5 日熔断 warning 通知, 同日同规则只发一次 (幂等)。
 // 复用 notifyConfirmation 的 Notification 构造模式, level=warning。
 func (p *Planner) notifyDailyLimitOnce(rule models.AutomationRule, at time.Time, eventID uint) {
@@ -337,14 +362,17 @@ func (p *Planner) notifyDailyLimitOnce(rule models.AutomationRule, at time.Time,
 	if err := p.db.Create(&n).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
 		logger.Warn("automation: failed to create daily limit notification", "rule_id", rule.ID, "error", err)
+		return
 	}
 	if p.broadcast != nil {
-		p.broadcast("automation_daily_limit", gin.H{
+		// 载荷 = 通知实体本身 (负债 D-3, 与 alert 同契约): 前端收到即可插入列表;
+		// 自定义事件名保留 (前端按语义给出差异化提示), 自动化领域详情进嵌套 detail。
+		p.broadcast("automation_daily_limit", notificationBroadcastPayload(n, gin.H{
 			"rule_id":   rule.ID,
 			"rule_name": rule.Name,
 			"event_id":  eventID,
 			"limit":     rule.MaxDailyExec,
-		})
+		}))
 	}
 }
 
@@ -389,12 +417,13 @@ func (p *Planner) notifySystemActorUnavailableOnce(at time.Time, eventID uint, c
 	if err := p.db.Create(&n).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
 		logger.Warn("automation: failed to create system actor notification", "error", err)
+		return
 	}
 	if p.broadcast != nil {
-		p.broadcast("automation_system_actor_unavailable", gin.H{
+		p.broadcast("automation_system_actor_unavailable", notificationBroadcastPayload(n, gin.H{
 			"event_id": eventID,
 			"reason":   cause.Error(),
-		})
+		}))
 	}
 }
 
@@ -415,15 +444,16 @@ func (p *Planner) notifyConfirmation(rule models.AutomationRule, at time.Time, v
 	if err := p.db.Create(&n).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
 		logger.Warn("automation: failed to create confirmation notification", "rule_id", rule.ID, "error", err)
+		return
 	}
 	if p.broadcast != nil {
-		p.broadcast("automation_pending_confirm", gin.H{
+		p.broadcast("automation_pending_confirm", notificationBroadcastPayload(n, gin.H{
 			"rule_id":   rule.ID,
 			"rule_name": rule.Name,
 			"event_id":  eventID,
 			"action_id": rule.ActionID,
 			"value":     value,
-		})
+		}))
 	}
 }
 

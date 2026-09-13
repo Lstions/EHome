@@ -307,3 +307,103 @@ func TestNotificationTypeMapping(t *testing.T) {
 		t.Errorf("info→info, got %q", got)
 	}
 }
+
+// ── 负债 D-3: WS 广播载荷必须是通知实体 (与 GET /notifications 列表项同形) ──
+//
+// 契约: 载荷顶层含 id/type/title/description/message/source/source_id/read/
+// created_at; 告警领域详情 (rule_id/sensor_name/threshold/comparator) 收进嵌套
+// detail, 不平铺 —— 否则前端无法把推送插入通知列表 (拿不到 id, 无法标记已读)。
+// 铁律: Create 失败 (拿不到 ID) 时不得广播。
+func TestNotifyBroadcastPayloadIsNotificationEntity(t *testing.T) {
+	db := newTestDB(t)
+	type captured struct {
+		eventType string
+		payload   map[string]any
+	}
+	var got []captured
+	ev := newTestEvaluator(t, db, func(eventType string, payload any) {
+		m, ok := payload.(gin.H)
+		if !ok {
+			t.Fatalf("payload type = %T, want gin.H", payload)
+		}
+		got = append(got, captured{eventType: eventType, payload: m})
+	})
+	r := rule(7, "temperature", "gt", 50, 0)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+	ev.Evaluate(1, []parser.Field{{Name: "temperature", Value: 60}}, time.Now())
+
+	if len(got) != 1 {
+		t.Fatalf("broadcasts = %d, want 1", len(got))
+	}
+	if got[0].eventType != "notification" {
+		t.Fatalf("event type = %q, want notification", got[0].eventType)
+	}
+	p := got[0].payload
+
+	// 通知实体字段必须存在且与落库行一致。
+	var n models.Notification
+	if err := db.Where("source = ?", "alert_rule").First(&n).Error; err != nil {
+		t.Fatalf("notification row missing: %v", err)
+	}
+	if p["id"] != n.ID || n.ID == 0 {
+		t.Fatalf("payload id = %v, want %d (非零自增 ID)", p["id"], n.ID)
+	}
+	if p["type"] != n.Type {
+		t.Fatalf("payload type = %v, want %v", p["type"], n.Type)
+	}
+	if p["title"] != n.Title || p["description"] != n.Description || p["message"] != n.Message {
+		t.Fatalf("payload title/description/message 与落库行不一致: %+v vs %+v", p, n)
+	}
+	if p["source"] != "alert_rule" || p["source_id"] != "7" {
+		t.Fatalf("payload source/source_id = %v/%v, want alert_rule/7", p["source"], p["source_id"])
+	}
+	if p["read"] != false {
+		t.Fatalf("payload read = %v, want false", p["read"])
+	}
+	if _, ok := p["created_at"]; !ok {
+		t.Fatalf("payload 缺 created_at: %+v", p)
+	}
+	// 领域详情必须嵌套, 不得平铺。
+	for _, flat := range []string{"rule_id", "sensor_name", "threshold", "comparator", "level", "event_id"} {
+		if _, exists := p[flat]; exists {
+			t.Fatalf("领域字段 %q 不得平铺在载荷顶层: %+v", flat, p)
+		}
+	}
+	detail, ok := p["detail"].(gin.H)
+	if !ok {
+		t.Fatalf("payload detail 缺失或类型错误: %T", p["detail"])
+	}
+	if detail["rule_id"] != r.ID || detail["sensor_name"] != "temperature" ||
+		detail["threshold"] != r.Threshold || detail["comparator"] != "gt" {
+		t.Fatalf("detail 内容不符: %+v", detail)
+	}
+	if detail["state"] != stateFiring {
+		t.Fatalf("detail state = %v, want firing", detail["state"])
+	}
+}
+
+// Create 失败时不得广播 (否则前端插入一条库里不存在的通知, 永远无法标记已读)。
+func TestNotifyDoesNotBroadcastWhenCreateFails(t *testing.T) {
+	db := newTestDB(t)
+	var broadcasts int
+	ev := newTestEvaluator(t, db, func(string, any) { broadcasts++ })
+	r := rule(8, "temperature", "gt", 50, 0)
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	ev.LoadRules()
+	// 触发前删表: alert_events 写入必失败 → onFire 提前 return; 再直接调 notify
+	// 覆盖"Notification 落库失败"分支。
+	if err := db.Migrator().DropTable(&models.Notification{}); err != nil {
+		t.Fatal(err)
+	}
+	var evRow models.AlertEvent
+	evRow.RuleID = r.ID
+	ev.notify(r, evRow, 60, time.Now())
+	if broadcasts != 0 {
+		t.Fatalf("Create 失败时广播了 %d 次, want 0", broadcasts)
+	}
+}

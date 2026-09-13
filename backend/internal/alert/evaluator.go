@@ -292,6 +292,15 @@ func (e *Evaluator) onResolve(rule models.AlertRule, value float64, at time.Time
 }
 
 // notify 写 Notification 行 + WS BroadcastEvent (events.Notification 类型)。
+//
+// 载荷契约 (负债 D-3): 广播的必须是**通知实体本身** —— 与前端
+// api/notification.ts 的 Notification 接口、GET /notifications 列表项同形
+// (id/type/title/description/message/source/source_id/read/created_at),
+// 前端才能"收到即插入列表头部"。触发它的告警领域详情 (rule_id/sensor_name/
+// threshold/comparator...) 收进嵌套 detail 字段, 不与通知字段平铺混淆。
+//
+// 铁律: 只有 Create 成功 (拿到自增 ID) 才广播 —— 否则前端会插入一条库里
+// 不存在的通知, 且该条永远无法标记已读 (PUT /notifications/:id/read 无行可改)。
 func (e *Evaluator) notify(rule models.AlertRule, ev models.AlertEvent, value float64, at time.Time) {
 	desc := sensorDesc(rule, value, ev.State)
 	n := models.Notification{
@@ -307,20 +316,34 @@ func (e *Evaluator) notify(rule models.AlertRule, ev models.AlertEvent, value fl
 	if err := e.db.Create(&n).Error; err != nil {
 		metrics.DataConsumerDBWriteFailures.WithLabelValues("alert_evaluator", "notifications").Inc()
 		logger.Warn("alert: failed to create notification", "rule_id", rule.ID, "error", err)
+		return
 	}
 	if e.broadcast != nil {
 		e.broadcast(events.Notification, gin.H{
-			"rule_id":     rule.ID,
-			"rule_name":   rule.Name,
-			"event_id":    ev.ID,
-			"state":       ev.State,
-			"value":       value,
-			"level":       rule.Level,
-			"sensor_name": rule.SensorName,
-			"threshold":   rule.Threshold,
-			"comparator":  rule.Comparator,
-			"fired_at":    ev.FiredAt,
-			"resolved_at": ev.ResolvedAt,
+			// ── 通知实体 (与列表项同形) ──
+			"id":          n.ID,
+			"type":        n.Type,
+			"title":       n.Title,
+			"description": n.Description,
+			"message":     n.Message,
+			"source":      n.Source,
+			"source_id":   n.SourceID,
+			"read":        n.Read,
+			"created_at":  n.CreatedAt,
+			// ── 告警领域详情 (嵌套, 不平铺) ──
+			"detail": gin.H{
+				"rule_id":     rule.ID,
+				"rule_name":   rule.Name,
+				"event_id":    ev.ID,
+				"state":       ev.State,
+				"value":       value,
+				"level":       rule.Level,
+				"sensor_name": rule.SensorName,
+				"threshold":   rule.Threshold,
+				"comparator":  rule.Comparator,
+				"fired_at":    ev.FiredAt,
+				"resolved_at": ev.ResolvedAt,
+			},
 		})
 	}
 }
