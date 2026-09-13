@@ -38,6 +38,7 @@ vi.mock('@/stores/websocket', () => ({
     disconnect: vi.fn(),
     isAuthenticated: true,
     subscribe: vi.fn(() => vi.fn()),
+    onConnected: vi.fn(() => vi.fn()),
   }),
 }))
 
