@@ -10,6 +10,26 @@ import (
 	"gorm.io/gorm"
 )
 
+// registerVendorRoutes 注册「厂商 / 设备型号 / 设备类别」这一组遗留端点。
+//
+// 保留原因（而不是直接删除）：
+//  1. 这组端点有完整的路由级测试（handler_ota_vendor_user_test.go 的 TestVendor_* /
+//     TestDeviceModel_* / TestDeviceCategories_List，以及 handler_p0_error_semantics_test.go
+//     的 P0-4 状态码回归护栏），删除会让这些护栏一起消失；端点本身无副作用、不参与采集链路。
+//  2. 型号库将来仍可能被复用（例如做设备型号选择器）。前提是它重新变得需要，
+//     而不是"既然有就先留着"。
+//
+// 为什么现在没有前端消费：该体系已被 v2.2 的 DeviceConfig 取代——设备连接/解析/初始化/操作
+// 改由 models.DeviceConfig 的 Connection / Parser / InitFlow / Operations 四个 JSONB 字段承载
+// （见 models/models.go:216-220），models.Vendor / models.DeviceModel 自身也被标注为「(保留)」
+// （models/models.go:423/431）。Device 上的 DeviceModelID *uint（models/models.go:223）全仓零读写，
+// 同样是这套遗留关联的残骸。
+//
+// 配套的前端客户端 frontend-shared/src/api/vendor.ts（vendorApi / deviceModelApi /
+// deviceCategoryApi）已于清理中删除：它零消费，留着只会造成"有 api 却无页面"的误导性半成品状态。
+//
+// 若确认不再需要型号库：请连同 models.Vendor / models.DeviceModel 以及上述测试一并删除，
+// 不要只删端点而留下无人引用的表结构。
 func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	// === Vendors ===
 	v1.GET("/vendors", func(c *gin.Context) {
