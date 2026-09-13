@@ -3,11 +3,17 @@
   <!-- 与 demo(/dev/new-node-demo) 的差异：MainLayout 提供导航 chrome；无 mock 数据； -->
   <!-- 位置/备注/时区/搜索/通知卡已裁剪（后端模型无对应字段）；指标卡仅保留真实指标。 -->
   <div class="node-overview-page">
-    <!-- 面包屑 -->
-    <el-breadcrumb separator="/" class="no-breadcrumb">
+    <!-- 面包屑（层级线索，规范 §4.1.2 MUST「至少表达列表 -> 当前实体」）
+         桌面：首页 / 节点管理 / <当前实体>
+         移动端（<=768px）：隐去根级「首页」，压缩为「节点管理 / <当前实体>」两段。
+         改前移动端整条 display:none，且 MainLayout 顶栏面包屑同时 display:none、
+         错误分支里的「返回列表」又不在渲染路径上 ⇒ 390px 下只剩页面标题，
+         用户无法判断自己处在哪一层。此处不新增按钮，因为「节点管理」这一段
+         本身带 :to 链接：同一元素既给出位置又给出返回入口，不额外占用紧张的页头空间。 -->
+    <el-breadcrumb separator="/" class="no-breadcrumb" data-testid="node-breadcrumb">
       <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
       <el-breadcrumb-item :to="{ path: '/node' }">节点管理</el-breadcrumb-item>
-      <el-breadcrumb-item>{{ pageTitle }}</el-breadcrumb-item>
+      <el-breadcrumb-item data-testid="node-breadcrumb-current">{{ pageTitle }}</el-breadcrumb-item>
     </el-breadcrumb>
 
     <!-- 加载骨架 -->
@@ -75,14 +81,14 @@
           <div class="stat-icon"><el-icon :size="16"><Cpu /></el-icon></div>
           <div class="stat-text">
             <div class="stat-label">型号</div>
-            <div class="stat-value">{{ node.model || '-' }}</div>
+            <div class="stat-value">{{ node.model || UNKNOWN }}</div>
           </div>
         </div>
         <div class="stat-item">
           <div class="stat-icon"><el-icon :size="16"><Document /></el-icon></div>
           <div class="stat-text">
             <div class="stat-label">固件版本</div>
-            <div class="stat-value">{{ node.firmware_version || '-' }}</div>
+            <div class="stat-value">{{ node.firmware_version || UNKNOWN }}</div>
           </div>
         </div>
         <div class="stat-item">
@@ -103,7 +109,7 @@
           <div class="stat-icon"><el-icon :size="16"><Share /></el-icon></div>
           <div class="stat-text">
             <div class="stat-label">协议版本</div>
-            <div class="stat-value">{{ node.protocol_version || '-' }}</div>
+            <div class="stat-value">{{ node.protocol_version || UNKNOWN }}</div>
           </div>
         </div>
       </div>
@@ -115,7 +121,12 @@
           :key="tab.label"
           class="tab-item"
           :class="{ active: activeTab === tab.label }"
+          role="tab"
+          tabindex="0"
+          :aria-selected="activeTab === tab.label"
           @click="activateTab(tab.label)"
+          @keydown.enter.prevent="activateTab(tab.label)"
+          @keydown.space.prevent="activateTab(tab.label)"
         >
           <el-icon :size="15"><component :is="tab.icon" /></el-icon>
           <span>{{ tab.label }}</span>
@@ -133,10 +144,10 @@
           </div>
           <div class="info-grid">
             <div class="info-col">
-              <div class="info-row"><span class="info-label">节点名称</span><span class="info-val">{{ node.name || '-' }} <el-icon :size="12" class="mini-edit" @click="renameVisible = true"><EditPen /></el-icon></span></div>
+              <div class="info-row"><span class="info-label">节点名称</span><span class="info-val">{{ node.name || UNKNOWN }} <el-icon :size="12" class="mini-edit" @click="renameVisible = true"><EditPen /></el-icon></span></div>
               <div class="info-row"><span class="info-label">设备 ID</span><span class="info-val mono">{{ node.node_id }} <el-icon :size="12" class="mini-edit" @click="copyId"><CopyDocument /></el-icon></span></div>
-              <div class="info-row"><span class="info-label">型号</span><span class="info-val">{{ node.model || '-' }}</span></div>
-              <div class="info-row"><span class="info-label">固件版本</span><span class="info-val">{{ node.firmware_version || '-' }}</span></div>
+              <div class="info-row"><span class="info-label">型号</span><span class="info-val">{{ node.model || UNKNOWN }}</span></div>
+              <div class="info-row"><span class="info-label">固件版本</span><span class="info-val">{{ node.firmware_version || UNKNOWN }}</span></div>
               <div class="info-row">
                 <span class="info-label">状态</span>
                 <span class="info-val"><span class="dot" :class="nodeOnline ? 'dot-green' : 'dot-gray'"></span> {{ nodeOnline ? '在线' : '离线' }}</span>
@@ -690,7 +701,7 @@ import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { WS_EVENT } from '@/events/events'
 import { getSessionGeneration, assertSessionGeneration } from '@/utils/sessionCache'
 import { DmaState, dmaStateText, isDmaRebindable } from '@/utils/dmaState'
-import { formatTime } from '@/utils/format'
+import { UNKNOWN, formatTime } from '@/utils/format'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { logger } from '@/utils/logger'
@@ -875,7 +886,7 @@ const lastOnlineText = computed(() => {
   return formatTime(t)
 })
 
-// 在线时长：从 last_online_time 到现在（每秒走字），离线显示 '-'
+// 在线时长：从 last_online_time 到现在（每秒走字），离线显示统一未知占位符 UNKNOWN（'—'）
 const sessionDuration = computed(() => {
   const t = node.value?.last_online_time
   if (!t || !nodeOnline.value) return '—'
@@ -1620,6 +1631,18 @@ html.dark .node-overview-page {
   --no-success-bg: rgba(34, 197, 94, 0.15);
   --no-warning-bg: rgba(245, 158, 11, 0.15);
   --no-chip-off-bg: rgba(255, 255, 255, 0.06);
+  /* F8：补齐此前只在亮色定义的 6 个 token。语义色改为引用 theme.css 的暗色语义 token，
+     亮色块保持不变；-text 变体落在各自 tinted 底上，同样引用主题 token。 */
+  --no-danger: var(--color-danger, #F78989);
+  --no-success: var(--color-success, #85CE61);
+  --no-warning: var(--color-warning, #EBB563);
+  --no-success-text: var(--color-success, #85CE61);
+  --no-warning-text: var(--color-warning, #EBB563);
+  /* F8 层级修正：原值 #A7B1BF 在卡片底上实测 6.70，比 muted(#A3A6AD, 5.96) 还亮 → 层级反转。
+     #7D8694 实测 3.95：明显弱于 muted，且仍高于 3.0 的禁用态下限。 */
+  --no-text-faint: #7D8694;
+  /* F8：零使用，但属设计稿色板；补暗色覆盖，使其一旦被用即为正确的暗色页面底色。 */
+  --no-bg-page: var(--bg-color-page, #0D0D0D);
 }
 
 .no-breadcrumb { margin-bottom: 12px; }
@@ -1683,6 +1706,7 @@ html.dark .node-overview-page {
   font-size: 14px; color: var(--no-text-secondary); cursor: pointer; position: relative;
 }
 .tab-item:hover { color: var(--no-primary); }
+.tab-item:focus-visible { outline: 2px solid var(--no-primary); outline-offset: -2px; border-radius: 4px; }
 .tab-item.active { color: var(--no-primary); font-weight: 500; }
 .tab-item.active::after {
   content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--no-primary);
@@ -2004,7 +2028,39 @@ html.dark .node-overview-page {
   .info-grid { flex-direction: column; gap: 0; }
 }
 @media (max-width: 768px) {
-  .no-breadcrumb { display: none; }
+  /* ── 面包屑：移动端从「整条隐藏」改为「压缩为两段」 ──
+     改前 .no-breadcrumb{display:none} 与 MainLayout 顶栏面包屑同时消失，
+     移动端只剩标题，层级位置感丢失（审计 F10 / §4.1.2 MUST）。
+     这里必须用 flex 而非保留 EP 的 float:left —— float 布局下容器不参与
+     overflow 计算，横向溢出会顶破页面（documentElement.scrollWidth > clientWidth）。 */
+  .no-breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    min-width: 0;
+    margin-bottom: 10px;
+    font-size: 12px;
+    line-height: 18px;
+    /* 兜底：极端长实体名时容器内滚动，而不是把页面撑出横向滚动条 */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .no-breadcrumb::-webkit-scrollbar { display: none; }
+  /* 只保留「上一级 / 当前」两段：根级「首页」在 390px 下信息价值最低，优先裁掉 */
+  .no-breadcrumb :deep(.el-breadcrumb__item:first-child) { display: none; }
+  .no-breadcrumb :deep(.el-breadcrumb__item) { flex: 0 0 auto; }
+  /* 当前实体名可长可短：允许它收缩并省略，避免把胶囊标签撑成逐字竖排（§4.2.5） */
+  .no-breadcrumb :deep(.el-breadcrumb__item:last-child) { flex: 0 1 auto; min-width: 6em; }
+  .no-breadcrumb :deep(.el-breadcrumb__item:last-child .el-breadcrumb__inner) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: keep-all;
+  }
+  /* 上一级是真实链接（:to），保留最小 44px 触控热区高度（§4.4.5） */
+  .no-breadcrumb :deep(.el-breadcrumb__inner.is-link) { min-height: 20px; display: inline-flex; align-items: center; }
+  .no-breadcrumb :deep(.el-breadcrumb__separator) { margin: 0 6px; }
   .page-header { flex-direction: column; gap: 12px; }
   .ph-title-row { gap: 8px; }
   .ph-title { font-size: 18px; line-height: 26px; }

@@ -110,6 +110,17 @@ const stubs = {
   },
 }
 
+/**
+ * 剥掉 CSS 注释后再做样式断言。
+ *
+ * 为什么必须剥：本文件的样式用例既要断言"新规则存在"，又要断言"旧规则已消失"，
+ * 而改动的说明性注释里会**引用被删除的旧规则原文**（如 "改前 .no-breadcrumb{display:none}"）。
+ * 若带着注释做 not.toMatch，断言会被自己的文档文字误伤 —— 这是"源码字符串断言"的经典陷阱。
+ */
+function stripCssComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
 describe('NodeOverview (生产页)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -263,11 +274,111 @@ describe('NodeOverview (生产页)', () => {
   })
 
   it('移动端将页头操作收纳为两列，并让外层 TAB 横向滚动而非挤压裁切', () => {
-    expect(source).toContain('.no-breadcrumb { display: none; }')
     expect(source).toMatch(/\.ph-actions\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/)
     expect(source).toMatch(/\.ph-actions \.btn\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0[^}]*justify-content:\s*center/)
     expect(source).toMatch(/\.tab-bar\s*\{[^}]*overflow-x:\s*auto[^}]*overscroll-behavior-x:\s*contain[^}]*scrollbar-width:\s*none/)
     expect(source).toContain('.tab-item { flex: 0 0 auto; }')
+  })
+
+  // ─── 未知值占位符统一为 —（§3.4.5 MUST） ───
+  // 改前五格统计条与基本信息表的 6 处空值都渲染半角连字符 '-'，
+  // 与全站其余页面的 '—' 不一致，也和「减号/分隔符」同形难以辨读。
+
+  it('型号/固件版本/协议版本缺失时渲染 — 而不是半角 -', async () => {
+    mockGetDetail.mockResolvedValueOnce({
+      id: 3, node_id: 'NOSPEC01', name: '', status: 'offline',
+      // 三个可选标识字段全部缺失 —— 后端确实可能不返回
+      model: '', firmware_version: '', protocol_version: '',
+      connection_quality: 0, latency_ms: 0, ping_latency_ms: 0,
+      wifi_rssi: 0, free_heap_bytes: 0, uptime_seconds: 0, capabilities: {}, config: {},
+    } as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+
+    // 五格统计条：型号 / 固件版本 / 协议版本 三格必须显示 —
+    const strip = wrapper.find('.stat-strip')
+    expect(strip.exists()).toBe(true)
+    const values = strip.findAll('.stat-value').map(v => v.text().trim())
+    expect(values).toContain('—')
+    expect(values.filter(v => v === '—').length).toBeGreaterThanOrEqual(3)
+    // 且绝不能出现半角连字符占位
+    expect(values).not.toContain('-')
+
+    // 基本信息表：节点名称/型号/固件版本 同样显示 —
+    const infoVals = wrapper.findAll('.info-card .info-val').map(v => v.text().trim())
+    expect(infoVals.filter(v => v === '—').length).toBeGreaterThanOrEqual(3)
+    expect(infoVals).not.toContain('-')
+  })
+
+  it('源码不再用半角连字符作未知占位（§3.4.5）', () => {
+    const css = stripCssComments(source)
+    // || '-' 形态的模板占位必须全部消失
+    expect(css).not.toMatch(/\|\|\s*'-'/)
+    expect(css).not.toMatch(/\?\s*'-'\s*:/)
+    expect(css).not.toMatch(/:\s*'-'/)
+    // 统一走 format.ts 导出的常量，而不是各页各写一个字面量
+    expect(css).toContain("import { UNKNOWN, formatTime } from '@/utils/format'")
+  })
+
+  // ─── 移动端层级线索（F10 / §4.1.2 MUST） ───
+  // 改前移动端同时丢失两条线索：本页面包屑 display:none（旧断言见上一用例）
+  // + MainLayout 顶栏面包屑 display:none，而「返回列表」只在错误分支渲染。
+  // 这里的断言分两层：① DOM 里三条层级线索都真实存在；
+  // ② 移动端断点里**不再**隐藏面包屑，而是压缩为两段并给出可滚动的溢出兜底。
+
+  it('渲染面包屑层级线索：首页 / 节点管理 / 当前实体，且「节点管理」是真实返回入口', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+
+    const crumb = wrapper.find('[data-testid="node-breadcrumb"]')
+    expect(crumb.exists()).toBe(true)
+
+    // 三段层级：首页 -> 节点管理 -> 当前实体（§4.1.2「至少表达列表 -> 当前实体」）。
+    // 这里按**子元素顺序与文本**断言，不依赖 Element Plus 内部 class 名 ——
+    // test-setup.ts 的通用 stub 渲染的是 elbreadcrumbitem（无连字符），
+    // 用 .el-breadcrumb-item 选择器会得到 0 个匹配的假绿/假红。
+    const items = Array.from(crumb.element.children) as HTMLElement[]
+    expect(items.map(el => el.textContent?.trim())).toEqual(['首页', '节点管理', '机房采集器'])
+
+    // 前两段带 to（可跳转），最后一段没有 —— 这正是「移动端裁掉根级后仍保留返回入口」的依据
+    expect(items[0].getAttribute('to')).not.toBeNull()
+    expect(items[1].getAttribute('to'), '「节点管理」必须是真实可跳转的上一级入口').not.toBeNull()
+    expect(items[2].getAttribute('to'), '当前实体不应是可跳转链接').toBeNull()
+    expect(wrapper.find('[data-testid="node-breadcrumb-current"]').text()).toBe('机房采集器')
+  })
+
+  it('移动端不再隐藏面包屑，而是压缩为「上一级 / 当前」两段并做容器内滚动', () => {
+    // 断言必须只看真实 CSS：源码注释里为了说明「改前行为」写着
+    // "改前 .no-breadcrumb{display:none}"，若带注释一起 match，
+    // not.toMatch 会被自己的说明文字误伤（本用例第一版就踩了这个坑）。
+    const css = stripCssComments(source)
+
+    // ① 旧行为必须消失：整条 display:none 会让移动端只剩标题
+    expect(css).not.toMatch(/\.no-breadcrumb\s*\{[^}]*display:\s*none/)
+
+    // ② 新行为：移动端断点内确实重定义了面包屑布局
+    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
+    const crumbRule = mobileBlock.slice(mobileBlock.indexOf('.no-breadcrumb {'), mobileBlock.indexOf('.no-breadcrumb::-webkit-scrollbar'))
+    expect(crumbRule).toMatch(/display:\s*flex/)
+    // 用 flex 而非 EP 默认的 float:left —— float 不参与父容器 overflow 计算
+    expect(crumbRule).toMatch(/overflow-x:\s*auto/)
+    expect(crumbRule).toMatch(/flex-wrap:\s*nowrap/)
+    // 只保留两段：根级「首页」在窄屏被裁掉
+    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item:first-child\)\s*\{\s*display:\s*none/)
+    // 当前实体允许收缩 + 省略号，避免把胶囊撑成逐字竖排（§4.2.5）
+    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item:last-child\)\s*\{[^}]*flex:\s*0 1 auto/)
+    expect(mobileBlock).toMatch(/word-break:\s*keep-all/)
+  })
+
+  it('移动端面包屑容器横向滚动有上限：min-width:0 + 滚动条隐藏', () => {
+    const css = stripCssComments(source)
+    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
+    const crumbRule = mobileBlock.slice(mobileBlock.indexOf('.no-breadcrumb {'), mobileBlock.indexOf('.no-breadcrumb::-webkit-scrollbar'))
+    // min-width:0 是 flex 子项能被压缩、进而触发 overflow-x 的前提
+    expect(crumbRule).toMatch(/min-width:\s*0/)
+    expect(mobileBlock).toContain('.no-breadcrumb::-webkit-scrollbar { display: none; }')
+    // 每段固定不收缩，收缩只发生在最后一段（保证「上一级」永远可读可点）
+    expect(mobileBlock).toMatch(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__item\)\s*\{\s*flex:\s*0 0 auto/)
   })
 
   it('离线时总线写操作均被门控', async () => {
