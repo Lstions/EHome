@@ -212,14 +212,22 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			Error(c, http.StatusNotFound, "")
 			return
 		}
+		// Field names must match the canonical API/DB contract of models.Firmware
+		// (json/gorm tag "target_model"). The previous "node_model" tag silently
+		// dropped the value sent by the UI while still answering 200.
 		var req struct {
 			Version        *string `json:"version"`
 			Changelog      *string `json:"changelog"`
-			NodeModel      *string `json:"node_model"`
+			TargetModel    *string `json:"target_model"`
 			MinFromVersion *string `json:"min_from_version"`
 			Stable         *bool   `json:"stable"`
 		}
-		c.ShouldBindJSON(&req)
+		// A malformed body must fail loudly: ignoring this error made every request
+		// look successful no matter what the client sent.
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		updates := map[string]interface{}{}
 		if req.Version != nil {
 			updates["version"] = *req.Version
@@ -227,8 +235,8 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 		if req.Changelog != nil {
 			updates["changelog"] = *req.Changelog
 		}
-		if req.NodeModel != nil {
-			updates["target_model"] = *req.NodeModel
+		if req.TargetModel != nil {
+			updates["target_model"] = *req.TargetModel
 		}
 		if req.MinFromVersion != nil {
 			updates["min_from_version"] = *req.MinFromVersion
