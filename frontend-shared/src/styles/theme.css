@@ -196,10 +196,17 @@
 [data-theme="dark"],
 .dark-theme,
 html.dark {
-  /* 基础色 - 调亮以便在暗色背景上显示 */
-  --color-primary: #409eff;
-  --color-primary-light: #5399ff;
-  --color-primary-lighter: #79bbff;
+  /* 基础色 - 调亮以便在暗色背景上显示。
+     --color-primary 必须同时满足两个约束（与文件顶部注释同源）：
+       ① 实心填充上的白字 ≥4.5（el-button--primary 就是白字落在它上面）；
+       ② 作为文字落在深色底上 ≥4.5。
+     原值 #409eff 是 EP 默认调色板，白字只有 2.78 —— 亮色块已改成 #1f5ad8(5.98)，
+     但暗色块此前沿用了默认值，于是「暗色下主按钮不达标」被漏掉（主控独立复验抓到）。
+     实测：#7aa7f0 白字 3.72、#8ab4f8 白字 3.28，均不足；
+     故暗色与亮色同策略 —— 深色填充 + 白字：#1f5ad8 白字 5.98。 */
+  --color-primary: #1f5ad8;
+  --color-primary-light: #2f6ae8;
+  --color-primary-lighter: #4a84f0;
   --color-success: #85ce61;
   --color-warning: #ebb563;
   --color-danger: #f78989;
@@ -315,7 +322,13 @@ html.dark {
   --el-color-primary-light-5: #2a598a;
   --el-color-primary-light-7: #213d5b;
   --el-color-primary-light-8: #1d3043;
-  --el-color-primary-light-9: #18222b;
+  --el-color-primary-light-9: #18222b; /* el-tag/el-alert 的**底** */
+  /* 暗色下「实心填充色」与「浅底徽标的文字色」必须分开取：
+     基色 #1f5ad8 是为「白字落在其上 ≥4.5」选的（深色），但同一颜色作文字落在
+     深色底 light-9(#18222b) 上只有 2.7（EP 用同一个变量同时承担这两个角色，
+     亮色下两者恰好同向，暗色下则相反）。
+     故浅底徽标的前景色用更亮的蓝：#79bbff on #18222b = 7.96。 */
+  --el-tag-primary-text: #79bbff;
   --el-color-success-light-3: #4e8e2f;
   --el-color-success-light-5: #3e6b27;
   --el-color-success-light-7: #2d481f;
@@ -341,6 +354,25 @@ html.dark {
   --el-color-info-light-7: #393a3c;
   --el-color-info-light-8: #2d2d2f;
   --el-color-info-light-9: #202121;
+}
+
+/* el-tag(el-alert) 的 primary 变体在暗色下必须用「更亮的蓝」作文字。
+   原因：EP 用同一个 --el-color-primary 同时承担两个角色 —— 实心填充（白字落在其上）
+   与浅底徽标的文字色。亮色下两者同向（都要求基色够深），暗色下则相反：
+   基色为满足白字 ≥4.5 必须够深(#1f5ad8)，但它作文字落在深色底 light-9(#18222b) 上只有 2.7。
+   故这里单独覆盖前景色：#79bbff on #18222b = 7.96。
+   为什么用全局选择器而不是放在 :root 块里：el-tag 只在同时带 .el-tag--primary 时命中，
+   且该规则要在暗色三个入口（data-theme / .dark-theme / html.dark）全部生效。 */
+[data-theme="dark"] .el-tag--primary,
+.dark-theme .el-tag--primary,
+html.dark .el-tag--primary,
+[data-theme="dark"] .el-alert--primary .el-alert__title,
+.dark-theme .el-alert--primary .el-alert__title,
+html.dark .el-alert--primary .el-alert__title {
+  color: var(--el-tag-primary-text);
+}
+
+:root {
 
   /* 边框颜色 */
   --el-border-color: var(--border-color);
