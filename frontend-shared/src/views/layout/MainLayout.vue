@@ -14,13 +14,23 @@
 
       <!-- 导航菜单 -->
       <el-menu
+        ref="desktopMenuRef"
         :default-active="activeMenu"
         :collapse="uiStore.sidebarCollapsed"
         :collapse-transition="false"
         router
         class="sidebar-menu"
+        @keydown="handleSidebarKeydown"
       >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+        <el-menu-item
+          v-for="(item, idx) in menuItems"
+          :key="item.path"
+          :index="item.path"
+          :data-index="item.path"
+          :tabindex="idx === sidebarFocusIndex ? 0 : -1"
+          :aria-current="activeMenu === item.path ? 'page' : undefined"
+          @focus="sidebarFocusIndex = idx"
+        >
           <el-icon><component :is="item.icon" /></el-icon>
           <template #title>{{ item.title }}</template>
         </el-menu-item>
@@ -42,8 +52,10 @@
       :with-header="false"
       size="240px"
       class="mobile-sidebar-drawer"
+      @opened="handleMobileDrawerOpened"
+      @closed="handleMobileDrawerClosed"
     >
-      <div class="mobile-drawer-body">
+      <div ref="mobileDrawerBodyRef" class="mobile-drawer-body" tabindex="-1">
         <!-- Logo 区域 -->
         <div class="mobile-logo-area" @click="handleMobileLogoClick">
           <div class="logo-icon">
@@ -54,12 +66,24 @@
 
         <!-- 导航菜单 -->
         <el-menu
+          ref="mobileMenuRef"
           :default-active="activeMenu"
           router
           class="mobile-sidebar-menu"
           @select="mobileDrawerVisible = false"
+          @keydown="handleMobileMenuKeydown"
         >
-          <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
+          <!-- 抽屉是模态：所有导航项都可 Tab 到达，ElFocusTrap 才能在首尾之间循环。
+               这里刻意不用 roving tabindex —— 那会只剩一个 tab 停靠点，Tab 会"卡"在同一项上。 -->
+          <el-menu-item
+            v-for="(item, idx) in menuItems"
+            :key="item.path"
+            :index="item.path"
+            :data-index="item.path"
+            :tabindex="0"
+            :aria-current="activeMenu === item.path ? 'page' : undefined"
+            @focus="mobileFocusIndex = idx"
+          >
             <el-icon><component :is="item.icon" /></el-icon>
             <template #title>{{ item.title }}</template>
           </el-menu-item>
@@ -80,6 +104,7 @@
         <div class="header-left">
           <!-- 移动端用汉堡按钮 + 抽屉 -->
           <el-button
+            ref="mobileMenuTriggerRef"
             v-if="isMobile"
             :icon="Menu"
             circle
@@ -217,7 +242,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { useRouter, useRoute } from 'vue-router'
 import {
@@ -433,6 +458,144 @@ const handleMobileLogoClick = () => {
   router.push('/dashboard')
 }
 
+// ── 桌面侧栏键盘可达（roving tabindex）──
+// Element Plus 的 el-menu 垂直模式没有内置键盘导航：只有在水平模式（mode="horizontal"）
+// 才实例化 Menu 类并注册键盘处理，垂直分支零键盘处理。因此这里自行管理 roving tabindex：
+// 只有当前项 tabindex=0（可 Tab 进入），其余 -1；方向键在项之间移动焦点。
+const desktopMenuRef = ref<any>(null)
+const sidebarFocusIndex = ref(0)
+
+// 当前激活项下标 —— 进入侧栏时焦点落在用户当前所在页面，且始终落在有效范围内。
+const activeMenuIndex = computed(() => {
+  const idx = menuItems.value.findIndex((item) => item.path === activeMenu.value)
+  return idx >= 0 ? idx : 0
+})
+
+// 共用：从 el-menu 组件实例取真实 DOM 项。
+// 用 $el 而不是暴露的方法：expose() 不会移除 $el（Vue 的 publicPropertiesMap 含 $el）。
+const menuItemEls = (menuRef: { value: any }): HTMLElement[] => {
+  const root = (menuRef.value as any)?.$el as HTMLElement | undefined
+  if (!root) return []
+  return Array.from(root.querySelectorAll<HTMLElement>('.el-menu-item'))
+}
+
+// 共用键盘导航：ArrowUp/Down/Home/End 移动焦点（并同步 roving index），
+// Enter/Space 激活当前项。el-menu 渲染为 <li role="menuitem">，原生不响应任何键
+// （垂直模式 EP 未注册键盘处理），所以这里必须自己实现。
+// 说明：不需要额外的 focus 兜底参数 —— 每个菜单项的 @focus 已把 roving index
+// 同步到自身下标（见模板 :tabindex / @focus），键盘与鼠标聚焦都能覆盖。
+const makeMenuKeydownHandler = (
+  menuRef: { value: any },
+  focusIndex: { value: number },
+) => {
+  const focusItem = (index: number) => {
+    const items = menuItemEls(menuRef)
+    if (!items.length) return
+    const next = Math.min(Math.max(index, 0), items.length - 1)
+    focusIndex.value = next
+    void nextTick(() => {
+      items[next]?.focus()
+    })
+  }
+
+  return (event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null
+    const current = target?.closest?.('.el-menu-item') as HTMLElement | null
+    if (!current) return
+    const items = menuItemEls(menuRef)
+    const currentIndex = Math.max(items.indexOf(current), 0)
+
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault()
+        focusItem(currentIndex + 1)
+        break
+      case 'ArrowUp':
+        event.preventDefault()
+        focusItem(currentIndex - 1)
+        break
+      case 'Home':
+        event.preventDefault()
+        focusItem(0)
+        break
+      case 'End':
+        event.preventDefault()
+        focusItem(items.length - 1)
+        break
+      case 'Enter':
+      case ' ':
+        event.preventDefault()
+        current.click()
+        break
+      default:
+        break
+    }
+  }
+}
+
+const handleSidebarKeydown = makeMenuKeydownHandler(desktopMenuRef, sidebarFocusIndex)
+
+// ── 移动端抽屉焦点陷阱 ──
+// ElDrawer 自带 ElFocusTrap，但焦点陷阱只有在容器内"存在可聚焦元素"时才生效
+// （obtainAllFocusableElements 返回空 → 不 preventDefault → Tab 直接穿到遮罩后的页面）。
+// 抽屉内原本零个可聚焦元素，所以这里同样用 roving tabindex 让菜单项可聚焦，
+// 陷阱随即接管 Tab 循环；关闭时由 ElFocusTrap 归还焦点（其 lastFocusBeforeTrapped 记录触发按钮）。
+const mobileMenuRef = ref<any>(null)
+const mobileMenuTriggerRef = ref<any>(null)
+const mobileFocusIndex = ref(0)
+const mobileDrawerBodyRef = ref<HTMLElement | null>(null)
+
+const mobileMenuItemEls = (): HTMLElement[] => menuItemEls(mobileMenuRef)
+
+const handleMobileMenuKeydown = makeMenuKeydownHandler(mobileMenuRef, mobileFocusIndex)
+
+const mobileDrawerRoot = (): HTMLElement | null =>
+  (mobileDrawerBodyRef.value?.closest('.el-drawer') as HTMLElement | null) ?? null
+
+// 兜底：若焦点仍逃逸到抽屉外，立即拉回抽屉内（当前 roving 项）。
+// 仅在 ElFocusTrap 失效（容器内无可聚焦元素）时才会真正触发。
+const handleMobileDrawerFocusIn = (event: FocusEvent) => {
+  const root = mobileDrawerRoot()
+  const target = event.target as HTMLElement | null
+  if (!root || !target || root.contains(target)) return
+  const items = mobileMenuItemEls()
+  const fallback = items[mobileFocusIndex.value] ?? items[0] ?? mobileDrawerBodyRef.value
+  fallback?.focus()
+}
+
+// 打开时：对齐 roving 项并聚焦，随后挂上逃逸兜底；关闭时解绑。
+watch(mobileDrawerVisible, (visible) => {
+  if (visible) {
+    mobileFocusIndex.value = activeMenuIndex.value
+    document.addEventListener('focusin', handleMobileDrawerFocusIn)
+  } else {
+    document.removeEventListener('focusin', handleMobileDrawerFocusIn)
+  }
+})
+
+const handleMobileDrawerOpened = () => {
+  const items = mobileMenuItemEls()
+  const target = items[mobileFocusIndex.value] ?? mobileDrawerBodyRef.value
+  target?.focus()
+}
+
+// 关闭后把焦点归还触发按钮。
+// ElFocusTrap 的 lastFocusBeforeTrapped 记录的是"陷阱生效前"的 activeElement，
+// 而移动端点开抽屉时焦点往往还在 body 上，于是它归还到 body（键盘用户丢失位置）。
+// 这里显式归还到汉堡按钮，保证 Tab 序列从原处继续。仅当焦点未被用户主动移到别处时才抢。
+const handleMobileDrawerClosed = () => {
+  // afterLeave 里 v-show 会隐藏仍在焦点上的菜单项，浏览器随即把焦点重置到 body；
+  // 而 @closed 是在同一次 DOM patch 之前同步派发的。所以要等两帧（DOM 已更新、已绘制）
+  // 再判断"焦点是否丢失"，否则会把焦点抢回一个马上被隐藏的元素。
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const trigger = (mobileMenuTriggerRef.value as any)?.$el as HTMLElement | undefined
+    if (!trigger) return
+    const active = document.activeElement
+    const lostFocus = !active || active === document.body || active === mobileDrawerBodyRef.value
+    if (lostFocus) trigger.focus()
+  }))
+}
+
 // 侧边栏宽度
 const sidebarWidth = computed(() => {
   return uiStore.sidebarCollapsed ? '64px' : '200px'
@@ -441,6 +604,13 @@ const sidebarWidth = computed(() => {
 // 当前激活菜单
 const activeMenu = computed(() => {
   return route.path
+})
+
+// 路由变化时把桌面侧栏的 roving tabindex 对齐到当前激活项。
+// 必须放在 activeMenu 声明之后：watch 创建时会立即读取 source 的 .value，
+// 提前声明会命中 TDZ（ReferenceError: Cannot access '$' before initialization）。
+watch(activeMenuIndex, (idx) => {
+  sidebarFocusIndex.value = idx
 })
 
 // 面包屑
@@ -570,6 +740,8 @@ const handleKeydown = (e: KeyboardEvent) => {
 }
 
 onMounted(() => {
+  // 首次把 roving tabindex 对齐到当前激活项（此时 activeMenu 已声明，DOM 已挂载）。
+  sidebarFocusIndex.value = activeMenuIndex.value
   if (wsStore.isAuthenticated) {
     logger.debug('[MainLayout] 已登录，连接 WebSocket')
     wsStore.connect()
@@ -591,6 +763,7 @@ onUnmounted(() => {
   teardownRealtimeNotifications()
   wsStore.disconnect()
   document.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('focusin', handleMobileDrawerFocusIn)
   if (preloadTimer) clearTimeout(preloadTimer)
 })
 </script>
@@ -664,6 +837,13 @@ onUnmounted(() => {
 
 .sidebar :deep(.el-menu-item:hover) {
   background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+/* 键盘焦点可见环 —— 仅在键盘聚焦时出现，不干扰鼠标用户 */
+.sidebar :deep(.el-menu-item:focus-visible) {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
   color: #fff;
 }
 
@@ -1032,6 +1212,12 @@ onUnmounted(() => {
 :global(.mobile-sidebar-drawer .el-menu-item:hover) {
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
+}
+
+:global(.mobile-sidebar-drawer .el-menu-item:focus-visible) {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
+  color: var(--el-color-primary);
 }
 
 :global(.mobile-sidebar-drawer .el-menu-item.is-active) {
