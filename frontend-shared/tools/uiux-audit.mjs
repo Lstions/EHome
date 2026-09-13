@@ -180,12 +180,21 @@ const MEASURE = () => {
     // 这是契约 §2.2「探针会误报」的镜像错误 —— 凡以「某计数为 0」下结论前，
     // 必须核对选择器的覆盖范围。
     clickableNotFocusable: [...document.querySelectorAll('*')].filter(el => {
-      const cs = getComputedStyle(el);
-      return cs.cursor === 'pointer' && el.offsetParent !== null && el.tabIndex < 0;
+      if (el.offsetParent === null || el.tabIndex >= 0) return false;
+      if (getComputedStyle(el).cursor !== 'pointer') return false;
+      // 排除「原生可聚焦交互元素的后代」：button/a/input 内部的 svg/path/i/span 会
+      // 继承 cursor:pointer，但它们不是独立的点击目标 —— 真正可聚焦的是那个 button。
+      // D3 域实测：不过滤时 automation 报 414 个，其中约 392 个属此类（仅 span 就 260 个，
+      // 来自 .el-table__row 的 cursor 继承）；过滤后真实缺陷为 0。
+      // 这是 §2.3 假阴性家族的镜像：**假阳性**。
+      if (el.closest('button, a[href], input, select, textarea, [role="button"], [tabindex]')) return false;
+      return true;
     }).length,
     pointerElements: [...document.querySelectorAll('*')].filter(el => {
-      const cs = getComputedStyle(el);
-      return cs.cursor === 'pointer' && el.offsetParent !== null;
+      if (el.offsetParent === null) return false;
+      if (getComputedStyle(el).cursor !== 'pointer') return false;
+      if (el.closest('button, a[href], input, select, textarea, [role="button"], [tabindex]')) return false;
+      return true;
     }).length,
     // 焦点陷阱：移动抽屉打开时 Tab 是否会被困在抽屉内
     drawerFocusTrap: (() => {
