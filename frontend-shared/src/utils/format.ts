@@ -187,6 +187,22 @@ export function formatDataDisplay(data: any, mode: 'text' | 'hex' = 'text', devi
 }
 
 /**
+ * 指标未知态统一占位符。
+ *
+ * 语义（规范 §3.2.5「不得以本地默认值伪造事实」）：
+ *   **0 是「确实是 0」，「—」是「接口没说」**。
+ * 所以在「接口是否已成功返回」未知（加载中 / 加载失败 / 字段缺失）时，
+ * 必须用「—」表示未知，绝不能用 value || 0 把缺失数据渲染成 0。
+ *
+ * @param value 接口返回的数值；undefined / null 表示接口未提供该字段
+ * @param known 该数值是否已经可信；传 false（加载失败或尚未加载）时一律返回「—」
+ * @returns 可信时返回原数值，否则返回「—」
+ */
+export function metricOrDash(value: number | null | undefined, known = true): number | '—' {
+  return known ? (value ?? '—') : '—'
+}
+
+/**
  * Format power value: convert to kW if >= 1000W
  */
 export function formatPower(w: number): string {

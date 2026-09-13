@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatTime, formatFileSize, formatNumber, formatObjectData, bytesToHex, formatPower, debounce, throttle } from '../format'
+import { formatTime, formatFileSize, formatNumber, formatObjectData, bytesToHex, formatPower, metricOrDash, debounce, throttle } from '../format'
 
 // ── formatTime ──────────────────────────────────
 
@@ -153,6 +153,31 @@ describe('debounce', () => {
 })
 
 // ── throttle ────────────────────────────────────
+
+// ── metricOrDash：0 是「确实是 0」，「—」是「接口没说」（§3.2.5）──
+
+describe('metricOrDash', () => {
+  it('keeps a real 0 as 0 — zero is a fact, not an unknown', () => {
+    expect(metricOrDash(0)).toBe(0)
+  })
+
+  it('keeps real numbers unchanged', () => {
+    expect(metricOrDash(7)).toBe(7)
+    expect(metricOrDash(1234)).toBe(1234)
+  })
+
+  it('renders dash when the field is missing from the response (undefined/null)', () => {
+    expect(metricOrDash(undefined)).toBe('—')
+    expect(metricOrDash(null)).toBe('—')
+  })
+
+  it('renders dash for every value while the metric is not trustworthy (known=false)', () => {
+    // 接口失败 / 尚未加载时，即使对象里还残留着上一次的 0，也不得当成事实渲染
+    expect(metricOrDash(0, false)).toBe('—')
+    expect(metricOrDash(42, false)).toBe('—')
+    expect(metricOrDash(undefined, false)).toBe('—')
+  })
+})
 
 describe('throttle', () => {
   it('calls function immediately on first call', () => {

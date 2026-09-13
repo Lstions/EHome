@@ -60,6 +60,22 @@
       </div>
     </div>
 
+    <!-- 错误态：接口失败必须留下常驻痕迹并提供重试入口，
+         不得回退成"0 条 / 暂无通道"这一伪造的领域事实（范式同 views/data-source/DataSourceList.vue） -->
+    <el-alert
+      v-if="loadError"
+      type="error"
+      :closable="false"
+      show-icon
+      class="channel-error-alert"
+      data-test="channel-error"
+    >
+      <template #title>
+        <span class="channel-error-text">加载通道列表失败：{{ loadError }}</span>
+        <el-button link type="primary" size="small" data-test="channel-retry" @click="retryLoad">重试</el-button>
+      </template>
+    </el-alert>
+
     <!-- 加载骨架 -->
     <template v-if="loading && channels.length === 0">
       <div class="skeleton-grid">
@@ -67,12 +83,24 @@
       </div>
     </template>
 
-    <!-- 空状态 -->
+    <!-- 错误状态：优先于空态。加载失败不是"没有通道"，不得用空态冒充（§3.4.2）。 -->
+    <EmptyState
+      v-else-if="loadError"
+      kind="error"
+      icon="WarningFilled"
+      data-test="channel-error-state"
+      title="通道列表加载失败"
+      description="接口请求失败，暂时无法确定通道数量。"
+      :quick-actions="[{ label: '重试', type: 'primary', handler: retryLoad }]"
+    />
+
+    <!-- 空状态：加载成功且确实为空 / 筛选后无匹配（两种结论不同） -->
     <EmptyState
       v-else-if="filteredChannels.length === 0 && !loading"
+      :kind="hasActiveFilters ? 'filtered' : 'initial'"
       icon="Connection"
-      title="暂无通道"
-      :description="searchKeyword || nodeFilter || hardwareTypeFilter ? '没有匹配的通道，请调整筛选条件' : '还没有配置任何通道，请先在节点详情中添加通道'"
+      :title="hasActiveFilters ? '没有匹配的通道' : '暂无通道'"
+      :description="hasActiveFilters ? '没有匹配的通道，请调整筛选条件' : '还没有配置任何通道，请先在节点详情中添加通道'"
     />
 
     <!-- 通道表格（移动端可横向滚动，见 theme.css .mobile-table-wrapper） -->
@@ -187,6 +215,18 @@ const nodeStore = useNodeStore()
 const channels = ref<Channel[]>([])
 const loading = ref(false)
 const scanningId = ref<number | null>(null)
+
+// 接口失败态：'' 表示无错误。失败时页面必须留下常驻痕迹（错误提示条 + 错误空态 + 重试），
+// 而不是把"未知条数"渲染成 0 条 /"暂无通道"（§3.2.5 不得以本地默认值伪造事实）。
+const loadError = ref('')
+
+/** 用接口返回的 message 说明失败原因，缺省给通用文案。 */
+function errorMessage(err: unknown): string {
+  return err instanceof Error && err.message ? err.message : '网络请求失败'
+}
+
+/** 是否处于筛选态 —— 决定空态是"无匹配结果"还是"确实为空"。 */
+const hasActiveFilters = computed(() => Boolean(searchKeyword.value || nodeFilter.value || hardwareTypeFilter.value))
 
 function isScannable(row: any): boolean {
   if (row.hardware_type === 'i2c') return true
@@ -333,12 +373,20 @@ async function refreshData() {
     } else {
       channels.value = []
     }
+    loadError.value = ''
   } catch (error) {
-    console.error('获取通道列表失败', error)
-    channels.value = []
+    // 失败必须置常驻错误态：瞬态 ElMessage 不能替代错误态（U-1 根因三件套之三）。
+    loadError.value = errorMessage(error)
+    ElMessage.error('获取通道列表失败')
   } finally {
     loading.value = false
   }
+}
+
+/** 错误态的重试入口：清空错误后重新拉取。 */
+function retryLoad() {
+  loadError.value = ''
+  void refreshData()
 }
 
 onMounted(() => {
@@ -349,6 +397,15 @@ onMounted(() => {
 <style scoped>
 .channel-page {
   padding: 0;
+}
+
+.channel-error-alert {
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.channel-error-text {
+  margin-right: 8px;
 }
 
 .toolbar {
