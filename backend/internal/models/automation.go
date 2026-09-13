@@ -130,7 +130,16 @@ type AutomationRule struct {
 	ActionLevel      string `gorm:"size:10" json:"action_level,omitempty"` // notification 级别
 
 	// ── 执行约束 ──
-	CooldownSec      int  `gorm:"default:300" json:"cooldown_sec"`        // 冷却期 (防抖第二层)
+	//
+	// CooldownSec 冷却期 (防抖第二层), 0=不冷却 (与 MaxDailyExec 的 0=不限同族)。
+	//
+	// 不得带 gorm:"default:300": 带 default 的 int 列无法表达"显式零值" ——
+	// GORM 的 Create 把零值当"未设置"省略该列, 由 schema 默认值回填 300, 用户
+	// 显式填的 0 根本写不进库 (同款陷阱: notification_channel.go 的 max_retries、
+	// alert.go 的 enabled, 见 docs/设计/外发通知通道.md §7.6)。
+	// "未配置 = 300" 的默认值职责由应用层承担 (handler_automation.go Create 显式
+	// 赋值), 与 Enabled 同理: fail-closed 不依赖 DB 默认值。
+	CooldownSec      int  `gorm:"not null;default:0" json:"cooldown_sec"`
 	RequireConfirmed bool `gorm:"default:false" json:"require_confirmed"` // true=仅生成待确认通知
 	MaxDailyExec     int  `gorm:"default:0" json:"max_daily_exec"`        // 每日执行上限, 0=不限 (熔断)
 

@@ -20,10 +20,24 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	maxWindowSamples = 1000
-	defaultCooldown  = 300
-)
+const maxWindowSamples = 1000
+
+// cooldownFor 是 cooldown_sec 语义的唯一判定处: 冷却期时长, 返回 0 表示不冷却。
+//
+// 为什么必须是唯一实现 (负债 D-5): 该字段曾在两条读路径上语义相反 —— evaluator
+// 把 0 当"用默认 300s"(有冷却), planner 把 0 当"不冷却"(>0 才判定)。同一个用户
+// 配置在自动触发与手动触发下行为分叉, 根因就是"同一语义有两份实现"。
+//
+// 语义裁决: 0 = 不冷却 (与前端 :min="0" 的引导、与 MaxDailyExec 的 0=不限同族)。
+// 负数属无效配置 (API 契约拒绝 [-1]), 与 0 同样按不冷却处理 (fail-open 不误触)。
+// "未配置 = 300" 的默认 300 由应用层在创建时写入 (handler_automation.go 的
+// Create), 不在这里兜底 —— 兜底会让"显式 0"再次无法表达。
+func cooldownFor(rule models.AutomationRule) time.Duration {
+	if rule.CooldownSec <= 0 {
+		return 0
+	}
+	return time.Duration(rule.CooldownSec) * time.Second
+}
 
 // sample 滑动窗口单点 (同 alert 先例)。
 type sample struct {
@@ -253,13 +267,10 @@ func (e *Evaluator) evalWindowRule(rule models.AutomationRule, now time.Time) {
 	// 更新窗口状态 (无论是否触发都要记录本次状态)。
 	e.windowStates[rule.ID] = inside
 
-	// 冷却判定 (与 sensor_threshold 共用 triggered map)。
-	cooldown := time.Duration(rule.CooldownSec) * time.Second
-	if rule.CooldownSec <= 0 {
-		cooldown = defaultCooldown * time.Second
-	}
+	// 冷却判定 (与 sensor_threshold 共用 triggered map 与 cooldownFor 判定)。
+	cooldown := cooldownFor(rule)
 	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
-		if now.Sub(firedAt) < cooldown {
+		if cooldown > 0 && now.Sub(firedAt) < cooldown {
 			e.mu.Unlock()
 			return // 冷却期内, 不重复触发
 		}
@@ -420,20 +431,19 @@ func (e *Evaluator) evalRule(rule models.AutomationRule, fields []parser.Field, 
 	}
 
 	satisfied := compare(rule.TriggerComparator, value, rule.TriggerThreshold)
-	cooldown := time.Duration(rule.CooldownSec) * time.Second
-	if rule.CooldownSec <= 0 {
-		cooldown = defaultCooldown * time.Second
-	}
+	cooldown := cooldownFor(rule) // 0 = 不冷却 (cooldownFor 是唯一判定处)
 
 	e.mu.Lock()
 	// 冷却到期判定优先于求值: 到期即回 armed, 本批可参与新一轮触发。
+	// cooldown==0 (不冷却) 时直接清掉 triggered 态, 不做抑制也不落 suppressed 审计
+	// —— 没有冷却期就没有"被冷却压制"这回事 (recordSuppressed 只在 cooldown>0 时可达)。
 	if firedAt, isTriggered := e.triggered[rule.ID]; isTriggered {
-		if at.Sub(firedAt) < cooldown {
+		if cooldown > 0 && at.Sub(firedAt) < cooldown {
 			e.mu.Unlock()
 			e.recordSuppressed(rule, firedAt, at, value) // F3: 冷却命中落审计 (防抖可观测, 同窗节流)
 			return                                       // 冷却期内, 不更新窗口不重复触发
 		}
-		delete(e.triggered, rule.ID) // 冷却到期, 回 armed
+		delete(e.triggered, rule.ID) // 冷却到期或本就不冷却 (0), 回 armed
 	}
 
 	win := append(e.windows[rule.ID], sample{at: at, satisfied: satisfied})

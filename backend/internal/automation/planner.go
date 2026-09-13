@@ -546,15 +546,16 @@ func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceI
 	}
 
 	// ── 冷却抑制: 查最近一次 executed/pending_confirm 的 triggered_at,
-	//    与自动触发 evaluator 的内存 cooldown 等价 (planner 侧 DB 兜底) ──
-	if rule.CooldownSec > 0 {
+	//    与自动触发 evaluator 的内存 cooldown 等价 (planner 侧 DB 兜底)。
+	//    判定走 cooldownFor — 与 evaluator 同一份实现 (负债 D-5: 两路径曾语义相反,
+	//    evaluator 把 0 当默认 300s, 此处把 0 当不冷却); 0 表示不冷却, 直接跳过。 ──
+	if cooldown := cooldownFor(rule); cooldown > 0 {
 		var lastEv models.AutomationEvent
 		err := p.db.WithContext(ctx).
 			Where("rule_id = ? AND result IN ?", rule.ID,
 				[]string{models.AutomationResultExecuted, models.AutomationResultPendingConfirm}).
 			Order("triggered_at DESC").First(&lastEv).Error
 		if err == nil {
-			cooldown := time.Duration(rule.CooldownSec) * time.Second
 			if at.Sub(lastEv.TriggeredAt) < cooldown {
 				remaining := cooldown - at.Sub(lastEv.TriggeredAt)
 				ev := models.AutomationEvent{
