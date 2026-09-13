@@ -60,10 +60,10 @@
       <div class="card-head">
         <span class="card-title">触发历史<el-tag v-if="events.length" size="small" class="count-tag">{{ events.length }}</el-tag></span>
         <div class="event-filters">
-          <el-select v-model="eventFilterRuleId" placeholder="按规则过滤" clearable size="small" style="width: 140px" data-test="filter-rule">
+          <el-select v-model="eventFilterRuleId" placeholder="按规则过滤" clearable size="small" style="width: 140px" data-test="filter-rule" @change="fetchEvents">
             <el-option v-for="r in rules" :key="r.id" :label="r.name" :value="r.id" />
           </el-select>
-          <el-select v-model="eventFilterResult" placeholder="按结果过滤" clearable size="small" style="width: 140px" data-test="filter-result">
+          <el-select v-model="eventFilterResult" placeholder="按结果过滤" clearable size="small" style="width: 140px" data-test="filter-result" @change="fetchEvents">
             <el-option v-for="opt in resultOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
           </el-select>
           <el-button link size="small" data-test="refresh-events" @click="fetchEvents">刷新</el-button>
@@ -73,7 +73,11 @@
         <el-table-column label="时间" min-width="160">
           <template #default="{ row }">{{ formatTime(row.triggered_at) }}</template>
         </el-table-column>
-        <el-table-column prop="rule_id" label="规则" width="80" />
+        <el-table-column label="规则" width="120">
+          <template #default="{ row }">
+            <span class="mono" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结果" width="110">
           <template #default="{ row }">
             <el-tag :type="resultTagType(row.result)" size="small">{{ resultText(row.result) }}</el-tag>
@@ -116,6 +120,21 @@
         </el-table-column>
         <template #empty>暂无触发事件</template>
       </el-table>
+      <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
+           改前本表一次性渲染后端 Limit(500) 的全部行 (实测 502 行/11902 节点,
+           真实事件 >1006 条被静默截断), fixed 列为每行各注入一份 inline style。 -->
+      <div class="events-pagination">
+        <el-pagination
+          v-model:current-page="eventsPage"
+          v-model:page-size="eventsPageSize"
+          :total="eventsTotal"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          data-test="events-pagination"
+          @current-change="() => fetchEvents()"
+          @size-change="onEventsPageSizeChange"
+        />
+      </div>
     </section>
 
     <!-- 创建/编辑对话框 -->
@@ -289,8 +308,14 @@ async function fetchRules() {
 // ── 事件 ──
 const events = ref<AutomationEvent[]>([])
 const eventsLoading = ref(false)
-const eventFilterRuleId = ref<number | undefined>()
-const eventFilterResult = ref<AutomationEventResult | undefined>()
+const eventsTotal = ref(0)
+const eventsPage = ref(1)
+const eventsPageSize = ref(20)
+/** 筛选 (rule_id/result) 的初值, 用于判断筛选是否真的变化而重置页码。 */
+const EVENT_FILTER_INITIAL = { ruleId: undefined as number | undefined, result: undefined as AutomationEventResult | undefined }
+const lastEventFilter = ref({ ...EVENT_FILTER_INITIAL })
+const eventFilterRuleId = ref<number | undefined>(EVENT_FILTER_INITIAL.ruleId)
+const eventFilterResult = ref<AutomationEventResult | undefined>(EVENT_FILTER_INITIAL.result)
 
 const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
   { value: 'executed', label: '已执行' },
@@ -305,17 +330,38 @@ const resultOptions: Array<{ value: AutomationEventResult; label: string }> = [
 ]
 
 async function fetchEvents() {
+  // §3.2.6 MUST: 会改变查询范围的输入 (rule_id/result 筛选) 变化时必须重置分页派生状态。
+  // 本函数同时是分页控件与「刷新」按钮的入口 —— 后两者的页码变化属用户**主动翻页**,
+  // 不能重置 (否则永远停在第一页)。故只在筛选值真的变了时才把 eventsPage 归 1。
+  if (eventFilterRuleId.value !== lastEventFilter.value.ruleId
+    || eventFilterResult.value !== lastEventFilter.value.result) {
+    eventsPage.value = 1
+    lastEventFilter.value = { ruleId: eventFilterRuleId.value, result: eventFilterResult.value }
+  }
   eventsLoading.value = true
   try {
-    const params: { rule_id?: number; result?: AutomationEventResult } = {}
+    const params: {
+      rule_id?: number
+      result?: AutomationEventResult
+      page: number
+      page_size: number
+    } = { page: eventsPage.value, page_size: eventsPageSize.value }
     if (eventFilterRuleId.value) params.rule_id = eventFilterRuleId.value
     if (eventFilterResult.value) params.result = eventFilterResult.value
-    events.value = await automationApi.listEvents(params)
+    const res = await automationApi.listEvents(params)
+    events.value = res.items
+    eventsTotal.value = res.total
   } catch {
     ElMessage.error('加载事件失败')
   } finally {
     eventsLoading.value = false
   }
+}
+
+/** 每页条数变化: 页码必须回到第 1 页 (原第 3 页在新页长下可能已越界)。 */
+function onEventsPageSizeChange() {
+  eventsPage.value = 1
+  void fetchEvents()
 }
 
 // ── 对话框 ──
@@ -584,6 +630,11 @@ function goCommand(commandId: string) {
 }
 
 // ── 显示辅助 ──
+/** 事件只持久化 rule_id：回链规则名展示，规则已被删除时回退 #id（不留空白）。 */
+function ruleName(ruleId: number): string {
+  const hit = rules.value.find(r => r.id === ruleId)
+  return hit ? hit.name : `#${ruleId}`
+}
 function triggerTypeText(t: AutomationTriggerType): string {
   return t === 'sensor_threshold' ? '传感器阈值' : t === 'time_window' ? '时间窗口' : '事件驱动'
 }
@@ -657,4 +708,5 @@ onMounted(async () => {
 .trigger-type-tag { flex-shrink: 0; }
 .trigger-summary, .action-summary { font-size: 12px; }
 .event-filters { display: flex; gap: 8px; align-items: center; }
+.events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
 </style>

@@ -56,7 +56,11 @@
             <el-tag :type="row.state === 'firing' ? 'danger' : 'success'" size="small">{{ row.state === 'firing' ? '触发中' : '已恢复' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="rule_id" label="规则" width="80" />
+        <el-table-column label="规则" width="120">
+          <template #default="{ row }">
+            <span class="mono" data-test="event-rule-name">{{ ruleName(row.rule_id) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="值" width="110">
           <template #default="{ row }"><span class="mono">{{ formatValue(row.value) }}</span></template>
         </el-table-column>
@@ -149,6 +153,11 @@ const comparators: Array<{ value: AlertComparator; label: string }> = [
   { value: 'neq', label: '≠' },
 ]
 
+/** 事件只持久化 rule_id：回链规则名展示，规则已被删除时回退 #id（不留空白）。 */
+function ruleName(ruleId: number): string {
+  const hit = store.rules.find(r => r.id === ruleId)
+  return hit ? hit.name : `#${ruleId}`
+}
 function comparatorText(c: AlertComparator): string {
   return comparators.find(x => x.value === c)?.label ?? c
 }
