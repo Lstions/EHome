@@ -44,7 +44,7 @@
           @input="handleSearch"
         />
         
-        <el-select v-model="statusFilter" placeholder="状态筛选" clearable @change="handleFilter" style="min-width: 120px;">
+        <el-select v-model="statusFilter" placeholder="状态筛选" clearable style="min-width: 120px;">
           <template #prefix>
             <el-icon><Filter /></el-icon>
           </template>
@@ -53,7 +53,9 @@
           <el-option label="离线" value="offline" />
         </el-select>
         
-        <el-select v-model="modelFilter" placeholder="型号筛选" clearable @change="handleFilter" style="min-width: 120px;">
+        <!-- 型号选项来自**当前页**的 model 去重 (服务端无独立 facet 端点)。
+             不是全库清单, 因此改选型号后需用搜索框做全库检索。 -->
+        <el-select v-model="modelFilter" placeholder="型号筛选" clearable style="min-width: 120px;">
           <el-option v-for="model in modelOptions" :key="model" :label="model" :value="model" />
         </el-select>
       </div>
@@ -81,9 +83,9 @@
 
     <div v-if="hasActiveFilters" class="active-filters" aria-label="当前筛选条件">
       <span class="active-filters-label">当前筛选：</span>
-      <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''; handleFilter()">关键词：{{ searchKeyword }}</el-tag>
-      <el-tag v-if="statusFilter" closable @close="statusFilter = ''; handleFilter()">状态：{{ statusFilter === 'online' ? '在线' : '离线' }}</el-tag>
-      <el-tag v-if="modelFilter" closable @close="modelFilter = ''; handleFilter()">型号：{{ modelFilter }}</el-tag>
+      <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''">关键词：{{ searchKeyword }}</el-tag>
+      <el-tag v-if="statusFilter" closable @close="statusFilter = ''">状态：{{ statusFilter === 'online' ? '在线' : '离线' }}</el-tag>
+      <el-tag v-if="modelFilter" closable @close="modelFilter = ''">型号：{{ modelFilter }}</el-tag>
       <el-button text type="primary" @click="clearFilters">清除全部</el-button>
     </div>
 
@@ -95,7 +97,12 @@
         class="collector-card"
         :class="{ offline: node.status === 'offline' }"
         shadow="hover"
+        role="button"
+        tabindex="0"
+        :aria-label="`查看节点 ${node.name} 详情`"
         @click="goToDetail(node.node_id)"
+        @keydown.enter.prevent="goToDetail(node.node_id)"
+        @keydown.space.prevent="goToDetail(node.node_id)"
       >
         <div class="card-header">
           <div class="collector-info">
@@ -250,7 +257,7 @@
           :page-sizes="[10, 20, 50]"
           layout="total, sizes, prev, pager, next, jumper"
           @current-change="() => fetchNodes()"
-          @size-change="() => fetchNodes()"
+          @size-change="handlePageSizeChange"
         />
       </div>
     </el-card>
@@ -271,7 +278,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { 
   Connection, CircleCheck, CircleClose, Warning, Cpu, 
@@ -281,6 +288,7 @@ import {
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { useNodeStore } from '@/stores/node'
+import type { NodeListParams } from '@/api/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -308,12 +316,48 @@ const routeStatus = typeof route.query.status === 'string' ? route.query.status 
 if (routeSearch) searchKeyword.value = routeSearch
 if (routeStatus === 'online' || routeStatus === 'offline') statusFilter.value = routeStatus
 
-const getListParams = () => ({ page: currentPage.value, page_size: pageSize.value })
+const nodes = ref<any[]>([])
+
+// ── 服务端分页 + 服务端筛选 (负债 I-11) ──
+// 三个筛选 (search/status/model) 全部下沉到 GET /nodes, 与后端 Count/Find 两侧
+// 同口径 —— 检索覆盖全库, 而不是"当前页本地过滤伪装成全局检索" (§3.3.5)。
+// status/model 是离散选择, 变化即时下发; search 需要 300ms 防抖 (每次按键都打
+// 请求不可接受)。
+//
+// 为什么这里**不用** useDebouncedSearch: 该 composable 内部自建 searchKeyword ref,
+// 而本页已有一个模板绑定的 searchKeyword (路由 query 初始化 + 筛选标签都依赖它)。
+// 直接引入会出现**两个互不相干的 ref** —— 输入框写的是页面那个, debouncedKeyword
+// 跟随的是 composable 那个(永远为空), 结果是"搜索框能打字、请求里却没有 search",
+// 且在单测里表现为"筛选项看起来生效、实际没下发"。故此处按同一语义 (清空立即生效、
+// 非空延迟 300ms) 直接对页面自己的 ref 做防抖。
+const debouncedSearch = ref('')
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+watch(searchKeyword, (val) => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  if (!val) {
+    // 清空立即生效: 用户点"×"时期待立刻看到全量, 不是 300ms 后。
+    debouncedSearch.value = ''
+    return
+  }
+  searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = null
+    debouncedSearch.value = val
+  }, 300)
+})
+
+const getListParams = (): NodeListParams => {
+  const params: NodeListParams = { page: currentPage.value, page_size: pageSize.value }
+  if (debouncedSearch.value.trim()) params.search = debouncedSearch.value.trim()
+  if (statusFilter.value) params.status = statusFilter.value
+  if (modelFilter.value) params.model = modelFilter.value
+  return params
+}
+// 首屏缓存读取必须在 nodes 声明之后 —— 它现在要拿 getListParams() 的结果。
 const initialCache = nodeStore.getCachedList(getListParams())
 const hasInitialCache = !!initialCache
 const loading = ref(!hasInitialCache)
 const refreshing = ref(false)
-const nodes = ref<any[]>(initialCache?.items || [])
+nodes.value = initialCache?.items || []
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || statusFilter.value || modelFilter.value))
 
@@ -331,28 +375,12 @@ const modelOptions = computed(() => {
   return Array.from(models)
 })
 
-// 过滤后的节点
-const filteredNodes = computed(() => {
-  let result = nodes.value
-  
-  if (searchKeyword.value) {
-    const kw = searchKeyword.value.toLowerCase()
-    result = result.filter(c => 
-      c.name?.toLowerCase().includes(kw) || 
-      c.model?.toLowerCase().includes(kw)
-    )
-  }
-  
-  if (statusFilter.value) {
-    result = result.filter(c => c.status === statusFilter.value)
-  }
-  
-  if (modelFilter.value) {
-    result = result.filter(c => c.model === modelFilter.value)
-  }
-  
-  return result
-})
+// 表格/卡片直接渲染接口返回的当前页, **不再做本地切片/过滤** (真分页)。
+// 改前这里对 nodes.value (当时是全量数组) 做本地 filter, 于是"筛选"只在当前页
+// 生效、"翻页"只是本地切片 —— 两者都伪装成了全局行为。筛选已下沉服务端,
+// 本地再过滤一次只会把服务端已经筛好的结果二次筛一遍 (且有口径漂移风险:
+// 服务端 search 大小写不敏感、model 精确匹配, 本地实现必须与之一致)。
+const filteredNodes = computed(() => nodes.value)
 
 // 更新统计
 const updateStats = () => {
@@ -410,28 +438,50 @@ const refreshData = async () => {
 }
 
 // 搜索和筛选
+//
+// 规范 §3.2.6 MUST: 「对会改变查询范围的输入 (节点、设备、型号、时间范围、筛选)
+// 重置或失效其派生状态: 选中项、**分页**、异步结果…」。
+// 改前 handleFilter 只把 currentPage 归 1, 但**从不重新请求** —— 页码重置了,
+// 数据还是旧的; 服务端分页后"重置页码 + 重新查询"必须成对出现, 否则用户在
+// 第 3 页切换筛选会看到第 3 页的旧数据配第 1 页的页码。
 const handleSearch = () => {
-  // 实时搜索，防抖
+  // 仅占位: 真正的检索由上面 watch(searchKeyword) 的防抖副本触发 (300ms)。
 }
 
-const handleFilter = () => {
+// 每页条数变化: 页码回到第 1 页 (原页在新页长下可能已越界), 再查询。
+const handlePageSizeChange = () => {
   currentPage.value = 1
+  void fetchNodes()
 }
 
+// 清空筛选: 只改 ref, 由下面的 watch 统一重置页码 + 重新查询 ——
+// 不在这里再调一次 fetchNodes, 否则 watch 会补发第二个请求 (重复取数)。
+// useDebouncedSearch 在清空时**立即**同步 debouncedKeyword (不走 300ms 防抖),
+// 因此三个 ref 的变化在同一 tick 内被 Vue 批处理成一次 watch 回调。
 const clearFilters = () => {
   searchKeyword.value = ''
   statusFilter.value = ''
   modelFilter.value = ''
-  currentPage.value = 1
 }
 
 const handleStatClick = (status: string) => {
-  if (status === 'all') {
-    statusFilter.value = ''
-  } else {
-    statusFilter.value = status
-  }
+  statusFilter.value = status === 'all' ? '' : status
 }
+
+// 筛选/搜索变化 → 重置页码后重新查询 (§3.2.6 MUST)。
+// 这是"筛选变化"的唯一入口: 模板里的 @change / 标签关闭 / KPI 钻取都只改 ref,
+// 由这里统一收口 —— 避免"某条路径忘了重置页码"或"重复发请求"两种偏差。
+// 注意改前的缺陷: 旧 handleFilter 把 currentPage 归 1 却**从不重新请求**,
+// 于是页码重置了、数据仍是旧的; 服务端分页后重置与重查必须成对出现。
+//
+// filterReady 门控挂载期初值: 路由 query 初始化的 search/status 已经在
+// getListParams() 首次取数时带上, 不需要再触发一次请求。
+let filterReady = false
+watch([debouncedSearch, statusFilter, modelFilter], () => {
+  if (!filterReady) return
+  currentPage.value = 1
+  void fetchNodes()
+})
 
 // 跳转详情（新版节点总览页）
 const goToDetail = (nodeId: string) => {
@@ -497,7 +547,10 @@ const formatRelativeTime = (time: string) => {
 let unsubscribe: (() => void) | null = null
 
 onMounted(() => {
-  fetchNodes()
+  fetchNodes().then(() => {
+    // 首次加载后再武装筛选 watch, 避免挂载期初值触发一次多余请求。
+    filterReady = true
+  })
   
   // 订阅状态更新：就地更新节点状态，避免全量重拉导致屏闪
   unsubscribe = wsStore.subscribe(WS_EVENT.NODE_STATUS, (message: WebSocketMessage) => {
@@ -525,6 +578,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (unsubscribe) unsubscribe()
   if (wsRefreshTimer) clearTimeout(wsRefreshTimer)
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
 })
 </script>
 
@@ -649,6 +703,11 @@ onUnmounted(() => {
   cursor: pointer;
   transition: all 0.3s;
   border: 1px solid var(--el-border-color);
+}
+
+.collector-card:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 .collector-card:hover {

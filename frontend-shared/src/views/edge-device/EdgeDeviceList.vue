@@ -217,8 +217,13 @@
               <span class="fact-label">所属节点</span>
               <span
                 class="fact-value copyable"
+                role="button"
+                tabindex="0"
+                :aria-label="`复制所属节点 ${device.node?.name || ('#' + device.node_id)}`"
                 :title="`点击复制：${device.node?.name || ('#' + device.node_id)}`"
                 @click="copyText(device.node?.name || ('#' + device.node_id))"
+                @keydown.enter.prevent="copyText(device.node?.name || ('#' + device.node_id))"
+                @keydown.space.prevent="copyText(device.node?.name || ('#' + device.node_id))"
               >{{ device.node?.name || ('#' + device.node_id) }}</span>
             </div>
           </div>
@@ -262,8 +267,10 @@
       ]"
     />
 
-    <!-- 分页 -->
-    <div v-if="total > pageSize" class="pagination-wrapper">
+    <!-- 分页 — total 是后端返回的**过滤后全量**条数 (不是当前页条数),
+         分页器据此算总页数; v-if 放宽到 total > 0, 否则只有一页时用户看不到
+         "共 N 条" 这个关键信息 (与规范 §4.3.4「共 N 条必须与实际渲染记录一致」配套)。 -->
+    <div v-if="total > 0" class="pagination-wrapper">
       <el-pagination
         v-model:current-page="currentPage"
         v-model:page-size="pageSize"
@@ -271,7 +278,7 @@
         :page-sizes="[12, 24, 48]"
         layout="total, sizes, prev, pager, next"
         @current-change="() => fetchDevices()"
-        @size-change="() => fetchDevices()"
+        @size-change="handlePageSizeChange"
       />
     </div>
 
@@ -589,7 +596,7 @@ import { useNodeStore } from '@/stores/node'
 import { useChannelStore } from '@/stores/channel'
 import { useParserStore } from '@/stores/parser'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
-import { compactEdgeDeviceList, edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { compactEdgeDeviceList, edgeDeviceApi, type EdgeDevice, type EdgeDeviceListParams } from '@/api/edgeDevice'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import client from '@/api/client'
 import type { Channel } from '@/api/channel'
@@ -641,10 +648,27 @@ let createTransactionGeneration = 0
 const routeSearch = typeof route.query.search === 'string' ? route.query.search : ''
 const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
 
-const getListParams = () => {
-  const params: any = { page: currentPage.value, page_size: pageSize.value }
+// ── 服务端分页 + 服务端筛选 (负债 I-11) ──
+// 四个筛选 (search/device_type/status/hardware) 全部下沉到 GET /edge-devices,
+// 与后端 Count/Find 两侧同口径 —— 检索覆盖全库, 而不是"当前页本地过滤伪装成
+// 全局检索" (§3.3.5)。search 走 300ms 防抖; 其余三个是离散选择, 即时下发。
+//
+// useDebouncedSearch 只借它的**防抖输入**能力: filteredItems 在当前页上做本地
+// 过滤毫无用处 (服务端已筛过), 故不解构它, 只取 searchKeyword/debouncedKeyword。
+const {
+  searchKeyword,
+  debouncedKeyword,
+  clear: clearSearch,
+} = useDebouncedSearch(devices, {
+  searchFields: (d) => [d.name || '', d.device_type || '', getDeviceTypeLabel(d.device_type) || ''],
+})
+
+const getListParams = (): EdgeDeviceListParams => {
+  const params: EdgeDeviceListParams = { page: currentPage.value, page_size: pageSize.value }
+  if (debouncedKeyword.value.trim()) params.search = debouncedKeyword.value.trim()
   if (typeFilter.value) params.device_type = typeFilter.value
   if (statusFilter.value) params.status = statusFilter.value
+  if (hardwareFilter.value) params.hardware_type = hardwareFilter.value
   return params
 }
 const initialCache = edgeDeviceStore.getCachedList(getListParams())
@@ -653,16 +677,6 @@ const loading = ref(!hasInitialCache)
 devices.value = compactEdgeDeviceList(initialCache?.items)
 
 const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilter.value || statusFilter.value || hardwareFilter.value))
-
-// 搜索 debounce — 减少不必要的 filter 计算
-const {
-  searchKeyword,
-  debouncedKeyword: _debouncedSearchKeyword,
-  filteredItems: _searchFilteredItems,
-  clear: clearSearch,
-} = useDebouncedSearch(devices, {
-  searchFields: (d) => [d.name || '', d.device_type || '', getDeviceTypeLabel(d.device_type) || ''],
-})
 
 // 路由参数初始化（必须在 useDebouncedSearch 之后）
 if (routeSearch) searchKeyword.value = routeSearch
@@ -817,24 +831,10 @@ const onlineCollectors = computed(() => collectors.value.filter((c: any) => c.st
 // 设备类型定义 — 从 deviceType.ts 统一导入
 const deviceTypes = deviceTypeOptions
 
-// 过滤后的设备 — 结合 debounce 搜索与其他筛选
-const filteredDevices = computed(() => {
-  let result = _searchFilteredItems.value
-
-  if (typeFilter.value) {
-    result = result.filter(d => d.device_type === typeFilter.value)
-  }
-
-  if (statusFilter.value) {
-    result = result.filter(d => d.status === statusFilter.value)
-  }
-
-  if (hardwareFilter.value) {
-    result = result.filter(d => d.hardware_type === hardwareFilter.value)
-  }
-
-  return result
-})
+// 表格/卡片直接渲染接口返回的当前页, **不再做本地切片/过滤** (真分页)。
+// 改前这里对 devices.value (当时是全量数组) 做本地 filter, 于是"筛选"只在当前页
+// 生效、"翻页"只是本地切片 —— 两者都伪装成了全局行为。筛选已下沉服务端。
+const filteredDevices = computed(() => devices.value)
 
 // 获取边缘设备列表
 let listRequestSequence = 0
@@ -1126,6 +1126,7 @@ const copyText = async (text: string) => {
 }
 
 const handleStatClick = (status: string) => {
+  // 只改 ref: 页码重置 + 重新查询由 watch([...filters]) 统一收口 (§3.2.6 MUST)。
   if (status === 'all') {
     statusFilter.value = ''
   } else if (status === 'offline') {
@@ -1484,19 +1485,36 @@ const formatDeviceData = (data: any): string => {
   }).join(' | ')
 }
 
-// 监听筛选条件变化，重新获取数据
-watch([typeFilter, statusFilter], () => {
+// 筛选变化 → 重置页码后重新查询 (§3.2.6 MUST)。
+// 这是"筛选变化"的唯一入口: 模板里的下拉 / 标签关闭 / KPI 钻取都只改 ref,
+// 由这里统一收口 —— 避免"某条路径忘了重置页码"或"重复发请求"两种偏差。
+// 改前的缺陷: watch 只监听 [typeFilter, statusFilter], hardwareFilter 与
+// searchKeyword 变化时页码**不重置**; 且本地过滤会让用户以为在全局筛选。
+//
+// filterReady 门控挂载期初值: 路由 query 初始化的 search/status 已经在
+// getListParams() 首次取数时带上, 不需要再触发一次请求。
+let filterReady = false
+watch([debouncedKeyword, typeFilter, statusFilter, hardwareFilter], () => {
+  if (!filterReady) return
   currentPage.value = 1
-  fetchDevices()
+  void fetchDevices()
 })
 
-// 清空筛选时同时清空搜索
+// 每页条数变化: 页码回到第 1 页 (原页在新页长下可能已越界), 再查询。
+const handlePageSizeChange = () => {
+  currentPage.value = 1
+  void fetchDevices()
+}
+
+// 清空筛选: 只改 ref, 由上面的 watch 统一重置页码 + 重新查询 ——
+// 不在这里再调一次 fetchDevices, 否则 watch 会补发第二个请求 (重复取数)。
+// useDebouncedSearch 在清空时**立即**同步 debouncedKeyword (不走 300ms 防抖),
+// 因此四个 ref 的变化在同一 tick 内被 Vue 批处理成一次 watch 回调。
 const clearFilters = () => {
   clearSearch()
   typeFilter.value = ''
   statusFilter.value = ''
   hardwareFilter.value = ''
-  currentPage.value = 1
 }
 
 // 监听对话框打开，重置向导状态
@@ -1533,7 +1551,10 @@ watch(showCreateDialog, (val) => {
 })
 
 onMounted(() => {
-  fetchDevices()
+  fetchDevices().then(() => {
+    // 首次加载后再武装筛选 watch, 避免挂载期初值触发一次多余请求。
+    filterReady = true
+  })
 })
 
 onUnmounted(() => {
@@ -1791,6 +1812,12 @@ code.fact-value {
 
 .fact-value.copyable:hover {
   color: var(--el-color-primary);
+}
+
+.fact-value.copyable:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .card-reading {

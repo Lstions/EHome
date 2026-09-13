@@ -3,9 +3,13 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EdgeDeviceList from '@/views/edge-device/EdgeDeviceList.vue'
 import source from '@/views/edge-device/EdgeDeviceList.vue?raw'
+import type { EdgeDeviceListParams } from '@/api/edgeDevice'
 
+// 显式标注 mock 签名: 无参 `vi.fn(() => ...)` 会把 `mock.calls` 推成 `[][]`
+// (长度 0 的元组), 之后读 `calls[0][0]` 会报 TS2493。标注后 calls 是
+// `[params?, force?][]`, 既能断言参数、也不需要任何 `as any`。
 const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands } = vi.hoisted(() => ({
-  mockEdgeDeviceGetList: vi.fn(() => Promise.resolve({
+  mockEdgeDeviceGetList: vi.fn<(params?: EdgeDeviceListParams) => Promise<{ items: unknown[]; total: number }>>(() => Promise.resolve({
     items: [
       { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
       { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
@@ -103,10 +107,155 @@ describe('EdgeDeviceList.vue', () => {
     expect(wrapper.text()).toContain('Device B')
   })
 
+  // ── 负债 I-11: 真分页行为 (不是源码契约, 是真实请求参数) ──
+
+  it('I-11: 挂载时带分页参数请求第 1 页', async () => {
+    mountList()
+    await flushPromises()
+    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
+    // page_size=24 是本页默认; page=1 是初始页。两者都必须真的发出去 ——
+    // 改前虽也发, 但后端忽略, 这里钉死"前端侧参数正确"这一半。
+    expect(mockEdgeDeviceGetList.mock.calls[0][0]).toMatchObject({ page: 1, page_size: 24 })
+  })
+
+  it('I-11: 翻页发 page=2 (服务端取数, 不是本地切片)', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    mockEdgeDeviceGetList.mockClear()
+
+    vm.currentPage = 2
+    await vm.fetchDevices()
+    await flushPromises()
+
+    expect(mockEdgeDeviceGetList).toHaveBeenCalledTimes(1)
+    expect(mockEdgeDeviceGetList.mock.calls[0][0]).toMatchObject({ page: 2, page_size: 24 })
+  })
+
+  it('I-11: 渲染接口返回的当前页, 不再本地切片 (total 驱动分页器)', async () => {
+    // 后端说 total=57 但本页只给 2 条 —— 若前端仍把全量数组本地切片,
+    // 页面会渲染出远超 2 行的内容, 或分页器按错误的总数算页数。
+    mockEdgeDeviceGetList.mockResolvedValueOnce({
+      items: [
+        { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart' },
+        { id: 2, name: 'Device B', status: 'offline', device_type: 'wind_speed', hardware_type: 'i2c' },
+      ],
+      total: 57,
+    })
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    expect(vm.filteredDevices).toHaveLength(2)
+    expect(vm.total).toBe(57)
+  })
+
+  it('I-11: 筛选变化重置 page=1 并重新请求 (§3.2.6 MUST)', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    // 先翻到第 3 页, 模拟"用户在第 3 页上改筛选"
+    vm.currentPage = 3
+    await vm.fetchDevices()
+    await flushPromises()
+    mockEdgeDeviceGetList.mockClear()
+
+    // 改类型筛选 → 必须回到第 1 页 (第 3 页在新筛选下可能已越界)
+    vm.typeFilter = 'jiabaida_bms'
+    await flushPromises()
+
+    expect(vm.currentPage).toBe(1)
+    expect(mockEdgeDeviceGetList).toHaveBeenCalled()
+    const params = mockEdgeDeviceGetList.mock.calls.at(-1)![0]
+    expect(params).toMatchObject({ page: 1, page_size: 24, device_type: 'jiabaida_bms' })
+  })
+
+  it('I-11: hardware 筛选也重置页码 (改前它不在 watch 里, 页码不重置)', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.currentPage = 3
+    await vm.fetchDevices()
+    await flushPromises()
+    mockEdgeDeviceGetList.mockClear()
+
+    vm.hardwareFilter = 'i2c'
+    await flushPromises()
+
+    expect(vm.currentPage).toBe(1)
+    const params = mockEdgeDeviceGetList.mock.calls.at(-1)![0]
+    // hardware_type 作为**服务端**筛选参数下发 (非本地 filter)。
+    expect(params).toMatchObject({ page: 1, hardware_type: 'i2c' })
+  })
+
+  it('I-11: 搜索变化重置页码并作为服务端 search 参数下发', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.currentPage = 2
+    await vm.fetchDevices()
+    await flushPromises()
+    mockEdgeDeviceGetList.mockClear()
+
+    vm.searchKeyword = 'bms'
+    // 走 useDebouncedSearch 的 300ms 防抖; 直接同步其 debounced 值等价于防抖到期。
+    await new Promise(resolve => setTimeout(resolve, 350))
+    await flushPromises()
+
+    expect(vm.currentPage).toBe(1)
+    const params = mockEdgeDeviceGetList.mock.calls.at(-1)![0]
+    expect(params).toMatchObject({ page: 1, search: 'bms' })
+  })
+
+  it('I-11: 清空筛选只触发一次取数 (watch 收口, 不重复请求)', async () => {
+    const { useEdgeDeviceStore } = await import('@/stores/edgeDevice')
+    const store = useEdgeDeviceStore()
+    const fetchSpy = vi.spyOn(store, 'fetchList')
+
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+
+    vm.typeFilter = 'jiabaida_bms'
+    vm.hardwareFilter = 'uart'
+    vm.searchKeyword = 'bms'
+    await new Promise(resolve => setTimeout(resolve, 350))
+    await flushPromises()
+    fetchSpy.mockClear()
+
+    vm.clearFilters()
+    await flushPromises()
+
+    // 四个 ref 在同一 tick 内变更 → Vue 批处理成**一次** watch 回调 → 一次取数。
+    // 断言的是 fetchList 的调用次数而不是 API 次数: 清空后回到
+    // {page:1,page_size:24} 这个键, store 有新鲜缓存, 合法地不发网络请求 ——
+    // 那样的断言会把"缓存命中"误判成"没触发取数"。
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // 清空后不得再携带任何筛选参数 —— 用 toEqual 钉死**恰好**只剩分页两项,
+    // 而不是 toMatchObject (后者对多出来的字段视而不见, 会漏掉"清空没清干净")。
+    expect(fetchSpy.mock.calls[0][0]).toEqual({ page: 1, page_size: 24 })
+    fetchSpy.mockRestore()
+  })
+
   it('keeps component-level list responses sequence guarded and rejects malformed list entries', () => {
     expect(source).toContain('sequence !== listRequestSequence')
     expect(source).toContain('devices.value = compactEdgeDeviceList(initialCache?.items)')
-    expect(source).toContain('let result = _searchFilteredItems.value')
+    // 为什么这里断言"某段代码**不存在**":
+    // 本地 filter 链 (_searchFilteredItems / device_type / status / hardware_type
+    // 逐个 filter) 已按 §3.3.5「服务端分页时不得把当前页本地筛选伪装成全局检索」
+    // **下沉服务端并整体删除**。分页落地后, 本地再过滤一次只会把服务端已筛好的
+    // 当前页二次筛一遍, 且口径会漂移 (服务端 hardware_type 大小写不敏感、本地是
+    // 严格相等; 服务端 search 同时匹配中文标签之外的 name/type)。反向钉死是为了
+    // **防止回退到本地过滤** —— 那是本负债的原始形态, 一旦复活, 用户又会看到
+    // "搜索只在当前页生效"这种伪装成全局检索的行为。
+    expect(source).not.toContain('_searchFilteredItems')
+    expect(source).not.toContain("result = result.filter(d => d.device_type === typeFilter.value)")
+    expect(source).not.toContain("result = result.filter(d => d.status === statusFilter.value)")
+    expect(source).not.toContain("result = result.filter(d => d.hardware_type === hardwareFilter.value)")
+    expect(source).toContain('const filteredDevices = computed(() => devices.value)')
   })
 
   it('defers wizard dependencies until the create dialog is opened', () => {
