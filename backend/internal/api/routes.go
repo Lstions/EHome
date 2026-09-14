@@ -12,6 +12,7 @@ import (
 	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/nodemgr"
+	"ehome/backend/internal/notify"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/terminal"
 	"ehome/backend/internal/websocket"
@@ -45,6 +46,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 	// datasourceSvc 数据源主备领域服务 (设计/数据源主备与故障转移.md v1.0 §7):
 	// 经 *datasource.Service option 注入 (main.go); 测试未注入时为 nil。
 	var datasourceSvc *datasource.Service
+	// notifyDispatcher 外发通知投递器 (设计/外发通知通道.md §4): 经 *notify.Dispatcher
+	// option 注入 (main.go), 供 POST /notification-channels/:id/test 真发一条测试消息。
+	// 与 datasourceSvc 同规矩: 未注入时 /test 显式 503, 而不是 nil 解引用 panic。
+	var notifyDispatcher *notify.Dispatcher
 	for _, option := range options {
 		switch value := option.(type) {
 		case ControlPolicy:
@@ -61,6 +66,8 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 			automationManualTriggerOpt = value
 		case *datasource.Service:
 			datasourceSvc = value
+		case *notify.Dispatcher:
+			notifyDispatcher = value
 		case alertEvaluator:
 			alertEvaluatorOpt = value
 		}
@@ -126,6 +133,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		// Overview + Notification routes
 		registerOverviewRoutes(v1, db)
 		registerNotificationRoutes(v1, db)
+
+		// 外发通知通道 (设计/外发通知通道.md §4 冻结契约): 通道 CRUD + 测试投递
+		// + 投递审计。tester 未注入时仅 /test 返回 503, CRUD 与审计查询照常可用。
+		registerNotificationChannelRoutes(v1, db, notifyDispatcher)
 
 		// 阈值告警引擎 (方案 v0.4 §5.1.3 任务C): 规则 CRUD + 事件查询。
 		// evaluator 经 options 注入 (main.go), 单测可传 nil。

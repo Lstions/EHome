@@ -81,6 +81,31 @@ func (d *Dispatcher) Client() *Client { return d.client }
 
 // Create 是通知写入点的统一替代: 先落库 notifications 行 (保持现有语义),
 // 再旁路投递。永远不返回错误 —— 通知失败不得影响主流程 (fail-open)。
+//
+// ── 投递时机 (D-1 步骤 3 的裁决: 写入点一律用 Create, 不用 CreateAsync) ──
+//
+// 写入点全部在**业务事务提交之后**才发通知, 实测:
+//   - automation/planner.go: notifyDailyLimitOnce / notifyConfirmation /
+//     notifyAction 都在 recordRet(独立 db.Create) 返回后调用;
+//   - automation 手动路径 TriggerRule 的 notifyAction 也在事务外;
+//   - datalifecycle/migrate.go: notify 在 Transaction(...) 的 err 判定之后调用
+//     (失败分支: 事务已提交; 受阻分支: 只有一条独立 Update);
+//   - datalifecycle/retention_task.go / alert/evaluator.go / datasource/service.go:
+//     同为"业务写完成后再发通知"。
+//
+// 因此**没有一条写入点会把 HTTP 投递拖进业务事务** —— 前提是调用方不自行开事务
+// 再调本方法。为把该前提钉死成契约而不是巧合:
+//   - Notifier 接口注释明确"实现负责落库+投递", 调用方不再自己 Create;
+//   - 未来若真出现"事务内必须发通知"的场景, 正确姿势是**事务内只落库**
+//     (tx.Create) 并在 Commit 成功后再投递, 绝不能把 Create 塞进 tx 回调 ——
+//     出站 IO 会把外部网络延迟/重试等待 (最长 1+2+4+...+30s × 通道数) 拖进事务,
+//     直接拉长行锁与连接占用。
+//
+// 为什么不用 CreateAsync: 调用方依赖返回后 n.ID 非零才广播 WS 载荷
+// (alert/automation 的负债 D-3 契约), 而 CreateAsync 在 goroutine 里落库,
+// 返回时 ID 必然还没写回 -> 会广播出 id=0 的通知, 前端插入一条库里不存在的行。
+// 同步 Create 的代价只有一次本地 INSERT + 投递失败路径, 不阻塞采集热路径的
+// ("不阻塞"由 fail-open + 短超时保证, 不是靠异步)。
 func (d *Dispatcher) Create(ctx context.Context, n *models.Notification) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -135,6 +160,30 @@ func (d *Dispatcher) Deliver(ctx context.Context, n models.Notification) Outcome
 // DeliverAsync 在独立 goroutine 中投递 (不阻塞调用方)。
 func (d *Dispatcher) DeliverAsync(ctx context.Context, n models.Notification) {
 	go d.Deliver(context.WithoutCancel(ctx), n)
+}
+
+// DeliverToChannel 把一条消息投递到**指定**通道, 不经过 "哪些通道参与投递" 的筛选:
+// enabled=false 与 min_level 过滤都被跳过。这是给 POST /notification-channels/:id/test
+// 的配置自检语义准备的 —— 用户点"测试"就是要立刻验证这条通道的 URL/凭据是否可用,
+// 而一个因配置可疑被停用的通道恰恰最需要自检 (先测通再启用, 比先启用再试更安全)。
+//
+// 其余全部纪律不变: SSRF 判定/超时/重定向上限/重试/脱敏/每次尝试一行审计,
+// 与常规投递共用 deliverToChannel 这同一条实现路径 (不存在"测试走简化路径")。
+func (d *Dispatcher) DeliverToChannel(ctx context.Context, channel models.NotificationChannel, msg Message) Outcome {
+	outcome := Outcome{NotificationID: msg.NotificationID}
+	if channel.ID == 0 {
+		// 未落库的通道没有 id, 审计行会指向 0 —— 拒绝而不是写脏审计。
+		return outcome
+	}
+	outcome.Channels = 1
+	d.deliverToChannel(ctx, &outcome, channel, msg)
+	return outcome
+}
+
+// DeliverToChannelAsync 在独立 goroutine 中投递到指定通道 (不阻塞 HTTP 请求,
+// 与 DeliverAsync 同规矩: 用 context.WithoutCancel, 请求结束不取消出站)。
+func (d *Dispatcher) DeliverToChannelAsync(ctx context.Context, channel models.NotificationChannel, msg Message) {
+	go d.DeliverToChannel(context.WithoutCancel(ctx), channel, msg)
 }
 
 // enabledChannels 读取参与投递的通道 (enabled=true), 按 id 稳定排序。
