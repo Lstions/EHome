@@ -46,6 +46,22 @@ type RetentionTask struct {
 	// 同样挂在本任务上, 与 notifications 清理**同批处理** (裁决原文要求),
 	// 不新增 goroutine、不改 main.go。
 	deliveries *NotificationDeliveryCleaner
+	// events 清理 automation_events (运行期无界增长表设计的 §2.1 分层保留裁决):
+	// 与 notifications / deliveries 清理**同一批**、同一 RunOnce 调用点,
+	// 不新增 goroutine、不改 main.go。旁路: 失败只 slog.Warn + 指标。
+	//
+	// 该表同时是 7 处业务判定的读对象 (日熔断/幂等序号/手动冷却/超时清扫), 因此
+	// 它的清理带【分层窗口 + pending_confirm 显式排除 + 白名单 fail-closed】三重约束,
+	// 详见 automation_event_cleanup.go 文件头。
+	events *AutomationEventCleaner
+	// 命令域三表清理 (运行期无界增长表设计 §2.4/§2.5/§2.6): 三个清理器【各自独立】,
+	// 因为三张表的保留策略各不相同 (execution 730d 终态 / attempt 730d 全部 /
+	// outbox 30d 终态)。"三张表一套参数"正是设计 §3 专项要防的错误。
+	// 同样挂在本任务上 (同一 RunOnce 调用点), 不新增 goroutine、不改 main.go;
+	// 失败只 slog.Warn + 指标, 不影响逐设备 retention 主流程。
+	commandExecutions *CommandExecutionCleaner
+	commandAttempts   *CommandAttemptCleaner
+	commandOutboxes   *CommandOutboxCleaner
 	// now is injectable for tests.
 	now func() time.Time
 
@@ -64,8 +80,14 @@ func NewRetentionTask(db *gorm.DB) *RetentionTask {
 		batchSleep:   purgeBatchSleep,
 		notifier:     NewNotificationCleaner(db),
 		deliveries:   NewNotificationDeliveryCleaner(db),
-		now:          time.Now,
-		stopCh:       make(chan struct{}),
+		events:       NewAutomationEventCleaner(db),
+
+		commandExecutions: NewCommandExecutionCleaner(db),
+		commandAttempts:   NewCommandAttemptCleaner(db),
+		commandOutboxes:   NewCommandOutboxCleaner(db),
+
+		now:    time.Now,
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -192,6 +214,31 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 	// 下面的逐设备保留期删除。
 	if ctx.Err() == nil {
 		r.deliveries.runOnceLogged(ctx)
+	}
+
+	// 运行期无界增长表 §2.1: automation_events 分层保留清理 (非执行档 30 天 /
+	// 执行档 400 天), 与上两个清理器同一批。旁路操作: 失败仅告警, 不影响下面的
+	// 逐设备保留期删除。
+	if ctx.Err() == nil {
+		r.events.runOnceLogged(ctx)
+	}
+
+	// 命令域三表清理 (设计 §2.4/§2.5/§2.6)。顺序不是任意的:
+	//  1. executions 先删 —— 它让"对应 execution 已终态"这个条件对更多 outbox 成立
+	//     (outbox 的删除条件之一就是 execution 已终态);
+	//  2. outboxes 再删 (30 天窗, 依赖正确识别在途);
+	//  3. attempts 最后删 (730 天窗, 与 executions 同寿命)。
+	// 三者都是独立的单表 DELETE (零级联), 换个顺序也不会错, 但这样同一轮能一次清完。
+	//
+	// 三个清理器各自独立失败: 旁路操作, 失败仅告警, 绝不影响下面的逐设备保留期删除。
+	if ctx.Err() == nil {
+		r.commandExecutions.runOnceLogged(ctx)
+	}
+	if ctx.Err() == nil {
+		r.commandOutboxes.runOnceLogged(ctx)
+	}
+	if ctx.Err() == nil {
+		r.commandAttempts.runOnceLogged(ctx)
 	}
 
 	results := make([]RetentionResult, 0, len(devices))
