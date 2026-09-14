@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/notify"
 	"ehome/backend/pkg/metrics"
 )
 
@@ -42,6 +43,14 @@ type RetentionTask struct {
 	// notifier 清理 notifications 表 (D-2): 与本任务同频每日执行, 无独立
 	// goroutine —— 调度编排不变, 失败只 slog.Warn, 不影响 retention 主流程。
 	notifier *NotificationCleaner
+	// notifySink 是**通知写入 + 投递**入口 (D-1 步骤 3): main.go 经 SetNotifier
+	// 注入 notify.Dispatcher, 由它写 notifications 行并顺带外发投递。
+	//
+	// 字段名不叫 notifier 是因为它与上面的 D-2 清理器 *NotificationCleaner* 撞名
+	// (两者语义相反: 一个写通知, 一个删通知), 保留不同名字避免误读。
+	// **nil 是显式支持的合法状态**: 既有测试直接 NewRetentionTask(db) 不注入时
+	// 回落为直接写 notifications 表, 行为与改造前逐字节一致。
+	notifySink notify.Notifier
 	// deliveries 清理 notification_deliveries 投递审计表 (D-1 裁决 3 的欠账):
 	// 同样挂在本任务上, 与 notifications 清理**同批处理** (裁决原文要求),
 	// 不新增 goroutine、不改 main.go。
@@ -68,6 +77,18 @@ type RetentionTask struct {
 	// 与上面六个清理器同一 RunOnce 调用点 (第 7 个), 不新增 goroutine、不改 main.go;
 	// 失败只 slog.Warn + 指标, 不影响逐设备 retention 主流程。
 	audit *SecurityAuditCleaner
+	// nodeEvents 清理 node_events (运行期无界增长表设计 §2.2 的裁决: 统一保留
+	// 400 天, 按 created_at 删, 【不设分层档位】)。
+	//
+	// ⚠️ 口径纠正: audit 上面的注释曾把 security_audit_events 称作"本批八张表里
+	// 最后一个此前没有清理器的表"—— 那句对 §2.3 成立, 对本表【不成立】。实测本表
+	// (node_events) 才是真正被漏掉的那一张: §2.2 的裁决 2026-09-13 就已落下, 但全仓
+	// 零 Delete NodeEvent / 零 DELETE FROM node_events, 表只增不减 (实测 6098 行 /
+	// 2026-08-11 → 09-12)。详见 node_event_cleanup.go 文件头。
+	//
+	// 与上面七个清理器同一 RunOnce 调用点 (第 8 个), 不新增 goroutine、不改 main.go;
+	// 失败只 slog.Warn + 指标, 不影响逐设备 retention 主流程。
+	nodeEvents *NodeEventCleaner
 	// now is injectable for tests.
 	now func() time.Time
 
@@ -92,6 +113,7 @@ func NewRetentionTask(db *gorm.DB) *RetentionTask {
 		commandAttempts:   NewCommandAttemptCleaner(db),
 		commandOutboxes:   NewCommandOutboxCleaner(db),
 		audit:             NewSecurityAuditCleaner(db),
+		nodeEvents:        NewNodeEventCleaner(db),
 
 		now:    time.Now,
 		stopCh: make(chan struct{}),
@@ -255,6 +277,16 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 	// (INV-6), 同一轮里先清命令域再清审计, 审计行【最后】消失。
 	if ctx.Err() == nil {
 		r.audit.runOnceLogged(ctx)
+	}
+
+	// 运行期无界增长表 §2.2: node_events 单一时间窗清理 (400 天, 按 created_at)。
+	// 本表【不分层】—— 99.6% 是 offline, 而 offline 恰恰是运维时间线的主内容, 按
+	// event_type 分档等于删掉时间线本身 (§2.2 理由 1); 它是本批八张表里唯一保存
+	// "已不存在的节点"历史的表, 因此单表 DELETE、零级联, 绝不碰 nodes (INV-3)。
+	// 放在最后 (第 8 个) 不是任意的: 本表与命令域/审计没有跨表引用, 排在其后是为了
+	// 让"无引用关系的最慢增长表"不插在命令域与审计之间 (那两者有 INV-6 的先后约定)。
+	if ctx.Err() == nil {
+		r.nodeEvents.runOnceLogged(ctx)
 	}
 
 	results := make([]RetentionResult, 0, len(devices))
@@ -421,9 +453,31 @@ func (r *RetentionTask) notifyExpiry(ctx context.Context, ld *models.LogicalDevi
 		Source:      NotificationSourceRetentionExpiring,
 		SourceID:    sourceID,
 	}
-	if err := r.db.WithContext(ctx).Create(&n).Error; err != nil {
+	if !r.createNotification(ctx, &n, ld.ID) {
+		return false
+	}
+	return true
+}
+
+// SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
+// 传 nil 显式回落为直接写 notifications 表 (见 notifySink 字段注释)。
+func (r *RetentionTask) SetNotifier(n notify.Notifier) {
+	r.notifySink = n
+}
+
+// createNotification 落库一条通知 (D-1 步骤 3: 经注入的 Notifier 或直接落库)。
+//
+// nil 回落是**显式设计**, 既有测试直接 NewRetentionTask(db) 不注入时行为不变。
+// 调用点 (notifyExpiry) 不在事务内, 且在业务写完成之后, 因此同步投递安全
+// (详见 notify/dispatcher.go 的 Create 投递时机裁决)。
+func (r *RetentionTask) createNotification(ctx context.Context, n *models.Notification, logicalID uint) bool {
+	if r.notifySink != nil {
+		r.notifySink.Create(ctx, n)
+		return n.ID != 0
+	}
+	if err := r.db.WithContext(ctx).Create(n).Error; err != nil {
 		slog.Error("datalifecycle: create retention notification failed",
-			"logical_id", ld.ID, "error", err)
+			"logical_id", logicalID, "error", err)
 		return false
 	}
 	return true
