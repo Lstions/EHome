@@ -152,6 +152,16 @@ func AutoMigrate() error {
 	// 在此幂等 DROP (DROP TABLE IF EXISTS, 重跑零副作用)。
 	// 放在 AutoMigrate 之后: 即便某次显式重加注册建出空表, 也在同一次启动内被清掉。
 	_, err = RetireLegacyOperationLogs(DB)
+	if err != nil {
+		return err
+	}
+	// 死表退役 (2026-09-15): unified_data_rollup_1m 是"写了没人读, 且读了也不划算"
+	// 的冻结件 —— EXPLAIN 实测 30 天窗口查询仅毫秒级 (Index Scan + 分区裁剪),
+	// 且该表无 logical_device_id 列 ⇒ 本仓查询协议下接线不可达。建表路径
+	// EnsureRollupTable 与其 main.go 调用点已随退役删除; 存量库 (ehome/ehome_test)
+	// 里残留的表在此幂等 DROP (裁决: docs/分析/rollup-退役裁决-2026-09-15.md)。
+	// 放在 AutoMigrate 之后: 即便某次有人把建表加回来, 也在同一次启动内被清掉。
+	_, err = RetireLegacyRollup1m(DB)
 	return err
 }
 

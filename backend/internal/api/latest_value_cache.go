@@ -18,7 +18,8 @@ type latestValueCache struct {
 
 var globalLatestValueCache = &latestValueCache{entries: make(map[uint]models.UnifiedData)}
 
-// SetLatestValue 更新单设备最新值 (persist 成功路径调用; rollupSink 同点注入)。
+// SetLatestValue 更新单设备最新值 (persist 成功路径调用; 原与 rollupSink 同点注入,
+// rollup 已于 2026-09-15 退役, 现为该持久化成功分支上的独立回调)。
 // 注: UnifiedData.DeviceID 在 v2.2 即表示 edge_device_id (见 models.go:256 注释);
 // EdgeDeviceID 字段是另一独立指针列, 历史回填不全, 不能作为缓存键。
 func SetLatestValue(rec models.UnifiedData) {
@@ -65,14 +66,15 @@ type queryResult interface {
 	Scan(dest interface{}) error
 }
 
-// 注 (2026-09-14 裁决, docs/分析/rollup-读取路径裁决-2026-09-14.md):
+// 注 (2026-09-15 退役, docs/分析/rollup-退役裁决-2026-09-15.md):
 // 本文件原含 precisionFor (方案 §3.2.2 的 "跨度 > 48h 且无 logical scope 走
-// rollup" 路由函数), 生产零调用者, 已删除。它不是"待接线的读取路径", 而是
-// 一条在本仓查询协议下不可达的分支: logical scope 为空 ⟺ 实例
+// rollup" 路由函数), 生产零调用者, 已于 2026-09-14 删除。它不是"待接线的读取路径",
+// 而是一条在本仓查询协议下不可达的分支: logical scope 为空 ⟺ 实例
 // logical_device_id IS NULL (query_scope.go), 而启动 BackfillLogicalDevices
 // (identity.go) 对全量实例回填、新实例创建即赋逻辑身份 ⇒ 生产查询恒有
-// logical scope ⇒ 恒返回 raw。且 rollup 表无 logical_device_id 列
-// (partition_mgr.go EnsureRollupTable DDL), §六 scope 条件落不到该表上。
-// rollup 写入侧已同步停写 (nodemgr/manager.go 不再注入 rollupSink);
-// rollup 消费者/表/积压数据保留为冻结件, 门禁见
-// datalifecycle/rollup_wiring_gate_test.go (INV-7 修正版: 条件式)。
+// logical scope ⇒ 恒返回 raw。且 rollup 表无 logical_device_id 列, §六 scope
+// 条件落不到该表上。
+// rollup 的写入件 (RollupConsumer / rollupSink / 建表路径 / 模型) 与表本身已于
+// 2026-09-15 一并**退役**: EXPLAIN 实测 30 天窗口查询仅毫秒级 (索引 + 分区裁剪),
+// rollup 的收益是"省几毫秒", 代价是第二张无界表 + 改数据模型。门禁 (死表不得复活)
+// 见 datalifecycle/rollup_retirement_gate_test.go。

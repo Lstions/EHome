@@ -109,13 +109,10 @@ type SensorParserConsumer struct {
 	reassembler    Reassembler
 	deviceActivity func(uint)
 	driverRegistry *drivers.Registry
-	// rollupSink 数据层时序化 (v3.4 §3.2.2): 解析成功并持久化后的聚合回调
-	// (注入 RollupConsumer.Upsert)。nil 时跳过。
-	rollupSink func([]models.UnifiedData)
 	// latestSink 数据层时序化 (v3.4 §3.2.4): 最新值缓存更新回调 (api.SetLatestValue)。
 	latestSink func(models.UnifiedData)
 	// alertSink 阈值告警引擎 (方案 v0.4 §5 任务C): 解析后回调注入 alert.Evaluator。
-	// 复用 rollupSink 回调先例, 只对解析成功的物理量求值, nil 时跳过。
+	// 复用 latestSink 回调先例, 只对解析成功的物理量求值, nil 时跳过。
 	alertSink func(edgeDeviceID uint, fields []parser.Field, at time.Time)
 	// automationSink 自动化策略引擎 (设计/自动化策略引擎方案.md v0.1): 解析后回调注入
 	// automation.Evaluator, 与 alertSink 并列不合并。nil 时跳过。
@@ -137,11 +134,6 @@ func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, ha *
 		consumer.deviceActivity = deviceActivity[0]
 	}
 	return consumer
-}
-
-// SetRollupSink 注入 rollup 聚合回调 (数据层时序化 v3.4 §3.2.2)。
-func (c *SensorParserConsumer) SetRollupSink(sink func([]models.UnifiedData)) {
-	c.rollupSink = sink
 }
 
 // SetLatestSink 注入最新值缓存更新回调 (数据层时序化 v3.4 §3.2.4)。
@@ -214,7 +206,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Preload("Node") 带软删范围, 对已注销节点返回零值 (Node.ID == 0, 已实测),
 	// 对确实不存在的节点同样为零值 —— 两种情形统一按"节点不可用"拒收, 与
 	// commandexec 的 fail-closed 门同风格。门内拦截范围: 解析 / unified_data /
-	// device_data / rollup / 最新值缓存 / 告警 / 自动化 / 数据源健康 / HA / WS。
+	// device_data / 最新值缓存 / 告警 / 自动化 / 数据源健康 / HA / WS。
 	// 注意: 这里不额外查库 (零值即拒收), 健康路径查询次数不变。
 	if device.Node.ID == 0 {
 		logger.Warn("databus: node retired; refusing sample at ingest boundary",
@@ -352,14 +344,15 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		if err := c.db.Session(&gorm.Session{}).Create(&records).Error; err != nil {
 			metrics.DataConsumerDBWriteFailures.WithLabelValues(c.Name(), "unified_data").Inc()
 			logger.Warn("databus: failed to persist parsed sensor data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
-		} else if c.rollupSink != nil {
-			// 数据层时序化 (v3.4 §3.2.2/§3.2.4): 持久化成功后聚合进 rollup 表
-			// (仅 PG 生效) + 更新最新值缓存 (回调注入, 保持 databus 不依赖 api 包)。
-			c.rollupSink(records)
-			if c.latestSink != nil {
-				for i := range records {
-					c.latestSink(records[i])
-				}
+		} else if c.latestSink != nil {
+			// 数据层时序化 (v3.2.4): 持久化成功后更新最新值缓存
+			// (回调注入, 保持 databus 不依赖 api 包)。
+			// 注: 原 rollupSink 分支已于 2026-09-15 随 rollup 表退役删除; 注意该分支
+			// 原本还**门控**着 latestSink —— 退役时有意把 latestSink 提为独立条件,
+			// 消除"未注入 rollup ⇒ 最新值缓存永不更新"的隐藏耦合 (裁决见
+			// docs/分析/rollup-退役裁决-2026-09-15.md §5)。
+			for i := range records {
+				c.latestSink(records[i])
 			}
 		}
 	}

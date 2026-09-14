@@ -229,12 +229,8 @@ func (mgr *Manager) buildParserConsumers() {
 	if offlineDetector != nil {
 		deviceActivity = offlineDetector.OnEdgeDeviceData
 	}
-	// 数据层时序化 (v3.4 §3.2.2) rollup 聚合: **已停写** (2026-09-14 裁决)。
-	// 原因: 读取侧从未接线, 且 precisionFor 的 rollup 分支在本仓查询协议下不可达
-	// (logical scope 恒非空 ⇒ 恒 raw); rollup 表又无 logical_device_id 列,
-	// §六 scope 条件落不到该表。详见 docs/分析/rollup-读取路径裁决-2026-09-14.md。
-	// 停写切断增长源 (≈4.9×10³ 行/天 → 0); 写入材料 (RollupConsumer/表/积压数据)
-	// 保留为冻结件, 由 datalifecycle/rollup_wiring_gate_test.go 看守 (INV-7 修正版)。
+	// 注: 数据层时序化 v3.4 §3.2.2 的 rollup 聚合链路 (RollupConsumer / rollupSink
+	// 注入) 已于 2026-09-15 退役删除, 此处的停写注释随之移除。
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调 (main.go 经 SetLatestSinkFn 接线,
 	// 避免 nodemgr→api 编译期依赖)。
 	latestSinkFn := mgr.latestSinkFn

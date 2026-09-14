@@ -259,7 +259,7 @@ var (
 	// --- Data lifecycle task observability metrics ---
 
 	// LifecycleTaskFailures counts data lifecycle task failures by task type
-	// (retention|purge|partition|rollup).
+	// (retention|purge|partition).
 	LifecycleTaskFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_lifecycle_task_failures_total",
 		Help: "Data lifecycle task failures by task",

@@ -2,7 +2,7 @@
 //
 // 挂接点裁决 (§5.1.2): DataEvent 只携带 RawData 字节, 物理量在
 // SensorParserConsumer 内部解析为 []parser.Field。Evaluator 通过解析后回调
-// (alertSink) 接入, 复用 rollupSink/latestSink 先例, 避免独立 consumer 的
+// (alertSink) 接入, 复用 latestSink 先例 (原与 rollupSink 同点), 避免独立 consumer 的
 // 重复解析开销; 分片模式下回调随分片并发, 天然并行求值。
 package alert
 

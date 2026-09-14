@@ -172,44 +172,9 @@ func (pm *PartitionManager) DropPartitionsBefore(cutoff time.Time) ([]string, er
 	return pm.DropPartitionsBeforeFor(partitionedTable, cutoff)
 }
 
-// EnsureRollupTable idempotently creates the minute-level rollup table
-// (方案 v3.4 §3.2.2 DDL). No-op on non-postgres dialects (SQLite 测试库
-// 不建此表, RollupConsumer no-op)。
-//
-// 建表责任方裁决: rollup 表与分区母表同属数据层时序化迁移面, 由启动接线
-// 调用 (main.go), 不放 AutoMigrate (与 UnifiedData 移出 AutoMigrate 同因:
-// 时序化表结构由迁移面显式定义, 不交给 GORM tag 推导)。
-func EnsureRollupTable(db *gorm.DB) error {
-	if !isPostgres(db) {
-		return nil
-	}
-	var count int64
-	if err := db.Raw(tableExistsSQL, "unified_data_rollup_1m", "r").Scan(&count).Error; err != nil {
-		metrics.LifecycleTaskFailures.WithLabelValues("rollup").Inc()
-		return fmt.Errorf("check rollup table existence: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-	ddl := `CREATE TABLE unified_data_rollup_1m (
-		device_id   BIGINT NOT NULL,
-		sensor_name VARCHAR(32) NOT NULL,
-		bucket      TIMESTAMP NOT NULL,
-		min_v       DOUBLE PRECISION,
-		max_v       DOUBLE PRECISION,
-		avg_v       DOUBLE PRECISION,
-		last_v      DOUBLE PRECISION,
-		last_id     BIGINT,
-		cnt         INTEGER,
-		PRIMARY KEY (device_id, sensor_name, bucket)
-	)`
-	if err := db.Exec(ddl).Error; err != nil {
-		metrics.LifecycleTaskFailures.WithLabelValues("rollup").Inc()
-		return fmt.Errorf("create rollup table: %w", err)
-	}
-	slog.Info("partition_mgr: created rollup table unified_data_rollup_1m")
-	return nil
-}
+// 注: EnsureRollupTable (分钟级 rollup 建表) 已于 2026-09-15 随表退役删除 ——
+// 该表无读取者且 EXPLAIN 实测无性能收益; 表由 database.RetireLegacyRollup1m
+// 幂等 DROP。裁决: docs/分析/rollup-退役裁决-2026-09-15.md。
 
 // IsTablePartitioned reports whether table is already a partitioned parent
 // (relkind='p', migration done).

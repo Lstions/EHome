@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"ehome/backend/internal/database"
 	"ehome/backend/internal/models"
 	"ehome/backend/testutil"
 )
@@ -128,26 +129,54 @@ func TestMigrateUnifiedData_LegacyData_PreservesRowsAndAdvancesSequence(t *testi
 	}
 }
 
-func TestEnsureRollupTable_Postgres_CreateOnceIdempotent(t *testing.T) {
+// TestRollupTableNotCreated_Postgres 取代退役前的
+// TestEnsureRollupTable_Postgres_CreateOnceIdempotent:
+// 走**启动路径** (分区分支 + AutoMigrate 尾部退役) 之后, 隔离 schema 里
+// 不得出现 unified_data_rollup_1m —— 表由 database.AutoMigrate() 尾部幂等 DROP,
+// 且建表路径 EnsureRollupTable 已随退役删除。
+//
+// 这里是 PG 侧的"表在运行库中确实不存在"证据 (方言相关);
+// SQLite/源码级分别由 database/retire_rollup_test.go 与
+// rollup_retirement_gate_test.go 覆盖。
+func TestRollupTableNotCreated_Postgres(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
 
-	if err := EnsureRollupTable(db); err != nil {
-		t.Fatalf("EnsureRollupTable: %v", err)
+	// 1. 模拟"存量库里残留的旧表"。
+	if err := db.Exec("CREATE TABLE unified_data_rollup_1m (device_id BIGINT, sensor_name VARCHAR(32), bucket TIMESTAMP, PRIMARY KEY (device_id, sensor_name, bucket))").Error; err != nil {
+		t.Fatalf("创建模拟遗留 rollup 表: %v", err)
 	}
 	if tableExistsInSchema(t, db, "unified_data_rollup_1m", "r") == 0 {
-		t.Fatal("rollup table must exist after EnsureRollupTable")
+		t.Fatal("前置条件失败: 模拟遗留表未被创建")
 	}
-	// 幂等: 重复调用不报错。
-	if err := EnsureRollupTable(db); err != nil {
-		t.Fatalf("EnsureRollupTable second call: %v", err)
-	}
-}
 
-func TestEnsureRollupTable_SQLite_Noop(t *testing.T) {
-	db := newSQLiteDB(t)
-	if err := EnsureRollupTable(db); err != nil {
-		t.Fatalf("EnsureRollupTable on sqlite must be no-op, got %v", err)
+	// 2. 走启动期的分区分支 (退役的建表路径曾在这里的下游被调用)。
+	// 前置: unified_data 需先分区化 (同 TestRetentionTask_PartitionDrop 的既有范式)。
+	dropUnifiedDataFlat(t, db)
+	if err := MigrateUnifiedDataToPartitioned(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := NewPartitionManager(db).EnsurePartitions(2); err != nil {
+		t.Fatalf("EnsurePartitions: %v", err)
+	}
+
+	// 3. 走**生产入口**: AutoMigrate() 尾部会幂等 DROP 该表。
+	prev := database.DB
+	database.DB = db
+	t.Cleanup(func() { database.DB = prev })
+	if err := database.AutoMigrate(); err != nil {
+		t.Fatalf("生产 AutoMigrate 路径: %v", err)
+	}
+	if tableExistsInSchema(t, db, "unified_data_rollup_1m", "r") != 0 {
+		t.Fatal("退役后 unified_data_rollup_1m 仍存在 —— 死表复活 (INV: 死表不得复活)")
+	}
+
+	// 4. 二次执行: 幂等, 不得报错, 不得重建。
+	if err := database.AutoMigrate(); err != nil {
+		t.Fatalf("生产 AutoMigrate 二次执行 (幂等性): %v", err)
+	}
+	if tableExistsInSchema(t, db, "unified_data_rollup_1m", "r") != 0 {
+		t.Fatal("二次执行后 unified_data_rollup_1m 被重建")
 	}
 }
 

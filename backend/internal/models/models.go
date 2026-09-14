@@ -264,29 +264,12 @@ type UnifiedData struct {
 	LogicalDeviceID *uint `gorm:"column:logical_device_id" json:"logical_device_id,omitempty"`
 }
 
-// UnifiedDataRollup1m 分钟级聚合表 (数据层时序化, 方案 v3.4 §3.2.2)。
-//
-// 2026-09-14 裁决 (docs/分析/rollup-读取路径裁决-2026-09-14.md): **写入侧已停写**
-// (nodemgr/manager.go 不再注入 rollupSink), 因为**读取侧从未存在** —— 原注释所称的
-// "读取: historical API precision=rollup" 与代码不符 (已删除的 precisionFor 零生产调用者,
-// 且其 rollup 分支在 logical scope 恒非空的生产协议下不可达; 本表亦无 logical_device_id 列,
-// §六 scope 条件落不到该表)。本表/积压数据/建表路径保留为**冻结件**, 作为
-// "补读取路径还是退役" 的限期决策输入; 无消费者 ⇒ 不配保留期清理 (INV-7 修正版为条件式)。
-// SQLite 测试库不建此表 (consumer no-op)。
-type UnifiedDataRollup1m struct {
-	DeviceID   uint      `gorm:"primaryKey;column:device_id" json:"device_id"`
-	SensorName string    `gorm:"primaryKey;column:sensor_name;size:32" json:"sensor_name"`
-	Bucket     time.Time `gorm:"primaryKey;column:bucket" json:"bucket"` // 分钟对齐
-	MinV       float64   `gorm:"column:min_v" json:"min_v"`
-	MaxV       float64   `gorm:"column:max_v" json:"max_v"`
-	AvgV       float64   `gorm:"column:avg_v" json:"avg_v"`
-	LastV      float64   `gorm:"column:last_v" json:"last_v"`
-	LastID     uint      `gorm:"column:last_id" json:"last_id"` // 保形去重语义锚点(MAX(id))
-	Cnt        int64     `gorm:"column:cnt" json:"cnt"`
-}
-
-// TableName GORM 表名。
-func (UnifiedDataRollup1m) TableName() string { return "unified_data_rollup_1m" }
+// 注: UnifiedDataRollup1m (分钟级 rollup 聚合表) 已于 2026-09-15 **退役** ——
+// 它是"写了没人读, 且读了也不划算"的冻结件: 全仓零 SELECT 消费者, 且 EXPLAIN
+// 实测 30 天窗口的 unified_data 查询仅毫秒级 (索引 + 分区裁剪), 而它无
+// logical_device_id 列 ⇒ 本仓查询协议下接线不可达。模型/consumer/建表路径已删,
+// 存量表由 database.RetireLegacyRollup1m 幂等 DROP。
+// 裁决: docs/分析/rollup-退役裁决-2026-09-15.md。
 
 // =====================================================================
 

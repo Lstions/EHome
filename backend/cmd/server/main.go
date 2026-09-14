@@ -115,11 +115,9 @@ func main() {
 	// 与其他后台任务同序收尾。
 	defer close(partitionStop)
 
-	// 数据层时序化 (方案 v3.4 §3.2.2): rollup 分钟聚合表建表 (幂等)。
-	// 与分区迁移相互独立, 失败同样降级不阻塞启动 (rollup fail-open 语义)。
-	if err := datalifecycle.EnsureRollupTable(db); err != nil {
-		logger.Errorf("ensure rollup table failed (rollup aggregation disabled until fixed): %v", err)
-	}
+	// 注: 数据层时序化的 rollup 分钟聚合表 (EnsureRollupTable) 已于 2026-09-15 退役,
+	// 其建表调用点在此删除; 表本身由 database.AutoMigrate() 尾部幂等 DROP。
+	// 裁决: docs/分析/rollup-退役裁决-2026-09-15.md。
 
 	// v3.0: One-time idempotent migration of old GPIO channels → gpio_configs
 	if migrateResult, err := database.MigrateGPIOChannels(database.GetDB()); err != nil {
