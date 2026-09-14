@@ -136,8 +136,12 @@ export const ROUTES: RouteProbe[] = [
     name: 'monitor',
     path: '/monitor',
     root: '.monitor-container',
-    visible: '.stat-value',
-    settle: '.stat-value',
+    // F31：必须把**错误态**也算作「确定结论」。契约规定确定态有三种：有数据 / 空态 / 错误态。
+    // 修复前这里只有 '.stat-value' —— 而 F28 让未知态也渲染 .stat-value（显示 '—'），
+    // 于是「加载中」与「已加载」在这一条信号上不可区分（实测：接口挂起 10s 仍判就绪）。
+    // 照 /dashboard 的既有范式（'.el-table__row, .empty-state, [data-test="dashboard-error"]'）补齐。
+    visible: '.stat-value, [data-test="monitor-error"], [data-test="monitor-detail-error"]',
+    settle: '.stat-value, [data-test="monitor-error"], [data-test="monitor-detail-error"]',
     dataShaped: true,
   },
   {
@@ -297,7 +301,17 @@ async function structuralFacts(page: Page, probe: RouteProbe): Promise<Structura
       return {
         root: cls.split(' ')[0] || '',
         masks: countVisible('.el-loading-mask'),
-        skeletons: countVisible('.el-skeleton'),
+        // F31：骨架判定必须同时覆盖**本仓自研**骨架，而不只是 EP 的 .el-skeleton。
+        // 为什么：/monitor 的首屏骨架用的是 src/components/common/SkeletonCard.vue，
+        // 它渲染 .skeleton-card（variant 全挂在同一根节点，故单选择器覆盖全部变体）；
+        // 详情区顶层另用 .detail-skeleton（即 [data-test="monitor-loading"] 所在节点）。
+        // 修复前只认 .el-skeleton ⇒ 接口挂起时实测 skeletons=0、blockers=[]，门禁在
+        // **只有骨架的 DOM**（scanned=181 vs 真实数据 295）上做了裁切判定 —— 真实假绿。
+        // 其余自研骨架（.logical-info-skeleton/.candidate-skeleton/.skeleton-grid）一并纳入，
+        // 避免同类盲区在别的路由复现。
+        skeletons: countVisible(
+          '.el-skeleton, .skeleton-card, .detail-skeleton, .logical-info-skeleton, .candidate-skeleton, .skeleton-grid'
+        ),
         rows: document.querySelectorAll('.el-table__row').length,
         empties: countVisible('.empty-state, .el-table__empty-text, .el-table__empty-block'),
         signal: countVisible(p.visible),

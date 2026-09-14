@@ -663,6 +663,55 @@ test.describe('失败态不得伪装正常', () => {
     await expect(page.locator('[data-test="dashboard-summary-error"]')).toHaveCount(0)
     await expect(page.locator('[data-test="dashboard-error"]')).toHaveCount(0)
   })
+
+  /**
+   * 守护的不变量：**接口挂起时，就绪判据必须失败**，不得静默认为「已就绪」。
+   *
+   * 对应 F31（2026-09-14 主控实测发现的残余盲区）：
+   *   `/monitor` 的主接口挂起时，`readyBlockers()` 返回**空**（判为就绪），门禁于是在
+   *   `scanned=181` 的**骨架态 DOM** 上做裁切判定 —— 而真实数据渲染后是 `scanned=295`。
+   *   这是「在未就绪页面上取数」（第 7 例「伪装成正常」）的**换条件复发**。
+   *
+   * 两条根因（互相独立，都已修）：
+   *   ① 骨架判定只认 `.el-skeleton`，认不出本仓自研 `SkeletonCard`（`.skeleton-card`）
+   *      与详情区 `.detail-skeleton` ⇒ 挂起 10s 后实测 `skeletons=0`；
+   *   ② `/monitor` 的 probe 只有 `.stat-value`，而 F28 让未知态也渲染它（显示「—」）⇒
+   *      「加载中」与「已加载」不可区分；按契约确定态有三种（有数据/空态/**错误态**），
+   *      故须照 `/dashboard` 范式补 `[data-test="monitor-error"]`。
+   *
+   * 为什么断言「抛错」而不是「等够久」：门禁的契约是「拿不到数据承载信号时必须失败」，
+   * 「没有结论」不等于「合规」。这条把该契约**钉在 /monitor 上**，
+   * 而不是靠人记得去更新选择器。
+   *
+   * 已知残余（**不改 src/ 无法机械判定，如实记录**）：
+   *   「首屏成功后刷新时挂起」场景下页面**既无骨架也无错误态**，且 `.stat-value` 显示
+   *   上一次成功的**陈旧真值**（实测 142.92K）。该场景本轮**未覆盖** ——
+   *   全仓 `aria-busy` 仅 3 处使用，EP 的 el-table/el-loading 均不设该属性，
+   *   无法作为通用的「请求在飞」判据；发明启发式（等 N 秒/看数字变化）会引入不稳定，
+   *   故按「探针能力边界」记录，而非做假判据。
+   */
+  test('接口挂起时门禁必须失败：/monitor 就绪判据不得静默通过（F31）', async ({ page }) => {
+    await loginViaApi(page, 'light')
+    // 挂起主接口（永不 fulfill）—— 这正是残余盲区的触发条件
+    await page.route('**/api/v1/metrics/summary**', () => new Promise(() => {}))
+
+    const probe = ROUTES.find((r) => r.path === '/monitor')!
+    expect(probe, '受审路由清单里没有 /monitor，断言会假绿（分母为 0）').toBeTruthy()
+
+    let threw = false
+    let detail = ''
+    try {
+      // 用与溢出用例**完全相同**的就绪路径（否则测的不是门禁真正用的那条）
+      await measureRouteWhenReady(page, probe, 8000)
+    } catch (e) {
+      threw = true
+      detail = String(e).split('\n').slice(0, 3).join(' | ')
+    }
+    expect(
+      threw,
+      '接口挂起时门禁判为就绪（F31 盲区复发）：它会在只有骨架的 DOM 上做裁切判定。' + detail
+    ).toBe(true)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
