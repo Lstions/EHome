@@ -53,7 +53,12 @@ const stubs = {
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-row': { template: '<div class="el-row"><slot /></div>' },
   'el-col': { template: '<div class="el-col"><slot /></div>' },
-  'el-button': { template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>' },
+  // emits 必须声明：否则父组件的 @click 会同时经 $attrs 落到根 <button>（原生监听）
+  // 与 $emit('click') 两条路径，点击一次触发两遍 handler —— 会让重试次数断言假绿/假红。
+  'el-button': {
+    emits: ['click'],
+    template: '<button class="el-button" @click="$emit(\'click\')"><slot /></button>',
+  },
   'el-select': { template: '<select class="el-select" @change="$emit(\'change\')"><slot /></select>' },
   'el-option': { template: '<option />' },
   'el-icon': { template: '<i class="el-icon"><slot /></i>' },
@@ -62,7 +67,15 @@ const stubs = {
   // color 透传到 DOM：用于断言主题切换时进度条颜色随之变化（真实取值，非源码字符串断言）
   'el-progress': ProgressStub,
   'el-tag': { template: '<span class="el-tag"><slot /></span>' },
-  'el-alert': { props: ['title'], template: '<div class="el-alert">{{ title }}</div>' },
+  // 真实 ElAlert：有 #title 插槽时用插槽，否则回落到 title prop。替身必须同样支持，
+  // 否则错误态内的「重试」按钮会被吞掉，等于把失败态断言做成空断言。
+  'el-alert': {
+    props: ['title', 'type'],
+    template:
+      '<div class="el-alert" :class="`el-alert--${type}`">' +
+      '<div class="el-alert__content"><slot name="title">{{ title }}</slot></div>' +
+      '</div>',
+  },
 }
 
 /**
@@ -154,9 +167,15 @@ describe('Monitor.vue', () => {
     expect(wrapper.text()).toContain('节点在线状态')
   })
 
-  it('renders detail panels section', () => {
+  it('renders detail panels section', async () => {
     const wrapper = mount(Monitor, { global: { stubs } })
+    // 首次响应未落定 → 骨架屏（三态之一），此刻不得渲染任何具体数值
+    expect(wrapper.find('[data-test="monitor-loading"]').exists()).toBe(true)
+    expect(wrapper.find('.detail-panels').exists()).toBe(false)
+
+    await flushPromises()
     expect(wrapper.find('.detail-panels').exists()).toBe(true)
+    expect(wrapper.find('[data-test="monitor-loading"]').exists()).toBe(false)
   })
 
   it('shows durable control health and attention counts', async () => {
@@ -305,6 +324,193 @@ describe('Monitor.vue', () => {
     expect(monitorSource).not.toMatch(/lastUpdateTime\s*=\s*'--'/)
     // 未拉取到指标前，「最后更新」不得伪造成一个具体时刻
     expect(monitorSource).toContain("ref(UNKNOWN)")
+  })
+
+  // ─── F28 / U-1 家族第 4 处：接口失败伪装成「值为 0」 ───
+  //
+  // 缺陷：metrics 为 null 时全文件 40 处 `|| 0` 兜底，于是「接口 500」与
+  // 「接口成功但系统真的空闲」在 DOM 上**逐字段相同**（主控实测两组 values 均为
+  // ["0","0/0","0/0","0","0","0","0","0"] 且无任何错误态）。
+  // 下列用例把「A 与 B 必须可区分」钉成断言。
+
+  describe('F28 失败态不得伪装成 0（A/B 可区分）', () => {
+    const loadOk = async () => {
+      const { getMetricsSummary } = await import('@/api/monitor')
+      return vi.mocked(getMetricsSummary)
+    }
+
+    /** 成功但全 0：完整 shape，避免"全 0"因缺字段而名不副实。 */
+    const ALL_ZERO = {
+      code: 200,
+      data: {
+        timestamp: Date.now(),
+        http: { requests_total: 0, requests_in_flight: 0 },
+        mqtt: { messages_received: 0, messages_sent: 0, connection_errors: 0 },
+        device: { online: 0, offline: 0 },
+        node: { online: 0, offline: 0 },
+        data: { points_collected: 0, points_stored: 0 },
+        ota: { upgrades_total: 0 },
+        websocket: { connections_active: 0, messages_total: 0 },
+        control: {
+          operations_total: 0, active: 0, queued: 0, succeeded: 0, failed: 0,
+          unknown: 0, unresolved_unknown: 0, cancelled: 0, outbox_pending: 0,
+          outbox_leased: 0, capability_stale_nodes: 0, audit_write_failures: 0,
+        },
+      },
+    }
+
+    /** KPI 取值：去掉全部空白，口径与主控探针的 "0/0" 完全一致。 */
+    const statTexts = (wrapper: ReturnType<typeof mount>) =>
+      wrapper.findAll('.stat-value').map(n => n.text().replace(/\s+/g, ''))
+
+    /** 与真实断言同口径的快照：只取 DOM 事实。 */
+    const snapshot = (wrapper: ReturnType<typeof mount>) => ({
+      statValues: statTexts(wrapper),
+      controlValues: wrapper.findAll('.control-metric strong').map(n => n.text().trim()),
+      hasError: wrapper.find('[data-test="monitor-error"]').exists(),
+      hasDetailError: wrapper.find('[data-test="monitor-detail-error"]').exists(),
+      hasDetailPanels: wrapper.find('.detail-panels').exists(),
+      hasSkeleton: wrapper.find('[data-test="monitor-loading"]').exists(),
+    })
+
+    it('接口 500：错误态可见 + 配套重试，且 KPI 显示「—」而不是 0', async () => {
+      const api = await loadOk()
+      api.mockRejectedValueOnce(new Error('Request failed with status code 500'))
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+
+      // 1) 常驻错误态（不是一闪而过的 toast）
+      const alert = wrapper.find('[data-test="monitor-error"]')
+      expect(alert.exists()).toBe(true)
+      expect(alert.text()).toContain('获取监控数据失败')
+      expect(alert.text()).toContain('500')
+
+      // 2) 错误态**内部**的重试入口（页头「手动刷新」不算：探针的 looseRetry 正是在此误报）
+      const retry = wrapper.find('[data-test="monitor-retry"]')
+      expect(retry.exists()).toBe(true)
+      expect(retry.text()).toBe('重试')
+      // 重试入口必须是错误区域的后代，而不是页面上任意一个按钮
+      expect(alert.element.contains(retry.element)).toBe(true)
+
+      // 3) KPI 是未知占位「—」，绝不是 0
+      expect(statTexts(wrapper)).toEqual(['—', '—/—', '—/—', '—'])
+
+      // 4) 详情区整块进入错误态，不再渲染一排 0
+      expect(wrapper.find('[data-test="monitor-detail-error"]').exists()).toBe(true)
+      expect(wrapper.find('.detail-panels').exists()).toBe(false)
+
+      // 5) 失败时不得断言"控制面正常"，也不得给出"0 项需要关注"
+      expect(wrapper.find('[data-test="monitor-control-tag"]').text()).toBe('状态未知')
+      expect(wrapper.text()).not.toContain('项需要关注')
+      expect(wrapper.text()).not.toContain('正常')
+
+      // 6) 页脚必须说明数据已过期
+      expect(wrapper.find('[data-test="monitor-stale"]').exists()).toBe(true)
+      expect(wrapper.text()).not.toContain('暂无数据')
+    })
+
+    it('接口成功但全 0：正常显示 0，绝不出现错误态（不误伤真实数据）', async () => {
+      const api = await loadOk()
+      api.mockResolvedValueOnce(ALL_ZERO)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="monitor-error"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="monitor-detail-error"]').exists()).toBe(false)
+      expect(wrapper.find('.detail-panels').exists()).toBe(true)
+      // 0 是「确实是 0」：四张 KPI 卡照常渲染 0 / 0/0（= 主控探针里的 values 口径）
+      expect(statTexts(wrapper)).toEqual(['0', '0/0', '0/0', '0'])
+      expect(wrapper.findAll('.control-metric strong').map(n => n.text().trim()))
+        .toEqual(Array(9).fill('0'))
+    })
+
+    it('核心判据：失败的 DOM 与「成功但全 0」的 DOM 必须可区分', async () => {
+      const api = await loadOk()
+
+      api.mockRejectedValueOnce(new Error('Request failed with status code 500'))
+      const failed = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+
+      api.mockResolvedValueOnce(ALL_ZERO)
+      const zero = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+
+      expect(snapshot(failed)).not.toEqual(snapshot(zero))
+
+      // 逐字段给出可核对的差异（失败态必须有错误组件；成功全 0 态必须没有）
+      expect(snapshot(failed).hasError).toBe(true)
+      expect(snapshot(zero).hasError).toBe(false)
+      expect(snapshot(failed).hasDetailError).toBe(true)
+      expect(snapshot(zero).hasDetailError).toBe(false)
+      expect(snapshot(failed).controlValues).not.toEqual(snapshot(zero).controlValues)
+      // 「一片 0」只允许出现在真·成功分支
+      expect(snapshot(zero).statValues).toEqual(['0', '0/0', '0/0', '0'])
+      expect(snapshot(failed).statValues).toEqual(['—', '—/—', '—/—', '—'])
+
+      failed.unmount()
+      zero.unmount()
+    })
+
+    it('重试入口真实可用：第二次成功后错误态消失并恢复真实数值', async () => {
+      const api = await loadOk()
+      api.mockRejectedValueOnce(new Error('Request failed with status code 500'))
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+      expect(wrapper.find('[data-test="monitor-error"]').exists()).toBe(true)
+      expect(api, '挂载后应只拉取一次（自动刷新定时器未到期）').toHaveBeenCalledTimes(1)
+
+      api.mockResolvedValueOnce({
+        ...ALL_ZERO,
+        data: {
+          ...ALL_ZERO.data,
+          http: { requests_total: 123456, requests_in_flight: 3 },
+          device: { online: 3, offline: 1 },
+        },
+      })
+      await wrapper.find('[data-test="monitor-retry"]').trigger('click')
+      await flushPromises()
+
+      expect(api).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('[data-test="monitor-error"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="monitor-detail-error"]').exists()).toBe(false)
+      expect(wrapper.find('.detail-panels').exists()).toBe(true)
+      // 123456 → 123.46K，证明格式化路径未被未知态污染
+      expect(statTexts(wrapper)).toEqual(['123.46K', '3/4', '0/0', '0'])
+    })
+
+    it('200 但 envelope 无 data（后端异常包装）同样进入失败态，不得当成"成功且全 0"', async () => {
+      const api = await loadOk()
+      api.mockResolvedValueOnce({ code: 200, message: 'ok' } as never)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="monitor-error"]').exists()).toBe(true)
+      expect(statTexts(wrapper)).toEqual(['—', '—/—', '—/—', '—'])
+    })
+
+    it('源码守卫：模板里不得再出现「指标值 || 0」兜底（缺陷本体）', async () => {
+      const src = (await import('../Monitor.vue?raw')).default as string
+      // 指标取值一律经 metric()/metricText()，模板中不再有 || 0
+      // 注意：文件内含 <template #header>/<template #title> 等内层插槽，
+      // 首个 '</template>' 只是最早那个内层块的闭合 —— 必须切到**最后一个**。
+      const templateBody = src.slice(src.indexOf('<template>'), src.lastIndexOf('</template>'))
+      // 只有**插值**里的 || 0 才是缺陷本体（把未知渲染成 0）。
+      // :class="{ attention: (x || 0) > 0 }" 是布尔判定，不产生任何可见数值，保留。
+      const interpolations = templateBody.match(/\{\{[\s\S]*?\}\}/g) ?? []
+      expect(interpolations.length).toBeGreaterThan(20)
+      for (const expr of interpolations) {
+        expect(expr, '插值不得用 || 0 兜底未知值: ' + expr)
+          .not.toMatch(/\|\||\?\?\s*0/)
+      }
+      // 反向守卫：metric 必须真的用上了，否则"删掉全部数值"也能让上一行通过
+      expect(templateBody.match(/metric(Text)?\(/g)?.length ?? 0).toBeGreaterThanOrEqual(25)
+      // 未知态必须落到 UNKNOWN 常量，而不是新造占位符
+      expect(src).toContain("import { UNKNOWN, metricOrDash } from '@/utils/format'")
+    })
   })
 
   it('restarts polling when the refresh interval changes', async () => {
