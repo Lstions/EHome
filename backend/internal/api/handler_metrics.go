@@ -109,17 +109,39 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		db.Model(&models.OTATask{}).Count(&otaTotal)
 		resp.OTA.UpgradesTotal = otaTotal
 
+		// ── 控制域: 5 个【事件累计量】= 存活行 COUNT(*) + 清理基线 ─
+		//
+		// 清理前置条件 B (docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md §2.2):
+		// 这些数字原先全是无时间窗 COUNT(*), 命令域一旦启用保留策略清理,
+		// 删掉旧的 FAILED 行会让"操作失败 9"变"0"、Monitor.vue:160 的 attention
+		// 高亮消失 —— 看起来像故障自愈, 实际是证据被删。
+		// 口径 = 存活行 + 已被清理器删除的部分 (基线), 因此【累计语义原样保住】:
+		// 前端 JSON 契约字段名不变、面板文案不变、清理未上线时行为与今天逐字一致 (基线为 0)。
+		baseline := commandexec.GetMetricsBaseline(db)
 		db.Model(&models.CommandExecution{}).Count(&resp.Control.OperationsTotal)
+		resp.Control.OperationsTotal += baseline.OperationsTotal
 		db.Model(&models.CommandExecution{}).Where("status IN ?", []string{
 			commandexec.StatusQueued, commandexec.StatusDispatched, commandexec.StatusDeviceAccepted, commandexec.StatusVerifying,
 		}).Count(&resp.Control.Active)
 		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusQueued).Count(&resp.Control.Queued)
 		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusSucceeded).Count(&resp.Control.Succeeded)
+		resp.Control.Succeeded += baseline.Succeeded
 		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusFailed).Count(&resp.Control.Failed)
+		resp.Control.Failed += baseline.Failed
 		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusUnknown).Count(&resp.Control.Unknown)
+		resp.Control.Unknown += baseline.Unknown
+		// ── unresolved_unknown: 【刻意不加基线】──
+		//
+		// 它是【集合成员数】(当前 UNKNOWN 且尚未被人工处置), 不是事件累计量:
+		// 有人处置就减一, 本来就会下降。若给它加基线, 而被删掉的 UNKNOWN 行
+		// 【再也无法被处置】(处置入口 commandexec/service.go:594-600 必须先加载该行),
+		// 基线里那几条会永久留存 ⇒ 面板"未处置异常"永久虚高且用户怎么处置都降不下来。
+		// 变 0 是少报 (可察觉), 虚高是多报且不可纠正 —— 更坏。
+		// 正确性由"未处置的 UNKNOWN 永不随时间删"保证 (上游 §2.4), 见 B-INV-1b。
 		db.Table("command_executions AS ce").Joins("LEFT JOIN command_manual_resolutions AS cmr ON cmr.command_id = ce.command_id").
 			Where("ce.status = ? AND cmr.command_id IS NULL", commandexec.StatusUnknown).Count(&resp.Control.UnresolvedUnknown)
 		db.Model(&models.CommandExecution{}).Where("status = ?", commandexec.StatusCancelled).Count(&resp.Control.Cancelled)
+		resp.Control.Cancelled += baseline.Cancelled
 		db.Model(&models.CommandOutbox{}).Where("state = ?", "PENDING").Count(&resp.Control.OutboxPending)
 		db.Model(&models.CommandOutbox{}).Where("state = ?", "LEASED").Count(&resp.Control.OutboxLeased)
 		db.Model(&models.Node{}).Where("status = ? AND (resource_reported_at IS NULL OR resource_reported_at < ?)", "online", time.Now().UTC().Add(-commandexec.MaxCapabilityAge)).Count(&resp.Control.CapabilityStaleNodes)

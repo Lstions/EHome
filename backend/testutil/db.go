@@ -65,6 +65,8 @@ var allModels = []interface{}{
 	&models.CommandConfirmation{},
 	&models.CommandManualResolution{},
 	&models.ConfigChangeOutbox{},
+	// 清理前置条件 B: 命令域监控计数基线 (单行表, 与生产 AutoMigrate 列表同步)
+	&models.CommandMetricsBaseline{},
 	// v3.0: GPIO/PWM peripheral control models
 	&models.GPIOConfig{},
 	&models.PWMConfig{},

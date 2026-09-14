@@ -107,6 +107,9 @@ func AutoMigrate() error {
 		&models.CommandConfirmation{},
 		&models.CommandManualResolution{},
 		&models.ConfigChangeOutbox{},
+		// 清理前置条件 B: 命令域监控计数基线 (单行表)
+		// 见 docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md §2.2
+		&models.CommandMetricsBaseline{},
 
 		// v3.0: GPIO/PWM peripheral control models
 		&models.GPIOConfig{},

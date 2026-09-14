@@ -105,37 +105,81 @@ func NewEvaluator(db *gorm.DB, handler TriggerHandler) *Evaluator {
 }
 
 // rebuildCooldowns 启动重建冷却状态 (H1 修复, 方案 §9 R2): triggered map 纯内存,
-// 重启清空后冷却期规则被误判 armed, 条件仍满足时立即重触发。启动时对每条 enabled
-// 规则查最近一条 result=executed 的触发时刻回填 triggered[ruleID]。
+// 重启清空后冷却期规则被误判 armed, 条件仍满足时立即重触发。
+//
+// 清理前置条件 A (docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md):
+// 重建的【唯一持久锚点】是 automation_rules.last_triggered_at, 与 automation_events
+// 【物理解耦】。旧实现直接查 "SELECT rule_id, MAX(triggered_at) FROM automation_events
+// WHERE result='executed'", 于是事件表一旦启用保留策略清理, 被删掉 executed 行的规则
+// 在重启后被当作"从未触发"(armed) → 条件仍满足时立即重触发 → 多发真实设备动作。
+// 那不是"丢审计", 是"改变系统行为", 所以锚点必须落在清理器碰不到的地方。
+//
+// 兼容既有数据: 锚点列为空而事件表有历史的规则, 由 backfillCooldownAnchors 一次性回填
+// (锚点列上线前就存在的触发历史), 之后锚点自持。
 func (e *Evaluator) rebuildCooldowns() {
+	var rules []models.AutomationRule
+	if err := e.db.Select("id", "last_triggered_at").Find(&rules).Error; err != nil {
+		logger.Warn("automation: failed to load cooldown anchors", "error", err)
+		return
+	}
+	var needBackfill []uint
+	e.mu.Lock()
+	for _, r := range rules {
+		if r.LastTriggeredAt != nil {
+			e.triggered[r.ID] = *r.LastTriggeredAt
+			continue
+		}
+		needBackfill = append(needBackfill, r.ID)
+	}
+	e.mu.Unlock()
+
+	if len(needBackfill) == 0 {
+		return
+	}
+	e.backfillCooldownAnchors(needBackfill)
+}
+
+// backfillCooldownAnchors 一次性迁移: 对锚点为空的规则, 用事件表历史
+// (MAX(triggered_at) WHERE result='executed') 回填 automation_rules.last_triggered_at。
+//
+// 两条硬约束 (缺一即让前置条件 A 白做):
+//  1. 【只填空】—— 已有锚点的规则绝不覆盖。写成无条件 UPDATE ... = (SELECT MAX(...))
+//     会让事件表的清理重新影响冷却, 等于把缺陷搬回来。
+//  2. 【先库后存】—— 只有 UPDATE 真正落库成功才写内存 triggered; 且 UPDATE 带
+//     "last_triggered_at IS NULL" 条件, 与并发触发的锚点写入互不覆盖。
+func (e *Evaluator) backfillCooldownAnchors(ruleIDs []uint) {
 	rows := []struct {
 		RuleID uint
 		MaxAt  *string // SQLite MAX(timestamp) 返回字符串, 需手动解析
 	}{}
 	if err := e.db.Model(&models.AutomationEvent{}).
 		Select("rule_id, MAX(triggered_at) AS max_at").
-		Where("result = ?", models.AutomationResultExecuted).
+		Where("rule_id IN ? AND result = ?", ruleIDs, models.AutomationResultExecuted).
 		Group("rule_id").Scan(&rows).Error; err != nil {
-		logger.Warn("automation: failed to rebuild cooldowns", "error", err)
+		logger.Warn("automation: failed to backfill cooldown anchors", "error", err)
 		return
 	}
-	if len(rows) == 0 {
-		return
-	}
-	e.mu.Lock()
 	for _, r := range rows {
 		if r.MaxAt == nil {
 			continue
 		}
 		at, err := parseDBTime(*r.MaxAt)
 		if err != nil {
-			logger.Warn("automation: rebuild cooldowns parse time failed",
+			logger.Warn("automation: backfill cooldown anchor parse time failed",
 				"rule_id", r.RuleID, "raw", *r.MaxAt, "error", err)
 			continue
 		}
+		if err := e.db.Model(&models.AutomationRule{}).
+			Where("id = ? AND last_triggered_at IS NULL", r.RuleID).
+			Update("last_triggered_at", at).Error; err != nil {
+			logger.Warn("automation: backfill cooldown anchor failed",
+				"rule_id", r.RuleID, "error", err)
+			continue
+		}
+		e.mu.Lock()
 		e.triggered[r.RuleID] = at
+		e.mu.Unlock()
 	}
-	e.mu.Unlock()
 }
 
 // parseDBTime 解析 SQLite 返回的时间字符串 (gorm sqlite driver 写 time.Time

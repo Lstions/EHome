@@ -207,7 +207,60 @@ func (p *Planner) executeDeviceAction(rule models.AutomationRule, at time.Time, 
 		p.record(rule, at, value, result, "", err.Error())
 		return
 	}
-	p.record(rule, at, value, models.AutomationResultExecuted, exec.CommandID, "")
+	p.recordExecuted(rule, at, value, exec.CommandID)
+}
+
+// recordExecuted 落 result='executed' 事件, 并在【同一事务】内更新规则行的冷却锚点
+// (清理前置条件 A, docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md)。
+//
+// 为什么必须同事务: 事件行与锚点共同表达"该规则在 at 时刻触发过"这一个事实。
+// 分两次写会留下崩溃窗口 —— 事件落了锚点没落 → 重启后冷却提前解除 → 设备动作多发;
+// 锚点落了事件没落 → 审计说没触发过但系统确实冷却了 (本测试注入失败即断言前者)。
+//
+// fail-open 边界: 与 recordRet 一致, 写失败只告警不阻塞控制流 —— 但【两者一起失败】,
+// 不会出现"一半事实"。返回事件 ID (0=写失败), 供需要透传的调用方使用。
+func (p *Planner) recordExecuted(rule models.AutomationRule, at time.Time, value float64, commandID string) uint {
+	var eventID uint
+	err := p.db.Transaction(func(tx *gorm.DB) error {
+		ev := models.AutomationEvent{
+			RuleID:      rule.ID,
+			TriggeredAt: at,
+			Result:      models.AutomationResultExecuted,
+			CommandID:   commandID,
+			CreatedAt:   at,
+		}
+		if value != 0 || rule.TriggerType == models.AutomationTriggerSensorThreshold {
+			ev.TriggerValue = &value
+		}
+		if err := tx.Create(&ev).Error; err != nil {
+			return err
+		}
+		// 锚点取 at (本次触发时刻), 不取 DB now(): 求值器的冷却起点就是触发时刻,
+		// 用落库时间会让重启后的冷却窗比崩溃前更长 (保守偏差, 同样是行为改变)。
+		if err := tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+			Update("last_triggered_at", at).Error; err != nil {
+			return err
+		}
+		eventID = ev.ID
+		return nil
+	})
+	if err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+		logger.Warn("automation: failed to record executed event + cooldown anchor",
+			"rule_id", rule.ID, "error", err)
+		return 0
+	}
+	if p.broadcast != nil {
+		p.broadcast("automation_event", gin.H{
+			"rule_id":    rule.ID,
+			"rule_name":  rule.Name,
+			"event_id":   eventID,
+			"result":     models.AutomationResultExecuted,
+			"value":      value,
+			"command_id": commandID,
+		})
+	}
+	return eventID
 }
 
 // checkConditionsStillSatisfied F4 条件复核: 用最新值缓存重查 rule 的所有 conditions
@@ -550,14 +603,13 @@ func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceI
 	//    判定走 cooldownFor — 与 evaluator 同一份实现 (负债 D-5: 两路径曾语义相反,
 	//    evaluator 把 0 当默认 300s, 此处把 0 当不冷却); 0 表示不冷却, 直接跳过。 ──
 	if cooldown := cooldownFor(rule); cooldown > 0 {
-		var lastEv models.AutomationEvent
-		err := p.db.WithContext(ctx).
-			Where("rule_id = ? AND result IN ?", rule.ID,
-				[]string{models.AutomationResultExecuted, models.AutomationResultPendingConfirm}).
-			Order("triggered_at DESC").First(&lastEv).Error
-		if err == nil {
-			if at.Sub(lastEv.TriggeredAt) < cooldown {
-				remaining := cooldown - at.Sub(lastEv.TriggeredAt)
+		// 冷却基线优先读规则行锚点 (清理前置条件 A): automation_events 会被保留策略
+		// 清理, 拿它当唯一基线会让"删审计"变成"冷却提前解除"。锚点为空时 (锚点列
+		// 上线前的历史数据 / 回填尚未跑) 才回落到事件表, 保持既有行为不失。
+		lastAt, ok := p.cooldownBase(ctx, rule)
+		if ok {
+			if at.Sub(lastAt) < cooldown {
+				remaining := cooldown - at.Sub(lastAt)
 				ev := models.AutomationEvent{
 					RuleID:        rule.ID,
 					TriggeredAt:   at,
@@ -599,6 +651,31 @@ func (p *Planner) TriggerRule(ctx context.Context, ruleID, actorID uint, sourceI
 		_ = p.db.WithContext(ctx).Create(&ev).Error
 		return ev, nil
 	}
+}
+
+// cooldownBase 返回某规则冷却窗的起算时刻 (是否存在)。
+//
+// 读取优先级 (清理前置条件 A):
+//  1. automation_rules.last_triggered_at —— 唯一持久锚点, 清理器不碰;
+//  2. 回落 automation_events "最近一条 executed/pending_confirm" —— 仅用于锚点列
+//     上线前的历史数据 (回填尚未跑到时), 保持既有行为不失。
+//
+// 语义差异说明: 锚点记录【触发】时刻 (executed 落库那一刻的 at); 旧事件表兜底口径
+// 把 pending_confirm 也算作冷却起点。回落分支保留该口径以便与旧数据对齐, 主分支
+// 只认锚点 —— 一旦锚点被回填/写入, 行为即收敛到 evaluator 的触发时刻语义。
+func (p *Planner) cooldownBase(ctx context.Context, rule models.AutomationRule) (time.Time, bool) {
+	if rule.LastTriggeredAt != nil {
+		return *rule.LastTriggeredAt, true
+	}
+	var lastEv models.AutomationEvent
+	err := p.db.WithContext(ctx).
+		Where("rule_id = ? AND result IN ?", rule.ID,
+			[]string{models.AutomationResultExecuted, models.AutomationResultPendingConfirm}).
+		Order("triggered_at DESC").First(&lastEv).Error
+	if err != nil {
+		return time.Time{}, false
+	}
+	return lastEv.TriggeredAt, true
 }
 
 // executeManualDeviceAction 手动触发的 device_action 执行。
@@ -662,7 +739,19 @@ func (p *Planner) executeManualDeviceAction(ctx context.Context, rule models.Aut
 		CommandID:     exec.CommandID,
 		CreatedAt:     at,
 	}
-	_ = p.db.WithContext(ctx).Create(&ev).Error
+	// 手动触发同样要更新冷却锚点 (清理前置条件 A): 手动执行成功也是"该规则触发过"
+	// 这一事实, 且 planner.TriggerRule 的手动冷却判定正是读这个锚点。
+	if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&ev).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+			Update("last_triggered_at", at).Error
+	}); err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "automation_events").Inc()
+		logger.Warn("automation: failed to record manual executed event + cooldown anchor",
+			"rule_id", rule.ID, "error", err)
+	}
 	if p.broadcast != nil {
 		p.broadcast("automation_event", gin.H{
 			"rule_id":        rule.ID,
@@ -755,12 +844,30 @@ func (p *Planner) ConfirmEvent(ctx context.Context, eventID, actorID uint, sourc
 	// 条件 UPDATE 原事件行: 仅当仍是 pending_confirm 才翻转 (并发 confirm/expired 时
 	// RowsAffected=0, 幂等返回现值不覆写)。
 	if err == nil {
-		p.db.WithContext(ctx).Model(&models.AutomationEvent{}).
-			Where("id = ? AND result = ?", ev.ID, models.AutomationResultPendingConfirm).
-			Updates(map[string]interface{}{
-				"result":     models.AutomationResultExecuted,
-				"command_id": exec.CommandID,
-			})
+		// 翻转 + 冷却锚点同事务 (清理前置条件 A): 确认制规则的可执行路径是
+		// pending_confirm --人工确认--> executed, 若这里不写锚点, require_confirmed=true
+		// 的规则锚点【永远不会被写】, 重启后冷却照样提前解除。
+		// 触发时刻用原事件的 TriggeredAt (pending_confirm 落库时刻), 而不是 now():
+		// 冷却窗起点是"策略判定该触发"的时刻, 与自动/手动路径同语义。
+		if err := p.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&models.AutomationEvent{}).
+				Where("id = ? AND result = ?", ev.ID, models.AutomationResultPendingConfirm).
+				Updates(map[string]interface{}{
+					"result":     models.AutomationResultExecuted,
+					"command_id": exec.CommandID,
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return nil // 并发 confirm/expired: 未翻转, 不动锚点
+			}
+			return tx.Model(&models.AutomationRule{}).Where("id = ?", rule.ID).
+				Update("last_triggered_at", ev.TriggeredAt).Error
+		}); err != nil {
+			logger.Warn("automation: failed to flip event + cooldown anchor",
+				"event_id", ev.ID, "rule_id", rule.ID, "error", err)
+		}
 		p.db.WithContext(ctx).First(&ev, ev.ID)
 		return ev, nil
 	}

@@ -143,6 +143,26 @@ type AutomationRule struct {
 	RequireConfirmed bool `gorm:"default:false" json:"require_confirmed"` // true=仅生成待确认通知
 	MaxDailyExec     int  `gorm:"default:0" json:"max_daily_exec"`        // 每日执行上限, 0=不限 (熔断)
 
+	// ── 冷却锚点 (清理前置条件 A, docs/分析/清理前置条件-冷却锚点与监控基线-2026-09-14.md) ──
+	//
+	// 冷却窗 (armed→triggered) 的持久锚点: 该规则"上一次真正触发"的时刻。
+	//
+	// 为什么必须是独立列而不是继续靠 automation_events 回填: 冷却态只在
+	// evaluator 内存里 (evaluator.go triggered map), 重启后靠
+	// "SELECT MAX(triggered_at) FROM automation_events WHERE result='executed'"
+	// 回填。事件表一旦启用保留策略清理, 旧 executed 行被删 => 重启后该规则被当作
+	// "从未触发"(armed) => 条件仍满足时立即重触发 => 真实设备动作多发。
+	// 锚点必须与事件表【物理解耦】, 否则"删审计"会变成"改变系统行为"。
+	//
+	// 类型为 *time.Time (可空): 必须能表达"从未触发"。零值 time.Time 会让
+	// "从未触发"与"1970 年触发过"不可区分, 且 now.Sub(零值) 是巨大正数,
+	// 一旦写成 "now.Sub(anchor) < cooldown" 就会把新规则静默永久冷却。
+	//
+	// 不加 gorm default (同 CooldownSec/Enabled 的既有教训): 默认值会吞掉显式零值语义。
+	// 语义边界: 记录的是【触发】时刻 (evaluator armed→triggered 的 at), 不是命令下发成功时刻
+	// —— 旧回填用 executed 行只是近似, 该列把近似变成确定值。
+	LastTriggeredAt *time.Time `gorm:"index" json:"last_triggered_at,omitempty"` // 只读: 由触发路径同事务写入, API 不接受外部赋值
+
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `gorm:"index" json:"-"` // 软删, 保留历史归因
