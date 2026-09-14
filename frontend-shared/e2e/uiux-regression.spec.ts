@@ -1,5 +1,28 @@
 /**
- * UI/UX 审计断言回归门禁（2026-09-13）。
+ * UI/UX 审计断言回归门禁（2026-09-13，2026-09-14 就绪判据修复）。
+ *
+ * ## 2026-09-14 修复：门禁曾在"页面还没渲染数据"时就测量（已证实过一次真实假绿）
+ *
+ * 主控用真实 Chromium 在同源审计实例 360×800 逐帧实测 `/logical-device`：
+ *
+ *     t+   0ms  {scanned:149, nclips:0, rows:0, pag:0, loadingMask:1, bodyLen:154}
+ *     t+ 300ms  {scanned:705, nclips:12, maxClip:365, rows:20, pag:1, loadingMask:1}
+ *     t+ 500ms  {scanned:701, nclips:12, maxClip:365, rows:20, pag:1, loadingMask:0}
+ *     t+5000ms  {scanned:701, nclips:12, maxClip:365, rows:20, pag:1, loadingMask:0}
+ *
+ * 旧就绪谓词 `scanned > 50` 在 **t+0** 就已满足，而那一刻表格 0 行、bodyLen=154
+ * （只有工具栏和表头）、loadmask 还挂着、真实裁切尚未出现 —— 门禁于是取数判合规。
+ * 变异自证证实了后果：删掉 `LogicalDeviceList.vue` 的
+ * `.ld-pagination :deep(.el-pagination){flex-wrap:wrap}` 并重新构建（产物 CSS 中该规则
+ * 确实消失），`-g "360px 无视口横向溢出"` 仍 **1 passed**，而独立探针在同一份产物上
+ * 测得 clips=12 / maxClip=365px / btn-prev x=-118（视口外不可达）。
+ *
+ * 因此：就绪判据改为"数据承载信号 + 取数结束 + 布局连续两次一致"
+ * （`waitForRouteReady`，见 helpers/uiux-fixtures.ts），并新增本文件第 1 节的
+ * **探针自校准**用例（注入已知缺陷 → 断言探针必须变红）。
+ * **度量原语 uiux-metrics.ts 未改动** —— 它在稳定态本来就是对的，错的只是"何时测量"。
+ *
+ * 用例数量：修复前 19 条，修复后 20 条（只有新增，没有删除/跳过/放宽）。
  *
  * ## 为什么有这份文件
  *
@@ -38,8 +61,10 @@ import {
   gotoRoute,
   logicalDevicePage,
   loginViaApi,
+  measureRouteWhenReady,
   mockOverviewFailure,
   pollUntil,
+  readOverflow,
   ROUTES,
   TOUCH_MIN_DENSE_TOOLBAR,
   TOUCH_MIN_MOBILE,
@@ -90,17 +115,29 @@ test.describe('横向溢出与真实裁切', () => {
       await loginViaApi(page, 'light')
 
       const failures: string[] = []
-      for (const route of ROUTES) {
-        await gotoRoute(page, route.path)
-        // 等布局稳定：等到"有内容的容器"出现（表格行 / 卡片 / 空态都算）
-        await page
-          .waitForSelector('.el-table__row, .el-card, .empty-state, .el-empty, form', { timeout: 15000 })
-          .catch(() => {})
+      /** 契约 §2.3 的分母纪律：每个路由都要能回答"扫了多少元素""有多少数据行" */
+      const denominators: string[] = []
 
-        const m = await pollUntil(
-          () => page.evaluate(measureOverflow),
-          (v) => v.scanned > 50,
-          `${route.name} @${vp.name}px 页面未完成渲染（扫描元素数不足，分母过小不能当合规证据）`
+      for (const route of ROUTES) {
+        // ── 就绪判据（2026-09-14 假绿修复）──────────────────────────────────
+        // 旧写法：gotoRoute + waitForSelector('.el-table__row, .el-card, …')
+        //        再 pollUntil(v => v.scanned > 50) —— **结构性分母**。
+        //        实测 /logical-device @360px：t+0 {scanned:149, rows:0, loadingMask:1,
+        //        clips:0} 就已满足该谓词，而真实裁切 300ms 后才出现（12 处、最大 365px），
+        //        门禁于是在"数据还没渲染"的瞬间取数并判合规 —— 已造成一次真实假绿
+        //        （删掉分页 flex-wrap 规则重建后仍 1 passed）。
+        // 新写法：等"数据承载信号可见（有数据/空态/错误态三者之一）+ 取数已结束
+        //        （loadmask/骨架归零）+ 布局连续两次一致"；超时即抛出、用例失败，
+        //        **绝不**退回"测得 0 处裁切所以通过"。判据细节见
+        //        helpers/uiux-fixtures.ts 的 waitForRouteReady 与 ROUTES 注释。
+        const m = await measureRouteWhenReady(page, route)
+        const facts = await page.evaluate(() => ({
+          rows: document.querySelectorAll('.el-table__row').length,
+          tables: document.querySelectorAll('.el-table').length,
+        }))
+        denominators.push(
+          `${route.name} @${vp.name}px：scanned=${m.scanned}，tables=${facts.tables}，` +
+            `rows=${facts.rows}，clips=${m.clips.length}`
         )
 
         if (m.overflow > 0) {
@@ -117,9 +154,132 @@ test.describe('横向溢出与真实裁切', () => {
           )
         }
       }
-      expect(failures, failures.join('\n')).toEqual([])
+      // 分母守卫（契约 §2.3）：每条路由都必须能自证"扫到的元素数/数据面不是 0"。
+      // 只把事实写进注释性质的输出；真正的守卫是上面 waitForRouteReady 的超时抛出。
+      // 保留这次断言是为了让分母出现在**失败信息**里（下面第一条即含全部 13 条路由）。
+      expect(denominators.length, '受审路由数量为 0，无法说明分母').toBe(ROUTES.length)
+      expect(failures, failures.join('\n') + '\n\n分母（契约 §2.3）：\n' + denominators.join('\n')).toEqual([])
     })
   }
+
+  /**
+   * ## 探针自校准：在**真实页面**上注入已知缺陷，断言探针必须变红（契约 §2.3）
+   *
+   * 为什么这条是本次修复的**核心交付**：上一轮假绿暴露的不是某一条断言写错，而是
+   * 「门禁回答不了『我的度量到底会不会红』」。本仓已有同类范式——
+   * `src/views/layout/__tests__/TouchTargets.spec.ts` 的"探针本身可校准：分母非 0"。
+   * 那条守的是"分母是 0 还是真的没缺陷"；这条守的是**横向裁切探针在真实页面上确实能变红**。
+   *
+   * ### 注入的缺陷就是历史上真实发生过的那个
+   * `LogicalDeviceList.vue` 的 `.ld-pagination :deep(.el-pagination) { flex-wrap: wrap }`。
+   * 删掉它后（主控已用"删除规则 → pnpm build → grep 产物 CSS"证实规则消失），
+   * 360px 下 `el-pagination`（实测宽 676.94px，layout="total, sizes, prev, pager, next, jumper"
+   * 自带 white-space:nowrap）在 .el-main 内容宽 352px 里被右对齐后整体左移出容器，
+   * 而 .ld-pagination / .mobile-table-wrapper / .el-main 的 scrollWidth === clientWidth
+   * （横向位移预算 0）⇒ **真实裁切**，上一页按钮永久不可达。
+   * 这里用 `addStyleTag` 在浏览器里把该规则改写成 `nowrap !important` 复现同一几何
+   * （不动源码、不动产物；主控的完整"删源码重建"变异自证见交付报告）。
+   *
+   * ### 前置条件（否则这条会变成"恒红"的空断言）
+   * 先证明**注入前**探针在稳定态确实是 0 裁切 —— 也就是先证明"绿"是真的绿。
+   *
+   * ### 断言清单
+   *   A. 前置：稳定态下 `measureOverflow().clips.length === 0`（否则本用例没有对照基准）；
+   *   B. 注入后 `clips.length > 0`；
+   *   C. 注入后存在 `overBy > 100` 的裁切条目（不是 2-3px 的亚像素噪声）；
+   *   D. 裁切发生在分页控件上（`.ld-pagination` 相关元素），而不是别处的无关元素；
+   *   E. 被裁切的元素里包含 `.btn-prev`（上一页按钮）；
+   *   F. `.btn-prev` 的 `getBoundingClientRect().left < 0` —— **视口外不可达**；
+   *   G. `document.elementFromPoint(btn-prev 中心)` 取不到该按钮 —— 用户点不到它；
+   *   H. 页面级 `scrollWidth === clientWidth`（证明这是"裁切"而非"可滚动溢出"，
+   *      即上面 A–G 测的确实是门禁守护的那类缺陷）。
+   *
+   * 覆盖 **两个 project**（uiux-gate-fine 桌面 360×800 / uiux-gate-coarse 移动 390×844 暗色）：
+   * 门禁矩阵有两个入口，校准必须证明**门禁实际使用的那个上下文**里断言会红。
+   */
+  test('探针自校准：注入已知分页裁切缺陷后 measureOverflow 必须变红（契约 §2.3）', async ({ page }) => {
+    // 复现主控实测的几何：360×800（缺陷只在窄屏出现；project 默认视口是 1440×900，
+    // 在宽屏下 nowrap 也不会裁切 —— 那会让这条校准用例变成永远为绿的假证据）
+    await page.setViewportSize({ width: 360, height: 800 })
+    await loginViaApi(page, 'light')
+    // 用与门禁同源的 mock（1003 条逻辑设备，走真分页），不依赖 ehome_uiux 的现存数据
+    await page.route('**/api/v1/logical-devices**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(logicalDevicePage(1003)),
+      })
+    )
+
+    const probe = ROUTES.find((r) => r.path === '/logical-device')!
+    // 与上一条溢出用例**完全相同**的就绪判据（否则校准的就不是门禁真正用的那条路径）
+    const before = await measureRouteWhenReady(page, probe)
+
+    // A. 前置：注入前必须是真绿，否则后面"变红"说明不了任何事
+    expect(
+      before.clips.length,
+      '注入缺陷前探针就已经是红的 —— 本用例失去对照基准：' + JSON.stringify(before.clips.slice(0, 5))
+    ).toBe(0)
+
+    // 注入已知缺陷（等价于删掉源码里的 .ld-pagination :deep(.el-pagination){flex-wrap:wrap}）
+    await page.addStyleTag({ content: '.ld-pagination .el-pagination{flex-wrap:nowrap !important}' })
+    // 等布局吸收新样式：用"探针连续两次报同一结果"代替 sleep
+    const after = await pollUntil(
+      () => readOverflow(page),
+      (v) => v.clips.length > 0,
+      '注入 flex-wrap:nowrap 后探针仍未测到任何裁切 —— 度量已退化，门禁无法发现该缺陷'
+    )
+    // 再取一次稳定读数，排除"刚好抓到过渡帧"
+    const stable = await pollUntil(
+      () => readOverflow(page),
+      (v) => v.clips.length === after.clips.length && v.scanned === after.scanned,
+      '注入后布局未稳定（两次读数不一致）'
+    )
+
+    // B/C. 有裁切，且存在 >100px 的真实裁切（不是亚像素噪声）
+    expect(stable.clips.length, '探针未测到裁切：' + JSON.stringify(stable)).toBeGreaterThan(0)
+    const big = stable.clips.filter((c) => c.overBy > 100)
+    expect(
+      big.length,
+      `裁切幅度不足（最大 ${Math.max(...stable.clips.map((c) => c.overBy))}px）—— 探针只能测到噪声`
+    ).toBeGreaterThan(0)
+
+    // D. 裁切确实发生在分页控件上
+    const onPagination = stable.clips.filter((c) => c.by.includes('ld-pagination') || c.cls.includes('pagination'))
+    expect(
+      onPagination.length,
+      '裁切不在分页控件上，断言指向了别的缺陷：' + JSON.stringify(stable.clips.slice(0, 5))
+    ).toBeGreaterThan(0)
+
+    // E/F/G/H. 上一页按钮的实际可达性（走真实几何，不看截图观感）
+    const reach = await page.evaluate(() => {
+      const btn = document.querySelector('.ld-pagination .btn-prev')
+      if (!btn) return null
+      const r = btn.getBoundingClientRect()
+      const cx = r.left + r.width / 2
+      const cy = r.top + r.height / 2
+      const hit = document.elementFromPoint(cx, cy)
+      const de = document.documentElement
+      return {
+        left: Math.round(r.left),
+        right: Math.round(r.right),
+        cx: Math.round(cx),
+        inViewport: cx >= 0 && cx <= window.innerWidth,
+        hitSelf: !!(hit && (hit === btn || btn.contains(hit))),
+        pageOverflow: de.scrollWidth - de.clientWidth,
+      }
+    })
+    expect(reach, '页面上找不到 .ld-pagination .btn-prev，无法校准可达性').not.toBeNull()
+    expect(
+      reach!.left,
+      `上一页按钮 left=${reach!.left} 未移出视口左侧 —— 注入的缺陷没有复现出"不可达"`
+    ).toBeLessThan(0)
+    expect(reach!.hitSelf, 'elementFromPoint 仍能取到上一页按钮 —— 它其实可达，缺陷未复现').toBe(false)
+    expect(
+      reach!.pageOverflow,
+      '页面级出现横向溢出，说明这是可滚动溢出而非本次守护的"真实裁切"'
+    ).toBe(0)
+  })
 
   /**
    * 守护的不变量：F9 的**具体**回归点 —— device-configs 工具栏按钮不得越出卡片内容区左边界。
