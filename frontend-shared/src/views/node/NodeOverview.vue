@@ -2058,8 +2058,12 @@ html.dark .node-overview-page {
     white-space: nowrap;
     word-break: keep-all;
   }
-  /* 上一级是真实链接（:to），保留最小 44px 触控热区高度（§4.4.5） */
-  .no-breadcrumb :deep(.el-breadcrumb__inner.is-link) { min-height: 20px; display: inline-flex; align-items: center; }
+  /* 上一级是真实链接（:to）：它就是移动端唯一的「退回上一层」入口，
+     必须满足 §4.4.5 的 44px 触控热区。改前这里写的是 min-height:20px —— 注释声称
+     44px、实测 getBoundingClientRect().height 只有 20px（390px 实测 48x20），
+     是「注释与实现相矛盾」的假达标。改为 44px 后热区由 flex 居中撑开，
+     面包屑自身高度 20px→44px，仍在 390px 的预算内（docOverflowX 保持 0）。 */
+  .no-breadcrumb :deep(.el-breadcrumb__inner.is-link) { min-height: 44px; display: inline-flex; align-items: center; }
   .no-breadcrumb :deep(.el-breadcrumb__separator) { margin: 0 6px; }
   .page-header { flex-direction: column; gap: 12px; }
   .ph-title-row { gap: 8px; }

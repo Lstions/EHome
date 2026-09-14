@@ -157,7 +157,12 @@
               </div>
             </div>
           </div>
-          <!-- 每源明细 -->
+          <!-- 每源明细。移动端宽表：合并预览弹窗在 390px 下可用宽 92vw≈359px，
+               本表 5 列合计 640px（源逻辑设备 140 / 首条 160 / 末条 160 /
+               数据量 110 / 重叠 70）⇒ 右侧「数据量」「重叠」被裁在弹窗盒外，
+               无横滚容器。照抄同页 .mobile-table-wrapper 范式。 -->
+          <div class="mobile-table-wrapper">
+            <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
           <el-table :data="preview.sources" size="small" class="preview-table">
             <el-table-column prop="name" label="源逻辑设备" min-width="140" />
             <el-table-column label="首条数据" width="160">
@@ -176,6 +181,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div>
           <div class="preview-summary">
             <div class="summary-item">
               <span class="summary-label">数据量合计（估算）</span>

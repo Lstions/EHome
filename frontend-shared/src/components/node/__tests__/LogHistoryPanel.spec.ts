@@ -116,12 +116,43 @@ function mountPanel() {
   })
 }
 
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言真实 DOM 祖先链；happy-dom 无布局引擎，像素级可达性由真浏览器探针验收：
+// frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
 describe('LogHistoryPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.getNodeLogs.mockResolvedValue({ total: 201, page: 1, size: 100, logs: [log] })
     mocks.deleteNodeLogs.mockResolvedValue({ deleted: 1 })
     mocks.confirm.mockResolvedValue('confirm')
+  })
+
+  it('F8：历史日志表渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    expectEveryTableWrapped(wrapper)
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(1)
+  })
+
+  it('F8：日志为空时不渲染空 wrapper（v-if 与 el-empty 的分支不能错位）', async () => {
+    mocks.getNodeLogs.mockResolvedValue({ total: 0, page: 1, size: 100, logs: [] })
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(0)
+    expect(wrapper.find('.el-empty').exists(), '空态必须仍然渲染').toBe(true)
   })
 
   it('reloads history when collector changes', async () => {

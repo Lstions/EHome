@@ -143,7 +143,40 @@ async function mountWithSlotTable() {
   return wrapper
 }
 
+
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言真实渲染出的 DOM 祖先链，不是源码字符串包含。
+// happy-dom 无布局引擎（getBoundingClientRect 恒 0），像素级可达性由真浏览器
+// 探针验收：frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
 describe('AlertRules.vue', () => {
+  it('F8：规则表与事件表都渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
+    const wrapper = await mountPage()
+    expectEveryTableWrapped(wrapper)
+    // 本页两张表（规则 900px / 事件 650px），逐张判定，不能一张包裹就整页通过
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(2)
+    expect(wrapper.findAll('.mobile-table-hint')).toHaveLength(2)
+  })
+
+  it('F8：真分页器仍在 wrapper 之外（横滚容器不得把分页一起卷走）', async () => {
+    const wrapper = await mountPage()
+    const pagination = wrapper.find('.events-pagination')
+    expect(pagination.exists(), '分页器不存在，用例前提不成立').toBe(true)
+    expect(pagination.element.closest('.mobile-table-wrapper')).toBeNull()
+  })
+
   it('挂载后加载规则与事件', async () => {
     await mountPage()
     expect(mockedAlertApi.listRules).toHaveBeenCalledTimes(1)

@@ -80,12 +80,50 @@ const stubs = {
   'router-link': { template: '<a><slot /></a>' },
 }
 
+
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言**真实渲染出的 DOM 祖先链**，不是源码字符串包含：
+// `expect(src).toContain('class="mobile-table-wrapper"')` 无法区分
+// 「包住了这张表」还是「包住了另一张表 / 只写在注释里」。
+// happy-dom 无布局引擎（getBoundingClientRect 恒 0），像素级可达性由真浏览器
+// 探针验收：frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
 describe('Dashboard.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     localStorage.clear()
     sessionStorage.clear()
+  })
+
+  it('F8：最新数据表渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
+    const { dataApi } = await import('@/api/data')
+    // 必须用 mockResolvedValueOnce：mockResolvedValue 会永久替换实现，
+    // 而 beforeEach 的 clearAllMocks 只清调用记录、不还原实现 ——
+    // 会污染后续用例（本用例第一版就因此弄红了 4 条无关测试）。
+    vi.mocked(dataApi.getOverview).mockResolvedValueOnce({
+      nodes_total: 1, nodes_online: 1, devices_total: 1, devices_online: 1,
+      nodes_offline: 0, devices_offline: 0,
+      pending_commands: 0, alerts_today: 0, data_points_today: 0,
+      latest_data: [{ device_id: 1, device_name: '温湿度', node_name: 'n1', data: {}, raw_data: '', collected_at: '2026-09-01T00:00:00Z' }],
+    } as never)
+    const wrapper = mount(Dashboard, { global: { stubs } })
+    await flushPromises()
+    expectEveryTableWrapped(wrapper)
+    // 本页只有「最新数据」一张表；KPI/趋势区不是表格
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(1)
   })
 
   it('renders dashboard container', async () => {

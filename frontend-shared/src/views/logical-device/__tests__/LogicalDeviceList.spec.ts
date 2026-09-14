@@ -133,10 +133,29 @@ const mountPage = () =>
     },
   })
 
+
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言**真实渲染出的 DOM 祖先链**，不是源码字符串包含。
+// happy-dom 无布局引擎（getBoundingClientRect 恒 0），像素级可达性由真浏览器
+// 探针验收：frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
 describe('LogicalDeviceList.vue', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockRoute.query = {}
+
     mockList.mockResolvedValue({ items: [], total: 0 })
     mockPreview.mockResolvedValue({ sources: [], target_retention_days: 365 })
     mockMerge.mockResolvedValue({ target_id: 9, job_ids: [11] })
@@ -155,6 +174,41 @@ describe('LogicalDeviceList.vue', () => {
       finished_at: null,
     })
     mockUpdate.mockImplementation(async (_id, updates) => makeItem(updates))
+  })
+
+  // ─── F8 移动端宽表横滚合同 ───
+
+  it('F8：列表宽表渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
+    mockList.mockResolvedValue({ items: [makeItem()], total: 1 })
+    const wrapper = mountPage()
+    await flushPromises()
+    expectEveryTableWrapped(wrapper)
+  })
+
+  it('F8：合并预览弹窗内的每源明细表也被包裹（弹窗 720px > 390px 视口）', async () => {
+    mockList.mockResolvedValue({
+      items: [makeItem({ id: 3, name: 'A', device_type: 'bms' }), makeItem({ id: 5, name: 'B', device_type: 'bms' })],
+      total: 2,
+    })
+    mockPreview.mockResolvedValue({
+      sources: [{ id: 3, name: 'A', device_type: 'bms', first_data_at: null, last_data_at: null, row_estimate: 1000, overlap_with_others: false }],
+      target_retention_days: 365,
+    })
+
+    const wrapper = mountPage()
+    await flushPromises()
+    // 选中两行 -> 点「合并所选」打开预览弹窗（与既有用例同一条路径）
+    const checkboxes = wrapper.findAll('input.el-table__row-checkbox')
+    await checkboxes[0].setValue(true)
+    await checkboxes[1].setValue(true)
+    await wrapper.findAll('button').find(b => b.text().includes('合并所选'))!.trigger('click')
+    await flushPromises()
+
+    // 前提校验：预览弹窗内的明细表必须真的渲染出来了，否则本用例会假绿
+    expect(wrapper.find('.preview-table').exists(), '预览弹窗未渲染 .preview-table，用例前提不成立').toBe(true)
+    expectEveryTableWrapped(wrapper)
+    // 本页此时应有 2 个 wrapper：列表宽表 + 弹窗内每源明细表
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(2)
   })
 
   // ─── 列表渲染 ───

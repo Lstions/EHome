@@ -370,6 +370,20 @@ describe('NodeOverview (生产页)', () => {
     expect(mobileBlock).toMatch(/word-break:\s*keep-all/)
   })
 
+  it('F10：移动端唯一的上层级入口（「节点管理」链接）在 ≤768px 有 ≥44px 触控热区', () => {
+    const css = stripCssComments(source)
+    const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
+    // 改前这里写 min-height:20px，注释却声称 44px —— 390px 真浏览器实测
+    // 该链接布局盒只有 48x20（elementFromPoint 命中，但热区不足 §4.4.5 MUST）。
+    // 它是移动端**唯一**的「退回上一层」入口（顶栏面包屑 display:none、
+    // 「返回列表」按钮不在渲染路径上），所以热区必须真的补足。
+    const linkRule = mobileBlock.match(/\.no-breadcrumb\s*:deep\(\.el-breadcrumb__inner\.is-link\)\s*\{[^}]*\}/)
+    expect(linkRule, '缺少移动端面包屑链接的触控规则').not.toBeNull()
+    expect(linkRule![0]).toMatch(/min-height:\s*44px/)
+    // 反例守卫：不得回退到 <44px
+    expect(linkRule![0]).not.toMatch(/min-height:\s*(1?[0-9]|2[0-9]|3[0-9]|4[0-3])px/)
+  })
+
   it('移动端面包屑容器横向滚动有上限：min-width:0 + 滚动条隐藏', () => {
     const css = stripCssComments(source)
     const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))

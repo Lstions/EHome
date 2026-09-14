@@ -94,6 +94,11 @@
 
     <!-- 来源表格 -->
     <section class="card">
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+           本表 9 列合计 1270px，且「操作」是 330px 的 fixed="right" —— 390px 视口下
+           固定列占表格宽 106.5%，右缘越出表格盒 20px，行内 5 个操作按钮全部不可达。 -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.items" v-loading="store.loading" data-test="ds-table">
         <el-table-column label="逻辑设备" min-width="100">
           <template #default="{ row }">
@@ -179,6 +184,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <EmptyState
         v-if="!store.loading && store.items.length === 0"

@@ -8,6 +8,12 @@
         <span class="card-title">规则<el-tag v-if="store.rules.length" size="small" class="count-tag">{{ store.rules.length }}</el-tag></span>
         <el-button type="primary" :icon="Plus" data-test="create-rule" @click="openCreate">创建规则</el-button>
       </div>
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+           本表 8 列合计 900px（名称 140 / 目标 120 / 传感器 120 / 阈值 140 /
+           持续 80 / 级别 90 / 启用 80 / 操作 130），390px 视口下表格盒 310px，
+           操作列 fixed="right" 130px（占 41.9%）"粘"在右缘、数据列被压到 180px。 -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.rules" v-loading="store.rulesLoading" data-test="rules-table">
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
         <el-table-column label="目标" min-width="120">
@@ -42,6 +48,7 @@
         </el-table-column>
         <template #empty>暂无规则，点击右上角创建</template>
       </el-table>
+      </div>
     </section>
 
     <!-- 事件时间线 -->
@@ -54,6 +61,11 @@
         </span>
         <el-button link size="small" data-test="mark-read" @click="onMarkAllRead">全部标记已读</el-button>
       </div>
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+           本表 5 列合计 650px（状态 100 / 规则 120 / 值 110 / 触发时间 160 /
+           恢复时间 160），390px 视口下表格盒 310px ⇒ 「恢复时间」整列落在盒外。 -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.events" v-loading="store.eventsLoading" data-test="events-table">
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
@@ -76,6 +88,7 @@
         </el-table-column>
         <template #empty>暂无告警事件</template>
       </el-table>
+      </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表绑 store 的全量数组 —— 后端 Limit(500) 静默截断, 前端
            el-pagination 数量为 0, 用户既看不到 total 也没有翻页入口。 -->

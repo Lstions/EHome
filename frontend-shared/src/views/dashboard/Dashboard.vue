@@ -243,7 +243,13 @@
             </div>
           </template>
           <el-skeleton v-if="loading" :rows="5" animated />
-          <el-table v-else-if="(overview.latest_data || []).length > 0" :data="overview.latest_data" stripe>
+          <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+               本表 5 列合计 880px（设备名称 150 / 所属节点 150 / 解析数据 280 /
+               原始数据 200），390px 视口下表格盒约 300px；「解析数据」「原始数据」
+               两列几乎完全落在盒外且无横滚容器（el-table overflow:hidden）。 -->
+          <div v-else-if="(overview.latest_data || []).length > 0" class="mobile-table-wrapper">
+            <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+          <el-table :data="overview.latest_data" stripe>
             <el-table-column prop="device_name" label="设备名称" width="150">
               <template #default="{ row }">
                 <router-link :to="`/edge-device/${row.device_id}`" class="device-link">
@@ -275,6 +281,7 @@
               </template>
             </el-table-column>
           </el-table>
+          </div>
           <EmptyState
             v-else-if="overviewError"
             kind="error"

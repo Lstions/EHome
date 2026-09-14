@@ -150,7 +150,35 @@ async function mountPage() {
   return wrapper
 }
 
+
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言**真实渲染出的 DOM 祖先链**，不是源码字符串包含：
+// `expect(src).toContain('class="mobile-table-wrapper"')` 无法区分
+// 「包住了这张表」还是「包住了另一张表 / 只写在注释里」。
+// happy-dom 无布局引擎（getBoundingClientRect 恒 0），像素级可达性由真浏览器
+// 探针验收：frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
 describe('DataSourceList.vue', () => {
+  it('F8：来源表渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
+    const wrapper = await mountPage()
+    expectEveryTableWrapped(wrapper)
+    // 本表 9 列合计 1270px、操作列 fixed 330px：390px 下固定列占表格宽 106.5%，
+    // 必须真的包起来（真浏览器实测见 .tmp-probe/f8-f10-probe.mjs）
+    expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(1)
+  })
+
   it('挂载后加载列表，表格渲染 mock 数据行', async () => {
     const wrapper = await mountPage()
     expect(mockedApi.list).toHaveBeenCalledTimes(1)

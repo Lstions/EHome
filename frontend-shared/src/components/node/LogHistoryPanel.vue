@@ -86,7 +86,12 @@
       </el-button>
     </div>
 
-    <el-table v-if="logs.length > 0" :data="logs" stripe size="small" class="history-table">
+    <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+         本表 4 列合计 672px（时间 180 / Tag 120 / 消息 280），390px 视口下表格盒约
+         310px ⇒ 消息列与 Tag 列被裁在盒外且不可达（无 fixed 列，无横滚容器）。 -->
+    <div v-if="logs.length > 0" class="mobile-table-wrapper">
+      <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+    <el-table :data="logs" stripe size="small" class="history-table">
       <el-table-column label="时间" min-width="180">
         <template #default="{ row }">{{ formatHistoryTime(row.created_at) }}</template>
       </el-table-column>
@@ -98,6 +103,7 @@
       <el-table-column prop="tag" label="Tag" min-width="120" />
       <el-table-column prop="message" label="消息" min-width="280" show-overflow-tooltip />
     </el-table>
+    </div>
     <el-empty v-else description="暂无历史日志" />
 
     <el-pagination

@@ -22,7 +22,14 @@
           <el-button size="small" @click="selectedFirmwares = []">取消选择</el-button>
         </div>
 
-        <el-table v-if="firmwares.length > 0" :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef">
+        <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
+             本表 8 列合计 1065px（选择 45 / ID 50 / 版本号 120 / 目标型号 120 /
+             文件大小 100 / SHA256 180 / 创建时间 170 / 操作 280），且操作列**不是**
+             fixed 列 —— 390px 视口下表格盒约 310px，操作列整体落在盒外，
+             「编辑/复制链接/下载/删除」四个按钮不可达且无任何横滚提示。 -->
+        <div v-if="firmwares.length > 0" class="mobile-table-wrapper">
+          <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
+        <el-table :data="firmwares" stripe @selection-change="handleSelectionChange" ref="tableRef">
           <el-table-column type="selection" width="45" />
           <el-table-column prop="id" label="ID" width="50" />
           <el-table-column label="版本号" width="120">
@@ -73,6 +80,7 @@
             </template>
           </el-table-column>
         </el-table>
+        </div>
 
         <div style="display: flex; justify-content: center; margin-top: 16px;" v-if="total > 0">
           <el-pagination
