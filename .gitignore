@@ -89,3 +89,14 @@ backend/f6-env-dev.env
 # 数据库备份产物（pg_dump/校验文件，不入库）
 backups/
 *.dump
+
+# 执行者一次性探针/草稿（本轮新增，2026-09-13 第九轮）
+# 为什么扩这条规则：本轮多个子代理即使被要求「探针放 .tmp-probe/」，仍在
+# frontend-shared/ 根下就地写了 tmp-probe2.mjs / varprobe.tmp.mjs / .audit-tokens.mjs 等文件。
+# 约定：可复用的工具放 frontend-shared/tools/ 并入库；一次性草稿必须落在下面这些模式里。
+frontend-shared/*.tmp.mjs
+frontend-shared/*-probe*.mjs
+frontend-shared/.*-tokens.mjs
+frontend-shared/.f16-before.mjs
+**/*.tmp.mjs
+**/__probe.spec.ts
