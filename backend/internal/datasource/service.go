@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/notify"
 	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
@@ -89,9 +90,18 @@ type Options struct {
 
 // Service 数据源主备领域服务。
 type Service struct {
-	db     *gorm.DB
-	opts   Options
+	db   *gorm.DB
+	opts Options
+	// notify 是既有的**回调式**通知注入点 (早于 D-1 存在, 测试用它收集通知,
+	// 历史上 main.go 也用它直接落库)。保留不动以维持既有断言与兼容。
 	notify func(models.Notification)
+	// notifySink 是 D-1 步骤 3 的"通知写入 + 投递"入口: main.go 经 SetNotifier
+	// 注入 notify.Dispatcher, 由它写 notifications 行并顺带外发投递。
+	//
+	// 与上面的 notify 回调并存, 优先级: notifySink > notify > 直接落库。
+	// **nil 是显式支持的合法状态**: 既有测试只注 notify 或不注入, 行为不变
+	// (见 emit)。
+	notifySink notify.Notifier
 }
 
 // New 构造 Service，补齐 Options 默认值。
@@ -115,8 +125,21 @@ func New(db *gorm.DB, opts Options) *Service {
 }
 
 // SetNotifier 注入通知投递回调；nil → 回落到直接写 notifications 表。
+//
+// 注: 这是**既有**的回调式注入点 (测试收集通知用)。D-1 步骤 3 的生产接线走
+// SetDispatchNotifier, 两者可共存 (见 emit 的优先级)。
 func (s *Service) SetNotifier(fn func(models.Notification)) {
 	s.notify = fn
+}
+
+// SetDispatchNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
+//
+// 契约: 注入后通知经它落库并顺带外发投递; 传 nil 显式回落
+// (先回 notify 回调, 再回直接写 notifications 表)。
+// 窄接口 (notify.Notifier) 而非 *notify.Dispatcher: 沿用本仓"setter 二阶段注入 +
+// 避免包间编译期依赖"的既有范式。
+func (s *Service) SetDispatchNotifier(n notify.Notifier) {
+	s.notifySink = n
 }
 
 func (s *Service) now() time.Time { return s.opts.Now() }
@@ -855,13 +878,26 @@ func (s *Service) newNotification(typ, title, message string, sourceID uint) mod
 }
 
 // emitAll 事务提交后投递通知；投递失败不影响状态迁移 (fail-open)。
+//
+// 调用时序 (D-1 步骤 3 的投递时机依据): 全部 7 个调用点都在
+// s.db.Transaction(...) **返回之后** (事务已提交/已回滚), 因此把同步投递接在这里
+// 不会把出站 HTTP 拖进业务事务。详见 notify/dispatcher.go 的 Create 投递时机裁决。
 func (s *Service) emitAll(notes []models.Notification) {
 	for i := range notes {
 		s.emit(notes[i])
 	}
 }
 
+// emit 落库一条通知, 优先级: notifySink (Dispatcher, 落库+外发) > notify (既有回调,
+// 只收集/落库) > 直接写 notifications 表。
+//
+// nil 回落是**显式设计**而非"碰巧没 nil": 既有测试只注入 notify 回调 (或不注入),
+// 未接线的构造必须保持改造前逐字节相同的行为, 不得 panic。
 func (s *Service) emit(n models.Notification) {
+	if s.notifySink != nil {
+		s.notifySink.Create(context.Background(), &n)
+		return
+	}
 	if s.notify != nil {
 		s.notify(n)
 		return

@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/notify"
 )
 
 // 搬迁批次参数 (§4.3 锁交互说明, 与 purge/backfill 同策略):
@@ -57,6 +58,10 @@ type Migrator struct {
 	// batchHook 在每批事务执行前调用 (table, watermark, windowEnd);
 	// 返回错误模拟批次失败——测试注入点, 生产恒为 nil。
 	batchHook func(table string, watermark, windowEnd int64) error
+	// notifier 通知写入+投递入口 (D-1 步骤 3): main.go 经 SetNotifier 注入
+	// notify.Dispatcher。**nil 是显式支持的合法状态** —— 既有测试直接
+	// NewMigrator(db) 不注入时回落为直接写 notifications 表, 行为不变。
+	notifier  notify.Notifier
 	startOnce sync.Once
 	stopCh    chan struct{}
 	stopOnce  sync.Once
@@ -408,9 +413,32 @@ func (m *Migrator) failAttempt(ctx context.Context, job *models.MergeJob, result
 	}
 }
 
+// SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
+//
+// 契约: 注入后通知经它落库并顺带外发投递; 传 nil 显式回落为直接写 notifications 表。
+// 窄接口 (notify.Notifier) 而非 *notify.Dispatcher: 沿用本仓"setter 二阶段注入 +
+// 避免包间编译期依赖"的既有范式 (对齐 nodemgr.SetAlertEvaluator)。
+func (m *Migrator) SetNotifier(n notify.Notifier) {
+	m.notifier = n
+}
+
 // notify persists a Notification row (best-effort; notification failure
 // must not mask the underlying error).
+//
+// D-1 步骤 3: 落库改经注入的 Notifier (Dispatcher), 由它顺带按通道配置外发投递。
+//
+// nil 回落是**显式设计** (既有测试直接 NewMigrator(db) 不注入, 行为必须不变):
+// 回落路径与改造前逐字节相同。
+//
+// 投递时机: 本函数的两个调用点都在业务事务**提交之后** —— 失败分支在
+// Transaction(...) 的 err 判定之后 (txErr 已提交); 受阻分支之前只有一条独立
+// Update。因此同步投递不会把出站 IO 拖进事务。详见 notify/dispatcher.go 的
+// Create 投递时机裁决。
 func (m *Migrator) notify(ctx context.Context, n models.Notification) {
+	if m.notifier != nil {
+		m.notifier.Create(ctx, &n)
+		return
+	}
 	if err := m.db.WithContext(ctx).Create(&n).Error; err != nil {
 		slog.Error("datalifecycle: create notification failed",
 			"source", n.Source, "error", err)

@@ -11,6 +11,7 @@ import (
 
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/notify"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 
@@ -49,6 +50,12 @@ type Planner struct {
 
 	// nowFn 可注入时钟 (测试用), 默认 time.Now。
 	nowFn func() time.Time
+
+	// notifier 通知写入+投递入口 (D-1 步骤 3, 设计/外发通知通道.md §2.1 取向 A):
+	// main.go 经 SetNotifier 注入 notify.Dispatcher。
+	// **nil 是显式支持的合法状态**: 既有测试 NewPlanner(db, svc, nil, id) 不注入时,
+	// 回落为直接写 notifications 表 —— 行为与改造前逐字节等价 (见 createNotification)。
+	notifier notify.Notifier
 }
 
 // NewPlanner 构造编排器。systemActorID 是 users 表内置系统主体用户
@@ -75,6 +82,39 @@ func NewPlanner(db *gorm.DB, cmdSvc *commandexec.Service, broadcast func(string,
 // 与 databus 的 latestSink 同点挂接, 避免 automation→api 编译期依赖。
 func (p *Planner) SetLatestValueFn(fn func(deviceID uint) (models.UnifiedData, bool)) {
 	p.latestValueFn = fn
+}
+
+// SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
+//
+// 契约: 注入后通知经它落库并顺带外发投递; 传 nil 显式回落为直接写 notifications 表。
+// 沿用本包既有的二阶段 setter 注入范式 (SetLatestValueFn) 与窄接口取向, 避免
+// automation→(外发 HTTP 引擎) 的编译期依赖。
+func (p *Planner) SetNotifier(n notify.Notifier) {
+	p.notifier = n
+}
+
+// createNotification 落库一条通知 (D-1 步骤 3: 经注入的 Notifier 或直接落库)。
+//
+// nil 回落是**显式设计**: 既有测试直接 NewPlanner(db, ...) 不注入, 必须保持
+// 改造前的行为 (直接 Create + 同一条指标与日志), 不得 panic。
+//
+// 以下三个前提使"注入后同步投递"安全 (见 notify/dispatcher.go 的投递时机裁决):
+//   - 本函数**不在任何事务内**被调用 (notifydailyLimitOnce / notifyConfirmation /
+//     notifyAction 全部在 recordRet 的独立 db.Create 返回后才调用);
+//   - 返回 true 表示已拿到自增 ID, 调用方据此广播 WS 载荷 (契约: 广播的必须是
+//     库里真实存在的通知行), 因此要求同步落库 —— 不能用 CreateAsync;
+//   - Dispatcher 自身 fail-open 且带 recover, 通知路径不会掀翻 Planner 控制流。
+func (p *Planner) createNotification(ctx context.Context, n *models.Notification, scope string) bool {
+	if p.notifier != nil {
+		p.notifier.Create(ctx, n)
+		return n.ID != 0
+	}
+	if err := p.db.Create(n).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
+		logger.Warn("automation: failed to create notification", "scope", scope, "error", err)
+		return false
+	}
+	return true
 }
 
 // HandleTrigger 实现 TriggerHandler 接口, 由 Evaluator 在 armed→triggered 时调用。
@@ -412,9 +452,7 @@ func (p *Planner) notifyDailyLimitOnce(rule models.AutomationRule, at time.Time,
 		Read:        false,
 		CreatedAt:   at,
 	}
-	if err := p.db.Create(&n).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
-		logger.Warn("automation: failed to create daily limit notification", "rule_id", rule.ID, "error", err)
+	if !p.createNotification(context.Background(), &n, "daily_limit") {
 		return
 	}
 	if p.broadcast != nil {
@@ -467,9 +505,7 @@ func (p *Planner) notifySystemActorUnavailableOnce(at time.Time, eventID uint, c
 		Read:        false,
 		CreatedAt:   at,
 	}
-	if err := p.db.Create(&n).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
-		logger.Warn("automation: failed to create system actor notification", "error", err)
+	if !p.createNotification(context.Background(), &n, "system_actor_unavailable") {
 		return
 	}
 	if p.broadcast != nil {
@@ -494,9 +530,7 @@ func (p *Planner) notifyConfirmation(rule models.AutomationRule, at time.Time, v
 		Read:        false,
 		CreatedAt:   at,
 	}
-	if err := p.db.Create(&n).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
-		logger.Warn("automation: failed to create confirmation notification", "rule_id", rule.ID, "error", err)
+	if !p.createNotification(context.Background(), &n, "pending_confirm") {
 		return
 	}
 	if p.broadcast != nil {
@@ -527,9 +561,8 @@ func (p *Planner) notifyAction(rule models.AutomationRule, at time.Time, value f
 		Read:        false,
 		CreatedAt:   at,
 	}
-	if err := p.db.Create(&n).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues("automation_planner", "notifications").Inc()
-		logger.Warn("automation: failed to create action notification", "rule_id", rule.ID, "error", err)
+	if !p.createNotification(context.Background(), &n, "notification_action") {
+		return
 	}
 }
 

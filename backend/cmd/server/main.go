@@ -26,6 +26,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/nodemgr"
+	"ehome/backend/internal/notify"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/seed"
@@ -160,12 +161,27 @@ func main() {
 
 	// 数据生命周期 P3 (方案 v3.3 §4.3 任务 3): 合并搬迁 worker — 处理
 	// merge_status='pending' 源的数据搬迁, 水位断点续跑 + 失败通知/重试。
+	// 外发通知通道 (D-1 步骤 3, 设计/外发通知通道.md §2.1 取向 A): Dispatcher 是
+	// **所有通知写入点的唯一落库入口** —— 它写 notifications 行 (保持现有语义),
+	// 再按 notification_channels 配置外发投递 (出站 HTTP/SSRF 判定/超时/重试/
+	// 投递审计/指标全部封装在 internal/notify 内)。
+	//
+	// 接线必须早于下面所有通知生产者 (migrator / retention / alert / datasource /
+	// automation): 漏掉任何一个, 它的 notifySink 就保持 nil 而走"直接落库"回落 ——
+	// 通知照旧出现在通知中心, 但**永远不会外发**, 正是本步骤要消灭的"引擎孤儿"。
+	//
+	// 必须在 database.AutoMigrate() 之后构造: Dispatcher 要读 notification_channels /
+	// notification_deliveries 表。
+	notifyDispatcher := notify.NewDispatcher(db)
+
 	migrator := datalifecycle.NewMigrator(db)
+	migrator.SetNotifier(notifyDispatcher)
 	migrator.Start()
 
 	// 数据生命周期 P3 (方案 v3.3 §4.1/§4.2/§4.3 任务 1): retention 每日
 	// 任务 — 到期前 30/7 天通知 + 到期分批硬删。
 	retentionTask := datalifecycle.NewRetentionTask(db)
+	retentionTask.SetNotifier(notifyDispatcher)
 	retentionTask.Start()
 
 	if credential, err := authservice.CreateStartupInitializationCredential(db); err != nil {
@@ -225,6 +241,9 @@ func main() {
 	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
 	// 阈值告警引擎 (方案 v0.4 §5 任务C): 求值器构造 + 解析后回调接线。
 	alertEvaluator := alert.NewEvaluator(db, wsHub.BroadcastEvent)
+	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的
+	// 用户价值来源 —— 无人值守时把告警推到微信/QQ。
+	alertEvaluator.SetNotifier(notifyDispatcher)
 	nodeMgr.SetAlertEvaluator(alertEvaluator)
 	go alertEvaluator.Start()
 	defer alertEvaluator.Stop()
@@ -253,6 +272,9 @@ func main() {
 	// 数据源主备领域服务 (B1 已实现)。显式 Options{} 即 §4 默认语义:
 	// Cooldown 5m / MinResidency 2m / Staleness 5m / ScanInterval 60s。
 	datasourceSvc := datasource.New(db, datasource.Options{})
+	// 数据源主备通知经 Dispatcher 落库 + 外发 (D-1 步骤 3)。Dispatcher 优先级高于
+	// 下面既有的 SetNotifier 回调; 那个回调保留为未接线时的回落。
+	datasourceSvc.SetDispatchNotifier(notifyDispatcher)
 	// 数据源主备引擎接线 (设计/数据源主备与故障转移.md §4/§6):
 	//   解析成功 → MarkSuccess; 边缘设备离线 → MarkFailure; 停滞扫描 → Start。
 	// 硬约束: sink 注入必须在 nodemgr.NewManager 之后 (nodeMgr 已构建);
@@ -275,6 +297,9 @@ func main() {
 
 	// systemActorPrecheckID 可能为 0 (全新安装): 语义是"待 Planner 惰性解析", 不是有效 actor。
 	automationPlanner := automation.NewPlanner(db, commandService, wsHub.BroadcastEvent, systemActorPrecheckID)
+	// 自动化策略通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 日熔断 / 待人工确认 /
+	// 纯通知动作 / 系统主体不可用四类通知随之可外发 —— 无人值守下"待确认"必须能推送到手机。
+	automationPlanner.SetNotifier(notifyDispatcher)
 	// F4 条件复核接线: 注入最新值缓存查询, 触发到执行间条件失效则落 condition_changed 不执行。
 	// 用函数注入避免 automation→api 编译期反向依赖 (与 databus latestSink 同模式)。
 	automationPlanner.SetLatestValueFn(api.LatestValue)
@@ -391,7 +416,10 @@ func main() {
 		}))
 	}
 	controlCfg := cfg.ControlConfig()
-	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, api.ControlPolicy{
+	// notifyDispatcher 一并交给 API 层: POST /notification-channels/:id/test 要用它真发
+	// 一条测试消息 (D-1 步骤 4)。传的是**同一个实例** —— 否则"测试按钮"与真实通知
+	// 走两套客户端/两套 SSRF 判定的风险, 且测试通过不代表线上通道可用。
+	api.SetupRoutes(r, db, wsHub, nodeMgr, otaMgr, driverRegistry, commandService, alertEvaluator, automationEvaluator, automationPlanner, datasourceSvc, notifyDispatcher, api.ControlPolicy{
 		RawDiagnosticsEnabled: controlCfg.RawDiagnosticsEnabled,
 	})
 

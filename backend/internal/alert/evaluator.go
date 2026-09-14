@@ -7,6 +7,7 @@
 package alert
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/notify"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/parser"
@@ -46,6 +48,12 @@ type Evaluator struct {
 	// broadcast WS 广播回调 (websocket.Hub.BroadcastEvent), main.go 注入,
 	// 避免 alert→websocket 编译期依赖。nil 时跳过广播。
 	broadcast func(eventType string, payload any)
+	// notifier 通知写入+投递入口 (D-1 步骤 3, 设计/外发通知通道.md §2.1 取向 A):
+	// main.go 经 SetNotifier 注入 notify.Dispatcher。
+	// **nil 是显式支持的合法状态** (而非"碰巧没 nil"): 既有测试与任何直接构造
+	// Evaluator 的代码不注入时, 回落为直接写 notifications 表 —— 行为与改造前
+	// 逐字节等价 (见 createNotification 注释)。
+	notifier notify.Notifier
 
 	mu sync.RWMutex
 	// rules 规则缓存 (仅 enabled 规则), key: rule ID。
@@ -74,6 +82,15 @@ func NewEvaluator(db *gorm.DB, broadcast func(eventType string, payload any)) *E
 	}
 	e.LoadRules()
 	return e
+}
+
+// SetNotifier 注入"通知写入 + 投递"入口 (D-1 步骤 3, main.go 接线)。
+//
+// 契约: 注入后通知经它落库并顺带外发投递; 传 nil 显式回落为直接写 notifications 表。
+// 采用窄接口 (notify.Notifier) 而非 *notify.Dispatcher, 与本包已有的 broadcast 函数
+// 注入同思路 —— 避免 alert→(外发 HTTP 引擎) 的编译期依赖。
+func (e *Evaluator) SetNotifier(n notify.Notifier) {
+	e.notifier = n
 }
 
 // LoadRules 全量加载 enabled 规则到缓存 (CRUD 写路径经 Invalidate 即时调用;
@@ -291,6 +308,32 @@ func (e *Evaluator) onResolve(rule models.AlertRule, value float64, at time.Time
 	e.notify(rule, ev, value, at)
 }
 
+// createNotification 落库一条通知 (D-1 步骤 3: 经注入的 Notifier 或直接落库)。
+//
+// nil 回落是**显式设计**而非"碰巧没 nil":
+//   - 注入时: 交给 notify.Dispatcher —— 它负责写 notifications 行 + 按通道配置外发投递
+//     (设计 §2.1 取向 A 的单一入口); Dispatcher 本身 fail-open, 不返回错误。
+//   - 未注入时 (既有测试直接 NewEvaluator(db, ...) / 任何未接线的构造): 回落为
+//     改造前逐字节相同的直接 Create + 同一条指标与日志。既有行为与断言不受影响。
+//
+// 返回 true 表示通知已落库 (自增 ID 可用, 广播前提)。广播契约 (负债 D-3) 要求
+// 拿到 ID 才广播, 因此两条路径都必须**同步**完成落库后才返回 —— 这也是写入点
+// 一律用 Dispatcher.Create 而非 CreateAsync 的原因 (见 notify/dispatcher.go)。
+func (e *Evaluator) createNotification(ctx context.Context, n *models.Notification, ruleID uint) bool {
+	if e.notifier != nil {
+		e.notifier.Create(ctx, n)
+		// Dispatcher 不返回错误 (fail-open); 落库失败时 n.ID 保持 0, 由下面的
+		// 广播前提 (ID != 0) 统一兜住, 无需在此重复判定。
+		return n.ID != 0
+	}
+	if err := e.db.Create(n).Error; err != nil {
+		metrics.DataConsumerDBWriteFailures.WithLabelValues("alert_evaluator", "notifications").Inc()
+		logger.Warn("alert: failed to create notification", "rule_id", ruleID, "error", err)
+		return false
+	}
+	return true
+}
+
 // notify 写 Notification 行 + WS BroadcastEvent (events.Notification 类型)。
 //
 // 载荷契约 (负债 D-3): 广播的必须是**通知实体本身** —— 与前端
@@ -313,9 +356,7 @@ func (e *Evaluator) notify(rule models.AlertRule, ev models.AlertEvent, value fl
 		Read:        false,
 		CreatedAt:   at,
 	}
-	if err := e.db.Create(&n).Error; err != nil {
-		metrics.DataConsumerDBWriteFailures.WithLabelValues("alert_evaluator", "notifications").Inc()
-		logger.Warn("alert: failed to create notification", "rule_id", rule.ID, "error", err)
+	if !e.createNotification(context.Background(), &n, rule.ID) {
 		return
 	}
 	if e.broadcast != nil {
