@@ -95,8 +95,8 @@
     <!-- 来源表格 -->
     <section class="card">
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
-           本表 9 列合计 1270px，且「操作」是 330px 的 fixed="right" —— 390px 视口下
-           固定列占表格宽 106.5%，右缘越出表格盒 20px，行内 5 个操作按钮全部不可达。 -->
+           本表 9 列合计 1270px，且「操作」是 330px 的固定列 —— 390px 视口下占表格盒
+           106.5%，整列压住「名称」列（F26）。窄屏已取消该列的 fixed，见下表列定义。 -->
       <div class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.items" v-loading="store.loading" data-test="ds-table">
@@ -140,7 +140,17 @@
         <el-table-column label="最后成功" min-width="150">
           <template #default="{ row }">{{ relativeTime(asSource(row).last_success) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="330" fixed="right">
+        <!-- F26 裁决 D2：窄屏取消固定列（原 fixed="right"）。
+             实测（360/390px，48 点 elementFromPoint 网格）：330px 的粘性列大于表格盒
+             （占比 117.9%/106.5%），整列压在「名称」列上 —— 行内 5 个操作按钮与
+             「名称」链接命中自身 0/48、命中固定列 48/48；桌面 1440px 命中 48/48 正常。
+             故只在窄屏让位：宽度 330px 与列内容一字不改 ⇒ 桌面（≥769px）视觉密度
+             逐像素不变（§4.2.3 紧凑运维密度）。
+             为什么不照 EdgeDeviceList 收窄成 96px 图标列：实测本表 5 个 36px 热区
+             放不进 96px，会折成 5 行、桌面行高 40px → 183px，直接改变桌面密度；
+             即使收窄到单行所需的 208px，窄屏仍占表格盒 67.1%（照样遮挡），
+             且桌面列宽也被改动 —— 两条都不满足本任务的硬性约束。 -->
+        <el-table-column label="操作" width="330" :fixed="isMobile ? false : 'right'">
           <template #default="{ row }">
             <el-button
               link
@@ -333,7 +343,8 @@ import type {
   FailoverTrigger,
 } from '@/api/dataSource'
 
-const { width: viewportWidth } = useResponsive()
+// isMobile（<768px）用于窄屏取消操作列的固定（F26），断点与 theme.css 一致。
+const { width: viewportWidth, isMobile } = useResponsive()
 
 /**
  * 详情抽屉宽度：桌面保持 560px，窄视口按 92vw 收敛（与全局 .el-dialog 的 92vw 兜底同一比例），

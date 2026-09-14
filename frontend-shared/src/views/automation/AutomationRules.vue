@@ -47,7 +47,19 @@
             <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <!-- F26 裁决 D2：该列在窄屏**取消固定**（原 width="180" fixed="right"）。
+             实测（390px，48 点 elementFromPoint 网格）：固定列 180px 压在「启用」列上，
+             行内 el-switch 命中自身 0/48、命中固定列 48/48 —— 开关 100% 不可点；
+             桌面 1440px 命中 48/48（完全正常）。根因是粘性列的绘制顺序恒在普通列之上
+             （见 theme.css「固定列」小节），与列宽无关，故不适用收窄列宽那条路：
+             若按 EdgeDeviceList 范式改成图标按钮，桌面操作列会从 180px 降到 96px，
+             直接改变本页桌面视觉密度（任务书禁止）。
+             改法：宽度与内容不变，只在窄屏（<768px，与 useResponsive 的 BREAKPOINTS.md
+             同源）把 fixed 置 false。EP 的 table-column 对 fixed 注册了 watch 并触发
+             scheduleLayout（element-plus/es/components/table/src/table-column/watcher-helper.mjs），
+             运行期翻转会重算固定列集合；组件挂载时 isMobile 已是正确值，
+             桌面渲染路径与改前逐字节等价。 -->
+        <el-table-column label="操作" width="180" :fixed="isMobile ? false : 'right'">
           <template #default="{ row }">
             <el-button link type="warning" size="small" :loading="triggeringId === row.id" data-test="trigger-rule" @click="onTrigger(asRule(row))">触发</el-button>
             <el-button link type="primary" size="small" @click="openEdit(asRule(row))">编辑</el-button>
@@ -279,6 +291,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import {
   automationApi,
@@ -296,6 +309,9 @@ import {
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
 const asRule = (row: unknown) => row as AutomationRule
 const asEvent = (row: unknown) => row as AutomationEvent
+
+/** 窄屏（<768px，与 theme.css 的 @media (max-width:768px) 同断点）用于取消粘性操作列（F26）。 */
+const { isMobile } = useResponsive()
 
 const devices = ref<EdgeDevice[]>([])
 

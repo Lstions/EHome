@@ -174,8 +174,9 @@ describe('DataSourceList.vue', () => {
   it('F8：来源表渲染在 .mobile-table-wrapper 内并带横滑提示（§4.3.2.2 MUST）', async () => {
     const wrapper = await mountPage()
     expectEveryTableWrapped(wrapper)
-    // 本表 9 列合计 1270px、操作列 fixed 330px：390px 下固定列占表格宽 106.5%，
-    // 必须真的包起来（真浏览器实测见 .tmp-probe/f8-f10-probe.mjs）
+    // 操作列 330px 在窄屏已取消 fixed（F26，见页面模板注释）：它不再粘在右缘，
+    // 也就不再压住「名称」列。包裹仍必须保留（真浏览器实测见
+    // .tmp-probe/f26-acceptance.mjs）；本断言与列宽/固定无关，继续守护横滚容器与提示。
     expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(1)
   })
 
