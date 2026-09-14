@@ -7,7 +7,7 @@
         class="grid-item"
         :class="{ active: item.active }"
       >
-        <el-icon :size="iconSize" :color="item.active ? THEME_COLORS.danger : THEME_COLORS.success">
+        <el-icon :size="iconSize" :color="item.active ? 'var(--color-danger)' : 'var(--color-success)'">
           <component :is="item.active ? WarningFilled : CircleCheck" />
         </el-icon>
         <span class="grid-label">{{ item.label }}</span>
@@ -25,7 +25,6 @@
 
 <script setup lang="ts">
 import { WarningFilled, CircleCheck } from '@element-plus/icons-vue'
-import { THEME_COLORS } from '@/utils/theme'
 
 export interface StatusItem {
   key: string

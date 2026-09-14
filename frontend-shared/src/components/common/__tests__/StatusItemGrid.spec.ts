@@ -36,6 +36,22 @@ describe('StatusItemGrid', () => {
     expect(tags[1].text()).toBe('正常')
   })
 
+  it('图标颜色走语义 token（F17：不得再用静态 THEME_COLORS 十六进制常量）', () => {
+    // 契约（规范 §3.6.2）：el-icon 的 :color 传 var(--color-*) 语义 token 字符串，
+    // 由浏览器按当前主题解析；此前传 THEME_COLORS.danger/success 的亮色十六进制，
+    // 暗色下不跟随主题（本仓"伪装成正常"家族）。
+    const wrapper = mount(StatusItemGrid, { props: { items } })
+    const icons = wrapper.findAll('.el-icon')
+    expect(icons).toHaveLength(2)
+    // active → danger，inactive → success
+    expect(icons[0].attributes('style')).toContain('var(--color-danger)')
+    expect(icons[1].attributes('style')).toContain('var(--color-success)')
+    // 守卫：不得回退到硬编码色值
+    for (const icon of icons) {
+      expect(icon.attributes('style')).not.toMatch(/#[0-9a-fA-F]{3,8}|rgb\(/)
+    }
+  })
+
   it('applies the active class only to items with active=true', () => {
     const wrapper = mount(StatusItemGrid, { props: { items } })
     const gridItems = wrapper.findAll('.grid-item')

@@ -199,38 +199,65 @@ describe('Monitor.vue', () => {
     expect(wrapper.text()).toContain('K')
   })
 
-  it('进度条颜色取自主题 token，暗色下与亮色不同（回归：静态亮色常量）', async () => {
+  it('进度条颜色是语义 token 引用，不随主题重新计算也不含硬编码色值（F17）', async () => {
     document.documentElement.classList.remove('dark')
     const wrapper = mount(Monitor, { global: { stubs } })
     await flushPromises()
     const lightColors = renderedProgressColors(wrapper)
     // 四个进度条：设备在线/离线、节点在线/离线
-    expect(lightColors).toEqual(['#67c23a', '#f56c6c', '#67c23a', '#f56c6c'])
+    expect(lightColors).toEqual([
+      'var(--color-success)', 'var(--color-danger)',
+      'var(--color-success)', 'var(--color-danger)',
+    ])
 
     // 切换到暗色（与 stores/theme.ts 一致：html.dark + data-theme）
     document.documentElement.classList.add('dark')
     document.documentElement.setAttribute('data-theme', 'dark')
-    // 等待 MutationObserver 回调 + Vue 重新渲染，不依赖固定 sleep
-    await vi.waitFor(() => {
-      expect(renderedProgressColors(wrapper)).toEqual(['#85ce61', '#f78989', '#85ce61', '#f78989'])
-    })
+    await flushPromises()
 
-    const darkColors = renderedProgressColors(wrapper)
-    expect(darkColors).not.toEqual(lightColors)
+    // 契约（规范 §3.6.2）：传给 el-progress 的是 var(--color-*) 字符串，
+    // 由**浏览器**按当前主题解析 —— 组件无需在主题切换时重新计算，
+    // 这比「JS 解析 + MutationObserver」更强：取值不经 JS 中转，
+    // 不可能出现「JS 与 CSS 各算一套」的偏差。
+    expect(renderedProgressColors(wrapper)).toEqual(lightColors)
+
+    // 守卫：将来有人改回静态十六进制常量，这里必须变红。
+    // 分工：happy-dom 不做 var() 替换，故本层只能断言「props 是 token 引用」；
+    // 「该 token 在亮暗下确实取不同值」由 src/styles/__tests__/SidebarThemeTokens.spec.ts
+    // 的 token 解析断言与 .tmp-probe 下的真实浏览器探针覆盖。
+    for (const c of lightColors) {
+      expect(c, '进度条配色必须是 var(--color-*) 语义 token').toMatch(/^var\(--color-[a-z]+\)$/)
+      expect(c).not.toMatch(/^#|^rgb/)
+    }
     wrapper.unmount()
   })
 
-  it('主题在挂载后切回亮色时颜色跟随恢复', async () => {
+  it('暗色下挂载、再切回亮色，进度条配色仍是同一组 token 引用', async () => {
     document.documentElement.classList.add('dark')
     const wrapper = mount(Monitor, { global: { stubs } })
     await flushPromises()
-    expect(renderedProgressColors(wrapper)).toEqual(['#85ce61', '#f78989', '#85ce61', '#f78989'])
+    expect(renderedProgressColors(wrapper)).toEqual([
+      'var(--color-success)', 'var(--color-danger)',
+      'var(--color-success)', 'var(--color-danger)',
+    ])
 
     document.documentElement.classList.remove('dark')
-    await vi.waitFor(() => {
-      expect(renderedProgressColors(wrapper)).toEqual(['#67c23a', '#f56c6c', '#67c23a', '#f56c6c'])
-    })
+    document.documentElement.removeAttribute('data-theme')
+    await flushPromises()
+    // 组件不持有主题状态副本，故不依赖任何回调时序：token 引用恒定。
+    expect(renderedProgressColors(wrapper)).toEqual([
+      'var(--color-success)', 'var(--color-danger)',
+      'var(--color-success)', 'var(--color-danger)',
+    ])
     wrapper.unmount()
+  })
+
+  it('源码不再引用 getThemeColors/THEME_COLORS（F17：进度条配色已完全交给 CSS 变量）', async () => {
+    const src = (await import('../Monitor.vue?raw')).default as string
+    expect(src).not.toContain('getThemeColors')
+    expect(src).not.toContain('THEME_COLORS')
+    // 反向守卫：必须真的用了语义 token，否则上面的 not.toContain 在「整个删掉配色」时也会通过
+    expect(src.match(/var\(--color-[a-z]+\)/g)?.length ?? 0).toBeGreaterThanOrEqual(4)
   })
 
   // ─── KPI 范围标注（审计 Q3 三页均无范围标注 / §4.3 统计卡 MUST） ───

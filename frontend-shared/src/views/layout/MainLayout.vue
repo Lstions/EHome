@@ -776,7 +776,10 @@ onUnmounted(() => {
 
 /* ========== 侧边栏 (桌面端，深色主题) ========== */
 .sidebar {
-  background: linear-gradient(180deg, #1a1f2e 0%, #1e2538 100%);
+  /* F16：侧栏渐变必须取自主题 token 层（规范 §3.6.1/§3.6.2）。
+     此前硬编码亮色渐变，导致 --sidebar-bg-gradient 零消费、亮/暗两主题侧栏 backgroundImage 完全一致。
+     fallback 保留原硬编码值，仅在 token 层缺失时生效（token 定义见 styles/theme.css:65 亮 / :245 暗）。 */
+  background: var(--sidebar-bg-gradient, linear-gradient(180deg, #1a1f2e 0%, #1e2538 100%));
   display: flex;
   flex-direction: column;
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -791,12 +794,12 @@ onUnmounted(() => {
   justify-content: center;
   gap: 12px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--sidebar-border, rgba(255, 255, 255, 0.06));
   transition: all 0.3s;
 }
 
 .sidebar .logo-area:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--sidebar-hover-bg, rgba(255, 255, 255, 0.04));
 }
 
 .sidebar .logo-icon {
@@ -831,25 +834,25 @@ onUnmounted(() => {
   height: 44px;
   margin: 2px 0;
   border-radius: 8px;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--sidebar-text, rgba(255, 255, 255, 0.65));
   transition: all 0.3s;
 }
 
 .sidebar :deep(.el-menu-item:hover) {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: var(--sidebar-hover-bg, rgba(255, 255, 255, 0.08));
+  color: var(--sidebar-text-hover, #fff);
 }
 
 /* 键盘焦点可见环 —— 仅在键盘聚焦时出现，不干扰鼠标用户 */
 .sidebar :deep(.el-menu-item:focus-visible) {
   outline: 2px solid var(--el-color-primary);
   outline-offset: -2px;
-  color: #fff;
+  color: var(--sidebar-text-hover, #fff);
 }
 
 .sidebar :deep(.el-menu-item.is-active) {
-  background: linear-gradient(90deg, rgba(64, 158, 255, 0.2) 0%, rgba(64, 158, 255, 0.1) 100%);
-  color: var(--el-color-primary);
+  background: var(--sidebar-active-bg, rgba(64, 158, 255, 0.2));
+  color: var(--sidebar-active-color, #66b1ff);
 }
 
 .sidebar :deep(.el-menu-item.is-active)::before {
@@ -860,19 +863,20 @@ onUnmounted(() => {
   transform: translateY(-50%);
   width: 3px;
   height: 20px;
-  background: var(--el-color-primary);
+  background: var(--sidebar-active-color, #66b1ff);
   border-radius: 0 3px 3px 0;
 }
 
 .sidebar .sidebar-footer {
   padding: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--sidebar-border, rgba(255, 255, 255, 0.06));
 }
 
 .sidebar .version-info {
   text-align: center;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.3);
+  /* 此前 rgba(255,255,255,0.3) 叠加深色侧栏实测仅 2.70:1（12px 正文）。接线到 --sidebar-text 后 7.26/6.03。 */
+  color: var(--sidebar-text, rgba(255, 255, 255, 0.65));
 }
 
 /* ========== 右侧容器 ========== */

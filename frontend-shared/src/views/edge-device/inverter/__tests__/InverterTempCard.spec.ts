@@ -70,10 +70,22 @@ describe('InverterTempCard', () => {
     expect(fans[1].find('.el-progress').attributes('data-percentage')).toBe('30')
   })
 
-  it('maps fan speed to success/warning/danger colors', () => {
-    expect(mountCard({ fan1_speed: 30 }).find('.el-progress').attributes('data-color')).toBe('#67c23a')
-    expect(mountCard({ fan1_speed: 60 }).find('.el-progress').attributes('data-color')).toBe('#e6a23c')
-    expect(mountCard({ fan1_speed: 90 }).find('.el-progress').attributes('data-color')).toBe('#f56c6c')
+  it('maps fan speed to the success/warning/danger semantic tokens (F17：不得再用静态亮色常量)', () => {
+    // 契约（规范 §3.6.2）：:color 传语义 token 引用，由浏览器按当前主题解析。
+    // 此前传 THEME_COLORS.* 的十六进制字面量，暗色下不跟随主题（本仓"伪装成正常"家族）。
+    const colorFor = (speed: number) => mountCard({ fan1_speed: speed }).find('.el-progress').attributes('data-color')
+    // 三档全覆盖（>80 / 50~80 / <=50），漏测任一档都无法证明分支正确
+    expect(colorFor(30)).toBe('var(--color-success)')
+    expect(colorFor(60)).toBe('var(--color-warning)')
+    expect(colorFor(90)).toBe('var(--color-danger)')
+    // 守卫：将来改回硬编码十六进制 / 静态常量，这里必须变红
+    for (const v of [colorFor(30), colorFor(60), colorFor(90)]) {
+      expect(v, '风扇配色必须是 var(--color-*) 语义 token，不能是静态色值').toMatch(/^var\(--color-[a-z]+\)$/)
+      expect(v).not.toMatch(/^#|^rgb/)
+    }
+    // 边界：恰好 50 / 80 走「不高于」一侧（> 判定，非 >=）
+    expect(colorFor(50)).toBe('var(--color-success)')
+    expect(colorFor(80)).toBe('var(--color-warning)')
   })
 
   it('derives running state from status or speed and omits progress when speed unknown', () => {

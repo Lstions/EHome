@@ -1,7 +1,7 @@
 <template>
   <div class="bms-mos-status">
     <div class="mos-item" :class="{ on: chargeOn }">
-      <el-icon :size="20" :color="chargeOn ? THEME_COLORS.success : THEME_COLORS.info">
+      <el-icon :size="20" :color="chargeOn ? 'var(--color-success)' : 'var(--color-info)'">
         <component :is="chargeOn ? Open : Lock" />
       </el-icon>
       <div class="mos-info">
@@ -12,7 +12,7 @@
       </div>
     </div>
     <div class="mos-item" :class="{ on: dischargeOn }">
-      <el-icon :size="20" :color="dischargeOn ? THEME_COLORS.success : THEME_COLORS.info">
+      <el-icon :size="20" :color="dischargeOn ? 'var(--color-success)' : 'var(--color-info)'">
         <component :is="dischargeOn ? Open : Lock" />
       </el-icon>
       <div class="mos-info">
@@ -23,7 +23,7 @@
       </div>
     </div>
     <div class="mos-item" v-if="balanceOn" :class="{ on: true }">
-      <el-icon :size="20" :color="THEME_COLORS.success">
+      <el-icon :size="20" :color="'var(--color-success)'">
         <Open />
       </el-icon>
       <div class="mos-info">
@@ -32,7 +32,7 @@
       </div>
     </div>
     <div class="mos-item" v-if="!hasFetStatus" style="opacity: 0.6;">
-      <el-icon :size="20" :color="THEME_COLORS.info"><Lock /></el-icon>
+      <el-icon :size="20" :color="'var(--color-info)'"><Lock /></el-icon>
       <div class="mos-info">
         <span class="mos-label">无FET状态数据</span>
       </div>
@@ -43,7 +43,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Open, Lock } from '@element-plus/icons-vue'
-import { THEME_COLORS } from '@/utils/theme'
 
 const props = defineProps<{
   data: Record<string, number> | null

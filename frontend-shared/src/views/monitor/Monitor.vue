@@ -199,7 +199,7 @@
                 <el-progress
                   :percentage="deviceOnlinePercent"
                   :stroke-width="20"
-                  :color="themeColors.success"
+                  :color="'var(--color-success)'"
                 >
                   <span>{{ metrics?.device?.online || 0 }}</span>
                 </el-progress>
@@ -209,7 +209,7 @@
                 <el-progress
                   :percentage="deviceOfflinePercent"
                   :stroke-width="20"
-                  :color="themeColors.danger"
+                  :color="'var(--color-danger)'"
                 >
                   <span>{{ metrics?.device?.offline || 0 }}</span>
                 </el-progress>
@@ -232,7 +232,7 @@
                 <el-progress
                   :percentage="nodeOnlinePercent"
                   :stroke-width="20"
-                  :color="themeColors.success"
+                  :color="'var(--color-success)'"
                 >
                   <span>{{ metrics?.node?.online || 0 }}</span>
                 </el-progress>
@@ -242,7 +242,7 @@
                 <el-progress
                   :percentage="nodeOfflinePercent"
                   :stroke-width="20"
-                  :color="themeColors.danger"
+                  :color="'var(--color-danger)'"
                 >
                   <span>{{ metrics?.node?.offline || 0 }}</span>
                 </el-progress>
@@ -308,27 +308,22 @@ import {
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { useResponsive } from '@/composables/useResponsive'
-import { getThemeColors } from '@/utils/theme'
 import { UNKNOWN } from '@/utils/format'
 
 const { isMobile } = useResponsive()
 
 /**
- * el-progress 的 :color 是 canvas 之外的 JS 取值点，无法用 var(--color-*)，
- * 必须经 getThemeColors() 解析当前主题 token（规范 §3.6.2：禁止组件内写独立亮色调色盘）。
- * 这里把解析结果包成 ref 并在主题切换时刷新，否则暗色下仍会沿用亮色的 #67c23a。
+ * 进度条配色（F17）：直接传 var(--color-*) 字符串。
+ *
+ * el-progress 的 :color 最终落到 barStyle.backgroundColor（EP progress 源码里
+ * 非渐变分支即 backgroundColor），而这是**由浏览器解析**的声明值 ——
+ * var() 在此处照常生效，无需 JS 解析，也无需 MutationObserver 跟随主题。
+ *
+ * 此前是「JS 读取主题 token + MutationObserver 跟随切主题」：结果虽正确，
+ * 但按规范 §3.6.2「色值取自 token 层」应以 CSS 变量为首选；
+ * JS 解析只在真正取不到 CSS 的场景（ECharts 等 Canvas 渲染）才保留。
+ * （源码守卫测试断言本文件不再出现该工具函数名，故此处不写其标识符。）
  */
-const themeColors = ref(getThemeColors())
-
-let themeObserver: MutationObserver | null = null
-
-onMounted(() => {
-  // 主题切换由 stores/theme.ts 改写 html 的 class / data-theme，观察这两个属性即可重建颜色。
-  themeObserver = new MutationObserver(() => {
-    themeColors.value = getThemeColors()
-  })
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] })
-})
 
 /**
  * 统计卡范围词（规范 §4.3 统计卡 MUST）。
@@ -435,8 +430,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopPolling()
-  themeObserver?.disconnect()
-  themeObserver = null
 })
 </script>
 

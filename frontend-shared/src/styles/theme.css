@@ -66,7 +66,15 @@
   --sidebar-text: rgba(255, 255, 255, 0.65);
   --sidebar-text-hover: #ffffff;
   --sidebar-active-bg: rgba(64, 158, 255, 0.15);
-  --sidebar-active-color: #409eff;
+  /* 菜单项/logo 区 hover 叠加在深色侧栏上的半透明白。
+     此前该值硬编码在 MainLayout.vue 两处，亮暗恒为 0.08/0.04 —— 与侧栏渐变同理属"零消费 token"家族。
+     暗色侧栏底色更暗(#141414 vs #1a1f2e)，同样的白色叠加会更刺眼，故暗色取更低一档。 */
+  --sidebar-hover-bg: rgba(255, 255, 255, 0.08);
+  /* 可访问性（F16 扩展）：主控真实像素采样证明 is-active 项此前 2.34:1（文本 #1f5ad8 vs 实测底 rgb(30,44,69)）。
+     侧栏菜单文字是正文尺寸 #409eff 在 --sidebar-active-bg(#409eff26) 叠加深色渐变上只有 4.31，
+     仍低于 AA 4.5，故取 EP 官方 primary-light-3 (#66b1ff)：最差梯度位 5.31。
+     这两个值只服务"深色侧栏上的活动项文字"，不进入亮色页面调色盘（规范 §4.2.7）。 */
+  --sidebar-active-color: #66b1ff;
   --sidebar-border: rgba(255, 255, 255, 0.06);
 
   /* 顶部栏 */
@@ -246,7 +254,9 @@ html.dark {
   --sidebar-text: rgba(255, 255, 255, 0.55);
   --sidebar-text-hover: #ffffff;
   --sidebar-active-bg: rgba(64, 158, 255, 0.2);
-  --sidebar-active-color: #5399ff;
+  --sidebar-hover-bg: rgba(255, 255, 255, 0.06);
+  /* 暗色 active-bg alpha 更高(0.2)，故再提亮一档；#79bbff 已是本仓 --el-tag-primary-text 用色。最差 6.27。 */
+  --sidebar-active-color: #79bbff;
   --sidebar-border: rgba(255, 255, 255, 0.04);
 
   /* 顶部栏 */

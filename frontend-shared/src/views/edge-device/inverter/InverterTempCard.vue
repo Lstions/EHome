@@ -30,7 +30,7 @@
           <div class="fan-speed-bar" v-if="fan.speed !== null">
             <el-progress
               :percentage="fan.speed"
-              :color="fan.speed > 80 ? THEME_COLORS.danger : fan.speed > 50 ? THEME_COLORS.warning : THEME_COLORS.success"
+              :color="fan.speed > 80 ? 'var(--color-danger)' : fan.speed > 50 ? 'var(--color-warning)' : 'var(--color-success)'"
               :stroke-width="14"
               :text-inside="true"
             />
@@ -45,7 +45,6 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { THEME_COLORS } from '@/utils/theme'
 
 const props = defineProps<{
   // 后端实时数据可能尚未到达（此时为 null），组件内部已按 `!props.latestData` 兜底；
