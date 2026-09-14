@@ -607,17 +607,77 @@ html.dark .el-descriptions__content {
 }
 
 /* 触控目标尺寸（规范 §4.4.5 / §4.4.7）。
-   本项目是紧凑运维密度（§4.2.3），不整体放大行高；这里只补可点击区域：
-   1) 窄屏 + 粗指针环境：把紧凑控件（行操作、小图标按钮）补到 >=44px ——
-      规范对"移动端图标按钮与 Switch/Slider"的要求；
-   2) 表内 Switch 由 Element Plus 固定 20px 高，给容器补最小高度，
-      开关本体尺寸与行内视觉节奏不变。 */
+   本项目是紧凑运维密度（§4.2.3），裁决是「只扩点击热区，不改视觉密度」：
+   下面全部规则只动 min-width / min-height / padding / Element Plus 的尺寸变量，
+   不动任何颜色、字号、行高。
 
+   实现方式：一律用**真实布局盒**（min-width/min-height），不用 ::after 伪元素外扩。
+   原因（实测）：伪元素在 el-table 单元格内会被 .cell 的 overflow:hidden 裁剪，
+   elementFromPoint 与被裁掉的区域都命不中；且 getBoundingClientRect 根本测不出伪元素。
+   验收因此必须用 elementFromPoint（见 .tmp-probe/f6-verify.mjs）。
+
+   热区档位来自裁决：正文/高密度表格行内操作 >=36px（§4.4.5 工具栏例外），
+   页头图标 >=44px（§4.4.5 MUST，页头不是高密度工具栏）。 */
+
+/* ---- 1. 表格行内操作：审计 264 个 <36px 中 257 个的「行高 18px」单一根因 ----
+   Element Plus 的 .el-button--small 是 height:24px，但 link/text 变体被压到 18px 高。
+   这些是表格行「操作」列的主要操作，按 §4.4.5 的高密度例外取 36px 地板。
+   min-width 同时兜住「触发/编辑/删除」这类两字按钮（原本只有 30px 宽）。 */
+.el-table .el-button--small {
+  min-width: 36px;
+  min-height: 36px;
+}
+
+/* 行首多选复选框：EP 本体 14x14，热区不足。只给 label 壳补高度，
+   本体视觉尺寸（--el-checkbox-input-*）保持不变。 */
+.el-table .el-checkbox {
+  min-height: 36px;
+}
+
+/* 宽视口下行高守恒（不改视觉密度的关键）：
+   1440px 下按钮由 18px 补到 36px 会把 .el-table__cell 从 40px 撑到 53px（+13px/行）。
+   用 :has() 只选中「包含小按钮/复选框」的单元格，把它的上下 padding 由 8px 收到 1px，
+   使「按钮盒 + padding」总高与改前一致 —— 实测行高 40 → 40，逐像素不变。
+   窄视口（<=768px）不收紧：那里的行高本就由内容决定，收紧反而会让文字贴边。 */
+@media (min-width: 769px) {
+  .el-table .el-table__cell:has(> .cell > .el-button--small) {
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
+
+  .el-table .el-table__cell:has(> .cell > .el-checkbox) {
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
+}
+
+/* 表格单元格内超长文本链接（如「命令 ID」列的 UUID）：宽度原本撑到 285px，
+   而 .cell 只有 110px 且 overflow:hidden —— 按钮中心落在被裁掉的区域，
+   elementFromPoint 命中的是 td/固定列而不是按钮本身。
+   夹住宽度后按钮完整落在单元格内，中心即可命中（实测 10 处 → 0）。 */
+.el-table .cell > .el-button {
+  max-width: 100%;
+}
+
+/* ---- 2. 分页：EP 的 .btn-prev/.btn-next/.el-pager li 默认 --el-pagination-button-* = 32px，
+       小号变体更是 24px（审计实测 32x32）。改 EP 尺寸变量，不动视觉风格。 ---- */
+.el-pagination {
+  --el-pagination-button-width: 36px;
+  --el-pagination-button-height: 36px;
+  --el-pagination-button-width-small: 36px;
+  --el-pagination-button-height-small: 36px;
+}
+
+/* ---- 3. 窄屏（<=768px）：紧凑工具条按钮与表格行内操作转 36px 档 ----
+   Element Plus 的 .el-button--small 默认 height:24px，卡片头/卡片脚/空态工具栏
+   与表格行内操作都用它；窄屏下统一补到 36px（§4.4.5 高密度工具栏例外）。 */
 @media (max-width: 768px) {
-  /* 表格行内操作（30×18 的小 text/link 按钮）是审计量化出的最大单一根因：
-     自动化页 257 个 <36px 目标全部来自它。这里统一补到 36px —— 规范 §4.4.5
-     允许"极高密度、非主要任务的工具栏"降到 36px，行高只增加 18px，
-     保留紧凑运维密度（§4.2.3），不整体放大表格。 */
+  .el-button--small:not(.is-circle) {
+    min-height: 36px;
+  }
+
+  /* 显式保留这条（不是冗余）：审计 264 个 <36px 中 257 个就是表格行内 18px 小按钮，
+     这里钉住窄屏档位，防止后续被上面的通用规则覆盖或被误删。 */
   .el-table .el-button--small {
     min-height: 36px;
   }
@@ -631,47 +691,149 @@ html.dark .el-descriptions__content {
     min-height: 44px;
   }
 
-  /* 表单工具条/页头里的默认尺寸按钮（32px）：非表格区域补到 44px。
-     .el-table 内的按钮走上面的 36px 例外（极高密度工具栏）。 */
-  .el-button:not(.el-button--small):not(.is-circle):not(.is-link):not(.is-text) {
-    min-height: 44px;
-  }
-
+  /* 触控目标工具类（§4.4.5 / §4.4.7）。 */
   .touch-target {
     min-height: 44px;
-  }
-
-  .el-table .el-switch {
-    min-height: 44px;
-  }
-
-  .el-table .el-switch .el-switch__core {
-    margin-top: auto;
-    margin-bottom: auto;
   }
 }
 
+/* ---- 4. 小号输入/选择器：.el-select--small 的 wrapper 只有 24px 高 ---- */
+.el-select--small .el-select__wrapper {
+  min-height: 36px;
+}
+
+/* ---- 5. 数字输入框的加减档：EP 用绝对定位，实际只有 24x11（审计实测） ---- */
+.el-input-number__increase,
+.el-input-number__decrease {
+  min-width: 36px;
+}
+
+/* ---- 6. 分段控件（趋势区 1小时/24小时/7天 等）：EP 默认内高 22px ----
+   只加高度，EP 的选中态用 outline/背景，不依赖高度，视觉不变。 */
+.el-radio-button__inner,
+.el-checkbox-button__inner {
+  min-height: 36px;
+}
+
+/* ---- 7. 行内可点文本：<a class="device-link"> 17px、<span class="fact-value copyable"> 19px ----
+   只加纵向 padding（不改字号/颜色/display），热区升到 35-39px。
+   el-table 单元格里的 .cell 是 overflow:hidden，但行高由行内最高元素决定，
+   实测行高 247/109 不变。 */
+.fact-value.copyable,
+a.device-link {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+/* ---- 8. 页头图标按钮（全站共用、出现于每个页面）：审计实测 32x32 ----
+   页头高 60px，44px 放得下。注意用 .main-header 而不是 .el-header：
+   项目里 .main-header/.detail-header 都带 el-header 类，后者是详情页页头，
+   断言范围会被放大。ThemeSwitch 与页头三按钮都命中 .el-button.is-circle。 */
+.main-header .el-button.is-circle {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* 用户菜单是 <div class="user-menu"> 带 @click 的自研控件，不在按钮体系内，单独补。 */
+.main-header .user-menu {
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+/* ---- 9. 粗指针（规范 §4.4.7）----
+   不以浏览器宽度单独推断输入方式：触屏笔记本在 1440px 也走这一支。
+   这一支必须覆盖主要交互元素，而不只是 .touch-target 一条。 */
 @media (pointer: coarse) {
-  /* 规范 §4.4.7：不以浏览器宽度单独推断输入方式。
-     粗指针设备（手机/平板/触屏笔记本）无论宽度，紧凑控件都补足热区。 */
-  .touch-target {
+  .main-header .el-button.is-circle {
+    min-width: 44px;
     min-height: 44px;
   }
 
-  .el-table .el-button--small:not(.touch-target),
+  .main-header .user-menu {
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+
+  /* 文本输入与选择器：移动端主要输入目标（§4.4.5 MUST）。 */
+  .el-input__wrapper,
+  .el-select__wrapper,
+  .el-textarea__inner {
+    min-height: 44px;
+  }
+
+  /* 表格内控件：粗指针下统一升到 44px 档。 */
+  .el-table .el-button--small {
+    min-width: 36px;
+    min-height: 44px;
+  }
+
+  .el-table .el-checkbox,
   .el-table .el-switch {
     min-height: 44px;
   }
 
+  /* 表内 Switch 由 EP 固定 20px 高，给容器补最小高度后把本体垂直居中，
+     本体尺寸与行内视觉节奏不变。 */
   .el-table .el-switch .el-switch__core {
     margin-top: auto;
     margin-bottom: auto;
+  }
+
+  /* 分页（36 → 44）。 */
+  .el-pagination {
+    --el-pagination-button-width: 44px;
+    --el-pagination-button-height: 44px;
+    --el-pagination-button-width-small: 44px;
+    --el-pagination-button-height-small: 44px;
+  }
+
+  /* 页码条折行 —— 这是「44px 热区」与「窄屏容器」能兼得的关键，不是可选优化。
+     为什么必须写：EP 的 .el-pager 是 display:flex + flex-wrap:nowrap，宽度由内容撑开。
+     页码按钮从 32px 抬到 44px 后，6 页 + 省略号的 .el-pager 实测宽 352px，
+     而 390px 下 .mobile-table-wrapper 只有 342px（360px 下只有 312px）。
+     .el-pagination 自身虽已 flex-wrap:wrap，但**折行只发生在它的直接 item 之间**，
+     .el-pager 是**单个** 352px 的 item，wrap 管不到它内部 ⇒ 整体左移出容器。
+     实测：390 被裁 10px、360 被裁 40px（.mobile-table-wrapper 的 overflow-x:hidden + 
+     scrollWidth === clientWidth ⇒ 不可横滚 ⇒ 按契约 §2.2 是**真实裁切**，不是允许的内部横滚）。
+     注意**页面级 scrollWidth === clientWidth 恒为 0** —— 只看页级横向溢出完全发现不了这个缺陷，
+     只有沿祖先链判据（e2e/helpers/uiux-metrics.ts 的 measureOverflow）才能测到。
+     折行后：390/360 裁切均归零，且 6 个页码按钮与 prev/next **全部保持 44×44**（§4.4.7 未被削弱），
+     代价只是分页条由 1 行变 2 行（高 132 → 176px），这是窄屏下可接受的换行代价。 */
+  .el-pager {
+    flex-wrap: wrap;
+  }
+
+  .el-input-number__increase,
+  .el-input-number__decrease {
+    min-width: 44px;
+  }
+
+  .el-radio-button__inner,
+  .el-checkbox-button__inner {
+    min-height: 44px;
+  }
+
+  /* 触控目标工具类（§4.4.5 / §4.4.7）。 */
+  .touch-target {
+    min-height: 44px;
+  }
+
+  /* 表单工具条里的默认尺寸按钮（32px）：非表格区域补到 44px。
+     .el-table 内的按钮走上面的 36/44 档（极高密度工具栏例外）。 */
+  .el-button:not(.el-button--small):not(.is-circle):not(.is-link):not(.is-text) {
+    min-height: 44px;
   }
 
   /* 高密度、非主要任务的工具栏允许降到 36px（§4.4.5 MUST 的例外）。 */
   .el-button-group .el-button {
     min-width: 36px;
     min-height: 36px;
+  }
+
+  /* 下拉项也是触控目标：EP 默认 34px 高。 */
+  .el-dropdown-menu__item,
+  .el-select-dropdown__item {
+    min-height: 44px;
   }
 }
 
