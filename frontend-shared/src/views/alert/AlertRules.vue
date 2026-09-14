@@ -10,8 +10,9 @@
       </div>
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
            本表 8 列合计 900px（名称 140 / 目标 120 / 传感器 120 / 阈值 140 /
-           持续 80 / 级别 90 / 启用 80 / 操作 130），390px 视口下表格盒 310px，
-           操作列 fixed="right" 130px（占 41.9%）"粘"在右缘、数据列被压到 180px。 -->
+           持续 80 / 级别 90 / 启用 80 / 操作 130），360px 视口下表格盒 280px。
+           窄屏下「操作」列已取消 fixed（见该列上方注释），改为随表横滚，
+           否则 130px 固定列（占 46.4%）会盖住行内 el-switch。 -->
       <div class="mobile-table-wrapper">
         <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="store.rules" v-loading="store.rulesLoading" data-test="rules-table">
@@ -40,7 +41,18 @@
             <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" fixed="right">
+        <!-- F29 裁决：窄屏取消固定列（原 width="130" fixed="right"）。
+             实测（360px，表格盒 280px，48 点 elementFromPoint 网格）：固定列 130px
+             占 46.4%，行内「启用」列 el-switch 命中自身 40/48、被固定列内 DIV.cell
+             吃掉 8/48。根因是粘性列的绘制顺序恒在普通列之上（见 theme.css「固定列」小节），
+             与列宽无关；F26 已用真实产物实测否决收窄列宽路线（热区被折行、
+             桌面行高 40px→183px）。
+             改法：宽度与内容不变，只在窄屏（<768px，与 useResponsive 的 BREAKPOINTS.md
+             同源）把 fixed 置 false。EP 的 table-column 对 fixed 注册了 watch 并触发
+             scheduleLayout（element-plus/es/components/table/src/table-column/watcher-helper.mjs），
+             运行期翻转会重算固定列集合；组件挂载时 isMobile 已是正确值，
+             桌面渲染路径与改前逐字节等价（与 AutomationRules.vue:62 / DataSourceList.vue:153 同范式）。 -->
+        <el-table-column label="操作" width="130" :fixed="isMobile ? false : 'right'">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openEdit(asRule(row))">编辑</el-button>
             <el-button link type="danger" size="small" @click="onDelete(asRule(row))">删除</el-button>
@@ -167,6 +179,7 @@ import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useAlertStore } from '@/stores/alert'
+import { useResponsive } from '@/composables/useResponsive'
 import { feedback } from '@/utils/feedback'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
@@ -176,6 +189,10 @@ const asRule = (row: unknown) => row as AlertRule
 
 const store = useAlertStore()
 const devices = ref<EdgeDevice[]>([])
+
+// isMobile（<768px）用于窄屏取消「操作」列的固定（F29），断点与 theme.css 一致。
+// 事件表 5 列无 fixed 列，不涉及；只有规则表的「操作」列需要翻转。
+const { isMobile } = useResponsive()
 
 const comparators: Array<{ value: AlertComparator; label: string }> = [
   { value: 'gt', label: '>' },
