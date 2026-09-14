@@ -58,6 +58,7 @@ backend/cover.out
 # （.tmp-probe/、__dbg_*.spec.ts、_tmp-*.mjs 等），若不加规则会随 `git add -A` 混入提交。
 # 约定：可复用的工具放 tools/ 并入库（如 uiux-audit.mjs）；一次性的草稿放这些目录。
 frontend-shared/.tmp-probe/
+.tmp-probe/
 **/__dbg_*
 **/_tmp-*
 **/__scratch_*
@@ -96,6 +97,8 @@ backups/
 # 约定：可复用的工具放 frontend-shared/tools/ 并入库；一次性草稿必须落在下面这些模式里。
 frontend-shared/*.tmp.mjs
 frontend-shared/*-probe*.mjs
+frontend-shared/*varprobe*.mjs
+frontend-shared/*-vp*.mjs
 frontend-shared/.*-tokens.mjs
 frontend-shared/.f16-before.mjs
 **/*.tmp.mjs
