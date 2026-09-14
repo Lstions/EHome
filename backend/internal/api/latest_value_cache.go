@@ -2,7 +2,6 @@ package api
 
 import (
 	"sync"
-	"time"
 
 	"ehome/backend/internal/models"
 )
@@ -66,23 +65,14 @@ type queryResult interface {
 	Scan(dest interface{}) error
 }
 
-// precisionFor 决定 historical 查询走 rollup 还是 raw 路径。
-// 规则 (方案 §3.2.2): 显式参数优先; auto 时跨度 > 48h 且 logical scope 为空
-// (即 plain device 过滤) 才允许 rollup; logical scope 强制 raw (保形去重语义
-// 定义在 raw 上, 不引入第三种口径)。
-func precisionFor(precision string, span time.Duration, hasLogicalScope bool) string {
-	switch precision {
-	case "rollup":
-		if hasLogicalScope {
-			return "raw" // 口径裁决: logical 查询强制 raw
-		}
-		return "rollup"
-	case "raw":
-		return "raw"
-	default: // auto / 空值
-		if !hasLogicalScope && span > 48*time.Hour {
-			return "rollup"
-		}
-		return "raw"
-	}
-}
+// 注 (2026-09-14 裁决, docs/分析/rollup-读取路径裁决-2026-09-14.md):
+// 本文件原含 precisionFor (方案 §3.2.2 的 "跨度 > 48h 且无 logical scope 走
+// rollup" 路由函数), 生产零调用者, 已删除。它不是"待接线的读取路径", 而是
+// 一条在本仓查询协议下不可达的分支: logical scope 为空 ⟺ 实例
+// logical_device_id IS NULL (query_scope.go), 而启动 BackfillLogicalDevices
+// (identity.go) 对全量实例回填、新实例创建即赋逻辑身份 ⇒ 生产查询恒有
+// logical scope ⇒ 恒返回 raw。且 rollup 表无 logical_device_id 列
+// (partition_mgr.go EnsureRollupTable DDL), §六 scope 条件落不到该表上。
+// rollup 写入侧已同步停写 (nodemgr/manager.go 不再注入 rollupSink);
+// rollup 消费者/表/积压数据保留为冻结件, 门禁见
+// datalifecycle/rollup_wiring_gate_test.go (INV-7 修正版: 条件式)。

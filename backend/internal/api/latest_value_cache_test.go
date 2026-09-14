@@ -56,25 +56,6 @@ func TestLatestValueCacheOverwrite(t *testing.T) {
 	}
 }
 
-func TestPrecisionFor(t *testing.T) {
-	cases := []struct {
-		name       string
-		precision  string
-		span       time.Duration
-		hasLogical bool
-		want       string
-	}{
-		{"auto short span raw", "", 1 * time.Hour, false, "raw"},
-		{"auto long span no logical rollup", "", 72 * time.Hour, false, "rollup"},
-		{"auto long span logical forced raw", "", 72 * time.Hour, true, "raw"},
-		{"explicit rollup no logical", "rollup", 1 * time.Hour, false, "rollup"},
-		{"explicit rollup logical forced raw", "rollup", 72 * time.Hour, true, "raw"},
-		{"explicit raw always raw", "raw", 72 * time.Hour, false, "raw"},
-		{"auto exactly 48h is raw", "", 48 * time.Hour, false, "raw"},
-	}
-	for _, c := range cases {
-		if got := precisionFor(c.precision, c.span, c.hasLogical); got != c.want {
-			t.Errorf("%s: precisionFor(%q,%v,%v)=%q want %q", c.name, c.precision, c.span, c.hasLogical, got, c.want)
-		}
-	}
-}
+// TestPrecisionFor 已随 precisionFor 一并删除 (2026-09-14 裁决):
+// 该路由函数零生产调用者, 且其 rollup 分支在生产查询协议下不可达。
+// 详见 docs/分析/rollup-读取路径裁决-2026-09-14.md §1.1。

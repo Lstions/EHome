@@ -265,8 +265,13 @@ type UnifiedData struct {
 }
 
 // UnifiedDataRollup1m 分钟级聚合表 (数据层时序化, 方案 v3.4 §3.2.2)。
-// 写入: RollupConsumer UPSERT (仅 PG); 读取: historical API precision=rollup。
-// retention 为独立策略，文档记录 365 天 (与 raw 默认解耦; 当前代码未见自动清理路径)。
+//
+// 2026-09-14 裁决 (docs/分析/rollup-读取路径裁决-2026-09-14.md): **写入侧已停写**
+// (nodemgr/manager.go 不再注入 rollupSink), 因为**读取侧从未存在** —— 原注释所称的
+// "读取: historical API precision=rollup" 与代码不符 (已删除的 precisionFor 零生产调用者,
+// 且其 rollup 分支在 logical scope 恒非空的生产协议下不可达; 本表亦无 logical_device_id 列,
+// §六 scope 条件落不到该表)。本表/积压数据/建表路径保留为**冻结件**, 作为
+// "补读取路径还是退役" 的限期决策输入; 无消费者 ⇒ 不配保留期清理 (INV-7 修正版为条件式)。
 // SQLite 测试库不建此表 (consumer no-op)。
 type UnifiedDataRollup1m struct {
 	DeviceID   uint      `gorm:"primaryKey;column:device_id" json:"device_id"`

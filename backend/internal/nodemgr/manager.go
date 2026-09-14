@@ -229,8 +229,12 @@ func (mgr *Manager) buildParserConsumers() {
 	if offlineDetector != nil {
 		deviceActivity = offlineDetector.OnEdgeDeviceData
 	}
-	// 数据层时序化 (v3.4 §3.2.2): rollup 聚合器单实例 (UPSERT 幂等, 无需分片)。
-	rollup := databus.NewRollupConsumer(db)
+	// 数据层时序化 (v3.4 §3.2.2) rollup 聚合: **已停写** (2026-09-14 裁决)。
+	// 原因: 读取侧从未接线, 且 precisionFor 的 rollup 分支在本仓查询协议下不可达
+	// (logical scope 恒非空 ⇒ 恒 raw); rollup 表又无 logical_device_id 列,
+	// §六 scope 条件落不到该表。详见 docs/分析/rollup-读取路径裁决-2026-09-14.md。
+	// 停写切断增长源 (≈4.9×10³ 行/天 → 0); 写入材料 (RollupConsumer/表/积压数据)
+	// 保留为冻结件, 由 datalifecycle/rollup_wiring_gate_test.go 看守 (INV-7 修正版)。
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调 (main.go 经 SetLatestSinkFn 接线,
 	// 避免 nodemgr→api 编译期依赖)。
 	latestSinkFn := mgr.latestSinkFn
@@ -250,10 +254,6 @@ func (mgr *Manager) buildParserConsumers() {
 	for i := 0; i < parserShards; i++ {
 		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
 		mgr.parserConsumers = append(mgr.parserConsumers, parser)
-		// 数据层时序化 (v3.4 §3.2.2): rollup 聚合回调注入 (单实例共享, 无需分片)。
-		if rollup != nil {
-			parser.SetRollupSink(rollup.Upsert)
-		}
 		// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调注入。
 		// 注意: 通过函数变量间接引用 api.SetLatestValue, 避免 nodemgr→api 编译期
 		// 依赖 (api 已依赖 nodemgr); main.go 启动时接线。
