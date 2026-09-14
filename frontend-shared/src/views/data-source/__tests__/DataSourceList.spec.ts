@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { defineComponent, h, type VNodeChild } from 'vue'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { compileStyleAsync, parse } from '@vue/compiler-sfc'
 import DataSourceList from '../DataSourceList.vue'
-import { dataSourceApi, type DataSource } from '@/api/dataSource'
+import source from '../DataSourceList.vue?raw'
+import { dataSourceApi, type DataSource, type DataSourceListParams } from '@/api/dataSource'
 import { logicalDeviceApi, type LogicalDeviceItem } from '@/api/logicalDevice'
 
 // Element Plus 组件由 src/test-setup.ts 全局 stub；这里 mock 数据层（与 AlertRules.spec.ts 同法）。
@@ -148,6 +150,69 @@ async function mountPage() {
   })
   await flushPromises()
   return wrapper
+}
+
+/** 分页器控件（test-setup.ts 的 ElPagination stub 渲染为 <button class="el-pagination">，
+ *  点击 = currentPage + 1 并 emit current-change）。 */
+/**
+ * 分页条元素。参数用 `VueWrapper`（而不是手写的窄类型）：
+ * 手写类型只能表达调试时用到的那一两个成员，随后调用 `.exists()` 就会 typecheck 失败
+ * —— 而 vitest 不做类型检查，于是"测试全绿"与"类型干净"会脱节（本仓已记录过此类盲区）。
+ */
+const pager = (wrapper: VueWrapper) => wrapper.find('[data-test="ds-pagination"]')
+
+/** 第 n 次（从 0 起）list 调用的真实请求参数 —— 断言的是**发出去的请求**，不是源码字符串。 */
+function listParamsAt(call: number): DataSourceListParams {
+  const calls = mockedApi.list.mock.calls
+  expect(calls.length, `list 只被调用了 ${calls.length} 次，取不到第 ${call} 次`).toBeGreaterThan(call)
+  return calls[call][0] as DataSourceListParams
+}
+/** 最后一次 list 调用的请求参数。 */
+function lastListParams(): DataSourceListParams {
+  return listParamsAt(mockedApi.list.mock.calls.length - 1)
+}
+
+// ─── 分页样式契约辅助（与 LogicalDeviceList.spec.ts 同法） ───
+// 用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的 [data-v-*] 改写），
+// 再注入 DOM 读 getComputedStyle —— 比"源码字符串包含"更接近浏览器实际应用的声明。
+async function compiledScopedCss(raw: string, filename: string): Promise<string> {
+  const { descriptor } = parse(raw, { filename })
+  const chunks: string[] = []
+  for (const block of descriptor.styles) {
+    const res = await compileStyleAsync({
+      source: block.content,
+      filename,
+      id: 'data-v-testscope',
+      scoped: Boolean(block.scoped),
+    })
+    expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+    chunks.push(res.code)
+  }
+  return chunks.join('\n')
+}
+
+/**
+ * 注入编译产物 + 合成同结构 DOM（<div class="ds-pagination" data-v-testscope>
+ * <div class="el-pagination">），返回内层元素的计算 flex-wrap。
+ * 反证：把 parentClass 换成不匹配的值时返回空串 —— 说明真的在走选择器匹配。
+ */
+function measureFlexWrap(css: string, parentClass: string, childClass: string | null = 'el-pagination'): string {
+  const style = document.createElement('style')
+  style.textContent = css
+  document.head.appendChild(style)
+  const wrap = document.createElement('div')
+  wrap.className = parentClass
+  wrap.setAttribute('data-v-testscope', '')
+  const target = childClass === null ? wrap : document.createElement('div')
+  if (childClass !== null) {
+    target.className = childClass
+    wrap.appendChild(target)
+  }
+  document.body.appendChild(wrap)
+  const value = getComputedStyle(target).flexWrap
+  style.remove()
+  wrap.remove()
+  return value
 }
 
 
@@ -394,5 +459,216 @@ describe('DataSourceList.vue', () => {
     const alert = wrapper.find('[data-test="ds-error"]')
     expect(alert.exists()).toBe(true)
     expect(alert.text()).toContain('网络异常')
+  })
+})
+
+// ─── 数据源列表静默截断修复：真分页 (§3.2.6 MUST) ───────────────────────────
+//
+// 缺陷：本页原先从不发送 page/page_size，后端恒按 Page=1,PageSize=20 返回
+// （backend/internal/datasource/service.go:339-371），统计卡「总来源」显示 total=25，
+// 表格却永远只有 20 行，另外 5 条**无入口可达**且界面无任何截断迹象。
+// 隔离实例实测：不带 page → items_len=20, total=25；page=2 → items_len=5。
+//
+// 以下断言的是 **list 实际收到的请求参数**（而不是"渲染了分页控件"）：
+// 控件存在只说明有入口，page=2 真的发出去才说明数据可达。
+// 反例守卫（禁止本地切片）见本节「翻页会增加 API 调用次数」与「每页行数恒等于后端返回行数」。
+describe('DataSourceList.vue — 分页（真分页，非本地切片）', () => {
+  beforeEach(() => {
+    // 25 条总数 / 每页 20：第 1 页 20 行、第 2 页 5 行 —— 与隔离实例实测一致。
+    mockedApi.list.mockImplementation(async (params?: DataSourceListParams) => {
+      const page = params?.page ?? 1
+      const size = params?.page_size ?? 20
+      const from = (page - 1) * size
+      const items = Array.from({ length: Math.max(0, Math.min(size, 25 - from)) }, (_, i) =>
+        baseSource({ id: from + i + 1, name: '来源 ' + (from + i + 1) }),
+      )
+      return { items, total: 25 }
+    })
+  })
+
+  it('挂载时按第 1 页显式请求（page=1, page_size=20），不再依赖后端默认值', async () => {
+    await mountPage()
+    expect(mockedApi.list).toHaveBeenCalledTimes(1)
+    expect(listParamsAt(0).page).toBe(1)
+    expect(listParamsAt(0).page_size).toBe(20)
+  })
+
+  it('翻页控件渲染 total（来自接口的真总数，不是当前页行数）', async () => {
+    const wrapper = await mountPage()
+    const el = pager(wrapper)
+    expect(el.exists(), '分页器不存在 —— 用户没有翻页入口').toBe(true)
+    // stub 渲染 "共 N 条"；N 必须等于接口 total=25 而非当前页 20 行。
+    expect(el.text()).toContain('共 25 条')
+  })
+
+  it('翻到第 2 页时确实以 page=2 调用后端，且表格换成第 2 页数据', async () => {
+    const wrapper = await mountPage()
+    expect(wrapper.find('[data-test="ds-table"]').text()).toContain('来源 1')
+
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(lastListParams().page).toBe(2)
+    expect(lastListParams().page_size).toBe(20)
+    // 后端第 2 页返回 21..25：行内容真的换了（不是把第 1 页再渲染一遍）。
+    const table = wrapper.find('[data-test="ds-table"]')
+    expect(table.text()).toContain('来源 25')
+    expect(table.text()).not.toContain('来源 1')
+  })
+
+  it('反例守卫：翻页会增加 API 调用次数（本地切片不会发请求）', async () => {
+    // 60 条总数构造 3 个合法页：两次翻页都落在有数据的页码上，
+    // 调用次数才严格等于「1 次挂载 + 每翻一页 1 次」（total=25 时第 3 页越界，
+    // 会额外触发空页回退，反而测不出"翻页 = 多一次请求"）。
+    mockedApi.list.mockImplementation(async (params?: DataSourceListParams) => {
+      const page = params?.page ?? 1
+      const size = params?.page_size ?? 20
+      const from = (page - 1) * size
+      return {
+        items: Array.from({ length: Math.max(0, Math.min(size, 60 - from)) }, (_, i) =>
+          baseSource({ id: from + i + 1, name: '来源 ' + (from + i + 1) }),
+        ),
+        total: 60,
+      }
+    })
+    const wrapper = await mountPage()
+    expect(mockedApi.list).toHaveBeenCalledTimes(1)
+
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(mockedApi.list).toHaveBeenCalledTimes(2)
+    expect(lastListParams().page).toBe(2)
+
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(mockedApi.list).toHaveBeenCalledTimes(3)
+    expect(lastListParams().page).toBe(3)
+  })
+
+  it('反例守卫：每页行数恒等于后端返回行数（本地全量切片会出现 25 行）', async () => {
+    const wrapper = await mountPage()
+    const rowCount = () => wrapper.findAll('[data-test="ds-table"] tbody tr').length
+    expect(rowCount()).toBe(20)
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(rowCount()).toBe(5)
+  })
+
+  it('筛选变化（状态下拉）把 page 重置为 1，避免筛选后停在越界空页', async () => {
+    const wrapper = await mountPage()
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(2)
+
+    await wrapper.find('[data-test="filter-status"]').setValue('standby')
+    await flushPromises()
+
+    expect(lastListParams().page).toBe(1)
+    expect(lastListParams().status).toBe('standby')
+  })
+
+  it('筛选变化（查询按钮 / 重置筛选）同样把 page 重置为 1', async () => {
+    const wrapper = await mountPage()
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(2)
+
+    await wrapper.find('[data-test="search-btn"]').trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(1)
+
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(2)
+    await wrapper.find('[data-test="reset-filters"]').trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(1)
+  })
+
+  it('每页条数切换回到第 1 页并按新 page_size 请求', async () => {
+    const wrapper = await mountPage()
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(2)
+
+    // stub 的 ElPagination 无 sizes 控件，故按其对外契约直接 emit size-change
+    // （真实控件切换每页条数时发的就是这两个事件）。
+    const pagination = wrapper.findComponent({ name: 'ElPagination' })
+    pagination.vm.$emit('update:pageSize', 50)
+    pagination.vm.$emit('size-change', 50)
+    await flushPromises()
+
+    expect(lastListParams().page).toBe(1)
+    expect(lastListParams().page_size).toBe(50)
+  })
+
+  it('删除导致当前页被抽空时回退一页（不留空列表假象）', async () => {
+    const wrapper = await mountPage()
+    // 第 2 页只有 1 行（总数 21），删掉它后第 2 页变空。
+    let total = 21
+    mockedApi.list.mockImplementation(async (params?: DataSourceListParams) => {
+      const page = params?.page ?? 1
+      const size = params?.page_size ?? 20
+      const from = (page - 1) * size
+      const count = Math.max(0, Math.min(size, total - from))
+      return {
+        items: Array.from({ length: count }, (_, i) => baseSource({ id: from + i + 1 })),
+        total,
+      }
+    })
+    mockedApi.remove.mockImplementation(async () => { total = 20 })
+
+    await pager(wrapper).trigger('click')
+    await flushPromises()
+    expect(lastListParams().page).toBe(2)
+    expect(wrapper.findAll('[data-test="ds-table"] tbody tr')).toHaveLength(1)
+
+    await wrapper.find('[data-test="ds-delete"]').trigger('click')
+    await flushPromises()
+
+    // 第 2 页已空 → 自动回退到第 1 页重取，而不是停在第 2 页显示「暂无数源」。
+    expect(lastListParams().page).toBe(1)
+    expect(wrapper.findAll('[data-test="ds-table"] tbody tr')).toHaveLength(20)
+  })
+
+  it('第 1 页为空时不回退（不产生负页码 / 无限回退）', async () => {
+    mockedApi.list.mockResolvedValue({ items: [], total: 0 })
+    const wrapper = await mountPage()
+    expect(mockedApi.list).toHaveBeenCalledTimes(1)
+    expect(listParamsAt(0).page).toBe(1)
+    // total=0 → 分页条隐藏，且没有第二次请求。
+    expect(pager(wrapper).exists()).toBe(false)
+  })
+
+  it('无 status 筛选时状态操作不回取列表，有 status 筛选时回取（被改写行可能不再属于结果集）', async () => {
+    // 「切换为权威」按钮只对非 active 行可点：这里固定返回 standby 行。
+    mockedApi.list.mockImplementation(async () => ({
+      items: [baseSource({ id: 1, status: 'standby' })],
+      total: 1,
+    }))
+    mockedApi.activate.mockResolvedValue(baseSource({ id: 1, status: 'active' }))
+
+    const wrapper = await mountPage()
+    await wrapper.find('[data-test="ds-activate"]').trigger('click')
+    await flushPromises()
+    // 行只被本地替换：请求次数仍是挂载时那一次。
+    expect(mockedApi.list).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[data-test="filter-status"]').setValue('standby')
+    await flushPromises()
+    expect(mockedApi.list).toHaveBeenCalledTimes(2)
+
+    await wrapper.find('[data-test="ds-activate"]').trigger('click')
+    await flushPromises()
+    expect(mockedApi.list).toHaveBeenCalledTimes(3)
+  })
+
+  it('窄屏分页控件自身声明 flex-wrap（避免上一页按钮被推出可视区）', async () => {
+    const css = await compiledScopedCss(source, 'DataSourceList.vue')
+    const rule = css.match(/\.ds-pagination\[data-v-[a-z0-9]+\]\s+\.el-pagination\s*\{[^}]*\}/)
+    expect(rule, 'DataSourceList.vue 缺少 .ds-pagination :deep(.el-pagination) 编译产物').not.toBeNull()
+    expect(measureFlexWrap(css, 'ds-pagination')).toBe('wrap')
+    // 反证：换一个不匹配的父类名必须测不到 wrap（说明上面不是恒真）。
+    expect(measureFlexWrap(css, 'not-ds-pagination')).toBe('')
   })
 })

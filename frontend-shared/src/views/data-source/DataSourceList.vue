@@ -205,6 +205,25 @@
         description="创建数据源后，可按健康度自动切换权威来源。"
         :quick-actions="[{ label: '新建数据源', type: 'primary', handler: openCreate }]"
       />
+
+      <!-- 分页（真分页：表格数据来自**接口当前页**，不是对本地数组切片）。
+           改前本页从不发送 page/page_size，后端恒按 Page=1,PageSize=20 返回：
+           统计卡「总来源」显示 total=47，表格却只有 20 行，另外 27 条**无入口可达**
+           且界面无任何截断迹象（隔离实例实测：不带 page → items_len=20,total=25）。
+           v-if 用 total > 0 而非 items.length：即使当前页为空也要让用户看到
+           「共 N 条」并翻回来（与 EdgeDeviceList.vue:273 / LogicalDeviceList.vue:104 同范式）。 -->
+      <div v-if="store.total > 0" class="ds-pagination">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="store.total"
+          :page-sizes="DS_PAGE_SIZES"
+          layout="total, sizes, prev, pager, next, jumper"
+          data-test="ds-pagination"
+          @current-change="() => loadList()"
+          @size-change="onPageSizeChange"
+        />
+      </div>
     </section>
 
     <!-- 新建 / 编辑对话框 -->
@@ -347,6 +366,13 @@ import type {
 const { width: viewportWidth, isMobile } = useResponsive()
 
 /**
+ * 默认每页条数：与后端 defaultPageSize 一致（backend/internal/datasource/service.go:71）。
+ * 显式发送而不是依赖后端默认值 —— 后端默认值是**实现细节**，一旦调整，
+ * 前端分页器与真实返回行数就会错位（分页器按 page_size 算偏移）。
+ */
+const DEFAULT_PAGE_SIZE = 20
+
+/**
  * 详情抽屉宽度：桌面保持 560px，窄视口按 92vw 收敛（与全局 .el-dialog 的 92vw 兜底同一比例），
  * 保证 360px 视口下抽屉左边缘仍 >= 0、内部 el-descriptions 的 label 不被推出可视区。
  * 为什么在组件侧算而不是写 CSS 兜底：el-drawer 默认 teleport 到 body，组件的 scoped <style>
@@ -422,6 +448,17 @@ function metric(value: number): string | number {
   return metricsReady.value ? value : '—'
 }
 
+// ── 分页状态（真分页：每次翻页/改页长都重新请求后端，禁止本地对 items 切片） ──
+const currentPage = ref(1)
+const pageSize = ref(DEFAULT_PAGE_SIZE)
+/** 每页条数选项：与后端 maxPageSize=100 对齐（service.go:73），不给后端会静默钳制的值。 */
+const DS_PAGE_SIZES = [20, 50, 100]
+
+/**
+ * buildParams 只负责**筛选条件**；页码由 loadList 统一注入。
+ * 这样「翻页」与「改筛选」两条路径共用同一份筛选语义，不会出现
+ * 「某个筛选忘了带 page」或「翻页把筛选丢了」这类分叉。
+ */
 function buildParams(): DataSourceListParams {
   const params: DataSourceListParams = {}
   if (filterDeviceId.value != null) {
@@ -432,19 +469,50 @@ function buildParams(): DataSourceListParams {
   return params
 }
 
+/** 触发一次筛选查询：筛选条件变化意味着结果集变化，页码必须先归 1。 */
+function applyFilters() {
+  store.clearError()
+  currentPage.value = 1
+  void loadList()
+}
+
+/** 每页条数变化：旧页码在新页长下可能越界，同样归 1 后重新查询。 */
+function onPageSizeChange() {
+  currentPage.value = 1
+  void loadList()
+}
+
+/**
+ * 拉取当前页。翻页/尺寸变化**不得**重置页码（否则永远停在第 1 页），
+ * 故页码只在这里读取，重置只发生在 applyFilters / onPageSizeChange。
+ */
 async function loadList() {
   try {
-    await store.fetchList(buildParams())
+    await store.fetchList({ ...buildParams(), page: currentPage.value, page_size: pageSize.value })
+    await fallbackIfPageEmptied()
   } catch {
     /* store.error 已记录，错误提示条负责展示 */
   } finally {
     loaded.value = true
   }
 }
-function applyFilters() {
-  store.clearError()
-  void loadList()
+
+/**
+ * 空页回退：删除/筛选后当前页可能已越界（后端按 offset 返回空数组，total 仍是真总数）。
+ * 若停在空页，表格是空的、看起来像"一条都没有"——又一个"伪装成正常"的假象。
+ * 故非第 1 页且拿到空页时回退一页（只回退一页：删除一次最多抽掉一行；
+ * 一页最多 100 条，回退一页必然能落到仍有数据的页码区间内）。
+ */
+async function fallbackIfPageEmptied() {
+  if (currentPage.value <= 1 || store.items.length > 0) return
+  currentPage.value -= 1
+  try {
+    await store.fetchList({ ...buildParams(), page: currentPage.value, page_size: pageSize.value })
+  } catch {
+    /* 回退请求失败：store.error 已记录，保留当前页码交给用户手动重试 */
+  }
 }
+
 function retryFetch() {
   store.clearError()
   void loadList()
@@ -475,11 +543,22 @@ async function loadDevices() {
 // ── 行操作 ──
 const actingId = ref<number | null>(null)
 
+/**
+ * 状态类操作（切换/停用/重置）与编辑只在本地替换行内容。按 status 过滤时，
+ * 被改写的行可能已经**不再属于**当前筛选结果，本页因此可能被抽空 —— 那时必须
+ * 回后端重取（loadList 会做空页回退），否则留下「一行都不该在的结果集」假象。
+ * 无 status 过滤时不回取：行一定还在，少发一次请求。
+ */
+async function reloadIfStatusFiltered() {
+  if (filterStatus.value) await loadList()
+}
+
 async function onActivate(source: DataSource) {
   actingId.value = source.id
   try {
     await store.activateSource(source.id)
     ElMessage.success('已切换为权威来源')
+    await reloadIfStatusFiltered()
   } catch (err) {
     ElMessage.error(errorMessage(err))
   } finally {
@@ -500,6 +579,7 @@ async function onDeactivate(source: DataSource) {
   try {
     await store.deactivateSource(source.id)
     ElMessage.success('已停用')
+    await reloadIfStatusFiltered()
   } catch (err) {
     ElMessage.error(errorMessage(err))
   } finally {
@@ -512,6 +592,7 @@ async function onReset(source: DataSource) {
   try {
     await store.resetSource(source.id)
     ElMessage.success('已重置为待命')
+    await reloadIfStatusFiltered()
   } catch (err) {
     ElMessage.error(errorMessage(err))
   } finally {
@@ -531,6 +612,10 @@ async function onDelete(source: DataSource) {
   try {
     await store.removeSource(source.id)
     ElMessage.success('已删除')
+    // 删除会改变 total（分页器总页数）并可能抽空当前页：回后端取真值。
+    // store.removeSource 只在本地过滤 items，total 仍是删除前的数 —— 不回取
+    // 就会出现「表格 19 行、分页器仍说 21 条」的下一个静默不一致。
+    await loadList()
   } catch (err) {
     ElMessage.error(errorMessage(err))
   } finally {
@@ -625,9 +710,13 @@ async function onSave() {
     if (editingId.value !== null) {
       await store.updateSource(editingId.value, buildUpdatePayload())
       ElMessage.success('数据源已更新')
+      // 编辑可能改掉排序键（priority）或筛选键命中与否，当前页组成会变 —— 回取真值。
+      await loadList()
     } else {
       await store.createSource(buildCreatePayload())
       ElMessage.success('数据源已创建')
+      // 新建同样改变 total 与各页的组成：回后端重取当前页，别让分页器停在旧总数上。
+      await loadList()
     }
     dialogVisible.value = false
   } catch (e) {
@@ -686,6 +775,22 @@ onMounted(() => {
   background: var(--el-bg-color);
   border-radius: 8px;
   padding: 16px;
+}
+/* 分页条：与表格同卡，留出上间距并右对齐。 */
+.ds-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+/* 分页控件换行（窄屏真实裁切修复，同仓范式见 LogicalDeviceList.vue 的 .ld-pagination）。
+   外层 flex-wrap 只管多个 flex item **之间**，管不到单个过宽 item 的**内部**：
+   el-pagination 自带 white-space:nowrap + display:flex，layout="total, sizes, prev,
+   pager, next, jumper" 实测宽 600+px，在 360px 视口里会被整体推到容器左界之外 ——
+   上一页按钮永久不可达。给它自身加 flex-wrap: wrap，让它把 total/sizes/pager/jumper
+   拆成多行。 */
+.ds-pagination :deep(.el-pagination) {
+  flex-wrap: wrap;
 }
 .ds-error-alert {
   border-radius: 8px;
