@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { compileStyleAsync, parse } from '@vue/compiler-sfc'
+import { readFileSync } from 'node:fs'
+import { Window } from 'happy-dom'
 import DeviceConfigList from '@/views/config/DeviceConfigList.vue'
 import source from '@/views/config/DeviceConfigList.vue?raw'
 
@@ -52,6 +54,62 @@ function measureFlexWrap(css: string, parentClass: string, childClass: string | 
   wrap.remove()
   return value
 }
+
+/**
+ * 390px 窄屏页头契约（**真实级联**，非源码字符串包含）。
+ *
+ * happy-dom 有 CSS 级联，但 @media 只在**新建** Window 里按 innerWidth 求值
+ * （当前测试窗口改 innerWidth 不会重算，实测 1024→390 后 matchMedia 仍为 false）。
+ * 故这里开一个 390px Window，注入 @vue/compiler-sfc 真实编译后的 scoped CSS。
+ *
+ * 关键：本页与 PageHeader 是**两个** SFC，各自 scope id 不同。测试里用同一个合成 id
+ * 编译两边（'data-v-narrow'），并把该 id 挂到所有合成节点上 —— 这样 PageHeader 自身的
+ * 窄屏规则与页面侧的 :deep() 覆盖**都**会命中，等价于运行时 PageHeader 根节点继承
+ * 父组件 scope id 的真实行为（Vue 3 scoped 规则）。
+ *
+ * 为什么不断言"像素没溢出"：happy-dom **无布局引擎**，getBoundingClientRect/scrollWidth
+ * 恒为 0（仓内既有约定，见本文件上方 measureFlexWrap 的说明）。所以这里断言的是
+ * "390px 下页头不会横向撑破"的**级联事实**；真像素几何由 e2e 门禁覆盖。
+ */
+async function narrowPageHeaderCss(): Promise<string> {
+  const id = 'data-v-narrow'
+  const chunks: string[] = []
+  for (const file of ['src/views/config/DeviceConfigList.vue', 'src/components/common/PageHeader.vue']) {
+    const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file })
+    for (const block of descriptor.styles) {
+      const res = await compileStyleAsync({
+        source: block.content,
+        filename: file,
+        id,
+        scoped: Boolean(block.scoped),
+      })
+      expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+      chunks.push(res.code)
+    }
+  }
+  return chunks.join('\n')
+}
+
+
+/**
+ * happy-dom 的 Window 自带**另一套** DOM 类型（happy-dom/lib/nodes/...），与 tsconfig 的
+ * lib.dom 不是同一套：直接把它的节点传给 getComputedStyle/appendChild 会触发 TS2345
+ * （两边各有私有成员，互不兼容）。这里做**一次**收窄到标准 DOM 类型的外观，下游全部用
+ * 标准类型 —— 不需要 any，也不必在每个调用点撒 as。
+ */
+interface NarrowWindow {
+  innerWidth: number
+  document: Document
+  getComputedStyle: (el: Element) => CSSStyleDeclaration
+  matchMedia: (query: string) => { matches: boolean }
+}
+
+function newNarrowWindow(width: number): NarrowWindow {
+  const w = new Window({ width, height: 844 }) as unknown as NarrowWindow
+  w.innerWidth = width
+  return w
+}
+
 const { mockGetList } = vi.hoisted(() => ({
   mockGetList: vi.fn(() => Promise.resolve({
     list: [
@@ -125,6 +183,65 @@ describe('DeviceConfigList.vue', () => {
     expect(wrapper.findAll('.stats-row .stat-card')).toHaveLength(4)
     expect(wrapper.text()).toContain('模板总数')
     expect(wrapper.text()).toContain('本页启用')
+  })
+
+  // ─── I-6 页头统一 ─────────────────────────────────────────────────────────
+  // PageHeader 由**真实组件**渲染（本地 stubs 不含 PageHeader，全局 test-setup 也未注册它），
+  // 断言打在渲染结果 .page-header h2 的文本上，而非源码字符串。
+  // 变异自证：摘掉 DeviceConfigList.vue 里的 <PageHeader> 后本用例必须变红。
+  it('renders PageHeader as the page title', async () => {
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+
+    expect(wrapper.find('.page-header').exists()).toBe(true)
+    expect(wrapper.find('.page-header h2').text()).toBe('配置模板')
+    expect(wrapper.find('.page-header .page-header-subtitle').text())
+      .toBe('为边缘设备复用连接、解析与初始化配置')
+
+    // 页头必须在最前：标题不属于任何数据卡片，避免"标题长在统计卡/筛选卡里"
+    const page = wrapper.find('.config-page')
+    expect(page.element.firstElementChild?.classList.contains('page-header')).toBe(true)
+
+    // 去重守卫：页内只有这一个页面级标题
+    expect(wrapper.findAll('.page-header')).toHaveLength(1)
+  })
+
+  it('PageHeader 在 390px 下不撑破横向：标题换行、副标题折行、无 nowrap', async () => {
+    const css = await narrowPageHeaderCss()
+    const w = newNarrowWindow(390)
+    const style = w.document.createElement('style')
+    style.textContent = css
+    w.document.head.appendChild(style)
+
+    const id = 'data-v-narrow'
+    const mk = (tag: string, cls: string, parent: Element) => {
+      const el = w.document.createElement(tag)
+      if (cls) el.className = cls
+      el.setAttribute(id, '')
+      parent.appendChild(el)
+      return el
+    }
+    const root = mk('div', 'config-page', w.document.body)
+    const header = mk('div', 'page-header', root)
+    const left = mk('div', 'page-header-left', header)
+    const box = mk('div', '', left)
+    const h2 = mk('h2', '', box); h2.textContent = '配置模板'
+    const sub = mk('p', 'page-header-subtitle', box); sub.textContent = '为边缘设备复用连接、解析与初始化配置'
+
+    // 前置条件：390px 真的命中 <=768px 媒体查询，否则下面全是空断言
+    expect(w.matchMedia('(max-width: 768px)').matches).toBe(true)
+
+    const cs = (e: Element) => w.getComputedStyle(e)
+    // PageHeader 自身窄屏规则生效（padding 从 16px 24px 收敛到 14px 16px，h2 24→18px）
+    expect(cs(header).padding).toBe('14px 16px')
+    expect(cs(h2).fontSize).toBe('18px')
+    // 会撑破横排的三处 nowrap 都不存在（标题/副标题/左侧组均是默认 normal + 可收缩）
+    expect(cs(h2).whiteSpace).not.toBe('nowrap')
+    expect(cs(sub).whiteSpace).not.toBe('nowrap')
+    expect(cs(h2).textOverflow).not.toBe('ellipsis')
+    expect(cs(left).minWidth).not.toBe('max-content')
+    // 副标题不得被压成不换行单行（否则 28 个汉字会直接顶破 390px 内容区）
+    expect(cs(sub).whiteSpace).toBe('')
   })
 
   it('declares a four-column compact grid for mobile statistics', () => {

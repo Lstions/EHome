@@ -1,6 +1,6 @@
 <template>
   <div class="automation-rules-page">
-    <PageHeader title="自动化策略" description="传感器数据或时间窗口触发设备动作或通知" />
+    <PageHeader title="自动化策略" subtitle="传感器数据或时间窗口触发设备动作或通知" />
 
     <!-- 规则表格 -->
     <section class="card rules-card">

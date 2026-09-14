@@ -1,6 +1,6 @@
 <template>
   <div class="alert-rules-page">
-    <PageHeader title="告警规则" description="为传感器数据配置阈值规则，越限自动产生告警通知" />
+    <PageHeader title="告警规则" subtitle="为传感器数据配置阈值规则，越限自动产生告警通知" />
 
     <!-- 规则表格 -->
     <section class="card rules-card">

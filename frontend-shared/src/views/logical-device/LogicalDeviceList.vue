@@ -1,5 +1,10 @@
 <template>
   <div class="logical-device-page">
+    <!-- 页头（I-6 标题统一，范式同 views/channel/ChannelList.vue：标题 + 副标题，
+         无页级主操作时不开 #extra —— 合并/刷新是**列表操作**，留在下方工具栏卡片内）。
+         副标题取自本页空状态既有文案（见下方 el-empty 的 .empty-desc），未新造措辞。 -->
+    <PageHeader title="逻辑设备" subtitle="聚合边缘设备数据，实现统一视图和数据保留策略管理" />
+
     <!-- 工具栏 -->
     <el-card class="toolbar-card" shadow="hover">
       <div class="filter-bar">
@@ -288,6 +293,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Connection, Refresh, InfoFilled, WarningFilled, Plus } from '@element-plus/icons-vue'
+import PageHeader from '@/components/common/PageHeader.vue'
 import { deviceTypeOptions, getDeviceTypeLabel } from '@/utils/deviceType'
 import {
   logicalDeviceApi,

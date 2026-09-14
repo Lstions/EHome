@@ -1,5 +1,9 @@
 <template>
   <div class="config-page">
+    <!-- 页头（I-6 标题统一，范式同 views/data-source/DataSourceList.vue）。
+         副标题取自本页空状态既有文案（见下方 EmptyState 的 description），未新造措辞。 -->
+    <PageHeader title="配置模板" subtitle="为边缘设备复用连接、解析与初始化配置" />
+
     <!-- 顶部统计 -->
     <div class="stats-row">
       <StatCard label="模板总数" icon-color="var(--el-color-primary)">
@@ -247,6 +251,7 @@ import feedback from '@/utils/feedback'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import StatCard from '@/components/common/StatCard.vue'
+import PageHeader from '@/components/common/PageHeader.vue'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
 

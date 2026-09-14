@@ -11,26 +11,34 @@
     :aria-busy="isRefreshing"
     :data-test="isRefreshing ? 'monitor-refreshing' : undefined"
   >
-    <!-- 顶部操作栏 -->
-    <div class="toolbar">
-      <h2><el-icon aria-hidden="true"><DataAnalysis /></el-icon> 系统监控</h2>
-      <div class="toolbar-actions">
-        <el-select
-          v-model="refreshInterval"
-          class="refresh-interval-select"
-          size="default"
-          aria-label="自动刷新间隔"
-          @change="handleIntervalChange"
-        >
-          <el-option label="5秒" :value="5000" />
-          <el-option label="10秒" :value="10000" />
-          <el-option label="30秒" :value="30000" />
-          <el-option label="1分钟" :value="60000" />
-          <el-option label="关闭自动刷新" :value="0" />
-        </el-select>
-        <el-button type="primary" :icon="Refresh" @click="fetchMetrics">手动刷新</el-button>
-      </div>
-    </div>
+    <!-- 页头（I-6 标题统一）：原工具栏内的 <h2>系统监控</h2>（以及其内的 DataAnalysis 图标）
+         已**移除**，标题改由 PageHeader 承担 —— 同页不得出现两个「系统监控」。
+         刷新间隔选择器与手动刷新属于**页级操作**，按既有范式移入 #extra
+         （channel/ChannelList.vue、firmware/FirmwareManage.vue、data-source/DataSourceList.vue
+         均把页级主操作放 #extra）。PageHeader 的 .page-header-right 自带
+         display:flex + gap:8px，与原 .toolbar 的 space-between 布局等价；
+         .toolbar-actions 自身仍是 flex 容器，其窄屏规则（768px 换行、480px 纵向拉伸、
+         .el-select{flex:1}）不依赖已移除的 .toolbar 父级，故整组保留、行为不变。 -->
+    <PageHeader title="系统监控">
+      <template #extra>
+        <div class="toolbar-actions">
+          <el-select
+            v-model="refreshInterval"
+            class="refresh-interval-select"
+            size="default"
+            aria-label="自动刷新间隔"
+            @change="handleIntervalChange"
+          >
+            <el-option label="5秒" :value="5000" />
+            <el-option label="10秒" :value="10000" />
+            <el-option label="30秒" :value="30000" />
+            <el-option label="1分钟" :value="60000" />
+            <el-option label="关闭自动刷新" :value="0" />
+          </el-select>
+          <el-button type="primary" :icon="Refresh" @click="fetchMetrics">手动刷新</el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <!-- 接口失败：常驻错误态 + **配套**重试入口（范式同 views/dashboard/Dashboard.vue）。
          只弹一条 toast 不算错误态：自动刷新（默认 10s）会不断覆盖它，
@@ -362,10 +370,11 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
-  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, DataAnalysis, Operation, WarningFilled
+  Connection, Monitor, Cpu, DataLine, Promotion, Refresh, Operation, WarningFilled
 } from '@element-plus/icons-vue'
 import { getMetricsSummary, type MetricsSummary } from '@/api/monitor'
 import { useResponsive } from '@/composables/useResponsive'
+import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import { UNKNOWN, metricOrDash } from '@/utils/format'
 
@@ -599,23 +608,8 @@ onUnmounted(() => {
   padding: 0;
 }
 
-.toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 20px;
-}
-
-.toolbar h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 24px;
-}
-
+/* 注意：原 .toolbar / .toolbar h2 规则已随标题迁入 PageHeader 一并删除。
+   保留会形成"死选择器"——匹配不到任何元素，读代码的人会误以为页头仍由 .toolbar 承担。 */
 .toolbar-actions {
   display: flex;
   gap: 12px;
@@ -859,10 +853,23 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .toolbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
+  /* 页头窄屏契约：PageHeader 的 .page-header 是 flex 且**默认不换行**，而本页 #extra
+     里有 select + button 两个控件。沿用原 .toolbar 在 768px 的"标题独占一行、操作区
+     换到下一行"行为，避免操作区与标题在同一行互相挤压（390px 下标题 + 130px select
+     已占满内容区）。范式同 views/node/NodeDetail.vue 的
+     .collector-detail :deep(.page-header) { flex-wrap: wrap }。
+     :deep 在本页可行：PageHeader 根节点会继承父组件 scope id（Vue 3 scoped 规则）。 */
+  .monitor-container :deep(.page-header) {
+    flex-wrap: wrap;
+  }
+  .monitor-container :deep(.page-header-left) {
+    flex: 1;
+    min-width: 0;
+  }
+  .monitor-container :deep(.page-header-right) {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 6px;
   }
   .toolbar-actions {
     flex-wrap: wrap;
@@ -899,9 +906,8 @@ onUnmounted(() => {
   .toolbar-actions :deep(.el-button) {
     width: 100%;
   }
-  .toolbar h2 {
-    font-size: 20px;
-  }
+  /* 原 .toolbar h2 { font-size: 20px } 已删除：标题现由 PageHeader 承担，
+     其自身窄屏规则已把 h2 收敛到 18px（组件内 @media (max-width: 768px)）。 */
   .stat-card :deep(.el-card__body) {
     padding: 16px;
   }

@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
+import { Window } from 'happy-dom'
+import { parse, compileStyleAsync } from '@vue/compiler-sfc'
+import { readFileSync } from 'node:fs'
 import Monitor from '../Monitor.vue'
 
 // Mock API
@@ -48,8 +51,10 @@ const ProgressStub = defineComponent({
 })
 
 // Stub Element Plus components
+// 注意：**不** stub PageHeader —— I-6 的断言必须打在 PageHeader 的**真实**渲染结果上
+// （.page-header h2 的文本），stub 掉就退化成"我 stub 了我自己"，摘除组件也不会变红。
+// 范式同 views/profile/__tests__/Profile.spec.ts:54「PageHeader 是项目内组件，让真实组件渲染」。
 const stubs = {
-  PageHeader: { template: '<div class="page-header"><slot /></div>' },
   'el-card': { template: '<div class="el-card"><slot /><slot name="header" /></div>' },
   'el-row': { template: '<div class="el-row"><slot /></div>' },
   'el-col': { template: '<div class="el-col"><slot /></div>' },
@@ -99,6 +104,108 @@ function renderedProgressColors(wrapper: ReturnType<typeof mount>): string[] {
   return wrapper.findAll('.el-progress').map(el => el.attributes('data-color') || '')
 }
 
+/**
+ * 390px 窄屏页头契约（**真实级联**，非源码字符串包含）。
+ *
+ * happy-dom 有 CSS 级联：@media 规则在**新建**的 Window 里按 innerWidth 求值
+ * （实测 w.matchMedia('(max-width: 768px)').matches === true，computed flexWrap === 'wrap'）。
+ * 但**当前**测试窗口的 @media 不会在改 innerWidth 后重算（实测 1024→390 仍为 false），
+ * 故这里新开一个 390px Window、注入 @vue/compiler-sfc 真实编译后的 scoped CSS，
+ * 再按 PageHeader 的真实 DOM 形状（.page-header > .page-header-left/-right）合成节点读计算值。
+ *
+ * 为什么不断言"像素没溢出"：happy-dom **无布局引擎**，getBoundingClientRect/scrollWidth
+ * 恒为 0（仓内既有约定，见 views/config/__tests__/DeviceConfigList.spec.ts:164 的同类说明）。
+ * 因此这里断言的是"390px 下让页头能换行、操作区独占一行"的**级联事实**
+ * —— 这是横向溢出的**前置条件**；真像素几何由主控的 e2e 门禁覆盖。
+ * 若把本用例里的 :deep(.page-header) 换行规则删掉，flexWrap 会变回 'nowrap'，用例变红。
+ */
+async function compiledScopedCss(file: string): Promise<string> {
+  const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file })
+  const chunks: string[] = []
+  for (const block of descriptor.styles) {
+    const res = await compileStyleAsync({
+      source: block.content,
+      filename: file,
+      id: 'data-v-narrow',
+      scoped: Boolean(block.scoped),
+    })
+    expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+    chunks.push(res.code)
+  }
+  return chunks.join('\n')
+}
+
+
+/**
+ * happy-dom 的 Window 自带**另一套** DOM 类型（happy-dom/lib/nodes/...），与 tsconfig 的
+ * lib.dom 不是同一套：直接把它的节点传给 getComputedStyle/appendChild 会触发 TS2345
+ * （两边各有私有成员，互不兼容）。这里做**一次**收窄到标准 DOM 类型的外观，下游全部用
+ * 标准类型 —— 不需要 any，也不必在每个调用点撒 as。
+ */
+interface NarrowWindow {
+  innerWidth: number
+  document: Document
+  getComputedStyle: (el: Element) => CSSStyleDeclaration
+  matchMedia: (query: string) => { matches: boolean }
+}
+
+function newNarrowWindow(width: number): NarrowWindow {
+  const w = new Window({ width, height: 844 }) as unknown as NarrowWindow
+  w.innerWidth = width
+  return w
+}
+
+describe('Monitor.vue 页头 390px 窄屏契约（真实级联）', () => {
+  it('页头在 390px 下可换行、操作区独占一行，不把标题挤成逐字竖排', async () => {
+    const css = await compiledScopedCss('src/views/monitor/Monitor.vue')
+
+    const w = newNarrowWindow(390)
+    const style = w.document.createElement('style')
+    style.textContent = css
+    w.document.head.appendChild(style)
+
+    const make = (cls: string, parent: Element) => {
+      const el = w.document.createElement('div')
+      el.className = cls
+      el.setAttribute('data-v-narrow', '')
+      parent.appendChild(el)
+      return el
+    }
+    const root = make('monitor-container', w.document.body)
+    const header = make('page-header', root)
+    const left = make('page-header-left', header)
+    const right = make('page-header-right', header)
+
+    // 前置条件：390px 真的命中了 <=768px 媒体查询（否则下面的断言全是空断言）
+    expect(w.matchMedia('(max-width: 768px)').matches).toBe(true)
+
+    const cs = (el: Element) => w.getComputedStyle(el)
+    expect(cs(header).flexWrap).toBe('wrap')       // 标题行与操作区分行
+    expect(cs(left).flex).toBe('1 1 0%')           // 标题可收缩，不被操作区挤出
+    expect(cs(right).width).toBe('100%')           // 操作区占满第二行
+    expect(cs(right).justifyContent).toBe('flex-end')
+  })
+
+  it('反证：不匹配的 class 取不到该声明（证明测的是选择器而非恒真）', async () => {
+    const css = await compiledScopedCss('src/views/monitor/Monitor.vue')
+    const w = newNarrowWindow(390)
+    const style = w.document.createElement('style')
+    style.textContent = css
+    w.document.head.appendChild(style)
+
+    const root = w.document.createElement('div')
+    root.className = 'monitor-container'
+    root.setAttribute('data-v-narrow', '')
+    w.document.body.appendChild(root)
+    const notHeader = w.document.createElement('div')
+    notHeader.className = 'not-the-header'
+    notHeader.setAttribute('data-v-narrow', '')
+    root.appendChild(notHeader)
+
+    expect(w.getComputedStyle(notHeader).flexWrap).toBe('')
+  })
+})
+
 describe('Monitor.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -117,15 +224,38 @@ describe('Monitor.vue', () => {
     expect(wrapper.find('.monitor-container').exists()).toBe(true)
   })
 
-  it('renders toolbar with title', () => {
+  it('renders toolbar actions', () => {
     const wrapper = mount(Monitor, { global: { stubs } })
-    expect(wrapper.find('.toolbar').exists()).toBe(true)
+    expect(wrapper.find('.toolbar-actions').exists()).toBe(true)
     expect(wrapper.text()).toContain('系统监控')
   })
 
-  it('uses text and an icon rather than an emoji-only heading', () => {
+  // ─── I-6 页头统一：PageHeader 承担唯一标题，页内不得再有第二个「系统监控」 ───────
+  //
+  // 断言打在**渲染结果**上（PageHeader 真实渲染出的 .page-header h2），
+  // 不是源码里有没有 "PageHeader" 字符串 —— 后者会被注释或未使用的 import 骗过。
+  // 变异自证：摘掉 Monitor.vue 里的 <PageHeader> 后本用例必须变红。
+  it('renders PageHeader as the single page title', () => {
     const wrapper = mount(Monitor, { global: { stubs } })
-    expect(wrapper.find('.toolbar h2').text()).toBe('系统监控')
+
+    expect(wrapper.find('.page-header').exists()).toBe(true)
+    expect(wrapper.find('.page-header h2').text()).toBe('系统监控')
+
+    // 去重：原工具栏内的 <h2>系统监控</h2> 必须已移除，而不是与 PageHeader 并存。
+    const headings = wrapper.findAll('h1, h2')
+      .filter(h => h.text().includes('系统监控'))
+    expect(headings).toHaveLength(1)
+    // 旧的 .toolbar 容器一并消失（PageHeader 取代了它，不是叠加）
+    expect(wrapper.find('.toolbar').exists()).toBe(false)
+  })
+
+  it('标题是可读文本而非 emoji-only 字形（F17 既有守卫，改挂到 PageHeader 上）', () => {
+    const wrapper = mount(Monitor, { global: { stubs } })
+    const title = wrapper.find('.page-header h2').text()
+    expect(title).toBe('系统监控')
+    // 守卫本体：标题必须是真实文字，不得退化成纯 emoji / 符号
+    expect(/[\u4e00-\u9fa5A-Za-z0-9]/.test(title)).toBe(true)
+    expect(title).toMatch(/^[^\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]*$/u)
   })
 
   it('renders refresh button', () => {

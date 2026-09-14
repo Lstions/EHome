@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { compileStyleAsync, parse } from '@vue/compiler-sfc'
+import { readFileSync } from 'node:fs'
+import { Window } from 'happy-dom'
 import LogicalDeviceList from '@/views/logical-device/LogicalDeviceList.vue'
 import source from '@/views/logical-device/LogicalDeviceList.vue?raw'
 
@@ -52,6 +54,62 @@ function measureFlexWrap(css: string, parentClass: string, childClass: string | 
   wrap.remove()
   return value
 }
+
+/**
+ * 390px 窄屏页头契约（**真实级联**，非源码字符串包含）。
+ *
+ * happy-dom 有 CSS 级联，但 @media 只在**新建** Window 里按 innerWidth 求值
+ * （当前测试窗口改 innerWidth 不会重算，实测 1024→390 后 matchMedia 仍为 false）。
+ * 故这里开一个 390px Window，注入 @vue/compiler-sfc 真实编译后的 scoped CSS。
+ *
+ * 关键：本页与 PageHeader 是**两个** SFC，各自 scope id 不同。测试里用同一个合成 id
+ * 编译两边（'data-v-narrow'），并把该 id 挂到所有合成节点上 —— 这样 PageHeader 自身的
+ * 窄屏规则与页面侧的 :deep() 覆盖**都**会命中，等价于运行时 PageHeader 根节点继承
+ * 父组件 scope id 的真实行为（Vue 3 scoped 规则）。
+ *
+ * 为什么不断言"像素没溢出"：happy-dom **无布局引擎**，getBoundingClientRect/scrollWidth
+ * 恒为 0（仓内既有约定，见本文件上方 measureFlexWrap 的说明）。所以这里断言的是
+ * "390px 下页头不会横向撑破"的**级联事实**；真像素几何由 e2e 门禁覆盖。
+ */
+async function narrowPageHeaderCss(): Promise<string> {
+  const id = 'data-v-narrow'
+  const chunks: string[] = []
+  for (const file of ['src/views/logical-device/LogicalDeviceList.vue', 'src/components/common/PageHeader.vue']) {
+    const { descriptor } = parse(readFileSync(file, 'utf8'), { filename: file })
+    for (const block of descriptor.styles) {
+      const res = await compileStyleAsync({
+        source: block.content,
+        filename: file,
+        id,
+        scoped: Boolean(block.scoped),
+      })
+      expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+      chunks.push(res.code)
+    }
+  }
+  return chunks.join('\n')
+}
+
+
+/**
+ * happy-dom 的 Window 自带**另一套** DOM 类型（happy-dom/lib/nodes/...），与 tsconfig 的
+ * lib.dom 不是同一套：直接把它的节点传给 getComputedStyle/appendChild 会触发 TS2345
+ * （两边各有私有成员，互不兼容）。这里做**一次**收窄到标准 DOM 类型的外观，下游全部用
+ * 标准类型 —— 不需要 any，也不必在每个调用点撒 as。
+ */
+interface NarrowWindow {
+  innerWidth: number
+  document: Document
+  getComputedStyle: (el: Element) => CSSStyleDeclaration
+  matchMedia: (query: string) => { matches: boolean }
+}
+
+function newNarrowWindow(width: number): NarrowWindow {
+  const w = new Window({ width, height: 844 }) as unknown as NarrowWindow
+  w.innerWidth = width
+  return w
+}
+
 // ── Mocks ──────────────────────────────────────────────
 
 const { mockPush, mockRoute } = vi.hoisted(() => ({
@@ -150,6 +208,78 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
     expect(hint!.textContent).toContain('左右滑动')
   }
 }
+
+// ─── I-6 页头统一 ─────────────────────────────────────────────────────────
+// PageHeader 由**真实组件**渲染（mountPage 的 stubs 只 stub 了图标），断言打在渲染结果
+// .page-header h2 的文本上，而非源码字符串。
+// 变异自证：摘掉 LogicalDeviceList.vue 里的 <PageHeader> 后本用例必须变红。
+describe('LogicalDeviceList.vue 页头（I-6）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockRoute.query = {}
+    mockList.mockResolvedValue({ items: [], total: 0 })
+  })
+
+  it('renders PageHeader as the page title', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.find('.page-header').exists()).toBe(true)
+    expect(wrapper.find('.page-header h2').text()).toBe('逻辑设备')
+    expect(wrapper.find('.page-header .page-header-subtitle').text())
+      .toBe('聚合边缘设备数据，实现统一视图和数据保留策略管理')
+
+    // 页头必须在最前，且页内只有这一个页面级标题（不叠在工具栏卡片里）
+    const page = wrapper.find('.logical-device-page')
+    expect(page.element.firstElementChild?.classList.contains('page-header')).toBe(true)
+    expect(wrapper.findAll('.page-header')).toHaveLength(1)
+  })
+
+  it('PageHeader 在 390px 下不撑破横向：标题换行、副标题折行、无 nowrap', async () => {
+    const css = await narrowPageHeaderCss()
+    const w = newNarrowWindow(390)
+    const style = w.document.createElement('style')
+    style.textContent = css
+    w.document.head.appendChild(style)
+
+    const id = 'data-v-narrow'
+    const mk = (tag: string, cls: string, parent: Element) => {
+      const el = w.document.createElement(tag)
+      if (cls) el.className = cls
+      el.setAttribute(id, '')
+      parent.appendChild(el)
+      return el
+    }
+    const root = mk('div', 'logical-device-page', w.document.body)
+    const header = mk('div', 'page-header', root)
+    const left = mk('div', 'page-header-left', header)
+    const box = mk('div', '', left)
+    const h2 = mk('h2', '', box); h2.textContent = '逻辑设备'
+    const sub = mk('p', 'page-header-subtitle', box); sub.textContent = '聚合边缘设备数据，实现统一视图和数据保留策略管理'
+
+    // 前置条件：390px 真的命中 <=768px 媒体查询，否则下面全是空断言
+    expect(w.matchMedia('(max-width: 768px)').matches).toBe(true)
+
+    const cs = (e: Element) => w.getComputedStyle(e)
+    expect(cs(header).padding).toBe('14px 16px')
+    expect(cs(h2).fontSize).toBe('18px')
+    // 副标题 22 个汉字：必须能折行，且不得用省略号截断（页面级标题不应靠 ... 藏信息）
+    expect(cs(sub).whiteSpace).toBe('')
+    expect(cs(sub).textOverflow).not.toBe('ellipsis')
+    expect(cs(h2).whiteSpace).not.toBe('nowrap')
+    // 标题区可收缩，不被右侧内容挤出（本页无 #extra，但契约一并钉住）
+    expect(cs(left).minWidth).not.toBe('max-content')
+  })
+
+  it('合并/刷新仍留在工具栏卡片内，未被搬进页头（列表操作 ≠ 页级操作）', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const toolbar = wrapper.find('.toolbar-card')
+    expect(toolbar.find('.filter-right button').exists()).toBe(true)
+    expect(wrapper.find('.page-header .filter-right').exists()).toBe(false)
+  })
+})
 
 describe('LogicalDeviceList.vue', () => {
   beforeEach(() => {
