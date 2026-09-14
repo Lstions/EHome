@@ -42,6 +42,10 @@ type RetentionTask struct {
 	// notifier 清理 notifications 表 (D-2): 与本任务同频每日执行, 无独立
 	// goroutine —— 调度编排不变, 失败只 slog.Warn, 不影响 retention 主流程。
 	notifier *NotificationCleaner
+	// deliveries 清理 notification_deliveries 投递审计表 (D-1 裁决 3 的欠账):
+	// 同样挂在本任务上, 与 notifications 清理**同批处理** (裁决原文要求),
+	// 不新增 goroutine、不改 main.go。
+	deliveries *NotificationDeliveryCleaner
 	// now is injectable for tests.
 	now func() time.Time
 
@@ -59,6 +63,7 @@ func NewRetentionTask(db *gorm.DB) *RetentionTask {
 		initialDelay: 40 * time.Second, // purge 30s 首发之后, 错峰启动
 		batchSleep:   purgeBatchSleep,
 		notifier:     NewNotificationCleaner(db),
+		deliveries:   NewNotificationDeliveryCleaner(db),
 		now:          time.Now,
 		stopCh:       make(chan struct{}),
 	}
@@ -179,6 +184,14 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 	// 失败仅告警, 绝不影响下面的逐设备保留期删除。
 	if ctx.Err() == nil {
 		r.notifier.runOnceLogged(ctx)
+	}
+
+	// D-1 裁决 3 欠账: notification_deliveries 投递审计清理, 与
+	// notifications 清理**同批处理** (同一每日任务、同一 RunOnce 调用点,
+	// 不是两个各自调度的任务)。同样是旁路操作: 失败仅告警, 不影响
+	// 下面的逐设备保留期删除。
+	if ctx.Err() == nil {
+		r.deliveries.runOnceLogged(ctx)
 	}
 
 	results := make([]RetentionResult, 0, len(devices))

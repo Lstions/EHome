@@ -96,26 +96,50 @@ func (c *NotificationCleaner) SetBatchSize(n int) {
 // SetBatchSleep overrides the inter-batch sleep (tests only; 0 disables).
 func (c *NotificationCleaner) SetBatchSleep(d time.Duration) { c.batchSleep = d }
 
-// retentionWindows resolves the effective (read, unread) retention in days.
+// notificationRetentionWindows 解析通知本体的 (已读, 未读) 保留期 (天)。
 // 未显式配置时读系统级保留期快照 (默认 90), 未读 = 已读 × 2。
 // 脏值防御: 非正值一律回落到默认值, 避免负保留期算出未来 cutoff 而删除
 // 本不该删的通知 (与 globalPartitionRetentionDays 的防御同思路)。
+//
+// 抽成**无接收者的包级函数**, 因为投递审计清理必须复用**同一个**解析结果 ——
+// 证据的保留期不得短于被审计对象 (通知本体) 的最长保留期, 而"最长"必须由
+// 这一处算出 (见 notificationBodyMaxRetentionDays 与
+// notification_delivery_cleanup.go 文件头不变式)。两处各算一次 = 迟早漂移。
+func notificationRetentionWindows(readDays, unreadDays int) (read, unread int) {
+	read = readDays
+	if read <= 0 {
+		read = SystemRetentionDays()
+	}
+	if read <= 0 {
+		read = DefaultNotificationRetentionDays
+	}
+	unread = unreadDays
+	if unread <= 0 {
+		unread = read * notificationUnreadRetentionMultiplier
+	}
+	if unread < read {
+		unread = read // 未读不得比已读先被清理
+	}
+	return read, unread
+}
+
+// notificationBodyMaxRetentionDays 返回通知本体在**默认 (生产) 配置**下的最长
+// 保留期 —— 即投递审计证据必须至少活到的天数。
+//
+// 用默认配置而不是调用方注入的窗口: 投递清理是独立执行体, 拿不到
+// NotificationCleaner 的私有覆盖值; 而生产路径两侧都不覆盖, 默认值就是实际值。
+// 测试若显式覆盖了通知窗口, 也应对投递侧显式覆盖同样的值 (见 PG/不变式测试)。
+func notificationBodyMaxRetentionDays() int {
+	read, unread := notificationRetentionWindows(0, 0)
+	if unread > read {
+		return unread
+	}
+	return read
+}
+
+// retentionWindows resolves the effective (read, unread) retention in days.
 func (c *NotificationCleaner) retentionWindows() (readDays, unreadDays int) {
-	readDays = c.readDays
-	if readDays <= 0 {
-		readDays = SystemRetentionDays()
-	}
-	if readDays <= 0 {
-		readDays = DefaultNotificationRetentionDays
-	}
-	unreadDays = c.unreadDays
-	if unreadDays <= 0 {
-		unreadDays = readDays * notificationUnreadRetentionMultiplier
-	}
-	if unreadDays < readDays {
-		unreadDays = readDays // 未读不得比已读先被清理
-	}
-	return readDays, unreadDays
+	return notificationRetentionWindows(c.readDays, c.unreadDays)
 }
 
 // RunOnce deletes read notifications older than the read retention window and
