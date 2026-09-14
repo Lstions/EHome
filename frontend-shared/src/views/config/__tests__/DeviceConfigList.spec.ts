@@ -185,4 +185,69 @@ describe('DeviceConfigList.vue', () => {
       expect(rule![0]).toContain('flex-wrap: wrap')
     })
   })
+
+  /**
+   * 危险确认契约（规范 §3.4.3 / §4.3.4）：删除配置模板不可恢复，
+   * 确认键必须是 danger 语义类型 + danger class，且 autofocus:false；
+   * 这里是「页面 → feedback.confirmDanger」的接线守卫。
+   * confirmDanger 自身的真实渲染/焦点行为由 utils/__tests__/feedbackConfirmDanger.spec.ts 覆盖。
+   */
+  const dangerContract = expect.objectContaining({
+    confirmButtonType: 'danger',
+    confirmButtonClass: 'el-button--danger',
+    autofocus: false,
+  })
+
+  it('删除配置走危险确认契约，且文案含对象身份', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const confirmSpy = vi.mocked(ElMessageBox.confirm)
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+
+    // 「删除」是 el-dropdown 的 command 项；stub 不触发 command 事件，
+    // 故直接调用组件暴露的 handleMoreAction（与下拉触发同一入口）。
+    const vm = wrapper.vm as unknown as { handleMoreAction: (c: string, cfg: unknown) => Promise<void> }
+    await vm.handleMoreAction('delete', { id: 7, name: '温度模板' })
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('温度模板'),
+      expect.any(String),
+      dangerContract,
+    )
+  })
+
+  it('删除配置取消时不调用 delete 接口', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const { deviceConfigApi } = await import('@/api/deviceConfig')
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancel'))
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as { handleMoreAction: (c: string, cfg: unknown) => Promise<void> }
+    await vm.handleMoreAction('delete', { id: 7, name: '温度模板' })
+    await flushPromises()
+
+    expect(vi.mocked(deviceConfigApi.delete)).not.toHaveBeenCalled()
+  })
+
+  it('删除配置确认后调用 delete 接口，失败时报「删除失败」', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const { deviceConfigApi } = await import('@/api/deviceConfig')
+    const { ElMessage } = await import('element-plus')
+    vi.mocked(ElMessageBox.confirm).mockResolvedValueOnce('confirm' as never)
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as { handleMoreAction: (c: string, cfg: unknown) => Promise<void> }
+    await vm.handleMoreAction('delete', { id: 7, name: '温度模板' })
+    await flushPromises()
+    expect(vi.mocked(deviceConfigApi.delete)).toHaveBeenCalledWith(7)
+
+    // 接口失败分支：迁移后不再靠 error !== 'cancel' 判断，仍须提示失败
+    vi.mocked(deviceConfigApi.delete).mockRejectedValueOnce(new Error('boom'))
+    await vm.handleMoreAction('delete', { id: 8, name: '湿度模板' })
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('删除失败')
+  })
 })

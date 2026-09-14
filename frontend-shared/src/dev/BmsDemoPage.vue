@@ -392,6 +392,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import feedback from '@/utils/feedback'
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart as LineChartSeries } from 'echarts/charts'
@@ -488,16 +489,20 @@ const deviceFields = computed(() => [
 
 const restarting = ref(false)
 function onRestart() {
-  ElMessageBox.confirm('确认立即重启 EdgeBox-3000?', '重启设备', {
-    confirmButtonText: '重启', cancelButtonText: '取消', type: 'warning',
-  }).then(() => {
+  // 重启设备会中断当前所有采集/控制会话，属破坏性操作：danger 确认 + 安全侧焦点。
+  void feedback.confirmDanger('确认立即重启 EdgeBox-3000?', {
+    title: '重启设备',
+    confirmText: '重启',
+    cancelText: '取消',
+  }).then((ok) => {
+    if (!ok) return
     restarting.value = true
     addHistory('控制操作', '重启设备')
     setTimeout(() => {
       restarting.value = false
       toast('重启指令已下发,设备正在重启')
     }, 1500)
-  }).catch(() => {})
+  })
 }
 
 const remoteOpen = ref(false)
@@ -693,6 +698,9 @@ const ops = [
   { name: '升级固件', desc: '当前版本 v1.4.8', icon: UploadFilled },
   { name: '清除告警', desc: '清除所有告警记录', icon: Lock },
 ]
+/** 破坏性受控操作：不可逆或会丢数据，必须走 danger 确认 + 安全侧焦点。 */
+const DESTRUCTIVE_OPS = new Set(['恢复默认配置', '清除告警'])
+
 function onOpClick(op: { name: string }) {
   if (op.name === '重启设备') { onRestart(); return }
   const msgs: Record<string, string> = {
@@ -700,12 +708,21 @@ function onOpClick(op: { name: string }) {
     '升级固件': '确认将固件从 v1.4.8 升级到 v1.4.9?',
     '清除告警': '确认清除所有告警记录?该操作不可恢复。',
   }
-  ElMessageBox.confirm(msgs[op.name] || `确认执行「${op.name}」?`, op.name, {
-    confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning',
-  }).then(() => {
+  const message = msgs[op.name] || `确认执行「${op.name}」?`
+  const run = () => {
     addHistory('受控操作', op.name)
     toast(`「${op.name}」已执行`)
-  }).catch(() => {})
+  }
+  const options = { title: op.name, confirmText: '执行', cancelText: '取消' }
+  // 「恢复默认配置」覆盖当前配置、「清除告警」删除全部告警记录，两者不可逆；
+  // 「升级固件」在 demo 中只是本地记录、不清数据，保持普通确认不降信噪比。
+  if (DESTRUCTIVE_OPS.has(op.name)) {
+    void feedback.confirmDanger(message, options).then((ok) => { if (ok) run() })
+    return
+  }
+  ElMessageBox.confirm(message, op.name, {
+    confirmButtonText: '执行', cancelButtonText: '取消', type: 'warning',
+  }).then(() => run()).catch(() => {})
 }
 
 // ── 操作历史 ──

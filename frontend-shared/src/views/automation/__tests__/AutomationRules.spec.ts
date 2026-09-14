@@ -285,14 +285,68 @@ describe('AutomationRules.vue', () => {
     expect(source.default).toContain('onToggle')
   })
 
-  it('删除确认后调 deleteRule', async () => {
+  /**
+   * 危险确认契约（规范 §3.4.3 / §4.3.4）：删除规则不可恢复，
+   * 确认键必须是 danger 语义类型 + danger class，且 autofocus:false；
+   * 这里是「页面 → feedback.confirmDanger」的接线守卫。
+   * confirmDanger 自身的真实渲染/焦点行为由 utils/__tests__/feedbackConfirmDanger.spec.ts 覆盖。
+   */
+  const dangerContract = expect.objectContaining({
+    confirmButtonType: 'danger',
+    confirmButtonClass: 'el-button--danger',
+    autofocus: false,
+  })
+
+  it('删除规则走危险确认契约，且文案含对象身份', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const confirmSpy = vi.mocked(ElMessageBox.confirm)
     mockedAutomationApi.deleteRule.mockResolvedValue(undefined)
     await mountPage()
-    // ElTable stub 不渲染 slot 模板，删除按钮在 slot 内不可见。
-    // 改为验证源码中删除按钮存在 + onDelete 方法调用 deleteRule。
-    const source = await import('../AutomationRules.vue?raw')
-    expect(source.default).toContain('删除')
-    expect(source.default).toContain('onDelete')
+
+    // 规则行的删除按钮在 el-table 作用域槽内，通用 stub 不渲染槽；
+    // 故用执行作用域槽的表格替身拿到真实按钮，再点它触发 onDelete。
+    const wrapper = await mountWithSlotTable()
+    const delBtn = wrapper.findAll('button').find(b => b.text() === '删除')
+    expect(delBtn).toBeTruthy()
+    await delBtn!.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('高温开窗'),
+      expect.any(String),
+      dangerContract,
+    )
+    // 确认后（本文件默认 mock resolve(true)）才真正删除，且用该行的 id：
+    // 证明 confirmDanger 的 true/false 结果真的被 onDelete 消费，而不是摆设。
+    expect(mockedAutomationApi.deleteRule).toHaveBeenCalledWith(1)
+  })
+
+  it('删除规则取消时不调用 deleteRule', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancel'))
+    const wrapper = await mountWithSlotTable()
+    const delBtn = wrapper.findAll('button').find(b => b.text() === '删除')
+    await delBtn!.trigger('click')
+    await flushPromises()
+    expect(mockedAutomationApi.deleteRule).not.toHaveBeenCalled()
+  })
+
+  it('确认执行高风险动作走危险确认契约', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const confirmSpy = vi.mocked(ElMessageBox.confirm)
+    // 真实字段是 result（AutomationEvent.state 从不存在，见 api/automation.ts:32-33 的迁移说明）
+    mockedAutomationApi.listEvents.mockResolvedValue(eventPage([{ ...eventFixture, result: 'pending_confirm' }]))
+    const wrapper = await mountWithSlotTable()
+    const confirmBtn = wrapper.findAll('button').find(b => b.text() === '确认执行')
+    expect(confirmBtn).toBeTruthy()
+    await confirmBtn!.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      expect.stringContaining('高风险动作'),
+      expect.any(String),
+      dangerContract,
+    )
   })
 
   it('确认事件调 confirmEvent', async () => {
@@ -450,6 +504,42 @@ describe('AutomationRules.vue', () => {
       expect(measureFlexWrap(css, 'events-pagination')).toBe('wrap')
       // 反证：容器 class 不匹配时必须取不到该声明（证明测的是选择器而非恒真）
       expect(measureFlexWrap(css, 'not-the-container')).toBe('')
+    })
+  })
+
+// ─── F8 移动端宽表横滚合同（§4.3.2.2 MUST / §4.4.1 MUST） ───────────────────
+// 断言的是**真实渲染出的 DOM 祖先链**，不是源码字符串包含：
+// `expect(src).toContain('class="mobile-table-wrapper"')` 无法区分
+// 「包住了这张表」还是「包住了另一张表 / 只写在注释里」。happy-dom 无布局引擎
+// （getBoundingClientRect 恒 0），像素级可达性由真浏览器探针验收：
+// frontend-shared/.tmp-probe/f8-f10-probe.mjs
+function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ element: Element }> }) {
+  const tables = wrapper.findAll('.el-table')
+  expect(tables.length, '渲染出的 el-table 数量为 0，断言会假绿').toBeGreaterThan(0)
+  for (const t of tables) {
+    const el = t.element as HTMLElement
+    const box = el.closest('.mobile-table-wrapper')
+    expect(box, 'el-table 不在 .mobile-table-wrapper 祖先链上').not.toBeNull()
+    const hint = (box as HTMLElement).querySelector(':scope > .mobile-table-hint')
+    expect(hint, '.mobile-table-wrapper 缺少直接子节点 .mobile-table-hint').not.toBeNull()
+    expect(hint!.textContent).toContain('左右滑动')
+  }
+}
+
+  describe('F8 移动端宽表横滚合同（§4.3.2.2 MUST）', () => {
+    it('规则表与事件表都渲染在 .mobile-table-wrapper 内，且带横滑提示', async () => {
+      const wrapper = await mountPage()
+      expectEveryTableWrapped(wrapper)
+      // 本页有两张表（规则 + 触发历史），逐张判定，不能一张包裹就整页通过
+      expect(wrapper.findAll('.mobile-table-wrapper')).toHaveLength(2)
+      expect(wrapper.findAll('.mobile-table-hint')).toHaveLength(2)
+    })
+
+    it('分页器仍在 wrapper 之外（横滚容器不得把分页一起卷走）', async () => {
+      const wrapper = await mountPage()
+      const pagination = wrapper.find('.events-pagination')
+      expect(pagination.exists()).toBe(true)
+      expect(pagination.element.closest('.mobile-table-wrapper')).toBeNull()
     })
   })
 })

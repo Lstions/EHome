@@ -8,6 +8,9 @@
         <span class="card-title">规则<el-tag v-if="rules.length" size="small" class="count-tag">{{ rules.length }}</el-tag></span>
         <el-button type="primary" :icon="Plus" data-test="create-rule" @click="openCreate">创建规则</el-button>
       </div>
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="rules" v-loading="rulesLoading" data-test="rules-table">
         <el-table-column prop="name" label="名称" min-width="140" show-overflow-tooltip />
         <el-table-column label="触发器" min-width="180">
@@ -53,6 +56,7 @@
         </el-table-column>
         <template #empty>暂无规则，点击右上角创建</template>
       </el-table>
+      </div>
     </section>
 
     <!-- 触发历史 -->
@@ -69,6 +73,9 @@
           <el-button link size="small" data-test="refresh-events" @click="fetchEvents">刷新</el-button>
         </div>
       </div>
+      <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper） -->
+      <div class="mobile-table-wrapper">
+        <div class="mobile-table-hint">← 左右滑动查看完整表格 →</div>
       <el-table :data="events" v-loading="eventsLoading" data-test="events-table">
         <el-table-column label="时间" min-width="160">
           <template #default="{ row }">{{ formatTime(row.triggered_at) }}</template>
@@ -120,6 +127,7 @@
         </el-table-column>
         <template #empty>暂无触发事件</template>
       </el-table>
+      </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
            改前本表一次性渲染后端 Limit(500) 的全部行 (实测 502 行/11902 节点,
            真实事件 >1006 条被静默截断), fixed 列为每行各注入一份 inline style。 -->
@@ -268,6 +276,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import feedback from '@/utils/feedback'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
@@ -567,8 +576,14 @@ async function onToggle(rule: AutomationRule, enabled: boolean) {
 }
 
 async function onDelete(rule: AutomationRule) {
+  // 删除规则不可恢复：走统一危险确认（danger 确认键 + 焦点不落在破坏性按钮上）。
+  const confirmed = await feedback.confirmDanger(`删除规则「${rule.name}」？`, {
+    title: '确认删除',
+    confirmText: '删除',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
   try {
-    await ElMessageBox.confirm(`删除规则「${rule.name}」？`, '确认删除', { type: 'warning' })
     await automationApi.deleteRule(rule.id)
     ElMessage.success('已删除')
     void fetchRules()
@@ -579,8 +594,15 @@ async function onDelete(rule: AutomationRule) {
 }
 
 async function onConfirmEvent(event: AutomationEvent) {
+  // 确认制事件的「确认执行」会放开人工确认门、直接下发设备动作（不可撤销），
+  // 属破坏性操作，故走 danger 确认 + 安全侧焦点。
+  const confirmed = await feedback.confirmDanger('确认执行该高风险动作？', {
+    title: '确认执行',
+    confirmText: '确定',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
   try {
-    await ElMessageBox.confirm('确认执行该高风险动作？', '确认执行', { type: 'warning' })
     await automationApi.confirmEvent(event.id)
     ElMessage.success('已确认执行')
     void fetchEvents()

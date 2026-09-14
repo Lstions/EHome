@@ -243,6 +243,7 @@ import {
   DataBoard, DataAnalysis, Files
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import feedback from '@/utils/feedback'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import StatCard from '@/components/common/StatCard.vue'
@@ -462,23 +463,24 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
       exportConfig(config)
       break
       
-    case 'delete':
+    case 'delete': {
+      // 删除配置模板不可恢复：走统一危险确认（danger 确认键 + 焦点不落在破坏性按钮上）。
+      // 取消时直接跳出，不再进入下面的 try，故 catch 只处理接口失败（与迁移前一致）。
+      const confirmed = await feedback.confirmDanger(
+        `确定要删除配置 "${config.name}" 吗？`,
+        { title: '警告', confirmText: '删除', cancelText: '取消' },
+      )
+      if (!confirmed) break
+
       try {
-        await ElMessageBox.confirm(
-          `确定要删除配置 "${config.name}" 吗？`,
-          '警告',
-          { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
-        )
-        
         await deviceConfigApi.delete(config.id)
         ElMessage.success('删除成功')
         await fetchConfigs()
-      } catch (error: any) {
-        if (error !== 'cancel') {
-          ElMessage.error('删除失败')
-        }
+      } catch {
+        ElMessage.error('删除失败')
       }
       break
+    }
   }
 }
 
