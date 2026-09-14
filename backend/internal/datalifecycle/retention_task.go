@@ -39,6 +39,9 @@ type RetentionTask struct {
 	initialDelay time.Duration
 	batchSleep   time.Duration
 	batchSize    int // 0 → dialect default (PG 1万 / SQLite 1千)
+	// notifier 清理 notifications 表 (D-2): 与本任务同频每日执行, 无独立
+	// goroutine —— 调度编排不变, 失败只 slog.Warn, 不影响 retention 主流程。
+	notifier *NotificationCleaner
 	// now is injectable for tests.
 	now func() time.Time
 
@@ -55,6 +58,7 @@ func NewRetentionTask(db *gorm.DB) *RetentionTask {
 		interval:     24 * time.Hour,
 		initialDelay: 40 * time.Second, // purge 30s 首发之后, 错峰启动
 		batchSleep:   purgeBatchSleep,
+		notifier:     NewNotificationCleaner(db),
 		now:          time.Now,
 		stopCh:       make(chan struct{}),
 	}
@@ -169,6 +173,12 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 		metrics.LifecycleTaskFailures.WithLabelValues("retention").Inc()
 		slog.Error("datalifecycle: retention global partition sweep failed; continuing per-device deletes",
 			"error", err)
+	}
+
+	// D-2: notifications 清理 (与 retention 同频每日一次)。旁路操作:
+	// 失败仅告警, 绝不影响下面的逐设备保留期删除。
+	if ctx.Err() == nil {
+		r.notifier.runOnceLogged(ctx)
 	}
 
 	results := make([]RetentionResult, 0, len(devices))
