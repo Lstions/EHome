@@ -224,10 +224,10 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 	}
 
 	// 命令域三表清理 (设计 §2.4/§2.5/§2.6)。顺序不是任意的:
-	//  1. executions 先删 —— 它让"对应 execution 已终态"这个条件对更多 outbox 成立
-	//     (outbox 的删除条件之一就是 execution 已终态);
-	//  2. outboxes 再删 (30 天窗, 依赖正确识别在途);
-	//  3. attempts 最后删 (730 天窗, 与 executions 同寿命)。
+	//  1. executions 先删 —— outbox 的删除条件之一是"对应 execution 不处于非终态",
+	//     先删掉到期终态 execution 会让更多到期 outbox 在同一轮里满足条件;
+	//  2. outboxes 再删 (30 天窗, 唯一可短留的表);
+	//  3. attempts 最后删 (730 天窗, 与 executions 同寿命 —— 防伪锚点不得短留)。
 	// 三者都是独立的单表 DELETE (零级联), 换个顺序也不会错, 但这样同一轮能一次清完。
 	//
 	// 三个清理器各自独立失败: 旁路操作, 失败仅告警, 绝不影响下面的逐设备保留期删除。
