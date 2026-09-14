@@ -62,6 +62,12 @@ type RetentionTask struct {
 	commandExecutions *CommandExecutionCleaner
 	commandAttempts   *CommandAttemptCleaner
 	commandOutboxes   *CommandOutboxCleaner
+	// audit 清理 security_audit_events (运行期无界增长表设计 §2.3 的裁决: 统一保留
+	// 730 天, 按 created_at 删)。它是本批八张表里最后一个此前没有清理器的表 ——
+	// 在此之前表只增不减 (实测 3797 行 / 1.9 MB)。
+	// 与上面六个清理器同一 RunOnce 调用点 (第 7 个), 不新增 goroutine、不改 main.go;
+	// 失败只 slog.Warn + 指标, 不影响逐设备 retention 主流程。
+	audit *SecurityAuditCleaner
 	// now is injectable for tests.
 	now func() time.Time
 
@@ -85,6 +91,7 @@ func NewRetentionTask(db *gorm.DB) *RetentionTask {
 		commandExecutions: NewCommandExecutionCleaner(db),
 		commandAttempts:   NewCommandAttemptCleaner(db),
 		commandOutboxes:   NewCommandOutboxCleaner(db),
+		audit:             NewSecurityAuditCleaner(db),
 
 		now:    time.Now,
 		stopCh: make(chan struct{}),
@@ -239,6 +246,15 @@ func (r *RetentionTask) RunOnce(ctx context.Context) ([]RetentionResult, error) 
 	}
 	if ctx.Err() == nil {
 		r.commandAttempts.runOnceLogged(ctx)
+	}
+
+	// 运行期无界增长表 §2.3 (本批最后一个缺口): security_audit_events 单一时间窗
+	// 清理 (730 天, 按 created_at)。它是 append-only 审计证据, 无状态档位, 因此与
+	// 上面六个清理器不同 —— 没有白名单, 整表按时间删 (与 notification_cleanup 同型)。
+	// 放在命令域之后不是任意的: 本表 request_id 指向 command_executions.command_id
+	// (INV-6), 同一轮里先清命令域再清审计, 审计行【最后】消失。
+	if ctx.Err() == nil {
+		r.audit.runOnceLogged(ctx)
 	}
 
 	results := make([]RetentionResult, 0, len(devices))
