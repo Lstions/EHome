@@ -42,6 +42,66 @@ func tableExistsInSchema(t *testing.T, db *gorm.DB, name, kind string) int64 {
 	return count
 }
 
+// unifiedDataRelkinds 列出**全库所有 schema** 下名为 unified_data 的关系及其
+// relkind, 形如 "public:p,test_123_456:p"。当前 schema 之外的同名关系是
+// "PARTITION OF 打到了别的对象上" 这类问题的唯一直接证据 (search_path 回退)。
+func unifiedDataRelkinds(t *testing.T, db *gorm.DB) string {
+	t.Helper()
+	var s string
+	if err := db.Raw(`SELECT COALESCE(string_agg(n.nspname || ':' || c.relkind::text, ',' ORDER BY n.nspname), '<none>')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = ?`, partitionedTable).Scan(&s).Error; err != nil {
+		return "<query-error: " + err.Error() + ">"
+	}
+	if s == "" {
+		return "<none>"
+	}
+	return s
+}
+
+// flakeProbe 在关键步骤前后打印定位偶发 42P17 所需的状态。
+//
+// 背景 (2026-09-14 首轮 PG 全包偶发一次, 其后 5+4 次未复现):
+//
+//	partition_mgr_pg_test.go:155  EnsurePartitions: ensure partition unified_data_202608:
+//	ERROR: "unified_data" is not partitioned (SQLSTATE 42P17)
+//
+// 该错误由 PG 在 "CREATE TABLE <分区> PARTITION OF <母表>" 且母表 relkind != 'p' 时
+// 抛出。PG 服务端日志 (docker logs ehome-postgres) 留有原始记录 (2026-09-14
+// 18:53:26–18:55:32, 4 条同形态记录): parent 是 unified_data(**不带 _new**),
+// 月份是 **202608** —— 该 DDL 只可能来自 EnsurePartitionsFor("unified_data", n),
+// 与失败点逐字吻合 (迁移内部建分区时 parent 恒为 unified_data_new)。
+//
+// 注意: PG 默认 log_statement=none, **不记录成功语句**, 因此"当时哪些月份分区已
+// 存在"无从得知, 不要据此推断失败时序。4 条记录也可能只是同一次失败的重试。
+// 详见 .logs/partition-flake-report.md。
+//
+// 下次偶发时这张日志必须能直接回答四个问题: 当前 schema 是谁、unified_data 在当前
+// schema 下的 relkind 是什么、全库同名关系分布 (跨 schema 回退)、以及包级全局
+// database.DB 此刻指向谁 (本用例第 3 步会临时改写它)。
+func flakeProbe(t *testing.T, db *gorm.DB, stage string) {
+	t.Helper()
+	var schema, relkind, searchPath, dbName string
+	_ = db.Raw("SELECT current_schema()").Scan(&schema).Error
+	_ = db.Raw(`SELECT COALESCE((
+		SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = ? AND n.nspname = current_schema()), '<absent>')`,
+		partitionedTable).Scan(&relkind).Error
+	_ = db.Raw("SHOW search_path").Scan(&searchPath).Error
+	_ = db.Raw("SELECT current_database()").Scan(&dbName).Error
+	globalDB := "other"
+	switch {
+	case database.DB == nil:
+		globalDB = "nil"
+	case database.DB == db:
+		globalDB = "same-as-db"
+	}
+	t.Logf("[flake-probe] stage=%q db=%s schema=%s relkind(unified_data)=%s "+
+		"IsTablePartitioned=%v search_path=%q database.DB=%s all_schemas_unified_data=[%s]",
+		stage, dbName, schema, relkind, IsTablePartitioned(db, partitionedTable),
+		searchPath, globalDB, unifiedDataRelkinds(t, db))
+}
+
 func TestMigrateUnifiedData_FreshDeploy_PartitionedParentAtFinalName(t *testing.T) {
 	requirePostgres(t)
 	db := testutil.OpenTestDB(t)
@@ -153,20 +213,28 @@ func TestRollupTableNotCreated_Postgres(t *testing.T) {
 	// 2. 走启动期的分区分支 (退役的建表路径曾在这里的下游被调用)。
 	// 前置: unified_data 需先分区化 (同 TestRetentionTask_PartitionDrop 的既有范式)。
 	dropUnifiedDataFlat(t, db)
+	// 可观测性锚点: 失败点 (原 155 行) 的上下游状态。详见 flakeProbe 注释。
+	flakeProbe(t, db, "after-drop-flat")
 	if err := MigrateUnifiedDataToPartitioned(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	flakeProbe(t, db, "after-migrate")
 	if err := NewPartitionManager(db).EnsurePartitions(2); err != nil {
 		t.Fatalf("EnsurePartitions: %v", err)
 	}
+	flakeProbe(t, db, "after-ensure-partitions")
 
 	// 3. 走**生产入口**: AutoMigrate() 尾部会幂等 DROP 该表。
 	prev := database.DB
 	database.DB = db
 	t.Cleanup(func() { database.DB = prev })
+	flakeProbe(t, db, "before-automigrate")
 	if err := database.AutoMigrate(); err != nil {
 		t.Fatalf("生产 AutoMigrate 路径: %v", err)
 	}
+	// AutoMigrate 之后母表必须仍分区: 若这里 relkind 变了, 就是这个用例自己
+	// 把母表降级 (生产 AutoMigrate 列表已不含 UnifiedData, 见 gorm.go 注释)。
+	flakeProbe(t, db, "after-automigrate")
 	if tableExistsInSchema(t, db, "unified_data_rollup_1m", "r") != 0 {
 		t.Fatal("退役后 unified_data_rollup_1m 仍存在 —— 死表复活 (INV: 死表不得复活)")
 	}
@@ -175,6 +243,7 @@ func TestRollupTableNotCreated_Postgres(t *testing.T) {
 	if err := database.AutoMigrate(); err != nil {
 		t.Fatalf("生产 AutoMigrate 二次执行 (幂等性): %v", err)
 	}
+	flakeProbe(t, db, "after-automigrate-2")
 	if tableExistsInSchema(t, db, "unified_data_rollup_1m", "r") != 0 {
 		t.Fatal("二次执行后 unified_data_rollup_1m 被重建")
 	}
