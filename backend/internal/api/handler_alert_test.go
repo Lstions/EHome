@@ -175,24 +175,40 @@ func TestAlertEventsListAndRead(t *testing.T) {
 	r := ginNew()
 	registerAlertRoutes(r.Group("/api/v1"), db, nil)
 
+	// 分页契约 (P1.2): data 由裸数组改为 {items,total,page,page_size}。
+	// 此处逐字段断言信封, 不是"是不是数组"的宽松判断 —— 契约回退时会红。
 	all := alertReq(t, r, "GET", "/api/v1/alert-events", nil)
-	var items []models.AlertEvent
+	var allPage struct {
+		Items    []models.AlertEvent `json:"items"`
+		Total    int64               `json:"total"`
+		Page     int                 `json:"page"`
+		PageSize int                 `json:"page_size"`
+	}
 	_, data := decodeEnvelope(t, all)
-	if err := json.Unmarshal(data, &items); err != nil {
+	if err := json.Unmarshal(data, &allPage); err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(items))
+	if len(allPage.Items) != 2 || allPage.Total != 2 {
+		t.Fatalf("expected 2 events, got items=%d total=%d", len(allPage.Items), allPage.Total)
+	}
+	if allPage.Page != 1 || allPage.PageSize != 20 {
+		t.Fatalf("expected page/page_size echo 1/20, got %d/%d", allPage.Page, allPage.PageSize)
 	}
 
 	byRule := alertReq(t, r, "GET", "/api/v1/alert-events?rule_id=7&state=firing", nil)
+	var filtered struct {
+		Items []models.AlertEvent `json:"items"`
+		Total int64               `json:"total"`
+	}
 	_, data = decodeEnvelope(t, byRule)
-	items = nil
-	if err := json.Unmarshal(data, &items); err != nil {
+	if err := json.Unmarshal(data, &filtered); err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].State != "firing" {
-		t.Fatalf("expected firing-only filter, got %+v", items)
+	if len(filtered.Items) != 1 || filtered.Items[0].State != "firing" {
+		t.Fatalf("expected firing-only filter, got %+v", filtered.Items)
+	}
+	if filtered.Total != 1 {
+		t.Fatalf("expected firing-only total=1, got %d", filtered.Total)
 	}
 
 	read := alertReq(t, r, "POST", "/api/v1/alert-events/read", map[string]any{"ids": []uint{fired.ID}})

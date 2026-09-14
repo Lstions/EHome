@@ -85,15 +85,50 @@ describe('alert store', () => {
     expect(store.rules[0].enabled).toBe(false)
   })
 
-  it('fetchEvents 赋值事件列表并计算 firingCount', async () => {
-    mockedApi.listEvents.mockResolvedValue([
-      { id: 1, rule_id: 1, state: 'firing', value: 4.3, fired_at: '2026-08-21T01:00:00Z', resolved_at: null, notified_at: '2026-08-21T01:00:00Z', created_at: '2026-08-21T01:00:00Z' },
-      { id: 2, rule_id: 1, state: 'resolved', value: 4.1, fired_at: '2026-08-21T01:00:00Z', resolved_at: '2026-08-21T02:00:00Z', notified_at: '2026-08-21T01:00:00Z', created_at: '2026-08-21T01:00:00Z' },
-    ])
+  it('fetchEvents 赋值事件列表并计算 firingCount (分页形状: 只装当前页)', async () => {
+    mockedApi.listEvents.mockResolvedValue({
+      items: [
+        { id: 1, rule_id: 1, state: 'firing', value: 4.3, fired_at: '2026-08-21T01:00:00Z', resolved_at: null, notified_at: '2026-08-21T01:00:00Z', created_at: '2026-08-21T01:00:00Z' },
+        { id: 2, rule_id: 1, state: 'resolved', value: 4.1, fired_at: '2026-08-21T01:00:00Z', resolved_at: '2026-08-21T02:00:00Z', notified_at: '2026-08-21T01:00:00Z', created_at: '2026-08-21T01:00:00Z' },
+      ],
+      total: 137,
+      page: 1,
+      page_size: 20,
+    })
     const store = useAlertStore()
     await store.fetchEvents()
     expect(store.events).toHaveLength(2)
     expect(store.firingCount).toBe(1)
+    // P1.2 关键判据: total 是**过滤后全量**, 不是 events.length ——
+    // 若 store 把 total 取成本页长度, 分页器会算出 1 页, 用户永远翻不到第 2 页。
+    expect(store.eventsTotal).toBe(137)
+    expect(store.eventsPage).toBe(1)
+    expect(store.eventsPageSize).toBe(20)
+  })
+
+  it('fetchEvents 默认下发 page/page_size (服务端分页, 不是无参全量)', async () => {
+    mockedApi.listEvents.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+    const store = useAlertStore()
+    await store.fetchEvents()
+    expect(mockedApi.listEvents).toHaveBeenCalledWith(expect.objectContaining({ page: 1, page_size: 20 }))
+  })
+
+  it('setEventsPage 翻页下发 page=2 并采用后端回显的 total/page', async () => {
+    mockedApi.listEvents.mockResolvedValue({ items: [], total: 45, page: 2, page_size: 20 })
+    const store = useAlertStore()
+    await store.setEventsPage(2)
+    expect(mockedApi.listEvents).toHaveBeenCalledWith(expect.objectContaining({ page: 2, page_size: 20 }))
+    expect(store.eventsPage).toBe(2)
+    expect(store.eventsTotal).toBe(45)
+  })
+
+  it('后端 clamp 回显优先于请求值 (page_size=0 → 20)', async () => {
+    // 请求 page_size=0 时后端归 20 并回显 page_size=20; store 必须反写回显值,
+    // 否则分页器会停在 0 条/页, 界面自相矛盾。
+    mockedApi.listEvents.mockResolvedValue({ items: [], total: 5, page: 1, page_size: 20 })
+    const store = useAlertStore()
+    await store.setEventsPage(1, 0)
+    expect(store.eventsPageSize).toBe(20)
   })
 
   it('markEventsRead 透传 api', async () => {

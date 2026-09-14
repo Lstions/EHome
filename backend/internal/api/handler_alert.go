@@ -288,9 +288,29 @@ func patchAlertRuleEnabled(db *gorm.DB, evaluator alertEvaluator) gin.HandlerFun
 }
 
 // GET /api/v1/alert-events  过滤: rule_id/state/start_time/end_time (RFC3339)
+//
+// 分页契约 (架构与接口评估 P1.2 裁决: items + total): 查询参数 page (默认 1, <1 归 1) /
+// page_size (默认 20, 超出 [1,200] 归 20), 响应 data = {items,total,page,page_size}。
+// 参数语义与 /automation-events、/vendors、/device-configs、/nodes、/edge-devices
+// 完全一致; 结构用 items 而非 list —— /device-configs 的 {list,...} 是待收敛的旧方言,
+// 不在此扩散。rule_id / state / start_time / end_time 筛选原样保留。
+//
+// 历史 (为什么必须改): 本端点曾 `Order("id DESC").Limit(500)` 后直接
+// `Success(c, items)` 返回**裸数组** —— 与 /automation-events 同源的静默截断:
+// 事件超过 500 条时用户只看到最近 500 条且**没有任何截断提示**, total 也无从得知;
+// 同时前端 AlertRules.vue 的「告警事件」表绑的是本地全量数组, el-pagination 数量为 0,
+// 即使用户想翻页也没有入口。改为真分页后 total 如实反映过滤后的全量条数,
+// 前端据此渲染分页器 (与 AutomationRules.vue 同范式)。
 func listAlertEvents(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var items []models.AlertEvent
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
 		q := db.Model(&models.AlertEvent{})
 		if rid := c.Query("rule_id"); rid != "" {
 			if id, err := strconv.ParseUint(rid, 10, 64); err == nil {
@@ -316,11 +336,18 @@ func listAlertEvents(db *gorm.DB) gin.HandlerFunc {
 				return
 			}
 		}
-		if err := q.Order("id DESC").Limit(500).Find(&items).Error; err != nil {
+		var total int64
+		if err := q.Count(&total).Error; err != nil {
 			Error(c, 500, "查询告警事件失败")
 			return
 		}
-		Success(c, items)
+		// 非 nil 空切片: 空集序列化为 [] 而非 null (与 handler_data_source.go 同约定)。
+		items := make([]models.AlertEvent, 0)
+		if err := q.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+			Error(c, 500, "查询告警事件失败")
+			return
+		}
+		Success(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
 	}
 }
 

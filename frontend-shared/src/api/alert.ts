@@ -69,6 +69,23 @@ export interface AlertEventListParams {
   state?: 'firing' | 'resolved'
   start_time?: string
   end_time?: string
+  /** 页码 (从 1 开始, 后端 <1 归 1) */
+  page?: number
+  /** 每页条数 (后端默认 20, 超出 [1,200] 归 20) */
+  page_size?: number
+}
+
+/**
+ * 告警事件分页形状 (架构与接口评估 P1.2 裁决: items + total)。
+ * 与 `AutomationEventPage` 同范式; 调用方拿到的永远是分页形状,
+ * 因此前端不再有「全量 or 分页」两种可能, 也就不会重演
+ * 「内联分页器却本地全量渲染」的假分页。
+ */
+export interface AlertEventPage {
+  items: AlertEvent[]
+  total: number
+  page: number
+  page_size: number
 }
 
 /** 拦截器返回 response.data (envelope {code,data,message}), 用 any 双跳转取 data 字段 */
@@ -98,8 +115,25 @@ export const alertApi = {
   async setRuleEnabled(id: number, enabled: boolean): Promise<AlertRule> {
     return unwrap<AlertRule>(client.patch(`/api/v1/alert-rules/${id}/enabled`, { enabled }))
   },
-  async listEvents(params?: AlertEventListParams): Promise<AlertEvent[]> {
-    return unwrap<AlertEvent[]>(client.get('/api/v1/alert-events', { params }))
+  /**
+   * 告警事件列表 (服务端分页)。
+   *
+   * 后端自本任务起返回 `{items,total,page,page_size}`; 此处归一化为
+   * `AlertEventPage`, 与 `automationApi.listEvents` 完全同构 ——
+   * 这样视图层不可能再误把「当前页」当成「全量」。
+   *
+   * 与 automation 不同, 本端点**不需要**裸数组兼容分支: 旧形态是后端
+   * `Limit(500)` + 裸数组, 而本次是同一任务内前后端一起改, 没有第三方
+   * (仿真套件等) 消费方 (已 grep 确认 alertApi.listEvents 仅 store 一处调用)。
+   */
+  async listEvents(params?: AlertEventListParams): Promise<AlertEventPage> {
+    const data = await unwrap<AlertEventPage>(client.get('/api/v1/alert-events', { params }))
+    return {
+      items: Array.isArray(data?.items) ? data.items : [],
+      total: typeof data?.total === 'number' ? data.total : 0,
+      page: typeof data?.page === 'number' ? data.page : (params?.page ?? 1),
+      page_size: typeof data?.page_size === 'number' ? data.page_size : (params?.page_size ?? 20),
+    }
   },
   async markEventsRead(ids: number[]): Promise<void> {
     await client.post('/api/v1/alert-events/read', { ids })

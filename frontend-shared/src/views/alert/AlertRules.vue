@@ -47,7 +47,11 @@
     <!-- 事件时间线 -->
     <section class="card events-card">
       <div class="card-head">
-        <span class="card-title">告警事件<el-tag v-if="store.firingCount" type="danger" size="small" class="count-tag">{{ store.firingCount }} firing</el-tag></span>
+        <span class="card-title">
+          告警事件
+          <!-- 口径: 真分页后 store.events 只装当前页, 故此处标注「本页」, 不让页内计数冒充全量 firing 数。 -->
+          <el-tag v-if="store.firingCount" type="danger" size="small" class="count-tag">本页 {{ store.firingCount }} firing</el-tag>
+        </span>
         <el-button link size="small" data-test="mark-read" @click="onMarkAllRead">全部标记已读</el-button>
       </div>
       <el-table :data="store.events" v-loading="store.eventsLoading" data-test="events-table">
@@ -72,6 +76,21 @@
         </el-table-column>
         <template #empty>暂无告警事件</template>
       </el-table>
+      <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
+           改前本表绑 store 的全量数组 —— 后端 Limit(500) 静默截断, 前端
+           el-pagination 数量为 0, 用户既看不到 total 也没有翻页入口。 -->
+      <div class="events-pagination">
+        <el-pagination
+          v-model:current-page="eventsPage"
+          v-model:page-size="eventsPageSize"
+          :total="store.eventsTotal"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          data-test="events-pagination"
+          @current-change="onEventsPageChange"
+          @size-change="onEventsPageSizeChange"
+        />
+      </div>
     </section>
 
     <!-- 创建/编辑对话框 -->
@@ -130,11 +149,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useAlertStore } from '@/stores/alert'
+import { feedback } from '@/utils/feedback'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
 
@@ -267,12 +287,22 @@ async function onToggle(rule: AlertRule, enabled: boolean) {
 }
 
 async function onDelete(rule: AlertRule) {
+  // 破坏性确认必须走 feedback.confirmDanger (§3.4.3/§4.3.4):
+  // 它给确认键 confirmButtonType='danger' 且 autofocus=false —— 改前直接调
+  // ElMessageBox.confirm 时按钮是 primary 样式, 且默认焦点就落在「确定」上,
+  // 构成"回车即删除"的诱导性确认。取消时 confirmDanger 返回 false, 必须直接
+  // 返回, 不得继续执行删除。
+  const ok = await feedback.confirmDanger(`删除规则「${rule.name}」？`, {
+    title: '确认删除',
+    confirmText: '删除',
+    cancelText: '取消',
+  })
+  if (!ok) return
   try {
-    await ElMessageBox.confirm(`删除规则「${rule.name}」？`, '确认删除', { type: 'warning' })
     await store.deleteRule(rule.id)
     ElMessage.success('已删除')
   } catch {
-    /* 取消或失败静默 */
+    ElMessage.error('删除失败')
   }
 }
 
@@ -286,8 +316,33 @@ async function onMarkAllRead() {
   }
 }
 
+// ── 事件分页 (§3.2.6 MUST: 分页状态由 store 持有, 视图只驱动) ──
+const eventsPage = computed({
+  get: () => store.eventsPage,
+  set: v => { store.eventsPage = v },
+})
+const eventsPageSize = computed({
+  get: () => store.eventsPageSize,
+  set: v => { store.eventsPageSize = v },
+})
+/** 翻页: 页码变化即重查 (数据源是服务端当前页, 不是本地切片)。 */
+function onEventsPageChange(page: number) {
+  void store.setEventsPage(page)
+}
+/** 每页条数变化: 页码必须回到第 1 页 (原第 3 页在新页长下可能已越界)。 */
+function onEventsPageSizeChange(size: number) {
+  void store.setEventsPage(1, size)
+}
+
+// 规则增删会改变事件回链的规则名, 但不应重置用户所在页码 —— 只在事件总数
+// 变化到当前页已越界时才回退 (由 store 的 total 驱动, 见下)。
+watch(() => store.eventsTotal, total => {
+  const maxPage = Math.max(1, Math.ceil(total / store.eventsPageSize))
+  if (store.eventsPage > maxPage) void store.setEventsPage(maxPage)
+})
+
 onMounted(async () => {
-  await Promise.all([store.fetchRules(), store.fetchEvents()])
+  await Promise.all([store.fetchRules(), store.fetchEvents({ page: 1 })])
   try {
     const list = await edgeDeviceApi.getList()
     devices.value = list.items
@@ -306,4 +361,7 @@ onMounted(async () => {
 .mono { font-family: monospace; }
 .cond-row { display: flex; gap: 8px; align-items: center; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
+/* 分页器与表格留出间距; 窄容器下允许换行 (与 AutomationRules.vue 同范式)。 */
+.events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
+.events-pagination :deep(.el-pagination) { flex-wrap: wrap; }
 </style>

@@ -457,6 +457,58 @@ func TestNodesPagination_OutOfRangePage(t *testing.T) {
 	}
 }
 
+// TestNodesPagination_InvalidPageSize 覆盖三种**非法输入**的 clamp 语义。
+//
+// 为什么必须单列: 本端点改前没有 clamp —— page_size 既不在响应里回显, 也不做边界
+// 归一。三种非法输入的实际行为已用探针实测 (GORM v1.31.2 clause/limit.go:16
+// `if limit.Limit != nil && *limit.Limit >= 0` 才写 LIMIT 子句), 结果是**三种都错,
+// 但错法各不相同** —— 这也是为什么本用例对三者都断言"必须归 20":
+//   - page_size=0   → SQL 为 `LIMIT 0` → 返回**静默空页** (实测 items=0) 且回显 0。
+//     (注意: 任务书曾断言"Limit(0) 被当作无限制从而返回全表" —— 实测**不成立**,
+//     GORM 会真的写 LIMIT 0。真实缺陷形态是"静默空列表", 同样用户不可见任何提示。)
+//   - page_size=-1  → 负值使 LIMIT 子句被**整条丢弃** → 返回**全表** (实测 items=25),
+//     且回显 -1。
+//   - page_size=99999 → 未 clamp 的超大页 (实测 items=25, 回显 99999) —— 单次
+//     响应体大小不受控, 是资源耗尽面。
+//
+// 修复后三者一律归默认 20 并在响应里回显。
+func TestNodesPagination_InvalidPageSize(t *testing.T) {
+	r, db := newListNodeRouter(t)
+	seedNodes(t, db)
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"page_size=0 (GORM 写 LIMIT 0, 返回静默空页)", "page_size=0"},
+		{"page_size=-1 (负值丢弃 LIMIT 子句, 返回全表)", "page_size=-1"},
+		{"page_size=99999 (超大页, 未 clamp)", "page_size=99999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := getPage(t, r, "/api/v1/nodes?"+tc.query)
+			if got := len(resp.Data.Items); got != 20 {
+				t.Fatalf("%s: items = %d, want 20 (非法页长必须被 clamp 到默认页长)", tc.query, got)
+			}
+			if resp.Data.Total != 25 {
+				t.Fatalf("%s: total = %d, want 25 (clamp 不得影响 total)", tc.query, resp.Data.Total)
+			}
+			if resp.Data.Page != 1 || resp.Data.PageSize != 20 {
+				t.Fatalf("%s: 回显 page/page_size = %d/%d, want 1/20", tc.query, resp.Data.Page, resp.Data.PageSize)
+			}
+		})
+	}
+
+	// 与合法上界对照: page_size=200 是闭区间上界, 必须**原样保留**而不是被归 20
+	// (否则 clamp 写成 pageSize >= 200 也能骗过上面三条)。
+	upper := getPage(t, r, "/api/v1/nodes?page_size=200")
+	if upper.Data.PageSize != 200 {
+		t.Fatalf("page_size=200 回显 = %d, want 200 (上界是闭区间)", upper.Data.PageSize)
+	}
+	if got := len(upper.Data.Items); got != 25 {
+		t.Fatalf("page_size=200 items = %d, want 25 (全量不满一页)", got)
+	}
+}
+
 func TestNodesPagination_FilterWithPagination(t *testing.T) {
 	r, db := newListNodeRouter(t)
 	seedNodes(t, db)
@@ -627,6 +679,45 @@ func TestEdgeDevicesPagination_OutOfRangePage(t *testing.T) {
 	}
 	if clamped.Data.Page != 1 || clamped.Data.PageSize != 20 {
 		t.Fatalf("clamp 回显 = %d/%d, want 1/20", clamped.Data.Page, clamped.Data.PageSize)
+	}
+}
+
+// TestEdgeDevicesPagination_InvalidPageSize 与 TestNodesPagination_InvalidPageSize 同源
+// (机制与实测证据见那段注释): page_size=0 → LIMIT 0 静默空页; -1 → 丢弃 LIMIT 子句
+// 返回全表; 99999 → 未 clamp 的超大页。三者必须一律归默认 20 并在响应里回显。
+func TestEdgeDevicesPagination_InvalidPageSize(t *testing.T) {
+	r, db := newListNodeRouter(t)
+	seedEdgeDevices(t, db)
+
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{"page_size=0 (GORM 写 LIMIT 0, 返回静默空页)", "page_size=0"},
+		{"page_size=-1 (负值丢弃 LIMIT 子句, 返回全表)", "page_size=-1"},
+		{"page_size=99999 (超大页, 未 clamp)", "page_size=99999"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := getPage(t, r, "/api/v1/edge-devices?"+tc.query)
+			if got := len(resp.Data.Items); got != 20 {
+				t.Fatalf("%s: items = %d, want 20 (非法页长必须被 clamp 到默认页长)", tc.query, got)
+			}
+			if resp.Data.Total != 25 {
+				t.Fatalf("%s: total = %d, want 25 (clamp 不得影响 total)", tc.query, resp.Data.Total)
+			}
+			if resp.Data.Page != 1 || resp.Data.PageSize != 20 {
+				t.Fatalf("%s: 回显 page/page_size = %d/%d, want 1/20", tc.query, resp.Data.Page, resp.Data.PageSize)
+			}
+		})
+	}
+
+	// 与合法上界对照 (同 nodes): page_size=200 必须原样保留。
+	upper := getPage(t, r, "/api/v1/edge-devices?page_size=200")
+	if upper.Data.PageSize != 200 {
+		t.Fatalf("page_size=200 回显 = %d, want 200 (上界是闭区间)", upper.Data.PageSize)
+	}
+	if got := len(upper.Data.Items); got != 25 {
+		t.Fatalf("page_size=200 items = %d, want 25 (全量不满一页)", got)
 	}
 }
 

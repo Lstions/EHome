@@ -29,12 +29,25 @@ vi.mock('element-plus', async importOriginal => {
   return {
     ...actual,
     ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
-    ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) },
+  }
+})
+// F5 危险确认迁移: 删除确认改走 feedback.confirmDanger (它内部才调 ElMessageBox)。
+// mock 边界因此上移到 feedback —— 视图层不再直接依赖 ElMessageBox。
+vi.mock('@/utils/feedback', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/utils/feedback')>()
+  return {
+    ...actual,
+    feedback: { ...actual.feedback, confirmDanger: vi.fn().mockResolvedValue(true) },
   }
 })
 
 const mockedAlertApi = vi.mocked(alertApi)
 const mockedEdgeApi = vi.mocked(edgeDeviceApi)
+
+/** 分页形状夹具 (P1.2: {items,total,page,page_size})。 */
+function eventPage(items: unknown[], total = items.length, page = 1, page_size = 20) {
+  return { items, total, page, page_size } as never
+}
 
 const ruleFixture = {
   id: 1,
@@ -67,7 +80,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   mockedAlertApi.listRules.mockResolvedValue([ruleFixture])
-  mockedAlertApi.listEvents.mockResolvedValue([])
+  mockedAlertApi.listEvents.mockResolvedValue(eventPage([]))
   mockedEdgeApi.getList.mockResolvedValue({ total: 1, items: [{ id: 10, name: 'BMS-01' } as never] })
 })
 
@@ -145,7 +158,7 @@ describe('AlertRules.vue', () => {
   })
 
   it('告警事件「规则」列渲染规则名而不是裸主键', async () => {
-    mockedAlertApi.listEvents.mockResolvedValue([eventFixture])
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 1))
     const wrapper = await mountWithSlotTable()
 
     const row = wrapper.find('[data-test="events-table"] tbody tr')
@@ -157,7 +170,7 @@ describe('AlertRules.vue', () => {
   })
 
   it('告警事件「规则」列在规则已被删除时回退为 #id，不留空白', async () => {
-    mockedAlertApi.listEvents.mockResolvedValue([{ ...eventFixture, id: 51, rule_id: 999 }])
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([{ ...eventFixture, id: 51, rule_id: 999 }], 1))
     const wrapper = await mountWithSlotTable()
 
     const cells = wrapper.find('[data-test="events-table"] tbody tr').findAll('td').map(td => td.text())
@@ -174,6 +187,72 @@ describe('AlertRules.vue', () => {
     await wrapper.find('[data-test="save-rule"]').trigger('click')
     await flushPromises()
     expect(ElMessage.warning).toHaveBeenCalledWith('请填写规则名称')
+  })
+
+  it('删除走 feedback.confirmDanger, 取消时不发 DELETE 请求 (F5 危险确认)', async () => {
+    const { feedback } = await import('@/utils/feedback')
+    const confirmSpy = vi.mocked(feedback.confirmDanger)
+    confirmSpy.mockResolvedValueOnce(false)
+    mockedAlertApi.deleteRule.mockResolvedValue(undefined)
+    // 删除按钮在「操作」列的 #default 作用域插槽里, 通用 stub 不执行插槽 ——
+    // 用本文件已有的 slotTable 替身 (真实渲染每行每列)。
+    const wrapper = await mountWithSlotTable()
+
+    const delBtn = wrapper.findAll('button').find(b => b.text() === '删除')
+    expect(delBtn).toBeTruthy()
+    await delBtn!.trigger('click')
+    await flushPromises()
+
+    // 确认弹窗必须被调用, 且文案保留「删除规则「X」？」的语义。
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0][0]).toContain('删除规则「电池过压」？')
+    // 关键: 取消 (false) 时**不得**继续执行删除。
+    expect(mockedAlertApi.deleteRule).not.toHaveBeenCalled()
+  })
+
+  it('删除确认后发出 DELETE 请求 (确认路径)', async () => {
+    const { feedback } = await import('@/utils/feedback')
+    const confirmSpy = vi.mocked(feedback.confirmDanger)
+    confirmSpy.mockResolvedValueOnce(true)
+    mockedAlertApi.deleteRule.mockResolvedValue(undefined)
+    const wrapper = await mountWithSlotTable()
+
+    const delBtn = wrapper.findAll('button').find(b => b.text() === '删除')
+    await delBtn!.trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(mockedAlertApi.deleteRule).toHaveBeenCalledWith(1)
+  })
+
+  it('告警事件表接上真实分页器并渲染后端 total (P1.2: 不再无分页器)', async () => {
+    // 137 条事件、当前页 1、每页 20 → 分页器必须存在且 total 取自后端而非本地数组长度。
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
+    const wrapper = await mountPage()
+
+    const pager = wrapper.find('[data-test="events-pagination"]')
+    expect(pager.exists()).toBe(true)
+    // 首次加载只取当前页: page=1&page_size=20 必须真实下发 (改前是无参全量)。
+    expect(mockedAlertApi.listEvents).toHaveBeenCalledTimes(1)
+    expect(mockedAlertApi.listEvents.mock.calls[0][0]).toEqual(expect.objectContaining({ page: 1, page_size: 20 }))
+    // 137 > 20 → 分页器必须知道有 7 页, 而不是把 1 条当全部。
+    const store = useAlertStore(wrapper.vm.$pinia)
+    expect(store.eventsTotal).toBe(137)
+    expect(store.events).toHaveLength(1)
+  })
+
+  it('翻页按服务端页请求 (page=2), 不本地切片', async () => {
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([eventFixture], 137, 1, 20))
+    const wrapper = await mountPage()
+    const store = useAlertStore(wrapper.vm.$pinia)
+
+    mockedAlertApi.listEvents.mockResolvedValue(eventPage([{ ...eventFixture, id: 60 }], 137, 2, 20))
+    await store.setEventsPage(2)
+    await flushPromises()
+
+    expect(mockedAlertApi.listEvents).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2, page_size: 20 }))
+    expect(store.eventsPage).toBe(2)
+    expect(store.events[0].id).toBe(60)
   })
 
   it('创建成功后调用 store 并关闭对话框', async () => {

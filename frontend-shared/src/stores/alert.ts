@@ -18,9 +18,21 @@ export const useAlertStore = defineStore('alert', () => {
   const rules = ref<AlertRule[]>([])
   const rulesLoading = ref(false)
 
-  // ── 事件 ──
+  // ── 事件 (服务端真分页, 与 useAutomationStore 同范式) ──
   const events = ref<AlertEvent[]>([])
   const eventsLoading = ref(false)
+  /** 过滤后**全量**条数 (不是当前页条数): 分页器据此算总页数。 */
+  const eventsTotal = ref(0)
+  const eventsPage = ref(1)
+  const eventsPageSize = ref(20)
+  /**
+   * 当前页的 firing 计数。
+   *
+   * 注意口径: 真分页后 events 只装**当前页**, 因此本值是"本页 firing 数"而非
+   * "全量 firing 数"。后端没有提供 state=firing 的计数端点, 前端也就无法在不
+   * 额外拉全量的前提下算出全量 —— 故保留本值但由视图层显式标注口径
+   * (AlertRules.vue: "本页 N firing"), 不让它冒充全量。
+   */
   const firingCount = computed(() => events.value.filter(e => e.state === 'firing').length)
 
   /** 拉取规则列表 */
@@ -63,14 +75,41 @@ export const useAlertStore = defineStore('alert', () => {
     return updated
   }
 
-  /** 拉取事件列表 (时间线) */
+  /**
+   * 拉取事件列表 (时间线, 服务端分页)。
+   *
+   * 契约 (P1.2): 响应 data = {items,total,page,page_size}。
+   * - `events` 只装**当前页**, 不是全量切片 —— 否则分页器会退化成装饰;
+   * - `eventsTotal` 用后端回显的 total (过滤后全量), 不是 `events.length`;
+   * - 回显的 page/page_size 反写本地, 保证 UI 与后端实际使用的值一致
+   *   (例如后端把 page_size=0 clamp 成 20 时, 分页器不会停在 0)。
+   */
   async function fetchEvents(params?: AlertEventListParams) {
     eventsLoading.value = true
     try {
-      events.value = await alertApi.listEvents(params)
+      const req: AlertEventListParams = {
+        page: params?.page ?? eventsPage.value,
+        page_size: params?.page_size ?? eventsPageSize.value,
+        ...(params?.rule_id ? { rule_id: params.rule_id } : {}),
+        ...(params?.state ? { state: params.state } : {}),
+        ...(params?.start_time ? { start_time: params.start_time } : {}),
+        ...(params?.end_time ? { end_time: params.end_time } : {}),
+      }
+      const res = await alertApi.listEvents(req)
+      events.value = res.items
+      eventsTotal.value = res.total
+      eventsPage.value = res.page
+      eventsPageSize.value = res.page_size
     } finally {
       eventsLoading.value = false
     }
+  }
+
+  /** 翻页 / 改页长: 先更新本地派生状态, 再按显式参数重查。 */
+  async function setEventsPage(page: number, pageSize?: number) {
+    eventsPage.value = page
+    if (pageSize !== undefined) eventsPageSize.value = pageSize
+    await fetchEvents({ page: eventsPage.value, page_size: eventsPageSize.value })
   }
 
   /** 标记事件已读 (经规则回链 Notification) */
@@ -83,6 +122,9 @@ export const useAlertStore = defineStore('alert', () => {
     rulesLoading,
     events,
     eventsLoading,
+    eventsTotal,
+    eventsPage,
+    eventsPageSize,
     firingCount,
     fetchRules,
     createRule,
@@ -90,6 +132,7 @@ export const useAlertStore = defineStore('alert', () => {
     deleteRule,
     setRuleEnabled,
     fetchEvents,
+    setEventsPage,
     markEventsRead,
   }
 })
