@@ -18,9 +18,28 @@ import { resolve } from 'node:path'
  */
 const themeCss = readFileSync(resolve(process.cwd(), 'src/styles/theme.css'), 'utf8')
 
-/** 抽取一个媒体查询块的完整文本（按花括号配平）。 */
+/**
+ * 抽取一个媒体查询块的完整文本（按花括号配平）。
+ *
+ * 必须跳过**注释里**出现的同名文本：F6 修复过程中曾在注释里写
+ * "不会命中 @media (pointer: coarse) 分支"，导致 indexOf 命中注释而不是真规则，
+ * 抽出空块并使 4 条断言假红。这里逐个候选位置检查是否处于注释内。
+ */
+function inComment(css: string, pos: number): boolean {
+  const open = css.lastIndexOf('/*', pos)
+  if (open === -1) return false
+  const close = css.lastIndexOf('*/', pos)
+  return close < open
+}
 function mediaBlock(css: string, header: string): string {
-  const start = css.indexOf(header)
+  let start = -1
+  let from = 0
+  for (;;) {
+    const k = css.indexOf(header, from)
+    if (k === -1) break
+    if (!inComment(css, k)) { start = k; break }
+    from = k + 1
+  }
   if (start === -1) return ''
   let depth = 0
   for (let i = start; i < css.length; i += 1) {
@@ -36,16 +55,34 @@ function mediaBlock(css: string, header: string): string {
 /** 抽取一条顶层规则的声明体；selector 需与源码逐字一致。
  *  必须传"尺寸区"文本，否则会先命中暗色主题里同名的 .el-pagination 变量块。 */
 function ruleBody(region: string, selector: string): string {
-  // 尺寸区的第一条规则没有前导换行，故两种写法都要试
-  let i = region.startsWith(selector + ' {') ? 0 : region.indexOf('\n' + selector + ' {')
-  if (i === -1) return ''
-  const j = region.indexOf('}', i)
-  return j === -1 ? '' : region.slice(i + selector.length + 2, j)
+  // 必须容忍缩进：媒体查询块内的规则带前导空格（如 "  .el-table .el-switch {"）。
+  // 早先只匹配 '\n' + selector 的写法会漏掉它们并返回空串（假阴性）。
+  // 用「行首（允许空白）+ 选择器 + 空格 + {」逐个候选位置试，避免正则转义。
+  const needle = selector + ' {'
+  let from = 0
+  let at = -1
+  for (;;) {
+    const k = region.indexOf(needle, from)
+    if (k === -1) break
+    // 该匹配必须处在行首（前面只有空白）才算一条规则，避免命中更长的选择器后缀
+    const lineStart = region.lastIndexOf('\n', k) + 1
+    if (region.slice(lineStart, k).trim() === '') { at = k; break }
+    from = k + 1
+  }
+  if (at === -1) return ''
+  const j = region.indexOf('}', at)
+  return j === -1 ? '' : region.slice(at + needle.length, j)
 }
-
 /** 抽取尺寸区里**最后**一个匹配的媒体块（窄屏块在尺寸区出现过两次）。 */
 function lastMediaBlock(region: string, header: string): string {
-  const i = region.lastIndexOf(header)
+  let i = -1
+  let from = 0
+  for (;;) {
+    const k = region.indexOf(header, from)
+    if (k === -1) break
+    if (!inComment(region, k)) i = k
+    from = k + 1
+  }
   return i === -1 ? '' : mediaBlock(region.slice(i), header)
 }
 
@@ -78,6 +115,7 @@ describe('F6 触控热区：尺寸规则合同', () => {
       '.el-table .el-button--small',
       '.el-table .el-checkbox',
       '.el-table .el-switch',
+      '.el-pager',
       '.el-pagination',
       '.el-input-number__increase',
       '.el-radio-button__inner',
@@ -140,6 +178,36 @@ describe('F6 触控热区：尺寸规则合同', () => {
 
   it('窄屏紧凑工具条按钮补到 36px', () => {
     expect(narrowBlock).toMatch(/\.el-button--small:not\(\.is-circle\) \{[^}]*min-height: 36px/)
+  })
+
+  it('表格内 Switch 在窄屏档就补到 ≥36px（fine 门禁 390px 不命中粗指针分支）', () => {
+    // 2026-09-14 fine 门禁实测报错：automation @390px 2/28 个表格内控件 40×32。
+    // 根因：.el-switch 原来只写在粗指针分支里，而 uiux-gate-fine 的 hasTouch=false。
+    const body = ruleBody(narrowBlock, '.el-table .el-switch')
+    expect(body, '窄屏档缺少 .el-table .el-switch 规则').not.toBe('')
+    expect(body).toMatch(/min-height: 36px/)
+    // 本体垂直居中，视觉尺寸不变
+    expect(narrowBlock).toMatch(/\.el-table \.el-switch \.el-switch__core \{[^}]*margin-top: auto/)
+  })
+
+  it('粗指针下分页条与页码条都折行（否则 44px 档下单个 item 宽于容器 → 真实裁切）', () => {
+    // 2026-09-14 coarse 门禁实测：logical-device @390 裁 10px / @360 裁 40px。
+    // 根因：页码按钮 32→44px 后 .el-pager 宽 352px > 容器 342/312px，
+    // 且 .el-pagination 默认 nowrap —— 折行只发生在直接 item 之间，救不了单个超宽 item。
+    expect(coarseBlock).toMatch(/\.el-pager \{[^}]*flex-wrap: wrap/)
+    expect(coarseBlock).toMatch(/\.el-pagination \{[^}]*flex-wrap: wrap/)
+  })
+
+  it('探针自校准：注释里的媒体查询文本不得污染抽取（分母/定位自证）', () => {
+    // 这条守的是"契约 §2.3：探针必须能自证"——抽取函数被注释骗到过一次，
+    // 结果 coarseBlock 变成空串、4 条断言假红。这里注入一个已知文本证明它能被正确跳过。
+    const fake = '/* 注释里写 ' + '@media (pointer: coarse)' + ' 不应被当成真规则 */\n@media (pointer: coarse) {\n  .probe-sentinel { min-height: 44px; }\n}'
+    const blk = mediaBlock(fake, '@media (pointer: coarse)')
+    expect(blk, '抽取函数被注释里的同名文本骗到了').toContain('.probe-sentinel')
+    expect(blk).not.toContain('注释里写')
+    // 真实文件里 coarse 块必须非空且含真规则
+    expect(coarseBlock).not.toBe('')
+    expect(coarseBlock).toContain('.touch-target')
   })
 
   it('反例守卫：本任务只加尺寸，不得削弱到 36px 以下，也不得靠伪元素撑热区', () => {

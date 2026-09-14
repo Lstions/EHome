@@ -221,8 +221,25 @@ test.describe('横向溢出与真实裁切', () => {
       '注入缺陷前探针就已经是红的 —— 本用例失去对照基准：' + JSON.stringify(before.clips.slice(0, 5))
     ).toBe(0)
 
-    // 注入已知缺陷（等价于删掉源码里的 .ld-pagination :deep(.el-pagination){flex-wrap:wrap}）
-    await page.addStyleTag({ content: '.ld-pagination .el-pagination{flex-wrap:nowrap !important}' })
+    // 注入已知缺陷。
+    //
+    // **2026-09-14 F6 更新：注入面由「一层」扩为「两层」，但断言一条未放宽。**
+    // 原因：F6 触控任务在 `@media (pointer: coarse)` 下给分页按钮补到 44px 后，
+    // 单靠一层 `.el-pagination{flex-wrap:nowrap}` **不再足以**复现「上一页按钮移出视口」——
+    // 因为同一次修复还加了 `.el-pager{flex-wrap:wrap}`，页码条会自己折成多行，
+    // 把 prev/next 留在视口内（F6 实测：只撤一层时 prevLeft=+70/coarse、+94/fine，
+    // 断言 F 因此正确地拒绝通过，而不是被放宽）。
+    // 也就是说：**保护现在由两层共同承担**，要模拟「这个 bug 还在」的原始状态，
+    // 必须把两层都撤掉。实测撤两层后 prevLeft=-238（coarse）/ -158（fine），
+    // 缺陷被完整复现（见 .logs/f6-report.md「回归修复」一节的三态对照表）。
+    //
+    // 这不是把断言改松，而是把**注入的缺陷强度**补回到与"删掉源码规则"等价的水平；
+    // 下面 A–H 八条断言（含 F: left < 0 与 G: elementFromPoint 取不到）全部原样保留。
+    await page.addStyleTag({
+      content:
+        '.ld-pagination .el-pagination{flex-wrap:nowrap !important}' +
+        '.el-pager{flex-wrap:nowrap !important}',
+    })
     // 等布局吸收新样式：用"探针连续两次报同一结果"代替 sleep
     const after = await pollUntil(
       () => readOverflow(page),
