@@ -906,6 +906,36 @@ a.device-link {
   .hide-sm {
     display: none !important;
   }
+
+  /* ---- F30：小号 select 回到「输入控件 44px」档（§4.4.5）----
+     根因是**源码顺序 + 窄选择器**，不是单纯的特异性：
+       窄屏块（674 起）与粗指针块（786 起）用 `.el-select__wrapper`（0,1,0）把输入控件抬到 44px，
+       但压不住两条更窄的规则：
+         ① EP 自带 `.el-select--small .el-select__wrapper{min-height:24px}`（0,3,0）
+         ② 本文件第 4 条 `.el-select--small .el-select__wrapper{min-height:36px}`（0,3,0，桌面档取值）
+       实测（修复前）：小号 select 在 fine-390 / coarse-390 均被钉在 36px，
+       而同一页的**普通** select 正确为 44px —— 症状是「只有小号变体不达标」。
+
+     为什么写在这里：本块（904 起）位于第 4 条**之后**，
+     同特异性 (0,3,0) + 后出现 ⇒ 覆盖成功。
+     反例（已实测失败）：写进 674 起的窄屏块内 —— 那块在第 4 条之前，同特异性更早出现，仍被压掉。
+     也**不新增** @media (max-width:768px) 块：F6/F27 的 spec 按块数(<=3)与锚点定位，
+     新增会顶开它们（F27 已因此打红过 F6 两条用例）。故并入本块。
+
+     为什么不改第 4 条：它是**桌面档**取值（1440 下小号 select 36px 属有意密度），
+     改它会波及桌面；此处只在窄屏覆盖，桌面路径逐像素不变。 */
+  .el-select--small .el-select__wrapper {
+    min-height: 44px;
+  }
+}
+
+/* F30：粗指针（移动设备）下同一取值。
+   注意必须**另写**而非依赖上面的窄屏块 —— 粗指针与视口宽度是两个独立媒体特性，
+   桌面触屏设备（宽视口 + coarse）也应满足 44px。 */
+@media (pointer: coarse) {
+  .el-select--small .el-select__wrapper {
+    min-height: 44px;
+  }
 }
 
 @media (min-width: 769px) and (max-width: 1024px) {
