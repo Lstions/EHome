@@ -676,6 +676,31 @@ html.dark .el-descriptions__content {
     min-height: 36px;
   }
 
+  /* ---- F27（合并进本块，不新开 @media，理由见末尾）----
+     窄屏**普通尺寸按钮** 32px → 36px 档。
+
+     F27 修正口径后的唯一真实缺陷：390px fine 下全站 13 条路由 24 个
+     非表格内控件 <36px，**全部是 32px 的普通 el-button**
+     （工具栏「刷新/查询/新建…」、卡片/视图切换、/profile 的「提交/重置」）。
+     审计原记录里的 el-input 30px / el-select 24px / el-radio-button 13px 三个样本
+     经实测为**误报**：它们的真实热区是外层的 wrapper / label（实测 44/44/36px），
+     量 inner 属于「探针量错元素」（契约 §2.1）。详见 .logs/f27-report.md。
+
+     为什么 32px 连高密度档都没达到：EP 的 .el-button 默认 --el-button-size:32px，
+     而 §4.4.5 给「极高密度、非主要任务的工具栏」的下限就是 36px。
+     为什么只写在窄屏：桌面（>=769px）的 32px 是**有意的紧凑运维密度**（§4.2.3），
+     实测 1440 下注入前后按钮高度与不达标数完全一致（95 → 95）。
+     取 36px 与粗指针分支的同类规则同档，消除「fine 窄屏比 coarse 更严」的倒挂。
+
+     ⚠ 为什么必须合并进本块：touchTargetsF6.spec.ts 的抽取器按「注释标题 -> 其后第一个
+     max-width:768px 块」定位，另起一个同条件的 @media 块会把它的锚点顶开，
+     使 F6 的「窄屏工具条按钮」「窄屏表格 Switch」两条断言假红（实测 2 failed）。
+     后人也请往本块追加，不要再新开同条件的 @media 块。 */
+  .el-button:not(.is-circle):not(.is-link):not(.is-text):not(.el-button--small),
+  .el-button--small:not(.is-circle):not(.is-link):not(.is-text) {
+    min-height: 36px;
+  }
+
   /* 显式保留这条（不是冗余）：审计 264 个 <36px 中 257 个就是表格行内 18px 小按钮，
      这里钉住窄屏档位，防止后续被上面的通用规则覆盖或被误删。 */
   .el-table .el-button--small {
