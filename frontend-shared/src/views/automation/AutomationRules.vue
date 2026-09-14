@@ -709,4 +709,11 @@ onMounted(async () => {
 .trigger-summary, .action-summary { font-size: 12px; }
 .event-filters { display: flex; gap: 8px; align-items: center; }
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+/* 分页控件换行（窄屏真实裁切修复，与 LogicalDeviceList.vue 同根因）。
+   .events-pagination 的 flex-wrap 只管多个 item 之间；内层 el-pagination 自身
+   white-space:nowrap + display:flex 且宽 676.94px，在 768px（.events-pagination 宽 488px）
+   就已把「共 N 条」推出容器左界 153px —— 实测 el-pagination x=47.06 < 容器 x=236，
+   祖先链 scrollWidth === clientWidth（不可回滚）⇒ 真实裁切。
+   同仓范式：firmware/FirmwareManage.vue 的 .firmware-manage :deep(.el-pagination)。 */
+.events-pagination :deep(.el-pagination) { flex-wrap: wrap; }
 </style>

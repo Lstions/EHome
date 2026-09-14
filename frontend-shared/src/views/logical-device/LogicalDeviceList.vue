@@ -665,6 +665,22 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
+/* 分页控件换行（窄屏真实裁切修复）。
+   根因**不是**"外层缺 flex-wrap" —— .ld-pagination 已有 wrap，但换行只发生在多个
+   flex item **之间**，管不到单个过宽 item 的**内部**：el-pagination 自带
+   white-space:nowrap + display:flex，实测宽 676.94px（layout="total, sizes, prev,
+   pager, next, jumper"），在 360px 视口的 .el-main（内容宽 352px）里被整体右对齐后
+   向左溢出：el-pagination x=-344.94、btn-prev x=-118、el-pagination__total x=-344.94，
+   而 .ld-pagination / .mobile-table-wrapper / .el-main 的 scrollWidth === clientWidth
+   （横向位移预算 0）⇒ **真实裁切、上一页按钮永久不可达**（elementFromPoint 返回 null）。
+   给内层 el-pagination 自身加 flex-wrap: wrap，让它把 total/sizes/pager/jumper 拆成多行。
+   同仓已有正确范式：firmware/FirmwareManage.vue 的
+   .firmware-manage :deep(.el-pagination) { flex-wrap: wrap }。
+   规范 §4.3.2 MUST：分页换行须与最小宽度、横向滚动提示共同验收，不能只看页面级 overflow。 */
+.ld-pagination :deep(.el-pagination) {
+  flex-wrap: wrap;
+}
+
 .filter-left {
   display: flex;
   gap: 12px;

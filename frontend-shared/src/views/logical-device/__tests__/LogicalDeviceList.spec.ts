@@ -1,7 +1,57 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { compileStyleAsync, parse } from '@vue/compiler-sfc'
 import LogicalDeviceList from '@/views/logical-device/LogicalDeviceList.vue'
+import source from '@/views/logical-device/LogicalDeviceList.vue?raw'
 
+/**
+ * 样式契约辅助：用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的
+ * [data-v-*] 选择器改写），再注入 DOM 读 getComputedStyle —— 比字符串包含更接近
+ * 浏览器实际会应用的声明。真实几何/可达性由 e2e 门禁在真浏览器里验收。
+ */
+async function compiledScopedCss(raw: string, filename: string): Promise<string> {
+  const { descriptor } = parse(raw, { filename })
+  const chunks: string[] = []
+  for (const block of descriptor.styles) {
+    const res = await compileStyleAsync({
+      source: block.content,
+      filename,
+      id: 'data-v-testscope',
+      scoped: Boolean(block.scoped),
+    })
+    expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+    chunks.push(res.code)
+  }
+  return chunks.join('\n')
+}
+
+/**
+ * 注入编译产物 + 合成同结构 DOM（<div class="parentClass" data-v-testscope><div class="el-pagination">），
+ * 返回内层元素的计算 flex-wrap。
+ *
+ * happy-dom 实测：只有在元素**插入文档后**读 getComputedStyle 才会做选择器匹配；
+ * 若用"回调构造 DOM"或"插入前先读一次"，返回的是空串（不会命中已注入的样式表）。
+ * 因此这里固定 DOM 形状、固定读取顺序。反证：把 parentClass 换成不匹配的值时
+ * 返回值必须是空串 —— 说明该函数真的在走选择器匹配而非恒返回 wrap。
+ */
+function measureFlexWrap(css: string, parentClass: string, childClass: string | null = 'el-pagination'): string {
+  const style = document.createElement('style')
+  style.textContent = css
+  document.head.appendChild(style)
+  const wrap = document.createElement('div')
+  wrap.className = parentClass
+  wrap.setAttribute('data-v-testscope', '')
+  const target = childClass === null ? wrap : document.createElement('div')
+  if (childClass !== null) {
+    target.className = childClass
+    wrap.appendChild(target)
+  }
+  document.body.appendChild(wrap)
+  const value = getComputedStyle(target).flexWrap
+  style.remove()
+  wrap.remove()
+  return value
+}
 // ── Mocks ──────────────────────────────────────────────
 
 const { mockPush, mockRoute } = vi.hoisted(() => ({
@@ -223,6 +273,50 @@ describe('LogicalDeviceList.vue', () => {
     expect(wrapper.find('[data-test="ld-pagination"]').text()).toContain('共 1003 条')
     // 只渲染当前页 1 行, 不是 1003 行
     expect(wrapper.findAll('tbody tr')).toHaveLength(1)
+  })
+
+  // ── 分页控件窄屏可换行（§4.3.2 MUST：分页换行是独立验收项） ────────────────
+  //
+  // 根因（不是"外层缺 flex-wrap"）：.ld-pagination 早已有 flex-wrap，但 flex 换行只发生在
+  // 多个 item **之间**，管不到**单个过宽 item 的内部**：el-pagination 自带
+  // white-space:nowrap + display:flex，实测宽 676.94px（layout="total, sizes, prev,
+  // pager, next, jumper"）。
+  //   360px：容器 .ld-pagination 宽 312px（x=20），el-pagination x=-344.94、
+  //          btn-prev x=-118、el-pagination__total x=-344.94；
+  //   390px：el-pagination x=-314.94、btn-prev x=-88；
+  //   768px：el-pagination x=63.06（容器 x=220，裁 157px）。
+  // 且 .ld-pagination / .mobile-table-wrapper / .el-main 的 scrollWidth === clientWidth
+  // （横向位移预算 0）⇒ **真实裁切**；elementFromPoint 在 btn-prev 中心返回 null，
+  // **上一页按钮永久不可达**（不是"看起来挤"）。
+  // 修法照同仓范式 firmware/FirmwareManage.vue 的 .firmware-manage :deep(.el-pagination)。
+  //
+  // 为什么是样式契约而非真实布局断言（规范允许的例外，须标注理由）：
+  // happy-dom **无布局引擎**，getBoundingClientRect() 恒 0、scrollWidth/clientWidth 恒 0，
+  // "控件是否溢出容器"不可在单测里量化。故此处用 @vue/compiler-sfc **真实编译**
+  // scoped 样式并读 computed style（断言浏览器实际会应用的声明），真浏览器几何与
+  // 可达性由 e2e 门禁（frontend-shared/e2e）验收。
+  describe('分页控件窄屏换行（样式契约，happy-dom 无布局引擎的例外）', () => {
+    it('内层 .el-pagination 自身声明 flex-wrap，过宽时才会拆行', async () => {
+      const css = await compiledScopedCss(source, 'LogicalDeviceList.vue')
+      const rule = css.match(/\.ld-pagination\[data-v-[a-z0-9]+\]\s+\.el-pagination\s*\{[^}]*\}/)
+      expect(rule, 'LogicalDeviceList.vue 缺少 .ld-pagination :deep(.el-pagination) 编译产物').not.toBeNull()
+      expect(rule![0]).toContain('flex-wrap: wrap')
+      // 外层必须同时保留 wrap：两者防的是不同层级（item 之间 / item 内部）
+      const outer = css.match(/\.ld-pagination\[data-v-[a-z0-9]+\]\s*\{[^}]*\}/)
+      expect(outer, 'LogicalDeviceList.vue 缺少 .ld-pagination 自身的 scoped 规则').not.toBeNull()
+      expect(outer![0]).toContain('flex-wrap: wrap')
+      // DOM 级复核：把编译产物注入后，内层选择器命中的元素计算值必须真的是 wrap
+      expect(measureFlexWrap(css, 'ld-pagination')).toBe('wrap')
+      // 反证：容器 class 不匹配时必须取不到该声明（证明测的是选择器而非恒真）
+      expect(measureFlexWrap(css, 'not-the-container')).toBe('')
+    })
+
+    it('分页控件仍在页面上渲染（换行不得把分页器整个藏掉）', async () => {
+      mockList.mockResolvedValue({ items: [makeItem()], total: 1003 })
+      const wrapper = mountPage()
+      await flushPromises()
+      expect(wrapper.find('[data-test="ld-pagination"]').exists()).toBe(true)
+    })
   })
 
   // ─── 合并门控 ───

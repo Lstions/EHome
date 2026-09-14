@@ -2,10 +2,60 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { defineComponent, h, type VNode } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { compileStyleAsync, parse } from '@vue/compiler-sfc'
 import AutomationRules from '../AutomationRules.vue'
+import source from '../AutomationRules.vue?raw'
 import { automationApi, type AutomationEvent, type AutomationEventPage } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
 
+/**
+ * 样式契约辅助：用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的
+ * [data-v-*] 选择器改写），再注入 DOM 读 getComputedStyle —— 比字符串包含更接近
+ * 浏览器实际会应用的声明。真实几何/可达性由 e2e 门禁在真浏览器里验收。
+ */
+async function compiledScopedCss(raw: string, filename: string): Promise<string> {
+  const { descriptor } = parse(raw, { filename })
+  const chunks: string[] = []
+  for (const block of descriptor.styles) {
+    const res = await compileStyleAsync({
+      source: block.content,
+      filename,
+      id: 'data-v-testscope',
+      scoped: Boolean(block.scoped),
+    })
+    expect(res.errors, JSON.stringify(res.errors)).toEqual([])
+    chunks.push(res.code)
+  }
+  return chunks.join('\n')
+}
+
+/**
+ * 注入编译产物 + 合成同结构 DOM（<div class="parentClass" data-v-testscope><div class="el-pagination">），
+ * 返回内层元素的计算 flex-wrap。
+ *
+ * happy-dom 实测：只有在元素**插入文档后**读 getComputedStyle 才会做选择器匹配；
+ * 若用"回调构造 DOM"或"插入前先读一次"，返回的是空串（不会命中已注入的样式表）。
+ * 因此这里固定 DOM 形状、固定读取顺序。反证：把 parentClass 换成不匹配的值时
+ * 返回值必须是空串 —— 说明该函数真的在走选择器匹配而非恒返回 wrap。
+ */
+function measureFlexWrap(css: string, parentClass: string, childClass: string | null = 'el-pagination'): string {
+  const style = document.createElement('style')
+  style.textContent = css
+  document.head.appendChild(style)
+  const wrap = document.createElement('div')
+  wrap.className = parentClass
+  wrap.setAttribute('data-v-testscope', '')
+  const target = childClass === null ? wrap : document.createElement('div')
+  if (childClass !== null) {
+    target.className = childClass
+    wrap.appendChild(target)
+  }
+  document.body.appendChild(wrap)
+  const value = getComputedStyle(target).flexWrap
+  style.remove()
+  wrap.remove()
+  return value
+}
 // Element Plus 组件由 src/test-setup.ts 全局 stub; 这里 mock 数据层。
 vi.mock('@/api/automation', () => ({
   automationApi: {
@@ -376,6 +426,31 @@ describe('AutomationRules.vue', () => {
     expect(wrapper.find('[data-test="events-pagination"]').exists()).toBe(true)
     // stub 渲染 "共 N 条"; total 来自接口响应而非当前页长度。
     expect(wrapper.find('[data-test="events-pagination"]').text()).toContain('共 1 条')
+  })
+
+  // ── 分页控件窄屏可换行（§4.3.2 MUST；与 LogicalDeviceList.vue 同一根因） ──────
+  //
+  // .events-pagination 的 flex-wrap 只作用于多个 item 之间；内层 el-pagination
+  // 自身 white-space:nowrap + display:flex（宽 676.94px），**768px 即已裁切**：
+  // el-pagination x=47.06（容器 .events-pagination x=236，裁 153px）、
+  // el-pagination__total x=47.06、el-select「20条/页」x=130；
+  // 360px 时 el-pagination x=-360.94、btn-prev x=-134。祖先链
+  // scrollWidth === clientWidth ⇒ 真实裁切，elementFromPoint 在 btn-prev 中心返回 null。
+  // 范式同 firmware/FirmwareManage.vue 的 .firmware-manage :deep(.el-pagination)。
+  // 单测只能用样式契约：happy-dom 无布局引擎（详见本文件顶部辅助函数注释）。
+  describe('分页控件窄屏换行（样式契约，happy-dom 无布局引擎的例外）', () => {
+    it('内层 .el-pagination 自身声明 flex-wrap，过宽时才会拆行', async () => {
+      const css = await compiledScopedCss(source, 'AutomationRules.vue')
+      const rule = css.match(/\.events-pagination\[data-v-[a-z0-9]+\]\s+\.el-pagination\s*\{[^}]*\}/)
+      expect(rule, 'AutomationRules.vue 缺少 .events-pagination :deep(.el-pagination) 编译产物').not.toBeNull()
+      expect(rule![0]).toContain('flex-wrap: wrap')
+      const outer = css.match(/\.events-pagination\[data-v-[a-z0-9]+\]\s*\{[^}]*\}/)
+      expect(outer, 'AutomationRules.vue 缺少 .events-pagination 自身的 scoped 规则').not.toBeNull()
+      expect(outer![0]).toContain('flex-wrap: wrap')
+      expect(measureFlexWrap(css, 'events-pagination')).toBe('wrap')
+      // 反证：容器 class 不匹配时必须取不到该声明（证明测的是选择器而非恒真）
+      expect(measureFlexWrap(css, 'not-the-container')).toBe('')
+    })
   })
 })
 

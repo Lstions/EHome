@@ -762,6 +762,12 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 8px;
   padding-top: 12px;
+  /* 360px 实测：.el-card__body 内容宽 270px，四个按钮（预览 69.02 + 克隆 69.02 +
+     编辑 69.02 + 下拉 39）加 item 间距 294.05px > 270px。右对齐 + 不换行时
+     「预览」被推出 .el-card__body 左界（x=16.95 < body x=21，裁 4.05px），
+     而 body/card/grid/el-main 的 scrollWidth === clientWidth（不可回滚）⇒ 真实裁切。
+     F9 只补了 .filter-right，漏了同一根因的 .card-footer，此处补齐。 */
+  flex-wrap: wrap;
 }
 
 /* 分页 */
