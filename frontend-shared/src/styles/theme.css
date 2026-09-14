@@ -691,6 +691,21 @@ html.dark .el-descriptions__content {
     min-height: 44px;
   }
 
+  /* 表格内 Switch（/automation 规则表「启用」列）：EP 固定 32px 高（小号变体 16px），
+     窄屏下与其它行内控件一致取 36px 档。
+     注意：fine 门禁（uiux-gate-fine，390px，hasTouch:false）**不会**命中粗指针媒体查询，
+     原来把 .el-switch 只写在那个分支里会漏掉它 ——
+     这正是 2026-09-14 fine 门禁报「automation @390px 2/28 个表格内控件高度 <36px」的原因。 */
+  .el-table .el-switch {
+    min-height: 36px;
+  }
+
+  /* 只补容器高度，本体（.el-switch__core 20px）垂直居中，视觉尺寸与行内节奏不变。 */
+  .el-table .el-switch .el-switch__core {
+    margin-top: auto;
+    margin-bottom: auto;
+  }
+
   /* 触控目标工具类（§4.4.5 / §4.4.7）。 */
   .touch-target {
     min-height: 44px;
@@ -800,6 +815,19 @@ a.device-link {
      折行后：390/360 裁切均归零，且 6 个页码按钮与 prev/next **全部保持 44×44**（§4.4.7 未被削弱），
      代价只是分页条由 1 行变 2 行（高 132 → 176px），这是窄屏下可接受的换行代价。 */
   .el-pager {
+    flex-wrap: wrap;
+  }
+
+  /* 分页条自身也折行。
+     为什么 .el-pager 折行还不够：.el-pager 折行只解决「页码条比容器宽」，
+     但 .el-pagination 自身是 flex + 默认 nowrap，在 44px 档下它的最小内容宽
+     （total 44 + sizes 128 + prev 44 + pager 44 + next 44 = 304px，加 item gap）会超过
+     容器：实测 360px 下 edge-device / device-configs 的 .pagination-wrapper 只有 312px，
+     而 .el-pagination 是 336px（超出 24px）—— 这两个 wrapper 没有自己的 flex-wrap 规则，
+     于是分页条向右溢出。折行后 360/390 全部组合的 pagOverParent 归零。
+     放在 coarse 分支（而不是全局）：只有 44px 档才会超出容器；fine/桌面保持单行，
+     不改变紧凑运维密度（§4.2.3）。 */
+  .el-pagination {
     flex-wrap: wrap;
   }
 
