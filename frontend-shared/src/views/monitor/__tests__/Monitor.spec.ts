@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import Monitor from '../Monitor.vue'
 
@@ -510,6 +510,182 @@ describe('Monitor.vue', () => {
       expect(templateBody.match(/metric(Text)?\(/g)?.length ?? 0).toBeGreaterThanOrEqual(25)
       // 未知态必须落到 UNKNOWN 常量，而不是新造占位符
       expect(src).toContain("import { UNKNOWN, metricOrDash } from '@/utils/format'")
+    })
+  })
+
+  // ─── F31 残余：接口挂起时 DOM 必须留下可机械判定的「刷新中」痕迹 ───
+  //
+  // 缺陷：fetchMetrics 只在 finally 置 isLoading=false（从不置 true），于是
+  // 「首屏成功 → 接口挂起 → 点手动刷新」这一中间态在 DOM 上**既无骨架也无错误态**，
+  // .stat-value 显示的是上一次成功的陈旧真值 —— 门禁会把陈旧值当新鲜值，
+  // 在一份不代表终态的 DOM 上做裁切/溢出判定。
+  // 下列用例把「请求在飞」钉成 DOM 事实（用 deferred 控制 resolve 时机，
+  // 不使用任何 waitForTimeout）。
+  describe('F31 残余：刷新中标记必须可机械判定', () => {
+    const OK = (requestsTotal: number) => ({
+      code: 200,
+      data: {
+        timestamp: Date.now(),
+        http: { requests_total: requestsTotal, requests_in_flight: 0 },
+        mqtt: { messages_received: 50, messages_sent: 30, connection_errors: 0 },
+        device: { online: 3, offline: 1 },
+        node: { online: 2, offline: 0 },
+        data: { points_collected: 5000, points_stored: 4990 },
+        ota: { upgrades_total: 0 },
+        websocket: { connections_active: 4, messages_total: 200 },
+        control: {
+          operations_total: 20, active: 2, queued: 1, succeeded: 15, failed: 2,
+          unknown: 1, unresolved_unknown: 0, cancelled: 0, outbox_pending: 1,
+          outbox_leased: 0, capability_stale_nodes: 0, audit_write_failures: 0,
+        },
+      },
+    })
+
+    /** 手动控制 resolve 时机的 deferred：resolve 之前请求一直「在飞」。 */
+    const deferred = <T>() => {
+      let resolve!: (value: T) => void
+      let reject!: (reason?: unknown) => void
+      const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+      return { promise, resolve, reject }
+    }
+
+    const loadApi = async () => {
+      const { getMetricsSummary } = await import('@/api/monitor')
+      return vi.mocked(getMetricsSummary)
+    }
+
+    /** 与门禁同口径的 DOM 事实（选择器即门禁将要使用的判据）。 */
+    const refreshFacts = (wrapper: ReturnType<typeof mount>) => ({
+      refreshingMarker: wrapper.find('[data-test="monitor-refreshing"]').exists(),
+      ariaBusy: wrapper.find('.monitor-container').attributes('aria-busy'),
+      skeleton: wrapper.find('[data-test="monitor-loading"]').exists(),
+      hasDetailPanels: wrapper.find('.detail-panels').exists(),
+      statValues: wrapper.findAll('.stat-value').map(n => n.text().replace(/\s+/g, '')),
+    })
+
+    it('① 首屏加载中：刷新中标记为真，且首屏骨架仍渲染（F28 行为不变）', async () => {
+      const api = await loadApi()
+      const first = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(first.promise)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await nextTick()
+
+      const facts = refreshFacts(wrapper)
+      expect(facts.refreshingMarker, '首屏请求在飞时必须可机械观测').toBe(true)
+      expect(facts.ariaBusy, 'aria-busy 必须表达「忙」').toBe('true')
+      // 反向守卫：首屏骨架不得因新增标记而消失（F28 契约）
+      expect(facts.skeleton).toBe(true)
+
+      first.resolve(OK(100))
+      await flushPromises()
+    })
+
+    it('② 首屏加载完成：刷新中标记消失，骨架消失，渲染真实值', async () => {
+      const api = await loadApi()
+      const first = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(first.promise)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await nextTick()
+      expect(refreshFacts(wrapper).refreshingMarker).toBe(true)
+
+      first.resolve(OK(100))
+      await flushPromises()
+
+      const facts = refreshFacts(wrapper)
+      expect(facts.refreshingMarker, '落定后不得残留「刷新中」').toBe(false)
+      expect(facts.ariaBusy).not.toBe('true')
+      expect(facts.skeleton).toBe(false)
+      expect(facts.statValues[0]).toBe('100')
+    })
+
+    it('③ 已加载后再触发刷新：标记重新出现，且不显示骨架（保留陈旧值）', async () => {
+      const api = await loadApi()
+      const first = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(first.promise)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await nextTick()
+      first.resolve(OK(100))
+      await flushPromises()
+      expect(refreshFacts(wrapper).refreshingMarker).toBe(false)
+
+      // 接口挂起：第二次请求永不落定（deferred 不 resolve）
+      const second = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(second.promise)
+
+      await wrapper.find('.toolbar-actions button').trigger('click')
+      await nextTick()
+
+      const facts = refreshFacts(wrapper)
+      expect(api).toHaveBeenCalledTimes(2)
+      expect(facts.refreshingMarker, '刷新在飞时必须重新置真').toBe(true)
+      expect(facts.ariaBusy).toBe('true')
+      // 需求 4：刷新中**不**显示骨架/遮罩，保留陈旧值是可接受设计（F28 已裁决）
+      expect(facts.skeleton, '刷新中不得退回首屏骨架').toBe(false)
+      expect(facts.hasDetailPanels, '陈旧值仍应可见').toBe(true)
+      expect(facts.statValues[0], '此刻显示的仍是上一次的真值').toBe('100')
+
+      second.resolve(OK(200))
+      await flushPromises()
+    })
+
+    it('④ 刷新完成：标记再次消失，数值更新为新鲜值', async () => {
+      const api = await loadApi()
+      const first = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(first.promise)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await nextTick()
+      first.resolve(OK(100))
+      await flushPromises()
+
+      const second = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(second.promise)
+      await wrapper.find('.toolbar-actions button').trigger('click')
+      await nextTick()
+      expect(refreshFacts(wrapper).refreshingMarker).toBe(true)
+
+      second.resolve(OK(200))
+      await flushPromises()
+
+      const facts = refreshFacts(wrapper)
+      expect(facts.refreshingMarker, '刷新落定后必须复位').toBe(false)
+      expect(facts.ariaBusy).not.toBe('true')
+      expect(facts.statValues[0], '数值已更新为新鲜值').toBe('200')
+    })
+
+    it('失败路径同样复位标记（不得卡在「刷新中」）', async () => {
+      const api = await loadApi()
+      const first = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(first.promise)
+
+      const wrapper = mount(Monitor, { global: { stubs } })
+      await nextTick()
+      first.resolve(OK(100))
+      await flushPromises()
+
+      const second = deferred<ReturnType<typeof OK>>()
+      api.mockReturnValueOnce(second.promise)
+      await wrapper.find('.toolbar-actions button').trigger('click')
+      await nextTick()
+      expect(refreshFacts(wrapper).refreshingMarker).toBe(true)
+
+      second.reject(new Error('Request failed with status code 500'))
+      await flushPromises()
+
+      expect(refreshFacts(wrapper).refreshingMarker).toBe(false)
+      expect(wrapper.find('[data-test="monitor-error"]').exists()).toBe(true)
+    })
+
+    it('源码守卫：根容器同时绑定 aria-busy 与 data-test 刷新标记', async () => {
+      const src = (await import('../Monitor.vue?raw')).default as string
+      expect(src).toContain(":aria-busy=\"isRefreshing\"")
+      expect(src).toContain("'monitor-refreshing'")
+      // 反向守卫：置真必须发生在 fetchMetrics 内（否则任何异步都会点亮标记）
+      const fetchBody = src.slice(src.indexOf('const fetchMetrics = async () => {'))
+      expect(fetchBody.slice(0, fetchBody.indexOf('try {'))).toContain('isRefreshing.value = true')
     })
   })
 

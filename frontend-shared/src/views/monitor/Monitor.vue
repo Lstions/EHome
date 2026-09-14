@@ -1,5 +1,16 @@
 <template>
-  <div class="monitor-container">
+  <!-- 根容器承载「刷新中」状态（F31 残余）：
+       isLoading 只描述「首屏尚未落定」，刷新期间恒为 false，骨架分支不渲染；
+       而刷新期间 DOM 上既无骨架也无错误态，.stat-value 显示的是**上一次成功的陈旧值**
+       —— 门禁无法分辨陈旧值与新鲜值，会在一份不代表终态的 DOM 上做裁切/溢出判定。
+       故此处把「请求在飞」独立暴露出来：aria-busy 是对辅助技术的标准表达，
+       data-test 是本仓既有稳定约定（EP 的 el-table/el-loading 都不设 aria-busy）。
+       两者只表达状态，不改变视觉：刷新中不显示骨架/遮罩，保留陈旧值（F28 已裁决）。 -->
+  <div
+    class="monitor-container"
+    :aria-busy="isRefreshing"
+    :data-test="isRefreshing ? 'monitor-refreshing' : undefined"
+  >
     <!-- 顶部操作栏 -->
     <div class="toolbar">
       <h2><el-icon aria-hidden="true"><DataAnalysis /></el-icon> 系统监控</h2>
@@ -391,6 +402,19 @@ const SCOPE_GLOBAL = '全局'
 // 与"成功但系统空闲"在 DOM 上逐字段相同，用户无法察觉接口已挂。
 const metrics = ref<MetricsSummary | null>(null)
 const isLoading = ref(true)
+/**
+ * 「请求在飞」状态（F31 残余）。
+ *
+ * 裁决：**新增 isRefreshing，不改 isLoading 语义**。理由：
+ *   · isLoading 是首屏三态机的一支（骨架 / 错误 / 正常），且被 metricsReady 依赖 ——
+ *     若在刷新时把它置回 true，KPI 会瞬间整片变「—」（数值凭空消失再回来），
+ *     还会与 loadError 的优先级纠缠；这属于**改变视觉**，本任务明确不做。
+ *   · 刷新语义与首屏语义正交：刷新时页面已是「成功态」（保留陈旧值），
+ *     只是数据不再新鲜。用一个独立布尔表达，两者互不干扰，首屏骨架行为逐字节不变。
+ *   · 现有 refresh 语义在其他视图（Dashboard/NodeList/NodeOverview）也叫 refreshing，
+ *     命名一致，门禁侧无需为 /monitor 记特例。
+ */
+const isRefreshing = ref(false)
 const loadError = ref('')
 const refreshInterval = ref(10000)
 const lastUpdateTime = ref(UNKNOWN)
@@ -505,6 +529,9 @@ const onlineValueClass = (online: number | undefined, total: number) => {
  * 页面不会继续声称任何具体数字；数据留着只为重试成功后无闪烁。
  */
 const fetchMetrics = async () => {
+  // 进入即置真、finally 置回：覆盖手动刷新、自动轮询、首屏、重试四条入口，
+  // 且失败路径同样会复位（不只在成功分支复位）。
+  isRefreshing.value = true
   try {
     const res = await getMetricsSummary()
     if (res.code === 200 && res.data) {
@@ -522,6 +549,7 @@ const fetchMetrics = async () => {
     ElMessage.error('获取监控数据失败')
   } finally {
     isLoading.value = false
+    isRefreshing.value = false
   }
 }
 

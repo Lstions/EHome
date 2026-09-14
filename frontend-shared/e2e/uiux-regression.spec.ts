@@ -712,6 +712,73 @@ test.describe('失败态不得伪装正常', () => {
       '接口挂起时门禁判为就绪（F31 盲区复发）：它会在只有骨架的 DOM 上做裁切判定。' + detail
     ).toBe(true)
   })
+
+  /**
+   * 守护的不变量：**已有陈旧数据的「刷新中」也必须判为未就绪**。
+   *
+   * 这是 F31 的第二类场景，比首屏挂起**隐蔽得多**（主控实测发现）：
+   *   首屏加载成功 → 接口挂起 → 点手动刷新：
+   *     · 页面**既无骨架也无错误态**（保留陈旧值是 F28 的裁决）；
+   *     · `.stat-value` 显示上一次成功的真实值（实测 153.68K），**看起来完全可信**；
+   *     · 于是「骨架/错误态/数据」三态判据全部满足 ⇒ 门禁静默判为就绪。
+   *
+   * 该场景此前**无法机械判定**（全仓 aria-busy 仅 3 处、EP 的 el-table/el-loading 均不设它）。
+   * 修法分两步：
+   *   ① 产品侧（Monitor.vue 根容器）在请求在飞时暴露 `aria-busy="true"` +
+   *      `[data-test=monitor-refreshing]`，**不改变视觉**；
+   *   ② 门禁侧在 readyBlockers 里把「请求在飞」判为未就绪。
+   *
+   * 注意：判据必须**精确匹配 `aria-busy="true"`** —— Vue 对布尔 attr 在 false 时
+   * 渲染字面量 `"false"`，用属性存在性判断会恒真（会把正常态也判成未就绪）。
+   */
+  test('已有陈旧数据时刷新挂起，门禁仍必须判为未就绪（F31 第二类场景）', async ({ page }) => {
+    await loginViaApi(page, 'light')
+
+    // 先让首屏正常加载（拿到真实数据），再让后续刷新挂起
+    let hang = false
+    await page.route('**/api/v1/metrics/summary**', (route) => {
+      if (hang) return new Promise(() => {})
+      return route.continue()
+    })
+
+    const probe = ROUTES.find((r) => r.path === '/monitor')!
+    await measureRouteWhenReady(page, probe, 20000) // 首屏正常进入确定态
+
+    const loaded = await page.evaluate(() => ({
+      marker: document.querySelectorAll('[data-test="monitor-refreshing"]').length,
+      ariaBusy: document.querySelector('.monitor-container')?.getAttribute('aria-busy'),
+    }))
+    expect(loaded.marker, '首屏完成后不应有「刷新中」标记').toBe(0)
+    expect(loaded.ariaBusy, '首屏完成后 aria-busy 不应为 "true"').not.toBe('true')
+
+    // 挂起 + 触发刷新
+    hang = true
+    const clicked = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find((x) => /手动刷新/.test(x.textContent || ''))
+      if (btn) { btn.click(); return true }
+      return false
+    })
+    expect(clicked, '没找到「手动刷新」按钮 —— 断言会假绿（分母为 0）').toBe(true)
+
+    // 等「请求在飞」标记出现（不靠 sleep）
+    await page.waitForSelector('[data-test="monitor-refreshing"]', { timeout: 10000 })
+
+    // 此时必须判为**未就绪**：measureRouteWhenReady 应当抛错
+    let threw = false
+    let detail = ''
+    try {
+      await measureRouteWhenReady(page, probe, 8000)
+    } catch (e) {
+      threw = true
+      detail = String(e).split('\n').slice(0, 4).join(' | ')
+    }
+    expect(
+      threw,
+      '有陈旧数据时刷新挂起，门禁仍判为就绪（F31 第二类场景复发）—— ' +
+        '它会在不代表终态的 DOM 上做裁切判定。' + detail
+    ).toBe(true)
+    expect(detail, '失败原因应指向「请求在飞」而不是别的判据').toContain('请求在飞')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

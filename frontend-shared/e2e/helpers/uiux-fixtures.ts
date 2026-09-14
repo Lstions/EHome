@@ -282,6 +282,15 @@ export interface StructuralFacts {
   settle: boolean
   /** 数据表格数（用于"该有意义的分母是 0"的上报） */
   tables: number
+  /**
+   * 「请求在飞」标记数（F31 残余）。
+   *
+   * 为什么必须有：仅靠「骨架/错误态/数据」三态**无法**覆盖「已有陈旧数据的刷新中」——
+   * 那种页面既无骨架也无错误态，`.stat-value` 显示上一次成功的旧值，看起来可信。
+   * 产品侧因此暴露了 `aria-busy` + `[data-test=monitor-refreshing]`（见 Monitor.vue 根容器）。
+   * 精确匹配 `"true"`：Vue 布尔 attr 在 false 时渲染字面量 `"false"`，存在性判断会恒真。
+   */
+  inFlight: number
 }
 
 /** 在页内采一次结构事实（不度量裁切） */
@@ -317,6 +326,16 @@ async function structuralFacts(page: Page, probe: RouteProbe): Promise<Structura
         signal: countVisible(p.visible),
         settle: Array.from(document.querySelectorAll(p.settle)).filter(visible).length > 0,
         tables: document.querySelectorAll('.el-table').length,
+        // F31 残余：**请求在飞**的通用信号。
+        //
+        // 为什么需要它（此前是盲区）：「首屏成功后刷新时挂起」场景下，页面既无骨架也无错误态，
+        // .stat-value 显示的是**上一次成功的陈旧值**（实测 153.68K），看起来完全可信 ——
+        // 门禁会判为「已就绪」并在这份**不代表终态**的 DOM 上做裁切判定。
+        //
+        // 判据来源：产品侧已在 /monitor 根容器上暴露 aria-busy（标准属性）+ data-test
+        // （本仓稳定约定）。**精确匹配 "true"** —— Vue 对布尔 attr 在 false 时会渲染字面量
+        // "false"，用存在性判断会恒真。
+        inFlight: countVisible('[aria-busy="true"], [data-test="monitor-refreshing"]'),
       }
     },
     { root: probe.root, visible: probe.visible, settle: probe.settle }
@@ -336,6 +355,9 @@ function readyBlockers(f: StructuralFacts, probe: RouteProbe): string[] {
   if (f.masks > 0) why.push('仍有 ' + f.masks + ' 个可见加载遮罩 .el-loading-mask')
   if (f.skeletons > 0) why.push('仍有 ' + f.skeletons + ' 个可见骨架屏 .el-skeleton')
   if (!f.settle) why.push('加载结束信号未出现（' + probe.settle + '）')
+  if (f.inFlight > 0) {
+    why.push('仍有 ' + f.inFlight + ' 个「请求在飞」标记（[aria-busy="true"]/[data-test=monitor-refreshing]）')
+  }
   if (f.rows > 0 && (f.masks > 0 || f.skeletons > 0)) {
     why.push('表格行已出现但仍在加载（陈旧 DOM / 中间态）')
   }
