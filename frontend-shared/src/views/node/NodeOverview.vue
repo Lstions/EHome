@@ -183,7 +183,7 @@
           </div>
           <div class="metric-list">
             <div class="metric-row">
-              <span class="metric-icon" style="background: rgba(34,197,94,.1); color: #16A34A">
+              <span class="metric-icon" style="background: var(--no-success-bg); color: var(--no-success-text)">
                 <el-icon :size="13"><Connection /></el-icon>
               </span>
               <span class="metric-name">WiFi 信号强度</span>
@@ -191,7 +191,7 @@
               <span class="metric-val dim" v-else>—</span>
             </div>
             <div class="metric-row">
-              <span class="metric-icon" style="background: rgba(139,92,246,.1); color: #8B5CF6">
+              <span class="metric-icon" style="background: var(--no-accent-bg); color: var(--no-accent)">
                 <el-icon :size="13"><Odometer /></el-icon>
               </span>
               <span class="metric-name">空闲堆内存</span>
@@ -199,7 +199,7 @@
               <span class="metric-val dim" v-else>—</span>
             </div>
             <div class="metric-row">
-              <span class="metric-icon" style="background: rgba(46,107,255,.1); color: #2E6BFF">
+              <span class="metric-icon" style="background: rgba(46,107,255,.1); color: var(--no-primary)">
                 <el-icon :size="13"><Timer /></el-icon>
               </span>
               <span class="metric-name">通信延迟</span>
@@ -207,7 +207,7 @@
               <span class="metric-val dim" v-else>—</span>
             </div>
             <div class="metric-row">
-              <span class="metric-icon" style="background: rgba(245,158,11,.1); color: #D97706">
+              <span class="metric-icon" style="background: var(--no-warning-bg); color: var(--no-warning-text)">
                 <el-icon :size="13"><Clock /></el-icon>
               </span>
               <span class="metric-name">固件在线时长</span>
@@ -246,10 +246,10 @@
           <div v-if="channelsLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
           <template v-else>
             <div class="chips">
-              <div class="chip chip-total"><span class="chip-label"><i class="chip-dot" style="background:#8A93A3"></i>总数</span><span class="chip-num">{{ channelStats.total }}</span></div>
-              <div class="chip" :class="channelStats.ok > 0 ? 'chip-ok' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background:#22C55E"></i>正常</span><span class="chip-num">{{ channelStats.ok }}</span></div>
-              <div class="chip" :class="channelStats.error > 0 ? 'chip-warn' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background:#F59E0B"></i>异常</span><span class="chip-num" :class="{ 'dim-num': channelStats.error === 0 }">{{ channelStats.error }}</span></div>
-              <div class="chip chip-off"><span class="chip-label"><i class="chip-dot" style="background:#9CA3AF"></i>其他</span><span class="chip-num dim-num">{{ channelStats.other }}</span></div>
+              <div class="chip chip-total"><span class="chip-label"><i class="chip-dot" style="background: var(--no-text-muted)"></i>总数</span><span class="chip-num">{{ channelStats.total }}</span></div>
+              <div class="chip" :class="channelStats.ok > 0 ? 'chip-ok' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background: var(--no-success)"></i>正常</span><span class="chip-num">{{ channelStats.ok }}</span></div>
+              <div class="chip" :class="channelStats.error > 0 ? 'chip-warn' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background: var(--no-warning)"></i>异常</span><span class="chip-num" :class="{ 'dim-num': channelStats.error === 0 }">{{ channelStats.error }}</span></div>
+              <div class="chip chip-off"><span class="chip-label"><i class="chip-dot" style="background: var(--no-text-faint)"></i>其他</span><span class="chip-num dim-num">{{ channelStats.other }}</span></div>
             </div>
             <div v-if="channels.length === 0" class="card-empty">该节点暂无通道</div>
             <div v-else class="chan-list">
@@ -874,10 +874,13 @@ const qualityText = computed(() => {
 })
 const qualityColor = computed(() => {
   const q = node.value?.connection_quality ?? 0
-  if (q >= 80) return '#16A34A'
-  if (q >= 60) return '#2E6BFF'
-  if (q >= 40) return '#D97706'
-  return '#EF4444'
+  // F32：改为页面级 token 引用。该返回值只喂给 :style 的 color/background，
+  // Vue 不解析它，最终由 CSS 引擎解析 var() ⇒ 亮/暗主题各自取到正确的页面 token。
+  // 修复前返回字面量 hex，实测同一元素在亮/暗两主题下计算色**完全相同**。
+  if (q >= 80) return 'var(--no-success-text)'
+  if (q >= 60) return 'var(--no-primary)'
+  if (q >= 40) return 'var(--no-warning-text)'
+  return 'var(--no-danger)'
 })
 
 const lastOnlineText = computed(() => {
@@ -1614,6 +1617,11 @@ onUnmounted(() => {
   --no-bg-hover: #F7FAFF;
   --no-bg-active: #EBF2FF;
   --no-chip-off-bg: #F2F4F7;
+  /* F32：紫色强调色（空闲堆内存图标）。设计稿原值是内联硬编码 #8B5CF6，
+     它没有对应的全局语义 token（theme.css 里没有紫色语义），故此处置为**页面级 token**，
+     与其余 --no-* 同族；并补暗色覆盖，使其真正随主题变化（修复前亮暗计算色完全相同）。 */
+  --no-accent: #8B5CF6;
+  --no-accent-bg: rgba(139, 92, 246, 0.1);
   color: var(--no-text);
   font-size: 13px;
   line-height: 20px;
@@ -1643,6 +1651,10 @@ html.dark .node-overview-page {
   --no-text-faint: #7D8694;
   /* F8：零使用，但属设计稿色板；补暗色覆盖，使其一旦被用即为正确的暗色页面底色。 */
   --no-bg-page: var(--bg-color-page, #0D0D0D);
+  /* F32：紫色强调色的暗色档。深色底上原 #8B5CF6 偏暗，提亮一档保持可读性，
+     底纹同步提高不透明度（与既有 --no-success-bg/--no-warning-bg 的暗色处理一致）。 */
+  --no-accent: #A78BFA;
+  --no-accent-bg: rgba(167, 139, 250, 0.16);
 }
 
 .no-breadcrumb { margin-bottom: 12px; }

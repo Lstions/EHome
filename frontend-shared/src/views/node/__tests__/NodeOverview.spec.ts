@@ -648,6 +648,48 @@ describe('NodeOverview (生产页)', () => {
       expect(source).toContain('html.dark .node-overview-page')
     })
 
+    /**
+     * F32：语义色不得用内联字面量 hex —— 那些值不随主题变化。
+     *
+     * 实测缺陷（修复前，真实 Chromium 1440x900 节点详情页）：以下元素在亮/暗两主题下
+     * 计算色**完全相同**，而它们与 theme.css 的语义 token 是两套调色板：
+     *   chip-dot   rgb(138,147,163) / rgb(34,197,94) / rgb(245,158,11)
+     *   metric-icon rgb(22,163,74) / rgb(139,92,246) / rgb(46,107,255)
+     * 本层只守护「源码不再写这些字面量」；「两主题计算色确实不同」由浏览器探针覆盖
+     * （.tmp-probe/lead-nodehex.mjs），因为 happy-dom 不做 var() 解析。
+     */
+    it('F32：语义色走页面 token，不再用不随主题变化的内联 hex', () => {
+      // 反例守卫：**使用点**不得出现内联字面量 hex（token 定义行与注释里的不算）。
+      // 判据：只看 `style="..."` 里的字面量与 qualityColor 的 return 字面量 ——
+      // 这两类才是「不随主题变化」的来源；`--no-*: #xxxxxx` 是 token 定义，本就该有字面量。
+      const styleAttrs = [...source.matchAll(/style="[^"]*"/g)].map((m) => m[0])
+      expect(styleAttrs.length, '分母为 0：没抓到任何内联 style，断言会假绿').toBeGreaterThan(0)
+      for (const m of styleAttrs) {
+        const lit = m.match(/#[0-9a-fA-F]{3,8}/g)
+        expect(lit, '内联 style 里出现字面量 hex（不随主题变化）：' + m).toBeNull()
+      }
+      // qualityColor 的 return 必须是 token 引用而非字面量
+      const returns = [...source.matchAll(/return '(var\(--no-[a-z-]+\)|#[0-9a-fA-F]{3,8})'/g)].map((m) => m[1])
+      expect(returns.length, '分母为 0：没抓到 qualityColor 的 return，断言会假绿').toBeGreaterThan(0)
+      for (const r of returns) {
+        expect(r.startsWith('var(--no-'), 'qualityColor 返回了字面量 hex：' + r).toBe(true)
+      }
+      // 正向守卫：必须真的用了 token（否则上面的 not.toContain 在「整个删掉样式」时也会通过）
+      expect(source).toContain('var(--no-success-text)')
+      expect(source).toContain('var(--no-warning-text)')
+      expect(source).toContain('var(--no-success)')
+      expect(source).toContain('var(--no-warning)')
+      expect(source).toContain('var(--no-text-muted)')
+      expect(source).toContain('var(--no-text-faint)')
+      expect(source).toContain('var(--no-accent)')
+      // 新增的页面级 token 必须亮/暗都有定义（否则等于没修）
+      expect(source).toContain('--no-accent: #8B5CF6')
+      expect(source).toContain('--no-accent: #A78BFA')
+      // qualityColor 的 JS 返回值也走 token（此前返回字面量 hex）
+      expect(source).toContain("if (q >= 80) return 'var(--no-success-text)'")
+      expect(source).toContain("return 'var(--no-danger)'")
+    })
+
     it('字体层级使用稳定的页面 token，而不是让标题、字段和弱提示退化为同一层级', () => {
       expect(source).toContain('--no-text-secondary: #526072')
       expect(source).toContain('--no-text-muted: #69778B')
