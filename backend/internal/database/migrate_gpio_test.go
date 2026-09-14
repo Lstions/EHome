@@ -37,7 +37,6 @@ func setupMigrationDB(t *testing.T) *gorm.DB {
 		&models.Firmware{},
 		&models.Notification{},
 		&models.User{},
-		&models.OperationLog{},
 		&models.Vendor{},
 		&models.DeviceModel{},
 		&models.NodeEvent{},

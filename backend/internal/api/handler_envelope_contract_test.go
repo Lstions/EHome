@@ -98,7 +98,7 @@ func newEnvelopeContractDB(t *testing.T) *gorm.DB {
 		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.DeviceData{},
 		&models.UnifiedData{}, &models.DataSource{}, &models.User{},
 		&models.OTATask{}, &models.Firmware{}, &models.Vendor{},
-		&models.Notification{}, &models.OperationLog{}, &models.DeviceModel{},
+		&models.Notification{}, &models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{}, &models.PendingWriteRecord{},
 		&models.NodeLog{}, &models.GPIOConfig{}, &models.PWMConfig{},
 		&models.LogicalDevice{}, &models.MergeJob{},

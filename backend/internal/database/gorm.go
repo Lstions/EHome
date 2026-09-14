@@ -91,7 +91,6 @@ func AutoMigrate() error {
 		&models.AuthOutbox{},
 		&models.InitializationToken{},
 		&models.SecurityAuditEvent{},
-		&models.OperationLog{},
 		&models.Vendor{},
 		&models.DeviceModel{},
 		&models.NodeEvent{},
@@ -144,7 +143,15 @@ func AutoMigrate() error {
 	if _, err = MigrateGPIOChannels(DB); err != nil {
 		return err
 	}
-	_, err = RetireLegacyPWMChannels(DB)
+	if _, err = RetireLegacyPWMChannels(DB); err != nil {
+		return err
+	}
+	// 死 schema 退役 (2026-09): operation_logs 0 写入者/0 读取者/0 行, 已被
+	// models.SecurityAuditEvent 取代 (裁决: docs/分析/运行期无界增长表-保留策略
+	// 设计-2026-09-13.md §2.7)。模型已从上面的 AutoMigrate 列表移除, 表本身
+	// 在此幂等 DROP (DROP TABLE IF EXISTS, 重跑零副作用)。
+	// 放在 AutoMigrate 之后: 即便某次显式重加注册建出空表, 也在同一次启动内被清掉。
+	_, err = RetireLegacyOperationLogs(DB)
 	return err
 }
 

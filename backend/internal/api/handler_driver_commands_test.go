@@ -33,7 +33,7 @@ func setupDriverCommandsTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.EdgeDevice{}, &models.DeviceConfig{}, &models.DeviceData{},
 		&models.UnifiedData{}, &models.User{}, &models.OTATask{},
 		&models.Firmware{}, &models.Vendor{}, &models.Notification{},
-		&models.OperationLog{}, &models.DeviceModel{},
+		&models.DeviceModel{},
 		&models.NodeEvent{}, &models.CalibrationCache{},
 		&models.PendingWriteRecord{},
 		&models.LogicalDevice{},

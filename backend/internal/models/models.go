@@ -414,17 +414,6 @@ type User struct {
 
 // =====================================================================
 
-// OperationLog 审计日志 (保留)
-type OperationLog struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"index" json:"user_id"`
-	Action    string    `gorm:"size:32;not null" json:"action"`
-	Target    string    `gorm:"size:64" json:"target"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// =====================================================================
-
 // Vendor 厂商 (保留)
 type Vendor struct {
 	ID        uint          `gorm:"primaryKey" json:"id"`

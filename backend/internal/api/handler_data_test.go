@@ -32,7 +32,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	db.AutoMigrate(&models.Node{}, &models.Channel{}, &models.EdgeDevice{},
 		&models.DeviceConfig{}, &models.UnifiedData{}, &models.DeviceData{},
 		&models.User{}, &models.OTATask{}, &models.Firmware{}, &models.Vendor{},
-		&models.Notification{}, &models.OperationLog{}, &models.LogicalDevice{},
+		&models.Notification{}, &models.LogicalDevice{},
 		&models.MergeJob{})
 
 	r := gin.New()

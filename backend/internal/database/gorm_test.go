@@ -171,10 +171,12 @@ func TestAutoMigrate(t *testing.T) {
 		}
 	})
 
-	t.Run("OperationLog", func(t *testing.T) {
-		ol := models.OperationLog{UserID: 1, Action: "login", Target: "system"}
-		if err := db.Create(&ol).Error; err != nil {
-			t.Fatalf("create operation log: %v", err)
+	// operation_logs 已于 2026-09 退役 (docs/分析/运行期无界增长表-保留策略设计
+	// -2026-09-13.md §2.7 裁决): AutoMigrate 不再建该表, 且生产代码零引用。
+	// 断言"表不存在"而非"可写入" —— 复活即在此红。
+	t.Run("OperationLogRetired", func(t *testing.T) {
+		if db.Migrator().HasTable("operation_logs") {
+			t.Fatal("operation_logs 已被退役, AutoMigrate 不得再创建它 (INV-8 死 schema 不得复活)")
 		}
 	})
 

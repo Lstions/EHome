@@ -2,8 +2,13 @@ package models
 
 import "time"
 
-// SecurityAuditEvent is an append-only security event. OperationLog remains
-// available for legacy operational history.
+// SecurityAuditEvent is an append-only security event.
+//
+// 它是唯一的审计事件载体: 旧 models.OperationLog 已于 2026-09 退役
+// (0 写入者 / 0 读取者 / 0 行, 缺 request_id/source_ip/result/metadata,
+// 无法承载任何现代审计问题; 裁决见
+// docs/分析/运行期无界增长表-保留策略设计-2026-09-13.md §2.7), 表本身由
+// database.RetireLegacyOperationLogs 幂等 DROP。
 type SecurityAuditEvent struct {
 	ID            uint64    `gorm:"primaryKey" json:"id"`
 	ActorType     string    `gorm:"size:32;not null;index" json:"actor_type"`

@@ -51,7 +51,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&models.AuthState{},
 		&models.InitializationToken{},
 		&models.SecurityAuditEvent{},
-		&models.OperationLog{},
 		&models.Vendor{},
 		&models.DeviceModel{},
 		&models.NodeEvent{},

@@ -51,7 +51,6 @@ var allModels = []interface{}{
 	&models.AuthOutbox{},
 	&models.InitializationToken{},
 	&models.SecurityAuditEvent{},
-	&models.OperationLog{},
 	&models.Vendor{},
 	&models.DeviceModel{},
 	&models.NodeEvent{},
