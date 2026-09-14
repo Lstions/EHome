@@ -585,6 +585,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter, useRoute } from 'vue-router'
 import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
@@ -851,7 +852,7 @@ const fetchDevices = async (force = false, throwOnError = false) => {
     total.value = cached?.total || 0
     updateStats()
   } catch (error) {
-    if (sequence === listRequestSequence && !throwOnError) ElMessage.error('获取边缘设备列表失败')
+    if (sequence === listRequestSequence && !throwOnError) feedback.handleError(error, '获取边缘设备列表失败')
     if (throwOnError) throw error
   } finally {
     if (showInitialSkeleton && sequence === listRequestSequence) loading.value = false
@@ -904,7 +905,7 @@ const loadCreateWizardData = async () => {
     wizardDataLoaded = true
   } catch (error) {
     wizardDataLoaded = false
-    ElMessage.error('创建向导数据加载失败，请重试')
+    feedback.handleError(error, '创建向导数据加载失败，请重试')
   }
 }
 
@@ -1048,7 +1049,7 @@ const handleDriverCommandsLoadError = (message: string) => {
   commandIntervalsError.value = message
   commandIntervalsReady.value = false
   commandIntervalsSnapshot.value = null
-  ElMessage.error(message)
+  feedback.error(message)
 }
 
 // 提交时一致快照。加载失败/进行中 → null (不携带任何 intervals, 更不会带
@@ -1121,7 +1122,7 @@ const copyText = async (text: string) => {
     await navigator.clipboard.writeText(text)
     ElMessage.success('已复制: ' + text)
   } catch {
-    ElMessage.error('复制失败，请手动复制: ' + text)
+    feedback.error('复制失败，请手动复制: ' + text)
   }
 }
 
@@ -1413,7 +1414,7 @@ const handleCreate = async () => {
     resetCreateDialog()
     await fetchDevices(true)
   } catch (error: any) {
-    if (transactionGeneration === createTransactionGeneration) ElMessage.error(error.message || '创建失败')
+    if (transactionGeneration === createTransactionGeneration) feedback.handleError(error, '创建失败')
   } finally {
     if (transactionGeneration === createTransactionGeneration) submitting.value = false
   }

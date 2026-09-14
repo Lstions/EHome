@@ -30,7 +30,7 @@ const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands }
 }))
 
 vi.mock('element-plus', () => ({
-  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  ElMessage: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }))
 
 vi.mock('vue-router', () => ({
@@ -743,7 +743,11 @@ describe('EdgeDeviceList.vue', () => {
     // 加载失败 → 子组件 loadFailed 置位, 父组件记录错误
     expect(vm.commandIntervalsError).toBeTruthy()
     expect((vm.commandIntervalsRef as any)?.loadFailed).toBe(true)
-    expect(ElMessage.error).toHaveBeenCalled()
+    // I-1: 走 feedback.error → ElMessage({message, type:'error', duration:5000})
+    expect(ElMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'error',
+      duration: 5000,
+    }))
 
     await vm.handleCreate()
     await flushPromises()

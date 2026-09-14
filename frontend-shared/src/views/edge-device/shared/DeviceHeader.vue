@@ -87,6 +87,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Connection, Edit, Delete, MoreFilled } from '@element-plus/icons-vue'
@@ -150,7 +151,7 @@ async function submitEdit() {
     emit('updated')
   } catch (e: any) {
     if (operation !== operationGeneration || props.device?.id !== deviceId) return
-    ElMessage.error(e.message || '保存失败')
+    feedback.handleError(e, '保存失败')
   } finally {
     if (props.device?.id === deviceId) editLoading.value = false
   }
@@ -171,7 +172,7 @@ async function submitDelete() {
     router.replace('/edge-device')
   } catch (e: any) {
     if (operation !== operationGeneration || props.device?.id !== deviceId) return
-    ElMessage.error(e.message || '删除失败')
+    feedback.handleError(e, '删除失败')
   } finally {
     if (props.device?.id === deviceId) deleteLoading.value = false
   }

@@ -21,8 +21,8 @@
 
 <script setup lang="ts">
 import { ref, defineAsyncComponent, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 
 const route = useRoute()
@@ -66,7 +66,7 @@ async function resolveComponent() {
   } catch {
     if (sequence !== resolveSequence) return
     error.value = true
-    ElMessage.error('获取设备信息失败，请检查网络或稍后重试')
+    feedback.error('获取设备信息失败，请检查网络或稍后重试')
   } finally {
     if (sequence === resolveSequence) loading.value = false
   }

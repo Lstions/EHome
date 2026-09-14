@@ -14,7 +14,7 @@ vi.mock('vue-router', () => ({ useRoute: () => route }))
 vi.mock('@/stores/edgeDevice', () => ({
   useEdgeDeviceStore: () => ({ fetchDetail }),
 }))
-vi.mock('element-plus', () => ({ ElMessage: { error: vi.fn() } }))
+vi.mock('element-plus', () => ({ ElMessage: Object.assign(vi.fn(), { error: vi.fn() }) }))
 
 describe('EdgeDeviceDetailRouter', () => {
   beforeEach(() => {

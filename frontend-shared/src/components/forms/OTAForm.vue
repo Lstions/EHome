@@ -105,6 +105,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import { type Firmware } from '@/api/firmware'
@@ -200,7 +201,7 @@ const fetchFirmwares = async () => {
       ElMessage.warning('暂无可用固件，请先上传固件')
     }
   } catch (error: any) {
-    ElMessage.error('获取固件列表失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '获取固件列表失败')
   } finally {
     firmwaresLoading.value = false
   }
@@ -251,7 +252,7 @@ const handleStart = async () => {
 
   } catch (error: any) {
     if (generation !== otaGeneration || props.collectorId !== collectorId) return
-    ElMessage.error(error.message || '启动升级失败')
+    feedback.handleError(error, '启动升级失败')
     upgradeStatus.value = 'failed'
     statusText.value = '升级失败'
     addLog(`错误: ${error.message || '未知错误'}`)

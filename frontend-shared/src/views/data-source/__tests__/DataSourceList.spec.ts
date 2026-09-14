@@ -46,7 +46,7 @@ vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
   return {
     ...actual,
-    ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() },
+    ElMessage: Object.assign(vi.fn(), { success: vi.fn(), warning: vi.fn(), error: vi.fn(), info: vi.fn() }),
     ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) },
   }
 })

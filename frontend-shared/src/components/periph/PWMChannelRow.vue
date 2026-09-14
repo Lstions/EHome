@@ -53,6 +53,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { pwmApi, type PWMConfig } from '@/api/periph'
 
@@ -125,7 +126,7 @@ function onDutyChange(val: number) {
       } catch {
         // 保持 serverDuty
       }
-      ElMessage.error(`PWM 占空比设置失败: ${e?.message || '未知错误'}`)
+      feedback.handleError(e, 'PWM 占空比设置失败')
     } finally {
       loading.value = false
     }
@@ -144,7 +145,7 @@ async function startPwm() {
     emit('state-change', props.config.hardware_id, true)
     ElMessage.success(`${props.config.hardware_id} 已启动`)
   } catch (e: any) {
-    ElMessage.error(`PWM 启动失败: ${e?.message || '未知错误'}`)
+    feedback.handleError(e, 'PWM 启动失败')
   } finally {
     loading.value = false
   }
@@ -158,7 +159,7 @@ async function stopPwm() {
     emit('state-change', props.config.hardware_id, false)
     ElMessage.success(`${props.config.hardware_id} 已停止`)
   } catch (e: any) {
-    ElMessage.error(`PWM 停止失败: ${e?.message || '未知错误'}`)
+    feedback.handleError(e, 'PWM 停止失败')
   } finally {
     loading.value = false
   }

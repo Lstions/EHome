@@ -198,6 +198,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Filter, Cpu } from '@element-plus/icons-vue'
@@ -254,7 +255,7 @@ async function handleScan(row: any) {
     const result = await channelApi.scan(row.id, { scan_type: scanType })
     ElMessage.success(`扫描完成: 发现 ${result.devices?.length || 0} 个设备`)
   } catch (e: any) {
-    ElMessage.error('扫描失败: ' + (e.message || '未知错误'))
+    feedback.handleError(e, '扫描失败')
   } finally {
     scanningId.value = null
   }
@@ -377,7 +378,7 @@ async function refreshData() {
   } catch (error) {
     // 失败必须置常驻错误态：瞬态 ElMessage 不能替代错误态（U-1 根因三件套之三）。
     loadError.value = errorMessage(error)
-    ElMessage.error('获取通道列表失败')
+    feedback.handleError(error, '获取通道列表失败')
   } finally {
     loading.value = false
   }

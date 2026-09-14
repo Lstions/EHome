@@ -143,7 +143,7 @@ vi.mock('@/api/deviceConfig', () => ({
 }))
 
 vi.mock('element-plus', () => ({
-  ElMessage: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
+  ElMessage: Object.assign(vi.fn(), { error: vi.fn(), success: vi.fn(), warning: vi.fn() }),
   ElMessageBox: { confirm: vi.fn() },
 }))
 
@@ -365,6 +365,11 @@ describe('DeviceConfigList.vue', () => {
     vi.mocked(deviceConfigApi.delete).mockRejectedValueOnce(new Error('boom'))
     await vm.handleMoreAction('delete', { id: 8, name: '湿度模板' })
     await flushPromises()
-    expect(ElMessage.error).toHaveBeenCalledWith('删除失败')
+    // I-1: 删除失败走 feedback.error → ElMessage({message, type:'error', duration:5000})
+    expect(ElMessage).toHaveBeenCalledWith(expect.objectContaining({
+      message: '删除失败',
+      type: 'error',
+      duration: 5000,
+    }))
   })
 })

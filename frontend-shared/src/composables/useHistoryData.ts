@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { feedback } from '@/utils/feedback'
 import client from '@/api/client'
 
 export interface HistoryDataPoint {
@@ -119,8 +119,8 @@ export function useHistoryData(options: UseHistoryDataOptions = {}) {
         }
       }
       series.value = result
-    } catch {
-      if (showError) ElMessage.error(errorPrefix)
+    } catch (error) {
+      if (showError) feedback.handleError(error, errorPrefix)
     } finally {
       loading.value = false
     }

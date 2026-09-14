@@ -322,7 +322,7 @@ const fetchConfigs = async () => {
     total.value = response.total || 0
     updateStats()
   } catch (error: any) {
-    ElMessage.error('获取配置模板列表失败')
+    feedback.handleError(error, '获取配置模板列表失败')
   } finally {
     loading.value = false
   }
@@ -434,7 +434,7 @@ const handleClone = async (config: DeviceConfig) => {
     await fetchConfigs()
   } catch (error: any) {
     if (error !== 'cancel') {
-      ElMessage.error('克隆失败')
+      feedback.handleError(error, '克隆失败')
     }
   }
 }
@@ -448,7 +448,7 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
         ElMessage.success('设置成功')
         await fetchConfigs()
       } catch (error) {
-        ElMessage.error('设置失败')
+        feedback.handleError(error, '设置失败')
       }
       break
       
@@ -460,7 +460,7 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
         ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
         await fetchConfigs()
       } catch (error) {
-        ElMessage.error('操作失败')
+        feedback.handleError(error, '操作失败')
       }
       break
       
@@ -482,7 +482,7 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
         ElMessage.success('删除成功')
         await fetchConfigs()
       } catch {
-        ElMessage.error('删除失败')
+        feedback.error('删除失败')
       }
       break
     }
@@ -530,7 +530,7 @@ const importConfig = () => {
       ElMessage.success('导入成功')
       await fetchConfigs()
     } catch (error: any) {
-      ElMessage.error(error.message || '导入失败')
+      feedback.handleError(error, '导入失败')
     }
   }
   input.click()

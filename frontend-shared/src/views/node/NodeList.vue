@@ -407,7 +407,7 @@ const fetchNodes = async (silent = false, force = false, throwOnError = false) =
     total.value = cached?.total || 0
     updateStats()
   } catch (error: any) {
-    if (sequence === listRequestSequence) ElMessage.error('获取节点列表失败')
+    if (sequence === listRequestSequence) feedback.handleError(error, '获取节点列表失败')
     if (throwOnError) throw error
   } finally {
     if (showInitialSkeleton && sequence === listRequestSequence) loading.value = false
@@ -520,7 +520,7 @@ const handleDelete = async (row: any) => {
     }
   } catch (error: any) {
     if (error !== 'cancel' && !deleted) {
-      ElMessage.error('删除失败')
+      feedback.handleError(error, '删除失败')
     }
   }
 }

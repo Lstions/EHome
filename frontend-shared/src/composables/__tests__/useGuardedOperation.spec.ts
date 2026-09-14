@@ -4,11 +4,14 @@ import { mount } from '@vue/test-utils'
 
 // ElMessage mock — must be hoisted before component imports
 const mocks = vi.hoisted(() => ({
+  // feedback.error() 走 ElMessage({...}) 函数式调用（真实 EP 的 ElMessage 本身可调用），
+  // 故这里必须把 mock 造成「函数 + .error 方法」两用，否则会静默丢消息。
+  message: vi.fn(),
   messageError: vi.fn(),
 }))
 
 vi.mock('element-plus', () => ({
-  ElMessage: { error: mocks.messageError },
+  ElMessage: Object.assign(mocks.message, { error: mocks.messageError }),
 }))
 
 import { useGuardedOperation } from '@/composables/useGuardedOperation'
@@ -112,7 +115,12 @@ describe('useGuardedOperation', () => {
     expect(result).toBeUndefined()
     expect(row.feedback).toBe('写入失败 · 重试')
     expect(row.level).toBe(0) // rollback was called
-    expect(mocks.messageError).toHaveBeenCalledWith('GPIO 写入失败: timeout')
+    // 统一出口：错误对象自带 message 时以它为准（服务端原因可见），label 仅在缺 message 时兜底
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'timeout',
+      type: 'error',
+      duration: 5000,
+    }))
     expect(row.busy).toBe(false)
     wrapper.unmount()
   })
@@ -127,7 +135,10 @@ describe('useGuardedOperation', () => {
     })
 
     expect(row.feedback).toBe('操作失败 · 重试')
-    expect(mocks.messageError).toHaveBeenCalledWith('GPIO 操作失败: disconnected')
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'disconnected',
+      type: 'error',
+    }))
     wrapper.unmount()
   })
 
@@ -140,7 +151,48 @@ describe('useGuardedOperation', () => {
       throw 'string error'
     })
 
-    expect(mocks.messageError).toHaveBeenCalledWith('PWM 操作失败: 未知错误')
+    // 非 Error 抛出：extractErrorMessage 对字符串做直通，展示原始抛出内容
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'string error',
+      type: 'error',
+    }))
+    wrapper.unmount()
+  })
+
+  it('I-1: 提取服务端响应体的 message 作为错误文案', async () => {
+    const wrapper = mount(makeHost({ nodeId: 'node-1', errorPrefix: 'GPIO 操作失败' }))
+    const { run } = wrapper.vm as any
+    const row = makeRow()
+
+    // axios/ApiError 形态：Error 实例 + response.data.message（后端具体原因）
+    const serverError = Object.assign(new Error('Request failed with status code 500'), {
+      response: { data: { message: '引脚 12 已被 UART0 占用' } },
+    })
+
+    await run(row, '正在写入…', async () => { throw serverError })
+
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: '引脚 12 已被 UART0 占用',
+      type: 'error',
+      duration: 5000,
+    }))
+    wrapper.unmount()
+  })
+
+  it('I-1: 服务端无 message 时回落到 data.msg', async () => {
+    const wrapper = mount(makeHost({ nodeId: 'node-1', errorPrefix: 'GPIO 操作失败' }))
+    const { run } = wrapper.vm as any
+    const row = makeRow()
+
+    const serverError = Object.assign(new Error('fallback text'), {
+      response: { data: { msg: '后端 msg 字段原因' } },
+    })
+
+    await run(row, '正在写入…', async () => { throw serverError })
+
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: '后端 msg 字段原因',
+    }))
     wrapper.unmount()
   })
 

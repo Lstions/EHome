@@ -28,7 +28,7 @@ vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
   return {
     ...actual,
-    ElMessage: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+    ElMessage: Object.assign(vi.fn(), { success: vi.fn(), warning: vi.fn(), error: vi.fn() }),
   }
 })
 // F29: useResponsive 的视口宽度是模块级共享 ref —— 直接驱动它模拟窄屏，

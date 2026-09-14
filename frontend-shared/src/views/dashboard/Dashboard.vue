@@ -311,6 +311,7 @@
 
 <script setup lang="ts">
 import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter } from 'vue-router'
 import { Cpu, CircleCheck, CloseBold, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -589,7 +590,7 @@ const fetchOverview = async (silent = false) => {
       latest_data: []
     }
     overviewError.value = error?.message || '网络请求失败'
-    if (!silent) ElMessage.error('获取概览数据失败')
+    if (!silent) feedback.handleError(error, '获取概览数据失败')
   } finally {
     if (!silent) loading.value = false
   }
@@ -612,7 +613,7 @@ const handleRefresh = async () => {
     await Promise.all([fetchTrendData(), fetchStatusHistory()])
     ElMessage.success('数据已刷新')
   } catch (error) {
-    ElMessage.error('刷新失败')
+    feedback.handleError(error, '刷新失败')
   } finally {
     refreshing.value = false
   }

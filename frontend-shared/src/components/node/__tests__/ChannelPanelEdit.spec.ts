@@ -91,11 +91,11 @@ vi.mock('@/utils/logger', () => ({
   logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: {
+  ElMessage: Object.assign(vi.fn(), {
     success: mocks.messageSuccess,
     warning: mocks.messageWarning,
     error: mocks.messageError,
-  },
+  }),
 }))
 vi.mock('@/components/channel/ChannelManager.vue', () => ({ default: defineComponent({ template: '<div />' }) }))
 vi.mock('@/components/channel/ChannelTerminal.vue', () => ({ default: defineComponent({ template: '<div />' }) }))

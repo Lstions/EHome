@@ -223,7 +223,7 @@ const fetchFirmwares = async () => {
     firmwares.value = firmwareStore.list
     total.value = firmwareStore.total
   } catch {
-    ElMessage.error('获取固件列表失败')
+    feedback.error('获取固件列表失败')
   } finally {
     loading.value = false
   }
@@ -253,7 +253,7 @@ const handleBatchDelete = async () => {
     if (failed > 0) ElMessage.warning(`${failed} 个固件删除失败`)
     selectedFirmwares.value = []
   } catch (error: any) {
-    ElMessage.error('批量删除失败: ' + (error?.message || '未知错误'))
+    feedback.handleError(error, '批量删除失败')
   } finally {
     batchDeleting.value = false
   }
@@ -274,7 +274,7 @@ const handleDelete = async (row: Firmware) => {
     total.value = firmwareStore.total
     ElMessage.success('删除成功')
   } catch {
-    ElMessage.error('删除失败')
+    feedback.error('删除失败')
   }
 }
 
@@ -302,7 +302,7 @@ const handleEditSubmit = async () => {
     ElMessage.success('更新成功')
     showEditDialog.value = false
   } catch (error: any) {
-    ElMessage.error(error.message || '更新失败')
+    feedback.handleError(error, '更新失败')
   } finally {
     editing.value = false
   }
@@ -326,7 +326,7 @@ const handleCopyUrl = async (row: Firmware) => {
       document.execCommand('copy')
       ElMessage.success('下载链接已复制到剪贴板')
     } catch {
-      ElMessage.error('复制失败，请手动复制: ' + url)
+      feedback.error('复制失败，请手动复制: ' + url)
     }
     document.body.removeChild(textarea)
   }
@@ -380,7 +380,7 @@ const handleUpload = async () => {
     resetUploadForm()
     await fetchFirmwares()
   } catch (error: any) {
-    ElMessage.error(error.message || '上传失败')
+    feedback.handleError(error, '上传失败')
   } finally {
     uploading.value = false
   }

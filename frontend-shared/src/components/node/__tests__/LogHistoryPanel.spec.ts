@@ -19,11 +19,11 @@ vi.mock('@/api/node', () => ({
   },
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: {
+  ElMessage: Object.assign(vi.fn(), {
     success: mocks.success,
     error: mocks.error,
     warning: mocks.warning,
-  },
+  }),
   ElMessageBox: { confirm: mocks.confirm },
 }))
 vi.mock('@/utils/exportData', () => ({ exportCSV: mocks.exportCSV }))

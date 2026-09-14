@@ -124,7 +124,7 @@ import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
-import { levelText, levelTagType, errorMessage, LOG_LEVEL_OPTIONS } from '@/components/node/logTypes'
+import { levelText, levelTagType, LOG_LEVEL_OPTIONS } from '@/components/node/logTypes'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 
 interface Props {
@@ -178,7 +178,7 @@ async function loadLogs() {
     total.value = result.total ?? 0
   } catch (error: unknown) {
     if (generation === requestGeneration) {
-      ElMessage.error(`查询失败: ${errorMessage(error)}`)
+      feedback.handleError(error, '查询失败')
     }
   } finally {
     if (generation === requestGeneration) {
@@ -223,7 +223,7 @@ async function clearLogs(before?: number) {
     await loadLogs()
   } catch (error: unknown) {
     if (operation !== requestGeneration || props.collectorId !== collectorId) return
-    ElMessage.error(`删除失败: ${errorMessage(error)}`)
+    feedback.handleError(error, '删除失败')
   }
 }
 

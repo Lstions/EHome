@@ -132,6 +132,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { InfoFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useParserStore } from '@/stores/parser'
@@ -254,7 +255,7 @@ const handleDriverCommandsLoadError = (message: string) => {
   commandIntervalsError.value = message
   commandIntervalsReady.value = false
   commandIntervalsSnapshot.value = null
-  ElMessage.error(message)
+  feedback.error(message)
 }
 
 // 提交时一致快照: 先等驱动指令加载结算, 再读取间隔。
@@ -335,7 +336,7 @@ const handleSubmit = async () => {
     reset()
     emit('created')
   } catch (error: any) {
-    ElMessage.error(error?.message || '创建失败')
+    feedback.handleError(error, '创建失败')
   } finally {
     submitting.value = false
   }

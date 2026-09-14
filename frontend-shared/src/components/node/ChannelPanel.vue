@@ -322,6 +322,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, defineComponent, h, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { Refresh, Plus } from '@element-plus/icons-vue'
 import { nodeApi, type GPIOBusResource, type PWMBusResource } from '@/api/node'
@@ -484,7 +485,7 @@ async function handleScan(busType: string, hw: any) {
     ElMessage.success(`扫描完成: 发现 ${result.devices?.length || 0} 个设备`)
   } catch (e: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    ElMessage.error('扫描失败: ' + (e.message || '未知错误'))
+    feedback.handleError(e, '扫描失败')
   } finally {
     if (generation === panelGeneration && props.collectorId === collectorId && scanningHwId.value === scanHwId) scanningHwId.value = null
   }
@@ -679,7 +680,7 @@ const saveBusConfig = async () => {
     ElMessage.success('总线配置已保存')
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    ElMessage.error('保存失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '保存失败')
   } finally {
     if (generation === panelGeneration && props.collectorId === collectorId) saving.value = false
   }
@@ -729,7 +730,7 @@ const refreshPeriph = async () => {
   } catch (error: unknown) {
     if (generation !== panelGeneration || props.nodeDeviceId !== deviceId || sequence !== periphRequestSequence) return
     logger.error('加载 GPIO/PWM 配置失败', { error: String(error) })
-    if (initialLoadingDone.value) ElMessage.error('加载 GPIO/PWM 配置失败')
+    if (initialLoadingDone.value) feedback.handleError(error, '加载 GPIO/PWM 配置失败')
   } finally {
     if (generation === panelGeneration && props.nodeDeviceId === deviceId && sequence === periphRequestSequence) periphLoading.value = false
   }
@@ -985,7 +986,7 @@ const toggleDmaForHardware = async (busType: string, hw: any, dma: DmaChannelInf
     ElMessage.success(enabled ? `DMA ${dma.name} 已启用` : `DMA ${dma.name} 已禁用`)
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    ElMessage.error('DMA配置保存失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, 'DMA配置保存失败')
   }
 }
 
@@ -1000,7 +1001,7 @@ const handleDeleteChannel = async (channelId: number) => {
     refreshChannels()
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    ElMessage.error('删除失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '删除失败')
   }
 }
 
@@ -1022,7 +1023,7 @@ const submitReconfigure = async () => {
     reconfigureDialogVisible.value = false
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    ElMessage.error('重配置失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '重配置失败')
   } finally {
     if (generation === panelGeneration && props.collectorId === collectorId) reconfigureLoading.value = false
   }
@@ -1168,7 +1169,7 @@ const submitGpio = async () => {
       gpioDialogVisible.value = false
       await refreshPeriph()
     } else {
-      ElMessage.error(`${editingPin === null ? '添加' : '更新'} GPIO 失败: ` + msg)
+      feedback.handleErrorWithContext(e, `${editingPin === null ? '添加' : '更新'} GPIO 失败`)
     }
   } finally {
     if (generation === panelGeneration && props.nodeDeviceId === nodeId) gpioSaving.value = false
@@ -1186,7 +1187,7 @@ const handleRemoveGpio = async (pin: number) => {
     void refreshPeriph()
   } catch (e: any) {
     if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
-    ElMessage.error('删除 GPIO 失败: ' + (e?.message || '未知错误'))
+    feedback.handleError(e, '删除 GPIO 失败')
   }
 }
 
@@ -1285,7 +1286,7 @@ const submitPwm = async () => {
       pwmDialogVisible.value = false
       await refreshPeriph()
     } else {
-      ElMessage.error(`${editingPwmHardwareId.value === null ? '添加' : '更新'} PWM 失败: ` + msg)
+      feedback.handleErrorWithContext(e, `${editingPwmHardwareId.value === null ? '添加' : '更新'} PWM 失败`)
     }
   } finally {
     if (generation === panelGeneration && props.nodeDeviceId === nodeId) pwmSaving.value = false
@@ -1303,7 +1304,7 @@ const handleRemovePwm = async (hardwareId: string) => {
     void refreshPeriph()
   } catch (e: any) {
     if (generation !== panelGeneration || props.nodeDeviceId !== nodeId) return
-    ElMessage.error('删除 PWM 失败: ' + (e?.message || '未知错误'))
+    feedback.handleError(e, '删除 PWM 失败')
   }
 }
 

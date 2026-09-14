@@ -38,7 +38,7 @@ vi.mock('@/stores/websocket', () => ({
 // 2. <script setup> 组件（LogRealtimeViewer/LogHistoryPanel）的 stub 通过
 //    @vue/test-utils 的 global.stubs 不生效，改为用 vi.mock 在模块级别替换。
 vi.mock('element-plus', () => ({
-  ElMessage: { success: mocks.success, error: mocks.error, warning: mocks.warning },
+  ElMessage: Object.assign(vi.fn(), { success: mocks.success, error: mocks.error, warning: mocks.warning }),
   ElInput: { name: 'ElInput', template: '<input />' },
   ElButton: { name: 'ElButton', template: '<button><slot /></button>' },
   ElMessageBox: { confirm: vi.fn().mockResolvedValue(true) },

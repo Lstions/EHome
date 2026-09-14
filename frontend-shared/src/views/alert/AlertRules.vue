@@ -302,7 +302,7 @@ async function onSave() {
     dialogVisible.value = false
     void store.fetchEvents()
   } catch {
-    ElMessage.error('保存失败')
+    feedback.error('保存失败')
   } finally {
     saving.value = false
   }
@@ -312,7 +312,7 @@ async function onToggle(rule: AlertRule, enabled: boolean) {
   try {
     await store.setRuleEnabled(rule.id, enabled)
   } catch {
-    ElMessage.error('切换失败')
+    feedback.error('切换失败')
   }
 }
 
@@ -332,7 +332,7 @@ async function onDelete(rule: AlertRule) {
     await store.deleteRule(rule.id)
     ElMessage.success('已删除')
   } catch {
-    ElMessage.error('删除失败')
+    feedback.error('删除失败')
   }
 }
 
@@ -342,7 +342,7 @@ async function onMarkAllRead() {
     ElMessage.success('已全部标记')
     void store.fetchEvents()
   } catch {
-    ElMessage.error('操作失败')
+    feedback.error('操作失败')
   }
 }
 

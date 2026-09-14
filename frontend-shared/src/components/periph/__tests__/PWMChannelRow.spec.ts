@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   getState: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
+  // feedback.error()/handleError() 走 ElMessage({...}) 函数式调用
+  message: vi.fn(),
 }))
 
 vi.mock('@/api/periph', () => ({
@@ -20,7 +22,7 @@ vi.mock('@/api/periph', () => ({
   },
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: mocks.success, error: mocks.error },
+  ElMessage: Object.assign(mocks.message, { success: mocks.success, error: mocks.error }),
 }))
 
 import PWMChannelRow from '@/components/periph/PWMChannelRow.vue'
@@ -153,7 +155,23 @@ describe('PWMChannelRow', () => {
       await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
       await flushPromises()
 
-      expect(mocks.error).toHaveBeenCalledOnce()
+      expect(mocks.message).toHaveBeenCalledOnce()
+    })
+
+    it('I-1: 启动失败时展示服务端 message', async () => {
+      mocks.start.mockRejectedValue(
+        Object.assign(new Error('fault'), { response: { data: { message: 'PWM0 时钟源被占用' } } }),
+      )
+      const wrapper = track(mountRow(pwmConfig()))
+
+      await wrapper.findAll('button').find(b => b.text().includes('启动'))!.trigger('click')
+      await flushPromises()
+
+      expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'PWM0 时钟源被占用',
+        type: 'error',
+        duration: 5000,
+      }))
     })
 
     it('notifies parent of state-change on start/stop', async () => {
@@ -215,7 +233,26 @@ describe('PWMChannelRow', () => {
 
       // Should have rolled back to 5000
       expect(wrapper.get('.pwm-duty-value').text()).toBe('50.00%')
-      expect(mocks.error).toHaveBeenCalledOnce()
+      expect(mocks.message).toHaveBeenCalledOnce()
+    })
+
+    it('I-1: 占空比设置失败时展示服务端 message', async () => {
+      mocks.setDuty.mockRejectedValue(
+        Object.assign(new Error('fail'), { response: { data: { message: '占空比超出硬件允许范围' } } }),
+      )
+      mocks.getState.mockResolvedValue({ running: true, duty: 5000, frequency: 1000 })
+      const wrapper = track(mountRow(pwmConfig({ duty: 5000 }), false, true))
+
+      await wrapper.get('input.el-slider').setValue(8000)
+      await flushPromises()
+      vi.advanceTimersByTime(300)
+      await flushPromises()
+
+      expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+        message: '占空比超出硬件允许范围',
+        type: 'error',
+        duration: 5000,
+      }))
     })
 
     it('updates local display on slider input without API call', async () => {

@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
+  // feedback.error()/handleError() 走 ElMessage({...}) 函数式调用
+  message: vi.fn(),
 }))
 const wsState = vi.hoisted(() => ({ connected: false }))
 
@@ -30,7 +32,7 @@ vi.mock('@/stores/websocket', () => ({
     subscribe: mocks.subscribe,
   }),
 }))
-vi.mock('element-plus', () => ({ ElMessage: { success: mocks.success, error: mocks.error } }))
+vi.mock('element-plus', () => ({ ElMessage: Object.assign(mocks.message, { success: mocks.success, error: mocks.error }) }))
 
 // PeripheralControl 显式 import 子组件；使用模块 mock（而非 global.stubs）确保替换生效。
 vi.mock('@/components/periph/GPIOResourceList.vue', () => ({
@@ -201,7 +203,30 @@ describe('PeripheralControl', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('资源数据加载失败')
-    expect(mocks.error).toHaveBeenCalledWith('加载外设资源失败: network')
+    // I-1: 失败走统一出口。注意 extractErrorMessage 的语义：第二个参数是「兜底」而非「前缀」——
+    // error 自带 message 时以它为准，因此这里展示 'network'（旧实现是 '加载外设资源失败: network'）。
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'network',
+      type: 'error',
+      duration: 5000,
+    }))
+  })
+
+  it('I-1: 加载失败时优先展示服务端 message', async () => {
+    mocks.getCapabilities.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 500'), {
+        response: { data: { message: '节点 7 的 GPIO 驱动未就绪' } },
+      }),
+    )
+    mountControl()
+    await flushPromises()
+
+    // 关键判据：后端具体原因必须可见（旧实现只显示本地 error.message）
+    expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+      message: '节点 7 的 GPIO 驱动未就绪',
+      type: 'error',
+      duration: 5000,
+    }))
   })
 
   it('does not subscribe to unowned peripheral results', async () => {

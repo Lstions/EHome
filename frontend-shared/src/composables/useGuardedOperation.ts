@@ -1,5 +1,5 @@
 import { onUnmounted, watch, isRef, type Ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { feedback } from '@/utils/feedback'
 
 export interface GuardedRow {
   busy: boolean
@@ -81,7 +81,7 @@ export function useGuardedOperation(options: GuardedOperationOptions) {
       opts.rollback?.()
       row.feedback = opts.errorFeedback || '操作失败 · 重试'
       const label = opts.errorLabel || options.errorPrefix
-      ElMessage.error(`${label}: ${error instanceof Error ? error.message : '未知错误'}`)
+      feedback.handleError(error, label)
       return undefined
     } finally {
       if (!isStale(gen, nodeId)) row.busy = false

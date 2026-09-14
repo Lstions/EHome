@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 
@@ -41,7 +42,7 @@ export function useDeviceDelete(options: {
       return { success: true, id: device.id }
     } catch {
       if (!deleted) {
-        ElMessage.error('删除失败')
+        feedback.error('删除失败')
       }
       return { success: false }
     } finally {
@@ -89,12 +90,12 @@ export function useDeviceDelete(options: {
         onSuccess?.(succeededIds, deleteData)
       }
       if (failed > 0) {
-        ElMessage.error(`${failed} 个设备删除失败`)
+        feedback.error(`${failed} 个设备删除失败`)
       }
       selectedDevices.value = []
       return { success: succeeded > 0, succeeded, failed, succeededIds }
     } catch {
-      ElMessage.error('批量删除失败')
+      feedback.error('批量删除失败')
       return { success: false, succeeded: 0, failed: 0 }
     } finally {
       batchDeleteSubmitting.value = false

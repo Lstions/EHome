@@ -249,6 +249,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, Connection, DataAnalysis, DocumentChecked, Timer, Cpu } from '@element-plus/icons-vue'
@@ -450,7 +451,7 @@ const fetchDevices = async () => {
     await edgeDeviceStore.fetchList(params)
     deviceList.value = edgeDeviceStore.getCachedList(params)?.items || []
   } catch {
-    ElMessage.error('获取设备列表失败')
+    feedback.error('获取设备列表失败')
   }
 }
 
@@ -513,7 +514,7 @@ const fetchData = async () => {
     // 构建图表数据：从 unified_data API 获取解析后的数值数据
     buildChartSeries()
   } catch {
-    ElMessage.error('获取历史数据失败')
+    feedback.error('获取历史数据失败')
   } finally {
     loading.value = false
   }

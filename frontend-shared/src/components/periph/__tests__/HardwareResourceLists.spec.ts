@@ -25,7 +25,7 @@ vi.mock('@/api/periph', () => ({
   },
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: mocks.messageSuccess, error: mocks.messageError },
+  ElMessage: Object.assign(vi.fn(), { success: mocks.messageSuccess, error: mocks.messageError }),
 }))
 
 import GPIOResourceList from '@/components/periph/GPIOResourceList.vue'

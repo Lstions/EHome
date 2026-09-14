@@ -324,7 +324,7 @@ async function fetchRules() {
   try {
     rules.value = await automationApi.listRules()
   } catch {
-    ElMessage.error('加载规则失败')
+    feedback.error('加载规则失败')
   } finally {
     rulesLoading.value = false
   }
@@ -377,7 +377,7 @@ async function fetchEvents() {
     events.value = res.items
     eventsTotal.value = res.total
   } catch {
-    ElMessage.error('加载事件失败')
+    feedback.error('加载事件失败')
   } finally {
     eventsLoading.value = false
   }
@@ -576,7 +576,7 @@ async function onSave() {
     void fetchRules()
     void fetchEvents()
   } catch {
-    ElMessage.error('保存失败')
+    feedback.error('保存失败')
   } finally {
     saving.value = false
   }
@@ -587,7 +587,7 @@ async function onToggle(rule: AutomationRule, enabled: boolean) {
     await automationApi.setRuleEnabled(rule.id, enabled)
     rule.enabled = enabled
   } catch {
-    ElMessage.error('切换失败')
+    feedback.error('切换失败')
   }
 }
 
@@ -655,8 +655,7 @@ async function onTrigger(rule: AutomationRule) {
     }
     void fetchEvents()
   } catch (e: unknown) {
-    const err = e as { response?: { data?: { message?: string } } }
-    ElMessage.error(err?.response?.data?.message ?? '触发失败')
+    feedback.handleError(e, '触发失败')
   } finally {
     triggeringId.value = null
   }

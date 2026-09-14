@@ -228,6 +228,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance } from 'element-plus'
 import { type Channel } from '@/api/channel'
@@ -612,7 +613,7 @@ const handleSubmit = async () => {
     showDialog.value = false
     emit('refresh')
   } catch (error: any) {
-    if (transaction === transactionGeneration && error !== 'cancel') ElMessage.error(error.message || '操作失败')
+    if (transaction === transactionGeneration && error !== 'cancel') feedback.handleError(error, '操作失败')
   } finally {
     if (transaction === transactionGeneration) submitting.value = false
   }

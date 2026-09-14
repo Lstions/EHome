@@ -290,6 +290,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Connection, Refresh, InfoFilled, WarningFilled, Plus } from '@element-plus/icons-vue'
@@ -353,7 +354,7 @@ const fetchList = async () => {
     items.value = res.items
     total.value = res.total
   } catch (error: any) {
-    ElMessage.error('加载逻辑设备列表失败: ' + (error?.message || '未知错误'))
+    feedback.handleError(error, '加载逻辑设备列表失败')
   } finally {
     loading.value = false
   }
@@ -448,7 +449,7 @@ const openPreview = async () => {
   try {
     preview.value = await logicalDeviceApi.mergePreview(ids)
   } catch (error: any) {
-    ElMessage.error('加载合并预览失败: ' + (error?.message || '未知错误'))
+    feedback.handleError(error, '加载合并预览失败')
     previewVisible.value = false
   } finally {
     previewLoading.value = false
@@ -490,7 +491,7 @@ const confirmMerge = async () => {
       conflictMessage.value = error?.message || '合并校验未通过'
       conflictVisible.value = true
     } else {
-      ElMessage.error('发起合并失败: ' + (error?.message || '未知错误'))
+      feedback.handleError(error, '发起合并失败')
     }
   } finally {
     merging.value = false
@@ -606,7 +607,7 @@ const saveEdit = async () => {
     editVisible.value = false
     ElMessage.success('已保存')
   } catch (error: any) {
-    ElMessage.error('保存失败: ' + (error?.message || '未知错误'))
+    feedback.handleError(error, '保存失败')
   } finally {
     saving.value = false
   }

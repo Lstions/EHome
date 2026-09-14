@@ -81,7 +81,7 @@ vi.mock('@/utils/logger', () => ({
 
 // Mock element-plus ElMessage
 vi.mock('element-plus', () => ({
-  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  ElMessage: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }))
 
 // Mock useResponsive composable

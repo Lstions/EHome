@@ -53,6 +53,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import LineChart from '@/components/charts/LineChart.vue'
@@ -293,7 +294,7 @@ async function fetchHistoryData() {
     }
   } catch (error: any) {
     logger.error('获取历史数据失败', { error: String(error) })
-    ElMessage.error('获取历史数据失败')
+    feedback.handleError(error, '获取历史数据失败')
   } finally {
     chartLoading.value = false
   }

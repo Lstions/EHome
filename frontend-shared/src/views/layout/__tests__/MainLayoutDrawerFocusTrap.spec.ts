@@ -60,7 +60,7 @@ vi.mock('@/stores/node', () => ({ useNodeStore: () => ({ fetchNodes: vi.fn(() =>
 vi.mock('@/stores/edgeDevice', () => ({ useEdgeDeviceStore: () => ({ fetchList: vi.fn(() => Promise.resolve()) }) }))
 vi.mock('@/router/routeLoaders', () => ({ preloadPrimaryRoutes: vi.fn(() => Promise.resolve([])) }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  ElMessage: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
   ElNotification: vi.fn(),
 }))
 vi.mock('@/components/common/ThemeSwitch.vue', () => ({ default: { template: '<div />' } }))

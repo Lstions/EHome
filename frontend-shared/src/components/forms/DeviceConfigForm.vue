@@ -212,6 +212,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import driverApi, { type DriverLeaf } from '@/api/driver'
@@ -345,7 +346,7 @@ const handleSubmit = async () => {
   try {
     await formRef.value?.validate()
   } catch {
-    ElMessage.error('请完善表单信息')
+    feedback.error('请完善表单信息')
     return
   }
 
@@ -375,7 +376,7 @@ const handleSubmit = async () => {
     emit('success')
     dialogVisible.value = false
   } catch (error: any) {
-    ElMessage.error(error.message || '操作失败')
+    feedback.handleError(error, '操作失败')
   } finally {
     submitting.value = false
   }

@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
+  // feedback.error()/handleError() 走 ElMessage({...}) 函数式调用
+  message: vi.fn(),
 }))
 
 vi.mock('@/api/periph', () => ({
@@ -16,7 +18,7 @@ vi.mock('@/api/periph', () => ({
   },
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: mocks.success, error: mocks.error },
+  ElMessage: Object.assign(mocks.message, { success: mocks.success, error: mocks.error }),
 }))
 
 import GPIOPinRow from '@/components/periph/GPIOPinRow.vue'
@@ -107,9 +109,29 @@ describe('GPIOPinRow', () => {
       await sw.trigger('click')
       await flushPromises()
 
-      expect(mocks.error).toHaveBeenCalledOnce()
+      expect(mocks.message).toHaveBeenCalledOnce()
       // Should remain HIGH (rolled back)
       expect(wrapper.get('.level-text').text()).toBe('HIGH')
+    })
+
+    it('I-1: 写入失败时展示服务端 message 且错误停留 5 秒', async () => {
+      // I-1 核心判据：后端具体原因必须可见（旧实现只显示"GPIO 操作失败: ..."的本地 message）
+      mocks.set.mockRejectedValue(
+        Object.assign(new Error('Request failed with status code 409'), {
+          response: { data: { message: '引脚 5 已被 PWM0 占用' } },
+        }),
+      )
+      const wrapper = track(mountRow(outputConfig({ initial_level: 1 })))
+
+      await wrapper.find('.el-switch').trigger('click')
+      await flushPromises()
+
+      expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+        message: '引脚 5 已被 PWM0 占用',
+        type: 'error',
+        duration: 5000,
+        showClose: true,
+      }))
     })
 
     it('emits level-change on success', async () => {
@@ -158,7 +180,8 @@ describe('GPIOPinRow', () => {
       const wrapper = track(mountRow(inputConfig()))
       await flushPromises()
 
-      expect(mocks.error).not.toHaveBeenCalled()
+      // 自动读取失败仍静默（该路径不经过 feedback 出口）
+      expect(mocks.message).not.toHaveBeenCalled()
       expect(wrapper.get('.level-text').text()).toBe('未知')
     })
 
@@ -186,7 +209,26 @@ describe('GPIOPinRow', () => {
       await readBtn.trigger('click')
       await flushPromises()
 
-      expect(mocks.error).toHaveBeenCalledOnce()
+      expect(mocks.message).toHaveBeenCalledOnce()
+    })
+
+    it('I-1: 读取失败时展示服务端 message', async () => {
+      mocks.read.mockResolvedValue({ level: 0 })
+      const wrapper = track(mountRow(inputConfig()))
+      await flushPromises()
+      mocks.read.mockRejectedValue(
+        Object.assign(new Error('boom'), { response: { data: { message: '节点已离线，无法读取' } } }),
+      )
+
+      const readBtn = wrapper.findAll('button').find(b => b.text().includes('读取'))!
+      await readBtn.trigger('click')
+      await flushPromises()
+
+      expect(mocks.message).toHaveBeenCalledWith(expect.objectContaining({
+        message: '节点已离线，无法读取',
+        type: 'error',
+        duration: 5000,
+      }))
     })
 
     it('does not show el-switch for INPUT', () => {

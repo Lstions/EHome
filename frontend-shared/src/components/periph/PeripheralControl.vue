@@ -46,6 +46,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { nodeApi, type GPIOBusResource, type PWMBusResource } from '@/api/node'
@@ -115,7 +116,7 @@ const loadAll = async () => {
   } catch (error: unknown) {
     if (disposed || generation !== loadGeneration || props.nodeId !== nodeId) return
     loadError.value = true
-    ElMessage.error(`加载外设资源失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    feedback.handleError(error, '加载外设资源失败')
   } finally {
     if (!disposed && generation === loadGeneration && props.nodeId === nodeId) loading.value = false
   }
@@ -127,7 +128,7 @@ async function removeGpio(pin: number) {
     ElMessage.success(`GPIO ${pin} 已删除`)
     await loadAll()
   } catch (error: unknown) {
-    ElMessage.error(`删除 GPIO 失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    feedback.handleError(error, '删除 GPIO 失败')
   }
 }
 async function removePwm(hardwareId: string) {
@@ -136,7 +137,7 @@ async function removePwm(hardwareId: string) {
     ElMessage.success(`${hardwareId} 已删除`)
     await loadAll()
   } catch (error: unknown) {
-    ElMessage.error(`删除 PWM 失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    feedback.handleError(error, '删除 PWM 失败')
   }
 }
 

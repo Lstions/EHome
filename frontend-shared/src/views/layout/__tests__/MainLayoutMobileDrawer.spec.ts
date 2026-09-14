@@ -86,7 +86,7 @@ vi.mock('@/router/routeLoaders', () => ({
   preloadPrimaryRoutes: vi.fn(() => Promise.resolve([])),
 }))
 vi.mock('element-plus', () => ({
-  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  ElMessage: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }))
 // 不 mock @element-plus/icons-vue，让真实 SVG 组件导入
 

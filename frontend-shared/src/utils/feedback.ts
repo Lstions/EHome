@@ -112,6 +112,29 @@ export const feedback = {
   },
 
   /**
+   * 带**操作上下文**的错误提示：`context` 一定出现在消息里。
+   *
+   * 为什么需要它（本轮 I-1 收敛时实测到的取舍问题）:
+   * `handleError` 的第二参数是**兜底**而非前缀 —— `extractErrorMessage` 的优先级是
+   * `response.data.message || data.msg || error.message || fallback`，
+   * 所以**只要拿到了 message，兜底文案就被整个丢弃**。
+   * 而本仓后端**总是**带 `message`（`api/envelope.go:66 Error()` 必写 `Message`）⇒
+   * 实际后果是：调用方写的操作上下文（"添加 GPIO 失败" / "删除 PWM 失败"）**几乎永远看不到**，
+   * 用户只看到服务端那句话，不知道**是哪个操作**失败了。
+   *
+   * 这个取舍对"服务端原因是根因"的场景是对的（不被本地前缀稀释），
+   * 但对"同一句话会出现在多个操作里"的场景（如 `ChannelPanel` 的添加/更新 GPIO）
+   * 必须保留上下文 —— 故提供本出口**显式拼接**，而**不是**去改 `extractErrorMessage`
+   * 的既有语义（那会静默改变所有既有调用方的表现）。
+   *
+   * 用法: 当"哪个操作"对用户有信息量时用它；纯粹的错误透传继续用 `handleError`。
+   */
+  handleErrorWithContext(error: unknown, context: string, fallback = '操作失败') {
+    const detail = extractErrorMessage(error, fallback)
+    return this.error(`${context}: ${detail}`)
+  },
+
+  /**
    * 二次确认弹窗 (危险操作)
    * @returns 用户确认返回 true，取消返回 false
    */

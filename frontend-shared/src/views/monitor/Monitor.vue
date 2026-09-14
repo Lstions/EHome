@@ -368,7 +368,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { feedback } from '@/utils/feedback'
 import { 
   Connection, Monitor, Cpu, DataLine, Promotion, Refresh, Operation, WarningFilled
 } from '@element-plus/icons-vue'
@@ -555,7 +555,7 @@ const fetchMetrics = async () => {
   } catch (error) {
     console.error('获取指标失败:', error)
     loadError.value = error instanceof Error ? error.message : String(error)
-    ElMessage.error('获取监控数据失败')
+    feedback.handleError(error, '获取监控数据失败')
   } finally {
     isLoading.value = false
     isRefreshing.value = false

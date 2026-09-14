@@ -181,6 +181,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { feedback, extractErrorMessage } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { channelApi, type Channel } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -385,7 +386,7 @@ const sendData = async () => {
 
   const channel = selectedChannel.value
   if (!channel || !channel.node_id) {
-    ElMessage.error('无法获取通道的节点 ID')
+    feedback.error('无法获取通道的节点 ID')
     return
   }
   const deviceId = String(channel.node_id)
@@ -423,13 +424,13 @@ const sendData = async () => {
       if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
       if (result.success) ElMessage.success(`已发送 ${hexData.length / 2} 字节`)
       else {
-        ElMessage.error('发送失败')
+        feedback.error('发送失败')
         addLog({ type: 'error', direction: 'TX', time: now(), data: '操作失败', source: 'manual' })
       }
     } catch (error: any) {
       if (generation !== channelRequestGeneration || props.collectorId !== collectorId || props.nodeDeviceId !== nodeDeviceId) return
-      const errMsg = error?.response?.data?.message || error?.message || '未知错误'
-      ElMessage.error(`发送失败: ${errMsg}`)
+      const errMsg = extractErrorMessage(error, '未知错误')
+      feedback.handleError(error, '发送失败')
       addLog({ type: 'error', direction: 'TX', time: now(), data: errMsg, source: 'manual' })
     } finally {
       if (generation === channelRequestGeneration && props.collectorId === collectorId && props.nodeDeviceId === nodeDeviceId) sending.value = false

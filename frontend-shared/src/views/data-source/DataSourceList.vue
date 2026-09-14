@@ -437,10 +437,6 @@ function relativeTime(t: string | null | undefined): string {
   if (hour < 24) return `${hour} 小时前`
   return `${Math.floor(hour / 24)} 天前`
 }
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 // ── 列表加载与指标 ──
 const loaded = ref(false)
 const metricsReady = computed(() => loaded.value && !store.error)
@@ -560,7 +556,7 @@ async function onActivate(source: DataSource) {
     ElMessage.success('已切换为权威来源')
     await reloadIfStatusFiltered()
   } catch (err) {
-    ElMessage.error(errorMessage(err))
+    feedback.handleError(err)
   } finally {
     actingId.value = null
   }
@@ -581,7 +577,7 @@ async function onDeactivate(source: DataSource) {
     ElMessage.success('已停用')
     await reloadIfStatusFiltered()
   } catch (err) {
-    ElMessage.error(errorMessage(err))
+    feedback.handleError(err)
   } finally {
     actingId.value = null
   }
@@ -594,7 +590,7 @@ async function onReset(source: DataSource) {
     ElMessage.success('已重置为待命')
     await reloadIfStatusFiltered()
   } catch (err) {
-    ElMessage.error(errorMessage(err))
+    feedback.handleError(err)
   } finally {
     actingId.value = null
   }
@@ -617,7 +613,7 @@ async function onDelete(source: DataSource) {
     // 就会出现「表格 19 行、分页器仍说 21 条」的下一个静默不一致。
     await loadList()
   } catch (err) {
-    ElMessage.error(errorMessage(err))
+    feedback.handleError(err)
   } finally {
     actingId.value = null
   }
@@ -720,7 +716,7 @@ async function onSave() {
     }
     dialogVisible.value = false
   } catch (e) {
-    ElMessage.error(errorMessage(e))
+    feedback.handleError(e)
   } finally {
     saving.value = false
   }
@@ -738,7 +734,7 @@ async function openDetail(source: DataSource) {
       store.fetchFailoverLogs(source.device_id, { limit: 20 }),
     ])
   } catch (err) {
-    ElMessage.error(errorMessage(err))
+    feedback.handleError(err)
   }
 }
 

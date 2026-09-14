@@ -502,7 +502,7 @@ const saveName = async () => {
     ElMessage.success('节点名称已更新')
   } catch (error: any) {
     if (sequence !== nameSaveSequence || route.params.id !== targetRouteId || collector.value?.id !== targetId) return
-    ElMessage.error('保存失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '保存失败')
   } finally {
     if (sequence === nameSaveSequence && route.params.id === targetRouteId && collector.value?.id === targetId) savingName.value = false
   }
@@ -620,14 +620,14 @@ const handlePing = async () => {
   } catch (err: any) {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
     pinging.value = false
-    ElMessage.error('发送 Ping 失败: ' + (err.message || '未知错误'))
+    feedback.handleError(err, '发送 Ping 失败')
   }
 }
 
 const fetchCollectorDetail = async () => {
   const id = route.params.id as string
   if (!id) {
-    ElMessage.error('无效的节点ID')
+    feedback.error('无效的节点ID')
     goBack()
     return
   }
@@ -646,7 +646,7 @@ const fetchCollectorDetail = async () => {
       handlePing()
     }
   } catch (error: any) {
-    if (sequence === collectorDetailSequence) ElMessage.error('获取节点详情失败')
+    if (sequence === collectorDetailSequence) feedback.handleError(error, '获取节点详情失败')
   } finally {
     if (sequence === collectorDetailSequence) loading.value = false
     // R3: 节点加载失败(无序列号)时,关联设备区不能一直 loading——
@@ -680,7 +680,7 @@ const fetchDevices = async () => {
   } catch (error: any) {
     if (sequence === devicesRequestSequence) {
       logger.error('获取设备列表失败', { error: String(error) })
-      ElMessage.error('获取设备列表失败')
+      feedback.handleError(error, '获取设备列表失败')
     }
   } finally {
     if (sequence === devicesRequestSequence) devicesLoading.value = false
@@ -732,7 +732,7 @@ const handleSyncConfig = async () => {
     ElMessage.success('配置同步成功')
   } catch (error: any) {
     if (sequence !== syncRequestSequence || route.params.id !== id) return
-    ElMessage.error('配置同步失败: ' + (error.message || '未知错误'))
+    feedback.handleError(error, '配置同步失败')
   } finally {
     if (sequence === syncRequestSequence && route.params.id === id) syncingConfig.value = false
   }
@@ -762,7 +762,7 @@ const handleCancelOTA = async (record: OTARecord) => {
     fetchOTAHistory()
   } catch {
     if (operation !== componentOperationGeneration || collectorId.value !== id) return
-    ElMessage.error('取消OTA失败')
+    feedback.error('取消OTA失败')
   }
 }
 

@@ -1271,7 +1271,7 @@ async function requestBusResourceRefresh() {
     ElMessage.success('已读取设备最新资源上报')
   } catch (err: any) {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
-    ElMessage.error(`资源刷新请求失败: ${err.message || '未知错误'}`)
+    feedback.handleError(err, '资源刷新请求失败')
   } finally {
     if (operation === componentOperationGeneration && route.params.id === id) resourceQuerying.value = false
   }
@@ -1297,7 +1297,7 @@ async function toggleResourceDma(resource: BusResource, enabled: boolean | strin
     ElMessage.success(desired ? 'DMA 已绑定' : 'DMA 已解绑')
   } catch (err: any) {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
-    ElMessage.error(`DMA 配置保存失败: ${err.message || '未知错误'}`)
+    feedback.handleError(err, 'DMA 配置保存失败')
   }
 }
 
@@ -1318,7 +1318,7 @@ async function scanSelectedI2C() {
     else ElMessage.info('设备未返回可发现的 I2C 地址')
   } catch (err: any) {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
-    ElMessage.error(`地址扫描失败: ${err.message || '未知错误'}`)
+    feedback.handleError(err, '地址扫描失败')
   } finally {
     if (operation === componentOperationGeneration && route.params.id === id) i2cScanning.value = false
   }
@@ -1427,7 +1427,7 @@ async function handleCancelOTA(record: OTARecord) {
     void fetchOTAHistory()
   } catch {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
-    ElMessage.error('取消 OTA 失败')
+    feedback.error('取消 OTA 失败')
   }
 }
 
@@ -1456,7 +1456,7 @@ async function handleSyncConfig() {
     ElMessage.success('配置同步已触发')
   } catch (err: any) {
     if (sequence !== detailSequence || route.params.id !== id) return
-    ElMessage.error('配置同步失败: ' + (err.message || '未知错误'))
+    feedback.handleError(err, '配置同步失败')
   } finally {
     if (sequence === detailSequence && route.params.id === id) syncing.value = false
   }
@@ -1481,7 +1481,7 @@ async function handlePing() {
   } catch (err: any) {
     if (operation !== componentOperationGeneration || route.params.id !== id) return
     pinging.value = false
-    ElMessage.error('发送 Ping 失败: ' + (err.message || '未知错误'))
+    feedback.handleError(err, '发送 Ping 失败')
   }
 }
 
@@ -1492,7 +1492,7 @@ function copyId() {
 
 async function saveRename() {
   const v = renameDraft.value.trim()
-  if (!v) { ElMessage.error('名称不能为空'); return }
+  if (!v) { feedback.error('名称不能为空'); return }
   const id = route.params.id as string
   renameSaving.value = true
   const sessionGeneration = getSessionGeneration()
@@ -1504,7 +1504,7 @@ async function saveRename() {
     renameVisible.value = false
     ElMessage.success('设备名称已更新')
   } catch (err: any) {
-    ElMessage.error('保存失败: ' + (err.message || '未知错误'))
+    feedback.handleError(err, '保存失败')
   } finally {
     renameSaving.value = false
   }

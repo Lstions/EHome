@@ -44,6 +44,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { gpioApi, type GPIOConfig } from '@/api/periph'
 
@@ -109,7 +110,7 @@ async function setLevel(level: 0 | 1) {
   } catch (e: any) {
     // 回滚
     currentLevel.value = prev
-    ElMessage.error(`GPIO 操作失败: ${e?.message || '未知错误'}`)
+    feedback.handleError(e, 'GPIO 操作失败')
   } finally {
     loading.value = false
   }
@@ -120,7 +121,7 @@ async function readLevel() {
   try {
 	await gpioApi.read(props.nodeId, props.config.pin)
   } catch (e: any) {
-    ElMessage.error(`GPIO 读取失败: ${e?.message || '未知错误'}`)
+    feedback.handleError(e, 'GPIO 读取失败')
   } finally {
     loading.value = false
   }

@@ -13,6 +13,7 @@
  * - Uses useRealtimeData internally for WS subscription + data management.
  */
 import { ref, computed, watch, onUnmounted, type Ref } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { haApi } from '@/api/homeassistant'
@@ -92,7 +93,7 @@ export function useDeviceData(
         }
       }
     } catch (error) {
-      ElMessage.error(errorPrefix)
+      feedback.handleError(error, errorPrefix)
       if (throwOnError) throw error
     } finally {
       if (sequence === deviceDetailSequence) loading.value = false
@@ -148,7 +149,7 @@ export function useDeviceData(
       onChartsRefreshed?.()
       ElMessage.success('数据已刷新')
     } catch {
-      ElMessage.error('刷新失败')
+      feedback.error('刷新失败')
     } finally {
       refreshing.value = false
     }
@@ -168,7 +169,7 @@ export function useDeviceData(
       ElMessage.success('设备已同步到HomeAssistant')
     } catch (error: any) {
       if (operation !== operationGeneration || deviceId.value !== id) return
-      ElMessage.error('同步到HomeAssistant失败: ' + (error.message || '未知错误'))
+      feedback.handleError(error, '同步到HomeAssistant失败')
     } finally {
       if (operation === operationGeneration && deviceId.value === id) syncingHA.value = false
     }

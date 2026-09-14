@@ -66,6 +66,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import LogHistoryPanel from '@/components/node/LogHistoryPanel.vue'
@@ -201,7 +202,7 @@ async function onStreamToggle(value: string | number | boolean): Promise<void> {
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
     streamEnabled.value = !on
-    ElMessage.error(`操作失败: ${errorMessage(error)}`)
+    feedback.handleError(error, '操作失败')
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) streamLoading.value = false
   }
@@ -218,7 +219,7 @@ async function onLevelChange(value: number): Promise<void> {
     ElMessage.success('日志级别已更新')
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    ElMessage.error(`操作失败: ${errorMessage(error)}`)
+    feedback.handleError(error, '操作失败')
   }
 }
 
@@ -237,7 +238,7 @@ async function onPersistToggle(value: string | number | boolean): Promise<void> 
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
     persistEnabled.value = !on
-    ElMessage.error(`操作失败: ${errorMessage(error)}`)
+    feedback.handleError(error, '操作失败')
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) persistLoading.value = false
   }
@@ -259,7 +260,7 @@ function clearRealtimeLogs(): void {
 function exportRealtimeLogs(format: 'text' | 'csv'): void {
   const logs = filteredRealtimeLogs.value
   if (logs.length === 0) {
-    ElMessage.error('没有可导出的实时日志')
+    feedback.error('没有可导出的实时日志')
     return
   }
 
