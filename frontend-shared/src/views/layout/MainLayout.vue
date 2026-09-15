@@ -320,6 +320,7 @@ const allMenuItems = [
 	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
 	{ path: '/alerts', title: '告警规则', icon: Bell },
 	{ path: '/automation', title: '自动化策略', icon: SetUp },
+	{ path: '/notification-channels', title: '通知通道', icon: Bell },
 ]
 const menuItems = computed(() => allMenuItems)
 

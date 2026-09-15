@@ -122,6 +122,13 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '自动化策略', icon: 'SetUp' },
       },
       {
+        // 外发通知通道：列表 + 分页 + 删除（本轮范围；新建/编辑/测试留待下一轮）。
+        path: 'notification-channels',
+        name: 'NotificationChannels',
+        component: () => import('@/views/notification/NotificationChannels.vue'),
+        meta: { title: '通知通道', icon: 'Bell' },
+      },
+      {
         path: 'profile',
         name: 'Profile',
         component: () => import('@/views/profile/Profile.vue'),
