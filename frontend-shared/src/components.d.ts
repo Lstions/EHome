@@ -97,6 +97,7 @@ declare module 'vue' {
     LogRealtimeViewer: typeof import('./components/node/LogRealtimeViewer.vue')['default']
     MetricStatCard: typeof import('./components/common/MetricStatCard.vue')['default']
     NetworkBanner: typeof import('./components/common/NetworkBanner.vue')['default']
+    NotificationChannelFormDialog: typeof import('./components/notification/NotificationChannelFormDialog.vue')['default']
     OTAForm: typeof import('./components/forms/OTAForm.vue')['default']
     PageHeader: typeof import('./components/common/PageHeader.vue')['default']
     ParserBrowser: typeof import('./components/parser/ParserBrowser.vue')['default']
