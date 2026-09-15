@@ -3,7 +3,11 @@
     <PageHeader
       title="外发通知通道"
       subtitle="把告警外发到企业微信 / Webhook / OneBot；密钥只写不读，列表仅显示末 4 位。"
-    />
+    >
+      <template #extra>
+        <el-button type="primary" :icon="Plus" data-test="nc-create" @click="openCreate">新建通道</el-button>
+      </template>
+    </PageHeader>
 
     <!-- 错误提示条：store.error 是唯一错误源（store 不弹窗，页面负责展示 + 重试入口） -->
     <el-alert
@@ -59,14 +63,33 @@
         <el-table-column label="更新时间" width="170">
           <template #default="{ row }">{{ formatTime(asChannel(row).updated_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="96" fixed="right">
+        <!-- 操作列：三个行内动作。测试/编辑/删除都可能改"哪一行"，统一用 actingId 串行化
+             （per-row 忙态而不是表级 loading：表级遮罩会让用户看不出点的是哪一行）。
+             :fixed 按窄屏取消 —— 330px 的固定列在 360px 视口会整列盖住数据列（F26 实测）。 -->
+        <el-table-column label="操作" width="330" :fixed="isMobile ? false : 'right'">
           <template #default="{ row }">
+            <el-button
+              link
+              type="primary"
+              size="small"
+              data-test="nc-test"
+              :loading="actingId === asChannel(row).id"
+              :disabled="actingId === asChannel(row).id"
+              @click="onTest(asChannel(row))"
+            >测试</el-button>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              data-test="nc-edit"
+              :disabled="actingId === asChannel(row).id"
+              @click="openEdit(asChannel(row))"
+            >编辑</el-button>
             <el-button
               link
               type="danger"
               size="small"
               data-test="nc-delete"
-              :loading="actingId === asChannel(row).id"
               :disabled="actingId === asChannel(row).id"
               @click="onDelete(asChannel(row))"
             >删除</el-button>
@@ -82,6 +105,7 @@
         data-test="nc-empty"
         title="暂无通知通道"
         description="新建通道后，告警会按最低级别筛选后外发到对应渠道。"
+        :quick-actions="[{ label: '新建通道', type: 'primary', handler: openCreate }]"
       />
 
       <!-- 真分页：翻页/改页长都重新请求后端（page/page_size 原样发出），禁止本地对 items 切片。
@@ -99,18 +123,31 @@
         />
       </div>
     </section>
+
+    <!-- 新建 / 编辑共用同一个对话框（设计 §8）：表单、预设模板与 secret 三态全在子组件里 -->
+    <NotificationChannelFormDialog
+      v-model:visible="dialogVisible"
+      :channel="editingChannel"
+      :submitting="submitting"
+      @submit="onSubmitForm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
 import feedback from '@/utils/feedback'
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import NotificationChannelFormDialog from '@/components/notification/NotificationChannelFormDialog.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { useNotificationChannelStore } from '@/stores/notificationChannel'
 import type {
   NotificationChannel,
+  NotificationChannelCreatePayload,
   NotificationChannelType,
+  NotificationChannelUpdatePayload,
   NotificationMinLevel,
 } from '@/api/notificationChannel'
 
@@ -131,6 +168,12 @@ const PAGE_SIZES = [20, 50, 100, 200]
 const asChannel = (row: unknown) => row as NotificationChannel
 
 const store = useNotificationChannelStore()
+
+/**
+ * 窄屏取消固定操作列（F26 合同的同款范式）：固定列绘制顺序恒在普通列之上，
+ * 330px 的固定列在 360px 视口会整列盖住数据列与行内控件。
+ */
+const { isMobile } = useResponsive()
 
 // ── 分页状态（真分页） ──
 const currentPage = ref(1)
@@ -175,7 +218,78 @@ function retryFetch() {
 }
 
 // ── 行操作 ──
+/**
+ * 行内动作的"当前行"标记。**同时**充当互斥锁：任一行动作进行中，所有行的按钮都禁用
+ * （编辑对话框开着的时候还能删同一行，是并发的静默不一致来源）。
+ */
 const actingId = ref<number | null>(null)
+
+// ── 新建 / 编辑对话框 ──
+const dialogVisible = ref(false)
+const submitting = ref(false)
+/** null = 新建；非 null = 正在编辑的通道快照 */
+const editingChannel = ref<NotificationChannel | null>(null)
+
+function openCreate() {
+  editingChannel.value = null
+  dialogVisible.value = true
+}
+
+function openEdit(channel: NotificationChannel) {
+  editingChannel.value = channel
+  dialogVisible.value = true
+}
+
+/**
+ * 提交表单：新建走 createChannel，编辑走 updateChannel。
+ *
+ * payload 的 secret 键语义由子组件保证（见 NotificationChannelFormDialog.buildPayload）：
+ * 这里**只做透传**，绝不"顺手补一个 secret"—— 页面上拿得到的东西只有 secret_hint（末 4 位），
+ * 把它补进请求体就是用 4 位假密钥覆盖真密钥。
+ */
+async function onSubmitForm(payload: NotificationChannelCreatePayload | NotificationChannelUpdatePayload) {
+  const editing = editingChannel.value
+  submitting.value = true
+  try {
+    if (editing) {
+      await store.updateChannel(editing.id, payload as NotificationChannelUpdatePayload)
+      feedback.success('通道已更新')
+    } else {
+      await store.createChannel(payload as NotificationChannelCreatePayload)
+      // 新建改变 total：回后端取真值（同删除路径），否则分页器停在旧总数上
+      currentPage.value = 1
+      await loadList()
+      feedback.success('通道已创建')
+    }
+    dialogVisible.value = false
+    editingChannel.value = null
+  } catch (err) {
+    feedback.handleErrorWithContext(err, editing ? '更新通道失败' : '创建通道失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+/**
+ * 测试按钮 → POST /:id/test。
+ *
+ * 文案必须是"已发出"而不是"投递成功"：后端是**异步投递**，HTTP 200 只代表
+ * 测试消息进了投递队列（响应 state 恒为 pending），出站结果稍后才落到投递审计。
+ * 说成"投递成功"就是本仓明令禁止的假绿。
+ */
+async function onTest(channel: NotificationChannel) {
+  actingId.value = channel.id
+  try {
+    const res = await store.testChannel(channel.id)
+    feedback.success(
+      `测试消息已发出（通道 #${res?.channel_id ?? channel.id}）；实际投递结果见投递审计。`,
+    )
+  } catch (err) {
+    feedback.handleErrorWithContext(err, '测试消息发送失败')
+  } finally {
+    actingId.value = null
+  }
+}
 
 async function onDelete(channel: NotificationChannel) {
   // 删除不可恢复（投递审计会保留、但通道配置本身没了）：走 confirmDanger，

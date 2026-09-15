@@ -3,11 +3,13 @@ import { ref } from 'vue'
 import {
   notificationChannelApi,
   type NotificationChannel,
+  type NotificationChannelCreatePayload,
   type NotificationChannelListParams,
+  type NotificationChannelUpdatePayload,
 } from '@/api/notificationChannel'
 
 /**
- * 外发通知通道 store（本轮只做列表 + 删除；创建/编辑/测试留待下一轮）。
+ * 外发通知通道 store（列表 + 删除 + 创建/编辑 + 测试投递）。
  *
  * 与 stores/dataSource.ts 同一纪律：成功后本地同步，失败写 error **并 rethrow**，
  * 由页面决定提示文案（store 不弹 toast，弹窗归页面，便于测试与复用）。
@@ -64,9 +66,62 @@ export const useNotificationChannelStore = defineStore('notificationChannel', ()
     }
   }
 
+  /**
+   * 创建通道。成功后把后端回读的视图**插到当前页首**（列表按 id DESC 排序，
+   * 新建的 id 最大 ⇒ 它本来就该在第 1 页第一行）。total 由页面重新 fetchList 取真值。
+   */
+  async function createChannel(payload: NotificationChannelCreatePayload) {
+    loading.value = true
+    try {
+      const created = await notificationChannelApi.create(payload)
+      items.value = [created, ...items.value]
+      error.value = null
+      return created
+    } catch (err) {
+      captureError(err)
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * 更新通道：局部替换列表里的对应行（用后端回读的视图，而不是本地拼的期望值）。
+   *
+   * secret 三态**完全由 payload 决定**（见 api/notificationChannel.ts 的类型注释）：
+   * store 不碰 secret 字段，绝不做"从既有行里补一个 secret 回去"这类自作主张 ——
+   * 既有行里只有 secret_hint，把它补进请求体就等于用"末 4 位"覆盖真实密钥。
+   */
+  async function updateChannel(id: number, payload: NotificationChannelUpdatePayload) {
+    loading.value = true
+    try {
+      const updated = await notificationChannelApi.update(id, payload)
+      items.value = items.value.map((c) => (c.id === id ? updated : c))
+      error.value = null
+      return updated
+    } catch (err) {
+      captureError(err)
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * 发送测试消息。**不写 loading**：测试按钮有自己的 per-row actingId 状态，
+   * 复用全局 loading 会让整张表在测试期间一起转圈（表级 loading 遮罩），
+   * 掩盖用户正在操作的是哪一行。
+   */
+  async function testChannel(id: number) {
+    return notificationChannelApi.test(id)
+  }
+
   function clearError() {
     error.value = null
   }
 
-  return { items, total, loading, error, fetchList, removeChannel, clearError }
+  return {
+    items, total, loading, error,
+    fetchList, removeChannel, createChannel, updateChannel, testChannel, clearError,
+  }
 })
