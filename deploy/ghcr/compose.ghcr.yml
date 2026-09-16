@@ -1,0 +1,81 @@
+# 用 GHCR 已发布镜像运行 EHome（**不本地构建**）。
+#
+# 目的：验证 `git push` → CI → GHCR 产出的镜像**真的能跑起来**，
+# 而不是只验证「CI 绿了」。CI 绿 ≠ 镜像可用（这正是本项目反复强调的「假绿」纪律）。
+#
+# 与仓库 `docker-compose.yml` 的区别：
+#   · `image:` 指向 ghcr.io，**没有 `build:`** ⇒ 强制用远端产物，不会偷偷用本地构建掩盖问题；
+#   · 独立的 project 名/端口/库名 ⇒ 不与开发栈、黑盒栈互相干扰；
+#   · 自带 PG + EMQX ⇒ **自包含**，不依赖宿主机已有容器。
+#
+# 用法：
+#   docker compose -f deploy/ghcr/compose.ghcr.yml pull
+#   docker compose -f deploy/ghcr/compose.ghcr.yml up -d
+#   curl -s localhost:18090/health          # → {"status":"ok"}
+#   docker compose -f deploy/ghcr/compose.ghcr.yml down -v
+#
+# 可用环境变量覆盖（默认值即下面的字面量）：
+#   GHCR_TAG      镜像 tag（默认 main；也可 latest / sha-xxxxxxx / 版本号）
+#   GHCR_PORT     宿主端口（默认 18090）
+#   GHCR_PROJECT  compose project 名（默认 ehome-ghcr）
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ${GHCR_PROJECT:-ehome-ghcr}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ehome
+      POSTGRES_PASSWORD: ehome_ghcr_pw
+      POSTGRES_DB: ehome
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ehome"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      # postgres 18+ 要求挂载点是 /var/lib/postgresql（**不是**旧的 /var/lib/postgresql/data）。
+      # 实测（2026-09-16）：用旧路径 ⇒ 容器 Restarting，日志提示
+      # "This is usually the result of upgrading the Docker image without upgrading the
+      #  underlying database"，并建议 18+ 挂 /var/lib/postgresql。
+      - ghcr_pgdata:/var/lib/postgresql
+
+  emqx:
+    image: emqx/emqx:5.8
+    container_name: ${GHCR_PROJECT:-ehome-ghcr}-emqx
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ehome:
+    # 关键：**只有 image，没有 build** ⇒ 必须来自 GHCR，杜绝「本地构建掩盖 CI 问题」。
+    image: ghcr.io/lstions/ehome:${GHCR_TAG:-main}
+    container_name: ${GHCR_PROJECT:-ehome-ghcr}-web
+    restart: unless-stopped
+    ports:
+      - "${GHCR_PORT:-18090}:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ehome
+      EHOME_DB_PASSWORD: ehome_ghcr_pw
+      EHOME_DB_NAME: ehome
+      EHOME_DB_SSLMODE: disable
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-ghcr
+      EHOME_EXTERNAL_HOST: 127.0.0.1:${GHCR_PORT:-18090}
+      EHOME_JWT_SECRET: ghcr_verify_secret_please_change_0123456789
+      EHOME_DATA_RETENTION_DAYS: "90"
+      EHOME_STATIC_DIR: /app/static/dist
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  ghcr_pgdata:

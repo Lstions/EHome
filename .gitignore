@@ -48,6 +48,15 @@ backend/firmwares/
 .logs/
 .pids/
 
+# 验证证据（运行产物，不入库）
+#
+# 为什么：证据里含**容器日志**，而容器启动日志含一次性初始化凭据。
+# 2026-09-16 真实事故：deploy/blackbox/evidence/ 有 15 个文件带明文凭据且已入 git，
+# 不得不在推送前 squash 重写历史才没把它们发到 GitHub。
+# ⇒ 证据是**运行产物**，不该长期入库；需要留档时只提交结论文件（如 FINAL-REPORT.md）。
+# 注：黑盒那批文件已在历史中，此处只防新增；已入库的仍需显式 git rm --cached。
+deploy/ghcr/evidence/
+
 # Test coverage artifacts
 backend/coverage.out
 backend/api_cover.out
