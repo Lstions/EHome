@@ -28,6 +28,12 @@ export interface Channel {
   created_at?: string
 }
 
+/**
+ * /channels 服务端分页的页长上界（与后端 pageSize > 200 → clamp 回 20 的约定一致）。
+ * "要全量"的调用方必须显式传它 —— 不传时服务端只给默认的 20 条。
+ */
+export const CHANNEL_LIST_MAX_PAGE_SIZE = 200
+
 function isChannelRecord(value: unknown): value is Channel {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -40,10 +46,22 @@ export function compactChannelList(items: unknown): Channel[] {
 
 export const channelApi = {
   // 获取通道列表
-  // Server returns: { code: 200, data: { items: Channel[], total, page, page_size } }
-  // or with collector_id filter: { items: Channel[] }
-  async getList(nodeId?: number | string): Promise<Channel[] | { items: Channel[]; total?: number }> {
-    const params = nodeId ? { node_id: nodeId } : {}
+  //
+  // 服务端分页（2026-09-16）：GET /channels 返回 {items,total,page,page_size}，
+  // 默认 page_size=20、上界 200（见 backend/internal/api/handler_device.go）。
+  //
+  // ⚠️ 为什么缺省 pageSize 要下发 CHANNEL_LIST_MAX_PAGE_SIZE（而不是不下发）：
+  // 改造前本接口是全量返回；改造后服务端默认 page_size=20。本函数绝大多数调用方
+  // （NodeOverview / NodeDetail / ChannelPanel / PeripheralControl / ChannelTerminal /
+  // stores/channel）只传 nodeId，语义是「要该节点的全部通道」。
+  // 若缺省就不下发，它们会从「全量」静默退化为「只取前 20 条」——少显示且无报错，
+  // 正是本仓禁止的静默失败。200 是后端承认的上界，显式下发它即恢复改造前行为
+  // （只有 >200 条才可能截断，而 200 远超现实通道数）。
+  // 「不下发 = 默认 20」是一种行为变更，不该由「调用方没传参数」隐式触发。
+  // 因此：不要把它「优化」回 if (pageSize !== undefined) 再下发。
+  async getList(nodeId?: number | string, pageSize?: number): Promise<Channel[] | { items: Channel[]; total?: number }> {
+    const params: Record<string, unknown> = nodeId ? { node_id: nodeId } : {}
+    params.page_size = pageSize !== undefined ? pageSize : CHANNEL_LIST_MAX_PAGE_SIZE
     const response = await client.get('/api/v1/channels', { params })
     // response is the full body: { code: 200, data: { items, total, ... } }
     const body = response as { code?: number; data?: Channel[] | { items?: Channel[]; total?: number } }

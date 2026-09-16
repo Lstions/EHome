@@ -81,23 +81,46 @@ describe('deviceOperationApi', () => {
 })
 
 // ─── channel ───
-import { channelApi } from '../channel'
+import { channelApi, CHANNEL_LIST_MAX_PAGE_SIZE } from '../channel'
 
 describe('channelApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
-  it('getList with nodeId passes params', async () => {
+  // 契约（2026-09-16 静默截断回归修复）：GET /channels 已改为服务端分页，
+  // 不传 page_size 时服务端只给默认的 20 条。因此 getList 在调用方未显式指定 pageSize 时
+  // 必须下发上界 CHANNEL_LIST_MAX_PAGE_SIZE（200），恢复改造前的「全量」语义。
+  // 下面三条断言钉死这个契约；任何「缺省就不下发」的改法都会让它们变红。
+  it('getList with nodeId passes params with node_id and explicit max page_size', async () => {
     mockClient.get.mockResolvedValue({ code: 200, data: { items: [{ id: 1 }], total: 1 } })
     const res = await channelApi.getList(5)
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/channels', { params: { node_id: 5 } })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/channels', {
+      params: { node_id: 5, page_size: CHANNEL_LIST_MAX_PAGE_SIZE },
+    })
     expect(res).toEqual({ items: [{ id: 1 }], total: 1 })
   })
 
-  it('getList without params', async () => {
+  it('getList without explicit pageSize still sends page_size (regression guard)', async () => {
+    // 防的是「把缺省 pageSize 优化成不下发」——那正是本轮静默截断回归的根因。
+    // 能发现的错误：把 pageSize !== undefined 的判断原样恢复（不下发）、
+    // 或把默认值从 200 改小（>200 条以外的截断边界被悄悄移动）。
     mockClient.get.mockResolvedValue({ code: 200, data: { items: [] } })
     const res = await channelApi.getList()
-    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/channels', { params: {} })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/channels', {
+      params: { page_size: CHANNEL_LIST_MAX_PAGE_SIZE },
+    })
+    // 逐键校验：params 里多塞/少塞键时不会被 toEqual 的宽松比较掩盖
+    const callArgs = mockClient.get.mock.calls[0][1] as { params: Record<string, unknown> }
+    expect(Object.keys(callArgs.params)).toEqual(['page_size'])
+    expect(callArgs.params.page_size).toBe(CHANNEL_LIST_MAX_PAGE_SIZE)
     expect(res).toEqual({ items: [] })
+  })
+
+  it('getList with explicit pageSize sends that value, not the default', async () => {
+    mockClient.get.mockResolvedValue({ code: 200, data: { items: [] } })
+    await channelApi.getList(5, 50)
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/channels', {
+      params: { node_id: 5, page_size: 50 },
+    })
   })
 
   it('getList with array data returns array', async () => {

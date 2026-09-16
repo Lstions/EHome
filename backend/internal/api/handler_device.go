@@ -584,8 +584,21 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	// Channel 通道 CRUD
 	// ============================================================
 
-	// List channels (optionally filter by node_id)
+	// List channels (paginated; optionally filter by node_id)
+	//
+	// 分页方言与全仓其余 11 个列表端点统一为 {items,total,page,page_size}
+	// （默认 page_size=20，上界 200；非法页长 clamp 回默认，见 device-configs 同款实现）。
+	// items 是**当前页切片**，total 是**过滤后的全量** —— 前端分页器据此渲染，
+	// 不得再退回本地切片（见 frontend-shared/src/views/channel/ChannelList.vue）。
 	v1.GET("/channels", func(c *gin.Context) {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
 		q := db.Model(&models.Channel{})
 		if nid := c.Query("node_id"); nid != "" {
 			if _, err := strconv.ParseUint(nid, 10, 64); err == nil {
@@ -595,17 +608,25 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				if err := db.Where("node_id = ?", nid).First(&node).Error; err == nil {
 					q = q.Where("node_id = ?", node.NodeID)
 				} else {
-					Success(c, []models.Channel{})
+					// 未知节点 → 空页，仍返回分页信封（不得退回裸数组）
+					Success(c, gin.H{"items": []models.Channel{}, "total": int64(0), "page": page, "page_size": pageSize})
 					return
 				}
 			}
 		}
-		var chs []models.Channel
-		if err := q.Find(&chs).Error; err != nil {
+		var total int64
+		if err := q.Count(&total).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		Success(c, chs)
+		items := make([]models.Channel, 0, pageSize)
+		// id ASC：显式排序。原实现无 Order 依赖存储默认顺序，PostgreSQL 下不保证稳定，
+		// 会让"第 2 页切片"变成不确定结果。
+		if err := q.Order("id ASC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		Success(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// Create channel

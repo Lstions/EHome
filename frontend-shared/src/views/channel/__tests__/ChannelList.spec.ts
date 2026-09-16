@@ -6,6 +6,8 @@ import channelListSource from '@/views/channel/ChannelList.vue?raw'
 // EmptyState 使用真实实现：它的 props 契约已支持 kind="error"，
 // 失败态用例必须验证真实契约被接线，而不是被 stub 吞掉。
 import RealEmptyState from '@/components/common/EmptyState.vue'
+// 页长上界常量由 vi.mock('@/api/channel') 的工厂一并导出（值同真实实现）。
+import { CHANNEL_LIST_MAX_PAGE_SIZE } from '@/api/channel'
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -23,6 +25,10 @@ const { mockGetList, mockScan } = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/channel', () => ({
+  // 该常量是 ChannelList.vue 传给 getList 的页长上界（服务端分页后必须显式下发，
+  // 否则 >20 条通道会被后端默认页长静默截断）。mock 必须提供同名导出，否则
+  // 组件导入即抛 "No ... export is defined on the mock"。
+  CHANNEL_LIST_MAX_PAGE_SIZE: 200,
   channelApi: {
     getList: mockGetList,
     scan: mockScan,
@@ -74,6 +80,16 @@ describe('ChannelList.vue', () => {
     await flushPromises()
     expect(wrapper.find('.channel-page').exists()).toBe(true)
     expect(mockGetList).toHaveBeenCalled()
+  })
+
+  // /channels 后端默认 page_size=20 且上界 200。本页仍在本地筛选+切片，
+  // 因此必须显式下发上界，否则通道数 >20 的部署会被服务端静默截断，
+  // 页面却显示"共 N 条"的本地假象。这条钉住"不得退回不带 page_size 的调用"。
+  it('requests the full channel page (page_size=200) so server-side default truncation cannot hide rows', async () => {
+    mountList()
+    await flushPromises()
+    expect(mockGetList).toHaveBeenCalledWith(undefined, CHANNEL_LIST_MAX_PAGE_SIZE)
+    expect(CHANNEL_LIST_MAX_PAGE_SIZE).toBe(200)
   })
 
   it('renders all fetched channels in the table data text', async () => {

@@ -207,7 +207,7 @@ import { feedback } from '@/utils/feedback'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Filter, Cpu } from '@element-plus/icons-vue'
-import { channelApi, type Channel } from '@/api/channel'
+import { channelApi, CHANNEL_LIST_MAX_PAGE_SIZE, type Channel } from '@/api/channel'
 import { useNodeStore } from '@/stores/node'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -371,7 +371,13 @@ async function refreshData() {
     await nodeStore.fetchNodes(nodeListParams)
     cachedNodes.value = nodeStore.getCachedList(nodeListParams)?.items || []
     // 加载所有通道（不限定节点）
-    const res = await channelApi.getList()
+    //
+    // 兼容垫片：/channels 现已是服务端分页（默认 page_size=20），而本页仍在
+    // **本地**做筛选 + 切片（见下方 filteredChannels / paginatedChannels）。
+    // 若不下发上界，通道数 >20 的部署会被服务端静默截断成 20 条。
+    // 真正的"服务端分页切换"被「客户端筛选 vs 服务端分页」的契约冲突阻塞，
+    // 需主控裁定后再做（详见交付报告）。
+    const res = await channelApi.getList(undefined, CHANNEL_LIST_MAX_PAGE_SIZE)
     if (Array.isArray(res)) {
       channels.value = res
     } else if (res && typeof res === 'object' && 'items' in res) {

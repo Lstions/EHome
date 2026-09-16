@@ -753,11 +753,23 @@ func TestChannel_List_FilterByNodeID(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data := resp["data"].([]interface{})
-	if len(data) != 1 {
-		t.Errorf("expected 1 channel for NODE001, got %d", len(data))
+	// 分页契约（2026-09-16）：data 从裸数组改为 {items,total,page,page_size}。
+	// 本用例只关心"node_id 过滤是否生效"，故读 items；服务端 total 的断言在
+	// handler_device_channels_pagination_test.go 的 NodeFilterIsCountedServerSide。
+	var resp struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+			Total int64            `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Data.Items) != 1 {
+		t.Errorf("expected 1 channel for NODE001, got %d", len(resp.Data.Items))
+	}
+	if resp.Data.Total != 1 {
+		t.Errorf("expected total 1 for NODE001, got %d", resp.Data.Total)
 	}
 }
 
