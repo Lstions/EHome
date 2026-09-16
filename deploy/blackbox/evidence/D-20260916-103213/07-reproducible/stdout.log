@@ -1,0 +1,93 @@
+
+== 0. 环境与前置 ============================================
+  BB_PROJECT   : ehome-bb
+  BB_HOME_PORT : 18080
+  BB_DB_NAME   : ehome_bb_20260916_103213
+  证据目录     : /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-103213/07-reproducible
+  commit       : 9c8214d8 (9c8214d89c066af40f04be180382c7fe3d2a2ad7)
+  被测内容指纹 (git ls-files -s backend frontend-shared Dockerfile | md5): e4b09b9393dc93194c7e64d30b0ad592
+  Dockerfile md5: 2171b7a91fabf570c186a34a65b19f7a
+  docker       : Docker version 29.8.0, build 88096ef
+  GOPROXY      : https://goproxy.cn,direct
+  BB_MUTATION  : none
+  临时镜像 tag : ehome-bb-img:rep1 / ehome-bb-img:rep2 / ehome-bb-img:rep-mut
+  工作树脏文件 :
+     M deploy/blackbox/README.md
+     M deploy/blackbox/evidence/latest
+     M deploy/blackbox/evidence/latest-SUMMARY.md
+     M deploy/blackbox/probes/04-health.sh
+     M deploy/blackbox/probes/05-first-boot.sh
+     M deploy/blackbox/run.sh
+    ?? deploy/blackbox/evidence/D-20260916-103016/
+    ?? deploy/blackbox/evidence/D-20260916-103037/
+    ?? deploy/blackbox/evidence/D-20260916-103213/
+  注：本脚本不创建任何容器/数据库/网络；不碰共享 PG/EMQX、端口 3080/8082/80。
+
+== 1. 构建 (A1) ============================================
+  构建 #1: tag ehome-bb-img:rep1 （--no-cache，全量重建）
+  构建 #2: tag ehome-bb-img:rep2 （--no-cache，全量重建）
+  [PASS] A1 连续两次构建均成功（rep1 exit=0, rep2 exit=0）
+
+== 2. 产物取证 ============================================
+  rep1: id=sha256:ccc083701eec7981fa92309949eeee7ffbc370a366cc3857a8fd572116a3bfdb size=90456894 present=1 sha=e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91 index=1942 /app文件=101
+  rep2: id=sha256:7e0a9f808010a2252ad6570b7361dd165d8e814094e680155073807096d896b8 size=90456871 present=1 sha=e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91 index=1942 /app文件=101
+  asset 引用数: rep1=10 rep2=10 ；dist 文件数: rep1=100 rep2=100
+
+== 3. 分母守卫与非空转自证 (G1 / G2 / G3 / G4) ============================================
+  [PASS] G1a 分母守卫：两次都解析到 >=2 个 asset 引用（rep1=10, rep2=10）
+  [PASS] G1b 分母守卫：两次 dist 文件数 >=5（rep1=100, rep2=100）
+  [PASS] G1c 两次 index.html 均存在（rep1=1942 bytes, rep2=1942 bytes）
+  G2 非空转自证：构造「产物缺失」场景（asset 清单清空 + index sha=FILE_REMOVED），
+     再用**完全相同的比较逻辑**（cmp/diff）判断，看它是否真的报差异。
+  [PASS] G2a 非空转自证通过：清空清单后被判出差异（diff 行数 10）
+  [PASS] G2b 非空转自证通过：sha 变化被检出（e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91 vs FILE_REMOVED）
+  [PASS] G3 幂等性自证通过：同一清单自比较判一致（防比较器恒报不一致）
+  [PASS] G4 正控通过：注入的已知不同清单被判出差异
+
+== 4. 核心断言：两次构建产物集合一致 (R1 / R1b / R1c / R2) ============================================
+  rep1 引用 asset（10 个）：
+      auth-CUe78qqT.js
+      client-xb_tSfkq.js
+      element-D5E22AxL.js
+      element-GfQPuZdl.css
+      favicon.svg
+      index-DugQjQfc.css
+      index-VlKSwxbg.js
+      preload-helper-Czpn1I53.js
+      rolldown-runtime-QTnfLwEv.js
+      vue-BcQrzxAB.js
+  rep2 引用 asset（10 个）：
+      auth-CUe78qqT.js
+      client-xb_tSfkq.js
+      element-D5E22AxL.js
+      element-GfQPuZdl.css
+      favicon.svg
+      index-DugQjQfc.css
+      index-VlKSwxbg.js
+      preload-helper-Czpn1I53.js
+      rolldown-runtime-QTnfLwEv.js
+      vue-BcQrzxAB.js
+  [PASS] R1 两次构建 index.html 引用的 asset 文件名集合**一致**（各 10 个，diff 为空）
+  [PASS] R1b 两次构建 /app/static/dist 整棵目录文件名集合一致（各 100 个文件，含全部懒加载 chunk）
+  [PASS] R1c 两次构建 index.html 字节级 sha256 一致（e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91）
+  （BB_DEEP=0：跳过逐文件 sha 深比对；如需字节级结论请加 BB_DEEP=1）
+  [info] R2 镜像体积不同：rep1=90456894 rep2=90456871（仅记录，不判失败）
+
+== 5. 变异恢复校验 ============================================
+  未启用变异，无需恢复（Dockerfile md5=2171b7a91fabf570c186a34a65b19f7a 未变）
+
+== 6. 清理与残留核对 ============================================
+  [清理] 已删除临时镜像 ehome-bb-img:rep1
+  [清理] 已删除临时镜像 ehome-bb-img:rep2
+  [PASS] C1 临时镜像零残留（ehome-bb-img:rep1 / ehome-bb-img:rep2 / ehome-bb-img:rep-mut 均已删除）
+  当前 ehome-bb-img 系列镜像（可能含 01 探针的镜像，非本脚本产物）：
+      ehome-bb-img:warm 66339a8b19e1
+  容器残留核对（本脚本不创建容器，应为空）：
+      (无 ehome-bb 前缀容器，符合预期)
+
+== 汇总 ============================================
+  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_20260916_103213
+  commit=9c8214d8  被测内容指纹=e4b09b9393dc93194c7e64d30b0ad592
+  断言：PASS=12  FAIL=0
+  证据目录：/home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-103213/07-reproducible
+  结论：Q7 通过 -- 同 commit 两次构建的 asset 文件名集合一致，构建在本断言范围内**确定性**

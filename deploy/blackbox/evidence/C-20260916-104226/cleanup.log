@@ -1,0 +1,7 @@
+== down -v ==
+ Container ehome-bb-ehome Stopping 
+ Container ehome-bb-ehome Stopped 
+ Container ehome-bb-ehome Removing 
+ Container ehome-bb-ehome Removed 
+== drop db ==
+DROP DATABASE

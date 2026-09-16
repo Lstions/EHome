@@ -1,0 +1,68 @@
+
+== 0. 环境与前置 ============================================
+  BB_PROJECT   : ehome-bb-dev-a5
+  BB_HOME_PORT : 18091
+  BB_DB_NAME   : ehome_bbdev_a5_1
+  证据目录     : /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/A-20260916T023500Z-a5mut
+  commit       : 4698d230 (4698d230e599afb2b70b59035cb202a3214047b9)
+  被测内容指纹 (git ls-files -s backend frontend-shared Dockerfile | md5): e4b09b9393dc93194c7e64d30b0ad592
+  Dockerfile md5: 2171b7a91fabf570c186a34a65b19f7a
+  docker       : Docker version 29.8.0, build 88096ef
+  GOPROXY      : https://goproxy.cn,direct
+  BB_MUTATION  : drop-frontend-copy
+  临时镜像 tag : ehome-bb-img:rep1 / ehome-bb-img:rep2 / ehome-bb-img:rep-mut
+  工作树脏文件 :
+     D deploy/blackbox/compose.bb.dev.yml
+     M deploy/blackbox/evidence/latest
+     M deploy/blackbox/evidence/latest-SUMMARY.md
+     M deploy/blackbox/run.sh
+    ?? deploy/blackbox/evidence/A-20260916T023000Z-a5rep/
+    ?? deploy/blackbox/evidence/A-20260916T023500Z-a5mut/
+    ?? deploy/blackbox/evidence/D-20260916-101453/
+    ?? deploy/blackbox/evidence/D-20260916-101738/
+    ?? deploy/blackbox/probes/06-wiring.sh
+    ?? deploy/blackbox/probes/07-reproducible.sh
+  注：本脚本不创建任何容器/数据库/网络；不碰共享 PG/EMQX、端口 3080/8082/80。
+
+== 变异注入 BB_MUTATION=drop-frontend-copy ============================================
+  变异落地校验：匹配 '# MUTATED(07): COPY ...' 的行数 = 1 （期望 1）
+    44:# MUTATED(07): COPY --from=frontend-builder /app/dist ./static/dist
+  变异前 md5=2171b7a91fabf570c186a34a65b19f7a  变异后 md5=c7de3cf662a63d7234b2b4bba072b7ce
+
+== 1. 构建 (A1) ============================================
+  [变异模式] 只构建变异树，用于证明「破坏被测产物 ⇒ 输出出现可测差异」
+  复现命令见 07-build-mut.log 首行
+  [PASS] A1m 变异树构建成功（tag ehome-bb-img:rep-mut，--no-cache）
+
+== 2. 产物取证 ============================================
+  变异镜像：INDEX_PRESENT=0 INDEX_SHA= asset引用数=0 dist文件数=0
+  判据：删掉前端 COPY 后，被测量必须出现可测差异（index.html 缺失 / 引用集合变化）。
+  [PASS] R3 变异产生可测差异：变异镜像 index.html 缺失或引用为空（PRESENT=0 refs=0）-- 破坏确实改变了被测量
+
+  ★ 参考（不构成 07 的失败条件）：完整的『变异 ⇒ ASSERTION 必红』证据由
+    probes/01-image-contract.sh BB_MUTATION=drop-frontend-copy 提供（其 A3/A4 变红）。
+    07 此处只证明「该破坏真的改变了被测量」，与 G2 一起排除比较器空转。
+
+== 5. 变异恢复校验 ============================================
+  [PASS] M1 Dockerfile 已字节级还原（md5 2171b7a91fabf570c186a34a65b19f7a == 变异前 2171b7a91fabf570c186a34a65b19f7a；变异态 c7de3cf662a63d7234b2b4bba072b7ce）
+  恢复后 grep -n 'static/dist' Dockerfile：
+      44:COPY --from=frontend-builder /app/dist ./static/dist
+
+== 6. 清理与残留核对 ============================================
+  [清理] BB_KEEP_IMAGES=1 -- 保留临时镜像
+  [FAIL] C1 临时镜像残留： ehome-bb-img:rep-mut
+  当前 ehome-bb-img 系列镜像（可能含 01 探针的镜像，非本脚本产物）：
+      ehome-bb-img:rep-mut 26be40f31b33
+      ehome-bb-img:recheck c099bef82ca9
+      ehome-bb-img:606d8e6f 11a4bdbeb969
+      ehome-bb-img:warm bc9f638dd44a
+  容器残留核对（本脚本不创建容器，应为空）：
+      (无 ehome-bb-dev-a5 前缀容器，符合预期)
+
+== 汇总 ============================================
+  BB_PROJECT=ehome-bb-dev-a5  BB_HOME_PORT=18091  BB_DB_NAME=ehome_bbdev_a5_1
+  commit=4698d230  被测内容指纹=e4b09b9393dc93194c7e64d30b0ad592
+  断言：PASS=3  FAIL=1
+  证据目录：/home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/A-20260916T023500Z-a5mut
+  结论：有 1 条断言失败（详见 /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/A-20260916T023500Z-a5mut/07-reproducible.log）
+  [清理] BB_KEEP_IMAGES=1 -- 保留临时镜像

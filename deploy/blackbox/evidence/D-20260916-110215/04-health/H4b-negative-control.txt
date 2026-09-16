@@ -1,0 +1,9 @@
+GET /__bb_nonexistent_probe_586077 (负控, 期望: 内容判别失败) -> status=200 content_type=text/html; charset=utf-8
+contains_status_json=0 contains_prometheus_help=0
+--- body (head -c 200) ---
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initia

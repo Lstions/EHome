@@ -1,0 +1,2 @@
+POST /auth/initialize 重放同一凭据 -> status=409
+{"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}

@@ -1,0 +1,3 @@
+2026-09-16T02:19:52.077Z	INFO	logger/logger.go:85	EHomeSystem Server v2.0 starting...
+2026-09-16T02:19:52.077Z	INFO	logger/logger.go:85	Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_101950, API=:8080
+2026-09-16T02:19:52.088Z	INFO	logger/logger.go:85	Database connected successfully

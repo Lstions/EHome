@@ -1,0 +1,12 @@
+GET /metrics -> status=200 content_type=text/plain; version=0.0.4; charset=utf-8; escaping=underscores bytes=16535 help_lines=65
+--- 前 5 行 ---
+# HELP ehome_config_manifests_sent_total Total config manifest messages sent
+# TYPE ehome_config_manifests_sent_total counter
+ehome_config_manifests_sent_total 0
+# HELP ehome_data_event_bus_dropped_total DataEventBus data reports dropped under backpressure
+# TYPE ehome_data_event_bus_dropped_total counter
+--- 前 64 字节 hexdump (诊断编码/gzip 双重帧问题) ---
+ 23 20 48 45 4c 50 20 65 68 6f 6d 65 5f 63 6f 6e
+ 66 69 67 5f 6d 61 6e 69 66 65 73 74 73 5f 73 65
+ 6e 74 5f 74 6f 74 61 6c 20 54 6f 74 61 6c 20 63
+ 6f 6e 66 69 67 20 6d 61 6e 69 66 65 73 74 20 6d

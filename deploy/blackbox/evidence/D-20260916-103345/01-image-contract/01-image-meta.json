@@ -1,0 +1,56 @@
+[
+    {
+        "Id": "sha256:a3159506e958625ba2ce5feba1513ccb36f966fbb9cc17b000aa3e72f1ac3680",
+        "RepoTags": [
+            "ehome-bb-ehome:local"
+        ],
+        "RepoDigests": [
+            "ehome-bb-ehome@sha256:a3159506e958625ba2ce5feba1513ccb36f966fbb9cc17b000aa3e72f1ac3680"
+        ],
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-09-16T10:33:43.185534221+08:00",
+        "Config": {
+            "ExposedPorts": {
+                "8080/tcp": {}
+            },
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Cmd": [
+                "./ehome-server"
+            ],
+            "WorkingDir": "/app",
+            "ArgsEscaped": true
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 90456871,
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:7211d01aba8fa2e9eb71ad34395cd313df5fc51a6b69b92d2dfad32cc37759cb",
+                "sha256:e2c78004a0ff9816bfb8e0110221faf96cf95d839c68592e3f5c1c51b0a3073d",
+                "sha256:df778b2335c4bbeadf8525942f63365f8cabc6578d57f270719adf06647ae2d6",
+                "sha256:f3a5302e1dbf4866187657f8bad9071aab0f1670d0e16e3d1aada0f3f158e169",
+                "sha256:e17aacd035c0e6052ee23177f6740399dc823c0ec7419801a7a66eb9260d3eeb",
+                "sha256:6bc8af33538c80e1a519294e12ab4bb83fa6a5abf565df571fe5c5d88b833570"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-09-16T02:33:47.196214381Z"
+        },
+        "Descriptor": {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": "sha256:a3159506e958625ba2ce5feba1513ccb36f966fbb9cc17b000aa3e72f1ac3680",
+            "size": 856
+        },
+        "Identity": {
+            "Build": [
+                {
+                    "Ref": "p3ff2bqyee11k323prrxx8j1v",
+                    "CreatedAt": "2026-09-16T10:33:47.525112946+08:00"
+                }
+            ]
+        }
+    }
+]

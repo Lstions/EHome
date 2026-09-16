@@ -1,0 +1,2 @@
+NAME             IMAGE                  COMMAND            SERVICE   CREATED        STATUS                  PORTS
+ehome-bb-ehome   ehome-bb-ehome:local   "./ehome-server"   ehome     1 second ago   Up Less than a second   127.0.0.1:18080->8080/tcp

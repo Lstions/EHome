@@ -1,0 +1,9 @@
+== 残留容器 (label 或 名字前缀) ==
+ehome-bb-dev-c-ehome	Up About a minute	ehome-bb-dev-c
+== 残留卷 ==
+== 残留网络 ==
+== 残留独立库 ehome_bb_* ==
+ehome_bbdev_c
+ehome_bbdev_wiring_mut
+
+RESIDUE containers=1 volumes=0 networks=0 bb_databases=2

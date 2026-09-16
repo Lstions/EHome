@@ -1,0 +1,62 @@
+2026-09-16T02:31:53.486Z	INFO	logger/logger.go:85	EHomeSystem Server v2.0 starting...
+2026-09-16T02:31:53.486Z	INFO	logger/logger.go:85	Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_103016, API=:8080
+2026-09-16T02:31:53.498Z	INFO	logger/logger.go:85	Database connected successfully
+2026-09-16T02:31:54.075Z	INFO	logger/logger.go:85	Database connected and migrated
+2026/09/16 02:31:54 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=unified_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=unified_data_202608 parent=unified_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=unified_data_202609 parent=unified_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=unified_data_202610 parent=unified_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=unified_data_202611 parent=unified_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=unified_data_202612 parent=unified_data
+2026/09/16 02:31:54 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=device_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=device_data_202608 parent=device_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=device_data_202609 parent=device_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=device_data_202610 parent=device_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=device_data_202611 parent=device_data
+2026/09/16 02:31:54 INFO partition_mgr: created partition partition=device_data_202612 parent=device_data
+2026-09-16T02:31:54.182Z	INFO	logger/logger.go:85	Logical device backfill: all instances already attached
+2026-09-16T02:31:54.189Z	INFO	logger/logger.go:85	Initialization credential (valid for 10 minutes): <REDACTED:credential>
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: bmp280 (BMP280 温度气压传感器)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: lk_th01 (LK-TH01 温湿度传感器)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: sn3000 (SN-3000 风向传感器)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: prs3001 (PRS-3001 光学雨量光照变送器)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: sn3001_rain (SN-3001 光学雨量计)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: jiabaida_bms (嘉佰达 BMS 电池管理系统)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: techfine_inverter (泰琪丰 GB3024 逆变器)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: generic_modbus (通用 Modbus RTU 设备)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Driver registered: generic_i2c (通用 I2C 设备)
+2026-09-16T02:31:54.190Z	INFO	logger/logger.go:85	Registered 9 device drivers with 0 parser overrides
+2026/09/16 02:31:54 INFO datalifecycle: index ensured index=idx_unified_logical_ts table=unified_data concurrently=false
+2026/09/16 02:31:54 INFO datalifecycle: index ensured index=idx_devdata_logical_ts table=device_data concurrently=false
+2026/09/16 02:31:54 INFO datalifecycle: backfill table done table=unified_data rows_updated=0 batches=0 resumed_from=0
+2026/09/16 02:31:54 INFO datalifecycle: backfill table done table=device_data rows_updated=0 batches=0 resumed_from=0
+2026/09/16 02:31:54 INFO logstream: consumer registered name=database
+2026/09/16 02:31:54 INFO logstream: consumer registered name=websocket
+2026/09/16 02:31:54 INFO databus: consumer registered name=terminal
+2026/09/16 02:31:54 INFO databus: consumer registered name=ws_push
+2026/09/16 02:31:54 INFO databus: consumer registered name=data_metrics
+2026/09/16 02:31:54 INFO databus: consumer registered name=pending_write
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard0
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard0
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard1
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard1
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard2
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard2
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard3
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard3
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard4
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard4
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard5
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard5
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard6
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard6
+2026/09/16 02:31:54 INFO databus: consumer registered name=sensor_parser_shard7
+2026/09/16 02:31:54 INFO databus: consumer registered name=db_persist_shard7
+2026-09-16T02:31:54.246Z	INFO	logger/logger.go:85	Latest value cache warmed up: 0 rows
+2026-09-16T02:31:54.248Z	INFO	logger/logger.go:85	[automation] 系统主体用户尚未创建 (subject_key=system_admin), 首次自动 device_action 触发时将惰性解析: record not found
+2026-09-16T02:31:54.249Z	INFO	logger/logger.go:85	ChannelCmdV2 dispatcher enabled owner=server:e8f7b71323be:1:1e82d3ce-9565-4a8c-ae94-ce929c725cab
+2026-09-16T02:31:54.250Z	INFO	logger/logger.go:85	Started 8 data report workers
+2026-09-16T02:31:54.250Z	INFO	logger/logger.go:85	Collector manager started
+2026-09-16T02:31:54.251Z	INFO	logger/logger.go:85	[OfflineDetector] Loaded 0 active edge devices into cache
+2026-09-16T02:31:54.251Z	INFO	logger/logger.go:85	Offline detector started (3-layer)
+2026-09-16T02:31:54.251Z	INFO	logger/logger.go:85	API server listening on :8080

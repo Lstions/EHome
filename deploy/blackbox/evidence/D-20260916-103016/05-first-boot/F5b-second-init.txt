@@ -1,0 +1,5 @@
+POST /auth/initialize (已 initialized 后再初始化) -> status=409
+{"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+原管理员 bbadmin 再登录 -> status=200
+入侵者 intruder2 登录 -> status=401 (期望 401)
+{"code":401,"data":null,"message":"用户名或密码错误"}

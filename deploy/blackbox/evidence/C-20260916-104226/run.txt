@@ -1,0 +1,50 @@
+=== 契约模式冷启动: project=ehome-bb port=18080 db=ehome_bb_c_20260916_104226 ===
+CREATE DATABASE
+ Container ehome-bb-ehome Started 
+ Container ehome-bb-ehome Waiting 
+ Container ehome-bb-ehome Healthy 
+ready after 2s
+=== 04-health (契约默认值) ===
+INFO  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_c_20260916_104226
+INFO  探测 H1 GET /health (无 Authorization 头)
+PASS  H1 : /health 未鉴权可达 200 且含 status: {"status":"ok"}
+INFO  探测 H2 GET /metrics (无 Authorization 头)
+PASS  H2 : /metrics 未鉴权可达 200, Prometheus 格式 (bytes=16487 help_lines=65)
+INFO  探测 H3 GET /api/v1/overview (反向对照, 期望 401)
+PASS  H3 : 反向对照成立: /api/v1/overview 未鉴权被拒 401 ({"code":401,"data":null,"message":"missing authentication token"})
+INFO  探测 H4 GET /api/v1/health (陷阱: SPA catch-all)
+PASS  H4 : /api/v1/health 实测为 SPA HTML 回退 (status=200 ct=text/html; charset=utf-8) —— 健康端点只有 /health; 判据不得写成'该路径 200 即健康'
+PASS  H4b : 负控成立: 不存在的路径 /__bb_nonexistent_probe_530790 返回 status=200 但**通不过**内容判据 (无 status 字段/无 # HELP) —— 证明 H1/H2 靠内容判别, 不靠裸 200
+PASS  H5 : 分母守卫: 本轮实际探测 4 个端点 (>=2)
+PASS  H6 : 冷启动回填日志出现: [Latest value cache warmed up: 0 rows]
+
+==== 04-health: PASS=7 FAIL=0 endpoints_probed=4 ====
+04_EXIT=0
+=== 05-first-boot (契约默认值) ===
+INFO  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_c_20260916_104226
+INFO  GET /api/v1/auth/initialization -> status=200 body={"code":200,"data":{"state":"uninitialized"},"message":"ok"}
+PASS  F1 : 冷启动日志出现一次性凭据: total_len=68 selector_len=24 secret_len=43 (值未落盘)
+PASS  F4 : 错误凭据初始化被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F4b : 错误凭据尝试后系统仍未初始化 (state=uninitialized)
+PASS  F2 : 用一次性凭据建管理员成功 (201): {"code":201,"data":{"id":1,"username":"bbadmin"},"message":"initialized"}
+PASS  F2b : 初始化后状态转为 initialized
+PASS  F3 : 新管理员登录成功 (200, token_len=251)
+PASS  F5a : 重放已消费的一次性凭据被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F5b : 重复初始化被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F5c : 重复初始化后原管理员仍可登录 (200) —— 管理员未被覆盖
+PASS  F5d : 入侵者账号不存在 (401) —— 未被创建
+PASS  F5e : 登录主体身份确认: username=bbadmin (未被替换)
+PASS  F6 : 冷启动回填日志出现: [Latest value cache warmed up: 0 rows]
+PASS  F1b : 负控成立: 不存在的凭据标记在日志中 0 命中 —— '没找到凭据' 这个信号可信
+PASS  F1c : 正控: 凭据抽取器在已知存在的一次性凭据行上成功抽出 68 字符 (selector+secret)
+INFO  附加段: 本会话修复的容器级复验 (F7-F10)
+PASS  F7 : 运行时 /overview.latest_data 返回多物理量: device=1 n_qty=2 (>=2; 修复前缓存命中只 1)
+PASS  F8 : reconfigure 真的改了 bus_config: AABB00002580CC -> AABB0001C200CC (响应与落库值一致; 判据看 DB 回读值, 非裸 200)
+PASS  F9 : 告警规则 enabled:false 落库为 false (响应=false, 回读=false)
+PASS  F10 : 启动回填日志可解析: [Latest value cache warmed up: 0 rows]
+
+==== 05-first-boot: PASS=18 FAIL=0 ====
+05_EXIT=0
+=== 秘密泄漏核查: 证据目录中不得出现凭据形状 ===
+credential_shaped_tokens_found=0
+SECRET_LEAK_CHECK=PASS(0 credential-shaped tokens)

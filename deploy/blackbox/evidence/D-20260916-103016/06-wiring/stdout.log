@@ -1,0 +1,57 @@
+================ Q6: web→PG / web→EMQX 服务名连通 ================
+BB_PROJECT   : ehome-bb
+BB_CONTAINER : ehome-bb-ehome
+BB_HOME_PORT : 18080
+BB_DB_NAME   : ehome_bb_20260916_103016
+镜像         : ehome-bb-ehome:local
+网络方案     : external network 'ehomesystem_default'（复用现有 ehome-postgres/ehome-emqx）
+变异         : none
+复现命令     : cd /home/sun/workspace/EHomeSystem && BB_PROJECT=ehome-bb BB_HOME_PORT=18080 BB_DB=ehome_bb_20260916_103016 EHOME_DB_HOST=postgres \
+                 MQTT_BROKER=tcp://emqx:1883 docker compose -f docker-compose.yml \
+                 -f deploy/blackbox/compose.bb.yml -p ehome-bb up -d
+
+--- 网络方案事实（docker inspect，只读）---
+    /ehome-postgres networks=ehomesystem_default(aliases=[ehome-postgres postgres])
+  [PASS] ehome-postgres 挂在 ehomesystem_default 上（external network 复用前提成立）
+    /ehome-emqx networks=ehomesystem_default(aliases=[ehome-emqx emqx])
+  [PASS] ehome-emqx 挂在 ehomesystem_default 上（external network 复用前提成立）
+  [PASS] 前提守卫: 镜像 ehome-bb-ehome:local 存在
+  [PASS] 前提守卫: 复用容器 ehome-postgres healthy (PG)
+  [PASS] 前提守卫: 复用容器 ehome-emqx healthy (EMQX)
+  [PASS] 分母守卫: emqx ctl clients list 非空（connected=true x2）
+  [PASS] 已创建独立库 ehome_bb_20260916_103016（不触碰 ehome/ehome_test/ehome_uiux）
+compose up -d rc=0
+本 run 容器: ehome-bb-ehome cid=e8f7b71323be  库=ehome_bb_20260916_103016
+轮询结束: state=running
+    应用启动日志中的库: ehome_bb_20260916_103016  (本 run 期望: ehome_bb_20260916_103016)
+  [PASS] 分母守卫: web 日志 62 行（>=30）
+  [PASS] 分母守卫: 本探针检查 2 条连线（postgres:5432 + emqx:1883）
+
+--- 断言2: web 容器内按服务名解析 postgres / emqx ---
+    getent hosts postgres => [172.18.0.3        postgres  postgres]
+  [PASS] 服务名 postgres 在 web 容器内可解析
+    getent hosts emqx => [172.18.0.2        emqx  emqx]
+  [PASS] 服务名 emqx 在 web 容器内可解析
+    应用实际配置: Config: MQTT=tcp://emqx:1883
+
+--- 断言3: web→postgres:5432 连通（经服务名，日志 + 独立库 schema）---
+    日志计数: 'Database connected successfully' x1, 'and migrated' x1, '/ehome_bb_20260916_103016' x1
+  [PASS] 日志未见 127.0.0.1 连库（确为容器网络服务名路径）
+  [PASS] web→postgres 连通: 连库成功且完成迁移，目标为独立库 ehome_bb_20260916_103016
+    psql(只读): SELECT count(*) FROM information_schema.tables WHERE table_schema='public' => [53]
+  [PASS] PG 侧分母守卫: 独立库 public 表数 53（>=30）—— 非空壳
+
+--- 断言4: web→emqx:1883 连通（emqx ctl + web 容器 IP 匹配 + before/after 差集）---
+    web 容器 IP (ehomesystem_default): [172.18.0.5]
+    emqx connected=true 计数: before=2 after=3
+  [PASS] EMQX 上有客户端 peername=172.18.0.5（来自 web 容器）id=ehome-server-18d5ac5745a9ba21-1
+  [PASS] 该 client id (ehome-server-18d5ac5745a9ba21-1) 为起栈后新增（before/after 差集）—— 归因成立
+
+================ 汇总: PASS=16 FAIL=0 ================
+连线判定: PG(web→postgres:5432)=绿  EMQX(web→emqx:1883)=绿
+证据目录: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-103016/06-wiring
+结线判定: web→postgres:5432 与 web→emqx:1883 均经服务名连通 ✅
+
+--- 清理 (trap) ---
+已 DROP 独立库 ehome_bb_20260916_103016
+清理后 ehome-bb 残留: 0 容器

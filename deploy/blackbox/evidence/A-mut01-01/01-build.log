@@ -1,0 +1,66 @@
+$ docker build --progress=plain --build-arg GOPROXY=https://goproxy.cn,direct -t ehome-bb-img:mut01 /home/sun/workspace/EHomeSystem
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.06kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/golang:1.26.5-alpine
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/alpine:3.21
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [backend-builder 1/6] FROM docker.io/library/golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
+#5 resolve docker.io/library/golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 0.1s done
+#5 DONE 0.1s
+
+#6 [stage-2 1/5] FROM docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+#6 resolve docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d 0.1s done
+#6 DONE 0.1s
+
+#7 [internal] load build context
+#7 transferring context: 29.97kB 0.0s done
+#7 DONE 0.0s
+
+#8 [backend-builder 3/6] COPY backend/go.mod backend/go.sum ./
+#8 CACHED
+
+#9 [backend-builder 4/6] RUN go mod download
+#9 CACHED
+
+#10 [backend-builder 6/6] RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
+#10 CACHED
+
+#11 [stage-2 4/5] COPY --from=backend-builder /app/ehome-server .
+#11 CACHED
+
+#12 [stage-2 3/5] WORKDIR /app
+#12 CACHED
+
+#13 [stage-2 2/5] RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
+#13 CACHED
+
+#14 [backend-builder 2/6] WORKDIR /app
+#14 CACHED
+
+#15 [backend-builder 5/6] COPY backend/ .
+#15 CACHED
+
+#16 [stage-2 5/5] RUN mkdir -p /app/firmwares
+#16 CACHED
+
+#17 exporting to image
+#17 exporting layers done
+#17 exporting manifest sha256:ad76161d03c0137da0fff9b43474a3a85a6f727d4baae4b8d0830fd58eefab8a done
+#17 exporting config sha256:f127165c64951ab1c74ac5cb7e36a807987a898c06979d0317f1453e43cefb62 done
+#17 exporting attestation manifest sha256:cf609ff611ce36c336d8445e44ce67652e78e7ebf593a76b7314588a56b83530 0.0s done
+#17 exporting manifest list sha256:64afeb1798ad736baa6b31b5806b018cc64383791fc1325c253ba3336a96d779 0.0s done
+#17 naming to docker.io/library/ehome-bb-img:mut01 done
+#17 unpacking to docker.io/library/ehome-bb-img:mut01 0.0s done
+#17 DONE 0.1s
+[build exit=0]

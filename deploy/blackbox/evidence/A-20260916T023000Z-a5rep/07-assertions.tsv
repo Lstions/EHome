@@ -1,0 +1,14 @@
+PASS	A1	A1 连续两次构建均成功（rep1 exit=0, rep2 exit=0）
+PASS	G1a	G1a 分母守卫：两次都解析到 >=2 个 asset 引用（rep1=10, rep2=10）
+PASS	G1b	G1b 分母守卫：两次 dist 文件数 >=5（rep1=100, rep2=100）
+PASS	G1c	G1c 两次 index.html 均存在（rep1=1942 bytes, rep2=1942 bytes）
+PASS	G2a	G2a 非空转自证通过：清空清单后被判出差异（diff 行数 10）
+PASS	G2b	G2b 非空转自证通过：sha 变化被检出（e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91 vs FILE_REMOVED）
+PASS	G3	G3 幂等性自证通过：同一清单自比较判一致（防比较器恒报不一致）
+PASS	G4	G4 正控通过：注入的已知不同清单被判出差异
+PASS	R1	R1 两次构建 index.html 引用的 asset 文件名集合**一致**（各 10 个，diff 为空）
+PASS	R1b	R1b 两次构建 /app/static/dist 整棵目录文件名集合一致（各 100 个文件，含全部懒加载 chunk）
+PASS	R1c	R1c 两次构建 index.html 字节级 sha256 一致（e02f3822a08dcb7e97cce2aa44e72fae5704d751d9eec3958f698579a04e6a91）
+PASS	R2	R2 两次构建镜像体积一致（90456890 bytes）
+PASS	C1	C1 临时镜像零残留（ehome-bb-img:rep1 / ehome-bb-img:rep2 / ehome-bb-img:rep-mut 均已删除）
+TOTAL	ehome-bb-img:rep1	PASS=13 FAIL=0

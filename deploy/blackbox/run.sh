@@ -40,13 +40,16 @@ PROBES_DIR="$BB_DIR/probes"
 COMPOSE_BASE="$REPO_ROOT/docker-compose.yml"
 COMPOSE_BB="$BB_DIR/compose.bb.yml"
 
-PROJECT="ehome-bb"
-HOME_PORT="${HOME_PORT:-18080}"
+# CONTRACT 规则 B: project / 端口 / 库名前缀必须可覆盖, 默认值 = 契约值。
+# 开发自测: BB_PROJECT=ehome-bb-dev-d BB_HOME_PORT=18091 BB_DB_PREFIX=ehome_bbdev_
+PROJECT="${BB_PROJECT:-ehome-bb}"
+HOME_PORT="${BB_HOME_PORT:-${HOME_PORT:-18080}}"
 
 START_TS="$(date +%Y%m%d-%H%M%S)"
 RUN_ID="D-${START_TS}"
 EVID="$BB_DIR/evidence/${RUN_ID}"
-BB_DB_NAME="ehome_bb_${START_TS//-/_}"
+DB_PREFIX="${BB_DB_PREFIX:-ehome_bb_}"
+BB_DB_NAME="${DB_PREFIX}${START_TS//-/_}"
 LOG_FILE="$EVID/run.log"
 
 # 传给 compose: 黑盒独立库。compose.bb.yml 要求 EHOME_DB_NAME 必填且无默认值,
@@ -73,6 +76,8 @@ step_name()   { case "$1" in 01) echo image-contract;; 07) echo reproducible;; 0
 step_q()      { case "$1" in 01) echo Q1;; 07) echo Q7;; 02) echo Q2;; 03) echo Q3;; 06) echo Q6;; 04) echo Q4;; 05) echo Q5;; esac; }
 step_needs_stack() { case "$1" in 03|04|05|06) return 0;; *) return 1;; esac; }
 step_coldstart()   { [[ "$1" == "03" ]]; }
+# 自管生命周期: 探针自己 compose up/down + dropdb/createdb (03/06 实测如此)
+step_selfmanaged() { case "$1" in 03|06) return 0;; *) return 1;; esac; }
 
 # ─ 运行时状态 ───────────────────────────────────────────────────────────────
 declare -a R_ID R_NAME R_Q R_STATUS R_REASON R_EVID R_PROBE
@@ -89,6 +94,8 @@ FAIL_COUNT=0
 RESIDUE_DIRTY=0
 SHARED_DIRTY=0
 CLEANUP_DONE=0
+FOREIGN_STACK=0        # 1 = 启动时检测到同 project 的并发栈; 此时绝不清理他人资源
+LOCK_CONFLICT=0        # 1 = 排他锁被占用; 退出码 3(并发冲突, 非失败也非通过)
 PG_USER=""
 WARMUP_LINE=""
 WARMUP_N=""
@@ -155,6 +162,9 @@ capture_baseline() {
   {
     echo "run_id=$RUN_ID"
     echo "bb_db_name=$BB_DB_NAME"
+    echo "bb_db_prefix=$DB_PREFIX"
+    echo "bb_project=$PROJECT"
+    echo "bb_home_port=$HOME_PORT"
     echo "shared_ids=${SHARED_IDS[*]}"
     echo "pg_user=$PG_USER"
     echo "base_3080_http=$BASE_3080"
@@ -178,8 +188,9 @@ def main():
     except Exception as e:
         print("UNSAFE: cannot parse compose config JSON: %s" % e); return 3
     bad = []
-    if cfg.get("name") != "ehome-bb":
-        bad.append("project name=%r (expected ehome-bb)" % cfg.get("name"))
+    EXPECTED_PROJECT = __import__("os").environ.get("BB_EXPECT_PROJECT", "ehome-bb")
+    if cfg.get("name") != EXPECTED_PROJECT:
+        bad.append("project name=%r (expected %s)" % (cfg.get("name"), EXPECTED_PROJECT))
     svcs = cfg.get("services") or {}
     if not svcs:
         bad.append("no services after resolution")
@@ -231,7 +242,7 @@ _resolve_compose() {
     local json verdict rc
     json="$(docker compose "${args[@]}" -p "$PROJECT" config --format json 2>/dev/null)" || continue
     printf '%s' "$json" > "$EVID/00-compose-config-$cand.json"
-    verdict="$(printf '%s' "$json" | python3 "$EVID/bin/compose_safety.py" 2>&1)"
+    verdict="$(printf '%s' "$json" | BB_EXPECT_PROJECT="$PROJECT" python3 "$EVID/bin/compose_safety.py" 2>&1)"
     rc=$?
     echo "$verdict" > "$EVID/00-compose-config-$cand.safety"
     if [[ $rc -ne 0 ]]; then log "compose 候选 [$cand] 安全校验拒绝 -> $verdict"; continue; fi
@@ -246,6 +257,52 @@ _resolve_compose() {
 }
 
 _bb_compose() { docker compose "${COMPOSE_ARGS[@]}" -p "$PROJECT" "$@"; }
+
+# ─ project 级排他锁 (与 probes/_lock.sh 同一把锁) ──────────────────────────
+# 为什么需要: 契约 project 名共享, label 判据无法区分「同一个 ehome-bb 的两次运行」——
+# 两个 run 都用 -p ehome-bb 时, 一方 down -v 必然命中另一方。只能串行化。
+# 复用子代理 B 的 _lock.sh, 使 run.sh 与探针之间也互斥(同一锁文件)。
+BB_LOCK_FD=""
+BB_LOCK_FILE=""
+
+# 共享脱敏：run.sh **自己也写容器日志**（S1 的 logs-excerpt.txt），故同样必须脱敏。
+# 实测事故（2026-09-16）：漏了这里 ⇒ 明文一次性凭据进入证据目录。
+if [ -f "$PROBES_DIR/_redact.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$PROBES_DIR/_redact.sh"
+fi
+
+_bb_lock_acquire() {
+  if [ -f "$PROBES_DIR/_lock.sh" ]; then
+    # shellcheck disable=SC1090
+    . "$PROBES_DIR/_lock.sh"
+    bb_acquire_lock "$PROJECT"
+    return $?
+  fi
+  return 2   # 2 = 环境未提供锁机制
+}
+
+# 顶层探针(03/06)自己会去抢同一把 project 锁。run.sh 若一直持有, 它们必然抢不到
+# (实测: 03 因 run.sh 持锁而 exit 3)。做法: 只在「起栈/清理」这些真正需要互斥的短窗口
+# 持锁; 顶层探针运行前**释放**, 跑完立刻**重新获取**。
+BB_LOCK_TOP=0   # 1 = 锁记在顶层(变量赋值), 不能靠子 shell 释放
+_bb_lock_ensure() {
+  [ "$BB_LOCK_TOP" = "1" ] && return 0
+  local rc
+  _bb_lock_acquire; rc=$?
+  [ "$rc" = "0" ] && { BB_LOCK_TOP=1; return 0; }
+  # 2 = 无锁机制环境(自测), 视为可继续
+  [ "$rc" = "2" ] && { BB_LOCK_TOP=0; return 0; }
+  return 1
+}
+_bb_lock_free() {
+  [ "$BB_LOCK_TOP" = "1" ] || return 0
+  command -v bb_release_lock >/dev/null 2>&1 && bb_release_lock
+  BB_LOCK_TOP=0
+}
+_bb_lock_release() {
+  if command -v bb_release_lock >/dev/null 2>&1; then bb_release_lock; fi
+}
 
 cat > "$EVID/bin/bb-compose" <<EOF
 #!/usr/bin/env bash
@@ -270,11 +327,15 @@ _create_bb_db() {
 _drop_bb_dbs() {
   docker inspect ehome-postgres >/dev/null 2>&1 || { log "ehome-postgres 不可用, 跳过独立库清理"; return 0; }
   local names d out dropped=0 listed=0
-  names="$(_psql_rows "SELECT datname FROM pg_database WHERE datname LIKE 'ehome_bb_%' ORDER BY datname")"
+  # 注意: 不能用 LIKE '${DB_PREFIX}%' —— SQL 的 _ 是单字符通配符,
+  # 会把 ehome_bbdev_* 之类误算进来(实测假阳性)。starts_with 是字面量比较。
+  names="$(_psql_rows "SELECT datname FROM pg_database WHERE starts_with(datname, '${DB_PREFIX}') ORDER BY datname")"
   listed="$(printf '%s\n' "$names" | grep -c . || true)"
   while IFS= read -r d; do
     [[ -z "$d" ]] && continue
-    [[ "$d" =~ ^ehome_bb_[A-Za-z0-9_]+$ ]] || { log "  DROP 跳过(名字不匹配护栏): $d"; continue; }
+    # 允许短横线: 探针自管栈时可能用「ehome_bb_<date>-<time>」式库名。
+    # 前缀 + 保留名单双重护栏仍在, 放宽字符集不会触及共享库。
+    [[ "$d" =~ ^${DB_PREFIX}[A-Za-z0-9_-]+$ ]] || { log "  DROP 跳过(名字不匹配护栏): $d"; continue; }
     _is_reserved_db "$d" && { log "  DROP 拒绝(保留名单): $d"; continue; }
     out="$(_psql_exec "DROP DATABASE IF EXISTS \"$d\" WITH (FORCE)")"
     log "  DROP DATABASE $d -> ${out:-ok}"
@@ -286,6 +347,62 @@ _drop_bb_dbs() {
 }
 
 # ── 栈生命周期 ───────────────────────────────────────────────────────────────
+# ─ 环境完整性: 栈所有权 ──────────────────────────────────────────────────
+# 契约 project 名是共享的; 若同 project 上并行跑着另一个 run, 同名容器会被复用,
+# 我们可能对着**别人的容器**做断言(实测: Q6 抓到接入别 run 独立库的容器, 误判产品缺陷)。
+# 用黑盒证据(容器启动日志里的 DB=host:port/<db>)确认容器连的是**本 run 的独立库**。
+_assert_stack_ownership() {
+  local d web lg db ev
+  d="$EVID"
+  [ "$#" -gt 0 ] && d="$1"
+  mkdir -p "$d"
+  web="$(docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}' 2>/dev/null | head -1)"
+  if [ -z "$web" ]; then
+    printf 'result=NO_CONTAINER expected_db=%s\n' "$BB_DB_NAME" > "$d/ownership.txt"
+    log "所有权检查: 未找到 project=$PROJECT 的运行容器"
+    return 1
+  fi
+  lg="$(docker logs "$web" 2>&1 || true)"
+  db="$(printf '%s' "$lg" | grep -oE 'DB=[^ ]+:[0-9]+/[A-Za-z0-9_-]+' | head -1 | sed 's|.*/||')"
+  ev="$(printf '%s' "$lg" | grep -oE 'Config: MQTT=[^ ]+ DB=[^ ]+' | head -1)"
+  [ -n "$db" ] || db="<none>"
+  {
+    echo "container=$web"
+    echo "expected_db=$BB_DB_NAME"
+    echo "observed_db=$db"
+    echo "evidence=$ev"
+  } > "$d/ownership.txt"
+  if [ "$db" = "<none>" ]; then
+    log "所有权检查: 容器 $web 日志中未见 'DB=host:port/<db>' 形态"
+    return 1
+  fi
+  if [ "$db" != "$BB_DB_NAME" ]; then
+    log "!! 所有权检查失败: 容器 $web 连的是 $db, 期望 $BB_DB_NAME — 该容器很可能属于另一次运行"
+    return 1
+  fi
+  log "所有权检查: 容器 $web 连的库 = $BB_DB_NAME (属于本 run)"
+  return 0
+}
+
+_stack_running() {
+  local n
+  n="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  [[ "${n:-0}" -gt 0 ]]
+}
+
+# 确保应用经公开 HTTP 接口可探(黑盒视角)
+_wait_app_http() {
+  local url="http://127.0.0.1:${HOME_PORT}/" i code
+  for i in $(seq 1 30); do
+    code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$url" 2>/dev/null || true)"
+    code="$(printf '%s' "${code:-000}" | tr -d '[:space:]')"
+    [[ -n "$code" && "$code" != "000" ]] && { log "应用 :$HOME_PORT 可达 (HTTP $code)"; return 0; }
+    sleep 1
+  done
+  log "应用 :$HOME_PORT 在 30s 内不可达 (原始: HTTP ${code:-000})"
+  return 1
+}
+
 _stack_up() {
   local mode="$1" d="$2"
   mkdir -p "$d"
@@ -306,8 +423,10 @@ _stack_up() {
 # ── 清理(异常路径也执行) ─────────────────────────────────────────────────────
 _remove_bb_containers() {
   local ids id nm
-  ids="$( { docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
-            docker ps -aq --filter "name=^ehome-bb-" 2>/dev/null; } | sort -u )"
+  # 只清理 label 与 project 精确相等的容器。
+  # 不能用「label 匹配 OR 名字前缀」放宽整体 —— 那会误删同前驱的其他 project
+  # (实测: 曾删掉并行的 ehome-bb-dev-b-ehome)。契约 project 为 ehome-bb, 前缀安全。
+  ids="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | sort -u)"
   while IFS= read -r id; do
     [[ -z "$id" ]] && continue
     nm="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||')"
@@ -319,10 +438,15 @@ _remove_bb_containers() {
 }
 _remove_bb_volumes() {
   local ids v
-  ids="$( { docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
-            docker volume ls -q --filter "name=^${PROJECT}_" 2>/dev/null; } | sort -u )"
+  # 与容器清理同样**只认 label 精确相等**，不用 name 前缀。
+  # 为什么移除 `name=^${PROJECT}_` 兜底：PROJECT=ehome-bb 时该前缀会命中
+  # `ehome-bb_*`（含并行 dev project 的卷）—— 与「容器被前缀误删」是同一缺陷类。
+  # 主控实测（2026-09-16）：`docker volume ls -q --filter name=^ehome-bb_` 确实返回 ehome-bb_mcprobe-vol。
+  # 容器/卷/网络三处必须同判据，否则修了容器、漏了卷。
+  ids="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | sort -u)"
   while IFS= read -r v; do
     [[ -z "$v" ]] && continue
+    if _is_shared_id "$v"; then log "  拒绝删除共享卷(ID 快照命中): $v"; continue; fi
     case "$v" in *ehome-pgdata|*ehome-emqxdata|*ehome-redisdata) log "  拒绝删除共享卷: $v"; continue;; esac
     log "  docker volume rm $v"
     docker volume rm "$v" >/dev/null 2>&1 </dev/null || log "  (volume rm 失败/在用: $v)"
@@ -330,8 +454,8 @@ _remove_bb_volumes() {
 }
 _remove_bb_networks() {
   local ids n nm
-  ids="$( { docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null
-            docker network ls -q --filter "name=^${PROJECT}_" 2>/dev/null; } | sort -u )"
+  # 同卷清理：只认 label 精确相等（理由同上，不再用 name 前缀）。
+  ids="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | sort -u)"
   while IFS= read -r n; do
     [[ -z "$n" ]] && continue
     nm="$(docker network inspect -f '{{.Name}}' "$n" 2>/dev/null)"
@@ -346,6 +470,16 @@ do_cleanup() {
   CLEANUP_DONE=1
   local d="$EVID/99-cleanup"; mkdir -p "$d"
   section "清理 (project=$PROJECT)"
+  # 并发保护: 本 run 因探测到他人栈而拒绝运行, 从未创建任何资源。
+  # 此时**绝不**执行 down -v / 删卷 / 删网络 —— 那是在删别人的东西。
+  if [[ $FOREIGN_STACK == 1 ]]; then
+    {
+      echo "本 run 检测到同 project 的并发栈, 已拒绝运行(未创建任何资源)。"
+      echo "因此跳过所有清理动作 —— 既不删容器/卷/网络, 也不 DROP 任何库。"
+    } > "$d/cleanup.log"
+    log "并发保护: 本 run 未创建资源, 跳过清理(不触碰他人栈)"
+    return 0
+  fi
   {
     echo "== docker compose down -v =="
     if [[ ${#COMPOSE_ARGS[@]} -gt 0 ]]; then _bb_compose down -v --remove-orphans 2>&1
@@ -363,21 +497,34 @@ do_cleanup() {
 check_residue() {
   local d="$EVID/98-zero-residue"; mkdir -p "$d"
   section "零残留核对"
+  if [[ $FOREIGN_STACK == 1 ]]; then
+    printf 'N/A — 本 run 因并发冲突拒绝运行, 未创建任何资源; 存在的 ehome-bb 资源属于他人, 不计为本 run 残留\n' > "$d/residue.txt"
+    log "零残留核对: N/A (本 run 未创建资源; 同 project 的容器属于他人)"
+    return 0
+  fi
   local c v net db
-  c="$(docker ps -a --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$1 ~ ("^" p "-") || $2 == p' | wc -l)"
-  v="$( { docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT"; docker volume ls -q --filter "name=^${PROJECT}_"; } | sort -u | grep -c . || true)"
-  net="$(docker network ls --format '{{.Name}} {{.Label "com.docker.compose.project"}}' | awk -v p="$PROJECT" '$1 ~ ("^" p "_") || $2 == p' | wc -l)"
-  db="$(docker inspect ehome-postgres >/dev/null 2>&1 && _psql_rows "SELECT count(*) FROM pg_database WHERE datname LIKE 'ehome_bb_%'" || echo 0)"
+  # 只认 label 精确等于本 project 的容器; 无 label 的孤儿才用名字前缀兜底。
+  # 不能仅按名字前缀 —— 会把并行 project(ehome-bb-dev-c-ehome) 误报为残留(实测假阳性)。
+  c="$(docker ps -a --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$2 == p || ($2 == "" && $1 ~ ("^" p "-"))' | wc -l)"
+  # 卷计数与容器/网络**同判据**：label 精确，或「无 label 的孤儿」才用名字前缀。
+  # 不再无条件用 name 前缀 —— 那会把并行 project 的卷误报为残留（假阳性）。
+  v="$(docker volume ls --format '{{.Name}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$2 == p || ($2 == "" && $1 ~ ("^" p "_"))' | wc -l)"
+  net="$(docker network ls --format '{{.Name}} {{.Label "com.docker.compose.project"}}' | awk -v p="$PROJECT" '$2 == p || ($2 == "" && $1 ~ ("^" p "_"))' | wc -l)"
+  # 计数去空白: 命令替换带回车曾导致 [[ "$c" != 0 ]] 误判为「有残留」(假红)
+  c="$(printf '%s' "$c" | tr -d '[:space:]')"
+  v="$(printf '%s' "$v" | tr -d '[:space:]')"
+  net="$(printf '%s' "$net" | tr -d '[:space:]')"
+  db="$(docker inspect ehome-postgres >/dev/null 2>&1 && _psql_rows "SELECT count(*) FROM pg_database WHERE starts_with(datname, '${DB_PREFIX}')" || echo 0)"
   db="${db:-0}"
   {
     echo "== 残留容器 (label 或 名字前缀) =="
-    docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$1 ~ ("^" p "-") || $3 == p'
+    docker ps -a --format '{{.Names}}\t{{.Status}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$3 == p || ($3 == "" && $1 ~ ("^" p "-"))'
     echo "== 残留卷 =="
-    { docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT"; docker volume ls -q --filter "name=^${PROJECT}_"; } | sort -u
+    docker volume ls --format '{{.Name}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$2 == p || ($2 == "" && $1 ~ ("^" p "_")) {print $1}' | sort -u
     echo "== 残留网络 =="
-    docker network ls --format '{{.Name}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$1 ~ ("^" p "_") || $2 == p'
-    echo "== 残留独立库 ehome_bb_* =="
-    docker inspect ehome-postgres >/dev/null 2>&1 && _psql_rows "SELECT datname FROM pg_database WHERE datname LIKE 'ehome_bb_%' ORDER BY 1" || echo "(PG 不可用, 跳过)"
+    docker network ls --format '{{.Name}}\t{{.Label "com.docker.compose.project"}}' | awk -F'\t' -v p="$PROJECT" '$2 == p || ($2 == "" && $1 ~ ("^" p "_"))'
+    echo "== 残留独立库 ${DB_PREFIX}* =="
+    docker inspect ehome-postgres >/dev/null 2>&1 && _psql_rows "SELECT datname FROM pg_database WHERE starts_with(datname, '${DB_PREFIX}') ORDER BY 1" || echo "(PG 不可用, 跳过)"
     echo ""
     echo "RESIDUE containers=$c volumes=$v networks=$net bb_databases=$db"
   } > "$d/residue.txt" 2>&1
@@ -451,6 +598,9 @@ run_probe() {
     "BB_PROJECT=$PROJECT"
     "BB_HOME_PORT=$HOME_PORT"
     "BB_DB_NAME=$BB_DB_NAME"
+    "BB_DB=$BB_DB_NAME"
+    "BB_RUNID=$RUN_ID"
+    "BB_TIMEOUT=${BB_TIMEOUT:-180}"
     "BB_COMPOSE_BASE=$COMPOSE_BASE"
     "BB_COMPOSE_FILE=$COMPOSE_BB"
     "BB_IMAGE=$APP_IMAGE"
@@ -480,28 +630,54 @@ run_probe() {
 check_cache_warmup() {
   local d="$EVID/S1-cache-warmup"; mkdir -p "$d"
   section "SUP-1 / cache-warmup (附加检查, 非 Q1-Q7)"
-  if [[ $STACK_UP != 1 ]]; then
-    printf '结论: SKIP (栈未起来, 无冷启动日志可查)\n' > "$d/result.txt"
-    record "S1" "cache-warmup" "SUP" "SKIP" "栈未起来, 无冷启动日志" "$d" "-"
-    log "[S1] SKIP: 栈未起来"; SKIP_COUNT=$((SKIP_COUNT+1)); return 0
-  fi
-  local names n hits=0
+  local names n hits=0 line sources=""
   names="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}')"
   : > "$d/logs-excerpt.txt"
+  # 栈已不在运行且无任何栈证据 => 真 SKIP(未跑到冷启动)
+  if [[ $STACK_UP != 1 && -z "$names" ]]; then
+    printf '结论: SKIP (未观察到黑盒栈运行, 无冷启动日志可查)\n' > "$d/result.txt"
+    record "S1" "cache-warmup" "SUP" "SKIP" "未观察到黑盒栈运行, 无冷启动日志" "$d" "-"
+    log "[S1] SKIP: 未观察到黑盒栈运行"; SKIP_COUNT=$((SKIP_COUNT+1)); return 0
+  fi
+  # 取证来源 1: 仍在运行的容器实时日志
   while IFS= read -r n; do
     [[ -z "$n" ]] && continue
-    local lg line
-    lg="$(docker logs --tail=3000 "$n" 2>&1 || true)"
+    local lg
+    lg="$(docker logs --tail=5000 "$n" 2>&1 || true)"
+    printf '\n===== container=%s =====\n' "$n" >> "$d/logs-excerpt.txt"
     printf '%s' "$lg" >> "$d/logs-excerpt.txt"
+    # 脱敏：容器启动日志含一次性初始化凭据，**必须**在落盘后立即脱敏。
+    # 实测事故（2026-09-16）：本文件曾泄漏明文凭据 —— 我原先只给 probes/*.sh 加了脱敏，
+    # 漏了 run.sh 自己写的这份日志（这正是「脱敏是写日志的属性，不是某文件的职责」的反例）。
+    if command -v bb_redact_file >/dev/null 2>&1; then bb_redact_file "$d/logs-excerpt.txt"; fi
     line="$(printf '%s' "$lg" | grep -oE 'Latest value cache warmed up: [0-9]+ rows' | head -1)"
     if [[ -n "$line" ]]; then
       hits=$((hits+1)); WARMUP_LINE="$line"
       WARMUP_N="$(printf '%s' "$line" | grep -oE '[0-9]+')"
-      printf 'container=%s line=%s\n' "$n" "$line" >> "$d/result.txt"
+      printf 'source=live container=%s line=%s\n' "$n" "$line" >> "$d/result.txt"
+      sources="$sources live:$n"
     fi
   done <<< "$names"
+  # 取证来源 2: 探针自管栈时留下的冷启动日志快照
+  # (03 的 trap 会 compose down 并 dropdb, 使实时取证不稳定; 快照是等价证据)
+  if [[ $hits -eq 0 ]]; then
+    local snap f
+    for snap in "$EVID"/*/03-container.log "$EVID"/*/stack-logs.txt "$EVID"/*/*.log "$EVID"/*/*.txt; do
+      [[ -f "$snap" ]] || continue
+      f="$snap"
+      line="$(grep -oE 'Latest value cache warmed up: [0-9]+ rows' "$f" 2>/dev/null | head -1)"
+      if [[ -n "$line" ]]; then
+        hits=$((hits+1)); WARMUP_LINE="$line"
+        WARMUP_N="$(printf '%s' "$line" | grep -oE '[0-9]+')"
+        printf 'source=snapshot file=%s line=%s\n' "$f" "$line" >> "$d/result.txt"
+        printf '\n===== snapshot=%s =====\n%s\n' "$f" "$line" >> "$d/logs-excerpt.txt"
+        sources="$sources snapshot:$f"
+        break
+      fi
+    done
+  fi
   if [[ $hits -gt 0 ]]; then
-    record "S1" "cache-warmup" "SUP" "PASS" "观察到 [$WARMUP_LINE] (N=$WARMUP_N)" "$d" "-"
+    record "S1" "cache-warmup" "SUP" "PASS" "观察到 [$WARMUP_LINE] (N=$WARMUP_N; 来源:$sources)" "$d" "-"
     log "[S1] PASS: 冷启动日志含 [$WARMUP_LINE] (N=$WARMUP_N)"
   else
     {
@@ -524,11 +700,55 @@ main() {
   section "运行开始 run_id=$RUN_ID"
   log "仓库=$REPO_ROOT  探针目录=$PROBES_DIR"
   log "选项: only='${ONLY_FILTER:-<全部>}' skip_build=$SKIP_BUILD"
-  log "独立库=$BB_DB_NAME"
+  log "独立库=$BB_DB_NAME (前缀 $DB_PREFIX)"
 
   capture_baseline
   if _resolve_compose; then COMPOSE_RESOLVED=1; else log "栈不可用原因: $STACK_REASON"; fi
-  if [[ $COMPOSE_RESOLVED == 1 ]]; then _create_bb_db || log "建库未成功(探针可能自行处理)"; fi
+
+  # ─ 先取 project 级排他锁 ───────────────────────────────────────────────
+  local lockrc
+  _bb_lock_ensure; lockrc=$?
+  if [ "$lockrc" = "1" ]; then
+    section "并发冲突(排他锁) — 拒绝在共享 project 上运行"
+    local lp="?"
+    command -v bb_lock_path >/dev/null 2>&1 && lp="$(bb_lock_path "$PROJECT")"
+    log "project=$PROJECT 的排他锁已被其他 run/探针持有(锁文件 $lp)。"
+    log "持有者信息: $lp.holder -> $(cat "$lp.holder" 2>/dev/null | tr '\n' ' ')"
+    log "不等待、不自旋、不清理: 直接退出, 交给你(主控)串行调度。"
+    FOREIGN_STACK=1
+    LOCK_CONFLICT=1
+    # 并发冲突不算「失败」也不占 FAIL 计数: 退出码 3 单独表达「本 run 没跑成」
+    record "P0" "project-lock" "ENV" "CONFLICT" "project $PROJECT 排他锁被占用 — 本 run 未起栈、未清理他人资源" "-" "-"
+    section "编排结束: FAIL=$FAIL_COUNT SKIP=$SKIP_COUNT"
+    return 0
+  fi
+  if [ "$lockrc" = "2" ]; then
+    log "提示: 未找到 probes/_lock.sh, 跳过 project 排他锁 — 仅靠「同 project 已有容器」护栏"
+  else
+    log "已取得 project=$PROJECT 的排他锁 ($BB_LOCK_FILE)"
+  fi
+
+  # ─ 并发保护(硬护栏) ────────────────────────────────────────────────────
+  # project=$PROJECT 是共享名字。若启动时已有同 project 的运行容器, 说明另一个
+  # 代理/另一次运行正占用它: 继续下去 down -v / 同名容器会互相破坏, 且断言可能
+  # 打在别人的容器上(实测发生过: Q6 误判产品缺陷)。此时拒绝运行且不清理他人资源。
+  local preexist allow
+  preexist="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  case "$preexist" in ''|*[!0-9]*) preexist=0;; esac
+  allow="$(printenv BB_ALLOW_SHARED_PROJECT 2>/dev/null || true)"
+  if [ "$preexist" -gt 0 ] && [ "$allow" != "1" ]; then
+    section "并发冲突 — 拒绝在共享 project 上运行"
+    log "已存在 $preexist 个 project=$PROJECT 的运行容器(可能是另一个代理/另一次运行):"
+    docker ps --filter "label=com.docker.compose.project=$PROJECT" --format '    {{.Names}}\t{{.Status}}' 2>&1 | tee -a "$LOG_FILE" >&2
+    log "契约要求本 run 独占 project=$PROJECT。请等对方结束; 确要并行须显式 BB_ALLOW_SHARED_PROJECT=1 并自担互踩风险。"
+    FOREIGN_STACK=1
+    record "P0" "concurrency-guard" "ENV" "ERROR" "检测到同 project 上的并发运行容器($preexist 个) — 本 run 未起栈、未清理他人资源" "-" "-"
+    FAIL_COUNT=$((FAIL_COUNT+1))
+    section "编排结束: FAIL=$FAIL_COUNT SKIP=$SKIP_COUNT"
+    return 0
+  fi
+  # 故意**不**提前建库: 探针自管生命周期时(03/06), 它们自己 dropdb/createdb;
+  # 提前建库会让它们的 createdb 因「库已存在」而失败(实测踩过)。自管探针结束后再补建。
 
   local first_stack_step=1 id name q probe
   for id in "${STEP_ORDER[@]}"; do
@@ -540,26 +760,68 @@ main() {
       log "[$id/$name] SKIP: 探针缺失 (子代理尚未产出)"
       SKIP_COUNT=$((SKIP_COUNT+1)); continue
     fi
+    local sd="$EVID/${id}-${name}" self=0
     if step_needs_stack "$id"; then
       if [[ $COMPOSE_RESOLVED != 1 ]]; then
         record "$id" "$name" "$q" "SKIP" "$STACK_REASON" "-" "$probe"
         log "[$id/$name] SKIP: $STACK_REASON"; SKIP_COUNT=$((SKIP_COUNT+1)); continue
       fi
-      local mode="warm" sd="$EVID/${id}-${name}"
-      if step_coldstart "$id" && [[ $first_stack_step == 1 ]]; then mode="cold"; fi
-      if [[ $STACK_UP != 1 || "$mode" == "cold" ]]; then
-        if ! _stack_up "$mode" "$sd"; then
+      if step_selfmanaged "$id"; then
+        # 探针自带 compose up/down + dropdb/createdb (03/06 实测如此)。run.sh 不抢生命周期。
+        self=1
+        if step_coldstart "$id" && [[ $first_stack_step == 1 ]]; then
+          mkdir -p "$sd"
+          _bb_compose down -v --remove-orphans > "$sd/pre-down.log" 2>&1 || true
+          log "[$id/$name] 冷启动: 已 down -v 保证干净起点"
+        fi
+        log "[$id/$name] 生命周期由探针自管(self-managed): run.sh 不预起栈、不预建库"
+      elif [[ $STACK_UP != 1 ]]; then
+        if ! _stack_up warm "$sd"; then
           record "$id" "$name" "$q" "ERROR" "栈启动失败(见 ${id}-${name}/stack-up.log)" "$sd" "$probe"
           log "[$id/$name] ERROR: 栈启动失败"; FAIL_COUNT=$((FAIL_COUNT+1)); continue
         fi
+        _wait_app_http || true
+        if ! _assert_stack_ownership "$sd"; then
+          record "$id" "$name" "$q" "ERROR" "环境完整性: 栈所有权检查失败(容器连的库非本 run 独立库, 见 ownership.txt)" "$sd" "$probe"
+          log "[$id/$name] ERROR: 栈所有权检查失败 — 疑似与并发 run 冲突, 不据此判定产品缺陷"
+          FAIL_COUNT=$((FAIL_COUNT+1)); continue
+        fi
       fi
-      first_stack_step=0
     fi
+    # 自管探针(03/06)自带 project 锁, 运行前必须释放, 否则它抢不到自己那把锁(实测 exit 3)。
+    # 其余探针由 run.sh 全程持锁(04/05 不自己抢锁, 靠 run.sh 的锁挡住并发 run)。
+    local released=0
+    if step_selfmanaged "$id"; then _bb_lock_free; released=1; fi
     run_probe "$id" "$name" "$q" "$probe"; local rc=$?
+    if [[ $released == 1 ]] && ! _bb_lock_ensure; then
+      record "$id" "$name" "$q" "CONFLICT" "探针结束后无法重新取得 project 锁(疑似并发 run)" "$EVID/${id}-${name}" "$probe"
+      log "[$id/$name] CONFLICT: 探针结束后重新取锁失败"
+      log "安全取舍: 置 FOREIGN_STACK=1, 收尾时不做任何清理(无法区分同名资源归属, 宁可留残留也不删别人的)"
+      LOCK_CONFLICT=1; FOREIGN_STACK=1; break
+    fi
+    # 探针可能自行管理生命周期(如 03 的 trap: compose down + dropdb 独立库)。
+    # 若它拆了栈或删了库, 必须重置状态; 否则后续 warm 探针会在空栈/空库上假绿。
+    if step_needs_stack "$id"; then
+      if [[ $self == 0 ]]; then _wait_app_http || true; fi
+      if ! _stack_running; then
+        [[ $STACK_UP == 1 ]] && log "[$id/$name] 提示: 探针结束后黑盒栈已不在运行 — 后续需要栈的探针将重新起栈"
+        STACK_UP=0
+      fi
+      # 自管探针会把库删掉; 后续 warm 探针(04/05)必须连到本 run 的独立库
+      if ! _psql_rows "SELECT 1 FROM pg_database WHERE datname='$BB_DB_NAME'" | grep -q 1; then
+        log "[$id/$name] 提示: 独立库 $BB_DB_NAME 不存在 — 重新创建, 保证后续探针连到本 run 的独立库"
+        _create_bb_db || log "!! 重建独立库失败"
+      fi
+    fi
+    if step_needs_stack "$id" && [[ $self == 0 ]]; then first_stack_step=0; fi
     if [[ $rc -eq 0 ]]; then
       record "$id" "$name" "$q" "PASS" "exit=0" "$EVID/${id}-${name}" "$probe"; log "[$id/$name] PASS"
     elif [[ $rc -eq 77 ]]; then
       record "$id" "$name" "$q" "SKIP" "探针主动 SKIP (exit=77)" "$EVID/${id}-${name}" "$probe"; log "[$id/$name] SKIP (77)"; SKIP_COUNT=$((SKIP_COUNT+1))
+    elif [[ $rc -eq 3 ]]; then
+      # 探针内部抢不到 project 排他锁(见 probes/_lock.sh)。这不是产品缺陷,
+      # 而是「本 run 没能跑成」; 记为 CONFLICT 并把全局退出码置为 3。
+      record "$id" "$name" "$q" "CONFLICT" "探针并发冲突 (exit=3, project 锁被占用)" "$EVID/${id}-${name}" "$probe"; log "[$id/$name] CONFLICT (锁被占用)"; LOCK_CONFLICT=1
     elif [[ $rc -eq 124 || $rc -eq 137 ]]; then
       record "$id" "$name" "$q" "ERROR" "超时(timeout ${PROBE_TIMEOUT}s, exit=$rc)" "$EVID/${id}-${name}" "$probe"; log "[$id/$name] ERROR: 超时"; FAIL_COUNT=$((FAIL_COUNT+1))
     else
@@ -582,7 +844,7 @@ write_report() {
     echo "- 仓库: $REPO_ROOT @ $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- project: $PROJECT  端口: $HOME_PORT  独立库: $BB_DB_NAME"
     echo "- 选项: --only ${ONLY_FILTER:-全部} / --skip-build=$SKIP_BUILD"
-    echo "- 退出码: **$final**  (0=全绿 1=失败/残留/共享异常 2=有 SKIP 未完成)"
+    echo "- 退出码: **$final**  (0=全绿 1=失败/残留/共享异常 2=有 SKIP 未完成 3=并发冲突未跑成)"
     echo ""
     echo "## 命题结果"
     echo ""
@@ -599,6 +861,7 @@ write_report() {
     echo "|---|---|"
     if [[ $RESIDUE_DIRTY == 0 ]]; then echo "| 零残留 (容器/卷/网络/独立库) | PASS |"; else echo "| 零残留 | DIRTY — 见 98-zero-residue/residue.txt |"; fi
     if [[ $SHARED_DIRTY == 0 ]]; then echo "| 共享资源未受影响 (:3080 / :8082 / 4 容器) | PASS |"; else echo "| 共享资源未受影响 | FAIL — 见 97-shared-health/shared.txt |"; fi
+    if [[ $LOCK_CONFLICT == 1 ]]; then echo "| project 排他锁 | 被占用 — 本 run 未运行(退出码 3), 请串行重试 |"; fi
     echo ""
     echo "## 未覆盖 (方案 §6 照抄)"
     echo ""
@@ -626,14 +889,18 @@ on_exit() {
   if [[ $MAIN_RC == 0 ]]; then MAIN_RC=$rc; fi
   section "收尾 (main rc=$MAIN_RC)"
   do_cleanup
+  # 清理完成后再释放 project 排他锁, 保证「起栈 -> 断言 -> 清理」全程互斥
+  _bb_lock_release && log "已释放 project=$PROJECT 的排他锁" || true
   check_residue
   check_shared
   local final="$MAIN_RC"
   if [[ $FAIL_COUNT -gt 0 ]]; then final=1; fi
   if [[ $RESIDUE_DIRTY != 0 || $SHARED_DIRTY != 0 ]]; then final=1; fi
   if [[ $final == 0 && -z "$ONLY_FILTER" && $SKIP_COUNT -gt 0 ]]; then final=2; fi
+  # 并发冲突优先报告为 3: 既不是通过(0)也不是失败(1), 而是「本 run 没跑成, 请串行重试」
+  if [[ $LOCK_CONFLICT == 1 ]]; then final=3; fi
   write_report "$final"
-  section "最终退出码: $final  (0=全绿 1=失败/残留/共享异常 2=有 SKIP 未完成)"
+  section "最终退出码: $final  (0=全绿 1=失败/残留/共享异常 2=有 SKIP 未完成 3=并发冲突未跑成)"
   log "证据目录: $EVID"
   exit "$final"
 }

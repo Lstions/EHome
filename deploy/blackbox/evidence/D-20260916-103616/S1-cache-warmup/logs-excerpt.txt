@@ -1,0 +1,77 @@
+
+===== container=ehome-bb-ehome =====
+2026-09-16T02:38:08.855Z	INFO	logger/logger.go:85	EHomeSystem Server v2.0 starting...
+2026-09-16T02:38:08.855Z	INFO	logger/logger.go:85	Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_103616, API=:8080
+2026-09-16T02:38:08.866Z	INFO	logger/logger.go:85	Database connected successfully
+2026-09-16T02:38:09.443Z	INFO	logger/logger.go:85	Database connected and migrated
+2026/09/16 02:38:09 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=unified_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=unified_data_202608 parent=unified_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=unified_data_202609 parent=unified_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=unified_data_202610 parent=unified_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=unified_data_202611 parent=unified_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=unified_data_202612 parent=unified_data
+2026/09/16 02:38:09 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=device_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=device_data_202608 parent=device_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=device_data_202609 parent=device_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=device_data_202610 parent=device_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=device_data_202611 parent=device_data
+2026/09/16 02:38:09 INFO partition_mgr: created partition partition=device_data_202612 parent=device_data
+2026-09-16T02:38:09.553Z	INFO	logger/logger.go:85	Logical device backfill: all instances already attached
+2026-09-16T02:38:09.559Z	INFO	logger/logger.go:85	Initialization credential (valid for 10 minutes): <REDACTED:credential>
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: bmp280 (BMP280 温度气压传感器)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: lk_th01 (LK-TH01 温湿度传感器)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: sn3000 (SN-3000 风向传感器)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: prs3001 (PRS-3001 光学雨量光照变送器)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: sn3001_rain (SN-3001 光学雨量计)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: jiabaida_bms (嘉佰达 BMS 电池管理系统)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: techfine_inverter (泰琪丰 GB3024 逆变器)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: generic_modbus (通用 Modbus RTU 设备)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Driver registered: generic_i2c (通用 I2C 设备)
+2026-09-16T02:38:09.560Z	INFO	logger/logger.go:85	Registered 9 device drivers with 0 parser overrides
+2026/09/16 02:38:09 INFO datalifecycle: index ensured index=idx_unified_logical_ts table=unified_data concurrently=false
+2026/09/16 02:38:09 INFO datalifecycle: index ensured index=idx_devdata_logical_ts table=device_data concurrently=false
+2026/09/16 02:38:09 INFO datalifecycle: backfill table done table=unified_data rows_updated=0 batches=0 resumed_from=0
+2026/09/16 02:38:09 INFO datalifecycle: backfill table done table=device_data rows_updated=0 batches=0 resumed_from=0
+2026/09/16 02:38:09 INFO logstream: consumer registered name=database
+2026/09/16 02:38:09 INFO logstream: consumer registered name=websocket
+2026/09/16 02:38:09 INFO databus: consumer registered name=terminal
+2026/09/16 02:38:09 INFO databus: consumer registered name=ws_push
+2026/09/16 02:38:09 INFO databus: consumer registered name=data_metrics
+2026/09/16 02:38:09 INFO databus: consumer registered name=pending_write
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard0
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard0
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard1
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard1
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard2
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard2
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard3
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard3
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard4
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard4
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard5
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard5
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard6
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard6
+2026/09/16 02:38:09 INFO databus: consumer registered name=sensor_parser_shard7
+2026/09/16 02:38:09 INFO databus: consumer registered name=db_persist_shard7
+2026-09-16T02:38:09.614Z	INFO	logger/logger.go:85	Latest value cache warmed up: 0 rows
+2026-09-16T02:38:09.616Z	INFO	logger/logger.go:85	[automation] 系统主体用户尚未创建 (subject_key=system_admin), 首次自动 device_action 触发时将惰性解析: record not found
+2026-09-16T02:38:09.618Z	INFO	logger/logger.go:85	ChannelCmdV2 dispatcher enabled owner=server:bf190118fe3d:1:3022cd68-1581-4565-8748-1ed5a3fbf1b6
+2026-09-16T02:38:09.618Z	INFO	logger/logger.go:85	Started 8 data report workers
+2026-09-16T02:38:09.618Z	INFO	logger/logger.go:85	Collector manager started
+2026-09-16T02:38:09.619Z	INFO	logger/logger.go:85	[OfflineDetector] Loaded 0 active edge devices into cache
+2026-09-16T02:38:09.619Z	INFO	logger/logger.go:85	Offline detector started (3-layer)
+2026-09-16T02:38:09.620Z	INFO	logger/logger.go:85	API server listening on :8080
+2026-09-16T02:38:11.492Z	INFO	logger/logger.go:85	[sync_id=eab73e5a-79ea-4745-93ee-06e1c2582a02] ConfigChange push: device=sim-bbc-519888 reason=config_changed: type=node action=create
+2026-09-16T02:38:11.494Z	INFO	logger/logger.go:85	[sim-bbc-519888] ConfigManifest hex (58 bytes): 040a0b76322d3633353139303233520408001002422465616237336535612d373965612d343734352d393365652d303665316332353832613032
+2026-09-16T02:38:11.501Z	INFO	logger/logger.go:85	[sync_id=eab73e5a-79ea-4745-93ee-06e1c2582a02] ConfigManifest sent: device=sim-bbc-519888 id=v2-63519023 reason=config_changed: type=node action=create 0 templates, 0 channels
+2026-09-16T02:38:11.503Z	INFO	logger/logger.go:85	[sync_id=39b838d3-ff7c-4467-9364-075568a275a1] ConfigChange push: device=sim-bbc-519888 reason=config_changed: type=channel action=create
+2026-09-16T02:38:11.505Z	INFO	logger/logger.go:85	[sim-bbc-519888] ConfigManifest hex (87 bytes): 040a0b76322d6331353964336539221b080112055541525430208827280130013a07aabb00002580cc4000520408001002422433396238333864332d666637632d343436372d393336342d303735353638613237356131
+2026-09-16T02:38:11.508Z	INFO	logger/logger.go:85	[sync_id=39b838d3-ff7c-4467-9364-075568a275a1] ConfigManifest sent: device=sim-bbc-519888 id=v2-c159d3e9 reason=config_changed: type=channel action=create 0 templates, 1 channels
+2026-09-16T02:38:11.529Z	INFO	logger/logger.go:85	[edge-device-create] Created 1 ConfigTemplates for type=lk_th01 via driver
+2026-09-16T02:38:11.533Z	INFO	logger/logger.go:85	[sync_id=20337983-382f-4b07-8950-9863a216924f] ConfigChange push: device=sim-bbc-519888 reason=config_changed: type=edge_device action=create
+2026-09-16T02:38:11.535Z	INFO	logger/logger.go:85	[sim-bbc-519888] ConfigManifest hex (87 bytes): 040a0b76322d3437643565346262221b080112055541525430208827280130013a07aabb00002580cc4000520408001002422432303333373938332d333832662d346230372d383935302d393836336132313639323466
+2026-09-16T02:38:11.538Z	INFO	logger/logger.go:85	[sync_id=20337983-382f-4b07-8950-9863a216924f] ConfigManifest sent: device=sim-bbc-519888 id=v2-47d5e4bb reason=config_changed: type=edge_device action=create 0 templates, 1 channels
+2026-09-16T02:38:11.655Z	INFO	logger/logger.go:85	[sync_id=a7b045e7-7292-47a6-b8c3-5020a053cee7] ConfigChange push: device=sim-bbc-519888 reason=config_changed: type=channel action=update
+2026-09-16T02:38:11.657Z	INFO	logger/logger.go:85	[sim-bbc-519888] ConfigManifest hex (87 bytes): 040a0b76322d3765623831653830221b080112055541525430208827280130013a07aabb0001c200cc4000520408001002422461376230343565372d373239322d343761362d623863332d353032306130353363656537
+2026-09-16T02:38:11.660Z	INFO	logger/logger.go:85	[sync_id=a7b045e7-7292-47a6-b8c3-5020a053cee7] ConfigManifest sent: device=sim-bbc-519888 id=v2-7eb81e80 reason=config_changed: type=channel action=update 0 templates, 1 channels

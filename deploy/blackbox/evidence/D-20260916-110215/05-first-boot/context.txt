@@ -1,0 +1,4 @@
+probe=05-first-boot.sh  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_20260916_110215
+base_url=http://127.0.0.1:18080  container=ehome-bb-ehome
+注意: 一次性凭据为秘密, 本目录所有文件均已脱敏 (CRED_RE -> <REDACTED:credential>)
+started_at=2026-09-16T11:04:14+08:00

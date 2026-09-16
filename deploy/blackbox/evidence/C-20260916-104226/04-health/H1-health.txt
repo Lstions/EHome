@@ -1,0 +1,3 @@
+GET /health -> status=200 content_type=application/json; charset=utf-8
+--- body (head -c 400) ---
+{"status":"ok"}

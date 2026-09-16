@@ -1,0 +1,6 @@
+channel_id=1
+GET 回读 BEFORE bus_config=AABB00002580CC
+POST /reconfigure -> status=200
+响应体: {"code":200,"data":{"baudrate":115200,"bus_config":"AABB0001C200CC","node_id":"sim-bbc-519888","status":"reconfigured"},"message":"ok"}
+响应 data.bus_config=AABB0001C200CC
+GET 回读 AFTER  bus_config=AABB0001C200CC  (落库值)

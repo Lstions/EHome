@@ -27,10 +27,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BASE="$REPO/docker-compose.yml"
 OVR="$REPO/deploy/blackbox/compose.bb.yml"
-PROJECT="ehome-bb"
-WEB="ehome-bb-ehome"
-IMAGE="${EHOME_BB_IMAGE:-ehome-bb-ehome:local}"
+# project / 容器名 / 端口 / 库名**必须可覆盖**（见 deploy/blackbox/CONTRACT.md 规则 B）。
+# 为什么：开发期与交付期若共用同一 project 名，一个代理的 `down -v` 会删掉另一个正在跑的栈 ——
+# 上一轮就是这样发生了真实互踩（D 删了 C 的容器）。默认值 = 契约值，覆盖值用于开发自测。
+PROJECT="${BB_PROJECT:-ehome-bb}"
+WEB="${PROJECT}-ehome"
+IMAGE="${EHOME_BB_IMAGE:-${PROJECT}-ehome:local}"
 TIMEOUT="${BB_TIMEOUT:-90}"
+
+# project 级排他锁：**同 project 并发会互相删容器**（实测：B 的交付取证连续 3 次被打断）。
+# label 精确判据**解决不了** —— 两个调用方都用 -p ehome-bb 时 label 完全相同，
+# 故只能串行化。拿不到锁立即失败（不等待），避免多代理互相饿死。
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/_lock.sh"
+# 共享脱敏（见 _redact.sh 头部：一次真实泄漏事故的教训）—— 每个写日志文件的探针都必须用。
+source "$SCRIPT_DIR/_redact.sh"
+if ! bb_acquire_lock "$PROJECT"; then
+  echo "[03] 无法获得 project '$PROJECT' 排他锁 —— 疑似同 project 并发，拒绝继续（避免互相删容器）" >&2
+  exit 3
+fi
+trap 'bb_release_lock' EXIT
 
 RUNID="${BB_RUNID:-$(date +%Y%m%d-%H%M%S)}"
 DB="${BB_DB:-ehome_bb_$RUNID}"
@@ -54,10 +70,11 @@ if [ -z "${POSTGRES_PASSWORD:-}" ]; then
   echo "FATAL: POSTGRES_PASSWORD 未在 $REPO/.env 中提供 —— 无法连共享 PG（不猜凭据）" >&2
   exit 1
 fi
-export HOME_PORT=18080
+PORT="${BB_HOME_PORT:-18080}"
+export HOME_PORT="$PORT"
 export EHOME_DB_NAME="$DB"
 export EHOME_DB_PORT=5432
-export EHOME_EXTERNAL_HOST="${EHOME_EXTERNAL_HOST:-127.0.0.1:18080}"
+export EHOME_EXTERNAL_HOST="${EHOME_EXTERNAL_HOST:-127.0.0.1:$PORT}"
 export EHOME_JWT_SECRET="${EHOME_JWT_SECRET:-bb_coldstart_secret_0123456789}"
 export EHOME_DB_HOST="${EHOME_DB_HOST:-postgres}"
 if [ -n "${BB_MUTATE_DB_HOST:-}" ]; then
@@ -76,7 +93,7 @@ cleanup() {
   else
     log "WARN: DROP 独立库 $DB 失败（需手工清理）"
   fi
-  log "清理后 ehome-bb 残留: $(docker ps -aq --filter name=ehome-bb | wc -l | tr -d ' ') 容器"
+  log "清理后 $PROJECT 残留: $(docker ps -aq --filter name=$PROJECT | wc -l | tr -d ' ') 容器"
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
@@ -87,8 +104,8 @@ log "独立库       : $DB"
 log "镜像         : $IMAGE"
 log "超时         : ${TIMEOUT}s"
 log "EHOME_DB_HOST: $EHOME_DB_HOST    <-- 变异自证关注点"
-log "复现命令     : cd $REPO && HOME_PORT=18080 EHOME_DB_NAME=$DB EHOME_DB_HOST=$EHOME_DB_HOST \\"
-log "                 docker compose -f docker-compose.yml -f deploy/blackbox/compose.bb.yml -p ehome-bb up -d"
+log "复现命令     : cd $REPO && HOME_PORT=$PORT EHOME_DB_NAME=$DB EHOME_DB_HOST=$EHOME_DB_HOST \\"
+log "                 docker compose -f docker-compose.yml -f deploy/blackbox/compose.bb.yml -p $PROJECT up -d"
 log ""
 
 #  前提守卫 ──────────────────────────────────────────────────────────────
@@ -163,6 +180,7 @@ log ""
 log "--- 断言2: 启动序列成功迹象；无 panic/FATAL ---"
 APP_LOG="$EVID/03-container.log"
 docker logs "$WEB" > "$APP_LOG" 2>&1 || true
+bb_redact_file "$APP_LOG"   # 启动日志含一次性凭据 ⇒ 写完立即脱敏
 LINES="$(wc -l < "$APP_LOG" | tr -d ' ')"
 if [ "$LINES" -ge 30 ]; then
   ok "分母守卫: 拿到 $LINES 行容器日志（>=30）"

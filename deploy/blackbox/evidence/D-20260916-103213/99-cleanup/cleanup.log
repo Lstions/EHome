@@ -1,0 +1,8 @@
+== docker compose down -v ==
+ Container ehome-bb-ehome Stopping 
+ Container ehome-bb-ehome Stopped 
+ Container ehome-bb-ehome Removing 
+ Container ehome-bb-ehome Removed 
+== 按 label/名字精确清理 ==
+  DROP DATABASE ehome_bb_20260916_103213 -> DROP DATABASE
+独立库清理: 列出 1 个, 实际处理 1 个

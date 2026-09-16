@@ -1,0 +1,4 @@
+container=ehome-bb-ehome
+expected_db=ehome_bb_20260916_103616
+observed_db=ehome_bb_20260916_103616
+evidence=Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_103616,

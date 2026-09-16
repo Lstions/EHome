@@ -1,0 +1,2 @@
+/ehome-postgres networks=ehomesystem_default(aliases=[ehome-postgres postgres])
+/ehome-emqx networks=ehomesystem_default(aliases=[ehome-emqx emqx])

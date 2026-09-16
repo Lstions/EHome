@@ -1,0 +1,23 @@
+INFO  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_20260916_105359
+INFO  GET /api/v1/auth/initialization -> status=200 body={"code":200,"data":{"state":"uninitialized"},"message":"ok"}
+PASS  F1 : 冷启动日志出现一次性凭据: total_len=68 selector_len=24 secret_len=43 (值未落盘)
+PASS  F4 : 错误凭据初始化被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F4b : 错误凭据尝试后系统仍未初始化 (state=uninitialized)
+PASS  F2 : 用一次性凭据建管理员成功 (201): {"code":201,"data":{"id":1,"username":"bbadmin"},"message":"initialized"}
+PASS  F2b : 初始化后状态转为 initialized
+PASS  F3 : 新管理员登录成功 (200, token_len=251)
+PASS  F5a : 重放已消费的一次性凭据被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F5b : 重复初始化被拒 (409): {"code":409,"data":null,"message":"initialization rejected","error_code":"AUTH_INITIALIZATION_REJECTED"}
+PASS  F5c : 重复初始化后原管理员仍可登录 (200) —— 管理员未被覆盖
+PASS  F5d : 入侵者账号不存在 (401) —— 未被创建
+PASS  F5e : 登录主体身份确认: username=bbadmin (未被替换)
+PASS  F6 : 冷启动回填日志出现: [Latest value cache warmed up: 0 rows]
+PASS  F1b : 负控成立: 不存在的凭据标记在日志中 0 命中 —— '没找到凭据' 这个信号可信
+PASS  F1c : 正控: 凭据抽取器在已知存在的一次性凭据行上成功抽出 68 字符 (selector+secret)
+INFO  附加段: 本会话修复的容器级复验 (F7-F10)
+PASS  F7 : 运行时 /overview.latest_data 返回多物理量: device=1 n_qty=2 (>=2; 修复前缓存命中只 1)
+PASS  F8 : reconfigure 真的改了 bus_config: AABB00002580CC -> AABB0001C200CC (响应与落库值一致; 判据看 DB 回读值, 非裸 200)
+PASS  F9 : 告警规则 enabled:false 落库为 false (响应=false, 回读=false)
+PASS  F10 : 启动回填日志可解析: [Latest value cache warmed up: 0 rows]
+
+==== 05-first-boot: PASS=18 FAIL=0 ====

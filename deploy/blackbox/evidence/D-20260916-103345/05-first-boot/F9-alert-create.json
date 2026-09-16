@@ -1,0 +1,1 @@
+{"code":201,"data":{"id":1,"target_type":"edge_device","target_id":1,"sensor_name":"temperature","comparator":"gt","threshold":30,"duration_sec":0,"silence_sec":300,"level":"warning","enabled":false,"name":"bbc-disabled-500699","created_at":"2026-09-16T02:36:14.256364654Z","updated_at":"2026-09-16T02:36:14.256364654Z"},"message":"ok"}

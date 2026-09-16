@@ -1,0 +1,99 @@
+$ docker build --progress=plain --build-arg GOPROXY=https://goproxy.cn,direct -t ehome-bb-ehome:local /home/sun/workspace/EHomeSystem
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.05kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:22-alpine
+#2 DONE 0.1s
+
+#3 [internal] load metadata for docker.io/library/golang:1.26.5-alpine
+#3 DONE 0.1s
+
+#4 [internal] load metadata for docker.io/library/alpine:3.21
+#4 DONE 0.1s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 DONE 0.0s
+
+#7 [backend-builder 1/6] FROM docker.io/library/golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
+#7 resolve docker.io/library/golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 0.1s done
+#7 DONE 0.1s
+
+#8 [stage-2 1/6] FROM docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+#8 resolve docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+#8 resolve docker.io/library/alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d 0.1s done
+#8 DONE 0.1s
+
+#9 [frontend-builder 1/7] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+#9 resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 0.1s done
+#9 DONE 0.1s
+
+#6 [internal] load build context
+#6 transferring context: 3.68MB 0.5s done
+#6 DONE 0.5s
+
+#10 [backend-builder 2/6] WORKDIR /app
+#10 CACHED
+
+#11 [stage-2 4/6] COPY --from=backend-builder /app/ehome-server .
+#11 CACHED
+
+#12 [backend-builder 5/6] COPY backend/ .
+#12 CACHED
+
+#13 [backend-builder 4/6] RUN go mod download
+#13 CACHED
+
+#14 [backend-builder 6/6] RUN CGO_ENABLED=0 GOOS=linux go build -o ehome-server ./cmd/server/
+#14 CACHED
+
+#15 [frontend-builder 4/7] COPY frontend-shared/package.json frontend-shared/pnpm-lock.yaml ./
+#15 CACHED
+
+#16 [frontend-builder 5/7] RUN pnpm install --frozen-lockfile --ignore-scripts
+#16 CACHED
+
+#17 [frontend-builder 7/7] RUN pnpm build
+#17 CACHED
+
+#18 [stage-2 2/6] RUN apk --no-cache add ca-certificates tzdata && rm -rf /var/cache/apk/*
+#18 CACHED
+
+#19 [frontend-builder 3/7] WORKDIR /app
+#19 CACHED
+
+#20 [stage-2 3/6] WORKDIR /app
+#20 CACHED
+
+#21 [stage-2 5/6] COPY --from=frontend-builder /app/dist ./static/dist
+#21 CACHED
+
+#22 [backend-builder 3/6] COPY backend/go.mod backend/go.sum ./
+#22 CACHED
+
+#23 [frontend-builder 2/7] RUN corepack enable && corepack prepare pnpm@latest --activate
+#23 CACHED
+
+#24 [frontend-builder 6/7] COPY frontend-shared/ .
+#24 CACHED
+
+#25 [stage-2 6/6] RUN mkdir -p /app/firmwares
+#25 CACHED
+
+#26 exporting to image
+#26 exporting layers done
+#26 exporting manifest sha256:5ab4dab8725d174301de926fd84c63cf8aad85eefea4e9c6bd231885e61993e0 done
+#26 exporting config sha256:31a5563eb2742adf73d5f6a00ccfa9e03730d031d582f41acb354f6fcdf40e20 done
+#26 exporting attestation manifest sha256:5a947573f9493b6279381be084eea3c8af2d8d5f86ee6a165d034df74403ca57 0.0s done
+#26 exporting manifest list sha256:a2bec367a22a0877b711c6053e1b6aff05d17936c7af9b9a817dae24a9fb29bf 0.0s done
+#26 naming to docker.io/library/ehome-bb-ehome:local done
+#26 unpacking to docker.io/library/ehome-bb-ehome:local
+#26 unpacking to docker.io/library/ehome-bb-ehome:local 0.3s done
+#26 DONE 0.4s
+[build exit=0]

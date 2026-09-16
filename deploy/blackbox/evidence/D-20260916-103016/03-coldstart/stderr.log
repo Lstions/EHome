@@ -1,0 +1,4 @@
+bb: project 'ehome-bb' 已被占用（同 project 并发会导致互相删容器）
+bb: 持有者: pid=449499 project=ehome-bb started=2026-09-16T10:30:16+08:00 
+bb: 锁文件: /home/sun/workspace/EHomeSystem/.logs/blackbox/ehome-bb.lock
+[03] 无法获得 project 'ehome-bb' 排他锁 —— 疑似同 project 并发，拒绝继续（避免互相删容器）

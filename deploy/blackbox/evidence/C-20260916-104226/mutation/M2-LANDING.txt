@@ -1,0 +1,4 @@
+源文件(04-health.sh) md5=9c864b86d2a297a944594d095ab4d3f7
+[M2] 断言放宽为「裸 200 即健康」+ 探测路径改为 catch-all /api/v1/health:
+  变异体落地自证: if true; then
+  变异体落地自证: IFS=$'\t' read -r st ct bodyf <<< "$(http_get /api/v1/health)"

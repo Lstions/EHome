@@ -1,0 +1,55 @@
+================ Q3: 容器冷启动全序列 ================
+时间戳/runid : D-20260916-101908
+独立库       : ehome_bb_20260916_101908
+镜像         : ehome-bb-ehome:local
+超时         : 180s
+EHOME_DB_HOST: postgres    <-- 变异自证关注点
+复现命令     : cd /home/sun/workspace/EHomeSystem && HOME_PORT=18080 EHOME_DB_NAME=ehome_bb_20260916_101908 EHOME_DB_HOST=postgres \
+                 docker compose -f docker-compose.yml -f deploy/blackbox/compose.bb.yml -p ehome-bb up -d
+
+  [PASS] 前提守卫: 镜像 ehome-bb-ehome:local 存在
+  [PASS] 前提守卫: 复用容器 ehome-postgres healthy
+  [PASS] 前提守卫: 复用容器 ehome-emqx healthy
+  [PASS] 已创建独立库 ehome_bb_20260916_101908（黑盒专用；不触碰 ehome/ehome_test/ehome_uiux）
+compose up -d rc=0  (完整输出: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-101908/03-coldstart/03-compose-up.log)
+    |  Container ehome-bb-ehome Creating 
+    |  Container ehome-bb-ehome Created 
+    |  Container ehome-bb-ehome Starting 
+    |  Container ehome-bb-ehome Started 
+轮询结束: state=running ready=1
+
+--- 断言1: 容器进入 Up（非 Exited/Restarting）---
+  [PASS] 容器状态 running（Restarting=false）—— 不是 Exited/Restarting
+  [PASS] 在 180s 超时内观察到 'API server listening'
+
+--- 断言2: 启动序列成功迹象；无 panic/FATAL ---
+  [PASS] 分母守卫: 拿到 62 行容器日志（>=30）
+  [PASS] 启动序列: 出现 'Database connected successfully' (x1)
+  [PASS] 启动序列: 出现 'Database connected and migrated' (x1)
+  [PASS] 启动序列: 出现 'API server listening' (x1)
+  [PASS] 分母守卫: migration 相关日志 3 条（>=2）
+    | 2026-09-16T02:19:09.838Z	INFO	logger/logger.go:85	Database connected and migrated
+    | 2026/09/16 02:19:09 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=unified_data
+    | 2026/09/16 02:19:09 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=device_data
+  [PASS] 日志无 panic/FATAL
+
+--- 断言5: 应用确实连到独立库（防误连共享库）---
+  [PASS] 启动日志含 '/ehome_bb_20260916_101908'（应用连的是本 run 的独立库）
+    | 2026-09-16T02:19:09.253Z	INFO	logger/logger.go:85	Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_101908, API=:8080
+
+--- 断言3: 独立库被创建（docker exec psql 只读查询）---
+    psql: SELECT count(*) FROM pg_database WHERE datname='ehome_bb_20260916_101908'  => [1]
+  [PASS] pg_database 中存在 ehome_bb_20260916_101908
+    psql: SELECT count(*) FROM information_schema.tables WHERE table_schema='public'  => [53]
+  [PASS] 分母守卫: 独立库 public 表数 53（>=30）—— 确实建了 schema（非空壳）
+
+================ 汇总: PASS=15 FAIL=0 ================
+证据目录: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-101908/03-coldstart
+
+--- 清理 (trap) ---
+ Container ehome-bb-ehome Stopping 
+ Container ehome-bb-ehome Stopped 
+ Container ehome-bb-ehome Removing 
+ Container ehome-bb-ehome Removed 
+已 DROP 独立库 ehome_bb_20260916_101908
+清理后 ehome-bb 残留: 1 容器

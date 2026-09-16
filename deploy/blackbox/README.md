@@ -48,8 +48,16 @@ cd /home/sun/workspace/EHomeSystem
 | 7 | `05-first-boot.sh` | Q5 | 是 | 一次性凭据全流程（未初始化 → 设置 → 登录） |
 | — | `S1 cache-warmup` | SUP | 是 | **附加检查**（主控 2026-09-16 指派，非 Q1–Q7）：冷启动日志须出现 `Latest value cache warmed up: N rows`；如实记录 N |
 
-`03` 是第一个需要栈的探针，`run.sh` 会为它做**冷启动**（先 `down -v` 再 `up --wait`）；
-`04/05/06` 复用同一个运行中的栈（warm），生命周期由 `run.sh` 独占。
+**生命周期分两类（`run.sh` 已按此编排）**：
+
+- **探针自管（`03`、`06`）**：探针内部自己 `compose up -d` / `down` 并 `createdb`/`dropdb` 独立库。
+  `run.sh` **不预起栈、不预建库**，只在其需要冷启动时先 `down -v` 保证干净起点。
+- **编排器托管（`04`、`05`）**：`run.sh` 负责 `up -d --wait`、等应用 `:` + 端口可达、
+  并在探针跑完后**校验栈所有权**。
+
+> 两类混用时有个必须处理的点：自管探针（`03`）退出时会把栈和独立库一起拆掉，
+> 所以 `run.sh` 在每个探针结束后会**重新检测栈与独立库**，需要时重新起栈 / 重建库，
+> 否则后续 warm 探针会在**空栈/空库**上假绿。
 
 ---
 
@@ -77,7 +85,8 @@ D-<时间戳>/
 ```
 
 - `deploy/blackbox/evidence/latest` 软链到最近一次运行；`latest-SUMMARY.md` 是它的快照。
-- **退出码**：`0`=全绿 ／ `1`=有失败、或有残留、或共享资源异常 ／ `2`=有 SKIP（探针缺失或主动跳过），**不算通过**。
+- **退出码**：`0`=全绿 ／ `1`=有失败、或有残留、或共享资源异常 ／ `2`=有 SKIP（探针缺失或主动跳过），**不算通过** ／
+  `3`=**并发冲突**：`$PROJECT` 的排他锁被另一个 run/探针持有，本 run 未运行、也未清理他人资源，请串行重试。
 
 常用查看方式：
 
@@ -143,12 +152,21 @@ docker exec -i ehome-postgres psql -U ehome -d postgres -At -c \
 
 ## 5. 安全护栏（`run.sh` 自实现，实例化之前生效）
 
-1. 解析后的 compose 若出现 **共享容器同名** 或 **受保护宿主端口**（`80/3080/8082/5432/1883/18083`），**拒绝起栈**；
-   共享网络未标注 `external: true` 也拒绝。
-2. project 名不是 `ehome-bb` 一律拒绝。
-3. 清理按 label/名字前缀白名单执行，共享容器 ID 在启动时快照，**ID 命中即拒绝删除**。
-4. `DROP DATABASE` 双重护栏：正则 `^ehome_bb_` + 保留名单。
-5. 结束核对零残留，并断言 `:3080`（DSH GUI）与 `:8082`（审计后端）仍健康。
+1. **compose 契约**：解析后的 compose 若出现 **共享容器同名** 或 **受保护宿主端口**
+   （`80/3080/8082/5432/1883/18083`），**拒绝起栈**；共享网络未标注 `external: true` 也拒绝；
+   project 名不等于当前 `$PROJECT` 一律拒绝。
+2. **并发保护（硬护栏，两层）**：
+   - **排他锁**：复用 `probes/_lock.sh` 的 per-project `flock`。`run.sh` 起栈前抢 `$PROJECT` 的锁，
+     抢不到即退出码 `3`，**不自旋等待**（避免多代理互相饿死）。锁由内核在进程退出时自动释放。
+   - **已有容器检测**：启动时若发现同 project 已有运行容器，同样拒绝运行（除非显式 `BB_ALLOW_SHARED_PROJECT=1`）。
+   两种拒绝都**不执行任何清理**——不删容器/卷/网络、不 DROP 任何库，绝不触碰他人资源。
+3. **栈所有权校验**：托管起栈后，用容器**启动日志**里的 `DB=host:port/<db>` 确认该容器连的
+   正是**本 run 的独立库**；不一致即判 **ENV/ERROR**（不是产品缺陷），避免把并发运行的容器当成自己的。
+4. **清理判据**：容器/卷/网络三处**统一只用 `label com.docker.compose.project=<project>` 精确相等**；
+   仅当对象**无 label（孤儿）**时才用名字前缀兜底。共享容器 ID 在启动时快照，**ID 命中即拒绝删除**。
+5. **`DROP DATABASE` 双重护栏**：正则前缀 + 保留名单（`ehome`/`ehome_test`/`ehome_uiux`/`ehome_sim_pg`/`postgres`/`template*`）。
+   库名匹配用 `starts_with()` 而**不是** `LIKE`——SQL 的 `_` 是单字符通配符，会把 `ehome_bbdev_*` 误算进来（实测假阳性）。
+6. **零残留 + 共享健康**：结束核对容器/卷/网络/独立库计数全为 0，并断言 `:3080`（DSH GUI）与 `:8082`（审计后端）仍健康。
 
 ---
 
@@ -164,9 +182,16 @@ docker exec -i ehome-postgres psql -U ehome -d postgres -At -c \
 
 ## 7. 已知注意事项 / 运行陷阱
 
-- **`ehome-bb` 这个 project 名是共享资源**：同一台机器上**不要并行**跑两个黑盒栈
-  （包括开发期自造的 override）。`run.sh` 清理时会 `down -v` 整个 project，会误伤另一个栈。
-  并行开发请改用独立 project 名（如 `-p ehome-bb-dev`、容器名 `ehome-bb-dev-*`）。
+- **`ehome-bb` 这个 project 名是共享资源**：同一台机器上**不要并行**跑两个黑盒栈。
+  并行开发请用**与 `ehome-bb` 无前缀关系**的名字（CONTRACT 规则 B，如 `bbdev<代号>`），
+  并同时覆盖端口与库名前缀——`ehome-bb-dev-*` 这类**仍以 `ehome-bb` 开头**的名字会造成前缀误伤：
+
+  ```bash
+  BB_PROJECT=bbdevd BB_HOME_PORT=18091 BB_DB_PREFIX=ehome_bbdev_ ./deploy/blackbox/run.sh
+  ```
+
+  `run.sh` 已加**并发保护**：检测到同 project 的运行容器即拒绝运行且不清理他人资源；
+  容器/卷/网络的清理判据也统一为 **label 精确相等**（仅孤儿才用名字前缀兜底）。
 - **探针缺失 ⇒ SKIP**，退出码 `2`，**不算通过**，报告里如实计入。
 - 仓库**无 `.dockerignore`**，构建上下文约 913M（含 `node_modules` 318M）；首次构建约 2 分钟。
   国内网络加速：`--build-arg GOPROXY=https://goproxy.cn,direct`（`run.sh` 已默认注入该 GOPROXY）。

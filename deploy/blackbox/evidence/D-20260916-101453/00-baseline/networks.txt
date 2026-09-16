@@ -1,0 +1,6 @@
+NETWORK ID     NAME                          DRIVER    SCOPE
+10d1d3ccbf2a   bridge                        bridge    local
+4ce315412fa9   digital-family-tree_default   bridge    local
+4f89d95cd097   ehomesystem_default           bridge    local
+0e2f4dc7c9b9   host                          host      local
+0f9df48679a8   none                          null      local

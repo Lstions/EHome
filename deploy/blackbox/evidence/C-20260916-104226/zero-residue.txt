@@ -1,0 +1,11 @@
+== 残留容器 ==
+== 残留卷 ==
+== 残留网络 ==
+== 残留库 ehome_bb_* ==
+ehome_bbdevc_c
+== 共享容器 ==
+/ehome-postgres running
+/ehome-emqx running
+== :3080 / :8082 ==
+:3080=401
+{"status":"ok"}

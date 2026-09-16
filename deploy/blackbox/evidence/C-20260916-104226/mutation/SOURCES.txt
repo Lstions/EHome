@@ -1,0 +1,2 @@
+04-health.sh md5=9c864b86d2a297a944594d095ab4d3f7
+05-first-boot.sh md5=47ddff3e9504686960545fe7f1d876c9
