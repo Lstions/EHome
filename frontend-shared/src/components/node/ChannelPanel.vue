@@ -444,7 +444,13 @@ const reconfigureForm = reactive({
   channelId: null as number | null,
   baudrate: 115200
 })
-const uartChannels = computed(() => allChannels.value.filter((ch: any) => ch.hardware_type === 'uart'))
+// 归一化后再比较：后端落库为**大写**（实测只有 'UART'），而这里的字面量是小写。
+// 直接比较在真实数据下恒 false ⇒ 「修改波特率」弹窗的通道下拉**恒为空**，
+// 用户点确认只会得到「请选择要配置的通道」，功能不可用。
+// 同文件的 getChannelsForHardware（下方）已有正确的归一写法。
+const uartChannels = computed(() =>
+  allChannels.value.filter((ch: any) => String(ch?.hardware_type || '').toLowerCase() === 'uart')
+)
 
 const openReconfigure = (channel: any) => {
   reconfigureForm.channelId = channel.id

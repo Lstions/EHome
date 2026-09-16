@@ -560,11 +560,22 @@ const handleSubmit = async () => {
       busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
     }
 
+    // 后端存储约定为**大写**（实测 channels.hardware_type 只有 'UART'/'I2C'…），
+    // 而本表单用的小写（'uart'）。**两个字段必须同约定** —— 此前只把 bus_type 转大写，
+    // 于是落库得到 hardware_type='uart' + bus_type='UART' 的混合行，
+    // 而 channels 既有行是大写 ⇒ 同一列里混用两种大小写，
+    // 使所有按大写比较的读取方（含 ChannelPanel / ChannelTerminal）对这类行静默失配。
+    // 后端校验用 EqualFold（大小写不敏感）不会拦这种混合，且落库不归一
+    // （handler_device.go:687/755/774）⇒ 必须在这里统一。
+    // toUpperCase() 的静态类型是宽 string，而 Channel.hardware_type 只接受枚举联合
+    // （'uart' | 'UART' | …）。这里显式收窄为**大写成员**，不是 as any：
+    // 值域本就来自同文件的 HW_TYPES（小写四值），大写后必然落在联合的大写半边。
+    const hardwareType = form.hardware_type.toUpperCase() as Channel['hardware_type']
     const data: Partial<Channel> = {
       node_id: String(collectorId),
-      hardware_type: form.hardware_type,
+      hardware_type: hardwareType,
       hardware_id: form.hardware_id,
-      bus_type: form.hardware_type.toUpperCase(),
+      bus_type: hardwareType,
       address: address || undefined,
       name: form.name || undefined,
       enabled: form.enabled,

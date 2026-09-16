@@ -32,7 +32,9 @@
         {{ selectedChannel.address }}
       </el-tag>
 
-      <template v-if="selectedChannel && selectedChannel.hardware_type === 'uart'">
+      <!-- 归一化后比较：后端 hardware_type 存**大写**（'UART'），小写字面量直接比较恒 false
+           ⇒ 真实数据下波特率 tag 永不显示。同文件下方 showReadSize 同根因。 -->
+      <template v-if="selectedChannel && String(selectedChannel.hardware_type || '').toLowerCase() === 'uart'">
         <el-tag type="info" size="small">{{ currentBaud }} baud</el-tag>
       </template>
 
@@ -213,7 +215,9 @@ const expandedEntries = ref(new Set<string>())
 const readSize = ref<number>(0)
 
 const showReadSize = computed(() => {
-  const type = selectedChannel.value?.hardware_type
+  // 归一化（同上方波特率 tag 的根因）：后端存大写 'SPI'/'I2C'，
+  // 小写字面量直接比较在真实数据下恒 false ⇒ 读长度控件永不显示。
+  const type = String(selectedChannel.value?.hardware_type || '').toLowerCase()
   return type === 'spi' || type === 'i2c'
 })
 
