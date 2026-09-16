@@ -584,7 +584,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 	// Channel 通道 CRUD
 	// ============================================================
 
-	// List channels (paginated; optionally filter by node_id)
+	// List channels (paginated; optionally filter by node_id / hardware_type)
 	//
 	// 分页方言与全仓其余 11 个列表端点统一为 {items,total,page,page_size}
 	// （默认 page_size=20，上界 200；非法页长 clamp 回默认，见 device-configs 同款实现）。
@@ -613,6 +613,16 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 					return
 				}
 			}
+		}
+		// hardware_type 过滤：存储侧是大写枚举（生产库 SELECT DISTINCT hardware_type
+		// 只有 'UART'），而前端硬件类型下拉提交的是小写（uart/i2c/spi/adc），故必须
+		// **大小写不敏感** —— 写成 hardware_type = 'uart' 的精确匹配在真实数据下恒返回
+		// 0 行（静默筛选失效）。UPPER() 在 SQLite 与 PostgreSQL 都可用；同款大小写归一
+		// 见 handler_node.go:84 的 LOWER(...) LIKE。
+		// 位置在 Count 之前：过滤必须与 node_id 一样在 Count 与 Find **两侧同时**生效，
+		// 否则 total 是未过滤全量、分页器会算出多余页数。
+		if ht := strings.TrimSpace(c.Query("hardware_type")); ht != "" {
+			q = q.Where("UPPER(hardware_type) = ?", strings.ToUpper(ht))
 		}
 		var total int64
 		if err := q.Count(&total).Error; err != nil {
