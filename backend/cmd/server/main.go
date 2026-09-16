@@ -239,6 +239,28 @@ func main() {
 	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调接线 (api 包函数, 避免包依赖环)。
 	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
+	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
+	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
+	//
+	// 为什么放在这里：`api.WarmupLatestValues` 自 2026-08-21 引入起**一直没有调用者**
+	// （git 历史确认引入那次提交就没有；实施计划 §3.2.4 却明确要求「启动回填」）——
+	// 属未完成的实现（验收项「latest-value 缓存命中/回落双路径一致」至今未勾选）。
+	// 不 warmup 不影响**正确性**（Miss 回落 SQL 结果相同），影响的是性能与两条路径形状一致。
+	//
+	// 失败不 Fatal：回填只是预热，Miss 路径仍是正确兜底（与 WarmupLatestValues 内部
+	// 「回填失败不阻塞启动」的约定一致）。
+	//
+	// SQL 与 /overview、边缘设备列表的**回落查询同构**（DISTINCT ON 取最新时间戳 +
+	// JOIN 取该时刻全部行），保证「缓存命中」与「缓存 miss」两条路径形状一致。
+	api.SetLatestValuesSource(func() ([]models.UnifiedData, error) {
+		var rows []models.UnifiedData
+		err := db.Raw("SELECT u.* FROM unified_data u " +
+			"INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data " +
+			"WHERE device_id IS NOT NULL ORDER BY device_id, created_at DESC) latest " +
+			"ON u.device_id = latest.device_id AND u.created_at = latest.created_at").Scan(&rows).Error
+		return rows, err
+	})
+	logger.Infof("Latest value cache warmed up: %d rows", api.WarmupLatestValues())
 	// 阈值告警引擎 (方案 v0.4 §5 任务C): 求值器构造 + 解析后回调接线。
 	alertEvaluator := alert.NewEvaluator(db, wsHub.BroadcastEvent)
 	// 阈值告警通知经 Dispatcher 落库 + 外发 (D-1 步骤 3): 告警是外发通道最主要的

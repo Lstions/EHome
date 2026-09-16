@@ -1,0 +1,4 @@
+nginx	nginx:1.27-alpine	Up 4 days
+ehome-postgres	postgres:18-alpine	Up 9 days (healthy)
+ehome-emqx	emqx/emqx:5.8	Up 9 days (healthy)
+ddns-go	jeessy/ddns-go	Up 9 days

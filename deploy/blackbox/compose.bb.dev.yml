@@ -1,0 +1,13 @@
+# C 的**开发期**本地 override（临时，非交付物，不在契约里）。
+#
+# 为什么要它: 与子代理 D 的 run.sh 互踩（D 执行 `-p ehome-bb down -v` 会删掉我的栈）。
+# 故开发期一律用 project `ehome-bb-dev` + 容器名 `ehome-bb-dev-ehome`。
+# 交付探针 probes/04,05 默认仍走契约值 (project ehome-bb / B 的 compose.bb.yml)；
+# 只有显式设 BB_PROJECT=ehome-bb-dev 时才叠本文件。
+#
+# 叠加顺序: docker-compose.yml -> compose.bb.yml(B) -> 本文件
+services:
+  ehome:
+    container_name: ehome-bb-dev-ehome
+    image: ${EHOME_BB_IMAGE:-ehome-bb-img:warm}
+

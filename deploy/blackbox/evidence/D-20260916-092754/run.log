@@ -1,0 +1,39 @@
+
+── 运行开始 run_id=D-20260916-092754 ────────────────────────────────────────────────
+仓库=/home/sun/workspace/EHomeSystem  探针目录=/home/sun/workspace/EHomeSystem/deploy/blackbox/probes
+选项: only='02' skip_build=0
+独立库=ehome_bb_20260916_092754
+基线: :3080 -> 401 ; :8082/health -> {"status":"ok"}
+基线: 共享容器 ID 快照 c32d374bf4a8cd028d6ef4fa14e5a199b89624870f12a00de3f48a6fa3a3522f 416975a22e2b8e62ca80283e9bd769005c28909578e7a2cee5289bcc4aff033c ae52de5afdb6762ed9a3709b1c7787cc1f4bbea18d43a965834a3eeac1ffff18 198d33271ad0e5fa3017f23d9a1d1a6d58c1e4e756761f7cf0b8f352a0945798
+compose 候选 [layered] 通过: OK: services=ehome
+CREATE DATABASE ehome_bb_20260916_092754 -> CREATE DATABASE
+
+── 02 / env-contract (Q2) ────────────────────────────────────────────────
+执行: /home/sun/workspace/EHomeSystem/deploy/blackbox/probes/02-env-contract.sh
+证据: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-092754/02-env-contract
+--- 02 stdout (tail 40) ---
+[02/env-contract] PASS
+
+── SUP-1 / cache-warmup (附加检查, 非 Q1-Q7) ────────────────────────────────────────────────
+[S1] SKIP: 栈未起来
+
+── 编排结束: FAIL=0 SKIP=1 ────────────────────────────────────────────────
+
+── 收尾 (main rc=0) ────────────────────────────────────────────────
+
+── 清理 (project=ehome-bb) ────────────────────────────────────────────────
+  DROP DATABASE ehome_bb_20260916_092754 -> DROP DATABASE
+  DROP DATABASE ehome_bb_c_dev -> DROP DATABASE
+独立库清理: 列出 2 个, 实际处理 2 个
+清理完成 -> /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-092754/99-cleanup/cleanup.log
+
+── 零残留核对 ────────────────────────────────────────────────
+残留计数: 容器=0 卷=0 网络=0 独立库=0
+零残留: 无 ehome-bb 容器/卷/网络/独立库
+
+── 共享资源未受影响核对 ────────────────────────────────────────────────
+共享资源均正常: 4 容器 running, :3080=401, :8082/health=ok
+汇总报告: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-092754/SUMMARY.md
+
+── 最终退出码: 0  (0=全绿 1=失败/残留/共享异常 2=有 SKIP 未完成) ────────────────────────────────────────────────
+证据目录: /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/D-20260916-092754

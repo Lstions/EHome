@@ -1,0 +1,106 @@
+
+== 0. 环境与上下文 ============================================
+  仓库根         : /home/sun/workspace/EHomeSystem
+  commit         : 606d8e6f (606d8e6ff7003b436f8cc64029096a7cb5b1d9e1)
+  镜像 tag       : ehome-bb-img:606d8e6f
+  证据目录       : /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/A-20260916T012212Z
+  docker         : Docker version 29.8.0, build 88096ef
+  buildx         : github.com/docker/buildx v0.37.0 ac30b249211430b85fb8f37b6e7154b5c47ba0b6
+  GOPROXY        : https://goproxy.cn,direct
+  Dockerfile md5 : 2171b7a91fabf570c186a34a65b19f7a
+  工作树脏文件   :
+     M backend/cmd/server/main.go
+     M backend/internal/api/latest_value_cache.go
+     M "docs/\345\210\206\346\236\220/\345\220\216\347\273\255\345\267\245\344\275\234\350\256\241\345\210\222\344\270\216\346\226\271\346\241\210-2026-09-15.md"
+     M "docs/\350\256\276\350\256\241/\346\236\266\346\236\204\344\274\230\345\214\226\345\256\236\346\226\275\350\256\241\345\210\222.md"
+    ?? backend/internal/api/latest_value_cache_warmup_test.go
+    ?? deploy/blackbox/
+    ?? "docs/\345\210\206\346\236\220/\351\203\250\347\275\262\351\273\221\347\233\222\351\252\214\350\257\201\346\226\271\346\241\210-2026-09-16.md"
+  注：探针不加 --no-cache，构建时间受本地 build cache 影响；只有 07 才考「两次一致」。
+  注：本探针只测静态产物契约，不启动服务、不连 DB、不碰共享容器/端口。
+
+== 1. 构建镜像 (A1) ============================================
+  复现命令: docker build --progress=plain --build-arg GOPROXY=https://goproxy.cn,direct -t ehome-bb-img:606d8e6f /home/sun/workspace/EHomeSystem
+  [PASS] A1 镜像构建成功（exit 0）-- 日志 01-build.log
+
+== 2. 镜像元数据 (A1b) ============================================
+  image id : sha256:11a4bdbeb9696267802b6bc663747763337ca7c0909348ad8937d9144fdd9fed
+  created  : 2026-09-16T09:17:33.330755621+08:00
+  size     : 90436135 bytes (86 MiB；参考实测 90.4MB)
+  Config.Env:
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  [PASS] A1b 镜像体积 86 MiB 落在合理区间 [40,300] MiB
+
+== 3. 容器内取证 ============================================
+$ docker run --rm -e BB_CANARY=<红acted> -e BB_ABSENT=<红acted> --entrypoint sh ehome-bb-img:606d8e6f -c <probe>
+  docker run 退出码: 0 （stdout 279 行）
+  /app 文件数        : 101
+  ehome-server       : exists=1 exec=1 magic=7f454c46 size=48061152
+  index.html         : exists=1 size=1942
+  static/dist/assets : 98 个文件
+  /app/firmwares     : dir=1
+  二进制含 warmed-up 格式串 : 1
+  二进制含随机不存在串(负控) : 0
+
+== 4. 镜像内产物断言 ============================================
+  [PASS] A2 /app/ehome-server 存在、可执行、且为 ELF（magic=7f454c46, 48061152 bytes）
+  [PASS] A3 /app/static/dist/index.html 存在且非空（1942 bytes）
+  [PASS] A5 /app/firmwares 目录存在
+
+== 5. 静态资源完整性 (A4 / G1) ============================================
+  index.html 中 (src|href)= 引用总数 : 10
+  解析为镜像内路径待查              : 10
+  跳过（外部链接/data:/#片段等）     : 0
+  跳过（含引号/空白的异常路径）      : 0
+  待查路径清单（01-resolved-refs.txt）：
+      /app/static/dist/favicon.svg
+      /app/static/dist/assets/index-VlKSwxbg.js
+      /app/static/dist/assets/rolldown-runtime-QTnfLwEv.js
+      /app/static/dist/assets/element-D5E22AxL.js
+      /app/static/dist/assets/vue-BcQrzxAB.js
+      /app/static/dist/assets/client-xb_tSfkq.js
+      /app/static/dist/assets/auth-CUe78qqT.js
+      /app/static/dist/assets/preload-helper-Czpn1I53.js
+      /app/static/dist/assets/element-GfQPuZdl.css
+      /app/static/dist/assets/index-DugQjQfc.css
+  [PASS] G1a 引用路径解析安全：0 条含引号/空白（解析结果可信）
+  [PASS] G1b 分母守卫：解析到 10 条待查静态资源引用（期望 >= 2）
+  [PASS] G1c 分母守卫：镜像 /app 内文件数 101（期望 >= 5）
+  逐条核对结果（01-refs-check.txt）：
+      FOUND   /app/static/dist/favicon.svg
+      FOUND   /app/static/dist/assets/index-VlKSwxbg.js
+      FOUND   /app/static/dist/assets/rolldown-runtime-QTnfLwEv.js
+      FOUND   /app/static/dist/assets/element-D5E22AxL.js
+      FOUND   /app/static/dist/assets/vue-BcQrzxAB.js
+      FOUND   /app/static/dist/assets/client-xb_tSfkq.js
+      FOUND   /app/static/dist/assets/auth-CUe78qqT.js
+      FOUND   /app/static/dist/assets/preload-helper-Czpn1I53.js
+      FOUND   /app/static/dist/assets/element-GfQPuZdl.css
+      FOUND   /app/static/dist/assets/index-DugQjQfc.css
+  [PASS] A4 index.html 引用的 10 个静态资源在镜像内逐个存在（FOUND=10 MISSING=0）
+  [PASS] G1d 分母守卫：引用的 /assets/*.js bundle 数 7（期望 >= 1）-- 确是真前端产物
+
+== 6. 密钥泄漏与二进制格式串检查 (A6 / A7 / G2 / G3) ============================================
+  镜像内 .env / .env.* 命中 0 个（find / -xdev 全盘）：
+  [PASS] A6a 镜像内无 .env / .env.* 文件
+  镜像内密钥类文件命中 0 个（/app /root /home /srv /opt /var /tmp /usr/local）：
+  对照：/etc/ssl 下 CA 证书 *.pem = 146 个（基础镜像 ca-certificates，属预期非泄漏）
+  [PASS] A6b 镜像内无 *.pem / *.key / id_rsa* / .npmrc / .pgpass 等密钥文件
+  镜像内 JWT/DB 口令明文 grep 命中 1 个文件：
+      /app/ehome-server
+  [FAIL] A6c 疑似密钥泄漏：文件命中 1 个，Config.Env 敏感键 无
+  [PASS] A7 镜像内 ehome-server 含 'Latest value cache warmed up' 格式串（启动回填已接线进产物）
+  扫描器正控（G2）：容器内植入 canary 文件 /app/.bb-canary-probe，用同一 grep -rlF 扫描，命中 1 行
+  [PASS] G2 扫描器正控通过：植入的 canary 被抓到（命中 1 行）-- 「扫不到密钥」可信
+  扫描器负控（G3）：同一 grep -acF 对随机串 'bb-absent-control-1e6058b61ee2f44b47f3e3bef11e365c' 在二进制里命中 0 次
+  [PASS] G3 扫描器负控通过：随机不存在串 0 命中 -- 「命中」这个信号可信
+
+== 7. 变异恢复校验 ============================================
+  未启用 BB_MUTATION，无变异需恢复。
+
+== 汇总 ============================================
+  镜像      : ehome-bb-img:606d8e6f
+  image id  : sha256:11a4bdbeb9696267802b6bc663747763337ca7c0909348ad8937d9144fdd9fed
+  断言      : PASS=15  FAIL=1
+  证据目录  : /home/sun/workspace/EHomeSystem/deploy/blackbox/evidence/A-20260916T012212Z
+  结论      : 有 1 条断言失败（详见上方诊断与 01-image-contract.log）

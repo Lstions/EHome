@@ -92,6 +92,15 @@ func resetLatestValueCacheForTest() {
 
 // WarmupLatestValues 启动回填: 每设备**最新时刻的全部物理量** (仅启动一次)。
 //
+// ⚠️ **历史状态（2026-09-16 实测）**：本函数自 2026-08-21 引入以来**从未被生产代码调用**
+// （`grep -rn WarmupLatestValues` 全仓只有定义与注释；git 历史确认引入那次提交就没有调用点）。
+// 但 `docs/设计/架构优化实施计划.md:45` 明确要求「persist 旁路更新 **+ 启动回填** + miss 回落 SQL」，
+// 且其验收清单 `latest-value 缓存命中/回落双路径一致` 至今未勾选 ⇒ 这是**未完成的实现**，不是被否决的设计。
+//
+// 正确性影响：**无**（miss 时回落 SQL，结果仍正确）。
+// 影响的是**性能与一致性**：不 warmup ⇒ 每次重启后所有设备的首次查询都扫分区表；
+// 且「冷启动」与「跑了一会儿」两条路径的**形状**必须一致（这正是本函数存在的意义）。
+//
 // **必须与运行时 `SetLatestValue` 的粒度一致**：运行时对一帧的每个物理量各写一条，
 // 所以回填也必须是「该设备最新 `created_at` 上的所有行」，而不是「每设备一行」。
 //
@@ -103,16 +112,8 @@ func resetLatestValueCacheForTest() {
 // 这样「缓存命中」与「缓存 miss」两条路径的语义才真正一致。
 // 注意生产者用**同一个 `now`** 写一帧的所有物理量（`consumers_heavy.go` 的 `now := time.Now()`），
 // 因此按 `created_at` 相等即可取回整帧。
-func WarmupLatestValues(db gormDB) {
-	var rows []models.UnifiedData
-	if err := db.
-		Raw("SELECT u.* FROM unified_data u " +
-			"INNER JOIN (SELECT DISTINCT ON (device_id) device_id, created_at FROM unified_data " +
-			"WHERE device_id IS NOT NULL ORDER BY device_id, created_at DESC) latest " +
-			"ON u.device_id = latest.device_id AND u.created_at = latest.created_at").
-		Scan(&rows).Error; err != nil {
-		return // 回填失败不阻塞启动, miss 回落原 SQL 兜底
-	}
+// WarmupLatestValuesFrom 用**已取到的行**回填缓存（纯函数，便于测试；不碰 DB）。
+func WarmupLatestValuesFrom(rows []models.UnifiedData) {
 	globalLatestValueCache.mu.Lock()
 	defer globalLatestValueCache.mu.Unlock()
 	for _, r := range rows {
@@ -132,13 +133,42 @@ func WarmupLatestValues(db gormDB) {
 	}
 }
 
-// gormDB 最小接口 (避免 api 包直接依赖 gorm 的循环/测试负担)。
-type gormDB interface {
-	Raw(sql string, values ...interface{}) queryResult
+// WarmupLatestValues 启动回填入口：向已注入的数据来源取行并回填。
+//
+// 未注入来源时为 no-op（与「回填失败不阻塞启动」的既有约定一致）——
+// Miss 路径回落 SQL 仍是正确兜底。
+// 返回回填的行数，便于启动日志与测试断言。
+func WarmupLatestValues() int {
+	if warmupSource == nil {
+		return 0
+	}
+	rows, err := warmupSource()
+	if err != nil {
+		// 回填失败不阻塞启动, miss 回落原 SQL 兜底
+		return 0
+	}
+	WarmupLatestValuesFrom(rows)
+	return len(rows)
 }
 
-type queryResult interface {
-	Scan(dest interface{}) error
+// latestValuesSource 是启动回填的**数据来源函数**（由 cmd/server 注入）。
+//
+// 为什么用函数注入而不是像初版那样定义 `gormDB` 窄接口：
+//
+//	初版声明 `Raw(sql string, ...) queryResult`，而 `*gorm.DB.Raw` 的真实签名是
+//	`Raw(string, ...interface{}) *gorm.DB` —— **返回类型不同，*gorm.DB 并不实现它**，
+//	故 `api.WarmupLatestValues(db)` 无法编译。这正是该函数自 2026-08-21 引入以来
+//	**一直没有生产调用者**的机械原因。
+//	函数注入与本仓既有范式一致（`nodemgr.SetLatestSinkFn`、
+//	`automationPlanner.SetLatestValueFn` 都是这么接线的），且同样避免 api→gorm 依赖。
+type latestValuesSource func() ([]models.UnifiedData, error)
+
+// warmupSource 由 cmd/server 在启动时注入；nil 时 WarmupLatestValues 为 no-op。
+var warmupSource latestValuesSource
+
+// SetLatestValuesSource 注入启动回填的数据来源（在 cmd/server 的接线处调用）。
+func SetLatestValuesSource(fn latestValuesSource) {
+	warmupSource = fn
 }
 
 // 注 (2026-09-15 退役, docs/分析/rollup-退役裁决-2026-09-15.md):

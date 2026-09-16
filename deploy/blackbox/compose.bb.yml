@@ -1,0 +1,66 @@
+# ────────────────────────────────────────────────────────────────────────────
+# EHomeSystem 部署黑盒验证 —— compose override (子代理 B: Q2/Q3/Q6)
+#
+# 用途: 与仓库根 docker-compose.yml **叠加**，形成一个与生产隔离的黑盒栈。
+#       **不修改** 仓库原有 docker-compose.yml。
+#
+# 强制调用方式 (必须从仓库根调用，且第一个 -f 指向仓库根 docker-compose.yml):
+#   docker compose -f docker-compose.yml -f deploy/blackbox/compose.bb.yml -p ehome-bb #     --env-file deploy/blackbox/probes/.env.empty config          # ← Q2 契约检查 (抑制 .env)
+#   HOME_PORT=18080 EHOME_DB_NAME=ehome_bb_<runid> \
+#     docker compose -f docker-compose.yml -f deploy/blackbox/compose.bb.yml -p ehome-bb up -d
+#
+# 契约:
+#   * project 名必须为 ehome-bb (调用方 -p；本文件另用 name: 兜底，防止漏 -p 时
+#     回落到目录名 -> "ehomesystem"，那会与**正在运行的共享栈同名并可能重建它们**)
+#   * 端口 HOME_PORT=18080 (默认值即 18080，不会落到 80)
+#   * 容器名前缀 ehome-bb-
+#   * 复用现有 ehome-postgres / ehome-emqx —— 网络方案见下方 networks 注释
+#   * 数据库必须独立 (ehome_bb_<runid>)，EHOME_DB_NAME 无默认值，缺失即报错，
+#     从机制上杜绝误连共享库 ehome/ehome_test/ehome_uiux
+#
+# 网络方案选择 (已实测):
+#   现有 ehome-postgres / ehome-emqx 挂在 compose 网络 ehomesystem_default 上，
+#   其 DNS 别名同时含 "postgres"/"emqx" (compose service) 与 "ehome-postgres"/
+#   "ehome-emqx" (container_name)。因此本栈用 **external network** 直接接入该网络:
+#     - 无需新起 PG/EMQX (省资源、无端口冲突)
+#     - 服务名 postgres/emqx 天然可解析 (与生产 compose 内服务名一致)
+#   实测命令与结果见 evidence/B-*/06-wiring-net-probe.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: ehome-bb
+
+services:
+  # ── 复用现有容器，不在本 project 内创建/销毁 ─────────────────────────────
+  # profiles 给一个不会被激活的名字 => 本 project 内不创建这两个服务。
+  # 它们仍存在于合并后的 config 中 (因此 Q2 仍会校验其必填 env)，
+  # 但 up/down 都不会触碰共享的 ehome-postgres / ehome-emqx。
+  postgres:
+    profiles: ["_reuse-external"]
+  emqx:
+    profiles: ["_reuse-external"]
+
+  ehome:
+    image: ${EHOME_BB_IMAGE:-ehome-bb-ehome:local}
+    container_name: ehome-bb-ehome
+    # restart:no —— 黑盒要的是**可诊断**的失败 (Exited + 退出码 + 日志)，
+    # 而不是 unless-stopped 下的崩溃重启循环。生产值不变 (本文件不覆盖生产)。
+    restart: "no"
+    # 端口用 !override 整体替换 (否则会与 base 的 80 端口映射并存 => 端口冲突)
+    ports: !override
+      - "127.0.0.1:${HOME_PORT:-18080}:8080"
+    # 不依赖 project 内的 postgres/emqx (它们已被 profile 排除)；
+    # 复用的外部容器由脚本在起栈前用 docker inspect 断言健康。
+    depends_on: !reset []
+    networks: [bb-ext]
+    environment:
+      # 可注入的 DB host —— Q3 变异自证 (EHOME_DB_HOST=nonexistent) 依赖此插值点
+      EHOME_DB_HOST: ${EHOME_DB_HOST:-postgres}
+      EHOME_DB_PORT: ${EHOME_DB_PORT:-5432}
+      # 独立库：无默认值。未显式给出即 compose 报错，绝不静默回落到 ehome。
+      EHOME_DB_NAME: ${EHOME_DB_NAME:?err — blackbox must set EHOME_DB_NAME to an isolated database (ehome_bb_<runid>)}
+      MQTT_BROKER: ${MQTT_BROKER:-tcp://emqx:1883}
+
+networks:
+  bb-ext:
+    external: true
+    name: ehomesystem_default
