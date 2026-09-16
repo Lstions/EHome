@@ -1,6 +1,0 @@
-== 残留容器 (label 或 名字前缀) ==
-== 残留卷 ==
-== 残留网络 ==
-== 残留独立库 ehome_bb_* ==
-
-RESIDUE containers=0 volumes=0 networks=0 bb_databases=0

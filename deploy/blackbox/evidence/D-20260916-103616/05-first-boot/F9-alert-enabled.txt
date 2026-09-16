@@ -1,3 +1,0 @@
-POST /alert-rules (enabled:false) -> status=201
-响应 data.enabled=false   (规则 id=1)
-GET /alert-rules 回读 enabled=false

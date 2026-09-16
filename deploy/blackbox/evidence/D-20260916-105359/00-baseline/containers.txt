@@ -1,4 +1,0 @@
-/ehome-postgres running healthy
-/ehome-emqx running healthy
-/nginx running nohealth
-/ddns-go running nohealth

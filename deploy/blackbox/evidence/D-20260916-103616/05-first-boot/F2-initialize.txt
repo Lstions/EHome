@@ -1,3 +1,0 @@
-POST /api/v1/auth/initialize (正确凭据, 用户名已记入) -> status=201
---- body ---
-{"code":201,"data":{"id":1,"username":"bbadmin"},"message":"initialized"}

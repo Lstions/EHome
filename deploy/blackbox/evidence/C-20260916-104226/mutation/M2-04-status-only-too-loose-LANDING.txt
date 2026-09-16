@@ -1,5 +1,0 @@
-[M2] 断言放宽为「裸 200 即健康」+ 探测路径改为 catch-all /api/v1/health:
-  GET /health -> GET /api/v1/health
-  if grep -q '"status"' "$bodyf"; then  ->  if true; then
-  grep 变异后: if true; then
-  grep 变异后: IFS=$'\t' read -r st ct bodyf <<< "$(http_get /api/v1/health)"

@@ -1,5 +1,0 @@
-POST /api/v1/auth/login -> status=200
-token_len=251
---- body ---
-{"code": 200, "data": {"token": "<TOKEN len=251 REDACTED>", "user": {"id": 1, "username": "bbadmin"}}, "message": "ok"}
-

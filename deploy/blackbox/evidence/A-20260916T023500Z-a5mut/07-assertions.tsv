@@ -1,5 +1,0 @@
-PASS	A1m	A1m 变异树构建成功（tag ehome-bb-img:rep-mut，--no-cache）
-PASS	R3	R3 变异产生可测差异：变异镜像 index.html 缺失或引用为空（PRESENT=0 refs=0）-- 破坏确实改变了被测量
-PASS	M1	M1 Dockerfile 已字节级还原（md5 2171b7a91fabf570c186a34a65b19f7a == 变异前 2171b7a91fabf570c186a34a65b19f7a；变异态 c7de3cf662a63d7234b2b4bba072b7ce）
-FAIL	C1	C1 临时镜像残留： ehome-bb-img:rep-mut
-TOTAL	ehome-bb-img:rep1	PASS=3 FAIL=1

@@ -1,1 +1,0 @@
-{"code":200,"data":{"data_count_today":2,"edge_devices":{"offline":0,"online":1,"total":1},"latest_data":[{"device_id":1,"device_name":"BBC-Sensor-500699","node_name":"BBC 500699","data":{"humidity":60.1,"temperature":25.3},"collected_at":"2026-09-16T02:35:43Z","error_code":0}],"nodes":{"offline":1,"online":0,"total":1}},"message":"ok"}

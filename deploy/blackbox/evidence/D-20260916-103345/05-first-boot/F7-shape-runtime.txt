@@ -1,3 +1,0 @@
-=== 运行中 /overview.latest_data 各设备物理量数 ===
-1=2
-目标 edge_device_id=1 物理量数=2 (期望 >=2)

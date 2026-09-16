@@ -55,6 +55,15 @@ backend/firmwares/
 # 不得不在推送前 squash 重写历史才没把它们发到 GitHub。
 # ⇒ 证据是**运行产物**，不该长期入库；需要留档时只提交结论文件（如 FINAL-REPORT.md）。
 # 注：黑盒那批文件已在历史中，此处只防新增；已入库的仍需显式 git rm --cached。
+#
+# 2026-09-16 二次事故（同一条纪律又破了一次，这次真发了出去）：
+# 上面写了「黑盒那批文件已在历史中」，却**只忽略了 ghcr 那一半** ——
+# deploy/blackbox/evidence/ 从未被忽略，于是后续黑盒 run 的证据继续被跟踪，
+# 其中 00-compose-config-layered.json（docker compose config 的完整渲染结果）
+# 含**真实生产值** EHOME_JWT_SECRET / EHOME_DB_PASSWORD，已随 abe3a7b0 推到 GitHub。
+# ⇒ 根因不是「忘了加规则」，而是**规则只写了一半却以为写全了**。
+#   两份证据目录必须成对出现；任何新增的 *-evidence 目录都要同步登记。
+deploy/blackbox/evidence/
 deploy/ghcr/evidence/
 
 # Test coverage artifacts

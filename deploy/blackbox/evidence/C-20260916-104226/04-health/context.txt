@@ -1,3 +1,0 @@
-probe=04-health.sh  project=ehome-bb  BB_PROJECT=ehome-bb  BB_HOME_PORT=18080  BB_DB_NAME=ehome_bb_c_20260916_104226
-base_url=http://127.0.0.1:18080  container=ehome-bb-ehome
-started_at=2026-09-16T10:42:28+08:00

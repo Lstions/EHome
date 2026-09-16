@@ -1,5 +1,0 @@
-== docker compose down -v ==
-time="2026-09-16T10:19:12+08:00" level=warning msg="Warning: No resource found to remove for project \"ehome-bb\"."
-== 按 label/名字精确清理 ==
-  DROP DATABASE ehome_bb_20260916_101908 -> DROP DATABASE
-独立库清理: 列出 1 个, 实际处理 1 个

@@ -1,9 +1,0 @@
-ehome-bb-ehome  | 2026-09-16T02:14:54.133460049Z 2026-09-16T02:14:54.133Z	INFO	logger/logger.go:85	EHomeSystem Server v2.0 starting...
-ehome-bb-ehome  | 2026-09-16T02:14:54.133481479Z 2026-09-16T02:14:54.133Z	INFO	logger/logger.go:85	Config: MQTT=tcp://emqx:1883, DB=postgres:5432/ehome_bb_20260916_101453, API=:8080
-ehome-bb-ehome  | 2026-09-16T02:14:54.144697671Z 2026-09-16T02:14:54.144Z	INFO	logger/logger.go:85	Database connected successfully
-ehome-bb-ehome  | 2026-09-16T02:14:54.719543978Z 2026-09-16T02:14:54.719Z	INFO	logger/logger.go:85	Database connected and migrated
-ehome-bb-ehome  | 2026-09-16T02:14:54.720368287Z 2026/09/16 02:14:54 INFO migrate_partitioned: no legacy flat table, creating fresh partitioned parent table=unified_data
-ehome-bb-ehome  | 2026-09-16T02:14:54.744909474Z 2026/09/16 02:14:54 INFO partition_mgr: created partition partition=unified_data_202608 parent=unified_data
-ehome-bb-ehome  | 2026-09-16T02:14:54.751899256Z 2026/09/16 02:14:54 INFO partition_mgr: created partition partition=unified_data_202609 parent=unified_data
-ehome-bb-ehome  | 2026-09-16T02:14:54.757815946Z 2026/09/16 02:14:54 INFO partition_mgr: created partition partition=unified_data_202610 parent=unified_data
-ehome-bb-ehome  | 2026-09-16T02:14:54.763886037Z 2026/09/16 02:14:54 INFO partition_mgr: created partition partition=unified_data_202611 parent=unified_data
