@@ -363,12 +363,9 @@ export function pageHeaderFindings(file: string, regions: Regions): Finding[] {
  * 修好之后必须把条目删除；理由过期同样要让「豁免白名单不得腐烂」用例变红。
  */
 const EXEMPT_LOCAL_SLICE: Record<string, string> = {
-  'src/views/channel/ChannelList.vue':
-    '存量本地切片分页：const paginatedChannels = computed(() => filteredChannels.value.slice(start, start + pageSize))（ChannelList.vue:327-330）。' +
-    '后端 GET /channels（backend/internal/api/handler_device.go:579-600）不分页、直接 Success(c, chs) 全量返回，' +
-    '所以该页**当前没有服务端分页可接**：只改前端切片不会让行为更正确，只会把全量数据换个地方存。' +
-    '彻底修法（后端加 page/page_size + 前端接参 + total 改服务端值 + 契约测试）超出 P1-C 范围，' +
-    '已在交付报告里报给主控排期。删除本条的时机 = 后端分页上线且前端接参之后。登记日期 ' + SCAN_DATE + '。',
+  // ChannelList.vue 的存量豁免已于 2026-09-17 删除：该页已完成服务端分页改造
+  // （GET /channels 走 page/page_size/node_id/hardware_type，:total 用服务端 total，
+  // 本地 paginatedChannels / filteredChannels 切片已删除）。删除后本门禁对它是真实生效的。
   'src/views/data/DataPanel.vue':
     '已知误报（不是分页切片）：DataPanel.vue:703 的 historyData.value.slice(0, pageSize.value) 是 WebSocket ' +
     '实时流的"本页最多保留 N 条"上限；该页分页走 504-505 的 page: currentPage.value / page_size: pageSize.value，' +
@@ -726,10 +723,15 @@ describe('P1-C 判定器自检（分类器正例/反例）', () => {
     const finding: Finding = { file: p.file, line: 1, rule: '本地切片分页', detail: 'x' }
     // 未登记 ⇒ 不放行
     expect(isExempt(p, finding)).toBe(false)
-    // 登记过的文件（ChannelList）⇒ 该规则放行
-    expect(isExempt({ ...p, file: 'src/views/channel/ChannelList.vue' }, finding)).toBe(true)
+    // 登记过的文件（EXEMPT_LOCAL_SLICE 现存条目：DataPanel 的已知误报）⇒ 该规则放行
+    expect(isExempt({ ...p, file: 'src/views/data/DataPanel.vue' }, finding)).toBe(true)
+    // 反例（防"删掉登记项后本自检变成恒绿"）：ChannelList.vue 的登记已于服务端分页改造后删除 ⇒ 不放行
+    expect(
+      isExempt({ ...p, file: 'src/views/channel/ChannelList.vue' }, finding),
+      'ChannelList.vue 已删除存量豁免，不得再被放行',
+    ).toBe(false)
     // 但豁免只覆盖它登记的那条规则：同一个文件上"缺 PageHeader"不被 EXEMPT_LOCAL_SLICE 放行
-    const headerFinding: Finding = { file: 'src/views/channel/ChannelList.vue', line: 1, rule: '缺 PageHeader', detail: 'x' }
-    expect(isExempt({ ...p, file: 'src/views/channel/ChannelList.vue' }, headerFinding)).toBe(false)
+    const headerFinding: Finding = { file: 'src/views/data/DataPanel.vue', line: 1, rule: '缺 PageHeader', detail: 'x' }
+    expect(isExempt({ ...p, file: 'src/views/data/DataPanel.vue' }, headerFinding)).toBe(false)
   })
 });

@@ -34,6 +34,35 @@ export interface Channel {
  */
 export const CHANNEL_LIST_MAX_PAGE_SIZE = 200
 
+/**
+ * /nodes 服务端分页的页长上界（后端 clamp 语义同 /channels：page_size > 200 → 回默认 20）。
+ *
+ * 用途：ChannelList 的**节点筛选下拉**是一次性把节点灌进 <el-option> 的选择器，
+ * 它没有任何"翻页"入口。若不显式下发上界，服务端只给 20 个（审计库实测 418 个节点），
+ * 其余节点用户根本选不到 —— 这正是本仓禁止的"静默截断"。
+ * 这里下发上界把可选项拉满，并在 total 超过上界时由页面**显式**提示已截断（不得静默）。
+ * 与 CHANNEL_LIST_MAX_PAGE_SIZE 同一范式：值 200 是后端承认的闭区间上界。
+ */
+export const NODE_FILTER_MAX_PAGE_SIZE = 200
+
+/** GET /channels 的查询参数（服务端分页 + 服务端筛选）。 */
+export interface ChannelListQuery {
+  /** 服务端页码（从 1 开始；后端 clamp：<1 → 1） */
+  page?: number
+  /** 页长（后端 clamp：<1 或 >200 → 20） */
+  page_size?: number
+  /**
+   * 节点过滤。后端 handler_device.go 先试 ParseUint（兼容自增主键），
+   * 失败则按 nodes.node_id 查 —— 因此**物理序列号字符串**（'F0F5BDFFFE02'）是首选形态。
+   */
+  node_id?: number | string
+  /**
+   * 硬件类型过滤（'uart'/'i2c'…）。后端用 UPPER(hardware_type) = UPPER(?) 比较，
+   * **大小写不敏感**，故小写下拉值可直接下发。
+   */
+  hardware_type?: string
+}
+
 function isChannelRecord(value: unknown): value is Channel {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -42,6 +71,24 @@ function isChannelRecord(value: unknown): value is Channel {
 export function compactChannelList(items: unknown): Channel[] {
   if (!Array.isArray(items)) return []
   return items.filter(isChannelRecord)
+}
+
+/**
+ * 解开 /channels 的统一 envelope：{code,data:{items,total,page,page_size}} → {items,total,…}。
+ * 4xx/5xx 业务码必须抛错（与 client.ts 拦截器逻辑一致）—— 否则"接口失败"会被
+ * 解成"空列表"，页面就会用空态冒充"确实没有通道"（本仓禁止的静默失败）。
+ */
+function unwrapChannelList(response: unknown): Channel[] | { items: Channel[]; total?: number; page?: number; page_size?: number } {
+  const body = response as { code?: number; data?: Channel[] | { items?: Channel[]; total?: number; page?: number; page_size?: number } }
+  if (body.code && body.code >= 400) {
+    throw new Error('获取通道列表失败')
+  }
+  const inner = body.data
+  if (Array.isArray(inner)) return compactChannelList(inner)
+  if (inner && typeof inner === 'object' && Array.isArray(inner.items)) {
+    return { ...inner, items: compactChannelList(inner.items) }
+  }
+  return { items: [] }
 }
 
 export const channelApi = {
@@ -63,19 +110,42 @@ export const channelApi = {
     const params: Record<string, unknown> = nodeId ? { node_id: nodeId } : {}
     params.page_size = pageSize !== undefined ? pageSize : CHANNEL_LIST_MAX_PAGE_SIZE
     const response = await client.get('/api/v1/channels', { params })
-    // response is the full body: { code: 200, data: { items, total, ... } }
-    const body = response as { code?: number; data?: Channel[] | { items?: Channel[]; total?: number } }
-    // 2xx 为成功，4xx/5xx 为业务错误（与 client.ts 拦截器逻辑一致）
-    if (body.code && body.code >= 400) {
-      throw new Error('获取通道列表失败')
+    return unwrapChannelList(response)
+  },
+
+  /**
+   * 服务端分页 + 服务端筛选的列表入口（ChannelList.vue 走这条）。
+   *
+   * 与上面的 getList 的区别：getList 的语义是「给我某节点的全部通道」（缺省下发上界），
+   * 本函数是**真分页**：page/page_size/node_id/hardware_type 全部原样下发，并回传服务端 total。
+   * 二者并存是因为既有调用方（ChannelPanel/ChannelTerminal/stores/channel…）要的是"全部"。
+   */
+  async getPage(query: ChannelListQuery = {}): Promise<{ items: Channel[]; total: number; page: number; page_size: number }> {
+    const params: Record<string, unknown> = {
+      page: query.page ?? 1,
+      page_size: query.page_size ?? CHANNEL_LIST_MAX_PAGE_SIZE,
     }
-    // Unwrap: { data: { items: [...] } } -> { items: [...] }
-    const inner = body.data
-    if (Array.isArray(inner)) return compactChannelList(inner)
-    if (inner && typeof inner === 'object' && Array.isArray(inner.items)) {
-      return { ...inner, items: compactChannelList(inner.items) }
+    // 空串/undefined 一律不下发：后端对空串不过滤，但显式省略能让"没筛选"与"筛了空值"不可混淆。
+    if (query.node_id !== undefined && query.node_id !== '') params.node_id = query.node_id
+    if (query.hardware_type) params.hardware_type = query.hardware_type
+    const response = await client.get('/api/v1/channels', { params })
+    const inner = unwrapChannelList(response)
+    if (Array.isArray(inner)) {
+      // 旧后端（裸数组）不认得 page/page_size：如实按"只有一页"处理，不伪造 total。
+      return { items: inner, total: inner.length, page: 1, page_size: inner.length }
     }
-    return { items: [] }
+    const items = inner.items
+    const total = typeof (inner as { total?: unknown }).total === 'number'
+      ? (inner as { total: number }).total
+      : items.length
+    const echoed = inner as { page?: number; page_size?: number }
+    return {
+      items,
+      total,
+      // 回显后端 clamp 后的值；旧后端缺省时以请求值兜底（范式同 api/node.ts:275-280）
+      page: typeof echoed.page === 'number' ? echoed.page : (query.page ?? 1),
+      page_size: typeof echoed.page_size === 'number' ? echoed.page_size : (query.page_size ?? CHANNEL_LIST_MAX_PAGE_SIZE),
+    }
   },
 
   // 获取单个通道
