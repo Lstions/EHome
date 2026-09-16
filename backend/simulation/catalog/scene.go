@@ -33,7 +33,6 @@ package catalog
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -488,13 +487,11 @@ func sceneWaitNotification(e *harness.Env, ruleID int64) autoNotificationRow {
 func sceneWaitSensor(e *harness.Env, edgeDeviceID int64, name string, value float64) {
 	e.T.Helper()
 	e.Eventually(25*time.Second, func() error {
-		r := e.Admin.Get("/api/v1/devices/" + strconv.FormatInt(edgeDeviceID, 10) + "/sensor-data?limit=50")
-		if r.Status != http.StatusOK {
-			return fmt.Errorf("GET /devices/%d/sensor-data 返回 %d: %s", edgeDeviceID, r.Status, r.BodyString())
-		}
-		var samples []autoSensorSample
-		if err := json.Unmarshal(r.Data, &samples); err != nil {
-			return fmt.Errorf("解析统一数据失败: %w", err)
+		// 端点形状：**裸数组**（handler_data.go:56-99）。
+		path := "/api/v1/devices/" + strconv.FormatInt(edgeDeviceID, 10) + "/sensor-data?limit=50"
+		samples, err := simBareListItems[autoSensorSample](e.Admin.Get(path), path)
+		if err != nil {
+			return err
 		}
 		for _, sample := range samples {
 			if sample.SensorName == name && math.Abs(sample.Value-value) <= 1e-3 {
@@ -523,13 +520,11 @@ func sceneWaitNotificationDetail(e *harness.Env, ruleID int64) sceneNotifyRow {
 	e.T.Helper()
 	var hit sceneNotifyRow
 	e.Eventually(20*time.Second, func() error {
-		r := e.Admin.Get("/api/v1/notifications?limit=100")
-		if r.Status != http.StatusOK {
-			return fmt.Errorf("GET /api/v1/notifications 返回 %d: %s", r.Status, r.BodyString())
-		}
-		var rows []sceneNotifyRow
-		if err := json.Unmarshal(r.Data, &rows); err != nil {
-			return fmt.Errorf("解析通知列表失败: %w", err)
+		// 端点形状：**裸数组**（handler_notification.go:14-18）。
+		rows, err := simBareListItems[sceneNotifyRow](e.Admin.Get("/api/v1/notifications?limit=100"),
+			"/api/v1/notifications?limit=100")
+		if err != nil {
+			return err
 		}
 		id := strconv.FormatInt(ruleID, 10)
 		for _, row := range rows {

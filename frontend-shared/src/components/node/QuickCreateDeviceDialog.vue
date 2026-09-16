@@ -10,7 +10,7 @@
   >
     <div class="step-tip">
       <el-icon><InfoFilled /></el-icon>
-      <span>在节点 <strong>{{ nodeName || nodeId }}</strong> 上直接创建设备，无需预先创建设备模板</span>
+      <span>在节点 <strong>{{ nodeName || nodeId }}</strong> 上直接创建设备，无需预先创建设备配置</span>
     </div>
 
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top" style="margin-top: 16px;">

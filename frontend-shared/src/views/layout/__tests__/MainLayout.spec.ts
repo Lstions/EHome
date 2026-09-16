@@ -116,7 +116,7 @@ describe('MainLayout.vue', () => {
     window.dispatchEvent(new Event('resize'))
   })
 
-  it('renders all 13 admin menu items', async () => {
+  it('renders all 14 admin menu items', async () => {
     const wrapper = mount(MainLayout, {
       global: {
         stubs,
@@ -126,7 +126,7 @@ describe('MainLayout.vue', () => {
     await flushPromises()
 
     const menuItems = wrapper.findAll('.el-menu-item')
-    expect(menuItems).toHaveLength(13)
+    expect(menuItems).toHaveLength(14)
     const paths = menuItems.map((el) => el.attributes('data-index'))
     expect(paths).toEqual([
       '/dashboard',
@@ -142,6 +142,7 @@ describe('MainLayout.vue', () => {
       '/alerts',
       '/automation',
       '/notification-channels',
+      '/notification-deliveries',
     ])
   })
 

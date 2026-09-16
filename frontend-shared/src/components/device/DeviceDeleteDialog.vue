@@ -12,11 +12,11 @@
       <div class="delete-device-facts">
         <div class="fact-row">
           <span class="fact-label">设备名称</span>
-          <span class="fact-value">{{ device.name || '-' }}</span>
+          <span class="fact-value">{{ device.name || UNKNOWN }}</span>
         </div>
         <div class="fact-row">
           <span class="fact-label">设备类型</span>
-          <span class="fact-value">{{ device.device_type || '-' }}</span>
+          <span class="fact-value">{{ device.device_type || UNKNOWN }}</span>
         </div>
         <div class="fact-row">
           <span class="fact-label">所属节点</span>
@@ -75,6 +75,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { edgeDeviceApi, type EdgeDevice, type LogicalDeviceInfo } from '@/api/edgeDevice'
+import { UNKNOWN } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -96,9 +97,9 @@ const dialogVisible = computed({
 })
 
 const channelLabel = computed(() => {
-  if (!props.device) return '-'
+  if (!props.device) return UNKNOWN
   const parts = [props.device.hardware_type?.toUpperCase(), props.device.hardware_id].filter(Boolean)
-  return parts.length > 0 ? parts.join(' ') : '-'
+  return parts.length > 0 ? parts.join(' ') : UNKNOWN
 })
 
 // 数据处置：默认保留历史数据
@@ -192,7 +193,14 @@ const handleConfirm = () => {
 .skeleton-line {
   height: 12px;
   border-radius: 6px;
-  background: linear-gradient(90deg, #ebeef5 25%, #f5f7fa 50%, #ebeef5 75%);
+  /* I-4：改用主题 token（--border-color-light #ebeef5 / --bg-color-page #f5f7fa 同值），
+     原为写死 hex ⇒ 暗色下骨架条仍是亮色，与所在对话框底色几乎同色（看不清）。 */
+  background: linear-gradient(
+    90deg,
+    var(--border-color-light, #ebeef5) 25%,
+    var(--bg-color-page, #f5f7fa) 50%,
+    var(--border-color-light, #ebeef5) 75%
+  );
   background-size: 200% 100%;
   animation: skeleton-pulse 1.2s ease-in-out infinite;
 }

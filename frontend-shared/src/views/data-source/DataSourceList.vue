@@ -8,19 +8,19 @@
 
     <!-- 概览指标条 -->
     <div class="stats-row">
-      <StatCard label="总来源" icon-color="var(--el-color-primary)" data-test="ds-stat-total">
+      <StatCard :label="`总来源（${SCOPE_FILTERED}）`" icon-color="var(--el-color-primary)" data-test="ds-stat-total">
         <template #icon><el-icon><Connection /></el-icon></template>
         <template #value><span class="stat-value">{{ metric(store.total) }}</span></template>
       </StatCard>
-      <StatCard label="权威" icon-color="var(--el-color-success)" data-test="ds-stat-active">
+      <StatCard :label="`权威（${SCOPE_PAGE}）`" icon-color="var(--el-color-success)" data-test="ds-stat-active">
         <template #icon><el-icon><CircleCheck /></el-icon></template>
         <template #value><span class="stat-value">{{ metric(store.activeCount) }}</span></template>
       </StatCard>
-      <StatCard label="待命" icon-color="var(--el-color-info)" data-test="ds-stat-standby">
+      <StatCard :label="`待命（${SCOPE_PAGE}）`" icon-color="var(--el-color-info)" data-test="ds-stat-standby">
         <template #icon><el-icon><Clock /></el-icon></template>
         <template #value><span class="stat-value">{{ metric(store.standbyCount) }}</span></template>
       </StatCard>
-      <StatCard label="熔断" icon-color="var(--el-color-danger)" data-test="ds-stat-error">
+      <StatCard :label="`熔断（${SCOPE_PAGE}）`" icon-color="var(--el-color-danger)" data-test="ds-stat-error">
         <template #icon><el-icon><WarningFilled /></el-icon></template>
         <template #value><span class="stat-value">{{ metric(store.errorCount) }}</span></template>
       </StatCard>
@@ -349,6 +349,18 @@ import { Plus, Connection, CircleCheck, Clock, WarningFilled } from '@element-pl
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+
+/**
+ * F14 统计卡范围词（规范 §4.3 MUST）—— 本页 4 张卡**混排两种口径**，必须逐个标出：
+ *   · SCOPE_FILTERED —— `store.total` 来自后端 `q.Count(&total)`（service.go），
+ *     口径是「当前筛选条件下的全量」（不带筛选 = 全表），不是本页。
+ *   · SCOPE_PAGE     —— active/standby/error 三个计数都来自 `items.value`（当前页 ≤20 条）。
+ * 为什么必须标注：不标时「总来源=25」而「权威+待命+熔断」最多只加到 20，
+ * 用户会以为数据丢了 —— 这正是该 MUST 条款要防的误读。
+ * 常量化的理由同 Monitor.vue / DataPanel.vue：验收要能机械数出「每个统计值都带范围词」。
+ */
+const SCOPE_FILTERED = '当前筛选'
+const SCOPE_PAGE = '本页'
 import { useResponsive } from '@/composables/useResponsive'
 import { useDataSourceStore } from '@/stores/dataSource'
 import { logicalDeviceApi, type LogicalDeviceItem } from '@/api/logicalDevice'

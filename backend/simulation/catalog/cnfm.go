@@ -31,7 +31,6 @@
 package catalog
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -203,16 +202,10 @@ func cnfmWaitPending(e *harness.Env, ruleID int64) autoEventRow {
 
 // cnfmOperations 读某台边缘设备的受控指令记录（用户可见的"下发历史"）。
 func cnfmOperations(e *harness.Env, edgeDeviceID uint) ([]cnfmOperationRow, error) {
-	r := e.Admin.Get("/api/v1/edge-devices/" + strconv.FormatUint(uint64(edgeDeviceID), 10) + "/operations")
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/edge-devices/%d/operations 返回 %d: %s",
-			edgeDeviceID, r.Status, r.BodyString())
-	}
-	var rows []cnfmOperationRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析指令执行记录失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	// 端点形状：**裸数组**（handler_device_operation.go:90-110 的
+	// GET /edge-devices/:id/operations 走 Success(c, items)，没有分页）。
+	path := "/api/v1/edge-devices/" + strconv.FormatUint(uint64(edgeDeviceID), 10) + "/operations"
+	return simBareListItems[cnfmOperationRow](e.Admin.Get(path), path)
 }
 
 // cnfmCountAction 统计某台设备上某个动作的受控指令条数。
@@ -447,18 +440,14 @@ func cnfmRun002(e *harness.Env) {
 // 事件号只存在于正文（planner.go:290 的格式化文本），这也正是界面上唯一的线索。
 func cnfmNotificationMentionsEvent(e *harness.Env, notificationID, eventID uint) bool {
 	e.T.Helper()
-	r := e.Admin.Get("/api/v1/notifications?limit=100")
-	if r.Status != http.StatusOK {
-		e.Fatalf("GET /api/v1/notifications 返回 %d: %s", r.Status, r.BodyString())
-	}
-	var rows []struct {
+	// 端点形状：**裸数组**（handler_notification.go:14-18）。致命解析：
+	// 本函数随后要按 ID 断言通知正文，解析失败绝不能退化成"找不到"。
+	type cnfmNotifyRow struct {
 		ID          uint   `json:"id"`
 		Message     string `json:"message"`
 		Description string `json:"description"`
 	}
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		e.Fatalf("解析通知列表失败: %v", err)
-	}
+	rows := simBareListGet[cnfmNotifyRow](e, "/api/v1/notifications?limit=100")
 	needle := fmt.Sprintf("event_id=%d", eventID)
 	for _, row := range rows {
 		if row.ID != notificationID {

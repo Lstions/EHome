@@ -148,28 +148,93 @@ func windAssertCrossMidnight(e *harness.Env, label, start, end string) {
 	}
 }
 
-// windFindCrossWindow 找一个跨零点窗口（起点 > 终点）：inside=true 时返回
-// 「当前时刻在其中」的那个，inside=false 时返回「当前时刻不在其中」的那个。
+// 跨零点窗口（起点 > 终点）的判定语义与产品一致（automation 的 isInWindow；
+// 本文件 windContains 是它的独立复写）：
 //
-// 为什么需要搜索：22:00–06:00 这类字面窗口只在夜间为真，而场景必须在任何真实
-// 时刻都能跑；本函数以当前时刻为锚，在整点偏移里找出一个语义完全等价的跨零点
-// 窗口（同一个 isInWindow 分支），从而不必等到夜里（也不伪造时钟）。
+//	窗口 = [start, 24:00) ∪ [00:00, end)
+//	now 在窗口内   ⇔ nowMin >= start || nowMin < end
+//	now 不在窗口内 ⇔ end <= nowMin < start            （补集是空档 [end, start)）
+//
+// windFindCrossWindow 直接**构造**满足请求的窗口（不再搜索）：inside=true 返回
+// 「当前时刻在其中」的那个，inside=false 返回「当前时刻不在其中」的那个。
+//
+// 为什么放弃整点搜索：旧实现把 startOffset 与 width 都以 60 分钟步进，搜索空间
+// 覆盖不到全部 1440 个分钟点 ——
+//   - now ∈ 11:00–11:59：「含 now」无解。傍晚段要求宽度 >= 1440-now >= 13h00m；
+//     清晨段要求 end > now 且 start = end+1440-宽度 <= 1439，即宽度 >= end+1 >= 12h01m。
+//     两条路都超出旧搜索 12h 的宽度上限。
+//   - now ∈ 23:00–23:59：「不含 now」无解。要求 now < start，而整点起点最大 23:00。
+//
+// ⇒ 每天这两个小时 SIM-WIND-005 必然变红（11:00–11:59 与 23:00–23:59），与分页缺陷无关。
+//
+// 构造分支的完备性与语义由 wind_satisfiability_test.go 穷举 1440 分钟长期守护。
 func windFindCrossWindow(now time.Time, inside bool) (string, string, bool) {
 	nowMin := windMinutes(now)
-	for startOffset := -12; startOffset <= 12; startOffset++ {
-		for width := 1; width <= 12; width++ {
-			start := ((nowMin+startOffset*60)%1440 + 1440) % 1440
-			end := ((start+width*60)%1440 + 1440) % 1440
-			if start == end || start < end {
-				continue // 只要跨零点窗口
-			}
-			contained := nowMin >= start || nowMin < end
-			if contained == inside {
-				return windHHMM(start), windHHMM(end), true
-			}
-		}
+	if inside {
+		start, end := windCrossWindowInside(nowMin)
+		return windHHMM(start), windHHMM(end), true
 	}
-	return "", "", false
+	if windCrossWindowUnsolvable(nowMin) {
+		return "", "", false
+	}
+	start, end := windCrossWindowOutside(nowMin)
+	return windHHMM(start), windHHMM(end), true
+}
+
+// windCrossWindowUnsolvable 判定「不含当前时刻的跨零点窗口」是否**数学上无解**。
+//
+// 判据来源是上面的等价式，不是经验：不含 now ⇔ end <= nowMin < start，
+// 而 start <= 1439（当天最后一分钟），故必须 nowMin < start <= 1439，即 nowMin <= 1438。
+// 唯一无解的分钟是 nowMin == 1439（23:59）—— 那一分钟落在**任何**跨零点窗口内
+// （start <= 1439 <= nowMin 使 nowMin >= start 成立，或 end >= 1 > ... 的晨间段判定，
+// 两条析取必有一条为真）。
+//
+// 场景只允许在这一分钟跳过 out 分支，且必须把依据写进证据（见 windRun005）。
+func windCrossWindowUnsolvable(nowMin int) bool { return nowMin == 1439 }
+
+// windCrossWindowInside 构造一个含 nowMin 的跨零点窗口：14 小时宽、整点对齐。
+//
+//	H >= 11：now 落在傍晚段 —— start = H:00 <= now，窗口一直延到 24:00；
+//	H <= 10：now 落在清晨段 —— 固定 23:00–13:00（now < 13:00 必在该段内）。
+//
+// 为什么 H >= 11 取 14h（840 分钟）而不是 12h：傍晚段要 start <= now 且
+// start + 宽度 >= 1440。H == 11 时 start = 11:00 需要宽度 >= 780（13h），
+// 取 840 后 end = start-600 = 01:00 > 0，晨间段非空、窗口不退化。
+//
+// 稳定性（场景创建规则后要等真实 60s ticker 才求值）：两个分支都保证 now 之后
+// 至少还含 60 分钟 —— 傍晚段跨零点后由晨间段接续（end >= 01:00）。这条不变量的
+// 完整覆盖见 wind_satisfiability_test.go 的 now+60 断言。
+func windCrossWindowInside(nowMin int) (start, end int) {
+	if h := nowMin / 60; h >= 11 {
+		return 60 * h, 60*h - 600
+	}
+	return 23 * 60, 13 * 60
+}
+
+// windCrossWindowOutside 构造一个不含 nowMin 的跨零点窗口：12 小时宽、整点对齐。
+// 补集空档 [end, start) 必须含 nowMin，且 start 要明显晚于 now（空档不能在下一个
+// ticker tick 就失效），因此：
+//
+//	H <= 9       ：end = H:00、start = H+12:00（空档左边界只能落在当天，
+//	               否则 start < end，窗口就不再跨零点）。H == 0 时 end = 00:00，
+//	               晨间段为空（当天已无更早的整点），窗口仍是 start > end 的跨零点分支。
+//	10 <= H <= 21：start = H+2:00、end = start-12h（空档上边界距 now 至少 61 分钟）。
+//	H >= 22      ：当天已无更晚的整点，退化为 23:59–11:59（空档 [11:59, 23:59)，
+//	               仍覆盖 22:00–23:58）。23:59 由 windCrossWindowUnsolvable 提前挡掉。
+//
+// 调用前提：!windCrossWindowUnsolvable(nowMin)。
+func windCrossWindowOutside(nowMin int) (start, end int) {
+	h := nowMin / 60
+	switch {
+	case h <= 9:
+		end = 60 * h
+		return end + 720, end
+	case h <= 21:
+		start = 60 * (h + 2)
+		return start, start - 720
+	default:
+		return 23*60 + 59, 11*60 + 59
+	}
 }
 
 // windNightWindowContains 用显式小时算术判断当前时刻是否落在字面的
@@ -398,19 +463,41 @@ func windRun004(e *harness.Env) {
 
 func windRun005(e *harness.Env) {
 	now := time.Now()
+	nowMin := windMinutes(now)
+
+	// 含当前时刻的跨零点窗口：**恒有解**（推导见 windFindCrossWindow 的注释）。
+	// 因此这里不给「跳过」留任何余地 —— 构造不出来就是构造器的真实缺陷，必须红。
 	inStart, inEnd, okIn := windFindCrossWindow(now, true)
-	outStart, outEnd, okOut := windFindCrossWindow(now, false)
-	if !okIn || !okOut {
-		e.Fatalf("未能构造出跨零点窗口（now=%s）", now.Format(time.RFC3339))
+	if !okIn {
+		e.Fatalf("未能构造出含当前时刻的跨零点窗口（now=%s）—— 该分支对任意时刻都有解",
+			now.Format(time.RFC3339))
 	}
-	// 前提自检：两个窗口必须真的是跨零点窗口（起点晚于终点），且一含一不含当前时刻。
+	// 不含当前时刻的跨零点窗口：仅 now == 23:59 数学上无解（见 windCrossWindowUnsolvable）。
+	// 关键：这里是**显式裁决的不可满足边界**，不是笼统的「构造失败就跳过」——
+	// 只有「构造结果」与「无解判据」不一致时才失败，两者必须严格互为否定。
+	outStart, outEnd, okOut := windFindCrossWindow(now, false)
+	unsolvable := windCrossWindowUnsolvable(nowMin)
+	if okOut == unsolvable {
+		e.Fatalf("不含当前时刻的跨零点窗口与无解判据不一致（now=%s nowMin=%d 构造成功=%v 判据无解=%v）："+
+			"构造成功而判据说无解 ⇒ 判据错了；构造失败而判据说有解 ⇒ 构造器漏了分支",
+			now.Format(time.RFC3339), nowMin, okOut, unsolvable)
+	}
+
+	// 前提自检：窗口必须真的是跨零点窗口（起点晚于终点），且含/不含当前时刻与请求一致。
 	windAssertCrossMidnight(e, "SIM-WIND-005 含当前时刻的窗口", inStart, inEnd)
-	windAssertCrossMidnight(e, "SIM-WIND-005 不含当前时刻的窗口", outStart, outEnd)
 	windAssertContains(e, "SIM-WIND-005 含当前时刻的窗口", inStart, inEnd, now, true)
-	windAssertContains(e, "SIM-WIND-005 不含当前时刻的窗口", outStart, outEnd, now, false)
+	if okOut {
+		windAssertCrossMidnight(e, "SIM-WIND-005 不含当前时刻的窗口", outStart, outEnd)
+		windAssertContains(e, "SIM-WIND-005 不含当前时刻的窗口", outStart, outEnd, now, false)
+	}
 
 	inID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-in"), inStart, inEnd, "enter", 300)
-	outID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-out"), outStart, outEnd, "enter", 300)
+	// out 规则只在真的有窗口时才创建：23:59 那一分钟不存在不含 now 的跨零点窗口，
+	// 造一条不可能满足语义的规则只会污染后续计数（且它必然为「在窗口内」）。
+	var outID int64
+	if okOut {
+		outID = windCreateWindowRule(e, e.NS("SIM-WIND-005", "cross-out"), outStart, outEnd, "enter", 300)
+	}
 	// 字面窗口 22:00–06:00：真实用户会这么配，用它做一次独立交叉验证。
 	literalID := windCreateWindowRule(e, e.NS("SIM-WIND-005", "night"), "22:00", "06:00", "enter", 300)
 
@@ -419,7 +506,21 @@ func windRun005(e *harness.Env) {
 	// ① 跨零点且此刻在其中 → 必须触发（证明 22:00–06:00 这类窗口的「在窗口内」分支）。
 	inRows := trigWaitResult(e, inID, "notification", 1, windTickTimeout)
 	// ② 跨零点且此刻不在其中 → 一次都不能触发（证明另一半分支不会被误判成在窗口内）。
-	trigAssertNoResult(e, "跨零点但此刻不在其中的策略", outID, "notification", 2*time.Second)
+	if okOut {
+		trigAssertNoResult(e, "跨零点但此刻不在其中的策略", outID, "notification", 2*time.Second)
+	} else {
+		// now == 23:59：该分钟落在**任何**跨零点窗口内，因此「不含 now 的窗口」数学上不存在，
+		// 断言「不触发」在这里不可能成立。显式跳过并把不可满足的依据写进证据 ——
+		// 这不是「构造失败就算了」：判据本身由 wind_satisfiability_test.go 穷举验证。
+		e.Evidence("SIM-WIND-005.out_window_unsolvable", map[string]any{
+			"now":     now.Format("15:04"),
+			"now_min": nowMin,
+			"reason": "跨零点窗口不含 now ⇔ end <= now < start <= 1439 ⇒ now <= 1438；" +
+				"now == 23:59 数学上不存在这样的窗口，故跳过 out 分支（不可满足边界，非搜索缺陷）",
+			"unsolvable_at": "23:59",
+			"skipped_rule":  "cross-out（未创建）",
+		})
+	}
 
 	// ③ 字面 22:00–06:00 的独立交叉验证。
 	nightAfter := windNightWindowContains(time.Now())
@@ -445,14 +546,21 @@ func windRun005(e *harness.Env) {
 	}
 
 	// 注意：时间窗口事件没有 trigger_value（不是阈值触发），证据里只记条数与时刻。
-	e.Evidence("SIM-WIND-005.cross_midnight", map[string]any{
+	//
+	// cross_out_* 只在真的构造出 out 窗口时记录：23:59 那一分钟不存在这样的窗口，
+	// 硬写一个窗口串或 "events: 0" 会让证据看起来比事实更完整。
+	crossMidnight := map[string]any{
 		"cross_in_window":   inStart + "–" + inEnd,
-		"cross_out_window":  outStart + "–" + outEnd,
 		"now":               now.Format("15:04"),
 		"cross_in_events":   trigCountResult(inRows, "notification"),
 		"cross_in_fired_at": inRows[0].TriggeredAt,
-		"cross_out_events":  0,
 		"literal_window":    "22:00–06:00",
 		"night_inside":      nightBefore,
-	})
+		"cross_out_skipped": !okOut,
+	}
+	if okOut {
+		crossMidnight["cross_out_window"] = outStart + "–" + outEnd
+		crossMidnight["cross_out_events"] = 0
+	}
+	e.Evidence("SIM-WIND-005.cross_midnight", crossMidnight)
 }

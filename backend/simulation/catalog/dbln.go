@@ -22,7 +22,6 @@
 package catalog
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -147,12 +146,12 @@ func dblnPump(e *harness.Env, fx *autoFixture, raw uint16, timeout time.Duration
 // 用途：证明"高频上报真的被链路逐帧处理了"。没有这一步，"抑制审计只有一条"
 // 既可能是节流生效，也可能是那些上报压根没进管线 —— 两者无法区分。
 func dblnSampleCount(e *harness.Env, edgeDeviceID uint, want float64) (int, error) {
-	r := e.Admin.Get("/api/v1/devices/" + strconv.FormatUint(uint64(edgeDeviceID), 10) + "/sensor-data?limit=200")
-	if r.Status != http.StatusOK {
-		return 0, fmt.Errorf("GET /devices/%d/sensor-data 返回 %d: %s", edgeDeviceID, r.Status, r.BodyString())
-	}
-	var samples []autoSensorSample
-	if err := json.Unmarshal(r.Data, &samples); err != nil {
+	// 端点形状：**裸数组**（handler_data.go:56-99）。
+	// 非致命解析但必须带端点路径与 data 前缀：本函数是"高频上报真的
+	// 被逐帧处理了"的独立证据，解析失败被吞掉会把抑制断言变成假绿。
+	path := "/api/v1/devices/" + strconv.FormatUint(uint64(edgeDeviceID), 10) + "/sensor-data?limit=200"
+	samples, err := simBareListItems[autoSensorSample](e.Admin.Get(path), path)
+	if err != nil {
 		return 0, err
 	}
 	count := 0

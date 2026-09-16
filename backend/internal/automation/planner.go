@@ -324,8 +324,21 @@ func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (str
 	if !ok {
 		return fmt.Sprintf("latest value unavailable for edge_device_id=%d", rule.TriggerEdgeDeviceID), false
 	}
-	// Trigger 条件复核 (仅 sensor_threshold; time_window 由 evaluator 保证)
+	// Trigger 条件复核 (仅 sensor_threshold; time_window 由 evaluator 保证)。
+	//
+	// **必须先比对传感器名**：最新值缓存每设备只留一条记录（`map[edge_device_id]UnifiedData`），
+	// 它可能是**别的**物理量。不比对就比数值，等于拿 humidity 的值去和温度阈值比 ——
+	// 实测（修复前）：规则「temperature > 50」+ 缓存「humidity 80」被判为「仍满足」，
+	// 于是**条件已失效却照常执行动作**（fail-open，方向危险）。
+	//
+	// 缓存里不是本触发器传感器时：无法复核 ⇒ 保守判为「不再满足」并说明原因。
+	// 这与下方附加条件「无法复核则跳过」的取舍不同 —— 此处决定**是否执行动作**，
+	// 判不准时应偏向不执行（fail-closed），而不是拿无关数值蒙一个结论。
 	if rule.TriggerType == models.AutomationTriggerSensorThreshold {
+		if rec.SensorName != rule.TriggerSensorName {
+			return fmt.Sprintf("trigger sensor %q not in latest-value cache (cache holds %q); "+
+				"cannot re-verify, refusing to execute", rule.TriggerSensorName, rec.SensorName), false
+		}
 		if !compare(rule.TriggerComparator, rec.Value, rule.TriggerThreshold) {
 			return fmt.Sprintf("trigger condition no longer satisfied: %s %.2f vs threshold %.2f",
 				rule.TriggerComparator, rec.Value, rule.TriggerThreshold), false
@@ -334,7 +347,7 @@ func (p *Planner) checkConditionsStillSatisfied(rule models.AutomationRule) (str
 	// 附加条件复核 (全部 AND; SensorName 匹配 UnifiedData.SensorName)
 	for _, c := range conds {
 		if c.SensorName != rec.SensorName {
-			continue // 最新值缓存单条记录只覆盖一个传感器, 其余条件无法复核则跳过
+			continue // 附加条件不可复核时跳过（不阻断执行），与 trigger 的 fail-closed 取舍不同
 		}
 		if !compare(c.Comparator, rec.Value, c.Threshold) {
 			return fmt.Sprintf("condition %s %s %.2f no longer satisfied: latest=%.2f",

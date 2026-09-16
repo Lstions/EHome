@@ -6,22 +6,22 @@
 
     <!-- 顶部统计 -->
     <div class="stats-row">
-      <StatCard label="模板总数" icon-color="var(--el-color-primary)">
+      <StatCard :label="`模板总数（${SCOPE_FILTERED}）`" icon-color="var(--el-color-primary)">
         <template #icon><el-icon><Document /></el-icon></template>
         <template #value><span class="stat-value">{{ stats.total }}</span></template>
       </StatCard>
 
-      <StatCard label="本页启用" icon-color="var(--el-color-success)">
+      <StatCard :label="`${SCOPE_PAGE}启用`" icon-color="var(--el-color-success)">
         <template #icon><el-icon><CircleCheck /></el-icon></template>
         <template #value><span class="stat-value">{{ stats.active }}</span></template>
       </StatCard>
 
-      <StatCard label="总线类型" icon-color="var(--el-color-info)">
+      <StatCard :label="`总线类型（${SCOPE_PAGE}）`" icon-color="var(--el-color-info)">
         <template #icon><el-icon><Connection /></el-icon></template>
         <template #value><span class="stat-value">{{ stats.busTypes }}</span></template>
       </StatCard>
 
-      <StatCard label="设备类型" icon-color="var(--el-color-warning)">
+      <StatCard :label="`设备类型（${SCOPE_PAGE}）`" icon-color="var(--el-color-warning)">
         <template #icon><el-icon><Cpu /></el-icon></template>
         <template #value><span class="stat-value">{{ stats.deviceTypes }}</span></template>
       </StatCard>
@@ -219,7 +219,7 @@
         </el-descriptions-item>
         <el-descriptions-item label="设备类型">{{ getDeviceTypeLabel(previewConfig.device_type) }}</el-descriptions-item>
         <el-descriptions-item label="硬件类型">{{ previewConfig.hardware_type?.toUpperCase() }}</el-descriptions-item>
-        <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() || UNKNOWN }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatTime(previewConfig.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="描述" :span="2">{{ previewConfig.description || '无' }}</el-descriptions-item>
       </el-descriptions>
@@ -248,10 +248,23 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+
+/**
+ * F14 统计卡范围词（规范 §4.3 MUST）。
+ *   · SCOPE_FILTERED —— `stats.total ← total.value ← response.total ← 后端 q.Count(&total)`
+ *     （handler_device.go:233-234，q 已按 device_type/hardware_type/status 过滤），
+ *     口径是「当前筛选条件下的全量」。
+ *   · 其余三项（active/busTypes/deviceTypes）由 `configs.value`（当前页 pageSize 条）算出，
+ *     已在标签里写作「本页启用」；busTypes/deviceTypes 此前只有名词，同样必须标出本页。
+ * 不规范标注时：「模板总数=137」而「总线类型」只反映本页出现过的类型，用户会以为是全站类型数。
+ */
+const SCOPE_FILTERED = '当前筛选'
+const SCOPE_PAGE = '本页'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
 
@@ -318,7 +331,7 @@ const fetchConfigs = async () => {
       page_size: pageSize.value
     })
     
-    configs.value = response.list || []
+    configs.value = response.items || []
     total.value = response.total || 0
     updateStats()
   } catch (error: any) {
@@ -452,17 +465,22 @@ const handleMoreAction = async (command: string, config: DeviceConfig) => {
       }
       break
       
-    case 'toggle':
+    case 'toggle': {
+      // 目标状态必须在 try **外**算出来：catch 里要用它决定失败文案
+      // （放在 try 内会被块级作用域挡住，vue-tsc 会报 TS2552）。
+      const newStatus = config.status === 'active' ? 'inactive' : 'active'
       try {
-        const newStatus = config.status === 'active' ? 'inactive' : 'active'
         // 后端 PUT 要求 name 必填（缺失即 400），且以其当前行为底合并，故只发 name + status。
         await deviceConfigApi.update(config.id, { name: config.name, status: newStatus })
         ElMessage.success(newStatus === 'active' ? '已启用' : '已禁用')
         await fetchConfigs()
       } catch (error) {
-        feedback.handleError(error, '操作失败')
+        // 同文件其余动作（克隆/设置默认/导入）都带宾语，此处原先只写「操作失败」——
+        // 而后端总会带 message，用户看不到失败的是「启用/禁用」这件事。
+        feedback.handleErrorWithContext(error, newStatus === 'active' ? '启用失败' : '禁用失败')
       }
       break
+    }
       
     case 'export':
       exportConfig(config)
@@ -564,9 +582,9 @@ const handleFormSuccess = () => {
 
 // 格式化时间
 const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN')
 }
 

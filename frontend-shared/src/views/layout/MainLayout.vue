@@ -177,11 +177,13 @@
                   <p>暂无新通知</p>
                 </div>
                 <div v-else class="notification-list">
-                  <div 
-                    v-for="item in notifications" 
-                    :key="item.id" 
+                  <button
+                    v-for="item in notifications"
+                    :key="item.id"
+                    type="button"
                     class="notification-item"
                     :class="{ unread: !item.read }"
+                    :aria-label="`通知：${item.title}`"
                     @click="handleNotificationClick(item)"
                   >
                     <div class="notification-icon" :class="item.type">
@@ -192,7 +194,7 @@
                       <p class="notification-desc">{{ item.description }}</p>
                       <span class="notification-time">{{ item.created_at }}</span>
                     </div>
-                  </div>
+                  </button>
                 </div>
               </el-scrollbar>
             </div>
@@ -267,6 +269,7 @@ import {
   SuccessFilled,
   InfoFilled,
   Menu,
+  Tickets,
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { withBase } from '@/utils/basePath'
@@ -321,6 +324,7 @@ const allMenuItems = [
 	{ path: '/alerts', title: '告警规则', icon: Bell },
 	{ path: '/automation', title: '自动化策略', icon: SetUp },
 	{ path: '/notification-channels', title: '通知通道', icon: Bell },
+	{ path: '/notification-deliveries', title: '投递审计', icon: Tickets },
 ]
 const menuItems = computed(() => allMenuItems)
 
@@ -1037,16 +1041,27 @@ onUnmounted(() => {
   margin-top: 8px;
 }
 
+/* 通知条目：<button> 承载（自带焦点与 Enter/Space 激活），视觉与原 <div> 一致 */
 .notification-item {
   display: flex;
+  width: 100%;
   gap: 12px;
   padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
   cursor: pointer;
   transition: background 0.2s;
 }
 
 .notification-item:hover {
   background: var(--el-fill-color-light);
+}
+
+.notification-item:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
 }
 
 .notification-item.unread {

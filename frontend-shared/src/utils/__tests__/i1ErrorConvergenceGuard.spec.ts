@@ -38,7 +38,17 @@ function sourceFiles(dir = SRC): string[] {
 }
 
 const BARE_ERROR_CALL = /ElMessage\.error\(/g
-const FUNNEL_CALL = /feedback\.(handleError|error)\(/g
+/**
+ * 收敛出口的全部形态。
+ *
+ * **2026-09-15 修正一处假阴性**：原写法是 `/feedback\.(handleError|error)\(/g`，
+ * 它**匹配不到 `feedback.handleErrorWithContext(`** —— 因为 `handleError` 之后紧跟的是 `W`
+ * 而不是 `(`，正则要求字面量 `(`。后果：把一处 `handleError` 改进为 `handleErrorWithContext`
+ * 会让下面的分母守卫**减少 1**，于是「做了正确的改进」反而被判成「收敛在退化」。
+ * 该假阴性由 LogPanel.vue 的三处歧义文案修复暴露（110 → 108）。
+ * `handleErrorWithContext` 是 feedback 的正规出口（feedback.ts:132），必须计入分母。
+ */
+const FUNNEL_CALL = /feedback\.(handleErrorWithContext|handleError|error)\(/g
 
 function scan(re: RegExp): { file: string; line: number; text: string }[] {
   const hits: { file: string; line: number; text: string }[] = []
@@ -68,9 +78,32 @@ describe('I-1 静态守卫：错误提示必须走 utils/feedback', () => {
     expect(hits, `发现裸 ElMessage.error，请改走 feedback.handleError / feedback.error：\n${detail}`).toEqual([])
   })
 
+  it('分类器自检：出口正则必须覆盖全部三种形态（防假阴性）', () => {
+    // 这条是 2026-09-15 新增：原正则漏掉 handleErrorWithContext，
+    // 导致「把 handleError 改进为 WithContext」会被误判为分母下降。
+    for (const form of [
+      "feedback.handleError(e, 'x')",
+      "feedback.handleErrorWithContext(e, 'x')",
+      "feedback.error('x')",
+    ]) {
+      const re = new RegExp(FUNNEL_CALL.source, 'g')
+      expect(re.test(form), '出口正则必须匹配: ' + form).toBe(true)
+    }
+    // 反例：不该被当成出口的写法
+    for (const notForm of [
+      "ElMessage.error('x')",
+      "console.error('x')",
+      "logger.error('x')",
+    ]) {
+      const re = new RegExp(FUNNEL_CALL.source, 'g')
+      expect(re.test(notForm), '不该匹配: ' + notForm).toBe(false)
+    }
+  })
+
   it('反向守卫：收敛不得靠"删掉调用"实现，出口必须真实且广泛使用', () => {
     const hits = scan(new RegExp(FUNNEL_CALL.source, 'g'))
-    // 本轮收口 109 处 + 既有 4 处 = 113
+    // 本轮收口 109 处 + 既有 4 处 = 113；2026-09-15 起含 handleErrorWithContext，
+    // 实测 117（三种形态合计），阈值保持不变（110）以免掩盖真实退化。
     expect(hits.length).toBeGreaterThanOrEqual(110)
   })
 

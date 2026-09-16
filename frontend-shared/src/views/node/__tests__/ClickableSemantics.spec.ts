@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import nodeListSource from '@/views/node/NodeList.vue?raw'
 import nodeOverviewSource from '@/views/node/NodeOverview.vue?raw'
+import nodeDetailSource from '@/views/node/NodeDetail.vue?raw'
 import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
 // ── 本文件覆盖：页内可点击非原生容器补语义（规范 §3.1.3 MUST）──
@@ -10,8 +11,11 @@ import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 // 取舍（主要任务 vs 装饰性）：
 //   · 修：卡片整体可点击进详情（NodeList .collector-card）、页内 tab 切换
 //     （NodeOverview .tab-item）、点击复制的值（EdgeDeviceList .fact-value.copyable）
-//   · 不修：16x16 的 i.el-icon.ph-edit / 13x13 的 copy-icon —— 它们挂在已经
-//     可点击的父级语义之内，单独给 13px 图标造 tab 停靠点会让 Tab 序列退化。
+//   · 修（I-9 A 类，2026-09-15）：NodeOverview 的 ph-edit / copy-icon / mini-edit
+//     与 NodeDetail 的 edit-icon —— 它们不是"父级已可点击"的装饰图标，而是**动作本身**
+//     的唯一入口（重命名 / 复制 / 开始编辑）。改前用 <el-icon @click> 承载，键盘完全不可达。
+//     现改为真 <button> 承载：自带焦点、Enter/Space 激活、读屏角色，并带行内标识的
+//     aria-label（同类图标在一页内重复 N 次，没有名字就无法区分）。
 
 describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
   describe('NodeList.vue — .collector-card 卡片整体可点击进详情', () => {
@@ -93,16 +97,38 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
     })
   })
 
-  describe('装饰性小图标不单独加 tab 停靠点（避免 Tab 序列退化）', () => {
-    it('NodeOverview 的 16x16 ph-edit / 13x13 copy-icon 上没有被塞入 tabindex', () => {
-      // 这两个图标挂在已可点击的父级语义内（重命名 / 复制）；单独可聚焦会让
-      // 每次 Tab 多出无意义的 13px 停靠点，把 Tab 序列拉长。
-      const phEdit = nodeOverviewSource.match(/<el-icon[^>]*class="ph-edit"[^>]*>/)
-      const copyIcon = nodeOverviewSource.match(/<el-icon[^>]*class="copy-icon"[^>]*>/)
-      expect(phEdit).not.toBeNull()
-      expect(copyIcon).not.toBeNull()
-      expect(phEdit![0]).not.toContain('tabindex')
-      expect(copyIcon![0]).not.toContain('tabindex')
+  describe('I-9 A 类：图标动作入口改为真 <button>（重命名 / 复制 / 开始编辑）', () => {
+    // 这些图标曾是 <el-icon @click>（只有鼠标可靠，键盘不可达）。改为 <button> 后，
+    // 焦点、Enter/Space 激活、读屏角色由原生按钮提供，无需手写 role/tabindex/keydown。
+    // 下面断言：button 承载同一个 handler、保留原 class、可访问名带行内标识。
+    const iconButtons: Array<[string, string, string]> = [
+      ['NodeOverview.vue ph-edit', nodeOverviewSource, 'ph-edit'],
+      ['NodeOverview.vue copy-icon', nodeOverviewSource, 'copy-icon'],
+      ['NodeOverview.vue mini-edit(重命名)', nodeOverviewSource, 'mini-edit'],
+      ['NodeDetail.vue edit-icon', nodeDetailSource, 'edit-icon'],
+    ]
+
+    it.each(iconButtons)('%s 由 <button type="button"> 承载且保留原 class', (name, source, cls) => {
+      const tag = source.match(new RegExp('<button[^>]*class="' + cls + '"[^>]*>'))
+      expect(tag, name + ' 未找到承载 .' + cls + ' 的 <button>').not.toBeNull()
+      expect(tag![0]).toContain('type="button"')
+      // 原 class 仍在 button 上（视觉/布局不变），且不再由 <el-icon> 直接挂 @click
+      expect(source).not.toMatch(new RegExp('<el-icon[^>]*' + cls + '[^>]*@click'))
+    })
+
+    it.each(iconButtons)('%s 的可访问名带行内标识（不是只写「编辑/复制」）', (name, source, cls) => {
+      const tag = source.match(new RegExp('<button[^>]*class="' + cls + '"[^>]*>'))
+      expect(tag![0], name + ' 缺少 aria-label').toMatch(/aria-label/)
+      // 行内标识：模板串里必须引用具体对象（设备名 / 节点 ID / 通道名）
+      expect(tag![0]).toMatch(/\$\{(row|node|collector|ch)\b/)
+    })
+
+    it('NodeDetail 的通道单元格由 <button> 承载且 aria-label 带设备名', () => {
+      const tag = nodeDetailSource.match(/<button[^>]*class="device-channel-cell"[^>]*>/)
+      expect(tag).not.toBeNull()
+      expect(tag![0]).toContain('type="button"')
+      expect(tag![0]).toMatch(/aria-label="`编辑 \$\{row\.name\} 的通道配置`"/)
+      expect(nodeDetailSource).not.toMatch(/<div[^>]*class="device-channel-cell"[^>]*@click/)
     })
   })
 })

@@ -18,12 +18,27 @@
     </el-alert>
 
     <template v-if="loading">
-      <div class="dashboard-stats">
-        <SkeletonCard v-for="i in 4" :key="i" variant="stat" :icon-size="48" animated />
+      <!-- 骨架态与内容态共用同一外层容器与同一结构类（.dashboard-stats / .stat-card /
+           .stat-content / .stat-icon / .stat-info / .stat-value / .stat-label）。
+           高度因此由构造决定地相等：同一 el-card 边框+padding，同一行盒高度
+           （.stat-value/.stat-label 显式 line-height，骨架条显式同值 height），
+           而不是靠"90 ↔ 102"这类魔法数字互相追赶。
+           aria-hidden="true" 是必须的：骨架是装饰，不应被读屏播报
+           （内容态那 4 张卡的 role/tabindex/aria-label 不受影响）。 -->
+      <div class="dashboard-stats" data-test="dashboard-stats-skeleton">
+        <el-card v-for="i in 4" :key="i" shadow="hover" class="stat-card" aria-hidden="true">
+          <div class="stat-content">
+            <div class="stat-icon skeleton-bar"></div>
+            <div class="stat-info">
+              <p class="stat-value skeleton-bar skeleton-value"></p>
+              <p class="stat-label skeleton-bar skeleton-label"></p>
+            </div>
+          </div>
+        </el-card>
       </div>
     </template>
     <template v-else>
-      <div class="dashboard-stats">
+      <div class="dashboard-stats" data-test="dashboard-stats-loaded">
         <el-card shadow="hover" class="stat-card" role="link" tabindex="0" aria-label="查看节点总数" @click="router.push('/node')" @keydown.enter.prevent="router.push('/node')" @keydown.space.prevent="router.push('/node')">
           <div class="stat-content">
             <div class="stat-icon" style="color: var(--el-color-primary);">
@@ -312,11 +327,13 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { useRouter } from 'vue-router'
 import { Cpu, CircleCheck, CloseBold, Refresh, Connection, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/common/PageHeader.vue'
-import SkeletonCard from '@/components/common/SkeletonCard.vue'
+// 骨架态改为复用 .stat-card 自带结构（不再使用 SkeletonCard 的 stat 变体），
+// 但 SkeletonCard.vue 的 variant="stat" 仍被 NodeList.vue / EdgeDeviceList.vue 使用，保留。
 import EmptyState from '@/components/common/EmptyState.vue'
 // 异步拆分：LineChart（echarts 核心）渲染耗时且仅趋势区使用，
 // 独立 chunk 延迟加载，避免阻塞仪表盘首屏。
@@ -620,7 +637,7 @@ const handleRefresh = async () => {
 }
 
 const formatData = (data: Record<string, any>) => {
-  if (!data) return '-'
+  if (!data) return UNKNOWN
 
   return Object.entries(data)
     .map(([key, value]) => {
@@ -641,7 +658,7 @@ const formatData = (data: Record<string, any>) => {
 }
 
 const formatRawData = (rawData: any) => {
-  if (!rawData) return '-'
+  if (!rawData) return UNKNOWN
   if (typeof rawData === 'string') {
     // hex-encoded raw bytes from backend
     if (/^[0-9a-f]+$/i.test(rawData)) {
@@ -659,9 +676,9 @@ const formatRawData = (rawData: any) => {
 }
 
 const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN')
 }
 
@@ -766,6 +783,9 @@ onUnmounted(() => {
 .stat-label {
   margin: 8px 0 0;
   font-size: 14px;
+  /* 显式行盒高度（≈原 normal 的 14×1.2≈16.8，视觉变化 <1px），
+     使内容态与骨架态的高度由构造决定地相等，而不是靠 90/102 之类的魔法数字。 */
+  line-height: 17px;
   color: var(--el-text-color-secondary);
   /* 中文标签防止逐字断行竖排 */
   word-break: keep-all;
@@ -776,7 +796,40 @@ onUnmounted(() => {
   margin: 0;
   font-size: 28px;
   font-weight: 600;
+  /* 显式行盒高度（≈原 normal 的 28×1.2≈33.6，视觉变化 <1px）；与
+     .stat-value.skeleton-bar 的 height 必须成对同值 —— 见同目录 __tests__ 源码门禁。 */
+  line-height: 34px;
   color: var(--el-text-color-primary);
+}
+
+/* 骨架占位条：与它替代的那一行同高（空元素没有文本就没有行盒，必须显式给 height）。
+   圆角/尺寸沿用 .stat-icon / .stat-value / .stat-label 自身的声明，这里只加 shimmer 背景。
+   shimmer 动画：SkeletonCard.vue 的 @keyframes skeleton-shimmer 是 scoped 的（编译期会被
+   重命名为 skeleton-shimmer-<hash> 并加 [data-v-hash] 前缀），本组件用不到；
+   theme.css:994 的全局 @keyframes shimmer 键帧完全相同（0% 200% 0 → 100% -200% 0，
+   且 background-size: 200% 100% 与 var(--skeleton-shimmer) 的 90deg 渐变匹配），
+   故直接复用全局 shimmer，不再复制一份等价键帧。 */
+.skeleton-bar {
+  background: var(--skeleton-shimmer);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.stat-icon.skeleton-bar {
+  /* 只加 shimmer 背景；60×60、圆角 8px 沿用 .stat-icon 自身的声明 */
+  flex-shrink: 0;
+}
+
+.stat-value.skeleton-bar {
+  height: 34px;
+  width: 60%;
+  border-radius: 4px;
+}
+
+.stat-label.skeleton-bar {
+  height: 17px;
+  width: 40%;
+  border-radius: 4px;
 }
 
 .status-history-hint {
@@ -910,7 +963,8 @@ onUnmounted(() => {
 
   .stat-label {
     font-size: 10px;
-    line-height: 1.3;
+    /* 由 1.3 改为显式 13px：与 .stat-label.skeleton-bar 的 height 成对同值 */
+    line-height: 13px;
     margin-top: 1px;
     max-height: 2.6em;
     overflow: hidden;
@@ -920,10 +974,20 @@ onUnmounted(() => {
 
   .stat-value {
     font-size: 16px;
+    /* 与 .stat-value.skeleton-bar 的 height 成对同值 */
+    line-height: 19px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 100%;
+  }
+
+  .stat-value.skeleton-bar {
+    height: 19px;
+  }
+
+  .stat-label.skeleton-bar {
+    height: 13px;
   }
 
   :deep(.stat-card) {

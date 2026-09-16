@@ -238,7 +238,11 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		Success(c, gin.H{"list": items, "total": total, "page": page, "page_size": pageSize})
+		// 分页方言已统一为 {items,total,page,page_size}（全仓 12 个分页端点原本 11:1，
+		// 只有此处是 `list`）。旧键 `list` 是最后一份遗留方言，前端曾需要同时兼容两套形状
+		// （见 frontend-shared/src/api/deviceConfig.ts 的 DeviceConfigListResponse 与
+		//  api/automation.ts:164 的注释「待收敛的旧方言」）。此处收敛后不得再引入 `list`。
+		Success(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
 	})
 
 	// Get device-config detail
@@ -510,7 +514,12 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		var req struct {
 			RawData string `json:"raw_data"`
 		}
-		c.ShouldBindJSON(&req)
+		// P1-B: a discarded bind error made a malformed body look like a
+		// successful parse of empty data.
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		id, _ := strconv.Atoi(c.Param("id"))
 		var cfg models.DeviceConfig
 		if err := db.First(&cfg, id).Error; err != nil {
@@ -956,15 +965,66 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 	})
 
-	// Channel reconfigure (change bus params)
+	// Channel reconfigure (change bus params) —— **真实改动 bus_config 并触发下发**。
+	//
+	// 缺陷（2026-09-16 实测）：本端点曾只做 `ShouldBindJSON` 后**直接返回**
+	// `{"status":"reconfigured"}` —— 既不解析 baudrate、也不查通道、更不下发。
+	// 而前端 `ChannelPanel.vue` 的「修改波特率」对话框随后提示
+	// **「重配置命令已发送」** ⇒ 用户以为硬件已改，实际什么都没发生（**谎报成功**）。
+	//
+	// 修法：与既有真实路径对齐 ——
+	//   · UART 的 bus_config 是 hex，波特率在**字节 2..5**（big-endian），
+	//     与 `nodemgr/handler_channel_cmd_v2.go` 的 `set_baud_rate` 副作用**同一布局**；
+	//   · 改完写库并 `EmitConfigChange`（与 PUT /channels/:id 同一出口）触发下发；
+	//   · 非法/不支持的情况**明确报错**，而不是假装成功。
+	//
+	// 边界：本端点只支持 UART 波特率（前端对话框也只提供该用途）。
+	// clock_hz（SPI）当前无前端入口、且本仓 SPI 配置/扫描未实现（docs/设计/通道.md §8），
+	// 故传入时**显式 501 拒绝** —— 静默忽略正是本次要修的毛病。
 	v1.POST("/channels/:channel_id/reconfigure", func(c *gin.Context) {
 		id := c.Param("channel_id")
 		var req struct {
 			Baudrate int `json:"baudrate"`
 			ClockHz  int `json:"clock_hz"`
 		}
-		c.ShouldBindJSON(&req)
-		Success(c, gin.H{"status": "reconfigured", "request_id": fmt.Sprintf("reconf-%s-%d", id, time.Now().Unix())})
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.ClockHz != 0 {
+			ErrorWithCode(c, http.StatusNotImplemented, "reconfigure_unsupported",
+				"clock_hz 重配未实现（SPI 配置/扫描未实现，见 docs/设计/通道.md §8）；请勿依赖假成功")
+			return
+		}
+		var ch models.Channel
+		if err := db.First(&ch, id).Error; err != nil {
+			Error(c, http.StatusNotFound, "channel not found")
+			return
+		}
+		if !strings.EqualFold(strings.TrimSpace(ch.HardwareType), "UART") {
+			ErrorWithCode(c, http.StatusBadRequest, "reconfigure_requires_uart",
+				fmt.Sprintf("通道 %s 的硬件类型是 %s，仅 UART 支持波特率重配", id, ch.HardwareType))
+			return
+		}
+		updated, err := withUARTBaudrate(ch.BusConfig, req.Baudrate)
+		if err != nil {
+			ErrorWithCode(c, http.StatusBadRequest, "invalid_bus_config", err.Error())
+			return
+		}
+		if updated == ch.BusConfig {
+			// 幂等：目标波特率与现值相同，不必写库/下发，但**如实**说明未改动。
+			Success(c, gin.H{"status": "unchanged", "baudrate": req.Baudrate,
+				"message": "目标波特率与当前一致，未做改动"})
+			return
+		}
+		if err := db.Model(&models.Channel{}).Where("id = ?", ch.ID).Update("bus_config", updated).Error; err != nil {
+			Error(c, http.StatusInternalServerError, "failed to update bus config")
+			return
+		}
+		// 与 PUT /channels/:channel_id 同一出口：发配置变更事件 ⇒ 触发下发。
+		nodemgr.EmitConfigChange(c, eventBus, nodemgr.CfgChangeChannel, nodemgr.CfgActionUpdate, ch.NodeID, fmt.Sprint(ch.ID))
+		Success(c, gin.H{"status": "reconfigured", "baudrate": req.Baudrate,
+			"bus_config": updated, "node_id": ch.NodeID})
 	})
 
 	// Device config tree (driver hierarchy: OEM → Category → Driver)

@@ -65,6 +65,7 @@
                               :model-value="dmaStore.isSwitchOn(dma) && isDmaBoundTo(dma, busType, hw)"
                               :disabled="!canToggleDma(dma, busType, hw)"
                               :loading="dmaStore.toggling[dma.dma_id] || false"
+                              :aria-label="`${dma.name}（${busType.toUpperCase()} ${hw.id}）DMA 开关`"
                               @change="(val: string | number | boolean) => toggleDmaForHardware(busType, hw, dma, val === true)"
                               size="small"
                               :active-text="dma.name"
@@ -78,6 +79,10 @@
                       <!-- 第二行：通道标签 -->
                       <div class="hardware-card-channels">
                         <template v-if="getChannelsForHardware(busType, hw.id).length > 0">
+                          <!-- el-tag 内部是 EP 渲染的 <span>，无法塞真 <button>（HTML 不允许 button 嵌套，
+                               且 setTag 的 closable 已内建一个原生关闭按钮）。因此这里用完整的
+                               role + tabindex + @keydown 三件套，并带 accessible name。
+                               @keydown 用 .self：焦点在内部 EP 关闭按钮上按 Enter 时不得冒泡触发本编辑动作。 -->
                           <el-tag
                             v-for="ch in getChannelsForHardware(busType, hw.id)"
                             :key="ch.id"
@@ -86,8 +91,13 @@
                             type="primary"
                             effect="light"
                             class="channel-tag"
+                            role="button"
+                            tabindex="0"
+                            :aria-label="`编辑通道 ${ch.name || '未命名'} #${ch.id}`"
                             @close="collectorStatus === 'online' && handleDeleteChannel(ch.id)"
                             @click="collectorStatus === 'online' && handleOpenChannelManager(ch, busType, hw.id)"
+                            @keydown.enter.self.prevent="collectorStatus === 'online' && handleOpenChannelManager(ch, busType, hw.id)"
+                            @keydown.space.self.prevent="collectorStatus === 'online' && handleOpenChannelManager(ch, busType, hw.id)"
                           >
                             <span class="channel-tag-name">{{ ch.name || '未命名' }}</span>
                             <span class="channel-tag-id">#{{ ch.id }}</span>
@@ -535,7 +545,9 @@ const loadConfigTemplates = async () => {
   try {
     const result = await deviceConfigApi.getList({ page_size: 100 })
     if (generation !== panelGeneration || sequence !== templatesRequestSequence) return
-    configTemplates.value = result.items || result.list || []
+    // 方言已统一为 items（后端 handler_device_dialect_test.go 守住）；
+    // 不再保留 `|| result.list` 兜底 —— 兜底会让「端点改回旧方言」静默通过。
+    configTemplates.value = result.items || []
   } catch (error: any) {
     if (generation !== panelGeneration || sequence !== templatesRequestSequence) return
     logger.error('加载配置模板失败', { error: String(error) })
@@ -680,7 +692,8 @@ const saveBusConfig = async () => {
     ElMessage.success('总线配置已保存')
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    feedback.handleError(error, '保存失败')
+    // 同文件下方的 DMA 保存已写明对象（「DMA配置保存失败」），此处也应写明是总线配置。
+    feedback.handleErrorWithContext(error, '保存总线配置失败')
   } finally {
     if (generation === panelGeneration && props.collectorId === collectorId) saving.value = false
   }
@@ -1001,7 +1014,9 @@ const handleDeleteChannel = async (channelId: number) => {
     refreshChannels()
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
-    feedback.handleError(error, '删除失败')
+    // 同文件另两处删除已各自写明对象（「删除 GPIO 失败」「删除 PWM 失败」），
+    // 此处只说「删除失败」会让用户不知道删的是通道还是外设。
+    feedback.handleErrorWithContext(error, '删除通道失败')
   }
 }
 
@@ -1016,10 +1031,14 @@ const submitReconfigure = async () => {
   const generation = panelGeneration
   const sessionGeneration = getSessionGeneration()
   try {
-    await channelApi.reconfigure(reconfigureForm.channelId, reconfigureForm.baudrate)
+    const res = await channelApi.reconfigure(reconfigureForm.channelId, reconfigureForm.baudrate)
     assertSessionGeneration(sessionGeneration)
     if (generation !== panelGeneration || props.collectorId !== collectorId) throw new Error('节点已变更')
-    ElMessage.success('重配置命令已发送')
+    // 后端现在**真的**改 bus_config 并触发配置下发；
+    // 但若目标波特率与现值相同，后端返回 status=unchanged —— 此时如实提示，
+    // 不能说「已发送」（那正是修复前的谎报成功）。
+    const st = (res as any)?.data?.status ?? (res as any)?.status
+    ElMessage.success(st === 'unchanged' ? '波特率已是该值，未做改动' : '重配置已下发')
     reconfigureDialogVisible.value = false
   } catch (error: any) {
     if (generation !== panelGeneration || props.collectorId !== collectorId) return
@@ -1775,6 +1794,12 @@ defineExpose({
   opacity: 0.88;
   background: var(--el-color-primary-light-7);
   transform: scale(1.03);
+}
+
+/* 键盘可达：role=button 的 el-tag 需要可见焦点环 */
+.channel-tag:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 .channel-tag-name {

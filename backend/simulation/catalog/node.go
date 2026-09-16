@@ -229,22 +229,23 @@ type nodeEvent struct {
 }
 
 // nodeStatusHistory 读取某节点的状态变迁历史（真实持久化事实）。
+//
+// 端点形状：**裸数组**（已核对 handler_node.go:147-168 的
+// v1.GET("/nodes/:id/status-history") 走 Success(c, events)）。
 func nodeStatusHistory(e *harness.Env, nodeID string) []nodeEvent {
 	e.T.Helper()
-	resp := e.Admin.Get("/api/v1/nodes/" + nodeID + "/status-history")
-	resp.Expect(http.StatusOK)
-	var events []nodeEvent
-	resp.Decode(&events)
-	return events
+	return simBareListGet[nodeEvent](e, "/api/v1/nodes/"+nodeID+"/status-history")
 }
 
 // nodeListRows 统计节点列表里 node_id 匹配的行（真实 HTTP，不直连库）。
+//
+// 端点形状：**分页信封** {items,total,page,page_size}
+// （handler_node.go:45-98，提交 ffdec935 改）。这里刻意读**全部页**：
+// 列表默认 page_size=20 且 Order("id") 升序，本场景刚建的节点排在最后，
+// 只读第一页会得到"节点不存在"的假红 —— 那是把分页缺陷换成另一种假象。
 func nodeListRows(e *harness.Env, nodeID string) []nodeDetail {
 	e.T.Helper()
-	resp := e.Admin.Get("/api/v1/nodes")
-	resp.Expect(http.StatusOK)
-	var nodes []nodeDetail
-	resp.Decode(&nodes)
+	nodes := simListAll[nodeDetail](e, "/api/v1/nodes", "")
 	var matched []nodeDetail
 	for _, node := range nodes {
 		if node.NodeID == nodeID {

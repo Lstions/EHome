@@ -110,7 +110,7 @@ import { ElMessage } from 'element-plus'
 import { nodeApi } from '@/api/node'
 import { type Firmware } from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
-import { formatFileSize } from '@/utils/format'
+import { UNKNOWN, formatFileSize } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -158,7 +158,7 @@ const form = reactive({
 const firmwares = ref<Firmware[]>([])
 const firmwaresLoading = ref(false)
 const selectedFirmware = ref<Firmware | null>(null)
-const currentVersion = computed(() => props.currentFirmwareVersion || '-')
+const currentVersion = computed(() => props.currentFirmwareVersion || UNKNOWN)
 
 const progress = ref(0)
 const upgradeStatus = ref<'idle' | 'uploading' | 'upgrading' | 'completed' | 'failed'>('idle')

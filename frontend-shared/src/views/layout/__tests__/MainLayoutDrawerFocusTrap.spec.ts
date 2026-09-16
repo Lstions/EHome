@@ -108,8 +108,8 @@ describe('MainLayout 移动端抽屉焦点陷阱', () => {
     await nextTick()
 
     const items = wrapper.findAll('.mobile-sidebar-drawer .el-menu-item')
-    // 13 = 12 个既有导航项 + 本轮新增的「通知通道」(/notification-channels)
-    expect(items.length).toBe(13)
+    // 14 = 12 个既有导航项 + 「通知通道」(/notification-channels) + 「投递审计」(/notification-deliveries)
+    expect(items.length).toBe(14)
 
     // 模态抽屉内不应使用 roving tabindex：那会只剩 1 个停靠点，Tab 会卡在同一项上。
     const tabindexes = items.map((i) => i.attributes('tabindex'))

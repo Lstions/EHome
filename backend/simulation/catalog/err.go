@@ -518,9 +518,11 @@ func errRun005(e *harness.Env) {
 		if err := r.Check(http.StatusOK); err != nil {
 			return err
 		}
-		var rows []errNodeStatusHistoryRow
-		if err := json.Unmarshal(r.Data, &rows); err != nil {
-			return fmt.Errorf("解析状态历史失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
+		// 端点形状：**裸数组**（handler_node.go:103-123 的
+		// GET /nodes/status-history 走 Success(c, events)，与 /nodes 的分页信封不同）。
+		rows, err := simBareListItems[errNodeStatusHistoryRow](r, "/api/v1/nodes/status-history?limit=200")
+		if err != nil {
+			return err
 		}
 		for _, row := range rows {
 			if row.NodeID == dev.NodeID {
@@ -551,9 +553,8 @@ func errRun005(e *harness.Env) {
 	// 不变式 2：静态路径不被 :id 通配吃掉 —— 若是被当成 ID，这里会是 404 且
 	// 响应体里出现「node not found」这种"ID 解析失败"语义。断言用状态码与信封
 	// （不碰文案），并对同一路径的两种形态都验证：列表可用、limit 生效。
-	limited := e.Admin.Get("/api/v1/nodes/status-history?limit=1").Expect(http.StatusOK)
-	var limitedRows []errNodeStatusHistoryRow
-	limited.Decode(&limitedRows)
+	// 端点形状：**裸数组**（handler_node.go:103-123）。
+	limitedRows := simBareListGet[errNodeStatusHistoryRow](e, "/api/v1/nodes/status-history?limit=1")
 	if len(limitedRows) > 1 {
 		t.Fatalf("limit=1 未生效：返回了 %d 行", len(limitedRows))
 	}

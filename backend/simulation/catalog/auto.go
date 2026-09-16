@@ -7,7 +7,6 @@
 package catalog
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -118,29 +117,30 @@ type autoEventRow struct {
 }
 
 // autoListRules 读策略列表（可带 trigger_type/action_type 之类的过滤串）。
+//
+// 端点形状：**裸数组**（已核对 handler_automation.go:131-152 的 listAutomationRules
+// 走 Success(c, items)，没有 page/page_size/Count）。因此这里显式用裸数组解析：
+// 若该端点将来被改成信封，simBareListItems 会立刻报「object into slice」并打印端点路径。
 func autoListRules(e *harness.Env, query string) ([]autoRuleRow, error) {
-	r := e.Admin.Get("/api/v1/automation-rules" + query)
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/automation-rules%s 返回 %d: %s", query, r.Status, r.BodyString())
-	}
-	var rows []autoRuleRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析策略列表失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	path := "/api/v1/automation-rules" + query
+	return simBareListItems[autoRuleRow](e.Admin.Get(path), path)
 }
 
 // autoListEvents 读策略事件（可带 rule_id/result 过滤串）。
+//
+// 端点形状：**分页信封** {items,total,page,page_size}
+// （handler_automation.go:447-490 的 listAutomationEvents，提交 a96afda5 改）。
+// 这是本域最热的一个 helper：cnfm.go / audit.go / manu.go / scene.go /
+// trig.go / cond.go / dbln.go / crud.go / notify.go / actn.go / wind.go
+// 都经它读事件。
+//
+// 为什么读**全部页**而不是第一页：调用方的语义一律是"该过滤条件下的全部事件"
+// （trig.go 明写"**全量**事件快照"；dbln/crud 还做 ==1 / ==0 的精确条数断言）。
+// 该端点默认 page_size=20，只读第一页会把断言悄悄缩小到最近 20 条：
+// 条数少时照样通过、条数多时结论错误 —— 与本次缺陷同类的静默失真。
+// 改真分页之前该端点返回至多 500 条，读全页最接近原有语义。
 func autoListEvents(e *harness.Env, query string) ([]autoEventRow, error) {
-	r := e.Admin.Get("/api/v1/automation-events" + query)
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/automation-events%s 返回 %d: %s", query, r.Status, r.BodyString())
-	}
-	var rows []autoEventRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析策略事件失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	return simPageAll[autoEventRow](e, "/api/v1/automation-events", query)
 }
 
 // autoCreateRule 创建一条策略并把它的自清理挂到当前场景上（§5.6 场景自清理）。
@@ -514,13 +514,12 @@ func autoRun003(e *harness.Env) {
 
 	// 先证明数据确实流过了同一条链路：统一数据里必须出现本设备的 23.5 ℃。
 	e.Eventually(25*time.Second, func() error {
-		r := e.Admin.Get("/api/v1/devices/" + strconv.FormatUint(uint64(fx.edgeDeviceID), 10) + "/sensor-data?limit=50")
-		if r.Status != http.StatusOK {
-			return fmt.Errorf("GET /devices/%d/sensor-data 返回 %d: %s", fx.edgeDeviceID, r.Status, r.BodyString())
-		}
-		var samples []autoSensorSample
-		if err := json.Unmarshal(r.Data, &samples); err != nil {
-			return fmt.Errorf("解析统一数据失败: %w", err)
+		// 端点形状：**裸数组**（handler_data.go:56-99 的 GET /devices/:id/sensor-data
+		// 走 Success(c, data)）。非致命解析：轮询期间"数据还没到"是正常状态。
+		path := "/api/v1/devices/" + strconv.FormatUint(uint64(fx.edgeDeviceID), 10) + "/sensor-data?limit=50"
+		samples, err := simBareListItems[autoSensorSample](e.Admin.Get(path), path)
+		if err != nil {
+			return err
 		}
 		for _, sample := range samples {
 			if sample.SensorName == "temperature" && math.Abs(sample.Value-23.5) <= 1e-3 {
@@ -868,15 +867,10 @@ type autoNotificationRow struct {
 
 // autoNotifications 读通知中心列表（最多 100 条，够覆盖单次仿真运行的量）。
 func autoNotifications(e *harness.Env) ([]autoNotificationRow, error) {
-	r := e.Admin.Get("/api/v1/notifications?limit=100")
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/notifications 返回 %d: %s", r.Status, r.BodyString())
-	}
-	var rows []autoNotificationRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析通知列表失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	// 端点形状：**裸数组**（已核对 handler_notification.go:14-18 的 v1.GET("/notifications")
+	// 直接 Success(c, notifs)，没有 page/page_size/Count）。因此显式走裸数组解析。
+	return simBareListItems[autoNotificationRow](e.Admin.Get("/api/v1/notifications?limit=100"),
+		"/api/v1/notifications?limit=100")
 }
 
 // autoUnreadCount 读未读数（信封 data.count）。

@@ -366,7 +366,8 @@ describe('deviceConfigApi', () => {
   beforeEach(() => vi.clearAllMocks())
 
   it('getList returns response.data', async () => {
-    const listRes = { list: [{ id: 1 }], total: 1, page: 1, page_size: 20 }
+    // 2026-09-15 方言收敛：/device-configs 与全仓其余 11 个分页端点统一为 items。
+    const listRes = { items: [{ id: 1 }], total: 1, page: 1, page_size: 20 }
     mockClient.get.mockResolvedValue({ code: 200, data: listRes, message: 'ok' })
     const res = await deviceConfigApi.getList({ device_type: 'sensor' })
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/device-configs', { params: { device_type: 'sensor' } })
@@ -420,7 +421,7 @@ describe('deviceConfigApi', () => {
   })
 
   it('getByDeviceType returns list', async () => {
-    mockClient.get.mockResolvedValue({ code: 200, data: { list: [{ id: 1 }], total: 1, page: 1, page_size: 100 }, message: 'ok' })
+    mockClient.get.mockResolvedValue({ code: 200, data: { items: [{ id: 1 }], total: 1, page: 1, page_size: 100 }, message: 'ok' })
     const res = await deviceConfigApi.getByDeviceType('sensor')
     expect(res).toEqual([{ id: 1 }])
     expect(mockClient.get).toHaveBeenCalledWith('/api/v1/device-configs', { params: { device_type: 'sensor', page_size: 100 } })
@@ -446,14 +447,23 @@ describe('driver API', () => {
     expect(res).toEqual([])
   })
 
-  it('getDriverList returns list from envelope.data.list', async () => {
-    const list = [{ type: 'bmp280', model: 'BMP280' }]
-    mockClient.get.mockResolvedValue({ data: { list } })
+  // 2026-09-15 方言收敛：/device-configs 的 data 段由 `{list,...}` 改为 `{items,...}`
+  // （全仓 12 个分页端点原为 11:1，现统一）。下面第三条**断言旧键必须被忽略**，
+  // 这样「端点被改回 list」时前端不会静默返回空数组，而是测试变红。
+  it('getDriverList returns items from envelope.data.items', async () => {
+    const items = [{ type: 'bmp280', model: 'BMP280' }]
+    mockClient.get.mockResolvedValue({ data: { items } })
     const res = await getDriverList()
-    expect(res).toEqual(list)
+    expect(res).toEqual(items)
   })
 
-  it('getDriverList reads envelope.data.list and ignores data without .list', async () => {
+  it('getDriverList 不再兼容已废弃的 list 键（保留兼容会让形状漂移静默通过）', async () => {
+    mockClient.get.mockResolvedValue({ data: { list: [{ type: 'stale' }] } })
+    const res = await getDriverList()
+    expect(res, '旧 list 键必须被忽略（方言已收敛为 items）').toEqual([])
+  })
+
+  it('getDriverList reads envelope.data.items and ignores data without .items', async () => {
     mockClient.get.mockResolvedValue({ data: { total: 1 } })
     const res = await getDriverList()
     expect(res).toEqual([])
@@ -1206,7 +1216,7 @@ describe('parserApi', () => {
   it('getList requests status=active filter', async () => {
     mockClient.get.mockResolvedValue({
       data: {
-        list: [
+        items: [
           { id: 42, type: 'bmp280', display_name: 'BMP280', oem: 'Bosch', category: 'temp', hardware_types: ['i2c'], measure_type: ['temperature'], description: 'desc' }
         ]
       }
@@ -1218,7 +1228,7 @@ describe('parserApi', () => {
   it('getList normalizes drivers', async () => {
     mockClient.get.mockResolvedValue({
       data: {
-        list: [
+        items: [
           { id: 42, type: 'bmp280', display_name: 'BMP280', oem: 'Bosch', category: 'temp', hardware_types: ['i2c'], measure_type: ['temperature'], description: 'desc' }
         ]
       }
@@ -1233,7 +1243,7 @@ describe('parserApi', () => {
 
   it('getList resolves hardware_types via bus_types fallback', async () => {
     mockClient.get.mockResolvedValue({
-      data: { list: [{ type: 'bmp280', display_name: 'BMP280', bus_types: ['spi'] }] }
+      data: { items: [{ type: 'bmp280', display_name: 'BMP280', bus_types: ['spi'] }] }
     })
     const res = await parserApi.getList()
     expect(res[0].hardware_types).toEqual(['spi'])
@@ -1241,7 +1251,7 @@ describe('parserApi', () => {
 
   it('getList resolves hardware_types via hardware_type fallback', async () => {
     mockClient.get.mockResolvedValue({
-      data: { list: [{ type: 'bmp280', display_name: 'BMP280', hardware_type: 'I2C' }] }
+      data: { items: [{ type: 'bmp280', display_name: 'BMP280', hardware_type: 'I2C' }] }
     })
     const res = await parserApi.getList()
     expect(res[0].hardware_types).toEqual(['i2c'])
@@ -1249,7 +1259,7 @@ describe('parserApi', () => {
 
   it('getList resolves hardware_types via connection.bus_type fallback', async () => {
     mockClient.get.mockResolvedValue({
-      data: { list: [{ type: 'bmp280', display_name: 'BMP280', connection: { bus_type: 'SPI' } }] }
+      data: { items: [{ type: 'bmp280', display_name: 'BMP280', connection: { bus_type: 'SPI' } }] }
     })
     const res = await parserApi.getList()
     expect(res[0].hardware_types).toEqual(['spi'])
@@ -1257,7 +1267,7 @@ describe('parserApi', () => {
 
   it('getList resolves hardware_types via protocol fallback', async () => {
     mockClient.get.mockResolvedValue({
-      data: { list: [{ type: 'bmp280', display_name: 'BMP280', protocol: 'MODBUS' }] }
+      data: { items: [{ type: 'bmp280', display_name: 'BMP280', protocol: 'MODBUS' }] }
     })
     const res = await parserApi.getList()
     expect(res[0].hardware_types).toEqual(['modbus'])
@@ -1265,7 +1275,7 @@ describe('parserApi', () => {
 
   it('getList resolves measure_types from measure_type string', async () => {
     mockClient.get.mockResolvedValue({
-      data: { list: [{ type: 'bmp280', display_name: 'BMP280', measure_type: 'temperature' }] }
+      data: { items: [{ type: 'bmp280', display_name: 'BMP280', measure_type: 'temperature' }] }
     })
     const res = await parserApi.getList()
     expect(res[0].measure_types).toEqual(['temperature'])
@@ -1282,7 +1292,7 @@ describe('parserApi', () => {
   it('getList falls back to built-in drivers from tree when DB device-configs is empty', async () => {
     // DB 列表空数组 + tree 含内置驱动
     mockClient.get.mockResolvedValueOnce({
-      data: { list: [], total: 0, page: 1, page_size: 20, code: 200 },
+      data: { items: [], total: 0, page: 1, page_size: 20, code: 200 },
     })
     mockClient.get.mockResolvedValueOnce({
       data: [
@@ -1312,7 +1322,7 @@ describe('parserApi', () => {
       id: 42, type: 'bmp280', display_name: 'BMP280 定制模板', oem: 'Bosch', category: 'temp',
       hardware_types: ['i2c'], measure_type: ['temperature'], description: 'db',
     }
-    mockClient.get.mockResolvedValueOnce({ data: { list: [dbItem], total: 1, page: 1, page_size: 20 } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [dbItem], total: 1, page: 1, page_size: 20 } })
     mockClient.get.mockResolvedValueOnce({
       data: [{
         id: 'generic', name: '通用',
@@ -1332,7 +1342,7 @@ describe('parserApi', () => {
       id: 7, type: 'sn3001_rain', display_name: 'SN-3001 光学雨量计', oem: '威盟士',
       hardware_types: ['uart'], measure_type: ['rain'], description: 'db',
     }
-    mockClient.get.mockResolvedValueOnce({ data: { list: [dbItem], total: 1, page: 1, page_size: 20 } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [dbItem], total: 1, page: 1, page_size: 20 } })
     mockClient.get.mockResolvedValueOnce({
       data: [
         {
@@ -1356,7 +1366,7 @@ describe('parserApi', () => {
   })
 
   it('getList tolerates tree request failure and still returns DB items', async () => {
-    mockClient.get.mockResolvedValueOnce({ data: { list: [{ id: 1, type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c'] }], total: 1 } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [{ id: 1, type: 'bmp280', display_name: 'BMP280', hardware_types: ['i2c'] }], total: 1 } })
     mockClient.get.mockRejectedValueOnce(new Error('tree unreachable'))
     const res = await parserApi.getList()
     expect(res).toHaveLength(1)
@@ -1370,7 +1380,7 @@ describe('parserApi', () => {
   })
 
   it('normalize lowercases and array-izes hardware_types', async () => {
-    mockClient.get.mockResolvedValueOnce({ data: { list: [] } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [] } })
     mockClient.get.mockResolvedValueOnce({
       data: [{
         id: 'oem', name: 'OEM',
@@ -1383,7 +1393,7 @@ describe('parserApi', () => {
   })
 
   it('tree leaves without parent vendor/category get generic empty values', async () => {
-    mockClient.get.mockResolvedValueOnce({ data: { list: [] } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [] } })
     mockClient.get.mockResolvedValueOnce({
       data: [{ id: 'flat-oem', name: 'FlatOEM', drivers: [{ type: 'd1', display_name: 'D1', hardware_types: [] }] }],
     })
@@ -1396,7 +1406,7 @@ describe('parserApi', () => {
 
   // 回归: 空库时 DB 与 tree 均空 → 返回空列表
   it('getList returns [] when both sources are empty', async () => {
-    mockClient.get.mockResolvedValueOnce({ data: { list: [], total: 0 } })
+    mockClient.get.mockResolvedValueOnce({ data: { items: [], total: 0 } })
     mockClient.get.mockResolvedValueOnce({ data: [] })
     const res = await parserApi.getList()
     expect(res).toEqual([])

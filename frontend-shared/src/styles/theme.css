@@ -77,6 +77,12 @@
   --sidebar-active-color: #66b1ff;
   --sidebar-border: rgba(255, 255, 255, 0.06);
 
+  /* 登录页品牌背景渐变（审计报告 #17：此前两处硬编码在 Login.vue:275/400）。
+     设计上登录页与"登录成功过渡层"在**所有主题**下都保持深色品牌底（无可用性影响），
+     故亮/暗两套**同值**是有意的 —— 与 --sidebar-text-hover 同类（见 SidebarThemeTokens.spec.ts 的
+     SAME_VALUE_BY_DESIGN 豁免）。走 token 的目的是"换肤只需改一处"，不是"要有亮暗差异"。 */
+  --login-bg-gradient: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
+
   /* 顶部栏 */
   --header-bg: #ffffff;
   --header-border: #e8eaec;
@@ -258,6 +264,9 @@ html.dark {
   /* 暗色 active-bg alpha 更高(0.2)，故再提亮一档；#79bbff 已是本仓 --el-tag-primary-text 用色。最差 6.27。 */
   --sidebar-active-color: #79bbff;
   --sidebar-border: rgba(255, 255, 255, 0.04);
+
+  /* 登录页品牌渐变：与亮色**同值**（见亮色块处的说明）。 */
+  --login-bg-gradient: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
 
   /* 顶部栏 */
   --header-bg: #1a1a1a;

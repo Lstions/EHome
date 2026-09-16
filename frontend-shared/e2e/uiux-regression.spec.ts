@@ -927,3 +927,99 @@ test.describe('主题状态一致性', () => {
 // 规范 §7.6 只允许"可自动判断、影响面明确且已经证明能防真实回归"的规则进入强制门禁。
 // 每个断言对应的缺陷编号与证据见各 describe/test 的注释。
 void UIUX_BASE
+
+/**
+ * D4-01：仪表盘 KPI 首屏骨架卡与加载后内容卡必须几何一致。
+ *
+ * 审计原文（docs/分析/UIUX审计-数据分析域-2026-09-13.md D4-01）实测：
+ *   skeleton: .dashboard-stats > *  rects = [{w:283,h:90,...}, ...]
+ *   loaded  : .dashboard-stats .el-card rects = [{w:283,h:102,...}, ...]
+ *   x/y 相同、宽度相同，仅高度差 12px -> 切换时下方所有区段整体下移 12px
+ * 验收方法原文：复跑骨架/加载双态断言，Math.abs(skeletonRect.h - loadedRect.h) === 0。
+ *
+ * 为什么这条必须放在 e2e 而不是单测：happy-dom 没有布局引擎（getBoundingClientRect 恒 0），
+ * 在单测里断言"高度相等"只会得到恒真的假绿 —— 本仓已两次踩过"探针/断言在错误时机取值"的坑。
+ * 源码层的成对关系由 src/views/dashboard/__tests__/DashboardSkeletonGeometry.spec.ts 守，
+ * 本用例守的是**真实像素**。
+ *
+ * 为什么不用固定 waitForTimeout 抓骨架：概览接口很快，骨架可能一帧就没了。
+ * 这里用 page.route 把 /api/v1/overview **挂起**（不 fulfill），骨架就会稳定停留，
+ * 测量完再放行 —— 这样两态都能确定性地量到。
+ */
+test('仪表盘 KPI 骨架态与内容态高度一致，加载完成不产生跳动（D4-01）', async ({ page }) => {
+  await loginViaApi(page, 'light')
+
+  // 1) 挂起概览接口：骨架态稳定停留
+  let release: (() => void) | null = null
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let fulfillRoute: (() => Promise<void>) | null = null
+  await page.route('**/api/v1/overview**', async (route) => {
+    fulfillRoute = async () => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          code: 200,
+          message: 'ok',
+          data: {
+            nodes: { total: 2, online: 2, offline: 0 },
+            edge_devices: { total: 3, online: 3, offline: 0 },
+            channels: { total: 2, online: 2 },
+            data_errors: { total: 0, last_hour: 0 },
+            latest_data: [],
+          },
+        }),
+      })
+    }
+    await held
+    if (fulfillRoute) await fulfillRoute()
+  })
+
+  await page.goto('/dashboard')
+  const skeleton = page.locator('[data-test="dashboard-stats-skeleton"] > *')
+  await skeleton.first().waitFor({ state: 'visible', timeout: 20000 })
+  await expect(skeleton).toHaveCount(4)
+
+  const skeletonBoxes = await skeleton.evaluateAll((els) =>
+    els.map((el) => {
+      const r = el.getBoundingClientRect()
+      return { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y) }
+    })
+  )
+
+  // 2) 放行接口：等真实内容卡渲染完成（用选择器，不用 sleep）
+  release!()
+  const loaded = page.locator('[data-test="dashboard-stats-loaded"] > .el-card')
+  await loaded.first().waitFor({ state: 'visible', timeout: 20000 })
+  await expect(loaded).toHaveCount(4)
+  await expect(page.locator('[data-test="dashboard-stats-skeleton"]')).toHaveCount(0)
+
+  const loadedBoxes = await loaded.evaluateAll((els) =>
+    els.map((el) => {
+      const r = el.getBoundingClientRect()
+      return { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), y: Math.round(r.y) }
+    })
+  )
+
+  // 3) 分母守卫：两组都必须量到 4 张；高度不得为 0（量到 0 说明选择器选错了东西）
+  expect(skeletonBoxes.length, '骨架卡分母').toBe(4)
+  expect(loadedBoxes.length, '内容卡分母').toBe(4)
+  expect(skeletonBoxes.every((b) => b.h > 0), '骨架卡高度必须 > 0（否则是在量隐藏元素）').toBe(true)
+  expect(loadedBoxes.every((b) => b.h > 0), '内容卡高度必须 > 0').toBe(true)
+
+  // 4) 核心判据（审计原文的验收方法）：高度差必须为 0；x/y/宽度也必须一致
+  for (let i = 0; i < 4; i += 1) {
+    expect(
+      Math.abs(skeletonBoxes[i].h - loadedBoxes[i].h),
+      `第 ${i + 1} 张 KPI 卡高度从骨架 ${skeletonBoxes[i].h}px 变到内容 ${loadedBoxes[i].h}px`
+    ).toBe(0)
+    expect(Math.abs(skeletonBoxes[i].x - loadedBoxes[i].x), `第 ${i + 1} 张 x 位移`).toBe(0)
+    expect(Math.abs(skeletonBoxes[i].y - loadedBoxes[i].y), `第 ${i + 1} 张 y 位移`).toBe(0)
+    expect(Math.abs(skeletonBoxes[i].w - loadedBoxes[i].w), `第 ${i + 1} 张宽度变化`).toBe(0)
+  }
+
+  // 5) 骨架是装饰：不得被读屏播报
+  await expect(skeleton.first()).toHaveCount(0)
+})

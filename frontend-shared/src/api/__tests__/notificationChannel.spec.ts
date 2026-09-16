@@ -27,6 +27,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockClient.post.mockResolvedValue({ data: VIEW })
   mockClient.put.mockResolvedValue({ data: VIEW })
+  mockClient.get.mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 20 } })
 })
 
 describe('notificationChannelApi 写路径', () => {
@@ -61,5 +62,50 @@ describe('notificationChannelApi 写路径', () => {
     expect(mockClient.post).toHaveBeenCalledWith('/api/v1/notification-channels/7/test')
     expect(res.state).toBe('pending')
     expect(res.channel_id).toBe(7)
+  })
+})
+
+describe('notificationChannelApi 投递审计查询', () => {
+  const ROW = {
+    id: 91, notification_id: 3, channel_id: 7, state: 'failed',
+    attempt_no: 2, status_code: 500, error_message: '接收端返回 500', duration_ms: 1234,
+    created_at: '2026-09-15T10:00:00Z',
+  }
+
+  it('listDeliveries → GET /api/v1/notification-deliveries，page/page_size 走 query 参数（真分页）', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [ROW], total: 42, page: 3, page_size: 20 } })
+    const res = await notificationChannelApi.listDeliveries({ page: 3, page_size: 20 })
+
+    // 断言的是**路径 + 参数**：分页必须是"打给后端的 query"，本地切片不会有任何 HTTP 调用。
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/notification-deliveries', {
+      params: { page: 3, page_size: 20 },
+    })
+    // total 是**全量总数**（后端 Count 后回传），不是当前页条数 —— 分页器靠它算页数。
+    expect(res.total).toBe(42)
+    expect(res.page).toBe(3)
+    expect(res.page_size).toBe(20)
+    expect(res.items).toHaveLength(1)
+  })
+
+  it('listDeliveries → channel_id / state 原样发出，且不做"空值补键"', async () => {
+    await notificationChannelApi.listDeliveries({ channel_id: 7, state: 'failed', page: 1, page_size: 20 })
+    expect(mockClient.get).toHaveBeenCalledWith('/api/v1/notification-deliveries', {
+      params: { channel_id: 7, state: 'failed', page: 1, page_size: 20 },
+    })
+
+    mockClient.get.mockClear()
+    // 不过滤：params 里不得凭空出现 channel_id: undefined / state: '' ——
+    // 后者会被后端当成"state= 非法"直接 400（后端对非空 state 做白名单校验）。
+    const params = { page: 1, page_size: 20 }
+    await notificationChannelApi.listDeliveries(params)
+    const sent = mockClient.get.mock.calls[0][1].params as Record<string, unknown>
+    expect(Object.keys(sent)).toEqual(['page', 'page_size'])
+  })
+
+  it('listDeliveries → 解包 envelope.data（拿到的就是 {items,total,page,page_size}）', async () => {
+    mockClient.get.mockResolvedValue({ data: { items: [ROW], total: 1, page: 1, page_size: 20 } })
+    const res = await notificationChannelApi.listDeliveries()
+    expect(res.items[0].error_message).toBe('接收端返回 500')
+    expect(res.items[0].status_code).toBe(500)
   })
 })

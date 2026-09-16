@@ -202,7 +202,10 @@ async function onStreamToggle(value: string | number | boolean): Promise<void> {
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
     streamEnabled.value = !on
-    feedback.handleError(error, '操作失败')
+    // 必须用 handleErrorWithContext：本组件有**三处不同操作**（日志流开关 / 日志级别 /
+    // 持久化），若都报「操作失败」，而后端**总会**带自己的 message（见 api/envelope.go 的
+    // Error() 必写 Message），用户既看不到是哪个控件失败、也不知道失败的是哪件事。
+    feedback.handleErrorWithContext(error, on ? '开启日志流失败' : '关闭日志流失败')
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) streamLoading.value = false
   }
@@ -219,7 +222,7 @@ async function onLevelChange(value: number): Promise<void> {
     ElMessage.success('日志级别已更新')
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
-    feedback.handleError(error, '操作失败')
+    feedback.handleErrorWithContext(error, '更新日志级别失败')
   }
 }
 
@@ -238,7 +241,7 @@ async function onPersistToggle(value: string | number | boolean): Promise<void> 
   } catch (error: unknown) {
     if (operation !== operationGeneration || props.collectorId !== collectorId) return
     persistEnabled.value = !on
-    feedback.handleError(error, '操作失败')
+    feedback.handleErrorWithContext(error, on ? '开启日志持久化失败' : '关闭日志持久化失败')
   } finally {
     if (operation === operationGeneration && props.collectorId === collectorId) persistLoading.value = false
   }

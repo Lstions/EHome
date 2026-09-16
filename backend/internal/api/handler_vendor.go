@@ -73,7 +73,12 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var dto struct {
 			Name *string `json:"name"`
 		}
-		c.ShouldBindJSON(&dto)
+		// P1-B: 同 :183 (PUT /device-models/:id/fields) 的缺陷 —— 丢弃绑定错误后
+		// dto 保持零值，畸形 JSON 被当成"什么都没改"而返回 200。改为显式 400。
+		if err := c.ShouldBindJSON(&dto); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		updates := map[string]interface{}{}
 		if dto.Name != nil {
 			updates["name"] = *dto.Name
@@ -138,7 +143,11 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			VendorID *uint   `json:"vendor_id"`
 			Fields   *string `json:"fields"`
 		}
-		c.ShouldBindJSON(&dto)
+		// P1-B: 同上 —— 畸形 JSON 不得静默走成"无字段更新 + 200"。
+		if err := c.ShouldBindJSON(&dto); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		updates := map[string]interface{}{}
 		if dto.Name != nil {
 			updates["name"] = *dto.Name
@@ -180,7 +189,13 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var req struct {
 			Fields string `json:"fields"`
 		}
-		c.ShouldBindJSON(&req)
+		// P1-B: a discarded bind error left req.Fields at its zero value and the
+		// next line wrote that empty string straight into the column, silently
+		// wiping it. Fail before any side effect.
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		db.Model(&dm).Update("fields", req.Fields)
 		Success(c, nil)
 	})

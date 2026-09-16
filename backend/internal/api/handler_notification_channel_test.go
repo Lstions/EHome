@@ -249,13 +249,15 @@ func TestNotificationChannel_CreateThenList_HidesSecret(t *testing.T) {
 	}
 	// target_url 的查询串必须被脱敏 (企业微信的 key 就在 URL 里)。
 	//
-	// 实测发现 (设计文档未覆盖): 占位符的具体形态是 `key=%2A%2A%2A` 而不是
-	// models 注释里写的 `key=***` —— models.RedactTargetURL 用 url.Values.Encode()
-	// 重编码, '*' 被百分号转义; notify.RedactURL 因为多走了一道 RedactText 正则
-	// 才碰巧得到 `***`。两者行为并不一致 (models 里声称的守护测试
-	// TestRedactTargetURLMatchesNotify 在仓库中**并不存在**)。
-	// 这是文案/一致性缺陷而非泄露 (密钥已被屏蔽), 且修复点在 models/ (本任务范围外),
-	// 因此这里只断言**安全性质**本身: 明文密钥绝不出现。
+	// 占位符形态: `key=***`。models.RedactTargetURL 与 notify.RedactURL 走同一条
+	// 流水线 (Encode() 转义出的 %2A%2A%2A 由收尾的文本级兜底正则收回成 ***),
+	// 两者对任意输入**逐字节相同**, 由 internal/notify/redact_contract_test.go 的
+	// TestRedactTargetURLMatchesNotify 守护 (该测试只能放 notify 包: models 不能
+	// import notify, 否则 import 环)。
+	//
+	// 层次说明: 那条契约测试锁的是"两侧一致 + 占位符形态", 这里锁的是**端到端
+	// 安全性质** —— 明文密钥绝不出现。两者互补: 契约测试在包级, 这条在 HTTP 响应级
+	// (脱敏若在 handler 里被绕过, 包级测试照样绿, 只有这条会红)。
 	if got, _ := created["target_url"].(string); !strings.Contains(got, "key=") || strings.Contains(got, urlKey) {
 		t.Fatalf("target_url 查询串里的 key 未被脱敏: %q", got)
 	}

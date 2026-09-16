@@ -180,7 +180,18 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// real channels.id, and legacy 0-based channel-list index.
 	var device models.EdgeDevice
 	if evt.EdgeDeviceID > 0 {
-		if err := c.db.Preload("Node").Where("id = ?", evt.EdgeDeviceID).First(&device).Error; err != nil {
+		// 摄入边界必须同时按**节点**约束，不能只按 id 查（纵深防御）。
+		//
+		// 缺口（docs/设计/场景仿真验证框架.md §4.1b 记载为「留待裁决」）：原先只写
+		// `Where("id = ?", evt.EdgeDeviceID)`，于是任何能向 `nodes/<任意>/up` 发布的
+		// MQTT 客户端，只要猜中一个数字 edge_device_id，就能**以别的节点的名义**写数据 ——
+		// 落库、告警、自动化、WS 推送全部按那台受害设备走（实测已复现）。
+		// 生产靠 broker 认证限制发布者，但那是唯一一道防线。
+		//
+		// 加固：把帧来源主题里的节点（evt.DeviceID）一起作为查询条件。
+		// 命中失败即 return（与既有各分支同一失败语义：静默丢弃，不打日志刷屏）。
+		// 注意 evt.DeviceID 是**节点字符串 ID**（如 "F0F5BDFFFE02"），与下面 else 分支同源。
+		if err := c.db.Preload("Node").Where("id = ? AND node_id = ?", evt.EdgeDeviceID, evt.DeviceID).First(&device).Error; err != nil {
 			return
 		}
 	} else {

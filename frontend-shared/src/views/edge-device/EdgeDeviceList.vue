@@ -11,24 +11,28 @@
     <template v-else>
       <!-- 顶部统计 -->
       <div class="stats-row">
-        <StatCard label="本页边缘设备" mobile-label="边缘设备" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
+        <StatCard label="本页边缘设备" :mobile-label="`边缘设备（${SCOPE_PAGE}）`" icon-color="var(--el-color-primary)" @click="handleStatClick('all')">
           <template #icon><el-icon><Cpu /></el-icon></template>
           <template #value><CountUp :value="stats.total" class="stat-value" /></template>
         </StatCard>
 
-        <StatCard label="本页在线" mobile-label="在线" icon-color="var(--el-color-success)">
+        <StatCard label="本页在线" :mobile-label="`在线（${SCOPE_PAGE}）`" icon-color="var(--el-color-success)">
           <template #icon><el-icon><CircleCheck /></el-icon></template>
           <template #value><CountUp :value="stats.online" class="stat-value" /></template>
         </StatCard>
 
-        <StatCard label="本页离线/异常" mobile-label="离线/异常" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
+        <StatCard label="本页离线/异常" :mobile-label="`离线/异常（${SCOPE_PAGE}）`" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
           <template #icon><el-icon><CircleClose /></el-icon></template>
           <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
         </StatCard>
 
-        <StatCard label="今日数据" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
+        <StatCard :label="`今日数据（${SCOPE_GLOBAL}）`" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
           <template #icon><el-icon><DataAnalysis /></el-icon></template>
-          <template #value><CountUp :value="todayDataDisplay.value" :decimals="todayDataDisplay.decimals" :suffix="todayDataDisplay.suffix" class="stat-value" /></template>
+          <!-- 取不到值时走 UNKNOWN 占位符：CountUp 是数字组件，喂字符串会渲染成 NaN 动画 -->
+          <template #value>
+            <span v-if="todayDataDisplay.unknown" class="stat-value">{{ todayDataDisplay.value }}</span>
+            <CountUp v-else :value="todayDataDisplay.value as number" :decimals="todayDataDisplay.decimals" :suffix="todayDataDisplay.suffix" class="stat-value" />
+          </template>
         </StatCard>
       </div>
 
@@ -368,12 +372,22 @@
 
         <!-- 解析器选择卡片 -->
         <div class="parser-select-list">
+          <!-- I-9 A 类：解析器选择是创建设备向导第 1 步的唯一入口，改前只有 @click
+               （键盘完全不可达，键盘用户无法继续向导）。补 role/tabindex/aria-label +
+               Enter/Space，与同仓 .collector-card、StatCard.vue 是同一范式。
+               :aria-selected 让读屏能报出当前选中的是哪一个。 -->
           <div
             v-for="parser in availableParsers"
             :key="parser.id"
             class="parser-select-card"
             :class="{ selected: selectedParser?.id === parser.id }"
+            role="button"
+            tabindex="0"
+            :aria-label="`选择解析器 ${parser.name}`"
+            :aria-pressed="selectedParser?.id === parser.id"
             @click="selectParser(parser)"
+            @keydown.enter.prevent="selectParser(parser)"
+            @keydown.space.prevent="selectParser(parser)"
           >
             <div class="parser-select-icon">
               <el-icon :size="24"><Cpu /></el-icon>
@@ -424,12 +438,20 @@
         <el-tabs v-model="channelTab" style="margin-top: 20px;">
           <el-tab-pane label="选择已有通道" name="existing">
             <div v-if="existingChannels?.length > 0" class="channel-list">
+              <!-- I-9 A 类：通道选择是向导第 2 步的唯一入口（同 .parser-select-card 的问题）。
+                   aria-label 用与可见文本一致的回退名，保证读屏能区分多个通道。 -->
               <div
                 v-for="ch in existingChannels"
                 :key="ch.id"
                 class="channel-select-card"
                 :class="{ selected: selectedChannel?.id === ch.id }"
+                role="button"
+                tabindex="0"
+                :aria-label="`选择通道 ${ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}`}`"
+                :aria-pressed="selectedChannel?.id === ch.id"
                 @click="selectChannel(ch)"
+                @keydown.enter.prevent="selectChannel(ch)"
+                @keydown.space.prevent="selectChannel(ch)"
               >
                 <span class="channel-name" :title="ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}`">{{ ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}` }}</span>
                 <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ (ch.hardware_type || '').toUpperCase() }}</el-tag>
@@ -586,6 +608,19 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { feedback } from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
+
+/**
+ * F14 统计卡范围词（规范 §4.3 MUST）。
+ *   前三张卡（本页边缘设备/本页在线/本页离线）由当前页数据算出，已内嵌「本页」；
+ *   本项 `todayData` 来自 /api/v1/overview 的服务端全表计数（unified_data 今日行数），
+ *   与当前页/当前筛选无关，故标「全局」—— 常量化理由同 Monitor.vue。
+ */
+const SCOPE_GLOBAL = '全局'
+/** 前三张卡由当前页数据算出（与桌面 label 里的「本页」同义）。
+ *  移动端 ≤768px 时桌面 label 被 display:none 隐藏，只显示 mobile-label ——
+ *  所以 mobile-label **也必须带范围词**，否则移动端用户完全看不到范围（F14 在移动端失效）。 */
+const SCOPE_PAGE = '本页'
 import { useRouter, useRoute } from 'vue-router'
 import {
   Cpu, CircleCheck, CircleClose, DataAnalysis, Grid,
@@ -738,7 +773,7 @@ const selectedTemplate = computed(() =>
 const loadTemplates = async () => {
   try {
     const res = await deviceConfigApi.getList({ page_size: 100 })
-    availableTemplates.value = res.list || []
+    availableTemplates.value = res.items || []
   } catch (error) {
     availableTemplates.value = []
     throw error
@@ -805,25 +840,37 @@ const stats = reactive({
   total: 0,
   online: 0,
   offline: 0,
-  todayData: 0
+  // null = 后端未提供该字段（或请求失败），显示 UNKNOWN；0 是「今天是 0 条」的合法值，
+  // 两者必须可区分 —— 用 0 兜底会把「拿不到数据」显示成「没有数据」。
+  todayData: null as number | null
 })
 
 // 获取今日数据统计
+//
+// F14-b 修复要点（两处都必须对，缺一仍然恒 0）：
+//   ① 层级：axios 拦截器返回的是整个 envelope `{code,data,message}`（见 api/client.ts
+//      的 `return response.data`），所以 payload 在 `response.data` 上，不是 `response` 上。
+//   ② 缺字段不得伪装成 0：字段不存在时显示「—」（UNKNOWN），而不是 `|| 0`。
+//      旧写法把「后端没这个字段」和「今天确实 0 条」渲染成同一个 '0'，
+//      缺陷因此藏了很久 —— 这正是本次要钉住的行为。
 const fetchTodayDataCount = async () => {
   try {
     const response = await client.get<unknown, any>('/api/v1/overview')
-    stats.todayData = response.data_count_today || 0
+    const raw = response.data?.data_count_today
+    stats.todayData = typeof raw === 'number' ? raw : null
   } catch {
-    // fallback: 0
+    stats.todayData = null
   }
 }
 
-// 今日数据展示：<1000 显示原始整数（避免 "0.0k"），>=1000 以千为单位带一位小数
+// 今日数据展示：<1000 显示原始整数（避免 "0.0k"），>=1000 以千为单位带一位小数。
+// 取不到值时走 UNKNOWN 占位符（不进 CountUp —— 它是数字组件，喂不了字符串）。
 const todayDataDisplay = computed(() => {
   const count = stats.todayData
+  if (count === null) return { value: UNKNOWN, decimals: 0, suffix: '', unknown: true }
   return count >= 1000
-    ? { value: count / 1000, decimals: 1, suffix: 'k' }
-    : { value: count, decimals: 0, suffix: '' }
+    ? { value: count / 1000, decimals: 1, suffix: 'k', unknown: false }
+    : { value: count, decimals: 0, suffix: '', unknown: false }
 })
 
 // 只显示在线节点
@@ -1462,7 +1509,7 @@ const channelConfigObject = (ch: Channel): { device_type?: string; [key: string]
 }
 
 const formatRelativeTime = (time: string | null | undefined) => {
-  if (!time) return '-'
+  if (!time) return UNKNOWN
   const now = new Date()
   const date = new Date(time)
   const diff = now.getTime() - date.getTime()
@@ -1934,6 +1981,12 @@ code.fact-value {
   border-color: var(--el-color-primary);
 }
 
+/* I-9 A 类：键盘焦点必须可见（否则加了 tabindex 等于给键盘用户一个隐形停靠点） */
+.parser-select-card:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+}
+
 .parser-select-card.selected {
   border-color: var(--el-color-success);
   background: var(--el-color-success-light-9);
@@ -2013,6 +2066,11 @@ code.fact-value {
 
 .channel-select-card:hover {
   border-color: var(--el-color-primary);
+}
+
+.channel-select-card:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
 }
 
 .channel-select-card.selected {

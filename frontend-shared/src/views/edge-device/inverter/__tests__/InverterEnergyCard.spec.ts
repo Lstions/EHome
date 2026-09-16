@@ -5,7 +5,7 @@ import InverterEnergyCard from '../InverterEnergyCard.vue'
 /**
  * InverterEnergyCard 纯 props 展示组件。
  * props.latestData: Record<string, any> | null；模板用可选链兜底。
- * 内部 formatEnergy 分档：null/NaN -> '--'；>=10000 -> 0 位小数；
+ * 内部 formatEnergy 分档：null/NaN -> '—'；>=10000 -> 0 位小数；
  * >=100 -> 1 位小数；其余 -> 2 位小数。
  */
 
@@ -49,20 +49,20 @@ describe('InverterEnergyCard', () => {
     expect(cards[3].classes()).toContain('total')
   })
 
-  it('renders -- placeholders without throwing when latestData is null or empty', () => {
+  it('renders — placeholders without throwing when latestData is null or empty', () => {
     const fromNull = mountCard(null)
     expect(fromNull.findAll('.energy-card')).toHaveLength(4)
-    expect(energyText(fromNull).filter(t => t.includes('--'))).toHaveLength(4)
+    expect(energyText(fromNull).filter(t => t.includes('—'))).toHaveLength(4)
 
     const fromEmpty = mountCard({})
-    expect(energyText(fromEmpty).filter(t => t.includes('--'))).toHaveLength(4)
+    expect(energyText(fromEmpty).filter(t => t.includes('—'))).toHaveLength(4)
   })
 
-  it('renders -- for non-numeric values instead of NaN output', () => {
+  it('renders — for non-numeric values instead of NaN output', () => {
     const wrapper = mountCard({ daily_energy: 'abc', monthly_energy: NaN })
     const values = energyText(wrapper)
-    expect(values[0]).toContain('--')
-    expect(values[1]).toContain('--')
+    expect(values[0]).toContain('—')
+    expect(values[1]).toContain('—')
     expect(values[0]).not.toContain('NaN')
   })
 
@@ -87,7 +87,7 @@ describe('InverterEnergyCard', () => {
     const values = energyText(wrapper)
     expect(values[0]).toContain('0.00')
     expect(values[1]).toContain('-12.50')
-    expect(values[2]).toContain('--')
+    expect(values[2]).toContain('—')
     expect(values[3]).toContain('1000000000000')
   })
 })

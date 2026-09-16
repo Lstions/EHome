@@ -18,7 +18,6 @@
 package catalog
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -91,29 +90,25 @@ type alertEventRow struct {
 }
 
 // alertListRules 读告警规则列表（可带 level/target_type/target_id 之类的过滤串）。
+//
+// 端点形状：**裸数组**（已核对 handler_alert.go:80-101 的 listAlertRules
+// 走 Success(c, items)，没有 page/page_size/Count）。注意这与同文件的
+// /alert-events 不同 —— 同一 handler 文件里两个端点形状不同，正是本缺陷
+// 容易扩散的地方，所以每个调用点都必须写明依据。
 func alertListRules(e *harness.Env, query string) ([]alertRuleRow, error) {
-	r := e.Admin.Get("/api/v1/alert-rules" + query)
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/alert-rules%s 返回 %d: %s", query, r.Status, r.BodyString())
-	}
-	var rows []alertRuleRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析告警规则列表失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	path := "/api/v1/alert-rules" + query
+	return simBareListItems[alertRuleRow](e.Admin.Get(path), path)
 }
 
 // alertListEvents 读告警事件（可带 rule_id/state 过滤串）。
+//
+// 端点形状：**分页信封** {items,total,page,page_size}
+// （handler_alert.go:294-352 的 listAlertEvents，提交 ea9ce296 改）。
+//
+// 与 autoListEvents 同理读**全部页**：调用方断言的是"该规则下的全部告警"
+// （如"恢复后 firing 集合里不再有它"），只读第一页会漏掉窗口外的行。
 func alertListEvents(e *harness.Env, query string) ([]alertEventRow, error) {
-	r := e.Admin.Get("/api/v1/alert-events" + query)
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/alert-events%s 返回 %d: %s", query, r.Status, r.BodyString())
-	}
-	var rows []alertEventRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析告警事件失败: %w（data=%s）", err, autoHead(string(r.Data), 200))
-	}
-	return rows, nil
+	return simPageAll[alertEventRow](e, "/api/v1/alert-events", query)
 }
 
 // alertCreateRule 创建一条告警规则并把自清理挂到当前场景上（§5.6 场景自清理）。

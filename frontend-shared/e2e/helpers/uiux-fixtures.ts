@@ -20,7 +20,14 @@ export const UIUX_USER = process.env.UIUX_USER || 'admin'
 export const UIUX_PASS = process.env.UIUX_PASS || 'UiuxAudit2026!'
 
 /**
- * 13 个受审路由（docs/分析/UIUX审计契约-2026-09-13.md §4 的冻结清单）+ **就绪判据**。
+ * 15 个受审路由（docs/分析/UIUX审计契约-2026-09-13.md §4 的冻结清单，2026-09-15 从 13 修到 15）
+ * + **就绪判据**。
+ *
+ * 2026-09-15 分母漂移修复：契约 §4 原清单漏了 router 里已存在的 `/notification-channels`
+ * 与 `/notification-deliveries` 两个路由级页面 —— 它们**从未被本门禁审过**，而门禁仍全绿
+ * （分母是手写的，漏登记没有任何守卫能发现）。现补齐两条，并新增守卫
+ * `src/router/__tests__/uiuxRouteCoverage.spec.ts`：router 里每一个路由级页面都必须在
+ * 本表出现，缺一即红（fail-closed）。新增/改名路由页面时必须同步本表，否则守卫会拦住。
  *
  * ## 为什么每条路由要带一个"数据承载信号"（2026-09-14 门禁假绿修复）
  *
@@ -158,6 +165,36 @@ export const ROUTES: RouteProbe[] = [
     root: '.automation-rules-page',
     visible: '.el-table__row, .el-table__empty-text',
     settle: '.el-table__empty-text, .el-table__row',
+    dataShaped: true,
+  },
+  {
+    name: 'notification-channels',
+    path: '/notification-channels',
+    root: '.notification-channels-page',
+    // 数据承载信号：**行 / 空态 / 错误态三选一**，三者任一出现即证明已取得"确定结论"。
+    // 「空态也算就绪」是本条的关键：审计库 ehome_uiux 里通知通道数可能为 0，
+    // 若只认 `.el-table__row`，CI 上会因为"没有通知通道"而每次超时假红——
+    // 这是本门禁最忌讳的"依赖固定测试数据"。故必须把空态与错误态一并写进 visible/settle。
+    // 空态用 `[data-test="nc-empty"]`（EmptyState 根节点 .empty-state 上的 data-test）而非
+    // 泛型 `.empty-state`：它是本页专属的信号，避免"当前 DOM 里残留别的页面空态"被误判。
+    visible: '.el-table__row, [data-test="nc-empty"], [data-test="nc-error"]',
+    // 加载结束信号：模板用 v-loading="store.loading" 挂在 el-table 上，**:data 绑定后**才渲染行；
+    // 空态是 v-if="!store.loading && items.length === 0" ⇒ 空态出现本身即"加载已结束"；
+    // 错误条 v-if="store.error" 同理。三者共同排除骨架/遮罩态（v-loading 期间三者都不会命中）。
+    settle: '[data-test="nc-table"] .el-table__row, [data-test="nc-empty"], [data-test="nc-error"]',
+    dataShaped: true,
+  },
+  {
+    name: 'notification-deliveries',
+    path: '/notification-deliveries',
+    root: '.notification-deliveries-page',
+    // 同上：只读投递审计页，审计库里可能一条记录都没有 ⇒ 空态必须算就绪。
+    // 行信号限定在本页表格内（`[data-test="nd-table"] .el-table__row`），不照抄别页的裸 `.el-table__row`。
+    visible: '[data-test="nd-table"] .el-table__row, [data-test="nd-empty"], [data-test="nd-error"]',
+    // 加载结束：el-table 的 v-loading 结束时才渲染行；空态 v-if="!store.loading && items.length === 0"；
+    // 错误条 v-if="store.error"。过滤条（nd-filter-channel/state）**不作为** settle：
+    // 它们在 loading 期间是 :disabled 但仍可见 —— 拿它当"加载结束"信号会恒真，正是假绿模式。
+    settle: '[data-test="nd-table"] .el-table__row, [data-test="nd-empty"], [data-test="nd-error"]',
     dataShaped: true,
   },
   {

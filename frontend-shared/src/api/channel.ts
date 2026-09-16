@@ -115,9 +115,15 @@ export const channelApi = {
     return response.data
   },
 
-  // 重配置通道（改波特率等）
-  async reconfigure(id: number, baudrate: number, clockHz: number = 0): Promise<{ status: string; request_id: string }> {
-    const response = await client.post<unknown, { data: { status: string; request_id: string } }>(`/api/v1/channels/${id}/reconfigure`, {
+  // 重配置通道（改波特率）
+  //
+  // 返回 status 语义（2026-09-16 后端修复后）：
+  //   · 'reconfigured' —— bus_config 已改并触发下发；
+  //   · 'unchanged'    —— 目标波特率与现值相同，未改动。
+  // 修复前后端固定返回 'reconfigured' 且带 request_id（其实是**谎报成功**：
+  // 既不解析 baudrate 也不下发）。故类型随之去掉 request_id，并保留 status 供调用方如实提示。
+  async reconfigure(id: number, baudrate: number, clockHz: number = 0): Promise<{ status: string; baudrate?: number; bus_config?: string; node_id?: string }> {
+    const response = await client.post<unknown, { data: { status: string; baudrate?: number; bus_config?: string; node_id?: string } }>(`/api/v1/channels/${id}/reconfigure`, {
       baudrate,
       clock_hz: clockHz
     })

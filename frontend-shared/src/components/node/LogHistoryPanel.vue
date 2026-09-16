@@ -122,6 +122,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { nodeApi, type NodeLogEntry, type NodeLogQuery } from '@/api/node'
 import { exportCSV } from '@/utils/exportData'
 import { levelText, levelTagType, LOG_LEVEL_OPTIONS } from '@/components/node/logTypes'
@@ -223,7 +224,7 @@ async function clearLogs(before?: number) {
     await loadLogs()
   } catch (error: unknown) {
     if (operation !== requestGeneration || props.collectorId !== collectorId) return
-    feedback.handleError(error, '删除失败')
+    feedback.handleErrorWithContext(error, before !== undefined ? '删除指定时间前日志失败' : '清空日志失败')
   }
 }
 
@@ -259,7 +260,7 @@ function exportCurrentPage() {
 function formatHistoryTime(value: string | number): string {
   const date = new Date(value)
   return Number.isNaN(date.getTime())
-    ? '-'
+    ? UNKNOWN
     : date.toLocaleString('zh-CN', { hour12: false })
 }
 

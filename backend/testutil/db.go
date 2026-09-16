@@ -17,6 +17,9 @@ package testutil
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -123,6 +126,98 @@ func openSQLite(t *testing.T) *gorm.DB {
 	return db
 }
 
+// reapStaleSchemas 回收**上一次运行残留**的 test_* 隔离 schema。
+//
+// 为什么需要它（本仓真实事故，非假设）：
+//
+//	openPostgres 用 `t.Cleanup` 拆 schema，而 `t.Cleanup` **只在进程正常退出时执行**。
+//	若 go test 被 SIGKILL / SIGPIPE 打断（`go test … | head` 就是 SIGPIPE），
+//	清理钩子根本不会跑，schema 永久留在库里。
+//	实测复现：跑 PG 测试并在约 800ms 时 `kill -9`，`ehome_sim_pg` 里留下
+//	`test_3861920_1789489580224261933`。
+//	历史同源事故见 docs/取证/投递审计清理与PG验证-2026-09-14.md §3.4/§8.2
+//	（当时靠人工 DROP 收场，§8 明确建议「给 openPostgres 增加启动时的陈旧 schema 兜底回收」——本条即该建议的落地）。
+//
+// ── 安全规则（**绝不动可能仍在使用的 schema**）──────────────────────────
+//
+//	schema 名格式为 `test_<pid>_<unixnano>`（见 randomSuffix）。
+//	仅当**该 pid 当前不存在**时才回收（`syscall.Kill(pid, 0)` 判存活）。
+//	这样并行跑多个测试进程时互不误伤；进程已死而 schema 还在 ⇒ 必然是残留。
+//
+// ── 边界（诚实声明）──────────────────────────────────────────────────────
+//
+//	· 只回收**本库**里的 schema；不跨库，不碰非 `test_` 前缀；
+//	· pid 复用理论上会让「已死进程的 pid」被新进程占用 ⇒ 该 schema 多留一轮
+//	  （**只会漏收，不会误删** —— 刻意选的失败方向）；
+//	· 认不出命名格式的一律不碰（fail-closed）；
+//	· 回收失败只忽略，**不让测试失败**（清理是尽力而为，不该阻断用例）。
+func reapStaleSchemas(base *gorm.DB) {
+	rows, err := base.Raw("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'test\\_%'").Rows()
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err == nil {
+			names = append(names, n)
+		}
+	}
+	for _, name := range names {
+		if !shouldReapSchema(name, processAlive) {
+			continue
+		}
+		base.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", name))
+	}
+}
+
+// shouldReapSchema 是回收**决策**（纯函数，存活判定可注入，故可被行为测试覆盖）。
+//
+// 为什么必须抽成纯函数：决策就是安全规则的全部内容，必须能被**行为**验证，
+// 而不是靠扫描源码里有没有某个字符串。
+// 本仓刚发生过反例：判据 `strings.Contains(body, "processAlive(pid)")` 在
+// `if processAlive(pid) && false {…}` 之下**依然成立** —— 变异当场证明那是假绿。
+//
+// 规则：
+//
+//	· 认不出 `test_<pid>_<nano>` 格式 ⇒ **不回收**（fail-closed，宁可漏收不误删）；
+//	· pid 仍存活 ⇒ **不回收**（可能是并行测试进程正在用）；
+//	· 其余（格式合法且 pid 已死）⇒ 回收。
+//
+// 已知宽松点：pid 复用会让「已死进程的 pid」被新进程占用 ⇒ 该 schema 多留一轮。
+// 方向是**漏收而非误删**，这是刻意选的失败方向。
+func shouldReapSchema(name string, alive func(int) bool) bool {
+	pid, ok := pidFromSchemaName(name)
+	if !ok {
+		return false
+	}
+	return !alive(pid)
+}
+
+// pidFromSchemaName 从 `test_<pid>_<nano>` 解析 pid；格式不符返回 ok=false。
+func pidFromSchemaName(name string) (int, bool) {
+	rest := strings.TrimPrefix(name, "test_")
+	if rest == name {
+		return 0, false
+	}
+	parts := strings.SplitN(rest, "_", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(parts[0])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// processAlive 判断 pid 是否仍存在（signal 0 只做权限/存在性检查，不真的发信号）。
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
 func openPostgres(t *testing.T) *gorm.DB {
 	t.Helper()
 
@@ -142,6 +237,10 @@ func openPostgres(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open postgres (base): %v (dsn: host=%s port=%s user=%s dbname=%s)", err, host, port, user, dbname)
 	}
+
+	// 回收上一次被 SIGKILL/SIGPIPE 打断留下的 schema（见 reapStaleSchemas 的说明）。
+	// 放在建新 schema **之前**：这样残留在本轮就被清掉，而不是滚雪球。
+	reapStaleSchemas(base)
 
 	schemaName := fmt.Sprintf("test_%s", randomSuffix())
 	if err := base.Exec(fmt.Sprintf("CREATE SCHEMA %s", schemaName)).Error; err != nil {

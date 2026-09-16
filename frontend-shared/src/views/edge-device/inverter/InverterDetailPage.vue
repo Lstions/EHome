@@ -197,7 +197,7 @@ const alarmCount = computed(() => {
 const hasAlarms = computed(() => alarmCount.value > 0)
 
 function formatNum(v: number | undefined | null, digits: number = 1): string {
-  if (v === undefined || v === null || isNaN(v)) return '--'
+  if (v === undefined || v === null || isNaN(v)) return '—'
   return v.toFixed(digits)
 }
 

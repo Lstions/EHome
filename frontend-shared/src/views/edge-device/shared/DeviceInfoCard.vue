@@ -4,7 +4,7 @@
     <div v-if="isMobile" class="mobile-info-list">
       <div class="mobile-info-row">
         <span class="mobile-info-label">设备名称</span>
-        <span class="mobile-info-value">{{ device.name || '-' }}</span>
+        <span class="mobile-info-value">{{ device.name || UNKNOWN }}</span>
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">设备类型</span>
@@ -12,15 +12,15 @@
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">通信协议</span>
-        <span class="mobile-info-value">{{ device.protocol?.toUpperCase() || '-' }}</span>
+        <span class="mobile-info-value">{{ device.protocol?.toUpperCase() || UNKNOWN }}</span>
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">硬件类型</span>
-        <span class="mobile-info-value">{{ device.hardware_type?.toUpperCase() || '-' }}</span>
+        <span class="mobile-info-value">{{ device.hardware_type?.toUpperCase() || UNKNOWN }}</span>
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">硬件ID</span>
-        <span class="mobile-info-value">{{ device.hardware_id || '-' }}</span>
+        <span class="mobile-info-value">{{ device.hardware_id || UNKNOWN }}</span>
       </div>
       <div v-if="nodeLinkId" class="mobile-info-row">
         <span class="mobile-info-label">所属节点</span>
@@ -54,11 +54,11 @@
       </div>
     </div>
     <el-descriptions v-else :column="2" border>
-      <el-descriptions-item label="设备名称">{{ device.name || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="设备名称">{{ device.name || UNKNOWN }}</el-descriptions-item>
       <el-descriptions-item label="设备类型">{{ deviceTypeText }}</el-descriptions-item>
-      <el-descriptions-item label="通信协议">{{ device.protocol ? device.protocol.toUpperCase() : '-' }}</el-descriptions-item>
-      <el-descriptions-item label="硬件类型">{{ device.hardware_type ? device.hardware_type.toUpperCase() : '-' }}</el-descriptions-item>
-      <el-descriptions-item label="硬件ID">{{ device.hardware_id || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="通信协议">{{ device.protocol ? device.protocol.toUpperCase() : UNKNOWN }}</el-descriptions-item>
+      <el-descriptions-item label="硬件类型">{{ device.hardware_type ? device.hardware_type.toUpperCase() : UNKNOWN }}</el-descriptions-item>
+      <el-descriptions-item label="硬件ID">{{ device.hardware_id || UNKNOWN }}</el-descriptions-item>
       <el-descriptions-item v-if="nodeLinkId" label="所属节点">
         <router-link class="node-link" :to="`/node/${nodeLinkId}/overview`">{{ nodeDisplayName }}</router-link>
       </el-descriptions-item>
@@ -86,6 +86,7 @@ import { computed } from 'vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { getErrorInfo } from '@/utils/errorCode'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
+import { UNKNOWN } from '@/utils/format'
 import { useResponsive } from '@/composables/useResponsive'
 import type { EdgeDevice } from '@/api/edgeDevice'
 
@@ -100,12 +101,12 @@ const nodeLinkId = computed(() => {
   const id = props.device.node?.id ?? props.device.node_id
   return id === 0 || id === '' || id === undefined || id === null ? null : id
 })
-const nodeDisplayName = computed(() => props.device.node?.name || String(props.device.node_id || '-'))
+const nodeDisplayName = computed(() => props.device.node?.name || String(props.device.node_id || UNKNOWN))
 
 function formatTime(time: string | null | undefined) {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN')
 }
 </script>

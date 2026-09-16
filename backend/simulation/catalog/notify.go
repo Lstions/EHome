@@ -14,9 +14,23 @@
 //  3. 防抖不只是"不重复执行"——冷却期内也不能把用户轰炸成 N 条通知：
 //     同一策略在冷却窗内落下的通知**恰好一条**。
 //
-// 产品缺口（设计 §7.1，本域无法验证，不为不存在的能力写断言）：
-// 全仓没有任何外发通道 —— Notification 只落库 + WS 广播，无 webhook / 机器人 / 邮件 / 短信。
-// 因此"用户人不在系统前面时能不能收到告警"这一自动化最核心的价值**当前不可验证**。
+// 本文件只覆盖「通知**产生**」。「通知**外发**」（真实出站 HTTP / 旁路纪律 /
+// 凭据不外泄）在 catalog/outbound.go 的 SIM-NTFY-004..008。
+//
+// ── 陈旧声称的更正（2026-09-15，实测）────────────────────────────────────────
+// 本文件此前的头注释写着：
+//
+//	"全仓没有任何外发通道 —— Notification 只落库 + WS 广播，无 webhook / 机器人 / 邮件 / 短信。
+//	 因此'用户人不在系统前面时能不能收到告警'这一自动化最核心的价值**当前不可验证**。"
+//
+// 该声称**已失真**（这正是"记录会过期"的又一例）：
+//   - 外发通道**早已实现**：后端 6 个端点（backend/internal/api/handler_notification_channel.go）、
+//     notify 出站引擎（backend/internal/notify/，含 SSRF 判定/超时/重定向/重试/脱敏/审计）、
+//     前端配置页（frontend-shared/src/views/notification/NotificationChannels.vue，路由 /notification-channels）；
+//   - 复跑方式：`grep -rn "notification-channels" backend/internal/api/routes.go`、
+//     `ls backend/internal/notify/`、`ls frontend-shared/src/views/notification/`。
+//     ⇒ **真实缺口不是"没有能力"，而是"该能力此前没有仿真覆盖"** —— 已由
+//     catalog/outbound.go（SIM-NTFY-004..008）补上。
 //
 // 命名纪律（框架 §4.1 + 门禁第 8 条）：本文件包级标识符一律以 notify 开头。
 package catalog
@@ -32,9 +46,6 @@ import (
 	"ehome/backend/simulation/harness"
 )
 
-// notifyDomain 是本域标识（设计 v1.1 冻结：取 §6 表"前缀"列去 SIM- 的短名）。
-const notifyDomain Domain = "NTFY"
-
 // notifyErrKeepWatching 是"观察窗继续跑"的哨兵错误。EventuallyEveryError 会把最后一次
 // 失败原因用 %w 包装后返回，因此判定必须走 errors.Is，不能比较错误字符串。
 var notifyErrKeepWatching = errors.New("notify: keep watching")
@@ -43,21 +54,21 @@ func init() {
 	Register(Scenario{
 		ID:     "SIM-NTFY-001",
 		Title:  "策略通知带着正确的级别和来源，用户能判断严重程度与出处",
-		Domain: notifyDomain,
+		Domain: DomainNTFY,
 		Doc:    "docs/设计/自动化引擎场景仿真验证.md §4 SIM-NTFY-001（级别/来源）",
 		Run:    notifyRun001,
 	})
 	Register(Scenario{
 		ID:     "SIM-NTFY-002",
 		Title:  "读过一条通知后未读数正好减一，重复标记不会多扣",
-		Domain: notifyDomain,
+		Domain: DomainNTFY,
 		Doc:    "docs/设计/自动化引擎场景仿真验证.md §4 SIM-NTFY-002（未读计数）",
 		Run:    notifyRun002,
 	})
 	Register(Scenario{
 		ID:     "SIM-NTFY-003",
 		Title:  "冷却期内反复越限，用户只会收到一条通知，不会被反复打扰",
-		Domain: notifyDomain,
+		Domain: DomainNTFY,
 		Doc:    "docs/设计/自动化引擎场景仿真验证.md §4 SIM-NTFY-003（通知去重）",
 		Run:    notifyRun003,
 	})

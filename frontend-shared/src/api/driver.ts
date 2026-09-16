@@ -36,9 +36,11 @@ export async function getDriverTree(): Promise<DriverTreeNode[]> {
 
 // 获取驱动列表（扁平）
 export async function getDriverList(): Promise<DriverMeta[]> {
-  // 后端统一 envelope: {code, data: {list, total, page, page_size}, message}
-  const response = await client.get<unknown, ApiEnvelope<{ list?: DriverMeta[] }>>('/api/v1/device-configs')
-  return response.data?.list ?? []
+  // 后端统一 envelope: {code, data: {items, total, page, page_size}, message}
+  // 2026-09-15 方言收敛：该端点曾返回 `list`（全仓 12 个分页端点里唯一的旧方言），
+  // 已统一为 `items`；这里必须同步，否则本函数会静默返回空数组。
+  const response = await client.get<unknown, ApiEnvelope<{ items?: DriverMeta[] }>>('/api/v1/device-configs')
+  return response.data?.items ?? []
 }
 
 // 获取驱动详情

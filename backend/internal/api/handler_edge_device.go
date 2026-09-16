@@ -257,8 +257,13 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			var missed []uint
 			cacheByDevice := make(map[uint][]lastDataEntry)
 			for _, did := range deviceIDs {
-				if rec, ok := LatestValue(did); ok {
-					cacheByDevice[did] = append(cacheByDevice[did], lastDataEntry{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value, Unit: rec.Unit})
+				// 同 handler_overview.go：必须用 LatestValues 取回**全部**物理量，
+				// 否则缓存命中时每设备只报 1 个物理量，与回落 SQL 的形状不一致。
+				recs := LatestValues(did)
+				if len(recs) > 0 {
+					for _, rec := range recs {
+						cacheByDevice[did] = append(cacheByDevice[did], lastDataEntry{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value, Unit: rec.Unit})
+					}
 				} else {
 					missed = append(missed, did)
 				}

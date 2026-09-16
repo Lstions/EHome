@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -90,8 +91,8 @@ func (NotificationChannel) TableName() string { return "notification_channels" }
 //     逐个 handler 处理必然会漏掉某一个 —— 放在类型上才是"一处定义"。
 //
 // 实现要点：先 Alias 出去拿默认序列化（避免与 json.Marshal 递归），
-// 再把 target_url 换成脱敏版本。RedactURL 按 sensitiveQueryKeys 判定哪些参数敏感，
-// 命中则替换为 ***（与前端 stripToken 的占位一致）。
+// 再把 target_url 换成脱敏版本。脱敏规则见 RedactTargetURL —— 它与
+// notify.RedactURL 逐字节一致，占位符是 ***（与前端 stripToken 的占位一致）。
 func (c NotificationChannel) MarshalJSON() ([]byte, error) {
 	type alias NotificationChannel
 	safe := alias(c)
@@ -99,18 +100,45 @@ func (c NotificationChannel) MarshalJSON() ([]byte, error) {
 	return json.Marshal(safe)
 }
 
-// RedactTargetURL 是 models 包对 notify.RedactURL 的薄封装。
+// RedactedPlaceholder 是 URL / 文案脱敏后的占位符，与 notify.RedactedPlaceholder
+// （以及前端 stripToken 的占位）必须同值 —— 两处各有一份实现（原因见
+// RedactTargetURL），唯一能防止再次漂移的办法就是"值只有一个定义、由测试断言相等"。
+// notify 包的 TestRedactTargetURLMatchesNotify 里有一条断言专门守这个等式。
 //
-// 为什么不直接引用 notify 包：notify 依赖 models（它要读 NotificationChannel），
-// 反向引用会形成 import 环。脱敏规则本身只依赖 net/url 与一份敏感参数名表，
-// 因此这里保留一份**最小实现**，并由 TestRedactTargetURLMatchesNotify 守住两者行为一致。
+// 写成具名常量而不是字面量：占位符一旦被散布成魔法字符串，改一处漏一处就会
+// 重新变成"两边输出不同"的契约漂移（P0-A 修的就是这个）。
+const RedactedPlaceholder = "***"
+
+// RedactTargetURL 是 models 包内的**最小脱敏实现**：同一输入下，输出与
+// notify.RedactURL **逐字节相同**（由 notify 包的 TestRedactTargetURLMatchesNotify 守护）。
+//
+// 为什么不直接调用 notify.RedactURL：依赖方向是 notify → models（notify 要读
+// NotificationChannel 才能投递），models → notify 会构成 import 环。
+// 因此这里只能保留一份语义相同的副本。
+//
+// 由此还推出一条硬约束：**这个一致性测试不可能写在 models 包**——models 侧的
+// 测试文件一旦 import notify，整个测试二进制在编译期就失败（import cycle）。
+// 它只能待在 notify 包（internal/notify/redact_contract_test.go）。改本函数时
+// 必须同步跑那条测试，否则契约会再次漂移成"注释声称有测试、实际没有"。
+//
+// 流水线与 notify.RedactURL 完全同构，三步缺一不可：
+//  1. 空串早退；url.Parse 失败 ⇒ 走本包的文本级兜底 redactText（绝不原样返回）；
+//  2. 剥掉 user:pass@ 用户凭据，并把敏感查询参数置为 RedactedPlaceholder；
+//  3. query.Encode() 会把 '*' 百分号转义成 %2A，所以最后再套一遍 redactText，
+//     把 key=%2A%2A%2A 收回成 key=***。
+//
+// 第 3 步**不能**简化成 strings.ReplaceAll(out, "%2A%2A%2A", "***")：那会把
+// **非敏感参数里的用户数据**也一起改掉。反例 ?note=***&key=SECRET —— notify
+// 输出 key=***&note=%2A%2A%2A（note 是用户数据，保持其百分号编码形态），
+// 裸替换会把它篡改成 note=***。必须复用同一套正则，让"哪个值被改"只由参数名决定。
 func RedactTargetURL(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		// 解析失败绝不原样回显：非法 URL 里同样可能带 ?token=...（notify 侧同理）。
+		return redactText(raw)
 	}
 	// 用户凭据 (user:pass@host) 一律剥掉。
 	if parsed.User != nil {
@@ -121,25 +149,60 @@ func RedactTargetURL(raw string) string {
 		changed := false
 		for name := range query {
 			if sensitiveQueryKey(strings.ToLower(name)) {
-				query.Set(name, "***")
+				query.Set(name, RedactedPlaceholder)
 				changed = true
 			}
 		}
 		if changed {
+			// url.Values.Encode 按 key 排序重编码（脱敏后的重编码，不要求与原文
+			// 逐字节一致）；转义出来的 %2A 由下面 redactText 的兜底正则收回成 ***。
 			parsed.RawQuery = query.Encode()
 		}
 	}
-	return parsed.String()
+	return redactText(parsed.String())
 }
 
-// sensitiveQueryKeys 与 notify 包的判定保持一致（见 RedactTargetURL 的说明）。
+// sensitiveQueryKeys 必须与 notify 包的 sensitiveQueryKeys **逐键一致**。
+// 少一个键就是一条真实泄露面：notify 认 pwd / app_secret 而 models 不认时，
+// ?pwd=SECRET 会在 API 响应里原样回显（P0-A 实测复现过的漂移）。
+//
+// 两个包的变量同名不冲突（不同包）；**故意保持同名**，好让"改一个必须改另一个"
+// 在 diff 与审阅时一眼可见。守护测试会逐键对拍两张表。
 var sensitiveQueryKeys = map[string]bool{
-	"key": true, "access_token": true, "token": true, "secret": true,
-	"apikey": true, "api_key": true, "password": true, "passwd": true,
-	"signature": true, "sig": true, "auth": true, "authorization": true,
+	"key": true, "token": true, "access_token": true, "accesstoken": true,
+	"secret": true, "password": true, "passwd": true, "pwd": true,
+	"sign": true, "signature": true, "sig": true, "auth": true, "authorization": true,
+	"apikey": true, "api_key": true, "appkey": true, "app_secret": true,
 }
 
 func sensitiveQueryKey(lower string) bool { return sensitiveQueryKeys[lower] }
+
+// redactURLRe / redactHeaderRe / redactBearerRe 是 notify 包同名正则的**等价副本**
+// （import 环说明见 RedactTargetURL）。语义必须与 notify 侧逐字符一致：任何一侧
+// 改了正则而另一侧没跟，TestRedactTargetURLMatchesNotify 就会变红。
+var (
+	// 兜底匹配任何形态 URL 里的敏感查询参数（含裸 query 串与 net/http 错误
+	// 文案里被引号包住的 URL）。目标串: key=..., token=..., access_token=... 等，
+	// 值到 &/#/空白/引号为止。
+	redactURLRe = regexp.MustCompile("(?i)\\b(key|token|access_?token|secret|password|passwd|pwd|sign|signature|sig|api_?key|app_?key|app_?secret|auth|authorization)=([^&\\s\"'#]+)")
+	// 兜底匹配 header 形态的凭据 (Authorization: xxx / X-Api-Key: xxx)。
+	redactHeaderRe = regexp.MustCompile("(?i)((?:proxy-)?authorization|x-api-key|apikey)\\s*[:=]\\s*([^\\s,;\"']+)")
+	// 兜底匹配 Bearer/Basic 方案里的令牌本体。
+	redactBearerRe = regexp.MustCompile("(?i)\\b(bearer|basic)\\s+([A-Za-z0-9\\-._~+/=]{4,})")
+)
+
+// redactText 与 notify.RedactText 等价（说明见 RedactTargetURL）。
+// 用途与 notify 侧一致：解析失败时兜底、以及把 Encode() 转义出的 %2A 收回成 ***。
+func redactText(text string) string {
+	if text == "" {
+		return text
+	}
+	// 顺序有讲究: 先剥 Bearer/Basic 的令牌本体, 再处理 header 形态 ——
+	// 反过来会把 "Bearer" 这个词当成值吃掉, 令牌本体就漏出去了。
+	text = redactBearerRe.ReplaceAllString(text, "$1 "+RedactedPlaceholder)
+	text = redactHeaderRe.ReplaceAllString(text, "$1: "+RedactedPlaceholder)
+	return redactURLRe.ReplaceAllString(text, "$1="+RedactedPlaceholder)
+}
 
 // ApplySecret 写入密钥并同步辨认提示 (只写不读的唯一写入口)。
 // secret 为空串表示清空密钥。

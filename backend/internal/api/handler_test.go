@@ -1029,8 +1029,17 @@ func TestNode_I2CScan(t *testing.T) {
 	v1.Use(JWTAuth())
 	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
 
+	// P1-B: this request used to be sent with a nil body, and it only passed
+	// because the handler discarded the ShouldBindJSON error ("EOF" for an empty
+	// body) and answered 200 anyway. That was the defect, not the contract: the
+	// only caller (frontend-shared/src/api/node.ts scanI2C) always posts
+	// {"hardware_id": ...}. Sending the real payload keeps the 200 assertion
+	// meaningful; the malformed-body case is covered by
+	// TestP1B_Node_I2CScan_RejectsMalformedJSON.
+	body := bytes.NewBufferString(`{"hardware_id":"i2c0"}`)
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/nodes/1/bus/i2c/scan", nil)
+	req := httptest.NewRequest("POST", "/api/v1/nodes/1/bus/i2c/scan", body)
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 

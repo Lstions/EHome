@@ -70,8 +70,15 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			var missed []uint
 			cacheByDevice := make(map[uint][]sensorVal)
 			for _, did := range deviceIDs {
-				if rec, ok := LatestValue(did); ok {
-					cacheByDevice[did] = append(cacheByDevice[did], sensorVal{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value})
+				// 用 LatestValues（该设备**全部**物理量）而不是 LatestValue（单条）：
+				// 后者只返回最后写入的那一条，会让缓存命中时某设备只报 1 个物理量，
+				// 而缓存 miss 的回落 SQL 返回该时刻全部行 ⇒ 同一份数据两种形状
+				// （实测：设备 7053 回落路径 14 个 vs 缓存路径 1 个）。
+				recs := LatestValues(did)
+				if len(recs) > 0 {
+					for _, rec := range recs {
+						cacheByDevice[did] = append(cacheByDevice[did], sensorVal{DeviceID: rec.DeviceID, SensorName: rec.SensorName, Value: rec.Value})
+					}
 				} else {
 					missed = append(missed, did)
 				}
@@ -116,10 +123,21 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 			latestData = append(latestData, entry)
 		}
 
+		// F14-b: 「今日数据」统计卡读的字段。此前该字段在前后端都不存在，
+		// 前端 `|| 0` 兜底把「字段缺失」伪装成一个合法的 0，卡片永远显示 0。
+		// 口径 = unified_data 里**今天本地 00:00 起**写入的行数，与卡片文案一致。
+		// 注意不能用 time.Now().Truncate(24*time.Hour)：Truncate 按 UTC 纪元取整，
+		// 在 UTC+8 会得到本地 08:00，把当天前 8 小时的数据算到"昨天"。
+		now := time.Now()
+		startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		var dataCountToday int64
+		db.Model(&models.UnifiedData{}).Where("timestamp >= ?", startOfToday).Count(&dataCountToday)
+
 		result := gin.H{
-			"nodes":        gin.H{"total": nodeTotal, "online": nodeOnline, "offline": nodeTotal - nodeOnline},
-			"edge_devices": gin.H{"total": edgeDeviceTotal, "online": edgeDeviceOnline, "offline": edgeDeviceTotal - edgeDeviceOnline},
-			"latest_data":  latestData,
+			"nodes":            gin.H{"total": nodeTotal, "online": nodeOnline, "offline": nodeTotal - nodeOnline},
+			"edge_devices":     gin.H{"total": edgeDeviceTotal, "online": edgeDeviceOnline, "offline": edgeDeviceTotal - edgeDeviceOnline},
+			"latest_data":      latestData,
+			"data_count_today": dataCountToday,
 		}
 
 		// Update cache

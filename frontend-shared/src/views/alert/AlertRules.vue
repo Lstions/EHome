@@ -38,7 +38,14 @@
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
+            <!-- 可访问名带**规则名**：表格里每行都有一个一模一样的开关，
+                 没有名字时屏幕阅读器只读「开关」，用户无法分辨改的是哪条规则。 -->
+            <el-switch
+              :model-value="row.enabled"
+              :aria-label="`${asRule(row).name} 启用`"
+              data-test="rule-enabled"
+              @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
+            />
           </template>
         </el-table-column>
         <!-- F29 裁决：窄屏取消固定列（原 width="130" fixed="right"）。
@@ -181,6 +188,7 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import { useAlertStore } from '@/stores/alert'
 import { useResponsive } from '@/composables/useResponsive'
 import { feedback } from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
 
@@ -218,10 +226,10 @@ function levelTag(l: AlertLevel): 'danger' | 'warning' | 'info' {
   return l === 'critical' ? 'danger' : l === 'warning' ? 'warning' : 'info'
 }
 function formatValue(v: number): string {
-  return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : '-'
+  return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : UNKNOWN
 }
 function formatTime(t?: string | null): string {
-  if (!t) return '-'
+  if (!t) return UNKNOWN
   return new Date(t).toLocaleString()
 }
 

@@ -13,7 +13,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -327,10 +326,17 @@ func rtRun003(e *harness.Env) {
 func rtLiveInventory(t *testing.T, e *harness.Env) ([]string, []int64) {
 	t.Helper()
 
+	// 两个端点都已是**分页信封** {items,total,page,page_size}
+	// （handler_node.go:45-98 与 handler_edge_device.go:166-296，提交 ffdec935 改）。
+	// 这里必须读**全部页**：本函数返回的是"权威列表长度"，下面会拿它
+	// 与 GET /overview 的 total 做相等断言；只读第一页（默认 20 条）
+	// 在 100+ 节点的真实运行里必然误报。
 	var nodes []struct {
 		NodeID string `json:"node_id"`
 	}
-	e.Admin.Get("/api/v1/nodes").Expect(http.StatusOK).Decode(&nodes)
+	nodes = simListAll[struct {
+		NodeID string `json:"node_id"`
+	}](e, "/api/v1/nodes", "")
 	nodeIDs := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		nodeIDs = append(nodeIDs, node.NodeID)
@@ -339,7 +345,9 @@ func rtLiveInventory(t *testing.T, e *harness.Env) ([]string, []int64) {
 	var edges []struct {
 		ID uint `json:"id"`
 	}
-	e.Admin.Get("/api/v1/edge-devices").Expect(http.StatusOK).Decode(&edges)
+	edges = simListAll[struct {
+		ID uint `json:"id"`
+	}](e, "/api/v1/edge-devices", "")
 	edgeIDs := make([]int64, 0, len(edges))
 	for _, edge := range edges {
 		edgeIDs = append(edgeIDs, int64(edge.ID))
@@ -692,16 +700,11 @@ func rtUnreadCount(e *harness.Env, t *testing.T) int64 {
 }
 
 // rtListNotifications 读通知中心列表（最多 100 条，足够覆盖单次仿真运行的量）。
+// 端点形状：**裸数组**（已核对 handler_notification.go:14-18）——
+// 与 /nodes、/edge-devices 不同，通知中心没有分页，因此显式走裸数组解析。
 func rtListNotifications(e *harness.Env) ([]rtNotificationRow, error) {
-	r := e.Admin.Get("/api/v1/notifications?limit=100")
-	if r.Status != http.StatusOK {
-		return nil, fmt.Errorf("GET /api/v1/notifications 返回 %d: %s", r.Status, string(r.Raw))
-	}
-	var rows []rtNotificationRow
-	if err := json.Unmarshal(r.Data, &rows); err != nil {
-		return nil, fmt.Errorf("解析通知列表失败: %w（data=%s）", err, rtHead(string(r.Data), 200))
-	}
-	return rows, nil
+	return simBareListItems[rtNotificationRow](e.Admin.Get("/api/v1/notifications?limit=100"),
+		"/api/v1/notifications?limit=100")
 }
 
 // ---------------------------------------------------------------------------

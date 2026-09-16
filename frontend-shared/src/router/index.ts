@@ -122,11 +122,18 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '自动化策略', icon: 'SetUp' },
       },
       {
-        // 外发通知通道：列表 + 分页 + 删除（本轮范围；新建/编辑/测试留待下一轮）。
+        // 外发通知通道：列表 + 分页 + 删除。
         path: 'notification-channels',
         name: 'NotificationChannels',
         component: () => import('@/views/notification/NotificationChannels.vue'),
         meta: { title: '通知通道', icon: 'Bell' },
+      },
+      {
+        // 投递审计（P2-A）：只读列表 + channel_id/state 过滤 + 真分页，与通知通道同域相邻。
+        path: 'notification-deliveries',
+        name: 'NotificationDeliveries',
+        component: () => import('@/views/notification/NotificationDeliveries.vue'),
+        meta: { title: '投递审计', icon: 'Tickets' },
       },
       {
         path: 'profile',

@@ -607,7 +607,7 @@ const saveEdit = async () => {
     editVisible.value = false
     ElMessage.success('已保存')
   } catch (error: any) {
-    feedback.handleError(error, '保存失败')
+    feedback.handleErrorWithContext(error, '保存逻辑设备失败')
   } finally {
     saving.value = false
   }

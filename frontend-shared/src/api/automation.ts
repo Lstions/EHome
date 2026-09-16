@@ -161,7 +161,8 @@ export interface AutomationEventListParams {
 /**
  * 分页响应 (后端 `GET /automation-events` 的 `data`)。
  * 契约依据: 架构与接口评估及优化方案 P1.2「裁决 items + total」。
- * 用 `items` 而非 `list` —— `/device-configs` 的 `{list,...}` 是待收敛的旧方言。
+ * 用 `items` 而非 `list` —— `/device-configs` 的 `{list,...}` 旧方言已于 2026-09-15 收敛
+ * （全仓 12 个分页端点现已全部使用 `items`）。
  */
 export interface AutomationEventPage {
   items: AutomationEvent[]

@@ -111,8 +111,63 @@ export interface NotificationChannelTestResult {
   notification_id: number
   /** 后端固定回 pending（models.DeliveryStatePending）——"已发出"不等于"已送达"。 */
   state: string
-  /** 投递审计入口（本轮不实现审计页，先按后端契约把字段透出）。 */
+  /** 投递审计入口（投递审计页 NotificationDeliveries.vue 的查询入口）。 */
   deliveries_url: string
+}
+
+/**
+ * 投递状态：与 models.DeliveryState* 一一对应（设计 §5 状态机 pending → delivered | failed）。
+ *
+ * pending 是**中间态**（"尝试已开始、结论未落库"）：后端先写一行 pending 再去出站，
+ * 拿到结论后改写为 delivered/failed。因此页面上看到 pending 只表示"还在途中或进程
+ * 在写入结论前退出了"，**不能**读成"已送达"，也不能读成"失败"。
+ */
+export type NotificationDeliveryState = 'pending' | 'delivered' | 'failed'
+
+/**
+ * 投递审计行（= 后端 models.NotificationDelivery 的逐字段投影，设计 §3）。
+ *
+ * 为什么类型要逐字段手写而不是从后端生成：后端出站形状就是这张**审计表本身**
+ * （handler_notification_channel.go 的 listDeliveries 直接 Success(items)），
+ * 表里根本没有任何密钥载体 —— 通道密钥在 notification_channels.secret 与 target_url
+ * 的查询串里，审计行只有 error_message（落库前已过 RedactText）与 status_code。
+ * 手写这九个字段，等于把"投递审计页拿不到密钥"这件事钉在类型层：页面想拼密钥也无处可取。
+ */
+export interface NotificationDelivery {
+  id: number
+  /** 被投递的通知 id（notifications 表） */
+  notification_id: number
+  /** 目标通道 id；通道被删除后审计行仍在（DELETE 不级联），故这里可能指向已不存在的通道 */
+  channel_id: number
+  state: NotificationDeliveryState
+  /** 第几次尝试，从 1 开始；重试**新开一行**、attempt_no 递增（不是原地改） */
+  attempt_no: number
+  /** 出站 HTTP 状态码；0 = 没走到拿到响应那一步（连不上/DNS/SSRF 拒绝/超时） */
+  status_code: number
+  /** 失败原因（后端已脱敏并截断）；成功时为空串 */
+  error_message: string
+  /** 本次尝试耗时（毫秒） */
+  duration_ms: number
+  /** 审计行创建时刻（= 该次尝试开始时刻） */
+  created_at: string
+}
+
+/** 投递审计查询参数（后端支持 channel_id / state 过滤 + page / page_size 真分页）。 */
+export interface NotificationDeliveryListParams {
+  /** 只看某条通道的投递；不传 = 全部通道 */
+  channel_id?: number
+  /** 只看某种状态；不传 = 全部状态 */
+  state?: NotificationDeliveryState
+  page?: number
+  page_size?: number
+}
+
+/** 投递审计解包结果：后端 data 为 { items, total, page, page_size }（与通道列表同形）。 */
+export interface NotificationDeliveryListResult {
+  items: NotificationDelivery[]
+  total: number
+  page: number
+  page_size: number
 }
 
 /** 拦截器返回后端统一 envelope；只从 envelope.data 取值（同 api/dataSource.ts 范式）。 */
@@ -158,6 +213,22 @@ export const notificationChannelApi = {
   async test(id: number): Promise<NotificationChannelTestResult> {
     return unwrap<NotificationChannelTestResult>(
       client.post<unknown, ApiEnvelope<NotificationChannelTestResult>>(`/api/v1/notification-channels/${id}/test`),
+    )
+  },
+  /**
+   * 投递审计列表（GET /notification-deliveries）。
+   *
+   * 服务端**真分页**：page / page_size 原样发给后端，返回的 items 就是**当前页切片**，
+   * total 是全量总数（后端在 Offset/Limit 之前先 Count）。调用方不得对 items 再切片 ——
+   * 那样页码与数据会双双脱节（分页器说第 2 页、内容却是第 1 页的前 N 条）。
+   *
+   * 参数不传即"不过滤"：channel_id / state 都省略时返回全部通道的全部审计行。
+   * state 只能是 pending|delivered|failed —— 后端对非法值直接 400，前端类型与
+   * 下拉项都不产生别的取值（不在这里做静默兜底，否则非法值会变成"看起来过滤了"）。
+   */
+  async listDeliveries(params?: NotificationDeliveryListParams): Promise<NotificationDeliveryListResult> {
+    return unwrap<NotificationDeliveryListResult>(
+      client.get<unknown, ApiEnvelope<NotificationDeliveryListResult>>('/api/v1/notification-deliveries', { params }),
     )
   },
 }

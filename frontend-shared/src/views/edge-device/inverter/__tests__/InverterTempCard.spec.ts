@@ -48,10 +48,10 @@ describe('InverterTempCard', () => {
     expect(items[3].classes()).toContain('temp-danger')
   })
 
-  it('renders -- and no severity class for non-numeric temperature, formats negatives', () => {
+  it('renders — and no severity class for non-numeric temperature, formats negatives', () => {
     const wrapper = mountCard({ pv_temp: 'abc', inverter_temp: -20.5 })
     const items = wrapper.findAll('.temp-item')
-    expect(items[0].find('.temp-value').text()).toBe('--')
+    expect(items[0].find('.temp-value').text()).toBe('—')
     expect(items[0].classes()).not.toContain('temp-normal')
     expect(items[0].classes()).not.toContain('temp-warning')
     expect(items[0].classes()).not.toContain('temp-danger')

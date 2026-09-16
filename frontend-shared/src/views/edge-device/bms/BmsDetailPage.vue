@@ -241,7 +241,7 @@ const hasActiveProtection = computed(() => {
 })
 
 function formatNum(v: number | undefined | null, digits: number = 2): string {
-  if (v === undefined || v === null || isNaN(v)) return '--'
+  if (v === undefined || v === null || isNaN(v)) return '—'
   return v.toFixed(digits)
 }
 

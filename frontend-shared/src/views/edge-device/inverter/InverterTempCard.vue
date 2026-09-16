@@ -114,7 +114,7 @@ function tempClass(v: any): string {
 }
 
 function formatTemp(v: any): string {
-  if (v === undefined || v === null || isNaN(v)) return '--'
+  if (v === undefined || v === null || isNaN(v)) return '—'
   return `${Number(v).toFixed(1)}°C`
 }
 </script>

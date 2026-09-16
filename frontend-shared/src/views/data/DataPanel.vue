@@ -93,6 +93,7 @@
           <span>实时数据</span>
           <el-switch
             v-model="realtimeEnabled"
+            aria-label="实时数据开关"
             active-text="开启"
             inactive-text="关闭"
             @change="toggleRealtime"

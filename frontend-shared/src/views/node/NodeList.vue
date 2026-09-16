@@ -195,7 +195,7 @@
         
         <el-table-column prop="firmware_version" label="固件" width="100">
           <template #default="{ row }">
-            <el-tag size="small">{{ row.firmware_version || '-' }}</el-tag>
+            <el-tag size="small">{{ row.firmware_version || UNKNOWN }}</el-tag>
           </template>
         </el-table-column>
         
@@ -287,6 +287,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { useNodeStore } from '@/stores/node'
 import type { NodeListParams } from '@/api/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -520,14 +521,14 @@ const handleDelete = async (row: any) => {
     }
   } catch (error: any) {
     if (error !== 'cancel' && !deleted) {
-      feedback.handleError(error, '删除失败')
+      feedback.handleErrorWithContext(error, '删除节点失败')
     }
   }
 }
 
 // 工具函数
 const formatRelativeTime = (time: string) => {
-  if (!time) return '-'
+  if (!time) return UNKNOWN
   const now = new Date()
   const date = new Date(time)
   const diff = now.getTime() - date.getTime()

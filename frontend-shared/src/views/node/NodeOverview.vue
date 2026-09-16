@@ -27,7 +27,12 @@
         <div class="ph-left">
           <div class="ph-title-row">
             <h1 class="ph-title">{{ pageTitle }}</h1>
-            <el-icon :size="16" class="ph-edit" @click="renameVisible = true"><EditPen /></el-icon>
+            <button
+              type="button"
+              class="ph-edit"
+              :aria-label="`重命名节点 ${node.node_id}`"
+              @click="renameVisible = true"
+            ><el-icon :size="16"><EditPen /></el-icon></button>
             <span class="badge" :class="nodeOnline ? 'badge-green' : 'badge-gray'">
               <span class="dot" :class="nodeOnline ? 'dot-green' : 'dot-gray'"></span>{{ nodeOnline ? '在线' : '离线' }}
             </span>
@@ -44,7 +49,12 @@
           </div>
           <div class="ph-id">
             设备ID: {{ node.node_id }}
-            <el-icon :size="13" class="copy-icon" @click="copyId"><CopyDocument /></el-icon>
+            <button
+              type="button"
+              class="copy-icon"
+              :aria-label="`复制设备 ID ${node.node_id}`"
+              @click="copyId"
+            ><el-icon :size="13"><CopyDocument /></el-icon></button>
           </div>
         </div>
         <div class="ph-actions">
@@ -144,8 +154,8 @@
           </div>
           <div class="info-grid">
             <div class="info-col">
-              <div class="info-row"><span class="info-label">节点名称</span><span class="info-val">{{ node.name || UNKNOWN }} <el-icon :size="12" class="mini-edit" @click="renameVisible = true"><EditPen /></el-icon></span></div>
-              <div class="info-row"><span class="info-label">设备 ID</span><span class="info-val mono">{{ node.node_id }} <el-icon :size="12" class="mini-edit" @click="copyId"><CopyDocument /></el-icon></span></div>
+              <div class="info-row"><span class="info-label">节点名称</span><span class="info-val">{{ node.name || UNKNOWN }} <button type="button" class="mini-edit" :aria-label="`重命名节点 ${node.node_id}`" @click="renameVisible = true"><el-icon :size="12"><EditPen /></el-icon></button></span></div>
+              <div class="info-row"><span class="info-label">设备 ID</span><span class="info-val mono">{{ node.node_id }} <button type="button" class="mini-edit" :aria-label="`复制设备 ID ${node.node_id}`" @click="copyId"><el-icon :size="12"><CopyDocument /></el-icon></button></span></div>
               <div class="info-row"><span class="info-label">型号</span><span class="info-val">{{ node.model || UNKNOWN }}</span></div>
               <div class="info-row"><span class="info-label">固件版本</span><span class="info-val">{{ node.firmware_version || UNKNOWN }}</span></div>
               <div class="info-row">
@@ -220,7 +230,7 @@
         <div class="card events-card">
           <div class="card-head">
             <span class="card-title">最近事件</span>
-            <span class="card-link" @click="eventsVisible = true">查看全部</span>
+            <button type="button" class="card-link" @click="eventsVisible = true">查看全部</button>
           </div>
           <div v-if="eventsLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
           <div v-else-if="nodeEvents.length === 0" class="card-empty">暂无事件</div>
@@ -342,6 +352,7 @@
                           <span v-if="resource.enabled === false || !busSupportsDma" class="dma-na">—</span>
                           <el-switch
                             v-else
+                            :aria-label="`${resource.id} 的 DMA 绑定开关`"
                             :model-value="resourceDmaBinding(resource)?.bound_to ? true : false"
                             size="small"
                             :disabled="nodeOffline || !canToggleResourceDma(resource)"
@@ -1504,7 +1515,8 @@ async function saveRename() {
     renameVisible.value = false
     ElMessage.success('设备名称已更新')
   } catch (err: any) {
-    feedback.handleError(err, '保存失败')
+    // 同文件上方 DMA 保存已写明对象（「DMA 配置保存失败」），此处也应写明是重命名。
+    feedback.handleErrorWithContext(err, '重命名设备失败')
   } finally {
     renameSaving.value = false
   }
@@ -1622,6 +1634,10 @@ onUnmounted(() => {
      与其余 --no-* 同族；并补暗色覆盖，使其真正随主题变化（修复前亮暗计算色完全相同）。 */
   --no-accent: #8B5CF6;
   --no-accent-bg: rgba(139, 92, 246, 0.1);
+  /* I-4 残留清零：三处此前直接写死的色值收进页面级 token（与 --no-* 同族），
+     并补暗色覆盖 —— 它们原本在暗色下**仍取亮色值**，属于真缺陷而非风格问题。 */
+  --no-dot-off: #C9D2DE; /* 离线圆点/通道箭头（原 #C9D2DE 写死两处） */
+  --no-warning-border: #FCD98C; /* 总线告警条描边（原 #FCD98C 写死） */
   color: var(--no-text);
   font-size: 13px;
   line-height: 20px;
@@ -1655,6 +1671,9 @@ html.dark .node-overview-page {
      底纹同步提高不透明度（与既有 --no-success-bg/--no-warning-bg 的暗色处理一致）。 */
   --no-accent: #A78BFA;
   --no-accent-bg: rgba(167, 139, 250, 0.16);
+  /* I-4：上面两个亮色 token 的暗色档。离线圆点/描边在深色底上需提亮才可见。 */
+  --no-dot-off: #4A5568;
+  --no-warning-border: rgba(245, 158, 11, 0.45);
 }
 
 .no-breadcrumb { margin-bottom: 12px; }
@@ -1668,14 +1687,18 @@ html.dark .node-overview-page {
 }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
 .dot-green { background: var(--no-success); }
-.dot-gray { background: #C9D2DE; }
+.dot-gray { background: var(--no-dot-off); }
 
 /* ── 页头 ── */
 .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 16px; }
 .ph-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .ph-title { font-size: 20px; font-weight: 600; margin: 0; line-height: 28px; }
-.ph-edit { color: var(--no-text-muted); cursor: pointer; }
+/* 图标动作入口：<button> 承载（自带焦点与 Enter/Space）。
+   UA 复位是必需的：全站没有裸 button 复位（theme.css 无该选择器，Element Plus 只覆盖
+   .el-button），少了它铅笔会被套上浏览器默认的灰色描边盒子 —— 与改前的纯图标视觉不符。 */
+.ph-edit { display: inline-flex; align-items: center; border: 0; background: transparent; padding: 0; font: inherit; color: var(--no-text-muted); cursor: pointer; }
 .ph-edit:hover { color: var(--no-primary); }
+.ph-edit:focus-visible { outline: 2px solid var(--no-primary); outline-offset: 2px; border-radius: 4px; }
 .badge { font-size: 12px; padding: 2px 10px; border-radius: 11px; display: inline-flex; align-items: center; gap: 5px; }
 .badge-green { background: var(--no-success-bg); color: var(--no-success-text); }
 .badge-gray { background: var(--no-chip-off-bg); color: var(--no-text-muted); }
@@ -1683,7 +1706,7 @@ html.dark .node-overview-page {
 .quality { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--no-text-secondary); }
 .q-val, .q-text { font-weight: 600; }
 .ph-id { margin-top: 8px; font-size: 12px; color: var(--no-text-muted); display: flex; align-items: center; gap: 6px; }
-.copy-icon { cursor: pointer; color: var(--no-text-muted); }
+.copy-icon { display: inline-flex; align-items: center; border: 0; background: transparent; padding: 0; font: inherit; cursor: pointer; color: var(--no-text-muted); }
 .copy-icon:hover { color: var(--no-primary); }
 .ph-actions { display: flex; gap: 12px; flex-wrap: wrap; }
 
@@ -1813,7 +1836,7 @@ html.dark .node-overview-page {
 }
 
 /* 总线配置：双栏资源视图（对齐 designs/new-node-2.png） */
-.bus-alert { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px; margin-bottom: 16px; color: var(--no-text-secondary); background: var(--no-warning-bg); border: 1px solid #FCD98C; border-radius: 6px; font-size: 13px; }
+.bus-alert { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 14px; margin-bottom: 16px; color: var(--no-text-secondary); background: var(--no-warning-bg); border: 1px solid var(--no-warning-border); border-radius: 6px; font-size: 13px; }
 .bus-alert > .el-icon { color: var(--no-warning); }
 .bus-alert-refresh { margin-left: auto; flex: 0 0 auto; font-size: 12px; }
 .bus-alert-offline { background: var(--no-chip-off-bg); border-color: var(--no-border); }
@@ -1929,8 +1952,9 @@ html.dark .node-overview-page {
   padding: 16px 20px 12px; border-bottom: 1px solid var(--no-border-light);
 }
 .card-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }
-.card-link { color: var(--no-primary); font-size: 13px; font-weight: 500; line-height: 20px; cursor: pointer; }
+.card-link { border: 0; background: transparent; padding: 0; font-family: inherit; color: var(--no-primary); font-size: 13px; font-weight: 500; line-height: 20px; cursor: pointer; }
 .card-link:hover { text-decoration: underline; }
+.card-link:focus-visible { outline: 2px solid var(--no-primary); outline-offset: 2px; border-radius: 4px; }
 .card-loading { padding: 12px 20px; }
 .card-empty { padding: 32px 20px; text-align: center; color: var(--no-text-secondary); font-size: 13px; line-height: 20px; }
 
@@ -1943,8 +1967,9 @@ html.dark .node-overview-page {
 .info-val { color: var(--no-text); display: flex; align-items: center; gap: 6px; min-width: 0; }
 .info-val.mono { font-family: ui-monospace, monospace; }
 .info-val.dim { color: var(--no-text-muted); }
-.mini-edit { color: var(--no-text-muted); cursor: pointer; }
+.mini-edit { display: inline-flex; align-items: center; border: 0; background: transparent; padding: 0; font: inherit; color: var(--no-text-muted); cursor: pointer; }
 .mini-edit:hover { color: var(--no-primary); }
+.mini-edit:focus-visible, .copy-icon:focus-visible { outline: 2px solid var(--no-primary); outline-offset: 2px; border-radius: 4px; }
 .qbar { display: inline-block; width: 64px; height: 6px; border-radius: 3px; background: var(--no-border-light); overflow: hidden; flex-shrink: 0; }
 .qbar-fill { display: block; height: 100%; border-radius: 3px; }
 .q-num, .q-good { font-weight: 600; white-space: nowrap; }
@@ -2008,7 +2033,7 @@ html.dark .node-overview-page {
 .cb-ok { color: var(--no-success-text); background: var(--no-success-bg); }
 .cb-warn { color: var(--no-warning-text); background: var(--no-warning-bg); }
 .cb-off { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
-.chan-arrow { color: #C9D2DE; }
+.chan-arrow { color: var(--no-dot-off); }
 
 /* 弹窗 */
 .form-row { margin-bottom: 16px; }

@@ -123,12 +123,12 @@ describe('MainLayout 桌面侧栏键盘可达（roving tabindex）', () => {
     await nextTick()
 
     const items = wrapper.findAll('.sidebar .el-menu-item')
-    // 13 = 12 个既有导航项 + 本轮新增的「通知通道」(/notification-channels)
-    expect(items.length).toBe(13)
+    // 14 = 12 个既有导航项 + 「通知通道」(/notification-channels) + 「投递审计」(/notification-deliveries)
+    expect(items.length).toBe(14)
 
     const tabindexes = items.map((i) => i.attributes('tabindex'))
     expect(tabindexes.filter((t) => t === '0')).toHaveLength(1)
-    expect(tabindexes.filter((t) => t === '-1')).toHaveLength(12)
+    expect(tabindexes.filter((t) => t === '-1')).toHaveLength(13)
   })
 
   it('初始 tab 停靠点是当前激活项（/dashboard）', async () => {

@@ -70,7 +70,13 @@
               @keyup.enter="saveName"
               @keyup.escape="cancelEditName"
             />
-            <el-icon v-if="!editingName" class="edit-icon" @click="startEditName"><Edit /></el-icon>
+            <button
+              v-if="!editingName"
+              type="button"
+              class="edit-icon"
+              :aria-label="`重命名节点 ${collector.name || collector.node_id}`"
+              @click="startEditName"
+            ><el-icon><Edit /></el-icon></button>
             <el-button v-else type="primary" size="small" text @click="saveName">保存</el-button>
             <el-button v-if="editingName" size="small" text @click="cancelEditName">取消</el-button>
           </div>
@@ -82,7 +88,7 @@
           {{ collector.model }}
         </el-descriptions-item>
         <el-descriptions-item label="固件版本">
-          <el-tag type="info" size="small">{{ collector.firmware_version || '-' }}</el-tag>
+          <el-tag type="info" size="small">{{ collector.firmware_version || UNKNOWN }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="状态">
           <StatusBadge :status="collector.status" />
@@ -114,8 +120,8 @@
           {{ formatTime(collector.last_online_time) }}
         </el-descriptions-item>
         <el-descriptions-item label="在线时长">
-          <el-tooltip content="设备离线，暂无数据" placement="top" :disabled="collector.status === 'online' || sessionDuration !== '-'">
-            <span :class="{ 'field-na': sessionDuration === '-' && collector.status !== 'online' }">{{ sessionDuration }}</span>
+          <el-tooltip content="设备离线，暂无数据" placement="top" :disabled="collector.status === 'online' || sessionDuration !== UNKNOWN">
+            <span :class="{ 'field-na': sessionDuration === UNKNOWN && collector.status !== 'online' }">{{ sessionDuration }}</span>
           </el-tooltip>
         </el-descriptions-item>
       </el-descriptions>
@@ -276,16 +282,22 @@
           </el-table-column>
           <el-table-column label="地址" width="70">
             <template #default="{ row }">
-              <code>{{ row.hardware_id || '-' }}</code>
+              <code>{{ row.hardware_id || UNKNOWN }}</code>
             </template>
           </el-table-column>
           <el-table-column label="通道" width="140">
             <template #default="{ row }">
-              <div v-if="getChannelForDevice(row)" class="device-channel-cell" @click="handleEditChannel(getChannelForDevice(row))">
+              <button
+                v-if="getChannelForDevice(row)"
+                type="button"
+                class="device-channel-cell"
+                :aria-label="`编辑 ${row.name} 的通道配置`"
+                @click="handleEditChannel(getChannelForDevice(row))"
+              >
                 <el-tag size="small" type="primary" effect="light">
                   {{ getChannelForDevice(row)?.hardware_type?.toUpperCase() }} {{ getChannelForDevice(row)?.hardware_id }}
                 </el-tag>
-              </div>
+              </button>
               <span v-else class="text-muted">无</span>
             </template>
           </el-table-column>
@@ -365,7 +377,7 @@
           </el-table-column>
           <el-table-column label="完成时间" width="180">
             <template #default="{ row }">
-              {{ row.completed_at ? formatTime(row.completed_at) : '-' }}
+              {{ row.completed_at ? formatTime(row.completed_at) : UNKNOWN }}
             </template>
           </el-table-column>
           <el-table-column label="操作" width="100">
@@ -397,7 +409,7 @@
       @update:visible="showOTADialog = $event"
     />
 
-    <!-- 快速创建边缘设备对话框(预填节点+通道,无需设备模板) -->
+    <!-- 快速创建边缘设备对话框(预填节点+通道,无需设备配置) -->
     <QuickCreateDeviceDialog
       v-model="showQuickCreate"
       :node-id="collector?.node_id || ''"
@@ -423,6 +435,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useResponsive } from '@/composables/useResponsive'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { Upload, Refresh, RefreshRight, Connection, Edit, Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
@@ -502,7 +515,7 @@ const saveName = async () => {
     ElMessage.success('节点名称已更新')
   } catch (error: any) {
     if (sequence !== nameSaveSequence || route.params.id !== targetRouteId || collector.value?.id !== targetId) return
-    feedback.handleError(error, '保存失败')
+    feedback.handleErrorWithContext(error, '重命名节点失败')
   } finally {
     if (sequence === nameSaveSequence && route.params.id === targetRouteId && collector.value?.id === targetId) savingName.value = false
   }
@@ -527,11 +540,11 @@ let sessionTimer: ReturnType<typeof setInterval> | null = null
 
 const sessionDuration = computed(() => {
   const t = collector.value?.last_online_time
-  if (!t || collector.value?.status !== 'online') return '-'
+  if (!t || collector.value?.status !== 'online') return UNKNOWN
   const start = new Date(t).getTime()
-  if (isNaN(start)) return '-'
+  if (isNaN(start)) return UNKNOWN
   const diff = Math.floor((nowTick.value - start) / 1000)
-  if (diff < 0) return '-'
+  if (diff < 0) return UNKNOWN
   const days = Math.floor(diff / 86400)
   const hours = Math.floor((diff % 86400) / 3600)
   const minutes = Math.floor((diff % 3600) / 60)
@@ -541,7 +554,7 @@ const sessionDuration = computed(() => {
   if (hours > 0) parts.push(`${hours}小时`)
   if (minutes > 0) parts.push(`${minutes}分钟`)
   if (seconds > 0 && parts.length === 0) parts.push(`${seconds}秒`)
-  return parts.join(' ') || '-'
+  return parts.join(' ') || UNKNOWN
 })
 
 const collectorId = computed(() => route.params.id as string)
@@ -799,16 +812,16 @@ const handleDeviceClick = (row: any) => {
 }
 
 const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN')
 }
 
 const formatLastData = (data: Record<string, any>): string => {
-  if (!data) return '-'
+  if (!data) return UNKNOWN
   const entries = Object.entries(data).filter(([k]) => k !== 'error_code' && k !== 'raw_data')
-  if (entries.length === 0) return '-'
+  if (entries.length === 0) return UNKNOWN
   // Show up to 3 key=value pairs
   return entries.slice(0, 3).map(([k, v]) => {
     const unit = sensorUnitMap[k] || ''
@@ -997,7 +1010,14 @@ onUnmounted(() => {
   gap: 6px;
 }
 
+/* 重命名入口：<button> 承载（自带焦点与 Enter/Space 激活），保留原 .edit-icon 视觉 */
 .edit-icon {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
   cursor: pointer;
   color: var(--el-text-color-secondary);
   transition: color 0.2s;
@@ -1005,6 +1025,12 @@ onUnmounted(() => {
 
 .edit-icon:hover {
   color: var(--el-color-primary);
+}
+
+.edit-icon:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .text-muted {
@@ -1095,10 +1121,21 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
-/* 关联设备表格中的通道标签 */
+/* 关联设备表格中的通道标签：<button> 承载（自带焦点与 Enter/Space 激活），保留原视觉 */
 .device-channel-cell {
   display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
   cursor: pointer;
+}
+
+.device-channel-cell:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .device-channel-tag {

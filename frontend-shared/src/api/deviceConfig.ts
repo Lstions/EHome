@@ -42,8 +42,17 @@ export interface DeviceConfig {
 }
 
 export interface DeviceConfigListResponse {
-  list: DeviceConfig[]
-  items?: DeviceConfig[]  // 兼容不同响应格式
+  /**
+   * 当前页切片。
+   *
+   * 2026-09-15 方言收敛：后端曾返回 `{list,total,...}`，是全仓 12 个分页端点里
+   * **唯一**的 `list` 方言（其余 11 个都是 `items`）。已统一为 `items`；
+   * 这里**不再保留 `list?` 兜底** —— 留兜底等于允许多套形状并存，
+   * 下次有人改回 `list` 时前端会静默兼容、没人发现。
+   * 后端契约由 `backend/internal/api/handler_device_dialect_test.go` 守住。
+   */
+  items: DeviceConfig[]
+  /** 过滤后的**全量**条数（不是当前页条数）；分页器用它算总页数 */
   total: number
   page: number
   page_size: number
@@ -134,6 +143,6 @@ export const deviceConfigApi = {
       '/api/v1/device-configs',
       { params: { device_type: deviceType, page_size: 100 } }
     )
-    return response.data.list
+    return response.data.items
   }
 }

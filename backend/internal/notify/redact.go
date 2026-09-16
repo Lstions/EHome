@@ -12,10 +12,17 @@ import (
 // 没有实现, 这里是唯一一处, 所有出站相关文案都必须过这两个函数。
 
 // RedactedPlaceholder 与前端 stripToken 的 "***" 保持一致。
+//
+// models 包另有一份同值常量 models.RedactedPlaceholder（两份实现的原因见 RedactURL）。
+// 两侧的值必须逐字节相同，由 TestRedactTargetURLMatchesNotify 断言 —— 改这里就要跑它。
 const RedactedPlaceholder = "***"
 
 // sensitiveQueryKeys 是必须脱敏的查询参数名 (大小写不敏感, 覆盖企业微信 key、
 // OneBot access_token、通用 webhook 的 token/sign 等常见写法)。
+//
+// models 包有一张**必须逐键一致**的同名表（models/notification_channel.go）。
+// 表比它短就是泄露面: notify 认 pwd 而 models 不认时, ?pwd=SECRET 会在 API
+// 响应里原样回显。TestRedactTargetURLMatchesNotify 会逐键对拍这两张表。
 var sensitiveQueryKeys = map[string]bool{
 	"key": true, "token": true, "access_token": true, "accesstoken": true,
 	"secret": true, "password": true, "passwd": true, "pwd": true,
@@ -26,6 +33,7 @@ var sensitiveQueryKeys = map[string]bool{
 // redactURLRe 兜底匹配任何形态 URL 里的敏感查询参数 (含裸 query 串与
 // net/http 错误文案里被引号包住的 URL)。
 // 目标串: key=..., token=..., access_token=... 等, 值到 &/#/空白/引号为止。
+// models 包有一份等价副本, 两侧必须同步 (见下方 RedactURL 的说明)。
 var redactURLRe = regexp.MustCompile("(?i)\\b(key|token|access_?token|secret|password|passwd|pwd|sign|signature|sig|api_?key|app_?key|app_?secret|auth|authorization)=([^&\\s\"'#]+)")
 
 // redactHeaderRe 兜底匹配 header 形态的凭据 (Authorization: xxx / X-Api-Key: xxx)。
@@ -49,6 +57,14 @@ func RedactText(text string) string {
 
 // RedactURL 脱敏 URL 中的敏感查询参数与用户凭据。
 // 解析失败时回退到正则脱敏 (绝不原样返回)。
+//
+// 契约: 对任意输入, RedactURL(x) 与 models.RedactTargetURL(x) **逐字节相同**。
+// models 不能 import notify (notify 依赖 models, 反向即 import 环), 所以那份
+// 实现是同构副本而非封装; 这个等式由本包的 TestRedactTargetURLMatchesNotify
+// 守护 —— 它**只能放在本包**, 因为 models 侧的测试文件 import notify 会在
+// 编译期就失败。
+//
+// 改本函数 (含上面的三张正则与两张参数名表) 必须同步改 models 侧, 并跑那条测试。
 func RedactURL(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""

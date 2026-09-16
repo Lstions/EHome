@@ -314,7 +314,12 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		var req struct {
 			HardwareID string `json:"hardware_id"`
 		}
-		c.ShouldBindJSON(&req)
+		// P1-B: a discarded bind error answered "scan triggered" for a request
+		// whose hardware_id was never read.
+		if err := c.ShouldBindJSON(&req); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		// NOTE: requires MQTT broadcast I2C_SCAN to node firmware
 		Success(c, gin.H{
 			"devices": []string{}, "request_id": fmt.Sprintf("i2c-%s-%d", node.NodeID, time.Now().Unix()),

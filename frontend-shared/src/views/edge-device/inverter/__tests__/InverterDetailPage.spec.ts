@@ -203,15 +203,15 @@ describe('InverterDetailPage', () => {
     }
   })
 
-  it('renders -- placeholders and zero power when latestData is null', () => {
+  it('renders — placeholders and zero power when latestData is null', () => {
     hoisted.state.device.value = { id: 1, name: 'x', device_type: 'inverter', status: 'offline' }
     const wrapper = mount(InverterDetailPage, { global: globalOptions })
     const cards = wrapper.findAllComponents(MetricStatCard)
     expect(cards).toHaveLength(4)
     expect(cards[0].props('value')).toBe('0W')
-    expect(cards[1].props('value')).toBe('--')
-    expect(cards[2].props('value')).toBe('--')
-    expect(cards[2].props('subText')).toBe('--Hz')
+    expect(cards[1].props('value')).toBe('—')
+    expect(cards[2].props('value')).toBe('—')
+    expect(cards[2].props('subText')).toBe('—Hz')
     expect(cards[3].props('value')).toBe('0W')
     expect(wrapper.findComponent(InverterPowerFlow).props('pvPower')).toBe(0)
     expect(wrapper.findComponent(InverterMpptCard).props('data')).toBeNull()

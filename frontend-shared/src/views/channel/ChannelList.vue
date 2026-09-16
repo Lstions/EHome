@@ -146,8 +146,13 @@
       <el-table-column label="启用状态" width="110" align="center">
         <template #default="{ row }">
           <div class="status-cell">
+            <!-- 这里是**只读状态指示**（disabled），但依然需要可访问名：
+                 screen reader 对 disabled 开关仍会读出"开关，关/开"，
+                 没有名字时用户不知道它在说哪个通道的状态。
+                 真实开关在通道详情/编辑里，故文案标明"状态"。 -->
             <el-switch
               :model-value="row.enabled"
+              :aria-label="`${asChannel(row).name} 启用状态`"
               size="small"
               disabled
             />

@@ -272,7 +272,9 @@ const handleInitialize = async (request: InitializeRequest) => {
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
+  /* 审计 #17：品牌渐变走 token（--login-bg-gradient，亮暗同值是由设计决定的）。
+     fallback 保留原字面量，仅在 token 层缺失时生效 —— 与 F16 侧栏渐变同一形态。 */
+  background: var(--login-bg-gradient, linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%));
   overflow: hidden;
   position: relative;
 }
@@ -397,7 +399,8 @@ const handleInitialize = async (request: InitializeRequest) => {
   align-items: center;
   justify-content: center;
   gap: 24px;
-  background: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
+  /* 同 --login-bg-gradient（#17）：过渡层与登录页共享同一品牌底，避免两处各写一份。 */
+  background: var(--login-bg-gradient, linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%));
 }
 .login-transition__logo {
   width: 72px;

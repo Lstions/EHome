@@ -168,6 +168,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { Upload, Edit, Download, Delete, CopyDocument, CircleCheckFilled } from '@element-plus/icons-vue'
 import { ElMessage, type UploadInstance, type UploadProps } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { firmwareApi, type Firmware } from '@/api/firmware'
@@ -302,7 +303,7 @@ const handleEditSubmit = async () => {
     ElMessage.success('更新成功')
     showEditDialog.value = false
   } catch (error: any) {
-    feedback.handleError(error, '更新失败')
+    feedback.handleErrorWithContext(error, '更新固件信息失败')
   } finally {
     editing.value = false
   }
@@ -394,7 +395,7 @@ const resetUploadForm = () => {
 }
 
 const formatFileSize = (bytes: number | undefined | null) => {
-  if (!bytes && bytes !== 0) return '-'
+  if (!bytes && bytes !== 0) return UNKNOWN
   if (bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB']
@@ -403,9 +404,9 @@ const formatFileSize = (bytes: number | undefined | null) => {
 }
 
 const formatTime = (time: string | null | undefined) => {
-  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return '-'
+  if (!time || time === '0001-01-01T00:00:00Z' || time === '1970-01-01T00:00:00Z') return UNKNOWN
   const date = new Date(time)
-  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return '-'
+  if (isNaN(date.getTime()) || date.getFullYear() <= 1970) return UNKNOWN
   return date.toLocaleString('zh-CN')
 }
 

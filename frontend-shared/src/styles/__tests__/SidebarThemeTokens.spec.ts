@@ -258,3 +258,44 @@ describe('F16 侧栏主题 token 合同', () => {
     expect(missing, '侧栏引用了 theme.css 未定义的 token，var() 将永远走 fallback：' + missing.join(', ')).toEqual([])
   })
 })
+
+/**
+ * 审计报告 #17（D4，低）：登录页品牌背景渐变硬编码。
+ *
+ * 与 F16 同一形态、同一判据口径：**直接把 linear-gradient 写在声明里**是缺陷，
+ * 而 `var(--token, linear-gradient(...))` 是"token 优先 + 缺失时降级"的纵深防御 ——
+ * F16 自己就是这么落地的（MainLayout.vue:785），其护栏也只禁前者（见上方 not.toMatch）。
+ * 所以这里沿用同一口径，而不是要求字面量为零：**要求字面量从"唯一来源"降级为"fallback"**。
+ */
+describe('审计 #17 登录页品牌渐变 token 合同', () => {
+  const loginSource = readFileSync(resolve(process.cwd(), 'src/views/auth/Login.vue'), 'utf8')
+
+  it('解析有效（防止读错文件导致的假绿）', () => {
+    expect(loginSource).toContain('.login-container')
+    expect(loginSource).toContain('.login-transition')
+  })
+
+  it('--login-bg-gradient 在亮/暗两套都有定义', () => {
+    expect(light.has('--login-bg-gradient'), '亮色缺少 --login-bg-gradient').toBe(true)
+    expect(dark.has('--login-bg-gradient'), '暗色缺少 --login-bg-gradient').toBe(true)
+  })
+
+  it('登录页两处背景都消费 --login-bg-gradient（#17 核心）', () => {
+    for (const sel of ['.login-container {', '.login-transition {']) {
+      const b = block(loginSource, sel)
+      expect(b, sel + ' 未接线到 --login-bg-gradient').toMatch(/background:[ \t]*var\(--login-bg-gradient/)
+      // 裸硬编码仍属违规（与 F16 护栏同口径）
+      expect(b, sel + ' 仍把 linear-gradient 当作唯一来源').not.toMatch(
+        /background:[ \t]*linear-gradient\(135deg, #1a1f2e/,
+      )
+    }
+  })
+
+  it('亮/暗两套 --login-bg-gradient 同值是有意设计（须与注释一致，不是漏做暗色）', () => {
+    // 设计上登录页在所有主题下都保持深色品牌底：**同值是期望**，
+    // 但必须有人写明理由（theme.css 的两处注释），否则下一个人会以为漏了暗色适配。
+    expect(light.get('--login-bg-gradient')).toBe(dark.get('--login-bg-gradient'))
+    expect(themeCss).toContain('--login-bg-gradient')
+    expect(loginSource).toContain('#17')
+  })
+})

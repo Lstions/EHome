@@ -121,9 +121,10 @@ export const parserApi = {
     let dbParsers: Parser[] = []
     let dbError: unknown = null
     try {
-      // 后端统一 envelope: {code, data: {list, total, ...}, message}
-      const response = await client.get<unknown, ApiEnvelope<{ list?: unknown[] }>>('/api/v1/device-configs', { params: { status: 'active' } })
-      const drivers = response.data?.list
+      // 后端统一 envelope: {code, data: {items, total, ...}, message}
+      // 2026-09-15 方言收敛：该端点曾返回 `list`，已统一为 `items`。
+      const response = await client.get<unknown, ApiEnvelope<{ items?: unknown[] }>>('/api/v1/device-configs', { params: { status: 'active' } })
+      const drivers = response.data?.items
       dbParsers = (Array.isArray(drivers) ? drivers : []).map(normalizeParser)
     } catch (error) {
       dbError = error

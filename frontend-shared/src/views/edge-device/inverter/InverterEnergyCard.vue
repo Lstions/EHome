@@ -38,7 +38,7 @@ const energyItems = computed(() => [
 ])
 
 function formatEnergy(v: any): string {
-  if (v === undefined || v === null || isNaN(v)) return '--'
+  if (v === undefined || v === null || isNaN(v)) return '—'
   const num = Number(v)
   if (num >= 10000) return num.toFixed(0)
   if (num >= 100) return num.toFixed(1)

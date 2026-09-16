@@ -10,8 +10,12 @@
 package catalog
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"regexp"
 	"sort"
+	"strings"
 
 	"ehome/backend/simulation/harness"
 )
@@ -146,6 +150,178 @@ func simCountRows(e *harness.Env, query string, args ...any) int64 {
 		e.Fatalf("计数查询失败 (%s): %v", query, err)
 	}
 	return count
+}
+
+// simHead 截断长文本用于失败信息，避免刷屏。
+//
+// 为什么放在 catalog.go 而不是各域各写一份：失败信息必须一致地带上
+// 「端点 + 原始 data 前缀」，否则同一个解析缺陷在不同域会呈现成不同形态的
+// 噪音。历史上 auto.go / rt.go 各有一份等价实现（autoHead / rtHead），
+// 本助手是它们的跨域收敛点。
+func simHead(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(截断)"
+}
+
+// simEnvelopePage 是分页端点的 data 段形状（架构评估 P1.2 裁决：items + total）。
+//
+// 为什么用泛型：列表元素类型各域不同（autoEventRow / nodeDetail / edgeDeviceRow ...），
+// 但信封外层形状完全一致。泛型让"形状"只有一处定义，下一个端点改形状时
+// 只需改这里，而不是满地改解析调用点。
+type simEnvelopePage[T any] struct {
+	Items    []T   `json:"items"`
+	Total    int64 `json:"total"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+}
+
+// simPageEnvelope 解析**已分页**端点的 data 段，返回完整信封（含 total）。
+//
+// 契约（不可放宽）：只接受 {"items":[...], ...} 信封，收到裸数组必须**显式失败**。
+//
+// 为什么刻意**不**同时兼容裸数组（这是本缺陷的加固核心）：
+// 本仓库刚发生过一次真实事故 —— 端点从裸数组改为 {items,total} 信封后，
+// 场景侧的 json.Unmarshal 仍按裸数组解析，失败信息被 Eventually 吞成
+// 「等待超时」，于是大批场景变红而无人知道真正原因。若这里同时接受两种形状，
+// 端点**悄悄改回裸数组**（或改成第三种形状）时会再次退化成静默：解析"成功"、
+// 但 total / 分页语义已经丢失，断言照常通过却不再验证真实契约。
+// 只接受信封 + 明确报错，才能让"形状漂移"在第一次运行时立刻炸响。
+//
+// 失败信息必须包含：端点路径、期望形状、真实错误、原始 data 前缀。
+func simPageEnvelope[T any](r *harness.Response, path string) (*simEnvelopePage[T], error) {
+	if r.Status != http.StatusOK {
+		return nil, fmt.Errorf("GET %s 返回 %d（期望 200）: %s", path, r.Status, r.BodyString())
+	}
+	trimmed := strings.TrimSpace(string(r.Data))
+	if strings.HasPrefix(trimmed, "[") {
+		return nil, fmt.Errorf("GET %s 的 data 是**裸数组**，但该端点的契约是分页信封 "+
+			"{items,total,page,page_size}。端点形状已漂移（或回退）——按契约只能解析信封，"+
+			"不接受裸数组。请核对 handler 源码后同步本解析：data=%s", path, simHead(trimmed, 200))
+	}
+	var page simEnvelopePage[T]
+	if err := json.Unmarshal(r.Data, &page); err != nil {
+		return nil, fmt.Errorf("解析 GET %s 的分页信封失败: %w（期望 {items,total,page,page_size}，data=%s）",
+			path, err, simHead(trimmed, 200))
+	}
+	if page.Items == nil {
+		// items 缺失与 items 为空数组是两件事：前者是形状漂移（例如被改名为
+		// 旧方言 list），后者是合法的空集。绝不用"空列表"兜底掩盖前者。
+		return nil, fmt.Errorf("GET %s 的分页信封缺少 items 字段（可能是被改名为旧方言 list，或形状漂移）：data=%s",
+			path, simHead(trimmed, 200))
+	}
+	return &page, nil
+}
+
+// simPageItems 解析**已分页**端点的 data 段，返回第一页的 items 与错误。
+//
+// 非致命版本：供 Eventually 的轮询闭包做条件使用（轮询期间"数据还没到"
+// 是正常状态，不是断言失败）。契约与 simPageEnvelope 完全一致。
+func simPageItems[T any](r *harness.Response, path string) ([]T, error) {
+	page, err := simPageEnvelope[T](r, path)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
+// simPageAll 跟随 total 读**全部分页**，返回过滤后的完整集合。
+//
+// 为什么必须有它（而不是只读第一页）：a96afda5 / ffdec935 / ea9ce296 给这些端点
+// 接上真分页后，服务端默认 page_size=20。场景断言的语义是"该过滤条件下的**全部**
+// 事件/节点"（例如"停用期间没有新增事件"是与全量条数比较），只读第一页会把断言
+// 悄悄缩小到最近 20 条 —— 那是比形状漂移更隐蔽的假绿：条数少时照样通过，条数多时
+// 结论错误。更直接的一例：SIM-RT-003 拿 GET /nodes 的**全长**与 /overview 的总数比对，
+// 一次完整运行有 100+ 个节点，只读 20 条必然误报。
+//
+// 停止条件：累计条数 >= total，或某页不足一页（total 在读取期间增长时的兜底）。
+// 页数上限用于防止"边读边写"导致的不收敛；触顶即**显式失败**，绝不静默截断。
+func simPageAll[T any](e *harness.Env, base, query string) ([]T, error) {
+	e.T.Helper()
+	const (
+		pageSize = 200 // 服务端上限（handler 里 [1,200] 之外归 20）
+		maxPages = 100 // 20000 条；触顶说明过滤条件没有收窄，属于场景自身的问题
+	)
+	separator := "?"
+	if strings.Contains(query, "?") {
+		separator = "&"
+	}
+	var all []T
+	for page := 1; page <= maxPages; page++ {
+		path := fmt.Sprintf("%s%s%spage=%d&page_size=%d", base, query, separator, page, pageSize)
+		envelope, err := simPageEnvelope[T](e.Admin.Get(path), path)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, envelope.Items...)
+		if int64(len(all)) >= envelope.Total || len(envelope.Items) < pageSize {
+			return all, nil
+		}
+	}
+	return nil, fmt.Errorf("GET %s%s 的分页结果超过 %d 页仍未收敛（total 可能在读取期间持续增长）；"+
+		"请收窄过滤条件，不要静默截断", base, query, maxPages)
+}
+
+// simListAll 读**已分页**端点的全部页并返回 items，失败即终止场景。
+func simListAll[T any](e *harness.Env, base, query string) []T {
+	e.T.Helper()
+	items, err := simPageAll[T](e, base, query)
+	if err != nil {
+		e.Fatalf("%v", err)
+	}
+	return items
+}
+
+// simDecodePage 解析**已分页**端点的 data 段（只取当前页），失败即终止场景。
+func simDecodePage[T any](e *harness.Env, r *harness.Response, path string) []T {
+	e.T.Helper()
+	items, err := simPageItems[T](r, path)
+	if err != nil {
+		e.Fatalf("%v", err)
+	}
+	return items
+}
+
+// simListGet 发一次 GET 并解析**已分页**端点信封的当前页，返回 items。
+func simListGet[T any](e *harness.Env, path string) []T {
+	e.T.Helper()
+	return simDecodePage[T](e, e.Admin.Get(path), path)
+}
+
+// simBareListItems 解析**契约就是裸数组**的端点，返回 (rows, error)。
+//
+// 非致命版本，理由同 simPageItems。
+func simBareListItems[T any](r *harness.Response, path string) ([]T, error) {
+	if r.Status != http.StatusOK {
+		return nil, fmt.Errorf("GET %s 返回 %d（期望 200）: %s", path, r.Status, r.BodyString())
+	}
+	var rows []T
+	if err := json.Unmarshal(r.Data, &rows); err != nil {
+		return nil, fmt.Errorf("解析 GET %s 失败（该端点的契约是**裸数组**）: %w（data=%s）",
+			path, err, simHead(string(r.Data), 200))
+	}
+	return rows, nil
+}
+
+// simBareListGet 发一次 GET 并解析**契约就是裸数组**的端点，返回行，失败即终止场景。
+//
+// 它与 simListGet（分页信封）并存不是冗余：把"该端点没有分页"这一产品事实
+// **显式写在调用点**，下一个读者不必再去翻 handler 源码判断。反过来，
+// 若端点被改成信封，simBareListItems 会因为「object into slice」立刻失败
+// 并打印端点路径 —— 形状往任何方向漂移都会响。
+//
+// 命名用 sim 前缀（门禁 8）：它要被多个域调用，只能住在 catalog.go。
+func simBareListGet[T any](e *harness.Env, path string) []T {
+	e.T.Helper()
+	rows, err := simBareListItems[T](e.Admin.Get(path), path)
+	if err != nil {
+		e.Fatalf("%v", err)
+	}
+	return rows
 }
 
 // DomainOf 从场景 ID 中解析域段（"SIM-NODE-003" → "NODE"）。

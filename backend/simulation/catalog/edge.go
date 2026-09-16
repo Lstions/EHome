@@ -162,9 +162,11 @@ func edgeRun002(e *harness.Env) {
 		IntervalMs: 7000,
 	})
 
-	byNode := e.Admin.Get("/api/v1/edge-devices?node_id=" + fx.NodeID).Expect(http.StatusOK)
-	var rows []edgeDeviceRow
-	byNode.Decode(&rows)
+	// 端点形状：**分页信封** {items,total,page,page_size}
+	// （handler_edge_device.go:166-296，提交 ffdec935 改）。此处按 node_id 过滤后
+	// 本场景只有 1 台设备，读当前页即可。
+	byNodeFilter := "?node_id=" + fx.NodeID
+	rows := simListGet[edgeDeviceRow](e, "/api/v1/edge-devices"+byNodeFilter)
 	e.Evidence("SIM-EDGE-002.list_by_node", rows)
 
 	var hit *edgeDeviceRow
@@ -198,10 +200,9 @@ func edgeRun002(e *harness.Env) {
 	}
 
 	// 列表页的筛选条件（型号 + 状态）同样必须命中。
-	filtered := e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices?node_id=%s&device_type=%s&status=active",
-		fx.NodeID, fx.Type)).Expect(http.StatusOK)
-	var active []edgeDeviceRow
-	filtered.Decode(&active)
+	filterPath := fmt.Sprintf("/api/v1/edge-devices?node_id=%s&device_type=%s&status=active",
+		fx.NodeID, fx.Type)
+	active := simListGet[edgeDeviceRow](e, filterPath)
 	found := false
 	for _, row := range active {
 		if row.ID == fx.EdgeDeviceID {
@@ -268,9 +269,10 @@ func edgeRun003(e *harness.Env) {
 
 	// 不变量：两次被拒之后，节点下仍然只有本场景创建的那一台设备，
 	// 拒绝必须是真的没有落库（不能"报错但建了"）。
-	list := e.Admin.Get("/api/v1/edge-devices?node_id=" + fx.NodeID).Expect(http.StatusOK)
-	var rows []edgeDeviceRow
-	list.Decode(&rows)
+	// 端点形状：**分页信封**（handler_edge_device.go:166-296）。
+	// 断言"节点下只有本场景这一台"看的是过滤后的**全量**，因此读全部页：
+	// 只读第一页会让"被拒的创建留下残留设备"这类断言在设备多时失效。
+	rows := simListAll[edgeDeviceRow](e, "/api/v1/edge-devices", "?node_id="+fx.NodeID)
 	if len(rows) != 1 || rows[0].ID != fx.EdgeDeviceID {
 		t.Fatalf("被拒的两次创建留下了残留设备：%+v", rows)
 	}
@@ -447,12 +449,14 @@ func edgeRun006(e *harness.Env) {
 
 	// 不变量：管理列表里目标存在，两个来源都挂在目标之下（可追溯）。
 	// 注意 /logical-devices 没有单资源 GET，只能经列表读取。
-	list := e.Admin.Get("/api/v1/logical-devices").Expect(http.StatusOK)
-	var devices struct {
-		Items []edgeLogicalDeviceRow `json:"items"`
-		Total int                    `json:"total"`
-	}
-	list.Decode(&devices)
+	//
+	// 端点形状：**分页信封** {items,total,page,page_size}
+	// （handler_logical_device.go:25-99，提交 a96afda5 追加 page/page_size）。
+	// 本场景建的两个来源已被软删、目标刚建：默认 page_size=20 下这三条
+	// 未必落在第一页，因此读**全部页**而不是只读当前页。
+	devices := struct {
+		Items []edgeLogicalDeviceRow
+	}{Items: simListAll[edgeLogicalDeviceRow](e, "/api/v1/logical-devices", "")}
 
 	var target, sourceA, sourceB *edgeLogicalDeviceRow
 	for i := range devices.Items {

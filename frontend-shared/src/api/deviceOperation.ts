@@ -24,6 +24,15 @@ export function newIdempotencyKey(): string {
 export const deviceOperationApi = {
   actions: async (id: number) => unwrap<EffectiveAction[]>(await client.get<unknown, ApiEnvelope<EffectiveAction[]>>(`/api/v1/edge-devices/${id}/actions`)),
   list: async (id: number) => unwrap<DeviceOperation[]>(await client.get<unknown, ApiEnvelope<DeviceOperation[]>>(`/api/v1/edge-devices/${id}/operations`)),
+  /**
+   * 按 command_id 查单次执行（handler_device_operation.go:113 `GET /device-operations/:execution_id`）。
+   *
+   * 为什么需要它：自动化事件表只持久化 command_id（不带设备定位信息），
+   * 用户点那个 ID 时唯一能回答"这条命令后来怎么样"的入口就是本端点。
+   * 404 表示执行记录不存在（可能已被保留期清理）—— 调用方必须显式告知用户，
+   * 不得静默当成"没有数据"（本仓 F18 的 console.log 占位就是这么错的）。
+   */
+  get: async (commandId: string) => unwrap<DeviceOperation>(await client.get<unknown, ApiEnvelope<DeviceOperation>>(`/api/v1/device-operations/${encodeURIComponent(commandId)}`)),
   async create(id: number, actionId: string, params: Record<string, unknown> = {}, confirmationToken = '', reason = '', idempotencyKey = newIdempotencyKey()): Promise<DeviceOperation> {
     const request = () => client.post<unknown, ApiEnvelope<{ execution: DeviceOperation }>>(`/api/v1/edge-devices/${id}/operations`, { action_id: actionId, params, confirmation_token: confirmationToken, reason }, { headers: { 'Idempotency-Key': idempotencyKey } })
     try {

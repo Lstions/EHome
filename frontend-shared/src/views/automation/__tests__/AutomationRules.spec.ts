@@ -7,6 +7,7 @@ import AutomationRules from '../AutomationRules.vue'
 import source from '../AutomationRules.vue?raw'
 import { automationApi, type AutomationEvent, type AutomationEventPage } from '@/api/automation'
 import { edgeDeviceApi } from '@/api/edgeDevice'
+import { deviceOperationApi } from '@/api/deviceOperation'
 
 /**
  * 样式契约辅助：用 @vue/compiler-sfc 真实编译 <style scoped>（复现构建期的
@@ -74,6 +75,11 @@ vi.mock('@/api/edgeDevice', () => ({
     getList: vi.fn(),
   },
 }))
+// F18 命令回链：页面现在会**真实查询**执行记录（不再是 console.log 占位），
+// 因此必须 mock 该 api，否则点击会打到真实 axios。
+vi.mock('@/api/deviceOperation', () => ({
+  deviceOperationApi: { get: vi.fn() },
+}))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
   return {
@@ -85,6 +91,20 @@ vi.mock('element-plus', async importOriginal => {
 
 const mockedAutomationApi = vi.mocked(automationApi)
 const mockedEdgeApi = vi.mocked(edgeDeviceApi)
+const mockedOperationApi = vi.mocked(deviceOperationApi)
+
+/** 一次成功执行的执行记录（GET /device-operations/:id 的响应形状）。 */
+const operationFixture = {
+  command_id: 'cmd-001',
+  edge_device_id: 7,
+  node_id: 'node-1',
+  action_id: 'open_window',
+  action_version: 2,
+  status: 'SUCCEEDED' as const,
+  created_at: '2026-09-15T10:00:00Z',
+  updated_at: '2026-09-15T10:00:03Z',
+  completed_at: '2026-09-15T10:00:03Z',
+}
 
 const ruleFixture = {
   id: 1,
@@ -329,6 +349,52 @@ describe('AutomationRules.vue', () => {
     await delBtn!.trigger('click')
     await flushPromises()
     expect(mockedAutomationApi.deleteRule).not.toHaveBeenCalled()
+  })
+
+  /**
+   * F18 命令 ID 回链：此前是 `console.log` 占位 —— 用户点了**没有任何反馈**，
+   * 是"伪装成正常"家族（动作被吞掉）。修复后必须**真实查询**并展示终态。
+   *
+   * 判据取"API 参数 + 可见结果"两条，而不是"弹窗打开了"：
+   * 后者在旧的 console.log 版本里同样为假（弹窗压根没实现），却容易被写成恒真断言。
+   */
+  it('F18：点击命令 ID 会真实查询该次执行并展示状态（不再是 console.log 占位）', async () => {
+    mockedOperationApi.get.mockResolvedValueOnce(operationFixture)
+    const wrapper = await mountWithSlotTable()
+
+    const cmdBtn = wrapper.findAll('button').find(b => b.text().includes('cmd-001'))
+    expect(cmdBtn, '命令 ID 应当是可点击的回链（否则用户无法追查这条命令）').toBeTruthy()
+    await cmdBtn!.trigger('click')
+    await flushPromises()
+
+    // ① 真的按命令 ID 查了后端（本地 console.log 不会有这次调用）
+    expect(mockedOperationApi.get).toHaveBeenCalledWith('cmd-001')
+    // ② 查回来的终态**渲染给用户**（而不是只写进日志）
+    const html = wrapper.html()
+    expect(html).toContain('命令执行详情')
+    expect(html).toContain('成功')
+    expect(html).toContain('open_window')
+  })
+
+  it('F18：命令记录查不到时必须显式报错（不得留一个空弹窗）', async () => {
+    mockedOperationApi.get.mockRejectedValueOnce(new Error('operation not found'))
+    const wrapper = await mountWithSlotTable()
+
+    const cmdBtn = wrapper.findAll('button').find(b => b.text().includes('cmd-001'))
+    await cmdBtn!.trigger('click')
+    await flushPromises()
+
+    expect(mockedOperationApi.get).toHaveBeenCalledWith('cmd-001')
+    // 失败必须走统一反馈出口，而不是静默关闭弹窗让用户以为"没有详情"。
+    // 注意出口的**真实形状**：feedback.error() 调的是 `ElMessage({...})`（函数调用），
+    // 不是 `ElMessage.error(...)` —— 按后者断言会永远红（本用例第一版就踩了这个）。
+    const { ElMessage } = await import('element-plus')
+    const fn = ElMessage as unknown as { mock?: { calls: unknown[][] } }
+    expect(fn.mock?.calls.length ?? 0, '失败时必须弹出错误提示').toBeGreaterThan(0)
+    // 提示里必须带"是哪个操作失败了"——否则用户只看到服务端的 "operation not found"，
+    // 不知道这是"查命令记录"失败（本仓 I-1 收敛时的既有取舍，见 utils/feedback.ts 注释）。
+    const lastCall = JSON.stringify(fn.mock!.calls.at(-1))
+    expect(lastCall).toContain('未能读取')
   })
 
   it('确认执行高风险动作走危险确认契约', async () => {

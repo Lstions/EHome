@@ -44,7 +44,14 @@
         </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
-            <el-switch :model-value="row.enabled" data-test="rule-enabled" @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)" />
+            <!-- 可访问名带**规则名**：表格里每行都有一个一模一样的开关，
+                 没有名字时屏幕阅读器只读「开关」，用户无法分辨改的是哪条规则。 -->
+            <el-switch
+              :model-value="row.enabled"
+              :aria-label="`${asRule(row).name} 启用`"
+              data-test="rule-enabled"
+              @change="(v: string | number | boolean) => onToggle(asRule(row), v === true)"
+            />
           </template>
         </el-table-column>
         <!-- F26 裁决 D2：该列在窄屏**取消固定**（原 width="180" fixed="right"）。
@@ -282,6 +289,45 @@
         <el-button type="primary" :loading="saving" data-test="save-rule" @click="onSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 命令执行详情（F18：命令 ID 此前点了没反应）。
+         只读：展示该次执行的终态与（若有）失败原因/人工裁决，不提供任何写操作
+         —— 审计入口的职责是"看清楚"，写操作在设备页的命令面板里。 -->
+    <el-dialog
+      v-model="commandDetailOpen"
+      title="命令执行详情"
+      width="min(560px, 92vw)"
+      data-test="command-detail-dialog"
+    >
+      <div v-if="commandDetailLoading" aria-busy="true"><el-skeleton :rows="4" animated /></div>
+      <el-descriptions v-else-if="commandDetail" :column="1" border size="small">
+        <el-descriptions-item label="命令 ID">
+          <span class="mono">{{ commandDetail.command_id }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="执行状态">
+          <el-tag size="small" :type="commandDetail.status === 'SUCCEEDED' ? 'success' : commandDetail.status === 'FAILED' ? 'danger' : 'info'">
+            {{ operationStatusText(commandDetail.status) }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="动作">
+          {{ commandDetail.action_id }} <span class="text-muted">v{{ commandDetail.action_version }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="设备">
+          #{{ commandDetail.edge_device_id }} <span class="text-muted">({{ commandDetail.node_id }})</span>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="commandDetail.final_reason" label="失败原因">
+          {{ commandDetail.final_reason }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="commandDetail.manual_resolution" label="人工裁决">
+          {{ commandDetail.manual_resolution.outcome }}：{{ commandDetail.manual_resolution.reason }}
+        </el-descriptions-item>
+        <el-descriptions-item label="创建时间">{{ commandDetail.created_at }}</el-descriptions-item>
+        <el-descriptions-item v-if="commandDetail.completed_at" label="完成时间">{{ commandDetail.completed_at }}</el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button type="primary" @click="commandDetailOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -289,10 +335,12 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import feedback from '@/utils/feedback'
+import { UNKNOWN } from '@/utils/format'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import { deviceOperationApi, type DeviceOperation } from '@/api/deviceOperation'
 import {
   automationApi,
   type AutomationRule,
@@ -661,9 +709,55 @@ async function onTrigger(rule: AutomationRule) {
   }
 }
 
-function goCommand(commandId: string) {
-  // TODO: 跳转命令详情页（当前无路由，先留占位）
-  console.log('command id:', commandId)
+/**
+ * 命令 ID 回链（F18：此前是 console.log 占位 —— 点了没反应，属"静默失败"）。
+ *
+ * 本仓**没有**"命令详情页"路由，但有真实可查的端点
+ * `GET /api/v1/device-operations/:command_id`（handler_device_operation.go:113）。
+ * 因此这里不再"跳转"，而是**就地查询并展示**该次执行的终态 —— 用户点这个 ID 的
+ * 真实意图是"这条命令后来怎么样了"，而不是"换一个页面"。
+ *
+ * 为什么用只读弹窗而不是引导用户去设备详情页：审计行只带 command_id，
+ * 不带 edge_device_id 之外的定位信息；把用户丢到另一个列表再自己找，等于没回链。
+ */
+const commandDetail = ref<DeviceOperation | null>(null)
+const commandDetailLoading = ref(false)
+const commandDetailOpen = ref(false)
+
+async function goCommand(commandId: string) {
+  commandDetailOpen.value = true
+  commandDetailLoading.value = true
+  commandDetail.value = null
+  try {
+    commandDetail.value = await deviceOperationApi.get(commandId)
+  } catch (e: unknown) {
+    // 查不到（例如执行记录已被保留期清理）必须**显式告知**，不能留一个空弹窗。
+    //
+    // 必须用 handleErrorWithContext 而不是 handleError：后者的第二参数是**兜底**，
+    // 只在拿不到 message 时才生效；而后端**总是**带 message（envelope.Error 必写 Message），
+    // 实测结果是用户只看到 "operation not found"，**不知道是哪个操作失败了**
+    // （见 utils/feedback.ts:114-131 的记录）。这里"查命令记录"这个上下文对用户有信息量，
+    // 所以显式拼进消息。
+    feedback.handleErrorWithContext(e, '未能读取该命令的执行记录（可能已被保留期清理）')
+    commandDetailOpen.value = false
+  } finally {
+    commandDetailLoading.value = false
+  }
+}
+
+/** 执行状态 → 中文（与后端 OperationStatus 枚举一一对应，不给未定义的兜底文案）。 */
+function operationStatusText(status: string): string {
+  const map: Record<string, string> = {
+    QUEUED: '排队中',
+    DISPATCHED: '已下发',
+    DEVICE_ACCEPTED: '设备已受理',
+    VERIFYING: '核验中',
+    SUCCEEDED: '成功',
+    FAILED: '失败',
+    CANCELLED: '已取消',
+    UNKNOWN: '结果未知',
+  }
+  return map[status] ?? status
 }
 
 // ── 显示辅助 ──
@@ -684,11 +778,11 @@ function triggerSummary(rule: AutomationRule): string {
     const edge = rule.trigger_window_edge === 'enter' ? '进入' : rule.trigger_window_edge === 'exit' ? '离开' : '持续'
     return `${rule.trigger_window_start}-${rule.trigger_window_end} ${edge}`
   }
-  return '-'
+  return UNKNOWN
 }
 function actionSummary(rule: AutomationRule): string {
   if (rule.action_type === 'device_action') {
-    return rule.action_id ?? '-'
+    return rule.action_id ?? UNKNOWN
   }
   return rule.action_level === 'critical' ? '严重' : rule.action_level === 'warning' ? '警告' : '信息'
 }
@@ -713,10 +807,10 @@ function resultTagType(r: AutomationEventResult): 'success' | 'warning' | 'dange
   return 'info'
 }
 function formatValue(v: number): string {
-  return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : '-'
+  return Number.isFinite(v) ? String(Math.round(v * 1000) / 1000) : UNKNOWN
 }
 function formatTime(t?: string | null): string {
-  if (!t) return '-'
+  if (!t) return UNKNOWN
   return new Date(t).toLocaleString()
 }
 
