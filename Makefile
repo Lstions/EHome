@@ -28,6 +28,9 @@
 #   make backup         - PostgreSQL 备份（pg_dump custom + TOC 自校验，产物在 backups/）
 #   make restore        - 恢复到指定库（DUMP=<文件> DB=<库名>；生产库需 FORCE=1）
 #   make clean          - 停止本机前后端并清理日志（不删统一基础设施/数据卷）
+#   make docs-audit     - 文档「声称-实现」对账：分类器自校准 + 候选数（非门禁，理由见脚本头部）
+#   make verify-image   - 验证 GHCR 已发布镜像（需 docker pull + 起栈；不进 CI）
+#   make blackbox       - 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
 #
 # 说明：
 #   - 统一基础设施 = docker-compose.yml 的 postgres/emqx，与生产共用。
@@ -80,7 +83,8 @@ FRONTEND_COVERAGE_THRESHOLD ?= 25
         test test-backend test-frontend test-integration test-coverage test-scenarios \
         lint lint-backend lint-frontend \
         test-infra test-infra-down \
-        status logs backup restore clean help
+        status logs backup restore clean help \
+        docs-audit verify-image blackbox
 
 # ---- 一键启动统一环境 ----
 dev: up ## 启动统一环境（历史兼容别名）
@@ -332,6 +336,27 @@ e2e: ## Run Playwright E2E tests (run make up first)
 	fi
 	@echo "==> Running Playwright E2E tests against http://localhost:$(FRONTEND_PORT)..."
 	@cd $(FRONTEND) && npx playwright test
+
+# ---- 文档 / 部署验证（人工触发的「一键跑法」）----
+# 说明：下面三个目标**故意不进 CI** ——
+#   * docs-audit  ：只有 --selftest 适合进门禁（见 tools/docs/claims-audit.sh 头部论证）；
+#                   扫描模式总是退出 0，只打印候选数供人工复核。
+#   * verify-image：需要 docker pull + 起独立 compose 栈（GHCR 已发布镜像）。
+#   * blackbox    ：需要独占 project 名 ehome-bb 与端口 18080，只能串行跑。
+docs-audit: ## 文档「声称-实现」对账：分类器自校准（门禁级）+ 候选数（信息级）
+	@echo "==> claims-audit classifier selftest (exit!=0 表示分类器坏了)..."
+	@bash $(ROOT)/tools/docs/claims-audit.sh --selftest
+	@echo "==> Scan mode (信息级，总是退出 0；清单需人工复核)..."
+	@bash $(ROOT)/tools/docs/claims-audit.sh | grep -E '^总命中' || true
+	@echo "    完整清单：bash tools/docs/claims-audit.sh"
+
+verify-image: ## 验证 GHCR 已发布镜像（需 docker pull + 起栈；不进 CI）
+	@echo "==> Verifying published image (ghcr.io/lstions/ehome; project ehome-ghcr, port 18090)..."
+	@bash $(ROOT)/deploy/ghcr/verify-published-image.sh
+
+blackbox: ## 部署黑盒验证 Q1–Q7 + S1（独占 project ehome-bb / 端口 18080；不进 CI）
+	@echo "==> Running deployment blackbox (exclusive project ehome-bb, port 18080)..."
+	@bash $(ROOT)/deploy/blackbox/run.sh
 
 # ---- 状态 ----
 status: ## 查看服务状态

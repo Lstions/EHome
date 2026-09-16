@@ -20,6 +20,9 @@
 ## 2. 验证（一条命令）
 
 ```bash
+# 一键跑法（仓库根目录；等价于下面第一条命令）
+make verify-image
+
 # 验证 main 上最新镜像
 ./deploy/ghcr/verify-published-image.sh
 

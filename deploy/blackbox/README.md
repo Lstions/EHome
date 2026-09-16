@@ -27,6 +27,7 @@ export HOME=/home/sun
 ```bash
 cd /home/sun/workspace/EHomeSystem
 
+make blackbox                                     # 一键跑法：等价于下面的全量 ./deploy/blackbox/run.sh
 ./deploy/blackbox/run.sh                          # 全量（构建 → compose 契约 → 冷启动 → 连通 → 健康 → 首次部署）
 ./deploy/blackbox/run.sh --skip-build             # 复用已构建镜像（置 BB_SKIP_BUILD=1 传给探针）
 ./deploy/blackbox/run.sh --only 04                # 只跑指定探针（逗号分隔，支持 id / name / id-name）

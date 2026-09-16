@@ -11,6 +11,8 @@ on:
       - 'docker-compose*.yml'
       - '.env*'
       - '.github/workflows/**'
+      - 'tools/**'
+      - 'Makefile'
   pull_request:
     branches: [main, master, develop]
     paths:
@@ -21,6 +23,8 @@ on:
       - 'docker-compose*.yml'
       - '.env*'
       - '.github/workflows/**'
+      - 'tools/**'
+      - 'Makefile'
 
 concurrency:
   group: test-${{ github.ref }}
@@ -273,6 +277,20 @@ jobs:
 
       - name: Run host tests
         run: ctest --test-dir "${{ runner.temp }}/host-tests" --output-on-failure
+
+  # ─── Docs: 文档「声称-实现」对账 —— 分类器自校准 ─────────────────
+  # 只跑 --selftest：它断言的是「分类器没坏」（全通过=0，任一失败=1）。
+  # 默认扫描模式总是退出 0（清单需人工复核，命中数不是门禁判据）；
+  # --fail-on-candidates 被脚本头部明确排除在 CI 之外（会逼团队收窄规则到扫不到）。
+  # 不并入 Backend/Frontend：门禁分层跑，失败要能一眼定位。
+  docs-claims-audit:
+    name: Docs claims audit (classifier selftest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run claims-audit classifier selftest
+        run: bash tools/docs/claims-audit.sh --selftest
 
   # ─── Summary ─────────────────────────────────────────────────────
   summary:
