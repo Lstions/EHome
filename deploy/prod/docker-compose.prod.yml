@@ -1,0 +1,103 @@
+# EHomeSystem 生产环境 —— **独立自包含** compose。
+#
+# 为什么存在（用户 2026-09-17 指出）：
+#   此前生产是"override + 开发 compose"的拼法：一个 8 行的 override 必须与
+#   仓库根的 docker-compose.yml 一起用。而那根 compose 是**开发用**的：
+#   ehome 服务写的是 `build:`（本地构建）、Postgres 端口绑 127.0.0.1:5432、
+#   还带 monitoring profile —— 生产环境不该继承这些。
+#   ⇒ "生产部署 yaml 不是完整独立的环境"：无法单独起，语义上也不该叫生产。
+#   那个 override 已被删除；**本文件是生产的唯一入口**。
+#
+# 本文件自包含：postgres / emqx / ehome 三个服务 + 网络 + 卷全部在此定义。
+# 唯一的运行时代码来源是 **GHCR 正式镜像**（无 build: 段 ⇒ 杜绝"本地构建掩盖 CI 问题"）。
+#
+# 用法（仓库根目录）：
+#   docker compose -p ehomesystem -f deploy/prod/docker-compose.prod.yml up -d
+#   docker compose -p ehomesystem -f deploy/prod/docker-compose.prod.yml ps
+#   curl -s localhost:8080/health          # → {"status":"ok"}
+#
+# 可覆盖的环境变量（默认值见下）：
+#   EHOME_IMAGE_TAG   镜像 tag（默认 latest；也可 sha-xxxxxxx / 版本号）
+#   HOME_PORT         宿主端口（默认 8080）
+#   POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+#   EMQX_MQTT_PORT / EMQX_WS_PORT / EMQX_DASHBOARD_PORT
+#   EHOME_EXTERNAL_HOST / EHOME_JWT_SECRET / EHOME_ALLOWED_ORIGINS / EHOME_DATA_RETENTION_DAYS
+#
+# 与开发 compose 的差异（刻意的）：
+#   · ehome 用 GHCR 镜像，**没有 build:**；
+#   · Postgres **不**对宿主暴露端口（生产不需要从宿主连库，减少攻击面）；
+#   · 不含 monitoring profile（需要监控请单独起 deploy/monitoring）；
+#   · 独立的 project 名建议 ehomesystem（-p 指定），卷/网络与该 project 绑定。
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ehome-postgres
+    restart: unless-stopped
+    # 生产不对宿主暴露 5432：容器间通过 compose 网络访问即可。
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?err — POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err — POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ehome}
+    volumes:
+      # postgres 18+ 要求挂载点是 /var/lib/postgresql（**不是**旧的 /var/lib/postgresql/data）
+      - ehome-pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  emqx:
+    image: emqx/emqx:5.8
+    container_name: ehome-emqx
+    restart: unless-stopped
+    ports:
+      - "${EMQX_MQTT_PORT:-1883}:1883"
+      - "${EMQX_WS_PORT:-8083}:8083"
+      - "${EMQX_DASHBOARD_PORT:-18083}:18083"
+    environment:
+      EMQX_NAME: ehome
+      EMQX_LOADED_MODULES: "emqx_mod_acl_internal"
+    volumes:
+      - ehome-emqxdata:/opt/emqx/data
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ehome:
+    # 关键：**只有 image，没有 build** ⇒ 必须来自 GHCR，杜绝本地构建掩盖 CI 问题。
+    image: ghcr.io/lstions/ehome:${EHOME_IMAGE_TAG:-latest}
+    container_name: ehome-web
+    restart: unless-stopped
+    ports:
+      - "${HOME_PORT:-8080}:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ${POSTGRES_USER}
+      EHOME_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EHOME_DB_NAME: ${POSTGRES_DB:-ehome}
+      EHOME_DB_SSLMODE: ${EHOME_DB_SSLMODE:-disable}
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-server
+      # ESP32 固件 OTA 下载地址所使用的主机名 —— 必须是设备可达的 LAN IP/域名
+      EHOME_EXTERNAL_HOST: ${EHOME_EXTERNAL_HOST:?err — EHOME_EXTERNAL_HOST is required in production}
+      EHOME_JWT_SECRET: ${EHOME_JWT_SECRET:?err — EHOME_JWT_SECRET is required in production}
+      EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
+      EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-90}
+      EHOME_STATIC_DIR: /app/static/dist
+    volumes:
+      - ./backend/firmwares:/app/firmwares
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  ehome-pgdata:
+  ehome-emqxdata:

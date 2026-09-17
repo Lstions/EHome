@@ -365,7 +365,7 @@
             <template #default="{ row }">
               <el-progress
                 :percentage="row.progress"
-                :status="row.status === 'success' ? 'success' : row.status === 'failed' ? 'exception' : ''"
+                :status="otaProgressStatus(row.status)"
                 :stroke-width="6"
               />
             </template>
@@ -766,28 +766,51 @@ const handleCancelOTA = async (record: OTARecord) => {
   }
 }
 
-const getOTAStatusType = (status: string): TagType => {
-  const types: Record<string, TagType> = {
-    pending: 'info',
-    downloading: 'warning',
-    installing: 'warning',
-    success: 'success',
-    failed: 'danger',
-    cancelled: 'info'
-  }
-  return types[status] || 'info'
+// OTA 任务状态映射。
+//
+// 必须覆盖后端 backend/internal/ota/ota.go:24-31 的全部 8 个状态：
+//   pending, downloading, verifying, installing, success, failed, timeout, needs_retry
+//
+// 历史缺陷（2026-09-17 实测）：本表只覆盖 6 项，漏掉 verifying / timeout / needs_retry
+//   · 文案走 `texts[status] || status` ⇒ 中文界面**原样显示英文**；
+//   · 颜色回退到中性 'info' ⇒ **"升级超时""需要重试"被显示成中性色**，
+//     视觉上与"等待中"无异，弱化了本该引起注意的问题态。
+// 这两点都比 OTAForm.vue 里同类缺陷更隐蔽（那边至少文案会露英文）。
+const OTA_STATUS_TYPES: Record<string, TagType> = {
+  pending: 'info',
+  downloading: 'warning',
+  verifying: 'warning',
+  installing: 'warning',
+  success: 'success',
+  failed: 'danger',
+  timeout: 'danger',      // 问题态：绝不能是中性 info
+  needs_retry: 'danger',  // 问题态：需要人工介入重试
+  cancelled: 'info'
 }
 
-const getOTAStatusText = (status: string) => {
-  const texts: Record<string, string> = {
-    pending: '等待中',
-    downloading: '下载中',
-    installing: '安装中',
-    success: '成功',
-    failed: '失败',
-    cancelled: '已取消'
-  }
-  return texts[status] || status
+const OTA_STATUS_TEXTS: Record<string, string> = {
+  pending: '等待中',
+  downloading: '下载中',
+  verifying: '校验中',
+  installing: '安装中',
+  success: '成功',
+  failed: '失败',
+  timeout: '超时',
+  needs_retry: '需要重试',
+  cancelled: '已取消'
+}
+
+const getOTAStatusType = (status: string): TagType => OTA_STATUS_TYPES[status] || 'info'
+const getOTAStatusText = (status: string) => OTA_STATUS_TEXTS[status] || status
+
+/**
+ * OTA 进度条的原生状态。后端 timeout / needs_retry 属问题态，
+ * 原先只判 failed ⇒ 这两态进度条是普通蓝色，看不出出事了。
+ */
+const otaProgressStatus = (status: string): '' | 'success' | 'exception' | 'warning' => {
+  if (status === 'success' || status === 'completed') return 'success'
+  if (status === 'failed' || status === 'timeout' || status === 'needs_retry') return 'exception'
+  return ''
 }
 
 const handleViewDevice = (device: any) => {

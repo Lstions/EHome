@@ -119,6 +119,44 @@ import { type Firmware } from '@/api/firmware'
 import { useFirmwareStore } from '@/stores/firmware'
 import { UNKNOWN, formatFileSize } from '@/utils/format'
 
+/**
+ * OTA 任务状态 → 中文文案。
+ *
+ * 必须覆盖后端 backend/internal/ota/ota.go:24-31 的**全部 8 个**状态：
+ *   pending, downloading, verifying, installing, success, failed, timeout, needs_retry
+ *
+ * 历史缺陷（2026-09-17 生产实测）：本表只覆盖了 7 项，漏掉 verifying / timeout /
+ * needs_retry，而渲染是 `TABLE[status] || status` ⇒ 这三态在中文界面**原样显示英文**。
+ * 后端注释明确 ESP32 未来会显式上报 verifying、版本不匹配会置 needs_retry，
+ * 所以这不是理论问题，是"已定义但未接线"。
+ *
+ * 注：'flashing'/'completed' 不在后端枚举里，但历史数据/其它入口可能出现，保留兼容。
+ */
+const OTA_STATUS_TEXT: Record<string, string> = {
+  pending: '等待中...',
+  downloading: '正在下载固件...',
+  verifying: '正在校验固件...',
+  flashing: '正在刷写固件...',
+  installing: '正在安装固件...',
+  success: '升级完成',
+  completed: '升级完成',
+  failed: '升级失败',
+  timeout: '升级超时',
+  needs_retry: '需要重试',
+}
+
+/** 成功终态：停止轮询并提示"等待设备重启"。 */
+const OTA_TERMINAL_SUCCESS = new Set(['success', 'completed'])
+
+/**
+ * 不成功终态：同样必须停止轮询。
+ *
+ * timeout / needs_retry 若不在此集合内，轮询会一直跑、进度条永远停在半途
+ * ——UI 表现成"永远在升级中"，比直接报错更难排查（后端已不会再推进该任务）。
+ */
+const OTA_TERMINAL_FAILURE = new Set(['failed', 'timeout', 'needs_retry'])
+
+
 const props = withDefaults(defineProps<{
   visible: boolean
   collectorId: string
@@ -276,16 +314,7 @@ const pollProgress = (collectorId: string, recordId: number, generation: number)
       if (generation !== otaGeneration || props.collectorId !== collectorId) return
       progress.value = record.progress || 0
 
-      const statusMap: Record<string, string> = {
-        'pending': '等待中...',
-        'downloading': '正在下载固件...',
-        'flashing': '正在刷写固件...',
-        'installing': '正在安装固件...',
-        'success': '升级完成',
-        'completed': '升级完成',
-        'failed': '升级失败',
-      }
-      statusText.value = statusMap[record.status] || record.status
+      statusText.value = OTA_STATUS_TEXT[record.status] || record.status
 
       // 状态变化时添加日志
       const lastLog = upgradeLogs.value[0]
@@ -293,7 +322,7 @@ const pollProgress = (collectorId: string, recordId: number, generation: number)
         addLog(statusText.value)
       }
 
-      if (record.status === 'completed' || record.status === 'success') {
+      if (OTA_TERMINAL_SUCCESS.has(record.status)) {
         clearInterval(progressTimer!)
         progressTimer = null
         upgradeStatus.value = 'completed'
@@ -304,12 +333,20 @@ const pollProgress = (collectorId: string, recordId: number, generation: number)
         setTimeout(() => {
           if (closeGeneration === otaGeneration && props.collectorId === collectorId) dialogVisible.value = false
         }, 3000)
-      } else if (record.status === 'failed') {
+      } else if (OTA_TERMINAL_FAILURE.has(record.status)) {
+        // timeout / needs_retry 与 failed 同属**不成功终态**：必须在这里停轮询，
+        // 否则 UI 会永远转圈（后端不会再推进这些任务）。文案与处置分别给：
+        //   failed     → 展示 error_msg 的错误详情
+        //   timeout / needs_retry → 展示状态文案本身（含义比"失败"更具体）
         clearInterval(progressTimer!)
         progressTimer = null
         upgradeStatus.value = 'failed'
-        statusText.value = '升级失败'
-        addLog(`失败: ${record.error_msg || '未知错误'}`)
+        if (record.status === 'failed') {
+          statusText.value = '升级失败'
+          addLog(`失败: ${record.error_msg || '未知错误'}`)
+        } else {
+          addLog(`${OTA_STATUS_TEXT[record.status]}${record.error_msg ? ': ' + record.error_msg : ''}`)
+        }
       }
     } catch (error: any) {
       // 轮询失败不中断，继续尝试
@@ -377,6 +414,9 @@ onUnmounted(() => {
   /* 更新日志滚动区（原内联样式，语义等价迁移到类上） */
   max-height: 100px;
   overflow-y: auto;
+  /* changelog 是多行文本（含 \n），默认 white-space: normal 会把换行**折叠**成空格，
+     多行日志因此挤成一行（实测 lineBoxes=1）。pre-wrap 保留换行、同时仍允许长行折行。 */
+  white-space: pre-wrap;
 }
 
 .upgrade-progress {

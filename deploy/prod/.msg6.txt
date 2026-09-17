@@ -1,0 +1,49 @@
+fix(ui+deploy): 闭环 P5/P7/P8 + 生产 compose 独立化（子代理全灭后由主控亲自完成）
+
+## 背景：子代理连续失败，改为主控亲自实施
+三个并行子代理（P5a+P8 / P5b / P7）**全部失败**（两个无产出、一个死于半成品）。
+损害面：NodeDetail.vue 留下一行调用 otaProgressStatus 的半成品，typecheck 报
+TS2339（函数不存在）。已回退，工作树恢复到 fd703910 干净状态后由主控亲自重做。
+（判断依据：任务本身有现成范式，但单次范围偏大 + 3 连败 ⇒ 不再委派。）
+
+## P5 OTA 状态映射缺值（两处都有）
+后端 ota.go:24-31 定义 8 个状态，前端两处映射表都漏 verifying/timeout/needs_retry：
+· OTAForm.vue：文案 TABLE[status]||status ⇒ 中文界面露英文；且这两态不在任何终态
+  分支 ⇒ **轮询永不停止、进度条永远转圈**（比露英文更难排查）。
+· NodeDetail.vue：文案露英文；颜色回退中性 info ⇒ 超时/需重试显示成中性色，
+  视觉上与"等待中"无异，弱化了问题态。
+修：两处补齐；timeout/needs_retry 给 danger；轮询收尾改用 OTA_TERMINAL_* 集合。
+
+## P7 StringValue 字符串型读数未纳入展示
+后端 SensorData.StringValue 承载字符串真值：jiabaida 的 hardware_version /
+serial_number 其 **Value 恒为 0**，真值只在 StringValue（驱动单测断言 "V19"）。
+前端只取 s.Value ⇒ 显示成 **0**，比「—」更糟（0 像真实读数）。
+修：新增 asDisplayValue()（StringValue 非空优先，不做事后强转）；
+RowData 拆成 values（展示，可含字符串）+ numbers（纯数值，供统计/趋势）。
+**拆两个字段是必须的**：否则 "V19" 进趋势会被当 0，画出掉到 0 的假线。
+
+## P8 更新日志换行被折叠
+changelog 含 \n 但默认 white-space: normal 折叠成空格（实测 lineBoxes=1），
+多行日志挤成一行。修：white-space: pre-wrap。
+
+## 生产 compose 独立化
+此前 compose.ghcr-prod.yml 只是 8 行 override，必须与**开发用**的根
+docker-compose.yml 拼着用（含 build: / 5432 绑宿主 / monitoring profile）
+⇒ 生产部署 yaml 不是完整独立的环境。
+新增 deploy/prod/docker-compose.prod.yml：自包含三服务、无 build:（强制 GHCR），
+Postgres 不对宿主暴露端口；并删除旧 override（避免两个入口将来又用错）。
+
+## 验证
+- vue-tsc 0 错误；vitest **146 files / 1585 passed**。
+- 变异自证（逐条真红）：
+  · P7 改回只取 Value ⇒ 3 例 FAIL，报 `expected +0 to be V19`（精确复现现象）；
+  · P5a 删 3 个状态 ⇒ 2 例 FAIL；删 pre-wrap ⇒ 2 例 FAIL；
+  · 把统计改回用 values ⇒ **TS2339 直接拦下**（类型层比测试层更早守住"字符串不得进数值"）。
+- 独立 compose：config --quiet 通过、确认无 build 段、实际起栈 /health={"status":"ok"}、
+  镜像为 GHCR、Postgres 无宿主端口映射。
+
+## 一个关键发现（否则会写出假测试）
+先把 P5 缺陷改回去跑**既有 108 条** OTA/Node 测试 —— **全部通过**。
+即既有测试根本没覆盖状态映射，改坏也全绿。故新增 OTAFormStatusCoverage.spec.ts，
+用 ?raw 断言"后端 8 状态 ↔ 前端映射"完整性，并配分类器自检（锚点必须唯一、
+块必须括号配平 —— 防"M5 假绿"那种"删掉本规则也能靠后续规则蒙混"）。

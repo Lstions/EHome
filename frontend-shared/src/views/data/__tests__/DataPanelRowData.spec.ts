@@ -258,7 +258,7 @@ describe('parseRowData —— 本页唯一的行取数入口（纯函数层）',
   it('行本身缺失/非对象：不抛异常，values 与 rawHex 均为 null', () => {
     for (const row of [null, undefined, 'x', 42, true]) {
       expect(() => parseRowData(row)).not.toThrow()
-      expect(parseRowData(row)).toEqual({ values: null, rawHex: null })
+      expect(parseRowData(row)).toEqual({ values: null, numbers: null, rawHex: null })
     }
   })
 
@@ -275,9 +275,9 @@ describe('parseRowData —— 本页唯一的行取数入口（纯函数层）',
 
   it('兼容既有形状：{ data: {...} } 与扁平行（既有用例的 fixture），并排除 raw_data 键', () => {
     expect(parseRowData({ id: 1, data: { temperature: 21 }, raw_data: 'aabb' }))
-      .toEqual({ values: { temperature: 21 }, rawHex: 'aabb' })
+      .toEqual({ values: { temperature: 21 }, numbers: { temperature: 21 }, rawHex: 'aabb' })
     expect(parseRowData({ temperature: 21, humidity: 40 }))
-      .toEqual({ values: { temperature: 21, humidity: 40 }, rawHex: null })
+      .toEqual({ values: { temperature: 21, humidity: 40 }, numbers: { temperature: 21, humidity: 40 }, rawHex: null })
     // raw_data / raw_hex 不是"指标"，不得混进数值列
     expect(parseRowData({ data: { temperature: 21 }, raw_hex: 'aabb' }).values).toEqual({ temperature: 21 })
   })
@@ -286,6 +286,54 @@ describe('parseRowData —— 本页唯一的行取数入口（纯函数层）',
     expect(parseRowData({ raw_hex: '0x01030200057847' }).rawHex).toBe('01030200057847')
     expect(parseRowData({ raw_hex: '  01030200057847  ' }).rawHex).toBe('01030200057847')
     expect(parseRowData({ raw_hex: '' }).rawHex).toBeNull()
+  })
+
+  // ── P7：字符串型读数（StringValue）────────────────────────────────────────
+  // 后端 SensorData 有 StringValue 字段（drivers/registry.go:13），承载字符串真值：
+  // jiabaida_parse.go 的 hardware_version / serial_number 的 **Value 恒为 0**，
+  // 真值只在 StringValue。只取 Value ⇒ 显示成 0（比「—」更糟：0 像真实读数）。
+  describe('P7 字符串型读数（StringValue）', () => {
+    // 实测形状（驱动单测 jiabaida_test.go:677 断言 StringValue === "V19"）
+    const stringSensorRow = {
+      data_json: JSON.stringify({
+        channel_id: 1,
+        raw_hex: 'dd050003563139ff3d77',
+        sensors: [
+          { Name: 'hardware_version', Value: 0, Unit: '', StringValue: 'V19' },
+          { Name: 'rainfall', Value: 0.5, Unit: 'mm', StringValue: '' },
+        ],
+      }),
+    }
+
+    it('StringValue 非空时取它，而不是把它显示成 0', () => {
+      const { values } = parseRowData(stringSensorRow)
+      expect(values?.hardware_version).toBe('V19')
+      expect(values?.hardware_version).not.toBe(0)
+      expect(values?.rainfall).toBe(0.5)
+    })
+
+    it('StringValue 为空串时回退到 Value（不得把空串当读数）', () => {
+      const row = { data_json: JSON.stringify({ sensors: [{ Name: 'r', Value: 7, StringValue: '' }] }) }
+      expect(parseRowData(row).values?.r).toBe(7)
+    })
+
+    it('numbers 只含数值型：字符串读数不得进入数值统计（否则被当 0 拉低均值）', () => {
+      const { numbers } = parseRowData(stringSensorRow)
+      expect(numbers).toEqual({ rainfall: 0.5 })
+      expect(numbers && 'hardware_version' in numbers).toBe(false)
+    })
+
+    it('只有字符串读数时 numbers 为 null（趋势/统计不得画出掉到 0 的假线）', () => {
+      const row = { data_json: JSON.stringify({ sensors: [{ Name: 'sn', Value: 0, StringValue: 'SIM-BMS-0001' }] }) }
+      expect(parseRowData(row).values?.sn).toBe('SIM-BMS-0001')
+      expect(parseRowData(row).numbers).toBeNull()
+    })
+
+    it('纯数值行：values 与 numbers 一致（既有行为不回归）', () => {
+      const { values, numbers } = parseRowData(REAL_ROW)
+      expect(values).toEqual({ rainfall: 0.5 })
+      expect(numbers).toEqual({ rainfall: 0.5 })
+    })
   })
 })
 

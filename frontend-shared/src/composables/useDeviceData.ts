@@ -116,7 +116,13 @@ export function useDeviceData(
             const dj = JSON.parse(response.data_json)
             if (dj.sensors && Array.isArray(dj.sensors)) {
               parsedData = {}
-              for (const s of dj.sensors) parsedData[s.Name] = s.Value
+              for (const s of dj.sensors) {
+                // StringValue 优先：字符串型读数（如 BMS hardware_version="V19"）的
+                // 真值在 StringValue 里，而 Value 恒为 0 —— 只取 Value 会显示成 0，
+                // 比「—」更糟（0 看起来像真实读数）。口径同 DeviceControlPanel.vue:76。
+                const sv = s?.StringValue
+                parsedData[s.Name] = (typeof sv === 'string' && sv.trim() !== '') ? sv : s.Value
+              }
             }
           } catch { /* ignore parse error */ }
         }

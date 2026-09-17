@@ -145,6 +145,98 @@ OTA 进度查询与超时扫描连续报错。**重启后端**（新连接）即
 
 ---
 
+## P7 — StringValue 字符串型读数未纳入展示（**已修**）
+
+**这是什么问题**：有些传感器的**真值根本不是数字**。
+
+后端 `drivers.SensorData`（`backend/internal/drivers/registry.go:13`）有两个值字段：
+
+```go
+Value       float64 `json:"value"`
+StringValue string  `json:"string_value,omitempty"`   // 硬件版本、序列号等
+```
+
+`jiabaida_parse.go` 里两条指令的真值**只在 StringValue**，而 `Value` **恒为 0**：
+- `parse0x05` → `{Name:"hardware_version", Value:0, StringValue:string(data)}`
+- `parse0xA2` → `{Name:"serial_number", Value:0, StringValue:...}`
+
+驱动单测是铁证（`jiabaida_test.go:677`）：帧 `DD 05 00 03 'V' '1' '9'` 解析出
+`StringValue == "V19"`，同时 `Value == 0`。
+
+**缺陷**：前端只取 `s.Value`（`useDeviceData.ts:119`）⇒ 硬件版本显示成
+**`hardware_version: 0.00`**。这比"不显示"更危险：`0` 看起来像一个**真实读数**，
+用户不会怀疑；而 `—` 至少暗示"取不到"。属**假绿**同族（用无意义的默认值冒充真值）。
+
+**正确范式仓里就有**：`DeviceControlPanel.vue:76` 的 `value.string_value || value.value`。
+
+**修复**：
+- 新增 `asDisplayValue()`：`StringValue` 非空优先，否则 `Value`（刻意不做 `Number(str)` 强转）；
+- `RowData` 拆成两个视图：`values`（展示，可为字符串）+ `numbers`（**纯数值**，
+  供统计卡/趋势图）；
+- `parseRowData` 同时产出两者；`useDeviceData.ts` 同步修正。
+
+**为什么必须拆两个字段**：若让字符串读数进趋势/统计，`"V19"` 会被当成 0
+⇒ 拉低均值、在趋势图上画出一条掉到 0 的**假线**。
+
+**验证**：`DataPanelRowData.spec.ts` 新增 P7 组 5 例（含"numbers 只含数值型"）；
+变异自证：改回只取 `Value` ⇒ 3 例 FAIL，报 `expected +0 to be 'V19'`（精确复现生产现象）。
+另：把统计改回用 `values` 会被 **TypeScript 直接拦下**（`TS2339: Property 'toFixed' does not exist on type 'string | number'`）
+—— 类型层比测试层更早守住这条不变量。
+
+---
+
+## P5 — OTA 状态映射缺值（**已修**，两处都有）
+
+后端 `ota.go:24-31` 定义 **8 个**状态，前端两处映射表都漏了
+`verifying` / `timeout` / `needs_retry`：
+
+| 位置 | 后果 |
+|---|---|
+| `OTAForm.vue`（升级弹层） | 文案 `TABLE[status] \|\| status` ⇒ 中文界面**原样显示英文**；且 `timeout`/`needs_retry` 不在任何终态分支 ⇒ **轮询永不停止、进度条永远转圈** |
+| `NodeDetail.vue`（OTA 历史表） | 文案露英文；颜色回退中性 `info` ⇒ **"超时""需要重试"被显示成中性色**，视觉上与"等待中"无异 |
+
+**修复**：两处都补齐 3 个状态；颜色上 `timeout`/`needs_retry` 给 `danger`（问题态）；
+轮询收尾改用 `OTA_TERMINAL_SUCCESS` / `OTA_TERMINAL_FAILURE` 集合。
+
+**验证中的关键发现（否则会写出假测试）**：
+先把缺陷改回去跑**既有 108 条** OTA/Node 测试 —— **全部通过**。
+即既有测试根本没覆盖状态映射，改坏也全绿。
+⇒ 新增 `OTAFormStatusCoverage.spec.ts`（7 例），用 `?raw` 断言
+"后端 8 状态 ↔ 前端映射"的**完整性**；变异自证：
+删掉 3 个状态 ⇒ 2 例红（`缺少状态映射: verifying`）；删掉 `pre-wrap` ⇒ 2 例红。
+
+---
+
+## P8 — 更新日志换行被折叠（**已修**）
+
+`changelog` 是多行文本（含 `\n`），`.firmware-changelog` 只有
+`max-height/overflow-y`，默认 `white-space: normal` 把换行**折叠**成空格
+⇒ 多行日志挤成一行（实测 `lineBoxes=1`；滚动区还在但看不到分行）。
+修：加 `white-space: pre-wrap`（保留换行且仍允许长行折行）。
+
+---
+
+## 生产 compose 独立化（用户 2026-09-17 指出的部署问题）
+
+**问题**：生产用的 `deploy/prod/compose.ghcr-prod.yml` 只是 **8 行 override**，
+必须与仓库根的 `docker-compose.yml` 拼着用。而那根 compose 是**开发用**的：
+`ehome` 写的是 `build:`（本地构建）、Postgres 绑 `127.0.0.1:5432`、还带 monitoring profile。
+⇒ **生产部署 yaml 不是完整独立的环境**（既无法单独起，语义上也不该叫生产）。
+
+**修复**：新增 `deploy/prod/docker-compose.prod.yml`，**自包含**定义
+postgres / emqx / ehome + 卷，无 `build:`（唯一代码来源是 GHCR 正式镜像），
+Postgres 不对宿主暴露端口；并**删除**那个 override（避免留下两个入口将来又用错）。
+
+用法：
+```bash
+docker compose -p ehomesystem --env-file .env -f deploy/prod/docker-compose.prod.yml up -d
+```
+
+**验证**：`config --quiet` 通过；解析结果确认**无 build 段**、仅 3 个服务；
+实际用它起栈成功（`/health` = `{"status":"ok"}`，镜像为 GHCR，Postgres 无宿主端口映射）。
+
+---
+
 ## 处置状态
 
 | 编号 | 状态 | 说明 |

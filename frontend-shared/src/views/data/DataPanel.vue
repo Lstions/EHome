@@ -275,8 +275,23 @@
 
 /** parseRowData 的返回：数值指标 + 原始帧 hex。 */
 export interface RowData {
-  /** 指标名 → 数值；解析不出来时为 null（不是空对象 —— 空对象会与"真的没有指标"混淆） */
-  values: Record<string, number> | null
+  /**
+   * 指标名 → **展示值**（数值或字符串）；解析不出来时为 null
+   * （不是空对象 —— 空对象会与"真的没有指标"混淆）。
+   *
+   * 允许字符串是因为部分传感器的真值本就是字符串：后端 SensorData 有
+   * `StringValue` 字段（drivers/registry.go:13），此时 `Value` 恒为 0 而真值在
+   * StringValue 里 —— 典型是 BMS 的 hardware_version（"V19"）与 serial_number。
+   * 只取 Value 会把它显示成 **0**，比「—」更糟：0 看起来像真实读数。
+   */
+  values: Record<string, number | string> | null
+  /**
+   * 指标名 → **纯数值**，供统计卡 / 趋势图 / 数值专用消费者使用。
+   *
+   * 单独给出是为了不让字符串读数污染数值计算：若把 "V19" 混进趋势，
+   * 它会被当成 0 ⇒ 拉低均值并在图上画出掉到 0 的假线。
+   */
+  numbers: Record<string, number> | null
   /** 原始帧 hex，**不带 0x 前缀**（formatRawData 依赖该约定），没有则为 null */
   rawHex: string | null
 }
@@ -302,6 +317,24 @@ const asNumber = (value: unknown): number | null => {
   return null
 }
 
+/**
+ * 单个传感器的展示值。
+ *
+ * 口径与本仓既有正确范式一致（views/edge-device/shared/DeviceControlPanel.vue:76
+ * 的 `value.string_value || value.value`）：**StringValue 非空时优先**，否则取 Value。
+ *
+ * 为什么不能只取 Value：后端 SensorData.StringValue 承载字符串型读数
+ * （jiabaida_parse.go 的 hardware_version / serial_number，其 Value 恒为 0），
+ * 只取 Value 会把 "V19" 显示成 0。
+ * 刻意**不**做 Number(str)：把 "0.5" 静默转成数字属于以本地推断伪造事实。
+ * 返回 null 表示"这条传感器没有可信值"，与"值是 0"区分。
+ */
+const asDisplayValue = (sensor: { Value?: unknown; StringValue?: unknown }): number | string | null => {
+  const sv = sensor.StringValue
+  if (typeof sv === 'string' && sv.trim() !== '') return sv
+  return asNumber(sensor.Value)
+}
+
 /** hex 字符串规整：容忍 0x/0X 前缀与大小写，空串视为"没有" */
 const asHex = (value: unknown): string | null => {
   if (typeof value !== 'string') return null
@@ -321,10 +354,10 @@ const NON_METRIC_KEYS = new Set([
 ])
 
 export function parseRowData(row: unknown): RowData {
-  if (!row || typeof row !== 'object') return { values: null, rawHex: null }
+  if (!row || typeof row !== 'object') return { values: null, numbers: null, rawHex: null }
   const r = row as DeviceDataRow
 
-  let values: Record<string, number> | null = null
+  let values: Record<string, number | string> | null = null
   // raw_hex 也可能来自 data_json 内部（真实帧就在 sensors 的同一层）
   let rawHex = asHex(r.raw_hex) ?? asHex(r.raw_data)
   const hasDataJson = typeof r.data_json === 'string' && r.data_json.trim() !== ''
@@ -342,11 +375,11 @@ export function parseRowData(row: unknown): RowData {
       const dj = parsed as { sensors?: unknown; raw_hex?: unknown; raw_data?: unknown }
       rawHex = rawHex ?? asHex(dj.raw_hex) ?? asHex(dj.raw_data)
       const sensors: unknown[] = Array.isArray(dj.sensors) ? dj.sensors : []
-      const entries: Array<[string, number]> = []
+      const entries: Array<[string, number | string]> = []
       for (const sensor of sensors) {
         if (!sensor || typeof sensor !== 'object') continue
-        const s = sensor as { Name?: unknown; Value?: unknown }
-        const value = asNumber(s.Value)
+        const s = sensor as { Name?: unknown; Value?: unknown; StringValue?: unknown }
+        const value = asDisplayValue(s)
         if (typeof s.Name === 'string' && s.Name !== '' && value !== null) entries.push([s.Name, value])
       }
       // 空 sensors 与"解析失败"同处理：都没有可信数值可展示
@@ -354,7 +387,7 @@ export function parseRowData(row: unknown): RowData {
     }
     // 刻意**不再**退到扁平兜底：行是 data_json 形态却解不出 sensors 时，
     // 去扫行顶层的数字（id/device_id...）就是把元数据伪造成读数 —— 宁可为「—」。
-    return { values, rawHex }
+    return { values, numbers: numericOnly(values), rawHex }
   }
 
   // ② 兼容 { data: {...} } 与扁平 {...} 两种既有形状（既有单测的 fixture 走这里）
@@ -367,7 +400,17 @@ export function parseRowData(row: unknown): RowData {
     .filter((entry): entry is readonly [string, number] => entry[1] !== null)
   if (entries.length > 0) values = Object.fromEntries(entries)
 
-  return { values, rawHex }
+  return { values, numbers: numericOnly(values), rawHex }
+}
+
+/** 从展示值里挑出纯数值子集（统计卡 / 趋势图专用），字符串读数不得进入。 */
+function numericOnly(values: Record<string, number | string> | null): Record<string, number> | null {
+  if (!values) return null
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === 'number') out[key] = value
+  }
+  return Object.keys(out).length > 0 ? out : null
 }
 </script>
 
@@ -464,10 +507,11 @@ const dynamicStats = computed(() => {
     .sort((a, b) => String(b.timestamp || b.created_at || b.collected_at || '').localeCompare(String(a.timestamp || a.created_at || a.collected_at || '')))[0]
   // 与表格列共用 parseRowData：改前读 latest.parsed_data || latest.data，
   // 而接口只给 data_json ⇒ source 恒 {} ⇒ 统计卡恒不渲染（数据非空却一张卡都没有）。
-  const source = parseRowData(latest).values ?? {}
+  // 统计卡是**数值指标**视图：用 numbers（纯数值）而不是 values（可能含字符串），
+  // 否则 hardware_version="V19" 会被当成 0 计入并污染统计。
+  const source = parseRowData(latest).numbers ?? {}
   return availableCategories.value
     .map((category) => {
-      // parseRowData 已把值收敛为数值（number | null），这里直接取
       const value = source[category.code] ?? null
       if (value === null) return null
       return {
@@ -761,7 +805,8 @@ const buildChartSeries = async () => {
   } catch (error) {
     logger.error('获取趋势数据失败', { error: String(error) })
     // Fallback: 从 data_json 提取数值字段（与表格/统计卡同一解析入口）
-    const numericKeys = Object.keys(parseRowData(historyData.value[0]).values ?? {})
+    // 趋势是数值图：同样只看 numbers，字符串读数不能进（否则画出掉到 0 的假线）
+    const numericKeys = Object.keys(parseRowData(historyData.value[0]).numbers ?? {})
 
     if (numericKeys.length > 0) {
       chartSeries.value = numericKeys.map(key => ({
@@ -776,7 +821,7 @@ const buildChartSeries = async () => {
           // 该行没这个指标 ⇒ null，**不是 0**：折线应当断开，而不是伪造一个落零点
           .map(item => ({
             time: item.timestamp || item.collected_at || item.created_at,
-            value: parseRowData(item).values?.[key] ?? null,
+            value: parseRowData(item).numbers?.[key] ?? null,
           }))
       }))
     } else {
