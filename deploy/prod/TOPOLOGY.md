@@ -54,7 +54,30 @@ POST /api/v1/edge-devices/7055/operations
 | 设备 | 通道 | 类型 | 说明 |
 |---|---|---|---|
 | 测试BMS | UART0 (ch1) | `jiabaida_bms` | 模拟器供数 |
-| 测试雨量计 | UART0 (ch1) | `sn3001_rain` | 模拟器供数（与真实雨量计**重复**，待定去留） |
 | 雨量计(真实) | UART1 (ch4) | `sn3001_rain` | **真实硬件** |
 
+> `测试雨量计`（UART0 上的重复模拟实例）已于 2026-09-17 经浏览器删除（软删，
+> 2933 条历史数据按「保留历史数据」选项留存）。
+
 BMS 仍需 UART0 模拟器（真实 BMS 未接）。启动方式见 `run-rain-simulator.sh`。
+
+## 6. 实测发现的 UI 缺陷（未修，待处理）
+
+**删除对话框的「通道」标签显示错误的值。**
+
+`DeviceDeleteDialog.vue` 的 `channelLabel` 取的是 **edge_device 顶层**字段：
+
+```js
+const parts = [props.device.hardware_type?.toUpperCase(), props.device.hardware_id]
+```
+
+但 `hardware_id` 在边缘设备上表示 **Modbus 从站地址**（雨量计为 `"1"`），
+不是总线名；`hardware_type` 顶层又为空。于是对话框把两者拼成了 `UART 1` ——
+看起来像"UART1 总线"，实际该设备在 **UART1**(ch4)，而 `UART 1` 是**地址 1 的**
+巧合拼串。若设备在 UART0 且地址为 1（即被删的 `测试雨量计`），同样显示 `UART 1`，
+与它真实的 UART0 不符 —— 属于**会误导删除确认**的显示缺陷。
+
+正确来源应是关联的 `device.channel.hardware_id`（该字段确实为 `"UART0"` / `"UART1"`）。
+
+复现：`node deploy/prod/verify-channel-label-bug.mjs`（只读，确认对话框后取消，不提交删除）。
+
