@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"ehome/backend/internal/drivers"
+	"ehome/backend/internal/nodemgr"
 )
 
 // SchedulableCommandIDs returns the set of schedulable command template IDs
@@ -76,4 +77,62 @@ func validateAndNormalizeCommandIntervals(driverRegistry *drivers.Registry, devT
 		return nil, fmt.Errorf("failed to marshal command_intervals: %w", err)
 	}
 	return raw, nil
+}
+// CountManifestCandidates returns how many of the driver's schedulable commands
+// would actually be encoded as per-command polling sub-frames in the
+// ConfigManifest, given the intervals that will be stored.
+//
+// It mirrors nodemgr.CommandIsManifestCandidate (the production encoder's
+// predicate): a command counts only when it is schedulable AND its effective
+// interval is > 0. This is the number the collector compares against
+// MAX_COMMANDS_PER_DEVICE, so it is also the number the write path must check.
+//
+// A nil/empty intervals map means "no per-command overrides stored", in which
+// case each command falls back to its own template default interval — matching
+// the read path in GET /edge-devices/:id/commands.
+func CountManifestCandidates(driverRegistry *drivers.Registry, devType string, intervals map[string]int, fallbackIntervalMs int) (int, error) {
+	drv, err := driverRegistry.Get(devType)
+	if err != nil {
+		return 0, fmt.Errorf("cannot count manifest candidates: driver for type %q is not registered", devType)
+	}
+	provider, ok := drv.(drivers.CommandTemplateProvider)
+	if !ok {
+		return 0, fmt.Errorf("cannot count manifest candidates: driver for type %q provides no command templates", devType)
+	}
+	count := 0
+	for _, tmpl := range provider.GetCommandTemplates() {
+		if !tmpl.Schedulable {
+			continue
+		}
+		effective := tmpl.IntervalMs
+		if v, ok := intervals[tmpl.ID]; ok {
+			effective = v
+		} else if len(intervals) == 0 && fallbackIntervalMs > 0 {
+			effective = fallbackIntervalMs
+		}
+		if effective > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// ValidateManifestCommandCapacity rejects a command-interval set that would
+// make the ConfigManifest undeliverable to the collector.
+//
+// Why this exists: the encoder refuses to publish a manifest whose edge device
+// carries more than MaxCommandsPerEdgeDevice polling commands. Without this
+// gate the bad configuration is accepted (HTTP 200), the failure only surfaces
+// later as a rejected push, and the device silently keeps running the previous
+// configuration. Rejecting at write time turns a silent, repeating failure into
+// an immediate, actionable error.
+func ValidateManifestCommandCapacity(driverRegistry *drivers.Registry, devType string, intervals map[string]int, fallbackIntervalMs int) error {
+	count, err := CountManifestCandidates(driverRegistry, devType, intervals, fallbackIntervalMs)
+	if err != nil {
+		return err
+	}
+	if count > nodemgr.MaxCommandsPerEdgeDevice {
+		return fmt.Errorf("command_intervals enables %d polling commands, but the collector supports at most %d per edge device; set the remaining commands to 0 (disabled)", count, nodemgr.MaxCommandsPerEdgeDevice)
+	}
+	return nil
 }

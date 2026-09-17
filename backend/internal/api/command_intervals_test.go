@@ -91,3 +91,72 @@ func TestNormalizeCommandIntervals_ClampsNegatives(t *testing.T) {
 		t.Errorf("input map was mutated: read_a=%d", in["read_a"])
 	}
 }
+// ==================== manifest command capacity gate ====================
+//
+// 生产事故（2026-09-17，节点 F0F5BDFFFE02）：BMS 的 5 条 schedulable 指令全部
+// 配了 interval>0，写入侧放行（HTTP 200），但编码器上限是 3 条，于是每次推送
+// 都被拒。写入侧本该满足"能保存 = 能下发"，这里把该不变量钉住。
+
+func TestCountManifestCandidates_CountsOnlyEnabledSchedulable(t *testing.T) {
+	registry := newFakeRegistry()
+	// read_a/read_b 是唯二的 schedulable；one_shot 不算。
+	cases := []struct {
+		name      string
+		intervals map[string]int
+		fallback  int
+		want      int
+	}{
+		{"all enabled via stored intervals", map[string]int{"read_a": 5000, "read_b": 5000}, 0, 2},
+		{"zero disables a command", map[string]int{"read_a": 5000, "read_b": 0}, 0, 1},
+		{"all zero means no polling", map[string]int{"read_a": 0, "read_b": 0}, 0, 0},
+		{"empty map falls back to template defaults", nil, 0, 1},
+		{"empty map with device fallback enables both", nil, 3000, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CountManifestCandidates(registry, "fake_multi", tc.intervals, tc.fallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("count=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifestCommandCapacity_RejectsOverCollectorLimit(t *testing.T) {
+	registry := drivers.NewRegistry()
+	registry.Register(&fourSchedulableDriver{})
+	if err := ValidateManifestCommandCapacity(registry, "four-sched", map[string]int{
+		"c1": 5000, "c2": 5000, "c3": 5000, "c4": 5000,
+	}, 0); err == nil {
+		t.Fatal("4 enabled polling commands must exceed the collector limit of 3")
+	}
+	// Exactly at the limit is allowed.
+	if err := ValidateManifestCommandCapacity(registry, "four-sched", map[string]int{
+		"c1": 5000, "c2": 5000, "c3": 5000, "c4": 0,
+	}, 0); err != nil {
+		t.Fatalf("3 enabled polling commands must be accepted: %v", err)
+	}
+}
+
+func TestValidateManifestCommandCapacity_UnknownDriverErrors(t *testing.T) {
+	if err := ValidateManifestCommandCapacity(newFakeRegistry(), "nope", nil, 0); err == nil {
+		t.Fatal("unknown driver type must error, not silently pass the gate")
+	}
+}
+
+// fourSchedulableDriver declares 4 schedulable commands — one more than the
+// collector supports — so the capacity gate can be exercised at the boundary.
+type fourSchedulableDriver struct{ fakeMultiDriver }
+
+func (*fourSchedulableDriver) DeviceType() string { return "four-sched" }
+func (*fourSchedulableDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return []drivers.CommandTemplate{
+		{ID: "c1", Type: "read", WriteData: "B1", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
+		{ID: "c2", Type: "read", WriteData: "B2", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
+		{ID: "c3", Type: "read", WriteData: "B3", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
+		{ID: "c4", Type: "read", WriteData: "B4", ReadLength: 1, IntervalMs: 5000, Schedulable: true},
+	}
+}

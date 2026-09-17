@@ -688,6 +688,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { configSyncStateLabel } from '@/utils/configSyncState'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
@@ -946,8 +947,7 @@ const connectionTypeText = computed(() => {
 
 const syncStateLabel = computed(() => {
   if (nodeOffline.value) return '离线'
-  const s = node.value?.config_sync_state
-  return { in_sync: '已同步', syncing: '同步中', lag: '落后', error: '错误', unknown: '未知' }[s as string] || '未知'
+  return configSyncStateLabel(node.value?.config_sync_state)
 })
 
 const metricsUpdatedText = computed(() => {

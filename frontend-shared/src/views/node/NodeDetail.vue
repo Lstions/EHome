@@ -436,6 +436,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
+import { configSyncStateLabel, configSyncStateTagType } from '@/utils/configSyncState'
 import { Upload, Refresh, RefreshRight, Connection, Edit, Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
@@ -570,30 +571,16 @@ const nodeDisplayName = computed(() => {
 // 页面标题：优先节点名称，未命名时与面包屑一致显示设备ID短码，"节点详情"仅作最终兜底
 const pageTitle = computed(() => collector.value?.name || nodeDisplayName.value)
 
-// 配置同步状态
+// 配置同步状态（映射集中在 utils/configSyncState，避免两处漂移）
 const syncStateLabel = computed(() => {
   // 离线设备不可能正在同步：覆盖后端快照中可能残留的"同步中"等状态
   if (collector.value?.status === 'offline') return '离线'
-  const s = collector.value?.config_sync_state
-  return {
-    in_sync: '已同步',
-    syncing: '同步中',
-    lag: '落后',
-    error: '错误',
-    unknown: '未知',
-  }[s as string] || '未知'
+  return configSyncStateLabel(collector.value?.config_sync_state)
 })
 
 const syncStateTagType = computed<TagType>(() => {
   if (collector.value?.status === 'offline') return 'info'
-  const map: Record<string, TagType> = {
-    in_sync: 'success',
-    syncing: 'warning',
-    lag: 'danger',
-    error: 'danger',
-    unknown: 'info',
-  }
-  return map[collector.value?.config_sync_state as string] ?? 'info'
+  return configSyncStateTagType(collector.value?.config_sync_state)
 })
 
 const getDeviceTypeText = (type: string) => {

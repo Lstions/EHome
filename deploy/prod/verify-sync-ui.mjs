@@ -1,0 +1,23 @@
+// 验证「同步失败」在真实浏览器里可见（假绿修复的 UI 侧证据）
+import { chromium } from '/home/sun/workspace/EHomeSystem/frontend-shared/node_modules/.pnpm/playwright@1.62.0/node_modules/playwright/index.mjs';
+const BASE = process.env.EHOME_BASE || 'http://127.0.0.1:18091';
+const USER = process.env.EHOME_USER || 'admin';
+const PASS = process.env.EHOME_PASS || 'FixVerify123!';
+const browser = await chromium.launch({ executablePath: '/snap/bin/chromium', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const page = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' }).then(c => c.newPage());
+await page.goto(BASE + '/login', { waitUntil: 'networkidle' });
+await page.getByPlaceholder('请输入用户名').fill(USER);
+await page.getByPlaceholder('请输入密码').fill(PASS);
+await page.getByRole('button', { name: /登\s*录/ }).click();
+await page.waitForURL(/dashboard/, { timeout: 20000 }).catch(() => {});
+await page.goto(BASE + '/node/FIXV001', { waitUntil: 'networkidle' });
+await page.waitForTimeout(2500);
+const body = await page.locator('body').innerText();
+const hasFailed = body.includes('同步失败');
+console.log('页面是否显示「同步失败」:', hasFailed);
+console.log('页面是否仍显示「已同步」:', body.includes('已同步'));
+const m = body.match(/配置同步[\s\S]{0,20}/);
+console.log('配置同步行:', JSON.stringify(m && m[0]));
+await page.screenshot({ path: '/tmp/ehome-browser/08-sync-failed.png', fullPage: false });
+await browser.close();
+process.exit(hasFailed ? 0 : 1);

@@ -43,7 +43,7 @@ export interface Node {
   log_persist_enabled?: boolean
   // v2.2 同步机制字段
   protocol_version?: string
-  config_sync_state?: 'in_sync' | 'syncing' | 'lag' | 'error' | 'unknown'
+  config_sync_state?: 'in_sync' | 'syncing' | 'failed' | 'lag' | 'error' | 'unknown'
   config_epoch?: number
   last_manifest_id?: string
   last_sync_at?: string

@@ -65,6 +65,7 @@ backend/firmwares/
 #   两份证据目录必须成对出现；任何新增的 *-evidence 目录都要同步登记。
 deploy/blackbox/evidence/
 deploy/ghcr/evidence/
+deploy/prod/evidence/
 
 # Test coverage artifacts
 backend/coverage.out

@@ -1,0 +1,60 @@
+# 隔离验证栈：用「含修复的本地构建镜像」验证假绿修复 + 写入侧容量门禁。
+# 不动生产 project（ehomesystem / 端口 8080 / :latest 正式镜像）。
+# 用法：
+#   docker compose -p ehome-fixverify -f deploy/prod/compose.fixverify.yml up -d
+#   ... 验证 ...
+#   docker compose -p ehome-fixverify -f deploy/prod/compose.fixverify.yml down -v
+name: ehome-fixverify
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ehome-fixverify-postgres
+    environment:
+      POSTGRES_USER: ehome
+      POSTGRES_PASSWORD: ehome_fixverify_pw
+      POSTGRES_DB: ehome
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ehome"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - fixverify_pgdata:/var/lib/postgresql
+
+  emqx:
+    image: emqx/emqx:5.8
+    container_name: ehome-fixverify-emqx
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ehome:
+    image: ehome-fixverify:local
+    container_name: ehome-fixverify-web
+    ports:
+      - "18091:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ehome
+      EHOME_DB_PASSWORD: ehome_fixverify_pw
+      EHOME_DB_NAME: ehome
+      EHOME_DB_SSLMODE: disable
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-fixverify
+      EHOME_EXTERNAL_HOST: 127.0.0.1:18091
+      EHOME_JWT_SECRET: fixverify_secret_0123456789abcdef0123456789
+      EHOME_DATA_RETENTION_DAYS: "90"
+      EHOME_STATIC_DIR: /app/static/dist
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  fixverify_pgdata:

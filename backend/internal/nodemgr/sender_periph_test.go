@@ -906,3 +906,74 @@ func newManagerWithMock(db *gorm.DB, mock *mockMQTTPublisher) *Manager {
 		eventBus: NewConfigEventBus(64),
 	}
 }
+// TestConfigManifestRejectionOverwritesStaleInSyncState is the regression test
+// for the production false green observed on node F0F5BDFFFE02:
+//
+//	UI showed 配置同步 = 已同步 (in_sync) while the backend logged
+//	"ConfigManifest rejected" every 30s and the device never received a config.
+//
+// Root cause: persistFail() guarded its UPDATE on
+// last_sync_id = <this decision's sync_id>. A rejected manifest never reaches
+// the "persist syncing state" step (that only runs after a successful commit),
+// so the row still holds the PREVIOUS generation's sync_id — typically written
+// by the last SUCCESSFUL sync, where config_sync_state is already in_sync.
+// The guard therefore matched ZERO rows and the rejection was never persisted.
+//
+// This test pins the observable contract: after a rejected manifest the node
+// must NOT still advertise in_sync/applied.
+func TestConfigManifestRejectionOverwritesStaleInSyncState(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	mock := &mockMQTTPublisher{}
+	mgr := newManagerWithMock(db, mock)
+	registry := drivers.NewRegistry()
+	registry.Register(fourCommandDriver{})
+	mgr.driverRegistry = registry
+
+	// The stale generation left behind by an earlier SUCCESSFUL sync.
+	const staleSyncID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if err := db.Model(&models.Node{}).Where("node_id = ?", "dev1").Updates(map[string]interface{}{
+		"config_version": "v2-previous", "config_status": "applied",
+		"config_sync_state": "in_sync", "last_sync_id": staleSyncID,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// Now make the CURRENT config undeliverable: 4 schedulable commands against
+	// the collector's limit of 3 (exactly the production failure shape).
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "four-commands", Enabled: true, Name: "four"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, writeData := range []string{"01", "02", "03", "04"} {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: writeData, ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := mgr.SendConfigManifestWithDecision(SyncDecision{
+		DeviceID: "dev1", SyncID: "fresh-rejected-generation", ManifestID: "fresh-rejected-generation",
+	})
+	if err == nil || !strings.Contains(err.Error(), "commands") {
+		t.Fatalf("expected command capacity rejection, got %v", err)
+	}
+	if len(mock.publishedPayload) != 0 {
+		t.Fatal("undeliverable manifest was published")
+	}
+
+	var node models.Node
+	if err := db.Where("node_id = ?", "dev1").First(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The false green: state was left at in_sync even though nothing was sent.
+	if node.ConfigSyncState != "failed" {
+		t.Fatalf("node still advertises config_sync_state=%q after a rejected manifest (want failed) — UI would show 已同步", node.ConfigSyncState)
+	}
+	if node.ConfigStatus != "failed" {
+		t.Fatalf("node still advertises config_status=%q after a rejected manifest (want failed)", node.ConfigStatus)
+	}
+	if node.LastSyncID != "fresh-rejected-generation" {
+		t.Fatalf("last_sync_id=%q; the rejected generation must be recorded so a later ConfigResult cannot be attributed to the stale one", node.LastSyncID)
+	}
+}

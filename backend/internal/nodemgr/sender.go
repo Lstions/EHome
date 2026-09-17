@@ -29,7 +29,10 @@ const (
 	maxManifestChannels      = 8
 	maxLegacyTemplateIDs     = 8
 	maxEdgeDevicesPerChannel = 5
-	maxCommandsPerEdgeDevice = 3
+	// MaxCommandsPerEdgeDevice mirrors config_mgr's MAX_COMMANDS_PER_DEVICE.
+	// Exported so the API layer can refuse to SAVE a configuration that the
+	// collector could never receive, instead of letting it fail at push time.
+	MaxCommandsPerEdgeDevice = 3
 )
 
 type manifestLimits struct {
@@ -417,15 +420,32 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		manifestID string
 	}
 	var done outcome
-	// persistFail marks the node failed only when the outer transaction really
-	// failed. It runs after commit/rollback so it cannot hold the tx lock.
+	// persistFail marks the node failed. It runs after commit/rollback so it
+	// cannot hold the tx lock.
+	//
+	// The write is deliberately NOT conditional on last_sync_id matching the
+	// decision. A rejected manifest never reached the "persist syncing state"
+	// step below (that runs only after a successful commit), so the row still
+	// carries the PREVIOUS generation id - most often the one written by the
+	// last SUCCESSFUL sync, where config_sync_state is already in_sync/applied.
+	// Guarding on equality with the current decision therefore matched ZERO
+	// rows: the rejection was logged while the database kept advertising
+	// "in_sync", hiding every undeliverable config behind a false green.
+	// Only the "row already owns THIS generation" case may skip the write,
+	// because then a concurrent successful path owns the row.
 	fail := func(err error) error {
 		logger.Warnf("[sync_id=%s] ConfigManifest rejected: device=%s error=%v", decision.SyncID, deviceID, err)
 		result := m.db.Model(&models.Node{}).
-			Where("node_id = ? AND (last_sync_id = ? OR last_sync_id = '' OR last_sync_id IS NULL)", deviceID, decision.SyncID).
+			Where("node_id = ? AND (last_sync_id IS NULL OR last_sync_id = '' OR last_sync_id <> ?)", deviceID, decision.SyncID).
 			Updates(map[string]interface{}{"config_sync_state": "failed", "config_status": "failed", "last_sync_id": decision.SyncID})
 		if result.Error != nil {
 			return fmt.Errorf("%w; persist failed sync state: %v", err, result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// Either the node vanished or another path already owns this exact
+			// generation. Both deserve visibility: silence here is what made the
+			// original false green invisible.
+			logger.Warnf("[sync_id=%s] ConfigManifest rejection not persisted: device=%s rows=0 (node missing or generation already owned)", decision.SyncID, deviceID)
 		}
 		return err
 	}

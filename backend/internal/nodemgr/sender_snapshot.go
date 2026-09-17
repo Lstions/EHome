@@ -180,8 +180,8 @@ func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, regist
 				// template_ids resolves to a template that exists in this snapshot.
 				commandCount = 1
 			}
-			if commandCount > maxCommandsPerEdgeDevice {
-				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, maxCommandsPerEdgeDevice)
+			if commandCount > MaxCommandsPerEdgeDevice {
+				return fmt.Errorf("edge device %d on channel %d has %d commands; collector limit is %d", edge.ID, channel.ID, commandCount, MaxCommandsPerEdgeDevice)
 			}
 		}
 	}

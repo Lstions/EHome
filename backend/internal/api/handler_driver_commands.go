@@ -125,6 +125,14 @@ func registerDriverCommandRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *node
 		}
 		existing = NormalizeCommandIntervals(existing)
 
+		// Capacity gate: refuse to persist a set the collector could never
+		// receive. Without this the write returns 200 and the failure only
+		// shows up later as a rejected ConfigManifest push.
+		if err := ValidateManifestCommandCapacity(driverRegistry, dev.Type, existing, dev.IntervalMs); err != nil {
+			Error(c, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		intervalsJSON, err := json.Marshal(existing)
 		if err != nil {
 			Error(c, http.StatusInternalServerError, "failed to marshal intervals")

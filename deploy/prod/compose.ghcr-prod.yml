@@ -1,0 +1,8 @@
+# 生产栈覆写：用 GHCR 正式镜像替换本地构建
+# 用法（仓库根目录）：
+#   docker compose -p ehomesystem -f docker-compose.yml -f deploy/prod/compose.ghcr-prod.yml up -d
+# 保留 docker-compose.yml 中的 postgres/emqx/网络/卷/环境变量，仅把 ehome 的 build 换成 image。
+services:
+  ehome:
+    image: ghcr.io/lstions/ehome:${EHOME_IMAGE_TAG:-latest}
+    build: !reset null

@@ -65,7 +65,11 @@ describe('NodeDetail mobile responsive (behavior)', () => {
   it('overrides sync state badge to 离线 when the node is offline', () => {
     // 离线设备不可能"同步中"：前端覆盖后端快照状态
     expect(src).toContain("if (collector.value?.status === 'offline') return '离线'")
-    // 在线节点的真实"同步中"展示不受影响
-    expect(src).toContain("syncing: '同步中'")
+    // 在线节点的状态文案/配色交给 utils/configSyncState 单一权威
+    // （该模块自身的取值映射由 utils/__tests__/configSyncState.spec.ts 覆盖，
+    //  这里只断言"接线"，避免把映射表再抄一份到本文件里造成第三处漂移）。
+    expect(src).toContain('configSyncStateLabel(collector.value?.config_sync_state)')
+    expect(src).toContain('configSyncStateTagType(collector.value?.config_sync_state)')
+    expect(src).not.toContain("syncing: '同步中'")
   })
 })
