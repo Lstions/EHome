@@ -319,7 +319,13 @@ func authRun006(e *harness.Env) {
 // authRun007 守护的不变量：签名被篡改的令牌必须被拒绝，
 // 且拒绝是 401 —— 绝不能"校验失败就当作匿名"继续处理请求。
 func authRun007(e *harness.Env) {
-	tampered := authFlipLastChar(e.Admin.Token)
+	// 篡改**签名段**（第 3 段）：只有签名变了，才叫「签名被篡改」。
+	// 原实现改的是整串末字符（落在 header 段），语义不对，且可能不改变解码结果。
+	sigParts := strings.Split(e.Admin.Token, ".")
+	if len(sigParts) != 3 {
+		e.Fatalf("令牌不是三段式 JWT（段数 %d）", len(sigParts))
+	}
+	tampered := sigParts[0] + "." + sigParts[1] + "." + authTamperSegment(sigParts[2])
 	if tampered == e.Admin.Token {
 		e.Fatalf("未能构造出篡改令牌")
 	}
@@ -339,7 +345,7 @@ func authRun007(e *harness.Env) {
 	// 篡改 payload 段（保留原签名）同样必须被拒绝。
 	parts := strings.Split(e.Admin.Token, ".")
 	if len(parts) == 3 {
-		payloadTampered := parts[0] + "." + authFlipLastChar(parts[1]) + "." + parts[2]
+		payloadTampered := parts[0] + "." + authTamperSegment(parts[1]) + "." + parts[2]
 		session2 := e.NewSession()
 		session2.Token = payloadTampered
 		resp2 := session2.Get("/api/v1/account")
@@ -406,19 +412,35 @@ func authTokenTTL(e *harness.Env, rememberMe bool) (time.Duration, error) {
 	return time.Duration((exp - iat) * float64(time.Second)), nil
 }
 
-// authFlipLastChar 返回把最后一个字符替换为另一个字符的字符串，
+// authTamperSegment 篡改一个 base64url 段的**首字符**并返回结果，
 // 用于构造"签名被篡改"的令牌。
+//
+// ⚠️ 2026-09-17 修复一处**会让本用例变成假红/假绿的真缺陷**（CI 两次失败之一）：
+//
+// 原实现把**最后一个字符**改成 'A'（若已是 'A' 则改 'B'）。但 JWT 第三段是
+// base64url(无填充) 的 32 字节 HS256 签名，长度恰为 **43 字符**：
+// 43×6 = 258 位，而有效载荷只有 256 位 ⇒ **末字符仅低 2 位参与解码，高 4 位被丢弃**。
+// 当末字符本来就是 'A'（index 0）时，改成 'B'（index 1）后低 2 位相同 ⇒
+// **解码后的签名逐字节不变** ⇒ 令牌根本没被篡改，服务端当然返回 200，
+// 而用例却断言 401 ⇒ 报出「篡改令牌应返回 401，实际 200」的**假红**。
+// 实测该情形概率 = 1/16 ≈ 6.25%（canonical 编码的末字符只可能是 16 个值中的
+// AEIMQUYcgkosw048，其中仅 'A' 会触发），这正是两次 CI 红、而本地多轮绿的原因。
+//
+// ⇒ 修法：改**首字符**。base64url 首字符的 6 位**全部**有效，改它必然改变解码结果。
+// 同时保留末字符处理路径的语义（若首字符已是 'A' 则改 'B'，保证确实变了）。
 //
 // 注意：ota.go 里另有一个 flipLastChar（同名不同文件），按设计 §4.1
 // 的域前缀规则应由 ota 域自行改名；这里只改自己文件内的引用。
-func authFlipLastChar(value string) string {
+func authTamperSegment(value string) string {
 	if value == "" {
 		return value
 	}
-	last := value[len(value)-1]
+	// 改首字符而非末字符：末字符在 43 字符的 base64url 里只有低 2 位有效，
+	// 改成 'A' 可能不改变解码结果（详见上方说明）。
+	first := value[0]
 	replacement := byte('A')
-	if last == 'A' {
+	if first == 'A' {
 		replacement = 'B'
 	}
-	return value[:len(value)-1] + string(replacement)
+	return string(replacement) + value[1:]
 }
