@@ -57,8 +57,12 @@ try {
   const flat = JSON.stringify(rowsTxt);
   check('P2 数据列不再是恒 —', /rainfall:\s*0\.50/.test(flat), flat.slice(0, 200));
   check('P2 原始数据列有 hex', /\d+B hex/.test(flat), flat.slice(0, 200));
-  // 「真的是 0」必须与「取不到」区分：0.00 必须出现，且不得整体退化为 —
-  check('P2 区分数值 0 与缺失（0.00 可见）', /rainfall:\s*0\.00/.test(flat), flat.slice(0, 200));
+  // 「有值」与「取不到」必须区分开：所有行都必须显示具体读数，不得退化为 —
+  // （注意不要断言"必须是 0.00"—— 那是**环境特定**的：真实雨量计读数 0mm 时为 0.00，
+  //  而 UART0 台架模拟器恒为 0.50。断言具体数值会让脚本只在某种接线下通过。）
+  const rowVals = rowsTxt.map(r => r[1]);
+  const allHaveValues = rowVals.length > 0 && rowVals.every(v => /^[a-z_]+:\s*[-\d.]+/i.test(v));
+  check('P2 每行都有具体读数（未退化为 —）', allHaveValues, JSON.stringify(rowVals.slice(0, 3)));
   await page.screenshot({ path: OUT + '/p2-datapanel.png', fullPage: true });
 
   // ── P4：OTA 弹层固件信息不得竖排 ──
