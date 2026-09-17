@@ -282,3 +282,49 @@ docker compose -p ehomesystem --env-file .env -f deploy/prod/docker-compose.prod
 **主控自己踩的同类坑**：读取表格时只取首个 `<table>`，而 Element Plus 把
 表头/表体拆成两个 `<table>` ⇒ 误判"没有数据行"。改为读 `tbody tr` 单元格才对。
 **"断言/取值方式失效"会伪装成"功能没修好"，与上面两条同源。**
+
+---
+
+## 门禁盲区：逻辑门禁 ≠ 方言门禁（CI 抓到、本地没抓到）
+
+**事件**：OTA 死列迁移的回归测试在本地（默认 SQLite）全绿，但 CI 的
+`Backend (PostgreSQL integration)` job 失败：
+
+```
+--- FAIL: TestMigrateOTATaskDropLegacyCollectorIDRemovesDeadColumn
+    migrate_ota_collector_id_test.go:36: 创建模拟旧 ota_tasks 表:
+    ERROR: syntax error at or near "AUTOINCREMENT" (SQLSTATE 42601)
+```
+
+**根因**：测试里写死了 SQLite 专有的建表 DDL `id INTEGER PRIMARY KEY AUTOINCREMENT`。
+该测试同时跑两种方言（默认 SQLite / `EHOME_TEST_DB=postgres`），PG 不认这个关键字。
+
+**教训**：`go test ./...` 默认只跑 SQLite 路径。**"本地全绿"与"CI 集成绿"是两件事**，
+必须分别跑、分别看原始输出 —— 与本仓既有的"vitest 不做类型检查，所以
+'测试全绿'与'类型干净'是两件事"（见 `delegated-work-verification` §2a）**同源**。
+
+**修复**：DDL 改为方言中立的 `id BIGINT`（本测试不插入指定 id，不需要自增/主键）。
+
+**验证**：两种方言各自跑 `go test ./...` **均无失败**（本地显式切 PG 复现了 CI 路径）。
+
+---
+
+## 部署环境独立化（已完成）
+
+生产入口从"override + 开发 compose 拼装"改为**自包含**的
+`deploy/prod/docker-compose.prod.yml`：
+
+```bash
+docker compose -p ehomesystem --env-file .env -f deploy/prod/docker-compose.prod.yml up -d
+```
+
+差异（刻意的）：无 `build:`（唯一代码来源是 GHCR 正式镜像）；
+Postgres **不**对宿主暴露端口；不含 monitoring profile。
+
+**已验证**：`config --quiet` 通过、解析结果无 build 段、实际起栈
+`/health={"status":"ok"}`、镜像为 GHCR、`docker port ehome-postgres` 无输出（未暴露）。
+数据已从 `backups/ehome_20260912_005717.dump` 恢复（394,583 行 device_data）。
+
+> 注：本次生产卷曾被清空（`ehomesystem_ehome-pgdata` 不存在），
+> 数据从 09-12 的备份恢复 —— 即**清空之后新增的数据无法找回**。
+> 建议：生产 compose 独立化后可考虑给备份加一条定时任务。
