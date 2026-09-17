@@ -34,19 +34,26 @@
         <el-input :value="currentVersion" disabled />
       </el-form-item>
 
+      <!--
+        固件信息区必须是单列：MD5 是 64 字符且无自然断点的长串，两列布局时它会把
+        内容列的最小宽度顶到 ~425px；600px 弹层减去外层 120px 标签宽后只剩 ~448px，
+        于是 auto 表格反压另一列 —— 实测 label 列被压到 27px、内容列 57px，
+        「文件大小」被拆成「1.35」/「MB」两行、表头逐字竖排、表格整体溢出弹层右侧。
+        单列让长值独占整行，配合长串强制断行 + 短值禁止折行即可根治。
+      -->
       <el-form-item label="固件信息" v-if="selectedFirmware">
-        <el-descriptions :column="2" border size="small">
+        <el-descriptions :column="1" border size="small" class="firmware-descriptions">
           <el-descriptions-item label="文件名">
             {{ selectedFirmware.filename }}
           </el-descriptions-item>
           <el-descriptions-item label="文件大小">
-            {{ formatFileSize(selectedFirmware.size_bytes) }}
+            <span class="firmware-size">{{ formatFileSize(selectedFirmware.size_bytes) }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="MD5">
-            {{ selectedFirmware.checksum }}
+            <span class="firmware-md5">{{ selectedFirmware.checksum }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="更新日志">
-            <div style="max-height: 100px; overflow-y: auto;">
+            <div class="firmware-changelog">
               {{ selectedFirmware.changelog }}
             </div>
           </el-descriptions-item>
@@ -344,6 +351,34 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* ── 固件信息区（单列）───────────────────────────────────────────────
+   2026-09-17 缺陷取证：600px 弹层 + 120px 表单标签宽下，两列描述表的
+   label 列被 64 字符 MD5 反压到 27px（「文件大小」逐字竖排、值拆成两行）。
+   下列规则与模板里的 :column="1" 共同构成防挤压契约，缺一即回归。 */
+.firmware-descriptions :deep(.el-descriptions__label) {
+  /* 表头/标签永不被压成竖排 */
+  white-space: nowrap;
+}
+
+.firmware-size {
+  /* 「1.35 MB」是原子信息，禁止拆行 */
+  white-space: nowrap;
+}
+
+.firmware-md5 {
+  /* 64 字符哈希：任意处可断行，独占整行后完整可见（不省略、不截断） */
+  font-family: var(--el-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  word-break: break-all;
+  /* 便于整串复制粘贴核对 */
+  user-select: all;
+}
+
+.firmware-changelog {
+  /* 更新日志滚动区（原内联样式，语义等价迁移到类上） */
+  max-height: 100px;
+  overflow-y: auto;
+}
+
 .upgrade-progress {
   margin-top: 20px;
   padding: 20px;

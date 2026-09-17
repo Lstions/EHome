@@ -96,10 +96,20 @@ const dialogVisible = computed({
   set: (value: boolean) => emit('update:visible', value),
 })
 
+// 「通道」= 设备所挂的**总线标识**（如 UART0）。
+//
+// 为什么不能再用 hardware_type + hardware_id 拼：在**边缘设备**上这两个字段的语义是
+//   · hardware_type —— 设备上为空/无意义；
+//   · hardware_id   —— **Modbus 从站地址**（雨量计为 "1"），不是总线名。
+// 拼出来就是 "UART 1" 这种误导值（2026-09-17 生产实测：真实挂在 UART0 的雨量计显示 "UART 1"）。
+//
+// 真正的总线名在关联通道上：device.channel_hardware_id（= 后端 channel.hardware_id，"UART0"/"UART1"）。
+// 取不到（老数据 / 紧凑列表没有 channel）时回退为 UNKNOWN（'—'），
+// **绝不**退回 hardware_type + hardware_id 拼接 —— 那等于把设备地址当总线名展示。
 const channelLabel = computed(() => {
   if (!props.device) return UNKNOWN
-  const parts = [props.device.hardware_type?.toUpperCase(), props.device.hardware_id].filter(Boolean)
-  return parts.length > 0 ? parts.join(' ') : UNKNOWN
+  const busId = props.device.channel_hardware_id || props.device.channel?.hardware_id
+  return busId || UNKNOWN
 })
 
 // 数据处置：默认保留历史数据

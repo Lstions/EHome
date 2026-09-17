@@ -209,14 +209,21 @@
                 <span>{{ formatTime(row.timestamp || row.created_at || row.collected_at) }}</span>
               </template>
             </el-table-column>
+            <!-- 两列都经 parseRowData(row) 这**唯一**入口取数：
+                 接口 GET /edge-devices/:id/data 只返回 data_json（无 parsed_data/data/raw_data），
+                 改前表格读 row.parsed_data || row.data ⇒ 恒 undefined ⇒ 恒「—」。
+                 解析失败（坏 JSON / 空）返回 null ⇒ 仍显示「—」，与"值真的是 0"区分开。 -->
             <el-table-column prop="data" label="数据">
               <template #default="{ row }">
-                <span>{{ formatData(row.parsed_data || row.data) }}</span>
+                <!-- 判据是 .values 而不是整个返回对象：后者恒为真对象，
+                     会让"解析不出来"也能匹配 v-if 分支（只有 formatData 兜住才没露馅）。 -->
+                <span v-if="parseRowData(row).values" data-testid="row-values">{{ formatData(parseRowData(row).values) }}</span>
+                <span v-else style="color: var(--el-text-color-placeholder);" data-testid="values-unknown">{{ UNKNOWN }}</span>
               </template>
             </el-table-column>
             <el-table-column label="原始数据" width="120" align="center">
               <template #default="{ row }">
-                <span v-if="row.raw_data" style="font-size: 12px; color: var(--el-text-color-secondary);">{{ formatRawData(row.raw_data) }}</span>
+                <span v-if="parseRowData(row).rawHex" style="font-size: 12px; color: var(--el-text-color-secondary);" data-testid="row-raw-hex">{{ formatRawData(parseRowData(row).rawHex) }}</span>
                 <span v-else style="color: var(--el-text-color-placeholder);" data-testid="raw-unknown">{{ UNKNOWN }}</span>
               </template>
             </el-table-column>
@@ -247,6 +254,122 @@
     </el-card>
   </div>
 </template>
+
+<script lang="ts">
+/**
+ * 行数据解析（纯函数，**本页唯一**的取数入口）。
+ *
+ * 为什么单独开一个非 setup 的 script 块：模板、统计卡（dynamicStats）、趋势兜底、CSV 导出、
+ * 实时条目都要取同一份数据，散落多处必然再次漂移（本次缺陷正是"表格读 parsed_data、接口只给
+ * data_json"）。函数放在模块作用域后，script setup 块内可直接调用、模板也能解析 ——
+ * 已用本仓 @vue/compiler-sfc 3.5.40 实测确认（两块共享作用域，导出照常生成）。
+ *
+ * 为什么不用"把函数 defineExpose 出去、让测试调它"的既有范式：本缺陷的回归点是
+ * **表格列恒显示 —**，只暴露函数等于不守渲染路径；测试必须打到真实渲染出的单元格。
+ *
+ * 契约（规范 §3.2.5 不得以本地默认值伪造事实）：
+ *   · 取不到 / JSON 坏 ⇒ values = null ⇒ 界面显示「—」；
+ *   · 值是 0 ⇒ values = { rainfall: 0 } ⇒ 界面显示「rainfall: 0.00」。
+ *   二者绝不互相顶替，尤其**不得**把解析失败落成 0。
+ */
+
+/** parseRowData 的返回：数值指标 + 原始帧 hex。 */
+export interface RowData {
+  /** 指标名 → 数值；解析不出来时为 null（不是空对象 —— 空对象会与"真的没有指标"混淆） */
+  values: Record<string, number> | null
+  /** 原始帧 hex，**不带 0x 前缀**（formatRawData 依赖该约定），没有则为 null */
+  rawHex: string | null
+}
+
+/** GET /api/v1/edge-devices/:id/data 的真实行形状（另有 id/device_id/node_id/timestamp/created_at） */
+interface DeviceDataRow {
+  data_json?: unknown
+  parsed_data?: unknown
+  data?: unknown
+  raw_data?: unknown
+  raw_hex?: unknown
+}
+
+/**
+ * 只认 number（并兼容既有的 { value } 包装）。刻意**不**做 Number(str)：
+ * "0.5" / "abc" 这类字符串被静默转成 0.5 / NaN 都属于"以本地推断伪造事实"。
+ */
+const asNumber = (value: unknown): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (value && typeof value === 'object' && 'value' in value) {
+    return asNumber((value as { value?: unknown }).value)
+  }
+  return null
+}
+
+/** hex 字符串规整：容忍 0x/0X 前缀与大小写，空串视为"没有" */
+const asHex = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null
+  const hex = value.trim().replace(/^0x/i, '')
+  return hex.length > 0 ? hex : null
+}
+
+/**
+ * 非指标字段（行元数据 + 原始帧）。扁平兜底分支必须排除它们，否则会把
+ * id / device_id / logical_device_id 这类**元数据数字**当成传感器读数渲染出来
+ * （实测真实行就带这三个数字键 —— 本文件新增用例抓到过）。
+ */
+const NON_METRIC_KEYS = new Set([
+  'id', 'device_id', 'node_id', 'logical_device_id', 'channel_id', 'error_code',
+  'timestamp', 'created_at', 'collected_at', 'updated_at',
+  'raw_data', 'raw_hex', 'data_json', 'parsed_data',
+])
+
+export function parseRowData(row: unknown): RowData {
+  if (!row || typeof row !== 'object') return { values: null, rawHex: null }
+  const r = row as DeviceDataRow
+
+  let values: Record<string, number> | null = null
+  // raw_hex 也可能来自 data_json 内部（真实帧就在 sensors 的同一层）
+  let rawHex = asHex(r.raw_hex) ?? asHex(r.raw_data)
+  const hasDataJson = typeof r.data_json === 'string' && r.data_json.trim() !== ''
+
+  // ① 现代契约：data_json = {"channel_id":1,"raw_hex":"01030200057847","sensors":[{"Name":"rainfall","Value":0.5}]}
+  if (hasDataJson) {
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(r.data_json as string)
+    } catch {
+      // 坏 JSON：**不抛**，values 保持 null ⇒ 表格显示「—」而不是 0
+      parsed = null
+    }
+    if (parsed && typeof parsed === 'object') {
+      const dj = parsed as { sensors?: unknown; raw_hex?: unknown; raw_data?: unknown }
+      rawHex = rawHex ?? asHex(dj.raw_hex) ?? asHex(dj.raw_data)
+      const sensors: unknown[] = Array.isArray(dj.sensors) ? dj.sensors : []
+      const entries: Array<[string, number]> = []
+      for (const sensor of sensors) {
+        if (!sensor || typeof sensor !== 'object') continue
+        const s = sensor as { Name?: unknown; Value?: unknown }
+        const value = asNumber(s.Value)
+        if (typeof s.Name === 'string' && s.Name !== '' && value !== null) entries.push([s.Name, value])
+      }
+      // 空 sensors 与"解析失败"同处理：都没有可信数值可展示
+      if (entries.length > 0) values = Object.fromEntries(entries)
+    }
+    // 刻意**不再**退到扁平兜底：行是 data_json 形态却解不出 sensors 时，
+    // 去扫行顶层的数字（id/device_id...）就是把元数据伪造成读数 —— 宁可为「—」。
+    return { values, rawHex }
+  }
+
+  // ② 兼容 { data: {...} } 与扁平 {...} 两种既有形状（既有单测的 fixture 走这里）
+  const flat = r.data && typeof r.data === 'object' && !Array.isArray(r.data)
+    ? r.data as Record<string, unknown>
+    : r
+  const entries = Object.entries(flat)
+    .filter(([key]) => !NON_METRIC_KEYS.has(key))
+    .map(([key, value]) => [key, asNumber(value)] as const)
+    .filter((entry): entry is readonly [string, number] => entry[1] !== null)
+  if (entries.length > 0) values = Object.fromEntries(entries)
+
+  return { values, rawHex }
+}
+</script>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
@@ -303,6 +426,9 @@ interface RealtimeDataPayload {
   collected_at?: string
   data?: Record<string, unknown>
   sensors?: Record<string, unknown>
+  /** WS 帧里的原始 hex（stores/websocket.ts 的 payload 契约），随行落库给 parseRowData 解析 */
+  raw_hex?: unknown
+  raw_data?: unknown
 }
 const availableCategories = ref<MeasurementCategory[]>([])
 const compareCategories = ref<MeasurementCategory[]>([])
@@ -333,22 +459,16 @@ function unwrapList<T>(res: unknown): T[] {
   return []
 }
 
-const extractNumericValue = (value: unknown): number | null => {
-  if (typeof value === 'number') return value
-  if (typeof value === 'object' && value !== null && 'value' in value) {
-    const numeric = (value as { value?: unknown }).value
-    return typeof numeric === 'number' ? numeric : null
-  }
-  return null
-}
-
 const dynamicStats = computed(() => {
   const latest = [...historyData.value]
     .sort((a, b) => String(b.timestamp || b.created_at || b.collected_at || '').localeCompare(String(a.timestamp || a.created_at || a.collected_at || '')))[0]
-  const source = latest?.parsed_data || latest?.data || {}
+  // 与表格列共用 parseRowData：改前读 latest.parsed_data || latest.data，
+  // 而接口只给 data_json ⇒ source 恒 {} ⇒ 统计卡恒不渲染（数据非空却一张卡都没有）。
+  const source = parseRowData(latest).values ?? {}
   return availableCategories.value
     .map((category) => {
-      const value = extractNumericValue(source[category.code])
+      // parseRowData 已把值收敛为数值（number | null），这里直接取
+      const value = source[category.code] ?? null
       if (value === null) return null
       return {
         code: category.code,
@@ -640,10 +760,8 @@ const buildChartSeries = async () => {
     chartSeries.value = series
   } catch (error) {
     logger.error('获取趋势数据失败', { error: String(error) })
-    // Fallback: 尝试从 device_data.data 提取数值字段
-    const firstItem = historyData.value[0]
-    const data = firstItem.data || {}
-    const numericKeys = Object.keys(data).filter(key => key !== 'raw_data' && typeof data[key] === 'number')
+    // Fallback: 从 data_json 提取数值字段（与表格/统计卡同一解析入口）
+    const numericKeys = Object.keys(parseRowData(historyData.value[0]).values ?? {})
 
     if (numericKeys.length > 0) {
       chartSeries.value = numericKeys.map(key => ({
@@ -655,7 +773,11 @@ const buildChartSeries = async () => {
             const t = item.timestamp || item.collected_at || item.created_at
             return t && !t.startsWith('0001-01-01')
           })
-          .map(item => ({ time: item.timestamp || item.collected_at || item.created_at, value: item.data?.[key] ?? 0 }))
+          // 该行没这个指标 ⇒ null，**不是 0**：折线应当断开，而不是伪造一个落零点
+          .map(item => ({
+            time: item.timestamp || item.collected_at || item.created_at,
+            value: parseRowData(item).values?.[key] ?? null,
+          }))
       }))
     } else {
       chartSeries.value = []
@@ -686,9 +808,13 @@ const handleDataUpdate = (message: WebSocketMessage) => {
   if (!payload || payload.edge_device_id !== queryForm.deviceId) return
 
   realtimeCount.value++
+  // 形状必须与表格期望一致：历史行推入表格后由 parseRowData 解析，
+  // raw_hex 放在行内部，否则实时行的「原始数据」列会因数据只在 payload 上而显示「—」。
   const newItem = {
     collected_at: payload.collected_at || new Date().toISOString(),
-    data: payload.data || {},
+    timestamp: payload.collected_at || new Date().toISOString(),
+    data: (payload.data || payload.sensors || {}) as Record<string, unknown>,
+    raw_hex: asHex(payload.raw_hex) ?? asHex(payload.raw_data) ?? undefined,
     error_code: 0
   }
 
@@ -761,11 +887,14 @@ const handleExport = () => {
   const device = deviceList.value.find(d => d.id === queryForm.deviceId)
   const deviceName = device?.name || queryForm.deviceId
 
-  const rows = [['时间', '数据(JSON)', '错误码']]
+  const rows = [['时间', '数据', '原始数据', '错误码']]
   for (const item of historyData.value) {
+    // 导出与表格同源：JSON.parse 后再按行序列化，直接把 data_json 原串写进单元格没有意义
+    const { values, rawHex } = parseRowData(item)
     rows.push([
-      formatTime(item.collected_at),
-      JSON.stringify(item.data || {}),
+      formatTime(item.timestamp || item.created_at || item.collected_at),
+      values ? JSON.stringify(values) : '',
+      rawHex ?? '',
       String(item.error_code || 0)
     ])
   }
@@ -832,8 +961,11 @@ const formatTime = (time: string) => {
   return time ? new Date(time).toLocaleString('zh-CN') : UNKNOWN
 }
 
-const formatData = (data: Record<string, unknown>) => {
-  if (!data) return UNKNOWN
+const formatData = (data: Record<string, unknown> | null | undefined) => {
+  // typeof + 键数双保险：null / undefined / 空对象 / 空数组 / 字符串一律「—」。
+  // formatData 是显示层最后一道闸：即便上游把 values 传成空对象（"没有可信数值"），
+  // 也会落回「—」而不是渲染成 "0" 或空白。
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return UNKNOWN
 
   // Filter out raw_data from display (shown in separate column)
   const entries = Object.entries(data).filter(([key]) => key !== 'raw_data')
@@ -859,7 +991,9 @@ const formatData = (data: Record<string, unknown>) => {
     .join(', ')
 }
 
-const formatRawData = (rawData: string | Record<string, any>) => {
+// 参数放宽到可空：调用点（表格列）拿到的是 parseRowData 的 rawHex，类型就是 string | null；
+// 函数体本来就以 !rawData 兜底返回 UNKNOWN，放宽类型不改变任何行为。
+const formatRawData = (rawData?: string | Record<string, any> | null) => {
   if (!rawData) return UNKNOWN
   // raw_data may be a hex string from data field, or base64 from raw_data field
   if (typeof rawData === 'string') {

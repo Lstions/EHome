@@ -5,6 +5,25 @@ import type { OperationDef } from './deviceConfig'
 // Extended to support health status: active, warning, error, disabled
 export type DeviceStatus = 'active' | 'online' | 'offline' | 'warning' | 'error' | 'disabled' | 'pending' | 'initializing' | 'unknown'
 
+/**
+ * 边缘设备**关联通道**（后端 GET /edge-devices 每个 item 携带的 channel 对象）。
+ * 只声明展示所需的字段；其余字段（bus_config/address/...）按需追加。
+ */
+export interface EdgeDeviceChannel {
+  id?: number
+  /**
+   * 通道所属节点的序列号（后端 channel.node_id，如 'F0F5BDFFFE02'）。
+   * 与 EdgeDevice.node_id 同源，仅作展示兜底时的关联依据，不参与判定。
+   */
+  node_id?: number | string
+  /** 总线名字，形如 "UART0" / "I2C1" / "SPI0" —— 才是「设备挂在哪个通道」的权威标识 */
+  hardware_id?: string
+  /** 总线类型枚举，后端存大写（"UART"/"I2C"/…），历史数据存在小写 */
+  hardware_type?: string
+  /** 后端 Channel.BusType（json: bus_type），如 "UART" */
+  bus_type?: string
+}
+
 export interface EdgeDevice {
   id: number
   node_id: number | string
@@ -14,7 +33,29 @@ export interface EdgeDevice {
   device_type: string
   protocol: string
   hardware_type: string
+  /**
+   * **设备从站地址**（Modbus 地址 / I2C 地址），如 "1"、"0x76"、"7"。
+   *
+   * ⚠️ 它**不是**总线名，**不要**用它做「通道」展示 —— 后端 models.EdgeDevice.HardwareID
+   * 的语义就是通信地址（空值按遗留默认地址 1 处理，见 backend/internal/deviceaction）。
+   * 总线名在关联通道上：见 channel → EdgeDeviceChannel.hardware_id（"UART0"）。
+   *
+   * 历史坑：normalize() 曾把 d.hardware_id || d.channel?.hardware_id 合并进本字段，
+   * 于是设备地址（真值 "1"）**赢过**总线名（"UART1"），让「通道」栏拼出误导性的 "UART 1"。
+   * 本字段语义保持不变（其它调用方依赖它是地址）；通道显示一律走 channel_hardware_id。
+   */
   hardware_id: string
+  /**
+   * 关联通道的总线名，直接取自后端 channel.hardware_id（"UART0"）。
+   * 取不到时为 undefined（channel 缺失 / 该字段为空）—— 展示层必须回退为
+   * UNKNOWN（'—'），不得拿 hardware_id（设备地址）冒充。
+   */
+  channel_hardware_id?: string
+  /**
+   * 归一化后的关联通道信息；后端 channel 缺失（老数据 / 紧凑列表）时为 undefined。
+   * 需要总线类型（UART/I2C）等更多通道字段时用它，而不是 channel_hardware_id。
+   */
+  channel?: EdgeDeviceChannel
   config: Record<string, any>
   status: DeviceStatus
   last_data: Record<string, number> | null
@@ -131,7 +172,13 @@ interface RawEdgeDevice {
   protocol?: string
   device_config?: { id?: number; protocol?: string; config?: Record<string, any> | string; operations?: Record<string, OperationDef> }
   hardware_type?: string
-  channel?: { hardware_type?: string; hardware_id?: string }
+  channel?: {
+    id?: number
+    node_id?: number | string
+    hardware_type?: string
+    hardware_id?: string
+    bus_type?: string
+  }
   hardware_id?: string
   config?: Record<string, any>
   status?: string
@@ -193,7 +240,13 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   device_type: d.type || d.device_type || '',
   protocol: d.protocol || d.device_config?.protocol || '',
   hardware_type: d.hardware_type || d.channel?.hardware_type || '',
+  // 注意: hardware_id = 设备从站地址（"1"/"0x76"），**不是**总线名；语义不得更改，
+  //    这里的 || d.channel?.hardware_id 只是老后端缺设备地址时的兼容兜底。
+  //    总线名请用下方 channel_hardware_id（推送式保留，不再被设备地址遮蔽）。
   hardware_id: d.hardware_id || d.channel?.hardware_id || '',
+  // 追加式保留关联通道（旧实现整体丢弃 d.channel，导致展示层拿不到真正的总线名）。
+  channel_hardware_id: d.channel?.hardware_id || undefined,
+  channel: d.channel ? { ...d.channel } : undefined,
   config: d.config || {},
   status: mapStatus(d.status),
   last_data: d.last_data || null,

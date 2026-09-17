@@ -62,7 +62,10 @@ describe('DeviceDeleteDialog.vue (方案 v3.3 §2.1)', () => {
     // 信息请求仍 pending，基本信息已经渲染
     expect(wrapper.text()).toContain('BMS-1')
     expect(wrapper.text()).toContain('Collector-A')
-    expect(wrapper.text()).toContain('UART UART1')
+    // 该 fixture 的 hardware_id='UART1' 是历史写法（真实边缘设备上是 Modbus 地址）；
+    // 「通道」栏现在读关联通道的总线名，这个 fixture 没有 channel → 回退 '—'。
+    // 总线名的完整覆盖见 __tests__/DeviceDeleteDialogChannel.spec.ts。
+    expect(wrapper.text()).toContain('—')
     expect(wrapper.text()).toContain('jiabaida_bms')
     expect(mockGetLogicalDeviceInfo).toHaveBeenCalledWith(7)
   })

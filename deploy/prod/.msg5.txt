@@ -1,0 +1,42 @@
+fix(ui): 闭环 P1/P1b/P2/P4 四处显示缺陷（子代理并行实施 + 主控实机复验）
+
+由 4 个并行子代理按互斥文件集实施，主控分派/审查/统一构建/实机复验。
+
+## P1 删除对话框「通道」显示误导值（UART 1）
+根因：channelLabel 拼的是设备级 hardware_type + hardware_id，但边缘设备上
+hardware_id 是 **Modbus 从站地址**（"1"），不是总线名；且 normalize() 输出里
+整个丢弃了 channel 对象 ⇒ 真正的总线名不可达。
+修：normalize() 追加式保留 channel（channel_hardware_id + channel 对象），
+hardware_id 语义保持不变；对话框改读关联通道，取不到回退 —（不再退回旧拼接）。
+
+## P1b 同类缺陷剩余 3 处（P1 过程中发现）
+EdgeDeviceList.vue 的表格「总线」列 / 移动卡片「总线通道」/ 批量导出 CSV，
+同样是 hardware_type + hardware_id 拼接。
+修：新增唯一取值口径 getDeviceBusLabel()，三处统一改用它。
+（核实：NodeDetail.vue:298 读的是 **Channel 对象**，其 hardware_id 确为总线名 —— 正确，未动。）
+
+## P2 数据面板「数据/原始数据」两列恒 —
+根因：接口只返回 data_json，前端却读 parsed_data || data 与 raw_data ⇒ 恒 undefined。
+且同一份 data_json 在统计卡/趋势兜底/CSV 导出/实时条目 4 处也各自读错。
+修：收敛为唯一纯函数 parseRowData(row) -> { values, rawHex }，5 处取数统一；
+解析失败与"真的是 0"显式区分（失败不显示成 0）。
+
+## P4 OTA 固件信息区逐字竖排
+根因：el-descriptions 是 auto-layout 表格，64 字符无断点 MD5 把最小内容宽顶到 ~980px，
+而 600px 弹层扣掉 120px label 宽只剩 ~448px ⇒ 反压列宽（实测 label 列 27px、
+「1.35 MB」被拆两行、描述表溢出弹层右侧 103px）。
+修：改单列 + MD5 等宽/break-all/不省略 + 文件大小 nowrap + 标签 nowrap。
+
+## 验证（主控独立复验，不采信子代理自报）
+- vue-tsc --noEmit → 0 错误；vitest → 145 files / 1573 passed；go test ./... 全绿。
+- 统一构建 dist 一次（禁止子代理各自 build），确认修复进入产物。
+- 真实浏览器（隔离栈 18094 + 种子精确复现缺陷形态）全绿：
+  P1 通道=UART0（不再 UART 1）；P2 rainfall: 0.50 / 0.00 + 7B hex；
+  P4 单列无竖排、MD5 完整；P1b 卡片与表格「总线」列均 UART0。
+
+## 过程中查出的三个"假绿"（同源，值得记）
+1. 共享 ElTable stub 不求值列插槽 ⇒ 直接用它测表格列等于测空气（子代理 D 局部替换为真求值替身）；
+2. 子代理 C 的变异脚本按「首个 { 到文件尾 }」截取规则块，规则块被扩到后续规则 ⇒
+   删掉 label nowrap 也能靠后面规则蒙混（改括号配平后才真红）；
+3. 主控读表格只取首个 <table>，而 Element Plus 把表头/表体拆成两个 ⇒ 误判"无数据行"。
+   **断言/取值方式失效会伪装成"功能没修好"。**

@@ -1,0 +1,54 @@
+# 主控集成复验栈：验证 P1/P2/P4 三处修复（本地构建镜像 ehome-fixes:local）
+name: ehome-fixes
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ehome-fixes-postgres
+    environment:
+      POSTGRES_USER: ehome
+      POSTGRES_PASSWORD: ehome_fixes_pw
+      POSTGRES_DB: ehome
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ehome"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - fixes_pgdata:/var/lib/postgresql
+
+  emqx:
+    image: emqx/emqx:5.8
+    container_name: ehome-fixes-emqx
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ehome:
+    image: ehome-fixes:local
+    container_name: ehome-fixes-web
+    ports:
+      - "18094:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ehome
+      EHOME_DB_PASSWORD: ehome_fixes_pw
+      EHOME_DB_NAME: ehome
+      EHOME_DB_SSLMODE: disable
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-fixes
+      EHOME_EXTERNAL_HOST: 127.0.0.1:18094
+      EHOME_JWT_SECRET: fixes_secret_0123456789abcdef0123456789a
+      EHOME_STATIC_DIR: /app/static/dist
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  fixes_pgdata:

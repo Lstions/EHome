@@ -145,7 +145,7 @@
         </el-table-column>
         <el-table-column label="总线" width="120">
           <template #default="{ row }">
-            <code>{{ row.hardware_type?.toUpperCase() }} {{ row.hardware_id }}</code>
+            <code>{{ getDeviceBusLabel(asDevice(row)) }}</code>
           </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="90">
@@ -235,7 +235,7 @@
             <el-icon :size="16"><DataLine /></el-icon>
             <div class="fact-content">
               <span class="fact-label">总线通道</span>
-              <code class="fact-value">{{ device.hardware_type?.toUpperCase() }} {{ device.hardware_id }}</code>
+              <code class="fact-value">{{ getDeviceBusLabel(device) }}</code>
             </div>
           </div>
         </div>
@@ -1137,6 +1137,25 @@ const getDeviceTypeLabel = (type: string) => {
   return getGlobalDeviceTypeLabel(type)
 }
 
+/**
+ * 「总线」列 / 「总线通道」栏 / CSV「总线」列的唯一取值口径。
+ *
+ * 为什么不能再拼 `hardware_type + hardware_id`：边缘设备上这两个字段的语义是
+ *   · hardware_type —— 设备上为空/无意义；
+ *   · hardware_id   —— **Modbus/I2C 从站地址**（雨量计 = "1"、"0x76"），不是总线名。
+ * 拼出来就是 "UART 1" 这种把**地址当总线名**的误导值
+ * （2026-09-17 生产实测：真实挂在 UART0 的雨量计显示 "UART 1"）。
+ *
+ * 真正的总线名在**关联通道**上：device.channel_hardware_id（= 后端 channel.hardware_id，
+ * "UART0"/"UART1"）；取不到时再读 channel.hardware_id（老后端/局部对象）。
+ * 两者都没有（老数据 / 紧凑列表没有 channel）时回退为 UNKNOWN（'—'），
+ * **绝不**退回 hardware_type + hardware_id 拼接 —— 那等于把设备地址当总线名展示。
+ */
+const getDeviceBusLabel = (device: EdgeDevice | null | undefined): string => {
+  if (!device) return UNKNOWN
+  return device.channel_hardware_id || device.channel?.hardware_id || UNKNOWN
+}
+
 // Health status tag type mapping (Element Plus tag types)
 function statusTagType(status: string): TagType {
   switch (status) {
@@ -1246,7 +1265,7 @@ const handleBatchExport = () => {
       device.name,
       getDeviceTypeLabel(device.device_type),
       device.node?.name || ('#' + device.node_id),
-      `${device.hardware_type?.toUpperCase()} ${device.hardware_id}`,
+      getDeviceBusLabel(device),
       statusLabel(device.status),
       device.last_data ? formatDeviceData(device.last_data) : '暂无数据',
       formatRelativeTime(device.last_data_time)
