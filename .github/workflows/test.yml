@@ -189,6 +189,66 @@ jobs:
           EHOME_SIM_LOCK_WAIT: 3s
         run: go test -tags=simulation -count=1 -timeout=30m ./simulation/...
 
+      # 失败时把「哪个场景失败、为什么」写进 job summary。
+      #
+      # 为什么必须有这一步（2026-09-17 实测教训）：
+      #   CI 失败时 annotation 只有 `Process completed with exit code 1.`（不含场景名），
+      #   完整细节只在模拟证据 artifact 里，而 **artifact 下载需要认证**。
+      #   于是定位一次偶发红必须先装 gh 再翻日志 —— 可诊断性太差。
+      #   而 summary.json 里本来就有 `scenarios[].failure`，直接打出来即可。
+      # 用 python3 而不是 jq：runner 上 python3 必然存在，jq 不保证。
+      - name: Summarize failing scenarios (job summary)
+        if: always()
+        run: |
+          python3 - "$GITHUB_STEP_SUMMARY" <<'PY'
+          import glob, json, os, sys
+          # 容错：优先用 argv（CI 的实际用法），缺省回落到 $GITHUB_STEP_SUMMARY，
+          # 再缺省打到 stdout —— 这样**同一条脚本能在本地原样演练**，
+          # 不必为了测试它在本地伪造 CI 环境。
+          out = sys.argv[1] if len(sys.argv) > 1 else os.environ.get('GITHUB_STEP_SUMMARY') or '/dev/stdout'
+          latest, newest = None, -1.0
+          for p in glob.glob('.logs/simulation/sim-*/summary.json'):
+              m = os.path.getmtime(p)
+              if m > newest:                     # 取最近一次 run（可能多个）
+                  newest, latest = m, p
+          lines = []
+          if not latest:
+              lines.append('## ⚠️ 未找到 simulation summary.json')
+              lines.append('')
+              lines.append('说明仿真实例可能在产生证据前就退出了（如 preflight 失败）。')
+          else:
+              d = json.load(open(latest, encoding='utf-8'))
+              scen = d.get('scenarios') or []
+              bad = [s for s in scen if s.get('status') not in ('passed', 'skipped')]
+              lines.append('## 仿真结果：%s' % d.get('status'))
+              lines.append('')
+              lines.append('| 项 | 值 |')
+              lines.append('|---|---|')
+              lines.append('| run_id | `%s` |' % d.get('run_id'))
+              lines.append('| 场景数 | %d |' % len(scen))
+              lines.append('| 失败数 | **%d** |' % len(bad))
+              lines.append('| 耗时 | %s → %s |' % (d.get('started_at'), d.get('finished_at')))
+              lines.append('')
+              if bad:
+                  lines.append('### 失败场景（这是定位根因的关键，不要只贴结尾几行日志）')
+                  lines.append('')
+                  for s in bad:
+                      lines.append('#### `%s` — %s' % (s.get('id'), s.get('title') or ''))
+                      lines.append('')
+                      lines.append('```')
+                      lines.append(str(s.get('failure') or s.get('error') or '(无 failure 字段)'))
+                      lines.append('```')
+                      lines.append('')
+              else:
+                  lines.append('无失败场景 ✅')
+          text = '\n'.join(lines) + '\n'
+          # 只在真的写文件时写；out 缺省是 /dev/stdout 时直接 print，
+          # 否则会**打印两遍**（write 一遍 + print 一遍）—— 实测踩到过。
+          if out and out != '/dev/stdout':
+              open(out, 'a', encoding='utf-8').write(text)
+          print(text, end='')
+          PY
+
       # summary.json（失败详情 + 证据）与 server.log 在失败时最有价值。
       # 路径是仓库根的 .logs/simulation，不是 backend/.logs —— harness 的证据目录
       # 固定在 repoRoot/.logs/simulation（env.go:198 经 repoRoot 向上查找 backend/go.mod），
