@@ -3,6 +3,7 @@ import { chromium } from '/home/sun/workspace/EHomeSystem/frontend-shared/node_m
 const BASE = process.env.EHOME_BASE || 'http://127.0.0.1:18091';
 const USER = process.env.EHOME_USER || 'admin';
 const PASS = process.env.EHOME_PASS || 'FixVerify123!';
+const NODE = process.env.EHOME_NODE || 'FIXV001';
 const browser = await chromium.launch({ executablePath: '/snap/bin/chromium', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
 const page = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' }).then(c => c.newPage());
 await page.goto(BASE + '/login', { waitUntil: 'networkidle' });
@@ -10,7 +11,7 @@ await page.getByPlaceholder('请输入用户名').fill(USER);
 await page.getByPlaceholder('请输入密码').fill(PASS);
 await page.getByRole('button', { name: /登\s*录/ }).click();
 await page.waitForURL(/dashboard/, { timeout: 20000 }).catch(() => {});
-await page.goto(BASE + '/node/FIXV001', { waitUntil: 'networkidle' });
+await page.goto(BASE + '/node/' + NODE, { waitUntil: 'networkidle' });
 await page.waitForTimeout(2500);
 const body = await page.locator('body').innerText();
 const hasFailed = body.includes('同步失败');
