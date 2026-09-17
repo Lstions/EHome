@@ -161,7 +161,19 @@ func AutoMigrate() error {
 	// EnsureRollupTable 与其 main.go 调用点已随退役删除; 存量库 (ehome/ehome_test)
 	// 里残留的表在此幂等 DROP (裁决: docs/分析/rollup-退役裁决-2026-09-15.md)。
 	// 放在 AutoMigrate 之后: 即便某次有人把建表加回来, 也在同一次启动内被清掉。
-	_, err = RetireLegacyRollup1m(DB)
+	if _, err = RetireLegacyRollup1m(DB); err != nil {
+		return err
+	}
+	// 列级 schema 漂移修复 (2026-09-17 生产实测): v2.3 把 OTATask.CollectorID 改名为
+	// NodeID 后，代码里已无 collector_id 的读写者，但**老 PG 库上该列仍是 NOT NULL**，
+	// 而 AutoMigrate 不会删列 ⇒ 每次建 OTA 任务都报
+	//   null value in column "collector_id" ... violates not-null constraint
+	// 表现为「OTA 升级」必 500、OTA 功能整体不可用。
+	// 单测跑 SQLite 内存库（按模型现建表，无此列）所以从未暴露 —— 属"旧库 schema
+	// 漂移"而非模型/逻辑缺陷。在此幂等 DROP（列不存在则零 DDL 副作用）。
+	if _, err = MigrateOTATaskDropLegacyCollectorID(DB); err != nil {
+		return err
+	}
 	return err
 }
 

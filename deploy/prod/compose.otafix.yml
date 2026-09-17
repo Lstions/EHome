@@ -1,0 +1,55 @@
+# 隔离验证栈：验证「OTA 任务创建失败（collector_id 死列）」的修复
+# 复用真实 PostgreSQL（与生产同版本），故意造出旧库 schema。不动生产 project。
+name: ehome-otafix
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ehome-otafix-postgres
+    environment:
+      POSTGRES_USER: ehome
+      POSTGRES_PASSWORD: ehome_otafix_pw
+      POSTGRES_DB: ehome
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ehome"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - otafix_pgdata:/var/lib/postgresql
+
+  emqx:
+    image: emqx/emqx:5.8
+    container_name: ehome-otafix-emqx
+    healthcheck:
+      test: ["CMD", "emqx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ehome:
+    image: ehome-otafix:local
+    container_name: ehome-otafix-web
+    ports:
+      - "18092:8080"
+    environment:
+      GIN_MODE: release
+      EHOME_DB_HOST: postgres
+      EHOME_DB_PORT: "5432"
+      EHOME_DB_USER: ehome
+      EHOME_DB_PASSWORD: ehome_otafix_pw
+      EHOME_DB_NAME: ehome
+      EHOME_DB_SSLMODE: disable
+      MQTT_BROKER: tcp://emqx:1883
+      EHOME_MQTT_CLIENT_ID: ehome-otafix
+      EHOME_EXTERNAL_HOST: 127.0.0.1:18092
+      EHOME_JWT_SECRET: otafix_secret_0123456789abcdef0123456789
+      EHOME_STATIC_DIR: /app/static/dist
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+volumes:
+  otafix_pgdata:
