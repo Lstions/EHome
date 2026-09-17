@@ -326,8 +326,17 @@ export const nodeApi = {
   },
 
   async getOTAHistory(id: number | string): Promise<OTARecord[]> {
-    const response = await client.get<unknown, ApiResponse<OTARecord[]>>(`/api/v1/nodes/${id}/ota/history`)
-    return response.data
+    // 后端 getNodeOTAHistory 返回的是 Success(gin.H{"data": tasks})，
+    // 即被信封包成 { code, data: { data: [...] }, message } —— 真正的数组在
+    // response.data.data。过去这里直接 return response.data，拿到的是对象而非数组，
+    // el-table 把该对象当成"一行"渲染，于是出现一行 '— / 空状态徽标 / 0%' 的脏行，
+    // 真实记录全部不可见（2026-09-17 生产实测）。
+    // 这里同时兼容"直接返回数组"的形态，避免后端扁平化后再次回归。
+    const response = await client.get<unknown, ApiResponse<unknown>>(`/api/v1/nodes/${id}/ota/history`)
+    const payload = response?.data
+    if (Array.isArray(payload)) return payload as OTARecord[]
+    const nested = (payload as { data?: unknown } | undefined)?.data
+    return Array.isArray(nested) ? (nested as OTARecord[]) : []
   },
 
   async cancelOTA(_id: number | string, recordId: number): Promise<void> {
