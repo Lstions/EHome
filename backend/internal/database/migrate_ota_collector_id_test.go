@@ -9,8 +9,15 @@ import (
 // legacyOTATasksDDL 复刻 v2.3 之前 ota_tasks 的 schema：含 NOT NULL 的 collector_id
 // 死列（改名后由 node_id 取代）。只用于测试，证明"旧库里残留的死列"确实会被
 // MigrateOTATaskDropLegacyCollectorID 幂等清掉。
+//
+// ⚠️ 必须是**方言中立**的 DDL：本测试同时跑在 SQLite（默认）与 PostgreSQL
+// （EHOME_TEST_DB=postgres，CI 的集成 job）上。
+// 初版写了 SQLite 专有的 `INTEGER PRIMARY KEY AUTOINCREMENT`，在 PG 上直接
+// 语法错误（SQLSTATE 42601）—— 而"只跑 SQLite"时全绿，正是典型的**只跑一半门禁**。
+// 这里用最保守的 `id BIGINT`（不加自增/主键）：本测试只关心 collector_id 列的存在
+// 与可删性，不插入指定 id，两方言都接受。
 const legacyOTATasksDDL = "CREATE TABLE ota_tasks (" +
-	"id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+	"id BIGINT, " +
 	"ota_id VARCHAR(64) NOT NULL, " +
 	"collector_id VARCHAR(64) NOT NULL, " +
 	"node_id VARCHAR(32) NOT NULL, " +
