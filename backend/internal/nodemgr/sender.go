@@ -381,6 +381,43 @@ func protocolVersionAtLeast(raw string, minimum protocolVersion) bool {
 
 // parseHardwareID converts a hardware ID string to uint64.
 // "0x76" → 118, "5" → 5, "" → 0
+//
+// ==================== KNOWN DIVERGENCE — READ BEFORE CHANGING ====================
+// This is the SECOND hardware_id 口径 in the backend, and it is deliberately NOT
+// the gate. The single truth source for "is this a device address" is
+// deviceaction.ParseHardwareAddress (deviceaction/definition.go), which returns an
+// error and enforces 1..254. parseHardwareID is parse-or-ZERO and never rejects:
+//
+//	input      parseHardwareID   deviceaction.ParseHardwareAddress
+//	"0x76"     118              118            (agree)
+//	"5"        5                5              (agree)
+//	""         0                1 (default)    (differs: 0 vs legacy default 1)
+//	"0"        0                1 (default)    (differs: 0 vs legacy default 1)
+//	"255"      255              error (>254)   (differs: encoded vs rejected)
+//	"0xFF"     255              error (>254)   (differs)
+//	"0x00"     0                error (<1)     (differs)
+//	"999999"   999999           error (>254)   (differs: illegal WIRE value)
+//	"-1"       0                error          (differs: silently 0)
+//	"UART1"    0                error          (differs: the 2026-09-20 incident value)
+//
+// Where the value goes: sender_snapshot.go encodes it into ConfigManifest field 9
+// (edge_device_groups) sub-field 2. The ESP32 firmware stores it in
+// config_edge_device_t.hardware_id and copies it into the scheduler, but has no
+// consumer that addresses a bus with it — the physical address used on the wire
+// comes from the compiled ChannelCmdV2 step, which goes through
+// ParseHardwareAddress. So today this field is dead data, and the divergence is a
+// latent second 口径 rather than an active mis-addressing bug.
+//
+// What is NOT fixed here on purpose (2026-09-21, G6 decision): making the mapper
+// reject an illegal address would change ConfigManifest behaviour on the wire for
+// rows that already hold such values, and "make the encoded value agree with the
+// gate" is a protocol change that needs a coordinated firmware decision. The
+// divergence is therefore PINNED by TestParseHardwareIDDivergesFromAddressGate so
+// it cannot drift silently, and the WRITE side is closed instead: since G1 the
+// /nodes/:id/config endpoint validates hardware_id through
+// validateEdgeDeviceAddress, so new illegal values cannot be introduced here.
+// Legacy rows written before the gate existed are the remaining exposure.
+// ===============================================================================
 func parseHardwareID(s string) uint64 {
 	s = strings.TrimSpace(s)
 	if s == "" {

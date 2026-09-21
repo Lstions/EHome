@@ -64,6 +64,17 @@ type CommandManualResolution struct {
 
 // CommandAttempt is a physical-delivery attempt. Phase 1 creates an attempt
 // only when a dispatcher actually accepts an outbox record for transport.
+//
+// FinalReason (M-3, 2026-09-21) makes "why THIS attempt did not go out" an
+// attempt-scoped fact instead of an execution-scoped one. Before this column
+// existed the only carrier was command_executions.final_reason, so a rejection
+// had to be erased on the success path (a later successful attempt would
+// otherwise inherit the previous attempt's cause). Keeping the reason on the
+// attempt that was rejected removes that coupling: erasing it is no longer
+// required to avoid cross-attempt contamination, and a future second attempt
+// can clear the execution-level reason without destroying the first attempt's
+// cause. Same column budget as CommandExecution.FinalReason (size:256); writers
+// clamp to commandexec.FinalReasonColumnRunes before it is stored.
 type CommandAttempt struct {
 	ID           uint64     `gorm:"primaryKey" json:"id"`
 	CommandID    string     `gorm:"size:36;not null;uniqueIndex:idx_command_attempt" json:"command_id"`
@@ -73,6 +84,7 @@ type CommandAttempt struct {
 	WireDigest   string     `gorm:"size:64;not null" json:"wire_digest"`
 	BootID       string     `gorm:"size:96" json:"boot_id,omitempty"`
 	FencingToken uint64     `gorm:"not null" json:"fencing_token"`
+	FinalReason  string     `gorm:"size:256" json:"final_reason,omitempty"`
 	CreatedAt    time.Time  `gorm:"not null;index" json:"created_at"`
 	PublishedAt  *time.Time `json:"published_at,omitempty"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`

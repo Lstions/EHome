@@ -218,6 +218,24 @@ func (def Definition) Compile(params json.RawMessage) (SingleStep, error) {
 	return cloneStep(step), nil
 }
 
+// RequiresTargetAddress reports whether this action's wire frame embeds the
+// physical EdgeDevice address, i.e. whether dispatch will parse
+// EdgeDevice.hardware_id through ParseHardwareAddress.
+//
+// It is the single server-side predicate behind the create/update gate in the
+// HTTP layer (handler_edge_device.go) and the frontend wizard's "device
+// address" field (QuickCreateDeviceDialog.vue): such a device must be given a
+// valid 1-254 decimal or 0xNN address, while a device whose actions never
+// embed an address (e.g. pure I2C reads) must not be blocked by an
+// address-shaped field it never uses.
+//
+// All three trusted hooks are consulted because every one of them reaches
+// ParseHardwareAddress: CompileForAddress (single step), CompilePlanForAddress
+// (bounded plan) and VerifyForAddress (response binding).
+func (def Definition) RequiresTargetAddress() bool {
+	return def.addressCompiler != nil || def.planAddrCompiler != nil || def.addressVerifier != nil
+}
+
 // CompileForAddress applies the EdgeDevice-owned physical address when the
 // trusted driver declares that its protocol embeds one.  Non-addressed
 // actions retain the ordinary compiler path.
@@ -455,6 +473,19 @@ func CurrentEngineAllows(def Definition) bool {
 		}
 	}
 	return false
+}
+
+// DeviceTypes returns every device type present in the catalog, sorted. It is
+// the read accessor that lets a caller answer "which driver types can this
+// catalog act on" without hard-coding a fixture list that would silently drift
+// as drivers are added or removed.
+func (r *Registry) DeviceTypes() []string {
+	types := make([]string, 0, len(r.byType))
+	for deviceType := range r.byType {
+		types = append(types, deviceType)
+	}
+	sort.Strings(types)
+	return types
 }
 
 func (r *Registry) List(deviceType string) []Definition {

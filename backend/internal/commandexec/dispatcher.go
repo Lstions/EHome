@@ -156,6 +156,23 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 	published, queueDuration, err := d.dispatch(ctx, claimed)
 	if err != nil {
 		metrics.DeviceActionDispatchTotal.WithLabelValues("error").Inc()
+		// Surface the rejection to the operator instead of letting the execution
+		// sit in QUEUED until its deadline expires.
+		//
+		// The 2026-09-20 incident: every dispatch was rejected by
+		// deviceaction.ParseHardwareAddress ("hardware_id \"UART1\" must be an
+		// address from 1 to 254"), but the error only reached the server log.
+		// The UI showed QUEUED for the full deadline (~120s) and then a generic
+		// "deadline expired before dispatch", so the real cause was invisible.
+		//
+		// This runs in its own statement (NOT inside d.dispatch's transaction):
+		// the transaction above rolled back precisely to leave the attempt
+		// unpublished, and the outbox row is still LEASED. Writing here keeps the
+		// lease, fencing token, attempt row and QUEUED status exactly as they were,
+		// so RecoverExpired's deadline semantics and the retry path are unchanged;
+		// only the human-readable reason becomes visible. A later successful
+		// dispatch clears it again (see clearDispatchRejection).
+		d.recordDispatchRejection(ctx, claimed.CommandID, err)
 	} else if published {
 		metrics.DeviceActionDispatchTotal.WithLabelValues("published").Inc()
 		if queueDuration >= 0 {
@@ -165,6 +182,100 @@ func (d *Dispatcher) ProcessOnce(ctx context.Context) (bool, error) {
 		metrics.DeviceActionDispatchTotal.WithLabelValues("cancelled").Inc()
 	}
 	return true, err
+}
+
+// FinalReasonColumnRunes is the storage budget of every final_reason column
+// this domain writes: command_executions.final_reason and
+// command_attempts.final_reason are both `gorm:"size:256"`. Every composed
+// string is clamped to this budget before it is sent to the database, because
+// an over-long value would otherwise be silently cut (or rejected) by the
+// storage engine — invisibly and differently per dialect.
+//
+// It is counted in RUNES: both SQLite and PostgreSQL measure a
+// character-varying column in characters, and clampRunes truncates at rune
+// boundaries so a multi-byte cause can never end in half a character.
+const FinalReasonColumnRunes = 256
+
+// dispatchRejectionMaxRunes bounds the WHOLE reason written by
+// recordDispatchRejection, prefix included. It is deliberately smaller than
+// FinalReasonColumnRunes (200 < 256): the deadline path later composes
+// "<cause>; deadline expired before dispatch" onto the same value, and that
+// suffix plus the "…" of a clamped cause must still fit the column. The
+// composition in RecoverExpired is clamped again at FinalReasonColumnRunes, so
+// this budget is a readability choice, not a correctness boundary.
+const dispatchRejectionMaxRunes = 200
+
+// firstPhysicalAttemptNo is the attempt number of the only attempt the
+// dispatcher creates today. It is shared by the attempt creation site and by
+// recordDispatchRejection so a rejection can never be attributed to a different
+// attempt than the one that was just tried. A future retry path that opens a
+// second attempt must make both sites use that attempt's own number.
+const firstPhysicalAttemptNo uint32 = 1
+
+// recordDispatchRejection publishes "this command could not be handed to the
+// device, and why" so the operation history can show it while the command is
+// still QUEUED.
+//
+// Two sinks, deliberately (M-3, 2026-09-21):
+//   - the execution row, which is what R4 made visible while the command is
+//     still QUEUED (the 2026-09-20 outage showed nothing at all for ~120s);
+//   - the attempt row for the attempt that was rejected, which is the level the
+//     reason actually belongs to.
+//
+// Why the write is best-effort instead of an insert: d.dispatch creates the
+// attempt row INSIDE the transaction that also marks the outbox PROCESSED, and
+// every error path rolls that transaction back — so in today's single-attempt
+// flow the rejected attempt has no surviving row here. Creating one would be
+// actively wrong: command_attempts carries the unique keys (command_id,
+// attempt_no) and envelope_id that the retry's own create would then collide
+// with, and it is the publication evidence whose one-to-one correspondence with
+// a PROCESSED outbox is relied on by the retention invariant (INV-9 /
+// datalifecycle command_outbox_cleanup.go). A placeholder row for a dispatch
+// that never reached the wire would corrupt both. So the attempt row is written
+// when it exists, the execution row is ALWAYS written as the durable carrier,
+// and RecoverExpired (inbox.go) prefers the attempt-scoped copy when one
+// exists — which is exactly the arrangement a real second attempt needs: it can
+// clear the execution-level copy without destroying the first attempt's cause.
+//
+// Failure is deliberately non-fatal for the dispatcher: if the reason cannot be
+// written, the caller's error and the metrics counter still stand, and the
+// deadline path remains the backstop.
+func (d *Dispatcher) recordDispatchRejection(ctx context.Context, commandID string, dispatchErr error) {
+	if commandID == "" || dispatchErr == nil {
+		return
+	}
+	detail := strings.TrimSpace(dispatchErr.Error())
+	if detail == "" {
+		return
+	}
+	reason := clampRunes("dispatch rejected: "+detail, dispatchRejectionMaxRunes)
+	db := d.db.WithContext(ctx)
+	execErr := db.Model(&models.CommandExecution{}).
+		Where("command_id = ? AND status = ?", commandID, StatusQueued).
+		Update("final_reason", reason).Error
+	// Attempt-scoped copy. RowsAffected == 0 is the expected outcome while the
+	// rejected attempt's transaction has rolled back; it is not an error.
+	attemptErr := db.Model(&models.CommandAttempt{}).
+		Where("command_id = ? AND attempt_no = ?", commandID, firstPhysicalAttemptNo).
+		Update("final_reason", reason).Error
+	if execErr != nil || attemptErr != nil {
+		metrics.DeviceActionDispatchTotal.WithLabelValues("error").Inc()
+	}
+}
+
+// clampRunes truncates a string to AT MOST limit runes (ellipsis included), so
+// a multi-byte reason can never be sliced mid-character and the truncation is
+// visible to the reader. The ellipsis is counted against the budget because the
+// caller sizes the budget after the storage column, not after the payload.
+func clampRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) (bool, time.Duration, error) {
@@ -187,7 +298,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) 
 			}
 			return nil
 		}
-		attempt := models.CommandAttempt{CommandID: execution.CommandID, AttemptNo: 1, Status: StatusDispatched, FencingToken: outbox.FencingToken, CreatedAt: d.now()}
+		attempt := models.CommandAttempt{CommandID: execution.CommandID, AttemptNo: firstPhysicalAttemptNo, Status: StatusDispatched, FencingToken: outbox.FencingToken, CreatedAt: d.now()}
 		attempt.EnvelopeID = fmt.Sprintf("%s:%d", execution.CommandID, attempt.AttemptNo)
 		// A lease/fencing token protects database ownership only. It must never
 		// contribute to the wire identity: MQTT may have accepted the packet
@@ -217,6 +328,17 @@ func (d *Dispatcher) dispatch(ctx context.Context, outbox models.CommandOutbox) 
 			attemptUpdates["wire_digest"] = result.WireDigest
 		}
 		if err := tx.Model(&models.CommandAttempt{}).Where("id = ? AND status = ?", attempt.ID, StatusDispatched).Updates(attemptUpdates).Error; err != nil {
+			return err
+		}
+		// Clear any reason recorded by an earlier rejected dispatch: the command is
+		// now on the wire, so a stale rejection would misreport THIS attempt.
+		// M-3: the rejected attempt keeps its own copy in command_attempts, so
+		// clearing the execution-level value no longer destroys the first
+		// attempt's cause — it only stops a stale summary from being read as a
+		// property of the attempt that is now published.
+		if err := tx.Model(&models.CommandExecution{}).
+			Where("command_id = ? AND status = ?", execution.CommandID, StatusQueued).
+			Update("final_reason", "").Error; err != nil {
 			return err
 		}
 		transition := tx.Model(&models.CommandExecution{}).Where("command_id = ? AND status = ?", execution.CommandID, StatusQueued).Update("status", StatusDispatched)

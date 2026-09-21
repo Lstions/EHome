@@ -18,7 +18,59 @@ import (
 	"gorm.io/gorm"
 )
 
-const MaxCapabilityAge = 5 * time.Minute
+// MaxCapabilityAge bounds how old the newest ResourceReport may be before the
+// server stops trusting the node's ChannelCmdV2 capability facts.
+//
+// 为什么不是 5 分钟（2026-09-21 缺陷根因）：
+// ESP32 固件**没有**周期性 ResourceReport。全固件只有三处触发点：
+//   - hello_handshake.c:44  handle_hello_success()      —— 每次 Hello 握手成功后
+//   - app_callbacks.c:363   handle_config_applied()     —— 每次 ConfigManifest 提交成功后
+//   - handler_config.c:70   QueryResources(0x1A) 处理   —— 服务端主动查询时
+//
+// 而周期性 Hello 的间隔由周期 sync 决定：
+//   - sync_manager.c:269-273  sync_manager_periodic_task() 每 60s 轮询一次
+//   - sync_manager.c:295      should_request_sync(PERIODIC) 要求 > 600s
+//
+// 即稳态下最有把握的上报间隔约 600~660s（10~11 分钟）。
+// 5 分钟 < 10 分钟 ⇒ **必然**周期性地把一台健康节点的能力判为过期。
+// 这不是"证据不够新鲜"，而是"阈值与真实事件节奏不匹配"。
+//
+// 口径/来源待补：本条注释原先引用一组"生产实测"数字
+// （19 次 ResourceReport / 84 分钟、stale 占 1912s/5029s = 38%、7 个窗口、最长 360s）。
+// 仓库内**既无对应 artifact，也无复跑命令**，该组数字不可复核，故已移除。
+// 若需重新引入定量结论，请先落盘证据（原始 ResourceReport 时序 + 复跑脚本），
+// 并同时给出分母（窗口内事件数与节点数）、口径（stale 判定规则与采样粒度）与采集时刻。
+// 结论不依赖那组数字：上面的固件节奏推导已足以证明 5 分钟阈值必然误判健康节点。
+//
+// resourceReportInterval 的取值依据（上界，不是平均值）：
+//
+//	稳态周期 sync 间隔 600s + 任务轮询粒度 60s = 660s。
+//
+// capabilityReportMargin 是裕量：覆盖 HelloAck 往返、MQTT 重连后的 Hello
+// 重建、以及设备侧调度抖动。裕量 = 5 分钟，即 900s 里留 240s（约 36%）。
+const resourceReportInterval = 10 * time.Minute
+const capabilityReportMargin = 5 * time.Minute
+
+// MaxCapabilityAge 必须是"固件上报节奏 + 裕量"，而不是一个凭感觉挑的数字。
+// 下面的门禁测试（capability_window_alignment_test.go）把这条不变式钉死：
+// 任何把 MaxCapabilityAge 调到 resourceReportInterval 以下的改动都会变红。
+//
+// 为什么放宽到这里**不会**让危险操作使用过期能力：
+//  1. 能力快照只决定"服务端认为固件接受哪种 V2 信封形状"。请求的**物理正确性**
+//     来自服务端冻结的 ActionDefinition + 参数，与快照新旧无关。
+//  2. 快照"变得更差"的唯一现实途径是固件换代：OTA 后设备重启 ⇒ 新 BootID ⇒
+//     handler_hello.go:338-341 清空 BootID/ResourceReportedAt/Revision ⇒
+//     gate 立即 fail-closed，与年龄无关（BootID 清空使任何旧快照都不匹配）。
+//  3. 快照描述的资源发生任何**服务端可见**的变化（通道增删、设备地址改写、
+//     清单下发）都会走 ConfigManifest 提交 ⇒ app_callbacks.c:363 立刻重报。
+//     也就是说：只有"什么都没发生"时快照才会变老 —— 旧快照在那种情况下
+//     恰恰仍然是对的。
+//  4. 写类动作另有更强的、按**动作**分级的证据门禁（不是按时间分级的）：
+//     未冻结协议的写操作被 AvailabilityCode（protocol_unverified /
+//     hardware_evidence_required）在注册期冻结，生产根本进不来；
+//     clear_rainfall_write 走 bounded_sequence + readback 校验。
+//     按风险调**时间窗**并不能替代这些门禁，只会再引入一个不匹配真实节奏的常量。
+const MaxCapabilityAge = resourceReportInterval + capabilityReportMargin
 
 // ChannelCmdV2Transport is the only production transport for business
 // actions. It compiles server-owned ActionDefinition data into a bounded V2

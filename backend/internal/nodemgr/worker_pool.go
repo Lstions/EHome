@@ -31,9 +31,21 @@ const (
 	defaultJobBuffer   = 1024 // P1-5: from 128 → 1024
 
 	// nodeIDCacheTTL bounds how long a cached node_id → node.ID mapping is
-	// trusted before lookupCollectorID re-queries the DB. Kept in sync with
-	// commandexec.MaxCapabilityAge (5min) so node identity never outlives the
-	// capability window. Explicit InvalidateNodeIDCache remains the fast path.
+	// trusted before lookupCollectorID re-queries the DB.
+	//
+	// 本值**独立成立**，不跟随 commandexec.MaxCapabilityAge：
+	//   - MaxCapabilityAge 回答的是另一个问题：ResourceReport **快照**是否还新鲜
+	//     （当前 900s = resourceReportInterval 10min + capabilityReportMargin 5min）。
+	//     它与"device_id → 主键"这个映射的寿命没有推导关系。
+	//   - 本缓存只回答"这个 device_id 对应哪个主键"，而 device_id 只在
+	//     节点**创建**时写入、**删除**时才失效（见 handler_node.go 删除路径
+	//     调用 InvalidateNodeIDCache）。即映射的语义有效期与能力窗口无关。
+	//   - 之所以不干脆拉到 15min：这里缓存的是**主键**，一旦取到过期主键，
+	//     后续写入会落到错误的 node_id 上；5min 是"少打扰 DB"与"尽快自愈于
+	//     漏掉的失效通知"之间的折中。真实的快速路径始终是显式
+	//     InvalidateNodeIDCache，TTL 只是兜底。
+	//
+	// 注意：改这个值不影响 MaxCapabilityAge，反之亦然 —— 两者不再有同步契约。
 	nodeIDCacheTTL = 5 * time.Minute
 )
 
@@ -41,8 +53,10 @@ const (
 // Updated by handleHello/handleStatusReport, read by worker pool
 // instead of repeating db.Where("node_id = ?", job.deviceID).First() per DataReport.
 // Entries are TTL-bound: lookups older than nodeIDCacheTTL re-query the DB,
-// so a stale mapping cannot outlive the capability window even if an explicit
-// invalidation is missed.
+// so a stale mapping self-heals within nodeIDCacheTTL even if an explicit
+// invalidation is missed. (本句原先写作"cannot outlive the capability window"，
+// 那是把该 TTL 与 commandexec.MaxCapabilityAge 当成有同步契约的旧口径；
+// 两者已无同步关系，见上方 nodeIDCacheTTL 的说明。)
 var nodeIDCache sync.Map
 
 // nodeIDCacheEntry carries the cached collector ID plus the write timestamp
