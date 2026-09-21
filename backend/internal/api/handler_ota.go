@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -97,6 +98,9 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 
 	// Cancel OTA task
 	// - POST /api/v1/ota/tasks/:id/cancel
+	//
+	// 仅下载阶段 (pending/downloading) 可取消; 已进入 verifying/installing 或状态被
+	// 并发改写时 CancelTask 返回 ErrTaskNotCancellable → HTTP 409 (而不是 400)。
 	v1.POST("/ota/tasks/:id/cancel", func(c *gin.Context) {
 		id := c.Param("id")
 		taskID, err := strconv.ParseUint(id, 10, 64)
@@ -105,6 +109,10 @@ func registerOTARoutes(v1 *gin.RouterGroup, db *gorm.DB, otaMgr *ota.Manager, no
 			return
 		}
 		if err := otaMgr.CancelTask(uint(taskID)); err != nil {
+			if errors.Is(err, ota.ErrTaskNotCancellable) {
+				Error(c, http.StatusConflict, err.Error())
+				return
+			}
 			Error(c, http.StatusBadRequest, err.Error())
 			return
 		}

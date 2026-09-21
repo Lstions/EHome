@@ -3,6 +3,7 @@ package ota
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,10 +34,26 @@ const (
 
 // OtaProgress 状态码 (ESP→SVR, type=0x0B) — 与 docs §6.3 / protocol-spec.md 一致
 //
-// 当前 ESP32 实际只发 0/1/2/3 四个值, verifying 与 installing 阶段共用
-// status=1 (因为 ESP32 端 OTA_STAGE_VERIFYING/OTA_STAGE_APPLYING 都映射到
-// OTA_STATUS_INSTALLING)。WireVerifying=4 是 server 内部扩展, 允许未来
-// ESP32 升级时显式区分 verifying 和 installing 阶段。
+// 当前 ESP32 固件实际只发 0/1/2/3 四个值, verifying 与 installing 阶段共用
+// status=1。依据是固件源码本身（不依赖任何 OTA_STAGE_*/OTA_STATUS_* 宏 ——
+// 那组符号在 esp32-collector 中已不存在, 复核命令:
+//
+//	grep -rn 'OTA_STAGE_\|OTA_STATUS_' esp32-collector   # 0 命中）:
+//	- 消息表: frame_codec.h:49  #define MSG_OTA_PROG 0x0B
+//	- 发送端: handler_data.c:276-289  msg_handler_send_ota_prog() 把 status 原样
+//	  编进 field 2（无任何枚举翻译层）
+//	- 唯一的调用注入点: main.c:310  ota_set_progress_callback(msg_handler_send_ota_prog)
+//	- 全部 status 取值: ota.c 中 ota_report_progress() 的 8 处调用只出现 0/1/3
+//	  （行 517、609、713 传 0=downloading; 829 传 1=installing/完成;
+//	   797、809、820 传 3=failed）—— **从不出现 2**, 也从不出现 4
+//	- ota.c:828-829 在 ota_nvs_set_state(OTA_STATE_VERIFYING) 之后立刻
+//	  ota_report_progress(..., 1, 100, NULL), 即固件内部确有"校验/写入"阶段,
+//	  但 wire 上仍报 1
+//
+// 注意 ota.h:71 的注释写作 "1=completed, 2=verifying"，与 ota.c 的实际实参
+// 不一致, 属于**文档债**（本次不改固件, 仅记录）。
+// WireVerifying=4 是 server 内部扩展, 允许未来 ESP32 升级时显式区分
+// verifying 和 installing 阶段（当前固件永不发送该值）。
 const (
 	WireDownloading = 0
 	WireInstalling  = 1
@@ -51,6 +68,21 @@ var terminalStates = map[string]bool{
 	StatusFailed:  true,
 	StatusTimeout: true,
 }
+
+// cancellableStates 用户可主动取消的阶段: 仅下载阶段 (pending/downloading)。
+//
+// 一旦进入 verifying/installing, 设备已在写/准备写引导分区; 此时服务端单方面把任务
+// 置为终态只会造成 "账上说已取消、设备照样刷入新固件" 的账实不符 —— 故服务端拒绝取消
+// (API 层返回 409)。下载阶段取消不触碰引导分区, 因此允许。
+var cancellableStates = []string{StatusPending, StatusDownloading}
+
+// ErrTaskNotCancellable 任务已过可取消窗口 (verifying/installing) 或状态在
+// 读取后被并发改写。API 层用 errors.Is 判定并映射为 HTTP 409。
+var ErrTaskNotCancellable = errors.New("task is no longer cancellable")
+
+// cancelErrorMsg 用户取消的 error_msg。取消不引入 cancelled 终态, 复用 failed +
+// 本常量区分 (与设备侧上报的失败 reason 天然可区分)。
+const cancelErrorMsg = "cancelled by user (during download)"
 
 // 抢占 (supersede) 旧 OTA 记录: 同 node 下所有非终态记录标记为 failed
 // 实现 docs §6.4.1
@@ -695,8 +727,16 @@ func (m *Manager) HandleHelloOTACompletion(collectorID string, deviceID, firmwar
 	}
 }
 
-// CancelTask marks an in-flight OTA task as cancelled (failed with reason)
-// F6.x: user-initiated cancel from UI
+// CancelTask marks an in-flight OTA task as cancelled (failed with reason).
+// F6.x: user-initiated cancel from UI.
+//
+// 只允许在下载阶段取消 (status ∈ cancellableStates: pending/downloading)。
+// verifying/installing 阶段返回 ErrTaskNotCancellable (API 层 → HTTP 409), 因为设备
+// 已进入写引导分区流程, 服务端单方面置终态会造成 "账上说已取消、设备照样刷入新固件"。
+//
+// 状态转移使用**条件更新** (WHERE id=? AND status=<读到的状态>)，不是先读后写整行 Save:
+// 并发竞态下 RowsAffected != 1 说明状态已被其它路径改写, 此时返回
+// ErrTaskNotCancellable 包装错误, 绝不覆盖新状态。
 func (m *Manager) CancelTask(taskID uint) error {
 	var task models.OTATask
 	if err := m.db.First(&task, taskID).Error; err != nil {
@@ -705,13 +745,42 @@ func (m *Manager) CancelTask(taskID uint) error {
 	if _, ok := terminalStates[task.Status]; ok {
 		return fmt.Errorf("task %s is already in terminal state %s", task.OtaID, task.Status)
 	}
-	now := time.Now()
-	task.Status = StatusFailed
-	task.ErrorMsg = "cancelled by user"
-	task.CompletedAt = &now
-	if err := m.db.Save(&task).Error; err != nil {
-		return err
+	// 仅下载阶段可取消; verifying/installing 已过窗口
+	if !slices.Contains(cancellableStates, task.Status) {
+		return fmt.Errorf("task %s in state %s: %w", task.OtaID, task.Status, ErrTaskNotCancellable)
 	}
+
+	now := time.Now()
+	readStatus := task.Status
+	result := m.db.Model(&models.OTATask{}).
+		Where("id = ? AND status = ?", task.ID, readStatus).
+		Updates(map[string]interface{}{
+			"status":       StatusFailed,
+			"error_msg":    cancelErrorMsg,
+			"completed_at": &now,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("cancel task %s: %w", task.OtaID, result.Error)
+	}
+	if result.RowsAffected != 1 {
+		// 竞态: 读到的状态在 UPDATE 前被其它路径改写 (例如设备已推进到 installing)
+		return fmt.Errorf("task %s state changed concurrently (read=%s): %w",
+			task.OtaID, readStatus, ErrTaskNotCancellable)
+	}
+	task.Status = StatusFailed
+	task.ErrorMsg = cancelErrorMsg
+	task.CompletedAt = &now
+
+	// 清理 ack 等待通道: 取消后设备再也不会回 ack, 若不清理则该协程会一直等到
+	// ackTimeout×重试 (最长 90s) 才退出 —— 每次取消泄漏一个最长 90s 的等待协程。
+	// 所有 close 都在 pendingMu 内先查 ok 再关, delete 后其它路径查不到 → 不会二次 close。
+	_bridge.pendingMu.Lock()
+	if ch, ok := _bridge.pendingCmds[task.OtaID]; ok {
+		delete(_bridge.pendingCmds, task.OtaID)
+		close(ch)
+	}
+	_bridge.pendingMu.Unlock()
+
 	if m.wsHub != nil {
 		m.wsHub.BroadcastEvent(events.OTAProgress, map[string]interface{}{
 			"ota_id":   task.OtaID,
@@ -720,6 +789,6 @@ func (m *Manager) CancelTask(taskID uint) error {
 			"reason":   "cancelled",
 		})
 	}
-	logger.Infof("[OTA %s] cancelled by user", task.OtaID)
+	logger.Infof("[OTA %s] cancelled by user (was %s)", task.OtaID, readStatus)
 	return nil
 }

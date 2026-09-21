@@ -139,6 +139,95 @@ func TestOTA_CancelTask_InvalidID(t *testing.T) {
 	}
 }
 
+// TestOTA_CancelTask_InstallingReturns409: 已进入安装阶段的任务禁止取消 → HTTP 409
+// (不是 400/200)。服务端一旦放行就会造成 "账上说已取消、设备照样刷入新固件"。
+func TestOTA_CancelTask_InstallingReturns409(t *testing.T) {
+	r, db, _ := setupOTATest(t)
+
+	task := &models.OTATask{
+		OtaID: "ota-installing-1", NodeID: "NODE001", FirmwareID: 1,
+		Status: "installing", Progress: 42, ToVersion: "2.6.0",
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("seed installing task: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/ota/tasks/%d/cancel", task.ID), nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for installing task, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var after models.OTATask
+	if err := db.First(&after, task.ID).Error; err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if after.Status != "installing" {
+		t.Errorf("DB row must stay installing, got %q", after.Status)
+	}
+	if after.ErrorMsg != "" {
+		t.Errorf("error_msg must not be written, got %q", after.ErrorMsg)
+	}
+}
+
+// TestOTA_CancelTask_VerifyingReturns409: 校验阶段同样拒绝取消 → 409。
+func TestOTA_CancelTask_VerifyingReturns409(t *testing.T) {
+	r, db, _ := setupOTATest(t)
+
+	task := &models.OTATask{
+		OtaID: "ota-verifying-1", NodeID: "NODE001", FirmwareID: 1,
+		Status: "verifying", Progress: 90, ToVersion: "2.6.0",
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("seed verifying task: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/ota/tasks/%d/cancel", task.ID), nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for verifying task, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOTA_CancelTask_PendingSucceeds: 下载阶段 (pending) 取消仍返回 200 并落 failed。
+func TestOTA_CancelTask_PendingSucceeds(t *testing.T) {
+	r, db, _ := setupOTATest(t)
+
+	task := &models.OTATask{
+		OtaID: "ota-pending-1", NodeID: "NODE001", FirmwareID: 1,
+		Status: "pending", ToVersion: "2.6.0",
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("seed pending task: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/ota/tasks/%d/cancel", task.ID), nil)
+	req.Header.Set("Authorization", authHeader(t))
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for pending task, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var after models.OTATask
+	if err := db.First(&after, task.ID).Error; err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if after.Status != "failed" {
+		t.Errorf("expected status failed, got %q", after.Status)
+	}
+	if after.ErrorMsg != "cancelled by user (during download)" {
+		t.Errorf("expected download-cancel error_msg, got %q", after.ErrorMsg)
+	}
+}
+
 func TestOTA_ListFirmwares_Empty(t *testing.T) {
 	r, _, _ := setupOTATest(t)
 

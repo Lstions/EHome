@@ -1,6 +1,8 @@
 package ota
 
 import (
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -251,7 +253,7 @@ func wireEncoderForTest() *frame.Encoder {
 	return frame.NewEncoder(0)
 }
 
-// Test CancelTask: in-flight → failed with reason "cancelled by user"
+// Test CancelTask: in-flight (pending) → failed with reason cancelErrorMsg
 func TestCancelTask(t *testing.T) {
 	db := setupOTATestDB(t)
 
@@ -292,8 +294,8 @@ func TestCancelTask(t *testing.T) {
 	if updated.Status != StatusFailed {
 		t.Errorf("expected failed, got %s", updated.Status)
 	}
-	if updated.ErrorMsg != "cancelled by user" {
-		t.Errorf("expected 'cancelled by user', got %s", updated.ErrorMsg)
+	if updated.ErrorMsg != cancelErrorMsg {
+		t.Errorf("expected %q, got %q", cancelErrorMsg, updated.ErrorMsg)
 	}
 	if updated.CompletedAt == nil {
 		t.Error("expected CompletedAt to be set")
@@ -329,5 +331,222 @@ func TestCancelTask_NotFound(t *testing.T) {
 	err := mgr.CancelTask(99999)
 	if err == nil {
 		t.Error("expected error for nonexistent task")
+	}
+}
+
+// ==================== CancelTask: 取消窗口 + 条件更新 ====================
+
+// newCancelTestTask 建库 + 建 collector/firmware，并返回一个已落库的 pending 任务。
+func newCancelTestTask(t *testing.T, nodeID string) (*gorm.DB, *Manager, *models.OTATask) {
+	t.Helper()
+	db := setupOTATestDB(t)
+	db.Create(&models.Node{NodeID: nodeID, Model: "ESP32S3", FirmwareVersion: "1.0.0", Status: "online"})
+	fw := models.Firmware{Version: "1.1.0", URL: "u1", SizeBytes: 1024, Checksum: "abc"}
+	db.Create(&fw)
+	mgr := NewManager(db, nil, nil)
+	task, err := mgr.CreateTask(nodeID, fw.ID)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	return db, mgr, task
+}
+
+// reloadTask 从 DB 重新读取任务行。
+func reloadTask(t *testing.T, db *gorm.DB, id uint) models.OTATask {
+	t.Helper()
+	var got models.OTATask
+	if err := db.First(&got, id).Error; err != nil {
+		t.Fatalf("reload task %d: %v", id, err)
+	}
+	return got
+}
+
+// TestCancelTask_RejectedDuringInstalling: installing 阶段拒绝取消，且 DB 行不被改写。
+func TestCancelTask_RejectedDuringInstalling(t *testing.T) {
+	db, mgr, task := newCancelTestTask(t, "3001")
+
+	if err := db.Model(&models.OTATask{}).Where("id = ?", task.ID).
+		Update("status", StatusInstalling).Error; err != nil {
+		t.Fatalf("set installing: %v", err)
+	}
+
+	err := mgr.CancelTask(task.ID)
+	if err == nil {
+		t.Fatal("expected error cancelling an installing task, got nil")
+	}
+	if !errors.Is(err, ErrTaskNotCancellable) {
+		t.Errorf("expected errors.Is(err, ErrTaskNotCancellable), got %v", err)
+	}
+
+	got := reloadTask(t, db, task.ID)
+	if got.Status != StatusInstalling {
+		t.Errorf("DB row must stay %q, got %q", StatusInstalling, got.Status)
+	}
+	if got.ErrorMsg != "" {
+		t.Errorf("error_msg must not be written, got %q", got.ErrorMsg)
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("completed_at must not be written, got %v", got.CompletedAt)
+	}
+}
+
+// TestCancelTask_RejectedDuringVerifying: verifying 阶段拒绝取消，且 DB 行不被改写。
+func TestCancelTask_RejectedDuringVerifying(t *testing.T) {
+	db, mgr, task := newCancelTestTask(t, "3002")
+
+	if err := db.Model(&models.OTATask{}).Where("id = ?", task.ID).
+		Update("status", StatusVerifying).Error; err != nil {
+		t.Fatalf("set verifying: %v", err)
+	}
+
+	err := mgr.CancelTask(task.ID)
+	if err == nil {
+		t.Fatal("expected error cancelling a verifying task, got nil")
+	}
+	if !errors.Is(err, ErrTaskNotCancellable) {
+		t.Errorf("expected errors.Is(err, ErrTaskNotCancellable), got %v", err)
+	}
+
+	got := reloadTask(t, db, task.ID)
+	if got.Status != StatusVerifying {
+		t.Errorf("DB row must stay %q, got %q", StatusVerifying, got.Status)
+	}
+	if got.ErrorMsg != "" {
+		t.Errorf("error_msg must not be written, got %q", got.ErrorMsg)
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("completed_at must not be written, got %v", got.CompletedAt)
+	}
+}
+
+// TestCancelTask_DownloadingAllowed: downloading 阶段仍可取消。
+func TestCancelTask_DownloadingAllowed(t *testing.T) {
+	db, mgr, task := newCancelTestTask(t, "3003")
+
+	if err := db.Model(&models.OTATask{}).Where("id = ?", task.ID).
+		Update("status", StatusDownloading).Error; err != nil {
+		t.Fatalf("set downloading: %v", err)
+	}
+
+	if err := mgr.CancelTask(task.ID); err != nil {
+		t.Fatalf("CancelTask during downloading must succeed, got %v", err)
+	}
+
+	got := reloadTask(t, db, task.ID)
+	if got.Status != StatusFailed {
+		t.Errorf("expected %q, got %q", StatusFailed, got.Status)
+	}
+	if got.ErrorMsg != cancelErrorMsg {
+		t.Errorf("expected error_msg %q, got %q", cancelErrorMsg, got.ErrorMsg)
+	}
+	if got.CompletedAt == nil {
+		t.Error("expected completed_at to be set")
+	}
+}
+
+// TestCancelTask_ConditionalUpdateRejectsStaleState 证明实现使用的是条件更新
+// (WHERE id=? AND status=<读到的状态>) 而不是 "先读后写整行 Save"。
+//
+// 造法 (真实交错, 不是人为注入错误): 先把行置为 pending; 再注册一个只在
+// First() 之后触发一次的 query callback, 在 CancelTask 读完 pending **之后、发出 UPDATE
+// 之前** 用一个绕过当前事务的新会话把该行改成 installing (模拟并发写入者: 设备推进到安装阶段)。
+// 于是 CancelTask 手里是 pending, DB 里是 installing。
+//
+// 判别力:
+//
+//	· 正确实现 (条件更新): UPDATE ... WHERE id=? AND status='pending' → RowsAffected==0
+//	  → 返回 ErrTaskNotCancellable, 且 DB 行保持 installing。
+//	· 错误实现 (db.Save(&task) 整行写回): 会把 installing 覆盖成 failed
+//	  → 本用例在 "DB 行仍是 installing" 处变红。
+func TestCancelTask_ConditionalUpdateRejectsStaleState(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(tmp, "stale.sqlite")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&models.OTATask{}, &models.Firmware{}, &models.Node{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+	db.Create(&models.Node{NodeID: "3004", Status: "online"})
+	fw := models.Firmware{Version: "1.1.0", URL: "u", SizeBytes: 1, Checksum: "a"}
+	db.Create(&fw)
+	mgr := NewManager(db, nil, nil)
+	task, err := mgr.CreateTask("3004", fw.ID)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if task.Status != StatusPending {
+		t.Fatalf("precondition: expected pending, got %s", task.Status)
+	}
+
+	// 交错点: CancelTask 内部的 db.First 读完之后, 把行改成 installing。
+	// 只触发一次, 且只对 ota_tasks 生效 (CreateTask 的 supersede UPDATE 走 update callback,
+	// 不经过 query callback, 因此不会被误触发)。
+	flipped := false
+	cbName := "test:flip_to_installing_after_read"
+	_ = db.Callback().Query().After("gorm:query").Register(cbName, func(tx *gorm.DB) {
+		if flipped || tx.Statement.Table != "ota_tasks" {
+			return
+		}
+		flipped = true
+		// 独立会话: 出现在 CancelTask 读出 task 之后、条件 UPDATE 之前
+		if err := db.Session(&gorm.Session{NewDB: true}).Model(&models.OTATask{}).
+			Where("id = ?", task.ID).Update("status", StatusInstalling).Error; err != nil {
+			t.Errorf("interleave: flip to installing: %v", err)
+		}
+	})
+	defer func() { _ = db.Callback().Query().Remove(cbName) }()
+
+	err = mgr.CancelTask(task.ID)
+	if !flipped {
+		t.Fatal("interleave hook did not fire: CancelTask never read ota_tasks (test is not testing anything)")
+	}
+	if err == nil {
+		t.Fatal("expected ErrTaskNotCancellable for stale state, got nil")
+	}
+	if !errors.Is(err, ErrTaskNotCancellable) {
+		t.Errorf("expected errors.Is(err, ErrTaskNotCancellable), got %v", err)
+	}
+
+	got := reloadTask(t, db, task.ID)
+	if got.Status != StatusInstalling {
+		t.Errorf("conditional update must not overwrite concurrently-changed row: want %q, got %q",
+			StatusInstalling, got.Status)
+	}
+	if got.ErrorMsg != "" {
+		t.Errorf("error_msg must not be written, got %q", got.ErrorMsg)
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("completed_at must not be written, got %v", got.CompletedAt)
+	}
+}
+
+// TestCancelTask_ClearsPendingAckChannel: 取消必须清理 ack 等待通道, 否则等待协程
+// 会一直阻塞到 ackTimeout×重试 (最长 90s) 才退出 —— 每次取消泄漏一个长生命周期协程。
+func TestCancelTask_ClearsPendingAckChannel(t *testing.T) {
+	_, mgr, task := newCancelTestTask(t, "3005")
+
+	// 模拟 SendOtaCommand 已注册的等待通道
+	ackCh := make(chan struct{})
+	_bridge.pendingMu.Lock()
+	_bridge.pendingCmds[task.OtaID] = ackCh
+	_bridge.pendingMu.Unlock()
+
+	if err := mgr.CancelTask(task.ID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+
+	_bridge.pendingMu.Lock()
+	_, still := _bridge.pendingCmds[task.OtaID]
+	_bridge.pendingMu.Unlock()
+	if still {
+		t.Fatal("pendingCmds entry must be deleted on cancel")
+	}
+
+	// 通道必须已被 close (否则等待协程仍会阻塞)
+	select {
+	case <-ackCh:
+	default:
+		t.Fatal("ack channel must be closed on cancel so the waiter goroutine exits immediately")
 	}
 }
