@@ -202,13 +202,37 @@ func TestDeadlineWithoutFinalEvidenceTextUnchanged(t *testing.T) {
 // 必须因此变红 —— 两边共用一个常量的话, 这种变异会被静默放过。
 const composedReasonColumnChars = 256
 
+// columnFillingCause 造一条**能真正存进列里**的最长原因（恰好等于列宽，多字节）。
+//
+// 为什么不是"随便给个 400 字"（2026-09-21 CI 实测缺陷）：
+// 把超过列宽的值直接 UPDATE 进 varchar(256) 在 PostgreSQL 上是
+//   ERROR: value too long for type character varying(256) (SQLSTATE 22001)
+// 测试在**种数据**这一步就炸了，根本走不到它想验证的组装逻辑。
+// 而 SQLite 不强制 VARCHAR 宽度，于是同一个用例在本地（EHOME_TEST_DB 默认 sqlite）
+// 全绿、只在 CI 的 PG 集成 job 变红：这是**方言盲区**，也是本仓"测试全绿但存储
+// 约束没被检验"的又一实例。
+//
+// 为什么 256 仍然满足原用例的意图（"不能靠上游恰好已截到 200 这一巧合"）：
+// 派发器自己的预算是 200 runes，列宽是 256，本函数返回的 256 > 200 ⇒ 种进来的是一条
+// **未经上游预截断**的值，组装边界必须自己把它压到 222（256 - 后缀 34）以内。
+// 换言之：用例仍能证伪"只在 200 那一层做截断"的实现。
+//
+// 至于"原因长到远超列宽"这种输入，DB 根本存不下 ⇒ 不属于可达状态；
+// 该边界由不落库的纯函数用例 TestComposeDeadlineReasonHonorsColumnBudget
+// （attempt_reason_scope_test.go）覆盖 —— 分层之后两边都不越界。
+func columnFillingCause() string {
+	prefix := "dispatch rejected: "
+	fill := composedReasonColumnChars - len([]rune(prefix))
+	return prefix + strings.Repeat("误", fill)
+}
+
 // 终局列宽断言 (执行级路径): 组合文案不得突破 final_reason 列预算 (size:256),
 // 且必须多字节安全、保留 "deadline expired before dispatch" 这句可判别文案。
 //
 // 与旧版本的关键差别: 故意喂一条**未预截断**的超长原因, 证明列宽是在组装边界上被
 // 保证的, 而不是靠"上游恰好已经截到 200"这一巧合。
 func TestComposedDeadlineReasonFitsColumnBudget(t *testing.T) {
-	long := "dispatch rejected: " + strings.Repeat("误", 400)
+	long := columnFillingCause()
 	s, exec := seedQueuedWithRejection(t, long)
 	past := time.Now().UTC().Add(-time.Minute)
 	if err := s.db.Model(&models.CommandExecution{}).Where("command_id = ?", exec.CommandID).Update("deadline_at", past).Error; err != nil {
@@ -234,7 +258,7 @@ func TestComposedDeadlineReasonFitsColumnBudget(t *testing.T) {
 // 同一条终局断言走 **attempt 级** 组合路径 (M-3): 原因写在被拒的 attempt 行上,
 // 执行级副本已被成功路径清空。两条独立路径都要满足列宽与多字节安全。
 func TestComposedDeadlineReasonFromAttemptLevelFitsColumnBudget(t *testing.T) {
-	long := "dispatch rejected: " + strings.Repeat("误", 400)
+	long := columnFillingCause()
 	s, exec := seedQueuedWithAttemptCause(t, 1, long)
 
 	expired, err := s.RecoverExpired(context.Background())
