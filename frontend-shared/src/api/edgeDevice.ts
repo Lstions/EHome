@@ -240,10 +240,14 @@ const normalize = (d: RawEdgeDevice): EdgeDevice => ({
   device_type: d.type || d.device_type || '',
   protocol: d.protocol || d.device_config?.protocol || '',
   hardware_type: d.hardware_type || d.channel?.hardware_type || '',
-  // 注意: hardware_id = 设备从站地址（"1"/"0x76"），**不是**总线名；语义不得更改，
-  //    这里的 || d.channel?.hardware_id 只是老后端缺设备地址时的兼容兜底。
-  //    总线名请用下方 channel_hardware_id（推送式保留，不再被设备地址遮蔽）。
-  hardware_id: d.hardware_id || d.channel?.hardware_id || '',
+  // 注意: hardware_id = 设备从站地址（"1"/"0x76"），**不是**总线名；语义不得更改。
+  // G4：改前这里是 `d.hardware_id || d.channel?.hardware_id || ''` —— 那个"兼容兜底"
+  //    正好违反它头顶的注释：设备地址为空（后端默认地址 1 的合法形态）时，它把**通道
+  //    总线名**填进本字段，编辑框于是以 "UART1" 打开，用户点保存就把总线名写回后端
+  //    （与创建路径同一根因的回流路径）。
+  //    现在：本字段**只**反映后端真实存储的设备地址，不做任何跨语义兜底；
+  //    总线名一律走下方 channel_hardware_id（展示层唯一入口）。
+  hardware_id: d.hardware_id || '',
   // 追加式保留关联通道（旧实现整体丢弃 d.channel，导致展示层拿不到真正的总线名）。
   channel_hardware_id: d.channel?.hardware_id || undefined,
   channel: d.channel ? { ...d.channel } : undefined,

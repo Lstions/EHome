@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { useWebSocketStore } from '@/stores/websocket'
 
 import { loadEdgeDeviceList, loadNodeList } from './routeLoaders'
 import { useRouteProgress } from '@/stores/routeProgress'
@@ -183,14 +184,24 @@ const router = createRouter({
 // 路由守卫
 router.beforeEach((to, _from) => {
   const userStore = useUserStore()
+  const wsStore = useWebSocketStore()
   // 进度反馈：懒加载 chunk 下载/路由解析耗时无法预测，开始导航即唤起顶部进度条
   useRouteProgress().start()
 
-  // 1. 认证检查
-  if (to.meta.requiresAuth && !userStore.isLoggedIn) {
+  // 1. 认证检查。
+  // ⚠️ isLoggedIn 不能只看「token 字符串存在」：浏览器里残留的旧 token 同样是
+  // 非空字符串，但服务端早已拒绝它（WS 握手 401 不经过 axios 拦截器，见
+  // stores/websocket.ts 的 B1）。若沿用「存在即已登录」，被踢回 /login 后
+  // 守卫会立刻把用户弹回 /dashboard，形成「登录 → 401 → 回登录页 → 又被弹回」
+  // 的往复；且在 WS 永久 401 时用户没有任何自愈路径。
+  // 判定收敛为：token 存在 **且** 未被权威判定失效。
+  const sessionInvalid = wsStore.isCurrentTokenInvalidated()
+  const authenticated = userStore.isLoggedIn && !sessionInvalid
+  if (to.meta.requiresAuth && !authenticated) {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
-  if (to.path === '/login' && userStore.isLoggedIn) {
+  // 仅「确实未失效」时才把 /login 弹回首页；失效态必须放过，否则用户到不了登录页
+  if (to.path === '/login' && authenticated) {
     return '/dashboard'
   }
 })

@@ -220,7 +220,7 @@
         :total="total"
         layout="total, prev, pager, next"
         background
-        small
+        size="small"
         @current-change="handlePageChange"
       />
     </div>

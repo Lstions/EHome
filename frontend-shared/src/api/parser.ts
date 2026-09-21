@@ -21,6 +21,14 @@ export interface Parser {
   hardware_types: string[]     // 支持的硬件类型: ["i2c", "spi"]
   measure_types: string[] // 测量类型: ["temperature", "pressure"]
   description?: string    // 描述
+  /**
+   * m-1（2026-09-22）：该型号是否消费设备地址（后端 /device-configs/tree 的
+   * driver leaf 字段 requires_target_address）。
+   *
+   * undefined = 后端未提供该字段（老后端 / 该检查器来源没带）= 「能力未知」，
+   * 消费方必须退回字段缺失的兼容行为，绝不能当成 false。
+   */
+  requires_target_address?: boolean
 }
 
 // S8 fix: Extract 4-level hardware_types fallback chain into a helper function
@@ -48,7 +56,13 @@ function normalizeParser(d: any): Parser {
     measure_types: Array.isArray(d.measure_types)
       ? d.measure_types.filter(Boolean).map((m: unknown) => String(m))
       : d.measure_type ? [String(d.measure_type)] : [],
-    description: d.description
+    description: d.description,
+    // m-1：能力字段必须**原样透传三态**。若写成 !!d.requires_target_address，
+    // "字段缺失"会被压成 false（= 明确不需要地址），向导就会对纯 I2C 型号
+    // 静默跳过地址；这正是本任务要修的缺陷被换了个方向复现。
+    requires_target_address: typeof d.requires_target_address === 'boolean'
+      ? d.requires_target_address
+      : undefined,
   }
 }
 

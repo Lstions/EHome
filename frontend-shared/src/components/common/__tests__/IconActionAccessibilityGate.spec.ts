@@ -285,7 +285,10 @@ const REGISTERED_EXCEPTIONS = new Map<string, string>([
   ['src/views/layout/MainLayout.vue::router.push(\'/dashboard\')', '#1 D：侧栏 el-menu「仪表盘」项 roving tabindex 可达'],
   ['src/views/layout/MainLayout.vue::handleMobileLogoClick', '#2 D：抽屉内同一 el-menu 仪表盘项 :tabindex=0'],
   ['src/views/node/NodeOverview.vue::refreshAll', '#14 D：页头原生 <button>刷新</button> 完全等价'],
-  ['src/views/node/NodeOverview.vue::goToDetail', '#16 / #17 D：目标即当前路由，可聚焦 Tab 栏「通道终端」可达'],
+  // 2026-09-20 D1 修复后移除：'src/views/node/NodeOverview.vue::goToDetail'。
+  // 原例外理由写的是「目标即当前路由」—— 那句话本身就是缺陷描述（点通道行推当前页 = 原地打转），
+  // 登记成例外等于把缺陷合法化，还让修复者因为条目变 stale 而报红。
+  // 现该入口为带四件套的 goToNodeChannels（跳 /channel?node=<序列号>），**不得再登记为例外**。
   ['src/views/node/NodeOverview.vue::selectedResourceId = resource.id', '#18 D：行内「资源名」「查看」两个原生 button'],
   ['src/views/node/NodeOverview.vue::viewDevice(row)', '#19 D：视图切「列表」后每行原生「查看」button'],
 ])

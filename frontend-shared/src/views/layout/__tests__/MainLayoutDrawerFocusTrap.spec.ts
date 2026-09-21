@@ -43,6 +43,8 @@ vi.mock('@/stores/ui', () => ({
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({
     connected: false, isAuthenticated: true, connect: vi.fn(), disconnect: vi.fn(),
+    sessionInvalidated: false, isCurrentTokenInvalidated: () => false,
+    authInvalidationNonce: 0, reconnectWithFreshToken: vi.fn(),
     subscribe: vi.fn(() => vi.fn()), onConnected: vi.fn(() => vi.fn()),
   }),
 }))

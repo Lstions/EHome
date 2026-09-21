@@ -871,7 +871,14 @@ describe('edgeDeviceApi', () => {
     mockClient.get.mockResolvedValue({ data: { items: [{ id: 1, channel: { hardware_type: 'i2c', hardware_id: 'I2C0' } }], total: 1 } })
     const res = await edgeDeviceApi.getList()
     expect(res.items[0].hardware_type).toBe('i2c')
-    expect(res.items[0].hardware_id).toBe('I2C0')
+    // G4 (task-10)：**本条副断言改前是 .toBe('I2C0')，把缺陷钉成了期望行为** ——
+    //   EdgeDevice.hardware_id 是设备从站地址，通道的 hardware_id ('I2C0') 是总线名，
+    //   两者语义不同。旧 normalize 的 `|| d.channel?.hardware_id` 兜底让"设备地址为空"
+    //   时把总线名填进来，编辑框于是以 "I2C0" 打开，用户点保存就把总线名写回后端。
+    //   现在：设备地址为空 ⇒ hardware_id 就是空（不再跨语义兜底），
+    //   总线名照旧可从 channel_hardware_id 取到（展示层唯一入口）。
+    expect(res.items[0].hardware_id).toBe('')
+    expect(res.items[0].channel_hardware_id).toBe('I2C0')
   })
 
   it('normalize uses node info', async () => {

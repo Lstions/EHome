@@ -153,10 +153,22 @@
 
         <!-- 右侧：通知 + 主题 + 用户 -->
         <div class="header-right">
-          <!-- WebSocket 状态 -->
-          <div class="ws-status" :class="{ connected: wsStore.connected }">
+          <!-- WebSocket 状态（三态：在线 / 离线 / 登录已失效） -->
+          <div
+            class="ws-status"
+            :class="{ connected: wsStore.connected, invalid: wsSessionInvalid }"
+            :title="wsStatusTitle"
+          >
             <span class="status-dot"></span>
-            <span class="status-text">{{ wsStore.connected ? '在线' : '离线' }}</span>
+            <span class="status-text">{{ wsStatusText }}</span>
+            <!-- 恢复入口：认证失效只能靠重新登录恢复，不给出入口就等于让用户无限等待 -->
+            <el-link
+              v-if="wsSessionInvalid"
+              class="status-action"
+              type="primary"
+              underline="never"
+              @click="handleRelogin"
+            >重新登录</el-link>
           </div>
 
           <!-- 通知铃铛 -->
@@ -279,7 +291,9 @@ import { useNodeStore } from '@/stores/node'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { getNotifications, getUnreadCount, markAsRead, markAllAsRead, type Notification as ApiNotification } from '@/api/notification'
 import { WS_EVENT } from '@/events/events'
-import { ElMessage, ElNotification } from 'element-plus'
+// NotificationHandle 是 ElNotification() 的返回类型：m-2 需要保存实例以便显式关闭
+// （duration: 0 的提示没有自动关闭路径，路由跳转也不会清掉挂在 body 上的浮层）。
+import { ElMessage, ElNotification, type NotificationHandle } from 'element-plus'
 import ThemeSwitch from '@/components/common/ThemeSwitch.vue'
 import feedback from '@/utils/feedback'
 import { logger } from '@/utils/logger'
@@ -292,6 +306,76 @@ const uiStore = useUIStore()
 const wsStore = useWebSocketStore()
 const nodeStore = useNodeStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+
+// ─ WS 徽标三态（B3）────────────────────────────────────────
+// 「认证失效」与「网络中断」是两种完全不同的用户处境，却都只表现为「离线」：
+// 前者只能重新登录才能恢复，后者等网络回来即可。把前者独立成一个可区分态，
+// 并给出唯一的恢复入口（回登录页），否则用户会对着「离线」徽标无限等待。
+// 判据是「**当前** token 是否被判定失效」而不是裸的 sessionInvalidated：
+// 用户重新登录后 storage 换了新 token，旧结论必须立刻作废，徽标回到正常态。
+const wsSessionInvalid = computed(() => wsStore.isCurrentTokenInvalidated())
+const wsStatusText = computed(() =>
+  wsSessionInvalid.value
+    ? '登录已失效'
+    : (wsStore.connected ? '在线' : '离线')
+)
+const wsStatusTitle = computed(() =>
+  wsSessionInvalid.value
+    ? '登录已失效，请重新登录'
+    : (wsStore.connected ? 'WebSocket 已连接' : 'WebSocket 未连接（网络中断或服务端不可达）')
+)
+
+// ── m-2（2026-09-22）：认证失效提示的显式生命周期 ──────────────────
+// 「登录已失效」提示用 duration: 0（不自动关闭），而 handleRelogin 只做
+// disconnect + 路由跳转。若跳转不卸载 MainLayout（同级路由复用组件），这条
+// 提示就留在登录页上，成为一条无法消除、也无法再点的残留浮层。
+// 因此保存实例并在「重新登录 / 离开登录区 / 组件卸载」时显式关闭。
+// 只关这一条：其它通知（含 pending_confirm）的行为不受影响。
+let sessionInvalidNotification: NotificationHandle | null = null
+
+const closeSessionInvalidNotification = () => {
+  // close() 幂等；置空让「再次失效」能重新弹一条新提示，而不是复用已关闭的实例。
+  sessionInvalidNotification?.close()
+  sessionInvalidNotification = null
+}
+
+const handleRelogin = () => {
+  // 先关提示再跳转：跳转本身（组件未被卸载时）不会消除已弹出的 duration: 0 提示。
+  closeSessionInvalidNotification()
+  wsStore.disconnect()
+  router.push('/login')
+}
+
+// 兜底：无论用户是点击提示、点顶栏「重新登录」，还是别处把路由打到登录页，
+// 只要进入登录页就清掉这条残留提示。
+watch(() => route.path, (path) => {
+  if (path === '/login') closeSessionInvalidNotification()
+})
+
+// 凭证变更 → 用新凭证重建 WS 连接。
+// 服务端对同一主体只保留最新一条会话：登录页建立的连接会把旧连接踢掉，而旧连接的
+// 重连链会带着旧 token 在 /dashboard 上反复 401。以 token 为唯一触发源，
+// 变了就换连接；失效时 store 内部统一收敛（invalidateSession，只此一处）。
+watch(() => userStore.token, (token, previous) => {
+  if (token === previous || !token) return
+  logger.info('[MainLayout] 检测到凭证变更，重建 WebSocket 连接')
+  wsStore.reconnectWithFreshToken()
+})
+
+
+// 认证失效的一次性提示：由 nonce 驱动（而非布尔状态），避免 watcher 因重渲染
+// 重复弹窗，也避免「已失效」状态本身无法区分「刚失效」和「一直失效」。
+watch(() => wsStore.authInvalidationNonce, (nonce, previous) => {
+  if (nonce === previous || nonce === 0) return
+  sessionInvalidNotification = ElNotification({
+    title: '登录已失效',
+    message: '登录状态已失效，请重新登录。',
+    type: 'warning',
+    duration: 0,
+    position: 'bottom-right',
+    onClick: handleRelogin,
+  })
+})
 
 // 搜索
 const searchQuery = ref('')
@@ -765,6 +849,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  // m-2：组件卸载不会连带清掉挂在 body 上的 ElNotification 浮层，必须显式关闭。
+  closeSessionInvalidNotification()
   teardownRealtimeNotifications()
   wsStore.disconnect()
   document.removeEventListener('keydown', handleKeydown)
@@ -999,6 +1085,19 @@ onUnmounted(() => {
 .ws-status.connected {
   background: var(--el-color-success-light-9);
   color: var(--el-color-success);
+}
+
+/* 登录已失效（B3）：与「网络离线」区分开的第三态。
+   基础 .ws-status 本身就是红色系，这里加边框强调 + 让内嵌恢复入口同色。 */
+.ws-status.invalid {
+  border: 1px solid var(--el-color-danger-light-5);
+}
+
+.ws-status .status-action {
+  font-size: 12px;
+  line-height: 1;
+  --el-link-text-color: var(--el-color-danger);
+  --el-link-hover-text-color: var(--el-color-danger-dark-2);
 }
 
 .status-dot {

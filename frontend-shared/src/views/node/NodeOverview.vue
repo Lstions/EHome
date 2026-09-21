@@ -251,11 +251,14 @@
         <div class="card health-card">
           <div class="card-head">
             <span class="card-title">通道健康状态</span>
-            <span class="card-link" @click="goToDetail">查看全部</span>
+            <!-- D1 修复：原为 <span @click="goToDetail">，而 goToDetail 推的是**当前页**
+                 (router.push(`/node/${nodeSerial}`)) ⇒ 点"查看全部"和点通道行都等于原地打转，
+                 用户看不到任何变化。目标改为产品既有的、可直达的「通道管理」页并带上节点过滤。 -->
+            <button type="button" class="card-link" data-node-channels-entry @click="navigateToNodeChannels">查看全部</button>
           </div>
           <div v-if="channelsLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
           <template v-else>
-            <div class="chips">
+            <div class="chips" data-channel-totals>
               <div class="chip chip-total"><span class="chip-label"><i class="chip-dot" style="background: var(--no-text-muted)"></i>总数</span><span class="chip-num">{{ channelStats.total }}</span></div>
               <div class="chip" :class="channelStats.ok > 0 ? 'chip-ok' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background: var(--no-success)"></i>正常</span><span class="chip-num">{{ channelStats.ok }}</span></div>
               <div class="chip" :class="channelStats.error > 0 ? 'chip-warn' : 'chip-off'"><span class="chip-label"><i class="chip-dot" style="background: var(--no-warning)"></i>异常</span><span class="chip-num" :class="{ 'dim-num': channelStats.error === 0 }">{{ channelStats.error }}</span></div>
@@ -263,11 +266,38 @@
             </div>
             <div v-if="channels.length === 0" class="card-empty">该节点暂无通道</div>
             <div v-else class="chan-list">
-              <div v-for="ch in channels.slice(0, 6)" :key="ch.id" class="chan-row" @click="goToDetail">
+              <!-- D1：通道行点击进入「该节点的通道列表」（/channel?node=<序列号>，
+                   那里每行有「编辑通道」入口）；行内「编辑」按钮直接打开本行通道的
+                   配置对话框（ChannelManager 的 initial-data ⇒ 编辑态）。
+                   改前这里是 @click="goToDetail"，而 goToDetail 推的是**当前页**，
+                   点击等于原地打转；同时它是不可键盘聚焦的裸 div。 -->
+              <div
+                v-for="ch in channels.slice(0, 6)"
+                :key="ch.id"
+                class="chan-row"
+                role="button"
+                tabindex="0"
+                :aria-label="`查看通道 ${channelName(ch)}（前往通道管理）`"
+                @click="navigateToNodeChannels"
+                @keydown.enter.prevent="navigateToNodeChannels"
+                @keydown.space.prevent="navigateToNodeChannels"
+              >
                 <span class="chan-icon"><el-icon :size="14"><Link /></el-icon></span>
                 <span class="chan-name">{{ channelName(ch) }}</span>
                 <span class="chan-badge" :class="channelBadgeClass(ch)">{{ channelStatusText(ch) }}</span>
+                <button
+                  type="button"
+                  class="link-btn chan-edit"
+                  :disabled="nodeOffline"
+                  :aria-label="'编辑通道 ' + channelName(ch)"
+                  @click.stop="editChannel(ch)"
+                ><el-icon :size="12"><EditPen /></el-icon>编辑</button>
                 <el-icon :size="13" class="chan-arrow"><ArrowRight /></el-icon>
+              </div>
+              <!-- D2：列表是预览（前 N 条）而"总数"是全量 —— 截断必须可发现：
+                   范围行常驻，超出时再显式写出差额。否则用户会把「看到 6 行」读成「只有 6 个通道」。 -->
+              <div class="chan-more" data-chan-range>
+                共 {{ channelStats.total }} 条，此处显示前 {{ Math.min(channels.length, CHANNEL_HEALTH_PREVIEW_LIMIT) }} 条<template v-if="channels.length > CHANNEL_HEALTH_PREVIEW_LIMIT">（还有 {{ channels.length - CHANNEL_HEALTH_PREVIEW_LIMIT }} 条未显示，点上方「查看全部」）</template>
               </div>
             </div>
           </template>
@@ -339,6 +369,7 @@
                       <tr
                         v-for="resource in pagedBusResources"
                         :key="resource.id"
+                        :data-resource-id="resource.id"
                         :class="{ selected: selectedResourceId === resource.id, disabled: resource.enabled === false }"
                         @click="selectedResourceId = resource.id"
                       >
@@ -350,9 +381,36 @@
                         <td>{{ resourceMountedChannels(resource).length }}</td>
                         <td>
                           <span v-if="resource.enabled === false || !busSupportsDma" class="dma-na">—</span>
+                          <!-- B1（2026-09-20）：改前这里只有一个 el-switch，用户**无法选择**用哪条 DMA。
+                               而 DMA 候选常常是多个（本节点 SPI mask=4 → CH0/CH1/CH2 三条），
+                               开关只能作用于"隐式选中的第一条"。
+                               现在：候选 >1 时给选择器，=1 时保留开关（形态不变、无多余点击）。
+                               候选为 0 时**必须说明原因**，而不是留空（B3）。 -->
+                          <template v-else-if="resourceDmaCandidates(resource).length > 1">
+                            <el-select
+                              class="dma-select"
+                              size="small"
+                              :data-dma-select="resource.id"
+                              :aria-label="`${resource.id} 绑定的 DMA 资源`"
+                              :model-value="dmaSelectionFor(resource)"
+                              :disabled="nodeOffline || !canToggleResourceDma(resource)"
+                              placeholder="选择 DMA 资源"
+                              @click.stop
+                              @change="(value: any) => changeResourceDma(resource, String(value))"
+                            >
+                              <el-option label="不使用 DMA" value="" />
+                              <el-option
+                                v-for="dma in resourceDmaCandidates(resource)"
+                                :key="dma.dma_id"
+                                :label="dmaOptionLabel(dma)"
+                                :value="String(dma.dma_id)"
+                                :disabled="!isDmaRebindable(dma.state, dma.bound_to) && !isDmaBoundToResource(dma, resource)"
+                              />
+                            </el-select>
+                          </template>
                           <el-switch
-                            v-else
-                            :aria-label="`${resource.id} 的 DMA 绑定开关`"
+                            v-else-if="resourceDmaCandidates(resource).length === 1"
+                            :aria-label="`${resource.id} 的 DMA 绑定开关（${resourceDmaCandidates(resource)[0].name}）`"
                             :model-value="resourceDmaBinding(resource)?.bound_to ? true : false"
                             size="small"
                             :disabled="nodeOffline || !canToggleResourceDma(resource)"
@@ -360,10 +418,14 @@
                             @click.stop
                             @change="toggleResourceDma(resource, $event)"
                           />
+                          <span v-else class="dma-none" :data-dma-none="resource.id">{{ resourceDmaUnavailableText() }}</span>
                         </td>
                         <td>
                           <div class="bus-row-actions">
-                            <button class="link-btn" type="button" @click.stop="selectedResourceId = resource.id"><el-icon :size="12"><View /></el-icon>查看</button>
+                            <!-- D4：显式调用 selectResource(row)（而不是内联赋值），
+                                 由它统一重置该资源的分页/扫描态，并保证详情卡读的就是本行。
+                                 按钮上带 data-view-resource 便于 E2E 逐行点击取证。 -->
+                            <button class="link-btn" type="button" :data-view-resource="resource.id" @click.stop="selectedResourceId = resource.id"><el-icon :size="12"><View /></el-icon>查看</button>
                             <button class="link-btn" type="button" :disabled="nodeOffline || resource.enabled === false || !busSupportsChannels" @click.stop="openChannelManager(resource)"><el-icon :size="12"><Plus /></el-icon>新建通道</button>
                           </div>
                         </td>
@@ -423,7 +485,7 @@
           <aside class="bus-col-right">
             <section class="card bus-detail-card">
               <div class="bus-detail-head"><b>资源详情</b><span class="bus-tag bus-tag-gray">设备上报</span><button class="link-btn" type="button" :disabled="nodeOffline || activeBusType !== 'i2c' || !selectedResource" @click="scanSelectedI2C"><el-icon :size="12"><Search /></el-icon>地址扫描</button></div>
-              <div v-if="selectedResource" class="bus-detail-list">
+              <div v-if="selectedResource" class="bus-detail-list" data-bus-detail>
                 <div><span>资源名称</span><b class="mono">{{ selectedResource.id }}</b></div>
                 <div><span>引脚</span><b class="mono">{{ resourcePins(selectedResource) }}</b></div>
                 <div><span>工作模式</span><b>{{ resourceMode(selectedResource) }}</b></div>
@@ -473,13 +535,56 @@
             </section>
           </aside>
         </div>
+
+        <!-- A（2026-09-20）：已创建通道列表。
+             「资源」与「通道」是两个层级：资源是设备上报的 UART0/UART1/I2C0…（物理能力），
+             通道是用户基于某个资源创建的采集实例（有名称/使能/波特率/关联设备）。
+             改前本页只有资源表，通道的唯一痕迹是「已挂载通道」列里的一个**数字**
+             （resourceMountedChannels(resource).length）—— 用户看不到通道本身。
+             实测（隔离栈 18096，节点离线）：.channel-tag=0、整页无「已创建通道」字样、
+             body 不含作为通道呈现的 "UART1"；而 GET /api/v1/channels 明明返回 total=1。
+             数据源与「通道健康状态」卡同源（fetchChannels → /api/v1/channels），
+             这里渲染**全量**（不截断），每行有进入该通道配置的入口。
+             注意：本卡与资源表并列而非合并 —— 合并会再次把两个层级混为一谈。 -->
+        <section class="card bus-channels-card" data-created-channels>
+          <div class="bus-channels-head">
+            <b>已创建通道</b>
+            <span class="bus-tag" :class="channels.length ? 'bus-tag-green' : 'bus-tag-gray'" data-created-channels-count>{{ channelsLoading ? '加载中…' : channels.length + ' 条' }}</span>
+            <span class="bus-channels-hint">通道建立在硬件资源之上，是采集实例（与上面的「资源」不是同一层级）</span>
+            <button class="link-btn" type="button" data-created-channels-all @click="navigateToNodeChannels"><el-icon :size="12"><View /></el-icon>在通道管理中查看</button>
+          </div>
+          <div v-if="channelsLoading && channels.length === 0" class="bus-channels-empty">正在读取通道列表…</div>
+          <div v-else-if="channels.length === 0" class="bus-channels-empty" data-created-channels-empty>该节点暂无已创建通道 —— 在上方资源表选一行后点「新建通道」即可创建</div>
+          <div v-else class="bus-channels-list">
+            <div v-for="ch in channels" :key="ch.id" class="bus-channel-item" :data-channel-id="ch.id">
+              <span class="bus-channel-name">{{ channelName(ch) }}</span>
+              <el-tag size="small" effect="plain">{{ channelTypeLabel(ch) }}</el-tag>
+              <span class="bus-channel-hw mono">{{ channelHardwareKey(ch) }}</span>
+              <span class="channel-state-tag" :class="channelEnabled(ch) ? 'state-on' : 'state-off'">{{ channelEnabled(ch) ? '已启用' : '已禁用' }}</span>
+              <span class="bus-channel-res">资源 {{ channelResourceLabel(ch) }}</span>
+              <span class="bus-channel-actions">
+                <button class="link-btn" type="button" :data-edit-channel="ch.id" :disabled="nodeOffline" @click="editChannel(ch)"><el-icon :size="12"><EditPen /></el-icon>配置</button>
+              </span>
+            </div>
+          </div>
+        </section>
       </template>
 
       <!-- DMA 通道：只读资源视图，绑定操作在总线配置 TAB -->
       <template v-else-if="activeTab === 'DMA 通道'">
         <section class="card dma-card">
           <div v-if="dmaLoading" class="card-loading"><el-skeleton :rows="3" animated /></div>
-          <div v-else-if="dmaChannels.length === 0" class="card-empty">该节点暂无 DMA 通道</div>
+          <!-- D5：DMA 与其它总线不同——设备可能**根本没上报 DMA 资源**
+               （本仓实测 nodes.capabilities.buses.dma 缺失，而 uart/spi 却报 dma_supported=true，
+                 属设备侧数据矛盾）。此时既不能给"点不动的空控件"，也不能只说"暂无"：
+                 必须区分「设备未上报」与「上报了但一条都没有」，否则用户会把
+                 "节点没有这个能力"读成"这台设备确实没有 DMA"。 -->
+          <div v-else-if="dmaChannels.length === 0" class="card-empty dma-empty" data-dma-empty>
+            <template v-if="dmaNotReported">
+              该节点未上报 DMA 资源（设备能力上报中没有 dma 项）—— 这不是"没有 DMA 通道"，而是本节点未提供该能力信息。
+            </template>
+            <template v-else>该节点已上报 {{ dmaReportedCount }} 条 DMA 资源，但当前没有可用的 DMA 通道信息</template>
+          </div>
           <div v-else class="dma-grid">
             <div v-for="dma in dmaChannels" :key="dma.dma_id" class="dma-item">
               <div class="dma-item-head">
@@ -577,7 +682,7 @@
               </thead>
               <tbody>
                 <tr v-for="record in otaHistory" :key="record.id">
-                  <td class="mono">{{ record.from_version }} → {{ record.to_version }}</td>
+                  <td class="mono">{{ record.from_version ? record.from_version + ' → ' + record.to_version : record.to_version }}</td>
                   <td><span class="bus-tag" :class="otaTagClass(record.status)">{{ otaStatusText(record.status) }}</span></td>
                   <td>
                     <div class="ota-progress"><span class="ota-progress-bar" :style="{ width: otaProgressWidth(record) }"></span></div>
@@ -658,8 +763,10 @@
     />
 
     <!-- 通道创建复用生产组件；禁止复制 demo 的 mock 表单。 -->
+    <!-- 通道编辑：由通道健康卡某一行发起时携带该行数据（initial-data ⇒ 编辑态）。 -->
     <ChannelManager
       v-model="channelManagerVisible"
+      :initial-data="channelManagerInitialData"
       :collector-id="nodeSerial"
       :capabilities="capabilities"
       :preset-hardware-type="activeBusType"
@@ -784,6 +891,8 @@ const i2cScanning = ref(false)
 const scanResult = ref<string[] | null>(null)
 const resourceQuerying = ref(false)
 const channelManagerVisible = ref(false)
+// 通道健康卡「编辑」入口的数据源：打开 ChannelManager 时传给 initial-data（编辑而非新建）。
+const channelManagerInitialData = ref<Channel | null>(null)
 const baudToolVisible = ref(false)
 
 // ── Tab 栏 ──
@@ -802,8 +911,11 @@ const showQuickCreate = ref(false)
 
 function activateTab(label: string) {
   activeTab.value = label
-  if (label === '总线配置' && node.value && !busLoading.value && !busDataLoaded.value) {
-    void fetchBusData()
+  if (label === '总线配置' || label === 'DMA 通道') {
+    // D5：DMA 空态必须能区分「设备未上报该能力」与「上报了但一条不可用」，
+    // 而后者需要 capabilities.buses.dma —— 所以进 DMA 页签同样要保证能力数据已加载
+    // （改前只有"总线配置"会拉 capabilities，DMA 页签永远拿不到，只能笼统说"暂无"）。
+    if (node.value && !busLoading.value && !busDataLoaded.value) void fetchBusData()
   }
   if (label === 'DMA 通道') {
     const serial = nodeSerial.value
@@ -832,6 +944,18 @@ const nodeOnline = computed(() => node.value?.status === 'online')
 const nodeOffline = computed(() => node.value?.status !== 'online')
 const dmaChannels = computed(() => dmaStore.mergedChannels)
 const dmaLoading = computed(() => dmaStore.loading)
+// D5：设备能力上报里是否存在 dma 项。缺失 = 设备未上报该能力（而不是"上报了 0 条"）。
+const dmaNotReported = computed(() => {
+  const buses = (capabilities.value as any)?.buses
+  return !buses || buses.dma === undefined || buses.dma === null || (Array.isArray(buses.dma) && buses.dma.length === 0)
+})
+/** 设备在能力上报里声明的 DMA 资源条数（用于区分"未上报"与"上报了但拿不到通道"）。 */
+const dmaReportedCount = computed(() => {
+  const dma = (capabilities.value as any)?.buses?.dma
+  return Array.isArray(dma) ? dma.length : 0
+})
+/** 通道健康卡的预览条数（与模板 v-for 的 slice 上限共用同一常量，避免两处漂移）。 */
+const CHANNEL_HEALTH_PREVIEW_LIMIT = 6
 
 const busTabs: Array<{ type: BusType; label: string; icon: any; description: string }> = [
   { type: 'i2c', label: 'I2C', icon: Cpu, description: 'I2C 总线用于连接低速外设，支持多主多从通信' },
@@ -1025,17 +1149,29 @@ function formatLastData(data: Record<string, any> | null): string {
 }
 
 // ── OTA 辅助 ──
+//
+// 状态全集以 backend/internal/ota/ota.go 的 Status* 常量为唯一真源（8 态）。
+// 历史缺陷（2026-09-17）：otaStatusText / otaTagClass 只覆盖 5 态，漏掉
+//   verifying / timeout / needs_retry；文案走 `texts[status] || status` ⇒ 中文界面
+//   原样显示英文；颜色回退到中性灰 ⇒「升级超时」「需要重试」与「等待中」视觉无异。
+//   timeout 是真实可达状态（ota.go 的 timeoutScanner 会写入），不是理论分支。
+// 'cancelled' 是设计文档遗留的死条目：后端从未定义该状态（取消复用 failed +
+//   error_msg）。这里不再为它保留映射，见 OtaStatusTruthSource.spec.ts 门禁。
 function otaStatusText(status: string): string {
   const texts: Record<string, string> = {
-    pending: '等待中', downloading: '下载中', installing: '安装中',
-    success: '成功', failed: '失败', cancelled: '已取消',
+    pending: '等待中', downloading: '下载中', verifying: '校验中', installing: '安装中',
+    success: '成功', failed: '失败', timeout: '超时', needs_retry: '需要重试',
   }
   return texts[status] || status
 }
 function otaTagClass(status: string): string {
+  // 红/橙不是新增 token：.bus-tag-red 用亮暗两套都已定义的 --no-danger，
+  // .bus-tag-orange 用 --no-warning-text + --no-warning-bg（同 .bus-stat-warning）。
   const classes: Record<string, string> = {
-    pending: 'bus-tag-blue', downloading: 'bus-tag-blue', installing: 'bus-tag-blue',
-    success: 'bus-tag-green', failed: 'bus-tag-gray', cancelled: 'bus-tag-gray',
+    pending: 'bus-tag-blue', downloading: 'bus-tag-blue',
+    verifying: 'bus-tag-blue', installing: 'bus-tag-blue',
+    success: 'bus-tag-green', failed: 'bus-tag-red',
+    timeout: 'bus-tag-red', needs_retry: 'bus-tag-orange',
   }
   return classes[status] || 'bus-tag-gray'
 }
@@ -1056,6 +1192,35 @@ const BUS_TYPE_MASKS: Partial<Record<BusType, number>> = { uart: 1, i2c: 2, spi:
 
 function busTypeMask(type: BusType): number {
   return BUS_TYPE_MASKS[type] || 0
+}
+
+// ── A：已创建通道列表的展示辅助（数据源 = channels，与「通道健康状态」卡同源） ──
+/** 通道类型标签：后端 hardware_type 实测为大写（'UART'），统一归一后显示。 */
+function channelTypeLabel(ch: Channel): string {
+  return String(ch.hardware_type || '').toUpperCase() || '未知总线'
+}
+/** 通道自身的硬件标识（如 UART1）+ 通道号，用于与「资源」区分开。 */
+function channelHardwareKey(ch: Channel): string {
+  const hw = String(ch.hardware_id || '').trim() || '—'
+  return `${hw} #${ch.id}`
+}
+/** 使能态：后端 enabled 为布尔；缺失时按未启用呈现（不假装已启用）。 */
+function channelEnabled(ch: Channel): boolean {
+  return (ch as any).enabled === true
+}
+/**
+ * 该通道"绑定在哪个资源上"。
+ * 资源 id 与通道 hardware_id 的对应关系与资源表**同一套口径**
+ * （hardwareResourceMatchesChannel → canonicalHardwareId），因此这里反查 resources，
+ * 保证本卡显示的"资源"与资源表「已挂载通道」列指向同一个对象，不会出现两份真相。
+ */
+function channelResourceLabel(ch: Channel): string {
+  const type = String(ch.hardware_type || '').toLowerCase() as BusType
+  const resources = (capabilities.value?.buses?.[type] || []) as any[]
+  const hit = resources.find(resource => hardwareResourceMatchesChannel({ ...resource, id: String(resource.id) }, ch))
+  if (hit) return String(hit.id)
+  // 资源未上报/不匹配时如实回落到通道自己的 hardware_id，而不是编造一个资源名。
+  return String(ch.hardware_id || '').trim() || '未匹配到已上报资源'
 }
 
 function resourceMountedChannels(resource: BusResource): Channel[] {
@@ -1153,6 +1318,62 @@ function resourceDmaBinding(resource: BusResource): DmaChannelInfo | undefined {
   return resourceDmaCandidates(resource).find(dma => String(dma.bound_to || '').toLowerCase() === key)
 }
 
+/**
+ * 该 DMA 是否**已经**绑定在本资源上。
+ * 与 resourceDmaBinding 的区别：resourceDmaBinding 只看候选集内（按掩码筛过），
+ * 而"已绑定的那条"可能因为掩码调整/数据陈旧而不在候选集内 —— 那种情况下
+ * 选择器仍要把它显示为当前值，否则用户会以为"没绑定"，一改动就等于静默解绑。
+ */
+function isDmaBoundToResource(dma: DmaChannelInfo, resource: BusResource): boolean {
+  return String(dma.bound_to || '').toLowerCase() === resourceBindingKey(resource)
+}
+
+/** 选择器当前值：'' = 不使用 DMA，否则是已绑定本资源那条的 dma_id。 */
+function dmaSelectionFor(resource: BusResource): string {
+  const all = dmaStore.mergedChannels as DmaChannelInfo[]
+  const bound = all.find(dma => isDmaBoundToResource(dma, resource))
+  if (bound) return String(bound.dma_id)
+  return resourceDmaBinding(resource) ? String(resourceDmaBinding(resource)!.dma_id) : ''
+}
+
+/** 选项文案必须带 dma_id，否则两条同名/同前缀的通道无法区分。 */
+function dmaOptionLabel(dma: DmaChannelInfo): string {
+  return `${dma.name || 'DMA' + dma.dma_id}（#${dma.dma_id} · ${busText(dma.compatible_bus)}）`
+}
+
+/**
+ * B3：无可用 DMA 时**必须说明原因**，不能静默留空。
+ * 掩码为 0（adc/gpio/pwm 无 DMA 位）与"有掩码但设备没上报兼容通道"是两种不同成因，
+ * 混成一句"暂无"会让用户把"这条总线本来就不支持 DMA"读成"功能坏了"。
+ */
+function resourceDmaUnavailableText(): string {
+  if (!busTypeMask(activeBusType.value)) return '该总线类型不支持 DMA'
+  if ((dmaStore.mergedChannels as DmaChannelInfo[]).length === 0) return '该节点未上报 DMA 资源'
+  return '该总线暂无可兼容的 DMA 资源'
+}
+
+/** B1：选择器选中后绑定/解绑。复用 dmaStore.toggle（含并发守卫与"必须指定 bindTo"防御）。 */
+async function changeResourceDma(resource: BusResource, value: string) {
+  if (nodeOffline.value) return
+  const all = dmaStore.mergedChannels as DmaChannelInfo[]
+  const target = value ? all.find(dma => String(dma.dma_id) === value) : undefined
+  if (value && !target) {
+    ElMessage.warning('所选 DMA 资源已不存在，请刷新后重试')
+    return
+  }
+  if (!target) {
+    // 选择「不使用 DMA」= 解绑当前绑定在本资源上的那条
+    const bound = all.find(dma => isDmaBoundToResource(dma, resource))
+    if (!bound) return
+    await toggleResourceDma(resource, false)
+    return
+  }
+  // 同一资源上只能有一条 DMA：先把旧的解绑，否则会留下两条都指向本资源
+  const previous = all.find(dma => isDmaBoundToResource(dma, resource) && dma.dma_id !== target.dma_id)
+  if (previous) await toggleResourceDma(resource, false)
+  await toggleResourceDma(resource, true, target)
+}
+
 function canToggleResourceDma(resource: BusResource): boolean {
   if (resourceDmaBinding(resource)) return true
   return resourceDmaCandidates(resource).some(dma => isDmaRebindable(dma.state, dma.bound_to))
@@ -1164,6 +1385,12 @@ function selectBusType(type: BusType) {
   scanResult.value = null
   selectedResourceId.value = activeBusResources.value[0]?.id || ''
 }
+
+// D4：三个选中入口（整行点击、资源名按钮、「查看」按钮）都只写 selectedResourceId，
+// 右侧「资源详情」由 selectedResource 统一派生（资源名称/引脚/关键参数/已挂载通道/DMA 绑定）。
+// 清掉只属于上一行的瞬态（I2C 地址扫描结果）放在这里做一次，避免三个入口各写一份、
+// 漏掉任意一个就会把上一行的扫描结果挂到新资源上（张冠李戴）。
+watch(selectedResourceId, () => { scanResult.value = null })
 
 // ── 事件 ──
 const recentEvents = computed(() => nodeEvents.value.slice(0, 5))
@@ -1288,13 +1515,15 @@ async function requestBusResourceRefresh() {
   }
 }
 
-async function toggleResourceDma(resource: BusResource, enabled: boolean | string | number) {
+async function toggleResourceDma(resource: BusResource, enabled: boolean | string | number, explicit?: DmaChannelInfo) {
   if (nodeOffline.value) return
   const id = route.params.id as string
   const serial = nodeSerial.value
   const desired = Boolean(enabled)
   const bound = resourceDmaBinding(resource)
-  const candidate = bound || resourceDmaCandidates(resource).find(dma => isDmaRebindable(dma.state, dma.bound_to))
+  // B1：显式指定的目标优先（用户在选择器里选的那条），
+  // 否则退回"已绑定那条 / 第一条可重绑定的候选"——即改前开关的隐式行为，保持向后兼容。
+  const candidate = explicit || bound || resourceDmaCandidates(resource).find(dma => isDmaRebindable(dma.state, dma.bound_to))
   if (!candidate) {
     ElMessage.warning('没有可用于此资源的 DMA 通道')
     return
@@ -1342,6 +1571,9 @@ function openBaudTool() {
 function openChannelManager(resource: BusResource) {
   if (nodeOffline.value || resource.enabled === false || !busSupportsChannels.value) return
   selectedResourceId.value = resource.id
+  // 走「新建通道」路径：必须清掉上一轮「编辑」留下的 initial-data，
+  // 否则对话框会以编辑态打开并复用旧的通道数据。
+  channelManagerInitialData.value = null
   channelManagerVisible.value = true
 }
 
@@ -1530,10 +1762,42 @@ function handleOTASuccess() {
 
 // ── 导航 ──
 function goBack() { router.push('/node') }
-function goToDetail() { router.push(`/node/${nodeSerial.value}`) }
+
+/**
+ * D1 修复：进入「该节点的通道视图」。
+ *
+ * 改前是 goToDetail() { router.push(`/node/${nodeSerial.value}`) } —— 它推的是**当前页**
+ * （本页路由就是 /node/:id，见 router/index.ts 的 NodeDetail/NodeOverview 两条），
+ * 于是点通道行、点「查看全部」都等于原地打转，URL 不变（实测 urlAfter === urlBefore）。
+ * 更糟的是既有测试只断言「mockRouterPush 被调用过」⇒ 永远绿，掩盖了这一点。
+ *
+ * 目标必须是**已存在且可达**的页面：产品里通道的独立页是 /channel（通道管理，
+ * 支持节点过滤 + 每行「编辑通道」入口，可编辑通道名称/参数）。因此这里跳
+ * /channel 并带上 node 过滤，用户点一行即可看到该节点的全部通道。
+ * 用 { name, query } 对象形态而非拼字符串：参数不会被手工拼接漏编码。
+ */
+function editChannel(channel: Channel) {
+  if (nodeOffline.value) {
+    ElMessage.warning('节点离线，无法编辑通道')
+    return
+  }
+  channelManagerVisible.value = true
+  // 通道配置面板复用生产组件 ChannelManager，编辑数据由 initial-data 传入。
+  channelManagerInitialData.value = channel
+}
+
+function navigateToNodeChannels() {
+  const serial = nodeSerial.value
+  if (!serial) { router.push({ name: 'ChannelList' }); return }
+  router.push({ name: 'ChannelList', query: { node: serial } })
+}
+
+// 说明：旧的函数名 goToDetail（推当前页）已删除。它既是缺陷本体，也无法被任何
+// 合法目标复用 —— 保留一个"推当前页"的别名只会给回退留后门，故不再提供任何别名。
 
 // ── 弹窗初始化 ──
 watch(renameVisible, v => { if (v) renameDraft.value = node.value?.name || '' })
+watch(channelManagerVisible, v => { if (!v) channelManagerInitialData.value = null })
 
 // ── 路由切换重置 ──
 watch(() => route.params.id, () => {
@@ -1889,6 +2153,11 @@ html.dark .node-overview-page {
 .bus-tag-blue { color: var(--no-primary); background: var(--no-bg-active); }
 .bus-tag-green { color: var(--no-success-text); background: var(--no-success-bg); }
 .bus-tag-gray { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
+/* OTA 问题态标签：红=失败/超时，橙=需要重试。色值直接引用页面级语义 token
+   （--no-danger / --no-warning-text / --no-warning-bg 在 html.dark 块里已另给暗色档），
+   因此亮暗两套自动跟随主题，无需再定义新 token。 */
+.bus-tag-red { color: var(--no-danger); background: color-mix(in srgb, var(--no-danger) 12%, transparent); }
+.bus-tag-orange { color: var(--no-warning-text); background: var(--no-warning-bg); }
 .dma-na { color: var(--no-text-muted); }
 .bus-row-actions { display: flex; align-items: center; gap: 12px; }
 .bus-pagination { min-height: 48px; display: flex; align-items: center; gap: 10px; color: var(--no-text-secondary); font-size: 12px; }
@@ -1897,6 +2166,26 @@ html.dark .node-overview-page {
 .bus-page-btn:not(:disabled) { cursor: pointer; }
 .bus-page-btn:disabled { opacity: .5; cursor: not-allowed; }
 .bus-page-current { display: inline-flex; align-items: center; color: #fff; border-color: var(--no-primary); background: var(--no-primary); }
+/* A：已创建通道列表（与资源表并列，两个层级必须视觉可分） */
+.bus-channels-card { padding: 0 16px; }
+.bus-channels-head { min-height: 52px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--no-border-light); }
+.bus-channels-head > b { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }
+.bus-channels-hint { color: var(--no-text-muted); font-size: 12px; line-height: 18px; }
+.bus-channels-head .link-btn { margin-left: auto; font-size: 12px; line-height: 18px; }
+.bus-channels-empty { padding: 14px 0; color: var(--no-text-secondary); font-size: 13px; line-height: 20px; }
+.bus-channels-list { padding: 4px 0; }
+.bus-channel-item { min-height: 44px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--no-border-light); font-size: 13px; line-height: 20px; }
+.bus-channel-item:last-child { border-bottom: 0; }
+.bus-channel-name { color: var(--no-text); font-weight: 500; }
+.bus-channel-hw { color: var(--no-text-secondary); }
+.bus-channel-res { color: var(--no-text-muted); font-size: 12px; }
+.bus-channel-actions { margin-left: auto; }
+.channel-state-tag { display: inline-flex; align-items: center; min-height: 20px; padding: 0 7px; border-radius: 4px; font-size: 12px; font-weight: 500; line-height: 18px; }
+.channel-state-tag.state-on { color: var(--no-success-text); background: var(--no-success-bg); }
+.channel-state-tag.state-off { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
+/* B3：无可兼容 DMA 时的显式说明（不留空白控件） */
+.dma-none { color: var(--no-text-muted); font-size: 12px; line-height: 18px; white-space: nowrap; }
+.dma-select { width: 200px; }
 .bus-tool-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(228px, 1fr); gap: 16px; }
 .bus-tool-group { min-width: 0; padding: 14px 16px 16px; }
 .bus-tool-group-head { min-height: 24px; display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -2024,6 +2313,11 @@ html.dark .node-overview-page {
 }
 .chan-row:last-child { border-bottom: none; }
 .chan-row:hover { background: var(--no-bg-hover); }
+.chan-row:focus-visible { outline: 2px solid var(--no-primary); outline-offset: -2px; border-radius: 6px; }
+/* D2：列表被截断时的显式提示（不能把"看到 6 行"读成"只有 6 个通道"）。 */
+.chan-more { padding: 8px 4px 0; font-size: 12px; line-height: 18px; color: var(--no-text-muted); }
+/* D5：DMA 空态可能是"设备未上报"，文案较长，给它可读的行高。 */
+.dma-empty { line-height: 20px; }
 .chan-icon {
   width: 28px; height: 28px; border-radius: 6px; background: var(--no-bg-active); color: var(--no-primary);
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -2034,6 +2328,8 @@ html.dark .node-overview-page {
 .cb-warn { color: var(--no-warning-text); background: var(--no-warning-bg); }
 .cb-off { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
 .chan-arrow { color: var(--no-dot-off); }
+.chan-edit { flex-shrink: 0; }
+.channel-manager-edit-hint { padding: 0 20px 8px; font-size: 12px; color: var(--no-text-muted); }
 
 /* 弹窗 */
 .form-row { margin-bottom: 16px; }

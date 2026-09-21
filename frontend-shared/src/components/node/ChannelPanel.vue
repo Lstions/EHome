@@ -1,3 +1,24 @@
+<!--
+  ⚠️ 本组件当前**没有任何路由或组件引用它**（死代码），请勿在此继续投入功能修复。
+
+  证据（2026-09-20，fix-bus 实机核验）：
+    · frontend-shared/src/router/index.ts:47-58 —— 'node/:id'(name=NodeDetail) 与
+      'node/:id/overview'(name=NodeOverview) 两条路由的 component 都是
+      () => import('@/views/node/NodeOverview.vue')；router 里没有 NodeDetail.vue。
+    · 全仓唯一 import 本组件的位置是 views/node/NodeDetail.vue:444，
+      而 NodeDetail.vue 本身同样无人 import ⇒ 本组件永远不可达。
+    · 实机验证（隔离栈 18096，/node/1 → 总线配置）：本组件模板根 .bus-config-panel
+      在 DOM 中为 null，页面加载的 chunk 里只有 NodeOverview-*.js，没有 ChannelPanel-*。
+
+  因此「节点详情 → 总线配置」的**真实载体是 views/node/NodeOverview.vue**。
+  资源清单、已创建通道列表、DMA 绑定选择器都在那里实现；
+  在此复制一份"看起来一致"的新实现会制造两份真相，明确禁止。
+  修改本组件前请先确认上面两条路由仍然指向 NodeOverview。
+
+  另注：本文件仍被若干单测直接 mount（ChannelPanelEdit / ChannelPanelPeriphEdit /
+  ChannelPanelUartReconfigure / ChannelPanelRoute），所以它仍须能编译通过；
+  但这些测试只证明"组件自身能渲染"，**不能**证明它在生产可达。
+-->
 <template>
   <div class="bus-config-panel">
     <el-tabs v-model="activeTab">

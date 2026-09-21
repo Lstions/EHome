@@ -46,9 +46,24 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
   mockDmaChannelsRef: { value: [] as any[] },
 }))
 
+// D1 门禁需要"目标 vs 当前页"的语义比较，而不是"push 被调用过"。
+// 用一个**会真的改变当前路由**的假 router：push 同时写 pushHistory 与 currentRoute，
+// 这样测试才可能在"目标与当前页歧义/相同"时失败 —— 只记录调用次数的话，
+// 推当前页与推有效目标在断言上完全等价（这正是 D1 藏了这么久的机制）。
+const { mockRouterState } = vi.hoisted(() => ({
+  mockRouterState: {
+    /** 当前路由（初始即 NodeOverview 自身：name=NodeDetail, path=/node/1） */
+    current: { name: 'NodeDetail', path: '/node/1' } as { name?: string; path?: string },
+    pushes: [] as any[],
+  },
+}))
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ back: vi.fn(), push: mockRouterPush }),
-  useRoute: () => ({ params: { id: '1' } }),
+  useRouter: () => ({
+    back: vi.fn(),
+    push: mockRouterPush,
+    currentRoute: { value: mockRouterState.current },
+  }),
+  useRoute: () => ({ params: { id: '1' }, name: 'NodeDetail', path: '/node/1' }),
 }))
 vi.mock('@/api/node', () => ({
   nodeApi: {
@@ -88,9 +103,33 @@ vi.mock('element-plus', async (importOriginal) => {
 })
 vi.mock('@/utils/logger', () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
 
+// push 的语义后果：真实 vue-router 会让"当前路由"变成目标（并解析 {name,query}）。
+// 这里复刻该行为，使"目标 !== 当前页"成为可失败的断言。
+mockRouterPush.mockImplementation((target: any) => {
+  mockRouterState.pushes.push(target)
+  if (typeof target === 'string') {
+    mockRouterState.current = { path: target }
+  } else if (target && typeof target === 'object') {
+    const query = target.query
+      ? '?' + Object.entries(target.query).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join('&')
+      : ''
+    const resolved = target.name === 'ChannelList' ? '/channel' : (target.path || '/node/1')
+    mockRouterState.current = { name: target.name, path: resolved + query }
+  }
+  return Promise.resolve()
+})
+
+// ChannelManager 需要可查询的 props（D1 门禁要断言 initial-data = 本行通道），
+// 因此用一个最小 stub 而不是 true（true 渲染成匿名组件，拿不到 props）。
+const ChannelManagerStub = {
+  name: 'ChannelManager',
+  template: '<div class="channel-manager-stub" />',
+  props: ['modelValue', 'collectorId', 'capabilities', 'presetHardwareType', 'presetHardwareId', 'collectorStatus', 'initialData'],
+}
+
 const stubs = {
   OTAForm: true,
-  ChannelManager: true,
+  ChannelManager: ChannelManagerStub,
   ChannelTerminal: {
     template: '<div class="channel-terminal-stub"><slot /><span v-if="collectorId">collector={{ collectorId }}</span><span v-if="nodeDeviceId">device={{ nodeDeviceId }}</span><span v-if="channels">channels={{ channels.length }}</span></div>',
     props: ['collectorId', 'nodeDeviceId', 'channels'],
@@ -125,6 +164,9 @@ describe('NodeOverview (生产页)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    // 每个用例都从"当前就在 NodeOverview 自身"这一真实前提开始
+    mockRouterState.current = { name: 'NodeDetail', path: '/node/1' }
+    mockRouterState.pushes.length = 0
   })
 
   it('挂载后加载节点详情、通道与事件', async () => {
@@ -188,6 +230,164 @@ describe('NodeOverview (生产页)', () => {
     expect(chips[0].text()).toContain('2') // 总数
     expect(chips[1].text()).toContain('1') // 正常
     expect(chips[2].text()).toContain('1') // 异常
+  })
+
+  // ─── D1（本任务的核心门禁）：点通道行必须是**有效导航** ───
+  //
+  // 为什么旧测试测不出来：它只断言 mockRouterPush 被调用过。而改前的实现是
+  //   goToDetail() { router.push(\`/node/\${nodeSerial.value}\`) }
+  // —— 本页路由就是 /node/:id，于是「调用过」与「原地打转」在断言上完全等价。
+  // 这里改为断言**目标的语义有效性**：目标既不能等于当前路由（by name、by path），
+  // 也不能落在本页自身的路径族里，且必须真的携带该节点的过滤参数。
+  it('D1：点通道行的导航目标不是当前页，而是 /channel?node=<序列号>', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const rows = wrapper.findAll('.health-card .chan-row')
+    expect(rows.length, '前置条件：通道健康卡必须有可点的通道行').toBeGreaterThan(0)
+    const currentPath = mockRouterState.current.path
+    const currentName = mockRouterState.current.name
+    expect(currentName, '前置条件：当前页就是 NodeOverview 自身').toBe('NodeDetail')
+
+    await rows[0].trigger('click')
+    await flushPromises()
+
+    expect(mockRouterState.pushes).toHaveLength(1)
+    const target = mockRouterState.pushes[0]
+    expect(typeof target, '目标必须是可解析的路由对象（不是拼接字符串，避免丢参）').toBe('object')
+    expect(target.name).toBe('ChannelList')
+    expect(target.query?.node).toBe('F0F5BDFFFE02')
+
+    // ★ 有效性断言（这一条才是本次缺陷的判据）
+    expect(target.name, '目标路由名不得等于当前路由名（否则就是原地打转）').not.toBe(currentName)
+    expect(target.path ?? '', '目标不得推当前页路径').not.toBe(currentPath)
+    // 反向守卫：模拟 push 之后的当前路由必须真的离开了本页
+    expect(mockRouterState.current.path, '导航后必须离开当前页').not.toBe(currentPath)
+    expect(mockRouterState.current.path).toContain('/channel')
+
+    // 分类器自检：把「推当前页」这个旧行为喂给同一套判据，必须判为无效 ——
+    // 否则这段断言可能因为判据写错而永远绿（本仓已多次发生此类假绿）。
+    const verdict = (t: any) => {
+      const resolvesToSelf = t?.name === currentName || (t?.path || '') === currentPath
+      const leavesNodeDetail = String(t?.path ?? '/channel').includes('/channel')
+      return !resolvesToSelf && leavesNodeDetail
+    }
+    expect(verdict({ name: 'NodeDetail', path: '/node/1' }), '旧实现（推当前页）必须被判为无效目标').toBe(false)
+    expect(verdict({ name: 'ChannelList', path: '/channel?node=F0F5BDFFFE02' })).toBe(true)
+  })
+
+  it('D1：通道行键盘可达（role/tabindex/Enter/Space），旧契约不得复活', () => {
+    // 原生可聚焦元素之外的可点区域必须四件套齐全，否则键盘用户到不了这个入口；
+    // 全站门禁 IconActionAccessibilityGate.spec.ts 会在缺件时报红。
+    const start = source.indexOf('class="chan-row"')
+    expect(start, '源码里必须还有 .chan-row').toBeGreaterThan(0)
+    const rowTag = source.slice(start, start + 560)
+    expect(rowTag).toContain('role="button"')
+    expect(rowTag).toContain('tabindex="0"')
+    expect(rowTag).toContain('@keydown.enter.prevent="navigateToNodeChannels"')
+    expect(rowTag).toContain('@keydown.space.prevent="navigateToNodeChannels"')
+    // 旧契约（推当前页）不得复活。
+    // 判据只作用于**可执行代码**：源码注释里会引用旧写法作为修复说明，
+    // 不剥注释就会被自己的文档文字误伤（同 OTAFormStatusCoverage.spec.ts 的陷阱）。
+    const codeOnly = source
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    expect(codeOnly, '模板里不得再有 goToDetail 点击').not.toContain('@click="goToDetail"')
+    expect(codeOnly, '函数 goToDetail 不得复活').not.toContain('function goToDetail')
+    expect(codeOnly).not.toContain('router.push(`/node/')
+    expect(codeOnly).toContain('function navigateToNodeChannels()')
+  })
+
+  // ─── D4：点「查看」必须把资源详情切换到**该行** ───
+  it('D4：逐行点「查看」，右侧资源详情切换为该行资源（UART0 → UART1 → 回到 UART0）', async () => {
+    mockGetCapabilities.mockResolvedValueOnce({
+      buses: {
+        uart: [
+          { id: 'UART0', enabled: true, default_tx_pin: 16, default_rx_pin: 17, max_baud: 115200 },
+          { id: 'UART1', enabled: true, default_tx_pin: 20, default_rx_pin: 21, max_baud: 5000000 },
+        ],
+        i2c: [], spi: [], adc: [], gpio: [], pwm: [],
+      },
+    } as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.bus-subtab').find(b => b.text().includes('UART'))?.trigger('click')
+    await flushPromises()
+
+    const rows = wrapper.findAll('.bus-table tbody tr')
+    expect(rows).toHaveLength(2)
+    const detailText = () => wrapper.find('[data-bus-detail]').text()
+    const viewBtn = (i: number) => rows[i].findAll('button').find(b => b.text().includes('查看'))!
+
+    await viewBtn(0).trigger('click')
+    await flushPromises()
+    const afterRow0 = detailText()
+    expect(afterRow0).toContain('UART0')
+    expect(afterRow0, '详情必须切换成该行的引脚参数').toContain('TX16 / RX17')
+
+    // 第 2 行：点「查看」→ 详情必须**变化**成 UART1（这正是改前失败的地方）
+    await viewBtn(1).trigger('click')
+    await flushPromises()
+    const afterRow1 = detailText()
+    expect(afterRow1, '点第 2 行后详情内容必须发生变化').not.toBe(afterRow0)
+    expect(afterRow1).toContain('UART1')
+    expect(afterRow1).toContain('TX20 / RX21')
+    expect(afterRow1, '详情不得残留上一行的资源').not.toContain('UART0')
+
+    // 点回第 1 行同样必须切回（单向切换不算修好）
+    await viewBtn(0).trigger('click')
+    await flushPromises()
+    expect(detailText()).toContain('UART0')
+    expect(detailText()).not.toContain('UART1')
+  })
+
+  // ─── D2：计数与列表必须同源同过滤，截断必须显式 ───
+  it('D1：行内「编辑」打开该行通道的配置对话框（initial-data ⇒ 编辑态）', async () => {
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const rows = wrapper.findAll('.health-card .chan-row')
+    expect(rows.length).toBeGreaterThan(0)
+    const editBtn = rows[0].find('button.chan-edit')
+    expect(editBtn.exists(), '通道行必须有行内编辑入口').toBe(true)
+    await editBtn.trigger('click')
+    await flushPromises()
+    const stub = wrapper.findComponent(ChannelManagerStub)
+    expect(stub.exists()).toBe(true)
+    expect(stub.props('modelValue'), '点编辑必须打开对话框').toBe(true)
+    expect((stub.props('initialData') as any)?.id, 'initial-data 必须是本行通道（编辑态而非新建态）').toBe(1)
+  })
+  it('D2：总数/正常/异常由同一份 channels 派生，列表截断显式可见', async () => {
+    const many = Array.from({ length: 7 }, (_, i) => ({
+      id: i + 1, node_id: 'F0F5BDFFFE02', hardware_type: 'uart', hardware_id: 'UART' + i,
+      status: i === 0 ? 'error' : 'ok', config: {},
+    }))
+    mockChannelList.mockResolvedValueOnce(many as any)
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const health = wrapper.find('.health-card')
+    const chips = health.findAll('.chip').map(c => c.text())
+    expect(chips[0]).toContain('7')
+    expect(chips[1]).toContain('6')
+    expect(chips[2]).toContain('1')
+    // 列表只渲染前 6 条 ⇒ 第 7 条必须被显式说明，而不是静默消失
+    expect(health.findAll('.chan-row')).toHaveLength(6)
+    const rangeLine = health.find('[data-chan-range]')
+    expect(rangeLine.exists(), '截断必须有一行常驻的范围说明').toBe(true)
+    expect(rangeLine.text()).toContain('共 7 条')
+    expect(rangeLine.text()).toContain('此处显示前 6 条')
+    expect(rangeLine.text()).toContain('还有 1 条未显示')
+
+    // 反例（分类器自检）：恰好 6 条时不得出现截断提示
+    mockChannelList.mockResolvedValueOnce(many.slice(0, 6) as any)
+    const wrapper2 = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const rangeLine2 = wrapper2.find('.health-card [data-chan-range]')
+    expect(rangeLine2.exists(), '未截断时范围说明仍常驻（用户始终知道列表范围）').toBe(true)
+    expect(rangeLine2.text()).toContain('共 6 条')
+    expect(rangeLine2.text()).not.toContain('未显示')
+    expect(wrapper2.findAll('.health-card .chan-row')).toHaveLength(6)
   })
 
   it('最近事件卡渲染 status-history 真实事件', async () => {
@@ -421,7 +621,26 @@ describe('NodeOverview (生产页)', () => {
     await tab?.trigger('click')
     await flushPromises()
     expect(mockDmaFetch).toHaveBeenCalledWith('F0F5BDFFFE02')
-    expect(wrapper.find('.dma-card').text()).toContain('该节点暂无 DMA 通道')
+    // D5 修复后空态**必须区分两种成因**（改前统一说"暂无 DMA 通道"，用户会把
+    // "设备没上报这个能力"读成"这台设备确实没有 DMA"）：
+    //   · 能力上报里没有 dma 项 ⇒ 未上报（本用例的 fixture 正是这种：buses 无 dma）
+    //   · 上报了但一条不可用 ⇒ 已上报 N 条
+    const emptyText = wrapper.find('.dma-card .card-empty').text()
+    expect(emptyText).toContain('未上报 DMA 资源')
+    expect(emptyText).not.toContain('暂无 DMA 通道')
+
+    // 反例（分类器自检）：能力上报里**有** dma 项 ⇒ 不得再说"未上报"
+    mockGetCapabilities.mockResolvedValueOnce({
+      buses: { i2c: [], uart: [], spi: [], adc: [], gpio: [], pwm: [], dma: [{ id: 'GDMA_CH0', channel: 0 }] },
+    } as any)
+    const wrapperReported = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tabReported = wrapperReported.findAll('.tab-item').find(item => item.text().includes('DMA 通道'))
+    await tabReported?.trigger('click')
+    await flushPromises()
+    const reportedText = wrapperReported.find('.dma-card .card-empty').text()
+    expect(reportedText).not.toContain('未上报 DMA 资源')
+    expect(reportedText).toContain('1 条 DMA 资源')
 
     // 再验证有数据 → 渲染卡片（重新 mount）
     mockDmaChannelsRef.value = [
@@ -577,6 +796,64 @@ describe('NodeOverview (生产页)', () => {
     const cancelBtn = wrapper.find('.ota-card tbody tr button')
     expect(cancelBtn.text()).toContain('取消')
     expect(cancelBtn.attributes('disabled')).toBeDefined()
+  })
+
+  it('OTA 历史 TAB：timeout/needs_retry/verifying 三态渲染中文文案与红/橙/蓝标签', async () => {
+    // 三态此前完全未映射：文案走 `texts[status] || status` ⇒ 中文界面原样显示英文，
+    // 颜色回退 'bus-tag-gray' ⇒「超时」「需要重试」与「等待中」视觉无异。
+    // 必须先清掉上一次用例可能残留的 once 队列（mockClear 不清队列），否则会取到别人的 fixture
+    mockGetOTAHistory.mockReset()
+    // 本用例只会触发 1 次 fetchOTAHistory（点 TAB）；多排的值会泄漏给后续用例
+    mockGetOTAHistory.mockResolvedValueOnce([
+      { id: 11, node_id: 1, firmware_id: 1, from_version: '2.6.0', to_version: '2.6.1', status: 'timeout', progress: 60, created_at: new Date().toISOString() },
+      { id: 12, node_id: 1, firmware_id: 2, from_version: '2.6.0', to_version: '2.6.2', status: 'needs_retry', progress: 0, created_at: new Date().toISOString() },
+      { id: 13, node_id: 1, firmware_id: 3, from_version: '2.6.1', to_version: '2.6.2', status: 'verifying', progress: 100, created_at: new Date().toISOString() },
+    ] as any[])
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const card = wrapper.find('.ota-card')
+    expect(card.text()).toContain('超时')
+    expect(card.text()).toContain('需要重试')
+    expect(card.text()).toContain('校验中')
+    // 漏映射时状态名会原样露出英文
+    expect(card.text()).not.toContain('needs_retry')
+    expect(card.text()).not.toContain('verifying')
+
+    const rows = card.findAll('.bus-table tbody tr')
+    expect(rows).toHaveLength(3)
+    const tagOf = (text: string) => rows.find(r => r.text().includes(text))!.find('.bus-tag')
+    // 问题态绝不能落中性灰
+    expect(tagOf('超时').classes()).toContain('bus-tag-red')
+    expect(tagOf('超时').classes()).not.toContain('bus-tag-gray')
+    expect(tagOf('需要重试').classes()).toContain('bus-tag-orange')
+    expect(tagOf('需要重试').classes()).not.toContain('bus-tag-gray')
+    expect(tagOf('校验中').classes()).toContain('bus-tag-blue')
+    // 取消只允许 pending/downloading：这三态都不该有取消按钮
+    expect(card.find('.bus-table tbody button').exists()).toBe(false)
+  })
+
+  it('OTA 历史 TAB：from_version 缺失时版本列只渲染 to_version（后端 models.OTATask 无该字段）', async () => {
+    mockGetOTAHistory.mockReset()
+    mockGetOTAHistory.mockResolvedValueOnce([
+      { id: 21, node_id: 1, firmware_id: 1, from_version: '2.5.18', to_version: '2.6.0', status: 'success', progress: 100, created_at: new Date().toISOString(), completed_at: new Date().toISOString() },
+      // 后端真实响应形态：api/node.ts 从不返回 from_version
+      { id: 22, node_id: 1, firmware_id: 2, to_version: '2.6.3', status: 'failed', progress: 80, created_at: new Date().toISOString(), completed_at: new Date().toISOString() },
+    ] as any[])
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('OTA 历史'))
+    await tab?.trigger('click')
+    await flushPromises()
+    const rows = wrapper.findAll('.ota-card .bus-table tbody tr')
+    expect(rows).toHaveLength(2)
+    const cells = rows.map(r => r.findAll('td')[0])
+    // 旧数据/兼容形态仍能正确渲染（既有断言 NodeOverview.spec.ts:544 也压着这条）
+    expect(cells[0].text()).toBe('2.5.18 → 2.6.0')
+    // 修复前是 `{{ from_version }} → {{ to_version }}` ⇒ 这里渲染成 " → 2.6.3"（前半段空白）
+    expect(cells[1].text()).toBe('2.6.3')
   })
 
   it('系统日志 TAB：渲染 LogPanel 并传递 collector-id / node-device-id', async () => {

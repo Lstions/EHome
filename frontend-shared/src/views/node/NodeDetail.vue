@@ -351,7 +351,7 @@
           <el-table :data="otaHistory" stripe>
           <el-table-column label="升级版本" width="120">
             <template #default="{ row }">
-              {{ row.from_version }} → {{ row.to_version }}
+              {{ row.from_version ? row.from_version + ' → ' + row.to_version : row.to_version }}
             </template>
           </el-table-column>
           <el-table-column label="状态" width="120">
@@ -785,7 +785,6 @@ const OTA_STATUS_TYPES: Record<string, TagType> = {
   failed: 'danger',
   timeout: 'danger',      // 问题态：绝不能是中性 info
   needs_retry: 'danger',  // 问题态：需要人工介入重试
-  cancelled: 'info'
 }
 
 const OTA_STATUS_TEXTS: Record<string, string> = {
@@ -797,7 +796,6 @@ const OTA_STATUS_TEXTS: Record<string, string> = {
   failed: '失败',
   timeout: '超时',
   needs_retry: '需要重试',
-  cancelled: '已取消'
 }
 
 const getOTAStatusType = (status: string): TagType => OTA_STATUS_TYPES[status] || 'info'

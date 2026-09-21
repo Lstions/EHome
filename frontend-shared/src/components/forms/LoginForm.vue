@@ -36,7 +36,10 @@
       <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
         <el-checkbox v-model="form.rememberMe" label="记住我" :disabled="disabled" />
         <!-- 忘记密码入口（占位，指向管理员联系提示） -->
-        <el-link type="primary" :underline="false" @click="showForgotTip = true">忘记密码？</el-link>
+        <!-- Element Plus 2.14.3：underline 的布尔形态已弃用（触发 ElementPlusError 告警）。
+             `:underline="false"` 与 `underline="never"` 语义等价（link.vue:34-36 的
+             isBoolean 分支把 false 映射为 "never"），改为字符串字面量以消除告警且不改视觉。 -->
+        <el-link type="primary" underline="never" @click="showForgotTip = true">忘记密码？</el-link>
       </div>
     </el-form-item>
 

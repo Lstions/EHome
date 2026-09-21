@@ -17,6 +17,17 @@ export interface DriverLeaf {
   display_name: string
   hardware_types: string[]
   description: string
+  /**
+   * m-1（2026-09-22）：该型号的受控指令是否把 EdgeDevice.hardware_id 当**物理地址**
+   * （Modbus 从站号 / I2C 地址）解析。
+   *
+   * 后端真源：`driverRequiresTargetAddress`（handler_edge_device.go 的地址门禁与
+   * /device-configs/tree 共用同一个判定，不存在第二份口径）。
+   *
+   * 可选是**刻意的**：老后端不返回该字段。消费方必须把 undefined 当作
+   * 「拿不到能力信息」而不是 false —— 后者会让向导对纯 I2C 型号也照旧造地址 1。
+   */
+  requires_target_address?: boolean
 }
 
 export interface DriverTreeNode {
@@ -124,10 +135,22 @@ export const flattenDrivers = (tree: DriverTreeNode[]): DriverLeaf[] => {
   return drivers
 }
 
+/**
+ * 按型号 (device_type) 查该型号是否消费设备地址 —— 三分支显式返回。
+ *
+ * 这是前端**唯一**的能力查询入口（数据源永远是最初的 /device-configs/tree 快照），
+ * 调用方不要各自 `find` 一份，否则"字段缺失"的兼容判定会在各处走样。
+ */
+export function findDriverLeaf(tree: DriverTreeNode[], type: string): DriverLeaf | undefined {
+  if (!type) return undefined
+  return flattenDrivers(tree).find(driver => driver.type === type)
+}
+
 export default {
   getDriverTree,
   getDriverList,
   getDriverDetail,
   transformToCascaderOptions,
   flattenDrivers,
+  findDriverLeaf,
 }

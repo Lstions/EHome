@@ -8,7 +8,9 @@ import type { EdgeDeviceListParams } from '@/api/edgeDevice'
 // 显式标注 mock 签名: 无参 `vi.fn(() => ...)` 会把 `mock.calls` 推成 `[][]`
 // (长度 0 的元组), 之后读 `calls[0][0]` 会报 TS2493。标注后 calls 是
 // `[params?, force?][]`, 既能断言参数、也不需要任何 `as any`。
-const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands } = vi.hoisted(() => ({
+const { mockEdgeDeviceGetList, mockGetLogicalDeviceInfo, mockGetDriverCommands, mockGetCapabilities } = vi.hoisted(() => ({
+  // D6：向导「硬件ID」下拉的真源是设备上报能力（GET /nodes/:id/capabilities）
+  mockGetCapabilities: vi.fn((..._args: any[]) => Promise.resolve({ buses: {} })),
   mockEdgeDeviceGetList: vi.fn<(params?: EdgeDeviceListParams) => Promise<{ items: unknown[]; total: number }>>(() => Promise.resolve({
     items: [
       { id: 1, name: 'Device A', status: 'active', device_type: 'temp_humidity', hardware_type: 'uart', logical_device_id: 11 },
@@ -67,6 +69,7 @@ vi.mock('@/api/channel', () => ({
 vi.mock('@/api/deviceConfig', () => ({ deviceConfigApi: { getList: vi.fn(() => Promise.resolve({ list: [] })) } }))
 vi.mock('@/api/parser', () => ({ parserApi: { getList: vi.fn(() => Promise.resolve([])) } }))
 vi.mock('@/api/client', () => ({ default: { get: vi.fn(() => Promise.resolve({ data_count_today: 0 })) } }))
+vi.mock('@/api/node', () => ({ nodeApi: { getCapabilities: mockGetCapabilities } }))
 
 const stubs = {
   SkeletonCard: { template: '<div data-testid="skeleton-card" />' },
@@ -600,6 +603,166 @@ describe('EdgeDeviceList.vue', () => {
     spy.mockRestore()
   })
 
+
+  // ─── D6：创建向导的「硬件ID」必须来自设备上报，不得硬编码虚假资源 ───
+  //
+  // 改前：availableBusesForType 在"该节点还没有此类通道"时返回硬编码
+  //   uart:['UART1','UART2'] i2c:['I2C0','I2C1'] spi:['SPI1','SPI2'] ...
+  // 完全不读 nodes.capabilities。真实浏览器实测（节点 F0F5BDFFFE02）：
+  //   设备上报 uart=[UART0,UART1] i2c=[I2C0] spi=[SPI2]，
+  //   而下拉里出现 I2C1 / SPI1 —— 设备上根本不存在；选中即造出指向不存在总线的通道。
+  const CAPS_FIXTURE = {
+    uart: [{ id: 'UART0' }, { id: 'UART1' }],
+    i2c: [{ id: 'I2C0' }],
+    spi: [{ id: 'SPI2' }],
+    gpio: [{ id: 'GPIO0' }],
+    adc: [],
+    pwm: [],
+  }
+
+  it('D6(a)：硬件ID 选项来自 nodes.capabilities.buses[type] 的 resource.id（0 基、与设备一致）', async () => {
+    mockGetCapabilities.mockResolvedValue({ buses: CAPS_FIXTURE } as any)
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.deviceForm.node_id = 'node-1'
+    vm.handleNodeChange()
+    await flushPromises()
+
+    expect(mockGetCapabilities).toHaveBeenCalledWith('node-1')
+    // 与设备一致：UART0/UART1（不是 1 基的 UART1/UART2）
+    expect(vm.availableBusesForType('uart')).toEqual(['UART0', 'UART1'])
+    expect(vm.availableBusesForType('i2c')).toEqual(['I2C0'])
+    expect(vm.availableBusesForType('spi')).toEqual(['SPI2'])
+    // 反例：设备上不存在的资源名绝不能出现
+    for (const fake of ['UART2', 'I2C1', 'SPI1', 'ADC1', 'ADC2']) {
+      expect(vm.availableBusesForType('uart')).not.toContain(fake)
+      expect(vm.availableBusesForType('i2c')).not.toContain(fake)
+      expect(vm.availableBusesForType('spi')).not.toContain(fake)
+    }
+  })
+
+  it('D6(a) 变异自证：硬编码 fallback 一旦复活即报红（分类器真的在测东西）', async () => {
+    // 分类器自检：把"设备未上报"这一前提下的期望值写死成改前的硬编码表，
+    // 断言必须**失败** —— 否则说明这组断言其实没在看返回值。
+    mockGetCapabilities.mockResolvedValue({ buses: { ...CAPS_FIXTURE, spi: [] } } as any)
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.deviceForm.node_id = 'node-1'
+    vm.handleNodeChange()
+    await flushPromises()
+    const legacyHardcoded = ['SPI1', 'SPI2']
+    expect(vm.availableBusesForType('spi')).not.toEqual(legacyHardcoded)
+    expect(vm.availableBusesForType('spi')).toEqual([])
+  })
+
+  it('D6(b)：未上报该总线资源时必须显式提示且禁用创建，不提供虚假选项', async () => {
+    mockGetCapabilities.mockResolvedValue({ buses: { ...CAPS_FIXTURE, spi: [] } } as any)
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.showCreateDialog = true
+    vm.selectedParser = { id: 'bmp280', name: 'BMP280', hardware_types: ['i2c', 'spi'] }
+    vm.deviceForm.node_id = 'node-1'
+    vm.deviceForm.name = 'BMP280-1'
+    vm.channelTab = 'create'
+    vm.createStep = 2
+    vm.newChannel.hardware_type = 'spi'
+    vm.newChannel.hardware_id = ''
+    await flushPromises()
+
+    expect(vm.busTypeReported('spi')).toBe(true)   // 上报过该键，只是空数组
+    expect(vm.hasBusOptions).toBe(false)
+    expect(vm.unavailableBusMessage).toContain('未上报 SPI 资源')
+    // 步骤 2 不允许继续（否则会带着硬编码资源名往下走）
+    expect(vm.canGoNext).toBe(false)
+
+    // 提交侧兜底：即便绕过步骤校验，也不得发出 create
+    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    await vm.handleCreate()
+    await flushPromises()
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    expect(edgeDeviceApi.create).not.toHaveBeenCalled()
+
+    // 反例（分类器自检）：设备上报了 SPI2 时同一路径必须放行
+    mockGetCapabilities.mockResolvedValue({ buses: CAPS_FIXTURE } as any)
+    const wrapper2 = mountList()
+    await flushPromises()
+    const vm2 = wrapper2.vm as any
+    vm2.showCreateDialog = true
+    vm2.selectedParser = { id: 'bmp280', name: 'BMP280', hardware_types: ['spi'] }
+    vm2.deviceForm.node_id = 'node-1'
+    vm2.channelTab = 'create'
+    vm2.createStep = 2
+    vm2.newChannel.hardware_type = 'spi'
+    vm2.newChannel.hardware_id = 'SPI2'
+    await flushPromises()
+    expect(vm2.hasBusOptions).toBe(true)
+    expect(vm2.canGoNext).toBe(true)
+  })
+
+  it('D6(b)：总线类型切换后清空上一条资源 id（UART0 不是 SPI 资源）', async () => {
+    mockGetCapabilities.mockResolvedValue({ buses: CAPS_FIXTURE } as any)
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.deviceForm.node_id = 'node-1'
+    vm.handleNodeChange()
+    await flushPromises()
+    vm.newChannel.hardware_id = 'UART0'
+    vm.onNewChannelBusTypeChange()
+    expect(vm.newChannel.hardware_id).toBe('')
+  })
+
+  it('D6(c)：inline 建通道路径不得把总线标识当设备地址提交', async () => {
+    mockGetCapabilities.mockResolvedValue({ buses: CAPS_FIXTURE } as any)
+    const { edgeDeviceApi } = await import('@/api/edgeDevice')
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = await openWizardWithParser(wrapper, { id: 'generic_modbus', name: '通用 Modbus', hardware_types: ['uart'] })
+    vm.deviceForm.node_id = 'node-1'
+    vm.handleNodeChange()
+    await flushPromises()
+    vm.deviceForm.name = '通用设备'
+    vm.channelTab = 'create'
+    vm.newChannel.hardware_type = 'uart'
+    vm.newChannel.hardware_id = 'UART0'
+    vm.deviceFormRef = { validate: () => Promise.resolve(), resetFields: () => {} }
+    await vm.handleCreate()
+    await flushPromises()
+
+    expect(edgeDeviceApi.create).toHaveBeenCalledTimes(1)
+    const arg = (edgeDeviceApi.create as any).mock.calls[0][0]
+    // 通道总线标识照旧提交给 channel（这是通道语义，正确）
+    expect(arg.channel.hardware_id).toBe('UART0')
+    // 但设备 hardware_id 是**地址**，绝不能是 'UART0'
+    expect(arg.hardware_id).not.toBe('UART0')
+    expect(arg.hardware_id).toBe('1')  // 退回后端默认地址 1，并且用户已被明确告知
+
+    // 分类器自检：合法地址形态（通道恰好命名为 "1"）必须原样沿用，不被改写成默认值
+    // 第二次：把通道值换成**合法地址形态**（用户直接把通道命名为 "1"，即 Modbus 从站号），
+    // 同一路径必须原样沿用，而不是被覆盖成默认地址。
+    // 用**全新的挂载**而不是复用上一个 wrapper：成功创建后向导会 resetCreateDialog()，
+    // 复用会把"重置后的空状态"当成"用户第二次填写"，测的不是同一件事。
+    ;(edgeDeviceApi.create as any).mockClear()
+    const wrapper2 = mountList()
+    await flushPromises()
+    const vm2 = await openWizardWithParser(wrapper2, { id: 'generic_modbus', name: '通用 Modbus', hardware_types: ['uart'] })
+    vm2.deviceForm.node_id = 'node-1'
+    vm2.handleNodeChange()
+    await flushPromises()
+    vm2.deviceForm.name = '通用设备-地址1'
+    vm2.channelTab = 'create'
+    vm2.newChannel.hardware_type = 'uart'
+    vm2.newChannel.hardware_id = '1'
+    vm2.deviceFormRef = { validate: () => Promise.resolve(), resetFields: () => {} }
+    await vm2.handleCreate()
+    await flushPromises()
+    expect((edgeDeviceApi.create as any).mock.calls.length, '第二次提交必须真的发出 create').toBeGreaterThan(0)
+    expect((edgeDeviceApi.create as any).mock.calls[0][0].hardware_id).toBe('1')
+  })
+
   // ---- EDGE-WIZ-002: 通道卡片字体 ----
 
   it('EDGE-WIZ-002: 通道卡片不再使用原生 <code> 默认等宽字体', () => {
@@ -717,7 +880,7 @@ describe('EdgeDeviceList.vue', () => {
     vm.channelTab = 'existing'
     vm.deviceForm.name = 'SN'
     vm.deviceForm.node_id = 1
-    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    vm.deviceFormRef = { validate: () => Promise.resolve(), resetFields: () => {} }
     await vm.handleCreate()
     await flushPromises()
 
@@ -776,7 +939,7 @@ describe('EdgeDeviceList.vue', () => {
     vm.deviceForm.node_id = 1
     vm.inheritMode = 'new'
     vm.inheritLogicalDeviceId = null
-    vm.deviceFormRef = { validate: () => Promise.resolve() }
+    vm.deviceFormRef = { validate: () => Promise.resolve(), resetFields: () => {} }
     await vm.handleCreate()
     await flushPromises()
 

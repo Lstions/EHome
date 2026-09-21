@@ -469,16 +469,27 @@
               <el-row :gutter="16">
                 <el-col :span="12">
                   <el-form-item label="硬件类型" prop="hardware_type">
-                    <el-select v-model="newChannel.hardware_type" style="width: 100%;">
+                    <el-select v-model="newChannel.hardware_type" style="width: 100%;" @change="onNewChannelBusTypeChange">
                       <el-option v-for="bus in selectedParserBusTypes" :key="bus" :label="bus.toUpperCase()" :value="bus" />
                     </el-select>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
                   <el-form-item label="硬件ID" prop="hardware_id">
-                    <el-select v-model="newChannel.hardware_id" style="width: 100%;">
+                    <!-- D6：选项来自**设备上报的能力**（nodes.capabilities.buses[type] 的 resource.id，
+                         0 基，与设备一致）；未上报时不再列出硬编码的虚假资源。 -->
+                    <el-select v-model="newChannel.hardware_id" style="width: 100%;" :placeholder="hasBusOptions ? '请选择' : '无可用资源'" :disabled="!hasBusOptions">
                       <el-option v-for="bus in availableBusesForType(newChannel.hardware_type)" :key="bus" :label="bus" :value="bus" />
                     </el-select>
+                    <!-- D6(b)：未上报 ≠ 没有该总线。必须明确告知，而不是给一个点不动的空控件。 -->
+                    <div v-if="!hasBusOptions" class="bus-unavailable-hint" data-bus-unavailable>
+                      <template v-if="capabilitiesLoading">正在读取设备资源上报…</template>
+                      <!-- 「未上报该总线」与「上报了但一条资源都没有」是两件事，文案必须分开 -->
+                      <template v-else-if="busTypeReported(newChannel.hardware_type)">
+                        该节点上报的 {{ newChannel.hardware_type.toUpperCase() }} 资源为空，无法创建该总线的通道
+                      </template>
+                      <template v-else>{{ unavailableBusMessage }}</template>
+                    </div>
                   </el-form-item>
                 </el-col>
               </el-row>
@@ -634,7 +645,10 @@ import { useParserStore } from '@/stores/parser'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { compactEdgeDeviceList, edgeDeviceApi, type EdgeDevice, type EdgeDeviceListParams } from '@/api/edgeDevice'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
+import { nodeApi } from '@/api/node'
 import client from '@/api/client'
+import { logger } from '@/utils/logger'
+import { findDriverLeaf, getDriverTree, type DriverTreeNode } from '@/api/driver'
 import type { Channel } from '@/api/channel'
 import type { Parser } from '@/api/parser'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
@@ -647,6 +661,7 @@ import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandi
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { DEVICE_ADDRESS_DEFAULT, isValidDeviceAddress, parseDeviceAddress } from '@/utils/deviceAddress'
 import { getHardwareTagType } from '@/utils/hardwareTag'
 import type { TagType } from '@/utils/tagType'
 
@@ -661,6 +676,31 @@ const nodeStore = useNodeStore()
 const channelStore = useChannelStore()
 const parserStore = useParserStore()
 const edgeDeviceStore = useEdgeDeviceStore()
+
+// ── m-1（2026-09-22）：型号「是否消费设备地址」的能力来源 ─────────────
+// 唯一数据源就是 /device-configs/tree 的驱动叶子字段 requires_target_address
+// （与后端地址门禁 driverRequiresTargetAddress 同一口径）。这里**不新造**第二个
+// 数据源，也不在本文件重写一份判定表：Tree → 型号 → 能力，全程同一张快照。
+//
+// 为什么能力必须来自后端而不是"字符串形态"：后端只对**真的解析地址**的型号
+// （纯 Modbus 类）校验 1-254；纯 I2C/SPI 采集型号原样接受任何标识。按形态判断
+// 就会给后者凭空写一个它根本不用的地址 1 —— 正是本次要修的口径不一致。
+const driverTree = ref<DriverTreeNode[]>([])
+const driverTreeLoaded = ref(false)
+
+/**
+ * 该型号是否消费设备地址。三分支（**必须**保持可区分，不能压成布尔）：
+ *   true      → 要求地址；
+ *   false     → 明确不要求；
+ *   undefined → 拿不到能力字段（老后端 / 树未加载完 / 该型号只在 DB 模板里）
+ *               ⇒ 调用方退回"字段缺失"的兼容行为。
+ *
+ * findDriverLeaf 是 @/api/driver 暴露的唯一查询入口，避免各处 find 出不同口径。
+ */
+const resolveModelRequiresTargetAddress = (deviceType: string | undefined): boolean | undefined => {
+  const leaf = findDriverLeaf(driverTree.value, String(deviceType ?? '').trim())
+  return typeof leaf?.requires_target_address === 'boolean' ? leaf.requires_target_address : undefined
+}
 
 // 视图模式：card | table
 const viewMode = ref<'card' | 'table'>('card')
@@ -804,6 +844,12 @@ const onTemplateSelected = async (templateId: number | undefined | null) => {
 
 // 编辑边缘设备ID
 const editingDeviceId = ref<number | null>(null)
+// G4 编辑-保存回路：记录"打开编辑框那一刻"的设备地址值。
+// 保存时只在**值真的变了**才把 hardware_id 发出去 —— 编辑表单当前没有任何
+// 地址输入项（见步骤 3 表单：只有名称/采集间隔），所以该值永远不会变，
+// 保存就不会产生任何地址写入（正是契约要求的「打开编辑框保存不应产生写入」）。
+// 若将来给编辑表单加了地址输入框，这里的比较会自动变成"改了才写"，无需再改保存逻辑。
+const editingDeviceAddressSnapshot = ref('')
 
 // 设备表单
 const deviceForm = reactive({
@@ -927,8 +973,26 @@ const refreshWizardChannels = async () => {
     channelsRefreshing = false
   }
 }
+/**
+ * 拉取一次驱动树快照（m-1）。失败时保持 driverTreeLoaded=false，并在下次打开
+ * 向导时重试 —— 不缓存"失败"这种状态，否则一次网络抖动会让能力查询在整个
+ * 页面生命周期内都拿不到值。
+ */
+const fetchDriverTreeOnce = async () => {
+  if (driverTreeLoaded.value) return
+  try {
+    driverTree.value = await getDriverTree()
+    driverTreeLoaded.value = true
+  } catch (error) {
+    logger.warn('获取驱动树失败，型号地址能力未知，退回默认地址兜底', { error: String(error) })
+  }
+}
+
 const loadCreateWizardData = async () => {
   if (wizardDataLoaded) {
+    // 向导已初始化过: 树上一次没拿到（driverTreeLoaded=false）也要补一次，
+    // 否则用户第二次打开向导时仍然拿不到能力字段。
+    void fetchDriverTreeOnce()
     // 向导已初始化过: 节点/型号/模板不再重复拉取, 但通道列表每次打开都强制
     // 刷新 — 节点页刚创建的通道必须立即可见。并发守卫在 store 内
     // (requestSequence), 此处只需防重复请求压栈。
@@ -948,6 +1012,10 @@ const loadCreateWizardData = async () => {
       refreshWizardChannels(),
       parserStore.parsers.length === 0 ? parserStore.fetchParsers(true) : Promise.resolve(),
       loadTemplates(),
+      // m-1：型号能力（requires_target_address）与向导数据一起取一次。
+      // 失败**不**把向导整体判为加载失败（型号列表仍可用），只让能力查询
+      // 落回 undefined ⇒ 走"字段缺失"的兼容分支（默认地址 1 + 提示）。
+      fetchDriverTreeOnce(),
     ])
     wizardDataLoaded = true
   } catch (error) {
@@ -960,6 +1028,8 @@ const loadCreateWizardData = async () => {
 // requestSequence 防竞态: 并发请求只由最新序号写回, 不会互相覆盖。
 const handleNodeChange = () => {
   selectedChannel.value = null
+  // 设备上报的总线资源是「硬件ID」下拉的唯一真源：切换节点必须按新节点重新取。
+  void loadNodeCapabilities(deviceForm.node_id)
   if (wizardDataLoaded && !channelsRefreshing) {
     void channelStore.fetchChannels(undefined, true).catch(() => {
       // 失败时保留已有列表, 用户仍可重试 (切回再切或重开向导)
@@ -976,32 +1046,94 @@ const updateStats = () => {
   fetchTodayDataCount()
 }
 
-// 获取可用总线（从该节点的已有通道中提取，fallback 到默认选项）
+/**
+ * 向导用的节点能力缓存（node_id → buses）。
+ *
+ * 「硬件ID」下拉必须来自**设备真实上报**的总线资源（见下方 availableBusesForType），
+ * 因此打开向导/切换节点时按需拉取一次 GET /nodes/:id/capabilities。
+ * 拉取失败时**不伪造资源**：下拉退回「该节点已有通道的 hardware_id」，仍无则显示未上报提示。
+ */
+const nodeCapabilitiesByNode = ref<Record<string, Record<string, any>>>({})
+const capabilitiesLoading = ref(false)
+const capabilitiesRequestSequence = ref(0)
+const loadNodeCapabilities = async (nodeId: string | number | null | undefined) => {
+  const key = String(nodeId ?? '')
+  if (!key || nodeCapabilitiesByNode.value[key] || capabilitiesLoading.value) return
+  const sequence = ++capabilitiesRequestSequence.value
+  capabilitiesLoading.value = true
+  try {
+    const caps = await nodeApi.getCapabilities(key)
+    if (sequence !== capabilitiesRequestSequence.value) return
+    const buses = (caps as any)?.buses
+    nodeCapabilitiesByNode.value = {
+      ...nodeCapabilitiesByNode.value,
+      [key]: buses && typeof buses === 'object' ? buses : {},
+    }
+  } catch (error) {
+    // 能力上报读不到不是致命错误：下拉会退化为该节点已有通道，绝不伪造资源名。
+    logger.warn('获取节点能力失败，硬件资源下拉回退为已有通道', { error: String(error) })
+  } finally {
+    if (sequence === capabilitiesRequestSequence.value) capabilitiesLoading.value = false
+  }
+}
+
+/**
+ * 该节点在**能力上报**里声明的总线资源 id（唯一真源）。
+ *
+ * 为什么必须读能力上报而不是硬编码：通道的 hardware_id 是**总线资源标识**
+ * （如 UART0 / SPI2），设备实际只有它上报的那几条。改前这里在
+ * 「该节点还没有此类通道」时返回硬编码的 ['UART1','UART2'] / ['I2C0','I2C1'] /
+ * ['SPI1','SPI2']，既不读 capabilities、又是 1 基编号 —— 实测本机节点上报的是
+ * uart=[UART0,UART1]、i2c=[I2C0]、spi=[SPI2]，于是下拉里出现设备上根本不存在的
+ * UART2 / I2C1 / SPI1；用户一旦选中就会创建一个指向不存在总线的通道（静默的错误数据）。
+ */
+const busResourcesForType = (hardwareType: string): string[] => {
+  const nodeKey = String(deviceForm.node_id ?? '')
+  const buses = nodeCapabilitiesByNode.value[nodeKey]
+  if (!buses) return []
+  const list = (buses as Record<string, unknown>)[hardwareType.toLowerCase()]
+  if (!Array.isArray(list)) return []
+  return list
+    .map((resource: any) => String(resource?.id ?? '').trim())
+    .filter(Boolean)
+}
+
+/** 该节点是否**上报过**这个总线类型（用于区分「未上报」与「上报了 0 条」）。 */
+const busTypeReported = (hardwareType: string): boolean => {
+  const nodeKey = String(deviceForm.node_id ?? '')
+  const buses = nodeCapabilitiesByNode.value[nodeKey]
+  if (!buses) return false
+  return Array.isArray((buses as Record<string, unknown>)[hardwareType.toLowerCase()])
+}
+
+/** 「硬件ID」下拉是否有可选项（无 ⇒ 必须提示未上报并禁用「下一步」）。 */
+const hasBusOptions = computed(() => availableBusesForType(newChannel.hardware_type).length > 0)
+/** 未上报提示文案（下拉空态与步骤校验共用，措辞只有一处）。 */
+const unavailableBusMessage = computed(() =>
+  `该节点未上报 ${(newChannel.hardware_type || 'BUS').toUpperCase()} 资源，无法在此创建该总线的通道`)
+
+/**
+ * 向导「硬件ID」下拉的选项：通道 hardware_id 是**总线资源标识**语义，取值优先级：
+ *   1) 该节点能力上报的资源 id（与设备一致，0 基）
+ *   2) 该节点已有通道的 hardware_id（兼容能力上报缺失的老后端，但至少是真实存在的）
+ * 两者都拿不到 ⇒ 空数组，由 UI 明确提示「未上报」并禁用下一步。
+ * **绝不**回退到硬编码资源名 —— 那是把不存在的资源伪装成可选。
+ */
 const availableBusesForType = (hardwareType: string): string[] => {
   if (!deviceForm.node_id) return []
+  const fromCapabilities = busResourcesForType(hardwareType)
+  if (fromCapabilities.length > 0) return fromCapabilities
   // P0-2: node_id / hardware_type 比较归一化——channel.node_id 可能是
   // string(设备序列号如 'F0F5BDFFFE02')也可能是 number;channel.hardware_type
   // 后端存大写 'UART',表单是小写 'uart'。两者都需宽松匹配,否则 filter 空导致
-  // 硬件ID下拉无选项且无 fallback。
+  // 硬件ID下拉无选项。
   const nodeIdStr = String(deviceForm.node_id)
   const hwTypeLower = hardwareType.toLowerCase()
   const collectorChannels = channelStore.channels.filter(
     ch => ch && String(ch.node_id) === nodeIdStr && (ch.hardware_type || '').toLowerCase() === hwTypeLower
   )
-  // 提取已有的 hardware_id（如 I2C0, UART1），去重
-  const buses = [...new Set(collectorChannels.map(ch => ch.hardware_id))].filter(Boolean)
-  // 如果已有总线为空（该节点还没有任何此类通道），提供默认选项
-  if (buses.length === 0) {
-    switch (hardwareType) {
-      case 'uart': return ['UART1', 'UART2']
-      case 'i2c': return ['I2C0', 'I2C1']
-      case 'spi': return ['SPI1', 'SPI2']
-      case 'gpio': return ['GPIO0', 'GPIO2', 'GPIO4']
-      case 'adc': return ['ADC1', 'ADC2']
-      default: return []
-    }
-  }
-  return buses
+  // 提取已有的 hardware_id（如 I2C0, UART0），去重
+  return [...new Set(collectorChannels.map(ch => ch.hardware_id))].filter(Boolean) as string[]
 }
 
 // 解析器可选列表
@@ -1047,11 +1179,59 @@ const canGoNext = computed(() => {
   if (createStep.value === 2) {
     if (!deviceForm.node_id) return false
     if (channelTab.value === 'existing') return !!selectedChannel.value
-    if (channelTab.value === 'create') return !!newChannel.hardware_id
+    // D6(b)：该节点未上报所选总线资源时，不允许用硬编码资源名继续创建
+    // （否则会造出指向不存在总线的通道）。hasBusOptions 为假时下拉本身已禁用，
+    // 这里再把「下一步」一并挡住，避免用户以为能跳过。
+    if (channelTab.value === 'create') return !!newChannel.hardware_id && hasBusOptions.value
   }
   if (createStep.value === 3) return !!deviceForm.name
   return false
 })
+
+/**
+ * D6(c) + m-1（2026-09-22）：把「通道的总线资源标识」解析成可提交的
+ * **EdgeDevice.hardware_id（设备地址）**。
+ *
+ * 语义边界（本次 UI 缺陷族的根因族）：
+ *   · channel.hardware_id       = 总线资源标识（UART0 / SPI2 / I2C0）
+ *   · edgeDevice.hardware_id    = 该设备在总线上的**地址**（Modbus 从站号 / I2C 地址，1-254）
+ * 判定口径不在这里自造：复用 @/utils/deviceAddress（与后端 deviceaction.ParseHardwareAddress
+ * 同一张表，由 DeviceAddressContractParity.spec.ts 双向钉死）。
+ *
+ * m-1：**是否要求地址由型号能力决定，而不是由字符串形态决定**。后端
+ * validateEdgeDeviceAddress 只对 driverRequiresTargetAddress 为真的型号校验 1-254，
+ * 纯 I2C/SPI 型号原样接受任何标识；改前这里一律按形态兜底成默认地址 1，于是给
+ * 一个从不使用地址的型号凭空写了一个地址。三分支：
+ *   · requires === true      → 合法地址原样提交；总线名 ⇒ 默认地址 1 **并显式提示**；
+ *   · requires === false     → **不造地址**：提交空串（后端对空值的语义是「无地址/默认」），
+ *                              也不弹无意义提示；
+ *   · requires === undefined → 兼容分支（老后端不返回该字段、树未加载完、或型号只在
+ *                              DB 模板里）：保持**改前行为**（默认地址 1 + 提示），
+ *                              宁可与后端多校验一次，也不静默放行总线名。
+ */
+function resolveInlineDeviceAddress(
+  busHardwareId: string | undefined,
+  requiresTargetAddress?: boolean,
+): { value: string; warned: boolean } {
+  const raw = String(busHardwareId ?? '').trim()
+  const valid = isValidDeviceAddress(raw)
+  const explicitValue = valid && parseDeviceAddress(raw).explicit ? raw : ''
+  // 明确不消费地址的型号：不要凭空造一个它不用的地址（这是本任务的核心修复）。
+  if (requiresTargetAddress === false) {
+    return { value: '', warned: false }
+  }
+  if (valid) {
+    return { value: explicitValue, warned: false }
+  }
+  // requires === true（真源要求地址）或 === undefined（能力未知，兼容旧后端）：
+  // 退回后端默认地址 1，并由调用方显式提示。
+  return { value: String(DEVICE_ADDRESS_DEFAULT), warned: true }
+}
+
+const onNewChannelBusTypeChange = () => {
+  // 切换总线类型后，上一条资源 id 对新类型没有意义（UART0 不是 SPI 资源）。
+  newChannel.hardware_id = ''
+}
 
 const selectParser = (parser: Parser) => {
   selectedParser.value = parser
@@ -1216,8 +1396,12 @@ const handleEdit = (device: any) => {
   deviceForm.device_type = device.device_type
   deviceForm.protocol = device.protocol || 'modbus'
   deviceForm.hardware_type = device.hardware_type || 'uart'
+  // 只接受**真实存储的设备地址**（normalize 已不再用通道总线名兜底）。
+  // 注意这里不能用 device.channel_hardware_id 回填 —— 那是总线名，回填即回到 G4 的老路。
   deviceForm.hardware_id = device.hardware_id || ''
   deviceForm.interval_ms = device.config?.interval_ms || 1000
+  // G4：快照打开时的地址值（保存时用它判断"用户是否真的改过地址"）。
+  editingDeviceAddressSnapshot.value = deviceForm.hardware_id
   showCreateDialog.value = true
 }
 
@@ -1333,6 +1517,12 @@ const handleCreate = async () => {
       : null
     const frozenChannelTab = channelTab.value
     const frozenEditingDeviceId = editingDeviceId.value
+    // D6(b) 提交侧兜底：步骤校验之外，创建路径再挡一次「未上报资源」。
+    if (!frozenEditingDeviceId && frozenChannelTab === 'create' && !hasBusOptions.value) {
+      ElMessage.warning(unavailableBusMessage.value)
+      submitting.value = false
+      return
+    }
 
     // EDGE-WIZ-004/005: 提交流程先等驱动指令加载结算 (成功或失败), 再冻结
     // 逐指令轮询间隔快照。加载失败时以下拦截, 不允许携带旧驱动的 intervals
@@ -1343,11 +1533,24 @@ const handleCreate = async () => {
     // 编辑模式 — 字段对齐后端 UpdateDTO: name/enabled/interval_ms/hardware_id/node_id/channel_id
     // 不传 type: 设备型号绑定在编辑中不可变,且后端 G1 在 device_config_id>0 时拒绝 type。
     if (frozenEditingDeviceId) {
+      // G4 编辑-保存回路：编辑对话框里**没有**设备地址输入项（见步骤 3 的表单字段：
+      // 只有名称 / 采集间隔）。改前这里无条件把 deviceForm.hardware_id 发出去，而该值
+      // 来自 handleEdit 的 device.hardware_id —— normalize 的旧兜底会把它填成通道总线名
+      // （"UART1"），于是"打开编辑框→点保存"就把总线名写回后端（设备地址字段）。
+      // 现在有两道防线：
+      //   ① normalize 不再跨语义兜底（api/edgeDevice.ts），所以这里是真实存储值；
+      //   ② 这里只在"用户真的改了地址"时才带上该字段；值为空/与打开时相同则
+      //      **完全不发**这个 key，后端就不会有任何 hardware_id 写入。
+      const openedAddress = String(editingDeviceAddressSnapshot.value ?? '')
+      const currentAddress = String(frozenDeviceForm.hardware_id ?? '')
+      const addressChanged = currentAddress !== openedAddress
       await edgeDeviceApi.update(frozenEditingDeviceId, {
         name: frozenDeviceForm.name,
         node_id: String(frozenDeviceForm.node_id!),
-        hardware_id: frozenDeviceForm.hardware_id,
         interval_ms: frozenDeviceForm.interval_ms,
+        // 只有地址真的变了才带上这个 key（见上方 ②）。展开空对象 = 该 key 完全不出现在
+        // 请求体里，后端 UpdateDTO 的 *string 保持 nil ⇒ 不产生任何 hardware_id 写入。
+        ...(addressChanged ? { hardware_id: currentAddress } : {}),
       })
       assertSessionGeneration(sessionGeneration)
       if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
@@ -1397,10 +1600,25 @@ const handleCreate = async () => {
         ? { device_config_id: deviceConfigId }
         : { type: frozenParser.id }
 
+      // D6(c)：inline 创建路径里，EdgeDevice.hardware_id 是**设备地址**（Modbus 从站号 /
+      // I2C 地址），而 channelPayload.hardware_id 是**总线资源标识**（UART0/SPI2）。
+      // 二者语义不同，改前直接把总线标识当设备地址提交（前一个生产故障的根因族：
+      // 派发时 ParseHardwareAddress 拒绝 "UART1"，操作静默卡 QUEUED 直到 deadline 过期）。
+      // 这里：合法地址（含空/0 的默认语义）原样提交；非法（总线名形态）则退回后端默认地址 1
+      // 并在确认卡片显式提示 —— 必须由用户到边缘设备详情页确认/修正实际从站地址。
+      // m-1：能力来自**所选型号**（frozenParser 是提交时快照），不允许用 selectedParser
+      // 之外的第二份状态，否则提交期间换型号会让地址判定与型号不一致。
+      const inlineDeviceAddress = resolveInlineDeviceAddress(
+        channelPayload.hardware_id,
+        resolveModelRequiresTargetAddress(frozenParser.id),
+      )
+      if (inlineDeviceAddress.warned) {
+        ElMessage.warning(`通道标识「${channelPayload.hardware_id}」是总线名称，不是设备地址；已按默认从站地址 ${DEVICE_ADDRESS_DEFAULT} 创建设备，请到设备详情确认或修正实际地址`)
+      }
       await edgeDeviceApi.create({
         name: String(frozenDeviceForm.name),
         node_id: String(frozenDeviceForm.node_id!),
-        hardware_id: channelPayload.hardware_id,
+        hardware_id: inlineDeviceAddress.value,
         ...baseParams,
         ...frozenInheritParams,
         // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
@@ -1444,13 +1662,29 @@ const handleCreate = async () => {
         if (transactionGeneration !== createTransactionGeneration) throw new Error('创建事务已取消')
       }
 
+      // G3：已有通道分支与 inline-create 分支必须走**同一个**地址解析口径。
+      // 改前这里直接复制 targetChannel.hardware_id（通道的总线资源标识 "UART1"），
+      // 于是列表页向导的第二条创建路径绕过了 resolveInlineDeviceAddress，
+      // 把总线名写进 EdgeDevice.hardware_id（设备从站地址字段）—— 与 2026-09-20
+      // 生产故障同一根因，只是另一条端点/分支。
+      // 现在：合法地址原样提交；总线名形态退回后端默认地址 1 并在提交前显式告知用户。
+      // m-1：与 inline-create 分支同一个能力口径（同一型号 → 同一判定），也不允许
+      // 把能力查询写在两个分支各自处，否则两条路径会再次漂移。
+      const existingChannelDeviceAddress = resolveInlineDeviceAddress(
+        targetChannel.hardware_id,
+        resolveModelRequiresTargetAddress(frozenParser.id),
+      )
+      if (existingChannelDeviceAddress.warned) {
+        ElMessage.warning(`通道标识「${targetChannel.hardware_id}」是总线名称，不是设备地址；已按默认从站地址 ${DEVICE_ADDRESS_DEFAULT} 创建设备，请到设备详情确认或修正实际地址`)
+      }
+
       // 创建边缘设备: 根据 device_config_id 是否存在决定传 device_config_id 还是 type
       if (deviceConfigId) {
         await edgeDeviceApi.create({
           name: String(frozenDeviceForm.name),
           node_id: String(frozenDeviceForm.node_id!),
           channel_id: channelId!,
-          hardware_id: targetChannel.hardware_id,
+          hardware_id: existingChannelDeviceAddress.value,
           device_config_id: deviceConfigId,
           ...frozenInheritParams,
           // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
@@ -1462,7 +1696,8 @@ const handleCreate = async () => {
           node_id: String(frozenDeviceForm.node_id!),
           channel_id: channelId!,
           type: frozenParser.id,
-          hardware_id: targetChannel.hardware_id,
+          // G3：与上面 device_config_id 分支同一个解析结果（同一请求内只解析一次）
+          hardware_id: existingChannelDeviceAddress.value,
           ...frozenInheritParams,
           // EDGE-WIZ-004: 逐指令轮询间隔 (仅驱动声明 schedulable 指令时携带)
           ...(frozenCommandIntervals ? { command_intervals: frozenCommandIntervals } : {}),
@@ -1590,6 +1825,12 @@ const handleCreateDialogClose = (done: () => void) => {
   done()
 }
 
+// 设备上报的总线资源在进入"选择/创建通道"步骤时被消费，进入该步即确保已取到
+// （用户可能已在别处选过节点，或从后续步骤返回修改，handleNodeChange 不会再触发）。
+watch(createStep, (step) => {
+  if (step === 2) void loadNodeCapabilities(deviceForm.node_id)
+})
+
 watch(showCreateDialog, (val) => {
   if (!val) {
     createTransactionGeneration++
@@ -1634,6 +1875,14 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+/* D6(b)：节点未上报该总线资源时的显式提示（不是一个点不动的空控件）。 */
+.bus-unavailable-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--el-color-warning);
 }
 
 .template-quick-pick {

@@ -115,6 +115,11 @@ vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({
     connected: true,
     isAuthenticated: true,
+    // 会话失效面（B1/B2/B3）：徽标三态与换连接逻辑依赖它
+    sessionInvalidated: false,
+    isCurrentTokenInvalidated: () => false,
+    authInvalidationNonce: 0,
+    reconnectWithFreshToken: vi.fn(),
     connect: vi.fn(),
     disconnect: vi.fn(),
     subscribe: wsSubscribe,
