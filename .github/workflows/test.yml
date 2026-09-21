@@ -56,6 +56,15 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      # go vet ./... 看不到 //go:build simulation 的文件（drivers_sim.go、
+      # simulation/** 等 4 个包只在 -tags=simulation 下参与构建）。
+      # 于是仿真专用代码可以在"CI 全绿"的情况下烂掉 —— 直到 backend-scenarios
+      # job 需要真实 PG + EMQX 才发现，反馈慢且贵。
+      # 本步骤不依赖任何外部服务，只做编译 + vet，把这段代码的可见性补回 main 门禁。
+      # 覆盖分母：go list ./... = 35 包 → go list -tags=simulation ./... = 39 包。
+      - name: Go vet (simulation build tag)
+        run: go vet -tags=simulation ./...
+
       - name: Run unit tests (SQLite)
         run: |
           go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...

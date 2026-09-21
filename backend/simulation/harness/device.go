@@ -5,6 +5,7 @@ package harness
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -346,7 +347,9 @@ func (d *Device) sendHello(protocolVersion, firmwareVersion, model string, chann
 // backend/internal/nodemgr/handler_hello.go 在**每次 Hello 时**主动清空
 // node 的 BootID / ResourceReportedAt / CommandEngineRevision /
 // CommandEngineCapabilities。而 commandexec 的 currentCapabilities() 要求
-// BootID 非空、ResourceReportedAt 在 5 分钟内、CommandEngineRevision != 0。
+// BootID 非空、ResourceReportedAt 落在能力窗口内（commandexec.MaxCapabilityAge，
+// 当前 15 分钟 = 固件上报周期 10 分钟 + 裕量 5 分钟；口径以该常量的推导为准，
+// 不在注释里复制数字）、CommandEngineRevision != 0。
 // 因此 **每次 Hello 之后都必须重新发送 ResourceReport**，顺序不能反 ——
 // 先 ResourceReport 再 Hello 会让能力被清空，所有下发类场景只能断言"被拒绝"。
 func (d *Device) Hello(version, model string, channelCount int) *frame.Decoder {
@@ -513,7 +516,8 @@ type ReportedChannel struct {
 //
 // 为什么仿真器必须能发这一帧：commandexec 的运行时门禁全部 fail-closed，
 // 且这些事实**只能**由 MQTT 帧写入，HTTP 侧没有任何写入口：
-//   - currentCapabilities()：boot_id 非空 + resource_reported_at 5 分钟内 +
+//   - currentCapabilities()：boot_id 非空 + resource_reported_at 在能力窗口内
+//     （commandexec.MaxCapabilityAge，当前 15 分钟）+
 //     command_engine_revision != 0 + 能力齐全；
 //   - requireReportedActionChannel()：hardware_info.channels[] 含
 //     {id: <channelID>, enabled: true}；
@@ -689,6 +693,87 @@ func randomNonce() uint32 {
 		nonce = 1
 	}
 	return nonce
+}
+
+// ---------- 能力快照年龄（MaxCapabilityAge 的可控夹具） ----------
+
+// CapabilitySnapshotAge 回报该节点的 ResourceReport 快照已经"有多旧"，
+// 读法与 commandexec.currentCapabilities() **同源**：都是
+// now() - nodes.resource_reported_at。它只读，不写任何东西。
+//
+// 为什么场景需要它：能力窗口年龄（commandexec.MaxCapabilityAge）此前在仿真里
+// 没有任何端到端回归 —— 仿真器每次都能让快照保持新鲜，因此"把窗口从 5 分钟
+// 放宽到 15 分钟"这类改动无论对错，138 个场景都照样全绿。本函数与
+// AgeCapabilitySnapshot 一起把"年龄"变成可断言、可造坏的量。
+func (d *Device) CapabilitySnapshotAge() (time.Duration, error) {
+	raw, err := d.rawResourceReportedAt()
+	if err != nil {
+		return 0, err
+	}
+	if !raw.Valid {
+		// 与 currentCapabilities() 的 nil 分支同一语义：没有快照 ≠ 年龄很大。
+		return 0, fmt.Errorf("节点 %s 没有 resource_reported_at（能力快照不存在）", d.NodeID)
+	}
+	return time.Since(raw.Time.UTC()), nil
+}
+
+// AgeCapabilitySnapshot 把该节点的能力快照"做旧"到至少 age 之前，返回是否
+// 确实发生了写库（false = 现有快照本来就比目标时刻更旧，无需改动）。
+//
+// ⚠ 取舍声明（对照设计 §3 原则 2）：
+// 设计原则 2 要求"不得用直连 DB 替代本可走 API 的断言"，并把直连 DB 限定在
+// (a) 界面看不到的持久化事实、(b) 轮询收敛条件。本函数属于**第 (c) 类，
+// 由本次修复显式追加并在此留痕**：它不是断言，而是**造前置条件的写入**。
+//   - 观测侧仍然全部走 API：年龄由 CapabilitySnapshotAge 读、动作可用性由
+//     GET /edge-devices/:id/actions 读、拒绝语义由 POST .../operations 的响应
+//     读、陈旧节点计数由 GET /api/v1/metrics/summary 读。没有任何断言依赖本写入；
+//   - 它之所以必须存在：resource_reported_at 在生产里**只有**一个写入者
+//     （backend/internal/nodemgr/handler_resources.go:876 的 time.Now().UTC()），
+//     ResourceReport(0x19) 帧里**没有**任何时间戳字段，MaxCapabilityAge 也没有
+//     环境变量或配置入口。因此"让一个健康节点真的变陈旧"在不等待 15 分钟真实
+//     时间的前提下，只能改这一列；
+//   - 与真实硬件的关系：真实节点若停止上报能力，服务端不会再刷新该列，节点就会
+//     自然变陈旧 —— 本函数精确复现"距离上一次 ResourceReport 已经过了 age"这一
+//     状态，而不改变任何其它字段（boot_id / revision / capabilities / manifest 全部保持）。
+//
+// 与"改库绕过门禁"的区别：这些字段**没有被修改**，门禁照常按真实数据判定；
+// 变的只是"这份真实数据有多旧"。
+func (d *Device) AgeCapabilitySnapshot(age time.Duration) (bool, error) {
+	if age <= 0 {
+		return false, fmt.Errorf("AgeCapabilitySnapshot 需要正的 age（收到 %s）；默认路径请直接不调用本函数", age)
+	}
+	current, err := d.rawResourceReportedAt()
+	if err != nil {
+		return false, err
+	}
+	if current.Valid && time.Since(current.Time.UTC()) >= age {
+		return false, nil // 本来就够旧，幂等返回。
+	}
+	target := time.Now().UTC().Add(-age)
+	result, err := d.env.SQL().Exec(
+		"UPDATE nodes SET resource_reported_at = $1 WHERE node_id = $2", target, d.NodeID)
+	if err != nil {
+		return false, fmt.Errorf("做旧节点 %s 的能力快照失败: %w", d.NodeID, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("做旧节点 %s 后无法确认影响行数: %w", d.NodeID, err)
+	}
+	if rows != 1 {
+		return false, fmt.Errorf("做旧节点 %s 的能力快照影响了 %d 行，期望恰好 1 行", d.NodeID, rows)
+	}
+	return true, nil
+}
+
+// rawResourceReportedAt 读取该节点当前的 resource_reported_at 原始值。
+// 返回值 .Valid=false 表示该列为 NULL（节点从未上报过能力）。
+func (d *Device) rawResourceReportedAt() (sql.NullTime, error) {
+	var reported sql.NullTime
+	if err := d.env.SQL().QueryRow(
+		"SELECT resource_reported_at FROM nodes WHERE node_id = $1", d.NodeID).Scan(&reported); err != nil {
+		return reported, fmt.Errorf("读取节点 %s 的 resource_reported_at 失败: %w", d.NodeID, err)
+	}
+	return reported, nil
 }
 
 // EncodeInt16BigEndian 供夹具按 ConfigParser 的 binary 规则编码字段值。

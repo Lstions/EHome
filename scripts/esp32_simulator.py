@@ -435,7 +435,11 @@ def main() -> int:
             if now - last_status >= 30:
                 sim.send_status_report()
                 last_status = now
-            if now - last_resource >= 120:  # ResourceRpt 每 2min 刷 (MaxCapabilityAge=5min)
+            # ResourceRpt 每 2min 刷一次。口径来源：commandexec.MaxCapabilityAge
+            # = resourceReportInterval(10min) + capabilityReportMargin(5min) = 15min
+            # (backend/internal/commandexec/channel_cmd_v2_transport.go)。2min << 15min，
+            # 留足裕量，避免仿真节点被误判为 capability_stale。
+            if now - last_resource >= 120:
                 sim.send_resource_report()
                 last_resource = now
             if args.rsoc is not None and now - last_data >= args.interval:

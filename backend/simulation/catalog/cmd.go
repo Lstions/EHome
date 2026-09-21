@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -91,6 +92,20 @@ func init() {
 		Domain: cmdDomain,
 		Doc:    "docs/设计/场景仿真验证框架.md §9 SIM-CMD-006；docs/设计/设备指令与操作体系演进方案.md（执行记录）",
 		Run:    cmdRun006,
+	})
+	Register(Scenario{
+		ID:     "SIM-CMD-007",
+		Title:  "设备刚上报过能力时指令可以正常下发，能力快照变旧后系统明确拒绝而不是照发",
+		Domain: cmdDomain,
+		Doc:    "docs/设计/场景仿真验证框架.md §5.2/§5.3（harness 原语）；docs/设计/边缘设备控制.md（风控门禁 fail-closed）；commandexec.MaxCapabilityAge（channel_cmd_v2_transport.go）",
+		Run:    cmdRun007,
+	})
+	Register(Scenario{
+		ID:     "SIM-CMD-008",
+		Title:  "能力快照超过窗口后动作在目录里被标为过期，运营面板也把该节点计为能力陈旧",
+		Domain: cmdDomain,
+		Doc:    "docs/设计/场景仿真验证框架.md §5.2（可诊断原因码）；backend/internal/api/handler_metrics.go 的 control.capability_stale_nodes",
+		Run:    cmdRun008,
 	})
 }
 
@@ -291,6 +306,28 @@ func cmdAwaitChannelCmd(e *harness.Env, fx *edgeDevice, after int, timeout time.
 
 // cmdChannelCmdCount 返回该节点累计收到的指令帧条数。
 func cmdChannelCmdCount(fx *edgeDevice) int { return len(fx.Device.FramesOf(frame.MsgChannelCmdV2)) }
+
+// cmdExecutionCount 返回该设备当前的执行记录条数（不判空，供"拒绝前后不变"这类
+// 对照断言使用）。
+//
+// 为什么不用 Decode：commandexec.Service.List 在无记录时返回 nil 切片，信封 data
+// 序列化为 null，Decode 会直接判失败；这里显式检查原始 data 段再解码。
+func cmdExecutionCount(e *harness.Env, fx *edgeDevice) int {
+	e.T.Helper()
+	resp := e.Admin.Get(fmt.Sprintf("/api/v1/edge-devices/%d/operations", fx.EdgeDeviceID)).
+		Expect(http.StatusOK)
+	body := strings.TrimSpace(string(resp.Data))
+	if body == "null" || body == "" {
+		return 0
+	}
+	var items []struct {
+		CommandID string `json:"command_id"`
+	}
+	if err := json.Unmarshal(resp.Data, &items); err != nil {
+		e.Fatalf("解码执行记录列表失败: %v（原始 data=%s）", err, body)
+	}
+	return len(items)
+}
 
 // cmdAssertNoExecutions 断言设备上没有任何执行记录。
 //
@@ -782,4 +819,300 @@ func cmdRun006(e *harness.Env) {
 	if got := cmdChannelCmdCount(fx); got != 1 {
 		t.Fatalf("未应答的指令产生了 %d 条指令帧，期望 1 条（无新证据不得重复上物理线）", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// SIM-CMD-007 / SIM-CMD-008 能力窗口年龄（MaxCapabilityAge 的端到端回归）
+// ---------------------------------------------------------------------------
+//
+// 这两条场景存在的唯一理由：能力窗口年龄此前在仿真里**从未被考验过**。
+// 仿真器每次都能让 nodes.resource_reported_at 保持新鲜，于是
+// commandexec.currentCapabilities() 的"now-reportAt > MaxCapabilityAge"这一支
+// 在 138 个场景里一次都没被走到 —— 把窗口从 5 分钟放宽到 15 分钟，改对改错
+// 都是全绿。这里用 harness 的显式做旧原语（Device.AgeCapabilitySnapshot）
+// 把年龄变成可断言、可造坏的量，覆盖两个方向：
+//
+//	(a) 窗口内 ⇒ 动作被接受、指令真的出网（SIM-CMD-007 前半）；
+//	(b) 超窗   ⇒ fail-closed 拒绝，且原因可诊断（SIM-CMD-007 后半 + SIM-CMD-008）。
+//
+// 为什么用"做旧"而不是真实 sleep：MaxCapabilityAge 当前是 15 分钟，真实等待会让
+// 单条场景耗时 15 分钟以上（全量套件本就接近超时预算）。做旧把"距离上次
+// ResourceReport 已经过了多久"这一**同一状态**直接摆出来，与"真实心跳停了
+// 15 分钟"在库里的样子逐字段一致。
+//
+// 安全边界：做旧只写 resource_reported_at 一列，且只写本场景自己创建的节点；
+// 所有断言都从 API 读（动作目录 / 下发响应 / metrics summary），符合设计 §3 原则 2。
+
+// cmdAgedNodeWindowTarget 是把节点做到"刚超出能力窗口"的目标年龄。
+//
+// 取 16 分钟而不是"窗口 + 1 秒"：窗口值（commandexec.MaxCapabilityAge）目前是
+// 15 分钟，仿真侧不复制这个数字作为判据，只把它当作"必须超过"的下界来构造输入；
+// 断言仍然全部由服务端自己的判定给出（否则就变成"拿常量核对常量"的空断言）。
+const cmdAgedNodeWindowTarget = 16 * time.Minute
+
+// cmdReasonCodeCapabilityStale 是产品在"能力快照过期"时给出的机器可读原因码
+// （commandexec/service.go 的 Catalog 注解）。断言它而不是断言中文文案：
+// 文案是给人看的、可以改；原因码是 UI 的恢复入口契约。
+const cmdReasonCodeCapabilityStale = "capability_stale"
+
+// cmdMetricsControl 是 GET /api/v1/metrics/summary 里 control 段与本域相关的字段。
+type cmdMetricsControl struct {
+	CapabilityStaleNodes int64 `json:"capability_stale_nodes"`
+}
+
+// cmdMetricsSummaryEnvelope 是 metrics summary 的**信封**：data 下按域分段，
+// control 只是其中一段（handler_metrics.go 的 MetricsResponse）。
+//
+// 为什么必须有它（2026-09-21 实测缺陷）：把 data 整体解码进只声明了
+// capability_stale_nodes 的结构体时，encoding/json 会因为找不到同名顶层键而
+// **静默留下 0** —— 既不解码错误也不报缺字段。于是"面板把节点计为陈旧"这条断言
+// 永远拿到 0，场景必然失败（或更坏：变红原因指向错误方向）。嵌套层级必须显式表达。
+type cmdMetricsSummaryEnvelope struct {
+	Control cmdMetricsControl `json:"control"`
+}
+
+// cmdCapabilityStaleNodes 读运营面板口径的"能力陈旧在线节点数"。
+// 它与 commandexec.MaxCapabilityAge 同源（handler_metrics.go 用同一常量推导），
+// 因此是"过期"在监控面上的独立观测点。
+//
+// 解析失败走 harness 的 Fatalf（而非静默返回 0）：返回 0 会让"期望 > 基线"
+// 的断言以"计数未上升"的形式失败，把字段缺失误报成产品缺陷。
+func cmdCapabilityStaleNodes(e *harness.Env) int64 {
+	e.T.Helper()
+	resp := e.Admin.Get("/api/v1/metrics/summary").Expect(http.StatusOK)
+	var envelope cmdMetricsSummaryEnvelope
+	resp.Decode(&envelope)
+	return envelope.Control.CapabilityStaleNodes
+}
+
+// cmdActionAvailability 读取某个动作当前的目录项。
+//
+// 它**不**断言方向：正反两个方向用的是同一条观测，差别只在调用方的期望值。
+// 这样"可用性"只有一处判定口径，避免正反两段各自写一套读取逻辑而漂移。
+func cmdActionAvailability(e *harness.Env, edgeDeviceID int64, actionID string) cmdActionItem {
+	e.T.Helper()
+	items := cmdActionCatalog(e, edgeDeviceID)
+	item, ok := cmdActionByID(items, actionID)
+	if !ok {
+		e.Fatalf("动作目录里没有 %s：%+v", actionID, items)
+	}
+	return item
+}
+
+func cmdRun007(e *harness.Env) {
+	t := e.T
+	fx := cmdProvisionNode(e, "SIM-CMD-007", true)
+	cmdArmNode(e, fx)
+
+	// ── 方向 (a)：能力快照新鲜 ⇒ 接受 ──────────────────────────────────
+	// 先自证前提：此时年龄必须真的落在窗口内，否则下面的"接受"无法归因到年龄。
+	age, err := fx.Device.CapabilitySnapshotAge()
+	if err != nil {
+		t.Fatalf("读取能力快照年龄失败: %v", err)
+	}
+	fresh := cmdActionAvailability(e, fx.EdgeDeviceID, cmdActionReadRainfall)
+	if !fresh.Available {
+		t.Fatalf("快照新鲜（年龄 %s）时动作 %s 却不可用: reason=%q reason_code=%q（夹具未把能力事实上报齐）",
+			age.Round(time.Millisecond), cmdActionReadRainfall, fresh.Reason, fresh.ReasonCode)
+	}
+
+	before := fx.Device.FrameSeq()
+	accepted := cmdDispatch(cmdOpsSession(e), fx.EdgeDeviceID, cmdActionReadRainfall,
+		e.NS("SIM-CMD-007", "idem-fresh"), nil, "", "").Expect(http.StatusAccepted)
+	commandID := accepted.DataString("execution.command_id")
+	if commandID == "" {
+		t.Fatalf("窗口内下发未返回执行记录 ID：%s", accepted.BodyString())
+	}
+	// 不变量：接受必须是"真的发出去了"，而不是"接受了但没有下文"。
+	frame := cmdAwaitChannelCmd(e, fx, before, 20*time.Second)
+	e.Evidence("SIM-CMD-007.accepted_in_window", map[string]any{
+		"snapshot_age_ms": age.Milliseconds(), "command_id": commandID,
+		"reason_code": fresh.ReasonCode, "frame_boot_id": frame.BootID,
+	})
+
+	// ── 方向 (b)：能力快照超窗 ⇒ fail-closed 且可诊断 ─────────────────
+	changed, err := fx.Device.AgeCapabilitySnapshot(cmdAgedNodeWindowTarget)
+	if err != nil {
+		t.Fatalf("做旧能力快照失败: %v", err)
+	}
+	if !changed {
+		t.Fatalf("做旧未生效：快照本来就比 %s 更旧？这会让下面的拒绝断言失去归因",
+			cmdAgedNodeWindowTarget)
+	}
+	aged, err := fx.Device.CapabilitySnapshotAge()
+	if err != nil {
+		t.Fatalf("做旧后读取年龄失败: %v", err)
+	}
+	if aged < cmdAgedNodeWindowTarget {
+		t.Fatalf("做旧后年龄 = %s，期望 >= %s", aged, cmdAgedNodeWindowTarget)
+	}
+	// 归因护栏：做旧只动 resource_reported_at，其余能力事实必须原样保留。
+	// 否则下面观测到的拒绝可能来自"能力缺失"而不是"能力过期"。
+	state := cmdNodeState(e, fx.NodeID)
+	if state.BootID == "" || state.CommandEngineRevision == 0 {
+		t.Fatalf("做旧破坏了能力四件套（boot_id=%q revision=%d）——拒绝将无法归因于年龄",
+			state.BootID, state.CommandEngineRevision)
+	}
+	if state.ConfigStatus != "applied" || state.ConfigSyncState != "in_sync" {
+		t.Fatalf("做旧影响了清单状态（status=%q sync=%q）——拒绝将无法归因于年龄",
+			state.ConfigStatus, state.ConfigSyncState)
+	}
+	e.Evidence("SIM-CMD-007.aged_snapshot", map[string]any{
+		"snapshot_age_ms": aged.Milliseconds(), "boot_id": state.BootID,
+		"command_engine_revision": state.CommandEngineRevision,
+	})
+
+	// 不变量 1：目录必须把该动作标为不可用，并给出机器可读的"快照过期"原因。
+	expired := cmdActionAvailability(e, fx.EdgeDeviceID, cmdActionReadRainfall)
+	if expired.Available {
+		t.Fatalf("能力快照年龄 %s 已超出窗口，动作 %s 仍被标记为可用（门禁未 fail-closed）：%+v",
+			aged.Round(time.Second), cmdActionReadRainfall, expired)
+	}
+	if expired.ReasonCode != cmdReasonCodeCapabilityStale {
+		t.Fatalf("超窗动作的机器可读原因 = %q，期望 %q（reason=%q）——UI 无法区分「能力过期」与其它失败",
+			expired.ReasonCode, cmdReasonCodeCapabilityStale, expired.Reason)
+	}
+	e.Evidence("SIM-CMD-007.catalog_expired", expired)
+
+	// 不变量 2：下发必须被拒（409），拒绝语义仍是产品契约的 action unavailable。
+	beforeReject := fx.Device.FrameSeq()
+	rejected := cmdDispatch(cmdOpsSession(e), fx.EdgeDeviceID, cmdActionReadRainfall,
+		e.NS("SIM-CMD-007", "idem-aged"), nil, "", "").Expect(http.StatusConflict)
+	if !strings.Contains(rejected.Message, "action unavailable") {
+		t.Fatalf("超窗下发的拒绝原因不明确：%q", rejected.Message)
+	}
+	e.Evidence("SIM-CMD-007.dispatch_rejected", map[string]any{
+		"message": rejected.Message, "error_code": rejected.ErrorCode,
+		"snapshot_age_ms": aged.Milliseconds(),
+	})
+
+	// 不变量 3：被拒的请求不得**新增**执行记录，也不得产生任何物理下发。
+	//
+	// 为什么不是 cmdAssertNoExecutions（2026-09-21 实测缺陷）：那条断言要求该设备
+	// 上"零执行记录"，但本场景前半段已经用过一条**成功**的下发（窗口内接受），
+	// 记录本来就在列表里 —— 于是断言必然失败，且失败信息会指向"存在执行记录"，
+	// 把场景自身的断言缺陷误报成产品缺陷。这里改为对照被拒前后的记录数：
+	// 不变量是"拒绝不得留下痕迹"，而不是"设备上不曾有过任何记录"。
+	beforeCount := cmdExecutionCount(e, fx)
+	if extra := fx.Device.FrameSeq() - beforeReject; extra != 0 {
+		t.Fatalf("超窗被拒的下发之后新增了 %d 帧（应为 0，fail-closed 被破坏）", extra)
+	}
+	afterCount := cmdExecutionCount(e, fx)
+	if afterCount != beforeCount {
+		t.Fatalf("超窗被拒的下发留下了执行记录：被拒前 %d 条，被拒后 %d 条（拒绝必须无痕）",
+			beforeCount, afterCount)
+	}
+	e.Evidence("SIM-CMD-007.rejection_left_no_trace", map[string]any{
+		"executions_before_reject": beforeCount, "executions_after_reject": afterCount,
+	})
+
+	// ── 反向自证：刷新能力快照后必须恢复可用 ──────────────────────────
+	// 没有这一段，"上面那条指令被拒"就无法排除"请求本身有问题/设备已不可用"。
+	cmdResourceReportFrom(e, fx, state)
+	e.Eventually(20*time.Second, func() error {
+		recovered := cmdActionAvailability(e, fx.EdgeDeviceID, cmdActionReadRainfall)
+		if !recovered.Available {
+			return fmt.Errorf("重新上报能力后动作仍不可用: reason=%q reason_code=%q",
+				recovered.Reason, recovered.ReasonCode)
+		}
+		return nil
+	})
+	recoveredAge, err := fx.Device.CapabilitySnapshotAge()
+	if err != nil {
+		t.Fatalf("恢复后读取年龄失败: %v", err)
+	}
+	e.Evidence("SIM-CMD-007.recovered", map[string]any{
+		"snapshot_age_ms": recoveredAge.Milliseconds(),
+	})
+}
+
+// cmdResourceReportFrom 用节点当前的世代/清单事实重新上报一次能力。
+//
+// 为什么不调 cmdArmNode：cmdArmNode 会连带重跑"等清单回执"的完整武装流程，
+// 而本域需要的只是"刷新能力快照的时间戳 + 保持四件套不变"。
+// 这里原样沿用节点当前的 boot_id 与 command_engine_revision，
+// 因此刷新前后除 resource_reported_at 外**没有任何字段变化** ——
+// 这一点让"恢复可用"可以被单独归因到年龄。
+func cmdResourceReportFrom(e *harness.Env, fx *edgeDevice, state cmdNodeStateRow) {
+	e.T.Helper()
+	if err := fx.Device.ResourceReport(harness.ResourceReportData{
+		Platform:             "esp32s3",
+		Channels:             []harness.ReportedChannel{{ID: uint64(fx.ChannelID), Enabled: true}},
+		BootID:               state.BootID,
+		Revision:             state.CommandEngineRevision,
+		SupportsChannelCmdV2: true,
+		SupportsBoundedBatch: true,
+		SupportsFinally:      true,
+		MaxBatchSteps:        8,
+		MaxTXBytes:           128,
+		MaxRXBytes:           256,
+		MaxStepTimeoutMS:     5000,
+	}); err != nil {
+		e.Fatalf("重新上报能力失败: %v", err)
+	}
+}
+
+func cmdRun008(e *harness.Env) {
+	t := e.T
+	fx := cmdProvisionNode(e, "SIM-CMD-008", true)
+	cmdArmNode(e, fx)
+
+	// 基线：做旧之前该节点绝不应当被计为能力陈旧（否则下面的 +1 无法归因）。
+	baseline := cmdCapabilityStaleNodes(e)
+	ageBefore, err := fx.Device.CapabilitySnapshotAge()
+	if err != nil {
+		t.Fatalf("读取做旧前年龄失败: %v", err)
+	}
+	if ageBefore >= cmdAgedNodeWindowTarget {
+		t.Fatalf("前置条件不成立：做旧前年龄已达 %s", ageBefore)
+	}
+
+	changed, err := fx.Device.AgeCapabilitySnapshot(cmdAgedNodeWindowTarget)
+	if err != nil {
+		t.Fatalf("做旧能力快照失败: %v", err)
+	}
+	if !changed {
+		t.Fatalf("做旧未生效（现有快照已比 %s 更旧）", cmdAgedNodeWindowTarget)
+	}
+
+	// 不变量 1：运营面板口径（与 commandexec.MaxCapabilityAge 同一常量推导）必须把
+	// 本节点计入 capability_stale_nodes —— 这是"过期"在**监控面**上的可见后果。
+	// 用 Eventually 而不是一次读取：面板读数是实时 SQL，且线上有其它场景的节点。
+	e.Eventually(20*time.Second, func() error {
+		current := cmdCapabilityStaleNodes(e)
+		if current <= baseline {
+			return fmt.Errorf("能力陈旧节点数 = %d，期望 > 基线 %d（做旧后仍未计入）", current, baseline)
+		}
+		return nil
+	})
+	stale := cmdCapabilityStaleNodes(e)
+	e.Evidence("SIM-CMD-008.metrics_capability_stale_nodes", map[string]any{
+		"baseline": baseline, "after_aging": stale,
+	})
+
+	// 不变量 2：目录侧的原因码必须与监控口径一致 —— 同一个"过期"事实，
+	// 面板说它陈旧，目录就必须说 capability_stale，不能一边报陈旧一边说可用。
+	item := cmdActionAvailability(e, fx.EdgeDeviceID, cmdActionReadRainfall)
+	if item.Available {
+		t.Fatalf("面板已把节点计为能力陈旧（%d 个）但动作 %s 仍可用：%+v",
+			stale, cmdActionReadRainfall, item)
+	}
+	if item.ReasonCode != cmdReasonCodeCapabilityStale {
+		t.Fatalf("面板报陈旧、目录原因码却是 %q，期望 %q（reason=%q）——两处口径不一致",
+			item.ReasonCode, cmdReasonCodeCapabilityStale, item.Reason)
+	}
+	e.Evidence("SIM-CMD-008.catalog_consistent", item)
+
+	// 不变量 3：面板读数必须随能力刷新**回落**，而不是只增不减的噪声。
+	// 没有这一段，"计数变大"可能只是别的场景留下的脏数据在漂移。
+	state := cmdNodeState(e, fx.NodeID)
+	cmdResourceReportFrom(e, fx, state)
+	e.Eventually(20*time.Second, func() error {
+		current := cmdCapabilityStaleNodes(e)
+		if current >= stale {
+			return fmt.Errorf("重新上报能力后能力陈旧节点数 = %d，期望 < 做旧后的 %d", current, stale)
+		}
+		return nil
+	})
+	e.Evidence("SIM-CMD-008.metrics_recovered", cmdCapabilityStaleNodes(e))
 }

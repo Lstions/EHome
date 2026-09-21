@@ -92,6 +92,12 @@ esp32-collector/host_tests/build*/
 .hermes/
 .claude/
 
+# pnpm 本地内容寻址存储（运行产物，不入库）
+# 为什么：根目录 .pnpm-store/ 曾被当成"未跟踪目录"长期留在工作树，
+# 2026-09-21 复核时已达 295MB / 17729 个文件；它是 pnpm store 的本地副本，
+# 可由 pnpm-lock.yaml 完全重建，不应入库。
+.pnpm-store/
+
 # Python venv for screenshot tooling
 scripts/.venv/
 
@@ -125,3 +131,10 @@ frontend-shared/.f16-before.mjs
 
 # 临时提交信息文件（不入库）
 deploy/prod/.msg*.txt
+
+# 一次性 A/B 与变异自证脚本的落盘证据（不入库）
+# 为什么：2026-09-21 那一轮的 A/B 对照脚本（.fix4/）与变异自证脚本（各包下
+# .mutation-proof/）证明了门禁有分辨力，但它们是**一次性证据**、可由各自报告里的
+# 命令重建，且含本地端口/路径。与 .logs/ 同理：证据留档在报告里，脚本不入库。
+.fix4/
+.mutation-proof/
