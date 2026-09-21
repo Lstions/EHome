@@ -58,7 +58,7 @@ func TestEdgeDevice_Create_Success(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":             "New Device",
@@ -200,7 +200,7 @@ func TestEdgeDevice_CreateRejectsPeripheralChannelBinding(t *testing.T) {
 			db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 			db.Create(&models.Channel{NodeID: "NODE001", HardwareType: busType, BusType: busType, Enabled: true})
 			body, _ := json.Marshal(map[string]interface{}{
-				"name": "bad binding", "type": "temperature", "node_id": "NODE001", "channel_id": 1,
+				"name": "bad binding", "type": "bmp280", "node_id": "NODE001", "channel_id": 1,
 			})
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest("POST", "/api/v1/edge-devices", bytes.NewReader(body))
@@ -309,8 +309,8 @@ func TestEdgeDevice_Update_Success(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "i2c", Status: "active"})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":        "Updated Name",
@@ -475,7 +475,7 @@ func TestEdgeDevice_UpdateRejectsPeripheralChannelMassBind(t *testing.T) {
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "GPIO", BusType: "GPIO", Enabled: true})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1})
 	body, _ := json.Marshal(map[string]interface{}{"channel_id": 2})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", "/api/v1/edge-devices/1", bytes.NewReader(body))
@@ -530,8 +530,8 @@ func TestEdgeDevice_Update_InvalidJSON(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "uart"})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", "/api/v1/edge-devices/1", bytes.NewReader([]byte("bad json")))
@@ -551,8 +551,8 @@ func TestEdgeDevice_Get_Found(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "uart"})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1", nil)
@@ -577,8 +577,8 @@ func TestEdgeDevice_List_WithData(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
-	db.Create(&models.EdgeDevice{Name: "Dev1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "uart"})
+	db.Create(&models.EdgeDevice{Name: "Dev1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 	db.Create(&models.EdgeDevice{Name: "Dev2", Type: "humidity", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	w := httptest.NewRecorder()
@@ -598,8 +598,8 @@ func TestEdgeDevice_Delete_Success(t *testing.T) {
 
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", Enabled: true})
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
-	db.Create(&models.EdgeDevice{Name: "Device1", Type: "temperature", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "uart"})
+	db.Create(&models.EdgeDevice{Name: "Device1", Type: "bmp280", NodeID: "NODE001", ChannelID: 1, DeviceConfigID: 1})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1", nil)

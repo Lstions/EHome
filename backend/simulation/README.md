@@ -200,7 +200,9 @@ env.Evidence("node_status", "online")                 // 进 summary.json
 1. **`Hello()` 会清空节点的命令能力字段。**
    `nodemgr.handleHello` 每次握手都会重置 `BootID` / `ResourceReportedAt` /
    `CommandEngineRevision` / `CommandEngineCapabilities`，
-   而 `commandexec.currentCapabilities()` 要求这些字段齐全且新鲜（5 分钟内）。
+   而 `commandexec.currentCapabilities()` 要求这些字段齐全且新鲜
+   （当前阈值 15 分钟 = `resourceReportInterval` 10min + `capabilityReportMargin` 5min，
+   见 `backend/internal/commandexec/channel_cmd_v2_transport.go` 的 `MaxCapabilityAge`）。
    → **每次 `Hello()` 之后都必须重新发 `ResourceReport`**（直接用 `HelloThenReport`）。
 
 2. **`DataReport` 必须携带 `edge_device_id`（帧内 field 7）。**

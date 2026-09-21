@@ -911,7 +911,11 @@ func serverBinary() (string, error) {
 		out := filepath.Join(dir, "ehome-sim-server")
 		ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, goTool(), "build", "-buildvcs=false", "-o", out, "./cmd/server")
+		// -tags=simulation 让组合根登记仿真专用型号（sim_generic / sim_scene_*_*）。
+		// 2026-09-21 起 POST /device-configs 要求 device_type 已注册，地址门禁对未注册
+		// 型号 fail-closed，仿真框架过去依赖的"未注册型号"因此必须显式登记；标签保证
+		// 只有这一份构建带登记，生产二进制（不带该标签）没有任何后门。
+		cmd := exec.CommandContext(ctx, goTool(), "build", "-buildvcs=false", "-tags=simulation", "-o", out, "./cmd/server")
 		cmd.Dir = backendDirForBuild()
 		var output strings.Builder
 		cmd.Stdout = &output

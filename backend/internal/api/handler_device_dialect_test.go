@@ -56,7 +56,7 @@ func deviceConfigListData(t *testing.T, r http.Handler, query string) map[string
 // TestDeviceConfig_List_UsesItemsDialect 是本次收敛的核心断言。
 func TestDeviceConfig_List_UsesItemsDialect(t *testing.T) {
 	r, db := setupDeviceTest(t)
-	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "temperature", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
 
 	data := deviceConfigListData(t, r, "")
 	keys := make([]string, 0, len(data))
@@ -82,7 +82,7 @@ func TestDeviceConfig_List_ItemsAreCurrentPage(t *testing.T) {
 	r, db := setupDeviceTest(t)
 	for i := 0; i < 25; i++ {
 		db.Create(&models.DeviceConfig{
-			Name: "Config" + string(rune('A'+i)), DeviceType: "temperature", HardwareType: "uart", Status: "active",
+			Name: "Config" + string(rune('A'+i)), DeviceType: "bmp280", HardwareType: "uart", Status: "active",
 		})
 	}
 

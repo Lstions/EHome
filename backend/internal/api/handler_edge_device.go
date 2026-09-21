@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"ehome/backend/internal/datalifecycle"
+	"ehome/backend/internal/deviceaction"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
@@ -109,6 +111,115 @@ func checkDeviceUniqueness(tx *gorm.DB, channelID uint, devType, hardwareID stri
 		return fmt.Errorf("channel %d already hosts a %q device", channelID, devType)
 	}
 	return nil
+}
+
+// validateEdgeDeviceAddress is the create/update gate for
+// EdgeDevice.hardware_id — the field that holds a PHYSICAL DEVICE ADDRESS
+// (Modbus unit id / I2C address), not a bus name.
+//
+// Why it exists (2026-09-20 production incident): the creation wizard copied
+// Channel.hardware_id ("UART1", a bus name) into EdgeDevice.hardware_id. Nothing
+// rejected it at write time, so every dispatch failed inside
+// deviceaction.ParseHardwareAddress and the operation silently stayed QUEUED
+// until its deadline expired ~120s later. The user only ever saw "FAILED /
+// deadline expired before dispatch".
+//
+// 口径 is deliberately NOT re-implemented here: it delegates to
+// deviceaction.ParseHardwareAddress (single truth source), so this gate and
+// dispatch can never drift apart.
+//
+// Scope / backward compatibility:
+//   - Only types whose controlled actions actually embed an address are gated
+//     (Definition.RequiresTargetAddress). A pure I2C/SPI collector that has no
+//     addressed action keeps accepting any identifier.
+//   - An absent field, an empty value or a whitespace-only value means the
+//     legacy default address 1 (exactly ParseHardwareAddress's own semantics),
+//     so historical rows and existing API callers are unaffected.
+//   - An address-requiring device may legitimately have NO controlled action at
+//     all (e.g. it is still disabled / its last controlled action was removed
+//     from the catalog). That is not evidence of a bad address, so it is
+//     skipped rather than rejected — but then the address cannot be validated
+//     either, which is exactly why the wizard must always require one.
+func validateEdgeDeviceAddress(driverRegistry *drivers.Registry, devType, hardwareID string) error {
+	value := strings.TrimSpace(hardwareID)
+	if value == "" || value == "0" {
+		return nil
+	}
+	requiresAddress, cataloged := driverRequiresTargetAddress(driverRegistry, devType)
+	if !cataloged {
+		// G7 (2026-09-21): a type that is not in the driver registry used to be
+		// treated as "no signature information, so do not gate on a guess" and was
+		// passed unconditionally. That made an unregistered type a universal key:
+		// POST /device-configs accepted device_type="no_such_driver_xyz" (it only
+		// checked non-empty), PUT /nodes/:id/config derived edge_devices.type from
+		// that config, and from then on EVERY address write for the device was
+		// waved through — the very "UART1 as hardware_id" incident this gate exists
+		// to prevent, reached in three public HTTP steps.
+		//
+		// Failing closed is safe because the device type is not free-form data: the
+		// create and update paths require a registered driver whenever no
+		// DeviceConfig is bound (driverRegistry.Get), and POST /device-configs now
+		// rejects an unregistered device_type as well. The only rows that can still
+		// carry an unregistered type are historical ones, and they keep working:
+		// this gate only runs when the request actually puts an address on the
+		// dispatch path (hardware_id supplied, or the type changes), exactly the
+		// reviewed R2 trigger contract. Renaming / re-enabling / changing the
+		// interval of such a row still succeeds, so legacy data is never turned
+		// into "cannot even be renamed"; the repair path is to bind a registered
+		// driver type or to send an address a registered type accepts.
+		return fmt.Errorf("device type %q is not registered: unknown driver types have no address semantics, so hardware_id %q cannot be validated", strings.TrimSpace(devType), value)
+	}
+	if !requiresAddress {
+		return nil
+	}
+	if _, err := deviceaction.ParseHardwareAddress(value); err != nil {
+		return fmt.Errorf("hardware_id %q is not a valid device address: %v (该值必须是 1-254 的十进制或 0xNN 形式；若这是总线名如 \"UART1\"，请填写总线上该设备的实际地址)", value, err)
+	}
+	return nil
+}
+
+// driverRequiresTargetAddress reports whether any controlled action of devType
+// parses EdgeDevice.hardware_id as a physical address. The second return value
+// distinguishes "type is known to the catalog" from "no signature information
+// available".
+//
+// cataloged == false means the type is empty or not registered and therefore
+// carries NO address semantics at all. Callers must treat that as "cannot
+// validate" and fail closed rather than as "nothing to validate" (G7,
+// 2026-09-21): an unregistered type was reachable through public HTTP and
+// turned the address gate off wholesale.
+func driverRequiresTargetAddress(driverRegistry *drivers.Registry, devType string) (req, cataloged bool) {
+	devType = strings.TrimSpace(devType)
+	if devType == "" || driverRegistry == nil {
+		return false, false
+	}
+	if _, err := driverRegistry.Get(devType); err != nil {
+		return false, false
+	}
+	for _, def := range builtInActionRegistry().List(devType) {
+		if def.RequiresTargetAddress() {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+var (
+	actionRegistryOnce sync.Once
+	actionRegistryVal  *deviceaction.Registry
+)
+
+// builtInActionRegistry builds the Action Catalog over the built-in drivers.
+// The catalog only carries static definitions plus the composition root's
+// rollout overrides, both of which are stable for the lifetime of the process,
+// so it is cached here instead of being rebuilt on every edge-device write.
+func builtInActionRegistry() *deviceaction.Registry {
+	actionRegistryOnce.Do(func() {
+		registry := drivers.NewRegistry()
+		drivers.RegisterBuiltInDrivers(registry)
+		actionRegistryVal = deviceaction.NewBuiltInRegistry(registry)
+	})
+	return actionRegistryVal
 }
 
 func validateDeviceConfigForChannel(db *gorm.DB, deviceConfigID uint, channel *models.Channel) (models.DeviceConfig, error) {
@@ -479,6 +590,12 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				dev.Type = devType
 				dev.DeviceConfigID = 0
 			}
+			// Address gate: reject a bus name masquerading as a device address at
+			// write time. Without this, the bad value is accepted silently and
+			// only fails ~120s later inside dispatch (2026-09-20 incident).
+			if err := validateEdgeDeviceAddress(driverRegistry, dev.Type, dev.HardwareID); err != nil {
+				return err
+			}
 			// Uniqueness guard: the same slave address must not host two devices of the
 			// same model on one channel. Multi-drop buses (e.g. SPI with several CS
 			// lines, I2C with several addresses) stay valid because they map to
@@ -685,6 +802,23 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			}
 			if err := checkDeviceUniqueness(tx, targetChannelID, candidateType, candidateHardwareID, d.ID); err != nil {
 				return err
+			}
+			// Address gate on the CANDIDATE values, before any write, so a rejected
+			// update leaves the row untouched.
+			//
+			// It fires only when THIS write puts an address on the dispatch path:
+			//   - the request explicitly supplies hardware_id, or
+			//   - the device type changes, which re-binds the stored address to a
+			//     different action catalog.
+			// A write that touches neither (rename / enable / interval change on a
+			// row created before this gate existed) is deliberately NOT re-validated:
+			// rejecting it would turn pre-existing data into "cannot even rename
+			// this device", and the contract requires existing rows keep working.
+			// Repairing such a row stays possible by sending a legal hardware_id.
+			if dto.HardwareID != nil || candidateType != d.Type {
+				if err := validateEdgeDeviceAddress(driverRegistry, candidateType, candidateHardwareID); err != nil {
+					return err
+				}
 			}
 			if err := tx.Model(&d).Updates(updates).Error; err != nil {
 				return err

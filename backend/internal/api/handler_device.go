@@ -190,6 +190,11 @@ func emitDeviceConfigChanges(c *gin.Context, bus *nodemgr.ConfigEventBus, action
 // registerDeviceRoutes sets up channel + device-config CRUD routes
 func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, driverRegistry *drivers.Registry, policies ...ControlPolicy) {
 	controlPolicy := resolveControlPolicy(policies...)
+	// G7 (2026-09-21): POST/PUT /device-configs validate device_type against this
+	// registry, so a missing one must resolve to the built-in drivers rather than
+	// panicking on a nil receiver (the same fallback registerEdgeDeviceRoutes and
+	// registerNodeRoutes use).
+	driverRegistry = resolveDriverRegistry(driverRegistry)
 	// Get the EventBus for emitting config change events
 	eventBus := nodeMgr.EventBus()
 
@@ -272,8 +277,25 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			Error(c, http.StatusBadRequest, "name is required")
 			return
 		}
-		if tpl.DeviceType == "" {
+		if strings.TrimSpace(tpl.DeviceType) == "" {
 			Error(c, http.StatusBadRequest, "device_type is required")
+			return
+		}
+		// G7 (2026-09-21): device_type used to be accepted as free-form text. That
+		// made this endpoint the first step of a three-request bypass of the device
+		// address gate: create a config with an unregistered type, bind it through
+		// PUT /nodes/:id/config so the edge device inherits that type, and every
+		// later hardware_id write is then unvalidatable (an unknown type has no
+		// action catalog to judge an address against).
+		//
+		// The authority is the driver registry itself — GET /device-configs/tree
+		// already builds its model list from driverRegistry.List() plus these rows,
+		// so the wizard can only offer registered types. No second whitelist is
+		// introduced here. Rows created before this rule stay readable, listable,
+		// renamable and deletable; only a NEW config (or a type CHANGE) must name a
+		// registered driver.
+		if _, derr := driverRegistry.Get(strings.TrimSpace(tpl.DeviceType)); derr != nil {
+			Error(c, http.StatusBadRequest, fmt.Sprintf("device_type %q is not a registered driver", strings.TrimSpace(tpl.DeviceType)))
 			return
 		}
 		if tpl.HardwareType == "" {
@@ -356,6 +378,21 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			update.ID = current.ID
 			if strings.TrimSpace(update.Name) == "" {
 				return fmt.Errorf("name is required")
+			}
+			// G7 (2026-09-21): only a type CHANGE is gated, for the same reason the
+			// create path is. Unchanged types are deliberately not re-validated:
+			// historical rows may carry a device_type that no registered driver
+			// answers to, and rejecting every edit of such a row would turn legacy
+			// data into "cannot even be renamed". Changing the type TO an
+			// unregistered value is the dangerous move, so that is what is refused.
+			candidateType := strings.TrimSpace(update.DeviceType)
+			if candidateType == "" {
+				return fmt.Errorf("device_type is required")
+			}
+			if candidateType != current.DeviceType {
+				if _, derr := driverRegistry.Get(candidateType); derr != nil {
+					return fmt.Errorf("device_type %q is not a registered driver", candidateType)
+				}
 			}
 			if strings.TrimSpace(update.Status) == "" {
 				update.Status = current.Status
@@ -1066,6 +1103,17 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			DisplayName   string   `json:"display_name"`
 			HardwareTypes []string `json:"hardware_types"`
 			Description   string   `json:"description"`
+			// RequiresTargetAddress (m-1, 2026-09-22): whether this model's
+			// controlled actions embed EdgeDevice.hardware_id as a PHYSICAL
+			// address (Modbus unit id / I2C address). Consumers: the create
+			// wizard must not fabricate address "1" for a pure I2C/SPI model
+			// that never parses one.
+			//
+			// Additive field: every pre-existing key keeps its name/type/meaning
+			// and it is never omitted (false is the honest value for
+			// address-less models), so old callers and the frontend's
+			// "field missing" compatibility branch stay decidable.
+			RequiresTargetAddress bool `json:"requires_target_address"`
 		}
 		type TreeNode struct {
 			ID       string       `json:"id"`
@@ -1091,6 +1139,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				driverMap[key] = append(driverMap[key], DriverLeaf{
 					Type: dt, Model: dt, DisplayName: d.DeviceName(),
 					HardwareTypes: hwt, Description: "",
+					RequiresTargetAddress: driverLeafRequiresTargetAddress(driverRegistry, dt),
 				})
 			}
 		}
@@ -1124,6 +1173,10 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 					DisplayName:   cfg.Name,
 					HardwareTypes: []string{cfg.HardwareType},
 					Description:   cfg.Description,
+					// Same single-sourced judgement as the registry branch above:
+					// a DB-configured model must not disagree with the very same
+					// type when it is also a registered driver.
+					RequiresTargetAddress: driverLeafRequiresTargetAddress(driverRegistry, cfg.DeviceType),
 				})
 			}
 		}
@@ -1149,6 +1202,22 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 		}
 		Success(c, tree)
 	})
+}
+
+// driverLeafRequiresTargetAddress is the tree's ONLY source of truth for the
+// `requires_target_address` leaf flag.
+//
+// It deliberately delegates to driverRequiresTargetAddress — the same predicate
+// the create/update address gate (handler_edge_device.go) uses — so the型号树 can
+// never advertise a different address semantics than the gate that enforces it
+// (the G1-class drift this repository already paid for once).
+//
+// An uncataloged type (not in the driver registry) has no address semantics, so
+// the flag is false: unlike the write gate, which fails closed because it cannot
+// validate, the tree only answers "does this model consume an address at all".
+func driverLeafRequiresTargetAddress(driverRegistry *drivers.Registry, devType string) bool {
+	req, cataloged := driverRequiresTargetAddress(driverRegistry, devType)
+	return cataloged && req
 }
 
 // parseUintID parses a uint from a string, returning 0 on error

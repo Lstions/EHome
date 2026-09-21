@@ -77,11 +77,11 @@ func TestDeviceConfig_List_Empty(t *testing.T) {
 func TestDeviceConfig_List_WithFilter(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "temperature", HardwareType: "uart", Status: "active"})
-	db.Create(&models.DeviceConfig{Name: "Hum1", DeviceType: "humidity", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Hum1", DeviceType: "lk_th01", HardwareType: "i2c", Status: "active"})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/device-configs?device_type=temperature", nil)
+	req := httptest.NewRequest("GET", "/api/v1/device-configs?device_type=bmp280", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
@@ -101,7 +101,7 @@ func TestDeviceConfig_List_Pagination(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
 	for i := 0; i < 25; i++ {
-		db.Create(&models.DeviceConfig{Name: "Config" + string(rune('A'+i)), DeviceType: "temperature", HardwareType: "uart", Status: "active"})
+		db.Create(&models.DeviceConfig{Name: "Config" + string(rune('A'+i)), DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
 	}
 
 	w := httptest.NewRecorder()
@@ -117,7 +117,7 @@ func TestDeviceConfig_List_Pagination(t *testing.T) {
 func TestDeviceConfig_Get_Found(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "temperature", HardwareType: "uart"})
+	db.Create(&models.DeviceConfig{Name: "Temp Sensor", DeviceType: "bmp280", HardwareType: "uart"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/device-configs/1", nil)
@@ -154,7 +154,7 @@ func TestDeviceConfig_Create_Success(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":          "New Config",
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 		"description":   "A test config",
 		"status":        "active",
@@ -174,7 +174,7 @@ func TestDeviceConfig_Create_Success(t *testing.T) {
 	if dc.Name != "New Config" {
 		t.Errorf("expected name 'New Config', got %s", dc.Name)
 	}
-	if dc.DeviceType != "temperature" {
+	if dc.DeviceType != "bmp280" {
 		t.Errorf("expected device_type 'temperature', got %s", dc.DeviceType)
 	}
 }
@@ -183,7 +183,7 @@ func TestDeviceConfig_Create_MissingName(t *testing.T) {
 	r, _ := setupDeviceTest(t)
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 	})
 	w := httptest.NewRecorder()
@@ -220,7 +220,7 @@ func TestDeviceConfig_Create_MissingHardwareType(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":        "Config",
-		"device_type": "temperature",
+		"device_type": "bmp280",
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/device-configs", bytes.NewReader(body))
@@ -238,7 +238,7 @@ func TestDeviceConfig_Create_DefaultStatus(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":          "Auto Status",
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 	})
 	w := httptest.NewRecorder()
@@ -262,7 +262,7 @@ func TestDeviceConfig_CreateCanonicalizesAndRejectsStatus(t *testing.T) {
 	r, db := setupDeviceTest(t)
 	for _, status := range []string{"ACTIVE", "unsupported"} {
 		body, _ := json.Marshal(map[string]interface{}{
-			"name": "Status " + status, "device_type": "temperature", "hardware_type": "uart", "status": status,
+			"name": "Status " + status, "device_type": "bmp280", "hardware_type": "uart", "status": status,
 		})
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/device-configs", bytes.NewReader(body))
@@ -290,11 +290,11 @@ func TestDeviceConfig_Create_AsDefault(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
 	// Create an existing default
-	db.Create(&models.DeviceConfig{Name: "Old Default", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Old Default", DeviceType: "bmp280", HardwareType: "uart", IsDefault: true, Status: "active"})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":          "New Default",
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 		"is_default":    true,
 		"status":        "active",
@@ -320,11 +320,11 @@ func TestDeviceConfig_Create_AsDefault(t *testing.T) {
 func TestDeviceConfig_Update_Success(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Old Name", DeviceType: "temperature", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Old Name", DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":          "Updated Name",
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 		"description":   "Updated desc",
 	})
@@ -350,7 +350,7 @@ func TestDeviceConfig_Update_NotFound(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":          "X",
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 	})
 	w := httptest.NewRecorder()
@@ -367,10 +367,10 @@ func TestDeviceConfig_Update_NotFound(t *testing.T) {
 func TestDeviceConfig_Update_MissingName(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Old Name", DeviceType: "temperature", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Old Name", DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"device_type":   "temperature",
+		"device_type":   "bmp280",
 		"hardware_type": "uart",
 	})
 	w := httptest.NewRecorder()
@@ -387,7 +387,7 @@ func TestDeviceConfig_Update_MissingName(t *testing.T) {
 func TestDeviceConfig_Delete_Success(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "To Delete", DeviceType: "temperature", HardwareType: "uart"})
+	db.Create(&models.DeviceConfig{Name: "To Delete", DeviceType: "bmp280", HardwareType: "uart"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/device-configs/1", nil)
@@ -466,10 +466,10 @@ func TestDeviceConfig_RejectsDestructiveChangesWhileReferenced(t *testing.T) {
 func TestDeviceConfig_GetDefault_Found(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Default Temp", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Default Temp", DeviceType: "bmp280", HardwareType: "uart", IsDefault: true, Status: "active"})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/device-configs/default/temperature", nil)
+	req := httptest.NewRequest("GET", "/api/v1/device-configs/default/bmp280", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
@@ -482,10 +482,10 @@ func TestDeviceConfig_GetDefault_FallbackActive(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
 	// No is_default=true, but an active one exists
-	db.Create(&models.DeviceConfig{Name: "Active Temp", DeviceType: "temperature", HardwareType: "uart", IsDefault: false, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Active Temp", DeviceType: "bmp280", HardwareType: "uart", IsDefault: false, Status: "active"})
 
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/v1/device-configs/default/temperature", nil)
+	req := httptest.NewRequest("GET", "/api/v1/device-configs/default/bmp280", nil)
 	req.Header.Set("Authorization", authHeader(t))
 	r.ServeHTTP(w, req)
 
@@ -510,8 +510,8 @@ func TestDeviceConfig_GetDefault_NotFound(t *testing.T) {
 func TestDeviceConfig_MarkDefault(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Config1", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
-	db.Create(&models.DeviceConfig{Name: "Config2", DeviceType: "temperature", HardwareType: "uart", IsDefault: false, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Config1", DeviceType: "bmp280", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Config2", DeviceType: "bmp280", HardwareType: "uart", IsDefault: false, Status: "active"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/device-configs/2/default", nil)
@@ -538,8 +538,8 @@ func TestDeviceConfig_MarkDefault(t *testing.T) {
 
 func TestDeviceConfig_DefaultMustBeActive(t *testing.T) {
 	r, db := setupDeviceTest(t)
-	db.Create(&models.DeviceConfig{Name: "Active default", DeviceType: "temperature", HardwareType: "uart", IsDefault: true, Status: "active"})
-	db.Create(&models.DeviceConfig{Name: "Inactive", DeviceType: "temperature", HardwareType: "uart", Status: "inactive"})
+	db.Create(&models.DeviceConfig{Name: "Active default", DeviceType: "bmp280", HardwareType: "uart", IsDefault: true, Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Inactive", DeviceType: "bmp280", HardwareType: "uart", Status: "inactive"})
 
 	for _, request := range []struct {
 		method string
@@ -547,7 +547,7 @@ func TestDeviceConfig_DefaultMustBeActive(t *testing.T) {
 		body   map[string]interface{}
 	}{
 		{method: http.MethodPost, path: "/api/v1/device-configs", body: map[string]interface{}{
-			"name": "Inactive create", "device_type": "temperature", "hardware_type": "uart", "status": "inactive", "is_default": true,
+			"name": "Inactive create", "device_type": "bmp280", "hardware_type": "uart", "status": "inactive", "is_default": true,
 		}},
 		{method: http.MethodPut, path: "/api/v1/device-configs/2", body: map[string]interface{}{
 			"name": "Inactive", "status": "inactive", "is_default": true,
@@ -596,7 +596,7 @@ func TestDeviceConfig_InitFlow(t *testing.T) {
 
 	db.Create(&models.DeviceConfig{
 		Name:         "With Init",
-		DeviceType:   "temperature",
+		DeviceType:   "bmp280",
 		HardwareType: "uart",
 		InitFlow:     json.RawMessage(`[{"step":1,"action":"reset"}]`),
 	})
@@ -629,7 +629,7 @@ func TestDeviceConfig_Operations(t *testing.T) {
 
 	db.Create(&models.DeviceConfig{
 		Name:         "With Ops",
-		DeviceType:   "temperature",
+		DeviceType:   "bmp280",
 		HardwareType: "uart",
 		Operations:   json.RawMessage(`{"read_data":{"type":"read","command_template":"{{addr_hex}}03..."}}`),
 	})
@@ -681,7 +681,7 @@ func TestDeviceConfig_TestParser_WithJSONData(t *testing.T) {
 
 	db.Create(&models.DeviceConfig{
 		Name:         "Test Parser",
-		DeviceType:   "temperature",
+		DeviceType:   "bmp280",
 		HardwareType: "uart",
 	})
 
@@ -704,7 +704,7 @@ func TestDeviceConfig_TestParser_WithHexData(t *testing.T) {
 
 	db.Create(&models.DeviceConfig{
 		Name:         "Test Parser Hex",
-		DeviceType:   "temperature",
+		DeviceType:   "bmp280",
 		HardwareType: "uart",
 	})
 
@@ -1165,8 +1165,8 @@ func TestDeviceConfig_Tree_Empty(t *testing.T) {
 func TestDeviceConfig_Tree_WithConfigs(t *testing.T) {
 	r, db := setupDeviceTest(t)
 
-	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "temperature", HardwareType: "uart", Status: "active"})
-	db.Create(&models.DeviceConfig{Name: "Hum1", DeviceType: "humidity", HardwareType: "i2c", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Temp1", DeviceType: "bmp280", HardwareType: "uart", Status: "active"})
+	db.Create(&models.DeviceConfig{Name: "Hum1", DeviceType: "lk_th01", HardwareType: "i2c", Status: "active"})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/device-configs/tree", nil)
@@ -1184,6 +1184,9 @@ func TestDeviceConfig_Tree_ExcludesInactiveConfigs(t *testing.T) {
 	// active 与 inactive 各一条, device_type 互不相同且不与内置驱动重名,
 	// 避免被驱动注册表分支吸收。tree 只应暴露 active 配置——与
 	// GET /device-configs?status=active (前端 parserApi 主数据源) 对齐。
+	//
+	// 这两行**刻意**使用未注册型号: tree 是读路径, 收紧后的 device_type 门禁
+	// (G7, 2026-09-21) 只挡 POST/PUT 的写入, 历史行必须照旧可读、可出现在型号树里。
 	db.Create(&models.DeviceConfig{Name: "ActiveOnly", DeviceType: "review_active_only", HardwareType: "uart", Status: "active"})
 	db.Create(&models.DeviceConfig{Name: "InactiveOnly", DeviceType: "review_inactive_only", HardwareType: "i2c", Status: "inactive"})
 

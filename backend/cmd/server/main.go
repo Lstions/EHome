@@ -204,6 +204,11 @@ func main() {
 	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDriversWithParsers(driverRegistry, parserConfigs)
+	// 仅 -tags=simulation 构建下生效（空实现在 drivers_prod.go）。仿真型号
+	// （sim_generic / sim_scene_*_*）以"只作为型号存在"的驱动登记，使收紧后的
+	// POST /device-configs 门禁与 fail-closed 地址门禁不会误伤场景仿真；
+	// 生产产物里不含这些型号。
+	registerSimulationDriverTypes(driverRegistry)
 	logger.Infof("Registered %d device drivers with %d parser overrides", len(driverRegistry.List()), len(parserConfigs))
 
 	// 数据生命周期 P4 收尾 (方案 v3.3 §2.4-2/§七-3): 尽力回填

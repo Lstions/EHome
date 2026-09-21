@@ -122,7 +122,7 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 		registerMetricsRoutes(v1, db)
 
 		// v2.2 routes
-		registerNodeRoutes(v1, db, nodeMgr)
+		registerNodeRoutes(v1, db, nodeMgr, driverRegistry)
 		registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry)
 		registerDeviceOperationRoutes(v1, commandService, wsHub)
 		registerDriverCommandRoutes(v1, db, nodeMgr, driverRegistry)

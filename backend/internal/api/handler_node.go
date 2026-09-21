@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
@@ -38,8 +39,16 @@ func emptyHardwareResources() map[string]interface{} {
 	return map[string]interface{}{}
 }
 
-// registerNodeRoutes sets up node CRUD routes
-func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager) {
+// registerNodeRoutes sets up node CRUD routes.
+//
+// driverRegistry is variadic so existing call sites (unit tests that do not
+// exercise address semantics) stay source-compatible: a missing registry
+// resolves through resolveDriverRegistry to the built-in one, exactly like
+// registerEdgeDeviceRoutes. It is needed because PUT /nodes/:id/config writes
+// edge_devices.hardware_id and must apply the SAME address gate as the
+// edge-device create/update paths (G1, 2026-09-21).
+func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manager, registries ...*drivers.Registry) {
+	driverRegistry := resolveDriverRegistry(registries...)
 	eventBus := nodeMgr.EventBus()
 
 	// List nodes (v2.2 compat path)
@@ -297,7 +306,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	v1.GET("/nodes/:id/config", getNodeConfig(db, nodeMgr))
 
 	// Update node config (v2.2 incremental update)
-	v1.PUT("/nodes/:id/config", updateNodeConfig(db, nodeMgr))
+	v1.PUT("/nodes/:id/config", updateNodeConfig(db, nodeMgr, driverRegistry))
 
 	// BUG-08 fix: OTA history for a specific node
 	v1.GET("/nodes/:id/ota/history", getNodeOTAHistory(db))
@@ -806,7 +815,8 @@ type edgeDeviceUpdateItem struct {
 // updateNodeConfig handles incremental (partial) config updates for a node.
 // BUG-04 fix: idempotent — if the effective config content is unchanged,
 // skip epoch increment and MQTT push, return 200 immediately.
-func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
+func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager, registries ...*drivers.Registry) gin.HandlerFunc {
+	driverRegistry := resolveDriverRegistry(registries...)
 	return func(c *gin.Context) {
 		id := c.Param("id")
 
@@ -961,7 +971,39 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				updates := map[string]interface{}{"device_config_id": config.ID, "type": config.DeviceType}
+				// G2 (2026-09-21): type/device_config_id are written ONLY when this request
+				// really selects a device_config_id.
+				//
+				// The old code wrote `{"device_config_id": config.ID, "type": config.DeviceType}`
+				// unconditionally. When the request omitted device_config_id, configID stayed
+				// existing.DeviceConfigID; for the devices that matter here it is 0, and
+				// validateDeviceConfigForChannel(0) returns the ZERO DeviceConfig (ID 0,
+				// DeviceType ""). The row was therefore rewritten as device_config_id=0,
+				// type="" — the device silently lost its driver type while keeping its
+				// hardware_id. That is not only data loss: type is the input that selects the
+				// address gate, so an erased type made validateEdgeDeviceAddress treat the
+				// device as "not cataloged" and pass every later address write (G1 连带效应).
+				//
+				// Partial-update semantics (fields absent from the request stay untouched) are
+				// what the endpoint advertises in nodeConfigUpdateRequest, so the fix restores
+				// the documented behaviour instead of adding a new rule.
+				updates := map[string]interface{}{}
+				if ed.DeviceConfigID != nil {
+					if configID > 0 {
+						updates["device_config_id"] = config.ID
+						updates["type"] = config.DeviceType
+					} else {
+						// Explicitly detaching the template is a legal partial update, but it
+						// must NOT erase the driver type: handler_edge_device.go (the R2-fixed
+						// update path) does exactly this — configID == 0 writes
+						// device_config_id = 0 and leaves `type` alone. Erasing the type here
+						// would leave the row with hardware_id but no type, and the address
+						// gate keys off `type` (driverRequiresTargetAddress returns
+						// cataloged=false for ""), so a follow-up hardware_id write in the SAME
+						// request would be validated against nothing at all.
+						updates["device_config_id"] = uint(0)
+					}
+				}
 				if ed.Name != "" {
 					updates["name"] = ed.Name
 				}
@@ -976,6 +1018,71 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 				}
 				if ed.Enabled != nil {
 					updates["enabled"] = *ed.Enabled
+				}
+				// G1 (2026-09-21): this endpoint used to write edge_devices.hardware_id with
+				// ZERO validation, so it bypassed the create/update gate in
+				// handler_edge_device.go and accepted "UART1" (a bus name) as a device
+				// address. Every dispatch then failed inside deviceaction.ParseHardwareAddress
+				// and the operation sat QUEUED until its deadline.
+				//
+				// The gate below reuses validateEdgeDeviceAddress (single truth source) and
+				// runs on the CANDIDATE values before any write, so a rejected batch leaves
+				// the row untouched.
+				//
+				// ORDER IS THE CONTRACT: candidateType must be the FINAL type this request
+				// writes. type and hardware_id can change in the same batch, and validating
+				// against the STORED type would check the device against the action catalog it
+				// is leaving — that is precisely how a bus name survives a type switch
+				// (bmp280 -> sn3001_rain with hardware_id="UART1" would be judged as bmp280,
+				// which needs no address, and pass).
+				candidateType := existing.Type
+				if v, ok := updates["type"]; ok {
+					candidateType, _ = v.(string)
+				}
+				candidateHardwareID := existing.HardwareID
+				if ed.HardwareID != "" {
+					candidateHardwareID = ed.HardwareID
+				}
+				// Same trigger contract as the R2-fixed update path
+				// (handler_edge_device.go: `dto.HardwareID != nil || candidateType != d.Type`),
+				// so the two write paths cannot disagree about when a stored address is
+				// re-validated:
+				//   - the request supplies hardware_id, or
+				//   - the device type changes, which re-binds the stored address to a
+				//     different action catalog.
+				// A request that touches neither (rename / enable / interval on a row whose
+				// address predates the gate) is deliberately NOT re-validated: rejecting it
+				// would turn pre-existing data into "this device can no longer even be
+				// renamed", and repair stays available by sending a legal address. That is the
+				// reviewed R2 contract, and G1 must not silently tighten it.
+				//
+				// This is still not a hole: switching such a device back onto an
+				// address-requiring type changes candidateType, which re-validates the stored
+				// value at that moment and rejects it.
+				if ed.HardwareID != "" || candidateType != existing.Type {
+					if err := validateEdgeDeviceAddress(driverRegistry, candidateType, candidateHardwareID); err != nil {
+						return err
+					}
+				}
+				// G6 (2026-09-21): this endpoint wrote edge_devices.hardware_id with the
+				// address gate above but WITHOUT the per-channel uniqueness guard, so two
+				// devices of one model could be parked on the same slave address through
+				// the side door while the front door (PUT /edge-devices/:id) rejected the
+				// very same state with 400. Two identical Modbus unit ids on one bus is
+				// not a validation nicety: every addressed action for both devices is
+				// then ambiguous at the wire level.
+				//
+				// It reuses checkDeviceUniqueness (single truth source, same function the
+				// create and update paths call) on the CANDIDATE triple — channel, type
+				// and address all AFTER this request's changes — so the two doors cannot
+				// disagree about which states are reachable. excludeID is the row's own id,
+				// otherwise the device collides with itself.
+				//
+				// Ordering note: the address gate above is deliberately first. It rejects
+				// impossible values (a bus name) with the message that names the legal
+				// 1-254 domain; uniqueness then judges the remaining, well-formed states.
+				if err := checkDeviceUniqueness(tx, targetChannelID, candidateType, candidateHardwareID, existing.ID); err != nil {
+					return err
 				}
 				edgeWrites[ed.ID] = edgeWrite{existing: existing, updates: updates, finalChannelID: targetChannelID}
 			}
@@ -998,7 +1105,15 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 					}
 					configID := device.DeviceConfigID
 					if write, updated := edgeWrites[device.ID]; updated {
-						configID = write.updates["device_config_id"].(uint)
+						// Comma-ok, not a bare assertion: G2 (2026-09-21) made this key
+						// conditional (it is present only when the request selected a
+						// device_config_id), and a bare .(uint) on an absent key panics.
+						// Falling back to the stored value is also the correct semantics:
+						// the device keeps its current template when the request does not
+						// change it.
+						if v, ok := write.updates["device_config_id"]; ok {
+							configID, _ = v.(uint)
+						}
 					}
 					if _, err := validateDeviceConfigForChannel(tx, configID, &candidate); err != nil {
 						return err
