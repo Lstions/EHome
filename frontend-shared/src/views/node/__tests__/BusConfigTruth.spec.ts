@@ -99,7 +99,7 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ back: vi.fn(), push: mockRouterPush, currentRoute: { value: { path: '/node/1' } } }),
-  useRoute: () => ({ params: { id: '1' }, name: 'NodeDetail', path: '/node/1' }),
+  useRoute: () => ({ params: { id: '1' }, query: {}, name: 'NodeDetail', path: '/node/1' }),
 }))
 vi.mock('@/api/node', () => ({
   nodeApi: {

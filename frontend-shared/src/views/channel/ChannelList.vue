@@ -230,7 +230,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { feedback } from '@/utils/feedback'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh, Filter, Cpu } from '@element-plus/icons-vue'
 import { channelApi, NODE_FILTER_MAX_PAGE_SIZE, type Channel } from '@/api/channel'
@@ -308,6 +308,18 @@ const searchKeyword = ref('')
 /** 节点筛选值是**物理序列号**（node.node_id，如 'F0F5BDFFFE02'），不是 nodes 表主键。 */
 const nodeFilter = ref<string | number | ''>('')
 const hardwareTypeFilter = ref('')
+
+/**
+ * 消费节点页「查看全部」的 `?node=<序列号>` 深链（NodeOverview.navigateToNodeChannels 推的）。
+ *
+ * 改前该 query 全仓无消费者 —— 用户在节点详情点「查看全部」，落到通道列表后
+ * 筛选仍是「全部节点」，看到的是**全站**通道而不是刚看的那个节点的，
+ * 且 URL 里的 node 参数与页面状态不一致（看起来像点了没反应/落错页）。
+ * 这里与既有 route.query.search 的初始化写法保持一致：初始化即生效，不弹提示。
+ */
+const route = useRoute()
+const routeNode = typeof route.query.node === 'string' ? route.query.node : ''
+if (routeNode) nodeFilter.value = routeNode
 
 // 分页（服务端分页：currentPage/total 与接口一一对应，不再有本地切片）
 const currentPage = ref(1)

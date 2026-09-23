@@ -435,10 +435,60 @@ describe('AutomationRules.vue', () => {
     expect(source.default).toContain('onTrigger')
     expect(source.default).toContain('triggerRule')
     // 验证 onTrigger 函数逻辑: 确认框 + API 调用 + 结果提示
-    expect(source.default).toContain('ElMessageBox.confirm')
+    // G10 裁决: 手动触发是**非破坏性**操作 ⇒ 走 feedback.confirm (普通确认),
+    // **不得**走 confirmDanger (danger 红键只用于破坏性操作, 见 listPageConventions.spec.ts)。
+    expect(source.default).toContain('feedback.confirm(')
+    expect(source.default).not.toContain('ElMessageBox.confirm')
     expect(source.default).toContain('手动触发规则')
     expect(source.default).toContain('跳过条件评估与确认制')
     expect(source.default).toContain('fetchEvents()')
+  })
+
+  /**
+   * G10 接线守卫（行为断言，不是源码字符串）：手动触发是**非破坏性**操作，
+   * 必须走 feedback.confirm（普通确认，type:'info'，确认键不带 danger 语义）。
+   * 这里**不** mock feedback.confirm —— 让它真实执行、落在被 mock 的 ElMessageBox 上，
+   * 断言的就是真实会传给弹窗的 options。
+   * 反证：迁成 confirmDanger 后 options 里会出现 confirmButtonType:'danger' ⇒ 变红。
+   */
+  it('G10: 手动触发走 feedback.confirm 普通确认 (不带 danger 语义)', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const boxSpy = vi.mocked(ElMessageBox.confirm)
+    boxSpy.mockResolvedValueOnce('confirm' as never)
+    mockedAutomationApi.triggerRule.mockResolvedValue({ ...eventFixture, result: 'executed', trigger_source: 'manual' })
+    boxSpy.mockClear()
+
+    const wrapper = await mountWithSlotTable()
+    const triggerBtn = wrapper.findAll('button').find(b => b.text() === '触发')
+    expect(triggerBtn, '找不到「触发」按钮，用例前提不成立').toBeTruthy()
+    await triggerBtn!.trigger('click')
+    await flushPromises()
+
+    // 1) 确实弹了确认框, 标题与文案保留原语义。
+    expect(boxSpy).toHaveBeenCalledTimes(1)
+    const [message, title, options] = boxSpy.mock.calls[0]
+    expect(String(message)).toContain('手动触发规则「高温开窗」？')
+    expect(String(message)).toContain('跳过条件评估与确认制')
+    expect(title).toBe('手动触发')
+    // 2) 关键: 确认框**不得**是 danger 语义 (danger 只用于破坏性操作)。
+    expect(options).not.toEqual(expect.objectContaining({ confirmButtonType: 'danger' }))
+    expect(JSON.stringify(options)).not.toContain('danger')
+    // 3) 确认后才真正触发。
+    expect(mockedAutomationApi.triggerRule).toHaveBeenCalledWith(1)
+  })
+
+  it('G10: 手动触发确认框取消时不调用 triggerRule', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancel'))
+
+    const wrapper = await mountWithSlotTable()
+    const triggerBtn = wrapper.findAll('button').find(b => b.text() === '触发')
+    expect(triggerBtn).toBeTruthy()
+    await triggerBtn!.trigger('click')
+    await flushPromises()
+
+    // 取消 (false) ⇒ 一个请求都不发。
+    expect(mockedAutomationApi.triggerRule).not.toHaveBeenCalled()
   })
 
   it('触发历史「规则」列渲染规则名而不是裸主键', async () => {

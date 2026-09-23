@@ -80,6 +80,46 @@
         </span>
         <el-button link size="small" data-test="mark-read" @click="onMarkAllRead">全部标记已读</el-button>
       </div>
+      <!-- 事件筛选 (G1): 后端 GET /alert-events 已支持 rule_id/state/start_time/end_time,
+           改前前端 0 使用 —— 用户无法把时间线收敛到某条规则/某个状态/某个时间段。
+           规则下拉用 rule.id 作 value (与后端 rule_id 同型), 时间范围传 ISO 字符串。 -->
+      <div class="event-filters">
+        <el-select
+          v-model="filterRuleId"
+          placeholder="按规则筛选"
+          clearable
+          size="small"
+          style="width: 160px"
+          data-test="event-filter-rule"
+          @change="onFilterChange"
+        >
+          <el-option v-for="r in store.rules" :key="r.id" :label="r.name" :value="r.id" />
+        </el-select>
+        <el-select
+          v-model="filterState"
+          placeholder="按状态筛选"
+          clearable
+          size="small"
+          style="width: 140px"
+          data-test="event-filter-state"
+          @change="onFilterChange"
+        >
+          <el-option label="触发中" value="firing" />
+          <el-option label="已恢复" value="resolved" />
+        </el-select>
+        <el-date-picker
+          v-model="filterRange"
+          type="datetimerange"
+          size="small"
+          clearable
+          range-separator="至"
+          start-placeholder="开始时间"
+          end-placeholder="结束时间"
+          value-format="YYYY-MM-DDTHH:mm:ss"
+          data-test="event-filter-range"
+          @change="onFilterChange"
+        />
+      </div>
       <!-- 移动端宽表：横向滚动 + 滑动提示（theme.css .mobile-table-wrapper）。
            本表 5 列合计 650px（状态 100 / 规则 120 / 值 110 / 触发时间 160 /
            恢复时间 160），390px 视口下表格盒 310px ⇒ 「恢复时间」整列落在盒外。 -->
@@ -308,7 +348,8 @@ async function onSave() {
       ElMessage.success('规则已创建')
     }
     dialogVisible.value = false
-    void store.fetchEvents()
+    // 规则增删只影响事件回链的规则名, 不改筛选条件 —— 刷新时带上当前筛选与页码。
+    void loadEvents(store.eventsPage, store.eventsPageSize)
   } catch {
     feedback.error('保存失败')
   } finally {
@@ -346,12 +387,56 @@ async function onDelete(rule: AlertRule) {
 
 async function onMarkAllRead() {
   try {
-    await store.markEventsRead([])
+    // U9: 必须走 markAllEventsRead (发 {all:true})。改前调 markEventsRead([])
+    // 发的是空 ids, 后端在 !all && len(ids)==0 时判 400 —— 该按钮必然失败。
+    await store.markAllEventsRead()
     ElMessage.success('已全部标记')
-    void store.fetchEvents()
+    // 刷新时保留当前筛选与页码 (与列表取数走同一入口), 否则"全部已读"后筛选会静默失效。
+    void loadEvents(store.eventsPage, store.eventsPageSize)
   } catch {
     feedback.error('操作失败')
   }
+}
+
+// ── 事件筛选 (G1) ──
+/** 规则筛选值 (后端 rule_id)。 */
+const filterRuleId = ref<number | undefined>(undefined)
+/** 状态筛选值 (后端 state)。 */
+const filterState = ref<'firing' | 'resolved' | undefined>(undefined)
+/** 时间范围筛选值 (el-date-picker datetimerange, value-format 直接给 ISO 字符串)。 */
+const filterRange = ref<[string, string] | null>(null)
+
+/**
+ * 当前筛选值打包成 store.fetchEvents 的参数。
+ * 清空 (clearable) 后对应字段为 undefined ⇒ 不携带该参数, 后端按"不过滤"处理。
+ */
+function currentFilterParams() {
+  return {
+    ...(filterRuleId.value ? { rule_id: filterRuleId.value } : {}),
+    ...(filterState.value ? { state: filterState.value } : {}),
+    ...(filterRange.value?.[0] ? { start_time: filterRange.value[0] } : {}),
+    ...(filterRange.value?.[1] ? { end_time: filterRange.value[1] } : {}),
+  }
+}
+
+/**
+ * 统一的取数入口: 一次性下发「页码 + 页长 + 当前筛选」。
+ *
+ * 为什么视图层统一走这里而不是直接 store.setEventsPage(page):
+ * 本页筛选值由视图持有, 而 setEventsPage 只带 page/page_size —— 翻页/改页长/刷新
+ * 都会把筛选悄悄丢掉, 用户看到的是"筛选突然失效"。这里把筛选与分页一起下发,
+ * 且**只发一个请求** (store.fetchEvents 会用后端回显反写 eventsPage/eventsPageSize)。
+ */
+function loadEvents(page: number, pageSize: number) {
+  return store.fetchEvents({ page, page_size: pageSize, ...currentFilterParams() })
+}
+
+/**
+ * 筛选变化 (§3.2.6 MUST): 会改变查询范围的输入变化时必须重置页码到第 1 页。
+ * 不重置的话, 用户停在第 3 页时筛选后可能已越界, 页面显示"空列表"而不是筛选结果。
+ */
+function onFilterChange() {
+  void loadEvents(1, store.eventsPageSize)
 }
 
 // ── 事件分页 (§3.2.6 MUST: 分页状态由 store 持有, 视图只驱动) ──
@@ -365,18 +450,19 @@ const eventsPageSize = computed({
 })
 /** 翻页: 页码变化即重查 (数据源是服务端当前页, 不是本地切片)。 */
 function onEventsPageChange(page: number) {
-  void store.setEventsPage(page)
+  void loadEvents(page, store.eventsPageSize)
 }
 /** 每页条数变化: 页码必须回到第 1 页 (原第 3 页在新页长下可能已越界)。 */
 function onEventsPageSizeChange(size: number) {
-  void store.setEventsPage(1, size)
+  void loadEvents(1, size)
 }
 
 // 规则增删会改变事件回链的规则名, 但不应重置用户所在页码 —— 只在事件总数
 // 变化到当前页已越界时才回退 (由 store 的 total 驱动, 见下)。
 watch(() => store.eventsTotal, total => {
   const maxPage = Math.max(1, Math.ceil(total / store.eventsPageSize))
-  if (store.eventsPage > maxPage) void store.setEventsPage(maxPage)
+  // 回退页码时也必须带上筛选, 否则"越界回退"会顺手把筛选清掉。
+  if (store.eventsPage > maxPage) void loadEvents(maxPage, store.eventsPageSize)
 })
 
 onMounted(async () => {
@@ -399,6 +485,8 @@ onMounted(async () => {
 .mono { font-family: monospace; }
 .cond-row { display: flex; gap: 8px; align-items: center; }
 .hint { margin-left: 8px; color: var(--el-text-color-secondary); font-size: 12px; }
+/* 事件筛选条 (G1): 窄容器下允许换行 (与 AutomationRules.vue 的 .event-filters 同范式)。 */
+.event-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 /* 分页器与表格留出间距; 窄容器下允许换行 (与 AutomationRules.vue 同范式)。 */
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
 .events-pagination :deep(.el-pagination) { flex-wrap: wrap; }

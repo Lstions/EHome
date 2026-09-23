@@ -283,6 +283,17 @@ export const nodeApi = {
     return { total: 0, page: params?.page ?? 1, page_size: params?.page_size ?? 20, items: [] }
   },
 
+  /**
+   * POST /api/v1/nodes — 手动注册节点 (docs/设计/节点.md: node_id + name + config)。
+   *
+   * `node_id` wins 后端唯一约束: 重复注册返回 409 (`node_id already exists`),
+   * 调用方需把它翻成可读中文 (A1)。
+   */
+  async create(data: { node_id: string; name?: string; config?: string }): Promise<Node> {
+    const response = await client.post<unknown, ApiResponse<Node>>('/api/v1/nodes', data)
+    return response.data
+  },
+
   async getDetail(id: number | string): Promise<Node> {
     // 拦截器返回后端统一 envelope；data 为节点对象。
     const response = await client.get<unknown, ApiResponse<Node>>(`/api/v1/nodes/${id}`)

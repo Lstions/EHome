@@ -381,21 +381,39 @@ const EXEMPT_LOCAL_SLICE: Record<string, string> = {
  * 缺口登记：该对话框自身的 danger 语义/安全侧定焦/键盘可达性规范化不在 P1-C 范围，已报给主控。
  */
 /**
- * 规则②的**存量豁免**：确实是裸 ElMessageBox.confirm，但**不是破坏性操作**，因此不构成
- * "回车即删除"的风险面（教训见台账 §3.36 的分母纪律：把裸 confirm 一律当成危险确认是分母误用）。
- * P1-C 只加门禁、不改业务页面；改走 feedback.confirmDanger 会把确认键染成 danger 红
- * （对"克隆""手动触发"这类非破坏操作是**语义错误**，规范 §3.4.3 的 danger 类目只用于破坏性操作），
- * 所以正确修法是迁到 feedback.confirm（普通确认）—— 那同样属业务改动，登记缺口待排期。
+ * 规则②的「非破坏性操作确认出口」登记表。
+ *
+ * 表的用途：登记「不是破坏性操作、因而不该走 confirmDanger」的确认出口。
+ * 存量条目分**两类**：
+ *   ① 尚未迁移：页面仍写着裸 ElMessageBox.confirm（既有用法，待排期迁移）；
+ *   ② 已迁移到 feedback.confirm，但**门禁仍会报**——这一类不是待办，而是
+ *      **门禁分类器的已知覆盖边界**。分类器是 fail-closed 的文本判定，
+ *      `ALLOWED_CONFIRM_RECEIVERS` **刻意不含 feedback**（见 :273-276 的注释：
+ *      危险操作上用 feedback.confirm 等价于回退到审计 F5 之前的形态，故不能全局放行），
+ *      因此它无法区分「破坏性操作误用 feedback.confirm」（真违规）与
+ *      「非破坏性操作的合法 feedback.confirm」（本表登记的正当用法），一律报
+ *      「未登记的确认出口」。要真正消除该 finding 只能把 feedback 加进白名单，
+ *      那会让前者在**全站**静默假绿 —— 拆掉 F5 的核心保护，故不做（结构性裁决）。
+ *
+ * 为什么本表被排除在「无事可免即报错」的腐烂检查之外（`name !== 'EXEMPT_BARE_CONFIRM'`）：
+ *   与 STRICTER_CONFIRM_PAGES 同理 —— 第②类条目的 finding **会长期存在**
+ *   （只要页面还用 feedback.confirm 就会被分类器报出来），
+ *   故口径是「**只要 finding 还在就必须持续登记**」，而不是「修好即删除」。
+ *   删除条目的条件只有一个：该处置换成 confirmDanger / 专用对话框 / 或反馈接收者进了白名单。
  */
 const EXEMPT_BARE_CONFIRM: Record<string, string> = {
   'src/views/config/DeviceConfigList.vue':
-    'DeviceConfigList.vue:417 的裸 ElMessageBox.confirm 是**克隆配置**的确认（"确定要克隆配置 X 吗？"），' +
-    '非破坏性操作，无"回车即删除"风险；该页真正的删除（handleAction 的 delete 分支）已走 feedback.confirmDanger（:474）。' +
-    '正确修法是迁到 feedback.confirm（普通确认，不带 danger 语义），属业务改动，登记缺口待排期。登记日期 ' + SCAN_DATE + '。',
+    'DeviceConfigList.vue:433 的**克隆配置**确认已迁移到 feedback.confirm（普通确认，非破坏性操作）——' +
+    '**不是**未修复的裸 ElMessageBox.confirm（原 :417 是裸 confirm 时代的位置，已失效）。' +
+    '**不得**改走 confirmDanger：规范 §3.4.3 的 danger 类目只用于破坏性操作，给"克隆"的确认键染 danger 红是语义错误。' +
+    '本 finding 为**预期**：分类器 fail-closed（ALLOWED_CONFIRM_RECEIVERS 刻意不含 feedback，见 :273-276），' +
+    '故一律报「未登记的确认出口」，非缺陷。该页真正的删除已走 feedback.confirmDanger。登记日期 ' + SCAN_DATE + '。',
   'src/views/automation/AutomationRules.vue':
-    'AutomationRules.vue:635 的裸 ElMessageBox.confirm 是**手动触发规则**的确认（"手动触发规则 X？将跳过条件评估…"），' +
-    '非破坏性操作；该页删除已走 feedback.confirmDanger（:596），高风险动作确认也已走 confirmDanger（:615）。' +
-    '正确修法是迁到 feedback.confirm（普通确认），属业务改动，登记缺口待排期。登记日期 ' + SCAN_DATE + '。',
+    'AutomationRules.vue:685 的**手动触发规则**确认已迁移到 feedback.confirm（普通确认，非破坏性操作）——' +
+    '**不是**未修复的裸 ElMessageBox.confirm（原 :635 是裸 confirm 时代的位置，已失效）。' +
+    '**不得**改走 confirmDanger：规范 §3.4.3 的 danger 类目只用于破坏性操作。' +
+    '本 finding 为**预期**：分类器 fail-closed（ALLOWED_CONFIRM_RECEIVERS 刻意不含 feedback，见 :273-276），' +
+    '故一律报「未登记的确认出口」，非缺陷。该页删除与高风险动作确认均已走 feedback.confirmDanger。登记日期 ' + SCAN_DATE + '。',
 }
 
 const STRICTER_CONFIRM_PAGES: Record<string, string> = {

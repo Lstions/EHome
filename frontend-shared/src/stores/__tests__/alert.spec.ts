@@ -13,6 +13,7 @@ vi.mock('@/api/alert', () => ({
     setRuleEnabled: vi.fn(),
     listEvents: vi.fn(),
     markEventsRead: vi.fn(),
+    markAllEventsRead: vi.fn(),
   },
 }))
 
@@ -136,5 +137,23 @@ describe('alert store', () => {
     const store = useAlertStore()
     await store.markEventsRead([1, 2])
     expect(mockedApi.markEventsRead).toHaveBeenCalledWith([1, 2])
+  })
+
+  it('markEventsRead([]) 不发任何请求 (空 ids 必被后端判 400)', async () => {
+    // 后端 handler_alert.go: `!all && len(ids)==0` ⇒ 400「ids 或 all 必填其一」。
+    // 空数组是**必然失败**的请求, 故 store 层直接 return, 不得打到接口上。
+    mockedApi.markEventsRead.mockResolvedValue(undefined)
+    const store = useAlertStore()
+    await store.markEventsRead([])
+    expect(mockedApi.markEventsRead).not.toHaveBeenCalled()
+  })
+
+  it('markAllEventsRead 走 {all:true} 专用 api (而非 markEventsRead([]))', async () => {
+    // U9 回归钉子: 改前「全部标记已读」调 markEventsRead([]), 请求体是空 ids ⇒ 后端 400。
+    mockedApi.markAllEventsRead.mockResolvedValue(undefined)
+    const store = useAlertStore()
+    await store.markAllEventsRead()
+    expect(mockedApi.markAllEventsRead).toHaveBeenCalledTimes(1)
+    expect(mockedApi.markEventsRead).not.toHaveBeenCalled()
   })
 })

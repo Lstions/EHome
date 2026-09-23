@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { reactive } from 'vue'
 import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
-const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef } = vi.hoisted(() => ({
+const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() => Promise.resolve({
     id: 1, node_id: 'F0F5BDFFFE02', name: '机房采集器', model: 'esp32s3', status: 'online',
     firmware_version: '2.5.18', protocol_version: '2.2', connection_type: 'wifi',
@@ -44,7 +45,21 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
   mockElMessageBoxConfirm: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
   // 可变 DMA store 数据（测试可注入）
   mockDmaChannelsRef: { value: [] as any[] },
+  // 外设直控回填断言 + 可变 route.query（?tab= 深链用例需要按用例改 query）
+  mockApplyRuntimeLevel: vi.fn(),
+  mockApplyRuntimeState: vi.fn(),
+  mockPeriphReload: vi.fn(),
+  mockRouteQuery: { value: {} as Record<string, unknown> },
 }))
+
+/** 派发一次 WS periph_result：真实链路是 wsStore.subscribe 注册的回调被推送时触发。 */
+function emitPeriphResult(payload: Record<string, unknown>) {
+  // mockSubscribe 是 vi.fn()，其推断签名不含参数，故这里显式取调用记录并收窄。
+  const calls = mockSubscribe.mock.calls as unknown as Array<[string, (m: unknown) => void]>
+  const call = calls.find(c => c[0] === 'periph_result')
+  const handler = call?.[1]
+  if (typeof handler === 'function') handler({ event: 'periph_result', payload })
+}
 
 // D1 门禁需要"目标 vs 当前页"的语义比较，而不是"push 被调用过"。
 // 用一个**会真的改变当前路由**的假 router：push 同时写 pushHistory 与 currentRoute，
@@ -55,6 +70,16 @@ const { mockRouterState } = vi.hoisted(() => ({
     /** 当前路由（初始即 NodeOverview 自身：name=NodeDetail, path=/node/1） */
     current: { name: 'NodeDetail', path: '/node/1' } as { name?: string; path?: string },
     pushes: [] as any[],
+    /** 可变 route.params —— 跨节点切换用例需要改它来触发 watch(route.params.id) */
+    params: { id: '1' } as Record<string, string>,
+    /**
+     * params 的 reactive 代理（首次 useRoute 时创建）。
+     *
+     * 必须走代理写入：组件内部是 watch(() => route.params.id) —— 直接改原始对象
+     * 不会触发依赖，用例就会「假装测了节点切换但 watch 从未运行」（本文件已因此
+     * 漏过一次变异：删掉代际校验后测试仍然全绿）。
+     */
+    reactiveParams: null as Record<string, string> | null,
   },
 }))
 vi.mock('vue-router', () => ({
@@ -63,7 +88,11 @@ vi.mock('vue-router', () => ({
     push: mockRouterPush,
     currentRoute: { value: mockRouterState.current },
   }),
-  useRoute: () => ({ params: { id: '1' }, name: 'NodeDetail', path: '/node/1' }),
+  useRoute: () => {
+    // 惰性建 reactive 代理，使 watch(() => route.params.id) 能真正被触发
+    if (!mockRouterState.reactiveParams) mockRouterState.reactiveParams = reactive(mockRouterState.params)
+    return { params: mockRouterState.reactiveParams, query: mockRouteQuery.value, name: 'NodeDetail', path: '/node/1' }
+  },
 }))
 vi.mock('@/api/node', () => ({
   nodeApi: {
@@ -167,6 +196,10 @@ describe('NodeOverview (生产页)', () => {
     // 每个用例都从"当前就在 NodeOverview 自身"这一真实前提开始
     mockRouterState.current = { name: 'NodeDetail', path: '/node/1' }
     mockRouterState.pushes.length = 0
+    // query 是可变对象，clearAllMocks 不会重置它 —— 不重置会让 ?tab= 用例相互污染
+    mockRouteQuery.value = {}
+    if (mockRouterState.reactiveParams) mockRouterState.reactiveParams.id = '1'
+    else mockRouterState.params.id = '1'
   })
 
   it('挂载后加载节点详情、通道与事件', async () => {
@@ -1030,6 +1063,169 @@ describe('NodeOverview (生产页)', () => {
       expect(source).toContain('总线资源加载失败')
       expect(source).toContain('resourceQuerying')
       expect(source).toContain('hardwareResourceMatchesChannel')
+    })
+  })
+
+  // ── 外设直控接线（FR-I1/I2/I3 的生产入口；改前只在不可达的 NodeDetail→ChannelPanel 链里）──
+  //
+  // 这些用例证明的是「能力真的接到了可达入口」与「写后回填真的接通」，
+  // 而不只是源码里出现了某个字符串——后者在本仓是出了名的假绿来源。
+  describe('外设控制 TAB（GPIO/PWM 直控接线）', () => {
+    const periphStub = {
+      name: 'PeripheralControl',
+      template: '<div class="peripheral-control-stub" />',
+      props: ['nodeId', 'offline', 'registerPendingGpio', 'registerPendingPwm'],
+      methods: {
+        applyRuntimeLevel: (...args: any[]) => mockApplyRuntimeLevel(...args),
+        applyRuntimeState: (...args: any[]) => mockApplyRuntimeState(...args),
+        reload: (...args: any[]) => mockPeriphReload(...args),
+      },
+    }
+    const periphStubs = { ...stubs, PeripheralControl: periphStub }
+
+    it('TAB 栏含「外设控制」，点击后渲染 PeripheralControl 并传入节点身份', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      expect(tab, 'TAB 栏必须有「外设控制」——否则 GPIO/PWM 仍无生产入口').toBeTruthy()
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.find('.peripheral-control-stub')
+      expect(periph.exists()).toBe(true)
+      // nodeId 用物理序列号（与后端 /nodes/:id/gpio 的 :id 口径一致）
+      expect(wrapper.findComponent({ name: 'PeripheralControl' }).props('nodeId')).toBe('F0F5BDFFFE02')
+    })
+
+    it('registerPending 两个回调都已传入（缺一个即退回「写完不刷新」的降级态）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.findComponent({ name: 'PeripheralControl' })
+      expect(typeof periph.props('registerPendingGpio')).toBe('function')
+      expect(typeof periph.props('registerPendingPwm')).toBe('function')
+    })
+
+    it('注册后收到 periph_result 会按 request_id 回填运行态（GPIO 读回）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.findComponent({ name: 'PeripheralControl' })
+
+      // 模拟行控件写入前登记：requestId=101, pin=7, action=2（读电平）
+      const accepted = periph.props('registerPendingGpio')!({ requestId: 101, pin: 7, action: 2 })
+      expect(accepted, '返回 true 才表示「已登记、由 WS 回填」').toBe(true)
+
+      // 派发对应 WS 事件（periph_result）：成功、value=1
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 101, success: true, periph_type: 1, pin: 7, value: 1, action: 2 })
+      await flushPromises()
+      expect(mockApplyRuntimeLevel).toHaveBeenCalledWith(7, 1)
+    })
+
+    it('未登记的 request_id 不得回填（防串台）', async () => {
+      mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 999, success: true, periph_type: 1, pin: 7, value: 1, action: 2 })
+      await flushPromises()
+      expect(mockApplyRuntimeLevel).not.toHaveBeenCalled()
+    })
+
+    it('action/资源身份不匹配时不得回填（同一 request_id 也不能错配）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.findComponent({ name: 'PeripheralControl' })
+      periph.props('registerPendingGpio')!({ requestId: 202, pin: 7, action: 2 })
+
+      // action 不一致（登记的是读=2，回的是写=0）⇒ 必须拒绝
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 202, success: true, periph_type: 1, pin: 7, value: 1, action: 0 })
+      await flushPromises()
+      expect(mockApplyRuntimeLevel).not.toHaveBeenCalled()
+
+      // 资源身份不一致（同 request_id 但 pin 不同）⇒ 必须拒绝
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 202, success: true, periph_type: 1, pin: 8, value: 1, action: 2 })
+      await flushPromises()
+      expect(mockApplyRuntimeLevel).not.toHaveBeenCalled()
+    })
+
+    it('节点切换后旧 request_id 的 ACK 不得回填（跨节点串台防护）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.findComponent({ name: 'PeripheralControl' })
+      // 在旧节点上登记一个在途请求
+      periph.props('registerPendingGpio')!({ requestId: 404, pin: 7, action: 2 })
+
+      // 切到另一个节点：组件 watch(route.params.id) 会自增代际并清空 pending
+      mockRouterState.reactiveParams!.id = '2'
+      await flushPromises()
+
+      // 旧节点的 ACK 此时才到达 —— 必须被拒（否则会写进新节点的 UI）
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 404, success: true, periph_type: 1, pin: 7, value: 1, action: 2 })
+      await flushPromises()
+      expect(mockApplyRuntimeLevel).not.toHaveBeenCalled()
+    })
+
+    it('PWM 回填走 applyRuntimeState，失败时 running=null 表示状态未知', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      const periph = wrapper.findComponent({ name: 'PeripheralControl' })
+      periph.props('registerPendingPwm')!({ requestId: 303, hardwareId: 'PWM0', action: 1 })
+
+      emitPeriphResult({ node_id: 'F0F5BDFFFE02', request_id: 303, success: false, periph_type: 2, hardware_id: 'PWM0', action: 1 })
+      await flushPromises()
+      expect(mockApplyRuntimeState).toHaveBeenCalledWith('PWM0', null, undefined)
+    })
+
+    it('「配置/编辑」落点必须有响应（不得成为新的死入口）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
+      await flushPromises()
+      const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
+      await tab!.trigger('click')
+      await flushPromises()
+      // 触发 emit：真实行控件的「配置 GPIO」按钮就是发这个事件
+      wrapper.findComponent({ name: 'PeripheralControl' }).vm.$emit('configure-gpio', 7)
+      await flushPromises()
+      // 落点是切到「总线配置」（有意降级：唯一生产表单在待迁移的 ChannelPanel 中，
+      // 本轮不复制第二套真相），关键是**不能点了没反应**。
+      expect(wrapper.find('.peripheral-control-stub').exists()).toBe(false)
+      expect(wrapper.text()).toContain('总线配置')
+    })
+
+    it('源码层面：外设控制 TAB 存在且回填链路完整', () => {
+      expect(source).toContain("{ label: '外设控制'")
+      expect(source).toContain('PeripheralControl')
+      expect(source).toContain('WS_EVENT.PERIPH_RESULT')
+      expect(source).toContain('registerPendingPeripheral')
+      expect(source).toContain('registerPendingPWM')
+      expect(source).toContain('periphGeneration')
+    })
+  })
+
+  // ── 列表页快捷入口的 ?tab= 深链（改前 NodeList 推 ?tab=config 但本页无消费者）──
+  describe('?tab= 深链消费', () => {
+    it('?tab=config 落在「总线配置」TAB', async () => {
+      mockRouteQuery.value = { tab: 'config' }
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      expect(wrapper.find('.tab-item.active').text()).toContain('总线配置')
+    })
+
+    it('未知 tab 值不得报错也不得改变默认 TAB', async () => {
+      mockRouteQuery.value = { tab: 'not-a-real-tab' }
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      expect(wrapper.find('.tab-item.active').text()).toContain('基本信息')
     })
   })
 })

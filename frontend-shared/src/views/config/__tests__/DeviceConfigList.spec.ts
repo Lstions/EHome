@@ -372,4 +372,51 @@ describe('DeviceConfigList.vue', () => {
       duration: 5000,
     }))
   })
+
+  /**
+   * G10 接线守卫（行为断言）：克隆配置是**非破坏性**操作 ⇒ 走 feedback.confirm（普通确认，
+   * 不带 danger 语义）。这里**不** mock feedback.confirm —— 让它真实执行、落在被 mock 的
+   * ElMessageBox 上，断言的就是真实会传给弹窗的 options。
+   * 反证：迁成 confirmDanger 后 options 里会出现 confirmButtonType:'danger' ⇒ 变红。
+   */
+  it('G10: 克隆配置走 feedback.confirm 普通确认 (非破坏性，不得染 danger)', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const { deviceConfigApi } = await import('@/api/deviceConfig')
+    const boxSpy = vi.mocked(ElMessageBox.confirm)
+    boxSpy.mockResolvedValueOnce('confirm' as never)
+    vi.mocked(deviceConfigApi.create).mockResolvedValueOnce({} as never)
+    boxSpy.mockClear()
+
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { handleClone: (cfg: unknown) => Promise<void> }
+    await vm.handleClone({ id: 7, name: '温度模板' })
+    await flushPromises()
+
+    // 1) 确实弹了确认框, 标题与文案保留原语义。
+    expect(boxSpy).toHaveBeenCalledTimes(1)
+    const [message, title, options] = boxSpy.mock.calls[0]
+    expect(String(message)).toContain('温度模板')
+    expect(title).toBe('克隆配置')
+    // 2) 关键: 确认框**不得**是 danger 语义 (danger 只用于破坏性操作)。
+    expect(options).not.toEqual(expect.objectContaining({ confirmButtonType: 'danger' }))
+    expect(JSON.stringify(options)).not.toContain('danger')
+    // 3) 确认后才真正克隆。
+    expect(vi.mocked(deviceConfigApi.create)).toHaveBeenCalledTimes(1)
+  })
+
+  it('G10: 克隆配置取消时不调用 create（不再依赖 error !== "cancel" 字符串判断）', async () => {
+    const { ElMessageBox } = await import('element-plus')
+    const { deviceConfigApi } = await import('@/api/deviceConfig')
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce(new Error('cancel'))
+
+    const wrapper = mount(DeviceConfigList, { global: { stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { handleClone: (cfg: unknown) => Promise<void> }
+    await vm.handleClone({ id: 7, name: '温度模板' })
+    await flushPromises()
+
+    // 取消 ⇒ false ⇒ 一个请求都不发 (改前靠 error !== 'cancel' 字符串判断, 已删除)。
+    expect(vi.mocked(deviceConfigApi.create)).not.toHaveBeenCalled()
+  })
 })

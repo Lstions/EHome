@@ -14,12 +14,14 @@
     <section>
       <h4>GPIO 硬件资源</h4>
       <GPIOResourceList
+        ref="gpioResourceList"
         :resources="hardwareGpio"
         :configs="gpioConfigs"
         :node-id="nodeId"
         :offline="offline"
         :loading="loading && !hasLoaded"
         :occupied-pins="gpioOccupiedPins"
+        :register-pending="registerPendingGpio"
         @configure="pin => emit('configure-gpio', pin)"
         @edit="pin => emit('edit-gpio', pin)"
         @remove="removeGpio"
@@ -36,6 +38,7 @@
         :offline="offline"
         :loading="loading && !hasLoaded"
         :available-pins="availablePwmPins"
+        :register-pending="registerPendingPwm"
         @configure="hardwareId => emit('configure-pwm', hardwareId)"
         @edit="hardwareId => emit('edit-pwm', hardwareId)"
         @remove="removePwm"
@@ -60,6 +63,15 @@ import PWMResourceList from './PWMResourceList.vue'
 const props = withDefaults(defineProps<{
   nodeId: string
   offline?: boolean
+  /**
+   * 写后状态回填的登记回调（GPIO 与 PWM 的 payload 形状不同，故分两个 prop）。
+   *
+   * 语义必须与 GPIOResourceList/PWMResourceList 内部用法一致：返回 true =
+   * 「已登记，稍后由 WS（periph_result）回填运行态」；返回 false / 未提供 =
+   * 「降级为静态提示（写入命令已发送，等待设备响应）」。父组件不传时行为与改前完全一致。
+   */
+  registerPendingGpio?: (payload: { requestId: number; pin: number; action: number }) => boolean
+  registerPendingPwm?: (payload: { requestId: number; hardwareId: string; action: number }) => boolean
 }>(), { offline: false })
 const emit = defineEmits<{
   (event: 'configure-gpio' | 'edit-gpio', pin: number): void
@@ -74,6 +86,7 @@ const hardwarePwm = ref<PWMBusResource[]>([])
 const gpioConfigs = ref<GPIOConfig[]>([])
 const pwmConfigs = ref<PWMConfig[]>([])
 const pwmResourceList = ref<InstanceType<typeof PWMResourceList> | null>(null)
+const gpioResourceList = ref<InstanceType<typeof GPIOResourceList> | null>(null)
 let loadGeneration = 0
 let disposed = false
 const channels = ref<ChannelPinConfig[]>([])
@@ -151,6 +164,18 @@ watch(() => props.nodeId, () => {
 onUnmounted(() => {
   disposed = true
   loadGeneration++
+})
+
+/**
+ * 把写后回填的入口暴露给父级：父组件收到 WS periph_result 后调用这里，
+ * 由本组件转发到对应的行列表（两个子列表各自已 defineExpose）。
+ * 这样「WS 订阅与 request_id 代际校验」留在父组件（与 ChannelPanel 一致），
+ * 本组件只负责加载与转发，不引入第二套 pending 状态。
+ */
+defineExpose({
+  applyRuntimeLevel: (pin: number, level: number | null) => gpioResourceList.value?.applyRuntimeLevel(pin, level),
+  applyRuntimeState: (hardwareId: string, running: boolean | null, duty?: number) => pwmResourceList.value?.applyRuntimeState(hardwareId, running, duty),
+  reload: () => loadAll(),
 })
 </script>
 

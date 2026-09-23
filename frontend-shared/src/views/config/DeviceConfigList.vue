@@ -246,7 +246,7 @@ import {
   Upload, Download, Plus, View, Edit, CopyDocument, MoreFilled,
   DataBoard, DataAnalysis, Files
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import DeviceConfigForm from '@/components/forms/DeviceConfigForm.vue'
@@ -426,13 +426,18 @@ const handleEdit = (config: DeviceConfig) => {
 
 // 克隆
 const handleClone = async (config: DeviceConfig) => {
+  // 克隆是**非破坏性**操作 ⇒ 走 feedback.confirm (普通确认)。
+  // 不得改走 confirmDanger: §3.4.3 的 danger 类目只用于破坏性操作, 给"克隆"的确认键
+  // 染 danger 红是语义错误 (本仓既有结构性裁决, 见 listPageConventions.spec.ts)。
+  // confirm 返回 boolean, 取消即 return —— 不再依赖 error !== 'cancel' 字符串判断。
+  const ok = await feedback.confirm(`确定要克隆配置 "${config.name}" 吗？`, {
+    title: '克隆配置',
+    confirmText: '确定',
+    cancelText: '取消',
+  })
+  if (!ok) return
+
   try {
-    await ElMessageBox.confirm(
-      `确定要克隆配置 "${config.name}" 吗？`,
-      '克隆配置',
-      { confirmButtonText: '确定', cancelButtonText: '取消' }
-    )
-    
     const clonedConfig = {
       ...config,
       id: undefined,
@@ -446,9 +451,7 @@ const handleClone = async (config: DeviceConfig) => {
     ElMessage.success('克隆成功')
     await fetchConfigs()
   } catch (error: any) {
-    if (error !== 'cancel') {
-      feedback.handleError(error, '克隆失败')
-    }
+    feedback.handleError(error, '克隆失败')
   }
 }
 

@@ -112,9 +112,28 @@ export const useAlertStore = defineStore('alert', () => {
     await fetchEvents({ page: eventsPage.value, page_size: eventsPageSize.value })
   }
 
-  /** 标记事件已读 (经规则回链 Notification) */
+  /**
+   * 标记指定事件已读 (经规则回链 Notification)。
+   *
+   * 空数组防御: 后端 handler_alert.go 在 `!all && len(ids)==0` 时返回 **400
+   * 「ids 或 all 必填其一」**, 所以 `markEventsRead([])` 是一个必然失败的请求。
+   * 这里直接 return (不发请求), 让它不可能再被误用成"全部已读"——
+   * 需要"全部已读"请显式调 markAllEventsRead()。
+   */
   async function markEventsRead(ids: number[]) {
+    if (ids.length === 0) return
     await alertApi.markEventsRead(ids)
+  }
+
+  /**
+   * 全部标记已读 (发 `{all:true}`)。
+   *
+   * 为什么必须走这个而不是 `markEventsRead([])`: 后端 `POST /alert-events/read`
+   * 的入参二选一 (all=true 或非空 ids), 传空数组会被判 400。改前 AlertRules.vue
+   * 的「全部标记已读」正是传空数组, 因此该按钮**必然失败**, 用户只看到「操作失败」。
+   */
+  async function markAllEventsRead() {
+    await alertApi.markAllEventsRead()
   }
 
   return {
@@ -134,5 +153,6 @@ export const useAlertStore = defineStore('alert', () => {
     fetchEvents,
     setEventsPage,
     markEventsRead,
+    markAllEventsRead,
   }
 })

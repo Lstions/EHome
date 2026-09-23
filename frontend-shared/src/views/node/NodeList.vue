@@ -70,7 +70,7 @@
           </el-button>
         </el-button-group>
         
-        <el-button type="primary" @click="router.push('/node?action=add')">
+        <el-button type="primary" @click="openAddDialog">
           <el-icon><Plus /></el-icon>
           添加节点
         </el-button>
@@ -269,11 +269,57 @@
       title="暂无节点"
       description="开始添加第一个节点来监控您的设备"
       :quick-actions="[
-        { label: '添加节点', icon: Plus, type: 'primary', handler: () => ElMessage.info('跳转添加页面') }
+        { label: '添加节点', icon: Plus, type: 'primary', handler: openAddDialog }
       ]"
     />
 
     </template>
+
+    <!-- 两个对话框挂在页面级、**不进 `v-else` 分支**：加载骨架屏期间组件同样存在，
+         深链 ?action=add 一进来就能弹（放进 v-else 会等到骨架屏消失才出现）。 -->
+
+    <!-- 添加节点（手动注册）：POST /api/v1/nodes 的真实入口。
+         改前工具栏按钮 push('/node?action=add')、空态快捷动作只弹一句
+         ElMessage.info('跳转添加页面'), 两者全仓都没有消费者 —— 有按钮、没落点。 -->
+    <el-dialog
+      v-model="addDialogVisible"
+      title="添加节点"
+      width="480px"
+      :close-on-click-modal="false"
+      @closed="resetAddForm"
+    >
+      <el-form label-width="96px" @submit.prevent>
+        <el-form-item label="设备 ID" required>
+          <el-input
+            v-model="addForm.node_id"
+            placeholder="F0F5BD02F35C"
+            maxlength="12"
+            clearable
+            @keyup.enter="submitAddNode"
+          />
+          <div class="form-hint">12 位十六进制 MAC，例：F0F5BD02F35C</div>
+        </el-form-item>
+        <el-form-item label="名称">
+          <el-input v-model="addForm.name" placeholder="可选，留空用设备 ID" @keyup.enter="submitAddNode" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="addSubmitting" @click="submitAddNode">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- OTA 升级对话框：复用生产组件 OTAForm（与 NodeOverview 同一契约），
+         改前这里 push('/firmware?node=X')，而 FirmwareManage.vue 0 命中
+         useRoute/route.query —— 升级按钮是死入口。 -->
+    <OTAForm
+      :visible="otaDialogVisible"
+      :collector-id="otaNode.node_id"
+      :collector-model="otaNode.model"
+      :current-firmware-version="otaNode.firmware_version"
+      @success="handleOTASuccess"
+      @update:visible="otaDialogVisible = $event"
+    />
   </div>
 </template>
 
@@ -289,13 +335,14 @@ import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { useNodeStore } from '@/stores/node'
-import type { NodeListParams } from '@/api/node'
+import { nodeApi, type NodeListParams } from '@/api/node'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import CountUp from '@/components/common/CountUp.vue'
 import StatCard from '@/components/common/StatCard.vue'
+import OTAForm from '@/components/forms/OTAForm.vue'
 import { getQualityColor, getLatencyColor } from '@/utils/theme'
 
 const router = useRouter()
@@ -316,6 +363,11 @@ const routeSearch = typeof route.query.search === 'string' ? route.query.search 
 const routeStatus = typeof route.query.status === 'string' ? route.query.status : ''
 if (routeSearch) searchKeyword.value = routeSearch
 if (routeStatus === 'online' || routeStatus === 'offline') statusFilter.value = routeStatus
+
+// 「添加节点」深链：?action=add 直接打开对话框。
+// 改前工具栏按钮 push 的正是这个 query, 但全仓无消费者 (有按钮、没落点/假跳转) ——
+// 现在本页自己消费它, 外部深链与页内两处入口共用同一个对话框。
+const addDialogVisible = ref(route.query.action === 'add')
 
 const nodes = ref<any[]>([])
 
@@ -489,12 +541,70 @@ const goToDetail = (nodeId: string) => {
   router.push(`/node/${nodeId}`)
 }
 
-// 快捷操作
+// ── 添加节点（手动注册, POST /api/v1/nodes）────────────────────────────────
+// 本页此前**没有**任何创建入口: 工具栏按钮 push('/node?action=add')、空态快捷
+// 动作只弹 ElMessage.info('跳转添加页面') —— 两处都是"有按钮、没落点"。
+// 后端 POST /api/v1/nodes 已存在 (docs/设计/节点.md 明确其用途是手动注册)。
+const addForm = reactive({ node_id: '', name: '' })
+const addSubmitting = ref(false)
+/** 12 位十六进制 MAC —— 与后端 node_id 唯一键的口径一致。 */
+const NODE_ID_PATTERN = /^[0-9A-F]{12}$/
+
+const openAddDialog = () => {
+  addDialogVisible.value = true
+}
+
+const resetAddForm = () => {
+  addForm.node_id = ''
+  addForm.name = ''
+}
+
+const submitAddNode = async () => {
+  if (addSubmitting.value) return
+  // 本地先校验、非法格式**不发请求**: 让用户立刻看到格式要求, 而不是拿到一个
+  // 语焉不详的 400 "添加失败"(看不出到底哪里错了)。
+  const nodeId = addForm.node_id.trim().toUpperCase()
+  if (!NODE_ID_PATTERN.test(nodeId)) {
+    ElMessage.warning('设备 ID 必须是 12 位十六进制，例：F0F5BD02F35C')
+    return
+  }
+  const name = addForm.name.trim()
+  addSubmitting.value = true
+  try {
+    await nodeApi.create(name ? { node_id: nodeId, name } : { node_id: nodeId })
+    ElMessage.success('节点已添加')
+    addDialogVisible.value = false
+    await refreshData()
+  } catch (error: any) {
+    // 409 的 message 是英文 'node_id already exists', 原样透传用户看不懂。
+    if (error?.status === 409) feedback.error('该 node_id 已存在')
+    else feedback.handleError(error, '添加节点失败')
+  } finally {
+    addSubmitting.value = false
+  }
+}
+
+// ── OTA 升级对话框（复用生产组件 OTAForm）────────────────────────────────
+const otaDialogVisible = ref(false)
+const otaNode = ref<any>({})
+
+const handleOTASuccess = () => {
+  ElMessage.success('OTA 升级已完成')
+  otaDialogVisible.value = false
+  void fetchNodes(false, true)
+}
+
+// ── 快捷操作 ──────────────────────────────────────────────────────────────
 const handleQuickAction = (action: string, node: any) => {
   if (action === 'config') {
     router.push(`/node/${node.node_id}?tab=config`)
   } else if (action === 'ota') {
-    router.push(`/firmware?node=${node.node_id}`)
+    // 改前这里 push('/firmware?node=X'), 而 FirmwareManage.vue 0 命中
+    // useRoute/route.query —— 该 query 无人消费, "升级"是死入口。
+    // 这里直接复用生产组件 OTAForm 开升级对话框 (与 NodeOverview 同一契约),
+    // 因此 FirmwareManage 无需改动: 生产者不再产生 /firmware?node=。
+    otaNode.value = node
+    otaDialogVisible.value = true
   }
 }
 
@@ -971,6 +1081,15 @@ onUnmounted(() => {
   .search-input {
     width: 100%;
   }
+}
+
+/* 添加节点对话框的字段说明（设备 ID 格式要求） */
+.form-hint {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--el-text-color-secondary);
 }
 
 </style>

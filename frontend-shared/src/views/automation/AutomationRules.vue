@@ -333,7 +333,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { Plus } from '@element-plus/icons-vue'
@@ -679,15 +679,14 @@ async function onConfirmEvent(event: AutomationEvent) {
 const triggeringId = ref<number | null>(null)
 
 async function onTrigger(rule: AutomationRule) {
-  try {
-    await ElMessageBox.confirm(
-      `手动触发规则「${rule.name}」？将跳过条件评估与确认制直接执行动作 (cooldown/日熔断仍生效)。`,
-      '手动触发',
-      { type: 'warning', confirmButtonText: '触发', cancelButtonText: '取消' },
-    )
-  } catch {
-    return // 用户取消
-  }
+  // 手动触发是**非破坏性**操作 ⇒ 走 feedback.confirm (普通确认)。
+  // 不得改走 confirmDanger: §3.4.3 的 danger 类目只用于破坏性操作 (本仓既有结构性裁决,
+  // 见 listPageConventions.spec.ts)。confirm 返回 boolean, 取消即 return。
+  const ok = await feedback.confirm(
+    `手动触发规则「${rule.name}」？将跳过条件评估与确认制直接执行动作 (cooldown/日熔断仍生效)。`,
+    { title: '手动触发', confirmText: '触发', cancelText: '取消' },
+  )
+  if (!ok) return // 用户取消
   triggeringId.value = rule.id
   try {
     const ev = await automationApi.triggerRule(rule.id)

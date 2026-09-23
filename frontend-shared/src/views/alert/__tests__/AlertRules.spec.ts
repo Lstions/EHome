@@ -17,6 +17,7 @@ vi.mock('@/api/alert', () => ({
     setRuleEnabled: vi.fn(),
     listEvents: vi.fn(),
     markEventsRead: vi.fn(),
+    markAllEventsRead: vi.fn(),
   },
 }))
 vi.mock('@/api/edgeDevice', () => ({
@@ -393,5 +394,114 @@ describe('AlertRules.vue', () => {
         `事件表在 ${mobile ? '窄屏' : '桌面'} 下出现了 fixed 列`,
       ).toEqual([])
     }
+  })
+
+  // ─── U9: 「全部标记已读」必须发 {all:true}, 不得再发空 ids ──────────────────
+  //
+  // 改前链路: onMarkAllRead → store.markEventsRead([]) → POST {ids: []} →
+  // 后端 handler_alert.go 在 `!all && len(ids)==0` 判 400「ids 或 all 必填其一」。
+  // 该按钮因此**必然失败**, 用户只看到「操作失败」。下面断言的是**真实发出的请求**
+  // (api 层的 markAllEventsRead 被调用 / markEventsRead 未被调用), 不是源码字符串。
+  it('U9: 「全部标记已读」调 markAllEventsRead, 不发 markEventsRead([])', async () => {
+    mockedAlertApi.markAllEventsRead.mockResolvedValue(undefined)
+    const wrapper = await mountPage()
+    mockedAlertApi.markAllEventsRead.mockClear()
+    mockedAlertApi.markEventsRead.mockClear()
+    mockedAlertApi.listEvents.mockClear()
+
+    await wrapper.find('[data-test="mark-read"]').trigger('click')
+    await flushPromises()
+
+    expect(mockedAlertApi.markAllEventsRead).toHaveBeenCalledTimes(1)
+    // 回归钉子: 改前的写法就是 markEventsRead([]) (必然 400), 这里必须一次都没有。
+    expect(mockedAlertApi.markEventsRead).not.toHaveBeenCalled()
+    // 成功后刷新事件列表 (带当前筛选与页码)。
+    expect(mockedAlertApi.listEvents).toHaveBeenCalled()
+  })
+
+  // ─── G1: 事件筛选条 (后端已支持 rule_id/state/start_time/end_time, 改前 0 使用) ──
+  //
+  // 断言的是**真实请求参数** (listEvents 实际收到的 params), 不是源码字符串。
+  const lastParams = () => mockedAlertApi.listEvents.mock.calls.at(-1)?.[0] as Record<string, unknown>
+
+  it('G1: 事件筛选条渲染规则/状态/时间范围三个控件', async () => {
+    const wrapper = await mountPage()
+    expect(wrapper.find('[data-test="event-filter-rule"]').exists(), '缺规则筛选下拉').toBe(true)
+    expect(wrapper.find('[data-test="event-filter-state"]').exists(), '缺状态筛选下拉').toBe(true)
+    expect(wrapper.find('[data-test="event-filter-range"]').exists(), '缺时间范围选择器').toBe(true)
+  })
+
+  it('G1: 规则筛选变化下发 rule_id 且页码重置为 1', async () => {
+    const wrapper = await mountPage()
+    // 先翻到第 2 页, 制造「页码非 1」的前置状态。
+    const store = useAlertStore(wrapper.vm.$pinia)
+    store.eventsPage = 2
+
+    await wrapper.find('[data-test="event-filter-rule"]').setValue('1')
+    await flushPromises()
+
+    const params = lastParams()
+    expect(params.rule_id, '规则筛选未下发 rule_id').toBe(1)
+    expect(params.page, '筛选变化后页码必须重置为 1').toBe(1)
+    expect(params.page_size).toBe(20)
+  })
+
+  it('G1: 状态筛选变化下发 state 且页码重置为 1', async () => {
+    const wrapper = await mountPage()
+    const store = useAlertStore(wrapper.vm.$pinia)
+    store.eventsPage = 3
+
+    await wrapper.find('[data-test="event-filter-state"]').setValue('firing')
+    await flushPromises()
+
+    const params = lastParams()
+    expect(params.state, '状态筛选未下发 state').toBe('firing')
+    expect(params.page).toBe(1)
+  })
+
+  it('G1: 时间范围筛选下发 ISO start_time/end_time', async () => {
+    const wrapper = await mountPage()
+    const store = useAlertStore(wrapper.vm.$pinia)
+    // datetimerange 的 v-model 是 [start, end] 两元素数组 (value-format 直接给 ISO 字符串)。
+    store.eventsPage = 2
+    const vm = wrapper.vm as unknown as { filterRange: [string, string] | null }
+    vm.filterRange = ['2026-08-21T00:00:00', '2026-08-21T12:00:00']
+    await flushPromises()
+
+    await wrapper.find('[data-test="event-filter-state"]').setValue('resolved')
+    await flushPromises()
+
+    const params = lastParams()
+    expect(params.start_time).toBe('2026-08-21T00:00:00')
+    expect(params.end_time).toBe('2026-08-21T12:00:00')
+    expect(params.page).toBe(1)
+  })
+
+  it('G1: 筛选清空后不再携带该参数 (不带 = 不过滤)', async () => {
+    const wrapper = await mountPage()
+    await wrapper.find('[data-test="event-filter-state"]').setValue('firing')
+    await flushPromises()
+    expect(lastParams().state).toBe('firing')
+
+    // clearable 清空 → undefined ⇒ 请求里不得出现 state 字段。
+    await wrapper.find('[data-test="event-filter-state"]').setValue('')
+    await flushPromises()
+    expect(lastParams()).not.toHaveProperty('state')
+    expect(lastParams().page).toBe(1)
+  })
+
+  it('G1: 翻页时筛选不丢失 (筛选与分页同一次请求下发)', async () => {
+    const wrapper = await mountPage()
+    await wrapper.find('[data-test="event-filter-state"]').setValue('firing')
+    await flushPromises()
+    expect(lastParams().page).toBe(1)
+
+    // 分页控件 stub 点一下 = currentPage + 1 并 emit current-change。
+    // 关键: 翻页这条路径若只带 page/page_size 而丢掉筛选, 用户会看到"筛选突然失效"。
+    await wrapper.find('[data-test="events-pagination"]').trigger('click')
+    await flushPromises()
+    const params = lastParams()
+    expect(params.state, '翻页后筛选被丢掉').toBe('firing')
+    expect(params.page).toBe(2)
   })
 })

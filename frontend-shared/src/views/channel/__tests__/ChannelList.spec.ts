@@ -10,8 +10,12 @@ import RealEmptyState from '@/components/common/EmptyState.vue'
 // 页长上界常量由 vi.mock('@/api/channel') 的工厂一并导出（值同真实实现）。
 import { CHANNEL_LIST_MAX_PAGE_SIZE, NODE_FILTER_MAX_PAGE_SIZE } from '@/api/channel'
 
+// route.query.node 是可变的：`?node=` 深链用例要按用例改它。
+// （真实 vue-router 的 route 是响应式的，这里只需读取一次，故用普通对象即可。）
+const { mockRouteQuery } = vi.hoisted(() => ({ mockRouteQuery: { value: {} as Record<string, unknown> } }))
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => ({ query: mockRouteQuery.value, params: {}, name: 'ChannelList', path: '/channel' }),
 }))
 
 // 只给"真实 getPage 包装器"用例用：组件本身走的是被 mock 的 channelApi，
@@ -686,5 +690,43 @@ describe('ChannelList.vue — 接口失败态与空态语义', () => {
     expect(empties[0].props('kind')).toBe('filtered')
     expect(empties[0].props('title')).toBe('没有匹配的通道')
     expect(wrapper.find('[data-test="channel-error"]').exists()).toBe(false)
+  })
+})
+
+// ── ?node= 深链（节点页「查看全部」的生产者：NodeOverview.navigateToNodeChannels）──
+//
+// 改前该 query 全仓无消费者：用户点「查看全部」后看的是**全站**通道，
+// 而 URL 里却带着某个节点 —— 属于本轮 4 处死入口之一（唯一不在前两批修复范围内的那个）。
+describe('ChannelList.vue — ?node= 深链消费', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    mockRouteQuery.value = {}
+  })
+
+  it('URL 带 ?node= 时挂载即按该节点过滤，且首屏请求下发 node_id', async () => {
+    mockRouteQuery.value = { node: 'F0F5BDFFFE02' }
+    mockGetPage.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+
+    const wrapper = mount(ChannelList, { global: { stubs: { ...failureStubs, EmptyState: RealEmptyState } } })
+    await flushPromises()
+
+    // 筛选态生效：页面进入「已筛选」空态，而不是「整库暂无通道」
+    const empties = wrapper.findAllComponents(RealEmptyState)
+    expect(empties[0].props('kind')).toBe('filtered')
+
+    // 且请求真的带上了 node_id（服务端过滤，不是本地切片）
+    const calledWith = mockGetPage.mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+    expect(calledWith?.node_id).toBe('F0F5BDFFFE02')
+  })
+
+  it('无 ?node= 时不带 node_id（不得凭空过滤）', async () => {
+    mockGetPage.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+
+    mount(ChannelList, { global: { stubs: { ...failureStubs, EmptyState: RealEmptyState } } })
+    await flushPromises()
+
+    const calledWith = mockGetPage.mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+    expect(calledWith?.node_id === undefined || calledWith?.node_id === '').toBe(true)
   })
 })

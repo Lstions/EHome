@@ -570,6 +570,26 @@
         </section>
       </template>
 
+      <!-- 外设控制：GPIO/PWM 直控（PeriphCmd 0x1B / PeriphRsp 0x1C，不走通道）。
+           改前该能力只存在于不可达组件（PeripheralControl → GPIOResourceList/PWMResourceList，
+           仅由死文件 NodeDetail.vue 经 ChannelPanel.vue 消费），用户完全看不到；
+           FR-I1/I2/I3 已标 ✅ 但生产无入口 —— 本 TAB 是能力接线，不是新功能。
+           写后回填：本页订阅 WS periph_result，经 registerPending* 登记请求后按 request_id
+           代际校验回填（与 ChannelPanel 同一套语义，见 onPeriphResult）。 -->
+      <template v-else-if="activeTab === '外设控制'">
+        <PeripheralControl
+          ref="peripheralControlRef"
+          :node-id="nodeSerial"
+          :offline="nodeOffline"
+          :register-pending-gpio="registerPendingPeripheral"
+          :register-pending-pwm="registerPendingPWM"
+          @configure-gpio="onPeripheralConfigure"
+          @edit-gpio="onPeripheralConfigure"
+          @configure-pwm="onPeripheralConfigure"
+          @edit-pwm="onPeripheralConfigure"
+        />
+      </template>
+
       <!-- DMA 通道：只读资源视图，绑定操作在总线配置 TAB -->
       <template v-else-if="activeTab === 'DMA 通道'">
         <section class="card dma-card">
@@ -812,6 +832,7 @@ import OTAForm from '@/components/forms/OTAForm.vue'
 import ChannelManager from '@/components/channel/ChannelManager.vue'
 import ChannelTerminal from '@/components/channel/ChannelTerminal.vue'
 import LogPanel from '@/components/node/LogPanel.vue'
+import PeripheralControl from '@/components/periph/PeripheralControl.vue'
 import QuickCreateDeviceDialog from '@/components/node/QuickCreateDeviceDialog.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
@@ -899,6 +920,7 @@ const baudToolVisible = ref(false)
 const tabs = [
   { label: '基本信息', icon: House },
   { label: '总线配置', icon: Share },
+  { label: '外设控制', icon: Tools },
   { label: 'DMA 通道', icon: Grid },
   { label: '关联设备', icon: UserFilled },
   { label: 'OTA 历史', icon: Cloudy },
@@ -906,6 +928,35 @@ const tabs = [
   { label: '通道终端', icon: Monitor },
 ]
 const activeTab = ref('基本信息')
+
+/**
+ * 消费列表页快捷入口的 `?tab=` 深链（NodeList.vue 的「配置」按钮推 `?tab=config`）。
+ *
+ * 改前该 query 全仓无消费者 —— 用户从节点列表点「配置」只是原地换了个 URL，
+ * 落在「基本信息」TAB，看起来像点了没反应。映射表把外部的短名收敛到本页 TAB 标签，
+ * 未知值一律忽略（不报错、不白屏），保持「基本信息」默认。
+ */
+const TAB_QUERY_MAP: Record<string, string> = {
+  config: '总线配置',
+  bus: '总线配置',
+  peripheral: '外设控制',
+  gpio: '外设控制',
+  pwm: '外设控制',
+  dma: 'DMA 通道',
+  devices: '关联设备',
+  ota: 'OTA 历史',
+  logs: '系统日志',
+  terminal: '通道终端',
+  info: '基本信息',
+}
+function applyTabQuery(value: unknown) {
+  if (typeof value !== 'string') return
+  const target = TAB_QUERY_MAP[value]
+  if (target) activeTab.value = target
+}
+applyTabQuery(route.query.tab)
+// 同一路由内 query 变化（如在页内再次点「配置」）也要生效，故 watch 而非仅初始化。
+watch(() => route.query.tab, applyTabQuery)
 const deviceViewMode = ref<'list' | 'card'>('list')
 const showQuickCreate = ref(false)
 
@@ -1820,9 +1871,80 @@ watch(() => route.params.id, () => {
   dmaStore.clearCache()
   pinging.value = false
   syncing.value = false
+  periphGeneration++
+  pendingPeriphRequests.clear()
   if (pendingPingTimeout.value) { clearTimeout(pendingPingTimeout.value); pendingPingTimeout.value = null }
   void fetchDetail()
 })
+
+// ── 外设直控：写后状态回填 ──
+//
+// 语义与 components/node/ChannelPanel.vue 完全一致（同一套 pending + 代际校验），
+// 差异只在于回填入口改为本页持有的 PeripheralControl 引用。
+// periph_generation 在节点切换/卸载时自增，使在途请求的 ACK 失效 —— 否则旧节点的
+// 响应会写进新节点的行控件（跨节点状态串台）。
+const peripheralControlRef = ref<InstanceType<typeof PeripheralControl> | null>(null)
+let periphGeneration = 0
+const pendingPeriphRequests = new Map<number, { generation: number; type: number; resource: string; action: number }>()
+
+/** 登记一次外设写/读请求，返回 true 表示「已登记，将由 WS 回填」。 */
+const registerPendingPeripheral = (payload: { requestId: number; pin: number; action: number }): boolean => {
+  pendingPeriphRequests.set(payload.requestId, { generation: periphGeneration, type: 1, resource: String(payload.pin), action: payload.action })
+  return true
+}
+const registerPendingPWM = (payload: { requestId: number; hardwareId: string; action: number }): boolean => {
+  pendingPeriphRequests.set(payload.requestId, { generation: periphGeneration, type: 2, resource: payload.hardwareId, action: payload.action })
+  return true
+}
+
+/**
+ * 按 ChannelPanel.tryApplyPeriphResult 的判据回填：三重比对全部通过才消费该 request_id。
+ * 比对项：代际（防跨节点）、periph_type + action（防类型/动作错配）、资源身份（防同批多请求串台）。
+ */
+const onPeriphResult = (message: WebSocketMessage) => {
+  const payload = message.payload as {
+    node_id?: string; request_id?: number; success?: boolean; periph_type?: number
+    hardware_id?: string; pin?: number; value?: number; running?: boolean; action?: number
+  } | undefined
+  if (!payload || typeof payload.request_id !== 'number') return
+  const pending = pendingPeriphRequests.get(payload.request_id)
+  if (!pending || pending.generation !== periphGeneration) return
+  if (pending.type !== payload.periph_type || pending.action !== payload.action) return
+  const responseResource = payload.periph_type === 1 ? String(payload.pin) : payload.hardware_id
+  if (pending.resource !== responseResource) return
+  pendingPeriphRequests.delete(payload.request_id)
+
+  // GPIO（type=1）：读(2)/写(0,1,5) 回填电平；失败时回填 null 由行控件显示「设备操作失败 · 重试」。
+  if (payload.periph_type === 1 && typeof payload.pin === 'number' && [0, 1, 2, 5].includes(payload.action ?? -1)) {
+    peripheralControlRef.value?.applyRuntimeLevel(payload.pin, payload.success ? payload.value ?? null : null)
+    return
+  }
+  // PWM（type=2）：成功回填 running/duty；失败时 running=null 表示状态未知。
+  if (payload.periph_type === 2 && payload.hardware_id) {
+    if (payload.success) {
+      const duty = (payload.action === 0 || payload.action === 4) ? payload.value : undefined
+      peripheralControlRef.value?.applyRuntimeState(payload.hardware_id, payload.running ?? null, duty)
+    } else {
+      const duty = payload.action === 0 ? payload.value : undefined
+      peripheralControlRef.value?.applyRuntimeState(payload.hardware_id, null, duty)
+      if (payload.action === 1) peripheralControlRef.value?.reload()
+    }
+  }
+}
+
+/**
+ * GPIO/PWM 的「配置 / 编辑 / 移除」落点。
+ *
+ * 为什么不在这里直接开配置弹窗：资源的创建/编辑表单（引脚、方向、上下拉、PWM 频率与
+ * 占空比约束）与通道表单共用后端 manifest 校验，唯一的生产实现在 ChannelPanel 中，
+ * 而它属于「先接线、后迁移」的待迁移批次。本轮若复制一份表单，等于制造第二套真相。
+ * 因此这里**显式降级**为：切到「总线配置」TAB 并说明去哪操作 —— 保证不出现
+ * 「点了没反应」的新死入口（本轮的修复主题），同时不复制实现。
+ */
+function onPeripheralConfigure() {
+  ElMessage.info('GPIO/PWM 的资源配置在「总线配置」TAB 中管理，已为你切换')
+  activeTab.value = '总线配置'
+}
 
 // ── 生命周期 ──
 onMounted(() => {
@@ -1852,7 +1974,12 @@ onMounted(() => {
     }
   })
 
-  unsubscribe = () => { unsubStatus(); unsubPing() }
+  // 外设写后回填：GPIO/PWM 直控的 ACK 经 periph_result 到达（PeriphRsp 0x1C）。
+  // 与 ChannelPanel 同一套语义：先由 registerPending* 登记 request_id，收到后按
+  // request_id + 代际 + 资源身份三重比对才回填，避免旧节点的 ACK 打到新节点的 UI。
+  const unsubPeriph = wsStore.subscribe(WS_EVENT.PERIPH_RESULT, onPeriphResult)
+
+  unsubscribe = () => { unsubStatus(); unsubPing(); unsubPeriph() }
 })
 
 onUnmounted(() => {
@@ -1863,6 +1990,8 @@ onUnmounted(() => {
   capabilitiesSequence++
   devicesSequence++
   otaSequence++
+  periphGeneration++
+  pendingPeriphRequests.clear()
   if (unsubscribe) unsubscribe()
   if (pendingPingTimeout.value) clearTimeout(pendingPingTimeout.value)
   if (sessionTimer) clearInterval(sessionTimer)
