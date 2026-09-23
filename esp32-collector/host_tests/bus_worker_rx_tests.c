@@ -65,9 +65,39 @@ void host_test_log_record(char level, const char *tag, const char *format, ...) 
 const char *esp_err_to_name(esp_err_t err) { (void)err; return "ESP_OK"; }
 void esp_restart(void) { /* no-op in tests */ }
 
-/* ---- scheduler stubs ---- */
-void scheduler_notify_channel_error(uint32_t channel_id) { (void)channel_id; }
-void scheduler_notify_channel_success(uint32_t channel_id) { (void)channel_id; }
+/* ---- scheduler stubs ----
+ *
+ * These are OBSERVABLE on purpose.  As empty no-ops they made the whole suite
+ * blind to channel-health semantics: a completely unresponsive sensor that
+ * decremented the error counter (and therefore disappeared from the server's
+ * EdgeDeviceHealth sub-frame) looked exactly like a healthy one.  Counters here
+ * let a test assert WHICH outcome the firmware reports for a given RX result.
+ */
+/* Channel ids are arbitrary (the fixture uses 100), so accumulate totals plus',
+ * a per-id map keyed by identity rather than by array position. */
+static uint32_t g_sched_success_total;
+static uint32_t g_sched_error_total;
+static uint32_t g_sched_success_for;
+static uint32_t g_sched_error_for;
+static uint32_t g_sched_last_success_id;
+static uint32_t g_sched_last_error_id;
+
+void scheduler_notify_channel_error(uint32_t channel_id) {
+    g_sched_error_total++;
+    g_sched_error_for = channel_id;
+    g_sched_last_error_id = channel_id;
+}
+void scheduler_notify_channel_success(uint32_t channel_id) {
+    g_sched_success_total++;
+    g_sched_success_for = channel_id;
+    g_sched_last_success_id = channel_id;
+}
+
+static void reset_sched_counters(void) {
+    g_sched_success_total = g_sched_error_total = 0;
+    g_sched_success_for = g_sched_error_for = 0;
+    g_sched_last_success_id = g_sched_last_error_id = 0;
+}
 
 /* ---- Controllable bus_dma_read stub ---- */
 #define FAKE_RX_BUF_SIZE 2048
@@ -94,8 +124,20 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx, const uint8_t *tx, size_t tx_len,
     return ESP_OK;
 }
 QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx) {
-    if (!ctx || !ctx->initialized || ctx->bus_type != BUS_TYPE_UART) return NULL;
+    if (!ctx || !ctx->initialized) return NULL;
+    if (ctx->bus_type != BUS_TYPE_UART && ctx->bus_type != BUS_TYPE_USB) return NULL;
     return ctx->uart_event_queue;
+}
+
+/* Stream-bus flush.  The worker previously called uart_flush_input() with
+ * cfg.uart.port directly, which reads the USB union member as a UART port number
+ * on a USB context.  Counting calls here lets a test prove the flush went
+ * through the transport-neutral API. */
+static int g_bus_flush_calls;
+esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) {
+    (void)ctx;
+    g_bus_flush_calls++;
+    return ESP_OK;
 }
 
 /* ---- semaphore stubs ---- */
@@ -801,6 +843,187 @@ static void test_handle_batch_error_event(void) {
 }
 
 /* =====================================================================
+ * Tests: rebuild_uart_event_set must survive a NON-EMPTY driver queue
+ * =====================================================================
+ *
+ * Regression for the 2026-09-22 field failure: a real rain gauge stayed
+ * unreadable for 7 hours with RX_TASK events=0.
+ *
+ * Mechanism: uart_driver_install() registers the RX ISR immediately, so any
+ * byte arriving before the queue-set rebuild leaves the driver event queue
+ * non-empty.  Real FreeRTOS xQueueAddToSet() REFUSES a non-empty member
+ * (queue.c: "Cannot add a queue/semaphore to a queue set if there are already
+ * items in the queue/semaphore").  The old code only logged that failure, and
+ * because the queue never entered s_uart_event_members[] it could not even be
+ * reset later -> a SELF-LOCKING, permanent failure.
+ *
+ * These tests build a runtime whose event queue is a REAL queue: the shared
+ * setup_test_runtime() only stores a sentinel address, which is enough for
+ * index-mapping tests but cannot exercise xQueueAddToSet.
+ */
+static QueueHandle_t g_reg_real_event_q[SCHED_MAX_CHANNELS];
+
+static void setup_runtime_with_real_event_queue(void) {
+    setup_test_runtime();
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) g_reg_real_event_q[i] = NULL;
+    g_reg_real_event_q[0] = xQueueCreate(UART_EVENT_QUEUE_DEPTH, sizeof(uart_event_t));
+    CHECK(g_reg_real_event_q[0] != NULL, "fixture: a real event queue must be creatable");
+    g_test_event_queues[0] = g_reg_real_event_q[0];
+    g_test_bus_ctx[0].uart_event_queue = g_reg_real_event_q[0];
+}
+
+static void teardown_runtime_with_real_event_queue(void) {
+    rebuild_uart_event_set(NULL);   /* drop set + membership bookkeeping */
+    if (g_reg_real_event_q[0]) { vQueueDelete(g_reg_real_event_q[0]); g_reg_real_event_q[0] = NULL; }
+    g_test_event_queues[0] = NULL;
+    g_test_bus_ctx[0].uart_event_queue = NULL;
+    teardown_test_runtime();
+}
+
+/* The exact field failure: an RX event is already waiting when rebuild runs. */
+static void test_rebuild_uart_event_set_with_pending_driver_bytes(void) {
+    reset_counters();
+    setup_runtime_with_real_event_queue();
+
+    uart_event_t ev = {0};
+    ev.type = UART_DATA;
+    CHECK(xQueueSend(g_reg_real_event_q[0], &ev, 0) == pdTRUE,
+          "precondition: a driver RX event must be queued before the rebuild");
+
+    rebuild_uart_event_set(&g_test_rt);
+
+    CHECK(s_uart_event_set != NULL, "queue set must be created");
+    CHECK(s_uart_event_member_count == 1,
+          "a channel with pending driver bytes must still attach to the set");
+
+    /* The attachment must be live: a fresh event must come back out of the set. */
+    CHECK(xQueueSend(g_reg_real_event_q[0], &ev, 0) == pdTRUE,
+          "queueing a second event must succeed");
+    QueueSetMemberHandle_t member = xQueueSelectFromSet(s_uart_event_set, 0);
+    CHECK(member == (QueueSetMemberHandle_t)g_reg_real_event_q[0],
+          "the queue set must report the attached UART queue as ready");
+
+    uart_event_t out = {0};
+    CHECK(xQueueReceive(g_reg_real_event_q[0], &out, 0) == pdTRUE,
+          "rx_task must be able to receive from the attached queue");
+
+    teardown_runtime_with_real_event_queue();
+}
+
+/* Rebuilds happen on every suspend/resume.  The old implementation stayed
+ * broken forever because the un-attached queue kept accumulating and each
+ * later attach failed too. */
+static void test_rebuild_uart_event_set_is_idempotent_across_resumes(void) {
+    reset_counters();
+    setup_runtime_with_real_event_queue();
+
+    uart_event_t ev = {0};
+    ev.type = UART_DATA;
+    (void)xQueueSend(g_reg_real_event_q[0], &ev, 0);
+
+    for (int round = 0; round < 3; round++) {
+        rebuild_uart_event_set(&g_test_rt);
+        CHECK(s_uart_event_member_count == 1,
+              "every rebuild must re-attach the UART channel (no permanent lock-out)");
+    }
+
+    teardown_runtime_with_real_event_queue();
+}
+
+/* =====================================================================
+ * Tests: channel health must follow the RX outcome, not TX acceptance
+ * =====================================================================
+ *
+ * Regression for the 2026-09-22 field failure.  CMD_SAMPLE used to call
+ * scheduler_notify_channel_success() as soon as bus_dma_write() accepted the
+ * bytes.  scheduler_notify_channel_success() DECREMENTS error_count, and
+ * handler_data.c omits the EdgeDeviceHealth sub-frame whenever
+ * error_count == 0 -- so a sensor that never answered was reported HEALTHY.
+ * The outage stayed invisible on the server for 7 hours.
+ *
+ * Ownership after the fix: rx_task reports the outcome (complete response =>
+ * success, timeout/short read => error).  cmd_task reports only TX failures.
+ */
+
+/* An unanswered request must count as a channel ERROR, and must never be
+ * reported as a success. */
+static void test_rx_timeout_reports_channel_error(void) {
+    reset_counters();
+    reset_sched_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* Put a request in flight the way uart_cmd_loop does after a TX. */
+    pending_cmd_t pcmd = {0};
+    pcmd.edge_device_id = 7;
+    pcmd.read_size = 7;
+    pcmd.rx_timeout_ms = 100;
+    pcmd.tx_timestamp = 1000;          /* microseconds */
+    pcmd.channel_cmd_v2 = false;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE,
+          "precondition: a pending request must be queued");
+
+    /* Advance past the timeout with no bytes ever arriving. */
+    g_test_time_us = 1000 + 200 * 1000;
+    (void)expire_uart_state(&g_test_rt);
+
+    CHECK(g_sched_error_total == 1 && g_sched_last_error_id == 100,
+          "an unanswered request must report a channel error for ch100");
+    CHECK(g_sched_success_total == 0,
+          "an unanswered request must NOT report channel success");
+
+    teardown_test_runtime();
+}
+
+/* A complete response is the one place a sampled channel is genuinely healthy. */
+static void test_complete_response_reports_channel_success(void) {
+    reset_counters();
+    reset_sched_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* 7-byte Modbus reply: addr, func, len, 2 data bytes, 2 CRC bytes.
+     * Mirror test_handle_uart_data_event exactly: stage the bytes first and
+     * drive one DATA event; only then register the pending descriptor, because
+     * the frame is delivered by the idle boundary rather than by the event. */
+    const uint8_t reply[7] = {0x01, 0x03, 0x02, 0x00, 0x00, 0x44, 0xB8};
+    memcpy(g_fake_rx_data, reply, sizeof(reply));
+    g_fake_rx_len = sizeof(reply);
+    g_fake_rx_pos = 0;
+    g_test_time_us = 1000;
+
+    uart_event_t ev = {0};
+    ev.type = UART_DATA;
+    ev.size = sizeof(reply);
+    uint8_t scratch[256];
+    handle_uart_event(&g_test_rt, 0, &ev, scratch, sizeof(scratch));
+    CHECK(s_streams[0].len == sizeof(reply), "fixture: reply bytes must be accumulated");
+
+    /* The descriptor that was in flight when the reply arrived. */
+    pending_cmd_t pcmd = {0};
+    pcmd.edge_device_id = 7;
+    pcmd.read_size = sizeof(reply);
+    pcmd.rx_timeout_ms = 1000;
+    pcmd.tx_timestamp = 1000;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE,
+          "precondition: a pending request must be queued");
+
+    /* The idle boundary closes the descriptor and reports the outcome. */
+    g_test_time_us += UART_IDLE_THRESHOLD_US + 1;
+    uint32_t done = expire_uart_state(&g_test_rt);
+    CHECK(done >= 1, "fixture: the idle boundary must complete the pending descriptor");
+
+    CHECK(g_sched_success_total >= 1 && g_sched_last_success_id == 100,
+          "a complete response must report channel success for ch100");
+    CHECK(g_sched_error_total == 0,
+          "a complete response must not report a channel error");
+
+    teardown_test_runtime();
+}
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void)
@@ -826,6 +1049,10 @@ int main(void)
     test_decode_batch_step_invalid();
     test_rx_append_with_read_size();
     test_handle_batch_error_event();
+    test_rebuild_uart_event_set_with_pending_driver_bytes();
+    test_rebuild_uart_event_set_is_idempotent_across_resumes();
+    test_rx_timeout_reports_channel_error();
+    test_complete_response_reports_channel_success();
 
     report_path_deinit();
 

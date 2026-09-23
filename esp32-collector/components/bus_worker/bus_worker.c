@@ -191,6 +191,11 @@ static QueueSetHandle_t s_uart_event_set = NULL;
 static QueueHandle_t s_uart_event_members[SCHED_MAX_CHANNELS];
 static size_t s_uart_event_member_count;
 
+/* Serialises "drain the driver event queue, then attach it to the set".
+ * Without it an RX ISR could enqueue between the drain and xQueueAddToSet,
+ * reintroducing exactly the non-empty rejection this fix exists to prevent. */
+static portMUX_TYPE s_uart_set_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static void destroy_uart_event_set(void)
 {
  if (!s_uart_event_set) return;
@@ -615,7 +620,12 @@ static void rebuild_uart_event_set(bus_runtime_t *rt)
  }
 
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-  if (!rt->bus_ctx[i].initialized || rt->bus_ctx[i].bus_type != BUS_TYPE_UART)
+  /* STREAM buses: UART and USB both deliver uart_event_t notifications, so both
+   * join the same queue set and share rx_task's single wait path.  USB is the
+   * native C6 USB endpoint (no baud, no pins); it is NOT a UART controller. */
+  if (!rt->bus_ctx[i].initialized ||
+      (rt->bus_ctx[i].bus_type != BUS_TYPE_UART &&
+       rt->bus_ctx[i].bus_type != BUS_TYPE_USB))
    continue;
   QueueHandle_t event_queue = bus_dma_uart_event_queue(&rt->bus_ctx[i]);
   if (!event_queue) {
@@ -630,12 +640,42 @@ static void rebuild_uart_event_set(bus_runtime_t *rt)
     break;
    }
   }
-  if (!already_added) {
-   if (xQueueAddToSet(event_queue, set) != pdPASS) {
-    ESP_LOGE(TAG_RX, "failed to add UART channel slot %d event queue", i);
-   } else if (s_uart_event_member_count < SCHED_MAX_CHANNELS) {
-    s_uart_event_members[s_uart_event_member_count++] = event_queue;
-   }
+  if (already_added) continue;
+
+  /* FreeRTOS xQueueAddToSet REFUSES a member whose queue is not empty
+   * (FreeRTOS-Kernel/queue.c: "Cannot add a queue/semaphore to a queue set
+   * if there are already items in the queue/semaphore" -> pdFAIL).
+   *
+   * This is not theoretical: a UART driver starts delivering RX events from
+   * the instant uart_driver_install() registers its ISR, so any byte arriving
+   * between driver install and this rebuild leaves the event queue non-empty
+   * and makes the attach FAIL.  The failure is SELF-LOCKING: a queue that
+   * never enters the set is never selected by rx_task, so it is never drained,
+   * so it stays non-empty and every later rebuild fails too.  The old code
+   * only logged, and the queue was never recorded in s_uart_event_members[],
+   * so destroy_uart_event_set() could not even reset it.  Field impact
+   * (2026-09-22): a real rain gauge stayed unreadable for 7 hours with
+   * RX_TASK events=0, while the health path reported the channel as OK.
+   *
+   * Draining first satisfies the kernel precondition and breaks the lock.
+   * No payload is lost: these entries are "there is data" notifications;
+   * rx_append_from_event() keeps reading the driver ring via bus_dma_read()
+   * until it is empty, so the bytes are picked up on the next wake-up. */
+  taskENTER_CRITICAL(&s_uart_set_mux);
+  uart_event_t stale;
+  while (xQueueReceive(event_queue, &stale, 0) == pdTRUE) { /* drain */ }
+  BaseType_t added = xQueueAddToSet(event_queue, set);
+  taskEXIT_CRITICAL(&s_uart_set_mux);
+
+  if (added != pdPASS) {
+   /* Not survivable: without membership the channel is invisible to rx_task.
+    * Record it anyway so the next destroy_uart_event_set() can reset it, and
+    * keep the failure loud instead of leaving a silent, permanently
+    * unreadable channel behind. */
+   ESP_LOGE(TAG_RX, "failed to add UART channel slot %d event queue (attach refused; channel will be unreadable)", i);
+  }
+  if (s_uart_event_member_count < SCHED_MAX_CHANNELS) {
+   s_uart_event_members[s_uart_event_member_count++] = event_queue;
   }
  }
  s_uart_event_set = set;
@@ -658,6 +698,10 @@ void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb)
 
 static uint32_t compute_turnaround_us(const bus_dma_ctx_t *ctx)
 {
+ /* The USB transport is a full-duplex virtual serial port with no wire-level
+  * turnaround, and cfg is a union -- reading cfg.uart here would alias the USB
+  * member and produce a garbage delay. */
+ if (ctx->bus_type == BUS_TYPE_USB) return 0;
  int32_t cfg = ctx->cfg.uart.turnaround_us;
  if (cfg == -1) return 0; /* Full duplex — no turnaround */
  uint32_t us;
@@ -892,7 +936,10 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
   }
   /* UART responses carry no request ID.  Never transmit another
    * request/response command before rx_task has consumed the prior response. */
-  if (cmd.bus_type == BUS_TYPE_UART && (cmd.type == CMD_SAMPLE || cmd.read_size > 0)) {
+  /* Request/response buses: UART and the native USB endpoint both need the
+   * "one outstanding response" rule, because neither carries a request id. */
+  if ((cmd.bus_type == BUS_TYPE_UART || cmd.bus_type == BUS_TYPE_USB) &&
+      (cmd.type == CMD_SAMPLE || cmd.read_size > 0)) {
    if (!wait_for_uart_response_slot(rt, ch_idx, tag, &cmd)) {
     if (cmd.channel_cmd_v2) complete_control(&cmd, false, 1007, NULL, 0);
     else if (cmd.type == CMD_WRITE) queue_write_rsp(cmd.request_id, false, 1007, "configuration changed before dispatch");
@@ -905,7 +952,8 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
    uint8_t raw[256];
    size_t raw_len = 0;
    uint32_t code = 0x1000;
-   bool ok = cmd.bus_type == BUS_TYPE_UART && execute_uart_batch(ch_idx, ctx, &cmd, raw, &raw_len, &code);
+   bool ok = (cmd.bus_type == BUS_TYPE_UART || cmd.bus_type == BUS_TYPE_USB) &&
+             execute_uart_batch(ch_idx, ctx, &cmd, raw, &raw_len, &code);
    if (!ok && __atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) code = 1007;
    complete_control(&cmd, ok, ok ? 0 : code, ok ? raw : NULL, ok ? raw_len : 0);
    if (ok) scheduler_notify_channel_success(cmd.channel_id);
@@ -952,7 +1000,21 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
     errs++;
     scheduler_notify_channel_error(cmd.channel_id);
    } else {
-    scheduler_notify_channel_success(cmd.channel_id);
+    /* Do NOT report success here (2026-09-22 field fix).
+     *
+     * bus_dma_write() only proves the bytes reached the driver.  Reporting
+     * success at TX-accept time made scheduler_notify_channel_success()
+     * DECREMENT scheduler error_count even when the slave never answered --
+     * and handler_data.c skips the whole EdgeDeviceHealth sub-frame when
+     * error_count == 0.  Net effect: a channel that could not read its sensor
+     * at all (every RX timing out) was reported to the server as HEALTHY, and
+     * the resulting outage stayed invisible for 7 hours.
+     *
+     * Success/failure for a sampled channel is now owned solely by rx_task,
+     * which is the only place that can observe whether a response actually
+     * arrived: handle_uart_event() reports success on a complete response and
+     * expire_uart_state() reports the error on timeout.  One owner also keeps
+     * the health counters from being updated twice for a single transaction. */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
       if (rt->bus_ch[i] == cmd.channel_id) {
        (void)enqueue_pending(rt, i, &cmd);
@@ -1188,7 +1250,9 @@ static int uart_slot_from_event_queue(bus_runtime_t *rt,
 {
  if (!rt || !member) return -1;
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-  if (!rt->bus_ctx[i].initialized || rt->bus_ctx[i].bus_type != BUS_TYPE_UART)
+  if (!rt->bus_ctx[i].initialized ||
+      (rt->bus_ctx[i].bus_type != BUS_TYPE_UART &&
+       rt->bus_ctx[i].bus_type != BUS_TYPE_USB))
    continue;
   if (bus_dma_uart_event_queue(&rt->bus_ctx[i]) == member) return i;
  }
@@ -1280,6 +1344,8 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
   if (xQueuePeek(rt->pending_queues[idx], &pcmd, 0) != pdTRUE) return false;
   if (pcmd.read_size > 0 && s->len < pcmd.read_size) {
    (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   /* Short read = the sensor answered incompletely: a channel error. */
+   scheduler_notify_channel_error(rt->bus_ch[idx]);
    if (pcmd.channel_cmd_v2) {
     queue_control_final(pcmd.control_slot, false, 0x03, NULL, 0);
    } else {
@@ -1292,6 +1358,11 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
    s_last_rx_us[idx] = 0;
    return true;
   }
+  /* A complete response for a pending descriptor is the ONE place a sampled
+   * channel is genuinely healthy, so this is where success is reported
+   * (2026-09-22 field fix).  CMD_SAMPLE no longer reports success at
+   * TX-accept time. */
+  scheduler_notify_channel_success(rt->bus_ch[idx]);
   if (pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, true, 0, s->buffer, s->len);
   } else {
@@ -1332,7 +1403,7 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
     if (n == 0) break;
     if (state->len + n > sizeof(state->data)) {
      state->error = true;
-     (void)uart_flush_input(rt->bus_ctx[idx].cfg.uart.port);
+     (void)bus_dma_flush_input(&rt->bus_ctx[idx]);
      break;
     }
     memcpy(state->data + state->len, rx, n);
@@ -1349,7 +1420,7 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
   case UART_FRAME_ERR:
    state->error = true;
    s_rx_error_count[idx]++;
-   (void)uart_flush_input(rt->bus_ctx[idx].cfg.uart.port);
+   (void)bus_dma_flush_input(&rt->bus_ctx[idx]);
    notify_batch_waiter(state);
    break;
   default:
@@ -1371,9 +1442,11 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
   s_streams[idx].len = 0;
   s_streams[idx].overflow = true;
   s_last_rx_us[idx] = esp_timer_get_time();
-  (void)uart_flush_input(rt->bus_ctx[idx].cfg.uart.port);
-  ESP_LOGW(TAG_RX, "UART%d event=%d size=%" PRIu32 "; input reset",
-   (int)rt->bus_ctx[idx].cfg.uart.port, (int)event->type,
+  (void)bus_dma_flush_input(&rt->bus_ctx[idx]);
+  /* Do not print cfg.uart.port here: cfg is a union and this branch also runs for
+   * USB contexts, where it would read the USB member as a port number. */
+  ESP_LOGW(TAG_RX, "slot%d type=%d event=%d size=%" PRIu32 "; input reset",
+   idx, (int)rt->bus_ctx[idx].bus_type, (int)event->type,
    (uint32_t)event->size);
   break;
  case UART_BREAK:
@@ -1386,8 +1459,8 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
    * above unconditionally resets the input ring. */
   s_rx_error_count[idx]++;
   rx_append_from_event(rt, idx, rx, rx_cap);
-  ESP_LOGW(TAG_RX, "UART%d event=%d size=%" PRIu32 "; retained buffered input",
-   (int)rt->bus_ctx[idx].cfg.uart.port, (int)event->type,
+  ESP_LOGW(TAG_RX, "slot%d type=%d event=%d size=%" PRIu32 "; retained buffered input",
+   idx, (int)rt->bus_ctx[idx].bus_type, (int)event->type,
    (uint32_t)event->size);
   break;
  default:
@@ -1403,7 +1476,8 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
  uint32_t completions = 0;
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
   if (!rt->pending_queues[i] || !rt->bus_ctx[i].initialized ||
-      rt->bus_ctx[i].bus_type != BUS_TYPE_UART) continue;
+      (rt->bus_ctx[i].bus_type != BUS_TYPE_UART &&
+       rt->bus_ctx[i].bus_type != BUS_TYPE_USB)) continue;
 
   if (complete_idle_response(rt, i, now_us)) completions++;
 
@@ -1417,6 +1491,13 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
   s_rx_timeout_count[i]++;
   ESP_LOGW(TAG_RX, "UART RX timeout reqID=%lu (%lldms)",
    (unsigned long)pcmd.request_id, (long long)elapsed_ms);
+  /* Channel health is owned by rx_task (2026-09-22 field fix): a request that
+   * got no answer is a channel error, and only this path can observe that.
+   * Previously CMD_SAMPLE reported success at TX-accept time, so a completely
+   * unresponsive sensor DECREMENTED error_count and handler_data.c then
+   * omitted the EdgeDeviceHealth sub-frame entirely -- the server saw a
+   * healthy channel throughout a 7-hour outage. */
+  scheduler_notify_channel_error(rt->bus_ch[i]);
   if (pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, false, 1, NULL, 0);
   } else {
@@ -1441,7 +1522,9 @@ static TickType_t rx_wait_ticks(bus_runtime_t *rt)
  int64_t now_us = esp_timer_get_time();
  int64_t next_us = now_us + (int64_t)RX_WAKE_PERIOD_MS * 1000;
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-  if (!rt->bus_ctx[i].initialized || rt->bus_ctx[i].bus_type != BUS_TYPE_UART)
+  if (!rt->bus_ctx[i].initialized ||
+      (rt->bus_ctx[i].bus_type != BUS_TYPE_UART &&
+       rt->bus_ctx[i].bus_type != BUS_TYPE_USB))
    continue;
   if ((s_streams[i].len > 0 || s_streams[i].overflow) && s_last_rx_us[i] > 0) {
    int64_t deadline = s_last_rx_us[i] + UART_IDLE_THRESHOLD_US;

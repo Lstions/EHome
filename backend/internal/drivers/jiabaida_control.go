@@ -42,18 +42,25 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 				{Name: "priority", Type: "string", Required: true, Enum: []string{"user", "operator"}},
 			},
 		},
+		// 注意(2026-09-23)：这两条是 semantics="read"，而 deviceaction/definition.go
+		// 的默认启用重算**只覆盖 set/reset**（其分支写作：若 Semantics 为 "set" 或
+		// "reset"，则按 verifier/Verification/AvailabilityCode 重算 Enabled）。
+		// read 直接沿用驱动字面量的 Enabled，因此**仅仅清空 AvailabilityCode 并不会
+		// 让它们启用**，必须显式写 Enabled: true。
+		// 判据由 TestJiabaidaFormerlyGuardedActionsAreEnabledAtDriverLayer 长期钉死：
+		// 删掉这里的 Enabled: true 会让该测试变红（已用变异自证）。
 		ControlAction{ID: "read_protection_parameters", Version: 1, Name: "读取 BMS 保护参数",
-			Description: "嘉佰达 F2；需要受控工厂模式工作流，当前仅登记能力",
-			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
-			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F2 工厂模式步骤与实机响应尚未冻结"},
+			Description: "嘉佰达 F2；受控工厂模式工作流（进厂→读→出厂）",
+			Semantics:   "read", Risk: "medium", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3},
 		ControlAction{ID: "read_system_parameters", Version: 1, Name: "读取 BMS 系统参数",
-			Description: "嘉佰达 F3；需要受控工厂模式工作流，当前仅登记能力",
-			Semantics:   "read", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "readback",
-			MaxSteps: 3, AvailabilityCode: "protocol_unverified", AvailabilityReason: "F3 工厂模式步骤与实机响应尚未冻结"},
+			Description: "嘉佰达 F3；受控工厂模式工作流（进厂→读→出厂）",
+			Semantics:   "read", Risk: "medium", Enabled: true, ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 3},
 		ControlAction{ID: "bms_restart", Version: 1, Name: "重启 BMS",
 			Description: "重启后必须观察离线窗口或 restart counter，不能以 ACK 判定成功",
-			Semantics:   "reset", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
-			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified", AvailabilityReason: "未冻结 BMS 重启帧及离线/启动观测证据"},
+			Semantics:   "reset", Enabled: true, Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "observation",
+			AtMostOnce: true, MaxSteps: 4},
 	)
 	// -----------------------------------------------------------------------
 	// Factory-mode parameter read/write (F2/F3) — V19 §7.11
@@ -61,16 +68,14 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	actions = append(actions,
 		ControlAction{ID: "write_protection_parameters", Version: 1, Name: "写入 BMS 保护参数",
 			Description: "F2 写：进工厂→写 53 字节参数块(含 CRC-16)→读回对账→退出(2828 初始化)",
-			Semantics:   "set", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F2 写帧 CRC 覆盖范围及真机读回黄金向量未冻结",
-			Parameters:         jiabaidaF2Parameters()},
+			Semantics:   "set", Enabled: true, Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 4,
+			Parameters: jiabaidaF2Parameters()},
 		ControlAction{ID: "write_system_parameters", Version: 1, Name: "写入 BMS 系统参数",
 			Description: "F3 写：进工厂→写 52 字节参数块(含 CRC-16)→读回对账→退出(2828 初始化)",
-			Semantics:   "set", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F3 写帧 CRC 覆盖范围及真机读回黄金向量未冻结",
-			Parameters:         jiabaidaF3Parameters()},
+			Semantics:   "set", Enabled: true, Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 4,
+			Parameters: jiabaidaF3Parameters()},
 	)
 	// -----------------------------------------------------------------------
 	// MOS test / balance / buzzer / alarm / EDV / custom / resistance / timing
@@ -78,49 +83,42 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 	actions = append(actions,
 		ControlAction{ID: "test_charge_mos", Version: 1, Name: "测试充电 MOS",
 			Description: "0C 写 test_status=01 + 读回 0C 状态对账；测试需注入负载电流",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "0C 测试帧真机响应未冻结"},
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 2},
 		ControlAction{ID: "test_discharge_mos", Version: 1, Name: "测试放电 MOS",
 			Description: "0C 写 test_status=02 + 读回 0C 状态对账；测试需注入负载电流",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "0C 测试帧真机响应未冻结"},
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 2},
 		ControlAction{ID: "read_test_mos_status", Version: 1, Name: "读取 MOS 测试状态",
 			Description: "0C 读：返回充放电 MOS 测试状态(0 未测试/1 OK/2 NG/3 超时)",
-			Semantics:   "read", Risk: "low", Enabled: false,
+			Semantics:   "read", Risk: "low", Enabled: true,
 			TXData: []byte{0xDD, 0xA5, 0x0C, 0x00, 0xFF, 0xF4, 0x77}, ReadSize: 9, RXTimeoutMS: 1000},
 		ControlAction{ID: "force_balance", Version: 1, Name: "强制均衡",
 			Description: "F5 进入强制均衡模式 + 读回 0x03 均衡状态对账",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F5 强制均衡真机响应未冻结"},
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 2},
 		ControlAction{ID: "find_car", Version: 1, Name: "寻车(蜂鸣器)",
 			Description: "F1 蜂鸣器开/关(0x1801/0x1800)，最长 30S 自动关闭",
-			Semantics:   "set", Risk: "low", ExecutionShape: "bounded_sequence", Verification: "ack",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F1 寻车帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "low", ExecutionShape: "bounded_sequence", Verification: "ack",
+			MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "enabled", Type: "boolean", Required: true},
 			}},
 		ControlAction{ID: "clear_alarm", Version: 1, Name: "清除告警状态",
 			Description: "E6 清除所有告警信息(固定数据 0x1881)",
-			Semantics:   "reset", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "E6 清告警帧真机响应未冻结"},
+			Semantics:   "reset", Enabled: true, Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
+			MaxSteps: 2},
 		ControlAction{ID: "auto_test_edv", Version: 1, Name: "自动测试 EDV",
 			Description: "0D 设置静止时间(分钟)启动 EDV 测试；需 SOC>95%",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "ack",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "0D EDV 测试帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "ack",
+			AtMostOnce: true, MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "rest_minutes", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 			}},
 		ControlAction{ID: "write_custom_attributes", Version: 1, Name: "写入自定义属性",
 			Description: "F0 写 3 个 uint16 自定义字段 + 读回对账",
-			Semantics:   "set", Risk: "low", ExecutionShape: "bounded_sequence", Verification: "readback",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F0 自定义属性真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "low", ExecutionShape: "bounded_sequence", Verification: "readback",
+			MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "custom_1", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 				{Name: "custom_2", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
@@ -128,27 +126,24 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 			}},
 		ControlAction{ID: "read_custom_attributes", Version: 1, Name: "读取自定义属性",
 			Description: "F0 读 3 个 uint16 自定义字段",
-			Semantics:   "read", Risk: "low", Enabled: false,
+			Semantics:   "read", Risk: "low", Enabled: true,
 			TXData: []byte{0xDD, 0xA5, 0xF0, 0x00, 0xFF, 0x10, 0x77}, ReadSize: 13, RXTimeoutMS: 1000},
 		ControlAction{ID: "write_internal_resistance", Version: 1, Name: "写入电芯内阻",
 			Description: "F6 写 30 串内阻(0.1mΩ 有符号) + 读回对账；协议固定 30 串，参数为 30 个标量（catalog schema 仅支持标量参数）",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F6 写内阻帧真机响应未冻结",
-			Parameters:         jiabaidaResistanceParameters()},
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 2,
+			Parameters: jiabaidaResistanceParameters()},
 		ControlAction{ID: "set_static_correction_time", Version: 1, Name: "设置静态修正时间",
 			Description: "F7 写入静态修正时间(分钟)",
-			Semantics:   "set", Risk: "low", ExecutionShape: "bounded_sequence", Verification: "ack",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F7 修正时间帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "low", ExecutionShape: "bounded_sequence", Verification: "ack",
+			MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "minutes", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 			}},
 		ControlAction{ID: "set_report_interval", Version: 1, Name: "设置上报时间间隔",
 			Description: "F8 写入静态/充电/放电上报间隔(各 uint16 秒)",
-			Semantics:   "set", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "F8 上报间隔帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
+			MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "static_interval_s", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 				{Name: "charge_interval_s", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
@@ -156,27 +151,24 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 			}},
 		ControlAction{ID: "set_charge_time_window", Version: 1, Name: "设置充电时间窗",
 			Description: "FA 写入充电延迟+充电时长(秒)；0=持续允许",
-			Semantics:   "set", Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
-			MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "FA 充电时间窗帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "medium", ExecutionShape: "bounded_sequence", Verification: "ack",
+			MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "delay_s", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 				{Name: "duration_s", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 			}},
 		ControlAction{ID: "set_discharge_time_limit", Version: 1, Name: "设置放电时限",
 			Description: "FB 写入放电使能+时限(天)；到期自动断开放电",
-			Semantics:   "set", Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "ack",
-			AtMostOnce: true, MaxSteps: 2, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "FB 放电时限帧真机响应未冻结；远程断电语义需产品审批",
+			Semantics:   "set", Enabled: true, Risk: "critical", ExecutionShape: "bounded_sequence", Verification: "ack",
+			AtMostOnce: true, MaxSteps: 2,
 			Parameters: []ControlParameter{
 				{Name: "enabled", Type: "boolean", Required: true},
 				{Name: "days", Type: "integer", Required: true, Minimum: floatPtr(0), Maximum: floatPtr(65535)},
 			}},
 		ControlAction{ID: "write_sn", Version: 1, Name: "写入 SN 码",
 			Description: "进工厂→写 SN(ASCII,≤31 字符)→退出工厂",
-			Semantics:   "set", Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
-			AtMostOnce: true, MaxSteps: 4, AvailabilityCode: "protocol_unverified",
-			AvailabilityReason: "SN 写帧真机响应未冻结",
+			Semantics:   "set", Enabled: true, Risk: "high", ExecutionShape: "bounded_sequence", Verification: "readback",
+			AtMostOnce: true, MaxSteps: 4,
 			Parameters: []ControlParameter{
 				{Name: "sn", Type: "string", Required: true, MinLength: uint32Ptr(1), MaxLength: uint32Ptr(31)},
 			}},
@@ -186,8 +178,23 @@ func (d *JiabaidaBMSDriver) ControlActions() []ControlAction {
 
 func uint32Ptr(v uint32) *uint32 { return &v }
 
+// jiabaidaReadAction builds a low-risk single-step read.
+//
+// Enabled is true (2026-09-23): these frames are already exercised continuously
+// by the telemetry poller through the very same ChannelCmdV2 single-step path,
+// so exposing them as manual operations adds no new protocol risk.  A read
+// performs no write, and a peripheral that does not answer yields a timeout
+// (surfaced as a failed execution) rather than a corrupted BMS state.
+//
+// This does NOT loosen the fail-closed write gate: set/reset actions are gated
+// independently in deviceaction (they require a verifier + a declared
+// Verification and no AvailabilityCode).  The two factory-mode reads
+// (read_protection_parameters / read_system_parameters) were enabled on
+// 2026-09-23 together with the 16 writes.  They are NOT covered by that
+// recomputation (semantics=="read" passes the literal Enabled straight through),
+// which is exactly why each of them now carries an explicit Enabled: true.
 func jiabaidaReadAction(id, name string, tx []byte, readSize uint32, description string) ControlAction {
-	return ControlAction{ID: id, Version: 1, Name: name, Description: description, Semantics: "read", Risk: "low", Enabled: false,
+	return ControlAction{ID: id, Version: 1, Name: name, Description: description, Semantics: "read", Risk: "low", Enabled: true,
 		TXData: append([]byte(nil), tx...), ReadSize: readSize, RXTimeoutMS: 1000}
 }
 
@@ -762,9 +769,14 @@ func (d *JiabaidaBMSDriver) VerifyControlAction(actionID string, params json.Raw
 	if string(params) != "{}" {
 		return nil, fmt.Errorf("jiabaida action %q does not accept parameters", actionID)
 	}
+	// Single-step reads: every enabled manual read must appear here or the
+	// command reaches the device and is answered, yet verification reports
+	// "unknown control action" and the execution fails after a real round-trip.
+	// Keep this table in lockstep with jiabaidaReadAction/ControlActions.
 	expected, ok := map[string]byte{
 		"read_basic_info": 0x03, "read_cell_voltage": 0x04, "read_hardware_version": 0x05,
 		"read_comprehensive": 0x0F, "read_protection_count": 0xAA,
+		"read_test_mos_status": 0x0C, "read_custom_attributes": 0xF0,
 	}[actionID]
 	if !ok {
 		return nil, fmt.Errorf("unknown jiabaida control action %q", actionID)
@@ -899,6 +911,29 @@ func (d *JiabaidaBMSDriver) verifyExtendedBatchActions(actionID string, params j
 		readback, err := d.ParseData(steps[1])
 		if err != nil {
 			return nil, true, fmt.Errorf("jiabaida %s readback: %w", actionID, err)
+		}
+		// The readback must be RECONCILED, not merely parsed.  parse0x0C yields
+		// the two MOS test states (0=untested, 1=OK, 2=NG, 3=timeout); a
+		// parse-only check accepted a device reporting NG or timeout as success,
+		// so a failed MOS test looked like a passing one.  The MOS under test
+		// must report exactly 1.
+		wantName := "charge_mos_test_status"
+		if actionID == "test_discharge_mos" {
+			wantName = "discharge_mos_test_status"
+		}
+		var got *float64
+		for i := range readback {
+			if readback[i].Name == wantName {
+				v := readback[i].Value
+				got = &v
+				break
+			}
+		}
+		if got == nil {
+			return nil, true, fmt.Errorf("jiabaida %s readback: %s missing from response", actionID, wantName)
+		}
+		if *got != 1 {
+			return nil, true, fmt.Errorf("jiabaida %s readback mismatch: %s=%.0f want 1 (0=untested 1=OK 2=NG 3=timeout)", actionID, wantName, *got)
 		}
 		return append([]SensorData{{Name: "test_ack", Value: 1, Unit: "ack"}}, readback...), true, nil
 	case "force_balance", "find_car", "clear_alarm", "auto_test_edv",

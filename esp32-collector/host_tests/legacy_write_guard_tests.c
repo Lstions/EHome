@@ -34,7 +34,14 @@ int main(void)
     CHECK(!legacy_write_route_valid(LEGACY_WRITE_BUS_UART, 3), "invalid UART route accepted");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_I2C, 0), "I2C rejected");
     CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_SPI, 0), "SPI rejected");
-    CHECK(!legacy_write_route_valid(4, 0), "unsupported bus accepted");
+    /* USB is a legitimate write route as of the native-USB data bus work.  It
+     * has no uart_port to validate, so any value must be accepted -- the old
+     * assertion here used the literal 4 as "unsupported", which is now USB. */
+    CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_USB, 0), "USB rejected");
+    CHECK(legacy_write_route_valid(LEGACY_WRITE_BUS_USB, -1), "USB rejected for unset port");
+    /* 5 is still not a bus type (ADC is a peripheral, not a transport). */
+    CHECK(!legacy_write_route_valid(5, 0), "unsupported bus accepted");
+    CHECK(!legacy_write_route_valid(0, 0), "bus type zero accepted");
     puts("legacy_write_guard_tests: all tests passed");
     return 0;
 }

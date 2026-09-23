@@ -198,7 +198,19 @@ static inline BaseType_t xQueueAddToSet(QueueHandle_t queue, QueueSetHandle_t se
     if (!queue || !set) return pdFAIL;
     host_queue_t *q = (host_queue_t *)queue;
     host_queue_set_t *s = (host_queue_set_t *)set;
-    if (q->set_container != NULL || s->member_count >= MAX_QUEUE_SET_MEMBERS)
+    /* Mirror the REAL kernel's two rejection conditions
+     * (FreeRTOS-Kernel/queue.c, xQueueAddToSet):
+     *   1. the queue already belongs to another set;
+     *   2. the queue is NOT EMPTY.
+     *
+     * Condition 2 was missing here, which made this stub strictly weaker than
+     * the kernel it stands in for.  That is why the whole host-test suite stayed
+     * green while a real device had a permanently unreadable UART: the production
+     * failure mode (attach refused because an RX ISR had already enqueued a byte)
+     * was simply not representable in tests.  A stub that cannot fail the way the
+     * kernel fails is a false-green machine. */
+    if (q->set_container != NULL || q->count != 0 ||
+        s->member_count >= MAX_QUEUE_SET_MEMBERS)
         return pdFAIL;
     s->members[s->member_count++] = queue;
     q->set_container = s;

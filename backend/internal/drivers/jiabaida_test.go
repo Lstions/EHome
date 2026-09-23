@@ -572,7 +572,14 @@ func TestJiabaidaPublicTemplatesAreReadOnly(t *testing.T) {
 	}
 }
 
-func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
+// TestJiabaidaControlActionCatalog pins the whole jiabaida action catalogue.
+//
+// 2026-09-23 (T1)：原本 18 个动作挂在 AvailabilityCode="protocol_unverified" 后面
+// 保持 fail-closed；本轮解除该门禁，26 个动作全部 Enabled。本测试随之把
+// 「断言被门禁挡住」换成「断言已启用且结构未变」—— 即 ExecutionShape 与
+// Verification 仍逐条钉死（这两项是启用后真正的安全契约：写操作必须声明对账
+// 语义，且必须走 bounded_sequence 计划）。
+func TestJiabaidaControlActionCatalog(t *testing.T) {
 	d := &JiabaidaBMSDriver{}
 	var _ ControlActionProvider = d
 	var _ ControlActionVerifier = d
@@ -598,15 +605,26 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 			continue
 		}
 		if action.ID == "read_protection_parameters" || action.ID == "read_system_parameters" || action.ID == "bms_restart" {
-			if action.Enabled || action.AvailabilityCode == "" {
-				t.Fatalf("guarded action became available: %+v", action)
+			// 2026-09-23 (T1): the protocol_unverified gate was lifted, so these
+			// three are now enabled. Structure is still pinned: the two factory
+			// reads are bounded_sequence/readback, the restart is
+			// bounded_sequence/observation (ACK alone must never prove success).
+			wantShape, wantVerification := "bounded_sequence", "readback"
+			if action.ID == "bms_restart" {
+				wantVerification = "observation"
+			}
+			if !action.Enabled || action.AvailabilityCode != "" ||
+				action.ExecutionShape != wantShape || action.Verification != wantVerification {
+				t.Fatalf("formerly guarded action must now be enabled with intact structure: %+v", action)
 			}
 			continue
 		}
-		// The V19 write/factory-mode actions added 2026-08-16 are catalog-visible
-		// but stay fail-closed behind protocol_unverified until real-device
-		// evidence exists.  None may ship Enabled, and each keeps its declared
-		// verification semantics.
+		// The V19 write/factory-mode actions added 2026-08-16 were catalog-visible
+		// but fail-closed behind protocol_unverified.  2026-09-23 (T1) lifted that
+		// gate, so every one of them must now be Enabled.  The structural
+		// contract is unchanged and still pinned per action: each keeps its
+		// declared bounded_sequence shape and verification semantics, and none
+		// may retain an AvailabilityCode (which would silently re-gate it).
 		guardedWrites := map[string]struct{ shape, verification string }{
 			"write_protection_parameters": {"bounded_sequence", "readback"},
 			"write_system_parameters":     {"bounded_sequence", "readback"},
@@ -625,13 +643,15 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 			"write_sn":                    {"bounded_sequence", "readback"},
 		}
 		if wantShape, ok := guardedWrites[action.ID]; ok {
-			if action.Enabled || action.AvailabilityCode == "" || action.ExecutionShape != wantShape.shape || action.Verification != wantShape.verification {
-				t.Fatalf("guarded write action lost its fail-closed gate: %+v", action)
+			if !action.Enabled || action.AvailabilityCode != "" || action.ExecutionShape != wantShape.shape || action.Verification != wantShape.verification {
+				t.Fatalf("formerly guarded write action is not enabled with intact structure: %+v", action)
 			}
 			continue
 		}
 		if action.ID == "read_test_mos_status" || action.ID == "read_custom_attributes" {
-			if action.Enabled || action.Semantics != "read" || action.Risk != "low" || len(action.TXData) == 0 || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
+			// Manual reads are enabled (2026-09-23): they ride the same verified
+			// single-step telemetry path and perform no write.
+			if !action.Enabled || action.AvailabilityCode != "" || action.Semantics != "read" || action.Risk != "low" || len(action.TXData) == 0 || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
 				t.Fatalf("unsafe or malformed extended read action %+v", action)
 			}
 			continue
@@ -640,13 +660,111 @@ func TestJiabaidaControlActionsAreDisabledReads(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected action %q", action.ID)
 		}
-		if action.Enabled || action.Semantics != "read" || action.Risk != "low" || string(action.TXData) != string(frame) || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
+		// Manual reads are enabled (2026-09-23).  The safety property that
+		// matters here is structural: exact frozen TX frame, a read window, a
+		// timeout, no AvailabilityCode, and read/low-risk semantics.  The gate
+		// that must stay fail-closed is the WRITE gate, asserted above.
+		if !action.Enabled || action.AvailabilityCode != "" || action.Semantics != "read" || action.Risk != "low" || string(action.TXData) != string(frame) || action.ReadSize == 0 || action.RXTimeoutMS == 0 {
 			t.Fatalf("unsafe or malformed action %+v", action)
 		}
 		delete(want, action.ID)
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing actions: %v", want)
+	}
+}
+
+// TestJiabaidaFormerlyGuardedActionsAreEnabledAtDriverLayer pins the 18 actions
+// whose protocol_unverified gate was lifted on 2026-09-23 (T1).
+//
+// 为什么必须断言**驱动字面量**而不是 deviceaction 层：
+// deviceaction/definition.go 的默认启用重算只覆盖 set/reset —— 它会把这两个
+// 语义的 Enabled 直接改写为 true（只要 verifier/Verification/AvailabilityCode
+// 满足）。于是"驱动层没写 Enabled: true"这种缺陷会被重算**掩盖**，在
+// deviceaction 层看起来一切正常；只有 read 语义会暴露（它沿用字面量）。
+// 本测试把 18 个动作的字面量状态逐个钉死，使下面两类回归立即变红：
+//  1. 有人重新加上 AvailabilityCode → 该动作被静默重新门禁；
+//  2. 有人删掉 read_protection_parameters / read_system_parameters 的
+//     Enabled: true → 这两条会静默变回 disabled（且 deviceaction 层同样
+//     disabled，因为 read 不走重算）。
+func TestJiabaidaFormerlyGuardedActionsAreEnabledAtDriverLayer(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	// 18 个动作：2026-09-23 前全部挂在 AvailabilityCode="protocol_unverified" 后。
+	formerlyGuarded := []string{
+		"read_protection_parameters", "read_system_parameters", "bms_restart",
+		"write_protection_parameters", "write_system_parameters", "test_charge_mos",
+		"test_discharge_mos", "force_balance", "find_car", "clear_alarm",
+		"auto_test_edv", "write_custom_attributes", "write_internal_resistance",
+		"set_static_correction_time", "set_report_interval", "set_charge_time_window",
+		"set_discharge_time_limit", "write_sn",
+	}
+	if len(formerlyGuarded) != 18 {
+		t.Fatalf("denominator drift: want 18 formerly guarded actions, got %d", len(formerlyGuarded))
+	}
+	byID := map[string]ControlAction{}
+	for _, action := range d.ControlActions() {
+		byID[action.ID] = action
+	}
+	if len(byID) != 26 {
+		t.Fatalf("want 26 jiabaida control actions, got %d", len(byID))
+	}
+	for _, id := range formerlyGuarded {
+		action, ok := byID[id]
+		if !ok {
+			t.Fatalf("formerly guarded action %q vanished from the catalogue", id)
+		}
+		if !action.Enabled {
+			t.Errorf("%s: driver literal Enabled=false; deviceaction only recomputes set/reset, so this action is not actually reachable", id)
+		}
+		if action.AvailabilityCode != "" {
+			t.Errorf("%s: AvailabilityCode=%q silently re-gates a formerly enabled action", id, action.AvailabilityCode)
+		}
+		if action.ExecutionShape != "bounded_sequence" || action.Verification == "" {
+			t.Errorf("%s: lost its bounded/verified shape: %+v", id, action)
+		}
+	}
+	// 其余 8 个（5 个单步读 + set_mos_policy + 2 个扩展读）也必须仍然启用。
+	for _, id := range []string{"read_basic_info", "read_cell_voltage", "read_hardware_version",
+		"read_comprehensive", "read_protection_count", "read_test_mos_status",
+		"read_custom_attributes", "set_mos_policy"} {
+		action, ok := byID[id]
+		if !ok {
+			t.Fatalf("previously enabled action %q vanished", id)
+		}
+		if !action.Enabled || action.AvailabilityCode != "" {
+			t.Errorf("%s regressed out of the enabled set: %+v", id, action)
+		}
+	}
+}
+
+// TestJiabaidaEnabledSingleStepReadsAreVerifiable guards the drift that shipped
+// 2026-09-23: read_test_mos_status and read_custom_attributes were enabled in
+// the catalogue but missing from VerifyControlAction's command table, so each
+// execution performed a real USB round-trip and then failed with "unknown
+// jiabaida control action" -- a green-looking physical path with a red result.
+// Every enabled single-step read must be verifiable against its own frozen TX
+// frame, so adding a read to the catalogue without teaching the verifier about
+// its response command fails here instead of in production.
+func TestJiabaidaEnabledSingleStepReadsAreVerifiable(t *testing.T) {
+	d := &JiabaidaBMSDriver{}
+	for _, action := range d.ControlActions() {
+		if !action.Enabled || action.Semantics != "read" ||
+			action.ExecutionShape == "bounded_sequence" || len(action.TXData) < 3 {
+			continue
+		}
+		cmd := action.TXData[2]
+		// A frame carrying zero DATA bytes.  The verifier MUST bind the response
+		// command before parsing, so the only acceptable failure here is a
+		// data-shortage error from the command-specific parser -- never the
+		// "unknown control action" drift this test exists to catch.
+		raw := []byte{0xDD, cmd, 0x00, 0x00, 0x00, 0x00, 0x77}
+		_, err := d.VerifyControlAction(action.ID, json.RawMessage("{}"), raw)
+		if err == nil {
+			continue // parser tolerated the empty payload too
+		}
+		if strings.Contains(err.Error(), "unknown jiabaida control action") {
+			t.Errorf("enabled read %q has no verifier binding (catalogue/verifier drift): %v", action.ID, err)
+		}
 	}
 }
 
@@ -940,6 +1058,21 @@ func jiabaidaMOSEnvelope(t *testing.T, ack []byte, fet byte) []byte {
 // parseable follow-up sample (mirrors the MOS policy verifier semantics).
 func jiabaidaHardwareVersionReadback() []byte {
 	return []byte{0xDD, 0x05, 0x00, 0x03, 'V', '1', '9', 0xFF, 0x3D, 0x77}
+}
+
+// jiabaidaMOSStatusReadback builds a 0x0C response whose tested MOS reports OK.
+// parse0x0C reads DATA as [discharge_test_status, charge_test_status] with
+// 0=untested 1=OK 2=NG 3=timeout, so the tested side is the one under test.
+func jiabaidaMOSStatusReadback(tested byte) []byte {
+	discharge, charge := byte(0), byte(0)
+	if tested == 0x02 {
+		discharge = 1
+	} else {
+		charge = 1
+	}
+	body := []byte{0x02, discharge, charge}
+	ck := jiabaidaChecksum(body)
+	return []byte{0xDD, 0x0C, 0x00, body[0], body[1], body[2], byte(ck >> 8), byte(ck), 0x77}
 }
 
 func jiabaidaF2TestParams(t *testing.T) json.RawMessage {
@@ -1400,8 +1533,15 @@ func TestJiabaidaSimpleSetterPlansAndVerifier(t *testing.T) {
 			string(frame[4:4+len(tc.data)]) != string(tc.data) || !verifyJiabaidaChecksum(frame) {
 			t.Fatalf("%s write frame = % X, want cmd %02X data % X", tc.action, frame, tc.cmd, tc.data)
 		}
-		// Verifier: ACK for the setter cmd plus a parseable readback sample.
-		envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(tc.cmd), jiabaidaHardwareVersionReadback())
+		// Verifier: ACK for the setter cmd plus the readback the action actually
+		// reconciles.  test_charge_mos / test_discharge_mos read 0x0C and require
+		// the tested MOS to report 1 (OK), so a generic sample would not exercise
+		// the reconciliation those actions promise.
+		readback := jiabaidaHardwareVersionReadback()
+		if tc.cmd == 0x0C {
+			readback = jiabaidaMOSStatusReadback(tc.data[1])
+		}
+		envelope := jiabaidaTestEnvelope(t, jiabaidaZeroAck(tc.cmd), readback)
 		data, err := d.VerifyControlAction(tc.action, json.RawMessage(tc.params), envelope)
 		if err != nil {
 			t.Fatalf("VerifyControlAction(%s) error = %v", tc.action, err)
@@ -1438,6 +1578,27 @@ func TestJiabaidaTestMOSReadbackSurfacesStatus(t *testing.T) {
 	}
 	if got["discharge_mos_test_status"] != 2 || got["charge_mos_test_status"] != 1 {
 		t.Fatalf("MOS test readback = %+v", got)
+	}
+
+	// Reconciliation, not mere parsing: the MOS under test must report 1 (OK).
+	// Before 2026-09-23 the verifier only parsed the frame, so a device
+	// reporting NG (2) or timeout (3) was accepted as a successful test.
+	for _, bad := range []struct {
+		name   string
+		action string
+		data   []byte
+	}{
+		{"charge reports NG", "test_charge_mos", []byte{0x00, 0x02}},
+		{"charge reports timeout", "test_charge_mos", []byte{0x00, 0x03}},
+		{"charge never tested", "test_charge_mos", []byte{0x00, 0x00}},
+		{"discharge reports NG", "test_discharge_mos", []byte{0x02, 0x00}},
+		{"discharge never tested", "test_discharge_mos", []byte{0x00, 0x00}},
+	} {
+		rb := jiabaidaTestResponse(t, 0x0C, bad.data)
+		env := jiabaidaTestEnvelope(t, jiabaidaZeroAck(0x0C), rb)
+		if _, err := d.VerifyControlAction(bad.action, json.RawMessage("{}"), env); err == nil {
+			t.Errorf("%s: %s must fail verification", bad.action, bad.name)
+		}
 	}
 }
 

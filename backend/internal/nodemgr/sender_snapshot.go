@@ -279,11 +279,17 @@ func encodeConfigManifest(snap *manifestSnapshot, channels []models.Channel, use
 
 		subEnc.EncodeBool(5, ch.Enabled)
 
-		// Bus type
+		// Bus type — these numbers are the firmware's BUS_TYPE_* values and must
+		// stay in lockstep with esp32-collector/components/bus_dma/include/bus_dma.h.
+		// A type missing here is silently encoded as nothing (field omitted, firmware
+		// sees 0 = unknown), which is why USB had to be added alongside its driver.
 		busTypeMap := map[string]uint8{
 			"UART": 1, "1": 1,
 			"I2C": 2, "2": 2,
 			"SPI": 3, "3": 3,
+			// USB is string-only: "4" is not accepted as an alias anywhere on this
+			// path either, because legacy numeric channels reuse 4 for GPIO.
+			"USB": 4,
 			"ADC": 5, "5": 5,
 		}
 		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {

@@ -58,6 +58,10 @@ static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t
         if (bcmd->uart_port == UART_NUM_1) return q->uart1_cmd_queue;
         if (bcmd->uart_port == UART_NUM_2) return q->uart2_cmd_queue;
         return NULL;
+    /* USB samples ride the UART0 worker pair: uart_cmd_loop resolves the target
+     * context by channel_id, so no new worker or queue is required.  See the
+     * matching routing comment in bus_manager. */
+    case BUS_TYPE_USB:  return q->uart0_cmd_queue;
     case BUS_TYPE_SPI:  return q->spi_cmd_queue;
     case BUS_TYPE_I2C:  return q->i2c_cmd_queue;
     default:            return q->uart0_cmd_queue;
@@ -86,6 +90,9 @@ static int queue_metric_index(const bus_cmd_t *cmd)
         if (cmd->uart_port == UART_NUM_1) return SCHED_Q_UART1;
         if (cmd->uart_port == UART_NUM_2) return SCHED_Q_UART2;
         return -1;
+    /* USB shares the UART0 worker, so it accounts under the UART0 queue metric
+     * instead of a new index (which would change the metrics payload). */
+    case BUS_TYPE_USB: return SCHED_Q_UART0;
     case BUS_TYPE_SPI: return SCHED_Q_SPI;
     case BUS_TYPE_I2C: return SCHED_Q_I2C;
     default: return -1;

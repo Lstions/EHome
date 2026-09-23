@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "2.5.21")
+set(PROJECT_VER "2.5.26")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Component Manager lock files contain the selected target. Keep them alongside

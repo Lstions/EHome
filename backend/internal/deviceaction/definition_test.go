@@ -64,6 +64,58 @@ func TestBuiltInReadActionStartsDisabledUntilHardwareGate(t *testing.T) {
 	}
 }
 
+// TestCurrentEngineAllowsMultiStepReads pins the gate hole fixed 2026-09-23:
+// a read whose plan is bounded_sequence (enter protected mode -> read -> leave)
+// matched neither the single-step read branch nor the set/reset branch, so it
+// was rejected as "requires the future high-risk command engine".  The two
+// jiabaida factory-mode reads are exactly this shape and were unavailable in
+// the catalog while every other action worked.
+func TestCurrentEngineAllowsMultiStepReads(t *testing.T) {
+	base := Definition{
+		ID: "read_block", Semantics: "read", Risk: "medium",
+		ExecutionShape: "bounded_sequence", Verification: "readback",
+		Transport: ChannelCmdV2Adapter,
+	}
+	withVerifier := base
+	withVerifier.verifier = func(json.RawMessage, []byte) ([]drivers.SensorData, error) { return nil, nil }
+
+	if !CurrentEngineAllows(withVerifier) {
+		t.Error("bounded multi-step readback-verified read must be allowed")
+	}
+
+	// Every escape hatch must independently re-close the gate.
+	cases := []struct {
+		name string
+		mut  func(d Definition) Definition
+	}{
+		{"no verifier", func(d Definition) Definition { d.verifier = nil; return d }},
+		{"not readback", func(d Definition) Definition { d.Verification = "ack"; return d }},
+		{"at most once", func(d Definition) Definition { d.AtMostOnce = true; return d }},
+		{"single step but not low risk", func(d Definition) Definition {
+			d.ExecutionShape, d.Risk = "single", "high"
+			return d
+		}},
+	}
+	for _, tc := range cases {
+		if CurrentEngineAllows(tc.mut(withVerifier)) {
+			t.Errorf("%s: gate must stay closed", tc.name)
+		}
+	}
+
+	// The real catalogue must expose both factory-mode reads through this gate.
+	registry := NewBuiltInRegistry(nil)
+	for _, id := range []string{"read_protection_parameters", "read_system_parameters"} {
+		def, ok := registry.Get("jiabaida_bms", id)
+		if !ok {
+			t.Fatalf("%s missing from catalogue", id)
+		}
+		if !CurrentEngineAllows(def) {
+			t.Errorf("%s must pass the engine gate: shape=%s semantics=%s verification=%s verifier=%v",
+				id, def.ExecutionShape, def.Semantics, def.Verification, def.verifier != nil)
+		}
+	}
+}
+
 func TestTechfineReadActionsExcludeUnverifiedWrites(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definitions := registry.List("techfine_inverter")
@@ -91,13 +143,44 @@ func TestSetActionRequiresTrustedVerifier(t *testing.T) {
 func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definitions := registry.List("jiabaida_bms")
-	if len(definitions) < 8 {
-		t.Fatalf("got %d Jiabaida actions, want read actions plus guarded capabilities: %+v", len(definitions), definitions)
+	// T1 (2026-09-23): the catalogue is pinned at exactly 26 actions, all enabled.
+	// A loose lower bound would let an action disappear unnoticed; an exact count
+	// plus the per-action asserts below make both "vanished" and "silently
+	// re-gated" fail here instead of in production.
+	if len(definitions) != 26 {
+		t.Fatalf("got %d Jiabaida actions, want exactly 26: %+v", len(definitions), definitions)
 	}
+	// Every jiabaida action must be reachable: no AvailabilityCode may survive,
+	// and Enabled must be true.  (deviceaction recomputes Enabled for set/reset
+	// only; read actions pass their driver literal through unchanged, which is
+	// why this layer alone is not sufficient evidence -- see the driver-level
+	// TestJiabaidaFormerlyGuardedActionsAreEnabledAtDriverLayer.)
+	enabledCount, withAvailability := 0, 0
+	for _, definition := range definitions {
+		if !definition.Enabled {
+			t.Fatalf("jiabaida action %q is not enabled: %+v", definition.ID, definition)
+		}
+		if definition.AvailabilityCode != "" {
+			t.Fatalf("jiabaida action %q still carries AvailabilityCode=%q: %+v", definition.ID, definition.AvailabilityCode, definition)
+		}
+		enabledCount++
+		if definition.AvailabilityCode != "" {
+			withAvailability++
+		}
+		// Reproducible per-action statistics: run with -v to print the whole
+		// enabled set (used to report the T1 rollout denominator).
+		t.Logf("jiabaida action %-32s semantics=%-6s enabled=%v availability=%q shape=%s verification=%s",
+			definition.ID, definition.Semantics, definition.Enabled, definition.AvailabilityCode,
+			definition.ExecutionShape, definition.Verification)
+	}
+	t.Logf("STATISTICS: definitions=%d enabled=%d withAvailabilityCode=%d", len(definitions), enabledCount, withAvailability)
 	var mos, restart bool
-	// V19 write/test capabilities that may appear in the catalog ONLY as
-	// fail-closed guarded entries (Enabled=false + AvailabilityCode) until
-	// real-device evidence is frozen.  Any other non-read action leaks an
+	// V19 write/test capabilities.  Until 2026-09-23 these were guarded
+	// fail-closed entries (Enabled=false + AvailabilityCode="protocol_unverified");
+	// T1 lifted that gate, so every one of them must now be Enabled with NO
+	// AvailabilityCode.  The guard that remains is structural: each must still
+	// declare the bounded_sequence execution shape, and at-most-once ones must
+	// still carry high/critical risk.  Any other non-read action would leak an
 	// unverified BMS write.
 	guardedWrites := map[string]bool{
 		"read_protection_parameters": true, "read_system_parameters": true,
@@ -118,13 +201,16 @@ func TestJiabaidaReadActionsExcludeBMSWrites(t *testing.T) {
 		}
 		if definition.ID == "bms_restart" {
 			restart = true
-			if definition.Enabled || definition.Risk != "critical" || definition.Verification != "observation" {
-				t.Fatalf("BMS restart must be guarded critical action: %+v", definition)
+			// T1 (2026-09-23) lifted the protocol_unverified gate, so restart is
+			// now enabled.  Risk and Verification stay pinned: restart is the one
+			// critical action whose success may NOT be inferred from an ACK.
+			if !definition.Enabled || definition.Risk != "critical" || definition.Verification != "observation" {
+				t.Fatalf("BMS restart must be enabled critical observation action: %+v", definition)
 			}
 		}
 		if guardedWrites[definition.ID] {
-			if definition.Enabled || definition.AvailabilityCode == "" || definition.ExecutionShape != "bounded_sequence" {
-				t.Fatalf("V19 write capability must stay fail-closed bounded: %+v", definition)
+			if !definition.Enabled || definition.AvailabilityCode != "" || definition.ExecutionShape != "bounded_sequence" {
+				t.Fatalf("V19 write capability must be enabled and bounded: %+v", definition)
 			}
 			if definition.AtMostOnce && definition.Risk != "high" && definition.Risk != "critical" {
 				t.Fatalf("at-most-once capability %q must be high/critical risk: %+v", definition.ID, definition)

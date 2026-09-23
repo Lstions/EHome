@@ -84,6 +84,7 @@ esp_err_t bus_dma_transact(bus_dma_ctx_t *ctx, const uint8_t *tx, size_t tx_len,
     return ESP_OK;
 }
 QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx) { (void)ctx; return NULL; }
+esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) { (void)ctx; return ESP_OK; }
 
 /* ---- semaphore stubs (freertos/semphr.h declares but does not define) ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }

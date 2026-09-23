@@ -47,6 +47,14 @@ func normalizedManifestBusType(value string) (string, bool, bool) {
 		return "GPIO", true, true
 	case "ADC", "5":
 		return "ADC", true, false
+	// USB: ESP32-C6 native USB (USB-Serial-JTAG / USB-CDC) used as a data bus,
+	// firmware BUS_TYPE_USB. Deliberately string-only: the firmware bus_type
+	// numbering (UART=1, I2C=2, SPI=3, USB=4, ADC=5, PWM=6, GPIO=7) is NOT the
+	// legacy numbered alias set this function accepts (here "4" = GPIO), so any
+	// numeric alias for USB would collide with an existing meaning on the wire.
+	// Peripheral=false: USB is a transport, never a GPIO/PWM resource.
+	case "USB":
+		return "USB", true, false
 	case "PWM", "6":
 		return "PWM", true, true
 	default:
@@ -80,6 +88,15 @@ func decodeManifestTransportPins(ch models.Channel, busType string) ([]int, erro
 		}
 		return pins, nil
 	case "ADC":
+		return nil, nil
+	// USB carries no GPIO route: a CDC/JTAG data bus has no tx/rx pins and no
+	// baudrate, so there is nothing for the pin-authority check to claim.
+	// bus_config may therefore be empty OR any length — a host-side length gate
+	// here would only reject manifests the collector accepts (config_mgr's
+	// channel_uses_pin returns false for unknown bus types, and
+	// bus_config_get_dma_enabled defaults to true). Non-hex text is still
+	// rejected by the decode above, exactly as for every other bus type.
+	case "USB":
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("enabled channel %d has unsupported bus type %q", ch.ID, ch.BusType)

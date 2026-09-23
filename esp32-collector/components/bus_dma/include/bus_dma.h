@@ -34,6 +34,22 @@ extern "C" {
 #define BUS_TYPE_UART  1
 #define BUS_TYPE_I2C   2
 #define BUS_TYPE_SPI   3
+/* Native USB Serial/JTAG used as a DATA bus (ESP32-C6 internal USB, GPIO12/13).
+ *
+ * Deliberately a separate type rather than "a UART with no pins": USB-Serial-JTAG
+ * is not a UART controller.  It has no baud rate and no TX/RX GPIO to lease, and
+ * it is driven by its own IDF driver.  Modelling it as UART would make the
+ * resource planner lease a UART controller and report phantom pins -- the same
+ * class of "resource report and runtime routing disagree" bug this file already
+ * documents for UART0 in uart_init().
+ *
+ * bus_config is empty for this type: there is nothing to encode.  Only USB
+ * accepts a zero-length config.
+ *
+ * It shares the physical USB endpoint with the console.  ESP-IDF supports that:
+ * usb_serial_jtag_vfs_use_driver() routes console reads/writes through the same
+ * driver, so logs and sensor traffic coexist. */
+#define BUS_TYPE_USB   4
 
 /* === Bus config helper === */
 
@@ -58,6 +74,10 @@ static inline bool bus_config_get_dma_enabled(uint8_t bus_type,
     case BUS_TYPE_UART: flags_offset = 6; min_len = 7;  break;
     case BUS_TYPE_I2C:  flags_offset = 7; min_len = 8;  break;
     case BUS_TYPE_SPI:  flags_offset = 6; min_len = 7;  break;
+    /* USB has no DMA flag: the USB peripheral owns its own packet buffers and
+     * there is no bus_config to read.  Report "DMA enabled" so a caller that
+     * treats this as "use the large buffers" gets the streaming behaviour. */
+    case BUS_TYPE_USB:  return true;
     default: return true;
     }
 
@@ -75,7 +95,10 @@ typedef struct {
      * normal capability/default-pin allocation policy. */
     int32_t preferred_controller;
     SemaphoreHandle_t tx_mutex;
-    /* UART RX uses the driver event queue for both DMA and non-DMA paths. */
+    /* RX event queue for the STREAM buses (UART and USB).  Both deliver
+     * uart_event_t-shaped notifications to the worker, so rx_task has a single
+     * wait path.  The name is kept for source compatibility with the host tests
+     * and the existing UART plumbing. */
     QueueHandle_t uart_event_queue;
 
     union {
@@ -105,6 +128,11 @@ typedef struct {
             int        sda_pin;
             int        scl_pin;
         } i2c;
+        struct {
+            /* USB-Serial-JTAG has no pin, port or baud.  Only a lease count,
+             * because several logical channels may share the one endpoint. */
+            uint32_t ref_count;
+        } usb;
     } cfg;
 } bus_dma_ctx_t;
 
@@ -146,8 +174,17 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len);
  */
 size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size);
 
-/** Return the UART driver event queue owned by this initialized context. */
+/** Return the stream-bus driver event queue owned by this context (UART/USB). */
 QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx);
+
+/**
+ * @brief Discard any bytes already buffered by the transport.
+ *
+ * Exists because caller code used to reach into cfg.uart.port directly, which is
+ * a union: on a USB context that reads the USB member as a UART port number and
+ * flushes an unrelated (or invalid) peripheral.
+ */
+esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx);
 
 /* ==================================================================
  *  SPI / I2C: transactional (write then read, atomic)

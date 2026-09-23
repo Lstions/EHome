@@ -447,6 +447,21 @@ func CurrentEngineAllows(def Definition) bool {
 	if def.ExecutionShape == "single" && def.Semantics == "read" && def.Risk == "low" && !def.AtMostOnce {
 		return true
 	}
+	// Multi-step reads were a hole in this gate.  A read that needs a workflow
+	// (entering a protected mode, reading a parameter block, leaving it) is
+	// neither the single-step low-risk read above nor a set/reset below, so it
+	// fell through to false and was advertised as "requires the future
+	// high-risk command engine" even though it persists nothing and its plan is
+	// bounded and readback-verified.  The factory-mode reads are exactly this
+	// shape.
+	//
+	// The properties that make this safe are asserted, not assumed: bounded
+	// plan, readback verification, a real verifier, and not AtMostOnce (a read
+	// is repeatable, so an at-most-once read would be a modelling error).
+	if def.ExecutionShape == "bounded_sequence" && def.Semantics == "read" &&
+		def.Verification == "readback" && def.verifier != nil && !def.AtMostOnce {
+		return true
+	}
 	if def.Semantics == "reset" || def.Semantics == "set" {
 		// PeriphCmd single-step setters are confirmed by the PeriphRsp
 		// observation event (WS push), not by a driver readback verifier. The

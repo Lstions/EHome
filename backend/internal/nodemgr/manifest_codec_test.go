@@ -32,6 +32,13 @@ func TestNormalizedManifestBusType(t *testing.T) {
 		{"4", "GPIO", true, true},
 		{"ADC", "ADC", true, false},
 		{"5", "ADC", true, false},
+		// USB is accepted by name only. There is deliberately no numeric alias:
+		// "4" already means GPIO on this legacy path (firmware BUS_TYPE_USB==4
+		// is the *other* numbering, used only in the manifest's bus_type field).
+		{"USB", "USB", true, false},
+		{"usb", "USB", true, false},
+		{"  USB  ", "USB", true, false},
+		{"7", "", false, false},
 		{"PWM", "PWM", true, true},
 		{"6", "PWM", true, true},
 		{"UNKNOWN", "", false, false},
@@ -86,6 +93,46 @@ func TestDecodeManifestTransportPins(t *testing.T) {
 		pins, err := decodeManifestTransportPins(ch, "ADC")
 		if err != nil || pins != nil {
 			t.Fatalf("pins = %v err = %v, want nil/nil", pins, err)
+		}
+	})
+
+	// USB bus_config contract (2026-09-21): the native USB data bus has no
+	// tx/rx pins and no baudrate, so the whole bus_config is optional. The value
+	// the backend writes is the empty string ""; "{}" is also accepted (legacy
+	// channel rows carried JSON there). Both must yield an empty pin list and
+	// must NOT trip the UART/I2C "at least 2 bytes" gate — that gate must never
+	// be extended to USB, or the backend would reject manifests the collector
+	// accepts (config_mgr::channel_uses_pin returns false for a USB channel).
+	t.Run("USB no pins for empty bus_config", func(t *testing.T) {
+		ch := models.Channel{ID: 1, BusType: "USB", BusConfig: ""}
+		pins, err := decodeManifestTransportPins(ch, "USB")
+		if err != nil {
+			t.Fatalf("empty USB bus_config must be accepted, got err %v", err)
+		}
+		if len(pins) != 0 {
+			t.Fatalf("pins = %v, want empty (USB occupies no GPIO)", pins)
+		}
+	})
+
+	t.Run("USB any length accepted", func(t *testing.T) {
+		// 1 byte (< the UART/I2C minimum) and 9 bytes (the SPI length) must both
+		// be tolerated: USB pins nothing, so no length is "wrong".
+		for _, cfg := range []string{"00", "050000000000020304"} {
+			ch := models.Channel{ID: 1, BusType: "USB", BusConfig: cfg}
+			pins, err := decodeManifestTransportPins(ch, "USB")
+			if err != nil {
+				t.Fatalf("USB bus_config %q must be accepted, got err %v", cfg, err)
+			}
+			if len(pins) != 0 {
+				t.Fatalf("USB bus_config %q: pins = %v, want empty", cfg, pins)
+			}
+		}
+	})
+
+	t.Run("USB still rejects non-hex bus_config", func(t *testing.T) {
+		ch := models.Channel{ID: 1, BusType: "USB", BusConfig: "zz"}
+		if _, err := decodeManifestTransportPins(ch, "USB"); err == nil {
+			t.Fatal("expected malformed bus_config error for non-hex USB bus_config")
 		}
 	})
 

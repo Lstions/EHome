@@ -37,4 +37,22 @@ typedef uint32_t UBaseType_t;
 #define BIT5 (1U << 5)
 #endif
 
+/* Critical sections.  On the target these mask interrupts for the duration; on
+ * the host they exist so that code which serialises "drain a queue, then attach
+ * it to a set" against an ISR (see bus_worker.c rebuild_uart_event_set) can be
+ * compiled and exercised.  Host tests run single-threaded, so an empty body
+ * keeps the same observable semantics. */
+#ifndef portMUX_TYPE
+typedef int portMUX_TYPE;
+#endif
+#ifndef portMUX_INITIALIZER_UNLOCKED
+#define portMUX_INITIALIZER_UNLOCKED 0
+#endif
+#ifndef taskENTER_CRITICAL
+#define taskENTER_CRITICAL(mux) ((void)(mux))
+#endif
+#ifndef taskEXIT_CRITICAL
+#define taskEXIT_CRITICAL(mux) ((void)(mux))
+#endif
+
 #endif

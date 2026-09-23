@@ -96,6 +96,13 @@ func channelRoutePins(ch models.Channel) ([]int, error) {
 		return toInts(bytes[0], bytes[6], bytes[7], bytes[8]), nil
 	case "ADC":
 		return nil, nil
+	// USB (ESP32-C6 native USB-Serial-JTAG used as a data bus) routes no GPIO:
+	// there are no tx/rx pins, so no peripheral pin conflict can arise. Empty and
+	// arbitrary-length bus_config are both accepted here — the collector stores
+	// the bytes verbatim and derives nothing from them for a USB channel. A
+	// non-hex value is still rejected (via the encode error), as for every bus type.
+	case "USB":
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unsupported transport bus type %q", ch.BusType)
 	}

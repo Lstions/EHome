@@ -26,6 +26,10 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 #include <string.h>
 
 #define TAG "BUS_DMA"
@@ -589,6 +593,265 @@ static esp_err_t uart_deinit(bus_dma_ctx_t *ctx)
     }
     return err;
 }
+
+/* ------------------------------------------------------------------ */
+/*  USB Serial/JTAG as a DATA bus                                      */
+/*                                                                     */
+/*  The C6 internal USB endpoint is a virtual serial port whose rate is */
+/*  set by the host, so there is no baud/pin to configure and no UART   */
+/*  controller to lease.  We surface it through the SAME public shape   */
+/*  as UART so that bus_worker's stream RX path (event -> read ring ->  */
+/*  idle/read_size boundary) works unchanged.                           */
+/*                                                                     */
+/*  Two IDF facts this implementation depends on:                       */
+/*   1. usb_serial_jtag_driver_install() may be called even when the    */
+/*      console is USB-Serial-JTAG; it does not check CONFIG_ESP_CONSOLE.*/
+/*      (verified: no CONFIG_ESP_CONSOLE reference in usb_serial_jtag.c) */
+/*   2. usb_serial_jtag_vfs_use_driver() then routes console TX/RX      */
+/*      through that driver, so logs keep working on the same endpoint.  */
+/* ------------------------------------------------------------------ */
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+
+/* Reader task: the IDF driver has no event queue (unlike uart_driver_install).
+ * rx_task waits on a FreeRTOS queue set built from per-channel event queues, so
+ * we synthesise uart_event_t notifications from a dedicated pump.  This keeps a
+ * single RX wait path in bus_worker instead of teaching it a second one. */
+#define USB_TX_BUFFER_SIZE    512
+#define USB_RX_BUFFER_SIZE    1024
+#define USB_PUMP_TASK_STACK   3072
+#define USB_PUMP_TASK_PRIO    9
+#define USB_PUMP_READ_CHUNK   256
+#define USB_PUMP_IDLE_MS      10   /* poll period when idle (~1 kHz task rate is avoided) */
+
+/* The IDF USB-Serial-JTAG driver has no event queue, so we synthesise
+ * uart_event_t notifications with a pump task.  CRITICAL: the pump must also be
+ * the place the bytes come to rest, because usb_serial_jtag_read_bytes() CONSUMES
+ * them.  UART's contract is "notify, leave the payload in the ring"; if the pump
+ * consumed the bytes and only posted a notification, rx_task's later
+ * bus_dma_read() would find an empty ring and every response would look like a
+ * timeout.  So the pump appends into a ring buffer and bus_dma_read() drains
+ * that buffer instead of the driver. */
+typedef struct {
+    QueueHandle_t   event_queue;   /* synthesised uart_event_t sink */
+    volatile bool   stop;
+    TaskHandle_t    task;
+    uint8_t        *scratch;
+    /* Bytes already taken from the driver, waiting for rx_task.  Single producer
+     * (pump) / single consumer (rx_task) => the two counters are sufficient; no
+     * lock is needed because only the consumer advances rx_tail and only the
+     * producer advances rx_head. */
+    uint8_t        *ring;
+    volatile size_t ring_head;
+    volatile size_t ring_tail;
+} usb_bus_runtime_t;
+
+#define USB_RING_SIZE 4096
+
+static usb_bus_runtime_t s_usb;
+static portMUX_TYPE      s_usb_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* Copy bytes into the hand-off ring, dropping only when rx_task has fallen a
+ * full ring behind (which the worker's idle/read_size boundary would treat as
+ * overflow anyway). */
+static size_t usb_ring_push(usb_bus_runtime_t *u, const uint8_t *src, size_t n)
+{
+    size_t written = 0;
+    while (written < n) {
+        size_t head = u->ring_head;
+        size_t tail = u->ring_tail;
+        size_t used = (head >= tail) ? (head - tail) : (USB_RING_SIZE - tail + head);
+        if (used >= USB_RING_SIZE) break;          /* full: drop the remainder */
+        size_t space = USB_RING_SIZE - used;
+        size_t chunk = n - written;
+        if (chunk > space) chunk = space;
+        for (size_t k = 0; k < chunk; k++) {
+            u->ring[(head + k) % USB_RING_SIZE] = src[written + k];
+        }
+        u->ring_head = (head + chunk) % USB_RING_SIZE;
+        written += chunk;
+    }
+    return written;
+}
+
+static void usb_pump_task(void *arg)
+{
+    usb_bus_runtime_t *u = (usb_bus_runtime_t *)arg;
+    while (!u->stop) {
+        int n = usb_serial_jtag_read_bytes(u->scratch, USB_PUMP_READ_CHUNK, 0);
+        if (n > 0) {
+            size_t total = (size_t)n;
+            while (total < USB_PUMP_READ_CHUNK) {
+                int m = usb_serial_jtag_read_bytes(u->scratch + total,
+                                                   USB_PUMP_READ_CHUNK - total, 0);
+                if (m <= 0) break;
+                total += (size_t)m;
+            }
+            /* Park the bytes where bus_dma_read() can find them, THEN notify.
+             * Order matters: the consumer must never observe an event for data
+             * that is not yet in the ring. */
+            size_t kept = usb_ring_push(u, u->scratch, total);
+            if (kept == 0) {
+                ESP_LOGW(TAG, "USB ring full, dropped %u bytes", (unsigned)total);
+                continue;
+            }
+            uart_event_t ev = {0};
+            ev.type = UART_DATA;
+            ev.size = (uint16_t)(kept > 0xFFFF ? 0xFFFF : kept);
+            /* Non-blocking send: the payload is already parked, and the worker
+             * also polls the ring on its idle tick, so a dropped notification
+             * delays but never loses data. */
+            (void)xQueueSend(u->event_queue, &ev, 0);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(USB_PUMP_IDLE_MS));
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+static esp_err_t usb_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
+{
+    /* No pins, no baud: the only thing we could validate is "config is ignored".
+     * Accept any length (including 0) so the platform does not need to invent
+     * placeholder bytes -- see bus_dma.h for why this type has no bus_config. */
+    (void)cfg;
+    (void)len;
+
+    taskENTER_CRITICAL(&s_usb_lock);
+    bool already = (s_usb.task != NULL);
+    taskEXIT_CRITICAL(&s_usb_lock);
+
+    QueueHandle_t q = NULL;
+    if (!already) {
+        q = xQueueCreate(UART_EVENT_QUEUE_DEPTH, sizeof(uart_event_t));
+        if (!q) {
+            ESP_LOGE(TAG, "USB: event queue alloc failed");
+            return ESP_ERR_NO_MEM;
+        }
+        usb_serial_jtag_driver_config_t ucfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+        ucfg.tx_buffer_size = USB_TX_BUFFER_SIZE;
+        ucfg.rx_buffer_size = USB_RX_BUFFER_SIZE;
+        esp_err_t r = usb_serial_jtag_driver_install(&ucfg);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "USB: driver install failed: %s", esp_err_to_name(r));
+            vQueueDelete(q);
+            return r;
+        }
+        /* Route the console through the driver so log output and sensor traffic
+         * share the endpoint instead of fighting over the raw FIFO. */
+        usb_serial_jtag_vfs_use_driver();
+
+        uint8_t *scratch = malloc(USB_PUMP_READ_CHUNK);
+        uint8_t *ring    = malloc(USB_RING_SIZE);
+        if (!scratch || !ring) {
+            free(scratch);
+            free(ring);
+            usb_serial_jtag_driver_uninstall();
+            vQueueDelete(q);
+            return ESP_ERR_NO_MEM;
+        }
+
+        taskENTER_CRITICAL(&s_usb_lock);
+        s_usb.event_queue = q;
+        s_usb.scratch     = scratch;
+        s_usb.ring        = ring;
+        s_usb.ring_head   = 0;
+        s_usb.ring_tail   = 0;
+        s_usb.stop        = false;
+        taskEXIT_CRITICAL(&s_usb_lock);
+
+        if (xTaskCreate(usb_pump_task, "usb_rx", USB_PUMP_TASK_STACK, &s_usb,
+                        USB_PUMP_TASK_PRIO, &s_usb.task) != pdPASS) {
+            ESP_LOGE(TAG, "USB: pump task create failed");
+            usb_serial_jtag_driver_uninstall();
+            free(scratch);
+            free(ring);
+            vQueueDelete(q);
+            s_usb.event_queue = NULL;
+            s_usb.scratch = NULL;
+            s_usb.ring = NULL;
+            s_usb.task = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+    } else {
+        q = s_usb.event_queue;
+    }
+
+    ctx->uart_event_queue = q;   /* shared stream-bus naming, see bus_dma.h */
+    ctx->cfg.usb.ref_count++;
+
+    ESP_LOGI(TAG, "USB data channel init (ref=%lu, console shares endpoint)",
+             (unsigned long)ctx->cfg.usb.ref_count);
+    return ESP_OK;
+}
+
+static esp_err_t usb_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    if (!data || len == 0) return ESP_OK;
+    int w = usb_serial_jtag_write_bytes(data, len, pdMS_TO_TICKS(100));
+    if (w < 0) {
+        ESP_LOGW(TAG, "USB write failed");
+        return ESP_FAIL;
+    }
+    /* Best-effort flush so a Modbus-style turnaround sees the frame on the wire
+     * before the reply window opens.  A timeout here is not fatal: the bytes are
+     * queued and will be transmitted. */
+    (void)usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
+
+/* Drain the pump's hand-off ring.  Reading the IDF driver here would race the
+ * pump and, worse, return nothing because the pump already took the bytes. */
+static size_t usb_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
+{
+    (void)ctx;
+    size_t total = 0;
+    while (total < buf_size) {
+        size_t head = s_usb.ring_head;
+        size_t tail = s_usb.ring_tail;
+        if (head == tail) break;                    /* empty */
+        size_t avail = (head > tail) ? (head - tail) : (USB_RING_SIZE - tail + head);
+        size_t chunk = buf_size - total;
+        if (chunk > avail) chunk = avail;
+        for (size_t k = 0; k < chunk; k++) {
+            buf[total + k] = s_usb.ring[(tail + k) % USB_RING_SIZE];
+        }
+        s_usb.ring_tail = (tail + chunk) % USB_RING_SIZE;
+        total += chunk;
+    }
+    return total;
+}
+
+static esp_err_t usb_deinit(bus_dma_ctx_t *ctx)
+{
+    if (ctx->cfg.usb.ref_count > 0) ctx->cfg.usb.ref_count--;
+    if (ctx->cfg.usb.ref_count > 0) return ESP_OK;   /* still leased */
+
+    taskENTER_CRITICAL(&s_usb_lock);
+    s_usb.stop = true;
+    QueueHandle_t q = s_usb.event_queue;
+    uint8_t *scratch = s_usb.scratch;
+    s_usb.event_queue = NULL;
+    s_usb.task = NULL;
+    taskEXIT_CRITICAL(&s_usb_lock);
+
+    /* Let the pump observe stop before we tear the driver down underneath it. */
+    vTaskDelay(pdMS_TO_TICKS(USB_PUMP_IDLE_MS * 3));
+
+    usb_serial_jtag_driver_uninstall();
+    if (q) vQueueDelete(q);
+    if (scratch) free(scratch);
+    uint8_t *ring = s_usb.ring;
+    s_usb.ring = NULL;
+    if (ring) free(ring);
+    s_usb.scratch = NULL;
+
+    ESP_LOGI(TAG, "USB data channel deinit");
+    return ESP_OK;
+}
+
+#endif /* SOC_USB_SERIAL_JTAG_SUPPORTED */
 
 /* ------------------------------------------------------------------ */
 /*  SPI init / transact / deinit (with bus sharing)                   */
@@ -1176,6 +1439,9 @@ static esp_err_t bus_dma_init_internal(bus_dma_ctx_t *ctx, uint8_t bus_type,
         case BUS_TYPE_UART: r = uart_init(ctx, config, config_len); break;
         case BUS_TYPE_SPI:  r = spi_init(ctx, config, config_len);  break;
         case BUS_TYPE_I2C:  r = i2c_init(ctx, config, config_len);  break;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        case BUS_TYPE_USB:  r = usb_init(ctx, config, config_len);  break;
+#endif
         default:
             ESP_LOGE(TAG, "Unknown bus type: %d", bus_type);
             r = ESP_ERR_NOT_SUPPORTED;
@@ -1216,12 +1482,18 @@ esp_err_t bus_dma_init_preferred(bus_dma_ctx_t *ctx, uint8_t bus_type,
 esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
 {
     if (ctx == NULL || !ctx->initialized) return ESP_ERR_INVALID_ARG;
-    if (ctx->bus_type != BUS_TYPE_UART) return ESP_ERR_NOT_SUPPORTED;
+    if (ctx->bus_type != BUS_TYPE_UART && ctx->bus_type != BUS_TYPE_USB)
+        return ESP_ERR_NOT_SUPPORTED;
 
     if (xSemaphoreTake(ctx->tx_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
         return ESP_ERR_TIMEOUT;
 
-    esp_err_t r = uart_write(ctx, data, len);
+    esp_err_t r;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (ctx->bus_type == BUS_TYPE_USB) r = usb_write(ctx, data, len);
+    else
+#endif
+    r = uart_write(ctx, data, len);
     xSemaphoreGive(ctx->tx_mutex);
     return r;
 }
@@ -1230,16 +1502,41 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
 size_t bus_dma_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
 {
     if (ctx == NULL || !ctx->initialized) return 0;
-    if (ctx->bus_type != BUS_TYPE_UART) return 0;
+    if (ctx->bus_type != BUS_TYPE_UART && ctx->bus_type != BUS_TYPE_USB) return 0;
 
-    /* No mutex needed for RX: uart_read_bytes is thread-safe (ESP-IDF
-     * internal per-port spinlock), and rx_task is the sole consumer. */
+    /* No mutex needed for RX: both readers are thread-safe at the driver level
+     * and rx_task is the sole consumer. */
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    if (ctx->bus_type == BUS_TYPE_USB) return usb_read(ctx, buf, buf_size);
+#endif
     return uart_read(ctx, buf, buf_size);
 }
 
+esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx)
+{
+    if (ctx == NULL || !ctx->initialized) return ESP_ERR_INVALID_ARG;
+    switch (ctx->bus_type) {
+    case BUS_TYPE_UART:
+        return uart_flush_input(ctx->cfg.uart.port);
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    case BUS_TYPE_USB:
+        /* Discard the hand-off ring.  Draining the IDF driver here would race
+         * the pump (and is meaningless once the pump owns the bytes). */
+        s_usb.ring_tail = s_usb.ring_head;
+        return ESP_OK;
+#endif
+    default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+}
+
+/* Stream buses (UART and USB) both deliver uart_event_t notifications through
+ * this accessor, so bus_worker discovers event queues from the runtime instead
+ * of keeping a fixed transport table. */
 QueueHandle_t bus_dma_uart_event_queue(const bus_dma_ctx_t *ctx)
 {
-    if (ctx == NULL || !ctx->initialized || ctx->bus_type != BUS_TYPE_UART)
+    if (ctx == NULL || !ctx->initialized) return NULL;
+    if (ctx->bus_type != BUS_TYPE_UART && ctx->bus_type != BUS_TYPE_USB)
         return NULL;
     return ctx->uart_event_queue;
 }
@@ -1284,6 +1581,9 @@ esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx)
         case BUS_TYPE_UART: err = uart_deinit(ctx); break;
         case BUS_TYPE_SPI:  err = spi_deinit(ctx);  break;
         case BUS_TYPE_I2C:  err = i2c_deinit(ctx);  break;
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+        case BUS_TYPE_USB:  err = usb_deinit(ctx);  break;
+#endif
         default: return ESP_ERR_NOT_SUPPORTED;
     }
     if (err != ESP_OK) return err;

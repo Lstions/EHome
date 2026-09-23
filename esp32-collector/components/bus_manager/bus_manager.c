@@ -89,6 +89,13 @@ static void derive_hw_id(char *buf, size_t buflen, uint8_t bus_type,
                     id = hw_i2cs[i].id; break;
                 }
         break;
+    case BUS_TYPE_USB:
+        /* One fixed internal endpoint, so the identifier is constant.  It must
+         * still be unique across buses because hw_id feeds dma_pool_release_by_hw()
+         * and the lease map. */
+        bus_name = "usb";
+        id = "USB0";
+        break;
     }
 
     if (id) {
@@ -111,7 +118,8 @@ static void format_resource_hw_id(char *buf, size_t buflen, uint8_t bus_type,
 {
     const char *prefix = bus_type == BUS_TYPE_UART ? "uart" :
                          bus_type == BUS_TYPE_SPI ? "spi" :
-                         bus_type == BUS_TYPE_I2C ? "i2c" : "unknown";
+                         bus_type == BUS_TYPE_I2C ? "i2c" :
+                         bus_type == BUS_TYPE_USB ? "usb" : "unknown";
     if (!resource_id || resource_id[0] == '\0') {
         snprintf(buf, buflen, "%s/UNKNOWN", prefix);
         return;
@@ -123,6 +131,9 @@ static bool controller_in_use(const bus_runtime_t *rt, uint8_t bus_type,
                               uint32_t controller_id)
 {
     if (!rt) return false;
+    /* USB has no leased controller: the endpoint is fixed and shared, so no
+     * controller id can ever be "in use". */
+    if (bus_type == BUS_TYPE_USB) return false;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         const bus_dma_ctx_t *ctx = &rt->bus_ctx[i];
         if (!ctx->initialized || ctx->bus_type != bus_type) continue;
@@ -159,6 +170,13 @@ static bool runtime_bus_config_matches(const bus_dma_ctx_t *ctx, uint8_t bus_typ
     case BUS_TYPE_I2C:
         return config_len >= 7 && ctx->cfg.i2c.sda_pin == config[0] &&
                ctx->cfg.i2c.scl_pin == config[1];
+    case BUS_TYPE_USB:
+        /* USB carries no config: two USB channels are by definition the same
+         * lease (one endpoint), so an existing USB lease always matches.  This
+         * is what lets a second logical device share the endpoint instead of
+         * being rejected as "already allocated to a different config". */
+        (void)config;
+        return true;
     default:
         return false;
     }
@@ -303,6 +321,7 @@ static int32_t runtime_controller_id(const bus_dma_ctx_t *ctx)
     if (!ctx || !ctx->initialized) return -1;
     switch (ctx->bus_type) {
     case BUS_TYPE_UART: return (int32_t)ctx->cfg.uart.port;
+    case BUS_TYPE_USB:  return -1;   /* fixed endpoint, nothing to lease */
     case BUS_TYPE_SPI:  return (int32_t)ctx->cfg.spi.host;
     case BUS_TYPE_I2C:  return (int32_t)ctx->cfg.i2c.port;
     default: return -1;
@@ -390,8 +409,14 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
     for (int i = 0; i < manifest->channel_count; i++) {
         const config_channel_t *ch = &manifest->channels[i];
         if (!ch->enabled) continue;
-        if (ch->id == 0 || ch->bus_config_len == 0 ||
-            ch->bus_config_len > sizeof(ch->bus_config)) return ESP_ERR_INVALID_ARG;
+        /* Every bus except USB must carry a config: UART encodes pins+baud, I2C
+         * pins+addr+freq, SPI pins+freq.  USB has nothing to encode (the endpoint
+         * is fixed and the host sets the rate), so an empty config is the correct
+         * wire form and must not be rejected here -- this pre-switch check used to
+         * fail before the USB branch could ever run. */
+        if (ch->id == 0 || ch->bus_config_len > sizeof(ch->bus_config) ||
+            (ch->bus_config_len == 0 && ch->bus_type != BUS_TYPE_USB))
+            return ESP_ERR_INVALID_ARG;
         for (int j = 0; j < i; j++) {
             if (manifest->channels[j].enabled &&
                 manifest->channels[j].id == ch->id) return ESP_ERR_INVALID_ARG;
@@ -611,11 +636,29 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
             used_i2c[resource_index] = true;
             break;
         }
+        case BUS_TYPE_USB: {
+            /* Native USB Serial/JTAG as a data bus.
+             *
+             * There is nothing to lease: the peripheral is a fixed internal
+             * endpoint (on C6 it is wired to GPIO12/13) that the host
+             * enumerates, with no baud rate and no TX/RX pins.  Accepting an
+             * empty bus_config is therefore deliberate -- requiring placeholder
+             * bytes would assert pins and a baud that do not exist, which is the
+             * exact failure mode this planner exists to prevent.
+             *
+             * It must NOT consume a UART lease: that would let USB starve a real
+             * UART channel, and vice versa. */
+            resource_id = "USB0";
+            resource_index = 0;
+            break;
+        }
         default:
             return ESP_ERR_NOT_SUPPORTED;
         }
 
-        if (dma_requested) {
+        /* USB owns its own packet buffers; there is no DMA pool lease to take
+         * (and no GDMA channel to contend for with the UARTs). */
+        if (dma_requested && ch->bus_type != BUS_TYPE_USB) {
             if (!have_dma) return ESP_ERR_INVALID_STATE;
             uint32_t dma_id = 0;
             char hw_id[16] = {0};
@@ -635,6 +678,8 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
                 plan[i].controller_id = (int32_t)hw_spis[resource_index].port;
             else if (ch->bus_type == BUS_TYPE_I2C)
                 plan[i].controller_id = (int32_t)hw_i2cs[resource_index].port;
+            else if (ch->bus_type == BUS_TYPE_USB)
+                plan[i].controller_id = -1;   /* no controller to pin */
         }
     }
     return ESP_OK;
@@ -811,7 +856,8 @@ esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt)
 /* v2.4: Incremental single-channel register */
 esp_err_t bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch)
 {
-    if (!rt || !ch || !ch->enabled || ch->id == 0 || ch->bus_config_len == 0) {
+    if (!rt || !ch || !ch->enabled || ch->id == 0 ||
+        (ch->bus_config_len == 0 && ch->bus_type != BUS_TYPE_USB)) {
         return ESP_ERR_INVALID_ARG;
     }
     return reg_bus_channel(rt, ch->id, ch->bus_type,
@@ -836,8 +882,11 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
     uint8_t enabled_count = 0;
     for (int i = 0; i < manifest->channel_count; i++) {
         if (!manifest->channels[i].enabled) continue;
+        /* USB is the one bus whose config is legitimately empty; see
+         * validate_manifest_resources for the full rationale. */
         if (manifest->channels[i].id == 0 ||
-            manifest->channels[i].bus_config_len == 0 ||
+            (manifest->channels[i].bus_config_len == 0 &&
+             manifest->channels[i].bus_type != BUS_TYPE_USB) ||
             manifest->channels[i].bus_config_len > sizeof(manifest->channels[i].bus_config)) {
             return ESP_ERR_INVALID_ARG;
         }
@@ -948,6 +997,8 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
         .edge_device_id = edge_device_id, /* 0 when sent by old firmware/backend */
         .type       = CMD_WRITE,
     };
+    /* Only UART stores a port; for USB cfg is a union, so reading cfg.uart here
+     * would interpret the USB member as a UART port number. */
     if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
     if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) {
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, ESP_ERR_INVALID_ARG, "unsupported bus route");
@@ -969,6 +1020,11 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
             return;
         }
         break;
+    /* USB is served by the uart_cmd_loop worker, which resolves the channel's
+     * context by channel_id (not by queue), so it reuses the UART0 worker pair
+     * instead of adding a sixth task.  A USB command never sets uart_port, so it
+     * cannot be confused with a real UART0 command at the queue level. */
+    case BUS_TYPE_USB:  target_q = rt->uart0_control_queue; break;
     case BUS_TYPE_SPI:  target_q = rt->spi_control_queue;  break;
     case BUS_TYPE_I2C:  target_q = rt->i2c_control_queue;  break;
     default:
@@ -996,16 +1052,23 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
         (plan_step_count > 0 && (!plan_data || plan_step_count < 2))) return false;
     bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
     if (!bctx) return false;
-    if (plan_step_count > 0 && bctx->bus_type != BUS_TYPE_UART) return false;
+    /* Multi-step plans (write + readback) need the same sequential TX→RX engine
+     * that single requests use.  UART and USB are both served by uart_cmd_loop /
+     * execute_uart_batch, so both may carry a plan.  SPI/I2C transactions are
+     * atomic in spi_i2c_cmd_loop and still cannot. */
+    if (plan_step_count > 0 && bctx->bus_type != BUS_TYPE_UART &&
+        bctx->bus_type != BUS_TYPE_USB) return false;
     bus_cmd_t cmd = { .channel_id = ch, .bus_type = bctx->bus_type, .tx_len = len,
         .delay_ms = post_tx_delay_ms, .read_size = read_size, .rx_timeout_ms = rx_timeout_ms,
         .channel_cmd_v2 = true, .control_slot = control_slot, .plan_len = plan_len,
         .plan_step_count = plan_step_count, .type = CMD_WRITE };
     if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
     if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) return false;
-    /* Only UART has an explicit TX→RX turnaround phase in the shared worker.
-     * SPI/I2C transactions are atomic and therefore reject a requested delay. */
-    if (cmd.bus_type != BUS_TYPE_UART && post_tx_delay_ms != 0) return false;
+    /* UART and USB are served by uart_cmd_loop, which has an explicit TX→RX
+     * turnaround phase.  SPI/I2C transactions are atomic in spi_i2c_cmd_loop and
+     * therefore reject a requested delay. */
+    if (cmd.bus_type != BUS_TYPE_UART && cmd.bus_type != BUS_TYPE_USB &&
+        post_tx_delay_ms != 0) return false;
     memcpy(cmd.tx_data, data, len);
     if (plan_len > 0) memcpy(cmd.plan_data, plan_data, plan_len);
     QueueHandle_t target_q = NULL;
@@ -1015,6 +1078,9 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
                    cmd.uart_port == UART_NUM_1 ? rt->uart1_control_queue :
                    cmd.uart_port == UART_NUM_2 ? rt->uart2_control_queue : NULL;
         break;
+    /* USB shares the UART0 worker pair; the worker resolves the context by
+     * channel_id, and USB commands never set uart_port. */
+    case BUS_TYPE_USB: target_q = rt->uart0_control_queue; break;
     case BUS_TYPE_SPI: target_q = rt->spi_control_queue; break;
     case BUS_TYPE_I2C: target_q = rt->i2c_control_queue; break;
     default: return false;

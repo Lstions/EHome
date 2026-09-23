@@ -66,7 +66,10 @@ func validateEnabledChannelPin(db *gorm.DB, nodeID string, pin int) error {
 		if busType == "GPIO" || busType == "4" || busType == "PWM" || busType == "6" {
 			return fmt.Errorf("legacy peripheral channel %d is still enabled", ch.ID)
 		}
-		if busType == "ADC" {
+		if busType == "ADC" || busType == "USB" {
+			// Pins-less transports route no GPIO, so they cannot conflict with a
+			// new GPIO/PWM resource. (USB = ESP32-C6 native USB data bus; its
+			// bus_config is empty and carries no pins.)
 			continue
 		}
 		raw := strings.TrimPrefix(strings.TrimSpace(ch.BusConfig), `\x`)
