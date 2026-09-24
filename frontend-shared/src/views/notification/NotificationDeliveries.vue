@@ -145,6 +145,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import PageHeader from '@/components/common/PageHeader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { notificationChannelApi, type NotificationChannel, type NotificationDelivery, type NotificationDeliveryState } from '@/api/notificationChannel'
@@ -178,6 +179,7 @@ const store = useNotificationDeliveryStore()
 // ── 过滤状态 ──
 /** 空值（undefined）= 不过滤。**不发空串** —— 后端对非空 state 做白名单校验，空串会直接 400。 */
 const channelId = ref<number | undefined>(undefined)
+const route = useRoute()
 const stateFilter = ref<NotificationDeliveryState | undefined>(undefined)
 const hasFilter = computed(() => channelId.value !== undefined || stateFilter.value !== undefined)
 
@@ -312,6 +314,12 @@ async function loadChannels() {
 }
 
 onMounted(() => {
+  // G7：消费通知通道页「测试」后的 `?channel_id=` 深链——落在**已筛好该通道**的审计页。
+  // 改前该 query 无消费者：用户点「查看投递审计」后看到的仍是全部通道的投递，
+  // 还得自己在下拉里再选一次通道（正是 G7 要消除的那一步）。
+  const raw = route.query.channel_id
+  const parsed = typeof raw === 'string' ? Number(raw) : NaN
+  if (Number.isFinite(parsed) && parsed > 0) channelId.value = parsed
   void loadList()
   void loadChannels()
 })

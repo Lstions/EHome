@@ -5,6 +5,12 @@
       subtitle="把告警外发到企业微信 / Webhook / OneBot；密钥只写不读，列表仅显示末 4 位。"
     >
       <template #extra>
+        <!-- G7：测试过一次后常驻的审计入口（通知气泡会消失，用户不该为此重找菜单）。 -->
+        <el-button
+          v-if="lastTestedChannelId !== null"
+          data-test="nc-goto-deliveries"
+          @click="goToDeliveries"
+        >查看通道 #{{ lastTestedChannelId }} 的投递审计</el-button>
         <el-button type="primary" :icon="Plus" data-test="nc-create" @click="openCreate">新建通道</el-button>
       </template>
     </PageHeader>
@@ -136,6 +142,8 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElNotification } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import feedback from '@/utils/feedback'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -224,6 +232,15 @@ function retryFetch() {
  */
 const actingId = ref<number | null>(null)
 
+// ── G7：测试投递后的审计入口 ──
+const router = useRouter()
+/** 最近一次测试的通道与目标路由（模板里提供常驻入口，不依赖通知是否还在屏幕上）。 */
+const lastTestedChannelId = ref<number | null>(null)
+const lastTestedTarget = ref<{ name: string; query: Record<string, string> } | null>(null)
+function goToDeliveries() {
+  if (lastTestedTarget.value) void router.push(lastTestedTarget.value)
+}
+
 // ── 新建 / 编辑对话框 ──
 const dialogVisible = ref(false)
 const submitting = ref(false)
@@ -281,9 +298,23 @@ async function onTest(channel: NotificationChannel) {
   actingId.value = channel.id
   try {
     const res = await store.testChannel(channel.id)
-    feedback.success(
-      `测试消息已发出（通道 #${res?.channel_id ?? channel.id}）；实际投递结果见投递审计。`,
-    )
+    const channelId = res?.channel_id ?? channel.id
+    // G7：改前只弹一句「实际投递结果见投递审计」，用户得自己找菜单跳过去再手动筛通道
+    // （4-7 步）。此处让提示**带一个直达入口**，并把该通道带上，落在已筛好的审计页。
+    //
+    // 注意 deliveries_url 是**后端 API 路径**（`handler_notification_channel.go:499`：
+    // `/api/v1/notification-deliveries?channel_id=N`），不是前端路由——不能直接 push，
+    // 否则会命中前端路由表外的地址。故只借用它的 channel_id 语义，路由用 name。
+    const target = { name: 'NotificationDeliveries', query: { channel_id: String(channelId) } }
+    ElNotification({
+      type: 'success',
+      duration: 8000,
+      title: '测试消息已发出',
+      message: `通道 #${channelId}：HTTP 200 仅表示进入投递队列，实际结果见投递审计。`,
+      onClick: () => { void router.push(target) },
+    })
+    lastTestedChannelId.value = channelId
+    lastTestedTarget.value = target
   } catch (err) {
     feedback.handleErrorWithContext(err, '测试消息发送失败')
   } finally {

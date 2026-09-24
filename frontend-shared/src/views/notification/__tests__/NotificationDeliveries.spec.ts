@@ -5,6 +5,14 @@ import NotificationDeliveries from '../NotificationDeliveries.vue'
 import { notificationChannelApi } from '@/api/notificationChannel'
 import { ElTableStub, ElTableColumnStub, makeChannel, makeDelivery } from './deliveryFixtures'
 
+// G7：本页现在消费 `?channel_id=` 深链（由通知通道页「测试」后跳入），
+// 故需 vue-router 替身。真实 vue-router 的 route 一定有 query，替身必须给全。
+const { mockRouteQuery } = vi.hoisted(() => ({ mockRouteQuery: { value: {} as Record<string, unknown> } }))
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: mockRouteQuery.value, params: {}, name: 'NotificationDeliveries', path: '/notification-deliveries' }),
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
 /**
  * 投递审计页的验收（P2-A 前半：列表 + channel_id/state 过滤 + 真分页）。
  *
@@ -44,6 +52,8 @@ const listCalls = () => mockedApi.listDeliveries.mock.calls
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // query 是可变对象，clearAllMocks 不会重置它 —— 不重置会让 G7 深链用例相互污染
+  mockRouteQuery.value = {}
   mockedApi.listDeliveries.mockResolvedValue({
     items: [makeDelivery()],
     total: 45,
@@ -99,8 +109,25 @@ describe('NotificationDeliveries 投递审计页', () => {
     expect(mockedApi.listDeliveries).toHaveBeenLastCalledWith({ state: 'failed', page: 1, page_size: 20 })
   })
 
-  it('切换通道过滤 → 以 channel_id= 请求后端（数字，不是字符串 label）', async () => {
-    const wrapper = mountPage()
+  // G7：从通知通道页「测试」跳入时带 `?channel_id=`，本页必须落成**已筛该通道**的首屏，
+  // 否则用户到了审计页还得自己再选一次通道（正是 G7 要消除的那一步）。
+  it('G7：带 ?channel_id= 进入时首屏即以该通道过滤（无需用户再选一次）', async () => {
+    mockRouteQuery.value = { channel_id: '1' }
+    mountPage()
+    await flushPromises()
+    expect(mockedApi.listDeliveries).toHaveBeenLastCalledWith({ channel_id: 1, page: 1, page_size: 20 })
+  })
+
+  it('G7：?channel_id= 非法值被忽略（不得把 NaN 发给后端）', async () => {
+    mockRouteQuery.value = { channel_id: 'abc' }
+    mountPage()
+    await flushPromises()
+    const lastCall = mockedApi.listDeliveries.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    expect(lastCall.channel_id).toBeUndefined()
+    expect(lastCall.page).toBe(1)
+  })
+
+  it('切换通道过滤 → 以 channel_id= 请求后端（数字，不是字符串 label）', async () => {    const wrapper = mountPage()
     await flushPromises()
 
     const select = wrapper.find('[data-test="nd-filter-channel"]')

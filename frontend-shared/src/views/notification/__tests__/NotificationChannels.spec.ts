@@ -16,7 +16,14 @@ import type { NotificationChannel } from '@/api/notificationChannel'
  */
 
 vi.mock('@/api/notificationChannel', () => ({
-  notificationChannelApi: { list: vi.fn(), remove: vi.fn() },
+  notificationChannelApi: { list: vi.fn(), remove: vi.fn(), test: vi.fn() },
+}))
+
+// G7：测试投递后要跳审计页，故需 vue-router 替身（断言 push 的目标与 query）。
+const { mockRouterPush } = vi.hoisted(() => ({ mockRouterPush: vi.fn() }))
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: mockRouterPush }),
+  useRoute: () => ({ query: {}, params: {}, name: 'NotificationChannels', path: '/notification-channels' }),
 }))
 
 // ElMessage / ElMessageBox 是 feedback 的底层依赖：这里替换成 spy，
@@ -157,5 +164,38 @@ describe('NotificationChannels 列表页', () => {
 
     // 取消分支的全部含义：一个删除请求都不发。
     expect(mockedApi.remove).not.toHaveBeenCalled()
+  })
+
+  // ── G7：测试投递后 1 次操作可达该通道的投递审计 ──
+  //
+  // 改前只弹一句「实际投递结果见投递审计」，用户得自己找菜单跳过去、再手动筛通道
+  // （4-7 步）。现改为：提示可点击直达 + 页头常驻入口，且带上 channel_id
+  // 让审计页落在**已筛好该通道**的状态。
+  it('G7：测试成功后提供到该通道投递审计的入口（带 channel_id，不是裸跳审计页）', async () => {
+    mockedApi.test = vi.fn().mockResolvedValue({ channel_id: 1, notification_id: 1, state: 'pending', deliveries_url: '/api/v1/notification-deliveries?channel_id=1' })
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.find('[data-test="nc-test"]').trigger('click')
+    await flushPromises()
+
+    // 页头出现常驻入口（通知气泡会消失，用户不该为此重找菜单）
+    const entry = wrapper.find('[data-test="nc-goto-deliveries"]')
+    expect(entry.exists()).toBe(true)
+    await entry.trigger('click')
+
+    expect(mockRouterPush).toHaveBeenCalledWith({
+      name: 'NotificationDeliveries',
+      query: { channel_id: '1' },
+    })
+  })
+
+  it('G7：测试失败时不得出现审计入口（避免误导"已发出"）', async () => {
+    mockedApi.test = vi.fn().mockRejectedValue(new Error('boom'))
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.find('[data-test="nc-test"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="nc-goto-deliveries"]').exists()).toBe(false)
+    expect(mockRouterPush).not.toHaveBeenCalled()
   })
 })
