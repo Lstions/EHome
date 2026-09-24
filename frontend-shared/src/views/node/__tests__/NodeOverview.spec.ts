@@ -6,7 +6,7 @@ import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
-const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
+const { mockGetDetail, mockChannelList, mockChannelDelete, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() => Promise.resolve({
     id: 1, node_id: 'F0F5BDFFFE02', name: '机房采集器', model: 'esp32s3', status: 'online',
     firmware_version: '2.5.18', protocol_version: '2.2', connection_type: 'wifi',
@@ -43,6 +43,7 @@ const { mockGetDetail, mockChannelList, mockGetCapabilities, mockClientGet, mock
   mockGetOTAHistory: vi.fn((..._args: any[]): Promise<any[]> => Promise.resolve([])),
   mockCancelOTA: vi.fn((..._args: any[]) => Promise.resolve()),
   mockElMessageBoxConfirm: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
+  mockChannelDelete: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
   // 可变 DMA store 数据（测试可注入）
   mockDmaChannelsRef: { value: [] as any[] },
   // 外设直控回填断言 + 可变 route.query（?tab= 深链用例需要按用例改 query）
@@ -107,7 +108,7 @@ vi.mock('@/api/node', () => ({
     cancelOTA: mockCancelOTA,
   },
 }))
-vi.mock('@/api/channel', () => ({ channelApi: { getList: mockChannelList } }))
+vi.mock('@/api/channel', () => ({ channelApi: { getList: mockChannelList, delete: mockChannelDelete } }))
 vi.mock('@/api/client', () => ({ default: { get: mockClientGet } }))
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ connected: true, subscribe: mockSubscribe }),
@@ -1265,6 +1266,63 @@ describe('NodeOverview (生产页)', () => {
 
     it('关联设备读的是所请求的缓存（不是全量/上一页残留）', () => {
       expect(source).toContain('edgeDeviceStore.getCachedList(')
+    })
+  })
+
+  // ── C5 能力补线：删除通道 ─────────────────────────────────────────────
+  //
+  // 改前「删除通道」的**唯一 UI** 在死文件 ChannelPanel.vue（el-tag 的 @close），
+  // 存活页面只能新建/编辑 ⇒ 用户永远删不掉。后端与前端 API 早已支持，
+  // 故这是"接线缺失"而不是"功能缺失"。
+  describe('删除通道（C5 能力补线）', () => {
+    it('点了必须经危险确认；确认后调 channelApi.delete 并刷新', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      mockChannelDelete.mockClear()
+      mockElMessageBoxConfirm.mockClear()
+      mockElMessageBoxConfirm.mockResolvedValue(undefined)
+
+      const btn = wrapper.find('[data-testid="delete-channel"]')
+      expect(btn.exists(), '存活页面缺少「删除通道」入口').toBe(true)
+      await btn.trigger('click')
+      await flushPromises()
+
+      // 后端是硬删 + 下发配置变更 ⇒ 必须先确认
+      expect(mockElMessageBoxConfirm, '删除通道前必须确认').toHaveBeenCalled()
+      expect(mockChannelDelete).toHaveBeenCalled()
+    })
+
+    it('用户取消 ⇒ 不得发删除请求', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      mockChannelDelete.mockClear()
+      mockElMessageBoxConfirm.mockRejectedValueOnce(new Error('cancel'))
+
+      await wrapper.find('[data-testid="delete-channel"]').trigger('click')
+      await flushPromises()
+
+      expect(mockChannelDelete).not.toHaveBeenCalled()
+    })
+
+    it('409「被边缘设备引用」是保护而非故障：给出原因与下一步，不报红', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      mockElMessageBoxConfirm.mockResolvedValue(undefined)
+      // 后端 handler_device.go:894 在有设备引用时返回该错误（409）
+      mockChannelDelete.mockRejectedValueOnce(new Error('cannot delete channel referenced by edge devices'))
+
+      const { ElMessage } = await import('element-plus')
+      const warnSpy = vi.spyOn(ElMessage, 'warning')
+      const errSpy = vi.spyOn(ElMessage, 'error')
+      warnSpy.mockClear(); errSpy.mockClear()
+
+      await wrapper.find('[data-testid="delete-channel"]').trigger('click')
+      await flushPromises()
+
+      const warns = warnSpy.mock.calls.map(c => String(c[0]))
+      expect(warns.some(m => m.includes('边缘设备引用')), '应说明原因').toBe(true)
+      expect(warns.some(m => m.includes('先移除或改绑')), '应给出下一步').toBe(true)
+      warnSpy.mockRestore(); errSpy.mockRestore()
     })
   })
 })

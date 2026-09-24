@@ -292,6 +292,19 @@
                   :aria-label="'编辑通道 ' + channelName(ch)"
                   @click.stop="editChannel(ch)"
                 ><el-icon :size="12"><EditPen /></el-icon>编辑</button>
+                <!-- C5 能力补线：删除通道入口此前**只存在于死文件** ChannelPanel.vue
+                     （其 el-tag 的 @close 承担删除），而存活页面只能新建/编辑 ——
+                     用户永远删不掉通道。后端 `DELETE /api/v1/channels/:id` 早已支持
+                     （handler_device.go:894），前端 API 也有（channelApi.delete）。
+                     这里把能力接到存活路径，使 ChannelPanel 可被安全删除。 -->
+                <button
+                  v-if="!nodeOffline"
+                  type="button"
+                  class="link-btn chan-del"
+                  data-testid="delete-channel"
+                  :aria-label="'删除通道 ' + channelName(ch)"
+                  @click.stop="deleteChannel(ch)"
+                ><el-icon :size="12"><Delete /></el-icon>删除</button>
                 <el-icon :size="13" class="chan-arrow"><ArrowRight /></el-icon>
               </div>
               <!-- D2：列表是预览（前 N 条）而"总数"是全量 —— 截断必须可发现：
@@ -820,7 +833,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import {
-  ArrowRight, Clock, Cloudy, Connection, CopyDocument, Cpu, DataLine, Document,
+  ArrowRight, Clock, Cloudy, Connection, CopyDocument, Cpu, DataLine, Delete, Document,
   EditPen, Grid, House, InfoFilled, Link, Lock, MagicStick, Monitor, Odometer, Plus, Refresh,
   RefreshRight, Search, Select, Share, SwitchButton, Timer, Tools, UploadFilled, UserFilled,
   View, WarningFilled,
@@ -1835,6 +1848,48 @@ function editChannel(channel: Channel) {
   channelManagerVisible.value = true
   // 通道配置面板复用生产组件 ChannelManager，编辑数据由 initial-data 传入。
   channelManagerInitialData.value = channel
+}
+
+/**
+ * 删除通道（C5 能力补线）。
+ *
+ * 为什么需要确认：后端 `handler_device.go:894` 是**硬删**（`tx.Delete(&ch)`），
+ * 并向设备下发 `CfgChangeChannel/CfgActionDelete` 配置变更 ⇒ 不可逆。
+ *
+ * 为什么 409 要单独讲清楚：后端在**有边缘设备引用该通道时拒绝删除**
+ * （`cannot delete channel referenced by edge devices` → 409）。
+ * 这是**保护**而不是故障 —— 若按普通错误报红，用户只会看到 "删除失败"，
+ * 却不知道原因是"先去把挂在这条通道上的设备挪走"。
+ */
+async function deleteChannel(channel: Channel) {
+  if (nodeOffline.value) {
+    ElMessage.warning('节点离线，无法删除通道')
+    return
+  }
+  const name = channelName(channel)
+  const channelId = channel.id
+  if (typeof channelId !== 'number') {
+    ElMessage.warning('该通道缺少 ID，无法删除')
+    return
+  }
+  const ok = await feedback.confirmDanger(
+    `删除通道「${name}」？该通道配置将被删除，并向节点下发配置变更（不可恢复）。`,
+    { title: '确认删除通道', confirmText: '删除', cancelText: '取消' },
+  )
+  if (!ok) return
+  try {
+    await channelApi.delete(channelId)
+    ElMessage.success(`通道「${name}」已删除`)
+    await fetchChannels()
+  } catch (error: unknown) {
+    const msg = (error as { message?: string })?.message || ''
+    if (/referenced by edge devices|Conflict|409/i.test(msg)) {
+      // 如实说明原因 + 下一步（不是故障，是保护）
+      ElMessage.warning(`通道「${name}」仍有边缘设备引用，无法删除：请先移除或改绑该通道下的设备。`)
+      return
+    }
+    feedback.handleErrorWithContext(error, '删除通道失败')
+  }
 }
 
 function navigateToNodeChannels() {
