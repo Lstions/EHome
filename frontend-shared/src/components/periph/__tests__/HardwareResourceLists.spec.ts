@@ -3,6 +3,9 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import type { GPIOBusResource, PWMBusResource } from '@/api/node'
 import type { GPIOConfig, PWMConfig } from '@/api/periph'
+// D6：触控目标契约用源码断言（happy-dom 不应用 media query，挂载级断言测不到移动端尺寸）。
+import gpioListSource from '@/components/periph/GPIOResourceList.vue?raw'
+import pwmListSource from '@/components/periph/PWMResourceList.vue?raw'
 
 const mocks = vi.hoisted(() => ({
   gpioSet: vi.fn(),
@@ -123,6 +126,109 @@ describe('GPIOResourceList', () => {
     // 监听器直接验证父组件可观察到的 configure 回调。
     expect(onConfigure).toHaveBeenCalledWith(2)
     expect(wrapper.find('[data-testid="configure-gpio-6"]').exists()).toBe(false)
+  })
+
+  // ── D6：GPIO 列表的「去重复文案 + 过滤条」契约 ────────────────────────
+  describe('D6 GPIO 列表可读性（去重 + 过滤）', () => {
+    // 4 个引脚、其中 1 个已配置
+    const manyGpio: GPIOBusResource[] = [
+      { id: 'GPIO0', pin: 0, enabled: true }, { id: 'GPIO1', pin: 1, enabled: true },
+      { id: 'GPIO2', pin: 2, enabled: true }, { id: 'GPIO3', pin: 3, enabled: true },
+    ]
+
+    it('未配置行**不得**再出现「ESP32 已上报」这类逐行相同的占位文案', () => {
+      // 改前每行都渲染这句（实测 8 行逐字相同），占着 170px+ 的列却零信息量。
+      const wrapper = track(mount(GPIOResourceList, {
+        props: { resources: manyGpio, configs: [], nodeId: 'node-1' },
+        global: { stubs },
+      }))
+      expect(wrapper.findAll('[data-testid="gpio-resource-row"]')).toHaveLength(4)
+      expect(wrapper.text()).not.toContain('ESP32 已上报')
+
+      // 反证：把每行 text 剥掉**结构性的、本来就该相同的**部分
+      // （引脚号 + 「可用」状态标签）后，**不应再剩任何正文**。
+      // 这样若有人塞回一句"XX 已上报"式占位描述，剩余文本会非空 ⇒ 红。
+      // 注：不能直接比较"整行文本是否互不相同" —— 4 行合法地共享「可用」标签，
+      // 那样写会假红（我第一版就是这么写的，被这条用例自己拦下了）。
+      for (const row of wrapper.findAll('[data-testid="gpio-resource-row"]')) {
+        const residual = row.text()
+          .replace(/GPIO\s*\d+/g, '')
+          .replace(/可用/g, '')
+          .replace(/配置 GPIO/g, '')
+          .trim()
+        expect(residual, '未配置行残留了描述性文案（应为空）："' + residual + '"').toBe('')
+      }
+    })
+
+    it('过滤条按「已配置/未配置」真过滤', async () => {
+      const wrapper = track(mount(GPIOResourceList, {
+        props: { resources: manyGpio, configs: [gpioConfig(2)], nodeId: 'node-1' },
+        global: { stubs },
+      }))
+      expect(wrapper.findAll('[data-testid="gpio-resource-row"]')).toHaveLength(4)
+
+      const vm = wrapper.vm as unknown as { filter: string }
+      vm.filter = 'configured'
+      await wrapper.vm.$nextTick()
+      const configured = wrapper.findAll('[data-testid="gpio-resource-row"]')
+      expect(configured, '已配置筛选应只剩 1 行').toHaveLength(1)
+      expect(configured[0].text()).toContain('GPIO 2')
+
+      vm.filter = 'unconfigured'
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-testid="gpio-resource-row"]'), '未配置筛选应剩 3 行').toHaveLength(3)
+
+      vm.filter = 'all'
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-testid="gpio-resource-row"]')).toHaveLength(4)
+    })
+
+    it('筛选后为空时必须给说明（不能留白，否则用户以为页面坏了）', async () => {
+      const wrapper = track(mount(GPIOResourceList, {
+        props: { resources: manyGpio, configs: [], nodeId: 'node-1' },   // 全未配置
+        global: { stubs },
+      }))
+      ;(wrapper.vm as unknown as { filter: string }).filter = 'configured'
+      await wrapper.vm.$nextTick()
+      expect(wrapper.findAll('[data-testid="gpio-resource-row"]')).toHaveLength(0)
+      expect(wrapper.text()).toContain('没有已配置的 GPIO')
+    })
+
+    it('「无效配置」在设备**一个 GPIO 都没上报**时仍须显示（最需要它的场景）', () => {
+      // 这是我重构时真踩过的回归：把 staleConfigs 嵌进 `resources.length > 0` 后，
+      // 设备零上报时反而看不到孤儿配置 —— 而那正是它最该出现的时刻。
+      const wrapper = track(mount(GPIOResourceList, {
+        props: { resources: [], configs: [gpioConfig(9)], nodeId: 'node-1' },
+        global: { stubs },
+      }))
+      expect(wrapper.text()).toContain('无效配置')
+      expect(wrapper.text()).toContain('GPIO9')
+    })
+  })
+
+  // ── D6 / 规范 §4.4.5：移动端触控目标 ≥44px ──────────────────────────
+  //
+  // 为什么用源码断言：happy-dom **不应用 @media 查询**，挂载级测不出移动端尺寸
+  // （实测：删掉 44px 规则后全部挂载用例仍然通过 ⇒ 那条规则此前零覆盖）。
+  // 这里钉住"移动端断点内确实抬到 44px"，桌面密度不受影响。
+  describe('D6 移动端触控目标契约', () => {
+    it.each([
+      ['GPIOResourceList', gpioListSource],
+      ['PWMResourceList', pwmListSource],
+    ])('%s 在移动端断点内把操作按钮抬到 ≥44px', (_name, src) => {
+      // 取最后一个 @media (max-width: 768px) 块（两份文件都只有一个移动端断点）
+      const idx = src.indexOf('@media (max-width: 768px)')
+      expect(idx, '未找到移动端断点').toBeGreaterThan(-1)
+      const block = src.slice(idx, src.indexOf('</style>', idx))
+      expect(block, '移动端断点内缺少 min-height: 44px（规范 §4.4.5 MUST）').toMatch(/min-height:\s*44px/)
+      expect(block, '44px 规则未作用于 .el-button').toMatch(/\.el-button\)\s*\{[^}]*min-height:\s*44px/)
+    })
+
+    it('反证：桌面端**不得**被抬到 44px（那会让 8 行列表高度虚增）', () => {
+      // 桌面基础规则里不应出现 44px 的按钮高度 —— 桌面是鼠标场景，规范只要求移动端。
+      const desktopPart = gpioListSource.slice(0, gpioListSource.indexOf('@media (max-width: 768px)'))
+      expect(desktopPart).not.toMatch(/\.actions\s+:deep\(\.el-button\)/)
+    })
   })
 })
 

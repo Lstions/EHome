@@ -241,7 +241,7 @@ defineExpose({ applyRuntimeState })
 <style scoped>
 .pwm-resource-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .resource-list { list-style: none; margin: 0; padding: 0; }
-.resource-row { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(190px, 1.2fr) minmax(260px, 1.6fr) auto; align-items: center; gap: 12px; min-height: 64px; padding: 12px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; }
+.resource-row { display: grid; grid-template-columns: minmax(170px, auto) minmax(0, 1.2fr) minmax(260px, 1.6fr) auto; align-items: center; gap: 12px; min-height: 60px; padding: 10px 16px; border-bottom: 1px solid var(--el-border-color-lighter); position: relative; }
 .resource-row[data-state="configured"]::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--el-color-success); }
 .identity, .configuration, .runtime, .actions { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
 .runtime :deep(.el-slider) { min-width: 100px; flex: 1; }
@@ -250,5 +250,11 @@ defineExpose({ applyRuntimeState })
 .duty { font-family: monospace; font-weight: 600; }
 .feedback { grid-column: 1 / -1; color: var(--el-color-danger); }
 .stale-configs { display: flex; flex-direction: column; gap: 4px; padding: 8px 16px; border: 1px solid var(--el-color-warning-light-5); }
-@media (max-width: 768px) { .resource-row { grid-template-columns: 1fr auto; } .configuration, .runtime, .feedback { grid-column: 1 / -1; } }
+@media (max-width: 768px) {
+  .resource-row { grid-template-columns: 1fr auto; }
+  .configuration, .runtime, .feedback { grid-column: 1 / -1; }
+  /* D6 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px（与 GPIO 侧同款，保持两列表一致）。 */
+  .actions :deep(.el-button) { min-height: 44px; padding-left: 16px; padding-right: 16px; }
+  .actions { justify-content: flex-start; }
+}
 </style>
