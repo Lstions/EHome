@@ -1187,7 +1187,7 @@ describe('NodeOverview (生产页)', () => {
       expect(mockApplyRuntimeState).toHaveBeenCalledWith('PWM0', null, undefined)
     })
 
-    it('「配置/编辑」落点必须给用户可读反馈，且**不得**指向做不到的页面', async () => {
+    it('「配置/编辑」必须真的打开配置表单，且**不得**指向做不到的页面', async () => {
       // ElMessage 未整体 mock（会破坏 feedback 的其它出口），故对真实模块装 spy。
       const { ElMessage } = await import('element-plus')
       const warningSpy = vi.spyOn(ElMessage, 'warning')
@@ -1197,16 +1197,25 @@ describe('NodeOverview (生产页)', () => {
       const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
       await tab!.trigger('click')
       await flushPromises()
-      // 触发 emit：真实行控件的「配置 GPIO」按钮就是发这个事件
-      wrapper.findComponent({ name: 'PeripheralControl' }).vm.$emit('configure-gpio', 7)
-      await flushPromises()
 
-      // 改前（我第一版）是切到「总线配置」TAB —— 但该 TAB 对 gpio/pwm 的
-      // busSupportsChannels=false，其按钮显示「此资源不支持通道」且 disabled，
-      // 全文件对 gpioApi/pwmApi 零调用 ⇒ 切过去**仍然无处可配**，
-      // 等于把"点了没反应"换成"跳过去也没反应"。
-      expect(warningSpy).toHaveBeenCalled()
-      // 关键：仍停在「外设控制」TAB（那里至少读写可用），不能跳到做不到的页面
+      // 历史三段（都写在断言里，防止退回）：
+      //   ① 最初：点了没反应（无任何反馈）；
+      //   ② E1 第一版：切到「总线配置」TAB —— 但该 TAB 对 gpio/pwm 的
+      //      busSupportsChannels=false（:1030 只含 uart/i2c/spi/adc），按钮显示
+      //      「此资源不支持通道」且 disabled ⇒ 跳过去**仍然无处可配**；
+      //   ③ E1 第二版：如实弹「尚未接线」提示（不假装有路，但能力仍是断的）；
+      //   ④ **现在**：配置表单已由 PeripheralControl 自带（共享组件
+      //      PeripheralConfigDialog），点击即真的能配置。
+      //
+      // 因此本用例的契约升级为：**不得**再弹"尚未接线"这类提示
+      //（否则用户会先看到对话框、再看到一句说它不存在的提示，自相矛盾）。
+      const warningCalls = warningSpy.mock.calls.map(call => String(call[0]))
+      expect(
+        warningCalls.some(msg => msg.includes('尚未接线')),
+        '配置入口已接线，不得再宣称"尚未接线"',
+      ).toBe(false)
+
+      // 关键：仍停在「外设控制」TAB，不能跳到做不到的页面
       expect(wrapper.find('.peripheral-control-stub').exists()).toBe(true)
       warningSpy.mockRestore()
     })

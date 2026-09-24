@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
   gpioDelete: vi.fn(),
   pwmList: vi.fn(),
   pwmDelete: vi.fn(),
+  gpioCreate: vi.fn(),
+  gpioUpdate: vi.fn(),
+  pwmCreate: vi.fn(),
+  pwmUpdate: vi.fn(),
   channelList: vi.fn(),
   subscribe: vi.fn(),
   unsubscribe: vi.fn(),
@@ -24,8 +28,11 @@ const wsState = vi.hoisted(() => ({ connected: false }))
 
 vi.mock('@/api/node', () => ({ nodeApi: { getCapabilities: mocks.getCapabilities } }))
 vi.mock('@/api/periph', () => ({
-  gpioApi: { list: mocks.gpioList, delete: mocks.gpioDelete },
-  pwmApi: { list: mocks.pwmList, delete: mocks.pwmDelete },
+  gpioApi: { list: mocks.gpioList, delete: mocks.gpioDelete, create: mocks.gpioCreate, update: mocks.gpioUpdate },
+  pwmApi: {
+    list: mocks.pwmList, delete: mocks.pwmDelete,
+    create: mocks.pwmCreate, update: mocks.pwmUpdate,
+  },
 }))
 vi.mock('@/api/channel', () => ({ channelApi: { getList: mocks.channelList } }))
 vi.mock('@/stores/websocket', () => ({
@@ -287,5 +294,111 @@ describe('PeripheralControl', () => {
     wrapper.unmount()
     wrappers.splice(wrappers.indexOf(wrapper), 1)
     expect(mocks.unsubscribe).not.toHaveBeenCalled()
+  })
+
+  // ── 外设「配置」能力必须真的可达（C5 能力迁移的核心断言）──────────────
+  //
+  // 背景：GPIO/PWM 配置的**创建/编辑**在整仓只由死文件 ChannelPanel 实现，
+  // 生产侧因此完全不可达（设备上报的引脚能列出，但点「配置」无处可去）。
+  // 本组件现自带 PeripheralConfigDialog（与 ChannelPanel 同形的共享实现），
+  // 下面这些用例锁住"点了真的能配"，防止将来退回"只 emit 不落地"。
+  describe('外设配置可达性（C5 能力迁移）', () => {
+    // 对话框由真实 el-dialog 渲染并 **teleport 到 document.body** ——
+    // 若 mount 不 attachTo，teleport 目标之外的内容不会被渲染，
+    // 断言会看到 null（这不是"表单没渲染"，而是"我没挂到文档上"）。
+    // 故本组用例统一 attachTo document.body，并在 afterEach 清理。
+    function mountAttached(offline = false) {
+      const wrapper = track(mount(PeripheralControl, {
+        props: { nodeId: 'node-1', offline } as any,
+        global: { stubs },
+        attachTo: document.body,
+      }))
+      return wrapper
+    }
+    const findSubmit = (testid: string) =>
+      Array.from(document.querySelectorAll('button'))
+        .find(b => b.getAttribute('data-testid') === testid) as HTMLButtonElement | undefined
+
+    afterEach(() => { document.body.innerHTML = '' })
+
+    it('点「配置 GPIO」打开表单；提交后调用 gpioApi.create 并带 pin', async () => {
+      mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [{ id: 'GPIO2', pin: 2, enabled: true }], pwm: [] } })
+      mocks.gpioList.mockResolvedValue([])   // 未配置 ⇒ 走 create 分支
+      mocks.pwmList.mockResolvedValue([])
+      mocks.gpioCreate.mockResolvedValue(undefined)
+
+      const wrapper = mountAttached()
+      await flushPromises()
+      await wrapper.get('.configure-gpio').trigger('click')
+      await flushPromises()
+
+      // 表单必须真的出现（而不是只 emit 一个事件给父组件）
+      expect(document.body.querySelector('[data-testid="gpio-direction"]'), 'GPIO 配置表单未渲染').not.toBeNull()
+
+      const submit = findSubmit('submit-gpio')
+      expect(submit, '缺少提交按钮').toBeTruthy()
+      submit!.click()
+      await flushPromises()
+
+      expect(mocks.gpioCreate, '应走 create（该引脚尚无配置）').toHaveBeenCalledWith(
+        'node-1',
+        expect.objectContaining({ pin: 2 }),
+      )
+    })
+
+    it('已配置的引脚点「编辑」走 gpioApi.update 而非 create', async () => {
+      mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [{ id: 'GPIO2', pin: 2, enabled: true }], pwm: [] } })
+      mocks.gpioList.mockResolvedValue([gpioConfig(2)])   // 已配置 ⇒ 走 update
+      mocks.pwmList.mockResolvedValue([])
+      mocks.gpioUpdate.mockResolvedValue(undefined)
+
+      const wrapper = mountAttached()
+      await flushPromises()
+      await wrapper.get('.configure-gpio').trigger('click')
+      await flushPromises()
+
+      findSubmit('submit-gpio')!.click()
+      await flushPromises()
+
+      expect(mocks.gpioUpdate).toHaveBeenCalledWith('node-1', 2, expect.anything())
+      expect(mocks.gpioCreate, '编辑不得走 create（否则会 409 或重复配置）').not.toHaveBeenCalled()
+    })
+
+    it('PWM「配置」同样开表单并走 pwmApi.create（带 hardware_id）', async () => {
+      mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [], pwm: [{ id: 'PWM1', channel: 1, timer_count: 4, max_resolution_bits: 14 }] } })
+      mocks.gpioList.mockResolvedValue([])
+      mocks.pwmList.mockResolvedValue([])
+      mocks.pwmCreate.mockResolvedValue(undefined)
+
+      const wrapper = mountAttached()
+      await flushPromises()
+      await wrapper.get('.configure-pwm').trigger('click')
+      await flushPromises()
+
+      expect(document.body.querySelector('[data-testid="pwm-pin"]'), 'PWM 配置表单未渲染').not.toBeNull()
+      findSubmit('submit-pwm')!.click()
+      await flushPromises()
+
+      expect(mocks.pwmCreate).toHaveBeenCalledWith(
+        'node-1',
+        expect.objectContaining({ hardware_id: 'PWM1' }),
+      )
+    })
+
+    it('离线时不得写配置（提交被拦下并提示）', async () => {
+      mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [{ id: 'GPIO2', pin: 2, enabled: true }], pwm: [] } })
+      mocks.gpioList.mockResolvedValue([])
+      mocks.pwmList.mockResolvedValue([])
+
+      const wrapper = mountAttached(true)   // offline
+      await flushPromises()
+      await wrapper.get('.configure-gpio').trigger('click')
+      await flushPromises()
+
+      findSubmit('submit-gpio')!.click()
+      await flushPromises()
+
+      expect(mocks.gpioCreate, '离线态不得发写请求').not.toHaveBeenCalled()
+    })
   })
 })

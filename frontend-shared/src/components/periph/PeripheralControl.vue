@@ -22,8 +22,8 @@
         :loading="loading && !hasLoaded"
         :occupied-pins="gpioOccupiedPins"
         :register-pending="registerPendingGpio"
-        @configure="pin => emit('configure-gpio', pin)"
-        @edit="pin => emit('edit-gpio', pin)"
+        @configure="pin => { emit('configure-gpio', pin); openGpioDialog(pin) }"
+        @edit="pin => { emit('edit-gpio', pin); openGpioDialog(pin) }"
         @remove="removeGpio"
       />
     </section>
@@ -39,11 +39,28 @@
         :loading="loading && !hasLoaded"
         :available-pins="availablePwmPins"
         :register-pending="registerPendingPwm"
-        @configure="hardwareId => emit('configure-pwm', hardwareId)"
-        @edit="hardwareId => emit('edit-pwm', hardwareId)"
+        @configure="hardwareId => { emit('configure-pwm', hardwareId); openPwmDialog(hardwareId) }"
+        @edit="hardwareId => { emit('edit-pwm', hardwareId); openPwmDialog(hardwareId) }"
         @remove="removePwm"
       />
     </section>
+
+    <!-- 配置创建/编辑对话框（与 ChannelPanel 共用同一份实现，见组件头注释）。
+         `@configure-*` 仍向上 emit，供父组件做额外联动；本组件同时直接开对话框，
+         使「配置」按钮在存活路径上**真的有落点**（改动前该按钮经 NodeOverview
+         只弹"尚未接线"，因为唯一实现被封在死文件 ChannelPanel 中）。 -->
+    <PeripheralConfigDialog
+      v-model="dialogVisible"
+      :kind="dialogKind"
+      :editing="dialogEditing"
+      :gpio="dialogGpio"
+      :pwm="dialogPwm"
+      :available-pins="availablePwmPins"
+      :max-resolution="dialogMaxResolution"
+      :saving="dialogSaving"
+      @submit="onDialogSubmit"
+      @closed="resetDialogState"
+    />
   </div>
 </template>
 
@@ -58,6 +75,8 @@ import { channelApi } from '@/api/channel'
 import { enabledChannelPins, type ChannelPinConfig } from '@/utils/channelPins'
 import GPIOResourceList from './GPIOResourceList.vue'
 import PWMResourceList from './PWMResourceList.vue'
+import PeripheralConfigDialog from './PeripheralConfigDialog.vue'
+import type { GpioFormModel, PwmFormModel } from './PeripheralConfigDialog.vue'
 
 
 const props = withDefaults(defineProps<{
@@ -132,6 +151,124 @@ const loadAll = async () => {
     feedback.handleError(error, '加载外设资源失败')
   } finally {
     if (!disposed && generation === loadGeneration && props.nodeId === nodeId) loading.value = false
+  }
+}
+
+// ── 配置创建/编辑对话框 ──────────────────────────────────────────────────
+//
+// 让「配置」/「编辑」按钮在**存活路径**上真的有落点。改动前这两个按钮经
+// NodeOverview 只弹「尚未接线」提示 —— 因为 GPIO/PWM 配置表单的唯一实现被封在
+// `ChannelPanel.vue`（只被死文件 NodeDetail 引用）。现改用共享组件
+// `PeripheralConfigDialog.vue`，与 ChannelPanel 同形，故将来删除 ChannelPanel
+// 不会带走任何能力（C5 从"能力迁移"退化为"纯删除"）。
+const dialogVisible = ref(false)
+const dialogKind = ref<'gpio' | 'pwm'>('gpio')
+const dialogEditing = ref(false)
+const dialogSaving = ref(false)
+const dialogGpio = ref<GpioFormModel | undefined>(undefined)
+const dialogPwm = ref<PwmFormModel | undefined>(undefined)
+/** 代际快照：对话框提交是异步的，节点切换后回来的响应不得再改 UI */
+let dialogGeneration = 0
+
+const resetDialogState = () => {
+  dialogEditing.value = false
+  dialogGpio.value = undefined
+  dialogPwm.value = undefined
+}
+
+/** PWM 分辨率上限取设备能力；缺失时回落 14（与 ChannelPanel 的默认一致） */
+const dialogMaxResolution = computed(() => {
+  const res = hardwarePwm.value.find(r => r.id === dialogPwm.value?.hardware_id)
+  const max = Number((res as { max_resolution?: number } | undefined)?.max_resolution)
+  return Number.isInteger(max) && max >= 4 ? max : 14
+})
+
+function openGpioDialog(pin: number) {
+  const cfg = gpioConfigs.value.find(item => item.pin === pin)
+  dialogKind.value = 'gpio'
+  dialogEditing.value = !!cfg
+  dialogGpio.value = {
+    pin,
+    direction: cfg?.direction ?? 1,
+    initial_level: cfg?.initial_level ?? 0,
+    label: cfg?.label || '',
+  }
+  dialogGeneration = ++loadGeneration
+  dialogVisible.value = true
+}
+
+function openPwmDialog(hardwareId: string) {
+  const cfg = pwmConfigs.value.find(item => item.hardware_id === hardwareId)
+  const res = hardwarePwm.value.find(r => r.id === hardwareId)
+  dialogKind.value = 'pwm'
+  dialogEditing.value = !!cfg
+  dialogPwm.value = {
+    hardware_id: hardwareId,
+    channel: cfg?.channel ?? (Number((res as { channel?: number } | undefined)?.channel) || 0),
+    pin: cfg?.pin ?? -1,
+    frequency: cfg?.frequency ?? 1000,
+    duty: cfg?.duty ?? 0,
+    resolution: cfg?.resolution ?? 14,
+    auto_start: cfg?.auto_start ?? false,
+    label: cfg?.label || '',
+  }
+  dialogGeneration = ++loadGeneration
+  dialogVisible.value = true
+}
+
+async function onDialogSubmit(payload: GpioFormModel | PwmFormModel) {
+  if (props.offline) {
+    ElMessage.warning('节点离线，无法写入配置')
+    return
+  }
+  const nodeId = props.nodeId
+  const generation = dialogGeneration
+  const editing = dialogEditing.value
+  const kind = dialogKind.value
+  dialogSaving.value = true
+  try {
+    if (kind === 'gpio') {
+      const form = payload as GpioFormModel
+      const body = {
+        direction: form.direction,
+        initial_level: form.initial_level,
+        label: form.label,
+      }
+      // 与 ChannelPanel 同语义：编辑改 pin 自身，创建带 pin
+      if (editing) await gpioApi.update(nodeId, form.pin, body)
+      else await gpioApi.create(nodeId, { pin: form.pin, ...body })
+    } else {
+      const form = payload as PwmFormModel
+      const body = {
+        channel: form.channel,
+        pin: form.pin,
+        frequency: form.frequency,
+        duty: form.duty,
+        resolution: form.resolution,
+        auto_start: form.auto_start,
+        label: form.label,
+      }
+      if (editing) await pwmApi.update(nodeId, form.hardware_id, body)
+      else await pwmApi.create(nodeId, { hardware_id: form.hardware_id, ...body })
+    }
+    if (generation !== loadGeneration || props.nodeId !== nodeId) return
+    ElMessage.success(editing ? '配置已更新' : '配置已添加')
+    dialogVisible.value = false
+    await loadAll()
+  } catch (error: unknown) {
+    if (generation !== loadGeneration || props.nodeId !== nodeId) return
+    const msg = (error as { message?: string })?.message || ''
+    // 409/pin 冲突是**正常业务结果**，不是异常：与 ChannelPanel.vue:1213 同一判据，
+    // 否则用户看到红色报错而不是"该引脚已有配置"。
+    if (!editing && /already configured|Conflict|409/i.test(msg)) {
+      ElMessage.warning(kind === 'gpio' ? '该引脚已存在配置' : '该 PWM 资源已存在配置')
+      dialogVisible.value = false
+      await loadAll()
+    } else {
+      feedback.handleError(error, `${editing ? '更新' : '添加'}配置失败`)
+    }
+  } finally {
+    if (generation === loadGeneration && props.nodeId === nodeId) dialogSaving.value = false
   }
 }
 

@@ -1933,26 +1933,23 @@ const onPeriphResult = (message: WebSocketMessage) => {
 }
 
 /**
- * GPIO/PWM 的「配置 / 编辑」落点。
+ * GPIO/PWM 的「配置 / 编辑」联动。
  *
- * 为什么不在这里直接开配置弹窗：资源的创建/编辑表单（引脚、方向、上下拉、PWM 频率与
- * 占空比约束）与通道表单共用后端 manifest 校验，唯一的生产实现在 `ChannelPanel` 中，
- * 而它属「先接线、后迁移」的待迁移批次。本轮若复制一份表单，等于制造第二套真相。
+ * **本函数不再弹提示**（历史：它曾弹「配置编辑入口尚未接线」）。
+ * 原因：`PeripheralControl.vue` 现已自带 `PeripheralConfigDialog`，点击
+ * 「配置」/「编辑」会真正打开表单 —— 若本函数仍弹"尚未接线"，用户会**先看到对话框、
+ * 再看到一句说它不存在的提示**，自相矛盾。
  *
- * ⚠️ **不要切到「总线配置」TAB**（我第一版就是这么写的，是错的）：
- * 该 TAB 对 gpio/pwm 有 `busSupportsChannels=false`（`NodeOverview.vue:1030` 只含
- * uart/i2c/spi/adc），其主按钮会显示「此资源不支持通道」且被 `disabled`；
- * 全文件对 gpioApi/pwmApi **零调用**。也就是说切过去之后用户**仍然无处可配**，
- * 等于把一个"点了没反应"换成"跳过去也没反应"——正是本轮在修的缺陷类型。
+ * 保留该 emit 链路的意义：父组件需要有"用户正在配置外设"的信号位，
+ * 将来若要在配置前后做额外联动（如暂停轮询、埋点、权限校验）由此接入。
  *
- * 因此这里改为**如实说明**：读写控制可用（本 TAB 已提供），配置编辑待迁移。
- * 「如实说明 + 不假装有路」优于「跳到一个做不到的页面」。
+ * ⚠️ 仍**不要**切到「总线配置」TAB（这是 E1 第一版的错误）：
+ * 该 TAB 对 gpio/pwm 有 `busSupportsChannels=false`（本文件 :1030 只含 uart/i2c/spi/adc），
+ * 主按钮显示「此资源不支持通道」且 disabled，全文件对 gpioApi/pwmApi 零调用。
  */
-function onPeripheralConfigure(resourceName: string) {
-  ElMessage.warning(
-    `${resourceName} 的配置编辑入口尚未接线（待 ChannelPanel 能力迁移）；`
-    + '当前「外设控制」TAB 已支持读写/启停/占空比控制。',
-  )
+function onPeripheralConfigure(_resourceName: string) {
+  // 对话框由 PeripheralControl 自行打开（见其 @configure/@edit 处理）。
+  // 此处刻意不弹消息：配置动作本身已有明确视觉反馈。
 }
 
 // ── 生命周期 ──
