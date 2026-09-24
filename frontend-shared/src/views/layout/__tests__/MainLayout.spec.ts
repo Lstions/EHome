@@ -376,4 +376,51 @@ describe('MainLayout.vue', () => {
     expect(mockPush).toHaveBeenCalledWith('/logical-device')
     expect(mockPush).not.toHaveBeenCalledWith('/edge-device')
   })
+
+  // ── 分组菜单在深色侧栏上的样式契约（防回退围栏）────────────────────────
+  //
+  // 背景：Phase 2.4 把 14 项平铺菜单改成 5 组 `el-sub-menu`，但样式只写了
+  // `.el-menu-item`。EP 会在每个分组内**再插一层 `<ul class="el-menu el-menu--inline">`**，
+  // 那一层没人覆盖 ⇒ 沿用 EP 默认**白底**。
+  // 实测（Chromium 计算值）：5 个分组的 `.el-menu--inline` 全是 `rgb(255,255,255)`，
+  // 分组标题 `.el-sub-menu__title` 是继承来的 `rgb(48,49,51)`（近黑）——
+  // 深色侧栏上出现 5 块白底 + 5 个几乎看不见的标题（用户截图复现）。
+  //
+  // 这里用源码契约测试把它钉住：**任何人删掉透明化规则，本用例当场红**。
+  // 不用挂载断言的原因：happy-dom 不加载 EP 真实 CSS，计算值拿不到白底，
+  // 那样写出来的断言测不到真问题（假绿）。
+  describe('分组菜单样式契约（防白底/防标题不可见回退）', () => {
+    it('桌面与移动都必须把 el-sub-menu 内层容器置为透明', () => {
+      // 桌面：.sidebar 作用域
+      expect(
+        /\.sidebar\s+:deep\(\.el-sub-menu\),[\s\S]{0,200}?background:\s*transparent/.test(layoutSource),
+        '桌面侧栏缺少「el-sub-menu / __title / --inline 透明」规则 —— 分组会重新出现白底',
+      ).toBe(true)
+      // 移动：.mobile-sidebar-drawer 作用域（浅色抽屉，同样需要透明）
+      expect(
+        /\.mobile-sidebar-drawer\s+\.el-sub-menu\),[\s\S]{0,200}?background:\s*transparent/.test(layoutSource),
+        '移动抽屉缺少同款透明规则',
+      ).toBe(true)
+    })
+
+    it('分组标题必须显式配色（不得依赖继承的近黑默认值）', () => {
+      // 桌面：深色底上用白色系变量
+      expect(layoutSource).toMatch(/\.sidebar\s+:deep\(\.el-sub-menu__title\)\s*\{[\s\S]{0,300}?color:\s*var\(--sidebar-group-title/)
+      // 移动：浅色底上用次级文字色
+      expect(layoutSource).toMatch(/\.mobile-sidebar-drawer\s+\.el-sub-menu__title\)\s*\{[\s\S]{0,300}?color:\s*var\(--el-text-color-secondary\)/)
+    })
+
+    it('分组内子项必须缩进（与分组标题分层）', () => {
+      // 注意选择器被 :deep(...) 包裹，故不能要求 `.el-menu-item` 后紧跟 `{`
+      expect(layoutSource).toMatch(/\.sidebar\s+:deep\(\.el-sub-menu\s+\.el-menu-item\)[\s\S]{0,120}?padding-left:\s*36px/)
+      expect(layoutSource).toMatch(/\.mobile-sidebar-drawer\s+\.el-sub-menu\s+\.el-menu-item\)[\s\S]{0,120}?padding-left:\s*36px/)
+    })
+
+    it('反证：不得只剩 .el-menu-item 规则（那就是本次缺陷的原始形态）', () => {
+      // 若 el-sub-menu 三件套规则被整体删除，上面几条会红；
+      // 这条额外确认「两个作用域都覆盖了」，防止只修桌面漏移动（或反之）。
+      const subMenuRules = layoutSource.match(/el-sub-menu__title\)\s*\{/g) ?? []
+      expect(subMenuRules.length, 'el-sub-menu__title 规则应至少覆盖桌面+移动两处').toBeGreaterThanOrEqual(2)
+    })
+  })
 })

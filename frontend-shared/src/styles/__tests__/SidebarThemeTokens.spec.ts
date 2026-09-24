@@ -241,6 +241,38 @@ describe('F16 侧栏主题 token 合同', () => {
     }
   })
 
+  it('分组标题在亮/暗两主题下均达 WCAG AA 4.5:1（Phase 2.4 分组后新增护栏）', () => {
+    // 背景：Phase 2.4 把 14 项平铺菜单改成 5 组 el-sub-menu，但分组标题
+    // （`.el-sub-menu__title`）**没有配色** ⇒ 继承 EP 默认 rgb(48,49,51)（近黑），
+    // 在深色侧栏上几乎不可见（用户截图复现）。修复时给 token 赋值，此处按同一口径复算。
+    //
+    // α 取值是用本函数算出来的，不是目测：0.45 → 4.25:1（**不合格**，初版就是它）、
+    // 0.50 → 4.90:1（刚过线）、0.55 → 5.62:1（采用）。若将来有人调低 α，本用例会红。
+    for (const theme of ['light', 'dark'] as const) {
+      const vars = theme === 'light' ? light : dark
+      const raw = vars.get('--sidebar-group-title')
+      expect(raw, '--sidebar-group-title 未定义').toBeTruthy()
+      const text = parseColor(raw!)
+      const a = alphaOf(raw!)
+      const [s0, s1] = gradientStops(vars.get('--sidebar-bg-gradient')!)
+      let worst = Infinity
+      let worstBg: RGB = s0
+      // 分组标题是半透明白**直接压在侧栏渐变上**（不像活动项还有 active-bg 叠一层），
+      // 故合成基准就是渐变本身，遍历全程取最差位置（保守口径）。
+      for (let t = 0; t <= 1.0001; t += 0.02) {
+        const bgStop = atStop(s0, s1, t)
+        const composed = over(text, a, bgStop)
+        const r = contrast(composed, bgStop)
+        if (r < worst) { worst = r; worstBg = composed }
+      }
+      expect(
+        worst,
+        theme + ' 主题分组标题对比度 ' + worst.toFixed(2) + ':1（' + raw +
+          ' vs rgb(' + worstBg.join(',') + ')）低于 AA 4.5'
+      ).toBeGreaterThanOrEqual(4.5)
+    }
+  })
+
   it('侧栏样式里每个 var(--x, fallback) 的 --x 都真的在 theme.css 定义（"引用了不存在的 token"比硬编码更隐蔽）', () => {
     const sidebarRegion = layoutSource.slice(
       layoutSource.indexOf('/* ========== 侧边栏'),

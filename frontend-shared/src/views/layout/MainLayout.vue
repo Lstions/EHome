@@ -976,6 +976,64 @@ onUnmounted(() => {
   padding: 8px;
 }
 
+/* ========== 分组（el-sub-menu）在深色侧栏上的样式 ==========
+ *
+ * 背景交代：本侧栏是深色渐变（`--sidebar-bg-gradient`），而下列规则此前**只写了
+ * `.el-menu-item`**。Phase 2.4 把 14 项平铺菜单改成 5 组 `el-sub-menu` 后，
+ * Element Plus 会在每个分组内**再插一层 `<ul class="el-menu el-menu--inline">`** ——
+ * 这一层没人覆盖，于是沿用 EP 默认的**白底**。实测（Chromium 计算值）：
+ *   5 个分组的 `.el-menu--inline` background 全部是 `rgb(255,255,255)`，
+ *   分组标题 `.el-sub-menu__title` 颜色是继承来的 `rgb(48,49,51)`（近黑）。
+ * 后果：深色侧栏上出现 5 块白底，且 5 个分组标题几乎不可见（截图已复现）。
+ *
+ * 修法：把"内层容器必须透明、标题必须用侧栏前景色"作为**契约**写死，
+ * 桌面与移动两处共用同一组值（见下方 `:global(.mobile-sidebar-drawer ...)` 同款规则）。
+ * 这样将来再调整分组结构也不会重新引入白底。 */
+.sidebar :deep(.el-sub-menu),
+.sidebar :deep(.el-sub-menu__title),
+.sidebar :deep(.el-menu--inline) {
+  background: transparent;
+}
+
+.sidebar :deep(.el-sub-menu__title) {
+  height: 44px;
+  margin: 2px 0;
+  border-radius: 8px;
+  /* 分组标题是**结构性标签**：比叶子项更弱（次级色），但仍必须可读。
+     实测改前是 rgb(48,49,51)（EP 默认近黑），在深色底上对比度不足 2:1。 */
+  color: var(--sidebar-group-title, rgba(255, 255, 255, 0.45));
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  transition: all 0.3s;
+}
+
+.sidebar :deep(.el-sub-menu__title:hover) {
+  background: var(--sidebar-hover-bg, rgba(255, 255, 255, 0.08));
+  color: var(--sidebar-text-hover, #fff);
+}
+
+.sidebar :deep(.el-sub-menu__title:focus-visible) {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
+  color: var(--sidebar-text-hover, #fff);
+}
+
+/* 分组内的子项需要缩进，才能在视觉上与分组标题分层
+   （EP 默认的 .el-menu--inline 缩进在透明化后仍需保留右移） */
+.sidebar :deep(.el-menu--inline) {
+  padding-left: 0;
+}
+
+.sidebar :deep(.el-sub-menu .el-menu-item) {
+  padding-left: 36px !important;
+}
+
+/* 分组展开箭头沿用侧栏前景色（默认继承的是近黑，同样不可见） */
+.sidebar :deep(.el-sub-menu__icon-arrow) {
+  color: var(--sidebar-text, rgba(255, 255, 255, 0.65));
+}
+
 .sidebar :deep(.el-menu-item) {
   height: 44px;
   margin: 2px 0;
@@ -1381,6 +1439,51 @@ onUnmounted(() => {
   border-radius: 8px;
   color: var(--el-text-color-regular);
   transition: all 0.3s;
+}
+
+/* 分组（el-sub-menu）在**浅色**抽屉里的同款契约 —— 见桌面端同名规则的注释。
+ * 与桌面端的差异只有配色（抽屉是浅色底，故标题用次级文字色而非白色系），
+ * 结构契约完全一致：内层 `ul.el-menu--inline` 必须透明，箭头必须可见。
+ * 移动端此前完全没有 .el-sub-menu 相关规则，若不补，抽屉里同样会出现白底叠白底
+ * （EP 默认白 + 抽屉白，子项看似"陷进去"）。 */
+:global(.mobile-sidebar-drawer .el-sub-menu),
+:global(.mobile-sidebar-drawer .el-sub-menu__title),
+:global(.mobile-sidebar-drawer .el-menu--inline) {
+  background: transparent;
+}
+
+:global(.mobile-sidebar-drawer .el-sub-menu__title) {
+  height: 44px;
+  margin: 2px 0;
+  border-radius: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  transition: all 0.3s;
+}
+
+:global(.mobile-sidebar-drawer .el-sub-menu__title:hover) {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+}
+
+:global(.mobile-sidebar-drawer .el-sub-menu__title:focus-visible) {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
+  color: var(--el-color-primary);
+}
+
+:global(.mobile-sidebar-drawer .el-menu--inline) {
+  padding-left: 0;
+}
+
+:global(.mobile-sidebar-drawer .el-sub-menu .el-menu-item) {
+  padding-left: 36px !important;
+}
+
+:global(.mobile-sidebar-drawer .el-sub-menu__icon-arrow) {
+  color: var(--el-text-color-secondary);
 }
 
 :global(.mobile-sidebar-drawer .el-menu-item:hover) {
