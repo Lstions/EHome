@@ -1246,4 +1246,25 @@ describe('NodeOverview (生产页)', () => {
       expect(wrapper.find('.tab-item.active').text()).toContain('基本信息')
     })
   })
+
+  // ── 从 NodeDetail.vue 迁移过来的断言（该文件已删除，见 C5 死代码清理）──────
+  //
+  // 迁移原则：只搬"守卫的是**用户可见行为**"的断言，不搬"锁死死文件实现细节"的。
+  // 死文件的模板结构断言（:column="descColumns"、mobile-table-wrapper 数量等）
+  // **不迁移** —— 它们本就是"源码字符串锁实现"，NodeOverview 用 CSS 断点 +
+  // .bus-table-wrap 实现了等价的移动端横滑，锁 class 名只会阻碍将来的正常重构。
+  describe('生存页面的展示映射守卫（迁移自 NodeDetail.spec）', () => {
+    it('离线节点不得显示"同步中"：离线覆盖优先于后端快照', () => {
+      // 这条是**真实缺陷守卫**：后端快照可能仍是 syncing，而设备已离线，
+      // 直接透传会让用户看到"离线设备正在同步"的矛盾状态。
+      expect(source).toMatch(/if \(nodeOffline\.value\) return '离线'/)
+      expect(source).toContain('configSyncStateLabel')
+      // 反证：不得把后端状态直接透传（那就丢了离线覆盖）
+      expect(source).not.toMatch(/syncStateLabel = computed\(\(\) => configSyncStateLabel\(/)
+    })
+
+    it('关联设备读的是所请求的缓存（不是全量/上一页残留）', () => {
+      expect(source).toContain('edgeDeviceStore.getCachedList(')
+    })
+  })
 })

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import nodeDetailSource from '../NodeDetail.vue?raw'
 import nodeOverviewSource from '../NodeOverview.vue?raw'
 
 /**
@@ -15,13 +14,18 @@ import nodeOverviewSource from '../NodeOverview.vue?raw'
  * 本门禁改为**直接解析后端源码**取真源：
  *   - 读不到 / 解析不出状态 ⇒ 抛错（防止路径写错变成空集合 ⇒ 全绿）；
  *   - 解析出的集合做下界断言（>= 5 且有 needs_retry）⇒ 防止正则失效；
- *   - NodeDetail / NodeOverview 的每个状态映射与真源**双向相等**（不得多、不得少）。
+ *   - NodeOverview 的状态映射与真源**双向相等**（不得多、不得少）。
  *
- * 覆盖面：NodeDetail.vue 的 OTA_STATUS_TYPES / OTA_STATUS_TEXTS，
- *        NodeOverview.vue 的 otaStatusText.texts / otaTagClass.classes。
- *        （NodeDetail 的 OTA_STATUS_TYPES 是 el-tag 的 type 集，
- *          'info'/'warning'/'success'/'danger' 是 Element Plus 的类型词表，
- *          不是状态名，故按"键"而不是"值"校验。）
+ * 覆盖面：NodeOverview.vue 的 otaStatusText.texts / otaTagClass.classes
+ *        —— 它是**存活的唯一** OTA 状态真源（`/node/:id` 与 `/node/:id/overview`
+ *        两个路由都渲染它，见 router/index.ts:49-56）。
+ *
+ * 历史：本文件曾同时校验死文件 `NodeDetail.vue` 的 OTA_STATUS_TYPES/TEXTS。
+ *       删除该文件前已用脚本核实**两者逐键逐值等价**（8 键全同），
+ *       因此该分支的断言是"重复真源的自我比对"，删除它**不损失覆盖面**；
+ *       其中唯一有独立价值的断言（"8 态文案必须是中文且不等于状态名"，
+ *       对应本仓"文案走 texts[status] || status ⇒ 中文界面原样显示英文"的真实缺陷）
+ *       已**迁移**到 NodeOverview 分支，未随文件一起消失。
  */
 
 // ── 真源 ──────────────────────────────────────────────────────────────
@@ -89,11 +93,6 @@ interface StatusRuleMap {
   constName: string
   statuses: string[]
   rules: Map<string, string>
-}
-
-function statusRuleMapOf(source: string, constName: string): StatusRuleMap {
-  const block = ruleBlockOf(source, constName)
-  return statusRuleMapOfBlock(constName, block)
 }
 
 /** 去掉行注释与块注释（遵守引号状态，避免误删字符串里的 "//"）。 */
@@ -213,9 +212,6 @@ function auditStatusRuleMap(
 }
 
 /** 把映射块的原始文本还原成可比较的形态（用于 cancelled 残留检查）。 */
-function ruleMapRawOf(source: string, constName: string): string {
-  return ruleBlockOf(source, constName)
-}
 function localRuleMapRawOf(source: string, mapConstName: string, fnName: string): string {
   const fnStart = source.indexOf('function ' + fnName)
   if (fnStart < 0) throw new Error('找不到函数: ' + fnName)
@@ -304,15 +300,6 @@ describe('门禁自身有效（防止"扫描器坏掉后永远绿"）', () => {
   })
 
   it('规则块是配对截取，没有吞到后续代码', () => {
-    const types = ruleMapRawOf(nodeDetailSource, 'OTA_STATUS_TYPES')
-    expect(types.startsWith('{')).toBe(true)
-    // 若退化成"截到文件尾"，块内会混进紧随其后的 OTA_STATUS_TEXTS
-    expect(types, '截取越界：把 OTA_STATUS_TEXTS 吞进来了').not.toContain('OTA_STATUS_TEXTS')
-
-    const texts = ruleMapRawOf(nodeDetailSource, 'OTA_STATUS_TEXTS')
-    expect(texts.startsWith('{')).toBe(true)
-    expect(texts, '截取越界：把 getOTAStatusType 吞进来了').not.toContain('getOTAStatusType')
-
     const overview = localRuleMapRawOf(nodeOverviewSource, 'texts', 'otaStatusText')
     expect(overview.startsWith('{')).toBe(true)
     expect(overview, '截取越界：把 otaTagClass 吞进来了').not.toContain('otaTagClass')
@@ -320,8 +307,6 @@ describe('门禁自身有效（防止"扫描器坏掉后永远绿"）', () => {
 
   it('扫描面非空：每个被检查的映射都真的解析出了条目', () => {
     const scans = [
-      statusRuleMapOf(nodeDetailSource, 'OTA_STATUS_TYPES'),
-      statusRuleMapOf(nodeDetailSource, 'OTA_STATUS_TEXTS'),
       localRuleMapOf(nodeOverviewSource, 'texts', 'otaStatusText'),
       localRuleMapOf(nodeOverviewSource, 'classes', 'otaTagClass'),
     ]
@@ -352,34 +337,6 @@ describe('门禁自身有效（防止"扫描器坏掉后永远绿"）', () => {
   })
 })
 
-describe('NodeDetail.vue：OTA 状态映射 ≡ 后端真源（双向相等）', () => {
-  const types = statusRuleMapOf(nodeDetailSource, 'OTA_STATUS_TYPES')
-  const texts = statusRuleMapOf(nodeDetailSource, 'OTA_STATUS_TEXTS')
-
-  it('OTA_STATUS_TYPES 覆盖且仅覆盖后端全集', () => {
-    expect(auditStatusRuleMap('OTA_STATUS_TYPES', types, BACKEND_OTA_STATUSES, {
-      problemStatuses: PROBLEM_STATUSES,
-      grayClass: 'info',
-    })).toEqual([])
-  })
-
-  it('OTA_STATUS_TEXTS 覆盖且仅覆盖后端全集', () => {
-    expect(auditStatusRuleMap('OTA_STATUS_TEXTS', texts, BACKEND_OTA_STATUSES)).toEqual([])
-  })
-
-  it('两表键序一致（渲染时不会出现"有文案没颜色"的错配）', () => {
-    expect(types.statuses).toEqual(texts.statuses)
-  })
-
-  it('8 态文案都是中文，且不等于状态名本身', () => {
-    for (const status of BACKEND_OTA_STATUSES) {
-      const text = texts.rules.get(status)!.replace(/^['"]|['"]$/g, '')
-      expect(/[\u4e00-\u9fa5]/.test(text), status + ' 文案应为中文: ' + text).toBe(true)
-      expect(text).not.toBe(status)
-    }
-  })
-})
-
 describe('NodeOverview.vue：OTA 状态映射 ≡ 后端真源（双向相等）', () => {
   const texts = localRuleMapOf(nodeOverviewSource, 'texts', 'otaStatusText')
   const classes = localRuleMapOf(nodeOverviewSource, 'classes', 'otaTagClass')
@@ -395,12 +352,19 @@ describe('NodeOverview.vue：OTA 状态映射 ≡ 后端真源（双向相等）
     })).toEqual([])
   })
 
-  it('两表键序一致，且与 NodeDetail 的中文文案逐态相同', () => {
-    const detailTexts = statusRuleMapOf(nodeDetailSource, 'OTA_STATUS_TEXTS')
+  it('两表键序一致（渲染时不会出现"有文案没颜色"的错配）', () => {
     expect(texts.statuses).toEqual(classes.statuses)
-    expect(texts.statuses).toEqual(detailTexts.statuses)
+  })
+
+  it('8 态文案都是中文，且不等于状态名本身', () => {
+    // 这条断言原先挂在死文件 NodeDetail 的 OTA_STATUS_TEXTS 上；
+    // NodeDetail 删除后迁移到 NodeOverview（唯一存活真源）。
+    // 文案"原样显示英文"是本仓已发生过的真实缺陷（见本文件头注释），
+    // 故必须保留该守卫，不能随文件一起消失。
     for (const status of BACKEND_OTA_STATUSES) {
-      expect(texts.rules.get(status), status + ' 文案与 NodeDetail 不一致').toBe(detailTexts.rules.get(status))
+      const text = texts.rules.get(status)!.replace(/^['"]|['"]$/g, '')
+      expect(/[\u4e00-\u9fa5]/.test(text), status + ' 文案应为中文: ' + text).toBe(true)
+      expect(text).not.toBe(status)
     }
   })
 
@@ -419,8 +383,6 @@ describe('NodeOverview.vue：OTA 状态映射 ≡ 后端真源（双向相等）
 
 describe("'cancelled' 死条目清零（后端从未定义该状态）", () => {
   const targets: Array<[string, string]> = [
-    ['NodeDetail.OTA_STATUS_TYPES', ruleMapRawOf(nodeDetailSource, 'OTA_STATUS_TYPES')],
-    ['NodeDetail.OTA_STATUS_TEXTS', ruleMapRawOf(nodeDetailSource, 'OTA_STATUS_TEXTS')],
     ['NodeOverview.otaStatusText', localRuleMapRawOf(nodeOverviewSource, 'texts', 'otaStatusText')],
     ['NodeOverview.otaTagClass', localRuleMapRawOf(nodeOverviewSource, 'classes', 'otaTagClass')],
   ]

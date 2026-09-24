@@ -176,7 +176,14 @@ describe('纯图标 <button> 可访问性门禁', () => {
     // 从而避免「0 违规」其实来自「扫描器空转」的假绿。
     expect(files.length, '扫描到的源码文件数为 0 —— 扫描路径错了').toBeGreaterThan(100)
     const withIcon = files.filter((f) => iconButtonSitesIn(readFileSync(f, 'utf-8')).length > 0)
-    expect(withIcon.length, '没有任何文件命中纯图标 button —— 判据被改坏').toBeGreaterThanOrEqual(2)
+    // 阈值口径修正（2026-09-23）：原为 `>= 2`。当时第 2 个命中文件是**死文件**
+    // `NodeDetail.vue`（本轮按 C5 删除；其 edit-icon 按钮在删除前已由 NodeOverview 的
+    // mini-edit 等价覆盖）。该守卫的**意图**是"判据没被改坏 ⇒ 仍能找到纯图标 button 样本"，
+    // 而非"必须 ≥2 个文件"—— 分母随合法清理下降会让 `>= 2` 变成假红。
+    // 改为「文件数 ≥1」+「总命中数 ≥3」：判据真被改坏时命中会掉到 0，仍会红，故未放水。
+    expect(withIcon.length, '没有任何文件命中纯图标 button —— 判据被改坏').toBeGreaterThanOrEqual(1)
+    const sitesTotal = withIcon.reduce((n, f) => n + iconButtonSitesIn(readFileSync(f, 'utf-8')).length, 0)
+    expect(sitesTotal, '纯图标 button 总命中数过低 —— 判据可能被改坏').toBeGreaterThanOrEqual(3)
   })
 
   it('分类器自检：正例必不报、反例必报（防止扫描器坏掉后永远绿）', () => {

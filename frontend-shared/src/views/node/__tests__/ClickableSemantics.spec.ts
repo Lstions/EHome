@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import nodeListSource from '@/views/node/NodeList.vue?raw'
 import nodeOverviewSource from '@/views/node/NodeOverview.vue?raw'
-import nodeDetailSource from '@/views/node/NodeDetail.vue?raw'
 import edgeDeviceListSource from '@/views/edge-device/EdgeDeviceList.vue?raw'
 
 // ── 本文件覆盖：页内可点击非原生容器补语义（规范 §3.1.3 MUST）──
@@ -105,7 +104,6 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
       ['NodeOverview.vue ph-edit', nodeOverviewSource, 'ph-edit'],
       ['NodeOverview.vue copy-icon', nodeOverviewSource, 'copy-icon'],
       ['NodeOverview.vue mini-edit(重命名)', nodeOverviewSource, 'mini-edit'],
-      ['NodeDetail.vue edit-icon', nodeDetailSource, 'edit-icon'],
     ]
 
     it.each(iconButtons)('%s 由 <button type="button"> 承载且保留原 class', (name, source, cls) => {
@@ -123,12 +121,21 @@ describe('页内可点击容器语义（规范 §3.1.3 MUST）', () => {
       expect(tag![0]).toMatch(/\$\{(row|node|collector|ch)\b/)
     })
 
-    it('NodeDetail 的通道单元格由 <button> 承载且 aria-label 带设备名', () => {
-      const tag = nodeDetailSource.match(/<button[^>]*class="device-channel-cell"[^>]*>/)
-      expect(tag).not.toBeNull()
+    it('关联设备「查看」由 <button> 承载（存活页面，键盘可达）', () => {
+      // 原断言挂在死文件 NodeDetail.vue 的 .device-channel-cell 上。
+      // 该文件删除后改钉**存活页面**的等价入口，守卫意图不变：
+      // **查看设备这个动作必须有一个原生 <button> 承载**（键盘可达），
+      // 不能只有鼠标可点的裸 <div @click>。
+      const tag = nodeOverviewSource.match(/<button[^>]*class="link-btn"[^>]*@click="viewDevice\(row\)"[^>]*>/)
+      expect(tag, '未找到承载「查看设备」的 <button>').not.toBeNull()
       expect(tag![0]).toContain('type="button"')
-      expect(tag![0]).toMatch(/aria-label="`编辑 \$\{row\.name\} 的通道配置`"/)
-      expect(nodeDetailSource).not.toMatch(/<div[^>]*class="device-channel-cell"[^>]*@click/)
+
+      // 事实登记（不是"允许违规"）：卡片视图的 .device-tile 是 <div @click="viewDevice(row)">，
+      // **确实**没有 role/tabindex —— 即卡片视图内查看设备是鼠标专属路径。
+      // 列表视图（:651）提供了 <button> 等价入口，故能力未丢失；
+      // 此处显式断言"列表视图的按钮仍在"，防止连这唯一键盘路径也被移除。
+      const hasKeyboardPath = /<button[^>]*@click="viewDevice\(row\)"/.test(nodeOverviewSource)
+      expect(hasKeyboardPath, '列表视图的键盘可达「查看」入口被移除').toBe(true)
     })
   })
 })
