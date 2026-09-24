@@ -54,25 +54,46 @@ export default defineConfig(({ mode }) => {
     port: 5174,
     proxy: {
       // baseURL 已含 /api/v1, 所以只代理根路径下的后端
+      //
+      // ⚠️ `changeOrigin` 必须为 **false**（此处显式写出，防止被"顺手改成 true"）：
+      // 后端 WebSocket 升级有 CSRF 防护 —— `checkOrigin` 要求
+      // `Origin.host === r.Host`（backend/internal/websocket/websocket.go:82），
+      // 否则 403 "request origin not allowed by Upgrader.CheckOrigin"。
+      //
+      // changeOrigin:true 会把 Host 改写成后端地址（127.0.0.1:8080），
+      // 而浏览器发的 Origin 仍是 dev server 地址（127.0.0.1:5174）⇒ 两者不等 ⇒
+      // **WS 必然 403**，前端 NetworkBanner 持续显示
+      // 「与服务器的连接已断开／正在尝试重新连接...」并每 10s 重连。
+      // 保持 false 则 Host 原样透传，与 Origin 一致 ⇒ 101 Switching Protocols。
+      //
+      // 为什么不改后端放行：生产部署前端 dist 与后端**同容器同端口**
+      // （EHOME_EXTERNAL_HOST=<host>:8080），同源校验在生产完全正确，属安全设计
+      // （提交 6b764ffa 加固）。只有 dev 的"5174 前端 + 8080 后端"跨源场景需要对齐，
+      // 故在代理侧解决。
+      //
+      // 验证提示：`curl` 不发 Origin 头时后端直接放行（`origin == ""` → true），
+      // 因此用 curl 测 WS 会**假绿** —— 必须用真实浏览器或显式带 Origin 才测得准。
       '/api': {
         target: apiTarget,
-        changeOrigin: true,
+        changeOrigin: false,
         ws: true,
       },
       '/ws': {
         target: wsTarget,
+        changeOrigin: false,
         ws: true,
       },
       // 反代前缀场景：/ehome-dev/api -> 后端 /api（剥离前缀）
       ...(basePrefix ? {
         [`${basePrefix}/api`]: {
           target: apiTarget,
-          changeOrigin: true,
+          changeOrigin: false,
           ws: true,
           rewrite: (path: string) => path.replace(new RegExp(`^${basePrefix}`), ''),
         },
         [`${basePrefix}/ws`]: {
           target: wsTarget,
+          changeOrigin: false,
           ws: true,
           rewrite: (path: string) => path.replace(new RegExp(`^${basePrefix}`), ''),
         },
