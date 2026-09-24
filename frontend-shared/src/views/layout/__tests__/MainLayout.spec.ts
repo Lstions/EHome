@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import MainLayout from '@/views/layout/MainLayout.vue'
 import layoutSource from '../MainLayout.vue?raw'
+import { expectedNavPaths, expectedNavPathsInOrder } from '../menuModel'
+import { collectNavPaths, expandAllSubMenus, hasSubMenu } from '../menuDom'
 
 // theme.css 通过同目录原始文本副本验证；happy-dom/Vitest 的 CSS ?raw 在该配置下为空。
 
@@ -130,25 +133,26 @@ describe('MainLayout.vue', () => {
     })
     await flushPromises()
 
-    const menuItems = wrapper.findAll('.el-menu-item')
-    expect(menuItems).toHaveLength(14)
-    const paths = menuItems.map((el) => el.attributes('data-index'))
-    expect(paths).toEqual([
-      '/dashboard',
-      '/node',
-      '/edge-device',
-      '/logical-device',
-      '/data-sources',
-      '/channel',
-      '/data',
-      '/firmware',
-      '/device-configs',
-      '/monitor',
-      '/alerts',
-      '/automation',
-      '/notification-channels',
-      '/notification-deliveries',
-    ])
+    // Phase 0.3 改造：原断言是 `findAll('.el-menu-item')` 恰为 14 且顺序逐项相等。
+    // 这把它绑死在**平铺**布局上 —— Phase 2 一旦改成 el-sub-menu 分组，子项在折叠态
+    // 不在 DOM，该断言会整批变红且无法区分"真回归"与"布局改了"（审计 H3）。
+    // 现改为两步，两者都与布局形态无关：
+    //   ① 模型面：导航目标集合 = menuModel 的真值源（覆盖，不看顺序/层级）；
+    //   ② DOM 面：每个导航目标都真实渲染出可定位的菜单项（先展开分组再收集）。
+    // 保留"多一项/少一项必须红"的牙：集合比较对增删都敏感（见 MenuGateHelpers 自证）。
+    // 本 spec 的 useResponsive mock 固定 isMobile=true ⇒ 桌面 `.sidebar`（v-if="!isMobile"）
+    // 不渲染，菜单在**移动端抽屉**里（原断言 findAll('.el-menu-item') 数的正是它）。
+    // 故这里定位抽屉容器；用 .mobile-sidebar-drawer，缺它时断言会明确失败而非静默数 0。
+    const drawerEl = wrapper.find('.mobile-sidebar-drawer').element as HTMLElement
+    expandAllSubMenus(drawerEl)
+    await nextTick()
+    const renderedPaths = collectNavPaths(drawerEl)
+    expect(new Set(renderedPaths)).toEqual(new Set(expectedNavPaths()))
+
+    // 平铺布局下仍应保持阅读顺序（分组后此断言不再适用，届时按组顺序另立断言）。
+    if (!hasSubMenu(drawerEl)) {
+      expect(renderedPaths).toEqual(expectedNavPathsInOrder())
+    }
   })
 
   it('marks /data as the active menu', async () => {

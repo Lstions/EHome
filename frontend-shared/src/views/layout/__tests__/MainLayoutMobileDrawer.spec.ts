@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
+import { expectedNavPaths } from '../menuModel'
+import { collectNavPaths, expandAllSubMenus } from '../menuDom'
 
 // Mock vue-router
 const mockPush = vi.fn()
@@ -165,17 +167,23 @@ describe('MainLayout', () => {
     const drawer = wrapper.find('.mobile-sidebar-drawer')
     expect(drawer.exists()).toBe(true)
 
-    // 抽屉内应该有菜单项
-    const menuItems = drawer.findAll('.el-menu-item')
-    expect(menuItems.length).toBeGreaterThan(0)
+    // 抽屉内的导航项：Phase 0.3 起改判**覆盖**而非"大于 0"。
+    // 原断言 `length).toBeGreaterThan(0)` 在分组折叠布局下会静默通过（子项全不在 DOM
+    // 也满足 >0，只要还有别的项），属假绿。现先展开分组再比较集合。
+    expandAllSubMenus(drawer.element)
+    await nextTick()
+    expect(new Set(collectNavPaths(drawer.element))).toEqual(new Set(expectedNavPaths()))
   })
 
   it('侧边栏菜单项包含预期路由', async () => {
     const wrapper = mount(MainLayout, { global: { stubs } })
     await flushPromises()
+    await nextTick()
 
-    const menuItems = wrapper.findAll('.sidebar .el-menu-item')
-    const indexes = menuItems.map((el) => el.attributes('data-index'))
+    const sidebarEl = wrapper.find('.sidebar').element as HTMLElement
+    expandAllSubMenus(sidebarEl)
+    await nextTick()
+    const indexes = collectNavPaths(sidebarEl)
     expect(indexes).toContain('/dashboard')
     expect(indexes).toContain('/node')
     expect(indexes).toContain('/edge-device')

@@ -243,6 +243,10 @@ export function measureKeyboardFacts(): {
   sidebarFocusableItems: number
   sidebarItemsWithTabindex0: number
   sidebarTabindexValues: number[]
+  /** Phase 0.3：分组事实（分组后 sidebarMenuItems 不含折叠子项）。 */
+  sidebarGrouped: boolean
+  sidebarSubMenuTitles: number
+  sidebarSubMenuFocusable: number
 } {
   const all = Array.from(document.querySelectorAll<HTMLElement>('*'))
   const pointerEls = all.filter(
@@ -254,6 +258,11 @@ export function measureKeyboardFacts(): {
     return true
   })
   const menuItems = Array.from(document.querySelectorAll<HTMLElement>('.sidebar .el-menu-item'))
+  // Phase 0.3：菜单可能已分组（el-sub-menu）。折叠态子项**不在 DOM**，
+  // 于是 sidebarMenuItems 会骤降（14 → 组数），而消费方的 `> 0` 守卫仍会通过 ——
+  // 属"分母还在、但已不代表覆盖"的静默退化。这里额外给出分组事实与分组标题的可聚焦性，
+  // 让门禁能区分「平铺 N 项」与「分组 M 组 + 折叠子项」两种形态。
+  const subMenuTitles = Array.from(document.querySelectorAll<HTMLElement>('.sidebar .el-sub-menu__title'))
   return {
     pointerTotal: pointerEls.length,
     clickableNotFocusable: cnf.length,
@@ -262,6 +271,12 @@ export function measureKeyboardFacts(): {
     sidebarFocusableItems: menuItems.filter((el) => el.tabIndex >= 0).length,
     sidebarItemsWithTabindex0: menuItems.filter((el) => el.getAttribute('tabindex') === '0').length,
     sidebarTabindexValues: menuItems.map((el) => el.tabIndex),
+    /** 是否已分组（存在 el-sub-menu 标题）。分组后 sidebarMenuItems 不含折叠子项。 */
+    sidebarGrouped: subMenuTitles.length > 0,
+    /** 分组标题数（平铺布局为 0）。 */
+    sidebarSubMenuTitles: subMenuTitles.length,
+    /** 分组标题里可聚焦的个数：键盘用户必须能展开分组，否则子项永久不可达。 */
+    sidebarSubMenuFocusable: subMenuTitles.filter((el) => el.tabIndex >= 0).length,
   }
 }
 

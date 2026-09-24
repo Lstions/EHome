@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
+import { expectedNavPaths } from '../menuModel'
+import { expandAllSubMenus } from '../menuDom'
 
 // ── 本文件覆盖：移动端抽屉焦点陷阱 ──
 // 实测缺陷：抽屉打开后连按 6 次 Tab，焦点穿到遮罩后的页头与卡片。
@@ -109,12 +111,18 @@ describe('MainLayout 移动端抽屉焦点陷阱', () => {
     await flushPromises()
     await nextTick()
 
-    const items = wrapper.findAll('.mobile-sidebar-drawer .el-menu-item')
-    // 14 = 12 个既有导航项 + 「通知通道」(/notification-channels) + 「投递审计」(/notification-deliveries)
-    expect(items.length).toBe(14)
+    // Phase 0.3 改造：原为 `items.length).toBe(14)` —— 与平铺布局耦合，
+    // 分组后折叠态子项不在 DOM 会整批变红。现两步：覆盖用集合比较，不变量逐项断言。
+    const drawerEl = wrapper.find('.mobile-sidebar-drawer').element as HTMLElement
+    expandAllSubMenus(drawerEl)
+    await nextTick()
+
+    const items = Array.from(drawerEl.querySelectorAll<HTMLElement>('.el-menu-item[data-index]'))
+    expect(new Set(items.map(i => i.getAttribute('data-index'))))
+      .toEqual(new Set(expectedNavPaths()))
 
     // 模态抽屉内不应使用 roving tabindex：那会只剩 1 个停靠点，Tab 会卡在同一项上。
-    const tabindexes = items.map((i) => i.attributes('tabindex'))
+    const tabindexes = items.map((i) => i.getAttribute('tabindex'))
     expect(tabindexes.every((t) => t === '0')).toBe(true)
   })
 

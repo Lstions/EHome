@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
+import { expectedNavPaths } from '../menuModel'
+import { expandAllSubMenus } from '../menuDom'
 
 // ── 本文件覆盖：桌面侧栏键盘可达（roving tabindex）──
 // 背景：el-menu 的垂直模式没有内置键盘导航（只有 mode="horizontal" 才实例化 Menu 类），
@@ -127,13 +129,25 @@ describe('MainLayout 桌面侧栏键盘可达（roving tabindex）', () => {
     await flushPromises()
     await nextTick()
 
-    const items = wrapper.findAll('.sidebar .el-menu-item')
-    // 14 = 12 个既有导航项 + 「通知通道」(/notification-channels) + 「投递审计」(/notification-deliveries)
-    expect(items.length).toBe(14)
+    // Phase 0.3 改造：原断言把规模硬编码为 14（`items.length).toBe(14)` + `-1 恰为 13`）。
+    // 那是**平铺布局**的形状：Phase 2 改 el-sub-menu 分组后折叠态子项不在 DOM，
+    // 该断言会整批变红且无法区分真回归（审计 H3）。
+    // 现改为：先展开分组拿全量项，再断言**与布局无关的不变量**
+    // （每项有 tabindex、恰一个 0、其余全为 -1）；覆盖由集合比较保证（增删都敏感）。
+    const sidebarEl = wrapper.find('.sidebar').element as HTMLElement
+    expandAllSubMenus(sidebarEl)
+    await nextTick()
 
-    const tabindexes = items.map((i) => i.attributes('tabindex'))
+    const items = Array.from(sidebarEl.querySelectorAll<HTMLElement>('.el-menu-item[data-index]'))
+    expect(new Set(items.map(i => i.getAttribute('data-index'))))
+      .toEqual(new Set(expectedNavPaths()))
+
+    const tabindexes = items.map((i) => i.getAttribute('tabindex'))
     expect(tabindexes.filter((t) => t === '0')).toHaveLength(1)
-    expect(tabindexes.filter((t) => t === '-1')).toHaveLength(13)
+    expect(tabindexes.filter((t) => t === '-1')).toHaveLength(items.length - 1)
+    // 每项都必须**显式**带 tabindex：缺 attr 会让该项成为额外的 Tab 停靠点，
+    // 破坏 roving 语义。用 getAttribute 而非 element.tabIndex —— 后者有默认值会掩盖缺失。
+    expect(tabindexes.every(t => t === '0' || t === '-1')).toBe(true)
   })
 
   it('初始 tab 停靠点是当前激活项（/dashboard）', async () => {

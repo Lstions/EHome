@@ -816,6 +816,18 @@ test.describe('键盘可达性', () => {
     // 分母守卫：侧栏确实存在菜单项，否则"进不去"与"没有侧栏"无法区分
     expect(facts.sidebarMenuItems, '侧栏菜单项数量为 0，无法判断键盘可达性（契约 §2.3 分母纪律）').toBeGreaterThan(0)
 
+    // Phase 0.3：分组后**折叠子项不在 DOM**，sidebarMenuItems 会骤降（14 → 组数）。
+    // 上面的 `> 0` 守卫在那种形态下依然通过 —— 属"分母还在但已不代表覆盖"的静默退化。
+    // 故补一条形态相关的守卫：若已分组，则分组标题必须**可聚焦**，
+    // 否则键盘用户永远展不开分组 ⇒ 子项永久不可达（比"进不去侧栏"更隐蔽）。
+    if (facts.sidebarGrouped) {
+      expect(
+        facts.sidebarSubMenuFocusable,
+        `菜单已分组（${facts.sidebarSubMenuTitles} 个 el-sub-menu）但分组标题都不可聚焦：` +
+          `键盘用户无法展开分组 ⇒ 子项永久不可达`,
+      ).toBeGreaterThan(0)
+    }
+
     // 前置事实：至少要有**一个**可聚焦入口，否则 Tab 永远进不去
     expect(
       facts.sidebarFocusableItems,

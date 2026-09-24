@@ -283,6 +283,7 @@ import {
   Menu,
   Tickets,
 } from '@element-plus/icons-vue'
+import { NAV_DESTINATIONS } from './menuModel'
 import { useUserStore } from '@/stores/user'
 import { withBase } from '@/utils/basePath'
 import { useUIStore } from '@/stores/ui'
@@ -394,22 +395,37 @@ const warmPrimaryListData = () => Promise.allSettled([
 ])
 
 // 单主体模式下，所有菜单仅由登录状态保护。
-const allMenuItems = [
-	{ path: '/dashboard', title: '仪表盘', icon: Odometer },
-	{ path: '/node', title: '节点', icon: Connection },
-	{ path: '/edge-device', title: '边缘设备', icon: Cpu },
-	{ path: '/logical-device', title: '逻辑设备', icon: Share },
-	{ path: '/data-sources', title: '数据源', icon: Link },
-	{ path: '/channel', title: '通道管理', icon: Connection },
-	{ path: '/data', title: '数据面板', icon: DataLine },
-	{ path: '/firmware', title: '固件管理', icon: Files },
-	{ path: '/device-configs', title: '配置模板', icon: Setting },
-	{ path: '/monitor', title: '系统监控', icon: DataAnalysis },
-	{ path: '/alerts', title: '告警规则', icon: Bell },
-	{ path: '/automation', title: '自动化策略', icon: SetUp },
-	{ path: '/notification-channels', title: '通知通道', icon: Bell },
-	{ path: '/notification-deliveries', title: '投递审计', icon: Tickets },
-]
+//
+// Phase 0.3：路径与标题来自 `menuModel.ts` 的**唯一真值源**，本文件只负责绑定图标。
+// 这样门禁可按「导航目标集合」判定覆盖（与平铺/分组布局无关），而不是把规模硬编码成
+// 14 —— 后者在 Phase 2 改分组时会整批变红，且无法区分真回归与"布局改了"。
+const menuIcons: Record<string, unknown> = {
+	'/dashboard': Odometer,
+	'/node': Connection,
+	'/edge-device': Cpu,
+	'/logical-device': Share,
+	'/data-sources': Link,
+	'/channel': Connection,
+	'/data': DataLine,
+	'/firmware': Files,
+	'/device-configs': Setting,
+	'/monitor': DataAnalysis,
+	'/alerts': Bell,
+	'/automation': SetUp,
+	'/notification-channels': Bell,
+	'/notification-deliveries': Tickets,
+}
+// 图标表必须覆盖模型全量：漏配会让菜单项渲染成空白图标（无报错，属静默降级）。
+const missingMenuIcon = NAV_DESTINATIONS.find(d => !menuIcons[d.path])
+if (import.meta.env.DEV && missingMenuIcon) {
+	throw new Error(`[menu] 图标表缺少 ${missingMenuIcon.path} —— 请同步 menuIcons 与 menuModel.NAV_DESTINATIONS`)
+}
+
+const allMenuItems = NAV_DESTINATIONS.map(d => ({
+	path: d.path,
+	title: d.title,
+	icon: menuIcons[d.path] ?? Tickets,
+}))
 const menuItems = computed(() => allMenuItems)
 
 const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
