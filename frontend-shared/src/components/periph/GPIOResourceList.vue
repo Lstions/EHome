@@ -232,7 +232,12 @@ defineExpose({ applyRuntimeLevel })
 .pin-id { font-weight: 600; white-space: nowrap; }
 .summary { color: var(--el-text-color-regular); font-size: 13px; white-space: nowrap; }
 .sep { color: var(--el-text-color-placeholder); }
-.actions { justify-content: flex-end; white-space: nowrap; }
+/* `align-self: center` 让操作区**按内容宽度**排列，不被 grid 拉伸。
+   桌面下 `.resource-row` 的第三列是 `auto` 本来就不会拉伸；但移动端单列
+   （`grid-template-columns: 1fr`）会把 `.actions` 撑满整行，进而把里面的按钮
+   也拉成整行宽 —— 8 个引脚就是 8 个全宽蓝按钮，视觉过重（实测宽 310px）。
+   固定为内容宽度后按钮回到 ~106px。 */
+.actions { justify-content: flex-end; align-self: center; white-space: nowrap; }
 .label, .stale-configs { color: var(--el-text-color-secondary); font-size: 12px; }
 .feedback { grid-column: 1 / -1; color: var(--el-color-danger); }
 .stale-configs { display: flex; flex-direction: column; gap: 4px; padding: 8px 16px; border: 1px solid var(--el-color-warning-light-5); }
@@ -240,10 +245,24 @@ defineExpose({ applyRuntimeLevel })
   /* 移动端：信息列占满一行，操作区独立成行（改前两列并排会把按钮挤到很窄）。 */
   .resource-row { grid-template-columns: 1fr; }
   .runtime, .actions, .feedback { grid-column: 1 / -1; }
-  /* D6 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px。
-     实测本行按钮在桌面是 24px 高（padding 5px 11px, font 12px），
-     移动端沿用同尺寸 ⇒ 不达标。这里只抬移动端的实际盒子，不动桌面密度。 */
-  .actions { justify-content: flex-start; }
-  .actions :deep(.el-button) { min-height: 44px; padding-left: 16px; padding-right: 16px; }
+  /* D6 修订 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px。
+   *
+   * ⚠️ 选择器**刻意写得比看起来需要的更长**，原因是一次真实失败：
+   * 初版写 `.actions :deep(.el-button)`（编译为 `.actions[data-v-x] .el-button`，特异性 (0,3,0)），
+   * 被 theme.css:722 的窄屏规则
+   *   `.el-button--small:not(.is-circle):not(.is-link):not(.is-text) { min-height: 36px }`
+   * 压过 —— 那条的 `:not()` 链把特异性堆到 **(0,4,0)**，**优先级高于书写顺序**。
+   * 结果按钮实测仍是 **36px**；而我当时只断言"源码里有 min-height:44px"，
+   * 完全没发现它没生效（源码层断言测不出级联结果）。
+   *
+   * 现选择器复刻全局规则的 `:not()` 链并**再加一层 `.resource-row` 后代**：
+   * 特异性 (0,5,0) > (0,4,0)，实测生效。若将来 theme.css 那条被改动或删除，
+   * 本规则依然成立（不依赖它消失）。 */
+  .resource-row .actions { justify-content: flex-start; }
+  .resource-row .actions :deep(.el-button.el-button--small:not(.is-circle):not(.is-link):not(.is-text)) {
+    min-height: 44px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 </style>

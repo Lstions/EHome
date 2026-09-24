@@ -221,7 +221,19 @@ describe('GPIOResourceList', () => {
       expect(idx, '未找到移动端断点').toBeGreaterThan(-1)
       const block = src.slice(idx, src.indexOf('</style>', idx))
       expect(block, '移动端断点内缺少 min-height: 44px（规范 §4.4.5 MUST）').toMatch(/min-height:\s*44px/)
-      expect(block, '44px 规则未作用于 .el-button').toMatch(/\.el-button\)\s*\{[^}]*min-height:\s*44px/)
+
+      // 不仅要求"声明存在"，还要求**选择器足够强**：
+      // theme.css:722 的 `.el-button--small:not(.is-circle):not(.is-link):not(.is-text)`
+      // 特异性 (0,4,0)，会压过简单的 `.actions :deep(.el-button)` (0,3,0) ——
+      // 我 2026-09-24 就是这样写了一个"存在但无效"的规则，源码断言当时没拦住。
+      // 故这里要求选择器**包含 :not() 链**（复刻全局形制）。
+      // 真实级联结果由 PeriphTouchTargetCascade.spec.ts 在计算值层面验收。
+      const mq44 = block.match(/([^{}]*)\{[^{}]*min-height:\s*44px/)
+      expect(mq44, '未找到 44px 规则的声明块').not.toBeNull()
+      expect(
+        mq44![1],
+        '44px 规则的选择器缺少 :not() 链 —— 会被 theme.css 的 (0,4,0) 全局窄屏规则压过，规则形同虚设',
+      ).toContain(':not(')
     })
 
     it('反证：桌面端**不得**被抬到 44px（那会让 8 行列表高度虚增）', () => {

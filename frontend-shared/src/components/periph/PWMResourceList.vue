@@ -253,8 +253,17 @@ defineExpose({ applyRuntimeState })
 @media (max-width: 768px) {
   .resource-row { grid-template-columns: 1fr auto; }
   .configuration, .runtime, .feedback { grid-column: 1 / -1; }
-  /* D6 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px（与 GPIO 侧同款，保持两列表一致）。 */
-  .actions :deep(.el-button) { min-height: 44px; padding-left: 16px; padding-right: 16px; }
-  .actions { justify-content: flex-start; }
+  /* D6 修订 / 规范 §4.4.5 MUST：移动端可点击区域 ≥44px（与 GPIO 侧同款，保持两列表一致）。
+   *
+   * ⚠️ 选择器刻意复刻 theme.css:722 全局窄屏规则的 `:not()` 链并加一层 `.resource-row` 后代。
+   * 原因：初版只写 `.actions :deep(.el-button)`（特异性 (0,3,0)），被那条
+   * `.el-button--small:not(.is-circle):not(.is-link):not(.is-text)`（(0,4,0)）
+   * 压过 ⇒ 按钮实测仍是 36px，而源码断言查不出来。详见 GPIO 侧同名注释。 */
+  .resource-row .actions { justify-content: flex-start; }
+  .resource-row .actions :deep(.el-button.el-button--small:not(.is-circle):not(.is-link):not(.is-text)) {
+    min-height: 44px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 </style>
