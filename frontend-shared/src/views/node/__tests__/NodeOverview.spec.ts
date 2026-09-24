@@ -1187,7 +1187,11 @@ describe('NodeOverview (生产页)', () => {
       expect(mockApplyRuntimeState).toHaveBeenCalledWith('PWM0', null, undefined)
     })
 
-    it('「配置/编辑」落点必须有响应（不得成为新的死入口）', async () => {
+    it('「配置/编辑」落点必须给用户可读反馈，且**不得**指向做不到的页面', async () => {
+      // ElMessage 未整体 mock（会破坏 feedback 的其它出口），故对真实模块装 spy。
+      const { ElMessage } = await import('element-plus')
+      const warningSpy = vi.spyOn(ElMessage, 'warning')
+
       const wrapper = mount(NodeOverview, { global: { stubs: periphStubs } })
       await flushPromises()
       const tab = wrapper.findAll('.tab-item').find(item => item.text().includes('外设控制'))
@@ -1196,10 +1200,15 @@ describe('NodeOverview (生产页)', () => {
       // 触发 emit：真实行控件的「配置 GPIO」按钮就是发这个事件
       wrapper.findComponent({ name: 'PeripheralControl' }).vm.$emit('configure-gpio', 7)
       await flushPromises()
-      // 落点是切到「总线配置」（有意降级：唯一生产表单在待迁移的 ChannelPanel 中，
-      // 本轮不复制第二套真相），关键是**不能点了没反应**。
-      expect(wrapper.find('.peripheral-control-stub').exists()).toBe(false)
-      expect(wrapper.text()).toContain('总线配置')
+
+      // 改前（我第一版）是切到「总线配置」TAB —— 但该 TAB 对 gpio/pwm 的
+      // busSupportsChannels=false，其按钮显示「此资源不支持通道」且 disabled，
+      // 全文件对 gpioApi/pwmApi 零调用 ⇒ 切过去**仍然无处可配**，
+      // 等于把"点了没反应"换成"跳过去也没反应"。
+      expect(warningSpy).toHaveBeenCalled()
+      // 关键：仍停在「外设控制」TAB（那里至少读写可用），不能跳到做不到的页面
+      expect(wrapper.find('.peripheral-control-stub').exists()).toBe(true)
+      warningSpy.mockRestore()
     })
 
     it('源码层面：外设控制 TAB 存在且回填链路完整', () => {

@@ -583,10 +583,10 @@
           :offline="nodeOffline"
           :register-pending-gpio="registerPendingPeripheral"
           :register-pending-pwm="registerPendingPWM"
-          @configure-gpio="onPeripheralConfigure"
-          @edit-gpio="onPeripheralConfigure"
-          @configure-pwm="onPeripheralConfigure"
-          @edit-pwm="onPeripheralConfigure"
+          @configure-gpio="(pin: number) => onPeripheralConfigure(`GPIO ${pin}`)"
+          @edit-gpio="(pin: number) => onPeripheralConfigure(`GPIO ${pin}`)"
+          @configure-pwm="(id: string) => onPeripheralConfigure(`PWM ${id}`)"
+          @edit-pwm="(id: string) => onPeripheralConfigure(`PWM ${id}`)"
         />
       </template>
 
@@ -1933,17 +1933,26 @@ const onPeriphResult = (message: WebSocketMessage) => {
 }
 
 /**
- * GPIO/PWM 的「配置 / 编辑 / 移除」落点。
+ * GPIO/PWM 的「配置 / 编辑」落点。
  *
  * 为什么不在这里直接开配置弹窗：资源的创建/编辑表单（引脚、方向、上下拉、PWM 频率与
- * 占空比约束）与通道表单共用后端 manifest 校验，唯一的生产实现在 ChannelPanel 中，
- * 而它属于「先接线、后迁移」的待迁移批次。本轮若复制一份表单，等于制造第二套真相。
- * 因此这里**显式降级**为：切到「总线配置」TAB 并说明去哪操作 —— 保证不出现
- * 「点了没反应」的新死入口（本轮的修复主题），同时不复制实现。
+ * 占空比约束）与通道表单共用后端 manifest 校验，唯一的生产实现在 `ChannelPanel` 中，
+ * 而它属「先接线、后迁移」的待迁移批次。本轮若复制一份表单，等于制造第二套真相。
+ *
+ * ⚠️ **不要切到「总线配置」TAB**（我第一版就是这么写的，是错的）：
+ * 该 TAB 对 gpio/pwm 有 `busSupportsChannels=false`（`NodeOverview.vue:1030` 只含
+ * uart/i2c/spi/adc），其主按钮会显示「此资源不支持通道」且被 `disabled`；
+ * 全文件对 gpioApi/pwmApi **零调用**。也就是说切过去之后用户**仍然无处可配**，
+ * 等于把一个"点了没反应"换成"跳过去也没反应"——正是本轮在修的缺陷类型。
+ *
+ * 因此这里改为**如实说明**：读写控制可用（本 TAB 已提供），配置编辑待迁移。
+ * 「如实说明 + 不假装有路」优于「跳到一个做不到的页面」。
  */
-function onPeripheralConfigure() {
-  ElMessage.info('GPIO/PWM 的资源配置在「总线配置」TAB 中管理，已为你切换')
-  activeTab.value = '总线配置'
+function onPeripheralConfigure(resourceName: string) {
+  ElMessage.warning(
+    `${resourceName} 的配置编辑入口尚未接线（待 ChannelPanel 能力迁移）；`
+    + '当前「外设控制」TAB 已支持读写/启停/占空比控制。',
+  )
 }
 
 // ── 生命周期 ──
