@@ -423,4 +423,55 @@ describe('MainLayout.vue', () => {
       expect(subMenuRules.length, 'el-sub-menu__title 规则应至少覆盖桌面+移动两处').toBeGreaterThanOrEqual(2)
     })
   })
+
+  // ── D7：侧栏纵向布局契约（logo 不得被压缩、菜单必须可滚）──────────────
+  //
+  // 缺陷形态（用户实机截图 + Chromium 实测）：侧栏顶部 logo 与菜单挤在一起。
+  // 根因是 flex 收缩 —— `.sidebar` 是 column flex 容器，`.logo-area` 声明
+  // `height:60px` 但默认 `flex-shrink:1` + `min-height:auto`，视口不够高时
+  // 被菜单挤压：实测 60px → **37px**（视口 ≤~900px 触发），
+  // 同时与右侧 `.main-header` 的 60px 不再对齐。
+  //
+  // 视口高度扫描（修复前）：
+  //   h=1400/1000 → logoH 60 ✅；h=900 → 37 ❌；h=800 → 37 ❌；h=700 → 37 ❌
+  // 且菜单 `overflow-y: visible` ⇒ 内容 892px 既不能滚、又把底部版本号顶出可视区
+  // （侧栏溢出 68~268px，`v2.2.0` 完全不可见）。
+  //
+  // 用源码断言而非挂载：happy-dom 不做 flex 布局，挂载级测不出 37px 这种收缩结果
+  // （与 D6 触控目标同因）。端到端已在真实 Chromium 逐视口验证。
+  describe('D7 侧栏纵向布局契约（防 logo 被压缩 / 菜单溢出）', () => {
+    /** 取某个选择器的规则块（到匹配的 `}` 为止），**剔除注释**后再断言。
+     *
+     * 剔注释是必须的：本文件的说明文字里会出现 `overflow-y: visible`、`flex-shrink:1`
+     * 这类"缺陷原始形态"的描述，不剥离就会把**注释**当配置报假红 ——
+     * 我在 D6/dev-proxy 两处都踩过同一个坑（本仓 skill 亦有记录）。 */
+    const ruleOf = (selector: string): string => {
+      const i = layoutSource.indexOf(selector)
+      expect(i, '未找到规则：' + selector).toBeGreaterThan(-1)
+      const block = layoutSource.slice(i, layoutSource.indexOf('}', i))
+      return block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    }
+
+    it('logo 区禁止 flex 收缩（否则矮视口下 60px 被压成 37px）', () => {
+      expect(
+        ruleOf('.sidebar .logo-area {'),
+        '缺 flex-shrink:0 —— 矮视口下 logo 会被菜单压缩并与 header 错位',
+      ).toContain('flex-shrink: 0')
+    })
+
+    it('底部版本号区同样禁止收缩（不得随视口变矮而消失）', () => {
+      expect(ruleOf('.sidebar .sidebar-footer {')).toContain('flex-shrink: 0')
+    })
+
+    it('菜单必须可滚动：overflow-y:auto + min-height:0（后者是 flex 滚动的必要条件）', () => {
+      const menu = ruleOf('.sidebar .sidebar-menu {')
+      expect(menu, '菜单不可滚动 ⇒ 14 项超出时把 logo 与版本号顶出可视区').toMatch(/overflow-y:\s*auto/)
+      // flex 子项默认 min-height:auto 会拒绝收缩到内容高度以下，只设 overflow 不生效
+      expect(menu, 'min-height:0 —— flex 子项滚动的必要条件，缺失时 overflow 形同虚设').toMatch(/min-height:\s*0/)
+    })
+
+    it('反证：菜单不得退回 overflow-y: visible（那就是本次缺陷的原始形态）', () => {
+      expect(ruleOf('.sidebar .sidebar-menu {')).not.toMatch(/overflow-y:\s*visible/)
+    })
+  })
 })

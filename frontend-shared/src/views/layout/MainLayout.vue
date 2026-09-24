@@ -935,6 +935,13 @@ onUnmounted(() => {
 /* 桌面端 logo 区域 — 限定在 .sidebar 内 */
 .sidebar .logo-area {
   height: 60px;
+  /* D7：**必须禁止 flex 收缩**。
+     `.sidebar` 是 column flex 容器，`.logo-area` 作为子项默认 `flex-shrink:1` +
+     `min-height:auto`，在视口不够高时会被菜单挤压 —— 实测 60px → **37px**
+     （视口 ≤~900px 触发），表现为 logo 与下方菜单挤在一起（用户截图即此形态），
+     且与右侧 `.main-header` 的 60px 不再对齐。
+     加 `flex-shrink:0` 后无论视口多矮都恒为 60px。 */
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -971,6 +978,14 @@ onUnmounted(() => {
 /* 桌面端菜单 — 限定在 .sidebar 内 */
 .sidebar .sidebar-menu {
   flex: 1;
+  /* D7：菜单必须能**滚动**，否则内容（14 项默认全展开，实测 892px）超出可用高度时
+     会把 logo 与底部版本号一起顶出可视区 —— 实测视口 700~900px 时侧栏溢出 68~268px，
+     版本号 `v2.2.0` 完全看不到。
+     `min-height: 0` 是 flex 滚动的必要条件：flex 子项默认 `min-height:auto`
+     会拒绝收缩到内容高度以下，仅设 overflow 不会生效。
+     改前是 `overflow-y: visible`（不可滚）。 */
+  min-height: 0;
+  overflow-y: auto;
   border-right: none;
   background: transparent;
   padding: 8px;
@@ -1072,6 +1087,8 @@ onUnmounted(() => {
 }
 
 .sidebar .sidebar-footer {
+  /* D7：与 logo 同理，禁止被菜单挤压（版本号是常驻信息，不得随视口变矮而消失）。 */
+  flex-shrink: 0;
   padding: 12px;
   border-top: 1px solid var(--sidebar-border, rgba(255, 255, 255, 0.06));
 }
