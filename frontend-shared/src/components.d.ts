@@ -85,7 +85,6 @@ declare module 'vue' {
     EmptyState: typeof import('./components/common/EmptyState.vue')['default']
     ErrorBoundary: typeof import('./components/common/ErrorBoundary.vue')['default']
     ErrorPageLayout: typeof import('./components/common/ErrorPageLayout.vue')['default']
-    GaugeChart: typeof import('./components/charts/GaugeChart.vue')['default']
     GPIOPinRow: typeof import('./components/periph/GPIOPinRow.vue')['default']
     GPIOResourceList: typeof import('./components/periph/GPIOResourceList.vue')['default']
     InitializeAdminForm: typeof import('./components/forms/InitializeAdminForm.vue')['default']
