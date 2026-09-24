@@ -112,9 +112,11 @@ function newNarrowWindow(width: number): NarrowWindow {
 
 // ── Mocks ──────────────────────────────────────────────
 
-const { mockPush, mockRoute } = vi.hoisted(() => ({
+const { mockPush, mockRoute, mockElMessageBoxConfirm } = vi.hoisted(() => ({
   mockPush: vi.fn(),
   mockRoute: { path: '/logical-device', query: {} as Record<string, string> },
+  // 默认 resolve（= 用户确认），各用例可 mockRejectedValueOnce 模拟取消。
+  mockElMessageBoxConfirm: vi.fn(() => Promise.resolve()),
 }))
 
 vi.mock('vue-router', () => ({
@@ -124,6 +126,9 @@ vi.mock('vue-router', () => ({
 
 vi.mock('element-plus', () => ({
   ElMessage: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
+  // G10：缩短保留期要经 confirmDanger（底层是 ElMessageBox.confirm）。
+  // 不提供它会抛 "ElMessageBox is not a function"，而"缩短保留期"用例正是靠它驱动。
+  ElMessageBox: { confirm: mockElMessageBoxConfirm },
 }))
 
 // 保留真实 extractMergeConflicts (结构化 409 解析), 仅 mock API 方法。
@@ -697,6 +702,64 @@ describe('LogicalDeviceList.vue', () => {
 
     expect(mockUpdate).not.toHaveBeenCalled()
     expect(ElMessage.warning).toHaveBeenCalledWith('名称不能为空')
+  })
+
+  // ── G10：缩短保留期是破坏性操作，必须先确认 ──
+  //
+  // 表单下方已写明「到期后数据将被分批硬删除，删除后不可恢复」，但改前保存**没有任何确认**：
+  // 用户把 90 天改成 7 天、点「保存」即静默缩短保留期，超出部分的历史数据随后被清理器
+  // 硬删且无法找回。这里对"调小"要确认，对"调大/不变"不打断。
+  describe('G10 缩短保留期需确认', () => {
+    async function openEditWith(retention: number) {
+      mockList.mockResolvedValue({ items: [makeItem({ id: 7, name: '设备甲', retention_days: retention })], total: 1 })
+      mockRoute.query = { retention: '7' }
+      const wrapper = mountPage()
+      await flushPromises()
+      return wrapper
+    }
+
+    it('调小保留期：先弹危险确认，确认后才提交', async () => {
+      const wrapper = await openEditWith(90)
+      mockElMessageBoxConfirm.mockClear()
+      await wrapper.find('input[data-testid="edit-retention"]').setValue('7')
+      await wrapper.find('button[data-testid="edit-save"]').trigger('click')
+      await flushPromises()
+
+      expect(mockElMessageBoxConfirm).toHaveBeenCalledTimes(1)
+      // 文案必须含对象身份与不可逆影响（规范 §3.4.3）。
+      // mockElMessageBoxConfirm 声明为无参 vi.fn()，推断签名不含参数，故显式收窄调用记录。
+      const calls = mockElMessageBoxConfirm.mock.calls as unknown as Array<[unknown, unknown?]>
+      const msg = String(calls[0]?.[0])
+      expect(msg).toContain('设备甲')
+      expect(msg).toContain('90')
+      expect(msg).toContain('7')
+      expect(msg).toContain('不可恢复')
+      // 确认后确实提交
+      expect(mockUpdate).toHaveBeenCalledWith(7, expect.objectContaining({ retention_days: 7 }))
+    })
+
+    it('调小保留期：用户取消则**不得**提交（否则确认形同虚设）', async () => {
+      const wrapper = await openEditWith(90)
+      mockUpdate.mockClear()
+      mockElMessageBoxConfirm.mockRejectedValueOnce(new Error('cancel'))
+      await wrapper.find('input[data-testid="edit-retention"]').setValue('7')
+      await wrapper.find('button[data-testid="edit-save"]').trigger('click')
+      await flushPromises()
+
+      expect(mockUpdate).not.toHaveBeenCalled()
+    })
+
+    it('调大保留期：不得弹确认（安全操作不该被无谓打断）', async () => {
+      const wrapper = await openEditWith(7)
+      mockElMessageBoxConfirm.mockClear()
+      mockUpdate.mockClear()
+      await wrapper.find('input[data-testid="edit-retention"]').setValue('365')
+      await wrapper.find('button[data-testid="edit-save"]').trigger('click')
+      await flushPromises()
+
+      expect(mockElMessageBoxConfirm).not.toHaveBeenCalled()
+      expect(mockUpdate).toHaveBeenCalledWith(7, expect.objectContaining({ retention_days: 365 }))
+    })
   })
 
   // ─── 进度轮询 ───

@@ -596,6 +596,26 @@ const saveEdit = async () => {
     ElMessage.warning('名称不能为空')
     return
   }
+
+  // G10：**调小保留天数**是破坏性操作 —— 表单下方已写明「到期后数据将被分批硬删除，
+  // 删除后不可恢复」，但改前保存**没有任何确认**：用户把 90 天改成 7 天，点「保存」
+  // 即静默缩短保留期，超出 7 天的历史数据会随后被清理器硬删且无法找回。
+  // 这里只对「调小」要确认（调大/不变是安全的，不该被无谓打断）。
+  const previousRetention = editing.value.retention_days
+  const nextRetention = editForm.value.retention_days
+  if (
+    typeof previousRetention === 'number'
+    && typeof nextRetention === 'number'
+    && nextRetention < previousRetention
+  ) {
+    const confirmed = await feedback.confirmDanger(
+      `把「${editing.value.name}」的保留天数从 ${previousRetention} 天缩短为 ${nextRetention} 天？`
+      + `超出新保留期的历史数据将被分批硬删除，且不可恢复。`,
+      { title: '确认缩短保留期', confirmText: '缩短并保存', cancelText: '取消' },
+    )
+    if (!confirmed) return
+  }
+
   saving.value = true
   try {
     const updated = await logicalDeviceApi.update(editing.value.id, {
