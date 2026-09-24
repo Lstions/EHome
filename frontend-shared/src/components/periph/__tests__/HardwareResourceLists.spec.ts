@@ -203,4 +203,57 @@ describe('PWMResourceList', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('运行中')
   })
+
+  // ── 占空比滑块的「拖动只改显示、松手 300ms 后才写设备」契约 ──
+  //
+  // 该契约原先只由**已删除**的 PWMChannelRow spec 覆盖（C5 清理时随死文件一并删除）。
+  // 而 PWMResourceList 是存活实现，本轮又把它的 input/change 处理器改写为收敛
+  // `Arrayable<number>`（el-slider 支持 range 模式故载荷可能是数组），
+  // 因此必须把这条契约重新钉在**存活组件**上，否则"拖动时每像素写一次设备"
+  // 这类回归将无人拦截。
+  describe('占空比滑块写入节流（存活实现）', () => {
+    it('拖动（input）不写设备；松手（change）过 300ms 后才写', async () => {
+      vi.useFakeTimers()
+      try {
+        mocks.pwmSetDuty.mockClear()
+        // 本用例必须**分别**驱动 input 与 change：默认 stub 一次点击连发两者，
+        // 那样无法区分"input 就写了"与"只有 change 才写"——
+        // 实测这种写法下"input 也调 scheduleDuty"的变异**能存活**（防抖掩盖了差异）。
+        // 故这里用一个只发 input、另一个只发 change 的两个探针元素。
+        const ProbeStub = defineComponent({
+          inheritAttrs: false,
+          props: ['modelValue', 'disabled', 'ariaLabel'],
+          emits: ['input', 'change'],
+          template: `<div>
+            <button class="slider-input-only" @click="$emit('input', 6500)">in</button>
+            <button class="slider-change-only" @click="$emit('change', 6500)">ch</button>
+          </div>`,
+        })
+        const wrapper = track(mount(PWMResourceList, {
+          props: { resources: pwmHardware, configs: [pwmConfig('PWM0', 6)], nodeId: 'node-1', availablePins: [2] },
+          global: { stubs: { ...stubs, ElSlider: ProbeStub } },
+        }))
+        await flushPromises()
+        ;(wrapper.vm as any).applyRuntimeState('PWM0', true, 5000)
+        await wrapper.vm.$nextTick()
+
+        // ① 只发 input：本地显示可变，但**不得**排入写设备
+        await wrapper.find('.slider-input-only').trigger('click')
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(
+          mocks.pwmSetDuty,
+          'input（拖动中）不得写设备 —— 否则拖动会按像素打爆设备',
+        ).not.toHaveBeenCalled()
+
+        // ② 只发 change：309ms 后才写
+        await wrapper.find('.slider-change-only').trigger('click')
+        await vi.advanceTimersByTimeAsync(299)
+        expect(mocks.pwmSetDuty, '299ms 时仍在防抖窗口内，不该写').not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(20)
+        expect(mocks.pwmSetDuty, '过防抖窗口后必须写').toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
 })

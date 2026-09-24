@@ -42,8 +42,8 @@
                 :show-tooltip="false"
                 :disabled="offline || row.running !== true || row.busy"
                 :aria-label="`${row.resource.id} GPIO ${row.config.pin} PWM 占空比`"
-                @input="(value: number) => row.duty = value"
-                @change="(value: number) => scheduleDuty(row, value)"
+                @input="(value: Arrayable<number>) => onSliderInput(row, value)"
+                @change="(value: Arrayable<number>) => onSliderChange(row, value)"
               />
             </template>
           </div>
@@ -85,6 +85,10 @@
 
 <script setup lang="ts">
 import { computed, onUnmounted, reactive, watch } from 'vue'
+// `el-slider` 的 input/change 载荷类型是 `Arrayable<number>`（支持 range 模式）。
+// 该类型未从 `element-plus` 根导出，只能从官方 utils 子路径取
+// （`element-plus/es/utils/typescript` 显式 export 了它，非内部私有路径）。
+import type { Arrayable } from 'element-plus/es/utils/typescript'
 import type { PWMBusResource } from '@/api/node'
 import { pwmApi, type PWMConfig } from '@/api/periph'
 import { useGuardedOperation } from '@/composables/useGuardedOperation'
@@ -183,6 +187,35 @@ function cancelDutyTimers() {
   dutyTimers.forEach(timer => clearTimeout(timer))
   dutyTimers.clear()
 }
+/**
+ * `el-slider` 的 `input`/`change` 载荷类型是 `Arrayable<number>`
+ * （该组件同时支持 range 模式，故类型上可能是数组）。
+ *
+ * 本页**不使用** range 模式（`:model-value` 传的是单个 duty 数值），
+ * 因此运行期只会收到 number；但类型门禁要求处理该联合类型。
+ * 这里显式收敛：非 number 一律忽略并告警，而不是用 `as number` 断言掩盖 ——
+ * 断言会在将来有人误开 range 模式时把数组当数字用，产生 NaN 占空比下发到设备。
+ */
+function toSingleDuty(value: Arrayable<number>): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  console.warn('[PWMResourceList] 忽略非单一数值的 slider 载荷（本页未启用 range 模式）', value)
+  return null
+}
+
+/** 拖动中只更新本地显示，不发请求（等 change 的 300ms 防抖再写设备） */
+function onSliderInput(row: PWMRow, value: Arrayable<number>) {
+  const duty = toSingleDuty(value)
+  if (duty === null) return
+  row.duty = duty
+}
+
+/** 松手后经 300ms 防抖写设备（沿用改前行为，见 scheduleDuty） */
+function onSliderChange(row: PWMRow, value: Arrayable<number>) {
+  const duty = toSingleDuty(value)
+  if (duty === null) return
+  scheduleDuty(row, duty)
+}
+
 function scheduleDuty(row: PWMRow, duty: number) {
   const previousTimer = dutyTimers.get(row.resource.id)
   if (previousTimer) clearTimeout(previousTimer)
