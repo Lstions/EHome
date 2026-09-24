@@ -658,5 +658,67 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       expect(pagination.element.closest('.mobile-table-wrapper')).toBeNull()
     })
   })
+
+  // ── G5：人工确认推送到达时自动刷新（改前本页 0 订阅，事件到达用户看不到） ──
+  //
+  // 后端在「待人工确认 / 日熔断 / 系统执行者不可用」时已经 WS 推送
+  // （automation/planner.go:550/474/525），但改前本页没有任何订阅：
+  // 事件到达时页面不刷新，用户得手动点「刷新」或翻页才可能发现待确认项，
+  // 而确认有超时——策略会卡在 pending_confirm。MainLayout 只弹提示+跳转，
+  // 不刷新本页数据（MainLayout.vue:495-508）。
+  //
+  // 断言手法：store 的 subscribe 是公开 API，handler 存在闭包里的
+  // messageHandlers；测试通过 subscribe 的返回值与 spy 捕获调用，
+  // 再用**独立订阅同一事件名**拿到的注册顺序来驱动（见 dispatchPush）。
+  describe('G5 自动化推送驱动的自动刷新', () => {
+    /**
+     * 用同一个 pinia 实例挂载，并捕获组件在 onMounted 里注册的 (事件名 → handler)。
+     *
+     * 为什么不能在 mountPage() 之后用 useWebSocketStore() 取 store 再派发：
+     * mountPage 内部 createPinia() 会新建实例，而测试里的 useWebSocketStore()
+     * 取到的是另一个 pinia 下的 store（两者 messageHandlers 不同）——
+     * 第一版就这么写的，结果 captured 为空、断言全红。
+     */
+    async function mountAndCapture() {
+      const { useWebSocketStore } = await import('@/stores/websocket')
+      const pinia = createPinia()
+      const store = useWebSocketStore(pinia)
+      const captured = new Map<string, (m: unknown) => void>()
+      vi.spyOn(store, 'subscribe').mockImplementation((type: string, handler: never) => {
+        captured.set(type, handler)
+        return () => { captured.delete(type) }
+      })
+      const wrapper = mount(AutomationRules, { global: { plugins: [pinia] } })
+      await flushPromises()
+      return { wrapper, captured }
+    }
+
+    it('订阅了后端实际推送的 3 个事件名（planner.go:474/525/550）', async () => {
+      const { captured } = await mountAndCapture()
+      expect([...captured.keys()]).toContain('automation_pending_confirm')
+      expect([...captured.keys()]).toContain('automation_daily_limit')
+      expect([...captured.keys()]).toContain('automation_system_actor_unavailable')
+      vi.restoreAllMocks()
+    })
+
+    it('收到 automation_pending_confirm 后自动重新拉取事件（无需用户手动刷新）', async () => {
+      const { captured } = await mountAndCapture()
+      const listEvents = automationApi.listEvents as unknown as ReturnType<typeof vi.fn>
+      const before = listEvents.mock.calls.length
+      captured.get('automation_pending_confirm')!({ type: 'automation_pending_confirm', payload: { detail: { rule_name: 'X' } } })
+      await flushPromises()
+      expect(listEvents.mock.calls.length).toBeGreaterThan(before)
+      vi.restoreAllMocks()
+    })
+
+    it('卸载后取消订阅（页面销毁后不得继续刷新）', async () => {
+      const { wrapper, captured } = await mountAndCapture()
+      expect(captured.has('automation_pending_confirm')).toBe(true)
+      wrapper.unmount()
+      // onUnmounted 调用了 subscribe 返回的 off()，captured 中该键应被删除
+      expect(captured.has('automation_pending_confirm')).toBe(false)
+      vi.restoreAllMocks()
+    })
+  })
 })
 

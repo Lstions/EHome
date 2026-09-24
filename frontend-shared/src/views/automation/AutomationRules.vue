@@ -332,13 +332,15 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import feedback from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { Plus } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { useResponsive } from '@/composables/useResponsive'
+import { useWebSocketStore } from '@/stores/websocket'
+import { logger } from '@/utils/logger'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { deviceOperationApi, type DeviceOperation } from '@/api/deviceOperation'
 import {
@@ -821,6 +823,45 @@ onMounted(async () => {
   } catch {
     /* 设备下拉加载失败不阻塞页面 */
   }
+})
+
+// ── G5：人工确认事件到达时自动刷新，不要求用户手动翻页/重进 ──
+//
+// 改前：后端 `automation/planner.go` 在「待人工确认 / 日熔断 / 系统执行者不可用」时
+// 已通过 WS 推送（`automation_pending_confirm` 等），但本页**没有任何订阅** ——
+// 事件到达时页面看不到新事件，用户只能手动点「刷新」或翻页才可能发现待确认项，
+// 而此时确认时限可能已经过去（策略卡在 pending_confirm）。
+// MainLayout 只负责弹提示与跳转（`MainLayout.vue:495-508`），不刷新本页数据。
+//
+// 订阅的事件名是**后端实际推送的字面量**（`planner.go:474/525/550`），
+// 它们尚未收进 `events/events.ts` 的 WS_EVENT 枚举（枚举缺失是既有债，
+// 这里先用字面量并注释出处，避免为 3 个事件扩枚举引发更大范围的改动）。
+const wsStore = useWebSocketStore()
+const AUTOMATION_PUSH_EVENTS = [
+  'automation_pending_confirm',
+  'automation_daily_limit',
+  'automation_system_actor_unavailable',
+] as const
+let unsubscribeAutomationPushes: Array<() => void> = []
+
+onMounted(() => {
+  try {
+    unsubscribeAutomationPushes = AUTOMATION_PUSH_EVENTS.map(name => wsStore.subscribe(name, () => {
+      // 只刷事件表（确认动作就是针对事件行的）；规则表结构不受推送影响。
+      // 失败不打扰用户：这是被动刷新，页面上仍有手动「刷新」按钮兜底。
+      void fetchEvents().catch((err: unknown) => {
+        logger.warn('自动化推送触发的刷新失败', { error: String(err), event: name })
+      })
+    }))
+  } catch (err: unknown) {
+    // 订阅失败不得阻塞页面（无 WS 时页面仍可手动刷新）。
+    logger.warn('自动化推送订阅失败', { error: String(err) })
+  }
+})
+
+onUnmounted(() => {
+  for (const off of unsubscribeAutomationPushes) off()
+  unsubscribeAutomationPushes = []
 })
 </script>
 
