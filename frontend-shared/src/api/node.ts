@@ -355,11 +355,25 @@ export const nodeApi = {
   },
 
   // 硬件配置管理
+  //
+  // ⚠️ **`updateHardwareConfig` 是无操作（no-op），不要用它"保存"任何东西。**
+  // 后端 `PUT /api/v1/nodes/:id/hardware/config`（handler_node.go:427-449）内
+  // **0 处 db 写**，只回 `{"status":"updated"}`；且主动拒绝写 `buses`
+  // （400 "hardware.buses is read-only reported state"）。
+  //
+  // 它的唯一前端调用方曾是死文件 `ChannelPanel.vue`（C5 已删除）。那个页面有个
+  // 「保存配置」按钮调它，然后弹「总线配置已保存」—— 即**假成功**：
+  // 用户以为配置已持久化，实际什么都没存。删除死文件时**刻意未迁移**该能力。
+  //
+  // 保留导出而非删除的理由：后端端点仍在（`handler_test.go:723` 有契约测试），
+  // 删前端导出会让"端点存在但无客户端"更难发现；留此注释比留一个会用错的函数安全。
+  // 若确认后端端点也要退役，应连同 `handler_node.go` 的 PUT 分支一并删除。
   async getHardwareConfig(id: number | string): Promise<Record<string, any>> {
     const response = await client.get<unknown, ApiResponse<Record<string, any>>>(`/api/v1/nodes/${id}/hardware/config`)
     return response.data
   },
 
+  /** @deprecated 后端不持久化任何内容，见上方说明。零消费者（仅契约测试引用）。 */
   async updateHardwareConfig(id: number | string, hardware: Record<string, any>): Promise<void> {
     await client.put(`/api/v1/nodes/${id}/hardware/config`, { hardware })
   },
