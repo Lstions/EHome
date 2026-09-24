@@ -393,6 +393,29 @@ describe('PeripheralControl', () => {
       ).not.toHaveProperty('channel')
     })
 
+    it('PWM「编辑」走 pwmApi.update 而非 create（沿用迁移前契约）', async () => {
+      // 旧实现 ChannelPanel 的对应用例：
+      // `updates an edited PWM by its immutable hardware id and retains its valid route`。
+      // 死文件删除后该语义必须由存活组件继续守住，否则"编辑变成新建"会
+      // 静默产生重复配置（或 409）。
+      mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [], pwm: [{ id: 'PWM1', channel: 1, timer_count: 4, max_resolution_bits: 14 }] } })
+      mocks.gpioList.mockResolvedValue([])
+      mocks.pwmList.mockResolvedValue([pwmConfig('PWM1', 1, 6)])   // 已配置 ⇒ update（stub 发的是 PWM1）
+      mocks.pwmUpdate.mockResolvedValue(undefined)
+
+      const wrapper = mountAttached()
+      await flushPromises()
+      await wrapper.get('.configure-pwm').trigger('click')
+      await flushPromises()
+      findSubmit('submit-pwm')!.click()
+      await flushPromises()
+
+      expect(mocks.pwmUpdate).toHaveBeenCalledWith('node-1', 'PWM1', expect.anything())
+      expect(mocks.pwmCreate, '编辑不得走 create').not.toHaveBeenCalled()
+      // 同样不得带 channel（PUT 的 DTO 里没有该字段）
+      expect(mocks.pwmUpdate.mock.calls[0][2]).not.toHaveProperty('channel')
+    })
+
     it('离线时不得写配置（提交被拦下并提示）', async () => {
       mocks.getCapabilities.mockResolvedValue({ buses: { gpio: [{ id: 'GPIO2', pin: 2, enabled: true }], pwm: [] } })
       mocks.gpioList.mockResolvedValue([])
