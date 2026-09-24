@@ -144,7 +144,18 @@
             </el-button>
           </template>
         </el-table-column>
-        <template #empty>暂无触发事件</template>
+        <!-- F3：区分"没配策略"与"策略没触发/被抑制" —— 后者常见成因是 cooldown 或日熔断，
+             只说「暂无触发事件」会让用户以为页面坏了（审计 R2-C2 口径）。 -->
+        <template #empty>
+          <div class="table-empty">
+            <p>{{ rules.length === 0 ? '尚未创建自动化策略' : '暂无触发事件' }}</p>
+            <p class="table-empty-hint">
+              {{ rules.length === 0
+                ? '在上方「自动化策略」中创建规则后，命中的事件会出现在这里。'
+                : '策略已就绪但尚未产生事件：确认条件可达，并留意冷却期（cooldown）与日熔断会抑制触发。' }}
+            </p>
+          </div>
+        </template>
       </el-table>
       </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
@@ -887,4 +898,8 @@ onUnmounted(() => {
    祖先链 scrollWidth === clientWidth（不可回滚）⇒ 真实裁切。
    同仓范式：firmware/FirmwareManage.vue 的 .firmware-manage :deep(.el-pagination)。 */
 .events-pagination :deep(.el-pagination) { flex-wrap: wrap; }
+/* F3：表格内的空态（说明原因 + 下一步），与全页 EmptyState 保持同一种信息密度。 */
+.table-empty { color: var(--el-text-color-secondary); }
+.table-empty p { margin: 0; }
+.table-empty-hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
 </style>

@@ -87,7 +87,12 @@
     </div>
 
     <!-- 配置模板卡片 -->
-    <div class="config-grid">
+    <!-- F3：加载态收敛 —— 本页原先**没有任何加载指示**（有 loading ref，却既无 v-loading
+         也无骨架）：首屏请求未回来时 .config-grid 为空、空态又因 `!loading` 被抑制，
+         于是加载期间只有一片空白，用户无法区分"正在加载"与"页面坏了"。
+         这里按仓库惯例（DataSourceList.vue:102 等）用 v-loading，与下方
+         `v-if="!loading && ..."` 的空态口径一致。 -->
+    <div class="config-grid" v-loading="loading" data-test="config-grid">
       <el-card 
         v-for="config in filteredConfigs" 
         :key="config.id" 

@@ -145,7 +145,18 @@
         <el-table-column label="恢复时间" min-width="160">
           <template #default="{ row }">{{ formatTime(row.resolved_at) }}</template>
         </el-table-column>
-        <template #empty>暂无告警事件</template>
+        <!-- F3：空态要能区分"没配规则"与"规则没触发" —— 两者下一步动作完全不同，
+             只说「暂无告警事件」会让用户以为页面坏了（审计 R2-C2 的口径）。 -->
+        <template #empty>
+          <div class="table-empty">
+            <p>{{ store.rules.length === 0 ? '尚未创建告警规则' : '暂无告警事件' }}</p>
+            <p class="table-empty-hint">
+              {{ store.rules.length === 0
+                ? '在「告警规则」表中创建规则后，条件触发的事件会出现在这里。'
+                : '规则已就绪但尚未触发：确认目标设备在线、且传感器名与设备实际上报的类别一致。' }}
+            </p>
+          </div>
+        </template>
       </el-table>
       </div>
       <!-- 分页 (真分页: 表格数据来自接口当前页, 不是本地全量切片)。
@@ -580,4 +591,8 @@ onMounted(async () => {
 /* 分页器与表格留出间距; 窄容器下允许换行 (与 AutomationRules.vue 同范式)。 */
 .events-pagination { display: flex; justify-content: flex-end; margin-top: 12px; }
 .events-pagination :deep(.el-pagination) { flex-wrap: wrap; }
+/* F3：表格内的空态（说明原因 + 下一步），与全页 EmptyState 保持同一种信息密度。 */
+.table-empty { color: var(--el-text-color-secondary); }
+.table-empty p { margin: 0; }
+.table-empty-hint { margin-top: 4px; font-size: 12px; color: var(--el-text-color-placeholder); }
 </style>

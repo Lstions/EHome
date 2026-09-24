@@ -564,4 +564,34 @@ describe('AlertRules.vue', () => {
       expect(mockedAlertApi.createRule).not.toHaveBeenCalled()
     })
   })
+
+  // ── F3：空态要能区分「没配规则」与「规则没触发」 ──
+  //
+  // 改前事件表只写「暂无告警事件」：两种截然不同的状态共用一句话，
+  // 用户无法判断是自己还没建规则，还是规则建了但不触发（后者通常意味着
+  // 传感器名与设备实际上报类别不一致 —— 正是 G2 修的静默失效）。
+  //
+  // 断言层次说明：`el-table` 的 `#empty` 插槽**只在 data 为空时由 EP 渲染**，
+  // 而本仓全局 ElTable stub（test-setup.ts:280）不渲染 empty 插槽 —— 故这里
+  // 无法用 DOM 断言空态文案。改为两层组合：
+  //   ① 行为层：store.rules 的长度决定走哪个分支（用真实 store 驱动，可失败）；
+  //   ② 源码层：两个分支的文案都在，且都含"下一步"信息。
+  // 不为这一条去改全局 stub：那会影响 160 个测试文件的表格渲染面。
+  describe('F3 事件表空态区分', () => {
+    it('空态分支由 store.rules 是否为空驱动（两条文案都必须存在）', async () => {
+      mockedAlertApi.listRules.mockResolvedValue([])
+      mockedAlertApi.listEvents.mockResolvedValue(eventPage([], 0, 1, 20))
+      const wrapper = await mountPage()
+      await flushPromises()
+      expect(useAlertStore(wrapper.vm.$pinia).rules).toHaveLength(0)
+
+      // 源码层：两种形态都在，且各自带"下一步"
+      expect(alertRulesSource).toContain('尚未创建告警规则')
+      expect(alertRulesSource).toContain('在「告警规则」表中创建规则后')
+      expect(alertRulesSource).toContain('暂无告警事件')
+      expect(alertRulesSource).toContain('传感器名')
+      // 反证：不得退回"单一文案"（那就是改前的缺陷）
+      expect(alertRulesSource).not.toContain('<template #empty>暂无告警事件</template>')
+    })
+  })
 })

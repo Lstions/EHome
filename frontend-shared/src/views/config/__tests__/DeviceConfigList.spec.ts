@@ -419,4 +419,19 @@ describe('DeviceConfigList.vue', () => {
     // 取消 ⇒ false ⇒ 一个请求都不发 (改前靠 error !== 'cancel' 字符串判断, 已删除)。
     expect(vi.mocked(deviceConfigApi.create)).not.toHaveBeenCalled()
   })
+
+  // ── F3：首屏加载期必须有可见指示 ──
+  //
+  // 改前本页有 `loading` ref 却**没有任何加载指示**：既无 v-loading 也无骨架，
+  // 而空态又被 `v-if="!loading && ..."` 抑制 ⇒ 请求未回来时整页只有空白，
+  // 用户无法区分"正在加载"与"页面坏了"。
+  describe('F3 加载态可见性', () => {
+    it('卡片网格绑定 v-loading（与空态的 !loading 判定同口径）', () => {
+      expect(source).toMatch(/class="config-grid"[^>]*v-loading="loading"/)
+
+      // 反证：空态必须仍受 `!loading` 保护 —— 否则加载期会先闪一下"暂无配置模板"
+      // （把"还在加载"误报成"没有数据"，比空白更误导）。
+      expect(source).toMatch(/v-if="!loading && filteredConfigs\.length === 0"/)
+    })
+  })
 })
