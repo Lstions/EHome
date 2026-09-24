@@ -98,7 +98,6 @@ declare module 'vue' {
     NotificationChannelFormDialog: typeof import('./components/notification/NotificationChannelFormDialog.vue')['default']
     OTAForm: typeof import('./components/forms/OTAForm.vue')['default']
     PageHeader: typeof import('./components/common/PageHeader.vue')['default']
-    ParserBrowser: typeof import('./components/parser/ParserBrowser.vue')['default']
     PeripheralControl: typeof import('./components/periph/PeripheralControl.vue')['default']
     PWMResourceList: typeof import('./components/periph/PWMResourceList.vue')['default']
     QuickCreateDeviceDialog: typeof import('./components/node/QuickCreateDeviceDialog.vue')['default']

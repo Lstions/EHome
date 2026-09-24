@@ -278,7 +278,6 @@ const REGISTERED_EXCEPTIONS = new Map<string, string>([
   // C 类：@click.stop 只为阻止冒泡，元素自身不产生动作
   ['src/components/channel/ChannelTerminal.vue::toggleExpand(\'tx\', index)', '#28 D：同一终端「导出」按钮输出未截断全量 hex，等价入口'],
   ['src/components/channel/ChannelTerminal.vue::toggleExpand(\'rx\', index)', '#29 D：同上，同一「导出」按钮覆盖两个面板'],
-  ['src/components/parser/ParserBrowser.vue::selectParser(parser)', '#32 A(死代码)：全仓无生产 import，见报告复核输出'],
   ['src/views/dashboard/Dashboard.vue::router.push(\'/node?status=offline\')', '#20 D：统计卡 el-card 可达 /node + NodeList 状态筛选'],
   ['src/views/dashboard/Dashboard.vue::router.push(\'/edge-device?status=offline\')', '#21 D：统计卡可达 /edge-device + 列表状态筛选'],
   ['src/views/dashboard/Dashboard.vue::router.push(\'/data\')', '#22 D：侧栏 el-menu「数据面板」roving tabindex 可达'],

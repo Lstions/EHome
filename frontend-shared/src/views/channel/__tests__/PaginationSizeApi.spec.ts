@@ -152,7 +152,10 @@ describe('全仓扫描：frontend-shared/src 下所有 .vue', () => {
 
   it('扫描器自身有效（找到的 .vue 数量是合理分母，不是空集合假绿）', () => {
     // 若递归/路径写错，files 为空 ⇒ 下面的断言会「全绿」，必须先钉住分母。
-    expect(files.length).toBeGreaterThan(80)
+    // 阈值口径：本守卫防的是"扫描器坏了 ⇒ 集合为空或严重截断"，**不是**精确分子。
+    // 原 `> 80` 会被正常的删除清理误伤（本轮删 3 个死组件后实测正好 80 ⇒ 假红）。
+    // 取 70 留出整改余量：真出问题时集合会掉到个位数或 0，仍会红。
+    expect(files.length).toBeGreaterThan(70)
     expect(files.some((f) => f.endsWith(join('channel', 'ChannelList.vue')))).toBe(true)
   })
 
