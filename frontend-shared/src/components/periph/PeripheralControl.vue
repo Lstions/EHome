@@ -239,8 +239,12 @@ async function onDialogSubmit(payload: GpioFormModel | PwmFormModel) {
       else await gpioApi.create(nodeId, { pin: form.pin, ...body })
     } else {
       const form = payload as PwmFormModel
+      // **不要提交 channel**：后端 `handler_periph.go:697` 用
+      // `Channel: resource.Channel`（从设备上报的资源解析），**忽略**请求体里的 channel。
+      // 旧实现 ChannelPanel 也刻意省略它（其 spec 有专门用例
+      // `omits the reported PWM channel from create payload because the backend resolves it`）。
+      // 传一个会被忽略的字段会让读者以为它生效，故这里显式不带。
       const body = {
-        channel: form.channel,
         pin: form.pin,
         frequency: form.frequency,
         duty: form.duty,

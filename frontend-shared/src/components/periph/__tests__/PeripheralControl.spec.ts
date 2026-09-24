@@ -383,6 +383,14 @@ describe('PeripheralControl', () => {
         'node-1',
         expect.objectContaining({ hardware_id: 'PWM1' }),
       )
+      // **不得提交 channel**：后端用 `Channel: resource.Channel` 自行解析
+      // （handler_periph.go:697），PUT 的 DTO 里更是**根本没有** channel 字段。
+      // 传一个被忽略的字段会让读者以为它生效 —— 旧实现 ChannelPanel 也刻意省略，
+      // 其 spec 有专门用例断言 `.not.toHaveProperty('channel')`。
+      expect(
+        mocks.pwmCreate.mock.calls[0][1],
+        'channel 由后端从上报资源解析，前端不得提交',
+      ).not.toHaveProperty('channel')
     })
 
     it('离线时不得写配置（提交被拦下并提示）', async () => {
