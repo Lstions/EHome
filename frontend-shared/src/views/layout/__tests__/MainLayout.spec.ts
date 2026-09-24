@@ -4,8 +4,8 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import MainLayout from '@/views/layout/MainLayout.vue'
 import layoutSource from '../MainLayout.vue?raw'
-import { expectedNavPaths, expectedNavPathsInOrder } from '../menuModel'
-import { collectNavPaths, expandAllSubMenus, hasSubMenu } from '../menuDom'
+import { expectedGroupTitles, expectedNavPaths, expectedNavPathsInOrder } from '../menuModel'
+import { collectNavPaths, collectVisibleNavPaths, expandAllSubMenus, hasSubMenu } from '../menuDom'
 
 // theme.css 通过同目录原始文本副本验证；happy-dom/Vitest 的 CSS ?raw 在该配置下为空。
 
@@ -153,6 +153,36 @@ describe('MainLayout.vue', () => {
     if (!hasSubMenu(drawerEl)) {
       expect(renderedPaths).toEqual(expectedNavPathsInOrder())
     }
+  })
+
+  it('Phase 2.4：菜单按 NAV_GROUPS 分组渲染（5 组），且叶子仍覆盖全部导航目标', async () => {
+    // 这条断言存在的前提是 test-setup.ts 注册了 ElSubMenu stub。
+    // 没有该 stub 时 `<el-sub-menu>` 被当未知元素、只渲染插槽 ⇒ 分组在测试里不可见
+    // （实测过 GROUP_TITLES=0 而叶子=14），门禁会假绿。故这里同时断言组标题数。
+    const wrapper = mount(MainLayout, { global: { stubs } })
+    await flushPromises()
+    await nextTick()
+
+    const drawerEl = wrapper.find('.mobile-sidebar-drawer').element as HTMLElement
+    expect(hasSubMenu(drawerEl), '未渲染 el-sub-menu —— 分组丢失或 stub 缺失').toBe(true)
+
+    const titles = Array.from(drawerEl.querySelectorAll('.el-sub-menu__title'))
+      .map(t => (t.textContent || '').trim())
+    // ⚠️ 期望值**写死为产品契约**（14 项 → 这 5 组），不能引用 expectedGroupTitles()。
+    // 理由（实测教训）：初版写 `expect(titles).toEqual(expectedGroupTitles())`，而该函数读的是
+    // **同一个 menuModel** ⇒「渲染结果 == 模型」恒成立，把 5 组并成 4 组的变异**照样全绿**
+    // （自指断言 = 假绿）。分组数量与命名是产品决策（审计 §4.4 D1），必须由测试钉住。
+    expect(titles).toEqual(['总览', '设备与通道', '数据', '自动化与通知', '运维'])
+    // 再校验模型与契约一致（防"改了模型没改契约"或反之）
+    expect(expectedGroupTitles()).toEqual(titles)
+
+    // 分组只是层级变化，**成员不得变化**（这正是 Phase 0.3 把门禁改成集合比较的意义）
+    expect(new Set(collectNavPaths(drawerEl))).toEqual(new Set(expectedNavPaths()))
+
+    // 默认全部展开：折叠会让子项 display:none，而侧栏 roving 序列只含叶子项 ⇒
+    // 折叠后键盘无法到达子项。故"默认展开"是可访问性要求，不是审美选择。
+    const visible = collectVisibleNavPaths(drawerEl)
+    expect(new Set(visible), '分组默认未展开 ⇒ 子项对键盘/可见性断言不可达').toEqual(new Set(expectedNavPaths()))
   })
 
   it('marks /data as the active menu', async () => {

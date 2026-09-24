@@ -180,8 +180,13 @@ describe('MainLayout 桌面侧栏键盘可达（roving tabindex）', () => {
     expect(source).toContain("case 'Home'")
     expect(source).toContain("case 'End'")
     expect(source).toContain("case 'Enter'")
-    // roving tabindex 绑定必须存在，否则整条链失效（变异自证对应的就是这一行）
-    expect(source).toContain(':tabindex="idx === sidebarFocusIndex ? 0 : -1"')
+    // roving tabindex 绑定必须存在，否则整条链失效（变异自证对应的就是这一行）。
+    // Phase 2.4 后菜单分组，绑定从 `idx === sidebarFocusIndex`（组内 v-for 下标）
+    // 改为 `item.flatIndex === sidebarFocusIndex` —— 必须用**扁平下标**：
+    // 分组后组内下标会与 DOM 叶子顺序错位，焦点会跳到错误的菜单项。
+    expect(source).toContain('item.flatIndex === sidebarFocusIndex ? 0 : -1')
+    // 反证：不得退回组内下标（那正是分组后最容易犯的错）
+    expect(source).not.toContain(':tabindex="idx === sidebarFocusIndex ? 0 : -1"')
   })
 
   it('方向键把焦点移到下一个菜单项并同步 tabindex（真实 DOM 焦点）', async () => {

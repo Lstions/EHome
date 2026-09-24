@@ -1,4 +1,4 @@
-import { defineComponent, h, inject, provide, type Component, type InjectionKey } from 'vue'
+import { computed, defineComponent, h, inject, provide, type Component, type InjectionKey } from 'vue'
 import { config } from '@vue/test-utils'
 
 /**
@@ -670,10 +670,14 @@ const genericElComponents = [
 ]
 
 // ElMenu/ElMenuItem 需要特殊处理：渲染 class + data-index + emit select
+/** 组名集合（el-menu 通过 provide 下发，el-sub-menu 通过 inject 读取）—— 对齐 EP 的 openedMenus 语义。 */
+const MENU_DEFAULT_OPENEDS: InjectionKey<string[]> = Symbol('menuDefaultOpeneds')
+
 config.global.components['ElMenu'] = defineComponent({
-  props: { defaultActive: String, collapse: Boolean, mode: String },
+  props: { defaultActive: String, collapse: Boolean, mode: String, defaultOpeneds: { type: Array, default: undefined } },
   emits: ['select'],
-  setup(_, { slots }) {
+  setup(props, { slots }) {
+    provide(MENU_DEFAULT_OPENEDS, (props.defaultOpeneds as string[] | undefined) ?? [])
     return () => h('div', { class: 'el-menu' }, slots.default?.())
   },
 })
@@ -687,6 +691,45 @@ config.global.components['ElMenuItem'] = defineComponent({
   },
 })
 config.global.components['el-menu-item'] = config.global.components['ElMenuItem']
+
+/**
+ * ElSubMenu：Phase 2.4 引入的分组容器。
+ *
+ * **必须有显式 stub**：不注册时 Vue 会把 `<el-sub-menu>` 当未知元素、只渲染默认插槽
+ * ⇒ 叶子项"看起来"仍是平铺的，分组在测试里**完全不可见**
+ * （实测：GROUP_TITLES=0 而叶子=14 —— 门禁会假绿，根本测不到分组本身）。
+ *
+ * 形状对齐 EP 2.14.3（`element-plus/.../menu/src/sub-menu.mjs:250-253`）：
+ *   - 根 `<li class="el-sub-menu">`，展开时带 `is-opened`；
+ *   - 标题 `<div class="el-sub-menu__title">`，**可聚焦**（键盘用户靠它展开分组）；
+ *   - 子级 `<ul class="el-menu">` 用 **v-show**（`[[vShow, opened]]`）⇒ 折叠时子项
+ *     **仍在 DOM**、仅 display:none。必须照抄这一点，否则测不出"存在 ≠ 可达"。
+ *
+ * 展开态近似：真实 EP 由父 el-menu 的 defaultOpeneds/openedMenus 管理，stub 拿不到父状态，
+ * 故按"defaultOpeneds 是否包含本 index"判定；对本仓用法（MainLayout 传全量组名 ⇒ 全展开）等价。
+ */
+config.global.components['ElSubMenu'] = defineComponent({
+  props: {
+    index: String,
+    defaultOpeneds: { type: Array, default: undefined },
+  },
+  setup(props, { slots }) {
+    // 展开态来源与真实 EP 一致：由父 el-menu 的 defaultOpeneds 决定（此处经 provide/inject 传递）。
+    const inherited = inject(MENU_DEFAULT_OPENEDS, [] as string[])
+    const opened = computed(() => {
+      const list = (props.defaultOpeneds as string[] | undefined) ?? inherited
+      return list.length > 0 && list.includes(String(props.index))
+    })
+    return () => h('li', { class: ['el-sub-menu', { 'is-opened': opened.value }] }, [
+      h('div', { class: 'el-sub-menu__title', tabindex: 0 }, slots.title?.()),
+      h('ul', {
+        class: 'el-menu',
+        style: opened.value ? undefined : { display: 'none' },
+      }, slots.default?.()),
+    ])
+  },
+})
+config.global.components['el-sub-menu'] = config.global.components['ElSubMenu']
 
 // ElSlider 需要渲染 <input> 以便测试通过 aria-label 查找和 trigger change
 config.global.components['ElSlider'] = defineComponent({

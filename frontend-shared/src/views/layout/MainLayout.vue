@@ -18,22 +18,33 @@
         :default-active="activeMenu"
         :collapse="uiStore.sidebarCollapsed"
         :collapse-transition="false"
+        :default-openeds="allGroupTitles"
         router
         class="sidebar-menu"
         @keydown="handleSidebarKeydown"
       >
-        <el-menu-item
-          v-for="(item, idx) in menuItems"
-          :key="item.path"
-          :index="item.path"
-          :data-index="item.path"
-          :tabindex="idx === sidebarFocusIndex ? 0 : -1"
-          :aria-current="activeMenu === item.path ? 'page' : undefined"
-          @focus="sidebarFocusIndex = idx"
-        >
-          <el-icon><component :is="item.icon" /></el-icon>
-          <template #title>{{ item.title }}</template>
-        </el-menu-item>
+        <!-- Phase 2.4：14 项平铺 → 5 组。默认全部展开（:default-openeds="allGroupTitles"），
+             理由见 menuModel.NAV_GROUPS 注释：折叠会让子项 display:none ⇒ 键盘用户必须先
+             展开分组，而侧栏 roving tabindex 只在叶子项间移动（menuItemEls 只收集
+             .el-menu-item，分组标题不在序列内）⇒ 折叠后子项将无法通过键盘到达。
+             默认展开后：叶子仍全在焦点序列内，可达性不变，分组只承担归类作用。 -->
+        <el-sub-menu v-for="group in menuGroups" :key="group.title" :index="group.title">
+          <template #title>
+            <span class="menu-group-title">{{ group.title }}</span>
+          </template>
+          <el-menu-item
+            v-for="item in group.items"
+            :key="item.path"
+            :index="item.path"
+            :data-index="item.path"
+            :tabindex="item.flatIndex === sidebarFocusIndex ? 0 : -1"
+            :aria-current="activeMenu === item.path ? 'page' : undefined"
+            @focus="sidebarFocusIndex = item.flatIndex"
+          >
+            <el-icon><component :is="item.icon" /></el-icon>
+            <template #title>{{ item.title }}</template>
+          </el-menu-item>
+        </el-sub-menu>
       </el-menu>
 
       <!-- 侧边栏底部 -->
@@ -68,25 +79,32 @@
         <el-menu
           ref="mobileMenuRef"
           :default-active="activeMenu"
+          :default-openeds="allGroupTitles"
           router
           class="mobile-sidebar-menu"
           @select="mobileDrawerVisible = false"
           @keydown="handleMobileMenuKeydown"
         >
           <!-- 抽屉是模态：所有导航项都可 Tab 到达，ElFocusTrap 才能在首尾之间循环。
-               这里刻意不用 roving tabindex —— 那会只剩一个 tab 停靠点，Tab 会"卡"在同一项上。 -->
-          <el-menu-item
-            v-for="(item, idx) in menuItems"
-            :key="item.path"
-            :index="item.path"
-            :data-index="item.path"
-            :tabindex="0"
-            :aria-current="activeMenu === item.path ? 'page' : undefined"
-            @focus="mobileFocusIndex = idx"
-          >
-            <el-icon><component :is="item.icon" /></el-icon>
-            <template #title>{{ item.title }}</template>
-          </el-menu-item>
+               这里刻意不用 roving tabindex —— 那会只剩一个 tab 停靠点，Tab 会"卡"在同一项上。
+               分组同桌面（默认展开），避免模态抽屉里再引入"必须先展开"的键盘步骤。 -->
+          <el-sub-menu v-for="group in menuGroups" :key="group.title" :index="group.title">
+            <template #title>
+              <span class="menu-group-title">{{ group.title }}</span>
+            </template>
+            <el-menu-item
+              v-for="item in group.items"
+              :key="item.path"
+              :index="item.path"
+              :data-index="item.path"
+              :tabindex="0"
+              :aria-current="activeMenu === item.path ? 'page' : undefined"
+              @focus="mobileFocusIndex = item.flatIndex"
+            >
+              <el-icon><component :is="item.icon" /></el-icon>
+              <template #title>{{ item.title }}</template>
+            </el-menu-item>
+          </el-sub-menu>
         </el-menu>
 
         <!-- 版本信息 -->
@@ -283,7 +301,7 @@ import {
   Menu,
   Tickets,
 } from '@element-plus/icons-vue'
-import { NAV_DESTINATIONS } from './menuModel'
+import { NAV_DESTINATIONS, NAV_GROUPS, assertGroupsCoverDestinations } from './menuModel'
 import { useUserStore } from '@/stores/user'
 import { withBase } from '@/utils/basePath'
 import { useUIStore } from '@/stores/ui'
@@ -421,12 +439,33 @@ if (import.meta.env.DEV && missingMenuIcon) {
 	throw new Error(`[menu] 图标表缺少 ${missingMenuIcon.path} —— 请同步 menuIcons 与 menuModel.NAV_DESTINATIONS`)
 }
 
-const allMenuItems = NAV_DESTINATIONS.map(d => ({
+const allMenuItems = NAV_DESTINATIONS.map((d, flatIndex) => ({
 	path: d.path,
 	title: d.title,
 	icon: menuIcons[d.path] ?? Tickets,
+	flatIndex,
 }))
+/** 平铺列表（保留：供全局搜索等按顺序消费；menuGroups 是渲染用的分组视图）。 */
 const menuItems = computed(() => allMenuItems)
+
+// Phase 2.4：分组视图。`flatIndex` 取自 NAV_DESTINATIONS 的下标（**不是**组内下标），
+// 这样 roving tabindex 的序号与「分组展开后的 DOM 叶子顺序」一致 ——
+// 否则 activeMenuIndex 定位到的下标会指向另一个菜单项，键盘 Tab 进错页。
+// 顺序一致性由 menuModel.assertGroupsCoverDestinations() 强制校验。
+assertGroupsCoverDestinations()
+const menuGroups = computed(() =>
+	NAV_GROUPS.map(g => ({
+		title: g.title,
+		items: g.paths.map(p => {
+			const item = allMenuItems.find(i => i.path === p)
+			// 模型自检已保证 p 必在目标集内，这里的兜底只为类型收窄（不会触发）。
+			if (!item) throw new Error(`[menu] 分组引用了未定义的路径 ${p}`)
+			return item
+		}),
+	})),
+)
+/** el-menu 的 default-openeds：全部组默认展开（见模板注释中的键盘可达性理由）。 */
+const allGroupTitles = NAV_GROUPS.map(g => g.title)
 
 const appVersion = computed(() => import.meta.env.VITE_APP_VERSION || '2.2.0')
 
