@@ -684,10 +684,10 @@ function expectEveryTableWrapped(wrapper: { findAll: (s: string) => Array<{ elem
       const pinia = createPinia()
       const store = useWebSocketStore(pinia)
       const captured = new Map<string, (m: unknown) => void>()
-      vi.spyOn(store, 'subscribe').mockImplementation((type: string, handler: never) => {
-        captured.set(type, handler)
+      vi.spyOn(store, 'subscribe').mockImplementation(((type: string, handler: (m: never) => void) => {
+        captured.set(type, handler as (m: unknown) => void)
         return () => { captured.delete(type) }
-      })
+      }) as typeof store.subscribe)
       const wrapper = mount(AutomationRules, { global: { plugins: [pinia] } })
       await flushPromises()
       return { wrapper, captured }

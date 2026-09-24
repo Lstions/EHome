@@ -183,7 +183,24 @@
           </el-select>
         </el-form-item>
         <el-form-item label="传感器" required>
-          <el-input v-model="form.sensor_name" placeholder="如：cell_voltage_1" data-test="field-sensor" />
+          <!-- G2：候选项来自目标设备已上报的类别；allow-create 保留手输（未上报时不阻塞建规则）。 -->
+          <el-select
+            v-model="form.sensor_name"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            :loading="sensorCategoriesLoading"
+            :placeholder="form.target_id ? '选择或输入传感器名' : '请先选择目标设备'"
+            data-test="field-sensor"
+          >
+            <el-option
+              v-for="c in sensorCategories"
+              :key="c.code"
+              :label="c.unit ? `${c.code}（${c.unit}）` : c.code"
+              :value="c.code"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="条件" required>
           <div class="cond-row">
@@ -230,13 +247,75 @@ import { useResponsive } from '@/composables/useResponsive'
 import { feedback } from '@/utils/feedback'
 import { UNKNOWN } from '@/utils/format'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
+import client from '@/api/client'
+import { logger } from '@/utils/logger'
 import type { AlertRule, AlertComparator, AlertLevel } from '@/api/alert'
+
+/** 后端已上报的测量类别（`GET /api/v1/unified-data/categories`）。 */
+interface MeasurementCategory {
+  code: string
+  unit: string
+}
+
+/** 与 DataPanel.vue 同一解包口径（后端可能回裸数组或 envelope.data）。 */
+function unwrapList<T>(res: unknown): T[] {
+  if (Array.isArray(res)) return res as T[]
+  if (res && typeof res === 'object' && Array.isArray((res as { data?: unknown }).data)) {
+    return (res as { data: T[] }).data
+  }
+  return []
+}
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
 const asRule = (row: unknown) => row as AlertRule
 
 const store = useAlertStore()
 const devices = ref<EdgeDevice[]>([])
+
+// ── G2：传感器名下拉（改前是手输 el-input） ──
+//
+// 改前 placeholder 写着「如：cell_voltage_1」，用户拼错时规则**永不触发**且没有任何反馈
+// —— 这是最典型的一类静默失效：规则列表显示"已启用"，但条件永远不成立。
+// 现改为按目标设备拉取后端**已上报**的类别作为候选项，同时保留 allow-create
+// （设备尚未上报该类别时仍可手填，不阻塞建规则）。
+//
+// 端点是 `GET /api/v1/unified-data/categories?device_pk=<id>`，与 DataPanel.vue:577 同一
+// 生产用法（**带 `/api/v1` 前缀**）。注意不要改用 `api/unifiedData.ts:85` 的
+// `client.get('/unified-data/categories')` —— 那处缺 `/api/v1` 前缀是已登记缺陷，
+// 跟着用会必然 404。
+const sensorCategories = ref<MeasurementCategory[]>([])
+const sensorCategoriesLoading = ref(false)
+/** 已拉取过类别的设备 id，避免同一设备反复请求。 */
+let loadedCategoryDeviceId: number | null = null
+
+async function fetchSensorCategories(deviceId: number) {
+  if (!deviceId || deviceId === loadedCategoryDeviceId) return
+  sensorCategoriesLoading.value = true
+  try {
+    const response = await client.get<unknown, MeasurementCategory[]>('/api/v1/unified-data/categories', {
+      params: { device_pk: deviceId },
+    })
+    sensorCategories.value = unwrapList<MeasurementCategory>(response)
+    loadedCategoryDeviceId = deviceId
+  } catch (err: unknown) {
+    // 有意不弹错、不阻塞表单：拿不到候选就退化为「只能手输」（allow-create 仍在），
+    // 若在此弹错误会打断用户填写。但也不空吞——留一条 warn 便于排查。
+    sensorCategories.value = []
+    loadedCategoryDeviceId = null
+    logger.warn('告警规则：传感器候选类别加载失败，退化为手工输入', { error: String(err), deviceId })
+  } finally {
+    sensorCategoriesLoading.value = false
+  }
+}
+
+/** 目标设备变化 ⇒ 换一份候选类别；清掉不再适用的旧值避免"设备 A 的传感器 + 设备 B"错配。 */
+function watchTargetDeviceForCategories() {
+  watch(() => form.target_id, (id) => {
+    sensorCategories.value = []
+    loadedCategoryDeviceId = null
+    if (id) void fetchSensorCategories(Number(id))
+  })
+}
 
 // isMobile（<768px）用于窄屏取消「操作」列的固定（F29），断点与 theme.css 一致。
 // 事件表 5 列无 fixed 列，不涉及；只有规则表的「操作」列需要翻转。
@@ -291,9 +370,16 @@ const emptyForm = () => ({
 })
 const form = reactive(emptyForm())
 
+// G2：必须在 `form` 声明**之后**注册 —— 否则 watch 的 getter 会命中 TDZ
+// （实测：放在 form 之前会在挂载时抛 "Cannot access 'form' before initialization"）。
+watchTargetDeviceForCategories()
+
 function openCreate() {
   editingId.value = null
   Object.assign(form, emptyForm())
+  // G2：清掉上一轮候选（watch 只在 target_id **变化**时触发，新建时 id 可能恰好同值）。
+  sensorCategories.value = []
+  loadedCategoryDeviceId = null
   dialogVisible.value = true
 }
 function openEdit(rule: AlertRule) {
@@ -310,6 +396,10 @@ function openEdit(rule: AlertRule) {
     level: rule.level,
     enabled: rule.enabled,
   })
+  // G2：编辑已有规则时也要有候选（watch 不会触发：target_id 赋值前已是同值或被 Object.assign 一次性写入）。
+  sensorCategories.value = []
+  loadedCategoryDeviceId = null
+  if (rule.target_id) void fetchSensorCategories(Number(rule.target_id))
   dialogVisible.value = true
 }
 

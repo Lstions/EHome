@@ -3,6 +3,7 @@ import { defineComponent, h, type VNode } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import AlertRules from '../AlertRules.vue'
+import alertRulesSource from '../AlertRules.vue?raw'
 import { useAlertStore } from '@/stores/alert'
 import { alertApi } from '@/api/alert'
 import { edgeDeviceApi } from '@/api/edgeDevice'
@@ -24,6 +25,15 @@ vi.mock('@/api/edgeDevice', () => ({
   edgeDeviceApi: {
     getList: vi.fn(),
   },
+}))
+// G2：传感器候选改为按设备拉取 `/api/v1/unified-data/categories`。
+// 不 mock 会真发 HTTP（该 spec 原先不涉及 client），这里给出与后端同形的候选，
+// 让「选已有类别」与「手输类别」两条路径都可测。
+const { mockClientGet } = vi.hoisted(() => ({
+  mockClientGet: vi.fn(() => Promise.resolve({ data: [{ code: 'temperature', unit: '°C' }] })),
+}))
+vi.mock('@/api/client', () => ({
+  default: { get: mockClientGet },
 }))
 vi.mock('element-plus', async importOriginal => {
   const actual = await importOriginal<typeof import('element-plus')>()
@@ -317,11 +327,14 @@ describe('AlertRules.vue', () => {
   it('创建成功后调用 store 并关闭对话框', async () => {
     const created = { ...ruleFixture, id: 2, name: '新规则' }
     mockedAlertApi.createRule.mockResolvedValue(created)
+    mockClientGet.mockResolvedValue({ data: [{ code: 'temperature', unit: '°C' }] })
     const wrapper = await mountPage()
     await wrapper.find('[data-test="create-rule"]').trigger('click')
     // 填表 (ElInput/ElSelect stub 将 data-test 直接渲染在控件自身上)
     await wrapper.find('[data-test="field-name"]').setValue('新规则')
     await wrapper.find('[data-test="field-target-id"]').setValue('10')
+    // G2：传感器已是 el-select。选定目标设备会去拉候选类别，故先 flush 再选。
+    await flushPromises()
     await wrapper.find('[data-test="field-sensor"]').setValue('temperature')
     await wrapper.find('[data-test="save-rule"]').trigger('click')
     await flushPromises()
@@ -503,5 +516,52 @@ describe('AlertRules.vue', () => {
     const params = lastParams()
     expect(params.state, '翻页后筛选被丢掉').toBe('firing')
     expect(params.page).toBe(2)
+  })
+
+  // ── G2：传感器名由手输改为「按设备候选 + 允许自建」的下拉 ──
+  //
+  // 改前是 el-input，placeholder「如：cell_voltage_1」——拼错时规则**永不触发**
+  // 且没有任何反馈（规则列表仍显示"已启用"）。这是最典型的静默失效，故必须
+  // 让候选项来自后端**已上报**的类别。
+  describe('G2 传感器候选下拉', () => {
+    it('选定目标设备后按该设备拉取候选类别（带 /api/v1 前缀，与生产一致）', async () => {
+      mockClientGet.mockResolvedValue({ data: [{ code: 'cell_voltage_1', unit: 'V' }] })
+      const wrapper = await mountPage()
+      mockClientGet.mockClear()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-target-id"]').setValue('10')
+      await flushPromises()
+      expect(mockClientGet).toHaveBeenCalledWith(
+        '/api/v1/unified-data/categories',
+        expect.objectContaining({ params: { device_pk: 10 } }),
+      )
+    })
+
+    it('候选渲染为可选项，且仍是可搜索 + 允许自建的下拉', async () => {
+      mockClientGet.mockResolvedValue({ data: [{ code: 'cell_voltage_1', unit: 'V' }] })
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-target-id"]').setValue('10')
+      await flushPromises()
+      const sensor = wrapper.find('[data-test="field-sensor"]')
+      // stub 是原生 <select>：候选项以 <option> 形式落地
+      expect(sensor.element.tagName.toLowerCase()).toBe('select')
+      expect(sensor.html()).toContain('cell_voltage_1')
+      // allow-create（允许手输）在 stub 上不体现为 DOM 属性，故对源码断言：
+      // 否则设备未上报类别时用户无法建规则（会把"候选为空"变成硬阻塞）。
+      expect(alertRulesSource).toContain('allow-create')
+      expect(alertRulesSource).toContain('filterable')
+    })
+
+    it('候选接口失败时退化为手输，不阻塞建规则（不得弹错打断）', async () => {
+      mockClientGet.mockRejectedValue(new Error('boom'))
+      const wrapper = await mountPage()
+      await wrapper.find('[data-test="create-rule"]').trigger('click')
+      await wrapper.find('[data-test="field-target-id"]').setValue('10')
+      await flushPromises()
+      // 表单仍在、仍可提交（不因候选加载失败而卡死）
+      expect(wrapper.find('[data-test="save-rule"]').exists()).toBe(true)
+      expect(mockedAlertApi.createRule).not.toHaveBeenCalled()
+    })
   })
 })
