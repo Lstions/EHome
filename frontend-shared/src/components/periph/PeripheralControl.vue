@@ -136,6 +136,15 @@ const loadAll = async () => {
 }
 
 async function removeGpio(pin: number) {
+  // G10：**移除配置是破坏性且不可逆**——后端 `handler_periph.go:511` 直接
+  // `db.Delete(&cfg)` 硬删该行，并向设备下发 `GPIOActionDeconfig` 解除引脚配置。
+  // 改前该动作**没有任何确认**：用户点「移除配置」即静默删库 + 解绑设备引脚。
+  // 注意这是本轮 E1 接线**新暴露出来**的路径（改前整条链不可达，所以从未有人点到）。
+  const ok = await feedback.confirmDanger(
+    `移除 GPIO ${pin} 的配置？该配置将被删除，并向节点下发解绑指令（引脚将被释放）。`,
+    { title: '确认移除 GPIO 配置', confirmText: '移除', cancelText: '取消' },
+  )
+  if (!ok) return
   try {
     await gpioApi.delete(props.nodeId, pin)
     ElMessage.success(`GPIO ${pin} 已删除`)
@@ -145,6 +154,12 @@ async function removeGpio(pin: number) {
   }
 }
 async function removePwm(hardwareId: string) {
+  // G10：同上，PWM 侧同样是硬删 + 设备侧 DECONFIG（`handler_periph.go` 的 pwm delete 分支）。
+  const ok = await feedback.confirmDanger(
+    `移除 ${hardwareId} 的 PWM 配置？该配置将被删除，并向节点下发解绑指令（通道将被释放）。`,
+    { title: '确认移除 PWM 配置', confirmText: '移除', cancelText: '取消' },
+  )
+  if (!ok) return
   try {
     await pwmApi.delete(props.nodeId, hardwareId)
     ElMessage.success(`${hardwareId} 已删除`)

@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   error: vi.fn(),
   // feedback.error()/handleError() 走 ElMessage({...}) 函数式调用
   message: vi.fn(),
+  // G10：confirmDanger 的底层；默认 resolve（用户确认）
+  confirm: vi.fn(() => Promise.resolve()),
 }))
 const wsState = vi.hoisted(() => ({ connected: false }))
 
@@ -32,7 +34,12 @@ vi.mock('@/stores/websocket', () => ({
     subscribe: mocks.subscribe,
   }),
 }))
-vi.mock('element-plus', () => ({ ElMessage: Object.assign(mocks.message, { success: mocks.success, error: mocks.error }) }))
+vi.mock('element-plus', () => ({
+  ElMessage: Object.assign(mocks.message, { success: mocks.success, error: mocks.error, warning: vi.fn() }),
+  // G10：移除 GPIO/PWM 配置改走 feedback.confirmDanger（底层 ElMessageBox.confirm）。
+  // 默认 resolve = 用户确认；取消分支用 mockRejectedValueOnce 驱动。
+  ElMessageBox: { confirm: mocks.confirm },
+}))
 
 // PeripheralControl 显式 import 子组件；使用模块 mock（而非 global.stubs）确保替换生效。
 vi.mock('@/components/periph/GPIOResourceList.vue', () => ({
@@ -186,6 +193,7 @@ describe('PeripheralControl', () => {
 
   it('deletes PWM by hardware_id and reloads capabilities and configs', async () => {
     mocks.pwmDelete.mockResolvedValue(undefined)
+    mocks.confirm.mockResolvedValue(undefined)
     const wrapper = mountControl()
     await flushPromises()
     mocks.getCapabilities.mockClear()
@@ -193,8 +201,49 @@ describe('PeripheralControl', () => {
     await wrapper.get('.remove-pwm').trigger('click')
     await flushPromises()
 
+    // G10：删除前必须先经危险确认（后端是硬删 + 设备侧 DECONFIG，不可逆）
+    expect(mocks.confirm, '移除 PWM 配置前必须先确认').toHaveBeenCalled()
     expect(mocks.pwmDelete).toHaveBeenCalledWith('node-1', 'PWM0')
     expect(mocks.getCapabilities).toHaveBeenCalledWith('node-1')
+  })
+
+  it('G10：移除 PWM 配置时用户取消 → 不得发删除请求', async () => {
+    const wrapper = mountControl()
+    await flushPromises()
+    mocks.pwmDelete.mockClear()
+    mocks.confirm.mockRejectedValueOnce(new Error('cancel'))
+
+    await wrapper.get('.remove-pwm').trigger('click')
+    await flushPromises()
+
+    expect(mocks.pwmDelete).not.toHaveBeenCalled()
+  })
+
+  it('G10：移除 GPIO 配置同样要先确认；确认后才删除并重载', async () => {
+    mocks.gpioDelete.mockResolvedValue(undefined)
+    mocks.confirm.mockResolvedValue(undefined)
+    const wrapper = mountControl()
+    await flushPromises()
+    mocks.getCapabilities.mockClear()
+
+    await wrapper.get('.remove-gpio').trigger('click')
+    await flushPromises()
+
+    expect(mocks.confirm, '移除 GPIO 配置前必须先确认').toHaveBeenCalled()
+    expect(mocks.gpioDelete).toHaveBeenCalledWith('node-1', 2)
+    expect(mocks.getCapabilities).toHaveBeenCalledWith('node-1')
+  })
+
+  it('G10：移除 GPIO 配置时用户取消 → 不得发删除请求', async () => {
+    const wrapper = mountControl()
+    await flushPromises()
+    mocks.gpioDelete.mockClear()
+    mocks.confirm.mockRejectedValueOnce(new Error('cancel'))
+
+    await wrapper.get('.remove-gpio').trigger('click')
+    await flushPromises()
+
+    expect(mocks.gpioDelete).not.toHaveBeenCalled()
   })
 
   it('shows a retryable error when any required resource request fails', async () => {
