@@ -417,7 +417,7 @@ function numericOnly(values: Record<string, number | string> | null): Record<str
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { feedback } from '@/utils/feedback'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, Connection, DataAnalysis, DocumentChecked, Timer, Cpu } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -434,6 +434,11 @@ import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { UNKNOWN } from '@/utils/format'
 
 const router = useRouter()
+const route = useRoute()
+
+/** A5：`?range=` 的合法取值，与模板里四个 el-option（1h/24h/7d/30d）逐字一致 —— 改模板须同步改这里。 */
+const TIME_RANGE_VALUES = ['1h', '24h', '7d', '30d'] as const
+
 const deviceList = ref<EdgeDevice[]>([])
 const historyData = ref<any[]>([])
 const chartSeries = ref<any[]>([])
@@ -1067,8 +1072,46 @@ watch(() => queryForm.compareCategory, () => {
 })
 
 onMounted(() => {
-  fetchDevices()
+  void (async () => {
+    // A5：先等设备列表就绪再消费 `?device=` —— 否则预填的 id 在 deviceList 里找不到，
+    // el-select 会因选项缺失而显示空白（看起来像"深链没生效"）。
+    await fetchDevices()
+    applyQueryPrefill()
+  })()
 })
+
+/**
+ * A5：消费 `?device=<device_pk>&range=<24h|7d|30d>` 深链。
+ *
+ * 改前 /data 的 route.query 零消费：从设备详情或图表"查看历史"跳进来，
+ * 用户还得手动选设备 + 选时间范围（4 步），URL 上的参数被完全忽略。
+ * 非法值一律忽略（不报错、不改成别的设备），保持"无 query 时行为与改前一致"。
+ */
+function applyQueryPrefill() {
+  // 深链只是"锦上添花"：route 缺失/异常时绝不能让整页取数挂掉（onMounted 里是异步调用，
+  // 抛出去会变成未处理拒绝——测试全绿但 vitest 退出码 1 的那种隐蔽故障）。
+  const query = route?.query
+  if (!query) return
+  const rawDevice = query.device
+  const rawRange = query.range
+  let applied = false
+
+  if (typeof rawDevice === 'string' && rawDevice.trim() !== '') {
+    const parsed = Number(rawDevice)
+    // 只接受**在设备列表里真实存在**的 id：否则 el-select 显示空值，
+    // 用户会以为页面坏了。列表未含该 id 时安静忽略。
+    if (Number.isFinite(parsed) && deviceList.value.some(d => d.id === parsed)) {
+      queryForm.deviceId = parsed
+      applied = true
+    }
+  }
+  if (typeof rawRange === 'string' && (TIME_RANGE_VALUES as readonly string[]).includes(rawRange)) {
+    queryForm.timeRange = rawRange
+    applied = true
+  }
+  // 有 device 才自动查（复用 handleQuery，一次请求，不另写取数路径）。
+  if (applied && queryForm.deviceId) handleQuery()
+}
 
 onUnmounted(() => {
   if (unsubscribeData) {

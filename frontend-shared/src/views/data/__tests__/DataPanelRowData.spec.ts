@@ -87,6 +87,13 @@ vi.mock('@/utils/feedback', () => ({
   feedback: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 vi.mock('@/utils/exportData', () => ({ exportCSV: vi.fn(), exportJSON: vi.fn() }))
+// A5：DataPanel 现在在 onMounted 里消费 `?device=`/`?range=`，故必须有 vue-router 替身。
+// 缺它时 useRoute() 返回 undefined → applyQueryPrefill 抛 "Cannot read properties of
+// undefined (reading 'query')"，表现为**未处理拒绝**（测试仍绿、但 vitest 退出码 1）。
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: {}, params: {}, name: 'DataPanel', path: '/data' }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}))
 vi.mock('@/utils/downsample', () => ({ downsampleData: vi.fn((data: unknown[]) => data) }))
 vi.mock('@/utils/sensor', () => ({
   sensorNameMap: { rainfall: '雨量' },

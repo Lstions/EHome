@@ -53,6 +53,14 @@ const { mockClientGet } = vi.hoisted(() => ({
   mockClientGet: vi.fn<(url: string, config?: unknown) => Promise<unknown>>(() => Promise.resolve([])),
 }))
 
+// A5：本页现在消费 `?device=` / `?range=` 深链，需要 vue-router 替身。
+// 真实 vue-router 的 route 一定有 query；替身必须给全，否则 route.query 取值为 undefined。
+const { mockRouteQuery } = vi.hoisted(() => ({ mockRouteQuery: { value: {} as Record<string, unknown> } }))
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: mockRouteQuery.value, params: {}, name: 'DataPanel', path: '/data' }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+}))
+
 vi.mock('@/api/client', () => ({
   default: {
     get: mockClientGet,
@@ -156,6 +164,8 @@ describe('DataPanel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // query 是可变对象，clearAllMocks 不重置它 —— 不重置会让 A5 用例相互污染
+    mockRouteQuery.value = {}
   })
 
   it('renders the .data-panel root element', () => {
@@ -529,6 +539,62 @@ describe('DataPanel', () => {
     await wrapper.find('.el-pagination').trigger('click')
     await flushPromises()
     expect((lastHistoryCall()[1] as Record<string, unknown>).page).toBe(3)
+  })
+
+  // ── A5：`?device=` / `?range=` 深链预填 ──
+  //
+  // 改前 /data 的 route.query 零消费：从设备详情/图表"查看历史"跳进来，
+  // 用户还得手动选设备+时间范围（4 步），URL 参数被完全忽略。
+  // 注意：预填只在**设备列表里真实存在**该 id 时才生效（否则 el-select 显示空白，
+  // 看起来像深链没生效）。本 spec 的设备列表是 [1, 42]。
+  describe('A5 深链预填', () => {
+    /**
+     * 断言走**行为面**而非 `wrapper.vm`：`<script setup>` 不暴露内部状态
+     * （本仓惯例见 Profile.spec.ts:95），且 vm 断言在 vue-tsc 下是 TS2339。
+     * 这里直接看真实请求——deviceId 是 getHistoryData 的第 1 个实参。
+     */
+    const deviceIdOf = (call: unknown[] | undefined) => call?.[0]
+
+    it('?device=42&range=7d 挂载后按该设备自动发起一次查询', async () => {
+      mockRouteQuery.value = { device: '42', range: '7d' }
+      getMounted()
+      await flushPromises()
+      // 复用 handleQuery（与点「查询」同入口），不是另写一条取数路径
+      expect(lastHistoryCall()).toBeTruthy()
+      expect(deviceIdOf(lastHistoryCall())).toBe(42)
+    })
+
+    it('?device=abc（非法）被忽略，且不发起查询', async () => {
+      mockRouteQuery.value = { device: 'abc' }
+      getMounted()
+      await flushPromises()
+      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+    })
+
+    it('?device=999（不在设备列表里）被忽略 —— 避免选中态空白', async () => {
+      mockRouteQuery.value = { device: '999' }
+      getMounted()
+      await flushPromises()
+      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+    })
+
+    it('?range=99d（非法枚举）被忽略：不发查询，时间范围保持默认', async () => {
+      mockRouteQuery.value = { range: '99d' }
+      const wrapper = getMounted()
+      await flushPromises()
+      expect(vi.mocked(edgeDeviceApi.getHistoryData)).not.toHaveBeenCalled()
+      // 时间范围下拉的当前值：替身是原生 <select>，读它的 value
+      const rangeSelect = wrapper.findAll('select')[1]
+      expect(rangeSelect?.element.value).toBe('24h')
+    })
+
+    it('?range=1h 是合法值（模板存在该选项，常量表不得漏项）', async () => {
+      mockRouteQuery.value = { device: '42', range: '1h' }
+      const wrapper = getMounted()
+      await flushPromises()
+      const rangeSelect = wrapper.findAll('select')[1]
+      expect(rangeSelect?.element.value).toBe('1h')
+    })
   })
 })
 
