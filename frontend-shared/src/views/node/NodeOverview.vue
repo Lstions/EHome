@@ -125,12 +125,13 @@
       </div>
 
       <!-- Tab 栏 -->
-      <div class="tab-bar card">
+      <div class="tab-bar card" ref="tabBarRef">
         <div
           v-for="tab in tabs"
           :key="tab.label"
           class="tab-item"
           :class="{ active: activeTab === tab.label }"
+          :data-tab="tab.label"
           role="tab"
           tabindex="0"
           :aria-selected="activeTab === tab.label"
@@ -827,7 +828,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { configSyncStateLabel } from '@/utils/configSyncState'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -970,6 +971,42 @@ function applyTabQuery(value: unknown) {
 applyTabQuery(route.query.tab)
 // 同一路由内 query 变化（如在页内再次点「配置」）也要生效，故 watch 而非仅初始化。
 watch(() => route.query.tab, applyTabQuery)
+
+/**
+ * M1：把**激活的**页签滚入视野。
+ *
+ * 390px 实测缺陷：`?tab=terminal` 深链进来后激活标签「通道终端」在 776–861px，
+ * 而 .tab-bar 可视区右边界只有 362px、`scrollLeft` 仍是 0 ⇒ 手机上栏里只显示
+ * 「基本信息/总线配置/外设控制」，**用户看不到自己在哪个页签**。
+ *
+ * 为什么必须 nextTick + 元素查询（时序）：
+ *  · 标签栏在 `<template v-else-if="node">` 里，而 `node` 由 fetchDetail() **异步**填充
+ *    —— 首屏那一刻 DOM 里根本没有 `.tab-item`，此刻 scrollIntoView 会拿到 null 而静默无效；
+ *  · 深链场景下 `applyTabQuery` 在 setup 阶段就改好了 activeTab，早于首次渲染，
+ *    所以「watch activeTab」的即时回调同样查不到元素。
+ *  故同时观察 `tabBarRef`：它在元素**真正挂载**时才由 null 变成节点，
+ *  那正是"标签栏已存在"的唯一可靠信号；再排到 nextTick 确保 activeTab 的新样式
+ *  已落到 DOM。查不到就安静返回 —— 后续 activeTab/挂载变化仍会再次触发，不会永久失效。
+ *
+ * 为什么不用 `scrollLeft = 0` 之类的"重置"：那会让每次切换页签都跳回栏首，
+ * 既没解决"激活项在右侧看不见"，又新增了跳动。`inline:'nearest'` 只在必要时滚动。
+ * `block:'nearest'` 不可省：省略时浏览器按默认 `block:'start'` 处理，会把标签栏
+ * 滚到视口顶部，导致页面纵向跳动（移动端尤其明显）。
+ */
+const tabBarRef = ref<HTMLElement | null>(null)
+async function scrollActiveTabIntoView() {
+  await nextTick()
+  const bar = tabBarRef.value
+  if (!bar) return
+  // 用 data-tab 逐项比对定位，不靠文本匹配、也不用 CSS.escape 拼选择器：
+  // 文本匹配会因"包含关系"选错元素，而 CSS.escape 在 happy-dom(单测环境)下不存在。
+  const active = Array.from(bar.querySelectorAll<HTMLElement>('.tab-item'))
+    .find(el => el.dataset.tab === activeTab.value)
+  if (!active) return
+  active.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+}
+// flush:'post' 保证在 DOM 更新后执行；同时观察 tabBarRef 覆盖"异步数据到达后标签栏才挂载"。
+watch([activeTab, tabBarRef], () => { void scrollActiveTabIntoView() }, { immediate: true, flush: 'post' })
 const deviceViewMode = ref<'list' | 'card'>('list')
 const showQuickCreate = ref(false)
 
@@ -2617,5 +2654,26 @@ html.dark .node-overview-page {
   .device-row .chan-sub { flex: 1 1 40%; }
   .device-card-actions { flex-wrap: wrap; }
   .ota-table-wrap { margin: 0 -16px; padding: 0 16px; }
+
+  /* M2：通道健康卡的「编辑/删除」在 390px 实测 42x20px（.link-btn 基样式
+     padding:0 + line-height:20px），两个维度都不满足 §4.4.5 的 44x44px 可点区域。
+     只改移动端：桌面 1440px 实测同样是 42x20，但那是 §4.2.3 有意保留的紧凑密度（鼠标精度高），
+     故桌面必须保持原样，规则不得外溢到 1440 块。
+     为何两个维度都要抬：规范说的是**实际可点击区域** 44x44，只加 min-height 仍不达标。
+     justify-content: center 让文字在加宽后保持居中（否则会靠左、看起来像坏了）。
+     为何不会撑破行：.chan-row 是 height:44px 固定行高，本规则只把**行内子元素**抬到 44px
+     （与行高相等，不产生纵向溢出）。
+     横向预算（Lead 独立实测，2026-09-24，390×844）：
+       .chan-row 可用宽 302px；行内子项 icon28 + 名称71 + 徽章44 + 编辑44 + 删除44 + 箭头13 = 244
+       加 5 个 gap×10 = 50 ⇒ 合计 **294px ≤ 302px**，余 8px，故 rowScrollW == clientW == 302 无溢出。
+       （注：名称列实测 71px 会随通道名长短浮动；余量仅 8px，若将来行内再增子项需重新核算。）
+     chan-del 未设 flex-shrink（chan-edit 有），故一并显式声明，避免两键互相挤压。 */
+  .chan-row .link-btn.chan-edit,
+  .chan-row .link-btn.chan-del {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    flex-shrink: 0;
+  }
 }
 </style>

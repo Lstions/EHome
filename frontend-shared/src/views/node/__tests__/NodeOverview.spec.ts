@@ -1248,6 +1248,114 @@ describe('NodeOverview (生产页)', () => {
     })
   })
 
+  // ── M1/M2：移动端两处缺陷（happy-dom 不做布局，故这里只锁**行为契约**）──
+  //
+  // 用例层次的取舍（为什么不断言几何）：happy-dom 没有布局引擎与滚动模型 ——
+  // `getBoundingClientRect()` 恒返回 0、`scrollIntoView()` 是空实现、`scrollLeft` 恒 0。
+  // 因此"激活标签是否真的落在可视区内""按钮是否真的 44x44"**在本层无法证明**，
+  // 只能证明"代码确实按正确参数发起了滚动/声明了正确规则"。
+  // 真实几何由 Playwright 探针在 390x844 / 1440x900 实测（见交付说明的实测数据）。
+  describe('M1 深链激活标签滚入视野', () => {
+    it('activeTab 变化时对激活标签调用 scrollIntoView(inline/block:nearest)', async () => {
+      // happy-dom 无此方法（是空实现），注入 spy 后监听
+      const spy = vi.fn()
+      ;(Element.prototype as any).scrollIntoView = spy
+
+      mockRouteQuery.value = { tab: 'terminal' }
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      await flushPromises()
+
+      const active = wrapper.find('.tab-item.active')
+      expect(active.text()).toContain('通道终端')
+      expect(spy).toHaveBeenCalled()
+      // 参数契约：两个方向都必须是 nearest —— block 省略会导致页面纵向跳动
+      expect(spy.mock.calls.at(-1)?.[0]).toEqual({ inline: 'nearest', block: 'nearest' })
+      // 必须打在**激活项**上（data-tab 精确锚点，不靠文本匹配）
+      expect(active.attributes('data-tab')).toBe('通道终端')
+    })
+
+    it('时序：标签栏随 node 异步挂载、晚于 setup —— 仍必须滚到（不能只在 immediate 那一刻查 DOM）', async () => {
+      // 本用例守卫的正是第一版的坑：applyTabQuery 在 setup 阶段设好 activeTab，
+      // 而 .tab-bar 在 `<template v-else-if="node">` 内、由 fetchDetail() 异步填充。
+      // 若只 watch(activeTab, {immediate:true})，回调发生在挂载前、查不到元素且不再重试。
+      const spy = vi.fn()
+      ;(Element.prototype as any).scrollIntoView = spy
+
+      mockRouteQuery.value = { tab: 'terminal' }
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      // 首帧：node 尚未到达 ⇒ 标签栏不存在
+      expect(wrapper.find('.tab-bar').exists()).toBe(false)
+      await flushPromises()
+      // 数据到达后标签栏才出现，此时必须已经滚过
+      expect(wrapper.find('.tab-bar').exists()).toBe(true)
+      expect(spy).toHaveBeenCalled()
+      expect(spy.mock.calls.at(-1)?.[0]).toEqual({ inline: 'nearest', block: 'nearest' })
+    })
+
+    it('不得用 scrollLeft=0 之类"重置"绕过（那会让每次切页签跳回栏首）', () => {
+      const js = stripCssComments(source)
+      // 反例守卫：源码里不得出现对 scrollLeft 的直接赋值
+      expect(js).not.toMatch(/scrollLeft\s*=\s*0/)
+      // 正向：必须走 scrollIntoView，且 block 不可省
+      expect(js).toContain('scrollIntoView')
+      expect(js).toContain("block: 'nearest'")
+    })
+
+    it('切换页签后仍保持可见（不是"只在首屏滚一次"）', async () => {
+      const spy = vi.fn()
+      ;(Element.prototype as any).scrollIntoView = spy
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      spy.mockClear()
+
+      const items = wrapper.findAll('.tab-item')
+      await items.find(i => i.text().includes('通道终端'))!.trigger('click')
+      await flushPromises()
+      await flushPromises()
+
+      expect(spy).toHaveBeenCalled()
+      expect(wrapper.find('.tab-item.active').attributes('data-tab')).toBe('通道终端')
+    })
+  })
+
+  describe('M2 link-btn 移动端触控尺寸', () => {
+    it('768px 断点内把 chan-edit / chan-del 抬到 44x44（两个维度都要）', () => {
+      const css = stripCssComments(source)
+      const mobileBlock = css.slice(css.indexOf('@media (max-width: 768px)'))
+      const rule = mobileBlock.match(/\.chan-row\s+\.link-btn\.chan-edit,\s*\.chan-row\s+\.link-btn\.chan-del\s*\{[^}]*\}/)
+      expect(rule, '缺少移动端 chan-edit/chan-del 触控规则').not.toBeNull()
+      const body = rule![0]
+      // 实测基线是 42x20 —— **宽也不达标**，只补 min-height 不够（§4.4.5 说的是可点区域）
+      expect(body).toMatch(/min-height:\s*44px/)
+      expect(body).toMatch(/min-width:\s*44px/)
+      expect(body).toMatch(/justify-content:\s*center/)
+      // chan-del 未设 flex-shrink（chan-edit 有），两键并排时必须都不被压缩
+      expect(body).toMatch(/flex-shrink:\s*0/)
+      // 反例守卫：不得回退到 <44px
+      expect(body).not.toMatch(/min-height:\s*(1?[0-9]|2[0-9]|3[0-9]|4[0-3])px/)
+      expect(body).not.toMatch(/min-width:\s*(1?[0-9]|2[0-9]|3[0-9]|4[0-3])px/)
+    })
+
+    it('规则只作用于移动端：桌面块（1440）不得出现该触控规则', () => {
+      const css = stripCssComments(source)
+      // 桌面是 §4.2.3 有意保留的紧凑密度，抬高会破坏信息密度
+      const desktopBlock = css.slice(css.indexOf('@media (max-width: 1440px)'), css.indexOf('@media (max-width: 768px)'))
+      expect(desktopBlock).not.toContain('.link-btn.chan-edit')
+      expect(desktopBlock).not.toMatch(/\.chan-row\s+\.link-btn/)
+    })
+
+    it('规则写在既有 768 块内，不新开同条件块（本仓有按锚点定位 @media 块的门禁先例）', () => {
+      const css = stripCssComments(source)
+      const count768 = (css.match(/@media \(max-width: 768px\)/g) || []).length
+      expect(count768, '不得新增重复的 768px 媒体查询块').toBe(1)
+      // 该规则必须位于 768 块内（出现在其之后）
+      const idx = css.indexOf('@media (max-width: 768px)')
+      const ruleIdx = css.indexOf('.chan-row .link-btn.chan-edit')
+      expect(ruleIdx).toBeGreaterThan(idx)
+    })
+  })
+
   // ── 从 NodeDetail.vue 迁移过来的断言（该文件已删除，见 C5 死代码清理）──────
   //
   // 迁移原则：只搬"守卫的是**用户可见行为**"的断言，不搬"锁死死文件实现细节"的。

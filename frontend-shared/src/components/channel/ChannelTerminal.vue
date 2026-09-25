@@ -45,17 +45,31 @@
         <el-radio-button value="ascii">ASCII</el-radio-button>
       </el-radio-group>
 
-      <el-button size="small" :aria-label="isPaused ? '继续终端日志' : '暂停终端日志'" @click="togglePause" :type="isPaused ? 'warning' : 'default'">
-        {{ isPaused ? '▶ 继续' : '⏸ 暂停' }}
-      </el-button>
+      <!-- M3 修复：三个日志操作按钮收进一个**不换行的按钮组**。
+           根因（390px 实测，可用宽 302px）：
+             行需求 = radio 100 + gap8 + 暂停 71.8 + (gap8 + EP 的 .el-button + .el-button margin-left 12)
+                      + 导出 65.7 + (gap8 + 12) + 清空 54 = **339.5px** > 302px ⇒ 溢出 37.5px。
+           两个叠加原因：
+             ① 间距翻倍：EP 的 `.el-button + .el-button { margin-left: 12px }` 叠在 flex `gap: 8px` 上，
+                相邻按钮实际间距 20px（贡献 24px 冗余宽度）；
+             ② 兜底仍不够：即便去掉全部 margin，四控件仍需 100+8+71.8+8+65.7+8+54 = 315.5px > 302px，
+                因此**一行放不下四个**；而 flex 逐项换行时最后一项（清空）被挤成孤行。
+           修法：按钮组整体换行 —— nowrap 保证「要么全在本行，要么整组一起下移」，
+           不可能再出现单个按钮独占一行；组内间距显式补回 20px（8 gap + 12 margin），
+           与改前实测间距完全一致（桌面与移动端本来都是 20px，实测按钮 x 坐标不变）。 -->
+      <div class="terminal-actions">
+        <el-button size="small" :aria-label="isPaused ? '继续终端日志' : '暂停终端日志'" @click="togglePause" :type="isPaused ? 'warning' : 'default'">
+          {{ isPaused ? '▶ 继续' : '⏸ 暂停' }}
+        </el-button>
 
-      <el-button size="small" aria-label="导出终端日志" @click="exportLog" :disabled="logEntries.length === 0" title="导出日志">
-        ↓ 导出
-      </el-button>
+        <el-button size="small" aria-label="导出终端日志" @click="exportLog" :disabled="logEntries.length === 0" title="导出日志">
+          ↓ 导出
+        </el-button>
 
-      <el-button size="small" aria-label="清空终端日志" @click="clearLog" :disabled="logEntries.length === 0">
-        清空
-      </el-button>
+        <el-button size="small" aria-label="清空终端日志" @click="clearLog" :disabled="logEntries.length === 0">
+          清空
+        </el-button>
+      </div>
     </div>
 
     <!-- 双面板日志区域 -->
@@ -613,6 +627,13 @@ watch(() => props.channels, (channels) => {
 <style scoped>
 .channel-terminal { display: flex; flex-direction: column; gap: 12px; }
 .terminal-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* M3：日志操作按钮组 —— nowrap 使三按钮成为**不可分割的整体**，
+   换行只发生在组这一级（整组下移），不会出现「清空」孤行。
+   桌面间距必须与改前逐像素一致：改前按钮间距 = 外层 gap 8 + EP 的 `.el-button + .el-button` margin-left 12 = 20px。
+   按钮组成为独立 flex 容器后，外层 gap 不再作用于组内 ⇒ 这里显式补回 `gap: 8px` + `margin-left: 12px`，
+   合计仍是 20px（实测桌面改前后按钮 x 坐标一致，见任务报告）。 */
+.terminal-actions { display: flex; align-items: center; flex-wrap: nowrap; flex-shrink: 0; gap: 8px; }
+.terminal-actions .el-button + .el-button { margin-left: 12px; }
 .terminal-dual-panel { display: flex; gap: 8px; height: 400px; }
 .terminal-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--el-border-color-lighter); border-radius: var(--radius-sm); overflow: hidden; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--el-border-color-lighter); font-size: 12px; font-weight: 500; }
