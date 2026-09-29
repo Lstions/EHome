@@ -29,6 +29,32 @@ const REQUIRED = [
   ['@keyframes pulse', '脉冲动画'],
   ['@keyframes flash', '闪烁动画'],
   ['.el-drawer', '抽屉兜底（若已加到 theme.css）'],
+  // ── 遮罩 / 毛玻璃（2026-09-29 新增）──────────────────────────────
+  // 为什么把这一族纳入构建产物门禁（而不是只写 vitest 源码断言）：
+  // 「页面切换黑遮罩」这个 bug 在生产上可见、在 dev 下**完全不可见**（dev 下 EP 后加载
+  // 把遮罩变量覆盖成白色）。任何"断言源码里有这条规则"的测试都抓不到这类问题 ——
+  // 只有读构建产物、或浏览器实测计算样式才能发现。故这里同时锁「规则在产物里」
+  // 与「变量的解析结果不再是纯黑」两件事。
+  ['backdrop-filter', '遮罩毛玻璃（v-loading / 对话框）；缺失会退回纯色遮罩'],
+  ['--mask-bg', '遮罩底色 token；缺失会让 --el-mask-color 解析失败退回纯黑'],
+  ['--mask-blur', '模糊半径 token；缺失则 blur() 无值'],
+  ['--overlay-bg', '对话框遮罩底色 token'],
+];
+
+// ── 产物级「解析结果」断言（比字符串存在更强的判据）────────────────────
+// 说明：CSS 变量会被 var() 逐层解析，字符串搜 'rgba(0,0,0,0.7)' 既可能误报也可能漏报。
+// 这里只做**关键否定断言**：项目产物中不得再出现「亮色下把遮罩定成 70% 黑」的那条历史缺陷值。
+// 允许出现在 EP 自己的产物（element-*.css）里 —— 那是上游默认值，项目不消费它。
+//
+// ⚠️ 为什么必须同时匹配 hex 与 rgba 两种写法（这是本门禁第一次写错的地方）：
+// esbuild 会把 `rgba(0, 0, 0, 0.7)` **压缩成 `#000000b3`**（alpha 折进 8 位 hex）。
+// 只写 /rgba\(0,\s*0,\s*0,\s*0?\.7\)/ 的话，源码变异后门禁**依然报绿** ——
+// 属于典型的「门禁看起来在工作、实际抓不到」的假门禁。两种形态都锁。
+const FORBIDDEN_IN_PROJECT_CSS = [
+  [
+    /--el-mask-color:\s*(?:rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0?\.7\s*\)|#000000b3|#000c)/,
+    '回归到「亮色主题 70%~80% 黑遮罩」的原始缺陷值（rgba(0,0,0,0.7) / 压缩后的 #000000b3）',
+  ],
 ];
 
 if (!fs.existsSync(DIST)) {
@@ -44,7 +70,13 @@ if (cssFiles.length === 0) {
 
 // 主入口 CSS 通常最大；把所有 CSS 拼起来判断更稳（规则可能被分到异步 chunk）。
 let all = '';
-for (const f of cssFiles) all += fs.readFileSync(path.join(DIST, f), 'utf8');
+// 项目自己的 CSS = 非 element-*.css 的那些（theme.css 打包在其中）。
+let projectCss = '';
+for (const f of cssFiles) {
+  const txt = fs.readFileSync(path.join(DIST, f), 'utf8');
+  all += txt;
+  if (!/^element-.*\.css$/.test(f)) projectCss += txt;
+}
 
 console.log('检查 ' + cssFiles.length + ' 个 CSS 产物，共 ' + all.length + ' 字节\n');
 
@@ -65,9 +97,21 @@ for (const [needle, why] of REQUIRED) {
   }
 }
 
+// 否定断言（只在项目自己的 CSS 上判，避免误伤 EP 上游默认值）
+for (const [re, why] of FORBIDDEN_IN_PROJECT_CSS) {
+  const compact = projectCss.replace(/\s+/g, '');
+  if (re.test(projectCss) || re.test(compact)) {
+    console.log('  ❌ 项目产物中出现被禁值：' + why);
+    missing.push(String(re));
+  } else {
+    console.log('  ✅ 未出现被禁值（' + why + '）');
+  }
+}
+
 if (missing.length > 0) {
   console.error('\n有 ' + missing.length + ' 条规则在构建期丢失：' + missing.join(', '));
   console.error('排查方向：CSS 压缩器把规则误判为 @keyframes、语法被静默忽略等。');
   process.exit(1);
 }
 console.log('\n全部关键规则在产物中存活。');
+

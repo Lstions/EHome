@@ -328,6 +328,20 @@ lint-frontend: ## 前端 TypeScript 类型检查
 	@cd $(FRONTEND) && pnpm typecheck
 	@echo "✅ TypeScript passed"
 
+# ---- 构建产物 CSS 门禁 ----
+# 为什么单独一条 target 且**必须跑构建**：有一类缺陷在 dev 下完全不可见、只在生产暴露。
+# 实证（2026-09-29）：`--el-mask-color: rgba(0,0,0,0.7)` 硬编码在 :root，
+# 亮色主题下产生「页面切换黑遮罩」；而 dev 下 element-plus 的样式后加载会覆盖该变量，
+# 任何基于 dev server 的验收都测不出来 —— 只能读 dist 产物。
+# 另一层原因：CSS 压缩器会把 rgba(0,0,0,0.7) 压成 #000000b3（8 位 hex），
+# 源码层断言与产物层形态不同，必须按产物判据复查（该门禁首版就因只匹配 rgba 写法而漏检）。
+frontend-dist-gate: ## 生产构建产物 CSS 门禁（构建 + 关键规则存活 + 禁用回归值）
+	@echo "==> Building frontend dist..."
+	@cd $(FRONTEND) && pnpm build
+	@echo "==> Checking dist CSS survival + forbidden values..."
+	@cd $(FRONTEND) && node tools/css-survival-check.mjs
+	@echo "✅ dist CSS gate passed"
+
 # ---- E2E 测试 ----
 e2e: ## Run Playwright E2E tests (run make up first)
 	@if ! lsof -ti :$(FRONTEND_PORT) >/dev/null 2>&1; then \
