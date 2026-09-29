@@ -157,6 +157,18 @@ describe('遮罩 / 毛玻璃 token 合同', () => {
     )
   })
 
+  it('亮色 :root 的遮罩桥接也带 !important（否则 dev 下被 EP 的 :root 抢走）', () => {
+    // 背景：EP **亮色**档同样把 --el-mask-color / --el-overlay-color-lighter 定义在 :root，
+    // 与本项目桥接同特异性 ⇒ 谁后加载谁赢。prod 下 theme.css 在后（项目赢，α0.6），
+    // dev 下 EP 由 JS 按需后注入（EP 赢，实测 α0.9 近全白）⇒ 两侧观感不一致。
+    // 这条护栏钉住「必须 !important」，让 dev 与 prod 解析结果一致。
+    for (const v of ['--el-mask-color', '--el-mask-color-extra-light', '--el-overlay-color-lighter']) {
+      const l = light.get(v)
+      expect(l, '亮色 :root 缺少桥接：' + v).toBeTruthy()
+      expect(l, v + ' 在亮色 :root 的桥接必须带 !important（EP 亮色档也在 :root 定义同名变量）').toContain('!important')
+    }
+  })
+
   it('--el-overlay-color-lighter 已接线（改前项目从未定义 ⇒ 恒为 EP 的 50% 纯黑）', () => {
     const bridged = [...rootBlocks, ...darkBlocks]
       .map((b) => decls(b.body).get('--el-overlay-color-lighter'))

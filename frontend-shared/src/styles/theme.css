@@ -548,13 +548,25 @@ html.dark .el-alert--primary .el-alert__title {
        · --el-mask-color        → el-loading 的**底色**（EP 拿它当 background-color）
        · --el-mask-color-extra-light → el-button.is-loading 的白幕
      el-loading 的背景色与模糊是**分开**设置的：EP 只声明 background-color，
-     backdrop-filter 由项目在下面的 `.el-loading-mask` 规则里补（EP 不提供该变量）。 */
-  --el-mask-color: var(--mask-bg);
-  --el-mask-color-extra-light: var(--mask-bg-extra-light);
+     backdrop-filter 由项目在下面的 `.el-loading-mask` 规则里补（EP 不提供该变量）。
+
+     ⚠️⚠️ 为什么这三条**必须**带 `!important`（2026-09-29 二次实测补修）：
+     EP 的**亮色**档也把 `--el-mask-color` / `--el-overlay-color-lighter` 定义在 `:root`
+     （`--el-mask-color:#ffffffe6`、`--el-overlay-color-lighter:#00000080`），
+     与本块**同特异性**，于是谁后加载谁赢 —— 而 dev / prod 顺序相反：
+       · prod：`element-*.css` 在前、本文件在后 ⇒ 项目值生效（实测 α0.6 白）✅
+       · dev ：EP 的样式由 JS 按需后注入 ⇒ **EP 值生效**（实测 α0.9 近全白）❌
+     后果：dev 亮色下遮罩是 α0.9 近全白，模糊被压得几乎看不见 —— 又是「dev 看着正常、
+     线上才是另一副样子」的同一类陷阱（本文件已在多处记录该族问题）。
+     加 `!important` 后两侧一致（已实测 dev/prod 均解析为 `--mask-bg`）。
+     安全性：已 grep 确认 EP theme-chalk 对这三个变量**没有**组件级局部重定义，
+     故提权不会误伤组件的自定义能力（与下方暗色安全网同一结论）。 */
+  --el-mask-color: var(--mask-bg) !important;
+  --el-mask-color-extra-light: var(--mask-bg-extra-light) !important;
   /* 模态遮罩底（对话框/抽屉）。项目此前从未定义 ⇒ 用 EP 的 #00000080（50% 黑）：
      亮色下就是用户所报「灰块」的另一半。EP 的 dark 档**没有**重声明它，
-     所以这一条 :root 桥接在两种主题下都生效，无需进安全网。 */
-  --el-overlay-color-lighter: var(--overlay-bg);
+     所以这一条桥接在两种主题下都生效，无需进安全网；但同样需要 !important（见上）。 */
+  --el-overlay-color-lighter: var(--overlay-bg) !important;
 
   /* 组件特定 */
   --el-menu-bg-color: var(--sidebar-bg);
