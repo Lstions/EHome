@@ -131,6 +131,55 @@
   --status-warning: var(--color-warning);
   --status-danger: var(--color-danger);
 
+  /* ============================================
+     遮罩与毛玻璃（2026-09-29）
+     ============================================ */
+  /* 遮罩底色 —— **必须**主题感知，这是本组 token 存在的唯一理由。
+     改前 `--el-mask-color` 在 EP 桥接块里硬编码 `rgba(0, 0, 0, 0.7)`，
+     亮色主题下同样是 70% 黑，压在白色表格上就是用户报告的「黑色遮罩 / 灰块」
+     （生产构建实测 rgb(95,95,95)，与截图一致）。
+
+     为什么亮色取白、暗色取黑：遮罩的语义是「把背景推远一档」，方向应与主题同向 ——
+     亮色推白（雾面），暗色推黑（压暗）。两者都能让前景 spinner 保持对比度，
+     而亮色下用黑会让整块内容看起来像坏掉/权重失控。
+
+     为什么亮色是 0.6 而不是 EP 默认的近全白 `#ffffffe6`(α0.9)：
+     遮罩现在带模糊（见 --mask-blur），模糊的收益来自「透过去仍能看见结构」。
+     α 0.9 会把背景糊成纯色，模糊等于白付 GPU 开销 —— 半透明 + 模糊是一套的，不能拆。 */
+  --mask-bg: rgba(255, 255, 255, 0.6);
+  /* EP 的 `.el-button.is-loading::before` 用它做按钮上的白幕（暗色下默认 #0000004d）。
+     同样必须跟随主题，否则暗色主题里按钮加载时浮起一层白雾。 */
+  --mask-bg-extra-light: rgba(255, 255, 255, 0.3);
+  /* 对话框/抽屉遮罩底（EP 的 `--el-overlay-color-lighter`，`.el-overlay` 的背景）。
+     项目此前**从未定义**它 ⇒ 亮暗恒为 EP 的 `#00000080`（50% 纯黑）——
+     亮色下 50% 黑压在白色卡片上，视觉上正是用户报告的「灰块」的另一半来源。
+     与 --mask-bg 分开取：遮罩要保留手指底下的内容可辨（α 低），
+     而**模态**遮罩的职责是把背景明确推远（层级感优先），故 α 取高一档。 */
+  --overlay-bg: rgba(0, 0, 0, 0.45);
+  /* 语义实心填充上的前景色（图标 / 文字落在 --color-* 实心块上时用）。
+     为什么要一个 token 而不是到处都是 `color: #fff`：暗色主题把语义基色**提亮**了
+     （success #147a3a→#85ce61、warning #9a5b06→#ebb563、danger #b91c1c→#f78989），
+     同一个白色前景在暗色下塌到 1.85–2.36:1。实测：白字 on 暗色 warning = 1.85、
+     success = 1.91、danger = 2.36；亮色下这些基色够深（5.42–6.47），白字正确。
+     故取「亮色白、暗色近黑」：暗色下 #1a1a1a 落在提亮后的基色上是 6.86–9.38:1。
+     与 theme.css 里 `--el-tag-primary-text`（实心/浅底分离）是同一条设计结论的延伸。
+     注意：只适用于**端点都够浅**的语义色（success/warning/danger/info/adc）。
+     两端深色系（primary 家族）的渐变请用 --brand-gradient + 白字，别用本 token。 */
+  --text-on-fill: #ffffff;
+
+  /* 品牌渐变（logo 图标 / 用户头像 / 统计卡"总计"图标等）。
+     改前 6 处硬编码 `linear-gradient(135deg, var(--el-color-primary), var(--el-color-success))`：
+     亮色下白字最差 5.42 ✓，但**暗色下 success 被提亮成 #85ce61 ⇒ 白字最差仅 1.91**，
+     而深色前景在 primary 端只有 2.91 —— 两端都过不了，换前景色救不了，必须换渐变。
+     故把渐变本身 token 化：暗色改为 primary 同族（#1f5ad8→#2f6ae8），白字最差 4.83 ✓，
+     且保持「蓝→青蓝」的品牌观感；亮色维持原 primary→success（5.42 ✓）。 */
+  --brand-gradient: linear-gradient(135deg, #1f5ad8 0%, #147a3a 100%);
+
+  /* 遮罩模糊半径（毛玻璃）。全站模糊半径的唯一出口，组件里不要写死 blur(Npx)。
+     为什么 8px：低于 6px 在 1x 屏上几乎不可辨；高于 12px 会把背景糊成纯色，
+     收益不再增长而合成开销线性上升。 */
+  --mask-blur: 8px;
+
   /* 终端色：保持调试语义，同时适配亮暗主题 */
   --terminal-bg: #1e1e1e;
   --terminal-text: #d4d4d4;
@@ -153,6 +202,12 @@
    这里把 EP 变量统一映射到上面的项目语义 token；浅色档按 EP 官方公式
    light-N = base*(1-N/10) + #fff*(N/10) 由基色生成，使「浅底 + 基色文字」稳定在 4.7–5.5。
    -rgb 变量必须同步：EP 用 rgba(var(--el-color-*-rgb), a) 生成半透明层，不同步会回落到默认色。
+   ⚠️ 2026-09-29 实测修正：这条注释描述的是 **Element Plus 1.x** 的机制。
+     本项目用的 element-plus 2.14.3 已改用 lightningcss 在**编译期**把 `color-mix()` 展开成
+     静态色值，`theme-chalk/` 与 `dist/` 里**没有任何** `rgba(var(--el-color-*-rgb), …)` 消费点
+     （grep 全包零命中），项目组件层同样零消费。
+     故这组变量当前是**死变量**：留着是为了将来升级/回退时兼容，改它们不会有视觉变化。
+     请勿据它推断「按钮 hover 会变亮」之类的行为 —— 那是不成立的。
    ============================================ */
 :root {
   /* 语义基色 → 实心填充 + 浅底文字（两者共用同一个值，见文件顶部注释） */
@@ -208,9 +263,14 @@
   --el-text-color-placeholder: var(--text-color-placeholder);
   --el-text-color-disabled: #797f89; /* 禁用项（用户菜单邮箱项等）≥3:1；改前 EP #c0c4cc = 1.75 */
 
-  /* 填充：el-tag 默认底 / 行悬浮 / 斑马纹 / 次级中性徽标底 */
+  /* 填充：el-tag 默认底 / 行悬浮 / 斑马纹 / 次级中性徽标底。
+     ⚠️ 这 4 行是**死声明**：本文件末尾还有一个 `:root` 块（EP 桥接块）重新声明了
+     同名变量（`--el-fill-color: var(--hover-bg)` 等），同特异性下后出现者胜 ——
+     实际生效值是那一组。保留在此仅因为它们记录了亮色档的设计意图，**改这里不会生效**。
+     （2026-09-29 核对：这两处的取值也不同，如这里 #f0f2f5 vs 生效的 #f5f7fa；
+     若要做清理，应删除本组并只保留桥接块一份，避免后人改错地方。） */
   --el-fill-color: #f0f2f5;
-  --el-fill-color-light: var(--bg-color-page); /* #f5f7fa：次级灰文字于其上 5.40（改前 2.87） */
+  --el-fill-color-light: var(--bg-color-page); /* 次级灰文字于其上 5.40（改前 2.87） */
   --el-fill-color-lighter: var(--bg-color-secondary);
   --el-fill-color-blank: var(--bg-color);
 }
@@ -278,6 +338,24 @@ html.dark {
   /* 分组标题：与亮色**同值**（侧栏恒为深色品牌底，见亮色块处说明；α 0.55 → 5.62:1）。 */
   --sidebar-group-title: rgba(255, 255, 255, 0.55);
 
+  /* 暗色下语义基色被提亮 ⇒ 前景必须转深（见亮色块处说明，实测 6.86–9.38:1）。 */
+  --text-on-fill: #1a1a1a;
+  /* 暗色品牌渐变改走 primary 同族：原 primary→success 在暗色下白字只剩 1.91（见亮色块说明）。 */
+  --brand-gradient: linear-gradient(135deg, #1f5ad8 0%, #2f6ae8 100%);
+
+  /* 遮罩与毛玻璃（暗色）。与亮色**同结构、不同取值**：暗色下推黑，
+     亮色下推白 —— 方向与主题同向，这是「遮罩必须主题感知」的全部内容。
+     暗色 α 取 0.55（亮色 0.6）：暗色底本身已很暗，α 再高会把模糊压没，
+     而暗色下用户对「压暗」的容忍度更高，略低一档让毛玻璃透出来。 */
+  --mask-bg: rgba(0, 0, 0, 0.55);
+  --mask-bg-extra-light: rgba(0, 0, 0, 0.3);
+  /* 暗色下模态遮罩可以更黑（内容底本来就暗，推远代价小、层级感更强）。 */
+  --overlay-bg: rgba(0, 0, 0, 0.6);
+  /* EP 的 html.dark 块自带 `--el-mask-color: #000c`；本项目由下方 :root 块显式
+     映射到本 token，不依赖 EP 的取值。此处仅声明模糊半径（两主题同值是有意的：
+     半径属于「质感」，不属于「明暗」）。 */
+  --mask-blur: 8px;
+
   /* 登录页品牌渐变：与亮色**同值**（见亮色块处的说明）。 */
   --login-bg-gradient: linear-gradient(135deg, #1a1f2e 0%, #2d3548 50%, #1a1f2e 100%);
 
@@ -310,6 +388,52 @@ html.dark {
   --terminal-danger: #f78989;
   --scrollbar-thumb: #4a4a4a;
   --scrollbar-thumb-hover: #5a5a5a;
+}
+
+/* ============================================
+    Element Plus 桥接变量的**暗色安全网**（2026-09-29）
+   ============================================ */
+/* 为什么必须有这一块（这是本文件最容易被后人删掉、删了就会重演黑遮罩的一段）：
+   项目在**亮色 `:root`**（下方第三个 :root 块）里桥接了 9 个 EP 变量到项目 token。
+   但 element-plus 的 `theme-chalk/dark/css-vars.css` 把这些同名变量定义在
+   **`html . dark` 属性块**里（选择器特异性 0,1,1），高于 `:root` 的 (0,1,0) ——
+   于是暗色主题下**项目桥接被静默架空**，与样式表加载顺序无关（实测复现）。
+
+   后果不是「颜色有点偏」，而是「遮罩又变回浓黑」：
+     --el-mask-color: EP 暗色给 `#000c`（α0.8 纯黑），项目想要的 --mask-bg(α0.55) 拿不到；
+     在 8px 背景模糊之上再压 0.8 纯黑 ⇒ 糊成一块死黑（正是要修的症状）。
+   同类还有 --el-fill-color* / --el-border-color*：项目暗色 token 与 EP 暗色默认值接近
+   （如 --bg-color #1a1a1a vs EP #141414），差异小到肉眼看不出，因此长期无人发现 ——
+   但它们是「项目 token 说了不算」的事实，一旦有人调暗色 token 就会失效。
+
+   选择器 `html.dark` / `[data-theme="dark"]` / `.dark-theme` 与 EP 的 `html.dark` **同特异性**，
+   靠本文件在 EP 之后（prod 顺序，实测 dist/index.html：element-*.css 在前）取胜。
+   dev 下 EP 后加载、顺序相反 —— 故这里用 `!important` 把「顺序无关」也一并钉死。
+
+   为什么用 `!important` 而不是靠巧劲：(a) 同上，dev 下顺序相反；
+   (b) 更关键的是 EP **组件内部常做局部重定义**（如 `.el-table{--el-table-bg-color:…}`、
+   `html.dark .el-button{--el-button-…}` 这类按组件作用域重新赋值的写法在 EP 里很普遍）。
+   若某组件把上述变量按更窄作用域重定义，自定义属性会按「离元素最近的定义」解析，
+   项目值会被就地架空 —— 那是比顺序更难查的失效。
+   **已实测确认**：这 9 个变量名在 EP theme-chalk 里**没有**任何组件级局部重定义
+   （grep 全量 `*.css`，排除 `:root` 与 `html . dark` 两个属性块后为空），
+   故 `!important` 在当前 EP 版本下不会误伤组件的自定义能力。
+
+   为什么不用 `:root:root`（提到 0,2,0）：那是靠堆特异性取胜的写法，
+   后人看到会以为可以删；且它会**同时压过项目自己的暗色块**（0,1,1），
+   引入更隐蔽的覆盖关系。这里选择显式列举。 */
+html.dark,
+[data-theme="dark"],
+.dark-theme {
+  --el-fill-color: var(--hover-bg) !important;
+  --el-fill-color-light: var(--bg-color-secondary) !important;
+  --el-fill-color-lighter: var(--bg-color) !important;
+  --el-fill-color-blank: var(--bg-color) !important;
+  --el-border-color: var(--border-color) !important;
+  --el-border-color-light: var(--border-color-light) !important;
+  --el-border-color-lighter: var(--border-color-lighter) !important;
+  --el-mask-color: var(--mask-bg) !important;
+  --el-mask-color-extra-light: var(--mask-bg-extra-light) !important;
 }
 
 /* ============================================
@@ -417,12 +541,31 @@ html.dark .el-alert--primary .el-alert__title {
   --el-fill-color-lighter: var(--bg-color);
   --el-fill-color-blank: var(--bg-color);
 
-  /* 遮罩 */
-  --el-mask-color: rgba(0, 0, 0, 0.7);
+  /* 遮罩（改前：硬编码 rgba(0,0,0,0.7) —— 亮色下也是 70% 黑，就是「黑色遮罩」的根因）。
+     现在跟随主题：亮色 → 白雾、暗色 → 压暗，见上方 --mask-bg 定义处的说明。
+
+     ⚠️ 这里同时存在**两个**同名变量，且取值策略相反，别被名字骗了：
+       · --el-mask-color        → el-loading 的**底色**（EP 拿它当 background-color）
+       · --el-mask-color-extra-light → el-button.is-loading 的白幕
+     el-loading 的背景色与模糊是**分开**设置的：EP 只声明 background-color，
+     backdrop-filter 由项目在下面的 `.el-loading-mask` 规则里补（EP 不提供该变量）。 */
+  --el-mask-color: var(--mask-bg);
+  --el-mask-color-extra-light: var(--mask-bg-extra-light);
+  /* 模态遮罩底（对话框/抽屉）。项目此前从未定义 ⇒ 用 EP 的 #00000080（50% 黑）：
+     亮色下就是用户所报「灰块」的另一半。EP 的 dark 档**没有**重声明它，
+     所以这一条 :root 桥接在两种主题下都生效，无需进安全网。 */
+  --el-overlay-color-lighter: var(--overlay-bg);
 
   /* 组件特定 */
   --el-menu-bg-color: var(--sidebar-bg);
-  --el-menu-hover-bg-color: rgba(255, 255, 255, 0.08);
+  /* 改前是硬编码 rgba(255,255,255,0.08)：与语义 token --sidebar-hover-bg
+     （亮 0.08 / 暗 0.06，见本文件亮暗两块）**漂移**——暗色下 EP 菜单的本体 hover
+     仍是 0.08，与项目侧栏的 0.06 不一致；且它只在亮色 :root 块出现一次，
+     暗色块没有重声明。改为引用同一 token，消掉这处双份定义。
+     消费面已核实：EP 的 `.el-menu-item:hover` / `.el-sub-menu__title:hover`
+     会拿它当背景，项目在 MainLayout 里对**侧栏**这两处都写了更高特异性的
+     `background: var(--sidebar-hover-bg)` 覆盖规则；本变量兜住其余位置。 */
+  --el-menu-hover-bg-color: var(--sidebar-hover-bg);
   --el-menu-text-color: var(--sidebar-text);
   --el-menu-active-color: var(--sidebar-active-color);
 }
@@ -575,6 +718,64 @@ html.dark .el-descriptions__content {
    窄视口下会溢出。全局 clamp 到 92vw，桌面端不受影响。 */
 .el-dialog {
   max-width: 92vw;
+}
+
+/* ============================================
+   毛玻璃遮罩（2026-09-29）
+   ============================================ */
+/* 全站遮罩统一升级为「半透明底 + 背景模糊」。底色的主题感知在上方 token 层
+   （--mask-bg / --overlay-bg，亮白暗黑），这里只负责补 EP 没有提供的那一半：模糊。
+
+   为什么必须写成消费侧规则（而不是只改 EP 变量）：
+   EP 的 `.el-loading-mask` 只声明 `background-color: var(--el-mask-color)`，
+   `backdrop-filter` **没有对应的 EP 变量**（已核 element-plus/theme-chalk/el-loading.css），
+   所以模糊只能在消费侧补。底色与模糊是**两件独立的事**，别指望一条规则解决。
+
+   为什么加 `!important`：EP 把 `.el-loading-mask` / `.el-overlay` 的规则放在自己的样式表里，
+   而本文件与 EP 的注入顺序在 dev / prod 下**相反**（dev：EP 后加载；prod：本文件后加载，
+   实测 dist/index.html 中 element-*.css 在 index-*.css 之前）。
+   backdrop-filter 是「有就必须生效」的项（缺了会退回纯色遮罩=本次要修的症状），
+   不能依赖加载顺序，故显式提权。
+   ⚠️ 注意：**提权只解决「本项目 vs EP 同属性谁赢」，不解决「变量被 EP 抢管」** ——
+   后者是特异性问题，必须靠上方「暗色安全网」块，两者缺一不可。
+
+   为什么不是所有遮罩都给模糊：`--el-overlay-color-lighter` 同时被
+   `.el-overlay`（对话框遮罩，全屏、背面是内容 ⇒ 值得模糊）和
+   `.el-dropdown__caret-button::before` / `el-upload` 卡片操作层（1px 分隔线、小图覆盖层
+   ⇒ 模糊无收益且会被放大成脏边）消费。故只给 `.el-overlay`，不给命名空间里所有用它的地方。 */
+.el-loading-mask {
+  -webkit-backdrop-filter: blur(var(--mask-blur, 8px));
+  backdrop-filter: blur(var(--mask-blur, 8px)) !important;
+}
+
+/* 对话框/抽屉遮罩：与 loading 同一套毛玻璃语言。
+   底色走 --overlay-bg（亮 0.45 黑 / 暗 0.6 黑），在本文件上方桥接为
+   `--el-overlay-color-lighter` —— 项目此前从未定义该变量，故一直是 EP 的 50% 纯黑。
+   注意**不要**给它加 `background-*`：EP 的层叠与 `.el-overlay` 上的内联 backdrop
+   由 EP 自己管理，这里只加模糊这一件事。 */
+.el-overlay {
+  -webkit-backdrop-filter: blur(var(--mask-blur, 8px));
+  backdrop-filter: blur(var(--mask-blur, 8px)) !important;
+}
+
+/* 降级：不支持 backdrop-filter 的环境（老 Safari / 关掉 GPU 合成的浏览器）
+   必须回退到**不透明**遮罩，否则半透明底会让「内容还在动」的错觉更强。
+   用 @supports not 而不是叠一层背景 —— 后者在支持的环境里也会改颜色。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .el-loading-mask,
+  .el-overlay {
+    background-color: var(--bg-color-overlay);
+    opacity: 0.92;
+  }
+}
+
+/* 尊重「减少动态效果」偏好：遮罩淡入淡出也是动效。
+   注意只关过渡，不关模糊 —— 模糊是静态质感，不是动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .el-loading-mask,
+  .el-overlay {
+    transition: none !important;
+  }
 }
 
 /* 移动端表格横向滚动模式：
