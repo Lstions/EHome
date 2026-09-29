@@ -2209,7 +2209,10 @@ html.dark .node-overview-page {
 .btn:disabled { opacity: .6; cursor: not-allowed; }
 .btn-plain { background: var(--card-bg, #fff); border-color: var(--no-border); color: var(--no-text-secondary); }
 .btn-plain:hover:not(:disabled) { color: var(--no-primary); border-color: var(--no-primary); }
-.btn-primary { background: var(--no-primary); color: #fff; }
+/* 前景用 --text-on-fill：--no-primary 亮 #2E6BFF / 暗 #4D7FFF，
+   白字在暗色下只有 3.62（低于 4.5），而它同时还要当**文字色**用（链接/选项卡），
+   不能为了当底而调暗 ⇒ 按主题切换前景（亮白 4.50 / 暗深 4.80）。 */
+.btn-primary { background: var(--no-primary); color: var(--text-on-fill); }
 .btn-primary:hover:not(:disabled) { background: var(--no-primary-hover); }
 .spin { animation: no-spin 1s linear infinite; }
 @keyframes no-spin { to { transform: rotate(360deg); } }
@@ -2266,7 +2269,7 @@ html.dark .node-overview-page {
   height: 26px; padding: 0 14px; border: 0; border-radius: 5px; font-size: 12px; cursor: pointer;
   background: transparent; color: var(--no-text-secondary); font-family: inherit; transition: all .15s;
 }
-.view-switch-btn.active { background: var(--no-primary); color: #fff; font-weight: 500; }
+.view-switch-btn.active { background: var(--no-primary); color: var(--text-on-fill); font-weight: 500; }
 .view-switch-btn:not(.active):hover { color: var(--no-primary); }
 
 /* 卡片视图网格 */
@@ -2392,7 +2395,7 @@ html.dark .node-overview-page {
 .bus-page-btn, .bus-page-current { height: 26px; padding: 0 8px; border: 1px solid var(--no-border); border-radius: 5px; background: var(--card-bg, #fff); color: var(--no-text-secondary); font: inherit; }
 .bus-page-btn:not(:disabled) { cursor: pointer; }
 .bus-page-btn:disabled { opacity: .5; cursor: not-allowed; }
-.bus-page-current { display: inline-flex; align-items: center; color: #fff; border-color: var(--no-primary); background: var(--no-primary); }
+.bus-page-current { display: inline-flex; align-items: center; color: var(--text-on-fill); border-color: var(--no-primary); background: var(--no-primary); }
 /* A：已创建通道列表（与资源表并列，两个层级必须视觉可分） */
 .bus-channels-card { padding: 0 16px; }
 .bus-channels-head { min-height: 52px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--no-border-light); }

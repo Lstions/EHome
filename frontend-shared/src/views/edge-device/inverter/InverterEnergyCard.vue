@@ -77,15 +77,24 @@ function formatEnergy(v: any): string {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: #fff;
+  /* 前景由各变体按底色决定，见下（颜色只承载语义，不在这里写死）。 */
+  color: var(--text-on-fill);
 }
 
+/* 4 个变体的前景各不相同，因为底色亮暗走向相反：
+   · daily(暖色)/yearly(绿)/total(灰) 用的语义色在**暗色下被提亮** ⇒ 前景必须转深
+     （否则白图标 1.85–2.36:1）；这些色在亮色下够深，而 --text-on-fill 亮色即白 ⇒ 一个 token 两边都对。
+   · monthly 走 primary 家族（#1f5ad8→#628ce4/#2f6ae8），**两端都是深色** ⇒ 必须保持白字
+     （深色前景在 primary 上只有 2.91）。 */
 .energy-card.daily .energy-icon {
   background: linear-gradient(135deg, var(--el-color-warning), var(--el-color-warning-light-3));
 }
 
 .energy-card.monthly .energy-icon {
   background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3));
+  /* 白字：primary 家族两端都是深色（亮 #1f5ad8→#628ce4 / 暗 #1f5ad8→#2f6ae8），
+     暗色下白字最差 4.83:1 达标；深色前景反而只有 2.91，故此处保持白字。 */
+  color: #fff;
 }
 
 .energy-card.yearly .energy-icon {

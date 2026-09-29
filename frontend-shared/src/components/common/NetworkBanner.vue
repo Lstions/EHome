@@ -112,16 +112,24 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   padding: 10px 24px;
-  color: #fff;
   font-size: 14px;
   box-shadow: var(--shadow-md);
 }
+/* 离线/重连横幅是**用户最需要看清**的通知，必须满足正文 4.5:1。
+   改前是「语义实心渐变 + 白字」：亮色下成立（5.42/6.47），但暗色主题把
+   warning/danger 提亮成 #ebb563 / #f78989，白字塌到 **1.85 / 2.36:1** —— 暗色下几乎不可读。
+   改为「-light-9 浅底 + 基色文字」：这是项目 el-tag/el-alert 的既有范式
+   （见 theme.css 顶部「浅底徽标的文字色」桥接说明），实测亮 4.74/5.45、暗 8.47/6.88，
+   两主题均稳过 4.5。基色在亮/暗两块本就是按「对浅底达标」选的，故文字直接用基色。 */
 .network-banner.error {
-  background: linear-gradient(90deg, var(--el-color-danger), var(--el-color-danger-light-3));
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+  border-bottom: 1px solid var(--el-color-danger-light-7);
 }
 .network-banner.warning {
-  background: linear-gradient(90deg, var(--el-color-warning), var(--el-color-warning-light-3));
-  color: #fff;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+  border-bottom: 1px solid var(--el-color-warning-light-7);
 }
 .banner-icon {
   font-size: 20px;

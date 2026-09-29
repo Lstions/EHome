@@ -632,14 +632,15 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 白字：基类前景；具体底色由 .stat-icon.* / .config-icon.* 变体决定（见各变体规则）。 */
   color: #fff;
   font-size: 20px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  background: var(--brand-gradient);
 }
 
-.stat-icon.active { background: var(--el-color-success); }
-.stat-icon.bus { background: var(--el-color-warning); }
-.stat-icon.device { background: var(--el-text-color-secondary); }
+.stat-icon.active { background: var(--el-color-success); color: var(--text-on-fill); }
+.stat-icon.bus { background: var(--el-color-warning); color: var(--text-on-fill); }
+.stat-icon.device { background: var(--el-text-color-secondary); color: var(--text-on-fill); }
 
 .stat-content { flex: 1; }
 .stat-value { display: block; font-size: 24px; font-weight: 600; color: var(--el-text-color-primary); }
@@ -720,15 +721,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 白字：基类前景；具体底色由 .stat-icon.* / .config-icon.* 变体决定（见各变体规则）。 */
   color: #fff;
   flex-shrink: 0;
 }
 
-.config-icon.uart { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
-.config-icon.i2c { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); }
-.config-icon.spi { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
-.config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
-.config-icon.adc { background: linear-gradient(135deg, var(--color-adc) 0%, var(--color-adc-light) 100%); }
+.config-icon.uart { background: var(--brand-gradient); }
+.config-icon.i2c { background: linear-gradient(135deg, var(--el-color-warning) 0%, var(--el-color-danger) 100%); color: var(--text-on-fill); }
+.config-icon.spi { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); color: var(--text-on-fill); }
+.config-icon.gpio { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); color: var(--text-on-fill); }
+.config-icon.adc { background: linear-gradient(135deg, var(--color-adc) 0%, var(--color-adc-light) 100%); color: var(--text-on-fill); }
 
 .config-info {
   flex: 1;

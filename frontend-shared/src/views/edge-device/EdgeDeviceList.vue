@@ -1947,14 +1947,15 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 白字：基类前景；具体底色由 .stat-icon.* / .config-icon.* 变体决定（见各变体规则）。 */
   color: #fff;
   font-size: 20px;
 }
 
-.stat-icon.total { background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%); }
-.stat-icon.online { background: var(--el-color-success); }
-.stat-icon.offline { background: var(--el-text-color-secondary); }
-.stat-icon.today { background: var(--el-color-warning); }
+.stat-icon.total { background: var(--brand-gradient); }
+.stat-icon.online { background: var(--el-color-success); color: var(--text-on-fill); }
+.stat-icon.offline { background: var(--el-text-color-secondary); color: var(--text-on-fill); }
+.stat-icon.today { background: var(--el-color-warning); color: var(--text-on-fill); }
 
 .stat-content { flex: 1; }
 .stat-value { display: block; font-size: 28px; font-weight: 600; color: var(--el-text-color-primary); }
@@ -2264,10 +2265,11 @@ code.fact-value {
   width: 44px;
   height: 44px;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  background: var(--brand-gradient);
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 白字：底为 --brand-gradient（两端深色系）——暗色下白字最差 4.83:1，不能用 --text-on-fill。 */
   color: #fff;
 }
 
@@ -2298,7 +2300,7 @@ code.fact-value {
   height: 24px;
   border-radius: 50%;
   background: var(--el-color-success);
-  color: #fff;
+  color: var(--text-on-fill);
   display: flex;
   align-items: center;
   justify-content: center;

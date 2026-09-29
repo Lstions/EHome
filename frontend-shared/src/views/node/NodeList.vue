@@ -740,9 +740,12 @@ onUnmounted(() => {
 .stat-card.offline .stat-icon { color: var(--el-color-danger); }
 .stat-card.warning .stat-icon { color: var(--el-color-warning); }
 
+/* ⚠️ 死代码：.stat-content 在模板中未被使用（仅 style 命中）。
+   留着会误导后人以为这里有"白字压深底"的设计，实际不存在。 */
 .stat-content {
   align-items: center;
   justify-content: center;
+  /* 死代码：本块在模板中未被使用（仅 style 命中），见上方说明。 */
   color: #fff;
   font-size: 20px;
 }
@@ -849,11 +852,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  /* 前景跟随各状态修饰符（见下两行）：在线/离线的底色在暗色下都会变浅。 */
+  color: var(--text-on-fill);
 }
 
-.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); }
-.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); }
+.collector-icon.online { background: linear-gradient(135deg, var(--el-color-success) 0%, var(--el-color-success-light-3) 100%); color: var(--text-on-fill); }
+.collector-icon.offline { background: linear-gradient(135deg, var(--el-text-color-secondary) 0%, var(--el-text-color-placeholder) 100%); color: var(--text-on-fill); }
 
 .collector-meta h3 {
   margin: 0;

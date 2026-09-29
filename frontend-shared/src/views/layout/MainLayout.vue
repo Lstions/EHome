@@ -958,11 +958,12 @@ onUnmounted(() => {
 .sidebar .logo-icon {
   width: 36px;
   height: 36px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  background: var(--brand-gradient);
   border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 白字：底为 --brand-gradient（两端深色系）——暗色下白字最差 4.83:1，不能用 --text-on-fill。 */
   color: #fff;
   flex-shrink: 0;
 }
@@ -971,6 +972,7 @@ onUnmounted(() => {
 .sidebar .logo-text {
   font-size: 18px;
   font-weight: 600;
+  /* 白字：侧栏恒为深色品牌底（--sidebar-bg-gradient），两主题同值是有意的。 */
   color: #fff;
   white-space: nowrap;
 }
@@ -1363,7 +1365,8 @@ onUnmounted(() => {
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  background: var(--brand-gradient);
+  /* 白字：底为 --brand-gradient（两端深色系）——暗色下白字最差 4.83:1，不能用 --text-on-fill。 */
   color: #fff;
   font-weight: 500;
 }
@@ -1426,7 +1429,7 @@ onUnmounted(() => {
 :global(.mobile-sidebar-drawer .logo-icon) {
   width: 36px;
   height: 36px;
-  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-success) 100%);
+  background: var(--brand-gradient);
   border-radius: 10px;
   display: flex;
   align-items: center;

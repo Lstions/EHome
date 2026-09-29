@@ -773,6 +773,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* ⚠️ 死声明：模板中每个 .stat-icon 都带内联 `style="color: var(--el-color-*)"`，
+     内联优先级高于本规则，故这里的 #fff 不会生效（且本块无 background）。
+     保留仅为记录；勿据此推断图标是白字。 */
   color: #fff;
 }
 
