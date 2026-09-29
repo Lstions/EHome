@@ -114,6 +114,9 @@
 4. `SHOULD` 用 class 和 scoped CSS 表达稳定布局；业务页面新增大量 inline style 时应先判断是否应归入组件 CSS、页面 CSS 或公共 token。单次尺寸/动态进度宽度等可保留 inline style。
 5. `禁止` 在业务 CSS 新增硬编码语义 hex、渐变或阴影以绕开 token。终端、Canvas、外部内容对比度等确有技术边界时，必须说明并使用主题 fallback。
 6. `MUST` 新增面向用户的稳定文案以中文为默认，并使用权威领域术语。项目虽注册了 `vue-i18n`，现有页面尚未使用 `$t`；在未完成全量迁移前，不得对单个新页面引入局部翻译体系。若启动全局 i18n 改造，必须另立设计并全链路迁移。
+7. `MUST` **桥接 Element Plus 变量时必须考虑 EP 的 `html.dark` 特异性**。EP 的 `theme-chalk/dark/css-vars.css` 把大量变量定义在 `html.dark{}`（特异性 `0,1,1`），**高于**项目桥接所在的 `:root`（`0,1,0`），且与样式表加载顺序无关。只写 `:root` 的桥接受影响变量（`--el-mask-color*`、`--el-fill-color*`、`--el-border-color*`、`--el-bg-color*`、`--el-text-color*`、`--el-color-*-light-N`、`--el-box-shadow*`）会在暗色下被 EP 静默接管。正确做法见 `theme.css` 的「EP 桥接变量的暗色安全网」块：同特异性选择器（`html.dark, [data-theme="dark"], .dark-theme`）+ `!important`。
+8. `MUST` **遮罩类视觉改动必须给出两主题计算样式证据**。`--el-mask-color` 等遮罩变量在 dev 与 prod 下解析结果不同（实证：dev 下 EP 后加载会覆盖项目值，亮色下看起来是白的，生产上却是 70% 黑），因此 dev server 目视验收**不能**作为遮罩类改动的通过依据。判据见 §3.7 第 8 条。
+9. `MUST` **语义实心填充上的前景色用 `--text-on-fill`，不要写死 `color: #fff`**。暗色主题会提亮语义基色（`success #147a3a→#85ce61`、`warning #9a5b06→#ebb563`、`danger #b91c1c→#f78989`），白字在暗色下只有 1.85–2.36:1（实测）。例外：底为 `--brand-gradient`（两端深色系）或恒深色侧栏时可保持白字，**且必须就近写明理由**（有源码护栏检查）。
 
 ### 3.7 测试与代码评审
 
@@ -124,6 +127,12 @@
 5. `MUST` 修改 Vue SFC 模板后运行至少覆盖该组件的 Vitest；修改共享布局、主题、路由、API client、store、公共组件或全局 CSS 后运行完整 `pnpm test:run` 与 `pnpm typecheck`。
 6. `MUST` 使用 `pnpm`，不使用 npm 修改 lockfile。新增依赖须说明现有依赖不能解决的原因、体积影响、许可和卸载策略。
 7. `禁止` 使用恒真断言、`catch` 吞没 `expect`、硬等待、只检查源码包含字符串而声称覆盖交互。禁止把既有失败数量下降当作通过结论。
+8. `MUST` **存在一类只在生产构建暴露的样式缺陷，验收必须跑 dist 产物**。判据（三者缺一不可）：
+   - 跑 `make frontend-dist-gate`（= `pnpm build` + `node tools/css-survival-check.mjs`），退出码必须为 0；
+   - 视觉/遮罩类改动额外用 CDP 对 **dist 产物**（后端同源托管或 `vite preview`）读 `getComputedStyle` 的 `backgroundColor` / `backdropFilter`，亮暗两主题各一次；
+   - 涉及 EP 变量桥接时，断言的是**解析后**的值，不是源码里写了什么。
+   实证（2026-09-29「页面切换黑遮罩」）：`--el-mask-color: rgba(0,0,0,0.7)` 在 dev 下被 EP 覆盖成白色 → 目视完全正常；生产上却是 70% 黑压白表格。**此前的所有 dev 验收都测不出来。**
+   配套教训：产物门禁的**否定断言必须匹配压缩后形态** —— esbuild 把 `rgba(0,0,0,0.7)` 压成 `#000000b3`，只写 rgba 正则会让门禁永远报绿（本门禁首版即此错，经「改坏→必须红」变异自证后修正）。
 
 ## 4. UI/UX 设计规范
 
@@ -152,6 +161,26 @@
 5. `MUST` 中文文本防逐字竖排：标签使用 `word-break: keep-all`，必要时缩短移动端文案或限制为两行；关键数值不得因 `ellipsis` 被截断。
 6. `SHOULD` 术语中英混排时提供中文解释、tooltip 或统一术语映射；技术标识（DMA、UART、ID、协议字段）可保留原文但不应成为普通用户唯一可见信息。
 7. `禁止` 新增装饰性渐变球、无语义 bokeh、超大营销式 hero、过度圆角或同色系一色到底的界面。
+8. `MUST` **模糊（`backdrop-filter`）只在「背面有可变化/可滚动内容」时才允许使用**。判据是背面内容，不是"好不好看"：盖在纯平底色上的模糊是 100% 的 GPU/合成开销、0 视觉收益。据此：
+
+   | 位置 | 结论 | 理由 |
+   |---|---|---|
+   | `.el-loading-mask`（v-loading） | ✅ 允许 | 全屏单例，背面是被加载容器的真实内容 |
+   | `.el-overlay`（对话框/抽屉遮罩） | ✅ 允许 | 全屏单例，背面是整页可滚动内容 |
+   | `.login-box`（登录卡片） | ✅ 允许 | 全仓唯一「背面持续动画」处（`.bg-circle` 漂浮光斑） |
+   | 移动端抽屉 `el-drawer` | ⚠️ 需同时放开内层实底 | 背面是主内容区；但 `MainLayout.vue` 给 `.el-drawer__body` 另铺了一层实底，只改外壳无效 |
+   | 顶栏 `.main-header` | ❌ 不做 | 与 `.main-content` 是**上下堆叠的兄弟**（高度互补 60px + calc(100vh-60px)），滚动封闭在内容区内部，背面永远是恒定 `--header-bg` |
+   | 桌面侧栏、主内容区、`.el-card`、`.el-table` | ❌ 不做 | 背面是纯平色（`--bg-color-page` / `--el-fill-color-light`）；卡片全仓 68 处，加基类等于批量生成合成层 |
+   | 空态 / 骨架屏 | ❌ 不做 | 它们本身就在被 `v-loading` 的容器内 = 模糊的承受方；嵌套模糊开销指数增长 |
+   | `.el-dialog` / `.el-message-box` **实体面板** | ❌ 不做 | 背面就是已模糊的遮罩层；要"玻璃对话框"应降低**面板底色 α**，而不是给面板加模糊 |
+   | ECharts tooltip | ❌ 不做 | 不经 `.el-popper`（ECharts 自己 `appendToBody` + 内联样式），且项目图表均 `confine: true`，背面是静态画布 |
+
+9. `MUST` 模糊的三条技术约束（写之前先核对，否则会静默失效）：
+   - **`filter` / `opacity<1` / `mask` / `clip-path` / `mix-blend-mode` 会形成 Backdrop Root**：其任何**祖先**命中其一，`backdrop-filter` 会**静默失效**（表现为透明或纯色，不报错）。`z-index` / `transform` / `position:fixed` **不会**形成 Backdrop Root。
+   - **`backdrop-filter ≠ none` 会让元素成为其绝对/固定定位后代的包含块**并创建层叠上下文。给大容器（如 `.main-content`）加模糊会给未来埋雷：其中任何 `position:fixed` 后代都会改为相对该容器定位。
+   - **`overflow:hidden` 不"裁掉模糊"，但会把可模糊区域限制在该元素边框盒内**（规范：clip 到 B 的 border box）。祖先被裁多少，模糊就少多少。
+10. `MUST` 模糊必须提供降级与偏好支持：`@supports not (backdrop-filter: ...)` 回退为不透明底（半透明底在无模糊时会让"内容还在动"的错觉更强）；`prefers-reduced-motion` 关过渡但**保留**模糊（模糊是静态质感，不是动画）；粗指针/窄屏场景按 §4.4.7 考虑降档。
+11. `MUST` 模糊半径取 `--mask-blur`（当前 8px），不得在组件里写死 `blur(Npx)`；低于 6px 在 1x 屏不可辨，高于 12px 会把背景糊成纯色而收益不再增长。**半透明底与模糊是一套的**：底色 α 过高（如 EP 默认 `#ffffffe6`，α 0.9）会把背景糊成纯色，模糊等于白付 GPU 开销。
 
 ### 4.3 组件与操作模式
 
