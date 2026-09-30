@@ -11,10 +11,15 @@ export default defineConfig(({ mode }) => {
   // 注意：不能用 process.env 读 VITE_* —— vite 不会把 .env 文件注入 process.env，
   // 用 process.env 会导致 vite.config 与前端 import.meta.env 读到不一致的值。
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = env.VITE_API_TARGET || 'http://localhost:8082'
+  // 默认代理到 :8080 的 ehome-web 容器（前端 SPA + 后端 API 同容器，且是唯一
+  // 连着 EMQX、真正在收设备数据的实例）。
+  // ⚠️ 曾经默认 :8082，但该端口已被**无关项目** digital-family-tree 的容器占用：
+  // 代理指过去时端口确实有服务在监听，因此不会报错，只会 REST 404 + WebSocket
+  // 永久握手失败 ⇒ 界面「一直显示离线」。默认值必须指向真正的 EHome 后端。
+  const apiTarget = env.VITE_API_TARGET || 'http://localhost:8080'
   const wsTarget = env.VITE_API_TARGET
     ? env.VITE_API_TARGET.replace('http://', 'ws://')
-    : 'ws://localhost:8082'
+    : 'ws://localhost:8080'
 
   // 子路径前缀部署（反代 /ehome-dev 场景）：VITE_BASE_PATH=/ehome-dev/ 时启用
   const basePath = env.VITE_BASE_PATH || '/'

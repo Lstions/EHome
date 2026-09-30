@@ -36,7 +36,9 @@
 #   - 统一基础设施 = docker-compose.yml 的 postgres/emqx，与生产共用。
 #     生产数据卷（ehome-pgdata 等）不受 make down/clean 影响。
 #   - 生产 web 服务（ehome）由 docker compose 直接管理，不受本 Makefile 控制。
-#   - 本地开发端口：后端 :8082、前端 :5174；
+#   - 本地开发端口：前端 :5174（代理 /api、/ws → API_PORT）；
+#     API 默认走 :8080 的 ehome-web 容器（唯一连着 EMQX、真正收设备数据的实例）；
+#     本机 Go 后端（BACKEND_PORT，默认 8090）仅在需要调试后端时启用。
 #     统一基础设施主机端口：PG :5432、EMQX :1883（仅绑定 127.0.0.1）。
 # ============================================================
 
@@ -46,17 +48,32 @@
 POSTGRES_USER   ?= ehome
 POSTGRES_PASSWORD ?= ehome123
 POSTGRES_DB     ?= ehome
-BACKEND_PORT    ?= 8082
+
+# API_PORT = 开发前端代理指向的后端。默认 8080，由 ehome-web 容器提供
+# （该容器同时托管前端 SPA 与后端 API，也是唯一连着 EMQX、真正在收设备数据的实例）。
+#
+# ⚠️ 历史上这里默认 8082，但 8082 已被**无关项目** digital-family-tree 的
+# 容器占用（0.0.0.0:8082->8082）。若前端代理指过去，REST 会返回该项目的
+# 404 方言、WebSocket 永远握手失败，界面表现是「一直显示离线」——
+# 且因为端口确实有服务在监听，故障是**静默**的。故默认改为 8080。
+API_PORT        ?= 8080
+
+# 仅当确实需要跑「本机 Go 后端」（例如调试后端改动）时才用到。
+# 刻意避开 API_PORT：8080 归容器所有，本地再绑会抢端口。
+# ⚠️ 本地后端与容器会各自建立一条 MQTT 连接并同时消费相同 topic，
+# 除非把 MQTT_BROKER 指向独立 broker，否则会造成重复处理。
+BACKEND_PORT    ?= 8090
 FRONTEND_PORT   ?= 5174
 
 # ---- OTA external host (ESP32 reaches backend here, not localhost) ----
 # Auto-detect the IP that external devices can reach; override with EHOME_EXTERNAL_HOST=ip:port
+# 设备下载 OTA 固件走的是 API_PORT（8080 容器），不是本机 Go 后端的 BACKEND_PORT。
 _WSL_IP := $(shell ip route get 1 2>/dev/null | awk '{print $$7; exit}')
 ifeq ($(EHOME_EXTERNAL_HOST),)
   ifneq ($(_WSL_IP),)
-    EHOME_EXTERNAL_HOST := $(_WSL_IP):$(BACKEND_PORT)
+    EHOME_EXTERNAL_HOST := $(_WSL_IP):$(API_PORT)
   else
-    EHOME_EXTERNAL_HOST := localhost:$(BACKEND_PORT)
+    EHOME_EXTERNAL_HOST := localhost:$(API_PORT)
   endif
 endif
 
@@ -75,6 +92,27 @@ define kill_port
 	lsof -ti :$(1) 2>/dev/null | xargs -r kill -9 2>/dev/null
 endef
 
+# 校验 API_PORT 上跑的确实是 EHomeSystem 后端。
+#
+# 为什么必须显式校验：端口上有**任何**服务在监听时，前端代理都不会报错 ——
+# REST 会拿到对方的 404 方言、WebSocket 永远握手失败，界面只表现为
+# 「一直显示离线」。故障是静默的，所以这里主动识别并中止。
+#
+# 判据用 /ping：EHome 后端返回 {"status":"ok","drivers":[...]}，
+# 且该路径在无关项目上返回其自身的错误方言（实测 digital-family-tree 返回
+# {"code":40401,...}），足以区分。
+define require_ehome_backend
+	@body=$$(curl -s -m 5 http://127.0.0.1:$(1)/ping 2>/dev/null); \
+	if ! printf '%s' "$$body" | grep -q '"status":"ok"'; then \
+		echo "❌ 端口 $(1) 上没有 EHomeSystem 后端（/ping 未返回 status:ok）。"; \
+		echo "   实际返回: $${body:-<空/连接失败>}"; \
+		echo "   若该端口被其它项目占用，请用 API_PORT=<其它端口> 覆盖，"; \
+		echo "   或先 'docker compose up -d ehome' 起 ehome-web 容器。"; \
+		exit 1; \
+	fi; \
+	echo "    API backend on :$(1) ✓ (EHome /ping ok)"
+endef
+
 # ---- 覆盖率阈值 (当前基线，逐步提高) ----
 BACKEND_COVERAGE_THRESHOLD  ?= 35
 FRONTEND_COVERAGE_THRESHOLD ?= 25
@@ -91,6 +129,7 @@ dev: up ## 启动统一环境（历史兼容别名）
 
 up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 	@mkdir -p $(LOG_DIR)
+	$(call require_ehome_backend,$(API_PORT))
 	@echo "==> Starting local backend (port $(BACKEND_PORT), unified infra)..."
 	@cd $(BACKEND) && \
 		EHOME_SERVER_ADDR=:$(BACKEND_PORT) \
@@ -110,7 +149,7 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend (port $(FRONTEND_PORT))..."
 	@cd $(FRONTEND) && \
-		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		VITE_API_TARGET=http://localhost:$(API_PORT) \
 		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@echo "==> Waiting for services..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -121,10 +160,10 @@ up: infra auth-bootstrap ## 确保基础设施运行 + 启动本机前后端
 		sleep 2; \
 	done
 	@if lsof -ti :$(BACKEND_PORT) >/dev/null 2>&1; then \
-		echo "    Backend:  http://localhost:$(BACKEND_PORT) ✓"; \
-	else echo "    Backend:  FAILED — check $(LOG_DIR)/backend.log"; fi
+		echo "    Backend(local): http://localhost:$(BACKEND_PORT) ✓"; \
+	else echo "    Backend(local): FAILED — check $(LOG_DIR)/backend.log"; fi
 	@if lsof -ti :$(FRONTEND_PORT) >/dev/null 2>&1; then \
-		echo "    Frontend: http://localhost:$(FRONTEND_PORT) ✓"; \
+		echo "    Frontend: http://localhost:$(FRONTEND_PORT) ✓ (API 代理 → :$(API_PORT))"; \
 	else echo "    Frontend: FAILED — check $(LOG_DIR)/frontend.log"; fi
 	@echo "    Postgres: 127.0.0.1:5432 (统一基础设施)"
 	@echo "    EMQX:     127.0.0.1:1883 (dashboard: 127.0.0.1:18083)"
@@ -190,7 +229,7 @@ restart: auth-bootstrap ## 重启本机前后端
 		nohup go run ./cmd/server/ > $(LOG_DIR)/backend.log 2>&1 &
 	@echo "==> Starting local frontend..."
 	@cd $(FRONTEND) && \
-		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		VITE_API_TARGET=http://localhost:$(API_PORT) \
 		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@echo "==> Waiting for services..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
@@ -245,9 +284,10 @@ backend: auth-bootstrap ## 仅启动本机后端（连统一基础设施）
 
 frontend: ## 仅启动本机前端
 	@mkdir -p $(LOG_DIR)
+	$(call require_ehome_backend,$(API_PORT))
 	$(call kill_port,$(FRONTEND_PORT))
 	@cd $(FRONTEND) && \
-		VITE_API_TARGET=http://localhost:$(BACKEND_PORT) \
+		VITE_API_TARGET=http://localhost:$(API_PORT) \
 		nohup pnpm dev --port $(FRONTEND_PORT) --strictPort > $(LOG_DIR)/frontend.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		lsof -ti :$(FRONTEND_PORT) >/dev/null 2>&1 && break; \

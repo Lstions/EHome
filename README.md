@@ -72,22 +72,30 @@ make up
 
 # 或分步启动
 make infra       # 确保统一基础设施 (PG/EMQX) 运行
-make backend     # 仅启动后端 (:8082)
-make frontend    # 仅启动前端 (:5174)
+make backend     # 仅启动本机 Go 后端 (:8090，调试后端改动时才需要)
+make frontend    # 仅启动前端 (:5174，API 代理 → :8080)
 ```
 
 统一 PostgreSQL 同时包含 `ehome` 和 `ehome_test` 两个数据库。基础设施与生产共用容器、网络、持久卷，生产数据卷（`ehome-pgdata` 等）不受 `make down/clean` 影响。
 
 本地端口（统一基础设施主机端口仅绑定 127.0.0.1）：
 
-| 服务 | 本地/统一端口 | 生产容器内端口 |
+| 服务 | 端口 | 说明 |
 |------|--------------|---------------|
-| PostgreSQL | 5432 | 5432 |
-| EMQX MQTT | 1883 | 1883 |
-| EMQX WebSocket | 8083 | 8083 |
-| EMQX Dashboard | 18083 | 18083 |
-| 后端 API | 8082 | 8080（ehome-web） |
-| 前端 | 5174 | 80（ehome-web 内 SPA） |
+| PostgreSQL | 5432 | 统一基础设施 |
+| EMQX MQTT | 1883 | 统一基础设施 |
+| EMQX WebSocket | 8083 | 统一基础设施 |
+| EMQX Dashboard | 18083 | 统一基础设施 |
+| **API（默认）** | **8080** | `ehome-web` 容器：前端 SPA + 后端 API 同容器，唯一连着 EMQX、真正收设备数据的实例 |
+| 前端 dev server | 5174 | Vite，`/api`、`/ws` 代理到 `API_PORT` |
+| 本机 Go 后端 | 8090 | 仅调试后端改动时启用（`make backend`）|
+
+> ⚠️ **为什么默认不再用 8082**：8082 已被无关项目 `digital-family-tree` 的容器占用
+> （`0.0.0.0:8082->8082`）。前端若代理过去，端口确实有服务在监听 ⇒ **不报错**，
+> 但 REST 会拿到对方的 404 方言、WebSocket 永久握手失败，界面只表现为
+> 「一直显示离线」。`make up` / `make frontend` 现在会先用 `/ping` 校验
+> `API_PORT` 上确实是 EHome 后端，否则直接中止并提示，不再静默失败。
+> 需要换端口时用 `API_PORT=<port>` 覆盖。
 
 ### 3. 构建 ESP32 固件
 
