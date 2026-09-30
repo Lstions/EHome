@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -59,8 +60,22 @@
 int64_t g_test_time_us = 0;
 
 /* ---- ESP stubs ---- */
+/* Capture the most recent formatted log line.  The RX-timeout diagnostic is
+ * part of the defect surface: it hardcoded "UART" while the same loop also
+ * serves BUS_TYPE_USB, and it omitted the slot/channel identity that every
+ * other rx_task diagnostic prints.  A test can only assert that if the stub
+ * records what was actually formatted. */
+static char g_last_log[256];
+static char g_last_log_level;
+static char g_last_log_tag[32];
+
 void host_test_log_record(char level, const char *tag, const char *format, ...) {
-    (void)level; (void)tag; (void)format;
+    g_last_log_level = level;
+    snprintf(g_last_log_tag, sizeof(g_last_log_tag), "%s", tag ? tag : "");
+    va_list ap;
+    va_start(ap, format);
+    vsnprintf(g_last_log, sizeof(g_last_log), format, ap);
+    va_end(ap);
 }
 const char *esp_err_to_name(esp_err_t err) { (void)err; return "ESP_OK"; }
 void esp_restart(void) { /* no-op in tests */ }
@@ -82,6 +97,22 @@ static uint32_t g_sched_error_for;
 static uint32_t g_sched_last_success_id;
 static uint32_t g_sched_last_error_id;
 
+/* Command-level outcome observations (defect 2, 2026-09-30).
+ *
+ * The counter the server actually reads is sched_command_t.error_count, which
+ * handler_data.c publishes as EdgeDeviceHealth.  scheduler_notify_channel_*
+ * only touches the channel-level backoff counter, so a stub that watches only
+ * those two functions CANNOT see whether a silent sensor became visible.
+ * Record the full (channel, edge_device, template, index, success) tuple here. */
+static uint32_t g_cmd_outcome_calls;
+static uint32_t g_cmd_outcome_errors;
+static uint32_t g_cmd_outcome_successes;
+static uint32_t g_cmd_outcome_last_channel;
+static uint32_t g_cmd_outcome_last_edge_device;
+static uint32_t g_cmd_outcome_last_template;
+static uint8_t  g_cmd_outcome_last_index;
+static bool     g_cmd_outcome_last_success;
+
 void scheduler_notify_channel_error(uint32_t channel_id) {
     g_sched_error_total++;
     g_sched_error_for = channel_id;
@@ -92,11 +123,43 @@ void scheduler_notify_channel_success(uint32_t channel_id) {
     g_sched_success_for = channel_id;
     g_sched_last_success_id = channel_id;
 }
+bool scheduler_notify_command_outcome(uint32_t channel_id,
+                                      uint32_t edge_device_id,
+                                      uint32_t command_template_id,
+                                      uint8_t command_index, bool success) {
+    g_cmd_outcome_calls++;
+    g_cmd_outcome_last_edge_device = edge_device_id;
+    if (success) g_cmd_outcome_successes++;
+    else g_cmd_outcome_errors++;
+    g_cmd_outcome_last_channel = channel_id;
+    g_cmd_outcome_last_template = command_template_id;
+    g_cmd_outcome_last_index = command_index;
+    g_cmd_outcome_last_success = success;
+    /* Mirror the real scheduler: the per-command counter is the reported one,
+     * the channel counter keeps the legacy backoff semantics. */
+    if (success) {
+        g_sched_success_total++;
+        g_sched_success_for = channel_id;
+        g_sched_last_success_id = channel_id;
+    } else {
+        g_sched_error_total++;
+        g_sched_error_for = channel_id;
+        g_sched_last_error_id = channel_id;
+    }
+    /* Only a known template identifies a command slot in the real scheduler. */
+    return command_template_id != 0;
+}
 
 static void reset_sched_counters(void) {
     g_sched_success_total = g_sched_error_total = 0;
     g_sched_success_for = g_sched_error_for = 0;
     g_sched_last_success_id = g_sched_last_error_id = 0;
+    g_cmd_outcome_calls = g_cmd_outcome_errors = g_cmd_outcome_successes = 0;
+    g_cmd_outcome_last_channel = 0;
+    g_cmd_outcome_last_edge_device = 0;
+    g_cmd_outcome_last_template = 0;
+    g_cmd_outcome_last_index = 0;
+    g_cmd_outcome_last_success = false;
 }
 
 /* ---- Controllable bus_dma_read stub ---- */
@@ -200,6 +263,9 @@ static void reset_counters(void) {
     g_test_time_us = 0;
     g_fake_rx_len = 0;
     g_fake_rx_pos = 0;
+    g_last_log[0] = '\0';
+    g_last_log_level = 0;
+    g_last_log_tag[0] = '\0';
 }
 
 /* Drain all report queues so allocations are fresh */
@@ -946,7 +1012,12 @@ static void test_rebuild_uart_event_set_is_idempotent_across_resumes(void) {
  */
 
 /* An unanswered request must count as a channel ERROR, and must never be
- * reported as a success. */
+ * reported as a success.
+ *
+ * 2026-09-30 (defect 2): the assertion that matters for the server is the
+ * COMMAND-level one.  handler_data.c publishes sched_command_t.error_count;
+ * bumping only the channel counter left edge_devices.error_code at 0 for a
+ * device that had been silent for 7 days. */
 static void test_rx_timeout_reports_channel_error(void) {
     reset_counters();
     reset_sched_counters();
@@ -954,9 +1025,13 @@ static void test_rx_timeout_reports_channel_error(void) {
     drain_report_queues();
     bus_worker_set_callbacks(NULL, test_data_rpt_cb);
 
-    /* Put a request in flight the way uart_cmd_loop does after a TX. */
+    /* Put a request in flight the way uart_cmd_loop does after a TX.
+     * The descriptor carries the scheduler's (template, index) identity, so
+     * the timeout can be attributed to the exact reported command. */
     pending_cmd_t pcmd = {0};
     pcmd.edge_device_id = 7;
+    pcmd.command_template_id = 11;
+    pcmd.command_index = 0;
     pcmd.read_size = 7;
     pcmd.rx_timeout_ms = 100;
     pcmd.tx_timestamp = 1000;          /* microseconds */
@@ -972,6 +1047,63 @@ static void test_rx_timeout_reports_channel_error(void) {
           "an unanswered request must report a channel error for ch100");
     CHECK(g_sched_success_total == 0,
           "an unanswered request must NOT report channel success");
+
+    /* The load-bearing assertion: the REPORTED (per-command) counter moved. */
+    CHECK(g_cmd_outcome_errors == 1 && g_cmd_outcome_successes == 0,
+          "an unanswered request must increment the REPORTED command "
+          "error_count (EdgeDeviceHealth), not just the channel counter");
+    CHECK(g_cmd_outcome_last_channel == 100 &&
+          g_cmd_outcome_last_template == 11 &&
+          g_cmd_outcome_last_index == 0,
+          "the timeout must be attributed to the exact (ch,template,index) "
+          "the pending descriptor was built from");
+
+    /* The diagnostic must identify the channel and the real bus type. */
+    CHECK(strstr(g_last_log, "slot0") != NULL,
+          "the RX-timeout log must print the slot (channel identity)");
+    char expect_uart[32];
+    snprintf(expect_uart, sizeof(expect_uart), "type=%d", (int)BUS_TYPE_UART);
+    CHECK(strstr(g_last_log, expect_uart) != NULL,
+          "the RX-timeout log must print the real bus_type, not a hardcoded bus");
+    CHECK(strstr(g_last_log, "RX timeout") != NULL,
+          "the RX-timeout log must name the failure");
+
+    teardown_test_runtime();
+}
+
+/* The same timeout loop serves the native USB endpoint.  The diagnostic must
+ * report the actual bus type rather than a hardcoded "UART". */
+static void test_rx_timeout_log_reflects_usb_bus_type(void) {
+    reset_counters();
+    reset_sched_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* Same channel, but the transport is the native USB endpoint. */
+    g_test_bus_ctx[0].bus_type = BUS_TYPE_USB;
+
+    pending_cmd_t pcmd = {0};
+    pcmd.edge_device_id = 7;
+    pcmd.command_template_id = 11;
+    pcmd.command_index = 0;
+    pcmd.read_size = 7;
+    pcmd.rx_timeout_ms = 100;
+    pcmd.tx_timestamp = 1000;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE,
+          "precondition: a pending request must be queued");
+
+    g_test_time_us = 1000 + 200 * 1000;
+    (void)expire_uart_state(&g_test_rt);
+
+    char expect[32];
+    snprintf(expect, sizeof(expect), "type=%d", (int)BUS_TYPE_USB);
+    CHECK(strstr(g_last_log, expect) != NULL,
+          "a USB-channel timeout must report the USB bus type, not \"UART\"");
+    CHECK(strstr(g_last_log, "UART RX timeout") == NULL,
+          "the timeout log must not claim UART for a USB channel");
+    CHECK(strstr(g_last_log, "slot0") != NULL,
+          "the USB timeout log must still identify the slot");
 
     teardown_test_runtime();
 }
@@ -1004,6 +1136,8 @@ static void test_complete_response_reports_channel_success(void) {
     /* The descriptor that was in flight when the reply arrived. */
     pending_cmd_t pcmd = {0};
     pcmd.edge_device_id = 7;
+    pcmd.command_template_id = 11;
+    pcmd.command_index = 0;
     pcmd.read_size = sizeof(reply);
     pcmd.rx_timeout_ms = 1000;
     pcmd.tx_timestamp = 1000;
@@ -1019,6 +1153,62 @@ static void test_complete_response_reports_channel_success(void) {
           "a complete response must report channel success for ch100");
     CHECK(g_sched_error_total == 0,
           "a complete response must not report a channel error");
+
+    /* Only an observed success may clear the reported per-command counter. */
+    CHECK(g_cmd_outcome_successes >= 1 && g_cmd_outcome_errors == 0,
+          "a complete response must clear the REPORTED command error_count");
+    CHECK(g_cmd_outcome_last_template == 11 && g_cmd_outcome_last_index == 0,
+          "success must be attributed to the exact command that answered");
+    /* edge_device_id 必须一并透传：command_index 只在单个设备内唯一，
+     * 丢掉设备身份会让「谁的故障」记到同通道的另一个设备头上。 */
+    CHECK(g_cmd_outcome_last_edge_device == 7,
+          "success must carry the edge_device_id of the answered command");
+
+    teardown_test_runtime();
+}
+
+/* A short read is a distinct completion path (complete_idle_response's
+ * read_size branch).  It must count as an ERROR on the reported counter, just
+ * like a full timeout: an incompletely answered sensor is not healthy. */
+static void test_short_read_reports_command_error(void) {
+    reset_counters();
+    reset_sched_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* Only 3 of the expected 8 bytes ever arrive. */
+    const uint8_t partial[3] = {0x01, 0x03, 0x02};
+    memcpy(g_fake_rx_data, partial, sizeof(partial));
+    g_fake_rx_len = sizeof(partial);
+    g_fake_rx_pos = 0;
+    g_test_time_us = 1000;
+
+    uart_event_t ev = {0};
+    ev.type = UART_DATA;
+    ev.size = sizeof(partial);
+    uint8_t scratch[256];
+    handle_uart_event(&g_test_rt, 0, &ev, scratch, sizeof(scratch));
+    CHECK(s_streams[0].len == sizeof(partial), "fixture: partial bytes accumulated");
+
+    pending_cmd_t pcmd = {0};
+    pcmd.edge_device_id = 7;
+    pcmd.command_template_id = 11;
+    pcmd.command_index = 0;
+    pcmd.read_size = 8;          /* expected 8, got 3 */
+    pcmd.rx_timeout_ms = 1000;
+    pcmd.tx_timestamp = 1000;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE,
+          "precondition: a pending request must be queued");
+
+    g_test_time_us += UART_IDLE_THRESHOLD_US + 1;
+    uint32_t done = expire_uart_state(&g_test_rt);
+    CHECK(done >= 1, "fixture: the idle boundary must complete the short read");
+
+    CHECK(g_cmd_outcome_errors >= 1 && g_cmd_outcome_successes == 0,
+          "a short read must increment the REPORTED command error_count");
+    CHECK(g_cmd_outcome_last_template == 11 && g_cmd_outcome_last_index == 0,
+          "the short read must be attributed to the exact pending command");
 
     teardown_test_runtime();
 }
@@ -1052,7 +1242,9 @@ int main(void)
     test_rebuild_uart_event_set_with_pending_driver_bytes();
     test_rebuild_uart_event_set_is_idempotent_across_resumes();
     test_rx_timeout_reports_channel_error();
+    test_rx_timeout_log_reflects_usb_bus_type();
     test_complete_response_reports_channel_success();
+    test_short_read_reports_command_error();
 
     report_path_deinit();
 

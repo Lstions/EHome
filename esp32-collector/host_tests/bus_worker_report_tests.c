@@ -66,9 +66,20 @@ void host_test_log_record(char level, const char *tag, const char *format, ...) 
 const char *esp_err_to_name(esp_err_t err) { (void)err; return "ESP_OK"; }
 void esp_restart(void) { /* no-op in tests */ }
 
-/* ---- scheduler stubs ---- */
+/* ---- scheduler stubs ----
+ * scheduler_notify_command_outcome is the hook rx_task uses to move the
+ * per-command counter that handler_data.c reports as EdgeDeviceHealth.
+ * These suites do not assert on it, but bus_worker.c must link. */
 void scheduler_notify_channel_error(uint32_t channel_id) { (void)channel_id; }
 void scheduler_notify_channel_success(uint32_t channel_id) { (void)channel_id; }
+bool scheduler_notify_command_outcome(uint32_t channel_id,
+                                      uint32_t edge_device_id,
+                                      uint32_t command_template_id,
+                                      uint8_t command_index, bool success) {
+    (void)channel_id; (void)edge_device_id; (void)command_template_id;
+    (void)command_index; (void)success;
+    return false;
+}
 
 /* ---- bus_dma stubs ---- */
 esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len) {

@@ -135,9 +135,39 @@ typedef struct {
  */
 const scheduler_state_t *scheduler_get_state(void);
 
-/* === Performance tracking === */
+/* === Performance tracking ===
+ *
+ * scheduler_notify_channel_error/success update the CHANNEL-level counter
+ * only.  That counter feeds the legacy v1 adaptive backoff and is NOT what
+ * StatusReport publishes.
+ *
+ * StatusReport's EdgeDeviceHealth sub-frame is built from
+ * sched_command_t.error_count (handler_data.c).  Use
+ * scheduler_notify_command_outcome() to move that counter: it is the only
+ * field the server can observe.  It also updates the channel-level counter,
+ * preserving the legacy v1 backoff behaviour.
+ *
+ *   success true  -> clear the command's consecutive-error count
+ *   success false -> increment it (saturating at 100)
+ *
+ * Matching key is (channel_id, edge_device_id, command_template_id,
+ * command_index).  edge_device_id is required, not optional: one channel may
+ * host several edge devices, and command_index is only unique *within* a
+ * device.  Matching on (channel, template, index) alone could attribute one
+ * device's timeout to a different device that happens to share the template
+ * and index -- the reported health would then name the wrong device.
+ * A zero edge_device_id therefore means "cannot address a command" and the
+ * call falls back to the channel-level counter only.
+ *
+ * Returns true when a per-command slot matched and was updated.
+ */
 void scheduler_notify_channel_error(uint32_t channel_id);
 void scheduler_notify_channel_success(uint32_t channel_id);
+bool scheduler_notify_command_outcome(uint32_t channel_id,
+                                      uint32_t edge_device_id,
+                                      uint32_t command_template_id,
+                                      uint8_t command_index,
+                                      bool success);
 
 /* Bounded runtime observability for performance gates.  All values are
  * measured since boot/config start; zero means the corresponding task has not

@@ -326,6 +326,35 @@ target_compile_definitions(handler_data_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=
 target_compile_options(handler_data_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME handler_data_tests COMMAND handler_data_tests)
 
+# Full-stack regression for defect 2 (2026-09-30): an RX timeout must reach
+# the EdgeDeviceHealth sub-frame the server receives.  This target compiles the
+# REAL bus_worker.c (rx_task timeout path), the REAL scheduler.c (owns the
+# reported counter) and the REAL handler_data.c (encodes the wire frame)
+# together.  bus_worker_rx_tests.c only proves a notify hook is called; this
+# proves the encoded StatusReport actually changes.
+add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_report_codec.c
+)
+target_include_directories(rx_health_e2e_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/frame
+    ../components/msg_handler
+    ../components/config_mgr
+    ../components/sync_manager
+    ../components/scheduler
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/ota
+    ../components/wifi_mgr
+)
+target_compile_definitions(rx_health_e2e_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(rx_health_e2e_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME rx_health_e2e_tests COMMAND rx_health_e2e_tests)
+
 add_executable(app_state_tests app_state_tests.c
     ../components/hw_profile/hw_tables.c
     ../components/dma_pool/dma_pool.c

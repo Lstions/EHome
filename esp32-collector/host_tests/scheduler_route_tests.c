@@ -72,12 +72,20 @@ static inline void vTaskDelayUntil(TickType_t *prev, TickType_t inc) {
 
 /* ── config_mgr stubs ──────────────────────────────────────────────
  * scheduler.c calls config_mgr_get_manifest() (in scheduler_start) and
- * config_mgr_get_template() (in schedule_v1/v2_channel).  Neither path
- * is exercised by the route/metric tests, but the linker needs symbols.
+ * config_mgr_get_template() (in schedule_v1/v2_channel).  The template
+ * lookup must return a real, sendable template so the command-level health
+ * tests can drive schedule_v2_channel() to the enqueue branch.
  */
 const config_manifest_t *config_mgr_get_manifest(void) { return NULL; }
 const config_template_t *config_mgr_get_template(uint32_t id) {
-    (void)id; return NULL;
+    static config_template_t t;
+    t.id = id;
+    t.write_data[0] = 0x01;
+    t.write_data[1] = 0x03;
+    t.write_data_len = 2;
+    t.read_length = 7;
+    t.delay_ms = 0;
+    return &t;
 }
 
 /* Now include scheduler.c to access static functions */
@@ -388,6 +396,201 @@ static void test_observe_queue_metrics_updates_spaces_and_high_water(void)
     vQueueDelete(q_i2c);
 }
 
+/* =====================================================================
+ * 7) Command-level health counter (defect 2, statistics ownership)
+ * =====================================================================
+ *
+ * handler_data.c publishes sched_command_t.error_count as EdgeDeviceHealth.
+ * Before the fix an RX timeout only bumped the CHANNEL-level counter, and a
+ * successful enqueue cleared the command counter, so a device that never
+ * answered kept reporting error_code == 0 for 7 days.
+ */
+
+/* Fixture edge-device id: command identity is
+ * (channel, edge_device, template, index) -- command_index alone is unique
+ * only within one device, so the device id must take part in every lookup. */
+#define EDGE_ID 7
+
+/* Build a v2 channel with one edge device / one command, wired into the
+ * scheduler so the reported command state exists. */
+static void make_v2_channel(uint32_t channel_id, uint32_t template_id,
+                            uint32_t interval_ms)
+{
+    config_channel_t ch;
+    memset(&ch, 0, sizeof(ch));
+    ch.id = channel_id;
+    ch.bus_type = BUS_TYPE_UART;
+    ch.enabled = true;
+    ch.interval_ms = interval_ms;
+    ch.bus_config[0] = 16;   /* C6 UART0 TX */
+    ch.bus_config[1] = 17;   /* C6 UART0 RX */
+    ch.bus_config_len = 2;
+    ch.edge_device_count = 1;
+    ch.edge_devices[0].edge_device_id = EDGE_ID;
+    ch.edge_devices[0].hardware_id = EDGE_ID;
+    ch.edge_devices[0].command_count = 1;
+    ch.edge_devices[0].commands[0].template_id = template_id;
+    ch.edge_devices[0].commands[0].interval_ms = interval_ms;
+    ch.edge_devices[0].commands[0].enabled = true;
+    CHECK(scheduler_add_channel(&ch) == SCHED_OK, "fixture: add_channel must succeed");
+}
+
+/* Locate the reported command slot for (channel, template, index). */
+static sched_command_t *reported_command(uint32_t channel_id,
+                                         uint32_t edge_device_id,
+                                         uint32_t template_id, uint8_t index)
+{
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (s_channels[i].active && s_channels[i].config.id == channel_id) {
+            for (int ed = 0; ed < s_channels[i].edge_device_count; ed++) {
+                sched_edge_device_t *dev = &s_channels[i].edge_devices[ed];
+                if (dev->edge_device_id != edge_device_id) continue;
+                if (index < dev->command_count &&
+                    dev->commands[index].template_id == template_id)
+                    return &dev->commands[index];
+            }
+        }
+    }
+    return NULL;
+}
+
+/* An RX timeout must move the counter the server reads, on the exact command
+ * identified by (channel_id, template_id, command_index). */
+static void test_command_outcome_error_targets_reported_counter(void)
+{
+    reset_scheduler_state();
+    make_v2_channel(100, 11, 5000);
+
+    sched_command_t *cmd = reported_command(100, EDGE_ID, 11, 0);
+    CHECK(cmd != NULL, "fixture: the v2 command must exist");
+    CHECK(cmd->error_count == 0, "fixture: a fresh command starts healthy");
+
+    bool hit = scheduler_notify_command_outcome(100, EDGE_ID, 11, 0, false);
+    CHECK(hit, "the per-command slot must be found for (ch,template,index)");
+    CHECK(cmd->error_count == 1,
+          "an RX timeout must increment the REPORTED command error_count");
+
+    /* A silent sensor must keep climbing: no reset happens elsewhere. */
+    (void)scheduler_notify_command_outcome(100, EDGE_ID, 11, 0, false);
+    (void)scheduler_notify_command_outcome(100, EDGE_ID, 11, 0, false);
+    CHECK(cmd->error_count == 3,
+          "consecutive timeouts must accumulate (server sees comm_status=FAULT)");
+
+    /* An observed successful completion is the only thing that clears it. */
+    (void)scheduler_notify_command_outcome(100, EDGE_ID, 11, 0, true);
+    CHECK(cmd->error_count == 0,
+          "a complete response must clear the reported command error_count");
+}
+
+/* The wrong command must not be touched, and an unknown template must not
+ * silently count against an arbitrary slot. */
+static void test_command_outcome_error_is_precisely_addressed(void)
+{
+    reset_scheduler_state();
+    make_v2_channel(100, 11, 5000);
+
+    bool hit = scheduler_notify_command_outcome(100, EDGE_ID, 999, 0, false);
+    CHECK(!hit, "an unknown template_id must not match a command slot");
+    CHECK(reported_command(100, EDGE_ID, 11, 0)->error_count == 0,
+          "an unknown template must not move an unrelated command");
+
+    hit = scheduler_notify_command_outcome(100, EDGE_ID, 11, 2, false);
+    CHECK(!hit, "an out-of-range command_index must not match");
+
+    hit = scheduler_notify_command_outcome(4242, EDGE_ID, 11, 0, false);
+    CHECK(!hit, "an unknown channel_id must not match");
+
+    /* edge_device_id must take part in matching.  command_index is unique only
+     * *within* one device, so without it a second device on the same channel
+     * that happens to share (template_id, command_index) would be charged with
+     * the first device's timeout, and the server would name the wrong device. */
+    hit = scheduler_notify_command_outcome(100, 999, 11, 0, false);
+    CHECK(!hit, "an unknown edge_device_id must not match");
+    CHECK(reported_command(100, EDGE_ID, 11, 0)->error_count == 0,
+          "a foreign edge_device_id must not move this device's command");
+
+    hit = scheduler_notify_command_outcome(100, 0, 11, 0, false);
+    CHECK(!hit, "edge_device_id 0 means 'not addressable' and must not match");
+}
+
+/* Two edge devices on ONE channel sharing (template_id, command_index) must be
+ * tracked independently.  This is the exact shape the (channel,template,index)
+ * key could not distinguish: device 8's timeout must not be reported as
+ * device 7's fault, or vice versa. */
+static void test_command_outcome_separates_devices_on_same_channel(void)
+{
+    reset_scheduler_state();
+
+    config_channel_t ch;
+    memset(&ch, 0, sizeof(ch));
+    ch.id = 100;
+    ch.bus_type = BUS_TYPE_UART;
+    ch.enabled = true;
+    ch.interval_ms = 5000;
+    ch.edge_device_count = 2;
+    for (int d = 0; d < 2; d++) {
+        ch.edge_devices[d].edge_device_id = (uint32_t)(EDGE_ID + d); /* 7, 8 */
+        ch.edge_devices[d].hardware_id = (uint32_t)(EDGE_ID + d);
+        ch.edge_devices[d].command_count = 1;
+        /* Same template_id AND same command_index on both devices. */
+        ch.edge_devices[d].commands[0].template_id = 11;
+        ch.edge_devices[d].commands[0].interval_ms = 5000;
+        ch.edge_devices[d].commands[0].enabled = true;
+    }
+    CHECK(scheduler_add_channel(&ch) == SCHED_OK, "fixture: two-device channel");
+
+    /* Only device 8 times out. */
+    bool hit = scheduler_notify_command_outcome(100, 8, 11, 0, false);
+    CHECK(hit, "device 8's command must be addressable");
+
+    sched_command_t *dev8 = reported_command(100, 8, 11, 0);
+    sched_command_t *dev7 = reported_command(100, 7, 11, 0);
+    CHECK(dev8 != NULL && dev7 != NULL, "fixture: both command slots exist");
+    CHECK(dev8->error_count == 1,
+          "the timed-out device (8) must carry the error");
+    CHECK(dev7->error_count == 0,
+          "the innocent device (7) must NOT be charged with device 8's timeout");
+}
+
+/* Regression for the enqueue-clears-error defect: schedule_v2_channel used to
+ * zero error_count on every successful enqueue.  A full queue must still be
+ * able to raise the counter, and a successful enqueue must NOT clear it.
+ *
+ * This is a source-level guarantee: the scheduler task loop is not driven on
+ * the host, so instead of faking a tick we assert the invariant that the
+ * enqueue-success branch no longer resets the reported counter. */
+static void test_enqueue_success_does_not_clear_error_count(void)
+{
+    reset_scheduler_state();
+    make_v2_channel(100, 11, 5000);
+
+    sched_command_t *cmd = reported_command(100, EDGE_ID, 11, 0);
+    CHECK(cmd != NULL, "fixture: the v2 command must exist");
+    cmd->error_count = 4;
+
+    /* Drive the real scheduling body with an available queue.  The queue is
+     * present and has space, so the enqueue succeeds -- the branch that used
+     * to clear error_count. */
+    QueueHandle_t q_uart0 = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
+    CHECK(q_uart0 != NULL, "fixture: uart0 queue must be creatable");
+    s_queues.uart0_cmd_queue = q_uart0;
+
+    uint32_t total_samples = 0, queue_full = 0;
+    /* interval_ms = 0 so the independent-timing gate always passes. */
+    s_channels[0].edge_devices[0].commands[0].interval_ms = 0;
+    s_channels[0].edge_devices[0].commands[0].last_run_ms = 0;
+
+    schedule_v2_channel(&s_channels[0], 1000, false, &total_samples, &queue_full);
+
+    CHECK(total_samples == 1, "fixture: the sample must have been enqueued");
+    CHECK(cmd->error_count == 4,
+          "a successful enqueue must NOT clear the reported error_count "
+          "(enqueue success is not channel health)");
+
+    vQueueDelete(q_uart0);
+    s_queues.uart0_cmd_queue = NULL;
+}
+
 /*
  * 4b) observe_queue_metrics with NULL queues: queue_spaces_or_depth returns
  *     CMD_QUEUE_DEPTH (16) for NULL queues, so used = capacity - 16.
@@ -495,6 +698,11 @@ int main(void)
     test_get_queue_metrics_snapshot();
     test_get_queue_metrics_reflects_internal_state();
     test_sample_skip_and_reject_counters();
+
+    test_command_outcome_error_targets_reported_counter();
+    test_command_outcome_error_is_precisely_addressed();
+    test_command_outcome_separates_devices_on_same_channel();
+    test_enqueue_success_does_not_clear_error_count();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

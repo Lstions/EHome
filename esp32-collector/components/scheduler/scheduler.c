@@ -417,7 +417,47 @@ const scheduler_state_t *scheduler_get_state(void)
 
 /* ── performance tracking ─────────────────────────────────────────── */
 
-void scheduler_notify_channel_error(uint32_t channel_id)
+/* 2026-09-30 (defect 2, "statistics ownership migration"):
+ * Find the per-command state that StatusReport reports as EdgeDeviceHealth.
+ * handler_data.c reads sched_command_t.error_count, NOT the channel-level
+ * s_channels[].error_count, so a health event that only bumps the channel
+ * counter is invisible on the server.  Both notifiers must therefore update
+ * the same per-command field the server reads.
+ *
+ * A zero/unknown key means the caller cannot address a command (legacy v1
+ * channel, or a TX-level failure that happens before the RX path knows which
+ * command is outstanding).  Only then do we fall back to the channel-level
+ * counter so v1 backoff keeps working.
+ *
+ * Matching key is (channel, edge_device, template, index).  edge_device_id is
+ * NOT optional: command_index is unique only *within* one device, so a channel
+ * hosting two devices that share a template_id would otherwise let one
+ * device's timeout be charged to the other, and the server would be told the
+ * wrong device is faulted. */
+static sched_command_t *sched_find_command(uint32_t channel_id,
+                                           uint32_t edge_device_id,
+                                           uint32_t command_template_id,
+                                           uint8_t command_index)
+{
+    if (command_template_id == 0 || edge_device_id == 0) return NULL;
+    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+        if (!s_channels[i].active || s_channels[i].config.id != channel_id)
+            continue;
+        sched_channel_t *ch = &s_channels[i];
+        for (int ed = 0; ed < ch->edge_device_count; ed++) {
+            sched_edge_device_t *dev = &ch->edge_devices[ed];
+            if (dev->edge_device_id != edge_device_id) continue;
+            if (command_index >= dev->command_count) return NULL;
+            if (dev->commands[command_index].template_id == command_template_id)
+                return &dev->commands[command_index];
+            return NULL;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+static void sched_note_channel_error(uint32_t channel_id)
 {
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s_channels[i].active && s_channels[i].config.id == channel_id) {
@@ -431,18 +471,57 @@ void scheduler_notify_channel_error(uint32_t channel_id)
     }
 }
 
+void scheduler_notify_channel_error(uint32_t channel_id)
+{
+    sched_note_channel_error(channel_id);
+}
+
+/* Record an RX/TX outcome against the exact command that was outstanding.
+ *
+ * The per-command counter is the one handler_data.c publishes as
+ * EdgeDeviceHealth, so it is the only field that makes an unanswered sensor
+ * visible to the server.  The channel-level counter is updated as well, so
+ * the legacy v1 adaptive backoff keeps working exactly as before.
+ *
+ * Returns true when a per-command slot matched (the reported counter moved). */
+bool scheduler_notify_command_outcome(uint32_t channel_id,
+                                      uint32_t edge_device_id,
+                                      uint32_t command_template_id,
+                                      uint8_t command_index,
+                                      bool success)
+{
+    bool reported = false;
+    sched_command_t *scmd = sched_find_command(channel_id, edge_device_id,
+                                               command_template_id, command_index);
+    if (scmd) {
+        if (success) {
+            /* A complete response clears the consecutive-error streak. */
+            scmd->error_count = 0;
+        } else if (scmd->error_count < 100) {
+            scmd->error_count++;
+        }
+        reported = true;
+    }
+    if (success) {
+        /* Keep the legacy channel-level backoff/health semantics: a healthy
+         * channel must not stay permanently backed off. */
+        for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+            if (s_channels[i].active && s_channels[i].config.id == channel_id) {
+                if (s_channels[i].error_count > 0) s_channels[i].error_count--;
+                s_channels[i].skip_count = 0;
+                break;
+            }
+        }
+    } else {
+        sched_note_channel_error(channel_id);
+    }
+    return reported;
+}
+
 void scheduler_notify_channel_success(uint32_t channel_id)
 {
-    for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
-        if (s_channels[i].active && s_channels[i].config.id == channel_id) {
-            /* Gradually reduce error count on success */
-            if (s_channels[i].error_count > 0) {
-                s_channels[i].error_count--;
-            }
-            s_channels[i].skip_count = 0;  /* Reset skip counter */
-            break;
-        }
-    }
+    /* 0/0/0 = "no addressable command": channel-level bookkeeping only. */
+    (void)scheduler_notify_command_outcome(channel_id, 0, 0, 0, true);
 }
 
 void scheduler_get_performance(scheduler_performance_t *out)
@@ -533,7 +612,19 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
                 if (scmd->error_count > 100) scmd->error_count = 100;
             } else {
                 (*total_samples)++;
-                scmd->error_count = 0;
+                /* 2026-09-30 (defect 2): do NOT clear error_count here.
+                 * Handing bytes to the bus queue only proves the TX path
+                 * accepted the request -- it says nothing about whether the
+                 * sensor answered.  Clearing on enqueue made the counter that
+                 * handler_data.c publishes (sched_command_t.error_count)
+                 * return to 0 on every sample, so a device that never
+                 * responded still reported error_code=0 for 7 days.
+                 *
+                 * The counter is now cleared only by an observed successful
+                 * RX completion: scheduler_notify_command_outcome(..., true,
+                 * ...) called from the rx_task idle-boundary path.  A
+                 * command whose queue is always full still climbs via the
+                 * branch above. */
             }
         }
     }

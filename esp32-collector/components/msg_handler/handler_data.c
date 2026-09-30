@@ -142,7 +142,14 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
                     const sched_command_t *cmd = &dev->commands[ci2];
                     /* Disabled commands are intentionally inactive, not a
                      * communication failure. Only report enabled commands
-                     * with an observed error. */
+                     * with an observed error.
+                     *
+                     * NOTE (2026-09-30, defect 2): cmd->error_count is THE
+                     * counter the server reads.  It is written only by
+                     * scheduler_notify_command_outcome() from the rx_task
+                     * outcome paths; a TX enqueue must never clear it.  Keep
+                     * that invariant or a silent sensor disappears from this
+                     * frame again (the 7-day outage). */
                     if (!cmd->enabled || cmd->error_count == 0) continue;
 
                     // Build EdgeDeviceHealth sub-frame

@@ -1344,8 +1344,12 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
   if (xQueuePeek(rt->pending_queues[idx], &pcmd, 0) != pdTRUE) return false;
   if (pcmd.read_size > 0 && s->len < pcmd.read_size) {
    (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
-   /* Short read = the sensor answered incompletely: a channel error. */
-   scheduler_notify_channel_error(rt->bus_ch[idx]);
+   /* Short read = the sensor answered incompletely: a command error.
+    * 2026-09-30: move the counter the server reads (sched_command_t), not
+    * only the channel-level backoff counter. */
+   (void)scheduler_notify_command_outcome(rt->bus_ch[idx], pcmd.edge_device_id,
+                                          pcmd.command_template_id,
+                                         pcmd.command_index, false);
    if (pcmd.channel_cmd_v2) {
     queue_control_final(pcmd.control_slot, false, 0x03, NULL, 0);
    } else {
@@ -1361,8 +1365,11 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
   /* A complete response for a pending descriptor is the ONE place a sampled
    * channel is genuinely healthy, so this is where success is reported
    * (2026-09-22 field fix).  CMD_SAMPLE no longer reports success at
-   * TX-accept time. */
-  scheduler_notify_channel_success(rt->bus_ch[idx]);
+   * TX-accept time.  It is also the only place that clears the per-command
+   * error streak, so the reported counter can fall back to 0 on recovery. */
+  (void)scheduler_notify_command_outcome(rt->bus_ch[idx], pcmd.edge_device_id,
+                                          pcmd.command_template_id,
+                                         pcmd.command_index, true);
   if (pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, true, 0, s->buffer, s->len);
   } else {
@@ -1489,15 +1496,32 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
   if (xQueueReceive(rt->pending_queues[i], &pcmd, 0) != pdTRUE) continue;
   completions++;
   s_rx_timeout_count[i]++;
-  ESP_LOGW(TAG_RX, "UART RX timeout reqID=%lu (%lldms)",
+  /* This loop covers BUS_TYPE_UART *and* BUS_TYPE_USB (the native USB CDC
+   * endpoint speaks the same request/response protocol), so neither the
+   * message nor the channel identity may be hardcoded.  Report slot/type
+   * like the other rx_task diagnostics in this file (cf. the FIFO-overflow
+   * and line-status branches, which print slot%d type=%d). */
+  ESP_LOGW(TAG_RX, "RX timeout slot%d type=%d reqID=%lu (%lldms)",
+   i, (int)rt->bus_ctx[i].bus_type,
    (unsigned long)pcmd.request_id, (long long)elapsed_ms);
   /* Channel health is owned by rx_task (2026-09-22 field fix): a request that
    * got no answer is a channel error, and only this path can observe that.
    * Previously CMD_SAMPLE reported success at TX-accept time, so a completely
    * unresponsive sensor DECREMENTED error_count and handler_data.c then
    * omitted the EdgeDeviceHealth sub-frame entirely -- the server saw a
-   * healthy channel throughout a 7-hour outage. */
-  scheduler_notify_channel_error(rt->bus_ch[i]);
+   * healthy channel throughout a 7-hour outage.
+   *
+   * 2026-09-30 (defect 2, statistics-ownership migration): the counter the
+   * server actually reads is sched_command_t.error_count, not the channel
+   * counter that scheduler_notify_channel_error() bumps.  The channel counter
+   * only fed the legacy v1 backoff, so a silent sensor still reported
+   * error_code=0.  Address the exact command that was outstanding -- the
+   * peeked descriptor carries the (template_id, command_index) pair the
+   * scheduler used to build it.  The helper also updates the channel-level
+   * counter, so the legacy v1 backoff keeps working unchanged. */
+  (void)scheduler_notify_command_outcome(rt->bus_ch[i], pcmd.edge_device_id,
+                                          pcmd.command_template_id,
+                                         pcmd.command_index, false);
   if (pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, false, 1, NULL, 0);
   } else {
