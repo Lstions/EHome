@@ -400,12 +400,21 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// Update edge device status. Keep last_data_at fresh for every successful
 	// sample, and notify the offline detector even when no status transition
 	// occurs so its active-device cache cannot age out a healthy device.
+	//
+	// error_code 清零（2026-09-30）：固件只在「命令有错」时才把设备放进
+	// StatusReport 的 EdgeDeviceHealth 子帧，恢复后该子帧消失、服务端收不到
+	// 「已恢复」的显式信号。而**成功采到数据本身就是最强的恢复证据**，
+	// 所以在这里清零 —— 否则一次超时留下的 error_code 会永久粘住。
 	result := c.db.Model(&device).Where("status = ?", "offline").Updates(map[string]interface{}{
 		"last_data_at": now,
 		"status":       "active",
+		"error_code":   0,
 	})
 	if result.RowsAffected == 0 {
-		c.db.Model(&device).Updates(map[string]interface{}{"last_data_at": now})
+		c.db.Model(&device).Updates(map[string]interface{}{
+			"last_data_at": now,
+			"error_code":   0,
+		})
 	}
 	if c.deviceActivity != nil {
 		c.deviceActivity(device.ID)

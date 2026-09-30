@@ -164,6 +164,9 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	var syncID string
 	var performance *runtimePerformanceReport
 	var controlStatistics *controlStatisticsReport
+	// 固件上报的通道/命令健康（StatusReport field 7）。解析后落库到
+	// edge_devices.error_code，使「设备不应答」在服务端可见。
+	var channelHealth []edgeDeviceHealth
 	seen := map[uint8]bool{}
 
 	for {
@@ -202,10 +205,20 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		case 6: // v2.2: config_hash
 			configHash = frame.GetString(field)
 		case 7:
-			if err := validateChannelHealth(frame.GetBytes(field)); err != nil {
+			raw := frame.GetBytes(field)
+			if err := validateChannelHealth(raw); err != nil {
 				logger.Warnf("[%s] malformed channel health: %v", deviceID, err)
 				return
 			}
+			// 2026-09-30：此前这里只校验、**丢弃** —— 服务端因此永远看不到
+			// 「设备已静默」的固件侧判断（实测：某设备 7 天无应答，
+			// edge_devices.error_code 仍恒为 0）。现在解析出来落库。
+			decoded, err := decodeChannelHealth(raw)
+			if err != nil {
+				logger.Warnf("[%s] malformed channel health: %v", deviceID, err)
+				return
+			}
+			channelHealth = append(channelHealth, decoded...)
 		case 8:
 			syncID = frame.GetString(field)
 		case 9:
@@ -253,16 +266,33 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	nodeIDCache.Store(deviceID, nodeIDCacheEntry{nodeID: node.ID, writtenAt: time.Now()})
 
 	oldStatus := node.Status
+	oldUptime := node.UptimeSeconds
 	now := time.Now()
 	node.Status = status
 	node.LastSeen = &now
 	node.UptimeSeconds = uint32(uptimeSec)
 	node.OnlineDuration = uint64(uptimeSec)
 
-	// last_online_time = 本次上线的起始时刻，只在 offline→online 转换时设置。
-	// 在线期间不覆盖，这样用户看到的是"什么时候上线的"而非"几秒前"。
-	if status == "online" && oldStatus != "online" {
+	// last_online_time = 本次上线的起始时刻。
+	//
+	// 两条触发路径，缺一不可：
+	//  ① offline→online 跳变 —— 常规重连；
+	//  ② **uptime 回退** —— 设备重启了，但后端没观察到离线。
+	//
+	// 为什么必须有 ②：设备重启（OTA、看门狗、掉电）到重新上报通常只要几秒，
+	// 远小于离线检测阈值 90s（offlinedetector.go 的 db_last_seen_timeout），
+	// 因此不会产生 offline→online 跳变。若只认 ①，last_online_time 会一直
+	// 停在很久以前，"在线时长" 便跨重启累加成一个虚假的大数
+	// —— 实测：设备当天重启 5 次，该字段仍显示 7 天，而固件 uptime 已归零。
+	//
+	// uptime 单调递增，回退即重启（uint32 溢出需 136 年，实际不可达）。
+	rebooted := uptimeSec < uint64(oldUptime)
+	if status == "online" && (oldStatus != "online" || rebooted) {
 		node.LastOnlineTime = &now
+	}
+	if rebooted {
+		logger.Infof("[%s] 检测到设备重启：uptime 回退 %d -> %d，重置本次上线时间",
+			deviceID, oldUptime, uptimeSec)
 	}
 
 	// StatusReport never overwrites synchronization generations. It may only
@@ -370,6 +400,13 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		m.triggerDeviceInit(node.NodeID, deviceID)
 	}
 
+	// 固件侧通道健康 → edge_devices.error_code
+	//
+	// 2026-09-30：此前该字段只在固件里算、在服务端被 validate 后丢弃，
+	// 导致「设备已静默」在服务端不可见（实测 7 天无应答仍 error_code=0）。
+	// 现在落库：error_count>0 视为通信故障（comm_status 1/2/3 映射到 error_code）。
+	m.persistEdgeDeviceHealth(node.NodeID, channelHealth)
+
 	// WebSocket push
 	m.wsHub.BroadcastEvent(events.NodeStatus, map[string]interface{}{
 		"node_id":        deviceID,
@@ -377,6 +414,38 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		"uptime_seconds": uptimeSec,
 		"channel_count":  channelCount,
 	})
+}
+
+// persistEdgeDeviceHealth 把固件上报的 EdgeDeviceHealth 落到 edge_devices.error_code。
+//
+// 语义：固件只在「命令有错」时才发这个子帧（error_count==0 的会被跳过），
+// 所以**收到即代表该设备当前处于故障**；comm_status 直接作为 error_code，
+// 与前端「异常」列的判据（error_code != 0）对齐。
+//
+// 恢复路径不在这里：固件恢复后 error_count 归零、子帧直接消失，服务端收不到
+// 显式的「已恢复」信号。清零由 databus 的成功采样路径负责
+// （consumers_heavy.go：成功采到数据即 error_code=0），否则一次超时会永久粘住。
+func (m *Manager) persistEdgeDeviceHealth(nodeID string, health []edgeDeviceHealth) {
+	if len(health) == 0 {
+		return
+	}
+	for _, h := range health {
+		if h.EdgeDeviceID == 0 || h.CommStatus == 0 {
+			continue
+		}
+		res := m.db.Model(&models.EdgeDevice{}).
+			Where("node_id = ? AND id = ?", nodeID, h.EdgeDeviceID).
+			Update("error_code", int(h.CommStatus))
+		if res.Error != nil {
+			logger.Warnf("[%s] 写入 edge_device %d 健康状态失败: %v",
+				nodeID, h.EdgeDeviceID, res.Error)
+			continue
+		}
+		if res.RowsAffected > 0 {
+			logger.Infof("[%s] EdgeDeviceHealth: device=%d ch=%d cmd=%d err=%d comm_status=%d",
+				nodeID, h.EdgeDeviceID, h.ChannelID, h.CommandIndex, h.ErrorCount, h.CommStatus)
+		}
+	}
 }
 
 func validateChannelHealth(data []byte) error {
@@ -413,6 +482,81 @@ func validateChannelHealth(data []byte) error {
 			edgeHealthCount++
 		default:
 			return fmt.Errorf("unexpected channel health field %d", field.FieldNum)
+		}
+	}
+}
+
+// edgeDeviceHealth 是 StatusReport field 7 里一条 EdgeDeviceHealth 子帧。
+// comm_status 语义见 docs/协议/二进制帧协议.md：1=TIMEOUT 2=CRC_ERROR 3=FAULT。
+type edgeDeviceHealth struct {
+	ChannelID    uint64
+	EdgeDeviceID uint64
+	CommandIndex uint64
+	ErrorCount   uint64
+	CommStatus   uint64
+}
+
+// decodeChannelHealth 解析 StatusReport field 7（repeated ChannelHealth）。
+//
+// 调用前应已通过 validateChannelHealth —— 此处按同样结构再走一遍并取值。
+// 与 validate 分开而不是合并，是为了让「校验」保持纯判定的职责，
+// 且校验失败时（更严格的字段/范围约束）调用方仍可安全丢弃。
+func decodeChannelHealth(data []byte) ([]edgeDeviceHealth, error) {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return nil, err
+	}
+	var out []edgeDeviceHealth
+	var channelID uint64
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch field.FieldNum {
+		case 1:
+			channelID = frame.GetUint64(field)
+		case 2:
+			entry, err := decodeEdgeDeviceHealth(frame.GetBytes(field))
+			if err != nil {
+				return nil, err
+			}
+			entry.ChannelID = channelID
+			out = append(out, entry)
+		default:
+			return nil, fmt.Errorf("unexpected channel health field %d", field.FieldNum)
+		}
+	}
+}
+
+func decodeEdgeDeviceHealth(data []byte) (edgeDeviceHealth, error) {
+	dec, err := frame.NewSubDecoder(data)
+	if err != nil {
+		return edgeDeviceHealth{}, err
+	}
+	var out edgeDeviceHealth
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			return out, nil
+		}
+		if err != nil {
+			return edgeDeviceHealth{}, err
+		}
+		switch field.FieldNum {
+		case 1:
+			out.EdgeDeviceID = frame.GetUint64(field)
+		case 2:
+			out.CommandIndex = frame.GetUint64(field)
+		case 3:
+			out.ErrorCount = frame.GetUint64(field)
+		case 4:
+			out.CommStatus = frame.GetUint64(field)
+		default:
+			return edgeDeviceHealth{}, fmt.Errorf("unexpected edge health field %d", field.FieldNum)
 		}
 	}
 }
