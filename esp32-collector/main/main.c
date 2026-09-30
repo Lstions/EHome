@@ -52,7 +52,10 @@ static void status_task(void *pv)
 {
     app_state_t *s = (app_state_t *)pv;
     while (1) {
-        s->uptime_sec++;
+        /* uptime 必须取真实单调时钟，不能按上报周期自增：
+         * 本循环周期是 5 秒，自增会让 StatusReport field 1（单位=秒）
+         * 每 5 秒真实时间才 +1，上报值 = 真实运行秒数 / 5。 */
+        s->uptime_sec = app_state_uptime_sec_now();
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
                 s->uptime_sec, "online",

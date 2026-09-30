@@ -74,6 +74,10 @@ esp_err_t esp_efuse_mac_get_default(uint8_t *mac) {
 }
 uint32_t esp_random(void) { return 0x12345678; }
 
+/* esp_timer 桩（stubs/esp_timer.h）背后的可控时间源。
+ * app_state_uptime_sec_now() 读它，用例自己设置期望值。 */
+int64_t g_test_time_us = 0;
+
 #ifndef CONFIG_COLLECTOR_NODE_ID
 #define CONFIG_COLLECTOR_NODE_ID "test-node"
 #endif
@@ -233,6 +237,50 @@ static void test_app_state_init_creates_queues(void) {
 }
 
 /* =====================================================================
+ * Test 4: app_state_uptime_sec_now — 运行时长必须来自真实单调时钟
+ *
+ * 回归背景（2026-09-29 实机定位）：status_task 曾在 5 秒上报循环里做
+ * `s->uptime_sec++`，使 StatusReport field 1（单位=秒）每 5 秒真实时间
+ * 才 +1 —— 上报值 = 真实运行秒数 / 5，前端「固件在线时长」少 5 倍。
+ * 实测铁证：相邻两次重启间的墙钟 15332s vs 上报 3065（×5 = 15325s）。
+ *
+ * 本用例锁定：uptime 只由单调时钟决定，与调用次数无关。
+ * ===================================================================== */
+static void test_uptime_sec_now_follows_monotonic_clock(void) {
+    /* 0 → 0 秒 */
+    g_test_time_us = 0;
+    CHECK(app_state_uptime_sec_now() == 0, "t=0us 应为 0 秒");
+
+    /* 整秒边界：截断（向下取整），不是四舍五入 */
+    g_test_time_us = 1000000;              /* 1.000000 s */
+    CHECK(app_state_uptime_sec_now() == 1, "t=1s 应为 1 秒");
+    g_test_time_us = 1999999;              /* 1.999999 s */
+    CHECK(app_state_uptime_sec_now() == 1, "t=1.999999s 应截断为 1 秒");
+
+    /* 关键回归点：真实经过 5 秒，值必须 +5（旧实现只 +1） */
+    g_test_time_us = 1000000;
+    uint32_t a = app_state_uptime_sec_now();
+    g_test_time_us = 6000000;              /* +5 秒真实时间 */
+    uint32_t b = app_state_uptime_sec_now();
+    CHECK(b - a == 5, "真实经过 5 秒，uptime 必须 +5（旧 bug 只 +1）");
+
+    /* 关键回归点：与调用次数无关 —— 同一时刻连读 3 次值不变。
+     * 旧实现每次 status_task 循环自增，值会随"调用次数"漂移。 */
+    g_test_time_us = 100000000;            /* 100 s */
+    uint32_t v1 = app_state_uptime_sec_now();
+    uint32_t v2 = app_state_uptime_sec_now();
+    uint32_t v3 = app_state_uptime_sec_now();
+    CHECK(v1 == 100 && v2 == 100 && v3 == 100,
+          "同一时刻重复读取必须恒为 100（不得随调用次数自增）");
+
+    /* 分钟级运行：1800 s 必须原样读出（旧实现按 5s 周期缩水成 360） */
+    g_test_time_us = 1800000000LL;         /* 1800 s = 30 min */
+    CHECK(app_state_uptime_sec_now() == 1800, "t=1800s 应为 1800 秒");
+
+    g_test_time_us = 0;
+}
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void)
@@ -240,6 +288,7 @@ int main(void)
     test_init_bus_runtime_field_mapping();
     test_control_sample_queue_separation();
     test_app_state_init_creates_queues();
+    test_uptime_sec_now_follows_monotonic_clock();
 
     if (g_failures > 0) {
         fprintf(stderr, "\napp_state_tests: %d FAILURES\n", g_failures);

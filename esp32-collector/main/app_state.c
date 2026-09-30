@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <inttypes.h>
 
@@ -155,6 +156,14 @@ void app_state_set_config_received(bool v)
 uint32_t app_state_get_uptime_sec(void)
 {
     return s_app.uptime_sec;
+}
+
+uint32_t app_state_uptime_sec_now(void)
+{
+    /* 单调时钟（微秒）→ 秒。esp_timer_get_time() 自本次上电起单调递增，
+     * 不随 SNTP 校时跳变，正是"运行时长"应有的时间源。
+     * 与 sync_manager.c 的 get_time_sec() 保持同一口径。 */
+    return (uint32_t)(esp_timer_get_time() / 1000000LL);
 }
 
 /* ---- Config lock ---- */
