@@ -16,15 +16,23 @@
           @update:model-value="emit('update:searchKeyword', $event)"
         />
         <div class="log-action-group log-control-group">
+          <!-- 文案必须诚实：这个按钮**只冻结自动滚动**，日志仍持续接收并入库。
+              用户实测（2026-09-30）：暂停期间注入 9 条，计数 3→8→12 全部照收照渲染。
+              要真正让 ESP32 停止产生日志，只能用上方的「日志流」开关
+              （→ ConfigManifest → log_stream_stop()）。旧文案「暂停」会让人以为
+              能停输出，故改为「暂停滚动」，并在 title 里说明。 -->
           <el-button
             class="pause-button"
             size="small"
             :type="paused ? 'warning' : 'default'"
             :icon="paused ? VideoPlay : VideoPause"
-            :aria-label="paused ? '继续实时日志' : '暂停实时日志'"
+            :aria-label="paused ? '继续自动滚动' : '暂停自动滚动'"
+            :title="paused
+              ? '继续自动滚动（日志一直在接收）'
+              : '仅暂停自动滚动；日志仍在接收。要让设备停止上报，请关闭「日志流」开关'"
             @click="emit('update:paused', !paused)"
           >
-            {{ paused ? '继续' : '暂停' }}
+            {{ paused ? '继续' : '暂停滚动' }}
           </el-button>
           <el-button
             class="clear-button"

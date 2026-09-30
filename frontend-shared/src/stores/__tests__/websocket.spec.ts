@@ -232,6 +232,80 @@ describe('useWebSocketStore', () => {
     expect(store.connected).toBe(false)
   })
 
+  // ── 陈旧连接的迟到事件不得污染当前连接 ────────────────
+  //
+  // 回归背景（2026-09-29 实机复现）：connect() 会用 abandonPrevious 换掉
+  // CONNECTING 的旧连接，旧连接的 close 事件异步到达、可能落在新连接 open
+  // **之后**。修复前 onclose 无条件把 connected 置 false，导致：
+  //   · 新连接明明 OPEN 且仍在收数据，徽标却永久显示「离线」；
+  //   · 随后的重连链里 connect() 又因 ws.value 已是 OPEN 而 early-return
+  //     ⇒ 永不自愈（实测冻结 80s，期间活着的 socket 收到 36 帧）。
+  it('陈旧连接的 close 不得把新连接标记为离线', () => {
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    const stale = MockWebSocket.instances[0]
+    stale.simulateOpen()
+
+    // 换连接：把旧连接置为 CONNECTING，connect(token, true) 才会真的替换它
+    // （这正是生产路径：凭证变更时旧连接常仍在 CONNECTING）。
+    stale.readyState = MockWebSocket.CONNECTING
+    store.connect('test-token', true)
+    const fresh = MockWebSocket.instances[1]
+    expect(fresh).toBeDefined()
+    fresh.simulateOpen()
+    expect(store.connected).toBe(true)
+
+    // 旧连接的 close 迟到 —— 必须被忽略
+    stale.simulateClose()
+    expect(store.connected).toBe(true)
+    expect(store.isConnected).toBe(true)
+  })
+
+  it('陈旧连接的 error 不得把新连接标记为离线', () => {
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    const stale = MockWebSocket.instances[0]
+    stale.simulateOpen()
+    stale.readyState = MockWebSocket.CONNECTING
+    store.connect('test-token', true)
+    const fresh = MockWebSocket.instances[1]
+    fresh.simulateOpen()
+    expect(store.connected).toBe(true)
+
+    stale.simulateError()
+    expect(store.connected).toBe(true)
+  })
+
+  it('陈旧连接的消息不得驱动当前会话', () => {
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    const stale = MockWebSocket.instances[0]
+    stale.simulateOpen()
+    stale.readyState = MockWebSocket.CONNECTING
+    store.connect('test-token', true)
+    const fresh = MockWebSocket.instances[1]
+    fresh.simulateOpen()
+
+    const handler = vi.fn()
+    store.subscribe('data_update', handler)
+
+    stale.simulateMessage({ type: 'data_update', payload: { from: 'stale' } })
+    expect(handler).not.toHaveBeenCalled()
+
+    fresh.simulateMessage({ type: 'data_update', payload: { from: 'fresh' } })
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('当前连接的 close 仍应正常置为离线（守卫不得过度拦截）', () => {
+    localStorage.setItem('token', 'test-token')
+    store.connect()
+    const only = MockWebSocket.instances[0]
+    only.simulateOpen()
+    expect(store.connected).toBe(true)
+    only.simulateClose()
+    expect(store.connected).toBe(false)
+  })
+
   // ── Subscribe / handleMessage ─────────────────────
 
   it('subscribe receives messages of matching type', () => {

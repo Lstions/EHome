@@ -326,7 +326,17 @@ export const useWebSocketStore = defineStore('websocket', () => {
     // socket's events fire.
     const sock = ws.value
 
+    // ⚠️ 陈旧连接守卫：任何回调都必须先确认自己仍是**当前**连接。
+    //
+    // 旧连接（已被换掉/主动关闭）的 close 事件是异步到达的，可能落在新连接
+    // open 之后。若不校验，它会无条件把共享的 connected 置回 false ——
+    // 新连接明明活着、数据还在流，徽标却永久停在「离线」；而随后重连链里的
+    // connect() 又因 ws.value 已是 OPEN 直接 early-return，于是永不自愈。
+    // 实测复现：徽标冻结 80s，期间活着的 socket 仍收到 36 帧数据。
+    const isCurrent = () => ws.value === sock
+
     sock.onopen = () => {
+      if (!isCurrent()) return
       connected.value = true
       reconnectAttempts.value = 0  // 连接成功后重置退避计数
       logger.info('WebSocket 已连接')
@@ -340,6 +350,9 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
 
     sock.onmessage = (event: MessageEvent) => {
+      // 陈旧连接的消息不得重置心跳/驱动 UI：它已被取代，其数据可能来自
+      // 旧凭证下的订阅，混入当前会话会造成状态串台。
+      if (!isCurrent()) return
       try {
         const message: WebSocketMessage = JSON.parse(event.data)
         handleMessage(message)
@@ -350,11 +363,17 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
 
     sock.onerror = (event) => {
+      if (!isCurrent()) return
       logger.error('WebSocket 错误', { event: String(event) })
       connected.value = false
     }
 
     sock.onclose = () => {
+      // 陈旧连接：不碰 connected、不安排重连 —— 当前连接由它自己的事件负责。
+      if (!isCurrent()) {
+        logger.debug('WebSocket 陈旧连接的 close 事件已忽略（当前连接仍然有效）')
+        return
+      }
       connected.value = false
       logger.warn('WebSocket 已断开')
 
