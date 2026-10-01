@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_err.h"
 #include "log_capture.h"
 #include "log_capture_esp.h"
 #include "log_stream.h"
@@ -97,9 +98,12 @@ int64_t esp_timer_get_time(void)
     return 42;
 }
 
-void esp_task_wdt_add(void *task) { (void)task; }
-void esp_task_wdt_reset(void) {}
-void esp_task_wdt_delete(void *task) { (void)task; }
+/* 返回类型对齐真实 IDF（esp_err_t），与 stubs/esp_task_wdt.h 保持一致。
+ * 本目标当前未调用这些符号，但对齐可避免后续接线时踩到
+ * 与 uart_flush_input 同一类漂移（void vs esp_err_t）。 */
+esp_err_t esp_task_wdt_add(void *task) { (void)task; return ESP_OK; }
+esp_err_t esp_task_wdt_reset(void) { return ESP_OK; }
+esp_err_t esp_task_wdt_delete(void *task) { (void)task; return ESP_OK; }
 
 EventGroupHandle_t xEventGroupCreateStatic(StaticEventGroup_t *storage)
 {
