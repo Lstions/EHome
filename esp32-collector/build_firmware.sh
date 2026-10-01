@@ -15,11 +15,46 @@ Profiles:
   s3-n16   ESP32-S3 with 16MB flash
   all      Build all profiles
 
-Set BUILD_ROOT to place build directories elsewhere.
-Set EXTRA_SDKCONFIG_DEFAULTS to append a semicolon-separated sdkconfig defaults file
-(for example, an isolated development MQTT broker override). Supplying it regenerates
-the selected profile's derived sdkconfig so the override takes effect.
+MQTT broker (required):
+  The broker URL is compiled into the firmware and cannot be changed at
+  runtime, so it is never committed.  Provide it one of these ways:
+
+    1. config/mqtt-broker.defaults        (recommended, gitignored)
+       cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
+       then edit the address.
+
+    2. EXTRA_SDKCONFIG_DEFAULTS=<file>    (one-off override)
+
+  A build without a real broker address fails on purpose: the built-in
+  default is an unroutable placeholder (TEST-NET-1), and shipping a firmware
+  that cannot reach its broker is worse than refusing to build.
+
+Other environment:
+  BUILD_ROOT   place build directories elsewhere.
 EOF
+}
+
+# Placeholder brokers that must never reach a flashable image.
+#
+# Matched as a prefix so the whole reserved block is caught, not just one host:
+# 192.0.2.0/24 is TEST-NET-1 (RFC 5737) and 198.51.100.0/24 is TEST-NET-2; both
+# are documentation-only and guaranteed unroutable. 10.42.0.1 is the historical
+# Kconfig default.
+PLACEHOLDER_BROKER_PREFIXES=(
+    "mqtt://192.0.2."
+    "mqtts://192.0.2."
+    "mqtt://198.51.100."
+    "mqtts://198.51.100."
+    "mqtt://10.42.0.1:"
+)
+
+# Where a per-deployment broker may be configured (first match wins).
+BROKER_DEFAULTS_FILE="$PROJECT_DIR/config/mqtt-broker.defaults"
+
+broker_from_file() {
+    # Echo the CONFIG_COLLECTOR_MQTT_BROKER_URL value from the given file, if any.
+    [[ -f "$1" ]] || return 1
+    grep -E '^CONFIG_COLLECTOR_MQTT_BROKER_URL=' "$1" | tail -1 | sed -E 's/^[^=]+="?([^"]*)"?$/\1/'
 }
 
 profile_settings() {
@@ -47,18 +82,93 @@ build_profile() {
     sdkconfig="$build_dir/sdkconfig"
     lock_file="$build_dir/dependencies.lock"
     defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
+
+    # ---- MQTT broker resolution -------------------------------------------
+    # The broker is compiled in, so an unset or placeholder value produces a
+    # device that cannot connect. Resolve it explicitly and refuse to build
+    # until a real address is supplied.
+    local broker="" broker_src=""
+    if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
+        broker="$(broker_from_file "${EXTRA_SDKCONFIG_DEFAULTS%%;*}" || true)"
+        [[ -n "$broker" ]] && broker_src="EXTRA_SDKCONFIG_DEFAULTS"
+    fi
+    if [[ -z "$broker" ]]; then
+        broker="$(broker_from_file "$BROKER_DEFAULTS_FILE" || true)"
+        [[ -n "$broker" ]] && broker_src="$BROKER_DEFAULTS_FILE"
+    fi
+
+    if [[ -z "$broker" ]]; then
+        cat >&2 <<EOF
+ERROR: $profile: no MQTT broker configured.
+
+The broker URL is compiled into the firmware and has no runtime override, so
+it is not committed. Set it for this deployment:
+
+    cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
+    \$EDITOR config/mqtt-broker.defaults        # set mqtt://<host>:<port>
+
+config/mqtt-broker.defaults is gitignored, so the address stays out of git.
+Alternatively pass EXTRA_SDKCONFIG_DEFAULTS=<file> for a one-off build.
+EOF
+        return 1
+    fi
+
+    for _ph in "${PLACEHOLDER_BROKER_PREFIXES[@]}"; do
+        if [[ "$broker" == "$_ph"* ]]; then
+            cat >&2 <<EOF
+ERROR: $profile: MQTT broker is still the placeholder ($broker).
+
+That address is TEST-NET-1 / a documentation default and is not routable, so
+the resulting device could never reach a broker. Configure the real broker in
+config/mqtt-broker.defaults (gitignored) or via EXTRA_SDKCONFIG_DEFAULTS.
+
+Source of this value: $broker_src
+EOF
+            return 1
+        fi
+    done
+
+    case "$broker" in
+        mqtt://*|mqtts://*) ;;
+        *)
+            echo "ERROR: $profile: broker must start with mqtt:// or mqtts:// (got '$broker')" >&2
+            return 1
+            ;;
+    esac
+
+    echo "==> Broker: $broker  (from $broker_src)"
+
+    # Apply the resolved broker last so it wins over the committed placeholder.
+    local _broker_defaults="$build_dir/.broker.defaults"
+    mkdir -p "$build_dir"
+    printf 'CONFIG_COLLECTOR_MQTT_BROKER_URL="%s"\n' "$broker" > "$_broker_defaults"
+
+    defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults;$_broker_defaults"
     if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
         defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
         # sdkconfig takes precedence over sdkconfig.defaults.  An explicit
-        # override (for example the isolated development MQTT broker) must
-        # therefore regenerate this profile's derived sdkconfig instead of
-        # silently retaining a previous production value.
+        # override (for example an isolated development broker) must therefore
+        # regenerate this profile's derived sdkconfig instead of silently
+        # retaining a previous value.
         rm -f "$sdkconfig"
     fi
 
-    mkdir -p "$build_dir"
     if [[ ! -f "$lock_file" && -f "$PROJECT_DIR/dependencies.lock" ]]; then
         cp "$PROJECT_DIR/dependencies.lock" "$lock_file"
+    fi
+
+    # The broker is an explicit per-build input, so a derived sdkconfig that
+    # still holds a different broker is simply out of date: regenerate it
+    # rather than making the user clean the profile by hand.  This is what makes
+    # a broker change actually take effect (kconfgen would otherwise keep the
+    # previously written user-set value).
+    if [[ -f "$sdkconfig" ]]; then
+        local _have_broker
+        _have_broker="$(broker_from_file "$sdkconfig" || true)"
+        if [[ -n "$_have_broker" && "$_have_broker" != "$broker" ]]; then
+            echo "==> Broker changed ($_have_broker -> $broker); regenerating $sdkconfig"
+            rm -f "$sdkconfig"
+        fi
     fi
 
     # Guard against a stale derived sdkconfig silently pinning values that the
@@ -69,16 +179,14 @@ build_profile() {
     # (menuconfig, or a one-off EXTRA_SDKCONFIG_DEFAULTS run), a later plain
     # build keeps that old value and ignores sdkconfig.defaults -- silently.
     #
-    # This is the same failure class as the 2026-10-01 incident, where a device
-    # was flashed pointing at a developer workstation.  Reproduced: building
-    # with EXTRA_SDKCONFIG_DEFAULTS=config/development-mqtt.defaults and then
-    # running a plain production build still embedded the development broker.
-    #
     # We therefore refuse to build when a defaults-owned symbol in the existing
     # sdkconfig disagrees with what the defaults files now say.  Rebuilding is
     # always available via a clean profile directory.
+    #
+    # CONFIG_COLLECTOR_MQTT_BROKER_URL is deliberately absent: it is handled
+    # above, because an explicit per-build input should take effect rather than
+    # be reported as drift.
     _guard_symbols=(
-        CONFIG_COLLECTOR_MQTT_BROKER_URL
         CONFIG_ESP_WIFI_IRAM_OPT
         CONFIG_ESP_WIFI_RX_IRAM_OPT
         CONFIG_ESP_WIFI_EXTRA_IRAM_OPT

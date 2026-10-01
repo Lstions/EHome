@@ -195,8 +195,17 @@ upload_firmware() {
     log_info "固件文件: $FIRMWARE_FILE ($firmware_size bytes)"
     
     local response
-    # Use Host header to ensure URL uses external IP (not localhost)
-    local ext_host="${EHOME_EXTERNAL_HOST:-192.168.20.3:8080}"
+    # The Host header must match the backend's EHOME_EXTERNAL_HOST, because the
+    # firmware download URL is signed against it. Do not default to a specific
+    # machine: a stale address here produces tickets the device cannot use.
+    if [[ -z "${EHOME_EXTERNAL_HOST:-}" ]]; then
+        log_error "EHOME_EXTERNAL_HOST is not set."
+        log_error "It must match the deployed backend's EHOME_EXTERNAL_HOST, e.g."
+        log_error "  EHOME_EXTERNAL_HOST=192.0.2.10:8080 $0"
+        log_error "Read it from the deployment's .env rather than guessing."
+        return 1
+    fi
+    local ext_host="$EHOME_EXTERNAL_HOST"
     response=$(curl -s -X POST \
         -H "Authorization: Bearer $AUTH_TOKEN" \
         -H "Host: $ext_host" \

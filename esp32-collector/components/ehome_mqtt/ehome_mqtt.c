@@ -886,6 +886,35 @@ static bool create_and_start_client(void)
 
     esp_mqtt_client_config_t mqtt_cfg;
     memset(&mqtt_cfg, 0, sizeof(mqtt_cfg));
+
+    /* The broker URI is a compile-time constant with no runtime override, so a
+     * wrong value cannot be corrected in the field -- the device just never
+     * connects.  Report that explicitly rather than letting an empty or
+     * placeholder URI present itself as a generic reconnect loop: on
+     * 2026-10-01 a firmware carrying a developer workstation's address looked
+     * like a network outage for hours. */
+    if (CONFIG_COLLECTOR_MQTT_BROKER_URL[0] == '\0' ||
+        (strncmp(CONFIG_COLLECTOR_MQTT_BROKER_URL, "mqtt://", 7) != 0 &&
+         strncmp(CONFIG_COLLECTOR_MQTT_BROKER_URL, "mqtts://", 8) != 0)) {
+        ESP_LOGE(TAG, "Broker URI is empty or malformed: '%s'",
+                 CONFIG_COLLECTOR_MQTT_BROKER_URL);
+        ESP_LOGE(TAG, "Refusing to start MQTT; rebuild with a valid "
+                      "CONFIG_COLLECTOR_MQTT_BROKER_URL (mqtt://host:port)");
+        LOCK_LIFECYCLE();
+        s_client_starting = false;
+        if (s_active_operations > 0) s_active_operations--;
+        UNLOCK_LIFECYCLE();
+        set_state(MQTT_CLIENT_FAILED);
+        return false;
+    }
+    if (strstr(CONFIG_COLLECTOR_MQTT_BROKER_URL, "192.0.2.") != NULL) {
+        /* TEST-NET-1 (RFC 5737) is the build-time placeholder, so reaching here
+         * means this firmware was built without a deployment broker. */
+        ESP_LOGE(TAG, "Broker URI is the unroutable build placeholder: '%s'",
+                 CONFIG_COLLECTOR_MQTT_BROKER_URL);
+        ESP_LOGE(TAG, "This firmware was built without a deployment broker.");
+    }
+
     mqtt_cfg.broker.address.uri = CONFIG_COLLECTOR_MQTT_BROKER_URL;
     mqtt_cfg.credentials.client_id = s_node_id;
     mqtt_cfg.session.keepalive = 30;

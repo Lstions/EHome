@@ -1,0 +1,23 @@
+# Local MQTT broker for firmware builds -- COPY THIS FILE and fill in your host.
+#
+#   cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
+#   $EDITOR config/mqtt-broker.defaults
+#
+# config/mqtt-broker.defaults is gitignored, so a real deployment address never
+# enters version control.  build_firmware.sh picks it up automatically when it
+# exists; otherwise the build stops and tells you to create it.
+#
+# Why a file instead of committing a default: on 2026-10-01 a firmware built
+# from the documented command embedded a developer workstation's address, so the
+# device could not be reached from production.  Committing any real address
+# re-creates that hazard, because the wrong one is indistinguishable from the
+# right one at review time.
+#
+# Replace the placeholder below with your broker.  The address must be reachable
+# from the device's network, and the port must be the MQTT listener.
+#
+# Format: mqtt://host:port  (or mqtts://host:port for TLS)
+# Examples:
+#   CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://10.0.0.5:1883"
+#   CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtts://mqtt.example.com:8883"
+CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.0.2.1:1883"

@@ -13,18 +13,44 @@
 
 ## 2. 构建步骤（双目标）
 
+**请用仓库脚本构建，不要直接 `idf.py build`** —— 脚本会解析 broker 配置、拒绝占位地址，
+并在链接后执行 Wi-Fi ISR 的 IRAM 安全检查：
+
 ```bash
 cd esp32-collector
-# 选择目标（二选一）
-idf.py set-target esp32s3   # 或 esp32c6
-idf.py build
+
+# 一次性：配置本部署的 broker（gitignored）
+cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
+$EDITOR config/mqtt-broker.defaults
+
+# 构建（可 all 构建全部四个 profile）
+./build_firmware.sh s3-n16      # 或 c6-n8 / c6-n16 / s3-n8 / all
+
+# 烧录
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+直接 `idf.py build` 会跳过上述两道门禁，并沿用未配置的占位 broker。
 
 要点：
 
 - 双目标独立 sdkconfig：sdkconfig.defaults.s3 / sdkconfig.defaults.c6；分区表 partitions_*.csv。
-- MQTT broker URL 默认 CONFIG_COLLECTOR_MQTT_BROKER_URL —— 部署时用 sdkconfig 或 defaults 覆盖。
+- **MQTT broker 必须显式配置，仓库不存真实地址。** broker 是编译期常量、无运行时覆盖，
+  因此由每个部署各自提供：
+
+  ```bash
+  cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
+  # 编辑其中的 mqtt://<host>:<port>
+  ./build_firmware.sh s3-n16
+  ```
+
+  `config/mqtt-broker.defaults` 已 gitignore；也可用 `EXTRA_SDKCONFIG_DEFAULTS=<file>`
+  做一次性覆盖。未配置或仍是占位地址时构建**直接失败**，不会产出连不上 broker 的固件。
+  内置默认值 `192.0.2.1` 属 TEST-NET-1（RFC 5737），保证不可路由。
+
+  > 背景：2026-10-01 因提交的默认值指向开发机（`192.168.20.3`），按文档构建出的固件
+  > 把设备指向开发机，生产侧长时间不可达。故改为强制显式配置。
+
 - 固件双目标构建是发布门禁（S3 + C6 都必须过）。
 
 ## 3. 配网（NVS / SoftAP）

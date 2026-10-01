@@ -13,6 +13,11 @@ esp32-collector/build/
 esp32-collector/build-*
 esp32-collector/sdkconfig
 esp32-collector/sdkconfig.old
+# Per-deployment MQTT broker. A real address must never be committed: on
+# 2026-10-01 a committed developer-workstation address shipped inside a
+# firmware and made the device unreachable from production. Copy
+# config/mqtt-broker.defaults.example instead.
+esp32-collector/config/mqtt-broker.defaults
 esp32-collector/managed_components/
 esp32-collector/.cache/
 

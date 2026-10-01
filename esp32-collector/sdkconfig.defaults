@@ -75,7 +75,22 @@ CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
 
 # Partition Table - custom with OTA dual partition
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.168.20.3:1883"
+
+# MQTT broker URL -- deliberately NOT a real deployment address.
+#
+# 192.0.2.0/24 is TEST-NET-1 (RFC 5737): reserved for documentation and
+# guaranteed unroutable.  Committing a real LAN address here is what caused the
+# 2026-10-01 incident -- a firmware built from the documented command silently
+# pointed at a developer workstation, and the device was unreachable from
+# production until a transparent proxy was installed.
+#
+# The real broker is supplied per-build and never committed:
+#   - config/mqtt-broker.defaults   (gitignored, local override), or
+#   - EXTRA_SDKCONFIG_DEFAULTS=...  (one-off override)
+# build_firmware.sh refuses to produce a flashable image while this placeholder
+# is still in effect, so a build that forgets to set the broker fails loudly
+# rather than shipping a device that cannot connect.
+CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.0.2.1:1883"
 CONFIG_COLLECTOR_NODE_ID="1001"
 
 # Debug TCP Server (for parallel debugging with MQTT)
