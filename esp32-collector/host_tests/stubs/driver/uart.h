@@ -73,6 +73,10 @@ esp_err_t uart_wait_tx_done(uart_port_t port, TickType_t ticks);
 esp_err_t uart_set_rx_timeout(uart_port_t port, uint8_t tout);
 
 /* Minimal inline stubs for functions referenced by bus_worker.c */
-static inline void uart_flush_input(uart_port_t port) { (void)port; }
+/* 返回类型必须与真实 IDF 一致：esp_err_t uart_flush_input(uart_port_t)。
+ * 曾写成 void，导致 bus_dma.c 的 `return uart_flush_input(...)`（本身是对的）
+ * 在 host 构建下报 "void value not ignored as it ought to be" —— 只有 CI 的
+ * host 测试会暴露，ESP-IDF 真机构建不受影响。 */
+static inline esp_err_t uart_flush_input(uart_port_t port) { (void)port; return ESP_OK; }
 
 #endif
