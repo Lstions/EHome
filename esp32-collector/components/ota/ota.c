@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include <ctype.h>
 
 #define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
@@ -564,12 +565,31 @@ static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
     esp_http_client_config_t cli_cfg = {0};
     cli_cfg.url = url;
     cli_cfg.timeout_ms = 30000;
-    cli_cfg.buffer_size = 8192;
+    /* Internal RX buffer size.
+     *
+     * esp_http_client_init() mallocs this as ONE contiguous block, and the read
+     * loop below already stages data through a 4 KB static buffer, so asking for
+     * 8 KB only doubled the contiguous allocation without changing throughput.
+     * That request is what failed on ESP32-S3 with 33880 bytes free but no 8 KB
+     * contiguous run ("HTTP_CLIENT: Allocation failed"), after the OTA task
+     * itself had already been created successfully.
+     *
+     * 2048 matches the read granularity with headroom while staying easy to
+     * satisfy on a fragmented heap. */
+    cli_cfg.buffer_size = 2048;
     cli_cfg.buffer_size_tx = 1024;
 
     esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
     if (client == NULL) {
-        ESP_LOGE(TAG, "HTTP client init FAILED");
+        /* esp_http_client_init() returns NULL when its internal TX/RX buffers
+         * cannot be allocated. Report the sizes and the largest free block so a
+         * heap-fragmentation failure is distinguishable from a bad URL -- the
+         * raw "Allocation failed" from IDF does not say which. */
+        ESP_LOGE(TAG, "HTTP client init FAILED (rx=%u tx=%u, free=%u, "
+                      "largest free block=%u)",
+                 (unsigned)cli_cfg.buffer_size, (unsigned)cli_cfg.buffer_size_tx,
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         return ESP_FAIL;
     }
 
