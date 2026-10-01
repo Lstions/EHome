@@ -120,6 +120,24 @@ build_profile() {
         -D "SDKCONFIG_DEFAULTS=$defaults" \
         build
     echo "==> Firmware: $build_dir/ehome_collector.bin"
+
+    # Post-link gate: no flash-resident code may be reachable from the Wi-Fi ISR.
+    #
+    # The Wi-Fi ISR is registered raw (xt_set_interrupt_handler), so
+    # esp_intr_noniram_disable() never masks it and it DOES run while the flash
+    # cache is disabled during OTA writes.  Any flash-resident function in its
+    # call graph is therefore an IllegalInstruction crash during OTA -- exactly
+    # when a field device is being repaired.  See the script's header for the
+    # full mechanism.  Exit 2 means "could not verify", which must not pass.
+    local _chk="$PROJECT_DIR/tools/check_iram_isr_safety.py"
+    if [[ -f "$_chk" ]]; then
+        echo "==> Checking Wi-Fi ISR IRAM safety"
+        if ! python3 "$_chk" "$build_dir/ehome_collector.elf"; then
+            echo "ERROR: $profile: Wi-Fi ISR IRAM safety check failed (see above)" >&2
+            echo "       Refusing to leave a firmware that can crash during OTA." >&2
+            return 1
+        fi
+    fi
 }
 
 main() {
