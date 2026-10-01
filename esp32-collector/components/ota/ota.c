@@ -42,16 +42,22 @@
 #define OTA_NVS_KEY_PCT "replay_pct"
 #define OTA_NVS_KEY_ERROR "replay_error"
 
-/* Stack for the OTA worker task.
+/* Stack for the OTA worker task, in bytes.
  *
- * xTaskCreate() takes words, so the byte count is the reviewable quantity.
- * The download path buffers 4 KB of HTTP body on the heap, so the stack does
- * not need to hold the firmware itself; 8 KB leaves ample headroom for the
- * HTTP client, TLS, and the mbedTLS call chain while halving what a device
- * must have free before it can accept an OTA at all. On 2026-10-01 a 16 KB
- * request failed outright on ESP32-S3 with 14.3 KB free. */
+ * ESP-IDF's xTaskCreate() takes the depth in BYTES, unlike vanilla FreeRTOS
+ * which takes words (see freertos/task.h: "specified as the NUMBER OF BYTES.
+ * Note that this differs from vanilla FreeRTOS").  So the value below is
+ * passed straight through and the unit is not converted.
+ *
+ * Sizing rationale: the two 4 KB HTTP staging buffers are file-scope `static`
+ * (they live in .bss, not on this stack), and the mbedTLS record buffers are
+ * heap-allocated via mbedtls_ssl_setup() (ssl.h declares in_buf as a pointer).
+ * 8 KB is therefore stack for the call chain only, and matches what ESP-IDF's
+ * own advanced_https_ota example uses (xTaskCreate(..., 1024 * 8, ...)).
+ * Halving it from 16 KB matters because that value is what a device must have
+ * free before it can accept an OTA at all; on 2026-10-01 a 16 KB request
+ * failed outright on ESP32-S3 with ~14 KB free. */
 #define OTA_TASK_STACK_BYTES 8192
-#define OTA_TASK_STACK_WORDS (OTA_TASK_STACK_BYTES / sizeof(StackType_t))
 
 typedef enum {
     OTA_STATE_NONE       = 0,
@@ -760,7 +766,7 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
      * cmd is passed directly — ota_task_func takes ownership and will free it. */
     ESP_LOGI(TAG, "Creating ota_task with %u byte stack (%u bytes free heap)...",
              (unsigned)OTA_TASK_STACK_BYTES, (unsigned)esp_get_free_heap_size());
-    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", OTA_TASK_STACK_WORDS, (void *)cmd, 5, NULL);
+    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", OTA_TASK_STACK_BYTES, (void *)cmd, 5, NULL);
     if (ret != pdPASS) {
         /* Report the failure instead of returning silently.
          *

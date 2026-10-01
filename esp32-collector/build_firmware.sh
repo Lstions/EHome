@@ -61,6 +61,56 @@ build_profile() {
         cp "$PROJECT_DIR/dependencies.lock" "$lock_file"
     fi
 
+    # Guard against a stale derived sdkconfig silently pinning values that the
+    # defaults files are supposed to own.
+    #
+    # kconfgen only lets a defaults file override a value that sdkconfig still
+    # records as its default.  Once a symbol has been written as *user-set*
+    # (menuconfig, or a one-off EXTRA_SDKCONFIG_DEFAULTS run), a later plain
+    # build keeps that old value and ignores sdkconfig.defaults -- silently.
+    #
+    # This is the same failure class as the 2026-10-01 incident, where a device
+    # was flashed pointing at a developer workstation.  Reproduced: building
+    # with EXTRA_SDKCONFIG_DEFAULTS=config/development-mqtt.defaults and then
+    # running a plain production build still embedded the development broker.
+    #
+    # We therefore refuse to build when a defaults-owned symbol in the existing
+    # sdkconfig disagrees with what the defaults files now say.  Rebuilding is
+    # always available via a clean profile directory.
+    _guard_symbols=(
+        CONFIG_COLLECTOR_MQTT_BROKER_URL
+        CONFIG_ESP_WIFI_IRAM_OPT
+        CONFIG_ESP_WIFI_RX_IRAM_OPT
+        CONFIG_ESP_WIFI_EXTRA_IRAM_OPT
+    )
+    if [[ -f "$sdkconfig" ]]; then
+        local _drift=0 _sym _want _have _want_all=""
+        # Concatenate the defaults files in order; last assignment wins.
+        while IFS= read -r _f; do
+            [[ -f "$_f" ]] && _want_all+="$(cat "$_f")"$'\n'
+        done < <(printf '%s\n' "$defaults" | tr ';' '\n')
+        for _sym in "${_guard_symbols[@]}"; do
+            _want="$(printf '%s\n' "$_want_all" | grep -E "^${_sym}=|^# ${_sym} is not set" | tail -1)"
+            _have="$(grep -E "^${_sym}=|^# ${_sym} is not set" "$sdkconfig" | tail -1)"
+            # Normalise `CONFIG_X=n` and `# CONFIG_X is not set`: kconfgen writes
+            # the latter for a disabled bool, so comparing them literally would
+            # report drift where there is none.
+            [[ "$_want" == "# ${_sym} is not set" ]] && _want="${_sym}=n"
+            [[ "$_have" == "# ${_sym} is not set" ]] && _have="${_sym}=n"
+            if [[ -n "$_want" && -n "$_have" && "$_want" != "$_have" ]]; then
+                echo "ERROR: $profile: $build_dir/sdkconfig is stale for $_sym" >&2
+                echo "         defaults say: $_want" >&2
+                echo "         sdkconfig has: $_have" >&2
+                echo "       A stale user-set value silently overrides sdkconfig.defaults." >&2
+                echo "       Fix: rm -rf $build_dir   (or pass EXTRA_SDKCONFIG_DEFAULTS to regenerate)" >&2
+                _drift=1
+            fi
+        done
+        if [[ "$_drift" -ne 0 ]]; then
+            return 1
+        fi
+    fi
+
     echo "==> Building $profile (target=$target, flash=$flash_profile)"
     idf.py \
         --project-dir "$PROJECT_DIR" \
