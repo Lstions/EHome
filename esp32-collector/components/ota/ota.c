@@ -42,6 +42,17 @@
 #define OTA_NVS_KEY_PCT "replay_pct"
 #define OTA_NVS_KEY_ERROR "replay_error"
 
+/* Stack for the OTA worker task.
+ *
+ * xTaskCreate() takes words, so the byte count is the reviewable quantity.
+ * The download path buffers 4 KB of HTTP body on the heap, so the stack does
+ * not need to hold the firmware itself; 8 KB leaves ample headroom for the
+ * HTTP client, TLS, and the mbedTLS call chain while halving what a device
+ * must have free before it can accept an OTA at all. On 2026-10-01 a 16 KB
+ * request failed outright on ESP32-S3 with 14.3 KB free. */
+#define OTA_TASK_STACK_BYTES 8192
+#define OTA_TASK_STACK_WORDS (OTA_TASK_STACK_BYTES / sizeof(StackType_t))
+
 typedef enum {
     OTA_STATE_NONE       = 0,
     OTA_STATE_DOWNLOADING = 1,
@@ -747,10 +758,25 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
 
     /* Run OTA in a dedicated task so mqtt_task can keep running.
      * cmd is passed directly — ota_task_func takes ownership and will free it. */
-    ESP_LOGI(TAG, "Creating ota_task with 16KB stack...");
-    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", 16384, (void *)cmd, 5, NULL);
+    ESP_LOGI(TAG, "Creating ota_task with %u byte stack (%u bytes free heap)...",
+             (unsigned)OTA_TASK_STACK_BYTES, (unsigned)esp_get_free_heap_size());
+    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", OTA_TASK_STACK_WORDS, (void *)cmd, 5, NULL);
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create ota_task");
+        /* Report the failure instead of returning silently.
+         *
+         * This is load-bearing, not cosmetic: the server's SendOtaCommand()
+         * treats "no OtaProg within 30s" as a retryable condition and only
+         * fails the task after 3 attempts. A silent return here therefore
+         * costs the operator 90+ seconds and yields the generic message
+         * "no ack after 3 attempts", which points at the network rather than
+         * at the device. Observed 2026-10-01 on 30EDA0A9A808, where the real
+         * cause was a 16 KB stack request against 14.3 KB of free heap.
+         *
+         * ota_id must still match s_last_ota_id for ota_report_progress() to
+         * forward the callback, which ota_classify_cmd() already set. */
+        ESP_LOGE(TAG, "Failed to create ota_task: need %u bytes, only %u free",
+                 (unsigned)OTA_TASK_STACK_BYTES, (unsigned)esp_get_free_heap_size());
+        ota_report_progress(cmd->ota_id, 3, 0, "Insufficient heap to start OTA task");
         free((void *)cmd);
         s_upgrading = false;
         return ESP_ERR_NO_MEM;
