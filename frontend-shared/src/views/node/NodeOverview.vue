@@ -2744,15 +2744,21 @@ html.dark .node-overview-page {
 .bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px; border-bottom: 1px solid var(--no-border); white-space: nowrap; }
 /* 最后一行不再画线：线由卡片底部承担，避免出现"半截线" */
 .bus-table tbody tr:last-child td { border-bottom: 0; }
+/* 「关键参数」列放的是长度不定的标签（"1MHz" / "5000000 baud" / "SDA8 / SCL9"…）。
+   单元格默认 white-space:nowrap，标签一超标就**溢出到相邻列** —— 实测 92px 标签挤进
+   89px 单元格（2026-10-02 在 UART TAB 复现）。改为允许在此列内换行：宽度不再依赖
+   对"最长文案"的猜测，任何长度的参数都不会越界。 */
+.bus-table td:nth-child(4) { white-space: normal; }
+.bus-table td:nth-child(4) .bus-tag { margin: 2px 3px 2px 0; }
 .bus-table th:nth-child(1), .bus-table td:nth-child(1) { width: 28px; }
 /* 2026-10-02 重新配比：把宽度让给真正需要空间的列。
    「DMA 绑定」要放一条选择器、「操作」要放"查看 + 建通道"两个入口，
    而「引脚」「状态」内容很短（SDA8 / SCL9、可用），不需要原来的份额。 */
 .bus-table th:nth-child(2), .bus-table td:nth-child(2) { width: 9%; }
 .bus-table th:nth-child(3), .bus-table td:nth-child(3) { width: 13%; }
-.bus-table th:nth-child(4), .bus-table td:nth-child(4) { width: 11%; }
+.bus-table th:nth-child(4), .bus-table td:nth-child(4) { width: 12%; }
 .bus-table th:nth-child(5), .bus-table td:nth-child(5) { width: 8%; }
-.bus-table th:nth-child(6), .bus-table td:nth-child(6) { width: 10%; }
+.bus-table th:nth-child(6), .bus-table td:nth-child(6) { width: 9%; }
 .bus-table th:nth-child(7), .bus-table td:nth-child(7) { width: 17%; }
 .bus-table th:nth-child(8), .bus-table td:nth-child(8) { width: 21%; }
 .bus-table tbody tr { cursor: pointer; transition: background .15s; }
