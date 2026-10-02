@@ -124,6 +124,32 @@ COPY ehome-server /app/ehome-server
 > 由 CI 产出正式镜像后把 `EHOME_IMAGE_TAG` 切回 `latest`/具体 sha。
 > 在此之前，任何 `docker compose pull && up` 都会把镜像换回不含修复的 CI 版本。
 
+### 三.1 临时措施已解除（2026-10-02 22:31 完成）
+
+修复已推入 `main`，CI 产出正式镜像，生产已切到该镜像：
+
+| 阶段 | 提交 | 结果 |
+|---|---|---|
+| 修复推送 | `3aad8be` | 镜像构建 ✅；Test CI 被并发策略取消（被下一提交取代） |
+| 列宽回归修复 | `7be3884` | **镜像构建 ✅ + Test CI 六项全绿 ✅** |
+
+生产现状（已实测）：
+
+```
+ehome-prod-web | ghcr.io/lstions/ehome:sha-7be3884 | Up (healthy)
+  rev=7be38843154154fd23394b34799682b2422f5b97     ← 与提交一致（镜像 label 核对）
+```
+
+- `.env` 的 `EHOME_IMAGE_TAG` 由 `hotfix-20261002` 改为 `sha-7be3884`
+  —— **钉具体 sha 而不是 `latest`**：`latest` 会随每次 main 推送漂移，
+  出问题时光看 `.env` 无法知道在跑哪份代码；
+- overlay 镜像 `hotfix-20261002` **不再被引用**，可在确认稳定后删除；
+- 本次线上验证：`/health` ok；重部署后 5 分钟内应用日志 **0 条 ERROR/FATAL/panic**；
+  `device_data` 3 分钟新增 356 条；`BMS-UART0` `status=active`、`error_code=0`。
+
+> `.env` 里 `EHOME_IMAGE_TAG` 曾出现**两处**（第 8 行与第 38 行），
+> 后者生效。已一并改为同值，避免"改了一处却不生效"的陷阱。
+
 ---
 
 ## 四、验证清单（全部通过）
