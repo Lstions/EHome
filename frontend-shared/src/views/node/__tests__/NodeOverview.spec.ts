@@ -6,7 +6,7 @@ import NodeOverview from '../NodeOverview.vue'
 import source from '../NodeOverview.vue?raw'
 
 // ── hoisted mocks（形状必须与后端真实响应对齐） ──
-const { mockGetDetail, mockChannelList, mockChannelDelete, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
+const { mockGetDetail, mockChannelList, mockChannelDelete, mockChannelReconfigure, mockGetCapabilities, mockClientGet, mockSubscribe, mockDmaFetch, mockRouterPush, mockFetchDevices, mockGetCachedList, mockInvalidateLists, mockGetOTAHistory, mockCancelOTA, mockElMessageBoxConfirm, mockDmaChannelsRef, mockApplyRuntimeLevel, mockApplyRuntimeState, mockPeriphReload, mockRouteQuery } = vi.hoisted(() => ({
   mockGetDetail: vi.fn(() => Promise.resolve({
     id: 1, node_id: 'F0F5BDFFFE02', name: '机房采集器', model: 'esp32s3', status: 'online',
     firmware_version: '2.5.18', protocol_version: '2.2', connection_type: 'wifi',
@@ -44,6 +44,7 @@ const { mockGetDetail, mockChannelList, mockChannelDelete, mockGetCapabilities, 
   mockCancelOTA: vi.fn((..._args: any[]) => Promise.resolve()),
   mockElMessageBoxConfirm: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
   mockChannelDelete: vi.fn((..._args: any[]): Promise<any> => Promise.resolve()),
+  mockChannelReconfigure: vi.fn((..._args: any[]): Promise<any> => Promise.resolve({ status: 'reconfigured' })),
   // 可变 DMA store 数据（测试可注入）
   mockDmaChannelsRef: { value: [] as any[] },
   // 外设直控回填断言 + 可变 route.query（?tab= 深链用例需要按用例改 query）
@@ -108,7 +109,7 @@ vi.mock('@/api/node', () => ({
     cancelOTA: mockCancelOTA,
   },
 }))
-vi.mock('@/api/channel', () => ({ channelApi: { getList: mockChannelList, delete: mockChannelDelete } }))
+vi.mock('@/api/channel', () => ({ channelApi: { getList: mockChannelList, delete: mockChannelDelete, reconfigure: mockChannelReconfigure } }))
 vi.mock('@/api/client', () => ({ default: { get: mockClientGet } }))
 vi.mock('@/stores/websocket', () => ({
   useWebSocketStore: () => ({ connected: true, subscribe: mockSubscribe }),
@@ -1431,6 +1432,101 @@ describe('NodeOverview (生产页)', () => {
       expect(warns.some(m => m.includes('边缘设备引用')), '应说明原因').toBe(true)
       expect(warns.some(m => m.includes('先移除或改绑')), '应给出下一步').toBe(true)
       warnSpy.mockRestore(); errSpy.mockRestore()
+    })
+  })
+
+  // ── 波特率重配置接线（2026-10-02）──────────────────────────────────────
+  //
+  // 后端 2026-09-16 已实现 POST /channels/:id/reconfigure（真的改写 bus_config 的
+  // 字节 2..5 并 EmitConfigChange 下发），但前端一直停在 2026-08-13 的占位弹窗
+  // 「服务端尚未实现通道重配置下发」⇒ 本页最后的「改波特率」路径是断的。
+  // 本组用例锁死三条：真调用、目标选择正确、失败不谎报。
+  describe('波特率重配置（接线）', () => {
+    const uartWithBaud = (id: number, hardwareId: string, baud: number) => ({
+      id,
+      node_id: 'F0F5BDFFFE02',
+      name: 'CH' + id,
+      hardware_type: 'UART',
+      hardware_id: hardwareId,
+      status: 'ok',
+      enabled: true,
+      // 与 withUARTBaudrate 同一布局：[tx][rx][baud BE32][data][stop][parity]
+      bus_config: '1415' + baud.toString(16).padStart(8, '0').toUpperCase() + '080100',
+      config: {},
+    })
+
+    it('通道行「改波特率」调真实重配置端点，目标就是该通道、预填当前值', async () => {
+      mockChannelList.mockResolvedValueOnce([uartWithBaud(7, 'UART1', 9600)] as any)
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
+      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+      await flushPromises()
+      const btn = wrapper.find('[data-baud-channel="7"]')
+      expect(btn.exists(), '存活页面缺少按通道改波特率的入口').toBe(true)
+      await btn.trigger('click')
+      await flushPromises()
+
+      // 入口必须显示目标与当前值，否则用户不知道要改的是哪一条
+      expect(wrapper.find("[data-baud-target]").text()).toContain('CH7')
+      expect(wrapper.find("[data-baud-target]").text()).toContain('9600')
+      expect(wrapper.find("[data-baud-input]").attributes('type')).toBe('number')
+
+      mockChannelReconfigure.mockClear()
+      await wrapper.find("[data-baud-confirm]").trigger('click')
+      await flushPromises()
+
+      expect(mockChannelReconfigure).toHaveBeenCalledTimes(1)
+      expect(mockChannelReconfigure).toHaveBeenCalledWith(7, 9600)
+      // 提交后必须刷新通道列表（否则卡片还显示旧波特率）
+      expect(mockChannelList.mock.calls.length).toBeGreaterThan(1)
+    })
+
+    it('非 UART 通道不渲染该入口（后端只支持 UART）', async () => {
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
+      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+      await flushPromises()
+      // 默认 mockChannelList 的第 1 条是 i2c、第 2 条是 uart
+      expect(wrapper.find('[data-baud-channel="1"]').exists()).toBe(false)
+      expect(wrapper.find('[data-baud-channel="2"]').exists()).toBe(true)
+    })
+
+    it('后端失败 ⇒ 就地如实报错，不假装成功、不刷新', async () => {
+      mockChannelList.mockResolvedValueOnce([uartWithBaud(7, 'UART1', 9600)] as any)
+      mockChannelReconfigure.mockRejectedValueOnce(new Error('clock_hz 重配未实现'))
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      // 「已创建通道」卡在「总线配置」TAB 内，先切过去（默认落在「基本信息」）。
+      await wrapper.findAll('.tab-item').find(item => item.text().includes('总线配置'))?.trigger('click')
+      await flushPromises()
+      await wrapper.find('[data-baud-channel="7"]').trigger('click')
+      await flushPromises()
+      const before = mockChannelList.mock.calls.length
+      await wrapper.find("[data-baud-confirm]").trigger('click')
+      await flushPromises()
+
+      const err = wrapper.find("[data-baud-error]")
+      expect(err.exists(), '失败必须就地可见，不能只弹 toast').toBe(true)
+      expect(err.text()).toContain('clock_hz 重配未实现')
+      // 失败不刷新：列表没变就没有「已生效」的假象
+      expect(mockChannelList.mock.calls.length).toBe(before)
+    })
+
+    it('未选中任何目标时入口禁用，并说明怎么选', async () => {
+      mockGetCapabilities.mockResolvedValueOnce({ buses: { uart: [], i2c: [], spi: [], adc: [], gpio: [], pwm: [] } } as any)
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      await wrapper.findAll(".tab-item").find(item => item.text().includes('总线配置'))?.trigger('click')
+      await flushPromises()
+      await wrapper.findAll(".bus-subtab").find(b => b.text().includes('UART'))?.trigger('click')
+      await flushPromises()
+
+      const openBtn = wrapper.find("[data-open-baud-tool]")
+      expect(openBtn.exists()).toBe(true)
+      expect(openBtn.attributes('disabled')).toBeDefined()
+      expect(wrapper.find("[data-baud-pick-hint]").text()).toContain('未选中通道')
     })
   })
 })

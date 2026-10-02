@@ -489,8 +489,11 @@
                 </div>
                 <section class="bus-tool-card">
                   <div class="bus-tool-head"><span class="bus-tool-icon bus-tool-orange"><el-icon :size="15"><Tools /></el-icon></span><b>修改波特率</b></div>
-                  <p>服务端尚未实现安全重配置下发，仅提供状态说明。</p>
-                  <div class="bus-tool-foot"><button class="btn btn-plain btn-sm" :disabled="nodeOffline || activeBusType !== 'uart'" @click="openBaudTool">查看限制</button></div>
+                  <p>选中下方「已创建通道」里的 UART 通道即可单独改；未选中时按总线资源批量改该资源上的全部 UART 通道。</p>
+                  <div class="bus-tool-foot">
+                    <span class="bus-tool-hint" :class="{ 'baud-picked': baudToolSelection }" data-baud-pick-hint>{{ baudToolSelectionText }}</span>
+                    <button class="btn btn-plain btn-sm" data-open-baud-tool :disabled="!baudToolAvailable" @click="openBaudTool">修改波特率</button>
+                  </div>
                 </section>
               </section>
             </div>
@@ -578,6 +581,7 @@
               <span class="bus-channel-res">资源 {{ channelResourceLabel(ch) }}</span>
               <span class="bus-channel-actions">
                 <button class="link-btn" type="button" :data-edit-channel="ch.id" :disabled="nodeOffline" @click="editChannel(ch)"><el-icon :size="12"><EditPen /></el-icon>配置</button>
+                <button v-if="isUARTChannel(ch)" class="link-btn" type="button" :data-baud-channel="ch.id" :disabled="nodeOffline" @click="pickBaudChannel(ch)"><el-icon :size="12"><Tools /></el-icon>改波特率</button>
               </span>
             </div>
           </div>
@@ -819,10 +823,33 @@
       @created="handleDeviceCreated"
     />
 
-    <!-- 后端重配置端点当前为 stub，不能对用户伪报下发成功。 -->
-    <el-dialog v-model="baudToolVisible" title="批量修改波特率" width="440px">
-      <el-alert type="warning" :closable="false" title="服务端尚未实现通道重配置下发，无法安全执行此操作。" />
-      <template #footer><button class="btn btn-plain" @click="baudToolVisible = false">关闭</button></template>
+    <!-- 波特率重配置：服务端 2026-09-16 起已真实改写 bus_config 并触发下发
+         （POST /channels/:id/reconfigure，见 handler_device.go）。
+         本前端的旧文案「服务端尚未实现」是 2026-08-13 的占位，已过时 —— 见下方注释。 -->
+    <el-dialog v-model="baudToolVisible" title="修改波特率" width="480px">
+      <div v-if="baudToolSelection" class="baud-target" data-baud-target>
+        {{ baudToolTargetText }}
+      </div>
+      <div v-else class="baud-pick-hint" data-baud-scope-hint>
+        未选中通道：本次将按「总线资源」批量配置该资源上的全部 UART 通道。
+      </div>
+      <div class="baud-field">
+        <label for="baud-tool-input">目标波特率</label>
+        <!-- 既有 validateBaudrate() 的枚举不含 230400/460800，而 921600 这个既有的
+             「能力兜底」值也不在白名单内 —— 抽屉在这里的话后端明明会接受
+             （withUARTBaudrate 只要求正整数），前端却先失败。失败方向是「不发请求」，
+             不会谎报成功，故保持既有白名单不变，只把上限交给能力数据约束。 -->
+        <el-input-number id="baud-tool-input" data-baud-input v-model="baudTarget" :min="1200" :max="baudMax" :step="1200" />
+        <span class="baud-range">范围 1200 ~ {{ baudMax }}</span>
+      </div>
+      <p class="baud-note">改完即写入通道 bus_config 并向节点下发配置；节点按新波特率重建总线。改错会让该通道上的设备失联，请先在设备侧确认目标值。</p>
+      <el-alert v-if="baudToolError" type="error" :closable="false" :title="baudToolError" data-baud-error />
+      <template #footer>
+        <button class="btn btn-plain" data-baud-cancel @click="baudToolVisible = false">取消</button>
+        <button class="btn btn-primary" data-baud-confirm :disabled="baudSubmitting" @click="confirmBaudReconfigure">
+          {{ baudSubmitting ? '下发中…' : '确认修改' }}
+        </button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -859,6 +886,7 @@ import { UNKNOWN, formatTime } from '@/utils/format'
 import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { logger } from '@/utils/logger'
+import { validateBaudrate } from '@/utils/validate'
 
 // ── 类型 ──
 interface NodeEvent {
@@ -928,7 +956,19 @@ const resourceQuerying = ref(false)
 const channelManagerVisible = ref(false)
 // 通道健康卡「编辑」入口的数据源：打开 ChannelManager 时传给 initial-data（编辑而非新建）。
 const channelManagerInitialData = ref<Channel | null>(null)
+
+// ── 波特率重配置（POST /channels/:id/reconfigure）────────────────────────
+// 目标选择两档（见下方 baudToolSelection）：
+//   1. 用户在「已创建通道」行里点了「改波特率」 ⇒ 只改该通道；
+//   2. 否则用上方资源表选中的 UART 资源 ⇒ 批量改该资源上的全部 UART 通道。
+// 两档都不成立时入口**禁用**并说明怎么选 —— 既不让用户白点一下再吃 400，
+// 也不伪造一个「默认通道」当目标。
 const baudToolVisible = ref(false)
+const baudPickedChannel = ref<Channel | null>(null)
+const baudTarget = ref(9600)
+const baudSubmitting = ref(false)
+/** 失败原因就地展示在对话框里（活动元素被禁用/卸载时 ElMessage 可能不可达）。 */
+const baudToolError = ref('')
 
 // ── Tab 栏 ──
 const tabs = [
@@ -1665,8 +1705,163 @@ async function scanSelectedI2C() {
   }
 }
 
+function closeBaudTool() {
+  baudToolVisible.value = false
+  baudToolError.value = ''
+  baudSubmitting.value = false
+}
+
+// ── 波特率重配置：目标选择与提交 ──────────────────────────────────────────
+
+/** 该通道是否是 UART。后端 hardware_type 实测为大写，故必须归一后比较。 */
+function isUARTChannel(ch: Channel): boolean {
+  return String(ch.hardware_type || '').toUpperCase() === 'UART'
+}
+
+/**
+ * 行内「改波特率」入口：把这一行**显式**选为本次重配置的目标。
+ *
+ * 为什么需要选中态而不是直接开对话框：快速操作卡片同时承担「按资源批量改」
+ * （不选通道时后端会扩展到一个资源上的全部 UART 通道），两者目标集合不同却共用
+ * 一个对话框。没有可视的选中态，用户无从判断点下去到底改的是「这一条」还是
+ * 「这一片」—— 而改错波特率会让该通道上的设备失联。
+ */
+function pickBaudChannel(ch: Channel) {
+  if (nodeOffline.value) {
+    ElMessage.warning('节点离线，无法修改波特率')
+    return
+  }
+  if (!isUARTChannel(ch)) {
+    ElMessage.warning('仅 UART 通道支持修改波特率')
+    return
+  }
+  baudPickedChannel.value = ch
+  openBaudTool()
+}
+
+/** 上方资源表里当前选中的资源（仅 UART 有意义）。 */
+const baudSelectedResource = computed<BusResource | null>(() => (
+  activeBusType.value === 'uart' ? selectedResource.value : null
+))
+
+/** 本次是否有明确目标（选中通道 或 选中 UART 资源）。布尔，避免 'none' 这类真值字符串。 */
+const baudToolSelection = computed(() => Boolean(baudPickedChannel.value || baudSelectedResource.value))
+
+/** 该资源上的 UART 通道（口径与资源表「已挂载通道」列一致）。 */
+const baudScopeChannels = computed<Channel[]>(() => {
+  if (baudPickedChannel.value) return [baudPickedChannel.value]
+  const resource = baudSelectedResource.value
+  if (!resource) return []
+  return channels.value.filter(ch => (
+    isUARTChannel(ch)
+    && hardwareResourceMatchesChannel({ ...resource, id: String(resource.id) }, ch)
+  ))
+})
+const baudScopeCount = computed(() => baudScopeChannels.value.length)
+
+/**
+ * 入口可用性：节点离线或没有目标时**禁用**按钮，并说明原因，而不是让用户提交后吃 400。
+ * 这里只做前端可知的判断（节点状态 + 选中通道/资源）；通道归属仍由后端独立校验
+ * —— 前端不重复实现它，两套规则迟早分叉。
+ */
+const baudToolAvailable = computed(() => !nodeOffline.value && baudToolSelection.value)
+const baudToolSelectionText = computed(() => {
+  if (baudPickedChannel.value) return '已选通道：' + channelName(baudPickedChannel.value)
+  if (baudSelectedResource.value) return '已选资源：' + baudSelectedResource.value.id + '（' + baudScopeCount.value + ' 条 UART 通道）'
+  return '未选中通道：请先在上方资源表选一条 UART 资源，或在通道行点「改波特率」'
+})
+
+const baudToolTargetText = computed(() => {
+  const picked = baudPickedChannel.value
+  if (!picked) return ''
+  const current = baudCurrentRate(picked)
+  return '目标通道「' + channelName(picked) + '」（资源 ' + channelResourceLabel(picked) + '）'
+    + (current === null ? '' : '，当前 ' + current + ' bit/s')
+})
+
+/**
+ * 该通道 bus_config 里当前生效的波特率（字节 2..5，big-endian）；解不出返回 null。
+ * 布局与 withUARTBaudrate（backend/internal/api/channel_reconfigure.go）逐字节一致；
+ * 本函数只**读**它，写入永远走服务端，避免前端自造一份 hex 布局形成第二真相。
+ */
+function baudCurrentRate(ch: Channel): number | null {
+  const raw = String((ch as any).bus_config || '').trim().replace(/^\\x/i, '')
+  if (!/^[0-9a-f]+$/i.test(raw) || raw.length < 12) return null
+  const value = Number.parseInt(raw.slice(4, 12), 16)
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+/** 能力驱动上限；无能力数据时回落到与「创建通道」兜底一致的 921600。 */
+const baudMax = computed(() => {
+  const picked = baudPickedChannel.value
+  const capsMax = picked ? resourceCapsFor(picked)?.baud_rate_max : null
+  const resourceMax = (baudSelectedResource.value as any)?.max_baud
+  const raw = Number(capsMax ?? resourceMax)
+  return Number.isFinite(raw) && raw > 0 ? raw : 921600
+})
+
+/** 从能力数据里取该通道所属资源的能力项（找不到返回 null，不做推测）。 */
+function resourceCapsFor(ch: Channel): any | null {
+  const resources = (capabilities.value?.buses?.uart || []) as any[]
+  return resources.find(r => hardwareResourceMatchesChannel({ ...r, id: String(r.id) }, ch)) || null
+}
+
 function openBaudTool() {
+  const targets = baudScopeChannels.value
+  if (targets.length) {
+    const first = baudCurrentRate(targets[0])
+    const allSame = targets.every(ch => baudCurrentRate(ch) === first)
+    // 预填「当前值」而不是某个常量：常量预填会让用户一确认就把一批通道改成 9600。
+    baudTarget.value = allSame && first !== null ? first : 9600
+  }
+  baudToolError.value = ''
   baudToolVisible.value = true
+}
+
+/** 提交：逐个通道调用真实重配置端点，逐条如实汇报成功/未改动/失败。 */
+async function confirmBaudReconfigure() {
+  if (baudSubmitting.value) return
+  const baud = Number(baudTarget.value)
+  if (!validateBaudrate(baud)) {
+    baudToolError.value = '请选择标准波特率（300/600/1200/2400/4800/9600/19200/38400/57600/115200）'
+    return
+  }
+  const targets = baudScopeChannels.value
+  if (!targets.length) {
+    baudToolError.value = '没有可修改的 UART 通道：请先在资源表选一条 UART 资源，或在通道行点「改波特率」'
+    return
+  }
+  baudSubmitting.value = true
+  baudToolError.value = ''
+  const serial = nodeSerial.value
+  let changed = 0
+  let unchanged = 0
+  const failures: string[] = []
+  for (const ch of targets) {
+    try {
+      const res = await channelApi.reconfigure(Number(ch.id), baud)
+      if (res?.status === 'unchanged') unchanged += 1
+      else changed += 1
+    } catch (err: any) {
+      failures.push(channelName(ch) + '：' + (err?.message || '下发失败'))
+    }
+  }
+  // 提交期间节点可能已切换/组件已卸载 ⇒ 不再改 UI、也不再提示（避免切页后弹上一次的结果）。
+  if (serial !== nodeSerial.value) return
+  baudSubmitting.value = false
+  if (failures.length) {
+    baudToolError.value = failures.join('；')
+    if (changed || unchanged) {
+      ElMessage.warning('部分通道已提交：成功 ' + changed + ' 条、未改动 ' + unchanged + ' 条、失败 ' + failures.length + ' 条')
+      await fetchChannels()
+    }
+    return
+  }
+  closeBaudTool()
+  if (changed === 0) ElMessage.info('目标波特率与当前一致，未做改动')
+  else if (unchanged === 0) ElMessage.success('已提交波特率修改并下发（' + changed + ' 条通道）')
+  else ElMessage.success('已提交波特率修改：' + changed + ' 条已下发，' + unchanged + ' 条与当前一致')
+  await fetchChannels()
 }
 
 function openChannelManager(resource: BusResource) {
@@ -2089,6 +2284,12 @@ onUnmounted(() => {
   devicesSequence++
   otaSequence++
   periphGeneration++
+  // 选中态只在「用户刚点了某一行」的上下文里有意义；留在组件外会让下次挂载
+  // 带着上一次的通道/弹窗打开状态。
+  baudPickedChannel.value = null
+  baudToolVisible.value = false
+  baudToolError.value = ''
+  baudSubmitting.value = false
   pendingPeriphRequests.clear()
   if (unsubscribe) unsubscribe()
   if (pendingPingTimeout.value) clearTimeout(pendingPingTimeout.value)
@@ -2432,6 +2633,15 @@ html.dark .node-overview-page {
 .bus-tool-orange { color: var(--no-warning-text); background: var(--no-warning-bg); }
 .bus-tool-card p { margin: 8px 0; color: var(--no-text-secondary); font-size: 13px; line-height: 20px; }
 .bus-tool-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.bus-tool-hint { font-size: 12px; line-height: 18px; color: var(--no-text-muted); flex: 1 1 100%; }
+/* 选中态必须与「未选中」在视觉上可分：它决定这次提交的目标集合是 1 条还是 N 条。 */
+.bus-tool-hint.baud-picked { color: var(--no-accent); font-weight: 500; }
+.baud-target { font-size: 13px; color: var(--no-text); margin-bottom: 10px; }
+.baud-pick-hint { font-size: 13px; line-height: 20px; color: var(--no-text-muted); margin-bottom: 10px; }
+.baud-field { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.baud-field > label { font-size: 13px; color: var(--no-text-secondary); }
+.baud-range { font-size: 12px; color: var(--no-text-muted); }
+.baud-note { margin: 12px 0 8px; font-size: 12px; line-height: 18px; color: var(--no-text-muted); }
 .btn-sm { height: 28px; padding: 0 11px; font-size: 12px; line-height: 18px; }
 .scan-found { color: var(--no-success-text); font-size: 12px; }
 .scan-empty { color: var(--no-text-muted); font-size: 12px; }
