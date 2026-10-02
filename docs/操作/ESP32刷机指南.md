@@ -7,7 +7,7 @@
 
 ## 1. 环境要求
 
-- ESP-IDF v5.x（v6.0 勿用：vprintf hook 在 C6 crash）
+- ESP-IDF v6.1（本仓库已升级并在 C6/S3 双目标实编通过；旧的 v5.x 说明已过期）
 - 目标芯片：ESP32-S3 或 ESP32-C6 开发板
 - 串口驱动：CP210x（数据口 ttyUSB0）与 USB-Serial-JTAG（日志口 ttyACM0）可能并存，烧录用数据口
 

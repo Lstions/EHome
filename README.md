@@ -41,7 +41,7 @@
 
 | 层 | 技术 |
 |----|------|
-| 边缘节点 | ESP32-S3 / ESP32-C6, FreeRTOS, WiFi STA, ESP-IDF 6.0.1 |
+| 边缘节点 | ESP32-S3 / ESP32-C6, FreeRTOS, WiFi STA, ESP-IDF 6.1 |
 | 消息中间件 | EMQX 5.7 (MQTT 5.0, QoS 1) |
 | 服务端 | Go 1.25, Gin, GORM, PostgreSQL 16 |
 | 前端 | Vue 3.5, Vite 8, Element Plus 2.13, ECharts 6, Pinia 3, Tailwind CSS |
@@ -54,7 +54,7 @@
 - Go 1.25+
 - Node.js 22+ / pnpm
 - Docker + Docker Compose
-- ESP-IDF 6.0.1 (固件编译)
+- ESP-IDF 6.1 (固件编译)
 
 ### 1. 克隆并进入项目
 
@@ -99,7 +99,7 @@ make frontend    # 仅启动前端 (:5174，API 代理 → :8080)
 
 ### 3. 构建 ESP32 固件
 
-先安装 ESP-IDF 6.0.1，并在当前终端加载其环境：
+先安装 ESP-IDF 6.1，并在当前终端加载其环境：
 
 ```bash
 cd esp32-collector

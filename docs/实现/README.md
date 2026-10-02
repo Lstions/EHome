@@ -42,7 +42,7 @@
 
 ### 节点
 
-- ESP-IDF v5.x（⚠️ v6.0 勿用）、FreeRTOS、S3/C6 双目标、NVS、A/B 分区、WS2812 RGB 状态灯、WiFi STA + SoftAP 配网。
+- ESP-IDF v6.1、FreeRTOS、S3/C6 双目标、NVS、A/B 分区、WS2812 RGB 状态灯、WiFi STA + SoftAP 配网。
 
 ### 构建
 

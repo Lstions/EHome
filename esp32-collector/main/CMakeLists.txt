@@ -1,3 +1,5 @@
+# main/linker.lf keeps the Wi-Fi blob's logger in IRAM so the raw-registered
+# Wi-Fi ISR stays flash-cache-safe during OTA writes (see the file's header).
 idf_component_register(SRCS "main.c"
                               "app_state.c"
                               "app_callbacks.c"
@@ -10,7 +12,8 @@ idf_component_register(SRCS "main.c"
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool
-                       bus_worker bus_manager log_stream gpio_ctrl pwm_ctrl periph_owner)
+                       bus_worker bus_manager log_stream gpio_ctrl pwm_ctrl periph_owner
+                       LDFRAGMENTS "linker.lf")
 
 # Inject version from top-level CMakeLists.txt PROJECT_VER as a compile definition.
 # This is the single source of truth — app_state.c reads EHOME_PROJECT_VER instead

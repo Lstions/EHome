@@ -1,0 +1,49 @@
+# Linker fragment: keep the Wi-Fi blob's logger reachable from the Wi-Fi ISR.
+#
+# Why this file exists
+# --------------------
+# ESP-IDF 6.1's ESP32-S3 Wi-Fi library puts pp_post in .iram1 (unconditional
+# IRAM: pp.o has "g F .iram1.66 pp_post"), and in this IDF that IRAM function
+# branches to wifi_log, which the stock mapping leaves in .flash.text:
+#
+#     tools/check_iram_isr_safety.py -> "pp_post -> 0x42086404"  (wifi_log)
+#
+# The Wi-Fi ISR is registered raw (xt_set_interrupt_handler), so it is NOT
+# masked by esp_intr_noniram_disable() and it DOES run while the flash cache is
+# disabled during an OTA write.  A flash-resident callee in that graph is an
+# IllegalInstruction crash exactly while a field device is being repaired.
+#
+# ESP-IDF 6.0.1 did not have this branch (the gate passed on the same target),
+# so it arrived with the IDF 6.1 Wi-Fi blob.  It also survives the stock
+# ESP_WIFI_IRAM_OPT / RX / EXTRA options: measured with all three = y and the
+# stock ESP_WIFI_SLP_IRAM_OPT = y, the gate still reports the same single
+# target, because pp_post sits in .iram1 and not in one of the conditional
+# .wifi*iram sections.
+#
+# What this does
+# --------------
+# Places libnet80211.a's ieee80211_debug.o (the object that defines wifi_log)
+# into IRAM.  ieee80211_debug.o is not covered by any mapping in
+# components/esp_wifi/linker.lf, so the entry below does not collide with the
+# Wi-Fi blob's own mapping (ldgen rejects an archive mapped twice without an
+# object filter -- "Entity ... mapped to multiple targets").  The cost is this
+# object's text (~2.5 KiB) in IRAM, which is the price of keeping OTA safe.
+#
+# The alternative -- lowering CONFIG_LOG_MAXIMUM_LEVEL so the Wi-Fi logger is
+# compiled out -- is not acceptable here: log_stream's runtime tag levels
+# depend on maximum VERBOSE (see sdkconfig.defaults).
+#
+# This is a post-link-gated property, not a hope: build_firmware.sh runs
+# tools/check_iram_isr_safety.py and refuses to produce an image while any
+# flash target remains reachable from wDev_ProcessFiq.
+
+# Scoped to ESP32-S3: only that target's blob was measured to reach a flash
+# callee from IRAM pp_post.  ESP32-C6 passes the gate unaided, and moving this
+# object into IRAM there would cost heap for no benefit -- the gate will fail
+# the build the day C6 needs the same treatment, which is the intended way for
+# this to be discovered.
+[mapping:ehome_wifi_log_iram]
+archive: libnet80211.a
+entries:
+    if IDF_TARGET_ESP32S3 = y:
+        ieee80211_debug (noflash_text)

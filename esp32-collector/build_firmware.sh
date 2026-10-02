@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# MSys/Git-Bash spells paths as /e/WorkSpace/... but CMake, Ninja and the
+# toolchain are native Windows programs, so a path that is not converted is
+# simply "does not exist" to them -- which is how a Git-Bash build died with:
+#   SDKCONFIG_DEFAULTS '/e/WorkSpace/.../sdkconfig.defaults' does not exist.
+# cygpath -m gives the mixed form (E:/WorkSpace/...) that both MSys and native
+# tools understand.  On Linux cygpath is absent and this is a no-op.
+to_native_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+PROJECT_DIR="$(to_native_path "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
 BUILD_ROOT="${BUILD_ROOT:-$PROJECT_DIR/build}"
+BUILD_ROOT="$(to_native_path "$BUILD_ROOT")"
 
 usage() {
     cat <<'EOF'
@@ -50,6 +65,76 @@ PLACEHOLDER_BROKER_PREFIXES=(
 
 # Where a per-deployment broker may be configured (first match wins).
 BROKER_DEFAULTS_FILE="$PROJECT_DIR/config/mqtt-broker.defaults"
+
+# ---------------------------------------------------------------------------
+# How idf.py gets invoked.
+#
+# `command -v idf.py` is NOT a sufficient check on Windows: the ESP-IDF
+# installer puts C:\Espressif\tools\idf-exe\<ver>\idf.py.exe on PATH, and under
+# MSys/Git-Bash that launcher exits 0 while printing nothing at all.  A build
+# driven from bash therefore "succeeds" without ever producing an ELF -- which
+# is exactly what happened on 2026-10-02: profiles reported success, then the
+# IRAM gate failed with "no such ELF: .../ehome_collector.elf".
+#
+# Always drive idf.py through the IDF python environment, and refuse to start
+# when that cannot be resolved.
+# ---------------------------------------------------------------------------
+IDF_PY_CMD=()
+
+resolve_idf_python() {
+    local cand=""
+    if [[ -n "${IDF_PYTHON_ENV_PATH:-}" ]]; then
+        for cand in \
+            "$IDF_PYTHON_ENV_PATH/Scripts/python.exe" \
+            "$IDF_PYTHON_ENV_PATH/bin/python" \
+            "$IDF_PYTHON_ENV_PATH/bin/python3"; do
+            if [[ -x "$cand" ]]; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+    fi
+    for cand in python3 python; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            command -v "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+init_idf_py() {
+    local py=""
+    if [[ -z "${IDF_PATH:-}" || ! -f "$IDF_PATH/tools/idf.py" ]]; then
+        echo "ERROR: IDF_PATH is not set to a usable ESP-IDF checkout (got '${IDF_PATH:-<unset>}')." >&2
+        echo "       Source the export script first:  . \$IDF_PATH/export.sh" >&2
+        return 127
+    fi
+    py="$(resolve_idf_python)" || {
+        echo "ERROR: no python interpreter found to run \$IDF_PATH/tools/idf.py." >&2
+        echo "       Set IDF_PYTHON_ENV_PATH (source the ESP-IDF export script) and retry." >&2
+        return 127
+    }
+    # Run through tools/idf_shim.py, never idf.py directly: under MSys/Git-Bash
+    # idf.py prints an "MSys/Mingw is no longer supported" warning and exits 0
+    # WITHOUT building anything (see that file's docstring for the exact
+    # mechanism, and why `env -u MSYSTEM` cannot fix it).
+    if [[ -f "$PROJECT_DIR/tools/idf_shim.py" ]]; then
+        IDF_PY_CMD=("$py" "$PROJECT_DIR/tools/idf_shim.py")
+    else
+        IDF_PY_CMD=("$py" "$IDF_PATH/tools/idf.py")
+    fi
+}
+
+idf_py() {
+    if [[ ${#IDF_PY_CMD[@]} -eq 0 ]]; then
+        echo "ERROR: idf.py has not been resolved; call init_idf_py first." >&2
+        return 127
+    fi
+    # IDF_PY_CMD already points at tools/idf_shim.py, which strips MSYSTEM
+    # inside the interpreter (env -u cannot: MSys re-injects it into children).
+    "${IDF_PY_CMD[@]}" "$@"
+}
 
 broker_from_file() {
     # Echo the CONFIG_COLLECTOR_MQTT_BROKER_URL value from the given file, if any.
@@ -220,7 +305,7 @@ EOF
     fi
 
     echo "==> Building $profile (target=$target, flash=$flash_profile)"
-    idf.py \
+    idf_py \
         --project-dir "$PROJECT_DIR" \
         -B "$build_dir" \
         -D "IDF_TARGET=$target" \
@@ -228,6 +313,18 @@ EOF
         -D "SDKCONFIG_DEFAULTS=$defaults" \
         build
     echo "==> Firmware: $build_dir/ehome_collector.bin"
+
+    # A build that reports success must have produced an image.  Without this,
+    # a no-op idf.py (see the launcher note above) reaches the IRAM gate and is
+    # only caught there, with an error that points at the gate instead of the
+    # build.
+    local _elf="$build_dir/ehome_collector.elf"
+    if [[ ! -f "$build_dir/ehome_collector.bin" || ! -f "$_elf" ]]; then
+        echo "ERROR: $profile: build reported success but produced no image." >&2
+        echo "       Missing: $build_dir/ehome_collector.bin or $_elf" >&2
+        echo "       Check that idf.py actually ran (see the IDF launcher note in this script)." >&2
+        return 1
+    fi
 
     # Post-link gate: no flash-resident code may be reachable from the Wi-Fi ISR.
     #
@@ -240,7 +337,7 @@ EOF
     local _chk="$PROJECT_DIR/tools/check_iram_isr_safety.py"
     if [[ -f "$_chk" ]]; then
         echo "==> Checking Wi-Fi ISR IRAM safety"
-        if ! python3 "$_chk" "$build_dir/ehome_collector.elf"; then
+        if ! "${IDF_PY_CMD[0]}" "$_chk" "$build_dir/ehome_collector.elf"; then
             echo "ERROR: $profile: Wi-Fi ISR IRAM safety check failed (see above)" >&2
             echo "       Refusing to leave a firmware that can crash during OTA." >&2
             return 1
@@ -251,10 +348,9 @@ EOF
 main() {
     local profile="${1:-}"
 
-    if [[ "$profile" != "-h" && "$profile" != "--help" && -n "$profile" ]] && ! command -v idf.py >/dev/null 2>&1; then
-        echo "idf.py was not found. Source the ESP-IDF export script before building:" >&2
-        echo "  . \$IDF_PATH/export.sh" >&2
-        return 127
+    if [[ "$profile" != "-h" && "$profile" != "--help" && -n "$profile" ]]; then
+        init_idf_py || return $?
+        echo "==> ESP-IDF: $(idf_py --version 2>/dev/null || echo unknown)  (IDF_PATH=$IDF_PATH)"
     fi
 
     case "$profile" in

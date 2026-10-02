@@ -13,8 +13,14 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
 # MQTT
+#
+# IDF 6.1 moved the MQTT client into the managed component espressif/mqtt
+# (lock: 1.1.0).  CONFIG_MQTT_TRANSPORT_TCP no longer exists there -- plain TCP
+# is always compiled in and the remaining transport choice is SSL/WebSocket.
+# Keeping the old symbol produced an "unknown kconfig symbol" notice on every
+# build while silently doing nothing, so it is dropped rather than left to look
+# like it configures something.
 CONFIG_MQTT_USE_CUSTOM_CONFIG=y
-CONFIG_MQTT_TRANSPORT_TCP=y
 CONFIG_MQTT_BUFFER_SIZE=2048
 CONFIG_MQTT_TASK_STACK_SIZE=6144
 CONFIG_MQTT_TASK_PRIORITY=5
@@ -50,15 +56,25 @@ CONFIG_COLLECTOR_OTA_CRT_BUNDLE=y
 CONFIG_COLLECTOR_OTA_ALLOW_HTTP=y
 
 # OTA - HTTPS certificate verification
-CONFIG_ESP_CERTIFICATE_BUNDLE=y
-CONFIG_ESP_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+#
+# IDF 6.1 renamed these into the MBEDTLS_* namespace (sdkconfig.rename maps
+# ESP_CERTIFICATE_BUNDLE -> MBEDTLS_CERTIFICATE_BUNDLE).  The old names are not
+# parsed at all any more, so they were dead letters: the Mozilla CA bundle that
+# esp_crt_bundle_attach() needs was enabled by the Kconfig default, not by this
+# file.  Use the current names so the setting is real.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
 # Bootloader rollback protection
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=n
 CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
 
 # NVS
-CONFIG_NVS_ENABLED=y
+#
+# CONFIG_NVS_ENABLED does not exist in IDF 6.1 (it did not exist in 5.x either:
+# NVS is compiled in unconditionally via the nvs_flash component).  Listed here
+# it only produced an "unknown kconfig symbol" notice on every build, so it is
+# removed rather than left as documentation that lies.
 
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
