@@ -126,13 +126,61 @@ static esp_err_t tx_apply_scheduler(void *opaque, const config_manifest_t *manif
     return err == SCHED_OK ? ESP_OK : ESP_FAIL;
 }
 
+/* Log streaming is a diagnostic side-channel: driving it to the requested state
+ * must never be able to abort a config transaction, because an aborted
+ * transaction can escalate to a fail-hard restart -- i.e. rebooting the device
+ * merely because a log toggle did not finish in time.
+ *
+ * That escalation is reachable in practice, and log_stream's own behaviour is
+ * correct as designed. log_stream_stop() is cooperative: when the TX worker is
+ * inside publish() it does not force-delete the worker, it leaves the state at
+ * STOPPING and reports ESP_FAIL. The old code turned that report straight into
+ * CONFIG_APPLY_FATAL. Measured on ESP32-C6 (fw 2.5.29) at a ~1.2 s toggle
+ * cadence, 12 flips:
+ *
+ *     I LOG_STREAM: Started (level=2, ring=4 entries)
+ *     W LOG_STREAM: log_tx_task stop timed out; awaiting cooperative exit
+ *     E CALLBACK:   Rejecting ConfigManifest transaction: result=4
+ *     E CALLBACK:   Unrecoverable config transaction; restarting fail-hard
+ *     rst:0xc (SW_CPU),boot:0xc            <- device rebooted mid-operation
+ *
+ * So retry briefly instead: the worker owns its exit and does reach STOPPED on
+ * its own, so a bounded retry normally lands the requested state (a stop retry
+ * returns ESP_OK as soon as the worker has settled). If it still has not
+ * settled, report success and let the next config sync reconcile -- a
+ * transiently stale log stream is strictly better than a reboot. */
+#define LOG_STREAM_SETTLE_ATTEMPTS 8
+#define LOG_STREAM_SETTLE_DELAY_MS 250
+
+static esp_err_t log_stream_apply_state(bool enabled, uint8_t level)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < LOG_STREAM_SETTLE_ATTEMPTS; ++attempt) {
+        if (enabled) {
+            err = log_stream_is_active()
+                ? log_stream_set_level(level)
+                : log_stream_start(level);
+        } else {
+            err = log_stream_stop();
+        }
+        if (err == ESP_OK) return ESP_OK;
+        /* Only lifecycle-transient outcomes are worth retrying: a stop that is
+         * still waiting on the worker reports ESP_FAIL, and a start/stop that
+         * collides with an in-flight transition reports ESP_ERR_INVALID_STATE.
+         * Anything else is a genuine error the caller should still see. */
+        if (err != ESP_FAIL && err != ESP_ERR_INVALID_STATE) return err;
+        vTaskDelay(pdMS_TO_TICKS(LOG_STREAM_SETTLE_DELAY_MS));
+    }
+    ESP_LOGW(TAG, "log stream did not settle (want=%d); deferring to next sync",
+             (int)enabled);
+    return ESP_OK;
+}
+
 static esp_err_t tx_apply_log_stream(void *opaque, const config_manifest_t *manifest)
 {
     (void)opaque;
-    if (!manifest->log_stream_enabled) return log_stream_stop();
-    return log_stream_is_active()
-        ? log_stream_set_level(manifest->log_stream_level)
-        : log_stream_start(manifest->log_stream_level);
+    return log_stream_apply_state(manifest->log_stream_enabled,
+                                  manifest->log_stream_level);
 }
 
 static bool tx_commit(void *opaque)
@@ -174,10 +222,7 @@ static esp_err_t tx_restore_peripherals(void *opaque)
 static esp_err_t tx_restore_log_stream(void *opaque)
 {
     manifest_tx_ctx_t *tx = opaque;
-    if (!tx->old_log_active) return log_stream_stop();
-    return log_stream_is_active()
-        ? log_stream_set_level(tx->old_log_level)
-        : log_stream_start(tx->old_log_level);
+    return log_stream_apply_state(tx->old_log_active, tx->old_log_level);
 }
 
 static esp_err_t tx_safe_state(void *opaque)
@@ -190,9 +235,12 @@ static esp_err_t tx_safe_state(void *opaque)
     esp_err_t dma_err = tx->app->dma_pool
         ? dma_pool_reset_runtime(tx->app->dma_pool) : ESP_OK;
     esp_err_t periph_err = handler_periph_apply_configs_locked(&empty_manifest);
-    esp_err_t log_err = log_stream_stop();
+    /* Log streaming must not gate the safe state. A cooperative stop that has
+     * not finished yet is not a reason to keep the runtime unrecovered, and
+     * failing here is what escalated a log toggle into a fail-hard restart. */
+    (void)log_stream_stop();
     return scheduler_err == ESP_OK && bus_err == ESP_OK && dma_err == ESP_OK &&
-           periph_err == ESP_OK && log_err == ESP_OK ? ESP_OK : ESP_FAIL;
+           periph_err == ESP_OK ? ESP_OK : ESP_FAIL;
 }
 
 static const config_apply_ops_t s_manifest_tx_ops = {
