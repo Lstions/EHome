@@ -85,35 +85,78 @@ const getChartTheme = () => ({
 })
 
 /**
+ * 同一单位、但量级相差 ≥ 该倍数的序列**不能**再共用一根 Y 轴。
+ *
+ * 2026-10-02 生产实测（BMS 电压图）：总电压 50.5V 与最高/最低单体电压 3.18V 同为 "V"，
+ * 按单位分组后被放进同一根 Y 轴，轴上界被 50.5 撑到 ~60，3.18V 的两条曲线被压成
+ * 贴在 X 轴上的直线 —— 数据在、图上看不见。这正是"分组正确但量纲不可比"的失效。
+ *
+ * 判据用「量级比」而不是「单位」：单位相同不代表可以共轴。
+ */
+const MAGNITUDE_SPLIT_RATIO = 10
+/** 轴数上限：超过后按"量级最接近"合并，避免 grid 被挤爆、图不可读。 */
+const MAX_Y_AXIS = 4
+
+/** 该序列的量级参考值（绝对值最大者）。空/全 null 返回 0，表示"无从比较"。 */
+const seriesMagnitude = (s: SeriesConfig): number => {
+  let magnitude = 0
+  for (const point of s.data) {
+    const abs = Math.abs(point.value as number)
+    if (Number.isFinite(abs) && abs > magnitude) magnitude = abs
+  }
+  return magnitude
+}
+
+/** 两个量级是否可比（任一为 0 视为未知，不加惩罚地允许共轴）。 */
+const magnitudeComparable = (a: number, b: number): boolean => {
+  if (a === 0 || b === 0) return true
+  return Math.max(a, b) / Math.min(a, b) < MAGNITUDE_SPLIT_RATIO
+}
+
+/**
  * Build yAxis list for multi-series mode.
- * Series with the same unit share one Y-axis (left side).
- * Series with different units get their own Y-axis (offset right).
+ * Series share one Y-axis only when BOTH unit and magnitude are comparable;
+ * otherwise they get their own Y-axis (offset to the right).
  */
 const buildYAxisList = (theme = getChartTheme()) => {
   if (!props.series || props.series.length <= 1) return undefined
-  const unitGroups: string[] = []
+  const axes: { unit: string; magnitude: number }[] = []
   const seriesToYAxis: number[] = []
   props.series.forEach(s => {
     const unit = s.unit || ''
-    const existingIdx = unitGroups.indexOf(unit)
-    if (existingIdx >= 0) {
-      seriesToYAxis.push(existingIdx)
-    } else {
-      seriesToYAxis.push(unitGroups.length)
-      unitGroups.push(unit)
+    const magnitude = seriesMagnitude(s)
+    let idx = axes.findIndex(a => a.unit === unit && magnitudeComparable(a.magnitude, magnitude))
+    if (idx < 0 && axes.length >= MAX_Y_AXIS) {
+      // 触顶：并入量级最接近的那根轴，保持图可读（宁可共轴也不新增轴）。
+      let best = 0
+      let bestDistance = Infinity
+      axes.forEach((a, i) => {
+        const d = a.magnitude === 0 || magnitude === 0 ? 0 : Math.abs(Math.log10(a.magnitude) - Math.log10(magnitude))
+        if (d < bestDistance) { bestDistance = d; best = i }
+      })
+      idx = best
     }
+    if (idx < 0) {
+      axes.push({ unit, magnitude })
+      idx = axes.length - 1
+    } else if (magnitude > axes[idx].magnitude) {
+      axes[idx].magnitude = magnitude
+    }
+    seriesToYAxis.push(idx)
   })
-  const hasCustomRange = props.yAxisMin !== undefined && props.yAxisMax !== undefined
+  // 自定义范围是"整张图一个范围"的旧契约，只在单轴时成立；
+  // 多轴时若把它套到每根轴上，量级不同的轴会得到错误的上下界。
+  const hasCustomRange = props.yAxisMin !== undefined && props.yAxisMax !== undefined && axes.length === 1
   return {
-    yAxisList: unitGroups.map((unit, i) => ({
+    yAxisList: axes.map((axis, i) => ({
       type: 'value' as const,
-      name: unit ? `(${unit})` : '数值',
+      name: axis.unit ? `(${axis.unit})` : '数值',
       position: i === 0 ? 'left' as 'left' : 'right' as 'right',
       offset: i > 1 ? (i - 1) * 60 : 0,
-      min: props.yAxisMin,
-      max: props.yAxisMax,
+      min: hasCustomRange ? props.yAxisMin : undefined,
+      max: hasCustomRange ? props.yAxisMax : undefined,
       axisLine: { lineStyle: { color: theme.border } },
-      splitLine: { lineStyle: { color: theme.split } },
+      splitLine: { show: i === 0, lineStyle: { color: theme.split } },
       axisLabel: { color: theme.regular, formatter: (v: number) => hasCustomRange ? v.toFixed(2) : v.toFixed(1) },
       nameTextStyle: { color: theme.regular }
     })),
@@ -202,6 +245,8 @@ const applyChartOption = () => {
   const theme = getChartTheme()
   const multiSeries = props.series && props.series.length > 1
   const yAxisInfo = buildYAxisList(theme)
+  // 每根右侧轴都要留出刻度位；固定 8% 在多轴时会把轴标签挤出画布。
+  const rightAxisCount = yAxisInfo ? Math.max(0, yAxisInfo.yAxisList.length - 1) : 0
   const yAxisConfig = yAxisInfo?.yAxisList || {
     type: 'value' as const,
     min: props.yAxisMin,
@@ -259,7 +304,7 @@ const applyChartOption = () => {
       }
     },
     legend: multiSeries ? { top: 30, type: 'scroll' as const, textStyle: { color: theme.regular } } : undefined,
-    grid: { left: '3%', right: multiSeries ? '8%' : '4%', bottom: '3%', containLabel: true },
+    grid: { left: '3%', right: multiSeries ? (rightAxisCount > 0 ? `${8 + rightAxisCount * 7}%` : '8%') : '4%', bottom: '3%', containLabel: true },
     xAxis: getXAxisConfig(theme),
     yAxis: yAxisConfig,
     series: buildSeries(yAxisInfo?.seriesToYAxis, theme.palette)

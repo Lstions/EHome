@@ -409,14 +409,22 @@
                               :model-value="dmaSelectionFor(resource)"
                               :disabled="nodeOffline || !canToggleResourceDma(resource)"
                               placeholder="选择 DMA 资源"
+                              :title="dmaBoundValueLabel(resourceDmaBinding(resource))"
                               @click.stop
                               @change="(value: any) => changeResourceDma(resource, String(value))"
                             >
                               <el-option label="不使用 DMA" value="" />
+                              <!--
+                                选项文案分两档（2026-10-02）：
+                                · 已绑定本资源的那条 → 紧凑文案（名字 + #id）。它同时是选择器的
+                                  **显示值**，而单元格只有 ~138px，全量文案必被截断成
+                                  "GDMA_CH0（#…"，等于没显示。
+                                · 其余候选（只在下拉里出现）→ 全量文案，带兼容总线便于比较。
+                              -->
                               <el-option
                                 v-for="dma in resourceDmaCandidates(resource)"
                                 :key="dma.dma_id"
-                                :label="dmaOptionLabel(dma)"
+                                :label="isDmaBoundToResource(dma, resource) ? dmaBoundValueLabel(dma) : dmaOptionLabel(dma)"
                                 :value="String(dma.dma_id)"
                                 :disabled="!isDmaRebindable(dma.state, dma.bound_to) && !isDmaBoundToResource(dma, resource)"
                               />
@@ -461,18 +469,27 @@
               </template>
             </section>
 
-            <div class="bus-tool-layout">
-              <section class="card bus-tool-group bus-i2c-tools">
+            <!--
+              总线工具：**只显示当前 TAB 自己的工具**。
+
+              改前（2026-10-02 生产实测）：I2C TAB 上同时渲染了「I2C 总线工具」和
+              「快速操作 UART 专属」两块 —— 后者与 I2C 无关，用户会以为在 I2C 页能改波特率。
+              现在按 activeBusType 收窄：每块工具只在所属总线 TAB 出现。
+              「资源刷新」对所有总线通用，因此与「地址扫描」并列放在当前 TAB 的工具组里，
+              而不是固定挂在 I2C 组下。
+            -->
+            <div class="bus-tool-layout" :class="{ 'single-group': !isUartTab }">
+              <section class="card bus-tool-group bus-current-tools">
                 <div class="bus-tool-group-head">
-                  <span class="bus-tool-group-title">I2C 总线工具</span>
+                  <span class="bus-tool-group-title">{{ activeBusTab.label }} 总线工具</span>
                   <span class="bus-tool-group-hint">仅展示后端已支持的操作</span>
                 </div>
                 <div class="bus-tool-cards">
-                  <section class="bus-tool-card">
+                  <section v-if="activeBusType === 'i2c'" class="bus-tool-card">
                     <div class="bus-tool-head"><span class="bus-tool-icon bus-tool-blue"><el-icon :size="15"><Search /></el-icon></span><b>地址扫描</b></div>
                     <p>扫描所选 I2C 资源上的从设备地址</p>
                     <div class="bus-tool-foot">
-                      <button class="btn btn-primary btn-sm" :disabled="nodeOffline || activeBusType !== 'i2c' || !selectedResource" @click="scanSelectedI2C">{{ i2cScanning ? '扫描中…' : '开始扫描' }}</button>
+                      <button class="btn btn-primary btn-sm" :disabled="nodeOffline || !selectedResource" @click="scanSelectedI2C">{{ i2cScanning ? '扫描中…' : '开始扫描' }}</button>
                       <span v-if="scanResult !== null" :class="scanResult.length ? 'scan-found' : 'scan-empty'">{{ scanResult.length ? `发现 ${scanResult.length} 个设备` : '未发现设备' }}</span>
                     </div>
                   </section>
@@ -481,20 +498,15 @@
                     <p>请求节点重新上报当前总线资源状态</p>
                     <div class="bus-tool-foot"><button class="btn btn-plain btn-sm" :disabled="nodeOffline || resourceQuerying" @click="requestBusResourceRefresh">{{ resourceQuerying ? '查询中…' : '查询资源' }}</button></div>
                   </section>
+                  <section v-if="isUartTab" class="bus-tool-card">
+                    <div class="bus-tool-head"><span class="bus-tool-icon bus-tool-orange"><el-icon :size="15"><Tools /></el-icon></span><b>修改波特率</b></div>
+                    <p>选中下方「已创建通道」里的 UART 通道即可单独改；未选中时按总线资源批量改该资源上的全部 UART 通道。</p>
+                    <div class="bus-tool-foot">
+                      <span class="bus-tool-hint" :class="{ 'baud-picked': baudToolSelection }" data-baud-pick-hint>{{ baudToolSelectionText }}</span>
+                      <button class="btn btn-plain btn-sm" data-open-baud-tool :disabled="!baudToolAvailable" @click="openBaudToolInline">修改波特率</button>
+                    </div>
+                  </section>
                 </div>
-              </section>
-              <section class="card bus-tool-group bus-uart-tools">
-                <div class="bus-tool-group-head">
-                  <span class="bus-tool-group-title">快速操作 <em>UART 专属</em></span>
-                </div>
-                <section class="bus-tool-card">
-                  <div class="bus-tool-head"><span class="bus-tool-icon bus-tool-orange"><el-icon :size="15"><Tools /></el-icon></span><b>修改波特率</b></div>
-                  <p>选中下方「已创建通道」里的 UART 通道即可单独改；未选中时按总线资源批量改该资源上的全部 UART 通道。</p>
-                  <div class="bus-tool-foot">
-                    <span class="bus-tool-hint" :class="{ 'baud-picked': baudToolSelection }" data-baud-pick-hint>{{ baudToolSelectionText }}</span>
-                    <button class="btn btn-plain btn-sm" data-open-baud-tool :disabled="!baudToolAvailable" @click="openBaudTool">修改波特率</button>
-                  </div>
-                </section>
               </section>
             </div>
           </div>
@@ -502,13 +514,52 @@
           <aside class="bus-col-right">
             <section class="card bus-detail-card">
               <div class="bus-detail-head"><b>资源详情</b><span class="bus-tag bus-tag-gray">设备上报</span><button class="link-btn" type="button" :disabled="nodeOffline || activeBusType !== 'i2c' || !selectedResource" @click="scanSelectedI2C"><el-icon :size="12"><Search /></el-icon>地址扫描</button></div>
+              <!--
+                可编辑性与"事实来源"对齐（2026-10-02）：
+                · 资源名称/引脚/工作模式/关键参数 —— 是设备上报的**物理事实**（能力报告），
+                  前端不能改：改了只是本地假象，下次上报就被覆盖，等于制造第二真相。
+                  故这几行保持只读。
+                · DMA 绑定 —— 是**真正可写的配置**（走节点配置下发），此前只有资源表里
+                  那个窄小的选择器能改。这里就地提供同样的编辑能力，用户在看详情时
+                  顺手就能改，不必回到表格里找那一行。
+                · 已挂载通道 —— 只读计数，但给出进「通道管理」的入口，省一次跳转。
+              -->
               <div v-if="selectedResource" class="bus-detail-list" data-bus-detail>
                 <div><span>资源名称</span><b class="mono">{{ selectedResource.id }}</b></div>
                 <div><span>引脚</span><b class="mono">{{ resourcePins(selectedResource) }}</b></div>
                 <div><span>工作模式</span><b>{{ resourceMode(selectedResource) }}</b></div>
                 <div><span>关键参数</span><b>{{ resourceParameters(selectedResource).join(' · ') || '—' }}</b></div>
-                <div><span>已挂载通道</span><b>{{ resourceMountedChannels(selectedResource).length }}</b></div>
-                <div><span>DMA 绑定</span><b :class="{ 'dma-bound': resourceDmaBinding(selectedResource)?.bound_to }">{{ resourceDmaBinding(selectedResource)?.bound_to || '未绑定' }}</b></div>
+                <div>
+                  <span>已挂载通道</span>
+                  <b>
+                    {{ resourceMountedChannels(selectedResource).length }}
+                    <button v-if="resourceMountedChannels(selectedResource).length > 0" class="link-btn bus-detail-action" type="button" data-detail-channels @click="navigateToNodeChannels">查看</button>
+                  </b>
+                </div>
+                <div>
+                  <span>DMA 绑定</span>
+                  <b v-if="selectedResource.enabled !== false && busSupportsDma && resourceDmaCandidates(selectedResource).length > 0" class="bus-detail-edit">
+                    <el-select
+                      class="dma-select"
+                      size="small"
+                      :data-dma-detail-select="selectedResource.id"
+                      :aria-label="`${selectedResource.id} 绑定的 DMA 资源`"
+                      :model-value="dmaSelectionFor(selectedResource)"
+                      :disabled="nodeOffline || !canToggleResourceDma(selectedResource)"
+                      placeholder="选择 DMA 资源"
+                      @change="(value: any) => changeResourceDma(selectedResource!, String(value))"
+                    >
+                      <el-option label="不使用 DMA" value="" />
+                      <el-option
+                        v-for="dma in resourceDmaCandidates(selectedResource)"
+                        :key="dma.dma_id"
+                        :label="dmaOptionLabel(dma)"
+                        :value="String(dma.dma_id)"
+                      />
+                    </el-select>
+                  </b>
+                  <b v-else :class="{ 'dma-bound': resourceDmaBinding(selectedResource)?.bound_to }">{{ resourceDmaBinding(selectedResource)?.bound_to || '未绑定' }}</b>
+                </div>
               </div>
               <el-empty v-else description="请选择资源" :image-size="72" />
             </section>
@@ -580,8 +631,29 @@
               <span class="channel-state-tag" :class="channelEnabled(ch) ? 'state-on' : 'state-off'">{{ channelEnabled(ch) ? '已启用' : '已禁用' }}</span>
               <span class="bus-channel-res">资源 {{ channelResourceLabel(ch) }}</span>
               <span class="bus-channel-actions">
-                <button class="link-btn" type="button" :data-edit-channel="ch.id" :disabled="nodeOffline" @click="editChannel(ch)"><el-icon :size="12"><EditPen /></el-icon>配置</button>
-                <button v-if="isUARTChannel(ch)" class="link-btn" type="button" :data-baud-channel="ch.id" :disabled="nodeOffline" @click="pickBaudChannel(ch)"><el-icon :size="12"><Tools /></el-icon>改波特率</button>
+                <!-- 内联编辑态：就在这一行里改，Enter 提交 / Esc 取消，不再弹窗遮页 -->
+                <template v-if="baudInlineId === String(ch.id)">
+                  <el-input-number
+                    v-model="baudInlineValue"
+                    size="small"
+                    controls-position="right"
+                    :min="1200"
+                    :max="baudMax"
+                    :step="1"
+                    :disabled="baudInlineSubmitting"
+                    class="baud-inline-input"
+                    data-baud-inline-input
+                    @keyup.enter="submitBaudInline(ch)"
+                    @keyup.esc="cancelBaudInline"
+                  />
+                  <button class="link-btn" type="button" data-baud-inline-save :disabled="baudInlineSubmitting" @click="submitBaudInline(ch)">{{ baudInlineSubmitting ? '下发中…' : '保存' }}</button>
+                  <button class="link-btn" type="button" data-baud-inline-cancel :disabled="baudInlineSubmitting" @click="cancelBaudInline">取消</button>
+                  <span v-if="baudInlineError" class="baud-inline-error" data-baud-inline-error>{{ baudInlineError }}</span>
+                </template>
+                <template v-else>
+                  <button class="link-btn" type="button" :data-edit-channel="ch.id" :disabled="nodeOffline" @click="editChannel(ch)"><el-icon :size="12"><EditPen /></el-icon>配置</button>
+                  <button v-if="isUARTChannel(ch)" class="link-btn" type="button" :data-baud-channel="ch.id" :disabled="nodeOffline" @click="openBaudInline(ch)"><el-icon :size="12"><Tools /></el-icon>改波特率</button>
+                </template>
               </span>
             </div>
           </div>
@@ -629,11 +701,11 @@
                 <span class="mono">{{ dma.name || `DMA${dma.dma_id}` }}</span>
                 <span class="bus-tag" :class="dmaTagClass(dma.state)">{{ dmaStateText(dma.state) }}</span>
               </div>
-              <div class="dma-item-row"><span>类型</span><b class="mono">{{ dmaTypeText(dma.dma_type) }}</b></div>
-              <div class="dma-item-row"><span>能力</span><b class="mono">{{ capText(dma.capabilities) }}</b></div>
-              <div class="dma-item-row"><span>最大突发</span><b class="mono">{{ dma.max_burst }}</b></div>
-              <div class="dma-item-row"><span>绑定</span><b class="mono">{{ dma.bound_to || '未绑定' }}</b></div>
-              <div class="dma-item-row"><span>兼容总线</span><b class="mono">{{ busText(dma.compatible_bus) }}</b></div>
+              <div class="dma-item-row"><span>通道类型</span><b class="mono">{{ dmaTypeText(dma.dma_type) }}</b></div>
+              <div class="dma-item-row"><span>支持能力</span><b class="mono">{{ capText(dma.capabilities) }}</b></div>
+              <div class="dma-item-row"><span>最大突发长度</span><b class="mono">{{ dma.max_burst }}</b></div>
+              <div class="dma-item-row"><span>DMA 绑定</span><b class="mono">{{ dmaBoundToText(dma.bound_to) }}</b></div>
+              <div class="dma-item-row"><span>可服务总线</span><b class="mono">{{ busText(dma.compatible_bus) }}</b></div>
             </div>
           </div>
         </section>
@@ -947,6 +1019,8 @@ const busLoading = ref(false)
 const busLoadError = ref(false)
 const busDataLoaded = ref(false)
 const activeBusType = ref<BusType>('i2c')
+/** 当前是否在 UART TAB。"改波特率"等 UART 专属工具只在此时渲染。 */
+const isUartTab = computed(() => activeBusType.value === 'uart')
 const selectedResourceId = ref('')
 const busPage = ref(1)
 const busPageSize = 10
@@ -964,6 +1038,17 @@ const channelManagerInitialData = ref<Channel | null>(null)
 // 两档都不成立时入口**禁用**并说明怎么选 —— 既不让用户白点一下再吃 400，
 // 也不伪造一个「默认通道」当目标。
 const baudToolVisible = ref(false)
+/**
+ * 内联波特率编辑：正在编辑的通道 id（'' = 未编辑）。
+ *
+ * 为什么保留弹窗之外再加内联：弹窗在"只改一条通道的波特率"这个最高频场景里
+ * 要多两次点击（打开、关闭）且遮住整页。内联直接在通道行上改，Enter 提交、Esc 取消。
+ * 弹窗仍保留，用于"按资源批量改多条通道"那种确实需要确认范围的场景。
+ */
+const baudInlineId = ref<string>('')
+const baudInlineValue = ref<number>(9600)
+const baudInlineSubmitting = ref(false)
+const baudInlineError = ref('')
 const baudPickedChannel = ref<Channel | null>(null)
 const baudTarget = ref(9600)
 const baudSubmitting = ref(false)
@@ -1248,19 +1333,53 @@ const channelStats = computed(() => {
 function dmaTypeText(type: number): string {
   return type === 0 ? 'GDMA' : `类型${type}`
 }
+/**
+ * DMA 能力位的中文文案。
+ *
+ * 2026-10-02 统一：改前是 'TX' / 'RX' / 'Burst' —— 前两个是缩写、第三个是英文单词，
+ * 混在同一行里既不同语言也不同粒度；而同一张卡上「最大突发」用的是中文。
+ * 现在三项都用中文，与卡片内其它字段一致。
+ */
 function capText(cap: number): string {
   const parts: string[] = []
-  if (cap & 1) parts.push('TX')
-  if (cap & 2) parts.push('RX')
-  if (cap & 4) parts.push('Burst')
-  return parts.join(', ') || '无'
+  if (cap & 1) parts.push('发送')
+  if (cap & 2) parts.push('接收')
+  if (cap & 4) parts.push('突发')
+  return parts.join(' · ') || '无'
 }
+
+/**
+ * DMA 通道绑定的展示文案。
+ *
+ * 后端 bound_to 是内部键 `bus/RESOURCE`（总线类型小写 + 资源名，如 uart/UART0）。
+ * 2026-10-02 统一：改前把它**原样**渲染在 DMA 卡上，于是同一个资源在
+ * 资源表/DMA 列/资源详情里是 "UART0"，在 DMA 卡里却成了 "uart/UART0" ——
+ * 大小写与写法都不一致，用户会怀疑是不是两个不同的东西。
+ * 解析不出来时如实回退原值，而不是丢弃信息。
+ */
+function dmaBoundToText(boundTo: string | undefined | null): string {
+  const raw = String(boundTo || '').trim()
+  if (!raw) return '未绑定'
+  const slash = raw.indexOf('/')
+  if (slash <= 0) return raw
+  const bus = raw.slice(0, slash).toLowerCase()
+  const resource = raw.slice(slash + 1)
+  // busText 已把总线掩码映射为规范大写（UART/I2C/SPI），复用它保证口径一致。
+  const label = busText(busTypeMask(bus as BusType)) || bus.toUpperCase()
+  return resource + '（' + label + '）'
+}
+/**
+ * DMA 能力掩码 → 总线名列表。
+ *
+ * 2026-10-02 统一分隔符：改前用半角 ', '，而本页其它并列项（关键参数、能力位）
+ * 用的是 ' · '。同一个页面里两种并列符属于纯噪声，这里统一为 ' · '。
+ */
 function busText(bus: number): string {
   const parts: string[] = []
   if (bus & 1) parts.push('UART')
   if (bus & 2) parts.push('I2C')
   if (bus & 4) parts.push('SPI')
-  return parts.join(', ') || '无'
+  return parts.join(' · ') || '无'
 }
 function dmaTagClass(state: number): string {
   // 复用 DMA 状态枚举，映射到页面 .bus-tag 色系（蓝=空闲/绿=已分配/灰=已禁用）
@@ -1480,6 +1599,21 @@ function dmaSelectionFor(resource: BusResource): string {
 /** 选项文案必须带 dma_id，否则两条同名/同前缀的通道无法区分。 */
 function dmaOptionLabel(dma: DmaChannelInfo): string {
   return `${dma.name || 'DMA' + dma.dma_id}（#${dma.dma_id} · ${busText(dma.compatible_bus)}）`
+}
+
+/**
+ * 资源表里已绑定值的**紧凑**文案。
+ *
+ * 表格的「DMA 绑定」列只有 ~138px，用完整选项文案（名字 + id + 兼容总线）
+ * 必然截断成 "GDMA_CH0（#…"，反而看不出绑的是哪条。表内只需要回答
+ * "绑了哪一条"，兼容总线在当前 TAB 下是冗余信息（下拉选项里仍给全）。
+ */
+function dmaBoundValueLabel(dma: DmaChannelInfo | undefined): string {
+  if (!dma) return '不使用 DMA'
+  // 单元格仅 ~126px（可用 ~102px）：连 "GDMA_CH0（#0）" 都会截断。
+  // 表内只需回答"绑了哪一条"，通道名本身在节点内已唯一；dma_id 交给
+  // title 提示与下拉选项（下拉里仍带 #id 与兼容总线）。
+  return dma.name || 'DMA' + dma.dma_id
 }
 
 /**
@@ -1711,22 +1845,10 @@ function closeBaudTool() {
   baudSubmitting.value = false
 }
 
-// ── 波特率重配置：目标选择与提交 ──────────────────────────────────────────
+// ── 内联波特率编辑（通道行内直接改，不走弹窗）─────────────────────────────
 
-/** 该通道是否是 UART。后端 hardware_type 实测为大写，故必须归一后比较。 */
-function isUARTChannel(ch: Channel): boolean {
-  return String(ch.hardware_type || '').toUpperCase() === 'UART'
-}
-
-/**
- * 行内「改波特率」入口：把这一行**显式**选为本次重配置的目标。
- *
- * 为什么需要选中态而不是直接开对话框：快速操作卡片同时承担「按资源批量改」
- * （不选通道时后端会扩展到一个资源上的全部 UART 通道），两者目标集合不同却共用
- * 一个对话框。没有可视的选中态，用户无从判断点下去到底改的是「这一条」还是
- * 「这一片」—— 而改错波特率会让该通道上的设备失联。
- */
-function pickBaudChannel(ch: Channel) {
+/** 打开某一行的内联编辑；复用了与弹窗完全相同的"当前值"读取口径。 */
+function openBaudInline(ch: Channel) {
   if (nodeOffline.value) {
     ElMessage.warning('节点离线，无法修改波特率')
     return
@@ -1735,8 +1857,59 @@ function pickBaudChannel(ch: Channel) {
     ElMessage.warning('仅 UART 通道支持修改波特率')
     return
   }
-  baudPickedChannel.value = ch
+  baudInlineId.value = String(ch.id)
+  const current = baudCurrentRate(ch)
+  baudInlineValue.value = current ?? 9600
+  baudInlineError.value = ''
+}
+
+function cancelBaudInline() {
+  baudInlineId.value = ''
+  baudInlineError.value = ''
+  baudInlineSubmitting.value = false
+}
+
+/**
+ * 提交单条通道的波特率。成功/未改动/失败都**逐条如实**反馈，
+ * 不复用批量提交的措辞（那会说"共 N 条"，在单条场景下是误导）。
+ */
+async function submitBaudInline(ch: Channel) {
+  if (baudInlineSubmitting.value) return
+  const baud = Number(baudInlineValue.value)
+  if (!validateBaudrate(baud)) {
+    baudInlineError.value = '请选择标准波特率'
+    return
+  }
+  baudInlineSubmitting.value = true
+  baudInlineError.value = ''
+  const serial = nodeSerial.value
+  try {
+    const res = await channelApi.reconfigure(Number(ch.id), baud)
+    if (serial !== nodeSerial.value) return
+    await fetchChannels()
+    if (res?.status === 'unchanged') ElMessage.info('目标波特率与当前一致，未做改动')
+    else ElMessage.success(`已下发波特率 ${baud} bit/s`)
+    cancelBaudInline()
+  } catch (err: any) {
+    if (serial !== nodeSerial.value) return
+    // 就地显示错误，不关编辑态 —— 用户可以直接改一个值重试，不用重新打开。
+    baudInlineError.value = err?.message || '下发失败'
+  } finally {
+    if (serial === nodeSerial.value) baudInlineSubmitting.value = false
+  }
+}
+
+/** 弹窗入口（按资源批量改）。保留原语义，仅重命名以区别于内联入口。 */
+function openBaudToolInline() {
+  baudPickedChannel.value = null
   openBaudTool()
+}
+
+// ── 波特率重配置：目标选择与提交 ──────────────────────────────────────────
+
+/** 该通道是否是 UART。后端 hardware_type 实测为大写，故必须归一后比较。 */
+function isUARTChannel(ch: Channel): boolean {
+  return String(ch.hardware_type || '').toUpperCase() === 'UART'
 }
 
 /** 上方资源表里当前选中的资源（仅 UART 有意义）。 */
@@ -2320,6 +2493,9 @@ onUnmounted(() => {
   --no-bg-page: #F5F7FA;
   --no-bg-hover: #F7FAFF;
   --no-bg-active: #EBF2FF;
+  /* 表头/分组底的"极浅面"，用于在白卡片上分出层次（--no-border-light 太淡，
+     单靠它画不出结构）。必须与 --no-bg-page 区分：后者是整页底色，不是面。 */
+  --no-bg-subtle: #F7F8FA;
   --no-chip-off-bg: #F2F4F7;
   /* F32：紫色强调色（空闲堆内存图标）。设计稿原值是内联硬编码 #8B5CF6，
      它没有对应的全局语义 token（theme.css 里没有紫色语义），故此处置为**页面级 token**，
@@ -2344,6 +2520,7 @@ html.dark .node-overview-page {
   --no-border-light: var(--border-color-lighter, #2E3442);
   --no-bg-hover: rgba(77, 127, 255, 0.12);
   --no-bg-active: rgba(77, 127, 255, 0.18);
+  --no-bg-subtle: rgba(255, 255, 255, 0.04);
   --no-success-bg: rgba(34, 197, 94, 0.15);
   --no-warning-bg: rgba(245, 158, 11, 0.15);
   --no-chip-off-bg: rgba(255, 255, 255, 0.06);
@@ -2560,15 +2737,24 @@ html.dark .node-overview-page {
 .bus-table-wrap { overflow-x: auto; }
 .bus-table { width: 100%; min-width: 0; border-collapse: collapse; table-layout: fixed; font-size: 13px; line-height: 20px; }
 .bus-table th { height: 42px; padding: 0 6px; color: var(--no-text-secondary); text-align: left; font-size: 12px; font-weight: 500; line-height: 18px; white-space: nowrap; border-bottom: 1px solid var(--no-border); }
-.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px; border-bottom: 1px solid var(--no-border-light); white-space: nowrap; }
+/* 2026-10-02：表体原先用 --no-border-light(#F0F2F5) 画行分隔线，在白底卡片上几乎看不见，
+   整块表格读起来是"一片白"。表头加浅底色带 + 正文改用 --no-border，让"表头/表行/行间"
+   三层结构各自可辨（--no-border-light 仍用于卡片内其它更轻的分隔，不动它）。 */
+.bus-resource-card .bus-table thead th { background: var(--no-bg-subtle, #FAFBFC); }
+.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px; border-bottom: 1px solid var(--no-border); white-space: nowrap; }
+/* 最后一行不再画线：线由卡片底部承担，避免出现"半截线" */
+.bus-table tbody tr:last-child td { border-bottom: 0; }
 .bus-table th:nth-child(1), .bus-table td:nth-child(1) { width: 28px; }
-.bus-table th:nth-child(2), .bus-table td:nth-child(2) { width: 10%; }
-.bus-table th:nth-child(3), .bus-table td:nth-child(3) { width: 18%; }
-.bus-table th:nth-child(4), .bus-table td:nth-child(4) { width: 12%; }
-.bus-table th:nth-child(5), .bus-table td:nth-child(5) { width: 9%; }
-.bus-table th:nth-child(6), .bus-table td:nth-child(6) { width: 13%; }
-.bus-table th:nth-child(7), .bus-table td:nth-child(7) { width: 10%; }
-.bus-table th:nth-child(8), .bus-table td:nth-child(8) { width: 22%; }
+/* 2026-10-02 重新配比：把宽度让给真正需要空间的列。
+   「DMA 绑定」要放一条选择器、「操作」要放"查看 + 建通道"两个入口，
+   而「引脚」「状态」内容很短（SDA8 / SCL9、可用），不需要原来的份额。 */
+.bus-table th:nth-child(2), .bus-table td:nth-child(2) { width: 9%; }
+.bus-table th:nth-child(3), .bus-table td:nth-child(3) { width: 13%; }
+.bus-table th:nth-child(4), .bus-table td:nth-child(4) { width: 11%; }
+.bus-table th:nth-child(5), .bus-table td:nth-child(5) { width: 8%; }
+.bus-table th:nth-child(6), .bus-table td:nth-child(6) { width: 10%; }
+.bus-table th:nth-child(7), .bus-table td:nth-child(7) { width: 17%; }
+.bus-table th:nth-child(8), .bus-table td:nth-child(8) { width: 21%; }
 .bus-table tbody tr { cursor: pointer; transition: background .15s; }
 .bus-table tbody tr:hover { background: var(--no-bg-hover); }
 .bus-table tbody tr.selected { background: var(--no-bg-active); }
@@ -2616,8 +2802,14 @@ html.dark .node-overview-page {
 .channel-state-tag.state-off { color: var(--no-text-muted); background: var(--no-chip-off-bg); }
 /* B3：无可兼容 DMA 时的显式说明（不留空白控件） */
 .dma-none { color: var(--no-text-muted); font-size: 12px; line-height: 18px; white-space: nowrap; }
-.dma-select { width: 200px; }
+/* 选择器宽度必须跟着列走：原先写死 200px，而「DMA 绑定」列在 812px 表宽下只有 ~81px，
+   控件直接溢出并盖住右侧「操作」列（2026-10-02 实测该单元格 scrollWidth=206 > clientWidth=81）。 */
+.dma-select { width: 100%; min-width: 0; }
 .bus-tool-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(228px, 1fr); gap: 16px; }
+/* 只剩一组工具时让它占满整行，避免右侧留一片空白 */
+.bus-tool-layout.single-group { grid-template-columns: minmax(0, 1fr); }
+/* 单组时工具卡是"整行宽"，两个卡片并排更均衡 */
+.bus-tool-layout.single-group .bus-tool-cards { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .bus-tool-group { min-width: 0; padding: 14px 16px 16px; }
 .bus-tool-group-head { min-height: 24px; display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .bus-tool-group-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }
@@ -2655,6 +2847,16 @@ html.dark .node-overview-page {
 .bus-detail-list span { color: var(--no-text-secondary); }
 .bus-detail-list b { color: var(--no-text); font-weight: 500; text-align: right; overflow-wrap: anywhere; }
 .bus-detail-list .dma-bound { color: var(--no-success-text); }
+/* 详情行内的就地操作（查看通道 / DMA 选择器）靠右对齐，与只读值同一列 */
+.bus-detail-list .bus-detail-action { margin-left: 8px; font-size: 12px; }
+/* flex:1 + min-width:0 才能让选择器真正吃满剩余宽度；
+   只写 width:100% 时父级 <b> 是 inline-flex 收缩包裹，100% 无处可依，会退到 min-width，
+   于是长文案（如 "GDMA_CH0（#0 · UART · I2C）"）被截断成 "GDMA_CH0（#0 · UART · I…"。 */
+.bus-detail-list .bus-detail-edit { flex: 1; min-width: 0; display: inline-flex; justify-content: flex-end; }
+.bus-detail-list .bus-detail-edit .dma-select { width: 100%; min-width: 0; }
+/* 通道行内联波特率编辑 */
+.baud-inline-input { width: 120px; }
+.baud-inline-error { color: var(--no-danger); font-size: 12px; }
 .bus-create-head b { flex: 1; }
 .bus-close { padding: 4px; border: 0; background: transparent; color: var(--no-text-muted); cursor: pointer; }
 .bus-close:hover { color: var(--no-primary); }

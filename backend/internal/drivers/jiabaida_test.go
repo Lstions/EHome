@@ -1902,3 +1902,41 @@ func TestParse0x05_Empty(t *testing.T) {
 		t.Errorf("error code: got %d, want %d", parseErr.Code, ErrDataTooShort)
 	}
 }
+
+// ============================================================================
+// Regression: variable-length response framing (2026-10-02 real-device fix)
+// ============================================================================
+
+// TestJiabaidaTemplatesUseIdleFraming locks the 2026-10-02 real-device fix.
+//
+// Every Jiabaida response is variable length (0x03 payload is 23 + 2*NTC bytes),
+// so a non-zero ReadLength is enforced by the firmware as a FLOOR: rx_task
+// withholds the reply until read_size bytes accumulate and then discards the
+// whole frame as a "short read" (error_code=3, empty raw payload). On the bench
+// this silently dropped 100% of a real BMS's data while the device itself logged
+// "events=N completions=N" -- proof the sensor answered and the firmware threw
+// the answer away.
+//
+// ReadLength must therefore stay 0, which makes the device frame each reply with
+// the protocol-neutral 10ms idle gap. A non-zero value here is a regression, not
+// a tuning choice -- do not "fix" this test by restoring a concrete length.
+func TestJiabaidaTemplatesUseIdleFraming(t *testing.T) {
+	drv := &JiabaidaBMSDriver{}
+	templates := drv.GetCommandTemplates()
+	if len(templates) == 0 {
+		t.Fatal("jiabaida driver exposes no command templates")
+	}
+	for _, tmpl := range templates {
+		if tmpl.ReadLength != 0 {
+			t.Errorf("template %q has ReadLength=%d; variable-length Jiabaida frames require 0 (idle-gap framing)",
+				tmpl.ID, tmpl.ReadLength)
+		}
+		if !tmpl.Schedulable {
+			t.Errorf("template %q is not schedulable; polling commands must be", tmpl.ID)
+		}
+		if tmpl.WriteData == "" {
+			t.Errorf("template %q has empty WriteData", tmpl.ID)
+		}
+	}
+}
+

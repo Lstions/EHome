@@ -234,7 +234,8 @@ describe('B1：DMA 必须可选资源（不是只能开关）', () => {
     expect(sel.exists(), '多候选必须给选择器（改前只有一个开关）').toBe(true)
     const labels = sel.findAll('option').map((o: any) => o.text())
     expect(labels).toContain('GDMA_CH0（#0 · SPI）')
-    expect(labels).toContain('GDMA_CH1（#1 · UART, SPI）')
+    // 2026-10-02 分隔符统一：总线名列表由半角 ', ' 改为 ' · '（与#0/#2 及页面其它并列项一致）
+    expect(labels).toContain('GDMA_CH1（#1 · UART · SPI）')
     expect(labels).toContain('GDMA_CH2（#2 · SPI）')
     expect(labels, '必须能显式选择"不使用 DMA"').toContain('不使用 DMA')
   })
