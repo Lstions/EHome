@@ -16,6 +16,14 @@
 #   docker compose -p ehomesystem -f deploy/prod/docker-compose.prod.yml ps
 #   curl -s localhost:8080/health          # → {"status":"ok"}
 #
+# 数据目录（2026-10-02 起全部为宿主机 bind mount，不再是 Docker named volume）：
+#   ./data/postgres     PG 数据（容器内 /var/lib/postgresql；属主由镜像内 uid=70 管理）
+#   ./data/emqx         EMQX 数据（容器内 /opt/emqx/data，属主 uid=1000）
+#   ./data/emqx-log     EMQX 日志（容器内 /opt/emqx/log，属主 uid=1000）
+#   ./data/firmwares    OTA 固件（容器内 /app/firmwares）
+# 备份 = tar 打包 ./data；迁移 = 拷贝 ./data 到目标机同路径。
+# 旧部署的数据在 /var/lib/docker/volumes/ehomesystem_*/_data，需先 cp -a 迁入。
+#
 # 可覆盖的环境变量（默认值见下）：
 #   EHOME_IMAGE_TAG   镜像 tag（默认 latest；也可 sha-xxxxxxx / 版本号）
 #   HOME_PORT         宿主端口（默认 8080）
@@ -41,7 +49,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ehome}
     volumes:
       # postgres 18+ 要求挂载点是 /var/lib/postgresql（**不是**旧的 /var/lib/postgresql/data）
-      - ehome-pgdata:/var/lib/postgresql
+      # 宿主机 bind mount（2026-10-02 数据落盘改造）：数据必须躺在 /srv/ehomesystem/data/ 下。
+      # 用 named volume 时数据实际在 /var/lib/docker/volumes/ 里 —— 拷贝部署目录得不到数据，
+      # 换机器/重建卷就会丢库。备份 = 打包这一个目录，迁移 = 拷贝这一个目录。
+      - ./data/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
@@ -60,7 +71,8 @@ services:
       EMQX_NAME: ehome
       EMQX_LOADED_MODULES: "emqx_mod_acl_internal"
     volumes:
-      - ehome-emqxdata:/opt/emqx/data
+      - ./data/emqx:/opt/emqx/data
+      - ./data/emqx-log:/opt/emqx/log
     healthcheck:
       test: ["CMD", "emqx", "ping"]
       interval: 10s
@@ -90,14 +102,15 @@ services:
       EHOME_ALLOWED_ORIGINS: ${EHOME_ALLOWED_ORIGINS:-}
       EHOME_DATA_RETENTION_DAYS: ${EHOME_DATA_RETENTION_DAYS:-90}
       EHOME_STATIC_DIR: /app/static/dist
+      # 通道终端（未审计 raw 读写）开关。生产默认关闭；仅在受控排障时临时置 true。
+      EHOME_RAW_DIAGNOSTICS_ENABLED: ${EHOME_RAW_DIAGNOSTICS_ENABLED:-false}
     volumes:
-      - ./backend/firmwares:/app/firmwares
+      - ./data/firmwares:/app/firmwares
     depends_on:
       postgres:
         condition: service_healthy
       emqx:
         condition: service_healthy
 
-volumes:
-  ehome-pgdata:
-  ehome-emqxdata:
+# 不再声明 named volume：数据全部走宿主机 bind mount（./data/*）。
+# 保留此注释是为了让「为什么没有 volumes: 段」在评审时一眼可见。

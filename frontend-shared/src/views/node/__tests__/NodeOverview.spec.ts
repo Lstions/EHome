@@ -483,7 +483,12 @@ describe('NodeOverview (生产页)', () => {
     await flushPromises()
 
     expect(wrapper.find('.bus-workbench').exists()).toBe(true)
-    expect(wrapper.findAll('.bus-tool-group')).toHaveLength(2)
+    // 2026-10-02：工具分组按当前总线 TAB 收窄。默认落在 I2C TAB，因此只有
+    // 「I2C 总线工具」一组；「快速操作（改波特率）」是 UART 专属，不得出现在这里
+    // —— 它曾在生产 I2C 页面上渲染，误导用户以为 I2C 也能改波特率。
+    expect(wrapper.findAll('.bus-tool-group')).toHaveLength(1)
+    expect(wrapper.find('.bus-tool-group').text()).toContain('I2C 总线工具')
+    expect(wrapper.find('.bus-tool-group').text()).not.toContain('修改波特率')
 
     const editor = wrapper.find('.bus-create-card')
     expect(editor.exists()).toBe(true)
@@ -691,11 +696,18 @@ describe('NodeOverview (生产页)', () => {
     const items = card.findAll('.dma-item')
     expect(items).toHaveLength(2)
     expect(items[0].text()).toContain('GDMA')
-    expect(items[0].text()).toContain('TX, RX')
-    expect(items[0].text()).toContain('UART, I2C') // 兼容总线 3 = UART(1) + I2C(2)
+    // 2026-10-02 文案统一：能力位由 'TX, RX'（缩写+英文单词混排）改为全中文「发送 · 接收 · 突发」，
+    // 与同卡片内的「最大突发长度」保持同一语言与粒度。
+    // fixture capabilities=3 = TX(1)|RX(2)，无突发位(4) ⇒ 支持能力值只有「发送 · 接收」。
+    // 注意不能断言整卡不含"突发"：「最大突发长度」是另一个字段，本来就该出现。
+    expect(items[0].text()).toContain('支持能力发送 · 接收')
+    expect(items[0].text()).toContain('UART · I2C') // 可服务总线 3 = UART(1) + I2C(2)
     expect(items[0].text()).toContain('128')
     expect(items[0].text()).toContain('未绑定')
-    expect(items[1].text()).toContain('i2c/i2c0')
+    // 后端内部键 'i2c/i2c0' 不得原样露出：同一资源在别处写作 "i2c0"，
+    // 这里渲染成 "i2c0（I2C）"，大小写与写法与资源表一致。
+    expect(items[1].text()).toContain('i2c0（I2C）')
+    expect(items[1].text()).not.toContain('i2c/i2c0')
   })
 
   it('关联设备 TAB：渲染设备名称/类型/地址，点查看跳转 edge-device', async () => {
@@ -1012,7 +1024,10 @@ describe('NodeOverview (生产页)', () => {
       expect(source).toContain('.card-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }')
       expect(source).toContain('.stat-label { font-size: 12px; line-height: 18px; color: var(--no-text-secondary); }')
       expect(source).toContain('.stat-value { font-size: 14px; font-weight: 500; line-height: 20px;')
-      expect(source).toContain('.btn {\n  height: 36px; padding: 0 16px; border-radius: 6px; font-size: 13px; font-weight: 500; line-height: 20px;')
+      // 用正则而不是 toContain('…\n…')：本仓 Windows 检出为 CRLF，
+      // 而断言里写的是 LF，导致该用例在 Windows 上恒失败（与字体层级无关的假失败）。
+      // 断言意图是"字号/字重/行高成体系"，与换行符无关。
+      expect(source).toMatch(/\.btn \{\s*height: 36px; padding: 0 16px; border-radius: 6px; font-size: 13px; font-weight: 500; line-height: 20px;/)
     })
 
     it('总线工作台文本层级与响应式关键规则由 scoped CSS 明确约束', () => {
@@ -1022,6 +1037,9 @@ describe('NodeOverview (生产页)', () => {
       expect(source).toContain('.bus-stat-value { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 22px; }')
       expect(source).toContain('.bus-table th { height: 42px; padding: 0 6px; color: var(--no-text-secondary); text-align: left; font-size: 12px; font-weight: 500; line-height: 18px;')
       expect(source).toContain('.bus-table td { height: 44px; padding: 0 6px; color: var(--no-text); font-size: 13px; font-weight: 400; line-height: 20px;')
+      // 2026-10-02：行分隔线原先用 --no-border-light(#F0F2F5)，在白底卡片上几乎不可见，
+      // 整张表读起来是"一片白"。改用 --no-border，并给表头加浅底色带恢复三层层级。
+      expect(source).toContain('.bus-resource-card .bus-table thead th { background: var(--no-bg-subtle, #FAFBFC); }')
       expect(source).toContain('.bus-tool-group-title { color: var(--no-text); font-size: 16px; font-weight: 600; line-height: 24px; }')
       expect(source).toContain('.bus-create-field span { color: var(--no-text-secondary); font-size: 12px; line-height: 18px; }')
       expect(source).toContain('.bus-create-field b { color: var(--no-text); font-size: 13px; font-weight: 500; line-height: 20px; }')
@@ -1467,13 +1485,16 @@ describe('NodeOverview (生产页)', () => {
       await btn.trigger('click')
       await flushPromises()
 
-      // 入口必须显示目标与当前值，否则用户不知道要改的是哪一条
-      expect(wrapper.find("[data-baud-target]").text()).toContain('CH7')
-      expect(wrapper.find("[data-baud-target]").text()).toContain('9600')
-      expect(wrapper.find("[data-baud-input]").attributes('type')).toBe('number')
+      // 2026-10-02：改为**行内编辑**，不再为「只改一条通道」弹窗遮住整页。
+      // 入口仍必须显示目标与当前值，否则用户不知道要改的是哪一条。
+      expect(wrapper.find('[data-baud-inline-input]').exists(), '行内编辑未打开').toBe(true)
+      expect(wrapper.find('[data-baud-inline-input]').attributes('type')).toBe('number')
+      expect((wrapper.find('[data-baud-inline-input]').element as HTMLInputElement).value).toContain('9600')
+      // 行内编辑态下不再保留「改波特率」按钮，避免同一行出现两个入口
+      expect(wrapper.find('[data-baud-channel="7"]').exists()).toBe(false)
 
       mockChannelReconfigure.mockClear()
-      await wrapper.find("[data-baud-confirm]").trigger('click')
+      await wrapper.find('[data-baud-inline-save]').trigger('click')
       await flushPromises()
 
       expect(mockChannelReconfigure).toHaveBeenCalledTimes(1)
@@ -1504,12 +1525,14 @@ describe('NodeOverview (生产页)', () => {
       await wrapper.find('[data-baud-channel="7"]').trigger('click')
       await flushPromises()
       const before = mockChannelList.mock.calls.length
-      await wrapper.find("[data-baud-confirm]").trigger('click')
+      await wrapper.find('[data-baud-inline-save]').trigger('click')
       await flushPromises()
 
-      const err = wrapper.find("[data-baud-error]")
+      const err = wrapper.find('[data-baud-inline-error]')
       expect(err.exists(), '失败必须就地可见，不能只弹 toast').toBe(true)
       expect(err.text()).toContain('clock_hz 重配未实现')
+      // 失败后编辑态保持打开，用户可以改一个值重试，不用重新找入口
+      expect(wrapper.find('[data-baud-inline-input]').exists()).toBe(true)
       // 失败不刷新：列表没变就没有「已生效」的假象
       expect(mockChannelList.mock.calls.length).toBe(before)
     })

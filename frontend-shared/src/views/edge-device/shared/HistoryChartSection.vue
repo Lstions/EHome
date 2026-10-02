@@ -141,15 +141,28 @@ interface ChartSubGroup {
   title: string
   categories: string[]
 }
+/**
+ * BMS 按量纲分组。
+ *
+ * 2026-10-02 修正：原先把 total_voltage(~50V) 与 cell_voltage_max/min(~3.2V)
+ * 放进同一个「电压 (V)」组。两者单位相同但量级差 15 倍，共用一根 Y 轴会把
+ * 单体电压压成贴底直线（生产实测图：50V 曲线正常、两条 3.2V 曲线几乎不可见）。
+ * 拆成两组后各自独立缩放，两条曲线都完整可读。
+ */
 const bmsChartGroups: ChartSubGroup[] = [
-  { title: '电压 (V)', categories: ['total_voltage', 'cell_voltage_max', 'cell_voltage_min'] },
+  { title: '总电压 (V)', categories: ['total_voltage'] },
+  { title: '单体电压 (V)', categories: ['cell_voltage_max', 'cell_voltage_min'] },
   { title: '电流 (A)', categories: ['current'] },
   { title: '电池状态', categories: ['rsoc', 'remaining_capacity'] },
   { title: '温度 (°C)', categories: ['temperature_1', 'temperature_2', 'temperature_3'] },
 ]
 
 /**
- * 逆变器按量纲分组的子图表定义。
+ * 逆变器按预定义量纲分组。
+ *
+ * 只需按"物理量族"分组即可 —— 组内的单位差异（V/A/W/Hz/%）由 LineChart 的
+ * 多 Y 轴机制解决，量级差异由它的量级分轴判据解决。不要在这里按单个单位
+ * 拆成十几张图，否则页面会被拉得极长。
  */
 const inverterChartGroups: ChartSubGroup[] = [
   { title: 'PV输入', categories: ['pv1_voltage', 'pv1_current', 'pv1_power', 'pv2_voltage', 'pv2_current', 'pv2_power'] },
@@ -224,14 +237,32 @@ const chartSubGroups = computed<ChartSubGroupResult[]>(() => {
     }))
   }
 
-  // 只在单组时计算自适应Y轴范围
-  if (groups.length === 1 && groups[0].series.length > 0) {
-    const allValues = groups[0].series.flatMap(s => s.data.map(d => d.value))
+  // 自适应 Y 轴范围只在「该组内所有序列量级可比」时才传。
+  //
+  // 2026-10-02 生产实测：BMS 电压组同时含总电压(~50V)与单体电压(~3.2V)。
+  // 传一个基于**全组最小值/最大值**算出的范围，等于强行把两条曲线压进同一根轴，
+  // 3.2V 会被压成贴底的直线。此时必须交回 LineChart 按量级分轴。
+  const adaptive = (series: SeriesData[]) => {
+    if (series.length === 0) return {}
+    const magnitudes = series.map(s => {
+      let m = 0
+      for (const d of s.data) {
+        const abs = Math.abs(d.value)
+        if (Number.isFinite(abs) && abs > m) m = abs
+      }
+      return m
+    }).filter(m => m > 0)
+    if (magnitudes.length > 1) {
+      const max = Math.max(...magnitudes)
+      const min = Math.min(...magnitudes)
+      if (max / min >= 10) return {} // 量级不可比 ⇒ 不指定范围，让 LineChart 分轴
+    }
+    const allValues = series.flatMap(s => s.data.map(d => d.value))
     const { min, max } = computeAdaptiveYAxisRange(allValues)
-    return [{ ...groups[0], yAxisMin: min, yAxisMax: max }]
+    return { yAxisMin: min, yAxisMax: max }
   }
 
-  return groups.map(g => ({ ...g }))
+  return groups.map(g => ({ ...g, ...adaptive(g.series) }))
 })
 
 async function fetchHistoryData() {

@@ -1129,36 +1129,60 @@ func jiabaidaReadFrameHex(cmd byte) string {
 // physical-write path.  BMS writes must be represented by a verified Action
 // Catalog definition instead, and none is enabled until real-device evidence
 // covers the two MOS bits, priority, ACK and readback.
+//
+// ReadLength MUST stay 0 for every command below (2026-10-02 real-device fix).
+//
+// A Jiabaida response is VARIABLE length: the frame is
+// DD CMD STATUS LEN DATA... CHK_H CHK_L 77 with LEN = 23 + 2*NTC for 0x03, so
+// the same command yields a different byte count per pack (NTC count varies).
+// ReadLength is not a "suggested size" on the device side -- the firmware treats
+// it as a FLOOR: bus_worker.c emit_ready_stream_chunks() withholds the response
+// until read_size bytes have accumulated, and complete_idle_response() then
+// discards the whole reply as a short read, reporting error_code=3 with an empty
+// raw payload.  Every real 0x03/0x04/0x05/0x0F/0xAA reply is shorter than the
+// values that used to sit here, so the field silently discarded 100% of the
+// data while the device logged "events=N completions=N" -- the sensor WAS
+// answering and the firmware was throwing the answer away.
+//
+// 0 is the documented opt-out: sender_snapshot.go omits field 3 when
+// ReadLength == 0, and bus_rx_boundary.h then falls back to the
+// protocol-neutral 10ms idle gap (UART_IDLE_THRESHOLD_US) to frame each reply.
+// At 9600 8N1 the intra-frame byte gap (~1ms) is far below that threshold while
+// the inter-frame gap is far above it, so idle framing recovers exactly the
+// bytes the BMS sent, at the length it actually sent them.
+//
+// Do not "restore" a concrete length here: any non-zero value reintroduces the
+// silent-discard bug for every pack whose NTC/cell count differs.
 func (d *JiabaidaBMSDriver) GetCommandTemplates() []CommandTemplate {
 	return []CommandTemplate{
 		{
 			ID: "read_basic_info", Name: "读取基本信息", Type: "read",
 			CmdByte: 0x03, WriteData: jiabaidaReadFrameHex(0x03),
-			ReadLength: 60, DelayMs: 100, IntervalMs: 5000, Schedulable: true,
+			ReadLength: 0, DelayMs: 100, IntervalMs: 5000, Schedulable: true,
 			Description: "总电压、电流、剩余容量、SOC、温度等",
 		},
 		{
 			ID: "read_cell_voltage", Name: "读取单体电压", Type: "read",
 			CmdByte: 0x04, WriteData: jiabaidaReadFrameHex(0x04),
-			ReadLength: 50, DelayMs: 100, IntervalMs: 0, Schedulable: true,
+			ReadLength: 0, DelayMs: 100, IntervalMs: 0, Schedulable: true,
 			Description: "每串电芯电压、最高/最低/平均",
 		},
 		{
 			ID: "read_hardware_version", Name: "读取硬件版本", Type: "read",
 			CmdByte: 0x05, WriteData: jiabaidaReadFrameHex(0x05),
-			ReadLength: 40, DelayMs: 100, IntervalMs: 0, Schedulable: true,
+			ReadLength: 0, DelayMs: 100, IntervalMs: 0, Schedulable: true,
 			Description: "硬件版本字符串",
 		},
 		{
 			ID: "read_comprehensive", Name: "读取综合信息", Type: "read",
 			CmdByte: 0x0F, WriteData: jiabaidaReadFrameHex(0x0F),
-			ReadLength: 100, DelayMs: 100, IntervalMs: 0, Schedulable: true,
+			ReadLength: 0, DelayMs: 100, IntervalMs: 0, Schedulable: true,
 			Description: "0x03超集：含单体电压、均衡状态、运行时间",
 		},
 		{
 			ID: "read_protection_count", Name: "读取保护历史次数", Type: "read",
 			CmdByte: 0xAA, WriteData: jiabaidaReadFrameHex(0xAA),
-			ReadLength: 40, DelayMs: 100, IntervalMs: 0, Schedulable: true,
+			ReadLength: 0, DelayMs: 100, IntervalMs: 0, Schedulable: true,
 			Description: "12种保护触发次数统计",
 		},
 	}
