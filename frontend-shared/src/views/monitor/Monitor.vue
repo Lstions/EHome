@@ -277,6 +277,20 @@
                   <span>{{ metric(metrics?.device?.offline) }}</span>
                 </el-progress>
               </div>
+              <!-- 等待数据：已创建但尚未收到任何数据（2026-10-03 缺陷 5）。
+                   它既不是在线也不是离线。此前后端把这类设备算进离线，
+                   用户新建设备后会看到"离线"告警。有值时才有意义，
+                   故为 0 时整行不显示，避免给正常系统增加噪声。 -->
+              <div class="status-item" v-if="(metrics?.device?.pending || 0) > 0">
+                <span class="status-label">等待数据</span>
+                <el-progress
+                  :percentage="devicePendingPercent"
+                  :stroke-width="20"
+                  :color="'var(--color-warning)'"
+                >
+                  <span>{{ metric(metrics?.device?.pending) }}</span>
+                </el-progress>
+              </div>
             </div>
           </el-card>
         </el-col>
@@ -483,8 +497,13 @@ const controlHealthTag = computed(() => {
 const controlAlertVisible = computed(() => metricsReady.value && controlAttention.value > 0)
 
 // 计算属性
+// 总数必须含 pending（2026-10-03）：刚创建、还没采到数据的设备既不在
+// online 也不在 offline 里。漏掉它会让「本页设备总数」小于实际行数，
+// 且在线/离线百分比的分母偏小、两个百分比之和虚高。
 const deviceTotal = computed(() => {
-  return (metrics.value?.device?.online || 0) + (metrics.value?.device?.offline || 0)
+  return (metrics.value?.device?.online || 0)
+    + (metrics.value?.device?.offline || 0)
+    + (metrics.value?.device?.pending || 0)
 })
 
 /**
@@ -503,6 +522,13 @@ const deviceOnlinePercent = computed(() => {
 const deviceOfflinePercent = computed(() => {
   if (deviceTotal.value === 0) return 0
   return Math.round(((metrics.value?.device?.offline || 0) / deviceTotal.value) * 100)
+})
+
+// 「等待数据」占比。分母与在线/离线一致（三者相加即总数），
+// 因此三条进度条之和恒为 100%，不会出现"三个百分比加起来超过 100%"的假象。
+const devicePendingPercent = computed(() => {
+  if (deviceTotal.value === 0) return 0
+  return Math.round(((metrics.value?.device?.pending || 0) / deviceTotal.value) * 100)
 })
 
 const nodeTotal = computed(() => {

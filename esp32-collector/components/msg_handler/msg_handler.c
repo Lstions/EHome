@@ -132,6 +132,20 @@ void msg_handler_process_with_transport(const uint8_t *data, size_t len, transpo
     }
 }
 
+/* === v2.6 crash diagnostics: injected ack callback (DIP, avoids component cycle) === */
+
+static diag_ack_cb_t s_diag_ack_cb = NULL;
+
+void msg_handler_set_diag_ack_cb(diag_ack_cb_t cb)
+{
+    s_diag_ack_cb = cb;
+}
+
+diag_ack_cb_t msg_handler_get_diag_ack_cb(void)
+{
+    return s_diag_ack_cb;
+}
+
 /* === Message dispatch === */
 
 void msg_handler_process(const uint8_t *data, size_t len)
@@ -197,6 +211,11 @@ void msg_handler_process(const uint8_t *data, size_t len)
 
     case MSG_PERIPH_CMD:
         handler_periph_process(&dec);
+        break;
+
+    case MSG_DIAG_ACK:
+        /* v2.6: 服务端确认崩溃记录已入库 -> 设备释放对应 NVS 占用 */
+        handler_diag_process_ack(&dec);
         break;
 
     default:

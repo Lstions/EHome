@@ -906,6 +906,7 @@ func newManagerWithMock(db *gorm.DB, mock *mockMQTTPublisher) *Manager {
 		eventBus: NewConfigEventBus(64),
 	}
 }
+
 // TestConfigManifestRejectionOverwritesStaleInSyncState is the regression test
 // for the production false green observed on node F0F5BDFFFE02:
 //

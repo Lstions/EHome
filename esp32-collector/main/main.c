@@ -12,6 +12,7 @@
 #include "hello_handshake.h"
 #include "bus_worker.h"
 #include "msg_handler.h"
+#include "crash_diag.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
 #include "scheduler.h"
@@ -44,6 +45,14 @@
 #define TAG "EHOME"
 #define STATUS_TASK_STACK 6144
 
+/* StatusReport 上报周期 (毫秒)。1s 是节点离线可见时延预算的一部分：
+ * 最坏 = 1s(本周期) + 3s(服务端 NodeOfflineThreshold) + 1s(服务端检测 ticker) = 5s。
+ * 改这里必须同步 backend/internal/offlinedetector/offlinedetector.go 的
+ * FirmwareStatusReportPeriod 常量与预算注释，否则指标会被静默破坏。
+ * 关于 uptime：status_task 取的是真实单调时钟（app_state_uptime_sec_now），
+ * 不是按本周期自增，所以把 5s 压到 1s 不会让 uptime 失真。 */
+#define STATUS_REPORT_PERIOD_MS 1000
+
 static bool s_ota_pending_verify = false;
 
 /* ---- status_task — still in main.c (single-loop, minimal dependency) ---- */
@@ -53,8 +62,10 @@ static void status_task(void *pv)
     app_state_t *s = (app_state_t *)pv;
     while (1) {
         /* uptime 必须取真实单调时钟，不能按上报周期自增：
-         * 本循环周期是 5 秒，自增会让 StatusReport field 1（单位=秒）
-         * 每 5 秒真实时间才 +1，上报值 = 真实运行秒数 / 5。 */
+         * 若改成每循环 +1，StatusReport field 1（单位=秒）就会变成
+         * "真实运行秒数 / STATUS_REPORT_PERIOD_MS" 的比例值——周期从 5s
+         * 收到 1s 后这个偏差会放大 5 倍。取 app_state_uptime_sec_now()
+         * 与周期无关，所以收紧周期不会让 uptime 失真。 */
         s->uptime_sec = app_state_uptime_sec_now();
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
@@ -65,7 +76,7 @@ static void status_task(void *pv)
 				if (ota_confirm_valid() == ESP_OK) s->ota_need_confirm = false;
 			}
 		}
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(STATUS_REPORT_PERIOD_MS));
     }
 }
 
@@ -245,6 +256,12 @@ void app_main(void)
     app_state_t *s = app_state_init();
 	s->ota_need_confirm = s_ota_pending_verify;
 
+    /* ---- Crash diagnostics (v2.6) ----
+     * 必须在 nvs_flash_init() 之后：把上次 panic 留在 RTC_NOINIT 里的记录
+     * 搬进 NVS。设备此前完全不记录复位原因，导致"反复重启"无法定性；
+     * 这一步让每次启动都带一个可上报的原因。 */
+    crash_diag_init();
+
     /* ---- UART0 boot mode check (MUST be before any UART0 driver install) ---- */
     /* If BOOT held at startup, UART0 reserved for download — task blocks here */
     if (!bus_dma_uart0_boot_init()) {
@@ -271,6 +288,7 @@ void app_main(void)
     log_stream_set_publish_callback(msg_handler_publish);
     if (handler_periph_init() != ESP_OK) {
         ESP_LOGE(TAG, "Peripheral handler initialization failed; restarting");
+        crash_diag_mark_reboot_reason("periph_init_failed");
         esp_restart();
     }   /* v3.0: GPIO/PWM peripheral control queues + tasks */
     ota_init();
@@ -311,6 +329,10 @@ void app_main(void)
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
     ota_set_progress_callback(msg_handler_send_ota_prog);
+
+    /* Inject crash-record ack callback (v2.6): msg_handler cannot depend on
+     * main, so the release-on-ACK handler is injected here. */
+    msg_handler_set_diag_ack_cb(crash_diag_on_ack);
 
     /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
      * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)

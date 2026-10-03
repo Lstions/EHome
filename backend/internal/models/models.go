@@ -80,17 +80,29 @@ func (Node) TableName() string { return "nodes" }
 // 一个 EdgeDevice = Node + Channel + DeviceConfig 三元组的实例化
 // 字段含义见 docs/设计/边缘设备/详细设计.md
 type EdgeDevice struct {
-	Type             string          `gorm:"column:type;size:32;not null;default:'';index" json:"type"`  // deprecated: use DeviceConfig.DeviceType via JOIN. Kept for backward compat.
-	ParserID         string          `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"` // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
-	ID               uint            `gorm:"primaryKey" json:"id"`
-	Name             string          `gorm:"size:64;not null" json:"name"`
-	NodeID           string          `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2 显式 FK (was implicit via Channel)
-	ChannelID        uint            `gorm:"index;not null" json:"channel_id"`                              // 保留
-	DeviceConfigID   uint            `gorm:"index" json:"device_config_id"`                                 // v2.2 FK; 0 = no template (driver fallback)
-	HardwareID       string          `gorm:"size:16;default:''" json:"hardware_id"`                         // v2.2 新增 (从 Channel 移过来)
-	IntervalMs       int             `gorm:"default:5000" json:"interval_ms"`
-	Enabled          bool            `gorm:"default:true" json:"enabled"`
-	Status           string          `gorm:"size:20;default:active" json:"status"`
+	Type           string `gorm:"column:type;size:32;not null;default:'';index" json:"type"`  // deprecated: use DeviceConfig.DeviceType via JOIN. Kept for backward compat.
+	ParserID       string `gorm:"column:parser_id;size:32;type:varchar(32)" json:"parser_id"` // v2.1 字段保留 (从 DeviceConfig.Parser.ID 同步)
+	ID             uint   `gorm:"primaryKey" json:"id"`
+	Name           string `gorm:"size:64;not null" json:"name"`
+	NodeID         string `gorm:"column:node_id;type:varchar(32);index;not null" json:"node_id"` // v2.2 显式 FK (was implicit via Channel)
+	ChannelID      uint   `gorm:"index;not null" json:"channel_id"`                              // 保留
+	DeviceConfigID uint   `gorm:"index" json:"device_config_id"`                                 // v2.2 FK; 0 = no template (driver fallback)
+	HardwareID     string `gorm:"size:16;default:''" json:"hardware_id"`                         // v2.2 新增 (从 Channel 移过来)
+	IntervalMs     int    `gorm:"default:5000" json:"interval_ms"`
+	Enabled        bool   `gorm:"default:true" json:"enabled"`
+	// Status 边缘设备可见状态。取值见 EdgeDeviceStatus* 常量。
+	//
+	// 默认值从 "active" 改为 EdgeDeviceStatusPending（2026-10-03 缺陷 5）：
+	// 设备刚创建、还没有一次成功采集时，此前直接落 "active"，而前端把
+	// "active" 渲染成「在线」——于是用户建完设备就看到「在线」，尽管
+	// 一条数据都没有。真实在线是**采集成功**的结论，不是创建动作的结论。
+	// "pending" 由 databus 收到首个数据帧时提升（见 consumers_heavy.go），
+	// 或由 offlinedetector 在超时后判为 offline。
+	// index 是必需的（2026-10-03 审查发现的 P1）：offlinedetector 现在**每个 tick（1s）**
+	// 执行 `WHERE status <> 'offline'` 来同步设备集合（见 loadActiveDevices 的说明）。
+	// 该列原本无索引，每秒一次全表扫 + 全字段物化，设备量大时是不可接受的开销。
+	// 加索引后这条查询走 index scan，与「每秒一次」的调用频率相称。
+	Status           string          `gorm:"size:20;default:pending;index" json:"status"`
 	ErrorCode        int             `gorm:"default:0" json:"error_code"` // v2.2 新增
 	LastDataAt       *time.Time      `json:"last_data_at"`                // v2.2 新增
 	LastError        string          `gorm:"size:256" json:"last_error"`  // v2.2 新增
@@ -113,6 +125,27 @@ type EdgeDevice struct {
 
 // TableName GORM 表名
 func (EdgeDevice) TableName() string { return "edge_devices" }
+
+// 边缘设备可见状态取值。
+//
+// 为什么需要 pending 而不是复用 active：设备列表把 active/online 一律渲染成
+// 「在线」，而"已创建"与"已采到数据"是两件事。历史上创建即 active，
+// 于是新建但从未上报数据的设备永远显示「在线」，且因为 offline 判定要求
+// last_data_at 非零（offlinedetector 的零值守卫），它**永远不会**变成离线。
+//
+// 状态迁移：
+//
+//	(创建) ──► pending ──(首个数据帧)──► active
+//	              │                        │
+//	              └──(超时无数据)──► offline ◄──(超时)──┘
+//
+// active 只由「收到数据」产生（databus），offline 只由「超时」产生
+// （offlinedetector）；创建动作本身不再产生任何"在线"结论。
+const (
+	EdgeDeviceStatusPending = "pending"
+	EdgeDeviceStatusActive  = "active"
+	EdgeDeviceStatusOffline = "offline"
+)
 
 // =====================================================================
 

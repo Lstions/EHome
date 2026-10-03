@@ -14,6 +14,14 @@ export interface MetricsSummary {
   device: {
     online: number
     offline: number
+    /**
+     * 已创建但尚未收到任何数据的设备（后端 EdgeDeviceStatusPending）。
+     * 2026-10-03：后端此前把这类设备计入 offline（status <> active 兜底），
+     * 会把刚建好的设备报成故障。三态分开后这里也必须有对应字段，
+     * 且总数计算要把 pending 算进去，否则百分比的分母会漏掉一部分设备。
+     * 旧后端不返回该字段时为 undefined，按 0 处理。
+     */
+    pending?: number
   }
   node: {
     online: number

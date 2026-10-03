@@ -81,7 +81,7 @@
       <span class="active-filters-label">当前筛选：</span>
       <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''; handleFiltersChanged()">关键词：{{ searchKeyword }}</el-tag>
       <el-tag v-if="typeFilter" closable @close="typeFilter = ''; handleFiltersChanged()">类型：{{ getDeviceTypeLabel(typeFilter) }}</el-tag>
-      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''; handleFiltersChanged()">总线：{{ hardwareFilter.toUpperCase() }}</el-tag>
+      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''; handleFiltersChanged()">总线：{{ getHardwareLabel(hardwareFilter) }}</el-tag>
       <el-tag v-if="statusFilter" closable @close="statusFilter = ''; handleFiltersChanged()">状态：{{ statusFilter === 'active' ? '启用' : '禁用' }}</el-tag>
       <el-button text type="primary" @click="clearFilters">清除全部</el-button>
     </div>
@@ -133,7 +133,7 @@
             
             <div class="spec-item">
               <span class="label">总线类型</span>
-              <el-tag type="warning" size="small">{{ config.hardware_type?.toUpperCase() }}</el-tag>
+              <el-tag :type="getHardwareTagType(config.hardware_type)" size="small">{{ getHardwareLabel(config.hardware_type) }}</el-tag>
             </div>
             
             <div class="spec-item" v-if="config.config">
@@ -223,7 +223,7 @@
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="设备类型">{{ getDeviceTypeLabel(previewConfig.device_type) }}</el-descriptions-item>
-        <el-descriptions-item label="硬件类型">{{ previewConfig.hardware_type?.toUpperCase() }}</el-descriptions-item>
+        <el-descriptions-item label="硬件类型">{{ getHardwareLabel(previewConfig.hardware_type) }}</el-descriptions-item>
         <el-descriptions-item label="通信协议">{{ previewConfig.protocol?.toUpperCase() || UNKNOWN }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ formatTime(previewConfig.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="描述" :span="2">{{ previewConfig.description || '无' }}</el-descriptions-item>
@@ -272,6 +272,7 @@ const SCOPE_FILTERED = '当前筛选'
 const SCOPE_PAGE = '本页'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import { deviceTypeOptions } from '@/utils/deviceType'
+import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 
 // 状态
 const loading = ref(false)

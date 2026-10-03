@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -127,17 +128,30 @@ func TestEdgeDevice_CommandIntervals_RejectsUnknownId(t *testing.T) {
 	}
 }
 
+// 2026-10-03：本用例原先用 techfine_inverter 当"已知但不可调度"的 fixture，
+// 依据是它的 GetCommandTemplates() 返回 nil（演进方案 C6）。
+//
+// 该 fixture 已失效 —— 现场缺陷要求恢复逆变器的可调度轮询模板（UART1 从未
+// 发送过任何字节，因为 manifest 为该边设备编码了 0 条命令）。恢复之后
+// techfine 的 read_* 全部 schedulable，本用例会**因为错误的原因**继续通过：
+// "query_status" 确实仍被拒，但拒它的是"未知命令 id"分支，而不是测试名声称
+// 的"不可调度"分支。这正是假绿：断言没变，被测语义已经换了。
+//
+// 因此改用显式的契约 stub：fake_multi 提供一个真正的 Schedulable=false 模板
+// one_shot，并注册进测试专用 registry（与 command_intervals_test.go 中
+// TestValidateCommandIntervals_RejectsNonSchedulableId 共用同一 fixture）。
 func TestEdgeDevice_CommandIntervals_RejectsNonSchedulableId(t *testing.T) {
-	// techfine_inverter exposes only non-schedulable (one-shot) templates —
-	// a good fixture for the "known but not schedulable" rejection.
-	r, db := setupEdgeDeviceTest(t)
+	r, db := setupEdgeDeviceTestWithRegistry(t, func(reg *drivers.Registry) {
+		reg.Register(&fakeMultiDriver{})
+	})
 	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "UART", BusType: "UART", Enabled: true})
 
 	body := map[string]interface{}{
 		"name": "Inverter", "node_id": "NODE001", "channel_id": 1,
-		"type":              "techfine_inverter",
-		"command_intervals": map[string]interface{}{"query_status": 5000},
+		"type": "fake_multi",
+		// one_shot 是 fake_multi 声明的非可调度模板：id 已知，但不可轮询。
+		"command_intervals": map[string]interface{}{"one_shot": 5000},
 	}
 	w := postEdgeDevice(t, r, body)
 	if w.Code != http.StatusBadRequest {

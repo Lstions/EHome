@@ -556,12 +556,24 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", bindingChannel.NodeID).First(&node).Error; err != nil {
 					return err
 				}
-				// Peripheral pin-conflict check runs only when a bus_config (pin
-				// route) is supplied — consistent with handler_node.go channel
-				// updates. The inline wizard path omits bus_config (no route to
-				// validate), so the check is intentionally skipped there; a
-				// caller that supplies bus_config gets the same gate as the
-				// dedicated channel-create path.
+				// 与 POST /channels 同一兜底（2026-10-03）：向导内联建 UART 通道时调用方
+				// 通常不传 bus_config（原实现只在显式传入时才写，否则落空串），同样会
+				// 造出"以后改不了波特率"的通道。这里按节点资源能力补齐。
+				if strings.EqualFold(strings.TrimSpace(bindingChannel.HardwareType), "UART") {
+					if err := ensureUARTBusConfig(&node, &bindingChannel); err != nil {
+						return err
+					}
+				}
+				// 引脚冲突校验以"该通道确有引脚路由"为前提。原缺陷是：向导内联路径
+				// 原本不传 bus_config，于是这里被整段跳过 —— 但上面的
+				// ensureUARTBusConfig 现在会按节点能力把 UART 补齐，所以 UART 走到
+				// 这里**必然有** bus_config，校验不再被绕过（2026-10-03 P0 的路径入口）。
+				//
+				// 这里刻意**不**改成无条件调用：I2C/SPI 在内联路径上仍可能不带
+				// bus_config，无条件调用会让 channelRoutePins 直接报
+				// "I2C bus_config requires at least 2 bytes"，把既有的合法创建路径
+				// 挡死（改错方向加严）。"建了一条 bus_config 为空的非 UART 通道"
+				// 是另一类缺陷（节点端会拒收整份 manifest），不在本次引脚仲裁范围内。
 				if bindingChannel.BusConfig != "" {
 					if err := validateChannelPeripheralConflicts(tx, bindingChannel); err != nil {
 						return err
@@ -823,6 +835,35 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 			if err := tx.Model(&d).Updates(updates).Error; err != nil {
 				return err
 			}
+
+			// 补齐 ConfigTemplates（2026-10-03 现场缺陷的修复路径）。
+			//
+			// 为什么必须在这里也做一次：模板只在 POST /edge-devices 创建时生成
+			// （handler_edge_device.go:680）。于是"先把设备建好、驱动之后才获得
+			// 可调度模板"的设备永远拿不到模板 —— 现场逆变器（edge_devices.id=4）
+			// 正是这种状态：channels.template_ids=''，config_templates 里一条都没有，
+			// manifest 因而为该边设备编码 0 条命令，固件从不向 UART1 发指令。
+			//
+			// createTemplatesFromDriver 对每个 Schedulable 模板插入一行并把 id
+			// 追加到 channel.template_ids。它在同一事务内、且在设备已存在之后执行，
+			// 因此对"已有模板"的设备是幂等的吗？——不是：重复调用会重复插入。
+			// 所以先判断该设备是否已有归属模板；有则跳过，避免用户每改一次名字就
+			// 多出一批模板并把 template_ids 撑爆（编码器上限 16 条）。
+			var owned int64
+			if err := tx.Model(&models.ConfigTemplate{}).
+				Where("edge_device_id = ?", d.ID).Count(&owned).Error; err != nil {
+				return err
+			}
+			if owned == 0 {
+				var chForTmpl models.Channel
+				if err := tx.First(&chForTmpl, d.ChannelID).Error; err == nil {
+					if err := createTemplatesFromDriver(tx, driverRegistry, &chForTmpl, &d); err != nil {
+						// 与 POST 路径一致：模板生成失败记警告但不阻断设备更新。
+						logger.Warnf("[edge-device-update] Failed to create ConfigTemplates: %v", err)
+					}
+				}
+			}
+
 			return tx.Preload("Channel").Preload("Node").Preload("DeviceConfig").First(&d, d.ID).Error
 		}); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {

@@ -46,14 +46,42 @@ func TestNewBuiltInRegistryUsesInjectedDriverRegistry(t *testing.T) {
 	}
 }
 
-func TestBuiltInReadActionStartsDisabledUntilHardwareGate(t *testing.T) {
+// TestBuiltInReadActionIsEnabledAndRolloutToggleStillWorks pins the policy
+// after the 2026-10-03 change (was: ...StartsDisabledUntilHardwareGate).
+//
+// Why the expected value flipped.  PRS3001 read_rainfall carries no
+// AvailabilityCode and no AvailabilityReason -- it was a bare Enabled:false,
+// i.e. a development rollout flag, not an evidence gate.  Meanwhile
+// GetCommandTemplates() declares the IDENTICAL frame
+// (010300000002C40B, ReadLength 9, Schedulable true, IntervalMs 5000), so the
+// exact same read has always been executed by the sampler every 5 seconds;
+// only the manual operation was blocked, surfacing to the user as
+// "action is not enabled for rollout" with no way to turn it on.
+//
+// The freeze that must NOT be lifted is the fail-closed one, and it is
+// asserted separately below: an action carrying an AvailabilityCode stays
+// disabled no matter what the driver literal says.  Reads are side-effect
+// free, so enabling them cannot corrupt device state; reset/set writes can,
+// and they remain gated.
+//
+// Per docs/设计/设备指令与操作体系演进方案.md §4.2 item 3, an unfreeze must
+// flip the guarded assertion in the same change -- this is that flip.
+func TestBuiltInReadActionIsEnabledAndRolloutToggleStillWorks(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definition, ok := registry.Get("prs3001", "read_rainfall")
 	if !ok {
 		t.Fatal("built-in read action is missing")
 	}
+	if !definition.Enabled {
+		t.Fatal("a side-effect-free read with no AvailabilityCode must be usable by default")
+	}
+	// The rollout primitive must keep working in both directions.
+	if err := registry.SetEnabled("prs3001", "read_rainfall", false); err != nil {
+		t.Fatal(err)
+	}
+	definition, _ = registry.Get("prs3001", "read_rainfall")
 	if definition.Enabled {
-		t.Fatal("unverified built-in read action must not start enabled")
+		t.Fatal("explicit rollout disable did not take effect")
 	}
 	if err := registry.SetEnabled("prs3001", "read_rainfall", true); err != nil {
 		t.Fatal(err)
@@ -61,6 +89,30 @@ func TestBuiltInReadActionStartsDisabledUntilHardwareGate(t *testing.T) {
 	definition, _ = registry.Get("prs3001", "read_rainfall")
 	if !definition.Enabled {
 		t.Fatal("explicit rollout enable did not take effect")
+	}
+}
+
+// TestAvailabilityCodeActionsStayDisabled is the guard rail that replaces the
+// old blanket "reads start disabled" rule: what must fail closed is an action
+// whose evidence is explicitly missing, regardless of Semantics.  Without this
+// assertion the enablement change above could silently drift into enabling a
+// frozen write.
+func TestAvailabilityCodeActionsStayDisabled(t *testing.T) {
+	registry := NewBuiltInRegistry(nil)
+	for _, tc := range []struct{ deviceType, actionID string }{
+		{"prs3001", "reset_rainfall"},
+		{"sn3001_rain", "clear_rainfall_write"},
+	} {
+		definition, ok := registry.Get(tc.deviceType, tc.actionID)
+		if !ok {
+			t.Fatalf("%s/%s is missing from the catalog", tc.deviceType, tc.actionID)
+		}
+		if definition.AvailabilityCode == "" {
+			t.Fatalf("%s/%s no longer carries an AvailabilityCode; if the gate was lifted, update the ledger and this test together", tc.deviceType, tc.actionID)
+		}
+		if definition.Enabled {
+			t.Fatalf("%s/%s carries AvailabilityCode %q yet is enabled: fail-closed was violated", tc.deviceType, tc.actionID, definition.AvailabilityCode)
+		}
 	}
 }
 
@@ -116,6 +168,16 @@ func TestCurrentEngineAllowsMultiStepReads(t *testing.T) {
 	}
 }
 
+// TestTechfineReadActionsExcludeUnverifiedWrites asserts the property that
+// actually protects the inverter: the catalog contains eleven reachable,
+// side-effect-free reads and no unverified write.
+//
+// 2026-10-03: the eleven were previously pinned as DISABLED here.  That made
+// this test lock a rollout flag instead of the safety property, and the
+// deployment consequence was eleven operations shown to the user as
+// "action is not enabled for rollout" with no way to enable them.  Reads
+// cannot corrupt inverter state, so they are now enabled; the write exclusion
+// below is what must never regress.
 func TestTechfineReadActionsExcludeUnverifiedWrites(t *testing.T) {
 	registry := NewBuiltInRegistry(nil)
 	definitions := registry.List("techfine_inverter")
@@ -123,8 +185,17 @@ func TestTechfineReadActionsExcludeUnverifiedWrites(t *testing.T) {
 		t.Fatalf("got %d Techfine read actions, want 11: %+v", len(definitions), definitions)
 	}
 	for _, definition := range definitions {
-		if definition.Semantics != "read" || definition.Enabled {
-			t.Fatalf("Techfine action must be a disabled read: %+v", definition)
+		if definition.Semantics != "read" || !definition.Enabled {
+			t.Fatalf("Techfine action must be an enabled read: %+v", definition)
+		}
+		if definition.Risk != "low" || definition.AvailabilityCode != "" {
+			t.Fatalf("Techfine read must stay low-risk and ungated: %+v", definition)
+		}
+		// The engine gate must still admit it -- an action that is "enabled" but
+		// rejected by the deployed engine would be exactly the same dead end the
+		// enablement change was made to remove.
+		if !CurrentEngineAllows(definition) {
+			t.Fatalf("Techfine read is enabled but the engine gate rejects it: %+v", definition)
 		}
 		if definition.ID == "turn_on" || definition.ID == "set_grid_range" {
 			t.Fatalf("unverified Techfine write leaked into the catalog: %+v", definition)

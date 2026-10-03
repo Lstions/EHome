@@ -4,6 +4,8 @@ idf_component_register(SRCS "main.c"
                               "app_state.c"
                               "app_callbacks.c"
                               "config_apply_transaction.c"
+                              "crash_diag.c"
+                              "panic_capture.c"
                               "hello_handshake.c"
                               "hello_handshake_runtime.c"
                               "hello_handshake_state.c"
@@ -23,3 +25,16 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE EHOME_PROJECT_VER="${PROJECT
 # ConfigManifest rollback snapshots/workspaces must stay off callback task stacks.
 set_source_files_properties(app_callbacks.c PROPERTIES
     COMPILE_OPTIONS "-Wframe-larger-than=1024")
+
+# Crash capture (v2.6): intercept esp_panic_handler to snapshot the exception
+# frame into RTC_NOINIT before IDF's own panic path runs.
+#
+# Why --wrap: ESP-IDF 6.0 exposes no panic-hook registration API. The call site
+# (components/esp_system/port/panic_handler.c:258) is a cross-TU call, so the
+# linker wrapper reliably intercepts it. __wrap_* captures and then forwards to
+# __real_*, so panic printing and reset behaviour are unchanged.
+#
+# Why not espcoredump: it needs a new "coredump" partition, and a partition-table
+# change cannot be delivered over OTA — it needs a physical reflash, which is not
+# possible for a remotely deployed node.
+idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=esp_panic_handler" APPEND)

@@ -44,7 +44,7 @@
           <template #default="{ data }">
             <div class="driver-option">
               <span>{{ data.label }}</span>
-              <el-tag v-if="data.hardware_types?.length" size="small" type="info">{{ data.hardware_types.join(',') }}</el-tag>
+              <el-tag v-if="data.hardware_types?.length" size="small" type="info">{{ data.hardware_types.map(getHardwareLabel).join(' / ') }}</el-tag>
             </div>
           </template>
         </el-cascader>
@@ -216,6 +216,7 @@ import { feedback } from '@/utils/feedback'
 import { ElMessage } from 'element-plus'
 import { deviceConfigApi, type DeviceConfig } from '@/api/deviceConfig'
 import driverApi, { type DriverLeaf } from '@/api/driver'
+import { getHardwareLabel } from '@/utils/hardwareTag'
 
 const props = defineProps<{
   visible: boolean
@@ -242,12 +243,8 @@ type BusType = (typeof BUS_TYPES)[number]
 const isBusType = (value: unknown): value is BusType =>
   typeof value === 'string' && (BUS_TYPES as readonly string[]).includes(value)
 
-const busOptions = [
-  { value: 'uart', label: 'UART' },
-  { value: 'i2c', label: 'I2C' },
-  { value: 'spi', label: 'SPI' },
-  { value: 'adc', label: 'ADC' },
-]
+/** 表单下拉项：值仍是提交契约用的小写，标签一律取共享源，避免页面再写一份展示名。 */
+const busOptions = BUS_TYPES.map(value => ({ value, label: getHardwareLabel(value) }))
 
 const dialogVisible = computed({
   get: () => props.visible,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { reactive } from 'vue'
@@ -727,7 +727,9 @@ describe('NodeOverview (生产页)', () => {
     expect(card.text()).toContain('温湿度传感器')
     const row = card.findAll('.device-row')[0]
     expect(row.text()).toContain('I2C0-01')
-    expect(row.text()).toContain('I2C I2C0') // 通道列：hardware_type + hardware_id
+    // 通道列：hardware_id 'I2C0' 已自带总线名，不得再拼成 "I2C I2C0"（旧写法）。
+    expect(row.text()).toContain('I2C0')
+    expect(row.text()).not.toContain('I2C I2C0')
     // 最新一条数据列（last_data → formatLastData；>=10 的数 toFixed(0)）
     expect(row.text()).toContain('温度')
     expect(row.text()).toContain('26')
@@ -1550,6 +1552,80 @@ describe('NodeOverview (生产页)', () => {
       expect(openBtn.exists()).toBe(true)
       expect(openBtn.attributes('disabled')).toBeDefined()
       expect(wrapper.find("[data-baud-pick-hint]").text()).toContain('未选中通道')
+    })
+  })
+
+  // ── 资源表波特率口径（2026-10-03 缺陷 4：把能力上限当当前值显示） ──────────────
+  //
+  // 用户可见症状：资源表显示「5000000 baud」，而通道里真实生效的是 4800 ⇒
+  // 用户说"波特率参数都对不上"。根因是 ResourceReport 的 uartEntry **只有** max_baud
+  // （能力上限），旧代码 `resource.baud_rate || resource.max_baud` 于是永远走回退，
+  // 把上限当当前值。本组用例锁死：上限必须明确标注为「最高」，当前值只从通道 bus_config 解，
+  // 无通道时如实显示"未配置"而不是拿 max_baud 冒充。
+  describe("资源表波特率口径（上限 vs 当前值）", () => {
+    // 本组用**持久实现**而非 mockResolvedValueOnce：Once 队列会被前面用例留下的
+    // 未消费值污染（全量跑时本组第二个用例因此拿到空能力 ⇒ 假失败；单跑却全绿）。
+    // 先 mockReset 清空队列，再设持久值；用例结束再 reset，不向下泄漏。
+    beforeEach(() => {
+      mockGetCapabilities.mockReset()
+      mockChannelList.mockReset()
+    })
+    afterEach(() => {
+      mockGetCapabilities.mockReset()
+      mockChannelList.mockReset()
+    })
+    /** 与 withUARTBaudrate 同一布局：[tx][rx][baud BE32][data][stop][parity][flow] */
+    const uartChannelWithBaud = (id: number, hardwareId: string, baud: number) => ({
+      id,
+      node_id: "F0F5BDFFFE02",
+      name: "CH" + id,
+      hardware_type: "UART",
+      hardware_id: hardwareId,
+      status: "ok",
+      enabled: true,
+      bus_config: "1415" + baud.toString(16).padStart(8, "0").toUpperCase() + "08010000",
+      config: {},
+    })
+
+    const uartCaps = {
+      buses: {
+        uart: [{ id: "UART1", enabled: true, default_tx_pin: 20, default_rx_pin: 21, max_baud: 5000000 }],
+        i2c: [], spi: [], adc: [], gpio: [], pwm: [],
+      },
+    }
+
+    it("资源表把 max_baud 标为「最高」而不是当前值；当前值从通道 bus_config 解出", async () => {
+      mockGetCapabilities.mockResolvedValue(uartCaps as any)
+      mockChannelList.mockResolvedValue([uartChannelWithBaud(7, "UART1", 4800)] as any)
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线配置"))?.trigger("click")
+      await flushPromises()
+      await wrapper.findAll(".bus-subtab").find(b => b.text().includes("UART"))?.trigger("click")
+      await flushPromises()
+
+      const row = wrapper.findAll(".bus-table tbody tr")[0]
+      // 逐 tag 断言：旧实现只会产出**一个** "5000000 baud" 的裸 tag；
+      // 修好后应是"最高 …" + "当前 …"两个语义明确的 tag。
+      const tags = row.findAll(".bus-tag").map((tag: any) => tag.text())
+      expect(tags, "能力上限必须明确标注为「最高」，不得看起来像当前值").toContain("最高 5000000 baud")
+      expect(tags, "当前值必须来自通道 bus_config（4800），而不是 max_baud").toContain("当前 4800 baud")
+      expect(tags, "不得出现把上限冒充当前值的裸 tag").not.toContain("5000000 baud")
+    })
+
+    it("没有通道时如实显示「当前波特率未配置」，不拿 max_baud 冒充当前值", async () => {
+      mockGetCapabilities.mockResolvedValue(uartCaps as any)
+      mockChannelList.mockResolvedValue([] as any)
+      const wrapper = mount(NodeOverview, { global: { stubs } })
+      await flushPromises()
+      await wrapper.findAll(".tab-item").find(item => item.text().includes("总线配置"))?.trigger("click")
+      await flushPromises()
+      await wrapper.findAll(".bus-subtab").find(b => b.text().includes("UART"))?.trigger("click")
+      await flushPromises()
+
+      const row = wrapper.findAll(".bus-table tbody tr")[0]
+      expect(row.text()).toContain("最高 5000000 baud")
+      expect(row.text(), "无通道必须如实说未配置").toContain("当前波特率未配置")
     })
   })
 })

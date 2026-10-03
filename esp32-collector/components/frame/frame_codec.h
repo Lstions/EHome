@@ -69,6 +69,13 @@ typedef enum {
 #define MSG_PERIPH_RSP       0x1C
 /* v2.5 log streaming */
 #define MSG_LOG_STREAM       0x1D
+/* v2.6 crash diagnostics (ESP -> SVR: report; SVR -> ESP: ack)
+ *
+ * 引入背景：远程 S3 节点反复重启而设备端不留证据（见 main/crash_diag.h）。
+ * 该通道让"复位原因 + 异常 PC + 栈窗口"能在重启后上传，且设备端**只有
+ * 在收到 ACK 后才释放**对应的 NVS 记录占用。 */
+#define MSG_DIAG_REPORT      0x1E
+#define MSG_DIAG_ACK         0x1F
 
 /* === Encoder === */
 typedef struct {

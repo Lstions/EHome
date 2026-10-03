@@ -9,7 +9,7 @@
 
 ```
 main/                    # 启动 + 应用外壳
-├── main.c               # 启动、任务创建、状态心跳任务(5s)
+├── main.c               # 启动、任务创建、状态心跳任务(1s, STATUS_REPORT_PERIOD_MS)
 ├── app_state.c          # 聚合根 app_state_t + 启动身份(node_id 从 eFuse MAC 派生)
 ├── app_callbacks.c      # Wi-Fi/MQTT 生命周期 + 配置事务编排
 └── hello_handshake.c    # Hello nonce 状态机（连接握手 supervisor）
@@ -69,7 +69,7 @@ scheduler（interval_ms）
   → Hello(0x01, 新 nonce) → HelloAck(0x12 同 nonce) → 握手完成
   → ResourceReport(0x19)
   → [等待 ConfigManifest 或周期 sync]
-  → StatusReport 5s 心跳循环
+  → StatusReport 1s 心跳循环
 ```
 
 - 重连：指数退避，3 次后销毁重建客户端；订阅 ACK 超时同样重建。
@@ -106,7 +106,7 @@ host test 基础设施：FreeRTOS task API 补全（xTaskCreatePinnedToCore/eTas
 
 | 关注点 | 主要实现 |
 |--------|---------|
-| 启动/任务/心跳 | main/main.c（status_task 5s:65） |
+| 启动/任务/心跳 | main/main.c（status_task 1s，宏 STATUS_REPORT_PERIOD_MS） |
 | 身份 | main/app_state.c |
 | MQTT 生命周期 | components/ehome_mqtt/ehome_mqtt.c（topic 537-546） |
 | 帧 | components/frame/frame_codec.h |

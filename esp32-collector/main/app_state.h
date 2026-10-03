@@ -96,8 +96,10 @@ uint32_t app_state_get_uptime_sec(void);
  * 本次上电以来的运行秒数，取自单调时钟 esp_timer_get_time()。
  *
  * status_task 必须用它给 app_state_t.uptime_sec 赋值，**不能**每轮自增：
- * 上报周期是 5 秒，自增会让"秒"字段每 5 秒真实时间才 +1，
- * 于是上报值 = 真实运行秒数 / 5，前端「固件在线时长」少 5 倍。
+ * 上报周期是 1 秒（2026-10-03 由 5s 收紧，见 main.c 的 STATUS_REPORT_PERIOD_MS），
+ * 自增会让"秒"字段每 1 个周期才 +1；一旦周期再变，上报值就成了
+ * 「真实运行秒数 / 周期秒数」，前端「固件在线时长」会成比例失真。
+ * 取本函数则与周期无关。
  */
 uint32_t app_state_uptime_sec_now(void);
 

@@ -2,6 +2,7 @@ package nodemgr
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"ehome/backend/internal/models"
@@ -63,14 +64,59 @@ type ConfigQueryMsg struct {
 type SyncGate struct {
 	mgr      *Manager
 	eventBus *ConfigEventBus
+
+	// dedupMu / lastFullPushAt 实现 SyncActionDefer 的**去重窗口**：
+	// 同一设备在窗口内重复触发的「全量 manifest 推送」被降级为 Defer。
+	//
+	// 2026-10-03 审查发现（P1）：SyncActionDefer 一直只有声明（见上方常量）
+	// 与 metric 分支，**没有任何代码产生它** —— 也就是说去重窗口从未实现。
+	// 此前无人在意，因为 hash_mismatch 分支每次 StatusReport 都推送，而心跳是 5s；
+	// 心跳收到 1s 后，一个持续失配的节点（配置一直应用失败）会让全量 manifest
+	// 推送频率 ×5。故在此把窗口真正实现出来，而不是新造第二套机制。
+	dedupMu        sync.Mutex
+	lastFullPushAt map[string]time.Time
+
+	// now 可注入（测试用）；nil 时用 time.Now。
+	now func() time.Time
 }
+
+// fullPushDedupWindow 是同一设备两次「全量 manifest 推送」之间的最小间隔。
+//
+// 取 5s = **收紧前的心跳周期**：这样把心跳从 5s 收到 1s 之后，一个持续失配的
+// 节点收到的 manifest 推送频率**不会高于改动之前**。既保留原有的自愈速度，
+// 又消除 ×5 的放大。只作用于周期心跳（OnStatusReport）触发的推送；
+// 显式配置变更（OnConfigChange / OnHello / nvs_empty）必须立即推送。
+const fullPushDedupWindow = 5 * time.Second
 
 // NewSyncGate creates a new SyncGate.
 func NewSyncGate(mgr *Manager, eventBus *ConfigEventBus) *SyncGate {
 	return &SyncGate{
-		mgr:      mgr,
-		eventBus: eventBus,
+		mgr:            mgr,
+		eventBus:       eventBus,
+		lastFullPushAt: make(map[string]time.Time),
 	}
+}
+
+// gateClock 返回当前时间（可注入）。
+func (g *SyncGate) gateClock() time.Time {
+	if g.now != nil {
+		return g.now()
+	}
+	return time.Now()
+}
+
+// allowPeriodicFullPush 判断该设备是否已脱离去重窗口；若是则记录本次推送时间。
+//
+// 只应在**周期心跳**路径调用。返回 false 表示应降级为 SyncActionDefer。
+func (g *SyncGate) allowPeriodicFullPush(deviceID string) bool {
+	g.dedupMu.Lock()
+	defer g.dedupMu.Unlock()
+	now := g.gateClock()
+	if last, ok := g.lastFullPushAt[deviceID]; ok && now.Sub(last) < fullPushDedupWindow {
+		return false
+	}
+	g.lastFullPushAt[deviceID] = now
+	return true
 }
 
 // recordDecision records a sync decision metric.
@@ -175,7 +221,25 @@ func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDec
 		recordDecision(d)
 		return d
 	}
-	return g.decide(deviceID, rpt.ConfigHash, false, rpt.ChannelCount)
+	d := g.decide(deviceID, rpt.ConfigHash, false, rpt.ChannelCount)
+	// 周期心跳触发的全量推送走去重窗口（2026-10-03）：心跳 5s→1s 后，
+	// 一个持续 hash_mismatch 的节点会每 1s 收到一次全量 manifest。
+	// 窗口内降级为 SyncActionDefer —— 这正是该常量声明的语义
+	//（"Defer — within dedup window"），此前无代码产生它。
+	//
+	// 只对周期路径生效：OnConfigChange / OnHello / nvs_empty 走 decide 的其他分支，
+	// 那些是**事件驱动**的显式变更，必须立即推送，不能被冷却期拖延。
+	if d.Action == SyncActionFull && d.Reason == "hash_mismatch" && !g.allowPeriodicFullPush(deviceID) {
+		deferred := SyncDecision{
+			Action:   SyncActionDefer,
+			Reason:   "hash_mismatch_within_dedup_window",
+			SyncID:   d.SyncID,
+			DeviceID: deviceID,
+		}
+		recordDecision(deferred)
+		return deferred
+	}
+	return d
 }
 
 // OnConfigChange handles a ConfigChangeEvent from the bus.

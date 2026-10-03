@@ -529,3 +529,16 @@ target_compile_definitions(wifi_mgr_rssi_tests PRIVATE
 )
 target_compile_options(wifi_mgr_rssi_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter)
 add_test(NAME wifi_mgr_rssi_tests COMMAND wifi_mgr_rssi_tests)
+
+# 崩溃诊断上报/确认的线协议契约（0x1E / 0x1F）。
+# 这条链路在正常运行时永不执行，只有真崩溃时才走 —— 正因如此它最容易腐烂，
+# 必须由测试守住字段号与 accepted 语义。
+add_executable(crash_diag_codec_tests
+    crash_diag_codec_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(crash_diag_codec_tests PRIVATE
+    ../components/frame
+)
+target_compile_options(crash_diag_codec_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME crash_diag_codec_tests COMMAND crash_diag_codec_tests)

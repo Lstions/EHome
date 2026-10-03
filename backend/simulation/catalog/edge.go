@@ -694,9 +694,10 @@ func (f *edgeDevice) edgeReport(raw uint16) error {
 
 // heartbeat 以固定节奏上报自身状态，保住 nodes.last_seen。
 //
-// 为什么需要：offlinedetector 把 last_seen 超过 90s 的在线节点判为离线，
-// 而命令可用性门禁要求 node.status == "online"。长时间场景（等待派发、
-// 等待 Deadline 收尾）必须靠真实心跳维持在线，不能靠改库或 sleep 绕过。
+// 为什么需要：offlinedetector 把 last_seen 超过 NodeOfflineThreshold 的在线节点判为离线，
+// 该阈值 2026-10-03 起为 3s（旧值 90s；见 internal/offlinedetector/offlinedetector.go，
+// 1s 心跳 + 3s 阈值 + 1s ticker = 5s 预算），而命令可用性门禁要求 node.status == "online"。
+// 长时间场景（等待派发、等待 Deadline 收尾）必须靠真实心跳维持在线，不能靠改库或 sleep 绕过。
 // 这里的 ticker 属于"仿真器模拟上报节奏"（设计 §3 原则 3 允许的唯一 sleep 场景），
 // 不作为任何断言的同步手段。
 func (f *edgeDevice) heartbeat() {

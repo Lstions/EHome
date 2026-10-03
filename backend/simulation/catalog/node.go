@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/simulation/harness"
 )
@@ -494,9 +495,12 @@ func nodeScenario003(e *harness.Env) {
 // 守护的不变量：节点静默后必须由离线检测器翻成 offline，并留下
 // online → offline 的状态事件。
 //
-// 关于时长：离线判定阈值是 last_seen 超过 90s（backend/internal/offlinedetector
-// 的 checkDBLastSeen），检测 ticker 5s，因此真实耗时约 90~95s。这里把等待上限
-// 放大到 150s —— 不为"让用例变快"去改生产阈值。
+// 关于时长（2026-10-03 阈值收紧后的事实，勿再抄旧数字）：
+// 离线判定阈值 = offlinedetector.NodeOfflineThreshold（当前 3s），检测 ticker
+// = offlinedetector.OfflineCheckInterval（当前 1s），离线可见时延预算 =
+// offlinedetector.OfflineLatencyBudget（1s 心跳 + 3s 阈值 + 1s ticker = 5s）。
+// 因此等待上限设为预算的 6 倍（30s）：正常 5s 内必判离线，多等只为容忍 MQTT
+// 投递与轮询抖动，**不是**允许离线判定被削弱。
 func nodeScenario004(e *harness.Env) {
 	dev := nodeProvision(e, "SIM-NODE-004", "n1", "静默节点")
 	nodeID := dev.NodeID
@@ -516,7 +520,7 @@ func nodeScenario004(e *harness.Env) {
 	onlineAt := time.Now()
 
 	// 此后节点完全静默：不再有任何 Hello/StatusReport/DataReport。
-	e.Eventually(150*time.Second, func() error {
+	e.Eventually(6*offlinedetector.OfflineLatencyBudget, func() error {
 		status, err := nodeStatus(e, nodeID)
 		if err != nil {
 			return err
@@ -527,8 +531,16 @@ func nodeScenario004(e *harness.Env) {
 		return nil
 	})
 	silence := time.Since(onlineAt)
-	if silence < 90*time.Second {
-		e.T.Fatalf("静默 %s 就判定离线，短于节点设计规定的 90s 阈值：判定被削弱", silence)
+	// 断言方向与旧阈值下的写法相反：阈值变小后要防的是"该判离线却还在线"
+	// （判定被削弱），所以要求"静默 ≥ 生产阈值时必须已判离线"，并额外要求离线
+	// 可见时延落在生产预算内。两个数字都直接引用生产常量，本文件不再抄一份：
+	// 旧断言写死 90s，在 3s 阈值下等于要求"静默 ≥90s 才判离线"，恰好把"判定被
+	// 削弱"守护反成"要求判定被削弱"——这正是阈值收紧后它转红的根因。
+	if silence < offlinedetector.NodeOfflineThreshold {
+		e.T.Fatalf("静默 %s 就判定离线，短于生产阈值 %s：判定被削弱", silence, offlinedetector.NodeOfflineThreshold)
+	}
+	if silence > offlinedetector.OfflineLatencyBudget {
+		e.T.Fatalf("静默 %s 才判定离线，超过生产离线可见时延预算 %s", silence, offlinedetector.OfflineLatencyBudget)
 	}
 
 	events := nodeStatusHistory(e, nodeID)

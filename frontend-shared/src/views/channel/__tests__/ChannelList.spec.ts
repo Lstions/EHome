@@ -527,9 +527,12 @@ describe('ChannelList.vue', () => {
 
   it('maps node names and hardware labels in the component contract', () => {
     expect(channelListSource).toContain('return node?.name || \`节点 #\${nodeId}\`')
-    expect(channelListSource).toContain("uart: '串行'")
-    expect(channelListSource).toContain("i2c: 'I²C'")
-    expect(channelListSource).toContain("spi: 'SPI'")
+    // 总线标签必须来自共享源：页面私有 map（uart: '串行' / i2c: 'I²C'…）已删除，
+    // 否则同一实体又会出现 UART / 串行 两套写法（本用例旧断言正是锁死私有 map）。
+    expect(channelListSource).toContain('getHardwareLabel(row.hardware_type)')
+    expect(channelListSource).toContain("from '@/utils/hardwareTag'")
+    expect(channelListSource).not.toContain('getBusTypeLabel')
+    expect(channelListSource).not.toContain("uart: '串行'")
   })
 
   it('contains mobile table scroll affordance for the wide channel table', () => {

@@ -743,7 +743,20 @@
           </div>
           <!-- 卡片视图（设计稿 new-node-edge.png 卡片模式） -->
           <div v-else class="device-grid">
-            <div v-for="row in devices" :key="row.id" class="device-tile" :class="{ 'is-offline': row.status !== 'online' }" @click="viewDevice(row)">
+            <!--
+              is-offline 只对**真正离线/禁用**的设备生效（2026-10-03 审查发现）。
+              原判据 `row.status !== 'online'` 会把 pending（已创建、还没采到数据）
+              也变暗（CSS 里 is-offline 是 opacity .72），而同一行的 StatusBadge 却
+              渲染 warning 色的「等待中」—— 一行里两个相反信号。
+              与 StatusBadge 同口径：只有 offline/disabled/error 才算"非正常在线"。
+            -->
+            <div
+              v-for="row in devices"
+              :key="row.id"
+              class="device-tile"
+              :class="{ 'is-offline': isDeviceOffline(row.status) }"
+              @click="viewDevice(row)"
+            >
               <div class="device-tile-head">
                 <span class="device-tile-icon"><el-icon :size="18"><Connection /></el-icon></span>
                 <div class="device-tile-title">
@@ -882,6 +895,7 @@
       :preset-hardware-type="activeBusType"
       :preset-hardware-id="selectedResourceId"
       :collector-status="node?.status"
+      :occupied-hardware-ids="occupiedHardwareIds"
       @refresh="handleChannelManagerRefresh"
     />
 
@@ -959,6 +973,7 @@ import { sensorNameMap, sensorUnitMap } from '@/utils/sensor'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
 import { logger } from '@/utils/logger'
 import { validateBaudrate } from '@/utils/validate'
+import { getHardwareDisplay, getHardwareLabel } from '@/utils/hardwareTag'
 
 // ── 类型 ──
 interface NodeEvent {
@@ -1183,13 +1198,14 @@ const dmaReportedCount = computed(() => {
 /** 通道健康卡的预览条数（与模板 v-for 的 slice 上限共用同一常量，避免两处漂移）。 */
 const CHANNEL_HEALTH_PREVIEW_LIMIT = 6
 
+// label 一律取共享源，避免此处再维护一份总线展示名；description 是说明性文案，不参与实体命名。
 const busTabs: Array<{ type: BusType; label: string; icon: any; description: string }> = [
-  { type: 'i2c', label: 'I2C', icon: Cpu, description: 'I2C 总线用于连接低速外设，支持多主多从通信' },
-  { type: 'uart', label: 'UART', icon: Connection, description: 'UART 串口用于异步串行通信' },
-  { type: 'spi', label: 'SPI', icon: MagicStick, description: 'SPI 总线用于高速同步串行通信' },
-  { type: 'adc', label: 'ADC', icon: DataLine, description: 'ADC 通道用于采集模拟量输入' },
-  { type: 'gpio', label: 'GPIO', icon: Share, description: 'GPIO 是引脚直控资源，不属于通道协议总线' },
-  { type: 'pwm', label: 'PWM', icon: Tools, description: 'PWM 资源用于占空比控制输出' },
+  { type: 'i2c', label: getHardwareLabel('i2c'), icon: Cpu, description: 'I2C 总线用于连接低速外设，支持多主多从通信' },
+  { type: 'uart', label: getHardwareLabel('uart'), icon: Connection, description: 'UART 串口用于异步串行通信' },
+  { type: 'spi', label: getHardwareLabel('spi'), icon: MagicStick, description: 'SPI 总线用于高速同步串行通信' },
+  { type: 'adc', label: getHardwareLabel('adc'), icon: DataLine, description: 'ADC 通道用于采集模拟量输入' },
+  { type: 'gpio', label: getHardwareLabel('gpio'), icon: Share, description: 'GPIO 是引脚直控资源，不属于通道协议总线' },
+  { type: 'pwm', label: getHardwareLabel('pwm'), icon: Tools, description: 'PWM 资源用于占空比控制输出' },
 ]
 const activeBusTab = computed(() => busTabs.find(tab => tab.type === activeBusType.value) || busTabs[0])
 const activeBusDescription = computed(() => activeBusTab.value.description)
@@ -1319,8 +1335,17 @@ function channelBadgeClass(ch: Channel): string {
   if (t === '异常') return 'cb-warn'
   return 'cb-off'
 }
+/**
+ * 通道的硬件标识展示（name 为空时的回退）。
+ * 判据（自带总线名则不重复前缀，如 'UART0' 不再拼成 "UART UART0"）集中在共享
+ * hardwareIdIncludesBusName/getHardwareDisplay，避免本页再维护一份总线名清单。
+ */
+function channelHardwareDisplay(ch: Channel): string {
+  return getHardwareDisplay(ch.hardware_type, String(ch.hardware_id || ''))
+}
+
 function channelName(ch: Channel): string {
-  return ch.name || `${(ch.hardware_type || '').toUpperCase()} ${ch.hardware_id || ''}`.trim() || `通道 #${ch.id}`
+  return ch.name || channelHardwareDisplay(ch) || `通道 #${ch.id}`
 }
 const channelStats = computed(() => {
   const total = channels.value.length
@@ -1389,10 +1414,24 @@ function dmaTagClass(state: number): string {
 }
 
 // ── 关联设备辅助 ──
+
+// isDeviceOffline 决定设备卡是否显示"变暗"（.is-offline → opacity .72）。
+//
+// 2026-10-03 审查发现：原判据 `status !== 'online'` 把 pending 也算成离线，
+// 而同一行的 StatusBadge 对 pending 渲染 warning 色的「等待中」——
+// 一行之内给出两个相反信号。pending 的语义是"已创建、还在等第一帧数据"，
+// 既不是正常在线，也不是故障，不该被当作离线变暗。
+// 与 StatusBadge 的 warning/danger 口径保持一致：offline/disabled/error 才算。
+function isDeviceOffline(status: unknown): boolean {
+  const s = String(status ?? '').toLowerCase()
+  return s === 'offline' || s === 'disabled' || s === 'error'
+}
+
 function deviceChannelText(row: any): string {
   const channel = channels.value.find(ch => ch.id === row.channel_id)
   if (!channel) return '—'
-  return `${(channel.hardware_type || '').toUpperCase()} ${channel.hardware_id || ''}`.trim()
+  // 与 channelName 同一口径：hardware_id 已带总线名时不再重复前缀（旧写法出 "I2C I2C0"）。
+  return channelHardwareDisplay(channel) || '—'
 }
 function viewDevice(row: any) {
   router.push(`/edge-device/${row.id}`)
@@ -1457,7 +1496,7 @@ function busTypeMask(type: BusType): number {
 // ── A：已创建通道列表的展示辅助（数据源 = channels，与「通道健康状态」卡同源） ──
 /** 通道类型标签：后端 hardware_type 实测为大写（'UART'），统一归一后显示。 */
 function channelTypeLabel(ch: Channel): string {
-  return String(ch.hardware_type || '').toUpperCase() || '未知总线'
+  return getHardwareLabel(ch.hardware_type) || '未知总线'
 }
 /** 通道自身的硬件标识（如 UART1）+ 通道号，用于与「资源」区分开。 */
 function channelHardwareKey(ch: Channel): string {
@@ -1483,11 +1522,40 @@ function channelResourceLabel(ch: Channel): string {
   return String(ch.hardware_id || '').trim() || '未匹配到已上报资源'
 }
 
+/**
+ * 已被**已启用通道**占用的资源 id（给 ChannelManager 的下拉框标灰用）。
+ *
+ * 口径与后端 validateChannelCrossChannelPins 一致：只看 enabled 的通道。
+ * 停用通道不占资源——否则"想换个串口"的用户会发现自己哪儿都选不了。
+ * 用 hardware_id（"UART1"）而不是引脚号：下拉框的选项就是资源 id。
+ */
+const occupiedHardwareIds = computed<string[]>(() => {
+  return channels.value
+    .filter(channel => channel.enabled !== false)
+    .map(channel => String(channel.hardware_id || '').trim())
+    .filter(Boolean)
+})
+
 function resourceMountedChannels(resource: BusResource): Channel[] {
   return channels.value.filter(channel => (
     String(channel.hardware_type || '').toLowerCase() === activeBusType.value
     && hardwareResourceMatchesChannel(resource, channel)
   ))
+}
+
+/**
+ * 资源层级显示的「当前波特率」：只从该资源上已创建通道的 bus_config 解出（见 baudCurrentRate）。
+ * 没有通道时返回 0，调用方如实显示"未配置"——不用 max_baud（能力上限）冒充当前值。
+ * 多条通道时取第一条可解出的值：本页资源行是**资源视角的摘要**，
+ * 逐通道的精确值在下方「已创建通道」列表里（每行一个当前值），不在此处编造聚合。
+ */
+function resourceCurrentBaud(resource: BusResource): number {
+  if (activeBusType.value !== 'uart') return 0
+  for (const ch of resourceMountedChannels(resource)) {
+    const rate = baudCurrentRate(ch)
+    if (rate !== null) return rate
+  }
+  return 0
 }
 
 function canonicalHardwareId(type: BusType, rawId: unknown): number | null {
@@ -1537,8 +1605,19 @@ function resourceParameters(resource: BusResource): string[] {
     if (frequency) values.push(frequency)
     if (resource.mode) values.push(resource.mode === 'master' ? '主机' : '从机')
   } else if (activeBusType.value === 'uart') {
-    const baud = Number(resource.baud_rate || resource.max_baud)
-    if (baud > 0) values.push(`${baud} baud`)
+    // 这里显示的是**能力上限**，不是当前波特率（2026-10-03 缺陷 4）。
+    // 旧代码写 `resource.baud_rate || resource.max_baud`，而 ResourceReport 的
+    // uartEntry 只有 max_baud（固件能力），没有 baud_rate 字段 —— 于是永远走
+    // 回退分支，把能力上限当成当前值显示。实测现场 max_baud=5000000，
+    // 资源表就显示「5000000 baud」，而通道里真实生效的是 4800，
+    // 这正是用户说的"波特率参数都对不上"。
+    // 当前波特率只存在通道的 bus_config 里（复用 baudCurrentRate 的读取口径），
+    // 资源层级没有通道时如实显示"未配置"，绝不拿 max_baud 冒充。
+    const maxBaud = Number(resource.max_baud)
+    if (maxBaud > 0) values.push(`最高 ${maxBaud} baud`)
+    const currentBaud = resourceCurrentBaud(resource)
+    if (currentBaud > 0) values.push(`当前 ${currentBaud} baud`)
+    else values.push('当前波特率未配置（未创建通道）')
     if (resource.data_bits) values.push(`${resource.data_bits}bit`)
   } else if (activeBusType.value === 'spi') {
     const frequency = formatFrequency(resource.clock_hz || resource.max_freq_hz)

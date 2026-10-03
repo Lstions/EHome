@@ -147,19 +147,19 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="硬件类型" width="110">
+      <!-- 总线类型：英文标签走共享 getHardwareLabel；同一行的 hardware_id 由相邻「硬件ID」列
+           承担，故本列不再重复渲染它。
+           改前这里是「硬件类型 + 硬件ID + 总线类型」三列：前两列与总线类型列同源
+           （都来自 row.hardware_type），却一个走 toUpperCase、一个走页面私有 map，
+           于是同一事实在一行里出现两种写法（UART / 串行）。 -->
+      <el-table-column label="总线类型" width="110">
         <template #default="{ row }">
           <el-tag :type="getHardwareTagType(row.hardware_type)" size="small" effect="plain">
-            {{ row.hardware_type?.toUpperCase() }}
+            {{ getHardwareLabel(row.hardware_type) }}
           </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="hardware_id" label="硬件ID" width="120" />
-      <el-table-column label="总线类型" width="100">
-        <template #default="{ row }">
-          {{ getBusTypeLabel(row.hardware_type) }}
-        </template>
-      </el-table-column>
       <el-table-column prop="address" label="地址" width="100">
         <template #default="{ row }">
           <span v-if="row.address">{{ row.address }}</span>
@@ -238,7 +238,7 @@ import { useNodeStore } from '@/stores/node'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { getHardwareTagType } from '@/utils/hardwareTag'
+import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 
 const router = useRouter()
 const nodeStore = useNodeStore()
@@ -410,19 +410,6 @@ const emptyDescription = computed(() => {
   }
   return '还没有配置任何通道，请先在节点详情中添加通道'
 })
-
-// 工具函数
-function getBusTypeLabel(type: string): string {
-  const map: Record<string, string> = {
-    uart: '串行',
-    i2c: 'I²C',
-    spi: 'SPI',
-    gpio: '数字IO',
-    adc: '模拟',
-    pwm: 'PWM',
-  }
-  return map[type] || type
-}
 
 // 事件处理
 //

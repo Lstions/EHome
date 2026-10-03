@@ -1213,6 +1213,90 @@ static void test_short_read_reports_command_error(void) {
     teardown_test_runtime();
 }
 
+
+/* =====================================================================
+ * ChannelCmdV2 short read (2026-10-03 deficiency 1)
+ *
+ * The legacy rule above must stay: a write-response shorter than read_size
+ * is a command error.  ChannelCmdV2 is deliberately excluded from it,
+ * because read_size there is the RX window (<=256), not the vendor frame
+ * length.
+ *
+ * Why this test exists: a single-step V2 command always reaches the node as
+ * CMD_WRITE (bus_manager.c:1064).  With read_size == 0 the control used to
+ * complete with NO payload at all (bus_worker.c:985); with a positive
+ * read_size a shorter ASCII reply was turned into error 0x03.  So EVERY
+ * variable-length V2 read was broken one way or the other -- e.g. a Techfine
+ * "HBAT" snapshot returns one "(" ... CR line whose length varies by command
+ * and firmware revision.  Neither "guess the length" nor "declare zero" can
+ * work; the line-idle gap is the only frame boundary the node can actually
+ * observe, and the server owns the per-action verifier.
+ *
+ * This test fails on the pre-fix code: the final frame would carry
+ * success=false with error_code 0x03 and zero bytes of payload.
+ * ===================================================================== */
+static void test_v2_short_read_delivers_partial_payload(void) {
+    reset_counters();
+    reset_sched_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+    bus_worker_set_channel_cmd_v2_final_cb(test_control_final_cb);
+
+    /* A 12-byte ASCII line, shorter than the declared window. */
+    const char *line = "(220.5 01.2\r";
+    size_t line_len = strlen(line);
+    memcpy(g_fake_rx_data, line, line_len);
+    g_fake_rx_len = line_len;
+    g_fake_rx_pos = 0;
+    g_test_time_us = 1000;
+
+    uart_event_t ev = {0};
+    ev.type = UART_DATA;
+    ev.size = line_len;
+    uint8_t scratch[256];
+    handle_uart_event(&g_test_rt, 0, &ev, scratch, sizeof(scratch));
+    CHECK(s_streams[0].len == line_len, "fixture: the reply bytes must be accumulated");
+
+    pending_cmd_t pcmd = {0};
+    pcmd.edge_device_id = 7;
+    pcmd.command_template_id = 11;
+    pcmd.command_index = 0;
+    pcmd.read_size = 256;          /* the V2 window, not the real length */
+    pcmd.rx_timeout_ms = 1000;
+    pcmd.tx_timestamp = 1000;
+    pcmd.channel_cmd_v2 = true;    /* the behaviour under test */
+    pcmd.control_slot = 5;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE,
+          "precondition: a pending V2 request must be queued");
+
+    g_test_time_us += UART_IDLE_THRESHOLD_US + 1;
+    uint32_t done = expire_uart_state(&g_test_rt);
+    CHECK(done >= 1, "fixture: the idle boundary must complete the V2 descriptor");
+
+    /* The partial line must reach the server instead of becoming a local
+     * 0x03 error: the server verifier is the authority on whether a vendor
+     * frame is well formed. */
+    control_final_desc_t final;
+    bool got = (s_control_final_q &&
+                xQueueReceive(s_control_final_q, &final, 0) == pdTRUE);
+    CHECK(got, "a V2 short read must enqueue a control_final frame");
+    if (got) {
+        CHECK(final.slot == 5, "the final frame must carry the pending control slot");
+        CHECK(final.success,
+              "a V2 short read must be SUCCESS, not 0x03: read_size is a window");
+        CHECK(final.error_code == 0,
+              "a V2 short read must not report a local short-read error code");
+        CHECK((size_t)final.raw_len == line_len,
+              "a V2 short read must deliver exactly the bytes that arrived");
+        if ((size_t)final.raw_len == line_len) {
+            CHECK(memcmp(final.raw, line, line_len) == 0,
+                  "the delivered payload must be the received line, unmodified");
+        }
+    }
+
+    teardown_test_runtime();
+}
 /* =====================================================================
  * Main
  * ===================================================================== */
@@ -1245,6 +1329,7 @@ int main(void)
     test_rx_timeout_log_reflects_usb_bus_type();
     test_complete_response_reports_channel_success();
     test_short_read_reports_command_error();
+    test_v2_short_read_delivers_partial_payload();
 
     report_path_deinit();
 

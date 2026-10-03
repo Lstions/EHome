@@ -30,8 +30,12 @@ type reportedGPIOResource struct {
 }
 
 type reportedUARTResource struct {
-	DefaultTxPin int `json:"default_tx_pin"`
-	DefaultRxPin int `json:"default_rx_pin"`
+	ID           string `json:"id"`
+	DefaultTxPin int    `json:"default_tx_pin"`
+	DefaultRxPin int    `json:"default_rx_pin"`
+	// MaxBaud 是资源**能力上限**（不是当前生效波特率）。新建 UART 通道兜底补齐
+	// bus_config 时用它把默认速率夹在设备支持的范围内（见 ensureUARTBusConfig）。
+	MaxBaud uint64 `json:"max_baud"`
 }
 
 type reportedI2CResource struct {
@@ -158,6 +162,104 @@ func reportedBusPinConflict(resources *reportedPeripheralResources, pin int) boo
 	return false
 }
 
+// errUARTCapabilityUnavailable 标记「节点没有上报可用的 UART 资源能力」这一类失败，
+// 供调用方映射为 400（用户输入/前置条件问题），而不是 500（服务端故障）。
+// 关键语义：**宁可拒绝创建，也不落库空 bus_config** —— 后者会制造一个"以后改不了波特率"
+// 的通道，用户当下看不到任何异常，等点「改波特率」才报错。
+var errUARTCapabilityUnavailable = errors.New("uart capability unavailable")
+
+// errUARTBusConfigMalformed 标记「调用方显式给了 bus_config，但它连引脚路由都不是」
+// （例如 "zz" 非 hex）。与上一条一样映射 400：这是用户输入问题，不是服务端故障。
+//
+// 为什么不静默改写成能力值：显式提供的引脚是**用户的意图**，静默改写会让用户
+// 以为自己的引脚被采纳了（实际被丢弃），比明确拒绝更危险。
+//
+// ⚠ 2026-10-03 修正（审查发现的 P0）：这里曾经用 withUARTBaudrate 当判据，
+// 于是把「2 字节」也判成非法。**那是错的**，两个约束被混为一谈：
+//
+//	· 引脚路由合法性：UART/I2C 只要 >=2 字节（tx,rx）即合法 ——
+//	  见 channelRoutePins（handler_device.go:96-100）。仿真套件与存量库都在用 2 字节。
+//	· 可改波特率：需要 >=6 字节（字节 2..5 存波特率）—— withUARTBaudrate 的要求。
+//
+// 用「可改波特率」当「合法性」判据，会把合法的 2 字节引脚路由一并拒绝：
+// 实测仿真套件 4 处 UART bus_config 字面量（chan.go:482、edge.go:608、
+// scene.go:247、auto.go:242）全是 <6 字节且断言 201 ⇒ -tags=simulation 门禁大面积变红。
+//
+// 正确的分工：本函数只保证**引脚路由合法**（>=2 且 hex）；
+// 「能否改波特率」是另一个独立事实，由 minUARTBusConfigLenForBaudrate 显式判定，
+// 不再拿它当拒绝理由 —— 拒绝一个能正常下发引脚、只是暂时改不了波特率的通道，
+// 属于用错误的手段达成正确目标（用户连通道都建不出来了）。
+var errUARTBusConfigMalformed = errors.New("uart bus_config malformed")
+
+// uartBusConfigMinRouteLen 是 UART 引脚路由的**最小**长度：tx(1B) + rx(1B)。
+// 与 channelRoutePins 的判据保持一致，不要各写一份。
+const uartBusConfigMinRouteLen = 2
+
+// uartBusConfigMinBaudLen 是「可改波特率」所需的**最小**长度：
+// 字节 2..5 存 big-endian uint32 波特率，故至少 6 字节。
+const uartBusConfigMinBaudLen = 6
+
+// ensureUARTBusConfig 保证 UART 通道落库的 bus_config 一定可解析、可改波特率。
+//
+// 背景（2026-10-03 实测）：前端组装 bus_config 依赖 capabilities.buses.uart 里能按 id 找到
+// 该资源；资源能力尚未上报、或 hardware_id 与资源 id 不完全相等时，前端**静默**产出空串，
+// 后端又原样落库 ⇒ 用户得到一个"改不了波特率"的通道（reconfigure 报 bus_config 为空）。
+// 后端不能信任调用方一定带了 bus_config，故在此兜底。
+//
+// 规则（三种输入，三种归宿）：
+//   - 非空且**是合法引脚路由**（hex 且 >=2 字节）⇒ 原样保留；
+//     此时若长度 <6，它**暂时改不了波特率**，但那是可接受的中间状态：
+//     通道能正常下发引脚、能被节点解析，用户后续可用补丁式 PUT 补齐波特率字段。
+//     刻意**不**因此拒绝 —— 见 errUARTBusConfigMalformed 上方的说明。
+//   - 非空但**连引脚路由都不是**（非 hex / <2 字节）⇒ errUARTBusConfigMalformed（400）；
+//   - **空** ⇒ 按节点 ResourceReport（nodes.capabilities 的 buses.uart[]）里的
+//     default_tx_pin/default_rx_pin + 默认波特率补齐（造出的一定是 10 字节、可改波特率）；
+//   - 能力里查不到该资源 / 节点无能力 ⇒ errUARTCapabilityUnavailable（映射 400）。
+func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
+	if ch == nil {
+		return fmt.Errorf("channel is required")
+	}
+	if trimmed := strings.TrimSpace(ch.BusConfig); trimmed != "" {
+		// 只校验「引脚路由是否合法」，不要求「可改波特率」。
+		// 复用 channelRoutePins 的同一判据，避免两处阈值漂移。
+		if _, err := channelRoutePins(*ch); err != nil {
+			return fmt.Errorf("%w：UART 通道 bus_config 非法（%q）：%v", errUARTBusConfigMalformed, ch.BusConfig, err)
+		}
+		return nil
+	}
+	if node == nil {
+		return fmt.Errorf("%w: 节点不存在，无法确定 UART 资源能力", errUARTCapabilityUnavailable)
+	}
+	var resources reportedPeripheralResources
+	if strings.TrimSpace(node.Capabilities) == "" || json.Unmarshal([]byte(node.Capabilities), &resources) != nil {
+		return fmt.Errorf("%w: 节点 %s 尚未上报硬件资源能力，无法为 UART 通道补齐 bus_config（请等待资源上报后重试）",
+			errUARTCapabilityUnavailable, node.NodeID)
+	}
+	hardwareID := strings.TrimSpace(ch.HardwareID)
+	for i := range resources.Buses.UART {
+		entry := resources.Buses.UART[i]
+		if !strings.EqualFold(strings.TrimSpace(entry.ID), hardwareID) {
+			continue
+		}
+		if entry.DefaultTxPin <= 0 || entry.DefaultRxPin <= 0 {
+			return fmt.Errorf("%w: UART 资源 %s 上报的默认引脚无效（TX=%d, RX=%d）",
+				errUARTCapabilityUnavailable, entry.ID, entry.DefaultTxPin, entry.DefaultRxPin)
+		}
+		baud := defaultUARTBaudrate
+		if entry.MaxBaud > 0 && entry.MaxBaud < uint64(baud) {
+			// 能力上限低于默认值时退到上限，不造一个设备明确不支持的速率。
+			baud = int(entry.MaxBaud)
+		}
+		// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）：
+		// 传 true 得到 0x01，与生产既有三条 UART 行一致。帧格式 8N1 由固件硬编码，
+		// 不编进 bus_config（UART 分支不读 byte 7..9）。
+		ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, true)
+		return nil
+	}
+	return fmt.Errorf("%w: 节点 %s 上报的资源里没有 UART 资源 %q（请先在设备侧上报该资源，或检查 hardware_id）",
+		errUARTCapabilityUnavailable, node.NodeID, hardwareID)
+}
+
 func validateReportedGPIO(db *gorm.DB, node *models.Node, pin int) error {
 	var resources reportedPeripheralResources
 	if node.Capabilities == "" || json.Unmarshal([]byte(node.Capabilities), &resources) != nil || len(resources.Buses.GPIO) == 0 {
@@ -190,6 +292,12 @@ func isUniqueConstraintError(err error) bool {
 }
 
 var errPeripheralPinConflict = errors.New("peripheral pin conflict")
+
+// errChannelPinConflict 表示候选通道与**同节点其它通道**抢同一 GPIO。
+// 与 errPeripheralPinConflict（通道 vs GPIO/PWM 配置）分开，是为了让 HTTP
+// 层能给出可行动的提示（"换个串口/引脚"），而不是笼统的 409。
+var errChannelPinConflict = errors.New("channel route conflicts with another channel")
+
 
 func createGPIOConfigWithPinExclusion(db *gorm.DB, nodeID string, cfg *models.GPIOConfig) error {
 	return db.Transaction(func(tx *gorm.DB) error {

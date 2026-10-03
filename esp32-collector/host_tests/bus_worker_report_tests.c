@@ -697,7 +697,29 @@ static void test_idle_completion_chunked_no_residual(void) {
     rt.pending_queues[0] = NULL;
 }
 
-static void test_idle_short_read_is_failure(void) {
+/* Short read, ChannelCmdV2.  The expectation here flipped on 2026-10-03.
+ *
+ * Old contract: any reply shorter than read_size was a local failure with
+ * error 0x03.  That is correct for a fixed-length protocol (Modbus), but
+ * ChannelCmdV2 carries no per-action length and read_size is only the RX
+ * window (<= 256, the control-final buffer size).  A GB3024 inverter answers
+ * with one ASCII line of ~15-40 bytes whose length is not knowable to the
+ * node, so "shorter than the window" is the NORMAL case, not an error:
+ * failing it locally made every variable-length read unusable, while the
+ * alternative (read_size == 0) completed the control with no payload at all
+ * (bus_worker.c:985).  Either way the action could never work.
+ *
+ * New contract: for V2 the 10 ms line-idle gap IS the frame boundary.  The
+ * node delivers the bytes that arrived; the server applies the authoritative
+ * per-action verifier (commandexec.VerifyFinal -> driver VerifyControlAction),
+ * and a malformed or truncated line becomes final_failed there
+ * (nodemgr/handler_channel_cmd_v2.go:54-56).  So a bad frame still fails --
+ * it just fails where the vendor frame format is actually known.
+ *
+ * The legacy write-response rule is deliberately NOT relaxed; the sibling
+ * test test_idle_short_read_legacy_is_failure below pins that.
+ */
+static void test_idle_short_read_is_delivered_for_v2(void) {
     reset_counters();
     drain_report_queues();
     bus_worker_set_channel_cmd_v2_final_cb(test_control_final_cb);
@@ -719,18 +741,66 @@ static void test_idle_short_read_is_failure(void) {
     memset(s_streams[0].buffer, 0x44, 40);
 
     CHECK(complete_idle_response(&rt, 0, 15000),
-          "idle short read should complete as a failure");
+          "idle short read should complete for V2");
     control_final_desc_t final;
     bool got = s_control_final_q && xQueueReceive(s_control_final_q, &final, 0) == pdTRUE;
     CHECK(got,
           "short V2 read should queue a final result");
     if (got && final.slot == 9) {
-        CHECK(final.success == false, "short V2 read must not be successful");
-        CHECK(final.error_code == 0x03, "short V2 read should use error 0x03");
+        CHECK(final.success == true,
+              "short V2 read must be delivered: read_size is a window, not a frame length");
+        CHECK(final.raw_len == 40,
+              "short V2 read must carry every byte that arrived");
     }
     CHECK(uxQueueMessagesWaiting(rt.pending_queues[0]) == 0,
           "short read pending descriptor should be consumed");
     CHECK(s_streams[0].len == 0, "short read buffer should be cleared");
+
+    vQueueDelete(rt.pending_queues[0]);
+    rt.pending_queues[0] = NULL;
+}
+
+/* The counterpart: the legacy (non-V2) write-response path must STILL treat a
+ * short reply as an error, otherwise the V2 exemption above would have
+ * silently weakened every Modbus read in the system. */
+static void test_idle_short_read_legacy_is_failure(void) {
+    reset_counters();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, NULL);
+
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    rt.bus_ch[0] = 92;
+    rt.pending_queues[0] = xQueueCreate(PENDING_QUEUE_DEPTH, sizeof(pending_cmd_t));
+
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.read_size = 100;
+    pcmd.channel_cmd_v2 = false;   /* the path that must keep failing short reads */
+    pcmd.request_id = 7;
+    xQueueSend(rt.pending_queues[0], &pcmd, 0);
+
+    s_last_rx_us[0] = 1000;
+    s_streams[0].len = 40;
+    memset(s_streams[0].buffer, 0x44, 40);
+
+    CHECK(complete_idle_response(&rt, 0, 15000),
+          "legacy idle short read should complete as a failure");
+    CHECK(uxQueueMessagesWaiting(rt.pending_queues[0]) == 0,
+          "legacy short read pending descriptor should be consumed");
+    CHECK(s_streams[0].len == 0, "legacy short read buffer should be cleared");
+    /* It must be reported as an error on the telemetry path, not as data. */
+    report_desc_t desc;
+    bool saw_error = false;
+    while (s_report_telemetry_q && xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE) {
+        if (desc.error_code == 0x03) saw_error = true;
+        report_free_block(false, desc.block_index);
+    }
+    while (s_report_critical_q && xQueueReceive(s_report_critical_q, &desc, 0) == pdTRUE) {
+        if (desc.error_code == 0x03) saw_error = true;
+        report_free_block(true, desc.block_index);
+    }
+    CHECK(saw_error, "legacy short read must still report error 0x03");
 
     vQueueDelete(rt.pending_queues[0]);
     rt.pending_queues[0] = NULL;
@@ -948,7 +1018,8 @@ int main(void) {
     test_idle_no_completion_when_last_rx_zero();
     test_idle_completion_with_pending_cmd();
     test_idle_completion_chunked_no_residual();
-    test_idle_short_read_is_failure();
+    test_idle_short_read_is_delivered_for_v2();
+    test_idle_short_read_legacy_is_failure();
     test_idle_overflow_is_failure();
     test_timeout_discards_partial_stream();
     test_idle_no_completion_empty_no_chunked();

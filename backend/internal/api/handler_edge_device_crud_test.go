@@ -26,6 +26,20 @@ func init() {
 // setupEdgeDeviceTest creates a test router with DB and edge-device routes.
 func setupEdgeDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
+	return setupEdgeDeviceTestWithRegistry(t, nil)
+}
+
+// setupEdgeDeviceTestWithRegistry 在标准测试环境上允许调用方追加自定义驱动。
+//
+// 为什么需要：某些用例要验证"已知但不可调度的命令 id 被拒"，这需要一个真正
+// 声明了 Schedulable=false 模板的驱动。用内置驱动当这种 fixture 是脆弱的 ——
+// 演进方案 C6 曾让 techfine_inverter 的模板集合清空，2026-10-03 又因现场缺陷
+// 恢复为全部 schedulable；两次变动都会让该用例静默地失去被测语义（仍通过，
+// 但走的是"未知 id"分支）。显式 stub 让 fixture 的生命周期与被测契约绑定。
+//
+// customize 为 nil 时行为与 setupEdgeDeviceTest 完全一致。
+func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Registry)) (*gin.Engine, *gorm.DB) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -40,12 +54,19 @@ func setupEdgeDeviceTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 		&models.NodeEvent{}, &models.CalibrationCache{},
 		&models.PendingWriteRecord{},
 		&models.LogicalDevice{},
+		// 2026-10-03：向导内联建 UART 通道现在会按能力补齐 bus_config，
+		// 于是 validateChannelPeripheralConflicts 会真的执行（旧实现 bus_config 为空时跳过），
+		// 必须像 setupDeviceTest 一样迁移这两张表，否则报 "no such table: gpio_configs"。
+		&models.GPIOConfig{}, &models.PWMConfig{},
 	)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(registry)
+	if customize != nil {
+		customize(registry)
+	}
 	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
 	registerEdgeDeviceRoutes(v1, db, mgr, registry)
 	return r, db

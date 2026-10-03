@@ -51,11 +51,12 @@ func TestCheckDBLastSeen_NoNodes(t *testing.T) {
 }
 
 // TestCheckDBLastSeen_OfflineNode verifies that a node whose last_seen is
-// older than 90s (and no Redis heartbeat) gets marked offline.
+// older than NodeOfflineThreshold (and no Redis heartbeat) gets marked offline.
+// 阈值引用生产常量，测试不再自带一份字面量。
 func TestCheckDBLastSeen_OfflineNode(t *testing.T) {
 	d, db := setupExtraDetector(t)
 
-	oldTime := time.Now().Add(-120 * time.Second)
+	oldTime := time.Now().Add(-(NodeOfflineThreshold + time.Second))
 	node := ehomeModels.Node{
 		NodeID:   "offline-test-001",
 		Status:   "online",
@@ -185,7 +186,7 @@ func TestOnEdgeDeviceOffline(t *testing.T) {
 }
 
 // TestCheckEdgeDevicesOffline_StaleDevice verifies that a device with stale
-// data (>60s) is marked offline in the DB.
+// data (>EdgeDeviceOfflineThreshold) is marked offline in the DB.
 func TestCheckEdgeDevicesOffline_StaleDevice(t *testing.T) {
 	d, db := setupExtraDetector(t)
 
@@ -197,8 +198,8 @@ func TestCheckEdgeDevicesOffline_StaleDevice(t *testing.T) {
 	}
 	db.Create(&dev)
 
-	// Simulate stale data — set lastData to 120s ago
-	staleTime := time.Now().Add(-120 * time.Second)
+	// Simulate stale data — set lastData to just beyond the edge threshold
+	staleTime := time.Now().Add(-(EdgeDeviceOfflineThreshold + time.Second))
 	d.mu.Lock()
 	d.activeDevices[dev.ID] = staleTime
 	d.cacheReady = true
@@ -224,7 +225,7 @@ func TestCheckEdgeDevicesOffline_StaleDevice(t *testing.T) {
 }
 
 // TestCheckEdgeDevicesOffline_RecentDevice verifies that a device with recent
-// data (<60s) is NOT marked offline.
+// data (<EdgeDeviceOfflineThreshold) is NOT marked offline.
 func TestCheckEdgeDevicesOffline_RecentDevice(t *testing.T) {
 	d, db := setupExtraDetector(t)
 
@@ -235,8 +236,8 @@ func TestCheckEdgeDevicesOffline_RecentDevice(t *testing.T) {
 	}
 	db.Create(&dev)
 
-	// Set recent data — 10s ago
-	recentTime := time.Now().Add(-10 * time.Second)
+	// Set recent data — half the edge threshold ago
+	recentTime := time.Now().Add(-EdgeDeviceOfflineThreshold / 2)
 	d.mu.Lock()
 	d.activeDevices[dev.ID] = recentTime
 	d.cacheReady = true
@@ -299,4 +300,20 @@ func (d *Detector) pending_deviceCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.activeDevices)
+}
+
+// TestEdgeDeviceThresholdExceedsPollingPeriod 钉死"两套口径"的原因：
+// 边缘设备按 interval_ms 轮询（BMS 实测 5000ms），阈值必须显著大于轮询周期。
+// 如果有人图省事把 EdgeDeviceOfflineThreshold 也改成 3s，本用例变红，
+// 否则所有按 5s 轮询的设备会在正常间隙里被判离线并永久停留 offline。
+func TestEdgeDeviceThresholdExceedsPollingPeriod(t *testing.T) {
+	const bmsPollingPeriod = 5 * time.Second // BMS interval_ms 实测值
+	if EdgeDeviceOfflineThreshold <= bmsPollingPeriod {
+		t.Errorf("edge-device threshold %s must stay well above the %s polling period",
+			EdgeDeviceOfflineThreshold, bmsPollingPeriod)
+	}
+	if EdgeDeviceOfflineThreshold == NodeOfflineThreshold {
+		t.Errorf("edge-device threshold must NOT be collapsed onto the node threshold (%s): "+
+			"they are two different clocking regimes", NodeOfflineThreshold)
+	}
 }

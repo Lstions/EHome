@@ -35,8 +35,9 @@
                 v-for="bus in p.hardware_types"
                 :key="bus"
                 size="small"
+                :type="getHardwareTagType(bus)"
                 style="margin-left: 6px;"
-              >{{ bus.toUpperCase() }}</el-tag>
+              >{{ getHardwareLabel(bus) }}</el-tag>
             </div>
           </el-option>
         </el-select>
@@ -54,7 +55,7 @@
           <el-option
             v-for="ch in filteredChannels"
             :key="ch.id"
-            :label="`${(ch.hardware_type || '').toUpperCase()} ${ch.hardware_id}${ch.address ? ' / ' + ch.address : ''}`"
+            :label="`${getHardwareLabel(ch.hardware_type)} ${ch.hardware_id}${ch.address ? ' / ' + ch.address : ''}`"
             :value="ch.id ?? 0"
           />
         </el-select>
@@ -162,6 +163,7 @@ import LogicalDeviceCandidateSelect from '@/components/device/LogicalDeviceCandi
 import CreateWizardCommandIntervals from '@/components/device/CreateWizardCommandIntervals.vue'
 import type { Parser } from '@/api/parser'
 import type { Channel } from '@/api/channel'
+import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 import {
   DEVICE_ADDRESS_ERROR,
   DEVICE_ADDRESS_HINT,
@@ -253,7 +255,7 @@ const filteredChannels = computed(() => {
 })
 
 const selectedParserBusTypesText = computed(() =>
-  (selectedParser.value?.hardware_types || []).map(b => b.toUpperCase()).join('/'),
+  (selectedParser.value?.hardware_types || []).map(b => getHardwareLabel(b)).join('/'),
 )
 
 // R2: 通道加载中状态(来自父级 NodeDetail 的 devicesLoading)

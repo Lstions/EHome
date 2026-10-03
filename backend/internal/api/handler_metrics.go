@@ -28,6 +28,14 @@ type MetricsResponse struct {
 	Device struct {
 		Online  int64 `json:"online"`
 		Offline int64 `json:"offline"`
+		// Pending 是「已创建但尚未收到任何数据」的设备数（models.EdgeDeviceStatusPending）。
+		// 2026-10-03 缺陷 5：此前 offline 用的是 status <> active，会把新建的
+		// pending 设备算进「离线」——与"没数据却显示在线"是同一类错误，只是方向相反：
+		// 刚建好的设备会被监控页报成故障。三态必须分开计数：
+		// online（采到数据）/ pending（等第一帧）/ offline（超时未上报）。
+		// 消费端（Monitor.vue 的 deviceTotal）用 online+offline 求和，
+		// 因此前端需要一并把 pending 计入总数，否则百分比的分母会漏掉一部分设备。
+		Pending int64 `json:"pending"`
 	} `json:"device"`
 	Node struct {
 		Online  int64 `json:"online"`
@@ -88,11 +96,18 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 		resp.MQTT.ConnectionErrors = 0 // not tracked yet
 
 		// DB counts
-		var devOnline, devOffline int64
-		db.Model(&models.EdgeDevice{}).Where("status = ?", "active").Count(&devOnline)
-		db.Model(&models.EdgeDevice{}).Where("status <> ?", "active").Count(&devOffline)
+		// 三态分开计数，offline 不再用 `status <> active` 兜底：那样会把新建的
+		// pending 设备算成离线（2026-10-03 缺陷 5）。
+		// 残余的未知状态值归入 offline（保守：宁可报异常也不要谎报在线）。
+		var devOnline, devOffline, devPending int64
+		db.Model(&models.EdgeDevice{}).Where("status = ?", models.EdgeDeviceStatusActive).Count(&devOnline)
+		db.Model(&models.EdgeDevice{}).Where("status = ?", models.EdgeDeviceStatusPending).Count(&devPending)
+		db.Model(&models.EdgeDevice{}).
+			Where("status NOT IN ?", []string{models.EdgeDeviceStatusActive, models.EdgeDeviceStatusPending}).
+			Count(&devOffline)
 		resp.Device.Online = devOnline
 		resp.Device.Offline = devOffline
+		resp.Device.Pending = devPending
 
 		var nodeOnline, nodeOffline int64
 		db.Model(&models.Node{}).Where("status = ?", "online").Count(&nodeOnline)

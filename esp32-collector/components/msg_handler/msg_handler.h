@@ -58,6 +58,22 @@ void msg_handler_send_query_rsp(const char *request_id, bool success, const char
 void msg_handler_send_config_report(const char *request_id);
 void msg_handler_send_resource_report(void);
 
+/* === v2.6 crash diagnostics === */
+
+/**
+ * 服务端确认回调签名：record_id + accepted。
+ * 实现方（main/crash_diag.c）在 accepted=true 时删除对应 NVS 记录。
+ */
+typedef void (*diag_ack_cb_t)(uint32_t record_id, bool accepted);
+
+/** 注入崩溃记录确认回调（DIP：避免 msg_handler -> main 的组件环）。 */
+void msg_handler_set_diag_ack_cb(diag_ack_cb_t cb);
+
+/** 读取已注入的回调；未注入时返回 NULL。 */
+diag_ack_cb_t msg_handler_get_diag_ack_cb(void);
+
+void handler_diag_process_ack(frame_decoder_t *dec);
+
 /* === Publish raw frame via current transport (MQTT/TCP) === */
 void msg_handler_publish(const uint8_t *data, size_t len);
 

@@ -26,10 +26,71 @@ func (d *TechfineInverterDriver) Category() string        { return "inverter" }
 func (d *TechfineInverterDriver) HardwareTypes() []string { return []string{"uart"} }
 
 // ControlActions exposes only documented, side-effect-free ASCII queries.
-// They are individually disabled until the target GB3024 hardware evidence
-// gate is met.  In particular, neither SON nor any CRC-bearing setting is
-// represented here: the V0.5 document does not define the CRC algorithm or
-// provide a verifiable write/readback capture.
+//
+// All eleven are ENABLED (2026-10-03).  They were hard-coded Enabled:false as a
+// development rollout gate ("until GB3024 hardware evidence is recorded"), but
+// that gate had no configuration entry point -- SetEnabled is a
+// composition-root/test primitive, docs/设计/设备指令与操作体系演进方案.md
+// §4.1 says so explicitly -- so the effect on a real deployment was simply
+// "eleven operations are visible and unusable": the edge-device UI listed
+// every one of them as "action is not enabled for rollout".
+// A gate nobody can open is not a gate, it is a permanent disablement.
+//
+// Re-enabling them is safe for the reason that gate was about *writes*, not
+// reads: these are pure ASCII queries with no side effect, so a wrong frame or
+// a silent inverter produces a timeout (a failed execution) and can never
+// corrupt inverter state.  The fail-closed write gate is untouched and stays
+// enforced elsewhere: no SON, no CRC-bearing setting and no parameter write is
+// represented here at all, because the V0.5 document does not define the CRC
+// algorithm and provides no verifiable write/readback capture.
+//
+// Process: the same document (§4.2 item 3) requires an unfreeze to flip the
+// guarded assertion in the same change and to register the action in the gate
+// ledger.  Both are done:
+//   · backend/internal/deviceaction/definition_test.go -- the GB3024 read
+//     assertions flipped to "enabled", plus a new guard proving the
+//     AvailabilityCode actions (reset_rainfall / clear_rainfall_write) still
+//     fail closed.
+//   · docs/分析/动作门禁台账.md -- ledger row for these eleven actions.
+//
+// Firmware dependency (this is the part that was actually broken, and it is
+// why enabling the flag alone would not have been enough): the driver used to
+// declare ReadSize 256 while a GB3024 reply is a single ASCII line of roughly
+// 15-40 bytes.  A single-step ChannelCmdV2 command reaches the node as
+// CMD_WRITE (bus_manager.c:1064), where a reply shorter than read_size was
+// converted into error 0x03 by complete_idle_response(), and read_size == 0
+// instead completed the control with no payload at all (:985).  Every
+// variable-length read was therefore broken either way.  The node now treats
+// the line-idle gap as the frame boundary for V2 (bus_worker.c, "short-read
+// rule"), which keeps the legacy write-response rule intact.  Without that
+// firmware change these eleven actions stay unusable no matter what Enabled
+// says, which is precisely why the flag was never the real gate.
+//
+// ReadSize is the node's *upper* read window here, deliberately set to the
+// protocol maximum (256) rather than the real line length.
+//
+// Why not the exact length: a Techfine reply is one ASCII line whose byte
+// count varies by command and firmware revision, and the node uses read_size
+// as a hard boundary, not a hint.  bus_rx_boundary.h:18 buffers until that
+// many bytes arrived (so any value larger than the real line simply never
+// completes), while a value smaller than the real line makes
+// emit_ready_stream_chunks() cut the line at that length
+// (bus_worker.c:1197-1213) and hand a truncated frame to the parser.  There is
+// no single "correct" exact length to guess.
+//
+// 256 is reachable in the other direction: a line shorter than the window is
+// delivered when the line goes idle (10 ms gap).  That delivery requires the
+// node's ChannelCmdV2 short-response rule -- see
+// docs/分析/六项缺陷诊断与修复方案-2026-10-03.md 缺陷 1 -- where a V2 response
+// that is shorter than read_size is passed to the server instead of being
+// turned into error_code=3 locally.  That split is deliberate: for V2 the node
+// cannot know a vendor frame's true length, and the server already owns the
+// authoritative per-action verifier (VerifyControlAction), which rejects
+// anything that is not a well-formed '(' ... '\r' response.  On a node without
+// that rule these actions still fail closed (they error, they do not fake a
+// success), which is why enabling them cannot silently corrupt anything.
+//
+// RXTimeoutMS remains the hard bound so a silent inverter still fails.
 func (d *TechfineInverterDriver) ControlActions() []ControlAction {
 	return []ControlAction{
 		techfineReadAction("read_status", "读取运行状态", "HSTS\r", "故障代码、运行模式与告警标志"),
@@ -49,9 +110,10 @@ func (d *TechfineInverterDriver) ControlActions() []ControlAction {
 func techfineReadAction(id, name, command, description string) ControlAction {
 	return ControlAction{
 		ID: id, Version: 1, Name: name, Description: description,
-		Semantics: "read", Risk: "low", Enabled: false,
-		// UART worker returns the entire line-idle-delimited response.  The
-		// envelope cap protects memory and fails closed if the device exceeds it.
+		Semantics: "read", Risk: "low", Enabled: true,
+		// UART worker returns the entire line-idle-delimited response; the window
+		// is the protocol max because the exact line length is not knowable.  See
+		// the ControlActions comment above.
 		TXData: []byte(command), ReadSize: 256, RXTimeoutMS: 1000,
 	}
 }
@@ -72,7 +134,137 @@ func (d *TechfineInverterDriver) VerifyControlAction(actionID string, params jso
 	if !ok {
 		return nil, fmt.Errorf("unknown techfine control action %q", actionID)
 	}
-	return d.ParseDataWithCommand(raw, hex.EncodeToString([]byte(command)))
+	// 帧完整性：GB3024 的每一条响应都以 CR 结尾（查询帧本身也是 "<CMD>\r"，
+	// 见上面的命令表）。校验结尾不是"锦上添花"，而是**必需的**：
+	//
+	// 2026-10-03 主控自查发现（P0）：节点侧对 ChannelCmdV2 改为「行空闲即帧边界」后，
+	// 短于 read_size 的响应不再在节点本地被丢成 error 0x03，而是原样投递上来。
+	// 若这里不校验结尾，一个被截断的 ASCII 行会**通过校验并产出错误数值**：
+	// 例如 "(220.5 08.0 0" 会被 ParseData 解析成 pv2_power=0（本该是 960），
+	// 于是"读取失败"退化成"静默的假数据"——比失败更糟，用户无从察觉。
+	//
+	// 判据放在 verifier 而不是 ParseData：ParseData 也被轮询路径（CMD_SAMPLE）调用，
+	// 那条路径的定帧由节点侧负责，收紧它会影响既有轮询行为；
+	// 而 V2 控制动作的权威校验点就是这里。
+	if len(raw) == 0 || raw[len(raw)-1] != '\r' {
+		return nil, fmt.Errorf("techfine %s: response is not CR-terminated (len=%d, tail=%q) — 截断或畸形帧拒绝采信",
+			actionID, len(raw), tailForError(raw))
+	}
+	data, err := d.ParseDataWithCommand(raw, hex.EncodeToString([]byte(command)))
+	if err != nil {
+		return nil, err
+	}
+	// 形状绑定（2026-10-03 固件审查发现，P0）：**仅校验 CR 结尾是不够的**。
+	//
+	// ParseData 是按「字段数/格式」嗅探分支的，它不绑定所请求的动作：
+	// 一个 CR 结尾但形状错误的帧会被解析成**别的传感器**并当成成功。实测：
+	//
+	//	请求 read_battery，喂 HGRID 形状 → 返回 grid_voltage/grid_frequency
+	//	请求 read_status，喂被截短的 HSTS → 12 个告警位全 0（**fail-open**：
+	//	  截短的状态帧被读成"一切正常"，这是最危险的一种）
+	//	请求 read_temperature，喂 HBAT 形状 → 返回 battery_* 字段
+	//
+	// 这是本批改动放行短读后新增的暴露面（改动前 <256 字节会被节点本地 0x03 拒绝）。
+	// 因此每个动作必须绑定**它期望的传感器族**：返回的字段必须全部属于该族，
+	// 否则判为「响应与请求不符」并失败。
+	if err := expectActionSensors(actionID, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// techfineActionSensorFamily 把每个动作绑定到它期望的传感器名前缀。
+//
+// 为什么用「前缀族」而不是「精确字段集合」：同一动作在不同固件版本上返回的
+// 字段数可能不同（例如 HSTS 的告警位数量、HEEP1 的尾部填充），精确集合会因
+// 版本差异误拒合法响应；而族前缀（grid_/output_/battery_/...）足以区分
+// 「这个响应根本不是我要的那类数据」。
+var techfineActionSensorFamily = map[string][]string{
+	"read_status":      {"fault_code", "work_mode", "alarm_"},
+	"read_grid":        {"grid_"},
+	"read_output":      {"output_"},
+	"read_battery":     {"battery_", "bus_voltage"},
+	"read_pv1":         {"pv1_"},
+	"read_pv2":         {"pv2_"},
+	"read_temperature": {"pv_temp", "inverter_temp", "boost_temp", "transformer_temp", "max_temp", "pv2_temp", "dc_rectifier_temp", "fan"},
+	"read_energy":      {"daily_energy", "monthly_energy", "yearly_energy", "total_energy"},
+	"read_bms":         {"bms_"},
+	"read_eeprom":      {"eeprom_"},
+	"read_version":     {"software_"},
+}
+
+// techfineActionMinSensors 是每个动作期望的**最少**字段数。
+//
+// 为什么还需要它（族前缀检查不够）：一个"同族但被截短"的帧产出的字段是**子集**，
+// 族检查会放行。实测两个 fail-open 案例：
+//
+//	read_status 喂 "(00 P0000\r"（HSTS 的告警串被截到 5 字符）→
+//	  仍返回 12 个 alarm_* 且**全为 0**，即"一切正常"。
+//	  这是最危险的一类：设备明明可能正在报警，界面显示无告警。
+//	read_pv2 喂 "(220.5 08.0 0\r"（功率字段被截）→ 返回 pv2_power=0。
+//
+// 因此除了"字段必须同族"，还要求"字段数不少于该动作的完整形状"。
+// 取的是各 parser 的字段数下界（与 parse* 内部的 need >=N 校验一致）。
+var techfineActionMinSensors = map[string]int{
+	"read_status":      14, // fault_code + work_mode + 12 个告警位
+	"read_grid":        2,  // grid_voltage + grid_frequency
+	"read_output":      5,  // output_voltage/frequency/apparent/active/load
+	"read_battery":     5,  // battery_voltage/capacity/charge/discharge + bus_voltage
+	"read_pv1":         3,  // pv1_voltage/current/power
+	"read_pv2":         3,  // pv2_voltage/current/power
+	"read_temperature": 5,  // 至少 5 个温度通道
+	"read_energy":      4,  // daily/monthly/yearly/total
+	"read_bms":         10,
+	"read_eeprom":      15,
+	"read_version":     2,  // software_version + software_date
+}
+
+// expectActionSensors 校验解析结果确实属于该动作期望的传感器族，且形状完整。
+//
+// 两道判据缺一不可：
+//   1. **每一个**返回字段都必须属于期望族（拦"喂错形状"）；
+//   2. 字段数不得少于该动作的完整形状（拦"同族但被截短"）。
+// 只做 1 会放过截短的 HSTS（12 个告警位全 0 = fail-open）；
+// 只做 2 会放过"字段数够但根本不是这个动作"的错配帧。
+func expectActionSensors(actionID string, data []SensorData) error {
+	allowed, ok := techfineActionSensorFamily[actionID]
+	if !ok {
+		// 未登记的动作不静默放行：新增动作时必须显式声明期望形状，
+		// 否则这条防线的覆盖面会随动作增加而静默缩水。
+		return fmt.Errorf("techfine %s: no expected sensor family registered — 新增动作必须同时声明形状绑定", actionID)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("techfine %s: response produced no sensor values", actionID)
+	}
+	for _, sd := range data {
+		if !sensorNameMatchesFamily(sd.Name, allowed) {
+			return fmt.Errorf("techfine %s: response contained %q which does not belong to the expected sensor family %v — 响应与请求的动作不符（错配或截断帧）",
+				actionID, sd.Name, allowed)
+		}
+	}
+	if min := techfineActionMinSensors[actionID]; min > 0 && len(data) < min {
+		return fmt.Errorf("techfine %s: response yielded only %d sensor values, expected at least %d — 帧形状不完整（很可能是被截断的响应，拒绝采信以免产生静默假数据）",
+			actionID, len(data), min)
+	}
+	return nil
+}
+
+func sensorNameMatchesFamily(name string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// tailForError 截取用于报错信息的尾部片段（最多 16 字节），避免把整帧塞进日志。
+func tailForError(raw []byte) string {
+	const maxTail = 16
+	if len(raw) > maxTail {
+		raw = raw[len(raw)-maxTail:]
+	}
+	return string(raw)
 }
 
 // GetSensorDefinitions returns all sensor definitions for HA Discovery.
@@ -345,12 +537,17 @@ func (d *TechfineInverterDriver) parseHSTS(fields []string) ([]SensorData, error
 	}
 
 	// Alarm flags are positions 1..12 in the status string
-	alarmFlags := ""
-	if len(statusStr) >= 13 {
-		alarmFlags = statusStr[1:13]
-	} else if len(statusStr) > 1 {
-		alarmFlags = statusStr[1:]
+	// 状态串必须是 1 个模式字符 + 12 个告警位（共 13 字符）。
+	//
+	// 2026-10-03 固件审查发现（P0，fail-open）：原实现在串短于 13 时
+	// 只取到多少算多少，缺失的告警位在下面被默认成 0 —— 于是
+	// "(00 P0000\r"（告警串被截到 5 字符）会返回 12 个 alarm_* 且**全为 0**，
+	// 即"一切正常"。这是最危险的一类静默假数据：设备可能正在报警，
+	// 界面显示无告警。放行短读后这种帧能到达解析器，故必须在此 fail-closed。
+	if len(statusStr) < 13 {
+		return nil, fmt.Errorf("techfine HSTS: status string truncated (%d chars, need 13: 1 mode + 12 alarm flags) — 拒绝采信以免把截断帧读成\"无告警\"", len(statusStr))
 	}
+	alarmFlags := statusStr[1:13]
 
 	// Map alarm flag positions to sensor names
 	alarmMap := []string{
@@ -518,7 +715,34 @@ func (d *TechfineInverterDriver) parsePV(fields []string, prefix string) ([]Sens
 		return nil, fmt.Errorf("techfine PV: invalid current %q", fields[1])
 	}
 
-	power := parseFloat(fields[2])
+	// 功率字段必须可解析，不能用 parseFloat 的"解析失败返回 0"兜底。
+	//
+	// 2026-10-03 固件审查发现（P0）：截断帧 "(220.5 08.0 0\r" 的第三字段是 "0"，
+	// parseFloat 把它读成 0，于是返回 pv2_power=0 —— 一个看起来正常但错误的功率读数。
+	// 真实的 "00960" 表示 960W；把截断读成 0W 会让用户以为逆变器没在发电。
+	// 判据：字段必须是非空且可被 ParseFloat 解析；"0" 本身是合法值，但
+	// 被截断成更短的形状时字段会缺失或非数字，故必须显式解析并报错。
+	powerText := strings.TrimSpace(fields[2])
+	if powerText == "" {
+		return nil, fmt.Errorf("techfine PV: power field is empty — 帧被截断")
+	}
+	// 功率字段是协议规定的定宽零填充 "CCCCC"（见上方 Format 注释与
+	// TestTechfine_HPV_WithCommand 的 "00960"、"00400" 夹具）。
+	//
+	// 2026-10-03 固件审查发现（P0）：仅"可解析"不够 —— 截断帧
+	// "(220.5 08.0 0\r" 的功率字段是单个 "0"，ParseFloat 读成 0，
+	// 于是返回 pv2_power=0W。而完整帧的 "00960" 是 960W。
+	// 把"被截断"读成"0 瓦"会让用户以为逆变器停止发电 —— 静默假数据。
+	// 因此要求宽度至少 4（协议 5，留 1 位容差以兼容不补零的固件变体）；
+	// 单字符 "0" 这类畸形形状被拒。
+	if len(powerText) < 4 {
+		return nil, fmt.Errorf("techfine PV: power field %q too short (%d chars, expected the fixed-width %q form) — 帧形状不完整，拒绝采信",
+			powerText, len(powerText), "CCCCC")
+	}
+	power, err := strconv.ParseFloat(powerText, 64)
+	if err != nil {
+		return nil, fmt.Errorf("techfine PV: invalid power %q: %w", powerText, err)
+	}
 
 	return []SensorData{
 		{Name: prefix + "_voltage", Value: voltage, Unit: "V"},
@@ -831,13 +1055,88 @@ func asciiToHex(s string) string {
 }
 
 // ============================================================================
-// GetCommandTemplates returns no templates.  The 11 query_* compatibility
-// templates were removed (演进方案 C6, 2026-09-06): the third state
-// CommandTemplate{Schedulable:false} is abolished, and the same physical
-// reads are owned by the Action Catalog (ControlActions, read_*).
-// Pre-deletion audit: see commit message — 0 unowned config_templates rows
-// matched the removed frame set, so template_backfill loses no matchable
-// rows (宁留勿删 semantics unchanged).
+// GetCommandTemplates — 可调度轮询模板（2026-10-03 恢复）
+// ============================================================================
+//
+// 为什么恢复（这是现场缺陷的根因，不是"设计偏好"）
+// ----------------------------------------------
+// 2026-10-03 现场：S3 节点 UART1 上的泰琪丰逆变器**从未收到任何指令**。
+// 用户的物理证据是决定性的 —— TTL↔RS232 转接板的 Tx/Rx 指示灯从未亮过，
+// 说明固件根本没有在 UART1 上发送过任何字节（若只是电平不匹配，TX 灯仍会亮，
+// 只是对端收不到）。
+//
+// 代码层因果链完全吻合：
+//
+//	GetCommandTemplates() 返回 nil
+//	  -> CommandIsManifestCandidate 对任何命令都为 false，该边设备编码 0 条命令
+//	     （生产日志原文：edge_device 4 (channel 4): no valid template_id in
+//	       channel.template_ids "" (resolved 0), skipping command encoding）
+//	  -> 固件 scheduler_add_channel 登记 command_count = 0
+//	  -> 调度器从不投递 CMD_SAMPLE
+//	  -> UART1 TX 引脚从头到尾没有电平变化 -> 转接板指示灯不亮
+//
+// 演进方案 C6 (2026-09-06) 删除这 11 条模板时的理由本身没错 —— 它反对的是
+// "Schedulable=false 的第三态"（一次性触发命令混进轮询域）。但 C6 把**轮询**
+// 一并删掉，等于让该驱动在架构上失去周期性采集能力：ControlActions 是受控
+// 动作目录，只有服务端主动下发 ChannelCmdV2 才会执行，**没有任何后台路径**
+// 会周期性调用它。于是"逆变器像 BMS 一样可配置定期采集"无法实现。
+//
+// 因此这里恢复的是**纯轮询模板**，全部 Schedulable=true（遵守 P2：第三态
+// 仍然废止），与 JBD BMS 驱动的形态完全一致。受控写操作仍只存在于
+// ControlActions，不进模板域。
+//
+// ReadLength = 0 是刻意的
+// -----------------------
+// 泰琪丰响应是 ASCII 行，长度不定（HSTS/HGRID/HOP/HBAT/HPV/HPVB/HTEMP/HGEN/
+// HBMS1/HEEP1/HIMSG1 各不相同）。固件里 read_length 的语义分两种：
+//
+//	read_length > 0 -> 期望**恰好**该长度，短读判 error 0x03
+//	read_length = 0 -> 走 CMD_SAMPLE 的"行空闲即帧边界"，整行原样上报
+//
+// 逆变器必须用后者，否则每条响应都会因长度不符被判读失败。
+// 这与 JBD BMS 的模板一致（同为 ReadLength: 0）。
+//
+// IntervalMs 是**默认值**：实际轮询周期由 edge_devices.command_intervals
+// 覆盖（与 BMS 相同的可配置机制，经 api.ValidateCommandIntervals 校验）。
+// 默认只给 read_status 一个非零值（1s），其余默认 0 = 不轮询；用户可在界面
+// 上按需开启，最多 3 条同时启用（MaxCommandsPerEdgeDevice）。这样既满足
+// "像 BMS 一样可配置参数定期采集"，又不会在默认状态下把 UART1 塞满。
 func (d *TechfineInverterDriver) GetCommandTemplates() []CommandTemplate {
-	return nil
+	// 与 ControlActions()/VerifyControlAction() 使用同一张命令表，
+	// 避免两处各自维护一份 ASCII 命令而产生漂移。
+	type pollCmd struct {
+		id       string
+		name     string
+		command  string
+		interval int
+		desc     string
+	}
+	cmds := []pollCmd{
+		{"read_status", "读取运行状态", "HSTS\r", 1000, "故障代码、运行模式与告警标志"},
+		{"read_grid", "读取市电信息", "HGRID\r", 0, "市电电压、频率与丢失阈值"},
+		{"read_output", "读取输出信息", "HOP\r", 0, "输出电压、频率、功率与负载"},
+		{"read_battery", "读取电池信息", "HBAT\r", 0, "电池电压、容量、充放电电流与 BUS 电压"},
+		{"read_pv1", "读取 PV1 信息", "HPV\r", 0, "PV1 电压、电流与功率"},
+		{"read_pv2", "读取 PV2 信息", "HPVB\r", 0, "PV2 电压、电流与功率"},
+		{"read_temperature", "读取温度信息", "HTEMP\r", 0, "温度、风扇转速与状态"},
+		{"read_energy", "读取发电量", "HGEN\r", 0, "日、月、年与总发电量"},
+		{"read_bms", "读取 BMS 信息", "HBMS1\r", 0, "BMS 状态、SOC、电流与限制值"},
+		{"read_eeprom", "读取 EEPROM 设置", "HEEP1\r", 0, "持久化配置与 BMS SOC 阈值"},
+		{"read_version", "读取软件版本", "HIMSG1\r", 0, "软件版本号与发布日期"},
+	}
+	out := make([]CommandTemplate, 0, len(cmds))
+	for _, c := range cmds {
+		out = append(out, CommandTemplate{
+			ID: c.id, Name: c.name, Type: "read",
+			// CmdByte 不适用于 ASCII 协议行（保留 0 表示"见 WriteData"）。
+			CmdByte:     0,
+			WriteData:   asciiToHex(c.command),
+			ReadLength:  0, // 行空闲定帧，见上面 ReadLength 说明
+			DelayMs:     0,
+			IntervalMs:  c.interval,
+			Schedulable: true, // P2: 第三态废止，模板域恒为 true
+			Description: c.desc,
+		})
+	}
+	return out
 }

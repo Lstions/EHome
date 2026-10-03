@@ -41,6 +41,16 @@ func isPeripheralChannelType(value string) bool {
 	}
 }
 
+// isUARTChannel 判定通道是否为 UART。**创建与更新两条路径共用它**，
+// 避免两个地方各写一份大小写/空白处理而分叉（缺陷 4 的同类风险：
+// 不变量只守一半等于没守）。
+func isUARTChannel(ch *models.Channel) bool {
+	if ch == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(ch.HardwareType), "UART")
+}
+
 func validateTransportChannel(ch *models.Channel) error {
 	if ch == nil {
 		return fmt.Errorf("channel is required")
@@ -126,6 +136,61 @@ func validateChannelPeripheralConflicts(tx *gorm.DB, ch models.Channel) error {
 		}
 		if gpioCount+pwmCount > 0 {
 			return errPeripheralPinConflict
+		}
+	}
+	// 同节点**其它通道**的引脚也要比。原实现只比 GPIO/PWM 配置，完全不看其它
+	// 通道：于是同一对 tx/rx 可以被两条 UART 通道重复认领，创建时全部 201，
+	// 直到节点端 manifest 权威校验才以 "GPIO pin N conflict between channel X
+	// and channel Y" 拒收 —— 而那份校验是 whole-manifest fail-closed，
+	// 一条冲突通道会让**整个节点**的配置下发失败、所有指令失效。
+	//
+	// 把冲突挡在这里（400/409）而不是留给节点端：错误能定位到具体请求，
+	// 也不会把它升级成"整个节点不可用"。（节点端那份校验保留为纵深防御。）
+	return validateChannelCrossChannelPins(tx, ch)
+}
+
+// validateChannelCrossChannelPins 拒绝与**同节点其它启用通道**抢占同一 GPIO
+// 的候选通道。excludeID 用于更新场景跳过自身。
+//
+// 为什么用"逐字节解码后比引脚"而不是比 hardware_id/bus_type：真实冲突是
+// 引脚级的。两条通道可以 hardware_id 不同（甚至一个是 "uart"、一个是 "UART1"）
+// 却因为 bus_config 相同而指向同一对引脚 —— 反过来 hardware_id 相同但
+// bus_config 不同也仍会冲突。只有 bus_config 编出来的引脚集合是权威。
+//
+// 只统计 Enabled 的通道：停用通道不会进 manifest（nodemgr 只 claim enabled 的），
+// 把停用的也算进来会挡住"先建好停用通道、再启用"的合法操作。
+func validateChannelCrossChannelPins(tx *gorm.DB, ch models.Channel) error {
+	if !ch.Enabled {
+		return nil
+	}
+	mine, err := channelRoutePins(ch)
+	if err != nil {
+		return err
+	}
+	if len(mine) == 0 {
+		// ADC/USB 不路由 GPIO（channelRoutePins 返回 nil）⇒ 无引脚可冲突。
+		return nil
+	}
+	var others []models.Channel
+	if err := tx.Where("node_id = ? AND id <> ? AND enabled = ?", ch.NodeID, ch.ID, true).Find(&others).Error; err != nil {
+		return err
+	}
+	mineSet := make(map[int]bool, len(mine))
+	for _, pin := range mine {
+		mineSet[pin] = true
+	}
+	for _, other := range others {
+		theirs, err := channelRoutePins(other)
+		if err != nil {
+			// 对方是既有的坏行（例如空 bus_config）。不能因此把本次
+			// 合法请求判成冲突 —— 那会让"修一条坏通道"反而被另一条挡住。
+			continue
+		}
+		for _, pin := range theirs {
+			if mineSet[pin] {
+				return fmt.Errorf("%w: GPIO pin %d 已被通道 %d (%s) 占用",
+					errChannelPinConflict, pin, other.ID, other.HardwareID)
+			}
 		}
 	}
 	return nil
@@ -725,6 +790,14 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("node_id = ?", ch.NodeID).First(&node).Error; err != nil {
 				return err
 			}
+			// 纵深防御（2026-10-03）：UART 的波特率只存在 bus_config 里，空串会造出
+			// 一个"以后改不了波特率"的通道。前端已不再静默产出空串，但后端不能把
+			// "调用方一定会带合法 bus_config"当契约 —— 这里按节点已上报的资源能力补齐。
+			if isUARTChannel(&ch) {
+				if err := ensureUARTBusConfig(&node, &ch); err != nil {
+					return err
+				}
+			}
 			if err := validateChannelPeripheralConflicts(tx, ch); err != nil {
 				return err
 			}
@@ -745,8 +818,18 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			return nil
 		}); err != nil {
+			if errors.Is(err, errChannelPinConflict) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
 			if errors.Is(err, errPeripheralPinConflict) {
 				c.JSON(http.StatusConflict, gin.H{"error": "channel route conflicts with GPIO/PWM configuration"})
+				return
+			}
+			// 两类 UART 输入问题都报 400：能力不可得（等资源上报 / 检查 hardware_id）
+			// 与显式 bus_config 非法。它们都是用户能据此行动的输入问题，不是服务端故障。
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -870,6 +953,27 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			if err := validateTransportChannelType(&finalCandidate); err != nil {
 				return err
 			}
+			// 与 POST /channels 同一不变量（2026-10-03 缺陷 4 的残留缺口）：
+			// UART 的波特率**只**存在 bus_config 里，一旦被 PUT 成空串，
+			// 这条通道就永远改不了波特率（"通道 bus_config 为空"）。
+			// 创建路径已补齐/拒绝，更新路径原先却原样写回空串 —— 同一个
+			// 不变量只守一半等于没守，故此处同样走 ensureUARTBusConfig：
+			// 空值按节点已上报的能力补齐，查不到资源则 fail-closed 报 400。
+			// 注意：只在调用方**确实要写 bus_config** 或类型含 UART 时才校验，
+			// 避免"改个名字/开关"被无关能力缺失挡住（既有行为不做无谓加严）。
+			if isUARTChannel(&finalCandidate) && (dto.BusConfig != nil || dto.HardwareType != nil) {
+				before := finalCandidate.BusConfig
+				if err := ensureUARTBusConfig(&node, &finalCandidate); err != nil {
+					return err
+				}
+				// 只有**真的被补齐/改写**时才写回 bus_config。
+				// 若调用方只改类型、没动 bus_config，ensureUARTBusConfig 会原样保留；
+				// 此时若无条件写 updates，就会产生一次"用户没要求的" bus_config 写入：
+				// 触发无谓的 updated_at 变更与配置同步事件，也让审计看不出是谁改的。
+				if finalCandidate.BusConfig != before {
+					updates["bus_config"] = finalCandidate.BusConfig
+				}
+			}
 			if err := validateChannelPeripheralConflicts(tx, finalCandidate); err != nil {
 				return err
 			}
@@ -878,6 +982,20 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			return tx.Model(&locked).Updates(updates).Error
 		}); err != nil {
+			// 与 POST /channels 同口径：能力不可得 / bus_config 非法都报 400（输入问题），
+			// 而不是笼统 500。
+			if errors.Is(err, errChannelPinConflict) {
+				Error(c, http.StatusConflict, err.Error())
+				return
+			}
+			if errors.Is(err, errPeripheralPinConflict) {
+				Error(c, http.StatusConflict, "channel route conflicts with GPIO/PWM configuration")
+				return
+			}
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+				Error(c, http.StatusBadRequest, err.Error())
+				return
+			}
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}

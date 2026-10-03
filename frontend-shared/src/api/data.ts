@@ -10,6 +10,13 @@ export interface Overview {
     total: number
     online: number
     offline: number
+    /**
+     * 已创建但尚未收到任何数据（后端 EdgeDeviceStatusPending）。
+     * 2026-10-03：后端新增该字段后，Dashboard 原先用 `total - online` 推 offline，
+     * 会把新建设备在 ~60s 的 pending 窗口内算成「离线设备」。
+     * 旧后端不返回时为 undefined，按 0 处理。
+     */
+    pending?: number
   }
   latest_data: Array<{
     device_id: number

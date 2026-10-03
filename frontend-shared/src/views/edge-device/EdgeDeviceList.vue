@@ -21,9 +21,23 @@
           <template #value><CountUp :value="stats.online" class="stat-value" /></template>
         </StatCard>
 
+        <!-- 第三张卡承载「非在线」的全部设备：离线/异常 + 等待数据。
+            2026-10-03 审查发现：pending 原先只计入总数、两个分项都不含它，
+             于是「在线 + 离线/异常 < 总数」，用户本就抱怨数字对不上。
+             这里**不新增第 5 张卡**：移动端契约（MobileStatCardsResponsive.spec.ts）
+             钉死了本页在 ≤768px 下必须是 4 张卡（grid repeat(4,…)），加卡会破坏布局契约。
+             改为让第三张卡 = 离线/异常 + 等待数据，使「在线 + 非在线 = 总数」成立，
+             且卡内把等待数据单列出来，用户仍能区分两者。 -->
         <StatCard label="本页离线/异常" :mobile-label="`离线/异常（${SCOPE_PAGE}）`" icon-color="var(--el-color-danger)" @click="handleStatClick('offline')">
           <template #icon><el-icon><CircleClose /></el-icon></template>
-          <template #value><CountUp :value="stats.offline" class="stat-value" /></template>
+          <template #value>
+            <CountUp :value="stats.offline + stats.pending" class="stat-value" />
+          </template>
+          <!-- StatCard 只有 icon/value/suffix 三个插槽（见 components/common/StatCard.vue），
+               没有 footer。用 suffix 承载"其中等待数据 N"的说明。 -->
+          <template #suffix>
+            <span v-if="stats.pending > 0" class="stat-sub">等待数据 {{ stats.pending }}</span>
+          </template>
         </StatCard>
 
         <StatCard :label="`今日数据（${SCOPE_GLOBAL}）`" icon-color="var(--el-color-info)" @click="handleStatClick('today')">
@@ -64,6 +78,9 @@
         
         <el-select v-model="statusFilter" placeholder="状态" clearable style="min-width: 90px;">
           <el-option label="在线" value="active" />
+          <!-- pending 已是真实后端状态（创建后未收到数据），必须可筛选，
+               否则用户看到「等待数据」却找不到对应筛选项。 -->
+          <el-option label="等待数据" value="pending" />
           <el-option label="离线" value="offline" />
           <el-option label="警告" value="warning" />
           <el-option label="故障" value="error" />
@@ -100,7 +117,7 @@
       <el-tag v-if="searchKeyword" closable @close="searchKeyword = ''">关键词：{{ searchKeyword }}</el-tag>
       <el-tag v-if="typeFilter" closable @close="typeFilter = ''">类型：{{ getDeviceTypeLabel(typeFilter) }}</el-tag>
       <el-tag v-if="statusFilter" closable @close="statusFilter = ''">状态：{{ statusLabel(statusFilter) }}</el-tag>
-      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''">总线：{{ hardwareFilter.toUpperCase() }}</el-tag>
+      <el-tag v-if="hardwareFilter" closable @close="hardwareFilter = ''">总线：{{ getHardwareLabel(hardwareFilter) }}</el-tag>
       <el-button text type="primary" @click="clearFilters">清除全部</el-button>
     </div>
 
@@ -353,20 +370,20 @@
               <el-option
                 v-for="t in availableTemplates"
                 :key="t.id"
-                :label="`${t.name}  (${t.device_type} / ${t.hardware_type?.toUpperCase()})${t.is_default ? ' ⭐' : ''}`"
+                :label="`${t.name}  (${t.device_type} / ${getHardwareLabel(t.hardware_type)})${t.is_default ? ' ⭐' : ''}`"
                 :value="t.id"
               >
                 <div class="template-option-row">
                   <span class="tpl-name">{{ t.name }}</span>
                   <el-tag v-if="t.is_default" type="success" size="small">默认</el-tag>
-                  <el-tag size="small" type="info">{{ t.hardware_type?.toUpperCase() }}</el-tag>
+                  <el-tag size="small" type="info">{{ getHardwareLabel(t.hardware_type) }}</el-tag>
                 </div>
               </el-option>
             </el-select>
           </div>
           <el-alert v-if="selectedTemplate" :closable="false" type="success" show-icon style="margin-top: 8px;">
             已套用模板: <strong>{{ selectedTemplate.name }}</strong>
-            (设备类型 <code>{{ selectedTemplate.device_type }}</code> · 硬件 <code>{{ selectedTemplate.hardware_type?.toUpperCase() }}</code>)
+            (设备类型 <code>{{ selectedTemplate.device_type }}</code> · 硬件 <code>{{ getHardwareLabel(selectedTemplate.hardware_type) }}</code>)
           </el-alert>
         </el-card>
 
@@ -397,7 +414,7 @@
               <p class="parser-vendor">{{ parser.vendor }}</p>
               <div class="parser-tags">
                 <el-tag v-for="bus in parser.hardware_types" :key="bus" size="small" :type="getHardwareTagType(bus)">
-                  {{ bus.toUpperCase() }}
+                  {{ getHardwareLabel(bus) }}
                 </el-tag>
               </div>
             </div>
@@ -447,14 +464,14 @@
                 :class="{ selected: selectedChannel?.id === ch.id }"
                 role="button"
                 tabindex="0"
-                :aria-label="`选择通道 ${ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}`}`"
+                :aria-label="`选择通道 ${channelCardLabel(ch)}`"
                 :aria-pressed="selectedChannel?.id === ch.id"
                 @click="selectChannel(ch)"
                 @keydown.enter.prevent="selectChannel(ch)"
                 @keydown.space.prevent="selectChannel(ch)"
               >
-                <span class="channel-name" :title="ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}`">{{ ch.name || `${(ch.hardware_type || 'BUS').toUpperCase()} ${ch.hardware_id}` }}</span>
-                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type) as any">{{ (ch.hardware_type || '').toUpperCase() }}</el-tag>
+                <span class="channel-name" :title="channelCardLabel(ch)">{{ channelCardLabel(ch) }}</span>
+                <el-tag size="small" :type="getHardwareTagType(ch.hardware_type)">{{ getHardwareLabel(ch.hardware_type) }}</el-tag>
                 <span class="channel-bus-id">{{ ch.hardware_id }}</span>
                 <div v-if="selectedChannel?.id === ch.id" class="channel-selected-badge">
                   <el-icon><Check /></el-icon>
@@ -470,7 +487,7 @@
                 <el-col :span="12">
                   <el-form-item label="硬件类型" prop="hardware_type">
                     <el-select v-model="newChannel.hardware_type" style="width: 100%;" @change="onNewChannelBusTypeChange">
-                      <el-option v-for="bus in selectedParserBusTypes" :key="bus" :label="bus.toUpperCase()" :value="bus" />
+                      <el-option v-for="bus in selectedParserBusTypes" :key="bus" :label="getHardwareLabel(bus)" :value="bus" />
                     </el-select>
                   </el-form-item>
                 </el-col>
@@ -486,7 +503,7 @@
                       <template v-if="capabilitiesLoading">正在读取设备资源上报…</template>
                       <!-- 「未上报该总线」与「上报了但一条资源都没有」是两件事，文案必须分开 -->
                       <template v-else-if="busTypeReported(newChannel.hardware_type)">
-                        该节点上报的 {{ newChannel.hardware_type.toUpperCase() }} 资源为空，无法创建该总线的通道
+                        该节点上报的 {{ getHardwareLabel(newChannel.hardware_type) }} 资源为空，无法创建该总线的通道
                       </template>
                       <template v-else>{{ unavailableBusMessage }}</template>
                     </div>
@@ -561,7 +578,7 @@
               <span class="label">通道</span>
               <span class="value">
                 <code>{{ selectedChannel?.name || generatedChannelName }}</code>
-                <el-tag size="small">{{ selectedChannel?.hardware_type?.toUpperCase() || newChannel.hardware_type.toUpperCase() }}</el-tag>
+                <el-tag size="small">{{ getHardwareLabel(selectedChannel?.hardware_type || newChannel.hardware_type) }}</el-tag>
               </span>
             </div>
             <div class="confirm-item">
@@ -662,7 +679,7 @@ import CreateWizardCommandIntervals from '@/components/device/CreateWizardComman
 import { deviceTypeOptions, getDeviceTypeLabel as getGlobalDeviceTypeLabel, getDeviceTypeIcon } from '@/utils/deviceType'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
 import { DEVICE_ADDRESS_DEFAULT, isValidDeviceAddress, parseDeviceAddress } from '@/utils/deviceAddress'
-import { getHardwareTagType } from '@/utils/hardwareTag'
+import { getHardwareDisplay, getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 import type { TagType } from '@/utils/tagType'
 
 /** el-table 作用域槽的 row 在 EP 类型里是内部 DefaultRow（未从包根导出），此处做一次命名类型的边界收窄（非 any）。 */
@@ -756,7 +773,7 @@ const hasActiveFilters = computed(() => Boolean(searchKeyword.value || typeFilte
 
 // 路由参数初始化（必须在 useDebouncedSearch 之后）
 if (routeSearch) searchKeyword.value = routeSearch
-if (['active', 'online', 'offline', 'warning', 'error', 'disabled'].includes(routeStatus)) {
+if (['active', 'online', 'offline', 'warning', 'error', 'disabled', 'pending'].includes(routeStatus)) {
   statusFilter.value = routeStatus
 }
 
@@ -885,6 +902,9 @@ const deviceFormRef = ref()
 const stats = reactive({
   total: 0,
   online: 0,
+  // pending：已创建但尚未收到任何数据（后端 EdgeDeviceStatusPending）。
+  // 单列一项，使 total = online + pending + offline 可被用户自行核对。
+  pending: 0,
   offline: 0,
   // null = 后端未提供该字段（或请求失败），显示 UNKNOWN；0 是「今天是 0 条」的合法值，
   // 两者必须可区分 —— 用 0 兜底会把「拿不到数据」显示成「没有数据」。
@@ -1041,7 +1061,17 @@ const handleNodeChange = () => {
 const updateStats = () => {
   const allVisible = compactEdgeDeviceList(devices.value)
   stats.total = allVisible.length
+  // 只有 active/online 才是「在线」；pending（已创建未采到数据）不算，
+  // 否则刚建的空设备会被计入在线，正是缺陷 5 的统计口径版本。
   stats.online = allVisible.filter(d => d.status === 'active' || d.status === 'online').length
+  // pending 也不计入「离线/异常」：它在等第一帧数据，offlinedetector 尚未
+  // 判定（超时后才转 offline）。算进离线会让新建设备一出现就显示故障。
+  //
+  // 但**必须单列一张卡**（2026-10-03 审查发现）：此前 pending 只进 total，
+  // 两个分项都不含它，于是三张卡并排却「在线 + 离线/异常 < 总数」，
+  // 用户本来就在抱怨数字对不上 —— 修一个显示错误不该引入一个新的对不上。
+  // 单列后 total = online + pending + offline，三卡可自校验。
+  stats.pending = allVisible.filter(d => d.status === 'pending' || d.status === 'initializing').length
   stats.offline = allVisible.filter(d => d.status === 'offline' || d.status === 'disabled' || d.status === 'error' || d.status === 'warning').length
   fetchTodayDataCount()
 }
@@ -1110,7 +1140,7 @@ const busTypeReported = (hardwareType: string): boolean => {
 const hasBusOptions = computed(() => availableBusesForType(newChannel.hardware_type).length > 0)
 /** 未上报提示文案（下拉空态与步骤校验共用，措辞只有一处）。 */
 const unavailableBusMessage = computed(() =>
-  `该节点未上报 ${(newChannel.hardware_type || 'BUS').toUpperCase()} 资源，无法在此创建该总线的通道`)
+  `该节点未上报 ${getHardwareLabel(newChannel.hardware_type || 'BUS')} 资源，无法在此创建该总线的通道`)
 
 /**
  * 向导「硬件ID」下拉的选项：通道 hardware_id 是**总线资源标识**语义，取值优先级：
@@ -1336,11 +1366,34 @@ const getDeviceBusLabel = (device: EdgeDevice | null | undefined): string => {
   return device.channel_hardware_id || device.channel?.hardware_id || UNKNOWN
 }
 
+/**
+ * 通道选择卡上显示的通道名。
+ *
+ * 用户 2026-10-03 的原话：「一会 uart0，一会又 uart uart0，一会 UART，串行」。
+ * 这里原本是 `(hardware_type).toUpperCase() + " " + hardware_id`，
+ * 当 hardware_id 本身已含总线名（现场就是 UART0/UART1/I2C0）时就渲染成
+ * 「UART UART0」——同一个词重复两遍。
+ * 改走共享的 getHardwareDisplay：它按 hardwareIdIncludesBusName 判断，
+ * 已含总线名就只显示 hardware_id（UART0），否则补前缀（1 → UART 1）。
+ * 全部通道展示都必须走它，不要再在模板里手工拼字符串。
+ */
+const channelCardLabel = (ch: Channel): string => {
+  if (ch.name) return ch.name
+  return getHardwareDisplay(ch.hardware_type, ch.hardware_id)
+}
+
 // Health status tag type mapping (Element Plus tag types)
+//
+// 'pending' 必须与 online 区分（2026-10-03 缺陷 5）：设备刚创建、还没采到
+// 任何数据时后端落 pending。此前模型默认 active、前端把 active 渲染成
+// 「在线」，于是新建的空设备看起来已经正常工作了。等待数据是 warning
+// 而非 success —— 它不是成功，也不是故障。
 function statusTagType(status: string): TagType {
   switch (status) {
     case 'active': return 'success'
     case 'online': return 'success'
+    case 'pending':
+    case 'initializing': return 'warning'
     case 'warning': return 'warning'
     case 'error': return 'danger'
     case 'disabled': return 'info'
@@ -1350,10 +1403,16 @@ function statusTagType(status: string): TagType {
 }
 
 // Health status label mapping
+//
+// 'pending' 显示为「等待数据」而不是「在线」或「离线」：它表达的是
+// 「已创建但尚未收到任何数据」这一事实，既不能宣称设备正常，
+// 也不能在设备还在等第一帧时就说它故障。
 function statusLabel(status: string): string {
   switch (status) {
     case 'active': return '在线'
     case 'online': return '在线'
+    case 'pending': return '等待数据'
+    case 'initializing': return '初始化中'
     case 'warning': return '警告'
     case 'error': return '故障'
     case 'disabled': return '已禁用'
@@ -1960,6 +2019,10 @@ onUnmounted(() => {
 .stat-content { flex: 1; }
 .stat-value { display: block; font-size: 28px; font-weight: 600; color: var(--el-text-color-primary); }
 .stat-label { font-size: 13px; color: var(--el-text-color-secondary); }
+/* 「离线/异常」卡内的补充说明（其中等待数据 N）。
+   它把 pending 从"看不见"变成"看得见"，同时不新增第 5 张卡
+   （移动端契约要求本页 ≤768px 保持 4 张卡）。 */
+.stat-sub { font-size: 12px; color: var(--el-text-color-secondary); white-space: nowrap; }
 
 
 /* 工具栏 */

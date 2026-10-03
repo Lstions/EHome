@@ -97,6 +97,10 @@ func AutoMigrate() error {
 		&models.CalibrationCache{},
 		&models.PendingWriteRecord{}, // P3-4: pending write persistence
 		&models.NodeLog{},            // v2.5: remote ESP32 system-log history
+		// v2.6: durable ESP32 boot/crash diagnostics (MSG_DIAG_REPORT 0x1E).
+		// (device_id, record_id) is UNIQUE so a device retrying an un-ACKed
+		// crash record upserts rather than duplicating evidence.
+		&models.DeviceDiagReport{},
 		// Phase 1: durable device-action control domain. These are additive
 		// tables; no legacy operation history is rewritten during migration.
 		&models.CommandExecution{},

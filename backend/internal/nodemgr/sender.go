@@ -331,6 +331,28 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 	return requestID, nil
 }
 
+// SendDiagAck sends a DiagAck (0x1F, SVR→ESP) for a crash report.
+//
+// This is the contract the firmware's NVS retention depends on:
+//
+//	accepted=true  → the report is durably persisted; the device may release
+//	                 its NVS copy of record_id.
+//	accepted=false → persistence failed; the device MUST keep the record and
+//	                 retry. Never send true unless the row is committed.
+//
+// Mirrors SendQueryResources: encode → Publish(mqtt.TopicForNode(deviceID)).
+func (m *Manager) SendDiagAck(deviceID string, recordID uint32, accepted bool) error {
+	enc := frame.NewEncoder(frame.MsgDiagAck)
+	enc.EncodeVarint(1, uint64(recordID))
+	enc.EncodeBool(2, accepted)
+
+	topic := mqtt.TopicForNode(deviceID)
+	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+		return fmt.Errorf("failed to publish DiagAck: %w", err)
+	}
+	return nil
+}
+
 // ServerMaxProtocolVersion is the highest protocol version this server supports.
 // Negotiated version = min(device-reported, ServerMaxProtocolVersion).
 const ServerMaxProtocolVersion = "2.6"

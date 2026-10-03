@@ -75,6 +75,8 @@ const (
 	MsgPeriphCmd         = 0x1B // v3.0: PeriphCmd (SVR→ESP, GPIO/PWM peripheral control)
 	MsgPeriphRsp         = 0x1C // v3.0: PeriphRsp (ESP→SVR, peripheral operation result)
 	MsgLogStream         = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
+	MsgDiagReport        = 0x1E // v2.6: DiagReport (ESP→SVR, boot/crash diagnostics)
+	MsgDiagAck           = 0x1F // v2.6: DiagAck (SVR→ESP, crash-report persistence confirmation)
 )
 
 // Field represents a decoded field
@@ -361,6 +363,8 @@ func MsgTypeName(msgType uint8) string {
 		MsgPeriphCmd:         "periph_cmd",
 		MsgPeriphRsp:         "periph_rsp",
 		MsgLogStream:         "log_stream",
+		MsgDiagReport:        "diag_report",
+		MsgDiagAck:           "diag_ack",
 	}
 	if name, ok := names[msgType]; ok {
 		return name

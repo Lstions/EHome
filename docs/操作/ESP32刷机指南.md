@@ -65,7 +65,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 2. **Wi-Fi**：获得 IP（SoftAP 页或日志）。
 3. **Hello 握手**：中心端节点列表出现该节点 → 状态 online。
 4. **数据采集**：配置通道 + 边缘设备后 DataPanel 有数据。
-5. **心跳**：StatusReport 5s 心跳；90s 无心跳判离线。
+5. **心跳**：StatusReport **1s** 心跳；服务端**3s** 无心跳判离线（检测 ticker 1s），最坏离线可见时延 ≈5s（2026-10-03 由 5s/90s 收紧）。
 
 ## 5. 故障排查
 

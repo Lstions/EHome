@@ -279,10 +279,14 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	//  ① offline→online 跳变 —— 常规重连；
 	//  ② **uptime 回退** —— 设备重启了，但后端没观察到离线。
 	//
-	// 为什么必须有 ②：设备重启（OTA、看门狗、掉电）到重新上报通常只要几秒，
-	// 远小于离线检测阈值 90s（offlinedetector.go 的 db_last_seen_timeout），
-	// 因此不会产生 offline→online 跳变。若只认 ①，last_online_time 会一直
-	// 停在很久以前，"在线时长" 便跨重启累加成一个虚假的大数
+	// 为什么必须有 ②：设备重启（OTA、看门狗、掉电）到重新上报通常只要几秒。
+	// 旧阈值 90s 下这远小于阈值，重启必然不产生 offline→online 跳变，② 只是
+	// "冗余保险"；2026-10-03 阈值收紧到 3s（offlinedetector.go 的
+	// NodeOfflineThreshold）后前提被削弱：几秒的重启与 3s 阈值同量级，检测器很
+	// 可能已把节点翻成 offline，重启后再收到 online 上报就会产生真实的
+	// offline→online 跳变。② 因此从"冗余保险"变成"真实需要的路径"——它覆盖
+	// "重启快于检测器翻牌、后端没观察到离线"这一档。若只认 ①，这档下
+	// last_online_time 会一直停在很久以前，"在线时长" 便跨重启累加成一个虚假的大数
 	// —— 实测：设备当天重启 5 次，该字段仍显示 7 天，而固件 uptime 已归零。
 	//
 	// uptime 单调递增，回退即重启（uint32 溢出需 136 年，实际不可达）。

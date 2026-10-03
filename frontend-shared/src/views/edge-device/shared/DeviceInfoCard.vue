@@ -16,7 +16,7 @@
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">硬件类型</span>
-        <span class="mobile-info-value">{{ device.hardware_type?.toUpperCase() || UNKNOWN }}</span>
+        <span class="mobile-info-value">{{ device.hardware_type ? getHardwareLabel(device.hardware_type) : UNKNOWN }}</span>
       </div>
       <div class="mobile-info-row">
         <span class="mobile-info-label">硬件ID</span>
@@ -57,7 +57,7 @@
       <el-descriptions-item label="设备名称">{{ device.name || UNKNOWN }}</el-descriptions-item>
       <el-descriptions-item label="设备类型">{{ deviceTypeText }}</el-descriptions-item>
       <el-descriptions-item label="通信协议">{{ device.protocol ? device.protocol.toUpperCase() : UNKNOWN }}</el-descriptions-item>
-      <el-descriptions-item label="硬件类型">{{ device.hardware_type ? device.hardware_type.toUpperCase() : UNKNOWN }}</el-descriptions-item>
+      <el-descriptions-item label="硬件类型">{{ device.hardware_type ? getHardwareLabel(device.hardware_type) : UNKNOWN }}</el-descriptions-item>
       <el-descriptions-item label="硬件ID">{{ device.hardware_id || UNKNOWN }}</el-descriptions-item>
       <el-descriptions-item v-if="nodeLinkId" label="所属节点">
         <router-link class="node-link" :to="`/node/${nodeLinkId}/overview`">{{ nodeDisplayName }}</router-link>
@@ -86,6 +86,10 @@ import { computed } from 'vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { getErrorInfo } from '@/utils/errorCode'
 import { getDeviceTypeLabel } from '@/utils/deviceType'
+// 硬件类型展示统一走共享源（2026-10-03 文案统一）：原来这里直接 toUpperCase，
+// 与其它页面用私有 map/中英混排的写法不一致，同一个 bus_type 在不同页面
+// 会显示成 UART / uart / 串行 三种样子。
+import { getHardwareLabel } from '@/utils/hardwareTag'
 import { UNKNOWN } from '@/utils/format'
 import { useResponsive } from '@/composables/useResponsive'
 import type { EdgeDevice } from '@/api/edgeDevice'

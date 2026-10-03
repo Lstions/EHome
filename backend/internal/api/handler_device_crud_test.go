@@ -872,11 +872,21 @@ func TestChannel_CreateRejectsPeripheralTypes(t *testing.T) {
 	}
 }
 
+// TestChannel_CreateAllowsExplicitDisabledTransport 断言「enabled:false 被原样保留」。
+//
+// 2026-10-03 起 UART 通道必须能确定 bus_config（缺陷 4：空 bus_config 会造出
+// 一条永远改不了波特率的通道），因此夹具需要提供节点已上报的 UART 资源 ——
+// 否则请求会在补齐阶段被 400 拒绝，测的就不再是 enabled 语义。这里补上能力上报，
+// 让本用例继续只验证它真正关心的那件事。
 func TestChannel_CreateAllowsExplicitDisabledTransport(t *testing.T) {
 	r, db := setupDeviceTest(t)
-	db.Create(&models.Node{NodeID: "NODE001", Name: "Test", Status: "online"})
+	db.Create(&models.Node{
+		NodeID: "NODE001", Name: "Test", Status: "online",
+		Capabilities: uartCapabilities("UART1", 20, 21, 5000000),
+	})
 	body, _ := json.Marshal(map[string]interface{}{
-		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART", "enabled": false,
+		"node_id": "NODE001", "hardware_type": "UART", "bus_type": "UART",
+		"hardware_id": "UART1", "enabled": false,
 	})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/channels", bytes.NewReader(body))
@@ -928,11 +938,15 @@ func TestChannel_Update_Success(t *testing.T) {
 
 	db.Create(&models.Channel{NodeID: "NODE001", HardwareType: "I2C", BusType: "I2C", BusConfig: "0102", Enabled: true, IntervalMs: 5000})
 
+	// bus_config 必须是**合法 10 字节 UART 布局**（2026-10-03 缺陷 4）。
+	// 原夹具用 2 字节 "0304"：非空但解不出波特率，正是"以后改不了波特率"的那一档，
+	// 现在被 API 明确拒绝（400）。本用例关心的是"更新成功"这一路径，
+	// 故改用合法布局：tx=20 rx=21 baud=9600 8N1 无流控。
 	body, _ := json.Marshal(map[string]interface{}{
 		"node_id":       "NODE001",
 		"hardware_type": "UART",
 		"bus_type":      "UART",
-		"bus_config":    "0304",
+		"bus_config":    "14150000258008010000",
 		"enabled":       true,
 		"interval_ms":   10000,
 	})

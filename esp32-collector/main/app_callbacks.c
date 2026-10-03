@@ -17,6 +17,7 @@
 #include "periph_config_apply.h"
 #include "bus_manager.h"
 #include "hello_handshake.h"
+#include "crash_diag.h"
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "scheduler.h"
@@ -372,6 +373,10 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
             ESP_LOGE(TAG, "Unrecoverable config transaction; restarting fail-hard");
             free(old_snapshot);
             free(tx);
+            /* 记下重启原因 -> 下次启动随 BOOT 报告上传。没有这一行，
+             * 复位原因只会笼统显示 SOFTWARE，无法区分是配置事务失败、
+             * 还是别处的 esp_restart()。 */
+            crash_diag_mark_reboot_reason("config_apply_failed");
             esp_restart();
             return;
         }
@@ -578,6 +583,16 @@ void on_mqtt_ready_cb(uint32_t generation, void *ctx)
 {
     (void)ctx;
     hello_handshake_on_ready(generation);
+
+    /* v2.6: 每上线一次就补报一条诊断记录。
+     *
+     * 放在这里而不是 main.c 的启动序列：此时 MQTT 已就绪，publish 才真正
+     * 有出口。有未确认崩溃则补报那条（服务端回 ACK 后才释放 NVS 占用），
+     * 无则报一条 BOOT（含 esp_reset_reason），让"为什么重启"每次都有答案。
+     *
+     * 重复调用是安全的：未确认的崩溃记录会重复上报，服务端按
+     * (device_id, record_id) 幂等去重。 */
+    crash_diag_report_pending();
 }
 
 /* ==== MQTT message callback ==== */

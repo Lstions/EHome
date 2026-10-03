@@ -410,6 +410,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handlePeriphResponse(deviceID, payload)
 	case frame.MsgLogStream:
 		m.handleLogStream(deviceID, payload)
+	case frame.MsgDiagReport:
+		m.handleDiagReport(deviceID, payload)
 
 	// Unimplemented message types — log warning, no panic
 	case frame.MsgConfigMfst:

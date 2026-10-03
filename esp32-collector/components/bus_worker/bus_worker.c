@@ -1342,7 +1342,22 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  if (has_pending_cmd(rt, idx)) {
   pending_cmd_t pcmd;
   if (xQueuePeek(rt->pending_queues[idx], &pcmd, 0) != pdTRUE) return false;
-  if (pcmd.read_size > 0 && s->len < pcmd.read_size) {
+  /* Short-read rule.  For the legacy write-response path a reply shorter than
+   * read_size means the slave answered incompletely, and that must stay an
+   * error.  ChannelCmdV2 is different (2026-10-03): read_size there is the
+   * node's RX *window* (<=256, the size of the control-final buffer), not a
+   * promise about the vendor frame length.  A single-step V2 command always
+   * reaches the node as CMD_WRITE (bus_manager.c:1064), and V2 carries no
+   * per-action length: an ASCII sensor reply is one line of ~15-40 bytes
+   * whose exact length is not knowable to the node.  Erroring on it made
+   * every variable-length read permanently fail with 0x03 (a Techfine
+   * "HBAT\r" -> "(...)\r" read could never satisfy a fixed length), while
+   * declaring read_size == 0 instead completed the control with NO data at
+   * all (:985).  So for V2 the line-idle gap is the authoritative frame
+   * boundary: deliver what arrived and let the server, which owns the
+   * per-action verifier (VerifyControlAction), decide whether it is valid.
+   * A genuinely silent sensor still fails, via expire_uart_state() timeout. */
+  if (pcmd.read_size > 0 && s->len < pcmd.read_size && !pcmd.channel_cmd_v2) {
    (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
    /* Short read = the sensor answered incompletely: a command error.
     * 2026-09-30: move the counter the server reads (sched_command_t), not

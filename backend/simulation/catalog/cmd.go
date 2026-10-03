@@ -156,7 +156,8 @@ func cmdArmNode(e *harness.Env, fx *edgeDevice) {
 	t.Helper()
 
 	// 保持节点在线：命令门禁要求 node.status == "online"，
-	// 而 offlinedetector 会把 last_seen 超过 90s 的在线节点判为离线。
+	// 而 offlinedetector 会把 last_seen 超过 NodeOfflineThreshold 的在线节点判为离线
+	// （2026-10-03 起为 3s，旧值 90s；见 internal/offlinedetector/offlinedetector.go）。
 	// 这里用真实心跳维持（不是 sleep 同步，见 edgeDevice.heartbeat）。
 	fx.heartbeat()
 

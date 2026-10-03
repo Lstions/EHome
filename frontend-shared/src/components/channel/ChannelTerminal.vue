@@ -24,8 +24,8 @@
         </el-option-group>
       </el-select>
 
-      <el-tag v-if="selectedChannel" :type="getTagType(selectedChannel.hardware_type)" size="small">
-        {{ selectedChannel.hardware_type?.toUpperCase() }}
+      <el-tag v-if="selectedChannel" :type="getHardwareTagType(selectedChannel.hardware_type)" size="small">
+        {{ getHardwareLabel(selectedChannel.hardware_type) }}
       </el-tag>
 
       <el-tag v-if="selectedChannel && selectedChannel.address" type="info" size="small">
@@ -203,6 +203,7 @@ import { channelApi, type Channel } from '@/api/channel'
 import { useWebSocketStore, type WebSocketMessage } from '@/stores/websocket'
 import { WS_EVENT } from '@/events/events'
 import { logger } from '@/utils/logger'
+import { getHardwareLabel, getHardwareTagType } from '@/utils/hardwareTag'
 
 interface Props {
   collectorId: number | string
@@ -286,29 +287,24 @@ interface ChannelGroup { type: string; label: string; channels: Channel[] }
 
 const channelGroups = computed<ChannelGroup[]>(() => {
   const groups: Map<string, Channel[]> = new Map()
-  const typeLabels: Record<string, string> = {
-    uart: '串口 (UART)', i2c: 'I2C', spi: 'SPI', adc: 'ADC'
-  }
   for (const ch of allChannels.value) {
-    const type = ch.hardware_type || 'other'
+    // 分组键按归一小写：后端存大写 'UART'、历史数据存小写 'uart'，
+    // 不归一会把同一总线拆成两个下拉分组。
+    const type = String(ch.hardware_type || '').trim().toLowerCase() || 'other'
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(ch)
   }
-  return Array.from(groups.entries()).map(([type, channels]) => ({ type, label: typeLabels[type] || type, channels }))
+  // label 走共享源：改前此处私有 map 给 uart 单独造了「串口」写法，与共享源的「UART」不一致。
+  return Array.from(groups.entries()).map(([type, channels]) => ({ type, label: getHardwareLabel(type), channels }))
 })
 
 const txEntries = computed(() => logEntries.value.filter(e => e.direction === 'TX'))
 const rxEntries = computed(() => logEntries.value.filter(e => e.direction === 'RX'))
 
 // --- Helpers ---
-// Element Plus 默认外观（'' 与 'primary' 视觉一致），此处归一到联合类型以匹配 el-tag :type。
-const getTagType = (type: string): 'success' | 'primary' | 'info' | 'warning' | 'danger' => {
-  const types: Record<string, 'success' | 'primary' | 'info' | 'warning' | 'danger'> = { adc: 'success', i2c: 'warning', spi: 'danger', uart: 'primary' }
-  return types[type] || 'primary'
-}
-
 const getChannelLabel = (ch: Channel) => {
-  const hwId = (ch as any).hardware_id || ch.hardware_type?.toUpperCase() || '?'
+  // hardware_id 已是 'UART0' 这类总线标识；缺失时才退回共享标签，避免渲染成「UART UART」。
+  const hwId = (ch as any).hardware_id || getHardwareLabel(ch.hardware_type) || '?'
   if (ch.name) return `${ch.name} (ID:${ch.id})`
   return `${hwId} (ID:${ch.id})`
 }

@@ -405,9 +405,16 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 	// StatusReport 的 EdgeDeviceHealth 子帧，恢复后该子帧消失、服务端收不到
 	// 「已恢复」的显式信号。而**成功采到数据本身就是最强的恢复证据**，
 	// 所以在这里清零 —— 否则一次超时留下的 error_code 会永久粘住。
-	result := c.db.Model(&device).Where("status = ?", "offline").Updates(map[string]interface{}{
+	//
+	// 判定条件从 status = "offline" 放宽为 status <> "active"（2026-10-03 缺陷 5）：
+	// 新建设备的初始状态是 "pending"（无数据），首个数据帧必须把它提升为
+	// "active"。若仍只匹配 offline，pending 设备即使一直正常采数也会永远停在
+	// pending —— 那是把「显示不准」修成「永远不显示在线」，比原缺陷更糟。
+	// 用 <> 而非枚举 pending/offline，是为了让任何历史遗留的陌生状态值
+	// （"error"/"warning"/手工改库的脏值）都能被真实数据纠正回来。
+	result := c.db.Model(&device).Where("status <> ?", models.EdgeDeviceStatusActive).Updates(map[string]interface{}{
 		"last_data_at": now,
-		"status":       "active",
+		"status":       models.EdgeDeviceStatusActive,
 		"error_code":   0,
 	})
 	if result.RowsAffected == 0 {
@@ -426,7 +433,7 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 			"device_name":    device.Name,
 			"node_id":        device.NodeID,
 			"channel_id":     device.ChannelID,
-			"status":         "active",
+			"status":         models.EdgeDeviceStatusActive,
 			"reason":         "data_received",
 		})
 	}

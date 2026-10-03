@@ -440,7 +440,22 @@ func TestTechfine_DriverMetadata(t *testing.T) {
 	}
 }
 
-func TestTechfine_ControlActionsAreDisabledReads(t *testing.T) {
+// TestTechfine_ControlActionsAreEnabledReads pins the eleven Techfine queries as
+// ENABLED low-risk reads (2026-10-03).
+//
+// What this test is really guarding is NOT the Enabled literal — it is that only
+// side-effect-free ASCII queries are reachable.  Until 2026-10-03 the assertions
+// here required Enabled==false, which meant the test was locking a development
+// rollout flag rather than a safety property: the field effect was eleven
+// operations listed in the UI as unusable ("action is not enabled for
+// rollout"), with no configuration entry point to open them.  The gate that
+// actually matters is the one below it: every entry must be a read, must be
+// low risk, must send exactly the frozen command, and no write may appear.
+//
+// The frozen command set is asserted byte-for-byte on purpose: these are the
+// frames the vendor document defines, and a "harmless refactor" that changes
+// one would silently address the wrong register.
+func TestTechfine_ControlActionsAreEnabledReads(t *testing.T) {
 	d := &TechfineInverterDriver{}
 	var _ ControlActionProvider = d
 	var _ ControlActionVerifier = d
@@ -459,7 +474,7 @@ func TestTechfine_ControlActionsAreDisabledReads(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected action %q", action.ID)
 		}
-		if action.Enabled || action.Semantics != "read" || action.Risk != "low" || string(action.TXData) != command || action.ReadSize != 256 || action.RXTimeoutMS != 1000 {
+		if !action.Enabled || action.Semantics != "read" || action.Risk != "low" || action.AvailabilityCode != "" || string(action.TXData) != command || action.ReadSize != 256 || action.RXTimeoutMS != 1000 {
 			t.Fatalf("unsafe or malformed action %+v", action)
 		}
 		delete(wantCommands, action.ID)
@@ -553,12 +568,31 @@ func TestTechfine_SensorDefinitions(t *testing.T) {
 // ============================================================================
 
 func TestTechfine_CommandTemplates(t *testing.T) {
-	// C6: the 11 query_* compatibility templates are deleted; the third state
-	// CommandTemplate{Schedulable:false} is abolished. GetCommandTemplates
-	// must return no templates — one-shot reads live in ControlActions().
+	// 2026-10-03: 轮询模板恢复。C6 删除它们时把"轮询"一并删掉了，导致该驱动
+	// 在架构上失去周期性采集能力 —— 现场表现为 UART1 从未发送任何字节
+	// （用户观察到 RS232 转接板 Tx/Rx 灯从不亮），因为 manifest 为该边设备
+	// 编码了 0 条命令，调度器于是从不投递 CMD_SAMPLE。
+	//
+	// 断言三件事：
+	//   1. 模板非空（否则命令永远不会被调度）
+	//   2. 全部 Schedulable（遵守 P2：第三态废止）
+	//   3. ReadLength 全为 0（ASCII 行协议必须走行空闲定帧；非 0 会让每条
+	//      响应因长度不符被判 error 0x03）
 	templates := (&TechfineInverterDriver{}).GetCommandTemplates()
-	if len(templates) != 0 {
-		t.Fatalf("expected 0 templates after C6 removal, got %d: %+v", len(templates), templates)
+	if len(templates) == 0 {
+		t.Fatal("GetCommandTemplates returned no templates — the inverter can never be polled")
+	}
+	for _, tmpl := range templates {
+		if !tmpl.Schedulable {
+			t.Errorf("template %q has Schedulable=false — the third state is abolished (演进方案 P2)", tmpl.ID)
+		}
+		if tmpl.ReadLength != 0 {
+			t.Errorf("template %q has ReadLength=%d; ASCII line protocol requires 0 (line-idle framing), "+
+				"otherwise every response is rejected as a short read (error 0x03)", tmpl.ID, tmpl.ReadLength)
+		}
+		if tmpl.WriteData == "" {
+			t.Errorf("template %q has empty WriteData — no frame would be transmitted", tmpl.ID)
+		}
 	}
 }
 
@@ -616,5 +650,170 @@ func TestTechfine_CommandAwareDriver(t *testing.T) {
 	}
 	if _, err := d.ParseDataWithCommand(raw, "not-hex"); err == nil {
 		t.Fatal("invalid command context accepted an ambiguous PV response")
+	}
+}
+
+// ============================================================================
+// 截断帧不得被采信（2026-10-03 主控自查发现的 P0 回归）
+//
+// 背景：节点侧对 ChannelCmdV2 改为「行空闲即帧边界」后，短于 read_size 的响应
+// 不再在节点本地被丢成 error 0x03，而是原样投递到服务端，由本驱动的 verifier
+// 做权威校验（这是该固件改动的安全前提）。
+//
+// 但当时 verifier **没有校验帧结尾**：ParseData 用 TrimRight + strings.Fields，
+// 一个被截断的 ASCII 行照样能解析出数值。实测 "(220.5 08.0 0" 会产出
+// pv2_power=0（真实值 960）—— 于是"读取失败"退化成"静默的假数据"，
+// 比失败更糟：用户看到的是一个看起来正常但错误的功率读数。
+//
+// 本用例把"截断即拒绝"钉死：GB3024 每条响应都以 CR 结尾，缺 CR 即畸形。
+// 它凭什么会失败：把 VerifyControlAction 里的 CR 结尾校验删掉，
+// 下面 18 个前缀里会有 5 个被接受，本用例立刻红。
+// ============================================================================
+func TestTechfine_VerifyControlActionRejectsTruncatedFrames(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	full := []byte("(220.5 08.0 00960\r")
+
+	// 前置：完整帧必须通过，否则下面的"拒绝"可能只是因为解析器根本不通。
+	if _, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), full); err != nil {
+		t.Fatalf("完整帧应通过，却失败: %v", err)
+	}
+
+	// 逐字节截断：任何缺少 CR 结尾的前缀都不得被采信。
+	for n := 0; n < len(full); n++ {
+		if _, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), full[:n]); err == nil {
+			t.Errorf("截断帧被采信了（前 %d 字节: %q）：缺失 CR 结尾说明线路截断或设备异常，不得产出数值",
+				n, string(full[:n]))
+		}
+	}
+
+	// 反向：完整帧（含 CR）仍然必须通过 —— 防止"一刀切拒绝所有帧"式的假修复。
+	if _, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), full); err != nil {
+		t.Fatalf("完整帧被误拒: %v", err)
+	}
+
+	// 空帧同样不得采信。
+	if _, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), nil); err == nil {
+		t.Error("空响应被采信")
+	}
+}
+
+// TestTechfine_VerifyControlActionRejectsTruncatedNumericField 用**具体数值后果**
+// 说明为什么必须拒绝：截断会把一个非零功率读成 0。
+// 只断言"返回 error"不足以表达危害，这里直接钉住"不得产出 0 这个错误值"。
+func TestTechfine_VerifyControlActionRejectsTruncatedNumericField(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	// 完整帧的第三个字段 00960 会被解析为 pv2_power。
+	result, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), []byte("(220.5 08.0 00960\r"))
+	if err != nil {
+		t.Fatalf("完整帧解析失败: %v", err)
+	}
+	var power float64
+	found := false
+	for _, sd := range result {
+		if sd.Name == "pv2_power" {
+			power = sd.Value
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("完整帧未产出 pv2_power，夹具失效")
+	}
+	if power == 0 {
+		t.Fatalf("完整帧的 pv2_power 解析为 0，夹具与实际解析不符")
+	}
+
+	// 截断到最后一个字符之前：不得产出任何值（尤其不得产出 0）。
+	if got, err := d.VerifyControlAction("read_pv2", json.RawMessage(`{}`), []byte("(220.5 08.0 0")); err == nil {
+		for _, sd := range got {
+			if sd.Name == "pv2_power" {
+				t.Fatalf("截断帧产出了 pv2_power=%v（真实值 %v）—— 静默假数据比失败更危险", sd.Value, power)
+			}
+		}
+		t.Error("截断帧未报错")
+	}
+}
+
+// ============================================================================
+// 形状绑定：CR 结尾不足以防错配/截断帧（2026-10-03 固件审查发现的 P0）
+//
+// 背景：节点侧放行 V2 短读后，verifier 成为唯一防线。但**仅校验 CR 结尾不够**：
+// ParseData 是按字段数/格式嗅探分支的，不绑定所请求的动作。审查者实测出 4 个洞，
+// 我自查时又发现第 5 个。下面逐个钉死（全部为实测复现过的输入）：
+//
+//  1. read_battery 喂 HGRID 形状 → 曾返回 grid_voltage/grid_frequency
+//  2. read_output  喂市电形状   → 曾返回 grid_voltage/grid_frequency
+//  3. read_status  喂截短 HSTS  → 曾返回 12 个 alarm_* 全为 0（**fail-open**：
+//     设备可能正在报警，界面显示"无告警"）
+//  4. read_temperature 喂 HBAT 形状 → 曾返回 battery_* 字段
+//  5. read_pv2 喂截断功率字段 → 曾返回 pv2_power=0（真实 960W）
+//
+// 修法：verifier 做两道校验 —— 字段必须同族（拦错配）+ 字段数与形状必须完整（拦截断）；
+// 并在 parseHSTS / parsePV 里把"缺字段默认成 0"的 fail-open 改为显式报错。
+//
+// 它凭什么会失败：删掉 expectActionSensors 的调用，或用回 parseFloat 的 0 兜底，
+// 下面 5 条会全部变红。
+// ============================================================================
+func TestTechfine_VerifyControlActionRejectsWrongShapeAndTruncatedFrames(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	// 每一条都是"CR 结尾但形状不对/被截断"的帧 —— 旧的 CR 校验放行它们。
+	bad := []struct {
+		action string
+		raw    string
+		reason string
+	}{
+		{"read_battery", "(52.1 08.0 00960 001 00000 002 00000\r", "市电形状的帧被当成电池数据"},
+		{"read_output", "(230.1 50.0 01150 01000 025 003\r", "市电形状的帧被当成输出数据"},
+		{"read_status", "(00 P0000\r", "截短的状态帧被读成\"无告警\"（fail-open）"},
+		{"read_temperature", "(25 30 40 45 50 55 60 70\r", "电池形状的帧被当成温度数据"},
+		{"read_pv2", "(220.5 08.0 0\r", "截断的功率字段被读成 0W"},
+	}
+	for _, tc := range bad {
+		got, err := d.VerifyControlAction(tc.action, json.RawMessage(`{}`), []byte(tc.raw))
+		if err == nil {
+			names := make([]string, 0, len(got))
+			for _, sd := range got {
+				names = append(names, sd.Name)
+			}
+			t.Errorf("%s: %s —— 却返回了 %v（静默假数据比失败更危险）", tc.action, tc.reason, names)
+		}
+	}
+}
+
+// TestTechfine_VerifyControlActionAcceptsWellFormedResponses 是上一条的**反向对照**：
+// 形状绑定不得把合法响应一起拒掉（防"一刀切拒绝"式假修复）。
+// 只说"能拒绝坏帧"无法排除"把好帧也拒了"—— 两条合起来才钉住判据的边界。
+func TestTechfine_VerifyControlActionAcceptsWellFormedResponses(t *testing.T) {
+	d := &TechfineInverterDriver{}
+	good := []struct {
+		action string
+		raw    string
+	}{
+		{"read_status", "(00 P000000000000\r"},
+		{"read_battery", "(12 053.2 080 010 00005 380 00000\r"},
+		{"read_pv1", "(120.5 08.0 00960\r"},
+		{"read_pv2", "(080.0 05.0 00400\r"},
+	}
+	for _, tc := range good {
+		data, err := d.VerifyControlAction(tc.action, json.RawMessage(`{}`), []byte(tc.raw))
+		if err != nil {
+			t.Errorf("%s: 合法响应被误拒: %v", tc.action, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("%s: 合法响应未产出任何字段", tc.action)
+		}
+	}
+}
+
+// TestTechfine_HSTS_TruncatedStatusIsNotAllClear 直接钉住 fail-open 的**后果**：
+// 截短的状态帧绝不能产出"12 个告警全 0"这种"一切正常"的结论。
+func TestTechfine_HSTS_TruncatedStatusIsNotAllClear(t *testing.T) {
+	// "(00 P0000" 是告警串被截到 5 字符的 HSTS；完整帧是 13 字符（1 模式 + 12 告警位）。
+	if _, err := (&TechfineInverterDriver{}).ParseData([]byte("(00 P0000\r")); err == nil {
+		t.Fatal("截短的状态帧被解析成功：缺失的告警位被默认成 0，会把\"正在报警\"显示成\"无告警\"")
+	}
+	// 完整帧必须仍然可解析（否则上面那条可能只是因为解析器整体坏了）。
+	if _, err := (&TechfineInverterDriver{}).ParseData([]byte("(00 P000000000000\r")); err != nil {
+		t.Fatalf("完整状态帧被误拒: %v", err)
 	}
 }

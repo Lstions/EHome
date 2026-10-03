@@ -291,11 +291,24 @@ func (d *PRS3001Driver) GetCommandTemplates() []CommandTemplate {
 	}
 }
 
+// ControlActions 的 read_rainfall 自 2026-10-03 起 Enabled: true。
+//
+// 它是 FC03 读保持寄存器的纯查询（Semantics: "read"），无副作用；帧长固定 9 字节
+// （addr + fc + bytecount + 2×2 字节数据 + 2 字节 CRC），与只读的 GetCommandTemplates
+// 用同一帧、同一长度，且该模板一直在正常采集 —— 也就是说这条读路径在生产上早已
+// 每 5 秒跑一次。把它标成 disabled 的唯一后果，是「读取雨量」在操作目录里被
+// gateActionEnabled 拦下、对用户显示为不可用（用户 2026-10-03 的原话：
+// 「一些设备根本就无法进行指令操作，全都没有启用，这种禁用全给我去掉」），
+// 而不是任何安全收益：读不会改变设备状态。
+//
+// 与 definition.go 的默认启用原则一致：具备了完整执行链(verifier)的只读操作
+// 默认可用，真正的门禁在运行时 gate。清零(reset_rainfall)仍然禁用，
+// 因为它带 AvailabilityCode: protocol_unverified —— 那才是真正缺证据的操作。
 func (d *PRS3001Driver) ControlActions() []ControlAction {
 	return []ControlAction{{
 		ID: "read_rainfall", Version: 1, Name: "读取雨量",
 		Description: "PRS-3001 雨量 (mm) 和光照度 (Lux)，Modbus RTU FC03",
-		Semantics:   "read", Risk: "low", Enabled: false,
+		Semantics:   "read", Risk: "low", Enabled: true,
 		TXData:   []byte{0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xc4, 0x0b},
 		ReadSize: 9, RXTimeoutMS: 1000, PostTXDelayMS: 100,
 	}, {

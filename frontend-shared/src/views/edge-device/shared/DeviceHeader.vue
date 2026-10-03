@@ -60,7 +60,9 @@
         <el-input :model-value="device?.protocol?.toUpperCase()" disabled />
       </el-form-item>
       <el-form-item label="硬件类型">
-        <el-input :model-value="device?.hardware_type?.toUpperCase()" disabled />
+        <!-- 硬件类型走共享源（2026-10-03 文案统一）：与列表/详情/通道页同口径，
+             未知类型也能得到非空的大写标签，而不是各页各写一次 toUpperCase。 -->
+        <el-input :model-value="device?.hardware_type ? getHardwareLabel(device.hardware_type) : ''" disabled />
       </el-form-item>
       <el-form-item label="硬件ID">
         <el-input :model-value="device?.hardware_id" disabled />
@@ -96,6 +98,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { edgeDeviceApi, type EdgeDevice } from '@/api/edgeDevice'
 import { useEdgeDeviceStore } from '@/stores/edgeDevice'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { getHardwareLabel } from '@/utils/hardwareTag'
 
 const props = defineProps<{
   device: EdgeDevice | null

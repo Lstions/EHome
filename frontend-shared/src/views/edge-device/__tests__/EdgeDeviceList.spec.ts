@@ -340,13 +340,25 @@ describe('EdgeDeviceList.vue', () => {
     expect(updateCall).not.toContain('type:')
   })
 
-  // Step2 通道模板 hardware_type 兜底:防 hardware_type 缺失(undefined/null)时
-  // .toUpperCase() 抛 TypeError。带可选链的 ch.hardware_type?.toUpperCase() 是合法的。
-  it('Step2 template guards ch.hardware_type with a fallback before toUpperCase()', () => {
-    expect(source).toContain("(ch.hardware_type || '').toUpperCase()")
-    // 不允许裸的 ch.hardware_type.toUpperCase()(允许可选链 ?. 形式)
+  // Step2 通道模板 hardware_type 兜底。原意图（必须保留）：hardware_type 可能
+  // 缺失(undefined/null)，直接 .toUpperCase() 会抛 TypeError，页面白屏。
+  //
+  // 2026-10-03 文案统一后，通道展示改走共享的 getHardwareDisplay/getHardwareLabel；
+  // 它们内部做 String(type ?? '').trim().toLowerCase()，缺失/非字符串都安全，
+  // 且顺带修掉了「UART UART0」重复前缀。因此断言从"必须手工兜底"改为
+  // "不得再有裸 toUpperCase，且必须走共享源"。
+  it('Step2 通道硬件标识走共享源，不再手工 toUpperCase（缺 hardware_type 也不抛）', () => {
+    // 不允许任何裸的 ch.hardware_type.toUpperCase()（可选链 ?. 形式也不再需要）
     const bareMatches = source.match(/ch\.hardware_type\.toUpperCase\(\)/g)
     expect(bareMatches).toBeNull()
+    const fallbackMatches = source.match(/\(ch\.hardware_type \|\| ['"]{2}\)\.toUpperCase\(\)/g)
+    expect(fallbackMatches).toBeNull()
+    // 通道卡必须经共享源渲染（去重复前缀 + 大小写归一的唯一实现点）
+    expect(source).toContain("from '@/utils/hardwareTag'")
+    expect(source).toContain("getHardwareDisplay(ch.hardware_type, ch.hardware_id)")
+    // 用户可见效果：源码里不得再拼出「总线名 + 空格 + hardware_id」这种
+    // 会渲染成 "UART UART0" 的写法（hardware_id 现场就是 UART0/UART1/I2C0）。
+    expect(source).not.toMatch(/toUpperCase\(\)\}\s*\$\{?\s*[a-z]*hardware_id/)
   })
 
   // ---- 数据生命周期 T2: 删除确认弹窗改造 (方案 v3.3 §2.1/§2.2) ----
@@ -1012,3 +1024,39 @@ describe('EdgeDeviceList.vue', () => {
     expect(vm.createStep).toBe(0)
   })
 })
+
+  // ===================================================================
+  // 统计口径：卡片数字必须能自校验（2026-10-03 审查发现的 P2）
+  //
+  // 缺陷 5 把 pending 从「在线」里摘出来是对的，但当时 pending 只计入 total，
+  // 两个分项都不含它 ⇒ 「在线 + 离线/异常 < 总数」。用户本来就在抱怨数字
+  // 对不上，修一个显示错误不该引入一个新的对不上。
+  //
+  // 修法不是加第 5 张卡：移动端契约（views/__tests__/MobileStatCardsResponsive.spec.ts:118）
+  // 钉死了本页 ≤768px 必须是 4 张卡（grid repeat(4,…)）。故第三张卡承载
+  // 「离线/异常 + 等待数据」，并在卡内单列"等待数据 N"。
+  // 不变量：total = online + (offline + pending)。
+  //
+  // 它凭什么会失败：把第三张卡的 value 从 `stats.offline + stats.pending`
+  // 改回 `stats.offline`，第一与第三条断言立刻红。
+  // ===================================================================
+  it("统计不变量：在线 + 非在线(离线/异常+等待数据) = 总数", () => {
+    // 复用文件顶部已导入的 ?raw 源码（与其它源码级断言同一来源）。
+    // pending 必须被单独统计（否则它既不进在线也不进非在线，三卡之和小于总数）
+    expect(source).toContain("stats.pending = allVisible.filter")
+    // 第三张卡的数字必须把 pending 算进去，等式才成立
+    expect(
+      source,
+      "「离线/异常」卡必须 = offline + pending，否则三卡之和小于总数（用户会看到数字对不上）",
+    ).toContain("stats.offline + stats.pending")
+    // pending 不得被计入在线（缺陷 5 的核心：没数据不能算在线）
+    expect(source).not.toMatch(/stats\.online\s*=[^\n]*pending/)
+    // pending 也不得被并进 stats.offline 本身：它要与"真离线"保持可区分，
+    // 否则卡内无法单列"等待数据 N"，也就丢失了缺陷 5 要表达的语义。
+    expect(source).not.toMatch(/stats\.offline\s*=[^\n]*pending/)
+    // 卡内必须真的把等待数据单列出来，用户才能区分两者
+    expect(source).toContain("等待数据 {{ stats.pending }}")
+    // 且不得新增第 5 张卡（移动端 4 卡契约）
+    const cardCount = [...source.matchAll(/<StatCard/g)].length
+    expect(cardCount, "EdgeDeviceList 必须保持 4 张统计卡（移动端布局契约）").toBe(4)
+  })

@@ -419,7 +419,20 @@ const availableTrendCategories = computed(() => {
 
 // 告警摘要计算属性
 const offlineCollectors = computed(() => Math.max(0, (overview.value.nodes?.total || 0) - (overview.value.nodes?.online || 0)))
-const offlineDevices = computed(() => Math.max(0, (overview.value.edge_devices?.total || 0) - (overview.value.edge_devices?.online || 0)))
+// 离线设备数：必须减去 pending（2026-10-03 审查发现）。
+//
+// 原写法是 `total - online`，把「已创建但还没采到数据」的设备也算成离线。
+// 此前设备默认 status=active，所以看不出问题；改成 pending 后，新建设备会在
+// ~60s 的 pending 窗口内被仪表盘报成「离线设备」，触发无谓的告警摘要
+// （hasAlerts 会因此为真）。pending 既不是在线也不是故障，必须从离线里排除。
+const offlineDevices = computed(() =>
+  Math.max(
+    0,
+    (overview.value.edge_devices?.total || 0)
+      - (overview.value.edge_devices?.online || 0)
+      - (overview.value.edge_devices?.pending || 0),
+  ),
+)
 const dataErrorCount = computed(() => {
   return (overview.value.latest_data || []).filter(d => (d.error_code ?? 0) > 0).length
 })

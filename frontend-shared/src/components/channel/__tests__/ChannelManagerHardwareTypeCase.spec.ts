@@ -164,7 +164,14 @@ async function clickPrimarySubmit(wrapper: { findAll(selector: string): any[] })
 
 describe('ChannelManager 写侧枚举大小写约定（后端存储约定为大写）', () => {
   it('创建 UART 通道时 hardware_type 与 bus_type 同为后端约定的大写', async () => {
-    const wrapper = await mountManager(baseProps({ presetHardwareType: 'uart', presetHardwareId: 'UART1' }))
+    // 2026-10-03：必须带上 capabilities —— ChannelManager 现在会在"所选资源未上报"时
+    // **拒绝提交**（旧行为是静默落空 bus_config，那正是缺陷）。本用例要测的是大小写约定，
+    // 不是缺能力时的拦截，故补齐资源让提交走完。
+    const wrapper = await mountManager(baseProps({
+      presetHardwareType: 'uart',
+      presetHardwareId: 'UART1',
+      capabilities: { buses: { uart: [{ id: 'UART1', default_tx_pin: 20, default_rx_pin: 21, max_baud: 5000000 }] } },
+    }))
     await clickPrimarySubmit(wrapper)
 
     expect(mocks.createChannel).toHaveBeenCalledTimes(1)
@@ -175,7 +182,12 @@ describe('ChannelManager 写侧枚举大小写约定（后端存储约定为大�
   })
 
   it('创建 I2C 通道时同样是统一大写（不是只转 bus_type）', async () => {
-    const wrapper = await mountManager(baseProps({ presetHardwareType: 'i2c', presetHardwareId: 'I2C0' }))
+    // 同上：i2c 的 bus_config 也需要资源能力才能组装，缺资源会被拒绝提交。
+    const wrapper = await mountManager(baseProps({
+      presetHardwareType: 'i2c',
+      presetHardwareId: 'I2C0',
+      capabilities: { buses: { i2c: [{ id: 'I2C0', default_sda_pin: 4, default_scl_pin: 5, max_freq_hz: 400000 }] } },
+    }))
     await clickPrimarySubmit(wrapper)
 
     const data = mocks.createChannel.mock.calls[0][0] as Record<string, unknown>

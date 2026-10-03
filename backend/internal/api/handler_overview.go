@@ -34,10 +34,15 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 		var nodeOnline int64
 		var edgeDeviceTotal int64
 		var edgeDeviceOnline int64
+		var edgeDevicePending int64
 		db.Model(&models.Node{}).Count(&nodeTotal)
 		db.Model(&models.Node{}).Where("status = ?", "online").Count(&nodeOnline)
 		db.Model(&models.EdgeDevice{}).Count(&edgeDeviceTotal)
-		db.Model(&models.EdgeDevice{}).Where("status = ?", "active").Count(&edgeDeviceOnline)
+		db.Model(&models.EdgeDevice{}).Where("status = ?", models.EdgeDeviceStatusActive).Count(&edgeDeviceOnline)
+		// pending 必须单独计数（2026-10-03 缺陷 5）：offline 若继续用
+		// total - online 推导，新建的、还没采到数据的设备会被算成「离线」，
+		// 与"没数据却显示在线"是同一类错误的反方向版本。
+		db.Model(&models.EdgeDevice{}).Where("status = ?", models.EdgeDeviceStatusPending).Count(&edgeDevicePending)
 
 		// Build latest_data from edge devices + unified_data (C2 fix: batch query)
 		type latestEntry struct {
@@ -135,7 +140,7 @@ func registerOverviewRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 
 		result := gin.H{
 			"nodes":            gin.H{"total": nodeTotal, "online": nodeOnline, "offline": nodeTotal - nodeOnline},
-			"edge_devices":     gin.H{"total": edgeDeviceTotal, "online": edgeDeviceOnline, "offline": edgeDeviceTotal - edgeDeviceOnline},
+			"edge_devices":     gin.H{"total": edgeDeviceTotal, "online": edgeDeviceOnline, "offline": edgeDeviceTotal - edgeDeviceOnline - edgeDevicePending, "pending": edgeDevicePending},
 			"latest_data":      latestData,
 			"data_count_today": dataCountToday,
 		}

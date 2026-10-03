@@ -932,6 +932,22 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager, registries ...*driv
 				if err := validateTransportChannelType(&candidate); err != nil {
 					return err
 				}
+				// 第四条写 channels.bus_config 的路径（2026-10-03 审查发现的 P2）：
+				// POST /channels、向导内联、PUT /channels 都有 ensureUARTBusConfig 守卫，
+				// 只有这里没有 —— 同一不变量只守一半等于没守。
+				// 本路径会原样落库调用方给的 bus_config，因此必须同样校验：
+				// 连引脚路由都不是的值（非 hex / <2 字节）直接拒绝，
+				// 避免绕过其它三条路径的守卫写入一个不可解析的通道。
+				// 注意只校验合法性，不要求「可改波特率」—— 理由见
+				// ensureUARTBusConfig 上方关于两个约束被混为一谈的说明。
+				if isUARTChannel(&candidate) {
+					if err := ensureUARTBusConfig(node, &candidate); err != nil {
+						return err
+					}
+					if candidate.BusConfig != updates["bus_config"] {
+						updates["bus_config"] = candidate.BusConfig
+					}
+				}
 				if err := validateChannelPeripheralConflicts(tx, candidate); err != nil {
 					return err
 				}

@@ -22,10 +22,8 @@
             :disabled="!!presetHardwareType"
             @change="onHardwareTypeChange"
           >
-            <el-option label="UART" value="uart" />
-            <el-option label="I2C" value="i2c" />
-            <el-option label="SPI" value="spi" />
-            <el-option label="ADC" value="adc" />
+            <!-- 展示名走共享源：value 仍是后端契约用的小写。 -->
+            <el-option v-for="bus in HW_TYPES" :key="bus" :label="getHardwareLabel(bus)" :value="bus" />
           </el-select>
         </el-form-item>
 
@@ -43,10 +41,15 @@
               :key="hw.id"
               :label="hw.name || hw.id"
               :value="String(hw.id)"
+              :disabled="isOccupiedResource(hw)"
             >
               <span>{{ hw.name || hw.id }}</span>
               <span v-if="hw.pins?.length" style="color: var(--el-text-color-secondary); font-size: 12px; margin-left: 8px;">
                 ({{ formatPinsBrief(hw.pins) }})
+              </span>
+              <!-- 已占用：与后端的引脚仲裁同口径，避免用户填完整张表才被 409 拒 -->
+              <span v-if="isOccupiedResource(hw)" style="color: var(--el-color-warning); font-size: 12px; margin-left: 8px;">
+                已被其它通道占用
               </span>
             </el-option>
           </el-select>
@@ -235,6 +238,7 @@ import { type Channel } from '@/api/channel'
 import { nodeApi } from '@/api/node'
 import { useChannelStore } from '@/stores/channel'
 import { assertSessionGeneration, getSessionGeneration } from '@/utils/sessionCache'
+import { getHardwareLabel } from '@/utils/hardwareTag'
 
 interface Props {
   collectorId: string | number
@@ -247,6 +251,14 @@ interface Props {
   presetHardwareId?: string
   collectorStatus?: string
   readonly?: boolean
+  /**
+   * 已被**其它已启用通道**占用的硬件资源 id（大小写/别名不敏感地比较）。
+   *
+   * 为什么必须由调用方传入：本组件只拿到 capabilities（资源清单），
+   * 拿不到"哪些资源已经建过通道"。后端已在创建时做引脚仲裁（409），
+   * 但让用户填完整张表再被拒是坏体验 —— 这里在下拉框里直接标出来。
+   */
+  occupiedHardwareIds?: string[]
 }
 
 const props = defineProps<Props>()
@@ -306,6 +318,15 @@ const toBusType = (value: unknown): HardwareBusType => {
   const lower = typeof value === 'string' ? value.toLowerCase() : ''
   return (HW_TYPES as readonly string[]).includes(lower) ? (lower as HardwareBusType) : 'i2c'
 }
+
+// UART 默认波特率 9600（见 initConfigDefaults 的说明：本仓现场设备是 2400/4800/9600）。
+// 抽成常量是为了让「表单默认值」与「提交兜底值」不可能再各自漂移成不同数字。
+const DEFAULT_UART_BAUD_RATE = 9600
+
+// 这些总线的 bus_config 承载引脚/速率，是后续参数修改（改波特率、重配引脚）的唯一数据源；
+// 落空会让后续修改永久失败，故提交前必须能确定对应硬件资源。
+const BUS_TYPES_REQUIRING_CONFIG = ['uart', 'i2c', 'spi'] as const
+const needsBusConfig = (type: string) => (BUS_TYPES_REQUIRING_CONFIG as readonly string[]).includes(type)
 
 // 获取当前选中硬件的能力数据。能力上报尚未到达时提供安全兜底，
 // 以确保既有通道在编辑时仍可修改其已保存的参数。
@@ -391,6 +412,29 @@ const availableHardwareList = computed<HardwareResource[]>(() => {
   return props.capabilities.buses[form.hardware_type] || []
 })
 
+// 占用集：大小写不敏感（能力里的 id 是 "UART1"，历史数据里出现过 "uart1"）。
+const occupiedHardwareSet = computed(() => {
+  const set = new Set<string>()
+  for (const id of props.occupiedHardwareIds || []) {
+    const key = String(id || '').trim().toUpperCase()
+    if (key) set.add(key)
+  }
+  return set
+})
+
+/**
+ * 该资源是否已被别的通道占用。
+ *
+ * 编辑态下要排除**自己**：否则打开一条 UART1 通道的编辑框，
+ * UART1 会被标成"已占用"，用户连原样保存都做不到。
+ */
+function isOccupiedResource(hw: HardwareResource): boolean {
+  const key = String(hw?.id ?? '').trim().toUpperCase()
+  if (!key || !occupiedHardwareSet.value.has(key)) return false
+  const editing = String(props.initialData?.hardware_id ?? '').trim().toUpperCase()
+  return editing !== key
+}
+
 // ====== 标签/格式化辅助 ======
 
 const parityLabel = (p: string) => ({ none: '无', odd: '奇校验', even: '偶校验', mark: 'Mark', space: 'Space' }[p] || p)
@@ -438,7 +482,17 @@ const initConfigDefaults = () => {
   if (!caps) return
 
   if (form.hardware_type === 'uart') {
-    form.config.baud_rate = 115200
+    // 默认 9600，不用 115200（2026-10-03 缺陷 4）：本仓现场 UART 设备是
+    // 2400(逆变器)/4800(SN-3001、部分 BMS)/9600(多数 BMS)，没有一台用 115200。
+    // 拿设备不支持的速率当默认值，用户建完通道仍连不上，必须回头改波特率 ——
+    // 而旧代码在"资源能力未上报"时又会落空 bus_config，于是直接卡死。
+    // 与后端 defaultUARTBaudrate 保持一致；超出能力范围时夹到能力边界。
+    const maxBaud = Number(caps.baud_rate_max) || 0
+    const minBaud = Number(caps.baud_rate_min) || 0
+    let baud = DEFAULT_UART_BAUD_RATE
+    if (maxBaud > 0 && baud > maxBaud) baud = maxBaud
+    if (minBaud > 0 && baud < minBaud) baud = minBaud
+    form.config.baud_rate = baud
     form.config.data_bits = caps.data_bits_options?.includes(8) ? 8 : (caps.data_bits_options?.[0] || 8)
     form.config.stop_bits = caps.stop_bits_options?.includes(1) ? 1 : (caps.stop_bits_options?.[0] || 1)
     form.config.parity = caps.parity_options?.includes('none') ? 'none' : (caps.parity_options?.[0] || 'none')
@@ -504,29 +558,65 @@ const handleSubmit = async () => {
     // 组装 bus_config (硬件总线配置的hex字节数组)
     let busConfig = ''
     const hw = availableHardwareList.value.find(h => String(h.id) === form.hardware_id)
+    // 资源能力缺失时**不再静默产出空 bus_config**（2026-10-03 缺陷 4）。
+    // 旧行为：`&& hw` 不成立就跳过整个分支，busConfig 保持空串并成功提交，
+    // 结果是一条"以后永远改不了波特率"的通道 —— 用户点「改波特率」才看到
+    // 「bus_config 为空」，而那时已经晚了。这里改为提交前明确拦下，
+    // 并把可操作的下一步告诉用户（后端 UART 还会兜底补齐，见 ensureUARTBusConfig）。
+    //
+    // 判据覆盖 uart/i2c/spi 三种**需要 bus_config 才能确定引脚/速率**的总线：
+    // 旧写法对三者都是同一个静默空串（只是 UART 的后果最容易被用户看见——
+    // 改波特率报错；i2c/spi 的空 bus_config 会直接导致节点端无法解析引脚）。
+    // 编辑态不得要求资源能力（2026-10-03 审查发现的 P1 回归）。
+    //
+    // 原判据只写 `needsBusConfig && !hw`，对**编辑已有通道**同样生效。
+    // 而编辑入口（NodeOverview 通道行「配置」）不检查能力是否加载；
+    // 能力拉取失败时 capabilities 会被置成 {buses:{}} ⇒ hw 必然找不到 ⇒
+    // 用户连"改个通道名 / 改轮询周期"都保存不了。那是把
+    // 「改不了波特率」换成了「连名字都改不了」，比原缺陷更糟。
+    //
+    // 编辑态的 bus_config 是**已存在的**：只要不清空，就不会制造
+    // "改不了波特率"的通道。提交时 data.bus_config 仅在能组装出合法值时才带值
+    // （见下方 uart/i2c/spi 分支），拿不到时保持 undefined ⇒ PUT 不带该字段
+    // ⇒ 后端保留原值。真正的兜底仍在后端 ensureUARTBusConfig（校验并补齐）。
+    //
+    // 因此：**只在新建时**要求资源能力可解析。
+    const isEditingExistingChannel = Boolean(editingChannel.value?.id)
+    if (needsBusConfig(form.hardware_type) && !hw && !isEditingExistingChannel) {
+      // 走 feedback 而非裸 ElMessage.error：项目 I-1 静态门禁
+      // (utils/__tests__/i1ErrorConvergenceGuard.spec.ts) 要求所有错误提示
+      // 经 utils/feedback 收敛，否则样式/级别/埋点会分叉。
+      feedback.error(
+        `该节点尚未上报所选 ${getHardwareLabel(form.hardware_type)} 资源，无法确定引脚与速率。请等待节点上报后重试，或改用已上报的资源。`,
+      )
+      submitting.value = false
+      return
+    }
     if (form.hardware_type === 'uart' && hw) {
       const tx_pin = form.config.tx_pin || hw.default_tx_pin
       const rx_pin = form.config.rx_pin || hw.default_rx_pin
-      const baud = form.config.baud_rate || 115200
+      // 兜底同样是 9600 而非 115200（见 initConfigDefaults 的说明）。
+      const baud = form.config.baud_rate || DEFAULT_UART_BAUD_RATE
+      // 帧格式参数不再进 bus_config（见上面的布局说明）：固件把 UART 硬编码为
+      // 8N1，byte 7..9 从不读。它们只写进 config JSON 供人阅读与回显。
       const data_bits = form.config.data_bits || 8
       const stop_bits = form.config.stop_bits || 1
-      const parity_map: Record<string, number> = { none: 0, even: 1, odd: 2, mark: 3, space: 4 }
-      const parity = parity_map[form.config.parity] ?? 0
-      const flow_map: Record<string, number> = { none: 0, rts: 1, cts: 2, 'rts/cts': 3 }
-      const flow = flow_map[form.config.flow_control] ?? 0
-      // bus_config layout (10 bytes):
-       // [0]=tx_pin [1]=rx_pin [2-5]=baud(BE) [6]=data_bits [7]=stop_bits [8]=parity [9]=flow
-       const buf = new Uint8Array(10)
+      // bus_config 布局（7 字节）——与固件权威定义和 backend
+      // channel_reconfigure.go 的 buildUARTBusConfig 逐字节一致：
+      //   [0]=tx_pin [1]=rx_pin [2-5]=baud(BE) [6]=DMA flags（bit0=使能）
+      //
+      // 为什么不再是 10 字节 [6]=data_bits：固件 bus_dma.h 把 UART 的 bus_config[6]
+      // 读作 DMA flags（& 0x01），而 uart_config_t 的帧格式是硬编码 8N1（bus_dma.c），
+      // byte 7..9 根本不读。旧写法把 data_bits=8 写进 byte 6 ⇒ 0x08 & 0x01 == 0
+      // ⇒ 静默关闭 DMA。帧格式仍进 config JSON（下面几行），只是不编进 bus_config。
+       const buf = new Uint8Array(7)
       buf[0] = tx_pin
       buf[1] = rx_pin
       buf[2] = (baud >> 24) & 0xFF
       buf[3] = (baud >> 16) & 0xFF
       buf[4] = (baud >> 8) & 0xFF
       buf[5] = baud & 0xFF
-      buf[6] = data_bits
-      buf[7] = stop_bits
-      buf[8] = parity
-      buf[9] = flow
+      buf[6] = 0x01
        busConfig = Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join('').toUpperCase()
        // Also store in config JSON for readability
        config.baud_rate = baud
