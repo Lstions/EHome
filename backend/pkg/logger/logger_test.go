@@ -9,7 +9,8 @@ func TestInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init(warn) failed: %v", err)
 	}
-	if L == nil {
+	// L 是 atomic.Pointer，必须 Load() 读取（直接比较会编译失败，且绕过并发契约）。
+	if L.Load() == nil {
 		t.Fatal("L should be initialized after Init()")
 	}
 }

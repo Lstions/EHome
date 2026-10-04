@@ -182,14 +182,14 @@ func deliveriesOf(t *testing.T, db *gorm.DB) []models.NotificationDelivery {
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}
-	previous := logger.L
 	core := zapcore.NewCore(
 		zapcore.NewConsoleEncoder(zapcore.EncoderConfig{MessageKey: "msg", LevelKey: "level", EncodeLevel: zapcore.CapitalLevelEncoder}),
 		zapcore.AddSync(buf),
 		zapcore.DebugLevel,
 	)
-	logger.L = zap.New(core).Sugar()
-	t.Cleanup(func() { logger.L = previous })
+	// 走原子 Swap，不要直接赋值 logger.L（见 pkg/logger 的并发契约注释）。
+	previous := logger.Swap(zap.New(core).Sugar())
+	t.Cleanup(func() { logger.Swap(previous) })
 	return buf
 }
 

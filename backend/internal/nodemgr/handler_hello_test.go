@@ -321,9 +321,10 @@ func TestHandleHelloDoesNotAckWhenNodePersistFails(t *testing.T) {
 	}
 
 	core, observed := observer.New(zapcore.ErrorLevel)
-	previous := logger.L
-	logger.L = zap.New(core).Sugar()
-	defer func() { logger.L = previous }()
+	// 必须走 logger.Swap（原子）：直接赋值 logger.L 既编译不过，也会重新引入
+	// Init 与后台 consumer 之间的数据竞争（2026-10-04 CI 的 -race 抓到过）。
+	previous := logger.Swap(zap.New(core).Sugar())
+	defer func() { logger.Swap(previous) }()
 
 	mgr.handleHello(deviceID, encodedHelloFor(deviceID, 103))
 	mgr.wg.Wait()
@@ -361,9 +362,8 @@ func TestStoreNodeIDCacheNeverCachesZero(t *testing.T) {
 	defer nodeIDCache.Delete(deviceID)
 
 	core, observed := observer.New(zapcore.WarnLevel)
-	previous := logger.L
-	logger.L = zap.New(core).Sugar()
-	defer func() { logger.L = previous }()
+	previous := logger.Swap(zap.New(core).Sugar())
+	defer func() { logger.Swap(previous) }()
 
 	storeNodeIDCache(deviceID, 0)
 	if v, ok := nodeIDCache.Load(deviceID); ok {
