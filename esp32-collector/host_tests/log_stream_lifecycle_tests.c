@@ -173,6 +173,53 @@ BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_dep
     return pdPASS;
 }
 
+/* 静态创建版本。
+ *
+ * 2026-10-04（第二个实机缺陷）：满负载下 xTaskCreate 会失败 —— S3 上 5 条总线
+ * （全开 DMA）+ 6 路 PWM + 全部模板就绪时，空闲堆只剩约 13.7KB，而 xTaskCreate
+ * 需要 4096 字节栈 + TCB，于是串口出现
+ *
+ *	I CONFIG: LogStream config: enabled=1 level=3
+ *	E LOG_STREAM: Failed to create log_tx_task
+ *
+ * 表现为"日志开关返回 200、配置 applied，但设备一帧日志都不推"。
+ * 改用 xTaskCreateStatic 后不再依赖运行时堆。
+ *
+ * 这里刻意**复用与 xTaskCreate 相同的断言与记账**（优先级、栈深度、失败注入），
+ * 两个入口不能有分叉：否则将来只改一个分支，测试就守不住另一个。
+ * 返回语义按 ESP-IDF：成功返回句柄，失败返回 NULL。 */
+TaskHandle_t xTaskCreateStatic(TaskFunction_t task, const char *name,
+                               uint32_t stack_depth, void *arg, unsigned priority,
+                               StackType_t *stack, StaticTask_t *tcb)
+{
+    (void)name;
+    /* 静态创建必须真的用到调用方提供的存储：传 NULL 在真实 FreeRTOS 上是
+     * 未定义行为，这里显式拒绝，避免测试用假实现掩盖调用方的错误。 */
+    if (stack == NULL || tcb == NULL) {
+        fprintf(stderr, "FAIL xTaskCreateStatic: static storage must not be NULL\n");
+        s_failures++;
+        return NULL;
+    }
+    /* 单位换算：xTaskCreate 的 stack_depth 是**字节**，而 xTaskCreateStatic 的
+     * ulStackDepth 是**字（StackType_t 个数）** —— 这是 FreeRTOS 的真实差异。
+     * 本文件下面那条回归断言断言的是"字节 >= 4096"，所以这里必须换算回字节，
+     * 否则 4096 字的栈会被记成 4096、巧合地仍然通过，将来有人把常量改小一半时
+     * 断言却依旧绿 —— 守门就失效了。 */
+    s_last_stack_depth = stack_depth * (uint32_t)sizeof(StackType_t);
+    if (priority != 2) {
+        fprintf(stderr, "FAIL xTaskCreateStatic: log_tx must remain below MQTT/control task priority\n");
+        s_failures++;
+        return NULL;
+    }
+    s_create_calls++;
+    s_created_task_fn = task;
+    s_created_task_arg = arg;
+    if (!s_create_succeeds) {
+        return NULL;
+    }
+    return &s_task_token;
+}
+
 uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t wait_ticks)
 {
     (void)clear_on_exit;
