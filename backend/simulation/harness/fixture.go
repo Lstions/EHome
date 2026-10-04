@@ -150,6 +150,23 @@ func (e *Env) ProvisionSimpleDevice(scenarioID, suffix string) (*Fixture, error)
 	}
 	fixture.Node.HelloThenReport("2.6", "SIM-GENERIC", 1, nil)
 
+	// 步骤 2.5：等能力事实真正落库再建通道。
+	//
+	// 为什么必须等（2026-10-04 实测）：HelloThenReport 是**发出即返回**——
+	// ResourceReport 走异步 QoS1 上行，服务端落库有延迟。而 POST /edge-devices
+	// 在 UART 通道上会按 nodes.capabilities 补齐 bus_config；能力还没到就看
+	// 不到任何 UART 资源，于是被 400 拒绝（"上报的资源里没有 UART 资源"）。
+	// 这不是"用户输入错误"，而是夹具和消息时序赛跑：140 个场景里每次红的
+	// 是不同的一小批，重跑结果不一致 —— 典型竞态。
+	//
+	// 这里复用 catalog/auto.go:655 已经验证过的同一道屏障（问 HTTP、等能力可见），
+	// 而不是去放宽服务端校验：那个 400 是**对的**——真让它过，就会落库一条
+	// bus_config 为空的通道，节点端会拒收整份清单（实测报错
+	// "enabled channel N has malformed bus_config"）。修夹具，不修判据。
+	if err := fixture.waitForCapabilities(20 * time.Second); err != nil {
+		return nil, fmt.Errorf("步骤 2.5（等待能力上报落库）失败: %w", err)
+	}
+
 	// 步骤 3：创建边缘设备并内联创建通道（一次 HTTP 调用，避免两阶段提交
 	// 产生孤儿通道）。type 由 device_config_id 派生，因此不要求驱动注册表
 	// 认识 sim_generic。
@@ -331,6 +348,36 @@ func (f *Fixture) StartReporting(interval time.Duration) (stop func()) {
 		return f.ReportMany(map[string]float64{FixtureTempCategory: temp, FixtureLevelCategory: level})
 	})
 	return cancel
+}
+
+
+// waitForCapabilities 等节点的 ResourceReport 真正可见再继续。
+//
+// 与 catalog/auto.go:655 用的是同一道屏障（读 HTTP、等能力事实落库），
+// 只是抽到夹具层给所有场景复用。
+//
+// 判据取「capabilities 非空且含 uart 资源」而不是仅非空：
+//   · capabilities 为空 -> ResourceReport 还没到；
+//   · 有 capabilities 但没有 uart -> 落库了但内容不完整（或节点真没串口）。
+// 两者都不该拿去建 UART 通道，所以一并等。
+func (f *Fixture) waitForCapabilities(timeout time.Duration) error {
+	if f.env == nil || f.session == nil {
+		return fmt.Errorf("夹具未初始化（env/session 为空）")
+	}
+	return f.env.EventuallyEveryError(timeout, 50*time.Millisecond, func() error {
+		resp := f.session.Get("/api/v1/nodes/" + f.NodeID)
+		if err := resp.Check(200); err != nil {
+			return err
+		}
+		caps := strings.TrimSpace(resp.DataString("capabilities"))
+		if caps == "" || caps == "{}" {
+			return fmt.Errorf("节点 %s 的能力尚未落库（capabilities=%q）", f.NodeID, caps)
+		}
+		if !strings.Contains(caps, "\"uart\"") {
+			return fmt.Errorf("节点 %s 的能力已落库但缺少 uart 资源（capabilities=%s）", f.NodeID, caps)
+		}
+		return nil
+	})
 }
 
 // Cleanup 删除夹具创建的资源（场景自我清理，设计 §5.6）。

@@ -30,9 +30,13 @@ type reportedGPIOResource struct {
 }
 
 type reportedUARTResource struct {
-	ID           string `json:"id"`
-	DefaultTxPin int    `json:"default_tx_pin"`
-	DefaultRxPin int    `json:"default_rx_pin"`
+	ID string `json:"id"`
+	// Port 是固件上报的 UART 控制器序号（hw_tables.c 的 .port）。用来把 hardware_id 的
+	// 三种历史写法（"UART1" / "uart1" / "0x01"）归一到同一个资源，见 matchReportedUART。
+	// 缺省 0 时该字段不参与匹配（否则会把所有资源都当成 port 0）。
+	Port         int `json:"port"`
+	DefaultTxPin int `json:"default_tx_pin"`
+	DefaultRxPin int `json:"default_rx_pin"`
 	// MaxBaud 是资源**能力上限**（不是当前生效波特率）。新建 UART 通道兜底补齐
 	// bus_config 时用它把默认速率夹在设备支持的范围内（见 ensureUARTBusConfig）。
 	MaxBaud uint64 `json:"max_baud"`
@@ -235,29 +239,114 @@ func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
 		return fmt.Errorf("%w: 节点 %s 尚未上报硬件资源能力，无法为 UART 通道补齐 bus_config（请等待资源上报后重试）",
 			errUARTCapabilityUnavailable, node.NodeID)
 	}
-	hardwareID := strings.TrimSpace(ch.HardwareID)
-	for i := range resources.Buses.UART {
-		entry := resources.Buses.UART[i]
-		if !strings.EqualFold(strings.TrimSpace(entry.ID), hardwareID) {
-			continue
-		}
-		if entry.DefaultTxPin <= 0 || entry.DefaultRxPin <= 0 {
-			return fmt.Errorf("%w: UART 资源 %s 上报的默认引脚无效（TX=%d, RX=%d）",
-				errUARTCapabilityUnavailable, entry.ID, entry.DefaultTxPin, entry.DefaultRxPin)
-		}
-		baud := defaultUARTBaudrate
-		if entry.MaxBaud > 0 && entry.MaxBaud < uint64(baud) {
-			// 能力上限低于默认值时退到上限，不造一个设备明确不支持的速率。
-			baud = int(entry.MaxBaud)
-		}
-		// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）：
-		// 传 true 得到 0x01，与生产既有三条 UART 行一致。帧格式 8N1 由固件硬编码，
-		// 不编进 bus_config（UART 分支不读 byte 7..9）。
-		ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, true)
-		return nil
+	entry, ok, err := matchReportedUART(resources.Buses.UART, strings.TrimSpace(ch.HardwareID))
+	if err != nil {
+		return err
 	}
-	return fmt.Errorf("%w: 节点 %s 上报的资源里没有 UART 资源 %q（请先在设备侧上报该资源，或检查 hardware_id）",
-		errUARTCapabilityUnavailable, node.NodeID, hardwareID)
+	if !ok {
+		return fmt.Errorf("%w: 节点 %s 上报的资源里没有 UART 资源 %q（已上报：%s）",
+			errUARTCapabilityUnavailable, node.NodeID, ch.HardwareID, describeReportedUARTPorts(resources.Buses.UART))
+	}
+	if entry.DefaultTxPin <= 0 || entry.DefaultRxPin <= 0 {
+		return fmt.Errorf("%w: UART 资源 %s 上报的默认引脚无效（TX=%d, RX=%d）",
+			errUARTCapabilityUnavailable, entry.ID, entry.DefaultTxPin, entry.DefaultRxPin)
+	}
+	baud := defaultUARTBaudrate
+	if entry.MaxBaud > 0 && entry.MaxBaud < uint64(baud) {
+		// 能力上限低于默认值时退到上限，不造一个设备明确不支持的速率。
+		baud = int(entry.MaxBaud)
+	}
+	// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）：
+	// 传 true 得到 0x01，与生产既有三条 UART 行一致。帧格式 8N1 由固件硬编码，
+	// 不编进 bus_config（UART 分支不读 byte 7..9）。
+	ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, true)
+	return nil
+}
+
+// matchReportedUART 把通道的 hardware_id 匹配到节点上报的某条 UART 资源。
+//
+// 为什么不能只做一次 EqualFold（第一版就是这么写的，2026-10-04 被仿真门禁打回）：
+// hardware_id 在真实数据里有**三种**写法，全都必须能命中：
+//
+//	"UART1"  生产通道 / 前端下拉框
+//	"uart1"  固件 hw_tables.c 的小写 id（仿真 harness 也用它）
+//	"0x01"   仿真夹具与部分前端历史写法：把第几个串口写成十六进制
+//
+// 只比字符串会漏掉后两种，于是**建通道直接 400** —— 不是少补一个字段，
+// 而是把本来能用的请求整个拒掉。仿真 140 个场景里因此有 9 个变红，
+// 而 CI 的 backend-scenarios 是既有绿灯门禁（0ad5975 success），
+// 所以这是回归，不是新约束。
+//
+// 归一规则：同时接受 id 与 port 两条线索 ——
+//
+//	· id 相同（大小写不敏感）；或
+//	· hardware_id 是 "0xNN" / "NN" 纯数字形式，且 NN == entry.Port。
+//
+// 返回 (entry, found, err)：err 仅在认出了写法但指向不存在的资源时为非空。
+func matchReportedUART(entries []reportedUARTResource, hardwareID string) (reportedUARTResource, bool, error) {
+	if hardwareID == "" {
+		// 没有 hardware_id：只有资源唯一时才敢猜，否则交给调用方报错。
+		if len(entries) == 1 {
+			return entries[0], true, nil
+		}
+		return reportedUARTResource{}, false, nil
+	}
+
+	// 线索 1：id 直接相等（"UART1" == "uart1"）。
+	for i := range entries {
+		if strings.EqualFold(strings.TrimSpace(entries[i].ID), hardwareID) {
+			return entries[i], true, nil
+		}
+	}
+
+	// 线索 2：把 "0x01" / "1" 这类写法解成端口号，再按 entry.Port 匹配。
+	if port, ok := parseUARTPortToken(hardwareID); ok {
+		for i := range entries {
+			if entries[i].Port == port {
+				return entries[i], true, nil
+			}
+		}
+		// 端口写法认得出来，但节点没上报这个端口 —— 明确说清。
+		return reportedUARTResource{}, false,
+			fmt.Errorf("%w: hardware_id %q 指的是 UART 端口 %d，但节点上报的 UART 资源里没有该端口（已上报：%s）",
+				errUARTCapabilityUnavailable, hardwareID, port, describeReportedUARTPorts(entries))
+	}
+
+	return reportedUARTResource{}, false, nil
+}
+
+// parseUARTPortToken 只接受两类明确的端口写法，避免把任意字符串误解析成 0：
+//   - 十六进制："0x01" / "0X1"
+//   - 十进制："1"
+func parseUARTPortToken(token string) (int, bool) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return 0, false
+	}
+	base := 10
+	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
+		base = 16
+		trimmed = trimmed[2:]
+		if trimmed == "" {
+			return 0, false
+		}
+	}
+	value, err := strconv.ParseUint(trimmed, base, 8)
+	if err != nil {
+		return 0, false
+	}
+	return int(value), true
+}
+
+func describeReportedUARTPorts(entries []reportedUARTResource) string {
+	if len(entries) == 0 {
+		return "（无）"
+	}
+	parts := make([]string, 0, len(entries))
+	for i := range entries {
+		parts = append(parts, fmt.Sprintf("%s(port=%d)", entries[i].ID, entries[i].Port))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func validateReportedGPIO(db *gorm.DB, node *models.Node, pin int) error {
@@ -297,7 +386,6 @@ var errPeripheralPinConflict = errors.New("peripheral pin conflict")
 // 与 errPeripheralPinConflict（通道 vs GPIO/PWM 配置）分开，是为了让 HTTP
 // 层能给出可行动的提示（"换个串口/引脚"），而不是笼统的 409。
 var errChannelPinConflict = errors.New("channel route conflicts with another channel")
-
 
 func createGPIOConfigWithPinExclusion(db *gorm.DB, nodeID string, cfg *models.GPIOConfig) error {
 	return db.Transaction(func(tx *gorm.DB) error {
