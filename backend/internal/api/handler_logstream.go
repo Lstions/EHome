@@ -49,12 +49,21 @@ func updateLogConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 			return
 		}
 
+		// 必须拒绝未知字段。2026-10-04 实错：客户端把开关写成 `{"enabled":...}`，
+		// 而本端点的字段名是 `stream_enabled`；gin 默认忽略未知字段，于是
+		// req.StreamEnabled 为 nil、updates 里只剩 level，**接口返回 HTTP 200
+		// 与 "log config updated"**，但开关根本没被改。
+		//
+		// 这个静默失败比报错危险得多：调用方以为日志已关（或已开），
+		// 实际设备状态没变 —— 我本人在排查"日志开关是否会重启"时就被它骗了一轮，
+		// 拿到 200 后以为开关生效，实则一次都没生效（见
+		// docs/取证/ 的对应记录）。所以这里显式拒绝未知字段，让写错的键当场 400。
 		var req struct {
 			StreamEnabled *bool `json:"stream_enabled"`
 			Level         *int  `json:"level"`
 		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		if err := bindJSONStrict(c, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -107,8 +116,8 @@ func updateLogPersist(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 		var req struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		if err := bindJSONStrict(c, &req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
