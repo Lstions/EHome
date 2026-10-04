@@ -23,7 +23,29 @@
 #define TAG "LOG_STREAM"
 
 #define LOG_BATCH_MAX       4
-#define LOG_TX_STACK        1536
+/* log_tx 任务栈（字节）。
+ *
+ * 2026-10-04 现场事故：S3 节点 30EDA0A9A808 以约 50 次/小时 复位，
+ * 串口捕获到决定性证据：
+ *
+ *     ***ERROR*** A stack overflow in task log_tx has been detected.
+ *     Backtrace: 0x40381871(panic_abort) 0x40381839(_esp_error_check_failed)
+ *                0x420cd6f2(prvGetCurMaxSizeAllowSplit) 0x40382a8b(vTaskSwitchContext)
+ *
+ * 即：log_tx 的栈被击穿，触发 FreeRTOS 栈哨兵，直接 abort 重启。
+ * 这与"堆不足"是两个不同的问题 —— 堆还有 24KB，但栈只有 1536 字节。
+ *
+ * 为什么 1536 不够（按 xtensa ABI 实测结构体尺寸计算）：
+ *   log_tx_task 帧：entries[LOG_BATCH_MAX] = 4 x 24 = 96 字节
+ *   log_stream_encode 帧：sub_buf[224] + 2 x frame_encoder_t + 局部变量 ≈ 260 字节
+ *   再往下 publish() 是**最深的一层**：msg_handler_publish -> transport ->
+ *   esp_mqtt_client_publish -> lwIP，这条链自身就要 1KB 以上。
+ *   1536 连"本函数 + 一次 publish"都不够，必然溢出。
+ *
+ * 取值依据：本仓其他"会调用 publish"的任务用 4096（bus_worker 的 report_tx、
+ * rx_task 都是 4096），mqtt_super 用 8192。这里取 4096，与同类任务对齐，
+ * 而不是拍一个"看起来够大"的数。 */
+#define LOG_TX_STACK        4096
 #define LOG_TX_PRIO         2
 #define LOG_TX_BUF_SIZE     768
 #define RING_CAPACITY       4
@@ -66,7 +88,10 @@ static EventGroupHandle_t s_task_events;
  * Static ring/TX/control storage is resident even while disabled. This is only a
  * lower-bound accounting gate: dynamically allocated TCB, allocator metadata,
  * per-task TLS, and target runtime overhead require C6/S3 hardware measurement. */
-#define LOG_STREAM_OWNED_RAM_BUDGET_BYTES 4096U
+/* 预算随 LOG_TX_STACK 上调（1536 -> 4096，见上面的栈溢出分析）。
+ * 这是**上界门禁**：一旦有人再加静态缓冲或抬栈，必须同时复核这个数，
+ * 否则门禁会在无人察觉时失去意义。 */
+#define LOG_STREAM_OWNED_RAM_BUDGET_BYTES 6656U
 #define LOG_STREAM_OWNED_RAM_BYTES ( \
     sizeof(s_capture) + sizeof(s_ring) + sizeof(s_tx_batch) + sizeof(s_tx_buf) + \
     LOG_TX_STACK + sizeof(s_task) + sizeof(s_state) + sizeof(s_capture_users) + \

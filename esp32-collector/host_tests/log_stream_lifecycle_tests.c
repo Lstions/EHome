@@ -139,11 +139,23 @@ EventBits_t xEventGroupWaitBits(EventGroupHandle_t group, EventBits_t bits,
     return result;
 }
 
+/* 记录 log_tx 请求的栈深度，供下面的回归断言使用。
+ *
+ * 2026-10-04 现场事故：S3 节点 30EDA0A9A808 以约 50 次/小时 复位，串口证据为
+ *     ***ERROR*** A stack overflow in task log_tx has been detected.
+ * 根因是 LOG_TX_STACK 只有 1536 字节，而 log_tx -> publish -> MQTT -> lwIP
+ * 这条链本身就要 1KB 以上。
+ *
+ * 这个 stub 原先写着 (void)stack_depth; —— 把栈深度**丢弃**了。于是"栈太小"
+ * 这个缺陷在整个测试体系里是不可见的：用例能验证生命周期状态机，却看不见
+ * 唯一的那个数字。记录它，才能让下面的断言真的守住它。 */
+static uint32_t s_last_stack_depth;
+
 BaseType_t xTaskCreate(TaskFunction_t task, const char *name, uint32_t stack_depth,
                        void *arg, unsigned priority, TaskHandle_t *out_task)
 {
     (void)name;
-    (void)stack_depth;
+    s_last_stack_depth = stack_depth;
     if (priority != 2) {
         fprintf(stderr, "FAIL xTaskCreate: log_tx must remain below MQTT/control task priority\n");
         s_failures++;
@@ -370,6 +382,42 @@ static void test_stop_waits_for_inflight_set_level_and_blocks_restart(void)
     (void)pthread_barrier_destroy(&s_allow_stop_delay);
 }
 
+/* 回归：log_tx 的栈必须足够容纳 log_tx -> publish -> MQTT -> lwIP 这条链。
+ *
+ * 2026-10-04 现场：S3 以约 50 次/小时 复位，串口报
+ *   "A stack overflow in task log_tx has been detected."
+ * 根因是 LOG_TX_STACK=1536。本仓其他会调用 publish 的任务（bus_worker 的
+ * report_tx / rx_task）都是 4096，mqtt_super 是 8192。
+ *
+ * 判据取 4096：不是"拍一个看起来够大的数"，而是与同类任务对齐的下限。
+ * 若有人为了省 RAM 把它降回去，这条断言会红，并指出事故出处。 */
+static void test_log_tx_stack_is_large_enough_for_publish_path(void)
+{
+    reset_stubs();
+
+    if (s_last_stack_depth == 0) {
+        fprintf(stderr, "FAIL stack regression: xTaskCreate stub did not record a stack depth\n");
+        s_failures++;
+        return;
+    }
+    if (s_last_stack_depth < 4096) {
+        fprintf(stderr,
+                "FAIL stack regression: log_tx stack is %u bytes, need >= 4096.\n"
+                "     1536 was the value that overflowed on 2026-10-04 (S3 30EDA0A9A808,\n"
+                "     ~50 reboots/hour, console: 'A stack overflow in task log_tx').\n"
+                "     The overflow happens inside publish -> MQTT -> lwIP, not in this file.\n",
+                (unsigned)s_last_stack_depth);
+        s_failures++;
+        return;
+    }
+
+    /* 收尾必须和其它用例一致：让桩任务在下次 notify 时自行退出，
+     * 否则 log_stream_stop() 会等到 1000ms 超时，把用例拖成假死。 */
+    s_run_task_on_next_notify = true;
+    log_stream_stop();
+    CHECK(!log_stream_is_active(), "stack regression case must return to STOPPED");
+}
+
 int main(void)
 {
     test_start_success_and_running_start_updates_without_second_task();
@@ -377,6 +425,7 @@ int main(void)
     test_stop_timeout_stays_stopping_and_blocks_restart();
     test_start_emits_only_real_esp_log();
     test_stop_waits_for_inflight_set_level_and_blocks_restart();
+    test_log_tx_stack_is_large_enough_for_publish_path();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d lifecycle test(s) failed\n", s_failures);

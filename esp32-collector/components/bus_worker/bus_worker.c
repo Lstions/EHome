@@ -273,35 +273,56 @@ static bool receive_prioritized_command(QueueSetHandle_t set,
                                          bus_cmd_t *cmd,
                                          uint8_t *control_burst)
 {
- if (!cmd || !control_burst) return false;
+if (!cmd || !control_burst) return false;
+
+/* 2026-10-04 现场事故（S3 30EDA0A9A808，约 50 次/小时复位）：
+ *   assert failed: prvNotifyQueueSetContainer queue.c:3362
+ *   (pxQueueSetContainer->uxMessagesWaiting < pxQueueSetContainer->uxLength)
+ * 复位回溯落在 schedule_v2_channel -> xQueueSend -> prvNotifyQueueSetContainer。
+ *
+ * 根因：下面这段"先直接读成员队列"的快速路径，在队列已经加入 queue set
+ * 时依然会执行。FreeRTOS 用一个内部队列记录"已入队、但尚未被
+ * xQueueSelectFromSet 取走的句柄数"：
+ *   - 向成员队列 send       -> prvNotifyQueueSetContainer 让 set 计数 +1
+ *   - xQueueSelectFromSet   取走一个句柄 -> set 计数 -1
+ *   - xQueueReceive(成员队列) 完全不动 set 计数
+ * 于是每走一次快速路径直接取走一条命令，set 里就永久多留一个句柄；
+ * 计数只增不减，涨到 uxLength(24) 后，下一帧 send 直接命中断言 -> abort 重启。
+ *
+ * 修法：只要存在 set，就只走 set 路径。set 路径每次"弹 1 个句柄 + 读 1 条
+ * 命令"，两边严格配平；公平策略仍由 bus_queue_choose 在弹出后重新评估，
+ * 控制命令突发优先的语义不变。 */
+if (!set) {
  bool control_ready = control && uxQueueMessagesWaiting(control) > 0;
  bool sample_ready = sample && uxQueueMessagesWaiting(sample) > 0;
  bus_queue_decision_t decision = bus_queue_choose(control_ready, sample_ready,
-                                                   control_burst);
+                                                  control_burst);
  if (decision == BUS_QUEUE_DECISION_CONTROL &&
-     xQueueReceive(control, cmd, 0) == pdTRUE) return true;
+  xQueueReceive(control, cmd, 0) == pdTRUE) return true;
  if (decision == BUS_QUEUE_DECISION_SAMPLE &&
-     xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
- if (!set) {
-  if (control && xQueueReceive(control, cmd, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS)) == pdTRUE) {
-   if (*control_burst < BUS_CONTROL_BURST_MAX) (*control_burst)++;
-   return true;
-  }
-  return sample && xQueueReceive(sample, cmd, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS)) == pdTRUE;
+  xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
+ if (control && xQueueReceive(control, cmd, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS)) == pdTRUE) {
+  if (*control_burst < BUS_CONTROL_BURST_MAX) (*control_burst)++;
+  return true;
  }
- QueueSetMemberHandle_t member = xQueueSelectFromSet(set, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS));
- if (!member) return false;
- (void)member;
- /* Re-evaluate after the wakeup: another producer may have changed which
-  * queue should win according to the shared fairness policy. */
- control_ready = control && uxQueueMessagesWaiting(control) > 0;
- sample_ready = sample && uxQueueMessagesWaiting(sample) > 0;
- decision = bus_queue_choose(control_ready, sample_ready, control_burst);
- if (decision == BUS_QUEUE_DECISION_CONTROL &&
-     xQueueReceive(control, cmd, 0) == pdTRUE) return true;
- if (decision == BUS_QUEUE_DECISION_SAMPLE &&
-     xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
- return false;
+ return sample && xQueueReceive(sample, cmd, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS)) == pdTRUE;
+}
+
+QueueSetMemberHandle_t member = xQueueSelectFromSet(set, pdMS_TO_TICKS(CMD_QUEUE_WAIT_MS));
+if (!member) return false;
+(void)member;
+/* 弹出后重新评估：另一个生产者可能已经改变了谁该赢。
+ * 上面恰好弹出了 1 个句柄，所以这里必须恰好消费 1 条命令，
+ * 否则 set 计数会向反方向漂移（句柄被消耗、而队列里没有命令可读）。 */
+bool control_ready = control && uxQueueMessagesWaiting(control) > 0;
+bool sample_ready = sample && uxQueueMessagesWaiting(sample) > 0;
+bus_queue_decision_t decision = bus_queue_choose(control_ready, sample_ready,
+                                                 control_burst);
+if (decision == BUS_QUEUE_DECISION_CONTROL &&
+ xQueueReceive(control, cmd, 0) == pdTRUE) return true;
+if (decision == BUS_QUEUE_DECISION_SAMPLE &&
+ xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
+return false;
 }
 
 static void report_free_block(bool critical, uint8_t index)
