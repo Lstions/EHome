@@ -1440,6 +1440,53 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  return true;
 }
 
+/* 行状态事件（BREAK/PARITY/FRAME）的日志限流。
+ *
+ * 2026-10-04 实机观察：某台 S3 上 slot1 的 UART_BREAK（type=1）以约 50 次/秒
+ * 持续触发，55 秒内打出 2826 行同样的 WARN。后果不是"日志多"这么轻：
+ *
+ *   1) 串口控制台被灌满，出现大量交错/截断的半行（实测 70 秒内 32 行损坏），
+ *      而**真正要看的错误日志恰好被挤掉** —— 我因此连续多轮拿不到配置事务的
+ *      拒绝原因，只能靠猜，浪费了大量时间；
+ *   2) 该 WARN 会被 log_capture 收进日志环（它是 WARN，manifest level>=1 即捕获），
+ *      一旦日志上传链路打开，就是每秒约 50 条 MQTT 帧的洪水。
+ *
+ * 只对**重复的同一类行状态事件**限流：窗口内前几条立即打印，之后打一条聚合摘要
+ * （含被抑制条数），再安静到下一个周期。
+ *
+ * 重要：限的是**日志**，不是**计量**。s_rx_error_count 等计数器照常累加，
+ * 任何依赖计数的健康上报都不受影响。
+ */
+#define RX_LINESTATUS_LOG_PERIOD_MS 5000
+#define RX_LINESTATUS_LOG_BURST 3
+
+typedef struct {
+    int64_t window_start_us;
+    uint32_t in_window;
+    uint32_t suppressed;
+} rx_linestatus_log_t;
+
+static rx_linestatus_log_t s_rx_linestatus_log[SCHED_MAX_CHANNELS];
+
+/* 返回 true 表示调用方应当打印；false 表示已被限流（并已在本窗口补过摘要）。 */
+static bool rx_linestatus_log_should_emit(int idx)
+{
+    if (idx < 0 || idx >= SCHED_MAX_CHANNELS) return true;
+    rx_linestatus_log_t *st = &s_rx_linestatus_log[idx];
+    const int64_t now = esp_timer_get_time();
+    const int64_t period = (int64_t)RX_LINESTATUS_LOG_PERIOD_MS * 1000;
+    if (st->window_start_us == 0 || now - st->window_start_us >= period) {
+        st->window_start_us = now;
+        st->in_window = 0;
+        st->suppressed = 0;
+    }
+    st->in_window++;
+    if (st->in_window <= RX_LINESTATUS_LOG_BURST) return true;
+    st->suppressed++;
+    /* 抑制开始后补一条摘要，之后安静到下一个窗口。 */
+    return st->suppressed == 1;
+}
+
 static void handle_uart_event(bus_runtime_t *rt, int idx,
                               const uart_event_t *event, uint8_t *rx,
                               size_t rx_cap)
@@ -1517,9 +1564,20 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
    * above unconditionally resets the input ring. */
   s_rx_error_count[idx]++;
   rx_append_from_event(rt, idx, rx, rx_cap);
-  ESP_LOGW(TAG_RX, "slot%d type=%d event=%d size=%" PRIu32 "; retained buffered input",
-   idx, (int)rt->bus_ctx[idx].bus_type, (int)event->type,
-   (uint32_t)event->size);
+  /* 计数照常（上一行），只有日志受限流 —— 见 rx_linestatus_log_should_emit 的说明。 */
+  if (rx_linestatus_log_should_emit(idx)) {
+   rx_linestatus_log_t *st = &s_rx_linestatus_log[idx];
+   if (st->suppressed > 0) {
+    ESP_LOGW(TAG_RX, "slot%d type=%d event=%d size=%" PRIu32
+     "; retained buffered input (%" PRIu32 " more like this suppressed in the last %d ms)",
+     idx, (int)rt->bus_ctx[idx].bus_type, (int)event->type,
+     (uint32_t)event->size, st->suppressed, RX_LINESTATUS_LOG_PERIOD_MS);
+   } else {
+    ESP_LOGW(TAG_RX, "slot%d type=%d event=%d size=%" PRIu32 "; retained buffered input",
+     idx, (int)rt->bus_ctx[idx].bus_type, (int)event->type,
+     (uint32_t)event->size);
+   }
+  }
   break;
  default:
   /* Wakeup and other target-specific events do not carry payload, but are

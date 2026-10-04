@@ -84,6 +84,34 @@ static _Atomic(log_stream_publish_fn_t) s_publish;
 static StaticEventGroup_t s_task_events_storage;
 static EventGroupHandle_t s_task_events;
 
+/* log_tx_task 的静态存储。
+ *
+ * 2026-10-04 实机根因（S3，满负载）：日志开关的配置**确实下发到了设备**
+ * （串口可见 "LogStream config: enabled=1 level=3"），但紧接着就是
+ *
+ *	E LOG_STREAM: Failed to create log_tx_task
+ *
+ * 连打 6 次后放弃。原因是 xTaskCreate 需要从堆里分配 4096 字节栈 + TCB，
+ * 而此时 5 条总线（3×UART + SPI2 + I2C0，都开了 DMA）、6 路 PWM、全部模板
+ * 都已就绪，空闲堆只剩约 13.7KB —— 分配失败。
+ *
+ * 所以"打开日志开关就重启/无效"的真正机制不是配置没生效，而是**任务创建
+ * 在满资源占用下必然失败**，且失败被静默降级成"日志不推"，开关看起来像没反应。
+ *
+ * 改为静态分配后，这条路径不再依赖运行时堆：
+ *   - 创建不会因堆碎片/耗尽而失败；
+ *   - 代价是 RAM 常驻（原本 xTaskCreate 也是按最大栈预留，量级相同）；
+ *   - 与文件已有的 LOG_STREAM_OWNED_RAM_BYTES 门禁一致 —— 那个门禁
+ *     本来就把 LOG_TX_STACK 计入"固件自有 RAM"，即代码早已假设它是静态的，
+ *     只是实现用了动态创建，两者不一致。
+ *
+ * 注意：静态任务的栈/TCB 由调用方提供，任务结束必须用 vTaskDelete(NULL)
+ * 归还 TCB（本文件已是如此），且不能重复创建 —— 上层 start/stop 状态机
+ * 已保证同一时刻只有一个实例。
+ */
+static StaticTask_t s_log_tx_tcb;
+static StackType_t s_log_tx_stack[LOG_TX_STACK / sizeof(StackType_t)];
+
 /* Compile-time gate for firmware-owned known storage plus configured task stack.
  * Static ring/TX/control storage is resident even while disabled. This is only a
  * lower-bound accounting gate: dynamically allocated TCB, allocator metadata,
@@ -228,10 +256,13 @@ esp_err_t log_stream_start(uint8_t level)
     s_seq = 0;
     log_capture_esp_attach(&s_capture);
 
-    TaskHandle_t task = NULL;
-    BaseType_t ret = xTaskCreate(log_tx_task, "log_tx", LOG_TX_STACK,
-                                 NULL, LOG_TX_PRIO, &task);
-    if (ret != pdPASS) {
+    /* 静态创建：满负载下堆只有约 13.7KB 时 xTaskCreate 会失败，
+     * 详见 s_log_tx_tcb 处的说明。xTaskCreateStatic 不分配堆。 */
+    TaskHandle_t task = xTaskCreateStatic(log_tx_task, "log_tx",
+                                          LOG_TX_STACK / sizeof(StackType_t),
+                                          NULL, LOG_TX_PRIO,
+                                          s_log_tx_stack, &s_log_tx_tcb);
+    if (task == NULL) {
         (void)log_capture_esp_detach();
         atomic_store_explicit(&s_task, NULL, memory_order_release);
         atomic_store_explicit(&s_state, LOG_STREAM_STOPPED, memory_order_release);
