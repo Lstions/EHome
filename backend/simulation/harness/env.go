@@ -302,6 +302,34 @@ func (e *Env) releaseRunLock() {
 	e.lock = nil
 }
 
+// WindowTickInterval 是仿真专用的事件窗口求值周期，注入给子进程的
+// EHOME_WINDOW_TICK_INTERVAL（生产默认 1 分钟，见 automation.WindowTickInterval）。
+//
+// 为什么仿真要用 2s（2026-10-04 性能优化）：time_window 是**边沿**触发器，
+// 场景必须等到下一个 tick 才能观测到"进入/离开窗口"是否恰好触发一次。
+// 1 分钟周期下每条这样的场景都要真等 30~180s —— 实测全量 781s 里 605s（77%）
+// 集中在 6 条上（SIM-WIND-001..005 / SIM-CMD-006 / SIM-DS-003）。
+//
+// 2s 而不是更小：仍明显大于"一次 HTTP 往返 + 一轮事件落库"的量级（毫秒级），
+// 因此时序断言不会因 ticker 过密而抖动；同时让"冷却抑制下一个 tick"这类
+// 不变式保有可观测的间隔（tick 2s、冷却 6s ⇒ 支持"隔了 3 个 tick"的证据）。
+const WindowTickInterval = 2 * time.Second
+
+// EdgeOfflineThreshold 是仿真专用的边缘设备离线阈值，注入 EHOME_EDGE_OFFLINE_THRESHOLD。
+//
+// 取 6s：必须大于仿真设备的上报周期（夹具多为 1~5s），否则正常轮询间隙就会被
+// 误判离线 —— 这正是生产侧 EdgeDeviceOfflineThreshold 保持 60s 的同一条理由，
+// 仿真只是不需要那么宽的余量。"掉线→切备源"（SIM-DS-003）必须真等一个阈值，
+// 60s 下白等 61s，6s 下秒级完成。
+const EdgeOfflineThreshold = 6 * time.Second
+
+// CommandDeadline 是仿真专用的命令执行 Deadline，注入 EHOME_COMMAND_DEADLINE。
+//
+// 取 8s：明显大于一次 MQTT 下发 + HTTP 往返（毫秒级），"未超期"的断言不会被逼近；
+// 同时让"超期收尾"在 10s 内可观测（生产默认 2 分钟，SIM-CMD-006 因此白等 121s）。
+// RecoverExpired 仍每秒实跑一轮，判据（deadline_at vs now）一字未动。
+const CommandDeadline = 8 * time.Second
+
 // ---------- 启动子步骤 ----------
 
 func (e *Env) startServer(port int) error {
@@ -333,9 +361,15 @@ func (e *Env) startServer(port int) error {
 		// 带票据下载场景能直接对该 URL 发真实请求。
 		"EHOME_EXTERNAL_HOST": fmt.Sprintf("127.0.0.1:%d", port),
 		"LOG_LEVEL":           e.Options.LogLevel,
-		"CONFIG_PATH":         filepath.Join(e.runDir, "no-config.yaml"),
-		"SEED_TEST_DATA":      "",
-		"EHOME_STATIC_DIR":    "",
+		// 事件窗口求值周期：生产默认 1 分钟，仿真压到 2s（理由见 WindowTickInterval）。
+		"EHOME_WINDOW_TICK_INTERVAL": WindowTickInterval.String(),
+		// 边缘设备离线阈值：生产默认 60s，仿真 6s（理由见 EdgeOfflineThreshold）。
+		"EHOME_EDGE_OFFLINE_THRESHOLD": EdgeOfflineThreshold.String(),
+		// 命令执行 Deadline：生产默认 2 分钟，仿真 8s（理由见 CommandDeadline）。
+		"EHOME_COMMAND_DEADLINE": CommandDeadline.String(),
+		"CONFIG_PATH":            filepath.Join(e.runDir, "no-config.yaml"),
+		"SEED_TEST_DATA":         "",
+		"EHOME_STATIC_DIR":       "",
 		// 空字符串 = 不启用 CORS 中间件（与生产同源部署一致）。
 		"EHOME_ALLOWED_ORIGINS": "",
 	})

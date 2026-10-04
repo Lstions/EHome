@@ -127,6 +127,11 @@ func resolveReportedPWMResources(db *gorm.DB, node *models.Node, hardwareID stri
 	}
 	for _, gpio := range resources.Buses.GPIO {
 		if gpio.Pin == pin {
+			// PWM 是本次事故的**直接**入口（PWM0 配到 S3 的 GPIO0，duty 3%）：
+			// 即使旧固件把它上报成可用 GPIO，这里也必须拒绝。
+			if err := checkNotReservedPin(node, pin); err != nil {
+				return reportedPWMResource{}, err
+			}
 			if err := validateEnabledChannelPin(db, node.NodeID, pin); err != nil {
 				return reportedPWMResource{}, err
 			}
@@ -349,7 +354,54 @@ func describeReportedUARTPorts(entries []reportedUARTResource) string {
 	return strings.Join(parts, ", ")
 }
 
+// reservedPinForPlatform 返回该平台**不可分配给用户外设**的引脚。
+//
+// 为什么服务端也要挡（2026-10-04 现场事故的纵深防线）：
+// 固件已把保留引脚从 ResourceReport 剔除（hw_profile.c 的过滤 +
+// hw_tables.c 的 HW_GPIO_FLAG_RESERVED），正常路径下这里不会命中。
+// 但有两条路径能绕过固件侧上报：
+//  1. 现场设备跑的是**旧固件**（上报里还带 GPIO0），而服务端已升级；
+//  2. 有人手工改库 / 灌入伪造的 capabilities（本次事故正是我用 SQL 手写
+//     bus_config 造通道，当时服务端没有任何 strapping 引脚的概念）。
+//
+// 事故后果不是"配置没生效"，而是"设备每 8.8s 擦一次 NVS 并重启"——
+// 一个 UI 上完全合法的 PWM 配置把设备变成了砖。这种破坏性配置值得服务端
+// 再挡一次：宁可返回 422 说清原因，也不能下发出去。
+//
+// 判定按 node.Platform（由 Hello/ResourceReport 写入；prod 实测为
+// ESP32S3 / ESP32C6）。未知平台返回 not-ok：不阻碍新硬件接入，因为固件侧
+// 的过滤对任何平台都生效。
+func reservedPinForPlatform(platform string) (int, bool) {
+	switch strings.ToUpper(strings.TrimSpace(platform)) {
+	case "ESP32S3", "ESP32-S3", "S3":
+		// GPIO0 = BOOT 按键 / strapping（factory_reset.c 的 BOOT_BUTTON_GPIO、
+		// bus_dma.c 的 BOOT_STRAP_GPIO）。把它拉低即等同"长按 BOOT"。
+		return 0, true
+	case "ESP32C6", "ESP32-C6", "C6":
+		// GPIO9 = BOOT 按键（C6 的 GPIO8 是 RGB LED，但 LED 由固件内部驱动、
+		// 不在 hw_gpios 上报清单里，用户本来也配不到，故不在此列）。
+		return 9, true
+	default:
+		return 0, false
+	}
+}
+
+// checkNotReservedPin 在引脚属于该平台保留引脚时返回可读错误。
+func checkNotReservedPin(node *models.Node, pin int) error {
+	reserved, known := reservedPinForPlatform(node.Platform)
+	if !known || pin != reserved {
+		return nil
+	}
+	return fmt.Errorf("GPIO pin %d on %s is the BOOT/strapping pin and cannot be "+
+		"assigned to a peripheral: a low level on it is indistinguishable from "+
+		"holding the BOOT button, which triggers a factory reset (NVS erase + "+
+		"reboot). Choose another pin", pin, node.Platform)
+}
+
 func validateReportedGPIO(db *gorm.DB, node *models.Node, pin int) error {
+	if err := checkNotReservedPin(node, pin); err != nil {
+		return err
+	}
 	var resources reportedPeripheralResources
 	if node.Capabilities == "" || json.Unmarshal([]byte(node.Capabilities), &resources) != nil || len(resources.Buses.GPIO) == 0 {
 		return fmt.Errorf("node has not reported usable GPIO resources")

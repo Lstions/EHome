@@ -271,9 +271,13 @@ func windWindowEvents(e *harness.Env, ruleID int64) []autoEventRow {
 	return rows
 }
 
-// windTickTimeout 是「至少跨过一个 60s tick」的等待上限（ticker 相位不可知，
-// 首次 tick 最坏要等满一个周期，再留 35s 给事件落库与轮询间隔）。
-const windTickTimeout = 95 * time.Second
+// windTickTimeout 是「至少跨过一个 tick」的等待上限。
+//
+// ticker 相位不可知，首次 tick 最坏要等满一个周期；再加 15s 余量覆盖事件落库
+// 与轮询间隔。周期本身由 harness.WindowTickInterval 注入（生产 1 分钟，仿真 2s），
+// 因此这里写成「一个周期 + 固定余量」而不是写死 95s —— 2026-10-04 优化前写死
+// 95s，在仿真 2s 周期下等于每条窗口场景白等 95s。
+const windTickTimeout = harness.WindowTickInterval + 15*time.Second
 
 // ---------------------------------------------------------------------------
 // SIM-WIND-001 进入时间窗口时执行一次（enter 边沿）
@@ -367,9 +371,13 @@ func windRun003(e *harness.Env) {
 	start, end := windWindowAround(now, -1, 30)
 	windAssertContains(e, "SIM-WIND-003", start, end, now, true)
 
-	// 主体：inside 边沿 + 90s 冷却。tick 周期是 60s，因此两次执行之间必然跨过
-	// 至少一个「按 tick 求值但被冷却压住」的时刻。
-	subjectID := windCreateWindowRule(e, e.NS("SIM-WIND-003", "subject"), start, end, "inside", 90)
+	// 主体：inside 边沿 + 冷却窗。冷却窗按 tick 缩放（3 个 tick）：
+	// 不变式是「冷却确实压住了后续 tick」，而不是「冷却恰好 90 秒」；
+	// 取 3 个 tick 既保证 冷却 > tick（否则"每 tick 都刷"与"冷却生效"
+	// 在观测上无法区分），又让"被压住→再次执行"的完整证据落在 3 个 tick 内。
+	// 2026-10-04 优化前窗口写死 90s 冷却 + 60s tick，本条因此真等 180s。
+	cooldownSec := int(3 * harness.WindowTickInterval / time.Second)
+	subjectID := windCreateWindowRule(e, e.NS("SIM-WIND-003", "subject"), start, end, "inside", cooldownSec)
 	// 探针：inside 边沿 + 1s 冷却 —— 每个 tick 必然触发一次，用它当**tick 计数器**。
 	// 这样「到底发生过几个 tick」有确凿证据，而不是靠 sleep 猜（设计 §3 原则 3）。
 	probeID := windCreateWindowRule(e, e.NS("SIM-WIND-003", "tick-probe"), start, end, "inside", 1)
@@ -405,7 +413,11 @@ func windRun003(e *harness.Env) {
 	//
 	// 为什么不改用绝对值：abs() 会把"时钟倒退/事件时间戳乱序"这类**真实异常**
 	// 一并掩盖成通过。按升序排序后，任何负间隔都会以"排序后仍倒序"的形式响亮失败。
-	const cooldownSec = 90
+	// minGap 是「冷却窗 - 半个 tick」：留半个 tick 给 ticker 相位与落库延迟。
+	// 关键性质：它必须**显著大于一个 tick 周期**，否则"每个 tick 都刷"的退化
+	// 实现（间隔 = 1 个 tick）也能通过 —— 那正是本条场景要抓的缺陷。
+	// 仿真 tick 2s、冷却窗 6s ⇒ minGap 5s > 2s，退化实现仍是红的。
+	minGap := time.Duration(cooldownSec)*time.Second - harness.WindowTickInterval/2
 	sort.Slice(executions, func(i, j int) bool { return executions[i].Before(executions[j]) })
 	for i := 1; i < len(executions); i++ {
 		gap := executions[i].Sub(executions[i-1])
@@ -413,20 +425,22 @@ func windRun003(e *harness.Env) {
 			e.Fatalf("事件时间戳在升序排序后仍出现负间隔 %s（第 %d/%d 次）：时间戳可能被篡改或时钟倒退",
 				gap.Round(time.Millisecond), i, i+1)
 		}
-		if gap < (cooldownSec-5)*time.Second {
-			e.Fatalf("inside 策略在第 %d/%d 次执行之间只隔了 %s，短于冷却窗 %ds（每个 tick 都刷）：%+v",
-				i, i+1, gap.Round(time.Millisecond), cooldownSec, finalSubject)
+		if gap < minGap {
+			e.Fatalf("inside 策略在第 %d/%d 次执行之间只隔了 %s，短于冷却窗要求 %s（冷却窗 %ds、tick %s）：每个 tick 都刷的实现会退化成 tick 周期，这里应当变红：%+v",
+				i, i+1, gap.Round(time.Millisecond), minGap.Round(time.Millisecond),
+				cooldownSec, harness.WindowTickInterval, finalSubject)
 		}
 	}
 
 	e.Evidence("SIM-WIND-003.inside_cooldown", map[string]any{
 		"subject_rule_id": subjectID, "probe_rule_id": probeID,
 		"window": start + "–" + end, "cooldown_sec": cooldownSec,
-		"ticks_observed":      trigCountResult(probeRows, "notification"),
-		"subject_executions":  len(executions),
-		"first_execution_at":  executions[0].Format(time.RFC3339Nano),
-		"last_execution_at":   executions[len(executions)-1].Format(time.RFC3339Nano),
-		"min_gap_requirement": (cooldownSec - 5),
+		"ticks_observed":         trigCountResult(probeRows, "notification"),
+		"subject_executions":     len(executions),
+		"first_execution_at":     executions[0].Format(time.RFC3339Nano),
+		"last_execution_at":      executions[len(executions)-1].Format(time.RFC3339Nano),
+		"min_gap_requirement_ms": minGap.Milliseconds(),
+		"tick_interval_ms":       harness.WindowTickInterval.Milliseconds(),
 	})
 }
 

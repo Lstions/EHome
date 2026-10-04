@@ -1,13 +1,13 @@
 package offlinedetector
 
 import (
-	"ehome/backend/internal/events"
-	"ehome/backend/pkg/logger"
 	"sync"
 	"time"
 
+	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/websocket"
+	"ehome/backend/pkg/logger"
 
 	"gorm.io/gorm"
 )

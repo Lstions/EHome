@@ -50,7 +50,18 @@ static bool s_initialized;
 static bool is_valid_pin(int pin)
 {
     for (int i = 0; i < HW_GPIO_COUNT; i++) {
-        if (hw_gpios[i].pin == pin) return true;
+        if (hw_gpios[i].pin != pin) continue;
+        /* reserved 引脚（BOOT/strap 等）永不接受 PWM 配置。
+         * 2026-10-04 现场事故的**直接**入口就在这里：PWM0 配到 S3 的 GPIO0
+         * （BOOT 按键），duty=500/16384 把它拉低 97% 的时间，
+         * factory_reset_task 每 100ms 轮询到低电平并走满 5s 长按判定，
+         * 于是设备每 8.8s 擦一次 NVS 并重启，红/蓝/紫灯交替闪烁。
+         * PWM 占空比一旦非 100%，就等于"持续按住 BOOT 键"。 */
+        if (hw_gpio_is_reserved(&hw_gpios[i])) {
+            ESP_LOGW(TAG, "pin %d (%s) 是保留引脚，拒绝 PWM 配置", pin, hw_gpios[i].id);
+            return false;
+        }
+        return true;
     }
     return false;
 }

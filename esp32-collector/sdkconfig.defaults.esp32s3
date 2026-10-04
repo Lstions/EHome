@@ -13,3 +13,17 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # PSRAM (S3 dev boards often have 8MB PSRAM)
 # CONFIG_SPIRAM=y
 # CONFIG_SPIRAM_MODE_OCT=y
+
+# 16MB flash + 16MB 分区表（ota_0/ota_1 各 0x680000）。
+#
+# 为什么必须写进 committed defaults：这两项以前只存在于本地 sdkconfig，
+# 而 sdkconfig 是 gitignored 的（仓库根 .gitignore:14）。后果：
+#   1. 任何人跑一次 `idf.py set-target esp32s3` 就会把它重置回 2MB 默认值，
+#      构建直接失败 —— "Partitions tables occupies 3.6MB of flash which
+#      does not fit in configured flash size 2MB"（2026-10-04 实际发生）；
+#   2. 从仓库无法复现产线固件 —— 同一份代码在不同机器上产出不同分区表，
+#      OTA 镜像上限与可用升级空间随之不同。
+# 这两项属于"产品形态"而非"个人偏好"，因此随代码走。
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_s3_16m.csv"

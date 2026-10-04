@@ -159,6 +159,10 @@ func cmdArmNode(e *harness.Env, fx *edgeDevice) {
 	// 而 offlinedetector 会把 last_seen 超过 NodeOfflineThreshold 的在线节点判为离线
 	// （2026-10-03 起为 3s，旧值 90s；见 internal/offlinedetector/offlinedetector.go）。
 	// 这里用真实心跳维持（不是 sleep 同步，见 edgeDevice.heartbeat）。
+	//
+	// ⚠ 心跳周期必须 <= 生产阈值：edgeDevice.heartbeat 取固件的
+	// STATUS_REPORT_PERIOD_MS（1s）。2026-10-04 前它写死 20s，在 3s 阈值下节点
+	// 会在两次心跳之间被判离线，本条场景与 SIM-SCNE-008 因此撞上 gateNodeStatus。
 	fx.heartbeat()
 
 	bootID := "sim-boot-" + fx.NodeID
@@ -793,14 +797,22 @@ func cmdRun006(e *harness.Env) {
 	e.Evidence("SIM-CMD-006.attempt_visible", list.BodyString())
 
 	// 失败原因可查询：仿真设备故意不回 Ack/Final，执行记录必须在 Deadline 之后
-	// 以明确终态 + 原因收尾（RecoverExpired 每秒一轮；Deadline = 创建 + 2 分钟），
-	// 绝不能永远停在"已下发"这种无法解释的状态。
+	// 以明确终态 + 原因收尾（RecoverExpired 每秒一轮，判据是库里的
+	// deadline_at vs now），绝不能永远停在"已下发"这种无法解释的状态。
+	//
+	// 超时按生效 Deadline 推导（Deadline + 30s 覆盖每秒一轮的 RecoverExpired、
+	// 终态落库与轮询间隔），不写死 190s。
+	//
+	// 用 harness.CommandDeadline 而不是 commandexec.CommandDeadline()：后者读环境
+	// 变量，而环境变量只注入给**子进程**；测试进程里调用它会拿到生产默认 2 分钟，
+	// 从而推导出与真实 Deadline 不符的超时（2026-10-04 在 DS 场景上正是这样翻的车）。
+	// harness 常量就是"注入给子进程的那个值"本身，两边同源。
 	var final struct {
 		Status      string `json:"status"`
 		FinalReason string `json:"final_reason"`
 		CompletedAt string `json:"completed_at"`
 	}
-	e.Eventually(190*time.Second, func() error {
+	e.Eventually(harness.CommandDeadline+30*time.Second, func() error {
 		state := e.Admin.Get("/api/v1/device-operations/" + commandID).Expect(http.StatusOK)
 		state.Decode(&final)
 		if final.Status != "UNKNOWN" && final.Status != "FAILED" {

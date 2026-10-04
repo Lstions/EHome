@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/simulation/harness"
 )
@@ -30,6 +31,14 @@ import (
 // 域标识：设计 v1.1 冻结 Domain 取 §6 表"前缀"列的短名（去 SIM-），
 // 且不变量 ID == "SIM-" + string(Domain) + "-" + NNN 由目录门禁校验。
 const edgeDomain Domain = "EDGE"
+
+// edgeDeviceStatusPending 是新建边缘设备的初始状态。
+//
+// 与 models.EdgeDeviceStatusPending 同值，但这里刻意不 import models：
+// 仿真场景断言的是**外部可见的 API 行为**（设备刚建好时列表里显示什么状态），
+// 而不是把服务端常量抄过来核对 —— 后者会让「两边一起改错」也照样全绿。
+// 该值只在 SIM-EDGE-002 使用；若服务端改了状态机，这里必须显式跟着改。
+const edgeDeviceStatusPending = "pending"
 
 func init() {
 	Register(Scenario{
@@ -149,6 +158,7 @@ type edgeDeviceRow struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMs      int    `json:"interval_ms"`
 	LogicalDeviceID *int64 `json:"logical_device_id"`
+	Status          string `json:"status"`
 }
 
 func edgeRun002(e *harness.Env) {
@@ -200,17 +210,31 @@ func edgeRun002(e *harness.Env) {
 	}
 
 	// 列表页的筛选条件（型号 + 状态）同样必须命中。
-	filterPath := fmt.Sprintf("/api/v1/edge-devices?node_id=%s&device_type=%s&status=active",
-		fx.NodeID, fx.Type)
-	active := simListGet[edgeDeviceRow](e, filterPath)
+	//
+	// 2026-10-04 修正：状态不再写死 "active"。新建边缘设备的初始状态是 pending
+	// （models.go 的 `default:pending`，对应现场缺陷 5「新建的传感器一条数据都没有
+	// 却显示在线」），只有 databus 收到首个数据帧才提升为 active。本场景只验证
+	// 「绑定后能被查到」，从不上报数据，所以 pending 才是它此刻的合法状态；
+	// 写死 active 等于把已被修掉的旧行为（创建即在线）当成契约。
+	//
+	// 这里同时守住两件事：
+	//   ① 新建设备的状态必须是 pending —— 有人把 default 改回 active 即变红；
+	//   ② 型号 + 状态的组合筛选必须能筛出它 —— 筛选器回归也变红。
+	if hit.Status != edgeDeviceStatusPending {
+		t.Fatalf("新建边缘设备 #%d 的 status = %q，期望 %q（「创建即有数据」是已修复的缺陷 5）",
+			hit.ID, hit.Status, edgeDeviceStatusPending)
+	}
+	filterPath := fmt.Sprintf("/api/v1/edge-devices?node_id=%s&device_type=%s&status=%s",
+		fx.NodeID, fx.Type, edgeDeviceStatusPending)
+	filtered := simListGet[edgeDeviceRow](e, filterPath)
 	found := false
-	for _, row := range active {
+	for _, row := range filtered {
 		if row.ID == fx.EdgeDeviceID {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("device_type+status 过滤后没有边缘设备 #%d：%+v", fx.EdgeDeviceID, active)
+		t.Fatalf("device_type+status 过滤后没有边缘设备 #%d：%+v", fx.EdgeDeviceID, filtered)
 	}
 
 	// 详情页与列表必须一致。
@@ -702,7 +726,18 @@ func (f *edgeDevice) edgeReport(raw uint16) error {
 // 不作为任何断言的同步手段。
 func (f *edgeDevice) heartbeat() {
 	start := time.Now()
-	f.Device.Loop(context.Background(), 20*time.Second, func() error {
+	// 周期必须 <= offlinedetector.NodeOfflineThreshold（当前 3s），否则节点会在
+	// 两次心跳之间被判离线，任何"等派发/等收尾"超过一个周期的场景都会撞上
+	// commandexec 的 gateNodeStatus（node.status == "online"），表现为动作被拒为
+	// "action is unavailable for this device"。
+	//
+	// 2026-10-04 修复：这里原本写死 20s。阈值还是 90s 时它没问题；为满足
+	// "断电 5s 内可见"把阈值收紧到 3s 后就自相矛盾 —— 用例一边声称"用真实心跳
+	// 维持在线"，一边以 6.7 倍于阈值的间隔发心跳，于是被自己的门禁判离线。
+	//
+	// 取固件的真实上报周期（main.c 的 STATUS_REPORT_PERIOD_MS = 1s）而不是再写一个
+	// "刚好够用"的数：与真实设备同拍，阈值以后再变这里仍然成立。
+	f.Device.Loop(context.Background(), offlinedetector.FirmwareStatusReportPeriod, func() error {
 		return f.Device.StatusReport(uint64(time.Since(start).Seconds()), "online", 0)
 	})
 }

@@ -9,6 +9,8 @@ package automation
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -259,12 +261,43 @@ func (e *Evaluator) Stop() {
 	e.once.Do(func() { close(e.stopCh) })
 }
 
-// StartWindowTicker 启动 time_window 触发器独立求值 ticker (1min 周期)。
+// windowTickEnvVar 是 time_window 求值周期的环境变量名。
+const windowTickEnvVar = "EHOME_WINDOW_TICK_INTERVAL"
+
+// WindowTickInterval 返回 time_window 触发器的求值周期。
+//
+// 生产默认 1 分钟：time_window 是时钟驱动的边沿触发器，语义上就是"每分钟看一眼
+// 窗口边界"。收紧它只是增加无谓的求值次数，没有任何产品收益，因此默认值不动。
+//
+// 允许环境变量覆盖的唯一原因是仿真套件（2026-10-04 性能优化）：
+// 140 个场景里有一批必须"等到下一个 tick"才能观测边沿，1 分钟周期让它们各自
+// 真等 30~180s —— 实测全量 781s 里 605s（77%）花在这几条上。
+// 把周期调小后它们全部回到秒级。
+//
+// 为什么不改变判据：走的是**同一条** evalTimeWindows 路径、同一个时间源
+// （time.Now()），只是更频繁地求值。对"边沿是否只触发一次""冷却是否被遵守"
+// 这类不变式，求值更频繁只会更容易暴露错误实现（一个"每 tick 都刷"的 bug
+// 会更早被观测到），不会放松任何断言。
+//
+// 解析失败或非正值一律回落默认值：这个变量不该有让服务起不来的能力。
+func WindowTickInterval() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(windowTickEnvVar)); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		} else {
+			logger.Warnf("automation: 忽略非法的 %s=%q（应为正 duration，如 2s），回落 %s",
+				windowTickEnvVar, raw, time.Minute)
+		}
+	}
+	return time.Minute
+}
+
+// StartWindowTicker 启动 time_window 触发器独立求值 ticker（周期见 WindowTickInterval）。
 // 与 sensor_threshold 的 Evaluate 路径完全独立 — 时钟驱动不挂传感器解析回调。
 // ctx 取消时优雅退出 (main.go 接线用)。
 func (e *Evaluator) StartWindowTicker(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(WindowTickInterval())
 		defer ticker.Stop()
 		for {
 			select {

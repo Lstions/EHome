@@ -334,8 +334,15 @@ static bool build_buses_blob(uint8_t *blob, size_t cap, size_t *out_len)
             return false;
     }
 
-    /* field4: gpio_entry (repeated) */
+    /* field4: gpio_entry (repeated)
+     *
+     * reserved 引脚不上报：服务端把"上报过的引脚"当作可分配白名单
+     * （handler_periph.go 的 validateReportedGPIO），不上报它就没有
+     * 任何配置路径能选中 GPIO0/strap/LED 等保留引脚 —— 这是第一道闸，
+     * 固件侧的 is_valid_pin 是第二道闸（防越权或旧版服务端直发）。
+     * 代价是上报的 GPIO 数少于物理引脚数，属预期：上报的是**可分配**资源。 */
     for (int i = 0; i < HW_GPIO_COUNT; i++) {
+        if (hw_gpio_is_reserved(&hw_gpios[i])) continue;
         if (!encode_gpio_entry(entry_buf, sizeof(entry_buf), &entry_len,
                                &hw_gpios[i]))
             return false;

@@ -58,10 +58,32 @@ typedef struct {
     uint8_t     flags;           /* bit0 = dma_supported */
 } hw_spi_t;
 
+/* GPIO flags */
+#define HW_GPIO_FLAG_RESERVED  0x01  /* 不得分配给用户外设（strap/按键/调试占用） */
+
 typedef struct {
     const char *id;
     uint8_t     pin;
+    uint8_t     flags;  /* bit0 = reserved（见 HW_GPIO_FLAG_RESERVED） */
 } hw_gpio_t;
+
+/* 引脚是否禁止分配给用户外设（GPIO/PWM 等）。
+ *
+ * 为什么需要它：2026-10-04 现场事故 —— 压力测试把 PWM 配到 S3 的 GPIO0，
+ * 而 GPIO0 正是 BOOT 按键引脚。PWM 以 3% 占空比把它拉低 97% 的时间，
+ * factory_reset_task 轮询到低电平并走满 5s 长按判定，于是每次上电约 8.8s
+ * 就擦一次 NVS 并重启，设备陷入"恢复出厂→重启→重连→再恢复出厂"死循环，
+ * 表现为红/蓝/紫灯交替闪烁、配置永远 success=false。
+ *
+ * 这类引脚即使在用户视角"看起来空着"，也不该被业务配置驱动：
+ *   - BOOT/strap 引脚决定启动模式，且被按键轮询逻辑占用；
+ *   - USB D+/D- 决定能否被主机枚举（占用即失联）；
+ *   - RGB LED 引脚被 LED 驱动独占。
+ * 因此标注为 reserved 的引脚一律不参与资源上报、也不接受下发配置。 */
+static inline bool hw_gpio_is_reserved(const hw_gpio_t *g)
+{
+    return (g->flags & HW_GPIO_FLAG_RESERVED) != 0;
+}
 
 typedef struct {
     const char *id;
@@ -98,6 +120,11 @@ typedef struct {
   #define HW_RESERVED_USB_DN   19  /* USB_D- */
   #define HW_RESERVED_USB_DP   20  /* USB_D+ */
   #define HW_RESERVED_LED      48  /* RGB LED (WS2812) */
+  /* S3 BOOT 按键 / strapping 引脚：rom 下载模式判定（bus_dma.c 的
+   * BOOT_STRAP_GPIO）与 factory_reset 长按轮询（factory_reset.c 的
+   * BOOT_BUTTON_GPIO）都用它。任何把它拉低的输出配置都会伪装成
+   * "按键长按"，触发 NVS 擦除 + 重启。 */
+  #define HW_RESERVED_BOOT      0  /* BOOT 按键 / strapping (S3) */
 
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
 
@@ -116,6 +143,9 @@ typedef struct {
   #define HW_RESERVED_USB_DN   12  /* USB_D- */
   #define HW_RESERVED_USB_DP   13  /* USB_D+ */
   #define HW_RESERVED_LED       8  /* RGB LED (WS2812) */
+  /* C6 BOOT 按键 / strapping 引脚（factory_reset.c 的 BOOT_BUTTON_GPIO=9）。
+   * 注意 C6 的 GPIO8 是 RGB LED（由 LED 驱动占用），GPIO9 才是 BOOT 按键。 */
+  #define HW_RESERVED_BOOT      9  /* BOOT 按键 (C6) */
 
 #else
   #error "Unsupported IDF target — add profile for this chip"

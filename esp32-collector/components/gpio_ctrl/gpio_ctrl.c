@@ -35,7 +35,16 @@ static volatile bool s_reconfiguring = false;
 static bool is_valid_pin(int pin)
 {
     for (int i = 0; i < HW_GPIO_COUNT; i++) {
-        if (hw_gpios[i].pin == pin) return true;
+        if (hw_gpios[i].pin != pin) continue;
+        /* reserved 引脚（BOOT/strap 等）永不接受配置：把它们当普通输出驱动
+         * 会伪装成"按键长按"，触发 NVS 擦除 + 重启（2026-10-04 现场事故：
+         * PWM 配到 S3 的 GPIO0，设备每 8.8s 恢复出厂一次）。
+         * 与 gpio_ctrl 的 is_valid_pin 用同一判据，两条下发路径行为一致。 */
+        if (hw_gpio_is_reserved(&hw_gpios[i])) {
+            ESP_LOGW(TAG, "pin %d (%s) 是保留引脚，拒绝配置", pin, hw_gpios[i].id);
+            return false;
+        }
+        return true;
     }
     return false;
 }

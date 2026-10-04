@@ -8,3 +8,10 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # C6 has 2 HP UARTs (DMA-capable) + 1 LP UART (no DMA)
 # UART0 (TX16/RX17): user data serial + ROM download fallback
 # UART1 (TX20/RX21): general purpose
+
+# 8MB flash + 8MB 分区表。与 S3 同理（见 sdkconfig.defaults.esp32s3 的长注释）：
+# 这两项以前只在 gitignored 的本地 sdkconfig 里，一次 set-target 就会被重置成
+# 2MB 默认值导致构建失败，且仓库无法复现产线固件。
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_c6_8m.csv"

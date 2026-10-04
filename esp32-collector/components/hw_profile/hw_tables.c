@@ -101,8 +101,12 @@ const hw_spi_t hw_spis[HW_SPI_COUNT] = {
       .flags = 0x01 },
 };
 
+/* GPIO0 标 reserved：它是 BOOT 按键 / strapping 引脚（见 hw_tables.h 的
+ * hw_gpio_is_reserved 注释，2026-10-04 PWM 配到 GPIO0 导致设备每 8.8s
+ * 恢复出厂一次的现场事故）。reserved 引脚不进资源上报，服务端因此拿不到
+ * 它，用户也就配不上去 —— 这是"配不上"的第一道闸。 */
 const hw_gpio_t hw_gpios[HW_GPIO_COUNT] = {
-    { .id = "GPIO0",  .pin = 0  },
+    { .id = "GPIO0",  .pin = 0,  .flags = HW_GPIO_FLAG_RESERVED },
     { .id = "GPIO1",  .pin = 1  },
     { .id = "GPIO2",  .pin = 2  },
     { .id = "GPIO3",  .pin = 3  },

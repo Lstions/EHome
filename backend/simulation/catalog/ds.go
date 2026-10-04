@@ -9,7 +9,8 @@
 // 断言口径（照真实实现写，不照想当然）：
 //   - 组内首条来源自动 active，其余 standby（datasource.Service.Create）；
 //   - 自动切换只有两条真实信号：设备离线钩子（device_offline）与停滞扫描（stale_data）。
-//     本域用前者：它由 offlinedetector 在边缘设备超过 60s 无数据时触发，
+//     本域用前者：它由 offlinedetector 在边缘设备超过
+//     EdgeDeviceOfflineThreshold（60s）无数据时触发，
 //     是最快且最真实的路径（停滞扫描还要先满足 R11 的 2 分钟最小驻留）；
 //   - MarkSuccess 只清 fail_count 且 error→standby，**不抢占 active**，
 //     所以"回切"必然是管理员显式操作（R1，设计 §3"不自动回切"）。
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/simulation/harness"
 )
 
@@ -462,10 +464,18 @@ func dsRun003(e *harness.Env) {
 	// 且成功事件已把 last_success 写在主来源上。
 	dsReportAndAwaitSuccess(e, g)
 
-	// 主机停止上报。offlinedetector 每 5s 扫描一次，last_data_at 超过 60s
-	// 即判定边缘设备离线 → 触发 datasource 的 device_offline 失败信号 →
-	// fail_count 达到阈值 → 自动切换。超时给足 150s。
-	e.Eventually(150*time.Second, func() error {
+	// 主机停止上报。offlinedetector 每秒扫描一次，last_data_at 超过
+	// offlinedetector.EdgeDeviceOfflineThreshold 即判定边缘设备离线 → 触发
+	// datasource 的 device_offline 失败信号 → fail_count 达到阈值 → 自动切换。
+	//
+	// 超时按生产阈值推导（×3，覆盖扫描周期、失败计数与轮询间隔）而不写死秒数：
+	// 数字同源，阈值调整时这里自动跟随，不会出现"阈值已变、等待还是老值"。
+	//
+	// 为什么这里必须真的等一个离线阈值：本场景证明的是"设备离线这个真实信号
+	// 能驱动自动切换"。若把阈值调小来提速，就会改变被判离线的物理条件
+	// （备用设备的持续上报周期是 30s，阈值小于它就必然误判），前提先坏，
+	// 断言再快也没有意义 —— 2026-10-04 我把阈值压到 6s 时正是这样翻的车。
+	e.Eventually(3*offlinedetector.EdgeDeviceOfflineThreshold, func() error {
 		primary := dsGet(e, g.PrimarySource)
 		rows := dsList(e, g.LogicalDeviceID, g.Category)
 		if primary.Status != "error" {
@@ -534,8 +544,10 @@ func dsRun004(e *harness.Env) {
 	dsEstablish(e, "SIM-DS-004", g, 1)
 	dsReportAndAwaitSuccess(e, g)
 
-	// 制造一次真实的自动切换（与 SIM-DS-003 同一条路径）。
-	e.Eventually(150*time.Second, func() error {
+	// 制造一次真实的自动切换（与 SIM-DS-003 同一条路径：靠真实的离线判定
+	// 触发 device_offline 失败信号，而不是直接改库）。
+	// 超时同样按生产阈值推导，理由见 SIM-DS-003。
+	e.Eventually(3*offlinedetector.EdgeDeviceOfflineThreshold, func() error {
 		if row := dsGet(e, g.PrimarySource); row.Status != "error" {
 			return fmt.Errorf("主来源状态 = %q，尚未熔断", row.Status)
 		}

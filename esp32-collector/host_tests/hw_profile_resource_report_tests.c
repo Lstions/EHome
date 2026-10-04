@@ -5,6 +5,7 @@
 
 #include "frame_codec.h"
 #include "hw_profile.h"
+#include "hw_tables.h"  /* hw_gpios / hw_gpio_is_reserved */
 
 static int s_failures;
 

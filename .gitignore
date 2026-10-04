@@ -93,6 +93,13 @@ frontend-shared/coverage/
 # Local ESP32 host-test build trees
 esp32-collector/host_tests/build*/
 
+# CTest 的运行产物：在**源码目录**里生成（cmake -S host_tests ... 时的 cwd
+# 决定），因此不受上面 build*/ 规则约束。里面是 LastTest.log / CTestCostData.txt
+# 这类每次跑测试都会变的一次性文件，不能入库。
+# 2026-10-04 实际发生过：`git add -A` 把它们带进了暂存区 —— 提交前一律用
+# `git diff --cached --name-only` 复核，不要盲信 .gitignore 已经挡住。
+esp32-collector/host_tests/Testing/
+
 # AI agent local files
 .hermes/
 .claude/

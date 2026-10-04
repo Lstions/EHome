@@ -103,6 +103,35 @@ target_compile_definitions(hw_profile_resource_report_tests PRIVATE
 target_compile_options(hw_profile_resource_report_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME hw_profile_resource_report_tests COMMAND hw_profile_resource_report_tests)
 
+# 保留引脚契约：S3 / C6 各编一份（见文件头注释）。
+#
+# 为什么必须两份：此处此前所有 host test 都只编 C6，而 2026-10-04 的现场
+# 事故发生在 S3 的 GPIO0 上 —— C6 上 GPIO0 是普通引脚，所以那份 C6 用例
+# 永远绿，S3 的缺陷在 CI 里连编译都没编译过。两个 target 用不同机制挡住
+# BOOT 引脚（S3 靠 reserved 标记、C6 靠不在表里），必须两种都验。
+foreach(_ehome_pin_target ESP32S3 ESP32C6)
+    string(TOLOWER "${_ehome_pin_target}" _ehome_pin_suffix)
+    set(_ehome_pin_exe "reserved_pin_contract_${_ehome_pin_suffix}_tests")
+    add_executable(${_ehome_pin_exe}
+        reserved_pin_contract_tests.c
+        ../components/frame/frame_codec.c
+        ../components/hw_profile/hw_profile.c
+        ../components/hw_profile/hw_tables.c
+    )
+    target_include_directories(${_ehome_pin_exe} PRIVATE
+        stubs
+        ../components/frame
+        ../components/hw_profile/include
+        ../components/dma_pool/include
+        ../components/config_mgr
+    )
+    target_compile_definitions(${_ehome_pin_exe} PRIVATE
+        CONFIG_IDF_TARGET_${_ehome_pin_target}=1
+    )
+    target_compile_options(${_ehome_pin_exe} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${_ehome_pin_exe} COMMAND ${_ehome_pin_exe})
+endforeach()
+
 add_executable(peripheral_identity_tests
     peripheral_identity_tests.c
     ../components/pwm_ctrl/pwm_ctrl.c
