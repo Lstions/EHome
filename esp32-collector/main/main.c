@@ -43,7 +43,25 @@
 #endif
 
 #define TAG "EHOME"
-#define STATUS_TASK_STACK 6144
+
+/* status_task 的栈。6144 在 2026-10-04 被证明不够：设备在压测中两次以
+ * reset_reason=4(PANIC) 崩溃，pc 落在 FreeRTOS 的 prvTaskCheckFreeStackSpace
+ * （栈溢出检测点），crash_diag 记下的 task 名就是 "status"。
+ *
+ * 为什么 6144 不够：status_task 每秒调用 msg_handler_send_status，而该函数有
+ * uint8_t buf[1400] 的栈上帧（components/msg_handler/handler_data.c:107），
+ * 之后还要走 msg_handler_publish_checked → MQTT → lwIP，这条链本身有 1KB 以上
+ * 开销 —— 与 log_tx 那次栈溢出是同一形态（见 log_stream.c 的同类修复）。
+ * 1400 + 发布链 + 调用者帧，6144 的余量过薄。
+ *
+ * 取 8192：与 OTA 任务同量级（ota.c 的 OTA_TASK_STACK_BYTES），
+ * 给 buf[1400] + 发布链留约 2 倍余量。
+ *
+ * ⚠ 这只是把余量做够，**没有**消除根因：msg_handler_send_status 仍把 1400 字节
+ * 放在栈上。main/CMakeLists.txt 的 -Wframe-larger-than 门禁此前只作用于
+ * app_callbacks.c 这一个文件，所以这个 1400 字节帧从未被门禁检查过；
+ * handler_data.c 属于 msg_handler 组件，完全在门禁视野之外。 */
+#define STATUS_TASK_STACK 8192
 
 /* StatusReport 上报周期 (毫秒)。1s 是节点离线可见时延预算的一部分：
  * 最坏 = 1s(本周期) + 3s(服务端 NodeOfflineThreshold) + 1s(服务端检测 ticker) = 5s。

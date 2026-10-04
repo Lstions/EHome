@@ -10,9 +10,35 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # UART1 (TX20/RX21): CH340 dev board
 # UART2 (TX1/RX2):   general purpose
 
-# PSRAM (S3 dev boards often have 8MB PSRAM)
-# CONFIG_SPIRAM=y
-# CONFIG_SPIRAM_MODE_OCT=y
+# PSRAM：保持**关闭**（曾经尝试开启，实测不可行，原因必须记在这里防止重蹈）。
+#
+# 背景：S3 板上确有 8MB 嵌入式 PSRAM（esptool 报 "Embedded PSRAM 8MB (AP_3v3)"），
+# 而 ABI 只能给设备约 16KB 可用内部堆，直接造成两个现场故障：
+#
+#   1. OTA 起不来：xTaskCreate(ota_task, 8192) 在 16KB 空闲堆上失败，上报
+#      "Insufficient heap to start OTA task"（ota.c 注释记录了同一台设备
+#      30EDA0A9A808 在 2026-10-01 就因此失败过，当时 14.3KB 空闲）。
+#   2. 配置同步失败：config_manifest_t 单个 5400 字节（channels[8] 占 3520），
+#      apply 事务同时持有 active + old_snapshot + staged 三份 ≈ 16KB，恰好等于
+#      全部空闲堆。表现为"UART-only 能同步、一加上 SPI2 或 I2C0 就 success=false"，
+#      且失败点在无日志的分配路径上，设备侧连一条 ERROR 都看不到。
+#
+# 看起来开 PSRAM 就能同时解决这两件事 —— 但**不能开**，原因是硬约束：
+#
+#   开启 PSRAM 会让 IDF 置上 CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND，
+#   从而给全部编译单元加 -mdisable-hardware-atomics
+#   （见 $IDF_PATH/components/esp_libc/project_include.cmake:37）。
+#   原因是 Xtensa 的 S32C1I 原子指令**在 PSRAM 地址上不成立**，
+#   IDF 只能全局禁用硬件原子以避免静默的数据竞争。
+#   后果：ATOMIC_INT_LOCK_FREE 从 2 变成 1，而 main/hello_handshake_runtime.h
+#   开头就有硬门禁 `#if ATOMIC_INT_LOCK_FREE != 2 -> #error`，构建立刻失败：
+#      "Hello callbacks require always-lock-free 32-bit integer atomics"
+#   这个门禁是对的：Hello 回调要在 ISR/并发语境下用无锁 32 位原子。
+#
+# 结论：在这颗芯片 + 这个 IDF 上，"PSRAM 可用堆" 与 "无锁 32 位原子" 二选一。
+# 本项目选了后者（既有的显式要求），所以 PSRAM 关闭；
+# 堆紧张必须靠**减小 manifest 体积 / 降低 OTA 栈需求**来解决，不能靠开 PSRAM。
+# 若将来真要开 PSRAM，前提是先改造 hello_handshake_runtime 的原子用法。
 
 # 16MB flash + 16MB 分区表（ota_0/ota_1 各 0x680000）。
 #

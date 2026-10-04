@@ -73,7 +73,22 @@
 #define WRITE_RSP_QUEUE_DEPTH 8
 #define WRITE_RSP_MSG_MAX 64
 #define CONTROL_FINAL_RAW_MAX 256
-#define REPORT_TASK_STACK 4096
+/* report_tx 的栈。4096 在 2026-10-04 的排查中被判定**不安全**：本任务通过
+ *   bus_worker_set_callbacks(..., msg_handler_send_data_report)
+ * 直接调用 msg_handler_send_data_report，而该函数有 2416 字节的栈帧
+ * （components/msg_handler/handler_data.c:254，其中 uint8_t buf[1400] 是
+ * "至少 1024 字节数据块 + 报头开销"所必需的，注释里写明了不能缩小），
+ * 之后还要走 msg_handler_publish → MQTT → lwIP 这条 1KB 以上的链。
+ * 2416 + 1000+ 已超过 4096 —— 与 status_task 那次栈溢出同形，只是触发它需要
+ * 特定的数据块尺寸，所以此前没有被观测到。
+ *
+ * 取 6144：给 2416 帧 + 发布链留约 2 倍余量。这是**栈空间换确定性**的选择：
+ * 栈在任务创建时一次性预留，不像堆分配那样有失败路径与碎片风险。
+ * 同类修复见 components/log_stream/log_stream.c（LOG_TX_STACK 1536→4096）。
+ *
+ * ⚠ 根因未消除：send_data_report 仍把 2416 字节放在栈上。新加的组件级
+ * -Wframe-larger-than 门禁会盯着它，若将来再叠大缓冲，构建即失败。 */
+#define REPORT_TASK_STACK 6144
 #define REPORT_TASK_PRIO 5
 
 typedef struct {

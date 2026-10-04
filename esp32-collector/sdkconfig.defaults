@@ -22,7 +22,13 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 # like it configures something.
 CONFIG_MQTT_USE_CUSTOM_CONFIG=y
 CONFIG_MQTT_BUFFER_SIZE=2048
-CONFIG_MQTT_TASK_STACK_SIZE=6144
+# 8192（原 6144）：MQTT 任务要在回调里跑完整条 ConfigManifest 事务，
+# 其中 bus_manager 的 validate_manifest_resources 有 1792 字节栈帧
+# （components/bus_manager/bus_manager.c:376），之后还有 config_mgr 的事务
+# 包装与发布链。6144 对该路径余量偏薄；2026-10-04 的 status_task 栈溢出
+# 证明了这类"帧 + 发布链"组合会实际崩掉设备（PANIC in
+# prvTaskCheckFreeStackSpace），因此一并加厚。
+CONFIG_MQTT_TASK_STACK_SIZE=8192
 CONFIG_MQTT_TASK_PRIORITY=5
 
 # WiFi

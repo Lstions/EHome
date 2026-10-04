@@ -228,7 +228,19 @@ EOF
     mkdir -p "$build_dir"
     printf 'CONFIG_COLLECTOR_MQTT_BROKER_URL="%s"\n' "$broker" > "$_broker_defaults"
 
-    defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults;$_broker_defaults"
+    # 目标专属 defaults 必须显式加入链（脚本设置了 SDKCONFIG_DEFAULTS，这会**取代**
+    # IDF 默认的"sdkconfig.defaults + 自动 sdkconfig.defaults.<target>"行为）。
+    #
+    # 2026-10-04 实错：sdkconfig.defaults.esp32s3 里的 CONFIG_SPIRAM=y 一直不生效，
+    # 因为本脚本的链里从来没有它；而直接跑 `idf.py build` 时 IDF 会自动带上，
+    # 于是"同一条命令编出的固件不同"——S3 一直以 16KB 内部堆运行，
+    # 导致 OTA 起不来（ota_task 需 8KB）与配置同步失败（manifest 事务需约 16KB）。
+    _target_defaults="$PROJECT_DIR/sdkconfig.defaults.$target"
+    defaults="$PROJECT_DIR/sdkconfig.defaults"
+    if [[ -f "$_target_defaults" ]]; then
+        defaults="$defaults;$_target_defaults"
+    fi
+    defaults="$defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults;$_broker_defaults"
     if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
         defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
         # sdkconfig takes precedence over sdkconfig.defaults.  An explicit
@@ -275,6 +287,11 @@ EOF
         CONFIG_ESP_WIFI_IRAM_OPT
         CONFIG_ESP_WIFI_RX_IRAM_OPT
         CONFIG_ESP_WIFI_EXTRA_IRAM_OPT
+        # PSRAM 决定可用堆总量。被陈旧的派生 sdkconfig 静默钉成 n 时，
+        # 设备会带着约 16KB 内部堆上线，OTA 与配置同步都会失败，
+        # 而构建日志一切正常 —— 这正是 2026-10-04 的故障形态。
+        CONFIG_SPIRAM
+        CONFIG_SPIRAM_MODE_OCT
     )
     if [[ -f "$sdkconfig" ]]; then
         local _drift=0 _sym _want _have _want_all=""
@@ -283,8 +300,15 @@ EOF
             [[ -f "$_f" ]] && _want_all+="$(cat "$_f")"$'\n'
         done < <(printf '%s\n' "$defaults" | tr ';' '\n')
         for _sym in "${_guard_symbols[@]}"; do
-            _want="$(printf '%s\n' "$_want_all" | grep -E "^${_sym}=|^# ${_sym} is not set" | tail -1)"
-            _have="$(grep -E "^${_sym}=|^# ${_sym} is not set" "$sdkconfig" | tail -1)"
+            # grep 在这里**合法地可能无匹配**（该符号在 defaults 与 sdkconfig 两边都不出现），
+            # 而本脚本开头是 `set -euo pipefail`：管道里 grep 返回 1 会让整个函数
+            # 静默中止，构建在没有任何错误信息的情况下退出 1。
+            # 2026-10-04 实测：加入 CONFIG_SPIRAM 到守卫名单后，sdkconfig.defaults.esp32s3
+            # 通篇没有以 CONFIG_SPIRAM= 开头的行（只有注释里提到它），于是 _want 为空、
+            # grep 退出 1，脚本在 "==> Broker:" 之后直接消失 —— 很难查。
+            # 因此显式吞掉退出码：无匹配就是"两边都没有该符号"，属正常情况。
+            _want="$(printf '%s\n' "$_want_all" | grep -E "^${_sym}=|^# ${_sym} is not set" | tail -1 || true)"
+            _have="$(grep -E "^${_sym}=|^# ${_sym} is not set" "$sdkconfig" | tail -1 || true)"
             # Normalise `CONFIG_X=n` and `# CONFIG_X is not set`: kconfgen writes
             # the latter for a disabled bool, so comparing them literally would
             # report drift where there is none.
