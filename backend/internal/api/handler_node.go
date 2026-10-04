@@ -533,7 +533,29 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 
-		// Input validation: dma_id, duplicate check, bind_to length
+		// Input validation: dma_id, duplicate check, bind_to length AND VALUE.
+		//
+		// bind_to 必须校验**值**，不能只看长度。2026-10-04 实错：S3 的 node.Config 里
+		// 长期存着
+		//
+		//	{"dma_id": 1, "bind_to": "uart/uart1", "enabled": true}
+		//
+		// 而固件派生的规范 hw_id 是 "uart/UART1"（只有大小写不同）。固件侧
+		// dma_pool_apply_config 不校验、直接把它标成 ALLOCATED 并写入 bound_to，
+		// 于是：
+		//   - 预抢占（preempt）用 strcmp 比对，永远匹配不上 -> 占不回那条通道；
+		//   - dma_pool_release_by_hw 同样 strcmp -> 永远释放不掉。
+		// 结果是该 GDMA 通道被**永久占用**。S3 只有 5 条 GDMA，被占 1 条后
+		// 「3 UART + SPI2 + I2C0」就分不出 DMA，I2C0 打
+		// "No DMA for i2c/I2C0"，整个 ConfigManifest 以 ESP_ERR_NOT_FOUND 被拒、
+		// success=false。表面症状像 I2C/SPI 的问题，真正原因却是一条没人记得的
+		// 历史 DMA 绑定 —— 而且它只在"通道数刚好用满 DMA 资源"时才暴露。
+		//
+		// 两类拒绝：
+		//   1) 形状不对（不是 "<bus>/<ID>"）；
+		//   2) 大小写与规范 id 不匹配 —— 只提示正确写法，不静默改写：
+		//      静默改写会让"用户以为填的值"与"系统实际用的值"再次不一致，
+		//      正是本次事故的成因。
 		seen := make(map[uint32]bool)
 		for i, cfg := range configs {
 
@@ -545,6 +567,20 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			if len(cfg.BindTo) > 16 {
 				Error(c, http.StatusBadRequest, fmt.Sprintf("configs[%d].bind_to exceeds 16 characters", i))
 				return
+			}
+			if cfg.BindTo != "" {
+				if !hwIDShapeOK(cfg.BindTo) {
+					Error(c, http.StatusBadRequest, fmt.Sprintf(
+						"configs[%d].bind_to %q is not a hardware id; expected \"<bus>/<ID>\" such as \"uart/UART0\" or \"spi/SPI2\"",
+						i, cfg.BindTo))
+					return
+				}
+				if suggestion := hwIDCaseSuggestion(cfg.BindTo); suggestion != "" {
+					Error(c, http.StatusBadRequest, fmt.Sprintf(
+						"configs[%d].bind_to %q does not match any hardware id (compared case-sensitively on the device); did you mean %q?",
+						i, cfg.BindTo, suggestion))
+					return
+				}
 			}
 		}
 
