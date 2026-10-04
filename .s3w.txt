@@ -1,0 +1,103 @@
+I (190282) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (191267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (191292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (191293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (195270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (195308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (195309) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+I (196043) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+W (196267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (196292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (196293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (200283) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (201267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (201292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (201293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (206267) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+W (206267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (206292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (206293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (210270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (210284) SCHEDULER: Stats: samples=6 full=0 min_free=8
+I (210308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (210308) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (211267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (211292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (211293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+W (216267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+I (216268) RX_TASK: Stats: events=0 completions=7 report_drop=0 report_q_high=1
+W (216292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (216293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (220285) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (221267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (221292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (221293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (225270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (225308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (225309) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (226267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+I (226292) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+W (226292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (226293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (230286) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (231267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (231292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (231293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+W (236267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (236292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+I (236293) RX_TASK: Stats: events=0 completions=7 report_drop=0 report_q_high=1
+W (236293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (240270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (240287) SCHEDULER: Stats: samples=6 full=0 min_free=8
+I (240308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (240308) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (241267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (241292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (241293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (243857) SCHEDULER: sched: ch=2 edge_device_count=1, choosing v2 path
+I (243865) SCHEDULER: sched: ch=4 edge_device_count=1, choosing v2 path
+I (243866) SCHEDULER: sched: ch=5 edge_device_count=1, choosing v2 path
+W (246267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (246292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (246293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (246543) RX_TASK: Stats: events=0 completions=7 report_drop=0 report_q_high=1
+I (250288) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (251267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (251292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (251293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (255270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (255308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (255308) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (256267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (256292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (256293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (256793) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+I (260289) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (261267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (261292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (261293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+W (266267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (266292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (266293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (267043) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+I (270270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (270290) SCHEDULER: Stats: samples=6 full=0 min_free=8
+I (270308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (270308) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (271267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (271292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (271293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+W (276267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (276292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (276293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (277293) RX_TASK: Stats: events=0 completions=6 report_drop=0 report_q_high=1
+I (280291) SCHEDULER: Stats: samples=6 full=0 min_free=8
+W (281267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (281292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (281293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)
+I (285270) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (285308) CMD_U1: Stats: txn=3 err=0 (100%) no_ctx=0
+I (285308) CMD_U2: Stats: txn=3 err=0 (100%) no_ctx=0
+W (286267) RX_TASK: RX timeout slot0 type=1 reqID=0 (1001ms)
+W (286292) RX_TASK: RX timeout slot1 type=1 reqID=0 (1001ms)
+W (286293) RX_TASK: RX timeout slot2 type=1 reqID=0 (1001ms)

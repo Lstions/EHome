@@ -82,9 +82,33 @@ func decodeManifestTransportPins(ch models.Channel, busType string) ([]int, erro
 		if len(data) != 9 {
 			return nil, fmt.Errorf("enabled channel %d has malformed bus_config", ch.ID)
 		}
-		pins := []int{int(data[0])}
-		if len(data) >= 9 {
-			pins = append(pins, int(data[6]), int(data[7]), int(data[8]))
+		/* SPI 的 bus_config 里**同一个引脚会出现两次**，必须去重。
+		 *
+		 * 权威语义（固件 bus_manager.c 的 validate_manifest_resources 与
+		 * config_mgr.c 的 channel_uses_pin）：
+		 *   byte0    = MOSI（旧式单引脚形式，供 len>=6 的兼容路径使用）
+		 *   byte[6]  = MOSI   <- 与 byte0 同义
+		 *   byte[7]  = MISO
+		 *   byte[8]  = SCLK
+		 * 于是 [data[0], data[6], data[7], data[8]] 里 MOSI 必然出现两次。
+		 *
+		 * 2026-10-04 实错：本函数原样返回这 4 个值，调用方 validateManifestAuthority
+		 * 对每个 pin 调 claim()，第二次 claim 同一个 MOSI 立刻命中
+		 *   "GPIO pin 11 conflict between channel 6 and channel 6"
+		 * —— 自己和自己冲突。后果是**任何启用 SPI 的节点都无法同步配置**：
+		 * 整份 manifest 被拒，ConfigResult 永远 success=false，而报错信息把
+		 * "同一通道重复声明同一引脚"说成了"两个通道冲突"，指向完全错误的方向。
+		 * 这也解释了为何只有 SPI 中招：UART/I2C 的 byte0/byte1 是两个不同引脚。
+		 */
+		seen := make(map[int]struct{}, 4)
+		pins := make([]int, 0, 4)
+		for _, b := range []byte{data[0], data[6], data[7], data[8]} {
+			pin := int(b)
+			if _, dup := seen[pin]; dup {
+				continue
+			}
+			seen[pin] = struct{}{}
+			pins = append(pins, pin)
 		}
 		return pins, nil
 	case "ADC":
