@@ -328,3 +328,27 @@ Postgres **不**对宿主暴露端口；不含 monitoring profile。
 > 注：本次生产卷曾被清空（`ehomesystem_ehome-pgdata` 不存在），
 > 数据从 09-12 的备份恢复 —— 即**清空之后新增的数据无法找回**。
 > 建议：生产 compose 独立化后可考虑给备份加一条定时任务。
+
+---
+
+## UART1 无波形 + S3 UHCI/DMA 限制（2026-10-05，**未解决**）
+
+S3 节点 `30EDA0A9A808` 的 UART1(GPIO4/5) 接泰琪丰 GB3024 逆变器时，
+转换板 **TX/RX 灯完全不亮**（用户确认接线无误、电源灯亮；并指出"接反了灯也会亮"，
+故只能解释为**引脚无信号**）。同时 `device_data` 中该通道 `raw` 恒为空、
+`error_code=1`（RX 超时）。UART0(GPIO43/44) 接嘉佰达 BMS 一切正常。
+
+**已排除**：UHCI/DMA 争用（本固件 UART 走中断驱动，全仓 `uhci_*` 零命中，
+且两条通道 `dma_enabled` 同为 true 而 UART0 正常）、引脚非法、配置未下发（已修）。
+
+**已修复并实测**：配置此前因"模板容量"被后端拒绝（`reconcileDriverTemplates`
+与编码器口径不一致，把永不轮询的模板也计入 16 上限），修后 `config_status`
+由 failed 变 applied、ch9 记录由 0 增至 598 条 —— 但**引脚仍无波形**，属独立问题。
+
+**下一步**：量 GPIO4 在发送时是否有电平变化，以区分固件侧与转换板侧。
+
+**TODO（用户决定先记录）**：ESP32-S3 三个 UART 共享 UHCI，同一时刻只能一个用 DMA；
+目标形态为**混合模式**（都支持 DMA、同时只启用一个）。
+若将来启用 UART DMA，必须在配置校验阶段拒绝"多 UART 同时 DMA"。
+
+详见 `deploy/prod/UART1无输出诊断与S3-UHCI限制-2026-10-05.md`。

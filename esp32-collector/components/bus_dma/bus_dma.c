@@ -378,6 +378,35 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     int rx_pin  = cfg[1];
     uint32_t baud = read_be32(&cfg[2]);
 
+    /* ── TODO(DMA): ESP32-S3 的三个 UART 共享一组 UHCI，同一时刻只能有一个用 DMA ──
+     *
+     * 硬件事实（用户 2026-10-05 提供的官方依据）：
+     *   · ESP32-S3 的 UART0/UART1/UART2 通过 UHCI（主机控制接口）共享一组
+     *     DMA TX/RX 通道；UHCI_UART_SEL 用于从多个 UART 中**选择一个**连到
+     *     UHCI，UHCI_UART1_CE 决定是否把 UHCI 接到 UART1。
+     *   · 因此任一时刻**只有一个 UART 能占用这组共享 DMA 资源**；
+     *     需要多路时只能"分时复用"或"混合模式"（一个 DMA + 其余中断/轮询）。
+     *   · 官方另提醒：UART DMA 与**蓝牙 HCI 共享硬件**，不要与 BLE HCI 同时用。
+     *
+     * 当前代码的实际情况（**重要，避免误解**）：本组件对 UART 走的是
+     * **中断驱动**（uart_driver_install + 事件队列 + 512B 驱动缓冲），
+     * 并未调用任何 UHCI API（全仓 `uhci_*` 零命中）。因此 `dma_enabled`
+     * 对 UART 的**唯一实际作用**是选择驱动缓冲大小（见下方 rx/tx_buffer_size），
+     * **不构成 UHCI 争用**，也就不是现场 TX 无输出的原因（已实测排除：
+     * 同一节点上 UART0 正常、UART1 全无波形，而两者 dma_enabled 都是 true）。
+     *
+     * 待办（用户要求先记 TODO，不阻塞当前调试）：
+     *   1. 若将来真的启用 UART DMA（uhci_*），**必须**在这里加互斥：
+     *      同一时刻只允许一个 UART 持有 UHCI，并在配置校验阶段就拒绝
+     *      "多个 UART 同时 DMA"的 manifest（而不是运行期静默失败）。
+     *   2. 目标形态按用户决定：**混合模式** —— 三个 UART 都"支持" DMA，
+     *      但任一时刻只有一个真正启用；其余走中断/轮询。
+     *   3. 若将来引入 BLE 配网/BLE OTA，需同时保证 BLE HCI 与 UART DMA
+     *      不并存（同一套共享硬件）。
+     *
+     * 相关位置：components/hw_profile/hw_tables.c 的 hw_dmas/hw_uarts 能力表、
+     * components/dma_pool/dma_pool.c 的分配互斥。 */
+
     /* Validate pins (S3: 0-48, C6: 0-30) */
     if (tx_pin < 0 || tx_pin > GPIO_PIN_MAX || rx_pin < 0 || rx_pin > GPIO_PIN_MAX) {
         ESP_LOGE(TAG, "UART invalid pins: TX=%d RX=%d (must be 0-%d)", tx_pin, rx_pin, GPIO_PIN_MAX);

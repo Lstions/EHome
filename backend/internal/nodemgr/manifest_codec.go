@@ -239,9 +239,44 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		if !ok {
 			continue
 		}
+		// Per-command interval overrides for this device (may be empty).
+		cmdIntervals := make(map[string]int)
+		if len(edge.CommandIntervals) > 0 {
+			_ = json.Unmarshal(edge.CommandIntervals, &cmdIntervals)
+		}
 		for _, cmd := range provider.GetCommandTemplates() {
 			if !cmd.Schedulable || cmd.WriteData == "" {
 				continue
+			}
+			/* Only commands that are ACTUALLY POLLED need a ConfigTemplate.
+			 *
+			 * 修复（2026-10-05 现场）：此前这里只过滤 Schedulable/WriteData，
+			 * 没有过滤 interval，于是把驱动声明的**全部**模板都创建进 DB，
+			 * 再由 sender_snapshot.go:238 全量编码进 ConfigManifest。
+			 * 而编码器（sender_snapshot.go:347-357）和
+			 * CommandIsManifestCandidate（sender_snapshot.go:197）都只把
+			 * `Schedulable && effectiveInterval > 0` 视为候选 —— 两处口径不一致。
+			 *
+			 * 现场后果（S3 节点 30EDA0A9A808，接 JBD BMS + Techfine 逆变器）：
+			 *   JBD 声明 5 个模板，仅 read_basic_info(5000ms) 启用，其余 4 个为 0；
+			 *   Techfine 声明 11 个，仅 read_status(1000ms) 启用，其余 10 个为 0；
+			 *   合计应有 2 个，但这里算成 5+11=16，再加 2 个历史残留 = 18 > 16，
+			 *   于是 SendConfigManifest 每次都被自己拒绝：
+			 *     "template reconciliation would create 18 templates;
+			 *      collector limit is 16"
+			 *   配置永远下发不到设备 → 逆变器通道从未生效 → UART1 一个字节
+			 *   都没发出（现场表现为 TTL→RS232 板的 TX/RX 灯完全不亮，
+			 *   极易被误判成接线或电平转换故障）。
+			 *
+			 * interval 的解析必须与 CommandIsManifestCandidate 一致：
+			 * storedIntervals 里有该命令的覆盖值就用覆盖值，否则用模板默认值。
+			 */
+			effectiveInterval := cmd.IntervalMs
+			if v, ok := cmdIntervals[cmd.ID]; ok {
+				effectiveInterval = v
+			}
+			if effectiveInterval <= 0 {
+				continue // 不轮询：不建模板，也不占容量
 			}
 			key := strings.ToUpper(strings.TrimSpace(cmd.WriteData))
 			needed[key] = cmdNeed{
