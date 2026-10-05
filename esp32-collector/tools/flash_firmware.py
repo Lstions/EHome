@@ -56,7 +56,9 @@ SCRIPT_PATH = Path(__file__).resolve()
 PROJECT_DIR = SCRIPT_PATH.parent.parent              # esp32-collector/
 DEFAULT_BUILD_ROOT = PROJECT_DIR / "build"
 
-# IDF 6.1 的 venv（esptool + pyserial 都在里面）
+# IDF 6.1 的 venv（esptool + pyserial 都在里面）。
+# Windows 安装器的固定位置；Linux 上不存在，因此 Linux 必须设置
+# IDF_PYTHON_ENV_PATH，否则候选解释器会退到 sys.executable 并因缺 esptool 而拒绝运行。
 DEFAULT_IDF_PYTHON = Path(r"C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe")
 
 ESPRESSIF_VID = 0x303A      # ESP32 USB-Serial-JTAG / USB-CDC

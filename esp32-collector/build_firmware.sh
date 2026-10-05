@@ -15,7 +15,80 @@ to_native_path() {
     fi
 }
 
+# ESP-IDF version of the checkout IDF_PATH points at, without starting python.
+#
+# Two sources, because a checkout may carry either:
+#   * version.txt      ("v6.1.0" in a release checkout)
+#   * git describe     ("v6.1" in a tag checkout -- the file can be absent)
+# Empty output means "unknown", which callers treat as "do not judge".
+idf_version_string() {
+    local _vf="${IDF_PATH:-}/version.txt" _v=""
+    if [[ -f "$_vf" ]]; then
+        _v="$(head -n1 "$_vf" 2>/dev/null | tr -d '[:space:]')"
+        _v="${_v#v}"
+    fi
+    if [[ -z "$_v" && -n "${IDF_PATH:-}" ]] && command -v git >/dev/null 2>&1; then
+        _v="$(git -C "$IDF_PATH" describe --tags --always 2>/dev/null || true)"
+        _v="${_v#v}"
+    fi
+    printf '%s\n' "$_v"
+}
+
+# Major.minor only ("6.1.0" -> "6.1"), so a patch bump does not look like a
+# different toolchain.
+idf_version_short() {
+    printf '%s\n' "${1:-}" | grep -oE '^[0-9]+\.[0-9]+' || true
+}
+
+# A build directory is bound to the toolchain that configured it: CMake records
+# the configuring interpreter (CMakeCache.txt) and the IDF version (config.env).
+# Reusing it after an IDF switch makes idf.py abort part-way through the build:
+#   "…idf6.1_py3.14_env/bin/python is currently active in the environment while
+#    the project was configured with …idf6.0_py3.14_env/bin/python. Run idf.py
+#    fullclean"
+# That message arrives only after the build has started, so check up front and
+# say what to do.  A checkout replaced in place (same IDF_PATH, new version) is
+# caught by the recorded IDF_VERSION, which the python-env check would miss.
+check_build_dir_compat() {
+    local build_dir="$1" cur_py="$2"
+    local env_file="$build_dir/config.env" cache="$build_dir/CMakeCache.txt"
+
+    if [[ -f "$env_file" ]]; then
+        local have_idf cur_idf
+        have_idf="$(grep -oE '"IDF_VERSION"[[:space:]]*:[[:space:]]*"[^"]*"' "$env_file" 2>/dev/null \
+            | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+        cur_idf="$(idf_version_string)"
+        if [[ -n "$have_idf" && -n "$cur_idf" ]]; then
+            local hs cs
+            hs="$(idf_version_short "$have_idf")"
+            cs="$(idf_version_short "$cur_idf")"
+            if [[ -n "$hs" && -n "$cs" && "$hs" != "$cs" ]]; then
+                echo "ERROR: $build_dir was configured with ESP-IDF $have_idf," >&2
+                echo "       but IDF_PATH now points at $cur_idf." >&2
+                echo "       A build directory cannot be reused across IDF versions." >&2
+                echo "       Fix: rm -rf $build_dir   (or build into a fresh one:" >&2
+                echo "            BUILD_ROOT=$PWD/build-$cs ./build_firmware.sh ...)" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    if [[ -f "$cache" ]]; then
+        local have_py
+        have_py="$(grep -E '^PYTHON:UNINITIALIZED=' "$cache" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+        if [[ -n "$have_py" && -n "$cur_py" && "$have_py" != "$cur_py" ]]; then
+            echo "ERROR: $build_dir was configured with a different python:" >&2
+            echo "         configured: $have_py" >&2
+            echo "         active now: $cur_py" >&2
+            echo "       idf.py would abort mid-build.  Fix: rm -rf $build_dir" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 PROJECT_DIR="$(to_native_path "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")"
+
 BUILD_ROOT="${BUILD_ROOT:-$PROJECT_DIR/build}"
 BUILD_ROOT="$(to_native_path "$BUILD_ROOT")"
 
@@ -45,7 +118,9 @@ MQTT broker (required):
   that cannot reach its broker is worse than refusing to build.
 
 Other environment:
-  BUILD_ROOT   place build directories elsewhere.
+  BUILD_ROOT   place build directories elsewhere.  A build directory
+               cannot be reused across ESP-IDF versions: this script
+               refuses rather than letting idf.py abort mid-build.
 EOF
 }
 
@@ -110,6 +185,16 @@ init_idf_py() {
         echo "       Source the export script first:  . \$IDF_PATH/export.sh" >&2
         return 127
     fi
+    # cmake is needed by IDF's CMake build.  Check it here rather than letting
+    # idf.py discover it: idf.py prints "ESP-IDF v6.1.0" BEFORE it reaches the
+    # build, so a missing cmake otherwise looks like a working environment and
+    # the failure lands mid-build with exit code 2.
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "ERROR: cmake is not on PATH; ESP-IDF's build cannot start." >&2
+        echo "       This checkout ships one at: $PROJECT_DIR/../.tools/cmake-*/bin" >&2
+        echo "       Add it to PATH (or source the ESP-IDF export script) and retry." >&2
+        return 127
+    fi
     py="$(resolve_idf_python)" || {
         echo "ERROR: no python interpreter found to run \$IDF_PATH/tools/idf.py." >&2
         echo "       Set IDF_PYTHON_ENV_PATH (source the ESP-IDF export script) and retry." >&2
@@ -167,6 +252,10 @@ build_profile() {
     sdkconfig="$build_dir/sdkconfig"
     lock_file="$build_dir/dependencies.lock"
     defaults="$PROJECT_DIR/sdkconfig.defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
+
+    # Refuse up front when this directory was configured by another IDF/python;
+    # idf.py would otherwise abort only after the build has started.
+    check_build_dir_compat "$build_dir" "${IDF_PY_CMD[0]:-}" || return 1
 
     # ---- MQTT broker resolution -------------------------------------------
     # The broker is compiled in, so an unset or placeholder value produces a
@@ -292,6 +381,10 @@ EOF
         # 而构建日志一切正常 —— 这正是 2026-10-04 的故障形态。
         CONFIG_SPIRAM
         CONFIG_SPIRAM_MODE_OCT
+        # MQTT 客户端任务栈：sdkconfig.defaults 给 8192，而陈旧的派生
+        # sdkconfig 会把它钉在旧的 6144 上。构建日志无任何提示，
+        # 设备在 MQTT 收包路径上栈溢出 —— 同属"静默钉住旧值"形态。
+        CONFIG_MQTT_TASK_STACK_SIZE
     )
     if [[ -f "$sdkconfig" ]]; then
         local _drift=0 _sym _want _have _want_all=""
@@ -374,7 +467,9 @@ main() {
 
     if [[ "$profile" != "-h" && "$profile" != "--help" && -n "$profile" ]]; then
         init_idf_py || return $?
-        echo "==> ESP-IDF: $(idf_py --version 2>/dev/null || echo unknown)  (IDF_PATH=$IDF_PATH)"
+        local _idf_ver
+        _idf_ver="$(idf_version_string)"
+        echo "==> ESP-IDF: ${_idf_ver:-unknown}  (IDF_PATH=$IDF_PATH, build root=$BUILD_ROOT)"
     fi
 
     case "$profile" in

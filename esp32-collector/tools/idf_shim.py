@@ -23,8 +23,13 @@ ESP-IDF 6.1's tools/idf.py ends with:
             ...
 
 The MSYSTEM branch prints a warning and then falls off the end of the module
-WITHOUT calling main().  It does not raise, it does not exit non-zero: idf.py
-simply exits 0 having done nothing at all.
+WITHOUT calling main().  The warning goes to stdout and the module exits 0 --
+idf.py reports success having done nothing at all.
+
+(Note: on the IDF 6.1 checkout this wrapper was written for, idf.py's uncaught
+__main__ block leaves the process at exit code 0.  The "does nothing" part is
+what makes the failure silent, and it holds regardless of the exact code: a
+build driven this way is not distinguishable from a successful one.)
 
 MSYSTEM is set by every MSys/Git-Bash session (e.g. MSYSTEM=UCRT64), and Windows
 MSys re-injects it into every child process, so `env -u MSYSTEM python idf.py`
