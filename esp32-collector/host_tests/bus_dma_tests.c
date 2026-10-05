@@ -325,6 +325,14 @@ esp_err_t i2c_master_receive(i2c_master_dev_handle_t dev,
  * ===================================================================== */
 #include "../components/bus_dma/bus_dma.c"
 
+/* bus_dma.c（2026-10-05 起）在 uart_driver_install 失败时打印内存实况，
+ * 用于区分"总量不够"与"碎片导致无连续块"。宿主机给出同名实现
+ * （与其它测试文件的既有做法一致），报恒定大值使诊断分支不误触发。 */
+size_t heap_caps_get_free_size(unsigned caps) { (void)caps; return 65536; }
+size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return 32768; }
+size_t esp_get_free_heap_size(void) { return 65536; }
+size_t esp_get_minimum_free_heap_size(void) { return 32768; }
+
 /* =====================================================================
  * Test helpers — reset all static state between tests
  * ===================================================================== */
@@ -435,7 +443,19 @@ static void test_uart_init_hw_derive(void)
     CHECK(!ctx.initialized, "ctx should be deinitialized");
 }
 
-/* --- UART: DMA init uses 1024-byte buffers --- */
+/* --- UART: DMA init uses 512-byte buffers ---
+ *
+ * 2026-10-05：由 1024 降为 512。理由是实机内存约束，不是随手调参：
+ * S3 三路 UART 各占 1024+1024 字节驱动缓冲时合计约 7.2KB，而 S3 做配置
+ * 事务时可用堆只有约 7~8KB，导致第三路 uart_driver_install 失败
+ * （"UART driver malloc error"）-> apply_buses 失败 -> **整个配置事务回滚**
+ * -> 设备长期 config failed/failed。降到 512 后三路合计约 5.1KB，实机验证
+ * 首次配置即成功（success=1），0 次失败。
+ *
+ * 这个断言的意义：512 是**经过实机验证的下界**，不能被无声改回 1024。
+ * 同时它远大于 UART 硬件 FIFO（128 字节），因此不是靠牺牲时序余量换内存。
+ * 若将来要调大，必须先确认 S3 在配置事务期间有足够余量，否则会重新引入
+ * 这个"表现为间歇性失败、极难定位"的故障。 */
 static void test_uart_dma_buffer_sizes(void)
 {
     reset_all_state();
@@ -447,8 +467,8 @@ static void test_uart_dma_buffer_sizes(void)
     CHECK(r == ESP_OK, "uart DMA init should succeed");
     CHECK(ctx.cfg.uart.port == UART_NUM_1, "TX20/RX21 should derive to UART1");
     CHECK(ctx.dma_enabled, "DMA should be enabled");
-    CHECK(g_uart_rx_buf[UART_NUM_1] == 1024, "DMA rx buffer should be 1024");
-    CHECK(g_uart_tx_buf[UART_NUM_1] == 1024, "DMA tx buffer should be 1024");
+    CHECK(g_uart_rx_buf[UART_NUM_1] == 512, "DMA rx buffer should be 512 (S3 heap constraint)");
+    CHECK(g_uart_tx_buf[UART_NUM_1] == 512, "DMA tx buffer should be 512 (S3 heap constraint)");
 
     bus_dma_deinit(&ctx);
 }
