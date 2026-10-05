@@ -333,7 +333,7 @@ target_include_directories(bus_worker_batch_tests PRIVATE
     ../components/frame
     ../components/msg_handler
 )
-target_compile_definitions(bus_worker_batch_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_definitions(bus_worker_batch_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1 EHOME_TEST_CLOCK_STEP=1)
 target_compile_options(bus_worker_batch_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_batch_tests COMMAND bus_worker_batch_tests)
 

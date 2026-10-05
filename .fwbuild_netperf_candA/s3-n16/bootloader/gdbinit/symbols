@@ -1,0 +1,9 @@
+
+
+# Load bootloader symbols
+set confirm off
+    # Bootloader elf was not found
+set confirm on
+
+# Load application symbols
+file /mnt/storage/WorkSpace/EHome/.fwbuild_netperf_candA/s3-n16/bootloader/bootloader.elf

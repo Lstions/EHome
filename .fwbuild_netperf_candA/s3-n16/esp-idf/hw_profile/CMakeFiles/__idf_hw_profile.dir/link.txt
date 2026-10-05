@@ -1,0 +1,2 @@
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libhw_profile.a CMakeFiles/__idf_hw_profile.dir/hw_profile.c.obj CMakeFiles/__idf_hw_profile.dir/hw_tables.c.obj
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libhw_profile.a

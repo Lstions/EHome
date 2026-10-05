@@ -1,0 +1,56 @@
+I (141009) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (143682) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (144594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (146003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (151010) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (153932) RX_TASK: Stats: events=12 completions=13 report_drop=0 report_q_high=1
+I (155594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (161003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (161011) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (163933) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (166573) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (171012) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (173938) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (176003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (176594) CMD_U1: Stats: txn=10 err=0 (100%) no_ctx=0
+I (181013) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (183559) SCHEDULER: sched: ch=8 edge_device_count=1, choosing v2 path
+I (183563) SCHEDULER: sched: ch=9 edge_device_count=1, choosing v2 path
+I (184184) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (187594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (191003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (191014) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (194434) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (198594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (201015) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (204435) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (206003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (209594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (211016) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (214677) RX_TASK: Stats: events=13 completions=12 report_drop=0 report_q_high=1
+I (220594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (221003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (221017) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (224682) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (231018) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (231594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (234932) RX_TASK: Stats: events=12 completions=13 report_drop=0 report_q_high=1
+I (236003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (241019) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (242594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (243560) SCHEDULER: sched: ch=8 edge_device_count=1, choosing v2 path
+I (243564) SCHEDULER: sched: ch=9 edge_device_count=1, choosing v2 path
+I (245182) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (251003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (251020) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (253594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (255187) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (261021) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (264594) CMD_U1: Stats: txn=11 err=0 (100%) no_ctx=0
+I (265434) RX_TASK: Stats: events=12 completions=12 report_drop=0 report_q_high=1
+I (266003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (271022) SCHEDULER: Stats: samples=12 full=0 min_free=8
+I (274595) CMD_U1: Stats: txn=10 err=0 (100%) no_ctx=0
+I (275674) RX_TASK: Stats: events=13 completions=12 report_drop=0 report_q_high=1
+I (281003) CMD_U0: Stats: txn=3 err=0 (100%) no_ctx=0
+I (281023) SCHEDULER: Stats: samples=12 full=0 min_free=8

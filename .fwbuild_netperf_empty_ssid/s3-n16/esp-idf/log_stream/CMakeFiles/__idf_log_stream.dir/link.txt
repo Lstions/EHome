@@ -1,0 +1,2 @@
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc liblog_stream.a CMakeFiles/__idf_log_stream.dir/log_stream.c.obj CMakeFiles/__idf_log_stream.dir/log_capture.c.obj CMakeFiles/__idf_log_stream.dir/log_capture_esp.c.obj CMakeFiles/__idf_log_stream.dir/log_stream_codec.c.obj
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib liblog_stream.a

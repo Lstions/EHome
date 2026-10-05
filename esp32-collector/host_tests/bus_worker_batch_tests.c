@@ -75,6 +75,10 @@
 
 /* ---- Controllable time (esp_timer stub reads this) ---- */
 int64_t g_test_time_us = 0;
+/* 1 ms per esp_timer_get_time() call.  uart_collect_response() polls the clock
+ * in a tight loop; without a step the frozen clock can never reach its timeout
+ * and a missing fast path would hang instead of failing the test. */
+int64_t g_test_time_step_us = 1000;
 
 /* ---- ESP stubs ---- */
 void host_test_log_record(char level, const char *tag, const char *format, ...) {
@@ -100,10 +104,18 @@ bool scheduler_notify_command_outcome(uint32_t channel_id,
 
 /* ---- batch RX staging (injected after each TX, mirroring rx_task) ---- */
 #define STAGED_RESP_MAX 8
-static uint8_t  g_staged[STAGED_RESP_MAX][64];
+static uint8_t  g_staged[STAGED_RESP_MAX][128];
 static size_t   g_staged_len[STAGED_RESP_MAX];
 static bool     g_staged_error[STAGED_RESP_MAX];
 static unsigned g_staged_count = 0;
+/* task-5：默认把 last_rx_us 放到 now-10000，让旧的 10ms 静默判据满足。
+ * 快速路径用例需要"最后一字节刚到现在"（静默远未满足）这一前提，否则测不出
+ * "不再等 10ms"这件事。设 true 时 last_rx_us = now。 */
+static bool     g_stage_last_rx_now = false;
+/* task-5：粘包用例的第二帧。非 0 时，第 N 次 TX 注入 g_stage_extra 而不是
+ * 普通 stage（用来模拟"本步响应 + 后续事务字节"在同一次 RX 里到达）。 */
+static uint8_t  g_stage_extra[128];
+static size_t   g_stage_extra_len = 0;
 
 static void stage_response(const uint8_t *data, size_t len)
 {
@@ -156,7 +168,9 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len) {
         } else {
             memcpy(s_batch_rx[0].data, g_staged[idx], g_staged_len[idx]);
             s_batch_rx[0].len = g_staged_len[idx];
-            s_batch_rx[0].last_rx_us = g_test_time_us - 10000;
+            s_batch_rx[0].last_rx_us = g_stage_last_rx_now
+                ? g_test_time_us
+                : g_test_time_us - 10000;
         }
     }
     return ESP_OK;
@@ -201,6 +215,7 @@ static void reset_capture(void)
     memset(g_staged, 0, sizeof(g_staged));
     memset(g_staged_len, 0, sizeof(g_staged_len));
     memset(g_staged_error, 0, sizeof(g_staged_error));
+    g_stage_last_rx_now = false;
     g_test_time_us = 1000000000;   /* base "now" */
 }
 
@@ -494,6 +509,121 @@ static void test_top_level_guards(void)
           "plan_step_count<2 must be rejected");
 }
 
+/* =====================================================================
+ * Test 7 (task-5): expected-length fast path — a batch step whose read_size
+ * is satisfied completes IMMEDIATELY, without waiting out the 10ms idle gap.
+ *
+ * Fixture: the staged response arrives with last_rx_us == now, so the idle
+ * predicate ("10ms of silence since the last byte") is NOT satisfied.  Before
+ * this change the only exit was the step timeout (0x1400); the assertion
+ * therefore discriminates the fast path from the old ordering.
+ * ===================================================================== */
+static void test_expected_length_completes_without_idle(void)
+{
+    reset_capture();
+    reset_batch_rx(0);
+    g_stage_last_rx_now = true;   /* no idle silence has elapsed */
+
+    uint8_t step1[64], step2[64];
+    static const uint8_t tx1[] = {0xDD, 0xA5, 0x03, 0x00};
+    static const uint8_t tx2[] = {0xDD, 0xA5, 0x04, 0x00};
+    size_t n1 = build_step(step1, 1, tx1, sizeof(tx1), 60, 100, 0);
+    size_t n2 = build_step(step2, 2, tx2, sizeof(tx2), 3, 100, 0);
+
+    bus_cmd_t cmd;
+    init_batch_cmd(&cmd);
+    append_plan_step(&cmd, step1, n1);
+    append_plan_step(&cmd, step2, n2);
+
+    uint8_t resp1[60];
+    for (size_t i = 0; i < sizeof(resp1); i++) resp1[i] = (uint8_t)(0x40 + i);
+    static const uint8_t resp2[] = {0x11, 0x22, 0x33};
+    stage_response(resp1, sizeof(resp1));
+    stage_response(resp2, sizeof(resp2));
+
+    bus_dma_ctx_t ctx = make_uart_ctx();
+    uint8_t raw[256];
+    size_t raw_len = 0;
+    uint32_t error_code = 0;
+    /* Virtual-clock bound.  The idle predicate needs 10ms of silence; the
+     * fast path must complete in a single poll, so the elapsed virtual time
+     * must stay well under UART_IDLE_THRESHOLD_US.  This is the assertion
+     * that actually discriminates: without it, the old ordering also yields
+     * the same 60 bytes (after burning the 10ms), and the test would pass. */
+    int64_t t_before = g_test_time_us;
+    bool ok = execute_uart_batch(0, &ctx, &cmd, raw, &raw_len, &error_code);
+    int64_t elapsed_us = g_test_time_us - t_before;
+
+    CHECK(ok, "a satisfied read_size must complete the step, not time out (0x1400)");
+    CHECK(error_code == 0, "the fast path must not set an error code");
+    CHECK(elapsed_us < (int64_t)UART_IDLE_THRESHOLD_US,
+          "the step must complete BEFORE the 10ms idle threshold elapses");
+    CHECK(raw_len == 1 + 3 + 60 + 3 + 3, "raw must carry both steps' exact payloads");
+    if (raw_len == 1 + 3 + 60 + 3 + 3) {
+        CHECK(raw[0] == 2, "raw[0] must be the step count");
+        CHECK(raw[2] == 60 && raw[3] == 0, "step1 length must be the declared read_size");
+        CHECK(memcmp(raw + 4, resp1, sizeof(resp1)) == 0,
+              "step1 payload must be exactly the bytes the slave sent");
+        CHECK(raw[65] == 3 && raw[66] == 0, "step2 length must be its declared read_size");
+        CHECK(memcmp(raw + 67, resp2, sizeof(resp2)) == 0, "step2 payload mismatch");
+    }
+    CHECK(s_batch_rx[0].waiter == NULL, "waiter must be NULL after the fast path");
+    CHECK(s_plan_active[0] == false, "plan_active must be cleared after the fast path");
+}
+
+/* =====================================================================
+ * Test 8 (task-5): the fast path must not eat bytes that belong to the NEXT
+ * transaction.  A 60-byte frame followed by 10 stray bytes in the same RX
+ * burst is delivered as EXACTLY 60 bytes; the 10 trailing bytes never enter
+ * this step's payload.
+ * ===================================================================== */
+static void test_expected_length_does_not_absorb_sticky_bytes(void)
+{
+    reset_capture();
+    reset_batch_rx(0);
+    g_stage_last_rx_now = true;
+
+    uint8_t step1[64], step2[64];
+    static const uint8_t tx1[] = {0xDD, 0xA5, 0x03, 0x00};
+    static const uint8_t tx2[] = {0xDD, 0xA5, 0x04, 0x00};
+    size_t n1 = build_step(step1, 1, tx1, sizeof(tx1), 60, 100, 0);
+    size_t n2 = build_step(step2, 2, tx2, sizeof(tx2), 3, 100, 0);
+
+    bus_cmd_t cmd;
+    init_batch_cmd(&cmd);
+    append_plan_step(&cmd, step1, n1);
+    append_plan_step(&cmd, step2, n2);
+
+    /* One burst: the 60-byte frame plus 10 bytes of the next/extra traffic. */
+    uint8_t burst[70];
+    for (size_t i = 0; i < 60; i++) burst[i] = (uint8_t)(0x80 + i);
+    for (size_t i = 60; i < sizeof(burst); i++) burst[i] = 0xEE;
+    static const uint8_t resp2[] = {0x11, 0x22, 0x33};
+    stage_response(burst, sizeof(burst));
+    stage_response(resp2, sizeof(resp2));
+
+    bus_dma_ctx_t ctx = make_uart_ctx();
+    uint8_t raw[256];
+    size_t raw_len = 0;
+    uint32_t error_code = 0;
+    bool ok = execute_uart_batch(0, &ctx, &cmd, raw, &raw_len, &error_code);
+
+    CHECK(ok, "the sticky burst must still complete step1 via the fast path");
+    CHECK(raw_len == 1 + 3 + 60 + 3 + 3,
+          "step1 must be reported at exactly 60 bytes, not 70");
+    if (raw_len == 1 + 3 + 60 + 3 + 3) {
+        CHECK(raw[2] == 60 && raw[3] == 0,
+              "step1 length must be the declared read_size (60), not the burst size");
+        CHECK(memcmp(raw + 4, burst, 60) == 0, "step1 payload must be the first 60 bytes");
+        /* The trailing 0xEE bytes must not appear anywhere in step1's payload. */
+        bool sticky_leaked = false;
+        for (size_t i = 4; i < 4 + 60; i++) if (raw[i] == 0xEE) sticky_leaked = true;
+        CHECK(!sticky_leaked, "the trailing bytes must NOT be absorbed into step1");
+        CHECK(memcmp(raw + 67, resp2, sizeof(resp2)) == 0,
+              "step2 must still receive its own response");
+    }
+}
+
 int main(void)
 {
     reset_capture();
@@ -505,6 +635,8 @@ int main(void)
     test_tx_failure_error();
     test_rx_collect_failure_error();
     test_top_level_guards();
+    test_expected_length_completes_without_idle();
+    test_expected_length_does_not_absorb_sticky_bytes();
 
     if (g_failures > 0) {
         fprintf(stderr, "\nbus_worker_batch_tests: %d FAILURES\n", g_failures);

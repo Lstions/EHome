@@ -1,0 +1,25 @@
+Command: make -j 14 all
+NOTE: Kconfig parser version: 1
+NOTE: Kconfig defaults policy: use sdkconfig
+NOTE: Status: Finished successfully
+CMake Warning at /home/sun/env/esp-idf/tools/cmake/gdbinit.cmake:58 (message):
+  Error while generating esp_rom gdbinit
+Call Stack (most recent call first):
+  /home/sun/env/esp-idf/tools/cmake/project.cmake:452 (__generate_gdbinit)
+  /home/sun/env/esp-idf/tools/cmake/project.cmake:1101 (__project_info)
+  CMakeLists.txt:88 (project)
+
+
+In file included from /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/components/wifi_mgr/wifi_mgr.c:9:
+/mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/components/wifi_mgr/wifi_provisioning.h:47:12: warning: 'url_decode' declared 'static' but never defined [-Wunused-function]
+   47 | static int url_decode(char *dst, size_t dst_len, const char *src, size_t src_len);
+      |            ^~~~~~~~~~
+/mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/components/config_mgr/config_mgr.c:190:13: warning: 'clear_manifest' defined but not used [-Wunused-function]
+  190 | static void clear_manifest(void)
+      |             ^~~~~~~~~~~~~~
+/mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/components/rgb_led/rgb_led.c:88:15: warning: 'ws2812_encode' defined but not used [-Wunused-function]
+   88 | static size_t ws2812_encode(rmt_encoder_t *encoder, rmt_channel_handle_t channel,
+      |               ^~~~~~~~~~~~~
+NOTE: /home/sun/env/esp-idf/components/bt/host/nimble/Kconfig.in:1428: BT_NIMBLE_MESH_PROVISIONER: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /home/sun/env/esp-idf/components/fatfs/Kconfig:240: FATFS_PRINT_LLI: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /home/sun/env/esp-idf/components/fatfs/Kconfig:245: FATFS_PRINT_FLOAT: 'default 0' is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.

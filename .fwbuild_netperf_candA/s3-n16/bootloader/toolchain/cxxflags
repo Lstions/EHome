@@ -1,0 +1,6 @@
+"-specs=/mnt/storage/WorkSpace/EHome/.fwbuild_netperf_candA/s3-n16/bootloader/specs/picolibc.specs"
+-mlongcalls
+-fno-builtin-memcpy
+-fno-builtin-memset
+-fno-builtin-bzero
+-fno-rtti

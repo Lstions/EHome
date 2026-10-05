@@ -888,6 +888,64 @@ static void test_rx_append_with_read_size(void) {
 }
 
 /* =====================================================================
+ * Test 17b (task-5): the LEGACY CMD_SAMPLE path already completes at
+ * read_size WITHOUT waiting out the 10ms idle gap.
+ *
+ * This is the load-bearing distinction behind the 100Hz analysis: the
+ * bench's ch8 runs the legacy path (CMD_SAMPLE), and the reason it sits at
+ * ~26Hz is that its manifest omits read_length (=> read_size == 0), which
+ * forces idle framing.  The legacy fast path itself is NOT the defect.
+ *
+ * Fixture: read_size == 60 and 60 bytes arrive at virtual time T.  The
+ * report must be emitted at T, i.e. while "now - last_rx_us == 0", which is
+ * 10ms short of UART_IDLE_THRESHOLD_US.  If anyone ever makes this path wait
+ * for idle again, this assertion goes red.
+ * ===================================================================== */
+static void test_legacy_read_size_completes_without_idle(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    pending_cmd_t pcmd = {
+        .request_id = 77,
+        .read_size = 60,
+        .rx_timeout_ms = 1000,
+        .tx_timestamp = 1000,
+    };
+    xQueueSend(g_test_pending_q[0], &pcmd, 0);
+
+    for (int i = 0; i < 60; i++) g_fake_rx_data[i] = (uint8_t)i;
+    g_fake_rx_len = 60;
+    g_fake_rx_pos = 0;
+    g_test_time_us = 5000;            /* T */
+
+    uint8_t rx[256];
+    /* ONLY the event path runs — expire_uart_state() is deliberately NOT
+     * called and the clock does NOT advance.  An idle-framed design could not
+     * produce a report here; the emission must come from the read_size
+     * boundary inside rx_append_from_event(). */
+    rx_append_from_event(&g_test_rt, 0, rx, sizeof(rx));
+    CHECK(g_test_time_us == 5000,
+          "fixture: no virtual time may pass inside the event append");
+
+    report_desc_t desc;
+    bool got = (s_report_critical_q &&
+                xQueueReceive(s_report_critical_q, &desc, 0) == pdTRUE);
+    CHECK(got, "a legacy read_size of 60 must emit immediately, not wait for idle");
+    if (got) {
+        CHECK(desc.len == 60, "the emitted payload must be the declared 60 bytes");
+        CHECK(desc.request_id == 77, "request_id must be preserved");
+        CHECK(desc.error_code == 0, "a complete read_size response must not be an error");
+        report_free_block(true, desc.block_index);
+    }
+    CHECK(uxQueueMessagesWaiting(g_test_pending_q[0]) == 0,
+          "the pending descriptor must be consumed by the fast completion");
+
+    teardown_test_runtime();
+}
+
+/* =====================================================================
  * Test 18: handle_uart_event — batch error event
  * ===================================================================== */
 static void test_handle_batch_error_event(void) {
@@ -1322,6 +1380,7 @@ int main(void)
     test_decode_batch_step_valid();
     test_decode_batch_step_invalid();
     test_rx_append_with_read_size();
+    test_legacy_read_size_completes_without_idle();
     test_handle_batch_error_event();
     test_rebuild_uart_event_set_with_pending_driver_bytes();
     test_rebuild_uart_event_set_is_idempotent_across_resumes();

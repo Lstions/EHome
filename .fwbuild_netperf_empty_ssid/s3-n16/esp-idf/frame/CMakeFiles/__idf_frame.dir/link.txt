@@ -1,0 +1,2 @@
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libframe.a CMakeFiles/__idf_frame.dir/frame_codec.c.obj
+/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libframe.a

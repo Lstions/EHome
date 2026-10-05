@@ -1178,6 +1178,32 @@ static bool uart_collect_response(int ch_idx, uint8_t *out, size_t cap,
   if (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return false;
   size_t len = state->len;
   if (state->error || len > cap) return false;
+  /* 快速路径（2026-10-06，task-5）：已知期望长度（read_size>0）时，收到
+   * 至少 expected 字节即可判定本步响应完整，立即返回，不再等 10ms 静默。
+   *
+   * 语义依据（不是猜测）：
+   *   - 批处理步骤的 read_size 来自后端 ControlAction 的 SingleStep.ReadSize，
+   *     由厂商协议的真实帧长编译而来（如 JBD read_basic_info 的 Modbus 0x03
+   *     响应恰好 60 B，见 jiabaida_control.go:485 / 二进制帧协议.md §WriteCmd
+   *     field 4 的"期望长度"定义）。
+   *   - 判据是 >=（不是 ==）：收满才返回，绝不截断。多余字节（同一 RX 里
+   *     紧跟在后的下一事务/额外上行）**不并入本步响应**：本步结束时
+   *     s_batch_rx[ch].len 会被重置（execute_uart_batch 每步 TX 前重置），
+   *     而 execute_uart_batch 进入时已用 bus_dma_read 循环 drain 过驱动环，
+   *     因此它们既不会进本步载荷，也不会被当作下一步的响应。
+   *   - expected == 0（变长协议，如 GB3024 一行 ASCII）没有可用长度，
+   *     保持 10ms 静默兜底，行为不变。
+   *
+   * 旧顺序是"先满足 10ms 静默、再检查 expected"，对 115200 的 60 B 帧要
+   * 多付 10ms 尾等待，理论上限只有约 63 Hz。 */
+  if (expected > 0 && len >= expected) {
+   /* 只交付声明的长度，多余字节不并入本步响应：它们属于下一个事务
+    * （或从机的额外上行），本步结束后的 len 重置会丢弃它们，因此既不会
+    * 污染下一步，也不会被当成本步的载荷上报给服务端 verifier。 */
+   memcpy(out, state->data, (size_t)expected);
+   *out_len = (size_t)expected;
+   return true;
+  }
   if (len > 0 && state->last_rx_us > 0 &&
       esp_timer_get_time() - state->last_rx_us >= 10000) {
    memcpy(out, state->data, len);
