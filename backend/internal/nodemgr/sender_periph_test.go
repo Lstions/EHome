@@ -26,8 +26,15 @@ func (templateOverflowDriver) GetSensorDefinitions() []drivers.SensorData { retu
 func (templateOverflowDriver) ParseData([]byte) ([]drivers.SensorData, error) {
 	return nil, nil
 }
+
+// IntervalMs MUST be > 0: reconcileDriverTemplates now only creates a
+// ConfigTemplate for a command that will actually be polled (effective
+// interval > 0), matching CommandIsManifestCandidate and the production
+// encoder (sender_snapshot.go). With the zero-value interval this driver
+// would be "declared but never polled", so it would legitimately need no
+// template and the overflow this test guards against could never occur.
 func (templateOverflowDriver) GetCommandTemplates() []drivers.CommandTemplate {
-	return []drivers.CommandTemplate{{ID: "extra", Type: "read", WriteData: "AA", ReadLength: 1, Schedulable: true}}
+	return []drivers.CommandTemplate{{ID: "extra", Type: "read", WriteData: "AA", ReadLength: 1, IntervalMs: 1000, Schedulable: true}}
 }
 
 type fourCommandDriver struct{ templateOverflowDriver }
@@ -976,5 +983,65 @@ func TestConfigManifestRejectionOverwritesStaleInSyncState(t *testing.T) {
 	}
 	if node.LastSyncID != "fresh-rejected-generation" {
 		t.Fatalf("last_sync_id=%q; the rejected generation must be recorded so a later ConfigResult cannot be attributed to the stale one", node.LastSyncID)
+	}
+}
+
+// displayOnlyDriver declares several polling commands but only ONE is
+// actually polled (the rest keep the zero-value interval).
+//
+// 回归（2026-10-05，S3 节点 30EDA0A9A808 现场）：reconcileDriverTemplates
+// 曾只按 Schedulable/WriteData 过滤，把"声明过但永不轮询"的模板也创建进 DB，
+// 再由编码器全量写入 ConfigManifest，最后撞上固件 MAX_TEMPLATES=16 而整份
+// 配置被拒。真实数据：JBD 声明 5 个仅 1 个启用（IntervalMs=5000），
+// Techfine 声明 11 个仅 1 个启用（1000），加 2 个历史残留 = 18 > 16。
+// 后果是配置永远下发不了，逆变器通道从未生效（现场表现为 RS232 板 TX/RX
+// 灯完全不亮，被误判为接线/电平故障）。
+//
+// 本测试锁定：只有被轮询的命令才需要（也只应创建）ConfigTemplate。
+type displayOnlyDriver struct{ templateOverflowDriver }
+
+func (displayOnlyDriver) DeviceType() string { return "display-only" }
+
+func (displayOnlyDriver) GetCommandTemplates() []drivers.CommandTemplate {
+	return []drivers.CommandTemplate{
+		{ID: "polled", Type: "read", WriteData: "B1", ReadLength: 0, IntervalMs: 5000, Schedulable: true},
+		{ID: "idle1", Type: "read", WriteData: "B2", ReadLength: 0, IntervalMs: 0, Schedulable: true},
+		{ID: "idle2", Type: "read", WriteData: "B3", ReadLength: 0, IntervalMs: 0, Schedulable: true},
+	}
+}
+
+func TestReconcileCreatesTemplatesOnlyForPolledCommands(t *testing.T) {
+	db := setupTestDBForManifest(t, "dev1", "2.5")
+	if err := db.Create(&models.Channel{ID: 1, NodeID: "dev1", BusType: "UART", HardwareType: "UART", Enabled: true, BusConfig: "10110000096000"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.EdgeDevice{NodeID: "dev1", ChannelID: 1, Type: "display-only", Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	registry := drivers.NewRegistry()
+	registry.Register(displayOnlyDriver{})
+
+	var existing []models.ConfigTemplate
+	if err := db.Where("node_id = ?", "dev1").Find(&existing).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := reconcileDriverTemplates(db, registry, "dev1", existing, maxManifestTemplates)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if !created {
+		t.Fatal("expected the one polled command to create a template")
+	}
+
+	var templates []models.ConfigTemplate
+	if err := db.Where("node_id = ?", "dev1").Find(&templates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) != 1 {
+		t.Fatalf("created %d templates, want exactly 1 (only the polled command); idle commands must not consume collector template capacity: %+v", len(templates), templates)
+	}
+	if !strings.EqualFold(strings.TrimSpace(templates[0].WriteData), "B1") {
+		t.Fatalf("created template for %q; want the polled command B1", templates[0].WriteData)
 	}
 }
