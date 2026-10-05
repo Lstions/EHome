@@ -46,6 +46,30 @@ func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch
 		if !cmd.Schedulable {
 			continue // one-shot triggers don't need ConfigTemplates
 		}
+		/* 只为"真正会被轮询"的命令建模板（interval > 0）。
+		 *
+		 * 修复（2026-10-05 现场，与 nodemgr/reconcileDriverTemplates 同一类缺陷）：
+		 * 这里原本只过滤 Schedulable，于是把驱动**声明过但 interval=0（永不轮询）**
+		 * 的命令也建成了 ConfigTemplate，并追加进 channels.template_ids。
+		 *
+		 * 实测后果（节点 30EDA0A9A808，接 JBD BMS + Techfine 逆变器）：
+		 *   · JBD 声明 5 个命令，只有 read_basic_info(5000ms) 启用；
+		 *   · Techfine 声明 11 个，只有 read_status(1000ms) 启用；
+		 *   · 创建逆变器设备时一次插入 11 行模板（含重复的 read_status），
+		 *     与 JBD 的 5 行合计 16 行 —— 正好卡满固件 MAX_TEMPLATES=16；
+		 *   此后任何新增设备都会超限，使整份 ConfigManifest 被设备拒绝、
+		 *   config_status 停在 failed、相关通道不工作（现场表现为
+		 *   "命令没发出去/指示灯不亮"，极易误判为接线或电平故障）。
+		 *
+		 * 与编码器口径保持一致：sender_snapshot.go:355 只把
+		 * `Schedulable && effectiveInterval > 0` 的命令编进 manifest，
+		 * 因此 interval=0 的命令既不会被下发、也不需要模板。
+		 * 未建模板的命令若日后被启用（command_intervals 覆盖为非 0），
+		 * 下发给该节点时 reconcileDriverTemplates 会补齐。
+		 */
+		if cmd.IntervalMs <= 0 {
+			continue // 不轮询：不建模板，也不占固件模板额度
+		}
 		if err := createSingleTemplate(tx, ch, dev.ID, cmd.WriteData, cmd.ReadLength, cmd.DelayMs); err != nil {
 			return fmt.Errorf("failed to create template for command %s: %w", cmd.ID, err)
 		}
