@@ -1,0 +1,88 @@
+{
+  "tag": "step2b-loadstate-intdiag-window",
+  "node": "30EDA0A9A808",
+  "broker": "192.168.20.6:1883",
+  "duration_s": 150.17,
+  "console": {
+    "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_30:ED:A0:A9:A8:08-if00",
+    "reopens": 0,
+    "lines": 16973,
+    "report_drop_samples": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "report_drop_last": 0,
+    "report_drop_max": 0,
+    "cmd_u0": {
+      "txn": 408,
+      "err": 0
+    },
+    "cmd_u1": {
+      "txn": 10,
+      "err": 0
+    },
+    "scheduler": {
+      "samples": 418,
+      "full": 588,
+      "min_free": 2
+    },
+    "panic_or_wdt_lines": [],
+    "panic_count": 0
+  },
+  "mqtt": {
+    "connected": true,
+    "disconnects": 0,
+    "total_messages": 4024,
+    "data_reports": 3845,
+    "status_reports": 93,
+    "hello_acks": 0,
+    "log_stream_lines": 83,
+    "mem_report_msg_type": "0x21",
+    "mem_report_count": 3,
+    "config_results": []
+  },
+  "mem_report_last": {
+    "free_bytes": 48675,
+    "largest_bytes": 23552,
+    "min_ever_bytes": 31628,
+    "min_task_stack_high_water_bytes": 300,
+    "reserve_floor_bytes": 16384
+  },
+  "mem_report_note": "largest 为内部 RAM 量级，可作为 floor 判据参考",
+  "per_channel": {
+    "8": {
+      "count": 3742,
+      "observed_hz": 24.919,
+      "error_reports": 0,
+      "seq_gaps": 109,
+      "missing_reports": 2435,
+      "payload_bytes": 224520,
+      "avg_payload_len": 60.0
+    },
+    "9": {
+      "count": 103,
+      "observed_hz": 0.686,
+      "error_reports": 103,
+      "seq_gaps": 42,
+      "missing_reports": 45,
+      "payload_bytes": 0,
+      "avg_payload_len": 0.0
+    }
+  },
+  "latency_ms": {
+    "p50": 1007.05,
+    "p99": 2266.33,
+    "p99_9": 2348.39,
+    "max": 2361.88,
+    "samples": 3845,
+    "convention": "相对最小观测偏移的抖动+排队，不是绝对传播时延"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "broker": "127.0.0.1:1883",
+  "topic": "nodes/loadtest-sim5x100/up",
+  "node": "loadtest-sim5x100",
+  "channels": 5,
+  "target_hz": 60,
+  "duration_s": 30.0,
+  "payload_bytes_each": 300,
+  "published_reports": 9000,
+  "publish_failures": 0,
+  "expected_reports": 9000,
+  "publish_elapsed_s": 30.0,
+  "achieved_report_rate_hz": 300.0,
+  "raw_payload_kb_s": 94.3,
+  "backend": {
+    "metrics_before": {
+      "ehome_data_event_bus_dropped_total": 76.0,
+      "ehome_data_report_errors_total": 0.0,
+      "ehome_data_reports_processed_total": 39000.0
+    },
+    "metrics_after": {
+      "ehome_data_event_bus_dropped_total": 76.0,
+      "ehome_data_report_errors_total": 0.0,
+      "ehome_data_reports_processed_total": 48000.0
+    },
+    "processed_delta": 9000.0,
+    "dropped_delta": 0.0,
+    "errors_delta": 0.0,
+    "drain_extra_s": 0.0
+  },
+  "pass": {
+    "published_matches_expected": true,
+    "processed_ge_published": true,
+    "no_backend_drop": true,
+    "no_backend_error": true
+  },
+  "scope_note": "本步只验证后端在 300 report/s（94 KB/s）下的吞吐与背压；真实 UART 链路在 9600/2400 baud 下物理上限约 14.3/41 Hz（见报告），满配 100 Hz 的前提是每路 >=115200 baud。**不得**据此声称现场链路已跑满 5x100Hz。",
+  "overall_pass": true
+}

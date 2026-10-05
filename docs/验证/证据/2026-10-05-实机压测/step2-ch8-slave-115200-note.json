@@ -1,0 +1,8 @@
+{
+  "note": "ch8 @115200 从机（CP2102/ttyUSB0）在 step2 台架压测期间运行；进程被 restore 阶段终止，JSON 未落盘。端口层观测：收到固件轮询帧 dda50300fffd77、逐帧应答 0x03。",
+  "profile": "jiabaida",
+  "port": "/dev/ttyUSB0",
+  "baud": 115200,
+  "observed": "运行 ~250s（23:58:59 -> 00:02:5x），restore 前被 kill；设备侧 CMD_U0 txn=408~420/10s err=0 与 broker 侧 3139 条 DataReport 均证明应答链路正常。",
+  "captured": false
+}

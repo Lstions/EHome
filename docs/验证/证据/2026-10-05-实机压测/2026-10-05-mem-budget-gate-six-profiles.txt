@@ -1,0 +1,242 @@
+########## PROFILE s3-n8
+=== mem_budget_check: profile=s3-n8 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/s3-n8/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=167968 total=341760 remain=173792
+IRAM  used=16384 total=16384 remain=0
+静态任务栈（含在 DIRAM used 内）: total=12292 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32s3/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. bus_worker                            17676 B
+   2. spi_flash                             17200 B
+   3. freertos                               9709 B
+   4. net80211                               9035 B
+   5. ota                                    9032 B
+   6. phy                                    8502 B
+   7. scheduler                              8086 B
+   8. config_mgr                             7153 B
+   9. esp_hw_support                         7032 B
+  10. log_stream                             6162 B
+IRAM 组件 top-10:
+   1. esp_hw_support                         3841 B
+   2. esp_system                             2418 B
+   3. esp_driver_spi                         1672 B
+   4. heap                                   1576 B
+   5. spi_flash                              1511 B
+   6. esp_libc                                878 B
+   7. xtensa                                  503 B
+   8. hal                                     485 B
+   9. esp_driver_rmt                          439 B
+  10. freertos                                388 B
+
+--- checks ---
+  PASS    DIRAM used       167968   <= 168000
+  PASS    DIRAM remain     173792    >= 20480
+  PENDING IRAM remain           0     >= 4096  (IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。)
+
+RESULT: PASS (1 项已知待办，默认不阻塞；加 --strict 可拦)
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0
+########## PROFILE s3-n16
+=== mem_budget_check: profile=s3-n16 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/s3-n16/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=167968 total=341760 remain=173792
+IRAM  used=16384 total=16384 remain=0
+静态任务栈（含在 DIRAM used 内）: total=12292 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32s3/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. bus_worker                            17676 B
+   2. spi_flash                             17200 B
+   3. freertos                               9709 B
+   4. net80211                               9035 B
+   5. ota                                    9032 B
+   6. phy                                    8502 B
+   7. scheduler                              8086 B
+   8. config_mgr                             7153 B
+   9. esp_hw_support                         7032 B
+  10. log_stream                             6162 B
+IRAM 组件 top-10:
+   1. esp_hw_support                         3841 B
+   2. esp_system                             2418 B
+   3. esp_driver_spi                         1672 B
+   4. heap                                   1576 B
+   5. spi_flash                              1511 B
+   6. esp_libc                                878 B
+   7. xtensa                                  503 B
+   8. hal                                     485 B
+   9. esp_driver_rmt                          439 B
+  10. freertos                                388 B
+
+--- checks ---
+  PASS    DIRAM used       167968   <= 168000
+  PASS    DIRAM remain     173792    >= 20480
+  PENDING IRAM remain           0     >= 4096  (IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。)
+
+RESULT: PASS (1 项已知待办，默认不阻塞；加 --strict 可拦)
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0
+########## PROFILE s3p-n8
+=== mem_budget_check: profile=s3p-n8 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/s3p-n8/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=147364 total=341760 remain=194396
+IRAM  used=16384 total=16384 remain=0
+静态任务栈（含在 DIRAM used 内）: total=12292 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32s3/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. spi_flash                             17846 B
+   2. freertos                               9709 B
+   3. net80211                               9035 B
+   4. ota                                    9032 B
+   5. phy                                    8498 B
+   6. esp_hw_support                         6953 B
+   7. bus_worker                             6892 B
+   8. log_stream                             6162 B
+   9. heap                                   5498 B
+  10. msg_handler                            5287 B
+IRAM 组件 top-10:
+   1. esp_hw_support                         3923 B
+   2. esp_system                             2422 B
+   3. heap                                   1900 B
+   4. spi_flash                              1594 B
+   5. esp_driver_spi                          966 B
+   6. esp_libc                                878 B
+   7. xtensa                                  503 B
+   8. hal                                     481 B
+   9. esp_driver_rmt                          416 B
+  10. freertos                                388 B
+
+--- checks ---
+  PASS    DIRAM used       147364   <= 151500
+  PASS    DIRAM remain     194396        >= 0
+  PENDING IRAM remain           0     >= 4096  (S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。)
+
+RESULT: PASS (1 项已知待办，默认不阻塞；加 --strict 可拦)
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0
+########## PROFILE s3p-n16
+=== mem_budget_check: profile=s3p-n16 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/s3p-n16/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=147364 total=341760 remain=194396
+IRAM  used=16384 total=16384 remain=0
+静态任务栈（含在 DIRAM used 内）: total=12292 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32s3/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. spi_flash                             17846 B
+   2. freertos                               9709 B
+   3. net80211                               9035 B
+   4. ota                                    9032 B
+   5. phy                                    8498 B
+   6. esp_hw_support                         6953 B
+   7. bus_worker                             6892 B
+   8. log_stream                             6162 B
+   9. heap                                   5498 B
+  10. msg_handler                            5287 B
+IRAM 组件 top-10:
+   1. esp_hw_support                         3923 B
+   2. esp_system                             2422 B
+   3. heap                                   1900 B
+   4. spi_flash                              1594 B
+   5. esp_driver_spi                          966 B
+   6. esp_libc                                878 B
+   7. xtensa                                  503 B
+   8. hal                                     481 B
+   9. esp_driver_rmt                          416 B
+  10. freertos                                388 B
+
+--- checks ---
+  PASS    DIRAM used       147364   <= 151500
+  PASS    DIRAM remain     194396        >= 0
+  PENDING IRAM remain           0     >= 4096  (S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。)
+
+RESULT: PASS (1 项已知待办，默认不阻塞；加 --strict 可拦)
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0
+########## PROFILE c6-n8
+=== mem_budget_check: profile=c6-n8 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/c6-n8/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=184425 total=452112 remain=267687
+IRAM  该目标无独立 IRAM 段（代码在 flash）
+静态任务栈（含在 DIRAM used 内）: total=13828 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+       1536  xIsrStack                esp-idf/freertos/libfreertos.a(port.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32c6/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. pp                                    21428 B
+   2. bus_worker                            16822 B
+   3. spi_flash                             16074 B
+   4. esp_hw_support                        14400 B
+   5. net80211                              12546 B
+   6. ota                                    9020 B
+   7. scheduler                              7330 B
+   8. log_stream                             6444 B
+   9. config_mgr                             6425 B
+  10. freertos                               6336 B
+
+--- checks ---
+  PASS    DIRAM used       184425   <= 185000
+  PASS    DIRAM remain     267687    >= 20480
+
+RESULT: PASS
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0
+########## PROFILE c6-n16
+=== mem_budget_check: profile=c6-n16 ===
+map: /mnt/storage/WorkSpace/EHome/.worktrees/mem-psram/esp32-collector/build-verify/c6-n16/ehome_collector.map
+parser: /home/sun/.espressif/python_env/idf6.0_py3.14_env/bin/python -m esp_idf_size
+
+DIRAM used=184425 total=452112 remain=267687
+IRAM  该目标无独立 IRAM 段（代码在 flash）
+静态任务栈（含在 DIRAM used 内）: total=13828 B
+       4096  s_ota_stack              esp-idf/ota/libota.a(ota.c.obj)
+       4096  s_sched_stack            esp-idf/scheduler/libscheduler.a(scheduler.c.obj)
+       4096  s_log_tx_stack           esp-idf/log_stream/liblog_stream.a(log_stream.c.obj)
+       1536  xIsrStack                esp-idf/freertos/libfreertos.a(port.c.obj)
+          4  s_netstack_ref           /home/sun/env/esp-idf/components/esp_wifi/lib/esp32c6/libnet80211.a(ieee80211_output.o)
+
+DIRAM 组件 top-10（含 .bss/.data/别名 .text）:
+   1. pp                                    21428 B
+   2. bus_worker                            16822 B
+   3. spi_flash                             16074 B
+   4. esp_hw_support                        14400 B
+   5. net80211                              12546 B
+   6. ota                                    9020 B
+   7. scheduler                              7330 B
+   8. log_stream                             6444 B
+   9. config_mgr                             6425 B
+  10. freertos                               6336 B
+
+--- checks ---
+  PASS    DIRAM used       184425   <= 185000
+  PASS    DIRAM remain     267687    >= 20480
+
+RESULT: PASS
+提示：接入方式见 esp32-collector/tools/README-mem-budget.md 与 build_firmware.sh 建议插入点。
+EXIT=0

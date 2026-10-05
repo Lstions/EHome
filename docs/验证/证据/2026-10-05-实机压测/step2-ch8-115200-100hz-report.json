@@ -1,0 +1,88 @@
+{
+  "tag": "step2-ch8-115200-100hz",
+  "node": "30EDA0A9A808",
+  "broker": "192.168.20.6:1883",
+  "duration_s": 120.12,
+  "console": {
+    "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_30:ED:A0:A9:A8:08-if00",
+    "reopens": 0,
+    "lines": 12981,
+    "report_drop_samples": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "report_drop_last": 0,
+    "report_drop_max": 0,
+    "cmd_u0": {
+      "txn": 409,
+      "err": 0
+    },
+    "cmd_u1": {
+      "txn": 10,
+      "err": 0
+    },
+    "scheduler": {
+      "samples": 422,
+      "full": 582,
+      "min_free": 2
+    },
+    "panic_or_wdt_lines": [],
+    "panic_count": 0
+  },
+  "mqtt": {
+    "connected": true,
+    "disconnects": 0,
+    "total_messages": 3362,
+    "data_reports": 3227,
+    "status_reports": 68,
+    "hello_acks": 0,
+    "log_stream_lines": 66,
+    "mem_report_msg_type": "0x20",
+    "mem_report_count": 1,
+    "config_results": []
+  },
+  "mem_report_last": {
+    "free_bytes": 8327163,
+    "largest_bytes": 8257536,
+    "min_ever_bytes": 8301748,
+    "min_task_stack_high_water_bytes": 292,
+    "reserve_floor_bytes": 16384
+  },
+  "mem_report_note": "S3(s3p) 的 free/largest 来自 heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)，在 SPIRAM_USE_MALLOC 下会取到 PSRAM 的 8MB 连续块 —— 这是『PSRAM 总量』，**不是内部 RAM 水位**，不能作为 16KiB floor 达标证据（见 Lead 缺陷报告）。",
+  "per_channel": {
+    "8": {
+      "count": 3139,
+      "observed_hz": 26.133,
+      "error_reports": 0,
+      "seq_gaps": 84,
+      "missing_reports": 1762,
+      "payload_bytes": 188340,
+      "avg_payload_len": 60.0
+    },
+    "9": {
+      "count": 88,
+      "observed_hz": 0.733,
+      "error_reports": 88,
+      "seq_gaps": 25,
+      "missing_reports": 29,
+      "payload_bytes": 0,
+      "avg_payload_len": 0.0
+    }
+  },
+  "latency_ms": {
+    "p50": 918.29,
+    "p99": 2275.6,
+    "p99_9": 2338.04,
+    "max": 2351.35,
+    "samples": 3227,
+    "convention": "相对最小观测偏移的抖动+排队，不是绝对传播时延"
+  }
+}
