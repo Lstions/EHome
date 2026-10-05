@@ -33,7 +33,50 @@ const (
 	// Exported so the API layer can refuse to SAVE a configuration that the
 	// collector could never receive, instead of letting it fail at push time.
 	MaxCommandsPerEdgeDevice = 3
+
+	// MaxManifestWireBytes is the largest ConfigManifest payload that fits in a
+	// SINGLE MQTT downlink event on the ESP32 collectors. It is a hard wire
+	// bound, not a memory-tuning knob: esp-mqtt fragments an inbound PUBLISH
+	// that does not fit the receive buffer into several MQTT_EVENT_DATA events
+	// and the firmware has NO downlink reassembly, so every fragment is handed
+	// to msg_handler_process() as if it were a whole frame. A manifest above
+	// this bound is therefore not merely delayed — it is undeliverable
+	// (first fragment fails to parse → ConfigResult(false), the rest is
+	// discarded as an unknown mid-frame type), while the backend used to see
+	// only "published successfully" (V3 设计文档 §8 R1).
+	//
+	// Derivation (all inputs read from the firmware tree):
+	//   CONFIG_MQTT_BUFFER_SIZE = 2048        (esp32-collector/sdkconfig.defaults:24)
+	//   topic = "nodes/<node_id>/control"     (ehome_mqtt.c:665)
+	//   per-event payload = 2048
+	//                     − 1                 (fixed header byte 1: type + flags)
+	//                     − 2                 (remaining-length varint, 2-byte form)
+	//                     − (2 + len(topic))  (2-byte topic length prefix + topic)
+	//                     − 2                 (QoS 1 packet identifier)
+	//   For the shortest deployed node_id (12 hex chars → 26 B topic) that is
+	//   2015 B; for 16 chars (30 B topic) 2011 B; for 32 chars 1995 B. The
+	//   product issues 12-char hex node_ids, so 2011 B is the conservative
+	//   (16-char) figure and leaves 4 B of slack on real hardware.
+	MaxManifestWireBytes = 2011
 )
+
+// checkManifestWireBytes fails closed when an encoded ConfigManifest cannot fit
+// in one MQTT downlink event. It is deliberately a pure function on the encoded
+// length: the send path calls it with len(payload) of the bytes it is about to
+// publish, and the boundary itself (2011 pass / 2012 reject) is pinned directly.
+//
+// The caller must pass the length of the SAME payload it is about to publish —
+// never a re-encoded copy — so the check and the bytes on the wire are
+// same-source (see SendConfigManifestWithDecision).
+func checkManifestWireBytes(encodedBytes int) error {
+	if encodedBytes > MaxManifestWireBytes {
+		return fmt.Errorf("ConfigManifest is %d bytes; the single MQTT downlink event limit is %d bytes "+
+			"(CONFIG_MQTT_BUFFER_SIZE=2048, esp-mqtt fragments and firmware has no downlink reassembly): "+
+			"refusing to publish a manifest the collector cannot receive",
+			encodedBytes, MaxManifestWireBytes)
+	}
+	return nil
+}
 
 type manifestLimits struct {
 	maxTemplates   int
@@ -612,6 +655,16 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 	}
 
 	topic := mqtt.ControlTopicForNode(deviceID)
+
+	// R1 byte gate: the encoded manifest must fit in ONE MQTT downlink event.
+	// Checked on the exact bytes about to be published (same snapshot, same
+	// encode call — never a re-encode), before any state is marked "syncing",
+	// so an undeliverable manifest is rejected with a diagnosable error and the
+	// node is driven to config_status=failed by fail() below instead of the
+	// backend falsely reporting a successful publish.
+	if err := checkManifestWireBytes(len(payload)); err != nil {
+		return fail(err)
+	}
 
 	// Persist the exact generation before publish so an immediate valid ACK
 	// cannot race ahead of backend authority.
