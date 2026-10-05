@@ -79,7 +79,14 @@ typedef struct {
     struct { struct { const char *uri; } address; } broker;
     struct { const char *client_id; } credentials;
     struct { int keepalive; bool disable_clean_session; } session;
-    struct { bool disable_auto_reconnect; } network;
+    /* timeout_ms 与 outbox.limit 是 2026-10-04 修复引入的配置项：
+     *   - network.timeout_ms 显式钉住网络超时。原来依赖 IDF 默认值 10000ms，
+     *     恰好等于本固件的 TWDT 超时，于是单次阻塞写就能吃光看门狗预算；
+     *   - outbox.limit 给 enqueue 之后的出站箱一个上限（背压边界）。
+     * 桩必须与真实 esp_mqtt_client_config_t 的字段面保持一致，否则宿主机测试
+     * 会在编译期直接失败 —— 本次就是这样发现的。 */
+    struct { bool disable_auto_reconnect; int timeout_ms; } network;
+    struct { uint64_t limit; } outbox;
 } esp_mqtt_client_config_t;
 
 typedef struct {
@@ -396,10 +403,29 @@ int main(void)
           "log stream publish failed");
     CHECK(enqueue_calls == 1 && enqueued_qos == 0 && enqueued_store && publish_calls == 0,
           "log stream must use stored QoS0 enqueue");
+
+    /* 2026-10-04 修复：**业务帧也必须走 enqueue**，不能走 esp_mqtt_client_publish。
+     *
+     * 原来这里断言的是 publish_calls == 1 && published_qos == 1，
+     * 即"非日志帧用可靠 publish" —— 那条断言**把缺陷当成契约固定了下来**。
+     *
+     * 缺陷：esp_mqtt_client_publish() 在**调用者上下文里同步写 socket**
+     * （mqtt_client.c:2644 -> esp_mqtt_write -> :823 esp_transport_write），
+     * 而 IDF 默认 network.timeout_ms 是 10000ms，恰好等于本固件 TWDT 的
+     * 10000ms。两个 10 秒相等 => 一次阻塞写就吃光看门狗预算，
+     * report_tx 无法喂狗 -> TWDT Aborting -> 重启。实测 506 秒内 11 次，
+     * 崩溃 uptime 仅 23~112 秒，且因配置持久化而自持成循环。
+     *
+     * 现在统一 enqueue：QoS 语义不变（qos 仍为 1，store=true 由 outbox 重传），
+     * 但 socket 写移到 esp-mqtt 自己的任务上下文，调用者不再阻塞。
+     * 若有人把业务帧改回 publish，这条断言立刻变红。 */
     CHECK(mqtt_client_publish_impl(hello_frame, sizeof(hello_frame)),
           "Hello publish failed");
-    CHECK(publish_calls == 1 && published_qos == 1,
-          "non-log frame must use reliable publish");
+    CHECK(publish_calls == 0 && enqueue_calls == 2 && enqueued_qos == 1 &&
+          enqueued_store,
+          "non-log frame must also use enqueue (QoS1 preserved) — calling the "
+          "blocking esp_mqtt_client_publish from a worker task caused 11 PANIC "
+          "reboots on 2026-10-04");
 
     mqtt_client_register_msg_cb(record_message, NULL);
     char topic[] = "nodes/test/down";

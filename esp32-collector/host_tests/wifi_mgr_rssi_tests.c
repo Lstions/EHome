@@ -198,11 +198,31 @@ static void test_rssi_when_ap_info_fails(void) {
     g_stub_ap_err = ESP_OK;
 }
 
+/* 断连后的状态与 RSSI。
+ *
+ * 2026-10-05 修正：原用例断言"重试耗尽后进入 WIFI_MGR_FAILED"，
+ * **它把缺陷当成了契约**。
+ *
+ * 实际缺陷：wifi_mgr 在 10 次快速重试（10x5s=50s）后永久放弃，
+ * WIFI_MGR_FAILED 无人恢复，设备从此彻底脱网 —— 实测固件仍运行
+ * （uptime 涨到 1600s+）但 ping 100% 丢包、ARP 无表项（L2 都不在），
+ * 只能人工断电。对远程节点来说这比崩溃重启更糟（崩溃至少会重新入网）。
+ *
+ * 修复后：快速阶段用完转慢速（30s）**无限**重试，永不永久放弃。
+ * 因此本用例现在断言的是"仍然在重试"，而不是"放弃了"。 */
 static void test_rssi_after_disconnect(void) {
-    /* Exhaust reconnect attempts (s_max_retry = 10) */
-    for (int i = 0; i < 11; i++) simulate_disconnect_reason(8);
-    CHECK(wifi_mgr_get_state() == WIFI_MGR_FAILED,
-          "state should be FAILED after retries exhausted");
+    /* 打满快速重试阶段（WIFI_FAST_RETRY_LIMIT = 10）并越过它。 */
+    for (int i = 0; i < 12; i++) simulate_disconnect_reason(8);
+
+    /* 关键断言：越过快速阶段后**不得**停在 WIFI_MGR_FAILED。
+     * 修复前这里是 FAILED（永久放弃）；修复后应停在 CONNECTING（仍在重试）。 */
+    CHECK(wifi_mgr_get_state() != WIFI_MGR_FAILED,
+          "must NOT permanently give up after fast retries are exhausted "
+          "(device became unreachable for 26 min on 2026-10-05: ping 100% loss, "
+          "no ARP entry, firmware still running)");
+    CHECK(wifi_mgr_get_state() == WIFI_MGR_CONNECTING,
+          "state should be CONNECTING while slow retries continue");
+
     CHECK(wifi_mgr_get_rssi_dbm() == 0,
           "after disconnect: rssi must be 0");
 }

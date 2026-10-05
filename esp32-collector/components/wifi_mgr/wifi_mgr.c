@@ -25,6 +25,32 @@
 #define WIFI_CONNECT_TIMEOUT_MS  30000
 #define WIFI_RECONNECT_DELAY_MS  5000
 
+/* 快速重试阶段：连续失败这么多次后转入"永久慢速重试"。
+ *
+ * 2026-10-05 实机事故（比 TWDT 那个更严重）：原实现是
+ *
+ *     if (s_auto_reconnect && s_retry_count < s_max_retry) { ...esp_wifi_connect(); }
+ *     else { set_state(WIFI_MGR_FAILED); }   // <- 永久放弃，再没有任何重试
+ *
+ * 即 10 次 x 5s = **50 秒**后设备**永久放弃 WiFi**。而 WIFI_MGR_FAILED 的处理
+ * 只做两件事：点红灯、唤醒 MQTT supervisor（main/app_callbacks.c:548）——
+ * 没有任何地方会再调用 esp_wifi_connect()。
+ *
+ * 实测后果：设备固件仍在运行（串口 uptime 一路涨到 1600s+，UART/SPI/I2C 采样
+ * 全部正常），但**彻底脱离网络**：
+ *   - 服务端 ping 100% 丢包；
+ *   - ARP 表里连一条表项都没有（L2 都不在）；
+ *   - EMQX 从来看不到连接尝试（TCP 根本没发起）；
+ *   - MQTT 侧只表现为反复的 esp-tls select() timeout + 重连，极具误导性。
+ *
+ * 这是"设备看起来还活着、其实已经不可达"的典型静默失联：只能靠人工断电恢复。
+ * 对远程部署的节点来说，这比崩溃重启更糟 —— 崩溃至少会重启并重新入网。
+ *
+ * 修复：**永不永久放弃**。快速重试用完后退到慢速无限重试，让设备在网络恢复
+ * 或 AP 重启后能自行回来。 */
+#define WIFI_FAST_RETRY_LIMIT    10
+#define WIFI_SLOW_RETRY_DELAY_MS 30000
+
 /* Event bits */
 #define WIFI_CONNECTED_BIT    BIT0
 #define WIFI_FAIL_BIT         BIT1
@@ -35,7 +61,6 @@ static EventGroupHandle_t s_wifi_event_group = NULL;
 static wifi_mgr_state_cb_t s_state_cb = NULL;
 static void *s_state_cb_ctx = NULL;
 static int s_retry_count = 0;
-static int s_max_retry = 10;
 static bool s_auto_reconnect = true;
 
 /* Forward declarations */
@@ -304,18 +329,40 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 
             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
-            if (s_auto_reconnect && s_retry_count < s_max_retry) {
-                s_retry_count++;
-                ESP_LOGI(TAG, "Reconnecting... attempt %d/%d",
-                         s_retry_count, s_max_retry);
-                set_state(WIFI_MGR_CONNECTING);
-                vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
-                esp_wifi_connect();
-            } else {
-                ESP_LOGE(TAG, "Connection failed after %d attempts", s_retry_count);
+            /* 永不永久放弃重连。
+             *
+             * 原实现在 s_retry_count 达到 10 次后进入 WIFI_MGR_FAILED 并**停止
+             * 一切重试**，而该状态无人恢复 —— 设备从此永久脱网，只能人工断电。
+             * 实测：固件继续运行（uptime 涨到 1600s+），但 ping 100% 丢包、
+             * ARP 无表项，即 L2 都不在。详见 WIFI_FAST_RETRY_LIMIT 处的说明。
+             *
+             * 现在：快速阶段（5s 间隔）用完后转入慢速阶段（30s 间隔）**无限**重试。
+             * 这样网络或 AP 恢复后设备能自行回来，代价只是 30s 的探测间隔。
+             *
+             * 注意：这里仍然会置一次 WIFI_FAIL_BIT / 上报 WIFI_MGR_FAILED ——
+             * 那是给上层"当前不可用"的信号（红灯、唤醒 MQTT supervisor），
+             * 但**不再意味着放弃**。状态机会在下次重试时回到 CONNECTING。 */
+            if (!s_auto_reconnect) {
+                ESP_LOGE(TAG, "Auto reconnect disabled; not retrying");
                 xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                 set_state(WIFI_MGR_FAILED);
+                break;
             }
+
+            s_retry_count++;
+            bool slow_phase = (s_retry_count > WIFI_FAST_RETRY_LIMIT);
+            uint32_t delay_ms = slow_phase ? WIFI_SLOW_RETRY_DELAY_MS
+                                           : WIFI_RECONNECT_DELAY_MS;
+            if (slow_phase && s_retry_count == WIFI_FAST_RETRY_LIMIT + 1) {
+                ESP_LOGW(TAG, "Fast retries exhausted (%d); switching to slow retry every %d ms",
+                         WIFI_FAST_RETRY_LIMIT, WIFI_SLOW_RETRY_DELAY_MS);
+            }
+            ESP_LOGI(TAG, "Reconnecting... attempt %d (%s, next in %u ms)",
+                     s_retry_count, slow_phase ? "slow" : "fast",
+                     (unsigned)delay_ms);
+            set_state(WIFI_MGR_CONNECTING);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            esp_wifi_connect();
             break;
         }
 

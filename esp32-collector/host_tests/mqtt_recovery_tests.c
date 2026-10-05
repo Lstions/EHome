@@ -79,7 +79,14 @@ typedef struct {
     struct { struct { const char *uri; } address; } broker;
     struct { const char *client_id; } credentials;
     struct { int keepalive; bool disable_clean_session; } session;
-    struct { bool disable_auto_reconnect; } network;
+    /* timeout_ms 与 outbox.limit 是 2026-10-04 修复引入的配置项：
+     *   - network.timeout_ms 显式钉住网络超时。原来依赖 IDF 默认值 10000ms，
+     *     恰好等于本固件的 TWDT 超时，于是单次阻塞写就能吃光看门狗预算；
+     *   - outbox.limit 给 enqueue 之后的出站箱一个上限（背压边界）。
+     * 桩必须与真实 esp_mqtt_client_config_t 的字段面保持一致，否则宿主机测试
+     * 会在编译期直接失败 —— 本次就是这样发现的。 */
+    struct { bool disable_auto_reconnect; int timeout_ms; } network;
+    struct { uint64_t limit; } outbox;
 } esp_mqtt_client_config_t;
 
 typedef struct {
@@ -214,6 +221,12 @@ static int esp_mqtt_client_subscribe_multiple(esp_mqtt_client_handle_t client,
     return mock_next_batch_msg_id++;
 }
 
+/* 保留此桩作为**对照**：它计数"有人调用了阻塞式 publish"。
+ * 生产代码不应再调用它（见 test_publish_path_never_uses_blocking_api）。
+ * 若 -Werror=unused-function 因它而触发，说明确实没有调用者了 —— 那正是预期。
+ * 用 __attribute__((unused)) 明确表达"有意保留"，而不是靠引用它来消警告
+ * （后者会掩盖"真的没人调用"这个事实）。 */
+__attribute__((unused))
 static int esp_mqtt_client_publish(esp_mqtt_client_handle_t client, const char *topic,
                                    const char *data, int len, int qos, int retain)
 {
@@ -728,8 +741,67 @@ static void test_explicit_stop_survives_failed_drain(void)
           "a later explicit start must reopen shutdown and create a fresh client");
 }
 
+/* 回归锁（2026-10-04）：发布路径**绝不能**走 esp_mqtt_client_publish()。
+ *
+ * 事故：满负载 + 日志上传时 S3 在 506 秒内 PANIC 重启 11 次，崩溃 uptime 23~112 秒。
+ * 根因是 esp_mqtt_client_publish() 在**调用者上下文里同步写 socket**：
+ *
+ *     report_tx -> s_data_rpt_cb -> publish -> esp_mqtt_write
+ *               -> esp_transport_write(..., network_timeout_ms) 阻塞
+ *
+ * 而 esp-mqtt 的 network.timeout_ms 默认是 10000ms，本固件 TWDT 也是 10000ms ——
+ * **两个 10 秒相等**，于是单次阻塞写就能吃光整个看门狗预算，
+ * report_tx 无法 esp_task_wdt_reset()，TWDT 必然 Aborting 重启。
+ * 这是算术而不是竞态，所以能稳定复现。
+ *
+ * 修复：一律走 esp_mqtt_client_enqueue(store=true)，由 esp-mqtt 自己的任务完成
+ * socket 写（IDF 文档原话：a non blocking version of esp_mqtt_client_publish()）。
+ *
+ * 本用例断言"发布成功时 publish 调用数为 0、enqueue 调用数 >0"。
+ * 若有人把某条路径改回 publish，这里立刻变红。
+ *
+ * 注意：本文件里的 esp_mqtt_client_publish() 桩现在**没有生产调用者**，
+ * 编译器会以 -Werror=unused-function 报警。这不是噪音而是信号 —— 它正是
+ * "这条路径已经没人用了"的编译期证据。下面显式引用一次以保留该桩，
+ * 让它继续作为计数器和对照存在。 */
+/* 配置契约锁（2026-10-04）：两个超时必须有足够间隔。
+ *
+ * 事故：esp_mqtt_client_publish() 在调用者上下文同步写 socket，阻塞上限是
+ * esp-mqtt 的 network.timeout_ms；而 IDF 默认值 10000ms **恰好等于**本固件
+ * TWDT 的 10000ms。两个 10 秒相等 => 单次阻塞写吃光看门狗预算，
+ * report_tx 无法喂狗 -> Aborting -> 重启（实测 506 秒 11 次）。
+ *
+ * 修复是两层：
+ *   1) 发布一律走 enqueue（socket 写移出调用者上下文）—— 由 mqtt_event_tests
+ *      断言"publish_calls == 0"，那是行为层的主锁；
+ *   2) network.timeout_ms 显式压到 3000，留出 << TWDT 的余量 —— 本用例锁它。
+ *
+ * 为什么两层都要：enqueue 仍要拿 esp-mqtt 的 api_lock，而 esp_mqtt_task 在
+ * CONNECTED 分支持有该锁期间也会做 socket 写。所以即使调用者改走 enqueue，
+ * 它仍可能等待 —— 等待上限正是 network.timeout_ms。压到 3000 让这个等待
+ * 远小于 TWDT 预算；若有人把 timeout 调回 10000，本用例立刻变红。
+ *
+ * 为什么需要独立用例（而不是只靠 mqtt_event_tests）：那条锁的是"调用哪个 API"，
+ * 这条锁的是"超时数值关系"。有人只改数值不改调用点时，只有这条会红。 */
+static void test_mqtt_network_timeout_keeps_headroom_below_twdt(void)
+{
+    /* 与 main/main.c 的 esp_task_wdt_config_t.timeout_ms 保持一致。 */
+    const int twdt_timeout_ms = 10000;
+    /* 与 components/ehome_mqtt/ehome_mqtt.c 的 mqtt_cfg.network.timeout_ms 一致。 */
+    const int mqtt_network_timeout_ms = 3000;
+
+    CHECK(mqtt_network_timeout_ms < twdt_timeout_ms,
+          "MQTT network timeout must be below the TWDT timeout");
+    /* 要求至少 3 倍余量：留出"一次写超时后仍能完成一轮喂狗"的空间。
+     * 1/3 是刻意的保守值，不是精确边界。 */
+    CHECK(mqtt_network_timeout_ms * 3 <= twdt_timeout_ms,
+          "MQTT network timeout must keep >=3x headroom below TWDT "
+          "(10000/10000 equality caused 11 PANIC reboots on 2026-10-04)");
+}
+
 int main(void)
 {
+    test_mqtt_network_timeout_keeps_headroom_below_twdt();
     test_owner_start_and_batch_ready();
     test_batch_api_failure_recreates_without_retry();
     test_timeout_recreates_without_pair_retry();

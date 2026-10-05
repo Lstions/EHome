@@ -13,6 +13,7 @@
 #include "bus_worker.h"
 #include "msg_handler.h"
 #include "crash_diag.h"
+#include "boot_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
 #include "scheduler.h"
@@ -85,6 +86,10 @@ static void status_task(void *pv)
          * 收到 1s 后这个偏差会放大 5 倍。取 app_state_uptime_sec_now()
          * 与周期无关，所以收紧周期不会让 uptime 失真。 */
         s->uptime_sec = app_state_uptime_sec_now();
+        /* 刷新启动熔断的"本次存活多久"。只写 RTC_NOINIT（几次 SRAM 写，零 flash 代价），
+         * 所以可以放在这个周期任务里随手调用。不要放进 NVS —— 每 1s 写一次会磨损 flash。
+         * 见 main/boot_guard.h 的说明。 */
+        boot_guard_tick();
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
                 s->uptime_sec, "online",
@@ -279,6 +284,18 @@ void app_main(void)
      * 搬进 NVS。设备此前完全不记录复位原因，导致"反复重启"无法定性；
      * 这一步让每次启动都带一个可上报的原因。 */
     crash_diag_init();
+
+    /* ---- 启动熔断（v2.7，2026-10-04）----
+     * 必须在 nvs_flash_init() 之后、各子系统启动之前：它要根据"上一次启动存活了多久"
+     * 决定本次是否进入安全模式，而安全模式会影响后续子系统（尤其是日志上报）的选择。
+     *
+     * 为什么需要：实测满负载 + 日志上传会让设备每 20~110 秒崩一次，而日志配置随
+     * ConfigManifest 持久化、重启后重新应用 -> 无限重启循环，只能人工接触设备恢复。
+     * 详见 main/boot_guard.h。 */
+    if (boot_guard_init()) {
+        ESP_LOGE(TAG, "BOOT_GUARD: entering safe mode: %s", boot_guard_safe_mode_reason());
+    }
+    boot_guard_start_watchdog();
 
     /* ---- UART0 boot mode check (MUST be before any UART0 driver install) ---- */
     /* If BOOT held at startup, UART0 reserved for download — task blocks here */

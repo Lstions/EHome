@@ -18,6 +18,7 @@
 #include "bus_manager.h"
 #include "hello_handshake.h"
 #include "crash_diag.h"
+#include "boot_guard.h"
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "scheduler.h"
@@ -180,6 +181,29 @@ static esp_err_t log_stream_apply_state(bool enabled, uint8_t level)
 static esp_err_t tx_apply_log_stream(void *opaque, const config_manifest_t *manifest)
 {
     (void)opaque;
+    /* 安全模式下强制关闭日志上报，**忽略服务端下发的开关**。
+     *
+     * 这是启动熔断能真正止血的关键一环。原因：日志开关的配置随 ConfigManifest
+     * 持久化到 NVS，设备每次重启后都会重新应用**同一个**配置；如果那个配置正是
+     * 引发崩溃的那一个，熔断就会陷入"重启 -> 重新应用坏配置 -> 再崩"的循环，
+     * 而熔断本身解决不了这个问题 —— 它只能让重启变慢，不能让它停。
+     *
+     * 因此安全模式必须**覆盖**服务端配置。这是刻意的"配置被拒绝"行为，
+     * 并且：
+     *   - 由 boot_guard_notify_server_contact() 在设备证明健康后自动解除，
+     *     不需要人工干预；
+     *   - 会打 ERROR 级日志，运维能看到"配置没有按预期生效及原因"。
+     *
+     * 取舍：运维在安全模式下**无法**远程重新打开日志上报（要等设备证明健康后
+     * 自动恢复）。这是有意的 —— 允许远程重新打开就等于允许远程重新触发崩溃循环。
+     * 设备仍保持联网、上报心跳、接受命令，所以仍然可诊断、可恢复。 */
+    if (boot_guard_in_safe_mode() && manifest->log_stream_enabled) {
+        ESP_LOGE(TAG, "BOOT_GUARD: log stream requested ON by manifest but device is "
+                      "in SAFE MODE (%s); forcing it OFF. It will be restored "
+                      "automatically once a server sync proves health.",
+                 boot_guard_safe_mode_reason());
+        return log_stream_apply_state(false, manifest->log_stream_level);
+    }
     return log_stream_apply_state(manifest->log_stream_enabled,
                                   manifest->log_stream_level);
 }
@@ -408,6 +432,13 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 	} else {
 		sync_manager_cancel_config_timeout();
 		sync_manager_on_downlink_received(MSG_CONFIG_MFST);
+		/* 健康证明：一次完整的端到端往返成功了（收到 manifest -> 应用 -> 回 ConfigResult）。
+		 * 这是"设备已恢复正常"的最强证据，用来自动解除启动熔断的安全模式。
+		 *
+		 * 为什么用"同步成功"而不是"等够时间"：等待型判据会让一个仍在崩溃循环里
+		 * 的设备自己解除降级、再次冲进去。只有真正完成了与服务端的往返，
+		 * 才说明网络、配置、事务三条链路都是通的。 */
+		boot_guard_notify_server_contact();
 		/* The backend admits V2 actions only when the latest ResourceReport
 		 * proves the applied runtime channel is enabled.  Hello-time reports
 		 * describe the pre-manifest state, so refresh immediately after a

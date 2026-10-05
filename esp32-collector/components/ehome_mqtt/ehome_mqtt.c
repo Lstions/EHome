@@ -549,11 +549,40 @@ bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
     }
 
     const int qos = mqtt_publish_qos_for_frame(data, len);
-    int msg_id = qos == MQTT_PUBLISH_QOS_NO_ACK
-        ? esp_mqtt_client_enqueue(op.client, s_up_topic, (const char *)data, len,
-                                  qos, 0, true)
-        : esp_mqtt_client_publish(op.client, s_up_topic, (const char *)data, len,
-                                  qos, 0);
+    /* 一律走 enqueue，**绝不**调用 esp_mqtt_client_publish。
+     *
+     * 为什么（2026-10-04 实机确诊，TWDT 误杀 11 次/506s）：
+     *   esp_mqtt_client_publish() 会在**调用者的上下文里同步写 socket** ——
+     *   mqtt_client.c:2644 直接调 esp_mqtt_write()，而后者在
+     *   mqtt_client.c:823 调 esp_transport_write(..., network_timeout_ms)。
+     *   断连/半开连接时这次写会一直阻塞到 network_timeout_ms 耗尽。
+     *
+     *   而 esp-mqtt 的 network.timeout_ms 默认是 **10000ms**
+     *   （managed_components/espressif__mqtt/lib/include/mqtt_config.h:57
+     *    MQTT_NETWORK_TIMEOUT_MS (10000)），本固件的 TWDT 也是 **10000ms**
+     *   （main/main.c）。两个数字相等，意味着**单次阻塞写就能吃光整个看门狗预算**：
+     *
+     *     report_tx -> s_data_rpt_cb -> publish -> esp_mqtt_write
+     *               -> esp_transport_write 阻塞 10s
+     *     -> report_tx 无法 esp_task_wdt_reset()
+     *     -> task_wdt: report_tx did not reset in time -> Aborting -> 重启
+     *
+     *   这不是竞态而是算术，所以能稳定复现（实测 11 次，uptime 23~112s）。
+     *
+     * 为什么 enqueue 是正解而不是"调小超时"：
+     *   esp_mqtt_client_enqueue() 只把报文交给 esp-mqtt 的 outbox 就返回
+     *   （mqtt_client.c:2741，内部不调用 esp_mqtt_write），真正的 socket 写
+     *   由 esp-mqtt 自己的任务完成。于是：
+     *     - 调用者不再碰网络 —— 这是根因所在，而不是把窗口调小；
+     *     - QoS 语义不变：QoS1 仍由 outbox 负责重传（store=true），
+     *       断连期间消息会排队等重连，比原来"直接失败"更可靠；
+     *     - 背压变成可见的：outbox 满时 enqueue 返回 -2 -> 我们报错并计数，
+     *       不会像原来那样静默阻塞；
+     *     - 不需要新任务、不需要新增 RAM（本机空闲堆只有约 9-13KB，加不起）。
+     *
+     * 保留 qos 区分：日志帧本就走 QoS0（不存 outbox），业务帧走 QoS1。 */
+    int msg_id = esp_mqtt_client_enqueue(op.client, s_up_topic, (const char *)data, len,
+                                         qos, 0, true);
     bool valid = finish_operation(&op);
     if (msg_id < 0 || !valid) {
         ESP_LOGE(TAG, "Publish failed");
@@ -920,6 +949,26 @@ static bool create_and_start_client(void)
     mqtt_cfg.session.keepalive = 30;
     mqtt_cfg.session.disable_clean_session = false;
     mqtt_cfg.network.disable_auto_reconnect = true;
+    /* 显式钉住网络超时，**不要依赖 IDF 默认值**。
+     *
+     * 原来这一项没设，esp-mqtt 用的是 MQTT_NETWORK_TIMEOUT_MS = 10000ms，
+     * 恰好等于本固件的 TWDT 超时（main/main.c: 10000ms）。两个 10 秒撞在
+     * 一起，任何一次走同步写路径的阻塞都能吃光看门狗预算 —— 这是 2026-10-04
+     * 那 11 次重启的直接原因。
+     *
+     * 发布路径已经改成 enqueue（调用者不再同步写 socket），所以这里主要防的是
+     * esp-mqtt 内部任务自己的写：把它压到 3s，连接异常时能更快地 abort 并进入
+     * 重连，而不是长时间占着 socket。留出 3s << 10s 的余量，即使将来有人新增
+     * 一条同步写路径，也不会立刻撞上看门狗。
+     *
+     * 取舍：超时更短会让慢网络下的单次写更容易被判失败。但失败的后果是
+     * 「本次写中断 + 重连」，而原来的后果是「整个设备重启」，两者不对等。 */
+    mqtt_cfg.network.timeout_ms = 3000;
+    /* 出站箱上限：enqueue 之后的背压边界。0 表示不限制，会让长时间断连
+     * 期间 outbox 无界增长（本机堆只有约 9-13KB 空闲）。给一个明确上限，
+     * 满了 enqueue 返回 -2 —— 我们上报失败而不是静默阻塞或耗尽堆。
+     * CONFIG_MQTT_OUTBOX_EXPIRED_TIMEOUT_MS=30000 另有一道 30s 过期淘汰。 */
+    mqtt_cfg.outbox.limit = 4096;
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     if (client == NULL) {
