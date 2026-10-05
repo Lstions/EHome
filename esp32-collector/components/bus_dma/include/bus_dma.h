@@ -143,6 +143,53 @@ typedef struct {
 esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
                        const uint8_t *config, size_t config_len);
 
+/* ==================================================================
+ *  UART install-once lifecycle (WS-E)
+ *
+ *  Contract:
+ *    - bus_dma_init*() installs a UART driver at most once per controller and
+ *      then takes a lease on it.  A later init with different pins/baud on an
+ *      installed controller reconfigures it in place
+ *      (uart_param_config/uart_set_pin/uart_set_baudrate); it never
+ *      delete+installs.
+ *    - bus_dma_deinit() releases the lease only.  The driver stays resident so
+ *      the next manifest rebuild is cheap.
+ *    - bus_dma_uart_teardown() is the explicit, separate release.  Call it
+ *      only when the controller is idle (a manifest no longer leases it, or
+ *      the whole runtime is being torn down).  It refuses while leased.
+ *    - bus_dma_uart_preinstall() installs/reconfigures without taking a lease,
+ *      so a transaction can pay the one-time ~3 KB/driver cost before it
+ *      suspends workers.  Resource preflight stays the caller's job.
+ * ================================================================== */
+
+/**
+ * @brief Preinstall/reconfigure a UART controller without leasing it.
+ *
+ * Intended to run before bus_worker_suspend(): the one-time driver allocation
+ * is then a separately gated step instead of landing inside apply_buses.
+ *
+ * @param tx_pin,rx_pin    data pins from the manifest channel
+ * @param baud             baud rate
+ * @param dma_enabled      DMA preference (LP_UART forces polled internally)
+ * @param preferred_controller  planner-selected UART port, or -1 for the
+ *                              default derivation policy
+ * @param out_port         [out, optional] selected controller
+ * @return ESP_OK when the controller is installed and configured, otherwise
+ *         the driver error.  No lease is taken.
+ */
+esp_err_t bus_dma_uart_preinstall(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud,
+                                  bool dma_enabled, int32_t preferred_controller,
+                                  uart_port_t *out_port);
+
+/**
+ * @brief Delete an idle UART controller's driver.
+ *
+ * @param port  controller previously installed by bus_dma_init*()/preinstall
+ * @return ESP_OK (also when already torn down); ESP_ERR_INVALID_STATE when the
+ *         port is still leased and must not be removed.
+ */
+esp_err_t bus_dma_uart_teardown(uart_port_t port);
+
 /**
  * Initialize a bus while honoring a controller selected by the manifest
  * planner.  This is what preserves a compatible logical Channel's lease

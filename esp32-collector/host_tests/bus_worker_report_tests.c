@@ -276,10 +276,10 @@ static void test_report_enqueue_telemetry_drops_when_full(void) {
     reset_counters();
     drain_report_queues();
 
-    /* Fill the telemetry pool (12 blocks) + telemetry queue (12 depth).
+    /* Fill the telemetry pool (REPORT_TELEMETRY_BLOCKS) + queue (same depth).
      * Each report_enqueue allocates a block from the free pool and enqueues
-     * a desc.  After 12 enqueues, the free pool is empty and the queue is
-     * also full, so the 13th telemetry report should be dropped. */
+     * a desc.  After all blocks are handed out and the queue is full, the
+     * next telemetry report must be dropped. */
     uint8_t data[16];
     memset(data, 0x42, sizeof(data));
 
@@ -291,7 +291,7 @@ static void test_report_enqueue_telemetry_drops_when_full(void) {
     CHECK(bus_worker_get_report_drop_count() == drops_before,
           "telemetry should not drop while pool has space");
 
-    /* 13th telemetry — pool exhausted, should drop */
+    /* (REPORT_TELEMETRY_BLOCKS + 1)th telemetry — pool exhausted, should drop */
     report_enqueue(7, 4000, 13, data, 8, 0, 0, 0, 0, 0);
     CHECK(bus_worker_get_report_drop_count() == drops_before + 1,
           "telemetry must drop when pool exhausted");
@@ -393,26 +393,28 @@ static void test_emit_fixed_block_chunks(void) {
     init_test_runtime(&rt);
     rt.bus_ch[0] = 42;
 
-    /* Fill stream with 1024 bytes → 2 × 512B chunks */
+    /* The WS-C capacity (512) equals the fixed automatic block, so one buffer
+     * holds exactly one full block.  Fill in terms of STREAM_RX_BUF_SIZE; a
+     * second block would be appended by the next rx_append_from_event(). */
     stream_rx_t *s = &s_streams[0];
-    s->len = 1024;
-    memset(s->buffer, 0xAB, 1024);
+    s->len = STREAM_RX_BUF_SIZE;
+    memset(s->buffer, 0xAB, s->len);
     s_last_rx_us[0] = 5000;
 
     emit_ready_stream_chunks(&rt, 0, 5000);
 
     /* No pending cmd → report_enqueue with request_id=0 (telemetry).
-     * Two 512B chunks should be enqueued. */
+     * One full-size chunk should be enqueued. */
     report_desc_t desc;
     int count = 0;
     while (s_report_telemetry_q &&
            xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE) {
         count++;
-        CHECK(desc.len == 512, "each chunk should be 512 bytes");
+        CHECK(desc.len == STREAM_RX_BUF_SIZE, "each chunk should be one full block");
         CHECK(desc.request_id == 0, "no pending cmd → request_id=0");
         report_free_block(false, desc.block_index);
     }
-    CHECK(count == 2, "1024 bytes should produce 2 chunks of 512");
+    CHECK(count == 1, "one full block should produce exactly one chunk");
     CHECK(s->len == 0, "stream buffer should be empty after emission");
 }
 

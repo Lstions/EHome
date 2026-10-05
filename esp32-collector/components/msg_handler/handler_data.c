@@ -18,10 +18,43 @@
 #include "wifi_mgr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 
 #define TAG "DATA_H"
+
+/* === WS-E: OTA start memory gate ===
+ *
+ * Why here and not in ota.c: ota_start() runs in a dedicated task, but the
+ * decision to accept an OTA is observable at command admission.  Refusing at
+ * admission gives the server a deterministic error instead of an OTA that
+ * starts and dies mid-download from heap fragmentation — the 2026-10-01 field
+ * failure was exactly that ("Allocation failed" after the HTTP client had
+ * already been created).
+ *
+ * The water-level predicate lives in main/mem_guard.c (WS-G).  A component
+ * cannot include a header from main/ (dependency direction: main REQUIRES
+ * msg_handler, not the reverse), so this hook follows the same weak-symbol DIP
+ * pattern the file already uses for msg_handler_publish_checked and
+ * on_query_resources_received:
+ *   - msg_handler links the weak default (allow) so host tests build;
+ *   - main/app_callbacks.c provides the strong definition backed by
+ *     mem_guard_can_start(), the single gate implementation for all callers.
+ *
+ * 4096 is OTA_TASK_STACK_BYTES (components/ota/ota.c:78; private to ota.c) and
+ * 4096 covers the HTTP client's contiguous rx/tx buffers (ota.c configures
+ * 1024/512) plus esp_ota state.  Keep the two numbers in sync if either moves.
+ */
+#define OTA_CMD_MEM_NEED_BYTES (4096u + 4096u)
+
+__attribute__((weak)) bool ehome_mem_can_start(size_t need_bytes)
+{
+    /* Host tests and any build without the main/ implementation: do not gate. */
+    (void)need_bytes;
+    return true;
+}
 
 /* === Receive: OtaCmd (0x0C) === */
 
@@ -85,6 +118,14 @@ void handler_data_process_ota(frame_decoder_t *dec)
         ESP_LOGW(TAG, "OTA command rejected: id=%s class=%d", cmd->ota_id, (int)cmd_class);
         free(cmd);
         return;
+    }
+    /* WS-E water gate: an OTA that cannot fit is refused at admission, with
+     * an explicit log, instead of failing later mid-download.  The command is
+     * released and the server sees no OtaProg (its documented retry path). */
+    if (!ehome_mem_can_start(OTA_CMD_MEM_NEED_BYTES)) {
+        ESP_LOGE(TAG, "[memgate] phase=admission step=ota need=%u rc=REJECT",
+                 (unsigned)OTA_CMD_MEM_NEED_BYTES);
+        goto reject;
     }
     char ota_id_copy[sizeof(cmd->ota_id)];
     memcpy(ota_id_copy, cmd->ota_id, sizeof(ota_id_copy));

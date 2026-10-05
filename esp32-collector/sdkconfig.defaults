@@ -34,6 +34,122 @@ CONFIG_MQTT_TASK_PRIORITY=5
 # WiFi
 CONFIG_ESP_WIFI_ENABLED=y
 
+# ===========================================================================
+# Network sizing for a 100 Hz x 5-channel collector (WS-D / task-4)
+# ===========================================================================
+#
+# Traffic model (why these numbers, not IDF defaults):
+#   Full fit on S3 = 5 channels x 100 Hz = 500 transactions/s.
+#   Each DataReport carries ~300 B raw payload.  Raw uplink payload is
+#   therefore 500 x 300 B = ~150 KB/s; the design point is 300 KB/s (2x) to
+#   absorb retries, ACKs, keepalive/control traffic and bursts while an OTA
+#   download runs in parallel.
+#   802.11n on 2.4 GHz delivers multiple Mbit/s even in a busy home mesh, so
+#   the binding resource is buffering/latency, not link rate.  Values below
+#   are chosen for ~4x queueing margin at 300 KB/s, not at the 150 KB/s mean:
+#     - static RX 6 x ~1.6 KB = 9.6 KB of hardware DMA ring
+#       -> ~32 ms of worst-case burst absorption at 300 KB/s, and it matches
+#          ESP_WIFI_RX_BA_WIN=6 (IDF docs: static RX should be >= RX_BA_WIN
+#          for good AMPDU compatibility).
+#     - dynamic RX 16 + dynamic TX 16 -> ~25.6 KB each of Wi-Fi-layer
+#       buffering (IDF peak formula p = b_rx*m_rx + b_tx*m_tx), i.e. another
+#       ~85 ms of headroom at 300 KB/s.
+#     - MQTT outbox limit 4096 B, QoS1 frames ~100-400 B: ~10-40
+#       unacknowledged publishes can queue before backpressure -> 20-80 ms
+#       of absorption at 500 Hz, matched by the 5760 B TCP window.
+#   Reference: IDF Wi-Fi performance guide, "Peak Wi-Fi Dynamic Buffer" and
+#   "Wi-Fi Buffer Configure".  Never below IDF range floors
+#   (TCPIP recvmbox >= 6, UDP/TCP recvmbox = 6).
+#
+# WiFi static RX buffers (hardware DMA ring), allocated at esp_wifi_init.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+#
+# WiFi dynamic RX/TX buffers (allocated from the heap on demand).
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+#
+# Management/short-buffer pool: association, scan, control.  Event-driven,
+# not 100 Hz; 16 is still 2.6x the IDF minimum of 6.
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
+#
+# lwIP TCP/IP task mailbox.  At 300 KB/s each inbound segment is one message;
+# 16 entries absorb ~50 ms even at full line rate, and must stay above the
+# TCP/UDP recvmbox (6).
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
+#
+# Per-socket budget.  At 500 Hz a socket is busy but not concurrent: one MQTT
+# socket + one OTA (TLS) socket at most, plus a transient DNS socket.  6
+# sockets leaves 2x protocol margin.  No listening sockets in production
+# (debug TCP server off), so 2 is already generous.
+CONFIG_LWIP_MAX_SOCKETS=6
+CONFIG_LWIP_MAX_ACTIVE_TCP=6
+CONFIG_LWIP_MAX_LISTENING_TCP=2
+#
+# UDP: only DNS and DHCP, both request/response.  IDF hard range for this
+# symbol is 6..64 (lwip/Kconfig:859-862), so 6 is the lowest admissible
+# value; a value of 4 is silently clamped to 6 by kconfig.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
+#
+# TCP window / send buffer are deliberately NOT reduced: 5760 B is 4 x MSS
+# and is the throughput-sensitive pair for the MQTT upload path.  Cutting
+# them would trade RAM for p99 latency, which the 100 Hz requirement forbids.
+# MQTT_BUFFER_SIZE=2048 and the 4096 B outbox limit are likewise kept.
+#
+# Product feature switches (2026-10-05 user decision):
+#   - STA only; no SoftAP, no DHCP server, no mDNS.
+#   - Never cut TLS/mbedTLS memory: TLS is a hard future requirement.
+#   - WPA3 Personal stays enabled; Enterprise/OWE/SAE-PK/SoftAP-SAE off.
+#   NOTE: wifi_mgr.c's no-credentials fallback still calls the SoftAP
+#   provisioning path (wifi_mgr.c:110).  It links today only because the
+#   default SSID is non-empty, which lets the compiler dead-strip the AP
+#   branch.  With CONFIG_COLLECTOR_WIFI_SSID="" + SOFTAP_SUPPORT=n the link
+#   fails on esp_netif_create_default_wifi_ap (measured, link error).
+#   WS-H/task-8 must put that path behind #if CONFIG_ESP_WIFI_SOFTAP_SUPPORT
+#   before first-boot provisioning is exercised with an empty SSID.
+CONFIG_LWIP_DHCPS=n
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+CONFIG_LWIP_DNS_SUPPORT_MDNS_QUERIES=n
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
+CONFIG_ESP_WIFI_ENABLE_SAE_PK=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+# WPA3 Personal / WPA2 backward compatibility (kept explicitly; defaults we
+# depend on):
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+CONFIG_ESP_WIFI_ENABLE_SAE_H2E=y
+CONFIG_ESP_WIFI_WPA3_COMPATIBLE_SUPPORT=y
+# wifi_mgr.c keeps threshold.authmode = WIFI_AUTH_WPA2_PSK: the threshold is
+# the *weakest* accepted mode, so WPA2-PSK admits WPA2-only and WPA2/WPA3
+# mixed APs; raising it to WPA2_WPA3_PSK would reject WPA2-only APs
+# (esp_wifi_types_generic.h:375/377).
+
+# ===========================================================================
+# BLE budget reservation (WS-H/task-8; BLE not implemented in this phase)
+# ===========================================================================
+# CONFIG_COLLECTOR_BLE=y is reserved for future BLE provisioning / status /
+# BLE OTA and must only be enabled after the memory gate passes.
+# Intended Kconfig combination (NimBLE, peripheral only, 1 connection):
+#   CONFIG_BT_ENABLED=y
+#   CONFIG_BT_NIMBLE_ENABLED=y
+#   CONFIG_BT_CONTROLLER_ENABLED=y
+#   CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+#   CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+#   CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y   # advertising while peripheral
+#   CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+#   CONFIG_BT_NIMBLE_GATT_SERVER=y
+#   CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+#   CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
+#   CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
+#   CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4096   # internal RAM
+# Budget: 48-64 KiB internal RAM (NimBLE host + controller + GATT server +
+# one connection; no Bluedroid, no mesh, no classic BT).
+# Acceptance criterion: with CONFIG_COLLECTOR_BLE=n, in the worst-case running
+# state (500 txn/s + configuration transaction + log stream), internal free
+# must be >= BLE budget + 8 KiB.  For the minimum budget that is
+# >= 48 + 8 = 56 KiB internal free, with a largest free block large enough
+# to create the BLE task stack from internal RAM.
+
 # Memory reclaim: keep the Wi-Fi driver code in flash instead of IRAM.
 #
 # IDF defaults these to y ("speed optimization"). The cost is IRAM, and on
@@ -116,5 +232,7 @@ CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.0.2.1:1883"
 CONFIG_COLLECTOR_NODE_ID="1001"
 
 # Debug TCP Server (for parallel debugging with MQTT)
-CONFIG_DEBUG_TCP_ENABLED=y
+# Production default: off.  The Kconfig option stays available for
+# bring-up; when off the code is #ifdef'd out of the image entirely.
+CONFIG_DEBUG_TCP_ENABLED=n
 CONFIG_DEBUG_TCP_PORT=8088

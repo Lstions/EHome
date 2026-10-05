@@ -76,6 +76,17 @@ typedef enum {
  * 在收到 ACK 后才释放**对应的 NVS 记录占用。 */
 #define MSG_DIAG_REPORT      0x1E
 #define MSG_DIAG_ACK         0x1F
+/* v2.8 memory health (ESP -> SVR only).
+ *
+ * 低频内存水位上报：free/largest/min_ever/min_task_stack_high_water/floor，
+ * 全部 varint、单位字节。独立于 StatusReport (0x02)，原因：老后端对
+ * StatusReport 顶层 field_num > 10 是**整条丢弃**（handler_status.go:181），
+ * 新增 field 11 会让旧后端连心跳一起掉。而未知消息类型在管理器里走
+ * default 分支只记一条 Warn（manager.go:429），不拒连接、不影响其他消息，
+ * 所以固件先行是安全的，后端解析可后续接入。
+ *
+ * 触发：启动后一次、每 60 s 一次、低内存事件时一次。 */
+#define MSG_MEM_RPT          0x20
 
 /* === Encoder === */
 typedef struct {

@@ -1,0 +1,59 @@
+{
+  "_comment": "构建期静态内存预算门禁阈值（WS-G）。所有数字的依据见 docs/验证/内存与吞吐基线-2026-10-05.md；修改阈值必须在同一 PR 更新基线文档中的对照表。",
+  "_units": "全部为字节",
+  "_version": "2026-10-05",
+  "defaults": {
+    "iram_remain_min": 4096,
+    "dir_remain_min": 20480,
+    "top_n": 10
+  },
+  "profiles": {
+    "s3-n8": {
+      "dir_used_max": 168000,
+      "iram_remain_min": 4096,
+      "known_pending": {
+        "iram_remain_min": "IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。"
+      }
+    },
+    "s3-n16": {
+      "dir_used_max": 168000,
+      "iram_remain_min": 4096,
+      "known_pending": {
+        "iram_remain_min": "IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。"
+      }
+    },
+    "s3p-n8": {
+      "dir_used_max": 151500,
+      "iram_remain_min": 4096,
+      "dir_remain_min": 0,
+      "known_pending": {
+        "iram_remain_min": "S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。"
+      }
+    },
+    "s3p-n16": {
+      "dir_used_max": 151500,
+      "iram_remain_min": 4096,
+      "dir_remain_min": 0,
+      "known_pending": {
+        "iram_remain_min": "S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。"
+      }
+    },
+    "c6-n8": {
+      "dir_used_max": 185000,
+      "dir_remain_min": 20480
+    },
+    "c6-n16": {
+      "dir_used_max": 185000,
+      "dir_remain_min": 20480
+    }
+  },
+  "_notes": {
+    "dir_used_max_baseline": "s3-n16 基线 182,732 B（2026-10-05 HEAD ed1a4fce build61/s3-n16，DIRAM used）；阈值 183,000 = 基线 + 268 B 抖动余量。task-3 静态瘦身落地后应显著低于此值，届时收紧。",
+    "c6_baseline": "c6-n16 基线 206,769 B（同 HEAD）；阈值 207,500 = 基线 + 731 B 抖动余量。",
+    "s3p_no_baseline": "s3p 首次构建于 2026-10-05 19:xx 由本任务与 task-2/task-3 同时进行中；300,000 是 PSRAM 版本开始构建前的占位上限，首次基线出来立即替换。",
+    "iram_remain_s3": "S3 IRAM 段 16,384 B 当前 100% 占用（remain=0），方案要求 remain>=4 KiB。known_pending 记录 task-3 的 IRAM→flash 缺口，默认打印 PENDING 不阻塞合并；--strict 时拦截。",
+    "dir_remain_c6": "C6 无独立 IRAM 段（代码在 flash），DIRAM remain>=20 KiB 是方案 §2.2 的硬门禁。",
+    "top_n": "仅影响报告展示，不影响退出码。",
+    "provisional_2026_10_05": "2026-10-05 20:31 六 profile 全部构建通过后的实测：s3-n8=s3-n16=163,840；s3p-n8=s3p-n16=147,332（PSRAM 数据放置生效，比无 PSRAM 的 s3 还低 16.5 KiB）；c6-n8=c6-n16=180,305。阈值=实测+2-3%（s3=168,000；s3p=151,500；c6=185,000），用于挡住继续变胖。注意：task-3/task-5 仍在进行中，冻结后应把阈值收紧到最终实测附近。"
+  }
+}

@@ -12,7 +12,22 @@ __attribute__((weak)) esp_err_t msg_handler_publish_checked(const uint8_t *data,
 
 #define TAG "CH_CMD_V2"
 #define V2_PROTOCOL 1U
-#define V2_MAX_RX 256U
+/* Two distinct bounds -- do not collapse them into one constant:
+ *
+ *   V2_MAX_READ_SIZE (256): the protocol admission window.  It must match the
+ *     capability this firmware advertises (hw_profile.c: max_rx_bytes=256) and
+ *     the backend's own bound (deviceaction/definition.go:374).  Techfine sets
+ *     ReadSize=256 as a line-idle window on purpose; lowering the admission
+ *     bound would turn those reads into MALFORMED rejects.
+ *
+ *   V2_MAX_RX (128): the per-slot raw RESPONSE storage.  Measured drivers reply
+ *     at most 67 bytes (jiabaida readback); Techfine <=40 B.  If a real reply
+ *     exceeds 128 the existing complete() path fails closed with
+ *     V2_ERR_FINAL_OVERFLOW (no truncation, no fake success) -- the transport
+ *     still reads up to 256 B so the oversize is observable, never swallowed.
+ */
+#define V2_MAX_READ_SIZE 256U
+#define V2_MAX_RX 128U
 #define V2_MAX_TIMEOUT 30000U
 #define V2_ERR_UNSUPPORTED 1001U
 #define V2_ERR_MALFORMED 1002U
@@ -200,6 +215,9 @@ void handler_channel_cmd_v2_complete(uint8_t slot, bool success, uint32_t error_
                                      const uint8_t *raw_response, size_t raw_len)
 {
     if (slot >= CHANNEL_CMD_V2_SLOT_COUNT) return;
+    /* Storage is 128 B (V2_MAX_RX) while admission accepts a 256 B read
+     * window.  An actual oversize response MUST NOT be truncated into a
+     * successful-looking final: fail closed and keep final_raw untouched. */
     if (raw_len > V2_MAX_RX) {
         success = false;
         error_code = V2_ERR_FINAL_OVERFLOW;
@@ -256,7 +274,7 @@ static bool validate_batch_step(const uint8_t *data, size_t len)
         }
     }
     if (!seen[1] || !seen[2] || !seen[3] || !seen[4] || !seen[5]) return false;
-    return kind <= 3 && tx_len > 0 && read_size <= 256 && timeout > 0 && timeout <= 30000 && delay <= 30000;
+    return kind <= 3 && tx_len > 0 && read_size <= V2_MAX_READ_SIZE && timeout > 0 && timeout <= 30000 && delay <= 30000;
 }
 
 void handler_channel_cmd_v2_process(frame_decoder_t *dec)
@@ -297,7 +315,7 @@ void handler_channel_cmd_v2_process(frame_decoder_t *dec)
     }
     if (err != FRAME_DONE) goto malformed;
     const uint32_t required=(1U<<1)|(1U<<2)|(1U<<3)|(1U<<4)|(1U<<5)|(1U<<6)|(1U<<7)|(1U<<8)|(1U<<9)|(1U<<10)|(1U<<11)|(1U<<12)|(1U<<13)|(1U<<14);
-    if ((seen&required)!=required || !cmd.attempt || !cmd.edge_device_id || !cmd.channel_id || !cmd.deadline_unix_ms || cmd.read_size>V2_MAX_RX || !cmd.rx_timeout_ms || cmd.rx_timeout_ms>V2_MAX_TIMEOUT || cmd.post_tx_delay_ms>V2_MAX_TIMEOUT) goto malformed;
+    if ((seen&required)!=required || !cmd.attempt || !cmd.edge_device_id || !cmd.channel_id || !cmd.deadline_unix_ms || cmd.read_size>V2_MAX_READ_SIZE || !cmd.rx_timeout_ms || cmd.rx_timeout_ms>V2_MAX_TIMEOUT || cmd.post_tx_delay_ms>V2_MAX_TIMEOUT) goto malformed;
     const char *boot=channel_cmd_v2_current_boot_id();
     if (!boot || strcmp(boot, cmd.boot_id) != 0) {
         send_ack(&cmd,false,V2_ERR_UNSUPPORTED);return;

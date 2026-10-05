@@ -10,35 +10,40 @@ CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
 # UART1 (TX20/RX21): CH340 dev board
 # UART2 (TX1/RX2):   general purpose
 
-# PSRAM：保持**关闭**（曾经尝试开启，实测不可行，原因必须记在这里防止重蹈）。
+# PSRAM：按型号区分。**本文件（s3-n8/s3-n16）保持关闭**；
+# 带 PSRAM 的型号 s3p-* 在 sdkconfig.defaults.esp32s3psram 中开启。
 #
-# 背景：S3 板上确有 8MB 嵌入式 PSRAM（esptool 报 "Embedded PSRAM 8MB (AP_3v3)"），
-# 而 ABI 只能给设备约 16KB 可用内部堆，直接造成两个现场故障：
+# 历史（2026-10-04/05，必须保留）：S3 板上确有 8MB 嵌入式 PSRAM
+# （esptool 报 "Embedded PSRAM 8MB (AP_3v3)"），曾经因为两个现场故障
+# （OTA 任务 8KB 栈创建失败；ConfigManifest 事务需要约 16KB，apply 峰值
+# 只剩数百字节）尝试开启。当时立即可见的问题是：
 #
-#   1. OTA 起不来：xTaskCreate(ota_task, 8192) 在 16KB 空闲堆上失败，上报
-#      "Insufficient heap to start OTA task"（ota.c 注释记录了同一台设备
-#      30EDA0A9A808 在 2026-10-01 就因此失败过，当时 14.3KB 空闲）。
-#   2. 配置同步失败：config_manifest_t 单个 5400 字节（channels[8] 占 3520），
-#      apply 事务同时持有 active + old_snapshot + staged 三份 ≈ 16KB，恰好等于
-#      全部空闲堆。表现为"UART-only 能同步、一加上 SPI2 或 I2C0 就 success=false"，
-#      且失败点在无日志的分配路径上，设备侧连一条 ERROR 都看不到。
+#   开 CONFIG_SPIRAM → IDF 置上 CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND
+#   （esp_libc/Kconfig:212，默认 SPIRAM && (ESP32||ESP32S3) && !CLANG）
+#   → esp_libc/project_include.cmake:55-58 给**全部**编译单元加
+#     -mdisable-hardware-atomics
+#   → ATOMIC_INT_LOCK_FREE 由 2 降 1
+#   → main/hello_handshake_runtime.h 的全局硬门禁 #error
+#     "Hello callbacks require always-lock-free 32-bit integer atomics"
 #
-# 看起来开 PSRAM 就能同时解决这两件事 —— 但**不能开**，原因是硬约束：
+# 根因是 Xtensa 的 S32C1I 原子指令**只在内部 RAM 有效**，PSRAM 地址上
+# 不成立，IDF 只能全局禁用硬件原子避免静默数据竞争。但这不是"PSRAM 与
+# 无锁原子二选一"：IDF 自己对 src/port/xtensa/stdatomic_s32c1i.c 用
+# -mno-disable-hardware-atomics 精确豁免（esp_libc/CMakeLists.txt:129-131），
+# 这正是本项目的复用模式。
 #
-#   开启 PSRAM 会让 IDF 置上 CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND，
-#   从而给全部编译单元加 -mdisable-hardware-atomics
-#   （见 $IDF_PATH/components/esp_libc/project_include.cmake:37）。
-#   原因是 Xtensa 的 S32C1I 原子指令**在 PSRAM 地址上不成立**，
-#   IDF 只能全局禁用硬件原子以避免静默的数据竞争。
-#   后果：ATOMIC_INT_LOCK_FREE 从 2 变成 1，而 main/hello_handshake_runtime.h
-#   开头就有硬门禁 `#if ATOMIC_INT_LOCK_FREE != 2 -> #error`，构建立刻失败：
-#      "Hello callbacks require always-lock-free 32-bit integer atomics"
-#   这个门禁是对的：Hello 回调要在 ISR/并发语境下用无锁 32 位原子。
+# 现在的方案（s3p 型号）：
+#   * main/hello_handshake_runtime.c 单 TU 恢复硬件原子
+#     （main/CMakeLists.txt，仅当 STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y）；
+#   * main/hello_handshake.c 的 s_runtime 用 DRAM_ATTR 钉在内部 RAM，
+#     并在初始化时断言地址不在 [SOC_EXTRAM_DATA_LOW, SOC_EXTRAM_DATA_HIGH)；
+#   * 其他 TU 仍为 ATOMIC_INT_LOCK_FREE=1，IDF 按地址走临界区分支
+#     （esp_stdatomic.h:55），语义正确。
 #
-# 结论：在这颗芯片 + 这个 IDF 上，"PSRAM 可用堆" 与 "无锁 32 位原子" 二选一。
-# 本项目选了后者（既有的显式要求），所以 PSRAM 关闭；
-# 堆紧张必须靠**减小 manifest 体积 / 降低 OTA 栈需求**来解决，不能靠开 PSRAM。
-# 若将来真要开 PSRAM，前提是先改造 hello_handshake_runtime 的原子用法。
+# 因此：s3-n8/s3-n16 默认不开 PSRAM（本文件无 CONFIG_SPIRAM=y）；
+# s3p-* 通过 sdkconfig.defaults.esp32s3psram 开启。若将来把无 PSRAM 的
+# s3 型号也切到 PSRAM，必须同时确认 s_runtime 的 DRAM_ATTR 与实现 TU 的
+# 豁免仍然生效。
 
 # 16MB flash + 16MB 分区表（ota_0/ota_1 各 0x680000）。
 #

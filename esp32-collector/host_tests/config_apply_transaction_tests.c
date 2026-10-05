@@ -12,6 +12,13 @@
 } while (0)
 
 #include "config_apply_transaction.h"
+#include "config_tx_arena.h"
+#include "mem_guard.h"
+
+/* WS-E 起 execute() 每步前调用 mem_guard_can_start()，判决依据是 largest。
+ * 覆盖 heap_stub_impl.c 的弱定义，让测试可以精确摆布水位。 */
+static size_t s_test_largest = 65536;
+size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return s_test_largest; }
 
 /* config_apply_transaction.c 自 2026-10-05 起在失败路径记录"是哪一步失败"，
  * 因此需要宿主机的 ESP_LOG 与 esp_err_to_name 实现（与其它用例一致的做法）。 */
@@ -294,6 +301,140 @@ static void test_rollback_and_safe_state_failure_is_fatal(void)
     CHECK(!config_apply_result_requires_restart(CONFIG_APPLY_FAILED_SAFE));
 }
 
+/* ---- WS-E: arena reservation + water-level gate ---- */
+
+static size_t s_test_drop_to = 65536;
+
+/* begin_transaction hook: Phase A already passed at the high level; this drops
+ * the water between Phase A and the first Phase B check, which is exactly the
+ * race the per-step gate exists for. */
+static esp_err_t begin_drop(void *ctx)
+{
+    (void)ctx;
+    s_test_largest = s_test_drop_to;
+    return ESP_OK;
+}
+
+static void test_arena_insufficient_refuses_before_begin(void)
+{
+    config_manifest_t new_m = {0};
+    fixture_t f = fixture(NULL, &new_m);
+    config_apply_ops_t ops = OPS;
+    /* Whole-arena request can never be reserved: the canary owns the last
+     * 4 bytes, so can_reserve() must be false. */
+    ops.arena_need = CONFIG_TX_ARENA_BYTES;
+    s_test_largest = 65536;
+    CHECK(config_tx_arena_init());
+
+    CHECK(config_apply_transaction_execute(&ops, &f, NULL, &new_m) ==
+          CONFIG_APPLY_FAILED_UNCHANGED);
+    CHECK(f.count == 0);   /* no begin/snapshot/prepare: runtime untouched */
+}
+
+static void test_arena_reusable_after_rollback(void)
+{
+    config_manifest_t new_m = {0};
+    fixture_t f = fixture(NULL, &new_m);
+    f.commit_ok = false;   /* fail at the last step -> rollback -> RESTORED */
+    config_apply_ops_t ops = OPS;
+    ops.arena_need = 792;  /* measured sizeof(manifest_tx_ctx_t) */
+    s_test_largest = 65536;
+    CHECK(config_tx_arena_init());
+
+    /* Caller lifecycle (app_callbacks): begin, allocate the tx ctx, execute,
+     * then end.  A rollback must leave the arena immediately reusable. */
+    CHECK(config_tx_arena_begin());
+    void *tx1 = config_tx_arena_alloc(792);
+    CHECK(tx1 != NULL);
+    CHECK(config_apply_transaction_execute(&ops, &f, NULL, &new_m) ==
+          CONFIG_APPLY_FAILED_RESTORED);
+    CHECK(config_tx_arena_end());
+
+    fixture_t f2 = fixture(NULL, &new_m);
+    CHECK(config_tx_arena_begin());
+    void *tx2 = config_tx_arena_alloc(792);
+    CHECK(tx2 == tx1);     /* cursor reset -> same workspace handed out */
+    /* Second transaction on the same arena goes all the way to success. */
+    CHECK(config_apply_transaction_execute(&ops, &f2, NULL, &new_m) ==
+          CONFIG_APPLY_OK);
+    CHECK(f2.steps[f2.count - 1] == STEP_END);
+    CHECK(config_tx_arena_end());
+}
+
+static void test_watermark_refuses_before_begin(void)
+{
+    config_manifest_t new_m = {0};
+    fixture_t f = fixture(NULL, &new_m);
+    s_test_largest = mem_guard_floor_bytes() - 1;   /* below the hard floor */
+
+    CHECK(config_apply_transaction_execute(&OPS, &f, NULL, &new_m) ==
+          CONFIG_APPLY_FAILED_UNCHANGED);
+    CHECK(f.count == 0);
+    s_test_largest = 65536;
+}
+
+static void test_phase_b_drop_after_prepare_rolls_back(void)
+{
+    config_manifest_t new_m = {0};
+    fixture_t f = fixture(NULL, &new_m);
+    config_apply_ops_t ops = OPS;
+    ops.begin_transaction = begin_drop;
+    /* Make apply_buses the step that fails: its gate need (9000) exceeds the
+     * dropped largest (8192 = host floor). Earlier steps' defaults fit. */
+    ops.step_need_apply_buses = 9000;
+    s_test_largest = 65536;
+    s_test_drop_to = mem_guard_floor_bytes();
+
+    config_apply_result_t r = config_apply_transaction_execute(&ops, &f, NULL, &new_m);
+
+    /* The scheduler was already stopped by prepare; UNCHANGED would be a lie. */
+    CHECK(r != CONFIG_APPLY_FAILED_UNCHANGED);
+    CHECK(r == CONFIG_APPLY_FAILED_RESTORED);
+    CHECK(f.steps[f.count - 1] == STEP_END);
+
+    bool saw_stop = false, saw_cleanup = false, saw_bus_new = false;
+    for (int i = 0; i < f.count; i++) {
+        if (f.steps[i] == STEP_STOP) saw_stop = true;
+        if (f.steps[i] == STEP_CLEANUP) saw_cleanup = true;
+        if (f.steps[i] == STEP_BUS_NEW) saw_bus_new = true;
+    }
+    CHECK(saw_stop && saw_cleanup);
+    CHECK(!saw_bus_new);
+    s_test_largest = 65536;
+}
+
+static void test_phase_b_drop_to_below_floor_enters_safe_state(void)
+{
+    config_manifest_t new_m = {0};
+    fixture_t f = fixture(NULL, &new_m);
+    config_apply_ops_t ops = OPS;
+    ops.begin_transaction = begin_drop;
+    s_test_largest = 65536;
+    s_test_drop_to = 4096;   /* below floor: even rollback rebuilds must refuse */
+
+    config_apply_result_t r = config_apply_transaction_execute(&ops, &f, NULL, &new_m);
+
+    CHECK(r != CONFIG_APPLY_FAILED_UNCHANGED);
+    CHECK(r == CONFIG_APPLY_FAILED_SAFE);
+    bool saw_safe = false;
+    for (int i = 0; i < f.count; i++)
+        if (f.steps[i] == STEP_SAFE) saw_safe = true;
+    CHECK(saw_safe);
+    s_test_largest = 65536;
+}
+
+static void test_can_start_predicate_is_pure(void)
+{
+    s_test_largest = 65536;
+    CHECK(config_apply_transaction_can_start(&OPS));
+    s_test_largest = mem_guard_floor_bytes() - 1;
+    CHECK(!config_apply_transaction_can_start(&OPS));
+    /* No steps recorded: predicate must not touch the ops callbacks. */
+    fixture_t f = fixture(NULL, NULL);
+    (void)f;
+    s_test_largest = 65536;
+}
+
 int main(void)
 {
     test_commit_is_after_all_runtime_subsystems();
@@ -307,6 +448,12 @@ int main(void)
     test_unconfirmed_rollback_stop_is_fatal_without_cleanup_or_safe_state();
     test_log_start_failure_is_before_commit_and_rolls_back();
     test_rollback_and_safe_state_failure_is_fatal();
+    test_arena_insufficient_refuses_before_begin();
+    test_arena_reusable_after_rollback();
+    test_watermark_refuses_before_begin();
+    test_phase_b_drop_after_prepare_rolls_back();
+    test_phase_b_drop_to_below_floor_enters_safe_state();
+    test_can_start_predicate_is_pure();
     puts("config_apply_transaction_tests: PASS");
     return 0;
 }

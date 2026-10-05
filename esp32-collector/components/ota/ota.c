@@ -4,6 +4,7 @@
  */
 
 #include "ota.h"
+#include "ota_internal.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_http_client.h"
@@ -107,6 +108,45 @@ _Static_assert(OTA_TASK_STACK_BYTES % sizeof(StackType_t) == 0,
 static StackType_t  s_ota_stack[OTA_TASK_STACK_WORDS];
 static StaticTask_t s_ota_tcb;
 static TaskHandle_t s_ota_task;
+
+/* WS-C: ONE 4 KiB I/O buffer for both OTA phases (was rx[4096] + buf[4096]).
+ *
+ * Why merging is safe: ota_try_download() runs the phases strictly
+ * serially -- ota_download_http() finishes (esp_http_client_close +
+ * esp_ota_end) before ota_verify() starts -- and the whole OTA runs in the
+ * single ota_task under the s_upgrading guard, so the download read buffer and
+ * the SHA-256 partition read buffer can never be live at the same time.
+ *
+ * Why it MUST stay internal RAM: esp_ota_write() flashes a partition with the
+ * cache disabled for parts of the operation; touching PSRAM from that window
+ * would fault.  It is therefore a static .bss object, never allocated through
+ * collector_mem_alloc_pref_psram().
+ *
+ * Future BLE OTA reuse: GATT writes arrive as arbitrary-size chunks; that
+ * path should call ota_write_chunk() (declared in ota_internal.h, same
+ * signature/checks) and keep the buffer ownership here -- it must NOT copy
+ * the buffer or relocate it to PSRAM.  Promoting the pair to a public
+ * begin/write/finish session API is the expected shape when BLE lands. */
+#define OTA_IO_CHUNK_BYTES OTA_WRITE_CHUNK_MAX
+_Static_assert(OTA_IO_CHUNK_BYTES == 4096,
+               "OTA chunk size is part of the single-buffer memory budget");
+static uint8_t s_ota_io_buf[OTA_IO_CHUNK_BYTES];
+
+/**
+ * Write one OTA payload chunk (declared in ota_internal.h).  Single choke
+ * point for the HTTP download phase and the future BLE GATT transfer: same
+ * bounds check, same error reporting.  Not static so the future BLE transport
+ * can reuse it without a second buffer; see ota_internal.h for the internal-
+ * RAM policy this function's buffer must keep.
+ */
+esp_err_t ota_write_chunk(esp_ota_handle_t handle,
+                          const uint8_t *data, size_t len)
+{
+    if (handle == 0 || (data == NULL && len != 0) || len > OTA_WRITE_CHUNK_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return esp_ota_write(handle, data, len);
+}
 
 typedef enum {
     OTA_STATE_NONE       = 0,
@@ -676,10 +716,10 @@ static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
     }
 
     int total = 0, last_pct = -1;
-    static uint8_t rx[4096];
     int n;
-    while ((n = esp_http_client_read(client, (char *)rx, sizeof(rx))) > 0) {
-        err = esp_ota_write(handle, rx, n);
+    while ((n = esp_http_client_read(client, (char *)s_ota_io_buf,
+                                      OTA_IO_CHUNK_BYTES)) > 0) {
+        err = ota_write_chunk(handle, s_ota_io_buf, (size_t)n);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "ota_write FAILED at %d bytes", total);
             esp_ota_end(handle);
@@ -743,8 +783,7 @@ static esp_err_t ota_verify(const char *expected_checksum,
     mbedtls_sha256_init(&sha256_ctx);
     mbedtls_sha256_starts(&sha256_ctx, 0);
 
-    const int CHUNK = 4096;
-    static uint8_t buf[4096];
+    const int CHUNK = OTA_IO_CHUNK_BYTES;
     uint64_t remaining = total_bytes > 0 ? (uint64_t)total_bytes : expected_size;
     uint32_t offset = 0;
     int chunk_count = 0;
@@ -752,13 +791,13 @@ static esp_err_t ota_verify(const char *expected_checksum,
 
     while (remaining > 0) {
         size_t tr = (remaining > CHUNK) ? CHUNK : (size_t)remaining;
-        err = esp_partition_read(update_partition, offset, buf, tr);
+        err = esp_partition_read(update_partition, offset, s_ota_io_buf, tr);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "part read @%lu: %s", offset, esp_err_to_name(err));
             mbedtls_sha256_free(&sha256_ctx);
             return err;
         }
-        mbedtls_sha256_update(&sha256_ctx, buf, tr);
+        mbedtls_sha256_update(&sha256_ctx, s_ota_io_buf, tr);
         offset += tr; remaining -= tr;
         chunk_count++;
         if (chunk_count % 16 == 0) {

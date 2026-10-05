@@ -24,6 +24,8 @@
 #include "scheduler.h"
 #include "bus_worker.h"
 #include "config_mgr.h"
+#include "config_tx_arena.h"
+#include "mem_guard.h"
 #include "dma_pool.h"
 #include "sync_manager.h"
 #include "rgb_led.h"
@@ -35,8 +37,11 @@
 #include "pwm_ctrl.h"
 #include "periph_owner.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "frame_codec.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -47,6 +52,17 @@
 static bool is_config_manifest(const uint8_t *data, size_t len)
 {
     return len > 0 && data[0] == MSG_CONFIG_MFST;
+}
+
+/* Strong override of the weak hook declared in components/msg_handler/handler_data.c.
+ *
+ * msg_handler cannot call into main/, so the OTA admission gate is injected
+ * this way, backed by the one water-level implementation (mem_guard).  Defined
+ * here because this file already owns the config-apply memory gate and is
+ * linked into the same image. */
+bool ehome_mem_can_start(size_t need_bytes)
+{
+    return mem_guard_can_start(need_bytes);
 }
 
 typedef struct {
@@ -159,9 +175,24 @@ static esp_err_t log_stream_apply_state(bool enabled, uint8_t level)
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < LOG_STREAM_SETTLE_ATTEMPTS; ++attempt) {
         if (enabled) {
-            err = log_stream_is_active()
-                ? log_stream_set_level(level)
-                : log_stream_start(level);
+            if (!log_stream_is_active()) {
+                /* WS-E water gate on the START transition only (stopping or
+                 * changing level on a live stream costs nothing).  log_stream
+                 * was already changed to a static task, but its publish path
+                 * still needs contiguous buffers; refusing the start is
+                 * harmless (next sync retries) whereas failing the whole
+                 * transaction for a diagnostic side channel is not. */
+                if (!mem_guard_can_start(2048)) {
+                    ESP_LOGW(TAG, "[memgate] phase=B step=log_stream need=2048 "
+                                  "largest=%u free=%u floor=%u rc=SKIP",
+                             (unsigned)mem_guard_largest(), (unsigned)mem_guard_free(),
+                             (unsigned)mem_guard_floor_bytes());
+                    return ESP_OK;
+                }
+                err = log_stream_start(level);
+            } else {
+                err = log_stream_set_level(level);
+            }
         } else {
             err = log_stream_stop();
         }
@@ -285,6 +316,17 @@ static const config_apply_ops_t s_manifest_tx_ops = {
     .restore_peripherals = tx_restore_peripherals,
     .restore_log_stream = tx_restore_log_stream,
     .enter_safe_state = tx_safe_state,
+    /* WS-E memory needs: the contiguous allocation each step is expected to
+     * make.  apply_buses keeps only SPI (~1.35 KB) and I2C (~1.42 KB) driver
+     * rebuilds because the preinstall step installs UARTs beforehand, so 4 KiB
+     * bounds it.  arena_need reserves the transaction workspace. */
+    .preflight_need            = 4096u,
+    .step_need_apply_dma       = 1024u,
+    .step_need_apply_peripherals = 1024u,
+    .step_need_apply_buses     = 4096u,
+    .step_need_apply_scheduler = 1024u,
+    .step_need_apply_log_stream = 2048u,
+    .arena_need                = 1152u,
 };
 
 static bool extract_manifest_identity(const uint8_t *data, size_t len,
@@ -308,6 +350,34 @@ static bool extract_manifest_identity(const uint8_t *data, size_t len,
     return err == FRAME_DONE && have_manifest && have_sync && manifest_id[0] && sync_id[0];
 }
 
+/* One-time UART driver cost per transaction.
+ *
+ * WS-E: UART drivers are installed once and then reconfigured
+ * (install-once contract in bus_manager/bus_dma).  The very first manifest
+ * after boot still has to install them, and that is ~3.1 KB of contiguous heap
+ * per controller (IDF allocates 9 objects per driver; three S3 UARTs measured
+ * ~9.3 KB).  Doing it here, as an explicitly named and gated step, keeps that
+ * cost out of apply_buses, whose budget is 4 KiB.
+ *
+ * It runs with the workers already suspended, so an RX event cannot race the
+ * install/remap; gating happens before any install with a conservative bound
+ * for one controller (largest single object is the 512 B rx_data_buf plus ring
+ * buffers — 3584 covers all nine) and the driver itself reports allocation
+ * failure with full heap state. */
+#define CONFIG_TX_UART_INSTALL_LARGEST_NEED 3584u
+
+static void log_heap_step_here(const char *step, const char *phase)
+{
+#ifdef EHOME_MEM_DIAG
+    ESP_LOGI(TAG, "[heap] %-18s %-5s free=%u largest=%u",
+             step, phase,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#else
+    (void)step; (void)phase;
+#endif
+}
+
 /* Transactional config apply. A checked full runtime rebuild is intentionally
  * used for both first and subsequent manifests so no incremental path can
  * acknowledge a partially applied channel set. */
@@ -322,16 +392,34 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         ESP_LOGE(TAG, "Rejecting ConfigManifest without valid correlation identity");
         return;
     }
-    /* Large rollback state lives in bounded heap, never on the MQTT callback stack. */
-    config_manifest_t *old_snapshot = calloc(1, sizeof(*old_snapshot));
-    manifest_tx_ctx_t *tx = calloc(1, sizeof(*tx));
-    if (!old_snapshot || !tx) {
-        free(old_snapshot);
-        free(tx);
+    /* Rollback source: the live active manifest.
+     *
+     * stage_manifest() only writes the INACTIVE slot and commit_staged_manifest()
+     * is the transaction's last step, so this pointer still names the
+     * pre-transaction config when rollback runs, and no concurrent writer can
+     * touch it (config lock + bus_worker_suspend).  That is why there is no
+     * 5,400 B calloc snapshot here any more.
+     *
+     * NULL is expected until the first manifest is committed. */
+    const config_manifest_t *active_cfg = config_mgr_get_manifest();
+    bool had_old = active_cfg != NULL && active_cfg->applied;
+
+    /* Phase A (pre-suspend): refuse before touching anything.  The arena must
+     * be able to hold the transaction workspace and the steps must fit under
+     * the model's memory floor.  This is the only point that may report
+     * "unchanged" without having mutated runtime state. */
+    if (!config_tx_arena_init() ||
+        !config_tx_arena_can_reserve(CONFIG_TX_ARENA_BUMP_RESERVE)) {
+        ESP_LOGE(TAG, "[memgate] phase=A step=arena reason=unavailable "
+                      "capacity=%u", (unsigned)config_tx_arena_capacity());
         msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
         return;
     }
-    bool had_old = config_mgr_snapshot_active(old_snapshot);
+    if (!config_apply_transaction_can_start(&s_manifest_tx_ops)) {
+        ESP_LOGE(TAG, "Rejecting ConfigManifest before suspend: memory gate");
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        return;
+    }
 
     /* Suspend rx_task/cmd_task before cleanup to prevent race.  A worker
      * waiting on a queue must acknowledge within a bounded deadline; never
@@ -339,8 +427,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     if (!bus_worker_suspend()) {
         ESP_LOGE(TAG, "Rejecting ConfigManifest: worker suspend timeout");
         msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
-        free(old_snapshot);
-        free(tx);
         return;
     }
 
@@ -353,8 +439,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
         app_state_unlock_config();
         bus_worker_resume();
-        free(old_snapshot);
-        free(tx);
         return;
     }
     const config_manifest_t *staged_cfg = config_mgr_get_staged_manifest();
@@ -364,8 +448,6 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
         app_state_unlock_config();
         bus_worker_resume();
-        free(old_snapshot);
-        free(tx);
         return;
     }
 
@@ -375,6 +457,60 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
     attempted_id[sizeof(attempted_id) - 1] = '\0';
 	memcpy(attempted_sync_id, staged_cfg->sync_id, sizeof(attempted_sync_id));
 	attempted_sync_id[sizeof(attempted_sync_id) - 1] = '\0';
+    /* Reserve the transaction workspace from the fixed arena.  No heap
+     * allocation can fail later because the water level moved. */
+    if (!config_tx_arena_begin()) {
+        ESP_LOGE(TAG, "[memgate] step=arena reason=begin_failed");
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        return;
+    }
+    manifest_tx_ctx_t *tx = config_tx_arena_alloc(sizeof(*tx));
+    if (tx == NULL) {
+        ESP_LOGE(TAG, "[memgate] step=arena reason=alloc_failed need=%u capacity=%u",
+                     (unsigned)sizeof(manifest_tx_ctx_t), (unsigned)config_tx_arena_capacity());
+        (void)config_tx_arena_end();
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        return;
+    }
+    memset(tx, 0, sizeof(*tx));
+
+    /* Pay the one-time UART install cost as its own step (design §4.4/§5.7).
+     * Idempotent for controllers already resident, so on steady-state applies
+     * this loop only reconfigures.  A refusal is reported as an unchanged
+     * manifest: staging is discarded and nothing has been applied. */
+    if (!mem_guard_can_start(CONFIG_TX_UART_INSTALL_LARGEST_NEED)) {
+        ESP_LOGE(TAG, "[memgate] phase=preinstall step=uart_install need=%u largest=%u "
+                      "free=%u floor=%u rc=UNCHANGED",
+                 (unsigned)CONFIG_TX_UART_INSTALL_LARGEST_NEED,
+                 (unsigned)mem_guard_largest(), (unsigned)mem_guard_free(),
+                 (unsigned)mem_guard_floor_bytes());
+        (void)config_tx_arena_end();
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        return;
+    }
+    log_heap_step_here("uart_preinstall", "in");
+    esp_err_t preinstall_err = bus_manager_preinstall_uarts(&s->bus_runtime, staged_cfg);
+    log_heap_step_here("uart_preinstall", "out");
+    if (preinstall_err != ESP_OK) {
+        ESP_LOGE(TAG, "UART preinstall failed: %s (0x%x)", esp_err_to_name(preinstall_err),
+                 (unsigned)preinstall_err);
+        (void)config_tx_arena_end();
+        config_mgr_discard_staged_manifest();
+        msg_handler_send_config_result(incoming_manifest_id, incoming_sync_id, false);
+        app_state_unlock_config();
+        bus_worker_resume();
+        return;
+    }
+
     tx->app = s;
     tx->queues = (scheduler_queues_t){
         .uart0_cmd_queue = s->uart0_cmd_queue,
@@ -386,7 +522,7 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
         .route_ctx = &s->bus_runtime,
     };
     config_apply_result_t tx_result = config_apply_transaction_execute(
-        &s_manifest_tx_ops, tx, had_old ? old_snapshot : NULL, staged_cfg);
+        &s_manifest_tx_ops, tx, had_old ? active_cfg : NULL, staged_cfg);
     if (tx_result != CONFIG_APPLY_OK) {
         ESP_LOGE(TAG, "Rejecting ConfigManifest transaction: result=%d", (int)tx_result);
         config_mgr_discard_staged_manifest();
@@ -395,8 +531,9 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
             /* Runtime is neither restored nor safely stopped. Keep bus workers
              * suspended and retain the config lock until the restart executes. */
             ESP_LOGE(TAG, "Unrecoverable config transaction; restarting fail-hard");
-            free(old_snapshot);
-            free(tx);
+            /* Arena state does not matter across the restart; release the
+             * transaction marker so a post-restart path cannot see it stuck. */
+            (void)config_tx_arena_end();
             /* 记下重启原因 -> 下次启动随 BOOT 报告上传。没有这一行，
              * 复位原因只会笼统显示 SOFTWARE，无法区分是配置事务失败、
              * 还是别处的 esp_restart()。 */
@@ -404,14 +541,20 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
             esp_restart();
             return;
         }
+        if (!config_tx_arena_end()) {
+            ESP_LOGE(TAG, "[memgate] step=arena reason=canary_corrupted (failed transaction)");
+        }
         app_state_unlock_config();
         bus_worker_resume();
-        free(old_snapshot);
-        free(tx);
         return;
     }
-    free(old_snapshot);
-    free(tx);
+    if (!config_tx_arena_end()) {
+        /* Canary damaged: something wrote past its arena allocation.  The IDF
+         * driver state is already committed at this point, so escalate on the
+         * next config sync rather than aborting a successful apply; the loud
+         * error is what makes it diagnosable. */
+        ESP_LOGE(TAG, "[memgate] step=arena reason=canary_corrupted rc=DEGRADED");
+    }
 
     const config_manifest_t *new_cfg = config_mgr_get_manifest();
     const char *new_id = new_cfg ? new_cfg->manifest_id : NULL;

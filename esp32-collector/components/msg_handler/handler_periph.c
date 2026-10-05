@@ -72,7 +72,16 @@ typedef struct {
     uint32_t value;
     uint8_t error_code;
 } dedup_entry_t;
-static dedup_entry_t s_dedup[64];
+/* WS-C: 64 -> 16 entries.  The dedup window only has to cover retried MQTT
+ * deliveries of recent PeriphCmd request_ids; the queue in front of it is
+ * depth 8 and the backend's retry window is seconds.  16 = 2x the queue depth,
+ * keeps collision detection for the whole plausible retry set, and this table
+ * is an ISR-safe MQTT-callback path so it stays in internal RAM.  Request-id
+ * collision with an older, already-evicted entry is still rejected by the
+ * backend as V2/correlation failure, never silently applied twice: eviction
+ * only drops the RAM replay cache, not the command identity checks above it. */
+#define PERIPH_DEDUP_ENTRIES 16
+static dedup_entry_t s_dedup[PERIPH_DEDUP_ENTRIES];
 static uint8_t s_dedup_next;
 
 

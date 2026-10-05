@@ -132,7 +132,13 @@ typedef struct {
  * (read_size, fixed report block, then idle completion); no user-selectable
  * receive mode is exposed.
  * ================================================================== */
-#define STREAM_RX_BUF_SIZE 1024
+/* WS-C: 1024 -> 512.  The UART hardware FIFO is 128 B and the driver ring is
+ * drained in 256 B reads (bus_dma_read()), so the stream buffer only has to
+ * hold one automatic boundary at a time: read_size <= 256, fixed block = 512
+ * (BUS_RX_FIXED_BLOCK_SIZE).  Anything larger was slack, and it is multiplied
+ * by SCHED_MAX_CHANNELS (5 on S3).  Boundary semantics are unchanged: the
+ * overflow path still flushes and then re-assesses against this capacity. */
+#define STREAM_RX_BUF_SIZE 512
 
 typedef struct {
  uint8_t buffer[STREAM_RX_BUF_SIZE];

@@ -5,7 +5,12 @@
 #include <stdint.h>
 #include <stdatomic.h>
 
-#if ATOMIC_INT_LOCK_FREE != 2
+/* Only the implementation TU is compiled with hardware atomics restored on
+ * PSRAM targets (see hello_handshake_runtime.c and main/CMakeLists.txt). Other
+ * consumer TUs legitimately see ATOMIC_INT_LOCK_FREE == 1 under
+ * CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND; IDF routes those non-lock-free
+ * operations by address. The guarantee is enforced where it is actually used. */
+#if defined(HELLO_RUNTIME_IMPL) && ATOMIC_INT_LOCK_FREE != 2
 #error "Hello callbacks require always-lock-free 32-bit integer atomics"
 #endif
 

@@ -28,6 +28,7 @@
 #include "bus_dma.h"
 #include "cmd_queue.h"
 #include "scheduler.h"
+#include "collector_mem.h"
 #include "frame_codec.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -76,7 +77,16 @@
 #define REPORT_PAYLOAD_BLOCK_SIZE 1024
 #define REPORT_CRITICAL_BLOCKS 4
 #define REPORT_CRITICAL_EMERGENCY_BLOCKS 1
-#define REPORT_TELEMETRY_BLOCKS 12
+/* WS-C: 12 -> 8, per Lead 2026-10-05.  Backpressure model at full population
+ * (S3: 5 x 100 Hz = 500 samples/s): a telemetry block is held from enqueue
+ * until report_tx calls msg_handler_send_data_report() and MQTT enqueue
+ * returns -- ~1-5 ms, NOT until the network ACK.  Mean in-flight is therefore
+ * ~500/s x 5 ms = 2.5 blocks; 8 gives ~3x margin.  Judgement variable is
+ * bus_worker_get_report_drop_count()==0 under the task-4 stress run; if drops
+ * appear, raise this back to 12 rather than relaxing the criterion.  The
+ * critical/emergency reserves stay internal RAM and are deliberately NOT
+ * reduced (they carry errors and V2 control finals). */
+#define REPORT_TELEMETRY_BLOCKS 8
 #define REPORT_CRITICAL_QUEUE_DEPTH REPORT_CRITICAL_BLOCKS
 #define REPORT_TELEMETRY_QUEUE_DEPTH REPORT_TELEMETRY_BLOCKS
 #define CONTROL_FINAL_QUEUE_DEPTH 8
@@ -146,9 +156,41 @@ typedef struct {
  char error_msg[WRITE_RSP_MSG_MAX];
 } write_rsp_desc_t;
 
+/* Critical and emergency payload reserves are small and directly tied to the
+ * error/control path: they stay INTERNAL RAM unconditionally.  The telemetry
+ * pool (REPORT_TELEMETRY_BLOCKS x 1 KiB) is pure CPU-accessed sample data and
+ * moves to PSRAM on PSRAM models, allocated in report_path_init(); the
+ * internal-only models keep the static array so their layout and host-test
+ * behaviour are unchanged. */
 static uint8_t s_critical_payload[REPORT_CRITICAL_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
 static uint8_t s_critical_emergency_payload[REPORT_CRITICAL_EMERGENCY_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static uint8_t (*s_telemetry_payload)[REPORT_PAYLOAD_BLOCK_SIZE];
+#else
 static uint8_t s_telemetry_payload[REPORT_TELEMETRY_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
+#endif
+
+/* s_streams is rx_task's CPU-side linearisation buffer (no DMA, no ISR): on
+ * PSRAM models it is allocated here in report_path_init() alongside the
+ * telemetry pool; internal-only models keep the static array.  The storage is
+ * declared BEFORE report_path_init()/deinit() so the PSRAM branch can see it.
+ * See collector_mem.h for the placement policy. */
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static stream_rx_t *s_streams;
+#else
+static stream_rx_t s_streams[SCHED_MAX_CHANNELS];
+#endif
+
+/* Branch-local readiness: comparing an array address to NULL trips
+ * -Werror=address in the non-PSRAM branch, so the test lives in one place. */
+static bool worker_buffers_ready(void)
+{
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    return s_streams != NULL && s_telemetry_payload != NULL;
+#else
+    return true;
+#endif
+}
 static QueueHandle_t s_report_critical_free;
 static QueueHandle_t s_report_critical_emergency_free;
 static QueueHandle_t s_report_telemetry_free;
@@ -575,6 +617,26 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
 static void report_path_init(void)
 {
  if (s_report_path_started) return;
+#if COLLECTOR_MEM_PSRAM_ENABLED
+ /* Prefer PSRAM, fall back to internal RAM.  Fail closed: a NULL pool would
+  * turn the first sample into a load from address 0, so the whole report path
+  * (and therefore bus_worker_start) refuses to come up instead. */
+ if (s_telemetry_payload == NULL) {
+  s_telemetry_payload = collector_mem_alloc_pref_psram(
+      (size_t)REPORT_TELEMETRY_BLOCKS * REPORT_PAYLOAD_BLOCK_SIZE);
+ }
+ if (s_streams == NULL) {
+  s_streams = collector_mem_alloc_pref_psram(
+      (size_t)SCHED_MAX_CHANNELS * sizeof(stream_rx_t));
+  if (s_streams) memset(s_streams, 0, (size_t)SCHED_MAX_CHANNELS * sizeof(stream_rx_t));
+ }
+ if (!worker_buffers_ready()) {
+  ESP_LOGE(TAG_RX, "report/stream buffer allocation failed; report path not started");
+  collector_mem_free(s_telemetry_payload); s_telemetry_payload = NULL;
+  collector_mem_free(s_streams); s_streams = NULL;
+  return;
+ }
+#endif
  s_report_critical_free = xQueueCreate(REPORT_CRITICAL_BLOCKS, sizeof(uint8_t));
  s_report_critical_emergency_free = xQueueCreate(REPORT_CRITICAL_EMERGENCY_BLOCKS, sizeof(uint8_t));
  s_report_telemetry_free = xQueueCreate(REPORT_TELEMETRY_BLOCKS, sizeof(uint8_t));
@@ -632,6 +694,12 @@ static void report_path_deinit(void)
  if (s_report_critical_free) { vQueueDelete(s_report_critical_free); s_report_critical_free = NULL; }
  if (s_report_critical_emergency_free) { vQueueDelete(s_report_critical_emergency_free); s_report_critical_emergency_free = NULL; }
  if (s_report_telemetry_free) { vQueueDelete(s_report_telemetry_free); s_report_telemetry_free = NULL; }
+#if COLLECTOR_MEM_PSRAM_ENABLED
+ /* Free only after the queues and the report task are gone, so no descriptor
+  * can still reference a block.  Restart re-allocates in report_path_init(). */
+ collector_mem_free(s_telemetry_payload); s_telemetry_payload = NULL;
+ collector_mem_free(s_streams); s_streams = NULL;
+#endif
  s_report_path_started = false;
 }
 
@@ -1226,7 +1294,8 @@ static void cmd_task_i2c(void *pv) {
 
 #define UART_IDLE_THRESHOLD_US 10000  /* protocol-neutral idle completion deadline */
 
-static stream_rx_t s_streams[SCHED_MAX_CHANNELS];
+/* s_streams storage is declared next to s_telemetry_payload above (the PSRAM
+ * branch must be visible to report_path_init before this point). */
 static int64_t     s_last_rx_us[SCHED_MAX_CHANNELS];
 static uint32_t    s_rx_sequence[SCHED_MAX_CHANNELS];
 static bool        s_stream_chunked[SCHED_MAX_CHANNELS];
@@ -1754,6 +1823,12 @@ void bus_worker_start(bus_runtime_t *rt)
  ensure_suspend_events();
  s_runtime = rt;
  report_path_init();
+ if (!s_report_path_started) {
+  /* report_path_init() failed (or was never able to build its pool).  Starting
+   * the RX/cmd tasks here would let rx_task write into a NULL stream buffer. */
+  ESP_LOGE("BUS_WORKER", "report path unavailable; not starting bus workers");
+  return;
+ }
  rebuild_cmd_queue_sets(rt);
  rebuild_uart_event_set(rt);
  xTaskCreate(rx_task, "rx_task", RX_STACK,

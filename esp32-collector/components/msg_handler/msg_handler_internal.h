@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include "frame_codec.h"
 #include "esp_err.h"
+#include "config_mgr.h"  /* MAX_CHANNELS: single source for V2 slot count */
 
 #ifdef __cplusplus
 extern "C" {
@@ -240,7 +241,14 @@ typedef struct {
     uint32_t replayed;
 } channel_cmd_v2_metrics_t;
 
-#define CHANNEL_CMD_V2_SLOT_COUNT 4
+/* One RAM replay slot per physical channel.  The backend serialises
+ * ChannelCmdV2 only per (node, channel) pair (commandexec/dispatcher.go), so
+ * commands on DIFFERENT channels can be in flight simultaneously.  A global
+ * slot count smaller than MAX_CHANNELS would reject a legal cross-channel
+ * command with V2_ERR_BUSY; a fixed 4 would still under-provision S3 (5
+ * buses).  Derived from config_mgr.h so the two can never drift; host tests
+ * resolve MAX_CHANNELS through config_mgr.h's non-target fallback (8). */
+#define CHANNEL_CMD_V2_SLOT_COUNT MAX_CHANNELS
 #define CHANNEL_CMD_V2_SLOT_NONE UINT8_MAX
 
 void handler_channel_cmd_v2_process(frame_decoder_t *dec);

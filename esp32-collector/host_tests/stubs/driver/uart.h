@@ -64,6 +64,10 @@ typedef struct {
 /* Driver function declarations — implementations provided by test files */
 esp_err_t uart_param_config(uart_port_t port, const uart_config_t *config);
 esp_err_t uart_set_pin(uart_port_t port, int tx, int rx, int rts, int cts);
+/* WS-E install-once: manifest changes reconfigure a live driver through this
+ * instead of delete+install.  Declaration must match IDF 6.1
+ * (esp_driver_uart/include/driver/uart.h:240) so host and target agree. */
+esp_err_t uart_set_baudrate(uart_port_t port, uint32_t baud_rate);
 esp_err_t uart_driver_install(uart_port_t port, int rx_buf, int tx_buf,
                               int queue_size, QueueHandle_t *queue, int flags);
 esp_err_t uart_driver_delete(uart_port_t port);

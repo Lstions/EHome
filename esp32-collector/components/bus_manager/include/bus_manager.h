@@ -26,9 +26,39 @@ void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb);
 
 void bus_manager_init(bus_runtime_t *rt);
 void bus_manager_snapshot_leases(bus_runtime_t *rt);
+/* Release every channel lease and the DMA allocations it owns.
+ *
+ * WS-E install-once: this no longer deletes UART drivers.  The controller
+ * objects stay resident so a manifest rebuild reconfigures them instead of
+ * paying the ~3 KB/UART install cost; bus_manager_prune_unused_uarts() frees
+ * the ones the new manifest does not use. */
 esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt);
 esp_err_t bus_manager_setup_from_manifest(bus_runtime_t *rt);
 esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t *manifest);
+
+/**
+ * @brief Install/reconfigure the UART controllers this manifest will lease.
+ *
+ * Call before bus_worker_suspend() so the one-time driver allocation happens
+ * as a separately gated step instead of inside apply_buses.  Performs the same
+ * pin/controller preflight as apply_manifest and refuses a manifest that does
+ * not pass it.  Takes no leases; those are taken by apply_manifest.
+ *
+ * @return ESP_OK, or the first driver/preflight error.  On error the resident
+ *         runtime is untouched (this function only adds idle controllers).
+ */
+esp_err_t bus_manager_preinstall_uarts(bus_runtime_t *rt, const config_manifest_t *manifest);
+
+/**
+ * @brief Tear down UART controllers installed but no longer leased.
+ *
+ * Call only after a SUCCESSFUL apply_manifest().  On a failed/rolled-back
+ * apply the old manifest still needs its controllers, so pruning there would
+ * delete a live driver.
+ *
+ * @return ESP_OK, or the first teardown error.
+ */
+esp_err_t bus_manager_prune_unused_uarts(bus_runtime_t *rt);
 
 /* v2.4: Incremental config apply — checked single-channel lifecycle. */
 esp_err_t bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch);

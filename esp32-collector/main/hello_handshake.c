@@ -14,6 +14,7 @@
 #include "sync_manager.h"
 #include "rgb_led.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "freertos/task.h"
 #include <stddef.h>
 
@@ -22,7 +23,11 @@
 
 static TaskHandle_t s_task_handle;
 static app_state_t *s_state_ref;
-static hello_runtime_t s_runtime = HELLO_RUNTIME_INITIALIZER;
+/* Hardware 32-bit atomics (S32C1I) only work on internal RAM. Pinning the
+ * runtime to .dram1 keeps the lock-free path valid even though the rest of
+ * the firmware is compiled with -mdisable-hardware-atomics on PSRAM builds;
+ * hello_runtime_init_with_seed() re-checks the address at runtime. */
+static DRAM_ATTR hello_runtime_t s_runtime = HELLO_RUNTIME_INITIALIZER;
 static hello_sm_t s_sm;
 static uint32_t s_active_nonce;
 

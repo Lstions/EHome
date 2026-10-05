@@ -101,6 +101,8 @@ Profiles:
   c6-n16   ESP32-C6 with 16MB flash
   s3-n8    ESP32-S3 with 8MB flash
   s3-n16   ESP32-S3 with 16MB flash
+  s3p-n8   ESP32-S3 with PSRAM + 8MB flash
+  s3p-n16  ESP32-S3 with PSRAM + 16MB flash
   all      Build all profiles
 
 MQTT broker (required):
@@ -227,26 +229,36 @@ broker_from_file() {
     grep -E '^CONFIG_COLLECTOR_MQTT_BROKER_URL=' "$1" | tail -1 | sed -E 's/^[^=]+="?([^"]*)"?$/\1/'
 }
 
+# Each profile is echoed as four fields:
+#   <target> <flash> <model-defaults-suffix> <inject-psram-switch>
+# The third/fourth fields are empty for the existing c6/s3 profiles, which
+# keeps their SDKCONFIG_DEFAULTS chain and behaviour unchanged.  "s3p" is the
+# same SoC as "s3" plus the model dimension: it chains
+# sdkconfig.defaults.esp32s3psram (content owned by WS-B/task-2; this script
+# only references it) and forces CONFIG_COLLECTOR_PSRAM=y for model naming.
 profile_settings() {
     case "$1" in
-        c6-n8)  printf '%s %s\n' esp32c6 n8 ;;
-        c6-n16) printf '%s %s\n' esp32c6 n16 ;;
-        s3-n8)  printf '%s %s\n' esp32s3 n8 ;;
-        s3-n16) printf '%s %s\n' esp32s3 n16 ;;
+        c6-n8)   printf '%s %s %s %s\n' esp32c6 n8  ''           '' ;;
+        c6-n16)  printf '%s %s %s %s\n' esp32c6 n16 ''           '' ;;
+        s3-n8)   printf '%s %s %s %s\n' esp32s3 n8  ''           '' ;;
+        s3-n16)  printf '%s %s %s %s\n' esp32s3 n16 ''           '' ;;
+        s3p-n8)  printf '%s %s %s %s\n' esp32s3 n8  esp32s3psram y  ;;
+        s3p-n16) printf '%s %s %s %s\n' esp32s3 n16 esp32s3psram y  ;;
         *) return 1 ;;
     esac
 }
 
 build_profile() {
     local profile="$1"
-    local settings target flash_profile build_dir sdkconfig defaults lock_file
+    local settings target flash_profile model_defaults model_psram build_dir sdkconfig defaults lock_file
+    local _model_defaults _model_switch_defaults
 
     settings="$(profile_settings "$profile")" || {
         echo "Unknown firmware profile: $profile" >&2
         usage >&2
         return 2
     }
-    read -r target flash_profile <<<"$settings"
+    read -r target flash_profile model_defaults model_psram <<<"$settings"
 
     build_dir="$BUILD_ROOT/$profile"
     sdkconfig="$build_dir/sdkconfig"
@@ -329,6 +341,28 @@ EOF
     if [[ -f "$_target_defaults" ]]; then
         defaults="$defaults;$_target_defaults"
     fi
+
+    # 第三级（型号 defaults）：同一 SoC 的 PSRAM / 非 PSRAM 型号差异。
+    # 该文件由 WS-B(task-2) 维护，本脚本只负责在存在时加入链 —— 尚未就绪时
+    # 明确警告并跳过，而不是假装它存在。
+    if [[ -n "$model_defaults" ]]; then
+        _model_defaults="$PROJECT_DIR/sdkconfig.defaults.$model_defaults"
+        if [[ -f "$_model_defaults" ]]; then
+            defaults="$defaults;$_model_defaults"
+        else
+            echo "WARNING: $profile: $_model_defaults not found; building without model defaults" >&2
+        fi
+    fi
+
+    # 型号开关是 profile 的显式语义（s3p = 带 PSRAM 的型号），与 broker 同理注入
+    # 链尾，防止"profile 叫 s3p、Kconfig 却报非 PSRAM 型号"的静默漂移。
+    # 板上是否真有 PSRAM 仍由 app_state.c 运行时 heap_caps 探测决定，二者缺一不可。
+    if [[ "$model_psram" == "y" ]]; then
+        _model_switch_defaults="$build_dir/.model.defaults"
+        printf 'CONFIG_COLLECTOR_PSRAM=y\n' > "$_model_switch_defaults"
+        defaults="$defaults;$_model_switch_defaults"
+    fi
+
     defaults="$defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults;$_broker_defaults"
     if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
         defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
@@ -379,6 +413,10 @@ EOF
         # PSRAM 决定可用堆总量。被陈旧的派生 sdkconfig 静默钉成 n 时，
         # 设备会带着约 16KB 内部堆上线，OTA 与配置同步都会失败，
         # 而构建日志一切正常 —— 这正是 2026-10-04 的故障形态。
+        # WS-A: s3p profile 的型号开关。陈旧派生 sdkconfig 若把它钉在 n，
+        # 设备会以非 PSRAM 型号上线（后端按型号下 manifest），构建日志却正常，
+        # 与下面 CONFIG_SPIRAM 属于同一种"静默钉旧值"形态。
+        CONFIG_COLLECTOR_PSRAM
         CONFIG_SPIRAM
         CONFIG_SPIRAM_MODE_OCT
         # MQTT 客户端任务栈：sdkconfig.defaults 给 8192，而陈旧的派生
@@ -475,11 +513,11 @@ main() {
     case "$profile" in
         all)
             local item
-            for item in c6-n8 c6-n16 s3-n8 s3-n16; do
+            for item in c6-n8 c6-n16 s3-n8 s3-n16 s3p-n8 s3p-n16; do
                 build_profile "$item"
             done
             ;;
-        c6-n8|c6-n16|s3-n8|s3-n16)
+        c6-n8|c6-n16|s3-n8|s3-n16|s3p-n8|s3p-n16)
             build_profile "$profile"
             ;;
         -h|--help|'')

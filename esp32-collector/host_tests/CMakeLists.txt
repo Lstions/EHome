@@ -30,6 +30,7 @@ target_include_directories(writecmd_decoder_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(writecmd_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME writecmd_decoder_tests COMMAND writecmd_decoder_tests)
@@ -43,6 +44,7 @@ target_include_directories(channel_cmd_v2_decoder_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
@@ -56,6 +58,7 @@ target_include_directories(channel_cmd_v2_slot_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(channel_cmd_v2_slot_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME channel_cmd_v2_slot_tests COMMAND channel_cmd_v2_slot_tests)
@@ -440,15 +443,20 @@ set_source_files_properties(
 )
 add_test(NAME periph_config_apply_tests COMMAND periph_config_apply_tests)
 
+# WS-E: config_apply_transaction.c now includes the transaction arena impl and
+# consults mem_guard_can_start() before each step, so both TUs must be linked.
 add_executable(config_apply_transaction_tests
     config_apply_transaction_tests.c
     stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
+    ../main/mem_guard.c
+    ../components/frame/frame_codec.c
 )
 target_include_directories(config_apply_transaction_tests PRIVATE
     stubs
     ../main
     ../components/config_mgr
+    ../components/frame
 )
 target_compile_options(config_apply_transaction_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME config_apply_transaction_tests COMMAND config_apply_transaction_tests)
@@ -457,12 +465,15 @@ add_executable(periph_transaction_gate_tests
     periph_transaction_gate_tests.c
     stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
+    ../main/mem_guard.c
+    ../components/frame/frame_codec.c
     ../components/periph_owner/periph_owner.c
 )
 target_include_directories(periph_transaction_gate_tests PRIVATE
     stubs
     ../main
     ../components/config_mgr
+    ../components/frame
     ../components/periph_owner/include
 )
 target_compile_definitions(periph_transaction_gate_tests PRIVATE _POSIX_C_SOURCE=200809L)
@@ -582,3 +593,63 @@ target_include_directories(crash_diag_codec_tests PRIVATE
 )
 target_compile_options(crash_diag_codec_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME crash_diag_codec_tests COMMAND crash_diag_codec_tests)
+
+# 运行期内存水位门禁（WS-G）。判错的代价：内存充足时拒绝重操作，或低水位
+# 事件风暴 —— 两者都难从串口反推，所以用可控堆值把边界钉在宿主测试里。
+# mem_guard_tests.c 自带 heap_caps_* 强定义，不需要 heap_stub_impl.c。
+add_executable(mem_guard_tests
+    mem_guard_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(mem_guard_tests PRIVATE
+    stubs
+    ../components/frame
+    ../main
+)
+target_compile_definitions(mem_guard_tests PRIVATE CONFIG_IDF_TARGET_ESP32S3=1)
+target_compile_options(mem_guard_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+add_test(NAME mem_guard_tests COMMAND mem_guard_tests)
+
+# WS-E transaction arena: fixed 4 KiB bump allocator backing the config
+# transaction workspace (design §2).  The test includes the implementation
+# header directly, mirroring how main/config_apply_transaction.c compiles it.
+# No heap_stub_impl.c: the internal-RAM branch uses a static .bss block.
+add_executable(config_tx_arena_tests
+    config_tx_arena_tests.c
+)
+target_include_directories(config_tx_arena_tests PRIVATE
+    ../main
+    ../components/config_mgr
+)
+target_compile_options(config_tx_arena_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME config_tx_arena_tests COMMAND config_tx_arena_tests)
+
+# WS-F phase-2 prototype: ConfigManifest as raw bytes + offset index.
+# Host-only proof of the v3 storage model; not compiled into firmware.
+add_executable(v3_manifest_view_tests
+    v3_manifest_view_tests.c
+    v3_manifest_view.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(v3_manifest_view_tests PRIVATE
+    .
+    ../components/frame
+    ../components/config_mgr
+    stubs
+)
+target_compile_options(v3_manifest_view_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME v3_manifest_view_tests COMMAND v3_manifest_view_tests)
+
+# WS-C PSRAM placement contract: prove prefer-PSRAM / fall-back-internal /
+# both-exhausted-NULL for collector_mem.h.  The stub directory is listed
+# BEFORE stubs/ because only it declares heap_caps_malloc/free; compiling with
+# CONFIG_COLLECTOR_PSRAM=1 selects the firmware-side branch.
+add_executable(collector_mem_tests
+    collector_mem_tests.c
+)
+target_include_directories(collector_mem_tests PRIVATE
+    collector_mem_stubs
+    ../components/config_mgr
+)
+target_compile_options(collector_mem_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME collector_mem_tests COMMAND collector_mem_tests)
