@@ -38,6 +38,15 @@ typedef enum {
 
 typedef struct {
     esp_mqtt_error_type_t error_type;
+    /* 2026-10-05：ehome_mqtt.c 的 MQTT_EVENT_ERROR 分支改为把错误细节全部
+     * 打印出来（原来只有一句 "MQTT transport error"，掩盖了 errno=11 其实是
+     * **内存不足**而非网络阻塞 —— lwIP 在非阻塞 socket 上会把 ERR_MEM 改写成
+     * ERR_WOULDBLOCK）。桩结构必须带上这些字段。 */
+    int  esp_tls_last_esp_err;
+    int  esp_tls_stack_err;
+    int  esp_tls_cert_verify_flags;
+    int  esp_transport_sock_errno;
+    int  connect_return_code;
 } esp_mqtt_error_codes_t;
 
 typedef struct {

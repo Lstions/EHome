@@ -11,6 +11,7 @@ int64_t esp_timer_get_time(void);
 #endif
 #include "esp_log.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #ifndef EHOME_MQTT_HOST_TEST
 #include "freertos/task.h"
 #else
@@ -1115,9 +1116,52 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                    event->data_len, msg_ctx);
         break;
     }
-    case MQTT_EVENT_ERROR:
-        ESP_LOGE(TAG, "MQTT transport error");
+    case MQTT_EVENT_ERROR: {
+        /* 把错误细节全部打出来 —— 原来这里只有一句 "MQTT transport error"，
+         * 而这一行掩盖了一个**很容易误判**的事实：
+         *
+         * 现场一直看到的是 `errno=11`（= EAGAIN / EWOULDBLOCK，字面意思是
+         * "操作会阻塞"），于是很像"网络暂时写不进去、等一会儿就好"。
+         * 但真实的传导链是**内存不足**：
+         *
+         *   lwIP tcp_write() 分配 pbuf 失败 -> ERR_MEM（"Out of memory"）
+         *     -> api_msg.c:1855 `} else if (dontblock) {`
+         *        err = (offset == 0) ? ERR_WOULDBLOCK : ERR_OK;
+         *     -> 故意把 ERR_MEM **改写成** ERR_WOULDBLOCK
+         *     -> err_to_errno_table[ERR_WOULDBLOCK] = EWOULDBLOCK = 11
+         *     -> send() 返回 -1，errno=11
+         *
+         * 之所以走 dontblock 分支：esp_tls.c:409 在 connect 之前就把 socket
+         * 设成 O_NONBLOCK 了。**阻塞 socket 反而不会这样** —— 那种情况下
+         * lwIP 会等缓冲区排空再继续写。所以"非阻塞"这个选择把一次可恢复的
+         * 内存不足，变成了对 esp-mqtt 而言的硬失败：
+         * esp_mqtt_write() 对任何 wlen<0 一律 return ESP_FAIL 并
+         * dispatch_transport_error() -> 断开连接。
+         *
+         * 结论：这个 errno 是**内存压力**的信号，不是网络信号。
+         * 把 error_type / tls / sock_errno 一并打出来，下次不必再靠反推。 */
+        if (event != NULL && event->error_handle != NULL) {
+            const esp_mqtt_error_codes_t *eh = event->error_handle;
+            ESP_LOGE(TAG, "MQTT transport error: type=%d tls_esp_err=0x%x "
+                          "tls_stack_err=0x%x cert_flags=0x%x sock_errno=%d(%s) "
+                          "conn_rc=%d | free=%u largest=%u min_ever=%u",
+                     (int)eh->error_type,
+                     (unsigned)eh->esp_tls_last_esp_err,
+                     (unsigned)eh->esp_tls_stack_err,
+                     (unsigned)eh->esp_tls_cert_verify_flags,
+                     eh->esp_transport_sock_errno,
+                     strerror(eh->esp_transport_sock_errno),
+                     (int)eh->connect_return_code,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+        } else {
+            ESP_LOGE(TAG, "MQTT transport error (no error_handle); free=%u largest=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
         break;
+    }
     case MQTT_EVENT_PUBLISHED:
         break;
     default:

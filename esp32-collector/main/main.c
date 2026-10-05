@@ -26,6 +26,8 @@
 #include "transport.h"
 #include "bus_dma.h"
 #include "log_stream.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #ifdef CONFIG_DEBUG_TCP_ENABLED
 #include "ehome_tcp.h"
 #endif
@@ -45,6 +47,39 @@
 
 #define TAG "EHOME"
 
+/* 启动里程碑堆探针（2026-10-05）。
+ *
+ * 目的：S3 有 211+21+32 KiB 内部 RAM，但配置事务开始时只剩约 13KB 可用，
+ * 事务内 apply_buses 又要约 12KB，把堆压到 844 字节，导致 MQTT 上报时
+ * lwIP 分配 pbuf 失败（tcp_write errno=11 -> esp-mqtt 判定致命 -> 掉线）。
+ *
+ * 关键约束：**MQTT 未来要启用 TLS**，所以不能靠裁 mbedTLS / SSL 缓冲来省内存
+ * —— TLS 会**增加**内存需求（TLS 上下文通常 16~40KB）。
+ * 因此必须先搞清 258KB 内部 RAM 究竟被谁占用：只有找到"真正的过量预留"，
+ * 才有空间既让当前明文 MQTT 稳定，又为将来的 TLS 留出余量。
+ * 下面在每个子系统初始化后打印 free/largest，按步骤差分即可定位。 */
+/* 启动里程碑堆探针只在 EHOME_MEM_DIAG 定义时编译进来。
+ *
+ * 2026-10-05 定位"配置事务后 MQTT 因内存不足掉线"时，这组探针是决定性的：
+ * 它按步骤差分出 apply_buses 单独吃掉约 12KB，并证明 WiFi 启动另吃 63KB。
+ * 但它在正常启动时会打 8 行日志，属于诊断噪声，因此默认关闭。
+ * 需要时在 main/CMakeLists.txt 加 target_compile_definitions(main PRIVATE EHOME_MEM_DIAG=1)。
+ * 注意：失败路径上的内存打印（bus_dma/scheduler/mqtt）**不在此开关内**，
+ * 它们只在出错时各打一行，必须保持常开，否则下次同类故障又要重新反推。 */
+#ifdef EHOME_MEM_DIAG
+static void log_boot_heap(const char *stage)
+{
+    ESP_LOGI(TAG, "[bootheap] %-22s free=%u largest=%u min_ever=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
+#else
+static void log_boot_heap(const char *stage) { (void)stage; }
+#endif
+
+
 /* status_task 的栈。6144 在 2026-10-04 被证明不够：设备在压测中两次以
  * reset_reason=4(PANIC) 崩溃，pc 落在 FreeRTOS 的 prvTaskCheckFreeStackSpace
  * （栈溢出检测点），crash_diag 记下的 task 名就是 "status"。
@@ -62,7 +97,18 @@
  * 放在栈上。main/CMakeLists.txt 的 -Wframe-larger-than 门禁此前只作用于
  * app_callbacks.c 这一个文件，所以这个 1400 字节帧从未被门禁检查过；
  * handler_data.c 属于 msg_handler 组件，完全在门禁视野之外。 */
-#define STATUS_TASK_STACK 8192
+/* **由 8192 降到 5120（2026-10-05，实测依据）**。
+ *
+ * 依据：uxTaskGetStackHighWaterMark() 实测峰值 3996 字节（未用 4196）。
+ * 5120 保留 1124 字节余量，相对峰值约 1.28 倍 —— 之所以不按 2 倍给，
+ * 是因为这个任务的栈需求主要来自 buf[1400] 这一个固定帧，属于**已知常量**
+ * 而非随负载增长的量；下面的警告也说明该帧已被门禁盯着。
+ *
+ * 为什么值得收：S3 的 14 个任务栈标称合计约 64KB（占内部 RAM 近四分之一），
+ * 而配置事务后只剩 844 字节可用堆，导致 MQTT 上报时 lwIP 分配 pbuf 失败、
+ * 连接被判定致命而断开。且 MQTT 未来要启用 TLS（上下文 16~40KB），
+ * 现有余量完全不够 —— 只能先把无谓预留压下去。 */
+#define STATUS_TASK_STACK 5120
 
 /* StatusReport 上报周期 (毫秒)。1s 是节点离线可见时延预算的一部分：
  * 最坏 = 1s(本周期) + 3s(服务端 NodeOfflineThreshold) + 1s(服务端检测 ticker) = 5s。
@@ -102,6 +148,46 @@ static void status_task(void *pv)
         /* 传入应用层信号：MQTT 是否已连接。
          * WiFi 自述 CONNECTED 而 MQTT 连不上，正是静默失联的特征组合 ——
          * 只看 WiFi 驱动状态是发现不了的（驱动缓存会说"一切正常"）。 */
+        /* ---- 任务栈实际用量探针（2026-10-05，一次性诊断）----
+         *
+         * 动机：S3 的 14 个任务栈全部走堆分配（xTaskCreate），
+         * 标称合计约 64KB —— 是配置事务（12KB）的 5 倍，也是内部 RAM 的
+         * 主要去向之一。但这些栈大小**从未按实测用量论证过**，
+         * 全是"照着别的项目抄一个看起来安全的数"。
+         *
+         * 约束：MQTT 未来要启用 TLS。TLS 上下文通常要吃 16~40KB，
+         * 而当前配置事务后只剩 844 字节 —— 现状**根本撑不起 TLS**。
+         * 所以必须先把无谓的栈预留压下去，为 TLS 腾出空间。
+         *
+         * 但压缩栈**不能靠猜**：栈不足的表现是随机的内存踩踏/崩溃，
+         * 比内存不足更难定位。因此先用 uxTaskGetStackHighWaterMark()
+         * 测出每个任务的真实峰值余量，再决定砍多少 —— 只砍有实测依据的部分。
+         *
+         * 输出格式：name=已用字节(总栈)，每 60 次循环（约 60s）打印一次。 */
+        {
+#ifdef EHOME_MEM_DIAG
+                static uint32_t s_stack_dump_tick = 0;
+                if (++s_stack_dump_tick % 60 == 0) {
+                    /* 见 log_boot_heap 处说明：默认关闭。 */
+                    static const char *names[] = {
+                        "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
+                        "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
+                        "hello_super", "periph_worker", "periph_rsp", "rgb_led",
+                        "factory_reset",
+                    };
+                    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                        TaskHandle_t h = xTaskGetHandle(names[i]);
+                        if (h == NULL) continue;
+                        UBaseType_t hw = uxTaskGetStackHighWaterMark(h);
+                        ESP_LOGI(TAG, "[stack] %-14s high_water=%u bytes free (unused)",
+                                 names[i], (unsigned)(hw * sizeof(StackType_t)));
+                    }
+                    ESP_LOGI(TAG, "[stack] ---- heap free=%u largest=%u ----",
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                }
+#endif
+        }
         (void)wifi_mgr_check_liveness(mqtt_client_is_connected_impl());
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
@@ -318,8 +404,11 @@ void app_main(void)
         while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
 
+    log_boot_heap("after app_state");
+
     /* ---- Subsystem init (dma_pool already initialized in app_state_init) ---- */
     config_mgr_init();
+    log_boot_heap("after config_mgr");
     
     /* DIP: inject dma_pool into components that need it */
     config_mgr_set_dma_pool(s->dma_pool);
@@ -331,6 +420,7 @@ void app_main(void)
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
     msg_handler_init();
+    log_boot_heap("after msg_handler");
     /* Create the long-lived Hello supervisor before MQTT can start. */
     hello_handshake_start(s);
     log_stream_set_publish_callback(msg_handler_publish);
@@ -339,13 +429,16 @@ void app_main(void)
         crash_diag_mark_reboot_reason("periph_init_failed");
         esp_restart();
     }   /* v3.0: GPIO/PWM peripheral control queues + tasks */
+    log_boot_heap("after periph");
     ota_init();
     scheduler_init();
+    log_boot_heap("after ota+sched");
 
     /* ---- Transports ---- */
     mqtt_client_init();
     transport_manager_init();
     mqtt_transport_register();
+    log_boot_heap("after mqtt_init");
 
     /* ---- WiFi + callbacks ---- */
     wifi_mgr_register_state_cb(on_wifi_state_cb, s);
@@ -360,8 +453,10 @@ void app_main(void)
     rgb_led_start();
     factory_reset_init();
 
+    log_boot_heap("before wifi");
     wifi_mgr_init();
     wifi_mgr_start();
+    log_boot_heap("after wifi_start");
 
     /* ---- Background tasks ---- */
     /* StatusReport now carries runtime queue/performance metrics and nested

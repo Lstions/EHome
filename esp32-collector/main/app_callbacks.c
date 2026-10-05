@@ -504,7 +504,7 @@ static void ensure_mqtt_supervisor(app_state_t *s)
         return;
     }
     TaskHandle_t created = NULL;
-    if (xTaskCreate(mqtt_supervisor_task, "mqtt_super", 8192, NULL, 5,
+    if (xTaskCreate(mqtt_supervisor_task, "mqtt_super", 4096, NULL, 5,
                     &created) != pdPASS) {
         ESP_LOGE(TAG, "failed to create MQTT supervisor; leaving MQTT failed");
         (void)mqtt_client_request_stop();

@@ -187,6 +187,7 @@ add_test(NAME dma_pool_contract_tests COMMAND dma_pool_contract_tests)
 # ---- P0-P5 multi-bus tests ----
 
 add_executable(bus_manager_manifest_tests bus_manager_manifest_tests.c
+    stubs/heap_stub_impl.c
     ../components/hw_profile/hw_profile.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
@@ -211,6 +212,7 @@ add_executable(bus_dma_lease_tests bus_dma_lease_tests.c
     ../components/hw_profile/hw_profile.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
+    stubs/heap_stub_impl.c
 )
 target_include_directories(bus_dma_lease_tests PRIVATE
     stubs
@@ -230,6 +232,7 @@ add_test(NAME bus_dma_lease_tests COMMAND bus_dma_lease_tests)
 
 add_executable(bus_dma_tests bus_dma_tests.c
     ../components/hw_profile/hw_tables.c
+    stubs/heap_stub_impl.c
 )
 target_include_directories(bus_dma_tests PRIVATE
     stubs
@@ -248,6 +251,7 @@ add_test(NAME bus_dma_tests COMMAND bus_dma_tests)
 add_executable(scheduler_route_tests scheduler_route_tests.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
+    stubs/heap_stub_impl.c
 )
 target_include_directories(scheduler_route_tests PRIVATE
     stubs
@@ -364,6 +368,7 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
+    stubs/heap_stub_impl.c
 )
 target_include_directories(rx_health_e2e_tests PRIVATE
     stubs
@@ -437,6 +442,7 @@ add_test(NAME periph_config_apply_tests COMMAND periph_config_apply_tests)
 
 add_executable(config_apply_transaction_tests
     config_apply_transaction_tests.c
+    stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
 )
 target_include_directories(config_apply_transaction_tests PRIVATE
@@ -449,6 +455,7 @@ add_test(NAME config_apply_transaction_tests COMMAND config_apply_transaction_te
 
 add_executable(periph_transaction_gate_tests
     periph_transaction_gate_tests.c
+    stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
     ../components/periph_owner/periph_owner.c
 )
@@ -508,12 +515,16 @@ target_link_options(log_stream_lifecycle_tests PRIVATE -Wl,--wrap=log_capture_se
 target_link_libraries(log_stream_lifecycle_tests PRIVATE pthread)
 add_test(NAME log_stream_lifecycle_tests COMMAND log_stream_lifecycle_tests)
 
-add_executable(mqtt_event_tests mqtt_event_tests.c)
+add_executable(mqtt_event_tests mqtt_event_tests.c
+    stubs/heap_stub_impl.c
+)
 target_include_directories(mqtt_event_tests PRIVATE stubs)
 target_compile_options(mqtt_event_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
 add_test(NAME mqtt_event_tests COMMAND mqtt_event_tests)
 
-add_executable(mqtt_recovery_tests mqtt_recovery_tests.c)
+add_executable(mqtt_recovery_tests mqtt_recovery_tests.c
+    stubs/heap_stub_impl.c
+)
 target_include_directories(mqtt_recovery_tests PRIVATE stubs ../main)
 target_compile_options(mqtt_recovery_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
 add_test(NAME mqtt_recovery_tests COMMAND mqtt_recovery_tests)

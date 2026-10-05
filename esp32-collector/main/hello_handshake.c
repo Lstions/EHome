@@ -167,7 +167,9 @@ void hello_handshake_start(app_state_t *state)
     s_active_nonce = 0;
 
     TaskHandle_t created = NULL;
-    if (xTaskCreate(hello_supervisor_task, "hello_super", 4096, NULL, 5,
+    /* 4096 -> 3072（2026-10-05）：实测峰值 2172，保留约 1.4 倍余量。
+     * 见 bus_worker.c 中 REPORT_TASK_STACK 处的完整说明。 */
+    if (xTaskCreate(hello_supervisor_task, "hello_super", 3072, NULL, 5,
                     &created) != pdPASS || created == NULL) {
         hello_runtime_set_creation_failed(&s_runtime, true);
         state->hello_task_running = false;

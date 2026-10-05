@@ -21,6 +21,8 @@
 #include "hw_tables.h"
 #include "hw_profile.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "driver/uart.h"
 #include <string.h>
 #include <inttypes.h>
@@ -904,10 +906,33 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
     for (int i = 0; i < manifest->channel_count; i++) {
         if (!manifest->channels[i].enabled) continue;
         const config_channel_t *ch = &manifest->channels[i];
+        /* 逐总线差分堆用量（2026-10-05）。
+         *
+         * 现场已确认 apply_buses 这一步单独吃掉约 12KB（12936 -> 876），
+         * 之后堆只剩 876 字节 / 最大连续块 832 字节，导致后续 MQTT 上报
+         * 时 lwIP 分配 pbuf 失败（表现为 tcp_write errno=11）。
+         * 但 5 条总线里究竟是谁吃的、以及是否**每条都吃**，
+         * 只看这一步的前后差无法回答 —— 因此逐条打印。
+         *
+         * 由 EHOME_MEM_DIAG 门控（默认关闭）：每次配置同步会打 10 行，
+         * 正常运行时属于噪声。需要时加 target_compile_definitions(... PRIVATE EHOME_MEM_DIAG=1)。 */
+#ifdef EHOME_MEM_DIAG
+        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d before: free=%u largest=%u",
+                 (unsigned long)ch->id, (int)ch->bus_type,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#endif
         err = reg_bus_channel(rt, ch->id, ch->bus_type,
                               ch->bus_config, ch->bus_config_len,
                               config_channel_get_dma_enabled(ch), generation,
                               plan[i].valid ? plan[i].controller_id : -1);
+#ifdef EHOME_MEM_DIAG
+        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d after:  free=%u largest=%u err=%s",
+                 (unsigned long)ch->id, (int)ch->bus_type,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 esp_err_to_name(err));
+#endif
         if (err != ESP_OK) {
             esp_err_t cleanup_err = bus_manager_cleanup_all(rt);
             return cleanup_err == ESP_OK ? err : cleanup_err;

@@ -286,7 +286,30 @@ static inline uint32_t read_be32(const uint8_t *p)
 
 /* Shared UART port registry */
 #define MAX_UART_PORTS 3
-#define UART_EVENT_QUEUE_DEPTH 32
+/* UART 驱动事件队列深度。**由 32 降到 8（2026-10-05 实机测量）**。
+ *
+ * 这一步是 S3 内存问题的真正大头。逐总线实测（bus_manager 的 [busheap] 探针）：
+ *
+ *     ch=2 UART0  12948 -> 9848   -3100
+ *     ch=4 UART1   9848 -> 6768   -3080
+ *     ch=5 UART2   6768 -> 3672   -3096     3 路 UART 合计 ~9.3KB
+ *     ch=6 SPI2    3672 -> 2320   -1352
+ *     ch=7 I2C0    2320 ->  896   -1424
+ *
+ * 每路 UART 约 3.1KB，而缓冲区（512+512）只占其中约 1KB。差额来自 IDF 的
+ * uart_alloc_driver_obj()（components/esp_driver_uart/src/uart.c:1962）：
+ * 每路要分配 **9 个独立堆对象** —— uart_obj_t 本体、rx_data_buf
+ * （UART_HW_FIFO_LEN × sizeof(uint32_t) = 128×4 = **512 字节**）、
+ * event_queue、tx/rx 两个 ringbuf、以及 5 个 mutex/semaphore。
+ *
+ * event_queue ≈ 深度 × sizeof(uart_event_t) ≈ 32×12 ≈ 400 字节。深度 32 是
+ * 历史值，从未按实际消费速率论证过：事件由 rx_task 通过 queue set 持续排空，
+ * 稳态下队列里通常只有个位数条目。8 仍能吸收突发，但省下约 300 字节/路
+ * —— 在只有 876 字节可用堆的现场，这个量级是决定性的。
+ *
+ * 注意：这里**不是**靠缩小 RX/TX 缓冲换内存。RX 缓冲已另行由 1024 降到 512
+ * （仍远大于 128 字节硬件 FIFO），本条是进一步去掉队列深度的过量预留。 */
+#define UART_EVENT_QUEUE_DEPTH 8
 
 /* UART 驱动缓冲区。DMA 路径用 512（原为 1024）；非 DMA 路径 256 不变。
  * 降低的理由见 uart_driver_install 调用处的大段说明：S3 只有约 7~8KB
@@ -523,9 +546,9 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
                      esp_err_to_name(r), (int)ctx->cfg.uart.port,
                      (unsigned)rx_buffer_size, (unsigned)tx_buffer_size,
                      UART_EVENT_QUEUE_DEPTH,
-                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned)esp_get_minimum_free_heap_size());
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
             return r;
         }
         ctx->uart_event_queue = event_queue;

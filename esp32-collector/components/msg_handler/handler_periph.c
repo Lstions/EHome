@@ -118,7 +118,9 @@ esp_err_t handler_periph_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(periph_worker_task, "periph_worker", 4096, NULL, 4,
+    /* 4096 -> 3072（2026-10-05）：实测峰值 1544，保留约 2 倍余量。
+     * 见 bus_worker.c 中 REPORT_TASK_STACK 处的完整说明。 */
+    if (xTaskCreate(periph_worker_task, "periph_worker", 3072, NULL, 4,
                     &s_periph_worker_task) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create periph worker task");
 		vQueueDelete(s_periph_cmd_queue); s_periph_cmd_queue = NULL;
@@ -126,7 +128,8 @@ esp_err_t handler_periph_init(void)
 		vSemaphoreDelete(s_dedup_mutex); s_dedup_mutex = NULL;
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(periph_rsp_task_func, "periph_rsp", 4096, NULL, 4,
+    /* 4096 -> 3072（2026-10-05）：实测峰值 1620，保留约 1.9 倍余量。 */
+    if (xTaskCreate(periph_rsp_task_func, "periph_rsp", 3072, NULL, 4,
                     &s_periph_rsp_task) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create periph response task");
         vTaskDelete(s_periph_worker_task);

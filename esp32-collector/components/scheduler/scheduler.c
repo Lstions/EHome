@@ -221,9 +221,9 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
         ESP_LOGE(TAG, "scheduler task create FAILED (static): need %d bytes; "
                       "free=%u largest=%u min_ever=%u | internal free=%u largest=%u",
                  SCHED_TASK_STACK,
-                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         s_prepared = false;
@@ -314,7 +314,7 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
         SCHED_TASK_PRIORITY, s_sched_stack, &s_sched_tcb, SCHED_TASK_CORE);
     if (s_task_handle == NULL) {
         ESP_LOGE(TAG, "scheduler task resume FAILED (static); free=%u largest=%u",
-                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         s_running = false;
         return SCHED_ERR_NOT_INIT;
