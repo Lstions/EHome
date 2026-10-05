@@ -50,6 +50,16 @@ type StatusReportMsg struct {
 	ConfigEpoch  uint64
 	SyncState    string
 	ConfigHash   string // v2.2: config_hash from device
+
+	// NodeConfigFailed 是**服务端权威状态**：该节点当前 config_status/config_sync_state
+	// 为 failed（由 ConfigResult(success=false) 或服务端拒绝 manifest 写入）。
+	//
+	// 为什么 SyncGate 需要它：hash 相等 / 无 hash 都只说明"设备当前持有的配置"，
+	// 不说明"设备成功应用了它"。设备一旦应用失败就会丢弃暂存的新 manifest
+	// （固件 config_mgr_discard_staged_manifest），active 仍是旧值，于是它
+	// 继续上报**旧** hash —— 服务端据此判定 hash_match 而停止下发，双方互等。
+	// failed 是唯一能打破这个对称的服务端证据。详见 OnStatusReport。
+	NodeConfigFailed bool
 }
 
 // ConfigQueryMsg carries the parsed ConfigSyncRequest fields.
@@ -211,6 +221,59 @@ func (g *SyncGate) OnHello(deviceID string, hello *HelloMsg) SyncDecision {
 // CRITICAL: old firmware does not send config_hash — must short-circuit to avoid
 // pushing config every 5 seconds (empty string != serverHash is always true).
 func (g *SyncGate) OnStatusReport(deviceID string, rpt *StatusReportMsg) SyncDecision {
+	// === 服务端已判 failed 的节点：hash 无法证明它应用成功，必须重新下发 ===
+	//
+	// 这是 2026-10-05 S3(30EDA0A9A808) "config_status=failed 且服务端停止下发"
+	// 的根因修复。设备侧证据（固件 app_callbacks.c）：
+	//   事务失败 → config_mgr_discard_staged_manifest() → active 仍是**旧**配置
+	//   → ConfigResult(success=false) → 此后每次 StatusReport 都上报**旧** manifest_id。
+	// 服务端侧证据（本文件）：
+	//   旧逻辑先判 hash 相等就返回 hash_match(none)，于是**永远**不再下发；
+	//   设备在等一份新 manifest，服务端在等设备改变 hash —— 双向死锁，
+	//   双方都没做错任何"动作"，所以日志里既没有 sent 也没有 rejected。
+	//
+	// failed 是打破这个对称的**服务端权威**信号。这里刻意放在 hash 比较**之前**，
+	// 因为 hash 相等恰恰就是死锁的那个条件（放在之后等于没修）。
+	//
+	// 为什么不会打爆节点：本分支与周期失配推送**共用**同一个 5s 去重窗口，
+	// 频率不高于改动之前；且设备在应用失败时会明确回 ConfigResult(false)，
+	// 不会出现"假装成功"的抖动。
+	if rpt.NodeConfigFailed {
+		// 服务端无配置可发时不要制造空 manifest：此时设备拿到的只会是空配置，
+		// 把它标成 syncing 反而会掩盖"服务端侧缺配置"这个真实问题。
+		// 走与 decide() 一致的 no_server_config 语义。
+		serverHash := g.mgr.CalcConfigHashForDevice(deviceID)
+		if serverHash.Hash == "" {
+			d := SyncDecision{
+				Action:   SyncActionNone,
+				Reason:   "no_server_config",
+				SyncID:   uuid.New().String(),
+				DeviceID: deviceID,
+			}
+			recordDecision(d)
+			return d
+		}
+		d := SyncDecision{
+			Action:     SyncActionFull,
+			Reason:     "hash_match_but_config_failed",
+			SyncID:     uuid.New().String(),
+			DeviceID:   deviceID,
+			ManifestID: serverHash.ManifestID,
+		}
+		if !g.allowPeriodicFullPush(deviceID) {
+			deferred := SyncDecision{
+				Action:   SyncActionDefer,
+				Reason:   "config_failed_within_dedup_window",
+				SyncID:   d.SyncID,
+				DeviceID: deviceID,
+			}
+			recordDecision(deferred)
+			return deferred
+		}
+		recordDecision(d)
+		return d
+	}
+
 	if rpt.ConfigHash == "" {
 		d := SyncDecision{
 			Action:   SyncActionNone,

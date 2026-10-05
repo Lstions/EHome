@@ -170,6 +170,23 @@ static bool g_spi_initialized[SPI_HOST_MAX];
 static int g_spi_dma_mode[SPI_HOST_MAX];
 static int g_spi_dev_count;
 
+/* Full-duplex contract tracking.
+ *
+ * The previous stub was a bare `return ESP_OK` and therefore could not fail
+ * for the one frame shape that broke the S3 node: a full-duplex transaction
+ * with rxlength > length.  IDF rejects exactly that in check_trans_valid()
+ * (esp_driver_spi/src/gpspi/spi_master.c:1119), so the stub now models the
+ * rule and records what the driver was asked to do. */
+static int g_spi_reject_fd_calls;   /* calls IDF would reject: rxlength > length */
+static int g_spi_transmit_calls;    /* accepted calls */
+static bool g_spi_last_valid;
+static spi_transaction_t g_spi_last;
+static uint8_t g_spi_last_tx[512];  /* copy of the MOSI bytes */
+static size_t  g_spi_last_tx_len;
+static uint8_t g_spi_last_rx[512];  /* bytes the modelled slave drives on MISO */
+static size_t  g_spi_slave_resp_len;   /* how many response bytes it will drive */
+static size_t  g_spi_slave_cmd_len;    /* how many command bytes it consumes first */
+
 esp_err_t spi_bus_initialize(spi_host_device_t host, const spi_bus_config_t *cfg, int dma) {
     (void)cfg;
     if (host < 0 || host >= SPI_HOST_MAX) return ESP_ERR_INVALID_ARG;
@@ -196,8 +213,71 @@ esp_err_t spi_bus_add_device(spi_host_device_t host,
 esp_err_t spi_bus_remove_device(spi_device_handle_t handle) {
     (void)handle; g_spi_dev_count--; return ESP_OK;
 }
+/* Model IDF's full-duplex length rule and the peripheral's RX capture.
+ *
+ * IDF check_trans_valid() (spi_master.c:1119):
+ *     SPI_CHECK(is_half_duplex || rxlength <= length,
+ *               "rx length > tx length in full duplex mode", ESP_ERR_INVALID_ARG);
+ * and spi_hal_fetch_result() copies rx_bitlen bits out of the work registers
+ * starting at bit 0 of the frame.  A stub that returns ESP_OK unconditionally
+ * is blind to the defect this test exists for, so both behaviours are modelled
+ * here.  It also asserts the MOSI pad contract so the test cannot pass with a
+ * widened frame that forgot to zero its dummy tail. */
 esp_err_t spi_device_transmit(spi_device_handle_t handle, spi_transaction_t *t) {
-    (void)handle; (void)t; return ESP_OK;
+    (void)handle;
+    if (t == NULL) return ESP_ERR_INVALID_ARG;
+
+    g_spi_transmit_calls++;
+
+    if (t->rxlength > t->length) {
+        g_spi_reject_fd_calls++;
+        g_spi_last_valid = false;
+        return ESP_ERR_INVALID_ARG;
+    }
+    g_spi_last_valid = true;
+
+    size_t tx_len = t->length / 8;
+    if (tx_len > sizeof(g_spi_last_tx)) tx_len = sizeof(g_spi_last_tx);
+    g_spi_last_tx_len = tx_len;
+    if (t->tx_buffer != NULL) memcpy(g_spi_last_tx, t->tx_buffer, tx_len);
+    else memset(g_spi_last_tx, 0, tx_len);
+
+    g_spi_last = *t;
+
+    /* Model a real SPI slave.
+     *
+     * A slave cannot answer a command while that command is still being
+     * shifted in, so its response bytes appear on MISO only during the clocks
+     * AFTER the command.  The modelled slave consumes g_spi_slave_cmd_len
+     * leading bytes (driving 0x00 while it reads the command) and then drives
+     * g_spi_slave_resp_len response bytes.  A frame that is too short to hold
+     * the response cannot return it, which is exactly the failure the test
+     * exists to catch. */
+    size_t frame_len = t->rxlength / 8;
+    if (frame_len > sizeof(g_spi_last_rx)) frame_len = sizeof(g_spi_last_rx);
+
+    uint8_t miso[512];
+    memset(miso, 0, sizeof(miso));
+    size_t off = g_spi_slave_cmd_len;
+    if (off < sizeof(miso)) {
+        size_t n = g_spi_slave_resp_len;
+        if (n > sizeof(miso) - off) n = sizeof(miso) - off;
+        memcpy(miso + off, g_spi_last_rx, n);
+    }
+
+    if (t->rx_buffer != NULL) memcpy(t->rx_buffer, miso, frame_len);
+    return ESP_OK;
+}
+
+/* Program the MISO bytes the modelled slave will shift out, and how many
+ * command bytes it must consume before it starts driving them. */
+static void spi_slave_set_miso(const uint8_t *bytes, size_t len, size_t cmd_len)
+{
+    if (len > sizeof(g_spi_last_rx)) len = sizeof(g_spi_last_rx);
+    memset(g_spi_last_rx, 0, sizeof(g_spi_last_rx));
+    if (bytes && len) memcpy(g_spi_last_rx, bytes, len);
+    g_spi_slave_resp_len = bytes ? len : 0;
+    g_spi_slave_cmd_len = cmd_len;
 }
 
 /* ---- I2C driver stubs with state tracking ---- */
@@ -274,6 +354,15 @@ static void reset_all_state(void)
     memset(g_spi_initialized, 0, sizeof(g_spi_initialized));
     memset(g_spi_dma_mode, 0, sizeof(g_spi_dma_mode));
     g_spi_dev_count = 0;
+    g_spi_reject_fd_calls = 0;
+    g_spi_transmit_calls = 0;
+    g_spi_last_valid = false;
+    memset(&g_spi_last, 0, sizeof(g_spi_last));
+    memset(g_spi_last_tx, 0, sizeof(g_spi_last_tx));
+    g_spi_last_tx_len = 0;
+    memset(g_spi_last_rx, 0, sizeof(g_spi_last_rx));
+    g_spi_slave_resp_len = 0;
+    g_spi_slave_cmd_len = 0;
     g_i2c_bus_count = 0;
     g_i2c_dev_count = 0;
     g_mutex_count = 0;
@@ -892,6 +981,140 @@ static void test_api_guards(void)
 }
 
 /* =====================================================================
+ * SPI full-duplex length contract (S3 field defect, 2026-10-05)
+ *
+ * The S3 node 30EDA0A9A808 reported, every 5s, forever:
+ *     E spi_master: check_trans_valid(1119): rx length > tx length in full duplex mode
+ *     I CMD_SPI: Stats: txn=3 err=3 (0%) no_ctx=0
+ * and both SPI/I2C edge devices stayed offline.  Root cause: spi_transact()
+ * set .length = tx_len*8 and .rxlength = rx_size*8 unconditionally, so every
+ * read-after-write whose response was longer than the request was rejected by
+ * IDF before a single clock was emitted.
+ *
+ * These cases use the two production frame shapes from config_templates
+ * 643 (8-byte Modbus RTU request, 9-byte response) and 644 (1-byte register
+ * pointer, 6-byte response).  Both are legal protocol frames; only the
+ * firmware's one-clock-train representation of them was wrong.
+ * ===================================================================== */
+
+/* --- 643: Modbus RTU read, 8-byte request, 9-byte response --- */
+static void test_spi_transact_rx_longer_than_tx(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx;
+    uint8_t spi_cfg[9];
+    make_spi_cfg(spi_cfg, 5, 0, 1000000, 23, 19, 18);
+    CHECK(bus_dma_init(&ctx, BUS_TYPE_SPI, true, spi_cfg, sizeof(spi_cfg)) == ESP_OK,
+          "SPI init should succeed");
+
+    const uint8_t tx[8] = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xC4, 0x0B };
+    uint8_t rx[64];
+    size_t rx_len = 0;
+    memset(rx, 0, sizeof(rx));
+
+    /* The slave answers with 9 bytes after consuming the 8-byte command. */
+    const uint8_t resp[9] = { 0x01, 0x03, 0x04, 0x00, 0x64, 0x00, 0xC8, 0x00, 0x00 };
+    spi_slave_set_miso(resp, sizeof(resp), sizeof(tx));
+
+    esp_err_t e = bus_dma_transact(&ctx, tx, sizeof(tx), rx, 9, &rx_len);
+
+    /* This is the defect: IDF rejected the frame, so the caller saw an error
+     * and the channel counted err++ every sample. */
+    CHECK(e == ESP_OK, "SPI 8->9 byte read-after-write must be accepted");
+    CHECK(g_spi_reject_fd_calls == 0,
+          "spi_transact must never issue rxlength > length in full duplex");
+    CHECK(rx_len == 9, "SPI 8->9 must report all 9 response bytes");
+    CHECK(memcmp(rx, resp, 9) == 0, "SPI 8->9 must return the slave response verbatim");
+
+    /* One clock train, CS held low for the whole frame: exactly one transmit. */
+    CHECK(g_spi_transmit_calls == 1,
+          "SPI read-after-write must be a single transaction (CS stays low)");
+    /* The single-CS frame must clock the command AND the response: 8 + 9. */
+    CHECK(g_spi_last.length == (8 + 9) * 8,
+          "read-after-write frame must clock tx_len + rx_size bytes");
+    CHECK(g_spi_last.rxlength == (8 + 9) * 8,
+          "read-after-write frame must capture the whole frame");
+    /* MOSI pad after the command must be neutral, not stale stack bytes. */
+    CHECK(memcmp(g_spi_last_tx, tx, 8) == 0, "command bytes must be shifted out first");
+    for (int i = 8; i < 17; i++)
+        CHECK(g_spi_last_tx[i] == 0x00, "MOSI pad byte must be 0x00");
+
+    bus_dma_deinit(&ctx);
+}
+
+/* --- 644: I2C register-pointer idiom, 1-byte request, 6-byte response --- */
+static void test_spi_transact_short_command_long_response(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx;
+    uint8_t spi_cfg[9];
+    make_spi_cfg(spi_cfg, 5, 0, 1000000, 23, 19, 18);
+    CHECK(bus_dma_init(&ctx, BUS_TYPE_SPI, true, spi_cfg, sizeof(spi_cfg)) == ESP_OK,
+          "SPI init should succeed");
+
+    const uint8_t tx[1] = { 0xF7 };  /* BMP280-style register pointer */
+    uint8_t rx[8];
+    size_t rx_len = 0;
+    memset(rx, 0, sizeof(rx));
+
+    const uint8_t resp[6] = { 0x6C, 0x51, 0x80, 0x00, 0x1F, 0xA0 };
+    spi_slave_set_miso(resp, sizeof(resp), sizeof(tx));
+
+    esp_err_t e = bus_dma_transact(&ctx, tx, sizeof(tx), rx, 6, &rx_len);
+
+    CHECK(e == ESP_OK, "SPI 1->6 byte register read must be accepted");
+    CHECK(g_spi_reject_fd_calls == 0, "no full-duplex length violation for 1->6");
+    CHECK(rx_len == 6, "SPI 1->6 must report all 6 response bytes");
+    CHECK(memcmp(rx, resp, 6) == 0, "SPI 1->6 must return the slave response verbatim");
+    CHECK(g_spi_transmit_calls == 1, "SPI 1->6 must stay one transaction");
+    CHECK(g_spi_last.length == (1 + 6) * 8,
+          "1->6 register read must clock the pointer plus the 6 response bytes");
+    CHECK(g_spi_last_tx[0] == 0xF7, "register pointer must be shifted out first");
+    for (int i = 1; i < 7; i++)
+        CHECK(g_spi_last_tx[i] == 0x00, "pad bytes must all be 0x00");
+
+    bus_dma_deinit(&ctx);
+}
+
+/* --- the legal shapes must stay legal and must not be widened --- */
+static void test_spi_transact_symmetric_and_tx_only(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx;
+    uint8_t spi_cfg[9];
+    make_spi_cfg(spi_cfg, 5, 0, 1000000, 23, 19, 18);
+    CHECK(bus_dma_init(&ctx, BUS_TYPE_SPI, true, spi_cfg, sizeof(spi_cfg)) == ESP_OK,
+          "SPI init should succeed");
+
+    /* Symmetric 8->8: must NOT be widened and must use the caller's buffers. */
+    const uint8_t tx[8] = { 0xAA, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+    const uint8_t resp[8] = { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80 };
+    uint8_t rx[8];
+    size_t rx_len = 0;
+    spi_slave_set_miso(resp, sizeof(resp), sizeof(tx));
+
+    CHECK(bus_dma_transact(&ctx, tx, 8, rx, 8, &rx_len) == ESP_OK,
+          "symmetric SPI 8->8 must succeed");
+    CHECK(rx_len == 8, "symmetric SPI must return 8 bytes");
+    CHECK(memcmp(rx, resp, 8) == 0, "symmetric SPI must return the slave response");
+    CHECK(g_spi_last.length == 16 * 8 && g_spi_last.rxlength == 16 * 8,
+          "write-then-read frame must be tx_len + rx_size even when symmetric");
+    CHECK(g_spi_last.tx_buffer != tx,
+          "read-after-write must use the scratch frame, not the caller's TX buffer");
+
+    /* TX-only: no RX requested at all, and the caller's buffer is used. */
+    spi_slave_set_miso(NULL, 0, 0);
+    CHECK(bus_dma_transact(&ctx, tx, 8, NULL, 0, &rx_len) == ESP_OK,
+          "TX-only SPI write must succeed");
+    CHECK(rx_len == 0, "TX-only SPI must report no RX bytes");
+    CHECK(g_spi_last.rxlength == 0, "TX-only SPI must not request an RX phase");
+    CHECK(g_spi_last.tx_buffer == tx, "TX-only SPI must use the caller's TX buffer");
+    CHECK(g_spi_reject_fd_calls == 0, "no length violation in any legal shape");
+
+    bus_dma_deinit(&ctx);
+}
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void)
@@ -923,6 +1146,9 @@ int main(void)
     test_i2c_config_too_short();
     test_bus_config_get_dma_enabled();
     test_api_guards();
+    test_spi_transact_rx_longer_than_tx();
+    test_spi_transact_short_command_long_response();
+    test_spi_transact_symmetric_and_tx_only();
 
     if (g_failures > 0) {
         fprintf(stderr, "\nbus_dma_tests: %d FAILURES\n", g_failures);

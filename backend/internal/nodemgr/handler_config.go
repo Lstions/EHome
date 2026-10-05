@@ -66,8 +66,25 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 	if err := m.db.Where("node_id = ?", deviceID).First(&current).Error; err != nil {
 		return
 	}
-	if current.ConfigVersion != manifestID || current.ConfigSyncState != "syncing" || current.LastSyncID != syncID {
+	// 只丢弃"确实属于更早世代"的回执。
+	//
+	// 旧实现额外要求 config_sync_state == "syncing"，这让 failed 变成一个**没有出口
+	// 的终态**：一次失败把状态写成 failed 之后，同一代（同 manifest_id + 同 sync_id）
+	// **迟到的成功回执**会被当成 stale 丢掉 —— 设备后来其实应用成功了，服务端却
+	// 拒绝相信，failed 永久粘住（2026-10-05 S3 现场：45+ 分钟 cfg=failed，
+	// 期间 0 sent / 0 rejected）。
+	//
+	// 世代判据（manifest_id + sync_id）本身已经足够精确：sync_id 是每次决策新生成的
+	// UUID，跨代必然不同。因此这里放行 failed → applied/in_sync 的复位，
+	// 而更早世代的回执仍被 manifest_id/sync_id 挡住。
+	if current.ConfigVersion != manifestID || current.LastSyncID != syncID {
 		logger.Warnf("[%s] ignoring stale ConfigResult manifest=%s sync_id=%s", deviceID, manifestID, syncID)
+		return
+	}
+	// 状态机守卫：in_sync 已经是终态且世代相同，重复回执无需再写（幂等短路）。
+	// failed / syncing / 其它中间态都允许按本回执的结果收敛。
+	if current.ConfigSyncState == "in_sync" && success {
+		logger.Infof("[%s] ConfigResult already in_sync for manifest=%s sync_id=%s (idempotent)", deviceID, manifestID, syncID)
 		return
 	}
 
@@ -86,12 +103,20 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 		if syncID != "" {
 			updates["last_sync_id"] = syncID
 		}
-		result := m.db.Model(&models.Node{}).Where("node_id = ? AND config_version = ? AND config_sync_state = ? AND last_sync_id = ?", deviceID, manifestID, "syncing", syncID).Updates(updates)
+		// CAS 从 "= syncing" 放宽为 "IN (syncing, failed)"：世代判据由
+		// manifest_id + sync_id 承担，状态判据只用来**阻止把已确认的 in_sync
+		// 降级**。要求严格等于 syncing 会让 failed 永远无法复位（见上文）。
+		result := m.db.Model(&models.Node{}).
+			Where("node_id = ? AND config_version = ? AND last_sync_id = ? AND config_sync_state IN ?",
+				deviceID, manifestID, syncID, []string{"syncing", "failed"}).
+			Updates(updates)
 		if result.Error != nil || result.RowsAffected != 1 {
 			logger.Warnf("[%s] persist ConfigResult rejected: err=%v rows=%d", deviceID, result.Error, result.RowsAffected)
 		}
 	} else {
-		result := m.db.Model(&models.Node{}).Where("node_id = ? AND config_version = ? AND config_sync_state = ? AND last_sync_id = ?", deviceID, manifestID, "syncing", syncID).
+		result := m.db.Model(&models.Node{}).
+			Where("node_id = ? AND config_version = ? AND last_sync_id = ? AND config_sync_state IN ?",
+				deviceID, manifestID, syncID, []string{"syncing", "failed"}).
 			Updates(map[string]interface{}{"config_status": "failed", "config_sync_state": "failed"})
 		if result.Error != nil || result.RowsAffected != 1 {
 			logger.Warnf("[%s] persist ConfigResult failure rejected: err=%v rows=%d", deviceID, result.Error, result.RowsAffected)

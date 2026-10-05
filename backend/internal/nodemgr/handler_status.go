@@ -300,11 +300,25 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 	}
 
 	// StatusReport never overwrites synchronization generations. It may only
-	// self-heal a non-syncing node when the current manifest identity matches.
+	// self-heal a node when the current manifest identity matches.
+	//
+	// 2026-10-05：自愈范围从 "syncing" 扩到 **syncing + failed**。
+	// 旧实现漏掉 failed 这一档，于是"设备已 idle 且持有当前这一代配置"
+	// 这个**最强证据**反而无法把 failed 清掉 —— failed 成了没有出口的终态
+	// （现场：S3 45+ 分钟 cfg=failed，0 sent / 0 rejected，双方互等）。
+	//
+	// 判据本身没有放宽：仍要求 device 自报的 sync_state=idle、
+	// 且 config_hash == node.ConfigVersion、且 syncID == node.LastSyncID
+	// —— 三条同时成立才说明"这一代确实在设备上生效了"。
 	recoveryAttempted := false
-	if syncState == "idle" && node.ConfigSyncState == "syncing" {
+	if syncState == "idle" && (node.ConfigSyncState == "syncing" || node.ConfigSyncState == "failed") {
 		if configHash != "" && configHash == node.ConfigVersion && syncID != "" && syncID == node.LastSyncID {
+			// 内存态必须与即将落库的值一致。否则下面的 NodeConfigFailed
+			// 仍读到旧的 "failed"，会触发一次**多余的重下发**，而重下发路径
+			// （sender.go persist syncing）会把刚自愈好的 in_sync 又踩回 syncing
+			// —— 自愈与重下发互相打架，正是本会话反复出现的"写了但没生效"。
 			node.ConfigSyncState = "in_sync"
+			node.ConfigStatus = "applied"
 			recoveryAttempted = true
 		}
 	}
@@ -364,9 +378,14 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		return
 	}
 	if recoveryAttempted {
+		// 必须**同时**复位 config_status：它和 config_sync_state 是一对，
+		// 只清一个会留下 "config_status=failed + sync_state=in_sync" 的自相矛盾行
+		// —— 前端读 config_status 仍显示失败，而 SyncGate 的 NodeConfigFailed
+		// 仍为真、会一直重下发。两个字段必须原子地一起收敛。
 		result := m.db.Model(&models.Node{}).
-			Where("id = ? AND config_version = ? AND last_sync_id = ? AND config_sync_state = ?", node.ID, configHash, syncID, "syncing").
-			Update("config_sync_state", "in_sync")
+			Where("id = ? AND config_version = ? AND last_sync_id = ? AND config_sync_state IN ?",
+				node.ID, configHash, syncID, []string{"syncing", "failed"}).
+			Updates(map[string]interface{}{"config_sync_state": "in_sync", "config_status": "applied"})
 		if result.Error != nil || result.RowsAffected != 1 {
 			logger.Warnf("[%s] status recovery rejected: err=%v rows=%d", deviceID, result.Error, result.RowsAffected)
 			return
@@ -391,6 +410,12 @@ func (m *Manager) handleStatusReport(deviceID string, payload []byte) {
 		ConfigEpoch:  configEpoch,
 		SyncState:    syncState,
 		ConfigHash:   configHash,
+		// 服务端权威状态（不是设备自述）：node 是本函数早前从 DB 读出的行，
+		// 此处尚未写入 config_status/config_sync_state，因此它精确反映"上一次
+		// 落库的判定"。failed 表示上一次配置事务已被判失败，而设备上报的
+		// hash 仍可能是旧的（固件失败时丢弃暂存 manifest），此时按 hash 相等
+		// 跳过下发会造成"双方互等"的永久卡死。
+		NodeConfigFailed: node.ConfigStatus == "failed" || node.ConfigSyncState == "failed",
 	}
 
 	decision := m.syncGate.OnStatusReport(deviceID, rpt)

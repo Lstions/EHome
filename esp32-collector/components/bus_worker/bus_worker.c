@@ -50,7 +50,17 @@
 #define CMD_PRIO      6
 #define RX_PRIO       7
 #define UART_STACK    4096
-#define SPI_I2C_STACK 3072
+/* 3072 was measured against spi_transact()'s ORIGINAL frame, which held no
+ * scratch.  The full-duplex write-then-read fix in bus_dma.c added a
+ * (tx_len + rx_size)-byte frame pair (SPI_FD_FRAME_MAX each) to that frame, so
+ * the deepest SPI path is now roughly spi_i2c_cmd_loop (1072) +
+ * bus_dma_transact (32) + spi_transact (864) + the IDF driver chain.
+ *
+ * -fstack-usage on the S3 build reports spi_transact = 864 bytes static; at
+ * 3072 the remaining margin was under 30%, which is the same shape as the
+ * 2026-10-04 stack overflows (log_tx, status_task) that this repo already paid
+ * for.  4096 matches UART_STACK/RX_STACK and restores a ~45% margin. */
+#define SPI_I2C_STACK 4096
 #define RX_STACK      4096
 #define UART_EVENT_QUEUE_DEPTH 32
 #define UART_EVENT_SET_CAPACITY (SCHED_MAX_CHANNELS * UART_EVENT_QUEUE_DEPTH)

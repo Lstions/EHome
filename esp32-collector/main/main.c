@@ -90,6 +90,19 @@ static void status_task(void *pv)
          * 所以可以放在这个周期任务里随手调用。不要放进 NVS —— 每 1s 写一次会磨损 flash。
          * 见 main/boot_guard.h 的说明。 */
         boot_guard_tick();
+        /* WiFi 主动链路探针（2026-10-05）。
+         *
+         * 为什么不能只靠 WIFI_EVENT_STA_DISCONNECTED：实测出现过"驱动以为还连着、
+         * 实际 L2 已经不在"的静默失联 —— 串口 0 条 WiFi 事件、0 条重连日志，
+         * 而服务端 ping 100% 丢包、ARP 无表项，固件却一路正常运行。
+         * 没有事件就没有重试，所以必须有一个主动探针。
+         *
+         * 放在这里（1s 周期）而不是新建任务：探针自带 5s 节流，
+         * 无需额外栈与内存。 */
+        /* 传入应用层信号：MQTT 是否已连接。
+         * WiFi 自述 CONNECTED 而 MQTT 连不上，正是静默失联的特征组合 ——
+         * 只看 WiFi 驱动状态是发现不了的（驱动缓存会说"一切正常"）。 */
+        (void)wifi_mgr_check_liveness(mqtt_client_is_connected_impl());
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
                 s->uptime_sec, "online",

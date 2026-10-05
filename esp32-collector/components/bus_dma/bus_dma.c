@@ -1085,27 +1085,95 @@ static esp_err_t spi_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
     return ESP_OK;
 }
 
+/* Byte bound on the scratch frame used for a full-duplex write-then-read.
+ * The frame is tx_len + rx_size bytes: every caller is bounded by
+ * CMD_TX_MAX == 128 (legacy_write_guard.h) and read_size <= 256, and
+ * spi_i2c_cmd_loop clamps the capture to its own 256-byte buffer.  The bound
+ * is explicit so a future CMD_TX_MAX/read_size change fails loudly at the
+ * source instead of silently truncating a request. */
+#define SPI_FD_FRAME_MAX 384
+
 static esp_err_t spi_transact(bus_dma_ctx_t *ctx,
                                const uint8_t *tx, size_t tx_len,
                                uint8_t *rx, size_t rx_size, size_t *rx_len)
 {
     *rx_len = 0;
 
-    spi_transaction_t t = {
-        .length    = tx_len * 8,          /* bits */
-        .tx_buffer = tx,
-        .rxlength  = rx_size * 8,
-        .rx_buffer = rx,
-    };
+    const bool rx_wanted = (rx != NULL && rx_size > 0);
+    const bool tx_wanted = (tx != NULL && tx_len > 0);
+
+    if (!rx_wanted && !tx_wanted) return ESP_ERR_INVALID_ARG;
+
+    spi_transaction_t t = { 0 };
+
+    if (tx_wanted && rx_wanted) {
+        /* Full-duplex write-then-read, the shape every SPI sensor read uses
+         * (e.g. template 644: 1 register-pointer byte, 6 response bytes).
+         *
+         * SPI clocks one bit in and one bit out per clock, so a slave cannot
+         * answer a command while that command is still being shifted in.  The
+         * response therefore occupies the clocks AFTER the command, and the
+         * single-CS frame that carries it is (tx_len + rx_size) bytes: the
+         * command first, then rx_size neutral clocks that shift the answer
+         * back.  That is also exactly what i2c_master_transmit_receive() does
+         * on the I2C side (write, repeated START, read), so both transactional
+         * buses now describe a read-after-write the same way.
+         *
+         * The previous code asked for length = tx_len and rxlength = rx_size in
+         * one full-duplex transaction.  Whenever the response was longer than
+         * the request (8->9 for template 643, 1->6 for 644) IDF rejected the
+         * frame before emitting a clock:
+         *     E spi_master: check_trans_valid(1119):
+         *       rx length > tx length in full duplex mode
+         * (esp_driver_spi/src/gpspi/spi_master.c:1119, because the peripheral
+         * has no way to clock in more than it clocks out in full duplex), so
+         * CMD_SPI counted err++ on 100% of samples.
+         *
+         * Splitting this into two spi_device_transmit() calls would raise CS
+         * between the command and the response and reset the slave's command
+         * state machine on most sensors, so it must stay ONE transaction: the
+         * MOSI tail is padded with 0x00 (neutral, not stale stack) and the
+         * whole frame is captured, then the response is sliced from the tail.
+         * IDF copies RX from bit 0 of the frame (spi_hal_fetch_result()), so
+         * the first tx_len captured bytes are the slave's pre-response output
+         * and are discarded; rx[0..rx_size) is the answer. */
+        size_t frame = tx_len + rx_size;
+        if (frame > SPI_FD_FRAME_MAX) return ESP_ERR_INVALID_ARG;
+
+        uint8_t scratch_tx[SPI_FD_FRAME_MAX];
+        uint8_t scratch_rx[SPI_FD_FRAME_MAX];
+        memcpy(scratch_tx, tx, tx_len);
+        memset(scratch_tx + tx_len, 0x00, rx_size);
+
+        t.length    = (uint32_t)frame * 8;
+        t.tx_buffer = scratch_tx;
+        t.rxlength  = (uint32_t)frame * 8;   /* capture the whole frame */
+        t.rx_buffer = scratch_rx;
+
+        esp_err_t r = spi_device_transmit(ctx->cfg.spi.dev, &t);
+        if (r != ESP_OK) return r;
+
+        memcpy(rx, scratch_rx + tx_len, rx_size);
+        *rx_len = rx_size;
+        return ESP_OK;
+    }
+
+    /* Symmetric (rx_size <= tx_len) and single-direction frames are already a
+     * legal full-duplex transaction: rxlength <= length holds, so the caller's
+     * own buffers can be used directly. */
+    t.length    = (uint32_t)tx_len * 8;          /* bits */
+    t.tx_buffer = tx;
+    t.rxlength  = rx_size * 8;
+    t.rx_buffer = rx;
 
     /* If TX only, don't request RX */
-    if (rx == NULL || rx_size == 0) {
+    if (!rx_wanted) {
         t.rxlength  = 0;
         t.rx_buffer = NULL;
     }
     /* If RX only, don't send TX */
-    if (tx == NULL || tx_len == 0) {
-        t.length    = rx_size * 8;
+    if (!tx_wanted) {
+        t.length    = (uint32_t)rx_size * 8;
         t.tx_buffer = NULL;
     }
 

@@ -49,6 +49,11 @@ static int g_failures = 0;
  * ===================================================================== */
 static int g_stub_ap_rssi = -55;
 static esp_err_t g_stub_ap_err = ESP_OK;
+static int g_connect_calls = 0;
+static int g_disconnect_calls = 0;
+
+/* stubs/esp_timer.h 声明为 extern，这里给出唯一一份定义（可控假时钟）。 */
+int64_t g_test_time_us = 0;
 
 esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *ap_info) {
     if (g_stub_ap_err != ESP_OK) return g_stub_ap_err;
@@ -125,7 +130,12 @@ esp_err_t esp_wifi_set_config(wifi_interface_t ifx, wifi_config_t *conf) {
 }
 esp_err_t esp_wifi_start(void) { return ESP_OK; }
 esp_err_t esp_wifi_stop(void) { return ESP_OK; }
-esp_err_t esp_wifi_connect(void) { return ESP_OK; }
+esp_err_t esp_wifi_connect(void) { g_connect_calls++; return ESP_OK; }
+/* esp_wifi_disconnect 由 2026-10-05 的静默失联修复引入（主动链路探针）。 */
+esp_err_t esp_wifi_disconnect(void) { g_disconnect_calls++; return ESP_OK; }
+
+/* 探针用 esp_timer 做节流。时钟由 stubs/esp_timer.h 提供（g_fake_now_us），
+ * 测试通过推进 g_test_time_us 来跨越 5s 节流窗口。 */
 
 /* --- nvs_flash --- */
 esp_err_t nvs_open(const char *ns, int mode, nvs_handle_t *out) {
@@ -227,6 +237,65 @@ static void test_rssi_after_disconnect(void) {
           "after disconnect: rssi must be 0");
 }
 
+/* 静默失联探针（2026-10-05）。
+ *
+ * 现场：设备 uptime 525s 正常运行，但服务端 ping 100% 丢包、ARP 无表项，
+ * 串口里**0 条 WiFi 事件**（WIFI_EVENT_STA_DISCONNECTED 从未触发）。
+ * 没有事件就没有重试，所以事件驱动的重连阶梯永远不会启动。
+ *
+ * 本用例构造"驱动自述 CONNECTED，但 esp_wifi_sta_get_ap_info() 持续失败"的
+ * 静默失联场景，断言探针最终会强制重新关联。
+ *
+ * 关键点：修复前这个场景下什么都不会发生（没有事件可等），
+ * 所以这条用例在修复前必然红。 */
+static void test_liveness_detects_silent_link_loss(void) {
+    /* 先进入"已连接"状态（复用既有的 GOT_IP 事件模拟）。 */
+    simulate_got_ip();
+    CHECK(wifi_mgr_is_connected(), "precondition: must be CONNECTED");
+
+    const int connects_before = g_connect_calls;
+    const int disconnects_before = g_disconnect_calls;
+
+    /* 制造静默失联：驱动仍报 CONNECTED，但拿不到 AP 信息。 */
+    g_stub_ap_err = ESP_FAIL;
+
+    /* 推进假时钟，逐次调用探针。
+     * 探针节流 5s、持续失败阈值 60s，所以需要推进 >60s 才会动手。
+     * 这里推 15 次 x 6s = 90s，稳稳越过阈值。 */
+    for (int i = 0; i < 15; i++) {
+        g_test_time_us += 6 * 1000 * 1000; /* 每次推进 6s，越过 5s 节流 */
+        /* app_network_ok=false 模拟"WiFi 自述已连接但应用层不通"。 */
+        (void)wifi_mgr_check_liveness(false);
+    }
+
+    /* 断言：必须已经强制断连并重新关联。 */
+    CHECK(g_disconnect_calls > disconnects_before,
+          "silent link loss must trigger a forced esp_wifi_disconnect() "
+          "(driver reported CONNECTED but AP info was unavailable; on 2026-10-05 this "
+          "left the device unreachable for 26 min with zero WiFi events)");
+    CHECK(g_connect_calls > connects_before,
+          "silent link loss must trigger re-association (esp_wifi_connect())");
+
+    g_stub_ap_err = ESP_OK;
+}
+
+/* 反向对照：链路正常时探针**不得**动它。
+ * 防"把正确行为当缺陷修" —— 探针误判会打断正常连接。 */
+static void test_liveness_does_not_disturb_healthy_link(void) {
+    simulate_got_ip();
+    const int disconnects_before = g_disconnect_calls;
+
+    g_stub_ap_err = ESP_OK; /* AP 信息可得 => 链路正常 */
+    for (int i = 0; i < 10; i++) {
+        g_test_time_us += 6 * 1000 * 1000;
+        (void)wifi_mgr_check_liveness(true); /* 应用层也健康 */
+    }
+
+    CHECK(g_disconnect_calls == disconnects_before,
+          "healthy link must NOT be disturbed by the liveness probe");
+    CHECK(wifi_mgr_is_connected(), "healthy link must stay CONNECTED");
+}
+
 int main(void) {
     wifi_mgr_init();
     CHECK(g_wifi_handler != NULL, "wifi event handler must be registered");
@@ -235,6 +304,8 @@ int main(void) {
     test_rssi_when_connected();
     test_rssi_when_ap_info_fails();
     test_rssi_after_disconnect();
+    test_liveness_detects_silent_link_loss();
+    test_liveness_does_not_disturb_healthy_link();
 
     if (g_failures > 0) {
         fprintf(stderr, "\nwifi_mgr_rssi_tests: %d FAILURES\n", g_failures);

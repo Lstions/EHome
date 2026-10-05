@@ -8,6 +8,7 @@
 #include "wifi_mgr.h"
 #include "wifi_provisioning.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -169,6 +170,137 @@ int wifi_mgr_get_rssi_dbm(void)
     return ap_info.rssi;
 }
 
+/* 主动链路探针（2026-10-05 第二版）。
+ *
+ * 第一版用 `esp_wifi_sta_get_ap_info()` 是否成功作为判据 —— **那是错的**，
+ * 因为它读的是**驱动自己缓存的 AP 记录**，而驱动状态正是失效时不可信的那个东西：
+ * 驱动认为"还连着"，于是 get_ap_info() 照常成功返回陈旧数据，探针什么也发现不了。
+ * 实测印证：加了第一版探针后设备仍然静默失联，串口里 0 条探针日志。
+ *
+ * 正确判据必须来自**链路之外**的、应用层可观测的证据。这里用两个信号：
+ *
+ *   (a) `esp_wifi_sta_get_ap_info()` —— 仍保留，用于捕捉驱动层掉线；
+ *   (b) `app_network_ok` —— 调用方传入"应用层网络是否真的通"
+ *       （main.c 传 mqtt_client_is_connected_impl()）。
+ *
+ * (b) 才是本次事故的克星：WiFi 自述 CONNECTED、MQTT 却连不上、
+ * 服务端 ping 100% 丢包 —— 这个组合只有"链路实际已断"能解释。
+ * 只要 (a) 或 (b) 任一持续失败超过阈值，就强制重新关联。
+ *
+ * 取舍：服务端长时间宕机时本探针也会周期性触发重新关联。这是可接受的 ——
+ * 重新关联是无害的重连尝试且有 60s 冷却；而"链路静默死掉后永不恢复、
+ * 只能人工断电"是不可接受的。
+ */
+#define WIFI_LIVENESS_PROBE_INTERVAL_MS 5000
+/* 持续失败多久才动手。取 60s：必须显著大于正常启动时 MQTT 建连时间（约 20s），
+ * 否则每次启动都会误触发一次重新关联。 */
+#define WIFI_LIVENESS_FAIL_AFTER_MS     60000
+#define WIFI_LIVENESS_RECOVER_COOLDOWN_MS 60000
+/* 诊断日志间隔：让"探针到底看到了什么"在串口可见，便于现场定性。 */
+#define WIFI_LIVENESS_DIAG_INTERVAL_MS  30000
+
+static int64_t s_liveness_first_fail_us = 0;
+static int64_t s_last_liveness_probe_us = 0;
+static int64_t s_last_liveness_recover_us = 0;
+static int64_t s_last_liveness_diag_us = 0;
+
+bool wifi_mgr_check_liveness(bool app_network_ok)
+{
+    if (!s_auto_reconnect) return true;
+
+    /* 只在"自述已连接"时才做这个检查。
+     * 若状态不是 CONNECTED，说明事件路径已经在处理（重试阶梯），无需叠加。 */
+    if (s_state != WIFI_MGR_CONNECTED) {
+        s_liveness_first_fail_us = 0;
+        return true;
+    }
+
+    const int64_t now = esp_timer_get_time();
+    if (now - s_last_liveness_probe_us <
+        (int64_t)WIFI_LIVENESS_PROBE_INTERVAL_MS * 1000) {
+        return true;
+    }
+    s_last_liveness_probe_us = now;
+
+    /* 信号 (a)：驱动层是否还能给出 AP 信息。 */
+    wifi_ap_record_t ap_info = {0};
+    const bool driver_ok = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
+
+    /* **触发条件只看驱动层信号 `driver_ok`，不看 `app_network_ok`。**
+     *
+     * 这是 2026-10-05 实测踩到的一个自伤缺陷，记录下来：
+     *
+     * 第一版把 MQTT 连接状态（app_ok）也当成 WiFi 存活的判据，于是在"MQTT 因
+     * 与 WiFi 无关的原因连不上"时（broker 侧问题、鉴权、MQTT 客户端自身故障），
+     * 探针会误判成"WiFi 链路静默失效"，**每 60s 把一条完全正常的 WiFi 拆掉重连**。
+     *
+     * 现场证据（当时 ping 设备 1/4 通、59ms、broker 1883 正常、无鉴权失败，
+     * 即网络本身是好的）：
+     *
+     *     WIFI_MGR: Liveness degraded for 42001 ms: wifi_state=CONNECTED driver_ok=1 app_ok=0 rssi=-48
+     *     WIFI_MGR: Got IP: 192.168.110.250
+     *     WIFI_MGR: Liveness suspect: driver_ok=1 app_ok=0 (starting 60000 ms window)
+     *
+     * 危害是自持的：断连 churn 会让 MQTT 永远无法稳定建立连接，于是 app_ok 永远为 0，
+     * 探针就一直拆 —— **探针本身成了故障源**。
+     *
+     * 教训：一个**恢复动作**的触发判据必须是"它要修的那个东西确实坏了"。
+     * MQTT 连不上 ≠ WiFi 坏了；用前者触发后者，就是在用一个观测去修另一个系统。
+     *
+     * 因此 app_ok 现在**只用于日志**（区分"驱动也不认"还是"只有应用层不通"），
+     * 不参与触发。若将来要覆盖"驱动自述正常但 L3 确实不通"的情形，
+     * 正确的判据是**独立的 L3 探测**（如 ping 网关），而不是复用上层协议状态。 */
+    if (driver_ok) {
+        if (s_liveness_first_fail_us != 0) {
+            ESP_LOGI(TAG, "Liveness recovered (driver_ok=1)");
+        }
+        s_liveness_first_fail_us = 0;
+        return true;
+    }
+
+    if (s_liveness_first_fail_us == 0) {
+        s_liveness_first_fail_us = now;
+        ESP_LOGW(TAG, "Liveness suspect: driver_ok=%d app_ok=%d (starting %d ms window)",
+                 (int)driver_ok, (int)app_network_ok, WIFI_LIVENESS_FAIL_AFTER_MS);
+    }
+
+    const int64_t failing_ms = (now - s_liveness_first_fail_us) / 1000;
+
+    /* 周期性诊断：把"WiFi 自述已连接、但实际不通"暴露到串口。 */
+    if (now - s_last_liveness_diag_us >=
+        (int64_t)WIFI_LIVENESS_DIAG_INTERVAL_MS * 1000) {
+        s_last_liveness_diag_us = now;
+        ESP_LOGW(TAG, "Liveness degraded for %lld ms: wifi_state=CONNECTED driver_ok=%d "
+                      "app_ok=%d rssi=%d",
+                 (long long)failing_ms, (int)driver_ok, (int)app_network_ok,
+                 driver_ok ? ap_info.rssi : 0);
+    }
+
+    if (failing_ms < (int64_t)WIFI_LIVENESS_FAIL_AFTER_MS) return true;
+
+    if (now - s_last_liveness_recover_us <
+        (int64_t)WIFI_LIVENESS_RECOVER_COOLDOWN_MS * 1000) {
+        return true;
+    }
+    s_last_liveness_recover_us = now;
+    s_liveness_first_fail_us = 0;
+
+    /* 静默失联：驱动以为连着，实际 L2 已经不在。强制断开再关联。
+     *
+     * esp_wifi_disconnect() 会触发 WIFI_EVENT_STA_DISCONNECTED，
+     * 从而走上事件路径的重连阶梯；这里再显式 connect 一次，
+     * 保证即使事件没有立刻到达也能发起关联。 */
+    ESP_LOGE(TAG, "WiFi link is silently dead (wifi_state=CONNECTED driver_ok=%d app_ok=%d "
+                  "for %lld ms); forcing re-association",
+             (int)driver_ok, (int)app_network_ok, (long long)failing_ms);
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    esp_wifi_disconnect();
+    s_retry_count = 0;
+    set_state(WIFI_MGR_CONNECTING);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_wifi_connect();
+    return false;
+}
 bool wifi_mgr_save_credentials(const char *ssid, const char *password)
 {
     if (!ssid) return false;

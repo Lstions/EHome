@@ -1,6 +1,6 @@
 idf_component_register(SRCS "wifi_mgr.c" "wifi_provisioning.c"
                        INCLUDE_DIRS "."
-                       REQUIRES nvs_flash esp_wifi esp_event esp_http_server)
+                       REQUIRES nvs_flash esp_wifi esp_event esp_http_server esp_timer)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 # 见 2026-10-04 status_task 栈溢出（prvTaskCheckFreeStackSpace）：根因帧在
