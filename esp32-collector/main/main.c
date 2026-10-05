@@ -14,6 +14,7 @@
 #include "msg_handler.h"
 #include "crash_diag.h"
 #include "boot_guard.h"
+#include "mem_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
 #include "scheduler.h"
@@ -120,6 +121,36 @@ static void log_boot_heap(const char *stage) { (void)stage; }
 
 static bool s_ota_pending_verify = false;
 
+/* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x20) ==== */
+
+/* 低内存事件只置标志，发布动作留到 status_task 且仅在 MQTT 已连接时执行。
+ * 原因：low callback 由 mem_guard_poll() 在 status_task 上下文同步调用，
+ * 在其中直接 publish 会让"内存已低"的路径再走 AT 分配/网络栈，正是要避免的。 */
+static volatile bool s_mem_low_event = false;
+
+static void mem_guard_low_memory_cb(size_t free_bytes, size_t largest_bytes)
+{
+    s_mem_low_event = true;
+    /* 失败路径上的内存打印必须常开（方法论 §3）：每类事件一行，成本可忽略，
+     * 缺了它下次故障又要从零反推。 */
+    ESP_LOGW(TAG, "[memguard] low memory: free=%u largest=%u floor=%u; scheduling MemReport",
+             (unsigned)free_bytes, (unsigned)largest_bytes,
+             (unsigned)mem_guard_floor_bytes());
+}
+
+/* 编码并发布 MemReport(0x20)。帧很小（5 个 varint），栈缓冲 64B 足够，
+ * 不引入新的堆分配；编码失败只记一行，不阻塞主循环。 */
+static void send_mem_report(void)
+{
+    uint8_t buf[64];
+    size_t n = mem_guard_encode_report(buf, sizeof(buf));
+    if (n == 0) {
+        ESP_LOGW(TAG, "MemReport encode failed");
+        return;
+    }
+    msg_handler_publish(buf, n);
+}
+
 /* ---- status_task — still in main.c (single-loop, minimal dependency) ---- */
 
 static void status_task(void *pv)
@@ -148,46 +179,72 @@ static void status_task(void *pv)
         /* 传入应用层信号：MQTT 是否已连接。
          * WiFi 自述 CONNECTED 而 MQTT 连不上，正是静默失联的特征组合 ——
          * 只看 WiFi 驱动状态是发现不了的（驱动缓存会说"一切正常"）。 */
-        /* ---- 任务栈实际用量探针（2026-10-05，一次性诊断）----
+        /* ---- 运行期水位门禁 + 每 60s 任务栈采样/内存上报（WS-G，2026-10-05）----
          *
-         * 动机：S3 的 14 个任务栈全部走堆分配（xTaskCreate），
-         * 标称合计约 64KB —— 是配置事务（12KB）的 5 倍，也是内部 RAM 的
-         * 主要去向之一。但这些栈大小**从未按实测用量论证过**，
-         * 全是"照着别的项目抄一个看起来安全的数"。
+         * 动机（沿用原诊断探针）：S3 的 14 个任务栈全部走堆分配（xTaskCreate），
+         * 标称合计约 64KB，是配置事务（12KB）的 5 倍。压缩栈不能靠猜：
+         * 栈不足表现为随机踩踏，比内存不足更难定位；必须先用
+         * uxTaskGetStackHighWaterMark() 测真实峰值。
          *
-         * 约束：MQTT 未来要启用 TLS。TLS 上下文通常要吃 16~40KB，
-         * 而当前配置事务后只剩 844 字节 —— 现状**根本撑不起 TLS**。
-         * 所以必须先把无谓的栈预留压下去，为 TLS 腾出空间。
+         * 与原探针的区别：现在**不只在 EHOME_MEM_DIAG 下打日志**，而是把
+         * "最小剩余字节"写入 mem_guard，并随 MemReport(0x20) 低频上报，
+         * 使服务端能看到跨重启趋势（原探针默认编译不进来，服务端什么都看不到）。
          *
-         * 但压缩栈**不能靠猜**：栈不足的表现是随机的内存踩踏/崩溃，
-         * 比内存不足更难定位。因此先用 uxTaskGetStackHighWaterMark()
-         * 测出每个任务的真实峰值余量，再决定砍多少 —— 只砍有实测依据的部分。
-         *
-         * 输出格式：name=已用字节(总栈)，每 60 次循环（约 60s）打印一次。 */
+         * 单位：uxTaskGetStackHighWaterMark 返回**字**（FreeRTOS 约定），
+         * 乘 sizeof(StackType_t) 才是字节。 */
+        bool mem_periodic = false;
         {
+            static uint32_t s_mem_report_tick = 0;
+            if (++s_mem_report_tick >= 60) {
+                s_mem_report_tick = 0;
+                mem_periodic = true;
+            }
+        }
+        if (mem_periodic) {
+            static const char *names[] = {
+                "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
+                "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
+                "hello_super", "periph_worker", "periph_rsp", "rgb_led",
+                "factory_reset",
+            };
+            size_t min_stack_free = (size_t)-1;
+            for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+                TaskHandle_t h = xTaskGetHandle(names[i]);
+                if (h == NULL) continue;
+                size_t hw = (size_t)uxTaskGetStackHighWaterMark(h) * sizeof(StackType_t);
+                if (hw < min_stack_free) min_stack_free = hw;
 #ifdef EHOME_MEM_DIAG
-                static uint32_t s_stack_dump_tick = 0;
-                if (++s_stack_dump_tick % 60 == 0) {
-                    /* 见 log_boot_heap 处说明：默认关闭。 */
-                    static const char *names[] = {
-                        "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
-                        "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
-                        "hello_super", "periph_worker", "periph_rsp", "rgb_led",
-                        "factory_reset",
-                    };
-                    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-                        TaskHandle_t h = xTaskGetHandle(names[i]);
-                        if (h == NULL) continue;
-                        UBaseType_t hw = uxTaskGetStackHighWaterMark(h);
-                        ESP_LOGI(TAG, "[stack] %-14s high_water=%u bytes free (unused)",
-                                 names[i], (unsigned)(hw * sizeof(StackType_t)));
-                    }
-                    ESP_LOGI(TAG, "[stack] ---- heap free=%u largest=%u ----",
-                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-                }
+                ESP_LOGI(TAG, "[stack] %-14s high_water=%u bytes free (unused)",
+                         names[i], (unsigned)hw);
+#endif
+            }
+            if (min_stack_free != (size_t)-1) {
+                mem_guard_set_min_stack_high_water(min_stack_free);
+            }
+#ifdef EHOME_MEM_DIAG
+            ESP_LOGI(TAG, "[stack] ---- heap free=%u largest=%u ----",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 #endif
         }
+
+        /* 1Hz 轮询水位；低于 floor 时回调置 s_mem_low_event（迟滞见 mem_guard.c）。 */
+        mem_guard_poll();
+        bool mem_mqtt_connected = mqtt_client_is_connected_impl();
+        bool mem_send = false;
+        {
+            static bool s_mem_report_initial_sent = false;
+            if (!s_mem_report_initial_sent && mem_mqtt_connected) {
+                s_mem_report_initial_sent = true;
+                mem_send = true;   /* 启动后首报（等 MQTT 连上再发） */
+            }
+        }
+        if (mem_periodic && mem_mqtt_connected) mem_send = true;  /* 60s 周期 */
+        if (s_mem_low_event && mem_mqtt_connected) {              /* 低内存事件 */
+            s_mem_low_event = false;
+            mem_send = true;
+        }
+        if (mem_send) send_mem_report();
         (void)wifi_mgr_check_liveness(mqtt_client_is_connected_impl());
         if (mqtt_client_is_connected_impl()) {
             esp_err_t status_err = msg_handler_send_status(
@@ -463,6 +520,7 @@ void app_main(void)
      * channel health.  Its bounded encoder buffers live on this call stack;
      * keep a dedicated budget so a valid report cannot trip the stack guard
      * while UART RX workers are active. */
+    mem_guard_register_low_cb(mem_guard_low_memory_cb);
     xTaskCreate(status_task, "status", STATUS_TASK_STACK, (void *)s, 3, NULL);
     xTaskCreate(sync_manager_periodic_task, "sync", 3072, NULL, 2, NULL);
     /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */

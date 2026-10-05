@@ -102,6 +102,35 @@ typedef void (*data_rpt_cb_t)(uint32_t ch, uint64_t ts, uint32_t seq,
 typedef void (*channel_cmd_v2_final_cb_t)(uint8_t slot, bool success, uint32_t error_code,
                                           const uint8_t *raw_response, size_t raw_len);
 
+/* V3-2a: 非关键遥测批量上报回调。
+ *
+ * bus_worker 只负责**决定**把哪几个样本合成一批（契约 §3 的聚合策略），
+ * 帧的编码（契约 §2）由 msg_handler 在它自己的 1400 B 编码预算内完成。
+ *
+ * 为什么编码不放 bus_worker：bus_worker 的组件级门禁是
+ * -Wframe-larger-than=1024，而一帧 DataBatch 需要 1400 B 的编码缓冲。若在
+ * bus_worker 里放这个缓冲，report_tx 的栈帧会变成 ~1472 B，且它会**叠加**
+ * 在 send_data_report() 已有的 2416 B 栈帧之上（只有批路径才调用 publish，
+ * 但同一任务栈仍要容纳两者），实测峰值会顶到 4096 B 任务栈的上限。契约
+ * §2.2 所说的"report_tx 的 1,400 B 编码缓冲"指的正是 msg_handler 上报路径
+ * 里那个既有的 buf[1400]；批量编码复用它，既不新增静态 RAM（契约要求），
+ * 也不把两个大缓冲叠在同一个任务栈上。
+ *
+ * 参数用并行数组而非结构体：让这个回调契约不依赖任何额外头文件，从而不
+ * 把 msg_handler 的头链拖进 bus_worker 的每个宿主测试。
+ *   timestamps_us[i] —— 第 i 个样本的绝对微秒时间戳；[0] 即 base。
+ *   raw_data[i] / raw_lens[i] —— 与 0x03 payload 同义的样本字节。
+ * 返回 false 表示编码失败（调用方据此退回逐样本 0x03，绝不丢样本）。 */
+typedef bool (*data_batch_cb_t)(uint32_t channel_id,
+                                uint32_t first_sequence,
+                                const uint64_t *timestamps_us,
+                                const uint8_t *const *raw_data,
+                                const size_t *raw_lens,
+                                size_t count,
+                                uint32_t edge_device_id,
+                                uint32_t command_template_id,
+                                uint8_t command_index);
+
 
 /* ==================================================================
  * Pending command descriptor (moved from app_state.h for decoupling)
@@ -132,7 +161,13 @@ typedef struct {
  * (read_size, fixed report block, then idle completion); no user-selectable
  * receive mode is exposed.
  * ================================================================== */
-#define STREAM_RX_BUF_SIZE 1024
+/* WS-C: 1024 -> 512.  The UART hardware FIFO is 128 B and the driver ring is
+ * drained in 256 B reads (bus_dma_read()), so the stream buffer only has to
+ * hold one automatic boundary at a time: read_size <= 256, fixed block = 512
+ * (BUS_RX_FIXED_BLOCK_SIZE).  Anything larger was slack, and it is multiplied
+ * by SCHED_MAX_CHANNELS (5 on S3).  Boundary semantics are unchanged: the
+ * overflow path still flushes and then re-assesses against this capacity. */
+#define STREAM_RX_BUF_SIZE 512
 
 typedef struct {
  uint8_t buffer[STREAM_RX_BUF_SIZE];
@@ -150,6 +185,9 @@ typedef struct {
 /** Inject msg_handler callbacks (call before bus_worker_start) */
 void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb);
 void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb);
+/** Inject the V3-2a DataBatch encoder callback (call before bus_worker_start).
+ *  Not injected => DataBatch stays disabled regardless of the capability bit. */
+void bus_worker_set_data_batch_cb(data_batch_cb_t cb);
 
 /** Start rx_task + per-bus cmd_tasks (called once at boot) */
 void bus_worker_start(bus_runtime_t *rt);

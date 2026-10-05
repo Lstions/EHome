@@ -30,6 +30,7 @@ target_include_directories(writecmd_decoder_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(writecmd_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME writecmd_decoder_tests COMMAND writecmd_decoder_tests)
@@ -43,6 +44,7 @@ target_include_directories(channel_cmd_v2_decoder_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
@@ -56,6 +58,7 @@ target_include_directories(channel_cmd_v2_slot_tests PRIVATE
     stubs
     ../components/frame
     ../components/msg_handler
+    ../components/config_mgr
 )
 target_compile_options(channel_cmd_v2_slot_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME channel_cmd_v2_slot_tests COMMAND channel_cmd_v2_slot_tests)
@@ -270,6 +273,8 @@ add_test(NAME scheduler_route_tests COMMAND scheduler_route_tests)
 
 add_executable(bus_worker_report_tests bus_worker_report_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_report_tests PRIVATE
     stubs
@@ -282,6 +287,7 @@ target_include_directories(bus_worker_report_tests PRIVATE
     ../components/dma_pool/include
     ../components/hw_profile/include
     ../components/frame
+    ../components/msg_handler
 )
 target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -289,6 +295,8 @@ add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
 
 add_executable(bus_worker_rx_tests bus_worker_rx_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_rx_tests PRIVATE
     stubs
@@ -301,6 +309,7 @@ target_include_directories(bus_worker_rx_tests PRIVATE
     ../components/dma_pool/include
     ../components/hw_profile/include
     ../components/frame
+    ../components/msg_handler
 )
 target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -308,6 +317,8 @@ add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
 
 add_executable(bus_worker_batch_tests bus_worker_batch_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_batch_tests PRIVATE
     stubs
@@ -339,6 +350,7 @@ add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
 add_executable(handler_data_tests handler_data_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
+    ../components/msg_handler/data_batch_codec.c
 )
 target_include_directories(handler_data_tests PRIVATE
     stubs
@@ -368,7 +380,9 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
+    ../components/msg_handler/data_batch_codec.c
     stubs/heap_stub_impl.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(rx_health_e2e_tests PRIVATE
     stubs
@@ -385,7 +399,11 @@ target_include_directories(rx_health_e2e_tests PRIVATE
     ../components/ota
     ../components/wifi_mgr
 )
-target_compile_definitions(rx_health_e2e_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_definitions(rx_health_e2e_tests PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+    # 本 target 同时编入 bus_worker.c 与真正的 handler_data.c，因此必须关掉
+    # bus_worker.c 里的弱默认编码器定义，否则重定义。
+    EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER=1)
 target_compile_options(rx_health_e2e_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME rx_health_e2e_tests COMMAND rx_health_e2e_tests)
 
@@ -440,15 +458,20 @@ set_source_files_properties(
 )
 add_test(NAME periph_config_apply_tests COMMAND periph_config_apply_tests)
 
+# WS-E: config_apply_transaction.c now includes the transaction arena impl and
+# consults mem_guard_can_start() before each step, so both TUs must be linked.
 add_executable(config_apply_transaction_tests
     config_apply_transaction_tests.c
     stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
+    ../main/mem_guard.c
+    ../components/frame/frame_codec.c
 )
 target_include_directories(config_apply_transaction_tests PRIVATE
     stubs
     ../main
     ../components/config_mgr
+    ../components/frame
 )
 target_compile_options(config_apply_transaction_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME config_apply_transaction_tests COMMAND config_apply_transaction_tests)
@@ -457,12 +480,15 @@ add_executable(periph_transaction_gate_tests
     periph_transaction_gate_tests.c
     stubs/heap_stub_impl.c
     ../main/config_apply_transaction.c
+    ../main/mem_guard.c
+    ../components/frame/frame_codec.c
     ../components/periph_owner/periph_owner.c
 )
 target_include_directories(periph_transaction_gate_tests PRIVATE
     stubs
     ../main
     ../components/config_mgr
+    ../components/frame
     ../components/periph_owner/include
 )
 target_compile_definitions(periph_transaction_gate_tests PRIVATE _POSIX_C_SOURCE=200809L)
@@ -582,3 +608,107 @@ target_include_directories(crash_diag_codec_tests PRIVATE
 )
 target_compile_options(crash_diag_codec_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME crash_diag_codec_tests COMMAND crash_diag_codec_tests)
+
+# 运行期内存水位门禁（WS-G）。判错的代价：内存充足时拒绝重操作，或低水位
+# 事件风暴 —— 两者都难从串口反推，所以用可控堆值把边界钉在宿主测试里。
+# mem_guard_tests.c 自带 heap_caps_* 强定义，不需要 heap_stub_impl.c。
+add_executable(mem_guard_tests
+    mem_guard_tests.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(mem_guard_tests PRIVATE
+    stubs
+    ../components/frame
+    ../main
+)
+target_compile_definitions(mem_guard_tests PRIVATE CONFIG_IDF_TARGET_ESP32S3=1)
+target_compile_options(mem_guard_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+add_test(NAME mem_guard_tests COMMAND mem_guard_tests)
+
+# WS-E transaction arena: fixed 4 KiB bump allocator backing the config
+# transaction workspace (design §2).  The test includes the implementation
+# header directly, mirroring how main/config_apply_transaction.c compiles it.
+# No heap_stub_impl.c: the internal-RAM branch uses a static .bss block.
+add_executable(config_tx_arena_tests
+    config_tx_arena_tests.c
+)
+target_include_directories(config_tx_arena_tests PRIVATE
+    ../main
+    ../components/config_mgr
+)
+target_compile_options(config_tx_arena_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME config_tx_arena_tests COMMAND config_tx_arena_tests)
+
+# WS-F phase-2 prototype: ConfigManifest as raw bytes + offset index.
+# Host-only proof of the v3 storage model; not compiled into firmware.
+add_executable(v3_manifest_view_tests
+    v3_manifest_view_tests.c
+    v3_manifest_view.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(v3_manifest_view_tests PRIVATE
+    .
+    ../components/frame
+    ../components/config_mgr
+    stubs
+)
+target_compile_options(v3_manifest_view_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME v3_manifest_view_tests COMMAND v3_manifest_view_tests)
+
+# WS-C PSRAM placement contract: prove prefer-PSRAM / fall-back-internal /
+# both-exhausted-NULL for collector_mem.h.  The stub directory is listed
+# BEFORE stubs/ because only it declares heap_caps_malloc/free; compiling with
+# CONFIG_COLLECTOR_PSRAM=1 selects the firmware-side branch.
+add_executable(collector_mem_tests
+    collector_mem_tests.c
+)
+target_include_directories(collector_mem_tests PRIVATE
+    collector_mem_stubs
+    ../components/config_mgr
+)
+target_compile_options(collector_mem_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME collector_mem_tests COMMAND collector_mem_tests)
+
+# V3-2a DataBatch(0x20)：契约 §2 的 7 条不变量 + 逐字节锚点。
+#
+# 为什么单列一个 target 而不是塞进现有用例：这个文件同时是**后端对锚的
+# 参照实现**（v3-backend 的 handler_data_batch.go 用同一组 hex 常量），
+# 它必须能独立编译、独立运行、独立失败，才能被两边共同引用。
+add_executable(data_batch_codec_tests
+    data_batch_codec_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+)
+target_include_directories(data_batch_codec_tests PRIVATE
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_options(data_batch_codec_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME data_batch_codec_tests COMMAND data_batch_codec_tests)
+
+# V3-2a 聚合路径（契约 §3）：直接编入 bus_worker.c 驱动 report_try_data_batch()。
+#
+# 与 bus_worker_report_tests 分开的理由：那份用例覆盖 0x03 路径的池/队列
+# 语义，本份只覆盖"能力位门控 + 聚合决策"。两者共享 #include bus_worker.c
+# 的模式，但断言集互不重叠，分开后失败定位更快。
+add_executable(bus_worker_data_batch_tests bus_worker_data_batch_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+)
+target_include_directories(bus_worker_data_batch_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_definitions(bus_worker_data_batch_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_worker_data_batch_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_worker_data_batch_tests COMMAND bus_worker_data_batch_tests)

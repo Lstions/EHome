@@ -120,14 +120,22 @@ static size_t g_uart_tx_buf[UART_NUM_MAX];
 static int g_fake_uart_queues[UART_NUM_MAX];  /* distinct addresses */
 static int g_uart_delete_count[UART_NUM_MAX];
 
+static uint32_t g_uart_baud[UART_NUM_MAX];
 esp_err_t uart_param_config(uart_port_t port, const uart_config_t *cfg) {
-    (void)cfg;
     if (port < 0 || port >= UART_NUM_MAX) return ESP_ERR_INVALID_ARG;
+    /* Record the live baud so tests can tell install/reconfigure from a no-op.
+     * uart_set_baudrate (below) updates it too, matching IDF's two entry points. */
+    if (cfg) g_uart_baud[port] = (uint32_t)cfg->baud_rate;
     return ESP_OK;
 }
 esp_err_t uart_set_pin(uart_port_t port, int tx, int rx, int rts, int cts) {
     (void)tx; (void)rx; (void)rts; (void)cts;
     if (port < 0 || port >= UART_NUM_MAX) return ESP_ERR_INVALID_ARG;
+    return ESP_OK;
+}
+esp_err_t uart_set_baudrate(uart_port_t port, uint32_t baud_rate) {
+    if (port < 0 || port >= UART_NUM_MAX) return ESP_ERR_INVALID_ARG;
+    g_uart_baud[port] = baud_rate;
     return ESP_OK;
 }
 esp_err_t uart_driver_install(uart_port_t port, int rx_buf, int tx_buf,
@@ -359,6 +367,7 @@ static void reset_all_state(void)
     memset(g_uart_rx_buf, 0, sizeof(g_uart_rx_buf));
     memset(g_uart_tx_buf, 0, sizeof(g_uart_tx_buf));
     memset(g_uart_delete_count, 0, sizeof(g_uart_delete_count));
+    memset(g_uart_baud, 0, sizeof(g_uart_baud));
     memset(g_spi_initialized, 0, sizeof(g_spi_initialized));
     memset(g_spi_dma_mode, 0, sizeof(g_spi_dma_mode));
     g_spi_dev_count = 0;
@@ -536,13 +545,160 @@ static void test_uart_port_sharing(void)
     CHECK(entry->ref_count == 1, "ref_count should be 1 after first deinit");
     CHECK(g_uart_installed[UART_NUM_0], "driver should still be installed");
 
-    /* Second deinit: ref_count drops to 0, driver deleted */
+    /* Second deinit: ref_count drops to 0, but WS-E install-once keeps the
+     * driver resident; only an explicit teardown frees it. */
     bus_dma_deinit(&ctx2);
     entry = uart_find_port(16, 17, 115200);
-    CHECK(entry == NULL || entry->port == UART_NUM_MAX,
-          "port entry should be freed after last deinit");
-    CHECK(!g_uart_installed[UART_NUM_0], "driver should be deleted after last deinit");
+    CHECK(entry != NULL, "port entry must stay registered after last lease release");
+    if (entry == NULL) return;   /* keep the mutant red as an assertion, not a crash */
+    CHECK(entry->ref_count == 0, "ref_count should be 0 after last deinit");
+    CHECK(!entry->leased, "port must be unleased after last deinit");
+    CHECK(entry->installed, "driver must stay installed (install-once contract)");
+    CHECK(g_uart_installed[UART_NUM_0], "driver should stay installed after last deinit");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0,
+          "deinit must NOT delete the driver; teardown is explicit");
+
+    /* Explicit teardown is the only path that frees it. */
+    CHECK(bus_dma_uart_teardown(UART_NUM_0) == ESP_OK, "idle teardown should succeed");
+    CHECK(!g_uart_installed[UART_NUM_0], "driver should be deleted by teardown");
     CHECK(g_uart_delete_count[UART_NUM_0] == 1, "driver should be deleted exactly once");
+    CHECK(uart_find_port(16, 17, 115200) == NULL, "entry should be freed after teardown");
+}
+
+/* --- WS-E: second apply must not delete+install the UART driver --- */
+static void test_uart_reuse_across_config_change(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx1, ctx2;
+    uint8_t cfg1[6], cfg2[6];
+
+    /* First manifest: pins 16/17 @115200. */
+    make_uart_cfg(cfg1, 16, 17, 115200);
+    CHECK(bus_dma_init(&ctx1, BUS_TYPE_UART, false, cfg1, sizeof(cfg1)) == ESP_OK,
+          "first init should install");
+    CHECK(g_uart_installed[UART_NUM_0], "driver should be installed");
+
+    /* Transaction teardown phase: release the lease (manager cleanup_all). */
+    bus_dma_deinit(&ctx1);
+    CHECK(g_uart_installed[UART_NUM_0], "release must keep the driver installed");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0, "no delete during manifest rebuild");
+
+    /* Second manifest moves baud and pins on the SAME controller.  This is the
+     * apply_buses step that used to cost ~3.1 KB per UART. */
+    make_uart_cfg(cfg2, 16, 17, 57600);
+    CHECK(bus_dma_init_preferred(&ctx2, BUS_TYPE_UART, false, cfg2, sizeof(cfg2), 0) == ESP_OK,
+          "second init on the same controller must reconfigure");
+    CHECK(ctx2.cfg.uart.port == UART_NUM_0, "controller must be preserved");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0, "reconfigure must not delete the driver");
+    CHECK(g_uart_baud[UART_NUM_0] == 57600, "baud must be updated in place");
+
+    bus_dma_deinit(&ctx2);
+}
+
+/* --- WS-E: preinstall must not disturb a controller still leased by the old
+ * manifest (cleanup runs later, inside apply_buses).
+ *
+ * Regression: an earlier implementation reconfigured blindly, so preinstall
+ * hit the "controller is leased" guard and rejected the whole transaction
+ * whenever a manifest changed baud on an existing channel. --- */
+static void test_preinstall_does_not_touch_leased_controller(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx;
+    uint8_t cfg[6];
+    make_uart_cfg(cfg, 16, 17, 115200);
+    CHECK(bus_dma_init_preferred(&ctx, BUS_TYPE_UART, false, cfg, sizeof(cfg), 0) == ESP_OK,
+          "old manifest apply should install+lease UART0");
+    CHECK(g_uart_baud[UART_NUM_0] == 115200, "initial baud should be live");
+
+    /* New manifest: same controller, new baud, old lease still held. */
+    uart_port_t port = UART_NUM_MAX;
+    CHECK(bus_dma_uart_preinstall(16, 17, 57600, false, 0, &port) == ESP_OK,
+          "preinstall of a leased controller must be a no-op success");
+    CHECK(g_uart_baud[UART_NUM_0] == 115200,
+          "preinstall must not reconfigure a controller the old manifest still leases");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0, "preinstall must not delete the driver");
+
+    /* Transaction cleanup releases the old lease, then the new apply
+     * reconfigures in place — no install, no delete. */
+    bus_dma_ctx_t ctx2;
+    uint8_t cfg2[6];
+    bus_dma_deinit(&ctx);            /* apply cleanup */
+    make_uart_cfg(cfg2, 16, 17, 57600);
+    CHECK(bus_dma_init_preferred(&ctx2, BUS_TYPE_UART, false, cfg2, sizeof(cfg2), 0) == ESP_OK,
+          "new apply should reconfigure the released controller");
+    CHECK(g_uart_baud[UART_NUM_0] == 57600, "new baud must be live after apply");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0, "no install/delete churn");
+    bus_dma_deinit(&ctx2);
+}
+
+/* The apply path (after cleanup released the lease) must reconfigure in place. */
+static void test_acquire_reconfigures_unleased_controller(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx1, ctx2;
+    uint8_t cfg1[6], cfg2[6];
+    make_uart_cfg(cfg1, 16, 17, 115200);
+    CHECK(bus_dma_init_preferred(&ctx1, BUS_TYPE_UART, false, cfg1, sizeof(cfg1), 0) == ESP_OK,
+          "first apply should install UART0");
+    bus_dma_deinit(&ctx1);   /* apply cleanup */
+
+    make_uart_cfg(cfg2, 16, 17, 57600);
+    CHECK(bus_dma_uart_preinstall(16, 17, 57600, false, 0, NULL) == ESP_OK,
+          "preinstall with a released controller must succeed");
+    CHECK(bus_dma_init_preferred(&ctx2, BUS_TYPE_UART, false, cfg2, sizeof(cfg2), 0) == ESP_OK,
+          "second apply should reconfigure UART0 in place");
+    CHECK(g_uart_baud[UART_NUM_0] == 57600, "baud must be applied by the acquire path");
+    CHECK(g_uart_delete_count[UART_NUM_0] == 0, "no delete/install churn");
+    bus_dma_deinit(&ctx2);
+}
+
+/* --- WS-E: teardown refuses while a lease is held --- */
+static void test_uart_teardown_refuses_leased(void)
+{
+    reset_all_state();
+    bus_dma_ctx_t ctx;
+    uint8_t cfg[6];
+    make_uart_cfg(cfg, 16, 17, 115200);
+
+    CHECK(bus_dma_init(&ctx, BUS_TYPE_UART, false, cfg, sizeof(cfg)) == ESP_OK,
+          "init should succeed");
+    CHECK(bus_dma_uart_teardown(UART_NUM_0) == ESP_ERR_INVALID_STATE,
+          "teardown must refuse a leased controller");
+    CHECK(g_uart_installed[UART_NUM_0], "driver must survive the refused teardown");
+
+    bus_dma_deinit(&ctx);
+    CHECK(bus_dma_uart_teardown(UART_NUM_0) == ESP_OK, "idle teardown must succeed");
+    CHECK(bus_dma_uart_teardown(UART_NUM_0) == ESP_OK, "teardown must be idempotent");
+}
+
+/* --- WS-E: preinstall installs without leasing --- */
+static void test_uart_preinstall_then_apply(void)
+{
+    reset_all_state();
+    uart_port_t port = UART_NUM_MAX;
+    CHECK(bus_dma_uart_preinstall(16, 17, 115200, false, -1, &port) == ESP_OK,
+          "preinstall should succeed");
+    CHECK(port == UART_NUM_0, "preinstall should pick UART0");
+    CHECK(g_uart_installed[port], "driver should be installed by preinstall");
+
+    uart_port_entry_t *entry = uart_find_port(16, 17, 115200);
+    CHECK(entry != NULL && entry->installed && !entry->leased,
+          "preinstalled controller must be unleased");
+
+    /* The transaction then leases it without any driver allocation. */
+    bus_dma_ctx_t ctx;
+    uint8_t cfg[6];
+    make_uart_cfg(cfg, 16, 17, 115200);
+    CHECK(bus_dma_init_preferred(&ctx, BUS_TYPE_UART, false, cfg, sizeof(cfg), 0) == ESP_OK,
+          "apply after preinstall must succeed");
+    CHECK(g_uart_delete_count[port] == 0, "apply must not delete/reinstall");
+    bus_dma_deinit(&ctx);
+
+    /* Preinstall is idempotent for an already-resident mapping. */
+    CHECK(bus_dma_uart_preinstall(16, 17, 115200, false, -1, &port) == ESP_OK,
+          "preinstall of a resident mapping must be a no-op success");
+    bus_dma_uart_teardown(port);
 }
 
 /* --- UART: lease conflict — different preferred controller for same pins --- */
@@ -1144,6 +1300,11 @@ int main(void)
     test_uart_preferred_controller();
     test_uart_no_preferred_dynamic();
     test_uart_port_sharing();
+    test_uart_reuse_across_config_change();
+    test_preinstall_does_not_touch_leased_controller();
+    test_acquire_reconfigures_unleased_controller();
+    test_uart_teardown_refuses_leased();
+    test_uart_preinstall_then_apply();
     test_uart_lease_conflict();
     test_uart_port_occupied();
     test_uart_reserved_pins();

@@ -1,5 +1,58 @@
 menu "EHome Collector Configuration"
 
+    menu "Model Configuration"
+
+        # WS-A: model dimension = same SoC, with or without PSRAM.  The build
+        # profile (s3p-*) forces this on; it is also visible for manual builds.
+        config COLLECTOR_PSRAM
+            bool "Model has PSRAM (ESP32-S3 only)"
+            default n
+            depends on IDF_TARGET_ESP32S3
+            help
+                Select for the PSRAM variant of the ESP32-S3 (profiles s3p-*).
+                The model name reported at Hello/ResourceReport becomes
+                esp32s3p when PSRAM is also detected at runtime; a board
+                without working PSRAM degrades to esp32s3.
+                Only ESP-IDF targets with PSRAM support expose this option.
+
+        config COLLECTOR_IPV6
+            bool "Enable IPv6"
+            default y
+            # Link the product switch to the lwIP stack it is supposed to
+            # control, so the two can never drift apart:
+            #   LWIP_IPV6           -- the IPv6 stack itself
+            #   LWIP_IPV6_AUTOCONFIG -- SLAAC (bounded by LWIP_IPV6); IDF 6.1
+            #       defaults it to n (lwip/Kconfig:522-525).  Without SLAAC the
+            #       device only gets a link-local address and never the global
+            #       address from a Router Advertisement, so "IPv6 reachable"
+            #       does not hold.
+            # select is the single source of truth here; no defaults file
+            # needs to repeat these values.
+            select LWIP_IPV6
+            select LWIP_IPV6_AUTOCONFIG
+            help
+                Enable IPv6 support with SLAAC.  IPv6 is part of the required
+                feature set for this product; keep enabled unless building a
+                constrained development image.
+
+                The selects above only guarantee the y direction: while this
+                option is on, LWIP_IPV6 and LWIP_IPV6_AUTOCONFIG are both
+                forced y.  select cannot force n, so switching this option
+                off does NOT turn the lwIP IPv6 stack off -- a future profile
+                that ships with IPv6 disabled MUST explicitly pin
+                CONFIG_LWIP_IPV6=n in its defaults file.
+
+        config COLLECTOR_BLE
+            bool "Enable BLE (reserved for future provisioning)"
+            default n
+            help
+                Reserved budget switch for future BLE provisioning / status /
+                OTA.  Not implemented in this phase: enabling it only records
+                the intent and reserves 48-64 KiB of internal RAM in the
+                capacity plan.
+
+    endmenu
+
     menu "OTA Configuration"
 
         config COLLECTOR_OTA_USE_HTTPS

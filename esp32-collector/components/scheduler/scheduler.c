@@ -15,6 +15,7 @@
 #include "scheduler.h"
 #include "scheduler_queue_guard.h"
 #include "config_mgr.h"
+#include "collector_mem.h"
 #include "cmd_queue.h"
 #include "bus_dma.h"
 #include "hw_tables.h"
@@ -31,8 +32,30 @@
 #define TAG "SCHEDULER"
 #define SCHED_CONTROL_QUEUE_RESERVE 2U
 
-/* ── per-channel state (struct definition now in scheduler.h) ──── */
+/* ── per-channel state (struct definition now in scheduler.h) ────
+ *
+ * On PSRAM models the whole SCHED_MAX_CHANNELS x sched_channel_t table
+ * (S3: 5 x 748 B = 3,740 B) is purely CPU-accessed scheduler state, so it is
+ * allocated from PSRAM at scheduler_init(); internal-only models keep the
+ * static .bss array.  The sched_channel_t itself was narrowed by WS-C
+ * (MAX_CHANNELS 8->5/4, bus_config 128->64). */
+#define SCHED_CHANNELS_BYTES (SCHED_MAX_CHANNELS * sizeof(sched_channel_t))
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static sched_channel_t *s_channels;
+#else
 static sched_channel_t s_channels[SCHED_MAX_CHANNELS];
+#endif
+
+/** True when the channel table can be touched.  Internal models always can;
+ *  PSRAM models can once scheduler_init() allocated it. */
+static inline bool sched_channels_ready(void)
+{
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    return s_channels != NULL;
+#else
+    return true;
+#endif
+}
 static TaskHandle_t    s_task_handle;
 static volatile bool   s_running;
 static volatile bool   s_prepared;
@@ -175,7 +198,18 @@ static uart_port_t route_uart_port(const config_channel_t *ch)
 
 void scheduler_init(void)
 {
-    memset(s_channels, 0, sizeof(s_channels));
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    if (s_channels == NULL) {
+        s_channels = collector_mem_alloc_pref_psram(SCHED_CHANNELS_BYTES);
+        if (s_channels == NULL) {
+            ESP_LOGE(TAG, "scheduler channel table allocation failed (%u bytes)",
+                     (unsigned)SCHED_CHANNELS_BYTES);
+        }
+    }
+#endif
+    if (sched_channels_ready()) {
+        memset(s_channels, 0, SCHED_CHANNELS_BYTES);
+    }
     s_running     = false;
     s_prepared    = false;
     s_task_handle = NULL;
@@ -194,18 +228,18 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
                               const config_manifest_t *manifest)
 {
     if (s_task_handle || s_prepared) return SCHED_ERR_DUPLICATE;
-    if (!queues_valid(queues) || !manifest) {
+    if (!queues_valid(queues) || !manifest || !sched_channels_ready()) {
         ESP_LOGE(TAG, "invalid queues or manifest, cannot prepare");
         return SCHED_ERR_INVALID;
     }
     s_queues = *queues;
 
-    memset(s_channels, 0, sizeof(s_channels));
+    memset(s_channels, 0, SCHED_CHANNELS_BYTES);
     for (int i = 0; i < manifest->channel_count && i < MAX_CHANNELS; i++) {
         if (!manifest->channels[i].enabled) continue;
         sched_err_t err = scheduler_add_channel(&manifest->channels[i]);
         if (err != SCHED_OK) {
-            memset(s_channels, 0, sizeof(s_channels));
+            memset(s_channels, 0, SCHED_CHANNELS_BYTES);
             return err;
         }
     }
@@ -227,7 +261,7 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         s_prepared = false;
-        memset(s_channels, 0, sizeof(s_channels));
+        memset(s_channels, 0, SCHED_CHANNELS_BYTES);
         return SCHED_ERR_NOT_INIT;
     }
     return SCHED_OK;
@@ -270,6 +304,7 @@ sched_err_t scheduler_stop(void)
     }
 
     /* Now safe to clear channel state — no task is reading it. */
+    if (!sched_channels_ready()) return SCHED_OK;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         s_channels[i].active = false;
     }
@@ -324,7 +359,7 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
 
 sched_err_t scheduler_add_channel(const config_channel_t *ch)
 {
-    if (!ch) return SCHED_ERR_INVALID;
+    if (!ch || !sched_channels_ready()) return SCHED_ERR_INVALID;
 
     int slot = -1;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
@@ -379,6 +414,7 @@ sched_err_t scheduler_add_channel(const config_channel_t *ch)
 
 sched_err_t scheduler_remove_channel(uint32_t id)
 {
+    if (!sched_channels_ready()) return SCHED_ERR_NOT_FOUND;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s_channels[i].active && s_channels[i].config.id == id) {
             s_channels[i].active = false;
@@ -393,7 +429,7 @@ sched_err_t scheduler_remove_channel(uint32_t id)
  * config hasn't changed and we don't want to lose the last_sample_time. */
 sched_err_t scheduler_update_channel(const config_channel_t *ch)
 {
-    if (!ch) return SCHED_ERR_INVALID;
+    if (!ch || !sched_channels_ready()) return SCHED_ERR_INVALID;
 
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
         if (s_channels[i].active && s_channels[i].config.id == ch->id) {
@@ -443,6 +479,7 @@ bool scheduler_is_running(void) { return s_running; }
 uint8_t scheduler_get_channel_count(void)
 {
     uint8_t c = 0;
+    if (!sched_channels_ready()) return 0;
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++)
         if (s_channels[i].active) c++;
     return c;
@@ -452,7 +489,7 @@ const scheduler_state_t *scheduler_get_state(void)
 {
     static scheduler_state_t state;
     state.channels = s_channels;
-    state.channel_count = SCHED_MAX_CHANNELS;
+    state.channel_count = sched_channels_ready() ? SCHED_MAX_CHANNELS : 0;
     return &state;
 }
 

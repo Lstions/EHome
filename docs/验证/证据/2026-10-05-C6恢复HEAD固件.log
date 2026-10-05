@@ -1,0 +1,242 @@
+p 19 2022
+rst:0x15 (USB_UART_HPSYS),boot:0x1c (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40809bbe
+SPIWP:0xee
+mode:DIO, clock div:2
+load:0x40875730,len:0x14ac
+load:0x4086b910,len:0x1418
+load:0x4086e610,len:0x3280
+entry 0x4086b91a
+I (24) boot: ESP-IDF v6.1 2nd stage bootloader
+I (24) boot: compile time Oct  5 2026 13:23:08
+I (26) boot: chip revision: v0.1
+I (26) boot: efuse block revision: v0.2
+I (26) qio_mode: Enabling default flash chip QIO
+I (27) boot.esp32c6: SPI Speed      : 80MHz
+I (27) boot.esp32c6: SPI Mode       : QIO
+I (28) boot.esp32c6: SPI Flash Size : 8MB
+I (28) boot: Enabling RNG early entropy source...
+I (29) boot: Partition Table:
+I (29) boot: ## Label            Usage          Type ST Offset   Length
+I (30) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+I (31) boot:  1 otadata          OTA data         01 00 0000d000 00002000
+I (32) boot:  2 phy_init         RF data          01 01 0000f000 00001000
+I (33) boot:  3 ota_0            OTA app          00 10 00010000 00380000
+I (34) boot:  4 ota_1            OTA app          00 11 00390000 00380000
+I (35) boot: End of partition table
+I (36) esp_image: segment 0: paddr=00010020 vaddr=42100020 size=4a8e4h (305380) map
+I (93) esp_image: segment 1: paddr=0005a90c vaddr=40800000 size=0570ch ( 22284) load
+I (99) esp_image: segment 2: paddr=00060020 vaddr=42000020 size=feb80h (1043328) map
+I (293) esp_image: segment 3: paddr=0015eba8 vaddr=4080570c size=0f8f8h ( 63736) load
+I (307) esp_image: segment 4: paddr=0016e4a8 vaddr=40815010 size=043c0h ( 17344) load
+I (311) esp_image: segment 5: paddr=00172870 vaddr=500000b0 size=00024h (    36) load
+I (318) boot: Loaded app from partition at offset 0x10000
+I (318) boot: Disabling RNG early entropy source...
+I (319) cpu_start: Unicore app
+I (327) cpu_start: Pro cpu start user code
+I (328) cpu_start: cpu freq: 160000000 Hz
+I (328) app_init: Application information:
+I (329) app_init: Project name:     ehome_collector
+I (329) app_init: App version:      2.8.0
+I (330) app_init: Compile time:     Oct  5 2026 13:23:23
+I (330) app_init: ELF file SHA256:  0680a5132...
+I (331) app_init: ESP-IDF:          v6.1
+I (331) efuse_init: Min chip rev:     v0.0
+I (332) efuse_init: Max chip rev:     v0.99 
+I (332) efuse_init: Chip rev:         v0.1
+I (333) heap_init: Initializing. RAM available for dynamic allocation:
+I (333) heap_init: At 40831760 len 0004AEB0 (299 KiB): RAM
+I (334) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+I (335) heap_init: At 500000D4 len 00003F14 (15 KiB): RTCRAM
+I (336) spi_flash: detected chip: gd
+I (336) spi_flash: flash io: qio
+I (336) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (337) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (338) coexist: coex firmware version: a830d28
+I (339) coexist: coexist rom version 5b8dcfa
+I (339) main_task: Started on CPU0
+I (339) main_task: Calling app_main()
+I (339) EHOME: EHomeSystem v2.8.0 unified bus DMA
+I (353) APP_STATE: node_id from MAC: F0F5BDFFFE02
+I (354) DMA_POOL:   DMA ch0: GDMA_CH0 cap=0x03 bus=0x04 burst=4095
+I (355) DMA_POOL:   DMA ch1: GDMA_CH1 cap=0x03 bus=0x05 burst=4095
+I (355) DMA_POOL:   DMA ch2: GDMA_CH2 cap=0x03 bus=0x04 burst=4095
+I (356) DMA_POOL: Initialized 3 DMA channels
+I (357) APP_STATE: State initialized: node_id=F0F5BDFFFE02 boot_id=36779A15A130A7CA fw=2.8.0 model=esp32c6
+I (358) CRASH_DIAG: reset_reason=11(USB) last_reboot_reason="" pending_crashes=0
+W (359) BOOT_GUARD: Fast reboot detected: 3s since previous boot (<60s window), consecutive=2
+I (361) BUS_DMA: UART0 available for data use (console on USB)
+I (361) CONFIG: Initializing config manager...
+I (362) SYNC: Initializing sync manager v2.1...
+I (362) SYNC: Sync manager ready: epoch=1781739719, manifest=v2-63519023, nvs_has=0
+I (363) SYNC: No active config, requesting sync
+I (364) SYNC: Sync request: reason=3
+W (364) SYNC: MQTT not connected, deferring sync request
+I (365) MSG: Message handler initialized
+I (365) PERIPH_H: periph_worker_task started
+I (366) PERIPH_H: periph_rsp_task started
+I (366) PERIPH_H: Periph handler initialized (cmd_queue=0x4084d854, rsp_queue=0x4084d9ac)
+I (367) OTA: OTA initialized
+I (368) MQTT: Initializing MQTT client...
+I (368) TRANSPORT: Transport manager initialized
+I (369) TRANSPORT: Registered transport type=0, count=1
+I (369) MQTT_ADAPTER: MQTT transport adapter registered
+I (370) MQTT: Node ID set: F0F5BDFFFE02
+I (370) rgb_led: Initializing RGB LED on GPIO8
+I (371) rgb_led: RGB LED initialized on GPIO8
+I (371) rgb_led: LED task started
+I (372) rgb_led: LED state machine started
+I (372) FACTORY_RESET: Monitoring BOOT button (GPIO9); only a hold within the first 10000 ms after boot triggers factory reset
+I (373) WIFI_MGR: Initializing WiFi manager...
+I (375) pp: pp rom version: 5b8dcfa
+I (375) net80211: net80211 rom version: 5b8dcfa
+I (377) wifi:wifi driver task: 4085564c, prio:23, stack:6656, core=0
+I (385) wifi:wifi firmware version: e12a754
+I (385) wifi:wifi certification version: v7.0
+I (385) wifi:config NVS flash: enabled
+I (386) wifi:config nano formatting: disabled
+I (386) wifi:mac_version:HAL_MAC_ESP32AX_761,ut_version:N, band mode:0x1
+I (387) wifi:Init data frame dynamic rx buffer num: 32
+I (388) wifi:Init static rx mgmt buffer num: 5
+I (388) wifi:Init management short buffer num: 32
+I (389) wifi:Init dynamic tx buffer num: 32
+I (389) wifi:Init static tx FG buffer num: 2
+I (390) wifi:Init static rx buffer size: 1700 (rxctrl:92, csi:512)
+I (391) wifi:Init static rx buffer num: 10
+I (391) wifi:Init dynamic rx buffer num: 32
+I (392) wifi_init: rx ba win: 6
+I (392) wifi_init: accept mbox: 6
+I (393) wifi_init: tcpip mbox: 32
+I (393) wifi_init: udp mbox: 6
+I (394) wifi_init: tcp mbox: 6
+I (394) wifi_init: tcp tx win: 5760
+I (395) wifi_init: tcp rx win: 5760
+I (395) wifi_init: tcp mss: 1440
+I (396) wifi_init: WiFi SLP IRAM OP enabled
+I (396) WIFI_MGR: WiFi manager initialized
+I (397) WIFI_MGR: Connecting to SSID: ABC
+I (398) phy_init: phy_version 345,552b044,Jul 14 2026,10:37:00
+I (448) wifi:11ax coex: WDEVAX_PTI0(0x55777555), WDEVAX_PTI1(0x00003377).
+
+I (449) wifi:mode : sta (f0:f5:bd:02:f3:5c)
+I (450) wifi:enable tsf
+I (452) WIFI_MGR: WiFi STA started
+I (454) rgb_led: LED state: 0 -> 2
+I (459) wifi:(he)max.RxAMPDULenExponentExtension:3, max.RxAMPDUpre-EOFpaddingBytes:8388607(0x7fffff)
+I (460) wifi:(mac)omc_ul_mu_data_disable_rx:1
+I (460) wifi:(phy)ppe_thresholds_present:1, nominal_packet_padding:0
+I (461) wifi:(phy)dcm tx(constellation:2, nss:0), dcm rx(constellation:2, nss:0)
+I (462) wifi:(phy)rx_mcs_map:0xfffa, tx_mcs_map:0xfffa, stbc_tx:1, bfmer(su:1, mu:1), ldpc:1, max_rate:172
+I (463) wifi:(phy)nsts:2, ru_index_bitmap:0x1(242:1, 484:0, 996:0, 2*996:0)
+I (464) wifi:(phy)threshold_bits:12, nsts_num:2, ru_num:1, he_cap->len:25, ppe_threshold_len:3(6,11,4)
+I (465) wifi:(ppe)RU242, NSTS0, PPE16:0, PPE8:7, nominal_packet_padding:2
+I (466) wifi:(opr)bss color disabled:1
+I (467) wifi:(opr)len:7, TWT Required:0, VHT Opr Info Present:0, 6GHz Opr Info Present:0, Co-Hosted BSS:0(max_indicator:0), Basic MCS and NSS:0xfffc
+I (468) wifi:(opr)len:7, Default PE Duration:4, TXOP RTS Threshold:1023(0 us), ER-SU-Disable:0
+I (469) wifi:(opr)len:7, BSS Color:0, disabled:1, Partial BSS Color:0
+I (470) wifi:(spr)len:2, ctrl:0x3, PSR Disallowed:1, Non-SRG OBSS PD SR Disallowed:1
+I (471) wifi:(spr)len:2, ctrl:0x3, Non-SRG Offset Present:0, SRG Info Present:0
+I (474) wifi:new:<2,0>, old:<1,0>, ap:<255,255>, sta:<2,0>, prof:1, snd_ch_cfg:0x0
+I (475) wifi:(connect)dot11_authmode:0x3, pairwise_cipher:0x3, group_cipher:0x3
+I (476) wifi:state: init -> auth (0xb0)
+I (483) wifi:state: auth -> assoc (0x0)
+I (490) wifi:(assoc)RESP, Extended Capabilities length:11, operating_mode_notification:0
+I (490) wifi:(assoc)RESP, Extended Capabilities, MBSSID:0, TWT Responder:0, OBSS Narrow Bandwidth RU In OFDMA Tolerance:0
+I (491) wifi:(he)max.RxAMPDULenExponentExtension:3, max.RxAMPDUpre-EOFpaddingBytes:8388607(0x7fffff)
+I (492) wifi:(mac)omc_ul_mu_data_disable_rx:1
+I (493) wifi:(phy)ppe_thresholds_present:1, nominal_packet_padding:0
+I (494) wifi:(phy)dcm tx(constellation:2, nss:0), dcm rx(constellation:2, nss:0)
+I (494) wifi:(phy)rx_mcs_map:0xfffa, tx_mcs_map:0xfffa, stbc_tx:1, bfmer(su:1, mu:1), ldpc:1, max_rate:172
+I (495) wifi:(phy)nsts:2, ru_index_bitmap:0x1(242:1, 484:0, 996:0, 2*996:0)
+I (496) wifi:(phy)threshold_bits:12, nsts_num:2, ru_num:1, he_cap->len:25, ppe_threshold_len:3(6,11,4)
+I (497) wifi:(ppe)RU242, NSTS0, PPE16:0, PPE8:7, nominal_packet_padding:2
+I (498) wifi:(opr)bss color disabled:1
+I (499) wifi:(opr)len:7, TWT Required:0, VHT Opr Info Present:0, 6GHz Opr Info Present:0, Co-Hosted BSS:0(max_indicator:0), Basic MCS and NSS:0xfffc
+I (500) wifi:(opr)len:7, Default PE Duration:4, TXOP RTS Threshold:1023(0 us), ER-SU-Disable:0
+I (501) wifi:(opr)len:7, BSS Color:0, disabled:1, Partial BSS Color:0
+I (502) wifi:state: assoc -> run (0x10)
+I (503) wifi:(he)ppe_thresholds_present:1, nominal_packet_padding(rx:0, cfg:2)
+I (504) wifi:(trc)phytype:CBW20-LGI, snr:44, maxRate:172, highestRateIdx:1
+W (505) wifi:(trc)band:2G, phymode:3, highestRateIdx:1, lowestRateIdx:11, dataSchedTableSize:14
+I (506) wifi:(trc)band:2G, rate(L-MCS7, rateIdx:1), ampdu(rate:L-MCS7, schedIdx(1, stop:8)), snr:44, ampduState:wait operational
+I (507) wifi:ifidx:0, rssi:-52, nf:-96, phytype(0x2, CBW20-LGI), phymode(0x7, 11ax), max_rate:172, he:1, vht:0, ht:1
+I (508) wifi:(ht)max.RxAMPDULenExponent:3(65535 bytes), MMSS:4(2 us)
+I (519) wifi:(extcap)mbssid:0, enhanced_mbssid_advertise:0, complete_nontxbssid_profiles:0, twt_responder: 0
+I (520) wifi:connected with ABC, aid = 8, channel 2, BW20, bssid = f4:fc:49:f0:75:dc
+I (521) wifi:security: WPA2-PSK, phy: ax, rssi: -52, cipher(pairwise:0x3, group:0x3), pmf:0
+I (523) wifi:pm start, type: 1, twt_start:0
+
+I (524) wifi:pm start, type:1, aid:0x8, trans-BSSID:f4:fc:49:f0:75:dc, BSSID[5]:0xdc, mbssid(max-indicator:0, index:0), he:1
+I (525) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us
+I (526) wifi:set rx beacon pti, rx_bcn_pti: 10, bcn_timeout: 25000, mt_pti: 10, mt_time: 10000
+I (527) wifi:[ADDBA]TX addba request, tid:0, dialogtoken:1, bufsize:32, A-MSDU:0(not supported), policy:1(IMR), ssn:0(0x0)
+I (528) wifi:[ADDBA]TX addba request, tid:7, dialogtoken:2, bufsize:32, A-MSDU:0(not supported), policy:1(IMR), ssn:0(0x20)
+I (529) wifi:[ADDBA]TX addba request, tid:5, dialogtoken:3, bufsize:32, A-MSDU:0(not supported), policy:1(IMR), ssn:0(0x0)
+I (532) wifi:[ADDBA]RX addba response, status:0, tid:0/tb:1(0xa1), bufsize:32, batimeout:0, txa_wnd:32
+I (533) wifi:[ADDBA]RX addba response, status:0, tid:7/tb:1(0xa1), bufsize:32, batimeout:0, txa_wnd:32
+I (534) wifi:[ADDBA]RX addba response, status:0, tid:5/tb:1(0xa1), bufsize:32, batimeout:0, txa_wnd:32
+I (535) WIFI_MGR: WiFi STA connected to AP
+W (543) wifi:<ba-add>idx:0, ifx:0, tid:0, TAHI:0x100dc75, TALO:0xf049fcf4, (ssn:4, win:64, cur_ssn:4), CONF:0xc0000005
+I (583) wifi:AP's beacon interval = 102400 us, DTIM period = 1
+I (1542) esp_netif_handlers: sta ip: 192.168.110.243, mask: 255.255.255.0, gw: 192.168.110.2
+I (1543) WIFI_MGR: Got IP: 192.168.110.243
+I (1543) rgb_led: LED state: 2 -> 4
+I (1544) CALLBACK: WiFi connected, waking MQTT supervisor
+I (1548) WIFI_MGR: Connected to AP
+I (1549) SYNC: Periodic sync task started (interval=600 sec, dedup=30 sec)
+I (1549) RX_TASK: Report task started (prio=5)
+I (1550) RX_TASK: Started (prio=7, event-driven)
+I (1550) CMD_U0: Started (prio=6)
+I (1552) CMD_U1: Started (prio=6)
+I (1561) MQTT: MQTT connected to broker
+I (1564) CMD_U2: Started (prio=6)
+I (1564) CMD_SPI: Started (prio=6)
+I (1569) HELLO: Hello generation 1
+I (1569) CRASH_DIAG: reported BOOT diag: reset_reason=11(USB)
+I (1570) HELLO_H: Sending Hello: F0F5BDFFFE02, 2.8.0, esp32c6, 0 ch, epoch=1781739719, nvs_has=0, last_manifest=v2-63519023, proto_ver=2.6 nonce=2589540340
+I (1572) CMD_I2C: Started (prio=6)
+I (1572) EHOME: Starting TCP transport on port 8088
+I (1573) TCP_TRANSPORT: TCP transport created (port=8088, max_clients=4)
+I (1574) TRANSPORT: Registered transport type=1, count=2
+I (1574) TCP_TRANSPORT: Accept task started
+I (1575) TCP_TRANSPORT: TCP server started on port 8088
+I (1575) EHOME: Init done, node=F0F5BDFFFE02
+I (1576) main_task: Returned from app_main()
+I (2740) MSG: Received message type=0x12, len=16
+I (2741) HELLO_H: HelloAck: server_time=1791211529769 features=0 nonce=2589540340 accepted=1
+I (2742) rgb_led: LED state: 4 -> 13
+I (2743) CFG_H: Sending ResourceReport: 467 bytes
+I (2745) MSG: Received message type=0x04, len=58
+I (2746) BUS_WORKER: Suspending and waiting for in-flight transactions
+I (2800) CONFIG: LogStream config: enabled=0 level=2
+I (2800) CFG_TX: [heap] apply_dma          in    free=82552 largest=57344
+I (2802) CFG_TX: [heap] apply_dma          out   free=82316 largest=57344
+I (2803) CFG_TX: [heap] apply_peripherals  in    free=82552 largest=57344
+I (2804) PWM_CTRL: init: 0 configs processed
+I (2805) GPIO_CTRL: init: 0 configs applied (count=0)
+I (2805) GPIO_CTRL: init: 0 configs applied (count=0)
+I (2806) PWM_CTRL: init: 0 configs processed
+I (2806) CFG_TX: [heap] apply_peripherals  out   free=82376 largest=57344
+I (2807) CFG_TX: [heap] apply_buses        in    free=82376 largest=57344
+I (2808) CFG_TX: [heap] apply_buses        out   free=82376 largest=57344
+I (2809) CFG_TX: [heap] apply_scheduler    in    free=82376 largest=57344
+I (2810) CFG_TX: [heap] apply_scheduler    out   free=82376 largest=57344
+I (2811) CFG_TX: [heap] apply_log_stream   in    free=82376 largest=57344
+I (2812) CFG_TX: [heap] apply_log_stream   out   free=82376 largest=57344
+I (2813) CFG_TX: [heap] commit_manifest    in    free=82376 largest=57344
+I (2814) CALLBACK: Config transaction committed: manifest=v2-63519023 channels=0
+I (2815) SYNC: Config applied: server_epoch=0, manifest_id=v2-63519023
+I (2816) SYNC: Sync state updated: epoch=1781739719, manifest=v2-63519023, nvs_has=1
+I (2817) CFG_H: Sending ConfigResult: v2-63519023, success=1
+I (2818) CFG_H: Sending ResourceReport: 467 bytes
+I (2818) CALLBACK: Config→scheduler 0 ch
+I (2819) BUS_WORKER: Resumed
+I (2819) rgb_led: LED state: 13 -> 7
+I (2820) CALLBACK: handle_config_applied: DONE
+I (2824) SYNC: Config receive timeout started: 120s
+I (2827) MSG: Received message type=0x08, len=10
+I (2827) HELLO_H: Ping: ts=1791211529777253
+I (2828) HELLO_H: Sending Pong: ts=1791211529777253
+I (10388) FACTORY_RESET: BOOT window closed at 10015 ms uptime; the button is no longer armed for factory reset
+I (11570) RX_TASK: Stats: events=0 completions=0 report_drop=0 report_q_high=0
+I (21571) RX_TASK: Stats: events=0 completions=0 report_drop=0 report_q_high=0

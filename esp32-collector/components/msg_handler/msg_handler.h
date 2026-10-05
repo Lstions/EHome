@@ -46,6 +46,18 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
                                   uint32_t error_code, uint32_t request_id,
                                   uint32_t edge_device_id, uint32_t command_template_id,
                                   uint8_t command_index);
+/* V3-2a DataBatch (0x20)：把一批非关键样本编码成单帧并发布。
+ * 返回 false 表示编码失败（调用方退回逐样本 0x03）。签名与
+ * bus_worker.h 的 data_batch_cb_t 一致，以便直接注入。 */
+bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
+                                 const uint64_t *timestamps_us,
+                                 const uint8_t *const *raw_data,
+                                 const size_t *raw_lens,
+                                 size_t count,
+                                 uint32_t edge_device_id,
+                                 uint32_t command_template_id,
+                                 uint8_t command_index);
+
 esp_err_t msg_handler_send_config_result(const char *manifest_id, const char *sync_id, bool success);
 void msg_handler_send_write_rsp(uint32_t request_id, bool success,
                                 uint32_t error_code, const char *error_msg);

@@ -9,7 +9,9 @@ static unsigned callback_count;
 static unsigned publish_count;
 static uint8_t captured_slot;
 static channel_cmd_v2_t captured_cmd;
-static uint8_t published[128];
+/* Must hold a ChannelCmdV2Final carrying V2_MAX_RX (128) raw bytes plus the
+ * identity header; 128 was enough only for the old small raw fixtures. */
+static uint8_t published[512];
 static size_t published_len;
 
 void host_test_log_record(char level, const char *tag, const char *format, ...)
@@ -60,6 +62,97 @@ static void process(const uint8_t *buf, size_t len)
     if (frame_decoder_init(&dec, buf, len) == FRAME_OK) {
         handler_channel_cmd_v2_process(&dec);
     }
+}
+
+/* Build one minimal valid single-step V2 command with an explicit read_size
+ * window and tx_len; used by the WS-C admission/storage-boundary tests.
+ * seed gives every fixture a distinct command identity, otherwise a later
+ * process() would hit the replay path instead of admission. */
+static size_t build_cmd_with_read_size(uint8_t *out, size_t cap, uint32_t read_size,
+                                       uint8_t seed)
+{
+    uint8_t id[16], digest[16], tx[2] = {0x01, 0x03};
+    memset(id, seed, sizeof(id));
+    memset(digest, (uint8_t)(seed ^ 0xF0), sizeof(digest));
+    frame_encoder_t enc;
+    frame_encoder_init(&enc, out, cap, MSG_CHANNEL_CMD_V2);
+    frame_encode_bytes(&enc, 1, id, sizeof(id));
+    frame_encode_bytes(&enc, 2, digest, sizeof(digest));
+    frame_encode_varint(&enc, 3, 1);
+    frame_encode_string(&enc, 4, "boot-1");
+    frame_encode_varint(&enc, 5, 7);
+    frame_encode_varint(&enc, 6, 9);
+    frame_encode_varint(&enc, 7, 1700000000000ULL);
+    frame_encode_bytes(&enc, 8, tx, sizeof(tx));
+    frame_encode_varint(&enc, 9, read_size);
+    frame_encode_varint(&enc, 10, 1000);
+    frame_encode_varint(&enc, 11, 100);
+    frame_encode_varint(&enc, 12, 0);
+    frame_encode_varint(&enc, 13, 0);
+    frame_encode_varint(&enc, 14, 1);
+    return frame_encoder_size(&enc);
+}
+
+static bool final_field_equals(uint8_t field, uint64_t wanted)
+{
+    frame_decoder_t dec;
+    frame_field_t f;
+    if (frame_decoder_init(&dec, published, published_len) != FRAME_OK) return false;
+    if (published_len == 0 || published[0] != MSG_CHANNEL_CMD_V2_FINAL) return false;
+    while (frame_decoder_next(&dec, &f) == FRAME_OK) {
+        if (f.field_num == field && f.wire_type == WIRE_VARINT && f.value.varint == wanted)
+            return true;
+    }
+    return false;
+}
+
+/* WS-C constraint 3a: a 256-byte read window (Techfine) must still be
+ * ADMITTED; 128 is the response storage bound, not the protocol ceiling. */
+static bool test_admission_accepts_protocol_max_read_size(void)
+{
+    uint8_t cmd[192];
+    reset_capture();
+    size_t n = build_cmd_with_read_size(cmd, sizeof(cmd), 256, 0x21);
+    process(cmd, n);
+    CHECK(callback_count == 1, "read_size=256 must be admitted (protocol window)");
+    CHECK(captured_slot != CHANNEL_CMD_V2_SLOT_NONE, "read_size=256 must get a slot");
+    CHECK(captured_cmd.read_size == 256, "read_size=256 must be preserved verbatim");
+    return true;
+}
+
+/* WS-C constraint 3b: actual responses >128 B must fail closed with
+ * V2_ERR_FINAL_OVERFLOW (1005) and must NOT be silently truncated/emptied. */
+static bool test_oversize_response_fails_closed(void)
+{
+    static const size_t sizes[] = {129, 200, 256};
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        uint8_t cmd[192];
+        uint8_t raw[256];
+        reset_capture();
+        size_t n = build_cmd_with_read_size(cmd, sizeof(cmd), 256, (uint8_t)(0x30 + i));
+        process(cmd, n);
+        CHECK(callback_count == 1, "protocol-max command must be admitted");
+        memset(raw, 0xEE, sizeof(raw));
+        handler_channel_cmd_v2_complete(captured_slot, true, 0, raw, sizes[i]);
+        CHECK(final_field_equals(6, 0), "oversize response must report success=false");
+        CHECK(final_field_equals(7, 1005), "oversize response must be V2_ERR_FINAL_OVERFLOW");
+    }
+    return true;
+}
+
+/* WS-C constraint 3c: a response within storage bound round-trips exactly. */
+static bool test_128_byte_response_round_trips(void)
+{
+    uint8_t cmd[192];
+    uint8_t raw[128];
+    reset_capture();
+    size_t n = build_cmd_with_read_size(cmd, sizeof(cmd), 128, 0x41);
+    process(cmd, n);
+    CHECK(callback_count == 1, "read_size=128 must be admitted");
+    memset(raw, 0x77, sizeof(raw));
+    handler_channel_cmd_v2_complete(captured_slot, true, 0, raw, sizeof(raw));
+    CHECK(final_field_equals(6, 1), "128-byte response must report success");
+    return true;
 }
 
 static bool response_field_equals(uint8_t message_type, uint8_t wanted_field, uint64_t wanted_value)
@@ -229,6 +322,9 @@ int main(void)
     ok = test_go_c_golden_vector() && ok;
     ok = test_malformed_and_wrong_boot_rejected() && ok;
     ok = test_completed_slot_window_evicts_oldest_final() && ok;
+    ok = test_admission_accepts_protocol_max_read_size() && ok;
+    ok = test_oversize_response_fails_closed() && ok;
+    ok = test_128_byte_response_round_trips() && ok;
     if (!ok) return 1;
     puts("channel_cmd_v2_decoder_tests: all tests passed");
     return 0;

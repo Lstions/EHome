@@ -375,6 +375,10 @@ static int resource_index_for_controller(uint8_t bus_type, int32_t controller_id
 /* P1 preflight.  This function is deliberately side-effect free: it runs
  * before bus_manager_cleanup_all(), so pin/controller/DMA conflicts reject a
  * manifest while the old runtime remains usable. */
+/* Forward declaration: apply_manifest's success path prunes after the new
+ * lease set is live (impl below). */
+static esp_err_t prune_unused_uarts(bus_runtime_t *rt, const config_manifest_t *manifest);
+
 static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
                                              const config_manifest_t *manifest,
                                              bus_plan_entry_t *plan)
@@ -812,6 +816,13 @@ void bus_manager_snapshot_leases(bus_runtime_t *rt)
     rt->lease_hints_valid = true;
 }
 
+/* Release every channel lease and the DMA allocations bound to it.
+ *
+ * WS-E install-once: bus_dma_deinit() (UART path) now only drops the lease; the
+ * driver object stays resident.  That is deliberate — reinstalling 3 UARTs per
+ * transaction cost ~9.3 KB of contiguous heap and was the direct cause of the
+ * S3 transaction failure.  Controllers the next manifest does not use are
+ * freed by bus_manager_prune_unused_uarts() after a successful apply. */
 esp_err_t bus_manager_cleanup_all(bus_runtime_t *rt)
 {
     if (!rt) return ESP_ERR_INVALID_ARG;
@@ -941,7 +952,134 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
     /* A successful apply has a new authoritative lease map.  Keep hints only
      * across a failed apply so the transaction rollback can consume them. */
     rt->lease_hints_valid = false;
+    /* Now that the new lease set is live, free UART controllers it does not
+     * use.  Doing this only on the success path is what keeps rollback safe:
+     * a failed apply immediately re-applies old_manifest, whose controllers
+     * must still exist.
+     *
+     * The manifest is passed explicitly, NOT read via config_mgr_get_manifest():
+     * commit_manifest() runs after apply_buses() in the transaction, so the
+     * active slot here is still the OLD manifest.  Consulting it would skip
+     * exactly the controllers this apply just stopped using. */
+    esp_err_t prune_err = prune_unused_uarts(rt, manifest);
+    if (prune_err != ESP_OK) return prune_err;
     return ESP_OK;
+}
+
+/* --- WS-E: UART preinstall / prune ---------------------------------- */
+
+/* Does the manifest intend to lease this controller?
+ *
+ * Two ways to answer yes: the pins map to a fixed profile controller
+ * (hw_derive_uart_port), or any enabled UART channel is already configured for
+ * those pins on this controller (custom pin pairs have no fixed mapping, so the
+ * planner is free to pick any free controller).  The second test is expressed
+ * against the manifest's pins, not against the stale registry, because the
+ * registry entry for a since-removed channel may still hold those pins. */
+static bool manifest_leases_uart(const config_manifest_t *m, uart_port_t port)
+{
+    for (int i = 0; i < m->channel_count; i++) {
+        const config_channel_t *ch = &m->channels[i];
+        if (!ch->enabled || ch->bus_type != BUS_TYPE_UART) continue;
+        if (ch->bus_config_len < 2) continue;
+        uart_port_t derived = hw_derive_uart_port(ch->bus_config[0], ch->bus_config[1], UART_NUM_MAX);
+        if (derived == port) return true;
+    }
+    return false;
+}
+
+esp_err_t bus_manager_preinstall_uarts(bus_runtime_t *rt, const config_manifest_t *manifest)
+{
+    if (!rt || !manifest) return ESP_ERR_INVALID_ARG;
+
+    /* Same side-effect-free preflight apply_manifest runs, and the SAME plan.
+     * Using the plan's controller id (not a fresh derivation) keeps preinstall
+     * and the later apply_buses on one controller: otherwise two custom-pin
+     * channels could both pick the first idle controller here and only the
+     * second would conflict later, after workers were already suspended. */
+    bus_plan_entry_t plan[MAX_CHANNELS];
+    esp_err_t plan_err = validate_manifest_resources(rt, manifest, plan);
+    if (plan_err != ESP_OK) {
+        ESP_LOGE(TAG, "preinstall rejected by resource plan: %s", esp_err_to_name(plan_err));
+        return plan_err;
+    }
+
+    for (int i = 0; i < manifest->channel_count; i++) {
+        const config_channel_t *ch = &manifest->channels[i];
+        if (!ch->enabled || ch->bus_type != BUS_TYPE_UART) continue;
+        if (ch->bus_config_len < 6) continue;
+
+        uint8_t tx = ch->bus_config[0];
+        uint8_t rx = ch->bus_config[1];
+        uint32_t baud = ((uint32_t)ch->bus_config[2] << 24) |
+                        ((uint32_t)ch->bus_config[3] << 16) |
+                        ((uint32_t)ch->bus_config[4] << 8) |
+                        (uint32_t)ch->bus_config[5];
+
+        /* Planner-selected controller for this channel, exactly as
+         * apply_manifest will use it. */
+        int32_t preferred = plan[i].valid ? plan[i].controller_id : -1;
+        const bus_dma_ctx_t *lease = find_compatible_runtime_lease(rt, ch->id, ch);
+        if (lease != NULL) preferred = runtime_controller_id(lease);
+
+        uart_port_t port = UART_NUM_MAX;
+        esp_err_t err = bus_dma_uart_preinstall(tx, rx, baud,
+                                                config_channel_get_dma_enabled(ch),
+                                                preferred, &port);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "UART preinstall failed for ch=%" PRIu32 ": %s",
+                     ch->id, esp_err_to_name(err));
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+/* Core prune.  `manifest` is the set of leases that will be authoritative once
+ * this apply commits; NULL means "only protect live channel leases".
+ *
+ * The manifest is authoritative even before commit: apply_buses() runs before
+ * commit_manifest(), so the staged manifest still has applied==false while its
+ * channels are already live.  Callers therefore pass the staged manifest
+ * explicitly, and the public wrapper passes the active one only when it is
+ * actually applied (a discarded/stale slot must not protect ports). */
+static esp_err_t prune_unused_uarts(bus_runtime_t *rt, const config_manifest_t *manifest)
+{
+    if (!rt) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t first_err = ESP_OK;
+
+    /* Try every controller from the platform table; teardown itself refuses
+     * anything still leased, so scanning is safe. */
+    for (int i = 0; i < HW_UART_COUNT; i++) {
+        uart_port_t port = (uart_port_t)hw_uarts[i].port;
+
+        bool leased_here = false;
+        for (int c = 0; c < SCHED_MAX_CHANNELS && !leased_here; c++) {
+            if (rt->bus_ch[c] == 0 || !rt->bus_ctx[c].initialized) continue;
+            if (rt->bus_ctx[c].bus_type == BUS_TYPE_UART &&
+                rt->bus_ctx[c].cfg.uart.port == port) {
+                leased_here = true;
+            }
+        }
+        if (leased_here) continue;
+
+        /* A controller the authoritative manifest intends to lease must
+         * survive even if no channel has registered it yet. */
+        if (manifest != NULL && manifest_leases_uart(manifest, port)) continue;
+
+        esp_err_t err = bus_dma_uart_teardown(port);
+        if (err != ESP_OK && first_err == ESP_OK) first_err = err;
+    }
+    return first_err;
+}
+
+esp_err_t bus_manager_prune_unused_uarts(bus_runtime_t *rt)
+{
+    const config_manifest_t *active = config_mgr_get_manifest();
+    /* Only an applied manifest is authoritative; a discarded/inactive slot
+     * must not keep a controller alive forever. */
+    return prune_unused_uarts(rt, (active != NULL && active->applied) ? active : NULL);
 }
 
 /* v2.4: Incremental single-channel unregister */
@@ -965,6 +1103,10 @@ esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id)
                 xQueueReset(rt->pending_queues[i]);
             }
             hw_profile_runtime_remove(channel_id);
+            /* The released controller may now be idle; free it if the active
+             * manifest no longer references it.  Errors are non-fatal here:
+             * the channel is already unregistered and a later apply prunes. */
+            (void)bus_manager_prune_unused_uarts(rt);
             ESP_LOGI(TAG, "Unregistered ch=%lu", (unsigned long)channel_id);
             return ESP_OK;
         }

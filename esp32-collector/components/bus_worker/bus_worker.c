@@ -28,7 +28,13 @@
 #include "bus_dma.h"
 #include "cmd_queue.h"
 #include "scheduler.h"
+#include "collector_mem.h"
 #include "frame_codec.h"
+/* V3-2a：能力位读取（契约 §1）。只取这个轻量头，刻意**不**引入
+ * msg_handler.h —— 它会把 scheduler/config_mgr/esp_err 整条头链拖进
+ * bus_worker。DataBatch 的**编码**不在这里：见 bus_worker.h 的
+ * data_batch_cb_t 注释（组件门禁 1024 B，而一帧需要 1400 B 缓冲）。 */
+#include "handler_hello.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
@@ -76,7 +82,16 @@
 #define REPORT_PAYLOAD_BLOCK_SIZE 1024
 #define REPORT_CRITICAL_BLOCKS 4
 #define REPORT_CRITICAL_EMERGENCY_BLOCKS 1
-#define REPORT_TELEMETRY_BLOCKS 12
+/* WS-C: 12 -> 8, per Lead 2026-10-05.  Backpressure model at full population
+ * (S3: 5 x 100 Hz = 500 samples/s): a telemetry block is held from enqueue
+ * until report_tx calls msg_handler_send_data_report() and MQTT enqueue
+ * returns -- ~1-5 ms, NOT until the network ACK.  Mean in-flight is therefore
+ * ~500/s x 5 ms = 2.5 blocks; 8 gives ~3x margin.  Judgement variable is
+ * bus_worker_get_report_drop_count()==0 under the task-4 stress run; if drops
+ * appear, raise this back to 12 rather than relaxing the criterion.  The
+ * critical/emergency reserves stay internal RAM and are deliberately NOT
+ * reduced (they carry errors and V2 control finals). */
+#define REPORT_TELEMETRY_BLOCKS 8
 #define REPORT_CRITICAL_QUEUE_DEPTH REPORT_CRITICAL_BLOCKS
 #define REPORT_TELEMETRY_QUEUE_DEPTH REPORT_TELEMETRY_BLOCKS
 #define CONTROL_FINAL_QUEUE_DEPTH 8
@@ -116,6 +131,20 @@
 #define REPORT_TASK_STACK 4096
 #define REPORT_TASK_PRIO 5
 
+/* ------------------------------------------------------------------ *
+ *  V3-2a DataBatch(0x20) 聚合参数（契约 §3）
+ * ------------------------------------------------------------------ */
+
+/* 聚合窗口。100 Hz 每通道间隔 10 ms，20 ms 通常能攒 2 个，且远低于契约
+ * 提到的 50 ms 上限。 */
+#define DATA_BATCH_WINDOW_MS 20
+/* 契约 §2.1.3：一帧最多 4 个样本。 */
+#define DATA_BATCH_MAX_SAMPLES 4
+/* 编码缓冲预算。真正的 buf[1400] 在 msg_handler 的批量编码器里（契约
+ * §2.2 所指），bus_worker 只用这个常量做"降 n"的**尺寸预言**，自身不分配
+ * 任何编码缓冲 —— 见 bus_worker.h 的 data_batch_cb_t 注释。 */
+#define DATA_BATCH_BUF_SIZE 1400
+
 typedef struct {
  uint32_t channel_id;
  uint64_t timestamp_us;
@@ -146,9 +175,41 @@ typedef struct {
  char error_msg[WRITE_RSP_MSG_MAX];
 } write_rsp_desc_t;
 
+/* Critical and emergency payload reserves are small and directly tied to the
+ * error/control path: they stay INTERNAL RAM unconditionally.  The telemetry
+ * pool (REPORT_TELEMETRY_BLOCKS x 1 KiB) is pure CPU-accessed sample data and
+ * moves to PSRAM on PSRAM models, allocated in report_path_init(); the
+ * internal-only models keep the static array so their layout and host-test
+ * behaviour are unchanged. */
 static uint8_t s_critical_payload[REPORT_CRITICAL_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
 static uint8_t s_critical_emergency_payload[REPORT_CRITICAL_EMERGENCY_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static uint8_t (*s_telemetry_payload)[REPORT_PAYLOAD_BLOCK_SIZE];
+#else
 static uint8_t s_telemetry_payload[REPORT_TELEMETRY_BLOCKS][REPORT_PAYLOAD_BLOCK_SIZE];
+#endif
+
+/* s_streams is rx_task's CPU-side linearisation buffer (no DMA, no ISR): on
+ * PSRAM models it is allocated here in report_path_init() alongside the
+ * telemetry pool; internal-only models keep the static array.  The storage is
+ * declared BEFORE report_path_init()/deinit() so the PSRAM branch can see it.
+ * See collector_mem.h for the placement policy. */
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static stream_rx_t *s_streams;
+#else
+static stream_rx_t s_streams[SCHED_MAX_CHANNELS];
+#endif
+
+/* Branch-local readiness: comparing an array address to NULL trips
+ * -Werror=address in the non-PSRAM branch, so the test lives in one place. */
+static bool worker_buffers_ready(void)
+{
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    return s_streams != NULL && s_telemetry_payload != NULL;
+#else
+    return true;
+#endif
+}
 static QueueHandle_t s_report_critical_free;
 static QueueHandle_t s_report_critical_emergency_free;
 static QueueHandle_t s_report_telemetry_free;
@@ -190,6 +251,9 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
 /* Injected callbacks */
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static data_rpt_cb_t s_data_rpt_cb = NULL;
+/* V3-2a DataBatch 编码回调（由 main 注入 msg_handler 的实现）。为 NULL 时
+ * DataBatch 完全不启用，即使能力位为 1。 */
+static data_batch_cb_t s_data_batch_cb = NULL;
 static channel_cmd_v2_final_cb_t s_channel_cmd_v2_final_cb = NULL;
 
 #define SUSPEND_RX_BIT   BIT0
@@ -377,6 +441,206 @@ static void report_free_emergency_block(uint8_t index)
   (void)xQueueSend(s_report_critical_emergency_free, &index, 0);
 }
 
+/* ------------------------------------------------------------------ *
+ *  V3-2a DataBatch(0x20) 聚合（契约 §3）
+ *
+ *  为什么把聚合与"编码进帧"分成两步：
+ *    report_tx 主循环拿到第一个 telemetry desc 后，可能还想并入队列里
+ *    紧随其后的 1..3 个同源非关键样本。但契约 §2.2 要求"缓冲剩余不足时
+ *    降 n，不得截断"，而"够不够"只有在算出确切帧长之后才知道。因此：
+ *      1) data_batch_collect() 只做**非破坏性**的窥视（xQueuePeek），
+ *         把"若按当前候选集发包会占多少字节"报给调用方；
+ *      2) 调用方挑出第一个放得下的 n，再真正 xQueueReceive 取出这 n 个
+ *         并编码。
+ *    这样"放回队列"的代价为零（peek 不移动 head），不丢样本，也不会有
+ *    "取出来又放回去"的次序扰动。
+ *
+ *  为什么不存在临时数组里：DESC_BATCH_MAX(4) 个 report_desc_t 只有约
+ *  4x40=160 B 栈，属于 report_tx 4096 B 预算内的可接受开销（同函数内
+ *  handler 链的 2416 B 栈帧才是大头，且那部分本函数不进入）。
+ * ------------------------------------------------------------------ */
+
+/* 从 telemetry 队列取出 desc 引用的 payload。与 report_task 主循环里的
+ * 同一套选择逻辑，避免"两处漂移"。 */
+static const uint8_t *report_payload_of(const report_desc_t *desc)
+{
+ return desc->emergency ? s_critical_emergency_payload[desc->block_index]
+                        : (desc->critical ? s_critical_payload[desc->block_index]
+                                          : s_telemetry_payload[desc->block_index]);
+}
+
+/* 判断 desc 能否并入以 base 为起点的同一批（契约 §2.1.1 的路由元数据
+ * 同源要求 + §3 的 critical==false 要求）。 */
+static bool data_batch_compatible(const report_desc_t *base, const report_desc_t *cand)
+{
+ if (!base || !cand) return false;
+ /* 关键样本（error_code != 0 或 request_id != 0）永不入批：契约 §2.1.6。
+  * 队列层面本不该出现（关键样本走 s_report_critical_q），这里是第二道锁。 */
+ if (cand->critical || cand->emergency) return false;
+ if (base->critical || base->emergency) return false;
+ if (cand->channel_id != base->channel_id) return false;
+ if (cand->edge_device_id != base->edge_device_id) return false;
+ if (cand->command_template_id != base->command_template_id) return false;
+ if (cand->command_index != base->command_index) return false;
+ /* 契约 §2.1.4 要求 delta 非递减；时间戳倒退的样本不能并入同一批。 */
+ if (cand->timestamp_us < base->timestamp_us) return false;
+ /* 契约 §2.1.5：空 raw_data 拒绝。0 长样本留给 0x03 路径，不入批。 */
+ if (cand->len == 0) return false;
+ return true;
+}
+
+/* 一帧 DataBatch 的**确切**字节数预测，与 data_batch_codec.c 的
+ * data_batch_encoded_size() 同式。bus_worker 用它做"降 n"决策，从而不必
+ * 链接编码器、也不必分配编码缓冲。
+ *
+ * 字段号/布局必须与契约 §2 及 data_batch_codec.h 保持一致；两侧若漂移，
+ * bus_worker_data_batch_tests.c 的 T6（降 n）会立刻变红。 */
+static size_t db_varint_size(uint64_t v)
+{
+ size_t n = 1;
+ while (v > 0x7F) { n++; v >>= 7; }
+ return n;
+}
+
+static size_t db_field_varint_size(uint8_t field_num, uint64_t value)
+{
+ return db_varint_size(((uint64_t)field_num << 3) | 0) + db_varint_size(value);
+}
+
+static size_t db_field_bytes_size(uint8_t field_num, size_t len)
+{
+ return db_varint_size(((uint64_t)field_num << 3) | 2) +
+        db_varint_size(len) + len;
+}
+
+/* 与编码器同款的可选字段省略规则（0 即省略；field8 在 edge!=0 时恒写，
+ * 与 data_report_codec.c 对 0x03 的既有习惯一致）。 */
+static size_t data_batch_frame_size(uint32_t channel_id, uint64_t base_ts,
+                                    uint32_t first_seq,
+                                    const report_desc_t *cands, size_t n,
+                                    uint32_t edge, uint32_t tmpl, uint8_t cmd_idx)
+{
+ size_t total = 1; /* 类型字节 */
+ total += db_field_varint_size(1, n);
+ total += db_field_varint_size(2, base_ts);
+ total += db_field_varint_size(3, first_seq);
+ total += db_field_varint_size(4, channel_id);
+ for (size_t i = 0; i < n; i++) {
+  uint64_t delta = cands[i].timestamp_us - base_ts;
+  size_t body = db_field_varint_size(1, delta) +
+                db_field_bytes_size(2, cands[i].len);
+  total += db_field_bytes_size(5, body);
+ }
+ if (edge != 0) total += db_field_varint_size(6, edge);
+ if (tmpl != 0) total += db_field_varint_size(7, tmpl);
+ if (cmd_idx > 0 || edge != 0) total += db_field_varint_size(8, cmd_idx);
+ return total;
+}
+
+/* 时间戳是否落在聚合窗口内（契约 §3：ts - start_us < WINDOW_MS）。 */
+static bool data_batch_in_window(uint64_t ts, uint64_t start_us)
+{
+ return ts >= start_us && (ts - start_us) < (uint64_t)DATA_BATCH_WINDOW_MS * 1000ULL;
+}
+
+/* 把已选中的 n 个样本交给注入的 DataBatch 编码回调（msg_handler 在它的
+ * 1400 B 编码预算内完成编码与发布）。返回 false 表示编码失败 —— 按契约
+ * 不得截断，调用方据此退回逐样本 0x03。
+ *
+ * 本函数刻意**不**在 bus_worker 里放编码缓冲：见 bus_worker.h 中
+ * data_batch_cb_t 的注释（组件门禁 1024 B vs 一帧需要 1400 B）。 */
+static bool data_batch_publish(const report_desc_t *descs, size_t n)
+{
+ if (!s_data_batch_cb || !descs || n < 2 || n > DATA_BATCH_MAX_SAMPLES) return false;
+
+ const uint8_t *raw[DATA_BATCH_MAX_SAMPLES];
+ size_t raw_lens[DATA_BATCH_MAX_SAMPLES];
+ uint64_t timestamps[DATA_BATCH_MAX_SAMPLES];
+ for (size_t i = 0; i < n; i++) {
+  timestamps[i] = descs[i].timestamp_us;
+  raw[i] = report_payload_of(&descs[i]);
+  raw_lens[i] = descs[i].len;
+ }
+ bool ok = s_data_batch_cb(descs[0].channel_id, descs[0].sequence,
+                           timestamps, raw, raw_lens, n,
+                           descs[0].edge_device_id,
+                           descs[0].command_template_id,
+                           descs[0].command_index);
+ if (!ok) {
+  ESP_LOGW(TAG_RX, "DataBatch encode failed for n=%u; falling back to 0x03",
+           (unsigned)n);
+ }
+ return ok;
+}
+
+/* 尝试把 desc（来自 member 队列）与其后续同源非关键样本聚合成一帧
+ * DataBatch(0x20)。返回 true 表示 desc 已被本函数消费（调用方不得再按
+ * 0x03 路径上报它）；false 表示走了现状路径。
+ *
+ * 抽成独立函数而不是内联在 report_task 里，是为了让宿主测试能**不经
+ * FreeRTOS 任务**直接驱动这段逻辑（report_tx 的循环体依赖真实任务调度）。
+ * 这也让"能力位为 0 时逐字节一致"这条红线有一个可执行的断言点。 */
+static bool report_try_data_batch(QueueSetMemberHandle_t member, report_desc_t *desc)
+{
+ /* 兼容性红线：能力位为 0 时本函数立即返回，report_tx 的代码路径与
+  * V3-2a 之前**逐字节一致**（只发 0x03）。所有窥视/编码动作都在
+  * CAP_DATA_BATCH_V1 为真之后才可能发生。
+  *
+  * 只对 telemetry 队列聚合：关键/紧急样本走各自队列，既有告警路径不受
+  * 影响（契约 §2.1.6）。 */
+ if ((hello_get_server_caps() & CAP_DATA_BATCH_V1) == 0) return false;
+ if (member != s_report_telemetry_q || !desc) return false;
+ if (desc->critical || desc->emergency || desc->len == 0) return false;
+
+ report_desc_t cands[DATA_BATCH_MAX_SAMPLES];
+ cands[0] = *desc;
+ size_t n = 1;
+ /* 非阻塞地窥视后续 desc，只并入同源、非关键、窗口内的样本。
+  * xQueuePeek 不移动队列 head —— "不满足条件即放回队列"因此是零代价的，
+  * 不丢样本、也不扰动次序。 */
+ while (n < DATA_BATCH_MAX_SAMPLES) {
+  report_desc_t peek;
+  if (xQueuePeek(s_report_telemetry_q, &peek, 0) != pdTRUE) break;
+  if (!data_batch_compatible(desc, &peek)) break;
+  if (!data_batch_in_window(peek.timestamp_us, desc->timestamp_us)) break;
+  /* 契约 §2.2：先算"若并入这个样本"的确切帧长，超出编码缓冲就停在这里
+   * （降 n），绝不截断。 */
+  report_desc_t probe[DATA_BATCH_MAX_SAMPLES];
+  for (size_t i = 0; i < n; i++) probe[i] = cands[i];
+  probe[n] = peek;
+  size_t projected = data_batch_frame_size(desc->channel_id, desc->timestamp_us,
+                                           desc->sequence, probe, n + 1,
+                                           desc->edge_device_id,
+                                           desc->command_template_id,
+                                           desc->command_index);
+  if (projected > DATA_BATCH_BUF_SIZE) break;
+  /* report_tx 是本队列唯一消费者，peek 到的元素必然仍是同一个，可以安全
+   * 地取出。 */
+  if (xQueueReceive(s_report_telemetry_q, &peek, 0) != pdTRUE) break;
+  cands[n++] = peek;
+ }
+
+ if (n < 2) return false;
+
+ if (data_batch_publish(cands, n)) {
+  /* 编码完成后才归还遥测池：编码期间这些 block 必须保持有效。 */
+  for (size_t i = 0; i < n; i++) report_free_block(false, cands[i].block_index);
+  return true;
+ }
+
+ /* 编码失败：把已取出的样本**放回队列头**，绝不丢样本。逆序回填以保持
+  * 原顺序；刚刚取走过 n 个，容量必然够，失败分支只是防御。放回后返回
+  * true —— desc 仍是"已被本函数接管"，由这里负责归位，调用方不得重复
+  * 归还。 */
+ for (size_t i = n; i-- > 0; ) {
+  if (xQueueSendToFront(s_report_telemetry_q, &cands[i], 0) != pdTRUE) {
+   report_free_block(false, cands[i].block_index);
+   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+  }
+ }
+ return true;
+}
+
 static void report_task(void *pv)
 {
  (void)pv;
@@ -417,8 +681,9 @@ static void report_task(void *pv)
    * change arrival order).  control_final/write_rsp keep strict priority via
    * the pre-scans above. */
   bool got_desc = false;
+  QueueSetMemberHandle_t member = NULL;
   {
-   QueueSetMemberHandle_t member = s_report_ready_set
+   member = s_report_ready_set
     ? xQueueSelectFromSet(s_report_ready_set, pdMS_TO_TICKS(1000)) : NULL;
    if (!member) continue;
    if (member == s_control_final_q) {
@@ -435,6 +700,12 @@ static void report_task(void *pv)
    }
    got_desc = xQueueReceive(member, &desc, 0) == pdTRUE;
    if (!got_desc) continue;
+  }
+
+  /* ---- V3-2a DataBatch(0x20) 聚合（契约 §3） ---- */
+  if (report_try_data_batch(member, &desc)) {
+   esp_task_wdt_reset();
+   continue;
   }
 
   const uint8_t *payload = desc.emergency
@@ -575,6 +846,26 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
 static void report_path_init(void)
 {
  if (s_report_path_started) return;
+#if COLLECTOR_MEM_PSRAM_ENABLED
+ /* Prefer PSRAM, fall back to internal RAM.  Fail closed: a NULL pool would
+  * turn the first sample into a load from address 0, so the whole report path
+  * (and therefore bus_worker_start) refuses to come up instead. */
+ if (s_telemetry_payload == NULL) {
+  s_telemetry_payload = collector_mem_alloc_pref_psram(
+      (size_t)REPORT_TELEMETRY_BLOCKS * REPORT_PAYLOAD_BLOCK_SIZE);
+ }
+ if (s_streams == NULL) {
+  s_streams = collector_mem_alloc_pref_psram(
+      (size_t)SCHED_MAX_CHANNELS * sizeof(stream_rx_t));
+  if (s_streams) memset(s_streams, 0, (size_t)SCHED_MAX_CHANNELS * sizeof(stream_rx_t));
+ }
+ if (!worker_buffers_ready()) {
+  ESP_LOGE(TAG_RX, "report/stream buffer allocation failed; report path not started");
+  collector_mem_free(s_telemetry_payload); s_telemetry_payload = NULL;
+  collector_mem_free(s_streams); s_streams = NULL;
+  return;
+ }
+#endif
  s_report_critical_free = xQueueCreate(REPORT_CRITICAL_BLOCKS, sizeof(uint8_t));
  s_report_critical_emergency_free = xQueueCreate(REPORT_CRITICAL_EMERGENCY_BLOCKS, sizeof(uint8_t));
  s_report_telemetry_free = xQueueCreate(REPORT_TELEMETRY_BLOCKS, sizeof(uint8_t));
@@ -632,6 +923,12 @@ static void report_path_deinit(void)
  if (s_report_critical_free) { vQueueDelete(s_report_critical_free); s_report_critical_free = NULL; }
  if (s_report_critical_emergency_free) { vQueueDelete(s_report_critical_emergency_free); s_report_critical_emergency_free = NULL; }
  if (s_report_telemetry_free) { vQueueDelete(s_report_telemetry_free); s_report_telemetry_free = NULL; }
+#if COLLECTOR_MEM_PSRAM_ENABLED
+ /* Free only after the queues and the report task are gone, so no descriptor
+  * can still reference a block.  Restart re-allocates in report_path_init(). */
+ collector_mem_free(s_telemetry_payload); s_telemetry_payload = NULL;
+ collector_mem_free(s_streams); s_streams = NULL;
+#endif
  s_report_path_started = false;
 }
 
@@ -751,6 +1048,11 @@ void bus_worker_set_callbacks(write_rsp_cb_t wr_cb, data_rpt_cb_t dr_cb)
 void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb)
 {
  s_channel_cmd_v2_final_cb = cb;
+}
+
+void bus_worker_set_data_batch_cb(data_batch_cb_t cb)
+{
+ s_data_batch_cb = cb;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1226,7 +1528,8 @@ static void cmd_task_i2c(void *pv) {
 
 #define UART_IDLE_THRESHOLD_US 10000  /* protocol-neutral idle completion deadline */
 
-static stream_rx_t s_streams[SCHED_MAX_CHANNELS];
+/* s_streams storage is declared next to s_telemetry_payload above (the PSRAM
+ * branch must be visible to report_path_init before this point). */
 static int64_t     s_last_rx_us[SCHED_MAX_CHANNELS];
 static uint32_t    s_rx_sequence[SCHED_MAX_CHANNELS];
 static bool        s_stream_chunked[SCHED_MAX_CHANNELS];
@@ -1749,11 +2052,69 @@ static void rx_task(void *pv)
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 
+/* 前向声明：让 bus_worker_start() 能在定义之前引用编码器。这里刻意**不带**
+ * weak 属性 —— 它只是声明；真正的弱定义在下面，宿主测试可用编译定义关掉。 */
+bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
+                                 const uint64_t *timestamps_us,
+                                 const uint8_t *const *raw_data,
+                                 const size_t *raw_lens, size_t count,
+                                 uint32_t edge_device_id,
+                                 uint32_t command_template_id,
+                                 uint8_t command_index);
+
+/* V3-2a: DataBatch(0x20) 编码器（在 msg_handler 组件内）的弱默认实现。
+ *
+ * EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER：宿主测试若**同时**编入了
+ * handler_data.c（真正的强定义，例如 rx_health_e2e_tests），就不能再定义
+ * 这个弱符号，否则同一翻译单元里重定义。该测试通过编译定义打开这个开关。
+ *
+ * 为什么需要它：bus_worker 已经 REQUIRES msg_handler（handler_data.c 读
+ * 上报计数器），但这只建立"谁依赖谁"，**不会**让 main/ 去调用
+ * bus_worker_set_data_batch_cb()。task-1 的写范围明确冻结 main/，因此
+ * 这里用弱符号给出默认实现 —— 既不改 main/，也不要求 Lead 在 main/ 里加
+ * 一行注入代码。
+ *
+ * 为什么链接器一定能取到强符号：ESP-IDF 把每个组件打成静态库。链接器在
+ * 解析 __idf_msg_handler.a 时会把强定义 msg_handler_send_data_batch 拉进
+ * 最终镜像，强定义随即覆盖弱定义（弱符号的地址由链接器在解析阶段回填）。
+ * 因此运行时调用的始终是 msg_handler 的实现。
+ *
+ * 语义边界：能力位为 0 时 report_try_data_batch() 根本不会走到这里，所以
+ * "与现状逐字节一致"这条红线不受本弱符号影响。能力位为 1 而弱定义被误用
+ * （即 msg_handler 未链接进来）时返回 false，聚合路径退化为逐样本 0x03，
+ * 属 fail-safe，绝不产出半截帧。 */
+#ifndef EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER
+__attribute__((weak))
+bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
+                                 const uint64_t *timestamps_us,
+                                 const uint8_t *const *raw_data,
+                                 const size_t *raw_lens, size_t count,
+                                 uint32_t edge_device_id,
+                                 uint32_t command_template_id,
+                                 uint8_t command_index)
+{
+ (void)channel_id; (void)first_sequence; (void)timestamps_us;
+ (void)raw_data; (void)raw_lens; (void)count;
+ (void)edge_device_id; (void)command_template_id; (void)command_index;
+ return false;
+}
+#endif
+
 void bus_worker_start(bus_runtime_t *rt)
 {
  ensure_suspend_events();
  s_runtime = rt;
+ /* 默认注入 DataBatch(0x20) 编码器（msg_handler 的强定义；main/ 若另行
+  * 注入会覆盖此默认值）。放在 start() 而不是 report_path_init()：编码器
+  * 只被 report_tx 使用，而 report_tx 由 report_path_init() 创建。 */
+ if (s_data_batch_cb == NULL) s_data_batch_cb = msg_handler_send_data_batch;
  report_path_init();
+ if (!s_report_path_started) {
+  /* report_path_init() failed (or was never able to build its pool).  Starting
+   * the RX/cmd tasks here would let rx_task write into a NULL stream buffer. */
+  ESP_LOGE("BUS_WORKER", "report path unavailable; not starting bus workers");
+  return;
+ }
  rebuild_cmd_queue_sets(rt);
  rebuild_uart_event_set(rt);
  xTaskCreate(rx_task, "rx_task", RX_STACK,

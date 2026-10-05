@@ -4,6 +4,7 @@
  */
 
 #include "config_mgr.h"
+#include "collector_mem.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "frame_codec.h"
@@ -21,8 +22,34 @@
 #define NVS_KEY_MANIFEST_ID    "manifest_id"   /* string */
 #define NVS_KEY_LAST_SYNC_TIME "last_sync"     /* uint32 */
 
-/* State — double-buffer for TOCTOU-safe concurrent access */
-static config_manifest_t s_manifests[2];
+/* State — double-buffer for TOCTOU-safe concurrent access.
+ *
+ * On PSRAM models the two manifests (2 x ~3.5 KB after WS-C) are allocated
+ * from PSRAM in config_mgr_init(); on internal-only models they stay a static
+ * .bss array.  Both branches use the same indexing expression below. */
+#define CONFIG_MGR_MANIFEST_SLOTS 2
+#define CONFIG_MGR_MANIFEST_BYTES (CONFIG_MGR_MANIFEST_SLOTS * sizeof(config_manifest_t))
+#if COLLECTOR_MEM_PSRAM_ENABLED
+static config_manifest_t *s_manifests;
+#else
+static config_manifest_t s_manifests[CONFIG_MGR_MANIFEST_SLOTS];
+#endif
+
+/* Branch-local readiness predicate.
+ *
+ * Why not `s_manifests != NULL` at the call sites: in the non-PSRAM branch
+ * s_manifests is an ARRAY, and GCC's -Werror=address rejects the comparison
+ * ("comparison will always evaluate as 'true' for the address of ...").
+ * Keeping the test inside the correct branch makes both profiles warning-free
+ * while preserving the real PSRAM allocation-failure guard. */
+static inline bool manifests_ready(void)
+{
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    return s_manifests != NULL;
+#else
+    return true;
+#endif
+}
 static volatile int s_active_idx = 0;  /* Xtensa: single-word read/write is atomic */
 static int s_staged_idx = -1;
 static SemaphoreHandle_t s_mutex = NULL;
@@ -57,7 +84,18 @@ void config_mgr_init(void)
 
     ESP_LOGI(TAG, "Initializing config manager...");
     s_mutex = xSemaphoreCreateMutex();
-    memset(s_manifests, 0, sizeof(s_manifests));
+#if COLLECTOR_MEM_PSRAM_ENABLED
+    /* Prefer PSRAM; helper falls back to internal RAM.  Do NOT keep a static
+     * .bss reserve here: the array is only absent from .bss when this branch
+     * is the sole owner, which is exactly the model split this change buys. */
+    s_manifests = collector_mem_alloc_pref_psram(CONFIG_MGR_MANIFEST_BYTES);
+    if (!manifests_ready()) {
+        ESP_LOGE(TAG, "manifest buffer allocation failed (%u bytes, PSRAM+internal)",
+                 (unsigned)CONFIG_MGR_MANIFEST_BYTES);
+        return;
+    }
+#endif
+    memset(s_manifests, 0, CONFIG_MGR_MANIFEST_BYTES);
     s_active_idx = 0;
     s_initialized = true;
     /* Server is single source of truth — no NVS load at boot */
@@ -69,7 +107,7 @@ static config_manifest_t *inactive_manifest(void) { return &s_manifests[1 - s_ac
 
 bool config_mgr_stage_manifest(const uint8_t *data, size_t len)
 {
-    if (data == NULL || len < 1) {
+    if (data == NULL || len < 1 || !manifests_ready()) {
         ESP_LOGE(TAG, "Invalid manifest data");
         return false;
     }
@@ -105,9 +143,16 @@ const config_manifest_t *config_mgr_get_staged_manifest(void)
     return s_staged_idx >= 0 ? &s_manifests[s_staged_idx] : NULL;
 }
 
+/* WS-E contract: this MUST be the configuration transaction's last step.
+ *
+ * stage_manifest() writes only the inactive slot, so before this call
+ * config_mgr_get_manifest() still returns the pre-transaction manifest and the
+ * transaction can rebuild runtime state from that live pointer on rollback.
+ * If a future change adds a fallible step AFTER commit, the caller must
+ * re-establish a rollback snapshot first. */
 bool config_mgr_commit_staged_manifest(void)
 {
-    if (s_staged_idx < 0) return false;
+    if (s_staged_idx < 0 || !manifests_ready()) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_manifests[s_staged_idx].applied = true;
     s_active_idx = s_staged_idx;
@@ -118,7 +163,8 @@ bool config_mgr_commit_staged_manifest(void)
 
 void config_mgr_discard_staged_manifest(void)
 {
-    if (s_staged_idx >= 0) memset(&s_manifests[s_staged_idx], 0, sizeof(config_manifest_t));
+    if (s_staged_idx >= 0 && manifests_ready())
+        memset(&s_manifests[s_staged_idx], 0, sizeof(config_manifest_t));
     s_staged_idx = -1;
 }
 
@@ -138,12 +184,13 @@ bool config_mgr_apply_manifest(const uint8_t *data, size_t len)
 
 const config_manifest_t *config_mgr_get_manifest(void)
 {
-    return s_initialized ? active_manifest() : NULL;
+    return (s_initialized && manifests_ready()) ? active_manifest() : NULL;
 }
 
 const config_template_t *config_mgr_get_template(uint32_t id)
 {
     const config_manifest_t *m = active_manifest();
+    if (m == NULL) return NULL;
     for (int i = 0; i < m->template_count; i++) {
         if (m->templates[i].id == id) {
             return &m->templates[i];
@@ -155,6 +202,7 @@ const config_template_t *config_mgr_get_template(uint32_t id)
 const config_channel_t *config_mgr_get_channel(uint8_t index)
 {
     const config_manifest_t *m = active_manifest();
+    if (m == NULL) return NULL;
     if (index >= m->channel_count) {
         return NULL;
     }
@@ -165,6 +213,7 @@ uint8_t config_mgr_get_active_channel_count(void)
 {
     const config_manifest_t *m = active_manifest();
     uint8_t count = 0;
+    if (m == NULL) return 0;
     for (int i = 0; i < m->channel_count; i++) {
         if (m->channels[i].enabled) {
             count++;
@@ -189,7 +238,8 @@ void config_mgr_unlock(void)
 
 static void clear_manifest(void)
 {
-    memset(s_manifests, 0, sizeof(s_manifests));
+    if (!manifests_ready()) return;
+    memset(s_manifests, 0, CONFIG_MGR_MANIFEST_BYTES);
 }
 
 static bool parse_field_manifest_id(config_manifest_t *target, const frame_field_t *field)
@@ -708,6 +758,7 @@ bool config_mgr_has_manifest(void)
      * Do NOT fall through to NVS — that's sync metadata, not active config. */
     if (!s_initialized) return false;
     const config_manifest_t *m = active_manifest();
+    if (m == NULL) return false;
     return m->manifest_id[0] != '\0' && m->applied;
 }
 
@@ -715,6 +766,7 @@ const char *config_mgr_get_manifest_id(void)
 {
     /* In-memory manifest_id — set by apply_manifest() or set_manifest_id() */
     const config_manifest_t *m = active_manifest();
+    if (m == NULL) return NULL;
     if (m->manifest_id[0] != '\0') {
         return m->manifest_id;
     }
@@ -767,14 +819,16 @@ void config_mgr_set_epoch(uint64_t epoch)
 /* === v2.5: Log stream config getters === */
 bool config_mgr_get_log_stream_enabled(void)
 {
-    if (!s_initialized) return false;
-    return active_manifest()->log_stream_enabled;
+    const config_manifest_t *m = active_manifest();
+    if (!s_initialized || m == NULL) return false;
+    return m->log_stream_enabled;
 }
 
 uint8_t config_mgr_get_log_stream_level(void)
 {
-    if (!s_initialized) return 2; /* INFO default */
-    return active_manifest()->log_stream_level;
+    const config_manifest_t *m = active_manifest();
+    if (!s_initialized || m == NULL) return 2; /* INFO default */
+    return m->log_stream_level;
 }
 
 void config_mgr_set_manifest_id(const char *id)
@@ -832,8 +886,10 @@ void config_mgr_clear_epoch(void)
     nvs_close(handle);
 
     /* Clear in-memory manifest_id from active buffer */
-    config_manifest_t *active = &s_manifests[s_active_idx];
-    memset(active->manifest_id, 0, sizeof(active->manifest_id));
+    if (manifests_ready()) {
+        config_manifest_t *active = &s_manifests[s_active_idx];
+        memset(active->manifest_id, 0, sizeof(active->manifest_id));
+    }
 
     ESP_LOGI(TAG, "Epoch and manifest_id cleared from NVS");
 }

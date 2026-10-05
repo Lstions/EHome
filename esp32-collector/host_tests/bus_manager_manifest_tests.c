@@ -89,6 +89,29 @@ esp_err_t bus_dma_init(bus_dma_ctx_t *ctx, uint8_t bus_type, bool dma_enabled,
     return bus_dma_init_preferred(ctx, bus_type, dma_enabled, config, config_len, -1);
 }
 esp_err_t bus_dma_deinit(bus_dma_ctx_t *ctx) { (void)ctx; return ESP_OK; }
+/* WS-E UART install-once hooks used by bus_manager preinstall/prune. */
+static int g_preinstall_calls;
+static int g_teardown_calls;
+esp_err_t bus_dma_uart_preinstall(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud,
+                                  bool dma_enabled, int32_t preferred_controller,
+                                  uart_port_t *out_port)
+{
+    (void)tx_pin; (void)rx_pin; (void)baud; (void)dma_enabled;
+    (void)preferred_controller;
+    g_preinstall_calls++;
+    if (out_port) *out_port = UART_NUM_0;
+    return ESP_OK;
+}
+static int g_teardown_ports[8];
+static int g_teardown_port_count;
+esp_err_t bus_dma_uart_teardown(uart_port_t port)
+{
+    g_teardown_calls++;
+    if (g_teardown_port_count < (int)(sizeof(g_teardown_ports) / sizeof(g_teardown_ports[0]))) {
+        g_teardown_ports[g_teardown_port_count++] = (int)port;
+    }
+    return ESP_OK;
+}
 esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
 {
     (void)ctx; (void)data; (void)len; return ESP_OK;
@@ -480,6 +503,102 @@ static void test_shared_dma_lease_is_retained_for_other_channel(void)
           "last channel should be allowed to release the physical lease");
 }
 
+/* ---- WS-E: preinstall / prune contract ---- */
+
+static void test_preinstall_uarts_installs_enabled_uart_only(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    g_preinstall_calls = 0;
+
+    config_channel_t chans[2];
+    make_uart_channel(&chans[0], 2, 16, 17, 115200, false);
+    /* C6 valid SPI pins (GPIO8 is the RGB LED and must not be used). */
+    make_spi_channel(&chans[1], 3, 5, 23, 19, 18, 1000000, false);
+    config_manifest_t m;
+    make_manifest(&m, chans, 2);
+
+    esp_err_t pe = bus_manager_preinstall_uarts(&rt, &m);
+    CHECK(pe == ESP_OK, "preinstall should succeed");
+    CHECK(g_preinstall_calls == 1, "only the enabled UART channel should be preinstalled");
+
+    /* Disabled UART must be skipped.  Note: make_manifest copied the channels,
+     * so flip the flag on the manifest copy the function actually reads. */
+    g_preinstall_calls = 0;
+    m.channels[0].enabled = false;
+    CHECK(bus_manager_preinstall_uarts(&rt, &m) == ESP_OK, "disabled UART preinstall should be OK");
+    CHECK(g_preinstall_calls == 0, "disabled UART must not be preinstalled");
+}
+
+static void test_preinstall_rejects_conflicting_manifest(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+    g_preinstall_calls = 0;
+
+    /* Same channel id twice is a resource-plan conflict; preinstall must
+     * reject before installing anything. */
+    config_channel_t chans[2];
+    make_uart_channel(&chans[0], 2, 16, 17, 115200, false);
+    make_uart_channel(&chans[1], 2, 20, 21, 115200, false);
+    config_manifest_t m;
+    make_manifest(&m, chans, 2);
+
+    CHECK(bus_manager_preinstall_uarts(&rt, &m) != ESP_OK, "conflict should be rejected");
+    CHECK(g_preinstall_calls == 0, "no driver may be installed for a rejected manifest");
+}
+
+/* A manifest-leased controller must never be pruned, even with no live
+ * channel: apply_manifest's success path prunes BEFORE commit, so the active
+ * manifest it could consult still describes the OLD set.  That is why prune
+ * takes the new manifest explicitly — this test pins that behavior. */
+static void test_prune_protects_manifest_leased_controllers(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+
+    /* Manifest leases UART0 only (C6 pins 16/17 derive to UART0). */
+    config_channel_t ch;
+    make_uart_channel(&ch, 2, 16, 17, 115200, false);
+    config_manifest_t m;
+    make_manifest(&m, &ch, 1);
+
+    g_teardown_calls = 0;
+    g_teardown_port_count = 0;
+    CHECK(prune_unused_uarts(&rt, &m) == ESP_OK, "prune should succeed");
+
+    /* UART0 is leased by the manifest -> protected.  UART1 is not -> pruned. */
+    for (int i = 0; i < g_teardown_port_count; i++) {
+        CHECK(g_teardown_ports[i] != (int)UART_NUM_0,
+              "manifest-leased UART0 must not be torn down");
+    }
+    CHECK(g_teardown_calls >= 1, "unleased UART1 should be pruned");
+}
+
+/* A controller currently leased by a live channel must never be pruned. */
+static void test_prune_protects_live_channel_leases(void)
+{
+    bus_runtime_t rt;
+    init_test_runtime(&rt);
+
+    rt.bus_ch[0] = 2;
+    rt.bus_ctx[0].initialized = true;
+    rt.bus_ctx[0].bus_type = 1; /* UART */
+    rt.bus_ctx[0].cfg.uart.port = UART_NUM_0;
+
+    /* Empty manifest: only the live channel protects UART0. */
+    config_manifest_t empty;
+    memset(&empty, 0, sizeof(empty));
+
+    g_teardown_calls = 0;
+    g_teardown_port_count = 0;
+    CHECK(prune_unused_uarts(&rt, &empty) == ESP_OK, "prune should succeed");
+    for (int i = 0; i < g_teardown_port_count; i++) {
+        CHECK(g_teardown_ports[i] != (int)UART_NUM_0,
+              "a live channel's controller must not be torn down");
+    }
+}
+
 int main(void)
 {
     test_null_inputs_rejected();
@@ -496,6 +615,10 @@ int main(void)
     test_mixed_bus_manifest_passes();
     test_dma_requested_without_pool_rejected();
     test_shared_dma_lease_is_retained_for_other_channel();
+    test_preinstall_uarts_installs_enabled_uart_only();
+    test_preinstall_rejects_conflicting_manifest();
+    test_prune_protects_manifest_leased_controllers();
+    test_prune_protects_live_channel_leases();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) failed\n", failures);

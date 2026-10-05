@@ -17,7 +17,24 @@ extern "C" {
 
 /* === Limits === */
 #define MAX_TEMPLATES     16
+/* Physical channel ceiling per SoC.  This is a HARDWARE bound, not a memory
+ * tuning knob: the product must run 100 Hz on every physical bus at full
+ * population.  S3 = UART0/1/2 + SPI + I2C = 5; C6 = UART0/1 + SPI + I2C = 4.
+ * (C6's third UART is LP-only and is not a HP data bus.)
+ *
+ * The fallback 8 keeps host tests/target-less builds at the historical value;
+ * firmware builds always define exactly one CONFIG_IDF_TARGET_ESP32* macro
+ * (sdkconfig.h reaches this header through esp_err.h -> esp_compiler.h).
+ * scheduler.h's SCHED_MAX_CHANNELS is defined FROM this constant, and
+ * hw_profile publishes this value to the backend as manifest_capacity.
+ * Do NOT lower it below the physical ceiling to save RAM. */
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define MAX_CHANNELS      5
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+#define MAX_CHANNELS      4
+#else
 #define MAX_CHANNELS      8
+#endif
 #define MAX_TEMPLATE_IDS  8
 #define MAX_DMA_CONFIGS   8
 #define MAX_EDGE_DEVICES_PER_CH 5
@@ -62,7 +79,7 @@ typedef struct {
     bool     dma_enabled;
     bool     dma_enabled_present;
     uint8_t  bus_type;    // 1=UART, 2=I2C, 3=SPI, 5=ADC (4=legacy GPIO, rejected)
-    uint8_t  bus_config[128];
+    uint8_t  bus_config[64];
     size_t   bus_config_len;
     /* v2.3: edge device groups */
     config_edge_device_t edge_devices[MAX_EDGE_DEVICES_PER_CH];
@@ -116,7 +133,7 @@ typedef struct {
 
 /* === Config state === */
 typedef struct {
-    char              manifest_id[64];
+    char              manifest_id[32];
 	char              sync_id[64];
     config_template_t templates[MAX_TEMPLATES];
     uint8_t           template_count;
@@ -144,7 +161,13 @@ const config_manifest_t *config_mgr_get_staged_manifest(void);
 bool config_mgr_commit_staged_manifest(void);
 void config_mgr_discard_staged_manifest(void);
 /* Copy active state into caller storage so staged commit cannot invalidate
- * rollback input. Intended for bounded heap transaction workspaces. */
+ * rollback input. Intended for bounded heap transaction workspaces.
+ *
+ * NOTE(WS-E 2026-10-05): the configuration transaction no longer calls this.
+ * stage_manifest() writes only the inactive slot and commit_staged_manifest()
+ * is the transaction's last step, so rollback can use the live pointer from
+ * config_mgr_get_manifest() instead of a 5,400 B copy.  Kept as a
+ * compatibility API for tests and other callers. */
 bool config_mgr_snapshot_active(config_manifest_t *out);
 
 /* === Get current config === */

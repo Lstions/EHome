@@ -13,6 +13,8 @@
 #include "rgb_led.h"
 
 extern void handler_hello_process_ack(frame_decoder_t *dec);
+/* V3-2a: HelloAck features 现在是服务端能力位图，由 bus_worker 读取。 */
+#include "handler_hello.h"
 
 static int failures;
 static bool task_create_fails;
@@ -569,6 +571,60 @@ static void test_worker_can_start_before_task_handle_publication(void)
           "creator must publish handle after an early worker safely blocks");
 }
 
+/* ------------------------------------------------------------------ *
+ *  V3-2a: HelloAck features -> hello_get_server_caps()
+ *
+ *  这是 DataBatch 的**唯一开关**。两个失败模式都会造成现场事故：
+ *    - 没存下来 -> 后端置了 bit0，固件仍只发 0x03（功能不生效）；
+ *    - 存下来但跨连接不清 -> 新后端不支持 0x20 时固件继续发，遥测静默丢失。
+ * ------------------------------------------------------------------ */
+static void test_server_caps_captured_and_reset(void)
+{
+    reset_fixture();
+    app_state_t *state = start_fixture();
+    (void)state;
+    connect_ready_send(11);
+    uint32_t nonce = hello_handshake_debug_armed_nonce();
+    CHECK(nonce != 0, "fixture must arm a nonce");
+
+    CHECK(hello_get_server_caps() == 0,
+          "caps must be 0 before any accepted HelloAck");
+
+    /* features = CAP_DATA_BATCH_V1 -> 必须被捕获。 */
+    process_ack(nonce, true, 500, (uint32_t)CAP_DATA_BATCH_V1);
+    CHECK(msg_handler_is_hello_ack_received(), "ACK must be accepted");
+    CHECK(hello_get_server_caps() == CAP_DATA_BATCH_V1,
+          "accepted HelloAck must store features into server caps");
+
+    /* 全 64 位都要能存下（features 在 wire 上是 varint，但固件侧按 uint64 存）。 */
+    reset_fixture();
+    state = start_fixture();
+    (void)state;
+    connect_ready_send(12);
+    nonce = hello_handshake_debug_armed_nonce();
+    process_ack(nonce, true, 600, 0x5);
+    CHECK(hello_get_server_caps() == 0x5ULL,
+          "multi-bit features must be preserved verbatim");
+
+    /* reset 必须清空：旧连接的能力位绝不能泄漏到新连接。 */
+    msg_handler_reset_hello_ack();
+    CHECK(hello_get_server_caps() == 0,
+          "msg_handler_reset_hello_ack() must clear server caps");
+
+    /* 陈旧 nonce 的 ACK 不得改变能力位。 */
+    reset_fixture();
+    state = start_fixture();
+    (void)state;
+    connect_ready_send(13);
+    uint32_t stale = hello_handshake_debug_armed_nonce();
+    for (uint32_t i = 0; i < 20; i++) (void)hello_handshake_worker_step(0);
+    process_ack(stale, true, 700, (uint32_t)CAP_DATA_BATCH_V1);
+    CHECK(!msg_handler_is_hello_ack_received(),
+          "stale ACK must not be accepted");
+    CHECK(hello_get_server_caps() == 0,
+          "stale ACK must not change server caps");
+}
+
 int main(void)
 {
     test_delayed_nonce1_ack_after_nonce2_armed_is_rejected();
@@ -586,6 +642,7 @@ int main(void)
     test_state_machine_retry_policy_is_unchanged();
     test_task_creation_failure_is_observable();
     test_worker_can_start_before_task_handle_publication();
+    test_server_caps_captured_and_reset();
 
     if (failures != 0) {
         fprintf(stderr, "%d test(s) FAILED\n", failures);

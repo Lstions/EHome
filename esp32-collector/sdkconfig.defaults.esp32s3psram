@@ -1,0 +1,157 @@
+# EHomeSystem ESP32-S3 **with PSRAM** (model s3p) defaults.
+#
+# Chained *after* sdkconfig.defaults.esp32s3 by build_firmware.sh, so it only
+# overrides the PSRAM-related settings that model variant turns on.  s3-n8 /
+# s3-n16 keep PSRAM off: the same SoC exists in populated and unpopulated
+# board variants, and only the s3p profiles may assume the 8MB chip.
+#
+# Why this file exists at all: the S3 on the field node 30EDA0A9A808 has 8MB
+# PSRAM, and without it the internal heap left after Wi-Fi/OTA/static buffers
+# is small enough that config transactions and the OTA task fail (measured:
+# apply_buses peak ~ -12 KB; ota_task needed 8 KB when ~16 KB internal free).
+# See sdkconfig.defaults.esp32s3 for the full history.
+
+# PSRAM enable. This makes IDF also set
+# CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND (esp_libc/Kconfig:212) and, in
+# turn, add -mdisable-hardware-atomics to every TU (esp_libc/project_include.cmake:55-58).
+# main/hello_handshake_runtime.c is exempted with -mno-disable-hardware-atomics
+# (main/CMakeLists.txt) and hello_handshake.c pins s_runtime to internal RAM,
+# so the Hello lock-free 32-bit atomic contract still holds.  Xtensa S32C1I is
+# only valid on internal RAM, hence that pin and the runtime address assert.
+CONFIG_SPIRAM=y
+
+# PSRAM mode is a **compile-time** Kconfig choice, not runtime-switchable:
+# IDF 6.1 defaults SPIRAM_MODE_QUAD (esp_psram/esp32s3/Kconfig.spiram:11-20);
+# SPIRAM_TYPE defaults to AUTO but the quad/oct bus mode itself does not.
+# The development board's PSRAM part is not yet confirmed, so start OCT here
+# and verify on hardware.  If the unit turns out to be Quad (e.g. WROVER
+# class), change this single line to CONFIG_SPIRAM_MODE_QUAD=y and rebuild --
+# boot logs the detected mode and the memory-test result.
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Bring up at 40MHz first (IDF 6.1's default for S3,
+# esp_psram/esp32s3/Kconfig.spiram:83-108).  After a full boot + PSRAM memory
+# test + soak at 40MHz is clean, raise to CONFIG_SPIRAM_SPEED_80M=y; do not
+# start at 80M.
+CONFIG_SPIRAM_SPEED_40M=y
+
+# Make PSRAM usable by plain malloc(); startup must initialize it before the
+# app can rely on it.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_BOOT_INIT=y
+
+# Keep small allocations internal: <= 4 KiB stays in internal RAM so latency-
+# sensitive control paths and internal-DMA-capable buffers do not silently
+# move to PSRAM.  Only larger allocations are eligible for PSRAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+
+# Reserve internal RAM for allocations that *must* be internal (FreeRTOS task
+# stacks, DMA descriptors).  32 KiB is the IDF default and intentionally kept:
+# the whole point of PSRAM here is to stop exhausting internal RAM.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# Let Wi-Fi/LWIP prefer PSRAM for their large buffers.
+# Effective ONLY together with CONFIG_SPIRAM_IGNORE_NOTFOUND=n below:
+# esp_wifi/Kconfig and lwip/Kconfig guard their PSRAM placement on
+# `SPIRAM_TRY_ALLOCATE_WIFI_LWIP && !SPIRAM_IGNORE_NOTFOUND`, and
+# Kconfig.spiram.common:55-60 states that with IGNORE_NOTFOUND enabled
+# "SPIRAM_TRY_ALLOCATE_WIFI_LWIP will not work" (runtime buffers are then
+# chosen as if PSRAM were absent).  Moving Wi-Fi/LWIP buffers into PSRAM is a
+# main benefit of the s3p model, so IGNORE_NOTFOUND must stay n.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Fail loudly instead of silently degrading: s3p is a dedicated model image
+# (flashed only to boards with PSRAM per the deployment policy), so a board
+# without PSRAM must panic/error at boot rather than boot with reduced
+# buffers.  Those boards get the plain s3-n16 image instead.  Keeping this n
+# is also what makes SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y actually take effect.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+
+# Never allow task stacks in PSRAM: xTaskCreateStatic accepts whatever pointer
+# the caller passes, and a stack in external RAM would fault during any flash
+# operation (OTA/NVS) because the cache is disabled then.  IDF 6.1 defaults
+# this to y for non-ESP32 targets; xTaskCreate already forces internal stacks,
+# so this only constrains xTaskCreateStatic callers (scheduler/log_tx currently
+# use internal static arrays).  Explicit n keeps a future refactor from
+# silently putting a stack in PSRAM.
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=n
+
+# --- WiFi/LWIP sizing for the PSRAM model -------------------------------
+# WS-D (task-4) appends the relaxed WiFi/LWIP buffer numbers here once the
+# IGNORE_NOTFOUND interaction above is decided.  Keep PSRAM settings above
+# this line to avoid merge conflicts.
+
+# Upstream (sdkconfig.defaults) sizes WiFi/LWIP for the *internal RAM* budget:
+# STATIC_RX=6, DYNAMIC_RX/TX=16/16, with the 100 Hz x 5 model in mind.  The
+# s3p model has 8 MB of PSRAM and CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y, so
+# Wi-Fi/LWIP buffers are allocated from PSRAM first and no longer compete with
+# the internal heap.  Spend that budget on burst absorption instead: larger
+# rings reduce packet drops during OTA download + 100 Hz telemetry bursts and
+# improve AMPDU aggregation behaviour.
+#
+# Sizing: STATIC_RX=16.  Two distinct reasons, do not conflate them:
+#  (a) HARD FLOOR: with SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y IDF raises
+#      ESP_WIFI_RX_BA_WIN from 6 to 16 (esp_wifi/Kconfig:204-205) and enforces
+#      at compile time
+#        wifi_init.c:52  RX_BA_WIN <= DYNAMIC_RX_BUFFER_NUM
+#        wifi_init.c:55  RX_BA_WIN <= 2 * STATIC_RX_BUFFER_NUM
+#      so the shared value 6 (2*6=12 < 16) fails the s3p build -- verified by
+#      experiment with `#error "WIFI_RX_BA_WIN should not be larger than
+#      double of the WIFI_STATIC_RX_BUFFER_NUM"`.  STATIC_RX=10 would pass
+#      that arithmetic (2*10=20 >= 16).
+#  (b) WHY NOT 10 (the number originally suggested): IDF says the static ring
+#      "is recommended to set equal or bigger than ESP_WIFI_RX_BA_WIN"
+#      (esp_wifi/Kconfig:37-39) and, for PSRAM Wi-Fi memory, "the default and
+#      minimum value should be 16 to achieve better throughput and
+#      compatibility with both stations and APs" (esp_wifi/Kconfig:207-212).
+#      10 < RX_BA_WIN=16 would leave the AMPDU window larger than the DMA
+#      ring -- exactly the aggregation penalty this model exists to avoid.
+#      16 is also IDF's own default here (esp_wifi/Kconfig:30).  Since these
+#      bytes land in PSRAM (see below), there is no reason to sit at 10.
+#
+# Byte accounting, and internal-RAM vs PSRAM split
+# ------------------------------------------------
+#   STATIC_RX 16 x ~1.6 KB                       ~= 25.6 KB  (esp_wifi/Kconfig:32)
+#   DYNAMIC_RX 32 x variable (frame-sized)       <= ~ 32 x 1.6 KB = 51.2 KB cap
+#   DYNAMIC_TX 32 x variable                     <= ~ 51.2 KB cap
+# The caps are worst-case (full-size 802.11 frames); real 300 B DataReports
+# allocate proportionally less.
+#
+# Where those bytes actually live (checked in IDF source, not assumed):
+#   * Wi-Fi side: wifi_malloc()/wifi_calloc() call
+#     heap_caps_malloc_prefer(size, 2, CAP_DEFAULT|CAP_SPIRAM, ...)
+#     (components/esp_wifi/esp32s3/esp_adapter.c:69-100) -> SPIRAM first for
+#     every Wi-Fi allocation, including the static RX ring.
+#   * lwIP side: mem_clib_malloc/calloc are redefined the same way when
+#     CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is set
+#     (components/lwip/port/include/lwipopts.h:1743-1749).
+#     heap_caps_malloc_prefer tries CAP_SPIRAM before CAP_INTERNAL, so these
+#     do NOT go through the SPIRAM_MALLOC_ALWAYSINTERNAL=4096 small-alloc
+#     policy (that policy only applies to plain malloc(), heap_caps.c:107-124).
+#   => expected internal-RAM delta of this section vs the shared defaults is
+#      ~0 bytes; the relaxed buffers should consume PSRAM.
+#   => REQUIRED ON-HARDWARE VERIFICATION (cannot be proven statically):
+#      boot the s3p image and compare
+#         heap_caps_get_free_size(MALLOC_CAP_INTERNAL) and
+#         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+#      against the shared s3 image; also read the task-6 StatusReport/0x20
+#      free/largest/min_ever after a full config transaction at 500 Hz.
+#      If internal free drops materially, that is the signal that some Wi-Fi
+#      path could not allocate from PSRAM and silently fell back.
+#
+#
+# TX side uses different symbols on purpose: with
+# SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y IDF *disables* the dynamic-TX choice
+# (`ESP_WIFI_DYNAMIC_TX_BUFFER depends on !(SPIRAM_TRY_ALLOCATE_WIFI_LWIP && ...)`
+# in esp_wifi/Kconfig:81), so TX becomes STATIC.  The shared defaults'
+# CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM is therefore DEAD on this model --
+# verified in the built sdkconfig: the symbol does not appear at all, and IDF
+# uses its own STATIC_TX_BUFFER_NUM=16 + CACHE_TX_BUFFER_NUM=32
+# (esp_wifi/Kconfig:74: "If PSRAM is enabled, Static should be selected to
+# guarantee enough WiFi TX buffers").  No override needed.
+#
+# These are *relaxations* relative to the shared defaults; they cannot make
+# throughput worse, and they are expected to cost PSRAM, not the internal heap
+# we are trying to protect (that is the whole point of the s3p model).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32

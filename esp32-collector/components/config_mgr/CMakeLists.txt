@@ -1,6 +1,8 @@
 idf_component_register(SRCS "config_mgr.c"
                        INCLUDE_DIRS "."
-                       REQUIRES frame nvs_flash dma_pool)
+                       # esp_hw_support: heap_caps_* for the PSRAM-preferred allocation
+                       # helper (collector_mem.h) used by the manifest double buffer.
+                       REQUIRES frame nvs_flash dma_pool esp_hw_support)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 # 见 2026-10-04 status_task 栈溢出（prvTaskCheckFreeStackSpace）：根因帧在

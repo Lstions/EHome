@@ -325,8 +325,18 @@ typedef struct {
     int tx_pin;
     int rx_pin;
     uint32_t baud;
-    uint32_t ref_count;  /* Number of channels using this port */
+    uint32_t ref_count;  /* Number of logical channels currently leasing this port */
     QueueHandle_t event_queue;
+    /* WS-E install-once lifecycle:
+     *   installed: the IDF driver object for this controller exists and is
+     *              kept across manifest rebuilds (that is the whole point —
+     *              re-installing it cost ~3 KB of contiguous heap per UART).
+     *   leased:    at least one logical channel currently owns it.  A port
+     *              with installed && !leased is idle but still resident; only
+     *              bus_dma_uart_teardown() frees it (called by the manager's
+     *              prune step after a successful apply, or explicitly). */
+    bool installed;
+    bool leased;
 } uart_port_entry_t;
 
 static uart_port_entry_t s_uart_ports[MAX_UART_PORTS];
@@ -370,7 +380,295 @@ static uart_port_entry_t *uart_alloc_port(void)
     return NULL;
 }
 
-static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
+/* Find the entry for a concrete controller, installed or not.  uart_find_port()
+ * above matches by pin/baud and therefore cannot answer "is controller N still
+ * installed after its last channel was released?". */
+static uart_port_entry_t *uart_find_installed(uart_port_t port)
+{
+    uart_registry_init();
+    for (int i = 0; i < MAX_UART_PORTS; i++) {
+        if (s_uart_ports[i].port == port && s_uart_ports[i].installed) {
+            return &s_uart_ports[i];
+        }
+    }
+    return NULL;
+}
+
+/* First installed but unleased entry (used when pins do not map to a fixed
+ * controller and no fresh slot is free).  Reusing an idle resident driver
+ * avoids a pointless teardown+install churn on the next apply. */
+static uart_port_entry_t *uart_find_idle_installed(void)
+{
+    uart_registry_init();
+    for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
+        if (s_uart_ports[i].port != UART_NUM_MAX &&
+            s_uart_ports[i].installed && !s_uart_ports[i].leased) {
+            return &s_uart_ports[i];
+        }
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  UART lifecycle (WS-E)                                              */
+/*                                                                     */
+/*  install-once contract:                                             */
+/*    - uart_driver_install() runs at most once per controller for the */
+/*      life of the process.  A manifest change that only moves pins,  */
+/*      baud or DMA preference reconfigures the live driver via        */
+/*      uart_param_config()/uart_set_pin()/uart_set_baudrate().        */
+/*    - bus_dma_deinit() releases the *lease*, it does not delete the  */
+/*      driver.  bus_dma_uart_teardown() is the only path that frees a */
+/*      controller, and the manager calls it only after a successful   */
+/*      apply for ports no longer leased (channel removed / controller */
+/*      moved), or explicitly for whole-runtime teardown.              */
+/*                                                                     */
+/*  Why: reinstalling 3 UART drivers per transaction cost ~9.3 KB of   */
+/*  contiguous heap (3 x ~3.1 KB; IDF allocates 9 objects per driver,  */
+/*  esp_driver_uart/src/uart.c:1962).  On the S3 field unit that left  */
+/*  free=876 / largest=832, which is what broke the transaction.       */
+/* ------------------------------------------------------------------ */
+
+/* Build the IDF config used by both install and reconfigure.  Keeping one
+ * builder guarantees a live driver and a freshly installed one end in the
+ * same state. */
+static uart_config_t uart_make_config(uart_port_t port, uint32_t baud)
+{
+    uart_config_t uart_cfg = {
+        .baud_rate  = (int)baud,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+#if SOC_UART_LP_NUM >= 1
+        .lp_source_clk = (port >= SOC_UART_HP_NUM)
+                         ? LP_UART_SCLK_DEFAULT
+                         : (lp_uart_sclk_t)UART_SCLK_DEFAULT,
+#else
+        .source_clk = UART_SCLK_DEFAULT,
+#endif
+    };
+    return uart_cfg;
+}
+
+/* True when the controller has fixed IOs and uart_set_pin() must be skipped
+ * (LP_UART on C6). */
+static bool uart_has_fixed_pins(uart_port_t port)
+{
+    for (int i = 0; i < HW_UART_COUNT; i++) {
+        if (hw_uarts[i].port == port) return hw_uart_is_lp(&hw_uarts[i]);
+    }
+    return false;
+}
+
+/* Apply pin/baud changes to an already-installed driver.
+ *
+ * On failure the entry's OLD pin/baud are written back so the caller's
+ * rollback has a consistent controller to hand back to the previous manifest
+ * (the IDF setters are transactional per call; restoring is idempotent).
+ * A write-back failure is logged but not escalated: the caller is already on
+ * the error path and will rebuild from old_manifest. */
+static esp_err_t uart_reconfigure(uart_port_entry_t *entry, int tx_pin, int rx_pin,
+                                  uint32_t baud)
+{
+    const uart_port_t port = entry->port;
+    const int old_tx = entry->tx_pin;
+    const int old_rx = entry->rx_pin;
+    const uint32_t old_baud = entry->baud;
+
+    /* Let an in-flight byte leave the FIFO before remapping pins.  Callers run
+     * this with bus_worker suspended, so this is a bounded drain, not a wait
+     * on new traffic. */
+    (void)uart_wait_tx_done(port, pdMS_TO_TICKS(100));
+
+    uart_config_t uart_cfg = uart_make_config(port, baud);
+    esp_err_t r = uart_param_config(port, &uart_cfg);
+    if (r == ESP_OK && !uart_has_fixed_pins(port)) {
+        r = uart_set_pin(port, tx_pin, rx_pin, -1, -1);
+    }
+    if (r == ESP_OK) {
+        r = uart_set_baudrate(port, baud);
+    }
+
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "UART%d reconfigure failed: %s (tx=%d rx=%d baud=%lu); restoring",
+                 (int)port, esp_err_to_name(r), tx_pin, rx_pin, (unsigned long)baud);
+        if (!uart_has_fixed_pins(port)) {
+            (void)uart_set_pin(port, old_tx, old_rx, -1, -1);
+        }
+        (void)uart_set_baudrate(port, old_baud);
+        return r;
+    }
+
+    entry->tx_pin = tx_pin;
+    entry->rx_pin = rx_pin;
+    entry->baud = baud;
+    ESP_LOGI(TAG, "UART%d reused/reconfigured (TX=%d RX=%d baud=%lu)",
+             (int)port, tx_pin, rx_pin, (unsigned long)baud);
+    return ESP_OK;
+}
+
+/* Install a brand-new driver and register the entry.  Only reached from
+ * uart_port_acquire() when no resident driver can serve the request. */
+static esp_err_t uart_install_new(bus_dma_ctx_t *ctx, int tx_pin, int rx_pin,
+                                  uint32_t baud)
+{
+    const uart_port_t port = ctx->cfg.uart.port;
+
+#if SOC_UART_LP_NUM >= 1
+    /* LP_UART does not support DMA — force polled mode */
+    if (uart_has_fixed_pins(port) && ctx->dma_enabled) {
+        ESP_LOGW(TAG, "LP_UART port %d does not support DMA, forcing polled mode", (int)port);
+        ctx->dma_enabled = false;
+    }
+#endif
+
+    uart_config_t uart_cfg = uart_make_config(port, baud);
+    esp_err_t r = uart_param_config(port, &uart_cfg);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(r));
+        return r;
+    }
+
+    if (!uart_has_fixed_pins(port)) {
+        r = uart_set_pin(port, tx_pin, rx_pin, -1, -1);
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
+            return r;
+        }
+    } else {
+        ESP_LOGI(TAG, "LP_UART port %d: using fixed pins (skip uart_set_pin)", (int)port);
+    }
+
+    /* Both DMA and non-DMA paths use the same driver event queue.  DMA only
+     * changes the underlying buffer sizes; it must not change the public
+     * receive flow or route one UART through a different worker.
+     *
+     * ── 为什么缓冲区从 1024 降到 512（2026-10-05，实机现场）───────────
+     *
+     * S3（30EDA0A9A808）的 3 路 UART 每路要 1024+1024 字节驱动缓冲，
+     * 外加 32 深的 uart_event_t 队列。三路合计约 7.2KB，而 S3 在做配置
+     * 事务时可用堆只有约 7~8KB —— 于是第 3 路必然失败：
+     *
+     *     E uart: UART driver malloc error
+     *     E BUS_DMA: uart_driver_install failed: ESP_FAIL
+     *     E BUS_MGR: ch=5 init failed: ESP_FAIL
+     *     E CFG_TX: config apply failed at apply_buses: ESP_FAIL
+     *     E CALLBACK: Rejecting ConfigManifest transaction: result=2
+     *
+     * 后果是**整个配置事务回滚**、设备持续上报 success=false；重试时因
+     * 分配顺序不同偶尔能成功（现场观察到"首次失败、第二次成功"）。
+     *
+     * 512 仍远大于 UART 硬件 FIFO（S3/C6 均为 128 字节），且 RX 由
+     * rx_task 持续搬运、不依赖缓冲区做大块缓存，因此不影响协议时序。
+     * 三路合计由约 7.2KB 降到约 5.1KB，为配置事务腾出必要余量。
+     *
+     * WS-E 起冷安装只在 preinstall/首笔配置时发生一次；后续 manifest 变更
+     * 走 uart_reconfigure()，不再重复这 ~9.3KB 峰值。 */
+    QueueHandle_t event_queue = NULL;
+    size_t rx_buffer_size = ctx->dma_enabled ? UART_DRV_RX_BUFFER : UART_DRV_RX_BUFFER_SMALL;
+    size_t tx_buffer_size = ctx->dma_enabled ? UART_DRV_TX_BUFFER : UART_DRV_TX_BUFFER_SMALL;
+    r = uart_driver_install(port, rx_buffer_size, tx_buffer_size,
+                            UART_EVENT_QUEUE_DEPTH, &event_queue, 0);
+    if (r != ESP_OK) {
+        /* 把内存实况一并打出来。2026-10-05 的现场只有一句裸的
+         * "UART driver malloc error"，无法判断是"总量不够"还是"碎片"，
+         * 定位成本很高；这次直接把 free / largest / min-ever 记下来。 */
+        ESP_LOGE(TAG, "uart_driver_install failed: %s (uart%d rx=%u tx=%u q=%d; "
+                      "free=%u largest=%u min_ever=%u)",
+                 esp_err_to_name(r), (int)port,
+                 (unsigned)rx_buffer_size, (unsigned)tx_buffer_size,
+                 UART_EVENT_QUEUE_DEPTH,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+        return r;
+    }
+
+    uart_port_entry_t *entry = uart_alloc_port();
+    if (entry == NULL) {
+        ESP_LOGE(TAG, "UART port registry full");
+        uart_driver_delete(port);
+        return ESP_ERR_NO_MEM;
+    }
+
+    entry->port = port;
+    entry->tx_pin = tx_pin;
+    entry->rx_pin = rx_pin;
+    entry->baud = baud;
+    entry->ref_count = 0;
+    entry->event_queue = event_queue;
+    entry->installed = true;
+    entry->leased = false;
+
+    ctx->uart_event_queue = event_queue;
+    /* A short hardware RX timeout improves event granularity.  The worker
+     * still applies its protocol-independent idle fallback. */
+    uart_set_rx_timeout(port, 4);
+
+    ESP_LOGI(TAG, "UART%d %s installed (TX=%d RX=%d baud=%lu)",
+             (int)port, ctx->dma_enabled ? "DMA" : "polled",
+             tx_pin, rx_pin, (unsigned long)baud);
+    return ESP_OK;
+}
+
+/* Select the controller for a not-yet-installed request, preserving the
+ * historical policy (preferred controller wins; profile pins derive a port;
+ * otherwise first free).  Split out so both acquire() and preinstall() share
+ * exactly one place where a controller id is chosen. */
+static esp_err_t uart_select_port(int tx_pin, int rx_pin,
+                                  int32_t preferred_controller,
+                                  uart_port_t *out_port)
+{
+    uart_port_t port_num = preferred_controller >= 0
+        ? (uart_port_t)preferred_controller
+        : hw_derive_uart_port(tx_pin, rx_pin, UART_NUM_MAX);
+
+    if (preferred_controller >= 0 && port_num >= UART_NUM_MAX) {
+        ESP_LOGE(TAG, "preferred UART controller %ld is unavailable", (long)preferred_controller);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (preferred_controller >= 0 && port_num == UART_NUM_0 &&
+        !bus_dma_uart0_is_available()) {
+        ESP_LOGE(TAG, "preferred UART0 controller is reserved");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (port_num < UART_NUM_MAX) {
+        for (int i = 0; i < MAX_UART_PORTS; i++) {
+            if (s_uart_ports[i].port == port_num) {
+                ESP_LOGE(TAG, "UART%d is already allocated to a different pin/baud config", port_num);
+                return ESP_ERR_INVALID_STATE;
+            }
+        }
+    } else {
+        /* No fixed mapping: prefer an idle resident driver over a fresh port,
+         * then the first free slot (skip UART0 only when it is the console). */
+        uart_port_entry_t *idle = uart_find_idle_installed();
+        if (idle != NULL) {
+            *out_port = idle->port;
+            return ESP_OK;
+        }
+        for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
+            if (s_uart_ports[i].port == UART_NUM_MAX) {
+                uart_port_t candidate = (uart_port_t)(UART_NUM_0 + i);
+                if (candidate >= UART_NUM_MAX) break;
+                port_num = candidate;
+                break;
+            }
+        }
+    }
+
+    if (port_num >= UART_NUM_MAX) {
+        ESP_LOGE(TAG, "No available UART port (all %d in use or exceeds chip limit)", MAX_UART_PORTS);
+        return ESP_ERR_NO_MEM;
+    }
+    *out_port = port_num;
+    return ESP_OK;
+}
+
+/* Acquire (install or reconfigure) a controller and take a lease on it. */
+static esp_err_t uart_port_acquire(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 {
     if (len < 6) return ESP_ERR_INVALID_SIZE;
 
@@ -419,209 +717,210 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Check if port with same config already exists */
-    uart_port_entry_t *port_entry = uart_find_port(tx_pin, rx_pin, baud);
-    if (port_entry && ctx->preferred_controller >= 0 &&
-        port_entry->port != (uart_port_t)ctx->preferred_controller) {
-        ESP_LOGE(TAG, "UART config is already leased by UART%d, preferred UART%ld requested",
-                 port_entry->port, (long)ctx->preferred_controller);
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (port_entry == NULL) {
-        /* A profile-owned TX/RX pair must retain its declared controller.
-         * In particular C6 GPIO20/21 is UART1, not merely "the first free
-         * UART".  The old allocator silently bound it to UART0 whenever the
-         * console was USB/JTAG, which made resource reports and runtime
-         * routing disagree.  Custom pin pairs retain the free-port fallback. */
-        uart_port_t port_num = ctx->preferred_controller >= 0
-            ? (uart_port_t)ctx->preferred_controller
-            : hw_derive_uart_port(tx_pin, rx_pin, UART_NUM_MAX);
-        if (ctx->preferred_controller >= 0 && port_num >= UART_NUM_MAX) {
-            ESP_LOGE(TAG, "preferred UART controller %ld is unavailable",
-                     (long)ctx->preferred_controller);
-            return ESP_ERR_NOT_SUPPORTED;
+    /* A resident driver whose pins/baud match is the hot path: reconfigure is
+     * a no-op and no driver object is touched. */
+    uart_port_entry_t *entry = uart_find_port(tx_pin, rx_pin, baud);
+    if (entry != NULL && entry->installed) {
+        if (ctx->preferred_controller >= 0 &&
+            entry->port != (uart_port_t)ctx->preferred_controller) {
+            ESP_LOGE(TAG, "UART config is already leased by UART%d, preferred UART%ld requested",
+                     (int)entry->port, (long)ctx->preferred_controller);
+            return ESP_ERR_INVALID_STATE;
         }
-        if (ctx->preferred_controller >= 0 && port_num == UART_NUM_0 &&
-            !bus_dma_uart0_is_available()) {
-            ESP_LOGE(TAG, "preferred UART0 controller is reserved");
-            return ESP_ERR_NOT_SUPPORTED;
-        }
-        if (port_num < UART_NUM_MAX) {
-            for (int i = 0; i < MAX_UART_PORTS; i++) {
-                if (s_uart_ports[i].port == port_num) {
-                    ESP_LOGE(TAG, "UART%d is already allocated to a different pin/baud config", port_num);
-                    return ESP_ERR_INVALID_STATE;
-                }
-            }
-        } else {
-            /* Find an available UART port — skip UART0 only when it is the console. */
-            for (int i = UART0_START_INDEX; i < MAX_UART_PORTS; i++) {
-                if (s_uart_ports[i].port == UART_NUM_MAX) {
-                    uart_port_t candidate = (uart_port_t)(UART_NUM_0 + i);
-                    if (candidate >= UART_NUM_MAX) break;  /* Exceeds chip UART count */
-                    port_num = candidate;
-                    break;
-                }
-            }
-        }
-        if (port_num >= UART_NUM_MAX) {
-            ESP_LOGE(TAG, "No available UART port (all %d in use or exceeds chip limit)", MAX_UART_PORTS);
-            return ESP_ERR_NO_MEM;
-        }
-        
-        ctx->cfg.uart.port   = port_num;
+        ctx->cfg.uart.port   = entry->port;
         ctx->cfg.uart.baud   = baud;
         ctx->cfg.uart.tx_pin = tx_pin;
         ctx->cfg.uart.rx_pin = rx_pin;
+        ctx->uart_event_queue = entry->event_queue;
+        entry->leased = true;
+        entry->ref_count++;
+        ESP_LOGI(TAG, "UART%d %s reused (TX=%d RX=%d baud=%lu)",
+                 (int)entry->port, ctx->dma_enabled ? "DMA" : "polled",
+                 tx_pin, rx_pin, (unsigned long)baud);
+        return ESP_OK;
+    }
 
+    /* An installed controller with a fixed mapping (preferred) but different
+     * pins/baud: reconfigure it in place instead of delete+install.  A
+     * controller already leased to another channel is NOT reusable — the old
+     * allocator rejected that too ("already allocated to a different
+     * pin/baud config"), and silently remapping it would break the running
+     * channel. */
+    if (ctx->preferred_controller >= 0) {
+        entry = uart_find_installed((uart_port_t)ctx->preferred_controller);
+        if (entry != NULL && (entry->leased || entry->ref_count > 0)) {
+            ESP_LOGE(TAG, "UART%d is already leased to a different pin/baud config",
+                     (int)entry->port);
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (entry != NULL) {
+            ctx->cfg.uart.port    = entry->port;
+            ctx->cfg.uart.baud    = baud;
+            ctx->cfg.uart.tx_pin  = tx_pin;
+            ctx->cfg.uart.rx_pin  = rx_pin;
+            ctx->cfg.uart.turnaround_us = 0;
+            ctx->uart_event_queue = entry->event_queue;
 #if SOC_UART_LP_NUM >= 1
-        /* LP_UART does not support DMA — force polled mode */
-        {
-            const hw_uart_t *hw = NULL;
-            for (int i = 0; i < HW_UART_COUNT; i++) {
-                if (hw_uarts[i].port == port_num) { hw = &hw_uarts[i]; break; }
-            }
-            if (hw && hw_uart_is_lp(hw) && ctx->dma_enabled) {
-                ESP_LOGW(TAG, "LP_UART port %d does not support DMA, forcing polled mode",
-                         port_num);
+            if (uart_has_fixed_pins(entry->port) && ctx->dma_enabled) {
                 ctx->dma_enabled = false;
             }
-        }
 #endif
-
-        uart_config_t uart_cfg = {
-            .baud_rate  = (int)baud,
-            .data_bits  = UART_DATA_8_BITS,
-            .parity     = UART_PARITY_DISABLE,
-            .stop_bits  = UART_STOP_BITS_1,
-            .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-#if SOC_UART_LP_NUM >= 1
-            .lp_source_clk = (ctx->cfg.uart.port >= SOC_UART_HP_NUM)
-                             ? LP_UART_SCLK_DEFAULT
-                             : (lp_uart_sclk_t)UART_SCLK_DEFAULT,
-#else
-            .source_clk = UART_SCLK_DEFAULT,
-#endif
-        };
-
-        esp_err_t r;
-        r = uart_param_config(ctx->cfg.uart.port, &uart_cfg);
-        if (r != ESP_OK) {
-            ESP_LOGE(TAG, "uart_param_config failed: %s", esp_err_to_name(r));
-            return r;
+            esp_err_t r = uart_reconfigure(entry, tx_pin, rx_pin, baud);
+            if (r != ESP_OK) return r;
+            entry->leased = true;
+            entry->ref_count++;
+            return ESP_OK;
         }
+    }
 
-        /* LP_UART has fixed IOs — skip uart_set_pin to avoid ESP_FAIL.
-         * For HP UART, set pins normally. */
-        {
-            const hw_uart_t *hw = NULL;
-            for (int i = 0; i < HW_UART_COUNT; i++) {
-                if (hw_uarts[i].port == ctx->cfg.uart.port) { hw = &hw_uarts[i]; break; }
-            }
-            if (hw && hw_uart_is_lp(hw)) {
-                ESP_LOGI(TAG, "LP_UART port %d: using fixed pins (skip uart_set_pin)",
-                         ctx->cfg.uart.port);
-            } else {
-                r = uart_set_pin(ctx->cfg.uart.port, tx_pin, rx_pin, -1, -1);
-                if (r != ESP_OK) {
-                    ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(r));
-                    return r;
-                }
-            }
-        }
+    /* Fresh install.  uart_select_port() rejects a port already occupied by a
+     * different pin/baud pair, so a slot here is guaranteed free or idle. */
+    uart_port_t port = UART_NUM_MAX;
+    esp_err_t r = uart_select_port(tx_pin, rx_pin, ctx->preferred_controller, &port);
+    if (r != ESP_OK) return r;
 
-        /* Both DMA and non-DMA paths use the same driver event queue.  DMA
-         * only changes the underlying buffer sizes; it must not change the
-         * public receive flow or route one UART through a different worker.
-         *
-         * ── 为什么缓冲区从 1024 降到 512（2026-10-05，实机现场）───────────
-         *
-         * S3（30EDA0A9A808）的 3 路 UART 每路要 1024+1024 字节驱动缓冲，
-         * 外加 32 深的 uart_event_t 队列。三路合计约 7.2KB，而 S3 在做配置
-         * 事务时可用堆只有约 7~8KB —— 于是第 3 路必然失败：
-         *
-         *     E uart: UART driver malloc error
-         *     E BUS_DMA: uart_driver_install failed: ESP_FAIL
-         *     E BUS_MGR: ch=5 init failed: ESP_FAIL
-         *     E CFG_TX: config apply failed at apply_buses: ESP_FAIL
-         *     E CALLBACK: Rejecting ConfigManifest transaction: result=2
-         *
-         * 后果是**整个配置事务回滚**、设备持续上报 success=false；重试时因
-         * 分配顺序不同偶尔能成功（现场观察到"首次失败、第二次成功"）。
-         *
-         * 必须注意：这里**不能靠开 PSRAM 解决**。S3 板上确有 8MB PSRAM，但
-         * 开启会让 IDF 置上 CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND、
-         * 全局加 -mdisable-hardware-atomics，使 ATOMIC_INT_LOCK_FREE 由 2 降 1，
-         * 触发 hello_handshake_runtime.h 的硬门禁 #error —— 构建立即失败。
-         * 这是"PSRAM 可用堆"与"无锁 32 位原子"的二选一（详见
-         * sdkconfig.defaults.esp32s3 的 PSRAM 段落）。因此只能降低内存需求。
-         *
-         * 512 仍远大于 UART 硬件 FIFO（S3/C6 均为 128 字节），且 RX 由
-         * rx_task 持续搬运、不依赖缓冲区做大块缓存，因此不影响协议时序。
-         * 三路合计由约 7.2KB 降到约 5.1KB，为配置事务腾出必要余量。 */
-        QueueHandle_t event_queue = NULL;
-        size_t rx_buffer_size = ctx->dma_enabled ? UART_DRV_RX_BUFFER : UART_DRV_RX_BUFFER_SMALL;
-        size_t tx_buffer_size = ctx->dma_enabled ? UART_DRV_TX_BUFFER : UART_DRV_TX_BUFFER_SMALL;
-        r = uart_driver_install(ctx->cfg.uart.port, rx_buffer_size,
-                                tx_buffer_size, UART_EVENT_QUEUE_DEPTH,
-                                &event_queue, 0);
-        if (r != ESP_OK) {
-            /* 把内存实况一并打出来。2026-10-05 的现场只有一句裸的
-             * "UART driver malloc error"，无法判断是"总量不够"还是"碎片"，
-             * 定位成本很高；这次直接把 free / largest / min-ever 记下来。 */
-            ESP_LOGE(TAG, "uart_driver_install failed: %s (uart%d rx=%u tx=%u q=%d; "
-                          "free=%u largest=%u min_ever=%u)",
-                     esp_err_to_name(r), (int)ctx->cfg.uart.port,
-                     (unsigned)rx_buffer_size, (unsigned)tx_buffer_size,
-                     UART_EVENT_QUEUE_DEPTH,
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
-            return r;
-        }
-        ctx->uart_event_queue = event_queue;
-        /* A short hardware RX timeout improves event granularity.  The
-         * worker still applies its protocol-independent idle fallback. */
-        uart_set_rx_timeout(ctx->cfg.uart.port, 4);
-
-        /* Register in shared port table */
-        port_entry = uart_alloc_port();
-        if (port_entry == NULL) {
-            ESP_LOGE(TAG, "UART port registry full");
-            uart_driver_delete(ctx->cfg.uart.port);
-            return ESP_ERR_NO_MEM;
-        }
-        
-        port_entry->port = ctx->cfg.uart.port;
-        port_entry->tx_pin = tx_pin;
-        port_entry->rx_pin = rx_pin;
-        port_entry->baud = baud;
-        port_entry->ref_count = 0;
-        port_entry->event_queue = ctx->uart_event_queue;
-        
-        ESP_LOGI(TAG, "UART%d %s init (TX=%d RX=%d baud=%lu)",
-                 ctx->cfg.uart.port,
-                 ctx->dma_enabled ? "DMA" : "polled",
-                 tx_pin, rx_pin, (unsigned long)baud);
-    } else {
-        /* Reuse existing port */
-        ctx->cfg.uart.port   = port_entry->port;
+    /* If select_port picked an idle installed entry, reconfigure it instead of
+     * leaving a stale mapping behind. */
+    entry = uart_find_installed(port);
+    if (entry != NULL) {
+        ctx->cfg.uart.port   = entry->port;
         ctx->cfg.uart.baud   = baud;
         ctx->cfg.uart.tx_pin = tx_pin;
         ctx->cfg.uart.rx_pin = rx_pin;
-        ctx->uart_event_queue = port_entry->event_queue;
-        ESP_LOGI(TAG, "UART%d %s reused (TX=%d RX=%d baud=%lu)",
-                 ctx->cfg.uart.port,
-                 ctx->dma_enabled ? "DMA" : "polled",
-                 tx_pin, rx_pin, (unsigned long)baud);
+        ctx->uart_event_queue = entry->event_queue;
+        r = uart_reconfigure(entry, tx_pin, rx_pin, baud);
+        if (r != ESP_OK) return r;
+        entry->leased = true;
+        entry->ref_count++;
+        return ESP_OK;
     }
 
-    port_entry->ref_count++;
-    ESP_LOGI(TAG, "UART port ref_count=%lu", (unsigned long)port_entry->ref_count);
+    ctx->cfg.uart.port   = port;
+    ctx->cfg.uart.baud   = baud;
+    ctx->cfg.uart.tx_pin = tx_pin;
+    ctx->cfg.uart.rx_pin = rx_pin;
+    ctx->uart_event_queue = NULL;
+
+    r = uart_install_new(ctx, tx_pin, rx_pin, baud);
+    if (r != ESP_OK) return r;
+
+    entry = uart_find_installed(port);
+    if (entry == NULL) {
+        /* uart_install_new registered it; reaching here means the registry
+         * was corrupted.  Delete the driver rather than leak it. */
+        ESP_LOGE(TAG, "UART%d installed but missing from registry", (int)port);
+        uart_driver_delete(port);
+        return ESP_FAIL;
+    }
+    entry->leased = true;
+    entry->ref_count++;
+    ESP_LOGI(TAG, "UART port ref_count=%lu", (unsigned long)entry->ref_count);
     return ESP_OK;
 }
 
+/* Preinstall a controller without taking a lease.  Used before a transaction
+ * suspends the workers so the one-time ~3 KB/driver allocation happens at a
+ * gated, explicitly measured point instead of inside apply_buses. */
+esp_err_t bus_dma_uart_preinstall(uint8_t tx_pin, uint8_t rx_pin, uint32_t baud,
+                                  bool dma_enabled, int32_t preferred_controller,
+                                  uart_port_t *out_port)
+{
+    if (tx_pin > GPIO_PIN_MAX || rx_pin > GPIO_PIN_MAX ||
+        is_pin_reserved((int)tx_pin) || is_pin_reserved((int)rx_pin)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* INSTALL ONLY.  Pin/baud changes are deliberately NOT applied here.
+     *
+     * This step exists to pay the one-time driver allocation before the
+     * transaction suspends workers.  Reconfiguring has zero heap cost, and at
+     * this moment the OLD manifest still holds its leases (cleanup runs inside
+     * apply_buses), so touching a live controller's pins would disturb a
+     * channel that is still registered.  acquire() reconfigures later, after
+     * cleanup has released those leases. */
+
+    /* Same pins/baud already resident?  Nothing to install. */
+    uart_port_entry_t *entry = uart_find_port((int)tx_pin, (int)rx_pin, baud);
+    if (entry != NULL && entry->installed) {
+        if (out_port) *out_port = entry->port;
+        return ESP_OK;
+    }
+
+    /* The planner's controller is already installed under different
+     * pins/baud: acquire() will reconfigure it; nothing to install. */
+    if (preferred_controller >= 0) {
+        entry = uart_find_installed((uart_port_t)preferred_controller);
+        if (entry != NULL) {
+            if (out_port) *out_port = entry->port;
+            return ESP_OK;
+        }
+    }
+
+    /* Any other installed-but-idle controller could serve custom pins.  The
+     * acquire path prefers it too (uart_select_port), so only an actual free
+     * slot needs a fresh install. */
+    entry = uart_find_idle_installed();
+    if (entry != NULL) {
+        if (out_port) *out_port = entry->port;
+        return ESP_OK;
+    }
+
+    /* Fresh install on a stack-only context: no bus_dma_ctx_t is published, so
+     * the controller ends up installed but unleased.  Resource preflight and
+     * the memory gate are the caller's responsibility (bus_manager does both
+     * before any teardown). */
+    bus_dma_ctx_t probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.dma_enabled = dma_enabled;
+    probe.preferred_controller = preferred_controller;
+
+    uart_port_t port = UART_NUM_MAX;
+    esp_err_t r = uart_select_port((int)tx_pin, (int)rx_pin,
+                                   preferred_controller, &port);
+    if (r != ESP_OK) return r;
+
+    entry = uart_find_installed(port);
+    if (entry != NULL) {          /* idle reuse, selected above by policy */
+        if (out_port) *out_port = entry->port;
+        return ESP_OK;
+    }
+
+    probe.cfg.uart.port = port;
+    r = uart_install_new(&probe, (int)tx_pin, (int)rx_pin, baud);
+    if (r != ESP_OK) return r;
+    if (out_port) *out_port = port;
+    return ESP_OK;
+}
+
+/* Release a controller's driver.  Only valid when installed && !leased; the
+ * manager calls this after a successful apply for ports the new manifest no
+ * longer uses (or explicitly for whole-runtime teardown).  Releasing a leased
+ * port would yank the event queue out from under a live worker. */
+esp_err_t bus_dma_uart_teardown(uart_port_t port)
+{
+    uart_port_entry_t *entry = uart_find_installed(port);
+    if (entry == NULL) return ESP_OK;   /* already gone: idempotent */
+    if (entry->leased || entry->ref_count > 0) {
+        ESP_LOGW(TAG, "UART%d teardown refused: still leased (ref=%lu)",
+                 (int)port, (unsigned long)entry->ref_count);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t r = uart_driver_delete(port);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "UART%d driver delete failed: %s", (int)port, esp_err_to_name(r));
+        return r;
+    }
+    entry->port = UART_NUM_MAX;
+    entry->event_queue = NULL;
+    entry->installed = false;
+    entry->leased = false;
+    entry->ref_count = 0;
+    ESP_LOGI(TAG, "UART%d driver torn down", (int)port);
+    return ESP_OK;
+}
+
+/* ==== UART: independent TX (fire-and-forget) ==== */
 /* ==== UART: independent TX (fire-and-forget) ==== */
 
 static esp_err_t uart_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len)
@@ -666,30 +965,33 @@ static size_t uart_read(bus_dma_ctx_t *ctx, uint8_t *buf, size_t buf_size)
     return total;
 }
 
+/* Release this channel's lease on its controller.
+ *
+ * WS-E install-once: the driver object stays resident.  Actually freeing it is
+ * bus_dma_uart_teardown()'s job, and the manager only calls that for ports the
+ * new manifest no longer leases.  Keeping the driver alive here is what makes
+ * a manifest rebuild cheap: the next apply reconfigures instead of
+ * reinstalling (~3 KB contiguous per UART). */
 static esp_err_t uart_deinit(bus_dma_ctx_t *ctx)
 {
-    esp_err_t err = ESP_OK;
-    /* Find the port entry and decrement ref count */
-    uart_port_entry_t *port_entry = uart_find_port(ctx->cfg.uart.tx_pin, 
-                                                    ctx->cfg.uart.rx_pin, 
-                                                    ctx->cfg.uart.baud);
-    if (port_entry && port_entry->ref_count > 0) {
-        port_entry->ref_count--;
-        ESP_LOGI(TAG, "UART port ref_count=%lu", (unsigned long)port_entry->ref_count);
-        
-        if (port_entry->ref_count == 0) {
-            /* Last channel on this port - delete the driver */
-            err = uart_driver_delete(ctx->cfg.uart.port);
-            if (err == ESP_OK) {
-                port_entry->port = UART_NUM_MAX;  /* Mark as available */
-                port_entry->event_queue = NULL;
-                ESP_LOGI(TAG, "UART%d driver deleted", ctx->cfg.uart.port);
-            } else {
-                port_entry->ref_count++;
-            }
-        }
+    uart_port_entry_t *port_entry = uart_find_installed(ctx->cfg.uart.port);
+    if (port_entry == NULL) {
+        /* No resident driver: tolerate teardown of an already-uninstalled port
+         * (idempotent), but surface it because it usually means bookkeeping is
+         * out of sync. */
+        ESP_LOGW(TAG, "UART%d lease release with no installed driver", (int)ctx->cfg.uart.port);
+        return ESP_OK;
     }
-    return err;
+
+    if (port_entry->ref_count > 0) {
+        port_entry->ref_count--;
+    }
+    if (port_entry->ref_count == 0) {
+        port_entry->leased = false;
+    }
+    ESP_LOGI(TAG, "UART%d lease released, ref_count=%lu (driver stays installed)",
+             (int)ctx->cfg.uart.port, (unsigned long)port_entry->ref_count);
+    return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1602,7 +1904,7 @@ static esp_err_t bus_dma_init_internal(bus_dma_ctx_t *ctx, uint8_t bus_type,
 
     esp_err_t r;
     switch (bus_type) {
-        case BUS_TYPE_UART: r = uart_init(ctx, config, config_len); break;
+        case BUS_TYPE_UART: r = uart_port_acquire(ctx, config, config_len); break;
         case BUS_TYPE_SPI:  r = spi_init(ctx, config, config_len);  break;
         case BUS_TYPE_I2C:  r = i2c_init(ctx, config, config_len);  break;
 #if SOC_USB_SERIAL_JTAG_SUPPORTED

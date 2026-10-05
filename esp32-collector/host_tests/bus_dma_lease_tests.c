@@ -63,6 +63,15 @@ esp_err_t bus_dma_init_preferred(bus_dma_ctx_t *c, uint8_t t, bool d,
 esp_err_t bus_dma_init(bus_dma_ctx_t *c, uint8_t t, bool d,
                        const uint8_t *cfg, size_t l) { return bus_dma_init_preferred(c,t,d,cfg,l,-1); }
 esp_err_t bus_dma_deinit(bus_dma_ctx_t *c) { (void)c; return ESP_OK; }
+/* WS-E UART install-once hooks (bus_manager links against these). */
+esp_err_t bus_dma_uart_preinstall(uint8_t tx, uint8_t rx, uint32_t baud, bool dma,
+                                  int32_t pref, uart_port_t *out)
+{
+    (void)tx; (void)rx; (void)baud; (void)dma; (void)pref;
+    if (out) *out = UART_NUM_0;
+    return ESP_OK;
+}
+esp_err_t bus_dma_uart_teardown(uart_port_t port) { (void)port; return ESP_OK; }
 esp_err_t bus_dma_write(bus_dma_ctx_t *c, const uint8_t *d, size_t l) { (void)c;(void)d;(void)l; return ESP_OK; }
 size_t bus_dma_read(bus_dma_ctx_t *c, uint8_t *b, size_t s) { (void)c;(void)b;(void)s; return 0; }
 esp_err_t bus_dma_transact(bus_dma_ctx_t *c, const uint8_t *t, size_t tl,

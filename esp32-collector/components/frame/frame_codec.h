@@ -76,6 +76,40 @@ typedef enum {
  * 在收到 ACK 后才释放**对应的 NVS 记录占用。 */
 #define MSG_DIAG_REPORT      0x1E
 #define MSG_DIAG_ACK         0x1F
+/* v2.8 memory health (ESP -> SVR only).
+ *
+ * 低频内存水位上报：free/largest/min_ever/min_task_stack_high_water/floor，
+ * 全部 varint、单位字节。独立于 StatusReport (0x02)，原因：老后端对
+ * StatusReport 顶层 field_num > 10 是**整条丢弃**（handler_status.go:181），
+ * 新增 field 11 会让旧后端连心跳一起掉。而未知消息类型在管理器里走
+ * default 分支只记一条 Warn（manager.go:429），不拒连接、不影响其他消息，
+ * 所以固件先行是安全的，后端解析可后续接入。
+ *
+ * 触发：启动后一次、每 60 s 一次、低内存事件时一次。
+ *
+ * ⚠ 类型号 0x20 → 0x21（2026-10-05，V3-2a 裁决）。0x20 被 V3 的 DataBatch
+ * 同时占用，而 DataBatch 已在设计文档/收益表/迁移表里通篇使用 0x20。
+ * MSG_MEM_RPT 尚未合入 main、后端尚未解析（后端对它只会打 Unknown msg type
+ * 警告），因此改号零成本。详见
+ * docs/设计/V3-2a-DataBatch-落地契约-2026-10-05.md §0.1。 */
+#define MSG_MEM_RPT          0x21
+
+/* V3-2a DataBatch (ESP -> SVR) —— 只承载【非关键】周期遥测。
+ *
+ * 为什么需要：100 Hz x N 通道时每个样本一帧 0x03 会产生 N*100 个 PUBACK/s。
+ * 把同一 channel/edge/template 的 ≤4 个非关键样本聚合进一帧，把每样本开销
+ * 降到 ~1/4。**能力位协商，而非版本号协商**：只有 HelloAck 的 features
+ * bit0（CAP_DATA_BATCH_V1）为 1 时固件才发 0x20；否则代码路径与现状逐字节
+ * 一致（只发 0x03）。后端即使自己没置位也必须能解析 0x20（防御性 + 灰度）。
+ *
+ * 帧布局与不变量见契约 §2（冻结）：count 必须等于 field 5 实际次数、
+ * count∈1..4、首样本 delta_us==0 且 delta 单调、单样本 raw_data ∈ [1,1024]、
+ * 不携带 error_code（关键样本永远单独走 0x03）、未知 field 跳过 / 已知 field
+ * 重复即整帧拒绝。QoS0（同 LogStream）。 */
+#define MSG_DATA_BATCH       0x20
+
+/* DataBatch 能力位（HelloAck field 2 features 的 bit0）。 */
+#define CAP_DATA_BATCH_V1    ((uint64_t)1 << 0)
 
 /* === Encoder === */
 typedef struct {

@@ -17,6 +17,11 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#ifdef CONFIG_COLLECTOR_PSRAM
+#if CONFIG_COLLECTOR_PSRAM
+#include "esp_heap_caps.h"
+#endif
+#endif
 #include "esp_timer.h"
 #include <string.h>
 #include <inttypes.h>
@@ -25,7 +30,19 @@
 /* Single source of truth: version comes from CMakeLists.txt PROJECT_VER,
  * injected via target_compile_definitions as EHOME_PROJECT_VER. */
 #define FIRMWARE_VERSION EHOME_PROJECT_VER
-#define MODEL_NAME       CONFIG_IDF_TARGET
+
+/* Model name is a runtime attribute, not a compile-time constant: the same
+ * SoC ships in a PSRAM and a non-PSRAM variant, and the backend selects the
+ * manifest from what Hello/ResourceReport actually reports.  Written once at
+ * startup into this static buffer, then returned read-only.
+ *
+ * Detection requires BOTH:
+ *   - CONFIG_COLLECTOR_PSRAM (the build says this is the PSRAM model), and
+ *   - heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0 (the chip really
+ *     brought PSRAM up at boot).
+ * A PSRAM-less board running an s3p image therefore degrades to "esp32s3"
+ * instead of claiming to be a model it is not.  No PSRAM size is assumed. */
+static char s_model_name[16] = CONFIG_IDF_TARGET;
 
 /* ==== Singleton ==== */
 static app_state_t s_app;
@@ -53,6 +70,26 @@ static void generate_boot_id(char *buf, size_t buflen)
 {
     snprintf(buf, buflen, "%08" PRIX32 "%08" PRIX32,
              esp_random(), esp_random());
+}
+
+/* ---- Model name (compile-time model intent + runtime PSRAM probe) ---- */
+
+static void generate_model_name(char *buf, size_t buflen)
+{
+#ifdef CONFIG_COLLECTOR_PSRAM
+#if CONFIG_COLLECTOR_PSRAM
+    size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (psram_total > 0) {
+        snprintf(buf, buflen, "%sp", CONFIG_IDF_TARGET);
+        ESP_LOGI(TAG, "PSRAM model: %s (PSRAM detected: %u B)", buf,
+                 (unsigned)psram_total);
+        return;
+    }
+    ESP_LOGW(TAG, "CONFIG_COLLECTOR_PSRAM=y but no PSRAM detected; "
+                  "reporting model %s", CONFIG_IDF_TARGET);
+#endif
+#endif
+    snprintf(buf, buflen, "%s", CONFIG_IDF_TARGET);
 }
 
 /* ---- P2-8: Bus runtime initialization ---- */
@@ -87,6 +124,7 @@ app_state_t *app_state_init(void)
     generate_node_id(s_app.node_id, sizeof(s_app.node_id));
     generate_boot_id(s_app.boot_id, sizeof(s_app.boot_id));
     hw_profile_set_boot_id(s_app.boot_id);
+    generate_model_name(s_model_name, sizeof(s_model_name));
 
     /* Mutex for config-manifest application.
      * Using mutex instead of spinlock because we call blocking functions
@@ -132,7 +170,7 @@ app_state_t *app_state_init(void)
     app_state_init_bus_runtime(&s_app, &s_app.bus_runtime);
 
     ESP_LOGI(TAG, "State initialized: node_id=%s boot_id=%s fw=%s model=%s",
-             s_app.node_id, s_app.boot_id, FIRMWARE_VERSION, MODEL_NAME);
+             s_app.node_id, s_app.boot_id, FIRMWARE_VERSION, s_model_name);
     return &s_app;
 }
 
@@ -191,5 +229,5 @@ const char *get_firmware_version(void)
 
 const char *get_model_name(void)
 {
-    return MODEL_NAME;
+    return s_model_name;
 }

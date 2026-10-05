@@ -1,7 +1,26 @@
+/* This is the one translation unit in which the Hello runtime atomics must be
+ * genuinely lock-free. main/CMakeLists.txt restores hardware atomics for this
+ * file only when CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND is enabled, so the
+ * implementation still gets ATOMIC_INT_LOCK_FREE == 2 while the rest of the
+ * firmware is compiled with -mdisable-hardware-atomics. */
+#define HELLO_RUNTIME_IMPL 1
 #include "hello_handshake_runtime.h"
 
 #include <stddef.h>
+#include <assert.h>
 #include "esp_random.h"
+#include "sdkconfig.h"
+
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2,
+               "hello runtime implementation requires lock-free 32-bit atomics");
+
+#if CONFIG_SPIRAM && __XTENSA__
+/* PSRAM occupies [SOC_EXTRAM_DATA_LOW, SOC_EXTRAM_DATA_HIGH) on S3, and the
+ * Xtensa S32C1I instruction is not valid there. IDF's own esp_stdatomic.h:55
+ * uses this same range test to decide between the hardware path and the
+ * critical-section fallback. s_runtime must therefore never live in PSRAM. */
+#include "soc/soc.h"
+#endif
 
 void hello_runtime_init(hello_runtime_t *runtime)
 {
@@ -13,6 +32,13 @@ void hello_runtime_init(hello_runtime_t *runtime)
 void hello_runtime_init_with_seed(hello_runtime_t *runtime, uint32_t seed)
 {
     if (runtime == NULL) return;
+#if CONFIG_SPIRAM && __XTENSA__
+    /* Defence in depth for the DRAM_ATTR pin in hello_handshake.c: hardware
+     * atomics only work on internal RAM, so a runtime object that ended up in
+     * PSRAM would silently lose atomicity. Fail loudly at init instead. */
+    assert(!((uintptr_t)runtime >= SOC_EXTRAM_DATA_LOW &&
+             (uintptr_t)runtime < SOC_EXTRAM_DATA_HIGH));
+#endif
     if (seed == 0) seed = 1;
     atomic_init(&runtime->current_generation, 0);
     atomic_init(&runtime->latest_ready_generation, 0);

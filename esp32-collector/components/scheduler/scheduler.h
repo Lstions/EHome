@@ -34,8 +34,16 @@
 extern "C" {
 #endif
 
-/* === Limits (must match config_mgr.h) === */
-#define SCHED_MAX_CHANNELS  8
+/* === Limits (must match config_mgr.h) ===
+ *
+ * Derived, not a second literal: the two arrays (config_mgr's channels[] and
+ * scheduler's s_channels[]) must have identical bounds or a manifest that fits
+ * one is silently truncated by the other.  config_mgr.h is included above. */
+#define SCHED_MAX_CHANNELS  MAX_CHANNELS
+_Static_assert(SCHED_MAX_CHANNELS == MAX_CHANNELS,
+               "SCHED_MAX_CHANNELS must stay derived from config_mgr MAX_CHANNELS");
+_Static_assert(SCHED_MAX_CHANNELS >= 4,
+               "physical capability floor: every supported target has >=4 buses");
 #define SCHED_TASK_STACK    4096
 #define SCHED_TASK_PRIORITY 5
 #define SCHED_TASK_CORE     0
