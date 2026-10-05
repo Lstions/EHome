@@ -623,6 +623,107 @@ func TestDataBatchEventMatchesDataReportPath(t *testing.T) {
 	}
 }
 
+// TestParseDataBatchFirmwareWideVarints decodes a firmware-produced frame whose
+// varint widths the other anchor vectors never reach.
+//
+// Why this exists: the earlier anchors leave the 2-byte delta class [128, 16383]
+// untested, and never push the batch header to its widest varints. This frame was
+// produced by the production firmware encoder with:
+//
+//	ch=9, base_timestamp_us=4294967295 (5-byte varint), first_sequence=65535 (3-byte),
+//	edge=254, template=65535 (3-byte), index=255,
+//	deltas 0 / 127 (1-byte max) / 128 (2-byte min) / 16383 (2-byte max),
+//	raw_len=300 (2-byte length prefix) for every sample.
+//
+// The firmware encoder's size prediction matched the emitted length exactly
+// (pred=actual=1259) and the firmware decoder reads it back. This test proves the
+// BACKEND parser handles the same byte classes, so the two sides are anchored on a
+// vector that exercises the varint width matrix rather than one corner of it.
+func TestParseDataBatchFirmwareWideVarints(t *testing.T) {
+	const firmwareHex = "20080410ffffffff0f18ffff0320092ab102080012ac02a0a1a2a3a4a5a6a7a8" +
+		"a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf808182838485868788" +
+		"898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fe0e1e2e3e4e5e6e7e8" +
+		"e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc0c1c2c3c4c5c6c7c8" +
+		"c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf202122232425262728" +
+		"292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f000102030405060708" +
+		"090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f606162636465666768" +
+		"696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f404142434445464748" +
+		"494a4b4c4d4e4f505152535455565758595a5b5c5d5e5fa0a1a2a3a4a5a6a7a8" +
+		"a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf808182838485868788" +
+		"898a8b2ab102087f12ac02a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4" +
+		"b5b6b7b8b9babbbcbdbebf808182838485868788898a8b8c8d8e8f9091929394" +
+		"95969798999a9b9c9d9e9fe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4" +
+		"f5f6f7f8f9fafbfcfdfeffc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4" +
+		"d5d6d7d8d9dadbdcdddedf202122232425262728292a2b2c2d2e2f3031323334" +
+		"35363738393a3b3c3d3e3f000102030405060708090a0b0c0d0e0f1011121314" +
+		"15161718191a1b1c1d1e1f606162636465666768696a6b6c6d6e6f7071727374" +
+		"75767778797a7b7c7d7e7f404142434445464748494a4b4c4d4e4f5051525354" +
+		"55565758595a5b5c5d5e5fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4" +
+		"b5b6b7b8b9babbbcbdbebf808182838485868788898a8b2ab20208800112ac02" +
+		"a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf" +
+		"808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f" +
+		"e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff" +
+		"c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf" +
+		"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f" +
+		"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+		"606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f" +
+		"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f" +
+		"a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf" +
+		"808182838485868788898a8b2ab20208ff7f12ac02a0a1a2a3a4a5a6a7a8a9aa" +
+		"abacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf808182838485868788898a" +
+		"8b8c8d8e8f909192939495969798999a9b9c9d9e9fe0e1e2e3e4e5e6e7e8e9ea" +
+		"ebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc0c1c2c3c4c5c6c7c8c9ca" +
+		"cbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf202122232425262728292a" +
+		"2b2c2d2e2f303132333435363738393a3b3c3d3e3f000102030405060708090a" +
+		"0b0c0d0e0f101112131415161718191a1b1c1d1e1f606162636465666768696a" +
+		"6b6c6d6e6f707172737475767778797a7b7c7d7e7f404142434445464748494a" +
+		"4b4c4d4e4f505152535455565758595a5b5c5d5e5fa0a1a2a3a4a5a6a7a8a9aa" +
+		"abacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf808182838485868788898a" +
+		"8b30fe0138ffff0340ff01"
+
+	payload, err := hex.DecodeString(firmwareHex)
+	if err != nil {
+		t.Fatalf("decode firmware wide-varint hex: %v", err)
+	}
+	if len(payload) != 1259 {
+		t.Fatalf("frame length = %d, want 1259 (firmware pred==actual)", len(payload))
+	}
+
+	batch, err := parseDataBatch(payload)
+	if err != nil {
+		t.Fatalf("parseDataBatch(firmware wide-varint frame): %v", err)
+	}
+	if batch.count != 4 || len(batch.samples) != 4 {
+		t.Fatalf("count=%d samples=%d, want 4/4", batch.count, len(batch.samples))
+	}
+	if batch.channelID != 9 {
+		t.Errorf("channel_id = %d, want 9", batch.channelID)
+	}
+	if batch.baseTimestampUS != 4294967295 {
+		t.Errorf("base_timestamp_us = %d, want 4294967295 (5-byte varint)", batch.baseTimestampUS)
+	}
+	if batch.firstSequence != 65535 {
+		t.Errorf("first_sequence = %d, want 65535 (3-byte varint)", batch.firstSequence)
+	}
+	if batch.edgeDeviceID != 254 || batch.commandTemplateID != 65535 || batch.commandIndex != 255 {
+		t.Errorf("addressing = %d/%d/%d, want 254/65535/255",
+			batch.edgeDeviceID, batch.commandTemplateID, batch.commandIndex)
+	}
+	wantDeltas := []uint64{0, 127, 128, 16383}
+	for i, sample := range batch.samples {
+		if sample.deltaUS != wantDeltas[i] {
+			t.Errorf("sample[%d] delta = %d, want %d", i, sample.deltaUS, wantDeltas[i])
+		}
+		if len(sample.rawData) != 300 {
+			t.Fatalf("sample[%d] raw len = %d, want 300", i, len(sample.rawData))
+		}
+		// raw[i] = (uint8_t)(0xA0 ^ i); the last byte is (0xA0 ^ 299) & 0xFF = 0x8B.
+		if sample.rawData[0] != 0xA0 || sample.rawData[299] != 0x8B {
+			t.Errorf("sample[%d] raw boundaries = 0x%02x/0x%02x", i, sample.rawData[0], sample.rawData[299])
+		}
+	}
+}
+
 // =============================================================================
 // 3. Strictness — every invariant rejects the WHOLE frame (fail-closed).
 // =============================================================================
