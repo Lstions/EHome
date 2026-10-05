@@ -202,6 +202,15 @@ int wifi_mgr_get_rssi_dbm(void)
 static int64_t s_liveness_first_fail_us = 0;
 static int64_t s_last_liveness_probe_us = 0;
 static int64_t s_last_liveness_recover_us = 0;
+/* 恢复动作的退避间隔（毫秒）。每次强制重新关联后翻倍，上限 15 分钟；
+ * 链路恢复正常时重置回 60s。
+ *
+ * 为什么需要它：若网络/AP 长时间真的不可达，固定 60s 的强制断连会变成
+ * 持续的 churn —— 2026-10-05 实测过这个自持故障（探针每 60s 拆一次正常 WiFi，
+ * 导致 MQTT 永远建不起来）。退避让"持续不可达"时的重试代价可接受，
+ * 同时保留"短暂抖动后自愈"的能力。 */
+static int64_t s_liveness_backoff_ms = 60000;
+#define WIFI_LIVENESS_BACKOFF_MAX_MS (15 * 60 * 1000)
 static int64_t s_last_liveness_diag_us = 0;
 
 bool wifi_mgr_check_liveness(bool app_network_ok)
@@ -250,11 +259,33 @@ bool wifi_mgr_check_liveness(bool app_network_ok)
      * 因此 app_ok 现在**只用于日志**（区分"驱动也不认"还是"只有应用层不通"），
      * 不参与触发。若将来要覆盖"驱动自述正常但 L3 确实不通"的情形，
      * 正确的判据是**独立的 L3 探测**（如 ping 网关），而不是复用上层协议状态。 */
-    if (driver_ok) {
+    /* 触发判据：驱动层与**应用层**任一不健康即计入失败。
+     *
+     * 这里改过两版，两版的错误都记下来：
+     *
+     * 第一版：`driver_ok && app_ok` 才算健康 —— **过于激进**。MQTT 因与 WiFi 无关的
+     *   原因连不上时，探针会把一条完全正常的 WiFi 每 60s 拆一次；churn 又让 MQTT
+     *   永远建不起来，形成自持故障（现场：ping 通、broker 正常、无鉴权失败）。
+     *
+     * 第二版：只看 `driver_ok` —— **过于被动，等于没修**。`esp_wifi_sta_get_ap_info()`
+     *   读的是驱动缓存的 AP 记录；链路静默死掉时驱动仍返回成功，于是探针每次都在
+     *   第一行 return true，**永远不触发**。实机证据：设备离线（ping 100% 丢包）
+     *   而 150 秒抓包里 0 条 WIFI_MGR 日志。这正是本次要修的盲区本身。
+     *
+     * 现在的判据：两者任一为假即视为"可疑"，持续 BOOT 窗口后强制重新关联。
+     * 为了不重蹈第一版的 churn，恢复动作带**指数退避**（见下面的 cooldown），
+     * 使"网络真的不通"时重试间隔从 60s 逐步拉长到 15 分钟，而不是死循环。
+     *
+     * 注意 app_ok 在**启动初期**必然为假（MQTT 还没建连）。所以窗口取 60s，
+     * 显著大于正常建连时间（约 20s），避免每次启动都误触发一次重新关联。 */
+    if (driver_ok && app_network_ok) {
         if (s_liveness_first_fail_us != 0) {
-            ESP_LOGI(TAG, "Liveness recovered (driver_ok=1)");
+            ESP_LOGI(TAG, "Liveness recovered (driver_ok=%d app_ok=%d)",
+                     (int)driver_ok, (int)app_network_ok);
         }
         s_liveness_first_fail_us = 0;
+        /* 链路恢复 -> 把退避重置回初始值，下一次故障重新从 60s 起算。 */
+        s_liveness_backoff_ms = WIFI_LIVENESS_RECOVER_COOLDOWN_MS;
         return true;
     }
 
@@ -278,12 +309,16 @@ bool wifi_mgr_check_liveness(bool app_network_ok)
 
     if (failing_ms < (int64_t)WIFI_LIVENESS_FAIL_AFTER_MS) return true;
 
-    if (now - s_last_liveness_recover_us <
-        (int64_t)WIFI_LIVENESS_RECOVER_COOLDOWN_MS * 1000) {
+    if (now - s_last_liveness_recover_us < s_liveness_backoff_ms * 1000) {
         return true;
     }
     s_last_liveness_recover_us = now;
     s_liveness_first_fail_us = 0;
+    /* 指数退避：下一次若仍不恢复，等待时间翻倍（上限 15 分钟）。 */
+    s_liveness_backoff_ms *= 2;
+    if (s_liveness_backoff_ms > WIFI_LIVENESS_BACKOFF_MAX_MS) {
+        s_liveness_backoff_ms = WIFI_LIVENESS_BACKOFF_MAX_MS;
+    }
 
     /* 静默失联：驱动以为连着，实际 L2 已经不在。强制断开再关联。
      *

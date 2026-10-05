@@ -9,6 +9,15 @@
 #include "periph_owner.h"
 #include "freertos/semphr.h"
 
+/* config_apply_transaction.c 自 2026-10-05 起在失败路径记录"是哪一步失败"，
+ * 因此需要宿主机的 ESP_LOG 与 esp_err_to_name 实现（与其它用例一致的做法）。 */
+void host_test_log_record(char level, const char *tag, const char *format, ...)
+{
+    (void)level; (void)tag; (void)format;
+}
+const char *esp_err_to_name(int err) { (void)err; return "ESP_ERR"; }
+
+
 #define CHECK(expr) do { \
     if (!(expr)) { \
         fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #expr); \

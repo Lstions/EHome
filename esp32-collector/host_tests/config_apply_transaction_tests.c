@@ -13,6 +13,13 @@
 
 #include "config_apply_transaction.h"
 
+/* config_apply_transaction.c 自 2026-10-05 起在失败路径记录"是哪一步失败"，
+ * 因此需要宿主机的 ESP_LOG 与 esp_err_to_name 实现（与其它用例一致的做法）。 */
+void host_test_log_record(char level, const char *tag, const char *format, ...)
+{
+    (void)level; (void)tag; (void)format;
+}
+const char *esp_err_to_name(int err) { (void)err; return "ESP_ERR"; }
 typedef enum {
     STEP_SNAPSHOT = 1,
     STEP_PREPARE,
