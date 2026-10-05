@@ -58,7 +58,55 @@
  * Halving it from 16 KB matters because that value is what a device must have
  * free before it can accept an OTA at all; on 2026-10-01 a 16 KB request
  * failed outright on ESP32-S3 with ~14 KB free. */
-#define OTA_TASK_STACK_BYTES 8192
+/* 4 KB（原 8KB，2026-10-05 实机测量后收紧）。
+ *
+ * 为什么敢降：本固件走**明文 HTTP**，两个 4KB 的下载暂存缓冲是 file-scope
+ * static（在 .bss，不占这个栈），mbedTLS 的记录缓冲也由堆分配。
+ * 因此这 8KB 里的"调用链"本身远用不到 8KB —— 8KB 是照抄 IDF
+ * advanced_https_ota 示例（那条路径确实需要 TLS 握手栈）。
+ *
+ * 而 S3 的堆只有约 19KB 空闲，静态栈**常驻 .bss**：8KB 相当于拿走
+ * 全部空闲的 42%。实测后果是 OTA 自己都跑不起来 ——
+ *     free=9836 largest=3584  (OTA 启动时)
+ *     free=2232 largest=1024  (下载中)
+ *     E HTTP_CLIENT: Allocation failed (rx=2048 tx=1024, largest=1024)
+ * 即"为了让 OTA 能启动而静态占的 8KB"，把 OTA 需要的 HTTP/lwIP
+ * 缓冲挤掉了 —— 自己把自己饿死。降到 4KB 后总账才划算。
+ *
+ * 下面在升级成功路径上打印 uxTaskGetStackHighWaterMark，用实测确认余量；
+ * 若余量不足会立刻在实测中暴露，而不是等到现场栈溢出。 */
+#define OTA_TASK_STACK_BYTES 4096
+
+/* OTA 任务的**静态**栈与 TCB（2026-10-05）。大小仍是 8KB，
+ * 改的是"从哪来"：从堆分配改为静态分配。
+ *
+ * 为什么必须静态：xTaskCreate() 需要一整块**连续**堆内存（栈 + TCB）。
+ * 现场实测（S3，2.8.0）：
+ *     I OTA: Creating ota_task with 8192 byte stack: free=18464 largest=7680
+ *     E OTA: Failed to create ota_task: need 8192 bytes contiguous
+ * 即**总空闲 18KB 够、但没有 8192 的连续块** —— 碎片问题，不是总量问题。
+ * 在只有十几 KB 堆的设备上碎片是常态：配置事务、UART 驱动、WiFi、
+ * MQTT 重连都在反复分配/释放不同尺寸的块。只要 OTA 依赖"堆里恰好有
+ * 这么一整块"，OTA 就变成**看运气** —— 而 OTA 是设备远程不可达时唯一的
+ * 救命通道，不能看运气。
+ *
+ * 静态分配把这块内存放进 .bss，不参与堆的分配与碎片，
+ * 于是"OTA 能否启动"与堆状态彻底解耦。代价是 8KB 常驻 .bss，
+ * 换来"OTA 永远可用" —— 这个交换是值得的。
+ *
+ * 与本仓对 log_tx_task（2026-10-04）和 scheduler（2026-10-05）的修复同一手法，
+ * 理由相同：**关键任务的成功不该取决于堆碎片**。
+ *
+ * 注意：StackType_t 在 Xtensa 上是 4 字节，而 xTaskCreateStatic 的栈深度
+ * 以**字**为单位（xTaskCreate 用字节），故显式做除法并加编译期断言。
+ * 重试升级时可能重复创建，用 s_ota_task 句柄做二次防护（s_upgrading
+ * 已提供主要串行化）。 */
+#define OTA_TASK_STACK_WORDS (OTA_TASK_STACK_BYTES / sizeof(StackType_t))
+_Static_assert(OTA_TASK_STACK_BYTES % sizeof(StackType_t) == 0,
+               "OTA_TASK_STACK_BYTES must be a whole number of StackType_t words");
+static StackType_t  s_ota_stack[OTA_TASK_STACK_WORDS];
+static StaticTask_t s_ota_tcb;
+static TaskHandle_t s_ota_task;
 
 typedef enum {
     OTA_STATE_NONE       = 0,
@@ -565,19 +613,19 @@ static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
     esp_http_client_config_t cli_cfg = {0};
     cli_cfg.url = url;
     cli_cfg.timeout_ms = 30000;
-    /* Internal RX buffer size.
+    /* HTTP 客户端内部缓冲：**1024/512（原 2048/1024，更早是 8192）。**
      *
-     * esp_http_client_init() mallocs this as ONE contiguous block, and the read
-     * loop below already stages data through a 4 KB static buffer, so asking for
-     * 8 KB only doubled the contiguous allocation without changing throughput.
-     * That request is what failed on ESP32-S3 with 33880 bytes free but no 8 KB
-     * contiguous run ("HTTP_CLIENT: Allocation failed"), after the OTA task
-     * itself had already been created successfully.
+     * 这两个值由 esp_http_client_init() 各 malloc 成一块**连续**内存，
+     * 因此能否分配成功取决于"最大连续块"而不是总空闲量：
+     *   - 8192 时曾在 S3 上出现"33880 字节空闲但没有 8KB 连续块"而失败；
+     *   - 2048 时实测 OTA 期间 largest free block 只有 1024，
+     *     直接报 "HTTP_CLIENT: Allocation failed"。
      *
-     * 2048 matches the read granularity with headroom while staying easy to
-     * satisfy on a fragmented heap. */
-    cli_cfg.buffer_size = 2048;
-    cli_cfg.buffer_size_tx = 1024;
+     * 1024/512 配合下面的 4KB 静态读缓冲足够：HTTP 头很小，正文由 read()
+     * 循环反复取，缓冲大小只影响系统调用次数、不影响正确性。
+     * 降这两个值是为了让 **OTA 在 S3 的碎片化堆上仍有可用的连续块**。 */
+    cli_cfg.buffer_size = 1024;
+    cli_cfg.buffer_size_tx = 512;
 
     esp_http_client_handle_t client = esp_http_client_init(&cli_cfg);
     if (client == NULL) {
@@ -784,10 +832,33 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
 
     /* Run OTA in a dedicated task so mqtt_task can keep running.
      * cmd is passed directly — ota_task_func takes ownership and will free it. */
-    ESP_LOGI(TAG, "Creating ota_task with %u byte stack (%u bytes free heap)...",
-             (unsigned)OTA_TASK_STACK_BYTES, (unsigned)esp_get_free_heap_size());
-    BaseType_t ret = xTaskCreate(ota_task_func, "ota_task", OTA_TASK_STACK_BYTES, (void *)cmd, 5, NULL);
-    if (ret != pdPASS) {
+    /* 必须同时打**最大连续块**，只打 free heap 会误导。
+     *
+     * xTaskCreate() 需要一整块**连续**内存（约 8192 字节栈 + TCB），
+     * 而堆的总空闲量可能够、却因为碎片没有 8192 的连续块而失败。
+     * 2026-10-01 的真实故障正是这一类：请求 16KB 栈而只有 14.3KB 空闲；
+     * 2026-10-05 修配置事务内存问题时又实测到配置刚结束时
+     * free=9648 但 largest 只有 7680 —— 小于 8192，此时 OTA 必然起不来，
+     * 而只看 free heap 会让人以为"还有 9.6KB，应该够"。
+     *
+     * 因此这里把 free / largest / min_ever 一并打出来，
+     * 让"OTA 起不来"能一眼区分为总量不足还是碎片所致。 */
+    ESP_LOGI(TAG, "Creating ota_task with %u byte stack: free=%u largest=%u min_ever=%u "
+                  "(internal free=%u largest=%u)",
+             (unsigned)OTA_TASK_STACK_BYTES,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    /* 静态创建：栈与 TCB 都在 .bss，**不从堆分配、也不受堆碎片影响**。
+     * 这正是本次要修的缺陷 —— 原实现要 8192 连续堆块，实测只有 7680，
+     * 于是 OTA 完全起不来（见文件上方 s_ota_stack 处的完整说明）。
+     * 返回即句柄，失败为 NULL（与 xTaskCreate 的 pdPASS 语义不同）。 */
+    s_ota_task = xTaskCreateStatic(ota_task_func, "ota_task",
+                                   OTA_TASK_STACK_WORDS, (void *)cmd, 5,
+                                   s_ota_stack, &s_ota_tcb);
+    if (s_ota_task == NULL) {
         /* Report the failure instead of returning silently.
          *
          * This is load-bearing, not cosmetic: the server's SendOtaCommand()
@@ -800,8 +871,12 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
          *
          * ota_id must still match s_last_ota_id for ota_report_progress() to
          * forward the callback, which ota_classify_cmd() already set. */
-        ESP_LOGE(TAG, "Failed to create ota_task: need %u bytes, only %u free",
-                 (unsigned)OTA_TASK_STACK_BYTES, (unsigned)esp_get_free_heap_size());
+        ESP_LOGE(TAG, "Failed to create ota_task (static): need %u bytes .bss "
+                      "(this should be unreachable); free=%u largest=%u min_ever=%u",
+                 (unsigned)OTA_TASK_STACK_BYTES,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
         ota_report_progress(cmd->ota_id, 3, 0, "Insufficient heap to start OTA task");
         free((void *)cmd);
         s_upgrading = false;
@@ -849,6 +924,10 @@ static void ota_task_func(void *pvParameters)
         ota_report_progress(cmd->ota_id, 3, 0, "Download failed after retries");
         free(cmd);
         s_upgrading = false;
+        /* 先清句柄再删除：vTaskDelete(NULL) 不返回，清必须在前。
+         * 静态任务的栈/TCB 不会被释放（它们在 .bss，见 s_ota_stack 的说明），
+         * 因此下一次升级可以安全复用同一组缓冲。 */
+        s_ota_task = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -861,6 +940,10 @@ static void ota_task_func(void *pvParameters)
         ota_report_progress(cmd->ota_id, 3, 0, "Boot partition switch failed");
         free(cmd);
         s_upgrading = false;
+        /* 先清句柄再删除：vTaskDelete(NULL) 不返回，清必须在前。
+         * 静态任务的栈/TCB 不会被释放（它们在 .bss，见 s_ota_stack 的说明），
+         * 因此下一次升级可以安全复用同一组缓冲。 */
+        s_ota_task = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -872,11 +955,35 @@ static void ota_task_func(void *pvParameters)
         ota_report_progress(cmd->ota_id, 3, 0, "Boot partition switch failed");
         free(cmd);
         s_upgrading = false;
+        /* 先清句柄再删除：vTaskDelete(NULL) 不返回，清必须在前。
+         * 静态任务的栈/TCB 不会被释放（它们在 .bss，见 s_ota_stack 的说明），
+         * 因此下一次升级可以安全复用同一组缓冲。 */
+        s_ota_task = NULL;
         vTaskDelete(NULL);
         return;
     }
 
     ESP_LOGI(TAG, "Boot partition set to next partition");
+    /* 一次性测量：OTA 任务的真实栈用量与剩余堆。
+     *
+     * 为什么需要：OTA_TASK_STACK_BYTES 从 16KB 降到 8KB 是照着 IDF 示例
+     * 抄的量级，**从未按本固件的实测用量论证**。而 8KB 常驻 .bss 会永久
+     * 拿走 8KB 堆 —— 在只有约 19KB 空闲堆的 S3 上这是很大的代价，
+     * 实测会导致配置事务后堆再次紧张（MQTT 上报 tcp_write errno=11）。
+     * 因此先量真实用量，再决定能否进一步收紧。
+     *
+     * uxTaskGetStackHighWaterMark 返回**历史最小剩余**（字节），
+     * 即"离栈溢出最近的时刻还差多少"——这正是选栈大小需要的数。 */
+    {
+        UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+        ESP_LOGI(TAG, "[otamem] ota_task stack: total=%u high_water_free=%u used≈%u",
+                 (unsigned)OTA_TASK_STACK_BYTES, (unsigned)(hw * sizeof(StackType_t)),
+                 (unsigned)(OTA_TASK_STACK_BYTES - hw * sizeof(StackType_t)));
+        ESP_LOGI(TAG, "[otamem] heap now: free=%u largest=%u min_ever=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+    }
     ota_nvs_set_state(OTA_STATE_VERIFYING);
     ota_report_progress(cmd->ota_id, 1, 100, NULL);
 
