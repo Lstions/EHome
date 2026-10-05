@@ -384,6 +384,8 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		m.handleStatusReport(deviceID, payload)
 	case frame.MsgDataRpt:
 		m.handleDataReport(deviceID, payload)
+	case frame.MsgDataBatch:
+		m.handleDataBatch(deviceID, payload)
 	case frame.MsgConfigRslt:
 		m.handleConfigResult(deviceID, payload)
 	case frame.MsgWriteRsp:

@@ -14,6 +14,29 @@ import (
 	"gorm.io/gorm"
 )
 
+// Server capability bits carried in HelloAck field 2 (features).
+//
+// The bitmap is the ONLY switch that turns DataBatch on: the protocol version
+// string deliberately stays at 2.6 on the wire (contract §0.2), because the
+// field-deployed backend image requires an exact "2.6" and would reject a 3.0
+// HelloAck, taking the device offline. Capability negotiation is additive, so
+// either side can be deployed first.
+const (
+	// CAP_DATA_BATCH_V1 tells the device the server can parse DataBatch (0x20)
+	// and that it may batch non-critical periodic telemetry.
+	CAP_DATA_BATCH_V1 uint32 = 1 << 0
+)
+
+// serverFeatureBits returns the HelloAck features bitmap this server advertises.
+//
+// Bit 1 (CAP_MANIFEST_BYTE_BUDGET) is intentionally NOT set: the manifest byte
+// budget guarantee is not part of this delivery (contract §1). Bits 2..63 must
+// stay 0 — a device is allowed to treat an unknown set bit as "the server
+// promised something it did not implement".
+func serverFeatureBits() uint32 {
+	return CAP_DATA_BATCH_V1
+}
+
 type parsedHello struct {
 	WireNodeID      string
 	FirmwareVersion string
@@ -117,14 +140,41 @@ func parseHello(payload []byte) (parsedHello, error) {
 	if hello.WireNodeID == "" || hello.FirmwareVersion == "" || hello.Model == "" {
 		return hello, fmt.Errorf("invalid Hello: node_id, firmware_version, and model are required")
 	}
-	if hello.ProtocolVersion != ServerMaxProtocolVersion {
-		return hello, fmt.Errorf("invalid Hello protocol_version %q, require %s", hello.ProtocolVersion, ServerMaxProtocolVersion)
+	// V3-2a: accept the closed range [MinSupportedProtocolVersion,
+	// ServerMaxProtocolVersion] instead of exact equality. The upper bound is
+	// what lets a future 3.0 device register without waiting for a backend
+	// release; the lower bound keeps a 1.x device from being accepted merely
+	// because the ceiling moved. A 2.6 device takes the identical accept path it
+	// always did.
+	if err := validateHelloProtocolVersion(hello.ProtocolVersion); err != nil {
+		return hello, err
 	}
 	if hello.HandshakeNonce == 0 {
 		return hello, fmt.Errorf("invalid Hello handshake_nonce: zero")
 	}
 
 	return hello, nil
+}
+
+// validateHelloProtocolVersion enforces the accepted protocol-version window.
+//
+// It is deliberately explicit about both failure directions so an operator
+// reading the log can tell "too old" from "too new" without decoding the wire:
+// a version outside the window is a real incompatibility, not a typo.
+func validateHelloProtocolVersion(reported string) error {
+	version, ok := parseProtocolVersion(reported)
+	if !ok {
+		return fmt.Errorf("invalid Hello protocol_version %q: unparseable", reported)
+	}
+	minimum, _ := parseProtocolVersion(MinSupportedProtocolVersion) // constant, always parses
+	maximum, _ := parseProtocolVersion(ServerMaxProtocolVersion)
+	if compareProtocolVersions(version, minimum) < 0 {
+		return fmt.Errorf("invalid Hello protocol_version %q: below minimum %s", reported, MinSupportedProtocolVersion)
+	}
+	if compareProtocolVersions(version, maximum) > 0 {
+		return fmt.Errorf("invalid Hello protocol_version %q: above maximum %s", reported, ServerMaxProtocolVersion)
+	}
+	return nil
 }
 
 // negotiatedProtocolVersion returns the protocol version to use for a node,
@@ -185,11 +235,15 @@ func (m *Manager) handleHello(deviceID string, payload []byte) {
 	storeNodeIDCache(deviceID, reg.node.ID)
 
 	// HelloAck (0x12) confirms a registration that is already durable.
+	// features carries the server capability bitmap (contract §1); the device
+	// only enables DataBatch (0x20) when it sees CAP_DATA_BATCH_V1. A device
+	// that ignores the field keeps sending 0x03 byte-for-byte as before.
 	serverTime := uint64(time.Now().UnixMilli())
-	if err := m.SendHelloAck(deviceID, serverTime, 0, handshakeNonce); err != nil {
+	features := serverFeatureBits()
+	if err := m.SendHelloAck(deviceID, serverTime, features, handshakeNonce); err != nil {
 		logger.Infof("[%s] Failed to send HelloAck: %v", deviceID, err)
 	} else {
-		logger.Infof("[%s] HelloAck sent: server_time=%d features=0 nonce=%d", deviceID, serverTime, handshakeNonce)
+		logger.Infof("[%s] HelloAck sent: server_time=%d features=0x%X nonce=%d", deviceID, serverTime, features, handshakeNonce)
 	}
 
 	oldStatus := reg.oldStatus

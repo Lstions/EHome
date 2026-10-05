@@ -372,7 +372,26 @@ func TestAllMessageTypes(t *testing.T) {
 			t.Errorf("MsgTypeName(0x%02X): got %q, want %q", msgType, got, name)
 		}
 	}
-	t.Logf("All 18 message type names PASS")
+
+	// V3-2a: 0x20/0x21 were the doubly-claimed slot. The assignment is frozen by
+	// the DataBatch contract §0.1 — DataBatch keeps 0x20 and MSG_MEM_RPT moved to
+	// 0x21 — so a swap here would silently re-introduce the collision.
+	if MsgDataBatch != 0x20 {
+		t.Fatalf("MsgDataBatch = 0x%02X, want 0x20", MsgDataBatch)
+	}
+	if MsgMemRpt != 0x21 {
+		t.Fatalf("MsgMemRpt = 0x%02X, want 0x21", MsgMemRpt)
+	}
+	if MsgMemRpt == MsgDataBatch {
+		t.Fatal("MsgMemRpt and MsgDataBatch collide on the same wire slot")
+	}
+	if got := MsgTypeName(MsgDataBatch); got != "data_batch" {
+		t.Errorf("MsgTypeName(0x20) = %q, want data_batch", got)
+	}
+	if got := MsgTypeName(MsgMemRpt); got != "mem_report" {
+		t.Errorf("MsgTypeName(0x21) = %q, want mem_report", got)
+	}
+	t.Logf("All message type names PASS (incl. 0x20 data_batch / 0x21 mem_report)")
 }
 
 // Test HelloAck (0x12) encode/decode round-trip

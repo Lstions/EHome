@@ -71,6 +71,114 @@ func TestParseHelloRequiresV26Nonce(t *testing.T) {
 	})
 }
 
+// TestParseHelloProtocolVersionWindow pins the V3-2a accepted window [2.6, 3.0].
+//
+// The floor deliberately does NOT move: a 2.5 Hello is rejected exactly as it
+// was before (also pinned by TestParseHelloRequiresV26Nonce). Only the ceiling
+// rises, which is what lets a future 3.0 device register without a backend
+// release — the field-deployed image still requires an exact "2.6", so firmware
+// keeps reporting 2.6 and enables DataBatch via the capability bit instead.
+func TestParseHelloProtocolVersionWindow(t *testing.T) {
+	for _, tt := range []struct {
+		version string
+		ok      bool
+	}{
+		{version: "2.5", ok: false},
+		{version: "2.6", ok: true},
+		{version: "2.7", ok: true},
+		{version: "2.10", ok: true},
+		{version: "3.0", ok: true},
+		{version: "3.0.1", ok: true},
+		{version: "3.1", ok: false},
+		{version: "4.0", ok: false},
+		{version: "garbage", ok: false},
+	} {
+		t.Run(tt.version, func(t *testing.T) {
+			_, err := parseHello(encodedHello(tt.version, 42))
+			if tt.ok && err != nil {
+				t.Fatalf("parseHello(%q) rejected: %v", tt.version, err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatalf("parseHello(%q) accepted, want rejection", tt.version)
+			}
+		})
+	}
+}
+
+// TestServerFeatureBitsAdvertisesDataBatch pins the HelloAck capability bitmap
+// (contract §1): bit0 only.
+//
+// The "exactly" assertion is the load-bearing one. Bits 2..63 are reserved and
+// must be 0 — a device is entitled to treat an unknown set bit as a promise the
+// server has not implemented. Bit1 (CAP_MANIFEST_BYTE_BUDGET) is explicitly not
+// part of this delivery, so it must not be set by accident either.
+func TestServerFeatureBitsAdvertisesDataBatch(t *testing.T) {
+	if CAP_DATA_BATCH_V1 != 1 {
+		t.Fatalf("CAP_DATA_BATCH_V1 = %#x, want bit0", CAP_DATA_BATCH_V1)
+	}
+	features := serverFeatureBits()
+	if features&CAP_DATA_BATCH_V1 == 0 {
+		t.Fatalf("serverFeatureBits()=%#x does not advertise CAP_DATA_BATCH_V1", features)
+	}
+	if features != CAP_DATA_BATCH_V1 {
+		t.Fatalf("serverFeatureBits()=%#x, want exactly %#x: reserved bits and bit1 must stay 0",
+			features, CAP_DATA_BATCH_V1)
+	}
+}
+
+// TestHandleHelloAckCarriesDataBatchCapability drives a real Hello through
+// handleHello and reads `features` off the published HelloAck, so the bitmap is
+// pinned on the wire rather than only at the constant.
+func TestHandleHelloAckCarriesDataBatchCapability(t *testing.T) {
+	mgr, _, mock := newHelloTestManager(t)
+	const deviceID = "sim-hello-cap"
+	nodeIDCache.Delete(deviceID)
+	defer nodeIDCache.Delete(deviceID)
+
+	mgr.handleHello(deviceID, encodedHelloFor(deviceID, 201))
+	mgr.wg.Wait()
+
+	var ack []byte
+	for _, rec := range mock.records {
+		if len(rec.payload) > 0 && rec.payload[0] == frame.MsgHelloAck {
+			ack = rec.payload
+		}
+	}
+	if ack == nil {
+		t.Fatal("no HelloAck published")
+	}
+
+	dec, err := frame.NewDecoder(ack)
+	if err != nil {
+		t.Fatalf("decode HelloAck: %v", err)
+	}
+	var features, nonce uint64
+	for {
+		field, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("HelloAck fields: %v", err)
+		}
+		switch field.FieldNum {
+		case 2:
+			features = frame.GetUint64(field)
+		case frame.HelloAckFieldHandshakeNonce:
+			nonce = frame.GetUint64(field)
+		}
+	}
+	if features != uint64(serverFeatureBits()) {
+		t.Fatalf("HelloAck features = %d, want %d", features, serverFeatureBits())
+	}
+	if features&uint64(CAP_DATA_BATCH_V1) == 0 {
+		t.Fatalf("HelloAck features = %d lacks CAP_DATA_BATCH_V1", features)
+	}
+	if nonce != 201 {
+		t.Fatalf("HelloAck nonce = %d, want 201", nonce)
+	}
+}
+
 func TestHandleHelloRejectsWireNodeMismatch(t *testing.T) {
 	mock := &senderMockMQTT{}
 	mgr := &Manager{mqtt: mock}

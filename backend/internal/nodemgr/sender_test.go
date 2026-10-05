@@ -582,19 +582,32 @@ func TestProtocolVersionAtLeastFeatureGates(t *testing.T) {
 	}
 }
 
+// TestNegotiatedProtocolVersionV26 pins the V3-2a version widening and, just as
+// importantly, pins what did NOT change.
+//
+// ServerMaxProtocolVersion moved "2.6" -> "3.0". The negotiated value for every
+// version that was already accepted (2.6) is byte-for-byte unchanged, so
+// node.protocol_version and every >= 2.3 / >= 2.4 manifest gate keep producing
+// the exact wire format they produced before. The values that DO change are
+// exactly the ones that used to be rejected outright by parseHello — there was
+// no previous behaviour to preserve for them.
 func TestNegotiatedProtocolVersionV26(t *testing.T) {
-	if ServerMaxProtocolVersion != "2.6" {
-		t.Fatalf("server max protocol: got %q, want 2.6", ServerMaxProtocolVersion)
+	if ServerMaxProtocolVersion != "3.0" {
+		t.Fatalf("server max protocol: got %q, want 3.0", ServerMaxProtocolVersion)
+	}
+	if MinSupportedProtocolVersion != "2.6" {
+		t.Fatalf("server min protocol: got %q, want 2.6 (the floor must not move)", MinSupportedProtocolVersion)
 	}
 	for _, tt := range []struct {
 		reported string
 		want     string
 	}{
 		{reported: "2.5", want: "2.5"},
-		{reported: "2.6", want: "2.6"},
-		{reported: "2.7", want: "2.6"},
-		{reported: "2.10", want: "2.6"},
-		{reported: "3.0", want: "2.6"},
+		{reported: "2.6", want: "2.6"}, // UNCHANGED: min(2.6, 3.0) = 2.6
+		{reported: "2.7", want: "2.7"}, // was unreachable (Hello rejected); no prior behaviour to preserve
+		{reported: "2.10", want: "2.10"},
+		{reported: "3.0", want: "3.0"},
+		{reported: "3.1", want: "3.0"}, // still clamped at the ceiling
 		{reported: "legacy", want: "legacy"},
 	} {
 		if got := negotiatedProtocolVersion(tt.reported); got != tt.want {

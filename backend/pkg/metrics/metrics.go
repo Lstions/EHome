@@ -301,4 +301,32 @@ var (
 		Name: "ehome_notification_channels_enabled",
 		Help: "Number of enabled outbound notification channels",
 	})
+
+	// --- V3-2a DataBatch (0x20) observability ---
+	//
+	// Labels are deliberately absent: node_id / channel_id would be unbounded
+	// cardinality, and the per-node view already exists via DataReceivedTotal.
+	// The pair frames vs samples is what proves batching actually happens
+	// (samples/frames = mean batch size), and rejected is the fail-closed
+	// counter that must stay 0 in steady state.
+
+	// DataBatchFramesTotal counts accepted DataBatch frames (0x20).
+	DataBatchFramesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_data_batch_frames_total",
+		Help: "Total DataBatch (0x20) frames accepted and fanned out",
+	})
+
+	// DataBatchSamplesTotal counts samples fanned out as DataEvents.
+	DataBatchSamplesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_data_batch_samples_total",
+		Help: "Total samples fanned out from DataBatch frames into DataEvents",
+	})
+
+	// DataBatchRejectedTotal counts DataBatch frames rejected by a strict
+	// invariant (count mismatch, out-of-range count, non-zero first delta,
+	// non-monotonic delta, empty/oversized raw_data, duplicate known field).
+	DataBatchRejectedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_data_batch_rejected_total",
+		Help: "Total DataBatch (0x20) frames rejected by a strict invariant",
+	})
 )

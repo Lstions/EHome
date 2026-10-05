@@ -66,7 +66,7 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 
 	// Dispatch to worker pool (non-blocking)
 	// P1-4: collectorID resolved in worker, not in MQTT callback
-	job := dataReportJob{
+	m.enqueueDataReportJob(deviceID, dataReportJob{
 		deviceID:          deviceID,
 		channelID:         channelID,
 		timestamp:         timestamp,
@@ -77,8 +77,17 @@ func (m *Manager) handleDataReport(deviceID string, payload []byte) {
 		edgeDeviceID:      edgeDeviceID,
 		commandIndex:      commandIndex,
 		commandTemplateID: commandTemplateID,
-	}
+	})
+}
 
+// enqueueDataReportJob submits a parsed report to the worker pool without
+// blocking the MQTT callback.
+//
+// This is the single enqueue path shared by DataReport (0x03) and DataBatch
+// (0x20): batching may not change backpressure behaviour, otherwise a device
+// that turns on batching would silently acquire a different overload policy
+// from one that does not.
+func (m *Manager) enqueueDataReportJob(deviceID string, job dataReportJob) {
 	select {
 	case m.dataCh <- job:
 		// submitted to worker pool

@@ -355,7 +355,32 @@ func (m *Manager) SendDiagAck(deviceID string, recordID uint32, accepted bool) e
 
 // ServerMaxProtocolVersion is the highest protocol version this server supports.
 // Negotiated version = min(device-reported, ServerMaxProtocolVersion).
-const ServerMaxProtocolVersion = "2.6"
+//
+// V3-2a (2026-10-05): widened "2.6" → "3.0". parseHello accepts any version
+// within [MinSupportedProtocolVersion, ServerMaxProtocolVersion], so a 3.0
+// device is no longer rejected outright — before this change the exact-equality
+// check refused it and the device could never register.
+//
+// Behaviour for a 2.6 device is unchanged in every observable way:
+//   - it is still accepted;
+//   - negotiatedProtocolVersion("2.6") still returns "2.6" (min of the two),
+//     so node.protocol_version and every version gate (>= 2.3 / >= 2.4 wire
+//     format selection) evaluate exactly as before;
+//   - a device reporting a version it cannot back up is not silently upgraded:
+//     the negotiated value is min(device, server).
+//
+// The wire version string is deliberately NOT bumped (contract §0.2): devices
+// keep reporting proto_ver=2.6 and DataBatch is enabled purely by the HelloAck
+// capability bit, so this server tolerates both an old and a new firmware.
+const ServerMaxProtocolVersion = "3.0"
+
+// MinSupportedProtocolVersion is the lowest protocol version this server still
+// accepts. It stays at the version currently deployed in the field, so V3-2a is
+// strictly an upward widening: a 2.5 Hello is rejected exactly as it was before
+// (pinned by TestParseHelloRequiresV26Nonce), and only versions *above* the old
+// ceiling become newly acceptable. Widening the floor too would be a separate,
+// deliberate compatibility decision — not a side effect of raising the ceiling.
+const MinSupportedProtocolVersion = "2.6"
 
 type protocolVersion struct {
 	major uint64

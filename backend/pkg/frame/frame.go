@@ -77,6 +77,15 @@ const (
 	MsgLogStream         = 0x1D // v2.5: LogStream (ESP→SVR, batched system log report)
 	MsgDiagReport        = 0x1E // v2.6: DiagReport (ESP→SVR, boot/crash diagnostics)
 	MsgDiagAck           = 0x1F // v2.6: DiagAck (SVR→ESP, crash-report persistence confirmation)
+	// V3-2a: DataBatch (ESP→SVR) carries 1..4 non-critical periodic telemetry
+	// samples in one frame. Wire layout is frozen in
+	// docs/设计/V3-2a-DataBatch-落地契约-2026-10-05.md §2. The device only sends
+	// it when HelloAck advertised CAP_DATA_BATCH_V1 (bit0 of features).
+	MsgDataBatch = 0x20
+	// MsgMemRpt is the firmware memory telemetry report (ESP→SVR). The 0x20 slot
+	// was doubly claimed, so MSG_MEM_RPT moved to 0x21 (contract §0.1). Only the
+	// constant is reserved here: parsing is task-9's deliverable.
+	MsgMemRpt = 0x21
 )
 
 // Field represents a decoded field
@@ -365,6 +374,8 @@ func MsgTypeName(msgType uint8) string {
 		MsgLogStream:         "log_stream",
 		MsgDiagReport:        "diag_report",
 		MsgDiagAck:           "diag_ack",
+		MsgDataBatch:         "data_batch",
+		MsgMemRpt:            "mem_report",
 	}
 	if name, ok := names[msgType]; ok {
 		return name
