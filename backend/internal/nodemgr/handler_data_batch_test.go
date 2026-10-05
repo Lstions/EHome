@@ -403,6 +403,106 @@ func TestParseDataBatchFirmwareFullSizeFrame(t *testing.T) {
 	}
 }
 
+// TestParseDataBatchFirmwareCompactAnchor decodes the compact 44-byte n=4 frame
+// produced by the production firmware encoder (v3-firmware, 2026-10-06).
+//
+// Input: ch=3, base=1000, first_seq=7, edge/template/index all 0,
+//
+//	deltas 0/10/20/30, raw deadbeef / 0102 / aa / 556677.
+//
+// Because every optional field is omitted this is the SMALLEST possible n=4
+// frame, so it pins the field order and the minimal-length varint paths that a
+// larger frame could mask.
+func TestParseDataBatchFirmwareCompactAnchor(t *testing.T) {
+	const firmwareHex = "20080410e807180720032a0808001204deadbeef2a06080a120201022a0508141201aa2a07081e1203556677"
+
+	payload, err := hex.DecodeString(firmwareHex)
+	if err != nil {
+		t.Fatalf("decode firmware compact hex: %v", err)
+	}
+	if len(payload) != 44 {
+		t.Fatalf("compact frame length = %d, want 44", len(payload))
+	}
+
+	batch, err := parseDataBatch(payload)
+	if err != nil {
+		t.Fatalf("parseDataBatch(firmware compact n=4): %v", err)
+	}
+	if batch.count != 4 || len(batch.samples) != 4 {
+		t.Fatalf("count=%d samples=%d, want 4/4", batch.count, len(batch.samples))
+	}
+	if batch.channelID != 3 || batch.baseTimestampUS != 1000 || batch.firstSequence != 7 {
+		t.Fatalf("header = ch %d base %d seq %d, want 3/1000/7",
+			batch.channelID, batch.baseTimestampUS, batch.firstSequence)
+	}
+	if batch.edgeDeviceID != 0 || batch.commandTemplateID != 0 || batch.commandIndex != 0 {
+		t.Fatalf("omitted optionals decoded as %d/%d/%d, want 0/0/0",
+			batch.edgeDeviceID, batch.commandTemplateID, batch.commandIndex)
+	}
+	wantDeltas := []uint64{0, 10, 20, 30}
+	wantRaw := []string{"deadbeef", "0102", "aa", "556677"}
+	for i, sample := range batch.samples {
+		if sample.deltaUS != wantDeltas[i] {
+			t.Errorf("sample[%d] delta = %d, want %d", i, sample.deltaUS, wantDeltas[i])
+		}
+		if got := hex.EncodeToString(sample.rawData); got != wantRaw[i] {
+			t.Errorf("sample[%d] raw = %s, want %s", i, got, wantRaw[i])
+		}
+	}
+}
+
+// TestHandleDataBatchFirmwareCompactFanOut fans the 44-byte firmware frame out
+// and asserts the exact timestamps/sequences the device intended.
+//
+// This vector is the PASSIVE case on purpose: edge_device_id=0 and request_id=0
+// make each fanned-out event a passive report (IsPassive), exactly as a 0x03
+// frame with edge=0 would be. Pinning that here prevents a future refactor from
+// silently "upgrading" batched samples into persisted ones — which would start
+// writing rows the 0x03 path never wrote.
+func TestHandleDataBatchFirmwareCompactFanOut(t *testing.T) {
+	const firmwareHex = "20080410e807180720032a0808001204deadbeef2a06080a120201022a0508141201aa2a07081e1203556677"
+	payload, err := hex.DecodeString(firmwareHex)
+	if err != nil {
+		t.Fatalf("decode firmware compact hex: %v", err)
+	}
+
+	mgr, capture := newBatchTestManager(t)
+	mgr.handleDataBatch("DEV-COMPACT", payload)
+
+	events := waitForEvents(t, capture, 4)
+	if len(events) != 4 {
+		t.Fatalf("fanned out %d event(s), want 4", len(events))
+	}
+
+	bySequence := indexBySequence(t, events)
+	wantRaw := []string{"deadbeef", "0102", "aa", "556677"}
+	for i := 0; i < 4; i++ {
+		wantSeq := uint64(7 + i)
+		wantTS := uint64(1000 + i*10)
+		evt, ok := bySequence[wantSeq]
+		if !ok {
+			t.Fatalf("no event with sequence %d; got %v", wantSeq, sequenceList(events))
+		}
+		if evt.Timestamp != wantTS {
+			t.Errorf("seq %d timestamp = %d, want %d", wantSeq, evt.Timestamp, wantTS)
+		}
+		if evt.ChannelID != 3 {
+			t.Errorf("seq %d channel = %d, want 3", wantSeq, evt.ChannelID)
+		}
+		if got := hex.EncodeToString(evt.RawData); got != wantRaw[i] {
+			t.Errorf("seq %d raw = %s, want %s", wantSeq, got, wantRaw[i])
+		}
+		if evt.EdgeDeviceID != 0 || evt.CommandTemplateID != 0 || evt.CommandIndex != 0 {
+			t.Errorf("seq %d addressing = %d/%d/%d, want 0/0/0",
+				wantSeq, evt.EdgeDeviceID, evt.CommandTemplateID, evt.CommandIndex)
+		}
+		if !evt.IsPassive() || evt.ShouldPersist() || evt.ShouldParse() {
+			t.Errorf("seq %d classification = passive:%v persist:%v parse:%v, want passive-only (matches 0x03 with edge=0)",
+				wantSeq, evt.IsPassive(), evt.ShouldPersist(), evt.ShouldParse())
+		}
+	}
+}
+
 // =============================================================================
 // 2. Fan-out — N samples must become N DataEvents with 0x03 semantics.
 // =============================================================================
