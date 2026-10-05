@@ -18,6 +18,7 @@
 #include "hw_tables.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
 #include "driver/i2c_master.h"
@@ -287,6 +288,15 @@ static inline uint32_t read_be32(const uint8_t *p)
 #define MAX_UART_PORTS 3
 #define UART_EVENT_QUEUE_DEPTH 32
 
+/* UART 驱动缓冲区。DMA 路径用 512（原为 1024）；非 DMA 路径 256 不变。
+ * 降低的理由见 uart_driver_install 调用处的大段说明：S3 只有约 7~8KB
+ * 可用堆时，3 路 UART 各占 1024+1024 会让第三路 uart_driver_install
+ * 失败，导致整个配置事务回滚。512 仍远大于硬件 FIFO（128 字节）。 */
+#define UART_DRV_RX_BUFFER       512U
+#define UART_DRV_TX_BUFFER       512U
+#define UART_DRV_RX_BUFFER_SMALL 256U
+#define UART_DRV_TX_BUFFER_SMALL 256U
+
 typedef struct {
     uart_port_t port;
     int tx_pin;
@@ -471,15 +481,51 @@ static esp_err_t uart_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
 
         /* Both DMA and non-DMA paths use the same driver event queue.  DMA
          * only changes the underlying buffer sizes; it must not change the
-         * public receive flow or route one UART through a different worker. */
+         * public receive flow or route one UART through a different worker.
+         *
+         * ── 为什么缓冲区从 1024 降到 512（2026-10-05，实机现场）───────────
+         *
+         * S3（30EDA0A9A808）的 3 路 UART 每路要 1024+1024 字节驱动缓冲，
+         * 外加 32 深的 uart_event_t 队列。三路合计约 7.2KB，而 S3 在做配置
+         * 事务时可用堆只有约 7~8KB —— 于是第 3 路必然失败：
+         *
+         *     E uart: UART driver malloc error
+         *     E BUS_DMA: uart_driver_install failed: ESP_FAIL
+         *     E BUS_MGR: ch=5 init failed: ESP_FAIL
+         *     E CFG_TX: config apply failed at apply_buses: ESP_FAIL
+         *     E CALLBACK: Rejecting ConfigManifest transaction: result=2
+         *
+         * 后果是**整个配置事务回滚**、设备持续上报 success=false；重试时因
+         * 分配顺序不同偶尔能成功（现场观察到"首次失败、第二次成功"）。
+         *
+         * 必须注意：这里**不能靠开 PSRAM 解决**。S3 板上确有 8MB PSRAM，但
+         * 开启会让 IDF 置上 CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND、
+         * 全局加 -mdisable-hardware-atomics，使 ATOMIC_INT_LOCK_FREE 由 2 降 1，
+         * 触发 hello_handshake_runtime.h 的硬门禁 #error —— 构建立即失败。
+         * 这是"PSRAM 可用堆"与"无锁 32 位原子"的二选一（详见
+         * sdkconfig.defaults.esp32s3 的 PSRAM 段落）。因此只能降低内存需求。
+         *
+         * 512 仍远大于 UART 硬件 FIFO（S3/C6 均为 128 字节），且 RX 由
+         * rx_task 持续搬运、不依赖缓冲区做大块缓存，因此不影响协议时序。
+         * 三路合计由约 7.2KB 降到约 5.1KB，为配置事务腾出必要余量。 */
         QueueHandle_t event_queue = NULL;
-        size_t rx_buffer_size = ctx->dma_enabled ? 1024U : 256U;
-        size_t tx_buffer_size = ctx->dma_enabled ? 1024U : 256U;
+        size_t rx_buffer_size = ctx->dma_enabled ? UART_DRV_RX_BUFFER : UART_DRV_RX_BUFFER_SMALL;
+        size_t tx_buffer_size = ctx->dma_enabled ? UART_DRV_TX_BUFFER : UART_DRV_TX_BUFFER_SMALL;
         r = uart_driver_install(ctx->cfg.uart.port, rx_buffer_size,
                                 tx_buffer_size, UART_EVENT_QUEUE_DEPTH,
                                 &event_queue, 0);
         if (r != ESP_OK) {
-            ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(r));
+            /* 把内存实况一并打出来。2026-10-05 的现场只有一句裸的
+             * "UART driver malloc error"，无法判断是"总量不够"还是"碎片"，
+             * 定位成本很高；这次直接把 free / largest / min-ever 记下来。 */
+            ESP_LOGE(TAG, "uart_driver_install failed: %s (uart%d rx=%u tx=%u q=%d; "
+                          "free=%u largest=%u min_ever=%u)",
+                     esp_err_to_name(r), (int)ctx->cfg.uart.port,
+                     (unsigned)rx_buffer_size, (unsigned)tx_buffer_size,
+                     UART_EVENT_QUEUE_DEPTH,
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                     (unsigned)esp_get_minimum_free_heap_size());
             return r;
         }
         ctx->uart_event_queue = event_queue;

@@ -19,6 +19,8 @@
 #include "bus_dma.h"
 #include "hw_tables.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -37,6 +39,33 @@ static volatile bool   s_prepared;
 static scheduler_queues_t s_queues;
 static volatile uint32_t s_min_queue_spaces;
 static scheduler_queue_metrics_t s_queue_metrics;
+
+/* 调度任务的**静态**栈与 TCB（2026-10-05）。
+ *
+ * 为什么必须静态：配置事务的流程是 prepare(停调度任务) -> apply_scheduler(重建任务)，
+ * 也就是**每次配置同步都会销毁再创建一个 4096 字节栈的任务**。
+ * 反复 alloc/free 同尺寸块正是制造堆碎片的经典手法；一旦堆里没有 4096 的
+ * **连续**块，xTaskCreatePinnedToCore 就失败 -> apply_scheduler 返回 ESP_FAIL
+ * -> 整个配置事务回滚 -> 设备永久上报 success=false。
+ *
+ * 现场数据（2026-10-05，均 2.8.0 / IDF 6.1）：
+ *     C6  free=77752  ->  config applied/in_sync   （正常）
+ *     S3  free=25784  ->  config failed/failed      （每次同步都失败）
+ * 串口证据：5 条 scheduler_add_channel 全部成功，紧接着
+ *     E CFG_TX: config apply failed at apply_scheduler: ESP_FAIL (0xffffffff)
+ * 因为 add_channel 的所有失败返回都在其日志**之前**，能打出日志即说明五路都成功，
+ * 失败点只能是任务创建。
+ *
+ * 静态分配后任务创建**不再从堆取内存**，与堆碎片彻底解耦。
+ * 这与本仓 2026-10-04 给 log_tx_task 做的修复是同一手法（那次堆只剩 13.7KB）。
+ *
+ * 注意 StackType_t 在 Xtensa 上是 4 字节，xTaskCreateStatic 的栈深度参数以
+ * **字**为单位（xTaskCreate 用字节）—— 本仓已踩过这个坑，故显式做除法加断言。 */
+#define SCHED_TASK_STACK_WORDS (SCHED_TASK_STACK / sizeof(StackType_t))
+_Static_assert(SCHED_TASK_STACK % sizeof(StackType_t) == 0,
+               "SCHED_TASK_STACK must be a whole number of StackType_t words");
+static StackType_t  s_sched_stack[SCHED_TASK_STACK_WORDS];
+static StaticTask_t s_sched_tcb;
 
 enum {
     SCHED_Q_UART0 = 0,
@@ -183,12 +212,21 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
 
     s_running = false;
     s_prepared = true;
-    if (xTaskCreatePinnedToCore(scheduler_task, "scheduler",
-                                SCHED_TASK_STACK, NULL,
-                                SCHED_TASK_PRIORITY, &s_task_handle,
-                                SCHED_TASK_CORE) != pdPASS) {
+    s_task_handle = xTaskCreateStaticPinnedToCore(
+        scheduler_task, "scheduler", SCHED_TASK_STACK_WORDS, NULL,
+        SCHED_TASK_PRIORITY, s_sched_stack, &s_sched_tcb, SCHED_TASK_CORE);
+    if (s_task_handle == NULL) {
+        /* 静态分配后这一路径理论上不可达（栈与 TCB 都在 .bss 中）。
+         * 保留它作为兜底，并把内存实况打出来 —— 若真的触发，说明问题不在堆。 */
+        ESP_LOGE(TAG, "scheduler task create FAILED (static): need %d bytes; "
+                      "free=%u largest=%u min_ever=%u | internal free=%u largest=%u",
+                 SCHED_TASK_STACK,
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         s_prepared = false;
-        s_task_handle = NULL;
         memset(s_channels, 0, sizeof(s_channels));
         return SCHED_ERR_NOT_INIT;
     }
@@ -270,12 +308,15 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
         return SCHED_ERR_INVALID;
     }
     s_running = true;
-    if (xTaskCreatePinnedToCore(scheduler_task, "scheduler",
-                                SCHED_TASK_STACK, NULL,
-                                SCHED_TASK_PRIORITY, &s_task_handle,
-                                SCHED_TASK_CORE) != pdPASS) {
+    /* 同样用静态分配（见文件内 SCHED_TASK_STACK_WORDS 处的说明）。 */
+    s_task_handle = xTaskCreateStaticPinnedToCore(
+        scheduler_task, "scheduler", SCHED_TASK_STACK_WORDS, NULL,
+        SCHED_TASK_PRIORITY, s_sched_stack, &s_sched_tcb, SCHED_TASK_CORE);
+    if (s_task_handle == NULL) {
+        ESP_LOGE(TAG, "scheduler task resume FAILED (static); free=%u largest=%u",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         s_running = false;
-        s_task_handle = NULL;
         return SCHED_ERR_NOT_INIT;
     }
     return SCHED_OK;

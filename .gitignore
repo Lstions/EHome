@@ -11,6 +11,7 @@ backend/vendor/
 # ESP-IDF
 esp32-collector/build/
 esp32-collector/build-*
+esp32-collector/build[0-9]*
 esp32-collector/sdkconfig
 esp32-collector/sdkconfig.old
 # Per-deployment MQTT broker. A real address must never be committed: on

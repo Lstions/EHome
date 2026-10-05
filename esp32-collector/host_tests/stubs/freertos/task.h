@@ -58,6 +58,21 @@ static inline TaskHandle_t xTaskCreateStatic(void (*task_fn)(void *), const char
     return (TaskHandle_t)1;
 }
 
+/* xTaskCreateStaticPinnedToCore: scheduler.c 自 2026-10-05 起改用静态分配
+ * （堆碎片会让 xTaskCreatePinnedToCore 失败，进而让整个配置事务回滚）。
+ * 语义与上面的 xTaskCreateStatic 一致：NULL 栈或 NULL TCB 表示失败，
+ * 否则返回句柄。保留 NULL 检查，宿主机才测得出失败分支。 */
+static inline TaskHandle_t xTaskCreateStaticPinnedToCore(
+        void (*task_fn)(void *), const char *name, uint32_t stack_depth,
+        void *param, UBaseType_t prio, StackType_t *stack,
+        StaticTask_t *tcb, BaseType_t core_id)
+{
+    (void)task_fn; (void)name; (void)stack_depth; (void)param; (void)prio;
+    (void)core_id;
+    if (stack == NULL || tcb == NULL) return NULL;
+    return (TaskHandle_t)1;
+}
+
 /* Task notification stubs */
 static inline uint32_t ulTaskNotifyTake(int clear, TickType_t ticks)
 {

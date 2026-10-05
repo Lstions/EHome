@@ -91,6 +91,15 @@ const config_template_t *config_mgr_get_template(uint32_t id) {
 /* Now include scheduler.c to access static functions */
 #include "../components/scheduler/scheduler.c"
 
+/* scheduler.c（2026-10-05 起）在任务创建失败时会打印内存实况，用
+ * free / largest-block / min-ever 区分"总量不够"与"碎片导致无连续块"。
+ * 宿主机测试给出同名实现（与 esp_get_free_heap_size 的既有做法一致）：
+ * 报恒定大值，使该诊断分支在测试中不因"内存不足"误触发。 */
+size_t heap_caps_get_free_size(unsigned caps) { (void)caps; return 65536; }
+size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return 32768; }
+size_t esp_get_free_heap_size(void) { return 65536; }
+size_t esp_get_minimum_free_heap_size(void) { return 32768; }
+
 /* ── Test helpers ────────────────────────────────────────────────── */
 
 static int failures = 0;
