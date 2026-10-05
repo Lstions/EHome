@@ -34,6 +34,7 @@
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
 #include "data_report_codec.h"
+#include "data_batch_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
@@ -520,6 +521,87 @@ static void test_status_report_sync_id(void) {
 }
 
 /* =====================================================================
+ * V3-2a: msg_handler_send_data_batch() —— **生产代码路径**的端到端锚点。
+ *
+ * 为什么这条必须有：bus_worker_data_batch_tests 用测试自带的编码回调，
+ * data_batch_codec_tests 直接调编码器。只有这条用例走的是固件真正运行的
+ * 那个函数（msg_handler_send_data_batch，main.c 注入给 bus_worker 的回调），
+ * 因此它同时验证了"1400B 预算够用""签名与回调契约一致""发布的是 0x20"。
+ * ===================================================================== */
+static void test_send_data_batch_production_path(void)
+{
+    static const uint8_t raw0[] = { 0x01, 0x03, 0x02, 0x00, 0x00, 0xb8, 0x44 };
+    static const uint8_t raw1[] = { 0x02, 0x04, 0xaa, 0xbb, 0xcc, 0xdd };
+    /* delta = 10,000 us —— 与 v3-backend 的锚点向量 A 完全一致
+     * （100 Hz 采样间隔的 10 倍，便于肉眼区分 delta 字段）。 */
+    const uint64_t ts[2] = { 1700000000000ULL, 1700000010000ULL };
+    const uint8_t *raw[2] = { raw0, raw1 };
+    const size_t lens[2] = { sizeof(raw0), sizeof(raw1) };
+
+    g_published_len = 0;
+    g_publish_count = 0;
+    CHECK(msg_handler_send_data_batch(3, 4096, ts, raw, lens, 2, 42, 7, 1) == true,
+          "send_data_batch must report success");
+    CHECK(g_publish_count == 1, "send_data_batch must publish exactly once");
+    CHECK(g_published_len == 47, "published frame must be 47 bytes");
+    CHECK(g_published[0] == MSG_DATA_BATCH, "published frame must be 0x20");
+
+    /* 与 v3-backend 共享的锚点字节，逐字节比对。 */
+    static const uint8_t expect[47] = {
+        0x20, 0x08, 0x02, 0x10, 0x80, 0xd0, 0x95, 0xff, 0xbc, 0x31,
+        0x18, 0x80, 0x20, 0x20, 0x03, 0x2a, 0x0b, 0x08, 0x00, 0x12,
+        0x07, 0x01, 0x03, 0x02, 0x00, 0x00, 0xb8, 0x44, 0x2a, 0x0b,
+        0x08, 0x90, 0x4e, 0x12, 0x06, 0x02, 0x04, 0xaa, 0xbb, 0xcc,
+        0xdd, 0x30, 0x2a, 0x38, 0x07, 0x40, 0x01,
+    };
+    CHECK(g_published_len == sizeof(expect), "anchor length must match");
+    if (g_published_len == sizeof(expect)) {
+        CHECK(memcmp(g_published, expect, sizeof(expect)) == 0,
+              "production frame must match the backend-shared anchor byte-for-byte");
+    }
+
+    data_batch_decoded_t dec;
+    CHECK(data_batch_decode(g_published, g_published_len, &dec) == FRAME_OK,
+          "production frame must decode");
+    CHECK(dec.count == 2 && dec.samples[1].delta_us == 10000,
+          "production frame sample semantics");
+
+    /* 契约 §2.2：4 x 300B 必须仍能放进 1400B 的生产缓冲。
+     * deltas = 0/10,000/20,000/30,000 us，正好是 100 Hz 通道 4 个样本的形态。 */
+    static uint8_t mid[300];
+    memset(mid, 0x33, sizeof(mid));
+    const uint64_t ts4[4] = { 1000, 11000, 21000, 31000 };
+    const uint8_t *raw4[4] = { mid, mid, mid, mid };
+    const size_t len4[4] = { sizeof(mid), sizeof(mid), sizeof(mid), sizeof(mid) };
+    g_published_len = 0; g_publish_count = 0;
+    CHECK(msg_handler_send_data_batch(1, 1, ts4, raw4, len4, 4, 0, 0, 0) == true,
+          "4 x 300B must fit the production 1400B buffer");
+    CHECK(g_published_len == 1247,
+          "4 x 300B production frame must be 1247 bytes");
+    CHECK(data_batch_decode(g_published, g_published_len, &dec) == FRAME_OK &&
+              dec.count == 4,
+          "4 x 300B production frame must decode with count=4");
+
+    /* 非法输入必须被拒绝且**不发布**（fail-closed）。 */
+    g_publish_count = 0;
+    const uint64_t bad_ts[2] = { 2000, 1000 };  /* 时间戳倒退 */
+    CHECK(msg_handler_send_data_batch(3, 1, bad_ts, raw, lens, 2, 0, 0, 0) == false,
+          "backwards timestamps must be rejected");
+    CHECK(g_publish_count == 0, "a rejected batch must not publish anything");
+
+    const size_t zero_len[2] = { 0, sizeof(raw1) };
+    CHECK(msg_handler_send_data_batch(3, 1, ts, raw, zero_len, 2, 0, 0, 0) == false,
+          "empty raw_data must be rejected");
+    CHECK(g_publish_count == 0, "a rejected batch must not publish anything");
+
+    /* count 越界（1 / 5）不得通过。 */
+    CHECK(msg_handler_send_data_batch(3, 1, ts, raw, lens, 1, 0, 0, 0) == false,
+          "count=1 must not go through the batch path");
+    CHECK(msg_handler_send_data_batch(3, 1, ts, raw, lens, 5, 0, 0, 0) == false,
+          "count=5 must be rejected");
+}
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void)
@@ -536,6 +618,7 @@ int main(void)
     test_ota_cmd_replay();
     test_ota_cmd_malformed();
     test_status_report_sync_id();
+    test_send_data_batch_production_path();
 
     if (g_failures > 0) {
         fprintf(stderr, "\nhandler_data_tests: %d FAILURES\n", g_failures);

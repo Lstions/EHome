@@ -8,6 +8,7 @@
 
 #include "msg_handler.h"
 #include "msg_handler_internal.h"
+#include "handler_hello.h"
 #include "frame_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
@@ -24,6 +25,19 @@ extern bool hello_handshake_notify_ack(uint32_t nonce);
 static volatile bool s_hello_ack_received = false;
 static volatile uint64_t s_server_time_ms = 0;
 static volatile int64_t s_server_time_received_us = 0;
+
+/* V3-2a: HelloAck features(field 2) 服务端能力位图（契约 §1）。
+ *
+ * 语义：**能力位协商，而非版本号协商**。固件继续上报 proto_ver="2.6"，
+ * 旧后端严格相等检查因此不受影响；DataBatch 是否启用完全由这里决定。
+ * 未收到 HelloAck 时为 0 —— 此时 report_tx 走与 V3-2a 之前逐字节一致的
+ * 0x03 路径（这是兼容性红线）。 */
+static volatile uint64_t s_server_caps = 0;
+
+uint64_t hello_get_server_caps(void)
+{
+    return s_server_caps;
+}
 
 /* === HelloAck state accessors === */
 
@@ -52,6 +66,9 @@ void msg_handler_reset_hello_ack(void)
     s_hello_ack_received = false;
     s_server_time_ms = 0;
     s_server_time_received_us = 0;
+    /* 能力位与 ACK 状态同生命周期：旧连接的能力位泄漏到新连接会让固件
+     * 对着不认识 0x20 的后端发 DataBatch。 */
+    s_server_caps = 0;
 }
 
 /* === Receive: HelloAck (0x12) === */
@@ -117,7 +134,9 @@ void handler_hello_process_ack(frame_decoder_t *dec)
     s_server_time_ms = server_time;
     s_server_time_received_us = esp_timer_get_time();
     s_hello_ack_received = accepted;
-    (void)features;
+    /* 只在 ACK 被接受（nonce 未过期）后写入能力位：一个陈旧的 ACK 不得
+     * 改变当前连接的能力协商结果。 */
+    s_server_caps = features;
     ESP_LOGI(TAG, "HelloAck: server_time=%llu features=%u nonce=%u accepted=%d",
              (unsigned long long)server_time, (unsigned)features,
              (unsigned)handshake_nonce, accepted);

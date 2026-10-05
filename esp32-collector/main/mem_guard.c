@@ -19,6 +19,25 @@
 
 #include <string.h>
 
+/* 门禁口径：只认**内部 RAM**。
+ *
+ * 为什么必须显式并上 MALLOC_CAP_INTERNAL（2026-10-05 实机缺陷）：
+ *   开了 CONFIG_SPIRAM_USE_MALLOC 的 s3p 上，MALLOC_CAP_8BIT 是"内部 RAM +
+ *   PSRAM"的合计，heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) 跨两个堆
+ *   取最大值，于是 largest 恒等于 PSRAM 的 8 MB 连续块。实测 s3p-n16 的
+ *   MemReport 为 free=8333027 largest=8257536 —— 内部 RAM 水位完全没有反映在
+ *   里面，can_start() 恒 true、低水位回调永不触发。门禁在最需要它的型号上
+ *   完全失效（PSRAM 型号恰恰是最会耗尽内部 RAM 的一类）。
+ *
+ * 为什么是内部 RAM 而不是合计：本模块所有消费点（配置事务各步、UART 驱动
+ *   install、OTA、log_stream、任务栈）要的都是**内部 RAM 的连续块**——任务栈与
+ *   DMA/ISR 缓冲必须内部，且 flash 写（OTA/NVS）期间 cache 关闭、访问 PSRAM 会崩。
+ *   floor 的语义本来就是"内部 RAM 水位"。
+ *
+ * 无 PSRAM 的 s3/c6 只有内部堆，加上 INTERNAL 后取值与改动前逐字节一致，
+ *   因此这是纯修复、不改这两个型号的行为。 */
+#define MEM_GUARD_CAPS  (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
 /* 硬地板：低于此值绝不启动任何重操作（配置事务/OTA/log_stream/大块分配）。
  * 判决依据是 largest（连续块），不是 free —— 见调试方法论 §4.1。 */
 #if defined(CONFIG_COLLECTOR_PSRAM) && CONFIG_COLLECTOR_PSRAM
@@ -43,17 +62,17 @@ static size_t            s_min_stack_high_water_bytes;
 
 size_t mem_guard_free(void)
 {
-    return heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    return heap_caps_get_free_size(MEM_GUARD_CAPS);
 }
 
 size_t mem_guard_largest(void)
 {
-    return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    return heap_caps_get_largest_free_block(MEM_GUARD_CAPS);
 }
 
 size_t mem_guard_min_ever(void)
 {
-    return heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    return heap_caps_get_minimum_free_size(MEM_GUARD_CAPS);
 }
 
 size_t mem_guard_floor_bytes(void)

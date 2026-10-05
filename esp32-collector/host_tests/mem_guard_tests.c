@@ -8,10 +8,12 @@
  *   两者都很难从串口日志反推。这里用可控堆值把每条边界钉死。
  *
  * 覆盖：
- *   1. MSG_MEM_RPT(0x20) 类型号与冲突检查
+ *   1. MSG_MEM_RPT(0x21) 类型号与冲突检查
  *   2. can_start = largest >= max(need, floor)，且只看 largest，不看 free
- *   3. 低水位回调只触发一次 + 迟滞回弹后才能再触发
- *   4. MemReport 0x20 字段 1..5 编码/解码 roundtrip，单位字节
+ *   3. **口径**：门禁只认内部 RAM —— PSRAM 很大而内部 RAM 低于 floor 时必须拒绝，
+ *      且传给 heap_caps_* 的 caps 必须带 MALLOC_CAP_INTERNAL（2026-10-05 实机缺陷回归）
+ *   4. 低水位回调只触发一次 + 迟滞回弹后才能再触发
+ *   5. MemReport 0x21 字段 1..5 编码/解码 roundtrip，单位字节
  */
 
 #include <stdio.h>
@@ -20,15 +22,65 @@
 #include <stdbool.h>
 
 #include "frame_codec.h"
+/* 桩头文件：给出 MALLOC_CAP_* 与 heap_caps_* 声明（-I stubs）。 */
+#include "esp_heap_caps.h"
 
-/* 可控堆值：覆盖 stubs/heap_stub_impl.c 的弱定义 */
+/* 可控堆值：覆盖 stubs/heap_stub_impl.c 的弱定义。
+ *
+ * ⚠ 这里**必须区分 caps**（2026-10-05 缺陷的逃逸原因）。
+ *
+ * 2026-10-05 的实机缺陷是"caps 选错"：mem_guard 用 MALLOC_CAP_8BIT 在开了
+ * CONFIG_SPIRAM_USE_MALLOC 的 s3p 上跨"内部 RAM + PSRAM"取最大值，于是
+ * largest 恒等于 PSRAM 的 8 MB 连续块、门禁恒放行。旧桩把 caps 参数
+ * `(void)` 掉、内部与 PSRAM 返回同一个值，因此"caps 选错"在宿主测试里
+ * **完全不可见** —— 测试只证明了谓词逻辑对，没证明口径对。
+ *
+ * 桩的行为（关键）：**默认口径（不含 MALLOC_CAP_INTERNAL，即 s3p 上"内部 +
+ * PSRAM 合计"）可以很大，而 INTERNAL 口径可以很小**。既有用例继续用
+ * `s_largest/s_free/s_min_ever` 驱动"总量口径"，而 mem_guard 实际读的是
+ * INTERNAL 口径 `s_internal_*`；两者默认同步，因此既有语义不变。
+ * 一旦 mem_guard 回退到裸 MALLOC_CAP_8BIT，它会读到被刻意放大的总量值，
+ * test_gate_uses_internal_caps_when_psram_is_large() 立即变红。 */
 static size_t s_free = 200000;
 static size_t s_largest = 65536;
 static size_t s_min_ever = 100000;
 
-size_t heap_caps_get_free_size(unsigned caps) { (void)caps; return s_free; }
-size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return s_largest; }
-size_t heap_caps_get_minimum_free_size(unsigned caps) { (void)caps; return s_min_ever; }
+/* 非 INTERNAL（"合计"）口径，只在需要制造"PSRAM 大 / 内部小"对照时使用；
+ * 默认与内部口径相同，因此既有用例无需关心它。 */
+static size_t s_total_free = 200000;
+static size_t s_total_largest = 65536;
+static size_t s_total_min_ever = 100000;
+
+/* 记录最近一次调用收到的 caps，供"口径正确性"断言直接检查 —— 只测返回值
+ * 的话，桩只要碰巧返回同一个数就仍可能漏掉 caps 错误。 */
+static unsigned s_last_free_caps = 0;
+static unsigned s_last_largest_caps = 0;
+static unsigned s_last_min_ever_caps = 0;
+
+#define CAPS_IS_INTERNAL(c)  (((c) & MALLOC_CAP_INTERNAL) != 0u)
+
+size_t heap_caps_get_free_size(unsigned caps)
+{
+    s_last_free_caps = caps;
+    return CAPS_IS_INTERNAL(caps) ? s_free : s_total_free;
+}
+size_t heap_caps_get_largest_free_block(unsigned caps)
+{
+    s_last_largest_caps = caps;
+    return CAPS_IS_INTERNAL(caps) ? s_largest : s_total_largest;
+}
+size_t heap_caps_get_minimum_free_size(unsigned caps)
+{
+    s_last_min_ever_caps = caps;
+    return CAPS_IS_INTERNAL(caps) ? s_min_ever : s_total_min_ever;
+}
+
+/* 把 INTERNAL 口径与"合计"口径设成同一个值 —— 既有用例的默认前提。 */
+static void set_all_caps(size_t value)
+{
+    s_free = s_largest = s_min_ever = value;
+    s_total_free = s_total_largest = s_total_min_ever = value;
+}
 
 /* 直接编入被测实现，便于驱动计数器/检查私有状态语义 */
 #include "../main/mem_guard.c"
@@ -52,28 +104,30 @@ static int g_pass = 0;
 
 static void test_type_and_collisions(void)
 {
-    CHECK(MSG_MEM_RPT == 0x20, "MSG_MEM_RPT should be 0x20, got 0x%02X", MSG_MEM_RPT);
+    /* V3-2a 裁决：0x20 让给 DataBatch，MSG_MEM_RPT 顺延到 0x21。 */
+    CHECK(MSG_MEM_RPT == 0x21, "MSG_MEM_RPT should be 0x21, got 0x%02X", MSG_MEM_RPT);
     CHECK(MSG_MEM_RPT != MSG_STATUS_RPT, "mem report collides with status report");
     CHECK(MSG_MEM_RPT != MSG_DIAG_REPORT, "mem report collides with diag report");
     CHECK(MSG_MEM_RPT != MSG_DIAG_ACK, "mem report collides with diag ack");
-    /* 后端已知类型中最大的旧值是 0x1F；0x20 必须是第一个空闲号。 */
-    CHECK(MSG_MEM_RPT == MSG_DIAG_ACK + 1, "0x20 must be the first free type after 0x1F");
+    CHECK(MSG_MEM_RPT != MSG_DATA_BATCH, "mem report collides with data batch");
+    CHECK(MSG_DATA_BATCH == 0x20, "MSG_DATA_BATCH should be 0x20, got 0x%02X", MSG_DATA_BATCH);
+    CHECK(MSG_MEM_RPT == MSG_DATA_BATCH + 1, "MSG_MEM_RPT must follow MSG_DATA_BATCH (0x21)");
 }
 
 static void test_can_start_uses_largest_not_free(void)
 {
-    s_largest = 4096;
+    set_all_caps(4096);
     s_free = 200000;                    /* free 很大但 largest 小 = 碎片 */
     CHECK(!mem_guard_can_start(4096), "largest=4096 < floor must refuse even with huge free");
     CHECK(!mem_guard_can_start(1024), "largest=4096 < floor must refuse a small need");
 
-    s_largest = FLOOR;                  /* 恰好等于 floor */
+    set_all_caps(FLOOR);                /* 恰好等于 floor */
     CHECK(mem_guard_can_start(1024), "largest==floor should allow need<=floor");
 
-    s_largest = FLOOR - 1;
+    set_all_caps(FLOOR - 1);
     CHECK(!mem_guard_can_start(1024), "largest just below floor must refuse (hard floor)");
 
-    s_largest = 32768;
+    set_all_caps(32768);
     CHECK(mem_guard_can_start(32768), "need == largest should pass");
     CHECK(!mem_guard_can_start(32769), "need > largest must fail even if above floor");
     CHECK(mem_guard_can_start(0), "zero need only requires floor, not free");
@@ -87,6 +141,74 @@ static void low_cb(size_t free_bytes, size_t largest_bytes)
     s_low_calls++;
     s_last_free = free_bytes;
     s_last_largest = largest_bytes;
+}
+
+/* 本任务的核心回归用例：**PSRAM 很大、内部 RAM 很小** 时必须拒绝。
+ *
+ * 这是 2026-10-05 实机缺陷的直接复现：s3p-n16 上
+ *   MALLOC_CAP_8BIT          -> free=8333027 largest=8257536（PSRAM 污染）
+ *   MALLOC_CAP_INTERNAL|8BIT -> 内部 RAM 真值（几十 KiB 量级）
+ * 旧代码读前者，can_start() 恒 true。这里把"总量口径"设成远大于 floor、
+ * "内部口径"设成小于 floor，断言门禁必须拒绝 —— 同时直接检查 mem_guard
+ * 传给 heap_caps_* 的 caps 确实带 MALLOC_CAP_INTERNAL（否则桩返回的仍是
+ * 那个巨大的总量值，说明口径没改对）。 */
+static void test_gate_uses_internal_caps_when_psram_is_large(void)
+{
+    /* s3p 实机观测值的量级：合计口径 ~8.25 MB（PSRAM 污染值），
+     * 内部口径取 floor 以下（s3p floor=16 KiB，本用例按目标宏自适应）。 */
+    s_total_free = 8333027;
+    s_total_largest = 8257536;
+    s_total_min_ever = 8301920;
+    s_free = FLOOR - 4096;
+    s_largest = FLOOR - 4096;
+    s_min_ever = FLOOR - 8192;
+
+    /* 缺陷复现：合计口径（PSRAM）远大于 floor，若门禁读错口径就会放行。 */
+    CHECK(!mem_guard_can_start(0),
+          "PSRAM huge + internal largest=%u(<floor %u) must refuse: got largest=%u",
+          (unsigned)s_largest, (unsigned)FLOOR, (unsigned)mem_guard_largest());
+    CHECK(!mem_guard_can_start(FLOOR),
+          "PSRAM huge + internal below floor must refuse a floor-sized need");
+    CHECK(!mem_guard_can_start(2048),
+          "internal below floor must refuse even a 2KiB need (floor is the hard line)");
+
+    /* 口径断言：mem_guard 必须把 MALLOC_CAP_INTERNAL 传给 heap_caps_*。
+     * 只断言返回值不够 —— 桩只要碰巧返回同一个数就仍会漏掉 caps 错误。
+     * 这里显式调用三个读取器，保证每个 caps 记录都被刷新。 */
+    (void)mem_guard_largest();
+    (void)mem_guard_free();
+    (void)mem_guard_min_ever();
+    CHECK((s_last_largest_caps & MALLOC_CAP_INTERNAL) != 0u,
+          "mem_guard_largest must query MALLOC_CAP_INTERNAL (got caps=0x%X)",
+          s_last_largest_caps);
+    CHECK((s_last_free_caps & MALLOC_CAP_INTERNAL) != 0u,
+          "mem_guard_free must query MALLOC_CAP_INTERNAL (got caps=0x%X)",
+          s_last_free_caps);
+    CHECK((s_last_min_ever_caps & MALLOC_CAP_INTERNAL) != 0u,
+          "mem_guard_min_ever must query MALLOC_CAP_INTERNAL (got caps=0x%X)",
+          s_last_min_ever_caps);
+
+    /* 内部 RAM 回到 floor 之上后必须放行：修复不能把门禁变成"恒拒绝"。
+     * （任务卡风险点：改口径后若内部 largest 长期 < floor，现场配置下不去。） */
+    s_largest = FLOOR + 4096;
+    s_free = FLOOR + 8192;
+    CHECK(mem_guard_can_start(0), "internal largest above floor must allow");
+    CHECK(mem_guard_can_start(4096), "internal largest above floor must allow a 4KiB need");
+
+    /* 低水位回调必须真的会被触发（旧代码在 s3p 上永不触发）。 */
+    mem_guard_register_low_cb(low_cb);
+    mem_guard_reset_latch();
+    s_low_calls = 0;
+    s_largest = FLOOR - 1;
+    mem_guard_poll();
+    CHECK(s_low_calls == 1, "low callback must fire on internal low water (fired %d)", s_low_calls);
+    CHECK(s_last_largest == FLOOR - 1,
+          "callback must carry the INTERNAL largest=%u, got %u",
+          (unsigned)(FLOOR - 1), (unsigned)s_last_largest);
+    mem_guard_register_low_cb(NULL);
+    mem_guard_reset_latch();
+
+    set_all_caps(200000);               /* 恢复默认，避免污染后续用例 */
 }
 
 static void test_low_callback_latch_and_hysteresis(void)
@@ -192,6 +314,7 @@ int main(void)
 {
     test_type_and_collisions();
     test_can_start_uses_largest_not_free();
+    test_gate_uses_internal_caps_when_psram_is_large();
     test_low_callback_latch_and_hysteresis();
     test_min_stack_watermark_roundtrip();
     test_report_roundtrip();

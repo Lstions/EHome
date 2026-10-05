@@ -1,7 +1,11 @@
 idf_component_register(
     SRCS "bus_worker.c"
     INCLUDE_DIRS "include"
-    REQUIRES bus_dma scheduler esp_timer esp_hw_support
+    # msg_handler: V3-2a 需要 hello_get_server_caps()（handler_hello.h，轻量）
+    # 与 data_batch_encode()（data_batch_codec.h）。msg_handler 反向 REQUIRES
+    # bus_worker（handler_data.c 读上报计数器），ESP-IDF 的 component manager
+    # 会记录依赖环并按字典序选择静态库重复解析顺序（build.cmake:399 明确处理）。
+    REQUIRES bus_dma scheduler esp_timer esp_hw_support msg_handler
 )
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。

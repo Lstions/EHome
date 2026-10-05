@@ -273,6 +273,8 @@ add_test(NAME scheduler_route_tests COMMAND scheduler_route_tests)
 
 add_executable(bus_worker_report_tests bus_worker_report_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_report_tests PRIVATE
     stubs
@@ -285,6 +287,7 @@ target_include_directories(bus_worker_report_tests PRIVATE
     ../components/dma_pool/include
     ../components/hw_profile/include
     ../components/frame
+    ../components/msg_handler
 )
 target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -292,6 +295,8 @@ add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
 
 add_executable(bus_worker_rx_tests bus_worker_rx_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_rx_tests PRIVATE
     stubs
@@ -304,6 +309,7 @@ target_include_directories(bus_worker_rx_tests PRIVATE
     ../components/dma_pool/include
     ../components/hw_profile/include
     ../components/frame
+    ../components/msg_handler
 )
 target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
 target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
@@ -311,6 +317,8 @@ add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
 
 add_executable(bus_worker_batch_tests bus_worker_batch_tests.c
     ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(bus_worker_batch_tests PRIVATE
     stubs
@@ -342,6 +350,7 @@ add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
 add_executable(handler_data_tests handler_data_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
+    ../components/msg_handler/data_batch_codec.c
 )
 target_include_directories(handler_data_tests PRIVATE
     stubs
@@ -371,7 +380,9 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
+    ../components/msg_handler/data_batch_codec.c
     stubs/heap_stub_impl.c
+    stubs/hello_caps_stub.c
 )
 target_include_directories(rx_health_e2e_tests PRIVATE
     stubs
@@ -388,7 +399,11 @@ target_include_directories(rx_health_e2e_tests PRIVATE
     ../components/ota
     ../components/wifi_mgr
 )
-target_compile_definitions(rx_health_e2e_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_definitions(rx_health_e2e_tests PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+    # 本 target 同时编入 bus_worker.c 与真正的 handler_data.c，因此必须关掉
+    # bus_worker.c 里的弱默认编码器定义，否则重定义。
+    EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER=1)
 target_compile_options(rx_health_e2e_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME rx_health_e2e_tests COMMAND rx_health_e2e_tests)
 
@@ -653,3 +668,47 @@ target_include_directories(collector_mem_tests PRIVATE
 )
 target_compile_options(collector_mem_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME collector_mem_tests COMMAND collector_mem_tests)
+
+# V3-2a DataBatch(0x20)：契约 §2 的 7 条不变量 + 逐字节锚点。
+#
+# 为什么单列一个 target 而不是塞进现有用例：这个文件同时是**后端对锚的
+# 参照实现**（v3-backend 的 handler_data_batch.go 用同一组 hex 常量），
+# 它必须能独立编译、独立运行、独立失败，才能被两边共同引用。
+add_executable(data_batch_codec_tests
+    data_batch_codec_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+)
+target_include_directories(data_batch_codec_tests PRIVATE
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_options(data_batch_codec_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME data_batch_codec_tests COMMAND data_batch_codec_tests)
+
+# V3-2a 聚合路径（契约 §3）：直接编入 bus_worker.c 驱动 report_try_data_batch()。
+#
+# 与 bus_worker_report_tests 分开的理由：那份用例覆盖 0x03 路径的池/队列
+# 语义，本份只覆盖"能力位门控 + 聚合决策"。两者共享 #include bus_worker.c
+# 的模式，但断言集互不重叠，分开后失败定位更快。
+add_executable(bus_worker_data_batch_tests bus_worker_data_batch_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msg_handler/data_batch_codec.c
+)
+target_include_directories(bus_worker_data_batch_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/scheduler
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/hw_profile/include
+    ../components/frame
+    ../components/msg_handler
+)
+target_compile_definitions(bus_worker_data_batch_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6=1)
+target_compile_options(bus_worker_data_batch_tests PRIVATE
+    -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME bus_worker_data_batch_tests COMMAND bus_worker_data_batch_tests)

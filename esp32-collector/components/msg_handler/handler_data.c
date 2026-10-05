@@ -10,6 +10,7 @@
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
 #include "data_report_codec.h"
+#include "data_batch_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
@@ -18,6 +19,7 @@
 #include "wifi_mgr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -237,8 +239,28 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
     uint8_t perf_buf[192];
     frame_encoder_t perf_enc;
     frame_encoder_init_sub(&perf_enc, perf_buf, sizeof(perf_buf));
-    bool perf_ok = frame_encode_varint(&perf_enc, 1, esp_get_free_heap_size()) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 2, esp_get_minimum_free_heap_size()) == FRAME_OK &&
+
+    /* 字段 1/2 是"空闲堆 / 历史最小空闲堆"。**必须取内部 RAM 口径**：
+     * esp_get_free_heap_size() 是 heap_caps_get_free_size(MALLOC_CAP_DEFAULT) 的封装
+     * （esp_system_chip.c:65），开了 CONFIG_SPIRAM_USE_MALLOC 后把 PSRAM 也算进去。
+     * 实测 s3p-n16 上它上报 8.3 MB —— 服务端与告警看到的 s3p 节点"永远充裕"，
+     * 而真正会耗尽的是内部 RAM（任务栈/DMA/OTA 缓冲必须内部）。这与
+     * main/mem_guard.c 2026-10-05 修的是同一个口径缺陷（缺陷报告 §7）。
+     *
+     * 宿主测试仍走 esp_get_* 桩：那两份测试文件对 esp_get_* 的返回类型不统一
+     * （既有 uint32_t 也有 size_t，见 host_tests/stubs/esp_heap_caps.h 的说明），
+     * 而 heap_caps_* 在宿主侧没有为这两个 target 提供实现。caps 正确性由
+     * host_tests/mem_guard_tests.c 的口径断言覆盖。 */
+#ifdef ESP_PLATFORM
+    const uint32_t perf_heap_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const uint32_t perf_heap_min  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+    const uint32_t perf_heap_free = (uint32_t)esp_get_free_heap_size();
+    const uint32_t perf_heap_min  = (uint32_t)esp_get_minimum_free_heap_size();
+#endif
+
+    bool perf_ok = frame_encode_varint(&perf_enc, 1, perf_heap_free) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 2, perf_heap_min) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 3, perf.stack_high_water_words) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 4, bus_worker_get_min_stack_watermark()) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 5, perf.min_queue_spaces) == FRAME_OK &&
@@ -317,6 +339,52 @@ void msg_handler_send_data_report(uint32_t channel_id, uint64_t timestamp_us,
              (unsigned long)channel_id, (unsigned long)sequence, raw_len,
              (unsigned long)edge_device_id, command_index);
     msg_handler_publish(buf, len);
+}
+
+/* === Send: DataBatch (0x20) — V3-2a（契约 §2/§3） === */
+
+bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
+                                 const uint64_t *timestamps_us,
+                                 const uint8_t *const *raw_data,
+                                 const size_t *raw_lens,
+                                 size_t count,
+                                 uint32_t edge_device_id,
+                                 uint32_t command_template_id,
+                                 uint8_t command_index)
+{
+    if (timestamps_us == NULL || raw_data == NULL || raw_lens == NULL) return false;
+    if (count < 2 || count > DATA_BATCH_MAX_SAMPLES) return false;
+
+    /* 契约 §2.2 的 1,400 B 编码缓冲。放在**本函数**而不是 bus_worker：
+     * bus_worker 的组件门禁是 -Wframe-larger-than=1024，而 report_tx 的
+     * 4096 B 栈还要同时容纳 send_data_report 的 2416 B 帧；把 1400 B 再叠
+     * 进去会顶穿。这里的栈深度与 send_data_report 同量级（批路径与单样本
+     * 路径互斥，不会叠加），并且复用 0x03 路径已经验证过的 1400 B 预算。 */
+    uint8_t buf[1400];
+    data_batch_sample_t samples[DATA_BATCH_MAX_SAMPLES];
+    for (size_t i = 0; i < count; i++) {
+        if (timestamps_us[i] < timestamps_us[0]) return false;
+        samples[i].delta_us = timestamps_us[i] - timestamps_us[0];
+        samples[i].raw_data = raw_data[i];
+        samples[i].raw_len = raw_lens[i];
+    }
+
+    size_t len = 0;
+    frame_err_t err = data_batch_encode(buf, sizeof(buf), &len,
+                                        channel_id, timestamps_us[0], first_sequence,
+                                        samples, count,
+                                        edge_device_id, command_template_id,
+                                        command_index);
+    if (err != FRAME_OK) {
+        /* 契约 §2.2：不得截断。调用方（bus_worker）据此退回逐样本 0x03。 */
+        ESP_LOGW(TAG, "DataBatch encode failed: %d (n=%u)", (int)err, (unsigned)count);
+        return false;
+    }
+    ESP_LOGD(TAG, "Sending DataBatch: ch=%lu, first_seq=%lu, n=%u, bytes=%zu",
+             (unsigned long)channel_id, (unsigned long)first_sequence,
+             (unsigned)count, len);
+    msg_handler_publish(buf, len);
+    return true;
 }
 
 /* === Send: OtaProg (0x0D) === */

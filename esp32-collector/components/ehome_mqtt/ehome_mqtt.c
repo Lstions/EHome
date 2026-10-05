@@ -25,6 +25,9 @@ enum {
     MQTT_PUBLISH_QOS_NO_ACK = 0,
     MQTT_PUBLISH_QOS_RELIABLE = 1,
     MQTT_FRAME_TYPE_LOG_STREAM = 0x1D,
+    /* V3-2a DataBatch(0x20)。遥测本就容忍丢帧，且批量化的目的就是减少
+     * PUBACK —— 走 QoS0（契约 §2.3）。 */
+    MQTT_FRAME_TYPE_DATA_BATCH = 0x20,
 };
 
 #ifndef CONFIG_MQTT_RECONNECT_MAX
@@ -41,7 +44,12 @@ enum {
 
 static int mqtt_publish_qos_for_frame(const uint8_t *data, size_t len)
 {
-    return data != NULL && len > 0 && data[0] == MQTT_FRAME_TYPE_LOG_STREAM
+    /* LogStream 与 DataBatch 走 QoS0：两者都是"丢了下一帧还有"的遥测，
+     * 且 DataBatch 的存在意义就是摊薄每样本的 PUBACK 开销。其余（含
+     * DataReport 0x03 的关键样本路径）保持 QoS1 可靠投递。 */
+    return data != NULL && len > 0 &&
+                   (data[0] == MQTT_FRAME_TYPE_LOG_STREAM ||
+                    data[0] == MQTT_FRAME_TYPE_DATA_BATCH)
                ? MQTT_PUBLISH_QOS_NO_ACK
                : MQTT_PUBLISH_QOS_RELIABLE;
 }
