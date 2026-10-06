@@ -123,6 +123,10 @@ func SetupRoutes(r *gin.Engine, db *gorm.DB, wsHub *websocket.Hub, nodeMgr *node
 
 		// v2.2 routes
 		registerNodeRoutes(v1, db, nodeMgr, driverRegistry)
+		// Node-level device operations (reboot / factory reset). Registered
+		// separately from registerNodeRoutes because it is the only node route
+		// that performs a synchronous, acknowledged downlink.
+		registerNodeDeviceOpRoutes(v1, db, nodeMgr)
 		registerEdgeDeviceRoutes(v1, db, nodeMgr, driverRegistry)
 		registerDeviceOperationRoutes(v1, commandService, wsHub)
 		registerDriverCommandRoutes(v1, db, nodeMgr, driverRegistry)

@@ -1,6 +1,7 @@
 package nodemgr
 
 import (
+	"fmt"
 	"time"
 
 	"ehome/backend/internal/events"
@@ -39,6 +40,9 @@ func (m *Manager) SendDeviceOp(nodeID string, op frame.DeviceOp, timeout time.Du
 	if nodeID == "" {
 		return DeviceOpOutcome{}, errEmptyNodeID
 	}
+	if timeout <= 0 {
+		timeout = m.deviceOpTimeoutOrDefault()
+	}
 	p, err := m.deviceOps.Begin(nodeID, op, time.Now(), timeout)
 	if err != nil {
 		// Already in flight: refuse rather than queue. Told apart from a send
@@ -66,9 +70,59 @@ func (m *Manager) SendDeviceOp(nodeID string, op frame.DeviceOp, timeout time.Du
 	}
 	metrics.DeviceOpSentTotal.WithLabelValues(deviceOpLabel(op)).Inc()
 
-	out := <-p.Done()
-	m.reportDeviceOpOutcome(out)
-	return out, nil
+	// Enforce the deadline HERE.
+	//
+	// I originally wrote this as a bare `<-p.Done()` and left expiry to
+	// "a ticker in production" -- but no ticker was ever wired, so a device that
+	// never ACKs (crashed, or a 2.x device that drops 0x22 as an unknown type)
+	// blocked the caller FOREVER. Behind an HTTP handler that is one leaked
+	// goroutine per click, and the operator never learns anything.
+	//
+	// The request path now owns its own deadline. ExpireDeviceOps remains for
+	// housekeeping and for outcomes nobody is waiting on.
+	effective := effectiveDeviceOpTimeout(timeout)
+	timer := time.NewTimer(effective)
+	defer timer.Stop()
+
+	var out DeviceOpOutcome
+	select {
+	case out = <-p.Done():
+		m.reportDeviceOpOutcome(out)
+		return out, nil
+	case <-timer.C:
+		// Fail() resolves the waiter and frees the single-flight slot, so the
+		// operator can retry immediately rather than waiting for housekeeping.
+		m.deviceOps.Fail(nodeID, p.RequestID(), fmt.Errorf(
+			"device did not acknowledge within %s", effective))
+		out = <-p.Done()
+		m.reportDeviceOpOutcome(out)
+		return out, nil
+	}
+}
+
+// effectiveDeviceOpTimeout supplies the default when a caller passes <= 0, so
+// "no timeout" is not expressible and cannot become an unbounded wait.
+func effectiveDeviceOpTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultDeviceOpTimeout
+	}
+	return d
+}
+
+// SetDeviceOpTimeout changes how long a device operation waits for its ACK.
+//
+// Exists so the wait is tunable rather than hard-coded -- the right value
+// depends on the deployment (a slow link wants longer, a UI wants shorter) --
+// and so tests do not have to sit through the 15s default.
+func (m *Manager) SetDeviceOpTimeout(d time.Duration) {
+	m.deviceOpTimeout = d
+}
+
+func (m *Manager) deviceOpTimeoutOrDefault() time.Duration {
+	if m.deviceOpTimeout <= 0 {
+		return DefaultDeviceOpTimeout
+	}
+	return m.deviceOpTimeout
 }
 
 // reportDeviceOpOutcome records and publishes the result.

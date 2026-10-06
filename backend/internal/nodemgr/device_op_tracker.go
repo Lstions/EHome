@@ -1,6 +1,7 @@
 package nodemgr
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -25,6 +26,12 @@ import (
 // Because a node is single-flighted only by convention here, not by
 // construction; the tracker enforces it per node and makes a second concurrent
 // request an explicit refusal rather than a race.
+
+// ErrDeviceOpInFlight means the node already has an operation outstanding.
+//
+// Exported so callers can tell "wait and retry" apart from "we could not even
+// ask", which need different answers and different operator behaviour.
+var ErrDeviceOpInFlight = errors.New("device operation already in flight")
 
 // DefaultDeviceOpTimeout bounds how long the server waits for an ACK.
 //
@@ -81,9 +88,12 @@ func (t *DeviceOpTracker) Begin(nodeID string, op frame.DeviceOp, now time.Time,
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if existing, ok := t.pending[nodeID]; ok {
-		return nil, fmt.Errorf("node %s already has a device op (%d) in flight (request %s, %s left)",
-			nodeID, uint8(existing.op), existing.requestID,
-			existing.deadline.Sub(now).Round(time.Second))
+		// Wrapped in a sentinel so the API layer can answer 409 Conflict
+		// ("one is already in flight, wait") instead of a generic failure. The
+		// operator's next action differs between those two cases.
+		return nil, fmt.Errorf("%w: node %s already has a device op (%d) in flight "+
+			"(request %s, %s left)", ErrDeviceOpInFlight, nodeID, uint8(existing.op),
+			existing.requestID, existing.deadline.Sub(now).Round(time.Second))
 	}
 	t.seq++
 	p := &pendingDeviceOp{

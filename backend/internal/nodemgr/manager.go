@@ -70,6 +70,9 @@ type Manager struct {
 	// or edge-device id, so it does not belong in the edge-device pipeline.
 	deviceOps *DeviceOpTracker
 
+	// deviceOpTimeout is how long a device op waits for its ACK; 0 = default.
+	deviceOpTimeout time.Duration
+
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
 	syncGate *SyncGate

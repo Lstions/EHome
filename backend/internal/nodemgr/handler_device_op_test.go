@@ -310,3 +310,40 @@ func TestFactoryResetUsesItsOwnOp(t *testing.T) {
 			"the device and a reboot would silently do nothing", seen)
 	}
 }
+
+// TestSendDeviceOpHonoursItsOwnTimeout -- THE deadline must be enforced by the
+// request path itself, not by someone else remembering to call Expire.
+//
+// I wrote SendDeviceOp as "out := <-p.Done()" and left ExpireDeviceOps to be
+// called by "a ticker in production" -- but no such ticker was ever wired. A
+// device that never ACKs (crashed, or 0x22 unsupported) therefore blocked the
+// caller FOREVER, and through an HTTP handler that is one leaked goroutine per
+// click. This test is written BEFORE the fix: it must fail (hang) on the old
+// code.
+func TestSendDeviceOpHonoursItsOwnTimeout(t *testing.T) {
+	pub := &fakeOpPublisher{}
+	m := newOpManager(pub)
+
+	start := time.Now()
+	out, err := m.SendDeviceOp("n1", frame.DeviceOpReboot, 100*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("a timeout should be reported through the outcome, not as a local "+
+			"error the caller cannot inspect: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("SendDeviceOp blocked for %s with a 100ms timeout; the deadline "+
+			"must be enforced by the request path", elapsed)
+	}
+	if out.Acked {
+		t.Fatal("a request nobody acknowledged was reported as acknowledged")
+	}
+	if out.Err == nil {
+		t.Fatal("the timeout outcome carried no error")
+	}
+	if m.PendingDeviceOp("n1") {
+		t.Fatal("after a timeout the node's single-flight slot is still held; the " +
+			"operator could never retry the reboot")
+	}
+}
