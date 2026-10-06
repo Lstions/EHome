@@ -98,6 +98,29 @@ def main():
             bad.append("%s = %s，但 IDF 里 %s = 0x%X"
                        % (key, found.group(1), name, val))
 
+    # --- 2b. tls_io.h 镜像的软等待常量（esp_tls_errors.h / mbedtls ssl.h） ---
+    # 这些值判错会让"健康连接"被当成故障重连，或反之（见 §56 / §58）。
+    # dirname(HEADER) 是 components/tls_guard/include ⇒ 要上两级到 components
+    io_h = read(os.path.join(os.path.dirname(HEADER), "..", "..",
+                             "tls_io", "include", "tls_io.h"))
+    ssl_h = read(os.path.join(idf, "components", "mbedtls", "mbedtls",
+                              "include", "mbedtls", "ssl.h"))
+    if io_h is None or ssl_h is None:
+        bad.append("读不到 tls_io.h 或 mbedtls/ssl.h（无法核对软等待常量）")
+    else:
+        for macro, key in (("MBEDTLS_ERR_SSL_WANT_READ", "TLS_IO_WANT_READ"),
+                           ("MBEDTLS_ERR_SSL_WANT_WRITE", "TLS_IO_WANT_WRITE"),
+                           ("MBEDTLS_ERR_SSL_TIMEOUT", "TLS_IO_TIMEOUT"),
+                           ("MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY", "TLS_IO_PEER_CLOSE")):
+            m4 = re.search(r"#define\s+" + macro + r"\s+\(?(-?0x[0-9A-Fa-f]+|-?\d+)", ssl_h)
+            m5 = re.search(r"#define\s+" + key + r"\s+\(?(-?0x[0-9A-Fa-f]+|-?\d+)", io_h)
+            if not m4 or not m5:
+                bad.append("找不到 %s 或 %s" % (macro, key))
+                continue
+            checked += 1
+            if int(m4.group(1), 0) != int(m5.group(1), 0):
+                bad.append("%s = %s，但 IDF 里 %s = %s" % (key, m5.group(1), macro, m4.group(1)))
+
     # --- 3. 时效位掩码必须恰好含 EXPIRED 与 FUTURE ---
     m3 = RE_TIME_REL.search(hdr)
     if not m3:

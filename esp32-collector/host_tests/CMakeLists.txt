@@ -1099,3 +1099,17 @@ add_executable(tls_io_tests
 target_include_directories(tls_io_tests PRIVATE ../components/tls_io/include)
 target_compile_options(tls_io_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME tls_io_tests COMMAND tls_io_tests)
+
+add_executable(tls_link_adapt_tests
+    tls_link_adapt_tests.c
+    ../components/tls_link_adapt/tls_link_adapt.c
+    ../components/tls_io/tls_io.c
+)
+target_include_directories(tls_link_adapt_tests PRIVATE
+    ../components/tls_link_adapt/include
+    ../components/tls_io/include
+    ../components/link_tcp/include
+    ../components/link/include
+)
+target_compile_options(tls_link_adapt_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_link_adapt_tests COMMAND tls_link_adapt_tests)
