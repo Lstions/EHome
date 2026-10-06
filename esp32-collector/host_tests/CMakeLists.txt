@@ -845,6 +845,9 @@ add_test(NAME net_policy_tests COMMAND net_policy_tests)
 
 # D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME host_coverage
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_host_coverage.py --max-uncovered 17)
+
 add_test(NAME no_weak_symbols
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_no_weak_symbols.py)
 
@@ -875,6 +878,40 @@ target_include_directories(transport_broadcast_tests PRIVATE
     hello_stubs
 )
 target_compile_options(transport_broadcast_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(msg_handler_publish_tests
+    msg_handler_publish_tests.c
+    ../components/transport/transport.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(msg_handler_publish_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/msg_handler
+    ../components/frame
+    ../components/ehome_mqtt
+    ../components/config_mgr
+    ../components/dma_pool/include
+    ../components/scheduler
+    ../components/bus_worker/include
+    ../components/bus_dma/include
+    ../components/bus_manager/include
+    ../components/hw_profile/include
+    ../components/sync_manager
+    ../components/ota
+    ../components/wifi_mgr
+    ../components/log_stream
+    ../components/log_stream/include
+    ../components/gpio_ctrl
+    ../components/pwm_ctrl
+    ../components/periph_owner
+    ../components/rgb_led
+    ../components/factory_reset
+    ../components/nvs_helper
+)
+target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_test(NAME msg_handler_publish_tests COMMAND msg_handler_publish_tests)
+
 add_test(NAME transport_broadcast_tests COMMAND transport_broadcast_tests)
 
 add_test(NAME transport_framing_tests COMMAND transport_framing_tests)
