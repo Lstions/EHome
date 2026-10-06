@@ -1,9 +1,9 @@
 /**
  * @file wire.c
- * @brief 帧定界 / 分片重组实现（16 B 定长头，设计 §5.1）
+ * @brief 帧定界实现（12 B 定长头；**无分片、无重组**）
  *
- * 零拷贝：MSG_READY 时 payload_out 指向重组器【内部】缓冲。
- * 惰性压缩：只在 push 开头前移未解析数据 —— 见 reasm_compact 注释。
+ * 零拷贝：MSG_READY 时 payload_out 指向定界器【内部】缓冲。
+ * 惰性压缩：只在 feed 开头前移未消费数据 —— 见 wire_delim_compact 注释。
  */
 #include "wire.h"
 
@@ -11,13 +11,13 @@
 #include <string.h>
 
 static const char *const s_wire_names[] = {
-    [WIRE_OK]              = "OK",
-    [WIRE_ERR_SHORT]       = "ERR_SHORT",
-    [WIRE_ERR_MAGIC]       = "ERR_MAGIC",
-    [WIRE_ERR_VERSION]     = "ERR_VERSION",
-    [WIRE_ERR_RANGE]       = "ERR_RANGE",
-    [WIRE_ERR_STRUCTURE]   = "ERR_STRUCTURE",
-    [WIRE_ERR_BAD_ARG]     = "ERR_BAD_ARG",
+    [WIRE_OK]            = "OK",
+    [WIRE_ERR_SHORT]     = "ERR_SHORT",
+    [WIRE_ERR_MAGIC]     = "ERR_MAGIC",
+    [WIRE_ERR_VERSION]   = "ERR_VERSION",
+    [WIRE_ERR_RANGE]     = "ERR_RANGE",
+    [WIRE_ERR_STRUCTURE] = "ERR_STRUCTURE",
+    [WIRE_ERR_BAD_ARG]   = "ERR_BAD_ARG",
 };
 
 const char *wire_result_name(wire_result_t r)
@@ -26,20 +26,19 @@ const char *wire_result_name(wire_result_t r)
     return s_wire_names[r];
 }
 
-static const char *const s_reasm_names[] = {
-    [REASM_NEED_MORE]           = "NEED_MORE",
-    [REASM_MSG_READY]           = "MSG_READY",
-    [REASM_ERROR_TOO_LARGE]     = "ERROR_TOO_LARGE",
-    [REASM_ERROR_MALFORMED]     = "ERROR_MALFORMED",
-    [REASM_ERROR_OUT_OF_ORDER]  = "ERROR_OUT_OF_ORDER",
-    [REASM_ERROR_CRC]           = "ERROR_CRC",
-    [REASM_ERROR_INTERNAL]      = "ERROR_INTERNAL",
+static const char *const s_delim_names[] = {
+    [WIRE_DELIM_NEED_MORE]      = "NEED_MORE",
+    [WIRE_DELIM_MSG_READY]      = "MSG_READY",
+    [WIRE_DELIM_ERR_TOO_LARGE]  = "ERR_TOO_LARGE",
+    [WIRE_DELIM_ERR_MALFORMED]  = "ERR_MALFORMED",
+    [WIRE_DELIM_ERR_CRC]        = "ERR_CRC",
+    [WIRE_DELIM_ERR_INTERNAL]   = "ERR_INTERNAL",
 };
 
-const char *reasm_result_name(reasm_result_t r)
+const char *wire_delim_result_name(wire_delim_result_t r)
 {
-    if ((int)r < 0 || r > (int)REASM_ERROR_INTERNAL) return "UNKNOWN";
-    return s_reasm_names[r];
+    if ((int)r < 0 || r > (int)WIRE_DELIM_ERR_INTERNAL) return "UNKNOWN";
+    return s_delim_names[r];
 }
 
 /* === 大端读写（本实现定的字节序，见 wire.h 抬头）=== */
@@ -69,21 +68,38 @@ static uint32_t get_u32(const uint8_t *p)
            ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
 }
 
+/* === CRC32C（Castagnoli，反射多项式 0x82F63B78）===
+ *
+ * 逐位实现（无查表）：消息最大 ~16 KB ⇒ 约 13 万次迭代，对校验路径可以接受，
+ * 换来的是"没有一张需要与后端对齐的表"（表的生成多项式写错会静默算错）。
+ *
+ * 标准校验值（由 host 测试断言）：CRC32C("123456789") == 0xE3069283。
+ */
+uint32_t wire_crc32c(const uint8_t *data, size_t n)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) {
+            /* 反射：最低位为 1 时右移并异或多项式 */
+            crc = (crc >> 1) ^ (0x82F63B78u & (uint32_t)(-(int32_t)(crc & 1u)));
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
 wire_result_t wire_encode_header(uint8_t *out, size_t cap, const wire_header_t *h)
 {
     if (out == NULL || h == NULL) return WIRE_ERR_BAD_ARG;
     if (cap < WIRE_HEADER_BYTES) return WIRE_ERR_BAD_ARG;
-    wire_result_t s = wire_check_structure(h);
-    if (s != WIRE_OK) return s;
+    if (h->payload_len > WIRE_PAYLOAD_MAX) return WIRE_ERR_RANGE;
 
     put_u16(out + 0, WIRE_MAGIC);
     out[2] = h->ver;
     out[3] = h->type;
     put_u16(out + 4, h->flags);
     put_u32(out + 6, h->seq);
-    put_u16(out + 10, h->frag_off);
-    put_u16(out + 12, h->frag_len);
-    put_u16(out + 14, h->total_len);
+    put_u16(out + 10, h->payload_len);
     return WIRE_OK;
 }
 
@@ -94,171 +110,119 @@ wire_result_t wire_decode_header(const uint8_t *in, size_t n, wire_header_t *out
     if (get_u16(in + 0) != (uint16_t)WIRE_MAGIC) return WIRE_ERR_MAGIC;
     if (in[2] != (uint8_t)WIRE_VER) return WIRE_ERR_VERSION;
 
-    out->ver       = in[2];
-    out->type      = in[3];
-    out->flags     = get_u16(in + 4);
-    out->seq       = get_u32(in + 6);
-    out->frag_off  = get_u16(in + 10);
-    out->frag_len  = get_u16(in + 12);
-    out->total_len = get_u16(in + 14);
-    return wire_check_structure(out);
-}
-
-wire_result_t wire_check_structure(const wire_header_t *h)
-{
-    if (h == NULL) return WIRE_ERR_BAD_ARG;
-    if (h->frag_len > WIRE_FRAG_LEN_MAX)  return WIRE_ERR_RANGE;
-    if (h->total_len > WIRE_TOTAL_LEN_MAX) return WIRE_ERR_RANGE;
-
-    uint32_t end = (uint32_t)h->frag_off + (uint32_t)h->frag_len;
-    if (end > h->total_len) return WIRE_ERR_STRUCTURE;
-
-    bool more = (h->flags & WIRE_FLAG_MORE) != 0;
-    if (more) {
-        /* 声称还有后续：本片就不能已经到末尾（否则 MORE 自相矛盾） */
-        if (end >= h->total_len) return WIRE_ERR_STRUCTURE;
-    } else {
-        /* 末片：必须恰好到末尾 */
-        if (end != h->total_len) return WIRE_ERR_STRUCTURE;
-    }
+    out->ver         = in[2];
+    out->type        = in[3];
+    out->flags       = get_u16(in + 4);
+    out->seq         = get_u32(in + 6);
+    out->payload_len = get_u16(in + 10);
+    if (out->payload_len > WIRE_PAYLOAD_MAX) return WIRE_ERR_RANGE;
     return WIRE_OK;
 }
 
-/* === 重组 === */
+bool wire_header_has_crc(const wire_header_t *h)
+{
+    return h != NULL && (h->flags & WIRE_FLAG_CRC32C) != 0;
+}
 
-struct reassembler {
-    uint32_t max_total;   /* 由构造参数决定（P5） */
-    uint8_t *msg;         /* 组装中的整条消息 */
-    size_t   msg_len;     /* 已组装字节数（也用作"期望的下一片 frag_off"）*/
-    uint16_t total;       /* 期望总长；0 表示尚未收到首片 */
-    uint32_t seq;         /* 当前组装的 seq */
+uint32_t wire_frame_wire_bytes(const wire_header_t *h)
+{
+    if (h == NULL) return 0;
+    return (uint32_t)WIRE_HEADER_BYTES + (uint32_t)h->payload_len +
+           (wire_header_has_crc(h) ? WIRE_CRC_BYTES : 0u);
+}
 
-    uint8_t *in;          /* 输入累积缓冲（头 + 未消费的载荷） */
-    size_t   in_cap;
-    size_t   start;       /* 未消费数据的起点（惰性压缩用） */
-    size_t   len;         /* 有效字节数；数据位于 in[start, len) */
+/* === 流定界器 === */
+
+struct wire_delim {
+    uint32_t max_payload;   /* 构造参数（P5） */
+    uint8_t *buf;
+    size_t   cap;           /* max_payload + 头 + CRC */
+    size_t   start;         /* 未消费数据的起点（惰性压缩用） */
+    size_t   len;           /* 有效字节数；数据位于 buf[start, len) */
 };
 
-reassembler_t *reasm_create(uint32_t max_total_bytes)
+wire_delim_t *wire_delim_create(uint32_t max_payload)
 {
-    if (max_total_bytes == 0) return NULL;   /* 0 上界无意义：拒绝而不是兜底 */
-    reassembler_t *r = (reassembler_t *)calloc(1, sizeof(*r));
-    if (r == NULL) return NULL;
-    r->max_total = max_total_bytes;
-    r->msg = (uint8_t *)malloc(max_total_bytes);
-    /* 输入缓冲需容纳 头 + 最大片 */
-    r->in_cap = WIRE_HEADER_BYTES + WIRE_FRAG_LEN_MAX;
-    r->in = (uint8_t *)malloc(r->in_cap);
-    if (r->msg == NULL || r->in == NULL) {
-        free(r->msg);
-        free(r->in);
-        free(r);
-        return NULL;
-    }
-    return r;
+    if (max_payload == 0) return NULL;   /* 0 上界无意义：拒绝而不是兜底 */
+    wire_delim_t *d = (wire_delim_t *)calloc(1, sizeof(*d));
+    if (d == NULL) return NULL;
+    d->max_payload = max_payload;
+    d->cap = (size_t)max_payload + WIRE_HEADER_BYTES + WIRE_CRC_BYTES;
+    d->buf = (uint8_t *)malloc(d->cap);
+    if (d->buf == NULL) { free(d); return NULL; }
+    return d;
 }
 
-void reasm_destroy(reassembler_t *r)
+void wire_delim_destroy(wire_delim_t *d)
 {
-    if (r == NULL) return;
-    free(r->msg);
-    free(r->in);
-    free(r);
+    if (d == NULL) return;
+    free(d->buf);
+    free(d);
 }
 
-static void reasm_reset(reassembler_t *r)
-{
-    r->len = 0;
-    r->start = 0;
-    r->msg_len = 0;
-    r->total = 0;
-}
+static void wire_delim_reset(wire_delim_t *d) { d->start = 0; d->len = 0; }
 
-/* 惰性压缩：只在【push 开头】把未消费数据前移。
+/* 惰性压缩：只在 feed 开头把未消费数据前移。
  * 为什么不能"一产出消息就压缩"：payload_out 指向内部缓冲，
  * 立刻 memmove 会把【刚返回给调用方的那条消息】覆盖掉。
- * 契约是"payload_out 在下次 push 前有效"，所以压缩只能发生在 push 内部，
- * 且必须发生在调用方已经用完上一条消息之后 —— 即本次 push 的开头。 */
-static void reasm_compact(reassembler_t *r)
+ * 契约是"payload_out 在下次 feed 前有效"，所以压缩只能发生在 feed 内部，
+ * 且必须发生在调用方已经用完上一条消息之后 —— 即本次 feed 的开头。 */
+static void wire_delim_compact(wire_delim_t *d)
 {
-    if (r->start == 0) return;
-    size_t keep = r->len - r->start;
-    if (keep > 0) memmove(r->in, r->in + r->start, keep);
-    r->len = keep;
-    r->start = 0;
+    if (d->start == 0) return;
+    size_t keep = d->len - d->start;
+    if (keep > 0) memmove(d->buf, d->buf + d->start, keep);
+    d->len = keep;
+    d->start = 0;
 }
 
-reasm_result_t reasm_push(reassembler_t *r, const uint8_t *in, size_t n,
-                          const uint8_t **payload_out, size_t *len_out)
+wire_delim_result_t wire_delim_feed(wire_delim_t *d, const uint8_t *in, size_t n,
+                                    const uint8_t **payload_out, size_t *len_out)
 {
-    if (r == NULL || payload_out == NULL || len_out == NULL) return REASM_ERROR_INTERNAL;
-    if (n > 0 && in == NULL) return REASM_ERROR_INTERNAL;
+    if (d == NULL || payload_out == NULL || len_out == NULL) return WIRE_DELIM_ERR_INTERNAL;
+    if (n > 0 && in == NULL) return WIRE_DELIM_ERR_INTERNAL;
 
-    /* 上一次的错误不粘住：新一次 push 先复位（契约写在 wire.h） */
-    reasm_compact(r);
-    if (r->len == WIRE_HEADER_BYTES + WIRE_FRAG_LEN_MAX) {
-        /* 输入缓冲满但还没解析出完整片 —— 不可能发生在合法流里
-         * （头一到就该能判断还需多少），属内部状态错误 */
-        reasm_reset(r);
-        return REASM_ERROR_INTERNAL;
-    }
-    if (n > r->in_cap - r->len) {
-        /* 单次投入超过输入缓冲：说明调用方没按"片"喂。
-         * 不静默丢弃 —— 明确报错。 */
-        reasm_reset(r);
-        return REASM_ERROR_TOO_LARGE;
+    wire_delim_compact(d);
+
+    /* 单次投入必须能放进缓冲。放不进说明调用方一次性给了超过一条最大消息的数据，
+     * 那是调用方违约；**不静默丢弃** —— 明确报错。 */
+    if (n > d->cap - d->len) {
+        wire_delim_reset(d);
+        return WIRE_DELIM_ERR_TOO_LARGE;
     }
     if (n > 0) {
-        memcpy(r->in + r->len, in, n);
-        r->len += n;
+        memcpy(d->buf + d->len, in, n);
+        d->len += n;
     }
 
-    for (;;) {
-        size_t avail = r->len - r->start;
-        if (avail < WIRE_HEADER_BYTES) return REASM_NEED_MORE;
+    size_t avail = d->len - d->start;
+    if (avail < WIRE_HEADER_BYTES) return WIRE_DELIM_NEED_MORE;
 
-        wire_header_t h;
-        wire_result_t wr = wire_decode_header(r->in + r->start, avail, &h);
-        if (wr == WIRE_ERR_RANGE)     { reasm_reset(r); return REASM_ERROR_TOO_LARGE; }
-        if (wr != WIRE_OK)            { reasm_reset(r); return REASM_ERROR_MALFORMED; }
-        if (h.total_len > r->max_total) { reasm_reset(r); return REASM_ERROR_TOO_LARGE; }
-
-        size_t need = WIRE_HEADER_BYTES + (size_t)h.frag_len;
-        if (avail < need) return REASM_NEED_MORE;
-
-        /* 首片：初始化整条消息的期望 */
-        if (r->total == 0) {
-            r->total = h.total_len;
-            r->seq = h.seq;
-            r->msg_len = 0;
-        } else if (h.seq != r->seq || h.total_len != r->total) {
-            /* 片间不一致（seq 或总长变了）—— 拒绝整条 */
-            reasm_reset(r);
-            return REASM_ERROR_MALFORMED;
-        }
-
-        /* 设计 §5.3：乱序 -> 拒绝整条（不允许"洞"） */
-        if ((size_t)h.frag_off != r->msg_len) {
-            reasm_reset(r);
-            return REASM_ERROR_OUT_OF_ORDER;
-        }
-
-        const uint8_t *pl = r->in + r->start + WIRE_HEADER_BYTES;
-        memcpy(r->msg + r->msg_len, pl, h.frag_len);
-        r->msg_len += h.frag_len;
-        r->start += need;
-
-        if (r->msg_len >= r->total) {
-            /* 收齐（结构校验已保证末片恰好到末尾） */
-            *payload_out = r->msg;
-            *len_out = r->msg_len;
-            /* 不 reset：调用方在下次 push 前要用 msg。
-             * 下次 push 开头会 reasm_compact，那时再复位消息状态。 */
-            r->total = 0;
-            r->msg_len = 0;
-            if (r->start == r->len) { r->start = 0; r->len = 0; }
-            return REASM_MSG_READY;
-        }
-        /* 还有后续片：继续尝试解析缓冲里剩余的字节 */
+    wire_header_t h;
+    wire_result_t wr = wire_decode_header(d->buf + d->start, avail, &h);
+    if (wr == WIRE_ERR_RANGE)    { wire_delim_reset(d); return WIRE_DELIM_ERR_TOO_LARGE; }
+    if (wr != WIRE_OK)           { wire_delim_reset(d); return WIRE_DELIM_ERR_MALFORMED; }
+    if (h.payload_len > d->max_payload) {
+        /* 超本实例上界：不缓冲（禁止"按对端声明分配"） */
+        wire_delim_reset(d);
+        return WIRE_DELIM_ERR_TOO_LARGE;
     }
+
+    size_t total = (size_t)WIRE_HEADER_BYTES + (size_t)h.payload_len;
+    if (wire_header_has_crc(&h)) total += WIRE_CRC_BYTES;
+    if (avail < total) return WIRE_DELIM_NEED_MORE;
+
+    const uint8_t *pl = d->buf + d->start + WIRE_HEADER_BYTES;
+    if (wire_header_has_crc(&h)) {
+        uint32_t want = get_u32(d->buf + d->start + WIRE_HEADER_BYTES + h.payload_len);
+        uint32_t got  = wire_crc32c(pl, h.payload_len);
+        if (got != want) { wire_delim_reset(d); return WIRE_DELIM_ERR_CRC; }
+    }
+
+    *payload_out = pl;
+    *len_out = h.payload_len;
+    /* 推进 start 但【不】压缩：压缩留到下一次 feed 开头（见 wire_delim_compact）。 */
+    d->start += total;
+    if (d->start >= d->len) wire_delim_reset(d);
+    return WIRE_DELIM_MSG_READY;
 }

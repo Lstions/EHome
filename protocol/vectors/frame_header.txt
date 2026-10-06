@@ -1,215 +1,134 @@
-# EHomeSystem 3.0 帧头 golden vector（S0 契约的一部分）
+# EHomeSystem 3.0 帧头 golden vector —— 12 B 定界头（**无分片**）
 #
-# 依据：设计 §5.1 分帧格式。16 B 定长头 + payload + 末片可选 CRC32C(4)。
+# 依据：用户 2026-10-06 决策「不需要分片与重组，需要的是分界」。
+# 分析见 docs/设计/决策-帧格式是否需要分片-2026-10-06.md；
+# 该决策同时删除了 frag_off / frag_len / MORE 与整套重组状态机。
 #
-#   偏移  字段        宽度
-#   0     magic       2     = 0x4548 ("EH")
-#   2     ver         1     = 0x30 (3.0)
-#   3     type        1     消息类型
-#   4     flags       2     bit0 MORE / bit1 ACK_REQ / bit2 IS_ACK / bit3 IS_NAK
-#   6     seq         4     每方向单调递增
-#   10    frag_off    2     本片在整条消息中的字节偏移
-#   12    frag_len    2     本片载荷长度（硬上界 1024）
-#   14    total_len   2     整条消息总长（硬上界 16384）
+#   偏移  字段          宽度
+#   0     magic         2     = 0x4548 (EH)
+#   2     ver           1     = 0x30 (3.0)
+#   3     type          1     消息类型
+#   4     flags         2     bit0 ACK_REQ / bit1 IS_ACK / bit2 IS_NAK / bit3 CRC32C
+#   6     seq           4     每方向单调递增
+#   10    payload_len   2     本条消息的载荷长度（**这就是分界**）
+#   ---- 12 B ---- 之后 payload_len 字节载荷；CRC32C 位置位时再跟 4 B
 #
-# ## 端序：设计文档【未规定】，本文件定为【大端（网络字节序）】
+# 端序：设计未规定，本实现定为**大端**（网络字节序）。理由：线路协议通行约定；
+# 且与两端主机字节序无关（ESP32/C6 与常见服务器都是小端，定小端则
+# 「能跑」只因双方恰好同序，换一端就静默错）。**需设计者确认。**
 #
-# **这是一处真实的设计缺口**：§5.1 只说 "seq = u32"、"frag_off = u16"，
-# 全篇没有一处规定字节序（两份设计文档 grep 无 大端/小端/big-endian/
-# network byte order）。多字节字段没有字节序 ⇒ 两端各自"按本机来"也能
-# 各自自测通过，却会**互相读错** —— 正是 S0 要拦的那类漂移。
+# payload_len 上界 = 16368 = MBEDTLS_SSL_IN_CONTENT_LEN(16384) - 头(12) - CRC(4)，
+# 使「一条完整消息恰好放进一个 TLS 记录」这个性质**成立**。
+# （上一版上界 16384 时该性质差 20 B 不成立，见决策文档 §11.2。）
 #
-# 选大端的理由：
-#   1. 线路协议的通行约定（network byte order 即大端）；
-#   2. 与两端主机字节序**无关** —— ESP32(Xtensa)/C6(RISC-V) 与常见服务器
-#      都是小端；定小端则"能跑"只是因为双方恰好同序，换一端就静默错；
-#   3. 实现代价相同（显式移位即可，两端都不该 memcpy 直通）。
+# ⚠ wire 值【不允许手写】，由 tools/check_frame_header.py 生成并复核。
 #
-# **需设计者确认**；若改小端，改本文件与两端读写函数即可
-# （有本向量门禁在，漏改一端会立刻红）。
-#
-# ## 本文件的 wire 值【不允许手写】
-# 2026-10-06 我手写了 9 条，Python 门禁当场抓出 6 条错（ver/type 位置写串）。
-# 现由 tools/check_frame_header.py 生成并校验（独立于 C 实现）。
-#
-# 语法：case / 字段行（<名> <hex>）/ payload <hex 或 -> / wire <hex> / end
-
-# --- 单帧、无分片、无 CRC ---
+# 语法：case / 字段行 <名> <hex> / payload <hex 或 -> / wire <hex> / expect_* / end
 
 case single_frame_no_crc
 ver 30
 type 08
 flags 0000
 seq 00000001
-frag_off 0000
-frag_len 0004
-total_len 0004
+payload_len 0004
 payload deadbeef
-wire 45483008000000000001000000040004deadbeef
+wire 454830080000000000010004deadbeef
 end
 
-# --- 分片：首片 MORE=1 ---
-
-case frag_first_more
+case empty_payload
 ver 30
-type 08
-flags 0001
-seq 00000002
-frag_off 0000
-frag_len 0004
-total_len 0008
-payload 01020304
-wire 4548300800010000000200000004000801020304
-end
-
-# --- 分片：末片 MORE=0 ---
-
-case frag_last
-ver 30
-type 08
+type 02
 flags 0000
 seq 00000002
-frag_off 0004
-frag_len 0004
-total_len 0008
-payload 05060708
-wire 4548300800000000000200040004000805060708
+payload_len 0000
+payload -
+wire 454830020000000000020000
 end
-
-# --- flags 位序（文档：bit0 MORE / bit1 ACK_REQ / bit2 IS_ACK / bit3 IS_NAK）---
 
 case flags_ack_req
 ver 30
 type 09
-flags 0002
+flags 0001
 seq 00000003
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 45483009000200000003000000000000
+wire 454830090001000000030000
 end
 
 case flags_is_ack
 ver 30
 type 09
-flags 0004
+flags 0002
 seq 00000003
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 45483009000400000003000000000000
+wire 454830090002000000030000
 end
 
 case flags_is_nak
 ver 30
 type 09
-flags 0008
+flags 0004
 seq 00000003
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 45483009000800000003000000000000
+wire 454830090004000000030000
 end
 
-# --- 端序决定性用例 ---
-# seq=0x12345678：大端写 12345678，小端会写 78563412。
-# 这条是端序漂移的直接捕手。
+case two_flags_combined
+ver 30
+type 20
+flags 0003
+seq 00000004
+payload_len 0002
+payload 0102
+wire 4548302000030000000400020102
+end
 
 case endian_seq_high_bytes
 ver 30
 type 20
 flags 0000
 seq 12345678
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 45483020000012345678000000000000
+wire 454830200000123456780000
 end
 
-# --- frag_len 硬上界 1024（§5.2）---
+# --- CRC32C（flags bit3 置位时，载荷后跟 4 B 大端 CRC）---
+# 标准校验值：crc32c("123456789") == 0xE3069283，见下方 case。
 
-case frag_len_max_1024
+case crc32c_present
 ver 30
 type 20
-flags 0000
-seq 0000000a
-frag_off 0000
-frag_len 0400
-total_len 0400
-payload a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
-wire 4548302000000000000a000004000400a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
-end
-
-# --- total_len 硬上界 16384 的首片 ---
-
-case two_frag_first_1024
-ver 30
-type 20
-flags 0001
-seq 0000000b
-frag_off 0000
-frag_len 0400
-total_len 4000
-payload a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
-wire 4548302000010000000b000004004000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
-end
-
-# --- 结构非法用例（解码必须拒绝）---
-# 这些是【负例】：C/Go/Python 都必须拒绝，且拒绝原因要可区分。
-
-case malformed_frag_len_over_1024
-ver 30
-type 20
-flags 0000
-seq 00000001
-frag_off 0000
-frag_len 0401
-total_len 0401
-payload -
-wire 45483020000000000001000004010401
-expect_range
-end
-
-case malformed_last_slice_not_at_end
-ver 30
-type 20
-flags 0000
-seq 00000001
-frag_off 0000
-frag_len 0004
-total_len 0008
-payload 01020304
-wire 4548302000000000000100000004000801020304
-expect_structure
-end
-
-case malformed_more_but_at_end
-ver 30
-type 20
-flags 0001
-seq 00000001
-frag_off 0000
-frag_len 0008
-total_len 0008
+flags 0008
+seq 00000005
+payload_len 0008
 payload 0102030405060708
-wire 454830200001000000010000000800080102030405060708
-expect_structure
+wire 454830200008000000050008010203040506070846891f81
 end
+
+# 业界标准 check value（不依赖本实现）：CRC32C("123456789") = 0xE3069283
+case crc32c_check_value
+ver 30
+type 20
+flags 0008
+seq 00000006
+payload_len 0009
+payload 313233343536373839
+wire 454830200008000000060009313233343536373839e3069283
+end
+
+# --- 负例：解码必须拒绝，且原因可区分 ---
 
 case malformed_bad_magic
 ver 30
 type 20
 flags 0000
 seq 00000001
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 00003020000000000001000000000000
+wire 000030200000000000010000
 expect_magic
 end
 
@@ -218,10 +137,19 @@ ver 31
 type 20
 flags 0000
 seq 00000001
-frag_off 0000
-frag_len 0000
-total_len 0000
+payload_len 0000
 payload -
-wire 45483120000000000001000000000000
+wire 454831200000000000010000
 expect_version
+end
+
+case malformed_payload_len_over_max
+ver 30
+type 20
+flags 0000
+seq 00000001
+payload_len 3ff1
+payload -
+wire 454830200000000000013ff1
+expect_range
 end

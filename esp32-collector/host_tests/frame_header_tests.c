@@ -1,8 +1,12 @@
 /* frame_header_tests.c —— S0：帧头编解码对锚共享 golden vector
  *
- * 为什么需要它：骨架初版把帧格式定成 varint(len)||payload —— 与设计 §5.1 的
- * 16 B 定长头（magic/ver/type/flags/seq/frag_off/frag_len/total_len）**是两种格式**，
- * 且初版**不支持分片**。这与 msgcodec 自创 tag 格式同族（骨架自作主张改契约）。
+ * 为什么需要它：骨架初版把帧格式定成 varint(len)||payload —— 与设计的定长头
+ * **是两种格式**（msgcodec 自创 tag 格式同族：骨架自作主张改契约）。
+ *
+ * **当前格式：12 B 定界头（magic/ver/type/flags/seq/payload_len）。**
+ * 分片字段（frag_off/frag_len）与整套重组已按用户 2026-10-06 决策删除：
+ * "不需要分片与重组，需要的是分界"。详见
+ * docs/设计/决策-帧格式是否需要分片-2026-10-06.md。
  *
  * 本用例直接读 protocol/vectors/frame_header.txt（唯一向量来源），
  * 逐条断言：编码 == wire，解码 == 各字段，且往返一致。
@@ -35,9 +39,9 @@ static int s_cases = 0;
 typedef struct {
     char     name[64];
     int      line;
-    bool     have[8];   /* magic ver type flags seq off len total */
-    uint16_t magic; uint8_t ver, type; uint16_t flags;
-    uint32_t seq; uint16_t off, flen, total;
+    uint8_t  ver, type; uint16_t flags;
+    uint32_t seq; uint16_t payload_len_field;   /* 头里的 payload_len 字段 */
+    bool     has_crc;                           /* flags 里 CRC32C 位 */
     uint8_t  payload[MAX_PAYLOAD];
     size_t   payload_len;
     uint8_t  wire[WIRE_HEADER_BYTES + MAX_PAYLOAD];
@@ -89,7 +93,7 @@ static void run_case(const vec_t *c)
 
     /* --- 1. 字段级编码 --- */
     h.ver = c->ver; h.type = c->type; h.flags = c->flags; h.seq = c->seq;
-    h.frag_off = c->off; h.frag_len = c->flen; h.total_len = c->total;
+    h.payload_len = c->payload_len_field;
 
     wire_result_t er = wire_encode_header(buf, sizeof(buf), &h);
     CHECK(er == WIRE_OK, "%s: 编码头返回 %s", c->name, wire_result_name(er));
@@ -99,9 +103,17 @@ static void run_case(const vec_t *c)
           "%s: 头部字节不符（前 4 字节 %02x %02x %02x %02x vs %02x %02x %02x %02x）",
           c->name, buf[0], buf[1], buf[2], buf[3],
           c->wire[0], c->wire[1], c->wire[2], c->wire[3]);
-    /* 载荷由调用方拼接；这里核对向量自身的 wire 长度 == 16 + payload */
-    CHECK(c->wire_len == WIRE_HEADER_BYTES + c->payload_len,
-          "%s: 向量 wire 长度 %zu != 16 + %zu", c->name, c->wire_len, c->payload_len);
+    /* 向量自洽性核对：wire 长度 == 头 + 载荷 (+ CRC) */
+    size_t want = (size_t)WIRE_HEADER_BYTES + c->payload_len +
+                  (c->has_crc ? WIRE_CRC_BYTES : 0u);
+    CHECK(c->wire_len == want,
+          "%s: 向量 wire 长度 %zu != 头(%u) + 载荷(%zu) + CRC(%u)",
+          c->name, c->wire_len, WIRE_HEADER_BYTES, c->payload_len,
+          c->has_crc ? WIRE_CRC_BYTES : 0u);
+    /* 头里的 payload_len 必须与向量实际载荷长度一致（分界靠它） */
+    CHECK(c->payload_len_field == c->payload_len,
+          "%s: 头内 payload_len %u 与实际载荷 %zu 不符",
+          c->name, c->payload_len_field, c->payload_len);
     if (c->payload_len > 0) {
         CHECK(memcmp(c->wire + WIRE_HEADER_BYTES, c->payload, c->payload_len) == 0,
               "%s: 向量载荷与 payload 字段不符", c->name);
@@ -116,9 +128,10 @@ static void run_case(const vec_t *c)
     CHECK(g.type == c->type, "%s: type %u != %u", c->name, g.type, c->type);
     CHECK(g.flags == c->flags, "%s: flags 0x%04x != 0x%04x", c->name, g.flags, c->flags);
     CHECK(g.seq == c->seq,   "%s: seq 0x%08x != 0x%08x", c->name, g.seq, c->seq);
-    CHECK(g.frag_off == c->off,   "%s: frag_off %u != %u", c->name, g.frag_off, c->off);
-    CHECK(g.frag_len == c->flen,  "%s: frag_len %u != %u", c->name, g.frag_len, c->flen);
-    CHECK(g.total_len == c->total,"%s: total_len %u != %u", c->name, g.total_len, c->total);
+    CHECK(g.payload_len == c->payload_len_field,
+          "%s: payload_len %u != %u", c->name, g.payload_len, c->payload_len_field);
+    CHECK(wire_header_has_crc(&g) == c->has_crc,
+          "%s: CRC 位应为 %d", c->name, (int)c->has_crc);
 }
 
 int main(int argc, char **argv)
@@ -176,14 +189,14 @@ int main(int argc, char **argv)
             uint8_t tmp[8] = {0};
             long n = phex(arg, tmp, sizeof(tmp));
             if (n < 0) { printf("FAIL 第 %d 行 %s hex 非法\n", lineno, kw); fclose(fp); return 2; }
-            if      (strcmp(kw, "magic") == 0)    cur.magic = (uint16_t)((tmp[0] << 8) | tmp[1]);
-            else if (strcmp(kw, "ver") == 0)      cur.ver = tmp[0];
+            if      (strcmp(kw, "ver") == 0)      cur.ver = tmp[0];
             else if (strcmp(kw, "type") == 0)     cur.type = tmp[0];
             else if (strcmp(kw, "flags") == 0)    cur.flags = (uint16_t)((tmp[0] << 8) | tmp[1]);
             else if (strcmp(kw, "seq") == 0)      cur.seq = ((uint32_t)tmp[0] << 24) | ((uint32_t)tmp[1] << 16) | ((uint32_t)tmp[2] << 8) | tmp[3];
-            else if (strcmp(kw, "frag_off") == 0) cur.off = (uint16_t)((tmp[0] << 8) | tmp[1]);
-            else if (strcmp(kw, "frag_len") == 0) cur.flen = (uint16_t)((tmp[0] << 8) | tmp[1]);
-            else if (strcmp(kw, "total_len") == 0) cur.total = (uint16_t)((tmp[0] << 8) | tmp[1]);
+            else if (strcmp(kw, "payload_len") == 0) {
+                cur.payload_len_field = (uint16_t)((tmp[0] << 8) | tmp[1]);
+                cur.has_crc = (cur.flags & WIRE_FLAG_CRC32C) != 0;
+            }
         }
     }
     fclose(fp);

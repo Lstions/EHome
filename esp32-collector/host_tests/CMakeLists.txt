@@ -1021,6 +1021,11 @@ add_executable(device_op_tests
 )
 target_include_directories(device_op_tests PRIVATE ../components/device_op/include)
 target_compile_options(device_op_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME check_frame_header
+    COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_frame_header.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/frame_header.txt)
+
 add_test(NAME device_op_tests COMMAND device_op_tests)
 
 add_test(NAME frame_header_tests
