@@ -112,12 +112,17 @@ static void test_all_combinations_defined(void)
                   t, tls_failure_name((tls_failure_t)f), (int)a);
         }
     }
-    /* 枚举名必须可用（日志与告警要用） */
+    /* 枚举名必须可用（日志与告警要用）。
+     * 注意：这里曾写"名字不得以 UN 开头" —— 那是**过强的断言**：
+     * TLS_FAIL_UNKNOWN 的显示名是 UNCLASSIFIED（合法的 "UN" 开头）。
+     * 真正要拦的是"越界值也返回了 UNKNOWN 这个名字"（会把未知值与
+     * UNCLASSIFIED 混同）。故改为逐值核对：合法范围内不得返回兜底串。 */
     for (int f = 0; f < TLS_FAIL_COUNT; f++) {
-        CHECK(tls_failure_name((tls_failure_t)f)[0] != 'U' ||
-              tls_failure_name((tls_failure_t)f)[1] != 'N',
-              "失败名不应是 UNKNOWN");
+        const char *n = tls_failure_name((tls_failure_t)f);
+        CHECK(n != NULL && n[0] != 0, "类别 %d 应有名字", f);
     }
+    CHECK(tls_failure_name((tls_failure_t)TLS_FAIL_COUNT)[0] == 'U',
+          "越界应返回兜底名 UNKNOWN（与 UNCLASSIFIED 区分开）");
     for (int a = 0; a < TLS_ACTION_COUNT; a++) {
         CHECK(tls_action_name((tls_action_t)a) != NULL, "动作名不应为空");
     }
@@ -174,6 +179,93 @@ static void test_field_scenario_without_sntp(void)
           "整个过程**不应出现 FATAL**（若出现即 K11：全站失联）");
 }
 
+/* ============ 8. 归约：证书标志位 ============ */
+static void test_reduce_cert_flags(void)
+{
+    /* 最关键：BADCERT_FUTURE 就是"没校时"的信号
+     * （now(1970) < notBefore(2026) 时 mbedTLS 置的正是这一位） */
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_FUTURE)
+              == TLS_FAIL_CERT_EXPIRED, "FUTURE 位应归 CERT_EXPIRED（时间相关）");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_EXPIRED)
+              == TLS_FAIL_CERT_EXPIRED, "EXPIRED 位应归 CERT_EXPIRED（时间相关）");
+    CHECK(tls_failure_is_time_related(TLS_FAIL_CERT_EXPIRED),
+          "CERT_EXPIRED 必须标为时间相关（否则自愈路径走不到）");
+
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_NOT_TRUSTED)
+              == TLS_FAIL_CERT_UNTRUSTED, "NOT_TRUSTED 应归 CERT_UNTRUSTED");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_MISSING)
+              == TLS_FAIL_CERT_UNTRUSTED, "MISSING 应归 CERT_UNTRUSTED");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_CN_MISMATCH)
+              == TLS_FAIL_CERT_UNTRUSTED, "CN_MISMATCH 归 CERT_UNTRUSTED（校时修不好）");
+    CHECK(!tls_failure_is_time_related(TLS_FAIL_CERT_UNTRUSTED),
+          "CERT_UNTRUSTED 不应标为时间相关");
+
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0,
+                                 TLS_CERTFLAG_NOT_TRUSTED | TLS_CERTFLAG_FUTURE)
+              == TLS_FAIL_CERT_EXPIRED,
+          "同时有 NOT_TRUSTED 与 FUTURE 应优先判时间相关（先校时再看）");
+
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, 0) == TLS_FAIL_UNKNOWN,
+          "CERT_FLAGS 类型但 flags=0 应归 UNCLASSIFIED（不猜）");
+}
+
+/* ============ 9. 归约：网络 / 配置 / 未知 ============ */
+static void test_reduce_non_cert(void)
+{
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_SYSTEM, 111, 0) == TLS_FAIL_NETWORK,
+          "errno 类应归 NETWORK");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_ESP, 0x102, 0) == TLS_FAIL_CONFIG,
+          "ESP_ERR_INVALID_ARG 应归 CONFIG");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_ESP, 0x103, 0) == TLS_FAIL_CONFIG,
+          "ESP_ERR_INVALID_STATE 应归 CONFIG");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_ESP, 0x101, 0) == TLS_FAIL_NETWORK,
+          "其它 ESP 错误应归 NETWORK（可重试）");
+
+    /* mbedTLS 一般错误（含 -0x7A00 BAD_CERTIFICATE）不带标志位 => UNCLASSIFIED */
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS, -0x7A00, 0) == TLS_FAIL_UNKNOWN,
+          "无标志位的 mbedTLS 证书错误应归 UNCLASSIFIED（不猜类别）");
+    CHECK(tls_guard_reduce_error(TLS_ERGTYPE_UNKNOWN, 12345, 0) == TLS_FAIL_UNKNOWN,
+          "未知类型应归 UNCLASSIFIED");
+}
+
+/* ============ 10. 归约 + 分类的完整链路 ============ */
+static void test_reduce_then_classify_integration(void)
+{
+    bool trusted = tls_guard_time_is_trusted(0);
+    CHECK(!trusted, "前提：没校时");
+
+    tls_failure_t f = tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0,
+                                             TLS_CERTFLAG_FUTURE);
+    CHECK(f == TLS_FAIL_CERT_EXPIRED, "应归为时间相关");
+
+    tls_action_t a = tls_guard_classify(trusted, f);
+    CHECK(a == TLS_ACTION_SYNC_TIME_FIRST,
+          "没校时的 BADCERT_FUTURE 必须导向'先校时'，实际 %s", tls_action_name(a));
+    CHECK(a != TLS_ACTION_FATAL, "绝不能是 FATAL（那会让设备永久失联 = K11）");
+
+    tls_action_t b = tls_guard_classify(true,
+        tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS, 0, TLS_CERTFLAG_NOT_TRUSTED));
+    CHECK(b == TLS_ACTION_FATAL, "时间正常 + 不受信应是 FATAL，实际 %s", tls_action_name(b));
+
+    tls_action_t c = tls_guard_classify(true, tls_guard_reduce_error(TLS_ERGTYPE_SYSTEM, 111, 0));
+    CHECK(c == TLS_ACTION_RETRY_BACKOFF, "网络失败应退避");
+
+    tls_action_t d = tls_guard_classify(true, tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS, -0x7A00, 0));
+    CHECK(d == TLS_ACTION_RETRY_BACKOFF,
+          "未知错误应按可重试处理（FATAL 不可逆，风险更大），实际 %s", tls_action_name(d));
+}
+
+/* ============ 11. 归约不留下未定义类别 ============ */
+static void test_reduce_covers_all_types(void)
+{
+    for (int t = 0; t <= TLS_ERGTYPE_CUSTOM_STACK_CERT_FLAGS; t++) {
+        tls_failure_t f = tls_guard_reduce_error(t, 0x100, 0x08);
+        CHECK(f >= 0 && f < TLS_FAIL_COUNT, "type=%d 应给出有效类别，实际 %d", t, (int)f);
+        tls_action_t a = tls_guard_classify(false, f);
+        CHECK(a >= 0 && a < TLS_ACTION_COUNT, "type=%d 的归约结果应可分类", t);
+    }
+}
+
 int main(void)
 {
     test_time_trusted_bounds();
@@ -182,6 +274,10 @@ int main(void)
     test_no_failure_proceeds();
     test_all_combinations_defined();
     test_stats_cover_every_branch();
+    test_reduce_cert_flags();
+    test_reduce_non_cert();
+    test_reduce_then_classify_integration();
+    test_reduce_covers_all_types();
     test_field_scenario_without_sntp();
 
     if (s_failures) { printf("tls_guard_tests: %d FAILURE(S)\n", s_failures); return 1; }

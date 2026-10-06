@@ -56,6 +56,7 @@ typedef enum {
     TLS_FAIL_CERT_EXPIRED,      /* 证书过期或尚未生效 —— **与时间强相关** */
     TLS_FAIL_PROTOCOL,          /* TLS 版本/密码套件协商失败 */
     TLS_FAIL_CONFIG,            /* 本地配置缺失（没证书、没私钥、没 CA）*/
+    TLS_FAIL_UNKNOWN,           /* 认不出的错误 —— **按可重试处理**，不按永久失败 */
     TLS_FAIL_COUNT
 } tls_failure_t;
 
@@ -124,3 +125,77 @@ void tls_guard_reset_stats(void);
 }
 #endif
 #endif /* EHOME_TLS_GUARD_H */
+
+/* ============================================================
+ * 错误码归约（reduction）—— 把 esp_tls / mbedTLS 的原始错误
+ * 映射成本模块的 tls_failure_t。
+ *
+ * ## 为什么需要单独一层
+ * esp_tls 的失败以**三元组**形式给出：
+ *     type(esp_tls_error_type_t) + code + cert_flags
+ * 直接把它喂给 tls_guard_classify 是不行的（类型对不上）。而如果随手
+ * "非 0 就当网络错误"，则**证书问题会被误判成网络问题 ⇒ 永远重试不收敛**；
+ * 反过来"非 0 就当证书错误"则**网络抖动会被误判成证书失效 ⇒ 无谓告警**。
+ * ⇒ 归约表必须显式、可测、可核对。
+ *
+ * ## ⚠ 这些常量必须与 IDF 头文件一致
+ * 下面镜像了 IDF 的取值（本组件不依赖 IDF，才能在宿主机测试）。
+ * 一致性由 tools/check_tls_constants.py 直接读 IDF 头文件核对 ——
+ * 若 IDF 改了值而这里没跟，门禁会红（同 check_stub_enum_sync 的思路）。
+ * ============================================================ */
+
+/** 镜像 esp_tls_error_type_t（esp_tls_errors.h:69-78）。 */
+#define TLS_ERGTYPE_UNKNOWN          0  /**< ESP_TLS_ERR_TYPE_UNKNOWN */
+#define TLS_ERGTYPE_SYSTEM           1  /**< ESP_TLS_ERR_TYPE_SYSTEM (errno) */
+#define TLS_ERGTYPE_MBEDTLS          2  /**< ESP_TLS_ERR_TYPE_MBEDTLS */
+#define TLS_ERGTYPE_MBEDTLS_CERT_FLAGS 3 /**< ESP_TLS_ERR_TYPE_MBEDTLS_CERT_FLAGS */
+#define TLS_ERGTYPE_ESP              4  /**< ESP_TLS_ERR_TYPE_ESP (esp_err_t) */
+#define TLS_ERGTYPE_CUSTOM_STACK     5
+#define TLS_ERGTYPE_CUSTOM_STACK_CERT_FLAGS 6
+
+/** 镜像 MBEDTLS_X509_BADCERT_*（mbedtls/x509.h:87-103）。 */
+#define TLS_CERTFLAG_EXPIRED     0x01
+#define TLS_CERTFLAG_REVOKED     0x02
+#define TLS_CERTFLAG_CN_MISMATCH 0x04
+#define TLS_CERTFLAG_NOT_TRUSTED 0x08
+#define TLS_CERTFLAG_MISSING     0x40
+#define TLS_CERTFLAG_SKIP_VERIFY 0x80
+#define TLS_CERTFLAG_OTHER       0x0100
+#define TLS_CERTFLAG_FUTURE      0x0200
+#define TLS_CERTFLAG_KEY_USAGE   0x0800
+#define TLS_CERTFLAG_EXT_KEY_USAGE 0x1000
+#define TLS_CERTFLAG_NS_CERT_TYPE 0x2000
+#define TLS_CERTFLAG_BAD_MD      0x4000
+#define TLS_CERTFLAG_BAD_PK      0x8000
+#define TLS_CERTFLAG_BAD_KEY     0x010000
+
+/** 时效相关的证书标志位掩码 —— **这就是"没校时"的信号**。
+ *  BADCERT_FUTURE = "certificate validity starts in the future"，
+ *  正是 now(1970) < notBefore(2026) 时 mbedTLS 报的那一位。 */
+#define TLS_CERTFLAG_TIME_RELATED (TLS_CERTFLAG_EXPIRED | TLS_CERTFLAG_FUTURE)
+
+/* 已新增的失败类别（与既有枚举合并见下） */
+
+/**
+ * ⭐ 把 esp_tls 三元组归约成 tls_failure_t。
+ *
+ * @param type       esp_tls_error_type_t 的值（可传 TLS_ERGTYPE_*）
+ * @param code       esp_tls_code 或 esp_err_t（视 type 而定）
+ * @param cert_flags 仅当 type 为 *_CERT_FLAGS 时有效
+ *
+ * 规则：
+ *  - `*_CERT_FLAGS` 类型：
+ *      · 命中 TIME_RELATED（EXPIRED/FUTURE） -> TLS_FAIL_CERT_EXPIRED（**时间相关**）
+ *      · 其它任何位（NOT_TRUSTED / MISSING / CN_MISMATCH …） -> TLS_FAIL_CERT_UNTRUSTED
+ *  - 缺证书/缺私钥/缺 CA（本地配置问题） -> TLS_FAIL_CONFIG
+ *  - SYSTEM（errno）/ ESP 层连接类 -> TLS_FAIL_NETWORK
+ *  - 其它 -> TLS_FAIL_UNKNOWN（**可重试**，见下）
+ *
+ * ⚠ 未知错误映射为 **UNKNOWN**，而不是 FATAL：
+ *   把不认识的错误报成"永久失败"会让设备**再也不回来**（不可逆）；
+ *   报成可重试则最坏只是"一直重试"（可观测、可人工介入）。两害相权，取其可逆者。
+ */
+tls_failure_t tls_guard_reduce_error(int type, int code, int cert_flags);
+
+/** 该失败是否与"时间不可信"强相关（供日志/告警区分）。 */
+bool tls_failure_is_time_related(tls_failure_t f);

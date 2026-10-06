@@ -13,6 +13,7 @@ static const char *const s_fail_names[] = {
     [TLS_FAIL_CERT_EXPIRED]   = "CERT_EXPIRED",
     [TLS_FAIL_PROTOCOL]       = "PROTOCOL",
     [TLS_FAIL_CONFIG]         = "CONFIG",
+    [TLS_FAIL_UNKNOWN]        = "UNCLASSIFIED",   /* 故意不叫 UNKNOWN：留给越界兜底 */
 };
 
 const char *tls_failure_name(tls_failure_t f)
@@ -69,6 +70,12 @@ tls_action_t tls_guard_classify(bool time_trusted, tls_failure_t failure)
     case TLS_FAIL_CONFIG:
         /* 本地没装证书/私钥/CA：重试无用 */
         return TLS_ACTION_FATAL;
+    case TLS_FAIL_UNKNOWN:
+        /* ⭐ 认不出的错误按**可重试**处理，不按永久失败。
+         * 理由：误判成 FATAL 会让设备再也不回来（不可逆）；
+         * 误判成可重试最坏只是"一直退避重试"（可观测、可人工介入）。
+         * 两害相权，取其可逆者。 */
+        return TLS_ACTION_RETRY_BACKOFF;
     case TLS_FAIL_NONE:
     default:
         return TLS_ACTION_FATAL;
@@ -100,4 +107,53 @@ void tls_guard_get_stats(tls_guard_stats_t *out)
 void tls_guard_reset_stats(void)
 {
     memset(&s_stats, 0, sizeof(s_stats));
+}
+
+/* ============================================================
+ * 错误码归约
+ * ============================================================ */
+
+bool tls_failure_is_time_related(tls_failure_t f)
+{
+    return f == TLS_FAIL_CERT_EXPIRED;
+}
+
+tls_failure_t tls_guard_reduce_error(int type, int code, int cert_flags)
+{
+    (void)code;   /* 目前只按 type + flags 分类；code 留给将来细分 */
+
+    /* --- 证书标志位类型：这是**唯一**能可靠区分"时间问题"与"信任问题"的来源 --- */
+    if (type == TLS_ERGTYPE_MBEDTLS_CERT_FLAGS ||
+        type == TLS_ERGTYPE_CUSTOM_STACK_CERT_FLAGS) {
+        if (cert_flags == 0) {
+            /* 报了 CERT_FLAGS 却没有位 —— 自相矛盾，不猜 */
+            return TLS_FAIL_UNKNOWN;
+        }
+        /* ⭐ 时效位（EXPIRED / FUTURE）才是"可能就是没校时"的信号。
+         * FUTURE 正是 now(1970) < notBefore(2026) 时置的那一位。 */
+        if ((cert_flags & TLS_CERTFLAG_TIME_RELATED) != 0) return TLS_FAIL_CERT_EXPIRED;
+        return TLS_FAIL_CERT_UNTRUSTED;
+    }
+
+    /* --- 本地配置类：设备自己就没装好，重试永远不会好 --- */
+    if (type == TLS_ERGTYPE_ESP) {
+        /* esp_err_t 的配置类取值：
+         *   ESP_ERR_INVALID_ARG   0x102
+         *   ESP_ERR_INVALID_STATE 0x103
+         *   ESP_ERR_NOT_FOUND     0x105
+         * 这些出现在 TLS 建立阶段基本都意味着"参数/状态/文件不对"。 */
+        if (code == 0x102 || code == 0x103 || code == 0x105) return TLS_FAIL_CONFIG;
+        return TLS_FAIL_NETWORK;   /* 其余 ESP 层（连接/内存）按网络类处理 */
+    }
+
+    /* --- 系统层（errno）与 mbedTLS 一般错误：归为网络/协议 ---
+     * 注意：mbedTLS 的错误码负值里也有"证书"类（如 MBEDTLS_ERR_SSL_BAD_CERTIFICATE
+     * = -0x7A00），但**它不带标志位** ⇒ 无法区分时间/信任。
+     * 若把它直接判成 CERT_EXPIRED，会把"真的不受信"说成"可能没校时"；
+     * 若判成 CERT_UNTRUSTED，又可能掩盖"其实没校时"。
+     * ⇒ 保守归为 UNKNOWN（可重试 + 可观测），比猜错更安全。 */
+    if (type == TLS_ERGTYPE_SYSTEM) return TLS_FAIL_NETWORK;
+    if (type == TLS_ERGTYPE_MBEDTLS) return TLS_FAIL_UNKNOWN;
+
+    return TLS_FAIL_UNKNOWN;
 }

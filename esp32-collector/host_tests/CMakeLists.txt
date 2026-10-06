@@ -1085,3 +1085,9 @@ add_executable(tls_guard_tests
 target_include_directories(tls_guard_tests PRIVATE ../components/tls_guard/include)
 target_compile_options(tls_guard_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME tls_guard_tests COMMAND tls_guard_tests)
+
+add_test(NAME check_tls_constants
+    COMMAND ${CMAKE_COMMAND} -E env
+            IDF_PATH=/home/sun/env/esp-idf
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tls_constants.py)
+
