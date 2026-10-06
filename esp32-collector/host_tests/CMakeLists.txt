@@ -1165,3 +1165,11 @@ add_test(NAME check_sdkconfig_symbols
             IDF_PATH=/home/sun/env/esp-idf
             python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_sdkconfig_symbols.py)
 
+
+add_executable(transport_sel_tests
+    transport_sel_tests.c
+    ../components/transport_sel/transport_sel.c
+)
+target_include_directories(transport_sel_tests PRIVATE ../components/transport_sel/include)
+target_compile_options(transport_sel_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME transport_sel_tests COMMAND transport_sel_tests)
