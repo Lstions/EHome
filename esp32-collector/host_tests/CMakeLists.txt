@@ -976,6 +976,19 @@ target_include_directories(link_mqtt_tests PRIVATE
 )
 target_compile_options(link_mqtt_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+add_executable(golden_vectors_tests
+    golden_vectors_tests.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(golden_vectors_tests PRIVATE ../components/msgcodec/include)
+target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
+# 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
+add_test(NAME golden_vectors_python
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_golden_vectors.py)
+
+add_test(NAME golden_vectors_tests
+    COMMAND golden_vectors_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
+
 add_test(NAME link_mqtt_tests COMMAND link_mqtt_tests)
 
 add_test(NAME report_stats_tests COMMAND report_stats_tests)

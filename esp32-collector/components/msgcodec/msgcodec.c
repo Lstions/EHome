@@ -60,35 +60,39 @@ dec_result_t dec_varint(const uint8_t *in, size_t n, size_t *used, uint64_t *v)
     return DEC_BAD_WIRE;   /* 超长 varint */
 }
 
+/* tag = (field_id << 3) | wire_type —— 与生产 frame_codec.c:38 和后端
+ * frame.go:253 完全一致。字段号 0 非法（tag 会退化成 0，无法与"无字段"区分）。 */
+static enc_result_t enc_tag(uint8_t *out, size_t cap, size_t *used,
+                            uint8_t field_id, uint8_t wire_type)
+{
+    uint64_t tag = ((uint64_t)field_id << 3) | (uint64_t)(wire_type & 0x07u);
+    return enc_varint(out, cap, used, tag);
+}
+
 enc_result_t enc_field_u64(uint8_t *out, size_t cap, size_t *used,
                            uint8_t field_id, uint64_t v)
 {
     if (out == NULL || used == NULL || field_id == 0) return ENC_BAD_ARG;
+
     uint8_t tmp[VARINT64_MAX_BYTES];
     size_t vlen = 0;
     enc_result_t e = enc_varint(tmp, sizeof(tmp), &vlen, v);
     if (e != ENC_OK) return e;
 
-    /* 总长 = field_id(1) + 长度前缀字节数 + 值字节数。
-     * 长度前缀编码的是 vlen（0..10），因此【最多 1 字节】——
-     * 早先误用 VARINT64_MAX_BYTES(10) 会让容量检查过度保守：
-     * 明明放得下的调用被判成 NO_SPACE（由 msgcodec_tests 的边界用例发现）。 */
-    uint8_t vlen_buf[2];
-    size_t vlen_len = 0;
-    if (enc_varint(vlen_buf, sizeof(vlen_buf), &vlen_len, (uint64_t)vlen) != ENC_OK) {
-        return ENC_NO_SPACE;
-    }
-    size_t total = 1 + vlen_len + vlen;
+    /* 总长 = tag 字节数 + 值 varint 字节数。
+     * tag 最大 2 字节（字段号 ≤ 31 时；更大则更多）—— 用 6 字节上限够所有 u8 字段号。
+     * 注意：这里【不】写"长度前缀"—— 那是本骨架初版的错误格式（见头文件说明）。 */
+    uint8_t tag_buf[6];
+    size_t tag_len = 0;
+    e = enc_tag(tag_buf, sizeof(tag_buf), &tag_len, field_id, MSGCODEC_WIRE_VARINT);
+    if (e != ENC_OK) return e;
+
+    size_t total = tag_len + vlen;
     if (cap < total) return ENC_NO_SPACE;   /* 先算总长，绝不写一半 */
 
-    size_t i = 0;
-    out[i++] = field_id;
-    size_t hdr = 0;
-    e = enc_varint(out + i, cap - i, &hdr, (uint64_t)vlen);
-    if (e != ENC_OK) return e;
-    i += hdr;
-    for (size_t k = 0; k < vlen; k++) out[i++] = tmp[k];
-    *used = i;
+    memcpy(out, tag_buf, tag_len);
+    memcpy(out + tag_len, tmp, vlen);
+    *used = total;
     return ENC_OK;
 }
 
@@ -98,19 +102,24 @@ enc_result_t enc_field_bytes(uint8_t *out, size_t cap, size_t *used,
     if (out == NULL || used == NULL || field_id == 0) return ENC_BAD_ARG;
     if (n > 0 && p == NULL) return ENC_BAD_ARG;
 
-    uint8_t tmp[VARINT64_MAX_BYTES];
-    size_t vlen = 0;
-    enc_result_t e = enc_varint(tmp, sizeof(tmp), &vlen, (uint64_t)n);
+    uint8_t tag_buf[6];
+    size_t tag_len = 0;
+    enc_result_t e = enc_tag(tag_buf, sizeof(tag_buf), &tag_len, field_id,
+                             MSGCODEC_WIRE_BYTES);
     if (e != ENC_OK) return e;
 
-    size_t total = 1 + vlen + n;
+    uint8_t len_buf[VARINT64_MAX_BYTES];
+    size_t len_len = 0;
+    e = enc_varint(len_buf, sizeof(len_buf), &len_len, (uint64_t)n);
+    if (e != ENC_OK) return e;
+
+    size_t total = tag_len + len_len + n;
     if (cap < total) return ENC_NO_SPACE;   /* 不截断（P2） */
 
     size_t i = 0;
-    out[i++] = field_id;
-    for (size_t k = 0; k < vlen; k++) out[i++] = tmp[k];
-    if (n > 0) memcpy(out + i, p, n);
-    i += n;
+    memcpy(out + i, tag_buf, tag_len); i += tag_len;
+    memcpy(out + i, len_buf, len_len); i += len_len;
+    if (n > 0) { memcpy(out + i, p, n); i += n; }
     *used = i;
     return ENC_OK;
 }
@@ -120,16 +129,44 @@ dec_result_t dec_next_field(const uint8_t *in, size_t n, size_t *cursor, field_v
     if (in == NULL || cursor == NULL || out == NULL) return DEC_BAD_WIRE;
     size_t c = *cursor;
     if (c >= n) return DEC_TRUNCATED;
-    uint8_t fid = in[c];
+
+    /* tag = (field_id << 3) | wire_type —— protobuf 风格，与生产/后端一致。 */
+    uint64_t tag = 0;
+    size_t tag_len = 0;
+    dec_result_t d = dec_varint(in + c, n - c, &tag_len, &tag);
+    if (d != DEC_OK) return d;
+    c += tag_len;
+
+    uint8_t fid = (uint8_t)(tag >> 3);
+    uint8_t wtype = (uint8_t)(tag & 0x07u);
     if (fid == 0) return DEC_BAD_WIRE;      /* 字段号 0 非法（与编码侧对称） */
-    c++;
-    size_t hdr = 0;
+    if (wtype != MSGCODEC_WIRE_VARINT && wtype != MSGCODEC_WIRE_BYTES) {
+        return DEC_BAD_WIRE;                /* 不支持的 wire type：不"尽量解析" */
+    }
+
+    if (wtype == MSGCODEC_WIRE_VARINT) {
+        /* 负载是 varint 本身；先解出来确认收全，再回填 */
+        uint64_t v = 0;
+        size_t vlen = 0;
+        d = dec_varint(in + c, n - c, &vlen, &v);
+        if (d != DEC_OK) return d;
+        out->field_id = fid;
+        out->wire_type = wtype;
+        out->value = in + c;
+        out->value_len = vlen;
+        *cursor = c + vlen;
+        return DEC_OK;
+    }
+
+    /* length-delimited */
     uint64_t vlen = 0;
-    dec_result_t d = dec_varint(in + c, n - c, &hdr, &vlen);
+    size_t hdr = 0;
+    d = dec_varint(in + c, n - c, &hdr, &vlen);
     if (d != DEC_OK) return d;
     c += hdr;
     if (vlen > (uint64_t)(n - c)) return DEC_TRUNCATED;   /* 值还没收全 */
     out->field_id = fid;
+    out->wire_type = wtype;
     out->value = in + c;
     out->value_len = (size_t)vlen;
     *cursor = c + (size_t)vlen;

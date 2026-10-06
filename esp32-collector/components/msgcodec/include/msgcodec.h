@@ -53,9 +53,29 @@ enc_result_t enc_field_bytes(uint8_t *out, size_t cap, size_t *used,
 /* ---- 字段读取（顺序扫描）----
  * 读出一个字段并把 *cursor 推到下一个字段；value 指向【输入缓冲内部】（零拷贝）。
  * 没有更多字段时返回 DEC_TRUNCATED 且 cursor 不变。 */
+/* 线路格式（**唯一权威 = 生产代码 + 后端**，不是本骨架自己定的）：
+ *   帧 = [类型字节 u8] 然后若干字段
+ *   字段 = [tag varint] [负载]
+ *   tag  = (field_id << 3) | wire_type         <-- protobuf 风格
+ *   wire_type: 0 = varint（负载就是 varint 值）
+ *              2 = length-delimited（负载 = varint 长度 + 数据）
+ *
+ * ⚠ 2026-10-06 修正：本骨架初版把字段编成
+ *     [field_id 1 字节][varint 长度][值]
+ *   —— 那是**另一种格式**，与生产 frame_codec.c:38 的
+ *   `tag = (field_num << 3) | WIRE_VARINT` 以及后端
+ *   backend/pkg/frame/frame.go:253 的 appendTag **都不兼容**。
+ *   由 S0 的共享 golden vector（protocol/vectors/wire_primitives.txt）
+ *   当场发现：12 条向量里 5 条对不上。
+ *   ⇒ 定义了"另一个格式"的骨架，比没有骨架更危险：它看起来能用。
+ */
+#define MSGCODEC_WIRE_VARINT 0u
+#define MSGCODEC_WIRE_BYTES  2u
+
 typedef struct {
     uint8_t        field_id;
-    const uint8_t *value;
+    uint8_t        wire_type;   /* 0 = varint；2 = length-delimited */
+    const uint8_t *value;       /* 负载（varint 字段：其 varint 字节；bytes 字段：数据本身） */
     size_t         value_len;
 } field_view_t;
 

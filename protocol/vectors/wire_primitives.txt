@@ -1,0 +1,122 @@
+# EHomeSystem 3.0 线路格式 golden vector（S0：冻结契约）
+#
+# 为什么存在这个文件（设计文档 §3 迁移路径 S0）：
+#   ESP32 端（components/msgcodec）与后端（backend/pkg/frame）是【两套独立实现】，
+#   各自带着各自的黄金向量。两端可能【同时自洽却互相不通】——
+#   这正是 S0 要在任何重构之前拦住的事：设计原文为
+#   "必须先有 S0 契约，否则重构中两端会各自漂移"。
+#
+# 本文件是【唯一】的向量来源。三处独立校验：
+#   - 后端 Go：backend/pkg/frame/golden_vectors_test.go（解析本文件）
+#   - ESP32 C ：host_tests/golden_vectors_tests.c（解析本文件）
+#   - 独立第三份实现：esp32-collector/tools/check_golden_vectors.py（Python）
+# 任何一端改了编码而本文件不变 ⇒ 那一端变红。
+# 要改格式，必须【同时】改本文件与两端实现，并在提交信息里说明。
+#
+# 语法（刻意极简、语言中立）：
+#   #  注释
+#   case <名字>           开始一个用例
+#   type <u8 十进制>      消息类型字节（帧首字节）；子结构用 sub
+#   u64 <字段号> <值>      varint 字段（十进制，最大 2^64-1）
+#   bytes <字段号> <hex>   长度定界字段（十六进制；空用 -）
+#   wire <hex>            期望编码结果（唯一权威）
+#   end                   结束该用例
+#
+# 重要：本文件的 wire 值【不允许手写】，必须由实现生成后再粘入。
+#   2026-10-06 第一版手写了 12 条，Python 门禁当场抓出 9 条错
+#   （字段号 2 写成 tag 0x02、类型字节错、长度前缀错、128 字节写成 130 字节）。
+#   本版全部 wire 由 encode_case() 生成。
+
+# --- 基线：直接取自后端既有 Go 测试 TestLegacyWriteCmdGoldenVector ---
+# NewEncoder(MsgWriteCmd=6), EncodeVarint(1,17), (2,9),
+# EncodeBytes(3,[01 03 00 00]), (4,8), (5,33), (6,2500)
+
+case writecmd_golden
+type 6
+u64 1 17
+u64 2 9
+bytes 3 01030000
+u64 4 8
+u64 5 33
+u64 6 2500
+wire 06081110091a04010300002008282130c413
+end
+
+# --- varint 边界 ---
+# 注意 field 2 的 tag = (2<<3)|0 = 16 = 0x10（不是 0x02——初版就错在这里）
+
+case varint_zero
+type 8
+u64 2 0
+wire 081000
+end
+
+case varint_127
+type 8
+u64 2 127
+wire 08107f
+end
+
+case varint_128
+type 8
+u64 2 128
+wire 08108001
+end
+
+case varint_max_u32
+type 8
+u64 2 4294967295
+wire 0810ffffffff0f
+end
+
+case varint_max_u64
+type 8
+u64 2 18446744073709551615
+wire 0810ffffffffffffffffff01
+end
+
+# --- 长度定界 ---
+
+case bytes_empty
+type 8
+bytes 3 -
+wire 081a00
+end
+
+case bytes_hello
+type 8
+bytes 3 68656c6c6f
+wire 081a0568656c6c6f
+end
+
+# --- 字段号边界：tag 从 1 字节跨到 2 字节 ---
+# field 15 -> tag (15<<3)|0 = 120 = 0x78（1 字节）
+# field 16 -> tag (16<<3)|0 = 128 = 0x80 0x01（2 字节）
+
+case field_15_one_byte_tag
+type 8
+u64 15 1
+wire 087801
+end
+
+case field_16_two_byte_tag
+type 8
+u64 16 1
+wire 08800101
+end
+
+# --- 长度恰好跨前缀宽度：128 字节 -> 长度前缀 80 01 ---
+
+case bytes_len_128
+type 8
+bytes 3 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+wire 081a80010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+end
+
+# --- 子结构：无类型前缀（SubEncoder 语义）---
+
+case sub_encoder_has_no_type_byte
+sub
+u64 1 1
+wire 0801
+end

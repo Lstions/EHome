@@ -86,17 +86,19 @@ static void test_field_roundtrip(void)
  * 变异自证时曾发现只测了 bytes，u64 的容量检查无人看管。 */
 static void test_field_no_space(void)
 {
+    /* 2026-10-06：格式改为 protobuf tag（(field<<3)|wire），长度随之改变。
+     * 旧格式是 [field_id][len][value]，本用例原先按它算的尺寸已不适用。 */
     uint8_t small[3]; size_t u = 0;
-    /* bytes: field_id(1) + len(1) + "hello"(5) = 7 > 3 */
+    /* bytes 字段 2：tag(1) + len(1) + "hello"(5) = 7 > 3 */
     CHECK(enc_field_bytes(small, sizeof(small), &u, 2, "hello", 5) == ENC_NO_SPACE);
 
-    /* u64: field_id(1) + len(1) + varint(300)=2 = 4，cap=3 必须拒绝 */
-    uint8_t u3[3]; size_t uu = 0;
-    CHECK(enc_field_u64(u3, sizeof(u3), &uu, 1, 300) == ENC_NO_SPACE);
-    /* 恰好放下（cap=4）允许 —— 边界 */
-    uint8_t u4[4]; size_t uu4 = 0;
+    /* u64 字段 1 值 300：tag(1) + varint(300)=2 = 3，cap=2 必须拒绝 */
+    uint8_t u2[2]; size_t uu = 0;
+    CHECK(enc_field_u64(u2, sizeof(u2), &uu, 1, 300) == ENC_NO_SPACE);
+    /* 恰好放下（cap=3）允许 —— 边界 */
+    uint8_t u4[3]; size_t uu4 = 0;
     CHECK(enc_field_u64(u4, sizeof(u4), &uu4, 1, 300) == ENC_OK);
-    CHECK(uu4 == 4);
+    CHECK(uu4 == 3);
 
     /* bytes 恰好放下 */
     uint8_t b7[7]; size_t ub = 0;
@@ -129,7 +131,8 @@ static void test_u64_field_with_trailing_bytes(void)
 /* 9) 截断的字段值 -> TRUNCATED */
 static void test_truncated_field(void)
 {
-    uint8_t buf[3] = { 0x02, 0x05, 'h' };   /* 声称 len=5，只有 1 字节 */
+    /* tag=(2<<3)|2=0x12，声称 len=5，只有 1 字节数据 */
+    uint8_t buf[3] = { 0x12, 0x05, 'h' };
     size_t cur = 0; field_view_t f;
     CHECK(dec_next_field(buf, sizeof(buf), &cur, &f) == DEC_TRUNCATED);
 }
