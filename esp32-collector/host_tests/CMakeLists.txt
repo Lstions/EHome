@@ -846,7 +846,7 @@ add_test(NAME net_policy_tests COMMAND net_policy_tests)
 # D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME host_coverage
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_host_coverage.py --max-uncovered 17)
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_host_coverage.py --max-uncovered 16)
 
 add_test(NAME no_weak_symbols
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_no_weak_symbols.py)
@@ -910,6 +910,22 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/nvs_helper
 )
 target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
+add_executable(mqtt_adapter_tests
+    mqtt_adapter_tests.c
+    ../components/transport/transport.c
+)
+target_include_directories(mqtt_adapter_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/ehome_mqtt
+)
+target_compile_options(mqtt_adapter_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable
+    # 生产代码在 IDF 下不报 unused-parameter（其默认警告集不同）；
+    # 宿主测试沿用同一宽容度，避免"因脚手架而报错"的假问题。
+    -Wno-unused-parameter)
+add_test(NAME mqtt_adapter_tests COMMAND mqtt_adapter_tests)
+
 add_test(NAME msg_handler_publish_tests COMMAND msg_handler_publish_tests)
 
 add_test(NAME transport_broadcast_tests COMMAND transport_broadcast_tests)
