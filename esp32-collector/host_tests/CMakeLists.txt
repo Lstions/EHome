@@ -840,3 +840,17 @@ add_test(NAME net_policy_tests COMMAND net_policy_tests)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME tcp_start_reachable
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tcp_start_reachable.py)
+
+# D-09 定帧契约（需要 esp 头 stub 才能宿主编译 transport.c）
+add_executable(transport_framing_tests
+    transport_framing_tests.c
+    ../components/transport/transport.c
+    ../components/netpolicy/net_policy.c
+)
+target_include_directories(transport_framing_tests PRIVATE
+    ../components/transport/include
+    ../components/netpolicy/include
+    hello_stubs
+)
+target_compile_options(transport_framing_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME transport_framing_tests COMMAND transport_framing_tests)

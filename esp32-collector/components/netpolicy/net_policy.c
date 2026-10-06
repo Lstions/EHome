@@ -18,3 +18,31 @@ bool net_policy_tcp_start_overdue(bool tcp_configured, bool tcp_connected,
     if (tcp_connected)   return false;   /* 连上了就不告警 */
     return elapsed_ms >= deadline_ms;
 }
+
+write_outcome_t net_policy_classify_write(size_t requested, size_t written, bool hard_error)
+{
+    /* 顺序很重要：硬错误优先于任何"写了多少"的判断 ——
+     * 部分写出后遇到 EPIPE，结论应当是 ERROR（重试无意义），不是 PARTIAL。 */
+    if (hard_error) return WRITE_ERROR;
+    if (written == 0 && requested > 0) return WRITE_NOTHING;
+    if (written < requested) return WRITE_PARTIAL;
+    return WRITE_COMPLETE;   /* 注意：written >= requested 都算完整（written 不该超过 requested） */
+}
+
+const char *net_policy_write_outcome_name(write_outcome_t w)
+{
+    switch (w) {
+    case WRITE_COMPLETE: return "COMPLETE";
+    case WRITE_PARTIAL:  return "PARTIAL";
+    case WRITE_NOTHING:  return "NOTHING";
+    case WRITE_ERROR:    return "ERROR";
+    default:             return "UNKNOWN";
+    }
+}
+
+bool net_policy_write_is_success(write_outcome_t w)
+{
+    /* 【只有】WRITE_COMPLETE 算成功。
+     * D-10 的病根就是在这里放宽：旧代码用 written > 0 当成功。 */
+    return w == WRITE_COMPLETE;
+}

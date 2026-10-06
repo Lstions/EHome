@@ -109,6 +109,43 @@ esp_err_t transport_broadcast(const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
+/* === D-09：定帧契约的唯一来源 ===
+ *
+ * 这张表是"每种传输交付什么"的【单一事实】。
+ *
+ * 诚实说明其强制力：transport_type_t 目前【没有 COUNT 哨兵】，
+ * 所以新增类型时编译器【不会】因为表里少一项而报错 ——
+ * 未表态的类型会走到下面的 UNKNOWN 分支（失败可见，但不是编译期失败）。
+ * 想升级为编译期强制，需要给枚举加哨兵并同步所有 switch；
+ * 那是一次独立改动，此处不顺手做（避免把 B0 的"小修"变成枚举重构）。 */
+static const transport_framing_t s_framing[TRANSPORT_TYPE_TCP + 1] = {
+    [TRANSPORT_TYPE_MQTT] = TRANSPORT_DELIVERS_MESSAGES,   /* MQTT 自带分帧 */
+    [TRANSPORT_TYPE_TCP]  = TRANSPORT_DELIVERS_STREAM,     /* TCP 是字节流，必须上层定界 */
+};
+
+transport_framing_t transport_framing_of(transport_type_t type)
+{
+    /* 越界或未表态 => UNKNOWN，【不】默认成"完整消息"。
+     * 默认成完整消息正是 D-09 的成因：一个未经声明的乐观假设。 */
+    if ((int)type < 0 || (int)type >= (int)(sizeof(s_framing) / sizeof(s_framing[0]))) {
+        return TRANSPORT_FRAMING_UNKNOWN;
+    }
+    transport_framing_t f = s_framing[type];
+    if (f != TRANSPORT_DELIVERS_MESSAGES && f != TRANSPORT_DELIVERS_STREAM) {
+        return TRANSPORT_FRAMING_UNKNOWN;
+    }
+    return f;
+}
+
+const char *transport_framing_name(transport_framing_t f)
+{
+    switch (f) {
+    case TRANSPORT_DELIVERS_MESSAGES: return "MESSAGES";
+    case TRANSPORT_DELIVERS_STREAM:   return "STREAM";
+    default:                          return "UNKNOWN";
+    }
+}
+
 bool transport_registry_has_type(transport_type_t type)
 {
     if (!s_initialized) {
@@ -158,4 +195,21 @@ transport_t *transport_get_connected(void)
 bool transport_any_connected(void)
 {
     return transport_get_connected() != NULL;
+}
+
+void transport_audit_ops(const transport_ops_t *ops, transport_ops_audit_t *out)
+{
+    if (out == NULL) return;
+    const bool has = (ops != NULL);
+    out->has_init         = has && ops->init != NULL;
+    out->has_deinit       = has && ops->deinit != NULL;
+    out->has_start        = has && ops->start != NULL;
+    out->has_stop         = has && ops->stop != NULL;
+    out->has_send         = has && ops->send != NULL;
+    out->has_is_connected = has && ops->is_connected != NULL;
+    /* 必需：没有它们传输根本无法工作 —— 缺失必须为 0 */
+    out->required_missing = (out->has_start ? 0u : 1u) + (out->has_stop ? 0u : 1u)
+                          + (out->has_send ? 0u : 1u) + (out->has_is_connected ? 0u : 1u);
+    /* 可选：init/deinit 允许缺席（表示"无需运行时初始化/清理"），但要看得见 */
+    out->optional_missing = (out->has_init ? 0u : 1u) + (out->has_deinit ? 0u : 1u);
 }
