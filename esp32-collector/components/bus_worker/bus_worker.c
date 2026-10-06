@@ -23,6 +23,7 @@
  */
 
 #include "bus_worker.h"
+#include "data_batch_codec.h"   /* D-18：帧长算术的唯一定义处 */
 #include "bus_queue_policy.h"
 #include "bus_rx_boundary.h"
 #include "bus_dma.h"
@@ -491,52 +492,38 @@ static bool data_batch_compatible(const report_desc_t *base, const report_desc_t
  return true;
 }
 
-/* 一帧 DataBatch 的**确切**字节数预测，与 data_batch_codec.c 的
- * data_batch_encoded_size() 同式。bus_worker 用它做"降 n"决策，从而不必
- * 链接编码器、也不必分配编码缓冲。
+/* D-18 修复（2026-10-06）：此处原先【复刻】了编码器的字节算术
+ * （db_varint_size / db_field_varint_size / db_field_bytes_size /
+ *   data_batch_frame_size，约 50 行），注释自陈"与 data_batch_codec.c 的
+ * data_batch_encoded_size() 同式"，靠一句"两侧若漂移测试会红"约束。
  *
- * 字段号/布局必须与契约 §2 及 data_batch_codec.h 保持一致；两侧若漂移，
- * bus_worker_data_batch_tests.c 的 T6（降 n）会立刻变红。 */
-static size_t db_varint_size(uint64_t v)
-{
- size_t n = 1;
- while (v > 0x7F) { n++; v >>= 7; }
- return n;
-}
-
-static size_t db_field_varint_size(uint8_t field_num, uint64_t value)
-{
- return db_varint_size(((uint64_t)field_num << 3) | 0) + db_varint_size(value);
-}
-
-static size_t db_field_bytes_size(uint8_t field_num, size_t len)
-{
- return db_varint_size(((uint64_t)field_num << 3) | 2) +
-        db_varint_size(len) + len;
-}
-
-/* 与编码器同款的可选字段省略规则（0 即省略；field8 在 edge!=0 时恒写，
- * 与 data_report_codec.c 对 0x03 的既有习惯一致）。 */
+ * 为什么要删掉复刻：
+ *   1. 帧布局若有两处定义，漂移时的症状是【静默】的 —— 尺寸算小了会写出
+ *      超长帧或提前降 n，算大了会白白少聚合；两者都不会让编译失败；
+ *   2. 复刻【没有换来任何解耦】：bus_worker 本就 REQUIRES msg_handler
+ *      （其 CMakeLists 注释明确写着就是为了 data_batch_encode()），
+ *      宿主测试也早已链接 data_batch_codec.c ⇒ 只是多了一份会漂移的副本；
+ *   3. 这正是 P4（语义只有一处定义）。
+ *
+ * 现在唯一来源是 data_batch_encoded_size()：bus_worker 只做
+ * report_desc_t -> data_batch_sample_t 的**字段搬运**，不含任何布局知识。
+ * 字段号/宽度/省略规则一旦改动，两侧不可能再各自漂移 —— 因为只剩一侧。 */
 static size_t data_batch_frame_size(uint32_t channel_id, uint64_t base_ts,
                                     uint32_t first_seq,
                                     const report_desc_t *cands, size_t n,
                                     uint32_t edge, uint32_t tmpl, uint8_t cmd_idx)
 {
- size_t total = 1; /* 类型字节 */
- total += db_field_varint_size(1, n);
- total += db_field_varint_size(2, base_ts);
- total += db_field_varint_size(3, first_seq);
- total += db_field_varint_size(4, channel_id);
- for (size_t i = 0; i < n; i++) {
-  uint64_t delta = cands[i].timestamp_us - base_ts;
-  size_t body = db_field_varint_size(1, delta) +
-                db_field_bytes_size(2, cands[i].len);
-  total += db_field_bytes_size(5, body);
- }
- if (edge != 0) total += db_field_varint_size(6, edge);
- if (tmpl != 0) total += db_field_varint_size(7, tmpl);
- if (cmd_idx > 0 || edge != 0) total += db_field_varint_size(8, cmd_idx);
- return total;
+    if (cands == NULL || n == 0 || n > DATA_BATCH_MAX_SAMPLES) return 0;
+
+    data_batch_sample_t samples[DATA_BATCH_MAX_SAMPLES];
+    for (size_t i = 0; i < n; i++) {
+        /* 只搬字段，不做算术 —— 布局知识全部留在编码器里。 */
+        samples[i].delta_us = cands[i].timestamp_us - base_ts;
+        samples[i].raw_data = report_payload_of(&cands[i]);
+        samples[i].raw_len  = cands[i].len;
+    }
+    return data_batch_encoded_size(channel_id, base_ts, first_seq,
+                                   samples, n, edge, tmpl, cmd_idx);
 }
 
 /* 时间戳是否落在聚合窗口内（契约 §3：ts - start_us < WINDOW_MS）。 */
