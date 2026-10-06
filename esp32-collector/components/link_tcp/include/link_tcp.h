@@ -50,6 +50,11 @@ extern "C" {
 /**
  * I/O 原语 —— 设备上由 esp_tls 实现；宿主测试注入假实现。
  */
+/** io->read 的四个返回值中，"非字节数"的三个（见 read 的契约说明）。 */
+#define LINK_TCP_IO_AGAIN   0
+#define LINK_TCP_IO_CLOSED  (-1)
+#define LINK_TCP_IO_ERROR   (-2)
+
 typedef struct {
     /**
      * 建立连接（含 TLS 握手与 mTLS 校验）。
@@ -66,6 +71,25 @@ typedef struct {
      *         <0 硬错误（连接已断）。
      */
     int (*write)(void *handle, const uint8_t *data, size_t len);
+
+    /**
+     * 读取（阻塞策略由实现决定）。
+     *
+     * 返回值约定（**四种状态必须可区分** —— 调用方对它们的处置完全不同）：
+     * @return >0                    读到的字节数（**字节流**，与"消息"无关）
+     *         LINK_TCP_IO_AGAIN (0) 暂时无数据（超时）：**正常**，继续读
+     *         LINK_TCP_IO_CLOSED    对端已正常关闭（EOF）：应重建连接
+     *         LINK_TCP_IO_ERROR     硬错误：应重建连接并计数
+     *
+     * 为什么 EOF 不能混进"错误"：对端正常关闭与服务端崩溃是**两件事**，
+     * 处置不同（前者可能是有意重启，后者要告警）。旧代码只有">0 成功 / 否则失败"
+     * 两档，这正是 P1 要治的形态。
+     *
+     * 契约要点：本函数【不】保证"一次 read == 一条消息"。
+     * TCP 是字节流，消息边界由上层定界器按 payload_len 判定 ——
+     * 这正是旧实现（ehome_tcp.c:477 把一次 recv 当一条消息）的病灶（D-09）。
+     */
+    int (*read)(void *handle, uint8_t *buf, size_t cap);
 
     /** 关闭连接（幂等）。 */
     void (*close)(void *handle);
@@ -97,6 +121,36 @@ void link_tcp_free(link_tcp_ctx_t *c);
 
 /** 取驱动实例（无状态单例，可安全多处引用）。 */
 const link_driver_t *link_tcp_driver(void);
+
+/**
+ * 读取结果 —— 每个取值对应调用方【不同】的决策（P1）。
+ *
+ * 为什么不复用 link_result_t：那是**写**的结果（SENT_FULL/PARTIAL/BACKPRESSURE），
+ * 与读的语义没有交集。硬塞进同一个枚举会让"读到 0 字节"和"写出 0 字节"
+ * 共用一条分支 —— 正是 P4 反对的"一个量两个语义"。
+ */
+typedef enum {
+    LINK_READ_DATA = 0,    /* 读到 *n_out > 0 字节 */
+    LINK_READ_AGAIN,       /* 暂时无数据（超时）：**正常**，继续读 */
+    LINK_READ_CLOSED,      /* 对端已正常关闭（EOF）：调用方应重建连接 */
+    LINK_READ_NOT_READY,   /* 链路未建立或已断：调用方应重连 */
+    LINK_READ_FATAL,       /* 驱动硬错误 */
+} link_read_result_t;
+
+const char *link_read_result_name(link_read_result_t r);
+
+/**
+ * 从链路读一段**字节流**（不做任何定界）。
+ *
+ * @param n_out 输出：本次读到的字节数（仅 LINK_READ_DATA 时 > 0）。
+ * @return 见 link_read_result_t。
+ *
+ * **本函数只提供字节流语义**（设计 §1.2）：定界归上层定界器
+ * （`wire_delim_feed`）。一次调用可能返回半条消息、也可能返回三条 ——
+ * 调用方**绝不能**把返回值当作消息边界。
+ */
+link_read_result_t link_tcp_read(link_tcp_ctx_t *c, uint8_t *buf, size_t cap,
+                                size_t *n_out);
 
 /**
  * 退避毫秒数（**纯函数**，宿主可测）。

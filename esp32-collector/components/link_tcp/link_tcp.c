@@ -21,7 +21,60 @@ struct link_tcp_ctx {
     uint32_t          tx_partial;            /* 部分写出次数（P3：这条路径必须可见） */
     uint32_t          tx_backpressure;
     uint32_t          tx_fatal;
+    /* --- 接收侧诊断（P3：每条路径都要可见）--- */
+    uint32_t          rx_bytes;   /* 累计读到的字节数（**字节流**口径，不是消息数） */
+    uint32_t          rx_again;   /* 暂无数据次数（正常状态） */
+    uint32_t          rx_closed;  /* 对端正常关闭次数（EOF，非错误） */
+    uint32_t          rx_fatal;   /* 读硬错误次数 */
 };
+
+static const char *const s_read_names[] = {
+    [LINK_READ_DATA]      = "DATA",
+    [LINK_READ_AGAIN]     = "AGAIN",
+    [LINK_READ_CLOSED]    = "CLOSED",
+    [LINK_READ_NOT_READY] = "NOT_READY",
+    [LINK_READ_FATAL]     = "FATAL",
+};
+
+const char *link_read_result_name(link_read_result_t r)
+{
+    if ((int)r < 0 || r > (int)LINK_READ_FATAL) return "UNKNOWN";
+    return s_read_names[r];
+}
+
+link_read_result_t link_tcp_read(link_tcp_ctx_t *c, uint8_t *buf, size_t cap,
+                                size_t *n_out)
+{
+    if (n_out != NULL) *n_out = 0;
+    if (c == NULL || buf == NULL || cap == 0 || n_out == NULL) return LINK_READ_FATAL;
+    /* 连接未建立时没有可发起的读 —— handle 由本模块维护，
+     * 不存在"查与用之间被外部改变"的窗口（与 link_send 的 TOCTOU 情形不同）。 */
+    if (c->handle == NULL) return LINK_READ_NOT_READY;
+    if (c->cfg.io == NULL || c->cfg.io->read == NULL) return LINK_READ_FATAL;
+
+    int n = c->cfg.io->read(c->handle, buf, cap);
+    if (n > 0) {
+        if ((size_t)n > cap) { c->rx_fatal++; return LINK_READ_FATAL; }  /* 驱动违约 */
+        c->rx_bytes += (uint32_t)n;
+        *n_out = (size_t)n;
+        return LINK_READ_DATA;
+    }
+    if (n == LINK_TCP_IO_AGAIN) {
+        /* 超时：正常状态。单独一档，**不并进 FATAL** */
+        c->rx_again++;
+        return LINK_READ_AGAIN;
+    }
+    if (n == LINK_TCP_IO_CLOSED) {
+        /* 对端正常关闭：连接不可再用，但**不是故障**
+         * （可能是服务端有意重启/滚动更新）。 */
+        c->rx_closed++;
+        c->handle = NULL;
+        return LINK_READ_CLOSED;
+    }
+    c->rx_fatal++;
+    c->handle = NULL;
+    return LINK_READ_FATAL;
+}
 
 link_tcp_ctx_t *link_tcp_new(const link_tcp_config_t *cfg)
 {

@@ -1065,3 +1065,15 @@ add_executable(scheduler_health_tests
 target_include_directories(scheduler_health_tests PRIVATE ../components/scheduler)
 target_compile_options(scheduler_health_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)
+
+add_executable(rx_pump_tests
+    rx_pump_tests.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(rx_pump_tests PRIVATE
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(rx_pump_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rx_pump_tests COMMAND rx_pump_tests)
