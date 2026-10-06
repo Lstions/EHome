@@ -1015,6 +1015,14 @@ add_executable(frame_header_tests
 )
 target_include_directories(frame_header_tests PRIVATE ../components/wire/include)
 target_compile_options(frame_header_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(device_op_tests
+    device_op_tests.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_tests PRIVATE ../components/device_op/include)
+target_compile_options(device_op_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_op_tests COMMAND device_op_tests)
+
 add_test(NAME frame_header_tests
     COMMAND frame_header_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/frame_header.txt)
 
