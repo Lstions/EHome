@@ -13,6 +13,9 @@ typedef int esp_err_t;
 #define ESP_ERR_NOT_SUPPORTED  0x106
 #define ESP_ERR_TIMEOUT        0x107
 #define ESP_ERR_PIN_CONFLICT   0x7101
+/* ESP-IDF: ESP_ERR_NVS_BASE(0x1100) + 0x0A。桩里必须给出**真实数值**，
+ * 否则"命名空间不存在"这条分支在宿主侧永远走不到，测试就成了假绿。 */
+#define ESP_ERR_NVS_NOT_FOUND  0x110A
 
 const char *esp_err_to_name(esp_err_t err);
 

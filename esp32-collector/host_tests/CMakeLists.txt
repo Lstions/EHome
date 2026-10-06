@@ -1200,3 +1200,25 @@ target_include_directories(handler_device_op_tests PRIVATE
 )
 target_compile_options(handler_device_op_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME handler_device_op_tests COMMAND handler_device_op_tests)
+
+# main 侧注入的三个原语：NVS 擦除 / 同步发送 / 重启。
+# 重点覆盖"命名空间不存在算成功"这条分支 —— 它错法的后果是
+# "一个永远失败、其实已经成功的恢复出厂"。
+add_executable(device_op_wiring_tests
+    device_op_wiring_tests.c
+    # 注入函数本身（msg_handler_set_device_op_hooks）在 handler_device_op.c 里；
+    # device_op.c 提供 device_op_reset_state 等。
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(device_op_wiring_tests PRIVATE
+    stubs
+    stubs/rom
+    ../main
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_wiring_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_op_wiring_tests COMMAND device_op_wiring_tests)

@@ -17,6 +17,9 @@ esp_err_t nvs_set_u8(nvs_handle_t handle, const char *key, uint8_t value);
 esp_err_t nvs_set_u64(nvs_handle_t handle, const char *key, uint64_t value);
 esp_err_t nvs_set_str(nvs_handle_t handle, const char *key, const char *value);
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key);
+/* 2026-10-06 新增：远程恢复出厂要擦整个命名空间。
+ * 桩里补上，否则 device_op_wiring.c 在宿主侧无法编译（IDF 侧本来就有）。 */
+esp_err_t nvs_erase_all(nvs_handle_t handle);
 esp_err_t nvs_commit(nvs_handle_t handle);
 void nvs_close(nvs_handle_t handle);
 

@@ -25,6 +25,12 @@ void on_mqtt_msg_cb(const char *topic, const uint8_t *data, size_t len, void *ct
 void on_transport_msg_cb(const uint8_t *data, size_t len, void *ctx);
 void on_transport_state_cb(transport_state_t state, void *ctx);
 
+/**
+ * 注入远程运维（0x22）的三个原语：NVS 擦除 / 同步发送 / 重启。
+ * 必须在传输开始收包之前调用（见 device_op_wiring.c）。
+ */
+void device_op_wiring_init(void);
+
 #ifdef __cplusplus
 }
 #endif

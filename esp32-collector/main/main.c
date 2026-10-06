@@ -611,6 +611,11 @@ void app_main(void)
      * main, so the release-on-ACK handler is injected here. */
     msg_handler_set_diag_ack_cb(crash_diag_on_ack);
 
+    /* 远程运维（0x22 重启 / 恢复出厂）的三个原语。
+     * 注入点刻意放在传输启动之前：晚注入的话，一条早到的 0x22 会命中
+     * "未注入 ⇒ 拒绝执行"分支，而操作员看到的是"设备没反应"。 */
+    device_op_wiring_init();
+
     /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
      * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)
      * before app_main. We must deinit first, then reinit with our config. */
