@@ -49,10 +49,16 @@ var (
 		Help: "Current data report worker pool queue depth",
 	})
 
-	// PendingWrites tracks pending write commands
+	// PendingWrites tracks pending write commands awaiting response.
+	//
+	// 与 PendingWriteActiveEntries（ehome_pendingwrite_active_entries）语义重叠：
+	// 两者都是"当前在途的写请求数"。这里刻意保留两个名字而不是删掉其一 ——
+	// ehome_pending_writes 先存在，删掉会让可能按它配置的看板/告警静默失配；
+	// 而保留一个**没有写入点**的 gauge 更糟：它会一直暴露为 0，看起来像
+	// "永远没有待写命令"。现由 pendingwrite 的提交/完成路径同时刷新两者。
 	PendingWrites = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "ehome_pending_writes",
-		Help: "Number of pending write commands awaiting response",
+		Help: "Number of pending write commands awaiting response (same value as ehome_pendingwrite_active_entries)",
 	})
 
 	// ConfigManifestsSent counts config manifests sent
@@ -82,10 +88,18 @@ var (
 
 	// --- G10: Additional design metrics ---
 
-	// NodeOnlineCount tracks online node count (deprecated, use NodesOnline)
-	_ = promauto.NewGauge(prometheus.GaugeOpts{
+	// NodeOnlineCountDeprecated 是历史指标名 ehome_node_online_count。
+	//
+	// 为什么保留：docs/设计/系统监控.md 与 docs/archive/ 下的设计文档仍按此名
+	// 描述在线节点数；删掉它会让这些文档与既有看板静默失配。
+	//
+	// 为什么必须是可写变量：它原先写成 `_ = promauto.NewGauge(...)` ——
+	// 匿名注册后**没有任何写入点**，因此恒为 0。恒为 0 比不暴露更坏：用旧指标名
+	// 做的看板会一直显示"0 个在线"，而不是"没有数据"。现已由
+	// offlinedetector.publishNodesOnline 与 NodesOnline 同步刷新。
+	NodeOnlineCountDeprecated = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "ehome_node_online_count",
-		Help: "Online node count",
+		Help: "Online node count (deprecated name; kept in sync with ehome_nodes_online)",
 	})
 
 	// EdgeDeviceTotal tracks edge device count by status

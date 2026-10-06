@@ -8,6 +8,7 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/metrics"
 
 	"gorm.io/gorm"
 )
@@ -125,15 +126,48 @@ func (d *Detector) checkOffline() {
 func (d *Detector) checkDBLastSeen(db *gorm.DB) {
 	var collectors []models.Node
 	if err := db.Where("status = ?", "online").Find(&collectors).Error; err != nil {
+		// 查询失败时【不发布】指标：宁可保留上一次的已知值，也不要把"查不到"
+		// 谎报成"0 个在线"—— 后者会直接触发 EhomeAllNodesOffline 这条
+		// critical 告警（deploy/monitoring/alert_rules.yml:192）。
 		return
 	}
 
 	now := time.Now()
+	online := len(collectors)
 	for _, col := range collectors {
 		if isNodeOffline(now, col.LastSeen) {
 			d.markOffline(db, col.NodeID, "db_last_seen_timeout")
+			online--
 		}
 	}
+
+	// ehome_nodes_online 的【唯一】刷新点。
+	//
+	// 缺陷背景（2026-10-06 现场实测）：该 gauge 原先只在 nodemgr.NewManager
+	// 里 Set() 一次（manager.go:209-212），全仓无第二个写入点 ⇒ 进程启动后
+	// 永远停在**启动瞬间**的在线数。生产实测 DB 3 个节点 online 而 /metrics 报 2。
+	//
+	// 为什么危害不止"数字不准"：deploy/monitoring/alert_rules.yml:192 的
+	// EhomeAllNodesOffline 是 critical 级，判据为 ehome_nodes_online == 0。
+	// 若进程启动时恰好没有节点在线，该指标恒为 0 —— 之后全部节点离线也**永不告警**
+	// （假阴性）；反之启动时在线数偏高会掩盖真实离线。两条都是安全方向的错误。
+	//
+	// 为什么放在这里：checkDBLastSeen 本就每秒查一次 "status = online" 的节点集，
+	// online 就是本次采样得到的权威在线数，无需额外查询；且它紧跟在 markOffline
+	// 之后，发布的是**本轮检测之后**的真实状态，不会慢一拍。文件头 1+3+1=5s 的
+	// 离线可见时延预算同样覆盖本指标的最大陈旧时间。
+	publishNodesOnline(online)
+}
+
+// publishNodesOnline 记录"当前在线节点数"（两个指标名同步）。
+//
+// ehome_node_online_count 是历史指标名（metrics.go 标注 deprecated），
+// docs/设计/系统监控.md 与归档设计文档仍在引用。它原先是匿名注册且**从无写入点**
+// ⇒ 恒为 0，这比"不存在"更坏：用旧指标名做的看板会一直显示 0 个在线。
+// 此处让它与权威值同步 —— 既保留既有 /metrics 表面（不破坏旧看板），也不再谎报。
+func publishNodesOnline(online int) {
+	metrics.NodesOnline.Set(float64(online))
+	metrics.NodeOnlineCountDeprecated.Set(float64(online))
 }
 
 // isNodeOffline 是节点离线判定的唯一判据（生产与测试共用，避免测试另抄一份阈值）。
@@ -309,18 +343,45 @@ func (d *Detector) checkEdgeDevicesOffline(db *gorm.DB) {
 		}
 	}
 
-	if len(staleIDs) == 0 {
+	// 这里不能再直接 return —— 函数末尾还要发布 ehome_edge_device_total，
+	// 提前返回会让该指标在"本轮没有设备超时"（最常见情形）时永远得不到刷新。
+	if len(staleIDs) > 0 {
+		// Fetch only stale devices from DB (targeted query, not full scan)
+		var staleDevices []models.EdgeDevice
+		if err := db.Where("id IN ? AND status <> ?", staleIDs, models.EdgeDeviceStatusOffline).Find(&staleDevices).Error; err != nil {
+			staleDevices = nil
+		}
+		for _, dev := range staleDevices {
+			d.markEdgeDeviceOffline(db, dev)
+		}
+	}
+
+	publishEdgeDeviceTotals(db)
+}
+
+// publishEdgeDeviceTotals 发布 ehome_edge_device_total{status}（各状态边缘设备数）。
+//
+// 该指标此前**没有任何写入点** ⇒ 从未出现在 /metrics 上，而
+// docs/设计/系统监控.md:41 与 docs/设计/总体设计.md:147 都把它列为对外指标 ——
+// 文档承诺了、实际拿不到（"缺失"而非"为零"，但同样会让看板空白）。
+func publishEdgeDeviceTotals(db *gorm.DB) {
+	var rows []struct {
+		Status string
+		N      int64
+	}
+	if err := db.Model(&models.EdgeDevice{}).
+		Select("status, count(*) as n").
+		Group("status").Scan(&rows).Error; err != nil {
+		// 查询失败时不 Reset：保留上一次已知值，避免把"查不到"谎报成"全为 0"。
+		logger.Warnf("[OfflineDetector] count edge devices by status: %v", err)
 		return
 	}
 
-	// Fetch only stale devices from DB (targeted query, not full scan)
-	var staleDevices []models.EdgeDevice
-	if err := db.Where("id IN ? AND status <> ?", staleIDs, models.EdgeDeviceStatusOffline).Find(&staleDevices).Error; err != nil {
-		return
-	}
-
-	for _, dev := range staleDevices {
-		d.markEdgeDeviceOffline(db, dev)
+	// 先 Reset 再赋值：设备可能整体消失（例如全部被删除）。只 Set 不清理的话，
+	// 已消失状态的序列会永远停在最后一次的数值上（假在线）。
+	metrics.EdgeDeviceTotal.Reset()
+	for _, r := range rows {
+		metrics.EdgeDeviceTotal.WithLabelValues(r.Status).Set(float64(r.N))
 	}
 }
 

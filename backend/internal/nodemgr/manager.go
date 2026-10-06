@@ -206,7 +206,13 @@ func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *
 		ha.StartPublishWorker()
 	}
 
-	// G10: Record initial node online count
+	// G10: 启动时先播报一次在线数，避免首次离线检测循环（最多 1s）之前的空窗。
+	//
+	// 注意这**不是**该指标的唯一维护者：原先只有这一处 Set()，于是 ehome_nodes_online
+	// 在进程整个生命周期里被冻结在启动瞬间的读数（2026-10-06 现场实测：
+	// DB 3 个节点在线，指标仍报 2）。之后每秒由
+	// offlinedetector.checkDBLastSeen → publishNodesOnline 刷新，见该函数处的说明
+	// （它驱动的是 critical 告警 EhomeAllNodesOffline，不能停在陈旧值上）。
 	var onlineCount int64
 	mgr.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineCount)
 	metrics.NodesOnline.Set(float64(onlineCount))

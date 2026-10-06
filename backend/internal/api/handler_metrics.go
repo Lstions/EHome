@@ -168,7 +168,10 @@ func getMetricsSummaryHandler(db *gorm.DB) gin.HandlerFunc {
 			"message": "ok",
 			"data":    resp,
 		})
-		_ = metrics.NodesOnline // suppress unused
+		// 注：此处曾有 `_ = metrics.NodesOnline // suppress unused` —— 它只是拿
+		// metrics 包"占位"以维持 import，靠一句空赋值让编译通过，读起来却像
+		// "指标已在本 handler 里维护"，实际什么都没写。该 import 仍有
+		// readCounterTotal(metrics.DataReportsProcessed) 等真实用途，故直接删掉这行。
 	}
 }
 

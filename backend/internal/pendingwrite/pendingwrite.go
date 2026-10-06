@@ -121,7 +121,12 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 	m.mu.Unlock()
 
 	// 8.1: Track active entries
+	//
+	// 两个指标名同步自增：ehome_pendingwrite_active_entries 是 8.1 引入的新名字，
+	// ehome_pending_writes 是更早的名字且**长期没有写入点**（恒为 0，看起来像
+	// "永远没有待写命令"）。两者语义相同，这里一起维护以免留下一个说谎的指标。
 	metrics.PendingWriteActiveEntries.Inc()
+	metrics.PendingWrites.Inc()
 
 	// P3-4: Persist entry to the database
 	m.persistEntry(entry, requestID, timeout)
@@ -130,6 +135,7 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 		m.removeEntry(requestID)
 		// 8.1: Decrement active entries on exit
 		metrics.PendingWriteActiveEntries.Dec()
+		metrics.PendingWrites.Dec()
 	}()
 
 	// Send the command (P3-5: QoS 2 for critical write operations)
