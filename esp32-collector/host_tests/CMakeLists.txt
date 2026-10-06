@@ -875,6 +875,14 @@ add_test(NAME databatch_injected
 add_test(NAME tcp_start_reachable
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tcp_start_reachable.py)
 
+# "建好了但没插电"门禁：每个组件都必须能从 main 到达。
+# 同族先例：api.WarmupLatestValues 自 2026-08-21 起一直没有调用者；
+# 3.0 设备侧链路组件（session/link_tcp/tls_*/transport_sel/sntp_mgr）各自
+# 有宿主测试且全绿，而 main/ 对它们**零引用** ⇒ 固件里根本没有 3.0 链路。
+# 这类问题**没有任何一处会报错**：组件自己的测试天然测不到"有没有人用它"。
+add_test(NAME component_reachable
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_reachable.py)
+
 # D-09 定帧契约（需要 esp 头 stub 才能宿主编译 transport.c）
 add_executable(transport_framing_tests
     transport_framing_tests.c
