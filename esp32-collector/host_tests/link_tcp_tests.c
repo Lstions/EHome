@@ -19,6 +19,25 @@
 #include "link.h"
 #include "link_tcp.h"
 
+/* D-30：link_send 现在需要 progress 出入参。
+ * SEND1 是"发一整帧、不关心中间进度"的便捷包装（progress 从 0 起、丢弃更新）； */
+static size_t g_prog;
+#define SEND1(l, f, n) (g_prog = 0, link_send((l), (f), (n), &g_prog))
+
+/* link.h 规定的续写循环 —— 调用方发一整帧的唯一正确姿势。
+ * 这里把它做成辅助函数，好让每个用例都用同一种（正确的）调用方式，
+ * 而不是各写各的、把"重发整帧"这种错法散落进测试。 */
+static link_result_t SEND_LOOP(link_t *l, const uint8_t *f, size_t n, size_t *prog)
+{
+    *prog = 0;
+    for (int guard = 0; guard < 16; guard++) {     /* 防御：避免测试挂死 */
+        link_result_t r = link_send(l, f, n, prog);
+        if (r == LINK_SENT_PARTIAL) continue;      /* 接着写 */
+        return r;                                  /* FULL / BACKPRESSURE / 其它 */
+    }
+    return LINK_FATAL;
+}
+
 static int s_failures = 0;
 #define CHECK(cond, ...)                                                     \
     do {                                                                     \
@@ -44,6 +63,10 @@ typedef struct {
     size_t   write_idx;
     int      write_calls;
     size_t   total_written;        /* 经假 I/O 实际写出的字节 */
+    /* 【D-30 的关键】把实际落到"线上"的字节按顺序记下来。
+     * 只有比对这条流，才能证明"续写"没有把已写出的字节重复写一遍。 */
+    uint8_t  wire[256];
+    size_t   wire_len;
 } fake_io_t;
 
 static fake_io_t s_io;
@@ -60,12 +83,21 @@ static void *fake_connect(void *io_ctx, bool *hard_fatal)
     return s_io.handle_to_return;
 }
 
+/* 把 data[0..n) 追加到"线上"记录（模拟对端真正收到的字节序列） */
+static void record_wire(const uint8_t *data, size_t n)
+{
+    if (s_io.wire_len + n > sizeof(s_io.wire)) return;
+    memcpy(s_io.wire + s_io.wire_len, data, n);
+    s_io.wire_len += n;
+}
+
 static int fake_write(void *handle, const uint8_t *data, size_t len)
 {
-    (void)handle; (void)data;
+    (void)handle;
     s_io.write_calls++;
     if (s_io.write_idx >= s_io.write_count) {
         s_io.total_written += len;
+        record_wire(data, len);
         return (int)len;                 /* 脚本用尽：视为一次写完（避免测试挂死） */
     }
     int r = s_io.write_results[s_io.write_idx++];
@@ -73,6 +105,7 @@ static int fake_write(void *handle, const uint8_t *data, size_t len)
         size_t n = (size_t)r;
         if (n > len) n = len;            /* 不许"写出"超过请求量 */
         s_io.total_written += n;
+        record_wire(data, n);
         return (int)n;
     }
     return r;                            /* 0 = 背压；<0 = 硬错 */
@@ -115,36 +148,87 @@ static void test_partial_write_is_continued(void)
     link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
     link_t *l = make_link(&cfg);
     CHECK(l != NULL, "link_create 失败");
-    CHECK(link_open(l) == LINK_SENT, "夹具应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
 
-    uint8_t frame[10] = {0};
+    /* frame 用可辨识的内容，便于逐字节比对"线上"是否被污染 */
+    uint8_t frame[10];
+    for (int i = 0; i < 10; i++) frame[i] = (uint8_t)(0xA0 + i);
+
     s_io.write_results[0] = 4;
     s_io.write_results[1] = 3;
     s_io.write_results[2] = 3;
     s_io.write_count = 3;
 
-    CHECK(link_send(l, frame, 10) == LINK_SENT, "部分写后应最终 SENT");
-    CHECK(s_io.write_calls == 3, "应续写 3 次，实际 %d", s_io.write_calls);
-    CHECK(s_io.total_written == 10, "应写完 10 字节，实际 %zu", s_io.total_written);
+    /* ⭐ D-30 回归：按 link.h 规定的续写循环发送，而不是"重发整帧"。 */
+    size_t progress = 0;
+    link_result_t r = SEND_LOOP(l, frame, 10, &progress);
+
+    CHECK(r == LINK_SENT_FULL, "续写循环后应 FULL，实际 %s", link_result_name(r));
+    CHECK(progress == 10, "progress 应为 10，实际 %zu", progress);
+    CHECK(s_io.write_calls == 3, "应为 3 次写（4+3+3），实际 %d", s_io.write_calls);
+
+    /* ⭐ 决定性断言：线上收到的字节必须【恰好等于这一帧，且只出现一次】。
+     * 这正是 D-30 的病灶 —— 旧实现会写成 frame[0:4] 两次。 */
+    CHECK(s_io.wire_len == 10, "线上字节数应为 10（不得重复），实际 %zu", s_io.wire_len);
+    CHECK(s_io.wire_len == 10 && memcmp(s_io.wire, frame, 10) == 0,
+          "线上字节必须恰好是这一帧一次（无重复、无错位）");
+
     drop_link(l);
 }
 
-/* ================= 2. 写不动 = 背压（可重试，不是失败）================= */
+/* ================= 2. 只写出一部分 -> PARTIAL（不是失败，也不是成功）===== */
+static void test_partial_write_reports_progress(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+
+    uint8_t frame[10] = {0};
+    s_io.write_results[0] = 4;      /* 只吞得下 4 字节 */
+    s_io.write_count = 1;
+
+    size_t progress = 0;
+    link_result_t r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_SENT_PARTIAL, "部分写应 PARTIAL，实际 %s", link_result_name(r));
+    CHECK(!link_result_is_error(r), "PARTIAL【不是】错误（是进行中）");
+    CHECK(progress == 4, "progress 应为 4，实际 %zu", progress);
+
+    /* 关键：新的一次调用必须【从进度处】继续，而不是重头写。
+     * 假 I/O 会如实记录它收到的是 data+4（见下一节的线上比对）。 */
+    s_io.write_results[0] = 6;
+    s_io.write_idx = 0; s_io.write_count = 1;
+    r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_SENT_FULL, "续写后应 FULL，实际 %s", link_result_name(r));
+    CHECK(progress == 10, "progress 应为 10，实际 %zu", progress);
+
+    link_stats_t st;
+    link_get_stats(l, &st);
+    CHECK(st.tx_sent_partial == 1, "PARTIAL 应单独计数（P3），实际 %u", st.tx_sent_partial);
+    CHECK(st.tx_sent_full == 1, "FULL 应计数，实际 %u", st.tx_sent_full);
+    drop_link(l);
+}
+
+/* ================= 2b. 背压 = 一个字节都没写出（整帧重试才安全）========= */
 static void test_write_blocked_is_backpressure_not_failure(void)
 {
     reset_io();
     link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
     link_t *l = make_link(&cfg);
 
-    CHECK(link_open(l) == LINK_SENT, "夹具应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
     uint8_t frame[10] = {0};
-    s_io.write_results[0] = 4;      /* 先写一部分 */
-    s_io.write_results[1] = 0;      /* 然后缓冲满 */
-    s_io.write_count = 2;
+    s_io.write_results[0] = 0;      /* 一个字节都没写出 */
+    s_io.write_count = 1;
 
-    link_result_t r = link_send(l, frame, 10);
-    CHECK(r == LINK_BACKPRESSURE, "缓冲满应为 BACKPRESSURE，实际 %s", link_result_name(r));
+    size_t progress = 0;
+    link_result_t r = link_send(l, frame, 10, &progress);
+    CHECK(r == LINK_BACKPRESSURE, "一字节未写出应为 BACKPRESSURE，实际 %s",
+          link_result_name(r));
     CHECK(!link_result_is_error(r), "背压【不是】错误（调用方应退避重试）");
+    CHECK(progress == 0, "背压时 progress 必须保持 0（这样整帧重试才安全），实际 %zu",
+          progress);
+    CHECK(s_io.wire_len == 0, "背压时线上不应有任何字节，实际 %zu", s_io.wire_len);
 
     link_stats_t st;
     link_get_stats(l, &st);
@@ -160,12 +244,12 @@ static void test_write_error_is_fatal(void)
     link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
     link_t *l = make_link(&cfg);
 
-    CHECK(link_open(l) == LINK_SENT, "夹具应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
     uint8_t frame[10] = {0};
     s_io.write_results[0] = -1;     /* 连接已断 */
     s_io.write_count = 1;
 
-    link_result_t r = link_send(l, frame, 10);
+    link_result_t r = SEND1(l, frame, 10);
     CHECK(r == LINK_FATAL, "写硬错应为 FATAL，实际 %s", link_result_name(r));
     CHECK(link_result_is_error(r), "FATAL 是错误");
     drop_link(l);
@@ -204,7 +288,7 @@ static void test_send_before_open_is_not_ready(void)
 
     (void)link_open(l);                  /* 失败：未连接 */
     int writes = s_io.write_calls;
-    CHECK(link_send(l, (const uint8_t *)"x", 1) == LINK_NOT_READY,
+    CHECK(SEND1(l, (const uint8_t *)"x", 1) == LINK_NOT_READY,
           "未连接发送应 NOT_READY");
     CHECK(s_io.write_calls == writes, "未连接时【不应】调用 write");
     drop_link(l);
@@ -260,7 +344,7 @@ static void test_backoff_resets_on_handshake_not_connect(void)
 
     /* ⭐ 连上：**不应**重置（设计 §4.2：重置条件是应用层握手，不是 socket connect） */
     s_io.handle_to_return = (void *)0x1;
-    CHECK(link_open(l) == LINK_SENT, "应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "应连接成功");
     CHECK(link_tcp_is_connected(s_ctx) == true, "连上后 is_connected 应为真");
     CHECK(link_tcp_reconnect_attempt(s_ctx) == 3,
           "socket connect 成功【不应】重置退避（设计 §4.2），实际 %u",
@@ -298,15 +382,15 @@ static void test_oversize_rejected_before_write(void)
     link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
     link_t *l = make_link(&cfg);
     static uint8_t big[LINK_TCP_MTU_BYTES + 1];
-    CHECK(link_open(l) == LINK_SENT, "夹具应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
 
     int before = s_io.write_calls;
-    CHECK(link_send(l, big, sizeof(big)) == LINK_PAYLOAD_TOO_BIG,
+    CHECK(SEND1(l, big, sizeof(big)) == LINK_PAYLOAD_TOO_BIG,
           "超 mtu 应 PAYLOAD_TOO_BIG");
     CHECK(s_io.write_calls == before, "超 mtu 时【不应】调用 write");
 
     /* 恰好等于 mtu：允许 */
-    CHECK(link_send(l, big, LINK_TCP_MTU_BYTES) == LINK_SENT, "恰好 mtu 应允许");
+    CHECK(SEND1(l, big, LINK_TCP_MTU_BYTES) == LINK_SENT_FULL, "恰好 mtu 应允许");
     drop_link(l);
 }
 
@@ -316,10 +400,48 @@ static void test_close_is_idempotent(void)
     reset_io();
     link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
     link_t *l = make_link(&cfg);
-    CHECK(link_open(l) == LINK_SENT, "应连接成功");
+    CHECK(link_open(l) == LINK_SENT_FULL, "应连接成功");
     int n = s_io.close_calls;
     drop_link(l);
     CHECK(s_io.close_calls == n + 1, "destroy 应 close 一次，实际 %d", s_io.close_calls - n);
+}
+
+/* ================= 11. 违约驱动：报出的字节数超过请求量 =================
+ * 为什么值得单独测：若 link 信任驱动报的数，进度就会【越过帧尾】，
+ * 下一轮续写会从帧外读到内存里的任意字节并写上线 —— 与 D-30 同族，
+ * 都是"流被污染"。驱动违约必须被显式抓住，不能静默夹取。 */
+static link_result_t lying_send(void *ctx, const uint8_t *data, size_t len,
+                                size_t *written_out)
+{
+    (void)ctx; (void)data; (void)len;
+    if (written_out != NULL) *written_out = 9999;   /* 谎报：远超请求量 */
+    return LINK_SENT_PARTIAL;
+}
+static link_result_t lying_open(void *ctx) { (void)ctx; return LINK_SENT_FULL; }
+static void lying_close(void *ctx) { (void)ctx; }
+static uint32_t lying_mtu(void *ctx) { (void)ctx; return 1024; }
+static bool lying_ready(void *ctx) { (void)ctx; return true; }
+
+static const link_driver_t LYING_DRV = {
+    .open = lying_open, .close = lying_close, .send = lying_send,
+    .mtu = lying_mtu, .is_ready = lying_ready, .name = "lying",
+};
+
+static void test_lying_driver_is_rejected(void)
+{
+    link_t *l = link_create(&LYING_DRV, NULL);
+    CHECK(l != NULL, "link_create 失败");
+    uint8_t frame[8] = {0};
+    size_t progress = 0;
+
+    link_result_t r = link_send(l, frame, 8, &progress);
+    CHECK(r == LINK_FATAL, "驱动谎报字节数应 FATAL，实际 %s", link_result_name(r));
+    CHECK(progress == 0, "被拒时进度不得前进，实际 %zu", progress);
+
+    link_stats_t st;
+    link_get_stats(l, &st);
+    CHECK(st.tx_driver_error == 1, "应计入 tx_driver_error，实际 %u", st.tx_driver_error);
+    link_destroy(l);
 }
 
 int main(void)
@@ -335,6 +457,7 @@ int main(void)
     test_mtu_matches_design();
     test_oversize_rejected_before_write();
     test_close_is_idempotent();
+    test_lying_driver_is_rejected();
 
     if (s_failures) { printf("link_tcp_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("link_tcp_tests: all checks passed\n");

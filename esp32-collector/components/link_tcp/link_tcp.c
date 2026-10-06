@@ -17,7 +17,8 @@ struct link_tcp_ctx {
     void             *handle;                /* io->connect 的返回值；NULL = 未连接 */
     bool              handshaked;            /* 应用层握手是否完成 */
     uint32_t          reconnect_attempt;
-    uint32_t          tx_sent;               /* 诊断计数 */
+    uint32_t          tx_sent;               /* 整帧写出次数（诊断） */
+    uint32_t          tx_partial;            /* 部分写出次数（P3：这条路径必须可见） */
     uint32_t          tx_backpressure;
     uint32_t          tx_fatal;
 };
@@ -58,7 +59,7 @@ static link_result_t tcp_open(void *ctx)
         return LINK_FATAL;   /* 配置缺失是硬错，重试无意义 */
     }
     if (c->handle != NULL) {
-        return LINK_SENT;    /* 已连接：幂等 */
+        return LINK_SENT_FULL;    /* 已连接：幂等 */
     }
 
     bool hard_fatal = false;
@@ -78,7 +79,7 @@ static link_result_t tcp_open(void *ctx)
      * **应用层握手**（Hello/HelloAck），不是 socket connect。
      * 否则会出现"连上但不通"时退避不断归零、永远 1s 重连的抖振。 */
     c->handshaked = false;
-    return LINK_SENT;
+    return LINK_SENT_FULL;
 }
 
 static void tcp_close(void *ctx)
@@ -92,7 +93,8 @@ static void tcp_close(void *ctx)
     c->handshaked = false;
 }
 
-static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len)
+static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len,
+                            size_t *written_out)
 {
     link_tcp_ctx_t *c = (link_tcp_ctx_t *)ctx;
     if (c == NULL || c->cfg.io == NULL ||
@@ -105,29 +107,46 @@ static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len)
         return LINK_NOT_READY;
     }
 
-    /* D-10：**必须续写**。部分写不是成功，也不是失败，是"还没写完"。 */
-    size_t written = 0;
-    for (;;) {
-        int n = c->cfg.io->write(c->handle, data + written, len - written);
-        if (n > 0) {
-            written += (size_t)n;
-            if (written >= len) {
-                c->tx_sent++;
-                return LINK_SENT;
-            }
-            continue;                 /* 部分写：继续 */
+    /* D-10 + D-30：**如实报出写了多少**，而不是自行"续写到写完"。
+     *
+     * 为什么不再自行续写（骨架首版的做法）：
+     *   首版在这里循环续写，写不动时返回 BACKPRESSURE；但调用方按"稍后重试"
+     *   会**重发整帧** ⇒ 已上线的字节再写一遍 ⇒ 线上出现重复片段 ⇒
+     *   接收端重组器无法自愈（静默流污染）。
+     *   根因是接口丢掉了"已写出多少"。
+     *   ⇒ 现在：写多少报多少，续写由调用方按 link.h 的循环模式负责。
+     *
+     * 语义（与 link_driver_t.send 契约一致）：
+     *   返回 FULL      => *written_out == len（本次请求的全部）
+     *   返回 PARTIAL   => 0 < *written_out < len
+     *   返回 BACKPRESSURE => *written_out == 0（一字节未写出）
+     *   其它           => *written_out == 0
+     */
+    if (written_out != NULL) *written_out = 0;
+
+    int n = c->cfg.io->write(c->handle, data, len);
+    if (n > 0) {
+        size_t got = ((size_t)n > len) ? len : (size_t)n;  /* 驱动不变量：不得超过请求量 */
+        if (written_out != NULL) *written_out = got;
+        if (got == len) {
+            c->tx_sent++;
+            return LINK_SENT_FULL;
         }
-        if (n == 0) {
-            /* 【背压】：发送缓冲满。不是错误 —— 调用方应退避重试。
-             * 这是 3.0 相对 MQTT 的净收益之一：背压从"隐式丢"变"显式可重试"。 */
-            c->tx_backpressure++;
-            return LINK_BACKPRESSURE;
-        }
-        /* n < 0：硬错误（连接已断） */
-        c->handle = NULL;             /* 连接已不可用，避免后续误用 */
-        c->tx_fatal++;
-        return LINK_FATAL;
+        /* 写出了一部分：不是成功也不是失败 —— 是【进行中】。
+         * 调用方必须从这里续写，绝不能重发整帧。 */
+        c->tx_partial++;
+        return LINK_SENT_PARTIAL;
     }
+    if (n == 0) {
+        /* 【背压】：一个字节都没写出 ⇒ 整帧稍后重试是安全的。
+         * 这是 3.0 相对 MQTT 的净收益：背压从"隐式丢"变"显式可重试"。 */
+        c->tx_backpressure++;
+        return LINK_BACKPRESSURE;
+    }
+    /* n < 0：硬错误（连接已断） */
+    c->handle = NULL;             /* 连接已不可用，避免后续误用 */
+    c->tx_fatal++;
+    return LINK_FATAL;
 }
 
 static uint32_t tcp_mtu(void *ctx)

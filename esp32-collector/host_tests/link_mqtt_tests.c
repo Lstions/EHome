@@ -18,6 +18,11 @@
 #include "ehome_mqtt.h"
 
 /* ---- 可控的底层桩 ---- */
+/* D-30：link_send 现在需要 progress 出入参。
+ * SEND1 是"发一整帧、不关心中间进度"的便捷包装（progress 从 0 起、丢弃更新）； */
+static size_t g_prog;
+#define SEND1(l, f, n) (g_prog = 0, link_send((l), (f), (n), &g_prog))
+
 static mqtt_publish_result_t s_publish_result = MQTT_PUBLISH_OK;
 static int  s_publish_calls = 0;
 static bool s_connected = false;
@@ -68,16 +73,16 @@ static void test_all_four_states_survive(void)
     uint8_t frame[8] = {0};
 
     s_publish_result = MQTT_PUBLISH_OK;
-    CHECK(link_send(l, frame, 8) == LINK_SENT);
+    CHECK(SEND1(l, frame, 8) == LINK_SENT_FULL);
 
     s_publish_result = MQTT_PUBLISH_NOT_CONNECTED;
-    CHECK(link_send(l, frame, 8) == LINK_NOT_READY);
+    CHECK(SEND1(l, frame, 8) == LINK_NOT_READY);
 
     s_publish_result = MQTT_PUBLISH_BACKPRESSURE;
-    CHECK(link_send(l, frame, 8) == LINK_BACKPRESSURE);
+    CHECK(SEND1(l, frame, 8) == LINK_BACKPRESSURE);
 
     s_publish_result = MQTT_PUBLISH_FAILED;
-    CHECK(link_send(l, frame, 8) == LINK_FATAL);
+    CHECK(SEND1(l, frame, 8) == LINK_FATAL);
 
     link_destroy(l);
 }
@@ -90,9 +95,9 @@ static void test_backpressure_is_distinct_from_failure(void)
     uint8_t frame[8] = {0};
 
     s_publish_result = MQTT_PUBLISH_BACKPRESSURE;
-    link_result_t bp = link_send(l, frame, 8);
+    link_result_t bp = SEND1(l, frame, 8);
     s_publish_result = MQTT_PUBLISH_FAILED;
-    link_result_t ft = link_send(l, frame, 8);
+    link_result_t ft = SEND1(l, frame, 8);
 
     CHECK(bp != ft);                    /* ← 旧实现里这两个是同一个值 */
     CHECK(bp == LINK_BACKPRESSURE);
@@ -110,12 +115,12 @@ static void test_mtu_is_checked_before_send(void)
     static uint8_t big[LINK_MQTT_MTU_BYTES + 1];
 
     int before = s_publish_calls;
-    CHECK(link_send(l, big, sizeof(big)) == LINK_PAYLOAD_TOO_BIG);
+    CHECK(SEND1(l, big, sizeof(big)) == LINK_PAYLOAD_TOO_BIG);
     CHECK(s_publish_calls == before);      /* ← 底层【没有】被调用 */
 
     /* 恰好等于 MTU：允许 */
     s_publish_result = MQTT_PUBLISH_OK;
-    CHECK(link_send(l, big, LINK_MQTT_MTU_BYTES) == LINK_SENT);
+    CHECK(SEND1(l, big, LINK_MQTT_MTU_BYTES) == LINK_SENT_FULL);
     CHECK(s_publish_calls == before + 1);
 
     link_destroy(l);
@@ -130,12 +135,12 @@ static void test_not_ready_comes_from_driver(void)
     s_connected = false;
     s_publish_result = MQTT_PUBLISH_NOT_CONNECTED;   /* 驱动自己说没连上 */
     int before = s_publish_calls;
-    CHECK(link_send(l, (const uint8_t *)"x", 1) == LINK_NOT_READY);
+    CHECK(SEND1(l, (const uint8_t *)"x", 1) == LINK_NOT_READY);
     CHECK(s_publish_calls == before + 1);            /* ← 驱动被调用了 */
 
     s_connected = true;
     s_publish_result = MQTT_PUBLISH_OK;
-    CHECK(link_send(l, (const uint8_t *)"x", 1) == LINK_SENT);
+    CHECK(SEND1(l, (const uint8_t *)"x", 1) == LINK_SENT_FULL);
     link_destroy(l);
 }
 
@@ -147,15 +152,15 @@ static void test_stats_count_each_path(void)
     s_connected = true;
 
     s_publish_result = MQTT_PUBLISH_OK;
-    link_send(l, frame, 4);
+    SEND1(l, frame, 4);
     s_publish_result = MQTT_PUBLISH_BACKPRESSURE;
-    link_send(l, frame, 4);
+    SEND1(l, frame, 4);
     s_publish_result = MQTT_PUBLISH_FAILED;
-    link_send(l, frame, 4);
+    SEND1(l, frame, 4);
 
     link_stats_t st;
     link_get_stats(l, &st);
-    CHECK(st.tx_sent == 1);
+    CHECK(st.tx_sent_full == 1);
     CHECK(st.tx_backpressure == 1);
     CHECK(st.tx_fatal == 1);
     link_destroy(l);

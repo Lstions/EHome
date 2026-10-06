@@ -22,7 +22,8 @@ struct link {
 };
 
 static const char *const s_result_names[LINK_RESULT_COUNT] = {
-    [LINK_SENT]            = "SENT",
+    [LINK_SENT_FULL]       = "SENT_FULL",
+    [LINK_SENT_PARTIAL]    = "SENT_PARTIAL",
     [LINK_NOT_READY]       = "NOT_READY",
     [LINK_BACKPRESSURE]    = "BACKPRESSURE",
     [LINK_PAYLOAD_TOO_BIG] = "PAYLOAD_TOO_BIG",
@@ -38,10 +39,13 @@ const char *link_result_name(link_result_t r)
 bool link_result_is_error(link_result_t r)
 {
     switch (r) {
-    case LINK_SENT:
+    case LINK_SENT_FULL:
+    case LINK_SENT_PARTIAL:
     case LINK_BACKPRESSURE:
     case LINK_NOT_READY:
-        /* 都不是错误：成功 / 稍后重试 / 等待就绪。 */
+        /* 都不是错误：成功 / 进行中 / 稍后重试 / 等待就绪。
+         * PARTIAL 尤其不是错误 —— 它是"还要接着写"；当成错误会让调用方
+         * 丢弃已上线的字节，或重发而污染 TCP 流（D-30）。 */
         return false;
     case LINK_PAYLOAD_TOO_BIG:
     case LINK_FATAL:
@@ -81,7 +85,7 @@ link_result_t link_open(link_t *l)
 {
     if (l == NULL) return LINK_FATAL;
     link_result_t r = l->drv->open(l->ctx);
-    if (r == LINK_SENT) {
+    if (r == LINK_SENT_FULL) {
         l->opened = true;
         l->stats.ready = true;
         l->stats.mtu = l->drv->mtu(l->ctx);
@@ -89,12 +93,24 @@ link_result_t link_open(link_t *l)
     return r;
 }
 
-link_result_t link_send(link_t *l, const uint8_t *frame, size_t len)
+link_result_t link_send(link_t *l, const uint8_t *frame, size_t len,
+                        size_t *progress)
 {
     /* 规则 1：参数错 -> FATAL（不是背压；调用方不该退避重试） */
-    if (l == NULL || l->drv == NULL || frame == NULL || len == 0) {
+    if (l == NULL || l->drv == NULL || frame == NULL || len == 0 ||
+        progress == NULL) {
         if (l != NULL) l->stats.tx_fatal++;
         return LINK_FATAL;
+    }
+    /* 进度越界 = 调用方违约（把别的帧的进度传进来了）。不猜、不夹取。 */
+    if (*progress > len) {
+        l->stats.tx_fatal++;
+        return LINK_FATAL;
+    }
+    /* 已经写完了：幂等返回，不再向线上写任何字节。
+     * 这条让调用方的重试循环天然安全（重试一个已完成的帧不会重复写）。 */
+    if (*progress == len) {
+        return LINK_SENT_FULL;
     }
 
     /* 规则 2：发出【前】校验契约（P2）—— 这是 R1 类缺陷的根治点。
@@ -122,12 +138,24 @@ link_result_t link_send(link_t *l, const uint8_t *frame, size_t len)
      * 现在"未就绪"只有一个来源：驱动 send 的返回值（规则 4）。
      * `stats.ready` 退回它本来的角色 —— **只读观测，不参与决策**。
      * 为避免"指标看不到就绪态"，仍在发送后刷新一次快照（规则 5）。 */
-    link_result_t r = l->drv->send(l->ctx, frame, len);
+    const size_t want_from = *progress;       /* 本次从这一字节开始写 */
+    size_t wrote = 0;
+    link_result_t r = l->drv->send(l->ctx, frame + want_from, len - want_from, &wrote);
+
+    /* 驱动契约校验：写出的字节数不能超过本次请求量（超出即驱动违约）。
+     * 不静默夹取 —— 夹取会掩盖驱动缺陷，而这类缺陷会污染流。 */
+    if (wrote > len - want_from) {
+        l->stats.tx_driver_error++;
+        return LINK_FATAL;
+    }
+    /* 进度只前进，不后退（重试同一个帧时 progress 保持不变是正确的） */
+    *progress = want_from + wrote;
 
     /* 规则 5：每条路径都计数（P3），并刷新只读快照 */
     l->stats.ready = l->drv->is_ready(l->ctx);
     switch (r) {
-    case LINK_SENT:            l->stats.tx_sent++;         break;
+    case LINK_SENT_FULL:       l->stats.tx_sent_full++;    break;
+    case LINK_SENT_PARTIAL:    l->stats.tx_sent_partial++; break;
     case LINK_BACKPRESSURE:    l->stats.tx_backpressure++; break;
     case LINK_NOT_READY:       l->stats.tx_not_ready++;    break;
     case LINK_PAYLOAD_TOO_BIG: l->stats.tx_too_big++;      break;

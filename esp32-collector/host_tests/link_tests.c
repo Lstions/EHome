@@ -28,22 +28,33 @@ typedef struct {
     link_result_t next_send;   /* 驱动要返回的结果 */
 } fake_t;
 
+/* D-30：link_send 现在需要 progress 出入参。
+ * SEND1 是"发一整帧、不关心中间进度"的便捷包装（progress 从 0 起、丢弃更新）； */
+static size_t g_prog;
+#define SEND1(l, f, n) (g_prog = 0, link_send((l), (f), (n), &g_prog))
+
 static link_result_t fake_open(void *ctx)
 {
     fake_t *f = (fake_t *)ctx;
     f->open_calls++;
-    return LINK_SENT;
+    return LINK_SENT_FULL;
 }
 static void fake_close(void *ctx)
 {
     fake_t *f = (fake_t *)ctx;
     f->close_calls++;
 }
-static link_result_t fake_send(void *ctx, const uint8_t *data, size_t len)
+static link_result_t fake_send(void *ctx, const uint8_t *data, size_t len,
+                                  size_t *written_out)
 {
     fake_t *f = (fake_t *)ctx;
     (void)data; (void)len;
     f->send_calls++;
+    /* 假驱动如实报出写的字节数：FULL 表示整帧，其余表示 0 字节。
+     * 不写的话 link_send 会认为"一个字节都没写出"，与结果自相矛盾。 */
+    if (written_out != NULL) {
+        *written_out = (f->next_send == LINK_SENT_FULL) ? len : 0;
+    }
     return f->next_send;
 }
 static uint32_t fake_mtu(void *ctx) { return ((fake_t *)ctx)->mtu; }
@@ -59,7 +70,7 @@ static void init_fake(fake_t *f, uint32_t mtu, bool ready)
     memset(f, 0, sizeof(*f));
     f->mtu = mtu;
     f->ready = ready;
-    f->next_send = LINK_SENT;
+    f->next_send = LINK_SENT_FULL;
 }
 
 /* 1) 【P2 核心】超 MTU 必须在【发出前】被拒绝，且【绝不调用】驱动 send。
@@ -71,13 +82,13 @@ static void test_too_big_is_rejected_before_driver(void)
     CHECK(l != NULL);
 
     uint8_t buf[101] = {0};
-    link_result_t r = link_send(l, buf, 101);   /* 101 > mtu 100 */
+    link_result_t r = SEND1(l, buf, 101);   /* 101 > mtu 100 */
     CHECK(r == LINK_PAYLOAD_TOO_BIG);
     CHECK(f.send_calls == 0);                   /* 关键：驱动【没被调用】 */
 
     /* 恰好等于 MTU 是允许的（边界） */
-    r = link_send(l, buf, 100);
-    CHECK(r == LINK_SENT);
+    r = SEND1(l, buf, 100);
+    CHECK(r == LINK_SENT_FULL);
     CHECK(f.send_calls == 1);
 
     link_destroy(l);
@@ -95,7 +106,7 @@ static void test_not_ready_comes_from_driver_result(void)
     link_t *l = link_create(&FAKE_DRV, &f);
     uint8_t buf[4] = {1, 2, 3, 4};
 
-    link_result_t r = link_send(l, buf, 4);
+    link_result_t r = SEND1(l, buf, 4);
     CHECK(r == LINK_NOT_READY);
     CHECK(f.send_calls == 1);          /* ← 驱动被调用了：结果来自它 */
 
@@ -105,7 +116,7 @@ static void test_not_ready_comes_from_driver_result(void)
     fake_t g; init_fake(&g, 100, true);
     g.next_send = LINK_NOT_READY;
     link_t *l2 = link_create(&FAKE_DRV, &g);
-    CHECK(link_send(l2, buf, 4) == LINK_NOT_READY);
+    CHECK(SEND1(l2, buf, 4) == LINK_NOT_READY);
     CHECK(g.send_calls == 1);
 
     link_destroy(l);
@@ -118,14 +129,14 @@ static void test_not_ready_comes_from_driver_result(void)
 static void test_driver_result_is_not_flattened(void)
 {
     const link_result_t cases[] = {
-        LINK_SENT, LINK_BACKPRESSURE, LINK_NOT_READY, LINK_PAYLOAD_TOO_BIG, LINK_FATAL
+        LINK_SENT_FULL, LINK_BACKPRESSURE, LINK_NOT_READY, LINK_PAYLOAD_TOO_BIG, LINK_FATAL
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         fake_t f; init_fake(&f, 1000, true);
         f.next_send = cases[i];
         link_t *l = link_create(&FAKE_DRV, &f);
         uint8_t buf[8] = {0};
-        link_result_t r = link_send(l, buf, 8);
+        link_result_t r = SEND1(l, buf, 8);
         CHECK(r == cases[i]);
         link_destroy(l);
     }
@@ -141,20 +152,20 @@ static void test_each_path_is_counted(void)
 
     f.ready = false;
     f.next_send = LINK_NOT_READY;       /* 由驱动结果表达未就绪 */
-    (void)link_send(l, ok, 4);          /* NOT_READY */
+    (void)SEND1(l, ok, 4);          /* NOT_READY */
     f.ready = true;
-    (void)link_send(l, big, 11);        /* TOO_BIG */
+    (void)SEND1(l, big, 11);        /* TOO_BIG */
     f.next_send = LINK_BACKPRESSURE;
-    (void)link_send(l, ok, 4);          /* BACKPRESSURE */
-    f.next_send = LINK_SENT;
-    (void)link_send(l, ok, 4);          /* SENT */
+    (void)SEND1(l, ok, 4);          /* BACKPRESSURE */
+    f.next_send = LINK_SENT_FULL;
+    (void)SEND1(l, ok, 4);          /* SENT */
 
     link_stats_t st;
     link_get_stats(l, &st);
     CHECK(st.tx_not_ready == 1);
     CHECK(st.tx_too_big == 1);
     CHECK(st.tx_backpressure == 1);
-    CHECK(st.tx_sent == 1);
+    CHECK(st.tx_sent_full == 1);
     CHECK(st.tx_fatal == 0);
     CHECK(st.tx_driver_error == 0);
     link_destroy(l);
@@ -167,13 +178,13 @@ static void test_bad_args_are_fatal_not_backpressure(void)
     link_t *l = link_create(&FAKE_DRV, &f);
     uint8_t buf[4] = {0};
 
-    CHECK(link_send(NULL, buf, 4) == LINK_FATAL);
-    CHECK(link_send(l, NULL, 4) == LINK_FATAL);
-    CHECK(link_send(l, buf, 0) == LINK_FATAL);
+    CHECK(SEND1(NULL, buf, 4) == LINK_FATAL);
+    CHECK(SEND1(l, NULL, 4) == LINK_FATAL);
+    CHECK(SEND1(l, buf, 0) == LINK_FATAL);
     CHECK(f.send_calls == 0);
 
     link_stats_t st; link_get_stats(l, &st);
-    /* 只有【有对象】的调用能被计数：link_send(NULL,...) 没有 link_t 可写。
+    /* 只有【有对象】的调用能被计数：SEND1(NULL,...) 没有 link_t 可写。
      * 这是接口的固有限制，不是缺陷 —— 3 次 FATAL 里只有 2 次可观测。
      * 之所以把它写成断言，是为了让这个限制【显式】而不是等人踩坑。 */
     CHECK(st.tx_fatal == 2);
@@ -186,7 +197,7 @@ static void test_zero_mtu_rejects_everything(void)
     fake_t f; init_fake(&f, 0, true);
     link_t *l = link_create(&FAKE_DRV, &f);
     uint8_t buf[1] = {0};
-    CHECK(link_send(l, buf, 1) == LINK_PAYLOAD_TOO_BIG);
+    CHECK(SEND1(l, buf, 1) == LINK_PAYLOAD_TOO_BIG);
     CHECK(f.send_calls == 0);
     link_destroy(l);
 }
@@ -227,7 +238,7 @@ static void test_lifecycle(void)
     fake_t f; init_fake(&f, 100, true);
     link_t *l = link_create(&FAKE_DRV, &f);
     CHECK(f.open_calls == 0);
-    CHECK(link_open(l) == LINK_SENT);
+    CHECK(link_open(l) == LINK_SENT_FULL);
     CHECK(f.open_calls == 1);
 
     link_stats_t st; link_get_stats(l, &st);
@@ -246,10 +257,10 @@ static void test_lifecycle(void)
      * （M41 变异即如此，本断言是唯一能抓到它的地方。） */
     fake_t g; init_fake(&g, 10, true);
     link_t *l2 = link_create(&FAKE_DRV, &g);
-    CHECK(link_open(l2) == LINK_SENT);
+    CHECK(link_open(l2) == LINK_SENT_FULL);
     g.ready = false;                   /* 发送后快照会变 false */
     g.next_send = LINK_NOT_READY;
-    (void)link_send(l2, (const uint8_t *)"x", 1);
+    (void)SEND1(l2, (const uint8_t *)"x", 1);
 
     link_stats_t snap;
     link_get_stats(l2, &snap);
