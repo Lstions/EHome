@@ -543,18 +543,20 @@ static void owner_attempt_recovery(void)
     }
 }
 
-bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
+mqtt_publish_result_t mqtt_client_publish_ex(const uint8_t *data, size_t len)
 {
     mqtt_operation_t op;
+    /* 拿不到操作槽 = 正在停机/重连。这是**本地状态**问题，不是对端问题，
+     * 因此归为 NOT_CONNECTED：调用方不得再换一条 MQTT 路径重发。 */
     if (s_init_failed || s_ctx.mutex == NULL || s_lifecycle_mutex == NULL ||
-        !begin_operation(&op, false)) return false;
+        !begin_operation(&op, false)) return MQTT_PUBLISH_NOT_CONNECTED;
 
     LOCK_CTX();
     bool connected = s_ctx.state == MQTT_CLIENT_CONNECTED && s_ctx.transport_connected;
     UNLOCK_CTX();
     if (!connected) {
         (void)finish_operation(&op);
-        return false;
+        return MQTT_PUBLISH_NOT_CONNECTED;
     }
 
     const int qos = mqtt_publish_qos_for_frame(data, len);
@@ -594,11 +596,28 @@ bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
                                          qos, 0, true);
     bool valid = finish_operation(&op);
     if (msg_id < 0 || !valid) {
-        ESP_LOGE(TAG, "Publish failed");
-        return false;
+        /* L-02 取证：把"为什么失败"打成一行可机读的日志。
+         *
+         * -2 = outbox 已达 outbox.limit（饱和/背压）
+         * -1 = make_publish 失败（编码/内存）或 QoS0 未入箱
+         * valid=0 = 操作期间 client 被换代（重连/重建）
+         *
+         * 同时打印 outbox 当前字节数与 limit：**只看返回码无法区分**
+         * "刚好压线"与"长期满"，而这两者对修复方向的含义完全不同。
+         * 该函数在 -2 路径上没有日志，所以"日志里没有 outbox 字样"
+         * 不能证明"没饱和" —— 必须把数打出来。 */
+        ESP_LOGE(TAG, "Publish failed (enqueue=%d, valid=%d, outbox=%d/%d, qos=%d, len=%d)",
+                 msg_id, (int)valid, esp_mqtt_client_get_outbox_size(op.client), 4096,
+                 qos, (int)len);
+        return MQTT_PUBLISH_FAILED;
     }
     ESP_LOGD(TAG, "Published %zu bytes to %s (msg_id=%d)", len, s_up_topic, msg_id);
-    return true;
+    return MQTT_PUBLISH_OK;
+}
+
+bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
+{
+    return mqtt_client_publish_ex(data, len) == MQTT_PUBLISH_OK;
 }
 
 mqtt_client_state_t mqtt_client_get_state(void)

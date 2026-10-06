@@ -82,6 +82,16 @@ esp_err_t transport_unregister(transport_t *transport);
 esp_err_t transport_broadcast(const uint8_t *data, size_t len);
 
 /**
+ * @brief 查询注册表中是否存在指定类型的 transport
+ *
+ * 用途：调用方在"广播失败后是否还要直接重试某条具体通路"上做决策。
+ * MQTT 适配器一旦注册进 manager，transport_broadcast() 就已经对它发过，
+ * 再直接调一次即为**同一帧的重复发布**（L-02 根因）。
+ * 它能作答的问题："MQTT 是否已经在我刚刚那次广播里被尝试过了？"
+ */
+bool transport_registry_has_type(transport_type_t type);
+
+/**
  * @brief 向指定的 transport 发送消息
  */
 esp_err_t transport_send(transport_t *transport, const uint8_t *data, size_t len);

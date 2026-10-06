@@ -38,8 +38,24 @@ static esp_err_t mqtt_adapter_stop(transport_t *transport)
 
 static esp_err_t mqtt_adapter_send(transport_t *transport, const uint8_t *data, size_t len)
 {
-    bool ok = mqtt_client_publish_impl(data, len);
-    return ok ? ESP_OK : ESP_FAIL;
+    (void)transport;
+    /* 三态解析 + 与修复前一致的对外语义。
+     *
+     * 为什么要解析三态：调用方需要能区分"本地没连上"与"对端/队列失败"，
+     * 否则无法避免对**同一帧**重复发布（见 mqtt_client_publish_ex 注释与
+     * msg_handler_publish_checked 里 L-02 的闭环推导）。
+     *
+     * 为什么这里仍然把两者都映射为 ESP_FAIL：transport_broadcast() 用
+     * 返回码统计 sent_count，改动它会连带改变"广播是否成功"的判定，
+     * 超出本次最小修复的范围。去重由调用方的注册表查询完成。 */
+    switch (mqtt_client_publish_ex(data, len)) {
+    case MQTT_PUBLISH_OK:
+        return ESP_OK;
+    case MQTT_PUBLISH_NOT_CONNECTED:
+    case MQTT_PUBLISH_FAILED:
+    default:
+        return ESP_FAIL;
+    }
 }
 
 static bool mqtt_adapter_is_connected(transport_t *transport)

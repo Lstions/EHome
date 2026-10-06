@@ -29,6 +29,14 @@ typedef enum {
     MQTT_SUB_FAILED,
 } mqtt_subscription_phase_t;
 
+/* 与生产 ehome_mqtt.h 保持一致（L-02 修复新增的三态发布结果）。桩头文件必须
+ * 同步，否则宿主测试编不过 —— 这正是"接口一变，桩要跟着变"的显式位置。 */
+typedef enum {
+    MQTT_PUBLISH_OK = 0,
+    MQTT_PUBLISH_NOT_CONNECTED = 1,
+    MQTT_PUBLISH_FAILED = 2,
+} mqtt_publish_result_t;
+
 typedef enum {
     MQTT_ERROR_TYPE_NONE = 0,
     MQTT_ERROR_TYPE_TCP_TRANSPORT,
@@ -249,6 +257,12 @@ static int esp_mqtt_client_enqueue(esp_mqtt_client_handle_t client, const char *
     (void)client; (void)topic; (void)data; (void)len; (void)qos; (void)retain; (void)store;
     mock_enqueue_calls++;
     return 1;
+}
+/* L-02 取证日志会调用它；桩返回 0 即可（本用例不驱动失败路径）。 */
+static int esp_mqtt_client_get_outbox_size(esp_mqtt_client_handle_t client)
+{
+    (void)client;
+    return 0;
 }
 
 #define EHOME_MQTT_HOST_TEST

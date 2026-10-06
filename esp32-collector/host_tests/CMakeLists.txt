@@ -757,3 +757,33 @@ else()
             "gate is silently absent")
     set_tests_properties(diag_heap_metric_gate PROPERTIES WILL_FAIL TRUE)
 endif()
+
+# ---- L-02: 调用点去重（2026-10-06）----
+#
+# 为什么单独一条：transport_registry_tests.c 只钉住**判据函数**的语义，
+# 变异自证发现把它改坏会红，但把**调用点**的去重分支去掉时它**仍然全绿** ——
+# 也就是"修复本身"没有用例盯住。本用例补这个缺口，钉住"每失败帧 1 条 PF"
+# 这一可观测后果（修复前是 2 条，实测 PF/NT = 1.996）。
+add_executable(l02_publish_dedup_callsite_tests l02_publish_dedup_callsite_tests.c)
+target_compile_options(l02_publish_dedup_callsite_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME l02_publish_dedup_callsite_tests COMMAND l02_publish_dedup_callsite_tests)
+set_tests_properties(l02_publish_dedup_callsite_tests PROPERTIES
+    FAIL_REGULAR_EXPRESSION "FAILED")
+
+# ---- L-02 去重判据的回归锁（task-9，2026-10-06）----
+#
+# 直接编译**真实**的 components/transport/transport.c（不用替身），
+# 锁住 transport_registry_has_type() 的语义 —— 它是 L-02 修复
+# （"广播已含 MQTT 适配器时不再重复发布"）唯一的判据。
+# 该判据若反向失效，后果是"静默丢消息"或"重复发布照旧"，两者在台架之外
+# 都很难察觉，因此用宿主用例钉死。
+add_executable(transport_registry_tests
+    transport_registry_tests.c
+    ../components/transport/transport.c
+)
+target_include_directories(transport_registry_tests PRIVATE
+    stubs
+    ../components/transport/include
+)
+target_compile_options(transport_registry_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME transport_registry_tests COMMAND transport_registry_tests)

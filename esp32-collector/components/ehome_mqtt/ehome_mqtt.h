@@ -83,6 +83,33 @@ esp_err_t mqtt_client_request_stop(void);
 void mqtt_client_owner_step(bool network_available);
 
 /* === Publish === */
+
+/* 发布结果。**必须用枚举而不是 bool**（2026-10-06，L-02 根因）：
+ *
+ * 100 Hz 台架实测 120 s 产生 3,873 条 "Publish failed"，而每次广播失败只应
+ * 对应 1 条。根因之一是调用方拿不到"没连上"这个信息 —— 它只能看到 bool
+ * false，于是**在同一个调用里继续尝试下游 transport**，同一帧被发布两次
+ * （一次同步适配器 + 一次 msg_handler 回退）。
+ *
+ * 语义：
+ *   MQTT_PUBLISH_OK             已交给 esp-mqtt（成功）
+ *   MQTT_PUBLISH_NOT_CONNECTED  本地未连接，调用方**不应**重试其它 MQTT 路径
+ *   MQTT_PUBLISH_FAILED         对端/队列问题（含 outbox 满 -2），可上报失败 */
+typedef enum {
+    MQTT_PUBLISH_OK = 0,
+    MQTT_PUBLISH_NOT_CONNECTED = 1,
+    MQTT_PUBLISH_FAILED = 2,
+} mqtt_publish_result_t;
+
+/**
+ * @brief 发布一帧并返回**分类后**的结果。
+ *
+ * 与 mqtt_client_publish_impl 的区别：后者把三类结果压成一个 bool，调用方
+ * 无法区分"没连上"与"发失败"，因此无法避免重复发布。
+ */
+mqtt_publish_result_t mqtt_client_publish_ex(const uint8_t *data, size_t len);
+
+/* 兼容包装：仅返回是否成功。新代码请用 mqtt_client_publish_ex()。 */
 bool mqtt_client_publish_impl(const uint8_t *data, size_t len);
 
 /* === State === */

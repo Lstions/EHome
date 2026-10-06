@@ -77,6 +77,28 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
         return ESP_OK;
     }
 
+    /* ==== L-02 根因（2026-10-06，参数化闭环）====
+     *
+     * MQTT 适配器在启动时就被注册进 transport manager（main.c 的
+     * mqtt_transport_register()），因此 transport_broadcast() **已经对 MQTT
+     * 发过一次**。此处"回退到 MQTT"是对**同一帧的第二次发布尝试** —— 实测
+     * PF/NT = 1.996（每个失败帧 2 条 "Publish failed"）就是它造成的。
+     *
+     * 闭环（与实测逐项吻合）：
+     *   广播内 1 次失败 + 这里再重试 1 次失败 = 2 条 PF
+     *   广播 0 个成功 transport              = 1 条 NT
+     *   "Broadcast failed, falling back"     = 1 条 BF
+     *   ⇒ PF = 2 x 帧, NT = BF = 1 x 帧, FS = 0
+     *   实测：PF=3873, NT=1938, BF=1937, FS=0  ✔
+     *
+     * 修法：适配器已在注册表里时不再重发，失败由 return ret 如实上报。
+     * 用注册表查询而非硬编码，使宿主测试（不注册适配器）仍走原路径，
+     * 不改变既有测试契约。 */
+    if (transport_registry_has_type(TRANSPORT_TYPE_MQTT)) {
+        ESP_LOGW(TAG, "Broadcast failed; MQTT already attempted inside broadcast, not re-publishing");
+        return ret;
+    }
+
     ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
     return mqtt_client_publish_impl(data, len) ? ESP_OK : ESP_FAIL;
 }

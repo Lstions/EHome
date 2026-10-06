@@ -109,6 +109,20 @@ esp_err_t transport_broadcast(const uint8_t *data, size_t len)
     return ESP_OK;
 }
 
+bool transport_registry_has_type(transport_type_t type)
+{
+    if (!s_initialized) {
+        return false;
+    }
+    for (int i = 0; i < s_transport_count; i++) {
+        transport_t *t = s_transports[i];
+        if (t != NULL && t->type == type) {
+            return true;
+        }
+    }
+    return false;
+}
+
 esp_err_t transport_send(transport_t *transport, const uint8_t *data, size_t len)
 {
     if (!transport || !data || len == 0) {
