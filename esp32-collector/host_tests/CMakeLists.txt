@@ -813,13 +813,32 @@ target_include_directories(transport_registry_tests PRIVATE
 target_compile_options(transport_registry_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_registry_tests COMMAND transport_registry_tests)
 # ---- 3.0 骨架：variant / link（设计文档「3.0-实施设计-骨架与增量」§2） ----
-add_executable(variant_tests
-    variant_tests.c
-    ../components/variant/variant.c
-)
-target_include_directories(variant_tests PRIVATE ../components/variant/include)
-target_compile_options(variant_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME variant_tests COMMAND variant_tests)
+# ⚠ 编译【三份】：每份注入一个型号，让"MAX_CHANNELS 的编译分支"与
+# "variant 的 max_channels"在**三种型号下**都被真正比对。
+# 只编一份的话，另外两个分支永远没被执行 —— 而"改一处忘另一处"
+# 恰恰最可能发生在没被编到的那个分支上。
+foreach(_v S3 S3P C6)
+    add_executable(variant_tests_${_v}
+        variant_tests.c
+        ../components/variant/variant.c
+    )
+    target_include_directories(variant_tests_${_v} PRIVATE
+        stubs
+        stubs/rom
+        ../components/variant/include
+        # 让本用例能 include config_mgr.h，从而把 MAX_CHANNELS 与 variant 的
+        # max_channels 钉在一起（两处定义同一事实 ⇒ 必须证明它们一致）。
+        ../components/config_mgr
+    )
+    target_compile_options(variant_tests_${_v} PRIVATE -Wall -Wextra -Werror)
+endforeach()
+# S3 与 S3P 共用 CONFIG_IDF_TARGET_ESP32S3（靠 VARIANT_SELECTED 区分）
+target_compile_definitions(variant_tests_S3  PRIVATE CONFIG_IDF_TARGET_ESP32S3=1 VARIANT_SELECTED=VARIANT_S3)
+target_compile_definitions(variant_tests_S3P PRIVATE CONFIG_IDF_TARGET_ESP32S3=1 VARIANT_SELECTED=VARIANT_S3P)
+target_compile_definitions(variant_tests_C6  PRIVATE CONFIG_IDF_TARGET_ESP32C6=1 VARIANT_SELECTED=VARIANT_C6)
+add_test(NAME variant_tests_S3  COMMAND variant_tests_S3)
+add_test(NAME variant_tests_S3P COMMAND variant_tests_S3P)
+add_test(NAME variant_tests_C6  COMMAND variant_tests_C6)
 
 add_executable(link_tests
     link_tests.c

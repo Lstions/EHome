@@ -1,5 +1,6 @@
 /* variant_tests.c —— 型号能力表（设计文档 1.13；原则 P8） */
 #include "variant.h"
+#include "config_mgr.h"   /* MAX_CHANNELS：与 variant 的 max_channels 是同一事实 */
 
 #include <assert.h>
 #include <stdio.h>
@@ -64,6 +65,49 @@ static void test_channel_counts(void)
     CHECK(variant_caps_for(VARIANT_C6)->max_channels == 4);
 }
 
+/* 5b) ⚠ 通道数有**两处**定义，必须证明它们一致（P4：一个语义一处定义）
+ *
+ *   - `config_mgr.h` 的 `MAX_CHANNELS`（编译期宏，按 CONFIG_IDF_TARGET_* 分支）
+ *   - `variant.c` 的 `max_channels`（运行期型号能力表）
+ *
+ * 两者今天数值相同，但**没有任何东西在保证它们相同**：
+ * 改一处、忘另一处 ⇒ scheduler 的 SCHED_MAX_CHANNELS（由 MAX_CHANNELS 派生）、
+ * hw_profile 上报给后端的 manifest_capacity（读 MAX_CHANNELS）、
+ * 与型号能力表（读 variant）三处对"这台设备有几个通道"给出**不同答案**，
+ * 而每一处单独看都自洽。
+ *
+ * 这条断言把两者钉在一起：**数值必须相等**。
+ * 真正的单一来源是后一步的事（把 MAX_CHANNELS 改为读 variant），
+ * 但在那之前，至少让不一致**立刻变红**，而不是等到现场才发现。
+ *
+ * 注意口径：本用例编译时带了某个 CONFIG_IDF_TARGET_*（见 CMakeLists），
+ * 所以这里比对的是"**当前构建目标**的 MAX_CHANNELS"与"**同一目标**的型号能力"。
+ * 这正是生产中会同时生效的那一对。 */
+static void test_max_channels_matches_variant_caps(void)
+{
+    variant_id_t sel = variant_selected();
+    const variant_caps_t *c = variant_caps();
+    CHECK(c != NULL);
+    if (c == NULL) return;
+
+    /* 本用例被编译【三份】（见 CMakeLists）：每份注入一个 CONFIG_IDF_TARGET_*，
+     * 于是三种型号下"MAX_CHANNELS 的编译分支"与"型号能力表"都被真正比对到。
+     * 单份构建只能覆盖一个分支 —— 那正是"改一处忘另一处"最容易漏的形态。 */
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    /* S3 与 S3P 共用同一个 IDF target 宏，靠 PSRAM 区分；两者通道数相同（5）。 */
+    CHECK(sel == VARIANT_S3 || sel == VARIANT_S3P);
+    CHECK((int)c->max_channels == (int)MAX_CHANNELS);
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+    CHECK(sel == VARIANT_C6);
+    CHECK((int)c->max_channels == (int)MAX_CHANNELS);
+#else
+    printf("FAIL %s:%d  本用例必须带 CONFIG_IDF_TARGET_* 编译，",
+           __FILE__, __LINE__);
+    printf("否则 MAX_CHANNELS 走宿主 fallback 8，与型号能力表的比对会被跳过（假绿）\n");
+    s_failures++;
+#endif
+}
+
 /* 6) 越界/未知【不静默兜底】—— 返回 NULL 而不是"默认型号"（P3 精神） */
 static void test_no_silent_fallback(void)
 {
@@ -105,6 +149,7 @@ int main(void)
     test_only_s3p_has_psram();
     test_iram_segment_presence();
     test_channel_counts();
+    test_max_channels_matches_variant_caps();
     test_no_silent_fallback();
     test_by_name();
     test_selected_is_consistent();
