@@ -66,8 +66,17 @@ def main():
     dev = device_msgs()
     go = go_msgs()
     if go is None:
-        print("SKIP check_message_types: 找不到 backend/pkg/frame/frame.go")
-        return 0
+        # ⚠ 这里**不能**返回 0。返回 0 意味着"没找到对锚的那一端 ⇒ 判它通过"，
+        # 于是这个门禁在"Go 文件被改名/移动/路径算错"时会**永远报 PASS**
+        # （vacuous pass）—— 它守护的恰恰是"两端编号一致"，而它自己
+        # 在对锚缺失时反而放行。实测过：把 GO_FRAME 指到不存在的路径 ⇒ 原实现
+        # 打印 SKIP 并返回 0。
+        # 找不到对锚 = **无法判定**，不是"通过"。判为失败并说清怎么修。
+        print("FAIL check_message_types: 找不到 %s" % GO_FRAME)
+        print("    这个门禁靠'设备侧定义'与'Go 侧常量'两端对锚来判一致性；")
+        print("    任一端读不到 ⇒ **无法判定**，不能当成通过（否则文件一改名门禁就失效）。")
+        print("    请确认 backend/pkg/frame/frame.go 存在，或修正本脚本的路径推导。")
+        return 2
     if not dev:
         print("FAIL 设备侧一个 MSG_ 定义都没解析到（解析器坏了？）")
         return 1

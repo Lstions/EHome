@@ -43,13 +43,26 @@ def strip_comments(text):
     return "".join(out)
 
 
+# 下界（防"扫描器坏了 ⇒ 永远绿"）。
+# ⚠ 实测过：把 SCAN_DIRS 指到不存在的路径 ⇒ 原实现**一个文件都没扫**，
+#   却打印 "PASS 生产代码无弱符号功能钩子" 并返回 0。
+#   一个坏掉的扫描器会永远绿，那比不装门禁更危险 ——
+#   它给出的是"已经守住了"的错觉。
+# 实测值（2026-10-06）：components/ + main/ 共 145 个 .c/.h。
+# 下界取 100（留一半余量，避免正常增删触发误报），
+# 低于它说明路径错或后缀判断坏了 —— 那是"什么都没扫"，不是"代码库干净"。
+MIN_FILES_SCANNED = 100
+
+
 def main():
     hits = []
+    scanned = 0
     for base in SCAN_DIRS:
         for dirpath, _dirnames, filenames in os.walk(base):
             for fn in filenames:
                 if not fn.endswith((".c", ".h")):
                     continue
+                scanned += 1
                 path = os.path.join(dirpath, fn)
                 try:
                     raw = open(path, encoding="utf-8").read()
@@ -61,6 +74,15 @@ def main():
                     for lineno, line in enumerate(code.split(chr(10)), 1):
                         if MARKER in line:
                             hits.append((os.path.relpath(path, _ROOT), lineno))
+    # ⚠ 先自检扫描面，再看结论。顺序很重要：
+    # "代码库干净"与"扫描器没看见"在输出上是一样的。
+    if scanned < MIN_FILES_SCANNED:
+        print("FAIL **门禁自身失效**：只扫到 %d 个 .c/.h 文件（下界 %d）"
+              % (scanned, MIN_FILES_SCANNED))
+        print("    路径错或目录结构变了。此时'没有弱符号'不代表代码库干净，")
+        print("    只代表**什么都没扫**。请先修 SCAN_DIRS。")
+        return 2
+
     if hits:
         print("FAIL 生产代码里仍有 %d 处 __attribute__((weak)) 功能钩子：" % len(hits))
         for path, lineno in hits[:20]:
@@ -68,7 +90,8 @@ def main():
         print("   钩子请统一声明在 components/msg_handler/msg_handler_hooks.h（普通 extern），")
         print("   由 main/ 提供强实现 —— 漏实现应当是【链接错误】，而不是静默无操作。")
         return 1
-    print("PASS 生产代码无弱符号功能钩子（钩子统一在 msg_handler_hooks.h 声明）")
+    print("PASS 生产代码无弱符号功能钩子（钩子统一在 msg_handler_hooks.h 声明）"
+          "（已扫 %d 个文件）" % scanned)
     return 0
 
 

@@ -178,6 +178,39 @@ def includes_of(comp_dir):
     return out
 
 
+# ── 下界断言（防"扫描器坏了 ⇒ 永远绿"）──
+# 门禁本身也会坏：路径错、正则失效、写法变了……
+# 一个坏掉的扫描器会**永远报 PASS**（vacuous pass）。
+#
+# ⚠ 实测过的边界（写下来是因为我第一次**说错了**）：
+#   只把 REQ_RE 改成永不匹配时，门禁**仍然是对的** ——
+#   main 的直接依赖从 26 条降到 24 条，可达数仍是 24，
+#   因为 **#include 那条边**把图撑住了。
+#   必须**两处解析同时失效**（REQ_RE + INC_RE）才会出现
+#   "可达 0 个，而它们全在待接线清单里 ⇒ PASS" 的假绿。
+#   ⇒ 单点失效有冗余兜底；这里的下界是为了拦住**整体**失效。
+#
+# 给出**下界**：扫描面与可达数低到不可能的程度 ⇒ 直接失败，
+# 并提示"先怀疑扫描器，不要怀疑代码库"。
+MIN_COMPONENTS = 30     # 当前 41
+MIN_REACHABLE = 20      # 当前 24
+
+
+def self_check(comps, reachable, main_deps):
+    """返回错误列表；空列表表示扫描器看起来是活的。"""
+    errs = []
+    if len(comps) < MIN_COMPONENTS:
+        errs.append("只扫到 %d 个组件（下界 %d）—— 路径错或目录结构变了"
+                    % (len(comps), MIN_COMPONENTS))
+    if len(main_deps) == 0:
+        errs.append("main 的依赖解析为 0 条 —— REQUIRES 正则失效或写法变了。"
+                    "此时所有组件都会'不可达'，而它们都在待接线清单里 ⇒ 门禁假绿")
+    if len(reachable) < MIN_REACHABLE:
+        errs.append("从 main 只可达 %d 个组件（下界 %d）—— 依赖图解析很可能坏了"
+                    % (len(reachable), MIN_REACHABLE))
+    return errs
+
+
 def main():
     comps = all_components()
     header_owner = {}
@@ -201,7 +234,8 @@ def main():
     graph = {c: edges(os.path.join(COMPONENTS, c), c) for c in comps}
 
     seen = set()
-    stack = list(edges(MAIN, "main"))
+    main_deps = edges(MAIN, "main")
+    stack = list(main_deps)
     while stack:
         cur = stack.pop()
         if cur in seen or cur not in graph:
@@ -214,6 +248,19 @@ def main():
 
     print("组件总数: %d，从 main 可达: %d，待接线（已登记）: %d"
           % (len(comps), len(seen), len(unreachable) - len(unregistered)))
+
+    # ⚠ 先自检扫描器，再看代码库。顺序很重要：
+    # 扫描器坏了会让"代码库有问题"和"扫描器没看见"看起来一样。
+    errs = self_check(comps, seen, main_deps)
+    if errs:
+        print()
+        print("FAIL **门禁自身失效**（先怀疑扫描器，不要怀疑代码库）：")
+        for e in errs:
+            print("    %s" % e)
+        print()
+        print("  一个坏掉的扫描器会**永远报 PASS** —— 那比不装门禁更危险，")
+        print("  因为它给出的是'已经守住了'的错觉。")
+        return 2
 
     if unregistered:
         print()
