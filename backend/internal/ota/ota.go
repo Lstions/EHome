@@ -170,7 +170,7 @@ func getBridge() *bridge {
 
 type Manager struct {
 	db        *gorm.DB
-	mqtt      *mqtt.Client
+	mqtt      mqtt.Publisher
 	wsHub     *websocket.Hub
 	wg        sync.WaitGroup // for timeoutScanner graceful shutdown
 	started   sync.Once      // ensures Start() is re-entrant safe
@@ -178,7 +178,7 @@ type Manager struct {
 }
 
 // NewManager creates a new OTA manager
-func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub) *Manager {
+func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub) *Manager {
 	getBridge() // ensure bridge singleton is initialized (idempotent)
 	mgr := &Manager{
 		db:    db,

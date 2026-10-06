@@ -17,6 +17,8 @@ import (
 	"ehome/backend/internal/commandexec"
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/database"
+	"ehome/backend/internal/downlink"
+	"ehome/backend/internal/transport"
 	"ehome/backend/internal/datalifecycle"
 	"ehome/backend/internal/datasource"
 	"ehome/backend/internal/deviceaction"
@@ -198,8 +200,39 @@ func main() {
 		}
 	}
 
+	// 3.0 device transport (design 7.3 P0). Disabled by default: with
+	// device.enabled unset this build behaves exactly as before, which is what
+	// makes deploying it safe. A partially configured listener is refused HERE
+	// rather than silently not starting, because "I enabled it" and "the
+	// device cannot connect" would otherwise look identical.
+	if err := cfg.Device.Validate(); err != nil {
+		logger.Fatalf("Invalid device transport configuration: %v", err)
+	}
+
 	mqttClient := mqtt.New(cfg.MQTTBroker(), cfg.MQTTUser(), cfg.MQTTPassword())
 	defer mqttClient.Close()
+
+	// 3.0 downlink wiring (design 7.3 P0).
+	//
+	// The registry is created HERE, before anything that publishes downlinks,
+	// and handed to the transport below. That ordering is what lets one object
+	// serve both roles: the transport populates it as devices connect, and the
+	// bridge reads it to decide whether a node is reachable over TCP. With the
+	// transport owning its own registry there would be a window in which a
+	// connected device is reachable by the routing layer but invisible to
+	// everyone else.
+	//
+	// When device.enabled is false the bridge simply never finds a session and
+	// every downlink goes to MQTT exactly as before.
+	deviceRegistry := transport.NewRegistry()
+	legacyWithFallback := downlink.New(deviceRegistry, mqttClient)
+	var publisher mqtt.Publisher = legacyWithFallback
+	if !cfg.Device.Enabled {
+		// Not opted in: hand the raw client around so behaviour is byte-for-byte
+		// 2.x. (The bridge would behave the same, but this keeps the 2.x path
+		// free of a 3.0 object entirely.)
+		publisher = mqttClient
+	}
 
 	parserConfigs := loadDeviceConfigParsers(db)
 	driverRegistry := drivers.NewRegistry()
@@ -239,10 +272,19 @@ func main() {
 	go outboxProcessor.Run(outboxContext, time.Second)
 
 	haIntegration := homeassistant.NewIntegration(mqttClient)
-	otaMgr := ota.NewManager(db, mqttClient, wsHub)
+	otaMgr := ota.NewManager(db, publisher, wsHub)
 	offlineDetector := offlinedetector.NewDetector(db, wsHub)
-	nodeMgr := nodemgr.NewManager(db, mqttClient, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
+	nodeMgr := nodemgr.NewManager(db, publisher, wsHub, haIntegration, offlineDetector, otaMgr, driverRegistry)
 	// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调接线 (api 包函数, 避免包依赖环)。
+	// Bring up the 3.0 listener now that FrameHandler exists. It uses the SAME
+	// registry the bridge above holds, so a device that authenticates becomes
+	// immediately addressable over TCP.
+	devTransport, err := startDeviceTransport(cfg, nodeMgr.FrameHandler(), deviceRegistry)
+	if err != nil {
+		logger.Fatalf("Device transport: %v", err)
+	}
+	defer devTransport.stop()
+
 	nodeMgr.SetLatestSinkFn(api.SetLatestValue)
 	// 数据层时序化 (v3.4 §3.2.4) 的**启动回填**：必须在开始服务前完成，
 	// 否则重启后每台设备的首次 /overview 都 Miss ⇒ 回落 DISTINCT ON 扫分区表。
@@ -371,8 +413,8 @@ func main() {
 		// MultiTransport 按 action Transport 路由: channel_cmd_v2 → 通道指令,
 		// periph_cmd → GPIO/PWM 外设帧 (PeriphCmd 0x1B)。
 		transport := commandexec.NewMultiTransport(
-			commandexec.NewChannelCmdV2Transport(db, mqttClient, actionRegistry),
-			commandexec.NewPeriphTransport(db, mqttClient, actionRegistry))
+			commandexec.NewChannelCmdV2Transport(db, publisher, actionRegistry),
+			commandexec.NewPeriphTransport(db, publisher, actionRegistry))
 		dispatcher := commandexec.NewDispatcher(db, transport, dispatcherOwner)
 		go runCommandDispatcher(outboxContext, dispatcher, commandService, wsHub)
 		logger.Infof("ChannelCmdV2 dispatcher enabled owner=%s", dispatcherOwner)

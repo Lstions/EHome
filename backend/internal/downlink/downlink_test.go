@@ -41,10 +41,26 @@ func (f *fakeNative) HasSession(nodeID string) bool { return f.has[nodeID] }
 
 type fakeLegacy struct {
 	published []string
+	qos2      int
 	err       error
 }
 
 func (f *fakeLegacy) Publish(topic string, payload []byte) error {
+	f.published = append(f.published, topic)
+	return f.err
+}
+
+// PublishQoS2 / PublishRetained exist because LegacyPublisher mirrors the
+// mqtt.Publisher interface. Making the fake implement the FULL interface (not
+// just the one method a test happens to call) means a future change to the
+// interface surfaces here as a compile error instead of a nil-method panic.
+func (f *fakeLegacy) PublishQoS2(topic string, payload []byte) error {
+	f.published = append(f.published, topic)
+	f.qos2++
+	return f.err
+}
+
+func (f *fakeLegacy) PublishRetained(topic string, payload []byte) error {
 	f.published = append(f.published, topic)
 	return f.err
 }

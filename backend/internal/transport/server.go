@@ -32,7 +32,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log/slog"
+	"go.uber.org/zap"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -41,6 +41,13 @@ import (
 
 	"ehome/backend/pkg/protoframe"
 )
+
+// FrameCallback receives one fully delimited frame.
+//
+// Named so callers can refer to the shape without repeating it (and so the
+// device-transport startup helper can take it as a parameter rather than
+// reaching into nodemgr).
+type FrameCallback func(nodeID string, h protoframe.Header, payload []byte) error
 
 // Config configures the device-facing listener.
 type Config struct {
@@ -70,11 +77,22 @@ type Config struct {
 	// connects and then stalls would hold a slot forever.
 	HandshakeTimeout time.Duration
 
-	Logger *slog.Logger
+	// Registry, when non-nil, is used instead of an internal one.
+	//
+	// Startup needs this: the downlink bridge must be built BEFORE the
+	// packages that publish downlinks (nodemgr, ota, commandexec), and the
+	// bridge needs the directory the transport will populate. Handing the same
+	// Registry in solves the ordering without a circular dependency -- and it
+	// makes explicit that there is exactly ONE directory, so a device that is
+	// connected is reachable by the routing layer by construction rather than
+	// by convention.
+	Registry *Registry
+
+	Logger *zap.SugaredLogger
 
 	// OnFrame is called for each complete frame whose payload has been read.
 	// Returning an error closes the connection.
-	OnFrame func(nodeID string, h protoframe.Header, payload []byte) error
+	OnFrame FrameCallback
 
 	// OnConnect / OnDisconnect are optional lifecycle hooks.
 	OnConnect    func(nodeID string, remote string)
@@ -90,7 +108,7 @@ func (c *Config) withDefaults() Config {
 		out.HandshakeTimeout = 10 * time.Second
 	}
 	if out.Logger == nil {
-		out.Logger = slog.Default()
+		out.Logger = zap.NewNop().Sugar()
 	}
 	return out
 }
@@ -173,9 +191,14 @@ func New(cfg Config) (*Server, error) {
 	if cfg.OnFrame == nil {
 		return nil, errors.New("transport: OnFrame is required")
 	}
+	cfg = cfg.withDefaults()
+	reg := cfg.Registry
+	if reg == nil {
+		reg = NewRegistry()
+	}
 	return &Server{
-		cfg:      cfg.withDefaults(),
-		registry: NewRegistry(),
+		cfg:      cfg,
+		registry: reg,
 		conns:    map[net.Conn]struct{}{},
 	}, nil
 }
@@ -246,7 +269,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 			// A single failed accept (e.g. a client that broke off during the
 			// handshake) must not kill the listener. Log and continue.
-			s.cfg.Logger.Warn("transport: accept failed", "err", err)
+			s.cfg.Logger.Warnw("transport: accept failed", "err", err)
 			continue
 		}
 		s.wg.Add(1)
@@ -355,7 +378,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		closeErr = fmt.Errorf("transport: TLS handshake: %w", err)
-		s.cfg.Logger.Warn("transport: handshake failed", "remote", conn.RemoteAddr(), "err", err)
+		s.cfg.Logger.Warnw("transport: handshake failed", "remote", conn.RemoteAddr(), "err", err)
 		return
 	}
 	// Past the handshake we manage deadlines per-operation.
@@ -369,7 +392,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	if err != nil {
 		closeErr = err
-		s.cfg.Logger.Warn("transport: no node identity", "remote", conn.RemoteAddr(), "err", err)
+		s.cfg.Logger.Warnw("transport: no node identity", "remote", conn.RemoteAddr(), "err", err)
 		return
 	}
 
@@ -385,11 +408,11 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	if s.cfg.OnConnect != nil {
 		s.cfg.OnConnect(nodeID, conn.RemoteAddr().String())
 	}
-	s.cfg.Logger.Info("transport: device connected", "node", nodeID, "remote", conn.RemoteAddr())
+	s.cfg.Logger.Infow("transport: device connected", "node", nodeID, "remote", conn.RemoteAddr())
 
 	closeErr = s.readLoop(conn, nodeID)
 	if closeErr != nil {
-		s.cfg.Logger.Info("transport: device disconnected",
+		s.cfg.Logger.Infow("transport: device disconnected",
 			"node", nodeID, "err", closeErr)
 	}
 	_ = conn.Close()
@@ -440,7 +463,7 @@ func (s *Server) readLoop(conn net.Conn, nodeID string) error {
 				s.stats.BadHeader.Add(1)
 				s.stats.ResyncBytes.Add(1)
 				buf = buf[1:]
-				s.cfg.Logger.Warn("transport: bad frame header, resynchronising",
+				s.cfg.Logger.Warnw("transport: bad frame header, resynchronising",
 					"node", nodeID, "err", derr, "dropped", 1)
 				continue
 			}

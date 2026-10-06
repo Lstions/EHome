@@ -149,7 +149,7 @@ func (m *Manager) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames [
 // that many independent bus workers keyed by node ID (0/1 = legacy single
 // consumer). Each shard uses its own streamReassembler: buffers are keyed by
 // (deviceID, requestID), so per-device reassembly stays shard-local.
-func NewManager(db *gorm.DB, mqttClient *mqtt.Client, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
+func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
 	driverRegistry := drivers.NewRegistry()
 	if len(registries) > 0 && registries[0] != nil {
 		driverRegistry = registries[0]

@@ -51,19 +51,37 @@ type sessionSender interface {
 	HasSession(nodeID string) bool
 }
 
-// legacyPublisher is the 2.x path.
-type legacyPublisher interface {
+// LegacyPublisher is the 2.x path, exported so main() can name it when
+// constructing a Bridge (and so the device-transport helper can hand it on).
+type LegacyPublisher interface {
 	Publish(topic string, payload []byte) error
+	PublishQoS2(topic string, payload []byte) error
+	PublishRetained(topic string, payload []byte) error
 }
 
+// legacyPublisher is the internal alias for the same shape.
+type legacyPublisher = LegacyPublisher
+
 // Bridge is an mqtt.Publisher that prefers the native transport.
+//
+// Both transports are fixed at construction. I briefly had a SetLegacy method
+// so main() could create the bridge before the MQTT client existed; that was
+// wrong for two reasons: a bridge with a nil legacy publisher silently drops
+// messages, and mutable wiring means "which transport does this node use"
+// could change under a caller. Construction-time wiring makes the illegal
+// state unrepresentable.
 type Bridge struct {
 	native sessionSender
 	legacy legacyPublisher
 }
 
 // New builds a bridge. native may be nil (then everything goes to MQTT).
+// legacy must not be nil: it is the fallback the whole design depends on.
 func New(native sessionSender, legacy legacyPublisher) *Bridge {
+	if legacy == nil {
+		panic("downlink: legacy publisher is required; a bridge without a " +
+			"fallback would drop every message for a node without a TCP session")
+	}
 	return &Bridge{native: native, legacy: legacy}
 }
 

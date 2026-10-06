@@ -41,7 +41,7 @@ type Response struct {
 type Manager struct {
 	mu      sync.RWMutex
 	pending map[uint32]*Entry
-	mqtt    *mqtt.Client
+	mqtt    mqtt.Publisher
 	db      *gorm.DB // P3-4: database persistence
 }
 
@@ -54,7 +54,13 @@ func init() {
 }
 
 // NewManager creates a new pending write manager
-func NewManager(mqttClient *mqtt.Client, db *gorm.DB) *Manager {
+// NewManager takes mqtt.Publisher rather than *mqtt.Client so the 3.0
+//
+//	downlink bridge can be injected during the MQTT retirement window (design
+//	§7.3). Widening the parameter is compile-checked: every caller must be
+//	updated, so no downlink path can be left silently pointing at the old
+//	transport.
+func NewManager(mqttClient mqtt.Publisher, db *gorm.DB) *Manager {
 	m := &Manager{
 		pending: make(map[uint32]*Entry),
 		mqtt:    mqttClient,

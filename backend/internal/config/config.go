@@ -18,6 +18,62 @@ type Config struct {
 	Ingest         IngestConfig         `yaml:"ingest"`
 	DataRetention  DataRetentionConfig  `yaml:"data_retention"`
 	AdminBootstrap AdminBootstrapConfig `yaml:"admin_bootstrap"`
+	Device         DeviceConfig         `yaml:"device"`
+}
+
+// DeviceConfig configures the 3.0 device-facing TCP+TLS listener.
+//
+// # Disabled by default, deliberately
+//
+// Design §7.3 turns MQTT retirement into a staged rollout (P0..P4) whose first
+// step is "backend listens on BOTH MQTT and TCP". Until this section is filled
+// in and Enabled is set, the server behaves EXACTLY as it does today: that is
+// what makes deploying this change safe rather than a cut-over.
+//
+// A half-configured listener is refused at startup rather than silently
+// skipped, because "I enabled it and nothing listens" is indistinguishable
+// from "the device cannot connect" once you are debugging at 3am.
+type DeviceConfig struct {
+	// Enabled turns the 3.0 listener on. Default false.
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the listen address, e.g. ":8443" (design §4.1 default port).
+	Addr string `yaml:"addr"`
+
+	// CertFile / KeyFile are the server certificate chain and private key.
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+
+	// ClientCAFile is the CA bundle used to verify DEVICE certificates.
+	// Required when Enabled: without it the listener would accept any client,
+	// which is the opposite of mTLS.
+	ClientCAFile string `yaml:"client_ca_file"`
+
+	// ReadTimeoutSec / WriteTimeoutSec bound a single read/write.
+	// 0 means "use the built-in default".
+	ReadTimeoutSec  int `yaml:"read_timeout_sec"`
+	WriteTimeoutSec int `yaml:"write_timeout_sec"`
+}
+
+// Validate refuses a partially configured listener.
+//
+// Called only when Enabled is true, so an operator who has not opted in is
+// never blocked by 3.0 settings they do not have yet.
+func (d DeviceConfig) Validate() error {
+	if !d.Enabled {
+		return nil
+	}
+	if d.Addr == "" {
+		return fmt.Errorf("device.addr is required when device.enabled is true")
+	}
+	if d.CertFile == "" || d.KeyFile == "" {
+		return fmt.Errorf("device.cert_file and device.key_file are required when device.enabled is true")
+	}
+	if d.ClientCAFile == "" {
+		return fmt.Errorf("device.client_ca_file is required when device.enabled is true " +
+			"(a device listener without client verification is not mTLS)")
+	}
+	return nil
 }
 
 type ControlConfig struct {
