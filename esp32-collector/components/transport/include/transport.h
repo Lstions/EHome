@@ -141,6 +141,32 @@ esp_err_t transport_broadcast(const uint8_t *data, size_t len);
  */
 bool transport_registry_has_type(transport_type_t type);
 
+/* === D-01：广播的【真实】结果报告（2026-10-06）===
+ *
+ * 为什么需要它：msg_handler 原先用 `transport_registry_has_type(MQTT)` 来回答
+ * "广播有没有尝试过 MQTT" —— 那是**代理判据**，实际回答的是"MQTT 是否已注册"。
+ * 两者在"**已注册但未连接**"时**不相等**：
+ *   transport_broadcast 只在 `is_connected()` 为真时才调用 send，
+ *   所以那一刻它【从未尝试过 MQTT】，而日志却说 "already attempted"。
+ *
+ * 当前行为**碰巧安全**（未连接时重试也会失败），但那是巧合 ——
+ * 一旦将来"未连接"变成可恢复状态，这个错误的判据会导致**漏发**。
+ * 现在把真实情况报出来，让调用方问对问题。 */
+typedef struct {
+    int  attempted;       /* 真正调用过 send 的 transport 数 */
+    int  sent;            /* 其中返回 ESP_OK 的 */
+    int  connected;       /* 处于 connected 的 transport 数 */
+    bool mqtt_attempted;  /* 是否【真的】对 MQTT 调用过 send */
+    bool tcp_attempted;   /* 是否【真的】对 TCP  调用过 send */
+} transport_broadcast_report_t;
+
+/**
+ * 与 transport_broadcast() 行为一致，但额外回报【实际发生了什么】。
+ * `out` 可为 NULL。返回值语义与 transport_broadcast() 完全相同。
+ */
+esp_err_t transport_broadcast_ex(const uint8_t *data, size_t len,
+                                 transport_broadcast_report_t *out);
+
 /**
  * @brief 向指定的 transport 发送消息
  */

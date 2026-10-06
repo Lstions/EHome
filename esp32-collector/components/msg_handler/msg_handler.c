@@ -71,7 +71,11 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
         ESP_LOGW(TAG, "Failed to send via current transport, falling back to broadcast");
     }
 
-    esp_err_t ret = transport_broadcast(data, len);
+    /* D-01（2026-10-06）：广播【如实回报】它到底尝试了谁。
+     * 此前这里只能靠 transport_registry_has_type(MQTT) 去猜 ——
+     * 那是代理判据，答的是"MQTT 是否已注册"，而非"是否尝试过"。 */
+    transport_broadcast_report_t rep;
+    esp_err_t ret = transport_broadcast_ex(data, len, &rep);
     if (ret == ESP_OK) {
         ESP_LOGD(TAG, "Broadcast to all transports (%d bytes)", (int)len);
         return ESP_OK;
@@ -91,10 +95,15 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
      *   ⇒ PF = 2 x 帧, NT = BF = 1 x 帧, FS = 0
      *   实测：PF=3873, NT=1938, BF=1937, FS=0  ✔
      *
-     * 修法：适配器已在注册表里时不再重发，失败由 return ret 如实上报。
-     * 用注册表查询而非硬编码，使宿主测试（不注册适配器）仍走原路径，
-     * 不改变既有测试契约。 */
-    if (transport_registry_has_type(TRANSPORT_TYPE_MQTT)) {
+     * 修法（D-01，2026-10-06 起）：改问【真实】的问题 ——
+     * "广播刚才有没有真的对 MQTT 调用过 send？"（rep.mqtt_attempted）
+     *
+     * 此前用的是 transport_registry_has_type(MQTT)，那是**代理判据**：
+     * 它答的是"MQTT 是否已注册"。两者在"**已注册但未连接**"时不等价 ——
+     * broadcast 只在 is_connected() 时才 send，所以那一刻它从未尝试过 MQTT，
+     * 而日志却说 "already attempted"。当前行为碰巧安全（未连接时重试也会失败），
+     * 但那是巧合：一旦"未连接"变成可恢复状态，错误的判据就会导致**漏发**。 */
+    if (rep.mqtt_attempted) {
         ESP_LOGW(TAG, "Broadcast failed; MQTT already attempted inside broadcast, not re-publishing");
         return ret;
     }

@@ -75,38 +75,67 @@ esp_err_t transport_unregister(transport_t *transport)
     return ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t transport_broadcast(const uint8_t *data, size_t len)
+esp_err_t transport_broadcast_ex(const uint8_t *data, size_t len,
+                                 transport_broadcast_report_t *out)
 {
+    if (out != NULL) {
+        out->attempted = 0; out->sent = 0; out->connected = 0;
+        out->mqtt_attempted = false; out->tcp_attempted = false;
+    }
+
     if (!s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    
+
     if (!data || len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
     int sent_count = 0;
-    
+    int attempted = 0;
+    int connected = 0;
+
     for (int i = 0; i < s_transport_count; i++) {
         transport_t *t = s_transports[i];
-        
+
         if (t && t->ops && t->ops->send) {
+            /* D-01：只有【真的调用过 send】才算"尝试过"。
+             * 未连接时这里直接跳过 —— 调用方必须能看见这个区别，
+             * 而不是靠"它注册了没有"去猜。 */
             if (t->ops->is_connected(t)) {
+                connected++;
                 esp_err_t err = t->ops->send(t, data, len);
+                attempted++;
+                if (out != NULL) {
+                    if (t->type == TRANSPORT_TYPE_MQTT) out->mqtt_attempted = true;
+                    if (t->type == TRANSPORT_TYPE_TCP)  out->tcp_attempted = true;
+                }
                 if (err == ESP_OK) {
                     sent_count++;
                 }
             }
         }
     }
-    
+
+    if (out != NULL) {
+        out->attempted = attempted;
+        out->sent = sent_count;
+        out->connected = connected;
+    }
+
     if (sent_count == 0) {
         ESP_LOGW(TAG, "No transport connected for broadcast");
         return ESP_ERR_INVALID_STATE;
     }
-    
+
     ESP_LOGD(TAG, "Broadcast to %d transports, len=%d", sent_count, (int)len);
     return ESP_OK;
+}
+
+esp_err_t transport_broadcast(const uint8_t *data, size_t len)
+{
+    /* 保持原签名与语义；不需要报告时用这个。 */
+    return transport_broadcast_ex(data, len, NULL);
 }
 
 /* === D-09：定帧契约的唯一来源 ===

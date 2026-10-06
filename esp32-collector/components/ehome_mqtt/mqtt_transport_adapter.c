@@ -45,9 +45,18 @@ static esp_err_t mqtt_adapter_send(transport_t *transport, const uint8_t *data, 
      * 否则无法避免对**同一帧**重复发布（见 mqtt_client_publish_ex 注释与
      * msg_handler_publish_checked 里 L-02 的闭环推导）。
      *
-     * 为什么这里仍然把两者都映射为 ESP_FAIL：transport_broadcast() 用
-     * 返回码统计 sent_count，改动它会连带改变"广播是否成功"的判定，
-     * 超出本次最小修复的范围。去重由调用方的注册表查询完成。 */
+     * 为什么这里仍然把两者都映射为 ESP_FAIL —— **更正一处错误理由**：
+     * 原注释写"改动它会连带改变 sent_count 判定"。**实测不成立**：
+     * transport_broadcast_ex() 只在 `err == ESP_OK` 时 sent_count++，
+     * 而 NOT_CONNECTED 与 FAILED **都**映射为 ESP_FAIL（都是失败）
+     * ⇒ 无论是否压平，sent_count 都不受影响。
+     *
+     * 真正的原因更简单也更诚实：`transport_ops.send` 的返回类型是 esp_err_t，
+     * **没有**"未连接"这一档。要表达三态就得先扩展接口 ——
+     * 那是 3.0 `link_result_t`（components/link）要做的事，不在本处最小修复范围。
+     *
+     * 而调用方的去重【已经不再依赖这个返回码】：见 msg_handler.c 改用
+     * transport_broadcast_ex() 的 mqtt_attempted（D-01）。 */
     switch (mqtt_client_publish_ex(data, len)) {
     case MQTT_PUBLISH_OK:
         return ESP_OK;

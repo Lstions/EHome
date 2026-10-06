@@ -866,6 +866,17 @@ target_include_directories(transport_framing_tests PRIVATE
     hello_stubs
 )
 target_compile_options(transport_framing_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(transport_broadcast_tests
+    transport_broadcast_tests.c
+    ../components/transport/transport.c
+)
+target_include_directories(transport_broadcast_tests PRIVATE
+    ../components/transport/include
+    hello_stubs
+)
+target_compile_options(transport_broadcast_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME transport_broadcast_tests COMMAND transport_broadcast_tests)
+
 add_test(NAME transport_framing_tests COMMAND transport_framing_tests)
 
 # D-07 健康计数写入规则（纯函数，无需 stub）
