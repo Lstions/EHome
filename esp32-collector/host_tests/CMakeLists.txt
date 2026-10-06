@@ -1131,3 +1131,23 @@ target_include_directories(link_rx_adapt_tests PRIVATE
 )
 target_compile_options(link_rx_adapt_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME link_rx_adapt_tests COMMAND link_rx_adapt_tests)
+
+add_executable(session_tests
+    session_tests.c
+    ../components/session/session.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(session_tests PRIVATE
+    ../components/session/include
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(session_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME session_tests COMMAND session_tests)
