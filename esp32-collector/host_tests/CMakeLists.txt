@@ -1009,6 +1009,15 @@ target_compile_options(link_tcp_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
 add_test(NAME link_tcp_tests COMMAND link_tcp_tests)
 
+add_executable(frame_header_tests
+    frame_header_tests.c
+    ../components/wire/wire.c
+)
+target_include_directories(frame_header_tests PRIVATE ../components/wire/include)
+target_compile_options(frame_header_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME frame_header_tests
+    COMMAND frame_header_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/frame_header.txt)
+
 add_test(NAME golden_vectors_tests
     COMMAND golden_vectors_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
 
