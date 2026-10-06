@@ -160,10 +160,16 @@ deploy/prod/.msg*.txt
 # `git add -A` 就会把整个 ESP-IDF 构建树（.fwbuild*，数百 MB）和下载的工具链
 # （.tools/，含 cmake 二进制）一起提交进去，让仓库体积不可逆地膨胀。
 # 显式忽略比依赖“记得别 add”更可靠。
-.fwbuild/
-.fwbuild_c6/
-.fwbuild_probe/
-.fwbuild_fallback/
+#
+# 2026-10-06 三次事故（本条规则第三次被击穿）：上面这四个**具体目录名**漏掉了
+# .fwbuild_netperf / .fwbuild_netperf_candA / .fwbuild_netperf_empty_ssid，
+# 而它们早在 6e778c95 就被跟踪 ⇒ .gitignore 对已跟踪文件无效 ⇒ 17687 个文件 /
+# 554 MB 构建产物（含 sdkconfig 里的 Wi-Fi 明文口令、.broker.defaults 里的
+# 生产 MQTT 地址、以及可 strings 出凭据的 ehome_collector.elf）随公开仓库发出。
+# ⇒ 教训：这类规则必须写成**通配**，枚举具体名字迟早漏。
+#   新增任何 *-evidence / build-* 目录时，同样先确认有通配规则覆盖。
+# 注意：通配只防新增；已入库的仍须显式 `git rm -r --cached` 摘除。
+.fwbuild*/
 .fallback/
 .tools/
 .ht_final/

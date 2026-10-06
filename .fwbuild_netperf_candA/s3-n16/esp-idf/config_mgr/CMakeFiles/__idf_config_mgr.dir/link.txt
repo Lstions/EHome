@@ -1,2 +1,0 @@
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libconfig_mgr.a CMakeFiles/__idf_config_mgr.dir/config_mgr.c.obj
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libconfig_mgr.a

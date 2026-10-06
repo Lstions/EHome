@@ -1,6 +1,0 @@
--mlongcalls
--fno-builtin-memcpy
--fno-builtin-memset
--fno-builtin-bzero
-"-specs=/mnt/storage/WorkSpace/EHome/.fwbuild_netperf/s3-n16/specs/picolibc.specs"
--fno-rtti
