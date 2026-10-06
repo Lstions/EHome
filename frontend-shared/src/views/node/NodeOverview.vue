@@ -79,6 +79,25 @@
               </button>
             </span>
           </el-tooltip>
+          <!-- 节点级设备操作（重启 / 恢复出厂）。
+               仅在服务端确实具备设备传输时出现：否则点了也只会得到 501，
+               把「后端没这个能力」伪装成「操作失败」对操作员没有帮助。 -->
+          <template v-if="deviceOpReady">
+            <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!nodeOffline">
+              <span>
+                <button class="btn btn-plain" :disabled="nodeOffline || deviceOpBusy" @click="handleDeviceOp('reboot')">
+                  <el-icon :size="14" :class="{ spin: deviceOpBusy && deviceOpInFlight === 'reboot' }"><SwitchButton /></el-icon>{{ deviceOpInFlight === 'reboot' ? '重启中...' : '重启' }}
+                </button>
+              </span>
+            </el-tooltip>
+            <el-tooltip content="设备离线，无法操作" placement="top" :disabled="!nodeOffline">
+              <span>
+                <button class="btn btn-plain" :disabled="nodeOffline || deviceOpBusy" @click="handleDeviceOp('factory_reset')">
+                  <el-icon :size="14" :class="{ spin: deviceOpBusy && deviceOpInFlight === 'factory_reset' }"><Delete /></el-icon>{{ deviceOpInFlight === 'factory_reset' ? '恢复中...' : '恢复出厂' }}
+                </button>
+              </span>
+            </el-tooltip>
+          </template>
           <button class="btn btn-plain" :disabled="refreshing" @click="refreshAll">
             <el-icon :size="14" :class="{ spin: refreshing }"><RefreshRight /></el-icon>{{ refreshing ? '刷新中...' : '刷新' }}
           </button>
@@ -953,6 +972,7 @@ import {
   View, WarningFilled,
 } from '@element-plus/icons-vue'
 import { nodeApi, type Capabilities, type DmaChannelInfo, type Node, type OTARecord } from '@/api/node'
+import { nodeDeviceOpApi, type NodeDeviceOp } from '@/api/nodeDeviceOp'
 import { channelApi, type Channel } from '@/api/channel'
 import client from '@/api/client'
 import OTAForm from '@/components/forms/OTAForm.vue'
@@ -1015,6 +1035,94 @@ const devices = ref<any[]>([])
 const devicesLoading = ref(false)
 const otaHistory = ref<OTARecord[]>([])
 const otaHistoryLoading = ref(false)
+
+// ── 节点级设备操作（重启 / 恢复出厂） ──
+//
+// 判据与用户可见后果，逐条写清：
+//
+// 1) deviceOpSupported：只有服务端**确实**有设备传输时才显示按钮
+//    （GET /nodes/device-ops 的 supported）。否则点了必然 501 ——
+//    把「后端没这个能力」显示成「操作失败」是在误导操作员。
+//
+// 2) **acked=false 是"结果未知"，不是失败**。后端在设备没回 ACK 时返回 202，
+//    axios 把 2xx 当成功 ⇒ 这里走 resolve 分支。此时**绝不能**说"重启失败"：
+//    ACK 丢了的重启照样重启了，说失败会让操作员白跑一趟现场。
+//
+// 3) 恢复出厂**不擦除 WiFi**（后端与固件都是这个语义），确认文案必须写明，
+//    否则这个功能没人敢用。
+//
+// 4) 成功提示要提醒"页面可能短暂失联"：设备重启时连接会断，
+//    不提前说明的话，操作员会以为是自己把设备搞坏了。
+const deviceOpSupported = ref(false)
+const deviceOpBusy = ref(false)
+const deviceOpInFlight = ref<NodeDeviceOp | null>(null)
+const deviceOpReady = computed(() => deviceOpSupported.value)
+
+async function loadDeviceOpSupport() {
+  try {
+    const catalog = await nodeDeviceOpApi.catalog()
+    deviceOpSupported.value = catalog.supported
+  } catch (err) {
+    // 能力探测失败**不能**让页面报错或影响别的行为：它只决定两个按钮显不显示。
+    // 保守取 false（不显示），debug 级留痕，不打扰用户。
+    deviceOpSupported.value = false
+    logger.debug('读取设备操作能力失败', { error: String(err) })
+  }
+}
+
+async function handleDeviceOp(op: NodeDeviceOp) {
+  if (!node.value || nodeOffline.value || deviceOpBusy.value) return
+  const serial = nodeSerial.value
+  const sessionGeneration = getSessionGeneration()
+
+  const label = op === 'reboot' ? '重启' : '恢复出厂'
+
+  // 破坏性操作必须二次确认（走既有 feedback.confirmDanger：danger 按钮语义 +
+  // 焦点确定落在"取消"侧）。
+  const message = op === 'reboot'
+    ? '确认重启节点 ' + serial + '？设备会断开连接约 10~30 秒后自动重连；' +
+      '配置与 WiFi 连接信息都会保留。'
+    : '确认将节点 ' + serial + ' 恢复出厂？设备上的配置会被清除，' +
+      '但 WiFi 连接信息与设备身份会保留，设备会自动重新上线。'
+  const ok = await feedback.confirmDanger(message, {
+    title: label + ' ' + serial,
+    confirmText: label,
+  })
+  if (!ok) return
+
+  deviceOpBusy.value = true
+  deviceOpInFlight.value = op
+  try {
+    const result = await nodeDeviceOpApi.run(serial, op)
+    if (getSessionGeneration() !== sessionGeneration) return
+
+    if (result.acked && result.result === 'ok') {
+      ElMessage.success(
+        label + '指令已被设备接受。设备即将断开，页面可能短暂失联，稍后刷新即可。'
+      )
+    } else if (!result.acked) {
+      // 202：已送达但没收到确认 ⇒ **结果未知**。措辞不能是"失败"。
+      ElMessage.warning(
+        label + '指令已送达，但设备未确认收到。操作**可能已经生效**——' +
+        '请稍后刷新页面查看设备是否重新上线，不要直接重复操作。'
+      )
+    } else {
+      // 设备回了 ACK 但不是 ok：设备明确拒绝，带它自己的原因。
+      // 走 feedback.error 而不是裸 ElMessage.error —— 本仓有静态守卫
+      // (I-1) 强制错误提示必须经 utils/feedback 汇聚，我第一次提交时
+      // **正是被那条守卫抓到的**。
+      feedback.error('设备拒绝了' + label + '：' + result.result)
+    }
+  } catch (err: any) {
+    if (getSessionGeneration() !== sessionGeneration) return
+    // 设备明确拒绝时后端给 409 + errorCode device_rejected:<原因>，
+    // 把设备的原始原因透出来，不要被兜底文案盖掉。
+    feedback.handleError(err, label + '失败')
+  } finally {
+    deviceOpBusy.value = false
+    deviceOpInFlight.value = null
+  }
+}
 
 // 页头操作
 const syncing = ref(false)
@@ -2494,6 +2602,8 @@ function onPeripheralConfigure(_resourceName: string) {
 // ── 生命周期 ──
 onMounted(() => {
   void fetchDetail()
+  // 探测服务端是否具备节点级设备操作能力；只影响两个按钮显不显示。
+  void loadDeviceOpSupport()
   sessionTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
 
   // 节点状态更新（node_status 无延迟字段，仅状态/uptime）
