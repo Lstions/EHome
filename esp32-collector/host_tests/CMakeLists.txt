@@ -1013,6 +1013,9 @@ add_test(NAME link_mqtt_tests COMMAND link_mqtt_tests)
 
 add_test(NAME report_stats_tests COMMAND report_stats_tests)
 
+add_test(NAME mem_budget_thresholds
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_mem_budget_thresholds.py)
+
 add_test(NAME stub_enum_sync
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_stub_enum_sync.py)
 

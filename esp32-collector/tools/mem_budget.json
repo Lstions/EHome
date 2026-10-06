@@ -18,13 +18,11 @@
     },
     "s3p-n8": {
       "dir_used_max": 151500,
-      "iram_remain_min": 4096,
-      "dir_remain_min": 0
+      "iram_remain_min": 4096
     },
     "s3p-n16": {
       "dir_used_max": 151500,
-      "iram_remain_min": 4096,
-      "dir_remain_min": 0
+      "iram_remain_min": 4096
     },
     "c6-n8": {
       "dir_used_max": 190000,
@@ -43,6 +41,7 @@
     "iram_remain_s3": "S3 IRAM 段 16,384 B 当前 100% 占用（remain=0），方案要求 remain>=4 KiB。known_pending 记录 task-3 的 IRAM→flash 缺口，默认打印 PENDING 不阻塞合并；--strict 时拦截。",
     "dir_remain_c6": "C6 无独立 IRAM 段（代码在 flash），DIRAM remain>=20 KiB 是方案 §2.2 的硬门禁。",
     "top_n": "仅影响报告展示，不影响退出码。",
-    "provisional_2026_10_05": "2026-10-05 20:31 六 profile 全部构建通过后的实测：s3-n8=s3-n16=163,840；s3p-n8=s3p-n16=147,332（PSRAM 数据放置生效，比无 PSRAM 的 s3 还低 16.5 KiB）；c6-n8=c6-n16=180,305。阈值=实测+2-3%（s3=168,000；s3p=151,500；c6=185,000），用于挡住继续变胖。注意：task-3/task-5 仍在进行中，冻结后应把阈值收紧到最终实测附近。"
+    "provisional_2026_10_05": "2026-10-05 20:31 六 profile 全部构建通过后的实测：s3-n8=s3-n16=163,840；s3p-n8=s3p-n16=147,332（PSRAM 数据放置生效，比无 PSRAM 的 s3 还低 16.5 KiB）；c6-n8=c6-n16=180,305。阈值=实测+2-3%（s3=168,000；s3p=151,500；c6=185,000），用于挡住继续变胖。注意：task-3/task-5 仍在进行中，冻结后应把阈值收紧到最终实测附近。",
+    "dir_remain_min_vacuous_2026_10_06": "D-25 修复（2026-10-06）：s3p-n8 / s3p-n16 的 dir_remain_min 原为 **0**，而其余四个 profile 都是 20,480。判据是 \"DIRAM remain >= dir_remain_min\"，取 0 意味着**恒真** —— 该 profile 的这条门禁**永远不会红**，即使只剩 1 字节。门禁打印 PASS 却什么都没检查（假绿）。\n\n排除\"有意放宽\"的可能：s3p 实测 DIRAM used **147,380** 是六个 profile 里**最低**的（PSRAM 数据放置生效），可用余量 194,380 B，**远大于** 20,480 —— 把它设成 0 既无依据也无收益。_notes 里也没有任何一条解释过它。\n\n处置：**删除该键**，让它继承 defaults.dir_remain_min=20,480（P4：一处定义）。实测仍 PASS（194,380 >= 20,480）。\n\n另加元门禁 tools/check_mem_budget_thresholds.py：拒绝\"恒真阈值\"（min 型=0、max 型超出该 profile 的物理容量），防止该形态再次出现。"
   }
 }

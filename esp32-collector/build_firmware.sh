@@ -498,10 +498,41 @@ EOF
             return 1
         fi
     fi
+
+    # ---- 静态内存预算门禁（WS-G）----
+    # 2026-10-06（D-27）接入。**此前该门禁存在但从未被任何流程调用** ——
+    # 只写在 README 的"建议插入点"里，于是它谁也没保护：
+    # 一个不运行的检查与没有检查等价，而且更糟 —— 它让文档看起来覆盖了这件事。
+    # 现在与 ISR 检查同一处、同一形态：超预算让**构建失败**，
+    # 而不是把超预算固件推给设备。
+    local _budget="$PROJECT_DIR/tools/mem_budget_check.py"
+    if [[ -f "$_budget" ]]; then
+        echo "==> Checking static memory budget ($profile)"
+        if ! "${IDF_PY_CMD[0]}" "$_budget" \
+                --profile "$profile" \
+                --map "$build_dir/ehome_collector.map"; then
+            echo "ERROR: $profile: static memory budget check failed (see above)" >&2
+            echo "       Refusing to leave a firmware that exceeds the memory budget." >&2
+            return 1
+        fi
+    fi
 }
 
 main() {
     local profile="${1:-}"
+
+    # 拒绝多余参数（2026-10-06，D-26）。
+    # 原先 main 只读 $1 并**静默忽略**其余参数 —— 于是
+    #   ./build_firmware.sh s3p-n16 /tmp/xxx
+    # 里的 /tmp/xxx 被丢掉，构建落在默认 build/ 而不是调用方以为的目录。
+    # 这种"看起来指定了、其实没生效"正是本项目反复出现的静默失效形态
+    # （对照 D-03 死代码、L-05 假绿阈值）：**不报错 = 以为成功**。
+    # 构建目录要用 BUILD_ROOT 环境变量指定（见 usage）。
+    if [[ $# -gt 1 ]]; then
+        echo "ERROR: 多余参数：'$2'（本脚本只接受一个 profile 参数）" >&2
+        echo "       要改构建目录请用环境变量：BUILD_ROOT=<dir> $0 <profile>" >&2
+        return 2
+    fi
 
     if [[ "$profile" != "-h" && "$profile" != "--help" && -n "$profile" ]]; then
         init_idf_py || return $?
