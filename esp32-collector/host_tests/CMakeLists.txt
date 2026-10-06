@@ -1201,6 +1201,30 @@ target_include_directories(handler_device_op_tests PRIVATE
 target_compile_options(handler_device_op_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME handler_device_op_tests COMMAND handler_device_op_tests)
 
+# 让**固件真实实现**（handler_device_op.c）消费共享向量，而不是只用通用编解码器。
+# 既有 golden_vectors_tests 只证明"通用 encoder 能产出这串字节"，
+# 证明不了"handler 用的是 field 1/2/3" —— 字段号写错它照样绿。
+# 本用例与后端 Go 的 device_op_vectors_test.go 用同一串字节对锚。
+add_executable(device_op_shared_vectors_tests
+    device_op_shared_vectors_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_shared_vectors_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_shared_vectors_tests PRIVATE -Wall -Wextra -Werror)
+# 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
+# （与 golden_vectors_tests 同一口径）。
+add_test(NAME device_op_shared_vectors_tests
+    COMMAND device_op_shared_vectors_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
+
 # main 侧注入的三个原语：NVS 擦除 / 同步发送 / 重启。
 # 重点覆盖"命名空间不存在算成功"这条分支 —— 它错法的后果是
 # "一个永远失败、其实已经成功的恢复出厂"。

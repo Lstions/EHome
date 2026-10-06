@@ -120,3 +120,62 @@ sub
 u64 1 1
 wire 0801
 end
+
+# --- v3.0 远程运维（0x22 下行 / 0x23 上行）---
+#
+# ⚠ 这一组是本文件**存在理由**的直接体现：
+#   后端 Go（pkg/frame/device_op_wire.go）与固件 C（handler_device_op.c）
+#   各自独立实现了同一份字段约定，而两边**从未在真实链路上对话过**。
+#   两端各自单测全绿、合起来却不通 —— 正是 S0 要在重构中拦住的事。
+#   加进本文件后，Go 测试、C 宿主测试、Python 门禁会**各自独立**校验同一串字节。
+#
+# 字段约定（两端必须一致）：
+#   0x22 下行：field 1 op_code(varint)、field 2 request_id(bytes)
+#   0x23 上行：field 1 result_code(varint)、field 2 request_id(bytes)、field 3 detail(bytes, 可选)
+#
+# request_id 故意选 10 字节（op-node1-1）：长度前缀 0x0a 与单字节值能区分开，
+# 若有人把长度前缀写成定长或漏掉，这里会红。
+# 最后一条用 result=9（未定义码）：**未知结果码必须原样保留数字**，
+# 折叠成某个已知值就等于把"设备比服务端新"误报成"操作失败"。
+case device_op_reboot
+type 34
+u64 1 1
+bytes 2 6f702d6e6f6465312d31
+wire 220801120a6f702d6e6f6465312d31
+end
+
+case device_op_factory_reset
+type 34
+u64 1 2
+bytes 2 6f702d6e6f6465312d31
+wire 220802120a6f702d6e6f6465312d31
+end
+
+case device_op_ack_ok
+type 35
+u64 1 0
+bytes 2 6f702d6e6f6465312d31
+wire 230800120a6f702d6e6f6465312d31
+end
+
+case device_op_ack_erase_failed
+type 35
+u64 1 3
+bytes 2 6f702d6e6f6465312d31
+wire 230803120a6f702d6e6f6465312d31
+end
+
+case device_op_ack_with_detail
+type 35
+u64 1 3
+bytes 2 6f702d6e6f6465312d31
+bytes 3 6e7673206572617365206661696c6564
+wire 230803120a6f702d6e6f6465312d311a106e7673206572617365206661696c6564
+end
+
+case device_op_ack_unknown_result_keeps_number
+type 35
+u64 1 9
+bytes 2 6f702d6e6f6465312d31
+wire 230809120a6f702d6e6f6465312d31
+end
