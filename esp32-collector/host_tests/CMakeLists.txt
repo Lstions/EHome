@@ -962,7 +962,26 @@ add_executable(report_stats_tests
 )
 target_include_directories(report_stats_tests PRIVATE ../components/report_stats/include)
 target_compile_options(report_stats_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(link_mqtt_tests
+    link_mqtt_tests.c
+    ../components/link/link.c
+    ../components/link_mqtt/link_mqtt.c
+)
+target_include_directories(link_mqtt_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/link/include
+    ../components/link_mqtt/include
+    ../components/ehome_mqtt
+)
+target_compile_options(link_mqtt_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+add_test(NAME link_mqtt_tests COMMAND link_mqtt_tests)
+
 add_test(NAME report_stats_tests COMMAND report_stats_tests)
+
+add_test(NAME stub_enum_sync
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_stub_enum_sync.py)
 
 add_test(NAME component_cycles
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_cycles.py)

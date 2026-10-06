@@ -606,6 +606,14 @@ mqtt_publish_result_t mqtt_client_publish_ex(const uint8_t *data, size_t len)
          * "刚好压线"与"长期满"，而这两者对修复方向的含义完全不同。
          * 该函数在 -2 路径上没有日志，所以"日志里没有 outbox 字样"
          * 不能证明"没饱和" —— 必须把数打出来。 */
+        /* 2026-10-06（3.0 link 迁移）：-2 是【背压】而不是失败 ——
+         * 调用方应退避重试；与"编码失败/client 换代"的处置方式相反。
+         * 把它单独分出来，是 LINK_BACKPRESSURE 存在的前提。 */
+        if (msg_id == -2 && valid) {
+            ESP_LOGW(TAG, "Publish backpressure (outbox=%d/%d, qos=%d, len=%d)",
+                     esp_mqtt_client_get_outbox_size(op.client), 4096, qos, (int)len);
+            return MQTT_PUBLISH_BACKPRESSURE;
+        }
         ESP_LOGE(TAG, "Publish failed (enqueue=%d, valid=%d, outbox=%d/%d, qos=%d, len=%d)",
                  msg_id, (int)valid, esp_mqtt_client_get_outbox_size(op.client), 4096,
                  qos, (int)len);

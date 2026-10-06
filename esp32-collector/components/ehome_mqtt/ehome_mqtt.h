@@ -94,11 +94,20 @@ void mqtt_client_owner_step(bool network_available);
  * 语义：
  *   MQTT_PUBLISH_OK             已交给 esp-mqtt（成功）
  *   MQTT_PUBLISH_NOT_CONNECTED  本地未连接，调用方**不应**重试其它 MQTT 路径
- *   MQTT_PUBLISH_FAILED         对端/队列问题（含 outbox 满 -2），可上报失败 */
+ *   MQTT_PUBLISH_BACKPRESSURE   【本机】outbox 已满（enqueue 返回 -2）——
+ *                               **可重试**，不是故障，更不是对端问题
+ *   MQTT_PUBLISH_FAILED         其它失败（编码/内存、client 换代、QoS0 未入箱）
+ *
+ * 2026-10-06（3.0 link 迁移）新增 BACKPRESSURE：
+ *   原先 -2（outbox 满）与真正的失败一起被压进 MQTT_PUBLISH_FAILED。
+ *   而这两者的**处置方式完全相反**：背压应当退避重试，失败不该重试。
+ *   这就是 3.0 `link_result_t` 专门设一个 LINK_BACKPRESSURE 的原因 ——
+ *   现在把这个区分一直贯通到最底层。 */
 typedef enum {
     MQTT_PUBLISH_OK = 0,
     MQTT_PUBLISH_NOT_CONNECTED = 1,
     MQTT_PUBLISH_FAILED = 2,
+    MQTT_PUBLISH_BACKPRESSURE = 3,
 } mqtt_publish_result_t;
 
 /**

@@ -27,6 +27,21 @@ const char *link_result_name(link_result_t r)
     return s_result_names[r];
 }
 
+bool link_result_is_error(link_result_t r)
+{
+    switch (r) {
+    case LINK_SENT:
+    case LINK_BACKPRESSURE:
+    case LINK_NOT_READY:
+        /* 都不是错误：成功 / 稍后重试 / 等待就绪。 */
+        return false;
+    case LINK_PAYLOAD_TOO_BIG:
+    case LINK_FATAL:
+    default:
+        return true;
+    }
+}
+
 link_t *link_create(const link_driver_t *drv, void *drv_ctx)
 {
     if (drv == NULL) return NULL;

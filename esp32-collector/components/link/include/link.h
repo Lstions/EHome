@@ -96,6 +96,18 @@ void link_get_stats(const link_t *l, link_stats_t *out);
 /** 结果名（日志/测试用）—— 避免结果名在多个文件里各写一遍（P4）。 */
 const char *link_result_name(link_result_t r);
 
+/**
+ * 该结果是否属于【错误】—— 即调用方应当上报/重建，而不是按正常流程继续或稍后重试。
+ *
+ * 这条区分就是整个 link 接口存在的理由（旧 esp_err_t 只有成功/失败两档）：
+ *   LINK_SENT         否 —— 成功
+ *   LINK_BACKPRESSURE 否 —— **可重试的正常状态**，不是故障
+ *   LINK_NOT_READY    否 —— 链路尚未就绪，属于等待而非故障
+ *   LINK_PAYLOAD_TOO_BIG 是 —— 调用方违反了契约（本应先分片/拒绝）
+ *   LINK_FATAL        是 —— 链路不可用
+ */
+bool link_result_is_error(link_result_t r);
+
 #ifdef __cplusplus
 }
 #endif

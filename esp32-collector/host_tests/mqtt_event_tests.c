@@ -29,12 +29,19 @@ typedef enum {
     MQTT_SUB_FAILED,
 } mqtt_subscription_phase_t;
 
-/* 与生产 ehome_mqtt.h 保持一致（L-02 修复新增的三态发布结果）。桩头文件必须
- * 同步，否则宿主测试编不过 —— 这正是"接口一变，桩要跟着变"的显式位置。 */
+/* 与生产 ehome_mqtt.h 保持一致（L-02 修复的三态 + 3.0 link 迁移新增的背压态）。
+ * 桩头文件必须同步，否则宿主测试编不过 —— 这正是"接口一变，桩要跟着变"的显式位置。
+ *
+ * ⚠ 2026-10-06 实测：这条注释**说对了** —— 新增 MQTT_PUBLISH_BACKPRESSURE 时
+ * 本文件立即编译失败（"undeclared"）。同步本身是对的，但**手抄一份枚举**
+ * 是维护负担（P4：语义应只有一处定义）。彻底的做法是让本 TU 直接 include
+ * 真实的 ehome_mqtt.h；它拉入的 mqtt_client.h 现在已有宿主桩
+ * （host_tests/stubs/mqtt_client.h）。**留给后续整理**，本次先如实同步。 */
 typedef enum {
     MQTT_PUBLISH_OK = 0,
     MQTT_PUBLISH_NOT_CONNECTED = 1,
     MQTT_PUBLISH_FAILED = 2,
+    MQTT_PUBLISH_BACKPRESSURE = 3,
 } mqtt_publish_result_t;
 
 typedef enum {

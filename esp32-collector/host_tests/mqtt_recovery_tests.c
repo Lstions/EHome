@@ -29,12 +29,17 @@ typedef enum {
     MQTT_SUB_FAILED,
 } mqtt_subscription_phase_t;
 
-/* 与生产 ehome_mqtt.h 保持一致（L-02 修复新增的三态发布结果）。桩头文件必须
- * 同步，否则宿主测试编不过 —— 这正是"接口一变，桩要跟着变"的显式位置。 */
+/* 与生产 ehome_mqtt.h 保持一致（L-02 的三态 + 3.0 link 迁移新增的背压态）。
+ *
+ * 本文件用 #define EHOME_MQTT_H 挡掉真实头文件（因为 esp-mqtt 不能在宿主编译，
+ * 必须手写整套桩）⇒ 这份枚举是【手抄】的，会漂移。
+ * 2026-10-06 实测就漂移了：新增 MQTT_PUBLISH_BACKPRESSURE 后本文件编译失败。
+ * 现在由 tools/check_stub_enum_sync.py 门禁守护，不再只靠注释提醒。 */
 typedef enum {
     MQTT_PUBLISH_OK = 0,
     MQTT_PUBLISH_NOT_CONNECTED = 1,
     MQTT_PUBLISH_FAILED = 2,
+    MQTT_PUBLISH_BACKPRESSURE = 3,
 } mqtt_publish_result_t;
 
 typedef enum {
