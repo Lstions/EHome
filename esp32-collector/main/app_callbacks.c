@@ -369,10 +369,18 @@ static bool extract_manifest_identity(const uint8_t *data, size_t len,
 static void log_heap_step_here(const char *step, const char *phase)
 {
 #ifdef EHOME_MEM_DIAG
-    ESP_LOGI(TAG, "[heap] %-18s %-5s free=%u largest=%u",
+    /* 口径：internal —— 与门禁（mem_guard）同一口径，也与 config_apply_transaction.c
+     * 的 [heap] 每步行一致（同一份差分表里两处口径不能不同，否则同一列数字不可比）。
+     *
+     * 这里**故意不并打 total**：本行的消费方式是"in/out 按步骤差分"，而 total
+     * 在 s3p 上恒等于 PSRAM 的 8.25 MB —— UART 驱动分配的是内部 RAM，不碰 PSRAM，
+     * 于是 total 的差分恒为 0，只会把行拉长、稀释真正的读数。被这一步吃掉的
+     * ~9.3 KB（S3 三路 UART）全部记在 internal 上，也正是门禁判的那个数。
+     * "内部紧、PSRAM 宽裕"的对照请看 [bootheap]/[stack] 的双口径行。 */
+    ESP_LOGI(TAG, "[heap] %-18s %-5s free=%u largest=%u (internal)",
              step, phase,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 #else
     (void)step; (void)phase;
 #endif

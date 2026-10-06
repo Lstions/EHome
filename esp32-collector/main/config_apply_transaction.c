@@ -171,12 +171,23 @@ static config_apply_result_t rollback(const config_apply_ops_t *ops, void *ctx,
  * WS-E 起该日志同时用于验收"apply_buses ≤ 4 KiB"：UART 冷安装被拆到
  * preinstall（app_callbacks 在 suspend 之前调用），因此稳态 apply_buses 只
  * 剩 SPI/I2C 驱动重建。失败路径上的这组打印保持常开。 */
+/* 口径：internal —— 与门禁（mem_guard）同一口径，也与 app_callbacks.c 的
+ * uart_preinstall 探针一致（两者拼成同一张差分表，口径必须相同）。
+ *
+ * 只留 internal 的理由（2026-10-06，task-7）：本行的唯一消费方式是"每步 in/out
+ * 差分定位消费者"，而 total（内部+PSRAM）在 s3p 上恒等于 PSRAM 的 8.25 MB ——
+ * 事务各步分配的是内部 RAM，total 差分恒为 0，纯噪声。实测 s3p 的现场数字
+ * （apply_buses in free=8330911 largest=8257536）正是 PSRAM，而门禁同时看的是
+ * internal largest=23,552：这行现在必须直接打印 23,552 那一侧。
+ *
+ * 注意本函数**不在 EHOME_MEM_DIAG 门控内**：验收"apply_buses ≤ 4 KiB"依赖它，
+ * 必须常开。 */
 static void log_heap_step(const char *step, const char *phase)
 {
-    ESP_LOGI(TAG, "[heap] %-18s %-5s free=%u largest=%u",
+    ESP_LOGI(TAG, "[heap] %-18s %-5s free=%u largest=%u (internal)",
              step, phase,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
 config_apply_result_t config_apply_transaction_execute(

@@ -673,11 +673,16 @@ static esp_err_t ota_download_http(const char *url, uint32_t *out_total_bytes)
          * cannot be allocated. Report the sizes and the largest free block so a
          * heap-fragmentation failure is distinguishable from a bad URL -- the
          * raw "Allocation failed" from IDF does not say which. */
+        /* 口径（2026-10-06，task-7）：internal —— 与门禁 mem_guard 同口径。
+         * esp_http_client_init() 的 TX/RX 缓冲来自内部 RAM，而旧写法用
+         * esp_get_free_heap_size()（= MALLOC_CAP_DEFAULT，含 PSRAM），在 s3p 上
+         * 打的是 8.3 MB 的 PSRAM 数字 —— 正是"看着还有 8 MB 却分配失败"这个
+         * 误导信号的来源。失败路径只打门禁判决用的那个口径，够用且不误导。 */
         ESP_LOGE(TAG, "HTTP client init FAILED (rx=%u tx=%u, free=%u, "
-                      "largest free block=%u)",
+                      "largest free block=%u (internal))",
                  (unsigned)cli_cfg.buffer_size, (unsigned)cli_cfg.buffer_size_tx,
-                 (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return ESP_FAIL;
     }
 
@@ -883,13 +888,14 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
      * 因此这里把 free / largest / min_ever 一并打出来，
      * 让"OTA 起不来"能一眼区分为总量不足还是碎片所致。 */
     ESP_LOGI(TAG, "Creating ota_task with %u byte stack: free=%u largest=%u min_ever=%u "
-                  "(internal free=%u largest=%u)",
+                  "(internal) | free=%u largest=%u min_ever=%u (total)",
              (unsigned)OTA_TASK_STACK_BYTES,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
     /* 静态创建：栈与 TCB 都在 .bss，**不从堆分配、也不受堆碎片影响**。
      * 这正是本次要修的缺陷 —— 原实现要 8192 连续堆块，实测只有 7680，
      * 于是 OTA 完全起不来（见文件上方 s_ota_stack 处的完整说明）。
@@ -911,11 +917,11 @@ esp_err_t ota_start(const ota_cmd_t *cmd)
          * ota_id must still match s_last_ota_id for ota_report_progress() to
          * forward the callback, which ota_classify_cmd() already set. */
         ESP_LOGE(TAG, "Failed to create ota_task (static): need %u bytes .bss "
-                      "(this should be unreachable); free=%u largest=%u min_ever=%u",
+                      "(this should be unreachable); free=%u largest=%u min_ever=%u (internal)",
                  (unsigned)OTA_TASK_STACK_BYTES,
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         ota_report_progress(cmd->ota_id, 3, 0, "Insufficient heap to start OTA task");
         free((void *)cmd);
         s_upgrading = false;
@@ -935,7 +941,11 @@ static void ota_task_func(void *pvParameters)
     ESP_LOGI(TAG, "  cmd->checksum:    '%s'", cmd->checksum);
     ESP_LOGI(TAG, "  cmd->version:     '%s'", cmd->version);
     ESP_LOGI(TAG, "  cmd->size_bytes:  %llu bytes", (unsigned long long)cmd->size_bytes);
-    ESP_LOGI(TAG, "  Free heap: %u bytes", (unsigned int)esp_get_free_heap_size());
+    /* 口径：internal（2026-10-06，task-7）。esp_get_free_heap_size() 是
+     * heap_caps_get_free_size(MALLOC_CAP_DEFAULT) 的封装，s3p 上把 PSRAM 计入
+     * （8.3 MB），与 OTA 真正需要的内部 RAM 无关。 */
+    ESP_LOGI(TAG, "  Free heap: %u bytes (internal)",
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     #define OTA_MAX_RETRIES 3
     static const int retry_delay_s[OTA_MAX_RETRIES] = {0, 2, 4};
@@ -1018,10 +1028,10 @@ static void ota_task_func(void *pvParameters)
         ESP_LOGI(TAG, "[otamem] ota_task stack: total=%u high_water_free=%u used≈%u",
                  (unsigned)OTA_TASK_STACK_BYTES, (unsigned)(hw * sizeof(StackType_t)),
                  (unsigned)(OTA_TASK_STACK_BYTES - hw * sizeof(StackType_t)));
-        ESP_LOGI(TAG, "[otamem] heap now: free=%u largest=%u min_ever=%u",
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+        ESP_LOGI(TAG, "[otamem] heap now: free=%u largest=%u min_ever=%u (internal)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     ota_nvs_set_state(OTA_STATE_VERIFYING);
     ota_report_progress(cmd->ota_id, 1, 100, NULL);

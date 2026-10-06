@@ -24,6 +24,19 @@ idf_component_register(SRCS "main.c"
 # of hardcoding FIRMWARE_VERSION.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE EHOME_PROJECT_VER="${PROJECT_VER}")
 
+# 可选：EHOME_MEM_DIAG=1 打开启动里程碑/逐总线/逐步骤的堆探针（默认关闭，
+# 正常启动会多打十几行日志）。
+#
+# 为什么做成 CMake 选项而不是像以前那样注释里写"需要时自己加一行"：
+# main.c / app_callbacks.c / bus_manager.c 的注释都让人手动改 CMakeLists ——
+# 那会让**源码树产生未提交的临时改动**，而这些探针恰恰是排障时最需要、
+# 也最容易把"临时改动"误提交的一类代码。改成一行 -D 后，源码树永远是交付态。
+#
+# 用法：cmake -DEHOME_MEM_DIAG=1 ...（或 idf.py -DEHOME_MEM_DIAG=1 build）
+# 开关本身定义在顶层 CMakeLists.txt（project() 之前），因为 components/bus_manager
+# 的 [busheap] 探针也看这个宏 —— 只在这里定义会让 -DEHOME_MEM_DIAG=1 静默地
+# 只打开 main 组件的一半探针。
+
 # ConfigManifest rollback snapshots/workspaces must stay off callback task stacks.
 set_source_files_properties(app_callbacks.c PROPERTIES
     COMPILE_OPTIONS "-Wframe-larger-than=1024")

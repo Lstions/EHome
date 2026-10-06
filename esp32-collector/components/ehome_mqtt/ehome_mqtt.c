@@ -1152,7 +1152,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             const esp_mqtt_error_codes_t *eh = event->error_handle;
             ESP_LOGE(TAG, "MQTT transport error: type=%d tls_esp_err=0x%x "
                           "tls_stack_err=0x%x cert_flags=0x%x sock_errno=%d(%s) "
-                          "conn_rc=%d | free=%u largest=%u min_ever=%u",
+                          "conn_rc=%d | free=%u largest=%u min_ever=%u (internal)",
                      (int)eh->error_type,
                      (unsigned)eh->esp_tls_last_esp_err,
                      (unsigned)eh->esp_tls_stack_err,
@@ -1160,13 +1160,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                      eh->esp_transport_sock_errno,
                      strerror(eh->esp_transport_sock_errno),
                      (int)eh->connect_return_code,
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         } else {
-            ESP_LOGE(TAG, "MQTT transport error (no error_handle); free=%u largest=%u",
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            ESP_LOGE(TAG, "MQTT transport error (no error_handle); free=%u largest=%u (internal)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         }
         break;
     }

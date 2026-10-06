@@ -12,6 +12,17 @@ cmake_minimum_required(VERSION 3.16)
 # 因此这是一次前后端必须一起升级的变更，不是纯修复。
 set(PROJECT_VER "2.8.0")
 
+# 诊断探针开关必须在这里（project() 之前）定义：main/CMakeLists.txt 的
+# target_compile_definitions 只作用于 main 组件，而 EHOME_MEM_DIAG 还门控
+# components/bus_manager 的 [busheap] 逐总线差分。只用 main 那份时，
+# -DEHOME_MEM_DIAG=1 会**静默地**只打开一半探针（[bootheap] 有、[busheap] 没有）——
+# 2026-10-06 实测就是这样（strings 查 ELF：[bootheap]=1、[busheap]=0）。
+# 放在 project() 之前 + 用 CACHE 变量，所有组件才都看得到；默认 OFF，交付态不变。
+set(EHOME_MEM_DIAG OFF CACHE BOOL "Enable boot/[busheap] heap milestone probes")
+if(EHOME_MEM_DIAG)
+    add_compile_definitions(EHOME_MEM_DIAG=1)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Component Manager lock files contain the selected target. Keep them alongside
 # each profile's build artifacts so C6 and S3 builds cannot rewrite each other.

@@ -573,15 +573,22 @@ static esp_err_t uart_install_new(bus_dma_ctx_t *ctx, int tx_pin, int rx_pin,
     if (r != ESP_OK) {
         /* 把内存实况一并打出来。2026-10-05 的现场只有一句裸的
          * "UART driver malloc error"，无法判断是"总量不够"还是"碎片"，
-         * 定位成本很高；这次直接把 free / largest / min-ever 记下来。 */
+         * 定位成本很高；这次直接把 free / largest / min-ever 记下来。
+         *
+         * 口径：internal（2026-10-06，task-7）。UART 驱动要的是**内部 RAM**
+         * 的连续块（DMA 描述符与 ring buffer 不能放 PSRAM），门禁读的也是它。
+         * 这里**只留 internal**：这行是分配失败的现场快照，读它就是为了知道
+         * 门禁为什么放行/拒绝，而 total 在 s3p 上恒为 PSRAM 的 8.25 MB ——
+         * 报它反而复现了那个原始误导信号。加 (internal) 后缀是必需的：
+         * 数字从 8.25 MB 变成 ~23 KB，没有标记会让人以为内存一夜之间少了 300 倍。 */
         ESP_LOGE(TAG, "uart_driver_install failed: %s (uart%d rx=%u tx=%u q=%d; "
-                      "free=%u largest=%u min_ever=%u)",
+                      "free=%u largest=%u min_ever=%u (internal))",
                  esp_err_to_name(r), (int)port,
                  (unsigned)rx_buffer_size, (unsigned)tx_buffer_size,
                  UART_EVENT_QUEUE_DEPTH,
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return r;
     }
 

@@ -66,15 +66,46 @@
  * 但它在正常启动时会打 8 行日志，属于诊断噪声，因此默认关闭。
  * 需要时在 main/CMakeLists.txt 加 target_compile_definitions(main PRIVATE EHOME_MEM_DIAG=1)。
  * 注意：失败路径上的内存打印（bus_dma/scheduler/mqtt）**不在此开关内**，
- * 它们只在出错时各打一行，必须保持常开，否则下次同类故障又要重新反推。 */
+ * 它们只在出错时各打一行，必须保持常开，否则下次同类故障又要重新反推。
+ *
+ * 口径（2026-10-06，task-7）：下面每个堆打印都**显式并上
+ * MALLOC_CAP_INTERNAL**，且 internal 一律在前。开了 CONFIG_SPIRAM_USE_MALLOC
+ * 的 s3p 上，裸 MALLOC_CAP_8BIT 是"内部 RAM + PSRAM"的合计：
+ *   - largest 跨两个堆取最大值 ⇒ 恒等于 PSRAM 的 8.25 MB 连续块；
+ *   - 而同一时刻门禁（mem_guard，2026-10-05 已修为内部口径）看的是 23,552 B。
+ * 读数比判决大 350 倍 —— "看着还有 8 MB，下一个 malloc 就失败"正是原始缺陷
+ * 报告抱怨的误导信号，所以读数必须与判决同口径。
+ *
+ * 本文件**两个口径都打**（internal + total）：internal 是门禁判决与"按步骤
+ * 差分找消费者"用的口径，total 只在 PSRAM 型号上提供"内部紧、PSRAM 宽裕"的
+ * 对照。只打 internal 的同类点各有理由，见 config_apply_transaction.c 与
+ * bus_dma.c 的注释。
+ *
+ * 防回退：host_tests/diag_heap_metric_scan.py 全树断言"8BIT 必须与 INTERNAL
+ * 同一语句出现"，任何一处退回裸 8BIT 都会让 ctest 变红。 */
 #ifdef EHOME_MEM_DIAG
 static void log_boot_heap(const char *stage)
 {
-    ESP_LOGI(TAG, "[bootheap] %-22s free=%u largest=%u min_ever=%u",
+    ESP_LOGI(TAG, "[bootheap] %-22s free=%u largest=%u min_ever=%u (internal) | "
+                  "free=%u largest=%u min_ever=%u (total)",
              stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT));
+}
+
+/* 60 s 栈采样后的一行堆总览，同样双口径（理由同上）。 */
+static void log_stack_heap(void)
+{
+    ESP_LOGI(TAG, "[stack] ---- heap free=%u largest=%u (internal) | "
+                  "free=%u largest=%u (total) ----",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 #else
 static void log_boot_heap(const char *stage) { (void)stage; }
@@ -222,9 +253,7 @@ static void status_task(void *pv)
                 mem_guard_set_min_stack_high_water(min_stack_free);
             }
 #ifdef EHOME_MEM_DIAG
-            ESP_LOGI(TAG, "[stack] ---- heap free=%u largest=%u ----",
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            log_stack_heap();
 #endif
         }
 

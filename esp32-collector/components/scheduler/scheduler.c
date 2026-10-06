@@ -253,13 +253,13 @@ sched_err_t scheduler_prepare(const scheduler_queues_t *queues,
         /* 静态分配后这一路径理论上不可达（栈与 TCB 都在 .bss 中）。
          * 保留它作为兜底，并把内存实况打出来 —— 若真的触发，说明问题不在堆。 */
         ESP_LOGE(TAG, "scheduler task create FAILED (static): need %d bytes; "
-                      "free=%u largest=%u min_ever=%u | internal free=%u largest=%u",
+                      "free=%u largest=%u min_ever=%u (internal) | free=%u largest=%u (total)",
                  SCHED_TASK_STACK,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         s_prepared = false;
         memset(s_channels, 0, SCHED_CHANNELS_BYTES);
         return SCHED_ERR_NOT_INIT;
@@ -348,9 +348,9 @@ sched_err_t scheduler_resume(const scheduler_queues_t *queues)
         scheduler_task, "scheduler", SCHED_TASK_STACK_WORDS, NULL,
         SCHED_TASK_PRIORITY, s_sched_stack, &s_sched_tcb, SCHED_TASK_CORE);
     if (s_task_handle == NULL) {
-        ESP_LOGE(TAG, "scheduler task resume FAILED (static); free=%u largest=%u",
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        ESP_LOGE(TAG, "scheduler task resume FAILED (static); free=%u largest=%u (internal)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         s_running = false;
         return SCHED_ERR_NOT_INIT;
     }

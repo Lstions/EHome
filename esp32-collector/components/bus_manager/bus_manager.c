@@ -928,8 +928,15 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
          * 由 EHOME_MEM_DIAG 门控（默认关闭）：每次配置同步会打 10 行，
          * 正常运行时属于噪声。需要时加 target_compile_definitions(... PRIVATE EHOME_MEM_DIAG=1)。 */
 #ifdef EHOME_MEM_DIAG
-        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d before: free=%u largest=%u",
+        /* 口径（2026-10-06，task-7）：internal 在前、total 在后，两者都打。
+         * 本组打印用于逐条总线差分找谁吃内存，而 total 在 s3p 上恒等于 PSRAM
+         * 的 8.25 MB、差分恒为 0；保留它只为在 PSRAM 型号上做"内部紧、PSRAM
+         * 宽裕"的对照。真正会变的是 internal。 */
+        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d before: free=%u largest=%u (internal) | "
+                      "free=%u largest=%u (total)",
                  (unsigned long)ch->id, (int)ch->bus_type,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 #endif
@@ -938,8 +945,11 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
                               config_channel_get_dma_enabled(ch), generation,
                               plan[i].valid ? plan[i].controller_id : -1);
 #ifdef EHOME_MEM_DIAG
-        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d after:  free=%u largest=%u err=%s",
+        ESP_LOGI(TAG, "[busheap] ch=%lu type=%d after:  free=%u largest=%u (internal) | "
+                      "free=%u largest=%u (total) err=%s",
                  (unsigned long)ch->id, (int)ch->bus_type,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                  esp_err_to_name(err));

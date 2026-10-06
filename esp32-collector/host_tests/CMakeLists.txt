@@ -712,3 +712,48 @@ target_compile_definitions(bus_worker_data_batch_tests PRIVATE CONFIG_IDF_TARGET
 target_compile_options(bus_worker_data_batch_tests PRIVATE
     -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_data_batch_tests COMMAND bus_worker_data_batch_tests)
+# ---- 防回退门禁：诊断打印必须与门禁同口径（task-7，2026-10-06）----
+#
+# 为什么这条门禁必须存在：CTest 的其它 43 个用例**结构上不可能**发现这个缺陷。
+# 裸 MALLOC_CAP_8BIT 只出现在诊断打印里 —— 它不参与任何判决，也不改变任何
+# 返回值，所以一行日志把 s3p 的内部 RAM（~23 KiB）打成 PSRAM 总量（8.25 MB）
+# 时，所有的运行时断言仍然全绿。这是一个**只有静态检查能覆盖**的缺陷类。
+#
+# 判据（为什么 grep 式检查就足够，不需要真机）：本仓只有
+# sdkconfig.defaults.esp32s3psram 打开 CONFIG_SPIRAM_USE_MALLOC=y，而
+# MALLOC_CAP_8BIT 之所以危险，正是因为它在该 profile 下悄悄变成"内部 + PSRAM"
+# 的合计口径。因此规则"每个 MALLOC_CAP_8BIT 必须与 MALLOC_CAP_INTERNAL 或
+# MALLOC_CAP_SPIRAM 出现在同一语句"在**所有** profile 下都成立，且与缺陷
+# 一一对应 —— 静态可判，无需刷机。
+#
+# 两个 add_test 共用一份 runner，因此扫描逻辑只有一处实现：
+#   1) 自测：对合成输入断言两条规则**真的会红**。否则正则写错时门禁会以
+#      "全绿"的形式失效（这正是它要防的那类假绿）。
+#   2) 全树扫描 main/ + components/ + host_tests/。
+# 解释器：**configure 时解析成绝对路径**，ctest 不依赖调用 shell 的 PATH。
+#
+# 找不到 Python 时**不静默跳过** —— 那会以"没有这条测试"的形式留下一个洞，
+# 而本门禁防的正是静默失效。改为注册一条必定失败的用例，把原因打出来：
+# 红得响，但不阻塞其它用例。
+find_program(EHOME_GATE_PYTHON NAMES python3 python)
+set(EHOME_DIAG_SCAN "${CMAKE_CURRENT_SOURCE_DIR}/diag_heap_metric_scan.py")
+
+if(EHOME_GATE_PYTHON)
+    add_test(NAME diag_heap_metric_gate
+        COMMAND "${EHOME_GATE_PYTHON}" "${EHOME_DIAG_SCAN}")
+    set_tests_properties(diag_heap_metric_gate PROPERTIES
+        FAIL_REGULAR_EXPRESSION "diag-metric gate FAILED")
+    # 自测：断言两条规则**真的会红**。正则写错时门禁会以"全绿"形式失效，
+    # 这条用例专门防那种假绿。
+    add_test(NAME diag_heap_metric_gate_selftest
+        COMMAND "${EHOME_GATE_PYTHON}" "${EHOME_DIAG_SCAN}" --self-test)
+    set_tests_properties(diag_heap_metric_gate_selftest PROPERTIES
+        FAIL_REGULAR_EXPRESSION "FAIL")
+else()
+    add_test(NAME diag_heap_metric_gate
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "diag-metric gate cannot run: no python3 found at configure time; "
+            "install python3 and re-run cmake, or the diagnostic-metric regression "
+            "gate is silently absent")
+    set_tests_properties(diag_heap_metric_gate PROPERTIES WILL_FAIL TRUE)
+endif()
