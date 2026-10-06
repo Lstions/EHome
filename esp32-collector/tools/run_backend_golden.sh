@@ -49,5 +49,16 @@ cd "$WORKTREE/backend" || exit 2
 
 # -count=1 关掉测试缓存：否则改了实现/向量后可能拿到上一次的"PASS"，
 # 让门禁变成假绿（本次开发中确实踩到过：日志显示 "(cached)"）。
-echo "运行后端 S0 对锚：go test -count=1 ./pkg/frame/ -run TestGoldenVectors $*"
-exec "$GO" test -count=1 ./pkg/frame/ -run TestGoldenVectors "$@"
+# ⚠ 必须把【所有】消费共享向量的包都跑上。
+# 原来只跑 ./pkg/frame/（2.6 的 protobuf TLV 向量），
+# 于是 3.0 的 12 B 定界头（./pkg/protoframe/）**从来没被这个脚本跑过** ——
+# 门禁覆盖不到新包，等于新包没有门禁。
+#
+# 这里用显式列表而不是 ./... ：
+#   - ./... 会带上大量依赖 DB/网络的包，在没有环境的机器上必然红，
+#     结果就是"门禁常年红 ⇒ 没人看"（比没有门禁更糟）；
+#   - 显式列表让"哪个包受 S0 契约约束"这件事**可见**。
+PACKAGES="./pkg/frame/ ./pkg/protoframe/"
+
+echo "运行后端 S0 对锚：go test -count=1 $PACKAGES $*"
+exec "$GO" test -count=1 $PACKAGES "$@"
