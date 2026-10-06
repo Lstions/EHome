@@ -121,6 +121,32 @@ def main():
             if int(m4.group(1), 0) != int(m5.group(1), 0):
                 bad.append("%s = %s，但 IDF 里 %s = %s" % (key, m5.group(1), macro, m4.group(1)))
 
+    # --- 2c. tls_guard.h 镜像的 ESP_ERR_ESP_TLS_* 码段 ---
+    # 这些值判错会让"网络问题"与"证书问题"互换分类（见 §54/§60）。
+    m_net = re.findall(r"#define\s+ESP_ERR_ESP_TLS_([A-Z_]+)\s+\s*\(ESP_ERR_ESP_TLS_BASE\s*\+\s*(0x[0-9A-Fa-f]+)\)", err_h)
+    if not m_net:
+        bad.append("esp_tls_errors.h 里找不到 ESP_ERR_ESP_TLS_* 码段")
+    else:
+        base_m = re.search(r"#define\s+ESP_ERR_ESP_TLS_BASE\s+(0x[0-9A-Fa-f]+)", err_h)
+        base_g = re.search(r"#define\s+TLS_ESP_ERR_BASE\s+(0x[0-9A-Fa-f]+)", hdr)
+        if not base_m or not base_g:
+            bad.append("找不到 ESP_ERR_ESP_TLS_BASE 或 TLS_ESP_ERR_BASE")
+        elif int(base_m.group(1), 0) != int(base_g.group(1), 0):
+            bad.append("TLS_ESP_ERR_BASE = %s，但 IDF 里是 %s"
+                       % (base_g.group(1), base_m.group(1)))
+        else:
+            checked += 1
+            for name, off in m_net:
+                key = "TLS_ESP_ERR_" + name
+                f2 = re.search(r"#define\s+" + re.escape(key) + r"\s+\(TLS_ESP_ERR_BASE\s*\+\s*(0x[0-9A-Fa-f]+)\)", hdr)
+                if not f2:
+                    # 本组件只镜像用到的那几个，缺的跳过
+                    continue
+                checked += 1
+                if int(f2.group(1), 0) != int(off, 0):
+                    bad.append("%s 偏移 %s，但 IDF 里 ESP_ERR_ESP_TLS_%s 偏移 %s"
+                               % (key, f2.group(1), name, off))
+
     # --- 3. 时效位掩码必须恰好含 EXPIRED 与 FUTURE ---
     m3 = RE_TIME_REL.search(hdr)
     if not m3:

@@ -266,6 +266,70 @@ static void test_reduce_covers_all_types(void)
     }
 }
 
+/* ============ 12. ⭐ 以 esp_tls 真实输入为准的归约 ============
+ * 上一轮我按"type+code+flags 三元组"设计，本轮读 IDF 源码发现公开 API
+ * **没有 type 字段**（只有 last_error/code/flags）。故按真实输入重测。 */
+static void test_reduce_esp_error_real_shape(void)
+{
+    /* ⭐ 最要紧：cert_flags 非 0 必须**优先**于 last_error 判定。
+     * 否则没校时的设备会被归成 NETWORK ⇒ 永远退避重试、永远连不上（K11）。 */
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_SERVER_HANDSHAKE_TIMEOUT, -0x7780,
+                                     TLS_CERTFLAG_FUTURE) == TLS_FAIL_CERT_EXPIRED,
+          "有 cert_flags 时应优先走证书归约（FUTURE -> 时间相关）");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_FAILED_CONNECT_TO_HOST, 0,
+                                     TLS_CERTFLAG_NOT_TRUSTED) == TLS_FAIL_CERT_UNTRUSTED,
+          "有 cert_flags 时应优先走证书归约（NOT_TRUSTED）");
+
+    /* 无 cert_flags 时的网络码段 */
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_CANNOT_RESOLVE_HOSTNAME, 0, 0)
+              == TLS_FAIL_NETWORK, "DNS 失败应归 NETWORK");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_CANNOT_CREATE_SOCKET, 0, 0)
+              == TLS_FAIL_NETWORK, "建 socket 失败应归 NETWORK");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_FAILED_CONNECT_TO_HOST, 0, 0)
+              == TLS_FAIL_NETWORK, "连不上主机应归 NETWORK");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_CONNECTION_TIMEOUT, 0, 0)
+              == TLS_FAIL_NETWORK, "连接超时应归 NETWORK");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_TCP_CLOSED_FIN, 0, 0)
+              == TLS_FAIL_NETWORK, "对端 FIN 应归 NETWORK（可重连）");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_SERVER_HANDSHAKE_TIMEOUT, 0, 0)
+              == TLS_FAIL_NETWORK, "握手超时应归 NETWORK");
+
+    /* 例外：安全元件失败是本地问题，退避重试无用 */
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_SE_FAILED, 0, 0) == TLS_FAIL_CONFIG,
+          "SE_FAILED 应归 CONFIG（不是 NETWORK —— 重试不会修好硬件）");
+
+    /* mbedtls 码段（0x8010+）：无 flags 时分不出是不是证书 ⇒ 不猜 */
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_MBEDTLS_FIRST, 0, 0)
+              == TLS_FAIL_UNKNOWN,
+          "mbedtls 码段且无 flags 应归 UNCLASSIFIED（不猜）");
+    CHECK(tls_guard_reduce_esp_error(0, 0, 0) == TLS_FAIL_UNKNOWN,
+          "last_error=0（没取到）应归 UNCLASSIFIED");
+
+    /* 网络码段边界要准：0x800F 仍算网络，0x8010 不算 */
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_NET_LAST, 0, 0) == TLS_FAIL_NETWORK,
+          "网络码段末位应仍是 NETWORK");
+    CHECK(tls_guard_reduce_esp_error(TLS_ESP_ERR_MBEDTLS_FIRST, 0, 0) != TLS_FAIL_NETWORK,
+          "mbedtls 码段首位不得算作 NETWORK");
+}
+
+/* ============ 13. ⭐ 端到端：没校时的 esp_tls 失败必须可自愈 ============ */
+static void test_esp_error_end_to_end_recoverable(void)
+{
+    /* 现场时序：设备无 SNTP -> 连 mTLS -> 服务端证书 2026 未生效 */
+    bool time_trusted = tls_guard_time_is_trusted(0);
+    CHECK(!time_trusted, "前提：没校时");
+
+    /* esp_tls 报：握手失败 + cert_flags = BADCERT_FUTURE */
+    tls_failure_t f = tls_guard_reduce_esp_error(
+        TLS_ESP_ERR_SERVER_HANDSHAKE_TIMEOUT, -0x2700, TLS_CERTFLAG_FUTURE);
+    CHECK(f == TLS_FAIL_CERT_EXPIRED, "应归为时间相关");
+
+    tls_action_t a = tls_guard_classify(time_trusted, f);
+    CHECK(a == TLS_ACTION_SYNC_TIME_FIRST,
+          "没校时的 esp 失败应导向'先校时'，实际 %s", tls_action_name(a));
+    CHECK(a != TLS_ACTION_FATAL, "**绝不能 FATAL**（否则 K11：设备永久失联）");
+}
+
 int main(void)
 {
     test_time_trusted_bounds();
@@ -274,6 +338,8 @@ int main(void)
     test_no_failure_proceeds();
     test_all_combinations_defined();
     test_stats_cover_every_branch();
+    test_reduce_esp_error_real_shape();
+    test_esp_error_end_to_end_recoverable();
     test_reduce_cert_flags();
     test_reduce_non_cert();
     test_reduce_then_classify_integration();

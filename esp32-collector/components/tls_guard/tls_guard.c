@@ -157,3 +157,31 @@ tls_failure_t tls_guard_reduce_error(int type, int code, int cert_flags)
 
     return TLS_FAIL_UNKNOWN;
 }
+
+
+/* ============================================================
+ * 以 esp_tls 真实输入为准的归约
+ * ============================================================ */
+
+tls_failure_t tls_guard_reduce_esp_error(unsigned last_error,
+                                         int esp_tls_code,
+                                         int cert_flags)
+{
+    /* 1) 证书标志位优先 —— 唯一能区分"时间问题 vs 信任问题"的信号 */
+    if (cert_flags != 0) {
+        return tls_guard_reduce_error(TLS_ERGTYPE_MBEDTLS_CERT_FLAGS,
+                                      esp_tls_code, cert_flags);
+    }
+
+    /* 2) 网络码段 */
+    if (last_error >= TLS_ESP_ERR_NET_FIRST && last_error <= TLS_ESP_ERR_NET_LAST) {
+        /* 例外：安全元件失败属本地配置/硬件问题，退避重试无用 */
+        if (last_error == TLS_ESP_ERR_SE_FAILED) return TLS_FAIL_CONFIG;
+        return TLS_FAIL_NETWORK;
+    }
+
+    /* 3) mbedtls 码段（0x8010+）：只能知道"mbedtls 层出错"，
+     *    无 flags 就分不出是不是证书 —— 不猜（见 tls_guard_reduce_error 的说明）。*/
+    /* 4) 其它 */
+    return TLS_FAIL_UNKNOWN;
+}

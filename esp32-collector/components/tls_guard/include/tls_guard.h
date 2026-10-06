@@ -199,3 +199,66 @@ tls_failure_t tls_guard_reduce_error(int type, int code, int cert_flags);
 
 /** 该失败是否与"时间不可信"强相关（供日志/告警区分）。 */
 bool tls_failure_is_time_related(tls_failure_t f);
+
+/* ============================================================
+ * ⚠ 归约的真实输入形状（2026-10-06 读 IDF 源码后修正上一轮的假设）
+ *
+ * 上一轮我按"三元组 type+code+cert_flags"设计了 tls_guard_reduce_error()。
+ * 本轮写真 esp_tls 适配时去核对 **公开 API 实际给什么**，结果发现：
+ *
+ *   `esp_tls_error_handle_t` 是 `struct esp_tls_last_error*`，公开字段只有：
+ *       esp_err_t last_error;        基于 ESP_ERR_ESP_TLS_BASE(0x8000)
+ *       int       esp_tls_error_code;
+ *       int       esp_tls_flags;     证书校验标志位
+ *   **没有 type 字段**。
+ *
+ * 取 type 的正规途径是 `esp_tls_get_and_clear_error_type(h, type, &code)`，
+ * 它**按槽位读并只清该槽**；而 `esp_tls_get_and_clear_last_error()` 会
+ * **memset 整个 handle**（源码：esp_tls.c:815）。
+ * ⇒ 先调后者，前者的槽位就没了（顺序陷阱，见 tls_esp.c 的注释）。
+ *
+ * 好消息：`get_and_clear_last_error` 一次就给出 (last_error, code, flags)
+ * 这三样，已足够做四分类。故新增下面这个以**真实输入**为准的归约函数，
+ * 它内部仍复用既有的 flags 判定逻辑（保证"时效位"只有一个来源）。
+ * ============================================================ */
+
+/** 镜像 ESP_ERR_ESP_TLS_BASE 与网络码段（esp_tls_errors.h:21-32）。 */
+#define TLS_ESP_ERR_BASE                 0x8000
+#define TLS_ESP_ERR_CANNOT_RESOLVE_HOSTNAME (TLS_ESP_ERR_BASE + 0x01)
+#define TLS_ESP_ERR_CANNOT_CREATE_SOCKET    (TLS_ESP_ERR_BASE + 0x02)
+#define TLS_ESP_ERR_UNSUPPORTED_PROTO_FAM   (TLS_ESP_ERR_BASE + 0x03)
+#define TLS_ESP_ERR_FAILED_CONNECT_TO_HOST  (TLS_ESP_ERR_BASE + 0x04)
+#define TLS_ESP_ERR_SOCKET_SETOPT_FAILED    (TLS_ESP_ERR_BASE + 0x05)
+#define TLS_ESP_ERR_CONNECTION_TIMEOUT      (TLS_ESP_ERR_BASE + 0x06)
+#define TLS_ESP_ERR_SE_FAILED               (TLS_ESP_ERR_BASE + 0x07)
+#define TLS_ESP_ERR_TCP_CLOSED_FIN          (TLS_ESP_ERR_BASE + 0x08)
+#define TLS_ESP_ERR_SERVER_HANDSHAKE_TIMEOUT (TLS_ESP_ERR_BASE + 0x09)
+
+/** 判据边界：0x8001..0x800F 是"连接/网络"码段；0x8010 起是 mbedtls 码段。 */
+#define TLS_ESP_ERR_NET_FIRST  (TLS_ESP_ERR_BASE + 0x01)
+#define TLS_ESP_ERR_NET_LAST   (TLS_ESP_ERR_BASE + 0x0F)
+#define TLS_ESP_ERR_MBEDTLS_FIRST (TLS_ESP_ERR_BASE + 0x10)
+
+/**
+ * ⭐ 按 **esp_tls 实际给的三样** 归约失败类别。
+ *
+ * @param last_error   esp_tls_get_and_clear_last_error 的**返回值**
+ * @param esp_tls_code 其 *esp_tls_code 出参（底层 code，可能是 mbedtls 负值）
+ * @param cert_flags   其 *esp_tls_flags 出参（**非 0 = 证书问题**）
+ *
+ * 规则（按优先级）：
+ *  1. cert_flags != 0            -> 证书类；再看时效位(EXPIRED/FUTURE)决定
+ *                                   CERT_EXPIRED 还是 CERT_UNTRUSTED
+ *  2. last_error ∈ 网络码段      -> NETWORK（可退避重试）
+ *     例外：SE_FAILED(0x8007)    -> CONFIG（安全元件失败，重试无用）
+ *  3. last_error ≥ 0x8010        -> UNCLASSIFIED（mbedtls 码段，无法区分证书/其它）
+ *  4. 其它                       -> UNCLASSIFIED
+ *
+ * ⚠ 为什么规则 1 必须**优先于**其它：`cert_flags` 是唯一能可靠区分
+ *   "时间问题（可自愈）"与"信任问题（需人工）"的信号；
+ *   而 last_error 只能告诉我们"大概哪一层坏了"。
+ *   若颠倒顺序，没校时的设备会被归成 NETWORK ⇒ 永远退避重试、永远连不上（K11）。
+ */
+tls_failure_t tls_guard_reduce_esp_error(unsigned last_error,
+                                         int esp_tls_code,
+                                         int cert_flags);
