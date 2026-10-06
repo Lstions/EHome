@@ -555,6 +555,12 @@ void app_main(void)
     /* Inject msg_handler callbacks into bus_worker and bus_manager (eliminates extern) */
     bus_worker_set_callbacks(msg_handler_send_write_rsp, msg_handler_send_data_report);
     bus_worker_set_channel_cmd_v2_final_cb(handler_channel_cmd_v2_complete);
+    /* D-06（2026-10-06）：DataBatch(0x20) 编码器【显式】注入。
+     * 此前靠 bus_worker.c 里的 __attribute__((weak)) 默认实现，
+     * 生效与否取决于链接顺序，且宿主测试走另一套符号表 ——
+     * 弱定义一旦生效，聚合静默退化为逐样本 0x03 而【没有测试会红】。
+     * 现在与上面两行同一风格：依赖方向单向（main -> 双方），一步到位。 */
+    bus_worker_set_data_batch_cb(msg_handler_send_data_batch);
     bus_manager_set_write_rsp_cb(msg_handler_send_write_rsp);
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */

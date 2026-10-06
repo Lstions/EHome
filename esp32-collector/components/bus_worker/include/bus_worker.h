@@ -188,6 +188,10 @@ void bus_worker_set_channel_cmd_v2_final_cb(channel_cmd_v2_final_cb_t cb);
 /** Inject the V3-2a DataBatch encoder callback (call before bus_worker_start).
  *  Not injected => DataBatch stays disabled regardless of the capability bit. */
 void bus_worker_set_data_batch_cb(data_batch_cb_t cb);
+/** V3-2a：DataBatch 编码器是否已注入（D-06）。
+ *  未注入 => 聚合静默退回逐样本 0x03，且【不应】对外宣称 0x20 能力。
+ *  供启动门禁断言使用 —— 别让"没接上"变成一个看不见的状态。 */
+bool bus_worker_data_batch_encoder_present(void);
 
 /** Start rx_task + per-bus cmd_tasks (called once at boot) */
 void bus_worker_start(bus_runtime_t *rt);

@@ -567,6 +567,36 @@ static void test_buffer_pressure_downgrades_n(void)
     drain_telemetry();
 }
 
+
+/*
+ * D-06（2026-10-06）：编码器"有没有被接上"必须是【可观测】的。
+ *
+ * 弱符号时代这件事无法从外部判断 —— 弱定义让 s_data_batch_cb 看起来
+ * 总是非 NULL，于是"没接上"变成一个看不见的状态，
+ * 症状是 DataBatch 悄悄退回逐样本 0x03（而能力位可能还宣称支持）。
+ * 现在：未注入 => 查询接口返回 false，且 start() 会打 ERROR。
+ */
+static void test_encoder_injection_is_observable(void)
+{
+    /* main() 里已经注入过 test_data_batch_cb —— 先确认"已注入"看得见 */
+    CHECK(bus_worker_data_batch_encoder_present() == true,
+          "an injected encoder must be reported present");
+
+    /* 显式置空（模拟"main 忘了注入"）—— 必须返回 false，不能假装存在 */
+    bus_worker_set_data_batch_cb(NULL);
+    CHECK(bus_worker_data_batch_encoder_present() == false,
+          "a missing encoder must be reported ABSENT -- silently pretending "
+          "it exists is exactly the D-06 failure mode");
+
+    /* 未注入时聚合必须【关闭】而不是产出坏帧 */
+    CHECK(data_batch_publish(NULL, 0) == false,
+          "without an encoder the aggregation path must refuse");
+
+    /* 恢复（后续用例与收尾都依赖它） */
+    bus_worker_set_data_batch_cb(test_data_batch_cb);
+    CHECK(bus_worker_data_batch_encoder_present() == true, "restore must work");
+}
+
 int main(void)
 {
     /* 与 bus_worker_report_tests 同款：先建 report 路径（队列 + 池）。 */
@@ -585,6 +615,7 @@ int main(void)
     test_window_boundary();
     test_critical_and_max_n();
     test_buffer_pressure_downgrades_n();
+    test_encoder_injection_is_observable();
 
     report_path_deinit();
 

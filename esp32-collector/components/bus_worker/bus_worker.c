@@ -254,6 +254,8 @@ static data_rpt_cb_t s_data_rpt_cb = NULL;
 /* V3-2a DataBatch 编码回调（由 main 注入 msg_handler 的实现）。为 NULL 时
  * DataBatch 完全不启用，即使能力位为 1。 */
 static data_batch_cb_t s_data_batch_cb = NULL;
+/* D-06：编码器未注入（配置错误）—— 供启动门禁/诊断查询，避免"静默降级"。 */
+static bool s_data_batch_missing = false;
 static channel_cmd_v2_final_cb_t s_channel_cmd_v2_final_cb = NULL;
 
 #define SUSPEND_RX_BIT   BIT0
@@ -551,7 +553,10 @@ static bool data_batch_in_window(uint64_t ts, uint64_t start_us)
  * data_batch_cb_t 的注释（组件门禁 1024 B vs 一帧需要 1400 B）。 */
 static bool data_batch_publish(const report_desc_t *descs, size_t n)
 {
- if (!s_data_batch_cb || !descs || n < 2 || n > DATA_BATCH_MAX_SAMPLES) return false;
+ /* 未注入编码器 = 配置错误（【不是】"这一批装不下"）——
+  * 两者都返回 false，但前者在 start() 时已经 ERROR 过，这里不再重复刷屏。 */
+ if (!s_data_batch_cb) return false;
+ if (!descs || n < 2 || n > DATA_BATCH_MAX_SAMPLES) return false;
 
  const uint8_t *raw[DATA_BATCH_MAX_SAMPLES];
  size_t raw_lens[DATA_BATCH_MAX_SAMPLES];
@@ -1054,6 +1059,15 @@ void bus_worker_set_data_batch_cb(data_batch_cb_t cb)
 {
  s_data_batch_cb = cb;
 }
+/* D-06：编码器是否已注入。
+ * 存在的理由：未注入时 DataBatch 会静默退回逐样本 0x03 ——
+ * 该状态此前【无法从外部观测】（弱符号让它看起来总是"已注入"）。
+ * 启动门禁与诊断据此判断，而不是靠人猜。 */
+bool bus_worker_data_batch_encoder_present(void)
+{
+    return s_data_batch_cb != NULL;
+}
+
 
 /* ------------------------------------------------------------------ */
 /*  P2-2: Turnaround delay helpers                                    */
@@ -2078,53 +2092,22 @@ static void rx_task(void *pv)
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 
-/* 前向声明：让 bus_worker_start() 能在定义之前引用编码器。这里刻意**不带**
- * weak 属性 —— 它只是声明；真正的弱定义在下面，宿主测试可用编译定义关掉。 */
-bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
-                                 const uint64_t *timestamps_us,
-                                 const uint8_t *const *raw_data,
-                                 const size_t *raw_lens, size_t count,
-                                 uint32_t edge_device_id,
-                                 uint32_t command_template_id,
-                                 uint8_t command_index);
-
-/* V3-2a: DataBatch(0x20) 编码器（在 msg_handler 组件内）的弱默认实现。
+/* D-06 修复（2026-10-06）：此处原有一个 __attribute__((weak)) 的
+ * msg_handler_send_data_batch 默认实现 + "若未注入则用它"。
  *
- * EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER：宿主测试若**同时**编入了
- * handler_data.c（真正的强定义，例如 rx_health_e2e_tests），就不能再定义
- * 这个弱符号，否则同一翻译单元里重定义。该测试通过编译定义打开这个开关。
+ * 为什么删掉它：
+ *   1. 它【违反本组件自己的契约】—— bus_worker.h 里 data_batch_cb_t 的注释
+ *      明确写着"Not injected => DataBatch stays disabled"，
+ *      弱符号却偷偷给了一个默认实现；
+ *   2. 生效与否取决于【链接顺序】（msg_handler 的强符号是否被拉进镜像），
+ *      而宿主测试走的是另一套符号表 ⇒ **弱定义一旦生效，DataBatch 静默
+ *      退化为逐样本 0x03，且【没有测试会红】**；
+ *   3. 它与仓库里既有的做法【不一致】—— main.c 已经对另外两个回调
+ *      (bus_worker_set_callbacks / bus_worker_set_channel_cmd_v2_final_cb)
+ *      做显式注入，只有这一个用弱符号走捷径。
  *
- * 为什么需要它：bus_worker 已经 REQUIRES msg_handler（handler_data.c 读
- * 上报计数器），但这只建立"谁依赖谁"，**不会**让 main/ 去调用
- * bus_worker_set_data_batch_cb()。task-1 的写范围明确冻结 main/，因此
- * 这里用弱符号给出默认实现 —— 既不改 main/，也不要求 Lead 在 main/ 里加
- * 一行注入代码。
- *
- * 为什么链接器一定能取到强符号：ESP-IDF 把每个组件打成静态库。链接器在
- * 解析 __idf_msg_handler.a 时会把强定义 msg_handler_send_data_batch 拉进
- * 最终镜像，强定义随即覆盖弱定义（弱符号的地址由链接器在解析阶段回填）。
- * 因此运行时调用的始终是 msg_handler 的实现。
- *
- * 语义边界：能力位为 0 时 report_try_data_batch() 根本不会走到这里，所以
- * "与现状逐字节一致"这条红线不受本弱符号影响。能力位为 1 而弱定义被误用
- * （即 msg_handler 未链接进来）时返回 false，聚合路径退化为逐样本 0x03，
- * 属 fail-safe，绝不产出半截帧。 */
-#ifndef EHOME_HOST_TEST_REAL_DATA_BATCH_ENCODER
-__attribute__((weak))
-bool msg_handler_send_data_batch(uint32_t channel_id, uint32_t first_sequence,
-                                 const uint64_t *timestamps_us,
-                                 const uint8_t *const *raw_data,
-                                 const size_t *raw_lens, size_t count,
-                                 uint32_t edge_device_id,
-                                 uint32_t command_template_id,
-                                 uint8_t command_index)
-{
- (void)channel_id; (void)first_sequence; (void)timestamps_us;
- (void)raw_data; (void)raw_lens; (void)count;
- (void)edge_device_id; (void)command_template_id; (void)command_index;
- return false;
-}
-#endif
+ * 现在：依赖方向保持单向（main -> bus_worker / main -> msg_handler），
+ * 由 main.c 显式注入；未注入时【可见地】失败，而不是静默降级。 */
 
 void bus_worker_start(bus_runtime_t *rt)
 {
@@ -2133,7 +2116,14 @@ void bus_worker_start(bus_runtime_t *rt)
  /* 默认注入 DataBatch(0x20) 编码器（msg_handler 的强定义；main/ 若另行
   * 注入会覆盖此默认值）。放在 start() 而不是 report_path_init()：编码器
   * 只被 report_tx 使用，而 report_tx 由 report_path_init() 创建。 */
- if (s_data_batch_cb == NULL) s_data_batch_cb = msg_handler_send_data_batch;
+ /* D-06：不再兜底 —— 未注入就是配置错误，必须【看得见】。
+  * 静默降级（悄悄退回逐样本 0x03）正是弱符号时代最难查的故障形态。 */
+ if (s_data_batch_cb == NULL) {
+  ESP_LOGE(TAG_RX, "DataBatch encoder NOT injected: aggregation disabled "
+                   "(capability bit may be advertised but 0x20 will never be sent). "
+                   "main.c must call bus_worker_set_data_batch_cb().");
+  s_data_batch_missing = true;
+ }
  report_path_init();
  if (!s_report_path_started) {
   /* report_path_init() failed (or was never able to build its pool).  Starting

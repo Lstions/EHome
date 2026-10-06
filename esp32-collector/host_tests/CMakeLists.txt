@@ -840,6 +840,9 @@ add_test(NAME net_policy_tests COMMAND net_policy_tests)
 
 # D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME databatch_injected
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_databatch_injected.py)
+
 add_test(NAME tcp_start_reachable
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tcp_start_reachable.py)
 
