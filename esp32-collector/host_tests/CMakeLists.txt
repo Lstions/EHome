@@ -252,6 +252,7 @@ target_compile_options(bus_dma_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-f
 add_test(NAME bus_dma_tests COMMAND bus_dma_tests)
 
 add_executable(scheduler_route_tests scheduler_route_tests.c
+    ../components/scheduler/scheduler_health.c
     ../components/hw_profile/hw_tables.c
     ../components/frame/frame_codec.c
     stubs/heap_stub_impl.c
@@ -378,6 +379,7 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 # together.  bus_worker_rx_tests.c only proves a notify hook is called; this
 # proves the encoded StatusReport actually changes.
 add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
+    ../components/scheduler/scheduler_health.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
     ../components/msg_handler/data_batch_codec.c
@@ -854,3 +856,12 @@ target_include_directories(transport_framing_tests PRIVATE
 )
 target_compile_options(transport_framing_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_framing_tests COMMAND transport_framing_tests)
+
+# D-07 健康计数写入规则（纯函数，无需 stub）
+add_executable(scheduler_health_tests
+    scheduler_health_tests.c
+    ../components/scheduler/scheduler_health.c
+)
+target_include_directories(scheduler_health_tests PRIVATE ../components/scheduler)
+target_compile_options(scheduler_health_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)

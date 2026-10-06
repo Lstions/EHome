@@ -14,6 +14,7 @@
 
 #include "scheduler.h"
 #include "scheduler_queue_guard.h"
+#include "scheduler_health.h"   /* D-07：健康计数的写入规则（宿主可测纯函数）*/
 #include "config_mgr.h"
 #include "collector_mem.h"
 #include "cmd_queue.h"
@@ -572,12 +573,11 @@ bool scheduler_notify_command_outcome(uint32_t channel_id,
     sched_command_t *scmd = sched_find_command(channel_id, edge_device_id,
                                                command_template_id, command_index);
     if (scmd) {
-        if (success) {
-            /* A complete response clears the consecutive-error streak. */
-            scmd->error_count = 0;
-        } else if (scmd->error_count < 100) {
-            scmd->error_count++;
-        }
+        /* D-07：设备层面的结果【才】可以推动健康计数 —— 走与背压路径
+         * 同一个规则函数，保证"谁可以改这个字段"只有一个来源（P4）。 */
+        scmd->error_count = sched_health_next(
+            scmd->error_count,
+            success ? SCHED_HEALTH_DEVICE_SUCCESS : SCHED_HEALTH_DEVICE_FAILURE);
         reported = true;
     }
     if (success) {
@@ -686,8 +686,17 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
                         s_queue_metrics.sample_rejected[metric_index]++;
                 }
                 (*queue_full_count)++;
-                scmd->error_count++;
-                if (scmd->error_count > 100) scmd->error_count = 100;
+                /* D-07 修复（2026-10-06）：本机队列满【不是】设备故障。
+                 * 旧代码在这里 scmd->error_count++，而该字段是服务端读的
+                 * 唯一健康量（handler_data.c 映射成 TIMEOUT/FAULT）——
+                 * 于是 100 Hz 下必然发生的队列满（L-01c 实测 full=577~589）
+                 * 会被上报成"现场传感器故障"。
+                 * 现在：本机背压只进自己的计数；健康计数由规则函数统一管。
+                 * 可观测性没有损失 —— 该拒绝早已计入
+                 * s_queue_metrics.sample_rejected[]/sample_skipped[] 并上报。 */
+                scmd->queue_full_count++;
+                scmd->error_count = sched_health_next(
+                    scmd->error_count, SCHED_HEALTH_LOCAL_BACKPRESSURE);
             } else {
                 (*total_samples)++;
                 /* 2026-09-30 (defect 2): do NOT clear error_count here.
