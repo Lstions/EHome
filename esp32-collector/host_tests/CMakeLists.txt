@@ -991,6 +991,21 @@ add_test(NAME golden_vectors_go
 add_test(NAME golden_vectors_python
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_golden_vectors.py)
 
+add_executable(link_tcp_tests
+    link_tcp_tests.c
+    ../components/link/link.c
+    ../components/link_tcp/link_tcp.c
+)
+target_include_directories(link_tcp_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/link/include
+    ../components/link_tcp/include
+)
+target_compile_options(link_tcp_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+add_test(NAME link_tcp_tests COMMAND link_tcp_tests)
+
 add_test(NAME golden_vectors_tests
     COMMAND golden_vectors_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
 
