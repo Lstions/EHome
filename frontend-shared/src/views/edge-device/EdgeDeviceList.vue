@@ -1545,7 +1545,19 @@ const handleCreate = async () => {
     // 步骤 0 可先跳过) 时, 在提交处拦截——继承语义要求显式目标, 不能静默
     // 回退为"作为新设备创建"违背用户的显式选择。
     if (inheritMode.value === 'inherit' && inheritLogicalDeviceId.value === null) {
-      ElMessage.warning('已选择"继承历史数据"但未选中候选逻辑设备，请回到"历史数据继承"步骤选择候选，或改为"作为新设备创建"')
+      // 把用户送回**能修的那一步**，而不是留他在最终确认步骤干看一条 toast。
+      //
+      // 现场现象（2026-10-06）：用户在这里点"创建"**没有任何反应** —— 按钮不转圈、
+      // 对话框不动、只有一条 5 秒后消失的提示。原因是候选选择器在第 0 步
+      // （v-if="inheritMode === 'inherit'"，且用 v-show 控制），用户在步骤 3 提交时
+      // 那个控件**根本不在视口**，提示语指向的是一个他看不见的地方。
+      // 故这里显式跳回第 0 步，让提示说的和用户看到的一致。
+      createStep.value = 0
+      ElMessage.warning({
+        message:
+          '已选择"继承历史数据"但未选中候选逻辑设备，已为你打开"历史数据继承"步骤，请选择候选或改为"作为新设备创建"',
+        duration: 6000,
+      })
       return
     }
     submitting.value = true

@@ -159,4 +159,25 @@ describe('feedback.error / feedback.handleError — 统一出口契约', () => {
     const opts = message.mock.calls[0][0] as { duration?: number }
     expect(opts.duration).toBeGreaterThan(3000)
   })
+
+  it('extractErrorMessage: 非 Error 的 invalidFields 必须取出真实原因（回归 2026-10-06）', () => {
+    // 现场：以"继承"方式创建边缘设备时点"创建"没反应；以新设备创建 + 中文名也失败。
+    // 两者的**真实原因都被吞掉**了 —— Element Plus 的 formRef.validate() 拒绝值是
+    // invalidFields 普通对象（不是 Error），而旧实现只处理 error instanceof Error，
+    // 其余一律 return fallback ⇒ 用户只看到通用的「创建失败」，5 秒后消失，
+    // 无从判断该改哪个字段。
+    const invalidFields = { name: [{ message: '请输入设备名称', field: 'name' }] }
+    expect(extractErrorMessage(invalidFields, '创建失败')).toBe('请输入设备名称')
+
+    // 多个字段时取第一条可读 message
+    expect(
+      extractErrorMessage({ name: [{ message: 'A' }], channel: [{ message: 'B' }] }, '创建失败'),
+    ).toBe('A')
+
+    // 形状不符时仍须安全回落到 fallback：既不抛异常，也不返回空串
+    expect(extractErrorMessage({ name: [] }, '创建失败')).toBe('创建失败')
+    expect(extractErrorMessage({ name: [{ nope: 1 }] }, '创建失败')).toBe('创建失败')
+    expect(extractErrorMessage({ name: [{ message: '' }] }, '创建失败')).toBe('创建失败')
+    expect(extractErrorMessage({}, '创建失败')).toBe('创建失败')
+  })
 })
