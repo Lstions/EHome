@@ -39,7 +39,17 @@ const (
 	Magic      uint16 = 0x4548 // "EH"
 	Version    uint8  = 0x30   // 3.0
 	HeaderSize int    = 12
-	// PayloadMax = 16384 - 12 - 4, so header+payload(+CRC) fits one TLS record.
+	// MaxFrameBytes is the largest WHOLE frame (header+payload+CRC) that may be
+	// sent in one TLS record: MBEDTLS_SSL_IN_CONTENT_LEN.
+	//
+	// It is named because it is the number both ends must agree on: the
+	// firmware calls it LINK_TCP_MTU_BYTES (link_tcp.h:42) and compares the
+	// whole frame length against it in link_send. Leaving it only inside the
+	// PayloadMax comment meant the server had no name for its own MTU, and a
+	// silent disagreement here would look like "frames mysteriously rejected".
+	MaxFrameBytes uint32 = 16384
+	// PayloadMax = MaxFrameBytes - HeaderSize - CRCSize, so header+payload(+CRC)
+	// fits one TLS record exactly.
 	PayloadMax uint16 = 16368
 	CRCSize    int    = 4
 )
