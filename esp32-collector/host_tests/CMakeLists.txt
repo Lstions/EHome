@@ -983,6 +983,11 @@ add_executable(golden_vectors_tests
 target_include_directories(golden_vectors_tests PRIVATE ../components/msgcodec/include)
 target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
 # 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
+# 后端（Go）侧的 S0 对锚。工具链自包含在 .tools/gotool，不在系统 PATH，
+# 故通过脚本运行（脚本会报出找不到工具链的原因）。
+add_test(NAME golden_vectors_go
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tools/run_backend_golden.sh)
+
 add_test(NAME golden_vectors_python
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_golden_vectors.py)
 
