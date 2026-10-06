@@ -61,15 +61,44 @@ void host_test_log_record(char level, const char *tag, const char *format, ...) 
 }
 const char *esp_err_to_name(esp_err_t err) { (void)err; return "ESP_ERR"; }
 
+/* ---------------------------------------------------------------------
+ * MAC 桩：必须**如实模仿真芯片语义**，否则本组用例无法复现真实缺陷。
+ *
+ * 真实 ESP32-C6（SOC_IEEE802154_SUPPORTED=1）上（esp-idf mac_addr.c）：
+ *   esp_read_mac(ESP_MAC_WIFI_STA) → 直接返回 6 字节接口 MAC，不插 MAC_EXT；
+ *   esp_efuse_mac_get_default()    → 先取 48 位 MAC_FACTORY，再执行
+ *                                    insert_mac_ext_into_mac()：
+ *                                    mac[3..4] = MAC_EXT(0xFFFE)，
+ *                                    真 MAC 的 mac[3..5] 被挪到 mac[5..7]。
+ * 只取前 6 字节时，区分两块芯片的字节（mac[3..4]）正好被丢掉。
+ *
+ * 2026-10-06 生产事故：ttyACM0/ttyACM2 两块不同 C6（EFUSE 分别
+ * bd02f35c…fffffef0f5 / bd02dd84…fffffef0f5）都上报 node_id
+ * F0F5BDFFFE02，互相顶掉 MQTT 连接（~5s 一次），后端看到同一节点反复上下线。
+ * 本桩令该差异在宿主机上可复现（g_test_efuse_mac_factory 为可注入的 48 位 MAC）。
+ * ------------------------------------------------------------------- */
+uint8_t g_test_efuse_mac_factory[6] = {0xF0, 0xF5, 0xBD, 0x02, 0xDD, 0x84};
+uint8_t g_test_mac_ext[2] = {0xFF, 0xFE};
+bool g_test_read_mac_fail = false;
+
 esp_err_t esp_read_mac(uint8_t *mac, esp_mac_type_t type) {
     (void)type;
-    mac[0] = 0xAA; mac[1] = 0xBB; mac[2] = 0xCC;
-    mac[3] = 0xDD; mac[4] = 0xEE; mac[5] = 0xFF;
+    if (g_test_read_mac_fail) return ESP_FAIL;   /* 兜底路径用例注入 */
+    /* 6 字节接口 MAC == MAC_FACTORY，无 MAC_EXT 插入 */
+    memcpy(mac, g_test_efuse_mac_factory, 6);
     return ESP_OK;
 }
+
 esp_err_t esp_efuse_mac_get_default(uint8_t *mac) {
-    mac[0] = 0xAA; mac[1] = 0xBB; mac[2] = 0xCC;
-    mac[3] = 0xDD; mac[4] = 0xEE; mac[5] = 0xFF;
+    /* 复刻 IDF 的 8 字节布局 + insert_mac_ext_into_mac() */
+    uint8_t buf[8];
+    memcpy(buf, g_test_efuse_mac_factory, 6);
+    buf[6] = 0; buf[7] = 0;
+    uint8_t mac_tmp[3];
+    memcpy(mac_tmp, &buf[3], 3);
+    memcpy(&buf[3], g_test_mac_ext, 2);
+    memcpy(&buf[5], mac_tmp, 3);
+    memcpy(mac, buf, 6);
     return ESP_OK;
 }
 uint32_t esp_random(void) { return 0x12345678; }
@@ -283,12 +312,81 @@ static void test_uptime_sec_now_follows_monotonic_clock(void) {
 /* =====================================================================
  * Main
  * ===================================================================== */
+/* =====================================================================
+ * Test: node_id 必须逐芯片唯一（2026-10-06 生产事故回归）
+ *
+ * 事故：两块不同的 ESP32-C6（EFUSE 低 3 字节分别为 02:dd:84 / 02:f3:5c）
+ * 都上报 F0F5BDFFFE02 → 同一个 node_id 变成同一个 MQTT client_id 与主题
+ * 前缀 → 互踢连接（实测周期 5.1s）、后端同一节点反复上下线。
+ *
+ * 根因：generate_node_id 用了 esp_efuse_mac_get_default()，该 API 在有
+ * IEEE 802.15.4 的芯片上会把 mac[3..4] 覆盖成 MAC_EXT(0xFFFE)，真实 MAC
+ * 被挪到 mac[5..7]，而函数只格式化前 6 字节 ⇒ 两块芯片算出同一个值。
+ *
+ * 本用例用两块真实芯片的 EFUSE 值断言派生结果不同，并锁定修复所用的 API。
+ * ===================================================================== */
+static const uint8_t kChipA[6] = {0xF0, 0xF5, 0xBD, 0x02, 0xDD, 0x84}; /* ttyACM2 */
+static const uint8_t kChipB[6] = {0xF0, 0xF5, 0xBD, 0x02, 0xF3, 0x5C}; /* ttyACM0 */
+
+static void test_node_id_is_unique_per_chip(void) {
+    uint8_t macA[6], macB[6];
+
+    /* 真实芯片语义下，旧 API 对两块不同芯片返回**相同**前 6 字节 */
+    memcpy(g_test_efuse_mac_factory, kChipA, 6);
+    esp_efuse_mac_get_default(macA);
+    memcpy(g_test_efuse_mac_factory, kChipB, 6);
+    esp_efuse_mac_get_default(macB);
+    CHECK(memcmp(macA, macB, 6) == 0,
+          "复现前提：esp_efuse_mac_get_default 前 6 字节对两块芯片相同（正是缺陷根因）");
+
+    /* 修复所用 API 必须给出不同 MAC —— 这是本用例真正锁定的一点 */
+    memcpy(g_test_efuse_mac_factory, kChipA, 6);
+    esp_read_mac(macA, ESP_MAC_WIFI_STA);
+    memcpy(g_test_efuse_mac_factory, kChipB, 6);
+    esp_read_mac(macB, ESP_MAC_WIFI_STA);
+
+    CHECK(memcmp(macA, macB, 6) != 0, "esp_read_mac(WIFI_STA) 必须给出逐芯片唯一的 MAC");
+    CHECK(memcmp(macA, kChipA, 6) == 0, "esp_read_mac(WIFI_STA) 必须返回真实接口 MAC（无 MAC_EXT 插入）");
+    CHECK(memcmp(macB, kChipB, 6) == 0, "esp_read_mac(WIFI_STA) 必须返回真实接口 MAC（无 MAC_EXT 插入）");
+
+    /* 端到端：app_state_init 之后两块芯片的 node_id 必须不同，且等于接口 MAC 的十六进制 */
+    memcpy(g_test_efuse_mac_factory, kChipA, 6);
+    app_state_t *sa = app_state_init();
+    char idA[24];
+    strlcpy(idA, sa->node_id, sizeof(idA));
+
+    memcpy(g_test_efuse_mac_factory, kChipB, 6);
+    app_state_t *sb = app_state_init();
+    char idB[24];
+    strlcpy(idB, sb->node_id, sizeof(idB));
+
+    CHECK(strcmp(idA, idB) != 0,
+          "两块不同 C6 的 node_id 必须不同（事故中二者都是 F0F5BDFFFE02）");
+    CHECK(strcmp(idA, "F0F5BD02DD84") == 0, "芯片 A 的 node_id 应为 F0F5BD02DD84");
+    CHECK(strcmp(idB, "F0F5BD02F35C") == 0, "芯片 B 的 node_id 应为 F0F5BD02F35C");
+    CHECK(strcmp(idA, "F0F5BDFFFE02") != 0, "node_id 不得再退化为 MAC_EXT 形态（F0F5BDFFFE02）");
+    CHECK(strlen(idA) == 12 && strlen(idB) == 12, "node_id 仍须是 12 位十六进制");
+}
+
+/* =====================================================================
+ * Test: MAC 读取失败时回退到 Kconfig（修复不得破坏兜底路径）
+ * ===================================================================== */
+static void test_node_id_falls_back_to_kconfig(void) {
+    g_test_read_mac_fail = true;
+    app_state_t *s = app_state_init();
+    g_test_read_mac_fail = false;
+    CHECK(strcmp(s->node_id, "test-node") == 0,
+          "MAC 读取失败时应回退到 CONFIG_COLLECTOR_NODE_ID");
+}
+
 int main(void)
 {
     test_init_bus_runtime_field_mapping();
     test_control_sample_queue_separation();
     test_app_state_init_creates_queues();
     test_uptime_sec_now_follows_monotonic_clock();
+    test_node_id_is_unique_per_chip();
+    test_node_id_falls_back_to_kconfig();
 
     if (g_failures > 0) {
         fprintf(stderr, "\napp_state_tests: %d FAILURES\n", g_failures);
