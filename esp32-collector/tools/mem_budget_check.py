@@ -133,6 +133,51 @@ def load_layout(map_path: Path) -> tuple[dict, str]:
     raise RuntimeError("esp-idf-size 不可用，无法解析布局: " + "; ".join(errs))
 
 
+def true_iram_usage(map_path: Path) -> dict | None:
+    """从 map 的链接器事实里读出 IRAM 段的真实容量与占用。
+
+    为什么需要这个函数（L-04，2026-10-06）：
+      esp_idf_size 报的 IRAM "total" **不是 IRAM 段的容量**。在 S3 上
+      iram0_0_seg(0x57700) 与 dram0_0_seg(0x53700) 是同一物理 SRAM 的两个
+      总线别名，idf_size 把两者长度之差 (0x4000 = 16384) 当作 IRAM 的
+      "size"，于是恒报 total=used=16384 / free=0 —— 无论实际用了多少。
+
+    实测反证（2026-10-06）：往 IRAM 里放 32 KiB 并链接，_iram_end 从
+      0x40389800 移到 0x40391800（+32768 B），**构建成功**，而报告的
+      IRAM free 始终是 0。⇒ "IRAM 满、新增 IRAM 代码会链接失败"是假警报。
+
+    真实口径取自 map 自身：Memory Configuration 里 iram0_0_seg 的
+      ORIGIN/LENGTH 与符号 _iram_end。链接器还带着权威断言：
+        ASSERT(((_iram_end - ORIGIN(iram0_0_seg)) <= LENGTH(iram0_0_seg)),
+               "IRAM0 segment data does not fit.")
+
+    返回 None 表示解析不到（调用方必须按"无法验证"处理，不能当通过）。
+    """
+    seg = None
+    iram_end = None
+    try:
+        with open(map_path, "r", errors="replace") as fh:
+            for line in fh:
+                if seg is None:
+                    m = _IRAM_SEG_RE.match(line)
+                    if m:
+                        seg = (int(m.group(2), 16), int(m.group(3), 16))
+                        continue
+                if iram_end is None:
+                    m = _IRAM_END_RE.match(line)
+                    if m:
+                        iram_end = int(m.group(1), 16)
+                if seg is not None and iram_end is not None:
+                    break
+    except OSError:
+        return None
+    if seg is None or iram_end is None:
+        return None
+    origin, length = seg
+    used = iram_end - origin
+    return {"origin": origin, "length": length, "end": iram_end,
+            "used": used, "free": length - used}
+
 def load_archives(map_path: Path, py: str) -> dict:
     rc, out, err = run_idf_size(py, "json2", map_path, archives=True)
     if rc != 0 or not out.strip():
@@ -148,6 +193,10 @@ _TARGET_SECTIONS = {
     ".iram0.text", ".iram0.vectors", ".iram0.data", ".iram0.bss",  # IRAM
 }
 _OUT_SEC_RE = re.compile(r"^(\.(?:dram0|iram0|noinit)[\w.]*)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)")
+# Memory Configuration 行:  iram0_0_seg      0x40374000         0x00057700         xr
+_IRAM_SEG_RE = re.compile(r"^\s*(iram0_0_seg)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)")
+# 链接输出行:               0x40389800                        _iram_end = ABSOLUTE (.)
+_IRAM_END_RE = re.compile(r"^\s+(0x[0-9a-fA-F]{8})\s+_iram_end = ABSOLUTE")
 _ENTRY_RE = re.compile(
     r"^\s+(?:(\.[\w.]+)\s+)?(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\S+\.a\(\S+\))\s*$"
 )
@@ -297,6 +346,9 @@ def main() -> int:
     iram_used = int(iram.get("used", 0))
     iram_total = int(iram.get("total", 0))
     iram_remain = int(iram.get("free", 0)) if iram_total else 0
+    # 链接器事实口径（L-04）。None = 该目标无 IRAM 段（如 C6）或解析失败；
+    # 两种情况都不做 IRAM 校验，但失败信息不同，见下方打印。
+    tiu = true_iram_usage(map_path)
 
     print()
     print(f"DIRAM used={dir_used} total={dir_total} remain={dir_remain}")
@@ -304,6 +356,9 @@ def main() -> int:
         print(f"IRAM  used={iram_used} total={iram_total} remain={iram_remain}")
     else:
         print("IRAM  该目标无独立 IRAM 段（代码在 flash）")
+    if tiu:
+        print(f"IRAM  真实段（链接器口径）: used={tiu['used']} length={tiu['length']} remain={tiu['free']}"
+              f"   [idf_size 分栏报 used={iram_used} total={iram_total} remain={iram_remain}，该栏 total 与段容量无关]")
     print(f"静态任务栈（含在 DIRAM used 内）: total={static_stack_total} B")
     for name, size, archive in static_stacks:
         print(f"    {size:7d}  {name:24s} {archive}")
@@ -334,10 +389,12 @@ def main() -> int:
         checks.append(("DIRAM used", dir_used, int(thresholds["dir_used_max"]), "max"))
     if "dir_remain_min" in thresholds and dir_total:
         checks.append(("DIRAM remain", dir_remain, int(thresholds["dir_remain_min"]), "min"))
-    if "iram_used_max" in thresholds and iram_total:
-        checks.append(("IRAM used", iram_used, int(thresholds["iram_used_max"]), "max"))
-    if "iram_remain_min" in thresholds and iram_total:
-        checks.append(("IRAM remain", iram_remain, int(thresholds["iram_remain_min"]), "min"))
+    # IRAM 校验用【链接器事实】，不用 idf_size 的 IRAM 分栏（L-04：那一栏的
+    # total 恒为 16384，与真实段容量 358,144 B 无关，见 true_iram_usage 注释）。
+    if "iram_used_max" in thresholds and tiu:
+        checks.append(("IRAM used (true)", tiu["used"], int(thresholds["iram_used_max"]), "max"))
+    if "iram_remain_min" in thresholds and tiu:
+        checks.append(("IRAM remain (true)", tiu["free"], int(thresholds["iram_remain_min"]), "min"))
 
     known_pending = thresholds.get("known_pending", {})
     if isinstance(known_pending, list):  # 兼容简写：["iram_remain_min"]
@@ -358,6 +415,9 @@ def main() -> int:
             "DIRAM remain": "dir_remain_min",
             "IRAM used": "iram_used_max",
             "IRAM remain": "iram_remain_min",
+            # 真实口径的 IRAM 校验同属这两个预算键（同一预算，两个口径）
+            "IRAM used (true)": "iram_used_max",
+            "IRAM remain (true)": "iram_remain_min",
         }[name]
         if ok:
             status = "PASS"

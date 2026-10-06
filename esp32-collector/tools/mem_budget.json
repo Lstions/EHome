@@ -10,33 +10,21 @@
   "profiles": {
     "s3-n8": {
       "dir_used_max": 172000,
-      "iram_remain_min": 4096,
-      "known_pending": {
-        "iram_remain_min": "IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。"
-      }
+      "iram_remain_min": 4096
     },
     "s3-n16": {
       "dir_used_max": 172000,
-      "iram_remain_min": 4096,
-      "known_pending": {
-        "iram_remain_min": "IRAM 16,384/16,384 已 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。落地后本项必须转为 PASS，再把 dir_used_max 收紧到 task-3 完成后的实测值。"
-      }
+      "iram_remain_min": 4096
     },
     "s3p-n8": {
       "dir_used_max": 151500,
       "iram_remain_min": 4096,
-      "dir_remain_min": 0,
-      "known_pending": {
-        "iram_remain_min": "S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。"
-      }
+      "dir_remain_min": 0
     },
     "s3p-n16": {
       "dir_used_max": 151500,
       "iram_remain_min": 4096,
-      "dir_remain_min": 0,
-      "known_pending": {
-        "iram_remain_min": "S3 IRAM 段 16,384/16,384 仍 100%：task-3 的 IRAM→flash 尚未落地（方案 §3.2）。s3p 后续也必须满足 remain>=4 KiB，不能因为 PSRAM 而豁免 IRAM 预算。"
-      }
+      "dir_remain_min": 0
     },
     "c6-n8": {
       "dir_used_max": 190000,
