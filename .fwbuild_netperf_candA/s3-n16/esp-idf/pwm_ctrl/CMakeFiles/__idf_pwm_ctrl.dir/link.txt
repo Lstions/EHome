@@ -1,2 +1,0 @@
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libpwm_ctrl.a CMakeFiles/__idf_pwm_ctrl.dir/pwm_ctrl.c.obj
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libpwm_ctrl.a

@@ -1,9 +1,0 @@
-
-
-# Load bootloader symbols
-set confirm off
-    add-symbol-file /mnt/storage/WorkSpace/EHome/.fwbuild_netperf_candA/s3-n16/bootloader/bootloader.elf
-set confirm on
-
-# Load application symbols
-file /mnt/storage/WorkSpace/EHome/.fwbuild_netperf_candA/s3-n16/ehome_collector.elf

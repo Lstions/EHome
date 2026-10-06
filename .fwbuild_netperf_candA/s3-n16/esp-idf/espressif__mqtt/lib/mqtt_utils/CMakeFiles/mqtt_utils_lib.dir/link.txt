@@ -1,2 +1,0 @@
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libmqtt_utils_lib.a CMakeFiles/mqtt_utils_lib.dir/mqtt_utils.c.obj
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libmqtt_utils_lib.a

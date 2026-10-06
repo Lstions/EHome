@@ -1,2 +1,0 @@
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ar qc libehome_tcp.a CMakeFiles/__idf_ehome_tcp.dir/ehome_tcp.c.obj
-/home/sun/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp32s3-elf-ranlib libehome_tcp.a
