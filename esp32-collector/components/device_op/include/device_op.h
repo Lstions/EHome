@@ -91,10 +91,24 @@ typedef struct {
     int (*erase_namespace)(void *ctx, const char *ns_name);
 
     /**
-     * 把 ACK 真正送出（阻塞到写完或超时）。
+     * 把【带 `result` 的】ACK 编码并送出（阻塞到写完或超时）。
+     *
+     * ⚠ 这个签名是 2026-10-06 改的，原签名是
+     * `flush_ack(ctx, const uint8_t *ack, size_t len)` —— **那个签名有个真实缺陷**：
+     *
+     * ACK 里必须带结果码，而**结果码要等 execute 跑完才知道**。
+     * 调用方在调用前能编出来的 ACK 只能是"OK"（它没有别的信息）。
+     * 于是"擦除失败"这条路径会把**一个写着 OK 的 ACK**发出去，
+     * 服务端据此告诉操作员"恢复出厂成功" ——
+     * **而设备根本没擦、没重启，还在跑旧配置**。
+     * 这是设备侧版本的"假成功"，与后端那个 stale-ACK 是同一类问题。
+     *
+     * 现在由模块告诉调用方"该报什么结果"，调用方负责编码
+     * （request_id 由调用方在收到请求时捕获，编解码仍归 msgcodec）。
+     *
      * 返回 0 成功，非 0 失败。**失败则不重启**（见 DEVOP_ERR_ACK_FLUSH_FAILED）。
      */
-    int (*flush_ack)(void *ctx, const uint8_t *ack, size_t ack_len);
+    int (*flush_ack)(void *ctx, device_op_result_t result);
 
     /** 重启。正常实现【不返回】；宿主测试的假实现直接返回。 */
     void (*restart)(void *ctx);
@@ -103,20 +117,19 @@ typedef struct {
 /**
  * 执行一个运维操作。顺序固定为：(擦除) → 刷新 ACK → 重启。
  *
- * @param ack / ack_len  已编码好的 ACK 帧（本模块不负责编码 —— 编解码归 msgcodec）。
  * @param restarted_out  可选；true 表示重启原语已被调用。
- * @return 结果码（同时应写进 ACK；本函数不构造 ACK 内容）。
+ * @return 结果码。**调用方必须把它写进 ACK** —— 通过 flush_ack 的 result 参数传下去，
+ *         不要自己另算一份（两份结果必然漂移）。
  *
  * 确定性行为（由 host_tests/device_op_tests.c 逐条锁定）：
  *   - 未知操作码        -> UNKNOWN_OP，**不擦除、不刷新、不重启**；
  *   - 已有操作进行中    -> BUSY，同上；
- *   - 擦除失败          -> ERASE_FAILED，**刷新 ACK 报告失败，但不重启**；
+ *   - 擦除失败          -> ERASE_FAILED，**刷新 ACK 报告 ERASE_FAILED，但不重启**；
  *   - ACK 刷新失败      -> ACK_FLUSH_FAILED，**不重启**；
  *   - 全部成功          -> OK，且重启前 ACK 已送出。
  */
 device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
                                      device_op_t op,
-                                     const uint8_t *ack, size_t ack_len,
                                      bool *restarted_out);
 
 /**

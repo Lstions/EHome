@@ -57,11 +57,10 @@ const char *const *device_op_factory_namespaces(size_t *count_out)
 
 device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
                                      device_op_t op,
-                                     const uint8_t *ack, size_t ack_len,
                                      bool *restarted_out)
 {
     if (restarted_out != NULL) *restarted_out = false;
-    if (io == NULL || ack == NULL || ack_len == 0) return DEVOP_ERR_BAD_ARG;
+    if (io == NULL) return DEVOP_ERR_BAD_ARG;
 
     /* 操作码不认识：什么都不做（版本不匹配时不要把设备弄成半执行状态） */
     if (op != DEVICE_OP_REBOOT && op != DEVICE_OP_FACTORY_RESET_KEEP_CONN) {
@@ -81,7 +80,9 @@ device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
             if (io->erase_namespace == NULL ||
                 io->erase_namespace(io_ctx, s_factory_ns[i]) != 0) {
                 if (io->flush_ack != NULL) {
-                    (void)io->flush_ack(io_ctx, ack, ack_len);
+                    /* 报【真实结果】而不是笼统失败：前端据此区分
+                     * "擦不掉"（ERASE_FAILED，可重试）与其它原因。 */
+                    (void)io->flush_ack(io_ctx, DEVOP_ERR_ERASE_FAILED);
                 }
                 /* 未重启 ⇒ 必须解除单飞，否则操作员"重试"会拿到 BUSY、
                  * 只能靠重启设备才能再试（与"可重试"的设计意图矛盾）。
@@ -94,7 +95,7 @@ device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
 
     /* ---- 步骤 2：把 ACK 送出去（必须在重启之前）----
      * 顺序不能反：先重启就断链，前端永远拿不到结果。 */
-    if (io->flush_ack == NULL || io->flush_ack(io_ctx, ack, ack_len) != 0) {
+    if (io->flush_ack == NULL || io->flush_ack(io_ctx, DEVOP_OK) != 0) {
         /* ACK 送不出去也【不重启】—— 否则操作员看到的是"点了没反应"，
          * 而设备其实重启了。宁可保持现状让操作员重试。
          * 同理解除单飞，让重试可行。 */

@@ -38,7 +38,13 @@ static char s_erased[8][32];
 static int  s_erased_n;
 static int  s_flush_calls;
 static int  s_restart_calls;
-static int  s_last_ack_len;
+/* ⚠ 2026-10-06 新增：模块**被要求上报的结果码**。
+ * 旧测试只断言 ACK 长度被原样传递，于是**完全没覆盖 ACK 里写的是什么结果** ——
+ * 而当时的签名根本没法写对：ACK 在调用前就已编码，结果码要到跑完才知道。
+ * 后果是【擦除失败】会把一个写着 OK 的 ACK 发出去，服务端据此告诉操作员
+ * 「恢复出厂成功」，而设备根本没擦、没重启。这条状态就是补上的观测点。 */
+static device_op_result_t s_last_flush_result;
+static int  s_flush_result_seen;
 static int  s_erase_fail_on_call;   /* >0: 第 N 次 erase 返回失败 */
 static int  s_flush_fail;           /* 1: flush_ack 返回失败 */
 
@@ -47,7 +53,8 @@ static void note(int step) { if (s_order_n < ORDER_MAX) s_order[s_order_n++] = s
 static void reset_fake(void)
 {
     s_order_n = 0; s_erased_n = 0; s_flush_calls = 0; s_restart_calls = 0;
-    s_last_ack_len = 0; s_erase_fail_on_call = 0; s_flush_fail = 0;
+    s_erase_fail_on_call = 0; s_flush_fail = 0;
+    s_last_flush_result = DEVOP_OK; s_flush_result_seen = 0;
 }
 
 static int fake_erase(void *ctx, const char *ns)
@@ -59,12 +66,14 @@ static int fake_erase(void *ctx, const char *ns)
     return 0;
 }
 
-static int fake_flush(void *ctx, const uint8_t *ack, size_t len)
+static int fake_flush(void *ctx, device_op_result_t result)
 {
-    (void)ctx; (void)ack;
+    (void)ctx;
     note(STEP_FLUSH);
     s_flush_calls++;
-    s_last_ack_len = (int)len;
+    /* 记下模块要求上报的结果 —— 这正是服务端最终会看到的东西。 */
+    s_last_flush_result = result;
+    s_flush_result_seen = 1;
     return s_flush_fail ? -1 : 0;
 }
 
@@ -89,8 +98,6 @@ static bool erased_contains(const char *ns)
     return false;
 }
 
-static uint8_t ACK[8] = { 0x45, 0x48, 0x30, 0x23, 0, 0, 0, 0 };
-
 /* ============ 1. 【需求核心】wifi_cfg 绝不能被远程擦除 ============ */
 static void test_wifi_is_never_erased(void)
 {
@@ -99,8 +106,7 @@ static void test_wifi_is_never_erased(void)
     bool restarted = false;
 
     device_op_result_t r = device_op_execute(&FAKE_IO, NULL,
-                                             DEVICE_OP_FACTORY_RESET_KEEP_CONN,
-                                             ACK, sizeof(ACK), &restarted);
+                                             DEVICE_OP_FACTORY_RESET_KEEP_CONN, &restarted);
     CHECK(r == DEVOP_OK, "恢复出厂应成功，实际 %s", device_op_result_name(r));
     CHECK(restarted, "应重启");
 
@@ -142,15 +148,17 @@ static void test_order_erase_flush_restart(void)
     device_op_reset_state();
     bool restarted = false;
 
-    (void)device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN,
-                            ACK, sizeof(ACK), &restarted);
+    (void)device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN, &restarted);
 
     CHECK(s_order_n == 3, "应有 3 步，实际 %d", s_order_n);
     CHECK(s_order[0] == STEP_ERASE,   "第 1 步应为擦除，实际 %d", s_order[0]);
     CHECK(s_order[1] == STEP_FLUSH,   "第 2 步应为刷新 ACK，实际 %d", s_order[1]);
     CHECK(s_order[2] == STEP_RESTART, "第 3 步应为重启，实际 %d", s_order[2]);
-    /* 顺序反了（先重启）前端就永远收不到 ACK —— 这是本条要拦的 */
-    CHECK(s_last_ack_len == (int)sizeof(ACK), "ACK 长度应原样传递");
+    /* 顺序反了（先重启）前端就永远收不到 ACK —— 这是本条要拦的。
+     * （原断言「ACK 长度原样传递」已删除：新签名下模块根本不接收 ACK 字节，
+     * 长度由调用方按自己的 request_id 决定，"传递长度"这句话不再有意义。
+     * 取而代之的是 test_ack_reports_the_real_result 里对**结果码**的断言。） */
+    CHECK(s_flush_calls == 1, "应恰好送出一次 ACK，实际 %d", s_flush_calls);
 }
 
 /* ============ 4. 重启操作：不擦任何东西，但同样先 ACK 后重启 ============ */
@@ -160,8 +168,7 @@ static void test_reboot_does_not_erase(void)
     device_op_reset_state();
     bool restarted = false;
 
-    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT,
-                                             ACK, sizeof(ACK), &restarted);
+    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT, &restarted);
     CHECK(r == DEVOP_OK, "重启应成功，实际 %s", device_op_result_name(r));
     CHECK(restarted, "应重启");
     CHECK(s_erased_n == 0, "重启【不应】擦除任何命名空间，实际擦了 %d 个", s_erased_n);
@@ -176,8 +183,7 @@ static void test_unknown_op_does_nothing(void)
     device_op_reset_state();
     bool restarted = false;
 
-    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, (device_op_t)99,
-                                             ACK, sizeof(ACK), &restarted);
+    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, (device_op_t)99, &restarted);
     CHECK(r == DEVOP_ERR_UNKNOWN_OP, "应 UNKNOWN_OP，实际 %s", device_op_result_name(r));
     CHECK(!restarted, "未知操作不应重启");
     CHECK(s_order_n == 0, "未知操作不应有任何动作，实际 %d 步", s_order_n);
@@ -191,15 +197,14 @@ static void test_second_op_is_busy(void)
     device_op_reset_state();
     bool restarted = false;
 
-    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT, ACK, sizeof(ACK),
+    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT,
                             &restarted) == DEVOP_OK, "第一次应成功");
     CHECK(device_op_in_progress(), "成功后应处于进行中（重启前不允许再来一条）");
 
     reset_fake();   /* 只重置假 IO，不重置模块状态 */
     bool restarted2 = false;
     device_op_result_t r2 = device_op_execute(&FAKE_IO, NULL,
-                                              DEVICE_OP_FACTORY_RESET_KEEP_CONN,
-                                              ACK, sizeof(ACK), &restarted2);
+                                              DEVICE_OP_FACTORY_RESET_KEEP_CONN, &restarted2);
     CHECK(r2 == DEVOP_ERR_BUSY, "第二次应 BUSY，实际 %s", device_op_result_name(r2));
     CHECK(s_order_n == 0, "被拒的操作不应有任何动作");
     CHECK(!restarted2, "被拒的操作不应重启");
@@ -214,8 +219,7 @@ static void test_erase_failure_reports_but_does_not_restart(void)
     bool restarted = false;
 
     device_op_result_t r = device_op_execute(&FAKE_IO, NULL,
-                                             DEVICE_OP_FACTORY_RESET_KEEP_CONN,
-                                             ACK, sizeof(ACK), &restarted);
+                                             DEVICE_OP_FACTORY_RESET_KEEP_CONN, &restarted);
     CHECK(r == DEVOP_ERR_ERASE_FAILED, "应 ERASE_FAILED，实际 %s", device_op_result_name(r));
     CHECK(!restarted, "擦除失败**不应**重启（否则操作员以为成功、设备停在半状态）");
     CHECK(s_restart_calls == 0, "restart 不应被调用");
@@ -224,8 +228,7 @@ static void test_erase_failure_reports_but_does_not_restart(void)
     CHECK(!device_op_in_progress(), "擦除失败后应解除单飞，允许重试");
     reset_fake();
     bool restarted2 = false;
-    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN,
-                            ACK, sizeof(ACK), &restarted2) == DEVOP_OK,
+    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN, &restarted2) == DEVOP_OK,
           "失败后应能重试成功");
     CHECK(restarted2, "重试成功应重启");
 }
@@ -238,13 +241,48 @@ static void test_ack_flush_failure_does_not_restart(void)
     s_flush_fail = 1;
     bool restarted = false;
 
-    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT,
-                                             ACK, sizeof(ACK), &restarted);
+    device_op_result_t r = device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT, &restarted);
     CHECK(r == DEVOP_ERR_ACK_FLUSH_FAILED, "应 ACK_FLUSH_FAILED，实际 %s",
           device_op_result_name(r));
     CHECK(!restarted, "ACK 送不出去时不应重启（否则操作员看到的是'点了没反应'）");
     CHECK(!device_op_in_progress(), "ACK 刷新失败后应解除单飞，允许重试");
     CHECK(s_restart_calls == 0, "restart 不应被调用");
+}
+
+/* ============ 8b. 【2026-10-06 新增】ACK 里必须是对的结果码 ============
+ *
+ * 这条是补漏洞的：旧签名 flush_ack(ctx, ack, len) 让调用方在调用前就编好 ACK，
+ * 而结果码要到跑完才知道 ⇒ 失败路径只能把写着 OK 的 ACK 发出去，
+ * 服务端会告诉操作员「恢复出厂成功」，
+ * **而设备根本没擦、没重启，还在跑旧配置**。
+ * 旧测试只断言 ACK 长度，因此这个漏洞完全没有被覆盖到。
+ *
+ * 现在 flush_ack 收到 result 参数，逐条断言每条路径报的码。 */
+static void test_ack_reports_the_real_result(void)
+{
+    /* (a) 成功：报 OK */
+    reset_fake();
+    device_op_reset_state();
+    bool restarted = false;
+    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN,
+                            &restarted) == DEVOP_OK, "成功路径应为 OK");
+    CHECK(s_flush_result_seen, "成功路径也应送出 ACK");
+    CHECK(s_last_flush_result == DEVOP_OK,
+          "成功路径 ACK 应报 OK，实际 %s", device_op_result_name(s_last_flush_result));
+
+    /* (b) 擦除失败：ACK 必须报 ERASE_FAILED（**不是 OK**） */
+    reset_fake();
+    device_op_reset_state();
+    s_erase_fail_on_call = 1;
+    restarted = false;
+    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_FACTORY_RESET_KEEP_CONN,
+                            &restarted) == DEVOP_ERR_ERASE_FAILED, "应为 ERASE_FAILED");
+    CHECK(s_flush_calls == 1, "擦除失败也要送 ACK（否则前端不知道）");
+    CHECK(s_last_flush_result == DEVOP_ERR_ERASE_FAILED,
+          "**擦除失败时 ACK 必须报 ERASE_FAILED**，实际报的是 %s —— "
+          "报 OK 等于告诉操作员「恢复出厂成功」，而设备根本没擦没重启",
+          device_op_result_name(s_last_flush_result));
+    CHECK(!restarted, "擦除失败不应重启");
 }
 
 /* ============ 9. 参数校验 ============ */
@@ -254,10 +292,8 @@ static void test_bad_args(void)
     device_op_reset_state();
     bool restarted = false;
 
-    CHECK(device_op_execute(NULL, NULL, DEVICE_OP_REBOOT, ACK, sizeof(ACK), &restarted)
+    CHECK(device_op_execute(NULL, NULL, DEVICE_OP_REBOOT, &restarted)
               == DEVOP_ERR_BAD_ARG, "io 为 NULL 应 BAD_ARG");
-    CHECK(device_op_execute(&FAKE_IO, NULL, DEVICE_OP_REBOOT, NULL, 0, &restarted)
-              == DEVOP_ERR_BAD_ARG, "ack 为空应 BAD_ARG");
     CHECK(s_order_n == 0, "参数错不应有任何动作");
     CHECK(!restarted, "参数错不应重启");
 }
@@ -272,6 +308,7 @@ int main(void)
     test_second_op_is_busy();
     test_erase_failure_reports_but_does_not_restart();
     test_ack_flush_failure_does_not_restart();
+    test_ack_reports_the_real_result();
     test_bad_args();
 
     if (s_failures) { printf("device_op_tests: %d FAILURE(S)\n", s_failures); return 1; }
