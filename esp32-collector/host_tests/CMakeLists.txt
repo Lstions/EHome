@@ -900,6 +900,10 @@ add_executable(msg_handler_publish_tests
     msg_handler_publish_tests.c
     ../components/transport/transport.c
     ../components/frame/frame_codec.c
+    # 本用例 #include 真实的 msg_handler.c，而它现在分发了 MSG_DEVICE_OP；
+    # 因此必须把该 handler 也链进来（否则 undefined reference）。
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
 )
 target_include_directories(msg_handler_publish_tests PRIVATE
     stubs
@@ -927,6 +931,7 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/rgb_led
     ../components/factory_reset
     ../components/nvs_helper
+    ../components/device_op/include
 )
 target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_executable(mqtt_adapter_tests
@@ -1176,3 +1181,22 @@ add_executable(transport_sel_tests
 target_include_directories(transport_sel_tests PRIVATE ../components/transport_sel/include)
 target_compile_options(transport_sel_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_sel_tests COMMAND transport_sel_tests)
+
+# 远程运维（0x22 -> 0x23）：解析、结果如实回显、request_id 关联、未注入原语即拒绝。
+# 只编译 handler_device_op.c + frame_codec.c + device_op.c ——
+# 不拉 msg_handler.c（它牵动整棵组件树），因此这三个文件的契约在本机可独立验证。
+add_executable(handler_device_op_tests
+    handler_device_op_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(handler_device_op_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(handler_device_op_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME handler_device_op_tests COMMAND handler_device_op_tests)

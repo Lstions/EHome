@@ -197,6 +197,12 @@ void msg_handler_process(const uint8_t *data, size_t len)
     ESP_LOGI(TAG, "Received message type=0x%02X, len=%zu", msg_type, len);
 
     switch (msg_type) {
+    case MSG_DEVICE_OP:
+        /* v3.0 远程运维（重启 / 恢复出厂）。设备侧策略在 device_op 组件里，
+         * 这里只负责解析字段、注入原语、把结果编成 0x23 送回去。 */
+        handler_device_op_process(&dec);
+        break;
+
     case MSG_CONFIG_MFST:
         /* v2.4: config_mgr_apply_manifest moved to handle_config_applied
          * inside app_state_lock_config() — prevents TOCTOU race between

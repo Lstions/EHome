@@ -111,6 +111,24 @@ typedef enum {
 /* DataBatch 能力位（HelloAck field 2 features 的 bit0）。 */
 #define CAP_DATA_BATCH_V1    ((uint64_t)1 << 0)
 
+/* v3.0 远程运维：重启 / 恢复出厂（保留连通性）。
+ *
+ * 为什么放在这张表里而不是只留在 device_op.h：
+ * **这张表是设备侧消息号的定义处**（check_message_types.py 就是按它扫的），
+ * 而 0x22 原来只定义在 components/device_op/include/device_op.h，
+ * 于是"设备侧有这个号"在**权威表里查不到** ——
+ * 那份门禁正是为消灭"两端各自的测试都绿、合起来静默不通"而存在的，
+ * 消息号只躺在组件私有头文件里会绕开它。
+ * device_op.h 现在改为引用这里的定义，号只有一个来源（P4）。
+ *
+ * 相邻占用：0x20 DATA_BATCH / 0x21 MEM_REPORT。 */
+#ifndef MSG_DEVICE_OP
+#define MSG_DEVICE_OP        0x22   /* 下行：请设备执行一个运维操作 */
+#endif
+#ifndef MSG_DEVICE_OP_ACK
+#define MSG_DEVICE_OP_ACK    0x23   /* 上行：执行结果（重启前送出） */
+#endif
+
 /* === Encoder === */
 typedef struct {
     uint8_t *buf;

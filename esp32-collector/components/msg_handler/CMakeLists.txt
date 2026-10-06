@@ -1,9 +1,9 @@
-idf_component_register(SRCS "msg_handler.c" "handler_hello.c" "handler_config.c" "handler_writecmd.c" "handler_channel_cmd_v2.c" "handler_data.c" "handler_periph.c" "periph_config_apply.c" "data_report_codec.c" "data_batch_codec.c" "handler_diag.c"
+idf_component_register(SRCS "msg_handler.c" "handler_hello.c" "handler_config.c" "handler_writecmd.c" "handler_channel_cmd_v2.c" "handler_data.c" "handler_periph.c" "periph_config_apply.c" "data_report_codec.c" "data_batch_codec.c" "handler_diag.c" "handler_device_op.c"
                        INCLUDE_DIRS "."
                        # D-14（2026-10-06）：去掉 bus_worker —— 原先只为 3 个上报统计量而依赖它，
 # 而 bus_worker 又依赖本组件，构成唯一的组件依赖环。
 # 统计量已搬到中立组件 report_stats（双方都依赖它，互不认识）。
-REQUIRES frame ehome_mqtt config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr)
+REQUIRES frame ehome_mqtt config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr device_op)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 #

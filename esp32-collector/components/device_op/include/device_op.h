@@ -57,10 +57,22 @@
 extern "C" {
 #endif
 
-/* === 3.0 消息类型（运维类别；0x22/0x23 在既有表里空闲）===
- * 这两个号已占用：0x20 DATA_BATCH / 0x21 MEM_REPORT（3.0 设计 §6.5）。 */
+/* === 3.0 消息类型（运维类别）===
+ * 这两个号的**权威定义在 components/frame/frame_codec.h 的消息表**里
+ * （check_message_types.py 按那张表扫两端一致性）。
+ * 本头文件刻意【不依赖 IDF、也不 include frame_codec】——它要能在宿主编译，
+ * 因此这里保留一份数值，并由 handler_device_op.c 用 _Static_assert 钉住
+ * 两边相等：谁只改一边，固件就编不过，数值不会悄悄漂移。
+ * 相邻占用：0x20 DATA_BATCH / 0x21 MEM_REPORT。 */
+#ifndef MSG_DEVICE_OP
 #define MSG_DEVICE_OP      0x22u   /* 下行：请设备执行一个运维操作 */
+#endif
+#ifndef MSG_DEVICE_OP_ACK
 #define MSG_DEVICE_OP_ACK  0x23u   /* 上行：执行结果（重启前送出） */
+#endif
+/* #ifndef 守卫的两个用途：
+ *   1) 单独 include 本头（宿主测试）时仍有这两个号 —— 保持"不依赖 IDF"；
+ *   2) 同时 include frame_codec.h 时**不重复定义**（权威表说了算）。 */
 
 /* === 操作码（走线路，必须【只增不改】）=== */
 typedef enum {
