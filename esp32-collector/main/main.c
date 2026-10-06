@@ -12,6 +12,7 @@
 #include "hello_handshake.h"
 #include "bus_worker.h"
 #include "msg_handler.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "crash_diag.h"
 #include "boot_guard.h"
 #include "mem_guard.h"
@@ -347,6 +348,25 @@ static uint16_t modbus_crc16(const uint8_t *data, size_t len)
 }
 
 /* ---- Modbus scan callback (overrides weak in handler_writecmd.c) ---- */
+
+/* B2（2026-10-06）：on_scan_req_received 原先**只有**一个 weak 空实现
+ * （在 handler_writecmd.c 里，注释写"implemented in main.c"）——
+ * 但 main.c **从来没有实现过它**。实测确认：全仓搜不到任何强定义。
+ *
+ * 也就是说：扫描请求这条路径一直是**静默无操作**的 ——
+ * 编译通过、链接通过、测试通过，功能却不存在。
+ * 这正是弱符号最坏的形态：它把"没实现"伪装成"已实现"。
+ *
+ * 现在给出一个**显式的**强实现：链接器能确认它存在，
+ * 而运行期每条请求都会留下一条 WARN，让"未实现"变成可见事实。
+ * 真要支持该功能时，替换本函数体即可（声明见 msg_handler_hooks.h）。 */
+void on_scan_req_received(const char *request_id, uint32_t hardware_id)
+{
+    ESP_LOGW(TAG, "on_scan_req_received: NOT IMPLEMENTED (request_id=%s hardware_id=%u) "
+                  "-- scan requests are acknowledged but never executed",
+             request_id ? request_id : "(null)", (unsigned)hardware_id);
+    /* 有意不发送任何成功回执：避免把"没做"报成"做完了"。 */
+}
 
 void on_modbus_scan_req_received(const char *request_id,
     uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)

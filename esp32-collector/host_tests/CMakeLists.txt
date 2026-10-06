@@ -22,6 +22,7 @@ target_compile_options(protocol_log_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME protocol_log_tests COMMAND protocol_log_tests)
 
 add_executable(writecmd_decoder_tests
+    msg_handler_hooks_stubs.c
     writecmd_decoder_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/handler_writecmd.c
@@ -36,6 +37,7 @@ target_compile_options(writecmd_decoder_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME writecmd_decoder_tests COMMAND writecmd_decoder_tests)
 
 add_executable(channel_cmd_v2_decoder_tests
+    msg_handler_hooks_stubs.c
     channel_cmd_v2_decoder_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/handler_channel_cmd_v2.c
@@ -50,6 +52,7 @@ target_compile_options(channel_cmd_v2_decoder_tests PRIVATE -Wall -Wextra -Werro
 add_test(NAME channel_cmd_v2_decoder_tests COMMAND channel_cmd_v2_decoder_tests)
 
 add_executable(channel_cmd_v2_slot_tests
+    msg_handler_hooks_stubs.c
     channel_cmd_v2_slot_tests.c
     channel_cmd_v2_slot_app_stubs.c
     ../components/frame/frame_codec.c
@@ -349,6 +352,7 @@ target_compile_options(perf_metrics_encode_tests PRIVATE -Wall -Wextra -Werror -
 add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
 
 add_executable(handler_data_tests handler_data_tests.c
+    msg_handler_hooks_stubs.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
     ../components/msg_handler/data_batch_codec.c
@@ -379,6 +383,7 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 # together.  bus_worker_rx_tests.c only proves a notify hook is called; this
 # proves the encoded StatusReport actually changes.
 add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
+    msg_handler_hooks_stubs.c
     ../components/scheduler/scheduler_health.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
@@ -840,6 +845,9 @@ add_test(NAME net_policy_tests COMMAND net_policy_tests)
 
 # D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME no_weak_symbols
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_no_weak_symbols.py)
+
 add_test(NAME databatch_injected
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_databatch_injected.py)
 

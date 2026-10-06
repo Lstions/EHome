@@ -7,6 +7,7 @@
  */
 
 #include "msg_handler.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
 #include "data_report_codec.h"
@@ -51,12 +52,9 @@
  */
 #define OTA_CMD_MEM_NEED_BYTES (4096u + 4096u)
 
-__attribute__((weak)) bool ehome_mem_can_start(size_t need_bytes)
-{
-    /* Host tests and any build without the main/ implementation: do not gate. */
-    (void)need_bytes;
-    return true;
-}
+/* B2（2026-10-06）：原为 weak 且 **return true**（"不设门禁"）。
+ * 已删除 —— 声明见 msg_handler_hooks.h，强实现在 main/app_callbacks.c。
+ * 一个漏实现就放行的内存门禁，比没有门禁更危险：它看起来是开着的。 */
 
 /* === Receive: OtaCmd (0x0C) === */
 

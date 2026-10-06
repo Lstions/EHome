@@ -1,14 +1,12 @@
 #include "msg_handler_internal.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "esp_log.h"
 #include <string.h>
 
-/* Host decoder tests link this handler without the MQTT transport component;
- * production provides the strong checked publisher. */
-__attribute__((weak)) esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
-{
-    msg_handler_publish(data, len);
-    return ESP_OK;
-}
+/* B2（2026-10-06）：此处原先有一个 __attribute__((weak)) 的
+ * msg_handler_publish_checked 默认实现（退化为未校验发布）。
+ * 已删除 —— 声明见 msg_handler_hooks.h，强实现在 msg_handler.c。
+ * 保留弱默认等于"绕过校验也能编译"，与 L-02 建立的约束相悖。 */
 
 #define TAG "CH_CMD_V2"
 #define V2_PROTOCOL 1U
@@ -56,10 +54,13 @@ typedef struct {
 
 /* The application bridge must enqueue the small slot index on an existing
  * per-bus worker queue. It must return false without physical TX if admission
- * fails. */
-__attribute__((weak)) const char *channel_cmd_v2_current_boot_id(void) { return NULL; }
-__attribute__((weak)) uint64_t channel_cmd_v2_current_time_ms(void) { return 0; }
-__attribute__((weak)) bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot) { (void)cmd; (void)slot; return false; }
+ * fails.
+ *
+ * B2（2026-10-06）：这三个钩子原先各带一个 weak 默认实现
+ * （boot_id -> NULL / time -> 0 / received -> false）。
+ * 全部删除 —— 声明见 msg_handler_hooks.h，强实现在 main.c。
+ * 弱默认会把"应用桥没接上"伪装成"boot_id 为空 / 命令被拒绝"，
+ * 而这两者都不会让编译或测试失败。 */
 static uint32_t s_event_sequence;
 static uint64_t s_completed_sequence;
 static uint32_t s_reservation_lock;

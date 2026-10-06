@@ -7,6 +7,7 @@
  */
 
 #include "msg_handler_internal.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "frame_codec.h"
 #include "esp_log.h"
 #include <limits.h>
@@ -18,25 +19,11 @@
 void msg_handler_send_query_rsp(const char *request_id, bool success,
                                 const char *error_msg);
 
-/* Weak callbacks - implemented in main.c */
-__attribute__((weak)) void on_write_cmd_received(uint32_t request_id, uint32_t channel_id,
-                                                   const uint8_t *data, size_t len, uint32_t read_size,
-                                                   uint32_t edge_device_id, uint32_t rx_timeout_ms)
-{
-    (void)request_id; (void)channel_id; (void)data; (void)len; (void)read_size;
-    (void)edge_device_id; (void)rx_timeout_ms;
-}
-
-__attribute__((weak)) void on_scan_req_received(const char *request_id, uint32_t hardware_id)
-{
-    (void)request_id; (void)hardware_id;
-}
-
-__attribute__((weak)) void on_modbus_scan_req_received(const char *request_id,
-    uint32_t start_addr, uint32_t end_addr, uint32_t timeout_ms)
-{
-    (void)request_id; (void)start_addr; (void)end_addr; (void)timeout_ms;
-}
+/* B2（2026-10-06）：三个回调原先都是带空实现的 __attribute__((weak))
+ * （注释写"implemented in main.c"）。已全部删除 —— 声明见
+ * msg_handler_hooks.h，强实现在 main.c。
+ * 空实现 + weak 的组合意味着：应用层忘了接上，写命令与扫描请求会被
+ * 【静默忽略】，而编译、链接、测试全都正常。 */
 
 /* === Receive: WriteCmd (0x06) === */
 

@@ -7,6 +7,7 @@
  */
 
 #include "msg_handler.h"
+#include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
 #include "config_mgr.h"
@@ -51,11 +52,8 @@ void handler_config_process_query(frame_decoder_t *dec)
 
 /* === Receive: QueryResources (0x1A) === */
 
-/* Weak callback - implemented in main.c */
-__attribute__((weak)) void on_query_resources_received(const char *request_id)
-{
-    (void)request_id;
-}
+/* B2（2026-10-06）：原为 weak 空实现。已删除 —— 声明见
+ * msg_handler_hooks.h，强实现在 main.c。 */
 
 void handler_config_process_query_resources(frame_decoder_t *dec)
 {
