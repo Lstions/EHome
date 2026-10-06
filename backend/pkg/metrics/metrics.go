@@ -359,4 +359,50 @@ var (
 		Name: "ehome_frame_type_mismatch_total",
 		Help: "Total frames dropped because the header type disagreed with the payload type byte",
 	})
+
+	// --- 3.0 downlink routing (internal/downlink) ---
+	//
+	// These make the transport CHOICE visible. Without them "the device did not
+	// get the command" is indistinguishable from "the command went out over the
+	// wrong transport" -- the failure mode the MQTT retirement window creates.
+
+	// DownlinkOverNativeTotal counts downlinks delivered over TCP+TLS.
+	DownlinkOverNativeTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_over_native_total",
+		Help: "Total downlink messages delivered over the native TCP+TLS transport",
+	})
+
+	// DownlinkNativeFailedTotal counts downlinks that had a TCP session but
+	// failed there and were retried over MQTT.
+	DownlinkNativeFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_native_failed_total",
+		Help: "Total downlink messages that failed over TCP and fell back to MQTT",
+	})
+
+	// DownlinkWrapFailedTotal counts payloads that could not be wrapped into a
+	// 3.0 frame (empty, or above the 3.0 payload maximum). A rising value while
+	// a node is on TCP means that node may be missing messages.
+	DownlinkWrapFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_wrap_failed_total",
+		Help: "Total downlink payloads that could not be framed for the 3.0 transport",
+	})
+
+	// DownlinkQoS2DowngradedTotal counts QoS-2 publishes that went over TCP
+	// without the application-layer ACK that is supposed to replace QoS 2.
+	// The ACK is not implemented yet, so this is expected to be non-zero
+	// whenever a 3.0 node receives control messages -- it is a TO-DO made
+	// visible rather than a silent downgrade. Target: zero once ACK lands.
+	DownlinkQoS2DowngradedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_qos2_downgraded_total",
+		Help: "Total QoS-2 publishes downgraded to best-effort over the 3.0 transport (ACK not implemented)",
+	})
+
+	// DownlinkRetainedNodeScopedTotal counts retained publishes addressed to a
+	// single node. "Retained" has no 3.0 equivalent, so those can only ever go
+	// over MQTT; a non-zero value means a caller expects broker semantics that
+	// will disappear when MQTT is retired.
+	DownlinkRetainedNodeScopedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_downlink_retained_node_scoped_total",
+		Help: "Total retained publishes addressed to a node-scoped topic (no 3.0 equivalent)",
+	})
 )
