@@ -1077,3 +1077,11 @@ target_include_directories(rx_pump_tests PRIVATE
 )
 target_compile_options(rx_pump_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME rx_pump_tests COMMAND rx_pump_tests)
+
+add_executable(tls_guard_tests
+    tls_guard_tests.c
+    ../components/tls_guard/tls_guard.c
+)
+target_include_directories(tls_guard_tests PRIVATE ../components/tls_guard/include)
+target_compile_options(tls_guard_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_guard_tests COMMAND tls_guard_tests)
