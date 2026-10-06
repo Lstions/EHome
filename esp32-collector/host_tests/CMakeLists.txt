@@ -1151,3 +1151,17 @@ target_include_directories(session_tests PRIVATE
 )
 target_compile_options(session_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME session_tests COMMAND session_tests)
+
+add_executable(sntp_mgr_tests
+    sntp_mgr_tests.c
+    ../components/sntp_mgr/sntp_mgr.c
+)
+target_include_directories(sntp_mgr_tests PRIVATE ../components/sntp_mgr/include)
+target_compile_options(sntp_mgr_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME sntp_mgr_tests COMMAND sntp_mgr_tests)
+
+add_test(NAME check_sdkconfig_symbols
+    COMMAND ${CMAKE_COMMAND} -E env
+            IDF_PATH=/home/sun/env/esp-idf
+            python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_sdkconfig_symbols.py)
+

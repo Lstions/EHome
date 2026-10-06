@@ -236,3 +236,35 @@ CONFIG_COLLECTOR_NODE_ID="1001"
 # bring-up; when off the code is #ifdef'd out of the image entirely.
 CONFIG_DEBUG_TCP_ENABLED=n
 CONFIG_DEBUG_TCP_PORT=8088
+
+# ============================================================================
+# SNTP —— mTLS 的**前置条件**（U6 / K11）
+#
+# 为什么必须有：3.0 用 mTLS 取代 MQTT 账号密码。mTLS 要校验证书的
+# notBefore/notAfter，而这需要**可信的墙上时间**。ESP32 无 RTC，断电后
+# 系统时间回到 1970-01-01。
+#
+# 2026-10-06 实测（当时的状态）：本文档与代码里**都没有**任何 SNTP 配置/调用，
+# 于是 now(1970) < notBefore(2026) ⇒ 证书"尚未生效" ⇒ **mTLS 握手必然失败**，
+# 且失败会被当成"网络问题"无限退避（K11 全站失联）。
+#
+# ⚠ 这里**没有** CONFIG_LWIP_SNTP=y 这一行 —— 因为它**不是个真符号**。
+# 2026-10-06 实测：IDF v6.1 的 lwip Kconfig 里 SNTP 是个**无条件 menu**
+#   （components/lwip/Kconfig:1153  menu "SNTP"），
+#   没有 menuconfig 开关 ⇒ SNTP 永远编译在内，**不需要也无法"开启"**。
+# 我一开始写了 CONFIG_LWIP_SNTP=y：它不报错、不警告、被**静默丢弃**，
+# 看起来像做了事，实际什么也没做 —— 这类"沉默无效开关"比缺配置更危险，
+# 故由 tools/check_sdkconfig_symbols.py 门禁看住（它要求 defaults 里每个
+# CONFIG_ 符号都能在生成配置里找到对应行）。
+#
+# ⇒ 真正的缺口从来不是"配置没开"，而是"**没有代码去调用它**"（§52 已证实）。
+#   发起与等待由 components/sntp_mgr 负责（状态机可在宿主机穷举）。
+# 只留 1 台服务器：内存紧张，且 sntp_mgr 自己做退避重试，不需要多台轮询。
+CONFIG_LWIP_SNTP_MAX_SERVERS=1
+# 周期性重同步（1 小时）：设备长期运行会有时钟漂移，
+# 而证书有效期校验依赖时间大致正确。
+CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+# 启动时不延迟：sntp_mgr 决定**何时**发起（网络就绪后），
+# 不需要 lwip 自己再等一轮。
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n
+
