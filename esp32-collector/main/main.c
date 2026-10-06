@@ -11,6 +11,7 @@
 #include "bus_manager.h"
 #include "hello_handshake.h"
 #include "bus_worker.h"
+#include "report_stats.h"   /* D-14：注册栈余量 provider */
 #include "msg_handler.h"
 #include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "crash_diag.h"
@@ -581,6 +582,26 @@ void app_main(void)
      * 弱定义一旦生效，聚合静默退化为逐样本 0x03 而【没有测试会红】。
      * 现在与上面两行同一风格：依赖方向单向（main -> 双方），一步到位。 */
     bus_worker_set_data_batch_cb(msg_handler_send_data_batch);
+
+    /* D-14（2026-10-06）：把"最小栈余量"的提供者注册给中立组件 report_stats。
+     *
+     * 为什么需要这一行：为了让 msg_handler 不再 REQUIRES bus_worker（破除依赖环），
+     * 三个上报统计量搬到了 report_stats。其中 drop_count 与 queue_high_water
+     * 是纯计数器，可以直接搬；而 min_stack_watermark 需要 **bus_worker 的任务句柄**
+     * 按需计算（uxTaskGetStackHighWaterMark）⇒ 不能搬，只能由 bus_worker
+     * 在此注册一个 provider，由 report_stats 转发。
+     *
+     * 不注册的后果：report_stats 会返回 UINT32_MAX（"无低水位"）。
+     * 这**不会**造成假告警（0 才会），但会让上报帧里该字段**恒为无低水位** ——
+     * 也就是丢失真实观测。所以这不是可选项。 */
+    report_stats_set_stack_watermark_provider(bus_worker_get_min_stack_watermark);
+    /* 启动期断言（P6：读一手事实，而不是假设刚才那行生效了）。
+     * 未接上不会有假告警，但会让上报字段恒为"无低水位" —— 沉默地丢观测，
+     * 所以这里必须【看得见】。 */
+    if (!report_stats_has_stack_watermark_provider()) {
+        ESP_LOGE(TAG, "report_stats stack-watermark provider NOT registered: "
+                      "PerformanceReport will lose real stack observations");
+    }
     bus_manager_set_write_rsp_cb(msg_handler_send_write_rsp);
 
     /* Inject OTA progress callback (eliminates ota → msg_handler cycle) */
