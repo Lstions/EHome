@@ -86,7 +86,74 @@ const (
 	// was doubly claimed, so MSG_MEM_RPT moved to 0x21 (contract §0.1). Only the
 	// constant is reserved here: parsing is task-9's deliverable.
 	MsgMemRpt = 0x21
+
+	// --- 3.0 device operations (added 2026-10-06) ---
+	//
+	// The firmware has had these since the "远程重启 / 恢复出厂" work
+	// (components/device_op/include/device_op.h:62-63), but the Go side
+	// never defined them. A message type the server cannot name is a
+	// message it cannot route -- the frontend feature is unreachable
+	// end-to-end even though the device half is finished.
+	//
+	// They belong HERE (not in pkg/protoframe): design §2.5.2 requires
+	// MsgType to have exactly one definition site, and the assertion is
+	// "grepping internal/ for these must be empty".
+	//
+	// Slots 0x22/0x23 were free in the existing table (0x20 DATA_BATCH,
+	// 0x21 MEM_REPORT were already taken).
+	MsgDeviceOp    = 0x22 // SVR→ESP: ask the device to perform an operation
+	MsgDeviceOpAck = 0x23 // ESP→SVR: result (sent BEFORE a reboot)
 )
+
+// DeviceOp codes (wire values -- append only, never renumber).
+//
+// Mirrors device_op_t in components/device_op/include/device_op.h.
+// Reordering these silently changes what an operator's click does.
+type DeviceOp uint8
+
+const (
+	DeviceOpReboot                 DeviceOp = 1 // reboot only
+	DeviceOpFactoryResetKeepConn   DeviceOp = 2 // factory reset, keep connectivity/identity
+)
+
+// DeviceOp results (wire values -- append only).
+//
+// Mirrors device_op_result_t. The frontend shows these, so a renumbering
+// would display the wrong reason rather than fail loudly.
+type DeviceOpResult uint8
+
+const (
+	DeviceOpOK                 DeviceOpResult = 0
+	DeviceOpErrUnknownOp       DeviceOpResult = 1 // unknown op (version mismatch)
+	DeviceOpErrBusy            DeviceOpResult = 2 // another op in flight
+	DeviceOpErrEraseFailed     DeviceOpResult = 3 // erase failed; device did NOT reboot, retryable
+	DeviceOpErrBadArg          DeviceOpResult = 4
+	DeviceOpErrAckFlushFailed  DeviceOpResult = 5 // ACK not delivered; did NOT reboot
+)
+
+// DeviceOpResultName is the single place a result becomes human-readable.
+//
+// Unknown values are rendered with their number rather than "unknown":
+// an unrecognised code means the device is newer than this server, and
+// collapsing it to "unknown" would hide that (P3: no silent information loss).
+func DeviceOpResultName(r DeviceOpResult) string {
+	switch r {
+	case DeviceOpOK:
+		return "ok"
+	case DeviceOpErrUnknownOp:
+		return "unknown_op"
+	case DeviceOpErrBusy:
+		return "busy"
+	case DeviceOpErrEraseFailed:
+		return "erase_failed"
+	case DeviceOpErrBadArg:
+		return "bad_arg"
+	case DeviceOpErrAckFlushFailed:
+		return "ack_flush_failed"
+	default:
+		return fmt.Sprintf("unrecognized(%d)", uint8(r))
+	}
+}
 
 // Field represents a decoded field
 type Field struct {

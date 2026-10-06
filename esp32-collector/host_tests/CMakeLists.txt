@@ -1165,6 +1165,9 @@ add_test(NAME check_sdkconfig_symbols
             IDF_PATH=/home/sun/env/esp-idf
             python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_sdkconfig_symbols.py)
 
+add_test(NAME check_message_types
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_message_types.py)
+
 
 add_executable(transport_sel_tests
     transport_sel_tests.c
