@@ -357,6 +357,12 @@ func (m *Manager) SetCommandExecutionService(service *commandexec.Service) {
 }
 
 // HandleMessage processes incoming MQTT messages from devices
+// HandleMessage is the 2.x (MQTT) entry point: the topic carries the node id.
+//
+// It stays for the dual-stack window (design 7.3 P0-P3): the backend must keep
+// serving 2.8.0 devices over MQTT while 3.0 rolls out. It is a thin wrapper so
+// that BOTH transports share one dispatch switch -- two switches would be two
+// definitions of "which messages exist", and they would drift.
 func (m *Manager) HandleMessage(topic string, payload []byte) {
 	parts := strings.Split(topic, "/")
 	if len(parts) < 3 {
@@ -364,7 +370,32 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		return
 	}
 	deviceID := parts[1]
+	if len(payload) < 1 {
+		logger.Infof("Empty payload from %s", deviceID)
+		return
+	}
+	// On MQTT the payload's first byte IS the type; there is no header.
+	m.HandleFrame(deviceID, payload[0], payload)
+}
 
+// HandleFrame is the 3.0 (TCP+TLS) entry point: the node id comes from the
+// client certificate and the type comes from the 12-byte frame header.
+//
+// ⚠ The message type appears TWICE on the 3.0 wire:
+//
+//	[12-byte header, type at offset 3][payload, whose first byte is ALSO the type]
+//
+// The payload keeps its leading type byte because every existing decoder
+// (frame.NewDecoder -> MsgType()) reads and validates it; that is the 2.x
+// convention and it is what the shared wire_primitives.txt vectors encode
+// (case writecmd_golden: "type 6" -> wire starts "06...").
+//
+// Nothing in the old protocol could disagree with itself, so no check existed.
+// Now two copies can diverge, and the failure would be SILENT in the worst way:
+// routing would follow the header while parsing followed the payload, so a
+// frame could be dispatched as one type and decoded as another. Hence the
+// explicit agreement check below.
+func (m *Manager) HandleFrame(deviceID string, msgType uint8, payload []byte) {
 	// Update heartbeat on every message (no-op since Redis retirement;
 	// offline detection relies on DB last_seen)
 	if m.offlineDetector != nil {
@@ -375,8 +406,14 @@ func (m *Manager) HandleMessage(topic string, payload []byte) {
 		logger.Infof("Empty payload from %s", deviceID)
 		return
 	}
-
-	msgType := payload[0]
+	if payload[0] != msgType {
+		// Two sources of truth disagree. Reject rather than pick one: whichever
+		// we picked, the other half of the pipeline would use the other value.
+		metrics.FrameTypeMismatchTotal.Inc()
+		logger.Warnf("[%s] Frame type mismatch: header says 0x%02X, payload says 0x%02X -- dropped",
+			deviceID, msgType, payload[0])
+		return
+	}
 	logger.Debugf("[%s] Received msg type 0x%02X (%d bytes)", deviceID, msgType, len(payload))
 
 	// Record message type as metric

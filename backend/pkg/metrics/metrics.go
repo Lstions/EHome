@@ -343,4 +343,20 @@ var (
 		Name: "ehome_data_batch_rejected_total",
 		Help: "Total DataBatch (0x20) frames rejected by a strict invariant",
 	})
+
+	// FrameTypeMismatchTotal counts frames whose 12-byte header type disagreed
+	// with the message type byte at the start of the payload.
+	//
+	// 3.0 carries the type TWICE: header offset 3 is what the transport routes
+	// on, while payload[0] is what every decoder validates. The two could not
+	// disagree before (2.x had no header), so nothing checked. A divergence
+	// would be silent in the worst way -- routed as one type, decoded as
+	// another -- hence a rejection plus this counter rather than a choice.
+	//
+	// This should stay flat zero in normal operation. Anything else means the
+	// two ends build frames differently.
+	FrameTypeMismatchTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_frame_type_mismatch_total",
+		Help: "Total frames dropped because the header type disagreed with the payload type byte",
+	})
 )
