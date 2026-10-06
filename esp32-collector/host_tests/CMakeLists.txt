@@ -787,3 +787,43 @@ target_include_directories(transport_registry_tests PRIVATE
 )
 target_compile_options(transport_registry_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_registry_tests COMMAND transport_registry_tests)
+# ---- 3.0 骨架：variant / link（设计文档「3.0-实施设计-骨架与增量」§2） ----
+add_executable(variant_tests
+    variant_tests.c
+    ../components/variant/variant.c
+)
+target_include_directories(variant_tests PRIVATE ../components/variant/include)
+target_compile_options(variant_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME variant_tests COMMAND variant_tests)
+
+add_executable(link_tests
+    link_tests.c
+    ../components/link/link.c
+)
+target_include_directories(link_tests PRIVATE ../components/link/include)
+target_compile_options(link_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME link_tests COMMAND link_tests)
+
+add_executable(wire_tests
+    wire_tests.c
+    ../components/wire/wire.c
+)
+target_include_directories(wire_tests PRIVATE ../components/wire/include)
+target_compile_options(wire_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME wire_tests COMMAND wire_tests)
+
+add_executable(msgcodec_tests
+    msgcodec_tests.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(msgcodec_tests PRIVATE ../components/msgcodec/include)
+target_compile_options(msgcodec_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME msgcodec_tests COMMAND msgcodec_tests)
+
+add_executable(dispatch_tests
+    dispatch_tests.c
+    ../components/dispatch/dispatch.c
+)
+target_include_directories(dispatch_tests PRIVATE ../components/dispatch/include)
+target_compile_options(dispatch_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME dispatch_tests COMMAND dispatch_tests)
