@@ -137,14 +137,25 @@ def true_iram_usage(map_path: Path) -> dict | None:
     """从 map 的链接器事实里读出 IRAM 段的真实容量与占用。
 
     为什么需要这个函数（L-04，2026-10-06）：
-      esp_idf_size 报的 IRAM "total" **不是 IRAM 段的容量**。在 S3 上
-      iram0_0_seg(0x57700) 与 dram0_0_seg(0x53700) 是同一物理 SRAM 的两个
-      总线别名，idf_size 把两者长度之差 (0x4000 = 16384) 当作 IRAM 的
-      "size"，于是恒报 total=used=16384 / free=0 —— 无论实际用了多少。
+      esp_idf_size 报的 IRAM "total" **不是 IRAM 段的容量**，而是它按
+      chip_info/esp32s3.yaml 的内存类型窗切分 iram0_0_seg 后、落在
+      "IRAM" 窗内的那一段：
 
-    实测反证（2026-10-06）：往 IRAM 里放 32 KiB 并链接，_iram_end 从
-      0x40389800 移到 0x40391800（+32768 B），**构建成功**，而报告的
-      IRAM free 始终是 0。⇒ "IRAM 满、新增 IRAM 代码会链接失败"是假警报。
+        yaml IRAM 窗  0x40370000 .. 0x40378000   (len 0x8000 = 32 KiB)
+        链接器段      0x40374000 .. 0x403CB700   (len 0x57700 = 358,144 B)
+        交集          0x40374000 .. 0x40378000   = 16,384 B
+
+      于是无论实际用了多少 IRAM，该栏都恒报 total=used=16384 / free=0；
+      放在该窗之后的 IRAM 代码全部被计入 **DIRAM 类**。
+
+    实测反证（2026-10-06，决定性）：往 IRAM 里放 32 KiB 并**让它被引用**，
+      _iram_end 从 0x40389800 移到 0x40391800（+32,768 B），**构建成功**，
+      而报告的 IRAM free 始终是 0、DIRAM used +32,804。
+      ⇒ "IRAM 满、新增 IRAM 代码会链接失败"是假警报。
+
+    第一次实验还踩了一个坑：探针没被任何代码引用，--gc-sections 把它整个
+      回收，_iram_end 与基线逐字节相同 —— "实验跑通了"不等于"实验测到了
+      东西"，必须断言被测物真的发生了变化。
 
     真实口径取自 map 自身：Memory Configuration 里 iram0_0_seg 的
       ORIGIN/LENGTH 与符号 _iram_end。链接器还带着权威断言：
