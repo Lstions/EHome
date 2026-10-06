@@ -131,11 +131,29 @@ type Stats struct {
 type Server struct {
 	cfg      Config
 	stats    Stats
+	registry *Registry
 	ln       net.Listener
 	wg       sync.WaitGroup
 	mu       sync.Mutex
 	closing  bool
 	conns    map[net.Conn]struct{}
+}
+
+// Registry exposes the live-session directory so callers can send downlinks
+// and list connected nodes.
+//
+// The transport owns it (rather than the caller passing one in) because a
+// session is created inside handleConn the moment a device authenticates; if
+// the caller also owned the directory there would be a window in which a
+// connected node is reachable by the transport but invisible to everyone else.
+func (s *Server) Registry() *Registry { return s.registry }
+
+// Send delivers a whole frame to a connected node.
+//
+// P1: the result tells the caller what to DECIDE. "No such node" and "node
+// present but its write failed" are different problems and are not collapsed.
+func (s *Server) Send(nodeID string, frame []byte) SendResult {
+	return s.registry.Send(nodeID, frame)
 }
 
 // New creates a server. It does not listen yet.
@@ -155,7 +173,11 @@ func New(cfg Config) (*Server, error) {
 	if cfg.OnFrame == nil {
 		return nil, errors.New("transport: OnFrame is required")
 	}
-	return &Server{cfg: cfg.withDefaults(), conns: map[net.Conn]struct{}{}}, nil
+	return &Server{
+		cfg:      cfg.withDefaults(),
+		registry: NewRegistry(),
+		conns:    map[net.Conn]struct{}{},
+	}, nil
 }
 
 // tlsConfig builds the mTLS configuration.
@@ -292,14 +314,34 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	s.conns[conn] = struct{}{}
 	s.mu.Unlock()
 
+	// ⚠ nodeID is declared here, BEFORE the deferred cleanup, so the closure
+	// below sees the final value.
+	//
+	// It used to be declared later (with :=) and the deferred call passed "".
+	// That is a real defect, not cosmetic: every disconnect reported an empty
+	// node id, so any cleanup keyed on the node — which is exactly what the
+	// registry needs (RemoveIfSame) — could never work, and the log line
+	// "device disconnected" named nobody.
+	var nodeID string
 	var closeErr error
+	var session *Session
+
 	defer func() {
+		// Deregister BEFORE closing the connection: a stale session finishing
+		// cleanup must not evict the session that replaced it, which is why
+		// removal is by identity rather than by node id.
+		if session != nil && s.registry != nil {
+			s.registry.RemoveIfSame(session)
+		}
 		s.mu.Lock()
 		delete(s.conns, conn)
 		s.mu.Unlock()
+		if session != nil {
+			session.Close("connection closed")
+		}
 		_ = conn.Close()
 		if s.cfg.OnDisconnect != nil {
-			s.cfg.OnDisconnect("", closeErr)
+			s.cfg.OnDisconnect(nodeID, closeErr)
 		}
 	}()
 
@@ -320,7 +362,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	_ = conn.SetDeadline(time.Time{})
 
 	state := tlsConn.ConnectionState()
-	nodeID, err := nodeIDFromCert(state.PeerCertificates[0])
+	var err error
+	nodeID, err = nodeIDFromCert(state.PeerCertificates[0])
 	if len(state.PeerCertificates) == 0 {
 		nodeID, err = "", errors.New("transport: no peer certificate after verified handshake")
 	}
@@ -328,6 +371,16 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		closeErr = err
 		s.cfg.Logger.Warn("transport: no node identity", "remote", conn.RemoteAddr(), "err", err)
 		return
+	}
+
+	// Publish a session so the rest of the server can reach this device.
+	//
+	// Registration happens BEFORE OnConnect: a hook that wants to send
+	// something immediately (a config sync, say) would otherwise find no
+	// session for the node that just connected.
+	session = NewSession(nodeID, conn, s.cfg.WriteTimeout)
+	if s.registry != nil {
+		s.registry.Register(session) // closes any previous session for this node
 	}
 	if s.cfg.OnConnect != nil {
 		s.cfg.OnConnect(nodeID, conn.RemoteAddr().String())
