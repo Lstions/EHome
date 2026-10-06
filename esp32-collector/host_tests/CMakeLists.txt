@@ -1091,3 +1091,11 @@ add_test(NAME check_tls_constants
             IDF_PATH=/home/sun/env/esp-idf
             python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tls_constants.py)
 
+
+add_executable(tls_io_tests
+    tls_io_tests.c
+    ../components/tls_io/tls_io.c
+)
+target_include_directories(tls_io_tests PRIVATE ../components/tls_io/include)
+target_compile_options(tls_io_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME tls_io_tests COMMAND tls_io_tests)
