@@ -17,6 +17,7 @@ idf_component_register(SRCS "main.c"
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool
                        bus_worker bus_manager log_stream gpio_ctrl pwm_ctrl periph_owner
+                       netpolicy
                        LDFRAGMENTS "linker.lf")
 
 # Inject version from top-level CMakeLists.txt PROJECT_VER as a compile definition.

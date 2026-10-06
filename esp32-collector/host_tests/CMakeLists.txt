@@ -827,3 +827,16 @@ add_executable(dispatch_tests
 target_include_directories(dispatch_tests PRIVATE ../components/dispatch/include)
 target_compile_options(dispatch_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME dispatch_tests COMMAND dispatch_tests)
+
+add_executable(net_policy_tests
+    net_policy_tests.c
+    ../components/netpolicy/net_policy.c
+)
+target_include_directories(net_policy_tests PRIVATE ../components/netpolicy/include)
+target_compile_options(net_policy_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME net_policy_tests COMMAND net_policy_tests)
+
+# D-03 回归门禁：TCP 启动必须可从 case 到达（防"不可达代码"复现）
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME tcp_start_reachable
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_tcp_start_reachable.py)

@@ -13,6 +13,7 @@
 
 #include "app_state.h"
 #include "app_callbacks.h"
+#include "net_policy.h"   /* D-03：TCP 启动决策（宿主可测纯函数）*/
 #include "config_apply_transaction.h"
 #include "periph_config_apply.h"
 #include "bus_manager.h"
@@ -680,13 +681,26 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
          * the long-lived supervisor, which serializes recovery and teardown. */
         ESP_LOGI(TAG, "WiFi connected, waking MQTT supervisor");
         ensure_mqtt_supervisor(s);
-        break;
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
-        if (s->tcp_transport && s->tcp_transport->state != TRANSPORT_CONNECTED
-            && s->tcp_transport->ops->start) {
-            ESP_LOGI(TAG, "Starting TCP transport");
-            s->tcp_transport->ops->start(s->tcp_transport);
+        /* D-03 修复（2026-10-06）：本块原先写在上面的 break 之后，属于
+         * 【不可达代码】—— 编译器不报错，sdkconfig 里开关也确实是 y，
+         * 但 TCP 传输因此【从不启动】。3.0 以 TCP 为主传输，不修则上线即不可用。
+         *
+         * 不只是"把代码挪上来"：决策改由宿主可测的纯函数给出
+         * （components/netpolicy），这样"该不该启动"不再只存在于控制流里，
+         * 而是有测试与变异自证兜底。 */
+        {
+            const bool tcp_configured = (s->tcp_transport != NULL
+                                         && s->tcp_transport->ops != NULL
+                                         && s->tcp_transport->ops->start != NULL);
+            const bool tcp_connected = (s->tcp_transport != NULL
+                                        && s->tcp_transport->state == TRANSPORT_CONNECTED);
+            /* 进入本 case 即 WiFi 已连上，故第三个参数为 true。 */
+            if (net_policy_should_start_tcp(tcp_configured, tcp_connected, true)) {
+                ESP_LOGI(TAG, "Starting TCP transport");
+                s->tcp_transport->ops->start(s->tcp_transport);
+            }
         }
 #endif
         break;
