@@ -53,6 +53,26 @@ rx_pump_t *rx_pump_create(uint32_t max_payload,
     return p;
 }
 
+rx_pump_t *rx_pump_create_feeder(uint32_t max_payload,
+                                 rx_msg_cb_t cb, void *cb_ctx)
+{
+    /* 与 rx_pump_create 同样：缺 cb 就不构造半成品（P1）。
+     * 差别是 read_fn 允许为空 —— 字节由调用方 rx_pump_feed 投喂。 */
+    if (cb == NULL) return NULL;
+
+    rx_pump_t *p = (rx_pump_t *)calloc(1, sizeof(*p));
+    if (p == NULL) return NULL;
+    p->delim = wire_delim_create(max_payload);
+    if (p->delim == NULL) { free(p); return NULL; }
+    p->read_fn = NULL;
+    p->read_ctx = NULL;
+    p->cb = cb;
+    p->cb_ctx = cb_ctx;
+    p->read_buf = NULL;
+    p->read_buf_cap = 0;
+    return p;
+}
+
 void rx_pump_destroy(rx_pump_t *p)
 {
     if (p == NULL) return;
@@ -129,10 +149,48 @@ static int deliver_loop(rx_pump_t *p, wire_delim_result_t dr,
     }
 }
 
+size_t rx_pump_feed(rx_pump_t *p, const uint8_t *in, size_t n,
+                    rx_pump_result_t *res_out)
+{
+    if (res_out != NULL) *res_out = RX_PUMP_FATAL;
+    if (p == NULL || p->delim == NULL) return 0;
+    if (in == NULL && n > 0) return 0;      /* 参数错：保留 FATAL */
+
+    uint32_t delivered = 0;
+
+    /* 阶段 1：先交付**缓冲里已经完整**的消息。
+     * 理由同 rx_pump_step：上一次回调可能要求停止，剩余消息已躺在定界器里；
+     * 若这次先投字节就可能被新数据挤到后面，甚至永远交不出来。 */
+    {
+        const uint8_t *pl = NULL; size_t pln = 0;
+        wire_delim_result_t dr = wire_delim_feed(p->delim, NULL, 0, &pl, &pln);
+        int st = deliver_loop(p, dr, pl, pln, &delivered);
+        if (st == 1) { if (res_out) *res_out = RX_PUMP_ERROR; return delivered; }
+        if (st == 2) { if (res_out) *res_out = RX_PUMP_DELIVERED; return delivered; }
+    }
+
+    /* 阶段 2：投入本轮字节。n==0 时就是"只要缓冲里的"。 */
+    if (n > 0) {
+        const uint8_t *pl = NULL; size_t pln = 0;
+        wire_delim_result_t dr = wire_delim_feed(p->delim, in, n, &pl, &pln);
+        p->stats.bytes_read += (uint32_t)n;
+        int st = deliver_loop(p, dr, pl, pln, &delivered);
+        if (st == 1) { if (res_out) *res_out = RX_PUMP_ERROR; return delivered; }
+        if (st == 2) { if (res_out) *res_out = RX_PUMP_DELIVERED; return delivered; }
+    }
+
+    if (res_out != NULL) {
+        *res_out = (delivered > 0) ? RX_PUMP_DELIVERED : RX_PUMP_IDLE;
+    }
+    return delivered;
+}
+
 rx_pump_result_t rx_pump_step(rx_pump_t *p, uint32_t *delivered_out)
 {
     if (delivered_out != NULL) *delivered_out = 0;
     if (p == NULL || p->delim == NULL) return RX_PUMP_FATAL;
+    /* 投喂型泵没有 read_fn —— 用错入口要说出来，不能靠空指针崩掉（P1）。 */
+    if (p->read_fn == NULL) return RX_PUMP_FATAL;
 
     uint32_t delivered = 0;
 
@@ -174,15 +232,14 @@ rx_pump_result_t rx_pump_step(rx_pump_t *p, uint32_t *delivered_out)
         p->stats.io_errors++;
         tail = RX_PUMP_ERROR;
     } else {
-        p->stats.bytes_read += (uint32_t)n;
-
-        /* ==== 阶段 3：把刚读入的数据里能定界的都交付 ==== */
-        const uint8_t *pl = NULL; size_t pln = 0;
-        wire_delim_result_t dr = wire_delim_feed(p->delim, p->read_buf, (size_t)n,
-                                                 &pl, &pln);
-        int st = deliver_loop(p, dr, pl, pln, &delivered);
-        if (st == 1) { if (delivered_out) *delivered_out = delivered; return RX_PUMP_ERROR; }
-        if (st == 2) { if (delivered_out) *delivered_out = delivered; return RX_PUMP_DELIVERED; }
+        /* ==== 阶段 3：把刚读入的数据里能定界的都交付 ====
+         * 走 rx_pump_feed，而不是在这里重写一遍 —— "字节流 → 消息"这条语义
+         * 只能有一处定义（P4）。bytes_read 也在 feed 内累加（此处**不再**加，
+         * 否则同一批字节会被计两次，计数就不再是单一事实来源）。 */
+        rx_pump_result_t fr = RX_PUMP_IDLE;
+        delivered = (uint32_t)rx_pump_feed(p, p->read_buf, (size_t)n, &fr);
+        if (fr == RX_PUMP_FATAL) { if (delivered_out) *delivered_out = delivered; return RX_PUMP_FATAL; }
+        if (fr == RX_PUMP_ERROR) { if (delivered_out) *delivered_out = delivered; return RX_PUMP_ERROR; }
         tail = RX_PUMP_IDLE;
     }
 

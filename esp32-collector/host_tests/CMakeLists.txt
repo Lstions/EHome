@@ -1110,6 +1110,20 @@ target_include_directories(rx_pump_tests PRIVATE
 target_compile_options(rx_pump_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME rx_pump_tests COMMAND rx_pump_tests)
 
+# 投喂型入口（rx_pump_feed）—— ehome_tcp.c 真正使用的那个缝合点。
+# 与 rx_pump_tests 分开的理由见文件头：引擎绿 ≠ 接口对，D-09 的缺陷在接口上。
+add_executable(rx_pump_feed_tests
+    rx_pump_feed_tests.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(rx_pump_feed_tests PRIVATE
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(rx_pump_feed_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rx_pump_feed_tests COMMAND rx_pump_feed_tests)
+
 add_executable(tls_guard_tests
     tls_guard_tests.c
     ../components/tls_guard/tls_guard.c

@@ -109,6 +109,23 @@ rx_pump_t *rx_pump_create(uint32_t max_payload,
                           rx_msg_cb_t cb, void *cb_ctx,
                           uint8_t *read_buf, size_t read_buf_cap);
 
+/**
+ * 创建"投喂型"接收泵（**由调用方自己读字节**）。
+ *
+ * ## 为什么需要第二个构造函数
+ * rx_pump_create 要求注入 read_fn，适用于"泵自己驱动读取"的形态（link_tcp）。
+ * 但既有的 ehome_tcp.c 已经在一个阻塞 recv() 循环里、**手里已经拿着这段字节** ——
+ * 要求它再包一个 read_fn 只是把同一段数据绕一圈。
+ *
+ * 于是本构造函数显式表达"我只做定界与交付，不负责读"（P1：能力与依赖都摆在签名上）。
+ * 与 rx_pump_create **共用同一个定界器与同一套交付代码** —— 这不是第二套实现，
+ * 否则就是 P4 禁止的"同一语义两处定义"。
+ *
+ * 注意：该形态下 rx_pump_step 不可用（无 read_fn），只能调 rx_pump_feed。
+ */
+rx_pump_t *rx_pump_create_feeder(uint32_t max_payload,
+                                 rx_msg_cb_t cb, void *cb_ctx);
+
 void rx_pump_destroy(rx_pump_t *p);
 
 /**
@@ -124,6 +141,32 @@ void rx_pump_destroy(rx_pump_t *p);
  *  - 头非法 / CRC 不符 / 超上界 ⇒ 计数 + 报 ERROR（**不静默跳过**）。
  */
 rx_pump_result_t rx_pump_step(rx_pump_t *p, uint32_t *delivered_out);
+
+/**
+ * 把**已经读到的**一段字节投入定界，并交付其中所有完整消息。
+ *
+ * 这是 D-09 修复的缝合点：把旧的
+ *     transport->msg_cb(recv_buf, received, ...)   // 一次 recv == 一条消息
+ * 换成
+ *     rx_pump_feed(pump, recv_buf, received, &res); // 字节流 -> 定界 -> 消息
+ *
+ * 与 rx_pump_step 的差别只有一个：字节由调用方给，而不是自己去 read。
+ * 定界、交付、计数三者**完全共用**（同一 deliver_loop）。
+ *
+ * @param p       泵（须由 rx_pump_create_feeder 创建）
+ * @param in      字节
+ * @param n       字节数
+ * @param res_out 可选，输出本轮结论；与 rx_pump_step 同一套枚举语义
+ * @return 本轮交付的消息条数（0 表示"还没凑够一条完整消息"）
+ *
+ * 确定性行为（由 host_tests/rx_pump_feed_tests.c 逐条锁定）：
+ *  - **半条消息不会被交付**（返回 0，字节留在定界器里等待后续）；
+ *  - 一段字节含 N 条完整消息 ⇒ 交付 N 条（旧实现只交付 1 条，其余被当中文乱码）；
+ *  - 一条消息被拆到两次 feed ⇒ 累积后**仍只交付 1 条**，且载荷拼接正确；
+ *  - 头非法/CRC 不符/超上界 ⇒ 计数 + res_out = ERROR（**不静默跳过**）。
+ */
+size_t rx_pump_feed(rx_pump_t *p, const uint8_t *in, size_t n,
+                    rx_pump_result_t *res_out);
 
 /** 取错误计数（只读快照）。 */
 void rx_pump_get_stats(const rx_pump_t *p, rx_pump_stats_t *out);
