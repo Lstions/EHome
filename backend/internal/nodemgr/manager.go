@@ -65,6 +65,11 @@ type Manager struct {
 	// 健康回调, main.go 经 SetSourceHealthSink 二阶段注入到所有已构建 consumer。
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
 
+	// deviceOps pairs node-level device-op ACKs (0x23) with their requests
+	// (0x22). Node-level because a collector reboot has no channel, manifest
+	// or edge-device id, so it does not belong in the edge-device pipeline.
+	deviceOps *DeviceOpTracker
+
 	// v2.1: Sync mechanism
 	eventBus *ConfigEventBus
 	syncGate *SyncGate
@@ -173,6 +178,7 @@ func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha
 		periphLatest:    make(map[string]uint32),
 	}
 	mgr.pingTracker = NewPingTracker()
+	mgr.deviceOps = NewDeviceOpTracker()
 
 	// v2.2: Initialize sync mechanism (no epoch generator)
 	mgr.eventBus = NewConfigEventBus(1024)
@@ -441,6 +447,8 @@ func (m *Manager) HandleFrame(deviceID string, msgType uint8, payload []byte) {
 		m.otaMgr.HandleOtaProgress(deviceID, payload)
 	case frame.MsgScanRpt:
 		m.handleScanReport(deviceID, payload)
+	case frame.MsgDeviceOpAck:
+		m.handleDeviceOpAck(deviceID, payload)
 	case frame.MsgQueryRsp:
 		m.handleQueryResponse(deviceID, payload)
 	case frame.MsgConfigReport:

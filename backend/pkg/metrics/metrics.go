@@ -397,6 +397,51 @@ var (
 		Help: "Total QoS-2 publishes downgraded to best-effort over the 3.0 transport (ACK not implemented)",
 	})
 
+	// --- node-level device operations (reboot / factory reset) ---
+	//
+	// These count FOUR different facts that must not be collapsed:
+	//   sent + acked(ok)     -> the device did it
+	//   sent + acked(<other>) -> the device refused, and said why
+	//   sent + unacked        -> we do not know; the device may have done it
+	//   refused               -> we never sent it (already in flight)
+	// Reporting the third as a failure would tell an operator a reboot did not
+	// happen while the device is already coming back up.
+
+	DeviceOpSentTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_sent_total",
+		Help: "Total node-level device operations delivered to a transport",
+	}, []string{"op"})
+
+	DeviceOpAckedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_acked_total",
+		Help: "Total device operations the device acknowledged, by result",
+	}, []string{"op", "result"})
+
+	DeviceOpUnackedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_unacked_total",
+		Help: "Total device operations sent that were never acknowledged (outcome unknown)",
+	}, []string{"op"})
+
+	DeviceOpRefusedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_refused_total",
+		Help: "Total device operations refused locally because the node already had one in flight",
+	}, []string{"op"})
+
+	DeviceOpSendFailedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ehome_device_op_send_failed_total",
+		Help: "Total device operations that could not be handed to a transport",
+	}, []string{"op"})
+
+	DeviceOpBadAckTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_device_op_bad_ack_total",
+		Help: "Total malformed device op ACKs dropped",
+	})
+
+	DeviceOpStaleAckTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ehome_device_op_stale_ack_total",
+		Help: "Total device op ACKs for an unknown or already-expired request",
+	})
+
 	// DownlinkRetainedNodeScopedTotal counts retained publishes addressed to a
 	// single node. "Retained" has no 3.0 equivalent, so those can only ever go
 	// over MQTT; a non-zero value means a caller expects broker semantics that

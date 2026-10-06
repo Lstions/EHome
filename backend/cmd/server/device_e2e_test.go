@@ -389,3 +389,136 @@ func TestHelloAckDoesNotAlsoGoToMQTT(t *testing.T) {
 var _ = io.EOF
 var _ = errors.Is
 var _ net.Conn
+
+// --- MsgDeviceOp end to end: the operator's reboot, all the way there and back ---
+
+// deviceOpRoundTrip drives a REAL 0x22 downlink over mTLS and feeds a REAL 0x23
+// ACK back on the same socket, asserting the outcome the operator would see.
+//
+// This is the first test where "reboot a node" works end to end on the server
+// side. The layers it exercises together: API-shaped call -> tracker -> shared
+// publisher -> downlink bridge -> TCP session -> real device socket -> back up
+// through HandleFrame -> tracker -> outcome.
+func deviceOpRoundTrip(t *testing.T, op frame.DeviceOp, result frame.DeviceOpResult) nodemgr.DeviceOpOutcome {
+	t.Helper()
+	pki := newE2EPKI(t, "op-node")
+	srv, mgr, addr := startE2EServer(t, pki)
+	conn := dialE2EDevice(t, pki, addr)
+
+	// Wait for the session to be published, then identify as this node.
+	for i := 0; i < 600 && !srv.Registry().HasSession("op-node"); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := conn.Write(buildHelloFrame(t, "op-node", 1234)); err != nil {
+		t.Fatalf("write Hello: %v", err)
+	}
+	if got := readOneFrame(t, conn, 5*time.Second); got == nil {
+		t.Fatal("no HelloAck; the device is not usable")
+	}
+
+	// The device side: read the downlink, ACK it, reply.
+	type outcome struct {
+		out nodemgr.DeviceOpOutcome
+		err error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		out, err := mgr.SendDeviceOp("op-node", op, 5*time.Second)
+		ch <- outcome{out, err}
+	}()
+
+	down := readOneFrame(t, conn, 5*time.Second)
+	if down == nil {
+		t.Fatal("the device received NO downlink for the operation")
+	}
+	h, err := protoframe.DecodeHeader(down)
+	if err != nil {
+		t.Fatalf("downlink does not decode: %v", err)
+	}
+	if h.Type != frame.MsgDeviceOp {
+		t.Fatalf("downlink type = 0x%02X, want MsgDeviceOp 0x%02X", h.Type, frame.MsgDeviceOp)
+	}
+	req, err := frame.DecodeDeviceOp(down[protoframe.HeaderSize:])
+	if err != nil {
+		t.Fatalf("the 0x22 payload the server sent does not decode: %v", err)
+	}
+	if req.Op != op {
+		t.Fatalf("wire op = %d, want %d", req.Op, op)
+	}
+	if req.RequestID == "" {
+		t.Fatal("the server sent no request_id, so an ACK could not be correlated")
+	}
+
+	// Reply exactly as the firmware would: ACK payload framed by the 12-byte header.
+	ackPayload, err := frame.EncodeDeviceOpAck(req.RequestID, result, "")
+	if err != nil {
+		t.Fatalf("encode ack: %v", err)
+	}
+	ackFrame := make([]byte, protoframe.HeaderSize+len(ackPayload))
+	ackHeader := protoframe.Header{
+		Ver: protoframe.Version, Type: frame.MsgDeviceOpAck,
+		PayloadLen: uint16(len(ackPayload)),
+	}
+	if err := protoframe.EncodeHeader(ackFrame, ackHeader); err != nil {
+		t.Fatalf("encode ack header: %v", err)
+	}
+	copy(ackFrame[protoframe.HeaderSize:], ackPayload)
+	if _, err := conn.Write(ackFrame); err != nil {
+		t.Fatalf("write ACK: %v", err)
+	}
+
+	select {
+	case o := <-ch:
+		if o.err != nil {
+			t.Fatalf("SendDeviceOp: %v", o.err)
+		}
+		return o.out
+	case <-time.After(10 * time.Second):
+		t.Fatal("SendDeviceOp never returned after the device ACKed")
+		return nodemgr.DeviceOpOutcome{}
+	}
+}
+
+// TestEndToEndRebootIsAcknowledgedOverTCP -- the operator's action, proven.
+func TestEndToEndRebootIsAcknowledgedOverTCP(t *testing.T) {
+	out := deviceOpRoundTrip(t, frame.DeviceOpReboot, frame.DeviceOpOK)
+	if !out.Acked {
+		t.Fatal("the reboot was not recorded as acknowledged")
+	}
+	if out.Result != frame.DeviceOpOK {
+		t.Fatalf("result = %s, want OK", frame.DeviceOpResultName(out.Result))
+	}
+	if out.Op != frame.DeviceOpReboot {
+		t.Fatalf("op = %d, want reboot", out.Op)
+	}
+}
+
+// TestEndToEndFactoryResetKeepsDistinctOp -- and the wipe is not a reboot.
+func TestEndToEndFactoryResetKeepsDistinctOp(t *testing.T) {
+	out := deviceOpRoundTrip(t, frame.DeviceOpFactoryResetKeepConn, frame.DeviceOpOK)
+	if out.Op != frame.DeviceOpFactoryResetKeepConn {
+		t.Fatalf("op = %d, want factory reset; the operator asked to erase the "+
+			"device and a reboot would silently do nothing", out.Op)
+	}
+	if !out.Acked || out.Result != frame.DeviceOpOK {
+		t.Fatalf("outcome = %+v, want acked OK", out)
+	}
+}
+
+// TestEndToEndDeviceRefusalIsReported -- when the device says NO, the operator
+// must see WHY, and it must not be reported as success.
+func TestEndToEndDeviceRefusalIsReported(t *testing.T) {
+	out := deviceOpRoundTrip(t, frame.DeviceOpReboot, frame.DeviceOpErrEraseFailed)
+	if !out.Acked {
+		t.Fatal("a refusal was not recorded as acknowledged")
+	}
+	if out.Result == frame.DeviceOpOK {
+		t.Fatal("a device REFUSAL was reported as success")
+	}
+	if out.Result != frame.DeviceOpErrEraseFailed {
+		t.Fatalf("result = %s, want the device's own code", frame.DeviceOpResultName(out.Result))
+	}
+	if frame.DeviceOpResultName(out.Result) == "unknown" {
+		t.Fatal("the device's refusal reason was collapsed into a generic value")
+	}
+}
