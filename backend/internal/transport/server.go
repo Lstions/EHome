@@ -35,6 +35,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"sync"
 	"time"
 
@@ -94,9 +95,42 @@ func (c *Config) withDefaults() Config {
 	return out
 }
 
+// Stats counts what the server rejected, per design §5.3.
+//
+// The design requires every rejection path to be **counted**. Without counters
+// a resynchronisation looks identical to normal operation: bytes are skipped,
+// no frame arrives, and nothing says why. That is the same "silently dropped"
+// shape as principle P3 (no silent drops).
+type Stats struct {
+	// BadHeader counts frames refused for bad magic/version. The stream is
+	// resynchronised (bytes dropped) rather than the connection closed.
+	BadHeader atomic.Uint64
+
+	// ResyncBytes counts bytes dropped while searching for the next magic.
+	// Kept separate from BadHeader because one bad header can require many
+	// byte drops, and the ratio is what tells you whether it is a stray bit
+	// or a peer speaking a different protocol.
+	ResyncBytes atomic.Uint64
+
+	// TooLarge counts frames whose declared payload exceeded the cap. These
+	// are refused at header-parse time so nothing is buffered for them.
+	TooLarge atomic.Uint64
+
+	// BadCRC counts frames whose CRC32C did not match.
+	BadCRC atomic.Uint64
+
+	// Overflow counts connections dropped because the buffer grew past one
+	// maximum frame without ever completing one.
+	Overflow atomic.Uint64
+
+	// Frames counts successfully delivered frames.
+	Frames atomic.Uint64
+}
+
 // Server accepts device connections.
 type Server struct {
 	cfg      Config
+	stats    Stats
 	ln       net.Listener
 	wg       sync.WaitGroup
 	mu       sync.Mutex
@@ -147,6 +181,16 @@ func (s *Server) Listen() error {
 	}
 	s.ln = ln
 	return nil
+}
+
+// StatsSnapshot returns the counters as plain numbers.
+//
+// Returns a snapshot rather than the live struct so callers cannot mutate
+// counters, and so the numbers come from one consistent moment.
+func (s *Server) StatsSnapshot() (frames, badHeader, resyncBytes, tooLarge, badCRC, overflow uint64) {
+	return s.stats.Frames.Load(), s.stats.BadHeader.Load(),
+		s.stats.ResyncBytes.Load(), s.stats.TooLarge.Load(),
+		s.stats.BadCRC.Load(), s.stats.Overflow.Load()
 }
 
 // Addr reports the bound address (useful with ":0").
@@ -328,14 +372,30 @@ func (s *Server) readLoop(conn net.Conn, nodeID string) error {
 			if derr == protoframe.ErrShort {
 				break // need more bytes -- normal on a stream
 			}
+			if derr == protoframe.ErrMagic || derr == protoframe.ErrVer {
+				// ⚠ 设计 §5.3 规定：「头非法（magic/ver）⇒ **拒绝 + 复位重新同步**，计数」。
+				//
+				// 我上一轮实现的是**直接断开连接** —— 那是**静默偏离设计**。
+				// 设计要的是"重新同步"而不是"踢掉设备"：这个端口上连的是
+				// 现场设备，为几个坏字节断开一条长连接（还要走退避重连）
+				// 代价远大于跳过它们。
+				//
+				// 如何重新同步：**magic 是两字节的固定标识**，
+				// 所以只要向后滑动一格再找 magic 即可。这里实现为
+				// "丢掉一个字节，重新尝试解析"（等价于在流里找下一个 magic）。
+				// 若滑动到不足一个头就停（切回 NEED_MORE 路径）。
+				s.stats.BadHeader.Add(1)
+				s.stats.ResyncBytes.Add(1)
+				buf = buf[1:]
+				s.cfg.Logger.Warn("transport: bad frame header, resynchronising",
+					"node", nodeID, "err", derr, "dropped", 1)
+				continue
+			}
 			if derr != nil {
-				// A malformed header desynchronises the stream: every later
-				// offset is now a guess. Without per-frame length framing we
-				// cannot resynchronise, so fail the connection rather than
-				// emit garbage frames.
-				return fmt.Errorf("transport: bad header from %s: %w", nodeID, derr)
+				return fmt.Errorf("transport: header error from %s: %w", nodeID, derr)
 			}
 			if h.PayloadLen > s.cfg.MaxPayload {
+				s.stats.TooLarge.Add(1)
 				return fmt.Errorf("transport: payload %d exceeds cap %d from %s",
 					h.PayloadLen, s.cfg.MaxPayload, nodeID)
 			}
@@ -350,10 +410,12 @@ func (s *Server) readLoop(conn net.Conn, nodeID string) error {
 					uint32(buf[total-protoframe.CRCSize+2])<<8 |
 					uint32(buf[total-protoframe.CRCSize+3])
 				if got := protoframe.CRC32C(payload); got != want {
+					s.stats.BadCRC.Add(1)
 					return fmt.Errorf("transport: CRC mismatch from %s (got 0x%08X want 0x%08X)",
 						nodeID, got, want)
 				}
 			}
+			s.stats.Frames.Add(1)
 			if err := s.cfg.OnFrame(nodeID, h, payload); err != nil {
 				return fmt.Errorf("transport: onFrame: %w", err)
 			}

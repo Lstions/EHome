@@ -304,33 +304,73 @@ func TestTwoFramesInOneWrite(t *testing.T) {
 	}
 }
 
-// TestBadMagicClosesConnection -- a desynchronised stream cannot be
-// resynchronised (there is no per-frame length outside the header), so the
-// server must drop the connection rather than emit garbage frames.
-func TestBadMagicClosesConnection(t *testing.T) {
+// TestBadMagicResynchronisesInsteadOfClosing --
+// 设计 §5.3 规定：「头非法（magic/ver）⇒ **拒绝 + 复位重新同步**，计数」。
+//
+// ⚠ 我上一轮实现的是**直接断开连接**（并为此写了一个断言"连接必须关闭"）——
+// 那是**静默偏离设计**。这个端口上连的是现场设备，为几个坏字节断开一条
+// 长连接（还要走退避重连）代价远大于跳过它们。
+//
+// 本用例锁住三件事：坏头被计数、坏头之后的**好帧仍被交付**、
+// 且**连接没有断**。
+func TestBadMagicResynchronisesInsteadOfClosing(t *testing.T) {
 	pki := newPKI(t)
-	_, addr, sink := startServer(t, pki, Config{})
+	srv, addr, sink := startServer(t, pki, Config{})
 	conn := dialDevice(t, pki, addr, "node-bad")
 
-	bad := make([]byte, 16)
-	binary.BigEndian.PutUint16(bad[0:2], 0xDEAD) // wrong magic
-	if _, err := conn.Write(bad); err != nil {
+	// 先塞一段垃圾（坏 magic），紧跟着一个**合法**帧。
+	garbage := make([]byte, 8)
+	binary.BigEndian.PutUint16(garbage[0:2], 0xDEAD) // wrong magic
+	good := buildFrame(t, 0x03, 1, []byte("after-resync"))
+	if _, err := conn.Write(append(garbage, good...)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// Server should close the connection.
-	//
-	// ⚠ 这里不能用"Read 返回 error"作为判据 —— 我第一版就是这么写的，
-	// 结果是个**真空断言**：我设了读超时，而**连接即使保持打开，
-	// 超时也会返回 error** ⇒ 该断言无论连接是否关闭都会通过。
-	// （它之所以在 T5 里"看起来"有效，是因为下面那条 frames==0 断言
-	//   碰巧也红了；T6 没有第二条断言，于是漏过。）
-	//
-	// 正确判据：**读到 EOF**（对端真的关了）而不是超时。
-	assertConnClosed(t, conn, "malformed header")
-	_, frames := sink.snapshot()
-	if len(frames) != 0 {
-		t.Fatalf("emitted %d frames from a malformed stream, want 0", len(frames))
+
+	// ⭐ 关键：坏头之后的合法帧必须被交付 —— 说明流被**重新同步**了。
+	_, frames := waitFrames(t, sink, 1)
+	if string(frames[0]) != "after-resync" {
+		t.Fatalf("payload %q, want %q", frames[0], "after-resync")
 	}
+
+	_, bad, resync, _, _, _ := srv.StatsSnapshot()
+	if bad == 0 {
+		t.Error("bad headers were not counted (design §5.3 requires 计数)")
+	}
+	if resync == 0 {
+		t.Error("resync bytes were not counted")
+	}
+}
+
+// TestTooLargePayloadIsRefusedAndCounted -- 设计 §5.3：「声明的长度超上界
+// ⇒ **拒绝且不缓冲**（禁止"按对端声明分配"）」。
+//
+// 这里用比 MaxPayload 大、但仍在 uint16 范围内的长度，确保拒绝发生在
+// **头解析阶段**，而不是等到读满 16 KiB。
+func TestTooLargePayloadIsRefusedAndCounted(t *testing.T) {
+	pki := newPKI(t)
+	// 故意把上界压到 64 B，这样"超上界"用一个很小的帧就能触发。
+	srv, addr, _ := startServer(t, pki, Config{MaxPayload: 64})
+	conn := dialDevice(t, pki, addr, "node-big")
+
+	// 只发头（payload_len = 100 > 64），不发载荷。
+	hdr := make([]byte, protoframe.HeaderSize)
+	if err := protoframe.EncodeHeader(hdr, protoframe.Header{
+		Ver: protoframe.Version, Type: 0x03, Seq: 1, PayloadLen: 100,
+	}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := conn.Write(hdr); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, _, _, tooLarge, _, _ := srv.StatsSnapshot()
+		if tooLarge > 0 {
+			return // refused at header-parse time, nothing buffered for it
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("oversized declared payload was not refused/counted")
 }
 
 // TestMissingClientCAsIsRejected -- constructing a device-facing server
