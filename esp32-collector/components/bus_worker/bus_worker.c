@@ -23,6 +23,7 @@
  */
 
 #include "bus_worker.h"
+#include "report_stats.h"   /* D-14：上报统计量已搬到中立组件，打破依赖环 */
 #include "data_batch_codec.h"   /* D-18：帧长算术的唯一定义处 */
 #include "bus_queue_policy.h"
 #include "bus_rx_boundary.h"
@@ -221,8 +222,9 @@ static QueueHandle_t s_control_final_q;
 static QueueHandle_t s_write_rsp_q;
 static QueueSetHandle_t s_report_ready_set;
 static TaskHandle_t s_report_task_h;
-static volatile uint32_t s_report_telemetry_drops;
-static volatile uint32_t s_report_queue_high_water;
+/* D-14：这两个计数器已搬到 components/report_stats ——
+ * msg_handler 要在上报帧里读它们，而它不该为了两个计数器就
+ * REQUIRES 整个 bus_worker（那正是唯一的组件依赖环）。 */
 static bool s_report_path_started;
 
 static bool report_is_critical(uint32_t error_code, uint32_t request_id,
@@ -627,7 +629,7 @@ static bool report_try_data_batch(QueueSetMemberHandle_t member, report_desc_t *
  for (size_t i = n; i-- > 0; ) {
   if (xQueueSendToFront(s_report_telemetry_q, &cands[i], 0) != pdTRUE) {
    report_free_block(false, cands[i].block_index);
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
   }
  }
  return true;
@@ -780,7 +782,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
   ESP_LOGW(TAG_RX, "DataReport payload too large (%u > %u)",
            (unsigned)len, (unsigned)REPORT_PAYLOAD_BLOCK_SIZE);
   if (!critical) {
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
   /* Keep error reporting on the publisher task even for malformed oversized
@@ -794,7 +796,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
  bool emergency = false;
  if (!report_alloc_block(critical, &index)) {
   if (!critical) {
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
   emergency = report_alloc_emergency_block(&index);
@@ -802,7 +804,7 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
    /* This is only possible when the reserved normal and emergency slots are
     * both occupied.  Count it explicitly; transport remains off this task. */
    ESP_LOGE(TAG_RX, "critical report pools exhausted");
-   __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+   report_stats_note_drop();
    return;
   }
  }
@@ -823,16 +825,14 @@ static void report_enqueue(uint32_t channel_id, uint64_t timestamp_us,
  if (!q || xQueueSend(q, &desc, 0) != pdTRUE) {
   if (emergency) report_free_emergency_block(index);
   else report_free_block(critical, index);
-  __atomic_add_fetch(&s_report_telemetry_drops, 1, __ATOMIC_RELAXED);
+  report_stats_note_drop();
   return;
  }
  UBaseType_t queued = uxQueueMessagesWaiting(s_report_critical_q) +
                       uxQueueMessagesWaiting(s_report_critical_emergency_q) +
                       uxQueueMessagesWaiting(s_report_telemetry_q);
- uint32_t old = __atomic_load_n(&s_report_queue_high_water, __ATOMIC_RELAXED);
- while (queued > old && !__atomic_compare_exchange_n(&s_report_queue_high_water, &old,
-                                                      queued, false,
-                                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) { }
+ /* D-14：高水位由中立组件维护（CAS 逻辑一并搬过去）。 */
+ report_stats_note_queue_depth((uint32_t)queued);
 }
 
 static void report_path_init(void)
@@ -884,8 +884,7 @@ static void report_path_init(void)
  for (uint8_t i = 0; i < REPORT_CRITICAL_BLOCKS; i++) (void)xQueueSend(s_report_critical_free, &i, 0);
  for (uint8_t i = 0; i < REPORT_CRITICAL_EMERGENCY_BLOCKS; i++) (void)xQueueSend(s_report_critical_emergency_free, &i, 0);
  for (uint8_t i = 0; i < REPORT_TELEMETRY_BLOCKS; i++) (void)xQueueSend(s_report_telemetry_free, &i, 0);
- s_report_telemetry_drops = 0;
- s_report_queue_high_water = 0;
+ report_stats_reset();
  s_report_path_started = true;
  if (xTaskCreate(report_task, "report_tx", REPORT_TASK_STACK, NULL,
                  REPORT_TASK_PRIO, &s_report_task_h) != pdPASS) {
@@ -2239,14 +2238,17 @@ uint32_t bus_worker_get_rx_timeout_count(int channel)
  return 0;
 }
 
+/* D-14：这两个 getter 保留为【兼容转发】—— 仍可能有调用方（如诊断打印）。
+ * 真正的数据源已在中立组件 report_stats；msg_handler 不再经由这里读取，
+ * 因此不再产生依赖环。 */
 uint32_t bus_worker_get_report_drop_count(void)
 {
- return __atomic_load_n(&s_report_telemetry_drops, __ATOMIC_RELAXED);
+ return report_stats_get_drop_count();
 }
 
 uint32_t bus_worker_get_report_queue_high_water(void)
 {
- return __atomic_load_n(&s_report_queue_high_water, __ATOMIC_RELAXED);
+ return report_stats_get_queue_high_water();
 }
 
 uint32_t bus_worker_get_min_stack_watermark(void)

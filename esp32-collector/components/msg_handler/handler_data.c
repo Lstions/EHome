@@ -9,13 +9,16 @@
 #include "msg_handler.h"
 #include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "msg_handler_internal.h"
+#include "report_stats.h"   /* D-14：不再直接依赖 bus_worker */
 #include "frame_codec.h"
 #include "data_report_codec.h"
 #include "data_batch_codec.h"
 #include "config_mgr.h"
 #include "sync_manager.h"
 #include "scheduler.h"
-#include "bus_worker.h"
+/* D-14（2026-10-06）：原先这里 #include "bus_worker.h" —— 只为读 3 个上报统计量。
+ * 它们已搬到中立组件 report_stats，本文件不再使用任何 bus_worker_* 符号，
+ * 故删除该 include（它正是"msg_handler 依赖 bus_worker"这条环边的来源）。 */
 #include "ota.h"
 #include "wifi_mgr.h"
 #include "esp_log.h"
@@ -260,10 +263,10 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
     bool perf_ok = frame_encode_varint(&perf_enc, 1, perf_heap_free) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 2, perf_heap_min) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 3, perf.stack_high_water_words) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 4, bus_worker_get_min_stack_watermark()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 4, report_stats_get_min_stack_watermark()) == FRAME_OK &&
         frame_encode_varint(&perf_enc, 5, perf.min_queue_spaces) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 6, bus_worker_get_report_drop_count()) == FRAME_OK &&
-        frame_encode_varint(&perf_enc, 7, bus_worker_get_report_queue_high_water()) == FRAME_OK;
+        frame_encode_varint(&perf_enc, 6, report_stats_get_drop_count()) == FRAME_OK &&
+        frame_encode_varint(&perf_enc, 7, report_stats_get_queue_high_water()) == FRAME_OK;
     scheduler_queue_metrics_t queue_metrics = {0};
     scheduler_get_queue_metrics(&queue_metrics);
     for (uint8_t i = 0; perf_ok && i < SCHED_QUEUE_METRIC_COUNT; i++) {

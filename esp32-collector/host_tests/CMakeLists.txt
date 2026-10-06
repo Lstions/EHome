@@ -75,13 +75,15 @@ add_test(NAME legacy_write_guard_tests COMMAND legacy_write_guard_tests)
 
 add_executable(bus_queue_policy_tests bus_queue_policy_tests.c)
 target_include_directories(bus_queue_policy_tests PRIVATE
-    ../components/bus_worker/include)
+    ../components/bus_worker/include
+    ../components/report_stats/include)
 target_compile_options(bus_queue_policy_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_queue_policy_tests COMMAND bus_queue_policy_tests)
 
 add_executable(bus_rx_boundary_tests bus_rx_boundary_tests.c)
 target_include_directories(bus_rx_boundary_tests PRIVATE
-    ../components/bus_worker/include)
+    ../components/bus_worker/include
+    ../components/report_stats/include)
 target_compile_options(bus_rx_boundary_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME bus_rx_boundary_tests COMMAND bus_rx_boundary_tests)
 
@@ -203,6 +205,7 @@ target_include_directories(bus_manager_manifest_tests PRIVATE
     stubs/rom
     ../components/bus_manager/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/config_mgr
     ../components/dma_pool/include
@@ -225,6 +228,7 @@ target_include_directories(bus_dma_lease_tests PRIVATE
     stubs/rom
     ../components/bus_manager/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/config_mgr
     ../components/dma_pool/include
@@ -266,6 +270,7 @@ target_include_directories(scheduler_route_tests PRIVATE
     ../components/scheduler
     ../components/bus_dma/include
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/config_mgr
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -275,7 +280,8 @@ target_compile_definitions(scheduler_route_tests PRIVATE CONFIG_IDF_TARGET_ESP32
 target_compile_options(scheduler_route_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME scheduler_route_tests COMMAND scheduler_route_tests)
 
-add_executable(bus_worker_report_tests bus_worker_report_tests.c
+add_executable(bus_worker_report_tests ../components/report_stats/report_stats.c
+    bus_worker_report_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
@@ -284,6 +290,7 @@ target_include_directories(bus_worker_report_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -297,7 +304,8 @@ target_compile_definitions(bus_worker_report_tests PRIVATE CONFIG_IDF_TARGET_ESP
 target_compile_options(bus_worker_report_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_report_tests COMMAND bus_worker_report_tests)
 
-add_executable(bus_worker_rx_tests bus_worker_rx_tests.c
+add_executable(bus_worker_rx_tests ../components/report_stats/report_stats.c
+    bus_worker_rx_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
@@ -306,6 +314,7 @@ target_include_directories(bus_worker_rx_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -319,7 +328,8 @@ target_compile_definitions(bus_worker_rx_tests PRIVATE CONFIG_IDF_TARGET_ESP32C6
 target_compile_options(bus_worker_rx_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
 add_test(NAME bus_worker_rx_tests COMMAND bus_worker_rx_tests)
 
-add_executable(bus_worker_batch_tests bus_worker_batch_tests.c
+add_executable(bus_worker_batch_tests ../components/report_stats/report_stats.c
+    bus_worker_batch_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
@@ -328,6 +338,7 @@ target_include_directories(bus_worker_batch_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -351,7 +362,8 @@ target_include_directories(perf_metrics_encode_tests PRIVATE
 target_compile_options(perf_metrics_encode_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME perf_metrics_encode_tests COMMAND perf_metrics_encode_tests)
 
-add_executable(handler_data_tests handler_data_tests.c
+add_executable(handler_data_tests ../components/report_stats/report_stats.c
+    handler_data_tests.c
     msg_handler_hooks_stubs.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
@@ -366,6 +378,7 @@ target_include_directories(handler_data_tests PRIVATE
     ../components/sync_manager
     ../components/scheduler
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -382,7 +395,8 @@ add_test(NAME handler_data_tests COMMAND handler_data_tests)
 # reported counter) and the REAL handler_data.c (encodes the wire frame)
 # together.  bus_worker_rx_tests.c only proves a notify hook is called; this
 # proves the encoded StatusReport actually changes.
-add_executable(rx_health_e2e_tests rx_health_e2e_tests.c
+add_executable(rx_health_e2e_tests ../components/report_stats/report_stats.c
+    rx_health_e2e_tests.c
     msg_handler_hooks_stubs.c
     ../components/scheduler/scheduler_health.c
     ../components/frame/frame_codec.c
@@ -400,6 +414,7 @@ target_include_directories(rx_health_e2e_tests PRIVATE
     ../components/sync_manager
     ../components/scheduler
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/dma_pool/include
     ../components/hw_profile/include
@@ -424,6 +439,7 @@ target_include_directories(app_state_tests PRIVATE
     stubs/rom
     ../main
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -698,7 +714,8 @@ add_test(NAME data_batch_codec_tests COMMAND data_batch_codec_tests)
 # 与 bus_worker_report_tests 分开的理由：那份用例覆盖 0x03 路径的池/队列
 # 语义，本份只覆盖"能力位门控 + 聚合决策"。两者共享 #include bus_worker.c
 # 的模式，但断言集互不重叠，分开后失败定位更快。
-add_executable(bus_worker_data_batch_tests bus_worker_data_batch_tests.c
+add_executable(bus_worker_data_batch_tests ../components/report_stats/report_stats.c
+    bus_worker_data_batch_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
 )
@@ -706,6 +723,7 @@ target_include_directories(bus_worker_data_batch_tests PRIVATE
     stubs
     stubs/rom
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/scheduler
@@ -894,6 +912,7 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/dma_pool/include
     ../components/scheduler
     ../components/bus_worker/include
+    ../components/report_stats/include
     ../components/bus_dma/include
     ../components/bus_manager/include
     ../components/hw_profile/include
@@ -937,6 +956,17 @@ target_include_directories(ehome_tcp_send_tests PRIVATE
 )
 target_compile_options(ehome_tcp_send_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+add_executable(report_stats_tests
+    report_stats_tests.c
+    ../components/report_stats/report_stats.c
+)
+target_include_directories(report_stats_tests PRIVATE ../components/report_stats/include)
+target_compile_options(report_stats_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME report_stats_tests COMMAND report_stats_tests)
+
+add_test(NAME component_cycles
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_cycles.py)
+
 add_test(NAME ehome_tcp_send_tests COMMAND ehome_tcp_send_tests)
 
 add_test(NAME mqtt_adapter_tests COMMAND mqtt_adapter_tests)
