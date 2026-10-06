@@ -988,6 +988,9 @@ target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME golden_vectors_go
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/../tools/run_backend_golden.sh)
 
+add_test(NAME baseline_sync
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_baseline_sync.py)
+
 add_test(NAME golden_vectors_python
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_golden_vectors.py)
 
