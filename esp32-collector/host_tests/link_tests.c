@@ -83,18 +83,33 @@ static void test_too_big_is_rejected_before_driver(void)
     link_destroy(l);
 }
 
-/* 2) 未就绪 -> NOT_READY，同样不调用驱动 */
-static void test_not_ready_skips_driver(void)
+/* 2) 【P1 核心】未就绪必须由【驱动的结果】表达，而不是 link 层预检。
+ *
+ * 这条曾经断言的是反面（预检 + send_calls==0）—— 那正是设计文档 §1.2
+ * 判为 TOCTOU 的"先查再发"，与 P1"结果即决策依据"矛盾。
+ * 现在断言：驱动**被调用**，且它返回的 NOT_READY 被原样透传。 */
+static void test_not_ready_comes_from_driver_result(void)
 {
     fake_t f; init_fake(&f, 100, false);
+    f.next_send = LINK_NOT_READY;      /* 驱动自己说"没就绪" */
     link_t *l = link_create(&FAKE_DRV, &f);
     uint8_t buf[4] = {1, 2, 3, 4};
 
     link_result_t r = link_send(l, buf, 4);
     CHECK(r == LINK_NOT_READY);
-    CHECK(f.send_calls == 0);
+    CHECK(f.send_calls == 1);          /* ← 驱动被调用了：结果来自它 */
+
+    /* 反面：驱动已就绪（is_ready 为真）但 send 返回 NOT_READY（竞态下真实存在）
+     * ⇒ 结果仍必须是 NOT_READY。预检实现会把它误判成"可以发"，
+     * 这正是 TOCTOU 的危害：查到的状态不能代表发送时的状态。 */
+    fake_t g; init_fake(&g, 100, true);
+    g.next_send = LINK_NOT_READY;
+    link_t *l2 = link_create(&FAKE_DRV, &g);
+    CHECK(link_send(l2, buf, 4) == LINK_NOT_READY);
+    CHECK(g.send_calls == 1);
 
     link_destroy(l);
+    link_destroy(l2);
 }
 
 /* 3) 【D-01 病根】驱动的结果必须被【原样透传，不许压平】。
@@ -125,6 +140,7 @@ static void test_each_path_is_counted(void)
     uint8_t ok[4] = {0};
 
     f.ready = false;
+    f.next_send = LINK_NOT_READY;       /* 由驱动结果表达未就绪 */
     (void)link_send(l, ok, 4);          /* NOT_READY */
     f.ready = true;
     (void)link_send(l, big, 11);        /* TOO_BIG */
@@ -220,12 +236,34 @@ static void test_lifecycle(void)
 
     link_destroy(l);
     CHECK(f.close_calls == 1);
+
+    /* 【P1/P4】生命周期开关必须来自 open 的事实，而不是诊断快照。
+     *
+     * 构造出 opened 与 stats.ready 【不一致】的情形：
+     *   open 成功（opened=true）后，一次 send 把 stats.ready 刷成 false
+     *   （驱动此刻未就绪）—— 若 destroy 用 stats.ready 决定 close，
+     *   就会【漏掉一次 close】。观测量被当控制量用，正是这条要防的。
+     * （M41 变异即如此，本断言是唯一能抓到它的地方。） */
+    fake_t g; init_fake(&g, 10, true);
+    link_t *l2 = link_create(&FAKE_DRV, &g);
+    CHECK(link_open(l2) == LINK_SENT);
+    g.ready = false;                   /* 发送后快照会变 false */
+    g.next_send = LINK_NOT_READY;
+    (void)link_send(l2, (const uint8_t *)"x", 1);
+
+    link_stats_t snap;
+    link_get_stats(l2, &snap);
+    CHECK(snap.ready == false);        /* 快照确实已经是 false */
+    CHECK(g.close_calls == 0);         /* 还没销毁 */
+
+    link_destroy(l2);
+    CHECK(g.close_calls == 1);         /* ← 仍然必须 close 一次（用 opened 判断）*/
 }
 
 int main(void)
 {
     test_too_big_is_rejected_before_driver();
-    test_not_ready_skips_driver();
+    test_not_ready_comes_from_driver_result();
     test_driver_result_is_not_flattened();
     test_each_path_is_counted();
     test_bad_args_are_fatal_not_backpressure();

@@ -121,12 +121,17 @@ static void test_mtu_is_checked_before_send(void)
     link_destroy(l);
 }
 
-/* 4) is_ready 如实转发 */
-static void test_is_ready_forwards(void)
+/* 4) 未就绪由【驱动结果】表达（不再由 link 层预检 —— 那是 TOCTOU）。
+ *    驱动在未连接时自己返回 NOT_CONNECTED ⇒ 映射成 NOT_READY。 */
+static void test_not_ready_comes_from_driver(void)
 {
     link_t *l = make_link();
+
     s_connected = false;
-    CHECK(link_send(l, (const uint8_t *)"x", 1) == LINK_NOT_READY);  /* 未就绪先拦 */
+    s_publish_result = MQTT_PUBLISH_NOT_CONNECTED;   /* 驱动自己说没连上 */
+    int before = s_publish_calls;
+    CHECK(link_send(l, (const uint8_t *)"x", 1) == LINK_NOT_READY);
+    CHECK(s_publish_calls == before + 1);            /* ← 驱动被调用了 */
 
     s_connected = true;
     s_publish_result = MQTT_PUBLISH_OK;
@@ -169,7 +174,7 @@ int main(void)
     test_all_four_states_survive();
     test_backpressure_is_distinct_from_failure();
     test_mtu_is_checked_before_send();
-    test_is_ready_forwards();
+    test_not_ready_comes_from_driver();
     test_stats_count_each_path();
     test_mtu_value();
     if (s_failures) { printf("link_mqtt_tests: %d FAILURE(S)\n", s_failures); return 1; }

@@ -11,6 +11,14 @@ struct link {
     const link_driver_t *drv;
     void                *ctx;
     link_stats_t         stats;
+    /* `opened` 与 stats.ready 是两回事：
+     *   - opened  = 生命周期事实（open 成功过 ⇒ destroy 要调 close），
+     *              由本文件自己维护，**不被任何观测刷新**；
+     *   - stats.ready = 诊断快照，随时可能变。
+     * 原先 link_destroy 用 stats.ready 决定要不要 close() —— 那会让
+     * "一次诊断刷新"顺手改变生命周期行为（把观测量当控制量用）。
+     * 这是 P1/P4 的同类病：一个量只该有一个语义。 */
+    bool                 opened;
 };
 
 static const char *const s_result_names[LINK_RESULT_COUNT] = {
@@ -62,7 +70,7 @@ link_t *link_create(const link_driver_t *drv, void *drv_ctx)
 void link_destroy(link_t *l)
 {
     if (l == NULL) return;
-    if (l->stats.ready && l->drv->close != NULL) {
+    if (l->opened) {
         l->drv->close(l->ctx);
     }
     free(l);
@@ -74,6 +82,7 @@ link_result_t link_open(link_t *l)
     if (l == NULL) return LINK_FATAL;
     link_result_t r = l->drv->open(l->ctx);
     if (r == LINK_SENT) {
+        l->opened = true;
         l->stats.ready = true;
         l->stats.mtu = l->drv->mtu(l->ctx);
     }
@@ -96,17 +105,27 @@ link_result_t link_send(link_t *l, const uint8_t *frame, size_t len)
         return LINK_PAYLOAD_TOO_BIG;
     }
 
-    /* 规则 3：未就绪 -> NOT_READY（同样不调用 send） */
-    if (!l->drv->is_ready(l->ctx)) {
-        l->stats.ready = false;
-        l->stats.tx_not_ready++;
-        return LINK_NOT_READY;
-    }
-
-    /* 规则 4：原样转发，【不压平】结果（D-01 的病根） */
+    /* 规则 3（2026-10-06 修正）：**不**做 is_ready 预检。
+     *
+     * 原实现先 !is_ready() 判断再 send —— 那正是设计文档 §1.2 判为
+     * "缺陷①：调用方须'先查再发' = TOCTOU" 的形态，也与本文件
+     * "P1：不做'先查再发'，结果即决策依据" 自相矛盾。
+     *
+     * 为什么预检是错的（不只是风格问题）：
+     *   - 查与发之间链路可以变化 ⇒ 预检通过不代表 send 会成功，
+     *     预检失败也不代表 send 会失败 —— 它**不能**替代结果；
+     *   - 它把"未就绪"变成 link 层的判断，而"未就绪"的权威来源
+     *     是驱动（它知道自己为什么没就绪）⇒ 语义被复制到两处（P4）；
+     *   - 省下的那次 send 调用没有价值：驱动本来就在未就绪时
+     *     立刻返回 NOT_READY（mqtt 驱动就是这么做的）。
+     *
+     * 现在"未就绪"只有一个来源：驱动 send 的返回值（规则 4）。
+     * `stats.ready` 退回它本来的角色 —— **只读观测，不参与决策**。
+     * 为避免"指标看不到就绪态"，仍在发送后刷新一次快照（规则 5）。 */
     link_result_t r = l->drv->send(l->ctx, frame, len);
 
-    /* 规则 5：每条路径都计数（P3） */
+    /* 规则 5：每条路径都计数（P3），并刷新只读快照 */
+    l->stats.ready = l->drv->is_ready(l->ctx);
     switch (r) {
     case LINK_SENT:            l->stats.tx_sent++;         break;
     case LINK_BACKPRESSURE:    l->stats.tx_backpressure++; break;
