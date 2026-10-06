@@ -24,6 +24,13 @@ import (
 
 var errInactiveDeviceConfigDefault = errors.New("only an active device config can be default")
 
+// usbBusConfigMaxBytes is the size of the collector's fixed bus_config slot
+// (config_mgr.h: `uint8_t bus_config[64]`). The firmware manifest decoder is
+// fail-closed for the entire manifest when any single field overflows its
+// destination (config_mgr.c:342-346), so a longer value makes the whole
+// config undeliverable instead of failing just this channel.
+const usbBusConfigMaxBytes = 64
+
 // peripheralExcludedTypes lists channel types that represent standalone
 // peripheral resources (GPIO/PWM) rather than bus channels. The numeric
 // ESP32 enum values "4"/"6" are retained for backward compatibility with
@@ -107,11 +114,27 @@ func channelRoutePins(ch models.Channel) ([]int, error) {
 	case "ADC":
 		return nil, nil
 	// USB (ESP32-C6 native USB-Serial-JTAG used as a data bus) routes no GPIO:
-	// there are no tx/rx pins, so no peripheral pin conflict can arise. Empty and
-	// arbitrary-length bus_config are both accepted here — the collector stores
-	// the bytes verbatim and derives nothing from them for a USB channel. A
-	// non-hex value is still rejected (via the encode error), as for every bus type.
+	// there are no tx/rx pins, so no peripheral pin conflict can arise. Any
+	// length up to the firmware slot is accepted here.
+	//
+	// The length bound is NOT cosmetic - it is the difference between "the
+	// user sees an error" and "the node silently loses its entire config".
+	// The collector stores bus_config in a fixed 64-byte slot and its decoder
+	// is fail-closed for the WHOLE manifest if a field overflows
+	// (config_mgr.c:342-346: if cf.value.bytes.len > sizeof(bus_config) it
+	// returns false). So a >64 B value does not merely drop this one channel:
+	// every template, pin and command in that manifest is rejected, and the
+	// node keeps running its old config while the operator believes the new
+	// one was applied. Rejecting it here turns a silent field failure into 400.
+	//
+	// NOTE: bus_config is stored as a hex STRING, so 64 bytes == 128 characters.
+	// The earlier comment here argued the opposite ("adding a bound would only
+	// reject manifests the firmware accepts") - that was backwards; without the
+	// bound the backend emits manifests the firmware is guaranteed to reject.
 	case "USB":
+		if len(bytes) > usbBusConfigMaxBytes {
+			return nil, fmt.Errorf("USB bus_config is %d bytes, exceeding the firmware %d-byte slot", len(bytes), usbBusConfigMaxBytes)
+		}
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unsupported transport bus type %q", ch.BusType)
