@@ -232,36 +232,19 @@ func TestCrossLanguageFirmwareClientOverSocket(t *testing.T) {
 	}
 	t.Logf("方向0c OK：后端→固件 已逐字节写入 HelloAck %d B (0x12, seq=0)", len(ackFrame))
 
-	// ── 方向 1：固件 C → 后端 Go（0x23 ACK，原有方向）──
-	// 用**生产解码器**解析固件真实栈发出的字节。
-	h, payload := readOneFrameFromStream(t, conn)
-	if h.Type != msgTypeDeviceOpAck {
-		t.Fatalf("帧类型 = 0x%02X, 期望 0x%02X（0x23 ACK）；固件发的头: %v", h.Type, msgTypeDeviceOpAck, h)
-	}
-	if h.Ver != protoframe.Version {
-		t.Fatalf("ver = 0x%02X, 期望 0x%02X", h.Ver, protoframe.Version)
-	}
-	if h.HasCRC() {
-		t.Fatalf("固件不该置 CRC 位（本向量未定义 CRC），flags=0x%04X", h.Flags)
-	}
-	ack, err := frame.DecodeDeviceOpAck(payload)
-	if err != nil {
-		t.Fatalf("生产解码器解不了固件发来的 0x23 载荷 %x: %v", payload, err)
-	}
-	if got := ack.RequestID; got != vectorRequestID {
-		t.Errorf("request_id = %q, 期望 %q（载荷 %x）", got, vectorRequestID, payload)
-	}
-	if !bytes.Equal(payload, mustHex(t, vectorAckOKPayload)) {
-		t.Errorf("固件发的 0x23 载荷 = %x, 期望共享向量 %s", payload, vectorAckOKPayload)
-	}
-	// 载荷首字节必须等于头里的 type（已知的"双写"，本仓现状）。
-	if len(payload) == 0 || payload[0] != h.Type {
-		t.Errorf("载荷首字节(%x) 与头 type(0x%02X) 不一致 —— 这是已知双写约定，两端都必须一致",
-			firstByte(payload), h.Type)
-	}
-	t.Logf("方向1 OK：固件→后端 type=0x%02X seq=%d plen=%d request_id=%q",
-		h.Type, h.Seq, h.PayloadLen, ack.RequestID)
-
+	// ⚠⚠ **顺序已换**（2026-10-07）：先发 0x22（方向 2），再读 0x23（方向 1）。
+	//
+	// 为什么必须换（这是 task-24 停下来的原因）：
+	// **命令是因、回执是果** —— 真实设备只有先收到 0x22 才可能产生 0x23。
+	// 原顺序是"先等 ACK、再发那条要被 ACK 的命令"：
+	// 固件等 0x22、后端等 0x23，两侧各自超时（固件 8s / Go io.ReadFull 阻塞）
+	// ⇒ **真实设备必然死锁** ⇒ 那条"真实回程"永远无法被对锚证明。
+	//
+	// 换序前这条对锚**只能**用客户端手写的 ACK 字节，因此它只证明了
+	// "一个手写的正确形状 ACK 能被后端接受"，**不能**证明"设备真的会产生这条回执"。
+	//
+	// 换序**不削弱任何断言**：两个方向、四类校验（头字段、生产解码器、
+	// 共享向量、载荷首字节双写）全部保留，只是发生次序变成因果次序。
 	// ── 方向 2：后端 Go → 固件 C，**每次 1 字节写入** ──
 	// 这是本测试的核心价值：向量测试是整块字节，永远测不到"半条帧"。
 	// 逐字节写强制固件侧接收路径必须真的做流式组装。
@@ -298,6 +281,35 @@ func TestCrossLanguageFirmwareClientOverSocket(t *testing.T) {
 	}
 	t.Logf("方向2 OK：后端→固件 已逐字节写入 %d B（0x22, seq=7）", len(wholeFrame))
 
+	// ── 方向 1：固件 C → 后端 Go（0x23 ACK，原有方向）──
+	// 用**生产解码器**解析固件真实栈发出的字节。
+	h, payload := readOneFrameFromStream(t, conn)
+	if h.Type != msgTypeDeviceOpAck {
+		t.Fatalf("帧类型 = 0x%02X, 期望 0x%02X（0x23 ACK）；固件发的头: %v", h.Type, msgTypeDeviceOpAck, h)
+	}
+	if h.Ver != protoframe.Version {
+		t.Fatalf("ver = 0x%02X, 期望 0x%02X", h.Ver, protoframe.Version)
+	}
+	if h.HasCRC() {
+		t.Fatalf("固件不该置 CRC 位（本向量未定义 CRC），flags=0x%04X", h.Flags)
+	}
+	ack, err := frame.DecodeDeviceOpAck(payload)
+	if err != nil {
+		t.Fatalf("生产解码器解不了固件发来的 0x23 载荷 %x: %v", payload, err)
+	}
+	if got := ack.RequestID; got != vectorRequestID {
+		t.Errorf("request_id = %q, 期望 %q（载荷 %x）", got, vectorRequestID, payload)
+	}
+	if !bytes.Equal(payload, mustHex(t, vectorAckOKPayload)) {
+		t.Errorf("固件发的 0x23 载荷 = %x, 期望共享向量 %s", payload, vectorAckOKPayload)
+	}
+	// 载荷首字节必须等于头里的 type（已知的"双写"，本仓现状）。
+	if len(payload) == 0 || payload[0] != h.Type {
+		t.Errorf("载荷首字节(%x) 与头 type(0x%02X) 不一致 —— 这是已知双写约定，两端都必须一致",
+			firstByte(payload), h.Type)
+	}
+	t.Logf("方向1 OK：固件→后端 type=0x%02X seq=%d plen=%d request_id=%q",
+		h.Type, h.Seq, h.PayloadLen, ack.RequestID)
 	// ── 等固件侧结论 ──
 	select {
 	case err := <-waitDone:
