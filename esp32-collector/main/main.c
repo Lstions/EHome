@@ -669,9 +669,21 @@ void app_main(void)
      * "未注入 ⇒ 拒绝执行"分支，而操作员看到的是"设备没反应"。 */
     device_op_wiring_init();
 
-    /* 3.0 设备侧链路（TCP + mTLS）。放在这里而不是启动最前面：
-     * 它自己等 WiFi 就绪，所以顺序不敏感；放在接线区一起更好读。
-     * 默认关闭（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）⇒ 不建任务、不分配堆。 */
+    /* ⚠ 2026-10-07（heap tracing 实测）**本顺序是敏感的** —— 原注释的"顺序不敏感"已被否证。
+     *
+     * trace 窗口 = 一次 mTLS 连接，实测到的机制：
+     *   · `device_link_wiring_init()` 建 devlink 任务后，该任务**立刻**开始连接
+     *     （WiFi 此时已就绪）⇒ 进入 mbedTLS 握手；
+     *   · 而 app_main 继续往下走到 `bus_worker_start()`，它要建 **7 个任务**
+     *     （report_tx + rx_task + cmd_u0..2 + cmd_spi + cmd_i2c），
+     *     **每个栈 4096 B、全在内部 RAM**（trace 里 7 条 4096 B 记录，调用栈指向
+     *     `xTaskCreatePinnedToCore` ← `report_path_init`/`bus_worker_start`）；
+     *   · 两者**并发** ⇒ 7×4096 的连续块需求与握手缓冲交错 ⇒ largest 塌到 7680。
+     *
+     * ⚠ **但"提前到链路之前"实测更差**（before_connect 的 largest 从 31744 掉到 12288）——
+     *   提前分配只是让堆**先被切碎**。⇒ **顺序改变不了总量**：
+     *   7×4096 栈 + TLS 缓冲之和本身就超出可用连续块。详见设计文档 §155。
+     * 默认关闭（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）⇒ 本段对默认构建无影响。 */
     device_link_wiring_init();
 
     /* task-21：把 3.0 会话注册成一条 transport，并注入**仲裁闸**。
