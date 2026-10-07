@@ -18,10 +18,22 @@ ca / cert / key；读不到时**不假装成功**，而是让 tls_guard 判 hard
   · 读回：components/nvs_flash/nvs_partition_tool/nvs_tool.py（官方解析器）
 自己实现 NVS 二进制格式 = 重复实现官方格式，且**必然**随 IDF 版本漂移。
 
-## ⭐ 生成后**读回校验**（本工具的核心，不是可选步骤）
+## ⭐ 两道校验，缺一不可（2026-10-07 补齐第二道）
 
+**第一道：生成后读回校验（搬运）**
 生成完立刻用官方 nvs_tool.py 把镜像**解析回来**，逐字节比对 ca/cert/key。
 没验证的生成器等于没有 —— 它可能产出一个"看起来成功了但设备读不到"的镜像。
+
+**第二道：材料内容校验（能不能用）** ← 此前**完全缺失**
+读回一致只证明"字节搬对了"，**完全不证明"这三份材料能建立 mTLS 会话"**。
+缺这一道的后果，本工具自己的 selftest 就是活证据：它一直用
+`openssl req -x509` 生成"设备证书"，那其实是**自签证书**（issuer == subject），
+由它签发的镜像在真机上**永远握不上手**，而两道错都没有报 ——
+因为当时只有第一道。现在 generate 会先跑 validate_material() 并**拒绝**：
+  · 设备证书未由该 CA 签发（自签是典型）  · 已过期 / 尚未生效
+  · 私钥与证书不配对                      · 私钥有口令（固件读裸 PEM）
+  · 证书里没有 CN/SAN（后端取不到 node_id，能握手但会被拒绝注册）
+`--force` 可**显式**跳过（默认不给过）。
 
 ## ⚠⚠ 安全现状（如实，不要读成"安全"）
 
@@ -96,6 +108,165 @@ def find_idf_python():
 def run(cmd, **kw):
     print("  $ " + " ".join(cmd))
     return subprocess.run(cmd, **kw)
+
+
+def _ssl(*args, **kw):
+    """跑一条 openssl 子命令，返回 (rc, stdout+stderr)。"""
+    try:
+        p = subprocess.run(["openssl"] + list(args), capture_output=True, text=True, **kw)
+    except FileNotFoundError:
+        return 127, "openssl not found"
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def _ssl_text(*args):
+    """取 openssl 的单值输出（去首尾空白）；失败返回 None。"""
+    rc, out = _ssl(*args)
+    return None if rc != 0 else out.strip()
+
+
+def validate_material(ca, cert, key, warn_days=30, quiet=False):
+    """校验 ca/cert/key 三件套是不是真的能用。返回 (errors, warnings)。
+
+    ## 为什么必须做（2026-10-07）
+    此前的校验是「镜像能不能读回三份字节」—— 那只证明搬运没丢字节，
+    **完全不证明这三份材料能建立 mTLS 会话**。
+    最刺眼的证据：本工具自己的 selftest 用 openssl req -x509 生成「设备证书」，
+    那其实是**自签证书**（issuer == subject），拿本工具生成的 CA 去验**必然失败**。
+    也就是说：工具一直在用一份**永远握不上手的材料**证明自己没问题。
+
+    ## 逐条判据 + 漏了会怎样
+    | 判据 | 漏了会怎样 |
+    |---|---|
+    | 三份都能 PEM 解析 | 设备端 mbedTLS 解析失败 ⇒ SESSION_FATAL |
+    | 设备证书由该 CA 签发 | 后端 RequireAndVerifyClientCert 拒绝 ⇒ 永远连不上 |
+    | 设备证书当前在有效期内 | 现场才过期 ⇒ 突然连不上，且不像配置错误 |
+    | 设备证书与私钥配对 | 握手签名失败 ⇒ 连不上，且报错离根因很远 |
+    | 私钥未加密 | 固件读裸 PEM、没有口令 ⇒ 必然失败 |
+    | 证书有 CN/SAN 可作身份 | 后端取不到 node_id ⇒ 能握手但被拒绝注册 |
+    """
+    errors, warnings = [], []
+
+    for label, fp in (("CA", ca), ("设备证书", cert), ("设备私钥", key)):
+        if not os.path.exists(fp):
+            errors.append("%s 不存在: %s" % (label, fp))
+        elif os.path.getsize(fp) == 0:
+            errors.append("%s 是空文件: %s" % (label, fp))
+    if errors:
+        return errors, warnings
+
+    if not shutil.which("openssl"):
+        # 不静默跳过：本函数的意义就是别拿没验过的材料去烧。
+        return (["找不到 openssl —— 无法校验证书内容（不静默跳过："
+                 "宁可失败，也不要放行未验证的材料）"], warnings)
+
+    # 1) 三份都能解析
+    rc, out = _ssl("x509", "-in", ca, "-noout")
+    if rc != 0:
+        errors.append("CA 证书无法解析为 PEM/X.509: %s" % out.strip()[:160])
+    rc, out = _ssl("x509", "-in", cert, "-noout")
+    if rc != 0:
+        errors.append("设备证书无法解析为 PEM/X.509: %s" % out.strip()[:160])
+    rc, out = _ssl("pkey", "-in", key, "-noout")
+    if rc != 0:
+        low = out.lower()
+        if "encrypted" in low or "pass phrase" in low or "bad decrypt" in low:
+            errors.append("设备私钥有口令（加密的）：固件读的是裸 PEM、没有口令 ⇒ 必然握手失败。"
+                          "请去掉口令：openssl pkey -in KEY -out KEY.plain")
+        else:
+            errors.append("设备私钥无法解析为 PEM: %s" % out.strip()[:160])
+    if errors:
+        return errors, warnings
+
+    # 2) 设备证书由该 CA 签发（最容易被自签证书骗过的一条）
+    rc, out = _ssl("verify", "-CAfile", ca, cert)
+    if rc != 0:
+        issues = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith(cert)]
+        hint = ""
+        iss = _ssl_text("x509", "-in", cert, "-noout", "-issuer") or ""
+        sub = _ssl_text("x509", "-in", cert, "-noout", "-subject") or ""
+        if iss and sub and iss.split("=", 1)[-1] == sub.split("=", 1)[-1]:
+            hint = ("（设备证书是自签的：issuer 与 subject 相同 ⇒ 它不是由给定 CA 签发的。"
+                    "openssl req -x509 会产生这种证书，它永远通不过 mTLS 服务端校验）")
+        errors.append("设备证书未通过该 CA 的验签：%s %s" % ("; ".join(issues[:3]), hint))
+
+    # 3) 有效期
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    end = _ssl_text("x509", "-in", cert, "-noout", "-enddate")
+    if not end:
+        errors.append("取不到设备证书的 notAfter")
+    else:
+        try:
+            raw_end = end.split("=", 1)[1].strip()
+            end_dt = datetime.datetime.strptime(raw_end, "%b %d %H:%M:%S %Y %Z").replace(
+                tzinfo=datetime.timezone.utc)
+            if end_dt <= now:
+                errors.append("设备证书已过期：notAfter=%s（现在 %s）⇒ 设备连不上，"
+                              "且现场看起来像网络故障、而不是证书到期"
+                              % (raw_end, now.strftime("%Y-%m-%d %H:%M:%S UTC")))
+            elif (end_dt - now).days < warn_days:
+                warnings.append("设备证书将于 %s 过期（不足 %d 天）—— 现场过期会突然断连"
+                                % (raw_end, warn_days))
+        except ValueError:
+            warnings.append("无法解析 notAfter=%r（跳过有效期判定，不静默当作有效）" % end)
+
+    begin = _ssl_text("x509", "-in", cert, "-noout", "-startdate")
+    if begin:
+        try:
+            raw_beg = begin.split("=", 1)[1].strip()
+            beg_dt = datetime.datetime.strptime(raw_beg, "%b %d %H:%M:%S %Y %Z").replace(
+                tzinfo=datetime.timezone.utc)
+            if beg_dt > now:
+                errors.append("设备证书尚未生效：notBefore=%s" % raw_beg)
+        except ValueError:
+            pass
+
+    # 4) 私钥与证书配对
+    cpub = _ssl_text("x509", "-in", cert, "-noout", "-pubkey")
+    kpub = _ssl_text("pkey", "-in", key, "-pubout")
+    if cpub and kpub and cpub.strip() != kpub.strip():
+        errors.append("设备私钥与设备证书不配对（公钥不同）⇒ 握手签名失败，且报错离根因很远")
+    elif not cpub or not kpub:
+        warnings.append("取不到公钥，跳过配对检查（不静默当作配对）")
+
+    # 5) 身份：后端要从证书里取 node_id
+    # backend/internal/transport/server.go:311 nodeIDFromCert()：
+    # 只信任已验签证书里的身份，取 (CN, SAN DNS, SAN email) 第一个非空者，
+    # 取不到就拒绝连接。⇒ 没有身份标识的证书能握手但会被拒绝注册。
+    # ⚠ openssl 打印的是 "subject=CN=xxx" —— **带 "subject=" 前缀**。
+    # 我第一版直接对整串按 "," 切再 startswith("CN=")，
+    # 于是第一个元素是 "subject=CN=node-self"，startswith("CN=") 恒为 False
+    # ⇒ 对**明明有 CN** 的证书报"没有 CN 也没有 SAN"（假阳性）。
+    # 实测输出（第一版就是被它骗过）：
+    #   $ openssl x509 -in dev.crt -noout -subject -nameopt RFC2253
+    #   subject=CN=node-self
+    # ⇒ 必须先去前缀再切分。
+    subj = _ssl_text("x509", "-in", cert, "-noout", "-subject", "-nameopt", "RFC2253")
+    has_cn = False
+    if subj:
+        body = subj.split("=", 1)[1] if subj.lower().startswith("subject=") else subj
+        has_cn = any(pp.strip().startswith("CN=") and pp.strip() != "CN="
+                     for pp in body.split(","))
+    # SAN：-ext subjectAltName 对没有 SAN 的证书会打印 "No extensions in certificate"
+    # 或直接报错。用"是否出现 DNS:/email:/URI:/IP Address:"来判断更稳，
+    # 因为有的 openssl 版本对空 SAN 会输出 "X509v3 Subject Alternative Name:" 头。
+    san = _ssl_text("x509", "-in", cert, "-noout", "-ext", "subjectAltName") or ""
+    has_san = any(tok in san for tok in ("DNS:", "email:", "URI:", "IP Address:", "othername:"))
+    if not has_cn and not has_san:
+        errors.append("设备证书里没有 CN 也没有 SAN —— 后端 nodeIDFromCert()"
+                      " (backend/internal/transport/server.go:311) 只从已验签证书的"
+                      " (CN, SAN DNS, SAN email) 取 node_id，取不到就拒绝连接。"
+                      " ⇒ 这种证书能握手但会被拒绝注册，设备侧只看到连接被关。")
+
+    if not quiet:
+        for e in errors:
+            print("  X %s" % e)
+        for w in warnings:
+            print("  ! %s" % w)
+        if not errors and not warnings:
+            print("  OK 三件套校验通过（签发链 / 有效期 / 配对 / 身份 / 私钥无口令）")
+    return errors, warnings
 
 
 def write_csv(path, ns, items):
@@ -265,6 +436,28 @@ def cmd_generate(args):
         if os.path.getsize(fp) == 0:
             return die("%s 文件是空的: %s" % (label, fp))
 
+    # ⭐ 先校验材料**能不能用**，再谈搬运（2026-10-07 补）。
+    #
+    # 在此之前这一步只看"文件在不在/空不空/超没超上限" ——
+    # 于是一份**自签的**设备证书、一份**已过期**的证书、一把**与证书不配对的**私钥
+    # 都能一路通过，生成镜像、读回校验全绿，最后在真机上表现为"连不上"。
+    # 本工具自己的 selftest 就一直在用 openssl req -x509 生成这种自签材料
+    # （工具用一份永远握不上手的材料证明自己没问题）。
+    #
+    # --force 允许显式跳过：给"我就是要拿这份材料去试试"留一条路，
+    # 但必须是**显式**的，不能是默认的。
+    errors, warnings = validate_material(args.ca, args.cert, args.key)
+    if errors:
+        if getattr(args, "force", False):
+            print("⚠ 材料校验未通过，但 --force 已指定 ⇒ 继续生成（生成的镜像很可能连不上）")
+            for e in errors:
+                print("    X %s" % e)
+        else:
+            print("材料校验未通过 ⇒ 拒绝生成（用 --force 可显式跳过，但请先确认真要这么做）：")
+            for e in errors:
+                print("    X %s" % e)
+            return die("证书材料不可用（见上）", code=3)
+
     # 固件侧上限（main/Kconfig.projbuild:181 CONFIG_EHOME_DEVICE_LINK_CERT_BYTES，默认 4096）。
     # 这里**提前**拦住超限材料：镜像能生成但设备会判 INVALID_SIZE 拒收，
     # 那种失败在设备上只表现为 SESSION_FATAL，很难查。
@@ -341,12 +534,30 @@ def cmd_generate(args):
 
 
 def _openssl_free() -> list:
-    """自检用：现场生成一次性 CA + 设备证书 + 私钥（全部落在临时目录）。"""
+    """自检用：现场生成一次性 CA + **由该 CA 签发**的设备证书 + 私钥。
+
+    ## ⚠ 这里原来生成的是**自签**设备证书（2026-10-07 修）
+    原实现两条命令**都是** openssl req -x509：
+    `-x509` 表示"直接签发一张自签证书"，于是设备证书的 issuer == subject，
+    **不由 ca.crt 签发**。拿这份材料去建 mTLS 会必然失败
+    （后端 RequireAndVerifyClientCert 直接拒绝）。
+
+    后果比"自检少测一条"更糟：**自检一直在用一份永远握不上手的材料证明自己没问题**，
+    而它测的只是"镜像能不能读回字节" —— 那件事与"证书能不能用"完全无关。
+
+    正确流程是三段：CA 自签 → 生成设备 CSR → 用 CA 签 CSR。
+    """
     return [
+        # 1) CA（自签，这一条用 -x509 是对的）
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-         "-keyout", "ca.key", "-out", "ca.crt", "-days", "1", "-subj", "/CN=nvs-selftest-ca"],
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-         "-keyout", "dev.key", "-out", "dev.crt", "-days", "1", "-subj", "/CN=nvs-selftest-dev"],
+         "-keyout", "ca.key", "-out", "ca.crt", "-days", "3650",
+         "-subj", "/CN=nvs-selftest-ca"],
+        # 2) 设备私钥 + CSR（-new，**不是** -x509）
+        ["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", "dev.key", "-out", "dev.csr", "-subj", "/CN=nvs-selftest-dev"],
+        # 3) 用 CA 签 CSR ⇒ 设备证书的 issuer = CA，subject = 设备身份
+        ["openssl", "x509", "-req", "-in", "dev.csr", "-CA", "ca.crt",
+         "-CAkey", "ca.key", "-CAcreateserial", "-out", "dev.crt", "-days", "365"],
     ]
 
 
@@ -456,6 +667,38 @@ def cmd_selftest(args):
                 for ln in lines3:
                     print("    " + ln)
 
+        # ── 3.5) 材料内容校验的负向对照（2026-10-07 补）──────────────
+        #
+        # 为什么必须补：上面 2)/3) 两条只证明"镜像里字节搬对没有"。
+        # 而"材料本身能不能握手"是**另一件事** —— 本工具此前**只**测了前者，
+        # 而它自己生成的自签材料又恰好证明了它没测后者有多危险。
+        # ⇒ 这里对 validate_material() 逐条喂坏材料，每一条都必须报错。
+        banner("3.5) 材料内容校验：逐条喂坏材料，每条都必须被拒")
+        # 先造一张"别的 CA" 以便测"未由该 CA 签发"
+        for c in ([["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", "other.key", "-out", "other.crt", "-days", "365",
+                    "-subj", "/CN=other-ca"],
+                   ["openssl", "pkey", "-in", "dev.key", "-aes256",
+                    "-passout", "pass:secret", "-out", "enc.key"]]):
+            if subprocess.run(c, capture_output=True).returncode != 0:
+                print("  (准备负向材料失败，跳过其中一两条)")
+        open("junk.crt", "w").write("not a certificate\n")
+
+        mat_cases = [
+            ("私钥与证书不配对", "dev.crt", "other.key", "配对"),
+            ("私钥有口令", "dev.crt", "enc.key", "口令"),
+            ("证书不是 PEM", "junk.crt", "dev.key", "无法解析"),
+            ("证书不由该 CA 签发", "other.crt", "other.key", "未通过该 CA 的验签"),
+        ]
+        for label, c, k, expect in mat_cases:
+            errs, _ = validate_material("ca.crt", c, k, quiet=True)
+            if errs and any(expect in e for e in errs):
+                print("  PASS: %s ⇒ 正确报错" % label)
+            else:
+                failures += 1
+                print("  FAIL: %s **没被拒**（期望报出含 %r 的错，实际 %r）"
+                      % (label, expect, errs))
+
         banner("4) 大小边界：3x4096 B（固件上限）能否装进 0x4000 的分区？")
         big = os.path.join(tmp, "big.bin")
         for nm in ("b1", "b2", "b3"):
@@ -508,6 +751,10 @@ def main():
     g.add_argument("--encrypted", action="store_true",
                    help="生成**加密**镜像（⚠ 要求设备侧具备 nvs_keys 分区+NVS 加密配置；默认**不**加密）")
     g.add_argument("--keyfile", default=None, help="加密密钥文件（配合 --encrypted）")
+    g.add_argument("--force", action="store_true",
+                   help="材料校验未通过时仍继续生成（**显式**跳过，默认不给过）")
+    g.add_argument("--warn-days", type=int, default=30,
+                   help="证书剩余有效期少于该天数时给出警告（默认 30）")
     g.set_defaults(func=cmd_generate)
 
     s = sub.add_parser("selftest", help="现场生成测试材料跑全流程 + 负向对照")
