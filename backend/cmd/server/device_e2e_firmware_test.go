@@ -309,6 +309,25 @@ func TestCrossLanguageFirmwareClientOverSocket(t *testing.T) {
 		if !strings.Contains(text, "E2E-CLIENT result=PASS") {
 			t.Fatalf("固件客户端没有报 PASS:\n%s", text)
 		}
+		// ⭐ **必须显式断言 state=READY**（2026-10-07 由 v3-backend 对抗性复核发现缺口）。
+		//
+		// 缺口是什么：本用例注释里声称断言链包含"设备报告 state=READY"，
+		// 但 grep 实测**这一条从未实现**（只有 result=PASS / rx type=0x22 / payload_match=yes）。
+		// 它当时仍可信，是因为 READY 被**间接**证明：固件只在 READY 之后才发 0x23
+		// （firmware_tcp_e2e_client.c 里的 if (session_state != SESSION_READY) return fail(...)），
+		// 而下面断言了 0x23 的载荷与共享向量逐字节相等。
+		//
+		// 为什么仍必须补：那份间接性**依赖固件客户端的内部实现顺序**。
+		// 若日后有人把"发 0x23"挪到 READY 检查之前（例如为了"尽早发"），
+		// 本测试**仍会全绿**，而"设备真的进了 READY"这条就**悄悄不再被证**了。
+		// ⇒ 一行断言把 READY 从**间接**变**直接**。
+		if !strings.Contains(text, "E2E-CLIENT state=READY") {
+			t.Fatalf("固件客户端没有报告 state=READY（应用层握手未完成）:\n%s", text)
+		}
+		// 同理：断言它**确实发了 Hello**（否则"跳过 Hello 直接发 0x23"也能过）。
+		if !strings.Contains(text, "E2E-CLIENT sent type=0x01") {
+			t.Fatalf("固件客户端没有发 Hello(0x01) —— 握手起点缺失:\n%s", text)
+		}
 		// 断言它确实**收到了** 0x22，而不是"没收到也算过"。
 		if !strings.Contains(text, "rx type=0x22") {
 			t.Fatalf("固件客户端没报告收到 0x22 帧:\n%s", text)

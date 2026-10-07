@@ -1098,6 +1098,26 @@ target_include_directories(scheduler_health_tests PRIVATE ../components/schedule
 target_compile_options(scheduler_health_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)
 
+# 3.0 会话 → transport 适配的**纯判定**（main/session_transport.c 的纯部分）。
+# 用 SESSION_TRANSPORT_HOST_TEST=1 只编纯判定，不含 IDF 头 ——
+# 适配层里两处判断错了都**不会报错**（静默丢弃 / 流污染），所以必须宿主可测。
+add_executable(session_transport_tests
+    session_transport_tests.c
+    ../main/session_transport.c
+)
+target_include_directories(session_transport_tests PRIVATE
+    ../main
+    ../components/session/include
+    ../components/link/include
+    ../components/link_tcp/include
+    ../components/rx_pump/include
+    ../components/wire/include
+    ../components/transport/include
+)
+target_compile_definitions(session_transport_tests PRIVATE SESSION_TRANSPORT_HOST_TEST=1)
+target_compile_options(session_transport_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME session_transport_tests COMMAND session_transport_tests)
+
 # 3.0 链路接线里的**判定**（main/device_link_wiring.c 的纯判定部分）。
 # 用 DEVICE_LINK_HOST_TEST=1 只编纯判定，不含任何 IDF 头 ——
 # 这样"有判断的部分"被真正跑到，而不是靠 EXEMPT 绕过覆盖率门禁。
@@ -1115,6 +1135,28 @@ target_include_directories(device_link_wiring_tests PRIVATE
 target_compile_definitions(device_link_wiring_tests PRIVATE DEVICE_LINK_HOST_TEST=1)
 target_compile_options(device_link_wiring_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME device_link_wiring_tests COMMAND device_link_wiring_tests)
+
+# 3.0 **下行帧的分发判定**（task-19）。
+#
+# 为什么单独一个 target：这组用例防的是"收到的帧被静默丢弃"——
+# devlink_on_msg 原先从不调用 msg_handler_process，后端下发的 0x22
+# （重启/恢复出厂）在固件里被丢掉，而构建/门禁/日志全都正常。
+# 用假 dispatch 直接观察"有没有真的进分发、进去的字节对不对"，
+# 这是"只断言计数器"骗不过的后果层断言。
+add_executable(device_link_downlink_tests
+    device_link_downlink_tests.c
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/wire/wire.c
+)
+target_include_directories(device_link_downlink_tests PRIVATE
+    ../main
+    ../components/variant/include
+    ../components/wire/include
+)
+target_compile_definitions(device_link_downlink_tests PRIVATE DEVICE_LINK_HOST_TEST=1)
+target_compile_options(device_link_downlink_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_downlink_tests COMMAND device_link_downlink_tests)
 
 add_executable(rx_pump_tests
     rx_pump_tests.c
