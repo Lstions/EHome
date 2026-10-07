@@ -241,6 +241,32 @@ menu "EHome Collector Configuration"
                 has to be done manually.  Missing material is reported and leads
                 to SESSION_FATAL.
 
+        config EHOME_DEVICE_LINK_MQTT_FALLBACK
+            bool "Allow MQTT fallback when the 3.0 link keeps failing"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default y
+            help
+                §7.3 P2/P3 的开关：TCP 是主通道，MQTT 只在 TCP **连续失败**时临时顶替。
+
+                * **y（默认，= P2 双栈期）**：3.0 固件必须保留 MQTT 兜底。
+                  后端 TCP 未就绪 / 证书没铺开 / 防火墙没放行 8443 ——
+                  这些都不该让一台已在现场的设备失去唯一上行通道。
+                * **n（= §7.3 P3）**：永不返回 MQTT。这是**迁移目标态**，
+                  只有在确认全网 TCP 可用后才可开启。
+
+                ⚠ 设成 n 的**前提**（缺一不可，否则设备会失去上行）：
+                  1. 后端 TCP+TLS 已在生产可用（不是本机 dev）；
+                  2. 证书已铺开到所有现场设备；
+                  3. 防火墙已放行设备端口。
+
+                ⚠ 它**不是**"关掉 MQTT 客户端"：MQTT 任务与连接仍然存在
+                （P4 才由后端关闭监听）。本开关只影响**上行仲裁**的兜底分支 ——
+                即"TCP 反复失败时要不要把上行让给 MQTT"。
+
+                为什么做成 Kconfig 而不是代码里的常量：迁移期需要**同一份代码**
+                产出 P2 与 P3 两种镜像，且"当前处于哪一阶段"必须是**构建期可见**的
+                （P5：预算/开关只有一个来源，不能靠注释表达）。
+
     endmenu
 
 endmenu

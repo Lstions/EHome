@@ -141,16 +141,33 @@ void uplink_arbiter_init(bool link_enabled)
     tsel_config_t cfg;
     cfg.tcp_fail_threshold   = UPLINK_TSEL_FAIL_THRESHOLD;
     cfg.tcp_recover_success  = UPLINK_TSEL_RECOVER_SUCCESS;
-    cfg.allow_mqtt_fallback  = true;   /* P3 之后应设 false（那时拆 MQTT 分支） */
+    /* §7.3 P2/P3 的开关，来自 Kconfig（P5：单一来源、构建期可见）。
+     * y = P2 双栈期（保留 MQTT 兜底）；n = P3 迁移目标态（永不返回 MQTT）。
+     * ⚠ 这里**不写死 true** —— 写死会让"当前处于哪一阶段"只能靠读注释判断，
+     *   而注释不是判据（本卡 §160.3 刚吃过一次"注释预言了分叉却没人看"的亏）。 */
+#if defined(CONFIG_EHOME_DEVICE_LINK_MQTT_FALLBACK) && (CONFIG_EHOME_DEVICE_LINK_MQTT_FALLBACK == 1)
+    cfg.allow_mqtt_fallback  = true;   /* §7.3 P2：保留兜底 */
+#else
+    cfg.allow_mqtt_fallback  = false;  /* §7.3 P3：TCP 是唯一上行 */
+#endif
     s_tsel = tsel_create(&cfg);
     if (s_tsel == NULL) {
         /* 不静默：没有 tsel 就不能保证单发，必须看得见。 */
         ESP_LOGE(TAG, "tsel_create 失败 ⇒ 仲裁层不可用（上行将回退到 broadcast 双发风险）");
         return;
     }
-    ESP_LOGI(TAG, "上行仲裁已接线：link_enabled=%d 阈值=%u/%u（**未标定**，见 transport_sel.h:66-78）",
+    /* ⚠ 必须报出**当前处于 P2 还是 P3**：这个开关决定"TCP 挂了设备还有没有上行"，
+     * 是现场排障第一个要看的量。只报阈值而不报它，等于把最关键的语义留给读代码的人。 */
+    ESP_LOGI(TAG, "上行仲裁已接线：link_enabled=%d 阈值=%u/%u MQTT兜底=%s（%s；**阈值未标定**，见 transport_sel.h:66-78）",
              (int)link_enabled, (unsigned)UPLINK_TSEL_FAIL_THRESHOLD,
-             (unsigned)UPLINK_TSEL_RECOVER_SUCCESS);
+             (unsigned)UPLINK_TSEL_RECOVER_SUCCESS,
+             cfg.allow_mqtt_fallback ? "允许" : "**禁止**",
+#if defined(CONFIG_EHOME_DEVICE_LINK_MQTT_FALLBACK) && (CONFIG_EHOME_DEVICE_LINK_MQTT_FALLBACK == 1)
+             "§7.3 P2 双栈期"
+#else
+             "§7.3 P3 迁移目标态"
+#endif
+    );
 }
 
 /** 推进一次仲裁。由持有 session 的任务周期调用（见 device_link_wiring 链路任务）。
