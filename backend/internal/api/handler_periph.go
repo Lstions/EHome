@@ -234,6 +234,14 @@ func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
 		if _, err := channelRoutePins(*ch); err != nil {
 			return fmt.Errorf("%w：UART 通道 bus_config 非法（%q）：%v", errUARTBusConfigMalformed, ch.BusConfig, err)
 		}
+
+		/* ⚠ 2026-10-07 记：这里**刻意**不把短 bus_config 补齐成 >=6 字节，尽管固件对下发
+		 * 要求 >=6（bus_manager.c:443）。原因是本函数的契约是"校验/补齐**空值**"，
+		 * 而**已给出的值必须原样保留** —— 这是 P0 回归护栏
+		 * （TestChannelUpdate_UART2ByteRouteAccepted:121 明确断言"调用方显式给的引脚路由必须原样保留"）。
+		 *
+		 * ⇒ "短值下发前补齐"属于**组装下发字节时**的职责，不在本函数。
+		 *   缺陷（后端 201 但设备 ESP_ERR_INVALID_SIZE）见设计文档 §160。 */
 		return nil
 	}
 	if node == nil {

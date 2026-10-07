@@ -102,6 +102,13 @@ func channelRoutePins(ch models.Channel) ([]int, error) {
 	}
 	switch busType {
 	case "UART", "I2C":
+		/* ⚠ 这里**刻意**只要 2 字节：本函数的用途是**引脚冲突检测**（"这条通道占哪两个脚"），
+		 * 2 字节足够，且仿真套件与存量库都在用 2 字节（见 channel_update_uart_busconfig_test.go
+		 * 的 TestChannelUpdate_UART2ByteRouteAccepted —— 那是 P0 回归护栏，收严会让 simulation 门禁变红）。
+		 *
+		 * ⇒ **不要在这里加"UART 需 >=6"**：那会误伤"只有引脚路由、还没配波特率"的合法通道。
+		 * 固件对**下发**要求 >=6（bus_manager.c:443），这条约束属于**组装 manifest 时**的补全，
+		 * 由 ensureUARTBusConfig / buildUARTBusConfig 负责 —— 见 handler_periph.go:204-238。 */
 		if len(bytes) < 2 {
 			return nil, fmt.Errorf("%s bus_config requires at least 2 bytes", busType)
 		}

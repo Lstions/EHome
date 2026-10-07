@@ -10,6 +10,7 @@ import (
 
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
+	"ehome/backend/internal/uartcfg"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -292,8 +293,12 @@ func encodeConfigManifest(snap *manifestSnapshot, channels []models.Channel, use
 			"USB": 4,
 			"ADC": 5, "5": 5,
 		}
-		if bt, ok := busTypeMap[strings.ToUpper(ch.BusType)]; ok {
-			subEnc.EncodeVarint(6, uint64(bt))
+		/* ⭐ 记住解析结果：下面"UART 的 bus_config 必须 >= 6 字节"那条补全要用到它。
+		 * ⚠ 用 busTypeMap 的**同一结果**而不是另写一次 EqualFold —— 两处判断一旦漂移，
+		 *   就会出现"编码时按 A 类型、补全时按 B 类型"的静默错配（P4：同一语义一份定义）。 */
+		encodedBusType, hasBusType := busTypeMap[strings.ToUpper(ch.BusType)]
+		if hasBusType {
+			subEnc.EncodeVarint(6, uint64(encodedBusType))
 		}
 
 		// Bus config
@@ -303,15 +308,46 @@ func encodeConfigManifest(snap *manifestSnapshot, channels []models.Channel, use
 		}
 		if busConfigData != "" {
 			/* Try hex decode first — PostgreSQL bytea may already be binary in-memory */
-			if decoded, err := hex.DecodeString(busConfigData); err == nil && len(decoded) > 0 {
-				subEnc.EncodeBytes(7, decoded)
-			} else if strings.HasPrefix(busConfigData, `\x`) {
-				hexStr := busConfigData[2:]
-				if decoded, err := hex.DecodeString(hexStr); err == nil && len(decoded) > 0 {
-					subEnc.EncodeBytes(7, decoded)
-				} else {
-					subEnc.EncodeString(7, busConfigData)
+			var decodedBytes []byte
+			switch {
+			case strings.HasPrefix(busConfigData, `\x`):
+				decodedBytes, _ = hex.DecodeString(busConfigData[2:])
+			default:
+				if d, err := hex.DecodeString(busConfigData); err == nil && len(d) > 0 {
+					decodedBytes = d
 				}
+			}
+
+			/* ⭐ 2026-10-07（真机实测缺陷）：UART 的 bus_config 必须 >= 6 字节才下发。
+			 *
+			 * 固件判据（bus_manager.c:443）：
+			 *   `if (ch->bus_config_len < 6) return ESP_ERR_INVALID_SIZE;`
+			 * 它必须读到 byte2..5 的 big-endian 波特率。而**后端此前原样下发**，于是：
+			 *   接口 201「通道创建成功」⇒ manifest 下发 ⇒ 设备
+			 *   `BUS_MGR: preinstall rejected by resource plan` ⇒ `ConfigResult success=0`；
+			 *   而**操作员在界面上看到的是成功**（本仓反复记的"后端说成功、设备静默失败"）。
+			 *
+			 * ⇒ 这里补齐，而**不是**在入库时拒绝短值：2 字节是合法的"只配了引脚、还没配
+			 *   波特率"，仿真套件与存量库都在用（channel_update_uart_busconfig_test.go 的
+			 *   TestChannelUpdate_UART2ByteRouteAccepted 是 P0 护栏，且断言**调用方给的值必须
+			 *   原样保留**）。⇒ 入库保持原样、**下发时**补全，两个契约各自成立。
+			 *
+			 * ⇒ 引脚沿用已有字节；波特率用 9600（defaultUARTBaudrate，与建通道兜底同一档）；
+			 *   DMA 位为 0（不擅自替用户开 DMA —— 该位由独立的 dma_enabled 字段承载）。
+			 * ⚠ 已 >= 6 字节时**逐字节不动**：否则会篡改用户已配的波特率/DMA 位。 */
+			const busTypeUART = 1 /* 与 busTypeMap 的 "UART" 同值，取自同一张表的语义 */
+			if hasBusType && encodedBusType == busTypeUART {
+				/* 补齐逻辑走 internal/uartcfg —— 与 api 侧**同一份实现**（P4）。
+				 * 已 >= MinLen 时返回 (nil,false) ⇒ 逐字节保留用户已配的波特率/DMA 位。 */
+				if padded, changed := uartcfg.PadShortUART(decodedBytes); changed {
+					logger.Warnf("channel %d UART bus_config 仅 %d 字节（< 固件下限 %d）⇒ 下发前补默认波特率 %d 到 %d 字节",
+						ch.ID, len(decodedBytes), uartcfg.MinLen, uartcfg.DefaultBaudrate, len(padded))
+					decodedBytes = padded
+				}
+			}
+
+			if decodedBytes != nil {
+				subEnc.EncodeBytes(7, decodedBytes)
 			} else {
 				subEnc.EncodeString(7, busConfigData)
 			}
