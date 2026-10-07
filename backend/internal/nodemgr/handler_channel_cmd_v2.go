@@ -96,10 +96,17 @@ func (m *Manager) handleChannelCmdV2Response(deviceID string, payload []byte) {
 	}
 	if applied && configChanged && m.eventBus != nil {
 		if err := m.eventBus.Publish(configEvent); err != nil {
-			// The durable state, DB side effect and config-change outbox are
-			// already committed. SyncGate will retry the outbox when the
-			// in-memory bus is full or temporarily unavailable.
-			logger.Warnf("[%s] ChannelCmdV2 config sync event enqueue failed command=%s: %v", deviceID, commandID, err)
+			// S5 (2026-10-07): this branch was unreachable until Publish started
+			// returning ErrConfigEventBusFull on a full buffer.
+			//
+			// Disposition: KEPT + explicitly recorded (not reported upwards).
+			// Why reporting is unnecessary here: the durable state, the DB side
+			// effect and the config-change outbox row are already committed in the
+			// same transaction, and SyncGate replays PENDING outbox rows on startup
+			// and once per second. The in-memory bus is therefore already an
+			// optimisation for latency, not the delivery guarantee — a dropped
+			// event costs at most one tick of delay.
+			logger.Warnf("[%s] ChannelCmdV2 config sync event enqueue dropped (bus full), durable outbox will replay command=%s: %v", deviceID, commandID, err)
 		}
 	}
 	if applied && m.wsHub != nil {
