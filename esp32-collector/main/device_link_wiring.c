@@ -140,6 +140,54 @@ uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
     return have_epoch ? epoch : 0u;
 }
 
+/* ── PEM 终止符（2026-10-07，**真机首次联调抓到**）────────────────────
+ *
+ * ## 缺陷回顾（只在真机上暴露）
+ * 首次把 3.0 固件刷到真机（S3 30EDA0A9A808）后，链路日志是：
+ *     E esp-tls-mbedtls: mbedtls_x509_crt_parse of CA cert returned -0x2180
+ *     E esp-tls: create_ssl_handle failed
+ *     W tls_esp: 连接失败: last_error=0x8015 ... -> RETRY_BACKOFF
+ * -0x2180 即 MBEDTLS_ERR_X509_INVALID_FORMAT。原因不在证书内容
+ * （同一份证书在宿主机 openssl verify 通过），而在**缓冲区没有 NUL 终止符**：
+ *
+ * ESP-IDF 契约（components/esp-tls/esp_tls.h:111-112, 137-140 原文）：
+ *   "In case of PEM format, the buffer must be NULL terminated
+ *    (with NULL character included in certificate size)."
+ *   "cacert_bytes: Size of Certificate Authority certificate ...
+ *    (including NULL-terminator in case of PEM format)"
+ * 而 NVS 里的 blob 是**文件原样字节**：PEM 以 "-----END CERTIFICATE-----\n"
+ * 结束（末字节 0x0A），**没有** NUL；我们还按 blob 原样传长度
+ * ⇒ mbedtls 解析 PEM 失败。
+ *
+ * ## ⚠ 为什么宿主测试与构建都没发现（最值得记的部分）
+ *   - 这条路径（devlink_load_certs）**只能在 IDF 里跑**（要 NVS），
+ *     宿主测试根本编不到；
+ *   - 全仓**唯一**构造 tls_esp_certs_t 的地方就是它
+ *     （grep 只有 main/device_link_wiring.c 一处），而它没有宿主测试；
+ *   - tls_esp 组件本身**没有宿主测试**（host_tests 零 include）。
+ *   ⇒ "证书内容对不对"被测过（工具侧 openssl/读回校验），
+ *     "交给 esp-tls 的**缓冲区形状**对不对"**从未被任何人测过**。
+ *   与 §134（生产上行未成帧）**同一族**：宿主测试与真实调用之间有一条缝。
+ *
+ * ## 修法：把这条契约变成**我们代码里的一处具名定义**（P4）
+ * 不让"记得补 NUL"散落在调用点，而是给出可被宿主测试钉住的函数。
+ */
+
+size_t devlink_pem_buf_bytes(size_t raw_len)
+{
+    return raw_len + 1u;   /* 原始字节 + 一个终止符 */
+}
+
+bool devlink_pem_terminate(uint8_t *buf, size_t cap, size_t raw_len, size_t *out_len)
+{
+    if (buf == NULL || out_len == NULL) return false;
+    if (cap < raw_len + 1u) return false;      /* 容量不足 ⇒ 一个字节都不写 */
+    buf[raw_len] = 0u;
+    /* ⚠ 长度**含**终止符：ESP-IDF 明确要求 cacert_bytes 含 NUL。
+     * 传 raw_len 是错的 —— 真机上就是这样失败的。 */
+    *out_len = raw_len + 1u;
+    return true;
+}
 /* ── 3.0 下行帧的分发判定 ── */
 
 static const char *const s_rx_verdict_names[] = {
@@ -395,11 +443,28 @@ static esp_err_t nvs_read_blob_alloc(nvs_handle_t h, const char *key,
         return (v == DEVLINK_CERT_EMPTY) ? ESP_ERR_NVS_NOT_FOUND : ESP_ERR_INVALID_SIZE;
     }
 
-    uint8_t *buf = (uint8_t *)malloc(need);
+    /* ⚠ 多分配 1 字节放 PEM 的 NUL 终止符（esp-tls 的契约，见文件上方
+     * devlink_pem_terminate 的说明）。真机上漏了这一步的后果是
+     * mbedtls_x509_crt_parse 返回 MBEDTLS_ERR_X509_INVALID_FORMAT。 */
+    const size_t cap = devlink_pem_buf_bytes(need);
+    uint8_t *buf = (uint8_t *)malloc(cap);
     if (buf == NULL) return ESP_ERR_NO_MEM;
-    err = nvs_get_blob(h, key, buf, &need);
+    size_t got = need;
+    err = nvs_get_blob(h, key, buf, &got);
     if (err != ESP_OK) { free(buf); return err; }
-    *out = buf; *out_len = need;
+
+    size_t pem_len = 0;
+    if (!devlink_pem_terminate(buf, cap, got, &pem_len)) {
+        /* cap 是按 got 之前的值算的；NVS 返回的大小理论上不会变，
+         * 但若变了（并发写同一 key），这里如实失败而不是溢出。 */
+        ESP_LOGE(TAG, "证书 %s：缓冲不足（got=%u cap=%u）—— 拒绝使用",
+                 key, (unsigned)got, (unsigned)cap);
+        free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    /* out_len 是**含 NUL** 的长度：直接喂给 esp-tls 的 cacert_bytes/
+     * clientcert_bytes/clientkey_bytes（IDF 要求含终止符）。 */
+    *out = buf; *out_len = pem_len;
     return ESP_OK;
 }
 

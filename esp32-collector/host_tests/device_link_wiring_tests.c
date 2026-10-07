@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "device_link_wiring.h"
 
@@ -442,6 +443,78 @@ static void test_frame_round_trips_through_the_wire_decoder(void)
     CHECK(wire_header_has_crc(&h) == false, "不得置 CRC 位（后端条件式校验 + 下行也不置）");
 }
 
+
+/* ════════ 12. PEM 终止符（2026-10-07，真机抓到）════════
+ *
+ * ## 为什么这条必须有
+ * 真机首次联调（S3 30EDA0A9A808）时链路起不来：
+ *     E esp-tls-mbedtls: mbedtls_x509_crt_parse of CA cert returned -0x2180
+ * -0x2180 = MBEDTLS_ERR_X509_INVALID_FORMAT。
+ * 根因不是证书内容（宿主机 openssl verify 通过），而是 **NVS 里的 blob 没有 NUL**：
+ * esp-tls 要求 PEM 缓冲以 NUL 终止、且 *_bytes **含**该终止符
+ * （esp_tls.h:111-112, 137-140），而 NVS 存的是文件原样字节（末尾 0x0A）。
+ *
+ * ## 为什么宿主测试原本抓不到
+ * 出错的那条路（devlink_load_certs）只能编进 IDF（要 NVS），宿主编不到；
+ * 而全仓唯一构造 tls_esp_certs_t 的地方就是它 ⇒ 这段缝**从未被测过**。
+ * ⇒ 修法之一就是把契约抽成**纯函数**，让它能被宿主钉住（本用例）。
+ *
+ * 与 §134（生产上行未成帧）同一族：宿主测试与真实调用之间有一条无人看守的缝。
+ */
+static void test_pem_terminator_contract(void)
+{
+    /* 真实形态：NVS 里的 PEM 以 0x0A 结尾，没有 NUL */
+    uint8_t pem[] = { '-', '-', '-', '-', '-', 0x0A };
+    const size_t raw = sizeof(pem);
+
+    /* ① 所需缓冲 = 原始 + 1（不 +1 就是真机上那个 bug） */
+    CHECK(devlink_pem_buf_bytes(raw) == raw + 1,
+          "PEM 缓冲应为 raw+1 字节（含终止符），实际 %zu", devlink_pem_buf_bytes(raw));
+    CHECK(devlink_pem_buf_bytes(0) == 1, "空材料也要 1 字节放终止符，实际 %zu",
+          devlink_pem_buf_bytes(0));
+
+    /* ② 终止符必须真的写在第 raw 字节上 */
+    uint8_t buf[8];
+    memset(buf, 0xAA, sizeof(buf));
+    /* ⚠ 这个函数只**写终止符**，不复制数据（那是调用方的事：NVS 已经把它读进
+     *   同一块缓冲）。所以我第一版"直接把 buf 拿去和 pem 比"是**测试写错了** ——
+     *   它报"原始字节被改写"，而其实是我从没把 pem 放进去。
+     *   教训：断言失败时先怀疑测试自己的前提，再怀疑实现。 */
+    memcpy(buf, pem, raw);
+    size_t out = 0;
+    CHECK(devlink_pem_terminate(buf, sizeof(buf), raw, &out) == true, "正常路径应成功");
+    CHECK(buf[raw] == 0, "第 raw 字节必须是 NUL，实际 0x%02X", buf[raw]);
+    CHECK(out == raw + 1,
+          "返回长度必须**含**终止符（esp-tls 的 cacert_bytes 契约），实际 %zu", out);
+    CHECK(memcmp(buf, pem, raw) == 0, "原始字节不得被改写");
+
+    /* ③ ⭐ 长度含终止符这一条单独钉住 —— 真机上失败的正是它。
+     * 若有人把 out 改回 raw（"看起来更自然"），这条会红。 */
+    CHECK(out != raw, "长度**不能**等于原始长度：esp-tls 要求含终止符；"
+          "真机上正是这里传错导致 MBEDTLS_ERR_X509_INVALID_FORMAT");
+
+    /* ④ 容量不足 ⇒ 拒绝，且**一个字节都不写**（不半途而废） */
+    uint8_t small[4];
+    memset(small, 0x55, sizeof(small));
+    size_t out2 = 12345;
+    CHECK(devlink_pem_terminate(small, sizeof(small), raw, &out2) == false,
+          "容量不足应返回 false");
+    CHECK(small[0] == 0x55 && small[3] == 0x55, "失败时不得写入任何字节");
+    CHECK(out2 == 12345, "失败时不得改写 out_len");
+
+    /* ⑤ 边界：刚好够 */
+    uint8_t exact[7];      /* raw(6) + 1 —— 我第一版写 exact[6]，那是**差一个**，
+                           * 函数拒绝得对，是我的断言错了 */
+    CHECK(sizeof(exact) == raw + 1, "本边界用例的前提：cap 恰好 == raw+1");
+    CHECK(devlink_pem_terminate(exact, sizeof(exact), raw, &out2) == true,
+          "cap 恰好等于 raw+1 时必须成功");
+    CHECK(out2 == raw + 1 && exact[raw] == 0, "边界情形结果应正确");
+
+    /* ⑥ NULL 参数 */
+    CHECK(devlink_pem_terminate(NULL, 8, raw, &out2) == false, "buf=NULL 应拒绝");
+    CHECK(devlink_pem_terminate(buf, sizeof(buf), raw, NULL) == false, "out_len=NULL 应拒绝");
+}
+
 int main(void)
 {
     test_delim_bytes_matches_wire_constants();
@@ -458,6 +531,7 @@ int main(void)
     test_frame_rejects_bad_input_instead_of_emitting_garbage();
     test_frame_max_payload_boundary_is_accepted();
     test_frame_round_trips_through_the_wire_decoder();
+    test_pem_terminator_contract();
 
     if (s_failures) { printf("device_link_wiring_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_link_wiring_tests: all checks passed\n");

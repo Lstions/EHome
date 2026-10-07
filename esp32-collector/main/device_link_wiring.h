@@ -117,6 +117,30 @@ const char *devlink_place_name(devlink_place_t v);
 /** 单份证书判定。cap 是容量上限。 */
 devlink_cert_t devlink_cert_check(size_t blob_bytes, size_t cap);
 
+/* ── PEM 终止符（2026-10-07，真机抓到 MBEDTLS_ERR_X509_INVALID_FORMAT 后补）──
+ *
+ * esp-tls 的契约（components/esp-tls/esp_tls.h:111-112, 137-140）：
+ *   PEM 缓冲**必须以 NUL 终止**，且 *_bytes **含**这个终止符。
+ * 而 NVS 里存的是文件原样字节（PEM 末尾是 0x0A，没有 NUL）
+ * ⇒ 直接传 blob 与 blob 长度会让 mbedtls 解析失败。
+ *
+ * ⚠ 这两个函数存在的意义：把这条契约变成**一处具名定义**并有宿主测试钉住，
+ * 而不是让每个调用点各自"记得 +1"。真机上就是漏了这一步。
+ */
+
+/** NVS blob 转成 PEM 后应有的缓冲字节数（含终止符）。 */
+size_t devlink_pem_buf_bytes(size_t raw_len);
+
+/**
+ * 在 buf 的 raw_len 处写入 NUL，并把长度（**含终止符**）写进 out_len。
+ *
+ * @param buf     至少 devlink_pem_buf_bytes(raw_len) 字节可写
+ * @param cap     buf 容量
+ * @param raw_len NVS blob 的原始字节数（不含终止符）
+ * @param out_len 输出：**含终止符**的长度，可直接用于 esp-tls 的 *_bytes
+ * @return true 成功；false = 参数为空或容量不足（此时**一个字节都不写**）
+ */
+bool devlink_pem_terminate(uint8_t *buf, size_t cap, size_t raw_len, size_t *out_len);
 /**
  * 定界器一次性分配的**连续**字节数 = max_payload + 12(头) + 4(CRC)。
  * 上界常量取自 wire.h（P5：唯一来源，不在这里重抄一份）。
