@@ -38,11 +38,37 @@
  *
  * ## 与 `transport_sel` 的关系（为什么本轮**不**接它）
  * `transport_sel`（§7.3 P2 的"TCP 优先 / MQTT 兜底"）已实现且有宿主测试，但**未接线**。
- * 本轮**不接**它，理由：本适配器一旦注册，`transport_broadcast` 的既有行为
+ *
+ * ### ⚠⚠ 更正（2026-10-07，本轮**实测推翻**了我上一轮写在这里的理由）
+ *
+ * 我上一轮写的是："本适配器一旦注册，`transport_broadcast` 的既有行为
  * （只对 `is_connected()` 为真的 transport 发送）**已经**给出了正确语义 ——
- * 未 READY 时它不会被选中，MQTT 兜底自然保留。
- * 引入 `transport_sel` 会**再叠一层选择**，在没有真实双栈设备可验的情况下
- * 属于**过度设计**（用户明确要求避免）。⇒ 待 §7.3 P2 真正上线、有 2.8.0 设备可测时再接。
+ * 未 READY 时它不会被选中，MQTT 兜底自然保留。"
+ *
+ * **这个理由是错的，而且错在危险的方向**：
+ * 它只考虑了"**未 READY** 时会不会误投"，却漏了**双栈稳态**（MQTT 与 3.0 都 connected）。
+ * `transport_broadcast` 的语义是**对每一个 is_connected() 为真的 transport 都发**
+ * —— 所以在双栈稳态下，**同一帧会被投递两次**。
+ *
+ * 这不是推测，是可测的：`host_tests/transport_dualstack_tests.c` 用**真实**
+ * `components/transport/transport.c` 构造该场景并数 send 次数 ⇒
+ * `mqtt.send_calls == 1 && tcp3.send_calls == 1`，即**一帧两投**。
+ *
+ * 而且触发路径正是**设备主动上行**：`msg_handler_publish_checked` 先看
+ * `s_current_transport`，而它**只在处理下行期间非 NULL**
+ * （`msg_handler_process_with_transport` 进去置、出来清，见 msg_handler.c:145-163）。
+ * 设备自己发 Hello/DataReport/DataBatch/状态上报时它是 NULL ⇒ **走 broadcast** ⇒ 双发。
+ *
+ * 后果（静默）：后端可能把重复 Hello 当重连（无害），
+ * 但重复 DataReport/DataBatch 会被当**两批数据**入库；设备侧两次 send 都返回 ESP_OK，
+ * **没有任何错误**。⇒ 属审计 D-01 同一族（"压平/重复"）。
+ *
+ * ### 因此：**接线时必须同时接 `transport_sel`**（或等价地让上行单选）
+ * `transport_sel` 正是为这件事设计的（§68）：**TCP 优先、MQTT 兜底、有连续失败阈值**。
+ * 本适配器只负责"把 session 变成一条 transport"，**不负责选路** ——
+ * 选路必须由 `transport_sel` 决定，否则双栈稳态必然双发。
+ * ⇒ 本文件只交付适配层；**注册与选路由接线那一步一起做**（下一步），
+ *   且接线后必须让 `transport_dualstack_tests` 的"双发"用例变成"只发一次"。
  */
 #ifndef EHOME_SESSION_TRANSPORT_H
 #define EHOME_SESSION_TRANSPORT_H

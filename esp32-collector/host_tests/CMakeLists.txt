@@ -923,6 +923,20 @@ target_include_directories(transport_broadcast_tests PRIVATE
     hello_stubs
 )
 target_compile_options(transport_broadcast_tests PRIVATE -Wall -Wextra -Werror)
+
+# 双栈期"同一帧被发两次"的实证（真实 transport.c，不是替身）。
+# 接 3.0 transport 之前必须先看到这个数字：MQTT 与 3.0 同时 connected 时，
+# 设备主动上行会走 broadcast ⇒ **两条都被调用**。
+add_executable(transport_dualstack_tests
+    transport_dualstack_tests.c
+    ../components/transport/transport.c
+)
+target_include_directories(transport_dualstack_tests PRIVATE
+    ../components/transport/include
+    hello_stubs
+)
+target_compile_options(transport_dualstack_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME transport_dualstack_tests COMMAND transport_dualstack_tests)
 add_executable(msg_handler_publish_tests
     msg_handler_publish_tests.c
     ../components/transport/transport.c
