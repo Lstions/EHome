@@ -74,6 +74,11 @@
 #include "device_link_handshake.h"
 #include "link.h"
 #include "link_tcp.h"
+#include "msg_handler.h"   /* task-23: 真实 msg_handler_send_hello */
+#include "frame_codec.h"   /* task-23: handler 内部用到的 MSG_HELLO 等 */
+#include "config_mgr.h"    /* task-23: 桩声明 */
+#include "sync_manager.h"  /* task-23: 桩声明 */
+#include "rgb_led.h"       /* task-23: 桩声明 */
 #include "rx_pump.h"
 #include "session.h"
 #include "wire.h"
@@ -100,6 +105,76 @@ static const uint8_t kRebootPayload[15] = {
 
 /* ── 结果输出（机器可读；Lead 的脚本按前缀 grep）── */
 
+/* ==========================================================================
+ * task-23：Hello 改用**真实 handler 的编码**（消除手写的第二份定义）
+ *
+ * ## 之前的问题
+ *
+ * 本程序原先自己手写了一份 Hello 编码（裸数字 1/2/3/4/5/6/8/9），与真机的
+ * handler_hello.c 是**同一协议的两份独立定义**。实测危害：把 handler_hello.c
+ * 的 field **编号** 4 改成 10（真实破坏 —— 后端 required 集缺 4 ⇒ 不回
+ * HelloAck ⇒ 设备永远进不了 READY），跨语言对锚**仍然 rc=0 / result=PASS**，
+ * 因为对锚用的是客户端那份。⇒ 对锚当时证明不了"**真机的** Hello 编码是对的"。
+ *
+ * ## 现在怎么做（方案 A：真正一处定义，P4）
+ *
+ * 直接调用**生产**的 msg_handler_send_hello()（与真机同一个函数），由它按
+ * HELLO_F_* 常量与 field 7 条件发送规则编码；本程序只提供
+ * msg_handler_publish() 的**捕获实现**把产出的字节接住 ——
+ * 这正是 host_tests/hello_handshake_tests.c:128 已在用的手法。
+ *
+ * ⇒ **未改任何生产文件**（没有给 handler_hello.c 加"只编码不发布"的新入口）。
+ *
+ * ## 代价与桩（诚实记录）
+ *
+ * 要编入 handler_hello.c 及其依赖，故 target 多链接了 handler_hello.c 与
+ * 若干桩。桩的取值决定 field 5/6/7：
+ *   config_mgr_get_epoch()                     -> field 5
+ *   config_mgr_has_manifest()                  -> field 6
+ *   config_mgr_get_last_known_manifest_id()    -> field 7（非空才发）
+ * 下面桩返回 0 / false / "" ⇒ 与之前手写版本发**同样那 8 个字段**，对锚行为不变。
+ * ========================================================================== */
+
+/* ---- 真实 handler 所需的最小桩 ---- */
+uint64_t config_mgr_get_epoch(void) { return 0; }
+bool config_mgr_has_manifest(void) { return false; }
+const char *config_mgr_get_last_known_manifest_id(void) { return ""; }
+void sync_manager_start_config_timeout(void) {}
+void sync_manager_on_downlink_received(uint8_t msg_type) { (void)msg_type; }
+void rgb_led_set_state(led_state_t state) { (void)state; }
+/* handler_hello.c 引用 main/ 的握手监督器；本程序不跑它。 */
+bool hello_handshake_notify_ack(uint32_t nonce) { (void)nonce; return false; }
+
+/* ---- 捕获 msg_handler_publish：这就是"取字节"的入口，无需改生产代码 ---- */
+static uint8_t s_hello_capture[512];
+static size_t  s_hello_capture_len;
+static bool    s_hello_captured;
+
+void msg_handler_publish(const uint8_t *data, size_t len)
+{
+    if (len == 0 || len > sizeof(s_hello_capture)) return;
+    memcpy(s_hello_capture, data, len);
+    s_hello_capture_len = len;
+    s_hello_captured = true;
+}
+
+/* 用**真实 handler** 编一条 Hello，返回原始字节（含类型字节，不含 3.0 头）。 */
+static const uint8_t *build_hello_via_real_handler(size_t *out_len)
+{
+    s_hello_captured = false;
+    s_hello_capture_len = 0;
+    /* 参数与之前手写版本逐项相同，保证对锚行为不变：
+     *   node_id="v3-link-node"  fw="3.0-link"  model="esp32"
+     *   channel_count=1  nonce=1（非 0）
+     * field 5/6/8 由 handler 依桩与 HELLO_F_* 常量决定。 */
+    msg_handler_send_hello("v3-link-node", "3.0-link", "esp32", 1u, 1u);
+    if (!s_hello_captured) {
+        *out_len = 0;
+        return NULL;
+    }
+    *out_len = s_hello_capture_len;
+    return s_hello_capture;
+}
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -375,39 +450,47 @@ int main(int argc, char **argv)
     uint8_t hello_frame[128];
     size_t  hello_len = 0;
     {
-        /* ⚠ 字段必须**完整**：后端 parseHello 的 required 是
-         * {1,2,3,4,5,6,8,9}，缺一个就整条 Hello 被拒 ⇒ 后端不回 HelloAck
-         * ⇒ 设备永远进不了 READY。
-         * 我第一版只发了 {1,2,3,8,9}（"最小 Hello 够握手就行"）—— 实测被打回：
-         * 方向0a 通过（后端解出了 node_id），但"真实路由回 HelloAck 条数 = 0"，
-         * 因为 parseHello 报 missing required field 4/5/6。
-         * 字段号用字面量（本程序是宿主测试，不链接 msg_handler_internal.h）；
-         * 与 handler_hello.c 的 hello_field_t 一致。 */
+        /* ⚠ task-23：**不再手写字段号**。
+         *
+         * 这里调用**生产**的 msg_handler_send_hello()（与真机同一个函数），
+         * 由它按 HELLO_F_* 常量与 field 7 条件发送规则编码；本文件顶部提供了
+         * msg_handler_publish() 的捕获实现把字节接住。
+         *
+         * 为什么必须这样（实测危害）：原先手写的这份与 handler_hello.c 是同一
+         * 协议的两份独立定义。把 handler_hello.c 的 field **编号** 4 改成 10 后，
+         * 对锚仍然 rc=0/PASS —— 因为对锚用的是手写那份，真机那份改了它毫发无损。
+         * ⇒ 对锚证明不了"真机的 Hello 编码是对的"。改成调用真实函数后，
+         * handler 的任何编号漂移都会直接改变本程序发出的字节。
+         *
+         * 后端 parseHello 的 required 是 {1,2,3,4,5,6,8,9}；缺一个就整条被拒
+         * ⇒ 不回 HelloAck ⇒ 设备永远进不了 READY。该完整性由 handler 保证，
+         * 并由 host_tests/hello_handshake_tests.c 的逐字段断言守护。 */
+        size_t hello_payload_len = 0;
+        const uint8_t *hello_payload = build_hello_via_real_handler(&hello_payload_len);
+        if (hello_payload == NULL || hello_payload_len == 0) {
+            say("note=real_handler_produced_no_hello");
+            session_destroy(sess);
+            return fail("hello_encode");
+        }
+        if (WIRE_HEADER_BYTES + hello_payload_len > sizeof(hello_frame)) {
+            say("note=hello_too_big len=%zu", hello_payload_len);
+            session_destroy(sess);
+            return fail("hello_encode");
+        }
+        memcpy(hello_frame + WIRE_HEADER_BYTES, hello_payload, hello_payload_len);
+
         wire_header_t hh;
         memset(&hh, 0, sizeof(hh));
         hh.ver   = (uint8_t)WIRE_VER;
         hh.type  = MSG_HELLO;                 /* 0x01，来自 frame_codec.h */
         hh.flags = 0;
         hh.seq   = 1;
-        /* payload 先编到 hello_frame 头之后，再回填 payload_len */
-        frame_encoder_t enc;
-        frame_encoder_init(&enc, hello_frame + WIRE_HEADER_BYTES,
-                           sizeof(hello_frame) - WIRE_HEADER_BYTES, MSG_HELLO);
-        (void)frame_encode_string(&enc, 1, "v3-link-node");
-        (void)frame_encode_string(&enc, 2, "3.0-link");
-        (void)frame_encode_string(&enc, 3, "esp32");
-        (void)frame_encode_varint(&enc, 4, 1u);      /* channel_count（required）*/
-        (void)frame_encode_varint(&enc, 5, 0u);      /* config_epoch（required）*/
-        (void)frame_encode_varint(&enc, 6, 0u);      /* nvs_has_config（required）*/
-        (void)frame_encode_string(&enc, 8, "2.6");   /* proto_ver 仍 2.6（设计 §0.2）*/
-        (void)frame_encode_varint(&enc, 9, 1u);      /* handshake_nonce 非 0 */
-        size_t plen = frame_encoder_size(&enc);
-        hh.payload_len = (uint16_t)plen;
+        hh.payload_len = (uint16_t)hello_payload_len;
         if (wire_encode_header(hello_frame, sizeof(hello_frame), &hh) != WIRE_OK) {
             session_destroy(sess);
             return fail("hello_encode");
         }
-        hello_len = WIRE_HEADER_BYTES + plen;
+        hello_len = WIRE_HEADER_BYTES + hello_payload_len;
     }
 
     /* 发送 Hello：按 link.h 的 progress 循环（PARTIAL 续写，BACKPRESSURE 整帧重试）。 */

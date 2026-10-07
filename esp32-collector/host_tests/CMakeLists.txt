@@ -1277,10 +1277,17 @@ add_executable(firmware_tcp_e2e_client
     # task-17：握手决策（与 main/device_link_wiring.c 用的是**同一份**）
     ../main/device_link_handshake.c
     ../components/frame/frame_codec.c
+    # task-23：Hello 改用**真实 handler 的编码**（消除客户端手写的第二份定义）。
+    # 客户端调用生产的 msg_handler_send_hello()，并提供 msg_handler_publish()
+    # 的捕获实现来接住产出的字节 —— 与 hello_handshake_tests 同一手法。
+    # ⚠ 未改任何生产文件（没有给 handler_hello.c 加"只编码不发布"的新入口）。
+    ../components/msg_handler/handler_hello.c
 )
 target_include_directories(firmware_tcp_e2e_client PRIVATE
+    hello_stubs
     ../main
     ../components/frame
+    ../components/msg_handler
     ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
