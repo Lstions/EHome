@@ -41,10 +41,16 @@ MAIN = os.path.join(ROOT, "main")
 PENDING_WIRING = {
     "msgcodec": (
         "消息编解码原语（纯函数）",
-        "定界已由 wire/rx_pump 接管，但**编解码**仍未接："
-        "① 设计尚未确认「3.0 payload 是否保留 2.x 类型首字节」；"
-        "② 分发仍走 msg_handler 的 switch，要等 dispatch 表接替",
-        "设计确认后由 dispatch/rx_pump 路径调用",
+        # 2026-10-07 更正：原先写的理由 ① 已**过期** ——
+        # 「3.0 payload 是否保留 2.x 类型首字节」已由 §120 决策文档结清
+        # （保留双写 + 两端强制一致性校验），不再是待确认项。
+        # 另：msgcodec 与 frame_codec 是**两份独立实现**；生产用 frame_codec，
+        # msgcodec 供 S0 共享向量的 C 侧校验，两者的逐字节一致性已由
+        # host_tests/codec_equivalence_tests.c 覆盖（不再只是"假定一致"）。
+        "编解码原语**未接入生产路径**：生产用的是 components/frame/frame_codec.c；"
+        "msgcodec 目前只作 S0 共享向量的 C 侧独立实现。要收口只能二选一 ——"
+        "要么改由它驱动 dispatch，要么把它降为纯测试用件并从组件表移除",
+        "由 dispatch 表接替 msg_handler 的 switch 时一并决定（P4：一处定义）",
     ),
     "dispatch": (
         "数据驱动的消息分发表",
