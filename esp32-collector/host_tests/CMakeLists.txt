@@ -864,6 +864,21 @@ target_include_directories(msgcodec_tests PRIVATE ../components/msgcodec/include
 target_compile_options(msgcodec_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME msgcodec_tests COMMAND msgcodec_tests)
 
+# ⭐ 两套独立编解码实现的**逐字节对拍**（frame_codec 生产用；msgcodec 是 S0 向量的 C 侧实现）。
+# 共享向量只覆盖 20 条固定用例 —— 超出之后"两者一致"只是假定。
+# 本 target 把它变成"在大范围边界输入空间上实测一致"。
+add_executable(codec_equivalence_tests
+    codec_equivalence_tests.c
+    ../components/frame/frame_codec.c
+    ../components/msgcodec/msgcodec.c
+)
+target_include_directories(codec_equivalence_tests PRIVATE
+    ../components/frame
+    ../components/msgcodec/include
+)
+target_compile_options(codec_equivalence_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME codec_equivalence_tests COMMAND codec_equivalence_tests)
+
 add_executable(dispatch_tests
     dispatch_tests.c
     ../components/dispatch/dispatch.c
