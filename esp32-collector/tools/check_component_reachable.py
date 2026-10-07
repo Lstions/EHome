@@ -41,91 +41,53 @@ MAIN = os.path.join(ROOT, "main")
 PENDING_WIRING = {
     "msgcodec": (
         "消息编解码原语（纯函数）",
-        "3.0 帧的编解码要由新的 link/rx_pump 路径使用；该路径尚未接管收发",
-        "rx_pump/link 接管收发后，由它们调用",
-    ),
-    "wire": (
-        "3.0 帧定界（12 B 头）",
-        "同上：定界属于新接收路径，而该路径尚未接管",
-        "与 rx_pump 一起接进接收路径",
+        "定界已由 wire/rx_pump 接管，但**编解码**仍未接："
+        "① 设计尚未确认「3.0 payload 是否保留 2.x 类型首字节」；"
+        "② 分发仍走 msg_handler 的 switch，要等 dispatch 表接替",
+        "设计确认后由 dispatch/rx_pump 路径调用",
     ),
     "dispatch": (
         "数据驱动的消息分发表",
         "目前实际分发仍在 msg_handler.c 的 switch 里；分发表尚未替换它",
         "用 dispatch 表替换 msg_handler 的 switch（P4：一处定义）",
     ),
-    "rx_pump": (
-        "接收泵：字节流 -> 消息（定界）",
-        "接收路径仍由既有 transport/msg_handler 负责",
-        "接进接收路径并接上 link_rx_adapt",
-    ),
-    "link": (
-        "上行链路抽象（取代 components/transport）",
-        "新旧两套传输要并存到 §7.3 的 P3/P4；此刻生产仍走 transport",
-        "§7.3 P2（固件 TCP 优先）时接入",
-    ),
     "link_mqtt": (
         "MQTT 的 link 驱动",
-        "link 抽象本身尚未接管，故其 MQTT 驱动也还没被用",
-        "随 link 一起接入（同一阶段）",
-    ),
-    "link_tcp": (
-        "TCP 链路实现（设备为 client）",
-        "3.0 链路尚未接管收发",
-        "随 link 接入（§7.3 P2）",
-    ),
-    "link_rx_adapt": (
-        "link_tcp_read -> rx_read_fn_t 的翻译层",
-        "上游 link_tcp/rx_pump 尚未接管",
-        "随 rx_pump 接入",
-    ),
-    "session": (
-        "会话状态机（DOWN/WAIT_HANDSHAKE/READY/BACKOFF/FATAL）",
-        "会话由新链路驱动，而新链路尚未接管",
-        "随 link 接入（§7.3 P2）",
+        "3.0 链路目前只接 TCP+mTLS；MQTT 兜底是 §7.3 P2 的事，"
+        "由 transport_sel 决定何时回退",
+        "§7.3 P2 阶段随 transport_sel 一起接",
     ),
     "transport_sel": (
         "TCP 优先 / MQTT 兜底的选择策略（§7.3 P2）",
-        "它要选择的两条 link 都还没接管收发",
-        "link 接入后由它决定用哪条",
+        "它要选择的**两条** link 里，link_mqtt 还没接；且阶段未到 P2",
+        "link_mqtt 接好后由它决定用哪条",
     ),
     "sntp_mgr": (
         "SNTP 管理器（填 TLS_ACTION_SYNC_TIME_FIRST 的另一半）",
-        "TLS 握手路径尚未接管，故时间前置条件尚未接上",
-        "TLS 接入时挂到握手前置条件上",
-    ),
-    "tls_guard": (
-        "mTLS 前置条件守卫（时间可信性 + 失败分级）",
-        "同上：它守卫的握手尚未接管",
-        "随 TLS 接入",
-    ),
-    "tls_io": (
-        "esp_tls 返回值 -> 本仓统一语义（归约层）",
-        "它的调用者是 tls_link_adapt，而后者尚未接管",
-        "随 TLS 接入",
-    ),
-    "tls_link_adapt": (
-        "tls_io -> link_tcp 的适配",
-        "同上",
-        "随 TLS 接入",
-    ),
-    "tls_esp": (
-        "esp_tls 真实 I/O 适配",
-        "尚未接入（且它直接 include IDF 头，宿主侧豁免，见 check_host_coverage.py）",
-        "随 TLS 接入",
-    ),
-    "variant": (
-        "型号能力描述（唯一型号知识来源，P8）",
-        "⚠ **三型号差异尚未真正驱动行为**：各 profile 的编译产物不同，"
-        "但运行期还没有代码读它来决定行为",
-        "让内存/通道数等按 variant 取值（P8：差异只影响资源摆放，不影响可观测行为）",
+        "TLS 路径**已接线**（见 device_link_wiring.c），但 SNTP 的"
+        "**真 esp_sntp 适配器尚未实现** ⇒ tls_esp_config_t.now_epoch 仍为 NULL "
+        "⇒ 时间不可信 ⇒ 证书类失败被分级为「可自愈」",
+        "实现 esp_sntp 适配器并把 now_epoch 接上（mTLS 的硬前置）",
     ),
     "nvs_helper": (
         "NVS 读写辅助",
-        "既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用",
+        "既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用"
+        "（device_link_wiring.c 也直接用 nvs_get_blob —— 待统一）",
         "用 helper 替换散落的 nvs 调用（或若确认不需要，删除它）",
     ),
 }
+
+# ⚠ 「可达」的确切含义（2026-10-07 实测补充）
+#
+# 本门禁的"可达"是**源码层**判据：main 声明了依赖（REQUIRES）或 #include 了它。
+# 它**不保证**代码真的进了**默认构建的镜像**：
+#   - 由 Kconfig 开关控制的调用点（如 device_link_wiring.c 里的 3.0 链路）在开关为 n 时，
+#     整个分支会被编译器消除、再被链接器 --gc-sections 丢掉。
+#     实测：开关 n 的 s3-n16 ELF 里 session_create/tls_esp_io 等符号数为 **0**；
+#     开关 y 时全部存在，且 .bin 的 md5 不同。
+#   ⇒ 对这类组件，"可达"= "源码里有真实调用点（编译过）"，**不等于**"已随默认固件出厂"。
+#   判断"是否真的会跑"要看 Kconfig 与运行时日志，不能只看本门禁。
+# 这条限制写在这里而不是留给下一个人去猜。
 
 REQ_RE = re.compile(r"REQUIRES\s+(.*?)\)", re.S)
 INC_RE = re.compile(r'#include\s+"([A-Za-z0-9_/]+\.h)"')

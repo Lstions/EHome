@@ -16,6 +16,7 @@
 #include "msg_handler_hooks.h"   /* B2：钩子的唯一声明处（禁止弱符号）*/
 #include "crash_diag.h"
 #include "boot_guard.h"
+#include "device_link_wiring.h"
 #include "mem_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
@@ -615,6 +616,11 @@ void app_main(void)
      * 注入点刻意放在传输启动之前：晚注入的话，一条早到的 0x22 会命中
      * "未注入 ⇒ 拒绝执行"分支，而操作员看到的是"设备没反应"。 */
     device_op_wiring_init();
+
+    /* 3.0 设备侧链路（TCP + mTLS）。放在这里而不是启动最前面：
+     * 它自己等 WiFi 就绪，所以顺序不敏感；放在接线区一起更好读。
+     * 默认关闭（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）⇒ 不建任务、不分配堆。 */
+    device_link_wiring_init();
 
     /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
      * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)

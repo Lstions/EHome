@@ -96,6 +96,108 @@ menu "EHome Collector Configuration"
                 Allow downloading firmware over plain HTTP.
                 WARNING: No encryption, no authentication. Dev use only.
 
+
+    endmenu
+
+    menu "3.0 Device Link (TCP + mTLS)"
+
+        config EHOME_DEVICE_LINK_ENABLED
+            bool "Enable 3.0 device link (device is TCP client, mTLS)"
+            default n
+            help
+                Turns on the 3.0 uplink: tls_esp (mTLS I/O) -> session, where
+                session internally drives link_tcp / link_rx_adapt / rx_pump / wire.
+
+                Default is **n** on purpose: the shipped firmware's behaviour must
+                not change until the migration reaches §7.3 P2 ("TCP preferred,
+                MQTT fallback").  With n, the implementation is still **compiled**
+                (so the reachability gate's "reachable" means "really called",
+                not merely a REQUIRES line) but no task is created, no heap is
+                allocated and no packet is sent.
+
+                NOTE: enabling this does **not** yet make the link usable.  Two
+                prerequisites are still outstanding (see the module header):
+                  * SNTP is not landed, so now_epoch is NULL -> time is not
+                    trusted -> certificate failures are graded "self-healing"
+                    (retry with backoff) rather than fatal.
+                  * Certificate provisioning into an NVS encrypted partition is
+                    not implemented; with no certs the guard yields hard_fatal
+                    => SESSION_FATAL (no retry storm masking a provisioning gap).
+
+        config EHOME_DEVICE_LINK_HOST
+            string "Backend host (SNI + certificate CN)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default "192.0.2.1"
+            help
+                Backend device-port host name.  The default is a placeholder,
+                not a deployment: 192.0.2.0/24 is TEST-NET-1 (RFC 5737),
+                reserved for documentation and guaranteed unroutable.  A build
+                without an explicit host therefore cannot reach anything, which
+                fails visibly instead of silently connecting to an unintended
+                host.  (Same convention as COLLECTOR_MQTT_BROKER_URL.)
+
+        config EHOME_DEVICE_LINK_PORT
+            int "Backend device port"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 8443
+            help
+                Device port for the 3.0 long-lived TLS connection.  The design
+                specifies 8443 (mTLS).
+
+        config EHOME_DEVICE_LINK_TIMEOUT_MS
+            int "Connect timeout (ms)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 10000
+
+        config EHOME_DEVICE_LINK_MAX_PAYLOAD
+            int "Max single-message payload bytes"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 4096
+            range 256 16368
+            help
+                Upper bound for one 3.0 message payload.  This is a real memory
+                decision, not a formality: the delimiter allocates
+                (max_payload + 12 header + 4 CRC) bytes as **one contiguous
+                block**, and that block must fit the model's contiguous budget.
+                The wiring refuses to start (visibly) if it does not, rather than
+                silently shrinking the bound -- shrinking would change observable
+                behaviour.
+
+                Ceiling 16368 comes from WIRE_PAYLOAD_MAX (derived so that one
+                full message fits in a single TLS record).  The default 4096 is a
+                starting point: the exact downlink bound depends on design
+                decisions that are still open (send window size, whether the 3.0
+                payload keeps the 2.x type byte).
+
+        config EHOME_DEVICE_LINK_RX_BUF
+            int "Read buffer bytes"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 2048
+            help
+                Buffer the session hands to rx_pump for socket reads.  Provided
+                by the caller so the session never implicitly allocates a large
+                block.
+
+        config EHOME_DEVICE_LINK_CERT_BYTES
+            int "Max bytes per certificate material"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default 4096
+            help
+                Per-material cap for ca / cert / key read from NVS.  A blob
+                larger than this is rejected (and reported) rather than accepted
+                by growing the allocation on request.
+
+        config EHOME_DEVICE_LINK_NVS_NS
+            string "NVS namespace holding ca/cert/key"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default "eh_tls"
+            help
+                Namespace containing three blobs: "ca", "cert", "key" (PEM).
+                The design specifies an NVS **encrypted** partition for these;
+                that partition is not implemented yet, so provisioning currently
+                has to be done manually.  Missing material is reported and leads
+                to SESSION_FATAL.
+
     endmenu
 
 endmenu

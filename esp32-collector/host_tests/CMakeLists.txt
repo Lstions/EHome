@@ -1098,6 +1098,24 @@ target_include_directories(scheduler_health_tests PRIVATE ../components/schedule
 target_compile_options(scheduler_health_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)
 
+# 3.0 链路接线里的**判定**（main/device_link_wiring.c 的纯判定部分）。
+# 用 DEVICE_LINK_HOST_TEST=1 只编纯判定，不含任何 IDF 头 ——
+# 这样"有判断的部分"被真正跑到，而不是靠 EXEMPT 绕过覆盖率门禁。
+add_executable(device_link_wiring_tests
+    device_link_wiring_tests.c
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/wire/wire.c
+)
+target_include_directories(device_link_wiring_tests PRIVATE
+    ../main
+    ../components/variant/include
+    ../components/wire/include
+)
+target_compile_definitions(device_link_wiring_tests PRIVATE DEVICE_LINK_HOST_TEST=1)
+target_compile_options(device_link_wiring_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_wiring_tests COMMAND device_link_wiring_tests)
+
 add_executable(rx_pump_tests
     rx_pump_tests.c
     ../components/rx_pump/rx_pump.c

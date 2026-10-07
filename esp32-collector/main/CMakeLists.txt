@@ -12,8 +12,10 @@ idf_component_register(SRCS "main.c"
                               "hello_handshake_runtime.c"
                               "hello_handshake_state.c"
                               "device_op_wiring.c"
+                              "device_link_wiring.c"
                        INCLUDE_DIRS "."
                        REQUIRES freertos nvs_flash device_op
+                       session tls_esp variant
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool
