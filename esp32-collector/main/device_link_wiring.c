@@ -218,7 +218,7 @@ uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
  *   - tls_esp 组件本身**没有宿主测试**（host_tests 零 include）。
  *   ⇒ "证书内容对不对"被测过（工具侧 openssl/读回校验），
  *     "交给 esp-tls 的**缓冲区形状**对不对"**从未被任何人测过**。
- *   与 §134（生产上行未成帧）**同一族**：宿主测试与真实调用之间有一条缝。
+ *   与 §134（生产上行未成帧，**已修**）**同一族**：宿主测试与真实调用之间有一条缝。
  *
  * ## 修法：把这条契约变成**我们代码里的一处具名定义**（P4）
  * 不让"记得补 NUL"散落在调用点，而是给出可被宿主测试钉住的函数。
@@ -399,24 +399,50 @@ static const char *TAG = "DEV_LINK";
 
 /** 链路任务栈。**TLS 握手与所有下行分发都在本任务里跑** ⇒ 不能按"普通轮询任务"给小栈。
  *
- * ## task-34 结论：**保持 8192 不变**（尽管它看起来是最大的一块 8 KB）
+ * ## 8192 → 6144（task-34，**依据真机实测**）
  *
- * 为什么不动它：
- *   1. **不需要**。把定界器缓冲（4112）+ 读缓冲（2048）改放 PSRAM 后，
- *      内部连续块预期 15872 → 22032，已越过 s3p 的 16384 floor（余量 5648 B）。
- *      即"只搬缓冲"就足以修好本卡的缺陷。
- *   2. **没有依据把它改小**。收窄栈必须先有**实测峰值**（OTA 的先例是
- *      "实测 3124 B 才从 8K 降到 4K"）；而本卡**没有**在真机上测过 dev_link 的
- *      uxTaskGetStackHighWaterMark ⇒ 任何收缩都是估算，正是那条例外禁止的。
- *      猜出来的栈大小会在某个长尾路径上以**随机踩踏**回来，比内存不足难查得多。
- *   3. ⇒ 正确顺序是：**先**打开采样、真机观测，**再**单独评估收缩。
- *      本卡已把 dev_link 加进 main.c 的采样名单（纯观测、无风险），
- *      于是"峰值到底是多少"这个问题**从此可回答**。
+ * ### 实测数据（Lead，受控镜像：同源/同设备/180 s，只差 LINK_ENABLED）
+ *     [stack] dev_link high_water=4024 bytes free   （t=61 s 与 t=121 s 两次一致）
+ * 栈 8192 − 未用 4024 ⇒ **峰值 4168 B**。
  *
- * ⚠ 栈**必须内部 RAM**（不能像同卡的缓冲那样放 PSRAM）：
- * 本任务会执行 OTA，而 esp_ota_write 期间 flash cache 关闭、PSRAM 不可访问
- * ⇒ 栈在 PSRAM 上会在 OTA 中崩。见决策文档 §3C。 */
-#define DEVLINK_TASK_STACK 8192
+ * ⚠ uxTaskGetStackHighWaterMark 记录的是**历史最小剩余（累计）**，
+ * 所以 t=61 s 的读数**已经包含**了 t≈3 s 那次 TLS 握手（以及 Hello/发布）的峰值
+ * —— 握手正是本任务里最深的调用链（session_poll → tls_esp_connect →
+ * esp_tls_conn_new_sync → mbedTLS 握手）。⇒ 4168 是**含握手**的峰值，不是空载值。
+ *
+ * ### 为什么不必再等"OTA 峰值"（我先前把它当硬前置，是**错的**）
+ * 本任务**不会**执行 OTA 的实际工作：
+ *   devlink_on_msg → msg_handler_process → handler_data_process_ota
+ *     只**解析** OtaCmd，然后调 ota_start()；
+ *   ota_start() 用 **xTaskCreateStatic** 另建 ota_task（ota.c:903，栈在 .bss），
+ *   **下载与 esp_ota_write 全在那个任务里**。
+ * ⇒ OTA 不落在本栈上，"先测 OTA 峰值再定栈"对本任务**不适用**。
+ *
+ * ### 取值与余量
+ * 6144 / 4168 = **1.47x**，高于本仓**已被接受**的两个更紧的先例：
+ *   status_task 5120/3996 = 1.28x（main.c:139）；hello_super 3072/2172 = 1.41x。
+ * 取 6144 而非 5120：5120 只有 1.23x，**低于**本仓自己已接受的 1.28x。
+ *
+ * ### 为什么必须缩（而不是只搬缓冲）
+ * 实测：link=n 稳态 largest=**23552**，link=y 稳态 largest=**15360**，差**恰好 8192**
+ * —— 就是本栈（xTaskCreate 从堆里切走一整块连续内存）。
+ * 而 s3p 的 floor 是 16384 ⇒ 被它压到线下 ⇒ ConfigManifest 被**永久拒绝**。
+ * 缩 6144 可把 largest 抬回约 **17408**（越过 floor，余 1024）。
+ *
+ * ⚠ 余量只有 1024 B **是已知的**：
+ *   - 若后续要给 status/hello_super 补栈（link=y 时只剩 1.11x/1.18x），
+ *     **那 1024 B 不够**（两者合计需 1024~2048）⇒ 必须另找预算，
+ *     不要把 B 的账记在 A2 腾出的额度上（见决策文档 §12）。
+ *   - 若把本栈改为 **xTaskCreateStatic**：等价于把 8192 整块还给堆
+ *     （largest 可回 ~23552），代价是 DIRAM +8192 超出 s3p 阈值 151500 ⇒
+ *     需同步调 mem_budget.json 与基线文档，属独立决策。
+ *
+ * ⚠ 栈**必须内部 RAM**（不能像同卡的缓冲那样放 PSRAM）—— 但**理由更正**：
+ * 我先前写"因为本任务执行 OTA"，**那是错的**（见上：OTA 在自己的任务里）。
+ * 真正的理由是 s3p 上 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=n，
+ * 且 PSRAM 栈在 flash 写（cache 关闭）窗口内被调度会崩 —— 与本任务是否跑 OTA 无关。
+ * 见决策文档 §3C。 */
+#define DEVLINK_TASK_STACK 6144
 #define DEVLINK_TASK_PRIO  5
 
 /* ── 注入项 ── */

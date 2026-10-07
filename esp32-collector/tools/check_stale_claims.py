@@ -36,6 +36,7 @@ still outstanding"，第一条是 "SNTP is not landed" —— 而 SNTP **早已�
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -148,6 +149,58 @@ def scan(claims):
     return out
 
 
+# ── 规则 3：注释里的**消息 ID 声称**必须与权威表一致（2026-10-07）
+#
+# 为什么加它：`components/msg_handler/handler_data.c` 顶部写着
+#     * Receives: MSG_OTA_CMD (0x0C)
+# 而权威表 `components/frame/frame_codec.h:48` 是 `#define MSG_OTA_CMD 0x0A`。
+# 这行**从写下那天起就是错的**，且它恰在一份"本文件收哪些消息"的清单里 ——
+# 与规则 1/2 同族：**读的人会以为清单是可信的**。
+#
+# 判据是**可机械判定**的（不像 TODO）：从权威表取值，与注释里的声称比。
+#
+# ⚠ 只在**符号确实存在于表中**时判不一致；表里没有的符号只报 WARN ——
+#   注释可能引用别的东西（协议名、外部规范），不能一律判错。
+TABLE_H = os.path.join(COMP, "frame", "frame_codec.h")
+MSG_CLAIM = re.compile(r"\b(MSG_[A-Z_0-9]+)\s*\(\s*(0[xX][0-9A-Fa-f]+)\s*\)")
+
+
+def message_ids_from_table():
+    """权威表：{MSG_X: '0xnn'}。返回 (dict, error)。"""
+    if not os.path.exists(TABLE_H):
+        return None, "找不到权威表 %s" % TABLE_H
+    body = open(TABLE_H, encoding="utf-8", errors="replace").read()
+    out = {}
+    for m in re.finditer(r"#define\s+(MSG_[A-Z_0-9]+)\s+(0[xX][0-9A-Fa-f]+)", body):
+        out[m.group(1)] = m.group(2).lower()
+    return out, None
+
+
+def scan_message_ids(table):
+    """返回 (mismatch, unknown)：[(相对路径, 行号, 符号, 声称, 实际)]。"""
+    mism, unk, n_seen = [], [], 0
+    for p in iter_source_files():
+        try:
+            lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
+        except Exception:
+            continue
+        for i, raw in enumerate(lines, 1):
+            if EXEMPT in raw:
+                continue
+            s = raw.strip()
+            if not (s.startswith("*") or s.startswith("//") or s.startswith("/*")):
+                continue
+            for name, claimed in MSG_CLAIM.findall(raw):
+                n_seen += 1
+                real = table.get(name)
+                rel = os.path.relpath(p, ROOT)
+                if real is None:
+                    unk.append((rel, i, name, claimed, "<不在表中>"))
+                elif real != claimed.lower():
+                    mism.append((rel, i, name, claimed, real))
+    return mism, unk, n_seen
+
+
 def main():
     # ── 下界断言：证明扫描器没瞎（否则"0 命中"可能只是路径错了）──
     n_files = sum(1 for _ in iter_source_files())
@@ -171,6 +224,29 @@ def main():
         for f, i, s in scan(CLAIM_FRAME):
             bad.append((f, i, s, "上行成帧已修（%s）" % why_f))
 
+        # 规则 3：消息 ID 声称 vs 权威表
+        table, terr = message_ids_from_table()
+        if table is None:
+            print("FAIL 无法读取权威消息表：%s" % terr)
+            return 2
+        if len(table) < 20:
+            # 下界断言：证明表解析器没瞎（否则"0 不一致"可能只是没解析到）
+            print("FAIL 权威表只解析出 %d 项 —— 解析器错了，本规则形同虚设" % len(table))
+            return 2
+        mism, unk, n_seen = scan_message_ids(table)
+        n_seen_msg = n_seen
+        if n_seen < 5:
+            # 下界断言：证明扫描器**确实看到了**注释里的声称。
+            # ⚠ 不能用 len(mism)+len(unk) 做下界 —— 那等于"没有问题时判失败"，
+            #   会把"全部正确"误判成"扫描器坏了"。（我第一版就是这么写的。）
+            print("FAIL 只扫到 %d 条 MSG_X(0xNN) 注释声称 —— 扫描器错了，本规则形同虚设" % n_seen)
+            return 2
+        for f, i, name, claimed, real in mism:
+            bad.append((f, i, "%s (%s)" % (name, claimed),
+                        "权威表 %s = %s（见 frame_codec.h）" % (name, real)))
+        for f, i, name, claimed, _ in unk:
+            print("WARN %s:%d 注释声称 %s (%s)，但权威表里没有该符号" % (f, i, name, claimed))
+
     if bad:
         print("FAIL 以下注释的声称与代码事实**不一致**（过期清单）：")
         for f, i, s, truth in bad:
@@ -185,6 +261,8 @@ def main():
 
     print("PASS 扫描 %d 个源文件，未发现过期的『未完成』声称" % n_files)
     print("     （SNTP: %s；成帧: %s）" % ("已落地" if landed else "未落地", why_f))
+    print("     （消息 ID: 核对 %d 条注释声称 vs 权威表 %d 项，全部一致）"
+          % (n_seen_msg, len(table)))
     return 0
 
 

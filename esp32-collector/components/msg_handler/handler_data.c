@@ -2,7 +2,7 @@
  * @file handler_data.c
  * @brief DataReport/StatusReport/OtaProg message handler
  *
- * Receives: MSG_OTA_CMD (0x0C)
+ * Receives: MSG_OTA_CMD (0x0A)
  * Sends:    DataReport (0x03), StatusReport (0x02), OtaProg (0x0D)
  */
 
@@ -59,7 +59,7 @@
  * 已删除 —— 声明见 msg_handler_hooks.h，强实现在 main/app_callbacks.c。
  * 一个漏实现就放行的内存门禁，比没有门禁更危险：它看起来是开着的。 */
 
-/* === Receive: OtaCmd (0x0C) === */
+/* === Receive: OtaCmd (0x0A) === */
 
 void handler_data_process_ota(frame_decoder_t *dec)
 {
