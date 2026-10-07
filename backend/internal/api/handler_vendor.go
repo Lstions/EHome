@@ -32,9 +32,18 @@ import (
 // 不要只删端点而留下无人引用的表结构。
 func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	// === Vendors ===
+	// S4 修复 (2026-10-07): 本端点与 /device-models 改前**没有** clamp ——
+	// page_size=-1 让 GORM 丢弃 LIMIT(返回全表)、page_size=0 写 LIMIT 0(静默空页)、
+	// 超大 page_size 不设限。补上与全仓其余 10 个分页端点同款的归一。
 	v1.GET("/vendors", func(c *gin.Context) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
 		var vendors []models.Vendor
 		var total int64
 		db.Model(&models.Vendor{}).Count(&total)
@@ -97,6 +106,12 @@ func registerVendorRoutes(v1 *gin.RouterGroup, db *gorm.DB) {
 	v1.GET("/device-models", func(c *gin.Context) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 20
+		}
 		vendorID := c.Query("vendor_id")
 		var deviceModels []models.DeviceModel
 		var total int64

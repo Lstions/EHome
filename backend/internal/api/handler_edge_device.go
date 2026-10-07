@@ -1239,8 +1239,17 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 		}
 		from := c.Query("start_time")
 		to := c.Query("end_time")
+		// S4 修复 (2026-10-07): 本端点改前没有 clamp (与 /edge-devices 列表端点不同,
+		// 它一直有)。page_size=-1 → LIMIT 整条丢弃 → 返回该设备**全量**历史;
+		// page_size=0 或 "abc" → LIMIT 0 → 静默空页。归一后越界值回落到本端点默认 50。
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		if page < 1 {
+			page = 1
+		}
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 50
+		}
 		cond, args := dataScopeCond(qs)
 		var data []models.DeviceData
 		// P2.2 取消传播: device_data 分页查询绑定请求上下文。

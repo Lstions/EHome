@@ -273,10 +273,20 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 	})
 
 	// Get node data
+	//
+	// S4 修复 (2026-10-07): limit 必须归一到有界默认值。
+	// 改前 limit 的错误被丢弃、也不做范围检查, 于是:
+	//   ?limit=-1  → GORM 丢弃整条 LIMIT 子句 → 返回**全表**(无界);
+	//   ?limit=0 或 ?limit=abc → GORM 写 LIMIT 0 → **静默空页**(用户看不到任何提示);
+	//   ?limit=100000000 → 未钳制的超大值 → 单次响应体不受控。
+	// 三种都归 100, 与 handler_data.go 的 limit 写法保持同一口径。
 	v1.GET("/nodes/:id/data", func(c *gin.Context) {
 		id := c.Param("id")
 		limitStr := c.DefaultQuery("limit", "100")
 		limit, _ := strconv.Atoi(limitStr)
+		if limit <= 0 || limit > 1000 {
+			limit = 100
+		}
 		node, err := findNodeByID(db, id)
 		if err != nil {
 			Error(c, http.StatusNotFound, "node not found")
