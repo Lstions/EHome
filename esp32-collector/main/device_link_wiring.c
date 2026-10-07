@@ -69,6 +69,7 @@ const char *devlink_place_name(devlink_place_t v)
     case DEVLINK_PLACE_OK:                   return "OK";
     case DEVLINK_PLACE_NO_VARIANT:           return "NO_VARIANT";
     case DEVLINK_PLACE_EXCEEDS_CONTIGUOUS:   return "EXCEEDS_CONTIGUOUS";
+    case DEVLINK_PLACE_EXCEEDS_COEXIST:      return "EXCEEDS_COEXIST";
     default:                                 return "UNKNOWN";
     }
 }
@@ -88,14 +89,42 @@ uint32_t device_link_delim_bytes(uint32_t max_payload)
 }
 
 devlink_place_t device_link_check_placement(uint32_t max_payload,
+                                            uint32_t tls_in_bytes,
                                             const variant_caps_t *caps)
 {
     /* 取不到型号能力时**不猜**：默默用一个默认上界会把"型号表没接上"
      * 伪装成"内存刚好够"，之后在真机上以随机失败的形式回来。 */
     if (caps == NULL) return DEVLINK_PLACE_NO_VARIANT;
-    if (device_link_delim_bytes(max_payload) > caps->internal_contiguous_max) {
+
+    const uint32_t delim = device_link_delim_bytes(max_payload);
+
+    /* 判据 1：单笔连续块（定界器的 `calloc(max_payload+16)`）。 */
+    if (delim > caps->internal_contiguous_max) {
         return DEVLINK_PLACE_EXCEEDS_CONTIGUOUS;
     }
+
+    /* 判据 2：⭐ **并存**需求（2026-10-07 补，推导见 §125）。
+     *
+     * 为什么必须有这一条：
+     * 定界器缓冲与 mbedTLS 记录缓冲**在会话存活期内同时存在**，
+     * 而三型号的 `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC` **都没开**
+     * （实测，含带 PSRAM 的 s3p）⇒ TLS 的 IN 缓冲一定来自**内部 RAM**。
+     * ⇒ 两笔各自都要在内部找到连续块。
+     *
+     * 用 S3/S3P 的 23552 B 上界算：
+     *   单笔判据放行到 max_payload = 23536（Kconfig 上限 16368 ⇒ 旧守卫**恒过**）
+     *   并存判据只放行到 max_payload = 23552 − 16384 − 16 = **7152**
+     * ⇒ 旧守卫在 (7152, 23536] 区间说"OK"，而运行期 TLS 必然失败 ——
+     *   正是"**守卫说没事、真机才炸**"的形态。
+     *
+     * `tls_in_bytes == 0` 表示该构建没有 TLS（或调用方明确不评估）⇒ 退化为旧行为。
+     * ⚠ 传 0 必须**是有意的**：调用方在 main 里传的是编译期常量
+     * `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN`，不会因为"忘了传"而静默通过。 */
+    if (tls_in_bytes > 0 &&
+        (delim + tls_in_bytes) > caps->internal_contiguous_max) {
+        return DEVLINK_PLACE_EXCEEDS_COEXIST;
+    }
+
     return DEVLINK_PLACE_OK;
 }
 
@@ -716,7 +745,10 @@ void device_link_wiring_init(void)
 
     /* ── 1) 放置判定（P8：型号差异只影响资源摆放）── */
     devlink_place_t place = device_link_check_placement(
-        (uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD, variant_caps());
+        (uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD,
+        /* 并存判据：TLS IN 缓冲常驻内部 RAM，与定界器缓冲同时存活。 */
+        (uint32_t)CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN,
+        variant_caps());
     if (place != DEVLINK_PLACE_OK) {
         /* 不"悄悄调小"——调小会改变可观测行为（大消息被判超上界），必须可见地失败。 */
         const variant_caps_t *vc = variant_caps();

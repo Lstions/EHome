@@ -1445,6 +1445,26 @@ add_executable(handler_device_op_tests
     ../components/frame/frame_codec.c
     ../components/device_op/device_op.c
 )
+
+# task-24：**真实** 0x22→执行→0x23 回程的字节级证明。
+# 对锚里那条 0x23 是手写常量（firmware_tcp_e2e_client.c:90-93）⇒ 只证明
+#「手写的正确形状能被后端接受」，没证明「设备真的会产生它」。
+# 本用例用真实 handler_device_op.c + device_op.c 跑一遍并断言 == 共享向量。
+add_executable(device_op_ack_realtime_tests
+    device_op_ack_realtime_tests.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/frame/frame_codec.c
+    ../components/device_op/device_op.c
+)
+target_include_directories(device_op_ack_realtime_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/msg_handler
+    ../components/frame
+    ../components/device_op/include
+)
+target_compile_options(device_op_ack_realtime_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_op_ack_realtime_tests COMMAND device_op_ack_realtime_tests)
 target_include_directories(handler_device_op_tests PRIVATE
     stubs
     stubs/rom

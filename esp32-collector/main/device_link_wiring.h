@@ -87,7 +87,12 @@ typedef enum {
 typedef enum {
     DEVLINK_PLACE_OK = 0,
     DEVLINK_PLACE_NO_VARIANT,          /* 取不到型号能力：**不猜**，拒绝 */
-    DEVLINK_PLACE_EXCEEDS_CONTIGUOUS,  /* 需要的连续块超型号上界 */
+    DEVLINK_PLACE_EXCEEDS_CONTIGUOUS,  /* 单笔连续块（定界器）超型号上界 */
+    /* ⭐ **并存**判据：定界器与 TLS 记录缓冲**同时存活**，两者的连续需求之和超上界。
+     * 与上一条分成两个取值，是因为**两个上界数字完全不同**
+     * （S3/S3P：单笔上限 23536，并存上限 7152）——
+     * 合成一个取值会让操作员不知道该调小到多少。见 .c 里的详细说明。 */
+    DEVLINK_PLACE_EXCEEDS_COEXIST,
 } devlink_place_t;
 
 const char *devlink_cert_name(devlink_cert_t v);
@@ -103,11 +108,21 @@ devlink_cert_t devlink_cert_check(size_t blob_bytes, size_t cap);
 uint32_t device_link_delim_bytes(uint32_t max_payload);
 
 /**
- * 这个连续块在本型号上放得下吗。
+ * 这条链路的**连续块需求**在本型号上放得下吗。
  * 用型号的 `internal_contiguous_max`（largest 类判据）而不是 free ——
  * OTA 那次"free 够、largest 不够"的事故就是这一类。
+ *
+ * ⚠ **两条判据，不是一条**（2026-10-07 补，详见 .c 里的推导）：
+ *   1. `delim = max_payload + 16` 单笔 ≤ 上界；
+ *   2. `delim + tls_in_bytes` ≤ 上界 —— 因为定界器缓冲与 mbedTLS 记录缓冲
+ *      **在会话存活期内同时存在**，两笔都要各自找到连续内部块。
+ *
+ * `tls_in_bytes` 传 0 表示"不评估并存约束"（只做单笔判据，等价于旧行为）。
+ * ⇒ 调用方应传**真实的** `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN`；
+ *    传 0 只在"该构建没有 TLS"时才正确。
  */
 devlink_place_t device_link_check_placement(uint32_t max_payload,
+                                            uint32_t tls_in_bytes,
                                             const variant_caps_t *caps);
 
 /* ── SNTP 接线里的判定（宿主可测）── */

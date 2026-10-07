@@ -22,6 +22,16 @@
 #include <stdio.h>
 
 #include "device_link_wiring.h"
+
+/* 测试用的 TLS IN 缓冲字节数。
+ *
+ * ⚠ 为什么**不能**填 0 就完事：0 表示"不评估并存约束"，会让本用例在
+ * (7152, 23536] 这个**真实危险区间**上给出假的 OK（见 §125）。
+ * 宿主构建没有 Kconfig，所以这里给一个**与三型号出厂配置一致**的实值
+ * （实测 s3/s3p/c6 的 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN 都是 16384）。 */
+#ifndef TLS_IN_TEST
+#define TLS_IN_TEST 16384u
+#endif
 #include "variant.h"
 #include "wire.h"
 
@@ -79,21 +89,28 @@ static void test_placement_across_all_three_variants(void)
         if (vc == NULL) continue;
 
         /* 小载荷在任何型号上都该放得下（否则就是上界配得太小） */
-        CHECK(device_link_check_placement(256, vc) == DEVLINK_PLACE_OK,
+        CHECK(device_link_check_placement(256, TLS_IN_TEST, vc) == DEVLINK_PLACE_OK,
               "%s：256 B 载荷应当放得下（连续上界 %u）",
               vc->name, (unsigned)vc->internal_contiguous_max);
 
-        /* ★ 核心：判据是"最高载荷是否超型号连续上界"，
-         *   期望值**从型号表推导**，不是我手填的数字。 */
+        /* ★ 核心：期望值**从型号表推导**，不是我手填的数字。
+         * ⚠ 现在是**两条判据**：先判单笔（定界器），再判并存（定界器 + TLS IN）——
+         *   顺序不可交换，且两个失败原因必须能区分（上界数字完全不同）。 */
         uint32_t need = device_link_delim_bytes(WIRE_PAYLOAD_MAX);
-        devlink_place_t want = (need > vc->internal_contiguous_max)
-                             ? DEVLINK_PLACE_EXCEEDS_CONTIGUOUS
-                             : DEVLINK_PLACE_OK;
-        CHECK(device_link_check_placement(WIRE_PAYLOAD_MAX, vc) == want,
-              "%s：最大载荷 %u B 连续块 vs 型号上界 %u ⇒ 期望 %s，实际 %s",
-              vc->name, (unsigned)need, (unsigned)vc->internal_contiguous_max,
+        devlink_place_t want;
+        if (need > vc->internal_contiguous_max) {
+            want = DEVLINK_PLACE_EXCEEDS_CONTIGUOUS;
+        } else if (need + TLS_IN_TEST > vc->internal_contiguous_max) {
+            want = DEVLINK_PLACE_EXCEEDS_COEXIST;
+        } else {
+            want = DEVLINK_PLACE_OK;
+        }
+        CHECK(device_link_check_placement(WIRE_PAYLOAD_MAX, TLS_IN_TEST, vc) == want,
+              "%s：最大载荷 %u B（+TLS %u B）vs 型号上界 %u ⇒ 期望 %s，实际 %s",
+              vc->name, (unsigned)need, (unsigned)TLS_IN_TEST,
+              (unsigned)vc->internal_contiguous_max,
               devlink_place_name(want),
-              devlink_place_name(device_link_check_placement(WIRE_PAYLOAD_MAX, vc)));
+              devlink_place_name(device_link_check_placement(WIRE_PAYLOAD_MAX, TLS_IN_TEST, vc)));
     }
 
     /* 三型号都必须真的不同 —— 若哪天表被抄成一样，说明"型号差异"名存实亡 */
@@ -110,9 +127,68 @@ static void test_no_variant_is_refused_not_guessed(void)
 {
     /* 默默用一个默认上界，会把"型号表没接上"伪装成"内存刚好够"，
      * 之后在真机上以随机失败的形式回来。必须显式拒绝。 */
-    CHECK(device_link_check_placement(1024, NULL) == DEVLINK_PLACE_NO_VARIANT,
+    CHECK(device_link_check_placement(1024, TLS_IN_TEST, NULL) == DEVLINK_PLACE_NO_VARIANT,
           "caps=NULL 应判 NO_VARIANT（不猜），实际 %s",
-          devlink_place_name(device_link_check_placement(1024, NULL)));
+          devlink_place_name(device_link_check_placement(1024, TLS_IN_TEST, NULL)));
+}
+
+/* ════════ 3b. ⭐ 并存判据：守卫不许在"真机必炸"的区间上说 OK ════════
+ *
+ * 这条用例的存在理由（2026-10-07 实测发现的真实缺口）：
+ * 旧守卫只看**单笔**连续块（定界器 = max_payload+16）对型号上界，
+ * 而这条链路还要**同时**持有一个 mbedTLS 记录缓冲（三型号都是内部 RAM）。
+ * 于是存在一个区间：**守卫说 OK，运行期 TLS 必然失败**。
+ *
+ * 用 S3/S3P 的 23552 B 上界算：
+ *   单笔判据放行到 max_payload ≤ 23536
+ *   并存判据只能到        max_payload ≤ 7152
+ * ⇒ (7152, 23536] 就是那个"守卫骗人"的区间。
+ * 本用例把它钉死：该区间内必须判 EXCEEDS_COEXIST，且**原因可与单笔区分**。 */
+static void test_coexist_is_guarded_not_just_single_block(void)
+{
+    const variant_caps_t *vc = variant_caps_for(VARIANT_S3);
+    CHECK(vc != NULL, "S3 能力表应存在");
+    if (vc == NULL) return;
+
+    const uint32_t L = vc->internal_contiguous_max;       /* 23552（实测） */
+    const uint32_t mp_single_ok  = L - 16u;               /* 单笔判据的上限 */
+    const uint32_t mp_coexist_ok = L - TLS_IN_TEST - 16u; /* 并存判据的上限 */
+    CHECK(mp_coexist_ok < mp_single_ok,
+          "并存上限应严格小于单笔上限（否则本用例没有区分度）");
+
+    /* ① 并存上限之内 ⇒ OK（且必须真的能同时放下两笔） */
+    CHECK(device_link_check_placement(mp_coexist_ok, TLS_IN_TEST, vc) == DEVLINK_PLACE_OK,
+          "max_payload=%u 恰好放得下（单笔+TLS=%u ≤ 上界 %u）",
+          (unsigned)mp_coexist_ok,
+          (unsigned)(device_link_delim_bytes(mp_coexist_ok) + TLS_IN_TEST), (unsigned)L);
+
+    /* ② ⭐ 超并存上限 1 字节 ⇒ 必须判 EXCEEDS_COEXIST（这是本用例的核心） */
+    CHECK(device_link_check_placement(mp_coexist_ok + 1u, TLS_IN_TEST, vc)
+              == DEVLINK_PLACE_EXCEEDS_COEXIST,
+          "max_payload=%u：单笔放得下但**并存放不下** ⇒ 必须拒绝，实际 %s",
+          (unsigned)(mp_coexist_ok + 1u),
+          devlink_place_name(device_link_check_placement(mp_coexist_ok + 1u, TLS_IN_TEST, vc)));
+
+    /* ③ 危险区间里任取一点都必须被拒（不是只挡边界） */
+    CHECK(device_link_check_placement((mp_coexist_ok + mp_single_ok) / 2u, TLS_IN_TEST, vc)
+              == DEVLINK_PLACE_EXCEEDS_COEXIST,
+          "危险区间中点必须被拒 —— 否则就是'守卫说 OK、真机才炸'");
+
+    /* ④ ⭐ 两个失败原因必须**可区分**：单笔超界报 CONTIGUOUS，并存超界报 COEXIST。
+     *    合成一个取值会让操作员不知道该把 MAX_PAYLOAD 调小到多少。 */
+    CHECK(device_link_check_placement(mp_single_ok + 1u, TLS_IN_TEST, vc)
+              == DEVLINK_PLACE_EXCEEDS_CONTIGUOUS,
+          "单笔超界应报 EXCEEDS_CONTIGUOUS（不是 COEXIST）");
+    CHECK(DEVLINK_PLACE_EXCEEDS_CONTIGUOUS != DEVLINK_PLACE_EXCEEDS_COEXIST,
+          "两个失败取值必须不同（否则日志里分不清是哪种超界）");
+
+    /* ⑤ 反向对照：tls_in_bytes==0 ⇒ 只评估单笔（退化为旧行为）。
+     *    这条**不是**说"传 0 就安全"，而是钉住"无 TLS 构建的语义没被改坏"。 */
+    CHECK(device_link_check_placement(mp_single_ok, 0u, vc) == DEVLINK_PLACE_OK,
+          "tls_in_bytes=0（无 TLS 构建）时单笔判据仍应放行到单笔上限");
+    CHECK(device_link_check_placement(mp_single_ok + 1u, 0u, vc)
+              == DEVLINK_PLACE_EXCEEDS_CONTIGUOUS,
+          "tls_in_bytes=0 时超单笔界仍应报 CONTIGUOUS");
 }
 
 /* ════════ 4. 证书三态必须分开 ════════ */
@@ -236,6 +312,7 @@ int main(void)
     test_delim_bytes_matches_wire_constants();
     test_placement_across_all_three_variants();
     test_no_variant_is_refused_not_guessed();
+    test_coexist_is_guarded_not_just_single_block();
     test_cert_verdict_three_states();
     test_names_are_nonempty();
     test_net_edge_only_on_change();
