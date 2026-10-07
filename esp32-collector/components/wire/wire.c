@@ -139,7 +139,34 @@ struct wire_delim {
     size_t   cap;           /* max_payload + 头 + CRC */
     size_t   start;         /* 未消费数据的起点（惰性压缩用） */
     size_t   len;           /* 有效字节数；数据位于 buf[start, len) */
+    /* task-34：缓冲是"自己 malloc 的"还是"调用方给的"。
+     * 调用方给的缓冲**不得**被本模块 free —— 否则会 free 掉一块可能来自
+     * PSRAM 的堆指针（heap_caps 分配的指针必须用 heap_caps_free），
+     * 那是堆损坏级别的错误，且在宿主上（同一 malloc）**测不出来**。 */
+    bool     owns_buf;
 };
+
+/* task-34：用调用方提供的缓冲创建定界器。
+ *
+ * 为什么需要它：定界器缓冲是 max_payload + 16 字节（默认 4112）的**纯数据**
+ * 缓冲，只需"够大且连续"，**不需要**内部 RAM。s3p 上把它放 PSRAM 可以把
+ * 内部连续块还给内存门禁（见 docs/设计/决策-3.0-s3p-内部RAM-2026-10-07.md）。
+ *
+ * 为什么不直接在本文件调 heap_caps_malloc：本文件按约束 C2 **不依赖 IDF**
+ * （宿主测试直接编它）。把 IDF 分配器写进来会破坏宿主可测性。
+ * ⇒ 用"调用方注入缓冲"的形态：IDF 侧负责选池，本层只负责用它。 */
+wire_delim_t *wire_delim_create_with_buf(uint32_t max_payload, uint8_t *buf, size_t cap)
+{
+    const size_t need = (size_t)max_payload + WIRE_HEADER_BYTES + WIRE_CRC_BYTES;
+    if (max_payload == 0 || buf == NULL || cap < need) return NULL;
+    wire_delim_t *d = (wire_delim_t *)calloc(1, sizeof(*d));
+    if (d == NULL) return NULL;
+    d->max_payload = max_payload;
+    d->cap = need;
+    d->buf = buf;
+    d->owns_buf = false;
+    return d;
+}
 
 wire_delim_t *wire_delim_create(uint32_t max_payload)
 {
@@ -150,13 +177,14 @@ wire_delim_t *wire_delim_create(uint32_t max_payload)
     d->cap = (size_t)max_payload + WIRE_HEADER_BYTES + WIRE_CRC_BYTES;
     d->buf = (uint8_t *)malloc(d->cap);
     if (d->buf == NULL) { free(d); return NULL; }
+    d->owns_buf = true;
     return d;
 }
 
 void wire_delim_destroy(wire_delim_t *d)
 {
     if (d == NULL) return;
-    free(d->buf);
+    if (d->owns_buf) free(d->buf);
     free(d);
 }
 

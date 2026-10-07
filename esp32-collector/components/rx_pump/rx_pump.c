@@ -32,17 +32,22 @@ const char *rx_pump_result_name(rx_pump_result_t r)
     return s_names[r];
 }
 
-rx_pump_t *rx_pump_create(uint32_t max_payload,
-                          rx_read_fn_t read_fn, void *read_ctx,
-                          rx_msg_cb_t cb, void *cb_ctx,
-                          uint8_t *read_buf, size_t read_buf_cap)
+/* task-34：定界器缓冲可由调用方注入（放在哪个内存池由调用方决定）。
+ * delim_buf == NULL 时退化为"本层自己 malloc"（= 本卡之前的逐字节行为）。 */
+rx_pump_t *rx_pump_create_ex(uint32_t max_payload,
+                             rx_read_fn_t read_fn, void *read_ctx,
+                             rx_msg_cb_t cb, void *cb_ctx,
+                             uint8_t *read_buf, size_t read_buf_cap,
+                             uint8_t *delim_buf, size_t delim_cap)
 {
     /* 参数校验：缺任何一个都**不**构造半成品对象（P1） */
     if (read_fn == NULL || cb == NULL || read_buf == NULL || read_buf_cap == 0) return NULL;
 
     rx_pump_t *p = (rx_pump_t *)calloc(1, sizeof(*p));
     if (p == NULL) return NULL;
-    p->delim = wire_delim_create(max_payload);
+    p->delim = (delim_buf != NULL)
+                   ? wire_delim_create_with_buf(max_payload, delim_buf, delim_cap)
+                   : wire_delim_create(max_payload);
     if (p->delim == NULL) { free(p); return NULL; }
     p->read_fn = read_fn;
     p->read_ctx = read_ctx;
@@ -51,6 +56,16 @@ rx_pump_t *rx_pump_create(uint32_t max_payload,
     p->read_buf = read_buf;
     p->read_buf_cap = read_buf_cap;
     return p;
+}
+
+rx_pump_t *rx_pump_create(uint32_t max_payload,
+                          rx_read_fn_t read_fn, void *read_ctx,
+                          rx_msg_cb_t cb, void *cb_ctx,
+                          uint8_t *read_buf, size_t read_buf_cap)
+{
+    /* 定界器缓冲传 NULL ⇒ 本层自己 malloc（保持既有调用点逐字节不变）。 */
+    return rx_pump_create_ex(max_payload, read_fn, read_ctx, cb, cb_ctx,
+                             read_buf, read_buf_cap, NULL, 0);
 }
 
 rx_pump_t *rx_pump_create_feeder(uint32_t max_payload,

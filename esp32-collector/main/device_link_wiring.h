@@ -165,6 +165,23 @@ devlink_place_t device_link_check_placement(uint32_t max_payload,
                                             uint32_t tls_in_bytes,
                                             const variant_caps_t *caps);
 
+/* ── task-34：链路缓冲的内存池选择（纯判定，宿主可测）──
+ *
+ * 3.0 链路新增的定界器缓冲（max_payload+16，默认 4112）与读缓冲（默认 2048）
+ * 都是**纯数据**缓冲，不参与 DMA、不在 flash 写期间被访问 ⇒ 可以放 PSRAM。
+ * 在 s3p 上这样做能把内部连续块还给内存门禁（此前 ConfigManifest 被永久拒绝）。
+ *
+ * 归一化（P8）：三型号走同一条判据，差别只在"PSRAM 可用与否"这一个放置维度；
+ * 无 PSRAM 时自动落回内部 RAM，与改动前逐字节相同 ⇒ 行为不变，只有放置不同。
+ */
+typedef enum {
+    DEVLINK_BUF_PLACE_INTERNAL = 0,  /* 无 PSRAM：放内部（= 改动前行为）*/
+    DEVLINK_BUF_PLACE_PSRAM,         /* 有 PSRAM：放外部 */
+} devlink_buf_place_t;
+
+devlink_buf_place_t devlink_buf_place(bool psram_available);
+const char *devlink_buf_place_name(devlink_buf_place_t p);
+
 /* ── SNTP 接线里的判定（宿主可测）── */
 
 /**

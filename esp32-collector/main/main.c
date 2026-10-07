@@ -242,6 +242,22 @@ static void status_task(void *pv)
                 "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
                 "hello_super", "periph_worker", "periph_rsp", "rgb_led",
                 "factory_reset",
+                /* ⭐ task-34：以下两个任务此前**不在采样名单里**。
+                 *
+                 * 3.0 的链路任务（8 KB 栈）漏得最要命：它是 3.0 引入的新任务，
+                 * 水位既没被记录、也没进 MemReport ⇒ "3.0 到底占了多少栈"在真机上
+                 * **无法回答**（只能靠猜），而本卡恰恰要求先测再改。
+                 * 名单漏项本身就是一类静默缺陷：采样在跑、看着很全，
+                 * 只是恰好漏掉了要观察的那个对象。 */
+                "dev_link",
+                /* S3 的 USB 数据泵（bus_dma.c:1189，栈 3072）—— 真实存在且常驻，
+                 * 同理应当被观察。 */
+                "usb_rx",
+                /* ⚠ "uart0_dl"（bus_dma.c:169，栈 2048）**故意不加**：
+                 * 它只在 USB 下载模式下创建，正常运行期不存在 ⇒ 加进来会
+                 * 恒为 xTaskGetHandle==NULL，除了多一次无效查找没有任何信息。
+                 * 写明理由是为了下一个人不必再查一遍"这是漏了还是有意为之"。
+                 * 若将来该任务在正常启动路径上也被创建，必须加进来。 */
             };
             size_t min_stack_free = (size_t)-1;
             for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {

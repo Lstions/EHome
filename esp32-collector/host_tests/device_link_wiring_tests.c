@@ -515,6 +515,27 @@ static void test_pem_terminator_contract(void)
     CHECK(devlink_pem_terminate(buf, sizeof(buf), raw, NULL) == false, "out_len=NULL 应拒绝");
 }
 
+/* ⭐ task-34：链路缓冲的池选择（P8 归一化）。
+ *
+ * 为什么必须钉住：3.0 链路在内部 RAM 上新增 2 KB 读缓冲 + 4 KB 定界器缓冲，
+ * 而 s3p 的内部连续块余量只剩约 7 KB ⇒ 差 512 字节 ⇒ ConfigManifest 被内存
+ * 门禁**永久拒绝**（真机 §139.4）。修法是把这两块纯数据缓冲放 PSRAM。
+ *
+ * 本判据要保证的是**三型号行为不变**：无 PSRAM 时必须落回内部（= 改动前），
+ * 有 PSRAM 时才走外部 —— 差别只是放置，不是可观测行为。 */
+static void test_buf_place_is_only_about_psram(void)
+{
+    CHECK(devlink_buf_place(false) == DEVLINK_BUF_PLACE_INTERNAL,
+          "无 PSRAM（s3/c6）⇒ 必须落回内部 RAM（与改动前逐字节相同）");
+    CHECK(devlink_buf_place(true) == DEVLINK_BUF_PLACE_PSRAM,
+          "有 PSRAM（s3p）⇒ 放外部，把内部连续块还给内存门禁");
+    CHECK(devlink_buf_place(true) == devlink_buf_place(true),
+          "同一输入必须给同一结论（纯函数，无隐藏状态）");
+    CHECK(devlink_buf_place_name(DEVLINK_BUF_PLACE_INTERNAL) != NULL &&
+          devlink_buf_place_name(DEVLINK_BUF_PLACE_PSRAM) != NULL,
+          "两个取值都要有非空名字（日志里要能看出放哪了）");
+}
+
 int main(void)
 {
     test_delim_bytes_matches_wire_constants();
@@ -532,6 +553,7 @@ int main(void)
     test_frame_max_payload_boundary_is_accepted();
     test_frame_round_trips_through_the_wire_decoder();
     test_pem_terminator_contract();
+    test_buf_place_is_only_about_psram();   /* task-34 */
 
     if (s_failures) { printf("device_link_wiring_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_link_wiring_tests: all checks passed\n");

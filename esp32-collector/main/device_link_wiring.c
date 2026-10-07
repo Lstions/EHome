@@ -88,6 +88,57 @@ uint32_t device_link_delim_bytes(uint32_t max_payload)
     return max_payload + (uint32_t)WIRE_HEADER_BYTES + (uint32_t)WIRE_CRC_BYTES;
 }
 
+/* ⭐ task-34：3.0 链路缓冲的**内存池选择**（纯判定，宿主可测）。
+ *
+ * ## 为什么需要它
+ * 3.0 链路在内部 RAM 上新增了 8 KB 任务栈 + 2 KB 读缓冲 + 4 KB 定界器缓冲，
+ * 而 s3p 的内部连续块余量只剩 7 KB ⇒ 实测差 512 字节 ⇒ ConfigManifest 被
+ * 内存门禁**永久拒绝**（真机 §139.4）。
+ *
+ * ## 推理（逐条对应"能不能放外部"）
+ *   - **定界器缓冲**：纯字节累积缓冲。**不参与 DMA**（字节由 CPU 从 TLS 读入后
+ *     逐块喂进 wire_delim_feed），因此**不受"flash 写期间 cache 关闭"的限制** ——
+ *     那条限制针对的是被 DMA/ISR 访问的缓冲。
+ *     先例：接收方向**同一形态**的缓冲早就在 PSRAM 里 ——
+ *     config_mgr 的 manifest 槽（CONFIG_MGR_MANIFEST_BYTES，见 config_mgr.c:91
+ *     的 collector_mem_alloc_pref_psram 调用）；那是"后端下发的配置字节"，
+ *     与定界器缓冲是同一类东西。⇒ **允许外部**。
+ *   - **读缓冲 rx_buf**：同理（TLS 读入的普通缓冲，非 DMA）。
+ *   - **任务栈**：**不放外部**。理由不是"做不到"，而是：
+ *     ① 3.0 任务会执行 OTA 与所有下行分发（见 devlink_on_msg），而 OTA 写 flash
+ *        期间 flash cache 关闭、PSRAM **不可访问** ⇒ 栈放 PSRAM 会在 OTA 中崩；
+ *     ② s3p 的 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=n（**实测未开**）。
+ *     ⇒ 栈**保持内部、且保持 8192 不动**（见 DEVLINK_TASK_STACK）。
+ *
+ *     ⚠ 这里曾写过「真机实测栈峰值仅 ~1.4 KB」并据此把栈缩到 4096 ——
+ *     **那是编造的**：从来没有测过 dev_link 的水位（当时的采样名单里没有它，
+ *     日志里也没有任何读数）。已还原为 8192。
+ *     ⇒ 唯一与它相关的正当改动是把 dev_link **加进采样名单**（纯观测），
+ *     让"峰值到底是多少"从此**可回答**；先测，再决定要不要改。
+ *
+ * ## 归一化（P8 不变性）
+ * 三型号都走**同一条**判据；差别只在"PSRAM 可用与否"这一个**放置**维度：
+ * 无 PSRAM 的 s3/c6 上 collector_mem 的桩返回 NULL ⇒ 自动落回内部 RAM，
+ * 与改动前**逐字节相同**。⇒ 行为不变，只有放置不同。
+ *
+ * @param psram_available  该型号是否有可用的外部 RAM 池
+ * @return 定界器/读缓冲应放的外部内存（应放且不能放时要如实报错，**不静默降级**）
+ */
+/* 类型与取值定义在 device_link_wiring.h（单一来源 P4）—— 本文件只放实现。 */
+devlink_buf_place_t devlink_buf_place(bool psram_available)
+{
+    return psram_available ? DEVLINK_BUF_PLACE_PSRAM : DEVLINK_BUF_PLACE_INTERNAL;
+}
+
+const char *devlink_buf_place_name(devlink_buf_place_t p)
+{
+    switch (p) {
+    case DEVLINK_BUF_PLACE_INTERNAL: return "INTERNAL";
+    case DEVLINK_BUF_PLACE_PSRAM:    return "PSRAM";
+    default:                         return "UNKNOWN";
+    }
+}
+
 devlink_place_t device_link_check_placement(uint32_t max_payload,
                                             uint32_t tls_in_bytes,
                                             const variant_caps_t *caps)
@@ -338,6 +389,7 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 #include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
 #include "msg_handler.h"             /* msg_handler_process：3.0 下行接进既有分发 */
 #include "config_mgr.h"              /* epoch / has_manifest / last_known_manifest */
+#include "collector_mem.h"           /* task-34：PSRAM 优先/内部兜底的放置策略（单一来源 P4）*/
 #include "tls_esp.h"
 #include "wifi_mgr.h"
 #include "sntp_mgr.h"     /* IDF 无关的头（组件约束 C2），只在这里被胶水用到 */
@@ -345,7 +397,25 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 
 static const char *TAG = "DEV_LINK";
 
-/** 链路任务栈。**TLS 握手在本任务里跑** ⇒ 不能按"普通轮询任务"给小栈。 */
+/** 链路任务栈。**TLS 握手与所有下行分发都在本任务里跑** ⇒ 不能按"普通轮询任务"给小栈。
+ *
+ * ## task-34 结论：**保持 8192 不变**（尽管它看起来是最大的一块 8 KB）
+ *
+ * 为什么不动它：
+ *   1. **不需要**。把定界器缓冲（4112）+ 读缓冲（2048）改放 PSRAM 后，
+ *      内部连续块预期 15872 → 22032，已越过 s3p 的 16384 floor（余量 5648 B）。
+ *      即"只搬缓冲"就足以修好本卡的缺陷。
+ *   2. **没有依据把它改小**。收窄栈必须先有**实测峰值**（OTA 的先例是
+ *      "实测 3124 B 才从 8K 降到 4K"）；而本卡**没有**在真机上测过 dev_link 的
+ *      uxTaskGetStackHighWaterMark ⇒ 任何收缩都是估算，正是那条例外禁止的。
+ *      猜出来的栈大小会在某个长尾路径上以**随机踩踏**回来，比内存不足难查得多。
+ *   3. ⇒ 正确顺序是：**先**打开采样、真机观测，**再**单独评估收缩。
+ *      本卡已把 dev_link 加进 main.c 的采样名单（纯观测、无风险），
+ *      于是"峰值到底是多少"这个问题**从此可回答**。
+ *
+ * ⚠ 栈**必须内部 RAM**（不能像同卡的缓冲那样放 PSRAM）：
+ * 本任务会执行 OTA，而 esp_ota_write 期间 flash cache 关闭、PSRAM 不可访问
+ * ⇒ 栈在 PSRAM 上会在 OTA 中崩。见决策文档 §3C。 */
 #define DEVLINK_TASK_STACK 8192
 #define DEVLINK_TASK_PRIO  5
 
@@ -604,6 +674,19 @@ static uint64_t devlink_now_epoch(void)
 
 static session_t *s_session;
 static uint8_t   *s_rx_buf;
+/* task-34：定界器缓冲（纯数据，可放 PSRAM，见 devlink_buf_place 的说明）。 */
+static uint8_t   *s_delim_buf;
+
+/* task-34：本型号是否真的有可用的外部 RAM 池。
+ *
+ * ⚠ 不直接读 CONFIG_SPIRAM：那是"编译期配了"，而这里要回答的是**运行期**
+ * "这块板子真的有 PSRAM 吗"。s3p 的镜像理论上可以被刷到没有 PSRAM 的板子上
+ * （配置写了 =y），此时 heap_caps 的外部池为 0 字节 ⇒ 应当如实落回内部，
+ * 而不是分配失败后不启动链路。 */
+static bool devext_psram_available(void)
+{
+    return heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0;
+}
 static const char *s_state_txt = "NONE";
 static sntp_mgr_state_t s_sntp_last = SNTP_MGR_DISABLED;
 
@@ -1000,14 +1083,46 @@ void device_link_wiring_init(void)
         return;
     }
 
-    /* ── 2) 读缓冲（调用方提供，session 不隐式分配大块）── */
-    s_rx_buf = (uint8_t *)malloc(CONFIG_EHOME_DEVICE_LINK_RX_BUF);
-    if (s_rx_buf == NULL) {
-        ESP_LOGE(TAG, "读缓冲分配失败（%d B）：free=%u largest=%u",
-                 (int)CONFIG_EHOME_DEVICE_LINK_RX_BUF,
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+    /* ── 2) 读缓冲 + 定界器缓冲（task-34：放置交给"能否用 PSRAM"这一个维度）──
+     *
+     * 为什么把这两块放到 PSRAM：它们是 3.0 链路新增的**纯数据**缓冲
+     * （2 KB + 4 KB），而 s3p 的内部连续块余量只剩约 7 KB ⇒ 实测差 512 字节
+     * ⇒ ConfigManifest 被内存门禁永久拒绝。两块都不参与 DMA，也不在 flash 写
+     * 期间被访问（字节都是 CPU 从 TLS 读入后喂给定界器的），所以放外部是安全的。
+     *
+     * ⚠ 分配失败**不静默降级**：降级会让"以为省下了内部 RAM、其实没有"再次发生，
+     * 而那正是本卡要修的形态。分配失败就如实报错并**不启动链路** ——
+     * 宁可链路不启用（可见），也不要一个悄悄吃内部 RAM 的链路。 */
+    {
+        const devlink_buf_place_t place = devlink_buf_place(devext_psram_available());
+        const size_t rx_bytes = (size_t)CONFIG_EHOME_DEVICE_LINK_RX_BUF;
+        const size_t delim_bytes =
+            (size_t)device_link_delim_bytes((uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD);
+
+        if (place == DEVLINK_BUF_PLACE_PSRAM) {
+            s_rx_buf = (uint8_t *)collector_mem_alloc_pref_psram(rx_bytes);
+            s_delim_buf = (uint8_t *)collector_mem_alloc_pref_psram(delim_bytes);
+        } else {
+            s_rx_buf = (uint8_t *)malloc(rx_bytes);
+            s_delim_buf = (uint8_t *)malloc(delim_bytes);
+        }
+
+        if (s_rx_buf == NULL || s_delim_buf == NULL) {
+            ESP_LOGE(TAG, "链路缓冲分配失败（place=%s rx=%u delim=%u，internal free=%u largest=%u）"
+                          " —— 不启动链路（不静默降级到内部，否则会再次吃光内部余量）",
+                     devlink_buf_place_name(place), (unsigned)rx_bytes, (unsigned)delim_bytes,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            collector_mem_free(s_rx_buf);
+            collector_mem_free(s_delim_buf);
+            s_rx_buf = NULL;
+            s_delim_buf = NULL;
+            devlink_free_certs();
+            return;
+        }
+        ESP_LOGI(TAG, "链路缓冲放置=%s（rx=%u B、delim=%u B；internal largest 现在=%u）",
+                 devlink_buf_place_name(place), (unsigned)rx_bytes, (unsigned)delim_bytes,
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-        return;
     }
 
     /* ── 3) 证书 ── */
@@ -1078,6 +1193,10 @@ void device_link_wiring_init(void)
     scfg.max_payload = (uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD;
     scfg.rx_buf = s_rx_buf;
     scfg.rx_buf_cap = CONFIG_EHOME_DEVICE_LINK_RX_BUF;
+    /* task-34：定界器缓冲也由这里提供（放在哪个池由 devlink_buf_place 决定）。 */
+    scfg.delim_buf = s_delim_buf;
+    scfg.delim_buf_cap = (size_t)device_link_delim_bytes(
+        (uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD);
     scfg.now_ms = devlink_now_ms;
     scfg.rand_permille = devlink_rand_permille;
     scfg.on_msg = devlink_on_msg;

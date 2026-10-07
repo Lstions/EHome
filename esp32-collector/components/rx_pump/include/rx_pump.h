@@ -110,6 +110,24 @@ rx_pump_t *rx_pump_create(uint32_t max_payload,
                           uint8_t *read_buf, size_t read_buf_cap);
 
 /**
+ * task-34：与 rx_pump_create 相同，但**定界器缓冲也由调用方提供**。
+ *
+ * 为什么需要：定界器缓冲是 max_payload + 16 字节（默认 4112）的**纯数据**缓冲，
+ * 它只需要"够大且连续"，不需要内部 RAM。在 PSRAM 型号上由调用方把它放外部，
+ * 可以把内部连续块还给内存门禁 —— 这属 P8 允许的"资源放置"差异，
+ * 不改任何可观测行为（同一份字节、同一套定界逻辑）。
+ *
+ * @param delim_buf 调用方拥有的缓冲；**传 NULL 则退化为本层自己 malloc**
+ *                  （= 本卡之前的逐字节行为，既有调用点无需改动）
+ * @param delim_cap delim_buf 的字节数；不足 max_payload + 16 时构造失败
+ */
+rx_pump_t *rx_pump_create_ex(uint32_t max_payload,
+                             rx_read_fn_t read_fn, void *read_ctx,
+                             rx_msg_cb_t cb, void *cb_ctx,
+                             uint8_t *read_buf, size_t read_buf_cap,
+                             uint8_t *delim_buf, size_t delim_cap);
+
+/**
  * 创建"投喂型"接收泵（**由调用方自己读字节**）。
  *
  * ## 为什么需要第二个构造函数

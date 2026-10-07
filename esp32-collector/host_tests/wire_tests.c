@@ -334,6 +334,65 @@ static void test_create_rejects_zero_bound(void)
     wire_delim_destroy(d);
 }
 
+/* ⭐ task-34：**调用方提供缓冲**的定界器契约。
+ *
+ * 背景：s3p 上 3.0 链路把内部 RAM 压到门禁地板以下（ConfigManifest 被永久拒绝），
+ * 修法是把定界器这块**纯数据**缓冲改由调用方注入，从而可以放 PSRAM。
+ * 这块缓冲是 max_payload+16 = 4112 字节，占了 3.0 新增内部占用的很大一块。
+ *
+ * 这组断言钉住三件事（每一件错了都会以很难查的形式回来）：
+ *   1. **用的是调用方那块内存**（不是又被内部 malloc 了一块）——
+ *      否则"放到 PSRAM"根本没发生，而内存门禁照样拒绝；
+ *   2. **销毁时不得 free 调用方的缓冲** —— 调用方给的多半是 heap_caps 分配的
+ *      PSRAM 指针，用 free() 释放是堆损坏级的错误，而且**在宿主上测不出来**
+ *      （宿主只有一种 malloc）。所以这里用"哨兵 + 事后仍可写"来证明它没被释放。
+ *   3. cap 不足必须**拒绝**（而不是照用导致越界写）。 */
+static void test_caller_provided_buffer_is_used_and_not_freed(void)
+{
+    enum { MP = 1024 };
+    /* 哨兵包裹：前后各 8 字节，销毁后必须原封不动。 */
+    static uint8_t pool[MP + WIRE_HEADER_BYTES + WIRE_CRC_BYTES + 16];
+    const size_t need = (size_t)MP + WIRE_HEADER_BYTES + WIRE_CRC_BYTES;
+    uint8_t *buf = pool + 8;
+    memset(pool, 0xA5, sizeof(pool));
+
+    wire_delim_t *d = wire_delim_create_with_buf(MP, buf, need);
+    CHECK(d != NULL, "cap 恰好够时应构造成功");
+
+    /* 1) 真的在用调用方那块：喂一条完整消息，检查解出的 payload 指针落在 buf 内。 */
+    uint8_t msg[WIRE_HEADER_BYTES + 4 + WIRE_CRC_BYTES];
+    wire_header_t h = { .ver = (uint8_t)WIRE_VER, .type = 0x22, .flags = 0,
+                        .seq = 1, .payload_len = 4 };
+    CHECK(wire_encode_header(msg, sizeof(msg), &h) == WIRE_OK, "编码头应成功");
+    msg[WIRE_HEADER_BYTES + 0] = 0xDE; msg[WIRE_HEADER_BYTES + 1] = 0xAD;
+    msg[WIRE_HEADER_BYTES + 2] = 0xBE; msg[WIRE_HEADER_BYTES + 3] = 0xEF;
+
+    const uint8_t *pl = NULL; size_t pl_len = 0;
+    wire_delim_result_t r = wire_delim_feed(d, msg, WIRE_HEADER_BYTES + 4, &pl, &pl_len);
+    CHECK(r == WIRE_DELIM_MSG_READY, "应解出一条消息（实际 %s）", wire_delim_result_name(r));
+    CHECK(pl != NULL && pl_len == 4, "载荷长度应为 4（实际 %u）", (unsigned)pl_len);
+    CHECK(pl >= buf && pl < buf + need,
+          "解出的载荷必须落在**调用方提供的**缓冲里（否则它用的是另一块内存）");
+    CHECK(pl[0] == 0xDE && pl[3] == 0xEF, "载荷内容必须正确");
+
+    wire_delim_destroy(d);
+
+    /* 2) 哨兵未被破坏 ⇒ 既没有越界写，也说明缓冲被使用过但不属于本模块。 */
+    for (int i = 0; i < 8; i++) {
+        CHECK(pool[i] == 0xA5, "缓冲前哨兵第 %d 字节被破坏（越界写）", i);
+        CHECK(pool[8 + need + i] == 0xA5, "缓冲后哨兵第 %d 字节被破坏（越界写）", i);
+    }
+    /* 3) 销毁后这块内存仍由调用方支配：可写且内容保留（没被 free 掉）。 */
+    buf[0] = 0x5A;
+    CHECK(buf[0] == 0x5A, "销毁后调用方仍应能使用自己的缓冲（说明未被 free）");
+
+    /* cap 不足必须拒绝，避免按声明越界写。 */
+    CHECK(wire_delim_create_with_buf(MP, buf, need - 1) == NULL,
+          "cap 少 1 字节必须拒绝");
+    CHECK(wire_delim_create_with_buf(MP, NULL, need) == NULL, "buf 为 NULL 必须拒绝");
+    CHECK(wire_delim_create_with_buf(0, buf, need) == NULL, "上界 0 必须拒绝");
+}
+
 int main(void)
 {
     test_crc32c_check_value();
@@ -348,6 +407,7 @@ int main(void)
     test_max_payload_fits_one_tls_record();
     test_oversized_feed_is_rejected();
     test_create_rejects_zero_bound();
+    test_caller_provided_buffer_is_used_and_not_freed();   /* task-34 */
 
     if (s_failures) { printf("wire_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("wire_tests: all checks passed\n");

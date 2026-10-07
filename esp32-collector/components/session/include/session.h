@@ -65,6 +65,11 @@ typedef struct {
     uint32_t             max_payload;  /* 单条消息载荷上界（传给定界器）*/
     uint8_t             *rx_buf;       /* 读缓冲，调用方提供 */
     size_t               rx_buf_cap;
+    /* task-34：定界器缓冲（可选）。**传 NULL 则由 rx_pump 自己 malloc**
+     * —— 也就是本卡之前的行为。由调用方提供，是为了让它决定内存池：
+     * 这块是纯数据缓冲，在 PSRAM 型号上放外部可以把内部连续块还给内存门禁。 */
+    uint8_t             *delim_buf;
+    size_t               delim_buf_cap;
     /** 单调毫秒时钟（注入 ⇒ 宿主可测）。 */
     uint64_t (*now_ms)(void);
     /** 随机数 [0,1000]（注入 ⇒ 保持核心逻辑纯；抖动幅度见 link_tcp_backoff_ms）。 */

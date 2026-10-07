@@ -150,6 +150,18 @@ typedef struct wire_delim wire_delim_t;
  * 内部缓冲 = max_payload + 头 + CRC，一次分配；不存在按对端声明扩容。
  */
 wire_delim_t *wire_delim_create(uint32_t max_payload);
+
+/**
+ * task-34：用**调用方提供**的缓冲创建定界器（缓冲不归本模块所有，销毁时不释放）。
+ *
+ * 用途：在 PSRAM 型号上把这块**纯数据**缓冲放到外部 RAM，把内部连续块还给
+ * 内存门禁（placement 属 P8 允许的差异，不改任何可观测行为）。
+ * 本文件保持 IDF 无关，所以由调用方决定池。
+ *
+ * @param buf 调用方拥有；cap 必须 >= max_payload + 头 + CRC，否则返回 NULL。
+ */
+wire_delim_t *wire_delim_create_with_buf(uint32_t max_payload, uint8_t *buf, size_t cap);
+
 void         wire_delim_destroy(wire_delim_t *d);
 
 /**

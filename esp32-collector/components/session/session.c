@@ -65,9 +65,11 @@ session_t *session_create(const session_config_t *cfg)
     s->rx_bind = link_rx_binding_new(s->tcp);
     if (s->rx_bind == NULL) { link_destroy(s->link); link_tcp_free(s->tcp); free(s); return NULL; }
 
-    s->pump = rx_pump_create(cfg->max_payload, link_rx_adapt_read, s->rx_bind,
-                             cfg->on_msg, cfg->on_msg_ctx,
-                             cfg->rx_buf, cfg->rx_buf_cap);
+    /* task-34：delim_buf 为 NULL 时 rx_pump 自己 malloc（既有行为不变）。 */
+    s->pump = rx_pump_create_ex(cfg->max_payload, link_rx_adapt_read, s->rx_bind,
+                                cfg->on_msg, cfg->on_msg_ctx,
+                                cfg->rx_buf, cfg->rx_buf_cap,
+                                cfg->delim_buf, cfg->delim_buf_cap);
     if (s->pump == NULL) {
         link_rx_binding_free(s->rx_bind);
         link_destroy(s->link);
