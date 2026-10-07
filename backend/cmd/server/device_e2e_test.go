@@ -39,13 +39,13 @@ import (
 
 // e2ePKI mints a CA, a server cert and a device cert.
 type e2ePKI struct {
-	caCert   *x509.Certificate
-	caKey    *ecdsa.PrivateKey
-	caPEM    []byte
-	srvCert  tls.Certificate
-	devCert  tls.Certificate
-	devNode  string
-	pool     *x509.CertPool
+	caCert  *x509.Certificate
+	caKey   *ecdsa.PrivateKey
+	caPEM   []byte
+	srvCert tls.Certificate
+	devCert tls.Certificate
+	devNode string
+	pool    *x509.CertPool
 }
 
 func newE2EPKI(t *testing.T, deviceCN string) *e2ePKI {
@@ -271,6 +271,88 @@ func buildHelloFrame(t *testing.T, nodeID string, nonce uint32) []byte {
 	return out
 }
 
+// readUntilType 读帧直到遇到 want 类型，期间允许列在 allow 里的、**设计上会交错到来**的帧。
+//
+// ## 为什么需要它（2026-10-07，修一个真实的间歇性失败）
+//
+// 原写法是"读下一帧并断言它是 MsgDeviceOp"。
+// **但服务端在 Hello 之后会主动推一帧配置清单**
+// （handler_hello.go:281 调 SendConfigManifestWithDecision），
+// 而它与"操作下行（0x22）"**谁先到是调度决定的**。
+// 于是该用例偶尔会把 0x04(config_manifest) 当成下行而失败：
+//
+//	downlink type = 0x04, want MsgDeviceOp 0x22
+//
+// （实测：该包单跑 3/3 绿、全量 3/3 绿、单用例 10/10 绿 ——
+//
+//	属"并行重载下才现"的间歇性失败，而间歇性的绿 **不可信**。）
+//
+// 修法为什么不是"直接跳过所有非目标帧"：
+// 那会把"下行真的被别的东西挤掉了"也一并吞掉。
+// 这里只放行**明确列出、且有依据**的交错类型；
+// 其余任何类型都**立刻失败**（宁可嗧一点，不要静默跳过）。
+// serverInitiatedInterleaves —— 服务端在"Hello 成功"之后**主动下发**的帧类型。
+//
+// 这些帧与本用例等的"操作下行（0x22）"**谁先到是调度决定的**。
+// 若用例假设"下一帧就是它"，就会在并行重载下间歇性失败
+// （实测：6 次里红 2 次，报 `downlink type = 0x04, want MsgDeviceOp 0x22`）
+// —— 而间歇性的绿 **不可信**。
+//
+// ❗ 每一项都必须有**出处**（行号），不许凭直觉加。
+// 不在此集合里的类型会被 readUntilType **立刻判失败**（不静默跳过）——
+// 这是有意的：宁可嗧一点，也不要把"下行真被别的东西挤掉了"一并吞掉。
+//
+//   - MsgConfigMfst: handler_hello.go:281 SendConfigManifestWithDecision（仅 SyncActionFull）
+//   - MsgPing:       handler_hello.go:301 SendPing（**异步 goroutine**，所以更容易插到中间）
+//
+// 我是先只加了 MsgConfigMfst，然后在重载复现里被写死了的断言**当场指出**还有 ping
+// （报"等待 0x22 时收到意外类型 0x08(ping)"）—— 这就是"失败信息要指名道姓"的价值：
+// 它比我读代码枚举更可靠。
+var serverInitiatedInterleaves = []uint8{
+	frame.MsgConfigMfst,
+	frame.MsgPing,
+}
+
+func readUntilType(t *testing.T, conn *tls.Conn, want uint8, allow []uint8, timeout time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		frameBytes := readOneFrame(t, conn, remaining)
+		if frameBytes == nil {
+			return nil
+		}
+		h, err := protoframe.DecodeHeader(frameBytes)
+		if err != nil {
+			t.Fatalf("下行帧无法解码: %v", err)
+		}
+		if h.Type == want {
+			return frameBytes
+		}
+		allowed := false
+		for _, a := range allow {
+			if h.Type == a {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			// ⚠ 这里第一版把 want 也写成了 h.Type（两个 %02X 传同一个值），
+			// 于是日志永远显示"等待 0x08 时收到 0x08"—— 自相矛盾、且把真正的
+			// want 藏了起来。报错信息本身也会成为误导源，所以一并修掉。
+			t.Fatalf("等待 0x%02X 时收到意外类型 0x%02X(%s)："+
+				"这不是已知的交错性质，不能静默跳过。"+
+				"若你刚新增了服务端主动下发，请在 serverInitiatedInterleaves "+
+				"里补上它并注明出处（行号）",
+				want, h.Type, frame.MsgTypeName(h.Type))
+		}
+		// 明确允许的交错类型：记一行日志再继续找目标帧。
+		t.Logf("跳过交错帧 0x%02X(%s)，继续等 0x%02X",
+			h.Type, frame.MsgTypeName(h.Type), want)
+	}
+	return nil
+}
+
 func readOneFrame(t *testing.T, conn *tls.Conn, timeout time.Duration) []byte {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
@@ -356,7 +438,7 @@ func TestHelloAckDoesNotAlsoGoToMQTT(t *testing.T) {
 	cfg := transport.Config{
 		Addr: "127.0.0.1:0", Cert: pki.srvCert, ClientCAs: pki.pool,
 		HandshakeTimeout: 5 * time.Second, OnFrame: mgr.FrameHandler(),
-		Registry:         reg, // same object as the bridge -- see the note above
+		Registry: reg, // same object as the bridge -- see the note above
 	}
 	srv, err := transport.New(cfg)
 	if err != nil {
@@ -427,7 +509,13 @@ func deviceOpRoundTrip(t *testing.T, op frame.DeviceOp, result frame.DeviceOpRes
 		ch <- outcome{out, err}
 	}()
 
-	down := readOneFrame(t, conn, 5*time.Second)
+	// ⚠ 不能假设"下一帧就是操作下行"：
+	// 服务端在 Hello 之后会主动推配置清单
+	// （handler_hello.go:281 调 SendConfigManifestWithDecision），
+	// 它与 0x22 谁先到是调度决定的。
+	// 这里只放行那一种已知交错，其余类型立刻失败。
+	down := readUntilType(t, conn, frame.MsgDeviceOp,
+		serverInitiatedInterleaves, 5*time.Second)
 	if down == nil {
 		t.Fatal("the device received NO downlink for the operation")
 	}
@@ -435,6 +523,8 @@ func deviceOpRoundTrip(t *testing.T, op frame.DeviceOp, result frame.DeviceOpRes
 	if err != nil {
 		t.Fatalf("downlink does not decode: %v", err)
 	}
+	// readUntilType 已保证类型；保留这条断言作为
+	// "助手被改坏"时的第二道防线。
 	if h.Type != frame.MsgDeviceOp {
 		t.Fatalf("downlink type = 0x%02X, want MsgDeviceOp 0x%02X", h.Type, frame.MsgDeviceOp)
 	}
