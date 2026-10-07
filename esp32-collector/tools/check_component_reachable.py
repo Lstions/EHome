@@ -62,13 +62,6 @@ PENDING_WIRING = {
         "它要选择的**两条** link 里，link_mqtt 还没接；且阶段未到 P2",
         "link_mqtt 接好后由它决定用哪条",
     ),
-    "sntp_mgr": (
-        "SNTP 管理器（填 TLS_ACTION_SYNC_TIME_FIRST 的另一半）",
-        "TLS 路径**已接线**（见 device_link_wiring.c），但 SNTP 的"
-        "**真 esp_sntp 适配器尚未实现** ⇒ tls_esp_config_t.now_epoch 仍为 NULL "
-        "⇒ 时间不可信 ⇒ 证书类失败被分级为「可自愈」",
-        "实现 esp_sntp 适配器并把 now_epoch 接上（mTLS 的硬前置）",
-    ),
     "nvs_helper": (
         "NVS 读写辅助",
         "既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用"
@@ -77,16 +70,24 @@ PENDING_WIRING = {
     ),
 }
 
-# ⚠ 「可达」的确切含义（2026-10-07 实测补充）
+# ⚠ 「可达」的确切含义（2026-10-07，我在这里写错过一次，已按实测更正）
 #
 # 本门禁的"可达"是**源码层**判据：main 声明了依赖（REQUIRES）或 #include 了它。
-# 它**不保证**代码真的进了**默认构建的镜像**：
-#   - 由 Kconfig 开关控制的调用点（如 device_link_wiring.c 里的 3.0 链路）在开关为 n 时，
-#     整个分支会被编译器消除、再被链接器 --gc-sections 丢掉。
-#     实测：开关 n 的 s3-n16 ELF 里 session_create/tls_esp_io 等符号数为 **0**；
-#     开关 y 时全部存在，且 .bin 的 md5 不同。
-#   ⇒ 对这类组件，"可达"= "源码里有真实调用点（编译过）"，**不等于**"已随默认固件出厂"。
+# 它**不保证**组件在运行期真的被**启用**：
+#   - 由 Kconfig 开关控制的调用点（如 device_link_wiring.c 里的 3.0 链路）在开关为 n 时
+#     会走**运行期早退**（`if (!devlink_wanted()) return;`），不建任务、不分配、不发包。
+#   ⇒ "可达"= "源码里有真实调用点（读得通、编译过）"，**不等于**"运行期会启用"。
 #   判断"是否真的会跑"要看 Kconfig 与运行时日志，不能只看本门禁。
+#
+# ❌ 一条我写错后删掉的旧说法（保留以免后人再写一遍）：
+#   "开关 n 时整个分支会被编译器消除、再被链接器 --gc-sections 丢掉，ELF 里符号数为 0。"
+#   **这是错的。** 实测（s3-n16，ENABLED=n）：session_create / tls_esp_io / rx_pump_create /
+#   wire_delim_create / sntp_mgr_create … **11/11 符号都在**，
+#   device_link_wiring_init = T size 0x29f，反汇编里真的调 device_link_check_placement。
+#   原因：`devlink_wanted()` 是**运行期函数**，不是编译期常量 ⇒ 分支不被消除。
+#   我当时测出"0"是因为跑 nm 时**没有 source export.sh**（命令不存在），
+#   又用 2>/dev/null 吞掉了 "command not found"，于是 grep -c 打印的 0 被我读成了"符号不存在"。
+#   **"命令跑通"≠"测到了东西"** —— 负面断言必须先证搜索面成立。
 # 这条限制写在这里而不是留给下一个人去猜。
 
 REQ_RE = re.compile(r"REQUIRES\s+(.*?)\)", re.S)

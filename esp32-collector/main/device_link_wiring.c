@@ -44,6 +44,12 @@
 #ifndef CONFIG_EHOME_DEVICE_LINK_TIMEOUT_MS
 #define CONFIG_EHOME_DEVICE_LINK_TIMEOUT_MS 10000
 #endif
+/* 空串（默认）= 没配 NTP 服务器 => sntp_mgr 进 DISABLED，不假装能同步。
+ * 兜底不是为了"能编过"：IDF 对 string 选项在 depends 不满足时**不生成**
+ * #define，宿主编译更是一个 Kconfig 都没有，两处都必须能落到"空"。 */
+#ifndef CONFIG_EHOME_NTP_SERVER
+#define CONFIG_EHOME_NTP_SERVER ""
+#endif
 
 /* ══════════════════════════ 纯判定（宿主与固件都编）══════════════════════════ */
 
@@ -93,6 +99,18 @@ devlink_place_t device_link_check_placement(uint32_t max_payload,
     return DEVLINK_PLACE_OK;
 }
 
+devlink_net_edge_t devlink_net_edge(bool was_up, bool is_up)
+{
+    if (was_up == is_up) return DEVLINK_NET_EDGE_NONE;
+    return is_up ? DEVLINK_NET_EDGE_UP : DEVLINK_NET_EDGE_DOWN;
+}
+
+uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
+{
+    /* 取不到 => 0（tls_guard 判不可信）。**不钳制**：阈值只有 tls_guard 一处。 */
+    return have_epoch ? epoch : 0u;
+}
+
 /* ══════════════════════════ IDF 胶水（宿主构建不含）══════════════════════════ */
 #ifndef DEVICE_LINK_HOST_TEST
 
@@ -108,9 +126,15 @@ devlink_place_t device_link_check_placement(uint32_t max_payload,
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include <time.h>
+
+#include "esp_sntp.h"
+
 #include "session.h"
 #include "tls_esp.h"
 #include "wifi_mgr.h"
+#include "sntp_mgr.h"     /* IDF 无关的头（组件约束 C2），只在这里被胶水用到 */
+#include "tls_guard.h"    /* 「时间是否可信」的单一来源（P4）—— 不再写第二份阈值 */
 
 static const char *TAG = "DEV_LINK";
 
@@ -204,11 +228,88 @@ static void devlink_free_certs(void)
     free(s_key);  s_key = NULL;  s_key_len = 0;
 }
 
+/* ── SNTP：sntp_mgr 的真 I/O 适配器 ──
+ *
+ * 这一层刻意做**薄**：所有判定（什么时候发起、等多久、退避多久、多大算可信）
+ * 都在 sntp_mgr / tls_guard 里，这里只做"把 IDF 的调用摆对位置"。
+ * 与 components/tls_esp/tls_esp.c 同一分工（判定下沉、胶水留薄）。 */
+
+static sntp_mgr_t    *s_sntp;
+static bool           s_sntp_started;   /* esp_sntp_init 是否已调用过 */
+static bool           s_sntp_net_up;    /* 上一轮观察到的网络状态（用于判边沿） */
+
+/** io->start：发起一次同步。**必须幂等** —— sntp_mgr 会在退避到点后重复调用。
+ *
+ * ⚠ 这里有一个不看 IDF 源码就会写错的地方（我核对了 lwip/sntp.c 才确认）：
+ *   - `esp_sntp_init()` 内部是 `if (sntp_pcb == NULL) { ... sntp_request(NULL); }`，
+ *     也就是说**第二次调用是彻底的 no-op**，不会再发一个 NTP 查询；
+ *   - `esp_sntp_setservername()` 只是把字符串指针存进表里，**不触发重发**。
+ *   若 start() 只写 init()，sntp_mgr 的"退避到点重新发起"就会变成
+ *   **starts 计数在涨、而网线上一个包都没出去** —— 一次静默的空转。
+ *   ⇒ 首次用 init()，之后必须用 restart()（它内部是 stop()+init()，
+ *     会重新触发一次 request）。 */
+static void sntp_io_start(void *ctx, const char *server)
+{
+    (void)ctx;
+    if (server == NULL || server[0] == '\0') return;   /* 空串由 sntp_mgr 挡在 DISABLED */
+
+    if (!s_sntp_started) {
+        esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, server);
+        esp_sntp_init();
+        s_sntp_started = true;
+        ESP_LOGI(TAG, "SNTP 已发起（server=%s）", server);
+        return;
+    }
+    /* 已初始化：init 是 no-op，必须 restart 才真的再发一次查询。 */
+    if (!esp_sntp_restart()) {
+        ESP_LOGW(TAG, "esp_sntp_restart 返回 false（SNTP 未启用？）—— 本轮重试没有真正发出");
+    }
+}
+
+/** io->get_time：当前墙上时间。
+ *
+ * 只看 `time()` 是否已越过 1970。**不在这里判"可信不可信"** ——
+ * 那是 tls_guard 的职责（单一来源）；本函数只如实回答"现在几点"。 */
+static bool sntp_io_get_time(void *ctx, uint64_t *epoch_out)
+{
+    (void)ctx;
+    if (epoch_out == NULL) return false;
+    time_t now = 0;
+    time(&now);
+    if (now <= 0) return false;        /* 还没校时：1970 */
+    *epoch_out = (uint64_t)now;
+    return true;
+}
+
+/** io->now_ms：单调毫秒（超时/退避用，与墙上时间无关）。 */
+static uint64_t sntp_io_now_ms(void *ctx)
+{
+    (void)ctx;
+    return (uint64_t)(esp_timer_get_time() / 1000);
+}
+
+static const sntp_mgr_io_t s_sntp_io = {
+    .start    = sntp_io_start,
+    .get_time = sntp_io_get_time,
+    .now_ms   = sntp_io_now_ms,
+};
+
+/** tls_esp 的 now_epoch：取不到就给 0，由 tls_guard 判不可信。
+ *  （契约与理由见 device_link_wiring.h 的 devlink_now_epoch_value。） */
+static uint64_t devlink_now_epoch(void)
+{
+    uint64_t epoch = 0;
+    bool have = (s_sntp != NULL) && sntp_mgr_now(s_sntp, &epoch);
+    return devlink_now_epoch_value(have, epoch);
+}
+
 /* ── 运行期状态 ── */
 
 static session_t *s_session;
 static uint8_t   *s_rx_buf;
 static const char *s_state_txt = "NONE";
+static sntp_mgr_state_t s_sntp_last = SNTP_MGR_DISABLED;
 
 const char *device_link_wiring_state_name(void)
 {
@@ -237,9 +338,40 @@ static void devlink_task(void *arg)
              (int)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD, s_state_txt);
 
     for (;;) {
+        /* ⚠ wifi_mgr_get_state() 这一轮只取一次：SNTP 与 3.0 链路必须看到
+         * **同一个**网络状态，否则两者可以在同一轮里得出不同结论。 */
+        bool net_up = (wifi_mgr_get_state() == WIFI_MGR_CONNECTED);
+
+        /* ── SNTP：复用本任务已有的观察点，**不新建任务** ──
+         * 只在**边沿**通知 up/down（理由见 device_link_wiring.h 的
+         * devlink_net_edge）。no-server 时 sntp_mgr 处于 DISABLED，通知是 no-op。 */
+        if (s_sntp != NULL) {
+            switch (devlink_net_edge(s_sntp_net_up, net_up)) {
+            case DEVLINK_NET_EDGE_UP:
+                s_sntp_net_up = true;
+                sntp_mgr_network_up(s_sntp);
+                break;
+            case DEVLINK_NET_EDGE_DOWN:
+                s_sntp_net_up = false;
+                sntp_mgr_network_down(s_sntp);
+                break;
+            case DEVLINK_NET_EDGE_NONE:
+                break;
+            }
+            uint64_t epoch = 0;
+            sntp_mgr_state_t sst = sntp_mgr_poll(s_sntp, &epoch);
+            if (sst != s_sntp_last) {
+                /* 状态变化才打日志：本任务 10ms 一轮，否则会淹掉串口。 */
+                ESP_LOGI(TAG, "SNTP %s -> %s（epoch=%llu）",
+                         sntp_mgr_state_name(s_sntp_last), sntp_mgr_state_name(sst),
+                         (unsigned long long)epoch);
+                s_sntp_last = sst;
+            }
+        }
+
         /* 网络没起来就不去连 —— 否则每次 session_poll 都白走一遍连接失败/退避，
          * 日志里看不出"其实只是 WiFi 还没好"。 */
-        if (wifi_mgr_get_state() != WIFI_MGR_CONNECTED) {
+        if (!net_up) {
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -255,9 +387,11 @@ static void devlink_task(void *arg)
                      (unsigned)session_reconnect_attempt(s));
             if (st == SESSION_FATAL) {
                 ESP_LOGE(TAG, "FATAL：重试无意义（证书/配置类）。"
-                              "请确认 NVS 命名空间 '%s' 里已铺开 ca/cert/key，"
-                              "并确认时间源可用（SNTP 尚未落地 ⇒ now_epoch=NULL）",
-                         CONFIG_EHOME_DEVICE_LINK_NVS_NS);
+                              "请确认 NVS 命名空间 '%s' 里已铺开 ca/cert/key；"
+                              "时间源状态见上面的 SNTP 日志（now_epoch=%s）",
+                         CONFIG_EHOME_DEVICE_LINK_NVS_NS,
+                         (s_sntp != NULL) ? sntp_mgr_state_name(sntp_mgr_state(s_sntp))
+                                          : "sntp_mgr 未创建");
             }
             last = st;
         }
@@ -315,6 +449,34 @@ void device_link_wiring_init(void)
                  CONFIG_EHOME_DEVICE_LINK_NVS_NS);
     }
 
+    /* ── 3.5) SNTP：mTLS 的时间前置条件 ──
+     *
+     * 放在 tls_esp 配置**之前**：now_epoch 要指向一个已经存在的 sntp_mgr，
+     * 否则首个握手会拿不到时间（而那正是本任务要修的东西）。 */
+    {
+        sntp_mgr_config_t scfg;
+        memset(&scfg, 0, sizeof(scfg));
+        scfg.io = &s_sntp_io;
+        scfg.io_ctx = NULL;
+        scfg.server = CONFIG_EHOME_NTP_SERVER;   /* "" => DISABLED（不假装能同步）*/
+        scfg.wait_ms = 0;                        /* 0 => sntp_mgr 用默认 30s */
+        /* P4：时间可信与否**只有** tls_guard 一个判据，不在这里重写阈值。 */
+        scfg.is_time_trusted = tls_guard_time_is_trusted;
+        s_sntp = sntp_mgr_create(&scfg);
+        /* 让首条状态日志只报真实变化，而不是初始化顺序造成的假跳变。 */
+        if (s_sntp != NULL) s_sntp_last = sntp_mgr_state(s_sntp);
+        if (s_sntp == NULL) {
+            ESP_LOGE(TAG, "sntp_mgr_create 失败（内存？）—— 时间保持不可信："
+                          "now_epoch 会返回 0，证书类失败按可自愈处理（不阻断 TLS）");
+        } else if (sntp_mgr_state(s_sntp) == SNTP_MGR_DISABLED) {
+            ESP_LOGW(TAG, "未配置 NTP 服务器（CONFIG_EHOME_NTP_SERVER 为空）=> SNTP DISABLED："
+                          "不发一个查询，也不假装有时间。证书类失败会被分级为可自愈");
+        } else {
+            ESP_LOGI(TAG, "SNTP 已装载：server=%s（网络就绪后由本任务发起）",
+                     CONFIG_EHOME_NTP_SERVER);
+        }
+    }
+
     /* ── 4) tls_esp 配置 ── */
     tls_esp_config_t tcfg;
     memset(&tcfg, 0, sizeof(tcfg));
@@ -322,9 +484,10 @@ void device_link_wiring_init(void)
     tcfg.port = (uint16_t)CONFIG_EHOME_DEVICE_LINK_PORT;
     tcfg.timeout_ms = CONFIG_EHOME_DEVICE_LINK_TIMEOUT_MS;
     tcfg.certs = certs;
-    /* ⚠ now_epoch 留 NULL：SNTP 适配器尚未落地。取不到时间 ⇒ tls_guard 把
-     * 证书类失败判为**可自愈**（soft）而不是致命 —— 见 §52.2 的分级意图。 */
-    tcfg.now_epoch = NULL;
+    /* now_epoch 接到 SNTP。取不到时间时它返回 **0**（而不是"看起来合理"的
+     * 时间），于是 tls_guard 把证书类失败判为**可自愈**而不是致命 ——
+     * 见 §52.2 的分级意图。 */
+    tcfg.now_epoch = devlink_now_epoch;
 
     tls_esp_config_t *tls_cfg = tls_esp_config_new(&tcfg);
     if (tls_cfg == NULL) {

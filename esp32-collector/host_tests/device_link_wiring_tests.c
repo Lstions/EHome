@@ -157,6 +157,80 @@ static void test_names_are_nonempty(void)
     CHECK(devlink_place_name((devlink_place_t)99) != NULL, "未知枚举应返回非 NULL");
 }
 
+/* ════════ 6. SNTP 接线：网络边沿判定（task-11）════════
+ *
+ * 为什么值得单列：sntp_mgr_network_down() 把状态压回 IDLE。若接线代码**每轮**
+ * 都通知一次 down（而不是只在边沿），状态机就永远回不到"可以发起"的那一步
+ * —— 而这份代码看起来正在认真接线，也没有任何一处会报错。
+ * 把"只在边沿通知"锁在宿主测试里，是这条契约唯一能被真正守住的形态。 */
+static void test_net_edge_only_on_change(void)
+{
+    /* 无变化 -> 不通知（这正是"每轮都调 down"会踩的坑） */
+    CHECK(devlink_net_edge(false, false) == DEVLINK_NET_EDGE_NONE,
+          "一直是 down 不应重复通知");
+    CHECK(devlink_net_edge(true, true) == DEVLINK_NET_EDGE_NONE,
+          "一直是 up 不应重复通知");
+
+    /* 两个方向的边沿 */
+    CHECK(devlink_net_edge(false, true) == DEVLINK_NET_EDGE_UP,
+          "down->up 必须是 UP");
+    CHECK(devlink_net_edge(true, false) == DEVLINK_NET_EDGE_DOWN,
+          "up->down 必须是 DOWN");
+
+    /* ⭐ 顺序性质：同一状态重复喂进来，只有**第一次**给出边沿。
+     * 模拟接线任务的循环。 */
+    bool prev = false;
+    devlink_net_edge_t e = devlink_net_edge(prev, true);
+    CHECK(e == DEVLINK_NET_EDGE_UP, "首次变 up 应给出 UP");
+    prev = true;
+    for (int i = 0; i < 5; i++) {
+        e = devlink_net_edge(prev, true);
+        CHECK(e == DEVLINK_NET_EDGE_NONE, "保持 up 时第 %d 轮不应再通知", i + 1);
+        prev = true;
+    }
+    e = devlink_net_edge(prev, false);
+    CHECK(e == DEVLINK_NET_EDGE_DOWN, "变 down 应给出 DOWN");
+    prev = false;
+    for (int i = 0; i < 5; i++) {
+        e = devlink_net_edge(prev, false);
+        CHECK(e == DEVLINK_NET_EDGE_NONE, "保持 down 时第 %d 轮不应再通知", i + 1);
+        prev = false;
+    }
+}
+
+/* ════════ 7. SNTP 接线：now_epoch 的取值规则（task-11）════════
+ *
+ * 两条契约：
+ *   ① 取不到时间必须给 0 —— 绝不猜一个"看起来合理"的值；
+ *   ② **不做区间钳制** —— 阈值只有 tls_guard 一处（P4）。
+ * ② 单独测，是因为"顺手钳一下"看起来更安全，实则会让 tls_guard 的判定
+ * 失去意义，且阈值出现第二个答案。 */
+static void test_now_epoch_never_fabricates_and_never_clamps(void)
+{
+    /* ① 取不到 => 0。即使调用方传来一个垃圾非零值也必须归零。 */
+    CHECK(devlink_now_epoch_value(false, 0u) == 0u, "取不到时间应为 0");
+    CHECK(devlink_now_epoch_value(false, 1759999999u) == 0u,
+          "取不到时间时，传进来的任何值都必须被丢弃（不得冒充可信时间）");
+    CHECK(devlink_now_epoch_value(false, UINT64_MAX) == 0u,
+          "取不到时间 + 溢出值 => 0");
+
+    /* ② 取得到 => 原样透传，**包括** tls_guard 会判为不可信的那些值。
+     *    适配器若在这里钳制/判定，阈值就有了第二个来源（违反 P4）。 */
+    const uint64_t passthrough[] = {
+        1u,                          /* 1970 + 1s：tls_guard 会判不可信 */
+        1577836799u,                 /* MIN-1：边界外 */
+        1577836800u,                 /* MIN  ：恰好可信 */
+        4102444800u,                 /* MAX  ：恰好可信 */
+        4102444801u,                 /* MAX+1：边界外，tls_guard 判不可信 */
+        UINT64_MAX,                  /* 溢出值：也不得被适配器改写 */
+    };
+    for (size_t i = 0; i < sizeof(passthrough) / sizeof(passthrough[0]); i++) {
+        CHECK(devlink_now_epoch_value(true, passthrough[i]) == passthrough[i],
+              "取得到时间时必须原样透传 %llu（不在适配器里判可信/钳制）",
+              (unsigned long long)passthrough[i]);
+    }
+}
+
 int main(void)
 {
     test_delim_bytes_matches_wire_constants();
@@ -164,6 +238,8 @@ int main(void)
     test_no_variant_is_refused_not_guessed();
     test_cert_verdict_three_states();
     test_names_are_nonempty();
+    test_net_edge_only_on_change();
+    test_now_epoch_never_fabricates_and_never_clamps();
 
     if (s_failures) { printf("device_link_wiring_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_link_wiring_tests: all checks passed\n");

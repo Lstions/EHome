@@ -16,6 +16,9 @@ idf_component_register(SRCS "main.c"
                        INCLUDE_DIRS "."
                        REQUIRES freertos nvs_flash device_op
                        session tls_esp variant
+                       # SNTP 接线（task-11）：sntp_mgr 是状态机，lwip 提供
+                       # esp_sntp.h，tls_guard 提供「时间可信」的唯一判据。
+                       sntp_mgr tls_guard lwip
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool

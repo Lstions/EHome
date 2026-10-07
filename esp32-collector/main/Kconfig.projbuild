@@ -187,6 +187,26 @@ menu "EHome Collector Configuration"
                 larger than this is rejected (and reported) rather than accepted
                 by growing the allocation on request.
 
+        config EHOME_NTP_SERVER
+            string "NTP server (empty = SNTP disabled)"
+            depends on EHOME_DEVICE_LINK_ENABLED
+            default ""
+            help
+                SNTP server used to obtain a trusted wall clock.  mTLS needs it
+                to evaluate certificate notBefore/notAfter: with no NTP the
+                device believes it is 1970, every certificate looks "not yet
+                valid", and the handshake can never succeed (design U6 / K11).
+
+                Empty (the default) puts sntp_mgr straight into DISABLED: no
+                query is ever sent and no time is pretended.  now_epoch then
+                returns 0, tls_guard grades certificate failures as
+                self-healing, and the device degrades instead of lying.
+
+                Deliberately NOT defaulted to a public pool: a shipped device
+                must not silently start talking to a third party the operator
+                never chose.  Set it explicitly per deployment.
+                Examples: "pool.ntp.org", "ntp.aliyun.com".
+
         config EHOME_DEVICE_LINK_NVS_NS
             string "NVS namespace holding ca/cert/key"
             depends on EHOME_DEVICE_LINK_ENABLED

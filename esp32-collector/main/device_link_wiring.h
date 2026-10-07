@@ -24,19 +24,31 @@
  * 目的是让"接线"在**源码层是真实的**：main 里有一个真实调用点，编译器确实编译它，
  * 而不是让整个文件在预处理期消失。
  *
- * ### ⚠ 但必须说清它**不**等于什么（我第一版在这里写错了，实测后更正）
+ * ### 开关 n 时到底发生什么（我在这里错了**两次**，最终结论经反汇编验证）
  *
- * 我原本写的是"代码始终编译 ⇒ 门禁的『可达』与『真的被调用』是同一件事"。
- * **这是错的**，实测证据（2026-10-07，s3-n16）：
- *   - 开关 **n**（默认）：ELF 里 `session_create` / `tls_esp_io` 等符号数为 **0**
- *     —— 常量折叠后该分支成为死代码，再被链接器 `--gc-sections` 丢弃；
- *     连被 main 调用的入口 `device_link_wiring_init` 都被内联掉了。
- *   - 开关 **y**：上述符号全部存在，且 `ehome_collector.bin` 的 md5 不同。
+ * **第一次错**：写过"代码始终编译 ⇒ 门禁的『可达』与『真的被调用』是同一件事"。
+ *   编译得过 ≠ 进了镜像，这句已删。
  *
- * ⇒ 准确说法：**默认构建里不含这条链路**；开关为 y 时才进镜像。
- *   可达性门禁的"可达"是**源码层**判据，**不保证**代码在默认固件里存在。
- *   详情已写入 `tools/check_component_reachable.py` 注释。
- *   默认 **n** 正是为了不改变出厂行为（约束：不影响生产环境）。
+ * **第二次错（更隐蔽）**：改成"开关 n 时整个分支被常量折叠成死代码、被 `--gc-sections`
+ *   丢弃，ELF 里符号数为 0"。**这也是错的**，两个独立证据（2026-10-07，s3-n16）：
+ *   1. 默认构建（`# CONFIG_EHOME_DEVICE_LINK_ENABLED is not set`）的 ELF 里
+ *      `session_create / session_poll / tls_esp_io / tls_esp_connect / rx_pump_create /
+ *      wire_delim_create / link_tcp_read / link_rx_adapt_read / sntp_mgr_create …`
+ *      **11/11 全部存在**；`device_link_wiring_init` = `T 4201599c size 0x29f`。
+ *   2. 反汇编该函数，内部**真的调用** `device_link_check_placement` 与 `variant_caps`。
+ *
+ *   根因（我为什么会测出"0"）：`devlink_wanted()` 是**运行期函数**而非编译期常量，
+ *   分支不会被消除。而我当时跑 `xtensa-esp32s3-elf-nm` **没有 source export.sh**
+ *   ⇒ 命令不存在 ⇒ 我把 stderr 用 `2>/dev/null` 吞掉 ⇒ `grep -c` 打印 `0`
+ *   ⇒ 我把"命令根本没跑成"读成了"符号不存在"。
+ *   **又一次"命令跑通 ≠ 测到了东西"。**
+ *
+ * **正确表述（已由符号表 + 反汇编验证）**：
+ *   - 开关 n 时**代码在镜像里**，保护机制是 `device_link_wiring_init` 开头的
+ *     **运行期早退**（`if (!devlink_wanted()) { log; return; }`，先于一切副作用）；
+ *   - ⇒ **可观测行为不变**（不建任务、不分配堆、不发一个包）—— 这是验收口径；
+ *   - ⇒ **但镜像不是逐字节不变**：s3-n16 `.bin` 约 +3.2 KB（代码/字符串/对齐）。
+ *     若要按"默认产物完全不变"验收，这条**不成立**，请按"**行为**不变"验收。
  *
  * ## ⚠ 两个前置条件**尚未**落地（因此现在开启会停在 FATAL，这是**设计如此**）
  *
@@ -97,6 +109,38 @@ uint32_t device_link_delim_bytes(uint32_t max_payload);
  */
 devlink_place_t device_link_check_placement(uint32_t max_payload,
                                             const variant_caps_t *caps);
+
+/* ── SNTP 接线里的判定（宿主可测）── */
+
+/**
+ * 网络可用性的**边沿**。
+ *
+ * 为什么要把这件事显式抽出来而不是写 `if (net != prev)`：
+ * sntp_mgr_network_down() 会把状态压回 IDLE，**每轮都通知 down** 会让状态机
+ * 永远停在"不能发起"的那一步 —— 而这么写出来的代码看起来正在认真接线，
+ * 也没有任何一处会报错（正是本仓反复出现的"建好了但没插电"）。
+ * 抽成纯函数后，"只在边沿通知"这条契约可以在宿主上被锁住。
+ */
+typedef enum {
+    DEVLINK_NET_EDGE_NONE = 0,   /* 无变化：**不要**重复通知 */
+    DEVLINK_NET_EDGE_UP,         /* 不可用 -> 可用 */
+    DEVLINK_NET_EDGE_DOWN,       /* 可用 -> 不可用 */
+} devlink_net_edge_t;
+
+devlink_net_edge_t devlink_net_edge(bool was_up, bool is_up);
+
+/**
+ * `tls_esp_config_t.now_epoch` 的取值规则。
+ *
+ * 取不到时间一律给 **0**（由 tls_guard 判为不可信），**绝不猜**一个
+ * "看起来合理"的值：伪造一个 2026 年的时间会让证书校验**看起来**通过，
+ * 把"根本没校时"变成一次无法归因的失败。
+ *
+ * ⚠ 刻意**不**在这里做区间钳制：TLS_GUARD_MIN/MAX_EPOCH 是 tls_guard 的
+ * 单一来源（P4）。适配器里再判一次，阈值就有了两个答案；而且"被适配器
+ * 钳过的时间"会让 tls_guard 的判定失去意义（它才是唯一裁判）。
+ */
+uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch);
 
 /* ── 胶水 ── */
 
