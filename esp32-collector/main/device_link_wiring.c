@@ -402,7 +402,31 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 
 static const char *TAG = "DEV_LINK";
 
-/** 链路任务栈。**TLS 握手与所有下行分发都在本任务里跑** ⇒ 不能按"普通轮询任务"给小栈。
+
+/* ⭐ task-34：链路建立各步的内部堆探针（**仅 EHOME_MEM_DIAG 下编入**）。
+ *
+ * 为什么需要它：真机实测「link=n 稳态 largest=23552 / link=y 稳态 15360」，
+ * 差 8192，但**缩栈 2048 之后 largest 一字不变** ⇒ 那 8192 与任务栈无关。
+ * 靠算术继续猜没有意义（我已被"恰好相等"误导过一次），必须**逐步定位**：
+ * 在链路建立的每个分配点前后各打一行，一次刷机就能看出是哪一步吃掉了连续块。
+ *
+ * ⚠ 口径与内存门禁**完全一致**（INTERNAL | 8BIT），否则两列数字不可比 ——
+ * 这正是 §2 / §12 记的「口径不同则结论作废」。
+ *
+ * ⚠ 默认关闭（EHOME_MEM_DIAG=OFF），交付态不受影响。 */
+#ifdef EHOME_MEM_DIAG
+static void log_link_heap(const char *step)
+{
+    ESP_LOGI(TAG, "[linkheap] %-20s free=%-6u largest=%-6u (internal)",
+             step,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+#else
+static void log_link_heap(const char *step) { (void)step; }
+#endif
+
+/** 该任务栈（task-34）*//** 链路任务栈。**TLS 握手与所有下行分发都在本任务里跑** ⇒ 不能按"普通轮询任务"给小栈。
  *
  * ## 8192 → 6144（task-34，**依据真机实测**）
  *
@@ -969,7 +993,20 @@ static void devlink_task(void *arg)
         }
 
         uint32_t delivered = 0;
+        /* ⭐ task-34 定位用（**纯观测**，EHOME_MEM_DIAG 门控）：
+         * 现有探针都在 init() 里，而 mbedTLS 记录缓冲是**连接建立时**才分配的
+         * ⇒ 那一步此前不可见。这里在每次状态跃迁后打一行，
+         * 于是"哪个状态吃掉了连续块"可以逐步读出来。 */
+        /* ⚠ 只打**一次**：本循环 10 ms 一轮，每轮打会淹掉串口并扭曲时序。 */
+        static bool s_lh_first_poll = false;
+        if (!s_lh_first_poll) {
+            s_lh_first_poll = true;
+            log_link_heap("task:first_poll");
+        }
         session_state_t st = session_poll(s, &delivered);
+        if (st != s_prev_state) {
+            log_link_heap(session_state_name(st));
+        }
 
         /* ── 应用层握手推进（决策是纯函数，见 device_link_handshake.h）──
          *
@@ -1107,6 +1144,10 @@ void device_link_wiring_init(void)
         return;
     }
 
+    /* task-34：链路建立的**每一步**都留一行堆读数 ⇒ 定位那 ~8192 是谁吃的。
+     * 与 link=n 的同名读数逐项对比即可看出"哪一步开始不一样"。 */
+    log_link_heap("init:enter");
+
     /* ── 1) 放置判定（P8：型号差异只影响资源摆放）── */
     devlink_place_t place = device_link_check_placement(
         (uint32_t)CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD,
@@ -1207,6 +1248,8 @@ void device_link_wiring_init(void)
         }
     }
 
+    log_link_heap("certs:done");
+
     /* ── 4) tls_esp 配置 ── */
     tls_esp_config_t tcfg;
     memset(&tcfg, 0, sizeof(tcfg));
@@ -1225,6 +1268,7 @@ void device_link_wiring_init(void)
         devlink_free_certs();
         return;
     }
+    log_link_heap("tls_cfg:new");
 
     /* ── 5) session ── */
     session_config_t scfg;
@@ -1250,9 +1294,16 @@ void device_link_wiring_init(void)
         devlink_free_certs();
         return;
     }
+    log_link_heap("session:create");
 
     BaseType_t ok = xTaskCreate(devlink_task, "dev_link", DEVLINK_TASK_STACK,
                                 s_session, DEVLINK_TASK_PRIO, NULL);
+    /* ⭐ task-34：**这一行直接回答了"栈是否吃 largest"**。
+     * 真机已证：把栈从 8192 缩到 6144，largest 一字不变。
+     * 本探针把这一步单独隔离出来 —— 若此处 largest **不掉**（只掉 free），
+     * 就与"缩栈无效"完全一致，那条推断从此可判死；
+     * 若 largest 在这里掉，则说明还有其它因素。 */
+    log_link_heap("task:create");
     if (ok != pdPASS) {
         /* 复用 OTA 那次的教训：连续块不够时 free 会骗人，必须打 largest。 */
         ESP_LOGE(TAG, "链路任务创建失败（需 %d B 连续栈）：free=%u largest=%u",
