@@ -8,10 +8,63 @@ import (
 
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/models"
+	"ehome/backend/pkg/protoframe"
 	"ehome/backend/testutil"
 
 	"gorm.io/gorm"
 )
+
+// TestR1ByteGateIsTransportIndependentByDesign — 2026-10-07 新增。
+//
+// 这个用例**不是**在测一个新功能，而是把一条**此前无人记录的行为**钉住：
+// 该门禁对**所有**传输都用 MQTT 的 2011 B 上界，包括走 TCP 的 3.0 设备 ——
+// 而 TCP 的载荷上界是 16368 B。所以一台走 TCP、本来收得下 3100 B manifest 的
+// 设备会被拒，而它拿到的报错以前只说"MQTT 单事件上限"（对它而言理由是错的）。
+//
+// ## 为什么"保守"是**对的**（别把它当 bug 顺手改掉）
+// downlink.Bridge 会在 TCP 会话缺失/成帧失败/SendToNode 出错时**回退到 MQTT**。
+// 若门禁只按 TCP 放行，一份超 2011 B 的 manifest 会在门禁处通过，
+// 然后在**回退路径**上失败 —— 上界必须按**最差传输**成立，而不是按"此刻恰好活着的那条"。
+//
+// ## 这个用例要让什么变红
+//   - 有人把门禁改成"按传输取上界"（那必须先做设计 §5.2/§489 的工作，
+//     并且**同时**处理回退路径，否则就是把缺陷引进回退路径）；
+//   - 有人把报错改回只提 MQTT（那会让 TCP 设备上的排查走错方向）；
+//   - MQTT 上界被改到比 TCP 上界还大（那"保守"就不成立了，说明标定错了）。
+func TestR1ByteGateIsTransportIndependentByDesign(t *testing.T) {
+	tcpBound := int(protoframe.PayloadMax)
+
+	if MaxManifestWireBytes >= tcpBound {
+		t.Fatalf("本用例的前提是 MQTT 上界 (%d) **严格小于** TCP 上界 (%d)。"+
+			"若两者关系变了，说明标定或传输上界改了，必须重新讨论'保守门禁'是否还成立",
+			MaxManifestWireBytes, tcpBound)
+	}
+
+	// 一份 TCP 收得下、但门禁必须拒绝的长度：取两者之间。
+	between := MaxManifestWireBytes + 1
+	if between >= tcpBound {
+		t.Fatalf("取不到夹在中间的样例：%d 不小于 %d", between, tcpBound)
+	}
+	err := checkManifestWireBytes(between)
+	if err == nil {
+		t.Fatalf("%d B 必须被拒（TCP 收得下，但回退到 MQTT 时收不下）——"+
+			"若门禁真的改成按传输放行了，请同时证明回退路径也安全，再改这个用例", between)
+	}
+
+	msg := err.Error()
+	// 报错必须**同时**说清三件事，否则排查者会得到错的结论。
+	for _, want := range []string{
+		fmt.Sprintf("%d", between),              // 实际字节数
+		fmt.Sprintf("%d", MaxManifestWireBytes), // 生效的上界
+		"REGARDLESS of transport",               // 承认它对 TCP 也生效
+		"falls back",                            // 说清为什么必须保守（回退路径）
+		fmt.Sprintf("%d", tcpBound),             // 指出 TCP 本可承载多少
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("报错缺少 %q —— 缺了它，TCP 设备上的排查会走错方向。实际报错：%q", want, msg)
+		}
+	}
+}
 
 // =====================================================================
 // R1: ConfigManifest 编码后字节门禁（单次 MQTT 下行事件上限）

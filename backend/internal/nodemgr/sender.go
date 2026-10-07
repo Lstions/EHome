@@ -15,6 +15,7 @@ import (
 	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"ehome/backend/pkg/protoframe"
 
 	"gorm.io/gorm"
 )
@@ -68,12 +69,36 @@ const (
 // The caller must pass the length of the SAME payload it is about to publish —
 // never a re-encoded copy — so the check and the bytes on the wire are
 // same-source (see SendConfigManifestWithDecision).
+//
+// # Why the MQTT bound is applied even to nodes on TCP (2026-10-07)
+//
+// This bound is transport-INDEPENDENT on purpose, and that is worth stating
+// because it looks like an oversight otherwise: a 3.0 node with a live TCP
+// session could carry up to protoframe.PayloadMax (16368 B), yet a 3100 B
+// manifest is still rejected here.
+//
+// The reason is that the downlink may STILL end up on MQTT: downlink.Bridge
+// falls back to the legacy publisher when the TCP session is absent, when
+// framing fails, or when SendToNode errors. A bound that only held for TCP
+// would let an oversized manifest through at the gate and then fail (or worse,
+// be mishandled) on the fallback path. The gate must therefore hold for the
+// WORST transport, not the one that happens to be up right now.
+//
+// Making the bound transport-aware is design work, not a bug fix — see
+// ESP32-3.0-重构方案 §5.2 (new bound derived from the reassembly buffer) and
+// the §489 row retiring this gate. Until then the conservative bound stands,
+// and the error message says so rather than blaming MQTT alone.
 func checkManifestWireBytes(encodedBytes int) error {
 	if encodedBytes > MaxManifestWireBytes {
-		return fmt.Errorf("ConfigManifest is %d bytes; the single MQTT downlink event limit is %d bytes "+
-			"(CONFIG_MQTT_BUFFER_SIZE=2048, esp-mqtt fragments and firmware has no downlink reassembly): "+
-			"refusing to publish a manifest the collector cannot receive",
-			encodedBytes, MaxManifestWireBytes)
+		return fmt.Errorf("ConfigManifest is %d bytes; the bound is %d bytes, "+
+			"which is MQTT's single-event limit (CONFIG_MQTT_BUFFER_SIZE=2048 minus framing and topic; "+
+			"esp-mqtt fragments, and the firmware has no downlink reassembly). "+
+			"This bound is applied REGARDLESS of transport on purpose: the same downlink may still be "+
+			"carried by MQTT if the node's TCP session drops (downlink.Bridge falls back), so it has to "+
+			"hold for the worst transport. TCP alone would carry up to %d B — making this bound "+
+			"transport-aware is design work (ESP32-3.0-重构方案 §5.2 / §489), not done yet. "+
+			"Refusing to publish a manifest the collector may be unable to receive",
+			encodedBytes, MaxManifestWireBytes, protoframe.PayloadMax)
 	}
 	return nil
 }
