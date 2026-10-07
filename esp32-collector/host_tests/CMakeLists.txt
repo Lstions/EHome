@@ -1154,6 +1154,27 @@ add_test(NAME mem_budget_thresholds
 add_test(NAME stub_enum_sync
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_stub_enum_sync.py)
 
+# 门禁分类器自检：证明每条门禁**真的会咬**（喂坏输入 ⇒ 必须非零）。
+#
+# 为什么它配得上一条 ctest（而不是"偶尔手动跑跑"）：
+# 本仓有三次"门禁存在却不管用"的前科 —— D-25 恒真阈值（remain>=0 永远成立）、
+# D-27 门禁**从未被任何流程调用**、L-05 阈值余量只剩 16 B。
+# 而且 Lead 报告里写过多轮"14 条门禁全 RC=0"，那句话本身是用一条
+# **结构上不可能打印非 0** 的 shell 循环得出的（$(basename) 先执行会重置 $?）。
+# ⇒ "门禁会不会咬"必须由机器每次回答，不能靠人相信。
+#
+# ⚠ 它**会临时改写生产文件**再还原（见脚本头部的 journal 说明），
+# 所以脚本在"目标文件已脏"时返回 77(SKIP) —— 用 SKIP_RETURN_CODE 认它，
+# 避免开发中（工作树正常是脏的）把 ctest 弄红，从而被人学会忽略。
+# 真正生效的场景是 CI / 干净检出。
+add_test(NAME gate_selftest
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_gates_selftest.py)
+# ⚠ set_tests_properties 必须在 add_test **之后** ——
+# 写反了 cmake 会以 "Can not find test to add properties to" 直接配置失败（已踩）。
+set_tests_properties(gate_selftest PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)
+
 add_test(NAME component_cycles
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_cycles.py)
 
