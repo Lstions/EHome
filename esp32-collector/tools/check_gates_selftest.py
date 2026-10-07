@@ -580,18 +580,42 @@ def run_recipe(rec, harmless, cov_limit):
 
     green_rc, green_out = run_gate(green_args)
 
+    # ⭐⭐ "这条门禁在当前环境下**本来就红**"必须先判掉（2026-10-07 实测补）。
+    #
+    # 起因：干净检出（CI / git worktree 快照）里 check_sdkconfig_symbols **本身就红** ——
+    # 它要读 gitignored 的 managed_components/，而干净检出里没有。
+    # 于是本自检在那里的绿跑（green_rc=1）永远不为 0 ⇒ 判定"自检失败"⇒ ctest 变红。
+    #
+    # ⚠ 但它**绝不是**"这条门禁有问题"：真实原因是**环境不完整**。
+    # 若把它当失败，就会出现最糟的那种结果：
+    #   一个**每次 CI 都红**的测试 ⇒ 人学会忽略它 ⇒ 它保护不了任何东西。
+    # 这正是本仓 D-27 教训的同族（"不运行的检查与没有检查等价"）。
+    #
+    # 处置：先跑一次"未注入"的基线；若基线就红 ⇒ 判 **SKIP（环境不完整）**，
+    # 并**打印基线红的原因**（不静默）。反之才继续判"会不会咬"。
+    #
+    # 这个判定必须**先于** bites 判定，否则"本来就红"会被误记成"会咬"
+    # （注入前后都红，看起来像是注入生效了 —— 假阳性）。
+    baseline_rc, baseline_out = (None, "")
+    if green_rc != 0:
+        baseline_rc, baseline_out = run_gate(green_args)
+
     bites = bad_rc != 0
-    if bites and restore_ok and green_rc == 0:
-        verdict = "会咬"
+    if green_rc != 0 and baseline_rc != 0:
+        # 门禁在本环境未注入时就红 ⇒ 无法用它判断"注入是否被侦破"。
+        verdict = "跳过（该门禁在本环境本来就红）"
     elif harmless and not bites:
         verdict = "自检假绿（无害输入下自检没报红）"
+    elif bites and restore_ok and green_rc == 0:
+        verdict = "会咬"
     elif not bites:
         verdict = "证不出会咬"
     else:
         verdict = "自检失败"
     return dict(rec=rec, inject_note=inject_note, bad_rc=bad_rc, bad_out=bad_out,
                 bites=bites, restore_ok=restore_ok, restore_note=restore_note,
-                green_rc=green_rc, green_out=green_out, verdict=verdict)
+                green_rc=green_rc, green_out=green_out, verdict=verdict,
+                baseline_rc=baseline_rc, baseline_out=baseline_out)
 
 
 def sweep():
@@ -720,12 +744,19 @@ def main():
     for r in rs:
         res = run_recipe(r, harmless, cov_limit)
         results.append(res)
-        mark = "OK " if res["verdict"] == "会咬" else "RED"
+        v = res["verdict"]
+        mark = {"会咬": "OK ", "跳过（该门禁在本环境本来就红）": "SKIP"}.get(v, "RED")
         print()
         print("[%s] %-42s %s" % (mark, r["name"], r["gate"]))
         print("      坏输入 : %s" % res["inject_note"])
         print("      坏 rc  : %s   还原: %s   绿 rc: %s"
               % (res["bad_rc"], res["restore_note"], res["green_rc"]))
+        if v.startswith("跳过"):
+            # 不静默：把"为什么这个环境里判不了"打出来。
+            print("      跳过原因：该门禁在**未注入**时就是 rc=%s ⇒ 本环境下无法判'注入是否被侦破'"
+                  % res["baseline_rc"])
+            for line in evidence(res["green_out"])[:3]:
+                print("      | 基线红: %s" % line)
         for line in evidence(res["bad_out"]):
             print("      | %s" % line)
         if res["green_rc"] != 0:
@@ -757,10 +788,22 @@ def main():
         for line in sorted(base_set):
             print("    开工时已有: %s" % line)
 
-    failed = [r for r in results if r["verdict"] != "会咬"]
+    # ⭐ 三种结果要分开统计（"跳过"不等于"通过"，也不等于"失败"）：
+    #   - 会咬      ：注入被侦破 + 还原成功 + 未注入时绿 ⇒ 这条门禁确实在保护东西
+    #   - 跳过      ：本环境不完整（该门禁本来就红）⇒ **无法判定**，必须报出来
+    #   - 未通过    ：真的有问题（恒真 / 证不出 / 还原失败）
+    skipped = [r for r in results if r["verdict"].startswith("跳过")]
+    failed = [r for r in results if r["verdict"] not in ("会咬",) and not r["verdict"].startswith("跳过")]
     print("-" * 78)
-    print("自检条目 %d：会咬 %d，未通过 %d"
-          % (len(results), len(results) - len(failed), len(failed)))
+    print("自检条目 %d：会咬 %d，跳过(环境不完整) %d，未通过 %d"
+          % (len(results), len(results) - len(skipped) - len(failed), len(skipped), len(failed)))
+    if skipped:
+        print()
+        print("⚠ 下列门禁**本次无法判定**（未注入时就红 ⇒ 环境不完整，不是门禁的问题）：")
+        for r in skipped:
+            print("    %-42s %s（基线 rc=%s）" % (r["rec"]["name"], r["rec"]["gate"], r["baseline_rc"]))
+        print("  典型原因：干净检出缺 gitignored 的 managed_components/。")
+        print("  ⇒ 在**完整工作树 / 配好 IDF 的环境**里跑，这些才会被真正判定。")
     # 正常走到这里 ⇒ 所有注入都已还原 ⇒ 日志可以清掉（否则下次启动会误报"异常退出"）。
     clear_journal()
 
