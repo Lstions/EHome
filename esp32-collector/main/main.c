@@ -280,17 +280,32 @@ static void status_task(void *pv)
 
         /* 1Hz 轮询水位；低于 floor 时回调置 s_mem_low_event（迟滞见 mem_guard.c）。 */
         mem_guard_poll();
-        bool mem_mqtt_connected = mqtt_client_is_connected_impl();
+
+        /* ⚠ task-34 修正一处 P1 违规：**上行可用 != MQTT 已连接**。
+         *
+         * 这里原先三处都写成 "&& mem_mqtt_connected"（MQTT 连上才发 MemReport），
+         * 注释也写着"等 MQTT 连上再发"。到 §7.3 P3（MQTT 下线、只留 3.0 TCP）时，
+         * 这条路径**永远不会执行** ⇒ 内存/栈水位**再也到不了服务端**，
+         * 而"栈峰值是多少"这个问题就会**再次变得不可回答**
+         * （与 §138 同族：3.0 已就绪，判据却还挂在 MQTT 上）。
+         *
+         * 判据改用 transport_any_connected()：
+         *   - 它回答的正是这里要问的问题：**任一**传输已连接（3.0 TCP 或 MQTT）；
+         *   - 实现已存在（transport.h:183），**不新增第二个判据**（P4）；
+         *   - 发送本身走 msg_handler_publish → 当前传输/广播，两条路都通。
+         *
+         * ⚠ 注意本修正**不改变** MemReport 的内容与频率，只改"什么时候允许发"。 */
+        const bool mem_uplink_ready = transport_any_connected();
         bool mem_send = false;
         {
             static bool s_mem_report_initial_sent = false;
-            if (!s_mem_report_initial_sent && mem_mqtt_connected) {
+            if (!s_mem_report_initial_sent && mem_uplink_ready) {
                 s_mem_report_initial_sent = true;
-                mem_send = true;   /* 启动后首报（等 MQTT 连上再发） */
+                mem_send = true;   /* 启动后首报（等任一路上行可用再发）*/
             }
         }
-        if (mem_periodic && mem_mqtt_connected) mem_send = true;  /* 60s 周期 */
-        if (s_mem_low_event && mem_mqtt_connected) {              /* 低内存事件 */
+        if (mem_periodic && mem_uplink_ready) mem_send = true;    /* 60s 周期 */
+        if (s_mem_low_event && mem_uplink_ready) {                /* 低内存事件 */
             s_mem_low_event = false;
             mem_send = true;
         }
