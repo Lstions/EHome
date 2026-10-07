@@ -722,24 +722,63 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 
 /* ==== Transport message callback ==== */
 
+/* ⭐ 下行消息的**唯一**处理入口（P4 + P1，2026-10-07 / 决策-3.0-配置应用所有权）。
+ *
+ * 为什么要有它：此前"下行消息到达后做什么"被写了**两遍**（MQTT 回调、debug-TCP 回调），
+ * 而 3.0 链路（devlink_on_msg）**只做了分发、没做应用** ⇒ 它的 ConfigManifest
+ * "到达、被分发、然后什么都不发生"（真机：3.0 送 10 次 0 次回执，MQTT 每次都有）。
+ * 根因是同一语义两份定义：`msg_handler` 分发表里的 `handler_config_process_manifest`
+ * 是 no-op（它自己写明"实际工作在 handle_config_applied"），而真正管应用的地方
+ * **只有两个传输回调会调** ⇒ 3.0 落在缝里。
+ *
+ * 现在三条路径（MQTT / debug-TCP / 3.0）**都调本函数** ⇒ 不可能再漂移。
+ *
+ * @param t  该消息所属的 transport；NULL 表示"没有特定 transport"（回执走广播/MQTT）。
+ *           ⚠ 只有 debug-TCP 那条路径会传非 NULL（它需要"从哪来、回哪去"）。
+ * @return   true 表示这条消息被当作 ConfigManifest 处理（含应用动作）。
+ *
+ * ⚠ 本函数做**配置事务**（较重）。在 3.0 链路上它跑在 devlink 任务栈上
+ *   （栈 6144 B，实测峰值 4168 B）—— 决策文档 §4 判据 3 要求实测其影响。 */
+bool ehome_handle_downlink(const uint8_t *data, size_t len, transport_t *t)
+{
+    /* ⚠ 不变式：这里用 app_state_get() 而**不是**调用方 ctx —— 因为本函数要能被
+     * 3.0 链路（devlink_on_msg，其 dispatch 签名**没有 ctx**）调用。
+     * 等价性依据：app_state_get() 返回单例 &s_app（app_state.c:212），
+     * 而各回调注册时传的 ctx 也是它（main.c 用 app_state_init() 的返回值，
+     * 同样返回 &s_app）⇒ **同一个对象**，行为与旧代码逐位等价。
+     * 若将来 app_state 不再是单例，这条必须跟着改。 */
+    app_state_t *s = app_state_get();
+    if (!s || !data || len == 0) return false;
+
+    const bool is_cfg = is_config_manifest(data, len);
+    if (is_cfg) s->config_received = true;
+
+    /* ② 分发（回执路径随 transport 走）。 */
+    if (t != NULL) {
+        msg_handler_process_with_transport(data, len, t);
+    } else {
+        msg_handler_process(data, len);
+    }
+
+    /* ③ 应用（**这一步此前只有 MQTT/debug-TCP 有**）。 */
+    if (is_cfg) {
+        ESP_LOGI(TAG, "ConfigManifest 下行 ⇒ 进入应用路径");
+        handle_config_applied(s, data, len);
+    }
+    return is_cfg;
+}
+
 void on_transport_msg_cb(const uint8_t *data, size_t len, void *ctx)
 {
     app_state_t *s = (app_state_t *)ctx;
     if (!s || !data || len == 0) return;
 
     ESP_LOGI(TAG, "Transport msg: %d bytes", (int)len);
+    /* 本路径保留那行"消息号"日志（排障用），其余全部委托给**唯一入口**。 */
+    ESP_LOGI(TAG, "is_config_manifest: %d, msg_type: 0x%02X",
+             (int)is_config_manifest(data, len), data[0]);
 
-    bool is_cfg = is_config_manifest(data, len);
-    ESP_LOGI(TAG, "is_config_manifest: %d, msg_type: 0x%02X", is_cfg, data[0]);
-
-    if (is_cfg) s->config_received = true;
-
-    msg_handler_process_with_transport(data, len, s->tcp_transport);
-
-    if (is_cfg) {
-        ESP_LOGI(TAG, "Calling handle_config_applied...");
-        handle_config_applied(s, data, len);
-    }
+    (void)ehome_handle_downlink(data, len, s->tcp_transport);
 }
 
 /* ==== Transport state callback ==== */
@@ -799,10 +838,6 @@ void on_mqtt_msg_cb(const char *topic, const uint8_t *data, size_t len, void *ct
     app_state_t *s = (app_state_t *)ctx;
     if (!s) return;
 
-    bool is_cfg = is_config_manifest(data, len);
-    if (is_cfg) s->config_received = true;
-
-    msg_handler_process(data, len);
-
-    if (is_cfg) handle_config_applied(s, data, len);
+    /* 委托给**唯一入口**（P4）：MQTT 这条路径自己不再实现"判断+分发+应用"。 */
+    (void)ehome_handle_downlink(data, len, NULL);
 }

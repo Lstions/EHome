@@ -404,6 +404,7 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 #include "hello_handshake.h"
 #include "frame_codec.h"             /* Hello 的帧编码器 + MSG_HELLO/FRAME_OK */
 #include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
+#include "app_callbacks.h"            /* ehome_handle_downlink（下行唯一入口，P4）*/
 #include "msg_handler.h"             /* msg_handler_process：3.0 下行接进既有分发 */
 #include "config_mgr.h"              /* epoch / has_manifest / last_known_manifest */
 #include "collector_mem.h"           /* task-34：PSRAM 优先/内部兜底的放置策略（单一来源 P4）*/
@@ -551,6 +552,29 @@ static devlink_rx_stats_t s_rx_stats;
  * 两条路径**可以并发**进 msg_handler_process。msg_handler_process 本身
  * **无锁**（msg_handler.c:182-260 是一张纯 switch），逐 handler 的结论见文件顶部。
  */
+/* 3.0 链路的**下行分发入口**：与 MQTT / debug-TCP 走**同一个函数**（P4）。
+ *
+ * ## 为什么必须有这一层（2026-10-07 真机缺陷）
+ * 此前这里直接传 `msg_handler_process` ⇒ **只做了分发、没做应用**。
+ * 而 `MSG_CONFIG_MFST` 在分发表里指向 `handler_config_process_manifest()`，
+ * 那是一句 **no-op**（`handler_config.c` 自己写明"实际工作在 handle_config_applied"），
+ * 而真正管应用的地方**只有 MQTT 与 debug-TCP 两个回调会调** ⇒
+ * ⇒ 3.0 的 ConfigManifest **到达、被分发、然后什么都不发生**（连失败回执都没有）。
+ *
+ * 真机证据：3.0 送 10 次 0 次回执；同一时段 MQTT 每次都有 ConfigResult。
+ * ⇒ §7.3 P3（MQTT 退役）后配置同步会**静默失效**。
+ *
+ * ## 为什么用包装函数而不是直接改签名
+ * `devlink_dispatch_fn`（本文件的宿主可测接口）签名是 `(data,len)`，**没有 ctx**；
+ * 而本函数在 **IDF-only** 段（`#ifndef DEVICE_LINK_HOST_TEST` 内）⇒
+ * 包一层既不改动宿主可测的判定层，也不把 main 的依赖带进去。
+ *
+ * ## ⚠ 栈：本函数在 devlink 任务上下文里跑（栈 6144 B）
+ * 它会进**配置事务**（较重）。决策文档 §4 判据 3 要求实测其栈影响。 */
+static void devlink_downlink_dispatch(const uint8_t *data, size_t len)
+{
+    (void)ehome_handle_downlink(data, len, NULL);
+}
 static bool devlink_on_msg(const rx_msg_t *m, void *ctx)
 {
     (void)ctx;
@@ -561,7 +585,7 @@ static bool devlink_on_msg(const rx_msg_t *m, void *ctx)
     /* 判定 + 分发。传 m->payload（**含首字节**）——这是关键：
      * msg_handler_process 的第一行是 data[0]。 */
     devlink_rx_verdict_t v = devlink_rx_handle(m->type, m->payload_len, m->payload,
-                                               msg_handler_process, &s_rx_stats);
+                                               devlink_downlink_dispatch, &s_rx_stats);
     if (v != DEVLINK_RX_DISPATCH) {
         /* 丢弃必须留下痕迹：静默丢弃正是本卡要修的那类缺陷。 */
         ESP_LOGW(TAG, "下行帧被丢弃：%s（header type=0x%02X plen=%u）",
