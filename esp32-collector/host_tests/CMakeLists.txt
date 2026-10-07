@@ -1218,8 +1218,13 @@ add_executable(firmware_tcp_e2e_client
     ../components/link/link.c
     ../components/rx_pump/rx_pump.c
     ../components/wire/wire.c
+    # task-17：握手决策（与 main/device_link_wiring.c 用的是**同一份**）
+    ../main/device_link_handshake.c
+    ../components/frame/frame_codec.c
 )
 target_include_directories(firmware_tcp_e2e_client PRIVATE
+    ../main
+    ../components/frame
     ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
@@ -1228,6 +1233,28 @@ target_include_directories(firmware_tcp_e2e_client PRIVATE
     ../components/wire/include
 )
 target_compile_options(firmware_tcp_e2e_client PRIVATE -Wall -Wextra -Werror)
+
+# 3.0 应用层握手的**决策**（task-17）。纯函数、无 IDF 依赖。
+#
+# 为什么单列：这组用例防的是"接线了但走不完握手"——补它之前 main/ 里没有任何
+# 地方调用 session_send / session_note_handshake，链路永远停在 WAIT_HANDSHAKE，
+# 而构建/门禁/组件单测全是绿的。
+add_executable(device_link_handshake_tests
+    device_link_handshake_tests.c
+    ../main/device_link_handshake.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(device_link_handshake_tests PRIVATE
+    ../main
+    ../components/frame
+    ../components/session/include
+    ../components/link/include
+    ../components/link_tcp/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(device_link_handshake_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME device_link_handshake_tests COMMAND device_link_handshake_tests)
 
 # 上行入口 session_send（task-15）。与 session_tests 分开：
 # session_tests 锁"退避只由应用层握手重置"；本文件锁"第一帧到底发不发得出去"

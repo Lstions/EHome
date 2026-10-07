@@ -13,6 +13,7 @@ idf_component_register(SRCS "main.c"
                               "hello_handshake_state.c"
                               "device_op_wiring.c"
                               "device_link_wiring.c"
+                              "device_link_handshake.c"
                        INCLUDE_DIRS "."
                        REQUIRES freertos nvs_flash device_op
                        session tls_esp variant

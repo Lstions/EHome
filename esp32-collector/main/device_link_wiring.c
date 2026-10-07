@@ -131,6 +131,10 @@ uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
 #include "esp_sntp.h"
 
 #include "session.h"
+#include "device_link_handshake.h"   /* 应用层握手的纯决策（IDF 无关）*/
+#include "frame_codec.h"             /* Hello 的帧编码器 + MSG_HELLO/FRAME_OK */
+#include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
+#include "config_mgr.h"              /* epoch / has_manifest / last_known_manifest */
 #include "tls_esp.h"
 #include "wifi_mgr.h"
 #include "sntp_mgr.h"     /* IDF 无关的头（组件约束 C2），只在这里被胶水用到 */
@@ -163,12 +167,29 @@ static uint32_t devlink_rand_permille(void)
  * 仍是待确认项。定界与那个决定无关，所以这里只如实记录帧元数据 ——
  * 绝不猜一个 payload 布局，那正是 D-09 那类"靠巧合成立"的契约。
  */
+/** 最近一条被定界出来的消息类型；**被读走一次就清 0**（一次性）。
+ *  为什么要清：dlhs_decide 的 rx_type 语义是"**本轮刚收到的**那条"。
+ *  若不清，一个 HelloAck 会在之后每一轮都触发一次 NOTE（幂等只是侥幸挡住）。 */
+static volatile uint8_t s_last_rx_type;
+
+/** 取走"本轮收到的类型"并清零（无则 0）。 */
+static uint8_t devlink_take_rx_type(void)
+{
+    uint8_t t = s_last_rx_type;
+    s_last_rx_type = 0;
+    return t;
+}
+
 static bool devlink_on_msg(const rx_msg_t *m, void *ctx)
 {
     (void)ctx;
     ESP_LOGI(TAG, "rx 3.0 msg ver=0x%02X type=0x%02X seq=%u plen=%u",
              (unsigned)m->ver, (unsigned)m->type, (unsigned)m->seq,
              (unsigned)m->payload_len);
+    /* 只记录**类型**，不解析 payload —— payload 语义仍是设计待确认项
+     * （见本文件顶部关于"不猜 payload 布局"的说明）。
+     * 握手推进只需要类型这一个比特的信息。 */
+    s_last_rx_type = m->type;
     return true;
 }
 
@@ -311,6 +332,11 @@ static uint8_t   *s_rx_buf;
 static const char *s_state_txt = "NONE";
 static sntp_mgr_state_t s_sntp_last = SNTP_MGR_DISABLED;
 
+/* ── 应用层握手状态 ── */
+static bool s_hello_sent;        /* **本连接代际**内是否已发过 Hello */
+static session_state_t s_prev_state = SESSION_DOWN;  /* 用于判链路重建 */
+static uint32_t s_hello_nonce;   /* 每次连接代际换一个新的 nonce */
+
 const char *device_link_wiring_state_name(void)
 {
     return EHOME_DEVLINK_ENABLED ? s_state_txt : "DISABLED";
@@ -325,6 +351,110 @@ const char *device_link_wiring_state_name(void)
 static bool devlink_wanted(void)
 {
     return EHOME_DEVLINK_ENABLED != 0;
+}
+
+/**
+ * 构造并发送一条 0x01 Hello。
+ *
+ * ## 为什么不用 msg_handler_send_hello
+ * 它**直接经 transport 发布**（走 MQTT/广播），拿不到字节，而 3.0 链路要的是
+ * "把字节交给 session_send 从这条 socket 发出去"。任务边界也明确要求
+ * **不要改动 msg_handler 的发布路径**。
+ * ⇒ 这里用**同一个 frame 编码器**按 handler_hello.c:164-191 的同一组字段号
+ *   构造一条最小 Hello。字段号取自 msg_handler_internal.h 的 hello_field_t
+ *   （唯一来源，不在这里重抄数字）。
+ *
+ * ## 字段必须**完整**，不能只挑几个
+ *
+ * ⚠ 我第一版只发了 {1,2,3,8,9}，理由是"最小 Hello 够握手就行" —— **错的**。
+ * 后端 handler_hello.go 的 required 是 **{1,2,3,4,5,6,8,9}**，
+ * 缺任何一个 field 都会让 parseHello 直接返回 error（missing required field N）。
+ * 而 FrameHandler 返回 error ⇒ 后端**不回 HelloAck** ⇒ 设备永远进不了 READY。
+ * 实测症状：方向0a 通过（后端解出了 node_id），但"真实路由回 HelloAck 条数 = 0"。
+ * ⇒ 字段集与 2.x 的 msg_handler_send_hello **逐字段对齐**（见下），
+ *   值也取**同一批 getter**，不编造。
+ *
+ * 字段与取值（全部复用 2.x 的同一批来源）：
+ *   1 node_id        = app_state_get()->node_id
+ *   2 firmware_version = get_firmware_version()
+ *   3 model          = get_model_name()
+ *   4 channel_count  = config_mgr_get_active_channel_count()
+ *   5 config_epoch   = config_mgr_get_epoch()
+ *   6 nvs_has_config = config_mgr_has_manifest() ? 1 : 0
+ *                      （**in-memory**，不是 NVS last_known —— 与
+ *                       handler_hello.c:181-184 的口径一致，否则后端会跳过 push）
+ *   7 last_manifest  = config_mgr_get_last_known_manifest_id()（非空才写）
+ *   8 proto_ver      = "2.6"（设计 §0.2：本次不改版本字符串；旧后端严格相等，
+ *                      改成 3.0 会失联）
+ *   9 handshake_nonce = nonce（**必须非 0**：msg_handler_send_hello 与后端
+ *                      parseHello 都拒绝 0）
+ *
+ * @return 写入 frame 的字节数；0 表示失败（nonce==0 或编码不下）。
+ */
+static size_t devlink_build_hello(uint8_t *frame, size_t cap, uint32_t nonce)
+{
+    if (nonce == 0) return 0;    /* 与 msg_handler_send_hello 同一条拒绝规则 */
+
+    const app_state_t *st = app_state_get();
+    const char *node_id = (st != NULL && st->node_id[0] != '\0') ? st->node_id : "";
+    if (node_id[0] == '\0') {
+        /* 没有身份就不发：后端 parseHello 要求 node_id 非空，发了也只会被拒。
+         * 如实返回失败，让调用方打日志（不静默）。 */
+        return 0;
+    }
+
+    frame_encoder_t enc;
+    frame_encoder_init(&enc, frame, cap, MSG_HELLO);
+    if (frame_encode_string(&enc, 1, node_id) != FRAME_OK) return 0;
+    if (frame_encode_string(&enc, 2, get_firmware_version()) != FRAME_OK) return 0;
+    if (frame_encode_string(&enc, 3, get_model_name()) != FRAME_OK) return 0;
+    if (frame_encode_varint(&enc, 4, config_mgr_get_active_channel_count()) != FRAME_OK) return 0;
+    if (frame_encode_varint(&enc, 5, config_mgr_get_epoch()) != FRAME_OK) return 0;
+    if (frame_encode_varint(&enc, 6, config_mgr_has_manifest() ? 1 : 0) != FRAME_OK) return 0;
+    const char *mid = config_mgr_get_last_known_manifest_id();
+    if (mid != NULL && mid[0] != '\0') {
+        if (frame_encode_string(&enc, 7, mid) != FRAME_OK) return 0;
+    }
+    if (frame_encode_string(&enc, 8, "2.6") != FRAME_OK) return 0;
+    if (frame_encode_varint(&enc, 9, nonce) != FRAME_OK) return 0;
+    return frame_encoder_size(&enc);
+}
+
+/**
+ * 用 session_send 把一条帧完整发出去（按 link.h 的 progress 循环）。
+ *
+ * ⚠ **绝不重发整帧**：PARTIAL 表示"写了一部分"，必须从 *progress 处续写；
+ *   重发已上线的字节会让接收端定界器看到重复片段而**无法自愈**（D-30）。
+ *
+ * @return true 整帧写出；false 失败（已如实打日志）。
+ */
+static bool devlink_send_frame(const uint8_t *frame, size_t len, const char *what)
+{
+    size_t progress = 0;
+    int rounds = 0;
+    for (;;) {
+        link_result_t r = session_send(s_session, frame, len, &progress);
+        if (r == LINK_SENT_FULL) return true;
+        if (r == LINK_SENT_PARTIAL) {
+            /* 续写：progress 已被推进，直接再调一次 */
+            if (++rounds > 64) {   /* 防御：避免病态下无限循环 */
+                ESP_LOGE(TAG, "%s：续写 64 轮仍未完成（progress=%u/%u）",
+                         what, (unsigned)progress, (unsigned)len);
+                return false;
+            }
+            continue;
+        }
+        if (r == LINK_BACKPRESSURE) {
+            /* 一字节没写出：**整帧稍后重试**（progress 未动，重发整帧是安全的）。
+             * 本任务 10ms 一轮，下一轮自然重试 —— 这里不忙等。 */
+            ESP_LOGW(TAG, "%s：发送缓冲满（背压），下一轮重试", what);
+            return false;
+        }
+        /* 其余（NOT_READY / PAYLOAD_TOO_BIG / FATAL）：如实报，不静默 */
+        ESP_LOGE(TAG, "%s：发送失败 rc=%s（progress=%u/%u）",
+                 what, link_result_name(r), (unsigned)progress, (unsigned)len);
+        return false;
+    }
 }
 
 static void devlink_task(void *arg)
@@ -378,6 +508,51 @@ static void devlink_task(void *arg)
 
         uint32_t delivered = 0;
         session_state_t st = session_poll(s, &delivered);
+
+        /* ── 应用层握手推进（决策是纯函数，见 device_link_handshake.h）──
+         *
+         * ⭐ 重连后必须**允许重发** Hello：若 hello_sent 只在启动时清零，
+         * 那么第一次连接失败重连后，新链路上永远不发 Hello ⇒ 新连接永远进不了
+         * READY ⇒ 表现为"第一次没连上就再也连不上"。
+         * 判据用 dlhs_link_generation_changed（不在调用方自己发明）。 */
+        if (dlhs_link_generation_changed(s_prev_state, st)) {
+            s_hello_sent = false;
+            /* 每个连接代际换一个 nonce：后端会拒绝 nonce==0，且新代际用旧
+             * nonce 容易被误判成重放。 */
+            s_hello_nonce = (uint32_t)(esp_random() | 1u);
+            ESP_LOGI(TAG, "链路代际更新（%s -> %s）：Hello 可重发，nonce=%u",
+                     session_state_name(s_prev_state), session_state_name(st),
+                     (unsigned)s_hello_nonce);
+        }
+        s_prev_state = st;
+
+        switch (dlhs_decide(st, s_hello_sent, devlink_take_rx_type())) {
+        case DLHS_SEND_HELLO: {
+            uint8_t hello[128];
+            size_t hlen = devlink_build_hello(hello, sizeof(hello), s_hello_nonce);
+            if (hlen == 0) {
+                /* 不静默：构造失败就报出来（nonce==0 或编码不下） */
+                ESP_LOGE(TAG, "Hello 构造失败（nonce=%u）—— 握手无法推进",
+                         (unsigned)s_hello_nonce);
+                break;
+            }
+            if (devlink_send_frame(hello, hlen, "Hello(0x01)")) {
+                s_hello_sent = true;   /* ⭐ 只有真的发出去了才记（背压时下一轮重试）*/
+                ESP_LOGI(TAG, "已发 Hello(0x01) len=%u nonce=%u（等待 HelloAck）",
+                         (unsigned)hlen, (unsigned)s_hello_nonce);
+            }
+            break;
+        }
+        case DLHS_NOTE_HANDSHAKE:
+            /* 收到 0x12 ⇒ 这是进入 READY 的**唯一**途径 */
+            session_note_handshake(s);
+            ESP_LOGI(TAG, "收到 HelloAck(0x12) ⇒ READY（退避计数归零）");
+            break;
+        case DLHS_DONE:
+        case DLHS_IDLE:
+        default:
+            break;
+        }
 
         if (st != last) {
             s_state_txt = session_state_name(st);

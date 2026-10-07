@@ -71,11 +71,13 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "device_link_handshake.h"
 #include "link.h"
 #include "link_tcp.h"
 #include "rx_pump.h"
 #include "session.h"
 #include "wire.h"
+#include "frame_codec.h"   /* MSG_HELLO / MSG_HELLO_ACK 的单一来源 */
 
 /* ── 对锚用的精确字节（任务卡给定，已由协议向量核对）── */
 
@@ -254,7 +256,17 @@ static uint32_t rand_permille(void) { return 500u; }
 /* ══════════════════ 收到的帧 ══════════════════ */
 
 typedef struct {
-    bool     got;
+    bool     got;           /* 已收到**目标**帧（0x22） */
+    bool     got_hello_ack; /* 已收到过 0x12 HelloAck（累计） */
+    /* ⭐ "**本轮**收到的帧类型"（供 dlhs_decide）。
+     *
+     * 为什么需要"本轮"这个粒度、而不是"最近一条"：一轮 poll 里 rx_pump 可能
+     * 交付**多条**消息（定界器一次 feed 最多出一条，但循环会继续）。
+     * 若只记"最近一条"，当 HelloAck 与 0x22 在同一轮到达时，0x12 会被 0x22
+     * 覆盖掉 ⇒ 握手决策看不到 HelloAck ⇒ 永远进不了 READY。
+     * 这是"半条帧/多帧同轮"这一族缺陷的又一变体。 */
+    bool     round_saw_hello_ack;
+    uint8_t  last_type;
     uint8_t  ver;
     uint8_t  type;
     uint16_t flags;
@@ -266,7 +278,17 @@ typedef struct {
 static bool on_msg(const rx_msg_t *m, void *ctx)
 {
     rx_capture_t *cap = (rx_capture_t *)ctx;
-    if (cap->got) return false;              /* 只要第一条 */
+
+    cap->last_type = m->type;
+
+    /* HelloAck(0x12)：握手推进用；**不算**目标帧，继续泵（同轮可能还有 0x22）。 */
+    if (m->type == MSG_HELLO_ACK) {
+        cap->got_hello_ack = true;
+        cap->round_saw_hello_ack = true;
+        return true;
+    }
+
+    if (cap->got) return false;              /* 目标帧只要第一条 */
 
     cap->got  = true;
     cap->ver  = m->ver;
@@ -341,6 +363,101 @@ int main(int argc, char **argv)
         return fail("connect");
     }
     say("connect=ok");
+
+    /* ══════════ 3) 应用层握手：发 Hello(0x01) → 等 HelloAck(0x12) → READY ══════════
+     *
+     * ⚠ 关键：**必须在 WAIT_HANDSHAKE 就发 Hello**。
+     *   READY 只能由 session_note_handshake()（收到 HelloAck）进入，而设备
+     *   必须先发 Hello 才可能收到 HelloAck ⇒ 若在这里等 READY 再发，就是一条
+     *   功能死锁（永远发不出 Hello、永远进不了 READY）。
+     *   决策用**纯函数** dlhs_decide（与 main/device_link_wiring.c 用的是同一份，
+     *   所以这里测到的规则就是固件里跑的规则）。 */
+    uint8_t hello_frame[128];
+    size_t  hello_len = 0;
+    {
+        /* ⚠ 字段必须**完整**：后端 parseHello 的 required 是
+         * {1,2,3,4,5,6,8,9}，缺一个就整条 Hello 被拒 ⇒ 后端不回 HelloAck
+         * ⇒ 设备永远进不了 READY。
+         * 我第一版只发了 {1,2,3,8,9}（"最小 Hello 够握手就行"）—— 实测被打回：
+         * 方向0a 通过（后端解出了 node_id），但"真实路由回 HelloAck 条数 = 0"，
+         * 因为 parseHello 报 missing required field 4/5/6。
+         * 字段号用字面量（本程序是宿主测试，不链接 msg_handler_internal.h）；
+         * 与 handler_hello.c 的 hello_field_t 一致。 */
+        wire_header_t hh;
+        memset(&hh, 0, sizeof(hh));
+        hh.ver   = (uint8_t)WIRE_VER;
+        hh.type  = MSG_HELLO;                 /* 0x01，来自 frame_codec.h */
+        hh.flags = 0;
+        hh.seq   = 1;
+        /* payload 先编到 hello_frame 头之后，再回填 payload_len */
+        frame_encoder_t enc;
+        frame_encoder_init(&enc, hello_frame + WIRE_HEADER_BYTES,
+                           sizeof(hello_frame) - WIRE_HEADER_BYTES, MSG_HELLO);
+        (void)frame_encode_string(&enc, 1, "v3-link-node");
+        (void)frame_encode_string(&enc, 2, "3.0-link");
+        (void)frame_encode_string(&enc, 3, "esp32");
+        (void)frame_encode_varint(&enc, 4, 1u);      /* channel_count（required）*/
+        (void)frame_encode_varint(&enc, 5, 0u);      /* config_epoch（required）*/
+        (void)frame_encode_varint(&enc, 6, 0u);      /* nvs_has_config（required）*/
+        (void)frame_encode_string(&enc, 8, "2.6");   /* proto_ver 仍 2.6（设计 §0.2）*/
+        (void)frame_encode_varint(&enc, 9, 1u);      /* handshake_nonce 非 0 */
+        size_t plen = frame_encoder_size(&enc);
+        hh.payload_len = (uint16_t)plen;
+        if (wire_encode_header(hello_frame, sizeof(hello_frame), &hh) != WIRE_OK) {
+            session_destroy(sess);
+            return fail("hello_encode");
+        }
+        hello_len = WIRE_HEADER_BYTES + plen;
+    }
+
+    /* 发送 Hello：按 link.h 的 progress 循环（PARTIAL 续写，BACKPRESSURE 整帧重试）。 */
+    {
+        size_t progress = 0;
+        uint64_t tx_deadline = now_ms() + 5000;
+        for (;;) {
+            link_result_t lr = session_send(sess, hello_frame, hello_len, &progress);
+            if (lr == LINK_SENT_FULL) break;
+            if (lr == LINK_SENT_PARTIAL) continue;
+            if (lr == LINK_BACKPRESSURE) {
+                if (now_ms() > tx_deadline) { session_destroy(sess); return fail("hello_backpressure"); }
+                continue;
+            }
+            say("note=hello_send_rc=%s", link_result_name(lr));
+            session_destroy(sess);
+            return fail("hello_send");
+        }
+    }
+    say("sent type=0x01");
+
+    /* 等 HelloAck(0x12) —— 用**同一个** dlhs_decide 驱动，证明"收到 0x12 ⇒ note"。 */
+    {
+        uint64_t hs_deadline = now_ms() + E2E_RX_TIMEOUT_MS;
+        bool noted = false;
+        while (!noted && now_ms() < hs_deadline) {
+            uint32_t delivered = 0;
+            cap.round_saw_hello_ack = false;   /* 清"本轮"标记 */
+            session_state_t ps = session_poll(sess, &delivered);
+
+            /* 本轮收到的类型（无则 0）—— 与 dlhs_decide 的入参语义一致 */
+            uint8_t rx_type = cap.round_saw_hello_ack ? MSG_HELLO_ACK : 0;
+            if (dlhs_decide(ps, true /* hello 已发 */, rx_type) == DLHS_NOTE_HANDSHAKE) {
+                session_note_handshake(sess);
+                noted = true;
+                break;
+            }
+            if (ps == SESSION_BACKOFF || ps == SESSION_FATAL) {
+                say("note=session_state=%s", session_state_name(ps));
+                session_destroy(sess);
+                return fail("hello_closed");
+            }
+        }
+    }
+    if (session_state(sess) != SESSION_READY) {
+        say("note=state=%s", session_state_name(session_state(sess)));
+        session_destroy(sess);
+        return fail("no_hello_ack");
+    }
+    say("state=READY");
 
     /* ── 4) 用**真实 wire 编码器**构造一条 0x23 帧 ── */
     wire_header_t h;
