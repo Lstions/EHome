@@ -80,7 +80,27 @@ const char *dlhs_action_name(dlhs_action_t a);
  * 注意：本函数**不**修改 `hello_sent`。它是纯函数，状态的推进由调用方做
  * （这样决策与状态推进各自可测，也让"忘了推进"这类缺陷暴露在调用方一处）。
  */
-dlhs_action_t dlhs_decide(session_state_t st, bool hello_sent, uint8_t rx_type);
+/**
+ * @param hello_ack_accepted  当 rx_type 是 HelloAck(0x12) 时，**应用层是否真的
+ *        接受了它**（即 msg_handler_is_hello_ack_received()）；rx_type 不是
+ *        HelloAck 时该参数无意义，传 false。
+ *
+ * ## task-33 新增此参数的原因（真机 §138）
+ *
+ * 此前判据是"**收到** 0x12 ⇒ note_handshake ⇒ READY"。在只有一条握手路径时
+ * 这是对的；3.0 链路引入后，**应用层会拒绝**一条 nonce 过期的 HelloAck
+ * （handler_hello.c:129）并直接 return。而 msg_handler_process 返回 void
+ * ⇒ 派发层看不见"拒绝"，调用方照样把 rx_type 记成 0x12 ⇒ 出现真机那条
+ * **自相矛盾**的日志：
+ *
+ *     W (3885) HELLO_H: Rejecting HelloAck: stale nonce=3781285441   ← 应用层拒绝
+ *     I (3886) DEV_LINK: 收到 HelloAck(0x12) ⇒ READY                 ← 链路层照样 READY
+ *
+ * ⇒ READY 必须由"**握手成功**"驱动，而不是"**帧到达**"驱动
+ *    （P1：接口表达不了"接受了"，于是调用方只能猜）。
+ */
+dlhs_action_t dlhs_decide(session_state_t st, bool hello_sent, uint8_t rx_type,
+                          bool hello_ack_accepted);
 
 /**
  * 链路代际是否变化 —— 用于决定"何时把 hello_sent 清零"。

@@ -19,9 +19,24 @@ const char *dlhs_action_name(dlhs_action_t a)
     return s_action_names[a];
 }
 
-dlhs_action_t dlhs_decide(session_state_t st, bool hello_sent, uint8_t rx_type)
+dlhs_action_t dlhs_decide(session_state_t st, bool hello_sent, uint8_t rx_type,
+                          bool hello_ack_accepted)
 {
-    /* ── 规则 1（最高优先级）：收到 HelloAck ⇒ note ──
+    /* ── 规则 0（task-33）：收到 0x12 但**应用层拒绝了它** ⇒ 什么都不做 ──
+     *
+     * 为什么必须在规则 1 之前：规则 1 只看"帧到了"，而帧到了
+     * **不等于**握手成功。应用层因 nonce 过期/缺失而拒收时，那条 ACK
+     * 对握手是**无效**的；把它当成功会让设备带着假 READY 继续跑，
+     * 而后端看到的是一个从未完成应用层握手的节点（真机 §138 的形态）。
+     *
+     * ⇒ 这里**不推进**握手、也**不 note**（不 note 才有机会重发/重连；
+     *   session_note_handshake 会把退避计数清零，那会把"握手其实没成"
+     *   掩盖成"链路很健康"）。 */
+    if (rx_type == MSG_HELLO_ACK && !hello_ack_accepted) {
+        return DLHS_IDLE;
+    }
+
+    /* ── 规则 1（最高优先级）：收到**被接受**的 HelloAck ⇒ note ──
      *
      * 为什么放在最前面、且**不先判 state**：
      *   1. 它是进入 READY 的**唯一**途径（session.h 的 note_handshake）；

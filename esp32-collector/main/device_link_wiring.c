@@ -329,6 +329,11 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 #include "session.h"
 #include "uplink_arbiter.h"   /* task-21：上行仲裁轮询 */
 #include "device_link_handshake.h"   /* 应用层握手的纯决策（IDF 无关）*/
+/* task-33：3.0 链路的 nonce **不再自己生成**，改为向 2.x 握手 runtime 取
+ * （决策 B′）。不 include 它会得到 implicit declaration —— 而这只在
+ * **IDF 构建**里暴露：宿主 target 用 DEVICE_LINK_HOST_TEST=1 把整段胶水
+ * 关掉了（宿主绿、目标红，正是本卡要消灭的形态；本轮实测又踩了一次）。 */
+#include "hello_handshake.h"
 #include "frame_codec.h"             /* Hello 的帧编码器 + MSG_HELLO/FRAME_OK */
 #include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
 #include "msg_handler.h"             /* msg_handler_process：3.0 下行接进既有分发 */
@@ -417,7 +422,31 @@ static bool devlink_on_msg(const rx_msg_t *m, void *ctx)
                  (unsigned)m->payload_len);
     }
 
-    /* 握手推进只需要类型这一个比特的信息。 */
+    /* ⚠ task-33 更正（这条注释写的时候是对的，引入第二条路径后不再成立）：
+     *
+     * 原话是"握手推进只需要类型这一个比特的信息"。在**只有一条**握手路径时
+     * 成立：收到 0x12 就意味着握手成功。但 §138 真机实测证明它**不成立**了 ——
+     * 应用层（handler_hello）会**拒绝**一条 stale nonce 的 HelloAck 并直接
+     * return，而 msg_handler_process 返回 void ⇒ 派发层看不见"拒绝"，
+     * 于是这里无条件把 type 记成 0x12 ⇒ device_link_handshake.c:33 只看
+     * rx_type == MSG_HELLO_ACK ⇒ **READY 的判据变成"收到 0x12"而不是
+     * "握手成功"**（P1：接口表达不了"接受了"）。
+     * 真机症状正是同时打印"Rejecting stale nonce"与"⇒ READY"两条相反的结论。
+     *
+     * ⇒ 现在要求**两个**条件同时成立：类型是 HelloAck **且** 应用层确实
+     *    接受了它（msg_handler_is_hello_ack_received 只在 nonce 通过校验时置真，
+     *    handler_hello.c:137）。被拒的 ACK 不再推进握手 —— 链路会**如实**
+     *    留在 WAIT_HANDSHAKE 并重试，而不是带着一个假的 READY 继续跑。 */
+    if (m->type == MSG_HELLO_ACK && !msg_handler_is_hello_ack_received()) {
+        /* ⚠ 不在这里读 session 状态：本函数在链路任务里被调，而 s_session 的
+         * 声明在文件更下方（:604）。此处只报事实，状态由调用方在别处打印。 */
+        ESP_LOGW(TAG, "HelloAck 被应用层拒绝（nonce 未通过校验）⇒ **不推进握手**，"
+                      "等待重发/重连（READY 判据是「握手成功」，不是「收到 0x12」）");
+    }
+
+    /* ⚠ 这里**仍然**记录 rx_type（"收到了什么"是事实）；是否推进握手由
+     * dlhs_decide 的 hello_ack_accepted 参数决定 —— 判据放在纯函数里，
+     * 宿主测试才咬得住（§134 的教训：判据藏在 IDF 胶水里就等于没测）。 */
     s_last_rx_type = m->type;
     return true;
 }
@@ -826,16 +855,39 @@ static void devlink_task(void *arg)
          * 判据用 dlhs_link_generation_changed（不在调用方自己发明）。 */
         if (dlhs_link_generation_changed(s_prev_state, st)) {
             s_hello_sent = false;
-            /* 每个连接代际换一个 nonce：后端会拒绝 nonce==0，且新代际用旧
-             * nonce 容易被误判成重放。 */
-            s_hello_nonce = (uint32_t)(esp_random() | 1u);
-            ESP_LOGI(TAG, "链路代际更新（%s -> %s）：Hello 可重发，nonce=%u",
-                     session_state_name(s_prev_state), session_state_name(st),
-                     (unsigned)s_hello_nonce);
+            /* ⭐ task-33（决策 B′）：nonce **不再由本文件生成**。
+             *
+             * 从前这里写 s_hello_nonce = esp_random() | 1 —— 而校验方
+             * （handler_hello.c:129 → hello_handshake_notify_ack）只认 2.x
+             * 握手 runtime 里 armed 的那个 nonce ⇒ 3.0 发出去的 Hello 的 ACK
+             * **必然**被判 stale（真机 §138：应用层 Rejecting，链路层照样 READY）。
+             *
+             * 现在改为向**同一个** runtime 取 nonce：同一个分配器、同一个
+             * armed_nonce 存储位，只是标记归属为"3.0 链路"。
+             * ⇒ "本次握手的 nonce 归谁"只有一个答案（P4），校验方自然认识它。
+             * 详见 docs/设计/决策-3.0-握手所有权-2026-10-07.md。 */
+            hello_handshake_clear_link_nonce();   /* 旧代际的 arm 作废 */
+            if (!hello_handshake_arm_link_nonce(&s_hello_nonce)) {
+                /* 取不到 nonce 就**不发**：发一条无 nonce 的 Hello 只会被后端拒。
+                 * 不静默 —— 这是"握手推不动"的根因，必须看得见。 */
+                s_hello_nonce = 0;
+                ESP_LOGE(TAG, "链路代际更新（%s -> %s）：**取不到 nonce**，"
+                              "本轮不发 Hello（握手无法推进）",
+                         session_state_name(s_prev_state), session_state_name(st));
+            } else {
+                ESP_LOGI(TAG, "链路代际更新（%s -> %s）：Hello 可重发，nonce=%u（来自握手 runtime）",
+                         session_state_name(s_prev_state), session_state_name(st),
+                         (unsigned)s_hello_nonce);
+            }
         }
         s_prev_state = st;
 
-        switch (dlhs_decide(st, s_hello_sent, devlink_take_rx_type())) {
+        /* task-33（D-B）：把"应用层是否接受了那条 HelloAck"作为**显式**输入
+         * 传给决策函数 —— 它只在 nonce 通过校验时才置真（handler_hello.c:137）。
+         * 读一次存起来：dlhs_decide 与本轮日志要用同一个值，避免两次读取之间
+         * 被另一个上下文改写。 */
+        const bool ack_accepted = msg_handler_is_hello_ack_received();
+        switch (dlhs_decide(st, s_hello_sent, devlink_take_rx_type(), ack_accepted)) {
         case DLHS_SEND_HELLO: {
             uint8_t hello[128];
             size_t hlen = devlink_build_hello(hello, sizeof(hello), s_hello_nonce);
@@ -857,9 +909,11 @@ static void devlink_task(void *arg)
             break;
         }
         case DLHS_NOTE_HANDSHAKE:
-            /* 收到 0x12 ⇒ 这是进入 READY 的**唯一**途径 */
+            /* ⭐ task-33：能走到这里 ⇒ 应用层**确实接受**了那条 HelloAck
+             * （dlhs_decide 的规则 0 已经把"收到但被拒"的路径挡成 IDLE）。
+             * ⇒ 这是进入 READY 的唯一途径，且判据是"握手成功"不是"帧到达"。 */
             session_note_handshake(s);
-            ESP_LOGI(TAG, "收到 HelloAck(0x12) ⇒ READY（退避计数归零）");
+            ESP_LOGI(TAG, "HelloAck(0x12) 被应用层接受 ⇒ READY（退避计数归零）");
             break;
         case DLHS_DONE:
         case DLHS_IDLE:

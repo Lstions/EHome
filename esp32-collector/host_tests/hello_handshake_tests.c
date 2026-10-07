@@ -493,6 +493,82 @@ static void test_runtime_generation_and_nonce_wrap(void)
           "current READY must expose the sole MQTT generation");
 }
 
+/* ⭐⭐ task-33：**真机 §138 的回归**（决策 B′ 的核心判据）。
+ *
+ * 真机症状：3.0 链路发 Hello 用的是自己的 esp_random()，而校验方只认
+ * runtime armed 的 nonce ⇒ 应用层必然判 stale，而链路层照样进 READY。
+ *
+ * 本用例钉住的正是修复后的不变量：
+ *   **在 MQTT 完全没就绪时（ready_generation == 0），
+ *     由 3.0 链路 arm 的 nonce 仍然必须被 notify_ack 接受。**
+ *
+ * 为什么这个前提如此重要：§7.3 P2 的场景就是"TCP 优先、MQTT 兜底"，
+ * 而 prepare_send/notify_ack 的旧判据要求 ready_generation == current，
+ * 那是 **MQTT** 的就绪概念 ⇒ 在 MQTT 未就绪时恒为 0 ⇒ 3.0 的 ACK 被
+ * 永久拒绝。这就是决策文档 §3 否掉候选 A 的那条证据。
+ *
+ * 变异自证：tools/handshake_mutation_proof.py 的 M3（arm 恒失败）会让
+ * 本用例第一组变红。 */
+static void test_link_armed_nonce_is_accepted_without_mqtt_ready(void)
+{
+    hello_runtime_t runtime;
+    hello_runtime_init_with_seed(&runtime, 7U);
+
+    /* 关键前提：**没有**调 on_transport_connected/on_ready ⇒ MQTT 未就绪。
+     * 断言这个前提本身，否则下面"accept"可能只是因为就绪了而对修复无感。 */
+    CHECK(hello_runtime_ready_generation(&runtime) == 0,
+          "前提：MQTT 未就绪时 ready_generation 必须为 0（否则本用例测不到 §138）");
+    CHECK(hello_runtime_current_generation(&runtime) == 0,
+          "前提：current_generation 也必须为 0");
+
+    /* 1) 3.0 链路取 nonce：必须成功且非 0（后端 reject nonce==0）。 */
+    uint32_t link_nonce = 0;
+    CHECK(hello_runtime_arm_link(&runtime, &link_nonce) && link_nonce != 0,
+          "3.0 链路应能从 runtime 取到非 0 nonce");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_LINK,
+          "arm 之后归属必须是 LINK");
+    CHECK(hello_runtime_armed_nonce(&runtime) == link_nonce,
+          "armed_nonce 必须就是刚取到的那个（同一个存储位，P4）");
+
+    /* 2) ⭐ 核心：这个 nonce 必须被校验方**接受** —— 即使 MQTT 未就绪。 */
+    CHECK(hello_runtime_notify_ack(&runtime, link_nonce),
+          "**MQTT 未就绪时，LINK arm 的 nonce 也必须被接受**（真机 §138 的修复点）");
+
+    /* 3) 重新 arm（= 链路重连）后，**旧** nonce 必须失效。 */
+    uint32_t next = 0;
+    CHECK(hello_runtime_arm_link(&runtime, &next) && next != link_nonce,
+          "重新 arm 应给一个不同的 nonce");
+    CHECK(!hello_runtime_notify_ack(&runtime, link_nonce),
+          "重新 arm 之后，旧 nonce 必须被拒（否则重放/迟到 ACK 会被当成功）");
+    CHECK(hello_runtime_notify_ack(&runtime, next),
+          "新的 nonce 应被接受");
+
+    /* 4) 清理：clear 之后谁都别想通过。 */
+    hello_runtime_clear_link_arm(&runtime);
+    CHECK(hello_runtime_armed_nonce(&runtime) == 0, "clear 之后 armed_nonce 应为 0");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_NONE,
+          "clear 之后归属应为 NONE");
+    CHECK(!hello_runtime_notify_ack(&runtime, next),
+          "clear 之后旧 nonce 不得再被接受");
+
+    /* 5) MQTT 路径的既有语义**不得被破坏**：仍是"代际必须就绪"。
+     *    （若有人把 notify_ack 简化成"只看 armed_nonce"，这条会红。） */
+    /* ⚠ 必须先 on_transport_connected(**再**) on_ready —— 这正是决策文档 §3
+     * 的证据：prepare_send 要求 ready_generation == generation，而 ready 只由
+     * MQTT 的就绪回调写入。少调 on_ready 就会失败（本用例第一版就踩了这条，
+     * 恰好从反面印证了 A 为什么在 MQTT 未就绪时取不到 nonce）。 */
+    hello_runtime_on_transport_connected(&runtime, 5);
+    hello_runtime_on_ready(&runtime, 5);
+    uint32_t mqtt_nonce = 0;
+    CHECK(hello_runtime_prepare_send(&runtime, 5, &mqtt_nonce),
+          "前提：MQTT 就绪（connected+ready）后 prepare_send 应能取到 nonce");
+    CHECK(hello_runtime_armed_transport(&runtime) == HELLO_ARM_MQTT,
+          "prepare_send 之后归属必须回到 MQTT");
+    hello_runtime_on_transport_connected(&runtime, 6);   /* 代际推进 ⇒ 旧 nonce 作废 */
+    CHECK(!hello_runtime_notify_ack(&runtime, mqtt_nonce),
+          "MQTT 路径：代际变化后旧 nonce 必须被拒（原有语义不得被本卡改掉）");
+}
+
 static void test_runtime_startup_nonce_seed(void)
 {
     hello_runtime_t first;
@@ -874,6 +950,7 @@ int main(void)
     test_periodic_sync_replaces_active_nonce_and_rejects_old_ack();
     test_ack_and_reset_during_publish_interleavings();
     test_runtime_generation_and_nonce_wrap();
+    test_link_armed_nonce_is_accepted_without_mqtt_ready();   /* task-33: §138 回归 */
     test_runtime_startup_nonce_seed();
     test_runtime_sync_request_mailbox();
     test_state_machine_retry_policy_is_unchanged();

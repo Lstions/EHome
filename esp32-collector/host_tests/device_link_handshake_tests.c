@@ -50,10 +50,10 @@ static int s_failures = 0;
 static void test_wait_handshake_sends_hello_once(void)
 {
     /* 尚未发过 ⇒ 发 */
-    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, false, 0) == DLHS_SEND_HELLO,
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, false, 0, true) == DLHS_SEND_HELLO,
           "WAIT_HANDSHAKE 且未发过 ⇒ 应 SEND_HELLO");
     /* ⭐ 已发过 ⇒ 什么都不做（**不是**再发一次） */
-    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, 0) == DLHS_IDLE,
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, 0, true) == DLHS_IDLE,
           "WAIT_HANDSHAKE 且已发过 ⇒ 应 IDLE（只发一次）");
 
     /* 连续多轮问：只有第一轮给 SEND_HELLO，其余都是 IDLE。
@@ -62,7 +62,7 @@ static void test_wait_handshake_sends_hello_once(void)
     bool hello_sent = false;
     int sends = 0;
     for (int i = 0; i < 20; i++) {
-        dlhs_action_t a = dlhs_decide(SESSION_WAIT_HANDSHAKE, hello_sent, 0);
+        dlhs_action_t a = dlhs_decide(SESSION_WAIT_HANDSHAKE, hello_sent, 0, true);
         if (a == DLHS_SEND_HELLO) { sends++; hello_sent = true; }  /* 调用方推进 */
     }
     CHECK(sends == 1, "20 轮 poll 里只应发 1 次 Hello（实际 %d 次）—— "
@@ -72,24 +72,68 @@ static void test_wait_handshake_sends_hello_once(void)
 static void test_hello_ack_leads_to_note(void)
 {
     /* 在 WAIT_HANDSHAKE 收到 0x12 ⇒ NOTE（这是真实时序！） */
-    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, MSG_HELLO_ACK) == DLHS_NOTE_HANDSHAKE,
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, MSG_HELLO_ACK, true) == DLHS_NOTE_HANDSHAKE,
           "WAIT_HANDSHAKE 收到 0x12 ⇒ 应 NOTE_HANDSHAKE");
     /* 还没发过 Hello 就收到 0x12（异常但对端可能主动发）⇒ 仍然 note，
      * 不因为 hello_sent=false 而丢掉这个 HelloAck。 */
-    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, false, MSG_HELLO_ACK) == DLHS_NOTE_HANDSHAKE,
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, false, MSG_HELLO_ACK, true) == DLHS_NOTE_HANDSHAKE,
           "收到 0x12 即应 NOTE（不依赖 hello_sent）");
     /* READY 之后再收到 0x12 ⇒ 不再重复 note（幂等） */
-    CHECK(dlhs_decide(SESSION_READY, true, MSG_HELLO_ACK) == DLHS_DONE,
+    CHECK(dlhs_decide(SESSION_READY, true, MSG_HELLO_ACK, true) == DLHS_DONE,
           "READY 后收到 0x12 ⇒ 应 DONE（不重复 note，避免退避被反复清零）");
+}
+
+/* ⭐⭐ task-33：**"收到 0x12" != "握手成功"**（真机 §138 的根因）。
+ *
+ * 为什么这组断言必须有：真机上同时出现
+ *     W HELLO_H: Rejecting HelloAck: stale nonce=...   ← 应用层拒绝
+ *     I DEV_LINK: 收到 HelloAck(0x12) ⇒ READY          ← 链路层照样 READY
+ * 两条相反的结论。原因是 READY 的判据只看了"帧到了"。
+ * ⇒ 现在判据是"帧到了 **且** 应用层接受了"。
+ *
+ * 变异自证（tools/handshake_mutation_proof.py）：
+ *   - 删掉规则 0 ⇒ 本用例第一组变红；
+ *   - 只看 rx_type 就 NOTE ⇒ 同样变红。 */
+static void test_rejected_hello_ack_does_not_reach_ready(void)
+{
+    /* 被应用层拒绝的 0x12：**任何**状态下都不得推进握手。 */
+    const session_state_t all[] = {
+        SESSION_DOWN, SESSION_BACKOFF, SESSION_WAIT_HANDSHAKE, SESSION_READY,
+    };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
+        dlhs_action_t a = dlhs_decide(all[i], true, MSG_HELLO_ACK, false);
+        CHECK(a != DLHS_NOTE_HANDSHAKE,
+              "%s：被拒绝的 HelloAck **不得** NOTE_HANDSHAKE（那会造出假 READY）",
+              st_name(all[i]));
+        CHECK(a == DLHS_IDLE,
+              "%s：被拒绝的 HelloAck ⇒ IDLE（既不 note 也不在此处重发）",
+              st_name(all[i]));
+    }
+
+    /* 对照：同状态下**被接受**的 0x12 仍然要 NOTE —— 证明上面不是"整个分支
+     * 都坏了"而变红（否则门禁会假绿在错误的方向上）。 */
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, MSG_HELLO_ACK, true) == DLHS_NOTE_HANDSHAKE,
+          "被接受的 HelloAck 仍应 NOTE_HANDSHAKE");
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, true, MSG_HELLO_ACK, false) == DLHS_IDLE,
+          "同状态同 rx_type，仅 accepted 不同 ⇒ 结果必须不同（否则该参数是装饰）");
+}
+
+/* 非 HelloAck 的消息：accepted 参数**不参与**判定（传 false 也必须照常工作）。 */
+static void test_accepted_flag_only_matters_for_hello_ack(void)
+{
+    CHECK(dlhs_decide(SESSION_WAIT_HANDSHAKE, false, 0x22, false) == DLHS_SEND_HELLO,
+          "别的类型 + accepted=false ⇒ 仍应照常发 Hello");
+    CHECK(dlhs_decide(SESSION_READY, true, 0x23, false) == DLHS_DONE,
+          "别的类型 + accepted=false ⇒ 仍应 DONE");
 }
 
 static void test_ready_is_quiet(void)
 {
-    CHECK(dlhs_decide(SESSION_READY, true, 0) == DLHS_DONE,
+    CHECK(dlhs_decide(SESSION_READY, true, 0, true) == DLHS_DONE,
           "READY 无消息 ⇒ DONE");
-    CHECK(dlhs_decide(SESSION_READY, true, 0x22) == DLHS_DONE,
+    CHECK(dlhs_decide(SESSION_READY, true, 0x22, true) == DLHS_DONE,
           "READY 收到非 HelloAck ⇒ DONE（不打扰）");
-    CHECK(dlhs_decide(SESSION_READY, false, 0) == DLHS_DONE,
+    CHECK(dlhs_decide(SESSION_READY, false, 0, true) == DLHS_DONE,
           "READY ⇒ DONE（不因 hello_sent=false 而重发 Hello）");
 }
 
@@ -97,10 +141,10 @@ static void test_not_connected_is_idle(void)
 {
     const session_state_t down_states[] = { SESSION_DOWN, SESSION_BACKOFF, SESSION_FATAL };
     for (size_t i = 0; i < sizeof(down_states) / sizeof(down_states[0]); i++) {
-        CHECK(dlhs_decide(down_states[i], false, 0) == DLHS_IDLE,
+        CHECK(dlhs_decide(down_states[i], false, 0, true) == DLHS_IDLE,
               "%s 未连上 ⇒ IDLE（发了也白发）", st_name(down_states[i]));
         /* 未连上却收到 HelloAck（不该发生，但不得崩、也不得静默丢弃） */
-        CHECK(dlhs_decide(down_states[i], false, MSG_HELLO_ACK) == DLHS_NOTE_HANDSHAKE,
+        CHECK(dlhs_decide(down_states[i], false, MSG_HELLO_ACK, true) == DLHS_NOTE_HANDSHAKE,
               "%s 收到 0x12 ⇒ 仍应 NOTE（如实响应，不吞）",
               st_name(down_states[i]));
     }
@@ -147,7 +191,7 @@ static void test_reconnect_allows_resending_hello(void)
     for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
         session_state_t now = seq[i];
         if (dlhs_link_generation_changed(prev, now)) hello_sent = false;  /* 调用方清零 */
-        dlhs_action_t a = dlhs_decide(now, hello_sent, 0);
+        dlhs_action_t a = dlhs_decide(now, hello_sent, 0, true);
         if (a == DLHS_SEND_HELLO) { sends++; hello_sent = true; }
         prev = now;
     }
@@ -172,6 +216,8 @@ int main(void)
 {
     test_wait_handshake_sends_hello_once();
     test_hello_ack_leads_to_note();
+    test_rejected_hello_ack_does_not_reach_ready();   /* task-33 */
+    test_accepted_flag_only_matters_for_hello_ack();  /* task-33 */
     test_ready_is_quiet();
     test_not_connected_is_idle();
     test_reconnect_allows_resending_hello();

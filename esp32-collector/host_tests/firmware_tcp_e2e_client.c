@@ -682,7 +682,7 @@ int main(int argc, char **argv)
 
             /* 本轮收到的类型（无则 0）—— 与 dlhs_decide 的入参语义一致 */
             uint8_t rx_type = cap.round_saw_hello_ack ? MSG_HELLO_ACK : 0;
-            if (dlhs_decide(ps, true /* hello 已发 */, rx_type) == DLHS_NOTE_HANDSHAKE) {
+            if (dlhs_decide(ps, true /* hello 已发 */, rx_type, true) == DLHS_NOTE_HANDSHAKE) {
                 session_note_handshake(sess);
                 noted = true;
                 break;
