@@ -1154,6 +1154,17 @@ add_test(NAME mem_budget_thresholds
 add_test(NAME stub_enum_sync
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_stub_enum_sync.py)
 
+# 证书 NVS 契约（命名空间 + 三个键名）两端必须一致。
+#
+# 它是**跨语言**契约：固件（C）读 eh_tls:{ca,cert,key}，工具（Python）写同样的名字，
+# 而此前**没有任何东西把它们钉在一起** —— 正是 P4 要防的形态。
+# 失效后果是静默的：两端漂移时工具照样生成镜像、**读回校验也照样全绿**，
+# 因为 verify() 比的是"镜像与它自己"，从没比过"镜像与固件读的名字"。
+# 真机上表现为 NVS_NOT_FOUND / 证书缺失 ⇒ 链路 FATAL，
+# 而"我刚生成的镜像校验全过"会把人引向错误方向。
+add_test(NAME cert_nvs_contract
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_cert_nvs_contract.py)
+
 # 门禁分类器自检：证明每条门禁**真的会咬**（喂坏输入 ⇒ 必须非零）。
 #
 # 为什么它配得上一条 ctest（而不是"偶尔手动跑跑"）：

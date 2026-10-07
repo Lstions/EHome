@@ -476,6 +476,36 @@ def recipes():
                        "镜像常量漂移"),
         "tls_guard.h: TLS_ERGTYPE_MBEDTLS 2 -> 3（与 IDF 枚举顺序失配）")
 
+    # 2026-10-07 新增：证书 NVS 契约（跨语言）。
+    # 坏输入选"固件读的键名"这一侧 —— 它最能说明这条门禁的价值：
+    # 两端漂移时工具照样生成、读回校验照样全绿，只有固件读不到。
+    add("cert_nvs_contract.fw_key_drift",
+        "check_cert_nvs_contract.py", "file",
+        inject_replace("main/device_link_wiring.c",
+                       r'nvs_read_blob_alloc\(h, "key",', 'nvs_read_blob_alloc(h, "privkey",',
+                       "固件读的键名漂移（key -> privkey）"),
+        "device_link_wiring.c: 固件读 \"privkey\" 而工具写 \"key\" ⇒ 镜像生成的证书固件读不到")
+
+    add("cert_nvs_contract.tool_ns_drift",
+        "check_cert_nvs_contract.py", "file",
+        inject_replace("tools/nvs_certs_gen.py",
+                       r'DEFAULT_NS = "eh_tls"', 'DEFAULT_NS = "eh_tls2"',
+                       "工具写的命名空间漂移（eh_tls -> eh_tls2）"),
+        "nvs_certs_gen.py: 工具写 \"eh_tls2\" 而固件开 \"eh_tls\" ⇒ 命名空间对不上")
+
+    add("cert_nvs_contract.kconfig_mismatch",
+        "check_cert_nvs_contract.py", "file",
+        # 锚点必须只落在**一行内**：inject_replace 用的是 re.subn(pattern, repl, text)
+        # **没有 re.S** ⇒ "." 不匹配换行。我第一版写成
+        #   (config\s+EHOME_DEVICE_LINK_NVS_NS.*?default\s+")eh_tls(")
+        # 想让 .*? 跨过 config 与 default 之间的若干行，结果**命中 0 次**，
+        # 自检直接 assert 报错（幸好它 assert 了；否则就是静默漏掉一条配方）。
+        # 改用"default 那一行"作锚点：它在整个文件里唯一。
+        inject_replace("main/Kconfig.projbuild",
+                       r'default "eh_tls"', 'default "zz_mismatch"',
+                       "Kconfig default 与源码兜底矛盾"),
+        "Kconfig.projbuild: default 改成 zz_mismatch，与源码 #define 兜底不一致")
+
     return R
 
 
@@ -491,6 +521,9 @@ def _mutation_targets():
     return {
         "main/main.c",
         "main/app_callbacks.c",
+        "main/device_link_wiring.c",
+        "main/Kconfig.projbuild",
+        "tools/nvs_certs_gen.py",
         "components/bus_worker/bus_worker.c",
         "components/report_stats/CMakeLists.txt",
         "components/tls_guard/include/tls_guard.h",
