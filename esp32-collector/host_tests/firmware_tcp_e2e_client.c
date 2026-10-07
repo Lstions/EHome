@@ -83,6 +83,14 @@
 #include "session.h"
 #include "wire.h"
 #include "frame_codec.h"   /* MSG_HELLO / MSG_HELLO_ACK 的单一来源 */
+/* ===== task-25：真实 device_op 回程所需的头 ===== */
+#include "transport.h"             /* 捕获 transport（真实广播路径的落点）*/
+#include "msg_handler_hooks.h"     /* msg_handler_publish_checked 的**唯一**声明处 */
+#include "msg_handler_device_op.h" /* msg_handler_set_device_op_hooks / _ready */
+#include "device_op.h"             /* device_op_result_t / DEVICE_OP_REBOOT */
+/* FreeRTOS 桩：msg_handler.c 用互斥量保护 s_current_transport。 */
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 /* ── 对锚用的精确字节（任务卡给定，已由协议向量核对）── */
 
@@ -145,36 +153,165 @@ void rgb_led_set_state(led_state_t state) { (void)state; }
 /* handler_hello.c 引用 main/ 的握手监督器；本程序不跑它。 */
 bool hello_handshake_notify_ack(uint32_t nonce) { (void)nonce; return false; }
 
-/* ---- 捕获 msg_handler_publish：这就是"取字节"的入口，无需改生产代码 ---- */
-static uint8_t s_hello_capture[512];
-static size_t  s_hello_capture_len;
-static bool    s_hello_captured;
+/* ══════════════════════════════════════════════════════════════════════════
+ * task-25：捕获「真实产出的上行帧」
+ *
+ * ## 为什么捕获点是 transport 而不是 msg_handler_publish
+ *
+ * task-23 时本文件自己实现了一个 msg_handler_publish() 来截字节。task-25 把
+ * **真实的 msg_handler.c** 编进本程序（见 CMakeLists 的 `msg_handler.c`），
+ * 而**它自己就定义** msg_handler_publish() ⇒ 再定义一次会**重复符号**。
+ *
+ * ⭐ 而且捕获点放在 transport 层**更真实**：真实的回程是
+ *    msg_handler_publish_checked → transport_broadcast_ex → transport->ops->send()
+ * 把捕获做在 send() 上，等于让**真实的广播路径完整跑一遍**（含 is_connected 判定、
+ * attempted/sent/mqtt_attempted 计数），**只有最后一步**（写 socket）被替换成"存起来"。
+ *
+ * ⚠ 3.0 路径调的是 msg_handler_process（**非** _with_transport）
+ *   ⇒ s_current_transport 恒为 NULL ⇒ ACK 必走 broadcast。
+ *   **这个真实形态被刻意保留** —— 改成 _with_transport 会掩盖真实回程路径。
+ * ══════════════════════════════════════════════════════════════════════════ */
 
-void msg_handler_publish(const uint8_t *data, size_t len)
+#define E2E_CAPTURE_CAP 512
+static uint8_t s_capture[E2E_CAPTURE_CAP];
+static size_t  s_capture_len;
+static bool    s_captured;
+static int     s_capture_calls;
+
+static esp_err_t cap_init(transport_t *t, const void *c) { (void)t; (void)c; return ESP_OK; }
+static esp_err_t cap_start(transport_t *t) { (void)t; return ESP_OK; }
+static esp_err_t cap_stop(transport_t *t) { (void)t; return ESP_OK; }
+
+/* 只把字节接住，不真的写 socket —— 这是唯一被替换的一步，且它是 I/O 不是逻辑。 */
+static esp_err_t cap_send(transport_t *t, const uint8_t *d, size_t n)
 {
-    if (len == 0 || len > sizeof(s_hello_capture)) return;
-    memcpy(s_hello_capture, data, len);
-    s_hello_capture_len = len;
-    s_hello_captured = true;
+    (void)t;
+    s_capture_calls++;
+    if (n == 0 || n > sizeof(s_capture)) return ESP_FAIL;
+    memcpy(s_capture, d, n);
+    s_capture_len = n;
+    s_captured = true;
+    return ESP_OK;
 }
 
-/* 用**真实 handler** 编一条 Hello，返回原始字节（含类型字节，不含 3.0 头）。 */
+/* 恒 true，代表「3.0 会话已 READY」⇒ 广播才会真的投给它。 */
+static bool cap_connected(transport_t *t) { (void)t; return true; }
+static void cap_deinit(transport_t *t) { (void)t; }
+
+static const transport_ops_t CAP_OPS = {
+    .init = cap_init, .start = cap_start, .stop = cap_stop,
+    .send = cap_send, .is_connected = cap_connected, .deinit = cap_deinit,
+};
+
+static transport_t *install_capture_transport(void)
+{
+    static transport_t t;
+    memset(&t, 0, sizeof(t));
+    t.ops = &CAP_OPS;
+    t.type = TRANSPORT_TYPE_TCP;   /* 代表 3.0 会话 */
+    t.state = TRANSPORT_CONNECTED;
+    if (transport_register(&t) != ESP_OK) return NULL;
+    return &t;
+}
+
+/* ══ device_op 的**真实出口**（照 main/device_op_wiring.c:75 的写法）══
+ * 真实固件用 msg_handler_publish_checked（带校验）—— 不要换成不检查返回值的
+ * msg_handler_publish()：device_op 依赖「失败 ⇒ 不重启」。 */
+static int client_send_frame(const uint8_t *frame, size_t len)
+{
+    if (frame == NULL || len == 0) return -1;
+    return (msg_handler_publish_checked(frame, len) == ESP_OK) ? 0 : -1;
+}
+
+/* 宿主上没有 NVS 语义；恢复出厂那条路径本卡不测，返回成功即可。 */
+static int client_erase_namespace(const char *ns) { (void)ns; return 0; }
+
+/* ⚠ 宿主上**绝不能**真重启（真机是 esp_restart()，不返回）。
+ * device_op 保证它只在 ACK 送出之后才被调用。 */
+static void client_restart(void) { }
+
+static const device_op_hooks_t CLIENT_DEVOP_HOOKS = {
+    .erase_namespace = client_erase_namespace,
+    .send_frame      = client_send_frame,
+    .restart         = client_restart,
+};
+
+/* 用**真实 handler** 编一条 Hello，返回被真实广播路径送出的字节。 */
 static const uint8_t *build_hello_via_real_handler(size_t *out_len)
 {
-    s_hello_captured = false;
-    s_hello_capture_len = 0;
-    /* 参数与之前手写版本逐项相同，保证对锚行为不变：
+    s_captured = false;
+    s_capture_len = 0;
+    s_capture_calls = 0;
+    /* 参数与 task-23 逐项相同，保证对锚行为不变：
      *   node_id="v3-link-node"  fw="3.0-link"  model="esp32"
      *   channel_count=1  nonce=1（非 0）
      * field 5/6/8 由 handler 依桩与 HELLO_F_* 常量决定。 */
     msg_handler_send_hello("v3-link-node", "3.0-link", "esp32", 1u, 1u);
-    if (!s_hello_captured) {
+    if (!s_captured) {
         *out_len = 0;
         return NULL;
     }
-    *out_len = s_hello_capture_len;
-    return s_hello_capture;
+    *out_len = s_capture_len;
+    return s_capture;
 }
+/* ══════════════════════════════════════════════════════════════════════════
+ * task-25：真实 msg_handler.c 需要的宿主桩
+ *
+ * 手法与 host_tests/msg_handler_publish_tests.c:19-23 完全一致 ——
+ * 摊入真实生产源码，只把"与本卡无关的其它 handler"桩掉。
+ *
+ * ⚠ 被桩掉的只是**本卡不测的那几条消息**（config/writecmd/data-ota/channel_cmd/
+ *   periph/diag）。**0x22 那条链路全程是真代码**：
+ *   msg_handler_process 的真实 switch → 真实 handler_device_op_process
+ *   → 真实 device_op_execute → 真实钩子 → 真实 msg_handler_publish_checked
+ *   → 真实 transport_broadcast_ex。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* FreeRTOS / 日志 / 系统桩 */
+void host_test_log_record(char level, const char *tag, const char *format, ...)
+{
+    (void)level; (void)tag; (void)format;   /* 与 hello_stubs/esp_log.h 的丢弃语义一致 */
+}
+void esp_restart(void) { }   /* ⚠ 宿主上绝不真重启 */
+SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
+int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
+
+/* MQTT 兜底（msg_handler.c 广播失败后的最后一条路）。本卡走 broadcast 成功路径，
+ * 不会到这里；给它一个如实失败的桩，语义与真实"没连上"一致。 */
+bool mqtt_client_publish_impl(const uint8_t *data, size_t len)
+{
+    (void)data; (void)len;
+    return false;
+}
+
+/* msg_handler.c 引用到的**其它 handler**（本卡不测它们；0x22 那条走真实实现）。
+ * ⚠ handler_hello_process_ack / _ping **不在这里桩** —— 它们来自上游已链接的
+ *   真实 handler_hello.c（task-23 引入）⇒ 再桩会 multiple definition。 */
+void handler_config_process_manifest(frame_decoder_t *d) { (void)d; }
+void handler_config_process_query(frame_decoder_t *d) { (void)d; }
+void handler_config_process_query_resources(frame_decoder_t *d) { (void)d; }
+void handler_writecmd_process(frame_decoder_t *d) { (void)d; }
+void handler_writecmd_process_scan(frame_decoder_t *d) { (void)d; }
+void handler_writecmd_process_query(frame_decoder_t *d) { (void)d; }
+void handler_data_process_ota(frame_decoder_t *d) { (void)d; }
+void handler_channel_cmd_v2_process(frame_decoder_t *d) { (void)d; }
+void handler_periph_process(frame_decoder_t *d) { (void)d; }
+void handler_diag_process_ack(frame_decoder_t *d) { (void)d; }
+void on_query_resources_received(const char *request_id) { (void)request_id; }
+void on_write_cmd_received(uint32_t a, uint32_t b, const uint8_t *c, size_t d,
+                           uint32_t e, uint32_t f, uint32_t g)
+{ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g; }
+void on_scan_req_received(const char *a, uint32_t b) { (void)a; (void)b; }
+void on_modbus_scan_req_received(const char *a, uint32_t b, uint32_t c, uint32_t d)
+{ (void)a;(void)b;(void)c;(void)d; }
+const char *channel_cmd_v2_current_boot_id(void) { return "boot"; }
+uint64_t channel_cmd_v2_current_time_ms(void) { return 0; }
+bool on_channel_cmd_v2_received(const struct channel_cmd_v2 *c, uint8_t s)
+{ (void)c; (void)s; return false; }
+bool ehome_mem_can_start(size_t n) { (void)n; return true; }
+
 static void say(const char *fmt, ...)
 {
     va_list ap;
@@ -396,6 +533,17 @@ int main(int argc, char **argv)
 
     if (ctx.port <= 0 || ctx.port > 65535) return fail("bad_port");
 
+    /* ══ task-25：先把"上行捕获"装好 —— Hello 与 ACK 两次上行都要经过它 ══
+     * 时机很关键：msg_handler_send_hello() 也走 msg_handler_publish_checked →
+     * transport_broadcast_ex ⇒ **Hello 第一次发之前**就必须有 transport 在册，
+     * 否则广播找不到落点、Hello 一个字节都发不出去（实测症状：
+     * note=real_handler_produced_no_hello）。
+     * device_op 的钩子同样一次装好；两者都幂等。 */
+    transport_manager_init();
+    if (install_capture_transport() == NULL) return fail("capture_register");
+    msg_handler_set_device_op_hooks(&CLIENT_DEVOP_HOOKS);
+    if (!msg_handler_device_op_ready()) return fail("devop_hooks");
+
     /* ── 1) 真实 session（内部就是 link_tcp + link_rx_adapt + rx_pump）── */
     static uint8_t rbuf[E2E_RX_BUF_CAP];
     rx_capture_t cap;
@@ -542,58 +690,20 @@ int main(int argc, char **argv)
     }
     say("state=READY");
 
-    /* ── 4) 用**真实 wire 编码器**构造一条 0x23 帧 ── */
-    wire_header_t h;
-    memset(&h, 0, sizeof(h));
-    h.ver         = (uint8_t)WIRE_VER;
-    h.type        = 0x23;
-    h.flags       = 0;                      /* ⚠ 不置 CRC 位 */
-    h.seq         = 1;
-    h.payload_len = (uint16_t)sizeof(kAckOkPayload);
-
-    uint8_t frame[WIRE_HEADER_BYTES + sizeof(kAckOkPayload)];
-    wire_result_t wr = wire_encode_header(frame, sizeof(frame), &h);
-    if (wr != WIRE_OK) {
-        say("note=wire_encode_header=%s", wire_result_name(wr));
-        session_destroy(sess);
-        return fail("wire_encode");
-    }
-    memcpy(frame + WIRE_HEADER_BYTES, kAckOkPayload, sizeof(kAckOkPayload));
-
-    /* ── 3) 发送：**真实 session_send**（薄委托到 link_send）──
+    /* ══════════════════════════════════════════════════════════════════════
+     * ── 4) ⭐ task-25：**先收真实的 0x22**，再由真实回程产出 0x23，最后发出去 ──
      *
-     * 按 link.h 规定的续写模式推进 progress：
-     *   PARTIAL（写了一部分）⇒ 继续写；BACKPRESSURE（一字节没写出）⇒ 整帧稍后重试。
-     * 绝不能重发整帧 —— 已上线字节再写一遍会让接收端定界器无法自愈（D-30）。 */
-    size_t len = sizeof(frame);
-    size_t progress = 0;
-    uint64_t tx_deadline = now_ms() + 5000;
-    for (;;) {
-        link_result_t lr = session_send(sess, frame, len, &progress);
-        if (lr == LINK_SENT_FULL) break;
-        if (lr == LINK_SENT_PARTIAL) continue;            /* 接着写（progress 已推进） */
-        if (lr == LINK_BACKPRESSURE) {                    /* 一字节没写出：整帧稍后重试 */
-            if (now_ms() > tx_deadline) {
-                session_destroy(sess);
-                return fail("tx_backpressure_timeout");
-            }
-            continue;
-        }
-        /* 其它结果：交给上层决策（本程序直接判失败并如实报出） */
-        say("note=session_send_rc=%s progress=%zu", link_result_name(lr), progress);
-        session_destroy(sess);
-        return fail("send");
-    }
-    say("sent type=0x23 len=%u", (unsigned)sizeof(kAckOkPayload));
-
-    /* ── 4) 反复 session_poll 直到收到一条帧或超时 ──
+     * 为什么次序变成"先收后发"：这就是**因果序**。
+     * 设备的 ACK 是对某一条命令的回执；没收到命令就产生不了回执。
+     * （后端 device_e2e_firmware_test.go 已相应改序：先逐字节发 0x22，再读 0x23。）
      *
-     * ⚠ 收帧走 session_poll（它内部是 rx_pump_step + wire 定界），因此
+     * ⚠ 收帧走 session_poll（内部是 rx_pump_step + wire 定界），因此
      *   "后端每次 1 字节写来"的**半条帧**必须仍能被正确组装 —— 这是本程序
-     *   原有能力，改用 session 后**不得退化**。
+     *   原有能力，不得退化。
      *
      * 状态机语义：poll 在 WAIT_HANDSHAKE / READY 两态都会泵读。
-     * 链路掉了会进 BACKOFF（本程序记为 rx_closed_by_peer，不假装是超时）。 */
+     * 链路掉了会进 BACKOFF（本程序记为 rx_closed_by_peer，不假装是超时）。
+     * ══════════════════════════════════════════════════════════════════════ */
     uint64_t deadline = now_ms() + E2E_RX_TIMEOUT_MS;
     int exit_code = 1;
     const char *rx_fail = "rx_timeout";   /* 默认：真的等满了 */
@@ -635,13 +745,105 @@ int main(int argc, char **argv)
 
     say("payload_match=%s", ok_pay ? "yes" : "no");
 
-    if (ok_type && ok_len && ok_pay) {
-        say("result=PASS");
-        exit_code = 0;
-    } else {
-        say("result=FAIL reason=%s",
-            !ok_type ? "type" : (!ok_len ? "payload_len" : "payload_bytes"));
+    /* ══════════════════════════════════════════════════════════════════════
+     * ── 5) ⭐⭐ task-25 的核心：让**真实链路**产出 0x23，而不是手写字节 ──
+     *
+     * 此前这里是 kAckOkPayload 这个手写常量（"一个手写的正确形状 ACK 能被后端接受"）
+     * ⇒ 对锚证明不了"**设备真的会产生**这条 ACK"。现在改成：
+     *
+     *   收到的 0x22 载荷
+     *     -> msg_handler_process（**真实**分发 switch，按 payload 首字节取类型）
+     *     -> handler_device_op_process（**真实**解析）
+     *     -> device_op_execute（**真实**执行：宿主上 restart 是空桩，不真重启）
+     *     -> 钩子 send_frame -> msg_handler_publish_checked（**真实**出口）
+     *     -> transport_broadcast_ex（**真实**广播，s_current_transport 为 NULL）
+     *     -> 捕获 transport 的 send()（**唯一被替换的一步：存下来而不是写 socket**）
+     *
+     * 然后把这份**真实产出的字节**经真实 session_send 发回后端。
+     * ══════════════════════════════════════════════════════════════════════ */
+    {
+        if (!ok_type || !ok_len || !ok_pay) {
+            /* 载荷不对就不该拿它去驱动真实执行 —— 那会把"收到的字节错"
+             * 掩盖成"回执错"。失败原因上面已经报过了。 */
+            say("result=FAIL reason=%s",
+                !ok_type ? "type" : (!ok_len ? "payload_len" : "payload_bytes"));
+            session_destroy(sess);
+            return 1;
+        }
+
+        /* 准备真实回程：注册捕获 transport（广播的落点）+ 注入 device_op 三个原语。 */
+        /* 回程所需的两件事已在启动时装好（见 main 开头的 setup 段）。 */
+        s_captured = false;
+        s_capture_len = 0;
+        s_capture_calls = 0;
+
+        /* ⭐ 真实分发。注意传的是**整个载荷**（首字节 0x22 = 类型，2.x 约定）。 */
+        msg_handler_process(cap.payload, cap.payload_len);
+
+        if (!s_captured || s_capture_len == 0) {
+            /* 真实回程没产出任何帧 ⇒ 广播没投到任何 transport。
+             * 这正是 task-19 报告过的"3.0 未注册 ⇒ 回执发不出去"形态。 */
+            say("note=real_ack_not_produced broadcast_calls=%d", s_capture_calls);
+            session_destroy(sess);
+            return fail("no_real_ack");
+        }
+
+        /* 断言真实产出的字节 == 共享向量（后端能接受的那串）。
+         * 这一条把"设备真的会产生这条 ACK"钉住 —— 手写常量的时代结束了。 */
+        if (s_capture_len != sizeof(kAckOkPayload) ||
+            memcmp(s_capture, kAckOkPayload, sizeof(kAckOkPayload)) != 0) {
+            printf("E2E-CLIENT real_ack_hex=");
+            for (size_t i = 0; i < s_capture_len; i++) printf("%02x", s_capture[i]);
+            printf("\n");
+            say("note=real_ack_mismatch len=%u", (unsigned)s_capture_len);
+            session_destroy(sess);
+            return fail("real_ack_bytes");
+        }
+
+        /* 发出去：**真实 wire 编码器** + **真实 session_send**。
+         * 载荷用的是**真实回程产出的字节**，不是 kAckOkPayload 这个常量本身。 */
+        uint8_t frame[WIRE_HEADER_BYTES + E2E_CAPTURE_CAP];
+        wire_header_t h;
+        memset(&h, 0, sizeof(h));
+        h.ver         = (uint8_t)WIRE_VER;
+        h.type        = (uint8_t)s_capture[0];   /* 0x23，来自真实字节 */
+        h.flags       = 0;                      /* ⚠ 不置 CRC 位 */
+        h.seq         = 1;
+        h.payload_len = (uint16_t)s_capture_len;
+
+        if (wire_encode_header(frame, sizeof(frame), &h) != WIRE_OK) {
+            say("note=wire_encode=FAIL");
+            session_destroy(sess);
+            return fail("wire_encode");
+        }
+        memcpy(frame + WIRE_HEADER_BYTES, s_capture, s_capture_len);
+
+        /* 按 link.h 规定的续写模式推进 progress：
+         *   PARTIAL（写了一部分）⇒ 继续写；BACKPRESSURE（一字节没写出）⇒ 稍后重试。
+         * 绝不重发整帧 —— 已上线字节再写一遍会让接收端定界器无法自愈（D-30）。 */
+        size_t tx_len = WIRE_HEADER_BYTES + s_capture_len;
+        size_t progress = 0;
+        uint64_t tx_deadline = now_ms() + 5000;
+        for (;;) {
+            link_result_t lr = session_send(sess, frame, tx_len, &progress);
+            if (lr == LINK_SENT_FULL) break;
+            if (lr == LINK_SENT_PARTIAL) continue;
+            if (lr == LINK_BACKPRESSURE) {
+                if (now_ms() > tx_deadline) {
+                    session_destroy(sess);
+                    return fail("tx_backpressure_timeout");
+                }
+                continue;
+            }
+            say("note=session_send_rc=%s progress=%zu", link_result_name(lr), progress);
+            session_destroy(sess);
+            return fail("send");
+        }
+        say("sent type=0x23 len=%u", (unsigned)s_capture_len);
     }
+
+    say("result=PASS");
+    exit_code = 0;
 
     session_destroy(sess);
     return exit_code;

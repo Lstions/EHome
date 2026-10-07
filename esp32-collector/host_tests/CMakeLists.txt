@@ -1331,12 +1331,30 @@ add_executable(firmware_tcp_e2e_client
     # 的捕获实现来接住产出的字节 —— 与 hello_handshake_tests 同一手法。
     # ⚠ 未改任何生产文件（没有给 handler_hello.c 加"只编码不发布"的新入口）。
     ../components/msg_handler/handler_hello.c
+    # task-25：真实 device_op 回程 —— 编入**真实的** msg_handler.c（含真实分发
+    # switch 与真实 msg_handler_publish_checked）+ 真实 handler_device_op.c +
+    # 真实 device_op.c。这样 0x22 → 分发 → 执行 → 钩子 → 发布 → 广播 全程是真代码。
+    ../components/msg_handler/msg_handler.c
+    ../components/msg_handler/handler_device_op.c
+    ../components/device_op/device_op.c
+    # 真实广播路径的落点（msg_handler_publish_checked → transport_broadcast_ex）。
+    ../components/transport/transport.c
 )
 target_include_directories(firmware_tcp_e2e_client PRIVATE
+    # ⚠ ../components/msg_handler 必须在 hello_stubs **之前**：
+    #   hello_stubs/msg_handler.h 是个只声明 Hello 相关函数的桩，它会**遮蔽**
+    #   真实头里的 msg_handler_process / msg_handler_set_device_op_hooks 等
+    #   ⇒ 编译期报 implicit declaration（task-25 实测踩到）。真实头是超集。
+    ../components/msg_handler
     hello_stubs
+    stubs
+    stubs/rom
+    ../components/transport/include
+    ../components/ehome_mqtt
+    ../components/dma_pool/include
+    ../components/device_op/include
     ../main
     ../components/frame
-    ../components/msg_handler
     ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
