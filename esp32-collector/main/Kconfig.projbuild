@@ -115,14 +115,37 @@ menu "EHome Collector Configuration"
                 not merely a REQUIRES line) but no task is created, no heap is
                 allocated and no packet is sent.
 
-                NOTE: enabling this does **not** yet make the link usable.  Two
-                prerequisites are still outstanding (see the module header):
-                  * SNTP is not landed, so now_epoch is NULL -> time is not
-                    trusted -> certificate failures are graded "self-healing"
-                    (retry with backoff) rather than fatal.
-                  * Certificate provisioning into an NVS encrypted partition is
-                    not implemented; with no certs the guard yields hard_fatal
-                    => SESSION_FATAL (no retry storm masking a provisioning gap).
+                NOTE: enabling this does **not** yet make the link usable.
+                Prerequisites (status reviewed 2026-10-07):
+
+                  * SNTP -- **LANDED**.  sntp_mgr is created in
+                    device_link_wiring.c before tls_esp is configured, so
+                    now_epoch is real once the network is up.  With an empty
+                    CONFIG_EHOME_NTP_SERVER it reports DISABLED and does not
+                    pretend to have time; certificate failures are then graded
+                    "self-healing" (retry with backoff) rather than fatal.
+                    (This bullet used to read "SNTP is not landed" -- that was
+                    true when written and became stale; a stale prerequisite
+                    list is worse than none, because it hides real remaining
+                    work behind a list that looks complete.)
+
+                  * Certificate provisioning into an NVS **encrypted**
+                    partition -- **NOT IMPLEMENTED**.  There is no nvs_keys
+                    partition and the guard still yields hard_fatal with no
+                    certs => SESSION_FATAL (deliberately: no retry storm
+                    masking a provisioning gap).  Consequence to be explicit
+                    about: written certs (and the **private key**) sit in NVS
+                    as **plaintext in flash** today.
+
+                  * Framing -- **FIXED** in the same review window.  See below;
+                    it is called out because it was missing from this list
+                    while being the most fatal of the three.
+
+                A prerequisite list is only useful if it is *complete*: the
+                original "Two prerequisites" omitted 3.0 uplink framing, so a
+                build with both of those satisfied still could not complete a
+                handshake.  When you close one item, update this list in the
+                same commit (tools/check_baseline_sync.py guards doc drift).
 
         config EHOME_DEVICE_LINK_HOST
             string "Backend host (SNI + certificate CN)"
