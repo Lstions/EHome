@@ -74,6 +74,11 @@ IRAM_ELF = "/tmp/v3idf-m1/s3-n16/ehome_collector.elf"
 #   这样即使进程被 SIGKILL，损失也止于"这一次运行"，不会越过下一次启动。
 JOURNAL_DIR = "/tmp/ehome_gate_selftest_journal"
 JOURNAL_MANIFEST = os.path.join(JOURNAL_DIR, "manifest.tsv")
+# 新建物（探针目录等）也记日志 —— 2026-10-07 实测补：
+# 只记改过的不够：被 SIGKILL 后探针目录会留在工作树里，
+# 而下次运行的 探针目录已存在拒绝覆盖 断言会直接崩，
+# 于是自愈反而变成下次跑不起来。恢复与清理必须成对。
+JOURNAL_CREATED = os.path.join(JOURNAL_DIR, "created.tsv")
 
 
 def md5(b):
@@ -102,14 +107,30 @@ def _journal_add(path, raw):
         os.fsync(fh.fileno())
 
 
+def _journal_add_created(path):
+    """在新建之前把路径记到盘上（先落盘，再动手）。"""
+    os.makedirs(JOURNAL_DIR, exist_ok=True)
+    with open(JOURNAL_CREATED, "a", encoding="utf-8") as fh:
+        fh.write("%s\n" % path)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
 def recover_journal():
-    """启动时自愈：若上次被 SIGKILL 留下日志，先恢复再继续。返回恢复的文件数。"""
-    if not os.path.exists(JOURNAL_MANIFEST):
+    """启动时自愈：恢复上次被 SIGKILL 留下的改动，并清理它新建的物。
+
+    返回 (恢复的文件数, 清理的新建物数)。
+    """
+    has_manifest = os.path.exists(JOURNAL_MANIFEST)
+    has_created = os.path.exists(JOURNAL_CREATED)
+    if not has_manifest and not has_created:
         shutil.rmtree(JOURNAL_DIR, ignore_errors=True)
-        return 0
-    restored, failed = 0, []
-    with open(JOURNAL_MANIFEST, encoding="utf-8") as fh:
-        lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+        return 0, 0
+    restored, failed, removed = 0, [], 0
+    lines = []
+    if has_manifest:
+        with open(JOURNAL_MANIFEST, encoding="utf-8") as fh:
+            lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
     for ln in lines:
         parts = ln.split("\t")
         if len(parts) != 2:
@@ -128,16 +149,36 @@ def recover_journal():
             restored += 1
         except OSError as e:
             failed.append("%s: %s" % (path, e))
+
+    if has_created:
+        with open(JOURNAL_CREATED, encoding="utf-8") as fh:
+            created_paths = [ln.rstrip("\n") for ln in fh if ln.strip()]
+        for cp in created_paths:
+            try:
+                ok = (os.path.realpath(cp) == os.path.realpath(PROBE_DIR)
+                      or cp in (TMP_FRAME, TMP_JUNK) or cp.startswith("/tmp/"))
+                if not ok:
+                    failed.append("%s: 不在可清理白名单内，拒绝删除" % cp)
+                    continue
+                if os.path.isdir(cp):
+                    shutil.rmtree(cp, ignore_errors=True)
+                    removed += 1
+                elif os.path.exists(cp):
+                    os.remove(cp)
+                    removed += 1
+            except OSError as e:
+                failed.append("%s: 清理失败 %s" % (cp, e))
+
     print("=" * 78)
     print("⚠ 检测到上一次自检**异常退出**留下的日志（很可能是 SIGKILL / OOM / Ctrl-C）。")
-    print("  已自动恢复 %d 个文件。" % restored)
+    print("  已自动恢复 %d 个文件，清理 %d 个新建物。" % (restored, removed))
     for f in failed:
         print("  ❌ %s" % f)
     print("  （自愈机制补于 2026-10-07：finally 扛不住 SIGKILL，"
           "会把改坏的文件永久留在工作树里）")
     print("=" * 78)
     shutil.rmtree(JOURNAL_DIR, ignore_errors=True)
-    return restored
+    return restored, removed
 
 
 def clear_journal():
@@ -208,6 +249,9 @@ def inject_json_key(relpath, setter):
 def inject_probe(files):
     def fn(backups, created):
         assert not os.path.exists(PROBE_DIR), "探针目录已存在，拒绝覆盖：%s" % PROBE_DIR
+        # 先记日志、再建目录（顺序不能反）：若在两者之间被 SIGKILL，
+        # 目录会留下而日志里没有它，下次启动无从清理，而拒绝覆盖断言会直接崩。
+        _journal_add_created(PROBE_DIR)
         os.makedirs(PROBE_DIR)
         created.append(PROBE_DIR)
         for rel, text in files.items():
@@ -437,6 +481,24 @@ def recipes():
 
 # ───────────────────────── 执行 ─────────────────────────
 
+def _mutation_targets():
+    """本自检会**就地改写**的仓库相对路径（相对 esp32-collector）。
+
+    用于开工前判断"这些文件是否已经脏"。刻意**显式列出**而不是解析注入器：
+    解析太脆，列出来则一眼可审。若将来新增注入目标却忘了加到这里，
+    后果只是"少保护一个文件"，不会误报 —— 这个方向是安全的。
+    """
+    return {
+        "main/main.c",
+        "main/app_callbacks.c",
+        "components/bus_worker/bus_worker.c",
+        "components/report_stats/CMakeLists.txt",
+        "components/tls_guard/include/tls_guard.h",
+        "sdkconfig.defaults",
+        "tools/mem_budget.json",
+    }
+
+
 def coverage_limit():
     """从门禁自己的输出里读出当前未覆盖文件数（自校准，不硬编码）。"""
     rc, out = run_gate(["tools/check_host_coverage.py"])
@@ -588,6 +650,45 @@ def main():
 
     base_status = subprocess.run(["git", "status", "--porcelain"], cwd=WT,
                                  capture_output=True, text=True).stdout
+
+    # ⭐⭐ 拒绝在"会被改动的文件已经脏"时运行（2026-10-07 补）。
+    #
+    # 为什么（真实协作风险，非假想）：本脚本会临时改写**生产文件**
+    # （main/main.c、main/app_callbacks.c、tls_guard.h、sdkconfig.defaults、mem_budget.json），
+    # 再把**运行前**的字节写回。若此刻**另一个人**正在改同一文件，
+    # 我们的"还原"会把**他在途的修改一起抹掉** —— 他丢工作，而且毫无提示。
+    # 本会话是多写者环境（多个 agent 共用一个工作树），所以这不是理论问题。
+    #
+    # ⚠ 我自己踩过：第一版直接拿 git status 的路径去比这份清单，
+    # 但 git status 是**相对工作树根**、清单是**相对 esp32-collector**，
+    # ⇒ 永不匹配 ⇒ 守卫静默失效。而"守卫没生效"的症状与"没有脏文件"**一模一样**。
+    # 所以这条守卫必须先证明它会咬（见文件末尾 --sweep-guard 的说明与实测记录）。
+    dirty_targets_wt = {os.path.relpath(os.path.join(ROOT, t), WT)
+                        for t in _mutation_targets()}
+    dirty_hit = []
+    for line in base_status.splitlines():
+        if len(line) < 4:
+            continue
+        rel = line[3:].strip().strip('"')
+        if rel in dirty_targets_wt:
+            dirty_hit.append("%s (%s)" % (rel, line[:2]))
+    if dirty_hit and not harmless:
+        print("=" * 78)
+        print("拒绝运行：下列**会被本自检改动的文件当前已经脏**。")
+        for d in dirty_hit:
+            print("    %s" % d)
+        print()
+        print("原因：自检会把文件还原成**运行前**的字节；若你（或别人）正在改同一个文件，")
+        print("      那份在途修改会被一起抹掉，而且不会有任何提示。")
+        print("处置：先把这些改动提交或 stash 掉，再跑本自检。")
+        print("      （单写者 / CI 场景通常不会触发这条。）")
+        print("=" * 78)
+        # 返回 77 = SKIP（automake 惯例），ctest 可用 SKIP_RETURN_CODE 认它。
+        # 为什么不返回 2：ctest 会把任何非零当 FAIL，而"工作树是脏的"在开发中是
+        # **正常状态**；若因此让整个 ctest 变红，人就会学会忽略这条测试，
+        # 那它也就等于没有了。代价要讲明：本地脏树时这条**不会**跑，
+        # 它真正生效的场景是 **CI / 干净检出**（也正是最该保证"门禁会不会咬"的地方）。
+        return 77
 
     gates = sorted(os.path.basename(p)
                    for p in glob.glob(os.path.join(_HERE, "check_*.py")))
