@@ -393,6 +393,43 @@ def recipes():
                       "probe.c": "int zz_gate_probe(void) { return 0; }\n"}),
         "新建 %s/（main 不可达、且不在待接线清单里）" % PROBE_REL)
 
+    # ── 待接线清单自身的可核查判据（2026-10-07 新增）──────────────────
+    #
+    # 起因：清单注释把"骨架 + 宿主测试已完成"写成了**事实**，而它是**假的**
+    # （nvs_helper 一个测试文件都没有）。于是把"有没有测试"改成去文件系统里查。
+    # 这三条配方就是证明这些新判据**真的会咬** —— 否则我又加了一条自证不了的检查。
+    add("component_reachable.fake_test_ref",
+        "check_component_reachable.py", "file",
+        inject_replace("tools/check_component_reachable.py",
+                       r'"test": "dispatch_tests\.c"',
+                       '"test": "no_such_test_file.c"',
+                       "登记表里的测试引用指向不存在的文件"),
+        "把 dispatch 的 test 改成不存在的文件 ⇒ 门禁必须红（'测试已完成'不能只是嘴上说）")
+
+    add("component_reachable.test_ref_not_mentioning",
+        "check_component_reachable.py", "file",
+        inject_replace("tools/check_component_reachable.py",
+                       r'"test": "link_mqtt_tests\.c"',
+                       '"test": "sntp_mgr_tests.c"',
+                       "登记表里的测试引用是个真文件但并不测该组件"),
+        "把 link_mqtt 的 test 换成 sntp_mgr_tests.c（真文件但不提 link_mqtt）⇒ 必须红")
+
+    add("component_reachable.review_overdue",
+        "check_component_reachable.py", "file",
+        inject_replace("tools/check_component_reachable.py",
+                       r'"review_by": "2026-12-01"',
+                       '"review_by": "2026-01-01"',
+                       "决策截止日已过去"),
+        "把 link_mqtt 的 review_by 改成过去的日期 ⇒ 门禁必须红（清单不能无限期挂着）")
+
+    add("component_reachable.test_missing_note",
+        "check_component_reachable.py", "file",
+        inject_replace("tools/check_component_reachable.py",
+                       r'"test_note": 「?[^」\n]*」?,',
+                       "",
+                       "无测试却连理由都不写"),
+        "删掉 nvs_helper 的 test_note ⇒ 必须红（无测试可以，但要说明原因）")
+
     add("databatch.weak_symbol_regression",
         "check_databatch_injected.py", "file",
         inject_append("components/bus_worker/bus_worker.c",
@@ -529,6 +566,9 @@ def _mutation_targets():
         "components/tls_guard/include/tls_guard.h",
         "sdkconfig.defaults",
         "tools/mem_budget.json",
+        # 2026-10-07：新增"待接线清单可核查判据"的配方后，
+        # 这份门禁脚本自身也成了被改写的目标。
+        "tools/check_component_reachable.py",
     }
 
 

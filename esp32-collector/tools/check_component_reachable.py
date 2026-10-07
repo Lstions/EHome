@@ -34,44 +34,72 @@ ROOT = os.path.dirname(_HERE)
 COMPONENTS = os.path.join(ROOT, "components")
 MAIN = os.path.join(ROOT, "main")
 
-# 已登记：组件名 -> (它是什么, 为什么现在还没接, 下一步)
+# 已登记：组件名 -> dict(what/why/next/test/review_by)
 #
-# 这些都是 3.0 重构"打骨架"阶段的产物：**骨架 + 宿主测试已完成**，
-# 接线是后续阶段的事。登记在这里是让这件事**可见**，不是把它藏起来。
+# 这些都是 3.0 重构"打骨架"阶段的产物：骨架已完成，接线是后续阶段的事。
+# 登记在这里是让这件事**可见**，不是把它藏起来。
+#
+# ⚠ 2026-10-07 更正：原注释写"**骨架 + 宿主测试已完成**"—— 这句**是错的**。
+# 实测：nvs_helper **一个测试文件都没有**（host_tests/ 里没有 nvs_*，
+# CMakeLists 只挂了它的 include 路径）。也就是说这句话把一个**未经验证的**
+# 说法写成了事实，而恰好它是假的 —— 与"门禁打印 PASS 却什么都没检查"同族。
+#
+# ⇒ 修法：把"有没有测试"从**散文**变成**可核查字段**（test），
+#   并加 review_by（到期必须做决策，不能无限期挂着）。
+#   门禁会真的去查 test 指向的文件是否存在、是否真的引用了该组件。
 PENDING_WIRING = {
-    "msgcodec": (
-        "消息编解码原语（纯函数）",
+    "msgcodec": {
+        "what": "消息编解码原语（纯函数）",
         # 2026-10-07 更正：原先写的理由 ① 已**过期** ——
         # 「3.0 payload 是否保留 2.x 类型首字节」已由 §120 决策文档结清
         # （保留双写 + 两端强制一致性校验），不再是待确认项。
-        # 另：msgcodec 与 frame_codec 是**两份独立实现**；生产用 frame_codec，
-        # msgcodec 供 S0 共享向量的 C 侧校验，两者的逐字节一致性已由
-        # host_tests/codec_equivalence_tests.c 覆盖（不再只是"假定一致"）。
-        "编解码原语**未接入生产路径**：生产用的是 components/frame/frame_codec.c；"
-        "msgcodec 目前只作 S0 共享向量的 C 侧独立实现。要收口只能二选一 ——"
-        "要么改由它驱动 dispatch，要么把它降为纯测试用件并从组件表移除",
-        "由 dispatch 表接替 msg_handler 的 switch 时一并决定（P4：一处定义）",
-    ),
-    "dispatch": (
-        "数据驱动的消息分发表",
-        "目前实际分发仍在 msg_handler.c 的 switch 里；分发表尚未替换它",
-        "用 dispatch 表替换 msg_handler 的 switch（P4：一处定义）",
-    ),
-    "link_mqtt": (
-        "MQTT 的 link 驱动",
-        "3.0 链路目前只接 TCP+mTLS；MQTT 兜底是 §7.3 P2 的事，"
-        "由 transport_sel 决定何时回退",
-        "§7.3 P2 阶段随 transport_sel 一起接",
-    ),
+        "why": ("编解码原语**未接入生产路径**：生产用的是 components/frame/frame_codec.c；"
+                "msgcodec 目前只作 S0 共享向量的 C 侧独立实现。要收口只能二选一 ——"
+                "要么改由它驱动 dispatch，要么把它降为纯测试用件并从组件表移除"),
+        "next": "由 dispatch 表接替 msg_handler 的 switch 时一并决定（P4：一处定义）",
+        # 它是**测试判据**（独立实现与 frame_codec 逐字节对拍），不是待接线产物。
+        "test": "msgcodec_tests.c",
+        "review_by": "2026-11-15",
+    },
+    "dispatch": {
+        "what": "数据驱动的消息分发表",
+        "why": ("实际分发仍在 msg_handler.c 的 switch 里；分发表尚未替换它。"
+                "⚠ 2026-10-07 复核：本组件的**核心语义已由现有实现提供** ——"
+                "未知类型可见失败由 switch 的 default + ESP_LOGW 提供；"
+                "类型编号的权威表已在 frame_codec.h（34 个 MSG_ 定义）。"
+                "⇒ 接线的收益是'路由变成数据'，不是修某个已存在的缺陷"),
+        "next": "用 dispatch 表替换 msg_handler 的 switch（P4：一处定义）；"
+                "注意：只接线而不删 switch 会**增加**一处定义",
+        "test": "dispatch_tests.c",
+        "review_by": "2026-11-15",
+    },
+    "link_mqtt": {
+        "what": "MQTT 的 link 驱动",
+        "why": ("3.0 链路目前只接 TCP+mTLS；MQTT 兜底是 §7.3 P2 的事，"
+                "由 transport_sel 决定何时回退"),
+        "next": "§7.3 P2 阶段随 transport_sel 一起接",
+        "test": "link_mqtt_tests.c",
+        "review_by": "2026-12-01",
+    },
     # task-21：transport_sel 已接线（main/uplink_arbiter.c 的 IDF 段调 tsel_create/tsel_poll，
     # 并在 main/CMakeLists.txt 的 REQUIRES 里声明）⇒ 本条目按门禁要求删除。
     # 它现在由仲裁层驱动："TCP 优先 / MQTT 兜底"，门见 main/uplink_arbiter.h。
-    "nvs_helper": (
-        "NVS 读写辅助",
-        "既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用"
-        "（device_link_wiring.c 也直接用 nvs_get_blob —— 待统一）",
-        "用 helper 替换散落的 nvs 调用（或若确认不需要，删除它）",
-    ),
+    "nvs_helper": {
+        "what": "NVS 读写辅助（header-only，6 个 static inline）",
+        "why": ("既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用。"
+                "⚠ 2026-10-07 复核发现两条更硬的事实："
+                "① 它有 **169 行却没有任何测试文件**（不是'测试已完成'）；"
+                "② 它**不含 blob 读写**（nvs_get_blob/nvs_set_blob 零命中），"
+                "而固件唯一真实的 NVS 需求就是 blob 读 ——"
+                "device_link_wiring.c:322 自己手写了 nvs_read_blob_alloc。"
+                "⇒ 它没提供那个唯一被需要的操作"),
+        "next": ("二选一，且请在 review_by 前定："
+                 "① 删除它（证据：无测试 + 不含唯一需要的 blob 读）；"
+                 "② 扩到支持 blob 读并替换 device_link_wiring.c 的手写版本"),
+        "test": None,
+        "test_note": "**无任何测试文件**（原注释'宿主测试已完成'是错的）",
+        "review_by": "2026-11-15",
+    },
 }
 
 # ⚠ 「可达」的确切含义（2026-10-07，我在这里写错过一次，已按实测更正）
@@ -247,10 +275,63 @@ def main():
         print()
         print("待接线清单（可见，不隐藏）：")
         for c in unreachable:
-            what, why, nxt = PENDING_WIRING[c]
-            print("  - %-16s %s" % (c, what))
-            print("      未接原因: %s" % why)
-            print("      下一步  : %s" % nxt)
+            e = PENDING_WIRING[c]
+            print("  - %-16s %s" % (c, e["what"]))
+            print("      未接原因: %s" % e["why"])
+            print("      下一步  : %s" % e["next"])
+            if e.get("test"):
+                print("      宿主测试: %s" % e["test"])
+            else:
+                print("      宿主测试: **无** —— %s" % e.get("test_note", "（未说明）"))
+            print("      决策截止: %s" % e["review_by"])
+
+    # ── 待接线清单自身的可核查判据（2026-10-07 补）───────────────────
+    #
+    # 为什么：原注释把"骨架 + 宿主测试已完成"写成了事实，而**它是假的**
+    # （nvs_helper 一个测试都没有）。这正是本仓反复出现的形态 ——
+    # 一句未经核查的散文声称"都做过了"，而没有任何东西会去核对它。
+    #
+    # ⇒ 把"有没有测试"变成**去文件系统里查**的判据：
+    #     · 声明了测试文件 ⇒ 该文件必须存在、且真的引用这个组件；
+    #     · 声明为 None   ⇒ 必须写明理由（test_note），否则 FAIL。
+    #   顺带把 review_by 也查掉：过期即 FAIL —— 免得待接线清单
+    #   变成"放进去就再也没人看"的地方。
+    import datetime as _dt
+    today = _dt.date.today()
+    reg_problems = []
+    for c in unreachable:
+        e = PENDING_WIRING[c]
+        tf = e.get("test")
+        if tf:
+            fp = os.path.join(ROOT, "host_tests", tf)
+            if not os.path.exists(fp):
+                reg_problems.append("%s: 声明了宿主测试 %s，但该文件不存在" % (c, tf))
+            else:
+                body = open(fp, encoding="utf-8", errors="replace").read()
+                if c not in body:
+                    reg_problems.append("%s: %s 里根本没提到 %s（引用是假的）" % (c, tf, c))
+        else:
+            if not e.get("test_note"):
+                reg_problems.append("%s: 既没有测试文件、也没写 test_note 说明原因" % c)
+        rb = e.get("review_by")
+        try:
+            d = _dt.date.fromisoformat(rb) if rb else None
+        except ValueError:
+            reg_problems.append("%s: review_by 不是合法日期: %r" % (c, rb))
+            d = None
+        if d is None:
+            reg_problems.append("%s: 缺少 review_by（待接线清单不能无限期挂着）" % c)
+        elif d < today:
+            reg_problems.append(
+                "%s: 决策已逾期（review_by=%s，今天 %s）—— 接还是删，请现在就定"
+                % (c, rb, today.isoformat()))
+
+    if reg_problems:
+        print()
+        print("FAIL 待接线清单里有经不起核查的条目：")
+        for x in reg_problems:
+            print("    %s" % x)
+        return 1
 
     # 反向检查：清单里已登记的组件若已经可达，说明登记过期了，应当删掉。
     stale = [c for c in PENDING_WIRING if c not in unreachable]
