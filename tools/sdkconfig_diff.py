@@ -46,10 +46,15 @@ def parse(path):
 
 
 # 会**改变运行期行为/内存布局**的开关：跨构建比数字前必须一致
+# ⚠ 2026-10-07 补：原正则**漏了 STACK / TASK** —— 我改 `CONFIG_ESP_MAIN_TASK_STACK_SIZE`
+#   做因果实验时，本工具报"差异=0"，而该值从 16384 变到 8192 确实改变行为
+#   （largest 15360 → 6656）。**工具漏报正是它最该防的那类失败**：
+#   它会让"先 diff 配置再比数字"这条纪律**看起来做了、实际没做**。
+#   ⇒ 凡是会改变**内存布局/任务栈**的开关都必须进这张表。
 RELEVANT = re.compile(
     r"COLLECTOR_PSRAM|DEVICE_LINK|MBEDTLS|SPIRAM|PSRAM|LOG_|FREERTOS|"
     r"IDF_TARGET|ESP32S3|ESP32C6|HEAP|MALLOC|WIFI_|OPTIMIZATION|"
-    r"COMPILER_|ASSERT|DEBUG"
+    r"COMPILER_|ASSERT|DEBUG|STACK|TASK|BUFFER|IRAM|CACHE|CONSOLE|UART"
 )
 
 
