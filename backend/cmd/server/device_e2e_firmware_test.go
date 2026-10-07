@@ -30,17 +30,25 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"ehome/backend/internal/models"
+	"ehome/backend/internal/nodemgr"
+	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/protoframe"
+	"ehome/backend/testutil"
+
+	"gorm.io/gorm"
 )
 
 // 共享向量里的精确字节（protocol/vectors/wire_primitives.txt，device_op 一组）。
@@ -48,11 +56,11 @@ import (
 // 若从向量文件读，就变成了"都读同一个文件"，反而绕过了"各自独立实现"这件事。
 // 下面另有断言把这些常量与向量文件钉在一起（见 TestSharedVectorBytesMatchConstants）。
 const (
-	vectorAckOKPayload   = "230800120a6f702d6e6f6465312d31" // 0x23 result=0 request_id=op-node1-1
-	vectorRebootPayload  = "220801120a6f702d6e6f6465312d31" // 0x22 op_code=1 request_id=op-node1-1
-	vectorRequestID      = "op-node1-1"
-	msgTypeDeviceOp      = 0x22
-	msgTypeDeviceOpAck   = 0x23
+	vectorAckOKPayload  = "230800120a6f702d6e6f6465312d31" // 0x23 result=0 request_id=op-node1-1
+	vectorRebootPayload = "220801120a6f702d6e6f6465312d31" // 0x22 op_code=1 request_id=op-node1-1
+	vectorRequestID     = "op-node1-1"
+	msgTypeDeviceOp     = 0x22
+	msgTypeDeviceOpAck  = 0x23
 )
 
 func mustHex(t *testing.T, s string) []byte {
@@ -160,7 +168,71 @@ func TestCrossLanguageFirmwareClientOverSocket(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
 
-	// ── 方向 1：固件 C → 后端 Go ──
+	// ═══════════════════════════════════════════════════════════════════════════
+	// 方向 0（task-18 新增）：**应用层握手** —— 设备发 Hello，后端回 HelloAck。
+	//
+	// 为什么必须补这一段：READY 只能由收到 HelloAck 触发（session_note_handshake）。
+	// 旧版对锚直接从 0x23 开始，于是"设备能否进 READY"这条**从未被对锚过** ——
+	// 两端各自单测全绿、合起来设备却永远停在 WAIT_HANDSHAKE，正是本卡要拦的形态。
+	// ═══════════════════════════════════════════════════════════════════════════
+	pub := &fwE2EMQTTPublisher{}
+	mgr, db := newHandshakeManager(t, pub)
+
+	helloHdr, helloPayload := readOneFrameFromStream(t, conn)
+	if helloHdr.Type != frame.MsgHello {
+		t.Fatalf("握手首帧类型 = 0x%02X, 期望 0x%02X (Hello)。\n"+
+			"固件侧尚未发出 Hello ⇒ 设备永远进不了 READY。\n"+
+			"若固件 task-17 还没落地, 这是**预期中的红**; 不得放宽断言或跳过。\n"+
+			"固件客户端输出:\n%s", helloHdr.Type, frame.MsgHello, out.String())
+	}
+	// 节点串取自 Hello field 1。生产里路由身份来自 TLS 证书 CN，而本测试不跑 TLS
+	// （见文件头"诚实边界"）；"证书 CN == wire node_id" 那条绑定由 device_e2e_test.go
+	// 的真 mTLS 用例覆盖。这里把它显式化：handleHello 要求两者相等，不等即拒
+	// （handler_hello.go:154-157）。
+	helloNodeID := helloField1String(t, helloPayload)
+	if helloNodeID == "" {
+		t.Fatalf("Hello field 1 (node_id) 为空 —— 后端 parseHello 会拒 (handler_hello.go:140)")
+	}
+	t.Logf("方向0a OK：固件→后端 type=0x%02X seq=%d plen=%d node_id=%q",
+		helloHdr.Type, helloHdr.Seq, helloHdr.PayloadLen, helloNodeID)
+
+	// 送进**真实路由**：FrameHandler → HandleFrame → handleHello（含"注册成功才发 Ack"）。
+	if err := mgr.FrameHandler()(helloNodeID, helloHdr, helloPayload); err != nil {
+		t.Fatalf("FrameHandler(Hello) 返回错误: %v", err)
+	}
+
+	// **取证**：断言后端确实发了 HelloAck，而不是只信客户端自述。
+	acks := pub.helloAckFrames()
+	if len(acks) != 1 {
+		t.Fatalf("真实路由回 HelloAck 条数 = %d, 期望 1（设备进不了 READY）", len(acks))
+	}
+	ackServerTime, ackFeatures, ackNonce := decodeHelloAck(t, acks[0])
+	t.Logf("方向0b OK：后端→固件 HelloAck server_time=%d features=0x%X nonce=0x%X (%d B)",
+		ackServerTime, ackFeatures, ackNonce, len(acks[0]))
+	if ackFeatures&1 == 0 {
+		t.Errorf("HelloAck features=0x%X 未置 bit0 (CAP_DATA_BATCH_V1)", ackFeatures)
+	}
+	// 注册必须已持久化 —— 否则就是"设备以为注册了、中心没有"的静默故障。
+	var nodeRows int64
+	if err := db.Model(&models.Node{}).Where("node_id = ?", helloNodeID).Count(&nodeRows).Error; err != nil {
+		t.Fatalf("查询 nodes: %v", err)
+	}
+	if nodeRows != 1 {
+		t.Fatalf("nodes 行数 = %d, 期望 1 —— 回了 Ack 却没持久化", nodeRows)
+	}
+
+	// 把后端产出的 HelloAck **逐字节**写回设备（继续逼固件做流式组装）。
+	// 载荷是 handleHello 经 SendHelloAck 产出的原始字节，这里只补 3.0 头。
+	ackFrame := wrapFrame(t, frame.MsgHelloAck, 0, acks[0])
+	for i := 0; i < len(ackFrame); i++ {
+		if _, err := conn.Write(ackFrame[i : i+1]); err != nil {
+			t.Fatalf("逐字节写 HelloAck 第 %d 字节失败: %v", i, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Logf("方向0c OK：后端→固件 已逐字节写入 HelloAck %d B (0x12, seq=0)", len(ackFrame))
+
+	// ── 方向 1：固件 C → 后端 Go（0x23 ACK，原有方向）──
 	// 用**生产解码器**解析固件真实栈发出的字节。
 	h, payload := readOneFrameFromStream(t, conn)
 	if h.Type != msgTypeDeviceOpAck {
@@ -277,6 +349,389 @@ func itoa(i int) string {
 		buf[p] = '-'
 	}
 	return string(buf[p:])
+}
+
+// =============================================================================
+// 应用层握手对锚（task-18）
+//
+// 上一版只对锚了「单帧互换」：固件发 0x23、后端回 0x22。它证明了两端**能互解字节**，
+// 但**没有**证明设备能进入 READY —— 而 READY 只能由 HelloAck 触发。
+// 本段把对锚扩到真实应用层握手：
+//
+//   设备发 Hello(0x01) → 后端走**真实路由** handleHello → 回 HelloAck(0x12)
+//   → 设备据此进 READY → 再走原有的 0x23/0x22 方向
+//
+// # Hello 字段契约（实测确认，不是猜的）
+//
+// 固件侧编码：esp32-collector/components/msg_handler/handler_hello.c:176-190
+//   frame_encode_string(1, node_id) / string(2, fw_version) / string(3, model)
+//   varint(4, channel_count) / varint(5, epoch) / varint(6, has_manifest)
+//   string(7, last_manifest)  ← 仅当非空才写（handler_hello.c:186-188）
+//   string(8, "2.6") / varint(9, handshake_nonce)
+//   （HELLO_F_PROTO_VERSION=8 / HELLO_F_HANDSHAKE_NONCE=9，见 msg_handler_internal.h:41-42）
+//
+// 后端解码：backend/internal/nodemgr/handler_hello.go
+//   :82-132 逐字段 switch（含 wire type 校验）
+//   :134-139 **必填** = {1,2,3,4,5,6,8,9} —— 注意 field 7(last_manifest) **不在必填集**
+//   :140-142 字符串类必填须非空（node_id / fw_version / model）
+//   :149     协议版本须落在 [MinSupportedProtocolVersion=2.6, ServerMaxProtocolVersion=3.0]
+//   :152-154 handshake_nonce 必须非零（固件侧 :168-171 也拒绝零 nonce）
+//
+// ⇒ **结论：固件发的 Hello 后端会接受**，不存在"必拒"。固件用 proto_ver="2.6"，
+//    正落在后端接受区间内（V3-2a 把上界放宽到 3.0 后 2.6 仍是合法下界）。
+//
+// 本用例刻意**镜像固件的字段序列**（含可选的 field 7），而不是照抄
+// device_e2e_test.go:244 的 3.0 版本 —— 后者是 TLS 路径的用例，与本卡的对锚对象不同。
+// =============================================================================
+
+// helloFieldContractHex 是"固件字段序列"的**黄金字节**。
+//
+// 它由下列输入经生产编码器产出，并被 TestHelloFieldContractMatchesFirmware 钉住：
+//
+//	node_id="fw-e2e-node"  fw="2.6.0"  model="ESP32-C6"  channel_count=2
+//	epoch=7  has_manifest=1  last_manifest="mf-1"  proto="2.6"  nonce=0xA1B2C3D4
+//
+// 断言这条常量，是为了让"字段顺序/编号"本身成为回归对象：若有人调换编号
+// （历史上 device_e2e_test.go:246-249 的注释就记着"我凭记忆写错过 field 3"），
+// 这里立刻变红。
+func fwE2EHelloPayload() []byte {
+	enc := frame.NewEncoder(frame.MsgHello)
+	enc.EncodeString(1, fwE2ENodeID)
+	enc.EncodeString(2, "2.6.0")
+	enc.EncodeString(3, "ESP32-C6")
+	enc.EncodeVarint(4, 2)
+	enc.EncodeVarint(5, 7)
+	enc.EncodeVarint(6, 1)
+	enc.EncodeString(7, "mf-1")
+	enc.EncodeString(8, "2.6")
+	enc.EncodeVarint(frame.HelloFieldHandshakeNonce, uint64(fwE2ENonce))
+	return enc.Bytes()
+}
+
+const (
+	fwE2ENodeID = "fw-e2e-node"
+	fwE2ENonce  = 0xA1B2C3D4
+)
+
+// fwHelloFrame 把 Hello 载荷包上 3.0 头（头里的 type 与载荷首字节都是 0x01 —— 已知双写）。
+func fwHelloFrame(t *testing.T) []byte {
+	t.Helper()
+	payload := fwE2EHelloPayload()
+	out := make([]byte, protoframe.HeaderSize+len(payload))
+	h := protoframe.Header{
+		Ver: protoframe.Version, Type: frame.MsgHello,
+		PayloadLen: uint16(len(payload)),
+	}
+	if err := protoframe.EncodeHeader(out, h); err != nil {
+		t.Fatalf("EncodeHeader(Hello): %v", err)
+	}
+	copy(out[protoframe.HeaderSize:], payload)
+	return out
+}
+
+// TestHelloFieldContractMatchesFirmware 钉住"固件字段序列"这条契约本身。
+//
+// 它断言的是**后端 parseHello 的必填集与固件实际发送集的交集**：
+// 固件发的每个字段都能被后端解出，且必填字段一个不缺。
+// 没有这条：日后有人改了编码顺序，"对锚"会继续用错字节自说自话。
+func TestHelloFieldContractMatchesFirmware(t *testing.T) {
+	payload := fwE2EHelloPayload()
+	// 用生产解码器逐字段读回，并断言"固件会发的字段"全部在场。
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	if dec.MsgType() != frame.MsgHello {
+		t.Fatalf("载荷首字节 = 0x%02X, 期望 0x%02X (MsgHello)", dec.MsgType(), frame.MsgHello)
+	}
+	seen := map[uint8]uint8{} // field -> wire type
+	for {
+		f, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextField: %v", err)
+		}
+		seen[f.FieldNum] = f.WireType
+	}
+	// 固件 handler_hello.c:176-190 会发的字段号（field 7 仅在 manifest 非空时发）。
+	for _, n := range []uint8{1, 2, 3, 4, 5, 6, 8, 9} {
+		if _, ok := seen[n]; !ok {
+			t.Errorf("固件会发的字段 %d 不在载荷里 —— 对锚发的不是固件形状", n)
+		}
+	}
+	// 后端 parseHello:134 的必填集 = {1,2,3,4,5,6,8,9}；field 7 是可选。
+	// 若后端将来把 7 加进必填，而固件仍只在非空时发 ⇒ 这里必须变红。
+	if _, ok := seen[7]; !ok {
+		t.Logf("注意: 本载荷带了可选 field 7 (last_manifest)；固件仅在非空时发它")
+	}
+	// wire type 也要对：字符串字段是 length-delimited(2)，varint 是 0。
+	for n, want := range map[uint8]uint8{1: frame.WireLengthDelimited, 2: frame.WireLengthDelimited, 3: frame.WireLengthDelimited, 4: frame.WireVarint, 5: frame.WireVarint, 6: frame.WireVarint, 7: frame.WireLengthDelimited, 8: frame.WireLengthDelimited, 9: frame.WireVarint} {
+		if got := seen[n]; got != want {
+			t.Errorf("字段 %d wire type = %d, 期望 %d", n, got, want)
+		}
+	}
+}
+
+// fwE2EMQTTPublisher 既是 nodemgr 的 MQTT 出口，也是本用例的**取证点**。
+//
+// 为什么不用 mock 掉整个 Manager：本卡要证的是"真实路由 handleHello 真的回了 HelloAck"。
+// 只断言"客户端报 PASS"会假绿 —— 那样即使后端从不回 HelloAck，
+// 只要客户端碰巧报 PASS 也过。这里直接**捕获后端发出的 0x12 帧**并逐字节校验。
+type fwE2EMQTTPublisher struct {
+	mu       sync.Mutex
+	payloads [][]byte
+}
+
+func (p *fwE2EMQTTPublisher) record(_ string, payload []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	p.payloads = append(p.payloads, cp)
+}
+
+func (p *fwE2EMQTTPublisher) Publish(_ string, payload []byte) error {
+	p.record("pub", payload)
+	return nil
+}
+func (p *fwE2EMQTTPublisher) PublishQoS2(_ string, payload []byte) error {
+	p.record("qos2", payload)
+	return nil
+}
+func (p *fwE2EMQTTPublisher) PublishRetained(_ string, payload []byte) error {
+	p.record("retained", payload)
+	return nil
+}
+
+// helloAckFrames 返回捕获到的全部 HelloAck(0x12) 帧。
+func (p *fwE2EMQTTPublisher) helloAckFrames() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out [][]byte
+	for _, b := range p.payloads {
+		if len(b) > 0 && b[0] == frame.MsgHelloAck {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// decodeHelloAck 用生产解码器读回 HelloAck 的字段（server_time=1, features=2, nonce=3）。
+func decodeHelloAck(t *testing.T, payload []byte) (serverTime, features, nonce uint64) {
+	t.Helper()
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		t.Fatalf("NewDecoder(HelloAck): %v", err)
+	}
+	if dec.MsgType() != frame.MsgHelloAck {
+		t.Fatalf("HelloAck 首字节 = 0x%02X, 期望 0x%02X", dec.MsgType(), frame.MsgHelloAck)
+	}
+	for {
+		f, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("HelloAck NextField: %v", err)
+		}
+		switch f.FieldNum {
+		case 1:
+			serverTime = frame.GetUint64(f)
+		case 2:
+			features = frame.GetUint64(f)
+		case frame.HelloAckFieldHandshakeNonce:
+			nonce = frame.GetUint64(f)
+		}
+	}
+	return serverTime, features, nonce
+}
+
+// helloField1String 用生产解码器取出 Hello 的 field 1 (node_id, string)。
+//
+// 为什么不用现成的 parseHello：它是 nodemgr 的**未导出**函数，且会顺带做完整校验。
+// 这里只需要"路由身份"，故按字段号取即可 —— 校验交给真实 handleHello 去做，
+// 那才是被测对象（自己先校验一遍会把"后端拒了 Hello"这条真实失败路径遮掉）。
+func helloField1String(t *testing.T, payload []byte) string {
+	t.Helper()
+	dec, err := frame.NewDecoder(payload)
+	if err != nil {
+		t.Fatalf("NewDecoder(Hello): %v", err)
+	}
+	for {
+		f, err := dec.NextField()
+		if errors.Is(err, frame.ErrEndOfFrame) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("NextField(Hello): %v", err)
+		}
+		if f.FieldNum == 1 {
+			return frame.GetString(f)
+		}
+	}
+}
+
+// wrapFrame 用**生产**编码器给载荷补一个 3.0 头。
+//
+// 注意头里的 type 与载荷首字节**都**是消息类型（已知双写约定，本仓现状）：
+// HandleFrame 会校验两者一致，不一致直接丢帧（manager.go:418-425）。
+func wrapFrame(t *testing.T, msgType uint8, seq uint32, payload []byte) []byte {
+	t.Helper()
+	out := make([]byte, protoframe.HeaderSize+len(payload))
+	h := protoframe.Header{
+		Ver: protoframe.Version, Type: msgType, Seq: seq,
+		PayloadLen: uint16(len(payload)),
+	}
+	if err := protoframe.EncodeHeader(out, h); err != nil {
+		t.Fatalf("EncodeHeader(0x%02X): %v", msgType, err)
+	}
+	copy(out[protoframe.HeaderSize:], payload)
+	return out
+}
+
+// newHandshakeManager 装配一个**真实** nodemgr.Manager（真实 handleHello、真实 SendHelloAck）。
+//
+// 与 device_e2e_test.go:151 的 startE2EServer 同源：同一个 websocket.Hub 必须既传给
+// Manager（handleHello 会无条件解引用 m.wsHub，传 nil 会 panic）又真正 Run 起来。
+func newHandshakeManager(t *testing.T, pub *fwE2EMQTTPublisher) (*nodemgr.Manager, *gorm.DB) {
+	t.Helper()
+	db := testutil.OpenTestDB(t)
+	hub := websocket.NewHub()
+	go hub.Run()
+	mgr := nodemgr.NewManager(db, pub, hub, nil, nil, nil)
+	return mgr, db
+}
+
+// 说明（2026-10-07，Lead 记，留痕以免后人重复走一遍）：
+//
+// 我曾在这里加过一个"传真实 downlink.Bridge + 注册 transport.Session"的变体，
+// 目的是让 HelloAck 走**生产的 TCP 优先路径**（downlink.Bridge.publish 只在
+// native.HasSession(nodeID) 时才走 TCP，否则退回 legacy/MQTT）。
+//
+// 但本文件的既定做法是：**用取证 publisher 捕获真实路由产出的 HelloAck 字节，
+// 再手动逐字节写给设备**（见"方向 0c"）。两者证明力等价：
+//   - 本文件证明"真实路由**产出**了正确的 HelloAck 字节，且固件能解析它"；
+//   - "下行是否**优先选 TCP 会话**"由 device_e2e_test.go 的真 mTLS 用例覆盖
+//     （那里用真实 registry + Bridge + handleConn）。
+// 我的变体被调用时只传 nil ⇒ 死代码 + 3 个多余 import，已删除。
+//
+// 教训：**当两处各自证明同一件事时，后加的那处要先确认不是重复**；
+// 而且我改这个文件时同事也在改它 —— 并发改同一文件的结果是互相覆盖，
+// 我一度看到的"文件里既有我的又有他的"就是那次踩踏。
+
+// handleHelloFrameThroughRealRoute 把一条 **3.0 头 + Hello 载荷** 的帧送进真实路由。
+//
+// 真实路径（与生产完全同源）：
+//
+//	protoframe.DecodeHeader  →  Manager.FrameHandler()  →  Manager.HandleFrame  →  handleHello
+//
+// FrameHandler 正是 main.go:282 `startDeviceTransport(cfg, nodeMgr.FrameHandler(), ...)`
+// 与 device_e2e_test.go:177 `OnFrame: mgr.FrameHandler()` 用的同一个适配器。
+//
+// nodeID 从哪来：生产里由 **TLS 客户端证书的 CN** 决定（server.go 从证书取 nodeID），
+// 而本测试不跑 TLS（见文件头"诚实边界"）。这里显式传入与 Hello field 1 **相同**的
+// 节点串 —— 这正是生产不变量：handleHello 要求 wire node_id 与路由身份一致
+// （handler_hello.go:154-157 不等则拒），所以这个参数不是"方便测试的旁路"，
+// 而是把生产约束**显式化**。
+func handleHelloFrameThroughRealRoute(t *testing.T, mgr *nodemgr.Manager, frameBytes []byte) {
+	t.Helper()
+	hdr, err := protoframe.DecodeHeader(frameBytes[:protoframe.HeaderSize])
+	if err != nil {
+		t.Fatalf("DecodeHeader(Hello): %v", err)
+	}
+	// FrameHandler 的返回值恒为 nil（每帧错误不该撕连接），但仍检查以防契约变化。
+	if err := mgr.FrameHandler()(fwE2ENodeID, hdr, frameBytes[protoframe.HeaderSize:]); err != nil {
+		t.Fatalf("FrameHandler(Hello) 返回错误: %v", err)
+	}
+}
+
+// TestHandleHelloRepliesHelloAckThroughRealRoute 是本卡的**握手对锚**（后端侧）。
+//
+// 断言链（全部打在**效果层**，不依赖客户端自述）：
+//  1. 送进真实路由的 Hello 被真实 handleHello 处理；
+//  2. 后端**确实发出** 0x12 HelloAck（用取证 publisher 捕获原始字节）；
+//  3. HelloAck 的 handshake_nonce 与 Hello 发来的**一致**（关联字段，不是认证）；
+//  4. features bit0 = CAP_DATA_BATCH_V1 已置位（V3-2a 能力位，与 Hello 无关但同帧）；
+//  5. 该 HelloAck 帧能被**生产解码器**读回；
+//  6. 节点确实被持久化（否则第 2 条会变成"注册失败也回了 Ack"）。
+func TestHandleHelloRepliesHelloAckThroughRealRoute(t *testing.T) {
+	pub := &fwE2EMQTTPublisher{}
+	mgr, db := newHandshakeManager(t, pub)
+
+	handleHelloFrameThroughRealRoute(t, mgr, fwHelloFrame(t))
+
+	acks := pub.helloAckFrames()
+	if len(acks) == 0 {
+		t.Fatalf("真实路由没有回 HelloAck —— 设备永远进不了 READY。"+
+			"\n捕获到的全部下行帧: %d 条", len(pub.payloads))
+	}
+	if len(acks) != 1 {
+		t.Fatalf("HelloAck 条数 = %d, 期望 1", len(acks))
+	}
+
+	serverTime, features, nonce := decodeHelloAck(t, acks[0])
+	t.Logf("HelloAck: server_time=%d features=0x%X nonce=0x%X (%d B)", serverTime, features, nonce, len(acks[0]))
+
+	// 3. nonce 必须回显本次 Hello 的 nonce。
+	if nonce != fwE2ENonce {
+		t.Errorf("HelloAck nonce = 0x%X, 期望回显 0x%X（关联字段）", nonce, fwE2ENonce)
+	}
+	// 4. V3-2a 能力位 bit0。
+	if features&1 == 0 {
+		t.Errorf("HelloAck features=0x%X 未置 bit0 (CAP_DATA_BATCH_V1)", features)
+	}
+	// server_time 是 Unix ms，必须是个可信的非零值。
+	if serverTime == 0 {
+		t.Errorf("HelloAck server_time = 0")
+	}
+
+	// 6. 注册必须已持久化 —— 与"注册失败不发 HelloAck"是同一约束的两面。
+	var n int64
+	if err := db.Model(&models.Node{}).Where("node_id = ?", fwE2ENodeID).Count(&n).Error; err != nil {
+		t.Fatalf("查询 nodes: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("nodes 行数 = %d, 期望 1 —— 回了 Ack 却没有持久化，正是静默故障", n)
+	}
+}
+
+// TestHandleHelloDoesNotAckWhenRegistrationFails 是"注册失败不发 HelloAck"的用例。
+//
+// 为什么必须有它：handleHello 的约束是"注册**已持久化**才发 Ack"（handler_hello.go:224-228）。
+// 若对锚只测成功路径，就掩盖了"设备以为自己注册了、其实中心没有"的静默故障 ——
+// 而那正是本卡要防的形态。
+//
+// 构造方式（**不**修改任何生产代码）：用 GORM 的 Create 回调注入一次 nodes INSERT 失败。
+// 这正是 handler_hello_test.go:315-321 用过的同款手法（"injected nodes insert failure"），
+// 只是这里从真实路由进入，而不是直接调 handleHello。
+func TestHandleHelloDoesNotAckWhenRegistrationFails(t *testing.T) {
+	pub := &fwE2EMQTTPublisher{}
+	mgr, db := newHandshakeManager(t, pub)
+
+	// 只让 nodes 表的 INSERT 失败，不影响其他表（避免把 fixture 也搞坏）。
+	if err := db.Callback().Create().Before("gorm:create").Register("e2e:fail_nodes_insert", func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Table == "nodes" {
+			tx.AddError(errors.New("e2e injected nodes insert failure"))
+		}
+	}); err != nil {
+		t.Fatalf("注册失败注入回调: %v", err)
+	}
+
+	handleHelloFrameThroughRealRoute(t, mgr, fwHelloFrame(t))
+
+	if acks := pub.helloAckFrames(); len(acks) != 0 {
+		t.Fatalf("注册未持久化却回了 %d 条 HelloAck —— 设备会以为自己已注册（静默故障）", len(acks))
+	}
+	var n int64
+	if err := db.Unscoped().Model(&models.Node{}).Where("node_id = ?", fwE2ENodeID).Count(&n).Error; err != nil {
+		t.Fatalf("查询 nodes: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("nodes 行数 = %d, 期望 0（注入的 INSERT 失败应当阻止落库）", n)
+	}
+	t.Logf("注册失败路径确认: 0 条 HelloAck, 0 行 nodes")
 }
 
 // TestSharedVectorBytesMatchConstants 把本文件的硬编码常量**钉在向量文件上**。
