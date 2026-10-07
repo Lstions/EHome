@@ -298,6 +298,57 @@ static void test_bad_args(void)
     CHECK(!restarted, "参数错不应重启");
 }
 
+/* ════════ 11. 线上数值契约（跨语言）════════
+ *
+ * ## 为什么这条必须有（2026-10-07 实测）
+ *
+ * ACK 帧里 result 是**数值**（handler_device_op.c:98 的 frame_encode_varint
+ * 编码的是 device_op_result_t 的枚举值），不是名字。⇒ 这些数值是
+ * **跨语言线上契约**：C 的 DEVOP_ERR_ERASE_FAILED 必须等于 Go 的
+ * DeviceOpErrEraseFailed（backend/pkg/frame/frame.go:123-132，
+ * 注释原文："Mirrors device_op_result_t. The frontend shows these,
+ *  so a renumbering would display the wrong reason rather than
+ *  fail loudly."）。
+ *
+ * ## 实测：改一个数值，**全部 107 条宿主测试仍然全绿**
+ * 把本文件枚举的 DEVOP_ERR_ERASE_FAILED 从 3 改成 7（Go 侧仍是 3）⇒
+ *     ctest: 100% tests passed, 0 tests failed out of 107
+ * ⇒ 跨语言契约已破，而本地**一处都不报错** —— 这正是 §134 那一族：
+ *   "两端各写一遍的常量，谁都不核对"。
+ *
+ * ## 为什么在这里钉而不是只靠 Go 侧
+ * Go 侧 device_op_test.go:30-38 已把 6 个值逐个钉住（含错误信息
+ * "wire value changed"）。但**只有一侧钉住不算契约**：
+ * 变了 C 侧、Go 侧测试只会继续用它自己的值通过。
+ * ⇒ 两侧都必须钉，且数值必须**逐字相同**（这边抄的就是那份清单）。
+ */
+static void test_wire_values_are_frozen(void)
+{
+    /* 逐条断言**数值**（不是符号名）—— 这是在钉线上字节。
+     * 顺序与 backend/pkg/frame/device_op_test.go:30-38 的清单一致，
+     * 改动任一端的任一数值都必须同步改另一端的测试。 */
+    CHECK((int)DEVOP_OK                    == 0, "DEVOP_OK 线上值应为 0，实际 %d", (int)DEVOP_OK);
+    CHECK((int)DEVOP_ERR_UNKNOWN_OP        == 1, "DEVOP_ERR_UNKNOWN_OP 应为 1，实际 %d", (int)DEVOP_ERR_UNKNOWN_OP);
+    CHECK((int)DEVOP_ERR_BUSY              == 2, "DEVOP_ERR_BUSY 应为 2，实际 %d", (int)DEVOP_ERR_BUSY);
+    CHECK((int)DEVOP_ERR_ERASE_FAILED      == 3, "DEVOP_ERR_ERASE_FAILED 应为 3，实际 %d", (int)DEVOP_ERR_ERASE_FAILED);
+    CHECK((int)DEVOP_ERR_BAD_ARG           == 4, "DEVOP_ERR_BAD_ARG 应为 4，实际 %d", (int)DEVOP_ERR_BAD_ARG);
+    CHECK((int)DEVOP_ERR_ACK_FLUSH_FAILED  == 5, "DEVOP_ERR_ACK_FLUSH_FAILED 应为 5，实际 %d", (int)DEVOP_ERR_ACK_FLUSH_FAILED);
+
+    /* 操作码同样是线上值（0x22 的 field 1），Go 侧 DeviceOpReboot=1 /
+     * DeviceOpFactoryResetKeepConn=2。 */
+    CHECK((int)DEVICE_OP_REBOOT                  == 1, "DEVICE_OP_REBOOT 应为 1，实际 %d", (int)DEVICE_OP_REBOOT);
+    CHECK((int)DEVICE_OP_FACTORY_RESET_KEEP_CONN == 2, "FACTORY_RESET_KEEP_CONN 应为 2，实际 %d", (int)DEVICE_OP_FACTORY_RESET_KEEP_CONN);
+
+    /* 名字表（本地诊断用）也必须与研究出的码一一对应：
+     * 若有人插入一个枚举值让下标错位，这里会立刻发现。 */
+    CHECK(strcmp(device_op_result_name(DEVOP_OK), "OK") == 0,
+          "DEVOP_OK 的名字应为 OK，实际 %s", device_op_result_name(DEVOP_OK));
+    CHECK(strcmp(device_op_result_name(DEVOP_ERR_ERASE_FAILED), "ERASE_FAILED") == 0,
+          "ERASE_FAILED 的名字应正确，实际 %s", device_op_result_name(DEVOP_ERR_ERASE_FAILED));
+    CHECK(strcmp(device_op_result_name(DEVOP_ERR_ACK_FLUSH_FAILED), "ACK_FLUSH_FAILED") == 0,
+          "ACK_FLUSH_FAILED（最大值）名字应正确，实际 %s",
+          device_op_result_name(DEVOP_ERR_ACK_FLUSH_FAILED));
+}
 int main(void)
 {
     test_wifi_is_never_erased();
@@ -310,6 +361,7 @@ int main(void)
     test_ack_flush_failure_does_not_restart();
     test_ack_reports_the_real_result();
     test_bad_args();
+    test_wire_values_are_frozen();
 
     if (s_failures) { printf("device_op_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_op_tests: all checks passed\n");
