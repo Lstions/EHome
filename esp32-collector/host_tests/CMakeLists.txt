@@ -1196,6 +1196,35 @@ target_include_directories(link_rx_adapt_tests PRIVATE
 target_compile_options(link_rx_adapt_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME link_rx_adapt_tests COMMAND link_rx_adapt_tests)
 
+# ══════════════════════════════════════════════════════════════════════════
+# 跨语言对锚：固件侧 C 客户端（task-13）
+#
+# 这是"固件 C 与后端 Go 从未在真实链路上对话过"的第一半：用**真实固件栈**
+# 通过**真实 TCP socket** 发真实字节，并校验对端回帧。
+#
+# 与其它 target 的关键区别：**它不是 add_test**。它需要一个真实对端
+# （Lead 的 Go 服务端）才能跑，不能进 ctest —— 否则 ctest 会因为"连不上"
+# 而红，而那与"代码坏了"完全不是一回事。
+#
+# 组件与 session_tests 完全相同，因为本程序按 session.c:58-66 的方式自己
+# 组装同一批真实层（session 没有上行入口 —— 见源文件头部注释）。
+add_executable(firmware_tcp_e2e_client
+    firmware_tcp_e2e_client.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(firmware_tcp_e2e_client PRIVATE
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(firmware_tcp_e2e_client PRIVATE -Wall -Wextra -Werror)
+
 add_executable(session_tests
     session_tests.c
     ../components/session/session.c
