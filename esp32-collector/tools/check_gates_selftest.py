@@ -804,6 +804,33 @@ def main():
             print("%-42s %s" % (r["name"], r["gate"]))
         return 0
 
+    # ⭐ "扫描器没瞎"下界断言（2026-10-07 加，教训来自 mutation-self-proof 技能）。
+    #
+    # 为什么必须有：脚本末尾的判决是
+    #     if failed or uncovered_gates or residue: return 1
+    #     return 0   # PASS
+    # ⇒ 若 glob 或 recipes() 因为**任何原因**返回空集，
+    #   那么 results=[] / uncovered_gates=[] / residue=[] ⇒ 全部为假 ⇒ **打印 PASS**，
+    #   而实际一条门禁都没被验证。这就是 vacuous pass：**扫描器瞎了却报全绿**。
+    # 我实测过这条路径（喂空集合复刻判决逻辑）：确实打印
+    #     "PASS 每条门禁都被证明会咬" —— 而条目数是 0。
+    #
+    # ⇒ 用**下界**而不是绝对值：门禁只会变多，写死数字会让新增门禁时误报。
+    #    真实验证：当前 check_*.py 16 条、recipes() 25 条。
+    # ⚠ 不适用于 --only / GATE_SELFTEST_HARMLESS：那两种模式本就会缩小到子集。
+    if not args.only and not harmless:
+        if len(gates) == 0:
+            print("FAIL 一条 check_*.py 都没扫到（_HERE=%s）—— 扫描路径错了，" % _HERE)
+            print("     此时下面的判决会**空集 PASS**，等于什么都没验证。")
+            return 1
+        if len(all_recipes) == 0:
+            print("FAIL recipes() 返回 0 条 —— 配方收集坏了，自检形同虚设。")
+            return 1
+        if len(rs) < len(all_recipes):
+            print("FAIL 待跑配方(%d) 少于总配方(%d) —— 有配方被静默丢掉。"
+                  % (len(rs), len(all_recipes)))
+            return 1
+
     cov_limit = coverage_limit()
 
     print("=" * 78)
