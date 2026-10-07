@@ -164,7 +164,19 @@ devlink_place_t device_link_check_placement(uint32_t max_payload,
      * 为什么必须有这一条：
      * 定界器缓冲与 mbedTLS 记录缓冲**在会话存活期内同时存在**，
      * 而三型号的 `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC` **都没开**
-     * （实测，含带 PSRAM 的 s3p）⇒ TLS 的 IN 缓冲一定来自**内部 RAM**。
+     * （实测，含带 PSRAM 的 s3p）⇒ **mbedTLS 的分配器被强制进内部 RAM**。
+ *
+ *   ⚠ 2026-10-07 **真机否证了本段原先的强断言**（原文写"TLS 的 IN 缓冲**一定**来自内部 RAM"）：
+ *     ✅ "**若**走到分配阶段，则在内部"成立，机制已查到：
+ *        IDF `components/mbedtls/port/esp_mem.c:17` 在 `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y`
+ *        时走 `heap_caps_calloc(..., MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)` ——
+ *        与通用 malloc 的 `SPIRAM_MALLOC_ALWAYSINTERNAL` 阈值**无关**（那条管不到 mbedTLS）。
+ *     ❌ "**一定分配了**"不成立：真机实测 3.0 **第一次**连接尝试
+ *        `esp_tls_conn_new_sync` 返回 **-1（失败）**，此时 mbedTLS 尚未分派记录缓冲；
+ *        把 `IN_CONTENT_LEN` 16384 → 8192，internal 只回收 **284 B**（PSRAM 反而 −40 B）
+ *        ⇒ **那 16 KB 从未被分配**，改它的上限自然什么都没变。
+ *     ⇒ 判据 2 的算术在"握手**成功**"时仍成立；但不能据此断言
+ *        "握手期间内部一定少了 16 KB"。
      * ⇒ 两笔各自都要在内部找到连续块。
      *
      * 用 S3/S3P 的 23552 B 上界算：

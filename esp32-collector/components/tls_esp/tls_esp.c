@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_tls.h"
 #include "esp_tls_errors.h"
+#include "esp_heap_caps.h"   /* 仅 EHOME_MEM_DIAG 下的 [tlsheap] 探针 */
 
 #include "tls_guard.h"
 #include "tls_io.h"
@@ -128,9 +129,26 @@ void *tls_esp_connect(void *io_ctx, bool *hard_fatal)
         err_handle = NULL;   /* 取不到就退化为 UNCLASSIFIED（可重试），不猜 */
     }
 
+    /* ⭐ task-34 定位用（**纯观测**，EHOME_MEM_DIAG 门控）：
+     * 逐步探针把 largest 的下降夹在 task:create → WAIT_HANDSHAKE 之间（约 1.6 s，
+     * 含 socket 建立 + TLS 握手 + 证书校验），但**再往里就看不见了**。
+     * 这两行把它对半切开：after − before = "esp_tls_conn_new_sync 里的全部消耗"。
+     * 口径与内存门禁一致（INTERNAL | 8BIT），否则两列数字不可比。 */
+#ifdef EHOME_MEM_DIAG
+    ESP_LOGI(TAG, "[tlsheap] before_connect free=%-6u largest=%-6u (internal)",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#endif
+
     /* 3) 连接（同步）。返回 1 成功，-1 失败（含超时）。 */
     int ret = esp_tls_conn_new_sync(cfg->host, (int)strlen(cfg->host),
                                     (int)cfg->port, &ecfg, tls);
+
+#ifdef EHOME_MEM_DIAG
+    ESP_LOGI(TAG, "[tlsheap] after_connect(%d) free=%-6u largest=%-6u (internal)", ret,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#endif
     if (ret != 1) {
         /* 4) 取失败信息并归约，再按 (时间可信, 失败类别) 分类（§52/§54）。
          *
