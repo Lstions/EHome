@@ -58,9 +58,14 @@ typedef struct {
 
     tls_esp_certs_t certs;
 
-    /** 时间源（注入）。返回 Unix 秒。
-     *  为什么要注入：a) 宿主/仿真可替；b) 把"时间从哪来"（SNTP 尚未落地）
-     *  与"怎么判"解耦 —— 判定逻辑在 tls_guard（可测），这里只负责取数。 */
+    /** 时间源（注入）。返回 Unix 秒；**取不到返回 0**（= 不可信，不在此钳制）。
+     *  为什么要注入：a) 宿主/仿真可替；b) 把"时间从哪来"与"怎么判"解耦 ——
+     *  判定逻辑在 tls_guard（可测），这里只负责取数。
+     *
+     *  ⚠ 括号里原写"（SNTP 尚未落地）"，**已过期**：SNTP 已落地
+     *  （components/sntp_mgr，由 main/device_link_wiring.c 在配置 tls_esp
+     *  **之前**创建，注入的就是它）。注入的理由本身仍然成立 —— 它使本模块
+     *  不依赖具体时间源，宿主测试可给任意时间。 */
     uint64_t (*now_epoch)(void);
 } tls_esp_config_t;
 

@@ -530,6 +530,27 @@ def recipes():
                        "工具写的命名空间漂移（eh_tls -> eh_tls2）"),
         "nvs_certs_gen.py: 工具写 \"eh_tls2\" 而固件开 \"eh_tls\" ⇒ 命名空间对不上")
 
+    # ── 过期声称（2026-10-07 新增）────────────────────────────────────
+    #
+    # 这两条配方证明 check_stale_claims 的新判据**真的会咬**。
+    # 起因：Kconfig help 写着 "SNTP is not landed"，而 SNTP 早已落地 ——
+    # 过期清单比没有清单更糟，它让人以为清单是完整的。
+    add("stale_claims.sntp_already_landed",
+        "check_stale_claims.py", "file",
+        inject_replace("main/device_link_wiring.c",
+                       r'(static const char \*TAG = "[^"]*";)',
+                       r'\1\n/* SNTP 尚未落地，时间不可信。 */',
+                       "重新引入过期的 SNTP 声称"),
+        "device_link_wiring.c: 注入 \"SNTP 尚未落地\" ⇒ 与事实（sntp_mgr 存在且被调用）矛盾")
+
+    add("stale_claims.uplink_already_framed",
+        "check_stale_claims.py", "file",
+        inject_replace("main/session_transport.c",
+                       r'(#include "session_transport.h")',
+                       r'\1\n/* 已知问题：上行未成帧。 */',
+                       "重新引入过期的未成帧声称"),
+        "session_transport.c: 注入 \"上行未成帧\" ⇒ 与事实（有成帧调用点）矛盾")
+
     add("cert_nvs_contract.kconfig_mismatch",
         "check_cert_nvs_contract.py", "file",
         # 锚点必须只落在**一行内**：inject_replace 用的是 re.subn(pattern, repl, text)
