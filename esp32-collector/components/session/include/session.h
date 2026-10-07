@@ -97,6 +97,71 @@ void       session_destroy(session_t *s);
 session_state_t session_poll(session_t *s, uint32_t *delivered_out);
 
 /**
+ * ⭐ 上行入口：发一帧。
+ *
+ * ## 哪些状态允许发 —— **不按状态门控**
+ *
+ * 本函数是 link_send() 的**薄委托**，**不检查 state**。理由不是"省事"：
+ *
+ * 1. ⚠ **设备的第一条 Hello 恰恰是在 WAIT_HANDSHAKE 期间发的**。
+ *    若在这里要求 state == READY，就会形成一条**死锁**：
+ *       Hello 发不出 ⇒ 收不到 HelloAck ⇒ session_note_handshake() 永不调用
+ *       ⇒ 永远进不了 READY ⇒ Hello 永远发不出。
+ *    而 READY **只能**由 note_handshake 进入，所以这个限制会让 3.0 链路
+ *    **功能上完全不可用** —— 且三个 profile 构建 rc=0、可达性门禁也是绿的，
+ *    **一处都不会报错**（本项目最怕的形态）。
+ *    ⇒ 该行为已由 host_tests/session_send_tests.c 钉住（用例名含
+ *      wait_handshake 的若干条），把守卫加回去必须变红。
+ * 2. **"能不能写出去"的权威来源是驱动，不是本层**（P4：同一语义一处定义）。
+ *    link.h 的"为什么不预检 is_ready"（TOCTOU、结果即决策依据）同样适用于此：
+ *    本层再判一次状态，就把驱动的判断复制了一份。
+ *
+ * ## 因此各状态下的**实际**行为
+ *
+ * | state | 行为 | 调用方应做 |
+ * |---|---|---|
+ * | WAIT_HANDSHAKE | **真的发出去**（这就是发 Hello 的时机） | 正常 |
+ * | READY | 真的发出去 | 正常 |
+ * | DOWN / BACKOFF / FATAL | 驱动未连接 ⇒ 返回 LINK_NOT_READY | 先 session_poll 推进状态 |
+ *
+ * 后三者**不是**"被本层拒绝"，而是驱动如实回答"链路没建立" ——
+ * 差别很重要：本层没有替调用方做决定，只是把事实带上来。
+ *
+ * ## ⚠ 发送窗口：**故意未实现**（设计里没有这个数字）
+ *
+ * 设计 §4.1 提到"发送窗口"并交叉引用 §5.2，但 **§5.2 里没有任何数字** ——
+ * 这个上界**从未被定义**。本仓既定纪律是"**不猜数字**"（猜出来的上界会变成
+ * 一条没人能核对、却在生产中生效的规则）。
+ * ⇒ 本函数只做"**一帧一帧发**"：调用方持有一个 progress，按返回的
+ *   LINK_SENT_PARTIAL（续写）/ LINK_BACKPRESSURE（整帧稍后重试）推进。
+ *   窗口语义（一次允许几帧在途）留待设计给出数字后再补；届时那是**上层策略**，
+ *   不应塞进本函数。
+ *
+ * ## progress 是**出入参**（D-30）
+ * 入参：本帧**已经确认写出**的字节数（发新帧传 0）。
+ * 出参：返回时本帧**累计**确认写出的字节数。
+ * 调用方**必须**从 *progress 处续写，**绝不能重发整帧** ——
+ * 已上线的字节再写一遍会让接收端的定界器看到重复片段而**无法自愈**
+ * （静默流污染；见 link.h 中 D-30 的说明与示例循环）。
+ *
+ * @param s        会话。NULL ⇒ LINK_FATAL（参数错，不是背压）。
+ * @param frame    整帧字节（头 + 载荷；本层不做任何封装/定界）。
+ * @param len      整帧长度。0 ⇒ LINK_FATAL。
+ * @param progress 出入参，**不得为 NULL**（传 NULL ⇒ LINK_FATAL）。
+ *                 传入前必须先初始化为 0（发新帧）。
+ * @return 与 link_send **完全相同**的结果 —— **原样透传，不压平**
+ *         （D-01 的病根就是压平）。含 LINK_PAYLOAD_TOO_BIG：本层不替你分片。
+ *
+ * 确定性行为（由 host_tests/session_send_tests.c 逐条锁定）：
+ *  - WAIT_HANDSHAKE 下允许发（**关键**，见上）；
+ *  - LINK_BACKPRESSURE / LINK_NOT_READY **原样透传**；
+ *  - 部分写出后按 progress 续写**不会**重发已写字节；
+ *  - 参数守卫：s / frame / progress 为 NULL 或 len == 0 ⇒ LINK_FATAL。
+ */
+link_result_t session_send(session_t *s, const uint8_t *frame, size_t len,
+                           size_t *progress);
+
+/**
  * ⭐ 上层通知"**应用层握手已完成**"（收到 HelloAck）⇒ 退避计数归零、进入 READY。
  *
  * 这是**唯一**的重置点（设计 §4.2）。socket 连上**不算**握手。

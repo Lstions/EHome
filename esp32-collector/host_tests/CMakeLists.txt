@@ -1210,6 +1210,9 @@ add_test(NAME link_rx_adapt_tests COMMAND link_rx_adapt_tests)
 # 组装同一批真实层（session 没有上行入口 —— 见源文件头部注释）。
 add_executable(firmware_tcp_e2e_client
     firmware_tcp_e2e_client.c
+    # task-15：客户端改为**只用 session 收发**（此前绕开 session 自己拼下面四层，
+    # 因为当时 session 没有上行入口）。因此这里也要编入 session.c。
+    ../components/session/session.c
     ../components/link_rx_adapt/link_rx_adapt.c
     ../components/link_tcp/link_tcp.c
     ../components/link/link.c
@@ -1217,6 +1220,7 @@ add_executable(firmware_tcp_e2e_client
     ../components/wire/wire.c
 )
 target_include_directories(firmware_tcp_e2e_client PRIVATE
+    ../components/session/include
     ../components/link_rx_adapt/include
     ../components/link_tcp/include
     ../components/link/include
@@ -1224,6 +1228,29 @@ target_include_directories(firmware_tcp_e2e_client PRIVATE
     ../components/wire/include
 )
 target_compile_options(firmware_tcp_e2e_client PRIVATE -Wall -Wextra -Werror)
+
+# 上行入口 session_send（task-15）。与 session_tests 分开：
+# session_tests 锁"退避只由应用层握手重置"；本文件锁"第一帧到底发不发得出去"
+# —— 那是另一条独立性更强、错了会让 3.0 链路完全不可用却处处不报错的路径。
+add_executable(session_send_tests
+    session_send_tests.c
+    ../components/session/session.c
+    ../components/link_rx_adapt/link_rx_adapt.c
+    ../components/link_tcp/link_tcp.c
+    ../components/link/link.c
+    ../components/rx_pump/rx_pump.c
+    ../components/wire/wire.c
+)
+target_include_directories(session_send_tests PRIVATE
+    ../components/session/include
+    ../components/link_rx_adapt/include
+    ../components/link_tcp/include
+    ../components/link/include
+    ../components/rx_pump/include
+    ../components/wire/include
+)
+target_compile_options(session_send_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME session_send_tests COMMAND session_send_tests)
 
 add_executable(session_tests
     session_tests.c

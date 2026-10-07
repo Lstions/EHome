@@ -120,6 +120,37 @@ static void enter_backoff(session_t *s)
     s->stats.backoffs_entered++;
 }
 
+link_result_t session_send(session_t *s, const uint8_t *frame, size_t len,
+                           size_t *progress)
+{
+    /* 参数守卫只保留一条：对象在不在。
+     *
+     * 其余守卫（frame==NULL / len==0 / progress==NULL / *progress > len）
+     * **刻意不在这里重复** —— link_send 已经逐条判过，且判法一致（都返回
+     * LINK_FATAL）。本层再抄一遍就是 P4 说的"同一语义两处定义"：将来 link
+     * 改了判法，这里会静默地与它不一致。
+     *
+     * 为什么单独判 s == NULL：我们连 s->link 都取不到，无法委托；
+     * 且 progress 也不能被写回（不知道它是谁的）。如实返回 FATAL，
+     * 而不是假装推进了进度。 */
+    if (s == NULL) return LINK_FATAL;
+
+    /* ⚠⚠ 这里**没有** state 门控 —— 这是本函数最重要的一行"不存在"。
+     *
+     * 加一行 "state 不是 READY 就返回 NOT_READY" 看起来更安全，实则会造出
+     * 一条**功能死锁**：设备的第一条 Hello 就是在 WAIT_HANDSHAKE 期间发的
+     * （"链路已通，等应用层握手"），而 READY **只能**由
+     * session_note_handshake()（收到 HelloAck）进入 —— Hello 发不出，就永远
+     * 收不到 HelloAck。⇒ 3.0 链路永远停在 WAIT_HANDSHAKE、完全不可用，
+     * 而三个 profile 构建与可达性门禁全都是绿的（本项目最怕的形态）。
+     * host_tests/session_send_tests.c 有专门用例钉住这条：把门控加回去即变红。
+     *
+     * 另外"能不能写出去"的权威来源是**驱动**而非本层（P4）；
+     * link.h 的"为什么不预检 is_ready"（TOCTOU、结果即决策依据）同理。
+     * 未连接时驱动会如实返回 LINK_NOT_READY，不需要本层替它下结论。 */
+    return link_send(s->link, frame, len, progress);
+}
+
 void session_note_handshake(session_t *s)
 {
     if (s == NULL) return;

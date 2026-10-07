@@ -9,20 +9,25 @@
  * 发出去，并校验对端发回的字节。
  *
  * ## 用的是哪些**真实**组件（未改一行生产代码）
- *   wire           —— 真实帧头编码器（12 B 大端头）
- *   link_tcp       —— 真实链路驱动 + 状态机（部分写/背压/错误分级）
+ *   session        —— 真实会话状态机（内部串起下面四层）
+ *   link / link_tcp—— 真实链路驱动 + 状态机（部分写/背压/错误分级）
  *   link_rx_adapt  —— 真实"枚举撞车"翻译层
  *   rx_pump        —— 真实接收泵（定界；处理半条帧）
+ *   wire           —— 真实帧头编码器（12 B 大端头）
  *
- * ## ⚠ 为什么**没有**用 session_create（与任务卡的偏离，已如实报告）
- * 任务卡要求"用真实 session_create"。实测核对后确认：**session 没有任何上行
- * 入口**（session.h 只有 create/poll/state/note_handshake/stats，唯一的上行
- * `link_send` 被私有的 `struct session` 持有，外部拿不到）。
- * 而本程序**必须**能发一条 0x23 帧 ⇒ 用 session_create 无法完成。
- * 不改生产代码的加法只有一种：**自己按 session.c 内部同样的方式组装同一批层**
- * （session.c:58-66 就是 link_tcp_new + link_create + link_rx_binding_new +
- * rx_pump_create）。本程序用的正是这四个真实组件，只少了 session 那层
- * 退避包装 —— 而单发一帧的对锚不需要退避。
+ * ## ⭐ 现在走的是 session_send（task-15）
+ * 本程序原先**绕开** session 自己拼 link_tcp+link+rx_pump —— 原因是当时
+ * session.h **没有任何上行入口**，发不出那条 0x23。task-15 给 session 补了
+ * `session_send()`，本程序随即改为**只用 session**：
+ *   session_create → poll 到链路通 → session_send(0x23) → 继续 poll 收 0x22。
+ *
+ * ## ⚠ 为什么"等链路通"**不是**等 READY（这是本卡最容易写错的地方）
+ * `SESSION_READY` **只能**由 `session_note_handshake()`（收到 HelloAck）进入，
+ * 而设备必须**先发 Hello** 才可能收到 HelloAck。
+ * ⇒ 若在这里等 READY 才发，就是一条**功能死锁**：永远发不出 Hello，
+ *   永远进不了 READY，3.0 链路完全不可用 —— 且构建/门禁全绿、一处不报错。
+ * ⇒ 本程序在 `WAIT_HANDSHAKE`（"链路已通，等应用层握手"）就发。
+ *   session_send 本身也**不做** READY 门控（见 session.h 的说明）。
  *
  * ## ⭐ link_tcp 读返回值的四态（本程序最容易写错的地方）
  * link_tcp.h 明确定义（link_tcp.c:55-77 逐条实现）：
@@ -67,9 +72,9 @@
 #include <unistd.h>
 
 #include "link.h"
-#include "link_rx_adapt.h"
 #include "link_tcp.h"
 #include "rx_pump.h"
+#include "session.h"
 #include "wire.h"
 
 /* ── 对锚用的精确字节（任务卡给定，已由协议向量核对）── */
@@ -243,6 +248,9 @@ static uint64_t now_ms(void)
     return (uint64_t)tv.tv_sec * 1000u + (uint64_t)(tv.tv_usec / 1000);
 }
 
+/** 退避抖动 [0,1000]。本程序只连一次、且对锚讲究可复现，故固定 500（无抖动）。 */
+static uint32_t rand_permille(void) { return 500u; }
+
 /* ══════════════════ 收到的帧 ══════════════════ */
 
 typedef struct {
@@ -291,35 +299,45 @@ int main(int argc, char **argv)
 
     if (ctx.port <= 0 || ctx.port > 65535) return fail("bad_port");
 
-    /* ── 1) 真实 link_tcp（含真实状态机）── */
-    link_tcp_config_t lcfg = { .io = &TCP_IO, .io_ctx = &ctx };
-    link_tcp_ctx_t *tcp = link_tcp_new(&lcfg);
-    if (tcp == NULL) return fail("link_tcp_new");
-
-    link_t *link = link_create(link_tcp_driver(), tcp);
-    if (link == NULL) { link_tcp_free(tcp); return fail("link_create"); }
-
-    /* ── 2) 真实 link_rx_adapt + rx_pump（定界 ⇒ 能处理半条帧）── */
-    link_rx_binding_t *bind = link_rx_binding_new(tcp);
-    if (bind == NULL) { link_destroy(link); link_tcp_free(tcp); return fail("rx_binding"); }
-
+    /* ── 1) 真实 session（内部就是 link_tcp + link_rx_adapt + rx_pump）── */
     static uint8_t rbuf[E2E_RX_BUF_CAP];
     rx_capture_t cap;
     memset(&cap, 0, sizeof(cap));
 
-    rx_pump_t *pump = rx_pump_create(E2E_MAX_PAYLOAD, link_rx_adapt_read, bind,
-                                     on_msg, &cap, rbuf, sizeof(rbuf));
-    if (pump == NULL) {
-        link_rx_binding_free(bind); link_destroy(link); link_tcp_free(tcp);
-        return fail("rx_pump_create");
-    }
+    session_config_t scfg;
+    memset(&scfg, 0, sizeof(scfg));
+    scfg.io           = &TCP_IO;
+    scfg.io_ctx       = &ctx;
+    scfg.max_payload  = E2E_MAX_PAYLOAD;
+    scfg.rx_buf       = rbuf;
+    scfg.rx_buf_cap   = sizeof(rbuf);
+    scfg.now_ms       = now_ms;
+    scfg.rand_permille = rand_permille;
+    scfg.on_msg       = on_msg;
+    scfg.on_msg_ctx   = &cap;
 
-    /* ── 3) 连接 ── */
-    link_result_t lr = link_open(link);
-    if (lr != LINK_SENT_FULL) {
-        rx_pump_destroy(pump); link_rx_binding_free(bind);
-        link_destroy(link); link_tcp_free(tcp);
-        say("note=link_open_rc=%s", link_result_name(lr));
+    session_t *sess = session_create(&scfg);
+    if (sess == NULL) return fail("session_create");
+
+    /* ── 2) poll 到"链路已通" ──
+     * ⚠ 这里**不能**等 SESSION_READY（那要收到 HelloAck，而 Hello 还没发）。
+     *   链路刚建成的那一态是 WAIT_HANDSHAKE —— 正是发 Hello 的时机。 */
+    uint64_t conn_deadline = now_ms() + E2E_CONNECT_TIMEOUT_MS;
+    session_state_t st = session_state(sess);
+    while (now_ms() < conn_deadline) {
+        (void)session_poll(sess, NULL);
+        st = session_state(sess);
+        if (st == SESSION_WAIT_HANDSHAKE || st == SESSION_READY) break;
+        if (st == SESSION_FATAL) {
+            say("note=session_fatal");
+            session_destroy(sess);
+            return fail("session_fatal");
+        }
+        /* DOWN / BACKOFF：继续等（BACKOFF 到点后 poll 会重连） */
+    }
+    if (st != SESSION_WAIT_HANDSHAKE && st != SESSION_READY) {
+        say("note=session_state=%s", session_state_name(st));
+        session_destroy(sess);
         return fail("connect");
     }
     say("connect=ok");
@@ -336,58 +354,65 @@ int main(int argc, char **argv)
     uint8_t frame[WIRE_HEADER_BYTES + sizeof(kAckOkPayload)];
     wire_result_t wr = wire_encode_header(frame, sizeof(frame), &h);
     if (wr != WIRE_OK) {
-        rx_pump_destroy(pump); link_rx_binding_free(bind);
-        link_destroy(link); link_tcp_free(tcp);
         say("note=wire_encode_header=%s", wire_result_name(wr));
+        session_destroy(sess);
         return fail("wire_encode");
     }
     memcpy(frame + WIRE_HEADER_BYTES, kAckOkPayload, sizeof(kAckOkPayload));
 
-    /* ── 5) 发送（真实 link_send；按 link.h 的续写模式处理部分写）── */
+    /* ── 3) 发送：**真实 session_send**（薄委托到 link_send）──
+     *
+     * 按 link.h 规定的续写模式推进 progress：
+     *   PARTIAL（写了一部分）⇒ 继续写；BACKPRESSURE（一字节没写出）⇒ 整帧稍后重试。
+     * 绝不能重发整帧 —— 已上线字节再写一遍会让接收端定界器无法自愈（D-30）。 */
     size_t len = sizeof(frame);
     size_t progress = 0;
     uint64_t tx_deadline = now_ms() + 5000;
     for (;;) {
-        lr = link_send(link, frame, len, &progress);
+        link_result_t lr = session_send(sess, frame, len, &progress);
         if (lr == LINK_SENT_FULL) break;
         if (lr == LINK_SENT_PARTIAL) continue;            /* 接着写（progress 已推进） */
         if (lr == LINK_BACKPRESSURE) {                    /* 一字节没写出：整帧稍后重试 */
             if (now_ms() > tx_deadline) {
-                rx_pump_destroy(pump); link_rx_binding_free(bind);
-                link_destroy(link); link_tcp_free(tcp);
+                session_destroy(sess);
                 return fail("tx_backpressure_timeout");
             }
             continue;
         }
         /* 其它结果：交给上层决策（本程序直接判失败并如实报出） */
-        say("note=link_send_rc=%s progress=%zu", link_result_name(lr), progress);
-        rx_pump_destroy(pump); link_rx_binding_free(bind);
-        link_destroy(link); link_tcp_free(tcp);
+        say("note=session_send_rc=%s progress=%zu", link_result_name(lr), progress);
+        session_destroy(sess);
         return fail("send");
     }
     say("sent type=0x23 len=%u", (unsigned)sizeof(kAckOkPayload));
 
-    /* ── 6) 反复 poll 直到收到一条帧或超时 ── */
+    /* ── 4) 反复 session_poll 直到收到一条帧或超时 ──
+     *
+     * ⚠ 收帧走 session_poll（它内部是 rx_pump_step + wire 定界），因此
+     *   "后端每次 1 字节写来"的**半条帧**必须仍能被正确组装 —— 这是本程序
+     *   原有能力，改用 session 后**不得退化**。
+     *
+     * 状态机语义：poll 在 WAIT_HANDSHAKE / READY 两态都会泵读。
+     * 链路掉了会进 BACKOFF（本程序记为 rx_closed_by_peer，不假装是超时）。 */
     uint64_t deadline = now_ms() + E2E_RX_TIMEOUT_MS;
     int exit_code = 1;
     const char *rx_fail = "rx_timeout";   /* 默认：真的等满了 */
 
     while (!cap.got && now_ms() < deadline) {
         uint32_t delivered = 0;
-        rx_pump_result_t pr = rx_pump_step(pump, &delivered);
-        /* 每一档都要区分（P1）—— 尤其 CLOSED 不能与 AGAIN 混：
-         * 前者说明对端关了，后者只是"还没数据"。
-         * ⚠ 失败原因必须**如实**：对端关闭却报 rx_timeout，会把人引向
-         * "再等等"而不是"对端为什么关了"。 */
-        if (pr == RX_PUMP_CLOSED) { say("note=rx_closed_by_peer"); rx_fail = "rx_closed_by_peer"; break; }
-        if (pr == RX_PUMP_ERROR)  { say("note=rx_pump_rc=ERROR");  rx_fail = "rx_pump_error"; break; }
-        if (pr == RX_PUMP_FATAL)  { say("note=rx_pump_rc=FATAL");  rx_fail = "rx_pump_fatal"; break; }
-        /* IDLE / DELIVERED：继续（DELIVERED 时 cap.got 已置位，循环条件会退出） */
+        session_state_t ps = session_poll(sess, &delivered);
+        if (ps == SESSION_BACKOFF || ps == SESSION_FATAL) {
+            /* 链路不可用（对端关闭/硬错误）。如实报，不混进 rx_timeout ——
+             * 那会把人引向"再等等"而不是"对端为什么关了"。 */
+            say("note=session_state=%s", session_state_name(ps));
+            rx_fail = "rx_closed_by_peer";
+            break;
+        }
+        /* WAIT_HANDSHAKE / READY：继续泵（收到后 cap.got 置位，循环退出） */
     }
 
     if (!cap.got) {
-        rx_pump_destroy(pump); link_rx_binding_free(bind);
-        link_destroy(link); link_tcp_free(tcp);
+        session_destroy(sess);
         return fail(rx_fail);
     }
 
@@ -418,9 +443,6 @@ int main(int argc, char **argv)
             !ok_type ? "type" : (!ok_len ? "payload_len" : "payload_bytes"));
     }
 
-    rx_pump_destroy(pump);
-    link_rx_binding_free(bind);
-    link_destroy(link);
-    link_tcp_free(tcp);
+    session_destroy(sess);
     return exit_code;
 }
