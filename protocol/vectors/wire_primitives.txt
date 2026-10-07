@@ -42,6 +42,43 @@ u64 6 2500
 wire 06081110091a04010300002008282130c413
 end
 
+# --- Hello / HelloAck：握手帧的**字段号契约** ---
+#
+# 为什么必须加这两个用例（2026-10-07，由对抗性复核指出）：
+#   Hello/HelloAck 的字段号此前**只存在于两处源码**里 ——
+#   固件 components/msg_handler/msg_handler_internal.h 与
+#   后端 backend/pkg/frame/frame.go。两端各自"自洽"，没有第三方权威。
+#   ⇒ 若两侧**同时**漂移成另一种形状（例如都把 field 4 改成别的含义），
+#     跨语言对锚**仍会全绿**，而协议已经不通 —— 这正是 S0 要拦的形态。
+#   0x22/0x23（device_op）早有向量钉住，Hello 这一对一直没有。
+#
+# 字节由**生产解码器**（backend/pkg/frame）逐字段读回验证过，不是手算后就信的：
+#   field 1/2/3/8 为长度定界字符串，4/5/6/9 为 varint；首字节 = 类型（2.x 约定）。
+# 取值与固件 handler_hello.c 实际发送的字段集一致（含后端 required 的 4/5/6）。
+
+case hello_from_device
+type 1
+bytes 1 76332d6c696e6b2d6e6f6465
+bytes 2 332e302e302d646576
+bytes 3 45482d5333
+u64 4 4
+u64 5 7
+u64 6 1
+bytes 8 322e36
+u64 9 2712847316
+wire 010a0c76332d6c696e6b2d6e6f64651209332e302e302d6465761a0545482d53332004280730014203322e3648d487cb8d0a
+end
+
+# HelloAck：字段 1 server_time / 2 features / 3 handshake_nonce（后端 sender.go:342-345）
+# ⚠ nonce 必须**回显** Hello 发来的值 —— 这是关联字段，跨语言对锚断言过它。
+case hello_ack_from_server
+type 18
+u64 1 1791340413951
+u64 2 1
+u64 3 2712847316
+wire 1208ff87d6a19134100118d487cb8d0a
+end
+
 # --- varint 边界 ---
 # 注意 field 2 的 tag = (2<<3)|0 = 16 = 0x10（不是 0x02——初版就错在这里）
 
