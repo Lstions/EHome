@@ -82,6 +82,9 @@
 #include "rx_pump.h"
 #include "session.h"
 #include "wire.h"
+/* task-31：生产成帧函数（与真机同一条路径）。不引入任何 IDF 头：
+ * device_link_wiring.h 只依赖 variant.h + stdint，宿主可编。 */
+#include "device_link_wiring.h"
 #include "frame_codec.h"   /* MSG_HELLO / MSG_HELLO_ACK 的单一来源 */
 /* ===== task-25：真实 device_op 回程所需的头 ===== */
 #include "transport.h"             /* 捕获 transport（真实广播路径的落点）*/
@@ -620,25 +623,33 @@ int main(int argc, char **argv)
             session_destroy(sess);
             return fail("hello_encode");
         }
-        if (WIRE_HEADER_BYTES + hello_payload_len > sizeof(hello_frame)) {
-            say("note=hello_too_big len=%zu", hello_payload_len);
-            session_destroy(sess);
-            return fail("hello_encode");
+        /* ⭐⭐ task-31（§122 同型收口）：**调用生产成帧函数**，不再自己拼头。
+         *
+         * 缺陷回顾：本程序原先自己 memcpy + wire_encode_header ⇒ 它证明的是
+         * "一个**会正确成帧的客户端**能与后端互通"，**不是**"生产固件能与后端
+         * 互通"——两者是**两个不同的程序**。真机那边全程不成帧
+         * （devlink_send_frame 直接把 payload 交给 session_send），
+         * 后端 protoframe.DecodeHeader 一律 ErrMagic ⇒ 设备永远进不了 READY，
+         * 而固件侧一处都不报错。
+         *
+         * 现在这里调的是**真机同一条** devlink_encode_frame
+         * （main/device_link_wiring.c 的纯判定段，本 target 已编入它）。
+         * ⇒ 生产成帧一旦漂移（忘了头/type 取自 payload[0]/payload_len 错），
+         * 对锚**立刻**红。这正是本卡要永久钉住的那一类。
+         *
+         * ⚠ 别改回自己拼头：那就把本测试变回"测一个不存在的客户端"。 */
+        {
+            size_t out_len = 0;
+            int frc = devlink_encode_frame(hello_frame, sizeof(hello_frame),
+                                           hello_payload, hello_payload_len,
+                                           /* seq */ 0u, &out_len);
+            if (frc != DEVLINK_FRAME_OK) {
+                say("note=devlink_encode_frame rc=%s", devlink_frame_err_name(frc));
+                session_destroy(sess);
+                return fail("hello_encode");
+            }
+            hello_len = out_len;
         }
-        memcpy(hello_frame + WIRE_HEADER_BYTES, hello_payload, hello_payload_len);
-
-        wire_header_t hh;
-        memset(&hh, 0, sizeof(hh));
-        hh.ver   = (uint8_t)WIRE_VER;
-        hh.type  = MSG_HELLO;                 /* 0x01，来自 frame_codec.h */
-        hh.flags = 0;
-        hh.seq   = 1;
-        hh.payload_len = (uint16_t)hello_payload_len;
-        if (wire_encode_header(hello_frame, sizeof(hello_frame), &hh) != WIRE_OK) {
-            session_destroy(sess);
-            return fail("hello_encode");
-        }
-        hello_len = WIRE_HEADER_BYTES + hello_payload_len;
     }
 
     /* 发送 Hello：按 link.h 的 progress 循环（PARTIAL 续写，BACKPRESSURE 整帧重试）。 */
@@ -803,25 +814,22 @@ int main(int argc, char **argv)
         /* 发出去：**真实 wire 编码器** + **真实 session_send**。
          * 载荷用的是**真实回程产出的字节**，不是 kAckOkPayload 这个常量本身。 */
         uint8_t frame[WIRE_HEADER_BYTES + E2E_CAPTURE_CAP];
-        wire_header_t h;
-        memset(&h, 0, sizeof(h));
-        h.ver         = (uint8_t)WIRE_VER;
-        h.type        = (uint8_t)s_capture[0];   /* 0x23，来自真实字节 */
-        h.flags       = 0;                      /* ⚠ 不置 CRC 位 */
-        h.seq         = 1;
-        h.payload_len = (uint16_t)s_capture_len;
-
-        if (wire_encode_header(frame, sizeof(frame), &h) != WIRE_OK) {
-            say("note=wire_encode=FAIL");
-            session_destroy(sess);
-            return fail("wire_encode");
+        /* ⭐ task-31：同样改走**生产成帧函数**（此前是自己 memset+wire_encode_header）。
+         * 与 Hello 那条同一收口，见上面的长注释。 */
+        size_t tx_len = 0;
+        {
+            int frc = devlink_encode_frame(frame, sizeof(frame), s_capture, s_capture_len,
+                                           /* seq */ 0u, &tx_len);
+            if (frc != DEVLINK_FRAME_OK) {
+                say("note=devlink_encode_frame rc=%s", devlink_frame_err_name(frc));
+                session_destroy(sess);
+                return fail("wire_encode");
+            }
         }
-        memcpy(frame + WIRE_HEADER_BYTES, s_capture, s_capture_len);
 
         /* 按 link.h 规定的续写模式推进 progress：
          *   PARTIAL（写了一部分）⇒ 继续写；BACKPRESSURE（一字节没写出）⇒ 稍后重试。
          * 绝不重发整帧 —— 已上线字节再写一遍会让接收端定界器无法自愈（D-30）。 */
-        size_t tx_len = WIRE_HEADER_BYTES + s_capture_len;
         size_t progress = 0;
         uint64_t tx_deadline = now_ms() + 5000;
         for (;;) {

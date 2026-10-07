@@ -173,6 +173,67 @@ devlink_rx_verdict_t devlink_rx_verdict(uint8_t header_type, uint16_t payload_le
     return DEVLINK_RX_DISPATCH;
 }
 
+/* ── ⭐ 3.0 上行成帧（task-31）──
+ *
+ * 放在**纯判定段**（宿主与固件都编）是刻意的：
+ *   - 真机的 devlink_send_frame 调它（生产路径**唯一**一处成帧）；
+ *   - 对锚客户端也调它（见 host_tests/firmware_tcp_e2e_client.c）；
+ *   - 宿主用例直接断言**字节**。
+ * ⇒ "生产成帧"只有一份实现（P4 收口）。
+ *
+ * 为什么返回 0/负值而不是 wire_result_t：本函数的失败面比 wire_encode_header
+ * 宽（还有"载荷为空/放不下"），复用 wire_result_t 会把"载荷空"硬塞进
+ * WIRE_ERR_BAD_ARG，调用方就分不清"参数写错"和"对端会丢这条帧"。
+ */
+const char *devlink_frame_err_name(int rc)
+{
+    switch (rc) {
+    case DEVLINK_FRAME_OK:          return "OK";
+    case DEVLINK_FRAME_ERR_BAD_ARG: return "BAD_ARG";
+    case DEVLINK_FRAME_ERR_TOO_BIG: return "TOO_BIG";
+    case DEVLINK_FRAME_ERR_CAP:     return "CAP";
+    case DEVLINK_FRAME_ERR_HEADER:  return "HEADER";
+    default:                        return "UNKNOWN";
+    }
+}
+
+int devlink_encode_frame(uint8_t *out, size_t cap,
+                         const uint8_t *payload, size_t payload_len,
+                         uint32_t seq, size_t *out_len)
+{
+    /* 先判空指针，再判空载荷：payload_len==0 时**没有首字节** ⇒ 无法取 type。
+     * 宁可不发，也不发一条 type=0 的畸形帧（后端 manager.go:418 会丢弃，
+     * 而丢弃时只打一条 warn —— 现场看起来就像"设备没反应"）。 */
+    if (out == NULL || out_len == NULL) return DEVLINK_FRAME_ERR_BAD_ARG;
+    if (payload == NULL || payload_len == 0) return DEVLINK_FRAME_ERR_BAD_ARG;
+
+    /* 载荷上界取 wire.h 的唯一来源（P5），不在本文件重抄 16368。 */
+    if (payload_len > (size_t)WIRE_PAYLOAD_MAX) return DEVLINK_FRAME_ERR_TOO_BIG;
+
+    const size_t total = (size_t)WIRE_HEADER_BYTES + payload_len;
+    if (cap < total) return DEVLINK_FRAME_ERR_CAP;
+
+    wire_header_t h;
+    h.ver         = (uint8_t)WIRE_VER;
+    h.type        = payload[0];   /* ⚠ 后端强校验 type == payload[0] */
+    h.flags       = 0;            /* ⚠ 不置 CRC32C 位：后端条件式校验 + 下行也不置 */
+    h.seq         = seq;
+    h.payload_len = (uint16_t)payload_len;
+
+    if (wire_encode_header(out, cap, &h) != WIRE_OK) {
+        return DEVLINK_FRAME_ERR_HEADER;
+    }
+    /* 逐字节复制，不用 memcpy/memmove：本函数不做原地成帧
+     * （out 与 payload 重叠属于调用错误）。用 memmove 会把调用错误
+     * **静默**变成"能跑"，反而掩盖问题。 */
+    for (size_t i = 0; i < payload_len; i++) {
+        out[WIRE_HEADER_BYTES + i] = payload[i];
+    }
+
+    *out_len = total;
+    return DEVLINK_FRAME_OK;
+}
+
 devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len,
                                        const uint8_t *payload,
                                        devlink_dispatch_fn dispatch,
@@ -548,6 +609,62 @@ static size_t devlink_build_hello(uint8_t *frame, size_t cap, uint32_t nonce)
  *
  * @return true 整帧写出；false 失败（已如实打日志）。
  */
+/* devlink_send_payload 定义在 devlink_send_frame 之前（成帧在发送之前读起来更顺），
+ * 所以这里先声明它调用的那个。 */
+static bool devlink_send_frame(const uint8_t *frame, size_t len, const char *what);
+
+/* ⭐ 上行成帧缓冲（task-31）。
+ *
+ * 为什么需要一块独立缓冲：成帧是"头 + payload"，而 payload 由各消息自己的
+ * 编码器写在自己的缓冲里（Hello 写在 devlink_task 的 hello[128]）。
+ * 用一块 scratch 成帧，比让每个生产者各自预留 12 B 前缀更不容易漏
+ * （漏了就是"少一个头"，正是本卡要修的那个缺陷）。
+ *
+ * 上界来自**当前唯一的上行生产者**：Hello 的编码缓冲是 128 B
+ * （devlink_task 里的 uint8_t hello[128]）。这里给 256 B（一倍余量），
+ * 超出会**响亮失败**而不是静默截断 —— 静默截断等于发出半条帧。 */
+#define DEVLINK_TX_SCRATCH_PAYLOAD 256u
+
+/**
+ * ⭐ 把 payload **成帧后**发出去（task-31 修：此前全程不成帧）。
+ *
+ * 这是生产上行路径上**唯一**的成帧点。真机与对锚客户端走同一条路：
+ *   devlink_send_payload -> devlink_encode_frame -> devlink_send_frame -> session_send
+ *
+ * ## 为什么必须在这里成帧（缺陷回顾）
+ * 此前 devlink_send_frame 直接把 payload 交给 session_send ⇒ 线上没有 12 B 头、
+ * 没有 magic，后端 protoframe.DecodeHeader 一律 ErrMagic 丢弃
+ * ⇒ 设备永远进不了 READY，而**固件侧一处都不报错**。
+ *
+ * ## 判据（不是猜的，来源见 device_link_wiring.h 的说明）
+ *   ver=0x30 / type=payload[0] / flags=0（不置 CRC 位）/ seq 由调用方给。
+ *   后端 CRC 校验是条件式的（server.go:483），且后端自己下行也不置 CRC 位
+ *   ⇒ 两端对称、CRC 非必需。
+ *
+ * @return true 整帧写出；false 失败（已如实打日志）。
+ */
+static bool devlink_send_payload(const uint8_t *payload, size_t len, const char *what)
+{
+    if (len == 0 || len > DEVLINK_TX_SCRATCH_PAYLOAD) {
+        ESP_LOGE(TAG, "%s：上行载荷长度 %u 超出本路径上限 %u —— 拒绝发送"
+                      "（宁可不发，也不发半条帧）",
+                 what, (unsigned)len, (unsigned)DEVLINK_TX_SCRATCH_PAYLOAD);
+        return false;
+    }
+
+    uint8_t framed[WIRE_HEADER_BYTES + DEVLINK_TX_SCRATCH_PAYLOAD];
+    size_t framed_len = 0;
+    int rc = devlink_encode_frame(framed, sizeof(framed), payload, len,
+                                  /* seq */ 0u, &framed_len);
+    if (rc != DEVLINK_FRAME_OK) {
+        ESP_LOGE(TAG, "%s：成帧失败 rc=%s —— 不发（半条帧会让对端定界器错位）",
+                 what, devlink_frame_err_name(rc));
+        return false;
+    }
+
+    return devlink_send_frame(framed, framed_len, what);
+}
+
 static bool devlink_send_frame(const uint8_t *frame, size_t len, const char *what)
 {
     size_t progress = 0;
@@ -663,10 +780,14 @@ static void devlink_task(void *arg)
                          (unsigned)s_hello_nonce);
                 break;
             }
-            if (devlink_send_frame(hello, hlen, "Hello(0x01)")) {
+            /* ⭐ task-31：必须走 devlink_send_payload（它负责成帧）。
+             * 传 hello/hlen 给 devlink_send_frame 会**绕过分帧** ⇒
+             * 线上没有 magic，后端一律 ErrMagic —— 这正是本卡修的缺陷，
+             * 留这条注释是为了后人不会"顺手"改回去。 */
+            if (devlink_send_payload(hello, hlen, "Hello(0x01)")) {
                 s_hello_sent = true;   /* ⭐ 只有真的发出去了才记（背压时下一轮重试）*/
-                ESP_LOGI(TAG, "已发 Hello(0x01) len=%u nonce=%u（等待 HelloAck）",
-                         (unsigned)hlen, (unsigned)s_hello_nonce);
+                ESP_LOGI(TAG, "已发 Hello(0x01) payload=%u B（已成帧 %u B，等待 HelloAck）",
+                         (unsigned)hlen, (unsigned)(hlen + WIRE_HEADER_BYTES));
             }
             break;
         }

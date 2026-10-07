@@ -1399,6 +1399,12 @@ add_executable(firmware_tcp_e2e_client
     ../components/wire/wire.c
     # task-17：握手决策（与 main/device_link_wiring.c 用的是**同一份**）
     ../main/device_link_handshake.c
+    # ⭐ task-31：**生产成帧函数**（devlink_encode_frame）。编入本 target 是为了让
+    # 对锚与真机走同一条成帧路径 —— 此前客户端自己拼 12 B 头，于是"生产上行
+    # 不成帧"这个缺陷能长期藏在全绿后面（对锚证明的是**另一个程序**）。
+    # 只编纯判定段（DEVICE_LINK_HOST_TEST=1），不含 IDF 头。
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
     ../components/frame/frame_codec.c
     # task-23：Hello 改用**真实 handler 的编码**（消除客户端手写的第二份定义）。
     # 客户端调用生产的 msg_handler_send_hello()，并提供 msg_handler_publish()
@@ -1435,7 +1441,10 @@ target_include_directories(firmware_tcp_e2e_client PRIVATE
     ../components/link/include
     ../components/rx_pump/include
     ../components/wire/include
+    ../components/variant/include   # task-31: device_link_wiring.h -> variant.h
 )
+# task-31：只编 device_link_wiring.c 的**纯判定段**（成帧函数在那里）。
+target_compile_definitions(firmware_tcp_e2e_client PRIVATE DEVICE_LINK_HOST_TEST=1)
 target_compile_options(firmware_tcp_e2e_client PRIVATE -Wall -Wextra -Werror)
 
 # 3.0 应用层握手的**决策**（task-17）。纯函数、无 IDF 依赖。

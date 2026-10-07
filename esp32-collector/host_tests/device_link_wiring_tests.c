@@ -307,6 +307,141 @@ static void test_now_epoch_never_fabricates_and_never_clamps(void)
     }
 }
 
+
+/* ════════ task-31：生产上行**成帧**的字节级断言 ════════
+ *
+ * ## 为什么这些断言必须打在**字节**上
+ *
+ * 生产上行此前全程不成帧（devlink_send_frame 直接把 payload 交给 session_send），
+ * 而"函数能返回 0"这类断言**对它完全无感**：不成帧的路径也能返回成功。
+ * 所以这里逐字节检查：magic、ver、type、flags、seq、payload_len、载荷位置，
+ * 以及空/超限载荷被**拒绝**（而不是发出畸形帧）。
+ */
+static void test_frame_bytes_are_exactly_the_wire_contract(void)
+{
+    /* 载荷首字节就是消息类型（2.x 约定），后端 manager.go:418 强校验它 == header.type */
+    const uint8_t payload[] = { 0x01, 0xAA, 0xBB, 0xCC };
+    uint8_t out[WIRE_HEADER_BYTES + sizeof(payload)];
+    size_t n = 0;
+
+    int rc = devlink_encode_frame(out, sizeof(out), payload, sizeof(payload),
+                                  /* seq */ 0x11223344u, &n);
+    CHECK(rc == DEVLINK_FRAME_OK, "成帧应成功，实际 rc=%s", devlink_frame_err_name(rc));
+    CHECK(n == WIRE_HEADER_BYTES + sizeof(payload),
+          "线上总长应=%u，实际 %u", (unsigned)(WIRE_HEADER_BYTES + sizeof(payload)), (unsigned)n);
+
+    /* 逐字节：大端 12 B 头 + 载荷原样。这些字面量来自 protocol/vectors/frame_header.txt
+     * 的约定与 protoframe/frame.go 的字段布局，**不**从任何本文件内的常量推导 ——
+     * 用被测代码自己的常量去推期望值，等于没测。 */
+    const uint8_t want[] = {
+        0x45, 0x48,             /* magic "EH" */
+        0x30,                   /* ver 3.0 */
+        0x01,                   /* type == payload[0] */
+        0x00, 0x00,             /* flags = 0（不置 CRC32C 位）*/
+        0x11, 0x22, 0x33, 0x44, /* seq 大端 */
+        0x00, 0x04,             /* payload_len = 4 大端 */
+        0x01, 0xAA, 0xBB, 0xCC, /* 载荷原样 */
+    };
+    for (size_t i = 0; i < sizeof(want); i++) {
+        CHECK(out[i] == want[i], "第 %u 字节 = 0x%02X，期望 0x%02X",
+              (unsigned)i, out[i], want[i]);
+    }
+}
+
+static void test_frame_type_tracks_payload_first_byte(void)
+{
+    /* type 必须是 payload[0]，不是常量、不是 MSG_HELLO。
+     * 后端 manager.go:418 对不上就丢，且只打一条 warn（现场像"设备没反应"）。 */
+    const uint8_t types[] = { 0x01, 0x04, 0x22, 0x23 };
+    for (size_t i = 0; i < sizeof(types); i++) {
+        uint8_t payload[3] = { types[i], 0x01, 0x02 };
+        uint8_t out[WIRE_HEADER_BYTES + sizeof(payload)];
+        size_t n = 0;
+        int rc = devlink_encode_frame(out, sizeof(out), payload, sizeof(payload), 0u, &n);
+        CHECK(rc == DEVLINK_FRAME_OK, "type=0x%02X 成帧应成功", types[i]);
+        CHECK(out[3] == types[i],
+              "header.type 应 == payload[0] = 0x%02X，实际 0x%02X", types[i], out[3]);
+        CHECK(out[11] == 0x03, "payload_len 低字节应为 3，实际 %u", out[11]);
+    }
+}
+
+static void test_frame_rejects_bad_input_instead_of_emitting_garbage(void)
+{
+    uint8_t out[64];
+    size_t n = 12345;   /* 故意预置：被拒绝时它必须**不被改写** */
+
+    /* 空载荷：没有首字节 ⇒ 取不出 type。宁可不发，也不发 type=0 的畸形帧。 */
+    CHECK(devlink_encode_frame(out, sizeof(out), (const uint8_t *)"", 0, 0u, &n)
+              == DEVLINK_FRAME_ERR_BAD_ARG,
+          "空载荷必须被拒绝（空指针或长度 0）");
+    CHECK(n == 12345, "被拒绝时 out_len 不得被改写，实际 %u", (unsigned)n);
+
+    const uint8_t payload[4] = { 0x01, 0, 0, 0 };
+
+    /* 缓冲放不下整条帧：必须拒绝，而不是发出**截断的**帧
+     * （截断帧会让对端定界器错位 —— 比不发更糟）。 */
+    CHECK(devlink_encode_frame(out, WIRE_HEADER_BYTES + sizeof(payload) - 1,
+                               payload, sizeof(payload), 0u, &n) == DEVLINK_FRAME_ERR_CAP,
+          "cap 少 1 字节时必须拒绝");
+
+    /* 载荷超上界：上界取 wire.h 的唯一来源 WIRE_PAYLOAD_MAX（P5）。 */
+    static uint8_t big[WIRE_PAYLOAD_MAX + 1u];
+    big[0] = 0x01;
+    CHECK(devlink_encode_frame(out, sizeof(out), big, sizeof(big), 0u, &n)
+              == DEVLINK_FRAME_ERR_TOO_BIG,
+          "载荷超过 WIRE_PAYLOAD_MAX 必须被拒绝");
+
+    /* NULL 参数 */
+    CHECK(devlink_encode_frame(NULL, sizeof(out), payload, sizeof(payload), 0u, &n)
+              == DEVLINK_FRAME_ERR_BAD_ARG, "out=NULL 必须被拒绝");
+    CHECK(devlink_encode_frame(out, sizeof(out), NULL, 4, 0u, &n)
+              == DEVLINK_FRAME_ERR_BAD_ARG, "payload=NULL 必须被拒绝");
+    CHECK(devlink_encode_frame(out, sizeof(out), payload, sizeof(payload), 0u, NULL)
+              == DEVLINK_FRAME_ERR_BAD_ARG, "out_len=NULL 必须被拒绝");
+}
+
+static void test_frame_max_payload_boundary_is_accepted(void)
+{
+    /* 边界：正好 WIRE_PAYLOAD_MAX 必须**成功**（拒绝它就是把上界算错了一位）。
+     * 缓冲按需分配，避免在宿主栈上放 16 KB。 */
+    static uint8_t payload[WIRE_PAYLOAD_MAX];
+    static uint8_t out[WIRE_HEADER_BYTES + WIRE_PAYLOAD_MAX];
+    payload[0] = 0x04;
+    payload[WIRE_PAYLOAD_MAX - 1] = 0x5A;
+
+    size_t n = 0;
+    int rc = devlink_encode_frame(out, sizeof(out), payload, sizeof(payload), 7u, &n);
+    CHECK(rc == DEVLINK_FRAME_OK, "最大载荷应被接受，实际 rc=%s", devlink_frame_err_name(rc));
+    CHECK(n == WIRE_HEADER_BYTES + (size_t)WIRE_PAYLOAD_MAX, "最大载荷总长不对");
+    /* payload_len 是 16 位；16368 = 0x3FF0 */
+    CHECK(out[10] == 0x3F && out[11] == 0xF0,
+          "payload_len 大端应为 0x3FF0，实际 0x%02X%02X", out[10], out[11]);
+    CHECK(out[3] == 0x04, "type 应为 0x04");
+    CHECK(out[WIRE_HEADER_BYTES] == 0x04, "载荷首字节位置错误");
+    CHECK(out[WIRE_HEADER_BYTES + WIRE_PAYLOAD_MAX - 1] == 0x5A, "载荷末字节位置错误");
+}
+
+static void test_frame_round_trips_through_the_wire_decoder(void)
+{
+    /* 成帧 → wire_decode_header 解回来必须逐个字段相等。
+     * 这条把"生产成帧"与 RX 侧的解码器钉在一起：成帧改了字段顺序/宽度，
+     * 这里立刻红（而不是等真机上链路起不来）。 */
+    const uint8_t payload[3] = { 0x22, 0x11, 0x00 };
+    uint8_t out[WIRE_HEADER_BYTES + sizeof(payload)];
+    size_t n = 0;
+    CHECK(devlink_encode_frame(out, sizeof(out), payload, sizeof(payload), 0xDEADBEEFu, &n)
+              == DEVLINK_FRAME_OK, "成帧应成功");
+
+    wire_header_t h;
+    CHECK(wire_decode_header(out, n, &h) == WIRE_OK, "生产成帧的字节必须能被 RX 侧解码器接受");
+    CHECK(h.ver == (uint8_t)WIRE_VER, "ver 往返不一致");
+    CHECK(h.type == 0x22, "type 往返不一致（%u）", h.type);
+    CHECK(h.flags == 0, "flags 往返不一致（%u）", h.flags);
+    CHECK(h.seq == 0xDEADBEEFu, "seq 往返不一致（%u）", h.seq);
+    CHECK(h.payload_len == sizeof(payload), "payload_len 往返不一致（%u）", h.payload_len);
+    CHECK(wire_header_has_crc(&h) == false, "不得置 CRC 位（后端条件式校验 + 下行也不置）");
+}
+
 int main(void)
 {
     test_delim_bytes_matches_wire_constants();
@@ -317,6 +452,12 @@ int main(void)
     test_names_are_nonempty();
     test_net_edge_only_on_change();
     test_now_epoch_never_fabricates_and_never_clamps();
+    /* task-31：生产上行成帧（字节级） */
+    test_frame_bytes_are_exactly_the_wire_contract();
+    test_frame_type_tracks_payload_first_byte();
+    test_frame_rejects_bad_input_instead_of_emitting_garbage();
+    test_frame_max_payload_boundary_is_accepted();
+    test_frame_round_trips_through_the_wire_decoder();
 
     if (s_failures) { printf("device_link_wiring_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("device_link_wiring_tests: all checks passed\n");

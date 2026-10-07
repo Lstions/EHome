@@ -260,6 +260,62 @@ const char *device_link_wiring_state_name(void);
 struct session;
 struct session *device_link_wiring_session(void);
 
+/* ── ⭐ 3.0 上行**成帧**（task-31 修：生产上行此前完全不成帧）──
+ *
+ * ## 缺陷是什么（已实测）
+ * 生产上行路径 devlink_send_frame -> session_send -> link_send -> tcp_send
+ * -> esp_tls_conn_write 全程**只发 payload**：没有 12 B 头、没有 CRC。
+ * 而唯一会写 magic 的 wire_encode_header（components/wire/wire.c:91）
+ * 在生产代码里**零调用**。后端每帧必经 protoframe.DecodeHeader，
+ * 它强校验前两字节 magic ⇒ payload-only 一律 ErrMagic 被丢。
+ *
+ * ## 为什么本地全绿却漏了它（这才是根因）
+ * 对锚客户端 firmware_tcp_e2e_client.c **自己** memcpy + wire_encode_header
+ * ⇒ 对锚证明的是"一个会正确成帧的客户端能与后端互通"，
+ * **不是**"生产固件能与后端互通"——两者是**两个不同的程序**。
+ * ⇒ 修法必须同型：让对锚**调用本函数**，而不是自己成帧。
+ *
+ * ## 判据来源（读 RX 侧 + 后端定的，不是猜的）
+ *   - ver = WIRE_VER (0x30)：wire_decode_header 强校验；后端 protoframe.Version
+ *   - type = payload[0]：后端 internal/nodemgr/manager.go:418 强校验
+ *     "header type == payload[0]"，不一致即丢弃并计数；后端自己的
+ *     downlink.wrapFrame 也是这么取的
+ *   - flags = 0（**不置 CRC32C 位**）：
+ *     · 后端 CRC **校验是条件式的**（transport/server.go:483 的 if h.HasCRC()），
+ *       不置位即不校验 ⇒ CRC 非必需；
+ *     · 后端**自己下行也不置位**（downlink.go 的 wrapFrame 中 Header 字面量
+ *       只填 Ver/Type/Seq/PayloadLen ⇒ Flags 为零值）⇒ 上行不置位才是**对称**的。
+ *     · 要改这个决定：必须**先同时改后端**，否则就是在固件侧单方面发明开关。
+ *   - seq：后端**不校验**（下行源码注释直言 per-node sequencing is not
+ *     implemented yet）；固件 RX 侧也只是把它透传出去（rx_pump.c:103）。
+ *     ⇒ 本函数取**调用方传入的** seq（纯函数，不与真机用法耦合）。
+ *     真机的 seq 由调用方固定为 0，与后端下行保持一致；**未实现递增/回绕**，
+ *     理由见 .c 里的说明。
+ *
+ * @param out        目的缓冲；须 >= 12 + payload_len
+ * @param cap        out 容量
+ * @param payload    2.x 载荷（首字节 = 消息类型）
+ * @param payload_len 载荷长度；**0 会被拒绝**（没有首字节就没有 type）
+ * @param seq        序号（写进头；后端当前不校验）
+ * @param out_len    成功时写"线上总字节数"（12 + payload_len）
+ * @return 0 成功；负值失败。**失败时绝不产出半条帧**（宁可不发也不发畸形帧）。
+ */
+int devlink_encode_frame(uint8_t *out, size_t cap,
+                         const uint8_t *payload, size_t payload_len,
+                         uint32_t seq, size_t *out_len);
+
+/** 上行成帧失败的原因名（诊断用；与 devlink_encode_frame 的负返回值对应）。 */
+const char *devlink_frame_err_name(int rc);
+
+/** devlink_encode_frame 的错误码（与 wire_result_t 分开：这是"上行成帧"的判定）。 */
+enum {
+    DEVLINK_FRAME_OK            = 0,
+    DEVLINK_FRAME_ERR_BAD_ARG   = -1,  /* 空指针 / 空载荷（无 type 字节） */
+    DEVLINK_FRAME_ERR_TOO_BIG   = -2,  /* 载荷或总帧长超上限 */
+    DEVLINK_FRAME_ERR_CAP       = -3,  /* out 缓冲放不下整条帧 */
+    DEVLINK_FRAME_ERR_HEADER    = -4   /* wire_encode_header 拒绝（不应发生） */
+};
+
 #ifdef __cplusplus
 }
 #endif
