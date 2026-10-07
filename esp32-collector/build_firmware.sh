@@ -459,22 +459,35 @@ EOF
         fi
     fi
 
+    echo "==> Building $profile (target=$target, flash=$flash_profile)"
+    idf_py \
+        --project-dir "$PROJECT_DIR" \
+        -B "$build_dir" \
+        -D "IDF_TARGET=$target" \
+        -D "SDKCONFIG=$sdkconfig" \
+        -D "SDKCONFIG_DEFAULTS=$defaults" \
+        build
+    echo "==> Firmware: $build_dir/ehome_collector.bin"
+
     # ---- defaults "落地核查"（2026-10-07 新增）----
     #
-    # 上面的 _drift 只查一个**手写名单**里那几个符号有没有被陈旧 sdkconfig 钉住。
-    # 它查不到另一类更安静的问题：**defaults 里写了、但在这个 profile 的依赖集下
-    # Kconfig 把它丢掉**（符号存在，所以 check_sdkconfig_symbols 的旧判据也绿）。
-    # 实测两例：
-    #   · CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16 —— 仅 s3p 两个 profile 上失效
-    #     （SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y 使 IDF 的该选择分支不可达）；
-    #   · CONFIG_DEBUG_TCP_PORT=8088 —— depends on DEBUG_TCP_ENABLED，而后者=n。
+    # ⚠⚠ 位置很重要：必须**在 idf.py build 之后**。
     #
-    # ⚠ 必须把**本 profile 真正生效的链**（$defaults）传进去：
-    #   门禁默认会并集全部 sdkconfig.defaults*，其中 esp32s3psram 只对 s3p 生效，
-    #   并进来会让 s3/c6 报 6 条假问题（实测过）。链只有这里知道，所以由这里传（P4）。
+    # 我第一版把它放在 build **之前**（本文件的旧位置），而它要读的
+    # `$sdkconfig` 正是 build 这一步才生成的 ⇒ **全新 BUILD_ROOT 永远失败、
+    # 且重跑不自愈**。实测症状：
+    #     cannot verify: 读不到生成配置 /tmp/.../s3-n16/sdkconfig
+    #     ERROR: s3-n16: some sdkconfig.defaults lines are silently inert
+    # 它把"首次构建的正常状态"误判成"写了但没生效"—— 属于**误报**，
+    # 不是漏报。教训：加门禁除了问"该红时会不会红"（变异自证），
+    # 还必须问"**不该红时会不会红**"（误报测试）—— 我当时只做了前者。
     #
-    # 为什么挂在**构建期**而不是只放 ctest：ctest 拿不到"这次构建实际用了哪些
-    # defaults、生成了什么 sdkconfig"这两个事实，只有构建时才知道。
+    # 放在 build 之后还有个好处：那时 sdkconfig **一定**已生成，
+    # 于是"首次构建"与"增量构建"两条路都能真的核查，**没有静默放行的残留**。
+    #
+    # ⚠ 必须把**本 profile 真正生效的链**（$defaults）传进去：门禁默认会并集
+    #   全部 sdkconfig.defaults*，其中 esp32s3psram 只对 s3p 生效，
+    #   并进来会让 s3/c6 报假问题（实测过）。链只有这里知道 ⇒ 由这里传（P4）。
     local _syms="$PROJECT_DIR/tools/check_sdkconfig_symbols.py"
     if [[ -f "$_syms" ]]; then
         echo "==> Checking that every non-n sdkconfig.defaults line actually took effect ($profile)"
@@ -488,16 +501,6 @@ EOF
             return 1
         fi
     fi
-
-    echo "==> Building $profile (target=$target, flash=$flash_profile)"
-    idf_py \
-        --project-dir "$PROJECT_DIR" \
-        -B "$build_dir" \
-        -D "IDF_TARGET=$target" \
-        -D "SDKCONFIG=$sdkconfig" \
-        -D "SDKCONFIG_DEFAULTS=$defaults" \
-        build
-    echo "==> Firmware: $build_dir/ehome_collector.bin"
 
     # A build that reports success must have produced an image.  Without this,
     # a no-op idf.py (see the launcher note above) reaches the IRAM gate and is
