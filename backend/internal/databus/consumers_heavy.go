@@ -59,6 +59,36 @@ func (c *PendingWriteConsumer) Handle(evt DataEvent) {
 // DBPersistConsumer writes raw data to device_data table for audit/history.
 // It persists command responses and scheduler samples; uncorrelated terminal
 // RX data remains memory/WS-only.
+//
+// ==================== S3: 为什么 device_data 会有"两行" ====================
+// 同一个 DataEvent 会落到 device_data **两行**, 由两个消费者各写一行:
+//
+//	· 本消费者 (db_persist)  → DataJSON={"raw":<hex>,"channel":...}   device_id=0
+//	· SensorParserConsumer   → DataJSON={"raw_hex":...,"sensors":[...]} device_id=<真实 id>
+//
+// **这不是重复, 不要"顺手去重"删掉任何一个** —— 实测 (2026-10-07,
+// s3_duplicate_device_data_probe_test.go) 证明两者**覆盖面不同**:
+//
+//	输入                                  | db_persist | sensor_parser
+//	可解析的调度采样 (ErrorCode=0, 有 raw)   |    写      |     写
+//	ErrorCode != 0 (关键样本)              |    写      |    不写  ← ShouldParse() 为假
+//	RawData 为空                           |    写      |    不写  ← ShouldParse() 为假
+//	驱动/校准在 Handle 内拒收                |    写      |    不写  ← ShouldHandle 为真, 运行期才失败
+//
+// 即: 后三类样本**只有本消费者会留下原始字节**。删掉本行 ⇒ 告警类样本的取证数据永久
+// 丢失 (本类型职责原文就是 "for audit/history"); 删掉解析行 ⇒ /edge-devices/:id/data
+// 与 latest-data 拿不到 data_json.sensors, 前端 DataPanel 直接空 (读契约见
+// internal/api/s3_read_shape_probe_test.go)。
+//
+// 注意最后一行: "驱动/校准在 Handle 内拒收"这一类**无法**通过收窄 ShouldHandle 覆盖,
+// 因为是否写入取决于 Handle 内部的运行期结果。所以两个写入点必须各自保留。
+//
+// 已知遗留 (本轮**故意未动**, 见 Lead task-16 裁决): GET /nodes/:id/data 按 node_id
+// 过滤, 两种形状都会命中 ⇒ 该端点返回的 items 里混着 raw 与 parsed 两形状。
+// 它**没有任何生产调用者** (全仓 grep + docs/分析/功能模块与业务功能实测盘点-2026-09-23.md:163
+// 「无包装、无调用者」), 为一个无人调用的端点改接口只承担风险而无收益, 故留作待裁决项。
+// 结构性收敛 (原始字节与解析结果分表) 是独立议题, 见审计 S3 的 3.0 方向。
+// ==========================================================================
 type DBPersistConsumer struct {
 	db *gorm.DB
 }
@@ -438,7 +468,13 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		})
 	}
 
-	// Store raw data for this edge device
+	// Store raw data for this edge device.
+	//
+	// S3: 本行与 DBPersistConsumer 写的行**不是重复** —— 见该消费者类型上方的完整
+	// 对照表。要点: 本行带 "sensors" (解析后物理量), 是 latest-data 与
+	// /edge-devices/:id/data 唯一能拿到的形状; 但 ErrorCode!=0 / 空 raw / 本函数
+	// 提前 return 的三类样本**只有 DBPersistConsumer 会写**。删任何一行都会丢数据
+	// 或打断前端。
 	dataJSON, err := json.Marshal(map[string]interface{}{
 		"raw_hex":    fmt.Sprintf("%x", merged),
 		"sensors":    sensorData,
