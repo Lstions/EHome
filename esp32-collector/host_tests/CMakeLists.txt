@@ -1119,6 +1119,22 @@ add_executable(golden_vectors_tests
 )
 target_include_directories(golden_vectors_tests PRIVATE ../components/msgcodec/include)
 target_compile_options(golden_vectors_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(sync_manager_uplink_tests
+    sync_manager_uplink_tests.c
+    sync_manager_uplink_tests_stubs.c
+    ../components/sync_manager/sync_manager.c
+)
+target_include_directories(sync_manager_uplink_tests PRIVATE
+    stubs
+    stubs/rom
+    ../components/sync_manager
+    ../components/config_mgr
+    ../components/ehome_mqtt
+    ../components/rgb_led/include
+)
+target_compile_options(sync_manager_uplink_tests PRIVATE -Wall -Wextra -Werror
+    -Wno-unused-function -Wno-unused-parameter)
+add_test(NAME sync_manager_uplink COMMAND sync_manager_uplink_tests)
 # 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
 # 后端（Go）侧的 S0 对锚。工具链自包含在 .tools/gotool，不在系统 PATH，
 # 故通过脚本运行（脚本会报出找不到工具链的原因）。

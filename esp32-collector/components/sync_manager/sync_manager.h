@@ -52,6 +52,26 @@ void sync_manager_init(void);
 typedef void (*sync_send_hello_cb_t)(void);
 void sync_manager_register_send_hello_cb(sync_send_hello_cb_t cb);
 
+/* === 注入"现在有没有可用上行"（P7：宿主可测；P4：一处定义）===
+ *
+ * 为什么必须有它（2026-10-08 真机缺陷）：
+ * 本模块原先**硬编码**判 `mqtt_client_is_connected_impl()`，于是：
+ *   · 无 MQTT 时 `sync_manager_request_sync()` **直接 return**（只留一条 WARN）；
+ *   · 配置之所以还能同步，是靠 **device_link 自己的握手 Hello**（3.0 路径）兜住的，
+ *     不是本模块的功劳；
+ *   · 而"周期 / 怀疑 / 无配置"这三条**主动请求同步**的路径**全部失效**。
+ * ⇒ §7.3 P4（后端关闭 MQTT 监听）之后，`mqtt_client_is_connected_impl()` **永远 false**
+ *   ⇒ 这三条路径**永久死掉**，且**不报错**（只有 WARN）—— 典型的静默死角。
+ *
+ * ⇒ 修法：把"有没有可用上行"做成**注入的函数指针**，由 main 侧接到上行仲裁
+ *   （`uplink_arbiter_tcp3_connected() || uplink_arbiter_mqtt_connected()`）。
+ *   ⚠ 语义是"**任意一条上行可用**"，不是"MQTT 可用" —— 这正是 P4 需要的。
+ *
+ * 未注入时的行为：退化为只看 MQTT（与改动前**逐位一致**），
+ * 以免宿主测试与既有接线被静默改变。 */
+typedef bool (*sync_uplink_available_cb_t)(void);
+void sync_manager_register_uplink_available_cb(sync_uplink_available_cb_t cb);
+
 /* === Request sync with given reason === */
 void sync_manager_request_sync(sync_reason_t reason);
 

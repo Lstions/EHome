@@ -7,6 +7,14 @@
  */
 
 #include "sync_manager.h"
+
+/* ⚠ 2026-10-08：本文件用了 strncpy（:100/:240）却**没有**包含 <string.h>。
+ * 它之所以能在 IDF 下编过，只是因为别处**恰好**间接带进了这个声明 ——
+ * 而"恰好"不是保证：把它编进宿主目标时立刻报
+ *   "implicit declaration of function 'strncpy' [-Werror=implicit-function-declaration]"
+ * ⇒ 补上。这类"靠传递包含活着"的用法会在改动包含图时静默炸掉。 */
+#include <string.h>
+
 #include "config_mgr.h"
 #include "ehome_mqtt.h"
 #include "esp_log.h"
@@ -36,6 +44,8 @@ static sync_state_t s_state = {0};
 static sync_state_enum_t s_sync_enum = SYNC_STATE_IDLE;
 static bool s_initialized = false;
 static sync_send_hello_cb_t s_send_hello_cb = NULL;
+/* 见 sync_manager.h 的说明：由 main 侧接到上行仲裁（P4：一处定义）。 */
+static sync_uplink_available_cb_t s_uplink_available_cb = NULL;
 
 /* === Forward declarations === */
 static bool should_request_sync(sync_reason_t reason);
@@ -124,6 +134,22 @@ void sync_manager_register_send_hello_cb(sync_send_hello_cb_t cb)
     s_send_hello_cb = cb;
 }
 
+void sync_manager_register_uplink_available_cb(sync_uplink_available_cb_t cb)
+{
+    s_uplink_available_cb = cb;
+}
+
+/* "现在有没有可用上行"的**唯一**判定（P4）。
+ *
+ * 未注入时退化为只看 MQTT —— 与改动前**逐位一致**（宿主测试与既有接线不受影响）。
+ * 注入后语义是"**任意一条上行可用**"：MQTT 挂了但 3.0 就绪时，本模块**必须继续工作**，
+ * 否则 §7.3 P4（后端关 MQTT）后"周期/怀疑/无配置"三条主动同步路径会**永久死掉且不报错**。 */
+static bool uplink_available(void)
+{
+    if (s_uplink_available_cb != NULL) return s_uplink_available_cb();
+    return mqtt_client_is_connected_impl();
+}
+
 void sync_manager_request_sync(sync_reason_t reason)
 {
     if (!s_initialized) {
@@ -138,9 +164,11 @@ void sync_manager_request_sync(sync_reason_t reason)
         return;
     }
 
-    /* Check MQTT connectivity */
-    if (!mqtt_client_is_connected_impl()) {
-        ESP_LOGW(TAG, "MQTT not connected, deferring sync request");
+    /* Check **uplink** availability（不是 MQTT 可用性 —— 见 uplink_available() 的说明）。
+     * ⚠ 日志措辞也要跟着改：原文写死 "MQTT not connected"，在 3.0 已就绪时会**误导排障**
+     *   （操作员会去查 MQTT，而真正的原因是上行仲裁层说两条都不通）。 */
+    if (!uplink_available()) {
+        ESP_LOGW(TAG, "无可用上行（MQTT 与 3.0 均未就绪），暂缓同步请求");
         s_sync_enum = SYNC_STATE_ERROR;
         return;
     }
@@ -154,11 +182,11 @@ void sync_manager_request_sync(sync_reason_t reason)
              reason, (unsigned long long)s_state.epoch, s_state.has_active_config);
 
     /* Invoke callback to send Hello */
-    if (s_send_hello_cb && mqtt_client_is_connected_impl()) {
+    if (s_send_hello_cb && uplink_available()) {
         s_send_hello_cb();
     } else {
-        ESP_LOGW(TAG, "Cannot send Hello: cb=%p, mqtt_connected=%d",
-                 s_send_hello_cb, mqtt_client_is_connected_impl());
+        ESP_LOGW(TAG, "Cannot send Hello: cb=%p, uplink_available=%d",
+                 s_send_hello_cb, (int)uplink_available());
         s_sync_enum = SYNC_STATE_ERROR;
     }
 }

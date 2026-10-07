@@ -331,6 +331,24 @@ static void on_sync_send_hello(void)
     (void)hello_handshake_request_sync();
 }
 
+/* ---- sync 的"有没有可用上行"（P4：一处定义）----
+ *
+ * ⭐ 2026-10-08：sync_manager 原先**硬编码**判 `mqtt_client_is_connected_impl()`，
+ * 于是无 MQTT 时 `sync_manager_request_sync()` 直接 return（只留一条 WARN）——
+ * "周期 / 怀疑 / 无配置"三条**主动请求同步**的路径全部失效。
+ *
+ * 真机实测（C6 + P3 + MQTT 死地址，§164）：t=334 与 t=31493 两次请求都被那条挡住；
+ * 配置之所以还能同步，是靠 **device_link 自己的握手 Hello** 兜住的，不是本模块的功劳。
+ * ⇒ §7.3 P4（后端关 MQTT 监听）之后 `mqtt_client_is_connected_impl()` **永远 false**
+ *   ⇒ 这三条路径**永久死掉且不报错**（只有一条 WARN）—— 静默死角。
+ *
+ * ⇒ 语义是"**任意一条上行可用**"：MQTT 挂了但 3.0 就绪时必须继续工作。
+ * ⚠ 两个函数都走 `uplink_get_facts`（同一份事实）⇒ 不会与仲裁层的判定漂移（P4）。 */
+static bool on_sync_uplink_available(void)
+{
+    return uplink_arbiter_tcp3_connected() || uplink_arbiter_mqtt_connected();
+}
+
 /* ---- Weak-symbol bridges for msg_handler callbacks ---- */
 
 void on_write_cmd_received(uint32_t rid, uint32_t ch,
@@ -560,6 +578,8 @@ void app_main(void)
     
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_sync_send_hello);
+    /* 见 on_sync_uplink_available 的说明：不接这条，"主动请求同步"在 P4 后永久失效。 */
+    sync_manager_register_uplink_available_cb(on_sync_uplink_available);
     msg_handler_init();
     log_boot_heap("after msg_handler");
     /* Create the long-lived Hello supervisor before MQTT can start. */
