@@ -22,6 +22,8 @@ import (
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/protoframe"
 	"ehome/backend/testutil"
+
+	"gorm.io/gorm"
 )
 
 // device_e2e_test.go -- the whole 3.0 chain on loopback, for the first time.
@@ -148,7 +150,23 @@ func pemEncodeCert(der []byte) []byte {
 }
 
 // startE2EServer brings up the real listener with the real manager behind it.
+//
+// 签名保持不变（已有调用点依赖它）。需要 db / hub（例如要把 HTTP 路由挂上去）
+// 请用 startE2EServerEx —— 本函数就是它的薄包装。
 func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Manager, string) {
+	t.Helper()
+	srv, mgr, addr, _, _ := startE2EServerEx(t, pki, &recordingLegacy{})
+	return srv, mgr, addr
+}
+
+// startE2EServerEx 与 startE2EServer 同源，但把 db 与 hub 也交出来。
+//
+// task-27 为什么需要它：HTTP 层（找 node 要查库）与传输层必须是**同一个 db、
+// 同一个 hub、同一个 manager**，否则测出来的不是真实装配。
+// legacy 由调用方注入：默认的 recordingLegacy 永远返回 nil（"MQTT 收下了"），
+// 而"哪都送不到"的场景需要它返回错误，两种都要能表达。
+func startE2EServerEx(t *testing.T, pki *e2ePKI, legacy downlink.LegacyPublisher) (
+	*transport.Server, *nodemgr.Manager, string, *gorm.DB, *websocket.Hub) {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
 
@@ -156,7 +174,6 @@ func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Mana
 	// reads it. That is the property the startup wiring establishes, and this
 	// test therefore exercises the REAL composition, not a simplified one.
 	reg := transport.NewRegistry()
-	legacy := &recordingLegacy{}
 	bridge := downlink.New(reg, legacy)
 
 	// A REAL websocket hub, not nil. Registering a node publishes an event, and
@@ -167,7 +184,6 @@ func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Mana
 	hub := websocket.NewHub()
 	go hub.Run()
 	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil, nil)
-	_ = legacy
 
 	cfg := transport.Config{
 		Addr:             "127.0.0.1:0",
@@ -198,7 +214,7 @@ func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Mana
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = srv.Close() })
 	go func() { _ = srv.Serve(ctx) }()
-	return srv, mgr, srv.Addr().String()
+	return srv, mgr, srv.Addr().String(), db, hub
 }
 
 // recordingLegacy stands in for MQTT and records what would have gone there.
