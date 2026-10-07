@@ -179,6 +179,33 @@ target_compile_definitions(config_manifest_pwm_tests PRIVATE
 target_compile_options(config_manifest_pwm_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
 add_test(NAME config_manifest_pwm_tests COMMAND config_manifest_pwm_tests)
 
+# ---- task-30: ConfigManifest(0x04) 跨语言对锚的固件侧解码器 ----
+#
+# 为什么是**可执行程序**而不是 ctest 用例：
+# 0x04 的对锚需要**后端 Go 真实编码器**产出的字节 —— 那是另一个进程/另一种语言。
+# 所以这里只提供"喂字节 → 用生产解码器解 → 逐字段打印"的可执行文件，
+# 由 backend/internal/nodemgr/manifest_crosslang_test.go 驱动并逐字段断言
+# （入口脚本 tools/run_firmware_backend_e2e.sh 负责先构建再跑，缺任一半都响亮失败）。
+#
+# ⚠ 这里**故意不加 add_test**：它需要参数（一个 hex 文件），
+# 无参运行只会打印 usage 并 rc=2；挂进 ctest 会制造一条永远失败的用例。
+# 它的"会跑"由 E2E 脚本保证，而不是由 ctest 假装保证。
+add_executable(firmware_manifest_crosslang
+    firmware_manifest_crosslang.c
+    ../components/config_mgr/config_mgr.c
+    ../components/frame/frame_codec.c
+)
+target_include_directories(firmware_manifest_crosslang PRIVATE
+    stubs
+    ../components/config_mgr
+    ../components/frame
+    ../components/dma_pool/include
+)
+target_compile_definitions(firmware_manifest_crosslang PRIVATE
+    CONFIG_IDF_TARGET_ESP32C6=1
+)
+target_compile_options(firmware_manifest_crosslang PRIVATE -Wall -Wextra -Werror -Wno-unused-function)
+
 add_executable(dma_pool_contract_tests
     dma_pool_contract_tests.c
     ../components/dma_pool/dma_pool.c

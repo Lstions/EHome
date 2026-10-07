@@ -34,17 +34,23 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 [ -d "$GO_BIN" ]    || fail "找不到 go：$GO_BIN"
 export PATH="$CMAKE_BIN:$GO_BIN:$PATH"
 
-echo "==> 1/3 构建固件侧客户端目标 $CLIENT_NAME"
+MLANG_NAME="firmware_manifest_crosslang"
+echo "==> 1/3 构建固件侧可执行目标：$CLIENT_NAME + $MLANG_NAME"
 cmake -S "$FW/host_tests" -B "$BUILD_DIR" >/dev/null 2>&1 \
   || fail "cmake configure 失败（$BUILD_DIR）；先单独跑一次看输出"
-if ! cmake --build "$BUILD_DIR" --target "$CLIENT_NAME" -j8 >/tmp/fw-e2e-build.log 2>&1; then
+# ⚠ 两个目标**必须都构建**：漏掉 $MLANG_NAME 会让 0x04 那条对锚
+#   因环境变量未设而 Skip ⇒ 静默不跑（本项目最忌讳的假绿形态）。
+#   $MLANG_NAME 是 task-30 新增的 ConfigManifest(0x04) 固件侧解码器。
+if ! cmake --build "$BUILD_DIR" --target "$CLIENT_NAME" --target "$MLANG_NAME" -j8 >/tmp/fw-e2e-build.log 2>&1; then
   echo "--- 构建输出尾部 ---" >&2
   tail -25 /tmp/fw-e2e-build.log >&2
-  fail "目标 $CLIENT_NAME 构建失败（日志 /tmp/fw-e2e-build.log）"
+  fail "目标 $CLIENT_NAME / $MLANG_NAME 构建失败（日志 /tmp/fw-e2e-build.log）"
 fi
 
 CLIENT="$BUILD_DIR/$CLIENT_NAME"
 [ -x "$CLIENT" ] || fail "目标构建成功但找不到可执行文件：$CLIENT"
+MLANG="$BUILD_DIR/$MLANG_NAME"
+[ -x "$MLANG" ] || fail "目标构建成功但找不到可执行文件：$MLANG（task-30 的 0x04 解码器）"
 
 echo "==> 2/3 运行跨语言测试（固件=$CLIENT）"
 cd "$BE" || fail "cd $BE 失败"
@@ -54,12 +60,25 @@ cd "$BE" || fail "cd $BE 失败"
 # （本次实测就是靠 SIGQUIT 的栈找到 nil-channel 死锁的）。
 EHOME_FW_E2E_CLIENT="$CLIENT" go test -count=1 -v -timeout 60s \
   -run 'TestCrossLanguageFirmwareClientOverSocket|TestSharedVectorBytesMatchConstants' \
-  ./cmd/server/ 
+  ./cmd/server/
 rc=$?
+
+# ---- task-30: ConfigManifest(0x04) 跨语言对锚 ----
+# 与上面两个用例不同，0x04 这条**不经过 socket**：它把 Go 真实编码器产出的载荷
+# 交给固件真实解码器（config_mgr_stage_manifest），逐字段比对。
+# 0x04 的"最复杂载荷 + 最危险路径"属性决定它值得一条独立的对锚，
+# 而 wire_primitives.txt 的 20 个 case 里**没有 0x04**。
+echo "==> 2b/3 运行 0x04 ConfigManifest 跨语言对锚（固件=$MLANG）"
+EHOME_FW_MANIFEST_DECODER="$MLANG" go test -count=1 -v -timeout 60s \
+  -run 'TestConfigManifestCrossLanguageGoEncodeCDecode' \
+  ./internal/nodemgr/
+rc2=$?
+if [ $rc2 -ne 0 ]; then rc=$rc2; fi
 
 echo "==> 3/3 结论"
 if [ $rc -eq 0 ]; then
-  echo "PASS 跨语言对锚通过（固件 C ↔ 后端 Go，真实 socket；TLS/真机不在范围内，见测试头注释）"
+  echo "PASS 跨语言对锚通过（固件 C ↔ 后端 Go）：socket 组（hello/device_op/共享向量）"
+  echo "                           + 0x04 ConfigManifest 逐字段组；TLS/真机不在范围内，见测试头注释"
 else
   echo "FAIL 跨语言对锚未通过（go test rc=$rc）" >&2
 fi
