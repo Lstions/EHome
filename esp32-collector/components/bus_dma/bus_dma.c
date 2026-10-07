@@ -1145,8 +1145,27 @@ static esp_err_t usb_init(bus_dma_ctx_t *ctx, const uint8_t *cfg, size_t len)
             return r;
         }
         /* Route the console through the driver so log output and sensor traffic
-         * share the endpoint instead of fighting over the raw FIFO. */
+         * share the endpoint instead of fighting over the raw FIFO.
+         *
+         * ⚠ 必须条件编译：这个函数由 IDF 的
+         *   components/esp_driver_usb_serial_jtag/CMakeLists.txt:24-26 提供，
+         *   而它**只在控制台选 USB Serial JTAG 时才编进来**：
+         *       if(CONFIG_VFS_SUPPORT_IO AND CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED)
+         *           target_sources(... "src/usb_serial_jtag_vfs.c")
+         *   于是"控制台改走 UART"这种**完全合法的配置**会让链接失败：
+         *       undefined reference to 'usb_serial_jtag_vfs_use_driver'
+         *   而本组件的 REQUIRES 里明明有 esp_driver_usb_serial_jtag —— 因为那是
+         *   **组件级**依赖，不是这个**源文件级**的。
+         *
+         * 语义上也应当条件编译：把控制台"重定向到驱动"这件事，只有在控制台
+         * 本来就在 USB 上时才有意义。控制台在 UART 时这句调用没有作用。
+         *
+         * 发现方式：为 QEMU 验证构建 "控制台走 UART" 变体时链接失败
+         * （见 tools/qemu-console-uart.defaults）。这不是为了 QEMU 才改 ——
+         * 它同时修好了一个真实配置：任何把控制台放 UART 的 S3 构建。 */
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED
         usb_serial_jtag_vfs_use_driver();
+#endif
 
         uint8_t *scratch = malloc(USB_PUMP_READ_CHUNK);
         uint8_t *ring    = malloc(USB_RING_SIZE);
