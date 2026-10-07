@@ -111,6 +111,64 @@ uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
     return have_epoch ? epoch : 0u;
 }
 
+/* ── 3.0 下行帧的分发判定 ── */
+
+static const char *const s_rx_verdict_names[] = {
+    [DEVLINK_RX_DISPATCH]           = "DISPATCH",
+    [DEVLINK_RX_DROP_EMPTY]         = "DROP_EMPTY",
+    [DEVLINK_RX_DROP_TYPE_MISMATCH] = "DROP_TYPE_MISMATCH",
+};
+
+const char *devlink_rx_verdict_name(devlink_rx_verdict_t v)
+{
+    if ((int)v < 0 || v > DEVLINK_RX_DROP_TYPE_MISMATCH) return "UNKNOWN";
+    return s_rx_verdict_names[v];
+}
+
+devlink_rx_verdict_t devlink_rx_verdict(uint8_t header_type, uint16_t payload_len,
+                                        const uint8_t *payload)
+{
+    /* 顺序很重要：**先判空，再读首字节**。
+     * 反过来写（先读 payload[0]）在 payload_len==0 时既是越界读，也是空指针解引用
+     * —— 而这一路正是"后端发了一条空帧"就会走到的路径。 */
+    if (payload == NULL || payload_len == 0) return DEVLINK_RX_DROP_EMPTY;
+
+    /* §118.4：头里的 type 与载荷首字节必须一致。
+     *
+     * 为什么**丢弃**而不是"挑一个信"：这两处是同一语义的两种表示
+     * （wire 头 + 2.x 的类型首字节）。挑一个信会让"按 header 派发、
+     * 按 payload 解码"这种错配**静默地**成立 —— 派给了 A 处理器，
+     * 解出来的却是 B 的字段。丢弃 + 计数至少能被看见。 */
+    if (payload[0] != header_type) return DEVLINK_RX_DROP_TYPE_MISMATCH;
+
+    return DEVLINK_RX_DISPATCH;
+}
+
+devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len,
+                                       const uint8_t *payload,
+                                       devlink_dispatch_fn dispatch,
+                                       devlink_rx_stats_t *stats)
+{
+    devlink_rx_verdict_t v = devlink_rx_verdict(header_type, payload_len, payload);
+
+    if (stats != NULL) {
+        switch (v) {
+        case DEVLINK_RX_DISPATCH:           stats->dispatched++; break;
+        case DEVLINK_RX_DROP_EMPTY:         stats->dropped_empty++; break;
+        case DEVLINK_RX_DROP_TYPE_MISMATCH: stats->dropped_type_mismatch++; break;
+        default: break;
+        }
+    }
+
+    if (v == DEVLINK_RX_DISPATCH && dispatch != NULL) {
+        /* ⚠ 传 **payload 原样**（含首字节），**不是** header。
+         * msg_handler_process 的第一行是 data[0]（2.x 的类型约定），
+         * 传 header 会让它把 header 的第 0 字节（ver）当成消息号。 */
+        dispatch(payload, payload_len);
+    }
+    return v;
+}
+
 /* ══════════════════════════ IDF 胶水（宿主构建不含）══════════════════════════ */
 #ifndef DEVICE_LINK_HOST_TEST
 
@@ -134,6 +192,7 @@ uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch)
 #include "device_link_handshake.h"   /* 应用层握手的纯决策（IDF 无关）*/
 #include "frame_codec.h"             /* Hello 的帧编码器 + MSG_HELLO/FRAME_OK */
 #include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
+#include "msg_handler.h"             /* msg_handler_process：3.0 下行接进既有分发 */
 #include "config_mgr.h"              /* epoch / has_manifest / last_known_manifest */
 #include "tls_esp.h"
 #include "wifi_mgr.h"
@@ -160,13 +219,6 @@ static uint32_t devlink_rand_permille(void)
     return (uint32_t)(esp_random() % 1001u);
 }
 
-/**
- * 收到一条**已被定界**的 3.0 消息。
- *
- * ⚠ 刻意**不解析 payload 语义**：设计里"3.0 payload 是否保留 2.x 的类型首字节"
- * 仍是待确认项。定界与那个决定无关，所以这里只如实记录帧元数据 ——
- * 绝不猜一个 payload 布局，那正是 D-09 那类"靠巧合成立"的契约。
- */
 /** 最近一条被定界出来的消息类型；**被读走一次就清 0**（一次性）。
  *  为什么要清：dlhs_decide 的 rx_type 语义是"**本轮刚收到的**那条"。
  *  若不清，一个 HelloAck 会在之后每一轮都触发一次 NOTE（幂等只是侥幸挡住）。 */
@@ -180,15 +232,53 @@ static uint8_t devlink_take_rx_type(void)
     return t;
 }
 
+/** 3.0 下行路径计数（§118.4 要求的"可观测"）。周期日志见任务循环。 */
+static devlink_rx_stats_t s_rx_stats;
+
+/**
+ * 收到一条**已被定界**的 3.0 消息。
+ *
+ * ## 这里**必须**把 payload 交给分发（曾经的死路）
+ * 本函数原先只打一行日志 + 记 type，**从不调用 msg_handler_process**
+ * ⇒ 后端经 3.0 链路下发的 0x22（重启/恢复出厂）、配置下发等
+ * **被静默丢弃**：操作员点"重启"，设备毫无反应且**没有任何错误**。
+ * 现在交给分发，并先做 §118.4 的**类型一致性校验**（见 devlink_rx_handle）。
+ *
+ * ## 为什么不再"完全不碰 payload"
+ * 旧注释说不解析 payload（因为 3.0 payload 的业务布局仍是待确认项）——
+ * 那条克制**仍然成立**：这里只碰**首字节**（2.x 的类型约定），
+ * 其余一个字节都不解释，业务布局的解析完全交给既有 handler。
+ *
+ * ## 生命周期
+ * rx_msg_t.payload 指向定界器内部缓冲，**回调返回后即失效**
+ * （rx_pump.h:56）。因此**只在本次调用内**传给分发 —— 分发（msg_handler_process）
+ * 是同步的，不保存该指针。需要跨调用保存状态的 handler（如 periph）
+ * 自己往队列里拷贝，与本函数无关。
+ *
+ * ## ⚠ 并发（已实测，见 .c 顶部说明）
+ * 本回调在**链路任务**上下文执行，而 MQTT 路径在 MQTT 任务上下文，
+ * 两条路径**可以并发**进 msg_handler_process。msg_handler_process 本身
+ * **无锁**（msg_handler.c:182-260 是一张纯 switch），逐 handler 的结论见文件顶部。
+ */
 static bool devlink_on_msg(const rx_msg_t *m, void *ctx)
 {
     (void)ctx;
     ESP_LOGI(TAG, "rx 3.0 msg ver=0x%02X type=0x%02X seq=%u plen=%u",
              (unsigned)m->ver, (unsigned)m->type, (unsigned)m->seq,
              (unsigned)m->payload_len);
-    /* 只记录**类型**，不解析 payload —— payload 语义仍是设计待确认项
-     * （见本文件顶部关于"不猜 payload 布局"的说明）。
-     * 握手推进只需要类型这一个比特的信息。 */
+
+    /* 判定 + 分发。传 m->payload（**含首字节**）——这是关键：
+     * msg_handler_process 的第一行是 data[0]。 */
+    devlink_rx_verdict_t v = devlink_rx_handle(m->type, m->payload_len, m->payload,
+                                               msg_handler_process, &s_rx_stats);
+    if (v != DEVLINK_RX_DISPATCH) {
+        /* 丢弃必须留下痕迹：静默丢弃正是本卡要修的那类缺陷。 */
+        ESP_LOGW(TAG, "下行帧被丢弃：%s（header type=0x%02X plen=%u）",
+                 devlink_rx_verdict_name(v), (unsigned)m->type,
+                 (unsigned)m->payload_len);
+    }
+
+    /* 握手推进只需要类型这一个比特的信息。 */
     s_last_rx_type = m->type;
     return true;
 }
@@ -552,6 +642,27 @@ static void devlink_task(void *arg)
         case DLHS_IDLE:
         default:
             break;
+        }
+
+        /* ── 下行计数周期上报（§118.4 要求"计数要可观测"）──
+         * 只在**有变化**时打，且限频：本任务 10ms 一轮，否则会淹掉串口。
+         * 三个数一起打：只打"丢弃数"会让人以为链路只是安静，
+         * 而"收到很多、派发 0"和"根本没收到"是完全不同的问题。 */
+        {
+            static devlink_rx_stats_t s_rx_stats_logged;
+            static uint32_t s_rx_log_ms;
+            bool changed = (s_rx_stats.dispatched != s_rx_stats_logged.dispatched) ||
+                           (s_rx_stats.dropped_empty != s_rx_stats_logged.dropped_empty) ||
+                           (s_rx_stats.dropped_type_mismatch != s_rx_stats_logged.dropped_type_mismatch);
+            uint32_t now_ms = (uint32_t)(devlink_now_ms() & 0xFFFFFFFFu);
+            if (changed && (s_rx_log_ms == 0u || (now_ms - s_rx_log_ms) >= 5000u)) {
+                s_rx_log_ms = now_ms;
+                s_rx_stats_logged = s_rx_stats;
+                ESP_LOGI(TAG, "下行计数：派发=%u 空帧丢弃=%u 类型不一致丢弃=%u",
+                         (unsigned)s_rx_stats.dispatched,
+                         (unsigned)s_rx_stats.dropped_empty,
+                         (unsigned)s_rx_stats.dropped_type_mismatch);
+            }
         }
 
         if (st != last) {

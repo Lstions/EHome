@@ -142,6 +142,76 @@ devlink_net_edge_t devlink_net_edge(bool was_up, bool is_up);
  */
 uint64_t devlink_now_epoch_value(bool have_epoch, uint64_t epoch);
 
+/* ── 3.0 下行帧的分发判定（宿主可测）──
+ *
+ * ## 为什么要把这件事抽出来
+ * devlink_on_msg 原先**只打日志 + 记 type**，从不调用 msg_handler_process
+ * ⇒ 后端经 3.0 链路下发的 0x22 远程运维（重启/恢复出厂）、配置下发等
+ * **被静默丢弃**：操作员点"重启"，设备毫无反应且**没有任何错误**。
+ * 而"补上调用"还不够 —— 还必须有 §118.4 登记的**类型一致性校验**：
+ * 头里的 type 与 payload 首字节的 type 是同一语义的两处表示，
+ * 不一致时若"挑一个信"，就会出现「按 header 派发、按 payload 解码」
+ * 的**静默错派发**（派给了 A，解码出的却是 B 的字段）。
+ *
+ * 这两件事（要不要丢弃、丢弃的原因是什么）都是纯判定，因此放在宿主可测区：
+ * 三个失败面（空 payload / 类型不一致 / 正常帧被误伤）可以在宿主机上穷举，
+ * 而不是只能靠"真机上点一下重启试试"。
+ */
+
+/** 一条下行帧的处置结论。每个取值对应调用方**一个**明确分支（P1）。 */
+typedef enum {
+    /** 类型一致 ⇒ 交给分发。 */
+    DEVLINK_RX_DISPATCH = 0,
+    /** payload 为空（或指针为空）⇒ 丢弃。**不读 payload[0]**（越界）。 */
+    DEVLINK_RX_DROP_EMPTY,
+    /** payload[0] != header.type ⇒ 丢弃 + 计数。**不挑一个信**。 */
+    DEVLINK_RX_DROP_TYPE_MISMATCH,
+} devlink_rx_verdict_t;
+
+const char *devlink_rx_verdict_name(devlink_rx_verdict_t v);
+
+/**
+ * 纯判定：这条下行帧该怎么处理。
+ *
+ * @param header_type 帧头里的 type（rx_msg_t.type）
+ * @param payload_len 载荷长度（rx_msg_t.payload_len）
+ * @param payload     载荷起始（**含首字节**，rx_msg_t.payload）
+ *
+ * ⚠ 只有 payload_len >= 1 时才读 payload[0]。
+ * ⚠ 语义注意：本函数判的是"**该不该发**"，不是"payload 里的业务布局"。
+ *   它只碰 payload 的**第 0 字节**（2.x 的类型约定），其余一个字节都不解释
+ *   —— 3.0 的 payload 业务布局仍是设计待确认项，这里不猜。
+ */
+devlink_rx_verdict_t devlink_rx_verdict(uint8_t header_type, uint16_t payload_len,
+                                        const uint8_t *payload);
+
+/** 3.0 下行路径的计数（诊断用）。 */
+typedef struct {
+    uint32_t dispatched;             /* 真正交给分发的帧数 */
+    uint32_t dropped_empty;          /* payload 为空而丢弃 */
+    uint32_t dropped_type_mismatch;  /* 头/载荷类型不一致而丢弃 */
+} devlink_rx_stats_t;
+
+/** 分发入口（默认是 msg_handler_process）。做成函数指针是为了宿主可测：
+ *  测试注入一个假的，直接观察"到底有没有进分发、进去的是哪几个字节"。 */
+typedef void (*devlink_dispatch_fn)(const uint8_t *data, size_t len);
+
+/**
+ * 判定 + 分发（把判定应用到 dispatch，并累计 stats）。
+ *
+ * @param dispatch 分发入口；为 NULL 时**只判定不分发**（仍计数）
+ * @param stats    计数累加目标；可为 NULL
+ * @return 实际采取的动作
+ *
+ * ⚠ 只在 DEVLINK_RX_DISPATCH 时才调用 dispatch，且传的是 **payload 原样**
+ *   （含首字节）—— msg_handler_process 是按 data[0] 取类型的（2.x 约定），
+ *   传 header 会让它读到错误的消息号。
+ */
+devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len,
+                                       const uint8_t *payload,
+                                       devlink_dispatch_fn dispatch,
+                                       devlink_rx_stats_t *stats);
+
 /* ── 胶水 ── */
 
 /**

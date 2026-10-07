@@ -42,12 +42,39 @@ static const char *const s_factory_ns[] = {
 };
 #define FACTORY_NS_COUNT (sizeof(s_factory_ns) / sizeof(s_factory_ns[0]))
 
-/* 运行期一次性状态。设备上一旦置位就不再清零（操作以重启收尾）。 */
-static bool s_in_progress = false;
+/* 运行期一次性状态。设备上一旦置位就不再清零（操作以重启收尾）。
+ *
+ * ⚠⚠ 类型是 `uint32_t` 而不是 `bool`，且所有访问都必须是**原子**的 —— 见下方说明。 */
+static uint32_t s_in_progress = 0u;
 
-bool device_op_in_progress(void) { return s_in_progress; }
+bool device_op_in_progress(void)
+{
+    return __atomic_load_n(&s_in_progress, __ATOMIC_ACQUIRE) != 0u;
+}
 
-void device_op_reset_state(void) { s_in_progress = false; }
+void device_op_reset_state(void)
+{
+    __atomic_store_n(&s_in_progress, 0u, __ATOMIC_RELEASE);
+}
+
+/* ── 为什么必须是原子的（2026-10-07，跨传输并发新引入的真实竞态）──
+ *
+ * 改前是普通 `bool` + check-then-set：
+ *     if (s_in_progress) return DEVOP_ERR_BUSY;   // 检查
+ *     s_in_progress = true;                        // 置位
+ *
+ * 2.x 时代这条路径只有 MQTT 一个调用者，实际不会并发，所以问题不显形。
+ * 3.0 起**下行可以同时来自两条传输**（MQTT 与 TCP 会话各在自己的任务上下文里
+ * 调 msg_handler_process ⇒ 各自可能进入本函数）。于是两个操作可能**同时通过检查**
+ * ⇒ "重启"与"恢复出厂"**同时执行**：各自擦 NVS、各自 esp_restart。
+ * 症状是设备行为不确定（谁先谁后看调度），且**没有任何日志会说"两个都在跑"**。
+ *
+ * 因此用仓内既有的原子模式（同 handler_channel_cmd_v2.c:156 的
+ * `__atomic_exchange_n` 自旋锁）：**用一次原子交换同时完成"检查+置位"**，
+ * 中间不存在可被插入的窗口。
+ *
+ * 为什么选 exchange 而不是 CAS 循环：单飞语义只需要"第一个到的人赢"，
+ * exchange 天然给出这个结论（返回值 0 表示"我是第一个"），且无循环、无饥饿。 */
 
 const char *const *device_op_factory_namespaces(size_t *count_out)
 {
@@ -67,9 +94,14 @@ device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
         return DEVOP_ERR_UNKNOWN_OP;
     }
 
-    /* 单飞：已有操作在进行中（例如前端重复点击、或重置尚未重启完又来一条） */
-    if (s_in_progress) return DEVOP_ERR_BUSY;
-    s_in_progress = true;
+    /* 单飞：已有操作在进行中（例如前端重复点击、或重置尚未重启完又来一条）。
+     *
+     * ⚠ **检查与置位必须是一次原子操作**（exchange），不能拆成
+     * "先读再写"两行 —— 见上方 s_in_progress 的说明：跨传输并发下，
+     * 拆开会让两个操作同时通过检查 ⇒ 重启与恢复出厂同时执行。 */
+    if (__atomic_exchange_n(&s_in_progress, 1u, __ATOMIC_ACQ_REL) != 0u) {
+        return DEVOP_ERR_BUSY;
+    }
 
     /* ---- 步骤 1：恢复出厂先擦 B 档（仅 config）----
      * 重启操作不擦任何东西。 */
@@ -87,7 +119,7 @@ device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
                 /* 未重启 ⇒ 必须解除单飞，否则操作员"重试"会拿到 BUSY、
                  * 只能靠重启设备才能再试（与"可重试"的设计意图矛盾）。
                  * 这条是 host 测试抓出来的：我原来的写法把状态留着了。 */
-                s_in_progress = false;
+                device_op_reset_state();   /* 原子：见 s_in_progress 说明 */
                 return DEVOP_ERR_ERASE_FAILED;
             }
         }
@@ -99,7 +131,7 @@ device_op_result_t device_op_execute(const device_op_io_t *io, void *io_ctx,
         /* ACK 送不出去也【不重启】—— 否则操作员看到的是"点了没反应"，
          * 而设备其实重启了。宁可保持现状让操作员重试。
          * 同理解除单飞，让重试可行。 */
-        s_in_progress = false;
+        device_op_reset_state();   /* 原子：见 s_in_progress 说明 */
         return DEVOP_ERR_ACK_FLUSH_FAILED;
     }
 
