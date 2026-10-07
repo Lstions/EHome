@@ -18,6 +18,9 @@
 #include "tls_guard.h"
 #include "tls_io.h"
 #include "tls_link_adapt.h"
+/* task-34：把"谁吃掉了 internal 连续块"从**猜**变成**点名**。
+ * 未开 EHOME_HEAP_TRACE 时全部是空实现 ⇒ 交付态零影响。 */
+#include "heap_trace_diag.h"
 
 static const char *TAG = "tls_esp";
 
@@ -140,6 +143,12 @@ void *tls_esp_connect(void *io_ctx, bool *hard_fatal)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 #endif
 
+    /* ⭐ task-34：**在这里开始记录**。逐步探针已把下降夹在
+     * "before_connect(31744) → after_connect(ret)" 之间，且**第一次尝试失败也照砍**
+     * （Lead 实测：after_connect(-1) 时 largest 已是 15872）。
+     * ⇒ 这里正是要归因的那个区间，记录区间的起点就放在这一行。 */
+    heap_trace_diag_start("tls_connect");
+
     /* 3) 连接（同步）。返回 1 成功，-1 失败（含超时）。 */
     int ret = esp_tls_conn_new_sync(cfg->host, (int)strlen(cfg->host),
                                     (int)cfg->port, &ecfg, tls);
@@ -149,6 +158,9 @@ void *tls_esp_connect(void *io_ctx, bool *hard_fatal)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 #endif
+
+    /* 结束并 dump：打印本区间内**仍然存活**的内部分配（含调用栈、大小）。 */
+    heap_trace_diag_stop_and_dump("tls_connect");
     if (ret != 1) {
         /* 4) 取失败信息并归约，再按 (时间可信, 失败类别) 分类（§52/§54）。
          *

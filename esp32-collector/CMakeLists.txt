@@ -23,6 +23,22 @@ if(EHOME_MEM_DIAG)
     add_compile_definitions(EHOME_MEM_DIAG=1)
 endif()
 
+# task-34 ⭐ 归因工具（**诊断镜像专用**，默认 OFF）：
+# 打开 ESP-IDF 的 heap trace，把每次分配连同**调用栈**记下来 ⇒ 直接点名
+# "谁吃掉了 internal 连续块"，不再依赖"数值吻合"式推断。
+#
+# 为什么必须有它：本卡为同一个问题连续四次"算一个数 + 改一个候选"，四次全空
+# （任务栈 / SSL_IN_CONTENT_LEN / SSL_OUT_CONTENT_LEN / MBEDTLS_DYNAMIC_BUFFER）。
+# 其中第二次最说明问题：砍掉 8192 B 的 IN 上限，内部只回收 **284 B**
+# ⇒ **改一个候选可以完全不动堆** ⇒ 枚举候选的信息量极低。
+#
+# ⚠ 它需要 HEAP_TRACING_STANDALONE（见 sdkconfig.defaults.diag），且会拖慢分配，
+#   绝不能进交付配置。默认 OFF ⇒ 交付镜像与"10 个门禁"均不受影响。
+set(EHOME_HEAP_TRACE OFF CACHE BOOL "Enable heap-trace allocation attribution (diagnostic only)")
+if(EHOME_HEAP_TRACE)
+    add_compile_definitions(EHOME_HEAP_TRACE=1)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Component Manager lock files contain the selected target. Keep them alongside
 # each profile's build artifacts so C6 and S3 builds cannot rewrite each other.

@@ -47,6 +47,14 @@ EXEMPT = {
     "components/tls_esp/tls_esp.c":
         "直接 #include esp_tls.h / esp_tls_errors.h / esp_log.h，宿主机无这些头；"
         "本文件刻意做薄：所有判定已下沉到可测层（tls_io / tls_link_adapt / tls_guard）",
+    "components/heap_diag/heap_trace_diag.c":
+        "task-34 的**分配归因工具**：把堆分配连同调用栈记下来，用于定位是谁吃掉了"
+        "内部连续块（动机：本卡四次『数值吻合』式归因全部打空，见文件头注释）。"
+        "整段实现都在 `#if defined(EHOME_MEM_DIAG) && defined(EHOME_HEAP_TRACE)` 之内，"
+        "依赖 esp_heap_trace.h / esp_heap_caps.h / EXT_RAM_BSS_ATTR —— 宿主无这些头。"
+        "门控之外的 #else 分支是**纯空实现**（只有 (void)label 与 return false），"
+        "没有任何判定逻辑可供宿主测试；且它是**诊断镜像专用**（默认 OFF），"
+        "不进交付配置 ⇒ 不存在『用空实现冒充已验证』的风险面。",
 }
 
 # 豁免必须满足的举证条件：文件里出现下列任一 IDF 头 include。
