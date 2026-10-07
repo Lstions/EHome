@@ -102,6 +102,47 @@ def loc(path):
         return 0
 
 
+def orphan_test_files():
+    """Find .c test files that NO build references (added 2026-10-08).
+
+    Why this check must exist:
+    Measured: tests/ holds 7 files / 1715 lines of "tests" that
+      - no build system references (CMake/Makefile/sh/py: zero hits);
+      - tests/ has no build file of its own;
+      - this gate only scans components/ + main/ => it never saw them;
+      - yet tests/UNIT_TEST_SUMMARY.md claims "137/137 tests passed (100%)".
+    => An unreproducible test report is MORE dangerous than no tests:
+       it makes readers believe coverage already exists.
+
+    A .c test file is an orphan when ALL hold:
+      (a) it lives in tests/ (this repo's "not yet wired" dir, NOT host_tests/);
+      (b) its name starts with test_ or contains _test;
+      (c) its filename does NOT appear in host_tests/CMakeLists.txt.
+    Reports facts only; it does not decide delete-vs-wire (a separate call).
+    """
+    import re as _re
+    orphans = []
+    tests_dir = os.path.join(ROOT, "tests")
+    if not os.path.isdir(tests_dir):
+        return orphans
+    cmake_path = os.path.join(HT, "CMakeLists.txt")
+    cmake = open(cmake_path, encoding="utf-8").read() if os.path.exists(cmake_path) else ""
+    for fn in sorted(os.listdir(tests_dir)):
+        if not fn.endswith(".c"):
+            continue
+        if not (fn.startswith("test_") or "_test" in fn):
+            continue
+        if _re.search(r"\b" + _re.escape(fn) + r"\b", cmake):
+            continue
+        path = os.path.join(tests_dir, fn)
+        try:
+            n = sum(1 for _ in open(path, encoding="utf-8", errors="replace"))
+        except OSError:
+            n = 0
+        orphans.append(("tests/" + fn, n))
+    return orphans
+
+
 def main(argv):
     prod, covered, uncovered = collect()
 
@@ -132,6 +173,16 @@ def main(argv):
     print("按行数排序（top 20）:")
     for p in sorted(uncovered, key=loc, reverse=True)[:20]:
         print("  %6d  %s" % (loc(p), p))
+
+    orphans = orphan_test_files()
+    if orphans:
+        tot = sum(n for _p, n in orphans)
+        print()
+        print("WARN orphan test files (absent from host_tests/CMakeLists.txt => NEVER compiled): %d files, %d lines" % (len(orphans), tot))
+        for _p, _n in orphans:
+            print("  %6d  %s" % (_n, _p))
+        print("    => their assertions have NEVER run. Any report claiming they pass is unreproducible.")
+        print("    => two options (this gate does not choose): wire into host_tests/CMakeLists.txt, or delete.")
 
     if exempt_bad:
         print()
