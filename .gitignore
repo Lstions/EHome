@@ -24,6 +24,11 @@ esp32-collector/.cache/
 
 # Node/Frontend
 node_modules/
+# 同上，但**不带斜杠**：worktree 里常把 node_modules 做成**符号链接**指向主检出
+# （.worktrees/v3 就没有自己的 node_modules）。而 `node_modules/` 是**目录**模式，
+# **不匹配符号链接** ⇒ 该软链会一直出现在 git status 里，且有被误提交的风险
+# （软链指向绝对路径 /mnt/storage/... ，换机器即失效）。
+node_modules
 dist/
 .env
 .env.local
