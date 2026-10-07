@@ -95,6 +95,23 @@ extern "C" {
 bool session_transport_ready(session_state_t st);
 
 /**
+ * task-21：**组合判据** —— "这一帧能不能投给 3.0 transport"。
+ *
+ * ```
+ * = session_transport_ready(st)   // 语义：链路与应用层是否就绪（未握手=静默丢弃）
+ *   && gate_open                  // 策略：仲裁层现在是否选中 TCP（否则双栈稳态双发）
+ * ```
+ *
+ * 为什么做成**独立纯函数**而不是内联在 is_connected 里：
+ * IDF 段（`#ifndef SESSION_TRANSPORT_HOST_TEST`）在宿主上编不到，内联就没法被测。
+ * 而这一行恰好是"双发"与"静默丢弃"两类故障的交点 ⇒ 必须宿主可测。
+ *
+ * @param st        当前会话状态
+ * @param gate_open 仲裁闸是否放行（未注入闸时传 true，退化为只看 READY）
+ */
+bool session_transport_connected(session_state_t st, bool gate_open);
+
+/**
  * `session_send` 的结果 → transport 层该返回什么。
  *
  * 返回的 esp_err_t 语义（与 transport.h 的契约一致）：
@@ -144,6 +161,26 @@ transport_t *session_transport_create(session_t *s);
 
 /** 注销并释放 transport 包装（**不**销毁 `s`）。幂等。 */
 void session_transport_destroy(transport_t *t);
+
+/* === task-21：上行仲裁闸（**唯一**一处把"能不能上行"与"该不该走 TCP"合起来）===
+ *
+ * 为什么需要闸：`transport_broadcast` 对**每个** is_connected() 为真的 transport
+ * 都发。双栈稳态下 3.0 与 MQTT 同时为真 ⇒ **同一帧发两次**。
+ * 仲裁层（main/uplink_arbiter.h）让两条门**互斥**，于是不需要动注册表。
+ *
+ * 为什么闸**不**写在这里的 is_connected 里而是做成注入的钩子：
+ * `session_transport.c` 是"纯判定 + 薄胶水"，让它 include uplink_arbiter 会引入
+ * IDF 依赖，破坏 `SESSION_TRANSPORT_HOST_TEST` 的可测性。
+ * ⇒ 由 main/ 在启动时注入；未注入时**保持今天的行为**（只看 READY）。
+ *
+ * ⚠ 为什么"未注入 = 只看 READY"是安全的：默认构建根本不创建 3.0 transport，
+ * 所以这个分支只在"启用了链路但忘了注入闸"时生效 —— 那种情况等价于本卡之前
+ * 的行为（有双发风险），**绝不是**"静默把所有上行关掉"。
+ * 后者会让设备变哑，前者只是回到已知状态。
+ */
+typedef bool (*session_transport_gate_fn)(void);
+
+void session_transport_set_gate(session_transport_gate_fn gate);
 
 #endif /* !SESSION_TRANSPORT_HOST_TEST */
 

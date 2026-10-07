@@ -937,6 +937,55 @@ target_include_directories(transport_dualstack_tests PRIVATE
 )
 target_compile_options(transport_dualstack_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME transport_dualstack_tests COMMAND transport_dualstack_tests)
+
+# task-21：上行仲裁的**纯判定**（main/uplink_arbiter.c 的门）。
+# 门错了有两种相反的静默故障：过松 ⇒ 双栈双发；过严 ⇒ 上行全哑。
+# 用 UPLINK_ARBITER_HOST_TEST=1 只编纯判定，不含 IDF 头。
+add_executable(uplink_arbiter_tests
+    uplink_arbiter_tests.c
+    ../main/uplink_arbiter.c
+)
+target_include_directories(uplink_arbiter_tests PRIVATE
+    ../main
+    ../components/transport/include
+)
+target_compile_definitions(uplink_arbiter_tests PRIVATE UPLINK_ARBITER_HOST_TEST=1)
+target_compile_options(uplink_arbiter_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME uplink_arbiter_tests COMMAND uplink_arbiter_tests)
+
+# task-21：两条门的**穷举**互斥性证明（2^4 = 16 组全走一遍）。
+# 为什么穷举：M1' 的正确性全归结为两条性质 ——
+#   ① 至多一条为真（否则同一帧被投两次）
+#   ② 有可用链路时恰好一条为真（否则上行掉进直发兜底）
+# 它们只依赖 4 个布尔输入 ⇒ 可以穷举，比"挑几个用例"更能排除"漏掉某个组合"。
+add_executable(uplink_gate_exhaustive_tests
+    uplink_gate_exhaustive_tests.c
+    ../main/uplink_arbiter.c
+)
+target_include_directories(uplink_gate_exhaustive_tests PRIVATE
+    ../main
+)
+target_compile_definitions(uplink_gate_exhaustive_tests PRIVATE UPLINK_ARBITER_HOST_TEST=1)
+target_compile_options(uplink_gate_exhaustive_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME uplink_gate_exhaustive_tests COMMAND uplink_gate_exhaustive_tests)
+
+# task-21：门控版 MQTT 上行出口的**纯逻辑**（main/uplink_mqtt_transport.c）。
+# 它替代 mqtt_transport_register() 成为上行出口 ⇒ 错了有两种静默故障：
+# 不问仲裁 ⇒ 双发；把失败压成 ESP_OK ⇒ 上层以为发出去了（D-01）。
+add_executable(uplink_mqtt_transport_tests
+    uplink_mqtt_transport_tests.c
+    ../main/uplink_mqtt_transport.c
+)
+target_include_directories(uplink_mqtt_transport_tests PRIVATE
+    ../main
+    ../components/transport/include
+    stubs
+    stubs/rom
+    hello_stubs
+)
+target_compile_options(uplink_mqtt_transport_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME uplink_mqtt_transport_tests COMMAND uplink_mqtt_transport_tests)
+
 add_executable(msg_handler_publish_tests
     msg_handler_publish_tests.c
     ../components/transport/transport.c

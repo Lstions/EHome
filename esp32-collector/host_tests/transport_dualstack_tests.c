@@ -138,10 +138,82 @@ static void test_three_zero_not_ready_is_not_delivered(void)
     (void)transport_unregister(tt);
 }
 
+
+/* ==========================================================================
+ * task-21 新增：仲裁后【恰好一条】被投递
+ *
+ * ## 与上一条用例的关系（两条并存，不是替换）
+ *
+ * test_dualstack_broadcast_sends_twice 记录的是【broadcast 的固有 fan-out 语义】：
+ * 它对每个 is_connected() 为真的 transport 都发。**那个事实依然为真**，
+ * 它是「为什么需要仲裁层」的证据，不该被改绿（Lead 明确要求保留）。
+ *
+ * 本用例记录的是【接线后的生产行为】：
+ * 仲裁层让两条门互斥 ⇒ 任一时刻最多一条 is_connected 为真 ⇒ 恰好一次投递。
+ *
+ * ## 诚实说明：这条用例建模的是什么
+ *
+ * 它【不能】测真实仲裁层 —— 那要编 uplink_arbiter.c + session + MQTT，
+ * 而本 target 只链 transport.c（见 CMakeLists 的注释）。
+ * 它测的是：给定「门互斥」这个性质，broadcast 是否恰好投一条。
+ * ⇒ 门的互斥性由 uplink_arbiter_tests.c 穷举 16 种组合证明（那边是纯函数）；
+ *    本条证明「互斥 ⇒ 单发」这一步。两条合起来才是完整论证。
+ *
+ * 这也是本卡要求的形态：双发无法在 transport 层消除（那是 broadcast 的语义），
+ * 只能由上层选路消除 —— 本条就是那个「上层选路」的可执行证据。
+ * ========================================================================== */
+static void test_arbiter_keeps_exactly_one_delivery(void)
+{
+    /* 场景：双栈稳态，但仲裁层选中 TCP ⇒ 3.0 门开、MQTT 门关。
+     * 注意 MQTT 的链路本身是通的 —— 只是【门】关着。
+     * 这正是 M1' 的实质：不动注册表，只动门。 */
+    transport_manager_init();
+    fake_t mqtt = { 0, false };   /* 门关：仲裁未选中 MQTT */
+    fake_t tcp3 = { 0, true  };   /* 门开：仲裁选中 TCP 且 READY */
+    transport_t *tm = make(TRANSPORT_TYPE_MQTT, &mqtt);
+    transport_t *tt = make(TRANSPORT_TYPE_TCP,  &tcp3);
+    CHECK(transport_register(tm) == ESP_OK, "注册 MQTT");
+    CHECK(transport_register(tt) == ESP_OK, "注册 3.0 TCP");
+
+    transport_broadcast_report_t rep;
+    (void)transport_broadcast_ex((const uint8_t *)"TELEMETRY", 9, &rep);
+
+    CHECK(tcp3.send_calls == 1, "仲裁选中 TCP ⇒ 3.0 应恰好被投 1 次，实际 %d",
+          tcp3.send_calls);
+    CHECK(mqtt.send_calls == 0, "仲裁未选中 MQTT ⇒ MQTT 必须 0 次，实际 %d",
+          mqtt.send_calls);
+    CHECK(tcp3.send_calls + mqtt.send_calls == 1,
+          "仲裁后必须恰好一次投递，实际 %d 次（2 次=双发未消除，0 次=上行掉了）",
+          tcp3.send_calls + mqtt.send_calls);
+    CHECK(rep.attempted == 1, "attempted 应为 1，实际 %d", rep.attempted);
+    CHECK(rep.sent == 1, "sent 应为 1，实际 %d", rep.sent);
+
+    (void)transport_unregister(tm);
+    (void)transport_unregister(tt);
+
+    /* 反向：仲裁切到 MQTT（TCP 连续失败达阈值）⇒ 恰好 MQTT 一条。
+     * 这一半同样重要：只测「TCP 优先」会漏掉「兜底还通不通」。 */
+    fake_t mqtt2 = { 0, true  };   /* 门开：兜底态 */
+    fake_t tcp2  = { 0, false };   /* 门关：3.0 未 READY（或 tsel 已切 MQTT） */
+    transport_t *m2 = make(TRANSPORT_TYPE_MQTT, &mqtt2);
+    transport_t *t2 = make(TRANSPORT_TYPE_TCP,  &tcp2);
+    (void)transport_register(m2);
+    (void)transport_register(t2);
+    transport_broadcast_report_t rep2;
+    (void)transport_broadcast_ex((const uint8_t *)"TELEMETRY", 9, &rep2);
+    CHECK(mqtt2.send_calls == 1, "兜底态 MQTT 应恰好被投 1 次，实际 %d", mqtt2.send_calls);
+    CHECK(tcp2.send_calls == 0, "兜底态 3.0 必须 0 次，实际 %d", tcp2.send_calls);
+    CHECK(rep2.mqtt_attempted && !rep2.tcp_attempted,
+          "兜底态应只尝试 MQTT（mqtt=%d tcp=%d）",
+          (int)rep2.mqtt_attempted, (int)rep2.tcp_attempted);
+    (void)transport_unregister(m2);
+    (void)transport_unregister(t2);
+}
 int main(void)
 {
     test_dualstack_broadcast_sends_twice();
     test_three_zero_not_ready_is_not_delivered();
+    test_arbiter_keeps_exactly_one_delivery();
 
     if (s_failures) { printf("transport_dualstack_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("transport_dualstack_tests: all checks passed\n");

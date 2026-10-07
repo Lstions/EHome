@@ -189,6 +189,7 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 #include "esp_sntp.h"
 
 #include "session.h"
+#include "uplink_arbiter.h"   /* task-21：上行仲裁轮询 */
 #include "device_link_handshake.h"   /* 应用层握手的纯决策（IDF 无关）*/
 #include "frame_codec.h"             /* Hello 的帧编码器 + MSG_HELLO/FRAME_OK */
 #include "app_state.h"               /* app_state_get()->node_id（真实身份，非编造）*/
@@ -562,6 +563,13 @@ static void devlink_task(void *arg)
          * **同一个**网络状态，否则两者可以在同一轮里得出不同结论。 */
         bool net_up = (wifi_mgr_get_state() == WIFI_MGR_CONNECTED);
 
+        /* task-21：推进上行仲裁（读 session READY 的**边沿**，喂给 transport_sel）。
+         *
+         * 为什么放在本任务：它是唯一持有 session 且周期运行的地方，能看到状态跃迁。
+         * 边沿而非电平（见 uplink_arbiter.c 的说明）：把"持续未 READY"当电平反复喂，
+         * 一个长重连期会被算成很多次失败，阈值语义失真。 */
+        uplink_arbiter_poll();
+
         /* ── SNTP：复用本任务已有的观察点，**不新建任务** ──
          * 只在**边沿**通知 up/down（理由见 device_link_wiring.h 的
          * devlink_net_edge）。no-server 时 sntp_mgr 处于 DISABLED，通知是 no-op。 */
@@ -684,6 +692,14 @@ static void devlink_task(void *arg)
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+}
+
+session_t *device_link_wiring_session(void)
+{
+    /* 只读句柄：所有权仍在本文件（见头文件）。未启用/未创建时为 NULL。
+     * 注意**不加** #ifdef —— 默认构建下 s_session 恒为 NULL，
+     * 于是本函数恒返回 NULL，行为可见且可测。 */
+    return s_session;
 }
 
 void device_link_wiring_init(void)

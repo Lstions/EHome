@@ -17,6 +17,8 @@
 #include "crash_diag.h"
 #include "boot_guard.h"
 #include "device_link_wiring.h"
+#include "uplink_arbiter.h"   /* task-21：上行仲裁（两条门互斥）*/
+#include "session_transport.h"  /* task-21：3.0 会话 → transport 适配 + 仲裁闸 */
 #include "mem_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
@@ -545,7 +547,26 @@ void app_main(void)
     /* ---- Transports ---- */
     mqtt_client_init();
     transport_manager_init();
-    mqtt_transport_register();
+    /* task-21：两条门互斥的上行仲裁。
+     *
+     * ⚠⚠ **默认构建（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）逐位不变** —— 这是硬约束：
+     *   链路未启用时 s_link_enabled=false ⇒ uplink_gate_tcp3() 恒 false，
+     *   且 MQTT 门退化为"只看自己连没连"（uplink_gate_mqtt 的 !link_enabled 分支）
+     *   ⇒ **与 task-21 之前完全相同**，没有 3.0 transport、没有闸、没有切换。
+     *   下面的 if 分支也保证注册路径都不同：未启用走原来的 mqtt_transport_register()。
+     *
+     * 为什么必须在 transport_manager_init() 之后：transport_register() 在未初始化时
+     * 返回 ESP_ERR_INVALID_STATE（transport.c:31-36），会静默注册失败。
+     *
+     * 为什么用编译期常量而不是运行期查询：device_link_wiring.h:23-34 记录过教训 ——
+     * devlink_wanted() 是运行期函数，静态分析看不到，于是"未启用"的构建仍会被误报。
+     * 这里用 CONFIG_* 常量，让"启用与否"在编译期就可见。 */
+#if defined(CONFIG_EHOME_DEVICE_LINK_ENABLED) && (CONFIG_EHOME_DEVICE_LINK_ENABLED == 1)
+    uplink_arbiter_init(true);
+    (void)uplink_mqtt_transport_register();   /* 门控版 MQTT 出口（不碰回调槽） */
+#else
+    mqtt_transport_register();                /* 默认构建：与今天逐位相同 */
+#endif
     log_boot_heap("after mqtt_init");
 
     /* ---- WiFi + callbacks ---- */
@@ -621,6 +642,33 @@ void app_main(void)
      * 它自己等 WiFi 就绪，所以顺序不敏感；放在接线区一起更好读。
      * 默认关闭（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）⇒ 不建任务、不分配堆。 */
     device_link_wiring_init();
+
+    /* task-21：把 3.0 会话注册成一条 transport，并注入**仲裁闸**。
+     *
+     * 为什么注册放在这里（而不是上面的 Transports 块）：
+     *   session 由 device_link_wiring_init() 创建并**持有**；上面那块跑的时候
+     *   device_link_wiring_session() 还是 NULL（未启用或尚未创建）。
+     *   本函数内部有运行期早退（CONFIG=n 时直接 return）⇒ 这里取到 NULL 即
+     *   "链路未启用"，静默跳过是**正确**的，不是失败。
+     *
+     * 为什么闸要单独注入：session_transport.c 是"纯判定 + 薄胶水"，让它直接
+     * include 仲裁层会把 IDF 依赖带进 SESSION_TRANSPORT_HOST_TEST 构建，
+     * 破坏那组宿主用例的可测性（见 session_transport.h 的说明）。
+     *
+     * ⚠ 不注册也不报错的原因：默认构建（CONFIG=n）本来就该**逐位不变**，
+     *   报错会让默认构建变吵；而"启用了却拿不到 session"才是真异常，
+     *   那种情况下面单独判并报错。 */
+    {
+        struct session *sess = device_link_wiring_session();
+        if (sess != NULL) {
+            transport_t *t3 = session_transport_create(sess);
+            if (t3 != NULL) {
+                session_transport_set_gate(uplink_arbiter_tcp3_connected);
+            } else {
+                ESP_LOGE(TAG, "3.0 transport 注册失败 ⇒ 上行仍走 MQTT（不双发，但没有 TCP 上行）");
+            }
+        }
+    }
 
     /* 8.3: Initialize task watchdog — 10 second timeout, panic on timeout
      * ESP-IDF v6.0 CONFIG_ESP_TASK_WDT_INIT=1 auto-initializes TWDT (5s)

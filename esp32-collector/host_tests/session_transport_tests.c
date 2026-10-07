@@ -127,6 +127,49 @@ static void test_names_nonempty(void)
     CHECK(stx_send_class_name((stx_send_class_t)999) != NULL, "未知枚举应返回非 NULL");
 }
 
+
+/* ════════ 7. ⭐ task-21：组合判据（语义 AND 策略）════════ */
+/* 为什么这组必须存在：is_connected 是**唯一**决定"这一帧投不投给 3.0"的地方。
+ * 它错了有两种相反的静默故障：
+ *   过松（只看 READY，不看策略）⇒ 双栈稳态**双发**；
+ *   过严（只看策略，不看 READY）⇒ 未握手就被投 ⇒ **静默丢弃**。
+ * ⇒ 两个方向各一条断言，缺一不可。 */
+static void test_connected_requires_both_semantics_and_policy(void)
+{
+    /* (a) 就绪 + 放行 ⇒ 可投（正常态） */
+    CHECK(session_transport_connected(SESSION_READY, true) == true,
+          "READY 且闸放行 ⇒ 可投");
+
+    /* (b) 就绪但闸关（如 tsel 已切 MQTT）⇒ **不可投**。
+     *     这一条就是"消除双发"在适配层的落点：
+     *     若写成 true，transport_broadcast 会同时投给 3.0 与 MQTT ⇒ 双发。 */
+    CHECK(session_transport_connected(SESSION_READY, false) == false,
+          "READY 但仲裁未选中 TCP ⇒ 不得投（否则与 MQTT 双发）");
+
+    /* (c) 闸放行但未握手 ⇒ **不可投**（静默丢弃方向）。
+     *     这是 session_transport_ready 的既有语义，组合函数必须**继承**它。 */
+    const session_state_t not_ready[] = { SESSION_WAIT_HANDSHAKE, SESSION_DOWN,
+                                          SESSION_BACKOFF, SESSION_FATAL };
+    for (unsigned i = 0; i < sizeof(not_ready) / sizeof(not_ready[0]); i++) {
+        CHECK(session_transport_connected(not_ready[i], true) == false,
+              "状态 %d 未就绪 ⇒ 即使闸放行也不得投（投了就是静默丢弃）",
+              (int)not_ready[i]);
+        CHECK(session_transport_connected(not_ready[i], false) == false,
+              "状态 %d 未就绪且闸关 ⇒ 更不得投", (int)not_ready[i]);
+    }
+
+    /* (d) 与 session_transport_ready **严格一致**（闸恒开时）。
+     *     下界断言：穷举全部状态，确认组合函数没有自己另立一套判据。 */
+    int checked = 0;
+    for (int st = 0; st <= 4; st++) {
+        CHECK(session_transport_connected((session_state_t)st, true)
+              == session_transport_ready((session_state_t)st),
+              "闸恒开时，组合判据必须与 session_transport_ready 完全一致（st=%d）", st);
+        checked++;
+    }
+    CHECK(checked == 5, "应穷举 5 个会话状态，实际 %d", checked);
+}
+
 int main(void)
 {
     test_only_ready_counts_as_up();
@@ -135,6 +178,7 @@ int main(void)
     test_not_ready_and_too_big();
     test_esp_err_mapping();
     test_names_nonempty();
+    test_connected_requires_both_semantics_and_policy();
 
     if (s_failures) { printf("session_transport_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("session_transport_tests: all checks passed\n");

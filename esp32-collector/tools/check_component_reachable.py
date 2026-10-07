@@ -57,11 +57,9 @@ PENDING_WIRING = {
         "由 transport_sel 决定何时回退",
         "§7.3 P2 阶段随 transport_sel 一起接",
     ),
-    "transport_sel": (
-        "TCP 优先 / MQTT 兜底的选择策略（§7.3 P2）",
-        "它要选择的**两条** link 里，link_mqtt 还没接；且阶段未到 P2",
-        "link_mqtt 接好后由它决定用哪条",
-    ),
+    # task-21：transport_sel 已接线（main/uplink_arbiter.c 的 IDF 段调 tsel_create/tsel_poll，
+    # 并在 main/CMakeLists.txt 的 REQUIRES 里声明）⇒ 本条目按门禁要求删除。
+    # 它现在由仲裁层驱动："TCP 优先 / MQTT 兜底"，门见 main/uplink_arbiter.h。
     "nvs_helper": (
         "NVS 读写辅助",
         "既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用"

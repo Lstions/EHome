@@ -14,6 +14,15 @@ idf_component_register(SRCS "main.c"
                               "device_op_wiring.c"
                               "device_link_wiring.c"
                               "device_link_handshake.c"
+                              # task-21 上行仲裁：两条门互斥（消除双栈双发）
+                              # ⚠ session_transport.c **必须**在这里：它的 IDF 胶水段
+                              # （session_transport_create/ready/set_gate）不在宿主测试里编，
+                              # 漏掉它 ⇒ 宿主 102/102 全绿，而 IDF 链接直接
+                              # "undefined reference to session_transport_create"。
+                              # （2026-10-07 实测踩到：宿主绿、目标红。）
+                              "session_transport.c"
+                              "uplink_arbiter.c"
+                              "uplink_mqtt_transport.c"
                        INCLUDE_DIRS "."
                        REQUIRES freertos nvs_flash device_op
                        session tls_esp variant
@@ -21,6 +30,8 @@ idf_component_register(SRCS "main.c"
                        # esp_sntp.h，tls_guard 提供「时间可信」的唯一判据。
                        sntp_mgr tls_guard lwip
                        frame wifi_mgr transport ehome_mqtt ehome_tcp msg_handler
+                       # task-21：上游仲裁层的策略组件（uplink_arbiter.c 调 tsel_create/poll）
+                       transport_sel
                        config_mgr scheduler ota rgb_led factory_reset
                        sync_manager bus_dma hw_profile dma_pool
                        bus_worker bus_manager log_stream gpio_ctrl pwm_ctrl periph_owner

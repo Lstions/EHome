@@ -224,6 +224,27 @@ void device_link_wiring_init(void);
 /** 当前会话状态名（未启用/未创建时返回 "DISABLED" / "NONE"）；诊断用。 */
 const char *device_link_wiring_state_name(void);
 
+/**
+ * task-21：**只读**会话访问器 —— 供上行仲裁层查询 session_state。
+ *
+ * 为什么需要它：`s_session` 是本文件的 static（device_link_wiring.c:420），
+ * 而仲裁层要读 `session_state(sess)` 才能回答"3.0 现在能不能承载上行"。
+ *
+ * ⚠ 为什么返回 `session_t *` 而不是把 `s_session` 暴露成全局：
+ * 全局变量任何人都能**写**（例如误调 session_destroy 后留下悬空指针）；
+ * 访问器只给读句柄，**所有权仍在本文件**。调用方**不得** destroy 它。
+ *
+ * @return 会话句柄；未启用（Kconfig=n）或尚未创建时返回 **NULL**。
+ *
+ * ⚠ 用 `struct session *` 前置声明而不是 include "session.h"：
+ * 本头会被 `host_tests/device_link_wiring_tests.c` 包含，而那个 target 的
+ * include 路径里**没有** `components/session/include`（见 host_tests/CMakeLists.txt:1144-1148）
+ * ⇒ include 会让该 target 编译失败。而 `session_t` 本身就是
+ * `typedef struct session session_t;`（session.h:77）⇒ 前置声明**类型完全等价**。
+ */
+struct session;
+struct session *device_link_wiring_session(void);
+
 #ifdef __cplusplus
 }
 #endif

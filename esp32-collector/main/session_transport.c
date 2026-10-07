@@ -22,6 +22,14 @@ bool session_transport_ready(session_state_t st)
     return st == SESSION_READY;
 }
 
+bool session_transport_connected(session_state_t st, bool gate_open)
+{
+    /* 唯一一处组合判据（P4）。顺序有意如此：先判**语义**（能不能发），
+     * 再判**策略**（该不该走 TCP）。反过来会在未握手时走进策略分支，
+     * 让"静默丢弃"看起来像"策略没选中"。 */
+    return session_transport_ready(st) && gate_open;
+}
+
 const char *stx_send_class_name(stx_send_class_t c)
 {
     switch (c) {
@@ -135,11 +143,27 @@ static esp_err_t sess_tx_send(transport_t *t, const uint8_t *data, size_t len)
     return (esp_err_t)stx_to_esp_err(STX_SEND_RETRY);
 }
 
+/* task-21：注入式仲裁闸。未注入 ⇒ NULL ⇒ 只看 READY（= 本卡之前的行为）。 */
+static session_transport_gate_fn s_gate = NULL;
+
+void session_transport_set_gate(session_transport_gate_fn gate)
+{
+    s_gate = gate;
+}
+
 static bool sess_tx_is_connected(transport_t *t)
 {
     if (t == NULL || t->priv_data == NULL) return false;
     sess_tx_priv_t *p = (sess_tx_priv_t *)t->priv_data;
-    return session_transport_ready(session_state(p->sess));
+
+    /* 两层含义**都要**，缺一不可：
+     *   1. session_transport_ready —— **语义**："这一帧能不能投给它"（未握手=静默丢弃）；
+     *   2. 仲裁闸                  —— **策略**："现在该不该走 TCP"（否则双栈稳态双发）。
+     *
+     * ⚠ 复用的是同一个 session_transport_ready()，**没有第二份定义**（P4）。
+     * ⚠ 闸为 NULL 时退化为只判 1 ⇒ 与 task-21 之前逐位相同。 */
+    bool gate_open = (s_gate == NULL) ? true : s_gate();
+    return session_transport_connected(session_state(p->sess), gate_open);
 }
 
 static const transport_ops_t s_sess_tx_ops = {
@@ -163,7 +187,11 @@ transport_t *session_transport_create(session_t *s)
     p->sess = s;
     t->ops = &s_sess_tx_ops;
     t->type = TRANSPORT_TYPE_TCP;   /* 复用既有枚举：3.0 链路就是 TCP+mTLS */
-    t->state = TRANSPORT_STATE_DISCONNECTED;
+    /* ⚠ 常量名是 TRANSPORT_DISCONNECTED（不是 TRANSPORT_STATE_DISCONNECTED）。
+     * 这个错**只在 IDF 构建里暴露**：整个 IDF 胶水段在 `#ifndef SESSION_TRANSPORT_HOST_TEST` 内，
+     * 宿主构建根本不编它 ⇒ 宿主 102/102 全绿，而 IDF `error: undeclared`。
+     * （2026-10-07 实测：本文件首次被编进固件时才暴露。） */
+    t->state = TRANSPORT_DISCONNECTED;
     t->priv_data = p;
 
     /* 注册**不要求**已 READY：未 READY 时 is_connected 返回 false，
