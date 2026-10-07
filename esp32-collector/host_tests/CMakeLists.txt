@@ -1241,6 +1241,13 @@ add_test(NAME scheduler_health_tests COMMAND scheduler_health_tests)
 add_executable(session_transport_tests
     session_transport_tests.c
     ../main/session_transport.c
+    # task-32: stx_send_frame 调用**生产**成帧函数 devlink_encode_frame，
+    # 因此要把它所在文件（只编纯判定段）与它的依赖一起链进来。
+    # 与 firmware_tcp_e2e_client 编的是同一批（那边 :17-27 已注明同一原因）。
+    ../main/device_link_wiring.c
+    ../components/variant/variant.c
+    ../components/frame/frame_codec.c
+    ../components/wire/wire.c
 )
 target_include_directories(session_transport_tests PRIVATE
     ../main
@@ -1250,8 +1257,19 @@ target_include_directories(session_transport_tests PRIVATE
     ../components/rx_pump/include
     ../components/wire/include
     ../components/transport/include
+    # task-32: session_transport.c 现在 include device_link_wiring.h（为了复用
+    # **生产**成帧函数 devlink_encode_frame，P4 不写第二个实现），
+    # 而 device_link_wiring.h include variant.h。
+    # 与 firmware_tcp_e2e_client 同一处需要（那边 :22 已注明同一原因）。
+    ../components/variant/include
 )
-target_compile_definitions(session_transport_tests PRIVATE SESSION_TRANSPORT_HOST_TEST=1)
+# ⚠ 两个宏都要：SESSION_TRANSPORT_HOST_TEST 关掉本文件的 IDF 胶水段，
+# DEVICE_LINK_HOST_TEST 关掉 device_link_wiring.c 的 IDF 胶水段
+# （后者是对锚 target 早已在用的同一个宏 —— 见 firmware_tcp_e2e_client 的
+#  compile definitions。少任何一个都会去 include esp_err.h 而编译失败。）
+target_compile_definitions(session_transport_tests PRIVATE
+    SESSION_TRANSPORT_HOST_TEST=1
+    DEVICE_LINK_HOST_TEST=1)
 target_compile_options(session_transport_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME session_transport_tests COMMAND session_transport_tests)
 

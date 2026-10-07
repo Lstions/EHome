@@ -142,6 +142,77 @@ stx_send_class_t stx_classify_send(link_result_t r, size_t progress, size_t len)
 /** 分类 → transport 层返回码。**单一来源**：不要在别处再写一遍映射。 */
 int stx_to_esp_err(stx_send_class_t c);
 
+/* ════════ ⭐ 上行成帧 + 发送编排（task-32，宿主可测，无 IDF 依赖）════════
+ *
+ * 为什么在**头文件里就放在宿主段**：这段编排正是"生产路径是否成帧"的所在，
+ * 而此前它整个躲在 #ifndef SESSION_TRANSPORT_HOST_TEST 里 ⇒ 宿主测试编不到
+ * ⇒ "忘记成帧"这类缺陷能长期全绿（§134 就是这么活下来的）。
+ * 现在真正的 session_send 由调用方通过 write 回调**注入**，编排本身纯函数。
+ */
+
+/** 写入回调：把 n 字节交给真实链路。语义与 link.h 的 session_send 一致。 */
+typedef link_result_t (*stx_write_fn)(void *ctx, const uint8_t *data, size_t len,
+                                      size_t *progress);
+
+/** 上行发送的统计与状态（计数：§需要"超界/成帧失败"可观测，不能静默）。 */
+typedef struct {
+    uint32_t framed;             /* 成功成帧的帧数 */
+    uint32_t too_big;            /* 载荷超上界被拒（**响亮失败**）*/
+    uint32_t encode_failed;      /* devlink_encode_frame 返回非 OK */
+    uint32_t retries;            /* 可重试（背压）次数 */
+    uint32_t failed;             /* 其它失败（含流污染）*/
+    uint32_t retries_exhausted;  /* 重试上限用尽 */
+} stx_tx_stats_t;
+
+/**
+ * 成帧 + 发送编排（**宿主可编**）。
+ *
+ * 流程：payload → devlink_encode_frame（**唯一**成帧点，复用生产函数）→
+ *       write 回调（含 progress 循环，PARTIAL 续写、BACKPRESSURE 重试）。
+ *
+ * ⚠ 本函数**不睡眠**：睡眠策略归调用方（宿主用例里不能有真实延时）。
+ */
+typedef struct {
+    stx_write_fn write;      /* 必需：把字节交给链路（固件传入 session_send 的包装）*/
+    void        *ctx;        /* 传给 write 的上下文（通常是 session_t *）*/
+    uint8_t     *scratch;    /* 必需：成帧缓冲，由调用方给（宿主可注入小缓冲）*/
+    size_t       scratch_cap;
+    stx_tx_stats_t stats;
+} stx_tx_t;
+
+/** 一次上行载荷的最大字节数。
+ *
+ * 推导（2026-10-07 实测，**按最大生产者**定，不是拍脑袋）：
+ *   - components/msg_handler/handler_data.c 的三处 uint8_t buf[1400]
+ *     （:151 status / :328 data_report / :364 data_batch）——
+ *     这是全仓**最大**的上行编码缓冲：其它生产者都更小
+ *     （handler_hello buf[384]、handler_config buf[256]、handler_writecmd buf[256]、
+ *      handler_periph buf[128]、handler_device_op DEVICE_OP_ACK_BUF、
+ *      log_stream s_tx_buf[LOG_TX_BUF_SIZE=768]、bus_worker DATA_BATCH_BUF_SIZE=1400
+ *      **只是尺寸预言常量本身不分配缓冲**，见 bus_worker.c:145-148）。
+ *   - ⇒ 取 1400（最大生产者）+ 余量 0。**不**取 Kconfig 的 16368：
+ *     那是 3.0 线协议上限，而本函数的上界是"**本路径实际会有多大**"。
+ *     取协议上限会让一个 8 KB 的误用悄悄通过，直到真机上撑爆缓冲。
+ *     若将来出现更大的生产者，这里**必须**同步调大（值与推导写在一起）。
+ */
+#define STX_TX_PAYLOAD_MAX 1400u
+
+/** 成帧后一条帧的最大字节数 = 上界 + 12 B 头（**不**含 CRC：生产不置 CRC 位）。 */
+#define STX_FRAME_MAX ((size_t)STX_TX_PAYLOAD_MAX + 12u)
+
+/** 单次发送的最大重试次数（背压）。与旧 sess_tx_send 的 64 一致。 */
+#define STX_TX_MAX_ATTEMPTS 64
+
+/* ⚠ 返回类型必须是 int，**不是 esp_err_t**：本声明位于宿主可编段
+ * （esp_err.h 只在下面的胶水段被 include）。
+ * 与 stx_to_esp_err 同规矩 —— 语义仍是 esp_err_t，由胶水层负责强转。
+ *
+ * 作者第一版写成 esp_err_t ⇒ 宿主构建**直接编译失败**
+ * （error: unknown type name 'esp_err_t'）。
+ * ⚠ 这个"失败"本身是好消息：**它证明这一段现在真的会被宿主编译到** ——
+ * 而这正是本卡的目的（§134 那类缺陷正是靠"宿主编不到"活下来的）。 */
+int stx_send_frame(stx_tx_t *tx, const uint8_t *payload, size_t len, uint32_t seq);
+
 /* ── 胶水（依赖 transport.h，而它含 IDF 头 ⇒ 宿主构建时用不到）── */
 
 #ifndef SESSION_TRANSPORT_HOST_TEST
