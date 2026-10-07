@@ -13,7 +13,18 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORKTREE="$(cd "$HERE/../.." && pwd)"                 # esp32-collector -> worktree 根
-MAINREPO="$(cd "$WORKTREE/../.." 2>/dev/null && pwd)" # .worktrees/v3 -> 主仓根
+# 主仓根：这个推导只对 <主仓>/.worktrees/<名字> 的布局成立。
+#
+# ⚠ 2026-10-07 修：原来无脑 cd 两层，于是**别的布局**（例如把快照 detach 到
+# /tmp/v3-fXX 做验证）会得到 MAINREPO="/"，错误信息就打印出
+#   "已尝试： //.tools/gotool/bin/go"
+# —— 一个打头双斜杠的荒谬路径。我被它误导过一次，误以为出现了新的失败
+# （真因只是我没把 gotool 放进 PATH）。⇒ 只在父目录确实叫 .worktrees 时才认这个推导。
+if [ "$(basename "$(dirname "$WORKTREE")")" = ".worktrees" ]; then
+    MAINREPO="$(cd "$WORKTREE/../.." && pwd)"
+else
+    MAINREPO=""
+fi
 
 find_go() {
     for c in \
@@ -32,9 +43,19 @@ find_go() {
 
 GO="$(find_go)" || {
     echo "FAIL 找不到 Go 工具链。已尝试："
-    echo "       $MAINREPO/.tools/gotool/bin/go"
+    # 只打印**真的试过**的路径：MAINREPO 为空时不要打印 "//.tools/..."。
+    [ -n "$MAINREPO" ] && echo "       $MAINREPO/.tools/gotool/bin/go"
     echo "       $WORKTREE/../.tools/gotool/bin/go"
-    echo "       /usr/local/go/bin/go  等"
+    echo "       $WORKTREE/.tools/gotool/bin/go"
+    echo "       $HOME/.local/share/go/bin/go"
+    echo "       /usr/local/go/bin/go"
+    echo "       /usr/lib/go/bin/go"
+    echo "       （以及 PATH 里的 go）"
+    if [ -z "$MAINREPO" ]; then
+        echo "说明：当前布局不是 <主仓>/.worktrees/<名字>（例如 /tmp 下的验证快照），"
+        echo "      因此推导不出主仓的 .tools/gotool。把工具链放进 PATH 即可："
+        echo "        export PATH=<主仓>/.tools/gotool/bin:\$PATH"
+    fi
     echo "安装（自包含，不动系统）："
     echo "  curl -sSLo /tmp/go.tgz https://go.dev/dl/go1.27.1.linux-amd64.tar.gz"
     echo "  curl -sS https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz.sha256   # 必须一致"
