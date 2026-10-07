@@ -27,9 +27,22 @@ static int s_publish_calls = 0;
 static esp_err_t s_publish_rc = ESP_OK;
 static bool s_connected = true;
 
+/* task-32：捕获 MQTT 实际收到的**字节**（此前只数调用次数）。
+ * 为什么必须捕获字节：MQTT 与 3.0 TCP 共用 transport_ops.send 契约，
+ * 3.0 TCP 侧需要 12 B 帧头，而 MQTT 侧是"原样当报文载荷发布"。
+ * 若谁把成帧放错层（放到 publish / 放到共用契约上），3.0 那边照样绿，
+ * 而 MQTT 这一份会被悄悄加上包头 ⇒ 2.x 设备与兜底路径全部读不懂。
+ * ⇒ 只数次数抓不到它，必须断言**字节**。 */
+#include <string.h>
+static uint8_t s_pub_buf[512];
+static size_t  s_pub_len = 0;
+
 static esp_err_t fake_publish(const uint8_t *d, size_t n)
 {
-    (void)d; (void)n; s_publish_calls++; return s_publish_rc;
+    s_publish_calls++;
+    s_pub_len = (n <= sizeof(s_pub_buf)) ? n : sizeof(s_pub_buf);
+    if (d != NULL && s_pub_len > 0) memcpy(s_pub_buf, d, s_pub_len);
+    return s_publish_rc;
 }
 static bool fake_is_connected(void) { return s_connected; }
 
@@ -88,6 +101,42 @@ static void test_send_reports_truthfully(void)
     CHECK(rc != ESP_OK, "失败绝不能压成 ESP_OK（D-01 病根）");
 }
 
+/* ⭐⭐ task-32 交付 4：**MQTT 路径不得被成帧**（"放错层"的失效形态）。
+ *
+ * 判据（两条一起才有意义）：
+ *   1. MQTT 收到的字节与传入 payload **逐字节相同**（长度也一样）；
+ *   2. 且它的前两字节**不是** 3.0 帧头 magic 0x45 0x48。
+ * 第 1 条能抓住"加了头"（长度会 +12、内容会整体位移）；
+ * 第 2 条把意图写成可读断言 —— 单看第 1 条，读者不知道"多出来的字节"是什么。
+ *
+ * 载荷刻意不 bare 0x45 开头：否则"没成帧"与"恰好以 0x45 开头"无法区分。 */
+static void test_mqtt_payload_is_never_framed(void)
+{
+    /* 一份真实的 MQTT 上行载荷形态：首字节 0x03 = DataReport 类型。 */
+    const uint8_t payload[] = { 0x03, 0x08, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+    uplink_mqtt_io_t io = { fake_publish, fake_is_connected };
+    transport_t *t = uplink_mqtt_transport_ops(&io);
+    if (t == NULL || t->ops == NULL || t->ops->send == NULL) return;
+
+    s_publish_calls = 0;
+    s_pub_len = 0;
+    s_publish_rc = ESP_OK;
+    CHECK(t->ops->send(t, payload, sizeof(payload)) == ESP_OK, "发送应成功");
+
+    /* 1) 长度必须**原样**：加 12 B 头会让它变成 19。 */
+    CHECK(s_pub_len == sizeof(payload),
+          "MQTT 收到的长度必须是原载荷长度 %u（加帧头会变成 %u），实际 %u",
+          (unsigned)sizeof(payload), (unsigned)(sizeof(payload) + 12u), (unsigned)s_pub_len);
+
+    /* 2) 内容必须逐字节相同。 */
+    CHECK(s_pub_len == sizeof(payload) && memcmp(s_pub_buf, payload, sizeof(payload)) == 0,
+          "MQTT 必须收到**原样**载荷（逐字节相同）—— 被成帧即污染 2.x 设备与兜底路径");
+
+    /* 3) 且不得以 3.0 帧头 magic 开头。 */
+    CHECK(!(s_pub_len >= 2 && s_pub_buf[0] == 0x45 && s_pub_buf[1] == 0x48),
+          "MQTT 载荷不得带 3.0 帧头 magic 0x4548（成帧是 TCP 线协议的属性，不是消息语义的）");
+}
+
 /* 未绑定 IO 时必须**拒绝**，不能假装成功。 */
 static void test_unbound_io_is_refused(void)
 {
@@ -111,6 +160,7 @@ int main(void)
     test_ops_table_and_no_downlink();
     test_is_connected_follows_arbiter_gate();
     test_send_reports_truthfully();
+    test_mqtt_payload_is_never_framed();   /* task-32：MQTT 不得被成帧 */
     test_unbound_io_is_refused();
 
     if (s_failures) {
