@@ -1,40 +1,38 @@
-// Package downlink routes server-to-device messages to the right transport.
+// Package downlink delivers server-to-device messages over the node's 3.0
+// TCP+TLS session.
 //
-// # Why this exists
+// # MQTT is gone (2026-10-08)
 //
-// During the MQTT retirement window (design 7.3, P0-P3) the backend must serve
-// BOTH 2.8.0 devices (MQTT) and 3.0 devices (TCP+TLS). Every downlink call site
-// already goes through the mqtt.Publisher interface, so this package implements
-// that interface as a COMPOSITE: it prefers the node's live TCP session and
-// falls back to MQTT.
+// This package used to be a COMPOSITE: it preferred the node's live TCP
+// session and fell back to MQTT (design 7.3 P0-P3, the dual-stack window).
+// MQTT has now been removed from the backend entirely, so there is exactly
+// ONE transport left and the fallback is impossible by construction rather
+// than by configuration.
 //
-// Doing it here rather than editing every call site has two benefits:
+// ⚠ What that means for callers: a message for a node with no live session
+// is now an ERROR, not a silent hand-off to a broker. That is deliberate --
+// the old fallback would have become a black hole once no broker consumer
+// existed, which is exactly the silent-loss failure this repo keeps
+// re-learning. Callers that care can retry when the node reconnects.
 //
-//  1. There is exactly ONE place that decides which transport a node is on
-//     (principle P4). Eleven call sites each making that decision would be
-//     eleven chances to disagree.
-//  2. The 2.x path is untouched: if a node has no TCP session, behaviour is
-//     byte-for-byte what it was before.
+// # There are no topics any more
 //
-// # The topic becomes a node-id carrier
+// Callers used to compute an MQTT topic (`nodes/<id>/down` or
+// `nodes/<id>/control`) and hand it to Publish. That scheme is gone: the
+// 3.0 connection identity is the certificate CN/SAN, so this package now
+// takes the node id DIRECTLY (principle P4 -- one definition of "which node
+// is this for", instead of a string that had to be parsed back apart).
 //
-// 3.0 has no topics: the connection identity is the certificate CN/SAN. But the
-// existing call sites compute a topic and hand it to Publish, and the topic
-// already encodes the node id ("nodes/<id>/down" or "nodes/<id>/control").
-// So this adapter PARSES the node id out of the topic and otherwise ignores it.
-//
-// That is deliberate, and it is honest: the topic is no longer a routing
-// mechanism, it is a transport-agnostic way for a caller to name a node. The
-// topic's "down" vs "control" distinction carries no meaning over TCP -- the
-// frame's message type already says what the message is -- so it is dropped.
+// The old `down` vs `control` split never carried meaning over TCP (the
+// frame's message type already says what the message is), and neither did
+// MQTT QoS 2 (it was already downgraded to a best-effort write, and counted
+// rather than hidden -- see the removed DownlinkQoS2DowngradedTotal).
 package downlink
 
 import (
 	"fmt"
-	"strings"
 
 	"ehome/backend/pkg/frame"
-	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
 	"ehome/backend/pkg/protoframe"
 )
@@ -43,7 +41,7 @@ import (
 //
 // Declared here (rather than importing internal/transport) so this package
 // stays testable with a fake and so the dependency points one way: downlink
-// knows about transport's shape, transport knows nothing about MQTT.
+// knows about transport's shape, transport knows nothing about this package.
 type sessionSender interface {
 	// SendToNode delivers one whole 3.0 frame to a connected node.
 	SendToNode(nodeID string, frame []byte) error
@@ -51,119 +49,59 @@ type sessionSender interface {
 	HasSession(nodeID string) bool
 }
 
-// LegacyPublisher is the 2.x path, exported so main() can name it when
-// constructing a Bridge (and so the device-transport helper can hand it on).
-type LegacyPublisher interface {
-	Publish(topic string, payload []byte) error
-	PublishQoS2(topic string, payload []byte) error
-	PublishRetained(topic string, payload []byte) error
+// Publisher is the downlink surface the rest of the backend consumes.
+//
+// It is an interface (not *Bridge) so tests can substitute a recorder, and
+// so the packages that send messages do not depend on the transport's shape.
+type Publisher interface {
+	// Publish delivers one 2.x payload to a node, framed as a 3.0 message.
+	// Returns an error when the node has no live session: with MQTT gone
+	// there is no second path, and reporting success would be a lie.
+	Publish(nodeID string, payload []byte) error
 }
 
-// legacyPublisher is the internal alias for the same shape.
-type legacyPublisher = LegacyPublisher
-
-// Bridge is an mqtt.Publisher that prefers the native transport.
-//
-// Both transports are fixed at construction. I briefly had a SetLegacy method
-// so main() could create the bridge before the MQTT client existed; that was
-// wrong for two reasons: a bridge with a nil legacy publisher silently drops
-// messages, and mutable wiring means "which transport does this node use"
-// could change under a caller. Construction-time wiring makes the illegal
-// state unrepresentable.
+// Bridge is the only Publisher implementation: it frames a payload and sends
+// it down the node's live session.
 type Bridge struct {
 	native sessionSender
-	legacy legacyPublisher
 }
 
-// New builds a bridge. native may be nil (then everything goes to MQTT).
-// legacy must not be nil: it is the fallback the whole design depends on.
-func New(native sessionSender, legacy legacyPublisher) *Bridge {
-	if legacy == nil {
-		panic("downlink: legacy publisher is required; a bridge without a " +
-			"fallback would drop every message for a node without a TCP session")
+// New builds a bridge over the device registry.
+//
+// native must not be nil. There is no fallback to construct around any more,
+// so a nil sender could only ever produce "every downlink fails" -- a
+// configuration mistake that must be loud at startup, not silent per message.
+func New(native sessionSender) *Bridge {
+	if native == nil {
+		panic("downlink: a session sender is required; without it no downlink " +
+			"can be delivered and every send would fail silently")
 	}
-	return &Bridge{native: native, legacy: legacy}
+	return &Bridge{native: native}
 }
 
-// NodeIDFromTopic extracts the node id from "nodes/<id>/<channel>".
-//
-// Returns "" when the topic is not node-scoped, which means the caller is
-// publishing something the native transport has no way to carry (for example
-// Home Assistant's retained discovery config). Those must NOT be silently
-// dropped -- see PublishRetained below.
-func NodeIDFromTopic(topic string) string {
-	parts := strings.Split(topic, "/")
-	if len(parts) != 3 || parts[0] != "nodes" || parts[1] == "" {
-		return ""
-	}
-	return parts[1]
-}
-
-// Publish sends a downlink message, preferring the node's TCP session.
-func (b *Bridge) Publish(topic string, payload []byte) error {
-	return b.publish(topic, payload, false)
-}
-
-// PublishQoS2 sends a control message, preferring the node's TCP session.
-//
-// ⚠ Honest gap: QoS 2 means "delivered exactly once". Over TCP the design
-// replaces that with an application-layer ACK (frame flag ACK_REQ + seq), but
-// that ACK is NOT IMPLEMENTED YET on either end. So a QoS2 publish that goes
-// over TCP is downgraded to the same best-effort write as a plain Publish.
-//
-// That downgrade is COUNTED rather than silent, because "the caller asked for a
-// stronger guarantee and did not get it" is exactly the class of problem this
-// refactor exists to remove. When the ACK lands: set the flag here and delete
-// the counter increment, then assert the counter stays zero.
-func (b *Bridge) PublishQoS2(topic string, payload []byte) error {
-	return b.publish(topic, payload, true)
-}
-
-func (b *Bridge) publish(topic string, payload []byte, wasQoS2 bool) error {
-	nodeID := NodeIDFromTopic(topic)
-
-	// Not node-scoped: the native transport cannot carry it. This is not an
-	// error condition, it simply has only one possible home.
-	if nodeID == "" || b.native == nil || !b.native.HasSession(nodeID) {
-		return b.legacy.Publish(topic, payload)
+// Publish frames one payload and delivers it to nodeID.
+func (b *Bridge) Publish(nodeID string, payload []byte) error {
+	if nodeID == "" {
+		// Without a node there is no session to look up. Refuse rather than
+		// guess: the old code treated "no node id" as "not node-scoped, send
+		// to MQTT", and that path no longer exists.
+		return fmt.Errorf("downlink: empty node id; cannot deliver %d-byte payload", len(payload))
 	}
 
 	enc, err := wrapFrame(payload)
 	if err != nil {
-		// Wrapping failed (empty or oversized). Fall back rather than drop:
-		// the MQTT path may still be able to deliver it, and the caller gets
-		// a real error if it cannot.
 		metrics.DownlinkWrapFailedTotal.Inc()
-		logger.Warnf("[%s] Cannot wrap downlink for TCP (%v); using MQTT", nodeID, err)
-		return b.legacy.Publish(topic, payload)
+		return fmt.Errorf("downlink: cannot frame payload for %s: %w", nodeID, err)
 	}
 
-	if wasQoS2 {
-		metrics.DownlinkQoS2DowngradedTotal.Inc()
-	}
 	if err := b.native.SendToNode(nodeID, enc); err != nil {
 		metrics.DownlinkNativeFailedTotal.Inc()
-		logger.Warnf("[%s] TCP downlink failed (%v); using MQTT", nodeID, err)
-		return b.legacy.Publish(topic, payload)
+		// No fallback: report the failure to the caller. Losing it here would
+		// be indistinguishable from a delivered message.
+		return fmt.Errorf("downlink: no live session for %s: %w", nodeID, err)
 	}
 	metrics.DownlinkOverNativeTotal.Inc()
 	return nil
-}
-
-// PublishRetained is MQTT-only by nature: "retained" has no 3.0 equivalent
-// (there is no broker to hold the last value). The only current caller is the
-// Home Assistant discovery config, which is not node-scoped at all.
-//
-// It therefore always goes to MQTT. If a caller ever passes a node-scoped
-// retained topic, that is a design problem, not something to paper over --
-// hence the explicit check and counter.
-func (b *Bridge) PublishRetained(topic string, payload []byte) error {
-	if nodeID := NodeIDFromTopic(topic); nodeID != "" {
-		metrics.DownlinkRetainedNodeScopedTotal.Inc()
-		logger.Warnf("[%s] retained publish to a NODE-scoped topic has no 3.0 "+
-			"equivalent; sending over MQTT only", nodeID)
-	}
-	return b.legacy.Publish(topic, payload)
 }
 
 // wrapFrame builds a 3.0 frame around a 2.x payload.
@@ -199,4 +137,5 @@ func wrapFrame(payload []byte) ([]byte, error) {
 // limit disagreeing).
 func MaxDownlinkPayload() int { return int(protoframe.PayloadMax) }
 
-var _ = frame.MsgHello // keep the frame import explicit about the type space
+// keep the frame import explicit about the type space
+var _ = frame.MsgHello

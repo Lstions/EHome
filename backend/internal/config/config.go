@@ -12,7 +12,6 @@ import (
 type Config struct {
 	Server         ServerConfig         `yaml:"server"`
 	Database       DatabaseConfig       `yaml:"database"`
-	MQTT           MQTTConfig           `yaml:"mqtt"`
 	Log            LogConfig            `yaml:"log"`
 	Control        ControlConfig        `yaml:"control"`
 	Ingest         IngestConfig         `yaml:"ingest"`
@@ -23,12 +22,18 @@ type Config struct {
 
 // DeviceConfig configures the 3.0 device-facing TCP+TLS listener.
 //
-// # Disabled by default, deliberately
+// # This is now the ONLY device transport
 //
-// Design §7.3 turns MQTT retirement into a staged rollout (P0..P4) whose first
-// step is "backend listens on BOTH MQTT and TCP". Until this section is filled
-// in and Enabled is set, the server behaves EXACTLY as it does today: that is
-// what makes deploying this change safe rather than a cut-over.
+// MQTT was removed from the backend on 2026-10-08, so this listener is the sole
+// way a device can reach the server (uplink AND downlink). The `enabled`
+// default of false is therefore no longer "safe because MQTT still works" --
+// with it off there is no device path at all.
+//
+// ⚠ Startup does not refuse Enabled=false: the setting is still useful for
+// API-only / test deployments, and refusing would break them. But an operator
+// who leaves it off on a real deployment gets a server that no device can talk
+// to, so the effective configuration is logged loudly at startup (see
+// cmd/server/main.go) rather than assumed.
 //
 // A half-configured listener is refused at startup rather than silently
 // skipped, because "I enabled it and nothing listens" is indistinguishable
@@ -115,13 +120,6 @@ type DatabaseConfig struct {
 	SSLMode  string `yaml:"sslmode"`
 }
 
-// MQTTConfig holds MQTT broker settings
-type MQTTConfig struct {
-	Broker   string `yaml:"broker"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-}
-
 // LogConfig holds logging settings
 type LogConfig struct {
 	Level string `yaml:"level"`
@@ -161,9 +159,6 @@ func defaultConfig() *Config {
 			Password: "ehome123",
 			DBName:   "ehome",
 			SSLMode:  "disable",
-		},
-		MQTT: MQTTConfig{
-			Broker: "tcp://localhost:1883",
 		},
 		Log: LogConfig{
 			Level: "info",
@@ -215,15 +210,6 @@ func overrideWithEnv(cfg *Config) {
 	if v := getEnv("EHOME_DB_NAME", ""); v != "" {
 		cfg.Database.DBName = v
 	}
-	if v := getEnv("MQTT_BROKER", ""); v != "" {
-		cfg.MQTT.Broker = v
-	}
-	if v := getEnv("MQTT_USER", ""); v != "" {
-		cfg.MQTT.User = v
-	}
-	if v := getEnv("MQTT_PASSWORD", ""); v != "" {
-		cfg.MQTT.Password = v
-	}
 	if v := getEnv("LOG_LEVEL", ""); v != "" {
 		cfg.Log.Level = v
 	}
@@ -266,10 +252,7 @@ func getEnv(key, defaultValue string) string {
 }
 
 // Convenience accessors for backward compatibility
-func (c *Config) MQTTBroker() string   { return c.MQTT.Broker }
-func (c *Config) MQTTUser() string     { return c.MQTT.User }
-func (c *Config) MQTTPassword() string { return c.MQTT.Password }
-func (c *Config) APIAddr() string      { return c.Server.Addr }
+func (c *Config) APIAddr() string { return c.Server.Addr }
 func (c *Config) DatabaseURL() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.Database.User, c.Database.Password, c.Database.Host,

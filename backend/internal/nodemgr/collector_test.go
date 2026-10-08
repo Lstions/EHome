@@ -7,19 +7,20 @@ import (
 	"ehome/backend/pkg/frame"
 )
 
-// MockMQTT implements a simple mock for testing
-type MockMQTT struct {
+// MockDownlink records downlink sends. (It used to record an MQTT topic; the
+// publisher now addresses a node, so the field is nodeID.)
+type MockDownlink struct {
 	published []struct {
-		topic   string
+		nodeID  string
 		payload []byte
 	}
 }
 
-func (m *MockMQTT) Publish(topic string, payload []byte) error {
+func (m *MockDownlink) Publish(nodeID string, payload []byte) error {
 	m.published = append(m.published, struct {
-		topic   string
+		nodeID  string
 		payload []byte
-	}{topic, payload})
+	}{nodeID, payload})
 	return nil
 }
 

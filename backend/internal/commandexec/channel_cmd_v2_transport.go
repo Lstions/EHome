@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"ehome/backend/internal/deviceaction"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 
 	"gorm.io/gorm"
@@ -77,10 +77,10 @@ const MaxCapabilityAge = resourceReportInterval + capabilityReportMargin
 // envelope and refuses to publish when current node facts cannot prove that
 // the firmware instance supports that envelope.
 type ChannelCmdV2Transport struct {
-	db      *gorm.DB
-	mqtt    mqtt.Publisher
-	actions *deviceaction.Registry
-	now     func() time.Time
+	db       *gorm.DB
+	downlink downlink.Publisher
+	actions  *deviceaction.Registry
+	now      func() time.Time
 }
 
 type commandEngineCapabilities struct {
@@ -93,12 +93,12 @@ type commandEngineCapabilities struct {
 	MaxStepTimeoutMS     uint32 `json:"max_step_timeout_ms"`
 }
 
-func NewChannelCmdV2Transport(db *gorm.DB, publisher mqtt.Publisher, actions *deviceaction.Registry) *ChannelCmdV2Transport {
-	return &ChannelCmdV2Transport{db: db, mqtt: publisher, actions: actions, now: func() time.Time { return time.Now().UTC() }}
+func NewChannelCmdV2Transport(db *gorm.DB, publisher downlink.Publisher, actions *deviceaction.Registry) *ChannelCmdV2Transport {
+	return &ChannelCmdV2Transport{db: db, downlink: publisher, actions: actions, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (t *ChannelCmdV2Transport) Dispatch(ctx context.Context, execution models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
-	if t == nil || t.db == nil || t.mqtt == nil || t.actions == nil {
+	if t == nil || t.db == nil || t.downlink == nil || t.actions == nil {
 		return DispatchResult{}, fmt.Errorf("ChannelCmdV2 transport is unavailable")
 	}
 	return t.dispatch(ctx, t.db, execution, attempt)
@@ -108,7 +108,7 @@ func (t *ChannelCmdV2Transport) Dispatch(ctx context.Context, execution models.C
 // transition transaction. This matters for both transaction consistency and
 // SQLite test semantics, where a separate in-memory connection has no schema.
 func (t *ChannelCmdV2Transport) DispatchInTransaction(ctx context.Context, db *gorm.DB, execution models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
-	if t == nil || db == nil || t.mqtt == nil || t.actions == nil {
+	if t == nil || db == nil || t.downlink == nil || t.actions == nil {
 		return DispatchResult{}, fmt.Errorf("ChannelCmdV2 transport is unavailable")
 	}
 	return t.dispatch(ctx, db, execution, attempt)
@@ -229,7 +229,7 @@ func (t *ChannelCmdV2Transport) dispatch(ctx context.Context, db *gorm.DB, execu
 	if err != nil {
 		return DispatchResult{}, err
 	}
-	if err := t.mqtt.Publish(mqtt.ControlTopicForNode(execution.NodeID), payload); err != nil {
+	if err := t.downlink.Publish(execution.NodeID, payload); err != nil {
 		return DispatchResult{}, fmt.Errorf("publish ChannelCmdV2: %w", err)
 	}
 	return DispatchResult{BootID: bootID, PublishedAt: t.now(), WireDigest: wireDigest}, nil

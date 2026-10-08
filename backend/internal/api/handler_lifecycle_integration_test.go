@@ -53,7 +53,7 @@ func setupLifecycleTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	v1.Use(JWTAuth())
 	registry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(registry)
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, registry)
 	registerEdgeDeviceRoutes(v1, db, mgr, registry)
 	registerDataRoutes(v1, db)
 	registerLogicalDeviceRoutes(v1, db)

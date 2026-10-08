@@ -53,10 +53,39 @@ WT = os.path.dirname(ROOT)                 # worktree root
 SELF = os.path.basename(os.path.abspath(__file__))
 PROBE_DIR = os.path.join(ROOT, "components", "zz_gate_selftest_probe")
 PROBE_REL = "components/zz_gate_selftest_probe"
+# 生产主机字面量：prod_isolation 的配方要把它注入进去。
+# ⚠ 与 check_prod_isolation.py 里的 PROD_HOST 必须**同值** —— 两处各写一份是
+#   有意的冗余：若哪天生产地址变了而只改了一处，配方会因"注入了不触发门禁的
+#   地址"而红（门禁正常、配方失效），从而暴露不一致。反过来若共用一个常量，
+#   改错时两边一起错、自检照样绿。
+PROD_HOST_LITERAL = "192.168.20.6"
 TMP_FRAME = "/tmp/gate_selftest_frame_header.txt"
 TMP_JUNK = "/tmp/gate_selftest_junk.elf"
 
-IRAM_ELF = "/tmp/v3idf-m1/s3-n16/ehome_collector.elf"
+# ⚠⚠ 2026-10-08（§194）：原值是**写死的 /tmp/v3idf-m1/s3-n16/ehome_collector.elf**。
+#   两个问题：
+#     ① /tmp 会被清理、且本项目用户明令"不要把东西放 /tmp"⇒ 该路径长期不存在；
+#     ② 一旦不存在，三条 iram 配方就**永远跳过**（自检报"跳过 3"），
+#        而"跳过"看起来像"环境不完整"、不像缺陷 ⇒ 这三条门禁的自证**长期缺席**。
+#   ⇒ 改为**自动搜索**真实构建产物（按新鲜度取最新的一个）。
+#   为什么不是写死某个 build 目录：build 目录名随实验变（nomqtt/bbase8/...），
+#   写死任何一个都会再次退化成"路径不存在 ⇒ 永远跳过"。
+def _find_iram_elf():
+    """找一个真实的固件 ELF 给 iram 门禁用；找不到返回 None（该 3 条配方跳过）。"""
+    pats = [
+        os.path.join(WT, "__scratch_v3", "build", "*", "*", "ehome_collector.elf"),
+        os.path.join(ROOT, "build", "*", "ehome_collector.elf"),
+    ]
+    cands = []
+    for pat in pats:
+        cands.extend(glob.glob(pat))
+    cands = [c for c in cands if os.path.isfile(c)]
+    if not cands:
+        return None
+    return max(cands, key=os.path.getmtime)
+
+
+IRAM_ELF = _find_iram_elf()
 
 # ── 崩溃安全：写盘日志（journal）────────────────────────────────────────
 #
@@ -427,21 +456,30 @@ def recipes():
                        "登记表里的测试引用指向不存在的文件"),
         "把 dispatch 的 test 改成不存在的文件 ⇒ 门禁必须红（'测试已完成'不能只是嘴上说）")
 
+    # ⚠ 2026-10-08（§194）：本配方原先把锚点打在 link_mqtt 条目上
+    #   （"把 link_mqtt 的 test 换成 sntp_mgr_tests.c"）。
+    #   但 link_mqtt 随 MQTT 一起整体删除了、登记条目也已删除
+    #   ⇒ 正则**打不中任何东西**，inject_replace 抛 AssertionError，
+    #     整个自检**崩掉**（不是"红"，是 traceback 退出）。
+    #   ⚠ 这正是"门禁的判据依赖了一条会消失的输入" —— 自检本身没有兜底。
+    #   ⇒ 锚点改到 dispatch（同一条目类型、同样有 test 字段、长期稳定）。
     add("component_reachable.test_ref_not_mentioning",
         "check_component_reachable.py", "file",
         inject_replace("tools/check_component_reachable.py",
-                       r'"test": "link_mqtt_tests\.c"',
+                       r'"test": "dispatch_tests\.c"',
                        '"test": "sntp_mgr_tests.c"',
                        "登记表里的测试引用是个真文件但并不测该组件"),
-        "把 link_mqtt 的 test 换成 sntp_mgr_tests.c（真文件但不提 link_mqtt）⇒ 必须红")
+        "把 dispatch 的 test 换成 sntp_mgr_tests.c（真文件但不提 dispatch）⇒ 必须红")
 
+    # ⚠ 同上：原锚点是 link_mqtt 的 review_by: "2026-12-01"（条目已删）。
+    #   现改为把 **msgcodec** 的 review_by 改成过去日期 —— 该条目长期存在。
     add("component_reachable.review_overdue",
         "check_component_reachable.py", "file",
         inject_replace("tools/check_component_reachable.py",
-                       r'"review_by": "2026-12-01"',
+                       r'"review_by": "2026-11-15"',
                        '"review_by": "2026-01-01"',
                        "决策截止日已过去"),
-        "把 link_mqtt 的 review_by 改成过去的日期 ⇒ 门禁必须红（清单不能无限期挂着）")
+        "把 msgcodec 的 review_by 改成过去的日期 ⇒ 门禁必须红（清单不能无限期挂着）")
 
     add("component_reachable.test_missing_note",
         "check_component_reachable.py", "file",
@@ -614,17 +652,31 @@ def recipes():
     #   刷了这些固件的设备**连上生产 broker 并自动订阅** nodes/<mac>/{down,control}。
     #   用户本轮明确"禁止碰 192.168.20.6"。
     #   ⇒ 这条门禁是本事故的**唯一**自动化拦截点，必须证明它真的会咬。
-    add("prod_isolation.scratch_broker_uncovered",
+    # ⚠⚠ 2026-10-08（§194）：本配方**整体重写**，原因值得记下来。
+    #
+    #   旧版锚点是 CONFIG_COLLECTOR_MQTT_BROKER_URL（在 linkvarbuf.defaults 里）。
+    #   MQTT 移除后该键**不存在了**，正则命中 0 次 ⇒ inject_replace 抛
+    #   AssertionError ⇒ **整个自检崩掉**（不是红，是 traceback 退出）。
+    #   而 check_prod_isolation.py 已被同步改版为"**按风险**守"（不再绑某个键，
+    #   改为任何键的值指向生产就 FAIL）⇒ 配方也必须按新判据重写。
+    #
+    #   ⚠ 教训：**门禁改判据时，它的自检配方必须同批改** ——
+    #     否则自检会在第一次运行时崩，而这比"门禁失效"更隐蔽：
+    #     崩溃发生在自检里，门禁本身看着还是 PASS 的。
+    #
+    #   新配方：把**联调 defaults** 的 link host 指向生产
+    #   ⇒ 命中 check_prod_isolation 的判据 ②（联调 defaults 不得指生产）。
+    #   用它而不是"删掉某行"：新门禁按**值**判，所以注入一个生产值最直接。
+    add("prod_isolation.scratch_points_at_prod",
         "check_prod_isolation.py", "file",
-        # ⚠ inject_replace 用 re.subn(pattern, repl, text) —— **没有 re.M/re.S**
-        #   ⇒ 不能用 ^ / $ 锚点（那样会命中 0 次并 assert 报错）。
-        #   改用不带锚点的字面锚：只匹配"键 = 值"这一段的字符本身。
         inject_replace(os.path.join("..", "__scratch_v3", "defaults",
-                                    "linkvarbuf.defaults"),
-                       r'CONFIG_COLLECTOR_MQTT_BROKER_URL\s*=\s*"[^"]*"\s*\n?',
-                       '', "测试 defaults 未覆盖 broker（继承生产地址）"),
-        "删掉 __scratch_v3/defaults/linkvarbuf.defaults 的 broker 覆盖 ⇒ 门禁必须红"
-        "（本会话真实事故：设备连上生产 broker 并订阅其下行主题）")
+                                    "s3p_realsrv_nobss.defaults"),
+                       r'CONFIG_EHOME_DEVICE_LINK_HOST\s*=\s*"[^"]*"',
+                       'CONFIG_EHOME_DEVICE_LINK_HOST="%s"' % PROD_HOST_LITERAL,
+                       "联调 defaults 的 link host 指向生产主机"),
+        "把 __scratch_v3/defaults 的 link host 改成生产地址 ⇒ 门禁必须红"
+        "（本会话真实事故：设备连上生产 broker 并订阅其下行主题；"
+        " 现在没有 broker 了，但'设备被指向生产'这个风险不变）")
 
     # ⚠ 第二条 prod_isolation 配方（2026-10-08 本轮发现的**第二个泄漏面**）：
     #   光修 defaults **不够** —— esp32-collector/build/s3p-n16/ 是 2026-10-06 的旧产物，
@@ -633,8 +685,11 @@ def recipes():
     #   本配方在 build/ 下造一个含生产地址的 sdkconfig，验证门禁能抓到它。
     add("prod_isolation.stale_build_artifact",
         "check_prod_isolation.py", "file",
+        # ⚠ §194：注入的键也从已删的 COLLECTOR_MQTT_BROKER_URL 换成现行的
+        #   EHOME_DEVICE_LINK_HOST —— 新门禁按**值里有没有生产主机**判，
+        #   所以"键换成哪个"不影响它咬人；换过来只是让配方贴近真实现状。
         inject_make_file(os.path.join("build", "zz_selftest_stale", "sdkconfig"),
-                         'CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.168.20.6:1883"\n'),
+                         'CONFIG_EHOME_DEVICE_LINK_HOST="%s"\n' % PROD_HOST_LITERAL),
         "build/zz_selftest_stale/sdkconfig 含生产地址 ⇒ 门禁必须红"
         "（陈旧产物不会因修 defaults 而改变）")
 

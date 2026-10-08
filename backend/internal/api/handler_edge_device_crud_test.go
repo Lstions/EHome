@@ -67,7 +67,7 @@ func setupEdgeDeviceTestWithRegistry(t *testing.T, customize func(*drivers.Regis
 	if customize != nil {
 		customize(registry)
 	}
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, registry)
 	registerEdgeDeviceRoutes(v1, db, mgr, registry)
 	return r, db
 }

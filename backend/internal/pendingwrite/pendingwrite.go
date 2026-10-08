@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/metrics"
@@ -39,10 +39,10 @@ type Response struct {
 
 // Manager handles pending write operations with timeout and retry
 type Manager struct {
-	mu      sync.RWMutex
-	pending map[uint32]*Entry
-	mqtt    mqtt.Publisher
-	db      *gorm.DB // P3-4: database persistence
+	mu       sync.RWMutex
+	pending  map[uint32]*Entry
+	downlink downlink.Publisher
+	db       *gorm.DB // P3-4: database persistence
 }
 
 // nextRequestID is an atomic counter for generating unique request IDs,
@@ -53,18 +53,17 @@ func init() {
 	nextRequestID = uint32(time.Now().UnixNano())
 }
 
-// NewManager creates a new pending write manager
-// NewManager takes mqtt.Publisher rather than *mqtt.Client so the 3.0
+// NewManager creates a new pending write manager.
 //
-//	downlink bridge can be injected during the MQTT retirement window (design
-//	§7.3). Widening the parameter is compile-checked: every caller must be
-//	updated, so no downlink path can be left silently pointing at the old
-//	transport.
-func NewManager(mqttClient mqtt.Publisher, db *gorm.DB) *Manager {
+// It takes downlink.Publisher (not the concrete *downlink.Bridge) so tests can
+// substitute a recorder. Widening this parameter is compile-checked: every
+// caller must be updated, so no downlink path can be left pointing at a
+// transport that no longer exists.
+func NewManager(downlinkPublisher downlink.Publisher, db *gorm.DB) *Manager {
 	m := &Manager{
-		pending: make(map[uint32]*Entry),
-		mqtt:    mqttClient,
-		db:      db,
+		pending:  make(map[uint32]*Entry),
+		downlink: downlinkPublisher,
+		db:       db,
 	}
 
 	// P3-4: Auto-migrate the persistence table. WAL is a SQLite-only setting.
@@ -144,9 +143,12 @@ func (m *Manager) SendWriteCommand(ctx context.Context, deviceID string, channel
 		metrics.PendingWrites.Dec()
 	}()
 
-	// Send the command (P3-5: QoS 2 for critical write operations)
-	topic := mqtt.ControlTopicForNode(deviceID)
-	if err := m.mqtt.PublishQoS2(topic, enc.Bytes()); err != nil {
+	// Send the command. This used to request MQTT QoS 2 ("exactly once") for
+	// critical writes; over 3.0 there is no QoS, and the old path had already
+	// been downgraded to a best-effort write with a counter rather than hidden.
+	// The write is still confirmed by the device's response below, which is what
+	// actually makes it safe to report success.
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		entry.resolve(&Response{Success: false, ErrorMsg: fmt.Sprintf("failed to publish: %v", err)})
 		return nil, fmt.Errorf("failed to publish: %w", err)
 	}

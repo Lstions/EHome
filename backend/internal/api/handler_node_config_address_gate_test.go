@@ -42,7 +42,7 @@ func nodeConfigTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	drivers.RegisterBuiltInDrivers(registry)
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, registry)
 	registerNodeRoutes(v1, db, mgr, registry)
 	return r, db
 }

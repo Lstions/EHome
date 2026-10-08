@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/nodemgr"
 	"ehome/backend/pkg/logger"
 
@@ -25,6 +25,19 @@ func init() {
 // setupPeriphTest 创建外设控制测试路由 (GPIO/PWM)
 // 返回 gin.Engine 和 gorm.DB, 数据库中预置一个节点
 func setupPeriphTest(t *testing.T) (*gin.Engine, *gorm.DB, *nodemgr.Manager) {
+	t.Helper()
+	// 默认：一条**可用**的下行（等价于设备已连上）。多数用例测的是路由与校验，
+	// 不该被"传输不可用"干扰。
+	return setupPeriphTestDownlink(t, &envelopeDownlinkStub{})
+}
+
+// setupPeriphTestDownlink 让调用方决定下行是否可用。
+//
+// ⚠ 为什么需要它：这些用例原先都靠传一个**零值 mqtt.Client**（client 为 nil，
+// 每次 Publish 都报错）来构造"没有传输"的失败路径。MQTT 删除后那个 client
+// 不存在了，失败路径改由**显式注入一个会报错的下行**来表达 —— 比原来更清楚：
+// 原来"失败"是 mock 的副作用，"成功"根本没法表达；现在两种都是显式的。
+func setupPeriphTestDownlink(t *testing.T, down downlink.Publisher) (*gin.Engine, *gorm.DB, *nodemgr.Manager) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -44,9 +57,7 @@ func setupPeriphTest(t *testing.T) (*gin.Engine, *gorm.DB, *nodemgr.Manager) {
 	// 创建默认用户 (JWT 需要 user_id=1 存在)
 	db.Create(&models.User{Username: "admin", PasswordHash: "$2a$10$dummy", Role: "admin", Enabled: true})
 
-	// 使用零值 mqtt.Client (c.client=nil, PublishQoS2 返回 error 而非 panic)
-	mockMQTT := &mqtt.Client{}
-	mgr := nodemgr.NewManager(db, mockMQTT, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, down, nil, nil, nil)
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
@@ -522,21 +533,22 @@ func TestGPIO_Delete_ConfigNotFound(t *testing.T) {
 // ==================== POST /nodes/:id/gpio/:pin/set ====================
 
 func TestGPIO_Set_Success(t *testing.T) {
-	// Arrange: 创建带有 mqtt publisher 的 manager (nil mqtt 会导致 SendPeriphCmd 报错)
-	// 由于 SendPeriphCmd 需要 mqtt client, 这里测试 nil mqtt 的错误路径
+	// ⚠ 本用例原先**断言不了成功**：它依赖零值 mqtt.Client 恒失败，所以只有一条
+	// 软日志（t.Logf）—— 名字叫 Success，实际测的是失败路径，且失败时不会红。
+	// 现在下行可用，这里断言真正的成功路径。
 	r, db, _ := setupPeriphTest(t)
-	createTestNode(t, db, "node-1")
+	// ⚠ 必须带 periph 资源：否则在到达下行之前就被 422
+	// "node has not reported usable GPIO resources" 拦下 —— 这也正是本用例
+	// 改名前的软断言一直"通过"的原因（它根本没走到被测代码）。
+	createTestNodeWithPeriphResources(t, db, "node-1")
+	db.Create(&models.GPIOConfig{NodeID: "node-1", Pin: 6, Direction: 1, Label: "out", Enabled: true})
 
-	// Act: 发送 set 命令 (mqtt=nil, SendPeriphCmd 会失败)
-	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/3/set", map[string]interface{}{
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/6/set", map[string]interface{}{
 		"level": 1,
 	})
 
-	// Assert: 由于 mqtt 为 nil, SendPeriphCmd 会报错, 返回 500
-	// 这是预期行为 — 没有 MQTT 连接时无法发送命令
-	if w.Code != http.StatusInternalServerError {
-		// 如果有 mqtt mock 则可能成功
-		t.Logf("got status %d (expected 500 without MQTT): %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with a working downlink, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -546,7 +558,7 @@ func TestGPIO_Set_Toggle(t *testing.T) {
 	createTestNode(t, db, "node-1")
 
 	// Act
-	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/3/set", map[string]interface{}{
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/6/set", map[string]interface{}{
 		"toggle": true,
 	})
 
@@ -597,17 +609,17 @@ func TestGPIO_Read_NodeNotFound(t *testing.T) {
 	}
 }
 
-func TestGPIO_Read_NoMQTT(t *testing.T) {
-	// Arrange
-	r, db, _ := setupPeriphTest(t)
-	createTestNode(t, db, "node-1")
+func TestGPIO_Read_NoDownlink(t *testing.T) {
+	// 下行不可用（设备未连上）⇒ SendPeriphCmd 报错 ⇒ 500。
+	// 原用例名带 MQTT；语义其实是"没有可用下行"，故改名。
+	r, db, _ := setupPeriphTestDownlink(t, &envelopeDownlinkStub{err: errStubNoDownlink})
+	createTestNodeWithPeriphResources(t, db, "node-1")
+	db.Create(&models.GPIOConfig{NodeID: "node-1", Pin: 7, Direction: 0, Label: "in", Enabled: true})
 
-	// Act
-	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/2/read", nil)
+	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/gpio/7/read", nil)
 
-	// Assert: 没有 MQTT 时 SendPeriphCmd 报错
 	if w.Code != http.StatusInternalServerError {
-		t.Logf("got status %d (expected 500 without MQTT): %s", w.Code, w.Body.String())
+		t.Fatalf("expected 500 when no downlink is available, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1291,14 +1303,13 @@ func TestPWM_Start_ConfigNotFound(t *testing.T) {
 	}
 }
 
-func TestPWM_Start_NoMQTT(t *testing.T) {
-	r, db, _ := setupPeriphTest(t)
+func TestPWM_Start_NoDownlink(t *testing.T) {
+	r, db, _ := setupPeriphTestDownlink(t, &envelopeDownlinkStub{err: errStubNoDownlink})
 	node := createTestNodeWithPeriphResources(t, db, "node-1")
 	db.Create(&models.PWMConfig{NodeID: node.NodeID, HardwareID: "PWM0", Channel: 0, Pin: 6, Frequency: 1000, Duty: 500, Resolution: 14, Enabled: true})
 	w := periphJSON(t, r, "POST", "/api/v1/nodes/node-1/pwm/PWM0/start", nil)
-	// 没有 MQTT, SendPeriphCmd 报错 → 500
 	if w.Code != http.StatusInternalServerError {
-		t.Logf("got %d (expected 500 without MQTT): %s", w.Code, w.Body.String())
+		t.Fatalf("expected 500 when no downlink is available, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1386,9 +1397,10 @@ func TestPWM_GetState_Success(t *testing.T) {
 	// Act
 	w := periphJSON(t, r, "GET", "/api/v1/nodes/node-1/pwm/PWM0/state", nil)
 
-	// Assert
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 without MQTT runtime authority, got %d: %s", w.Code, w.Body.String())
+	// Assert: 下行可用 ⇒ 读取命令已发出 ⇒ 200（与用例名一致）。
+	// 原断言 503 依赖"零值 mqtt.Client 恒失败"，测的其实是失败路径。
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 with a working downlink, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

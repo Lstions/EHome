@@ -527,14 +527,6 @@ func (p *fwE2EMQTTPublisher) Publish(_ string, payload []byte) error {
 	p.record("pub", payload)
 	return nil
 }
-func (p *fwE2EMQTTPublisher) PublishQoS2(_ string, payload []byte) error {
-	p.record("qos2", payload)
-	return nil
-}
-func (p *fwE2EMQTTPublisher) PublishRetained(_ string, payload []byte) error {
-	p.record("retained", payload)
-	return nil
-}
 
 // helloAckFrames 返回捕获到的全部 HelloAck(0x12) 帧。
 func (p *fwE2EMQTTPublisher) helloAckFrames() [][]byte {
@@ -631,7 +623,7 @@ func newHandshakeManager(t *testing.T, pub *fwE2EMQTTPublisher) (*nodemgr.Manage
 	db := testutil.OpenTestDB(t)
 	hub := websocket.NewHub()
 	go hub.Run()
-	mgr := nodemgr.NewManager(db, pub, hub, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, pub, hub, nil, nil)
 	return mgr, db
 }
 

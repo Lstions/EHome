@@ -180,8 +180,8 @@ func TestHandleHelloAckCarriesDataBatchCapability(t *testing.T) {
 }
 
 func TestHandleHelloRejectsWireNodeMismatch(t *testing.T) {
-	mock := &senderMockMQTT{}
-	mgr := &Manager{mqtt: mock}
+	mock := &senderMockDownlink{}
+	mgr := &Manager{downlink: mock}
 	mgr.handleHello("topic-node", encodedHelloWithNonce(42))
 	if len(mock.records) != 0 {
 		t.Fatalf("mismatched wire node published %d frame(s), want none", len(mock.records))
@@ -241,8 +241,8 @@ func TestParseHelloRejectsInvalidHandshakeNonce(t *testing.T) {
 func TestHandleHelloInvalidNonceDoesNotSendAck(t *testing.T) {
 	for name, payload := range invalidNonceHelloFrames() {
 		t.Run(name, func(t *testing.T) {
-			mock := &senderMockMQTT{}
-			mgr := &Manager{mqtt: mock}
+			mock := &senderMockDownlink{}
+			mgr := &Manager{downlink: mock}
 			mgr.handleHello("topic-node", payload)
 			if len(mock.records) != 0 {
 				t.Fatalf("invalid Hello published %d frame(s), want none", len(mock.records))
@@ -264,7 +264,7 @@ func TestHandleHelloInvalidNonceDoesNotSendAck(t *testing.T) {
 // end to end. Only nodes + node_events exist, so the config-hash pipeline
 // (which needs config_templates/edge_devices) degrades to SyncActionNone
 // instead of pushing a manifest — these tests stay focused on registration.
-func newHelloTestManager(t *testing.T) (*Manager, *gorm.DB, *senderMockMQTT) {
+func newHelloTestManager(t *testing.T) (*Manager, *gorm.DB, *senderMockDownlink) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -273,8 +273,8 @@ func newHelloTestManager(t *testing.T) (*Manager, *gorm.DB, *senderMockMQTT) {
 	if err := db.AutoMigrate(&models.Node{}, &models.NodeEvent{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	mock := &senderMockMQTT{}
-	mgr := &Manager{db: db, mqtt: mock, wsHub: websocket.NewHub()}
+	mock := &senderMockDownlink{}
+	mgr := &Manager{db: db, downlink: mock, wsHub: websocket.NewHub()}
 	mgr.syncGate = NewSyncGate(mgr, nil)
 	return mgr, db, mock
 }
@@ -295,7 +295,7 @@ func encodedHelloFor(deviceID string, nonce uint64) []byte {
 	return enc.Bytes()
 }
 
-func countHelloAcks(mock *senderMockMQTT) int {
+func countHelloAcks(mock *senderMockDownlink) int {
 	acks := 0
 	for _, rec := range mock.records {
 		if len(rec.payload) > 0 && rec.payload[0] == frame.MsgHelloAck {

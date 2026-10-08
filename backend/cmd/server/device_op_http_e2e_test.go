@@ -42,7 +42,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -58,40 +57,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// errNoDownlinkPath 表示"这条通路也送不到"（例如该 node 不在 MQTT 上、broker 不可达）。
-var errNoDownlinkPath = errors.New("no downlink path available for this node")
-
-// countingLegacy 记录被当作兜底调用的次数。
+// ⚠ countingLegacy（MQTT 兜底计数器）已随 MQTT 一起删除（2026-10-08）。
 //
-// 它存在的意义：**证明下行确实走的是 TCP**。若 Bridge 因为找不到会话而回落到
-// MQTT 兜底，这里就会 +1 —— 那样即使 HTTP 回 200，也说明设备根本没收到。
-type countingLegacy struct {
-	mu     sync.Mutex
-	calls  int
-	failIt bool
-}
-
-func (c *countingLegacy) bump() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls++
-	if c.failIt {
-		return errNoDownlinkPath
-	}
-	return nil
-}
-
-func (c *countingLegacy) Publish(topic string, payload []byte) error     { return c.bump() }
-func (c *countingLegacy) PublishQoS2(topic string, payload []byte) error { return c.bump() }
-func (c *countingLegacy) PublishRetained(topic string, payload []byte) error {
-	return c.bump()
-}
-
-func (c *countingLegacy) count() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.calls
-}
+// 它原本用来证明"下行确实走了 TCP 而不是回落 MQTT"。MQTT 已不存在 ⇒ 没有
+// 回落通道可走，这条性质变成**结构性**的：downlink.Publish 在没有会话时
+// 直接返回 error（见 internal/downlink），"没送到却回 200" 不再可能。
+// 下面第 3 条用例仍然覆盖"断链 ⇒ 明确错误码"，只是不再需要计数器。
+// 注：sync/errors 两个 import 随之删除（见文件头）。
 
 // httpOpEnv 是一条**完整装配**的链路句柄。
 type httpOpEnv struct {
@@ -101,7 +73,6 @@ type httpOpEnv struct {
 	addr   string
 	db     *gorm.DB
 	pki    *e2ePKI
-	legacy *countingLegacy
 	token  string
 	nodeID string
 }
@@ -124,13 +95,10 @@ func e2eJWTSecret() []byte {
 // ⚠ 传输层与 HTTP 层必须共用**同一个** db / hub / manager：
 // device_e2e_test.go 记过一次教训 —— registry 若被两半各建一个，
 // 设备会认证成功、发 Hello、然后**什么都收不到**，而且没有报错。
-func newHTTPOpEnv(t *testing.T, nodeID string, legacy *countingLegacy) *httpOpEnv {
+func newHTTPOpEnv(t *testing.T, nodeID string) *httpOpEnv {
 	t.Helper()
-	if legacy == nil {
-		legacy = &countingLegacy{}
-	}
 	pki := newE2EPKI(t, nodeID)
-	srv, mgr, addr, db, hub := startE2EServerEx(t, pki, legacy)
+	srv, mgr, addr, db, hub := startE2EServerEx(t, pki)
 
 	// 内存 SQLite 的每条连接是**独立的库**；链路里的 DB 访问跨 goroutine，
 	// 钉住连接池才能保证它们看到同一份数据（既有用例同款做法）。
@@ -155,7 +123,7 @@ func newHTTPOpEnv(t *testing.T, nodeID string, legacy *countingLegacy) *httpOpEn
 	api.SetupRoutes(engine, db, hub, mgr, nil, nil)
 
 	return &httpOpEnv{engine: engine, srv: srv, mgr: mgr, addr: addr,
-		db: db, pki: pki, legacy: legacy, token: token, nodeID: nodeID}
+		db: db, pki: pki, token: token, nodeID: nodeID}
 }
 
 func seedSessionForHTTPOp(t *testing.T, db *gorm.DB) string {
@@ -293,7 +261,7 @@ const httpOpNodeID = "http-op-node" // 非纯数字：findNodeByID 先试 Atoi �
 // ══════════════════════════════════════════════════════════════════════════
 
 func TestHTTPDeviceOp_ACKReachesDevice_Returns200(t *testing.T) {
-	env := newHTTPOpEnv(t, httpOpNodeID, nil)
+	env := newHTTPOpEnv(t, httpOpNodeID)
 	env.mgr.SetDeviceOpTimeout(10 * time.Second)
 
 	// 先证明这条路由**确实在生产鉴权之后**（不是被绕过）。
@@ -365,11 +333,6 @@ func TestHTTPDeviceOp_ACKReachesDevice_Returns200(t *testing.T) {
 		t.Fatalf("响应 request_id = %q, 设备 ACK 的是 %q —— 关联错了就说明配错了请求",
 			body.Data.RequestID, requestID)
 	}
-	// ⭐ 下行必须走的是 TCP，不是 MQTT 兜底。
-	if n := env.legacy.count(); n != 0 {
-		t.Fatalf("下行有 %d 次落到了 MQTT 兜底 —— 说明会话没被 bridge 认到，"+
-			"设备实际没收到，但 HTTP 却回了 200", n)
-	}
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -380,7 +343,7 @@ func TestHTTPDeviceOp_ACKReachesDevice_Returns200(t *testing.T) {
 // "设备做了" 与 "发出去了、不知道做没做"。
 // 把它当成失败（502/500）会让操作员白跑一趟现场；当成成功（200）是撒谎。
 func TestHTTPDeviceOp_NoACKReturns202NotError(t *testing.T) {
-	env := newHTTPOpEnv(t, httpOpNodeID, nil)
+	env := newHTTPOpEnv(t, httpOpNodeID)
 	// 短超时：这条用例要等的就是"没有 ACK"。
 	env.mgr.SetDeviceOpTimeout(250 * time.Millisecond)
 
@@ -410,12 +373,11 @@ func TestHTTPDeviceOp_NoACKReturns202NotError(t *testing.T) {
 // 场景：设备从未连上（或已断开），TCP 没有会话；MQTT 这条路也送不到。
 // 正确答案是**明确告诉操作员"没送到"**（502），而不是"已受理"。
 //
-// 为什么让 legacy 失败：真实生产里，一个 3.0 节点的 MQTT 通路是**不在**的；
-// 若让兜底假装成功（recordingLegacy 返回 nil），HTTP 会回 202——
-// 那个 202 的含义是"已投递但无应答"，而实际是"根本没投递"，属误报。
+// ⚠ MQTT 移除后这条路径**变简单了**：没有"socket 断了但 broker 收下了"这种
+// 中间态。没有会话就是没有投递，error 直接冒到 HTTP 层 ⇒ 502。
+// （改动前它靠"让兜底 publisher 返回错误"来构造同一种语义。）
 func TestHTTPDeviceOp_DisconnectedNoPathReturnsExplicitError(t *testing.T) {
-	legacy := &countingLegacy{failIt: true}
-	env := newHTTPOpEnv(t, httpOpNodeID, legacy)
+	env := newHTTPOpEnv(t, httpOpNodeID)
 	env.mgr.SetDeviceOpTimeout(500 * time.Millisecond)
 
 	// ⚠ 刻意**不**建立设备会话：这就是断链。
@@ -428,9 +390,9 @@ func TestHTTPDeviceOp_DisconnectedNoPathReturnsExplicitError(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("下行没能交给任何传输时应回 502，实际 %d：%s", w.Code, w.Body.String())
 	}
-	if legacy.count() == 0 {
-		t.Fatal("兜底一次都没被调用 —— 那这条用例没有覆盖到\"没有 TCP 会话\"的分支")
-	}
+	// ⚠ 这里原本还有一条"兜底被调用过"的断言，用来证明覆盖了"没有 TCP 会话"
+	// 的分支。MQTT 移除后没有兜底可查；该分支现在由**上面两条**断言覆盖：
+	// 非 200 + 恰好 502（502 只在"无法交给任何传输"时产生）。
 	// 502 的 body 是错误封装（data=null），绝不能含 acked=true。
 	if strings.Contains(w.Body.String(), "\"acked\":true") {
 		t.Fatalf("502 响应里出现了 acked=true：%s", w.Body.String())
@@ -447,7 +409,7 @@ func TestHTTPDeviceOp_DisconnectedNoPathReturnsExplicitError(t *testing.T) {
 //
 // 红线与 3a 相同：**不能是 200**。
 func TestHTTPDeviceOp_DeviceDropsMidOperationIsNotSuccess(t *testing.T) {
-	env := newHTTPOpEnv(t, httpOpNodeID, nil)
+	env := newHTTPOpEnv(t, httpOpNodeID)
 	env.mgr.SetDeviceOpTimeout(800 * time.Millisecond)
 
 	conn := dialDeviceForOp(t, env)
@@ -486,8 +448,6 @@ func TestHTTPDeviceOp_DeviceDropsMidOperationIsNotSuccess(t *testing.T) {
 	if body.Data.Acked {
 		t.Fatal("设备断开且没回 ACK，响应却声称 acked=true")
 	}
-	// 下行确实走的是 TCP（设备读到了），所以不该有任何 MQTT 兜底。
-	if n := env.legacy.count(); n != 0 {
-		t.Fatalf("下行落了 %d 次 MQTT 兜底，但设备明明读到了 —— 传输选择不一致", n)
-	}
+	// 下行确实走的是 TCP：上面 readUntilType 已经把 0x22 从设备 socket 里读出来了，
+	// 那本身就是"送到了"的证据（MQTT 移除后不再需要计数器来排除误投）。
 }

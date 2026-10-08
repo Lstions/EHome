@@ -19,7 +19,7 @@ import (
 
 type fakeOpPublisher struct {
 	mu       sync.Mutex
-	topics   []string
+	nodeIDs  []string
 	payloads [][]byte
 	err      error
 	// onPublish runs while the "publish" is in flight, so a test can deliver
@@ -27,9 +27,9 @@ type fakeOpPublisher struct {
 	onPublish func(payload []byte)
 }
 
-func (f *fakeOpPublisher) Publish(topic string, payload []byte) error {
+func (f *fakeOpPublisher) Publish(nodeID string, payload []byte) error {
 	f.mu.Lock()
-	f.topics = append(f.topics, topic)
+	f.nodeIDs = append(f.nodeIDs, nodeID)
 	f.payloads = append(f.payloads, append([]byte(nil), payload...))
 	err := f.err
 	hook := f.onPublish
@@ -40,16 +40,8 @@ func (f *fakeOpPublisher) Publish(topic string, payload []byte) error {
 	return err
 }
 
-func (f *fakeOpPublisher) PublishQoS2(topic string, payload []byte) error {
-	return f.Publish(topic, payload)
-}
-
-func (f *fakeOpPublisher) PublishRetained(topic string, payload []byte) error {
-	return f.Publish(topic, payload)
-}
-
 func newOpManager(pub *fakeOpPublisher) *Manager {
-	m := &Manager{mqtt: pub}
+	m := &Manager{downlink: pub}
 	m.deviceOps = NewDeviceOpTracker()
 	return m
 }
@@ -84,8 +76,8 @@ func TestSendDeviceOpDeliversEncodableRequest(t *testing.T) {
 	if !out.Acked || out.Result != frame.DeviceOpOK {
 		t.Fatalf("outcome = %+v, want acked OK", out)
 	}
-	if len(pub.topics) != 1 {
-		t.Fatalf("published %d times, want 1", len(pub.topics))
+	if len(pub.nodeIDs) != 1 {
+		t.Fatalf("published %d times, want 1", len(pub.nodeIDs))
 	}
 }
 
@@ -111,9 +103,9 @@ func TestSendDeviceOpRefusesWhileInFlight(t *testing.T) {
 	if _, err := m.SendDeviceOp("n1", frame.DeviceOpReboot, time.Second); err == nil {
 		t.Fatal("a second request was accepted while one was in flight")
 	}
-	if len(pub.topics) != 0 {
+	if len(pub.nodeIDs) != 0 {
 		t.Fatalf("a refused request was still published (%v); the device would "+
-			"receive two reboots", pub.topics)
+			"receive two reboots", pub.nodeIDs)
 	}
 }
 
@@ -220,7 +212,7 @@ func TestUnackedThroughSendDeviceOpIsNotAnAck(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		pub.mu.Lock()
-		published := len(pub.topics) > 0
+		published := len(pub.nodeIDs) > 0
 		pub.mu.Unlock()
 		if published {
 			break

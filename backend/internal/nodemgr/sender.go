@@ -12,7 +12,6 @@ import (
 
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
 	"ehome/backend/pkg/protoframe"
@@ -209,8 +208,10 @@ func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uin
 	logger.Infof("[%s] SendPeriphCmd: type=%d resource_id=%d action=%d value=%d config_len=%d reqID=%d",
 		deviceID, periphType, resourceID, action, value, len(config), requestID)
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-	if m.mqtt == nil {
+	if m.downlink == nil {
+		// Unwired publisher: tests construct a Manager without one. Refuse and
+		// release the pending entry rather than pretending the command went out.
+
 		delete(m.periphPending, requestID)
 		if m.periphLatest[latestKey] == requestID {
 			if hadPreviousLatest {
@@ -224,9 +225,9 @@ func (m *Manager) sendPeriphCmdWithPreviousValue(deviceID string, periphType uin
 			}
 		}
 		m.periphMu.Unlock()
-		return 0, fmt.Errorf("MQTT client not connected")
+		return 0, fmt.Errorf("no downlink publisher configured")
 	}
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		delete(m.periphPending, requestID)
 		if m.periphLatest[latestKey] == requestID {
 			if hadPreviousLatest {
@@ -276,8 +277,7 @@ func (m *Manager) SendPing(deviceID string) error {
 		})
 	}
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendWriteCommand sends a WriteCommand to a device
@@ -298,8 +298,7 @@ func (m *Manager) SendWriteCommand(deviceID string, channelID uint32, data []byt
 		enc.EncodeVarint(4, uint64(readSize))
 	}
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-	return m.mqtt.PublishQoS2(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendScanRequest sends a ScanRequest to a device (I2C mode)
@@ -308,8 +307,7 @@ func (m *Manager) SendScanRequest(deviceID string, hardwareID uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("scan-%d", time.Now().Unix()))
 	enc.EncodeVarint(2, uint64(hardwareID))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendModbusScanRequest sends a ScanRequest to a device (Modbus mode)
@@ -341,8 +339,7 @@ func (m *Manager) SendModbusScanRequest(deviceID string, startAddr, endAddr, tim
 		enc.EncodeVarint(6, 200) // default 200ms
 	}
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return "", err
 	}
 	return requestID, nil
@@ -354,8 +351,7 @@ func (m *Manager) SendQueryRequest(deviceID string, queryType uint32) error {
 	enc.EncodeString(1, fmt.Sprintf("query-%d", time.Now().UnixMilli()))
 	enc.EncodeVarint(2, uint64(queryType))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendHelloAck sends a nonce-correlated HelloAck (0x12, SVR→ESP).
@@ -369,8 +365,7 @@ func (m *Manager) SendHelloAck(deviceID string, serverTime uint64, features uint
 	enc.EncodeVarint(2, uint64(features))
 	enc.EncodeVarint(frame.HelloAckFieldHandshakeNonce, uint64(handshakeNonce))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendConfigQuery sends a ConfigQuery (type=0x10) to a device
@@ -378,8 +373,7 @@ func (m *Manager) SendConfigQuery(deviceID string) error {
 	enc := frame.NewEncoder(frame.MsgConfigQuery)
 	enc.EncodeString(1, fmt.Sprintf("cfgq-%d", time.Now().UnixMilli()))
 
-	topic := mqtt.TopicForNode(deviceID)
-	return m.mqtt.Publish(topic, enc.Bytes())
+	return m.downlink.Publish(deviceID, enc.Bytes())
 }
 
 // SendQueryResources sends a QueryResources (0x1A) to a device, requesting it to send a ResourceReport.
@@ -390,8 +384,7 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 	enc := frame.NewEncoder(frame.MsgQueryResources)
 	enc.EncodeString(1, requestID)
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return "", fmt.Errorf("failed to publish QueryResources: %w", err)
 	}
 
@@ -408,14 +401,13 @@ func (m *Manager) SendQueryResources(deviceID string) (string, error) {
 //	accepted=false → persistence failed; the device MUST keep the record and
 //	                 retry. Never send true unless the row is committed.
 //
-// Mirrors SendQueryResources: encode → Publish(mqtt.TopicForNode(deviceID)).
+// Mirrors SendQueryResources: encode → downlink.Publish(deviceID).
 func (m *Manager) SendDiagAck(deviceID string, recordID uint32, accepted bool) error {
 	enc := frame.NewEncoder(frame.MsgDiagAck)
 	enc.EncodeVarint(1, uint64(recordID))
 	enc.EncodeBool(2, accepted)
 
-	topic := mqtt.TopicForNode(deviceID)
-	if err := m.mqtt.Publish(topic, enc.Bytes()); err != nil {
+	if err := m.downlink.Publish(deviceID, enc.Bytes()); err != nil {
 		return fmt.Errorf("failed to publish DiagAck: %w", err)
 	}
 	return nil
@@ -679,9 +671,10 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		return fail(fmt.Errorf("encode config manifest: %w", err))
 	}
 
-	topic := mqtt.ControlTopicForNode(deviceID)
-
-	// R1 byte gate: the encoded manifest must fit in ONE MQTT downlink event.
+	// R1 byte gate: the encoded manifest must fit in ONE downlink message.
+	// ⚠ See MaxManifestWireBytes: the bound was DERIVED from the MQTT receive
+	// buffer and has not been re-derived for the 3.0 TCP path. It is kept
+	// unchanged (conservative) rather than silently widened.
 	// Checked on the exact bytes about to be published (same snapshot, same
 	// encode call — never a re-encode), before any state is marked "syncing",
 	// so an undeliverable manifest is rejected with a diagnosable error and the
@@ -701,7 +694,7 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 		return fail(fmt.Errorf("persist syncing state: %w", err))
 	}
 
-	if err := m.mqtt.Publish(topic, payload); err != nil {
+	if err := m.downlink.Publish(deviceID, payload); err != nil {
 		logger.Infof("[%s] Failed to send config: %v", deviceID, err)
 		return fail(fmt.Errorf("publish config manifest: %w", err))
 	}

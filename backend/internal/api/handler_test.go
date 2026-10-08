@@ -349,7 +349,7 @@ func TestNodeCRUD_List(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes", nil)
@@ -394,7 +394,7 @@ func TestNodeCRUD_GetByID(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/1", nil)
@@ -414,7 +414,7 @@ func TestNodeCRUD_GetByNodeID(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/F0F5BD02F35C", nil)
@@ -432,7 +432,7 @@ func TestNodeCRUD_Get_NotFound(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/999", nil)
@@ -450,7 +450,7 @@ func TestNodeCRUD_Create(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"node_id": "NODE003",
@@ -484,7 +484,7 @@ func TestNodeCRUD_Create_InvalidBody(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/nodes", strings.NewReader("not json"))
@@ -505,7 +505,7 @@ func TestNodeCRUD_Update(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":             "New Name",
@@ -547,7 +547,7 @@ func TestNodeCRUD_Update_NotFound(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body, _ := json.Marshal(map[string]interface{}{"name": "X"})
 	w := httptest.NewRecorder()
@@ -569,7 +569,7 @@ func TestNodeCRUD_Delete(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/nodes/1", nil)
@@ -593,7 +593,7 @@ func TestNodeCRUD_Delete_NotFound(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/nodes/999", nil)
@@ -618,7 +618,7 @@ func TestNode_GetChannels(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/1/channels", nil)
@@ -639,7 +639,7 @@ func TestNode_GetData(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/1/data?limit=10", nil)
@@ -659,7 +659,7 @@ func TestNode_Capabilities(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/1/capabilities", nil)
@@ -690,7 +690,7 @@ func TestNode_HardwareConfig_Get(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/nodes/1/hardware/config", nil)
@@ -710,7 +710,7 @@ func TestNode_HardwareConfig_PutRejectsReportedBuses(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"hardware": map[string]interface{}{
@@ -750,7 +750,7 @@ func TestNode_UpdateCannotInjectReportedResources(t *testing.T) {
 	}
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body := bytes.NewBufferString(`{"name":"after","capabilities":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}","hardware_info":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}"}`)
 	w := httptest.NewRecorder()
@@ -778,7 +778,7 @@ func TestNode_CreateCannotInjectReportedResourcesOrModelFields(t *testing.T) {
 	r := setupRouter()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	body := bytes.NewBufferString(`{"id":999,"node_id":"NODE001","name":"created","platform":"forged-platform","capabilities":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}","hardware_info":"{\"buses\":{\"gpio\":[{\"pin\":99}]}}"}`)
 	w := httptest.NewRecorder()
@@ -812,7 +812,7 @@ func TestNodeConfigUpdateRejectsPeripheralChannelTypes(t *testing.T) {
 			db.Create(&ch)
 			v1 := r.Group("/api/v1")
 			v1.Use(JWTAuth())
-			registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+			registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 			body, _ := json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{{"id": ch.ID, "bus_type": busType}}})
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
@@ -847,7 +847,7 @@ func TestNodeConfigCannotEnableStoredLegacyPeripheralChannel(t *testing.T) {
 	ch.Enabled = false
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 	body, _ := json.Marshal(map[string]interface{}{"channels": []map[string]interface{}{{"id": ch.ID, "enabled": true}}})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("PUT", fmt.Sprintf("/api/v1/nodes/%d/config", node.ID), bytes.NewReader(body))
@@ -878,7 +878,7 @@ func TestNodeConfigUpdateEnforcesDeviceConfigBinding(t *testing.T) {
 	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: node.NodeID, ChannelID: 1, DeviceConfigID: 1})
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	for _, payload := range []map[string]interface{}{
 		{"edge_devices": []map[string]interface{}{{"id": 1, "channel_id": 2}}},
@@ -991,7 +991,7 @@ func TestNodeConfigUpdateRejectsDisablingBoundChannel(t *testing.T) {
 	db.Create(&models.EdgeDevice{Name: "Device", Type: "bmp280", NodeID: node.NodeID, ChannelID: 1, DeviceConfigID: 1})
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil)
 	registerNodeRoutes(v1, db, mgr)
 
 	bus := mgr.EventBus()
@@ -1027,7 +1027,7 @@ func TestNode_I2CScan(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil))
+	registerNodeRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil))
 
 	// P1-B: this request used to be sent with a nil body, and it only passed
 	// because the handler discarded the ShouldBindJSON error ("EOF" for an empty
@@ -1215,7 +1215,7 @@ func TestEdgeDevice_List(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices", nil)
@@ -1238,7 +1238,7 @@ func TestEdgeDevice_GetByID(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1", nil)
@@ -1256,7 +1256,7 @@ func TestEdgeDevice_Get_NotFound(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/999", nil)
@@ -1279,7 +1279,7 @@ func TestEdgeDevice_Delete(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("DELETE", "/api/v1/edge-devices/1", nil)
@@ -1297,7 +1297,7 @@ func TestEdgeDevice_LatestData(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/latest-data", nil)
@@ -1316,7 +1316,7 @@ func TestEdgeDevice_Data(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/edge-devices/1/data?page=1&page_size=10", nil)
@@ -1335,7 +1335,7 @@ func TestEdgeDevice_OperationsIsNotProvidedByLegacyRoutes(t *testing.T) {
 
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil, nil), nil)
+	registerEdgeDeviceRoutes(v1, db, nodemgr.NewManager(db, nil, nil, nil, nil), nil)
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"operation": "read",

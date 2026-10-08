@@ -15,37 +15,29 @@ func init() {
 	_ = logger.Init("error")
 }
 
-// --- MockMQTT for sender tests ---
+// --- Mock downlink for sender tests ---
 
-// mockPublishRecord records a single Publish call
+// mockPublishRecord records a single Publish call.
+//
+// The qos field is gone: it existed to distinguish Publish from PublishQoS2,
+// and QoS is an MQTT concept with no 3.0 equivalent (the old QoS-2 path had
+// already been downgraded to a best-effort write).
 type mockPublishRecord struct {
-	topic   string
+	nodeID  string
 	payload []byte
-	qos     int // 1 for Publish, 2 for PublishQoS2
 }
 
-// senderMockMQTT implements mqtt.Publisher for sender tests.
-// It records every Publish / PublishQoS2 / PublishRetained call.
-type senderMockMQTT struct {
+// senderMockDownlink implements downlink.Publisher for sender tests.
+type senderMockDownlink struct {
 	records []mockPublishRecord
 }
 
-func (m *senderMockMQTT) Publish(topic string, payload []byte) error {
-	m.records = append(m.records, mockPublishRecord{topic: topic, payload: payload, qos: 1})
+func (m *senderMockDownlink) Publish(nodeID string, payload []byte) error {
+	m.records = append(m.records, mockPublishRecord{nodeID: nodeID, payload: payload})
 	return nil
 }
 
-func (m *senderMockMQTT) PublishQoS2(topic string, payload []byte) error {
-	m.records = append(m.records, mockPublishRecord{topic: topic, payload: payload, qos: 2})
-	return nil
-}
-
-func (m *senderMockMQTT) PublishRetained(topic string, payload []byte) error {
-	m.records = append(m.records, mockPublishRecord{topic: topic, payload: payload, qos: 1})
-	return nil
-}
-
-func (m *senderMockMQTT) lastRecord() *mockPublishRecord {
+func (m *senderMockDownlink) lastRecord() *mockPublishRecord {
 	if len(m.records) == 0 {
 		return nil
 	}
@@ -64,14 +56,14 @@ func setupSenderTestDB(t *testing.T) *gorm.DB {
 }
 
 // newSenderManager builds a minimal Manager with a mock MQTT client.
-func newSenderManager(t *testing.T) (*Manager, *senderMockMQTT) {
+func newSenderManager(t *testing.T) (*Manager, *senderMockDownlink) {
 	t.Helper()
 	db := setupSenderTestDB(t)
-	mock := &senderMockMQTT{}
+	mock := &senderMockDownlink{}
 	mgr := &Manager{
-		db:      db,
-		mqtt:    mock,
-		termMgr: terminal.NewManager(),
+		db:       db,
+		downlink: mock,
+		termMgr:  terminal.NewManager(),
 	}
 	return mgr, mock
 }
@@ -90,9 +82,9 @@ func TestSender_SendPing(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	// Topic should be nodes/NODE001/down
-	if rec.topic != "nodes/NODE001/down" {
-		t.Errorf("topic: got %s, want nodes/NODE001/down", rec.topic)
+	// Downlink must address the node the ping was sent to.
+	if rec.nodeID != "NODE001" {
+		t.Errorf("downlink node: got %s, want NODE001", rec.nodeID)
 	}
 	// First byte should be MsgPing (0x08)
 	if len(rec.payload) < 1 {
@@ -129,8 +121,8 @@ func TestSender_SendPing_MultipleCalls(t *testing.T) {
 		t.Errorf("expected 3 publish calls, got %d", len(mock.records))
 	}
 	for _, r := range mock.records {
-		if r.topic != "nodes/DEV5/down" {
-			t.Errorf("topic: got %s, want nodes/DEV5/down", r.topic)
+		if r.nodeID != "DEV5" {
+			t.Errorf("downlink node: got %s, want DEV5", r.nodeID)
 		}
 	}
 }
@@ -150,11 +142,8 @@ func TestSender_SendWriteCommand(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected PublishQoS2 to be called")
 	}
-	if rec.qos != 2 {
-		t.Errorf("expected QoS 2, got %d", rec.qos)
-	}
-	if rec.topic != "nodes/DEV1/control" {
-		t.Errorf("topic: got %s, want nodes/DEV1/control", rec.topic)
+	if rec.nodeID != "DEV1" {
+		t.Errorf("downlink node: got %s, want DEV1", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgWriteCmd {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgWriteCmd)
@@ -234,8 +223,8 @@ func TestSender_SendScanRequest(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV3/down" {
-		t.Errorf("topic: got %s, want nodes/DEV3/down", rec.topic)
+	if rec.nodeID != "DEV3" {
+		t.Errorf("downlink node: got %s, want DEV3", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgScanReq {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgScanReq)
@@ -274,8 +263,8 @@ func TestSender_SendHelloAck(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV4/down" {
-		t.Errorf("topic: got %s, want nodes/DEV4/down", rec.topic)
+	if rec.nodeID != "DEV4" {
+		t.Errorf("downlink node: got %s, want DEV4", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgHelloAck {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgHelloAck)
@@ -334,8 +323,8 @@ func TestSender_SendConfigQuery(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV6/down" {
-		t.Errorf("topic: got %s, want nodes/DEV6/down", rec.topic)
+	if rec.nodeID != "DEV6" {
+		t.Errorf("downlink node: got %s, want DEV6", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgConfigQuery {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgConfigQuery)
@@ -373,8 +362,8 @@ func TestSender_SendQueryResources(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV7/down" {
-		t.Errorf("topic: got %s, want nodes/DEV7/down", rec.topic)
+	if rec.nodeID != "DEV7" {
+		t.Errorf("downlink node: got %s, want DEV7", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgQueryResources {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgQueryResources)
@@ -412,8 +401,8 @@ func TestSender_SendModbusScanRequest(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV8/down" {
-		t.Errorf("topic: got %s, want nodes/DEV8/down", rec.topic)
+	if rec.nodeID != "DEV8" {
+		t.Errorf("downlink node: got %s, want DEV8", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgScanReq {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgScanReq)
@@ -502,8 +491,8 @@ func TestSender_SendQueryRequest(t *testing.T) {
 	if rec == nil {
 		t.Fatal("expected Publish to be called")
 	}
-	if rec.topic != "nodes/DEV10/down" {
-		t.Errorf("topic: got %s, want nodes/DEV10/down", rec.topic)
+	if rec.nodeID != "DEV10" {
+		t.Errorf("downlink node: got %s, want DEV10", rec.nodeID)
 	}
 	if rec.payload[0] != frame.MsgQueryReq {
 		t.Errorf("msg type: got 0x%02X, want 0x%02X", rec.payload[0], frame.MsgQueryReq)

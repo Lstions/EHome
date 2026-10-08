@@ -25,7 +25,7 @@ func newSensorParserTestConsumer(db *gorm.DB, reassembler Reassembler, testDrive
 	for _, driver := range testDrivers {
 		registry.Register(driver)
 	}
-	return NewSensorParserConsumerWithRegistry(db, nil, nil, reassembler, registry)
+	return NewSensorParserConsumerWithRegistry(db, nil, reassembler, registry)
 }
 
 func counterValue(t *testing.T, collector prometheus.Collector) float64 {
@@ -411,7 +411,7 @@ func TestDataEventBus_ScheduledSampleIsNotPassive(t *testing.T) {
 	if !NewDBPersistConsumer(nil).ShouldHandle(scheduled) {
 		t.Fatal("scheduled sample must be persisted")
 	}
-	if !NewSensorParserConsumer(nil, nil, nil, nil).ShouldHandle(scheduled) {
+	if !NewSensorParserConsumer(nil, nil, nil).ShouldHandle(scheduled) {
 		t.Fatal("scheduled sample must be parsed")
 	}
 }

@@ -12,16 +12,19 @@ var (
 		Help: "Number of online nodes",
 	})
 
-	// MessagesReceived counts total MQTT messages received by type
+	// MessagesReceived counts total device messages received by type.
+	// (Wording was MQTT-specific; both transports shared this counter and now
+	// only the 3.0 TCP path feeds it.)
 	MessagesReceived = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_messages_received_total",
-		Help: "Total MQTT messages received by type",
+		Help: "Total device messages received by type",
 	}, []string{"type"})
 
-	// MessagesSent counts total MQTT messages sent by type
+	// MessagesSent counts total device messages sent by type.
+	// (See MessagesReceived: the counter is transport-agnostic.)
 	MessagesSent = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ehome_messages_sent_total",
-		Help: "Total MQTT messages sent by type",
+		Help: "Total device messages sent by type",
 	}, []string{"type"})
 
 	// DataReportsProcessed counts data reports processed
@@ -240,13 +243,13 @@ var (
 
 	DeviceActionQueueDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ehome_device_action_queue_duration_seconds",
-		Help:    "Duration from durable creation until MQTT publication",
+		Help:    "Duration from durable creation until downlink publication",
 		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60},
 	})
 
 	DeviceActionAcceptDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ehome_device_action_accept_duration_seconds",
-		Help:    "Duration from MQTT publication until collector acceptance",
+		Help:    "Duration from downlink publication until collector acceptance",
 		Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30},
 	})
 
@@ -362,9 +365,10 @@ var (
 
 	// --- 3.0 downlink routing (internal/downlink) ---
 	//
-	// These make the transport CHOICE visible. Without them "the device did not
-	// get the command" is indistinguishable from "the command went out over the
-	// wrong transport" -- the failure mode the MQTT retirement window creates.
+	// These make delivery failures visible. Without them "the device did not get
+	// the command" is indistinguishable from "the command was never framed".
+	// (They were introduced to make the TCP-vs-MQTT CHOICE visible; MQTT is gone
+	// now, so what remains worth observing is whether a downlink went out at all.)
 
 	// DownlinkOverNativeTotal counts downlinks delivered over TCP+TLS.
 	DownlinkOverNativeTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -372,11 +376,16 @@ var (
 		Help: "Total downlink messages delivered over the native TCP+TLS transport",
 	})
 
-	// DownlinkNativeFailedTotal counts downlinks that had a TCP session but
-	// failed there and were retried over MQTT.
+	// DownlinkNativeFailedTotal counts downlinks that could NOT be delivered.
+	//
+	// ⚠ The name is historical: it used to mean "had a TCP session but the write
+	// failed, so we retried over MQTT". There is no retry path any more (MQTT
+	// was removed 2026-10-08), so this now simply means "the send failed and the
+	// caller was told". The metric NAME is kept because renaming a Prometheus
+	// series breaks dashboards/alerts; only the meaning is updated here.
 	DownlinkNativeFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ehome_downlink_native_failed_total",
-		Help: "Total downlink messages that failed over TCP and fell back to MQTT",
+		Help: "Total downlink messages that could not be delivered (send failed)",
 	})
 
 	// DownlinkWrapFailedTotal counts payloads that could not be wrapped into a
@@ -385,16 +394,6 @@ var (
 	DownlinkWrapFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ehome_downlink_wrap_failed_total",
 		Help: "Total downlink payloads that could not be framed for the 3.0 transport",
-	})
-
-	// DownlinkQoS2DowngradedTotal counts QoS-2 publishes that went over TCP
-	// without the application-layer ACK that is supposed to replace QoS 2.
-	// The ACK is not implemented yet, so this is expected to be non-zero
-	// whenever a 3.0 node receives control messages -- it is a TO-DO made
-	// visible rather than a silent downgrade. Target: zero once ACK lands.
-	DownlinkQoS2DowngradedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "ehome_downlink_qos2_downgraded_total",
-		Help: "Total QoS-2 publishes downgraded to best-effort over the 3.0 transport (ACK not implemented)",
 	})
 
 	// --- node-level device operations (reboot / factory reset) ---
@@ -440,14 +439,5 @@ var (
 	DeviceOpStaleAckTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ehome_device_op_stale_ack_total",
 		Help: "Total device op ACKs for an unknown or already-expired request",
-	})
-
-	// DownlinkRetainedNodeScopedTotal counts retained publishes addressed to a
-	// single node. "Retained" has no 3.0 equivalent, so those can only ever go
-	// over MQTT; a non-zero value means a caller expects broker semantics that
-	// will disappear when MQTT is retired.
-	DownlinkRetainedNodeScopedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "ehome_downlink_retained_node_scoped_total",
-		Help: "Total retained publishes addressed to a node-scoped topic (no 3.0 equivalent)",
 	})
 )

@@ -40,27 +40,12 @@ import (
 	"ehome/backend/testutil"
 )
 
-// realDeviceLegacy 是 MQTT 的替身：**记录**而非发布。
+// ⚠ realDeviceLegacy（MQTT 替身）已随 MQTT 一起删除（2026-10-08）。
 //
-// 它本身是判据：若 HelloAck 走了 MQTT 而不是设备的 TCP 会话，设备收不到，
-// 而这里会留下痕迹。选路由 downlink.Bridge 决定 ⇒ 它必须与 transport
-// 共用**同一个** Registry（cfg.Registry）。
-type realDeviceLegacy struct {
-	topics [][]byte
-}
-
-func (r *realDeviceLegacy) Publish(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
-func (r *realDeviceLegacy) PublishQoS2(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
-func (r *realDeviceLegacy) PublishRetained(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
+// 它存在的意义是"若 HelloAck 走了 MQTT 而不是 TCP，这里会留下痕迹"。
+// MQTT 已不存在 ⇒ 没有第二条可误走的通道；而"选路必须与 transport 共用
+// **同一个** Registry（cfg.Registry）"这一条**仍然成立且更要紧**，因为现在
+// 没有会话就是硬错误（downlink.Publish 返回 error），不再是静默误投。
 
 func TestRealDeviceLink(t *testing.T) {
 	if os.Getenv("EHOME_REAL_DEVICE") != "1" {
@@ -96,11 +81,10 @@ func TestRealDeviceLink(t *testing.T) {
 	// ── 真实装配（与 startE2EServerEx 同源）──────────────────────────────
 	db := testutil.OpenTestDB(t)
 	reg := transport.NewRegistry()
-	legacy := &realDeviceLegacy{}
-	bridge := downlink.New(reg, legacy)
+	bridge := downlink.New(reg)
 	hub := websocket.NewHub()
 	go hub.Run()
-	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil)
 
 	cfg := transport.Config{
 		Addr:             addr,
@@ -108,7 +92,7 @@ func TestRealDeviceLink(t *testing.T) {
 		ClientCAs:        pool,
 		HandshakeTimeout: 10 * time.Second,
 		OnFrame:          mgr.FrameHandler(),
-		Registry:         reg, // ⚠ 必须与 bridge 同一个对象，否则 HelloAck 走 MQTT
+		Registry:         reg, // ⚠ 必须与 bridge 同一个对象，否则下行找不到会话
 	}
 	srv, err := transport.New(cfg)
 	if err != nil {
@@ -161,9 +145,6 @@ func TestRealDeviceLink(t *testing.T) {
 	fr, bad, resync, tooLarge, badCRC, overflow := srv.StatsSnapshot()
 	t.Logf("传输层统计: frames=%d badHeader=%d resync=%d tooLarge=%d badCRC=%d overflow=%d",
 		fr, bad, resync, tooLarge, badCRC, overflow)
-	if len(legacy.topics) > 0 {
-		t.Logf("⚠ MQTT 替身收到 %d 次投递（本该走 TCP）—— 选路回退了", len(legacy.topics))
-	}
 	if fr == 0 {
 		t.Error("传输层收到 0 帧 —— 设备连上了却什么都没发（或帧全被拒）")
 	}

@@ -49,19 +49,11 @@ type swallowPublisher struct {
 	payloads [][]byte
 }
 
-func (s *swallowPublisher) Publish(topic string, payload []byte) error {
+func (s *swallowPublisher) Publish(nodeID string, payload []byte) error {
 	s.mu.Lock()
 	s.payloads = append(s.payloads, append([]byte(nil), payload...))
 	s.mu.Unlock()
 	return nil
-}
-
-func (s *swallowPublisher) PublishQoS2(topic string, payload []byte) error {
-	return s.Publish(topic, payload)
-}
-
-func (s *swallowPublisher) PublishRetained(topic string, payload []byte) error {
-	return s.Publish(topic, payload)
 }
 
 func (s *swallowPublisher) lastPayload() []byte {
@@ -96,7 +88,7 @@ func newDeviceOpAPI(t *testing.T) (*gin.Engine, *opTestEnv) {
 	}
 
 	pub := &swallowPublisher{}
-	mgr := nodemgr.NewManager(db, pub, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, pub, nil, nil, nil)
 	r := setupRouter()
 	registerNodeDeviceOpRoutes(r.Group("/api/v1"), db, mgr)
 	return r, &opTestEnv{db: db, mgr: mgr, pub: pub}

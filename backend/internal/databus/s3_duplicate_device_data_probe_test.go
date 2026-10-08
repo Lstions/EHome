@@ -115,7 +115,7 @@ func s3WiredBus(t *testing.T, f s3Fixture) (*DataEventBus, *s3BarrierConsumer) {
 	t.Helper()
 	registry := drivers.NewRegistry()
 	registry.Register(&drivers.BMP280Driver{})
-	inner := NewSensorParserConsumerWithRegistry(f.db, nil, nil, passthroughReassembler{}, registry)
+	inner := NewSensorParserConsumerWithRegistry(f.db, nil, passthroughReassembler{}, registry)
 	barrier := &s3BarrierConsumer{inner: inner, done: make(chan struct{})}
 	bus := NewDataEventBus()
 	bus.Register(NewDBPersistConsumer(f.db))

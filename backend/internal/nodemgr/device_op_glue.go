@@ -3,7 +3,6 @@ package nodemgr
 import (
 	"errors"
 
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 )
 
@@ -33,15 +32,4 @@ func deviceOpLabel(op frame.DeviceOp) string {
 	default:
 		return "unknown"
 	}
-}
-
-// mqttDownlinkTopic names the node for the shared publisher.
-//
-// The downlink bridge parses the node id out of this topic and routes 3.0
-// nodes to TCP; for a 2.x node the topic IS the route. Reusing it here (rather
-// than publishing to the session directly) keeps one transport decision in one
-// place: this function must never choose, or the choice could disagree with
-// every other downlink.
-func mqttDownlinkTopic(nodeID string) string {
-	return mqtt.TopicForNode(nodeID)
 }

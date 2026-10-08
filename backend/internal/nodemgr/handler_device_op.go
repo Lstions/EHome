@@ -58,9 +58,8 @@ func (m *Manager) SendDeviceOp(nodeID string, op frame.DeviceOp, timeout time.Du
 	}
 
 	// The downlink goes through the same publisher every other server->device
-	// message uses, so a 3.0 node takes TCP and a 2.x node takes MQTT without
-	// this code choosing (and therefore without it being able to choose wrong).
-	if err := m.mqtt.Publish(mqttDownlinkTopic(nodeID), payload); err != nil {
+	// message uses, so the transport decision stays in one place (downlink).
+	if err := m.downlink.Publish(nodeID, payload); err != nil {
 		m.deviceOps.Fail(nodeID, p.RequestID(), err)
 		metrics.DeviceOpSendFailedTotal.WithLabelValues(deviceOpLabel(op)).Inc()
 		// A send failure on a topic/transport that CANNOT carry 0x22 to a 2.x

@@ -1,335 +1,222 @@
 package downlink
 
+// downlink_test.go -- rewritten 2026-10-08 when MQTT was removed.
+//
+// # What changed and why most of the old tests are gone
+//
+// The old suite was mostly about the MQTT FALLBACK: does a node without a
+// session go to MQTT, does a native failure fall back, is the QoS-2 downgrade
+// counted. All of those describe a choice that no longer exists. Keeping them
+// (even renamed) would assert the behaviour of a deleted transport.
+//
+// The tests below cover what replaced them, plus the two properties that were
+// easiest to get wrong while removing the fallback:
+//
+//  1. A frame is still built EXACTLY as before: the payload's leading type
+//     byte must equal the header type, and the size bound must still REJECT
+//     rather than truncate (the R1 class of bug).
+//  2. A node with no session is now an ERROR, not a silent hand-off. This is
+//     the most important behavioural change: with no broker consumer left,
+//     the old fallback would have become a black hole -- and a black hole
+//     that reports success is the failure this repo keeps re-learning.
+
 import (
 	"errors"
 	"testing"
 
-	"ehome/backend/pkg/metrics"
+	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/protoframe"
 )
 
-// downlink_test.go -- the transport-choice bridge.
-//
-// The failure this guards against: during the MQTT retirement window a node may
-// be reachable over TCP or over MQTT, and a downlink that goes to the wrong one
-// is SILENTLY lost. Every test here therefore asserts where the bytes actually
-// went, not just that Publish returned nil.
-
-type fakeNative struct {
-	sent   map[string][][]byte
-	has    map[string]bool
-	failOn map[string]error
+// fakeSender records what was sent and can be made to fail.
+type fakeSender struct {
+	sent    []sentFrame
+	hasNode map[string]bool
+	sendErr error
 }
 
-func newFakeNative() *fakeNative {
-	return &fakeNative{
-		sent:   map[string][][]byte{},
-		has:    map[string]bool{},
-		failOn: map[string]error{},
-	}
+type sentFrame struct {
+	nodeID  string
+	payload []byte
 }
 
-func (f *fakeNative) SendToNode(nodeID string, frame []byte) error {
-	if err := f.failOn[nodeID]; err != nil {
-		return err
+func newFakeSender(nodes ...string) *fakeSender {
+	f := &fakeSender{hasNode: map[string]bool{}}
+	for _, n := range nodes {
+		f.hasNode[n] = true
 	}
-	f.sent[nodeID] = append(f.sent[nodeID], frame)
+	return f
+}
+
+func (f *fakeSender) HasSession(nodeID string) bool { return f.hasNode[nodeID] }
+
+func (f *fakeSender) SendToNode(nodeID string, payload []byte) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
+	if !f.hasNode[nodeID] {
+		return errors.New("no session for " + nodeID)
+	}
+	// Copy: a test that aliased the bridge's buffer could pass while a real
+	// receiver saw different bytes.
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	f.sent = append(f.sent, sentFrame{nodeID: nodeID, payload: cp})
 	return nil
 }
 
-func (f *fakeNative) HasSession(nodeID string) bool { return f.has[nodeID] }
-
-type fakeLegacy struct {
-	published []string
-	qos2      int
-	err       error
-}
-
-func (f *fakeLegacy) Publish(topic string, payload []byte) error {
-	f.published = append(f.published, topic)
-	return f.err
-}
-
-// PublishQoS2 / PublishRetained exist because LegacyPublisher mirrors the
-// mqtt.Publisher interface. Making the fake implement the FULL interface (not
-// just the one method a test happens to call) means a future change to the
-// interface surfaces here as a compile error instead of a nil-method panic.
-func (f *fakeLegacy) PublishQoS2(topic string, payload []byte) error {
-	f.published = append(f.published, topic)
-	f.qos2++
-	return f.err
-}
-
-func (f *fakeLegacy) PublishRetained(topic string, payload []byte) error {
-	f.published = append(f.published, topic)
-	return f.err
-}
-
-func TestNodeIDFromTopic(t *testing.T) {
-	cases := []struct {
-		topic string
-		want  string
-	}{
-		{"nodes/abc123/down", "abc123"},
-		{"nodes/abc123/control", "abc123"},
-		{"homeassistant/sensor/x/config", ""}, // not node-scoped
-		{"nodes//down", ""},                   // empty id
-		{"nodes/abc", ""},                     // wrong arity
-		{"", ""},
+// newBridge fails the test rather than panicking, so a wiring mistake reads as
+// a test failure with a line number instead of a stack trace.
+func newBridge(t *testing.T, s sessionSender) *Bridge {
+	t.Helper()
+	if s == nil {
+		t.Fatal("test would exercise the nil-sender panic; pass a fake")
 	}
-	for _, c := range cases {
-		if got := NodeIDFromTopic(c.topic); got != c.want {
-			t.Errorf("NodeIDFromTopic(%q) = %q, want %q", c.topic, got, c.want)
-		}
-	}
+	return New(s)
 }
 
-// TestPrefersNativeWhenSessionExists -- a 3.0 node must get TCP, not MQTT.
-func TestPrefersNativeWhenSessionExists(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+// ── the frame contract (unchanged by the MQTT removal) ───────────────────
 
-	payload := []byte{0x06, 0x08, 0x01} // WriteCmd with one field
-	if err := b.Publish("nodes/n1/down", payload); err != nil {
+func TestPublishFramesPayloadForTheNode(t *testing.T) {
+	sender := newFakeSender("node-a")
+	b := newBridge(t, sender)
+
+	payload := []byte{frame.MsgWriteCmd, 0x01, 0x02, 0x03}
+	if err := b.Publish("node-a", payload); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if len(leg.published) != 0 {
-		t.Fatalf("payload ALSO went to MQTT (%v) -- a node on TCP must not get "+
-			"a duplicate on the other transport", leg.published)
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent %d frames, want 1", len(sender.sent))
 	}
-	if got := len(nat.sent["n1"]); got != 1 {
-		t.Fatalf("native got %d frames, want 1", got)
+	got := sender.sent[0]
+	if got.nodeID != "node-a" {
+		t.Errorf("sent to %q, want node-a", got.nodeID)
 	}
-}
 
-// TestFrameCarriesThePayloadTypeInTheHeader -- the 2.x payload's first byte IS
-// the message type, so the 3.0 header must take its type from there.
-//
-// If this were wrong the receiver's agreement check would reject every
-// downlink, and the device would simply never receive commands.
-func TestFrameCarriesThePayloadTypeInTheHeader(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	b := New(nat, &fakeLegacy{})
-
-	payload := []byte{0x06, 0x08, 0x01}
-	if err := b.Publish("nodes/n1/down", payload); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	frame := nat.sent["n1"][0]
-	h, err := protoframe.DecodeHeader(frame)
+	h, err := protoframe.DecodeHeader(got.payload)
 	if err != nil {
-		t.Fatalf("the frame we built does not decode: %v", err)
+		t.Fatalf("DecodeHeader: %v", err)
 	}
+	if h.Ver != protoframe.Version {
+		t.Errorf("version = 0x%02X, want 0x%02X", h.Ver, protoframe.Version)
+	}
+	// The type is carried TWICE: in the header and as payload[0]. The receiver
+	// rejects a disagreement (nodemgr.HandleFrame), so a mismatch here would
+	// make every message undeliverable.
 	if h.Type != payload[0] {
-		t.Errorf("header type = 0x%02X, want the payload type 0x%02X", h.Type, payload[0])
+		t.Errorf("header type = 0x%02X, payload[0] = 0x%02X -- they must agree",
+			h.Type, payload[0])
 	}
 	if int(h.PayloadLen) != len(payload) {
-		t.Errorf("header payload_len = %d, want %d", h.PayloadLen, len(payload))
+		t.Errorf("PayloadLen = %d, want %d", h.PayloadLen, len(payload))
 	}
-	// The receiver verifies header.type == payload[0]; assert that holds.
-	if frame[protoframe.HeaderSize] != h.Type {
-		t.Errorf("header type 0x%02X disagrees with the payload byte 0x%02X -- "+
-			"the receiver would drop this frame", h.Type, frame[protoframe.HeaderSize])
-	}
-}
-
-// TestFallsBackToMQTTWhenNoSession -- a 2.8.0 device must keep working exactly
-// as before. This is the whole point of the dual-stack window.
-func TestFallsBackToMQTTWhenNoSession(t *testing.T) {
-	nat := newFakeNative() // has no session for n1
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
-
-	if err := b.Publish("nodes/n1/down", []byte{0x06}); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	if len(leg.published) != 1 || leg.published[0] != "nodes/n1/down" {
-		t.Fatalf("legacy published %v, want [nodes/n1/down]", leg.published)
-	}
-	if len(nat.sent) != 0 {
-		t.Fatal("nothing should have gone to the native transport")
+	body := got.payload[protoframe.HeaderSize:]
+	if string(body) != string(payload) {
+		t.Errorf("body = % x, want % x", body, payload)
 	}
 }
 
-// TestNonNodeTopicAlwaysGoesToMQTT -- Home Assistant discovery config is not
-// node-scoped, so the native transport has no way to carry it.
-func TestNonNodeTopicAlwaysGoesToMQTT(t *testing.T) {
-	nat := newFakeNative()
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+func TestPublishWithNoSessionIsAnErrorNotASilentDrop(t *testing.T) {
+	sender := newFakeSender() // nobody connected
+	b := newBridge(t, sender)
 
-	if err := b.Publish("homeassistant/sensor/x/config", []byte("{...}")); err != nil {
-		t.Fatalf("Publish: %v", err)
+	err := b.Publish("node-a", []byte{frame.MsgWriteCmd, 0x01})
+	if err == nil {
+		t.Fatal("no session but Publish returned nil: the caller would report " +
+			"success for a message nobody received")
 	}
-	if len(leg.published) != 1 {
-		t.Fatalf("legacy published %v, want 1", leg.published)
+	if len(sender.sent) != 0 {
+		t.Errorf("sent %d frames despite having no session", len(sender.sent))
 	}
 }
 
-// TestNativeFailureFallsBackNotDrops -- if the TCP write fails we must not lose
-// the message while the node is still reachable over MQTT.
-func TestNativeFailureFallsBackNotDrops(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	nat.failOn["n1"] = errors.New("write failed")
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+func TestPublishPropagatesSendFailure(t *testing.T) {
+	sender := newFakeSender("node-a")
+	sender.sendErr = errors.New("socket closed")
+	b := newBridge(t, sender)
 
-	if err := b.Publish("nodes/n1/down", []byte{0x06}); err != nil {
-		t.Fatalf("Publish: %v", err)
+	err := b.Publish("node-a", []byte{frame.MsgWriteCmd, 0x01})
+	if err == nil {
+		t.Fatal("send failed but Publish returned nil")
 	}
-	if len(leg.published) != 1 {
-		t.Fatal("a failed native send must fall back to MQTT, not drop the message")
+	if !errors.Is(err, sender.sendErr) {
+		t.Errorf("error %v does not wrap the transport error %v", err, sender.sendErr)
 	}
 }
 
-// TestOversizedPayloadFallsBack -- a payload above the 3.0 maximum cannot be
-// framed; it must fall back rather than be silently dropped.
-func TestOversizedPayloadFallsBack(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+func TestPublishRejectsEmptyNodeID(t *testing.T) {
+	sender := newFakeSender("node-a")
+	b := newBridge(t, sender)
 
-	tooBig := make([]byte, MaxDownlinkPayload()+1)
-	tooBig[0] = 0x06
-	if err := b.Publish("nodes/n1/down", tooBig); err != nil {
-		t.Fatalf("Publish: %v", err)
+	// An empty node id used to mean "not node-scoped -> MQTT" (Home Assistant).
+	// That path is gone, so it must be refused rather than guessed at.
+	if err := b.Publish("", []byte{frame.MsgWriteCmd, 0x01}); err == nil {
+		t.Fatal("empty node id accepted; there is no transport that could carry it")
 	}
-	if len(nat.sent) != 0 {
-		t.Error("an oversized payload must not be sent over TCP")
-	}
-	if len(leg.published) != 1 {
-		t.Fatal("an un-frameable payload must fall back, not vanish")
+	if len(sender.sent) != 0 {
+		t.Errorf("sent %d frames for an empty node id", len(sender.sent))
 	}
 }
 
-// TestHugePayloadDoesNotTruncateTheLengthField is the case a mutation run
-// showed my first version missed.
-//
-// I originally tested PayloadMax+1 only, and the mutant that removed the bound
-// check was NOT caught -- because protoframe.EncodeHeader range-checks too, so
-// that input is caught twice (an equivalent mutant for that input).
-//
-// But the bound check is load-bearing for payloads ABOVE 65535:
-//
-//	PayloadLen: uint16(len(payload))
-//
-// silently TRUNCATES. A 70000-byte payload becomes a header claiming 4464,
-// which passes EncodeHeader's own check, and the result is a frame whose length
-// field disagrees with its content -- stream corruption on a live connection.
-//
-// So this asserts on a payload in the truncation zone, where only the explicit
-// bound check protects us.
-func TestHugePayloadDoesNotTruncateTheLengthField(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+// ── the size bound (R1): must reject, never truncate ─────────────────────
 
-	// Above 65535 so uint16() cannot represent the real length.
-	huge := make([]byte, 70000)
-	huge[0] = 0x06 // a message type, so only the SIZE is wrong
-	if err := b.Publish("nodes/n1/down", huge); err != nil {
-		t.Fatalf("Publish: %v", err)
+func TestOversizedPayloadIsRejectedNotTruncated(t *testing.T) {
+	sender := newFakeSender("node-a")
+	b := newBridge(t, sender)
+
+	payload := make([]byte, MaxDownlinkPayload()+1)
+	payload[0] = frame.MsgWriteCmd
+
+	err := b.Publish("node-a", payload)
+	if err == nil {
+		t.Fatal("oversized payload accepted; the length field cannot hold it")
 	}
-	if len(nat.sent) != 0 {
-		t.Fatalf("a %d-byte payload was sent over TCP -- its 16-bit length field "+
-			"would have wrapped, producing a frame whose header disagrees with "+
-			"its content", len(huge))
-	}
-	if len(leg.published) != 1 {
-		t.Fatal("an un-frameable payload must fall back to MQTT, not vanish")
+	if len(sender.sent) != 0 {
+		t.Fatalf("oversized payload was sent anyway (%d frames)", len(sender.sent))
 	}
 }
 
-// TestEmptyPayloadFallsBack -- an empty payload has no message type byte, so it
-// cannot be framed. Same rule: fall back, never drop.
-func TestEmptyPayloadFallsBack(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
+func TestLargestLegalPayloadSurvivesTheLengthField(t *testing.T) {
+	sender := newFakeSender("node-a")
+	b := newBridge(t, sender)
 
-	if err := b.Publish("nodes/n1/down", nil); err != nil {
-		t.Fatalf("Publish: %v", err)
+	payload := make([]byte, MaxDownlinkPayload())
+	payload[0] = frame.MsgWriteCmd
+	if err := b.Publish("node-a", payload); err != nil {
+		t.Fatalf("largest legal payload rejected: %v", err)
 	}
-	if len(nat.sent) != 0 {
-		t.Error("an empty payload must not be sent over TCP")
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent %d frames, want 1", len(sender.sent))
 	}
-	if len(leg.published) != 1 {
-		t.Fatal("an empty payload must still reach MQTT, where it may be legal")
+	h, err := protoframe.DecodeHeader(sender.sent[0].payload)
+	if err != nil {
+		t.Fatalf("DecodeHeader: %v", err)
+	}
+	if int(h.PayloadLen) != MaxDownlinkPayload() {
+		t.Errorf("PayloadLen = %d, want %d (the length field wrapped)",
+			h.PayloadLen, MaxDownlinkPayload())
 	}
 }
 
-// TestNilNativeIsPurePassthrough -- before the transport is wired in (or on a
-// server configuration without it), behaviour must be exactly 2.x.
-func TestNilNativeIsPurePassthrough(t *testing.T) {
-	leg := &fakeLegacy{}
-	b := New(nil, leg)
-	if err := b.Publish("nodes/n1/down", []byte{0x06}); err != nil {
-		t.Fatalf("Publish: %v", err)
+func TestEmptyPayloadIsRejected(t *testing.T) {
+	sender := newFakeSender("node-a")
+	b := newBridge(t, sender)
+
+	// Without a type byte there is nothing to put in the header.
+	if err := b.Publish("node-a", nil); err == nil {
+		t.Fatal("empty payload accepted; header type would be garbage")
 	}
-	if err := b.PublishQoS2("nodes/n1/control", []byte{0x06}); err != nil {
-		t.Fatalf("PublishQoS2: %v", err)
-	}
-	if len(leg.published) != 2 {
-		t.Fatalf("legacy published %v, want 2", leg.published)
+	if len(sender.sent) != 0 {
+		t.Errorf("sent %d frames for an empty payload", len(sender.sent))
 	}
 }
 
-// TestRetainedGoesToMQTTEvenWhenNodeHasSession -- "retained" is broker state
-// with no 3.0 equivalent, so it cannot silently move to TCP.
-func TestRetainedGoesToMQTTEvenWhenNodeHasSession(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	leg := &fakeLegacy{}
-	b := New(nat, leg)
-
-	if err := b.PublishRetained("nodes/n1/down", []byte{0x06}); err != nil {
-		t.Fatalf("PublishRetained: %v", err)
-	}
-	if len(nat.sent) != 0 {
-		t.Error("retained must not be sent over TCP: there is no broker to retain it")
-	}
-	if len(leg.published) != 1 {
-		t.Fatal("retained must go to MQTT")
-	}
-}
-
-// TestQoS2OverTCPIsCountedAsDowngraded -- the ACK that should replace QoS 2 is
-// not implemented, so the downgrade must be VISIBLE rather than silent.
-func TestQoS2OverTCPIsCountedAsDowngraded(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	b := New(nat, &fakeLegacy{})
-
-	before := counterValue(t, metrics.DownlinkQoS2DowngradedTotal)
-	if err := b.PublishQoS2("nodes/n1/control", []byte{0x06}); err != nil {
-		t.Fatalf("PublishQoS2: %v", err)
-	}
-	after := counterValue(t, metrics.DownlinkQoS2DowngradedTotal)
-	if after != before+1 {
-		t.Fatalf("QoS2 downgraded count %v -> %v, want +1 (an unhonoured "+
-			"delivery guarantee must be visible)", before, after)
-	}
-}
-
-// TestPlainPublishIsNotCountedAsDowngraded -- only QoS2 carries the stronger
-// promise; a plain publish is not a downgrade and must not inflate the metric.
-func TestPlainPublishIsNotCountedAsDowngraded(t *testing.T) {
-	nat := newFakeNative()
-	nat.has["n1"] = true
-	b := New(nat, &fakeLegacy{})
-
-	before := counterValue(t, metrics.DownlinkQoS2DowngradedTotal)
-	if err := b.Publish("nodes/n1/down", []byte{0x06}); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	if after := counterValue(t, metrics.DownlinkQoS2DowngradedTotal); after != before {
-		t.Fatalf("a plain publish was counted as a QoS2 downgrade (%v -> %v)", before, after)
-	}
+func TestNewRejectsNilSender(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New(nil) did not panic: a bridge with no sender can only " +
+				"ever fail every downlink, and must be refused at construction")
+		}
+	}()
+	New(nil)
 }

@@ -10,11 +10,10 @@ import (
 	"ehome/backend/internal/config"
 	"ehome/backend/internal/databus"
 	"ehome/backend/internal/deviceinit"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/drivers"
-	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/logstream"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/offlinedetector"
 	"ehome/backend/internal/ota"
 	"ehome/backend/internal/pendingwrite"
@@ -31,9 +30,8 @@ import (
 // Manager handles node lifecycle and message processing
 type Manager struct {
 	db              *gorm.DB
-	mqtt            mqtt.Publisher
+	downlink        downlink.Publisher
 	wsHub           *websocket.Hub
-	ha              *homeassistant.Integration
 	otaMgr          *ota.Manager
 	hashMgr         *ConfigHashManager
 	pendingWrite    *pendingwrite.Manager
@@ -157,7 +155,7 @@ func (m *Manager) SetSourceHealthSink(sink func(edgeDeviceID uint, sensorNames [
 // that many independent bus workers keyed by node ID (0/1 = legacy single
 // consumer). Each shard uses its own streamReassembler: buffers are keyed by
 // (deviceID, requestID), so per-device reassembly stays shard-local.
-func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha *homeassistant.Integration, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
+func NewManager(db *gorm.DB, downlinkPublisher downlink.Publisher, wsHub *websocket.Hub, offlineDetector *offlinedetector.Detector, otaMgr *ota.Manager, registries ...*drivers.Registry) *Manager {
 	driverRegistry := drivers.NewRegistry()
 	if len(registries) > 0 && registries[0] != nil {
 		driverRegistry = registries[0]
@@ -166,13 +164,12 @@ func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha
 	}
 	mgr := &Manager{
 		db:              db,
-		mqtt:            mqttClient,
+		downlink:        downlinkPublisher,
 		wsHub:           wsHub,
-		ha:              ha,
 		otaMgr:          otaMgr,
 		hashMgr:         NewConfigHashManager(),
-		pendingWrite:    pendingwrite.NewManager(mqttClient, db),
-		deviceInit:      deviceinit.NewOrchestrator(db, mqttClient, driverRegistry),
+		pendingWrite:    pendingwrite.NewManager(downlinkPublisher, db),
+		deviceInit:      deviceinit.NewOrchestrator(db, downlinkPublisher, driverRegistry),
 		termMgr:         terminal.NewManager(),
 		offlineDetector: offlineDetector,
 		driverRegistry:  driverRegistry,
@@ -211,10 +208,6 @@ func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha
 	// 在 NewManager 之后 / Start 之前调用, 时序仍然安全 (单线程 main goroutine)。
 	mgr.buildParserConsumers()
 
-	if ha != nil {
-		ha.StartPublishWorker()
-	}
-
 	// G10: 启动时先播报一次在线数，避免首次离线检测循环（最多 1s）之前的空窗。
 	//
 	// 注意这**不是**该指标的唯一维护者：原先只有这一处 Set()，于是 ehome_nodes_online
@@ -236,7 +229,6 @@ func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub, ha
 func (mgr *Manager) buildParserConsumers() {
 	db := mgr.db
 	wsHub := mgr.wsHub
-	ha := mgr.ha
 	offlineDetector := mgr.offlineDetector
 	driverRegistry := mgr.driverRegistry
 
@@ -263,7 +255,7 @@ func (mgr *Manager) buildParserConsumers() {
 		reassemblers = append(reassemblers, newStreamReassembler())
 	}
 	for i := 0; i < parserShards; i++ {
-		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassemblers[i], driverRegistry, deviceActivity)
+		parser := databus.NewSensorParserConsumerWithRegistry(db, wsHub, reassemblers[i], driverRegistry, deviceActivity)
 		mgr.parserConsumers = append(mgr.parserConsumers, parser)
 		// 数据层时序化 (v3.4 §3.2.4): 最新值缓存回调注入。
 		// 注意: 通过函数变量间接引用 api.SetLatestValue, 避免 nodemgr→api 编译期
@@ -328,9 +320,6 @@ func (m *Manager) Start() {
 	m.wg.Wait()
 	if m.dataBus != nil {
 		m.dataBus.Stop()
-	}
-	if m.ha != nil {
-		m.ha.StopPublishWorker()
 	}
 	if m.logBus != nil {
 		m.logBus.Stop()
@@ -652,32 +641,21 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 	return ids
 }
 
-// publishHADiscovery publishes HomeAssistant MQTT Discovery for all devices of a node
+// publishHADiscovery is a REMOVED capability, kept as an explicit no-op.
+//
+// Home Assistant integration published a RETAINED MQTT discovery config, and
+// "retained" has no 3.0 equivalent: there is no broker to hold the last value
+// for a subscriber that was not connected. MQTT was removed from the backend
+// on 2026-10-08, so this capability went with it.
+//
+// ⚠ This is a REAL functional loss, not a silent one. It is kept as a named
+// no-op (rather than deleting the call site in handler_hello.go) so that the
+// next reader finds a statement of what was lost and where, instead of an
+// unexplained gap. If HA support is wanted again it needs a 3.0-native design
+// (e.g. a REST/WS push from the backend), NOT a resurrected MQTT client.
 func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
-	if m.ha == nil {
-		return
-	}
-
-	var devices []models.EdgeDevice
-	m.db.Joins("JOIN channels ON channels.id = edge_devices.channel_id").
-		Where("channels.node_id = ?", collectorID).
-		Find(&devices)
-
-	for _, dev := range devices {
-		driver, err := m.driverRegistry.Get(dev.Type)
-		if err != nil {
-			continue
-		}
-		sensors := driver.GetSensorDefinitions()
-		if len(sensors) == 0 {
-			continue
-		}
-		if err := m.ha.PublishDiscovery(deviceID, dev.Name, dev.Type, sensors); err != nil {
-			logger.Infof("[%s] HA Discovery failed for device %s: %v", deviceID, dev.Name, err)
-		} else {
-			logger.Infof("[%s] HA Discovery published for device %s (%s)", deviceID, dev.Name, dev.Type)
-		}
-	}
+	_ = collectorID
+	_ = deviceID
 }
 
 // SetTransactionIsolation sets the transaction isolation level to REPEATABLE READ

@@ -42,7 +42,7 @@ func setupDriverCommandsTest(t *testing.T) (*gin.Engine, *gorm.DB) {
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
 	registry := newFakeRegistry()
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil, registry)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, registry)
 	registerDriverCommandRoutes(v1, db, mgr, registry)
 	return r, db
 }

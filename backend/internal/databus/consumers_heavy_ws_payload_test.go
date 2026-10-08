@@ -55,7 +55,7 @@ func TestSensorParserConsumerBroadcastsCanonicalWSFieldNames(t *testing.T) {
 
 	registry := drivers.NewRegistry()
 	registry.Register(&plainTestDriver{})
-	consumer := NewSensorParserConsumerWithRegistry(db, hub, nil, passthroughReassembler{}, registry)
+	consumer := NewSensorParserConsumerWithRegistry(db, hub, passthroughReassembler{}, registry)
 	consumer.Handle(DataEvent{
 		DeviceID: node.NodeID, EdgeDeviceID: uint64(device.ID), RequestID: 1,
 		RawData: []byte{0x01},

@@ -14,8 +14,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// capturePublisher records the downlink surface. It used to record a topic;
+// with MQTT removed the publisher addresses a NODE, so the field is nodeID.
 type capturePublisher struct {
-	topic   string
+	nodeID  string
 	payload []byte
 }
 
@@ -28,12 +30,10 @@ func enabledReadActions(t *testing.T) *deviceaction.Registry {
 	return actions
 }
 
-func (p *capturePublisher) Publish(topic string, payload []byte) error {
-	p.topic, p.payload = topic, append([]byte(nil), payload...)
+func (p *capturePublisher) Publish(nodeID string, payload []byte) error {
+	p.nodeID, p.payload = nodeID, append([]byte(nil), payload...)
 	return nil
 }
-func (p *capturePublisher) PublishQoS2(string, []byte) error     { return nil }
-func (p *capturePublisher) PublishRetained(string, []byte) error { return nil }
 
 func markChannelReported(t *testing.T, db *gorm.DB, node *models.Node, channelID uint) {
 	t.Helper()
@@ -70,8 +70,8 @@ func TestChannelCmdV2TransportCompilesTrustedRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.BootID != node.BootID || publisher.topic != "nodes/node-v2/control" {
-		t.Fatalf("result=%+v topic=%s", result, publisher.topic)
+	if result.BootID != node.BootID || publisher.nodeID != "node-v2" {
+		t.Fatalf("result=%+v downlink node=%s", result, publisher.nodeID)
 	}
 	cmd, err := frame.DecodeChannelCmdV2(publisher.payload)
 	if err != nil {

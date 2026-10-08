@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"ehome/backend/internal/deviceaction"
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/pkg/frame"
 
 	"gorm.io/gorm"
@@ -48,23 +48,23 @@ func nextPeriphRequestID() uint32 {
 // surfaced as an observation event; this transport intentionally does not
 // touch nodemgr's periphPending map.
 type PeriphTransport struct {
-	db      *gorm.DB
-	mqtt    mqtt.Publisher
-	actions *deviceaction.Registry
-	now     func() time.Time
+	db       *gorm.DB
+	downlink downlink.Publisher
+	actions  *deviceaction.Registry
+	now      func() time.Time
 }
 
 // NewPeriphTransport wires the periph_cmd transport with the same DB and MQTT
 // publisher used by the ChannelCmdV2 transport.
-func NewPeriphTransport(db *gorm.DB, publisher mqtt.Publisher, actions *deviceaction.Registry) *PeriphTransport {
-	return &PeriphTransport{db: db, mqtt: publisher, actions: actions, now: func() time.Time { return time.Now().UTC() }}
+func NewPeriphTransport(db *gorm.DB, publisher downlink.Publisher, actions *deviceaction.Registry) *PeriphTransport {
+	return &PeriphTransport{db: db, downlink: publisher, actions: actions, now: func() time.Time { return time.Now().UTC() }}
 }
 
 // Dispatch implements Transport. It reads the GPIO/PWM config through the
 // service DB handle; the dispatcher may hand us a transaction handle via
 // DispatchInTransaction for read consistency with the state transition.
 func (t *PeriphTransport) Dispatch(ctx context.Context, execution models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
-	if t == nil || t.db == nil || t.mqtt == nil || t.actions == nil {
+	if t == nil || t.db == nil || t.downlink == nil || t.actions == nil {
 		return DispatchResult{}, fmt.Errorf("periph transport is unavailable")
 	}
 	return t.dispatch(ctx, t.db, execution, attempt)
@@ -73,7 +73,7 @@ func (t *PeriphTransport) Dispatch(ctx context.Context, execution models.Command
 // DispatchInTransaction keeps config reads inside the dispatcher's state
 // transition transaction (same semantics as ChannelCmdV2Transport).
 func (t *PeriphTransport) DispatchInTransaction(ctx context.Context, tx *gorm.DB, execution models.CommandExecution, attempt models.CommandAttempt) (DispatchResult, error) {
-	if t == nil || tx == nil || t.mqtt == nil || t.actions == nil {
+	if t == nil || tx == nil || t.downlink == nil || t.actions == nil {
 		return DispatchResult{}, fmt.Errorf("periph transport is unavailable")
 	}
 	return t.dispatch(ctx, tx, execution, attempt)
@@ -152,7 +152,7 @@ func (t *PeriphTransport) dispatch(ctx context.Context, db *gorm.DB, execution m
 	}
 	payload := enc.Bytes()
 
-	if err := t.mqtt.Publish(mqtt.ControlTopicForNode(execution.NodeID), payload); err != nil {
+	if err := t.downlink.Publish(execution.NodeID, payload); err != nil {
 		return DispatchResult{}, fmt.Errorf("publish PeriphCmd: %w", err)
 	}
 	return DispatchResult{PublishedAt: t.now(), WireDigest: periphWireDigest(execution, attempt.AttemptNo, payload)}, nil

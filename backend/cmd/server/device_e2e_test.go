@@ -155,7 +155,7 @@ func pemEncodeCert(der []byte) []byte {
 // 请用 startE2EServerEx —— 本函数就是它的薄包装。
 func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Manager, string) {
 	t.Helper()
-	srv, mgr, addr, _, _ := startE2EServerEx(t, pki, &recordingLegacy{})
+	srv, mgr, addr, _, _ := startE2EServerEx(t, pki)
 	return srv, mgr, addr
 }
 
@@ -163,9 +163,9 @@ func startE2EServer(t *testing.T, pki *e2ePKI) (*transport.Server, *nodemgr.Mana
 //
 // task-27 为什么需要它：HTTP 层（找 node 要查库）与传输层必须是**同一个 db、
 // 同一个 hub、同一个 manager**，否则测出来的不是真实装配。
-// legacy 由调用方注入：默认的 recordingLegacy 永远返回 nil（"MQTT 收下了"），
-// 而"哪都送不到"的场景需要它返回错误，两种都要能表达。
-func startE2EServerEx(t *testing.T, pki *e2ePKI, legacy downlink.LegacyPublisher) (
+//
+// ⚠ 原第 3 个参数（legacy MQTT publisher）已随 MQTT 一起删除。
+func startE2EServerEx(t *testing.T, pki *e2ePKI) (
 	*transport.Server, *nodemgr.Manager, string, *gorm.DB, *websocket.Hub) {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
@@ -174,7 +174,7 @@ func startE2EServerEx(t *testing.T, pki *e2ePKI, legacy downlink.LegacyPublisher
 	// reads it. That is the property the startup wiring establishes, and this
 	// test therefore exercises the REAL composition, not a simplified one.
 	reg := transport.NewRegistry()
-	bridge := downlink.New(reg, legacy)
+	bridge := downlink.New(reg)
 
 	// A REAL websocket hub, not nil. Registering a node publishes an event, and
 	// handleHello dereferences m.wsHub unconditionally -- passing nil panicked
@@ -183,7 +183,7 @@ func startE2EServerEx(t *testing.T, pki *e2ePKI, legacy downlink.LegacyPublisher
 	// a production defect; but it does mean a nil hub cannot be assumed away.
 	hub := websocket.NewHub()
 	go hub.Run()
-	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil)
 
 	cfg := transport.Config{
 		Addr:             "127.0.0.1:0",
@@ -217,27 +217,15 @@ func startE2EServerEx(t *testing.T, pki *e2ePKI, legacy downlink.LegacyPublisher
 	return srv, mgr, srv.Addr().String(), db, hub
 }
 
-// recordingLegacy stands in for MQTT and records what would have gone there.
+// ⚠ recordingLegacy was DELETED with MQTT (2026-10-08).
 //
-// This is how the test detects the seam defect: if HelloAck is answered over
-// MQTT instead of the device's TCP session, the device never receives it AND
-// this slice is non-empty.
-type recordingLegacy struct {
-	topics [][]byte
-}
-
-func (r *recordingLegacy) Publish(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
-func (r *recordingLegacy) PublishQoS2(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
-func (r *recordingLegacy) PublishRetained(topic string, payload []byte) error {
-	r.topics = append(r.topics, []byte(topic))
-	return nil
-}
+// It existed to catch the seam defect "HelloAck went to MQTT instead of the
+// device's TCP session". With MQTT gone there is no second transport to
+// mistakenly answer on: downlink.Publish errors when the node has no session
+// (see internal/downlink), so that failure mode is now a hard error rather
+// than a silent mis-route. The property is still asserted -- by the assertion
+// that the device's socket RECEIVES the frame, which was always the real
+// evidence.
 
 func dialE2EDevice(t *testing.T, pki *e2ePKI, addr string) *tls.Conn {
 	t.Helper()
@@ -439,47 +427,40 @@ func TestEndToEndHelloGetsHelloAckOverTCP(t *testing.T) {
 	}
 }
 
-// TestHelloAckDoesNotAlsoGoToMQTT -- a node on TCP must not get its answer
-// twice, on two transports.
-func TestHelloAckDoesNotAlsoGoToMQTT(t *testing.T) {
+// TestHelloAckReachesTheDeviceOnItsOwnSocket -- the downlink must arrive on the
+// device's TCP connection, and nowhere else can exist.
+//
+// This replaces TestHelloAckDoesNotAlsoGoToMQTT. That test asserted "not on
+// MQTT either"; with MQTT removed the "either" is gone and the surviving
+// property is the one that always mattered: the frame ARRIVES on the socket.
+// It is also now enforced structurally -- a node with no session gets an error
+// from downlink.Publish rather than a silent hand-off, so there is no second
+// transport left to mis-answer on.
+func TestHelloAckReachesTheDeviceOnItsOwnSocket(t *testing.T) {
 	pki := newE2EPKI(t, "e2e-node-2")
-	db := testutil.OpenTestDB(t)
-	reg := transport.NewRegistry()
-	legacy := &recordingLegacy{}
-	bridge := downlink.New(reg, legacy)
-	hub := websocket.NewHub()
-	go hub.Run()
-	mgr := nodemgr.NewManager(db, bridge, hub, nil, nil, nil)
+	srv, mgr, addr, _, _ := startE2EServerEx(t, pki)
 
-	cfg := transport.Config{
-		Addr: "127.0.0.1:0", Cert: pki.srvCert, ClientCAs: pki.pool,
-		HandshakeTimeout: 5 * time.Second, OnFrame: mgr.FrameHandler(),
-		Registry: reg, // same object as the bridge -- see the note above
-	}
-	srv, err := transport.New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := srv.Listen(); err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() { cancel(); _ = srv.Close() })
-	go func() { _ = srv.Serve(ctx) }()
-
-	conn := dialE2EDevice(t, pki, srv.Addr().String())
+	conn := dialE2EDevice(t, pki, addr)
 	for i := 0; i < 600 && !srv.Registry().HasSession("e2e-node-2"); i++ {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if _, err := conn.Write(buildHelloFrame(t, "e2e-node-2", 7)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if got := readOneFrame(t, conn, 5*time.Second); got == nil {
-		t.Fatal("no HelloAck on the device socket")
+	got := readOneFrame(t, conn, 5*time.Second)
+	if got == nil {
+		t.Fatal("no HelloAck on the device socket -- the only transport that exists")
 	}
-	if len(legacy.topics) != 0 {
-		t.Fatalf("HelloAck was ALSO published to MQTT (%d topics: %v) -- a node "+
-			"on TCP must not be answered on both transports", len(legacy.topics), legacy.topics)
+	h, err := protoframe.DecodeHeader(got)
+	if err != nil {
+		t.Fatalf("DecodeHeader: %v", err)
+	}
+	if h.Type != frame.MsgHelloAck {
+		t.Fatalf("frame type = 0x%02X, want HelloAck 0x%02X", h.Type, frame.MsgHelloAck)
+	}
+	// The manager must be the one behind this server, not a stray instance.
+	if mgr == nil {
+		t.Fatal("startE2EServerEx returned a nil manager")
 	}
 }
 

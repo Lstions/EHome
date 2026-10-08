@@ -47,7 +47,7 @@ func setupOTATest(t *testing.T) (*gin.Engine, *gorm.DB, *ota.Manager) {
 	r := gin.New()
 	v1 := r.Group("/api/v1")
 	v1.Use(JWTAuth())
-	mgr := nodemgr.NewManager(db, nil, nil, nil, nil, nil)
+	mgr := nodemgr.NewManager(db, nil, nil, nil, nil)
 	otaMgr := ota.NewManager(db, nil, nil)
 	registerOTARoutes(v1, db, otaMgr, mgr)
 	return r, db, otaMgr

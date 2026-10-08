@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ehome/backend/internal/downlink"
 	"ehome/backend/internal/events"
 	"ehome/backend/internal/models"
-	"ehome/backend/internal/mqtt"
 	"ehome/backend/internal/websocket"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
@@ -170,7 +170,7 @@ func getBridge() *bridge {
 
 type Manager struct {
 	db        *gorm.DB
-	mqtt      mqtt.Publisher
+	downlink  downlink.Publisher
 	wsHub     *websocket.Hub
 	wg        sync.WaitGroup // for timeoutScanner graceful shutdown
 	started   sync.Once      // ensures Start() is re-entrant safe
@@ -178,12 +178,12 @@ type Manager struct {
 }
 
 // NewManager creates a new OTA manager
-func NewManager(db *gorm.DB, mqttClient mqtt.Publisher, wsHub *websocket.Hub) *Manager {
+func NewManager(db *gorm.DB, downlinkPublisher downlink.Publisher, wsHub *websocket.Hub) *Manager {
 	getBridge() // ensure bridge singleton is initialized (idempotent)
 	mgr := &Manager{
-		db:    db,
-		mqtt:  mqttClient,
-		wsHub: wsHub,
+		db:       db,
+		downlink: downlinkPublisher,
+		wsHub:    wsHub,
 	}
 	return mgr
 }
@@ -430,7 +430,6 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 
 	// Build the frame once; reuse on retries
 	payload := m.buildOtaCmdPayload(task, &firmware, seq)
-	topic := mqtt.TopicForNode(nodeRecord.NodeID)
 
 	// Register pending ack channel
 	ackCh := make(chan struct{})
@@ -439,13 +438,13 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 	_bridge.pendingMu.Unlock()
 
 	// Initial publish
-	if err := m.mqtt.Publish(topic, payload); err != nil {
+	if err := m.downlink.Publish(nodeRecord.NodeID, payload); err != nil {
 		_bridge.pendingMu.Lock()
 		delete(_bridge.pendingCmds, task.OtaID)
 		_bridge.pendingMu.Unlock()
-		return fmt.Errorf("mqtt publish ota_cmd: %w", err)
+		return fmt.Errorf("publish ota_cmd: %w", err)
 	}
-	logger.Infof("[OTA] sent OtaCmd ota_id=%s seq=%d to %s", task.OtaID, seq, topic)
+	logger.Infof("[OTA] sent OtaCmd ota_id=%s seq=%d to %s", task.OtaID, seq, nodeRecord.NodeID)
 
 	// Spawn ack-wait goroutine
 	_bridge.wg.Add(1)
@@ -479,7 +478,7 @@ func (m *Manager) SendOtaCommand(task *models.OTATask) error {
 				}
 
 				// Resend
-				if err := m.mqtt.Publish(topic, payload); err != nil {
+				if err := m.downlink.Publish(nodeRecord.NodeID, payload); err != nil {
 					logger.Errorf("[OTA] ota_id=%s retry publish failed: %v", task.OtaID, err)
 				} else {
 					logger.Infof("[OTA] ota_id=%s resent (attempt %d/%d)", task.OtaID, attempt+1, ackMaxRetries)

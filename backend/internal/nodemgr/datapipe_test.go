@@ -116,7 +116,7 @@ type datapipeEventBusTestConsumer struct {
 func newDatapipeEventBusConsumer(db *gorm.DB, deviceActivity ...func(uint)) *datapipeEventBusTestConsumer {
 	registry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(registry)
-	consumer := databus.NewSensorParserConsumerWithRegistry(db, nil, nil, passthroughReassembler{}, registry, deviceActivity...)
+	consumer := databus.NewSensorParserConsumerWithRegistry(db, nil, passthroughReassembler{}, registry, deviceActivity...)
 	proxy := &datapipeSignalingConsumer{inner: consumer}
 	bus := databus.NewDataEventBus()
 	bus.Register(proxy)

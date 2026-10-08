@@ -10,7 +10,6 @@ import (
 	"ehome/backend/internal/deviceinit"
 	"ehome/backend/internal/drivers"
 	"ehome/backend/internal/events"
-	"ehome/backend/internal/homeassistant"
 	"ehome/backend/internal/models"
 	"ehome/backend/internal/pendingwrite"
 	"ehome/backend/internal/websocket"
@@ -129,13 +128,12 @@ func (c *DBPersistConsumer) Handle(evt DataEvent) {
 }
 
 // SensorParserConsumer parses sensor data, stores to unified_data,
-// updates edge_device status, publishes to HomeAssistant, and broadcasts
+// updates edge_device status and broadcasts
 // data_update WebSocket events. This is the heaviest consumer.
 // Only handles command responses with valid data (not passive, not error).
 type SensorParserConsumer struct {
 	db             *gorm.DB
 	wsHub          *websocket.Hub
-	ha             *homeassistant.Integration
 	reassembler    Reassembler
 	deviceActivity func(uint)
 	driverRegistry *drivers.Registry
@@ -152,14 +150,14 @@ type SensorParserConsumer struct {
 	sourceHealthSink func(edgeDeviceID uint, sensorNames []string, at time.Time)
 }
 
-func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
+func NewSensorParserConsumer(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, deviceActivity ...func(uint)) *SensorParserConsumer {
 	driverRegistry := drivers.NewRegistry()
 	drivers.RegisterBuiltInDrivers(driverRegistry)
-	return NewSensorParserConsumerWithRegistry(db, wsHub, ha, reassembler, driverRegistry, deviceActivity...)
+	return NewSensorParserConsumerWithRegistry(db, wsHub, reassembler, driverRegistry, deviceActivity...)
 }
 
-func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, ha *homeassistant.Integration, reassembler Reassembler, driverRegistry *drivers.Registry, deviceActivity ...func(uint)) *SensorParserConsumer {
-	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, ha: ha, reassembler: reassembler, driverRegistry: driverRegistry}
+func NewSensorParserConsumerWithRegistry(db *gorm.DB, wsHub *websocket.Hub, reassembler Reassembler, driverRegistry *drivers.Registry, deviceActivity ...func(uint)) *SensorParserConsumer {
+	consumer := &SensorParserConsumer{db: db, wsHub: wsHub, reassembler: reassembler, driverRegistry: driverRegistry}
 	if len(deviceActivity) > 0 {
 		consumer.deviceActivity = deviceActivity[0]
 	}
@@ -494,14 +492,9 @@ func (c *SensorParserConsumer) Handle(evt DataEvent) {
 		logger.Warn("databus: failed to persist parsed device data", "consumer", c.Name(), "node_id", evt.DeviceID, "edge_device_id", device.ID, "error", err)
 	}
 
-	// HomeAssistant publish
-	if c.ha != nil {
-		haData := make([]drivers.SensorData, len(sensorData))
-		for i, f := range sensorData {
-			haData[i] = drivers.SensorData{Name: f.Name, Value: f.Value, Unit: f.Unit}
-		}
-		c.ha.PublishState(evt.DeviceID, haData)
-	}
+	// HomeAssistant publish was REMOVED with MQTT (2026-10-08). It published
+	// sensor state over MQTT and has no 3.0 equivalent; the edge-device status,
+	// WS broadcast and DB persistence below are unaffected.
 
 	// Broadcast the legacy-compatible parsed channel_data payload. Terminal clients
 	// still receive raw uncorrelated RX reports through WSPushConsumer.
