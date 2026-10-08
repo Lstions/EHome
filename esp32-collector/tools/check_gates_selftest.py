@@ -587,17 +587,26 @@ def recipes():
 
     # ⚠ 为什么必须给 check_mem_guard_floor 也加一条配方（D-26）：
     #   host_tests/mem_guard_tests.c 用**自适应宏** FLOOR = mem_guard_floor_bytes()，
-    #   所有断言都相对 FLOOR 写 ⇒ **把 s3p 的 floor 从 16K 改成 8K，ctest 仍 109/109**。
+    #   所有断言都相对 FLOOR 写 ⇒ 改动 floor 时 ctest 仍 109/109。
     #   即：floor 被静默改动时，**没有别的门禁会红**。
-    #   而 floor 是**行为阈值**（决定配置事务/OTA 放行）且作为 MemReport field5 上报
+    #   而 floor 是**行为阈值**（决定配置事务/log_stream/UART install 放行）
+    #   且作为 MemReport field5 上报
     #   ⇒ 若这条新门禁自己也不咬，就等于又加了一条自证不了的检查。
+    #
+    # ⚠ 2026-10-08（§191）：s3p 的 floor 已按决策 §13 **正式改为 8 KiB**
+    #   （原 16 KiB 不可达，是功能缺陷）。故本配方的变异值随之改为 8→4 KiB。
+    #   ⚠ 锚点必须**唯一命中 s3p 那一支**：文件里有多处 (8u * 1024u)
+    #     （s3p / s3 / else 兜底），故把 #if 条件一起写进 pattern。
+    #   ⚠ s3p 的 #define 与 #if 之间隔着 §13 的理由注释 ⇒ 必须跨行匹配；
+    #     而 inject_replace 不开 re.S/DOTALL ⇒ 不能用 "."，要用 [\s\S]*?。
     add("mem_guard_floor.s3p_value_drift",
         "check_mem_guard_floor.py", "file",
         inject_replace("main/mem_guard.c",
-                       r'#define MEM_GUARD_FLOOR_BYTES       \(16u \* 1024u\)',
-                       '#define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)',
-                       "s3p floor 16KiB -> 8KiB（§137 实验值）"),
-        "mem_guard.c: s3p floor 16KiB -> 8KiB ⇒ 门禁必须红"
+                       r'(defined\(CONFIG_COLLECTOR_PSRAM\) && CONFIG_COLLECTOR_PSRAM[\s\S]*?'
+                       r'#define MEM_GUARD_FLOOR_BYTES       \()8u( \* 1024u\))',
+                       r'\g<1>4u\g<2>',
+                       "s3p floor 8KiB -> 4KiB（s3p 那一支）"),
+        "mem_guard.c: s3p floor 8KiB -> 4KiB ⇒ 门禁必须红"
         "（宿主测试因用自适应 FLOOR 宏而全绿，只有本门禁能发现）")
 
     # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：

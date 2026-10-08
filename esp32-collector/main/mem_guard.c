@@ -60,7 +60,20 @@
  *     有人把 ota.c 的 xTaskCreateStatic 改回 xTaskCreate，全套测试仍会绿。
  *     ⇒ 已补门禁 tools/check_critical_tasks_static.py。 */
 #if defined(CONFIG_COLLECTOR_PSRAM) && CONFIG_COLLECTOR_PSRAM
-#define MEM_GUARD_FLOOR_BYTES       (16u * 1024u)
+/* ⭐ 2026-10-08 重定值（决策 §13，原 16 KiB）：16 KiB **不可达** ⇒ 门禁永久关闭。
+ *
+ * 判据（按 largest 口径，三条）：
+ *   ① 可达性：floor 必须**低于稳态 largest**，否则不是"保守"而是**功能缺陷** ——
+ *      3.0 运行中 s3p 稳态 largest 实测 12288~15360（min 12288），而 16 KiB = 16384 > 12288
+ *      ⇒ 该地板**永远无法满足**，配置事务恒被拒（§172 实测 memgate 14~21 次、success=0）。
+ *   ② 必要性：调用方最大声明需求 = 4096（配置事务 apply_buses/preflight）⇒ 8 KiB 有 2x 余量；
+ *   ③ 一致性：s3 与 s3p 是**同一颗芯片**（build_firmware.sh 都是 esp32s3），s3 用 8 KiB。
+ *      原 2x 差异无任何文档依据（§178.5），且唯一可能机制（SPIRAM_MALLOC_RESERVE_INTERNAL
+ *      占用内部 RAM）只会**减少可用连续块** —— 那更是"门槛必须可达"的理由，而非抬高门槛。
+ *
+ * 实测依据：floor=8192 下配置事务 893 s 无失败（§185），且三个调用方（配置事务 4096 /
+ *   log_stream 2048 / UART install 3584）**全部实测通过**；OTA 不调用本门禁（§190，有意设计）。 */
+#define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)
 #elif defined(CONFIG_IDF_TARGET_ESP32S3)
 #define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
