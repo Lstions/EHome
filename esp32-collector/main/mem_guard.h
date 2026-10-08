@@ -18,7 +18,11 @@
  *
  * 注意：low callback 运行在调用 `mem_guard_poll()` 的任务上下文，**不得**在
  * 回调里做发布/阻塞动作。典型实现只置一个 volatile 标志，由 status_task
- * 在 MQTT 已连接时补发一次 MemReport(0x20)。
+ * 在上行可用时补发一次 MemReport(0x21)。
+ * ⚠ 2026-10-08 更正两处：① 类型号是 0x21（不是 0x20，见 frame_codec.h:95）；
+ *   ② "在 MQTT 已连接时"这个条件已过期 —— 3.0 上线后上行不再只有 MQTT，
+ *      而 main.c 的补发判据曾写死 mqtt_client_is_connected_impl()，
+ *      详见 §192.3（P5 死角登记）。
  */
 #ifndef MEM_GUARD_H
 #define MEM_GUARD_H

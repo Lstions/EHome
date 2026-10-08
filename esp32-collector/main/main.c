@@ -157,7 +157,7 @@ static void log_boot_heap(const char *stage) { (void)stage; }
 
 static bool s_ota_pending_verify = false;
 
-/* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x20) ==== */
+/* ==== WS-G: 运行期内存水位门禁 + 低频 MemReport(0x21) ==== */
 
 /* 低内存事件只置标志，发布动作留到 status_task 且仅在 MQTT 已连接时执行。
  * 原因：low callback 由 mem_guard_poll() 在 status_task 上下文同步调用，
@@ -174,7 +174,7 @@ static void mem_guard_low_memory_cb(size_t free_bytes, size_t largest_bytes)
              (unsigned)mem_guard_floor_bytes());
 }
 
-/* 编码并发布 MemReport(0x20)。帧很小（5 个 varint），栈缓冲 64B 足够，
+/* 编码并发布 MemReport(0x21)。帧很小（5 个 varint），栈缓冲 64B 足够，
  * 不引入新的堆分配；编码失败只记一行，不阻塞主循环。 */
 static void send_mem_report(void)
 {
@@ -223,7 +223,7 @@ static void status_task(void *pv)
          * uxTaskGetStackHighWaterMark() 测真实峰值。
          *
          * 与原探针的区别：现在**不只在 EHOME_MEM_DIAG 下打日志**，而是把
-         * "最小剩余字节"写入 mem_guard，并随 MemReport(0x20) 低频上报，
+         * "最小剩余字节"写入 mem_guard，并随 MemReport(0x21) 低频上报，
          * 使服务端能看到跨重启趋势（原探针默认编译不进来，服务端什么都看不到）。
          *
          * 单位：uxTaskGetStackHighWaterMark 返回**字**（FreeRTOS 约定），

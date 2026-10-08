@@ -89,8 +89,11 @@ typedef enum {
  *
  * ⚠ 类型号 0x20 → 0x21（2026-10-05，V3-2a 裁决）。0x20 被 V3 的 DataBatch
  * 同时占用，而 DataBatch 已在设计文档/收益表/迁移表里通篇使用 0x20。
- * MSG_MEM_RPT 尚未合入 main、后端尚未解析（后端对它只会打 Unknown msg type
- * 警告），因此改号零成本。详见
+ * ⚠ 2026-10-08 更正后半句：MSG_MEM_RPT **已合入 main**（mem_guard.c:176 用本宏
+ * 编码、main.c 周期上报），"尚未合入 main"已过期。**"后端尚未解析"仍然成立**：
+ * 后端 frame.go:88 有常量、:445 有名字，但 nodemgr/manager.go 的分布 switch
+ * 无对应 case ⇒ 落 default 打 Unknown msg type 警告（2026-10-08 实测 675 次）。
+ * 详见
  * docs/设计/V3-2a-DataBatch-落地契约-2026-10-05.md §0.1。 */
 #define MSG_MEM_RPT          0x21
 
