@@ -987,7 +987,7 @@ func updateNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager, registries ...*driv
 				// 注意只校验合法性，不要求「可改波特率」—— 理由见
 				// ensureUARTBusConfig 上方关于两个约束被混为一谈的说明。
 				if isUARTChannel(&candidate) {
-					if err := ensureUARTBusConfig(node, &candidate); err != nil {
+					if err := ensureBusConfigExtras(node, &candidate); err != nil {
 						return err
 					}
 					if candidate.BusConfig != updates["bus_config"] {

@@ -824,7 +824,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 一个"以后改不了波特率"的通道。前端已不再静默产出空串，但后端不能把
 			// "调用方一定会带合法 bus_config"当契约 —— 这里按节点已上报的资源能力补齐。
 			if isUARTChannel(&ch) {
-				if err := ensureUARTBusConfig(&node, &ch); err != nil {
+				if err := ensureBusConfigExtras(&node, &ch); err != nil {
 					return err
 				}
 			}
@@ -858,7 +858,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			}
 			// 两类 UART 输入问题都报 400：能力不可得（等资源上报 / 检查 hardware_id）
 			// 与显式 bus_config 非法。它们都是用户能据此行动的输入问题，不是服务端故障。
-			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) || errors.Is(err, errI2CBusConfigIncomplete) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -993,7 +993,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 			// 避免"改个名字/开关"被无关能力缺失挡住（既有行为不做无谓加严）。
 			if isUARTChannel(&finalCandidate) && (dto.BusConfig != nil || dto.HardwareType != nil) {
 				before := finalCandidate.BusConfig
-				if err := ensureUARTBusConfig(&node, &finalCandidate); err != nil {
+				if err := ensureBusConfigExtras(&node, &finalCandidate); err != nil {
 					return err
 				}
 				// 只有**真的被补齐/改写**时才写回 bus_config。
@@ -1022,7 +1022,7 @@ func registerDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 				Error(c, http.StatusConflict, "channel route conflicts with GPIO/PWM configuration")
 				return
 			}
-			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) {
+			if errors.Is(err, errUARTCapabilityUnavailable) || errors.Is(err, errUARTBusConfigMalformed) || errors.Is(err, errI2CBusConfigIncomplete) {
 				Error(c, http.StatusBadRequest, err.Error())
 				return
 			}

@@ -584,7 +584,7 @@ func registerEdgeDeviceRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr
 				// 通常不传 bus_config（原实现只在显式传入时才写，否则落空串），同样会
 				// 造出"以后改不了波特率"的通道。这里按节点资源能力补齐。
 				if strings.EqualFold(strings.TrimSpace(bindingChannel.HardwareType), "UART") {
-					if err := ensureUARTBusConfig(&node, &bindingChannel); err != nil {
+					if err := ensureBusConfigExtras(&node, &bindingChannel); err != nil {
 						return err
 					}
 				}
