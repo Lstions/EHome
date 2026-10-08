@@ -5,7 +5,9 @@ idf_component_register(
     # 与 data_batch_encode()（data_batch_codec.h）。msg_handler 反向 REQUIRES
     # bus_worker（handler_data.c 读上报计数器），ESP-IDF 的 component manager
     # 会记录依赖环并按字典序选择静态库重复解析顺序（build.cmake:399 明确处理）。
-    REQUIRES bus_dma scheduler esp_timer esp_hw_support msg_handler report_stats
+    # hw_profile: 2026-10-08 新增 —— UART 任务数由 HW_UART_COUNT 派生（见
+    # bus_worker.c 里 cmd_u2 的说明）。此前写死 3 个，而 C6 只有 2 个 UART。
+    REQUIRES bus_dma scheduler esp_timer esp_hw_support msg_handler report_stats hw_profile
 )
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。

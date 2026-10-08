@@ -32,6 +32,16 @@
 #include "scheduler.h"
 #include "collector_mem.h"
 #include "frame_codec.h"
+/* ⭐ 2026-10-08：HW_UART_COUNT —— UART 任务数必须**由硬件表派生**。
+ * 原先无条件建 cmd_u0/u1/u2 三个任务，而 C6 只有 2 个 UART ⇒
+ * cmd_u2 的 4096 B 内部栈与队列在 C6 上**永远收不到命令**（纯浪费）：
+ *   · 后端只知道 2 个 UART（ResourceReport 只含 hw_uarts 的 2 条）
+ *   · bus_manager 按 hw_uarts 校验 controller_id ⇒ UART2 无法注册
+ *   · scheduler.dispatch_queue 的 UART_NUM_2 分支永不命中
+ * ⇒ 这是 P8（型号差异只影响放置/大小，且差异必须显式）没做到的地方：
+ *   "有几个 UART"已经在 hw_tables 里写清楚了，任务数却还写死 3。
+ * ⚠ 只加 REQUIRES，不加行为差异：S3/S3P 的 HW_UART_COUNT=3 ⇒ 建 3 个，与改动前一致。 */
+#include "hw_tables.h"
 /* V3-2a：能力位读取（契约 §1）。只取这个轻量头，刻意**不**引入
  * msg_handler.h —— 它会把 scheduler/config_mgr/esp_err 整条头链拖进
  * bus_worker。DataBatch 的**编码**不在这里：见 bus_worker.h 的
@@ -2121,12 +2131,34 @@ void bus_worker_start(bus_runtime_t *rt)
  rebuild_uart_event_set(rt);
  xTaskCreate(rx_task, "rx_task", RX_STACK,
   (void *)rt, RX_PRIO, &s_rx_task_h);
+ /* ⭐ 2026-10-08：UART 任务数**由硬件表派生**（P8：型号差异必须显式，
+  * 且"有几个 UART"hw_tables 已经写清楚了 —— 不该在这里再写死一遍）。
+  *
+  * 缺陷：原先无条件建 cmd_u0/u1/u2 三个。而 **C6 只有 2 个 UART**
+  * （hw_tables.c 的 C6 分支 HW_UART_COUNT=2），于是 cmd_u2 在 C6 上
+  * **永远收不到命令**：
+  *   · 后端只知道 2 个 UART（ResourceReport 只含 hw_uarts 那 2 条）
+  *   · bus_manager 按 hw_uarts 校验 controller_id ⇒ UART2 无法注册
+  *   · scheduler.dispatch_queue 的 UART_NUM_2 分支永不命中
+  * ⇒ 白占 **4096 B 内部连续块** + 一对队列 + TCB，而 C6 的门禁是 12 KiB。
+  *
+  * ⚠ 这不是"顺手省内存"：它是 P8 要求的"三型号差异显式化"没做到的地方。
+  * ⚠ S3/S3P 的 HW_UART_COUNT=3 ⇒ 仍建 3 个，**行为与改动前逐字节一致**。
+  * ⚠ 用 static_assert 钉住上限：下面的分支只写到 u2，若哪天有 4 UART 的
+  *   型号加进来，这里会**编译失败**而不是静默少建一个任务。 */
+ _Static_assert(HW_UART_COUNT <= 3,
+                "bus_worker 的 UART 任务分支只写到 cmd_u2；"
+                "新增更多 UART 的型号时必须在这里补分支（不要静默少建任务）");
  xTaskCreate(cmd_task_uart0, "cmd_u0", UART_STACK,
   (void *)rt, CMD_PRIO, &s_cmd_u0_h);
- xTaskCreate(cmd_task_uart1, "cmd_u1", UART_STACK,
-  (void *)rt, CMD_PRIO, &s_cmd_u1_h);
- xTaskCreate(cmd_task_uart2, "cmd_u2", UART_STACK,
-  (void *)rt, CMD_PRIO, &s_cmd_u2_h);
+ if (HW_UART_COUNT >= 2) {
+  xTaskCreate(cmd_task_uart1, "cmd_u1", UART_STACK,
+   (void *)rt, CMD_PRIO, &s_cmd_u1_h);
+ }
+ if (HW_UART_COUNT >= 3) {
+  xTaskCreate(cmd_task_uart2, "cmd_u2", UART_STACK,
+   (void *)rt, CMD_PRIO, &s_cmd_u2_h);
+ }
  xTaskCreate(cmd_task_spi, "cmd_spi", SPI_I2C_STACK,
   (void *)rt, CMD_PRIO, &s_cmd_spi_h);
  xTaskCreate(cmd_task_i2c, "cmd_i2c", SPI_I2C_STACK,
