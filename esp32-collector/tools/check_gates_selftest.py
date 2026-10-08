@@ -665,6 +665,21 @@ def recipes():
                        "总线默认引脚落在保留脚上（S3 I2C1 SCL=48=RGB LED）"),
         "把 I2C1 的 default_scl 改回 48（= HW_RESERVED_LED，且固件真在驱动它）⇒ 门禁必须红")
 
+    # ⚠ 2026-10-09（§198）：第二条同类配方，但查的是**另一类**冲突。
+    #
+    #   §197 那类 = "默认引脚落在**保留脚**上"；
+    #   §198 这类 = "**两条总线**抢同一个引脚"（各自看都对、放一起才冲突）。
+    #   实例：C6 的 UART1(RX=21) 与 I2C0(SDA=21) —— 是从设备上报的 capabilities
+    #   里看出来的，人眼审表格很难发现。
+    #   ⇒ 两类都要有配方，否则"门禁的哪一半会咬"就没有证据。
+    add("hw_bus_defaults.bus_to_bus_collision",
+        "check_hw_bus_defaults.py", "file",
+        inject_replace("components/hw_profile/hw_tables.c",
+                       r'I2C0\", .port = 0, .default_sda = 21, .default_scl = 22',
+                       'I2C0", .port = 0, .default_sda = 21, .default_scl = 23',
+                       "两条总线抢同一个引脚（C6 I2C0.scl 撞 SPI2.mosi）"),
+        "把 C6 的 I2C0.default_scl 改成 23（= SPI2.default_mosi）⇒ 门禁必须红")
+
     # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：
     #   本会话真实事故 —— 所有测试 defaults 都没覆盖 CONFIG_COLLECTOR_MQTT_BROKER_URL，
     #   于是继承 config/mqtt-broker.defaults 的**生产**地址 192.168.20.6:1883，
