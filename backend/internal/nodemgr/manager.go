@@ -641,23 +641,6 @@ func (m *Manager) GetOnlineDeviceIDs() []string {
 	return ids
 }
 
-// publishHADiscovery is a REMOVED capability, kept as an explicit no-op.
-//
-// Home Assistant integration published a RETAINED MQTT discovery config, and
-// "retained" has no 3.0 equivalent: there is no broker to hold the last value
-// for a subscriber that was not connected. MQTT was removed from the backend
-// on 2026-10-08, so this capability went with it.
-//
-// ⚠ This is a REAL functional loss, not a silent one. It is kept as a named
-// no-op (rather than deleting the call site in handler_hello.go) so that the
-// next reader finds a statement of what was lost and where, instead of an
-// unexplained gap. If HA support is wanted again it needs a 3.0-native design
-// (e.g. a REST/WS push from the backend), NOT a resurrected MQTT client.
-func (m *Manager) publishHADiscovery(collectorID string, deviceID string) {
-	_ = collectorID
-	_ = deviceID
-}
-
 // SetTransactionIsolation sets the transaction isolation level to REPEATABLE READ
 // on PostgreSQL. On SQLite it is a no-op because SQLite transactions are
 // SERIALIZABLE by default (strictly stronger than REPEATABLE READ), and the
