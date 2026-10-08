@@ -750,6 +750,24 @@ bool ehome_handle_downlink(const uint8_t *data, size_t len, transport_t *t)
     app_state_t *s = app_state_get();
     if (!s || !data || len == 0) return false;
 
+    /* ⭐ 2026-10-08（round 129）新增探针：补上 §179.6 定位的**未探针窗口**。
+     *
+     * 缺口：从 [linkheap] task:create（largest=31744）到 uart_preinstall
+     * （largest=16384）之间，largest 掉了 **15360 B**，而那段日志里
+     * **没有任何 heap 探针**（只有 HelloAck / ResourceReport / 配置解析等业务行）。
+     * 现有探针（bootheap/linkheap/tlsheap）**都不覆盖**这段。
+     *
+     * ⇒ 在**每一次下行帧**前后各读一次堆，把窗口切成"每帧一段"，
+     *   从而指认那 15360 是哪一类下行（HelloAck / Manifest / 其它）造成的。
+     * ⚠ 口径与内存门禁一致（INTERNAL|8BIT），否则两列数字不可比。
+     * ⚠ 仅在 EHOME_MEM_DIAG 下编入（交付态不受影响）。 */
+#ifdef EHOME_MEM_DIAG
+    ESP_LOGI(TAG, "[dlheap] in  type=0x%02X len=%u free=%u largest=%u",
+             (unsigned)data[0], (unsigned)len,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#endif
+
     const bool is_cfg = is_config_manifest(data, len);
     if (is_cfg) s->config_received = true;
 
