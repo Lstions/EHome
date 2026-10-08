@@ -235,7 +235,13 @@ bool wifi_mgr_check_liveness(bool app_network_ok)
     wifi_ap_record_t ap_info = {0};
     const bool driver_ok = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
 
-    /* **触发条件只看驱动层信号 `driver_ok`，不看 `app_network_ok`。**
+    /* ⚠⚠ 下面这一段（到"而不是复用上层协议状态。"为止）描述的是**第二版**，
+     *   **已被第三版取代** —— 保留原文以便追溯推理错在哪，但**不要**据它写代码：
+     *   现行判据见下面"触发判据：驱动层与**应用层**任一不健康即计入失败"
+     *   （即 driver_ok && app_network_ok，实现于本函数末段的 if）。
+     *
+     * 【以下为第二版（已废）的原文】**触发条件只看驱动层信号 `driver_ok`，
+     * 不看 `app_network_ok`。**
      *
      * 这是 2026-10-05 实测踩到的一个自伤缺陷，记录下来：
      *

@@ -310,8 +310,30 @@ static void status_task(void *pv)
             mem_send = true;
         }
         if (mem_send) send_mem_report();
-        (void)wifi_mgr_check_liveness(mqtt_client_is_connected_impl());
-        if (mqtt_client_is_connected_impl()) {
+
+        /* ⚠ 2026-10-08（§193）修正与上面 MemReport **同一类**的判据错误。
+         *
+         * 这两行此前写死 mqtt_client_is_connected_impl()，理由与 §284-297 记录的
+         * MemReport 完全相同（**上行可用 != MQTT 已连接**），但当时只改了 MemReport，
+         * 紧邻的这两行漏了 ⇒ §7.3 P5（MQTT 完全下线）后：
+         *
+         *   ① msg_handler_send_status 的**唯一调用点就在下面这个 if 里**，
+         *      而它本体是**传输无关**的（handler_data.c:145 编码后走
+         *      msg_handler_publish → 当前传输）⇒ **3.0 明明能发却不发**，
+         *      服务端再也看不到 StatusReport（连带 ota_confirm 永不确认）。
+         *   ② 传给 wifi_mgr_check_liveness 的 app_network_ok 恒 false（P5 后 MQTT
+         *      永连不上）⇒ 触发"WiFi 静默失联"恢复动作，**反复拆一条健康的 WiFi**
+         *      （60s 起、指数退避封顶 15 min、但**永不停止**）。
+         *      这正是 wifi_mgr.c:266-268 记录过的"第一版自持 churn"同形态 ——
+         *      当年修的是 wifi_mgr **内部**的判据，而**调用方**仍在喂它一个
+         *      与 WiFi 无关的信号。
+         *
+         * 判据改用 transport_any_connected()：与 §298 同一个谓词，
+         * **不新增第二个判据**（P4）；语义上也正是这两处要问的
+         * "应用层还有没有可用上行"。 */
+        const bool uplink_ready = transport_any_connected();
+        (void)wifi_mgr_check_liveness(uplink_ready);
+        if (uplink_ready) {
             esp_err_t status_err = msg_handler_send_status(
                 s->uptime_sec, "online",
                 (config_mgr_get_manifest() ? config_mgr_get_manifest()->channel_count : 0),
