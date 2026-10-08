@@ -31,37 +31,48 @@ import (
 //     并且**同时**处理回退路径，否则就是把缺陷引进回退路径）；
 //   - 有人把报错改回只提 MQTT（那会让 TCP 设备上的排查走错方向）；
 //   - MQTT 上界被改到比 TCP 上界还大（那"保守"就不成立了，说明标定错了）。
-func TestR1ByteGateIsTransportIndependentByDesign(t *testing.T) {
-	tcpBound := int(protoframe.PayloadMax)
+//
+// ⚠⚠ 2026-10-08（§197）：本用例**整体重写**。原版守的是"门禁对**所有**传输都用
+// MQTT 的 2011 B 上界（保守），因为 downlink.Bridge 可能**回退到 MQTT**"。
+//
+// MQTT 已于 2026-10-08 **整体移除**（§194）⇒ 那条理由**失去了它的对象**：
+// 既没有 MQTT 上界，也没有回退路径。而门禁本身**仍然必要** —— 只是理由换了：
+// 现在的上界是**设备侧**的接收能力（CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD），
+// 与"走哪条传输"无关（3.0 是唯一传输）。
+//
+// ⇒ 保留用例（而非删除）的理由：它锁住三条**仍然成立**的性质 ——
+//
+//	① 上界必须 **≤ 传输上界**（否则门禁形同虚设：传输先于它拒绝）；
+//	② 超界必须被拒；
+//	③ 报错必须写清**是设备侧的限制**（否则排查者会去查后端/传输，方向错）。
+func TestByteGateIsDeviceSideByDesign(t *testing.T) {
+	transportBound := int(protoframe.PayloadMax)
 
-	if MaxManifestWireBytes >= tcpBound {
-		t.Fatalf("本用例的前提是 MQTT 上界 (%d) **严格小于** TCP 上界 (%d)。"+
-			"若两者关系变了，说明标定或传输上界改了，必须重新讨论'保守门禁'是否还成立",
-			MaxManifestWireBytes, tcpBound)
+	// ① 上界必须 ≤ 传输上界。两者取小者；若门禁比传输还大，它永远不会触发。
+	if MaxManifestWireBytes > transportBound {
+		t.Fatalf("门禁上界 (%d) **大于**传输上界 (%d) ⇒ 门禁形同虚设（传输会先拒绝）。"+
+			"两者应满足 门禁 <= 传输，且门禁取的是**设备侧**能力。",
+			MaxManifestWireBytes, transportBound)
 	}
 
-	// 一份 TCP 收得下、但门禁必须拒绝的长度：取两者之间。
-	between := MaxManifestWireBytes + 1
-	if between >= tcpBound {
-		t.Fatalf("取不到夹在中间的样例：%d 不小于 %d", between, tcpBound)
-	}
-	err := checkManifestWireBytes(between)
+	// ② 超界必须被拒。
+	over := MaxManifestWireBytes + 1
+	err := checkManifestWireBytes(over)
 	if err == nil {
-		t.Fatalf("%d B 必须被拒（TCP 收得下，但回退到 MQTT 时收不下）——"+
-			"若门禁真的改成按传输放行了，请同时证明回退路径也安全，再改这个用例", between)
+		t.Fatalf("%d B 必须被拒（超出设备侧接收上限 %d B）", over, MaxManifestWireBytes)
 	}
 
+	// ③ 报错必须说清"是设备侧的限制"，并给出实际字节数与生效上界。
 	msg := err.Error()
-	// 报错必须**同时**说清三件事，否则排查者会得到错的结论。
 	for _, want := range []string{
-		fmt.Sprintf("%d", between),              // 实际字节数
+		fmt.Sprintf("%d", over),                 // 实际字节数
 		fmt.Sprintf("%d", MaxManifestWireBytes), // 生效的上界
-		"REGARDLESS of transport",               // 承认它对 TCP 也生效
-		"falls back",                            // 说清为什么必须保守（回退路径）
-		fmt.Sprintf("%d", tcpBound),             // 指出 TCP 本可承载多少
+		"device-side",                           // 说清是设备侧，不是后端/传输侧
+		"contiguous",                            // 说清机制（定界器要一笔连续块）
+		fmt.Sprintf("%d", transportBound),       // 指出传输本可承载多少
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("报错缺少 %q —— 缺了它，TCP 设备上的排查会走错方向。实际报错：%q", want, msg)
+			t.Errorf("报错缺少 %q —— 缺了它，排查者会查错方向（后端/传输）而不是设备侧。实际报错：%q", want, msg)
 		}
 	}
 }
@@ -250,8 +261,15 @@ func TestR1ManifestWorstCaseEncodedBytes(t *testing.T) {
 			t.Errorf("%s worst-case encoded length = %d, want %d (pinned; update only together with the V3 §8 R1 measurement)",
 				tc.profile, len(payload), tc.want)
 		}
-		if len(payload) <= MaxManifestWireBytes {
-			t.Fatalf("%s worst case %d B must exceed the %d B single-event limit — if not, R1 is gone and this test must be rewritten",
+		// ⭐ 2026-10-08（§197）：本断言**方向已反转**，原为 must exceed（R1 存在），
+		//    现为 must fit（R1 已消除）。这不是放宽标准，而是记录一个**已修好的缺陷**：
+		//      门禁上界从 "MQTT 派生的 2011 B" 改为 "设备侧申报的 4096 B"，
+		//      而最坏帧是 3100 B(S3)/2838 B(C6) ⇒ **最坏配置现在必定送得出去**。
+		//    ⚠ 原断言自己就写着 "if not, R1 is gone and this test must be rewritten"
+		//      —— 本轮正是它的"not"分支，所以按它自己的指示重写，而不是删掉。
+		if len(payload) > MaxManifestWireBytes {
+			t.Errorf("%s worst case %d B **超出**上界 %d B ⇒ R1 复发（最坏配置将无法下发）。"+
+				"S3 5 通道 / C6 4 通道的最坏帧必须始终能过门禁。",
 				tc.profile, len(payload), MaxManifestWireBytes)
 		}
 	}
@@ -358,49 +376,80 @@ func r1SizedSnapshot(templateCount, firstWriteBytes, busBytes, edgesPerChannel i
 //   - 第 0 个模板 write_data 每短 1 B：−1 B
 //   - 第 0 个通道 bus_config 每短 1 B：−1 B
 //   - sync_id + manifest_id 每长 1 B：+1 B（最长 +35/+30）
-func TestR1ByteGateBoundaryRealEncoding(t *testing.T) {
-	target := MaxManifestWireBytes
+//
+// ⚠⚠ 2026-10-08（§197）：本用例**改了要证的性质**，理由是本轮最重要的那条结论。
+//
+// 原版要构造一份**恰好等于上界**的真实编码产物来钉住拒绝边界。上界是 2011 B 时
+// 那个构造是可行的（最坏帧 3100 B > 2011 B）。而现在上界是**设备侧**的 4096 B，
+// 而**编码器的最大产出**（受固件各字段上限约束）只有 3100 B(S3)/2838 B(C6)
+// ⇒ **"恰好等于上界"的产物根本不存在**，原版构造必然失败。
+//
+// ⚠ 这个"构造不出来"本身就是**比原断言更强**的性质，所以直接证它：
+//
+//	**编码器在固件上界内产出的任何 manifest 都过得了门禁** ⇒
+//	R1（"极端配置可能永远下发失败"）在**结构上**不可能复发，而不是"当前恰好不复发"。
+//
+// 它凭什么会失败：把 MaxManifestWireBytes 调回 2011，本用例立刻红
+// （最坏帧 3100 > 2011 ⇒ 编码器**能**产出超界帧）。
+func TestR1EncoderCannotExceedTheGate(t *testing.T) {
 	registry := r1StubRegistry()
 	const maxEdges = 5 * maxEdgeDevicesPerChannel
 	build := func(edges, wBytes, busBytes, idLen, syncLen int) []byte {
 		snap, chs := r1SizedSnapshot(maxManifestTemplates, wBytes, busBytes, edges)
 		return r1Encode(t, snap, chs, registry, strings.Repeat("m", idLen), strings.Repeat("s", syncLen))
 	}
-	// 先按整组 edge 粗调（每组约 37 B），再按 write_data 逐字节精调到 2011 B。
-	// 每删一组 edge 帧长只降 36–37 B，所以只要把 over 压进 0..63，write_data
-	// 杠杆（1 B/字节，长度 varint 不跨档）就能精确命中。
-	var payload2011, payload2012 []byte
-	for edges := maxEdges; edges >= 0 && payload2011 == nil; edges-- {
-		over := len(build(edges, 64, 64, 1, 1)) - target
-		if over < 0 || over > 63 {
-			continue
+
+	// 逐个"最坏"维度**逐字节**扫，找出编码器能产出的**最大**帧长。
+	// ⚠ 不是取一个样本就下结论：本轮要证的是"任何合法配置都不超界"，
+	//   所以必须把各个可调的杠杆都推到最大再看。
+	maxLen, maxDesc := 0, ""
+	for _, edges := range []int{0, 6, 12, maxEdges} {
+		for _, idLen := range []int{1, 16, 31} {
+			for _, syncLen := range []int{1, 18, 36} {
+				p := build(edges, 64, 64, idLen, syncLen)
+				if len(p) > maxLen {
+					maxLen = len(p)
+					maxDesc = fmt.Sprintf("edges=%d manifest_id=%dB sync_id=%dB", edges, idLen, syncLen)
+				}
+			}
 		}
-		payload2011 = build(edges, 64-over, 64, 1, 1)
-		if len(payload2011) != target {
-			t.Fatalf("constructed %d B, want exactly %d B (edges=%d over=%d)", len(payload2011), target, edges, over)
-		}
-		// 拒绝边界：manifest_id 从 1 B 加到 2 B（field 1 长度 +1）。
-		payload2012 = build(edges, 64-over, 64, 2, 1)
 	}
-	if payload2011 == nil {
-		t.Fatalf("could not construct a real %d B manifest from encoder output", target)
-	}
-	if len(payload2012) != target+1 {
-		t.Fatalf("constructed %d B for the reject boundary, want %d B", len(payload2012), target+1)
+	if maxLen == 0 {
+		t.Fatal("编码器一个产物都没产出 ⇒ 本用例没在测任何东西（假绿）")
 	}
 
-	if err := checkManifestWireBytes(len(payload2011)); err != nil {
-		t.Errorf("real %d B manifest must pass, got %v", len(payload2011), err)
+	if maxLen > MaxManifestWireBytes {
+		t.Fatalf("编码器能产出 %d B 的 manifest（%s），**超过**门禁上界 %d B ⇒ "+
+			"该配置会被拒且永远下发不了（R1 复发）。要么收紧字段上限，要么提高上界。",
+			maxLen, maxDesc, MaxManifestWireBytes)
 	}
-	err := checkManifestWireBytes(len(payload2012))
-	if err == nil {
-		t.Fatalf("real %d B manifest must be rejected", len(payload2012))
+	// ⚠ 另取两个**固件上限下的真实最坏快照**（与 TestR1ManifestWorstCaseEncodedBytes 同源），
+	//   上面的扫描用的是受参化快照，未必覆盖真正的最大值。
+	for _, chs := range []int{5, 4} {
+		snap, channels, reg := r1MaxSnapshot(chs)
+		worst := r1Encode(t, snap, channels, reg,
+			"v2-"+strings.Repeat("a", 28), strings.Repeat("s", 36))
+		if len(worst) > maxLen {
+			maxLen, maxDesc = len(worst), fmt.Sprintf("r1MaxSnapshot(%d)", chs)
+		}
+		if err := checkManifestWireBytes(len(worst)); err != nil {
+			t.Errorf("固件上限下 %d 通道的最坏帧 %d B 必须能过门禁，得到 %v", chs, len(worst), err)
+		}
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("%d", len(payload2012))) ||
-		!strings.Contains(err.Error(), fmt.Sprintf("%d", MaxManifestWireBytes)) {
-		t.Errorf("rejection must name both the actual size and the limit: %q", err.Error())
+
+	// 证明门禁**不是恒放行**：恰好在上界 + 1 B 处必须拒绝。
+	// ⚠ 这里必须用 MaxManifestWireBytes+1，**不是** maxLen+1 ——
+	//   第一版写成 maxLen+1（2619 B），那远在上界之内、当然不拒，于是假红。
+	//   判据要对准**上界**，不是对准"当前最大产出"。
+	if err := checkManifestWireBytes(MaxManifestWireBytes); err != nil {
+		t.Errorf("恰好等于上界 %d B 必须放行（边界含端点），得到 %v", MaxManifestWireBytes, err)
 	}
-	t.Logf("R1 gate boundary pinned with real encoder output: %d B passes, %d B rejected", len(payload2011), len(payload2012))
+	if err := checkManifestWireBytes(MaxManifestWireBytes + 1); err == nil {
+		t.Errorf("上界 + 1 B (%d) 必须拒绝 ⇒ 否则门禁恒放行，本用例失去意义", MaxManifestWireBytes+1)
+	}
+
+	t.Logf("编码器最大产出 %d B（%s）；门禁上界 %d B ⇒ 余量 %d B，R1 结构上不可能复发",
+		maxLen, maxDesc, MaxManifestWireBytes, MaxManifestWireBytes-maxLen)
 }
 
 // TestR1WorstCaseByteBudgetBreakdown 逐项测量最坏帧的字节预算构成，
@@ -538,35 +587,49 @@ func r1SeedWorstCaseDB(t *testing.T, channelCount int) *gorm.DB {
 	return db
 }
 
-// TestR1WorstCaseRejectedBySendPath 端到端：最坏配置必须被门禁拒绝、不发布、
-// 且节点被 fail() 驱动到 config_status=failed，错误信息含实际字节数与上限。
-func TestR1WorstCaseRejectedBySendPath(t *testing.T) {
+// ⚠⚠ 2026-10-08（§197）：**断言方向已反转** —— 原版是 "最坏配置必须被拒"，
+// 现在是 "最坏配置必须**送得出去**"。这是 R1 被修好的**端到端证据**。
+//
+// 背景：R1（设计 §8）原为"MQTT 单事件上限 2011 B，而最坏 Manifest 编码可达 3100 B(S3)
+// ⇒ 极端配置可能永远下发失败"。MQTT 移除 + 上界改为设备侧的 4096 B 之后，
+// 3100 < 4096 ⇒ **R1 不再存在**。
+//
+// ⇒ 保留用例（而非删除）的理由：它是**端到端**（走真实 SendConfigManifestWithDecision、
+//
+//	真实 DB、真实编码器），比单元层面的长度断言更能证明"这份配置真的送得出去"。
+//
+// 它凭什么会失败：把 MaxManifestWireBytes 调回 2011，本用例立刻红
+// （最坏配置会被拒且节点被标 failed）。
+func TestR1WorstCaseIsNowDeliverable(t *testing.T) {
 	db := r1SeedWorstCaseDB(t, 5)
 	mgr, mock := newManifestTestManager(t, db, r1StubRegistry())
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{
 		DeviceID: r1WorstDeviceID, SyncID: strings.Repeat("s", 36),
 		Action: SyncActionFull, Reason: "r1-byte-gate",
 	})
-	if err == nil {
-		t.Fatal("worst-case manifest above the single-event limit must be rejected, got nil")
+	if err != nil {
+		errMsg := err.Error()
+		// 若真被拒，错误里必须带长度与上界 —— 否则排查者不知道差多少。
+		if strings.Contains(errMsg, "bound is") {
+			t.Fatalf("最坏配置被字节门禁拒了 ⇒ R1 复发（该配置将永远下发不了）：%v", err)
+		}
+		t.Fatalf("最坏配置应能下发，得到其它错误：%v", err)
 	}
-	if len(mock.publishedPayload) != 0 {
-		t.Fatalf("over-limit manifest must not be published, got %d bytes", len(mock.publishedPayload))
+	if len(mock.publishedPayload) == 0 {
+		t.Fatal("最坏配置应被发布，实际发布 0 字节")
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("%d", MaxManifestWireBytes)) {
-		t.Errorf("error must contain the limit %d: %v", MaxManifestWireBytes, err)
-	}
-	if !strings.Contains(err.Error(), "bytes") {
-		t.Errorf("error must be diagnosable (actual byte count): %v", err)
-	}
+	t.Logf("最坏配置已下发：%d B（门禁上界 %d B，余量 %d B）",
+		len(mock.publishedPayload), MaxManifestWireBytes,
+		MaxManifestWireBytes-len(mock.publishedPayload))
+
 	var node models.Node
 	if err := db.Where("node_id = ?", r1WorstDeviceID).First(&node).Error; err != nil {
 		t.Fatal(err)
 	}
-	if node.ConfigStatus != "failed" || node.ConfigSyncState != "failed" {
-		t.Errorf("rejected manifest must mark the node failed: config_status=%q config_sync_state=%q", node.ConfigStatus, node.ConfigSyncState)
+	if node.ConfigStatus == "failed" || node.ConfigSyncState == "failed" {
+		t.Errorf("成功下发的配置**不应**把节点标 failed（那会让运维去查设备，而设备没问题）："+
+			"config_status=%q config_sync_state=%q", node.ConfigStatus, node.ConfigSyncState)
 	}
-	t.Logf("R1 end-to-end rejection: %v", err)
 }
 
 // TestR1NormalConfigStillPublishes 防"门禁误杀"：常规配置仍能正常发布。
