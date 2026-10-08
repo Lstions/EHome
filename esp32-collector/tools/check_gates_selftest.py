@@ -285,6 +285,27 @@ def inject_append(relpath, text):
     return fn
 
 
+def inject_make_file(relpath, text):
+    """新建一个文件（含父目录），供"陈旧构建产物"这类配方使用。
+
+    ⚠ 与 inject_probe 的差别：probe 建在固定目录 components/zz_gate_selftest_probe，
+      而本原语需要建在 build/ 这类**已 gitignore** 的路径下模拟陈旧产物。
+    ⚠ 清理安全性：只允许建在 build/ 前缀下（该目录已 gitignore、可安全重建），
+      并由 _journal_add_created 先落盘，SIGKILL 后 recover_journal 能自愈。
+    """
+    assert relpath.startswith("build/"), \
+        "inject_make_file 只允许建在 build/ 下（gitignore、可安全重建），收到：%s" % relpath
+    def fn(backups, created):
+        path = os.path.join(ROOT, relpath)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _journal_add_created(path)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        created.append(path)
+        return relpath
+    return fn
+
+
 def inject_replace(relpath, pattern, repl, what):
     def fn(backups, created):
         def sub(text):
@@ -597,6 +618,18 @@ def recipes():
         "删掉 __scratch_v3/defaults/linkvarbuf.defaults 的 broker 覆盖 ⇒ 门禁必须红"
         "（本会话真实事故：设备连上生产 broker 并订阅其下行主题）")
 
+    # ⚠ 第二条 prod_isolation 配方（2026-10-08 本轮发现的**第二个泄漏面**）：
+    #   光修 defaults **不够** —— esp32-collector/build/s3p-n16/ 是 2026-10-06 的旧产物，
+    #   里面 9 个文件（sdkconfig/.broker.defaults/.bin/.elf/.obj/.a）都嵌着生产地址。
+    #   任何 flash 脚本误用它刷机 ⇒ 设备连生产 broker。
+    #   本配方在 build/ 下造一个含生产地址的 sdkconfig，验证门禁能抓到它。
+    add("prod_isolation.stale_build_artifact",
+        "check_prod_isolation.py", "file",
+        inject_make_file(os.path.join("build", "zz_selftest_stale", "sdkconfig"),
+                         'CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.168.20.6:1883"\n'),
+        "build/zz_selftest_stale/sdkconfig 含生产地址 ⇒ 门禁必须红"
+        "（陈旧产物不会因修 defaults 而改变）")
+
     return R
 
 
@@ -638,11 +671,25 @@ def safe_remove(path):
     """只删探针物：路径必须严格落在白名单内。"""
     real = os.path.realpath(path)
     allowed = (os.path.realpath(PROBE_DIR), TMP_FRAME, TMP_JUNK)
-    assert real in allowed, "拒绝删除不在白名单内的路径：%s" % real
+    # build/ 下的自检产物（inject_make_file 建的"陈旧构建产物"）：
+    # 该目录已 gitignore、可安全重建，故允许清理，但仍**只允许** build/ 前缀。
+    build_prefix = os.path.realpath(os.path.join(ROOT, "build")) + os.sep
+    if real not in allowed and not real.startswith(build_prefix):
+        assert False, "拒绝删除不在白名单内的路径：%s" % real
     if os.path.isdir(real):
         shutil.rmtree(real)
     elif os.path.exists(real):
         os.remove(real)
+        # ⚠ inject_make_file 建的是 build/<名字>/sdkconfig —— 删掉文件后**父目录会留下**。
+        #   自检的"残留检查"只看文件，于是报"无残留"，但 build/ 下会逐轮累积空目录。
+        #   故删文件后顺带清理**空的**父目录（只在 build/ 前缀内，且必须为空）。
+        parent = os.path.dirname(real)
+        build_prefix = os.path.realpath(os.path.join(ROOT, "build")) + os.sep
+        if parent.startswith(build_prefix):
+            try:
+                os.rmdir(parent)   # 目录非空则抛 OSError，自然跳过
+            except OSError:
+                pass
 
 
 def run_recipe(rec, harmless, cov_limit):

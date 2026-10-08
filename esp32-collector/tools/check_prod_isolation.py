@@ -105,8 +105,35 @@ def main():
     else:
         print("  SKIP 未找到本地联调 defaults 目录（%s）" % SCRATCH_DIR)
 
+    # ── 3) ⚠ 陈旧构建产物：build/ 下的 sdkconfig 若指向生产 ⇒ FAIL ──
+    # 为什么必须查它（2026-10-08 本轮发现）：
+    #   esp32-collector/build/s3p-n16/ 是 **2026-10-06** 的旧产物，里面 9 个文件
+    #   （sdkconfig / .broker.defaults / ehome_collector.bin / .elf / .obj / .a ...）
+    #   都嵌着**生产地址**。任何 flash 脚本若误用它刷机，设备就会连生产 broker。
+    #   ⚠ 光修 defaults 文件**不够** —— 旧产物不会因此改变。
+    #   build/ 是 gitignore 的，但它**确实存在于工作树里**且可被刷机脚本引用。
+    # ⚠ 两个位置都要扫：交付构建目录 build/，以及本地联调构建目录 __scratch_v3/build/。
+    #   2026-10-08 实测：两处共 **189 个文件**（9 + 180）嵌着生产地址 —— 全是修复前构建的。
+    for build_dir in (os.path.join(ROOT, "build"),
+                      os.path.join(ROOT, "..", "__scratch_v3", "build")):
+        if not os.path.isdir(build_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(build_dir):
+            for fn in filenames:
+                if fn != "sdkconfig":
+                    continue
+                p = os.path.join(dirpath, fn)
+                src = read(p)
+                if src is None or PROD_HOST not in src:
+                    continue
+                checked += 1
+                problems.append(
+                    "%s（**陈旧构建产物**）指向生产 %s ⇒ 误用它刷机就会连生产 broker；"
+                    "修法：删掉该 build 目录重新构建（build/ 是 gitignore 的，可安全重建）"
+                    % (os.path.relpath(p, ROOT), PROD_HOST))
+
     print("")
-    print("生产隔离核对（生产主机 %s）：检查 %d 个 defaults 文件" % (PROD_HOST, checked))
+    print("生产隔离核对（生产主机 %s）：检查 %d 个 defaults/sdkconfig 文件" % (PROD_HOST, checked))
     if problems:
         print("FAIL: 发现指向生产的构建配置：")
         for p in problems:
