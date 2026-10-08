@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -194,6 +195,10 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 			return nil, err
 		}
 	}
+	// ⚠ 2026-10-09（§198）：到这里 owners 已收齐**全部**将要编码的引脚
+	//（UART/I2C/SPI 通道 + GPIO + PWM），正是检查"保留脚"的唯一合适位置。
+	// 只告警不拒绝，理由见 warnReservedPins 的注释（真源在固件，后端是可能过期的副本）。
+	warnReservedPins(node, owners)
 	return channels, nil
 }
 
@@ -373,4 +378,84 @@ func findTemplateID(ch models.Channel, edge models.EdgeDevice) uint64 {
 		}
 	}
 	return 0
+}
+
+// reservedPinName 返回该平台某引脚是保留脚时的**用途名**（BOOT / USB_D- / USB_D+ / LED）。
+//
+// ⚠ 与 handler_periph.go:382 的 reservedPinForPlatform **有意分工、但数据同源**：
+//
+//	那个函数返回**单个** pin 且只用于**硬拒绝** GPIO/PWM 外设；
+//	本函数给出**完整清单**且只用于**告警**。
+//	⚠ 两张表应合并成一份（现为手工副本，固件扩清单时不会自动跟上）—— 登记为待办（§198）。
+//
+// 数据来源：esp32-collector/components/hw_profile/include/hw_tables.h 的 HW_RESERVED_*。
+func reservedPinName(platform string, pin int) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(platform)) {
+	case "ESP32S3", "ESP32-S3", "S3":
+		switch pin {
+		case 0:
+			return "BOOT/strapping", true
+		case 19:
+			return "USB_D-", true
+		case 20:
+			return "USB_D+", true
+		case 48:
+			return "RGB LED (WS2812)", true
+		}
+	case "ESP32C6", "ESP32-C6", "C6":
+		switch pin {
+		case 9:
+			return "BOOT/strapping", true
+		case 12:
+			return "USB_D-", true
+		case 13:
+			return "USB_D+", true
+		case 8:
+			return "RGB LED (WS2812)", true
+		}
+	}
+	return "", false
+}
+
+// warnReservedPins 对"将要编码进 manifest 的引脚里落在保留脚上的"发告警。
+//
+// ⚠⚠ 2026-10-09（§198）新增，**只告警、不拒绝**。这是有意的取舍：
+//
+//	① **真源在固件**：哪些脚保留由 hw_tables.h 的 HW_RESERVED_* 定义
+//	   （S3: 0/19/20/48，C6: 9/12/13/8）。后端这份是**手工副本**。
+//	② 把可能过期的副本当**硬拒绝**判据，会在固件新增保留脚时误伤合法配置 ——
+//	   而固件侧 validate_manifest_resources 才是权威（它真知道本芯片的保留脚）。
+//	③ 但**静默**也不行：S3P 实测上报 capabilities 里 I2C1.default_scl_pin = **48**，
+//	   而 48 正是该型号的 RGB LED 保留脚（main.c 的 rgb_led_init(48) 真在驱动它）。
+//	   后端**照单全收**并编码下发 ⇒ 设备报 ESP_ERR_INVALID_ARG ⇒
+//	   排查者只看到"引脚仲裁失败"，不知道"后端早就该提醒这个脚是保留脚"。
+//
+// ⇒ 折中：编码前告警（可观测），判据仍归固件（权威）。
+//
+// ⚠ 为什么加在 claim 的调用点而不是 channelRoutePins：
+//
+//	claim 是**所有**会被编码进 manifest 的资源的唯一汇聚点
+//	（UART/I2C/SPI 通道 + GPIO + PWM 都走它），而
+//	handler_periph.go 的 validateReportedGPIO 只覆盖 GPIO/PWM ——
+//	**总线通道的引脚（channelRoutePins）从来没查过保留脚**。
+func warnReservedPins(node models.Node, owners map[int]string) {
+	if len(owners) == 0 {
+		return
+	}
+	pins := make([]int, 0, len(owners))
+	for pin := range owners {
+		pins = append(pins, pin)
+	}
+	sort.Ints(pins)
+	for _, pin := range pins {
+		name, ok := reservedPinName(node.Platform, pin)
+		if !ok {
+			continue
+		}
+		// ⚠ 格式串写在一行或用 +：Go 不支持相邻字符串字面量跨行拼接（本轮踩过两次）。
+		logger.Warnf("[%s] manifest 将编码保留脚 GPIO%d（%s 的 %s）：若固件无法认领该脚，"+
+			"整份 manifest 会被拒（不止这一条通道）；"+
+			"⚠ 后端保留脚表是固件 hw_tables.h 的手工副本，可能过期 —— 见 §198。",
+			node.NodeID, pin, node.Platform, name)
+	}
 }
