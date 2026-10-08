@@ -170,11 +170,15 @@ void sync_manager_request_sync(sync_reason_t reason)
         return;
     }
 
-    /* Check **uplink** availability（不是 MQTT 可用性 —— 见 uplink_available() 的说明）。
-     * ⚠ 日志措辞也要跟着改：原文写死 "MQTT not connected"，在 3.0 已就绪时会**误导排障**
-     *   （操作员会去查 MQTT，而真正的原因是上行仲裁层说两条都不通）。 */
+    /* Check **uplink** availability（不是某个传输的可用性 —— 见 uplink_available() 的说明）。
+     * ⚠ 日志措辞改过两次，两次都是因为**措辞比代码活得久**：
+     *   ① 原文写死 "MQTT not connected" —— 3.0 就绪时仍这么说，操作员会去查 MQTT；
+     *   ② 改成 "MQTT 与 3.0 均未就绪" —— 但 MQTT 已于 2026-10-08 **整体移除**
+     *      （§194）⇒ 这句话在**设备日志里点名了一个不存在的传输**，
+     *      真机上实测仍会打印（C6 验证时 t=375ms 那行就是这么来的）。
+     * ⇒ 现在只说"上行"：**日志不该点名具体实现，正如判据不该**（同一族教训）。 */
     if (!uplink_available()) {
-        ESP_LOGW(TAG, "无可用上行（MQTT 与 3.0 均未就绪），暂缓同步请求");
+        ESP_LOGW(TAG, "无可用上行（3.0 链路未就绪），暂缓同步请求");
         s_sync_enum = SYNC_STATE_ERROR;
         return;
     }

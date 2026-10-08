@@ -646,6 +646,25 @@ def recipes():
         "mem_guard.c: s3p floor 8KiB -> 4KiB ⇒ 门禁必须红"
         "（宿主测试因用自适应 FLOOR 宏而全绿，只有本门禁能发现）")
 
+    # ⚠⚠ 2026-10-08（§197）：为什么给 check_hw_bus_defaults 加配方
+    #
+    #   真机发现：hw_tables.c:91 的 I2C1 default_scl = 48，而**同一个文件** :62
+    #   自己写着 "S3: ... GPIO48=RGB LED"，hw_tables.h 也定义了 HW_RESERVED_LED=48，
+    #   且 main.c 的 rgb_led_init(48) 真的在驱动那个脚。
+    #   ⇒ 用户按默认值建 I2C1 ⇒ 设备 preinstall rejected: ESP_ERR_INVALID_ARG
+    #     ⇒ **整份 manifest 被拒**（连 3 条 UART 一起不装）。
+    #
+    #   ⚠ 这条门禁的价值在于"**人眼审不出来**"：两个清单在同一个文件里、相隔 29 行，
+    #     而且这是**第二次**踩同一个坑（第一次是 GPIO0/BOOT 脚被 PWM 占用，
+    #     见 hw_tables.c:104-107）。所以必须证明它真的会咬 —— 否则它和没有一样。
+    add("hw_bus_defaults.reserved_pin_conflict",
+        "check_hw_bus_defaults.py", "file",
+        inject_replace("components/hw_profile/hw_tables.c",
+                       r'default_scl = 46',
+                       'default_scl = 48',
+                       "总线默认引脚落在保留脚上（S3 I2C1 SCL=48=RGB LED）"),
+        "把 I2C1 的 default_scl 改回 48（= HW_RESERVED_LED，且固件真在驱动它）⇒ 门禁必须红")
+
     # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：
     #   本会话真实事故 —— 所有测试 defaults 都没覆盖 CONFIG_COLLECTOR_MQTT_BROKER_URL，
     #   于是继承 config/mqtt-broker.defaults 的**生产**地址 192.168.20.6:1883，
