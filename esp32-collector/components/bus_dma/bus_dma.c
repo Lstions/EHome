@@ -42,18 +42,27 @@
 /*  firmware download.                                                */
 /*                                                                    */
 /*  On ESP32-S3:  UART0 download port = TX43/RX44, strap = GPIO0     */
-/*  On ESP32-C6:  UART0 download port = TX16/RX17, strap = GPIO8     */
+/*  On ESP32-C6:  UART0 download port = TX16/RX17, strap = **GPIO9** */
 /*                                                                    */
-/*  C6 constraint: GPIO8 is shared with RGB LED (WS2812), so GPIO    */
-/*  hold cannot be used. Instead, C6 uses an NVS flag: set flag,     */
-/*  reboot, check flag on next boot to enter download wait mode.     */
+/*  ⚠ 2026-10-08 修正：这里原写 "C6 strap = GPIO8" 且据此断定          */
+/*  "GPIO8 与 RGB LED 共用 ⇒ 读不了 BOOT 按键"。**三处都错**：          */
+/*    ① C6 的 BOOT/strapping 引脚是 **GPIO9**，GPIO8 才是 RGB LED；    */
+/*    ② 因此"读不了 BOOT 按键"是**错的前提** —— factory_reset.c 正在读 */
+/*       GPIO9 当 BOOT 按键，同一块板上两条路径行为矛盾；               */
+/*    ③ 给用户的指示错了（原写"hold GPIO8"，实际要 hold GPIO9）。      */
+/*  真机证据（/tmp/ev116/c6p3run.log，C6 实机）：                       */
+/*    I (337) rgb_led: Initializing RGB LED on GPIO8                   */
+/*    I (339) FACTORY_RESET: Monitoring BOOT button (GPIO9)            */
+/*  ⇒ GPIO9 是普通 GPIO，**可以**做输入 ⇒ 下面改为与 S3 同样直接读它。  */
+/*  （GPIO hold 那部分仍不适用：hold 是为了让 ROM 看到低电平，而 C6 的  */
+/*    ROM 复位源不是 GPIO9，故仍走 NVS flag + 物理 BOOT+RESET。）        */
 /* ------------------------------------------------------------------ */
 
 /* Per-chip BOOT/strapping GPIO */
 #ifdef CONFIG_IDF_TARGET_ESP32S3
   #define BOOT_STRAP_GPIO  0   /* S3 strapping pin */
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
-  #define BOOT_STRAP_GPIO  8   /* C6 strapping pin (shared with RGB LED) */
+  #define BOOT_STRAP_GPIO  9   /* C6 BOOT/strapping pin (GPIO8 is the RGB LED) */
 #else
   #define BOOT_STRAP_GPIO  0
 #endif
@@ -75,7 +84,7 @@ static void download_wait_task(void *arg)
 #ifdef CONFIG_IDF_TARGET_ESP32S3
     ESP_LOGI(TAG, "  S3 UART0 pins: TX=43, RX=44 (strapping: GPIO0)");
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
-    ESP_LOGI(TAG, "  C6 UART0 pins: TX=16, RX=17 (strapping: GPIO8)");
+    ESP_LOGI(TAG, "  C6 UART0 pins: TX=16, RX=17 (BOOT/strapping: GPIO9, RGB LED: GPIO8)");
 #endif
 
     while (1) {
@@ -97,8 +106,24 @@ static void download_wait_task(void *arg)
             esp_restart();
         }
 #else
-        /* C6: no BOOT button check possible (GPIO8 = LED).
-         * User must physically reset. We just wait. */
+        /* 2026-10-08 FIX: original said 'C6: no BOOT button check possible
+         * (GPIO8 = LED)' -- the premise was wrong. C6 BOOT is GPIO9 (GPIO8 is
+         * the RGB LED) and GPIO9 is readable => same policy as S3.
+         * (S3 uses gpio_hold so the ROM sees a low level; C6's ROM reset source
+         *  is not GPIO9, so hold still cannot auto-enter ROM download -- but
+         *  detecting the release is valid regardless.) */
+        if (gpio_get_level(BOOT_STRAP_GPIO) != 0) {
+            ESP_LOGI(TAG, """BOOT (GPIO%d) released - clearing NVS flag, restarting""",
+                     BOOT_STRAP_GPIO);
+            nvs_handle_t h;
+            if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_u8(h, NVS_KEY_DL_FLAG, 0);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+        }
         vTaskDelay(pdMS_TO_TICKS(DOWNLOAD_LED_BLINK_MS));
 #endif
     }
@@ -145,8 +170,33 @@ bool bus_dma_uart0_boot_init(void)
     }
 
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
-    /* C6: GPIO8 is shared with RGB LED, cannot use as input.
-     * Only check NVS flag for download mode. */
+    /* ⚠ 2026-10-08 修正：原先这里只查 NVS flag，理由是"GPIO8 与 RGB LED
+     * 共用 ⇒ 读不了 BOOT 按键"。**那个前提是错的** —— C6 的 BOOT 是 GPIO9，
+     * GPIO8 才是 LED（真机证据见文件顶部注释）。
+     * GPIO9 是普通 GPIO，可以且**应当**做输入 ⇒ 与 S3 一样直接读它。
+     * ⚠ 这与 factory_reset.c 读 GPIO9 的行为**一致**了：
+     *   修之前，同一块板上"工厂重置能读到 BOOT 按键、而下载模式读不到"，自相矛盾。
+     * ⚠ 输入窗口仍限在启动后 50ms（与 S3 同）：C6 上 GPIO9 空闲时为高，
+     *   上电即按住 BOOT 才会读到低 —— 这是**刻意的**，避免把运行中按 BOOT
+     *   （用户可能只是误触）当成"请求下载模式"。 */
+    {
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << BOOT_STRAP_GPIO),
+            .mode         = GPIO_MODE_INPUT,
+            .pull_up_en   = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type    = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&io_conf);
+        vTaskDelay(pdMS_TO_TICKS(BOOT_CHECK_DELAY_MS));
+        if (gpio_get_level(BOOT_STRAP_GPIO) == 0) {
+            ESP_LOGW(TAG, "BOOT button (GPIO%d) held — entering download mode",
+                     BOOT_STRAP_GPIO);
+            dl_requested = true;
+        }
+    }
+
+    /* 仍然保留 NVS flag 路径（软件触发 / 物理 BOOT 之外的备用入口）。 */
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         uint8_t flag = 0;
@@ -198,11 +248,14 @@ void bus_dma_uart0_enter_download(void)
 
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
     /*
-     * C6 strategy: NVS flag only (GPIO8 = LED, cannot hold).
+     * C6 strategy: NVS flag + physical BOOT. BOOT is **GPIO9**, NOT GPIO8
+     * (GPIO8 is the RGB LED). GPIO9 is not an RTC GPIO so gpio_hold does not
+     * apply, and C6's ROM reset source is not GPIO9 either => software cannot
+     * pull it low to auto-enter ROM download.
      * Set flag, reboot. On next boot, bus_dma_uart0_boot_init reads flag
      * and enters download wait mode. User then connects esptool.
      * NOTE: ROM bootloader won't auto-enter download mode.
-     * User must manually hold BOOT (GPIO8) + press RESET for
+     * User must manually hold BOOT (GPIO9) + press RESET for
      * true ROM download. The NVS flag puts firmware in wait mode
      * so UART0 is not grabbed by bus_dma.
      */
