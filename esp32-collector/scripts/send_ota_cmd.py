@@ -122,9 +122,24 @@ for _ in range(10):
                         pos += length
                     else:
                         break
-            elif msg_type == 0x0C:  # MSG_OTA_RESULT
-                print("  OTA Result received")
-                break
+            elif msg_type == 0x0C:
+                # 2026-10-08 FIX: was labelled MSG_OTA_RESULT, which DOES NOT EXIST.
+                # Authoritative table frame_codec.h:50 => 0x0C is MSG_SCAN_RPT.
+                # So this branch used to print "OTA Result received" on a SCAN report,
+                # which actively MISLEADS debugging.
+                # OTA progress/result actually travels as MSG_OTA_PROG (0x0B), see the
+                # branch above; the backend also waits for OtaProg(status=0)
+                # (backend/internal/api/handler_ota.go:75).
+                print("  [0x0C = MSG_SCAN_RPT] scan report (NOT an OTA result)")
+                continue
+                # ⚠ 2026-10-08 修正（原注释写 MSG_OTA_RESULT，**该符号不存在**）：
+                # 权威表 components/frame/frame_codec.h:50 里 0x0C 是 **MSG_SCAN_RPT**，
+                # 不是 OTA 结果。设备侧根本没有 MSG_OTA_RESULT 这个符号。
+                # ⇒ 本分支原先会在收到**扫描上报**时打印 "OTA Result received"，**误导排障**。
+                # OTA 进度/结果走的是 **MSG_OTA_PROG (0x0B)**（见上面那个分支；
+                # 后端 internal/api/handler_ota.go:75 也是等 OtaProg(status=0) 才确认完成）。
+                print("  [0x0C = MSG_SCAN_RPT] 收到扫描上报（**不是** OTA 结果）")
+                continue
     except socket.timeout:
         break
 

@@ -44,8 +44,20 @@ ROOT = os.path.dirname(_HERE)          # esp32-collector
 MAIN = os.path.join(ROOT, "main")
 COMP = os.path.join(ROOT, "components")
 
-SCAN_DIRS = [MAIN, COMP]
-EXTS = (".c", ".h")
+# 2026-10-08: SCAN_DIRS MUST include scripts/.
+# scripts/*.py are tools that talk to the device directly, with HARDCODED
+# message ids (e.g. `cmd = bytearray([0x0A])  # MSG_OTA_CMD`).
+# Measured defect: both OTA scripts wrote `0x0C)  # MSG_OTA_RESULT`, but the
+# authoritative table has `0x0C = MSG_SCAN_RPT` and NO MSG_OTA_RESULT symbol
+# at all => the script prints "OTA Result received" on a SCAN report.
+# This gate used to scan only main/+components/ with .c/.h => it was blind.
+# Same family as "the criterion hides in a segment that never compiles":
+# here the criterion hides in a directory that is never scanned.
+SCAN_DIRS = [MAIN, COMP, os.path.join(ROOT, "scripts")]
+# .py added because scripts/ is all Python.
+# NOTE the comment prefixes must accept "#" too (see scan() and
+# scan_message_ids()) or the files are scanned yet match nothing.
+EXTS = (".c", ".h", ".py")
 EXEMPT = "[[stale-ok:"
 
 # 声称"SNTP 还没做"
@@ -75,6 +87,28 @@ DONE_MARK = (
     "此前", "原写", "原为", "已过期", "过期了", "曾写", "曾经",
 )
 
+
+
+def comment_text(path, raw):
+    """返回该行**属于注释的那部分**；不是注释行则返回 ""。
+
+    ## 为什么需要它（2026-10-08 实测）
+    C 的注释符（* / // / /*）**总是**整行注释，所以"整行以它开头"就够。
+    但 Python 的 # 既用于整行注释，也用于**行尾注释**：
+        elif msg_type == 0x0C:  # MSG_OTA_RESULT
+    这行以 elif 开头 ⇒ 被"整行前缀"判据拒绝 ⇒ **脚本里的声称永远查不到**。
+    我实测过：只把 "#" 加进前缀列表**不够**，注入变异后门禁仍 PASS（假绿）。
+
+    ⇒ 正确做法：对 .py 取 "#" 之后的部分（真正的注释语义），
+      而不是把整行当注释 —— 后者会把**字符串里的 #** 也当成声称。
+    """
+    s = raw.strip()
+    if s.startswith("*") or s.startswith("//") or s.startswith("/*"):
+        return s
+    if path.endswith(".py"):
+        i = raw.find("#")
+        return raw[i:].strip() if i >= 0 else ""
+    return ""
 
 def iter_source_files():
     for base in SCAN_DIRS:
@@ -139,8 +173,10 @@ def scan(claims):
         for i, raw in enumerate(lines, 1):
             if EXEMPT in raw:
                 continue
-            s = raw.strip()
-            if not (s.startswith("*") or s.startswith("//") or s.startswith("/*")):
+            # ⚠ 统一走 comment_text()（认 C 注释 **与 Python 行尾 #**）。
+            # 原先这里只认 C 前缀 ⇒ scripts/*.py 被静默跳过。
+            s = comment_text(p, raw)
+            if not s:
                 continue
             if any(c in raw for c in claims):
                 if any(d in raw for d in DONE_MARK):
@@ -162,7 +198,20 @@ def scan(claims):
 # ⚠ 只在**符号确实存在于表中**时判不一致；表里没有的符号只报 WARN ——
 #   注释可能引用别的东西（协议名、外部规范），不能一律判错。
 TABLE_H = os.path.join(COMP, "frame", "frame_codec.h")
+# 两种写法都要认（2026-10-08 补第二种）：
+#   ① `MSG_OTA_CMD (0x0A)`      —— C 注释里的常见写法
+#   ② `0x0C:  # MSG_OTA_RESULT` —— **Python 脚本里的写法**（值在前、符号在后）
+# ⚠ 只认①时，scripts/*.py 里**一条都匹配不到** ⇒ 扫了等于没扫（我实测过：
+#   把 0x0C 标成 MSG_OTA_RESULT 注入回去，门禁仍 PASS）。
 MSG_CLAIM = re.compile(r"\b(MSG_[A-Z_0-9]+)\s*\(\s*(0[xX][0-9A-Fa-f]+)\s*\)")
+MSG_CLAIM_REV = re.compile(r"0[xX]([0-9A-Fa-f]{2})[^#\n]*#\s*(MSG_[A-Z_0-9]+)")
+
+
+def claimed_message_ids(raw):
+    """从一行里抽出所有 (符号, 声称值) —— 正反两种写法都认。"""
+    out = [(n, v.lower()) for n, v in MSG_CLAIM.findall(raw)]
+    out += [(n, "0x" + v.lower()) for v, n in MSG_CLAIM_REV.findall(raw)]
+    return out
 
 
 def message_ids_from_table():
@@ -187,10 +236,13 @@ def scan_message_ids(table):
         for i, raw in enumerate(lines, 1):
             if EXEMPT in raw:
                 continue
-            s = raw.strip()
-            if not (s.startswith("*") or s.startswith("//") or s.startswith("/*")):
+            # ⚠ 必须与 scan() 用**同一个**判据（comment_text）。
+            # 我在 2026-10-08 实测过：只改 scan() 而漏改这里，
+            # 注入"0x0C 标成 MSG_OTA_RESULT"的变异后门禁**仍然 PASS**（假绿）。
+            s = comment_text(p, raw)
+            if not s:
                 continue
-            for name, claimed in MSG_CLAIM.findall(raw):
+            for name, claimed in claimed_message_ids(raw):
                 n_seen += 1
                 real = table.get(name)
                 rel = os.path.relpath(p, ROOT)
@@ -244,8 +296,20 @@ def main():
         for f, i, name, claimed, real in mism:
             bad.append((f, i, "%s (%s)" % (name, claimed),
                         "权威表 %s = %s（见 frame_codec.h）" % (name, real)))
+        # ⚠ 2026-10-08：**"符号不存在"必须判 FAIL，不能只 WARN**。
+        #
+        # 原实现只 WARN ⇒ 门禁**永远不会因此变红**。而我实测到的事实是：
+        #   scripts/send_ota_cmd*.py 里写着 "0x0C)  # MSG_OTA_RESULT"，
+        #   而 MSG_OTA_RESULT **在权威表里根本不存在**、0x0C 是 MSG_SCAN_RPT。
+        #   后果是脚本把**扫描上报**当成 OTA 结果，还据此打印 "OTA successful!"。
+        # ⇒ 一个"引用了不存在符号"的注释，恰恰是最该拦下的一类：它不是措辞陈旧，
+        #   而是**指向了一个不存在的东西**（读的人会去找这个符号，然后找不到）。
+        # ⚠ 只对"**看起来就是消息号声称**"的形态判 FAIL（形如 MSG_XXX (0xNN) 或
+        #   0xNN: # MSG_XXX）—— 这正是 claimed_message_ids() 的判据，
+        #   不会把"协议名/外部规范"误伤（那种写法不会被本正则匹配）。
         for f, i, name, claimed, _ in unk:
-            print("WARN %s:%d 注释声称 %s (%s)，但权威表里没有该符号" % (f, i, name, claimed))
+            bad.append((f, i, "%s (%s)" % (name, claimed),
+                        "权威表里**没有** %s 这个符号（见 frame_codec.h 的消息号表）" % name))
 
     if bad:
         print("FAIL 以下注释的声称与代码事实**不一致**（过期清单）：")

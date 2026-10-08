@@ -119,26 +119,17 @@ while time.time() - start_time < 30:
                         pos += length
                     else:
                         break
-            elif msg_type == 0x0C:  # MSG_OTA_RESULT
-                print(f"  OTA Result received!")
-                # Parse result
-                pos = 1
-                success = False
-                while pos < len(data):
-                    tag = data[pos]
-                    field_num = tag >> 3
-                    wire_type = tag & 0x07
-                    pos += 1
-                    
-                    if wire_type == 0:  # varint
-                        value = 0
-                        shift = 0
-                        while pos < len(data):
-                            b = data[pos]
-                            value |= (b & 0x7F) << shift
-                            pos += 1
-                            if not (b & 0x80):
-                                break
+              elif msg_type == 0x0C:
+                  # 2026-10-08 FIX: this branch was labelled MSG_OTA_RESULT, which
+                  # DOES NOT EXIST in the authoritative table (frame_codec.h).
+                  # 0x0C is actually MSG_SCAN_RPT.
+                  # Consequences of the old label: a SCAN report was parsed as an OTA
+                  # result, and the script printed "OTA successful!" from scan bytes.
+                  # OTA progress/result travels as MSG_OTA_PROG (0x0B) -- see the branch
+                  # above; the backend also waits for OtaProg(status=0)
+                  # (backend/internal/api/handler_ota.go:75).
+                  print("  [0x0C = MSG_SCAN_RPT] scan report (NOT an OTA result)")
+                  continue
                             shift += 7
                         if field_num == 1:  # success
                             success = (value != 0)
