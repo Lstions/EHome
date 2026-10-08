@@ -395,7 +395,7 @@ devlink_rx_verdict_t devlink_rx_handle(uint8_t header_type, uint16_t payload_len
 #include "esp_sntp.h"
 
 #include "session.h"
-#include "uplink_arbiter.h"   /* task-21：上行仲裁轮询 */
+
 #include "device_link_handshake.h"   /* 应用层握手的纯决策（IDF 无关）*/
 /* task-33：3.0 链路的 nonce **不再自己生成**，改为向 2.x 握手 runtime 取
  * （决策 B′）。不 include 它会得到 implicit declaration —— 而这只在
@@ -987,12 +987,9 @@ static void devlink_task(void *arg)
          * **同一个**网络状态，否则两者可以在同一轮里得出不同结论。 */
         bool net_up = (wifi_mgr_get_state() == WIFI_MGR_CONNECTED);
 
-        /* task-21：推进上行仲裁（读 session READY 的**边沿**，喂给 transport_sel）。
-         *
-         * 为什么放在本任务：它是唯一持有 session 且周期运行的地方，能看到状态跃迁。
-         * 边沿而非电平（见 uplink_arbiter.c 的说明）：把"持续未 READY"当电平反复喂，
-         * 一个长重连期会被算成很多次失败，阈值语义失真。 */
-        uplink_arbiter_poll();
+        /* ⭐ 2026-10-08（§194）：这里原先每轮调 uplink_arbiter_poll() 推进上行仲裁
+         * （读 session READY 的边沿去喂 transport_sel 做 TCP/MQTT 选路）。
+         * MQTT 已彻底移除 ⇒ 只剩一条传输，**没有可选的路**，仲裁与选路整体删除。 */
 
         /* ── SNTP：复用本任务已有的观察点，**不新建任务** ──
          * 只在**边沿**通知 up/down（理由见 device_link_wiring.h 的

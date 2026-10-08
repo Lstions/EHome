@@ -514,12 +514,11 @@ def recipes():
         inject_append("sdkconfig.defaults", "CONFIG_ZZ_GATE_SELFTEST_PROBE=y\n"),
         "sdkconfig.defaults: 追加不存在的 CONFIG_ZZ_GATE_SELFTEST_PROBE=y")
 
-    add("stub_enum_sync.stub_value_drift",
-        "check_stub_enum_sync.py", "file",
-        inject_replace("host_tests/mqtt_event_tests.c",
-                       r"(MQTT_PUBLISH_BACKPRESSURE\s*=\s*)3\b", r"\g<1>4",
-                       "桩值漂移"),
-        "mqtt_event_tests.c 手抄桩：MQTT_PUBLISH_BACKPRESSURE 3 -> 4")
+    # ⚠ 2026-10-08：stub_enum_sync 配方已删除 —— 该门禁连同
+    #   tools/check_stub_enum_sync.py 一起删除（唯一守护目标 mqtt_publish_result_t
+    #   随 components/ehome_mqtt 移除，且本仓已无任何"手抄生产枚举的宿主副本"）。
+    #   本自检会拒绝"有配方但门禁不存在"⇒ 必须同步删配方，否则自检会红。
+    #   （这正是它该有的行为：门禁删了却留着配方，等于假装它还在守。）
 
     add("tcp_start_reachable.unreachable_block",
         "check_tcp_start_reachable.py", "file",

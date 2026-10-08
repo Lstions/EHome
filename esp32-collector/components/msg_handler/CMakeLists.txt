@@ -3,7 +3,13 @@ idf_component_register(SRCS "msg_handler.c" "handler_hello.c" "handler_config.c"
                        # D-14（2026-10-06）：去掉 bus_worker —— 原先只为 3 个上报统计量而依赖它，
 # 而 bus_worker 又依赖本组件，构成唯一的组件依赖环。
 # 统计量已搬到中立组件 report_stats（双方都依赖它，互不认识）。
-REQUIRES frame ehome_mqtt config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr device_op)
+# ⭐ 2026-10-08（§194）：去掉 ehome_mqtt —— MQTT 已彻底移除。
+# ⚠⚠ 同时补上 esp_timer：handler_hello.c 用了 esp_timer.h，而它此前能编过
+#     **只是因为 ehome_mqtt 的 REQUIRES 里带着 esp_timer**（传递包含）。
+#     删掉 ehome_mqtt 后立刻暴露：fatal error: esp_timer.h: No such file or directory。
+#     ⇒ 这正是 sync_manager.c:15 记过的"靠传递包含活着"形态 —— 改动包含图就静默炸掉。
+#     补成**直接依赖**，不再依赖别人顺便带进来。
+REQUIRES frame config_mgr ota sync_manager hw_profile transport scheduler report_stats gpio_ctrl pwm_ctrl periph_owner wifi_mgr device_op esp_timer)
 
 # EHOME_FRAME_GUARD: 组件级栈帧上限门禁。
 #

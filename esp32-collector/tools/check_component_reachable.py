@@ -73,17 +73,13 @@ PENDING_WIRING = {
         "test": "dispatch_tests.c",
         "review_by": "2026-11-15",
     },
-    "link_mqtt": {
-        "what": "MQTT 的 link 驱动",
-        "why": ("3.0 链路目前只接 TCP+mTLS；MQTT 兜底是 §7.3 P2 的事，"
-                "由 transport_sel 决定何时回退"),
-        "next": "§7.3 P2 阶段随 transport_sel 一起接",
-        "test": "link_mqtt_tests.c",
-        "review_by": "2026-12-01",
-    },
-    # task-21：transport_sel 已接线（main/uplink_arbiter.c 的 IDF 段调 tsel_create/tsel_poll，
-    # 并在 main/CMakeLists.txt 的 REQUIRES 里声明）⇒ 本条目按门禁要求删除。
-    # 它现在由仲裁层驱动："TCP 优先 / MQTT 兜底"，门见 main/uplink_arbiter.h。
+    # ⚠ 2026-10-08：link_mqtt 条目已删除 —— 该组件连同 MQTT 一起**整体移除**，
+    #   不再是"待接线"，而是**不存在**了。门禁当时报的是"已可达，登记过期"，
+    #   但真实情况比"过期"更彻底：源码已删 ⇒ 登记一条已删组件的条目毫无意义。
+    #   ⚠ 这也说明该门禁的"已可达"判定只区分"可达/不可达"，不区分
+    #     "未接线 / 已删除" —— 两种情况的正确处置不同（前者接线，后者删条目）。
+    #   本次两种情形都落到了"删条目"上，是巧合而非门禁的设计。
+    # （task-21 的 transport_sel 条目此前已按其要求删除，本轮 transport_sel 亦随 MQTT 移除。）
     "nvs_helper": {
         "what": "NVS 读写辅助（header-only，6 个 static inline）",
         "why": ("既有代码直接用 nvs_open/nvs_get_*；helper 尚未被采用。"

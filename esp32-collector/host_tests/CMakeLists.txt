@@ -591,19 +591,10 @@ target_link_options(log_stream_lifecycle_tests PRIVATE -Wl,--wrap=log_capture_se
 target_link_libraries(log_stream_lifecycle_tests PRIVATE pthread)
 add_test(NAME log_stream_lifecycle_tests COMMAND log_stream_lifecycle_tests)
 
-add_executable(mqtt_event_tests mqtt_event_tests.c
-    stubs/heap_stub_impl.c
-)
-target_include_directories(mqtt_event_tests PRIVATE stubs)
-target_compile_options(mqtt_event_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
-add_test(NAME mqtt_event_tests COMMAND mqtt_event_tests)
-
-add_executable(mqtt_recovery_tests mqtt_recovery_tests.c
-    stubs/heap_stub_impl.c
-)
-target_include_directories(mqtt_recovery_tests PRIVATE stubs ../main)
-target_compile_options(mqtt_recovery_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
-add_test(NAME mqtt_recovery_tests COMMAND mqtt_recovery_tests)
+# ⚠ 2026-10-08：mqtt_event_tests / mqtt_recovery_tests 已随 MQTT **整体移除**。
+# 它们测的是 components/ehome_mqtt 的发布/重连状态机，被测对象已不存在
+# ⇒ 整个文件删除（不是"注释掉"：留着会让人以为还有 MQTT 行为被守护）。
+# 移除 MQTT 后这两条行为由 3.0 的 session/stx 路径承接，见 uplink 相关用例。
 
 add_executable(hello_handshake_tests
     hello_handshake_tests.c
@@ -966,67 +957,16 @@ target_include_directories(transport_broadcast_tests PRIVATE
 )
 target_compile_options(transport_broadcast_tests PRIVATE -Wall -Wextra -Werror)
 
-# 双栈期"同一帧被发两次"的实证（真实 transport.c，不是替身）。
-# 接 3.0 transport 之前必须先看到这个数字：MQTT 与 3.0 同时 connected 时，
-# 设备主动上行会走 broadcast ⇒ **两条都被调用**。
-add_executable(transport_dualstack_tests
-    transport_dualstack_tests.c
-    ../components/transport/transport.c
-)
-target_include_directories(transport_dualstack_tests PRIVATE
-    ../components/transport/include
-    hello_stubs
-)
-target_compile_options(transport_dualstack_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME transport_dualstack_tests COMMAND transport_dualstack_tests)
-
-# task-21：上行仲裁的**纯判定**（main/uplink_arbiter.c 的门）。
-# 门错了有两种相反的静默故障：过松 ⇒ 双栈双发；过严 ⇒ 上行全哑。
-# 用 UPLINK_ARBITER_HOST_TEST=1 只编纯判定，不含 IDF 头。
-add_executable(uplink_arbiter_tests
-    uplink_arbiter_tests.c
-    ../main/uplink_arbiter.c
-)
-target_include_directories(uplink_arbiter_tests PRIVATE
-    ../main
-    ../components/transport/include
-)
-target_compile_definitions(uplink_arbiter_tests PRIVATE UPLINK_ARBITER_HOST_TEST=1)
-target_compile_options(uplink_arbiter_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME uplink_arbiter_tests COMMAND uplink_arbiter_tests)
-
-# task-21：两条门的**穷举**互斥性证明（2^4 = 16 组全走一遍）。
-# 为什么穷举：M1' 的正确性全归结为两条性质 ——
-#   ① 至多一条为真（否则同一帧被投两次）
-#   ② 有可用链路时恰好一条为真（否则上行掉进直发兜底）
-# 它们只依赖 4 个布尔输入 ⇒ 可以穷举，比"挑几个用例"更能排除"漏掉某个组合"。
-add_executable(uplink_gate_exhaustive_tests
-    uplink_gate_exhaustive_tests.c
-    ../main/uplink_arbiter.c
-)
-target_include_directories(uplink_gate_exhaustive_tests PRIVATE
-    ../main
-)
-target_compile_definitions(uplink_gate_exhaustive_tests PRIVATE UPLINK_ARBITER_HOST_TEST=1)
-target_compile_options(uplink_gate_exhaustive_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME uplink_gate_exhaustive_tests COMMAND uplink_gate_exhaustive_tests)
-
-# task-21：门控版 MQTT 上行出口的**纯逻辑**（main/uplink_mqtt_transport.c）。
-# 它替代 mqtt_transport_register() 成为上行出口 ⇒ 错了有两种静默故障：
-# 不问仲裁 ⇒ 双发；把失败压成 ESP_OK ⇒ 上层以为发出去了（D-01）。
-add_executable(uplink_mqtt_transport_tests
-    uplink_mqtt_transport_tests.c
-    ../main/uplink_mqtt_transport.c
-)
-target_include_directories(uplink_mqtt_transport_tests PRIVATE
-    ../main
-    ../components/transport/include
-    stubs
-    stubs/rom
-    hello_stubs
-)
-target_compile_options(uplink_mqtt_transport_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME uplink_mqtt_transport_tests COMMAND uplink_mqtt_transport_tests)
+# ⚠ 2026-10-08：以下 4 个目标已随 MQTT **整体移除**（被测对象都不存在了）：
+#   * transport_dualstack_tests    —— 测"MQTT 与 3.0 同时 connected ⇒ broadcast 双发"。
+#                                    双栈本身已取消 ⇒ 该风险不存在。
+#   * uplink_arbiter_tests         —— 测 main/uplink_arbiter.c。仲裁的唯一用途是
+#                                    "MQTT 与 3.0 两条门互斥防双发"；只剩一条传输后，
+#                                    它的存在本身就是多余，故随源码一起删除。
+#   * uplink_gate_exhaustive_tests —— 同上（16 组穷举互斥性）。
+#   * uplink_mqtt_transport_tests  —— 测 main/uplink_mqtt_transport.c（MQTT 出口）。
+# ⇒ 四个文件删除而非注释：留着会让人以为"双栈双发""两条门互斥"仍被守护。
+# 移除后**上行只有 3.0 一条**，其发送语义由 session_transport/ stx 相关用例守护。
 
 add_executable(msg_handler_publish_tests
     msg_handler_publish_tests.c
@@ -1043,7 +983,6 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/transport/include
     ../components/msg_handler
     ../components/frame
-    ../components/ehome_mqtt
     ../components/config_mgr
     ../components/dma_pool/include
     ../components/scheduler
@@ -1066,20 +1005,6 @@ target_include_directories(msg_handler_publish_tests PRIVATE
     ../components/device_op/include
 )
 target_compile_options(msg_handler_publish_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable)
-add_executable(mqtt_adapter_tests
-    mqtt_adapter_tests.c
-    ../components/transport/transport.c
-)
-target_include_directories(mqtt_adapter_tests PRIVATE
-    stubs
-    stubs/rom
-    ../components/transport/include
-    ../components/ehome_mqtt
-)
-target_compile_options(mqtt_adapter_tests PRIVATE -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable
-    # 生产代码在 IDF 下不报 unused-parameter（其默认警告集不同）；
-    # 宿主测试沿用同一宽容度，避免"因脚手架而报错"的假问题。
-    -Wno-unused-parameter)
 add_executable(ehome_tcp_send_tests
     ehome_tcp_send_tests.c
     ../components/netpolicy/net_policy.c
@@ -1099,20 +1024,12 @@ add_executable(report_stats_tests
 )
 target_include_directories(report_stats_tests PRIVATE ../components/report_stats/include)
 target_compile_options(report_stats_tests PRIVATE -Wall -Wextra -Werror)
-add_executable(link_mqtt_tests
-    link_mqtt_tests.c
-    ../components/link/link.c
-    ../components/link_mqtt/link_mqtt.c
-)
-target_include_directories(link_mqtt_tests PRIVATE
-    stubs
-    stubs/rom
-    ../components/link/include
-    ../components/link_mqtt/include
-    ../components/ehome_mqtt
-)
-target_compile_options(link_mqtt_tests PRIVATE -Wall -Wextra -Werror
-    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter)
+# ⚠ 2026-10-08：link_mqtt_tests / mqtt_adapter_tests / transport_sel_tests 已随 MQTT 移除。
+#   三者的被测对象分别是 components/link_mqtt、components/ehome_mqtt 的适配层、
+#   components/transport_sel（TCP 优先 / MQTT 兜底选路）—— 源码全部删除 ⇒ 用例一并删除。
+#   ⚠ link_mqtt_tests 里"四态必须原样到达调用方"（D-01）的价值**没有丢失**：
+#     该不变式现在由 3.0 的 link/session 侧用例承接（device_link_*_tests.c）。
+
 add_executable(golden_vectors_tests
     golden_vectors_tests.c
     ../components/msgcodec/msgcodec.c
@@ -1129,7 +1046,6 @@ target_include_directories(sync_manager_uplink_tests PRIVATE
     stubs/rom
     ../components/sync_manager
     ../components/config_mgr
-    ../components/ehome_mqtt
     ../components/rgb_led/include
 )
 target_compile_options(sync_manager_uplink_tests PRIVATE -Wall -Wextra -Werror
@@ -1199,15 +1115,17 @@ add_test(NAME frame_header_tests
 add_test(NAME golden_vectors_tests
     COMMAND golden_vectors_tests ${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/vectors/wire_primitives.txt)
 
-add_test(NAME link_mqtt_tests COMMAND link_mqtt_tests)
-
 add_test(NAME report_stats_tests COMMAND report_stats_tests)
 
 add_test(NAME mem_budget_thresholds
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_mem_budget_thresholds.py)
 
-add_test(NAME stub_enum_sync
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_stub_enum_sync.py)
+# ⚠ 2026-10-08：stub_enum_sync 门禁已**删除**（连同 tools/check_stub_enum_sync.py）。
+#   它的唯一守护目标 mqtt_publish_result_t 随 components/ehome_mqtt 整体移除；
+#   而本仓**已无任何"手抄生产枚举的宿主副本"**（已逐个核对：stubs/rgb_led.h 是
+#   刻意缩减的符号子集、从不按数值跨边界比较；stubs/mqtt_client.h 是 IDF 自己的
+#   枚举桩，不是本仓副本；config_apply_transaction_tests.c 的是宿主自用枚举）。
+#   ⇒ 无靶即删，而不是换个靶凑数（那会让门禁"看起来还在守"却守错东西）。
 
 # 证书 NVS 契约（命名空间 + 三个键名）两端必须一致。
 #
@@ -1245,8 +1163,6 @@ add_test(NAME component_cycles
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_component_cycles.py)
 
 add_test(NAME ehome_tcp_send_tests COMMAND ehome_tcp_send_tests)
-
-add_test(NAME mqtt_adapter_tests COMMAND mqtt_adapter_tests)
 
 add_test(NAME msg_handler_publish_tests COMMAND msg_handler_publish_tests)
 
@@ -1476,7 +1392,6 @@ target_include_directories(firmware_tcp_e2e_client PRIVATE
     stubs
     stubs/rom
     ../components/transport/include
-    ../components/ehome_mqtt
     ../components/dma_pool/include
     ../components/device_op/include
     ../main
@@ -1575,13 +1490,9 @@ add_test(NAME check_message_types
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_message_types.py)
 
 
-add_executable(transport_sel_tests
-    transport_sel_tests.c
-    ../components/transport_sel/transport_sel.c
-)
-target_include_directories(transport_sel_tests PRIVATE ../components/transport_sel/include)
-target_compile_options(transport_sel_tests PRIVATE -Wall -Wextra -Werror)
-add_test(NAME transport_sel_tests COMMAND transport_sel_tests)
+# ⚠ 2026-10-08：transport_sel_tests 已随 components/transport_sel **整体删除**。
+#   该组件的唯一用途是"TCP 优先 / MQTT 兜底"选路；MQTT 移除后只剩一条传输，
+#   选路策略无从谈起（"有链路就用它"），故源码与用例一并删除。
 
 # 远程运维（0x22 -> 0x23）：解析、结果如实回显、request_id 关联、未注入原语即拒绝。
 # 只编译 handler_device_op.c + frame_codec.c + device_op.c ——

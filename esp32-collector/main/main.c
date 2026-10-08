@@ -17,8 +17,7 @@
 #include "crash_diag.h"
 #include "boot_guard.h"
 #include "device_link_wiring.h"
-#include "uplink_arbiter.h"   /* task-21：上行仲裁（两条门互斥）*/
-#include "session_transport.h"  /* task-21：3.0 会话 → transport 适配 + 仲裁闸 */
+#include "session_transport.h"  /* 3.0 会话 → transport 适配（MQTT 已移除，唯一传输）*/
 #include "mem_guard.h"
 #include "msg_handler_internal.h"
 #include "config_mgr.h"
@@ -28,7 +27,6 @@
 #include "rgb_led.h"
 #include "factory_reset.h"
 #include "wifi_mgr.h"
-#include "ehome_mqtt.h"
 #include "transport.h"
 #include "bus_dma.h"
 #include "log_stream.h"
@@ -239,7 +237,7 @@ static void status_task(void *pv)
         if (mem_periodic) {
             static const char *names[] = {
                 "status", "sync", "rx_task", "cmd_u0", "cmd_u1", "cmd_u2",
-                "cmd_spi", "cmd_i2c", "report_tx", "mqtt_super",
+                "cmd_spi", "cmd_i2c", "report_tx",
                 "hello_super", "periph_worker", "periph_rsp", "rgb_led",
                 "factory_reset",
                 /* ⭐ task-34：以下两个任务此前**不在采样名单里**。
@@ -311,26 +309,18 @@ static void status_task(void *pv)
         }
         if (mem_send) send_mem_report();
 
-        /* ⚠ 2026-10-08（§193）修正与上面 MemReport **同一类**的判据错误。
+        /* ⚠ 判据是"**应用层还有没有可用上行**"，而不是"某个特定实现在不在线"。
          *
-         * 这两行此前写死 mqtt_client_is_connected_impl()，理由与 §284-297 记录的
-         * MemReport 完全相同（**上行可用 != MQTT 已连接**），但当时只改了 MemReport，
-         * 紧邻的这两行漏了 ⇒ §7.3 P5（MQTT 完全下线）后：
+         * 这里有过一次真实缺陷（§193 修）：StatusReport 与 WiFi 活性判据都曾写死
+         * mqtt_client_is_connected_impl()，而 msg_handler_send_status 的**唯一调用点
+         * 就在下面这个 if 里**、它本体是**传输无关**的（handler_data.c:145 编码后走
+         * msg_handler_publish → 当前传输）⇒ 一旦 MQTT 不可用，**3.0 明明能发却不发**，
+         * 服务端再也看不到 StatusReport（连带 ota_confirm 永不确认）。
+         * 更糟的是同一个信号被喂给 wifi_mgr_check_liveness 当 "app_network_ok"，
+         * 而它与 WiFi 毫无关系 ⇒ 会**反复拆一条健康的 WiFi**（wifi_mgr.c:266-268 同形态）。
          *
-         *   ① msg_handler_send_status 的**唯一调用点就在下面这个 if 里**，
-         *      而它本体是**传输无关**的（handler_data.c:145 编码后走
-         *      msg_handler_publish → 当前传输）⇒ **3.0 明明能发却不发**，
-         *      服务端再也看不到 StatusReport（连带 ota_confirm 永不确认）。
-         *   ② 传给 wifi_mgr_check_liveness 的 app_network_ok 恒 false（P5 后 MQTT
-         *      永连不上）⇒ 触发"WiFi 静默失联"恢复动作，**反复拆一条健康的 WiFi**
-         *      （60s 起、指数退避封顶 15 min、但**永不停止**）。
-         *      这正是 wifi_mgr.c:266-268 记录过的"第一版自持 churn"同形态 ——
-         *      当年修的是 wifi_mgr **内部**的判据，而**调用方**仍在喂它一个
-         *      与 WiFi 无关的信号。
-         *
-         * 判据改用 transport_any_connected()：与 §298 同一个谓词，
-         * **不新增第二个判据**（P4）；语义上也正是这两处要问的
-         * "应用层还有没有可用上行"。 */
+         * ⇒ 用 transport_any_connected()（与上面 MemReport 同一谓词，**不新增第二份**，P4）。
+         * ⚠ MQTT 已移除（§194）⇒ 现在它精确等于"3.0 会话已连接"。 */
         const bool uplink_ready = transport_any_connected();
         (void)wifi_mgr_check_liveness(uplink_ready);
         if (uplink_ready) {
@@ -355,20 +345,22 @@ static void on_sync_send_hello(void)
 
 /* ---- sync 的"有没有可用上行"（P4：一处定义）----
  *
- * ⭐ 2026-10-08：sync_manager 原先**硬编码**判 `mqtt_client_is_connected_impl()`，
- * 于是无 MQTT 时 `sync_manager_request_sync()` 直接 return（只留一条 WARN）——
- * "周期 / 怀疑 / 无配置"三条**主动请求同步**的路径全部失效。
+ * ⭐ 2026-10-08（§194，MQTT 已彻底移除）：判据是"**3.0 传输是否已连接**"。
  *
- * 真机实测（C6 + P3 + MQTT 死地址，§164）：t=334 与 t=31493 两次请求都被那条挡住；
- * 配置之所以还能同步，是靠 **device_link 自己的握手 Hello** 兜住的，不是本模块的功劳。
- * ⇒ §7.3 P4（后端关 MQTT 监听）之后 `mqtt_client_is_connected_impl()` **永远 false**
- *   ⇒ 这三条路径**永久死掉且不报错**（只有一条 WARN）—— 静默死角。
+ * ⚠ 这里有过一段真实的历史缺陷，留着当教训：sync_manager 早期**硬编码**判
+ * `mqtt_client_is_connected_impl()`，于是在"Mqtt 连不上但 3.0 就绪"时
+ * `sync_manager_request_sync()` 直接 return（只留一条 WARN）——
+ * "周期 / 怀疑 / 无配置"三条**主动请求同步**的路径全部失效，而且**不报错**。
+ * 真机实测（C6 + MQTT 死地址，§164）：t=334 与 t=31493 两次请求都被那条挡住。
+ * ⇒ 教训：**判据要问"这件事需要什么"，不要问"某个特定实现是否在线"。**
  *
- * ⇒ 语义是"**任意一条上行可用**"：MQTT 挂了但 3.0 就绪时必须继续工作。
- * ⚠ 两个函数都走 `uplink_get_facts`（同一份事实）⇒ 不会与仲裁层的判定漂移（P4）。 */
+ * 现在只有一条传输 ⇒ 用 `transport_any_connected()`（transport.h:183）。
+ * ⚠ 它是**注册表级**查询：遍历所有已注册 transport 的 is_connected()。
+ *   当前只剩 session_transport（3.0）一个 ⇒ 语义精确等于"3.0 已连接"，
+ *   且**不新增第二份判据**（P4）。 */
 static bool on_sync_uplink_available(void)
 {
-    return uplink_arbiter_tcp3_connected() || uplink_arbiter_mqtt_connected();
+    return transport_any_connected();
 }
 
 /* ---- Weak-symbol bridges for msg_handler callbacks ---- */
@@ -618,38 +610,20 @@ void app_main(void)
     log_boot_heap("after ota+sched");
 
     /* ---- Transports ---- */
-    mqtt_client_init();
+    /* ⭐ 2026-10-08（§194）：**MQTT 已彻底移除** —— 3.0 TCP+TLS 是**唯一**传输。
+     *
+     * 随之删掉的三样东西（它们的存在理由**只是**"在 MQTT 与 3.0 之间选一条"）：
+     *   · components/ehome_mqtt/ + link_mqtt/    —— MQTT 客户端与链路
+     *   · components/transport_sel/              —— "TCP 优先 / MQTT 兜底"选路
+     *   · main/uplink_arbiter.{c,h}              —— 让两条门互斥以**防双发**
+     *   · session_transport 的 gate 注入         —— 同上，只剩一条传输后无意义
+     * 只剩一条传输 ⇒ **双发在结构上不可能** ⇒ 那一整套互斥机制失去对象。
+     */
     transport_manager_init();
-    /* task-21：两条门互斥的上行仲裁。
-     *
-     * ⚠⚠ **默认构建（CONFIG_EHOME_DEVICE_LINK_ENABLED=n）逐位不变** —— 这是硬约束：
-     *   链路未启用时 s_link_enabled=false ⇒ uplink_gate_tcp3() 恒 false，
-     *   且 MQTT 门退化为"只看自己连没连"（uplink_gate_mqtt 的 !link_enabled 分支）
-     *   ⇒ **与 task-21 之前完全相同**，没有 3.0 transport、没有闸、没有切换。
-     *   下面的 if 分支也保证注册路径都不同：未启用走原来的 mqtt_transport_register()。
-     *
-     * 为什么必须在 transport_manager_init() 之后：transport_register() 在未初始化时
-     * 返回 ESP_ERR_INVALID_STATE（transport.c:31-36），会静默注册失败。
-     *
-     * 为什么用编译期常量而不是运行期查询：device_link_wiring.h:23-34 记录过教训 ——
-     * devlink_wanted() 是运行期函数，静态分析看不到，于是"未启用"的构建仍会被误报。
-     * 这里用 CONFIG_* 常量，让"启用与否"在编译期就可见。 */
-#if defined(CONFIG_EHOME_DEVICE_LINK_ENABLED) && (CONFIG_EHOME_DEVICE_LINK_ENABLED == 1)
-    uplink_arbiter_init(true);
-    (void)uplink_mqtt_transport_register();   /* 门控版 MQTT 出口（不碰回调槽） */
-#else
-    mqtt_transport_register();                /* 默认构建：与今天逐位相同 */
-#endif
-    log_boot_heap("after mqtt_init");
+    log_boot_heap("after transport_init");
 
     /* ---- WiFi + callbacks ---- */
     wifi_mgr_register_state_cb(on_wifi_state_cb, s);
-    mqtt_client_register_state_cb(on_mqtt_state_cb, s);
-    mqtt_client_register_ready_cb(on_mqtt_ready_cb, s);
-    mqtt_client_register_transport_cb(on_mqtt_transport_cb, s);
-    mqtt_client_register_owner_wake_cb(on_mqtt_owner_wake_cb, s);
-    mqtt_client_register_msg_cb(on_mqtt_msg_cb, s);
-    mqtt_client_set_node_id(s->node_id);
 
     rgb_led_init(BOARD_LED_GPIO);
     rgb_led_start();
@@ -747,11 +721,13 @@ void app_main(void)
         struct session *sess = device_link_wiring_session();
         if (sess != NULL) {
             transport_t *t3 = session_transport_create(sess);
-            if (t3 != NULL) {
-                session_transport_set_gate(uplink_arbiter_tcp3_connected);
-            } else {
-                ESP_LOGE(TAG, "3.0 transport 注册失败 ⇒ 上行仍走 MQTT（不双发，但没有 TCP 上行）");
+            if (t3 == NULL) {
+                /* ⚠ 2026-10-08（§194）：MQTT 已移除 ⇒ 这里**没有兜底**了。
+                 * 注册失败就是**完全没有上行**，必须响亮报错（不再说"仍走 MQTT"）。 */
+                ESP_LOGE(TAG, "3.0 transport 注册失败 ⇒ **没有任何可用上行**（MQTT 已移除，无兜底）");
             }
+            /* 不再注入 session_transport_set_gate()：那个闸的唯一用途是
+             * "在 MQTT 与 3.0 之间选一条以防双发"，只剩一条传输后无意义。 */
         }
     }
 

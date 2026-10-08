@@ -13,7 +13,6 @@
 #include "msg_handler_internal.h"
 #include "frame_codec.h"
 #include "transport.h"
-#include "ehome_mqtt.h"
 #include "config_mgr.h"
 #include "dma_pool.h"
 #include "esp_log.h"
@@ -103,13 +102,17 @@ esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len)
      * broadcast 只在 is_connected() 时才 send，所以那一刻它从未尝试过 MQTT，
      * 而日志却说 "already attempted"。当前行为碰巧安全（未连接时重试也会失败），
      * 但那是巧合：一旦"未连接"变成可恢复状态，错误的判据就会导致**漏发**。 */
-    if (rep.mqtt_attempted) {
-        ESP_LOGW(TAG, "Broadcast failed; MQTT already attempted inside broadcast, not re-publishing");
-        return ret;
-    }
-
-    ESP_LOGW(TAG, "Broadcast failed, falling back to MQTT");
-    return mqtt_client_publish_impl(data, len) ? ESP_OK : ESP_FAIL;
+    /* ⭐ 2026-10-08（§194）：**MQTT 直发兜底已删除**（MQTT 已彻底移除）。
+     *
+     * 这一段的全部历史都是"兜底反而造成重复发送"的教训，记下来：
+     *   广播内已对 MQTT 发过一次，这里又直发一次 ⇒ 实测 PF/NT ≈ 2.0
+     *   （每失败帧 2 条 Publish failed：PF=3873 / NT=1938 / BF=1937）。
+     *   后来改用 rep.mqtt_attempted 问"广播刚才是否**真的**试过 MQTT"，
+     *   修正了"用代理判据 transport_registry_has_type() 答错问题"这一层。
+     * ⇒ 教训：**"兜底"若与主路径指向同一个出口，它不是兜底，是重试两次。**
+     * 现在只剩一条传输（3.0）⇒ 广播即全量，无兜底可加、也不该加。 */
+    ESP_LOGW(TAG, "Broadcast failed; no fallback transport (MQTT removed)");
+    return ret;
 }
 
 void msg_handler_publish(const uint8_t *data, size_t len)

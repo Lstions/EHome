@@ -12,24 +12,15 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
-# MQTT
+# ⭐ 2026-10-08（§194）：**MQTT 配置段已整体删除** —— MQTT 已彻底移除（用户明令）。
 #
-# IDF 6.1 moved the MQTT client into the managed component espressif/mqtt
-# (lock: 1.1.0).  CONFIG_MQTT_TRANSPORT_TCP no longer exists there -- plain TCP
-# is always compiled in and the remaining transport choice is SSL/WebSocket.
-# Keeping the old symbol produced an "unknown kconfig symbol" notice on every
-# build while silently doing nothing, so it is dropped rather than left to look
-# like it configures something.
-CONFIG_MQTT_USE_CUSTOM_CONFIG=y
-CONFIG_MQTT_BUFFER_SIZE=2048
-# 8192（原 6144）：MQTT 任务要在回调里跑完整条 ConfigManifest 事务，
-# 其中 bus_manager 的 validate_manifest_resources 有 1792 字节栈帧
-# （components/bus_manager/bus_manager.c:376），之后还有 config_mgr 的事务
-# 包装与发布链。6144 对该路径余量偏薄；2026-10-04 的 status_task 栈溢出
-# 证明了这类"帧 + 发布链"组合会实际崩掉设备（PANIC in
-# prvTaskCheckFreeStackSpace），因此一并加厚。
-CONFIG_MQTT_TASK_STACK_SIZE=8192
-CONFIG_MQTT_TASK_PRIORITY=5
+# 原段内容（CONFIG_MQTT_USE_CUSTOM_CONFIG=y / MQTT_BUFFER_SIZE=2048 /
+# MQTT_TASK_STACK_SIZE=8192 / MQTT_TASK_PRIORITY=5）全是给 esp-mqtt 客户端用的，
+# 客户端组件已删除。
+#
+# ⚠ 顺带的**内存收益**：原先 MQTT 任务常驻 8192 B 栈 + 2048 B 收发缓冲
+#   （都在内部 RAM）。这两块是内部 RAM 上的常驻占用，现在整块释放 ——
+#   对 s3p 那个"只剩 ~15 KB largest"的紧张局面是实质缓解。
 
 # WiFi
 CONFIG_ESP_WIFI_ENABLED=y
@@ -54,9 +45,10 @@ CONFIG_ESP_WIFI_ENABLED=y
 #     - dynamic RX 16 + dynamic TX 16 -> ~25.6 KB each of Wi-Fi-layer
 #       buffering (IDF peak formula p = b_rx*m_rx + b_tx*m_tx), i.e. another
 #       ~85 ms of headroom at 300 KB/s.
-#     - MQTT outbox limit 4096 B, QoS1 frames ~100-400 B: ~10-40
-#       unacknowledged publishes can queue before backpressure -> 20-80 ms
-#       of absorption at 500 Hz, matched by the 5760 B TCP window.
+#     - ⭐ §194：原先这里算的是"MQTT outbox 4096 B + QoS1 帧 ~100-400 B
+#       ≈ 10-40 条未确认发布可排队 → 20-80 ms 吸收"。MQTT 已移除 ⇒
+#       这段吸收**不再存在**；换成 3.0 TCP 后由 5760 B 的 TCP 窗口承担
+#       （下面 LWIP 段仍保留该窗口，且 §194 未改它）。
 #   Reference: IDF Wi-Fi performance guide, "Peak Wi-Fi Dynamic Buffer" and
 #   "Wi-Fi Buffer Configure".  Never below IDF range floors
 #   (TCPIP recvmbox >= 6, UDP/TCP recvmbox = 6).
@@ -77,10 +69,13 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
 # TCP/UDP recvmbox (6).
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
 #
-# Per-socket budget.  At 500 Hz a socket is busy but not concurrent: one MQTT
-# socket + one OTA (TLS) socket at most, plus a transient DNS socket.  6
-# sockets leaves 2x protocol margin.  No listening sockets in production
-# (debug TCP server off), so 2 is already generous.
+# Per-socket budget.  At 500 Hz a socket is busy but not concurrent: one 3.0
+# uplink (TLS) socket + one OTA (TLS) socket at most, plus a transient DNS
+# socket.  6 sockets leaves 2x protocol margin.  No listening sockets in
+# production (debug TCP server off), so 2 is already generous.
+# ⚠ §194：原文写"one MQTT socket + one OTA socket"。MQTT 已移除 ⇒ 现在
+#   上行是 3.0 那一**条** TLS socket。**数量没变**（仍是最多 1 上行 + 1 OTA
+#   + 1 DNS）⇒ 本预算**无需调整**，只更正说明。
 CONFIG_LWIP_MAX_SOCKETS=6
 CONFIG_LWIP_MAX_ACTIVE_TCP=6
 CONFIG_LWIP_MAX_LISTENING_TCP=2
@@ -91,9 +86,12 @@ CONFIG_LWIP_MAX_LISTENING_TCP=2
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=6
 #
 # TCP window / send buffer are deliberately NOT reduced: 5760 B is 4 x MSS
-# and is the throughput-sensitive pair for the MQTT upload path.  Cutting
+# and is the throughput-sensitive pair for the **uplink** path.  Cutting
 # them would trade RAM for p99 latency, which the 100 Hz requirement forbids.
-# MQTT_BUFFER_SIZE=2048 and the 4096 B outbox limit are likewise kept.
+# ⚠ §194：原文后半句是"MQTT_BUFFER_SIZE=2048 与 4096 B outbox 同样保留"。
+#   那两个随 MQTT 一起删除了（不再占用内部 RAM）。
+#   ⇒ 本行前半句（**TCP 窗口不裁**）仍然有效，且**更重要**了：MQTT 那层
+#     缓冲吸收没了，TCP 窗口成了唯一的在途吸收手段。
 #
 # Product feature switches (2026-10-05 user decision):
 #   - STA only; no SoftAP, no DHCP server, no mDNS.
@@ -214,21 +212,14 @@ CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
 # Partition Table - custom with OTA dual partition
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
-# MQTT broker URL -- deliberately NOT a real deployment address.
+# ⭐ 2026-10-08（§194）：CONFIG_COLLECTOR_MQTT_BROKER_URL **已删除**（MQTT 已移除）。
 #
-# 192.0.2.0/24 is TEST-NET-1 (RFC 5737): reserved for documentation and
-# guaranteed unroutable.  Committing a real LAN address here is what caused the
-# 2026-10-01 incident -- a firmware built from the documented command silently
-# pointed at a developer workstation, and the device was unreachable from
-# production until a transparent proxy was installed.
-#
-# The real broker is supplied per-build and never committed:
-#   - config/mqtt-broker.defaults   (gitignored, local override), or
-#   - EXTRA_SDKCONFIG_DEFAULTS=...  (one-off override)
-# build_firmware.sh refuses to produce a flashable image while this placeholder
-# is still in effect, so a build that forgets to set the broker fails loudly
-# rather than shipping a device that cannot connect.
-CONFIG_COLLECTOR_MQTT_BROKER_URL="mqtt://192.0.2.1:1883"
+# ⚠ 记下它原来承载的那条教训，因为它**换个地方仍然成立**：
+#   192.0.2.0/24 是 TEST-NET-1（RFC 5737），保留给文档、保证不可路由。
+#   2026-10-01 的事故正是"把一个真实 LAN 地址提交进仓库" —— 按文档命令构建出的
+#   固件静默指向了开发机，设备在生产上一直接不上，直到装了透明代理才发现。
+# ⇒ 现在的等价保护是 3.0 的 CONFIG_EHOME_DEVICE_LINK_HOST（默认 192.0.2.1）
+#   加上 build_firmware.sh 的占位拒绝：忘记配置就**构建失败**，而不是出厂一台连不上的设备。
 CONFIG_COLLECTOR_NODE_ID="1001"
 
 # Debug TCP Server (for parallel debugging with MQTT)

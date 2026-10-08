@@ -130,9 +130,20 @@ static void test_no_republish_when_broadcast_attempted_mqtt(void)
     free(t);
 }
 
-/* 2) 广播【没有】尝试过 MQTT（未连接）=> 回退单独发布一次。
- *    这条保证"修 L-02"没有把保底路径一起删掉。 */
-static void test_fallback_publish_when_broadcast_skipped_mqtt(void)
+/* 2) ⭐ 2026-10-08（§194）：**MQTT 直发兜底已随 MQTT 一起删除**。
+ *
+ * 原用例断言"广播没试过 MQTT ⇒ 回退单独发布一次"（保底路径仍在）。
+ * 该保底路径已从 msg_handler.c 删除 ⇒ 原断言测的是**已不存在的行为**。
+ *
+ * 但它守护的**真正**不变式仍然要守，只是换成了反面：
+ *   广播没尝试过任何 transport 且失败 ⇒ **调用方必须看到失败**，
+ *   且**不得**有任何第二条出口把这一帧偷偷发出去。
+ * 这正是 L-02 教训的另一面：兜底若与主路径指向同一出口，它不是兜底、是重试两次；
+ * 而现在**根本没有兜底** ⇒ 更要说清"失败就是失败"。
+ *
+ * ⚠ 它凭什么会失败：若有人重新引入一条"失败后再直发一次"的路径
+ *   （例如为了让上行更"可靠"），send_calls 会变成 1、s_mqtt_publish_calls 也会 >0。 */
+static void test_no_fallback_after_broadcast_failure(void)
 {
     reset_all();
     fake_t f = { 0, false, ESP_FAIL };         /* 未连接 => 广播会跳过它 */
@@ -143,8 +154,8 @@ static void test_fallback_publish_when_broadcast_skipped_mqtt(void)
     esp_err_t r = msg_handler_publish_checked((const uint8_t *)"frame", 5);
 
     CHECK(f.send_calls == 0);                  /* 未连接，广播没调 send */
-    CHECK(s_mqtt_publish_calls == 1);          /* ← 保底路径仍在 */
-    (void)r;
+    CHECK(s_mqtt_publish_calls == 0);          /* ← 关键：**没有**任何兜底出口 */
+    CHECK(r != ESP_OK);                        /* 失败必须如实上报，不被压成 ESP_OK（D-01） */
 
     (void)transport_unregister(t);
     free(t);
@@ -166,20 +177,25 @@ static void test_no_republish_on_success(void)
     free(t);
 }
 
-/* 4) 空注册表（既没尝试也没成功）=> 走回退一次 */
-static void test_no_transport_falls_back(void)
+/* 4) 空注册表（既没尝试也没成功）=> 如实失败，且**没有**兜底出口。
+ *
+ * 原用例断言"走回退一次"（s_mqtt_publish_calls == 1）。兜底已删 ⇒ 断言反转。
+ * 保留它的价值：这是"一条出口都没有"的**最坏情形**，最能暴露
+ * "为了显得可靠而偷偷补发"这类回退（那会让本用例立刻红）。 */
+static void test_no_transport_fails_without_fallback(void)
 {
     reset_all();
-    (void)msg_handler_publish_checked((const uint8_t *)"frame", 5);
-    CHECK(s_mqtt_publish_calls == 1);
+    esp_err_t r = msg_handler_publish_checked((const uint8_t *)"frame", 5);
+    CHECK(s_mqtt_publish_calls == 0);          /* 无兜底 */
+    CHECK(r != ESP_OK);                        /* 如实失败（D-01：不得压平成 ESP_OK）*/
 }
 
 int main(void)
 {
     test_no_republish_when_broadcast_attempted_mqtt();
-    test_fallback_publish_when_broadcast_skipped_mqtt();
+    test_no_fallback_after_broadcast_failure();
     test_no_republish_on_success();
-    test_no_transport_falls_back();
+    test_no_transport_fails_without_fallback();
     if (s_failures) { printf("msg_handler_publish_tests: %d FAILURE(S)\n", s_failures); return 1; }
     printf("msg_handler_publish_tests: all checks passed\n");
     return 0;

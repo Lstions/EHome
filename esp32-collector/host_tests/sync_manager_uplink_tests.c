@@ -13,17 +13,24 @@
  * 本用例断言三件事：
  *   ① **注入后**：MQTT 不可用但注入的判据说"上行可用" ⇒ Hello **必须发出去**；
  *   ② **注入后**：两条都不通 ⇒ 不发；
- *   ③ **未注入时**：退化为只看 MQTT（与改动前逐位一致）。
+ *   ③ **未注入时**：**保守返回 false ⇒ 不发**（fail-closed）。
+ *
+ * ⚠ 2026-10-08（§194）：③ 的语义**已反转**。原断言是"未注入时退化为只看 MQTT
+ *   （与改动前逐位一致）"；MQTT 彻底移除后，该兜底依赖的
+ *   mqtt_client_is_connected_impl() **已不存在**，生产改为**保守返回 false**
+ *   ⇒ 断言随之翻转。保留该用例（而非删除）的理由：它锁住
+ *     "**未注入时不假装有上行**"这条 fail-closed 性质 —— 若有人为了
+ *     "让同步更积极"而在未注入时返回 true，本用例立刻红。
+ *
+ * ⚠ 顺带：mqtt 替身（s_mqtt_connected）**已不再被生产读取**（生产对
+ *   mqtt_client_* 零引用）⇒ 它现在是死替身。删除它，因为它会让读者
+ *   误以为"生产还在看 MQTT 的连接状态"。
  */
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 
 #include "sync_manager.h"
-
-/* ---- 被 sync_manager 依赖的外部符号（宿主替身）---- */
-static bool s_mqtt_connected = false;
-bool mqtt_client_is_connected_impl(void) { return s_mqtt_connected; }
 
 /* ---- 注入的"上行可用"判据 ---- */
 static bool s_uplink_available = false;
@@ -41,13 +48,12 @@ static int s_failures = 0;
 
 static void reset(void)
 {
-    s_mqtt_connected = false;
     s_uplink_available = false;
     s_hello_calls = 0;
 }
 
-/* ① 注入后：MQTT 不可用，但 3.0 可用 ⇒ Hello 必须发出去。
- * 它凭什么会失败：把 uplink_available() 改回只看 mqtt_client_is_connected_impl()，
+/* ① 注入后：注入的判据说"上行可用" ⇒ Hello 必须发出去。
+ * 它凭什么会失败：把 uplink_available() 改回忽略注入、直接 return false，
  * 本用例立刻红（hello_calls 会是 0）。 */
 static void test_injected_gate_allows_sync_without_mqtt(void)
 {
@@ -59,12 +65,11 @@ static void test_injected_gate_allows_sync_without_mqtt(void)
     /* ⚠ 用 SYNC_REASON_FORCED 而不是 PERIODIC：后者受**去重窗口**抑制
      * （should_request_sync 里 (now - last_sync) > SYNC_PERIODIC_SEC），
      * 会把本用例变成"在测去重策略"而不是"在测上行可用性判定"。 */
-    s_mqtt_connected = false;   /* MQTT 不可用 */
-    s_uplink_available = true;  /* 但 3.0 可用 */
+    s_uplink_available = true;  /* 3.0 可用 */
     sync_manager_request_sync(SYNC_REASON_FORCED);
 
     CHECK(s_hello_calls == 1,
-          "MQTT 不可用但上行可用时，必须请求发 Hello（P4 后唯一的上行）");
+          "注入的判据说上行可用时，必须请求发 Hello（3.0 是唯一上行）");
 }
 
 /* ② 注入后：两条都不通 ⇒ 不发。
@@ -76,43 +81,41 @@ static void test_injected_gate_blocks_when_no_uplink(void)
     sync_manager_register_send_hello_cb(on_send_hello);
     sync_manager_register_uplink_available_cb(uplink_stub);
 
-    s_mqtt_connected = false;
     s_uplink_available = false;
     sync_manager_request_sync(SYNC_REASON_FORCED);
 
-    CHECK(s_hello_calls == 0, "两条上行都不通时不得请求发 Hello");
+    CHECK(s_hello_calls == 0, "上行不可用时不得请求发 Hello");
 }
 
-/* ③ **未注入**时退化为只看 MQTT —— 与改动前逐位一致（保护既有接线与宿主测试）。
+/* ③ **未注入**时**保守返回 false**（fail-closed）—— MQTT 移除后的现行语义。
  *
  * ⚠⚠ **本用例必须最先运行**（main 里的调用顺序即判据）：
  *   sync_manager_register_uplink_available_cb() 是**单槽赋值**且**没有注销接口**
  *   ⇒ 一旦任何用例注入过，进程内就**回不到"未注入"状态**。
  *   （这不是产品缺陷：固件里 main 只注册一次；但测试必须尊重它。）
  *   我第一版把它排在注入用例**之后**，于是 s_uplink_available_cb 仍指向 stub，
- *   而 stub 读的 s_uplink_available 被 reset() 清成 false ⇒ 即便 mqtt=1 也不发
- *   ⇒ 断言假红。**教训：单槽注入的模块，其"未注入"断言只能在最前面测。**
- * 它凭什么会失败：把 uplink_available() 的 NULL 分支改成 return true，本用例立刻红。 */
-static void test_without_injection_falls_back_to_mqtt(void)
+ *   而 stub 读的 s_uplink_available 被 reset() 清成 false ⇒ 断言假红。
+ *   **教训：单槽注入的模块，其"未注入"断言只能在最前面测。**
+ *
+ * ⚠ 2026-10-08（§194）：本用例的**断言已随 MQTT 移除翻转**。
+ *   旧版测的是"未注入时退化为只看 MQTT（与改动前逐位一致）" ——
+ *   但那个兜底依赖的 mqtt_client_is_connected_impl() 已随组件删除，
+ *   生产改为**保守返回 false**。若还断言"MQTT 可用 ⇒ 发"，就得给生产
+ *   塞回一个 MQTT 判据，正是本轮要删的东西。
+ *   ⇒ 保留用例本身（而非删掉）的理由：它锁住"**未注入时不假装有上行**"
+ *     这条 fail-closed 性质。**它凭什么会失败**：把 uplink_available() 的
+ *     NULL 分支改成 return true（比如有人为了"让同步更积极"这么干），
+ *     下面那句 CHECK 立刻红。 */
+static void test_without_injection_fails_closed(void)
 {
     reset();
     sync_manager_init();
     sync_manager_register_send_hello_cb(on_send_hello);
     /* ⚠ 刻意**不**注入 uplink cb */
 
-    s_mqtt_connected = false;
     sync_manager_request_sync(SYNC_REASON_FORCED);
-    CHECK(s_hello_calls == 0, "未注入时：MQTT 不可用 ⇒ 不发（与改动前一致）");
-
-    /* ⚠ 必须重新 init：上一次**成功请求**会把 last_sync_time_sec 置位，
-     * ⇒ 这里重置计数，使第二次断言测的是"MQTT 可用 ⇒ 发"，而不是残留状态。
-     * （不去改产品代码去迁就测试：那个时间戳的写入顺序本身是正确的。）
-     * ⚠ 注意**不能**靠重新 init 回到"未注入"：注入是单槽且无注销接口 —— 这正是
-     *   本函数必须最先跑的原因（见函数上方的说明）。 */
-    s_hello_calls = 0;
-    s_mqtt_connected = true;
-    sync_manager_request_sync(SYNC_REASON_FORCED);
-    CHECK(s_hello_calls == 1, "未注入时：MQTT 可用 ⇒ 发（与改动前一致）");
+    CHECK(s_hello_calls == 0,
+          "未注入时：保守返回 false ⇒ 不发（fail-closed；MQTT 移除后无兜底）");
 }
 
 int main(void)
@@ -120,7 +123,7 @@ int main(void)
     printf("=== sync_manager 上行可用性（2026-10-08 真机缺陷护栏）===\n");
     /* ⚠ 顺序即判据：③ 测的是"**未注入**时的退化行为"，而注入是**单槽且不可注销**
      * ⇒ 它必须**最先**跑（见该函数上方的说明）。 */
-    test_without_injection_falls_back_to_mqtt();
+    test_without_injection_fails_closed();
     test_injected_gate_allows_sync_without_mqtt();
     test_injected_gate_blocks_when_no_uplink();
     printf("=== %s（失败 %d）===\n", s_failures == 0 ? "PASS" : "FAIL", s_failures);

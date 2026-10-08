@@ -31,7 +31,6 @@
 #include "sync_manager.h"
 #include "rgb_led.h"
 #include "wifi_mgr.h"
-#include "ehome_mqtt.h"
 #include "transport.h"
 #include "log_stream.h"
 #include "gpio_ctrl.h"
@@ -615,57 +614,13 @@ static void handle_config_applied(app_state_t *s, const uint8_t *data, size_t le
 
 /* ==== WiFi callback ==== */
 
-/* === MQTT lifecycle supervisor ===
- * The supervisor is the sole owner of start/reconnect/retire. WiFi callbacks
- * only wake it; status_task must remain bounded even when retire drains an
- * in-flight ESP-MQTT API operation. */
-static TaskHandle_t s_mqtt_supervisor_task;
-
-static void wake_mqtt_supervisor(void)
-{
-    TaskHandle_t task = s_mqtt_supervisor_task;
-    if (task != NULL) (void)xTaskNotifyGive(task);
-}
-
-/* MQTT event callbacks may only wake the lifecycle owner. All subscribe,
- * reconnect, retire, and destroy work remains in mqtt_supervisor_task. */
-void on_mqtt_owner_wake_cb(void *ctx)
-{
-    (void)ctx;
-    wake_mqtt_supervisor();
-}
-
-static void mqtt_supervisor_task(void *pv)
-{
-    (void)pv;
-    for (;;) {
-        /* This task is the sole caller allowed to create, reconnect, retire,
-         * or destroy the MQTT client. WiFi/transport callbacks only request
-         * state and wake this owner. */
-        mqtt_client_owner_step(wifi_mgr_get_state() == WIFI_MGR_CONNECTED);
-        /* Wake immediately for WiFi state changes, while retaining a bounded
-         * periodic recovery deadline if no callback arrives. */
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
-    }
-}
-
-static void ensure_mqtt_supervisor(app_state_t *s)
-{
-    if (s_mqtt_supervisor_task != NULL) {
-        wake_mqtt_supervisor();
-        return;
-    }
-    TaskHandle_t created = NULL;
-    if (xTaskCreate(mqtt_supervisor_task, "mqtt_super", 4096, NULL, 5,
-                    &created) != pdPASS) {
-        ESP_LOGE(TAG, "failed to create MQTT supervisor; leaving MQTT failed");
-        (void)mqtt_client_request_stop();
-        rgb_led_set_state(LED_STATE_MQTT_FAILED);
-        on_mqtt_state_cb(MQTT_CLIENT_FAILED, s);
-        return;
-    }
-    s_mqtt_supervisor_task = created;
-}
+/* ⭐ 2026-10-08（§194）：**MQTT 生命周期监督任务已整体删除**。
+ *
+ * 被删掉的一个任务群（它存在的唯一理由就是"MQTT 需要有人串行化
+ * start/reconnect/retire/destroy"）：mqtt_supervisor_task（栈 4096，"mqtt_super"）、
+ * wake_mqtt_supervisor()、ensure_mqtt_supervisor()、on_mqtt_owner_wake_cb()。
+ * ⇒ 省下 **4096 B 栈 + TCB**（原来它一直在 [stack] 采样名单里，见 main.c）。
+ * ⇒ 3.0 的链路任务自己拥有会话生命周期（device_link_wiring），不需要第二个监督者。 */
 
 void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 {
@@ -675,12 +630,12 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
     switch (state) {
     case WIFI_MGR_CONNECTED:
         rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
-        /* Pending OTA images are confirmed only by status_task after MQTT is
-         * connected and the first StatusReport has been sent. */
-        /* WiFi callbacks never own MQTT lifecycle operations. They only wake
-         * the long-lived supervisor, which serializes recovery and teardown. */
-        ESP_LOGI(TAG, "WiFi connected, waking MQTT supervisor");
-        ensure_mqtt_supervisor(s);
+        /* Pending OTA images are confirmed only by status_task after an uplink
+         * is up and the first StatusReport has been sent. */
+        /* ⭐ 2026-10-08（§194）：这里原先调 ensure_mqtt_supervisor(s) 唤醒 MQTT
+         * 监督任务。MQTT 已移除 ⇒ **无需唤醒任何人**：3.0 的链路任务由
+         * device_link_wiring 自己驱动（它读 session 状态，不由 WiFi 回调触发）。 */
+        ESP_LOGI(TAG, "WiFi connected");
 
 #ifdef CONFIG_DEBUG_TCP_ENABLED
         /* D-03 修复（2026-10-06）：本块原先写在上面的 break 之后，属于
@@ -707,12 +662,10 @@ void on_wifi_state_cb(wifi_mgr_state_t state, void *ctx)
 
     case WIFI_MGR_CONNECTING:
         rgb_led_set_state(LED_STATE_WIFI_CONNECTING);
-        wake_mqtt_supervisor();
         break;
 
     case WIFI_MGR_FAILED:
         rgb_led_set_state(LED_STATE_WIFI_FAILED);
-        wake_mqtt_supervisor();
         break;
 
     default:
@@ -812,50 +765,21 @@ void on_transport_state_cb(transport_state_t state, void *ctx)
     }
 }
 
-/* ==== MQTT state callback ==== */
-
-void on_mqtt_state_cb(mqtt_client_state_t state, void *ctx)
-{
-    app_state_t *s = (app_state_t *)ctx;
-    if (!s) return;
-
-    if (state == MQTT_CLIENT_CONNECTED) {
-        rgb_led_set_state(LED_STATE_MQTT_CONNECTING);
-    } else if (state == MQTT_CLIENT_FAILED) {
-        rgb_led_set_state(LED_STATE_MQTT_FAILED);
-    }
-}
-
-void on_mqtt_transport_cb(uint32_t generation, void *ctx)
-{
-    (void)ctx;
-    hello_handshake_on_transport_connected(generation);
-}
-
-void on_mqtt_ready_cb(uint32_t generation, void *ctx)
-{
-    (void)ctx;
-    hello_handshake_on_ready(generation);
-
-    /* v2.6: 每上线一次就补报一条诊断记录。
-     *
-     * 放在这里而不是 main.c 的启动序列：此时 MQTT 已就绪，publish 才真正
-     * 有出口。有未确认崩溃则补报那条（服务端回 ACK 后才释放 NVS 占用），
-     * 无则报一条 BOOT（含 esp_reset_reason），让"为什么重启"每次都有答案。
-     *
-     * 重复调用是安全的：未确认的崩溃记录会重复上报，服务端按
-     * (device_id, record_id) 幂等去重。 */
-    crash_diag_report_pending();
-}
-
-/* ==== MQTT message callback ==== */
-
-void on_mqtt_msg_cb(const char *topic, const uint8_t *data, size_t len, void *ctx)
-{
-    (void)topic;
-    app_state_t *s = (app_state_t *)ctx;
-    if (!s) return;
-
-    /* 委托给**唯一入口**（P4）：MQTT 这条路径自己不再实现"判断+分发+应用"。 */
-    (void)ehome_handle_downlink(data, len, NULL);
-}
+/* ⭐ 2026-10-08（§194）：**MQTT 的 4 个回调整体删除**（on_mqtt_state_cb /
+ * on_mqtt_transport_cb / on_mqtt_ready_cb / on_mqtt_msg_cb）。
+ * 它们登记在 ehome_mqtt 的回调槽上，而该组件已删除。
+ *
+ * ⚠ 但其中**两件事有真实功能**，不能跟着一起消失，故已迁到 3.0 路径：
+ *
+ *   ① `crash_diag_report_pending()`（原在 on_mqtt_ready_cb 里）
+ *      —— 那是"每次上线上报一条诊断记录（未确认崩溃 或 BOOT 原因）"。
+ *      ⇒ 已迁到 3.0 会话**进入 READY 的唯一途径**（device_link_wiring.c 的
+ *        HelloAck 被接受处）。语义不变：此时上行已可用，publish 才真有出口。
+ *
+ *   ② `hello_handshake_on_transport_connected()` / `on_ready()`
+ *      —— 那两条是"带 generation 的传输上线通知"，喂 hello_handshake 的
+ *        **v2.6 监督器**。3.0 链路**不用**这套代际机（它走 task-33 的
+ *        arm_link_nonce 路径，见 hello_handshake.h 的设计 B′）
+ *      ⇒ 生产调用者随 MQTT 一起消失是**正确的**，不是遗漏。
+ *      ⚠ 函数本身保留在 hello_handshake 模块里（它传输无关、且宿主测试直接调它）。
+ * ═══════════════════════════════════════════════════════════════════════════ */

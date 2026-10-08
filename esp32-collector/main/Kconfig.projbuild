@@ -1,5 +1,20 @@
 menu "EHome Collector Configuration"
 
+    # ⭐ 2026-10-08（§194）：COLLECTOR_NODE_ID 从 components/ehome_mqtt/Kconfig
+    #   **搬到这里**（那个组件随 MQTT 一起删除）。
+    #   ⚠ 它本来就放错了地方：这是**设备标识**，与 MQTT 毫无关系 ——
+    #     app_state.c 生成 node_id 时用它（MAC 读失败才回退到它）。
+    #     放在 MQTT 组件里 ⇒ 删 MQTT 时差点**连带删掉设备身份**（编译期才发现）。
+    #   ⇒ 迁到顶层配置，语义归位。
+    config COLLECTOR_NODE_ID
+        string "Node ID"
+        default "1001"
+        help
+            Unique identifier for this collector node.
+
+            ⚠ 仅在 MAC 读取失败时作为回退使用（app_state.c 的 generate_node_id）。
+            正常路径下 node_id 由 MAC 派生（12 位十六进制），不是这个值。
+
     menu "Model Configuration"
 
         # WS-A: model dimension = same SoC, with or without PSRAM.  The build
@@ -103,17 +118,20 @@ menu "EHome Collector Configuration"
 
         config EHOME_DEVICE_LINK_ENABLED
             bool "Enable 3.0 device link (device is TCP client, mTLS)"
-            default n
+            default y
             help
                 Turns on the 3.0 uplink: tls_esp (mTLS I/O) -> session, where
                 session internally drives link_tcp / link_rx_adapt / rx_pump / wire.
 
-                Default is **n** on purpose: the shipped firmware's behaviour must
-                not change until the migration reaches §7.3 P2 ("TCP preferred,
-                MQTT fallback").  With n, the implementation is still **compiled**
-                (so the reachability gate's "reachable" means "really called",
-                not merely a REQUIRES line) but no task is created, no heap is
-                allocated and no packet is sent.
+                ⚠⚠ 2026-10-08（§194）：**默认改为 y**（原 default n）。
+
+                ⚠ **这是 MQTT 移除的必然后果，不是偏好**：
+                  原来 default n 是**安全的**，因为那时上行默认走 MQTT，
+                  本开关关着只是"还没开 3.0"，设备仍有 MQTT 这一条路。
+                  **MQTT 已彻底移除**（用户明令）⇒ 3.0 是**唯一**上行通道
+                  ⇒ 若默认 n，则**默认构建的设备将完全没有上行**
+                  （不连、不上报、收不到配置，且不报错）。
+                ⇒ 故必须 default y。关掉它现在**只**在"确定不要任何上行"时才有意义。
 
                 NOTE: enabling this does **not** yet make the link usable.
                 Prerequisites (status reviewed 2026-10-07):
@@ -157,7 +175,8 @@ menu "EHome Collector Configuration"
                 reserved for documentation and guaranteed unroutable.  A build
                 without an explicit host therefore cannot reach anything, which
                 fails visibly instead of silently connecting to an unintended
-                host.  (Same convention as COLLECTOR_MQTT_BROKER_URL.)
+                host.  ⭐ 2026-10-08（§194）：原注释写"Same convention as
+                COLLECTOR_MQTT_BROKER_URL"—— 那个符号随 MQTT 一起删除了。
 
         config EHOME_DEVICE_LINK_PORT
             int "Backend device port"
@@ -241,31 +260,15 @@ menu "EHome Collector Configuration"
                 has to be done manually.  Missing material is reported and leads
                 to SESSION_FATAL.
 
-        config EHOME_DEVICE_LINK_MQTT_FALLBACK
-            bool "Allow MQTT fallback when the 3.0 link keeps failing"
-            depends on EHOME_DEVICE_LINK_ENABLED
-            default y
-            help
-                §7.3 P2/P3 的开关：TCP 是主通道，MQTT 只在 TCP **连续失败**时临时顶替。
-
-                * **y（默认，= P2 双栈期）**：3.0 固件必须保留 MQTT 兜底。
-                  后端 TCP 未就绪 / 证书没铺开 / 防火墙没放行 8443 ——
-                  这些都不该让一台已在现场的设备失去唯一上行通道。
-                * **n（= §7.3 P3）**：永不返回 MQTT。这是**迁移目标态**，
-                  只有在确认全网 TCP 可用后才可开启。
-
-                ⚠ 设成 n 的**前提**（缺一不可，否则设备会失去上行）：
-                  1. 后端 TCP+TLS 已在生产可用（不是本机 dev）；
-                  2. 证书已铺开到所有现场设备；
-                  3. 防火墙已放行设备端口。
-
-                ⚠ 它**不是**"关掉 MQTT 客户端"：MQTT 任务与连接仍然存在
-                （P4 才由后端关闭监听）。本开关只影响**上行仲裁**的兜底分支 ——
-                即"TCP 反复失败时要不要把上行让给 MQTT"。
-
-                为什么做成 Kconfig 而不是代码里的常量：迁移期需要**同一份代码**
-                产出 P2 与 P3 两种镜像，且"当前处于哪一阶段"必须是**构建期可见**的
-                （P5：预算/开关只有一个来源，不能靠注释表达）。
+        # ⭐ 2026-10-08（§194）：EHOME_DEVICE_LINK_MQTT_FALLBACK **已删除**。
+        #   MQTT 已彻底移除（用户明令）⇒ 不存在"兜底给谁"这个问题。
+        #   3.0 TCP+TLS 是**唯一**上行/下行通道，没有第二条可退。
+        #
+        #   ⚠ 历史：该开关曾是 §7.3 P2/P3 的迁移闸（TCP 优先 / MQTT 兜底）。
+        #     删除它意味着**不再有迁移中间态** —— 前端（后端 + 证书 + 防火墙）
+        #     必须在刷 3.0 固件**之前**就绪，否则设备将彻底失去上行。
+        #     （这正是原 help 里"设成 n 的三条前提"所要防止的情形；
+        #       现在那三条前提从"可选"变成**强制前置**。）
 
     endmenu
 
@@ -277,7 +280,8 @@ menu "Debug Configuration"
         bool "Enable TCP Transport for debugging"
         default n
         help
-            Enable TCP transport layer that runs in parallel with MQTT.
+            Enable the debug TCP transport (a separate non-TLS debug channel).
+            ⚠ 2026-10-08（§194）：原文写"runs in parallel with MQTT"—— MQTT 已删除。
             This allows testing and debugging via direct TCP connection.
             Disable for production use to save resources.
 

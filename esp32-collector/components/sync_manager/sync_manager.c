@@ -16,7 +16,6 @@
 #include <string.h>
 
 #include "config_mgr.h"
-#include "ehome_mqtt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "rgb_led.h"
@@ -141,13 +140,20 @@ void sync_manager_register_uplink_available_cb(sync_uplink_available_cb_t cb)
 
 /* "现在有没有可用上行"的**唯一**判定（P4）。
  *
- * 未注入时退化为只看 MQTT —— 与改动前**逐位一致**（宿主测试与既有接线不受影响）。
- * 注入后语义是"**任意一条上行可用**"：MQTT 挂了但 3.0 就绪时，本模块**必须继续工作**，
- * 否则 §7.3 P4（后端关 MQTT）后"周期/怀疑/无配置"三条主动同步路径会**永久死掉且不报错**。 */
+ * ⭐ 2026-10-08（§194）：MQTT 已彻底移除 ⇒ 这条函数的语义就是"3.0 传输是否已连接"，
+ *    由注入回调（main.c 的 on_sync_uplink_available → transport_any_connected）提供。
+ *
+ * ⚠ 历史教训（留着别再犯）：本模块曾**硬编码**判 mqtt_client_is_connected_impl()，
+ *    于是在"某条上行不可用但另一条可用"时，三条**主动请求同步**的路径会**永久死掉
+ *    且不报错**（只留一条 WARN）。真机实测 §164：t=334 与 t=31493 两次请求都被挡住。
+ *    ⇒ 判据要问"**这件事需要什么**"，不要问"某个特定实现是否在线"。 */
 static bool uplink_available(void)
 {
     if (s_uplink_available_cb != NULL) return s_uplink_available_cb();
-    return mqtt_client_is_connected_impl();
+    /* 未注入 ⇒ **保守返回 false**（不知道就说没有）：宁可少发一次同步请求，
+     * 也不要在没有上行时假装有。⚠ 这与"逐位一致"的旧兜底行为**不同**，
+     * 是有意为之 —— 旧兜底依赖的 mqtt_client_* 已经不存在。 */
+    return false;
 }
 
 void sync_manager_request_sync(sync_reason_t reason)

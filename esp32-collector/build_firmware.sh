@@ -105,19 +105,18 @@ Profiles:
   s3p-n16  ESP32-S3 with PSRAM + 16MB flash
   all      Build all profiles
 
-MQTT broker (required):
-  The broker URL is compiled into the firmware and cannot be changed at
-  runtime, so it is never committed.  Provide it one of these ways:
+Backend device link (required):
+  ⭐ 2026-10-08（§194）：**MQTT 已彻底移除** —— 3.0 TCP+TLS 是**唯一**上行通道。
+  ⇒ 构建前必须给 3.0 的 host/端口；地址编译进固件、无运行期覆盖。
 
-    1. config/mqtt-broker.defaults        (recommended, gitignored)
-       cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
-       then edit the address.
+    1. EXTRA_SDKCONFIG_DEFAULTS=<file>    （本地联调/一次性覆盖，推荐）
+       CONFIG_EHOME_DEVICE_LINK_HOST="<后端 IP 或域名>"
+       CONFIG_EHOME_DEVICE_LINK_PORT=8443
 
-    2. EXTRA_SDKCONFIG_DEFAULTS=<file>    (one-off override)
+    2. 直接改 main/Kconfig.projbuild 的默认值（仅当你确定要改出厂默认）
 
-  A build without a real broker address fails on purpose: the built-in
-  default is an unroutable placeholder (TEST-NET-1), and shipping a firmware
-  that cannot reach its broker is worse than refusing to build.
+  ⚠ 占位地址（TEST-NET-1 等不可路由地址）构建出的固件**永远连不上**，
+    build_firmware.sh 会**拒绝**这种构建。
 
 Other environment:
   BUILD_ROOT   place build directories elsewhere.  A build directory
@@ -126,22 +125,9 @@ Other environment:
 EOF
 }
 
-# Placeholder brokers that must never reach a flashable image.
-#
-# Matched as a prefix so the whole reserved block is caught, not just one host:
-# 192.0.2.0/24 is TEST-NET-1 (RFC 5737) and 198.51.100.0/24 is TEST-NET-2; both
-# are documentation-only and guaranteed unroutable. 10.42.0.1 is the historical
-# Kconfig default.
-PLACEHOLDER_BROKER_PREFIXES=(
-    "mqtt://192.0.2."
-    "mqtts://192.0.2."
-    "mqtt://198.51.100."
-    "mqtts://198.51.100."
-    "mqtt://10.42.0.1:"
-)
-
-# Where a per-deployment broker may be configured (first match wins).
-BROKER_DEFAULTS_FILE="$PROJECT_DIR/config/mqtt-broker.defaults"
+# ⭐ 2026-10-08（§194）：PLACEHOLDER_BROKER_PREFIXES 与 BROKER_DEFAULTS_FILE
+#   已删除（MQTT broker 不复存在）。占位地址的拒绝逻辑现在只针对 3.0 的 host，
+#   见下方 EHOME_DEVICE_LINK_HOST 的处理。
 
 # ---------------------------------------------------------------------------
 # How idf.py gets invoked.
@@ -223,11 +209,6 @@ idf_py() {
     "${IDF_PY_CMD[@]}" "$@"
 }
 
-broker_from_file() {
-    # Echo the CONFIG_COLLECTOR_MQTT_BROKER_URL value from the given file, if any.
-    [[ -f "$1" ]] || return 1
-    grep -E '^CONFIG_COLLECTOR_MQTT_BROKER_URL=' "$1" | tail -1 | sed -E 's/^[^=]+="?([^"]*)"?$/\1/'
-}
 
 # Each profile is echoed as four fields:
 #   <target> <flash> <model-defaults-suffix> <inject-psram-switch>
@@ -269,65 +250,12 @@ build_profile() {
     # idf.py would otherwise abort only after the build has started.
     check_build_dir_compat "$build_dir" "${IDF_PY_CMD[0]:-}" || return 1
 
-    # ---- MQTT broker resolution -------------------------------------------
-    # The broker is compiled in, so an unset or placeholder value produces a
-    # device that cannot connect. Resolve it explicitly and refuse to build
-    # until a real address is supplied.
-    local broker="" broker_src=""
-    if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
-        broker="$(broker_from_file "${EXTRA_SDKCONFIG_DEFAULTS%%;*}" || true)"
-        [[ -n "$broker" ]] && broker_src="EXTRA_SDKCONFIG_DEFAULTS"
-    fi
-    if [[ -z "$broker" ]]; then
-        broker="$(broker_from_file "$BROKER_DEFAULTS_FILE" || true)"
-        [[ -n "$broker" ]] && broker_src="$BROKER_DEFAULTS_FILE"
-    fi
-
-    if [[ -z "$broker" ]]; then
-        cat >&2 <<EOF
-ERROR: $profile: no MQTT broker configured.
-
-The broker URL is compiled into the firmware and has no runtime override, so
-it is not committed. Set it for this deployment:
-
-    cp config/mqtt-broker.defaults.example config/mqtt-broker.defaults
-    \$EDITOR config/mqtt-broker.defaults        # set mqtt://<host>:<port>
-
-config/mqtt-broker.defaults is gitignored, so the address stays out of git.
-Alternatively pass EXTRA_SDKCONFIG_DEFAULTS=<file> for a one-off build.
-EOF
-        return 1
-    fi
-
-    for _ph in "${PLACEHOLDER_BROKER_PREFIXES[@]}"; do
-        if [[ "$broker" == "$_ph"* ]]; then
-            cat >&2 <<EOF
-ERROR: $profile: MQTT broker is still the placeholder ($broker).
-
-That address is TEST-NET-1 / a documentation default and is not routable, so
-the resulting device could never reach a broker. Configure the real broker in
-config/mqtt-broker.defaults (gitignored) or via EXTRA_SDKCONFIG_DEFAULTS.
-
-Source of this value: $broker_src
-EOF
-            return 1
-        fi
-    done
-
-    case "$broker" in
-        mqtt://*|mqtts://*) ;;
-        *)
-            echo "ERROR: $profile: broker must start with mqtt:// or mqtts:// (got '$broker')" >&2
-            return 1
-            ;;
-    esac
-
-    echo "==> Broker: $broker  (from $broker_src)"
-
-    # Apply the resolved broker last so it wins over the committed placeholder.
-    local _broker_defaults="$build_dir/.broker.defaults"
-    mkdir -p "$build_dir"
-    printf 'CONFIG_COLLECTOR_MQTT_BROKER_URL="%s"\n' "$broker" > "$_broker_defaults"
+    # ⭐ 2026-10-08（§194）：**MQTT broker 解析块已整体删除**（MQTT 已彻底移除）。
+    #   ⚠ 删掉的不只是"解析地址"，还有它承载的**构建期保护**：
+    #     原先若未配置 broker（或仍是 TEST-NET 占位地址）就**拒绝构建**，
+    #     因为地址是编译进去的、没有运行期覆盖，配错=设备永远连不上。
+    #   ⇒ 现在对应位置的保护是 EHOME_DEVICE_LINK_HOST 的占位拒绝
+    #     （见下方 link host 的处理），语义相同但目标换成了 3.0 的 host。
 
     # 目标专属 defaults 必须显式加入链（脚本设置了 SDKCONFIG_DEFAULTS，这会**取代**
     # IDF 默认的"sdkconfig.defaults + 自动 sdkconfig.defaults.<target>"行为）。
@@ -354,8 +282,15 @@ EOF
         fi
     fi
 
-    # 型号开关是 profile 的显式语义（s3p = 带 PSRAM 的型号），与 broker 同理注入
-    # 链尾，防止"profile 叫 s3p、Kconfig 却报非 PSRAM 型号"的静默漂移。
+    # ⚠ 2026-10-08（§194）：这里补回 mkdir -p "$build_dir"。
+    #   原先它写在已删除的 MQTT broker 块里（那句"Apply the resolved broker last"），
+    #   MQTT 一删就**连带丢了**，而下面 .model.defaults 的写入依赖该目录存在
+    #   ⇒ 构建直接失败："No such file or directory: .../.model.defaults"。
+    #   ⚠ 教训：删一个块时，要检查块里是否夹带了**与本块主题无关**的副作用语句。
+    mkdir -p "$build_dir"
+
+    # 型号开关是 profile 的显式语义（s3p = 带 PSRAM 的型号）注入链尾，
+    # 防止"profile 叫 s3p、Kconfig 却报非 PSRAM 型号"的静默漂移。
     # 板上是否真有 PSRAM 仍由 app_state.c 运行时 heap_caps 探测决定，二者缺一不可。
     if [[ "$model_psram" == "y" ]]; then
         _model_switch_defaults="$build_dir/.model.defaults"
@@ -363,32 +298,20 @@ EOF
         defaults="$defaults;$_model_switch_defaults"
     fi
 
-    defaults="$defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults;$_broker_defaults"
+    # ⭐ 2026-10-08（§194）：原先这里链尾还拼了 $_broker_defaults（MQTT broker）。
+    #   MQTT 已移除 ⇒ 该变量不存在，拼接也必须删（否则 set -u 下直接爆 unbound）。
+    defaults="$defaults;$PROJECT_DIR/config/flash/$flash_profile.defaults"
     if [[ -n "${EXTRA_SDKCONFIG_DEFAULTS:-}" ]]; then
         defaults="$defaults;$EXTRA_SDKCONFIG_DEFAULTS"
         # sdkconfig takes precedence over sdkconfig.defaults.  An explicit
-        # override (for example an isolated development broker) must therefore
-        # regenerate this profile's derived sdkconfig instead of silently
-        # retaining a previous value.
+        # override (for example an isolated development backend host) must
+        # therefore regenerate this profile's derived sdkconfig instead of
+        # silently retaining a previous value.
         rm -f "$sdkconfig"
     fi
 
     if [[ ! -f "$lock_file" && -f "$PROJECT_DIR/dependencies.lock" ]]; then
         cp "$PROJECT_DIR/dependencies.lock" "$lock_file"
-    fi
-
-    # The broker is an explicit per-build input, so a derived sdkconfig that
-    # still holds a different broker is simply out of date: regenerate it
-    # rather than making the user clean the profile by hand.  This is what makes
-    # a broker change actually take effect (kconfgen would otherwise keep the
-    # previously written user-set value).
-    if [[ -f "$sdkconfig" ]]; then
-        local _have_broker
-        _have_broker="$(broker_from_file "$sdkconfig" || true)"
-        if [[ -n "$_have_broker" && "$_have_broker" != "$broker" ]]; then
-            echo "==> Broker changed ($_have_broker -> $broker); regenerating $sdkconfig"
-            rm -f "$sdkconfig"
-        fi
     fi
 
     # Guard against a stale derived sdkconfig silently pinning values that the
@@ -403,9 +326,9 @@ EOF
     # sdkconfig disagrees with what the defaults files now say.  Rebuilding is
     # always available via a clean profile directory.
     #
-    # CONFIG_COLLECTOR_MQTT_BROKER_URL is deliberately absent: it is handled
-    # above, because an explicit per-build input should take effect rather than
-    # be reported as drift.
+    # ⭐ 2026-10-08（§194）：CONFIG_COLLECTOR_MQTT_BROKER_URL 与
+    #   CONFIG_MQTT_TASK_STACK_SIZE 已从本清单移除 —— MQTT 已彻底移除，
+    #   这两个符号不再存在（留在清单里会让"漂移检测"去比对一个不存在的键）。
     _guard_symbols=(
         CONFIG_ESP_WIFI_IRAM_OPT
         CONFIG_ESP_WIFI_RX_IRAM_OPT
@@ -419,10 +342,6 @@ EOF
         CONFIG_COLLECTOR_PSRAM
         CONFIG_SPIRAM
         CONFIG_SPIRAM_MODE_OCT
-        # MQTT 客户端任务栈：sdkconfig.defaults 给 8192，而陈旧的派生
-        # sdkconfig 会把它钉在旧的 6144 上。构建日志无任何提示，
-        # 设备在 MQTT 收包路径上栈溢出 —— 同属"静默钉住旧值"形态。
-        CONFIG_MQTT_TASK_STACK_SIZE
     )
     if [[ -f "$sdkconfig" ]]; then
         local _drift=0 _sym _want _have _want_all=""
