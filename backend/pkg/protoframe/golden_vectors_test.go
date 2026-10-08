@@ -233,14 +233,35 @@ func TestShortBufferIsNeedMoreNotCorruption(t *testing.T) {
 	}
 }
 
-// TestPayloadMaxFitsOneTLSRecord pins the arithmetic that makes the
-// "one message == one TLS record" property hold. If either the TLS record
-// size or the header/CRC sizes change, this must be revisited deliberately.
+// TestPayloadMaxFitsOneTLSRecord pins the "one message == one TLS record"
+// property. It checks TWO distinct things, and conflating them was a defect.
+//
+// ⚠ 2026-10-08（§195）：这里原先写死 `const tlsInContentLen = 16384`。
+//   那让本测试同时承担了两件事，而其中一件不该由它承担：
+//     ① **算术自洽**：header + payloadMax + CRC == MaxFrameBytes —— 应当守；
+//     ② **"记录大小是 16384"** —— 不该守。那是**设备侧的编译期选择**
+//        （CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN），2026-10-08 已因 s3p 内存实测
+//        降到 8192（largeat +8192、配置事务 1/9 → 9/9）。
+//        写死它 ⇒ 一次**有意的**三端联动改动会被误报成回归，
+//        而真正该抓的"改一处漏两处"反而抓不到。
+//   ⇒ 断言 ① 用 MaxFrameBytes（本包唯一权威常量）；
+//      再用**跨端来源**核对它与固件是否一致（见下面 firmwareTLSRecordLen）。
 func TestPayloadMaxFitsOneTLSRecord(t *testing.T) {
-	const tlsInContentLen = 16384 // MBEDTLS_SSL_IN_CONTENT_LEN
-	if got := HeaderSize + int(PayloadMax) + CRCSize; got != tlsInContentLen {
-		t.Errorf("header(%d)+payloadmax(%d)+crc(%d) = %d, want %d",
-			HeaderSize, PayloadMax, CRCSize, got, tlsInContentLen)
+	// ① 算术自洽（与具体记录大小无关）
+	if got := HeaderSize + int(PayloadMax) + CRCSize; got != int(MaxFrameBytes) {
+		t.Errorf("header(%d)+payloadmax(%d)+crc(%d) = %d, want MaxFrameBytes=%d",
+			HeaderSize, PayloadMax, CRCSize, got, MaxFrameBytes)
+	}
+	// ② 跨端一致：MaxFrameBytes 必须等于固件 sdkconfig.defaults 里的
+	//    CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN。三者是一个约束：
+	//      后端 MaxFrameBytes == 固件 LINK_TCP_MTU_BYTES == 固件 IN_CONTENT_LEN
+	//    改一处漏另一处 ⇒ 大帧静默跨 TLS 记录分片 ⇒ 在这里必红。
+	if want, ok := firmwareTLSRecordLen(t); ok {
+		if int(MaxFrameBytes) != want {
+			t.Errorf("MaxFrameBytes=%d 与固件 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=%d 不一致："+
+				"一处改了、另一处没改 ⇒ 大帧会静默跨 TLS 记录分片",
+				MaxFrameBytes, want)
+		}
 	}
 	// Encoding a payload one byte over the max must be refused, not truncated.
 	buf := make([]byte, HeaderSize)
@@ -303,4 +324,39 @@ func TestCRC32CCheckValue(t *testing.T) {
 	if CRC32C(nil) != 0 {
 		t.Errorf("CRC32C(nil) = 0x%08X, want 0", CRC32C(nil))
 	}
+}
+
+// firmwareTLSRecordLen 读**固件仓库的 sdkconfig.defaults**，取出
+// CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN。返回 ok=false 表示读不到（例如在只 checkout
+// 了 backend/ 的 CI 里）—— 那种情况**跳过**而不是失败：本测试的主职责是可自洽的
+// 算术，跨端核对是"有源可查时必须成立"的加强项。
+//
+// 为什么不把它做成"读运行期值"：设备侧的 IN_CONTENT_LEN 是**编译期**常量，
+// 运行期进程里根本不存在它；而 sdkconfig.defaults 正是三端联动的那个**源**。
+func firmwareTLSRecordLen(t *testing.T) (int, bool) {
+	t.Helper()
+	// backend/pkg/protoframe → ../../../esp32-collector/sdkconfig.defaults
+	rel := filepath.Join("..", "..", "..", "esp32-collector", "sdkconfig.defaults")
+	f, err := os.Open(rel)
+	if err != nil {
+		t.Logf("跳过跨端核对：读不到 %s（%v）", rel, err)
+		return 0, false
+	}
+	defer f.Close()
+	const key = "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN="
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, key)))
+		if err != nil {
+			t.Errorf("固件 %s 的值无法解析：%q", key, line)
+			return 0, false
+		}
+		return n, true
+	}
+	t.Logf("跳过跨端核对：固件 sdkconfig.defaults 里没有 %s（可能用 IDF 默认值）", key)
+	return 0, false
 }

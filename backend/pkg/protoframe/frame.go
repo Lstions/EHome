@@ -47,10 +47,18 @@ const (
 	// whole frame length against it in link_send. Leaving it only inside the
 	// PayloadMax comment meant the server had no name for its own MTU, and a
 	// silent disagreement here would look like "frames mysteriously rejected".
-	MaxFrameBytes uint32 = 16384
+	// ⭐ 2026-10-08（§195）：16,384 → **8,192**。
+	// 原值 16384 与当时的 MBEDTLS_SSL_IN_CONTENT_LEN 同值；但 16384 那笔
+	// **连续内部 RAM** 在 ESP32-S3/S3P 上不可靠（稳态 largest 仅 12288~15872），
+	// 实测导致"配置事务被内存门拒 1/9"与"握手概率性 OOM"。
+	// ⇒ 设备侧 IN_CONTENT_LEN 已降到 8192（largest +8192、配置事务 9/9），
+	//   本常量与 firmware 的 LINK_TCP_MTU_BYTES 必须**同值**跟随。
+	// ⚠ 三者是一个约束：本值 == LINK_TCP_MTU_BYTES == MBEDTLS_SSL_IN_CONTENT_LEN。
+	//   只改一处会让大帧**静默**跨 TLS 记录分片（正是下面注释要防的那件事）。
+	MaxFrameBytes uint32 = 8192
 	// PayloadMax = MaxFrameBytes - HeaderSize - CRCSize, so header+payload(+CRC)
 	// fits one TLS record exactly.
-	PayloadMax uint16 = 16368
+	PayloadMax uint16 = 8176
 	CRCSize    int    = 4
 )
 

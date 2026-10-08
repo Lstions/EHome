@@ -195,7 +195,11 @@ menu "EHome Collector Configuration"
             int "Max single-message payload bytes"
             depends on EHOME_DEVICE_LINK_ENABLED
             default 4096
-            range 256 16368
+            # ⭐ 2026-10-08（§195）：上限 16368 → **8176** = 8192 − 12(header) − 4(CRC)。
+            #   不能再让 payload 上限大于"一个 TLS 记录能装的量"：否则配出一个
+            #   16368 的 payload 会得到 16384 的帧，跨 2 个记录、且被后端按 8192
+            #   拒收 —— 能配出来却跑不通，属"配置项说谎"。
+            range 256 8176
             help
                 Upper bound for one 3.0 message payload.  This is a real memory
                 decision, not a formality: the delimiter allocates

@@ -370,8 +370,11 @@ static void test_mtu_matches_design(void)
     const link_driver_t *drv = link_tcp_driver();
     CHECK(drv != NULL, "driver 不应为 NULL");
     CHECK(drv->mtu(NULL) == LINK_TCP_MTU_BYTES, "mtu 应为常量");
-    CHECK(LINK_TCP_MTU_BYTES == 16384u,
-          "mtu 应为 16384（与 MBEDTLS_SSL_IN_CONTENT_LEN 对齐，设计 §5.2）");
+    /* ⚠ 2026-10-08（§195）：断言值随 IN_CONTENT_LEN 一起 16384 → 8192。
+     * 本断言守的是**跨端一致性**（MTU == TLS 记录大小），而不是"某个数字"：
+     * 若哪天又调 IN_CONTENT_LEN，这里必须同改 —— 这正是本断言存在的用途。 */
+    CHECK(LINK_TCP_MTU_BYTES == 8192u,
+          "mtu 应为 8192（与 MBEDTLS_SSL_IN_CONTENT_LEN 对齐，§195）");
     CHECK(strcmp(drv->name, "tcp") == 0, "驱动名应为 tcp");
 }
 

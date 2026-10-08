@@ -35,11 +35,22 @@
 extern "C" {
 #endif
 
-/** 单帧上限（字节）。设计 §5.2：total_len 硬上界 16,384 ——
- *  同时不超过 MBEDTLS_SSL_IN_CONTENT_LEN，使**一个 TLS 记录即可承载整条消息**，
- *  避免"重组边界"与"TLS 记录边界"双重分片。
- *  这也就是本驱动向编码层报出的 mtu（P2：编码层据此决定是否分片）。 */
-#define LINK_TCP_MTU_BYTES 16384u
+/** 单帧上限（字节）。**不超过 MBEDTLS_SSL_IN_CONTENT_LEN**，使一个 TLS 记录
+ *  即可承载整条消息，避免"重组边界"与"TLS 记录边界"双重分片。
+ *  这也就是本驱动向编码层报出的 mtu（P2：编码层据此决定是否分片）。
+ *
+ * ⭐ 2026-10-08（§195）：16,384 → **8,192**。
+ *   原值 16384 与当时的 IN_CONTENT_LEN=16384 同值，确实满足"一个记录"；
+ *   但 16384 那笔**连续内部 RAM** 在 s3p 上根本不可靠 ⇒ IN_CONTENT_LEN 已降到
+ *   8192（实测 largest +8192、配置事务 9/9；见 sdkconfig.defaults 的 §195 段）。
+ *   ⚠ 本常量与 IN_CONTENT_LEN 是**同一个约束的两端**，必须**同值**：
+ *     只降 IN 而留 MTU=16384，就会出现"设备声称能发 16384、而记录只有 8192"
+ *     的隐蔽不一致（一次发出去会跨 2 个记录，且后端按 8192 拒收）。
+ *   ⇒ 三处同改：本常量、MBEDTLS_SSL_IN_CONTENT_LEN、后端 protoframe.MaxFrameBytes。
+ *
+ * 8,192 够不够：设备自身 payload 上限 4096（CONFIG_EHOME_DEVICE_LINK_MAX_PAYLOAD）
+ *   ⇒ 实际最大帧 = 4096 + 12 + 4 = **4112 B**，对 8192 有 2x 余量。 */
+#define LINK_TCP_MTU_BYTES 8192u
 
 /** 退避上限（ms）。设计 §4.2：1→2→4→8→16→30→60（上限）。 */
 #define LINK_TCP_BACKOFF_MAX_MS 60000u
