@@ -63,12 +63,20 @@ void sync_manager_register_send_hello_cb(sync_send_hello_cb_t cb);
  * ⇒ §7.3 P4（后端关闭 MQTT 监听）之后，`mqtt_client_is_connected_impl()` **永远 false**
  *   ⇒ 这三条路径**永久死掉**，且**不报错**（只有 WARN）—— 典型的静默死角。
  *
- * ⇒ 修法：把"有没有可用上行"做成**注入的函数指针**，由 main 侧接到上行仲裁
- *   （`uplink_arbiter_tcp3_connected() || uplink_arbiter_mqtt_connected()`）。
- *   ⚠ 语义是"**任意一条上行可用**"，不是"MQTT 可用" —— 这正是 P4 需要的。
+ * ⇒ 修法：把"有没有可用上行"做成**注入的函数指针**，由 main 侧接到当前的上行判据
+ *   —— 现在是 `transport_any_connected()`（3.0 是唯一传输，§194 MQTT 已移除）。
  *
- * 未注入时的行为：退化为只看 MQTT（与改动前**逐位一致**），
- * 以免宿主测试与既有接线被静默改变。 */
+ * ⚠ 语义是"**上行是否可用**"，不是"某个特定实现是否在线" —— 这正是本注入要保的性质。
+ *
+ * ⚠⚠ 2026-10-08（§194）**本段曾过期**，留档：
+ *   上一版这里写的是"由 main 侧接到上行仲裁
+ *   （`uplink_arbiter_tcp3_connected() || uplink_arbiter_mqtt_connected()`）"，
+ *   而那两个函数**随 MQTT 一起删除了**；同段还写着"未注入时退化为只看 MQTT
+ *   （与改动前逐位一致）"—— 那也是**假的**了：MQTT 判据不存在，生产已改为
+ *   **保守返回 false（fail-closed）**。
+ *   ⇒ 一处过期注释同时**引用了不存在的函数**并**描述了不再存在的行为**，
+ *     而 check_stale_claims.py 没抓到（它只认它登记过的模式）。
+ *   ⇒ 教训：**删函数时，要搜"提到它的注释"** —— 编译器只保护代码，不保护注释。 */
 typedef bool (*sync_uplink_available_cb_t)(void);
 void sync_manager_register_uplink_available_cb(sync_uplink_available_cb_t cb);
 

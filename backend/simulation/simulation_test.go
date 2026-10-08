@@ -2,10 +2,22 @@
 
 // 场景仿真验证框架的测试入口（设计 §5.5）。
 //
-// 三个顶层测试的分工：
+// ⚠⚠⚠ 2026-10-08（§194）：**TestScenarios 已不再构成有效验证** —— 先读这条再跑。
+//
+// harness 的设备侧是一个 **MQTT 客户端**（paho），而后端已于 2026-10-08
+// **整体移除 MQTT** ⇒ TestScenarios 里"设备发布 → 后端入库 → 断言"这条链
+// 从中间断了：**没有任何进程消费那些发布**。
+//   · 它可能**跑完不报错**（连上 broker 就算成功）；
+//   · 但后端不会入库、不会回 ACK ⇒ 断言若只看"发布成功"就会**假绿**。
+//   ⇒ 拿 TestScenarios 的结果当"功能验证通过"是**错的**。见 §196。
+//
+// ✅ 仍然有效的部分：**TestCatalogGate 不受影响**（它只对目录做结构门禁，
+//    不需要任何基础设施、也不碰 MQTT）⇒ 仍应继续跑。
+//
+// 三个顶层测试的分工（⚠ TestScenarios 一行已按上述作废）：
 //   - TestMain：只做基础设施预检（PG / EMQX / 真实组合根可编译）并跑 m.Run()；
-//   - TestScenarios：启动 harness（真实子进程 + 真实库）并顺序执行全部场景；
-//   - TestCatalogGate：对**目录本身**做结构门禁，不需要任何基础设施。
+//   - TestScenarios：~~启动 harness 并顺序执行全部场景~~ **已作废（见上）**；
+//   - TestCatalogGate：对**目录本身**做结构门禁，不需要任何基础设施 —— **仍有效**。
 //
 // 为什么 harness 在 TestScenarios 里启动而不是 TestMain 里：harness.Start
 // 的收尾（杀子进程 / DROP 场景库 / 写 summary）挂在 *testing.T 的 Cleanup 上，
