@@ -579,6 +579,24 @@ def recipes():
         "mem_guard.c: s3p floor 16KiB -> 8KiB ⇒ 门禁必须红"
         "（宿主测试因用自适应 FLOOR 宏而全绿，只有本门禁能发现）")
 
+    # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：
+    #   本会话真实事故 —— 所有测试 defaults 都没覆盖 CONFIG_COLLECTOR_MQTT_BROKER_URL，
+    #   于是继承 config/mqtt-broker.defaults 的**生产**地址 192.168.20.6:1883，
+    #   刷了这些固件的设备**连上生产 broker 并自动订阅** nodes/<mac>/{down,control}。
+    #   用户本轮明确"禁止碰 192.168.20.6"。
+    #   ⇒ 这条门禁是本事故的**唯一**自动化拦截点，必须证明它真的会咬。
+    add("prod_isolation.scratch_broker_uncovered",
+        "check_prod_isolation.py", "file",
+        # ⚠ inject_replace 用 re.subn(pattern, repl, text) —— **没有 re.M/re.S**
+        #   ⇒ 不能用 ^ / $ 锚点（那样会命中 0 次并 assert 报错）。
+        #   改用不带锚点的字面锚：只匹配"键 = 值"这一段的字符本身。
+        inject_replace(os.path.join("..", "__scratch_v3", "defaults",
+                                    "linkvarbuf.defaults"),
+                       r'CONFIG_COLLECTOR_MQTT_BROKER_URL\s*=\s*"[^"]*"\s*\n?',
+                       '', "测试 defaults 未覆盖 broker（继承生产地址）"),
+        "删掉 __scratch_v3/defaults/linkvarbuf.defaults 的 broker 覆盖 ⇒ 门禁必须红"
+        "（本会话真实事故：设备连上生产 broker 并订阅其下行主题）")
+
     return R
 
 
