@@ -13,7 +13,16 @@
  *   - `mem_guard_register_low_cb()` 注册水位跌破回调；`mem_guard_poll()` 由
  *     低频任务（status_task，1 Hz）调用，触发一次低内存事件。
  *   - `floor` 是“低于此值绝不启动重操作”的硬地板，按型号/PSRAM 能力选取：
- *       s3p ≥ 16 KiB、s3 ≥ 8 KiB、c6 ≥ 12 KiB（方案 §2.1/§2.3）。
+ *       **s3p ≥ 8 KiB**、s3 ≥ 8 KiB、c6 ≥ 12 KiB。
+ *     ⚠ 2026-10-08（§194）：原文写"s3p ≥ 16 KiB"——**已过期**。
+ *       §13（决策-3.0-s3p-内部RAM-2026-10-07.md）把 s3p 从 16 KiB 降到 **8 KiB**，
+ *       因为 16 KiB **不可达**（稳态 largest 实测 12288~15360 < 16384）
+ *       ⇒ 那是**功能缺陷**而非保守：配置事务恒被拒（§172 实测 memgate 14~21 次、success=0）。
+ *     ⚠⚠ 这里曾与 mem_guard.c 的 #define **各写一份**同一个事实，而 c 那份先改了、
+ *       h 这份没跟上 ⇒ 两处互相矛盾（正是 P4"一处定义"要消除的形态）。
+ *       权威来源是 `mem_guard.c` 的 `MEM_GUARD_FLOOR_BYTES` 与
+ *       `docs/设计/配置事务确定性设计-2026-10-05.md`（后者由
+ *       `tools/check_mem_guard_floor.py` 与代码对拍，改一处必须改另一处）。
  *     该 floor 的**语义是内部 RAM 水位**（见 mem_guard_largest 的口径说明）。
  *
  * 注意：low callback 运行在调用 `mem_guard_poll()` 的任务上下文，**不得**在
