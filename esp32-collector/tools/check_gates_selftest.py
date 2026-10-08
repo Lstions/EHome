@@ -564,6 +564,21 @@ def recipes():
                        "Kconfig default 与源码兜底矛盾"),
         "Kconfig.projbuild: default 改成 zz_mismatch，与源码 #define 兜底不一致")
 
+    # ⚠ 为什么必须给 check_mem_guard_floor 也加一条配方（D-26）：
+    #   host_tests/mem_guard_tests.c 用**自适应宏** FLOOR = mem_guard_floor_bytes()，
+    #   所有断言都相对 FLOOR 写 ⇒ **把 s3p 的 floor 从 16K 改成 8K，ctest 仍 109/109**。
+    #   即：floor 被静默改动时，**没有别的门禁会红**。
+    #   而 floor 是**行为阈值**（决定配置事务/OTA 放行）且作为 MemReport field5 上报
+    #   ⇒ 若这条新门禁自己也不咬，就等于又加了一条自证不了的检查。
+    add("mem_guard_floor.s3p_value_drift",
+        "check_mem_guard_floor.py", "file",
+        inject_replace("main/mem_guard.c",
+                       r'#define MEM_GUARD_FLOOR_BYTES       \(16u \* 1024u\)',
+                       '#define MEM_GUARD_FLOOR_BYTES       (8u * 1024u)',
+                       "s3p floor 16KiB -> 8KiB（§137 实验值）"),
+        "mem_guard.c: s3p floor 16KiB -> 8KiB ⇒ 门禁必须红"
+        "（宿主测试因用自适应 FLOOR 宏而全绿，只有本门禁能发现）")
+
     return R
 
 
