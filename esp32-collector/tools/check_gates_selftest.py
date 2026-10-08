@@ -630,6 +630,22 @@ def recipes():
         "build/zz_selftest_stale/sdkconfig 含生产地址 ⇒ 门禁必须红"
         "（陈旧产物不会因修 defaults 而改变）")
 
+    # ⚠ 为什么必须给 check_critical_tasks_static 也加配方（D-28）：
+    #   2026-10-01 现场事故 —— OTA 起不来，真因是 xTaskCreate() 要一整块连续堆内存
+    #   （栈+TCB），而设备堆碎片常态化。修法是把 ota_task / log_tx / scheduler
+    #   改成静态分配（栈与 TCB 进 .bss，与堆解耦）。
+    #   ⚠ 2026-10-08 核实：这条不变量**此前没有任何测试/门禁保护** ——
+    #   把 ota.c 改回 xTaskCreate，全套测试仍全绿 ⇒ 事故会**重现**而 CI 不拦。
+    #   本配方证明新门禁真的会咬。
+    add("critical_tasks_static.ota_reverts_to_dynamic",
+        "check_critical_tasks_static.py", "file",
+        inject_replace(os.path.join("components", "ota", "ota.c"),
+                       r'xTaskCreateStatic\(ota_task_func',
+                       'xTaskCreate(ota_task_func',
+                       "OTA 任务从静态改回动态创建"),
+        "ota.c: xTaskCreateStatic -> xTaskCreate ⇒ 门禁必须红"
+        "（这条不变量此前无任何保护，改回去会重现 2026-10-01 现场事故）")
+
     return R
 
 
