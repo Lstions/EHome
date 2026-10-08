@@ -1135,6 +1135,18 @@ target_include_directories(sync_manager_uplink_tests PRIVATE
 target_compile_options(sync_manager_uplink_tests PRIVATE -Wall -Wextra -Werror
     -Wno-unused-function -Wno-unused-parameter)
 add_test(NAME sync_manager_uplink COMMAND sync_manager_uplink_tests)
+
+# 出厂重置白名单（2026-10-08 从 factory_reset.c 抽出，见 factory_reset_namespaces.h）
+add_executable(factory_reset_namespaces_tests
+    factory_reset_namespaces_tests.c
+    ../components/factory_reset/factory_reset_namespaces.c
+)
+target_include_directories(factory_reset_namespaces_tests PRIVATE
+    ../components/factory_reset/include
+)
+target_compile_options(factory_reset_namespaces_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME factory_reset_namespaces COMMAND factory_reset_namespaces_tests)
+
 # 向量文件在仓库根的 protocol/vectors/，从构建目录用相对路径找不到 => 显式传参
 # 后端（Go）侧的 S0 对锚。工具链自包含在 .tools/gotool，不在系统 PATH，
 # 故通过脚本运行（脚本会报出找不到工具链的原因）。
