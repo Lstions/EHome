@@ -231,7 +231,28 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		readLength uint32
 		delayMs    uint32
 	}
-	needed := make(map[string]cmdNeed) // key = normalized write_data
+	// ⚠⚠ 键必须是 (write_data, chID)，**不能**只是 write_data。
+	//
+	// 2026-10-09（§201，真机发现）：原来只以 write_data 为键 ⇒ 同一节点上
+	// **多条通道**挂同型号从机时（它们共用同一份驱动模板 ⇒ 同一 write_data），
+	// 这些从机会**塌缩成一条** cmdNeed，而 cmdNeed.chID 只保留**最后遍历到**的那个
+	// channel ⇒ 只有 1 条通道拿到 template_ids，其余通道的 template_ids 恒为空。
+	//
+	// 后果（真机实测，3 通道 × 5 从机 prs3001）：
+	//   · 只建 1 条模板、只回写 1 条通道（UART2 拿到 [47]，UART0/UART1 = NULL）
+	//   · 后端每次下发都打 "0 templates, 3 channels" 或 "1 templates, 3 channels"
+	//   · 设备侧 scheduler 因 `!t || t->write_data_len == 0` 跳过**全部**命令
+	//   · 三路 UART 一个请求都不发（对端从机 0 字节）
+	// ⚠ 它**不会**报错 —— 配置"下发成功"（success=1），只是没有任何轮询。
+	//   这正是本仓反复记的"静默失效"形态。
+	//
+	// ⚠ 单通道多从机**不受影响**（chID 相同，塌缩无害）⇒ 所以单元测试与
+	//   单通道现场都不会暴露它。触发面 = "同型号从机分布在 ≥2 条通道"。
+	type needKey struct {
+		writeData string
+		chID      uint
+	}
+	needed := make(map[needKey]cmdNeed)
 
 	var edges []models.EdgeDevice
 	db.Where("node_id = ? AND enabled = true", nodeID).Find(&edges)
@@ -283,7 +304,10 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 			if effectiveInterval <= 0 {
 				continue // 不轮询：不建模板，也不占容量
 			}
-			key := strings.ToUpper(strings.TrimSpace(cmd.WriteData))
+			key := needKey{
+				writeData: strings.ToUpper(strings.TrimSpace(cmd.WriteData)),
+				chID:      edge.ChannelID,
+			}
 			needed[key] = cmdNeed{
 				chID:       edge.ChannelID,
 				writeData:  cmd.WriteData,
@@ -301,7 +325,7 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 
 	missing := 0
 	for key := range needed {
-		if !existingKeys[key] {
+		if !existingKeys[key.writeData] {
 			missing++
 		}
 	}
@@ -309,33 +333,78 @@ func reconcileDriverTemplates(db *gorm.DB, driverRegistry *drivers.Registry, nod
 		return false, fmt.Errorf("template reconciliation would create %d templates; collector limit is %d", len(existingTemplates)+missing, maxTemplates)
 	}
 
+	// 已有模板的 id（按 write_data 归一化键索引）。
+	//
+	// 2026-10-09（201，真机发现）：原实现只在新建模板时回写 template_ids。
+	// 于是"模板已存在（为别的通道或历史建的）"这条路径下，通道永远拿不到 id，
+	// 设备收到 0 模板，调度器跳过全部命令 —— 三路 UART 一个请求都不发，
+	// 却报 success=1（静默失效）。这与 needed 的键缺陷是两层叠加，两层都要修。
+	existingByKey := make(map[string]uint64)
+	for _, t := range existingTemplates {
+		existingByKey[strings.ToUpper(strings.TrimSpace(t.WriteData))] = uint64(t.ID)
+	}
+
 	// Create missing templates after capacity preflight succeeds.
 	created := false
 	for key, need := range needed {
-		if existingKeys[key] {
-			continue
+		tmplID := existingByKey[key.writeData]
+		if tmplID == 0 {
+			tmpl := models.ConfigTemplate{
+				NodeID:     nodeID,
+				WriteData:  need.writeData,
+				ReadLength: need.readLength,
+				DelayMs:    need.delayMs,
+			}
+			if err := db.Create(&tmpl).Error; err != nil {
+				// F2 fail-closed: a failed Create aborts the whole transaction.
+				return created, fmt.Errorf("auto-create ConfigTemplate (tx_hex_chars=%d): %w", len(need.writeData), err)
+			}
+			tmplID = uint64(tmpl.ID)
+			existingByKey[key.writeData] = tmplID
+			logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
+				tmpl.ID, len(need.writeData), need.chID)
+			created = true
 		}
-		tmpl := models.ConfigTemplate{
-			NodeID:     nodeID,
-			WriteData:  need.writeData,
-			ReadLength: need.readLength,
-			DelayMs:    need.delayMs,
+		// 回写必须幂等：reconcile 每次下发都跑，非幂等会让 template_ids 线性膨胀，
+		// 最终超过 maxTemplateIDs 使整份 manifest 被拒（真机曾见 18 > 16）。
+		if err := appendTemplateIDToChannel(db, need.chID, tmplID); err != nil {
+			return created, err
 		}
-		if err := db.Create(&tmpl).Error; err != nil {
-			// F2 fail-closed: a failed Create aborts the whole transaction.
-			return created, fmt.Errorf("auto-create ConfigTemplate (tx_hex_chars=%d): %w", len(need.writeData), err)
-		}
-		// Append template ID to channel's template_ids
-		newID := strconv.FormatUint(uint64(tmpl.ID), 10)
-		if err := db.Model(&models.Channel{}).Where("id = ?", need.chID).Update("template_ids",
-			gorm.Expr("CASE WHEN template_ids = '' OR template_ids IS NULL THEN ? ELSE template_ids || ',' || ? END", newID, newID)).Error; err != nil {
-			return created, fmt.Errorf("append template_id %d to channel %d: %w", tmpl.ID, need.chID, err)
-		}
-		logger.Infof("[reconcile] Auto-created ConfigTemplate id=%d tx_hex_chars=%d for channel=%d",
-			tmpl.ID, len(need.writeData), need.chID)
-		created = true
 	}
 	return created, nil
+}
+
+// appendTemplateIDToChannel 把 templateID 幂等地加入 channel.template_ids。
+//
+// 为什么必须幂等：reconcileDriverTemplates 在每次 SendConfigManifest 时都会跑。
+// 非幂等实现（如 SQL 侧 CASE ... || ',' ||）会让 template_ids 随下发次数线性增长，
+// 最终超过 maxTemplateIDs 使整份 manifest 被拒。
+//
+// 实现：先读当前值，Go 侧解析判重，再整体写回。
+func appendTemplateIDToChannel(db *gorm.DB, chID uint, templateID uint64) error {
+	if templateID == 0 || chID == 0 {
+		return nil
+	}
+	var cur string
+	if err := db.Model(&models.Channel{}).Where("id = ?", chID).
+		Select("COALESCE(template_ids, '')").Scan(&cur).Error; err != nil {
+		return fmt.Errorf("read channel %d template_ids: %w", chID, err)
+	}
+	want := strconv.FormatUint(templateID, 10)
+	for _, part := range strings.Split(cur, ",") {
+		if strings.TrimSpace(part) == want {
+			return nil // 已在其中，幂等返回
+		}
+	}
+	next := want
+	if strings.TrimSpace(cur) != "" {
+		next = cur + "," + want
+	}
+	if err := db.Model(&models.Channel{}).Where("id = ?", chID).
+		Update("template_ids", next).Error; err != nil {
+		return fmt.Errorf("append template_id %s to channel %d: %w", want, chID, err)
+	}
+	return nil
 }
 
 // getCommandTemplatesFromDriver returns command templates from a driver, or nil.

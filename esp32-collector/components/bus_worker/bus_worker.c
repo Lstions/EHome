@@ -140,7 +140,31 @@
  * 组件级 -Wframe-larger-than 门禁会继续盯着它。4096 相对 2416 的帧
  * 有 1680 字节余量，仍高于该门禁要求。若将来再叠大缓冲，构建会失败，
  * 那时应提高此值而不是放宽门禁。 */
-#define REPORT_TASK_STACK 4096
+/* ⚠⚠ 2026-10-09（§201，压测实测）：4096 **不够**，已改回 6144。
+ *
+ * 真机证据（三路 UART 同时满载压测，S3 profile）：
+ *   ***ERROR*** A stack overflow in task report_tx has been detected.
+ *   Backtrace: 0x40381fd5 ... |<-CORRUPTED
+ *   rst:0xc (RTC_SW_CPU_RST)      ⇒ **150 秒内重启 12 次**
+ *
+ * 触发条件（正是上面 2026-10-04 那段注释预测的"特定数据块尺寸"）：
+ *   三路 UART **同时**在等从机响应 → RX_TASK 同时报多个超时
+ *     CMD_U0/U1/U2: waiting for pending UART response ch=34/35/36
+ *     RX_TASK: RX timeout slot0/slot2 type=1 reqID=0 (1001ms)
+ *   ⇒ report_tx 一轮要处理**多个**超时报告 ⇒ 2416 B 栈帧叠加 ⇒ 溢出。
+ *
+ * ⚠ 教训：**按实测峰值收紧栈，等于把余量押在"峰值不会变"上**。
+ *   2026-10-05 依据"峰值 3464、余量 2680"把 6144 收到 4096（留 ~630 B），
+ *   当时结论是安全的 —— 但那是在**单通道、有应答**的条件下测的。
+ *   压测把条件换成"三路同时超时"，峰值立刻越界。
+ *   ⇒ 收紧栈的理由（省内部 RAM 给 lwIP/TLS）仍成立，但余量不能只按均值场景定。
+ *
+ * 回到 6144 的代价（S3 profile 无 PSRAM，实测）：崩溃前 free=32860 largest=12800，
+ *   多占 2048 B 后 free≈30812；xTaskCreate 要连续块，6144 < largest(12800) ⇒ 无风险。
+ * ⚠ 根因仍在：send_data_report 把 2416 字节放在栈上（handler_data.c 的 buf[1400]）。
+ *   彻底消除应把那块缓冲移出栈，而不是继续加大栈。
+ *   组件级 -Wframe-larger-than 门禁会继续盯着它。 */
+#define REPORT_TASK_STACK 6144
 #define REPORT_TASK_PRIO 5
 
 /* ------------------------------------------------------------------ *
