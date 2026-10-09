@@ -212,6 +212,61 @@ func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemp
 	return nil
 }
 
+// validateUARTDMASlots 拒绝「显式请求的 UART DMA 数超过硬件槽位数」的 manifest。
+//
+// ⚠⚠ 2026-10-09（用户要求，两层设计）：
+//
+//	用户原话："用户手动开两条 UART DMA：ESP32应该直接报错，前端显示错误，
+//	          DMA 分不到降级为提示"
+//
+// 这是**第一层（硬报错）**：用户**显式**把多条 UART 的 DMA 打开时，配置在
+// **下发前**就被拒，错误信息直接回给前端 —— 而不是下发给设备后让资源计划
+// 拒绝整份 manifest（§211 的现场事故：2818 次 config failed、设备 ch=0
+// 永远 syncing，而 UI 上完全看不到原因）。
+//
+// 与第二层（运行期降级）的分工：
+//
+//	· 本函数（**显式冲突**）：manifest 里 dma_enabled=true 的 UART 通道数
+//	  > 硬件 UART DMA 槽位数 ⇒ 直接报错，不进设备。
+//	· bus_manager 的资源计划（**运行期不可用**）：非用户显式冲突导致的分不到
+//	  DMA ⇒ 降级 polled + 提示，**不**拒绝整份 manifest。
+//
+// 硬件事实（用户 2026-10-09 指正 + 已在 IDF 源码核实）：
+//
+//	S3 与 C6 的 UART 侧**只有 1 个 UHCI 槽位**，同一时刻只有一个 UART 能用 DMA：
+//	  S3/C6 soc_caps.h:  #define SOC_UHCI_SUPPORTED 1
+//	  uhci_ll.h:80-84    uhci_ll_attach_uart_port 写三个 uartN_ce 位时只有一个
+//	                     能为 1；后 attach 的会清掉前一个 ⇒ 前者 DMA 静默失效。
+//	两型号的 hw_dmas 表已收敛为「只有 1 条 compatible_bus 含 UART」
+//	（hw_tables.c；门禁 check_uart_dma_exclusive.py 强断言 <= 1）。
+//
+// ⚠ 为什么后端也要查（而不是只靠设备侧）：
+//
+//	设备侧报错只体现在 ConfigResult.success=false，而 §211 表明那条路径
+//	**在 UI 上几乎不可见**（用户只看到"配置失败"，不知道是 DMA）。
+//	在编码前拒绝能把原因直接放进 API 响应，前端可原样显示。
+func validateUARTDMASlots(channels []models.Channel) error {
+	requested := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		if !ch.Enabled || !ch.DmaEnabled {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(ch.BusType), "UART") {
+			continue
+		}
+		requested = append(requested, ch.HardwareID)
+	}
+	const slots = 1 // S3 与 C6 的 UART DMA 槽位数都是 1（用户 2026-10-09 指正）
+	if len(requested) > slots {
+		return fmt.Errorf(
+			"UART DMA 槽位不足：本节点硬件只有 %d 个 UART 可同时使用 DMA"+
+				"（S3/C6 的多个 UART 共用一个 UHCI 接口），但配置里有 %d 条 UART 通道开启了 DMA：%s。"+
+				"请关闭其中 %d 条的 DMA（默认即关闭），或只保留 1 条",
+			slots, len(requested), strings.Join(requested, ", "), len(requested)-slots)
+	}
+	return nil
+}
+
 // reconcileDriverTemplates ensures every driver CommandTemplate has a matching
 // ConfigTemplate in DB. Auto-creates missing templates for self-healing.
 // Capacity is checked before any mutation, so self-healing cannot manufacture a

@@ -316,6 +316,11 @@ static bool claim_resource_pin(int *owners, int pin, int owner)
 typedef struct {
     bool valid;
     int32_t controller_id;
+    /* ⚠ 2026-10-09（用户要求的两层设计的第二层）：
+     * 该通道请求了 DMA 但资源不可用，已降级为 polled。
+     * 用于在 apply 阶段保持一致（不能 preinstall 降级了、apply 又去要 DMA），
+     * 也用于把"降级"这件事**上报给后端**变成用户可见的提示。 */
+    bool dma_degraded;
 } bus_plan_entry_t;
 
 static int32_t runtime_controller_id(const bus_dma_ctx_t *ctx)
@@ -665,6 +670,28 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
         /* USB owns its own packet buffers; there is no DMA pool lease to take
          * (and no GDMA channel to contend for with the UARTs). */
         if (dma_requested && ch->bus_type != BUS_TYPE_USB) {
+            /* ⚠⚠ 2026-10-09（用户要求，两层设计的第二层）：
+             *   用户原话："用户手动开两条 UART DMA：ESP32应该直接报错，前端显示错误，
+             *             DMA 分不到降级为提示"
+             *
+             * 这里是**第二层（降级 + 提示）**：DMA 分不到时**不再拒绝整份 manifest**，
+             * 而是把这条通道降级为 polled 并告警。
+             *
+             * 为什么必须降级而不能拒绝：§211 的 C6 现场事故证明"拒绝整份"的代价是
+             * **全部通道都不工作**（设备 ch=0、永远 syncing、后端 2818 次 config failed），
+             * 而用户**完全看不到原因**。这与设计原则矛盾：
+             *   fab4e2fc v2.0 §1.4 原则 3：
+             *     "节点默认开启 DMA — DMA 优先分配，**不可用时自动降级 polled**"
+             *
+             * ⚠ 分工（用户 2026-10-09 明确的两层）：
+             *   · **用户显式**开多条 UART DMA ⇒ 后端 validateUARTDMASlots 在**编码前**
+             *     就拒绝并回错误给前端（manifest_codec.go）—— 那是**硬报错**。
+             *   · **非显式冲突**（如资源被别的总线占、硬件不支持）⇒ 落到这里，
+             *     **降级 + 提示**，不拒绝整份。
+             *   ⇒ 所以本函数现在只处理"意料之外的不可用"，不处理用户配置错误。
+             *
+             * ⚠ 仍保留一处**致命**：!have_dma（连 DMA 池都没有）是配置/初始化
+             *   层面的错误，不是资源争用 —— 那种情况降级会掩盖真正的问题。 */
             if (!have_dma) return ESP_ERR_INVALID_STATE;
             uint32_t dma_id = 0;
             char hw_id[16] = {0};
@@ -673,8 +700,15 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
              * pin matcher intentionally returns UNKNOWN. */
             format_resource_hw_id(hw_id, sizeof(hw_id), ch->bus_type, resource_id);
             if (!resource_id || dma_pool_allocate(&simulated_dma, ch->bus_type,
-                                                   hw_id, &dma_id) != ESP_OK)
-                return ESP_ERR_NOT_FOUND;
+                                                   hw_id, &dma_id) != ESP_OK) {
+                /* 降级为 polled，并把结果记进 plan 供 apply 阶段使用。 */
+                ESP_LOGW(TAG,
+                         "ch=%" PRIu32 " DMA unavailable (hw_id=%s); "
+                         "degrading to polled. Other channels keep working.",
+                         ch->id, resource_id ? hw_id : "(none)");
+                if (plan) plan[i].dma_degraded = true;
+                dma_requested = false;
+            }
         }
         if (plan) {
             plan[i].valid = true;
@@ -1033,8 +1067,18 @@ esp_err_t bus_manager_preinstall_uarts(bus_runtime_t *rt, const config_manifest_
         if (lease != NULL) preferred = runtime_controller_id(lease);
 
         uart_port_t port = UART_NUM_MAX;
+        /* ⚠ 2026-10-09（两层设计的第二层）：必须复用**资源计划**的降级决策。
+         * 若这里重新读 config_channel_get_dma_enabled(ch)，就会把计划阶段
+         * 已经降级为 polled 的通道**又当成要 DMA** —— preinstall 与 apply
+         * 不一致，降级形同虚设（而且会在 apply 阶段重新失败）。 */
+        /* plan 在此处是栈上数组（见函数开头 `bus_plan_entry_t plan[MAX_CHANNELS]`），
+         * 恒非 NULL —— 不能写 `plan && ...`（-Werror=address 会报错）。 */
+        bool dma_for_this_ch = config_channel_get_dma_enabled(ch);
+        if (plan[i].dma_degraded) {
+            dma_for_this_ch = false;
+        }
         esp_err_t err = bus_dma_uart_preinstall(tx, rx, baud,
-                                                config_channel_get_dma_enabled(ch),
+                                                dma_for_this_ch,
                                                 preferred, &port);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "UART preinstall failed for ch=%" PRIu32 ": %s",

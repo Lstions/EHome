@@ -81,13 +81,16 @@ const (
 // SendToNode 出错时回落到 legacy publisher。所以界必须按**最差传输**取。"
 //
 // ⇒ MQTT 已于 2026-10-08 **整体移除**（§194），downlink.Bridge 的回落路径
-//   与 legacy publisher 一并删除 ⇒ **"最差传输"现在是唯一的那条传输**。
-//   那段论证不是"过期"，而是**失去了它的对象**：它成立的前提（存在两条路）
-//   已经不存在了。
+//
+//	与 legacy publisher 一并删除 ⇒ **"最差传输"现在是唯一的那条传输**。
+//	那段论证不是"过期"，而是**失去了它的对象**：它成立的前提（存在两条路）
+//	已经不存在了。
+//
 // ⚠ 教训：删除一个传输时，要去找**为多传输权衡而写的判据** ——
-//   它们不会报错，只会继续用"已经不存在的另一条路"来解释自己。
-//   本处是这样，sender.go 的 MaxManifestWireBytes 推导（按 MQTT 缓冲算 2011）
-//   也是这样 —— 两处同批修正。
+//
+//	它们不会报错，只会继续用"已经不存在的另一条路"来解释自己。
+//	本处是这样，sender.go 的 MaxManifestWireBytes 推导（按 MQTT 缓冲算 2011）
+//	也是这样 —— 两处同批修正。
 //
 // 现在的界只有一个依据：**设备申报的接收上限**（见 MaxManifestWireBytes）。
 // TCP 能承载的上限是 protoframe.PayloadMax（%d B），它比设备侧上限**更大**，
@@ -636,6 +639,16 @@ func (m *Manager) SendConfigManifestWithDecision(decision SyncDecision) error {
 
 		channels, err := validateManifestAuthority(node, snap.channels, snap.gpioConfigs, snap.pwmConfigs)
 		if err != nil {
+			return err
+		}
+		// ⚠⚠ 2026-10-09（用户要求，两层设计的第一层）：
+		//   用户显式把多条 UART 的 DMA 打开 ⇒ **在下发前就报错**，错误回前端。
+		//   而不是下发给设备后让资源计划拒绝整份 manifest（§211 的 C6 事故：
+		//   2818 次 config failed、设备 ch=0 永远 syncing，UI 上看不到原因）。
+		//
+		//   第二层（运行期降级）在固件 bus_manager 的资源计划里：非用户显式冲突
+		//   导致的分不到 DMA ⇒ 降级 polled + 提示，不拒绝整份。
+		if err := validateUARTDMASlots(channels); err != nil {
 			return err
 		}
 		if err := validateManifestTemplateCapacity(snap.templates, limits.maxTemplates); err != nil {

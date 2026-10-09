@@ -558,7 +558,14 @@ func r1SeedWorstCaseDB(t *testing.T, channelCount int) *gorm.DB {
 	for c := 0; c < channelCount; c++ {
 		ch := models.Channel{
 			NodeID: r1WorstDeviceID, BusType: "UART", HardwareType: "UART",
-			Enabled: true, DmaEnabled: true, IntervalMs: 60000,
+			// ⚠ DmaEnabled 保持 false（默认值）：
+			//   本用例测的是 **R1 字节上界**（"最坏配置送得出去"），与 DMA 无关。
+			//   2026-10-09（用户要求"DMA 默认都不开"）+ §212 新增的
+			//   validateUARTDMASlots 之后，5 条 UART 全开 DMA 会被**正确拒绝**
+			//   （硬件只有 1 个 UART DMA 槽位）—— 那会让本用例红在 DMA 上，
+			//   而不是它要守的字节上界上。
+			//   保持 false 后，本用例仍能在 MaxManifestWireBytes 调回 2011 时变红。
+			Enabled: true, DmaEnabled: false, IntervalMs: 60000,
 			TemplateIDs: "1,2,3,4,5,6,7,8", BusConfig: r1MaxBusConfig(c),
 		}
 		if err := db.Create(&ch).Error; err != nil {
