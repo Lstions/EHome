@@ -736,6 +736,16 @@ def recipes():
             green_args=[S3_SDKCONFIG, S3P_SDKCONFIG],
             bad_args=[S3_SDKCONFIG, S3P_SDKCONFIG])
 
+    # 2026-10-09（§207）：C6 的 UART DMA 是**单槽**（TRM v1.2 Ch.4）。
+    # 把 C6 的 GDMA_CH0 也标成含 UART => 门禁必须红且 rc=1。
+    add('uart_dma_exclusive.c6_multi_uart',
+        'check_uart_dma_exclusive.py', 'file',
+        inject_replace('components/hw_profile/hw_tables.c',
+                       r'(\.compatible_bus = )0x04( },  /\* SPI only \*/)',
+                       r'\g<1>0x05\g<2>',
+                       'C6 GDMA_CH0 改成含 UART（违反单槽）'),
+        '把 C6 的 GDMA_CH0 改成 0x05 => 门禁必须红且 rc=1（2 条 > 上限 1）')
+
     # 2026-10-09（§201）：压测实测的栈溢出。
     #
     #   ***ERROR*** A stack overflow in task report_tx has been detected.
