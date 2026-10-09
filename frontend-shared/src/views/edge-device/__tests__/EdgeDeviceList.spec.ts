@@ -1008,7 +1008,14 @@ describe('EdgeDeviceList.vue', () => {
     await flushPromises()
 
     expect(edgeDeviceApi.create).not.toHaveBeenCalled()
-    expect(ElMessage.warning).toHaveBeenCalledWith(expect.stringContaining('未选中候选逻辑设备'))
+    // 回归点（2026-10-06 现场"点创建没有任何反应"）：拦截时**必须把用户送回
+    // 第 0 步**。候选选择器就在第 0 步（v-if inheritMode==='inherit' + v-show 控制），
+    // 用户在步骤 3 提交时它不在视口 —— 只弹 toast 的话，提示语指向的是
+    // 一个他看不见的控件，按钮态与对话框又都不变，于是表现为"点了没反应"。
+    expect(vm.createStep).toBe(0)
+    expect(ElMessage.warning).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('未选中候选逻辑设备') }),
+    )
   })
 
   it('创建对话框关闭/重置清空继承状态', async () => {

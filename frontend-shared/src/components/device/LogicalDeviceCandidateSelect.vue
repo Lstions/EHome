@@ -47,11 +47,17 @@
           name="logical-device-candidate"
           :checked="modelValue === c.id"
           :value="c.id"
+          :aria-label="`${c.name} #${c.id}`"
           @change="select(c)"
         />
         <div class="candidate-info">
           <div class="candidate-title">
             <span class="candidate-name">{{ c.name }}</span>
+            <!-- logical_devices.name 没有唯一约束（唯一的是 identity_key，与名字无关），
+                 同名候选完全可能存在。只渲染 name 时两张卡片会**逐字相同**，用户无法辨别。
+                 这里补上主键，与同仓另两个入口保持一致
+                 （QuickCreateDeviceDialog.vue「p.name (p.id)」、EdgeDeviceList.vue 型号卡片）。 -->
+            <span class="candidate-id">#{{ c.id }}</span>
             <el-tag size="small" :type="weightTagType(c.match_weight)">{{ weightLabel(c.match_weight) }}</el-tag>
           </div>
           <div class="candidate-meta">
@@ -270,6 +276,13 @@ defineExpose({ load, candidates, loading, loadError })
 .candidate-name {
   font-weight: 600;
   font-size: 14px;
+}
+
+/* 主键徽标：与名称并列，让同名候选可区分 */
+.candidate-id {
+  font-size: 12px;
+  font-family: var(--el-font-family-mono, monospace);
+  color: var(--el-text-color-secondary);
 }
 
 .candidate-meta {

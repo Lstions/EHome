@@ -28,6 +28,24 @@ export function extractErrorMessage(error: unknown, fallback = '操作失败'): 
       fallback
     )
   }
+
+  // Element Plus 表单校验的拒绝值**不是 Error**，而是 invalidFields 普通对象：
+  //   { name: [{ message: '请输入边缘设备名称', field: 'name' }] }
+  // 原实现只处理 instanceof Error，其余一律 return fallback，于是表单校验的
+  // **真实原因被替换成通用文案**（实测 extractErrorMessage({name:[{message:'请输入…'}]})
+  // → '创建失败'），且 5 秒后消失 —— 调用方无从判断该改哪个字段。
+  // 这里在兜底之前把第一条可读 message 提取出来。
+  if (typeof error === 'object') {
+    for (const v of Object.values(error as Record<string, unknown>)) {
+      const first = Array.isArray(v) ? v[0] : v
+      const msg =
+        first && typeof first === 'object'
+          ? (first as { message?: unknown }).message
+          : undefined
+      if (typeof msg === 'string' && msg) return msg
+    }
+  }
+
   return fallback
 }
 
