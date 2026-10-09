@@ -269,10 +269,23 @@ func ensureUARTBusConfig(node *models.Node, ch *models.Channel) error {
 		// 能力上限低于默认值时退到上限，不造一个设备明确不支持的速率。
 		baud = int(entry.MaxBaud)
 	}
-	// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）：
-	// 传 true 得到 0x01，与生产既有三条 UART 行一致。帧格式 8N1 由固件硬编码，
-	// 不编进 bus_config（UART 分支不读 byte 7..9）。
-	ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, true)
+	// byte 6 是 DMA flags（固件 bus_dma.h:59-62 / config_mgr GetDmaEnabled）。
+	// 帧格式 8N1 由固件硬编码，不编进 bus_config（UART 分支不读 byte 7..9）。
+	//
+	// ⚠⚠ 2026-10-09（用户明确要求）：**DMA 默认都不开，由用户手动配置。**
+	//   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+	//           "修改原则：DMA默认都不开，由用户手动配置"
+	//
+	// 原实现硬编码 true（注释写"与生产既有三条 UART 行一致"）—— 那是**沿用
+	// 历史现状**，不是需求。在 S3/C6 上它必然出事：
+	//   · 两个型号的 UART 同时只有 1 条能用 DMA（S3 也只有一条 UHCI）；
+	//   · 建 2 条 UART 通道就都带着"要 DMA"的意愿 ⇒ 第 2 条抢不到 ⇒
+	//     设备侧资源计划拒绝**整份 manifest**（§211 的 C6 现场事故：
+	//     2818 次 config failed、设备 ch=0 且永远 syncing）。
+	//
+	// ⇒ 改为 false。用户要开 DMA 时由前端 DMA 开关显式写这一位
+	//   （channel_reconfigure.go 的 uartDMAFlagsByte 是唯一构造点）。
+	ch.BusConfig = buildUARTBusConfig(entry.DefaultTxPin, entry.DefaultRxPin, baud, false)
 	return nil
 }
 

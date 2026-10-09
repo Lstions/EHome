@@ -28,8 +28,18 @@ HW_TABLES = os.path.join(ROOT, "components", "hw_profile", "hw_tables.c")
 
 DMA_BUS_UART = 0x01
 
-ENFORCED = {"esp32c6": 1}
-NOTED = {"esp32s3": "文档称 CH0-4 通用，未见 UART 单槽约束；但 SOC_UHCI_SUPPORTED=1，待查 TRM 与真机并发实验"}
+# ⚠ 2026-10-09（用户明确指正）：S3 **也是单槽**。
+#   用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+#   硬件依据：S3 soc_caps.h 也有 SOC_UHCI_SUPPORTED 1，且 uhci_ll.h:80-84 的
+#   uhci_ll_attach_uart_port 写三个 uartN_ce 位时只有一个能为 1（后 attach 的
+#   会清掉前一个 ⇒ 前者 DMA 静默失效）。
+#   ⇒ S3 从 NOTED 提升为 ENFORCED。
+#
+# ⚠ 我曾在 §207.3 撤回这条判断（因为 DMA 设计文档 v2.0 §1.1 把 S3 写成
+#   "CH0-4 通用"）。用户指正后确认：**文档那一行是错的，我最初的判断（§206.2）
+#   才对，撤回是过度自我怀疑。** 这条教训已记入文档 §212。
+ENFORCED = {"esp32c6": 1, "esp32s3": 1}
+NOTED = {}
 
 
 def read(path):

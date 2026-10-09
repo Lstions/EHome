@@ -156,18 +156,43 @@ const hw_pwm_t hw_pwms[HW_PWM_COUNT] = {
     { .id = "PWM7", .channel = 7, .timer_count = 4, .max_resolution_bits = 14 },
 };
 
-/* S3: 5 GDMA channels (CH0-4), all general purpose TX+RX, UART+I2C+SPI compatible */
+/* S3: 5 GDMA channels (CH0-4), all general purpose TX+RX.
+ *
+ * ⚠⚠ 2026-10-09（用户明确指正）：**UART 侧只有 1 条可用**。
+ *
+ * 用户原话："C6 S3的所有UART同时都只有有一个能用DMA！！！"
+ *
+ * 硬件事实（与 C6 同源，S3 也只有一个 UHCI 外设）：
+ *   S3 soc_caps.h:  #define SOC_UHCI_SUPPORTED 1
+ *   uhci_ll.h:80-84 uhci_ll_attach_uart_port(hw, uart_num):
+ *                     hw->conf0.uart0_ce = (uart_num == 0) ? 1 : 0;
+ *                     hw->conf0.uart1_ce = (uart_num == 1) ? 1 : 0;
+ *                     hw->conf0.uart2_ce = (uart_num == 2) ? 1 : 0;
+ *   ⇒ 三个 ce 位**只有一个能为 1** ⇒ 同一时刻只有一个 UART 能接入 UHCI DMA。
+ *     后 attach 的会把前一个的 ce 清 0 ⇒ 前者 DMA **静默失效**（不报错）。
+ *
+ * ⚠ 我曾在 §207.3 撤回这条判断（依据是 DMA 设计文档 v2.0 §1.1 把 S3 写成
+ *   "CH0-4 通用"、未提 UHCI 单槽）。**用户指正后确认：文档那一行是错的，
+ *   我最初的判断（§206.2）才对，撤回是过度自我怀疑。**
+ *
+ * 因此与 C6 用**同一套建模**：只有 1 条通道标 UART 兼容，让 dma_pool 自然
+ * 强制"两个 UART 不能同时拿到 DMA"，而不是在运行期静默抢占。
+ *
+ * CH0 = UART|SPI（与 C6 的 CH1 同角色）；CH1-CH4 = SPI only。
+ * ⚠ 这会让"3 UART 各拿一条"不再发生（§201/§202 压测日志里的
+ *   "Alloc GDMA_CH0/1/2 -> uart/UART0/1/2" 将成为不可能）。
+ * ⚠ I2C 本就不支持 DMA（docs/设计/DMA资源管理设计.md §1.1），保持不含 I2C 位。 */
 const hw_dma_t hw_dmas[HW_DMA_COUNT] = {
     { .dma_id = 0, .name = "GDMA_CH0", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },  /* UART|I2C|SPI */
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x05 },  /* UART|SPI */
     { .dma_id = 1, .name = "GDMA_CH1", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
     { .dma_id = 2, .name = "GDMA_CH2", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
     { .dma_id = 3, .name = "GDMA_CH3", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
     { .dma_id = 4, .name = "GDMA_CH4", .dma_type = 0,
-      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x07 },
+      .capabilities = 0x03, .max_burst = 4095, .compatible_bus = 0x04 },  /* SPI only */
 };
 
 #elif defined(CONFIG_IDF_TARGET_ESP32C6)
