@@ -314,6 +314,24 @@ def inject_append(relpath, text):
     return fn
 
 
+def inject_append_abs(abspath, text):
+    """往**绝对路径**追加一行（用于 build/ 下的 sdkconfig 这类构建产物）。
+
+    ⚠ 为什么不用 inject_append：它把 relpath 拼在 ROOT（esp32-collector）下，
+      而 sdkconfig 在 <worktree>/__scratch_v3/build/... 里 —— 不在 ROOT 下。
+    ⚠ 还原依赖 _backup + _journal_add（落盘日志），SIGKILL 后能自愈。
+    ⚠ 只允许动 build/ 前缀下的路径（构建产物，可安全重建）。
+    """
+    assert "/build/" in abspath or abspath.endswith("sdkconfig"), \
+        "inject_append_abs 只允许动构建产物，收到：%s" % abspath
+    def fn(backups, created):
+        raw = _backup(backups, abspath)
+        with open(abspath, "w", encoding="utf-8") as fh:
+            fh.write(raw.decode("utf-8").rstrip("\n") + "\n" + text)
+        return "%s: 追加 %s" % (os.path.basename(abspath), text.strip()[:60])
+    return fn
+
+
 def inject_make_file(relpath, text):
     """新建一个文件（含父目录），供"陈旧构建产物"这类配方使用。
 
@@ -410,6 +428,22 @@ def _golden_corrupt(text):
 def recipes():
     """每条门禁至少一条配方。kind: file / probe / tmp / argv。"""
     R = []
+
+    # §200：两型号 sdkconfig 的位置（那条门禁查的是**构建产物**，不是源码）。
+    # ⚠ 由 build_firmware.sh 生成，**可能不存在**（没构建过就找不到）。
+    #   找不到时该配方应报"环境不完整"而不是假红 —— 见下面的 skip 处理。
+    def _find_sdk(prof):
+        base = os.path.join(WT, "__scratch_v3", "build")
+        if not os.path.isdir(base):
+            return None
+        for d in sorted(os.listdir(base)):
+            cand = os.path.join(base, d, prof, "sdkconfig")
+            if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                return cand
+        return None
+
+    S3_SDKCONFIG = _find_sdk("s3-n16")
+    S3P_SDKCONFIG = _find_sdk("s3p-n16")
 
     def add(name, gate, kind, inject, desc, green_args=(), bad_args=None,
             extra=None):
@@ -679,6 +713,28 @@ def recipes():
                        'I2C0", .port = 0, .default_sda = 21, .default_scl = 23',
                        "两条总线抢同一个引脚（C6 I2C0.scl 撞 SPI2.mosi）"),
         "把 C6 的 I2C0.default_scl 改成 23（= SPI2.default_mosi）⇒ 门禁必须红")
+
+    # ⚠⚠ 2026-10-09（§200）：这一族门禁查的是**构建产物**（两份 sdkconfig 的差分），
+    #   不是源码。为什么必须有它：
+    #
+    #   P8（型号差异只影响放置/容量，绝不影响可观察行为）是本次重构的核心原则，
+    #   而 sdkconfig 差分显示**它在真实构建产物上不成立**：
+    #       INT_WDT_TIMEOUT_MS       s3=300  s3p=800  ⇒ 卡死 500ms 时行为不同！
+    #       *_WIFI_*_TX_BUFFER_TYPE  s3=1    s3p=0
+    #   两者都来自 IDF 的 depends on SPIRAM —— **不审构建产物就永远看不到**。
+    #
+    #   ⚠ 配方用「往 sdkconfig 追加一个假键」而不是「删登记表条目」：
+    #     后者依赖登记表的具体内容，登记表一改配方就烂；
+    #     注入假键则永远有效，且直接验证「新出现的差异会被报出」。
+    #   ⚠ 它同时验证**退出码**：本轮真的踩到过「打 FAIL 却退 0」
+    #     （return 1 被多缩进了 4 格、落进 for 循环体）⇒ 门禁形同虚设。
+    if S3_SDKCONFIG and S3P_SDKCONFIG:
+        add('model_behavior_diff.unregistered_diff_bites',
+            'check_model_behavior_diff.py', 'argv',
+            inject_append_abs(S3P_SDKCONFIG, 'CONFIG_SELFTEST_INJECTED_BEHAVIOR=y'),
+            '向 s3p 的 sdkconfig 追加一个未登记的键 ⇒ 门禁必须报 FAIL 且 rc=1',
+            green_args=[S3_SDKCONFIG, S3P_SDKCONFIG],
+            bad_args=[S3_SDKCONFIG, S3P_SDKCONFIG])
 
     # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：
     #   本会话真实事故 —— 所有测试 defaults 都没覆盖 CONFIG_COLLECTOR_MQTT_BROKER_URL，
