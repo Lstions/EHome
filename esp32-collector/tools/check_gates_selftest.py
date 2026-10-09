@@ -736,6 +736,26 @@ def recipes():
             green_args=[S3_SDKCONFIG, S3P_SDKCONFIG],
             bad_args=[S3_SDKCONFIG, S3P_SDKCONFIG])
 
+    # 2026-10-09（§201）：压测实测的栈溢出。
+    #
+    #   ***ERROR*** A stack overflow in task report_tx has been detected.
+    #   rst:0xc (RTC_SW_CPU_RST)   => 150 秒内重启 12 次
+    #
+    #   触发条件：三路 UART **同时**等响应 => RX_TASK 同时报多个超时
+    #   => report_tx 一轮处理多个报告 => 2416B 栈帧叠加 => 溢出。
+    #
+    #   ⚠ 根因是「按实测峰值收紧栈」：2026-10-05 依据「峰值 3464、余量 2680」
+    #     把 6144 收到 4096，但那是在**单通道、有应答**条件下测的。
+    #     压测换了条件，峰值立刻越界。
+    #   => 本门禁要求 栈 >= 最大帧 x 2.0，而不是「实测余量刚好够」。
+    add('task_stack_margin.report_tx_too_small',
+        'check_task_stack_margin.py', 'file',
+        inject_replace('components/bus_worker/bus_worker.c',
+                       r'#define REPORT_TASK_STACK (\d+)',
+                       '#define REPORT_TASK_STACK 4096',
+                       'report_tx 栈改回 4096（压测已证明会溢出）'),
+        '把 REPORT_TASK_STACK 改回 4096 => 门禁必须红且 rc=1（余量 -736B）')
+
     # ⚠ 为什么必须给 check_prod_isolation 也加配方（D-27）：
     #   本会话真实事故 —— 所有测试 defaults 都没覆盖 CONFIG_COLLECTOR_MQTT_BROKER_URL，
     #   于是继承 config/mqtt-broker.defaults 的**生产**地址 192.168.20.6:1883，
