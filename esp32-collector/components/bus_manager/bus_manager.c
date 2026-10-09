@@ -33,6 +33,29 @@
 static write_rsp_cb_t s_write_rsp_cb = NULL;
 static uint32_t s_runtime_generation;
 
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 最近一次成功 apply 时因 DMA 不可用而降级为 polled 的通道 id。
+ *
+ * 为什么用模块级快照：降级决策在 validate_manifest_resources 的栈上 plan 里，
+ * 而"提示"要经 msg_handler → ConfigResult 上报给后端 → 前端。
+ * 那两处拿不到栈上的 plan，所以在这里留一份只读快照。
+ *
+ * 线程/时序：只在 apply_manifest 的配置事务上下文写（单写者），
+ * 读取方（msg_handler 发 ConfigResult）在同一事务的后续步骤里，无并发。 */
+#define DMA_DEGRADED_MAX MAX_CHANNELS
+static uint32_t s_dma_degraded_ids[DMA_DEGRADED_MAX];
+static int s_dma_degraded_count;
+
+/* 供 msg_handler 读取（声明见 bus_manager.h）。 */
+int bus_manager_get_dma_degraded_channels(uint32_t *out_ids, int max)
+{
+    if (out_ids && max > 0) {
+        int n = s_dma_degraded_count < max ? s_dma_degraded_count : max;
+        for (int i = 0; i < n; i++) out_ids[i] = s_dma_degraded_ids[i];
+    }
+    return s_dma_degraded_count;
+}
+
 void bus_manager_set_write_rsp_cb(write_rsp_cb_t cb)
 {
     s_write_rsp_cb = cb;
@@ -924,6 +947,20 @@ esp_err_t bus_manager_apply_manifest(bus_runtime_t *rt, const config_manifest_t 
     if (plan_err != ESP_OK) {
         ESP_LOGE(TAG, "manifest resource plan rejected: %s", esp_err_to_name(plan_err));
         return plan_err;
+    }
+    /* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+     * 把计划阶段的降级结果快照下来，供 ConfigResult 上报给后端 → 前端。
+     * 位置必须在 validate_manifest_resources 之后、任何后续 return 之前。 */
+    s_dma_degraded_count = 0;
+    for (int di = 0; di < manifest->channel_count && di < MAX_CHANNELS; di++) {
+        if (plan[di].dma_degraded && s_dma_degraded_count < DMA_DEGRADED_MAX) {
+            s_dma_degraded_ids[s_dma_degraded_count++] = manifest->channels[di].id;
+        }
+    }
+    if (s_dma_degraded_count > 0) {
+        ESP_LOGW(TAG, "%d channel(s) degraded to polled (DMA unavailable); "
+                      "reported to the backend as a warning",
+                 s_dma_degraded_count);
     }
     uint32_t generation = ++s_runtime_generation;
     uint8_t enabled_count = 0;

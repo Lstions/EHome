@@ -396,6 +396,20 @@ void on_query_resources_received(const char *request_id)
     (void)request_id;
 }
 
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 把 bus_manager 的降级快照转给 msg_handler（声明见 msg_handler_hooks.h）。
+ *
+ * 为什么需要这一层转接：msg_handler 不能 REQUIRES bus_manager —— 会成环：
+ *   bus_manager -> bus_worker -> msg_handler
+ * 所以 msg_handler 只声明钩子，实现放在 main/（它已同时依赖两者）。
+ *
+ * ⚠ 声明是**普通 extern**（非弱符号）：漏实现则构建直接失败，
+ *   而不是"降级提示静默消失"（本仓 B2 记录过那一族缺陷）。 */
+int dma_degraded_channels(uint32_t *out_ids, int max)
+{
+    return bus_manager_get_dma_degraded_channels(out_ids, max);
+}
+
 /* ---- Modbus CRC16 helper ---- */
 
 static uint16_t modbus_crc16(const uint8_t *data, size_t len)

@@ -4,7 +4,9 @@ import (
 	"ehome/backend/internal/models"
 	"ehome/backend/pkg/frame"
 	"ehome/backend/pkg/logger"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -23,6 +25,10 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 	// v2.1 optional fields
 	var configEpoch uint64
 	var syncID string
+	// ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+	// 设备因 DMA 不可用而降级为 polled 的通道 id（field 5，repeated）。
+	// 设备只在成功时编、未降级时不编 ⇒ 空切片 = 无降级。
+	var dmaDegraded []uint64
 	seen := map[uint8]bool{}
 
 	for {
@@ -34,8 +40,14 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 			logger.Warnf("[%s] malformed ConfigResult: %v", deviceID, err)
 			return
 		}
-		if field.FieldNum < 1 || field.FieldNum > 4 || seen[field.FieldNum] {
+		if field.FieldNum < 1 || field.FieldNum > 5 {
 			logger.Warnf("[%s] invalid ConfigResult field %d", deviceID, field.FieldNum)
+			return
+		}
+		// ⚠ field 5（dma_degraded 通道 id）是 **repeated varint**，
+		// 不能像 1..4 那样用 seen[] 去重 —— 去重会把第 2 条及之后的降级通道丢掉。
+		if field.FieldNum != 5 && seen[field.FieldNum] {
+			logger.Warnf("[%s] duplicate ConfigResult field %d", deviceID, field.FieldNum)
 			return
 		}
 		seen[field.FieldNum] = true
@@ -56,6 +68,11 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 			configEpoch = frame.GetUint64(field)
 		case 4: // v2.1: sync_id
 			syncID = frame.GetString(field)
+		case 5:
+			// ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+			// 设备因 DMA 不可用而降级为 polled 的通道 id。
+			// 设备侧只在**成功**时编这个字段，且未降级时不编（缺失 = 无降级）。
+			dmaDegraded = append(dmaDegraded, frame.GetUint64(field))
 		}
 	}
 	if !seen[1] || !seen[2] || !seen[4] || manifestID == "" || syncID == "" {
@@ -99,6 +116,12 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 			"config_status":     "applied",
 			"config_sync_state": "in_sync",
 			"last_sync_at":      now,
+			// ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+			// 每次成功回执都**覆盖**这个字段（不是累加）——
+			// 它描述"本次配置的降级情况"，不是历史累积。
+			// 设备未降级时不编 field 5 ⇒ dmaDegraded 为空 ⇒ 写空数组，
+			// 于是上一次的降级提示会被正确清掉（否则会永久粘住）。
+			"config_warnings": buildConfigWarnings(dmaDegraded),
 		}
 		if syncID != "" {
 			updates["last_sync_id"] = syncID
@@ -122,6 +145,50 @@ func (m *Manager) handleConfigResult(deviceID string, payload []byte) {
 			logger.Warnf("[%s] persist ConfigResult failure rejected: err=%v rows=%d", deviceID, result.Error, result.RowsAffected)
 		}
 	}
+}
+
+// buildConfigWarnings 把设备上报的"降级通道 id"转成用户可见的告警 JSON。
+//
+// ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+//
+//	设备因 DMA 不可用把某条通道降级为中断/轮询时，把这件事变成**提示**。
+//
+// ⚠ 语义上**不是错误**：配置成功应用了（success=true），只是某条通道没用上
+//
+//	DMA。所以它进 config_warnings 而不是 config_status/LastError ——
+//	后者会让用户以为配置失败了。
+//
+// ⚠ 为什么必须给"人话"message：用户看到的是前端展示，
+//
+//	光有 channel_id 用户不知道是什么意思。
+//
+// 返回 JSON 数组字符串（存进 nodes.config_warnings）。
+// 空输入返回 "[]" —— **必须**返回空数组而不是省略：这样每次成功回执都会
+// 覆盖旧值，上一次的降级提示不会永久粘住。
+func buildConfigWarnings(dmaDegraded []uint64) string {
+	type warning struct {
+		Code      string `json:"code"`
+		ChannelID uint64 `json:"channel_id,omitempty"`
+		Message   string `json:"message"`
+	}
+	out := make([]warning, 0, len(dmaDegraded))
+	for _, chID := range dmaDegraded {
+		out = append(out, warning{
+			Code:      "dma_degraded",
+			ChannelID: chID,
+			Message: fmt.Sprintf(
+				"通道 %d 未能使用 DMA，已自动降级为中断/轮询模式（功能正常）。"+
+					"S3/C6 的多个 UART 共用一个 DMA 接口，同一时刻只有 1 条能用 DMA。"+
+					"若需要 DMA，请关闭其他 UART 通道的 DMA。", chID),
+		})
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		// Marshal 对这几个字段不可能失败；真失败也不能让配置回执处理崩掉。
+		logger.Warnf("buildConfigWarnings marshal failed: %v", err)
+		return "[]"
+	}
+	return string(b)
 }
 
 // handleConfigReport processes ConfigReport (type=0x11)

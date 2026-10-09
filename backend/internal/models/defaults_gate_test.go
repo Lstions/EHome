@@ -72,6 +72,7 @@ var registeredNonZeroDefaults = map[string]string{"alert.go:AlertRule.Comparator
 	"models.go:Node.Config":                                    "JSON 列默认 空对象，零值 空串 不是合法 JSON",
 	"models.go:Node.ConfigStatus":                              "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
 	"models.go:Node.ConfigSyncState":                           "非数值枚举，应用层显式赋值；零值 空串 不是合法取值",
+	"models.go:Node.ConfigWarnings":                            "JSON 列默认 空数组，零值 空串 不是合法 JSON；且显式空数组**有语义**（=本次配置无降级告警），所以必须能被写回，不能用 default 之外的表示",
 	"models.go:Node.ConnectionQuality":                         "0-100 质量分，0 表示最差但非缺省；缺省应为 100",
 	"models.go:Node.DmaChannels":                               "JSON 列默认 空数组，零值 空串 不是合法 JSON",
 	"models.go:Node.HardwareInfo":                              "JSON 列默认 空对象，零值 空串 不是合法 JSON",

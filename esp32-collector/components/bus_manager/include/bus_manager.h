@@ -60,6 +60,19 @@ esp_err_t bus_manager_preinstall_uarts(bus_runtime_t *rt, const config_manifest_
  */
 esp_err_t bus_manager_prune_unused_uarts(bus_runtime_t *rt);
 
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 最近一次 apply_manifest 里因 DMA 不可用而降级为 polled 的通道列表。
+ *
+ * 为什么需要它：降级发生在 bus_manager 资源计划内部（plan[i].dma_degraded），
+ * 而"提示"要经 ConfigResult 上报给后端、再到前端；中间隔着 msg_handler，
+ * 拿不到那个栈上的 plan ⇒ 用一个模块级快照传递。
+ *
+ * @param out_ids 接收通道 id 的数组（可为 NULL，只取数量）
+ * @param max     数组容量
+ * @return 实际降级的通道数（可能 > max，此时只填了前 max 个）
+ */
+int bus_manager_get_dma_degraded_channels(uint32_t *out_ids, int max);
+
 /* v2.4: Incremental config apply — checked single-channel lifecycle. */
 esp_err_t bus_manager_reg_channel(bus_runtime_t *rt, const config_channel_t *ch);
 esp_err_t bus_manager_unreg_channel(bus_runtime_t *rt, uint32_t channel_id);

@@ -48,6 +48,27 @@ export interface Node {
   last_manifest_id?: string
   last_sync_at?: string
   last_sync_id?: string
+  /**
+   * ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+   * 最近一次**成功**配置回执里设备上报的降级告警。
+   *
+   * ⚠ 语义上**不是错误**：配置成功应用了，只是某些通道从 DMA 降级为
+   * 中断/轮询（功能正常）。所以它与 config_status 分开显示，
+   * 不能让用户以为配置失败了。
+   *
+   * 后端 nodes.config_warnings（JSONB 数组），空数组 = 无告警。
+   */
+  config_warnings?: NodeConfigWarning[]
+}
+
+/** 配置告警（后端 buildConfigWarnings 产出）。 */
+export interface NodeConfigWarning {
+  /** 目前只有 'dma_degraded'。 */
+  code: string
+  /** 相关通道 id（可能缺省）。 */
+  channel_id?: number
+  /** 面向用户的中文说明（后端已写好，前端原样显示）。 */
+  message: string
 }
 
 export interface NodeListResponse {

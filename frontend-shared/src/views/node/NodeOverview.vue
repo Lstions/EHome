@@ -199,6 +199,19 @@
               <div class="info-row"><span class="info-label">连接方式</span><span class="info-val">{{ connectionTypeText }}</span></div>
               <div class="info-row"><span class="info-label">配置同步</span><span class="info-val">{{ syncStateLabel }}</span></div>
             </div>
+
+            <!-- ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+                 配置**告警**（不是错误）—— 配置成功应用了，只是某些通道从
+                 DMA 降级为中断/轮询。刻意与"配置同步"分开显示、用 warning
+                 色而非 danger 色，避免用户以为配置失败。
+                 message 由后端写好中文，前端原样显示（不在这里拼文案，
+                 否则两端各写一份会漂移）。 -->
+            <div v-if="configWarnings.length" class="config-warnings">
+              <div v-for="(w, i) in configWarnings" :key="`${w.code}-${w.channel_id ?? i}`" class="config-warning-row">
+                <el-icon :size="13" class="config-warning-icon"><WarningFilled /></el-icon>
+                <span class="config-warning-text">{{ w.message }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1422,6 +1435,23 @@ const connectionTypeText = computed(() => {
 const syncStateLabel = computed(() => {
   if (nodeOffline.value) return '离线'
   return configSyncStateLabel(node.value?.config_sync_state)
+})
+
+/**
+ * ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 设备上报的配置**告警**（不是错误）。
+ *
+ * ⚠ 与 syncStateLabel 分开：配置是**成功**的，只是某些通道降级了。
+ *   合在一起显示会让用户以为配置失败。
+ *
+ * 容错：后端可能给 null/undefined（老节点没这个字段），
+ * 且元素形状不保证 —— 只保留有 message 的项，避免渲染出空白行。
+ */
+const configWarnings = computed(() => {
+  const raw = node.value?.config_warnings
+  if (!Array.isArray(raw)) return []
+  return raw.filter((w): w is { code: string; channel_id?: number; message: string } =>
+    !!w && typeof w === 'object' && typeof (w as { message?: unknown }).message === 'string' && (w as { message: string }).message !== '')
 })
 
 const metricsUpdatedText = computed(() => {
@@ -3089,6 +3119,18 @@ html.dark .node-overview-page {
 .info-col { flex: 1; min-width: 0; }
 .info-row { display: flex; align-items: center; height: 36px; font-size: 13px; border-bottom: 1px solid var(--no-border-light); }
 .info-col .info-row:last-child { border-bottom: none; }
+/* ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+   配置告警 —— 用 warning 色而非 danger 色：配置是成功的，只是降级了。 */
+.config-warnings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.config-warning-row {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 6px 8px; border-radius: 4px; font-size: 12px; line-height: 1.5;
+  background: var(--el-color-warning-light-9);
+  border: 1px solid var(--el-color-warning-light-5);
+  color: var(--el-color-warning-dark-2);
+}
+.config-warning-icon { flex: none; margin-top: 2px; color: var(--el-color-warning); }
+.config-warning-text { flex: 1; word-break: break-word; }
 .info-label { width: 92px; flex-shrink: 0; color: var(--no-text-muted); font-size: 12px; }
 .info-val { color: var(--no-text); display: flex; align-items: center; gap: 6px; min-width: 0; }
 .info-val.mono { font-family: ui-monospace, monospace; }

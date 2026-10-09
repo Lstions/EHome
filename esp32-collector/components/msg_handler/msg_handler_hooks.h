@@ -63,6 +63,26 @@ void on_modbus_scan_req_received(const char *request_id,
 /* === 资源查询（handler_config.c 调用）=== */
 void on_query_resources_received(const char *request_id);
 
+/* === DMA 降级通道（handler_config.c 调用；实现在 main/app_callbacks.c）===
+ *
+ * ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+ * 返回最近一次成功 apply 时因 DMA 不可用而降级为 polled 的通道 id。
+ *
+ * 为什么走钩子而不是直接调 bus_manager_get_dma_degraded_channels()：
+ *   msg_handler 不能 REQUIRES bus_manager —— 会成环：
+ *     bus_manager -> bus_worker -> msg_handler
+ *   钩子是本仓既有的破环手法（见本文件头部关于 B2 的说明）。
+ *
+ * ⚠ 声明为**普通 extern**（不是弱符号）：漏实现必须是构建错误。
+ *   若给弱默认 return 0，就等于"降级提示静默消失" —— 正是本文件头部
+ *   表格里那一族"弱定义生效 ⇒ 功能静默消失"的缺陷形态。
+ *
+ * @param out_ids 接收通道 id 的数组（可为 NULL，只取数量）
+ * @param max     数组容量
+ * @return 实际降级的通道数（可能 > max，此时只填了前 max 个）
+ */
+int dma_degraded_channels(uint32_t *out_ids, int max);
+
 /* === 通道命令 v2（handler_channel_cmd_v2.c 调用）=== */
 /* 前置声明：真实定义在 msg_handler_internal.h（已加 struct tag）。
  * 这样钩子头不必把内部头整个拉进来，同时保持**类型安全** ——
