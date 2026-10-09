@@ -1628,4 +1628,63 @@ describe('NodeOverview (生产页)', () => {
       expect(row.text(), "无通道必须如实说未配置").toContain("当前波特率未配置")
     })
   })
+
+  // ⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）：
+  //   配置**告警**必须渲染出来，且不得与配置状态混为一谈。
+  it("DMA 降级告警渲染在配置同步下方，且不改变配置成功语义", async () => {
+    mockGetDetail.mockResolvedValueOnce({
+      id: 1, node_id: "F0F5BDFFFE02", name: "机房采集器", model: "esp32c6", status: "online",
+      firmware_version: "2.8.0", protocol_version: "2.6", connection_type: "wifi",
+      connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
+      wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
+      last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      // 配置是**成功**的（applied/in_sync）—— 告警不是错误。
+      config_status: "applied", config_sync_state: "in_sync",
+      config_warnings: [{ code: "dma_degraded", channel_id: 49, message: "通道 49 未能使用 DMA，已自动降级为中断/轮询模式（功能正常）。" }],
+      capabilities: {}, config: {},
+    })
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    const rows = wrapper.findAll(".config-warning-row")
+    expect(rows.length, "有告警就必须渲染出行").toBe(1)
+    expect(rows[0].text()).toContain("通道 49 未能使用 DMA")
+    // 关键：告警文案必须说明"功能正常"，否则用户会以为配置失败了
+    expect(rows[0].text()).toContain("功能正常")
+    // 且配置同步状态仍显示成功语义（不得被告警覆盖）
+    expect(wrapper.text()).toContain("已同步")
+  })
+
+  it("无降级（config_warnings 空数组）时不渲染告警行", async () => {
+    mockGetDetail.mockResolvedValueOnce({
+      id: 1, node_id: "F0F5BDFFFE02", name: "机房采集器", model: "esp32c6", status: "online",
+      firmware_version: "2.8.0", protocol_version: "2.6", connection_type: "wifi",
+      connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
+      wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
+      last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      config_status: "applied", config_sync_state: "in_sync",
+      config_warnings: [],
+      capabilities: {}, config: {},
+    })
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    expect(wrapper.findAll(".config-warning-row").length).toBe(0)
+  })
+
+  it("config_warnings 缺失或形状异常时不得崩、也不渲染空白行", async () => {
+    // 老节点没有这个字段；后端也可能给出非数组。容错必须成立。
+    mockGetDetail.mockResolvedValueOnce({
+      id: 1, node_id: "F0F5BDFFFE02", name: "机房采集器", model: "esp32c6", status: "online",
+      firmware_version: "2.8.0", protocol_version: "2.6", connection_type: "wifi",
+      connection_quality: 92, latency_ms: 12, ping_latency_ms: 12,
+      wifi_rssi: -62, free_heap_bytes: 153600, uptime_seconds: 187980,
+      last_online_time: new Date(Date.now() - 3600_000).toISOString(),
+      config_status: "applied", config_sync_state: "in_sync",
+      config_warnings: [null, { code: "dma_degraded" }, { message: "" }] as any,
+      capabilities: {}, config: {},
+    })
+    const wrapper = mount(NodeOverview, { global: { stubs } })
+    await flushPromises()
+    // 三项都无效 => 一行都不渲染（而不是渲染出空白行）
+    expect(wrapper.findAll(".config-warning-row").length).toBe(0)
+  })
 })

@@ -249,7 +249,7 @@ func (m *Manager) calcHashFromSnapshot(snap *manifestSnapshot) ConfigHashResult 
 // (single query) instead of issuing a per-channel DB query.
 func validateManifestScheduleCapacityFromSnapshot(snap *manifestSnapshot, registry *drivers.Registry, channels []models.Channel, useV2 bool, limits manifestLimits) error {
 	if len(channels) > limits.maxChannels {
-		return fmt.Errorf("manifest has %d channels; collector limit is %d", len(channels), limits.maxChannels)
+		return newManifestValidationError(fmt.Sprintf("manifest has %d channels; collector limit is %d", len(channels), limits.maxChannels))
 	}
 	for _, channel := range channels {
 		if !useV2 {

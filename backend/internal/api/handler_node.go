@@ -139,7 +139,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 		// Try by primary key first (if numeric)
 		if intID, err := strconv.Atoi(id); err == nil {
 			if db.First(&node, intID).Error == nil {
-				Success(c, node)
+				Success(c, nodeDetailResponse{Node: node, ConfigWarnings: parseConfigWarnings(node)})
 				return
 			}
 		}
@@ -148,7 +148,7 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			Error(c, http.StatusNotFound, "node not found")
 			return
 		}
-		Success(c, node)
+		Success(c, nodeDetailResponse{Node: node, ConfigWarnings: parseConfigWarnings(node)})
 	})
 
 	// Status transition history for operational timelines.
@@ -368,6 +368,19 @@ func registerNodeRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Manag
 			return
 		}
 		if err := nodeMgr.SendConfigManifestWithDecision(decisions[0]); err != nil {
+			// ⚠ 2026-10-09（用户要求"前端显示错误"，真机验证时发现）：
+			// 把**用户配置错误**与**服务端故障**分开。
+			//
+			// 原实现一律 500。于是"两条 UART 都开了 DMA"（用户可以在前端改的
+			// 配置问题）返回 500 Internal Server Error —— 前端会把它当成
+			// 服务端故障（重试、报"系统错误"），用户根本看不出是自己配错了。
+			//
+			// 判据：nodemgr 的**校验类**错误是用户可行动的 ⇒ 400 + 原文。
+			// 其余（编码失败、DB 写失败、链路不可用）仍是 500。
+			if nodemgr.IsManifestValidationError(err) {
+				Error(c, http.StatusBadRequest, err.Error())
+				return
+			}
 			Error(c, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -772,6 +785,44 @@ type nodeConfigResponse struct {
 }
 
 // getNodeConfig returns the full configuration manifest for a node.
+// nodeDetailResponse 是节点详情的响应体：在 models.Node 之上**覆盖**
+// config_warnings 的序列化形状。
+//
+// ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：
+//
+//	models.Node.ConfigWarnings 是 **string**（gorm jsonb，未加 serializer），
+//	直接 Success(c, node) 会让 API 把整个 JSON **当成字符串**返回：
+//	  "config_warnings": "[{\"code\":...}]"   <-- 字符串，不是数组
+//	而前端写的是 Array.isArray(raw) 判断 ⇒ **永远不成立** ⇒ 提示永不显示。
+//	⚠ 我的前端单测用的 mock 是手写的**真数组**，所以测试全绿 ——
+//	  又一个"mock 形状与后端真实响应对不上"的假绿（与 §214.4 同型）。
+//
+// 为何用**嵌入**而不手写字段清单：
+//
+//	手写一份 Node 字段清单就是 P4 禁止的"同一语义两处定义"，
+//	而且会随着 models.Node 加字段而静默漏掉（我第一版手写时
+//	就把 WiFiRSSI 写成了 WifiRSSI，编译报错才发现）。
+//	嵌入后，Node 的全部字段由嵌入体自动提供，
+//	只有 config_warnings 被外层字段遮蔽（Go 嵌入的标准行为：浅层优先）。
+type nodeDetailResponse struct {
+	models.Node
+	ConfigWarnings []any `json:"config_warnings"`
+}
+
+// parseConfigWarnings 把 nodes.config_warnings 的 JSON 字符串解析成数组。
+// 失败时返回空数组（而非保留原字符串）：一条格式错误的告警不该崩掉整个详情页。
+func parseConfigWarnings(node models.Node) []any {
+	warnings := []any{}
+	if node.ConfigWarnings == "" {
+		return warnings
+	}
+	if err := json.Unmarshal([]byte(node.ConfigWarnings), &warnings); err != nil {
+		logger.Warnf("[%s] Failed to parse config_warnings JSONB: %v", node.NodeID, err)
+		return []any{}
+	}
+	return warnings
+}
+
 func getNodeConfig(db *gorm.DB, nodeMgr *nodemgr.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")

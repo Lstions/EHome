@@ -125,7 +125,7 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 	owners := make(map[int]string)
 	claim := func(pin int, owner string) error {
 		if prior, exists := owners[pin]; exists {
-			return fmt.Errorf("GPIO pin %d conflict between %s and %s", pin, prior, owner)
+			return newManifestValidationError(fmt.Sprintf("GPIO pin %d conflict between %s and %s", pin, prior, owner))
 		}
 		owners[pin] = owner
 		return nil
@@ -207,7 +207,7 @@ func validateManifestAuthority(node models.Node, allChannels []models.Channel, g
 // collector cannot apply.
 func validateManifestTemplateCapacity(templates []models.ConfigTemplate, maxTemplates int) error {
 	if len(templates) > maxTemplates {
-		return fmt.Errorf("manifest has %d templates; collector limit is %d", len(templates), maxTemplates)
+		return newManifestValidationError(fmt.Sprintf("manifest has %d templates; collector limit is %d", len(templates), maxTemplates))
 	}
 	return nil
 }
@@ -258,11 +258,14 @@ func validateUARTDMASlots(channels []models.Channel) error {
 	}
 	const slots = 1 // S3 与 C6 的 UART DMA 槽位数都是 1（用户 2026-10-09 指正）
 	if len(requested) > slots {
-		return fmt.Errorf(
+		// ⚠ 这是**用户可行动**的配置错误 ⇒ ManifestValidationError ⇒ API 映射 400。
+		// 之前用裸 fmt.Errorf，API 一律映射 500，用户看到"服务端错误"，
+		// 既看不出是自己配错了，也可能被前端当成可重试故障。
+		return newManifestValidationError(fmt.Sprintf(
 			"UART DMA 槽位不足：本节点硬件只有 %d 个 UART 可同时使用 DMA"+
 				"（S3/C6 的多个 UART 共用一个 UHCI 接口），但配置里有 %d 条 UART 通道开启了 DMA：%s。"+
 				"请关闭其中 %d 条的 DMA（默认即关闭），或只保留 1 条",
-			slots, len(requested), strings.Join(requested, ", "), len(requested)-slots)
+			slots, len(requested), strings.Join(requested, ", "), len(requested)-slots))
 	}
 	return nil
 }

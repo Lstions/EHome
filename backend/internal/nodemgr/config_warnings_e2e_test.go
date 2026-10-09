@@ -28,12 +28,13 @@ func configResultFrameWithWarnings(manifestID, syncID string, degraded []uint64)
 // ⚠⚠ 2026-10-09（用户要求："DMA 分不到降级为提示"）—— **端到端**测试。
 //
 // 为什么必须有这个测试（而不是只测 buildConfigWarnings）：
-//   我先写了一个只调 buildConfigWarnings 的单元测试，然后做变异自证
-//   —— 把 handler_config.go 里写入 config_warnings 的那一行改成 "[]"，
-//   **测试依然全绿**。因为那个测试只验证了"函数算得对"，
-//   完全没覆盖"算出来的东西有没有被写进 DB"。
-//   ⇒ 这正是本仓记录的"假绿"形态：测了零件，没测接线。
-//   本用例走真实的 handleConfigResult + 真实 DB，能抓住那一行被改坏。
+//
+//	我先写了一个只调 buildConfigWarnings 的单元测试，然后做变异自证
+//	—— 把 handler_config.go 里写入 config_warnings 的那一行改成 "[]"，
+//	**测试依然全绿**。因为那个测试只验证了"函数算得对"，
+//	完全没覆盖"算出来的东西有没有被写进 DB"。
+//	⇒ 这正是本仓记录的"假绿"形态：测了零件，没测接线。
+//	本用例走真实的 handleConfigResult + 真实 DB，能抓住那一行被改坏。
 func TestConfigResult_PersistsDMAWarnings(t *testing.T) {
 	mgr, _ := newStatusTestManager(t)
 

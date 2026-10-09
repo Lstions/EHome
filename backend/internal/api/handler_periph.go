@@ -1387,21 +1387,22 @@ func registerPeriphRoutes(v1 *gin.RouterGroup, db *gorm.DB, nodeMgr *nodemgr.Man
 //
 // ⚠ 与 UART 的处境**不同**，所以处置也不同 —— 这是本函数存在的理由：
 //
-//   UART：短值(2B) 是可接受的中间状态，因为缺的那 4 字节是**波特率**，
-//         有公认默认值(9600)，后端下发前补齐不会替用户做危险决定。
-//         见 internal/uartcfg.PadShortUART 与 §160。
+//	UART：短值(2B) 是可接受的中间状态，因为缺的那 4 字节是**波特率**，
+//	      有公认默认值(9600)，后端下发前补齐不会替用户做危险决定。
+//	      见 internal/uartcfg.PadShortUART 与 §160。
 //
-//   I2C ：固件要求 >= **7** 字节（bus_manager.c:582、bus_dma.c:1746），布局是
-//             byte0 sda / byte1 scl / byte2 **从机地址** / byte3..6 freq(big-endian)
-//         ⚠ 缺的那几字节里包含 **从机地址** —— 那是"跟谁说话"，不是"说多快"。
-//         后端**不能**替用户编一个默认地址：编错了会去访问总线上**另一个**设备。
-//         ⇒ 所以这里**只校验、不补齐**，并在入库时就拒绝，而不是等下发才发现。
+//	I2C ：固件要求 >= **7** 字节（bus_manager.c:582、bus_dma.c:1746），布局是
+//	          byte0 sda / byte1 scl / byte2 **从机地址** / byte3..6 freq(big-endian)
+//	      ⚠ 缺的那几字节里包含 **从机地址** —— 那是"跟谁说话"，不是"说多快"。
+//	      后端**不能**替用户编一个默认地址：编错了会去访问总线上**另一个**设备。
+//	      ⇒ 所以这里**只校验、不补齐**，并在入库时就拒绝，而不是等下发才发现。
 //
 // 为什么必须在**入库**时拒绝（而不是像 UART 那样下发时补）：
-//   症状代价不同。UART 短值下发会失败，但补齐即可救；I2C 短值下发同样会
-//   `ESP_ERR_INVALID_SIZE` ⇒ **整份 manifest 被拒**（validate_manifest_resources 是
-//   整份判据）⇒ 用户加的这条 I2C 会把**其它所有通道一起弄坏**，
-//   而接口返回的是 201「创建成功」。⇒ 越早拒绝越好，且错误里要写清正确长度。
+//
+//	症状代价不同。UART 短值下发会失败，但补齐即可救；I2C 短值下发同样会
+//	`ESP_ERR_INVALID_SIZE` ⇒ **整份 manifest 被拒**（validate_manifest_resources 是
+//	整份判据）⇒ 用户加的这条 I2C 会把**其它所有通道一起弄坏**，
+//	而接口返回的是 201「创建成功」。⇒ 越早拒绝越好，且错误里要写清正确长度。
 var errI2CBusConfigIncomplete = errors.New("i2c bus_config incomplete")
 
 // i2cBusConfigMinLen 是**固件**接受 I2C 下发的硬下限。
@@ -1412,9 +1413,10 @@ const i2cBusConfigMinLen = 7
 //
 // 非空但不足 7 字节 ⇒ 返回 errI2CBusConfigIncomplete（调用方映射 400）。
 // 空 ⇒ **放行**：与 UART 一致，"还没配总线参数"是合法建通道状态，
-//      用户随后会配（I2C 扫描 / 手工填地址）。此时它不可能进 manifest
-//      —— 因为 manifest 组装要求通道可用，而空 bus_config 的 I2C 在固件侧
-//      同样会被拒；这一点已在 §197.3 登记为待收敛项。
+//
+//	用户随后会配（I2C 扫描 / 手工填地址）。此时它不可能进 manifest
+//	—— 因为 manifest 组装要求通道可用，而空 bus_config 的 I2C 在固件侧
+//	同样会被拒；这一点已在 §197.3 登记为待收敛项。
 func validateI2CBusConfig(ch *models.Channel) error {
 	if ch == nil {
 		return fmt.Errorf("channel is required")
@@ -1443,7 +1445,8 @@ func validateI2CBusConfig(ch *models.Channel) error {
 // 为什么要有它：UART 有 ensureUARTBusConfig，I2C 本轮（§197）才有 validateI2CBusConfig，
 // 而四条写 channels 的路径若各自记得调哪几个，迟早漏一条 —— 本轮就漏了 I2C 整整一类。
 // ⇒ 收敛成一个入口：调用方只需 `ensureBusConfigExtras(&node, &ch)`，
-//   由这里按 bus_type 分派。**新增总线类型时只改这一处**（P4）。
+//
+//	由这里按 bus_type 分派。**新增总线类型时只改这一处**（P4）。
 //
 // ⚠ 返回的错误可能是任意一种具体错误（UART 的 / I2C 的），调用方用 errors.Is 判。
 func ensureBusConfigExtras(node *models.Node, ch *models.Channel) error {

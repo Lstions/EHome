@@ -417,6 +417,20 @@ static esp_err_t validate_manifest_resources(bus_runtime_t *rt,
         for (int i = 0; i < MAX_CHANNELS; i++) {
             plan[i].valid = false;
             plan[i].controller_id = -1;
+            /* ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：
+             * **必须**显式清零 dma_degraded。
+             *
+             * 原实现只重置 valid/controller_id，把新增的 dma_degraded 漏了。
+             * plan 是 apply_manifest 里的**未初始化栈数组** ⇒ 该字段是随机值。
+             * 真机实测（C6，层① 临时关闭）后果：bus_manager_apply_manifest
+             * 把随机的 dma_degraded 当成 true 收集进 s_dma_degraded_ids
+             * ⇒ 上报了**通道 48**（实际它是拿到 DMA 的那条）：
+             *   "2 channel(s) degraded"，其中 channel 48 是假阳性。
+             * ⇒ 前端会显示一条不成立的告警，用户被误导去关一条正常的通道。
+             *
+             * ⚠ 教训：给结构体加字段时，"哪些地方初始化它"必须一起找齐。
+             *   这里 plan 的两处重置点（valid/controller_id）就是全部线索。 */
+            plan[i].dma_degraded = false;
         }
     }
     bool used_uart[HW_UART_COUNT] = {false};
@@ -800,10 +814,24 @@ static esp_err_t reg_bus_channel(bus_runtime_t *rt, uint32_t ch_id,
                     ESP_LOGI(TAG, "ch=%" PRIu32 " DMA allocated (id=%" PRIu32 ")",
                              ch_id, dma_id);
                 } else {
-                    ESP_LOGE(TAG, "ch=%" PRIu32 " DMA requested but allocation failed: %s",
+                    /* ⚠⚠ 2026-10-09（真机验证发现的缺陷，§215）：
+                     * 这里**也必须降级**，与 validate_manifest_resources 的第二层一致。
+                     *
+                     * 原实现直接 return dma_err ⇒ 整份 manifest 失败。
+                     * 真机实测（C6，层① 临时关闭）：
+                     *   plan 阶段已正确降级（"2 channel(s) degraded to polled"），
+                     *   但 apply 阶段又在这里硬失败 ⇒ ConfigResult success=0
+                     *   ⇒ 降级形同虚设，用户仍看到"配置失败"。
+                     *
+                     * ⚠ 这正是我 §213.4 声称"已修"的一致性缺陷的**第二个实例**：
+                     *   我当时只修了 bus_manager_preinstall_uarts 的读取，
+                     *   没注意到 apply 路径里还有一处**独立**的 DMA 分配。
+                     *   ⇒ 教训：改"降级"语义时，必须找出**所有**分配点，
+                     *     而不是修完第一个就以为覆盖了。 */
+                    ESP_LOGW(TAG, "ch=%" PRIu32 " DMA unavailable (%s); "
+                                  "degrading to polled. Other channels keep working.",
                              ch_id, esp_err_to_name(dma_err));
-                    rt->bus_ch[i] = 0;
-                    return dma_err;
+                    dma = false;
                 }
             } else {
                 ESP_LOGI(TAG, "ch=%" PRIu32 " DMA disabled by user config", ch_id);
