@@ -33,6 +33,11 @@ type manifestSnapshot struct {
 	gpioConfigs    []models.GPIOConfig
 	pwmConfigs     []models.PWMConfig
 	edgesByChannel map[uint][]models.EdgeDevice // enabled edges grouped by channel (single query)
+
+	// driverCommands caches driver-declared command templates per edge.Type.
+	// 2026-10-09 (§206.3): pruneUnreferencedTemplates needs the SAME command set
+	// the encoder uses, otherwise it would prune templates still in use.
+	driverCommands map[string][]drivers.CommandTemplate
 }
 
 // loadManifestSnapshot reads every entity that participates in hash calculation
@@ -45,6 +50,7 @@ func (m *Manager) loadManifestSnapshot(tx *gorm.DB, node models.Node, templates 
 	snap := &manifestSnapshot{
 		node:           node,
 		edgesByChannel: make(map[uint][]models.EdgeDevice),
+		driverCommands: make(map[string][]drivers.CommandTemplate),
 	}
 	if templates == nil {
 		if err := tx.Order("id ASC").Where("node_id = ?", node.NodeID).Find(&snap.templates).Error; err != nil {
@@ -84,7 +90,111 @@ func (m *Manager) loadManifestSnapshot(tx *gorm.DB, node models.Node, templates 
 	for _, ed := range snap.edgeDevices {
 		snap.edgesByChannel[ed.ChannelID] = append(snap.edgesByChannel[ed.ChannelID], ed)
 	}
+	// Populate the driver-command cache so prune uses the SAME command set as
+	// the encoder (one registry lookup per distinct edge.Type).
+	for _, ed := range snap.edgeDevices {
+		if _, ok := snap.driverCommands[ed.Type]; ok {
+			continue
+		}
+		var drv drivers.Driver
+		if m.driverRegistry != nil {
+			drv, _ = m.driverRegistry.Get(ed.Type)
+		}
+		snap.driverCommands[ed.Type] = getCommandTemplatesFromDriver(drv)
+	}
+	pruneUnreferencedTemplates(snap)
 	return snap, nil
+}
+
+// pruneUnreferencedTemplates 丢弃"不被任何**启用**边设备引用"的模板。
+//
+// 2026-10-09（§206.3，真机证实）：此前 snap.templates 与编码循环都不看 enabled，
+// 于是 enabled=false 的边设备仍然：
+//
+//	① 创建时由 createTemplatesFromDriver 建了 ConfigTemplate（它不看 dev.Enabled）；
+//	② 该模板被无条件编进 ConfigManifest（本文件 field 3 的循环）。
+//
+// 真机证据（构造 1 个 enabled=false 设备 + 1 个挂到 UART1 的模板）：
+//
+//	后端 "ConfigManifest sent: ... 1 templates, 3 channels"
+//	设备侧解析到的 edge_device 数 = 0
+//
+// ⇒ 设备收到 0 个从机却带 1 个模板 = 无引用的死数据，白占固件 MAX_TEMPLATES=16。
+//
+//	与 §205.3 那个 "18 > 16" 现场事故是同一后果（都是"建了不需要的模板"）。
+//
+// ⚠ 为什么是"丢弃无引用"而不是"删除禁用设备的模板"：
+//
+//	ConfigTemplate 是共享池 —— 多条通道/多个设备可共用同一 write_data 的模板
+//	（models.ConfigTemplate.EdgeDeviceID 可空，注释写明"multi-drop 共享池留 NULL"）。
+//	所以判据必须是"有没有被启用设备引用"，不能按 owner 删。
+//
+// ⚠ 归属列 EdgeDeviceID 不足以单独判定：reconcile 自愈路径建的无归属模板
+//
+//	（EdgeDeviceID == NULL）可能正被启用设备使用 ⇒ 必须按引用关系判定。
+//
+// 引用来源取两条路径的并集，与编码器口径一致：
+//
+//	· v2 多命令路径：启用设备的驱动命令（Schedulable && interval>0）→ write_data 匹配；
+//	· legacy 单命令路径：通道 template_ids 里的 id。
+func pruneUnreferencedTemplates(snap *manifestSnapshot) {
+	// 无启用设备 ⇒ 没有任何模板该下发（设备只会收到 0 个从机组）。
+	if len(snap.edgeDevices) == 0 {
+		snap.templates = nil
+		return
+	}
+	used := make(map[uint64]struct{}, len(snap.templates))
+	usedWrite := make(map[string]struct{})
+
+	chByID := make(map[uint]models.Channel, len(snap.channels))
+	for _, ch := range snap.channels {
+		chByID[ch.ID] = ch
+	}
+	// 模板按归一化 write_data 建索引，供 v2 路径反查。
+	byWrite := make(map[string]uint64, len(snap.templates))
+	for _, t := range snap.templates {
+		byWrite[strings.ToUpper(strings.TrimSpace(t.WriteData))] = uint64(t.ID)
+	}
+
+	for _, edge := range snap.edgeDevices {
+		// ① legacy 单命令路径：通道 template_ids 引用的 id。
+		if ch, ok := chByID[edge.ChannelID]; ok {
+			if id := findTemplateID(ch, edge); id != 0 {
+				used[id] = struct{}{}
+			}
+		}
+		// ② v2 多命令路径：该设备"会被轮询"的命令的 write_data。
+		//    ⚠ 这里必须用与编码器**同一份**驱动命令集与 interval 口径，
+		//    否则会把编码器仍要用的模板剪掉（剪多 = 静默少下发）。
+		intervals := make(map[string]int)
+		if len(edge.CommandIntervals) > 0 {
+			_ = json.Unmarshal(edge.CommandIntervals, &intervals)
+		}
+		for _, cmd := range snap.driverCommands[edge.Type] {
+			if !CommandIsManifestCandidate(cmd, intervals, snap.templates) {
+				continue
+			}
+			w := strings.ToUpper(strings.TrimSpace(cmd.WriteData))
+			usedWrite[w] = struct{}{}
+			if id, ok := byWrite[w]; ok {
+				used[id] = struct{}{}
+			}
+		}
+	}
+
+	kept := make([]models.ConfigTemplate, 0, len(snap.templates))
+	for _, t := range snap.templates {
+		if _, ok := used[uint64(t.ID)]; ok {
+			kept = append(kept, t)
+			continue
+		}
+		// 兜底：write_data 被某启用设备引用但 id 索引未命中（重复 write_data 时
+		// byWrite 只留最后一个）⇒ 按 write_data 保留，宁可多留也不剪掉在用的。
+		if _, ok := usedWrite[strings.ToUpper(strings.TrimSpace(t.WriteData))]; ok {
+			kept = append(kept, t)
+		}
+	}
+	snap.templates = kept
 }
 
 // parseManifestDMAConfigs extracts dma_configs from node.Config JSON. Shared

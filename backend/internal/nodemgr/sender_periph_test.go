@@ -602,15 +602,67 @@ func TestConfigManifest_PeriphEmpty(t *testing.T) {
 	}
 }
 
+// §206.3 修复后，容量门禁只统计"被启用设备引用"的模板
+// （pruneUnreferencedTemplates 剪掉无引用模板 —— 设备根本收不到它们）。
+// 所以这两个容量测试必须先造出"启用设备 + 驱动命令 write_data 引用"，
+// 否则模板被剪成 0，门禁自然不拒绝 —— 那样测试就测不到东西了。
+//
+// ⚠ 这不是把测试改松，而是让测试**描述真实约束**：
+//
+//	固件 MAX_TEMPLATES 限制的是"设备实际收到几个模板"，
+//	而设备只收到被引用的模板（§206.3 真机证实：0 个启用设备 ⇒ 设备收到 0 模板）。
+//
+// 走 v2 多命令路径（而非 legacy 单命令）：legacy 的 findTemplateID 只取
+// 通道 template_ids 里的第一个 id，一个通道只能引用 1 个模板，造不出 N 个。
+func registryWithReferencedTemplates(t *testing.T, db *gorm.DB, count int) *drivers.Registry {
+	t.Helper()
+	cmds := make([]drivers.CommandTemplate, 0, count)
+	for i := 0; i < count; i++ {
+		cmds = append(cmds, drivers.CommandTemplate{
+			ID: fmt.Sprintf("c%d", i), Type: "read",
+			WriteData: fmt.Sprintf("%02X", i), ReadLength: 1,
+			IntervalMs: 1000, Schedulable: true,
+		})
+	}
+	registry := drivers.NewRegistry()
+	registry.Register(&manyCmdDriver{cmds: cmds})
+
+	ch := models.Channel{ID: 900, NodeID: "dev1", HardwareType: "UART", BusType: "UART",
+		HardwareID: "UART1", Enabled: true, BusConfig: "10110000096000"}
+	if err := db.Create(&ch).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < count; i++ {
+		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1",
+			WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	ed := models.EdgeDevice{NodeID: "dev1", ChannelID: ch.ID, Name: "ref", HardwareID: "1",
+		Enabled: true, Status: "pending", InitState: "pending", Type: "many-cmd"}
+	if err := db.Create(&ed).Error; err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+
+// manyCmdDriver 声明任意条可轮询命令，供容量测试造出 N 个被引用模板。
+type manyCmdDriver struct{ cmds []drivers.CommandTemplate }
+
+func (d *manyCmdDriver) DeviceType() string                             { return "many-cmd" }
+func (d *manyCmdDriver) DeviceName() string                             { return "many-cmd" }
+func (d *manyCmdDriver) OEM() string                                    { return "test" }
+func (d *manyCmdDriver) Category() string                               { return "test" }
+func (d *manyCmdDriver) HardwareTypes() []string                        { return []string{"uart"} }
+func (d *manyCmdDriver) GetSensorDefinitions() []drivers.SensorData     { return nil }
+func (d *manyCmdDriver) ParseData([]byte) ([]drivers.SensorData, error) { return nil, nil }
+func (d *manyCmdDriver) GetCommandTemplates() []drivers.CommandTemplate { return d.cmds }
+
 func TestConfigManifestRejectsTemplateOverflowBeforePublish(t *testing.T) {
 	db := setupTestDBForManifest(t, "dev1", "2.5")
 	mock := &mockDownlinkPublisher{}
 	mgr := newManagerWithMock(db, mock)
-	for i := 0; i < maxManifestTemplates+1; i++ {
-		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
+	mgr.driverRegistry = registryWithReferencedTemplates(t, db, maxManifestTemplates+1)
 
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "overflow", ManifestID: "overflow"})
 	if err == nil || !strings.Contains(err.Error(), "collector limit") {
@@ -635,11 +687,7 @@ func TestConfigManifestHonorsReportedTemplateCapacity(t *testing.T) {
 	if err := db.Model(&models.Node{}).Where("node_id = ?", "dev1").Update("hardware_info", `{"manifest_capacity":{"max_templates":1,"max_channels":8,"max_template_ids":8}}`).Error; err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
-		if err := db.Create(&models.ConfigTemplate{NodeID: "dev1", WriteData: fmt.Sprintf("%02X", i), ReadLength: 1}).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
+	mgr.driverRegistry = registryWithReferencedTemplates(t, db, 2)
 	err := mgr.SendConfigManifestWithDecision(SyncDecision{DeviceID: "dev1", SyncID: "reported-capacity", ManifestID: "reported-capacity"})
 	if err == nil || !strings.Contains(err.Error(), "collector limit is 1") {
 		t.Fatalf("expected reported-capacity failure, got %v", err)

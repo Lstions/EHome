@@ -27,6 +27,26 @@ import (
 // driver get no templates — that legacy DeviceConfig-derived fallback has been
 // superseded by GenericModbusDriver / GenericI2CDriver.
 func createTemplatesFromDriver(tx *gorm.DB, driverRegistry *drivers.Registry, ch *models.Channel, dev *models.EdgeDevice) error {
+	// 2026-10-09 (§206.3, real-hardware confirmed): a disabled edge device must
+	// not consume template quota.
+	//
+	// Previously this ignored dev.Enabled, so an enabled=false device still got a
+	// ConfigTemplate created and appended to channels.template_ids, while the
+	// encoder unconditionally emitted it into ConfigManifest:
+	//   backend  "ConfigManifest sent: ... 1 templates, 3 channels"
+	//   device   parsed edge_device count = 0
+	// => the device received 0 slaves but 1 template = unreferenced dead data
+	//    occupying MAX_TEMPLATES=16. Same consequence as the §205.3 "18 > 16"
+	//    field incident.
+	//
+	// Skipping is safe: when the device is re-enabled, the next manifest push
+	// runs reconcileDriverTemplates (which queries enabled = true edges) and
+	// backfills the missing templates. So disabled => not created, enabled =>
+	// self-healed; no permanent "missing template" state is left behind.
+	if !dev.Enabled {
+		logger.Infof("[edge-device-create] edge device %d (type=%s) is disabled; skipping ConfigTemplate creation", dev.ID, dev.Type)
+		return nil
+	}
 	drv, err := driverRegistry.Get(dev.Type)
 	if err != nil {
 		// No driver registered — no templates. The generic_modbus and
