@@ -447,11 +447,48 @@ static void test_lying_driver_is_rejected(void)
     link_destroy(l);
 }
 
+/* ================= 12. ⚠⚠ §216：连接不可用时必须**释放**，不能只丢指针 =========
+ *
+ * 真机现象（C6，uptime 2.87h，后端重启后）：
+ *   E esp-tls: Failed to create socket (family 2 socktype 1 protocol 0)
+ *   tls_esp: 连接失败: last_error=0x8002 (=ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET)
+ *   ⇒ 设备再也连不上（每 60s 退避重试，每次都失败）；**断电重启立即恢复**
+ *     ⇒ 是资源泄漏（LWIP_MAX_SOCKETS=6 被耗尽），不是配置/证书问题。
+ *
+ * 根因：read/send 探测到连接不可用时直接 `c->handle = NULL;`
+ *   —— 只丢指针，**不调 io->close()** ⇒ socket/TLS 上下文泄漏。
+ *
+ * ⚠ 本用例为什么必要：既有 test_write_error_is_fatal 只断言"返回 FATAL"，
+ *   **不看 close_calls** ⇒ 旧实现（泄漏版）同样全绿。
+ *   这正是"测了行为，没测资源"的盲区。
+ */
+static void test_write_error_releases_handle(void)
+{
+    reset_io();
+    link_tcp_config_t cfg = { .io = &FAKE_IO, .io_ctx = NULL };
+    link_t *l = make_link(&cfg);
+    CHECK(link_open(l) == LINK_SENT_FULL, "夹具应连接成功");
+    int n = s_io.close_calls;
+    s_io.write_results[0] = -1;     /* 写硬错：连接已断 */
+    s_io.write_count = 1;
+
+    link_result_t r = SEND1(l, (const uint8_t *)"x", 1);
+    CHECK(r == LINK_FATAL, "写硬错应为 FATAL");
+    /* ⚠ 关键断言：写失败必须**释放**底层连接，否则 socket 泄漏。 */
+    CHECK(s_io.close_calls == n + 1,
+          "写硬错后必须 close 一次（释放 socket）；实际 close_calls=%d（未释放 => 泄漏）",
+          s_io.close_calls - n);
+    drop_link(l);
+    /* drop 时 handle 已是 NULL ⇒ 不应再 close（幂等，不重复释放） */
+    CHECK(s_io.close_calls == n + 1, "已释放后 drop 不应再 close");
+}
+
 int main(void)
 {
     test_partial_write_is_continued();
     test_write_blocked_is_backpressure_not_failure();
     test_write_error_is_fatal();
+    test_write_error_releases_handle();
     test_connect_error_grading();
     test_send_before_open_is_not_ready();
     test_backoff_sequence();

@@ -12,6 +12,11 @@
 static const uint32_t s_backoff_ms[] = { 1000u, 2000u, 4000u, 8000u,
                                          16000u, 30000u, 60000u };
 
+/* 前置声明：读/写路径在文件前部就要用它释放连接（§216 的 socket 泄漏修复），
+ * 而定义在 tcp_close 附近。放在这里而不是把定义上移，是为了让
+ * "所有 handle 释放都经此一处"这个事实在定义处一眼可见。 */
+static void tcp_release_handle(link_tcp_ctx_t *c);
+
 struct link_tcp_ctx {
     link_tcp_config_t cfg;                   /* 复制，不持有调用方的指针 */
     void             *handle;                /* io->connect 的返回值；NULL = 未连接 */
@@ -68,11 +73,13 @@ link_read_result_t link_tcp_read(link_tcp_ctx_t *c, uint8_t *buf, size_t cap,
         /* 对端正常关闭：连接不可再用，但**不是故障**
          * （可能是服务端有意重启/滚动更新）。 */
         c->rx_closed++;
-        c->handle = NULL;
+        /* ⚠ §216：必须**释放**（close socket/TLS），不能只丢指针。 */
+        tcp_release_handle(c);
         return LINK_READ_CLOSED;
     }
     c->rx_fatal++;
-    c->handle = NULL;
+    /* ⚠ §216：同上 —— 原实现只置 NULL，socket 泄漏。 */
+    tcp_release_handle(c);
     return LINK_READ_FATAL;
 }
 
@@ -135,15 +142,40 @@ static link_result_t tcp_open(void *ctx)
     return LINK_SENT_FULL;
 }
 
-static void tcp_close(void *ctx)
+/* ⚠⚠ 2026-10-09（§216）：**先关句柄，再置 NULL** —— 这是唯一的正确顺序。
+ *
+ * 真机现象（C6，uptime 2.87h，后端重启后）：
+ *   E esp-tls: Failed to create socket (family 2 socktype 1 protocol 0)
+ *   tls_esp: 连接失败: last_error=0x8002 (=ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET)
+ *   ⇒ 设备再也连不上（每 60s 退避重试一次，每次都失败）；
+ *     断电重启后**立即**恢复 ⇒ 是资源泄漏，不是配置/证书问题。
+ *
+ * 根因：read/send 探测到连接不可用时，原实现直接
+ *       `c->handle = NULL;` —— 只丢掉指针，**不调用 io->close()**
+ *       ⇒ 底层 socket / TLS 上下文泄漏，LWIP_MAX_SOCKETS=6 很快耗尽。
+ *
+ * ⚠ 这个缺陷**被一段注释"论证"成了安全的**（session.c 原文）：
+ *     "link_tcp 在 read/send 失败时**自己**把 handle 置 NULL
+ *      （且 tcp_close 对 NULL handle 安全）"
+ *   —— 前半句是事实，后半句也是事实，但**两者拼不出"安全"**：
+ *     置 NULL 不等于已释放。tcp_close 对 NULL 安全只保证"重复关不出错"，
+ *     不保证"已经被关过"。
+ *   ⇒ 又一次"为多传输权衡而写的判据在真实约束下失效"（见 §216 的教训）。
+ *
+ * 现改为统一走本函数释放：任何"连接不可用"的路径都必须经过它。 */
+static void tcp_release_handle(link_tcp_ctx_t *c)
 {
-    link_tcp_ctx_t *c = (link_tcp_ctx_t *)ctx;
     if (c == NULL || c->handle == NULL) return;
-    if (c->cfg.io->close != NULL) {
+    if (c->cfg.io != NULL && c->cfg.io->close != NULL) {
         c->cfg.io->close(c->handle);
     }
     c->handle = NULL;
     c->handshaked = false;
+}
+
+static void tcp_close(void *ctx)
+{
+    tcp_release_handle((link_tcp_ctx_t *)ctx);
 }
 
 static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len,
@@ -197,7 +229,10 @@ static link_result_t tcp_send(void *ctx, const uint8_t *data, size_t len,
         return LINK_BACKPRESSURE;
     }
     /* n < 0：硬错误（连接已断） */
-    c->handle = NULL;             /* 连接已不可用，避免后续误用 */
+    /* ⚠ §216：原实现只置 NULL（"避免后续误用"），但**没释放** —— 写入失败
+     * 是 socket 泄漏最频繁的路径（每次 TLS 断开都会走到这里）。
+     * 释放后 handle 同样是 NULL，原意图（防误用）不变，且不再泄漏。 */
+    tcp_release_handle(c);
     c->tx_fatal++;
     return LINK_FATAL;
 }
