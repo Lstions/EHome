@@ -1753,12 +1753,21 @@ static void rx_append_from_event(bus_runtime_t *rt, int idx, uint8_t *rx,
  }
 }
 
-static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
+/* P3 (2026-10-10): the frame-emission body was split out of
+ * complete_idle_response so the hardware frame boundary (UART RX timeout,
+ * reported as uart_event_t::timeout_flag) can reuse it verbatim instead of
+ * going through the boundary-length heuristic, which is a no-op for
+ * length-less protocols (bus_rx_boundary_length returns 0 while
+ * buffered < BUS_RX_FIXED_BLOCK_SIZE).
+ *
+ * This function is the SINGLE writer that closes a frame.  It clears
+ * s->len / s_stream_chunked / s_last_rx_us under the caller's critical
+ * section, so whichever caller wins (idle fallback or hardware TOUT) makes
+ * the other one a no-op: the loser sees s_last_rx_us == 0 and returns
+ * immediately.  A frame therefore cannot be completed twice. */
+static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
 {
  stream_rx_t *s = &s_streams[idx];
- if (s_last_rx_us[idx] == 0 ||
-     now_us - s_last_rx_us[idx] < UART_IDLE_THRESHOLD_US)
-  return false;
 
  if (s->overflow) {
   pending_cmd_t pcmd;
@@ -1857,6 +1866,41 @@ static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
  s_stream_chunked[idx] = false;
  s_last_rx_us[idx] = 0;
  return true;
+}
+
+/* P3-2 (2026-10-10): is a hardware frame boundary still in flight for this
+ * slot?  The UART driver reports the end of an idle-less frame through
+ * uart_event_t::timeout_flag, which is queued asynchronously.  If the 10 ms
+ * software fallback fired first, it would emit the bytes received so far as
+ * one frame, and the still-queued TOUT would then emit the remainder as a
+ * second frame — one response split in two.  The fallback therefore yields
+ * whenever the slot's UART event queue is non-empty: a TOUT arrives within
+ * ~0.35 ms at 115200 (4 character times), so a 10 ms quiet period with an
+ * empty event queue is genuine idle. */
+static bool hw_boundary_pending(bus_runtime_t *rt, int idx)
+{
+#ifdef EHOME_HOST_TESTS
+    /* The host stub has no event queue; its driver is synchronous. */
+    (void)rt; (void)idx;
+    return false;
+#else
+    QueueHandle_t q = bus_dma_uart_event_queue(&rt->bus_ctx[idx]);
+    return q != NULL && uxQueueMessagesWaiting(q) > 0;
+#endif
+}
+
+static bool complete_idle_response(bus_runtime_t *rt, int idx, int64_t now_us)
+{
+ stream_rx_t *s = &s_streams[idx];
+ if (s_last_rx_us[idx] == 0 ||
+     now_us - s_last_rx_us[idx] < UART_IDLE_THRESHOLD_US)
+  return false;
+
+ /* P3-2: let a queued hardware boundary win; it is the authoritative frame
+  * end for length-less protocols.  See hw_boundary_pending(). */
+ if (hw_boundary_pending(rt, idx)) return false;
+
+ return emit_buffered_frame(rt, idx, now_us);
 }
 
 /* 行状态事件（BREAK/PARITY/FRAME）的日志限流。
@@ -1958,6 +2002,21 @@ static void handle_uart_event(bus_runtime_t *rt, int idx,
  case UART_DATA:
  case UART_PATTERN_DET:
   rx_append_from_event(rt, idx, rx, rx_cap);
+  /* P3-1 (2026-10-10): use the hardware frame boundary when the driver
+   * reports one.  A UART_DATA event carries timeout_flag == false when the
+   * FIFO filled up (frame not necessarily over) and true when the RX timeout
+   * fired, which means the line went idle for uart_set_rx_timeout() character
+   * times — that is the end of a length-less frame (GPS NMEA and friends).
+   * Before this, the flag was never read anywhere in the repository and such
+   * frames only completed after the 10 ms software fallback.
+   *
+   * The software fallback stays: the IDF driver does not promise a TOUT event
+   * when the FIFO overflowed, so a frame can still be closed by the idle gap.
+   * Both paths funnel into emit_buffered_frame(), which is the single writer,
+   * so a frame cannot be completed twice. */
+  if (event->type == UART_DATA && event->timeout_flag) {
+   (void)emit_buffered_frame(rt, idx, esp_timer_get_time());
+  }
   break;
  case UART_FIFO_OVF:
  case UART_BUFFER_FULL:

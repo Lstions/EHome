@@ -1355,6 +1355,148 @@ static void test_v2_short_read_delivers_partial_payload(void) {
 
     teardown_test_runtime();
 }
+
+/* =====================================================================
+ * P3 (2026-10-10): hardware frame boundary (uart_event_t::timeout_flag)
+ * ===================================================================== */
+
+/* P3-1: timeout_flag == true means the RX timeout fired, i.e. the line went
+ * idle for uart_set_rx_timeout() character times.  That is the hardware frame
+ * boundary for a length-less protocol, so the frame must be emitted right
+ * there — without waiting for the 10 ms software fallback. */
+static void test_hw_timeout_flag_completes_frame(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* A short NMEA-like line, well below BUS_RX_FIXED_BLOCK_SIZE (512), so the
+     * boundary-length heuristic would refuse to emit it. */
+    const char *line = "$GPGGA,123519,4807.038,N\r\n";
+    size_t line_len = strlen(line);
+    CHECK(line_len < BUS_RX_FIXED_BLOCK_SIZE,
+          "fixture: the line must be shorter than the fixed block size");
+    memcpy(g_fake_rx_data, line, line_len);
+    g_fake_rx_len = line_len;
+    g_fake_rx_pos = 0;
+    g_test_time_us = 9000;
+
+    uart_event_t event = { .type = UART_DATA, .size = (uint32_t)line_len,
+                           .timeout_flag = true };
+    uint8_t rx[256];
+    handle_uart_event(&g_test_rt, 0, &event, rx, sizeof(rx));
+
+    /* The frame must be closed by the event itself. */
+    CHECK(s_streams[0].len == 0, "hardware boundary must empty the stream buffer");
+    CHECK(s_last_rx_us[0] == 0, "hardware boundary must clear last_rx_us");
+
+    /* report_task is not running: assert on the telemetry queue directly, the
+     * same way test_rx_append_block_emission does. */
+    report_desc_t desc;
+    bool got = (s_report_telemetry_q &&
+                xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE);
+    CHECK(got, "hardware boundary must emit exactly one report");
+    if (got) {
+        CHECK(desc.len == line_len, "report must carry the whole line");
+        CHECK(desc.channel_id == 100, "report must carry the channel id");
+        CHECK(desc.error_code == 0, "a healthy line is not an error");
+        report_free_block(false, desc.block_index);
+    }
+    teardown_test_runtime();
+}
+
+/* P3-1: timeout_flag == false means the FIFO filled up; the frame is not
+ * necessarily over, so the bytes must only accumulate. */
+static void test_hw_timeout_flag_false_accumulates(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    uint8_t data[7] = {1, 2, 3, 4, 5, 6, 7};
+    memcpy(g_fake_rx_data, data, sizeof(data));
+    g_fake_rx_len = sizeof(data);
+    g_fake_rx_pos = 0;
+    g_test_time_us = 4000;
+
+    uart_event_t event = { .type = UART_DATA, .size = sizeof(data),
+                           .timeout_flag = false };
+    uint8_t rx[256];
+    handle_uart_event(&g_test_rt, 0, &event, rx, sizeof(rx));
+
+    CHECK(s_streams[0].len == sizeof(data),
+          "FIFO-full event (flag=false) must accumulate, not emit");
+    CHECK(s_last_rx_us[0] == 4000, "last_rx_us must be stamped");
+    report_desc_t desc;
+    CHECK(!(s_report_telemetry_q && xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE),
+          "FIFO-full event must not emit a report");
+    teardown_test_runtime();
+}
+
+/* P3-2: the 10 ms software fallback must yield while a hardware boundary
+ * event is still queued.  Otherwise the fallback emits the bytes received so
+ * far and the later TOUT emits the remainder — one response split in two. */
+static void test_idle_fallback_yields_to_queued_hw_event(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    /* Buffer holds a partial frame. */
+    s_streams[0].len = 4;
+    memcpy(s_streams[0].buffer, "PART", 4);
+    s_last_rx_us[0] = 1000;
+    g_test_time_us = 20000;   /* well past UART_IDLE_THRESHOLD_US (10 ms) */
+
+    /* The fixture installs a fake sentinel handle in uart_event_queue, but
+     * hw_boundary_pending() must inspect a REAL queue, so give slot 0 one. */
+    QueueHandle_t evq = xQueueCreate(4, sizeof(uart_event_t));
+    CHECK(evq != NULL, "fixture: the event queue must be created");
+    g_test_bus_ctx[0].uart_event_queue = evq;
+    g_test_rt.bus_ctx[0].uart_event_queue = evq;
+
+    /* Queue a hardware boundary event for this slot: the fallback must wait. */
+    uart_event_t queued = { .type = UART_DATA, .size = 0, .timeout_flag = true };
+    CHECK(xQueueSend(evq, &queued, 0) == pdTRUE,
+          "fixture: the hardware boundary event must fit in the queue");
+
+    CHECK(!complete_idle_response(&g_test_rt, 0, g_test_time_us),
+          "idle fallback must NOT complete the frame while a hw boundary is queued");
+    CHECK(s_streams[0].len == 4, "the partial frame must stay buffered");
+    CHECK(s_last_rx_us[0] == 1000, "last_rx_us must be untouched");
+
+    teardown_test_runtime();
+}
+
+/* P3: emit_buffered_frame() is the single writer that closes a frame.  Once
+ * one caller has completed it, the other must be a no-op — a frame cannot be
+ * delivered twice even if both the hardware boundary and the fallback run. */
+static void test_single_writer_prevents_double_completion(void) {
+    reset_counters();
+    setup_test_runtime();
+    drain_report_queues();
+    bus_worker_set_callbacks(NULL, test_data_rpt_cb);
+
+    s_streams[0].len = 3;
+    memcpy(s_streams[0].buffer, "END", 3);
+    g_test_time_us = 7000;
+
+    CHECK(emit_buffered_frame(&g_test_rt, 0, g_test_time_us),
+          "first completion must succeed");
+    CHECK(s_last_rx_us[0] == 0, "first completion must clear last_rx_us");
+    CHECK(!emit_buffered_frame(&g_test_rt, 0, g_test_time_us),
+          "second completion must be a no-op (single-writer semantics)");
+
+    int reports = 0;
+    report_desc_t desc;
+    while (s_report_telemetry_q && xQueueReceive(s_report_telemetry_q, &desc, 0) == pdTRUE) {
+        reports++;
+        report_free_block(false, desc.block_index);
+    }
+    CHECK(reports == 1, "exactly one report may be emitted for one frame");
+    teardown_test_runtime();
+}
+
 /* =====================================================================
  * Main
  * ===================================================================== */
@@ -1389,6 +1531,10 @@ int main(void)
     test_complete_response_reports_channel_success();
     test_short_read_reports_command_error();
     test_v2_short_read_delivers_partial_payload();
+    test_hw_timeout_flag_completes_frame();
+    test_hw_timeout_flag_false_accumulates();
+    test_idle_fallback_yields_to_queued_hw_event();
+    test_single_writer_prevents_double_completion();
 
     report_path_deinit();
 
