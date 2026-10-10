@@ -93,6 +93,36 @@ const char *channel_cmd_v2_current_boot_id(void);
 uint64_t    channel_cmd_v2_current_time_ms(void);
 bool        on_channel_cmd_v2_received(const struct channel_cmd_v2 *cmd, uint8_t slot);
 
+/* === 借用 batch plan（bus_worker 调用；实现在 handler_channel_cmd_v2.c）===
+ *
+ * ⭐ 方案 D（2026-10-10）：队列元素不再内联 plan buffer，worker 改为**借用**
+ * msg_handler control 槽位里的那一份。
+ *
+ * 为什么是访问器而不是把裸指针放进队列元素：
+ *   · 裸指针的正确性依赖「槽位在 worker 读完之前不被复用」这条**隐式**不变量，
+ *     而它只在当前的执行顺序下偶然成立（读 plan 与发布 FINAL 恰好同任务串行）。
+ *     将来若有人把完成发布提前（完成回调已走 s_control_final_q 异步队列），
+ *     立刻变成 use-after-free，且**没有任何机制会报警**。
+ *   · 访问器把这条不变量变成**显式运行时校验**：槽位状态不是 QUEUED
+ *     （或 COMPLETING）就打印错误并拒绝交出 plan。失败可见，而不是静默损坏。
+ *
+ * 约定（借用期）：
+ *   · 返回 true 时 *out_plan / *out_len / *out_steps 有效，且保证在**当前任务
+ *     的这次调用期间**有效（槽位在整个执行期保持 QUEUED）。
+ *   · 调用方**不得跨任务**传递该指针，也不得在长时间阻塞后继续使用 ——
+ *     应当在同一次执行流程内用完。
+ *   · 返回 false 表示「这个 slot 没有可借的 plan」。可能是：
+ *       (a) slot 非法或状态不是 QUEUED（不变量被破坏，已打印错误）；
+ *       (b) 该命令本来就没有 plan（plan_len == 0）。
+ *     调用方应把 false 当作「无 plan」，而不是「致命错误」——
+ *     判据由调用方结合 cmd->channel_cmd_v2 自行决定。
+ *
+ * 线程安全：内部用原子 load 读槽位状态，可在任意任务调用。 */
+bool channel_cmd_v2_borrow_plan(uint8_t slot,
+                                const uint8_t **out_plan,
+                                size_t *out_len,
+                                uint8_t *out_steps);
+
 /* === 校验发布（handler_channel_cmd_v2.c 调用；实现在 msg_handler.c）===
  * 注意：不是弱默认 —— 绕过它等于绕过 L-02 建立的"发布必须被校验"约束。 */
 esp_err_t msg_handler_publish_checked(const uint8_t *data, size_t len);

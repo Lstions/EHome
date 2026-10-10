@@ -96,11 +96,14 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t request_id,
                                uint32_t read_size, uint32_t edge_device_id,
                                uint32_t rx_timeout_ms);
 
+/* ⭐ 方案 D（2026-10-10）：不再接收 plan 指针 —— 队列元素已不再内联 plan
+ * buffer（见 bus_dma/include/cmd_queue.h）。plan_len / plan_step_count 仍以
+ * **传值**方式传入，仅供准入校验；真正的 plan 字节留在 msg_handler 的 control
+ * 槽位里，由 bus_worker 通过 channel_cmd_v2_borrow_plan() 借用。 */
 bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t channel_id,
                                    const uint8_t *data, size_t len, uint32_t read_size,
                                    uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
-                                   const uint8_t *plan_data, size_t plan_len,
-                                   uint8_t plan_step_count,
+                                   size_t plan_len, uint8_t plan_step_count,
                                    uint8_t control_slot);
 
 #ifdef __cplusplus

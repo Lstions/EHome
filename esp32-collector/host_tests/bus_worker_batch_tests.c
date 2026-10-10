@@ -242,15 +242,28 @@ static size_t build_step(uint8_t *out, uint32_t kind,
     return frame_encoder_size(&enc);
 }
 
-/* Append a step to cmd->plan_data with the 2-byte little-endian length
- * prefix used by handler_channel_cmd_v2.c:266-269. */
+/* ⭐ 方案 D（2026-10-10）：plan 不再内联在 bus_cmd_t 里。
+ *
+ * 旧测试直接写 cmd->plan_data；现在元素里没有这个成员了，plan 改由
+ * channel_cmd_v2_borrow_plan() 从「槽位」借出。host 测试不链接
+ * handler_channel_cmd_v2.c，因此由 stubs/channel_cmd_v2_plan_stub.c 提供
+ * 行为等价的替身，测试通过这些辅助函数装载 plan。
+ *
+ * 语义对应关系（务必与生产实现一致，否则测试会变成假绿）：
+ *   host_test_plan_append()      <=> handler_channel_cmd_v2.c 的 plan 组装
+ *   host_test_plan_set_raw()     <=> 直接构造畸形 plan（负例）
+ *   host_test_plan_set_released()<=> 槽位被复用（验证访问器拒绝） */
+extern void host_test_plan_reset(void);
+extern void host_test_plan_clear(uint8_t slot);
+extern void host_test_plan_append(uint8_t slot, const uint8_t *bytes, size_t n);
+extern void host_test_plan_set_raw(uint8_t slot, const uint8_t *bytes, size_t n, uint8_t steps);
+extern void host_test_plan_set_released(uint8_t slot);
+
+/* Append a step to the slot's plan with the 2-byte little-endian length
+ * prefix used by handler_channel_cmd_v2.c. */
 static void append_plan_step(bus_cmd_t *cmd, const uint8_t *step_bytes, size_t step_len)
 {
-    cmd->plan_data[cmd->plan_len] = (uint8_t)(step_len & 0xffU);
-    cmd->plan_data[cmd->plan_len + 1] = (uint8_t)(step_len >> 8);
-    memcpy(cmd->plan_data + cmd->plan_len + 2, step_bytes, step_len);
-    cmd->plan_len += 2 + step_len;
-    cmd->plan_step_count++;
+    host_test_plan_append(cmd->control_slot, step_bytes, step_len);
 }
 
 static void init_batch_cmd(bus_cmd_t *cmd)
@@ -261,6 +274,8 @@ static void init_batch_cmd(bus_cmd_t *cmd)
     cmd->channel_cmd_v2 = true;
     cmd->control_slot = 0;
     cmd->type = CMD_WRITE;
+    /* 元素里已无 plan 成员；plan 装在槽位里，由 stub 承载。 */
+    host_test_plan_clear(cmd->control_slot);
 }
 
 static bus_dma_ctx_t make_uart_ctx(void)
@@ -338,13 +353,14 @@ static void test_plan_overflow_error(void)
     reset_capture();
     reset_batch_rx(0);
 
-    /* Declare a step with length 0xFFFF that overruns cmd->plan_len. */
+    /* Declare a step with length 0xFFFF that overruns the plan length.
+     * 方案 D：plan 装在槽位里，用 set_raw 直接放畸形字节。 */
     bus_cmd_t cmd;
     init_batch_cmd(&cmd);
-    cmd.plan_data[0] = 0xFF;
-    cmd.plan_data[1] = 0xFF;
-    cmd.plan_len = 2;
-    cmd.plan_step_count = 2;
+    {
+        static const uint8_t malformed[2] = {0xFF, 0xFF};
+        host_test_plan_set_raw(cmd.control_slot, malformed, sizeof(malformed), 2);
+    }
 
     bus_dma_ctx_t ctx = make_uart_ctx();
     uint8_t raw[256];

@@ -106,27 +106,49 @@ typedef struct {
     BUS_CMD_COMMON
 } sample_cmd_t;
 
-/* Full element for the CONTROL queues (WriteCommand / ChannelCmdV2 → cmd_task).
+/* Element for the CONTROL queues (WriteCommand / ChannelCmdV2 → cmd_task).
  * Also used as the receive buffer for both queues, and as the scratch type in
- * producers that build a command before choosing a queue. */
+ * producers that build a command before choosing a queue.
+ *
+ * ⭐ 方案 D（2026-10-10）：**队列元素不再内联 plan buffer**。
+ *
+ * 曾经这里有一个 uint8_t plan_data[CMD_PLAN_MAX]（512 B）+ plan_len +
+ * plan_step_count，把元素撑到 700 B —— 违反本项目的「一条命令 ≤ 256 B」接口
+ * 约束，且占掉 3 个 control 队列共 16.8 KiB 堆。
+ *
+ * 为什么以前要内联：一次用户操作可能是「写-等-读-再写-再读」的**多步序列**
+ * （如 SN-3001 雨量计清零：read_before → write_clear → readback）。
+ * 序列必须被**一个命令原子地**交给 worker，否则中途会被别的命令插入。
+ *
+ * 为什么现在可以去掉：原子性的真正来源是 **worker 在一次函数调用里跑完所有
+ * 步骤**（bus_worker.c 的 execute_uart_batch），而不是「plan 存在队列元素里」。
+ * 而 plan 数据**本来就有一份**在 msg_handler 的 control 槽位里
+ * （channel_cmd_v2_t.plan_data，见 msg_handler_internal.h），且：
+ *   · 槽位在 QUEUED 期间**独占**（handler_channel_cmd_v2.c 的 reserve_slot
+ *     只复用 FREE / 最旧 FINAL 的槽）；
+ *   · QUEUED **跨越整个执行期**（worker 完成回调后才置 FINAL）。
+ * ⇒ 槽位里的 plan 在命令执行期间天然有效，队列元素不需要第二份副本。
+ *
+ * worker 通过 msg_handler 的访问器借用 plan：
+ *     channel_cmd_v2_borrow_plan(cmd->control_slot, &plan, &len, &steps)
+ * 该访问器**校验槽位状态必须是 QUEUED**，不满足就打印错误并拒绝执行 ——
+ * 把「槽位不可提前释放」这条隐式不变量变成**显式运行时强制**，而不是把一根
+ * 裸指针放进队列元素里靠顺序偶然成立。
+ *
+ * 因此 bus_cmd_t 与 sample_cmd_t **结构完全相同**（都是 180 B target /
+ * 192 B host）。保留两个类型名是为了表达语义差别（control vs sample），
+ * 并让下面的断言把「两者可互换接收」这件事钉死。 */
 typedef struct {
     BUS_CMD_COMMON
-    uint8_t plan_data[CMD_PLAN_MAX];          /* bounded batch step records */
-    size_t plan_len;
-    uint8_t plan_step_count;
 } bus_cmd_t;
 
-/* sample_cmd_t must be the exact prefix of bus_cmd_t.  See the block comment
- * above for why this form (and not sizeof()) is the portable one. */
-_Static_assert(offsetof(bus_cmd_t, plan_data) ==
-               offsetof(sample_cmd_t, type) + sizeof(cmd_type_t),
-               "sample_cmd_t must be an exact prefix of bus_cmd_t");
-
-/* The two plan members must stay contiguous with plan_data (a stale-plan
- * read is only possible from a full bus_cmd_t, which control queues always
- * fill completely). */
+/* The two element types must be structurally identical: a consumer receives
+ * into a bus_cmd_t from either queue, and producers build one before choosing
+ * a queue.  If someone re-adds a member to bus_cmd_t only, this fails. */
 _Static_assert(offsetof(bus_cmd_t, type) == offsetof(sample_cmd_t, type),
                "type must sit at the same offset in both element types");
+_Static_assert(sizeof(bus_cmd_t) == sizeof(sample_cmd_t),
+               "bus_cmd_t and sample_cmd_t must have identical size");
 
 #ifdef __cplusplus
 }

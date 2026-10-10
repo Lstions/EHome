@@ -1325,17 +1325,27 @@ void bus_manager_on_write_cmd(bus_runtime_t *rt, uint32_t rid, uint32_t ch,
         if (s_write_rsp_cb) s_write_rsp_cb(rid, false, 0xFFFF, "queue full");
 }
 
+/* ⭐ 方案 D（2026-10-10）：plan 不再作为参数传入、也不再 memcpy 进队列元素。
+ *
+ * 元素里那个 512 B 的副本已删除（见 bus_dma/include/cmd_queue.h）；plan 只
+ * 存在于 msg_handler 的 control 槽位里，由 bus_worker 通过
+ * channel_cmd_v2_borrow_plan() 按 control_slot 借用。
+ *
+ * 本函数仍需要 plan 的**长度/步数**做准入校验（否则非法 plan 会被入队，
+ * 直到 worker 才被发现）。这两个值是纯标量，由调用方（main.c 的
+ * on_channel_cmd_v2_received）从已解析的 channel_cmd_v2_t 直接传值 ——
+ * 因此本组件**不需要**依赖 msg_handler，也不必接触任何指针。 */
+
 bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
                                    const uint8_t *data, size_t len, uint32_t read_size,
                                    uint32_t rx_timeout_ms, uint32_t post_tx_delay_ms,
-                                   const uint8_t *plan_data, size_t plan_len,
-                                   uint8_t plan_step_count,
+                                   size_t plan_len, uint8_t plan_step_count,
                                    uint8_t control_slot)
 {
     if (!rt || control_slot == CONTROL_SLOT_NONE ||
         !legacy_write_args_valid(ch, data, len, read_size, rx_timeout_ms, CMD_TX_MAX) ||
         plan_len > CMD_PLAN_MAX || plan_step_count > CMD_BATCH_MAX_STEPS ||
-        (plan_step_count > 0 && (!plan_data || plan_step_count < 2))) return false;
+        (plan_step_count > 0 && plan_step_count < 2)) return false;
     bus_dma_ctx_t *bctx = bus_manager_find_ctx(rt, ch);
     if (!bctx) return false;
     /* Multi-step plans (write + readback) need the same sequential TX→RX engine
@@ -1344,10 +1354,11 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
      * atomic in spi_i2c_cmd_loop and still cannot. */
     if (plan_step_count > 0 && bctx->bus_type != BUS_TYPE_UART &&
         bctx->bus_type != BUS_TYPE_USB) return false;
+    /* ⭐ 方案 D：元素里不再有 plan 成员。plan_len / plan_step_count 只用于上面
+     * 的准入校验；执行时由 bus_worker 按 control_slot 从槽位借用。 */
     bus_cmd_t cmd = { .channel_id = ch, .bus_type = bctx->bus_type, .tx_len = len,
         .delay_ms = post_tx_delay_ms, .read_size = read_size, .rx_timeout_ms = rx_timeout_ms,
-        .channel_cmd_v2 = true, .control_slot = control_slot, .plan_len = plan_len,
-        .plan_step_count = plan_step_count, .type = CMD_WRITE };
+        .channel_cmd_v2 = true, .control_slot = control_slot, .type = CMD_WRITE };
     if (cmd.bus_type == BUS_TYPE_UART) cmd.uart_port = bctx->cfg.uart.port;
     if (!legacy_write_route_valid(cmd.bus_type, (int)cmd.uart_port)) return false;
     /* UART and USB are served by uart_cmd_loop, which has an explicit TX→RX
@@ -1356,7 +1367,8 @@ bool bus_manager_on_channel_cmd_v2(bus_runtime_t *rt, uint32_t ch,
     if (cmd.bus_type != BUS_TYPE_UART && cmd.bus_type != BUS_TYPE_USB &&
         post_tx_delay_ms != 0) return false;
     memcpy(cmd.tx_data, data, len);
-    if (plan_len > 0) memcpy(cmd.plan_data, plan_data, plan_len);
+    /* ⭐ 方案 D：不再 memcpy plan —— 它留在 msg_handler 的槽位里，
+     * bus_worker 通过 channel_cmd_v2_borrow_plan() 按 control_slot 借用。 */
     QueueHandle_t target_q = NULL;
     switch (cmd.bus_type) {
     case BUS_TYPE_UART:

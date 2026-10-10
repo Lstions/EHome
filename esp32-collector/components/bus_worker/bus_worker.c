@@ -47,6 +47,10 @@
  * bus_worker。DataBatch 的**编码**不在这里：见 bus_worker.h 的
  * data_batch_cb_t 注释（组件门禁 1024 B，而一帧需要 1400 B 缓冲）。 */
 #include "handler_hello.h"
+/* ⭐ 方案 D（2026-10-10）：channel_cmd_v2_borrow_plan() —— 按 control_slot 借用
+ * msg_handler 槽位里的 batch plan（队列元素已不再内联 plan buffer）。
+ * bus_worker 本来就 REQUIRES msg_handler（见 CMakeLists 的说明），故无新增依赖。 */
+#include "msg_handler_hooks.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"  // Task watchdog
@@ -470,9 +474,25 @@ static void rebuild_cmd_queue_sets(bus_runtime_t *rt)
  * future mistake into an obvious "plan_len == 0" instead of a ghost batch.
  * Control commands go through the reset too: they are always fully written,
  * so it is a no-op for them. */
+/* ⭐ 方案 D（2026-10-10）：本函数**已无实际作用**，保留为显式的防御位。
+ *
+ * 它当初存在的原因是：sample 队列的元素是 sample_cmd_t（瘦），而消费者用
+ * bus_cmd_t（大）接收，于是 bus_cmd_t 的前缀之后会残留上一次迭代的字节 ——
+ * 那段正是 plan 成员（520 B）。
+ *
+ * 现状：bus_cmd_t 与 sample_cmd_t **尺寸相同**（都是 180 B target / 192 B
+ * host，见 cmd_queue.h 的 _Static_assert），前缀之后没有任何字节，
+ * 因此 memset 的长度恒为 0。保留函数与注释是为了让下一个人知道
+ * 「这里曾经有个尾部残留问题」以及它为什么消失了，而不是当成死代码删掉后
+ * 又有人在 bus_cmd_t 上加字段时忘记恢复它。
+ *
+ * ⚠ 若将来 bus_cmd_t 再次比 sample_cmd_t 大，本函数会自动恢复作用
+ *   （memset 长度不再为 0）——前提是调用点没有被删掉。 */
 static void scrub_plan_tail(bus_cmd_t *cmd)
 {
     if (cmd->channel_cmd_v2) return;   /* control command: fully written by producer */
+    _Static_assert(sizeof(bus_cmd_t) >= sizeof(sample_cmd_t),
+                   "bus_cmd_t must not be smaller than sample_cmd_t");
     memset((uint8_t *)cmd + sizeof(sample_cmd_t), 0,
            sizeof(bus_cmd_t) - sizeof(sample_cmd_t));
 }
@@ -1335,13 +1355,33 @@ static bool uart_collect_response(int ch_idx, uint8_t *out, size_t cap,
  }
 }
 
+/* ⭐ 方案 D（2026-10-10）：plan 不再从队列元素读取。
+ *
+ * 队列元素（bus_cmd_t）已不再内联 512 B 的 plan buffer —— 它违反本项目的
+ * 「一条命令 ≤ 256 B」约束，且占掉 3 个 control 队列共 16.8 KiB 堆。plan 只
+ * 存在于 msg_handler 的 control 槽位里，这里按 cmd->control_slot **借用**。
+ *
+ * 借用由 channel_cmd_v2_borrow_plan() 完成，它内部校验槽位状态仍是
+ * QUEUED/COMPLETING；不满足就报错返回 false —— 把「槽位在读完前不被复用」
+ * 这条不变量变成显式运行时强制，而不是靠执行顺序偶然成立。
+ *
+ * ⚠ 借用期约定：plan 指针只在**本次调用内**有效（同任务、不长时间阻塞）。
+ *   本函数恰好满足：读 plan 与随后的完成回调在同一任务内串行。 */
 static bool execute_uart_batch(int ch_idx, bus_dma_ctx_t *ctx,
                                const bus_cmd_t *cmd, uint8_t *raw, size_t *raw_len,
                                uint32_t *error_code)
 {
  if (ch_idx < 0 || ch_idx >= SCHED_MAX_CHANNELS || !ctx || !cmd || !raw ||
-     !raw_len || !error_code || cmd->plan_step_count < 2 ||
-     cmd->plan_step_count > CMD_BATCH_MAX_STEPS || cmd->plan_len == 0) return false;
+     !raw_len || !error_code) return false;
+
+ const uint8_t *plan = NULL;
+ size_t plan_len = 0;
+ uint8_t plan_steps = 0;
+ if (!channel_cmd_v2_borrow_plan(cmd->control_slot, &plan, &plan_len, &plan_steps)) {
+     /* 槽位不可借用（已释放/已复用）或本来就没有 plan。 */
+     return false;
+ }
+ if (plan_steps < 2 || plan_steps > CMD_BATCH_MAX_STEPS || plan_len == 0) return false;
  /* Drain bytes left by a previous request before claiming the sequence. */
  uint8_t drain[128];
  while (bus_dma_read(ctx, drain, sizeof(drain)) > 0) { }
@@ -1352,14 +1392,14 @@ static bool execute_uart_batch(int ch_idx, bus_dma_ctx_t *ctx,
  s_batch_rx[ch_idx].error = false;
  s_plan_active[ch_idx] = true;
  size_t cursor = 0, encoded = 1;
- raw[0] = cmd->plan_step_count;
- for (uint8_t i = 0; i < cmd->plan_step_count; i++) {
-  if (cursor + 2 > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
-  uint16_t step_len = (uint16_t)cmd->plan_data[cursor] | ((uint16_t)cmd->plan_data[cursor + 1] << 8);
+ raw[0] = plan_steps;
+ for (uint8_t i = 0; i < plan_steps; i++) {
+  if (cursor + 2 > plan_len) { *error_code = 0x1100U + i; goto fail; }
+  uint16_t step_len = (uint16_t)plan[cursor] | ((uint16_t)plan[cursor + 1] << 8);
   cursor += 2;
-  if (step_len == 0 || cursor + step_len > cmd->plan_len) { *error_code = 0x1100U + i; goto fail; }
+  if (step_len == 0 || cursor + step_len > plan_len) { *error_code = 0x1100U + i; goto fail; }
   batch_step_t step;
-  if (!decode_batch_step(cmd->plan_data + cursor, step_len, &step)) { *error_code = 0x1100U + i; goto fail; }
+  if (!decode_batch_step(plan + cursor, step_len, &step)) { *error_code = 0x1100U + i; goto fail; }
   cursor += step_len;
   /* Reset the event-driven hand-off before TX so a fast peripheral response
    * cannot race a post-write reset. */
@@ -1453,7 +1493,17 @@ static void uart_cmd_loop(bus_runtime_t *rt, QueueHandle_t sample_queue,
    }
   }
 
-  if (cmd.channel_cmd_v2 && cmd.plan_step_count > 0) {
+  /* ⭐ 方案 D（2026-10-10）：plan 不再在队列元素里，改用访问器探测。
+   * 这里只取元数据判断「这条命令是否有 plan」；execute_uart_batch 内部会
+   * 再次借用（并校验槽位状态）——两次借用都是只读，代价可忽略。 */
+  const uint8_t *probe_plan = NULL;
+  size_t probe_len = 0;
+  uint8_t probe_steps = 0;
+  bool has_plan = cmd.channel_cmd_v2 &&
+                  channel_cmd_v2_borrow_plan(cmd.control_slot, &probe_plan,
+                                             &probe_len, &probe_steps) &&
+                  probe_steps > 0;
+  if (has_plan) {
    uint8_t raw[256];
    size_t raw_len = 0;
    uint32_t code = 0x1000;

@@ -386,9 +386,17 @@ uint64_t channel_cmd_v2_current_time_ms(void)
 bool on_channel_cmd_v2_received(const channel_cmd_v2_t *cmd, uint8_t slot)
 {
     if (!cmd) return false;
+    /* ⭐ 方案 D（2026-10-10）：不再传 cmd->plan_data 指针。
+     *
+     * 队列元素已不再内联 plan buffer，plan 字节留在 msg_handler 的 control
+     * 槽位里（就是本函数收到的 cmd 所在槽，见 handler_channel_cmd_v2.c 的
+     * reserve_slot）。bus_worker 执行时按 slot 通过
+     * channel_cmd_v2_borrow_plan() 借用 —— 由访问器校验槽位仍是 QUEUED，
+     * 因此这里传指针既没必要、也会引入悬垂风险（cmd 是解析用的局部量）。
+     * 这里只传两个**标量**给 bus_manager 做准入校验。 */
     return bus_manager_on_channel_cmd_v2(&app_state_get()->bus_runtime, cmd->channel_id,
         cmd->tx_data, cmd->tx_len, cmd->read_size, cmd->rx_timeout_ms,
-        cmd->post_tx_delay_ms, cmd->plan_data, cmd->plan_len, cmd->plan_step_count, slot);
+        cmd->post_tx_delay_ms, cmd->plan_len, cmd->plan_step_count, slot);
 }
 
 void on_query_resources_received(const char *request_id)

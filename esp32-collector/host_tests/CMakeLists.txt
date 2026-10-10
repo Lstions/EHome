@@ -312,6 +312,7 @@ add_executable(bus_worker_report_tests ../components/report_stats/report_stats.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_report_tests PRIVATE
     stubs
@@ -336,6 +337,7 @@ add_executable(bus_worker_rx_tests ../components/report_stats/report_stats.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_rx_tests PRIVATE
     stubs
@@ -360,6 +362,10 @@ add_executable(bus_worker_batch_tests ../components/report_stats/report_stats.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
     stubs/hello_caps_stub.c
+    # ⭐ 方案 D（2026-10-10）：bus_cmd_t 不再内联 plan buffer，execute_uart_batch
+    # 改为通过 channel_cmd_v2_borrow_plan() 从「槽位」借 plan。本测试不链接
+    # handler_channel_cmd_v2.c，故由该 stub 提供行为等价的替身 + 装载辅助。
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_batch_tests PRIVATE
     stubs
@@ -434,6 +440,7 @@ add_executable(rx_health_e2e_tests ../components/report_stats/report_stats.c
     ../components/msg_handler/data_batch_codec.c
     stubs/heap_stub_impl.c
     stubs/hello_caps_stub.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(rx_health_e2e_tests PRIVATE
     stubs
@@ -739,6 +746,7 @@ add_executable(bus_worker_data_batch_tests ../components/report_stats/report_sta
     bus_worker_data_batch_tests.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_batch_codec.c
+    stubs/channel_cmd_v2_plan_stub.c
 )
 target_include_directories(bus_worker_data_batch_tests PRIVATE
     stubs
