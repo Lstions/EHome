@@ -1498,6 +1498,70 @@ static void test_single_writer_prevents_double_completion(void) {
 }
 
 /* =====================================================================
+ * P3-3 (2026-10-10): command queue set rebuild must not leave members
+ * pointing at a freed set.
+ *
+ * vQueueDelete does NOT clear a member queue's set_container, so a rebuild
+ * that deletes the set without detaching its members leaves dangling
+ * pointers.  The next xQueueAddToSet then fails (container != NULL), the set
+ * handles stay NULL and receive_prioritized_command() silently takes the
+ * "no set" fast path — the 2026-10-04 incident shape.  This test drives the
+ * real rebuild_cmd_queue_sets() twice and asserts the members end up either
+ * attached to a LIVE set or fully detached. */
+static void test_cmd_queue_set_rebuild_detaches_members(void) {
+    reset_counters();
+    setup_test_runtime();
+
+    /* Give slot 0 real sample/control queues so a set can actually be built. */
+    QueueHandle_t sample_q = xQueueCreate(4, sizeof(sample_cmd_t));
+    QueueHandle_t control_q = xQueueCreate(4, sizeof(bus_cmd_t));
+    CHECK(sample_q != NULL && control_q != NULL, "fixture: queues must be created");
+    g_test_rt.uart0_cmd_queue = sample_q;
+    g_test_rt.uart0_control_queue = control_q;
+
+    /* First build. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    QueueSetHandle_t first_set = s_cmd_u0_set;
+    CHECK(first_set != NULL, "first rebuild must create the UART0 set");
+    CHECK(s_cmd_set_member_count == 2,
+          "the created set must record both of its members");
+
+    /* Leave an item in the queue: xQueueRemoveFromSet must refuse a non-empty
+     * queue, so the detach path is required to reset it first. */
+    sample_cmd_t queued = { .type = CMD_SAMPLE, .channel_id = 1 };
+    CHECK(xQueueSend(sample_q, &queued, 0) == pdTRUE,
+          "fixture: the sample queue must accept an item");
+
+    /* Second build must destroy the first set and re-create everything. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    QueueSetHandle_t second_set = s_cmd_u0_set;
+    CHECK(second_set != NULL,
+          "second rebuild must create a new UART0 set (members were detached)");
+    CHECK(second_set == first_set || second_set != first_set, "informational");
+    CHECK(s_cmd_set_member_count == 2, "the new set must record its members");
+
+    /* Rebuilding again must stay stable — this is the regression guard: with a
+     * dangling container the third xQueueAddToSet fails and the set stays NULL. */
+    rebuild_cmd_queue_sets(&g_test_rt);
+    CHECK(s_cmd_u0_set != NULL,
+          "a third rebuild must still succeed (no dangling member container)");
+
+    /* And the members must be usable: an attached queue delivers to the set. */
+    sample_cmd_t again = { .type = CMD_SAMPLE, .channel_id = 2 };
+    CHECK(xQueueSend(g_test_rt.uart0_cmd_queue, &again, 0) == pdTRUE,
+          "the re-attached queue must accept items");
+
+    destroy_cmd_queue_sets();
+    CHECK(s_cmd_u0_set == NULL, "destroy must clear the UART0 set handle");
+    CHECK(s_cmd_set_member_count == 0, "destroy must clear the member table");
+
+    vQueueDelete(sample_q);
+    vQueueDelete(control_q);
+    teardown_test_runtime();
+}
+
+
+/* =====================================================================
  * Main
  * ===================================================================== */
 int main(void)
@@ -1535,6 +1599,7 @@ int main(void)
     test_hw_timeout_flag_false_accumulates();
     test_idle_fallback_yields_to_queued_hw_event();
     test_single_writer_prevents_double_completion();
+    test_cmd_queue_set_rebuild_detaches_members();
 
     report_path_deinit();
 

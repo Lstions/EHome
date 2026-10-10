@@ -223,6 +223,11 @@ static inline BaseType_t xQueueRemoveFromSet(QueueHandle_t queue, QueueSetHandle
     host_queue_t *q = (host_queue_t *)queue;
     host_queue_set_t *s = (host_queue_set_t *)set;
     if (q->set_container != s) return pdFAIL;
+    /* Real FreeRTOS refuses to detach a queue that still holds items
+     * (queue.c: uxMessagesWaiting != 0 -> pdFAIL).  Without this check a test
+     * of the detach path would pass even when the code forgot the mandatory
+     * xQueueReset, i.e. it would be false-green.  P3-3 (2026-10-10). */
+    if (q->count != 0) return pdFAIL;
     for (size_t i = 0; i < s->member_count; i++) {
         if (s->members[i] == queue) {
             s->members[i] = s->members[s->member_count - 1];

@@ -330,6 +330,14 @@ static QueueSetHandle_t s_cmd_u1_set = NULL;
 static QueueSetHandle_t s_cmd_u2_set = NULL;
 static QueueSetHandle_t s_cmd_spi_set = NULL;
 static QueueSetHandle_t s_cmd_i2c_set = NULL;
+/* P3-3 (2026-10-10): members of the five command queue sets, recorded at
+ * creation time so destroy_cmd_queue_sets() can detach them (and therefore
+ * clear their pxQueueSetContainer) before the set object is freed.  Two
+ * members per set, five sets. */
+#define CMD_SET_MAX_MEMBERS 10
+static QueueHandle_t s_cmd_set_members[CMD_SET_MAX_MEMBERS];
+static QueueSetHandle_t s_cmd_set_member_sets[CMD_SET_MAX_MEMBERS];
+static size_t s_cmd_set_member_count;
 static QueueSetHandle_t s_uart_event_set = NULL;
 static QueueHandle_t s_uart_event_members[SCHED_MAX_CHANNELS];
 static size_t s_uart_event_member_count;
@@ -358,8 +366,39 @@ static void destroy_uart_event_set(void)
  s_uart_event_member_count = 0;
 }
 
+/* Detach one member queue from its set before the set is freed.
+ *
+ * FreeRTOS does NOT clear a member's pxQueueSetContainer in vQueueDelete, so
+ * freeing the set while a member still points at it leaves a dangling pointer.
+ * A later xQueueAddToSet on that member then fails with pdFAIL because
+ * pxQueueSetContainer != NULL, the set handles stay NULL, and
+ * receive_prioritized_command() falls through to its "no set" fast path —
+ * exactly the shape of the 2026-10-04 incident.  xQueueRemoveFromSet refuses
+ * a non-empty queue, so reset first (the order destroy_uart_event_set()
+ * already uses).  All workers have acknowledged suspend before this runs, so
+ * no producer can refill it; the bounded retry plus the visible failure below
+ * cover a late producer without spinning forever. */
+static void detach_cmd_queue_member(QueueHandle_t q, QueueSetHandle_t set)
+{
+ if (!q || !set) return;
+ for (int attempt = 0; attempt < 100; attempt++) {
+  (void)xQueueReset(q);
+  if (xQueueRemoveFromSet(q, set) == pdPASS) return;
+ }
+ ESP_LOGE(TAG_RX, "command queue detach failed: producer still active");
+}
+
 static void destroy_cmd_queue_sets(void)
 {
+ /* Detach every member while the sets are still alive.  The members are
+  * recorded when the sets are created, so this works from bus_worker_stop()
+  * too, which has no bus_runtime_t at hand. */
+ for (size_t i = 0; i < s_cmd_set_member_count; i++) {
+  detach_cmd_queue_member(s_cmd_set_members[i], s_cmd_set_member_sets[i]);
+ }
+ s_cmd_set_member_count = 0;
+ memset(s_cmd_set_members, 0, sizeof(s_cmd_set_members));
+ memset(s_cmd_set_member_sets, 0, sizeof(s_cmd_set_member_sets));
  if (s_cmd_u0_set) { vQueueDelete(s_cmd_u0_set); s_cmd_u0_set = NULL; }
  if (s_cmd_u1_set) { vQueueDelete(s_cmd_u1_set); s_cmd_u1_set = NULL; }
  if (s_cmd_u2_set) { vQueueDelete(s_cmd_u2_set); s_cmd_u2_set = NULL; }
@@ -387,6 +426,18 @@ static QueueSetHandle_t create_cmd_queue_set(QueueHandle_t sample,
    vQueueDelete(set);
   }
   return NULL;
+ }
+ /* Record the members so destroy_cmd_queue_sets() can detach them without
+  * needing the bus_runtime_t. */
+ if (s_cmd_set_member_count + 2 <= CMD_SET_MAX_MEMBERS) {
+  s_cmd_set_members[s_cmd_set_member_count] = sample;
+  s_cmd_set_member_sets[s_cmd_set_member_count] = set;
+  s_cmd_set_member_count++;
+  s_cmd_set_members[s_cmd_set_member_count] = control;
+  s_cmd_set_member_sets[s_cmd_set_member_count] = set;
+  s_cmd_set_member_count++;
+ } else {
+  ESP_LOGE(TAG_RX, "%s member table full; detach would be incomplete", tag);
  }
  return set;
 }
