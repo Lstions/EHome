@@ -185,11 +185,16 @@ app_state_t *app_state_init(void)
     s_app.uart2_cmd_queue = xQueueCreate(16, sizeof(sample_cmd_t));
     s_app.spi_cmd_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
     s_app.i2c_cmd_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
+    /* P2b (2026-10-10): only the UART control queues can carry a batch plan.
+     * bus_manager rejects plan_step_count > 0 on anything but UART/USB, and
+     * spi_i2c_cmd_loop never reads a plan member (the plan guard lives inside
+     * uart_cmd_loop).  USB rides uart0_control_queue, so the three UART
+     * control queues keep the full element and SPI/I2C use the slim one. */
     s_app.uart0_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
     s_app.uart1_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
     s_app.uart2_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
-    s_app.spi_control_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
-    s_app.i2c_control_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
+    s_app.spi_control_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
+    s_app.i2c_control_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
 
     /* Zero the pool markers */
     for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
