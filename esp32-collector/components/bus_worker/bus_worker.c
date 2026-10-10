@@ -410,11 +410,27 @@ static void rebuild_cmd_queue_sets(bus_runtime_t *rt)
 /* Consume control commands with priority, but after a bounded burst give a
  * ready sample one turn.  This preserves control latency without allowing a
  * continuous control producer to starve scheduled sampling forever. */
-static bool receive_prioritized_command(QueueSetHandle_t set,
-                                         QueueHandle_t sample,
-                                         QueueHandle_t control,
-                                         bus_cmd_t *cmd,
-                                         uint8_t *control_burst)
+/* P2 (2026-10-10): a sample queue holds sample_cmd_t (the slim prefix), so
+ * xQueueReceive writes only the first sizeof(sample_cmd_t) bytes of this
+ * bus_cmd_t buffer.  Everything past that keeps whatever the previous
+ * iteration left there.  The plan members live past the prefix and are only
+ * reachable through the channel_cmd_v2 guard, so no stale read is possible —
+ * but zero them anyway: it costs 520 B per SAMPLE command and turns any
+ * future mistake into an obvious "plan_len == 0" instead of a ghost batch.
+ * Control commands go through the reset too: they are always fully written,
+ * so it is a no-op for them. */
+static void scrub_plan_tail(bus_cmd_t *cmd)
+{
+    if (cmd->channel_cmd_v2) return;   /* control command: fully written by producer */
+    memset((uint8_t *)cmd + sizeof(sample_cmd_t), 0,
+           sizeof(bus_cmd_t) - sizeof(sample_cmd_t));
+}
+
+static bool receive_prioritized_command_raw(QueueSetHandle_t set,
+                                             QueueHandle_t sample,
+                                             QueueHandle_t control,
+                                             bus_cmd_t *cmd,
+                                             uint8_t *control_burst)
 {
 if (!cmd || !control_burst) return false;
 
@@ -466,6 +482,21 @@ if (decision == BUS_QUEUE_DECISION_CONTROL &&
 if (decision == BUS_QUEUE_DECISION_SAMPLE &&
  xQueueReceive(sample, cmd, 0) == pdTRUE) return true;
 return false;
+}
+
+/* P2 (2026-10-10): wrap the raw receive so every caller gets the plan-tail
+ * scrub.  The wrapper deliberately leaves the queue-set accounting logic
+ * untouched — that code is hardened against the 2026-10-04 field incident and
+ * must not be restructured for a buffer-hygiene concern. */
+static bool receive_prioritized_command(QueueSetHandle_t set,
+                                        QueueHandle_t sample,
+                                        QueueHandle_t control,
+                                        bus_cmd_t *cmd,
+                                        uint8_t *control_burst)
+{
+    bool got = receive_prioritized_command_raw(set, sample, control, cmd, control_burst);
+    if (got) scrub_plan_tail(cmd);
+    return got;
 }
 
 static void report_free_block(bool critical, uint8_t index)

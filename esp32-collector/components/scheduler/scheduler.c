@@ -103,6 +103,12 @@ static void scheduler_task(void *p);
 
 /* ── queue dispatch: pick the right per-bus queue from bus_cmd_t ── */
 
+/* Both helpers only read members inside BUS_CMD_COMMON (the shared prefix),
+ * so they keep taking bus_cmd_t * for compatibility with the existing tests.
+ * P2 (2026-10-10): the sample producers hold a sample_cmd_t, which is an
+ * exact prefix of bus_cmd_t — they cast at the call site (see the two
+ * producers).  Reading past the prefix through this pointer would be a bug,
+ * so the helpers must never touch plan members. */
 static QueueHandle_t dispatch_queue(const scheduler_queues_t *q, const bus_cmd_t *bcmd)
 {
     switch (bcmd->bus_type) {
@@ -656,8 +662,11 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
             const config_template_t *t = config_mgr_get_template(scmd->template_id);
             if (!t || t->write_data_len == 0) continue;
 
-            /* Build bus_cmd_t */
-            bus_cmd_t bcmd = {
+            /* Build a SAMPLE command.  P2 (2026-10-10): the type is
+             * sample_cmd_t (the slim prefix).  Using the slim type here makes
+             * it a compile error to ever set batch-plan members on a sample
+             * command, and it drops this stack frame from 700 to 180 bytes. */
+            sample_cmd_t bcmd = {
                 .channel_id     = ch->config.id,
                 .bus_type       = ch->config.bus_type,
                 .tx_len         = t->write_data_len < CMD_TX_MAX ? t->write_data_len : CMD_TX_MAX,
@@ -671,8 +680,12 @@ static void schedule_v2_channel(sched_channel_t *ch, TickType_t now,
             memcpy(bcmd.tx_data, t->write_data, bcmd.tx_len);
 
             bcmd.uart_port = route_uart_port(&ch->config);
-            QueueHandle_t target_q = dispatch_queue(&s_queues, &bcmd);
-            int metric_index = queue_metric_index(&bcmd);
+            /* sample_cmd_t is an exact prefix of bus_cmd_t (static-asserted in
+             * cmd_queue.h), so this cast is layout-safe; the helpers only read
+             * prefix members. */
+            const bus_cmd_t *as_full = (const bus_cmd_t *)&bcmd;
+            QueueHandle_t target_q = dispatch_queue(&s_queues, as_full);
+            int metric_index = queue_metric_index(as_full);
             /* Keep a small per-bus reserve for on-demand control commands.
              * A congested SPI queue must not suppress UART0/UART1 sampling. */
             if (!scheduler_queue_is_present(target_q) ||
@@ -759,7 +772,8 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
      * Only channels with templates need active TX (e.g. Modbus polling).
      * Channels without templates (e.g. GPS NMEA) are passive —
      * rx_task handles them. */
-    bus_cmd_t cmd = {
+    /* P2 (2026-10-10): slim type for the same reasons as the V2 path above. */
+    sample_cmd_t cmd = {
         .channel_id = ch->config.id,
         .bus_type   = ch->config.bus_type,
         .tx_len     = 0,
@@ -785,8 +799,10 @@ static void schedule_v1_channel(sched_channel_t *ch, TickType_t now,
     }
 
     cmd.uart_port = route_uart_port(&ch->config);
-    QueueHandle_t target_q = dispatch_queue(&s_queues, &cmd);
-    int metric_index = queue_metric_index(&cmd);
+    /* See the V2 producer above for why this prefix cast is safe. */
+    const bus_cmd_t *as_full = (const bus_cmd_t *)&cmd;
+    QueueHandle_t target_q = dispatch_queue(&s_queues, as_full);
+    int metric_index = queue_metric_index(as_full);
     if (!scheduler_queue_is_present(target_q) ||
         uxQueueSpacesAvailable(target_q) <= SCHED_CONTROL_QUEUE_RESERVE ||
         xQueueSend(target_q, &cmd, 0) != pdTRUE) {

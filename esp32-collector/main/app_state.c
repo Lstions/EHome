@@ -167,15 +167,24 @@ app_state_t *app_state_init(void)
         ESP_LOGE(TAG, "Failed to create config mutex!");
     }
 
-    /* Command queue (WriteCommand compat, transition period) */
-    s_app.cmd_queue = xQueueCreate(CMD_QUEUE_DEPTH, sizeof(bus_cmd_t));
+    /* P1 (2026-10-10): the legacy WriteCommand compat queue was removed.
+     * It was created here but never read anywhere in the repository (the only
+     * other occurrence was its declaration), so it held CMD_QUEUE_DEPTH x
+     * sizeof(bus_cmd_t) bytes of heap for nothing.  Per-bus queues below are
+     * the real command paths. */
 
-    /* Per-bus command queues (for cmd_task split) */
-    s_app.uart0_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
-    s_app.uart1_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
-    s_app.uart2_cmd_queue = xQueueCreate(16, sizeof(bus_cmd_t));
-    s_app.spi_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
-    s_app.i2c_cmd_queue   = xQueueCreate(8, sizeof(bus_cmd_t));
+    /* Per-bus command queues (for cmd_task split).
+     *
+     * P2 (2026-10-10): the SAMPLE queues carry sample_cmd_t (the slim prefix,
+     * 180 B on target) because a sample command can never carry a batch plan.
+     * The CONTROL queues keep the full bus_cmd_t (700 B) since that is where
+     * ChannelCmdV2 batch plans travel.  See cmd_queue.h for why the two
+     * element types may differ inside one queue set. */
+    s_app.uart0_cmd_queue = xQueueCreate(16, sizeof(sample_cmd_t));
+    s_app.uart1_cmd_queue = xQueueCreate(16, sizeof(sample_cmd_t));
+    s_app.uart2_cmd_queue = xQueueCreate(16, sizeof(sample_cmd_t));
+    s_app.spi_cmd_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
+    s_app.i2c_cmd_queue   = xQueueCreate(8, sizeof(sample_cmd_t));
     s_app.uart0_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
     s_app.uart1_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
     s_app.uart2_control_queue = xQueueCreate(8, sizeof(bus_cmd_t));
