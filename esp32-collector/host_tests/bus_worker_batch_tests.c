@@ -108,9 +108,14 @@ static uint8_t  g_staged[STAGED_RESP_MAX][128];
 static size_t   g_staged_len[STAGED_RESP_MAX];
 static bool     g_staged_error[STAGED_RESP_MAX];
 static unsigned g_staged_count = 0;
-/* task-5：默认把 last_rx_us 放到 now-10000，让旧的 10ms 静默判据满足。
+/* task-5：默认把 last_rx_us 放到"静默已满足"的位置，让 collect 循环立即完成。
  * 快速路径用例需要"最后一字节刚到现在"（静默远未满足）这一前提，否则测不出
- * "不再等 10ms"这件事。设 true 时 last_rx_us = now。 */
+ * "不再等静默窗口"这件事。设 true 时 last_rx_us = now。
+ *
+ * ⚠ 2026-10-10：原先硬编码 now-10000。P4 把 UART_IDLE_THRESHOLD_US 从
+ * 10ms 降到 2ms 后，硬编码的 10000 会让"静默已满足"这一前提仍然成立，
+ * 但也会让"静默未满足"的用例（now-10000 已远超 2ms）反而变成已满足 ⇒
+ * 用例失去区分力。改为**引用常量本身**，无论阈值取多少都语义正确。 */
 static bool     g_stage_last_rx_now = false;
 /* task-5：粘包用例的第二帧。非 0 时，第 N 次 TX 注入 g_stage_extra 而不是
  * 普通 stage（用来模拟"本步响应 + 后续事务字节"在同一次 RX 里到达）。 */
@@ -170,7 +175,7 @@ esp_err_t bus_dma_write(bus_dma_ctx_t *ctx, const uint8_t *data, size_t len) {
             s_batch_rx[0].len = g_staged_len[idx];
             s_batch_rx[0].last_rx_us = g_stage_last_rx_now
                 ? g_test_time_us
-                : g_test_time_us - 10000;
+                : g_test_time_us - (int64_t)UART_IDLE_THRESHOLD_US;
         }
     }
     return ESP_OK;
@@ -191,6 +196,18 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) { (void)ctx; return ESP_
 
 /* ---- semaphore stubs ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 
@@ -561,19 +578,31 @@ static void test_expected_length_completes_without_idle(void)
     uint8_t raw[256];
     size_t raw_len = 0;
     uint32_t error_code = 0;
-    /* Virtual-clock bound.  The idle predicate needs 10ms of silence; the
-     * fast path must complete in a single poll, so the elapsed virtual time
-     * must stay well under UART_IDLE_THRESHOLD_US.  This is the assertion
-     * that actually discriminates: without it, the old ordering also yields
-     * the same 60 bytes (after burning the 10ms), and the test would pass. */
+    /* Virtual-clock bound.  The idle predicate needs UART_IDLE_THRESHOLD_US of
+     * silence; the fast path must complete in a single poll.  This is the
+     * assertion that actually discriminates: without it, the old ordering also
+     * yields the same 60 bytes (after burning the idle window), and the test
+     * would pass.
+     *
+     * ⚠ 2026-10-10：原先断言 elapsed_us < UART_IDLE_THRESHOLD_US。P4 把阈值
+     * 从 10ms 降到 2ms 后，该断言与阈值耦合失效（实测 elapsed=2000us，
+     * 阈值=2000us —— 两步批处理本来就要 2 次时钟推进）。
+     *
+     * 改为断言**小于"走 idle 路径所需的 2 倍阈值"**：
+     *   · 快速路径：两步各一次 TX 注入 + 收满即完成 ⇒ elapsed ≈ 2 × step_us
+     *     （实测 2000us，与阈值无关）
+     *   · idle 路径：每步都要等满一个 UART_IDLE_THRESHOLD_US 才收尾，
+     *     两步 ⇒ elapsed ≥ 2 × threshold
+     * 判据 elapsed < 2 × threshold 在阈值取任意值时都能区分两者；
+     * 且用 step_us 兜底，避免阈值小于时钟粒度时判据过松。 */
     int64_t t_before = g_test_time_us;
     bool ok = execute_uart_batch(0, &ctx, &cmd, raw, &raw_len, &error_code);
     int64_t elapsed_us = g_test_time_us - t_before;
 
     CHECK(ok, "a satisfied read_size must complete the step, not time out (0x1400)");
     CHECK(error_code == 0, "the fast path must not set an error code");
-    CHECK(elapsed_us < (int64_t)UART_IDLE_THRESHOLD_US,
-          "the step must complete BEFORE the 10ms idle threshold elapses");
+    CHECK(elapsed_us < 2 * (int64_t)UART_IDLE_THRESHOLD_US,
+          "the step must complete WITHOUT waiting out an idle window");
     CHECK(raw_len == 1 + 3 + 60 + 3 + 3, "raw must carry both steps' exact payloads");
     if (raw_len == 1 + 3 + 60 + 3 + 3) {
         CHECK(raw[0] == 2, "raw[0] must be the step count");

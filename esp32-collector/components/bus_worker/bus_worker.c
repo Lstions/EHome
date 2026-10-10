@@ -24,6 +24,9 @@
 
 #include "bus_worker.h"
 #include "report_stats.h"   /* D-14：上报统计量已搬到中立组件，打破依赖环 */
+/* ⭐ 2026-10-10：命令 fence 的事件等待用二值信号量（替代 5ms 轮询）。
+ * 见 UART_RESPONSE_WAIT_MS 与 s_pending_done 的说明。 */
+#include "freertos/semphr.h"
 #include "data_batch_codec.h"   /* D-18：帧长算术的唯一定义处 */
 #include "bus_queue_policy.h"
 #include "bus_rx_boundary.h"
@@ -87,7 +90,28 @@
 #define UART_EVENT_QUEUE_DEPTH 32
 #define UART_EVENT_SET_CAPACITY (SCHED_MAX_CHANNELS * UART_EVENT_QUEUE_DEPTH)
 #define RX_WAKE_PERIOD_MS 250  /* lifecycle/timeout wake, not RX polling */
-#define UART_RESPONSE_WAIT_MS 5 /* command fence only; RX uses driver events */
+/* ⭐ 2026-10-10 压测修复：命令 fence 从"轮询"改为"事件等待"。
+ *
+ * 旧实现 while (has_pending_cmd) vTaskDelay(5ms) 实测每次循环耗 **21ms**：
+ *   · vTaskDelay(5) 只是 5ms 粒度；
+ *   · 但 pending 队列要等 rx_task 完成才清空，而 rx_task 的完成判据包含
+ *     UART_IDLE_THRESHOLD_US(10ms) 静默窗口；
+ *   · 加上 cmd_task(prio=6) 与 rx_task(prio=7) 的调度交错。
+ * 后果：单通道吞吐被钉死在 ~27 req/s，**且与波特率无关**
+ *   （实测 115200 与 921600 都是 21.26ms/事务）。
+ *
+ * 现在改为事件驱动：pending 的**出队方**（rx_task 的各完成路径、超时路径、
+ * 丢弃路径）在清空 pending 之后唤醒等待者；等待者用二值信号量阻塞。
+ *
+ * 为什么用**独立信号量**而不是复用 s_batch_rx[].waiter：
+ *   同一个 cmd_task 既可能在 execute_uart_batch 里等批处理响应
+ *   （notify_batch_waiter），也可能在 wait_for_uart_response_slot 里等 fence。
+ *   复用同一 task 的通知槽会互相吞唤醒（ulTaskNotifyTake(pdTRUE) 会清零计数），
+ *   先到的唤醒被后到的等待吃掉 ⇒ 死等。用独立二值信号量则语义互不干扰。
+ *
+ * UART_RESPONSE_WAIT_MS 保留为**超时兜底**（不再是轮询周期）：
+ * 任何漏唤醒最多多等这么多毫秒，不会死等。 */
+#define UART_RESPONSE_WAIT_MS 5 /* 事件等待的超时兜底，不再是轮询周期 */
 #define CMD_QUEUE_WAIT_MS 25 /* bounded wait so lifecycle suspend is observable */
 #define WORKER_SUSPEND_TIMEOUT_MS 2000
 
@@ -1063,6 +1087,28 @@ static void report_path_deinit(void)
 static uint32_t s_rx_timeout_count[SCHED_MAX_CHANNELS];
 static volatile bool s_plan_active[SCHED_MAX_CHANNELS];
 
+/* ⭐ 2026-10-10：命令 fence 的事件等待对象（每总线槽一个）。
+ *
+ * 语义：**二值信号量**，由 pending 出队方 give，由 cmd_task 在
+ * wait_for_uart_response_slot 里 take。见 UART_RESPONSE_WAIT_MS 处的说明
+ * （为什么不用 task notification 复用 s_batch_rx[].waiter）。
+ *
+ * 生命周期：与 pending 队列一同在 bus_worker 启动时创建、停止时删除。
+ * 为 NULL 时等待路径退化为原来的轮询（安全降级，不会崩）。 */
+static SemaphoreHandle_t s_pending_done[SCHED_MAX_CHANNELS];
+
+/* 唤醒在 fence 上等待的 cmd_task。
+ *
+ * 调用点：**每一个把 pending 队列清空的路径**都要调用它，否则等待者只能靠
+ * UART_RESPONSE_WAIT_MS 超时兜底 —— 那会让本次优化失效（退化成慢轮询）。
+ * 用 xSemaphoreGive（而非 FromISR）：全部调用点都在任务上下文。 */
+static void notify_pending_done(int ch_idx)
+{
+ if (ch_idx < 0 || ch_idx >= SCHED_MAX_CHANNELS) return;
+ SemaphoreHandle_t sem = s_pending_done[ch_idx];
+ if (sem) (void)xSemaphoreGive(sem);
+}
+
 /* ChannelCmdV2 batches still need one synchronous final result, but their RX
  * bytes must come from the same UART event owner as ordinary traffic.  The RX
  * task fills this bounded hand-off while the command worker waits on a task
@@ -1718,7 +1764,32 @@ static void cmd_task_i2c(void *pv) {
 /*  in fixed blocks and closed by the common 10ms idle timeout.         */
 /* ------------------------------------------------------------------ */
 
-#define UART_IDLE_THRESHOLD_US 10000  /* protocol-neutral idle completion deadline */
+/* ⭐ 2026-10-10 压测修复（待办 3）：软 idle 兜底从 10ms 降到 2ms。
+ *
+ * 定位过程（先证明它是不是瓶颈，再决定改不改）：
+ *   · **主动轮询路径（有 pending + read_size）不经过这里** ——
+ *     bus_rx_boundary_length 一收满 read_size 就返回，既不等本常量、
+ *     也不依赖硬件 timeout_flag。所以 10ms **不是** 27 req/s 的原因
+ *     （那个已由 P2 的 21ms 轮询 fence 解释并修复）。
+ *   · 本常量只影响两类"长度未声明"的场景：
+ *       (a) length-less 协议（GPS NMEA 等）—— 但 P3-1 已让**硬件
+ *           timeout_flag**（uart_set_rx_timeout(port, 4) = 4 字符静默）
+ *           优先成为权威边界，软兜底只是它缺席时的后备；
+ *       (b) **真被动数据**（无 pending 命令）—— 见 bus_rx_boundary.h 的 P3 修复。
+ *
+ * 取值依据（不是拍脑袋）：
+ *   · 硬件 timeout 在 115200 下是 4 字符 = 347 us、921600 下 43 us；
+ *     2ms 给硬件事件留了 5.8x（115200）～46x（921600）的余量，
+ *     足够覆盖 rx_task 被更高优先级任务抢占后的调度延迟。
+ *   · 旧值 10ms 是被动路径的**最坏延迟下限**，对 100Hz 级采集明显过大。
+ *   · 不能降到 ~0：IDF 不保证 FIFO 溢出时一定发 TOUT 事件（见 P3-1 注释），
+ *     软兜底必须在硬件事件缺席时仍能把帧关掉，否则该帧会一直挂在缓冲区
+ *     直到 rx_timeout_ms（默认 1000ms）才失败。
+ *   · 也不能降到低于一次任务切换的量级，否则会与硬件事件竞争、把
+ *     同一个帧的两次完成路径都触发（虽然 emit_buffered_frame 是唯一写者、
+ *     不会重复完成，但会增加无谓唤醒）。
+ *   ⇒ 2ms 是"远大于硬件窗口 + 远小于采集周期"的折中。 */
+#define UART_IDLE_THRESHOLD_US 2000  /* protocol-neutral idle completion deadline */
 
 /* s_streams storage is declared next to s_telemetry_payload above (the PSRAM
  * branch must be visible to report_path_init before this point). */
@@ -1764,6 +1835,7 @@ static void emit_ready_stream_chunks(bus_runtime_t *rt, int idx, int64_t now_us)
     pending ? pcmd.command_index : 0);
   }
   if (pending && consume_pending) (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+  if (pending && consume_pending) notify_pending_done(idx);
   if (pending && !consume_pending) s_stream_chunked[idx] = true;
   s->len -= target;
   if (s->len > 0) memmove(s->buffer, s->buffer + target, s->len);
@@ -1794,10 +1866,27 @@ static bool wait_for_uart_response_slot(bus_runtime_t *rt, int ch_idx,
  ESP_LOGI(tag, "waiting for pending UART response ch=%lu before %s",
           (unsigned long)cmd->channel_id,
           cmd->channel_cmd_v2 ? "V2 command" : "next command");
+ /* ⭐ 2026-10-10：事件等待替代轮询（原来每轮 5ms 的 vTaskDelay 实测耗 21ms，
+  * 把单通道吞吐钉死在 ~27 req/s 且与波特率无关 —— 见 UART_RESPONSE_WAIT_MS
+  * 处的完整分析）。
+  *
+  * 语义要点（改动时必须保持）：
+  *   1. 超时用 UART_RESPONSE_WAIT_MS 兜底：任何漏唤醒最多多等这么久，不会死等。
+  *      超时后回到循环顶部重新判断，行为与旧轮询一致（只是不再固定睡 5ms）。
+  *   2. 信号量为 NULL（未初始化/已释放）时退化为原来的 vTaskDelay 轮询，
+  *      保证生命周期边界上不崩。
+  *   3. 循环结束后主动非阻塞 take 一次，清掉可能残留的 give，
+  *      避免把陈旧唤醒"透支"给下一次 fence 等待。 */
+ SemaphoreHandle_t sem = s_pending_done[ch_idx];
  while (has_pending_cmd(rt, ch_idx)) {
   if (__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE)) return false;
-  vTaskDelay(pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  if (sem) {
+   (void)xSemaphoreTake(sem, pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  } else {
+   vTaskDelay(pdMS_TO_TICKS(UART_RESPONSE_WAIT_MS));
+  }
  }
+ if (sem) (void)xSemaphoreTake(sem, 0);
  return !__atomic_load_n(&s_suspend_requested, __ATOMIC_ACQUIRE);
 }
 
@@ -1874,6 +1963,7 @@ static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
   pending_cmd_t pcmd;
   bool pending = rt->pending_queues[idx] &&
                  xQueueReceive(rt->pending_queues[idx], &pcmd, 0) == pdTRUE;
+   if (pending) notify_pending_done(idx);
   if (pending && pcmd.channel_cmd_v2) {
    queue_control_final(pcmd.control_slot, false, 0x02, NULL, 0);
   } else if (pending) {
@@ -1897,6 +1987,7 @@ static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
  if (s->len == 0 && s_stream_chunked[idx] && has_pending_cmd(rt, idx)) {
   pending_cmd_t pcmd;
   if (xQueueReceive(rt->pending_queues[idx], &pcmd, 0) == pdTRUE) {
+   notify_pending_done(idx);
    s_stream_chunked[idx] = false;
    s_last_rx_us[idx] = 0;
    return true;
@@ -1924,6 +2015,7 @@ static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
    * A genuinely silent sensor still fails, via expire_uart_state() timeout. */
   if (pcmd.read_size > 0 && s->len < pcmd.read_size && !pcmd.channel_cmd_v2) {
    (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   notify_pending_done(idx);
    /* Short read = the sensor answered incompletely: a command error.
     * 2026-09-30: move the counter the server reads (sched_command_t), not
     * only the channel-level backoff counter. */
@@ -1958,6 +2050,7 @@ static bool emit_buffered_frame(bus_runtime_t *rt, int idx, int64_t now_us)
     pcmd.command_template_id, pcmd.command_index);
   }
   (void)xQueueReceive(rt->pending_queues[idx], &pcmd, 0);
+   notify_pending_done(idx);
  } else {
   /* Passive/terminal data follows the same automatic boundary path. */
   report_enqueue(rt->bus_ch[idx], (uint64_t)now_us, ++s_rx_sequence[idx],
@@ -2182,6 +2275,7 @@ static uint32_t expire_uart_state(bus_runtime_t *rt)
   int64_t elapsed_ms = (now_us - pcmd.tx_timestamp) / 1000;
   if (elapsed_ms <= (int64_t)pcmd.rx_timeout_ms) continue;
   if (xQueueReceive(rt->pending_queues[i], &pcmd, 0) != pdTRUE) continue;
+   notify_pending_done(i);
   completions++;
   s_rx_timeout_count[i]++;
   /* This loop covers BUS_TYPE_UART *and* BUS_TYPE_USB (the native USB CDC
@@ -2324,6 +2418,20 @@ void bus_worker_start(bus_runtime_t *rt)
 {
  ensure_suspend_events();
  s_runtime = rt;
+
+ /* ⭐ 2026-10-10：创建命令 fence 的事件等待对象（每总线槽一个二值信号量）。
+  * 见 s_pending_done / UART_RESPONSE_WAIT_MS 的说明。
+  * 创建失败不致命：等待路径会退化为 vTaskDelay 轮询（行为正确，只是慢），
+  * 因此这里只告警、不中止启动 —— 吞吐退化比"设备起不来"轻得多。 */
+ for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+  if (s_pending_done[i]) continue;   /* 重复 start 不重复创建 */
+  s_pending_done[i] = xSemaphoreCreateBinary();
+  if (!s_pending_done[i]) {
+   ESP_LOGW("BUS_WORKER",
+            "pending-done semaphore %d unavailable; command fence falls back "
+            "to %d ms polling (throughput will be lower)", i, UART_RESPONSE_WAIT_MS);
+  }
+ }
  /* 默认注入 DataBatch(0x20) 编码器（msg_handler 的强定义；main/ 若另行
   * 注入会覆盖此默认值）。放在 start() 而不是 report_path_init()：编码器
   * 只被 report_tx 使用，而 report_tx 由 report_path_init() 创建。 */
@@ -2457,12 +2565,16 @@ void bus_worker_discard_queued(bus_runtime_t *rt)
  discard_command_queue(rt->i2c_control_queue);
  for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
   pending_cmd_t pending;
+  bool drained = false;
   while (rt->pending_queues[i] && xQueueReceive(rt->pending_queues[i], &pending, 0) == pdTRUE) {
+   drained = true;
    if (pending.channel_cmd_v2)
     queue_control_final(pending.control_slot, false, 1007, NULL, 0);
    else if (pending.request_id)
     queue_write_rsp(pending.request_id, false, 1007, "configuration changed before response");
   }
+  /* 出队循环结束后唤醒：等待者此时看到 pending 已空，会立即离开 fence。 */
+  if (drained) notify_pending_done(i);
  }
 }
 
@@ -2476,6 +2588,14 @@ void bus_worker_stop(void)
  if (s_cmd_i2c_h)  { vTaskDelete(s_cmd_i2c_h);  s_cmd_i2c_h  = NULL; }
  destroy_cmd_queue_sets();
  destroy_uart_event_set();
+ /* ⭐ 2026-10-10：任务已全部删除，等待者不存在了 —— 释放 fence 信号量。
+  * 顺序：必须在 vTaskDelete 之后（否则被删除的任务可能仍持有/等待它）。 */
+ for (int i = 0; i < SCHED_MAX_CHANNELS; i++) {
+  if (s_pending_done[i]) {
+   vSemaphoreDelete(s_pending_done[i]);
+   s_pending_done[i] = NULL;
+  }
+ }
  report_path_deinit();
 }
 

@@ -205,6 +205,18 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) {
 
 /* ---- semaphore stubs ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 
@@ -1564,6 +1576,70 @@ static void test_cmd_queue_set_rebuild_detaches_members(void) {
 /* =====================================================================
  * Main
  * ===================================================================== */
+
+/* =====================================================================
+ * ⭐ 2026-10-10：命令 fence 的**快速路径**（P2 修复的可测部分）
+ *
+ * 背景：wait_for_uart_response_slot 原先是 5ms 轮询（实测每轮耗 21ms，
+ * 把单通道吞吐钉死在 ~27 req/s 且与波特率无关）。现改为：
+ *   · 出队方在清空 pending 后调用 notify_pending_done() 唤醒；
+ *   · 等待者用二值信号量阻塞，UART_RESPONSE_WAIT_MS 仅作超时兜底。
+ *
+ * ⚠⚠ 本测试的**覆盖边界**（已用变异自证确认，不要夸大）：
+ *   它只覆盖 **pending 为空时立即通过**（不引入额外延迟）这一条。
+ *   它**不能**验证"唤醒是否真的发生"：host 的 xSemaphoreTake stub 是
+ *   立即返回 1、没有真实阻塞语义；把 notify_pending_done 改成空操作后
+ *   本测试**仍然全绿**（变异未捕获）。
+ *   ⇒ **唤醒路径只能靠真机验证**（测量 21ms 间隔是否消失）。
+ *   这里保留该测试的价值是：锁住"无 pending 时不引入延迟"这一回归。
+ * ===================================================================== */
+static void test_pending_fence_fast_path(void)
+{
+    setup_test_runtime();
+
+    /* 该函数只读 cmd->channel_id 与 cmd->channel_cmd_v2 用于日志，构造一个即可。 */
+    bus_cmd_t fence_cmd;
+    memset(&fence_cmd, 0, sizeof(fence_cmd));
+    fence_cmd.channel_id = 100;
+    fence_cmd.channel_cmd_v2 = false;
+
+    /* (1) pending 为空 ⇒ 立即通过。用一个"未被消耗的"虚拟时钟来证明：
+     *     若走了等待路径，时钟会被 vTaskDelay 推进。 */
+    int64_t t0 = g_test_time_us;
+    bool ok = wait_for_uart_response_slot(&g_test_rt, 0, "TEST", &fence_cmd);
+    CHECK(ok, "an empty pending queue must pass the fence immediately");
+    CHECK(g_test_time_us == t0, "no delay must be introduced when nothing is pending");
+
+    /* (2) pending 非空 ⇒ 出队并唤醒后必须通过。 */
+    pending_cmd_t pcmd;
+    memset(&pcmd, 0, sizeof(pcmd));
+    pcmd.channel_cmd_v2 = true;
+    pcmd.read_size = 0;
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE, "pending enqueue must succeed");
+    CHECK(has_pending_cmd(&g_test_rt, 0), "pending must be visible");
+
+    /* 模拟出队方：清空 + 唤醒（这正是 rx_task 各完成路径做的事）。 */
+    pending_cmd_t out;
+    CHECK(xQueueReceive(g_test_pending_q[0], &out, 0) == pdTRUE, "pending dequeue must succeed");
+    notify_pending_done(0);
+    CHECK(!has_pending_cmd(&g_test_rt, 0), "pending must be empty after dequeue");
+
+    bool ok2 = wait_for_uart_response_slot(&g_test_rt, 0, "TEST", &fence_cmd);
+    CHECK(ok2, "the fence must pass once the pending queue is drained");
+
+    /* (3) 出队方清空后，has_pending_cmd 必须转为 false —— 这是等待者
+     *     能离开 while 循环的前提（无论唤醒是否送达，超时兜底也能离开）。
+     *     ⚠ 注意这里**不能**断言"唤醒已送达"：host stub 无阻塞语义，
+     *     见上方覆盖边界说明。 */
+    CHECK(xQueueSend(g_test_pending_q[0], &pcmd, 0) == pdTRUE, "second pending enqueue must succeed");
+    CHECK(has_pending_cmd(&g_test_rt, 0), "pending must be visible after enqueue");
+    pending_cmd_t out2;
+    CHECK(xQueueReceive(g_test_pending_q[0], &out2, 0) == pdTRUE, "second dequeue must succeed");
+    CHECK(!has_pending_cmd(&g_test_rt, 0), "pending must be empty after dequeue");
+
+    teardown_test_runtime();
+}
+
 int main(void)
 {
     /* Initialize report path (needed for report_enqueue) */
@@ -1583,6 +1659,7 @@ int main(void)
     test_expire_no_timeout_when_disabled();
     test_expire_v2_timeout();
     test_rx_wait_ticks();
+    test_pending_fence_fast_path();
     test_decode_batch_step_valid();
     test_decode_batch_step_invalid();
     test_rx_append_with_read_size();

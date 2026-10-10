@@ -99,6 +99,18 @@ esp_err_t bus_dma_flush_input(const bus_dma_ctx_t *ctx) { (void)ctx; return ESP_
 
 /* ---- semaphore stubs (freertos/semphr.h declares but does not define) ---- */
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (SemaphoreHandle_t)1; }
+
+/* ⭐ 2026-10-10：命令 fence 的事件等待改用二值信号量（替代 5ms 轮询，
+ * 见 bus_worker.c 的 s_pending_done / UART_RESPONSE_WAIT_MS）。
+ * host 测试需要一个可 take/give/超时的替身。
+ *
+ * 语义：二值信号量（不是计数信号量）—— give 到 1 封顶，take 清零。
+ * 这里用一个静态标志模拟"是否有 token"。ticks 被忽略（host 测试是
+ * 单线程、无真实阻塞需求），超时返回 0 表示"未拿到"。 */
+static int g_bin_sem_token;
+SemaphoreHandle_t xSemaphoreCreateBinary(void) { return (SemaphoreHandle_t)1; }
+/* ⭐ 2026-10-10：bus_worker_stop() 现在会释放 fence 信号量。 */
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t ticks) { (void)sem; (void)ticks; return 1; }
 int xSemaphoreGive(SemaphoreHandle_t sem) { (void)sem; return 1; }
 
@@ -557,13 +569,17 @@ static void test_idle_no_completion_within_threshold(void) {
     init_test_runtime(&rt);
     rt.bus_ch[0] = 33;
 
-    /* s_last_rx_us = 5000, now = 12000 → delta = 7000 < 10000 → no completion */
+    /* ⚠ 2026-10-10：改为**相对阈值**表达，不再硬编码 10000。
+     * 原写法 "5000 → 12000（delta=7000 < 10000）" 在 P4 把阈值降到 2ms 后
+     * 语义反转（7000 > 2000 会变成"已满足"），用例失去区分力。
+     * 现在取 delta = 阈值的一半，无论阈值取多少都严格"未满足"。 */
     s_last_rx_us[0] = 5000;
     s_streams[0].len = 100;
     memset(s_streams[0].buffer, 0x11, 100);
 
-    bool result = complete_idle_response(&rt, 0, 12000);
-    CHECK(result == false, "should not complete within 10ms threshold");
+    bool result = complete_idle_response(
+        &rt, 0, 5000 + (int64_t)(UART_IDLE_THRESHOLD_US / 2));
+    CHECK(result == false, "should not complete before the idle threshold");
     CHECK(s_streams[0].len == 100, "buffer should be retained");
 }
 
@@ -576,13 +592,14 @@ static void test_idle_completion_after_threshold(void) {
     init_test_runtime(&rt);
     rt.bus_ch[0] = 33;
 
-    /* s_last_rx_us = 5000, now = 20000 → delta = 15000 > 10000 → completion */
+    /* ⚠ 2026-10-10：同样改为相对阈值（delta = 阈值的 2 倍，严格"已满足"）。 */
     s_last_rx_us[0] = 5000;
     s_streams[0].len = 100;
     memset(s_streams[0].buffer, 0x22, 100);
 
-    bool result = complete_idle_response(&rt, 0, 20000);
-    CHECK(result == true, "should complete after 10ms idle gap");
+    bool result = complete_idle_response(
+        &rt, 0, 5000 + (int64_t)(UART_IDLE_THRESHOLD_US * 2));
+    CHECK(result == true, "should complete after the idle gap");
 
     /* Should have enqueued a telemetry report (no pending cmd) */
     report_desc_t desc;
