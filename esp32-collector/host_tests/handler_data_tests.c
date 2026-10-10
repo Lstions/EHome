@@ -224,19 +224,26 @@ static void test_status_report_perf_field_count(void) {
     }
     CHECK(perf_len > 0, "perf sub-message should be present");
 
-    /* Count fields in perf sub-message: expect 7 base + 5*4 queue + rssi = 28 */
+    /* Count fields in perf sub-message:
+     *   7 base + 5*4 queue + rssi(28) + largest(29) = 29 (P4, 2026-10-10) */
     frame_decoder_t pdec;
     frame_field_t pfield;
     frame_decoder_init_sub(&pdec, perf_data, perf_len);
     int field_count = 0;
     int max_field_num = 0;
+    bool largest_present = false;
     while (frame_decoder_next(&pdec, &pfield) == FRAME_OK) {
         field_count++;
         if ((int)pfield.field_num > max_field_num)
             max_field_num = (int)pfield.field_num;
+        if (pfield.field_num == 29 && pfield.wire_type == WIRE_VARINT) {
+            largest_present = true;
+        }
     }
-    CHECK(field_count == 28, "perf sub-message should have 28 fields (7 base + 20 queue + rssi)");
-    CHECK(max_field_num == 28, "highest field number should be 28 (wifi rssi)");
+    CHECK(field_count == 29, "perf sub-message should have 29 fields (7 base + 20 queue + rssi + largest)");
+    CHECK(max_field_num == 29, "highest field number should be 29 (largest free internal block)");
+    /* P4: the memory gate judges on this unit, so it must actually ship. */
+    CHECK(largest_present, "field 29 (largest free internal block) must be present");
 }
 
 /* =====================================================================

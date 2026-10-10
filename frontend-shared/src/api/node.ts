@@ -31,6 +31,10 @@ export interface Node {
   wifi_rssi?: number
   wifi_ssid?: string
   free_heap_bytes?: number
+  // P4 (2026-10-10): largest free INTERNAL heap block — the unit the firmware's
+  // memory gate (main/mem_guard.c) judges on.  Undefined/0 means the device did
+  // not send it (firmware older than field 29).
+  largest_free_internal_bytes?: number
   platform?: string
   hardware_info?: Record<string, any>
   dma_channels?: unknown[]

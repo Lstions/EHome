@@ -287,6 +287,15 @@ esp_err_t msg_handler_send_status(uint32_t uptime_sec, const char *status,
         uint64_t rssi_abs = (rssi_dbm < 0) ? (uint64_t)(-rssi_dbm) : 0;
         perf_ok = frame_encode_varint(&perf_enc, 28, rssi_abs) == FRAME_OK;
     }
+    /* Field 29 (P4, 2026-10-10): largest free internal heap block.  The gate in
+     * main/mem_guard.c judges on heap_caps_get_largest_free_block(INTERNAL),
+     * but until now that value was only ever printed (during a configuration
+     * transaction); the steady-state ResourceReport carried free and min_free
+     * only, so "did the node pass its gate" was not observable online. */
+    if (perf_ok) {
+        perf_ok = frame_encode_varint(&perf_enc, 29,
+            (uint64_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) == FRAME_OK;
+    }
     if (perf_ok) {
         (void)frame_encode_bytes(&enc, STATUS_RPT_F_RUNTIME_PERF,
                                  frame_encoder_data(&perf_enc), frame_encoder_size(&perf_enc));

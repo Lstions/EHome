@@ -395,6 +395,9 @@ add_executable(handler_data_tests ../components/report_stats/report_stats.c
     ../components/frame/frame_codec.c
     ../components/msg_handler/data_report_codec.c
     ../components/msg_handler/data_batch_codec.c
+    # P4 (2026-10-10): the perf block now reports field 29 via
+    # heap_caps_get_largest_free_block(), so this target needs the heap stub.
+    stubs/heap_stub_impl.c
 )
 target_include_directories(handler_data_tests PRIVATE
     stubs
